@@ -82,7 +82,7 @@ def GetProcPIDForTask(task):
         return unsigned(GetProcPID(p))
 
     if task :
-        proc_ro = Cast(link.sl_alloc_task.bsd_info_ro, 'proc_ro *')
+        proc_ro = Cast(task.bsd_info_ro, 'proc_ro *')
         pid = unsigned(proc_ro.task_tokens.audit_token.val[5])
         return pid
 

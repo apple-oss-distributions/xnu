@@ -519,8 +519,11 @@ vm_page_unpack_ptr(uintptr_t p)
 #define VM_PAGE_PACK_PTR(p)     vm_page_pack_ptr((uintptr_t)(p))
 #define VM_PAGE_UNPACK_PTR(p)   vm_page_unpack_ptr((uintptr_t)(p))
 
-#define VM_PAGE_OBJECT(p)       ((vm_object_t)(VM_PAGE_UNPACK_PTR(p->vmp_object)))
-#define VM_PAGE_PACK_OBJECT(o)  ((vm_page_object_t)(VM_PAGE_PACK_PTR(o)))
+#define VM_OBJECT_PACK(o)       ((vm_page_object_t)VM_PACK_POINTER((uintptr_t)(o), VM_PAGE_PACKED_PTR))
+#define VM_OBJECT_UNPACK(p)     ((vm_object_t)VM_UNPACK_POINTER(p, VM_PAGE_PACKED_PTR))
+
+#define VM_PAGE_OBJECT(p)       VM_OBJECT_UNPACK((p)->vmp_object)
+#define VM_PAGE_PACK_OBJECT(o)  VM_OBJECT_PACK(o)
 
 
 #define VM_PAGE_ZERO_PAGEQ_ENTRY(p)     \
@@ -1008,8 +1011,11 @@ MACRO_END
 #define VM_PAGE_PACK_PTR(p)     (p)
 #define VM_PAGE_UNPACK_PTR(p)   ((uintptr_t)(p))
 
-#define VM_PAGE_OBJECT(p)       ((vm_object_t)((p)->vmp_object))
-#define VM_PAGE_PACK_OBJECT(o)  ((vm_page_object_t)(VM_PAGE_PACK_PTR(o)))
+#define VM_OBJECT_PACK(o)       ((vm_page_object_t)(o))
+#define VM_OBJECT_UNPACK(p)     ((vm_object_t)(p))
+
+#define VM_PAGE_PACK_OBJECT(o)  VM_OBJECT_PACK(o)
+#define VM_PAGE_OBJECT(p)       VM_OBJECT_UNPACK((p)->vmp_object)
 
 
 #define VM_PAGE_ZERO_PAGEQ_ENTRY(p)     \

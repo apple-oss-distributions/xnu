@@ -3630,3 +3630,26 @@ SYSCTL_PROC(_vm, OID_AUTO, corrupt_text_addr,
     CTLTYPE_QUAD | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED,
     0, 0, corrupt_text_addr, "-", "");
 #endif /* DEBUG || DEVELOPMENT */
+
+extern uint64_t c_seg_filled_no_contention;
+extern uint64_t c_seg_filled_contention;
+extern clock_sec_t c_seg_filled_contention_sec_max;
+extern clock_nsec_t c_seg_filled_contention_nsec_max;
+SYSCTL_QUAD(_vm, OID_AUTO, c_seg_filled_no_contention, CTLFLAG_RD | CTLFLAG_LOCKED, &c_seg_filled_no_contention, "");
+SYSCTL_QUAD(_vm, OID_AUTO, c_seg_filled_contention, CTLFLAG_RD | CTLFLAG_LOCKED, &c_seg_filled_contention, "");
+SYSCTL_ULONG(_vm, OID_AUTO, c_seg_filled_contention_sec_max, CTLFLAG_RD | CTLFLAG_LOCKED, &c_seg_filled_contention_sec_max, "");
+SYSCTL_UINT(_vm, OID_AUTO, c_seg_filled_contention_nsec_max, CTLFLAG_RD | CTLFLAG_LOCKED, &c_seg_filled_contention_nsec_max, 0, "");
+#if (XNU_TARGET_OS_OSX && __arm64__)
+extern clock_nsec_t c_process_major_report_over_ms; /* report if over ? ms */
+extern int c_process_major_yield_after; /* yield after moving ? segments */
+extern uint64_t c_process_major_reports;
+extern clock_sec_t c_process_major_max_sec;
+extern clock_nsec_t c_process_major_max_nsec;
+extern uint32_t c_process_major_peak_segcount;
+SYSCTL_UINT(_vm, OID_AUTO, c_process_major_report_over_ms, CTLFLAG_RW | CTLFLAG_LOCKED, &c_process_major_report_over_ms, 0, "");
+SYSCTL_INT(_vm, OID_AUTO, c_process_major_yield_after, CTLFLAG_RW | CTLFLAG_LOCKED, &c_process_major_yield_after, 0, "");
+SYSCTL_QUAD(_vm, OID_AUTO, c_process_major_reports, CTLFLAG_RD | CTLFLAG_LOCKED, &c_process_major_reports, "");
+SYSCTL_ULONG(_vm, OID_AUTO, c_process_major_max_sec, CTLFLAG_RD | CTLFLAG_LOCKED, &c_process_major_max_sec, "");
+SYSCTL_UINT(_vm, OID_AUTO, c_process_major_max_nsec, CTLFLAG_RD | CTLFLAG_LOCKED, &c_process_major_max_nsec, 0, "");
+SYSCTL_UINT(_vm, OID_AUTO, c_process_major_peak_segcount, CTLFLAG_RD | CTLFLAG_LOCKED, &c_process_major_peak_segcount, 0, "");
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */

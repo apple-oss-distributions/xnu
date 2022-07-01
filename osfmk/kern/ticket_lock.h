@@ -212,6 +212,9 @@ void lck_ticket_assert_owned(lck_ticket_t *tlock);
 #if XNU_KERNEL_PRIVATE
 bool lck_ticket_lock_try(lck_ticket_t *tlock, lck_grp_t *grp) __result_use_check;
 bool kdp_lck_ticket_is_acquired(lck_ticket_t *lck) __result_use_check;
+void lck_ticket_lock_nopreempt(lck_ticket_t *tlock, lck_grp_t *grp);
+bool lck_ticket_lock_try_nopreempt(lck_ticket_t *tlock, lck_grp_t *grp) __result_use_check;
+void lck_ticket_unlock_nopreempt(lck_ticket_t *tlock);
 #endif
 
 __END_DECLS

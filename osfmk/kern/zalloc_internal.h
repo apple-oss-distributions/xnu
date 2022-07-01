@@ -217,7 +217,7 @@ struct zone {
 	 * often mutated fields
 	 */
 
-	lck_spin_t          z_lock;
+	lck_ticket_t        z_lock;
 	struct zone_depot   z_recirc;
 
 	/*
@@ -919,6 +919,8 @@ extern uint16_t zone_index_from_tag_index(
 
 #endif /* VM_TAG_SIZECLASSES */
 
+extern lck_grp_t zone_locks_grp;
+
 static inline void
 zone_lock(zone_t zone)
 {
@@ -928,7 +930,7 @@ zone_lock(zone_t zone)
 		s = splsched();
 	}
 #endif /* KASAN_ZALLOC */
-	lck_spin_lock(&zone->z_lock);
+	lck_ticket_lock(&zone->z_lock, &zone_locks_grp);
 #if KASAN_ZALLOC
 	zone->z_kasan_spl = s;
 #endif /* KASAN_ZALLOC */
@@ -941,7 +943,7 @@ zone_unlock(zone_t zone)
 	spl_t s = zone->z_kasan_spl;
 	zone->z_kasan_spl = 0;
 #endif /* KASAN_ZALLOC */
-	lck_spin_unlock(&zone->z_lock);
+	lck_ticket_unlock(&zone->z_lock);
 #if KASAN_ZALLOC
 	if (zone->kasan_fakestacks) {
 		splx(s);

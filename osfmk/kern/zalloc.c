@@ -475,7 +475,7 @@ static uint8_t zone_early_pages_to_cram[PAGE_SIZE * 16];
  *	All locks are associated to this group in zinit.
  *	Look at tools/lockstat for debugging lock contention.
  */
-static LCK_GRP_DECLARE(zone_locks_grp, "zone_locks");
+LCK_GRP_DECLARE(zone_locks_grp, "zone_locks");
 static LCK_MTX_EARLY_DECLARE(zone_metadata_region_lck, &zone_locks_grp);
 
 /*
@@ -588,9 +588,9 @@ TUNABLE(bool, zalloc_disable_copyio_check, "-no-copyio-zalloc-check", false);
  *
  *   0 to disable.
  *
- * zc_recirc_denom
- *   denominator of the fraction of per-cpu depot to migrate to/from
- *   the recirculation depot layer at a time. Default 3 (1/3).
+ * zc_recirc_batch
+ *   how many magazines to transfer at most from/to the recirculation depot.
+ *   Default 4.
  *
  * zc_defrag_ratio
  *   percentage of the working set to recirc size below which
@@ -615,7 +615,7 @@ TUNABLE(bool, zalloc_disable_copyio_check, "-no-copyio-zalloc-check", false);
 static TUNABLE(uint16_t, zc_magazine_size, "zc_mag_size", 8);
 static TUNABLE(uint32_t, zc_auto_threshold, "zc_auto_enable_threshold", 20);
 static TUNABLE(uint32_t, zc_grow_threshold, "zc_grow_threshold", 8);
-static TUNABLE(uint32_t, zc_recirc_denom, "zc_recirc_denom", 3);
+static TUNABLE(uint16_t, zc_recirc_batch, "zc_recirc_batch", 4);
 static TUNABLE(uint32_t, zc_defrag_ratio, "zc_defrag_ratio", 66);
 static TUNABLE(uint32_t, zc_defrag_threshold, "zc_defrag_threshold", 512u << 10);
 static TUNABLE(uint32_t, zc_autogc_ratio, "zc_autogc_ratio", 20);
@@ -2744,7 +2744,7 @@ __attribute__((noinline, cold))
 static void
 zone_lock_was_contended(zone_t zone, zone_cache_t zc)
 {
-	lck_spin_lock_nopreempt(&zone->z_lock);
+	lck_ticket_lock_nopreempt(&zone->z_lock, &zone_locks_grp);
 
 	/*
 	 * If zone caching has been disabled due to memory pressure,
@@ -2757,7 +2757,7 @@ zone_lock_was_contended(zone_t zone, zone_cache_t zc)
 
 	zone->z_contention_cur++;
 
-	if (zc == NULL || zc->zc_depot_max >= INT16_MAX * zc_mag_size()) {
+	if (zc == NULL || zc->zc_depot_max >= INT16_MAX) {
 		return;
 	}
 
@@ -2788,7 +2788,7 @@ zone_lock_was_contended(zone_t zone, zone_cache_t zc)
 static inline void
 zone_lock_nopreempt_check_contention(zone_t zone, zone_cache_t zc)
 {
-	if (lck_spin_try_lock_nopreempt(&zone->z_lock)) {
+	if (lck_ticket_lock_try_nopreempt(&zone->z_lock, &zone_locks_grp)) {
 		return;
 	}
 
@@ -2805,7 +2805,7 @@ zone_lock_check_contention(zone_t zone, zone_cache_t zc)
 static inline void
 zone_unlock_nopreempt(zone_t zone)
 {
-	lck_spin_unlock_nopreempt(&zone->z_lock);
+	lck_ticket_unlock_nopreempt(&zone->z_lock);
 }
 
 static inline void
@@ -4694,8 +4694,8 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
 		}
 
 		z->z_expanding_wait = true;
-		lck_spin_sleep_with_inheritor(&z->z_lock, LCK_SLEEP_DEFAULT,
-		    &z->z_expander, z->z_expander,
+		lck_ticket_sleep_with_inheritor(&z->z_lock, &zone_locks_grp,
+		    LCK_SLEEP_DEFAULT, &z->z_expander, z->z_expander,
 		    TH_UNINT, TIMEOUT_WAIT_FOREVER);
 	}
 
@@ -5673,7 +5673,7 @@ kasan_quarantine_freed_element(
 		assert(sz == zone_elem_size(zone));
 	}
 	if (addr && !zone->kasan_noquarantine) {
-		kasan_free(&addr, &sz, KASAN_HEAP_ZALLOC, zonep, usersz, true);
+		kasan_free(&addr, &sz, KASAN_HEAP_ZALLOC, zonep, usersz);
 		if (!addr) {
 			return TRUE;
 		}
@@ -5768,7 +5768,7 @@ zfree_cached_slow(zone_t zone, struct zone_page_metadata *meta,
 	 * worth of element we're allowed.
 	 *
 	 * If pushing the bucket puts us in excess of `zc_depot_max`,
-	 * then we trim (1/zc_recirc_denom) buckets out, in order
+	 * then we trim (zc_recirc_batch) buckets out, in order
 	 * to amortize taking the zone lock.
 	 *
 	 * Note that `zc_depot_max` can be mutated by the GC concurrently,
@@ -5786,14 +5786,15 @@ zfree_cached_slow(zone_t zone, struct zone_page_metadata *meta,
 			return zone_depot_unlock(cache);
 		}
 
-		n_mags = 1;
-		STAILQ_FIRST(&mags) = mag = STAILQ_FIRST(&cache->zc_depot);
+		/*
+		 * Never free more than half of the magazines.
+		 */
+		n_mags = MIN(zc_recirc_batch, cache->zc_depot_cur / 2);
+		assert(n_mags && n_mags < cache->zc_depot_cur);
 
-		/* always leave at least once magazine behind */
-		while (n_mags + 1 < cache->zc_depot_cur &&
-		    n_mags * zc_mag_size() * zc_recirc_denom < depot_max) {
+		STAILQ_FIRST(&mags) = mag = STAILQ_FIRST(&cache->zc_depot);
+		for (uint16_t i = n_mags; i-- > 1;) {
 			mag = STAILQ_NEXT(mag, zm_link);
-			n_mags++;
 		}
 
 		cache->zc_depot_cur -= n_mags;
@@ -6561,7 +6562,7 @@ zalloc_cached_from_recirc(
 			break;
 		}
 
-		if (n_mags * zc_mag_size() * zc_recirc_denom >=
+		if (n_mags >= zc_recirc_batch || n_mags * zc_mag_size() >=
 		    cache->zc_depot_max) {
 			STAILQ_FIRST(&zone->z_recirc) = STAILQ_NEXT(mag, zm_link);
 			STAILQ_NEXT(mag, zm_link) = NULL;
@@ -6639,8 +6640,7 @@ zalloc_cached_slow(
 	}
 
 	/*
-	 * If the recirculation depot has elements, then try to fill
-	 * the local per-cpu depot to (1 / zc_recirc_denom)
+	 * If the recirculation depot has elements, then try to fill from it.
 	 */
 	return zalloc_cached_from_recirc(zone, zstats, flags, esize, cache);
 }
@@ -8572,7 +8572,7 @@ zone_init_defaults(zone_id_t zid)
 	z->collectable = true;
 	z->expandable = true;
 
-	lck_spin_init(&z->z_lock, &zone_locks_grp, LCK_ATTR_NULL);
+	lck_ticket_init(&z->z_lock, &zone_locks_grp);
 	STAILQ_INIT(&z->z_recirc);
 	return z;
 }

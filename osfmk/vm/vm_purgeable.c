@@ -31,6 +31,8 @@
 
 #include <machine/limits.h>
 
+#include <os/hash.h>
+
 #include <vm/vm_compressor_pager.h>
 #include <vm/vm_kern.h>                         /* kmem_alloc */
 #include <vm/vm_page.h>
@@ -179,7 +181,6 @@ find_available_token:
 				return KERN_ABORTED;
 			}
 		}
-		;
 
 		/* Check whether memory is still maxed out */
 		if (token_init_idx < token_q_max_cnt) {
@@ -192,50 +193,45 @@ find_available_token:
 		/* Drop page queue lock so we can allocate */
 		vm_page_unlock_queues();
 
-		struct token *new_loc;
 		vm_size_t alloc_size = token_q_cur_size + PAGE_SIZE;
-		kern_return_t result;
+		kmem_return_t kmr = { };
+		kmem_guard_t guard = {
+			.kmg_atomic = true,
+			.kmg_tag = VM_KERN_MEMORY_OSFMK,
+			.kmg_context = os_hash_kernel_pointer(&tokens),
+		};
 
-		if (alloc_size / sizeof(struct token) > TOKEN_COUNT_MAX) {
-			result = KERN_RESOURCE_SHORTAGE;
-		} else {
-			if (token_q_cur_size) {
-				result = kmem_realloc(kernel_map,
-				    (vm_offset_t) tokens,
-				    token_q_cur_size,
-				    (vm_offset_t *) &new_loc,
-				    alloc_size, VM_KERN_MEMORY_OSFMK);
-			} else {
-				result = kmem_alloc(kernel_map,
-				    (vm_offset_t *) &new_loc,
-				    alloc_size, KMA_DATA | KMA_ZERO,
-				    VM_KERN_MEMORY_OSFMK);
-			}
+		if (alloc_size <= TOKEN_COUNT_MAX * sizeof(struct token)) {
+			kmr = kmem_realloc_guard(kernel_map,
+			    (vm_offset_t)tokens, token_q_cur_size, alloc_size,
+			    KMR_ZERO | KMR_DATA, guard);
 		}
 
 		vm_page_lock_queues();
 
-		if (result) {
+		if (kmr.kmr_ptr == NULL) {
 			/* Unblock waiting threads */
 			token_q_allocating = 0;
 			thread_wakeup((event_t)&token_q_allocating);
-			return result;
+			return KERN_RESOURCE_SHORTAGE;
 		}
 
 		/* If we get here, we allocated new memory. Update pointers and
 		 * dealloc old range */
 		struct token *old_tokens = tokens;
-		tokens = new_loc;
 		vm_size_t old_token_q_cur_size = token_q_cur_size;
+
+		tokens = kmr.kmr_ptr;
 		token_q_cur_size = alloc_size;
 		token_q_max_cnt = (token_idx_t) (token_q_cur_size /
 		    sizeof(struct token));
 		assert(token_init_idx < token_q_max_cnt);       /* We must have a free token now */
 
-		if (old_token_q_cur_size) {     /* clean up old mapping */
+		/* kmem_realloc_guard() might leave the old region mapped. */
+		if (kmem_realloc_should_free((vm_offset_t)old_tokens, kmr)) {
 			vm_page_unlock_queues();
-			/* kmem_realloc leaves the old region mapped. Get rid of it. */
-			kmem_free(kernel_map, (vm_offset_t)old_tokens, old_token_q_cur_size);
+			kmem_free_guard(kernel_map, (vm_offset_t)old_tokens,
+			    old_token_q_cur_size, KMF_NONE, guard);
 			vm_page_lock_queues();
 		}
 

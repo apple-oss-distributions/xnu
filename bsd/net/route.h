@@ -659,6 +659,7 @@ extern errno_t route_to_gwroute(const struct sockaddr *, struct rtentry *,
 extern void rt_setexpire(struct rtentry *, uint64_t);
 extern void rt_str(struct rtentry *, char *, uint32_t, char *, uint32_t);
 extern const char *rtm2str(int);
+extern void route_clear(struct route *);
 extern void route_copyin(struct route *, struct route *, size_t);
 extern void route_copyout(struct route *, const struct route *, size_t);
 extern boolean_t rt_ifa_is_dst(struct sockaddr *, struct ifaddr *);

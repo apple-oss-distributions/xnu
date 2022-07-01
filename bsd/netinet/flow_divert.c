@@ -1992,7 +1992,6 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	proc_t last_proc = NULL;
 	struct sockaddr *remote_endpoint = fd_cb->original_remote_endpoint;
 	bool do_connect = !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT);
-	bool unset_connecting = false;
 	struct inpcb *inp = NULL;
 
 	so = fd_cb->so;
@@ -2001,8 +2000,6 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	}
 
 	FDLOG0(LOG_NOTICE, fd_cb, "Skipped all flow divert services, disabling flow divert");
-
-	unset_connecting = (SOCK_TYPE(so) == SOCK_STREAM || (fd_cb->flags & FLOW_DIVERT_HAS_TOKEN));
 
 	/* Restore the IP state */
 	inp = sotoinpcb(so);
@@ -2035,12 +2032,12 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	/* Revert back to the original protocol */
 	so->so_proto = pffindproto(SOCK_DOM(so), SOCK_PROTO(so), SOCK_TYPE(so));
 
+	/* Reset the socket state to avoid confusing NECP */
+	so->so_state &= ~(SS_ISCONNECTING | SS_ISCONNECTED);
+
 	last_proc = proc_find(so->last_pid);
 
 	if (do_connect) {
-		if (unset_connecting) {
-			so->so_state &= ~SS_ISCONNECTING; /* Get out of the connecting state to avoid confusing NECP */
-		}
 		/* Connect using the original protocol */
 		error = (*so->so_proto->pr_usrreqs->pru_connect)(so, remote_endpoint, (last_proc != NULL ? last_proc : current_proc()));
 		if (error) {
@@ -3400,6 +3397,12 @@ flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t 
 
 		if (to == NULL) {
 			FDLOG0(LOG_ERR, fd_cb, "No destination address available when creating connect packet");
+			error = EINVAL;
+			goto done;
+		}
+
+		if (!flow_divert_is_sockaddr_valid(to)) {
+			FDLOG0(LOG_ERR, fd_cb, "Destination address is not valid when creating connect packet");
 			error = EINVAL;
 			goto done;
 		}

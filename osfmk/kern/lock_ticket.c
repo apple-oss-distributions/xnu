@@ -307,7 +307,7 @@ lck_ticket_timeout_panic(void *_lock, uint64_t timeout, uint64_t start, uint64_t
 }
 
 static inline void
-hw_lck_ticket_unlock_internal(hw_lck_ticket_t *lck)
+hw_lck_ticket_unlock_internal_nopreempt(hw_lck_ticket_t *lck)
 {
 	_Atomic uint8_t *ctp = (_Atomic uint8_t *)&lck->cticket;
 	uint8_t cticket;
@@ -324,6 +324,12 @@ hw_lck_ticket_unlock_internal(hw_lck_ticket_t *lck)
 #if CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_TICKET_LOCK_RELEASE, lck);
 #endif /* CONFIG_DTRACE */
+}
+
+__header_always_inline void
+hw_lck_ticket_unlock_internal(hw_lck_ticket_t *lck)
+{
+	hw_lck_ticket_unlock_internal_nopreempt(lck);
 	lock_enable_preemption();
 }
 
@@ -475,11 +481,10 @@ lck_ticket_contended(lck_ticket_t *tlock, uint8_t mt, thread_t cthread
 }
 
 static inline hw_lck_ticket_t
-hw_lck_ticket_reserve_orig(hw_lck_ticket_t *lck, thread_t cthread __unused)
+hw_lck_ticket_reserve_orig(hw_lck_ticket_t *lck)
 {
 	hw_lck_ticket_t tmp;
 
-	lock_disable_preemption_for_thread(cthread);
 	/*
 	 * Atomically load both the entier lock state, and increment the
 	 * "nticket". Wrap of the ticket field is OK as long as the total
@@ -498,7 +503,8 @@ hw_lck_ticket_lock(hw_lck_ticket_t *lck, lck_grp_t *grp)
 	hw_lck_ticket_t tmp;
 
 	hw_lck_ticket_verify(lck);
-	tmp = hw_lck_ticket_reserve_orig(lck, cthread);
+	lock_disable_preemption_for_thread(cthread);
+	tmp = hw_lck_ticket_reserve_orig(lck);
 
 	if (__probable(tmp.cticket == tmp.nticket)) {
 		return lck_grp_ticket_update_held(lck LCK_GRP_ARG(grp));
@@ -519,7 +525,8 @@ hw_lck_ticket_lock_to(hw_lck_ticket_t *lck, uint64_t timeout,
 	hw_lck_ticket_t tmp;
 
 	hw_lck_ticket_verify(lck);
-	tmp = hw_lck_ticket_reserve_orig(lck, cthread);
+	lock_disable_preemption_for_thread(cthread);
+	tmp = hw_lck_ticket_reserve_orig(lck);
 
 	if (__probable(tmp.cticket == tmp.nticket)) {
 		lck_grp_ticket_update_held(lck LCK_GRP_ARG(grp));
@@ -533,14 +540,17 @@ hw_lck_ticket_lock_to(hw_lck_ticket_t *lck, uint64_t timeout,
 	           handler LCK_GRP_ARG(grp));
 }
 
-void
-lck_ticket_lock(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+__header_always_inline void
+__lck_ticket_lock(lck_ticket_t *tlock, __unused lck_grp_t *grp, bool nopreempt)
 {
 	thread_t cthread = current_thread();
 	hw_lck_ticket_t tmp;
 
 	lck_ticket_verify(tlock);
-	tmp = hw_lck_ticket_reserve_orig(&tlock->tu, cthread);
+	if (!nopreempt) {
+		lock_disable_preemption_for_thread(cthread);
+	}
+	tmp = hw_lck_ticket_reserve_orig(&tlock->tu);
 
 	if (__probable(tmp.cticket == tmp.nticket)) {
 		tlock_mark_owned(tlock, cthread);
@@ -549,6 +559,18 @@ lck_ticket_lock(lck_ticket_t *tlock, __unused lck_grp_t *grp)
 
 	/* Contention? branch to out of line contended block */
 	lck_ticket_contended(tlock, tmp.nticket, cthread LCK_GRP_ARG(grp));
+}
+
+void
+lck_ticket_lock(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+{
+	__lck_ticket_lock(tlock, grp, false);
+}
+
+void
+lck_ticket_lock_nopreempt(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+{
+	__lck_ticket_lock(tlock, grp, true);
 }
 
 bool
@@ -574,19 +596,23 @@ hw_lck_ticket_lock_try(hw_lck_ticket_t *lck, lck_grp_t *grp)
 	return true;
 }
 
-bool
-lck_ticket_lock_try(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+__header_always_inline bool
+__lck_ticket_lock_try(lck_ticket_t *tlock, __unused lck_grp_t *grp, bool nopreempt)
 {
 	thread_t cthread = current_thread();
 	hw_lck_ticket_t olck, nlck;
 
 	lck_ticket_verify(tlock);
-	lock_disable_preemption_for_thread(cthread);
+	if (!nopreempt) {
+		lock_disable_preemption_for_thread(cthread);
+	}
 
 	os_atomic_rmw_loop(&tlock->tu.tcurnext, olck.tcurnext, nlck.tcurnext, acquire, {
 		if (__improbable(olck.cticket != olck.nticket)) {
 		        os_atomic_rmw_loop_give_up({
-				lock_enable_preemption();
+				if (!nopreempt) {
+				        lock_enable_preemption();
+				}
 				return false;
 			});
 		}
@@ -597,6 +623,18 @@ lck_ticket_lock_try(lck_ticket_t *tlock, __unused lck_grp_t *grp)
 	tlock_mark_owned(tlock, cthread);
 	lck_grp_ticket_update_held(&tlock->tu LCK_GRP_ARG(grp));
 	return true;
+}
+
+bool
+lck_ticket_lock_try(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+{
+	return __lck_ticket_lock_try(tlock, grp, false);
+}
+
+bool
+lck_ticket_lock_try_nopreempt(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+{
+	return __lck_ticket_lock_try(tlock, grp, true);
 }
 
 /*
@@ -627,11 +665,11 @@ hw_lck_ticket_reserve_orig_allow_invalid(hw_lck_ticket_t *lck);
 bool
 hw_lck_ticket_reserve(hw_lck_ticket_t *lck, uint32_t *ticket, lck_grp_t *grp)
 {
-	thread_t cthread = current_thread();
 	hw_lck_ticket_t tmp;
 
 	hw_lck_ticket_verify(lck);
-	tmp = hw_lck_ticket_reserve_orig(lck, cthread);
+	lock_disable_preemption_for_thread(current_thread());
+	tmp = hw_lck_ticket_reserve_orig(lck);
 	*ticket = tmp.lck_value;
 
 	if (__probable(tmp.cticket == tmp.nticket)) {
@@ -721,7 +759,7 @@ hw_lck_ticket_unlock(hw_lck_ticket_t *lck)
 }
 
 void
-lck_ticket_unlock(lck_ticket_t *tlock)
+lck_ticket_unlock_nopreempt(lck_ticket_t *tlock)
 {
 	lck_ticket_verify(tlock);
 
@@ -729,7 +767,14 @@ lck_ticket_unlock(lck_ticket_t *tlock)
 	    "Ticket unlock non-owned, owner: %p", (void *) tlock->lck_owner);
 	os_atomic_store(&tlock->lck_owner, 0, relaxed);
 
-	hw_lck_ticket_unlock_internal(&tlock->tu);
+	hw_lck_ticket_unlock_internal_nopreempt(&tlock->tu);
+}
+
+void
+lck_ticket_unlock(lck_ticket_t *tlock)
+{
+	lck_ticket_unlock_nopreempt(tlock);
+	lock_enable_preemption();
 }
 
 void

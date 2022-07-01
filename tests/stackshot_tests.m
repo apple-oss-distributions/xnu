@@ -118,6 +118,7 @@ struct scenario {
 	bool should_fail;
 	bool maybe_unsupported;
 	bool maybe_enomem;
+	bool no_recordfile;
 	pid_t target_pid;
 	uint64_t since_timestamp;
 	uint32_t size_hint;
@@ -207,7 +208,7 @@ retry: ;
 	}
 	void *buf = stackshot_config_get_stackshot_buffer(config);
 	size_t size = stackshot_config_get_stackshot_size(config);
-	if (scenario->name) {
+	if (scenario->name && !scenario->no_recordfile) {
 		char sspath[MAXPATHLEN];
 		strlcpy(sspath, scenario->name, sizeof(sspath));
 		strlcat(sspath, ".kcdata", sizeof(sspath));
@@ -406,6 +407,12 @@ T_DECL(stress, "test that taking stackshots for 60 seconds doesn't crash the sys
 			printf(".");
 			fflush(stdout);
 		});
+
+		/*
+		 * After the first stackshot, there's no point in continuing to
+		 * write them to disk, and it wears down the SSDs.
+		 */
+		scenario.no_recordfile = true;
 
 		/* Leave some time for the testing infrastructure to catch up */
 		usleep(10000);

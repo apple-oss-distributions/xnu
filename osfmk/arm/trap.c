@@ -46,9 +46,10 @@
 #include <vm/vm_kern.h>
 
 #include <kern/ast.h>
+#include <kern/restartable.h>
+#include <kern/sched_prim.h>
 #include <kern/thread.h>
 #include <kern/task.h>
-#include <kern/sched_prim.h>
 
 #include <sys/kdebug.h>
 #include <kperf/kperf.h>
@@ -285,7 +286,8 @@ sleh_abort(struct arm_saved_state * regs, int type)
 	kern_return_t   result;
 	vm_offset_t     recover;
 	thread_t        thread = current_thread();
-	boolean_t               intr;
+	boolean_t       intr;
+	bool            need_done_faulting = false;
 
 	recover = thread->machine.recover;
 	thread->machine.recover = 0;
@@ -329,6 +331,11 @@ sleh_abort(struct arm_saved_state * regs, int type)
 
 	if (status == FSR_DEBUG) {
 		debug_status = arm_debug_read_dscr() & ARM_DBGDSCR_MOE_MASK;
+	}
+
+	if ((spsr & PSR_MODE_MASK) == PSR_USER_MODE && TEST_FSR_VMFAULT(status)) {
+		need_done_faulting = true;
+		thread_reset_pcs_will_fault(thread);
 	}
 
 	/* Inherit the interrupt masks from previous */
@@ -556,11 +563,19 @@ sleh_abort(struct arm_saved_state * regs, int type)
 		codes[0] = KERN_FAILURE;
 	}
 
+	if (need_done_faulting) {
+		thread_reset_pcs_done_faulting(thread);
+	}
+
 	codes[1] = vaddr;
 	exception_triage(exc, codes, 2);
 	/* NOTREACHED */
 
 exception_return:
+	if (need_done_faulting) {
+		thread_reset_pcs_done_faulting(thread);
+	}
+
 	if (recover) {
 		thread->machine.recover = recover;
 	}
@@ -568,6 +583,10 @@ exception_return:
 	/* NOTREACHED */
 
 exit:
+	if (need_done_faulting) {
+		thread_reset_pcs_done_faulting(thread);
+	}
+
 	if (recover) {
 		thread->machine.recover = recover;
 	}

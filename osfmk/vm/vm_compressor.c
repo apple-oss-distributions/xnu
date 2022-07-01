@@ -56,7 +56,29 @@
 
 #include <IOKit/IOHibernatePrivate.h>
 
-TUNABLE(uint32_t, c_seg_bufsize, "vm_compressor_segment_buffer_size", (1024 * 256));
+/*
+ * The segment buffer size is a tradeoff.
+ * A larger buffer leads to faster I/O throughput, better compression ratios
+ * (since fewer bytes are wasted at the end of the segment),
+ * and less overhead (both in time and space).
+ * However, a smaller buffer causes less swap when the system is overcommited
+ * b/c a higher percentage of the swapped-in segment is definitely accessed
+ * before it goes back out to storage.
+ *
+ * So on systems without swap, a larger segment is a clear win.
+ * On systems with swap, the choice is murkier. Empirically, we've
+ * found that a 64KB segment provides a better tradeoff both in terms of
+ * performance and swap writes than a 256KB segment on systems with fast SSDs
+ * and a HW compression block.
+ */
+#if XNU_TARGET_OS_OSX && defined(__arm64__)
+#define C_SEG_BUFSIZE (1024 * 64)
+#else
+#define C_SEG_BUFSIZE (1024 * 256)
+#endif /* TARGET_OS_OSX && defined(__arm64__) */
+
+TUNABLE(uint32_t, c_seg_bufsize, "vm_compressor_segment_buffer_size", C_SEG_BUFSIZE);
+
 uint32_t c_seg_max_pages, c_seg_off_limit, c_seg_allocsize, c_seg_slot_var_array_min_len;
 
 extern boolean_t vm_darkwake_mode;
@@ -699,15 +721,14 @@ vm_compressor_set_size(void)
 
 #elif defined(__arm__)
 
-#define VM_RESERVE_SIZE                 (1024 * 1024 * 256)
-#define MAX_COMPRESSOR_POOL_SIZE        (1024 * 1024 * 278)
+#define MAX_COMPRESSOR_POOL_SIZE        (1024 * 1024 * 300)
 
 	if (compressor_pool_max_size > MAX_COMPRESSOR_POOL_SIZE) {
 		compressor_pool_max_size = MAX_COMPRESSOR_POOL_SIZE;
 	}
 
 	if (vm_compression_limit == 0) {
-		compressor_pool_size = ((kernel_map->max_offset - kernel_map->min_offset) - kernel_map->size) - VM_RESERVE_SIZE;
+		compressor_pool_size = MAX_COMPRESSOR_POOL_SIZE;
 	}
 	compressor_pool_multiplier = 1;
 
@@ -3629,6 +3650,20 @@ extern boolean_t memorystatus_freeze_to_memory;
 #endif /* CONFIG_FREEZE */
 #endif /* DEVELOPMENT || DEBUG */
 
+#define TIME_SUB(rsecs, secs, rfrac, frac, unit)        \
+MACRO_BEGIN                                                                                     \
+	if ((int)((rfrac) -= (frac)) < 0) {                             \
+	        (rfrac) += (unit);                                                      \
+	        (rsecs) -= 1;                                                           \
+	}                                                                                               \
+	(rsecs) -= (secs);                                                              \
+MACRO_END
+
+uint64_t c_seg_filled_no_contention = 0;
+uint64_t c_seg_filled_contention = 0;
+clock_sec_t c_seg_filled_contention_sec_max = 0;
+clock_nsec_t c_seg_filled_contention_nsec_max = 0;
+
 static void
 c_current_seg_filled(c_segment_t c_seg, c_segment_t *current_chead)
 {
@@ -3703,7 +3738,25 @@ c_current_seg_filled(c_segment_t c_seg, c_segment_t *current_chead)
 	clock_get_system_nanotime(&sec, &nsec);
 	c_seg->c_creation_ts = (uint32_t)sec;
 
-	lck_mtx_lock_spin_always(c_list_lock);
+	if (!lck_mtx_try_lock_spin_always(c_list_lock)) {
+		clock_sec_t     sec2;
+		clock_nsec_t    nsec2;
+
+		lck_mtx_lock_spin_always(c_list_lock);
+		clock_get_system_nanotime(&sec2, &nsec2);
+		TIME_SUB(sec2, sec, nsec2, nsec, NSEC_PER_SEC);
+		// printf("FBDP %s: head %p waited for c_list_lock for %lu.%09u seconds\n", __FUNCTION__, current_chead, sec2, nsec2);
+		if (sec2 > c_seg_filled_contention_sec_max) {
+			c_seg_filled_contention_sec_max = sec2;
+			c_seg_filled_contention_nsec_max = nsec2;
+		} else if (sec2 == c_seg_filled_contention_sec_max &&
+		    nsec2 > c_seg_filled_contention_nsec_max) {
+			c_seg_filled_contention_nsec_max = nsec2;
+		}
+		c_seg_filled_contention++;
+	} else {
+		c_seg_filled_no_contention++;
+	}
 
 	c_seg->c_generation_id = c_generation_id++;
 	c_seg_switch_state(c_seg, new_state, head_insert);
@@ -3745,20 +3798,81 @@ c_current_seg_filled(c_segment_t c_seg, c_segment_t *current_chead)
 
 
 #if (XNU_TARGET_OS_OSX && __arm64__)
+clock_nsec_t c_process_major_report_over_ms = 9; /* report if over 9 ms */
+int c_process_major_yield_after = 1000; /* yield after moving 1,000 segments */
+uint64_t c_process_major_reports = 0;
+clock_sec_t c_process_major_max_sec = 0;
+clock_nsec_t c_process_major_max_nsec = 0;
+uint32_t c_process_major_peak_segcount = 0;
 static void
 vm_compressor_process_major_segments(void)
 {
-	c_segment_t c_seg = NULL, c_seg_next = NULL;
-	if (!queue_empty(&c_major_list_head)) {
-		c_seg = (c_segment_t)queue_first(&c_major_list_head);
+	c_segment_t c_seg = NULL;
+	int count = 0, total = 0, breaks = 0;
+	clock_sec_t start_sec, end_sec;
+	clock_nsec_t start_nsec, end_nsec;
+	clock_nsec_t report_over_ns;
 
-		while (!queue_end(&c_major_list_head, (queue_entry_t)c_seg)) {
-			c_seg_next = (c_segment_t) queue_next(&c_seg->c_age_list);
-			lck_mtx_lock_spin_always(&c_seg->c_lock);
-			c_seg_switch_state(c_seg, C_ON_AGE_Q, FALSE);
-			lck_mtx_unlock_always(&c_seg->c_lock);
-			c_seg = c_seg_next;
+	if (queue_empty(&c_major_list_head)) {
+		return;
+	}
+
+	// printf("%s: starting to move segments from MAJORQ to AGEQ\n", __FUNCTION__);
+	if (c_process_major_report_over_ms != 0) {
+		report_over_ns = c_process_major_report_over_ms * NSEC_PER_MSEC;
+	} else {
+		report_over_ns = (clock_nsec_t)-1;
+	}
+	clock_get_system_nanotime(&start_sec, &start_nsec);
+	while (!queue_empty(&c_major_list_head)) {
+		/* start from the end to preserve aging order */
+		c_seg = (c_segment_t)queue_last(&c_major_list_head);
+		lck_mtx_lock_spin_always(&c_seg->c_lock);
+		c_seg_switch_state(c_seg, C_ON_AGE_Q, FALSE);
+		lck_mtx_unlock_always(&c_seg->c_lock);
+
+		count++;
+		if (count == c_process_major_yield_after ||
+		    queue_empty(&c_major_list_head)) {
+			/* done or time to take a break */
+		} else {
+			/* keep going */
+			continue;
 		}
+
+		total += count;
+		clock_get_system_nanotime(&end_sec, &end_nsec);
+		TIME_SUB(end_sec, start_sec, end_nsec, start_nsec, NSEC_PER_SEC);
+		if (end_sec > c_process_major_max_sec) {
+			c_process_major_max_sec = end_sec;
+			c_process_major_max_nsec = end_nsec;
+		} else if (end_sec == c_process_major_max_sec &&
+		    end_nsec > c_process_major_max_nsec) {
+			c_process_major_max_nsec = end_nsec;
+		}
+		if (total > c_process_major_peak_segcount) {
+			c_process_major_peak_segcount = total;
+		}
+		if (end_sec > 0 ||
+		    end_nsec >= report_over_ns) {
+			/* we used more than expected */
+			c_process_major_reports++;
+			printf("%s: moved %d/%d segments from MAJORQ to AGEQ in %lu.%09u seconds and %d breaks\n",
+			    __FUNCTION__, count, total,
+			    end_sec, end_nsec, breaks);
+		}
+		if (queue_empty(&c_major_list_head)) {
+			/* done */
+			break;
+		}
+		/* take a break to allow someone else to grab the lock */
+		lck_mtx_unlock_always(c_list_lock);
+		mutex_pause(0); /* 10 microseconds */
+		lck_mtx_lock_spin_always(c_list_lock);
+		/* start again */
+		clock_get_system_nanotime(&start_sec, &start_nsec);
+		count = 0;
+		breaks++;
 	}
 }
 #endif /* (XNU_TARGET_OS_OSX && __arm64__) */

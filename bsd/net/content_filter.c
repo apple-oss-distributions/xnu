@@ -2402,6 +2402,10 @@ cfil_ctl_rcvd(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo, int flags)
 		cfil_info = entry->cfe_cfil_info;
 		so = cfil_info->cfi_so;
 
+		if (cfil_info == NULL || os_ref_retain_try(&cfil_info->cfi_ref_count) == false) {
+			break;
+		}
+
 		cfil_rw_unlock_shared(&cfil_lck_rw);
 		socket_lock(so, 1);
 
@@ -2422,6 +2426,7 @@ cfil_ctl_rcvd(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo, int flags)
 			cfil_release_sockbuf(so, 0);
 		} while (0);
 
+		CFIL_INFO_FREE(cfil_info);
 		socket_lock_assert_owned(so);
 		socket_unlock(so, 1);
 
@@ -5151,7 +5156,9 @@ cfil_sock_is_closed(struct socket *so)
 	}
 	cfil_release_sockbuf(so, 1);
 
-	so->so_cfil->cfi_flags |= CFIF_SOCK_CLOSED;
+	if (so->so_cfil != NULL) {
+		so->so_cfil->cfi_flags |= CFIF_SOCK_CLOSED;
+	}
 
 	/* Pending data needs to go */
 	cfil_flush_queues(so, so->so_cfil);

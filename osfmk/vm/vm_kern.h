@@ -122,6 +122,36 @@ typedef struct {
 } kmem_return_t;
 
 /*!
+ * @typedef kmem_guard_t
+ *
+ * @brief
+ * KMEM guards are used by the kmem_* subsystem to secure atomic allocations.
+ *
+ * @discussion
+ * This parameter is used to transmit the tag for the allocation.
+ *
+ * If @c kmg_atomic is set, then the other fields are also taken into account
+ * and will affect the allocation behavior for this allocation.
+ *
+ * @field kmg_tag               The VM_KERN_MEMORY_* tag for this entry.
+ * @field kmg_type_hash         Some hash related to the type of the allocation.
+ * @field kmg_atomic            Whether the entry is atomic.
+ * @field kmg_submap            Whether the entry is for a submap.
+ * @field kmg_context           A use defined 30 bits that will be stored
+ *                              on the entry on allocation and checked
+ *                              on other operations.
+ */
+typedef struct {
+	uint16_t                kmg_tag;
+	uint16_t                kmg_type_hash;
+	uint32_t                kmg_atomic : 1;
+	uint32_t                kmg_submap : 1;
+	uint32_t                kmg_context : 30;
+} kmem_guard_t;
+#define KMEM_GUARD_NONE         (kmem_guard_t){ }
+#define KMEM_GUARD_SUBMAP       (kmem_guard_t){ .kmg_atomic = 0, .kmg_submap = 1 }
+
+/*!
  * @typedef
  *
  * @brief
@@ -145,6 +175,8 @@ typedef struct kmem_range {
  *
  * - @c kmem_alloc    uses @c kma_flags_t / @c KMA_* namespaced values.
  * - @c kmem_suballoc uses @c kms_flags_t / @c KMS_* namespaced values.
+ * - @c kmem_realloc  uses @c kmr_flags_t / @c KMR_* namespaced values.
+ * - @c kmem_free     uses @c kmf_flags_t / @c KMF_* napespaced values.
  *
  *
  * <h2>Call behavior</h2>
@@ -157,8 +189,16 @@ typedef struct kmem_range {
  *	Using this flag should really be limited to cases when failure is not
  *	recoverable and possibly during early boot only.
  *
- * @const KMEM_NOPAGEWAIT (alloc)
+ * @const KMEM_NOPAGEWAIT (alloc, realloc)
  *	Pass this flag if the system should not wait in VM_PAGE_WAIT().
+ *
+ * @const KMEM_FREEOLD (realloc)
+ *	Pass this flag if @c kmem_realloc should free the old mapping
+ *	(when the address changed) as part of the call.
+ *
+ * @const KMEM_REALLOCF (realloc)
+ *	Similar to @c Z_REALLOCF: if the call is failing,
+ *	then free the old allocation too.
  *
  *
  * <h2>How the entry is populated</h2>
@@ -173,13 +213,13 @@ typedef struct kmem_range {
  *	Passing @c KMEM_PAGEABLE makes the entry non wired, and pages will be
  *	added to the entry as it faults.
  *
- * @const KMEM_ZERO (alloc)
+ * @const KMEM_ZERO (alloc, realloc)
  *	Any new page added is zeroed.
  *
  *
  * <h2>VM object to use for the entry</h2>
  *
- * @const KMEM_KOBJECT (alloc)
+ * @const KMEM_KOBJECT (alloc, realloc)
  *	The entry will be made for the @c kernel_object.
  *
  *	Note that the @c kernel_object is just a "collection of pages".
@@ -201,18 +241,26 @@ typedef struct kmem_range {
  *
  * <h2>How to look for addresses</h2>
  *
- * @const KMEM_LOMEM (alloc)
+ * @const KMEM_LOMEM (alloc, realloc)
  *	The physical memory allocated must be in the first 4G of memory,
  *	in order to support hardware controllers incapable of generating DMAs
  *	with more than 32bits of physical address.
  *
- * @const KMEM_LAST_FREE (alloc, suballoc)
+ * @const KMEM_LAST_FREE (alloc, suballoc, realloc)
  *	When looking for space in the specified map,
  *	start scanning for addresses from the end of the map
  *	rather than the start.
  *
- * @const KMEM_DATA (alloc, suballoc)
+ * @const KMEM_DATA (alloc, suballoc, realloc)
  *	The memory must be allocated from the "Data" range.
+ *
+ * @const KMEM_GUESS_SIZE (free)
+ *	When freeing an atomic entry (requires a valid kmem guard),
+ *	then look up the entry size because the caller didn't
+ *	preserve it.
+ *
+ *	This flag is only here in order to support kfree_data_addr(),
+ *	and shall not be used by any other clients.
  *
  * <h2>Entry properties</h2>
  *
@@ -225,8 +273,8 @@ typedef struct kmem_range {
  *	In user maps, permanent entries will only be deleted
  *	whenthe map is terminated.
  *
- * @const KMEM_GUARD_FIRST (alloc)
- * @const KMEM_GUARD_LAST (alloc)
+ * @const KMEM_GUARD_FIRST (alloc, realloc)
+ * @const KMEM_GUARD_LAST (alloc, realloc)
  *	Asks @c kmem_* to put a guard page at the beginning (resp. end)
  *	of the allocation.
  *
@@ -241,6 +289,11 @@ typedef struct kmem_range {
  *	The returned address for allocation will pointing at the entry start,
  *	which is the address of the left guard page if any.
  *
+ *	Note that if @c kmem_realloc* is called, the *exact* same
+ *	guard flags must be passed for this entry. The KMEM subsystem
+ *	is generally oblivious to guards, and passing inconsistent flags
+ *	will cause pages to be moved incorrectly.
+ *
  * @const KMEM_KSTACK (alloc)
  *	This flag must be passed when the allocation is for kernel stacks.
  *	This only has an effect on Intel.
@@ -254,6 +307,8 @@ __options_decl(kmem_flags_t, uint32_t, {
 	/* Call behavior */
 	KMEM_NOFAIL         = 0x00000001,
 	KMEM_NOPAGEWAIT     = 0x00000002,
+	KMEM_FREEOLD        = 0x00000004,
+	KMEM_REALLOCF       = 0x00000008,
 
 	/* How the entry is populated */
 	KMEM_VAONLY         = 0x00000010,
@@ -267,6 +322,7 @@ __options_decl(kmem_flags_t, uint32_t, {
 	/* How to look for addresses */
 	KMEM_LOMEM          = 0x00001000,
 	KMEM_LAST_FREE      = 0x00002000,
+	KMEM_GUESS_SIZE     = 0x00004000,
 	KMEM_DATA           = 0x00008000,
 
 	/* Entry properties */
@@ -275,7 +331,6 @@ __options_decl(kmem_flags_t, uint32_t, {
 	KMEM_GUARD_LAST     = 0x00040000,
 	KMEM_KSTACK         = 0x00080000,
 	KMEM_NOENCRYPT      = 0x00100000,
-	KMEM_ATOMIC         = 0x40000000, /* temporary */
 });
 
 
@@ -283,6 +338,9 @@ __options_decl(kmem_flags_t, uint32_t, {
 
 extern struct kmem_range kmem_ranges[KMEM_RANGE_COUNT];
 extern struct kmem_range kmem_large_ranges[KMEM_RANGE_COUNT];
+#define KMEM_RANGE_MASK       0x3fff
+#define KMEM_HASH_SET         0x4000
+#define KMEM_DIRECTION_MASK   0x8000
 
 __attribute__((overloadable))
 extern bool kmem_range_contains(
@@ -306,6 +364,10 @@ extern bool kmem_range_id_contains(
 extern kmem_range_id_t kmem_addr_get_range(
 	vm_map_offset_t         addr,
 	vm_map_size_t           size);
+
+extern kmem_range_id_t kmem_adjust_range_id(
+	uint32_t                hash);
+
 
 /**
  * @enum kmem_claims_flags_t
@@ -342,7 +404,7 @@ __options_decl(kmem_claims_flags_t, uint32_t, {
  * Security config that creates the additional splits in non data part of
  * kernel_map
  */
-#if KASAN || (__arm64__ && !defined(KERNEL_INTEGRITY_KTRR) && !defined(KERNEL_INTEGRITY_CTRR))
+#if KASAN || !defined(__LP64__) || (__arm64__ && !defined(KERNEL_INTEGRITY_KTRR) && !defined(KERNEL_INTEGRITY_CTRR))
 #   define ZSECURITY_CONFIG_KERNEL_PTR_SPLIT        OFF
 #else
 #   define ZSECURITY_CONFIG_KERNEL_PTR_SPLIT        ON
@@ -422,6 +484,50 @@ extern void kmem_shuffle(
 	uint16_t                count);
 
 
+#pragma mark kmem entry parameters
+
+/*!
+ * @function kmem_entry_validate_guard()
+ *
+ * @brief
+ * Validates that the entry matches the input parameters, panic otherwise.
+ *
+ * @discussion
+ * If the guard has a zero @c kmg_guard value,
+ * then the entry must be non atomic.
+ *
+ * The guard tag is not used for validation as the VM subsystems
+ * (particularly in IOKit) might decide to substitute it in ways
+ * that are difficult to predict for the programmer.
+ *
+ * @param entry         the entry to validate
+ * @param addr          the supposed start address
+ * @param size          the supposed size of the entry
+ * @param guard         the guard to use to "authenticate" the allocation.
+ */
+extern void kmem_entry_validate_guard(
+	vm_map_t                map,
+	struct vm_map_entry    *entry,
+	vm_offset_t             addr,
+	vm_size_t               size,
+	kmem_guard_t            guard);
+
+/*!
+ * @function kmem_size_guard()
+ *
+ * @brief
+ * Returns the size of an atomic allocation made in the specified map,
+ * according to the guard.
+ *
+ * @param map           a kernel map to lookup the entry into.
+ * @param addr          the kernel address to lookup.
+ * @param guard         the guard to use to "authenticate" the allocation.
+ */
+extern vm_size_t kmem_size_guard(
+	vm_map_t                map,
+	vm_offset_t             addr,
+	kmem_guard_t            guard);
+
 #pragma mark kmem allocations
 
 /*!
@@ -457,7 +563,6 @@ __options_decl(kma_flags_t, uint32_t, {
 	KMA_GUARD_LAST      = KMEM_GUARD_LAST,
 	KMA_KSTACK          = KMEM_KSTACK,
 	KMA_NOENCRYPT       = KMEM_NOENCRYPT,
-	KMA_ATOMIC          = KMEM_ATOMIC,
 });
 
 #define KMEM_ALLOC_CONTIG_FLAGS ( \
@@ -480,14 +585,55 @@ __options_decl(kma_flags_t, uint32_t, {
 	KMA_NONE)
 
 
+/*!
+ * @function kmem_alloc_guard()
+ *
+ * @brief
+ * Master entry point for allocating kernel memory.
+ *
+ * @param map           map to allocate into, must be a kernel map.
+ * @param size          the size of the entry to allocate, must not be 0.
+ * @param mask          an alignment mask that the returned allocation
+ *                      will be aligned to (ignoring guards, see @const
+ *                      KMEM_GUARD_FIRST).
+ * @param flags         a set of @c KMA_* flags, (@see @c kmem_flags_t)
+ * @param guard         how to guard the allocation.
+ *
+ * @returns
+ *     - the non zero address of the allocaation on success in @c kmr_address.
+ *     - @c KERN_NO_SPACE if the target map is out of address space.
+ *     - @c KERN_RESOURCE_SHORTAGE if the kernel is out of pages.
+ */
+extern kmem_return_t kmem_alloc_guard(
+	vm_map_t                map,
+	vm_size_t               size,
+	vm_offset_t             mask,
+	kma_flags_t             flags,
+	kmem_guard_t            guard) __result_use_check;
 
-extern kern_return_t    kernel_memory_allocate(
+static inline kern_return_t
+kernel_memory_allocate(
 	vm_map_t                map,
 	vm_offset_t            *addrp,
 	vm_size_t               size,
 	vm_offset_t             mask,
 	kma_flags_t             flags,
-	vm_tag_t                tag);
+	vm_tag_t                tag)
+{
+	kmem_guard_t guard = {
+		.kmg_tag = tag,
+	};
+	kmem_return_t kmr;
+
+	kmr = kmem_alloc_guard(map, size, mask, flags, guard);
+	if (kmr.kmr_return == KERN_SUCCESS) {
+		__builtin_assume(kmr.kmr_address != 0);
+	} else {
+		__builtin_assume(kmr.kmr_address == 0);
+	}
+	*addrp = kmr.kmr_address;
+	return kmr.kmr_return;
+}
 
 static inline kern_return_t
 kmem_alloc(
@@ -559,25 +705,156 @@ extern kmem_return_t kmem_suballoc(
 
 #pragma mark kmem reallocation
 
-extern kern_return_t    kmem_realloc(
+/*!
+ * @typedef kmr_flags_t
+ *
+ * @brief
+ * Flags used by the @c kmem_realloc* family of flags.
+ */
+__options_decl(kmr_flags_t, uint32_t, {
+	KMR_NONE            = KMEM_NONE,
+
+	/* Call behavior */
+	KMR_NOPAGEWAIT      = KMEM_NOPAGEWAIT,
+	KMR_FREEOLD         = KMEM_FREEOLD,
+	KMR_REALLOCF        = KMEM_REALLOCF,
+
+	/* How the entry is populated */
+	KMR_ZERO            = KMEM_ZERO,
+
+	/* VM object to use for the entry */
+	KMR_KOBJECT         = KMEM_KOBJECT,
+
+	/* How to look for addresses */
+	KMR_LOMEM           = KMEM_LOMEM,
+	KMR_LAST_FREE       = KMEM_LAST_FREE,
+	KMR_DATA            = KMEM_DATA,
+
+	/* Entry properties */
+	KMR_GUARD_FIRST     = KMEM_GUARD_FIRST,
+	KMR_GUARD_LAST      = KMEM_GUARD_LAST,
+});
+
+#define KMEM_REALLOC_FLAGS_VALID(flags) \
+	(((flags) & KMR_KOBJECT) == 0 || ((flags) & KMR_FREEOLD))
+
+/*!
+ * @function kmem_realloc_guard()
+ *
+ * @brief
+ * Reallocates memory allocated with kmem_alloc_guard()
+ *
+ * @discussion
+ * @c kmem_realloc_guard() either mandates a guard with atomicity set,
+ * or must use KMR_DATA (this is not an implementation limitation but
+ * but a security policy).
+ *
+ * If kmem_realloc_guard() is called for the kernel object
+ * (with @c KMR_KOBJECT), then the use of @c KMR_FREEOLD is mandatory.
+ *
+ * When @c KMR_FREEOLD isn't used, if the allocation was relocated
+ * as opposed to be extended or truncated in place, the caller
+ * must free its old mapping manually by calling @c kmem_free_guard().
+ *
+ * Note that if the entry is truncated, it will always be done in place.
+ *
+ *
+ * @param map           map to allocate into, must be a kernel map.
+ * @param oldaddr       the address to reallocate,
+ *                      passing 0 means @c kmem_alloc_guard() will be called.
+ * @param oldsize       the current size of the entry
+ * @param newsize       the new size of the entry,
+ *                      0 means kmem_free_guard() will be called.
+ * @param flags         a set of @c KMR_* flags, (@see @c kmem_flags_t)
+ *                      the exact same set of @c KMR_GUARD_* flags must
+ *                      be passed for all calls (@see kmem_flags_t).
+ * @param guard         the allocation guard.
+ *
+ * @returns
+ *     - the newly allocated address on success in @c kmr_address
+ *       (note that if newsize is 0, then address will be 0 too).
+ *     - @c KERN_NO_SPACE if the target map is out of address space.
+ *     - @c KERN_RESOURCE_SHORTAGE if the kernel is out of pages.
+ */
+extern kmem_return_t kmem_realloc_guard(
 	vm_map_t                map,
 	vm_offset_t             oldaddr,
 	vm_size_t               oldsize,
-	vm_offset_t             *newaddrp,
 	vm_size_t               newsize,
-	vm_tag_t                tag);
+	kmr_flags_t             flags,
+	kmem_guard_t            guard) __result_use_check
+__attribute__((diagnose_if(!KMEM_REALLOC_FLAGS_VALID(flags),
+    "invalid realloc flags passed", "error")));
 
-extern void kmem_realloc_down(
-	vm_map_t        map,
-	vm_offset_t     addr,
-	vm_size_t       oldsize,
-	vm_size_t       newsize);
+/*!
+ * @function kmem_realloc_should_free()
+ *
+ * @brief
+ * Returns whether the old address passed to a @c kmem_realloc_guard()
+ * call without @c KMR_FREEOLD must be freed.
+ *
+ * @param oldaddr       the "oldaddr" passed to @c kmem_realloc_guard().
+ * @param kmr           the result of that @c kmem_realloc_should_free() call.
+ */
+static inline bool
+kmem_realloc_should_free(
+	vm_offset_t             oldaddr,
+	kmem_return_t           kmr)
+{
+	return oldaddr && oldaddr != kmr.kmr_address;
+}
 
-__exported
-extern void             kmem_free(
+
+#pragma mark kmem free
+
+/*!
+ * @typedef kmf_flags_t
+ *
+ * @brief
+ * Flags used by the @c kmem_free* family of flags.
+ */
+__options_decl(kmf_flags_t, uint32_t, {
+	KMF_NONE            = KMEM_NONE,
+
+	/* Call behavior */
+
+	/* How the entry is populated */
+
+	/* How to look for addresses */
+	KMF_GUESS_SIZE      = KMEM_GUESS_SIZE,
+});
+
+
+/*!
+ * @function kmem_free_guard()
+ *
+ * @brief
+ * Frees memory allocated with @c kmem_alloc or @c kmem_realloc.
+ *
+ * @param map           map to free from, must be a kernel map.
+ * @param addr          the address to free
+ * @param size          the size of the memory to free
+ * @param flags         a set of @c KMF_* flags, (@see @c kmem_flags_t)
+ * @param guard         the allocation guard.
+ *
+ * @returns             the size of the entry that was deleted.
+ *                      (useful when @c KMF_GUESS_SIZE was used)
+ */
+extern vm_size_t kmem_free_guard(
 	vm_map_t                map,
 	vm_offset_t             addr,
-	vm_size_t               size);
+	vm_size_t               size,
+	kmf_flags_t             flags,
+	kmem_guard_t            guard);
+
+static inline void
+kmem_free(
+	vm_map_t                map,
+	vm_offset_t             addr,
+	vm_size_t               size)
+{
+	kmem_free_guard(map, addr, size, KMF_NONE, KMEM_GUARD_NONE);
+}
 
 #pragma mark kmem population
 
@@ -706,6 +983,20 @@ extern kern_return_t vm_map_kernel(
 	vm_inherit_t            inheritance);
 
 extern kern_return_t mach_vm_remap_kernel(
+	vm_map_t                target_map,
+	mach_vm_offset_t        *address,
+	mach_vm_size_t          size,
+	mach_vm_offset_t        mask,
+	int                     flags,
+	vm_tag_t                tag,
+	vm_map_t                src_map,
+	mach_vm_offset_t        memory_address,
+	boolean_t               copy,
+	vm_prot_t               *cur_protection,
+	vm_prot_t               *max_protection,
+	vm_inherit_t            inheritance);
+
+extern kern_return_t mach_vm_remap_new_kernel(
 	vm_map_t                target_map,
 	mach_vm_offset_t        *address,
 	mach_vm_size_t          size,

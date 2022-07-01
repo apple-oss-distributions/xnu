@@ -403,6 +403,10 @@ extern void     zone_require_ro_range_contains(
  * free the incoming memory on failure cases.
  *
  #if XNU_KERNEL_PRIVATE
+ * @const Z_MAY_COPYINMAP
+ * This data allocation might be used with vm_map_copyin().
+ * This allows for those allocations to be associated with a proper VM object.
+ *
  * @const Z_FULLSIZE
  * Used to indicate that the caller will use all available space in excess
  * from the requested allocation size.
@@ -438,6 +442,7 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	Z_REALLOCF      = 0x0008,
 
 #if XNU_KERNEL_PRIVATE
+	Z_MAY_COPYINMAP = 0x0100,
 	Z_FULLSIZE      = 0x0200,
 #if KASAN
 	Z_SKIP_KASAN    = 0x0400,

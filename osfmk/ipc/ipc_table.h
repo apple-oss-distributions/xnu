@@ -70,6 +70,7 @@
 #include <mach/mach_types.h>
 #include <mach/boolean.h>
 #include <mach/vm_param.h>
+#include <kern/kalloc.h>
 
 #include <ipc/ipc_types.h>
 
@@ -107,6 +108,7 @@ struct ipc_table_size {
 
 extern struct ipc_table_size ipc_table_entries[];
 extern struct ipc_table_size ipc_table_requests[];
+KALLOC_TYPE_VAR_DECLARE(kt_var_it_entries);
 
 /*
  *	Note that ipc_table_alloc and ipc_table_free
@@ -114,11 +116,16 @@ extern struct ipc_table_size ipc_table_requests[];
  *	be held across them.
  */
 
-#define it_entries_alloc(its) \
-	kalloc_type(struct ipc_entry, (its)->its_size, Z_WAITOK | Z_ZERO)
+#define it_entries_alloc(its)                                              \
+	(struct ipc_entry *) kalloc_type_var_impl(kt_var_it_entries,           \
+	    kt_size(0, sizeof(struct ipc_entry), (its)->its_size),             \
+	    __zone_flags_mix_tag(Z_WAITOK | Z_ZERO, VM_ALLOC_SITE_TAG()), NULL)
 
-#define it_entries_free(count, table) \
-	kfree_type(struct ipc_entry, count, table)
+#define it_entries_free(count, table) ({                                   \
+	__auto_type __count = (count);                                         \
+	kfree_type_var_impl(kt_var_it_entries, os_ptr_load_and_erase(table),   \
+	    kt_size(0, sizeof(struct ipc_entry), __count));                    \
+})
 
 #define it_requests_alloc(its) \
 	kalloc_type(struct ipc_port_request, (its)->its_size, Z_WAITOK | Z_ZERO)

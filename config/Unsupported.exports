@@ -110,7 +110,7 @@ _kev_post_msg
 _kev_post_msg_nowait
 _kfree:_kfree_external
 _kmem_alloc:_kmem_alloc_external
-_kmem_free
+_kmem_free:_kmem_free_external
 _kmputc
 _krealloc_data:_krealloc_data_external
 _lck_mtx_assert

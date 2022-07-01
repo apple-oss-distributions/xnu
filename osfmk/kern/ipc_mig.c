@@ -380,7 +380,7 @@ kernel_mach_msg_rpc(
 		assert(interruptible);
 		assert(reply == self->ith_kernel_reply_port);
 
-		if (self->ast & AST_APC) {
+		if (thread_ast_peek(self, AST_APC)) {
 			ip_release(dest);
 			thread_dealloc_kernel_special_reply_port(current_thread());
 			return mr;

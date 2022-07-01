@@ -31,6 +31,7 @@
 
 #include <sys/cdefs.h>
 #include <vm/vm_kern.h>
+#include <os/hash.h>
 
 #include <libkern/c++/OSContainers.h>
 #include <libkern/c++/OSLib.h>
@@ -51,6 +52,16 @@ OSMetaClassDefineReservedUnused(OSSerialize, 4);
 OSMetaClassDefineReservedUnused(OSSerialize, 5);
 OSMetaClassDefineReservedUnused(OSSerialize, 6);
 OSMetaClassDefineReservedUnused(OSSerialize, 7);
+
+static inline kmem_guard_t
+OSSerialize_guard()
+{
+	kmem_guard_t guard = {
+		.kmg_tag     = IOMemoryTag(kernel_map),
+	};
+
+	return guard;
+}
 
 
 char *
@@ -189,6 +200,8 @@ OSSerialize::addString(const char *s)
 bool
 OSSerialize::initWithCapacity(unsigned int inCapacity)
 {
+	kmem_return_t kmr;
+
 	if (!super::init()) {
 		return false;
 	}
@@ -203,26 +216,28 @@ OSSerialize::initWithCapacity(unsigned int inCapacity)
 	if (!inCapacity) {
 		inCapacity = 1;
 	}
-	if (round_page_overflow(inCapacity, &capacity)) {
+	if (round_page_overflow(inCapacity, &inCapacity)) {
 		tags.reset();
 		return false;
 	}
 
-	capacityIncrement = capacity;
+	capacityIncrement = inCapacity;
 
 	// allocate from the kernel map so that we can safely map this data
 	// into user space (the primary use of the OSSerialize object)
 
-	kern_return_t rc = kmem_alloc(kernel_map, (vm_offset_t *)&data,
-	    capacity, (kma_flags_t)(KMA_DATA | KMA_ZERO),
-	    IOMemoryTag(kernel_map));
-	if (rc) {
-		return false;
+	kmr = kmem_alloc_guard(kernel_map, inCapacity, /* mask */ 0,
+	    (kma_flags_t)(KMA_ZERO | KMA_DATA), OSSerialize_guard());
+
+	if (kmr.kmr_return == KERN_SUCCESS) {
+		data = (char *)kmr.kmr_ptr;
+		capacity = inCapacity;
+		OSCONTAINER_ACCUMSIZE(capacity);
+		return true;
 	}
 
-	OSCONTAINER_ACCUMSIZE(capacity);
-
-	return true;
+	capacity = 0;
+	return false;
 }
 
 OSSharedPtr<OSSerialize>
@@ -262,7 +277,7 @@ OSSerialize::setCapacityIncrement(unsigned int increment)
 unsigned int
 OSSerialize::ensureCapacity(unsigned int newCapacity)
 {
-	char *newData;
+	kmem_return_t kmr;
 
 	if (newCapacity <= capacity) {
 		return capacity;
@@ -272,25 +287,18 @@ OSSerialize::ensureCapacity(unsigned int newCapacity)
 		return capacity;
 	}
 
-	kern_return_t rc = kmem_realloc(kernel_map,
-	    (vm_offset_t)data,
-	    capacity,
-	    (vm_offset_t *)&newData,
-	    newCapacity,
-	    VM_KERN_MEMORY_IOKIT);
-	if (!rc) {
-		OSCONTAINER_ACCUMSIZE(newCapacity);
+	kmr = kmem_realloc_guard(kernel_map, (vm_offset_t)data, capacity,
+	    newCapacity, (kmr_flags_t)(KMR_ZERO | KMR_DATA | KMR_FREEOLD),
+	    OSSerialize_guard());
 
-		// kmem realloc does not free the old address range
-		kmem_free(kernel_map, (vm_offset_t)data, capacity);
-		OSCONTAINER_ACCUMSIZE(-((size_t)capacity));
+	if (kmr.kmr_return == KERN_SUCCESS) {
+		size_t delta = 0;
 
-		// kmem realloc does not zero out the new memory
-		// and this could end up going to user land
-		bzero(&newData[capacity], newCapacity - capacity);
-
-		data = newData;
+		data     = (char *)kmr.kmr_ptr;
+		delta   -= capacity;
 		capacity = newCapacity;
+		delta   += capacity;
+		OSCONTAINER_ACCUMSIZE(delta);
 	}
 
 	return capacity;
@@ -299,9 +307,12 @@ OSSerialize::ensureCapacity(unsigned int newCapacity)
 void
 OSSerialize::free()
 {
-	if (data) {
-		kmem_free(kernel_map, (vm_offset_t)data, capacity);
+	if (capacity) {
+		kmem_free_guard(kernel_map, (vm_offset_t)data, capacity,
+		    KMF_NONE, OSSerialize_guard());
 		OSCONTAINER_ACCUMSIZE( -((size_t)capacity));
+		data = nullptr;
+		capacity = 0;
 	}
 	super::free();
 }

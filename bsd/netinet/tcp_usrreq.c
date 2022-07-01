@@ -315,6 +315,7 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 {
 	int error = 0;
 	struct inpcb *inp = sotoinpcb(so);
+	const uint8_t old_flags = inp->inp_vflag;
 	struct tcpcb *tp;
 	struct sockaddr_in6 *sin6p;
 
@@ -346,7 +347,6 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 			inp->inp_vflag |= INP_IPV4;
 		} else if (IN6_IS_ADDR_V4MAPPED(&sin6p->sin6_addr)) {
 			struct sockaddr_in sin;
-			const uint8_t old_flags = inp->inp_vflag;
 
 			in6_sin6_2_sin(&sin, sin6p);
 			inp->inp_vflag |= INP_IPV4;
@@ -355,12 +355,15 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 			error = in_pcbbind(inp, (struct sockaddr *)&sin, p);
 			if (error != 0) {
 				inp->inp_vflag = old_flags;
+				route_clear(&inp->inp_route);
 			}
 			goto out;
 		}
 	}
 	error = in6_pcbbind(inp, nam, p);
 	if (error) {
+		inp->inp_vflag = old_flags;
+		route_clear(&inp->inp_route);
 		goto out;
 	}
 	COMMON_END(PRU_BIND);
@@ -718,10 +721,15 @@ tcp6_usr_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 		inp->inp_vflag &= ~INP_IPV6;
 		if ((error = tcp_connect(tp, (struct sockaddr *)&sin, p)) != 0) {
 			TCP_LOG_CONNECT(tp, true, error);
+			route_clear(&inp->inp_route);
 			goto out;
 		}
 
 		error = tcp_connect_complete(so);
+		if (error != 0) {
+			TCP_LOG_CONNECT(tp, true, error);
+			route_clear(&inp->inp_route);
+		}
 		goto out;
 	} else if (IN6_IS_ADDR_V4COMPAT(&sin6p->sin6_addr)) {
 		/*

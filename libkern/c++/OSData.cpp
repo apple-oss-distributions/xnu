@@ -56,59 +56,63 @@ OSMetaClassDefineReservedUnused(OSData, 7);
 bool
 OSData::initWithCapacity(unsigned int inCapacity)
 {
-	void *_data = NULL;
-
-	if (data) {
-		OSCONTAINER_ACCUMSIZE(-((size_t)capacity));
-		if (!inCapacity || (capacity < inCapacity)) {
-			// clean out old data's storage if it isn't big enough
-			if (capacity < page_size) {
-				kfree_data_container(data, capacity);
-			} else {
-				kmem_free(kernel_map, (vm_offset_t)data, capacity);
-			}
-			data = NULL;
-			capacity = 0;
-		}
-	}
+	struct kalloc_result kr;
+	bool success = true;
 
 	if (!super::init()) {
 		return false;
 	}
 
-	if (inCapacity && !data) {
-		if (inCapacity < page_size) {
-			data = (void *)kalloc_data_container(inCapacity, Z_WAITOK);
+	/*
+	 * OSData use of Z_MAY_COPYINMAP serves 2 purpposes:
+	 *
+	 * - It makes sure than when it goes to the VM, it uses its own object
+	 *   rather than the kernel object so that vm_map_copyin() can be used.
+	 *
+	 * - On Intel, it goes to the VM for any size >= PAGE_SIZE to maintain
+	 *   old (inefficient) ABI. On arm64 it will use kalloc_data() instead
+	 *   until the vm_map_copy_t msg_ool_size_small threshold for copies.
+	 */
+
+	if (inCapacity == 0) {
+		if (capacity) {
+			OSCONTAINER_ACCUMSIZE(-(size_t)capacity);
+			/* can't use kfree() as we need to pass Z_MAY_COPYINMAP */
+			__kheap_realloc(KHEAP_DATA_BUFFERS, data, capacity, 0,
+			    Z_VM_TAG_BT(Z_WAITOK_ZERO | Z_MAY_COPYINMAP,
+			    VM_KERN_MEMORY_LIBKERN), (void *)&this->data);
+			data     = nullptr;
+			capacity = 0;
+		}
+	} else if (inCapacity <= capacity) {
+		/*
+		 * Nothing to change
+		 */
+	} else {
+		if (inCapacity >= PAGE_SIZE) {
+			inCapacity = (uint32_t)round_page(inCapacity);
+		}
+		kr = kalloc_ext(KHEAP_DATA_BUFFERS, inCapacity,
+		    Z_VM_TAG_BT(Z_WAITOK_ZERO | Z_MAY_COPYINMAP,
+		    VM_KERN_MEMORY_LIBKERN), (void *)&this->data);
+
+		if (kr.addr) {
+			size_t delta = 0;
+
+			data     = kr.addr;
+			delta   -= capacity;
+			capacity = (uint32_t)MIN(kr.size, UINT32_MAX);
+			delta   += capacity;
+			OSCONTAINER_ACCUMSIZE(delta);
 		} else {
-			kern_return_t kr;
-			if (round_page_overflow(inCapacity, &inCapacity)) {
-				kr = KERN_RESOURCE_SHORTAGE;
-			} else {
-				kr = kernel_memory_allocate(kernel_map,
-				    (vm_offset_t *)&_data, inCapacity,
-				    0, (kma_flags_t) (KMA_ATOMIC | KMA_DATA),
-				    IOMemoryTag(kernel_map));
-				data = _data;
-			}
-			if (KERN_SUCCESS != kr) {
-				data = NULL;
-			}
+			success = false;
 		}
-		if (!data) {
-			return false;
-		}
-		capacity = inCapacity;
 	}
-	OSCONTAINER_ACCUMSIZE(capacity);
 
 	length = 0;
-	if (inCapacity < 16) {
-		capacityIncrement = 16;
-	} else {
-		capacityIncrement = inCapacity;
-	}
+	capacityIncrement = MAX(16, inCapacity);
 
-	return true;
+	return success;
 }
 
 bool
@@ -223,11 +227,10 @@ void
 OSData::free()
 {
 	if ((capacity != EXTERNAL) && data && capacity) {
-		if (capacity < page_size) {
-			kfree_data_container(data, capacity);
-		} else {
-			kmem_free(kernel_map, (vm_offset_t)data, capacity);
-		}
+		/* can't use kfree() as we need to pass Z_MAY_COPYINMAP */
+		__kheap_realloc(KHEAP_DATA_BUFFERS, data, capacity, 0,
+		    Z_VM_TAG_BT(Z_WAITOK_ZERO | Z_FULLSIZE | Z_MAY_COPYINMAP,
+		    VM_KERN_MEMORY_LIBKERN), (void *)&this->data);
 		OSCONTAINER_ACCUMSIZE( -((size_t)capacity));
 	} else if (capacity == EXTERNAL) {
 		DeallocFunction freemem = reserved ? reserved->deallocFunction : NULL;
@@ -269,10 +272,8 @@ OSData::setCapacityIncrement(unsigned increment)
 unsigned int
 OSData::ensureCapacity(unsigned int newCapacity)
 {
-	unsigned char * newData;
+	struct kalloc_result kr;
 	unsigned int finalCapacity;
-	void * copydata;
-	kern_return_t kr;
 
 	if (newCapacity <= capacity) {
 		return capacity;
@@ -286,50 +287,21 @@ OSData::ensureCapacity(unsigned int newCapacity)
 		return capacity;
 	}
 
-	copydata = data;
-
-	if (finalCapacity >= page_size) {
-		// round up
-		finalCapacity = round_page_32(finalCapacity);
-		// integer overflow check
-		if (finalCapacity < newCapacity) {
-			return capacity;
-		}
-		if (capacity >= page_size) {
-			copydata = NULL;
-			kr = kmem_realloc(kernel_map,
-			    (vm_offset_t)data,
-			    capacity,
-			    (vm_offset_t *)&newData,
-			    finalCapacity,
-			    IOMemoryTag(kernel_map));
-		} else {
-			kr = kernel_memory_allocate(kernel_map, (vm_offset_t *)&newData,
-			    finalCapacity, 0, (kma_flags_t) (KMA_ATOMIC | KMA_DATA),
-			    IOMemoryTag(kernel_map));
-		}
-		if (KERN_SUCCESS != kr) {
-			newData = NULL;
-		}
-	} else {
-		newData = (unsigned char *)kalloc_data_container(finalCapacity, Z_WAITOK);
+	if (finalCapacity >= PAGE_SIZE) {
+		finalCapacity = (uint32_t)round_page(finalCapacity);
 	}
+	kr = krealloc_ext((void *)KHEAP_DATA_BUFFERS, data, capacity, finalCapacity,
+	    Z_VM_TAG_BT(Z_WAITOK_ZERO | Z_MAY_COPYINMAP,
+	    VM_KERN_MEMORY_LIBKERN), (void *)&this->data);
 
-	if (newData) {
-		bzero(newData + capacity, finalCapacity - capacity);
-		if (copydata) {
-			bcopy(copydata, newData, capacity);
-		}
-		if (data) {
-			if (capacity < page_size) {
-				kfree_data_container(data, capacity);
-			} else {
-				kmem_free(kernel_map, (vm_offset_t)data, capacity);
-			}
-		}
-		OSCONTAINER_ACCUMSIZE(((size_t)finalCapacity) - ((size_t)capacity));
-		data = (void *) newData;
-		capacity = finalCapacity;
+	if (kr.addr) {
+		size_t delta = 0;
+
+		data     = kr.addr;
+		delta   -= capacity;
+		capacity = (uint32_t)MIN(kr.size, UINT32_MAX);
+		delta   += capacity;
+		OSCONTAINER_ACCUMSIZE(delta);
 	}
 
 	return capacity;
@@ -339,6 +311,7 @@ bool
 OSData::clipForCopyout()
 {
 	unsigned int newCapacity = (uint32_t)round_page(length);
+	__assert_only struct kalloc_result kr;
 
 	/*
 	 * OSData allocations are atomic, which means that if copyoutkdata()
@@ -347,10 +320,16 @@ OSData::clipForCopyout()
 	 * entry which will panic.
 	 *
 	 * In order to avoid this, trim down the unused pages.
+	 *
+	 * We know this operation never fails and keeps the allocation
+	 * address stable.
 	 */
 	if (length >= msg_ool_size_small && newCapacity < capacity) {
-		kmem_realloc_down(kernel_map, (vm_offset_t)data,
-		    capacity, newCapacity);
+		kr = krealloc_ext((void *)KHEAP_DATA_BUFFERS,
+		    data, capacity, newCapacity,
+		    Z_VM_TAG_BT(Z_WAITOK_ZERO | Z_FULLSIZE | Z_MAY_COPYINMAP,
+		    VM_KERN_MEMORY_LIBKERN), (void *)&this->data);
+		assert(kr.addr == data);
 		OSCONTAINER_ACCUMSIZE(((size_t)newCapacity) - ((size_t)capacity));
 		capacity = newCapacity;
 	}

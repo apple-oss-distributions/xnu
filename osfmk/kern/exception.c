@@ -599,6 +599,7 @@ out:
 }
 
 #if __has_feature(ptrauth_calls)
+static TUNABLE(bool, pac_exception_telemetry, "-pac_exception_telemetry", false);
 
 CA_EVENT(pac_exception_event,
     CA_INT, exception,
@@ -630,13 +631,15 @@ pac_exception_triage(
 		 * terminate the task via exit_with_reason
 		 */
 		if (!traced_flag) {
-			ca_event_t ca_event = CA_EVENT_ALLOCATE(pac_exception_event);
-			CA_EVENT_TYPE(pac_exception_event) * pexc_event = ca_event->data;
-			pexc_event->exception = exception;
-			pexc_event->exception_code_0 = code[0];
-			pexc_event->exception_code_1 = code[1];
-			strlcpy(pexc_event->proc_name, proc_name, CA_PROCNAME_LEN);
-			CA_EVENT_SEND(ca_event);
+			if (pac_exception_telemetry) {
+				ca_event_t ca_event = CA_EVENT_ALLOCATE(pac_exception_event);
+				CA_EVENT_TYPE(pac_exception_event) * pexc_event = ca_event->data;
+				pexc_event->exception = exception;
+				pexc_event->exception_code_0 = code[0];
+				pexc_event->exception_code_1 = code[1];
+				strlcpy(pexc_event->proc_name, proc_name, CA_PROCNAME_LEN);
+				CA_EVENT_SEND(ca_event);
+			}
 			if (task_is_pac_exception_fatal(task)) {
 				os_log_error(OS_LOG_DEFAULT, "%s: process %s[%d] hit a pac violation\n", __func__, proc_name, pid);
 				exit_with_pac_exception(proc, exception, code[0], code[1]);

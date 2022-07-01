@@ -4107,6 +4107,10 @@ pmap_remove_range_options(
 		panic("%s: PTE range [%p, %p) in pmap %p crosses page table boundary", __func__, bpte, epte, pmap);
 	}
 
+	if (__improbable(pmap->type == PMAP_TYPE_COMMPAGE)) {
+		panic("%s: attempt to remove mappings from commpage pmap %p", __func__, pmap);
+	}
+
 	num_removed = 0;
 	num_unwired = 0;
 	num_pte_changed = 0;
@@ -4345,9 +4349,6 @@ pmap_remove_options_internal(
 	if (__improbable(end < start)) {
 		panic("%s: invalid address range %p, %p", __func__, (void*)start, (void*)end);
 	}
-	if (__improbable(pmap->type == PMAP_TYPE_COMMPAGE)) {
-		panic("%s: attempt to remove mappings from commpage pmap %p", __func__, pmap);
-	}
 
 	validate_pmap_mutable(pmap);
 
@@ -4528,11 +4529,11 @@ pmap_switch_internal(
 	pmap_t pmap)
 {
 	pmap_cpu_data_t *cpu_data_ptr = pmap_get_cpu_data();
-	__unused const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
 #if XNU_MONITOR
 	os_atomic_store(&cpu_data_ptr->active_pmap, pmap, relaxed);
 #endif
 	validate_pmap_mutable(pmap);
+	__unused const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
 	uint16_t asid_index = pmap->hw_asid;
 	bool do_asid_flush = false;
 	bool do_commpage_flush = false;

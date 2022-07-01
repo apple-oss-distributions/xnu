@@ -98,6 +98,7 @@ typedef struct kalloc_heap {
 	struct kalloc_heap *kh_next;
 	zone_kheap_id_t     kh_heap_id;
 	vm_tag_t            kh_tag;
+	uint16_t            kh_type_hash;
 } *kalloc_heap_t;
 
 /*!
@@ -273,9 +274,9 @@ KALLOC_HEAP_DECLARE(KHEAP_KT_VAR);
  * not have this flag set. The runtime can use this as an indication
  * to appropriately redirect the call.
  *
- * @const KT_VM_TAG_MASK
- * Represents bits in which a vm_tag_t for the allocation can be passed.
- * (used for the zone tagging debugging feature).
+ * @const KT_HASH
+ * Hash of signature used by kmem_*_guard to determine range and
+ * direction for allocation
  #endif
  */
 __options_decl(kalloc_type_flags_t, uint32_t, {
@@ -290,8 +291,7 @@ __options_decl(kalloc_type_flags_t, uint32_t, {
 #if XNU_KERNEL_PRIVATE
 	KT_SLID           = 0x4000,
 	KT_PROCESSED      = 0x8000,
-	/** used to propagate vm tags for -zt */
-	KT_VM_TAG_MASK    = 0xffff0000,
+	KT_HASH           = 0xffff0000,
 #endif
 });
 
@@ -461,6 +461,17 @@ typedef struct kalloc_type_var_view *kalloc_type_var_view_t;
  */
 #define KALLOC_TYPE_DEFINE(var, type, flags) \
 	_KALLOC_TYPE_DEFINE(var, type, flags)
+
+/*!
+ * @macro KALLOC_TYPE_VAR_DECLARE
+ *
+ * @abstract
+ * (optionally) declares a kalloc type var view (in a header).
+ *
+ * @param var           the name for the kalloc type var view.
+ */
+#define KALLOC_TYPE_VAR_DECLARE(var) \
+	extern struct kalloc_type_var_view var[1]
 
 /*!
  * @macro KALLOC_TYPE_VAR_DEFINE
@@ -1187,18 +1198,6 @@ OSObject_typed_operator_delete(
 #define KALLOC_TYPE_SIZE_MASK  0xffffff
 #define KALLOC_TYPE_IDX_SHIFT  24
 #define KALLOC_TYPE_IDX_MASK   0xff
-
-static inline uint16_t
-kalloc_type_get_idx(uint32_t kt_size)
-{
-	return (uint16_t) (kt_size >> KALLOC_TYPE_IDX_SHIFT);
-}
-
-static inline uint32_t
-kalloc_type_set_idx(uint32_t kt_size, uint16_t idx)
-{
-	return kt_size | ((uint32_t) idx << KALLOC_TYPE_IDX_SHIFT);
-}
 
 static inline uint32_t
 kalloc_type_get_size(uint32_t kt_size)

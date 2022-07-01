@@ -78,6 +78,8 @@ SECURITY_READ_ONLY_LATE(struct ipc_table_size) ipc_table_entries[IPC_TABLE_ENTRI
 #define IPC_TABLE_REQUESTS_SIZE 64
 SECURITY_READ_ONLY_LATE(struct ipc_table_size) ipc_table_requests[IPC_TABLE_REQUESTS_SIZE];
 
+KALLOC_TYPE_VAR_DEFINE(kt_var_it_entries, struct ipc_entry, KT_PRIV_ACCT);
+
 static void
 ipc_table_fill(
 	ipc_table_size_t        its,         /* array to fill */

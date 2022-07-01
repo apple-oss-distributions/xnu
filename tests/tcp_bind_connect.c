@@ -530,3 +530,24 @@ T_DECL(tcp_connect_ipv4_null_compatible_ipv6, "TCP connect with IPv4 null compat
 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
+
+T_DECL(tcp_connect_ipv4_mapped_ipv6_r77991079, "rdar://77991079")
+{
+	int s = -1;
+	struct sockaddr_in6 sin6 = {};
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	init_sin6_address(&sin6);
+	sin6.sin6_port = htons(20001);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:0.0.0.5", &sin6.sin6_addr), 1, NULL);
+	sin6.sin6_scope_id = -1;
+
+	connect(s, (struct sockaddr *)&sin6, sizeof(struct sockaddr_in6));
+
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::", &sin6.sin6_addr), 1, NULL);
+	sin6.sin6_scope_id = 0xff;
+
+	connect(s, (struct sockaddr *)&sin6, sizeof(struct sockaddr_in6));
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}

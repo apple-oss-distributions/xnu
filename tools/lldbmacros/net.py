@@ -1933,15 +1933,15 @@ def GetKernEventPcbInfo(kev_pcb_head):
     out_string = ""
     pcb = Cast(kev_pcb_head.lh_first, 'kern_event_pcb *')
     if (kern.ptrsize == 8):
-        kev_pcb_format_string = "0x{0:<16x} {1:12d} {2:16d} {3:16d}"
-        out_string += "  evp socket         vendor code      class filter      subclass filter\n"
-        out_string += "--------------       -----------      ------------      ---------------\n"
+        kev_pcb_format_string = "0x{0:<16x} {1:12d} {2:16d} {3:16d} {4:16d} {5:16d}"
+        out_string += "  evp socket         vendor code      class filter      subclass filter     so_rcv.sb_cc      so_rcv.sb_mbcnt\n"
+        out_string += "--------------       -----------      ------------      ---------------     ------------      ---------------\n"
     else:
-        kev_pcb_format_string = "0x{0:<8x} {1:12d} {2:16d} {3:16d}"
-        out_string += "evp socket       vendor code      class filter      subclass filter\n"
-        out_string += "----------       -----------      ------------      ---------------\n"
+        kev_pcb_format_string = "0x{0:<8x} {1:12d} {2:16d} {3:16d} {4:16d} {5:16d}"
+        out_string += "evp socket       vendor code      class filter      subclass filter     so_rcv.sb_cc      so_rcv.sb_mbcnt\n"
+        out_string += "----------       -----------      ------------      ---------------     ------------      ---------------\n"
     while (pcb != 0):
-        out_string += kev_pcb_format_string.format(pcb.evp_socket, pcb.evp_vendor_code_filter, pcb.evp_class_filter, pcb.evp_subclass_filter)
+        out_string += kev_pcb_format_string.format(pcb.evp_socket, pcb.evp_vendor_code_filter, pcb.evp_class_filter, pcb.evp_subclass_filter, pcb.evp_socket.so_rcv.sb_cc, pcb.evp_socket.so_rcv.sb_mbcnt)
         out_string += "\n"
         pcb = pcb.evp_link.le_next
     return out_string

@@ -4461,6 +4461,8 @@ IOServicePH::matchingEnd(IOService * service)
 	serverAck(NULL);
 }
 
+TUNABLE(uint32_t, dk_shutdown_timeout_ms, "dk_shutdown_timeout_ms", 5000);
+TUNABLE(bool, dk_panic_on_shutdown_hang, "dk_panic_on_shutdown_hang", false);
 
 void
 IOServicePH::systemHalt(int howto)
@@ -4483,13 +4485,18 @@ IOServicePH::systemHalt(int howto)
 	}
 
 	lock();
-	clock_interval_to_deadline(1000, kMillisecondScale, &deadline);
+	clock_interval_to_deadline(dk_shutdown_timeout_ms, kMillisecondScale, &deadline);
 	while (0 < fUserServers->getCount()) {
 		fWaitingUserServers = true;
 		__assert_only int waitResult =
 		    IOLockSleepDeadline(gJobsLock, &fWaitingUserServers, deadline, THREAD_UNINT);
 		assert((THREAD_AWAKENED == waitResult) || (THREAD_TIMED_OUT == waitResult));
 		if (THREAD_TIMED_OUT == waitResult) {
+#if DEVELOPMENT || DEBUG
+			if (dk_panic_on_shutdown_hang) {
+				panic("Shutdown timed out waiting for DK drivers to stop");
+			}
+#endif /* DEVELOPMENT || DEBUG */
 			break;
 		}
 	}

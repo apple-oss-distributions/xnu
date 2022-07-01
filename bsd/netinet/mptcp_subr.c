@@ -2399,7 +2399,20 @@ fallback:
 				*mp = NULL;
 			}
 
-			VERIFY(dlen == 0 || m);
+			ASSERT(dlen == 0 || m);
+			if (dlen != 0 && m == NULL) {
+				/* "try" to gracefully recover on customer builds */
+				error_out = 1;
+				error = EIO;
+				dlen  = 0;
+
+				*mp0 = NULL;
+
+				SB_EMPTY_FIXUP(&so->so_rcv);
+				soevent(so, SO_FILT_HINT_LOCKED | SO_FILT_HINT_MUSTRST);
+
+				break;
+			}
 		}
 
 		VERIFY(dlen == 0);

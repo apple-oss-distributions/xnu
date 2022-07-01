@@ -506,6 +506,8 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 	if (tfp != NULL) {
 		struct fileproc *fp;
 
+		proc_fdlock(p);
+
 		fdt_foreach(fp, p) {
 			struct socket *so;
 

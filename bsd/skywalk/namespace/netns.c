@@ -1790,10 +1790,19 @@ static inline void
 netns_local_port_scan_flow_entry(struct flow_entry *fe, protocol_family_t protocol,
     u_int32_t flags, u_int8_t *bitfield)
 {
-	struct ns_token *token = fe->fe_port_reservation;
+	struct ns_token *token;
 	boolean_t iswildcard = false;
 
-	if (fe == NULL || token == NULL) {
+	if (fe == NULL) {
+		return;
+	}
+
+	if (fe->fe_flags & FLOWENTF_EXTRL_PORT) {
+		return;
+	}
+
+	token = fe->fe_port_reservation;
+	if (token == NULL) {
 		return;
 	}
 
@@ -1891,10 +1900,12 @@ netns_get_if_local_ports(ifnet_t ifp, protocol_family_t protocol,
 		goto done;
 	}
 	FSW_RLOCK(fsw);
+	NETNS_LOCK();
 	flow_mgr_foreach_flow(fsw->fsw_flow_mgr, ^(struct flow_entry *_fe) {
 		netns_local_port_scan_flow_entry(_fe, protocol, flags,
 		bitfield);
 	});
+	NETNS_UNLOCK();
 	FSW_UNLOCK(fsw);
 done:
 	ifnet_decr_iorefcnt(ifp);

@@ -2791,6 +2791,14 @@ boolean_t vm_darkwake_mode = FALSE;
 void
 vm_update_darkwake_mode(boolean_t darkwake_mode)
 {
+#if XNU_TARGET_OS_OSX && defined(__arm64__)
+#pragma unused(darkwake_mode)
+	assert(vm_darkwake_mode == FALSE);
+	/*
+	 * Darkwake mode isn't supported for AS macOS.
+	 */
+	return;
+#else /* XNU_TARGET_OS_OSX && __arm64__ */
 	LCK_MTX_ASSERT(&vm_page_queue_lock, LCK_MTX_ASSERT_NOTOWNED);
 
 	vm_page_lockspin_queues();
@@ -2824,6 +2832,7 @@ vm_update_darkwake_mode(boolean_t darkwake_mode)
 #endif /* CONFIG_BACKGROUND_QUEUE */
 	}
 	vm_page_unlock_queues();
+#endif
 }
 
 #if CONFIG_BACKGROUND_QUEUE
@@ -9564,7 +9573,7 @@ vm_page_diagnose_kt_heaps(mach_memory_info_t *info)
 		    ktv = (kalloc_type_var_view_t) ktv->kt_next) {
 			if (ktv->kt_stats && ktv->kt_stats != KHEAP_KT_VAR->kh_stats) {
 				vm_page_diagnose_zone_stats(info + idx, ktv->kt_stats, false);
-				snprintf(info[i].name, sizeof(info[i].name),
+				snprintf(info[idx].name, sizeof(info[idx].name),
 				    "%s[%s]", KHEAP_KT_VAR->kh_name, ktv->kt_name);
 				idx++;
 			}

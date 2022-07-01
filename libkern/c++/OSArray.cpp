@@ -72,8 +72,6 @@ OSArray::initWithCapacity(unsigned int inCapacity)
 	count = 0;
 	capacity = inCapacity;
 	capacityIncrement = (inCapacity)? inCapacity : 16;
-
-	os::uninitialized_value_construct(array, array + capacity);
 	OSCONTAINER_ACCUMSIZE(sizeof(*array) * inCapacity);
 
 	return true;
@@ -222,14 +220,10 @@ OSArray::ensureCapacity(unsigned int newCapacity)
 		return capacity;
 	}
 
-	newArray = kallocp_type_container(ArrayPtrType, &finalCapacity, Z_WAITOK);
+	newArray = kreallocp_type_container(ArrayPtrType, array,
+	    capacity, &finalCapacity, Z_WAITOK_ZERO);
 	if (newArray) {
 		OSCONTAINER_ACCUMSIZE(sizeof(*array) * (finalCapacity - capacity));
-
-		os::uninitialized_move(array, array + capacity, newArray);
-		os::uninitialized_value_construct(newArray + capacity, newArray + finalCapacity);
-		os::destroy(array, array + capacity);
-		kfree_type(ArrayPtrType, capacity, array);
 		array = newArray;
 		capacity = finalCapacity;
 	}

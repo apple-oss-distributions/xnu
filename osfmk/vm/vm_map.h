@@ -141,23 +141,6 @@ typedef struct vm_map_entry     *vm_map_entry_t;
 
 
 /*
- *	Type:		vm_map_object_t [internal use only]
- *
- *	Description:
- *		The target of an address mapping, either a virtual
- *		memory object or a sub map (of the kernel map).
- */
-typedef union vm_map_object {
-	vm_object_t             vmo_object;     /* object object */
-	vm_map_t                vmo_submap;     /* belongs to another map */
-} vm_map_object_t;
-
-#define named_entry_lock_init(object)   lck_mtx_init(&(object)->Lock, &vm_object_lck_grp, &vm_object_lck_attr)
-#define named_entry_lock_destroy(object)        lck_mtx_destroy(&(object)->Lock, &vm_object_lck_grp)
-#define named_entry_lock(object)                lck_mtx_lock(&(object)->Lock)
-#define named_entry_unlock(object)              lck_mtx_unlock(&(object)->Lock)
-
-/*
  *	Type:		vm_named_entry_t [internal use only]
  *
  *	Description:
@@ -194,6 +177,12 @@ struct vm_named_entry {
 	uint32_t                named_entry_bt; /* btref_t */
 #endif /* VM_NAMED_ENTRY_DEBUG */
 };
+
+#define named_entry_lock_init(object)   lck_mtx_init(&(object)->Lock, &vm_object_lck_grp, &vm_object_lck_attr)
+#define named_entry_lock_destroy(object)        lck_mtx_destroy(&(object)->Lock, &vm_object_lck_grp)
+#define named_entry_lock(object)                lck_mtx_lock(&(object)->Lock)
+#define named_entry_unlock(object)              lck_mtx_unlock(&(object)->Lock)
+
 
 /*
  *	Type:		vm_map_entry_t [internal use only]
@@ -265,6 +254,8 @@ struct vm_map_links {
 #define VME_ALIAS_MASK          ((1u << VME_ALIAS_BITS) - 1)
 #define VME_OFFSET_SHIFT        VME_ALIAS_BITS
 #define VME_OFFSET_BITS         (64 - VME_ALIAS_BITS)
+#define VME_SUBMAP_SHIFT        2
+#define VME_SUBMAP_BITS         (sizeof(vm_offset_t) * 8 - VME_SUBMAP_SHIFT)
 
 struct vm_map_entry {
 	struct vm_map_links     links;                      /* links to other entries */
@@ -274,14 +265,30 @@ struct vm_map_entry {
 #define vme_end                 links.end
 
 	struct vm_map_store     store;
-	union vm_map_object     vme_object;                 /* object I point to */
+
+	union {
+		vm_offset_t     vme_object_value;
+		struct {
+			vm_offset_t vme_atomic:1;           /* entry cannot be split/coalesced */
+			vm_offset_t is_sub_map:1;           /* Is "object" a submap? */
+			vm_offset_t vme_submap:VME_SUBMAP_BITS;
+		};
+#if __LP64__
+		struct {
+			uint32_t    vme_ctx_atomic : 1;
+			uint32_t    vme_ctx_is_sub_map : 1;
+			uint32_t    vme_context : 30;
+			vm_page_object_t vme_object;
+		};
+#endif
+	};
 
 	unsigned long long
 	/* vm_tag_t          */ vme_alias:VME_ALIAS_BITS,   /* entry VM tag */
 	/* vm_object_offset_t*/ vme_offset:VME_OFFSET_BITS, /* offset into object */
 
 	/* boolean_t         */ is_shared:1,                /* region is shared */
-	/* boolean_t         */ is_sub_map:1,               /* Is "object" a submap? */
+	/* boolean_t         */ __unused1:1,
 	/* boolean_t         */ in_transition:1,            /* Entry being changed */
 	/* boolean_t         */ needs_wakeup:1,             /* Waiters on in_transition */
 	/* behavior is not defined for submap type */
@@ -318,7 +325,7 @@ struct vm_map_entry {
 	/* boolean_t         */ iokit_acct:1,
 	/* boolean_t         */ vme_resilient_codesign:1,
 	/* boolean_t         */ vme_resilient_media:1,
-	/* boolean_t         */ vme_atomic:1,               /* entry cannot be split/coalesced */
+	/* boolean_t         */ __unused2:1,
 	/* boolean_t         */ vme_no_copy_on_read:1,
 	/* boolean_t         */ translated_allow_execute:1, /* execute in translated processes */
 	/* boolean_t         */ vme_kernel_object:1;        /* vme_object is kernel_object */
@@ -341,40 +348,85 @@ struct vm_map_entry {
 #endif
 };
 
-#define VME_SUBMAP(entry) \
-	((entry)->vme_object.vmo_submap)
-#define VME_OBJECT(entry) \
-	((entry)->vme_kernel_object ? kernel_object : \
-	((entry)->vme_object.vmo_object))
 #define VME_ALIAS(entry) \
 	((entry)->vme_alias)
 
-static inline void
-VME_OBJECT_SET(
-	vm_map_entry_t entry,
-	vm_object_t object)
+static inline vm_map_t
+_VME_SUBMAP(
+	vm_map_entry_t entry)
 {
-	if (object == kernel_object) {
-		entry->vme_kernel_object = TRUE;
-		entry->vme_object.vmo_object = VM_OBJECT_NULL;
-	} else {
-		entry->vme_kernel_object = FALSE;
-		entry->vme_object.vmo_object = object;
-	}
-	if (object != VM_OBJECT_NULL && !object->internal) {
-		entry->vme_resilient_media = FALSE;
-	}
-	entry->vme_resilient_codesign = FALSE;
-	entry->used_for_jit = FALSE;
+	__builtin_assume(entry->vme_submap);
+	return (vm_map_t)(entry->vme_submap << VME_SUBMAP_SHIFT);
 }
+#define VME_SUBMAP(entry) ({ assert((entry)->is_sub_map); _VME_SUBMAP(entry); })
 
 static inline void
 VME_SUBMAP_SET(
 	vm_map_entry_t entry,
 	vm_map_t submap)
 {
-	entry->is_sub_map = TRUE;
-	entry->vme_object.vmo_submap = submap;
+	__builtin_assume(((vm_offset_t)submap & 3) == 0);
+
+	entry->is_sub_map = true;
+	entry->vme_submap = (vm_offset_t)submap >> VME_SUBMAP_SHIFT;
+}
+
+static inline vm_object_t
+_VME_OBJECT(
+	vm_map_entry_t entry)
+{
+	vm_object_t object = kernel_object;
+
+	if (!entry->vme_kernel_object) {
+#if __LP64__
+		object = VM_OBJECT_UNPACK(entry->vme_object);
+		__builtin_assume(object != kernel_object);
+#else
+		object = (vm_object_t)(entry->vme_submap << VME_SUBMAP_SHIFT);
+#endif
+	}
+	return object;
+}
+#define VME_OBJECT(entry) ({ assert(!(entry)->is_sub_map); _VME_OBJECT(entry); })
+
+static inline void
+VME_OBJECT_SET(
+	vm_map_entry_t entry,
+	vm_object_t    object,
+	bool           atomic,
+	uint32_t       context)
+{
+	__builtin_assume(((vm_offset_t)object & 3) == 0);
+
+	entry->vme_atomic = atomic;
+	entry->is_sub_map = false;
+#if __LP64__
+	if (atomic) {
+		entry->vme_context = context;
+	} else {
+		entry->vme_context = 0;
+	}
+#else
+	(void)context;
+#endif
+
+	if (!object || object == kernel_object) {
+#if __LP64__
+		entry->vme_object = 0;
+#else
+		entry->vme_submap = 0;
+#endif
+	} else {
+#if __LP64__
+		entry->vme_object = VM_OBJECT_PACK(object);
+#else
+		entry->vme_submap = (vm_offset_t)object >> VME_SUBMAP_SHIFT;
+#endif
+	}
+
+	entry->vme_kernel_object = (object == kernel_object);
+	entry->vme_resilient_codesign = false;
+	entry->used_for_jit = false;
 }
 
 static inline vm_object_offset_t
@@ -420,8 +472,12 @@ VME_OBJECT_SHADOW(
 	offset = VME_OFFSET(entry);
 	vm_object_shadow(&object, &offset, length);
 	if (object != VME_OBJECT(entry)) {
-		VME_OBJECT_SET(entry, object);
-		entry->use_pmap = TRUE;
+#if __LP64__
+		entry->vme_object = VM_OBJECT_PACK(object);
+#else
+		entry->vme_submap = (vm_offset_t)object >> VME_SUBMAP_SHIFT;
+#endif
+		entry->use_pmap = true;
 	}
 	if (offset != VME_OFFSET(entry)) {
 		VME_OFFSET_SET(entry, offset);

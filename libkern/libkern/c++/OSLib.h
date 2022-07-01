@@ -62,11 +62,17 @@ __END_DECLS
 	(ty *)__kar.addr;                                                      \
 })
 
-#define kalloc_data_container(size, flags)  \
-	kalloc_data(size, Z_VM_TAG_BT(flags, VM_KERN_MEMORY_LIBKERN))
-
-#define kfree_data_container(buffer, size) \
-	kfree_data(buffer, size)
+#define kreallocp_type_container(ty, ptr, old_count, countp, flags) ({         \
+	uint32_t *__countp = (countp);                                         \
+	struct kalloc_result __kar;                                            \
+	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, ty, KT_SHARED_ACCT);      \
+	__kar = krealloc_ext(kt_mangle_var_view(kt_view_var), ptr,             \
+	    kt_size(0, sizeof(ty), old_count),                                 \
+	    kt_size(0, sizeof(ty), *__countp),                                 \
+	    Z_VM_TAG_BT(flags | Z_FULLSIZE, VM_KERN_MEMORY_LIBKERN), NULL);    \
+	*__countp = (uint32_t)MIN(__kar.size / sizeof(ty), UINT32_MAX);        \
+	(ty *)__kar.addr;                                                      \
+})
 
 #if OSALLOCDEBUG
 

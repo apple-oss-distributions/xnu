@@ -192,7 +192,7 @@ struct task {
 
 	/* Threads in this task */
 	queue_head_t            threads;
-	struct restartable_ranges *restartable_ranges;
+	struct restartable_ranges *t_rr_ranges;
 
 	processor_set_t         pset_hint;
 	struct affinity_space   *affinity_space;
@@ -472,6 +472,7 @@ struct task {
 #endif /* __arm64__ */
 	unsigned int    task_region_footprint:1;
 	unsigned int    task_has_crossed_thread_limit:1;
+	unsigned int    task_rr_in_flight:1; /* a t_rr_synchronzie() is in flight */
 	uint32_t        exec_token;
 	/*
 	 * A task's coalition set is "adopted" in task_create_internal

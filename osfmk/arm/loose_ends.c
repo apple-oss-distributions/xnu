@@ -48,6 +48,7 @@
 #include <vm/pmap.h>
 
 #include <arm/misc_protos.h>
+#include <kern/misc_protos.h>
 
 #include <sys/errno.h>
 
@@ -738,5 +739,24 @@ void
 kdp_register_callout(kdp_callout_fn_t fn, void *arg)
 {
 #pragma unused(fn,arg)
+}
+#endif
+
+#if (DEBUG || DEVELOPMENT)
+int
+verify_write(const void *source, void *dst, size_t size)
+{
+	int rc;
+
+	disable_preemption();
+	for (size_t i = 0; i < size; i++) {
+		rc = dtrace_nofault_copy8((vm_address_t)source + i,
+		    ((uint8_t *)dst + i));
+		if (rc) {
+			break;
+		}
+	}
+	enable_preemption();
+	return rc;
 }
 #endif

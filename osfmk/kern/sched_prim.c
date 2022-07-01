@@ -95,6 +95,7 @@
 #endif /* MONOTONIC */
 #include <kern/processor.h>
 #include <kern/queue.h>
+#include <kern/restartable.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
 #include <kern/sfi.h>
@@ -125,27 +126,8 @@
 #include <kern/host.h>
 #include <stdatomic.h>
 
-struct ast_gen_pair {
-	os_atomic(ast_gen_t) ast_gen;
-	os_atomic(ast_gen_t) ast_ack;
-};
-
-static struct ast_gen_pair PERCPU_DATA(ast_gen_pair);
 struct sched_statistics PERCPU_DATA(sched_stats);
 bool sched_stats_active;
-
-#define AST_GEN_CMP(a, op, b) ((long)((a) - (b)) op 0)
-
-__startup_func
-static void
-ast_gen_init(void)
-{
-	percpu_foreach(pair, ast_gen_pair) {
-		os_atomic_init(&pair->ast_gen, 1);
-		os_atomic_init(&pair->ast_ack, 1);
-	}
-}
-STARTUP(PERCPU, STARTUP_RANK_MIDDLE, ast_gen_init);
 
 static uint64_t
 deadline_add(uint64_t d, uint64_t e)
@@ -3145,6 +3127,7 @@ need_stack:
 	 * won't be saved and the stack will be discarded. When the stack is
 	 * re-allocated, it will be configured to resume from thread_continue.
 	 */
+
 	assert(continuation == self->continuation);
 	thread = machine_switch_context(self, continuation, thread);
 	assert(self == current_thread_volatile());
@@ -3380,8 +3363,16 @@ thread_dispatch(
 				thread_evaluate_workqueue_quantum_expiry(thread);
 			}
 
+			/*
+			 * Pairs with task_restartable_ranges_synchronize
+			 */
 			wake_lock(thread);
 			thread_lock(thread);
+
+			/*
+			 * Same as ast_check(), in case we missed the IPI
+			 */
+			thread_reset_pcs_ack_IPI(thread);
 
 			/*
 			 * Apply a priority floor if the thread holds a kernel resource
@@ -5712,33 +5703,6 @@ csw_check_locked(
 	return AST_NONE;
 }
 
-static void
-ast_ack_if_needed(processor_t processor)
-{
-	struct ast_gen_pair *pair = PERCPU_GET_RELATIVE(ast_gen_pair, processor, processor);
-	ast_gen_t gen;
-
-	/*
-	 * Make sure that if we observe a new generation, we ack it.
-	 *
-	 * Note that this ack might ack for a cause_ast_check()
-	 * that hasn't happened yet: 2 different cores A and B could
-	 * have called ast_generation_get(), we observe B's generation
-	 * already, before B has had a chance to call cause_ast_check() yet.
-	 *
-	 * This still preserves the property that we want,
-	 * which is that `processor` has been in ast_check()
-	 * _after_ ast_generation_get() was called.
-	 */
-
-	gen = os_atomic_load(&pair->ast_gen, relaxed);
-	if (gen != os_atomic_load(&pair->ast_ack, relaxed)) {
-		/* pairs with the fence in ast_generation_get() */
-		os_atomic_thread_fence(acq_rel);
-		os_atomic_store(&pair->ast_ack, gen, relaxed);
-	}
-}
-
 /*
  * Handle preemption IPI or IPI in response to setting an AST flag
  * Triggered by cause_ast_check
@@ -5749,7 +5713,6 @@ ast_check(processor_t processor)
 {
 	if (processor->state != PROCESSOR_RUNNING &&
 	    processor->state != PROCESSOR_SHUTDOWN) {
-		ast_ack_if_needed(processor);
 		return;
 	}
 
@@ -5757,9 +5720,13 @@ ast_check(processor_t processor)
 
 	assert(thread == current_thread());
 
+	/*
+	 * Pairs with task_restartable_ranges_synchronize
+	 */
 	thread_lock(thread);
 
-	ast_ack_if_needed(processor);
+	thread_reset_pcs_ack_IPI(thread);
+
 	/*
 	 * Propagate thread ast to processor.
 	 * (handles IPI in response to setting AST flag)
@@ -5801,35 +5768,6 @@ ast_check(processor_t processor)
 
 		machine_switch_perfcontrol_state_update(PERFCONTROL_ATTR_UPDATE,
 		    mach_approximate_time(), 0, thread);
-	}
-}
-
-void
-ast_generation_get(processor_t processor, ast_gen_t gens[])
-{
-	struct ast_gen_pair *pair = PERCPU_GET_RELATIVE(ast_gen_pair, processor, processor);
-
-	gens[processor->cpu_id] = os_atomic_add(&pair->ast_gen, 2, release);
-}
-
-void
-ast_generation_wait(ast_gen_t gens[MAX_CPUS])
-{
-	percpu_foreach(cpup, processor) {
-		struct ast_gen_pair *pair;
-		ast_gen_t gen_ack;
-		uint32_t cpu = cpup->cpu_id;
-
-		if (gens[cpu] == 0) {
-			continue;
-		}
-		pair    = PERCPU_GET_RELATIVE(ast_gen_pair, processor, cpup);
-		gen_ack = os_atomic_load(&pair->ast_ack, relaxed);
-		while (__improbable(AST_GEN_CMP(gen_ack, <, gens[cpu]))) {
-			disable_preemption();
-			gen_ack = hw_wait_while_equals_long(&pair->ast_ack, gen_ack);
-			enable_preemption();
-		}
 	}
 }
 

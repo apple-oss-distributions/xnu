@@ -343,7 +343,10 @@ enum virtual_memory_guard_exception_codes {
  * @discussion
  * The kernel_map VA has been split into the following ranges.
  *
- * @const KMEM_RANGE_ID_PTR
+ * @const KMEM_RANGE_ID_NONE
+ * This range is only used for early initialization.
+ *
+ * @const KMEM_RANGE_ID_PTR_*
  * Range containing general purpose allocations from kalloc, etc that
  * contain pointers.
  *
@@ -353,7 +356,9 @@ enum virtual_memory_guard_exception_codes {
  *
  */
 __enum_decl(kmem_range_id_t, uint32_t, {
-	KMEM_RANGE_ID_PTR,
+	KMEM_RANGE_ID_NONE,
+	KMEM_RANGE_ID_PTR_0,
+	KMEM_RANGE_ID_PTR_1,
 	KMEM_RANGE_ID_DATA,
 	KMEM_RANGE_ID_MAX = KMEM_RANGE_ID_DATA,
 
@@ -365,10 +370,7 @@ __enum_decl(kmem_range_id_t, uint32_t, {
 
 typedef struct {
 	unsigned int
-	    vmkf_atomic_entry:1,        /* keep entry atomic (no coalescing) */
 	    vmkf_permanent:1,           /* mapping can NEVER be unmapped */
-	    vmkf_submap:1,              /* mapping a VM submap */
-	    vmkf_submap_adjust:1,       /* the submap needs to be adjusted */
 	    vmkf_already:1,             /* OK if same mapping already exists */
 	    vmkf_beyond_max:1,          /* map beyond the map's max offset */
 	    vmkf_no_pmap_check:1,       /* do not check that pmap is empty */
@@ -386,6 +388,13 @@ typedef struct {
 	    vmkf_copy_pageable:1,       /* vm_map_copy with pageable entries */
 	    vmkf_copy_same_map:1,       /* vm_map_copy to remap in original map */
 	    vmkf_translated_allow_execute:1,    /* allow execute in translated processes */
+
+	/*
+	 * Submap creation, altering vm_map_enter() only
+	 */
+	    vmkf_submap:1,              /* mapping a VM submap */
+	    vmkf_submap_atomic:1,       /* keep entry atomic (no splitting/coalescing) */
+	    vmkf_submap_adjust:1,       /* the submap needs to be adjusted */
 
 	/*
 	 * Flags altering the behavior of vm_map_locate_space()

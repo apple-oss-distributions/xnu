@@ -74,6 +74,7 @@
 #include <kern/ecc.h>
 #include <kern/kern_cdata.h>
 #include <kern/zalloc_internal.h>
+#include <pexpert/device_tree.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
 #include <vm/pmap.h>
@@ -107,6 +108,7 @@
 #include <uuid/uuid.h>
 #include <mach_debug/zone_info.h>
 #include <mach/resource_monitors.h>
+#include <machine/machine_routines.h>
 
 #include <os/log_private.h>
 
@@ -221,6 +223,12 @@ extern void PE_panic_hook(const char*);
 
 #define NESTEDDEBUGGERENTRYMAX 5
 static unsigned int max_debugger_entry_count = NESTEDDEBUGGERENTRYMAX;
+
+SECURITY_READ_ONLY_LATE(bool) awl_scratch_reg_supported = false;
+static bool PERCPU_DATA(hv_entry_detected); // = false
+static void awl_set_scratch_reg_hv_bit(void);
+void awl_mark_hv_entry(void);
+static bool awl_pm_state_change_cbk(void *param, enum cpu_event event, unsigned int cpu_or_cluster);
 
 #if defined(__arm__) || defined(__arm64__)
 #define DEBUG_BUF_SIZE (4096)
@@ -484,7 +492,7 @@ phys_carveout_init(void)
 	}
 
 	kern_return_t kr = kmem_alloc_contig(kernel_map, &phys_carveout, temp_phys_carveout_size,
-	    VM_MAP_PAGE_MASK(kernel_map), 0, 0, KMA_PERMANENT | KMA_NOPAGEWAIT,
+	    VM_MAP_PAGE_MASK(kernel_map), 0, 0, KMA_PERMANENT | KMA_NOPAGEWAIT | KMA_DATA,
 	    VM_KERN_MEMORY_DIAG);
 	if (kr != KERN_SUCCESS) {
 		panic("failed to allocate %luMB for phys_carveout_mb: %u",
@@ -505,7 +513,7 @@ phys_carveout_init(void)
 		size_t temp_phys_carveout_metadata_size = PAGE_SIZE;
 		kr = kmem_alloc_contig(kernel_map, &phys_carveout_metadata, temp_phys_carveout_metadata_size,
 		    VM_MAP_PAGE_MASK(kernel_map), 0, 0,
-		    KMA_PERMANENT | KMA_NOPAGEWAIT, VM_KERN_MEMORY_DIAG);
+		    KMA_PERMANENT | KMA_NOPAGEWAIT | KMA_DATA, VM_KERN_MEMORY_DIAG);
 		if (kr != KERN_SUCCESS) {
 			panic("failed to allocate %u for phys_carveout_metadata: %u",
 			    (unsigned int)temp_phys_carveout_metadata_size, (unsigned int)kr);
@@ -1866,3 +1874,71 @@ sysctl_debug_free_preoslog(void)
 	/*  On Development & Debug builds, we retain the buffer so it can be extracted from coredumps. */
 #endif // RELEASE
 }
+
+#define AWL_HV_ENTRY_FLAG (0x1)
+
+static inline void
+awl_set_scratch_reg_hv_bit(void)
+{
+#if defined(__arm64__)
+#define WATCHDOG_DIAG0     "S3_5_c15_c2_6"
+	uint64_t awl_diag0 = __builtin_arm_rsr64(WATCHDOG_DIAG0);
+	awl_diag0 |= AWL_HV_ENTRY_FLAG;
+	__builtin_arm_wsr64(WATCHDOG_DIAG0, awl_diag0);
+#endif // defined(__arm64__)
+}
+
+void
+awl_mark_hv_entry(void)
+{
+	if (__probable(*PERCPU_GET(hv_entry_detected) || !awl_scratch_reg_supported)) {
+		return;
+	}
+	*PERCPU_GET(hv_entry_detected) = true;
+
+	awl_set_scratch_reg_hv_bit();
+}
+
+/*
+ * Awl WatchdogDiag0 is not restored by hardware when coming out of reset,
+ * so restore it manually.
+ */
+static bool
+awl_pm_state_change_cbk(void *param __unused, enum cpu_event event, unsigned int cpu_or_cluster __unused)
+{
+	if (event == CPU_BOOTED) {
+		if (*PERCPU_GET(hv_entry_detected)) {
+			awl_set_scratch_reg_hv_bit();
+		}
+	}
+
+	return true;
+}
+
+/*
+ * Identifies and sets a flag if AWL Scratch0/1 exists in the system, subscribes
+ * for a callback to restore register after hibernation
+ */
+__startup_func
+static void
+set_awl_scratch_exists_flag_and_subscribe_for_pm(void)
+{
+	DTEntry base = NULL;
+
+	if (SecureDTLookupEntry(NULL, "/arm-io/wdt", &base) != kSuccess) {
+		return;
+	}
+	const uint8_t *data = NULL;
+	unsigned int data_size = sizeof(uint8_t);
+
+	if (base != NULL && SecureDTGetProperty(base, "awl-scratch-supported", (const void **)&data, &data_size) == kSuccess) {
+		for (unsigned int i = 0; i < data_size; i++) {
+			if (data[i] != 0) {
+				awl_scratch_reg_supported = true;
+				cpu_event_register_callback(awl_pm_state_change_cbk, NULL);
+				break;
+			}
+		}
+	}
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, set_awl_scratch_exists_flag_and_subscribe_for_pm);

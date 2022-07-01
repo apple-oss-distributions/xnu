@@ -2994,7 +2994,6 @@ utun_pkt_input(struct utun_pcb *pcb, mbuf_t packet)
 			ifnet_stat_increment_in(pcb->utun_ifp, 0, 0, 1);
 
 			os_log_error(OS_LOG_DEFAULT, "%s - ifnet_input failed: %d\n", __FUNCTION__, result);
-			mbuf_freem(packet);
 		}
 
 		return 0;

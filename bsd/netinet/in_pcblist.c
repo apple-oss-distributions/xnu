@@ -787,6 +787,8 @@ shutdown_sockets_on_interface_proc_callout(proc_t p, void *arg)
 		return PROC_RETURNED;
 	}
 
+	proc_fdlock(p);
+
 	fdt_foreach(fp, p) {
 		struct fileglob *fg = fp->fp_glob;
 		struct socket *so;

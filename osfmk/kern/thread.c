@@ -106,6 +106,7 @@
 #include <kern/misc_protos.h>
 #include <kern/processor.h>
 #include <kern/queue.h>
+#include <kern/restartable.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
 #include <kern/syscall_subr.h>
@@ -459,7 +460,21 @@ thread_terminate_self(void)
 
 	thread_depress_abort_locked(thread);
 
+	/*
+	 * Before we take the thread_lock right above,
+	 * act_set_ast_reset_pcs() might not yet observe
+	 * that the thread is inactive, and could have
+	 * requested an IPI Ack.
+	 *
+	 * Once we unlock the thread, we know that
+	 * act_set_ast_reset_pcs() can't fail to notice
+	 * that thread->active is false,
+	 * and won't set new ones.
+	 */
+	thread_reset_pcs_ack_IPI(thread);
+
 	thread_unlock(thread);
+
 	splx(s);
 
 #if CONFIG_TASKWATCH
@@ -670,13 +685,16 @@ thread_terminate_self(void)
 	assert(thread->priority_floor_count == 0);
 	assert(thread->handoff_thread == THREAD_NULL);
 	assert(thread->th_work_interval == NULL);
+	assert(thread->t_rr_state.trr_value == 0);
 
-	assert((thread->sched_flags & TH_SFLAG_WAITQ_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_RW_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_FLOOR_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_EXEC_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_THREAD_GROUP_AUTO_JOIN) == 0);
+	assert3u(0, ==, thread->sched_flags &
+	    (TH_SFLAG_WAITQ_PROMOTED |
+	    TH_SFLAG_RW_PROMOTED |
+	    TH_SFLAG_EXEC_PROMOTED |
+	    TH_SFLAG_FLOOR_PROMOTED |
+	    TH_SFLAG_PROMOTED |
+	    TH_SFLAG_DEPRESS));
+
 	thread_unlock(thread);
 	/* splsched */
 

@@ -39,6 +39,7 @@
 #include <arm64/instructions.h>
 
 #include <kern/debug.h>
+#include <kern/restartable.h>
 #include <kern/socd_client.h>
 #include <kern/thread.h>
 #include <mach/exception.h>
@@ -541,7 +542,7 @@ task_vtimer_check(thread_t thread)
 	task_t task = get_threadtask_early(thread);
 
 	if (__improbable(task != NULL && task->vtimers)) {
-		thread->ast |= AST_BSD;
+		thread_ast_set(thread, AST_BSD);
 		thread->machine.CpuDatap->cpu_pending_ast |= AST_BSD;
 	}
 }
@@ -638,6 +639,10 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		}
 	}
 #endif /* CONFIG_XNUPOST */
+
+	if (is_user && class == ESR_EC_DABORT_EL0) {
+		thread_reset_pcs_will_fault(thread);
+	}
 
 	/* Inherit the interrupt masks from previous context */
 	if (SPSR_INTERRUPTS_ENABLED(get_saved_state_cpsr(state))) {
@@ -1315,6 +1320,11 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 
 	thread->iotier_override = THROTTLE_LEVEL_NONE; /* Reset IO tier override before handling abort from userspace */
 
+	if (!is_vm_fault(fault_code) &&
+	    thread->t_rr_state.trr_fault_state != TRR_FAULT_NONE) {
+		thread_reset_pcs_done_faulting(thread);
+	}
+
 	if (is_vm_fault(fault_code)) {
 		vm_map_t        map = thread->map;
 		vm_offset_t     vm_fault_addr = fault_addr;
@@ -1332,15 +1342,17 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 			    vm_fault_addr,
 			    fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), TRUE);
 		}
-		if (result == KERN_SUCCESS) {
-			return;
-		}
+		if (result != KERN_SUCCESS) {
 
-		{
-			/* We have to fault the page in */
-			result = vm_fault(map, vm_fault_addr, fault_type,
-			    /* change_wiring */ FALSE, VM_KERN_MEMORY_NONE, THREAD_ABORTSAFE,
-			    /* caller_pmap */ NULL, /* caller_pmap_addr */ 0);
+			{
+				/* We have to fault the page in */
+				result = vm_fault(map, vm_fault_addr, fault_type,
+				    /* change_wiring */ FALSE, VM_KERN_MEMORY_NONE, THREAD_ABORTSAFE,
+				    /* caller_pmap */ NULL, /* caller_pmap_addr */ 0);
+			}
+		}
+		if (thread->t_rr_state.trr_fault_state != TRR_FAULT_NONE) {
+			thread_reset_pcs_done_faulting(thread);
 		}
 		if (result == KERN_SUCCESS || result == KERN_ABORTED) {
 			return;

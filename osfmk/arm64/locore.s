@@ -808,8 +808,8 @@ LEXT(return_to_kernel)
 	msr		DAIFSet, #DAIFSC_ALL                    // Disable exceptions
 	cbnz	x1, exception_return_unint_tpidr_x3     // If preemption disabled, skip AST check
 	ldr		x1, [x3, ACT_CPUDATAP]                  // Get current CPU data pointer
-	ldr		x2, [x1, CPU_PENDING_AST]               // Get ASTs
-	tst		x2, AST_URGENT                          // If no urgent ASTs, skip ast_taken
+	ldr		w2, [x1, CPU_PENDING_AST]               // Get ASTs
+	tst		w2, AST_URGENT                          // If no urgent ASTs, skip ast_taken
 	b.eq	exception_return_unint_tpidr_x3
 	mov		sp, x21                                 // Switch to thread stack for preemption
 	PUSH_FRAME
@@ -855,8 +855,8 @@ check_user_asts:
 
 	msr		DAIFSet, #DAIFSC_ALL				// Disable exceptions
 	ldr		x4, [x3, ACT_CPUDATAP]				// Get current CPU data pointer
-	ldr		x0, [x4, CPU_PENDING_AST]			// Get ASTs
-	cbz		x0, no_asts							// If no asts, skip ahead
+	ldr		w0, [x4, CPU_PENDING_AST]			// Get ASTs
+	cbz		w0, no_asts							// If no asts, skip ahead
 
 	cbz		x28, user_take_ast					// If we don't need to check PFZ, just handle asts
 
@@ -1396,8 +1396,8 @@ Lskip_collect_measurement:
 
 	/* IF there is no urgent AST, skip the AST. */
 	ldr		x12, [x10, ACT_CPUDATAP]
-	ldr		x14, [x12, CPU_PENDING_AST]
-	tst		x14, AST_URGENT
+	ldr		w14, [x12, CPU_PENDING_AST]
+	tst		w14, AST_URGENT
 	b.eq	Lppl_skip_ast_taken
 
 	/* Stash our return value and return reason. */

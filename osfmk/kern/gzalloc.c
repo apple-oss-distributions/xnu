@@ -359,7 +359,7 @@ gzalloc_alloc(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 	} else {
 		kernel_memory_allocate(gzalloc_map,
 		    &gzaddr, rounded_size + PAGE_SIZE, 0,
-		    KMA_NOFAIL | KMA_ZERO | KMA_KOBJECT | KMA_ATOMIC | gzalloc_guard,
+		    KMA_NOFAIL | KMA_ZERO | KMA_KOBJECT | gzalloc_guard,
 		    VM_KERN_MEMORY_OSFMK);
 		new_va = true;
 	}

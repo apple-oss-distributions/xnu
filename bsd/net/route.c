@@ -3955,6 +3955,30 @@ ctrace_record(ctrace_t *tr)
 	(void) OSBacktrace(tr->pc, CTRACE_STACK_SIZE);
 }
 
+
+void
+route_clear(struct route *ro)
+{
+	if (ro == NULL) {
+		return;
+	}
+
+	if (ro->ro_rt != NULL) {
+		rtfree(ro->ro_rt);
+		ro->ro_rt = NULL;
+	}
+
+	if (ro->ro_lle != NULL) {
+		LLE_REMREF(ro->ro_lle);
+		ro->ro_lle = NULL;
+	}
+
+	if (ro->ro_srcia != NULL) {
+		IFA_REMREF(ro->ro_srcia);
+		ro->ro_srcia = NULL;
+	}
+}
+
 void
 route_copyout(struct route *dst, const struct route *src, size_t length)
 {

@@ -173,12 +173,10 @@ OSOrderedSet::ensureCapacity(unsigned int newCapacity)
 		return capacity;
 	}
 
-	newArray = kallocp_type_container(_Element, &finalCapacity, Z_WAITOK_ZERO);
+	newArray = kreallocp_type_container(_Element, array,
+	    capacity, &finalCapacity, Z_WAITOK_ZERO);
 	if (newArray) {
 		OSCONTAINER_ACCUMSIZE(sizeof(_Element) * (finalCapacity - capacity));
-
-		bcopy(array, newArray, capacity * sizeof(_Element));
-		kfree_type(_Element, capacity, array);
 		array = newArray;
 		capacity = finalCapacity;
 	}

@@ -805,32 +805,42 @@ IOFreeTypeVarImpl(kalloc_type_var_view_t kt_view, void * address, vm_size_t size
 	        IOFreeType(mem, type);                                    \
 	}
 
+
+extern "C++" {
+template<typename T>
 struct __IOTypedOperatorsArrayHeader {
-	size_t esize;
-	size_t count;
+	size_t alloc_size;
+	_Alignas(T) char array[];
 };
 
-#define __IOTypedOperatorNewArrayImpl(type, count)                \
-	{                                                             \
-	__IOTypedOperatorsArrayHeader *hdr;                        \
-	hdr = IONew(__IOTypedOperatorsArrayHeader, type, count);   \
-	if (hdr) {                                                 \
-	        hdr->esize = sizeof(type);                             \
-	        hdr->count = count;                                    \
-	        return static_cast<void *>(&hdr[1]);                   \
-	}                                                          \
-	_Pragma("clang diagnostic push")                           \
-	_Pragma("clang diagnostic ignored \"-Wnew-returns-null\"") \
-	return NULL;                                               \
-	_Pragma("clang diagnostic pop")                            \
+#define __IOTypedOperatorNewArrayImpl(type, count)                        \
+	{                                                                  \
+	        typedef __IOTypedOperatorsArrayHeader<type> hdr_ty;        \
+	        static KALLOC_TYPE_VAR_DEFINE(kt_view_var,                 \
+	            hdr_ty, type, KT_SHARED_ACCT);                         \
+	        hdr_ty *hdr;                                               \
+	        const size_t __s = sizeof(hdr_ty) + count;                 \
+	        hdr = reinterpret_cast<hdr_ty *>(                          \
+	            IOMallocTypeVarImpl(kt_view_var, __s));                \
+	        if (hdr) {                                                 \
+	                hdr->alloc_size = __s;                             \
+	                return reinterpret_cast<void *>(&hdr->array);      \
+	        }                                                          \
+	        _Pragma("clang diagnostic push")                           \
+	        _Pragma("clang diagnostic ignored \"-Wnew-returns-null\"") \
+	        return NULL;                                               \
+	        _Pragma("clang diagnostic pop")                            \
 	}
 
-#define __IOTypedOperatorDeleteArrayImpl(type, ptr)                      \
-	{                                                                    \
-	        __IOTypedOperatorsArrayHeader *hdr;                               \
-	        uintptr_t uptr = reinterpret_cast<uintptr_t>(ptr) - sizeof(*hdr); \
-	        hdr = reinterpret_cast<__IOTypedOperatorsArrayHeader *>(uptr);    \
-	        IODelete(hdr, __IOTypedOperatorsArrayHeader, type, hdr->count);   \
+#define __IOTypedOperatorDeleteArrayImpl(type, ptr)                  \
+	{                                                             \
+	        typedef __IOTypedOperatorsArrayHeader<type> hdr_ty;   \
+	        static KALLOC_TYPE_VAR_DEFINE(kt_view_var,            \
+	            hdr_ty, type, KT_SHARED_ACCT);                    \
+	        hdr_ty *hdr = reinterpret_cast<hdr_ty *>(             \
+	            reinterpret_cast<uintptr_t>(ptr) - sizeof(*hdr)); \
+	        IOFreeTypeVarImpl(kt_view_var,                        \
+	        reinterpret_cast<void *>(hdr), hdr->alloc_size);  \
 	}
 
 #define __IODefineTypedArrayOperators(type)        \
@@ -931,7 +941,6 @@ struct __IOTypedOperatorsArrayHeader {
 	__IOOverrideTypedOperators(type)
 
 
-extern "C++" {
 /*!
  * @template IOTypedOperatorsMixin
  *

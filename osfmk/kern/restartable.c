@@ -42,6 +42,7 @@
 #include <kern/thread.h>
 #include <kern/waitq.h>
 
+#include <os/atomic_private.h>
 #include <os/hash.h>
 #include <os/refcnt.h>
 
@@ -333,12 +334,163 @@ found:
 
 #pragma mark extern interfaces
 
+__attribute__((always_inline))
 void
 restartable_ranges_release(struct restartable_ranges *rr)
 {
 	if (os_ref_release_relaxed(&rr->rr_ref) == 0) {
 		_restartable_ranges_dispose(rr, true);
 	}
+}
+
+__attribute__((always_inline))
+void
+thread_reset_pcs_will_fault(thread_t thread)
+{
+	/*
+	 * Called in the exception handling code while interrupts
+	 * are still disabled.
+	 */
+	os_atomic_store(&thread->t_rr_state.trr_fault_state,
+	    (uint8_t)TRR_FAULT_PENDING, relaxed);
+}
+
+__attribute__((always_inline))
+void
+thread_reset_pcs_done_faulting(struct thread *thread)
+{
+	thread_rr_state_t state = {
+		.trr_ipi_ack_pending = ~0,
+	};
+
+	/*
+	 * Called by the exception handling code on the way back,
+	 * or when the thread is terminated.
+	 */
+	state.trr_value = os_atomic_and_orig(&thread->t_rr_state.trr_value,
+	    state.trr_value, relaxed);
+
+	if (__improbable(state.trr_sync_waiting)) {
+		task_t task = get_threadtask(thread);
+
+		task_lock(task);
+		wakeup_all_with_inheritor(&thread->t_rr_state, THREAD_AWAKENED);
+		task_unlock(task);
+	}
+}
+
+void
+thread_reset_pcs_ack_IPI(struct thread *thread)
+{
+	thread_rr_state_t trrs;
+
+	/*
+	 * Called under the thread lock from IPI or CSwitch context.
+	 */
+	trrs.trr_value = os_atomic_load(&thread->t_rr_state.trr_value, relaxed);
+	if (__improbable(trrs.trr_ipi_ack_pending)) {
+		trrs.trr_ipi_ack_pending = false;
+		if (trrs.trr_fault_state) {
+			assert3u(trrs.trr_fault_state, ==, TRR_FAULT_PENDING);
+			trrs.trr_fault_state = TRR_FAULT_OBSERVED;
+		}
+		os_atomic_store(&thread->t_rr_state.trr_value,
+		    trrs.trr_value, relaxed);
+	}
+}
+
+static bool
+thread_rr_wait_if_needed(task_t task, thread_t thread)
+{
+	thread_rr_state_t state;
+	bool did_unlock = false;
+
+	state.trr_value = os_atomic_load(&thread->t_rr_state.trr_value, relaxed);
+	if (state.trr_value == 0) {
+		return did_unlock;
+	}
+
+	assert(state.trr_sync_waiting == 0);
+
+	thread_reference(thread);
+
+	/*
+	 * The thread_rr_state state machine is:
+	 *
+	 *                        ,------------ IPI ack --------------.
+	 *                        v                                   |
+	 *        .-----> {f:N, w:0, ipi:0} --- IPI sent ---> {f:N, w:0, ipi:1}
+	 *        |           |        ^                              |
+	 *        |           |        |                              |
+	 *      fault       will     fault                          will
+	 *      done        fault    done                           fault
+	 *        |           |        |                              |
+	 *        |           v        |                              v
+	 *        |       {f:P, w:0, ipi:0} --- IPI sent ---> {f:P, w:0, ipi:1}
+	 *        |               |                                   |
+	 *        |               |                                   |
+	 *        |     act_set_ast_reset_pcs()                       |
+	 *        |               |                                   |
+	 *        |               v                                   |
+	 *        +------ {f:O, w:0, ipi:0} <--- IPI Ack -------------'
+	 *        |               |
+	 *        |               |
+	 *        |        wait_if_needed()
+	 *        |               |
+	 *        |               v
+	 *        `------ {f:O, w:1, ipi:0}
+	 */
+
+	while (state.trr_ipi_ack_pending) {
+		disable_preemption();
+		task_unlock(task);
+
+		state.trr_value =
+		    hw_wait_while_equals32(&thread->t_rr_state.trr_value,
+		    state.trr_value);
+
+		enable_preemption();
+		task_lock(task);
+
+		did_unlock = true;
+	}
+
+	/*
+	 * If a VM fault is in flight we must wait for it to resolve
+	 * before we can return from task_restartable_ranges_synchronize(),
+	 * as the memory we're faulting against might be freed by the caller
+	 * as soon as it returns, leading a crash.
+	 */
+	if (state.trr_fault_state == TRR_FAULT_OBSERVED) {
+		thread_rr_state_t nstate = {
+			.trr_fault_state  = TRR_FAULT_OBSERVED,
+			.trr_sync_waiting = 1,
+		};
+
+		if (os_atomic_cmpxchg(&thread->t_rr_state, state,
+		    nstate, relaxed)) {
+			lck_mtx_sleep_with_inheritor(&task->lock,
+			    LCK_SLEEP_DEFAULT, &thread->t_rr_state,
+			    thread, THREAD_UNINT, TIMEOUT_WAIT_FOREVER);
+			did_unlock = true;
+		}
+	}
+
+#if MACH_ASSERT
+	state.trr_value = os_atomic_load(&thread->t_rr_state.trr_value, relaxed);
+	assert3u(state.trr_fault_state, !=, TRR_FAULT_OBSERVED);
+	assert3u(state.trr_ipi_ack_pending, ==, 0);
+	assert3u(state.trr_sync_waiting, ==, 0);
+#endif
+
+	thread_deallocate_safe(thread);
+	return did_unlock;
+}
+
+bool
+thread_reset_pcs_in_range(task_t task, thread_t thread)
+{
+	return _ranges_lookup(task->t_rr_ranges, machine_thread_pc(thread)) != 0;
 }
 
 void
@@ -351,7 +503,7 @@ thread_reset_pcs_ast(task_t task, thread_t thread)
 	 * Because restartable_ranges are set while the task only has on thread
 	 * and can't be mutated outside of this, no lock is required to read this.
 	 */
-	rr = task->restartable_ranges;
+	rr = task->t_rr_ranges;
 	if (thread->active && rr) {
 		pc = _ranges_lookup(rr, machine_thread_pc(thread));
 
@@ -359,6 +511,14 @@ thread_reset_pcs_ast(task_t task, thread_t thread)
 			machine_thread_reset_pc(thread, pc);
 		}
 	}
+
+#if MACH_ASSERT
+	thread_rr_state_t state;
+
+	state.trr_value = os_atomic_load(&thread->t_rr_state.trr_value, relaxed);
+	assert3u(state.trr_fault_state, ==, TRR_FAULT_NONE);
+	assert3u(state.trr_sync_waiting, ==, 0);
+#endif
 }
 
 void
@@ -378,7 +538,6 @@ task_restartable_ranges_register(
 	mach_msg_type_number_t    count)
 {
 	kern_return_t kr;
-	thread_t th;
 
 	if (task != current_task()) {
 		return KERN_FAILURE;
@@ -390,28 +549,24 @@ task_restartable_ranges_register(
 	if (kr == KERN_SUCCESS) {
 		task_lock(task);
 
-		queue_iterate(&task->threads, th, thread_t, task_threads) {
-			if (th != current_thread()) {
-				kr = KERN_NOT_SUPPORTED;
-				break;
-			}
-		}
-#if !DEBUG && !DEVELOPMENT
-		/*
-		 * For security reasons, on release kernels, only allow for this to be
-		 * configured once.
-		 *
-		 * But to be able to test the feature we need to relax this for
-		 * dev kernels.
-		 */
-		if (task->restartable_ranges) {
+		if (task->thread_count > 1) {
 			kr = KERN_NOT_SUPPORTED;
-		}
+#if !DEBUG && !DEVELOPMENT
+		} else if (task->t_rr_ranges) {
+			/*
+			 * For security reasons, on release kernels,
+			 * only allow for this to be configured once.
+			 *
+			 * But to be able to test the feature we need
+			 * to relax this for dev kernels.
+			 */
+			kr = KERN_NOT_SUPPORTED;
 #endif
-		if (kr == KERN_SUCCESS) {
+		} else {
 			kr = _restartable_ranges_create(task, ranges, count,
-			    &task->restartable_ranges);
+			    &task->t_rr_ranges);
 		}
+
 		task_unlock(task);
 	}
 
@@ -421,12 +576,25 @@ task_restartable_ranges_register(
 kern_return_t
 task_restartable_ranges_synchronize(task_t task)
 {
-	ast_gen_t gens[MAX_CPUS] = {0};
 	thread_pri_floor_t token;
 	thread_t thread;
+	bool needs_wait = false;
+	kern_return_t kr = KERN_SUCCESS;
 
 	if (task != current_task()) {
 		return KERN_FAILURE;
+	}
+
+	/*
+	 * t_rr_ranges can only be set if the process is single threaded.
+	 * As a result, `t_rr_ranges` can _always_ be looked at
+	 * from current_thread() without holding a lock:
+	 * - either because it's the only thread in the task
+	 * - or because the existence of another thread precludes
+	 *   modification
+	 */
+	if (!task->t_rr_ranges) {
+		return KERN_SUCCESS;
 	}
 
 	/*
@@ -438,27 +606,75 @@ task_restartable_ranges_synchronize(task_t task)
 
 	task_lock(task);
 
-	if (task->restartable_ranges) {
+	/*
+	 * In order to avoid trivial deadlocks of 2 threads trying
+	 * to wait on each other while in kernel, disallow
+	 * concurrent usage of task_restartable_ranges_synchronize().
+	 *
+	 * At the time this code was written, the one client (Objective-C)
+	 * does this under lock which guarantees ordering. If we ever need
+	 * more clients, the library around restartable ranges will have
+	 * to synchronize in userspace.
+	 */
+	if (task->task_rr_in_flight) {
+		kr = KERN_ALREADY_WAITING;
+		goto out;
+	}
+
+	task->task_rr_in_flight = true;
+
+	/*
+	 * Pair with the acquire barriers handling RR_TSTATE_ONCORE.
+	 *
+	 * For threads that weren't on core, we rely on the fact
+	 * that we are taking their lock in act_set_ast_reset_pcs()
+	 * and that the context switch path will also take it before
+	 * resuming them which rovides the required ordering.
+	 *
+	 * For new threads not existing yet, because the task_lock()
+	 * is taken to add them to the task thread list,
+	 * which also synchronizes with this code.
+	 */
+	os_atomic_thread_fence(release);
+
+	/*
+	 * Set all the AST_RESET_PCS, and see if any thread needs
+	 * actual acknowledgement.
+	 */
+	queue_iterate(&task->threads, thread, thread_t, task_threads) {
+		if (thread != current_thread()) {
+			needs_wait |= act_set_ast_reset_pcs(task, thread);
+		}
+	}
+
+	/*
+	 * Now wait for acknowledgement if we need any
+	 */
+	while (needs_wait) {
+		needs_wait = false;
+
 		queue_iterate(&task->threads, thread, thread_t, task_threads) {
-			if (thread != current_thread()) {
-				act_set_ast_reset_pcs(thread, gens);
+			if (thread == current_thread()) {
+				continue;
+			}
+
+			needs_wait = thread_rr_wait_if_needed(task, thread);
+			if (needs_wait) {
+				/*
+				 * We drop the task lock,
+				 * we need to restart enumerating threads.
+				 */
+				break;
 			}
 		}
 	}
 
-	task_unlock(task);
+	task->task_rr_in_flight = false;
 
-	/*
-	 * For any core that was running one of our threads,
-	 * make sure the AST has been acknowledged.
-	 *
-	 * threads that aren't on core can't fail to see the AST
-	 * we set, because act_set_ast_reset_pcs() takes
-	 * the thread_lock() and so does the scheduler.
-	 */
-	ast_generation_wait(gens);
+out:
+	task_unlock(task);
 
 	thread_priority_floor_end(&token);
 
-	return KERN_SUCCESS;
+	return kr;
 }

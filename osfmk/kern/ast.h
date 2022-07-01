@@ -78,8 +78,6 @@
  */
 typedef uint32_t ast_t;
 
-typedef unsigned long ast_gen_t;
-
 /*
  * When returning from interrupt/trap context to kernel mode,
  * if AST_URGENT is set, then ast_taken_kernel is called, for
@@ -179,12 +177,6 @@ extern void ast_context(thread_t thread);
 /* Propagate ASTs set on a thread to the current processor */
 extern void ast_propagate(thread_t thread);
 
-/* Prepare for an AST "ack" scheme */
-extern void ast_generation_get(processor_t processor, ast_gen_t gens[] /* MAX_CPUS */);
-
-/* Wait for an AST generation "ack" to pass */
-extern void ast_generation_wait(ast_gen_t gens[] /* MAX_CPUS */ );
-
 /*
  *	Set an AST on a thread with thread_ast_set.
  *
@@ -196,6 +188,7 @@ extern void ast_generation_wait(ast_gen_t gens[] /* MAX_CPUS */ );
 #define thread_ast_set(act, reason)     ((void)os_atomic_or(&(act)->ast, (reason), relaxed))
 #define thread_ast_clear(act, reason)   ((void)os_atomic_andnot(&(act)->ast, (reason), relaxed))
 #define thread_ast_peek(act, reason)    (os_atomic_load(&(act)->ast, relaxed) & (reason))
+#define thread_ast_get(act)             os_atomic_load(&(act)->ast, relaxed)
 
 #ifdef MACH_BSD
 
@@ -218,7 +211,7 @@ extern void dtrace_ast(void);
 extern void kevent_ast(thread_t thread, uint16_t bits);
 extern void act_set_astkevent(thread_t thread, uint16_t bits);
 extern uint16_t act_clear_astkevent(thread_t thread, uint16_t bits);
-extern void act_set_ast_reset_pcs(thread_t thread, ast_gen_t array[] /* MAX_CPUS */ );
+extern bool act_set_ast_reset_pcs(task_t task, thread_t thread);
 extern void task_filedesc_ast(task_t task, int current_size, int soft_limit, int hard_limit);
 extern void act_set_debug_assert(void);
 

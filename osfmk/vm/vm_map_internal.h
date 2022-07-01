@@ -150,6 +150,10 @@ extern boolean_t vm_map_entry_should_cow_for_true_share(
  *
  * @const VM_MAP_REMOVE_NO_YIELD.
  * Try to avoid yielding during this call.
+ *
+ * @const VM_MAP_REMOVE_GUESS_SIZE
+ * The caller doesn't know the precise size of the entry,
+ * but the address must match an atomic entry.
  */
 __options_decl(vmr_flags_t, uint32_t, {
 	VM_MAP_REMOVE_NO_FLAGS          = 0x00,
@@ -160,30 +164,36 @@ __options_decl(vmr_flags_t, uint32_t, {
 	VM_MAP_REMOVE_IMMUTABLE         = 0x10,
 	VM_MAP_REMOVE_GAPS_FAIL         = 0x20,
 	VM_MAP_REMOVE_NO_YIELD          = 0x40,
+	VM_MAP_REMOVE_GUESS_SIZE        = 0x80,
 });
 
 /* Deallocate a region */
-extern kern_return_t vm_map_remove_flags(
+extern kmem_return_t vm_map_remove_guard(
 	vm_map_t                map,
 	vm_map_offset_t         start,
 	vm_map_offset_t         end,
-	vmr_flags_t             flags) __result_use_check;
+	vmr_flags_t             flags,
+	kmem_guard_t            guard) __result_use_check;
 
+extern kmem_return_t vm_map_remove_and_unlock(
+	vm_map_t        map,
+	vm_map_offset_t start,
+	vm_map_offset_t end,
+	vmr_flags_t     flags,
+	kmem_guard_t    guard) __result_use_check;
+
+/* Deallocate a region */
 static inline void
 vm_map_remove(
 	vm_map_t                map,
 	vm_map_offset_t         start,
 	vm_map_offset_t         end)
 {
-	(void)vm_map_remove_flags(map, start, end, VM_MAP_REMOVE_NO_FLAGS);
-}
+	vmr_flags_t  flags = VM_MAP_REMOVE_NO_FLAGS;
+	kmem_guard_t guard = KMEM_GUARD_NONE;
 
-/* Deallocate a region when the map is already locked */
-extern kern_return_t vm_map_remove_and_unlock(
-	vm_map_t                map,
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
-	vmr_flags_t             flags);
+	(void)vm_map_remove_guard(map, start, end, flags, guard);
+}
 
 #pragma GCC visibility pop
 __END_DECLS

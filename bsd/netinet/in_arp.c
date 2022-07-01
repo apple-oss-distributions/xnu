@@ -1563,9 +1563,8 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 				if (sendkev) {
 					post_kev_in_arpfailure(ifp);
 				}
-				result = EJUSTRETURN;
 				RT_LOCK(route);
-				goto release;
+				goto release_just_return;
 			} else {
 				route->rt_flags |= RTF_REJECT;
 				rt_setexpire(route,
@@ -1598,10 +1597,12 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 		}
 	}
 
+
+release_just_return:
 	/* The packet is now held inside la_holdq or dropped */
 	result = EJUSTRETURN;
 	if (packet != NULL && !enqueued) {
-		mbuf_free(packet);
+		m_freem(packet);
 		packet = NULL;
 	}
 

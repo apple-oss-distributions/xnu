@@ -2038,13 +2038,15 @@ necp_address_is_valid(struct sockaddr *address)
 }
 
 static bool
-necp_policy_result_is_valid(u_int8_t *buffer, u_int32_t length)
+necp_policy_result_is_valid(u_int8_t *buffer, u_int32_t length, bool *is_pass_skip)
 {
 	bool validated = FALSE;
 	u_int8_t type = necp_policy_result_get_type_from_buffer(buffer, length);
 	u_int32_t parameter_length = necp_policy_result_get_parameter_length_from_buffer(buffer, length);
+	*is_pass_skip = FALSE;
 	switch (type) {
 	case NECP_POLICY_RESULT_PASS: {
+		*is_pass_skip = TRUE;
 		if (parameter_length == 0 || parameter_length == sizeof(u_int32_t)) {
 			validated = TRUE;
 		}
@@ -2063,6 +2065,7 @@ necp_policy_result_is_valid(u_int8_t *buffer, u_int32_t length)
 		break;
 	}
 	case NECP_POLICY_RESULT_SKIP:
+		*is_pass_skip = TRUE;
 	case NECP_POLICY_RESULT_SOCKET_DIVERT:
 	case NECP_POLICY_RESULT_SOCKET_FILTER: {
 		if (parameter_length >= sizeof(u_int32_t)) {
@@ -2164,6 +2167,23 @@ necp_policy_condition_requires_real_application(u_int8_t *buffer, u_int32_t leng
 	return type == NECP_POLICY_CONDITION_ENTITLEMENT && condition_length > 0;
 }
 
+static inline bool
+necp_policy_condition_is_kernel_pid(u_int8_t *buffer, u_int32_t length)
+{
+	u_int8_t type = necp_policy_condition_get_type_from_buffer(buffer, length);
+	u_int32_t condition_length = 0;
+	pid_t *condition_value = NULL;
+
+	if (type == NECP_POLICY_CONDITION_PID) {
+		condition_length = necp_policy_condition_get_value_length_from_buffer(buffer, length);
+		if (condition_length >= sizeof(pid_t)) {
+			condition_value = (pid_t *)(void *)necp_policy_condition_get_value_pointer_from_buffer(buffer, length);
+			return *condition_value == 0;
+		}
+	}
+	return false;
+}
+
 static bool
 necp_policy_condition_is_valid(u_int8_t *buffer, u_int32_t length, u_int8_t policy_result_type)
 {
@@ -2237,8 +2257,7 @@ necp_policy_condition_is_valid(u_int8_t *buffer, u_int32_t length, u_int8_t poli
 	}
 	case NECP_POLICY_CONDITION_PID: {
 		if (condition_length >= sizeof(pid_t) &&
-		    condition_value != NULL &&
-		    *((pid_t *)(void *)condition_value) != 0) {
+		    condition_value != NULL) {
 			validated = TRUE;
 		}
 		break;
@@ -2439,6 +2458,8 @@ necp_handle_policy_add(struct necp_session *session,
 	bool has_real_application_condition = FALSE;
 	bool requires_application_condition = FALSE;
 	bool requires_real_application_condition = FALSE;
+	bool has_kernel_pid = FALSE;
+	bool is_pass_skip = FALSE;
 	u_int8_t *conditions_array = NULL;
 	u_int32_t conditions_array_size = 0;
 	int conditions_array_cursor;
@@ -2495,7 +2516,7 @@ necp_handle_policy_add(struct necp_session *session,
 		response_error = NECP_ERROR_POLICY_RESULT_INVALID;
 		goto fail;
 	}
-	if (!necp_policy_result_is_valid(policy_result, policy_result_size)) {
+	if (!necp_policy_result_is_valid(policy_result, policy_result_size, &is_pass_skip)) {
 		NECPLOG0(LOG_ERR, "Failed to validate policy result");
 		response_error = NECP_ERROR_POLICY_RESULT_INVALID;
 		goto fail;
@@ -2661,6 +2682,10 @@ necp_handle_policy_add(struct necp_session *session,
 				requires_real_application_condition = TRUE;
 			}
 
+			if (necp_policy_condition_is_kernel_pid((conditions_array + conditions_array_cursor), condition_size)) {
+				has_kernel_pid = TRUE;
+			}
+
 			conditions_array_cursor += condition_size;
 		}
 	}
@@ -2673,6 +2698,12 @@ necp_handle_policy_add(struct necp_session *session,
 
 	if (requires_real_application_condition && !has_real_application_condition) {
 		NECPLOG0(LOG_ERR, "Failed to validate conditions; did not contain real application condition");
+		response_error = NECP_ERROR_POLICY_CONDITIONS_INVALID;
+		goto fail;
+	}
+
+	if (has_kernel_pid && !is_pass_skip) {
+		NECPLOG0(LOG_ERR, "Failed to validate conditions; kernel pid (0) condition allows only Pass/Skip result");
 		response_error = NECP_ERROR_POLICY_CONDITIONS_INVALID;
 		goto fail;
 	}
@@ -7362,6 +7393,11 @@ necp_application_find_policy_match_internal(proc_t proc,
 			uuid_copy(returned_result->netagents[netagent_i], mapping->uuid);
 			returned_result->netagent_use_flags[netagent_i] = netagent_use_flags[netagent_cursor];
 			netagent_i++;
+		}
+
+		// If the flags say to remove, clear the local copy
+		if (netagent_use_flags[netagent_cursor] & NECP_AGENT_USE_FLAG_REMOVE) {
+			netagent_ids[netagent_cursor] = 0;
 		}
 	}
 

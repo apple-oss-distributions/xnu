@@ -818,7 +818,8 @@ sigreturn(
 	ut = (struct uthread *) get_bsdthread_info(th_act);
 
 	/* see osfmk/kern/restartable.c */
-	act_set_ast_reset_pcs(th_act);
+	act_set_ast_reset_pcs(TASK_NULL, th_act);
+
 	/*
 	 * If we are being asked to change the altstack flag on the thread, we
 	 * just set/reset it and return (the uap->uctx is not used).

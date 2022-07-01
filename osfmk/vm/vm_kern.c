@@ -74,6 +74,7 @@
 #include <vm/vm_compressor.h>
 #include <vm/vm_pageout.h>
 #include <vm/vm_init.h>
+#include <vm/vm_fault.h>
 #include <kern/misc_protos.h>
 #include <vm/cpm.h>
 #include <kern/ledger.h>
@@ -89,6 +90,9 @@
 
 #include <san/kasan.h>
 #include <kern/kext_alloc.h>
+#include <kern/backtrace.h>
+#include <os/hash.h>
+#include <kern/zalloc_internal.h>
 
 /*
  *	Variables exported by this module.
@@ -97,17 +101,122 @@
 SECURITY_READ_ONLY_LATE(vm_map_t) kernel_map;
 SECURITY_READ_ONLY_LATE(struct kmem_range) kmem_ranges[KMEM_RANGE_COUNT] = {};
 #if ZSECURITY_CONFIG(KERNEL_DATA_SPLIT)
+__startup_data
+vm_map_size_t data_range_size, ptr_range_size;
 SECURITY_READ_ONLY_LATE(struct kmem_range)
 kmem_large_ranges[KMEM_RANGE_COUNT] = {};
 #endif
+TUNABLE(uint32_t, kmem_ptr_ranges, "kmem_ptr_ranges", 2);
 
-/*
- * Forward declarations for internal functions.
- */
-extern kern_return_t kmem_alloc_pages(
-	vm_object_t             object,
-	vm_object_offset_t      offset,
-	vm_object_size_t        size);
+#pragma mark helpers
+
+__attribute__((overloadable))
+__header_always_inline kmem_flags_t
+ANYF(kma_flags_t flags)
+{
+	return (kmem_flags_t)flags;
+}
+
+__attribute__((overloadable))
+__header_always_inline kmem_flags_t
+ANYF(kmr_flags_t flags)
+{
+	return (kmem_flags_t)flags;
+}
+
+__attribute__((overloadable))
+__header_always_inline kmem_flags_t
+ANYF(kmf_flags_t flags)
+{
+	return (kmem_flags_t)flags;
+}
+
+__abortlike
+static void
+__kmem_invalid_size_panic(
+	vm_map_t        map,
+	vm_size_t       size,
+	uint32_t        flags)
+{
+	panic("kmem(map=%p, flags=0x%x): invalid size %zd",
+	    map, flags, (size_t)size);
+}
+
+__abortlike
+static void
+__kmem_invalid_arguments_panic(
+	const char     *what,
+	vm_map_t        map,
+	vm_address_t    address,
+	vm_size_t       size,
+	uint32_t        flags)
+{
+	panic("kmem_%s(map=%p, addr=%p, size=%zd, flags=0x%x): "
+	    "invalid arguments passed",
+	    what, map, (void *)address, (size_t)size, flags);
+}
+
+__abortlike
+static void
+__kmem_failed_panic(
+	vm_map_t        map,
+	vm_size_t       size,
+	uint32_t        flags,
+	kern_return_t   kr,
+	const char     *what)
+{
+	panic("kmem_%s(%p, %zd, 0x%x): failed with %d",
+	    what, map, (size_t)size, flags, kr);
+}
+
+__abortlike
+static void
+__kmem_entry_not_found_panic(
+	vm_map_t        map,
+	vm_offset_t     addr)
+{
+	panic("kmem(map=%p) no entry found at %p", map, (void *)addr);
+}
+
+__abortlike
+static void
+__kmem_invalid_object_panic(uint32_t flags)
+{
+	if (flags == 0) {
+		panic("KMEM_KOBJECT or KMEM_COMPRESSOR is required");
+	}
+	panic("more than one of KMEM_KOBJECT or KMEM_COMPRESSOR specified");
+}
+
+static inline vm_object_t
+__kmem_object(kmem_flags_t flags)
+{
+	flags &= (KMEM_KOBJECT | KMEM_COMPRESSOR);
+	if (flags == 0 || (flags & (flags - 1))) {
+		__kmem_invalid_object_panic(flags);
+	}
+
+	return (flags & KMEM_KOBJECT) ? kernel_object : compressor_object;
+}
+
+static inline vm_size_t
+__kmem_guard_left(kmem_flags_t flags)
+{
+	return (flags & KMEM_GUARD_FIRST) ? PAGE_SIZE : 0;
+}
+
+static inline vm_size_t
+__kmem_guard_right(kmem_flags_t flags)
+{
+	return (flags & KMEM_GUARD_LAST) ? PAGE_SIZE : 0;
+}
+
+static inline vm_size_t
+__kmem_guard_size(kmem_flags_t flags)
+{
+	return __kmem_guard_left(flags) + __kmem_guard_right(flags);
+}
+
 
 #pragma mark kmem range methods
 
@@ -176,6 +285,251 @@ kmem_addr_get_range(vm_map_offset_t addr, vm_map_size_t size)
 }
 
 
+#pragma mark entry parameters
+
+
+__abortlike
+static void
+__kmem_entry_validate_panic(
+	vm_map_t        map,
+	vm_map_entry_t  entry,
+	vm_offset_t     addr,
+	vm_size_t       size,
+	uint32_t        flags,
+	kmem_guard_t    guard)
+{
+	const char *what = "???";
+
+	if (entry->vme_atomic != guard.kmg_atomic) {
+		what = "atomicity";
+	} else if (entry->is_sub_map != guard.kmg_submap) {
+		what = "objectness";
+	} else if (addr != entry->vme_start) {
+		what = "left bound";
+	} else if ((flags & KMF_GUESS_SIZE) == 0 && addr + size != entry->vme_end) {
+		what = "right bound";
+#if __LP64__
+	} else if (guard.kmg_context != entry->vme_context) {
+		what = "guard";
+#endif
+	}
+
+	panic("kmem(map=%p, addr=%p, size=%zd, flags=0x%x): "
+	    "entry:%p %s mismatch guard(0x%08x)",
+	    map, (void *)addr, (size_t)size, flags, entry,
+	    what, guard.kmg_context);
+}
+
+static bool
+__kmem_entry_validate_guard(
+	vm_map_entry_t  entry,
+	vm_offset_t     addr,
+	vm_size_t       size,
+	kmem_flags_t    flags,
+	kmem_guard_t    guard)
+{
+	if (entry->vme_atomic != guard.kmg_atomic) {
+		return false;
+	}
+
+	if (!guard.kmg_atomic) {
+		return true;
+	}
+
+	if (entry->is_sub_map != guard.kmg_submap) {
+		return false;
+	}
+
+	if (addr != entry->vme_start) {
+		return false;
+	}
+
+	if ((flags & KMEM_GUESS_SIZE) == 0 && addr + size != entry->vme_end) {
+		return false;
+	}
+
+#if __LP64__
+	if (!guard.kmg_submap && guard.kmg_context != entry->vme_context) {
+		return false;
+	}
+#endif
+
+	return true;
+}
+
+void
+kmem_entry_validate_guard(
+	vm_map_t        map,
+	vm_map_entry_t  entry,
+	vm_offset_t     addr,
+	vm_size_t       size,
+	kmem_guard_t    guard)
+{
+	if (!__kmem_entry_validate_guard(entry, addr, size, KMEM_NONE, guard)) {
+		__kmem_entry_validate_panic(map, entry, addr, size, KMEM_NONE, guard);
+	}
+}
+
+__abortlike
+static void
+__kmem_entry_validate_object_panic(
+	vm_map_t        map,
+	vm_map_entry_t  entry,
+	kmem_flags_t    flags)
+{
+	const char *what;
+	const char *verb;
+
+	if (entry->is_sub_map) {
+		panic("kmem(map=%p) entry %p is a submap", map, entry);
+	}
+
+	if (flags & KMEM_KOBJECT) {
+		what = "kernel";
+		verb = "isn't";
+	} else if (flags & KMEM_COMPRESSOR) {
+		what = "compressor";
+		verb = "isn't";
+	} else if (entry->vme_kernel_object) {
+		what = "kernel";
+		verb = "is unexpectedly";
+	} else {
+		what = "compressor";
+		verb = "is unexpectedly";
+	}
+
+	panic("kmem(map=%p, flags=0x%x): entry %p %s for the %s object",
+	    map, flags, entry, verb, what);
+}
+
+static bool
+__kmem_entry_validate_object(
+	vm_map_entry_t  entry,
+	kmem_flags_t    flags)
+{
+	if (entry->is_sub_map) {
+		return false;
+	}
+	if ((bool)(flags & KMEM_KOBJECT) != entry->vme_kernel_object) {
+		return false;
+	}
+
+	return (bool)(flags & KMEM_COMPRESSOR) ==
+	       (VME_OBJECT(entry) == compressor_object);
+}
+
+vm_size_t
+kmem_size_guard(
+	vm_map_t        map,
+	vm_offset_t     addr,
+	kmem_guard_t    guard)
+{
+	kmem_flags_t flags = KMEM_GUESS_SIZE;
+	vm_map_entry_t entry;
+	vm_size_t size;
+
+	vm_map_lock_read(map);
+
+	if (!vm_map_lookup_entry(map, addr, &entry)) {
+		__kmem_entry_not_found_panic(map, addr);
+	}
+
+	if (!__kmem_entry_validate_guard(entry, addr, 0, flags, guard)) {
+		__kmem_entry_validate_panic(map, entry, addr, 0, flags, guard);
+	}
+
+	size = (vm_size_t)(entry->vme_end - entry->vme_start);
+
+	vm_map_unlock_read(map);
+
+	return size;
+}
+
+#if ZSECURITY_CONFIG(KALLOC_TYPE) && ZSECURITY_CONFIG(KERNEL_PTR_SPLIT)
+static inline uint16_t
+kmem_hash_backtrace(
+	void                     *fp)
+{
+	uint64_t  bt_count;
+	uintptr_t bt[8] = {};
+
+	struct backtrace_control ctl = {
+		.btc_frame_addr = (uintptr_t)fp,
+	};
+
+	bt_count = backtrace(bt, sizeof(bt) / sizeof(bt[0]), &ctl, NULL);
+	return (uint16_t) os_hash_jenkins(bt, bt_count * sizeof(bt[0]));
+}
+#endif
+
+static_assert(KMEM_RANGE_ID_DATA - 1 <= KMEM_RANGE_MASK,
+    "Insufficient bits to represent ptr ranges");
+
+kmem_range_id_t
+kmem_adjust_range_id(
+	uint32_t                  hash)
+{
+#if ZSECURITY_CONFIG(KERNEL_PTR_SPLIT)
+	return (kmem_range_id_t) (KMEM_RANGE_ID_PTR_0 +
+	       (hash & KMEM_RANGE_MASK) % kmem_ptr_ranges);
+#else
+	(void)hash;
+	return KMEM_RANGE_ID_PTR_0;
+#endif
+}
+
+static void
+kmem_apply_security_policy(
+	vm_map_t                  map,
+	kma_flags_t               kma_flags,
+	kmem_guard_t              guard,
+	vm_map_kernel_flags_t    *vmk_flags,
+	bool                      assert_dir __unused)
+{
+	kmem_range_id_t range_id;
+	bool direction;
+	uint16_t type_hash = guard.kmg_type_hash;
+
+	if (startup_phase < STARTUP_SUB_KMEM || map != kernel_map) {
+		return;
+	}
+
+	/*
+	 * When ZSECURITY_CONFIG(KALLOC_TYPE) is enabled, a non-zero type-hash
+	 * must be passed by krealloc_type
+	 */
+#if (DEBUG || DEVELOPMENT) && ZSECURITY_CONFIG(KALLOC_TYPE)
+	if (assert_dir && !(kma_flags & KMA_DATA)) {
+		assert(type_hash != 0);
+	}
+#endif
+
+	if (kma_flags & KMA_DATA) {
+		range_id = KMEM_RANGE_ID_DATA;
+		/*
+		 * As an optimization in KMA_DATA to avoid fragmentation,
+		 * allocate static carveouts at the end of the DATA range.
+		 */
+		direction = (bool)(kma_flags & KMA_PERMANENT);
+	} else if (type_hash) {
+		range_id = type_hash & KMEM_RANGE_MASK;
+		direction = type_hash & KMEM_DIRECTION_MASK;
+	} else {
+#if ZSECURITY_CONFIG(KALLOC_TYPE) && ZSECURITY_CONFIG(KERNEL_PTR_SPLIT)
+		type_hash = (uint16_t) kmem_hash_backtrace(__builtin_frame_address(0));
+#endif
+		/*
+		 * Range id needs to correspond to one of the PTR ranges
+		 */
+		range_id = kmem_adjust_range_id(type_hash);
+		direction = type_hash & KMEM_DIRECTION_MASK;
+	}
+
+	vmk_flags->vmkf_range_id = range_id;
+	vmk_flags->vmkf_last_free = direction;
+}
+
+#pragma mark allocation
 
 kern_return_t
 kmem_alloc_contig(
@@ -225,12 +579,7 @@ kmem_alloc_contig(
 	if (flags & KMA_PERMANENT) {
 		vmk_flags.vmkf_permanent = true;
 	}
-	if (flags & KMA_DATA) {
-		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
-		if (flags & KMA_PERMANENT) {
-			vmk_flags.vmkf_last_free = true;
-		}
-	}
+	kmem_apply_security_policy(map, flags, KMEM_GUARD_NONE, &vmk_flags, false);
 
 	kr = vm_map_find_space(map, 0, map_size, map_mask,
 	    vmk_flags, &entry);
@@ -245,7 +594,7 @@ kmem_alloc_contig(
 	} else {
 		offset = 0;
 	}
-	VME_OBJECT_SET(entry, object);
+	VME_OBJECT_SET(entry, object, false, 0);
 	VME_OFFSET_SET(entry, offset);
 	VME_ALIAS_SET(entry, tag);
 
@@ -317,51 +666,24 @@ kmem_alloc_contig(
 	return KERN_SUCCESS;
 }
 
-/*
- * Master entry point for allocating kernel memory.
- * NOTE: this routine is _never_ interrupt safe.
- *
- * map		: map to allocate into
- * addrp	: pointer to start address of new memory
- * size		: size of memory requested
- * flags	: see kma_flags_t.
- */
-
-__abortlike
-static void
-__kma_failed_panic(
+kmem_return_t
+kmem_alloc_guard(
 	vm_map_t        map,
-	kern_return_t   kr,
 	vm_size_t       size,
 	vm_offset_t     mask,
 	kma_flags_t     flags,
-	vm_tag_t        tag)
-{
-	panic("kernel_memory_allocate(%p, _, %zd, 0x%zx, 0x%x, %d) "
-	    "failed unexpectedly with %d",
-	    map, (size_t)size, (size_t)mask, flags, tag, kr);
-}
-
-kern_return_t
-kernel_memory_allocate(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size,
-	vm_offset_t     mask,
-	kma_flags_t     flags,
-	vm_tag_t        tag)
+	kmem_guard_t    guard)
 {
 	vm_object_t             object;
-	vm_object_offset_t      offset;
 	vm_map_entry_t          entry = NULL;
 	vm_map_offset_t         map_addr, fill_start;
 	vm_map_size_t           map_size, fill_size;
-	kern_return_t           kr;
 	vm_page_t               guard_left = VM_PAGE_NULL;
 	vm_page_t               guard_right = VM_PAGE_NULL;
 	vm_page_t               wired_page_list = VM_PAGE_NULL;
 	vm_map_kernel_flags_t   vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 	bool                    need_guards;
+	kmem_return_t           kmr = { };
 
 	assert(kernel_map && map->pmap == kernel_pmap);
 
@@ -370,11 +692,10 @@ kernel_memory_allocate(
 	    size, 0, 0, 0);
 #endif
 
-	/* Check for zero allocation size (either directly or via overflow) */
-	map_size = vm_map_round_page(size, VM_MAP_PAGE_MASK(map));
-	if (__improbable(map_size == 0)) {
-		kr = KERN_INVALID_ARGUMENT;
-		goto out;
+	if (size == 0 ||
+	    (size >> VM_KERNEL_POINTER_SIGNIFICANT_BITS) ||
+	    (size < __kmem_guard_size(ANYF(flags)))) {
+		__kmem_invalid_size_panic(map, size, flags);
 	}
 
 	/*
@@ -385,9 +706,9 @@ kernel_memory_allocate(
 	 * but scaled by installed memory above this
 	 */
 	if (__improbable(!(flags & (KMA_VAONLY | KMA_PAGEABLE)) &&
-	    map_size > MAX(1ULL << 31, sane_size / 64))) {
-		kr = KERN_RESOURCE_SHORTAGE;
-		goto out;
+	    size > MAX(1ULL << 31, sane_size / 64))) {
+		kmr.kmr_return = KERN_RESOURCE_SHORTAGE;
+		goto out_error;
 	}
 
 	/*
@@ -412,8 +733,9 @@ kernel_memory_allocate(
 	 * will begin in the range.
 	 */
 
+	map_size   = round_page(size);
 	fill_start = 0;
-	fill_size = map_size;
+	fill_size  = map_size - __kmem_guard_size(ANYF(flags));
 
 	need_guards = flags & (KMA_KOBJECT | KMA_COMPRESSOR) ||
 	    !map->never_faults;
@@ -421,39 +743,27 @@ kernel_memory_allocate(
 	if (flags & KMA_GUARD_FIRST) {
 		vmk_flags.vmkf_guard_before = true;
 		fill_start += PAGE_SIZE;
-		if (__improbable(os_sub_overflow(fill_size, PAGE_SIZE, &fill_size))) {
-			/* no space for a guard page */
-			kr = KERN_INVALID_ARGUMENT;
-			goto out;
-		}
-		if (need_guards) {
-			guard_left = vm_page_grab_guard((flags & KMA_NOPAGEWAIT) == 0);
-			if (__improbable(guard_left == VM_PAGE_NULL)) {
-				kr = KERN_RESOURCE_SHORTAGE;
-				goto out;
-			}
+	}
+	if ((flags & KMA_GUARD_FIRST) && need_guards) {
+		guard_left = vm_page_grab_guard((flags & KMA_NOPAGEWAIT) == 0);
+		if (__improbable(guard_left == VM_PAGE_NULL)) {
+			kmr.kmr_return = KERN_RESOURCE_SHORTAGE;
+			goto out_error;
 		}
 	}
-	if (flags & KMA_GUARD_LAST) {
-		if (__improbable(os_sub_overflow(fill_size, PAGE_SIZE, &fill_size))) {
-			/* no space for a guard page */
-			kr = KERN_INVALID_ARGUMENT;
-			goto out;
-		}
-		if (need_guards) {
-			guard_right = vm_page_grab_guard((flags & KMA_NOPAGEWAIT) == 0);
-			if (__improbable(guard_right == VM_PAGE_NULL)) {
-				kr = KERN_RESOURCE_SHORTAGE;
-				goto out;
-			}
+	if ((flags & KMA_GUARD_LAST) && need_guards) {
+		guard_right = vm_page_grab_guard((flags & KMA_NOPAGEWAIT) == 0);
+		if (__improbable(guard_right == VM_PAGE_NULL)) {
+			kmr.kmr_return = KERN_RESOURCE_SHORTAGE;
+			goto out_error;
 		}
 	}
 
 	if (!(flags & (KMA_VAONLY | KMA_PAGEABLE))) {
-		kr = vm_page_alloc_list(atop(fill_size), flags,
+		kmr.kmr_return = vm_page_alloc_list(atop(fill_size), flags,
 		    &wired_page_list);
-		if (__improbable(kr != KERN_SUCCESS)) {
-			goto out;
+		if (__improbable(kmr.kmr_return != KERN_SUCCESS)) {
+			goto out_error;
 		}
 	}
 
@@ -471,46 +781,43 @@ kernel_memory_allocate(
 		object = vm_object_allocate(map_size);
 	}
 
-	if (flags & KMA_ATOMIC) {
-		vmk_flags.vmkf_atomic_entry = TRUE;
-	}
 	if (flags & KMA_LAST_FREE) {
 		vmk_flags.vmkf_last_free = true;
 	}
 	if (flags & KMA_PERMANENT) {
 		vmk_flags.vmkf_permanent = true;
 	}
-	if (flags & KMA_DATA) {
-		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
-		if (flags & KMA_PERMANENT) {
-			vmk_flags.vmkf_last_free = true;
-		}
-	}
+	kmem_apply_security_policy(map, flags, guard, &vmk_flags, false);
 
-	kr = vm_map_find_space(map, 0, map_size, mask, vmk_flags, &entry);
-	if (__improbable(KERN_SUCCESS != kr)) {
+	kmr.kmr_return = vm_map_find_space(map, 0, map_size, mask,
+	    vmk_flags, &entry);
+	if (__improbable(KERN_SUCCESS != kmr.kmr_return)) {
 		vm_object_deallocate(object);
-		goto out;
+		goto out_error;
 	}
 
 	map_addr = entry->vme_start;
-	if (flags & (KMA_COMPRESSOR | KMA_KOBJECT)) {
-		offset = map_addr;
+	VME_OBJECT_SET(entry, object, guard.kmg_atomic, guard.kmg_context);
+	VME_ALIAS_SET(entry, guard.kmg_tag);
+	if (flags & (KMA_KOBJECT | KMA_COMPRESSOR)) {
+		VME_OFFSET_SET(entry, map_addr);
 	} else {
-		offset = 0;
 		vm_object_reference(object);
 	}
-	VME_OBJECT_SET(entry, object);
-	VME_OFFSET_SET(entry, offset);
-	VME_ALIAS_SET(entry, tag);
 
 	if (!(flags & (KMA_COMPRESSOR | KMA_PAGEABLE))) {
 		entry->wired_count = 1;
 	}
 
 	if (guard_left || guard_right || wired_page_list) {
+		vm_object_offset_t offset = 0ull;
+
 		vm_object_lock(object);
 		vm_map_unlock(map);
+
+		if (flags & (KMA_KOBJECT | KMA_COMPRESSOR)) {
+			offset = map_addr;
+		}
 
 		if (guard_left) {
 			vm_page_insert(guard_left, object, offset);
@@ -528,7 +835,7 @@ kernel_memory_allocate(
 		if (wired_page_list) {
 			kernel_memory_populate_object_and_unlock(object,
 			    map_addr + fill_start, offset + fill_start, fill_size,
-			    wired_page_list, flags, tag, VM_PROT_DEFAULT);
+			    wired_page_list, flags, guard.kmg_tag, VM_PROT_DEFAULT);
 		} else {
 			vm_object_unlock(object);
 		}
@@ -542,7 +849,7 @@ kernel_memory_allocate(
 		 * We need to allow the range for pageable memory,
 		 * or faulting will not be allowed.
 		 */
-		kasan_notify_address(map_addr, size);
+		kasan_notify_address(map_addr, map_size);
 	}
 #endif
 	/*
@@ -558,13 +865,12 @@ kernel_memory_allocate(
 	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_END,
 	    atop(fill_size), 0, 0, 0);
 #endif
+	kmr.kmr_address = CAST_DOWN(vm_offset_t, map_addr);
+	return kmr;
 
-	*addrp = CAST_DOWN(vm_offset_t, map_addr);
-	return KERN_SUCCESS;
-
-out:
-	if (kr != KERN_SUCCESS && (flags & KMA_NOFAIL)) {
-		__kma_failed_panic(map, kr, size, mask, flags, tag);
+out_error:
+	if (flags & KMA_NOFAIL) {
+		__kmem_failed_panic(map, size, flags, kmr.kmr_return, "alloc");
 	}
 	if (guard_left) {
 		guard_left->vmp_snext = wired_page_list;
@@ -577,13 +883,223 @@ out:
 	if (wired_page_list) {
 		vm_page_free_list(wired_page_list, FALSE);
 	}
-	*addrp = 0;
 
 #if DEBUG || DEVELOPMENT
 	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_END,
 	    0, 0, 0, 0);
 #endif
-	return kr;
+
+	return kmr;
+}
+
+kmem_return_t
+kmem_suballoc(
+	vm_map_t                parent,
+	vm_offset_t             *addr,
+	vm_size_t               size,
+	vm_map_create_options_t vmc_options,
+	int                     vm_flags,
+	kms_flags_t             flags,
+	vm_tag_t                tag)
+{
+	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+	vm_map_offset_t map_addr = 0;
+	kmem_return_t kmr = { };
+	vm_map_t map;
+
+	assert(page_aligned(size));
+	assert(parent->pmap == kernel_pmap);
+
+#if ZSECURITY_CONFIG(KERNEL_DATA_SPLIT)
+	if (parent == kernel_map) {
+		assert((vm_flags & VM_FLAGS_FIXED_RANGE_SUBALLOC) ||
+		    (flags & KMS_DATA));
+	}
+#endif
+
+	if ((vm_flags & VM_FLAGS_ANYWHERE) == 0) {
+		map_addr = trunc_page(*addr);
+	}
+
+	pmap_reference(vm_map_pmap(parent));
+	map = vm_map_create_options(vm_map_pmap(parent), 0, size, vmc_options);
+
+	/*
+	 * 1. vm_map_enter() will consume one ref on success.
+	 *
+	 * 2. make the entry atomic as kernel submaps should never be split.
+	 *
+	 * 3. instruct vm_map_enter() that it is a fresh submap
+	 *    that needs to be taught its bounds as it inserted.
+	 */
+	vm_map_reference(map);
+	vmk_flags.vmkf_submap = true;
+	if ((flags & KMS_DATA) == 0) {
+		/* FIXME: IOKit submaps get fragmented and can't be atomic */
+		vmk_flags.vmkf_submap_atomic = true;
+	}
+	vmk_flags.vmkf_submap_adjust = true;
+	if (flags & KMS_LAST_FREE) {
+		vmk_flags.vmkf_last_free = true;
+	}
+	if (flags & KMS_PERMANENT) {
+		vmk_flags.vmkf_permanent = true;
+	}
+	if (flags & KMS_DATA) {
+		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
+	}
+
+	kmr.kmr_return = vm_map_enter(parent, &map_addr, size, 0,
+	    vm_flags, vmk_flags, tag, (vm_object_t)map, 0, FALSE,
+	    VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+
+	if (kmr.kmr_return != KERN_SUCCESS) {
+		if (flags & KMS_NOFAIL) {
+			panic("kmem_suballoc(map=%p, size=%zd) failed with %d",
+			    parent, (size_t)size, kmr.kmr_return);
+		}
+		assert(os_ref_get_count_raw(&map->map_refcnt) == 2);
+		vm_map_deallocate(map);
+		vm_map_deallocate(map); /* also removes ref to pmap */
+		return kmr;
+	}
+
+	/*
+	 * For kmem_suballocs that register a claim and are assigned a range, ensure
+	 * that the exact same range is returned.
+	 */
+	if (*addr != 0 && parent == kernel_map &&
+	    startup_phase > STARTUP_SUB_KMEM) {
+		assert(CAST_DOWN(vm_offset_t, map_addr) == *addr);
+	} else {
+		*addr = CAST_DOWN(vm_offset_t, map_addr);
+	}
+
+	kmr.kmr_submap = map;
+	return kmr;
+}
+
+/*
+ *	kmem_alloc:
+ *
+ *	Allocate wired-down memory in the kernel's address map
+ *	or a submap.  The memory is not zero-filled.
+ */
+
+__exported kern_return_t
+kmem_alloc_external(
+	vm_map_t        map,
+	vm_offset_t     *addrp,
+	vm_size_t       size);
+kern_return_t
+kmem_alloc_external(
+	vm_map_t        map,
+	vm_offset_t     *addrp,
+	vm_size_t       size)
+{
+	if (size && (size >> VM_KERNEL_POINTER_SIGNIFICANT_BITS) == 0) {
+		return kmem_alloc(map, addrp, size, KMA_NONE, vm_tag_bt());
+	}
+	/* Maintain ABI compatibility: invalid sizes used to be allowed */
+	return size ? KERN_NO_SPACE: KERN_INVALID_ARGUMENT;
+}
+
+
+/*
+ *	kmem_alloc_kobject:
+ *
+ *	Allocate wired-down memory in the kernel's address map
+ *	or a submap.  The memory is not zero-filled.
+ *
+ *	The memory is allocated in the kernel_object.
+ *	It may not be copied with vm_map_copy, and
+ *	it may not be reallocated with kmem_realloc.
+ */
+
+__exported kern_return_t
+kmem_alloc_kobject_external(
+	vm_map_t        map,
+	vm_offset_t     *addrp,
+	vm_size_t       size);
+kern_return_t
+kmem_alloc_kobject_external(
+	vm_map_t        map,
+	vm_offset_t     *addrp,
+	vm_size_t       size)
+{
+	if (size && (size >> VM_KERNEL_POINTER_SIGNIFICANT_BITS) == 0) {
+		return kmem_alloc(map, addrp, size, KMA_KOBJECT, vm_tag_bt());
+	}
+	/* Maintain ABI compatibility: invalid sizes used to be allowed */
+	return size ? KERN_NO_SPACE: KERN_INVALID_ARGUMENT;
+}
+
+/*
+ *	kmem_alloc_pageable:
+ *
+ *	Allocate pageable memory in the kernel's address map.
+ */
+
+__exported kern_return_t
+kmem_alloc_pageable_external(
+	vm_map_t        map,
+	vm_offset_t     *addrp,
+	vm_size_t       size);
+kern_return_t
+kmem_alloc_pageable_external(
+	vm_map_t        map,
+	vm_offset_t     *addrp,
+	vm_size_t       size)
+{
+	if (size && (size >> VM_KERNEL_POINTER_SIGNIFICANT_BITS) == 0) {
+		return kmem_alloc(map, addrp, size, KMA_PAGEABLE | KMA_DATA, vm_tag_bt());
+	}
+	/* Maintain ABI compatibility: invalid sizes used to be allowed */
+	return size ? KERN_NO_SPACE: KERN_INVALID_ARGUMENT;
+}
+
+
+#pragma mark population
+
+static void
+kernel_memory_populate_pmap_enter(
+	vm_object_t             object,
+	vm_address_t            addr,
+	vm_object_offset_t      offset,
+	vm_page_t               mem,
+	vm_prot_t               prot,
+	int                     pe_flags)
+{
+	kern_return_t   pe_result;
+	int             pe_options;
+
+	PMAP_ENTER_CHECK(kernel_pmap, mem);
+
+	pe_options = PMAP_OPTIONS_NOWAIT;
+	if (object->internal) {
+		pe_options |= PMAP_OPTIONS_INTERNAL;
+	}
+	if (mem->vmp_reusable || object->all_reusable) {
+		pe_options |= PMAP_OPTIONS_REUSABLE;
+	}
+
+	pe_result = pmap_enter_options(kernel_pmap, addr + offset,
+	    VM_PAGE_GET_PHYS_PAGE(mem), prot, VM_PROT_NONE,
+	    pe_flags, /* wired */ TRUE, pe_options, NULL);
+
+	if (pe_result == KERN_RESOURCE_SHORTAGE) {
+		vm_object_unlock(object);
+
+		pe_options &= ~PMAP_OPTIONS_NOWAIT;
+
+		pe_result = pmap_enter_options(kernel_pmap, addr + offset,
+		    VM_PAGE_GET_PHYS_PAGE(mem), prot, VM_PROT_NONE,
+		    pe_flags, /* wired */ TRUE, pe_options, NULL);
+
+		vm_object_lock(object);
+	}
+
+	assert(pe_result == KERN_SUCCESS);
 }
 
 void
@@ -597,9 +1113,7 @@ kernel_memory_populate_object_and_unlock(
 	vm_tag_t        tag,
 	vm_prot_t       prot)
 {
-	kern_return_t   pe_result;
 	vm_page_t       mem;
-	int             pe_options;
 	int             pe_flags;
 
 	assert3u((bool)(flags & KMA_KOBJECT), ==, object == kernel_object);
@@ -648,39 +1162,8 @@ kernel_memory_populate_object_and_unlock(
 		 * for the kernel and compressor objects.
 		 */
 
-		PMAP_ENTER_CHECK(kernel_pmap, mem);
-
-		pe_options = PMAP_OPTIONS_NOWAIT;
-		if (flags & (KMA_COMPRESSOR | KMA_KOBJECT)) {
-			pe_options |= PMAP_OPTIONS_INTERNAL;
-		} else {
-			if (object->internal) {
-				pe_options |= PMAP_OPTIONS_INTERNAL;
-			}
-			if (mem->vmp_reusable || object->all_reusable) {
-				pe_options |= PMAP_OPTIONS_REUSABLE;
-			}
-		}
-
-		pe_result = pmap_enter_options(kernel_pmap,
-		    addr + pg_offset, VM_PAGE_GET_PHYS_PAGE(mem),
-		    prot, VM_PROT_NONE, pe_flags,
-		    /* wired */ TRUE, pe_options, NULL);
-
-		if (pe_result == KERN_RESOURCE_SHORTAGE) {
-			vm_object_unlock(object);
-
-			pe_options &= ~PMAP_OPTIONS_NOWAIT;
-
-			pe_result = pmap_enter_options(kernel_pmap,
-			    addr + pg_offset, VM_PAGE_GET_PHYS_PAGE(mem),
-			    prot, VM_PROT_NONE, pe_flags,
-			    /* wired */ TRUE, pe_options, NULL);
-
-			vm_object_lock(object);
-		}
-
-		assert(pe_result == KERN_SUCCESS);
+		kernel_memory_populate_pmap_enter(object, addr, pg_offset,
+		    mem, prot, pe_flags);
 
 		if (flags & KMA_NOENCRYPT) {
 			pmap_set_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
@@ -713,26 +1196,6 @@ kernel_memory_populate_object_and_unlock(
 #endif
 }
 
-__abortlike
-static void
-__kernel_or_compressor_object_panic(kma_flags_t flags)
-{
-	if (flags == 0) {
-		panic("KMA_KOBJECT or KMA_COMPRESSOR is required");
-	}
-	panic("more than one of KMA_KOBJECT or KMA_COMPRESSOR specified");
-}
-
-static inline vm_object_t
-kernel_or_compressor_object(kma_flags_t flags)
-{
-	flags &= (KMA_KOBJECT | KMA_COMPRESSOR);
-	if (flags == 0 || (flags & (flags - 1))) {
-		__kernel_or_compressor_object_panic(flags);
-	}
-
-	return (flags & KMA_KOBJECT) ? kernel_object : compressor_object;
-}
 
 kern_return_t
 kernel_memory_populate(
@@ -744,7 +1207,7 @@ kernel_memory_populate(
 	kern_return_t   kr = KERN_SUCCESS;
 	vm_page_t       page_list = NULL;
 	vm_size_t       page_count = atop_64(size);
-	vm_object_t     object = kernel_or_compressor_object(flags);
+	vm_object_t     object = __kmem_object(ANYF(flags));
 
 #if DEBUG || DEVELOPMENT
 	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_START,
@@ -772,7 +1235,7 @@ kernel_memory_depopulate(
 	kma_flags_t        flags,
 	vm_tag_t           tag)
 {
-	vm_object_t        object = kernel_or_compressor_object(flags);
+	vm_object_t        object = __kmem_object(ANYF(flags));
 	vm_object_offset_t offset = addr;
 	vm_page_t          mem;
 	vm_page_t          local_freeq = NULL;
@@ -826,414 +1289,444 @@ kernel_memory_depopulate(
 	}
 }
 
-/*
- *	kmem_realloc:
- *
- *	Reallocate wired-down memory in the kernel's address map
- *	or a submap.  Newly allocated pages are not zeroed.
- *	This can only be used on regions allocated with kmem_alloc.
- *
- *	If successful, the pages in the old region are mapped twice.
- *	The old region is unchanged.  Use kmem_free to get rid of it.
- */
-kern_return_t
-kmem_realloc(
+#pragma mark reallocation
+
+__abortlike
+static void
+__kmem_realloc_invalid_object_size_panic(
+	vm_map_t                map,
+	vm_address_t            address,
+	vm_size_t               size,
+	vm_map_entry_t          entry,
+	vm_object_t             object)
+{
+	panic("kmem_realloc(map=%p, addr=%p, size=%zd, entry=%p): "
+	    "object %p has unexpected size %lld",
+	    map, (void *)address, (size_t)size, entry, object, object->vo_size);
+}
+
+static kmem_return_t
+kmem_realloc_shrink_guard(
 	vm_map_t                map,
 	vm_offset_t             oldaddr,
 	vm_size_t               oldsize,
-	vm_offset_t             *newaddrp,
 	vm_size_t               newsize,
-	vm_tag_t                tag)
+	kmr_flags_t             flags,
+	kmem_guard_t            guard,
+	vm_map_entry_t          entry)
 {
 	vm_object_t             object;
-	vm_object_offset_t      offset;
-	vm_map_offset_t         oldmapmin;
-	vm_map_offset_t         oldmapmax;
-	vm_map_offset_t         newmapaddr;
-	vm_map_size_t           oldmapsize;
-	vm_map_size_t           newmapsize;
-	vm_map_entry_t          oldentry;
-	vm_map_entry_t          newentry;
-	vm_page_t               mem;
-	kern_return_t           kr;
-	vm_map_kernel_flags_t   vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-
-	oldmapmin = vm_map_trunc_page(oldaddr,
-	    VM_MAP_PAGE_MASK(map));
-	oldmapmax = vm_map_round_page(oldaddr + oldsize,
-	    VM_MAP_PAGE_MASK(map));
-	oldmapsize = oldmapmax - oldmapmin;
-	newmapsize = vm_map_round_page(newsize,
-	    VM_MAP_PAGE_MASK(map));
-	if (newmapsize < newsize) {
-		/* overflow */
-		*newaddrp = 0;
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	/*
-	 *	Find the VM object backing the old region.
-	 */
-
-	vm_map_lock(map);
-
-	if (!vm_map_lookup_entry(map, oldmapmin, &oldentry)) {
-		panic("kmem_realloc");
-	}
-	if (oldentry->vme_atomic) {
-		vmk_flags.vmkf_atomic_entry = true;
-	}
-	vmk_flags.vmkf_range_id = kmem_addr_get_range(oldmapmin, oldmapsize);
-
-	object = VME_OBJECT(oldentry);
-
-	/*
-	 *	Increase the size of the object and
-	 *	fill in the new region.
-	 */
-
-	vm_object_reference(object);
-	/* by grabbing the object lock before unlocking the map */
-	/* we guarantee that we will panic if more than one     */
-	/* attempt is made to realloc a kmem_alloc'd area       */
-	vm_object_lock(object);
-	vm_map_unlock(map);
-	if (object->vo_size != oldmapsize) {
-		panic("kmem_realloc");
-	}
-	object->vo_size = newmapsize;
-	vm_object_unlock(object);
-
-	/* allocate the new pages while expanded portion of the */
-	/* object is still not mapped */
-	kmem_alloc_pages(object, vm_object_round_page(oldmapsize),
-	    vm_object_round_page(newmapsize - oldmapsize));
-
-	/*
-	 *	Find space for the new region.
-	 */
-
-	kr = vm_map_find_space(map, 0, newmapsize, 0, vmk_flags, &newentry);
-	if (kr != KERN_SUCCESS) {
-		vm_object_lock(object);
-		for (offset = oldmapsize;
-		    offset < newmapsize; offset += PAGE_SIZE) {
-			if ((mem = vm_page_lookup(object, offset)) != VM_PAGE_NULL) {
-				VM_PAGE_FREE(mem);
-			}
-		}
-		object->vo_size = oldmapsize;
-		vm_object_unlock(object);
-		vm_object_deallocate(object);
-		return kr;
-	}
-
-	newmapaddr = newentry->vme_start;
-	VME_OBJECT_SET(newentry, object);
-	VME_ALIAS_SET(newentry, tag);
-	assert(newentry->wired_count == 0);
-
-
-	/* add an extra reference in case we have someone doing an */
-	/* unexpected deallocate */
-	vm_object_reference(object);
-	vm_map_unlock(map);
-
-	kr = vm_map_wire_kernel(map, newmapaddr, newmapaddr + newmapsize,
-	    VM_PROT_DEFAULT, tag, FALSE);
-	if (KERN_SUCCESS != kr) {
-		kmem_free(map, newmapaddr, newmapsize);
-		vm_object_lock(object);
-		for (offset = oldsize; offset < newmapsize; offset += PAGE_SIZE) {
-			if ((mem = vm_page_lookup(object, offset)) != VM_PAGE_NULL) {
-				VM_PAGE_FREE(mem);
-			}
-		}
-		object->vo_size = oldmapsize;
-		vm_object_unlock(object);
-		vm_object_deallocate(object);
-		return kr;
-	}
-	vm_object_deallocate(object);
-
-	if (kernel_object == object) {
-		vm_tag_update_size(tag, newmapsize);
-	}
-
-	*newaddrp = CAST_DOWN(vm_offset_t, newmapaddr);
-	return KERN_SUCCESS;
-}
-
-void
-kmem_realloc_down(
-	vm_map_t                map,
-	vm_offset_t             addr,
-	vm_size_t               oldsize,
-	vm_size_t               newsize)
-{
-	vm_object_t             object;
-	vm_map_entry_t          entry;
+	kmem_return_t           kmr = { .kmr_address = oldaddr };
 	bool                    was_atomic;
 
-	oldsize = round_page(oldsize);
-	newsize = round_page(newsize);
+	vm_map_lock_assert_exclusive(map);
 
-	if (oldsize <= newsize) {
-		panic("kmem_realloc_down() called with invalid sizes %zd <= %zd",
-		    (size_t)oldsize, (size_t)newsize);
+	if ((flags & KMR_KOBJECT) == 0) {
+		object = VME_OBJECT(entry);
+		vm_object_reference(object);
 	}
 
 	/*
-	 *	Find the VM object backing the old region.
+	 *	Shrinking an atomic entry starts with splitting it,
+	 *	and removing the second half.
 	 */
-
-	vm_map_lock(map);
-
-	if (!vm_map_lookup_entry(map, addr, &entry)) {
-		panic("kmem_realloc");
-	}
-	object = VME_OBJECT(entry);
-	vm_object_reference(object);
-
-	/*
-	 * This function has limited support for what it can do
-	 * and assumes the object is fully mapped in the range.
-	 *
-	 * Its only caller is OSData::clipForCopyout()
-	 * and only supports this use-case.
-	 */
-	assert(entry->vme_start == addr &&
-	    entry->vme_end == addr + oldsize &&
-	    entry->vme_offset == 0);
-
 	was_atomic = entry->vme_atomic;
 	entry->vme_atomic = false;
 	vm_map_clip_end(map, entry, entry->vme_start + newsize);
 	entry->vme_atomic = was_atomic;
 
-	(void)vm_map_remove_and_unlock(map, addr + newsize, addr + oldsize,
-	    VM_MAP_REMOVE_KUNWIRE);
-
-	vm_object_lock(object);
-	/* see kmem_realloc(): guarantees concurrent reallocs will panic */
-	if (object->vo_size != oldsize) {
-		panic("kmem_realloc");
-	}
-	vm_object_page_remove(object, newsize, oldsize);
-	object->vo_size = newsize;
-	vm_object_unlock(object);
-	vm_object_deallocate(object);
-}
-
-/*
- *	kmem_alloc:
- *
- *	Allocate wired-down memory in the kernel's address map
- *	or a submap.  The memory is not zero-filled.
- */
-
-__exported kern_return_t
-kmem_alloc_external(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size);
-kern_return_t
-kmem_alloc_external(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size)
-{
-	return kmem_alloc(map, addrp, size, KMA_NONE, vm_tag_bt());
-}
+	(void)vm_map_remove_and_unlock(map,
+	    oldaddr + newsize, oldaddr + oldsize,
+	    VM_MAP_REMOVE_KUNWIRE, KMEM_GUARD_NONE);
 
 
-/*
- *	kmem_alloc_kobject:
- *
- *	Allocate wired-down memory in the kernel's address map
- *	or a submap.  The memory is not zero-filled.
- *
- *	The memory is allocated in the kernel_object.
- *	It may not be copied with vm_map_copy, and
- *	it may not be reallocated with kmem_realloc.
- */
-
-__exported kern_return_t
-kmem_alloc_kobject_external(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size);
-kern_return_t
-kmem_alloc_kobject_external(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size)
-{
-	return kmem_alloc(map, addrp, size, KMA_KOBJECT, vm_tag_bt());
-}
-
-/*
- *	kmem_alloc_pageable:
- *
- *	Allocate pageable memory in the kernel's address map.
- */
-
-__exported kern_return_t
-kmem_alloc_pageable_external(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size);
-kern_return_t
-kmem_alloc_pageable_external(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size)
-{
-	return kmem_alloc(map, addrp, size, KMA_PAGEABLE, vm_tag_bt());
-}
-
-/*
- *	kmem_free:
- *
- *	Release a region of kernel virtual memory allocated
- *	with kmem_alloc, kmem_alloc_kobject, or kmem_alloc_pageable,
- *	and return the physical pages associated with that region.
- */
-
-void
-kmem_free(
-	vm_map_t        map,
-	vm_offset_t     addr,
-	vm_size_t       size)
-{
-	assert(addr >= VM_MIN_KERNEL_AND_KEXT_ADDRESS);
-	assert(map->pmap == kernel_pmap);
-
-	if (size == 0) {
-#if MACH_ASSERT
-		printf("kmem_free called with size==0 for map: %p with addr: 0x%llx\n", map, (uint64_t)addr);
-#endif
-		return;
-	}
-
-	(void)vm_map_remove_flags(map,
-	    vm_map_trunc_page(addr, VM_MAP_PAGE_MASK(map)),
-	    vm_map_round_page(addr + size, VM_MAP_PAGE_MASK(map)),
-	    VM_MAP_REMOVE_KUNWIRE);
-}
-
-/*
- *	Allocate new pages in an object.
- */
-
-kern_return_t
-kmem_alloc_pages(
-	vm_object_t             object,
-	vm_object_offset_t      offset,
-	vm_object_size_t        size)
-{
-	vm_object_size_t                alloc_size;
-
-	alloc_size = vm_object_round_page(size);
-	vm_object_lock(object);
-	while (alloc_size) {
-		vm_page_t   mem;
-
-
-		/*
-		 *	Allocate a page
-		 */
-		while (VM_PAGE_NULL ==
-		    (mem = vm_page_alloc(object, offset))) {
-			vm_object_unlock(object);
-			VM_PAGE_WAIT();
-			vm_object_lock(object);
+	/*
+	 *	Lastly, if there are guard pages, deal with them.
+	 *
+	 *	The kernel object just needs to depopulate,
+	 *	regular objects require freeing the last page
+	 *	and replacing it with a guard.
+	 */
+	if (flags & KMR_KOBJECT) {
+		if (flags & KMR_GUARD_LAST) {
+			kernel_memory_depopulate(oldaddr + newsize - PAGE_SIZE,
+			    PAGE_SIZE, KMA_KOBJECT, guard.kmg_tag);
 		}
-		mem->vmp_busy = FALSE;
+	} else {
+		vm_page_t guard_right = VM_PAGE_NULL;
+		vm_offset_t remove_start = newsize;
 
-		alloc_size -= PAGE_SIZE;
-		offset += PAGE_SIZE;
+		if (flags & KMR_GUARD_LAST) {
+			guard_right = vm_page_grab_guard(true);
+			remove_start -= PAGE_SIZE;
+		}
+
+		vm_object_lock(object);
+
+		if (object->vo_size != oldsize) {
+			__kmem_realloc_invalid_object_size_panic(map,
+			    oldaddr, oldsize, entry, object);
+		}
+		object->vo_size = newsize;
+
+		vm_object_page_remove(object, remove_start, oldsize);
+
+		if (flags & KMR_GUARD_LAST) {
+			vm_page_insert(guard_right, object, newsize - PAGE_SIZE);
+			guard_right->vmp_busy = false;
+		}
+		vm_object_unlock(object);
+		vm_object_deallocate(object);
 	}
-	vm_object_unlock(object);
-	return KERN_SUCCESS;
+
+	return kmr;
 }
 
 kmem_return_t
-kmem_suballoc(
-	vm_map_t                parent,
-	vm_offset_t             *addr,
-	vm_size_t               size,
-	vm_map_create_options_t vmc_options,
-	int                     vm_flags,
-	kms_flags_t             flags,
-	vm_tag_t                tag)
+kmem_realloc_guard(
+	vm_map_t                map,
+	vm_offset_t             oldaddr,
+	vm_size_t               oldsize,
+	vm_size_t               newsize,
+	kmr_flags_t             flags,
+	kmem_guard_t            guard)
 {
-	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vm_map_offset_t map_addr = 0;
-	kmem_return_t kmr = { };
-	vm_map_t map;
+	vm_object_t             object;
+	vm_map_offset_t         newaddr;
+	vm_object_offset_t      newoffs;
+	vm_map_entry_t          oldentry;
+	vm_map_entry_t          newentry;
+	vm_page_t               page_list = NULL;
+	bool                    needs_wakeup = false;
+	kmem_return_t           kmr = { };
+	unsigned int            last_timestamp;
+	vm_map_kernel_flags_t   vmk_flags = {
+		.vmkf_last_free = (bool)(flags & KMR_LAST_FREE),
+	};
 
-	assert(page_aligned(size));
-	assert(parent->pmap == kernel_pmap);
-
-	if ((vm_flags & VM_FLAGS_ANYWHERE) == 0) {
-		map_addr = trunc_page(*addr);
+	assert(KMEM_REALLOC_FLAGS_VALID(flags));
+	if (!guard.kmg_atomic && (flags & (KMR_DATA | KMR_KOBJECT)) != KMR_DATA) {
+		__kmem_invalid_arguments_panic("realloc", map, oldaddr,
+		    oldsize, flags);
 	}
 
-	pmap_reference(vm_map_pmap(parent));
-	map = vm_map_create_options(vm_map_pmap(parent), 0, size, vmc_options);
-
-	/*
-	 * 1. vm_map_enter() will consume one ref on success.
-	 *
-	 * 2. make the entry atomic as kernel submaps should never be split.
-	 *
-	 * 3. instruct vm_map_enter() that it is a fresh submap
-	 *    that needs to be taught its bounds as it inserted.
-	 */
-	vm_map_reference(map);
-	vmk_flags.vmkf_atomic_entry = true;
-	vmk_flags.vmkf_submap = true;
-	vmk_flags.vmkf_submap_adjust = true;
-	if (flags & KMS_LAST_FREE) {
-		vmk_flags.vmkf_last_free = true;
-	}
-	if (flags & KMS_PERMANENT) {
-		vmk_flags.vmkf_permanent = true;
-	}
-	if (flags & KMS_DATA) {
-		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
+	if (oldaddr == 0ul) {
+		return kmem_alloc_guard(map, newsize, 0, (kma_flags_t)flags, guard);
 	}
 
-	kmr.kmr_return = vm_map_enter(parent, &map_addr, size, 0,
-	    vm_flags, vmk_flags, tag, (vm_object_t)map, 0, FALSE,
-	    VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+	if (newsize == 0ul) {
+		kmem_free_guard(map, oldaddr, oldsize, KMF_NONE, guard);
+		return kmr;
+	}
 
-	if (kmr.kmr_return != KERN_SUCCESS) {
-		if (flags & KMS_NOFAIL) {
-			panic("kmem_suballoc(map=%p, size=%zd) failed with %d",
-			    parent, (size_t)size, kmr.kmr_return);
-		}
-		assert(os_ref_get_count_raw(&map->map_refcnt) == 2);
-		vm_map_deallocate(map);
-		vm_map_deallocate(map); /* also removes ref to pmap */
+	if (newsize >> VM_KERNEL_POINTER_SIGNIFICANT_BITS) {
+		__kmem_invalid_size_panic(map, newsize, flags);
+	}
+	if (newsize < __kmem_guard_size(ANYF(flags))) {
+		__kmem_invalid_size_panic(map, newsize, flags);
+	}
+
+	oldsize = round_page(oldsize);
+	newsize = round_page(newsize);
+
+	if (oldsize == newsize) {
+		kmr.kmr_address = oldaddr;
 		return kmr;
 	}
 
 	/*
-	 * For kmem_suballocs that register a claim and are assigned a range, ensure
-	 * that the exact same range is returned.
+	 *	If we're growing the allocation,
+	 *	then reserve the pages we'll need,
+	 *	and find a spot for its new place.
 	 */
-	if (*addr != 0 && parent == kernel_map &&
-	    startup_phase > STARTUP_SUB_KMEM) {
-		assert(CAST_DOWN(vm_offset_t, map_addr) == *addr);
+	if (oldsize < newsize) {
+#if DEBUG || DEVELOPMENT
+		VM_DEBUG_CONSTANT_EVENT(vm_kern_request,
+		    VM_KERN_REQUEST, DBG_FUNC_START,
+		    newsize - oldsize, 0, 0, 0);
+#endif
+		kmr.kmr_return = vm_page_alloc_list(atop(newsize - oldsize),
+		    (kma_flags_t)flags, &page_list);
+		if (kmr.kmr_return == KERN_SUCCESS) {
+			kmem_apply_security_policy(map, (kma_flags_t)flags, guard,
+			    &vmk_flags, true);
+			kmr.kmr_return = vm_map_find_space(map, 0, newsize, 0,
+			    vmk_flags, &newentry);
+		}
+		if (__improbable(kmr.kmr_return != KERN_SUCCESS)) {
+			if (flags & KMR_REALLOCF) {
+				kmem_free_guard(map, oldaddr, oldsize,
+				    KMF_NONE, guard);
+			}
+			if (page_list) {
+				vm_page_free_list(page_list, FALSE);
+			}
+#if DEBUG || DEVELOPMENT
+			VM_DEBUG_CONSTANT_EVENT(vm_kern_request,
+			    VM_KERN_REQUEST, DBG_FUNC_END,
+			    0, 0, 0, 0);
+#endif
+			return kmr;
+		}
+
+		/* map is locked */
 	} else {
-		*addr = CAST_DOWN(vm_offset_t, map_addr);
+		vm_map_lock(map);
 	}
 
-	kmr.kmr_submap = map;
+
+	/*
+	 *	Locate the entry:
+	 *	- wait for it to quiesce.
+	 *	- validate its guard,
+	 *	- learn its correct tag,
+	 */
+again:
+	if (!vm_map_lookup_entry(map, oldaddr, &oldentry)) {
+		__kmem_entry_not_found_panic(map, oldaddr);
+	}
+	if ((flags & KMR_KOBJECT) && oldentry->in_transition) {
+		oldentry->needs_wakeup = true;
+		vm_map_entry_wait(map, THREAD_UNINT);
+		goto again;
+	}
+	kmem_entry_validate_guard(map, oldentry, oldaddr, oldsize, guard);
+	if (!__kmem_entry_validate_object(oldentry, ANYF(flags))) {
+		__kmem_entry_validate_object_panic(map, oldentry, ANYF(flags));
+	}
+	/*
+	 *	TODO: We should validate for non atomic entries that the range
+	 *	      we are acting on is what we expect here.
+	 */
+
+	guard.kmg_tag = VME_ALIAS(oldentry);
+
+	if (newsize < oldsize) {
+		return kmem_realloc_shrink_guard(map, oldaddr, oldsize, newsize,
+		           flags, guard, oldentry);
+	}
+
+	/*
+	 *	We are growing the entry
+	 *
+	 *	For regular objects we use the object `vo_size` updates
+	 *	as a guarantee that no 2 kmem_realloc() can happen
+	 *	concurrently (by doing it before the map is unlocked.
+	 *
+	 *	For the kernel object, prevent the entry from being
+	 *	reallocated or changed by marking it "in_transition".
+	 */
+
+	object = VME_OBJECT(oldentry);
+	vm_object_lock(object);
+	vm_object_reference_locked(object);
+
+	newaddr = newentry->vme_start;
+	newoffs = oldsize;
+
+	VME_OBJECT_SET(newentry, object, guard.kmg_atomic, guard.kmg_context);
+	VME_ALIAS_SET(newentry, guard.kmg_tag);
+	if (flags & KMR_KOBJECT) {
+		oldentry->in_transition = true;
+		VME_OFFSET_SET(newentry, newaddr);
+		newentry->wired_count = 1;
+		newoffs = newaddr + oldsize;
+	} else {
+		if (object->vo_size != oldsize) {
+			__kmem_realloc_invalid_object_size_panic(map,
+			    oldaddr, oldsize, oldentry, object);
+		}
+		object->vo_size = newsize;
+	}
+
+	last_timestamp = map->timestamp;
+	vm_map_unlock(map);
+
+
+	/*
+	 *	Now proceed with the population of pages.
+	 *
+	 *	Kernel objects can use the kmem population helpers.
+	 *
+	 *	Regular objects will insert pages manually,
+	 *	then wire the memory into the new range.
+	 */
+
+	vm_size_t guard_right_size = __kmem_guard_right(ANYF(flags));
+
+	if (flags & KMR_KOBJECT) {
+		assert(flags & KMR_FREEOLD);
+
+		pmap_protect(kernel_pmap,
+		    oldaddr, oldaddr + oldsize - guard_right_size,
+		    VM_PROT_NONE);
+
+		for (vm_object_offset_t offset = 0;
+		    offset < oldsize - guard_right_size;
+		    offset += PAGE_SIZE_64) {
+			vm_page_t mem;
+
+			mem = vm_page_lookup(object, oldaddr + offset);
+			if (mem == VM_PAGE_NULL) {
+				continue;
+			}
+
+			pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(mem));
+
+			mem->vmp_busy = true;
+			vm_page_remove(mem, true);
+			vm_page_insert_wired(mem, object, newaddr + offset,
+			    guard.kmg_tag);
+			mem->vmp_busy = false;
+
+			kernel_memory_populate_pmap_enter(object, newaddr,
+			    offset, mem, VM_PROT_DEFAULT, 0);
+		}
+
+		kernel_memory_populate_object_and_unlock(object,
+		    newaddr + oldsize - guard_right_size,
+		    newoffs - guard_right_size,
+		    newsize - oldsize,
+		    page_list, (kma_flags_t)flags,
+		    guard.kmg_tag, VM_PROT_DEFAULT);
+	} else {
+		vm_page_t guard_right = VM_PAGE_NULL;
+		kern_return_t kr;
+
+		/*
+		 *	Note: we are borrowing the new entry reference
+		 *	on the object for the duration of this code,
+		 *	which works because we keep the object locked
+		 *	throughout.
+		 */
+		if ((flags & KMR_GUARD_LAST) && !map->never_faults) {
+			guard_right = vm_page_lookup(object, oldsize - PAGE_SIZE);
+			assert(guard_right->vmp_fictitious);
+			guard_right->vmp_busy = true;
+			vm_page_remove(guard_right, true);
+		}
+
+		for (vm_object_offset_t offset = oldsize - guard_right_size;
+		    offset < newsize - guard_right_size;
+		    offset += PAGE_SIZE_64) {
+			vm_page_t mem = page_list;
+
+			page_list = mem->vmp_snext;
+			mem->vmp_snext = VM_PAGE_NULL;
+
+			vm_page_insert(mem, object, offset);
+			mem->vmp_busy = false;
+		}
+
+		if (guard_right) {
+			vm_page_insert(guard_right, object, newsize - PAGE_SIZE);
+			guard_right->vmp_busy = false;
+		}
+
+		vm_object_unlock(object);
+
+		kr = vm_map_wire_kernel(map, newaddr, newaddr + newsize,
+		    VM_PROT_DEFAULT, guard.kmg_tag, FALSE);
+		assert(kr == KERN_SUCCESS);
+	}
+
+#if KASAN
+	kasan_notify_address(newaddr, newsize);
+#endif
+
+
+	/*
+	 *	Mark the entry as idle again,
+	 *	and honor KMR_FREEOLD if needed.
+	 */
+
+	vm_map_lock(map);
+	if (last_timestamp + 1 != map->timestamp &&
+	    !vm_map_lookup_entry(map, oldaddr, &oldentry)) {
+		__kmem_entry_not_found_panic(map, oldaddr);
+	}
+
+	if (flags & KMR_KOBJECT) {
+		assert(oldentry->in_transition);
+		oldentry->in_transition = false;
+		if (oldentry->needs_wakeup) {
+			needs_wakeup = true;
+			oldentry->needs_wakeup = false;
+		}
+	}
+
+	if (flags & KMR_FREEOLD) {
+		(void)vm_map_remove_and_unlock(map,
+		    oldaddr, oldaddr + oldsize,
+		    VM_MAP_REMOVE_KUNWIRE, guard);
+	} else {
+		vm_map_unlock(map);
+	}
+
+	if (needs_wakeup) {
+		vm_map_entry_wakeup(map);
+	}
+
+
+#if DEBUG || DEVELOPMENT
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_END,
+	    atop(newsize - oldsize), 0, 0, 0);
+#endif
+	kmr.kmr_address = newaddr;
 	return kmr;
 }
+
+#pragma mark free
+
+vm_size_t
+kmem_free_guard(
+	vm_map_t        map,
+	vm_offset_t     addr,
+	vm_size_t       size,
+	kmf_flags_t     flags,
+	kmem_guard_t    guard)
+{
+	vmr_flags_t vmr_flags = VM_MAP_REMOVE_KUNWIRE;
+
+	assert(addr >= VM_MIN_KERNEL_AND_KEXT_ADDRESS);
+	assert(map->pmap == kernel_pmap);
+
+	if (flags & KMF_GUESS_SIZE) {
+		vmr_flags |= VM_MAP_REMOVE_GUESS_SIZE;
+		size = PAGE_SIZE;
+	} else if (size == 0) {
+		__kmem_invalid_size_panic(map, size, flags);
+	} else {
+		size = round_page(size);
+	}
+
+	return vm_map_remove_guard(map, addr, addr + size,
+	           vmr_flags, guard).kmr_size;
+}
+
+__exported void
+kmem_free_external(
+	vm_map_t        map,
+	vm_offset_t     addr,
+	vm_size_t       size);
+void
+kmem_free_external(
+	vm_map_t        map,
+	vm_offset_t     addr,
+	vm_size_t       size)
+{
+	if (size) {
+		kmem_free(map, trunc_page(addr), size);
+#if MACH_ASSERT
+	} else {
+		printf("kmem_free(map=%p, addr=%p) called with size=0, lr: %p\n",
+		    map, (void *)addr, __builtin_return_address(0));
+#endif
+	}
+}
+
+
+#pragma mark kmem init
 
 /*
  * The default percentage of memory that can be mlocked is scaled based on the total
@@ -1343,7 +1836,8 @@ kmem_fuzz_start(void)
  */
 __startup_func
 uint16_t
-kmem_get_random16(uint16_t upper_limit)
+kmem_get_random16(
+	uint16_t        upper_limit)
 {
 	static uint64_t random_entropy;
 	assert(upper_limit < UINT16_MAX);
@@ -1360,7 +1854,9 @@ kmem_get_random16(uint16_t upper_limit)
  */
 __startup_func
 void
-kmem_shuffle(uint16_t *shuffle_buf, uint16_t count)
+kmem_shuffle(
+	uint16_t       *shuffle_buf,
+	uint16_t        count)
 {
 	for (uint16_t i = 0; i < count; i++) {
 		uint16_t j = kmem_get_random16(i);
@@ -1387,7 +1883,8 @@ kmem_shuffle_claims(void)
 
 __startup_func
 static void
-kmem_readjust_ranges(uint32_t cur_idx)
+kmem_readjust_ranges(
+	uint32_t        cur_idx)
 {
 	assert(cur_idx != 0);
 	uint32_t j = cur_idx - 1, random;
@@ -1430,26 +1927,73 @@ kmem_readjust_ranges(uint32_t cur_idx)
 	kmem_claims[random] = sp;
 }
 
-#define KMEM_ROUND_GRANULE (32ul << 20)
-#define KMEM_ROUND(x) \
-	((x + KMEM_ROUND_GRANULE - 1) & -KMEM_ROUND_GRANULE)
+__startup_func
+static void
+kmem_add_extra_claims(void)
+{
+	vm_map_size_t largest_free_size = 0, total_claims = 0;
+
+	vm_map_sizes(kernel_map, NULL, NULL, &largest_free_size);
+	largest_free_size = trunc_page(largest_free_size);
+
+	/*
+	 * Determine size of data and pointer kmem_ranges
+	 */
+	for (uint32_t i = 0; i < kmem_claim_count; i++) {
+		total_claims += kmem_claims[i].kc_size;
+	}
+	assert((total_claims & PAGE_MASK) == 0);
+	largest_free_size -= total_claims;
+
+	/*
+	 * kasan and configs w/o *TRR need to have just one ptr range due to
+	 * resource constraints.
+	 */
+#if !ZSECURITY_CONFIG(KERNEL_PTR_SPLIT)
+	kmem_ptr_ranges = 1;
+#endif
+
+	ptr_range_size = round_page(largest_free_size /
+	    (kmem_ptr_ranges * 3));
+	data_range_size = largest_free_size -
+	    (ptr_range_size * kmem_ptr_ranges);
+
+
+	/*
+	 * Add claims for data and pointer
+	 */
+	struct kmem_range_startup_spec kmem_spec_data = {
+		.kc_name = "kmem_data_range",
+		.kc_range = &kmem_ranges[KMEM_RANGE_ID_DATA],
+		.kc_size = data_range_size,
+		.kc_flags = KC_NO_ENTRY,
+	};
+	kmem_claims[kmem_claim_count++] = kmem_spec_data;
+
+	for (uint32_t i = 0; i < kmem_ptr_ranges; i++) {
+		struct kmem_range_startup_spec kmem_spec_ptr = {
+			.kc_name = "kmem_ptr_range",
+			.kc_range = &kmem_ranges[KMEM_RANGE_ID_PTR_0 + i],
+			.kc_size = ptr_range_size,
+			.kc_flags = KC_NO_ENTRY,
+		};
+		kmem_claims[kmem_claim_count++] = kmem_spec_ptr;
+	}
+}
 
 __startup_func
 static void
 kmem_scramble_ranges(void)
 {
-	vm_map_size_t largest_free_size = 0, total_size, total_free;
-	vm_map_size_t total_claims = 0, data_range_size = 0;
 	vm_map_offset_t start = 0;
-	struct kmem_range kmem_range_ptr = {};
 
 	/*
-	 * Initiatize KMEM_RANGE_ID_UNSORTED range to use the entire map so that
+	 * Initiatize KMEM_RANGE_ID_NONE range to use the entire map so that
 	 * the vm can find the requested ranges.
 	 */
-	kmem_ranges[KMEM_RANGE_ID_PTR].min_address = MAX(kernel_map->min_offset,
+	kmem_ranges[KMEM_RANGE_ID_NONE].min_address = MAX(kernel_map->min_offset,
 	    VM_MAP_PAGE_SIZE(kernel_map));
-	kmem_ranges[KMEM_RANGE_ID_PTR].max_address = kernel_map->max_offset;
+	kmem_ranges[KMEM_RANGE_ID_NONE].max_address = kernel_map->max_offset;
 
 	/*
 	 * Allocating the g_kext_map prior to randomizing the remaining submaps as
@@ -1469,40 +2013,10 @@ kmem_scramble_ranges(void)
 	 */
 	start = kmem_fuzz_start();
 
-	vm_map_sizes(kernel_map, &total_size, &total_free, &largest_free_size);
-	largest_free_size = trunc_page(largest_free_size);
-
 	/*
-	 * Determine size of data and pointer kmem_ranges
+	 * Add claims for ptr and data kmem_ranges
 	 */
-	for (uint32_t i = 0; i < kmem_claim_count; i++) {
-		total_claims += kmem_claims[i].kc_size;
-	}
-	largest_free_size -= total_claims;
-	data_range_size = round_page((2 * largest_free_size) / 3);
-	largest_free_size -= data_range_size;
-
-	/*
-	 * Add claims for data and pointer
-	 */
-	struct kmem_range_startup_spec kmem_spec_data = {
-		.kc_name = "kmem_data_range",
-		.kc_range = &kmem_ranges[KMEM_RANGE_ID_DATA],
-		.kc_size = data_range_size,
-		.kc_flags = KC_NO_ENTRY,
-	};
-	/*
-	 * Don't use &kmem_ranges[KMEM_RANGE_ID_PTR] as changing that range affects
-	 * vm_map_locate_space for the initialization below.
-	 */
-	kmem_claims[kmem_claim_count++] = kmem_spec_data;
-	struct kmem_range_startup_spec kmem_spec_ptr = {
-		.kc_name = "kmem_ptr_range",
-		.kc_range = &kmem_range_ptr,
-		.kc_size = largest_free_size,
-		.kc_flags = KC_NO_ENTRY,
-	};
-	kmem_claims[kmem_claim_count++] = kmem_spec_ptr;
+	kmem_add_extra_claims();
 
 	/*
 	 * Shuffle registered claims
@@ -1552,15 +2066,15 @@ kmem_scramble_ranges(void)
 			    sp.kc_name);
 		}
 		vm_object_reference(kernel_object);
-		VME_OBJECT_SET(entry, kernel_object);
+		VME_OBJECT_SET(entry, kernel_object, false, 0);
 		VME_OFFSET_SET(entry, entry->vme_start);
 		vm_map_unlock(kernel_map);
 	}
 	/*
-	 * Now that we are done assigning all the ranges, fixup
-	 * kmem_ranges[KMEM_RANGE_ID_PTR]
+	 * Now that we are done assigning all the ranges, reset
+	 * kmem_ranges[KMEM_RANGE_ID_NONE]
 	 */
-	kmem_ranges[KMEM_RANGE_ID_PTR] = kmem_range_ptr;
+	kmem_ranges[KMEM_RANGE_ID_NONE] = (struct kmem_range) {};
 
 #if DEBUG || DEVELOPMENT
 	for (uint32_t i = 0; i < kmem_claim_count; i++) {
@@ -1587,15 +2101,22 @@ kmem_range_init(void)
 {
 	kmem_scramble_ranges();
 
-	/* Initialize kmem_large_ranges. Skip 1/8th from the left as we currently
-	 * have one front
+	/* Initialize kmem_large_ranges. Skip 1/16th of range size on either side
+	 * for ptr ranges and 1/8th only from left for data as we a single front
+	 * for data.
 	 */
-	for (kmem_range_id_t i = 0; i < KMEM_RANGE_COUNT; i++) {
-		vm_size_t range_adjustment = kmem_range_size(&kmem_ranges[i]) >> 3;
-		kmem_large_ranges[i].min_address = kmem_ranges[i].min_address +
-		    range_adjustment;
-		kmem_large_ranges[i].max_address = kmem_ranges[i].max_address;
+	vm_size_t range_adjustment = ptr_range_size >> 4;
+	for (kmem_range_id_t i = 0; i < kmem_ptr_ranges; i++) {
+		kmem_large_ranges[KMEM_RANGE_ID_PTR_0 + i].min_address =
+		    kmem_ranges[KMEM_RANGE_ID_PTR_0 + i].min_address + range_adjustment;
+		kmem_large_ranges[KMEM_RANGE_ID_PTR_0 + i].max_address =
+		    kmem_ranges[KMEM_RANGE_ID_PTR_0 + i].max_address - range_adjustment;
 	}
+	range_adjustment = data_range_size >> 3;
+	kmem_large_ranges[KMEM_RANGE_ID_DATA].min_address =
+	    kmem_ranges[KMEM_RANGE_ID_DATA].min_address + range_adjustment;
+	kmem_large_ranges[KMEM_RANGE_ID_DATA].max_address =
+	    kmem_ranges[KMEM_RANGE_ID_DATA].max_address;
 
 #if DEBUG || DEVELOPMENT
 	for (kmem_range_id_t i = 0; i < KMEM_RANGE_COUNT; i++) {
@@ -1985,3 +2506,260 @@ vm_packing_verify_range(
 		    (void *)vm_packing_max_packable(params));
 	}
 }
+
+#pragma mark tests
+#if DEBUG || DEVELOPMENT
+#include <sys/errno.h>
+
+static void
+kmem_test_for_entry(
+	vm_map_t                map,
+	vm_offset_t             addr,
+	void                  (^block)(vm_map_entry_t))
+{
+	vm_map_entry_t entry;
+
+	vm_map_lock(map);
+	block(vm_map_lookup_entry(map, addr, &entry) ? entry : NULL);
+	vm_map_unlock(map);
+}
+
+#define kmem_test_assert_map(map, pg, entries) ({ \
+	assert3u((map)->size, ==, ptoa(pg)); \
+	assert3u((map)->hdr.nentries, ==, entries); \
+})
+
+static bool
+can_write_at(vm_offset_t offs, uint32_t page)
+{
+	static const int zero;
+
+	return verify_write(&zero, (void *)(offs + ptoa(page) + 128), 1) == 0;
+}
+#define assert_writeable(offs, page) \
+	assertf(can_write_at(offs, page), \
+	    "can write at %p + ptoa(%d)", (void *)offs, page)
+
+#define assert_faults(offs, page) \
+	assertf(!can_write_at(offs, page), \
+	    "can write at %p + ptoa(%d)", (void *)offs, page)
+
+#define peek(offs, page) \
+	(*(uint32_t *)((offs) + ptoa(page)))
+
+#define poke(offs, page, v) \
+	(*(uint32_t *)((offs) + ptoa(page)) = (v))
+
+__attribute__((noinline))
+static void
+kmem_alloc_basic_test(vm_map_t map)
+{
+	kmem_guard_t guard = {
+		.kmg_tag = VM_KERN_MEMORY_DIAG,
+	};
+	vm_offset_t addr;
+
+	/*
+	 * Test wired basics:
+	 * - KMA_KOBJECT
+	 * - KMA_GUARD_FIRST, KMA_GUARD_LAST
+	 * - allocation alignment
+	 */
+	addr = kmem_alloc_guard(map, ptoa(10), ptoa(2) - 1,
+	    KMA_KOBJECT | KMA_GUARD_FIRST | KMA_GUARD_LAST, guard).kmr_address;
+	assertf(addr != 0ull, "kma(%p, 10p, 0, KO | GF | GL)", map);
+	assert3u((addr + PAGE_SIZE) % ptoa(2), ==, 0);
+	kmem_test_assert_map(map, 10, 1);
+
+	kmem_test_for_entry(map, addr, ^(vm_map_entry_t e){
+		assertf(e, "unable to find address %p in map %p", (void *)addr, map);
+		assert(e->vme_kernel_object);
+		assert(!e->vme_atomic);
+		assert3u(e->vme_start, <=, addr);
+		assert3u(addr + ptoa(10), <=, e->vme_end);
+	});
+
+	assert_faults(addr, 0);
+	for (int i = 1; i < 9; i++) {
+		assert_writeable(addr, i);
+	}
+	assert_faults(addr, 9);
+
+	kmem_free(map, addr, ptoa(10));
+	kmem_test_assert_map(map, 0, 0);
+
+	/*
+	 * Test pageable basics.
+	 */
+	addr = kmem_alloc_guard(map, ptoa(10), 0,
+	    KMA_PAGEABLE, guard).kmr_address;
+	assertf(addr != 0ull, "kma(%p, 10p, 0, KO | PG)", map);
+	kmem_test_assert_map(map, 10, 1);
+
+	for (int i = 0; i < 9; i++) {
+		assert_faults(addr, i);
+		poke(addr, i, 42);
+		assert_writeable(addr, i);
+	}
+
+	kmem_free(map, addr, ptoa(10));
+	kmem_test_assert_map(map, 0, 0);
+}
+
+__attribute__((noinline))
+static void
+kmem_realloc_basic_test(vm_map_t map, kmr_flags_t kind)
+{
+	kmem_guard_t guard = {
+		.kmg_atomic  = !(kind & KMR_DATA),
+		.kmg_tag     = VM_KERN_MEMORY_DIAG,
+		.kmg_context = 0xefface,
+	};
+	vm_offset_t addr, newaddr;
+	const int N = 10;
+
+	/*
+	 *	This isn't something kmem_realloc_guard() _needs_ to do,
+	 *	we could conceive an implementation where it grows in place
+	 *	if there's space after it.
+	 *
+	 *	However, this is what the implementation does today.
+	 */
+	bool realloc_growth_changes_address = true;
+	bool GL = (kind & KMR_GUARD_LAST);
+
+	/*
+	 *	Initial N page allocation
+	 */
+	addr = kmem_alloc_guard(map, ptoa(N), 0,
+	    (kind & (KMA_KOBJECT | KMA_GUARD_LAST)) | KMA_ZERO,
+	    guard).kmr_address;
+	assert3u(addr, !=, 0);
+	kmem_test_assert_map(map, N, 1);
+	for (int pg = 0; pg < N - GL; pg++) {
+		poke(addr, pg, 42 + pg);
+	}
+	for (int pg = N - GL; pg < N; pg++) {
+		assert_faults(addr, pg);
+	}
+
+
+	/*
+	 *	Grow to N + 3 pages
+	 */
+	newaddr = kmem_realloc_guard(map, addr, ptoa(N), ptoa(N + 3),
+	    kind | KMR_ZERO, guard).kmr_address;
+	assert3u(newaddr, !=, 0);
+	if (realloc_growth_changes_address) {
+		assert3u(addr, !=, newaddr);
+	}
+	if ((kind & KMR_FREEOLD) || (addr == newaddr)) {
+		kmem_test_assert_map(map, N + 3, 1);
+	} else {
+		kmem_test_assert_map(map, 2 * N + 3, 2);
+	}
+	for (int pg = 0; pg < N - GL; pg++) {
+		assert3u(peek(newaddr, pg), ==, 42 + pg);
+	}
+	if ((kind & KMR_FREEOLD) == 0) {
+		for (int pg = 0; pg < N - GL; pg++) {
+			assert3u(peek(addr, pg), ==, 42 + pg);
+		}
+		/* check for tru-share */
+		poke(addr + 16, 0, 1234);
+		assert3u(peek(newaddr + 16, 0), ==, 1234);
+		kmem_free_guard(map, addr, ptoa(N), KMF_NONE, guard);
+		kmem_test_assert_map(map, N + 3, 1);
+	}
+	if (addr != newaddr) {
+		for (int pg = 0; pg < N - GL; pg++) {
+			assert_faults(addr, pg);
+		}
+	}
+	for (int pg = N - GL; pg < N + 3 - GL; pg++) {
+		assert3u(peek(newaddr, pg), ==, 0);
+	}
+	for (int pg = N + 3 - GL; pg < N + 3; pg++) {
+		assert_faults(newaddr, pg);
+	}
+	addr = newaddr;
+
+
+	/*
+	 *	Shrink to N - 2 pages
+	 */
+	newaddr = kmem_realloc_guard(map, addr, ptoa(N + 3), ptoa(N - 2),
+	    kind | KMR_ZERO, guard).kmr_address;
+	assert3u(map->size, ==, ptoa(N - 2));
+	assert3u(newaddr, ==, addr);
+	kmem_test_assert_map(map, N - 2, 1);
+
+	for (int pg = 0; pg < N - 2 - GL; pg++) {
+		assert3u(peek(addr, pg), ==, 42 + pg);
+	}
+	for (int pg = N - 2 - GL; pg < N + 3; pg++) {
+		assert_faults(addr, pg);
+	}
+
+	kmem_free_guard(map, addr, ptoa(N - 2), KMF_NONE, guard);
+	kmem_test_assert_map(map, 0, 0);
+}
+
+static int
+kmem_basic_test(__unused int64_t in, int64_t *out)
+{
+	vm_offset_t addr;
+	vm_map_t map;
+
+	printf("%s: test running\n", __func__);
+
+	map = kmem_suballoc(kernel_map, &addr, 64U << 20,
+	        VM_MAP_CREATE_DEFAULT, VM_FLAGS_ANYWHERE,
+	        KMS_NOFAIL | KMS_DATA, VM_KERN_MEMORY_DIAG).kmr_submap;
+
+	printf("%s: kmem_alloc ...\n", __func__);
+	kmem_alloc_basic_test(map);
+	printf("%s:     PASS\n", __func__);
+
+	printf("%s: kmem_realloc (KMR_KOBJECT | KMR_FREEOLD) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_KOBJECT | KMR_FREEOLD);
+	printf("%s:     PASS\n", __func__);
+
+	printf("%s: kmem_realloc (KMR_FREEOLD) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_FREEOLD);
+	printf("%s:     PASS\n", __func__);
+
+	printf("%s: kmem_realloc (KMR_NONE) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_NONE);
+	printf("%s:     PASS\n", __func__);
+
+	printf("%s: kmem_realloc (KMR_KOBJECT | KMR_FREEOLD | KMR_GUARD_LAST) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_KOBJECT | KMR_FREEOLD | KMR_GUARD_LAST);
+	printf("%s:     PASS\n", __func__);
+
+	printf("%s: kmem_realloc (KMR_FREEOLD | KMR_GUARD_LAST) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_FREEOLD | KMR_GUARD_LAST);
+	printf("%s:     PASS\n", __func__);
+
+	printf("%s: kmem_realloc (KMR_GUARD_LAST) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_GUARD_LAST);
+	printf("%s:     PASS\n", __func__);
+
+	/* using KMR_DATA signals to test the non atomic realloc path */
+	printf("%s: kmem_realloc (KMR_DATA | KMR_FREEOLD) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_DATA | KMR_FREEOLD);
+	printf("%s:     PASS\n", __func__);
+
+	printf("%s: kmem_realloc (KMR_DATA) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_DATA);
+	printf("%s:     PASS\n", __func__);
+
+	kmem_free_guard(kernel_map, addr, 64U << 20, KMF_NONE, KMEM_GUARD_SUBMAP);
+	vm_map_deallocate(map);
+
+	printf("%s: test passed\n", __func__);
+	*out = 1;
+	return 0;
+}
+SYSCTL_TEST_REGISTER(kmem_basic, kmem_basic_test);
+#endif /* DEBUG || DEVELOPMENT */

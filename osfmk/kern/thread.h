@@ -248,6 +248,46 @@ __options_decl(thread_work_interval_flags_t, uint32_t, {
 #endif /* CONFIG_SCHED_AUTO_JOIN */
 });
 
+typedef union thread_rr_state {
+	uint32_t trr_value;
+	struct {
+#define TRR_FAULT_NONE     0
+#define TRR_FAULT_PENDING  1
+#define TRR_FAULT_OBSERVED 2
+		/*
+		 * Set to TRR_FAULT_PENDING with interrupts disabled
+		 * by the thread when it is entering a user fault codepath.
+		 *
+		 * Moved to TRR_FAULT_OBSERVED from TRR_FAULT_PENDING:
+		 * - by the thread if at IPI time,
+		 * - or by task_restartable_ranges_synchronize() if the thread
+		 *   is interrupted (under the thread lock)
+		 *
+		 * Cleared by the thread when returning from a user fault
+		 * codepath.
+		 */
+		uint8_t  trr_fault_state;
+
+		/*
+		 * Set by task_restartable_ranges_synchronize()
+		 * if trr_fault_state is TRR_FAULT_OBSERVED
+		 * and a rendez vous at the AST is required.
+		 *
+		 * Set atomically if trr_fault_state == TRR_FAULT_OBSERVED,
+		 * and trr_ipi_ack_pending == 0
+		 */
+		uint8_t  trr_sync_waiting;
+
+		/*
+		 * Updated under the thread_lock(),
+		 * set by task_restartable_ranges_synchronize()
+		 * when the thread was IPIed and the caller is waiting
+		 * for an ACK.
+		 */
+		uint16_t trr_ipi_ack_pending;
+	};
+} thread_rr_state_t;
+
 struct thread {
 #if MACH_ASSERT
 #define THREAD_MAGIC 0x1234ABCDDCBA4321ULL
@@ -332,6 +372,7 @@ struct thread {
 	wait_result_t           wait_result;    /* outcome of wait -
 	                                        * may be examined by this thread
 	                                        * WITHOUT locking */
+	thread_rr_state_t       t_rr_state;     /* state for restartable ranges */
 	thread_continue_t       continuation;   /* continue here next dispatch */
 	void                   *parameter;      /* continuation parameter */
 
@@ -622,7 +663,7 @@ struct thread {
 	mach_port_t ith_kernel_reply_port;              /* reply port for kernel RPCs */
 
 	/* Pending thread ast(s) */
-	ast_t                   ast;
+	os_atomic(ast_t)        ast;
 
 	queue_chain_t           threads;                /* global list of all threads */
 

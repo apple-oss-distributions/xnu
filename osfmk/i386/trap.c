@@ -83,6 +83,7 @@
 #include <kern/processor.h>
 #include <kern/thread.h>
 #include <kern/task.h>
+#include <kern/restartable.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
 #include <kern/exception.h>
@@ -958,6 +959,10 @@ user_trap(
 		i386_lbr_enable();
 	}
 
+	if (type == T_PAGE_FAULT) {
+		thread_reset_pcs_will_fault(thread);
+	}
+
 	pal_sti();
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
@@ -1179,6 +1184,10 @@ user_trap(
 
 	default:
 		panic("Unexpected user trap, type %d", type);
+	}
+
+	if (type == T_PAGE_FAULT) {
+		thread_reset_pcs_done_faulting(thread);
 	}
 
 	if (exc != 0) {

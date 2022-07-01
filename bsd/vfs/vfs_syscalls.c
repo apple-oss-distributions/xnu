@@ -2216,6 +2216,9 @@ checkdirs(vnode_t olddp, vfs_context_t ctx)
 	return 0;
 }
 
+#define ROLE_ACCOUNT_UNMOUNT_ENTITLEMENT        \
+	"com.apple.private.vfs.role-account-unmount"
+
 /*
  * Unmount a file system.
  *
@@ -2230,7 +2233,15 @@ unmount(__unused proc_t p, struct unmount_args *uap, __unused int32_t *retval)
 	struct mount *mp;
 	int error;
 	struct nameidata nd;
-	vfs_context_t ctx = vfs_context_current();
+	vfs_context_t ctx;
+
+	/*
+	 * If the process has the entitlement, use the kernel's context when
+	 * performing lookup on the mount path as the process might lack proper
+	 * permission to access the directory.
+	 */
+	ctx = IOCurrentTaskHasEntitlement(ROLE_ACCOUNT_UNMOUNT_ENTITLEMENT) ?
+	    vfs_context_kernel() : vfs_context_current();
 
 	NDINIT(&nd, LOOKUP, OP_UNMOUNT, FOLLOW | AUDITVNPATH1,
 	    UIO_USERSPACE, uap->path, ctx);
@@ -2276,9 +2287,6 @@ vfs_unmountbyfsid(fsid_t *fsid, int flags, vfs_context_t ctx)
 	/* safedounmount consumes the mount ref */
 	return safedounmount(mp, flags, ctx);
 }
-
-#define ROLE_ACCOUNT_UNMOUNT_ENTITLEMENT        \
-	"com.apple.private.vfs.role-account-unmount"
 
 /*
  * The mount struct comes with a mount ref which will be consumed.

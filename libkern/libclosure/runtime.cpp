@@ -202,6 +202,7 @@ _Block_use_RR2(const Block_callbacks_RR *callbacks)
  *  Accessors for block descriptor fields
  *****************************************************************************/
 
+#if BLOCK_SMALL_DESCRIPTOR_SUPPORTED
 template <class T>
 static T *
 unwrap_relative_pointer(int32_t &offset)
@@ -215,6 +216,7 @@ unwrap_relative_pointer(int32_t &offset)
 	uintptr_t pointer = base + extendedOffset;
 	return (T *)pointer;
 }
+#endif
 
 #if 0
 static struct Block_descriptor_2 *
@@ -448,9 +450,11 @@ Block_size(void *aBlock)
 {
 	auto *layout = (Block_layout *)aBlock;
 	void *desc = _Block_get_descriptor(layout);
+#if BLOCK_SMALL_DESCRIPTOR_SUPPORTED
 	if (layout->flags & BLOCK_SMALL_DESCRIPTOR) {
 		return ((Block_descriptor_small *)desc)->size;
 	}
+#endif
 	return ((Block_descriptor_1 *)desc)->size;
 }
 
@@ -478,10 +482,12 @@ _Block_signature(void *aBlock)
 		return nullptr;
 	}
 
+#if BLOCK_SMALL_DESCRIPTOR_SUPPORTED
 	if (layout->flags & BLOCK_SMALL_DESCRIPTOR) {
 		auto *bds = (Block_descriptor_small *)_Block_get_descriptor(layout);
 		return unwrap_relative_pointer<const char>(bds->signature);
 	}
+#endif
 
 	struct Block_descriptor_3 *desc3 = _Block_descriptor_3(layout);
 	return desc3->signature;
@@ -497,10 +503,12 @@ _Block_layout(void *aBlock)
 		return nullptr;
 	}
 
+#if BLOCK_SMALL_DESCRIPTOR_SUPPORTED
 	if (layout->flags & BLOCK_SMALL_DESCRIPTOR) {
 		auto *bds = (Block_descriptor_small *)_Block_get_descriptor(layout);
 		return unwrap_relative_pointer<const char>(bds->layout);
 	}
+#endif
 
 	Block_descriptor_3 *desc = _Block_descriptor_3(layout);
 	return desc->layout;
@@ -517,6 +525,7 @@ _Block_extended_layout(void *aBlock)
 	}
 
 	const char *extLayout;
+#if BLOCK_SMALL_DESCRIPTOR_SUPPORTED
 	if (layout->flags & BLOCK_SMALL_DESCRIPTOR) {
 		auto *bds = (Block_descriptor_small *)_Block_get_descriptor(layout);
 		if (layout->flags & BLOCK_INLINE_LAYOUT_STRING) {
@@ -524,7 +533,9 @@ _Block_extended_layout(void *aBlock)
 		} else {
 			extLayout = unwrap_relative_pointer<const char>(bds->layout);
 		}
-	} else {
+	} else
+#endif
+	{
 		Block_descriptor_3 *desc3 = _Block_descriptor_3(layout);
 		extLayout = desc3->layout;
 	}

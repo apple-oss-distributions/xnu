@@ -313,7 +313,7 @@ allocate_loop:
 		vm_map_size_t keep = vm_map_round_page(used,
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
-		if (used < table_size) {
+		if (keep < table_size) {
 			kmem_free(ipc_kernel_map, table_addr + keep,
 			    table_size - keep);
 			table_size = keep;

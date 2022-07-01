@@ -6129,7 +6129,8 @@ handle_copy_delay:
 		}
 
 		if (vm_map_lookup_entry(map, laddr, &entry) &&
-		    (VME_OBJECT(entry) != NULL) &&
+		    (!entry->is_sub_map) &&
+		    (object != VM_OBJECT_NULL) &&
 		    (VME_OBJECT(entry) == object)) {
 			uint16_t superpage;
 
@@ -6160,7 +6161,7 @@ handle_copy_delay:
 				assert((uint32_t)((ldelta + hdelta) >> fault_page_shift) == ((ldelta + hdelta) >> fault_page_shift));
 				kr = pmap_map_block_addr(caller_pmap,
 				    (addr64_t)(caller_pmap_addr - ldelta),
-				    (pmap_paddr_t)(((vm_map_offset_t) (VME_OBJECT(entry)->vo_shadow_offset)) +
+				    (pmap_paddr_t)(((vm_map_offset_t) (object->vo_shadow_offset)) +
 				    VME_OFFSET(entry) + (laddr - entry->vme_start) - ldelta),
 				    (uint32_t)((ldelta + hdelta) >> fault_page_shift), prot,
 				    (VM_WIMG_MASK & (int)object->wimg_bits) | superpage, 0);
@@ -6175,7 +6176,7 @@ handle_copy_delay:
 				assert((uint32_t)((ldelta + hdelta) >> fault_page_shift) == ((ldelta + hdelta) >> fault_page_shift));
 				kr = pmap_map_block_addr(real_map->pmap,
 				    (addr64_t)(vaddr - ldelta),
-				    (pmap_paddr_t)(((vm_map_offset_t)(VME_OBJECT(entry)->vo_shadow_offset)) +
+				    (pmap_paddr_t)(((vm_map_offset_t)(object->vo_shadow_offset)) +
 				    VME_OFFSET(entry) + (laddr - entry->vme_start) - ldelta),
 				    (uint32_t)((ldelta + hdelta) >> fault_page_shift), prot,
 				    (VM_WIMG_MASK & (int)object->wimg_bits) | superpage, 0);
@@ -6316,8 +6317,8 @@ vm_fault_wire(
 
 	assert(entry->in_transition);
 
-	if ((VME_OBJECT(entry) != NULL) &&
-	    !entry->is_sub_map &&
+	if (!entry->is_sub_map &&
+	    VME_OBJECT(entry) != VM_OBJECT_NULL &&
 	    VME_OBJECT(entry)->phys_contiguous) {
 		return KERN_SUCCESS;
 	}

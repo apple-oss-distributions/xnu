@@ -6512,36 +6512,38 @@ REDISCOVER_ENTRY:
 		DEBUG4K_UPL("map %p (%d) offset 0x%llx size 0x%llx flags 0x%llx -> offset 0x%llx adjusted_size 0x%llx *upl_size 0x%x offset_in_mapped_page 0x%llx\n", map, VM_MAP_PAGE_SHIFT(map), (uint64_t)original_offset, (uint64_t)original_size, *flags, (uint64_t)offset, (uint64_t)adjusted_size, *upl_size, offset_in_mapped_page);
 	}
 
-	if (VME_OBJECT(entry) == VM_OBJECT_NULL ||
-	    !VME_OBJECT(entry)->phys_contiguous) {
-		if (*upl_size > MAX_UPL_SIZE_BYTES) {
-			*upl_size = MAX_UPL_SIZE_BYTES;
-		}
-	}
-
-	/*
-	 *      Create an object if necessary.
-	 */
-	if (VME_OBJECT(entry) == VM_OBJECT_NULL) {
-		if (vm_map_lock_read_to_write(map)) {
-			goto REDISCOVER_ENTRY;
+	if (!entry->is_sub_map) {
+		if (VME_OBJECT(entry) == VM_OBJECT_NULL ||
+		    !VME_OBJECT(entry)->phys_contiguous) {
+			if (*upl_size > MAX_UPL_SIZE_BYTES) {
+				*upl_size = MAX_UPL_SIZE_BYTES;
+			}
 		}
 
-		VME_OBJECT_SET(entry,
-		    vm_object_allocate((vm_size_t)
-		    vm_object_round_page((entry->vme_end - entry->vme_start))));
-		VME_OFFSET_SET(entry, 0);
-		assert(entry->use_pmap);
+		/*
+		 *      Create an object if necessary.
+		 */
+		if (VME_OBJECT(entry) == VM_OBJECT_NULL) {
+			if (vm_map_lock_read_to_write(map)) {
+				goto REDISCOVER_ENTRY;
+			}
 
-		vm_map_lock_write_to_read(map);
-	}
+			VME_OBJECT_SET(entry,
+			    vm_object_allocate((vm_size_t)
+			    vm_object_round_page((entry->vme_end - entry->vme_start))),
+			    false, 0);
+			VME_OFFSET_SET(entry, 0);
+			assert(entry->use_pmap);
 
-	if (!(caller_flags & UPL_COPYOUT_FROM) &&
-	    !entry->is_sub_map &&
-	    !(entry->protection & VM_PROT_WRITE)) {
-		vm_map_unlock_read(map);
-		ret = KERN_PROTECTION_FAILURE;
-		goto done;
+			vm_map_lock_write_to_read(map);
+		}
+
+		if (!(caller_flags & UPL_COPYOUT_FROM) &&
+		    !(entry->protection & VM_PROT_WRITE)) {
+			vm_map_unlock_read(map);
+			ret = KERN_PROTECTION_FAILURE;
+			goto done;
+		}
 	}
 
 #if !XNU_TARGET_OS_OSX
@@ -6613,8 +6615,10 @@ REDISCOVER_ENTRY:
 	}
 #endif /* !XNU_TARGET_OS_OSX */
 
-	local_object = VME_OBJECT(entry);
-	assert(local_object != VM_OBJECT_NULL);
+	if (!entry->is_sub_map) {
+		local_object = VME_OBJECT(entry);
+		assert(local_object != VM_OBJECT_NULL);
+	}
 
 	if (!entry->is_sub_map &&
 	    !entry->needs_copy &&
@@ -7274,8 +7278,8 @@ process_upl_to_remove:
 			vm_offset_t v_upl_submap_dst_addr;
 			vector_upl_get_submap(vector_upl, &v_upl_submap, &v_upl_submap_dst_addr);
 
-			vm_map_remove(map, v_upl_submap_dst_addr,
-			    v_upl_submap_dst_addr + vector_upl->u_size);
+			kmem_free_guard(map, v_upl_submap_dst_addr,
+			    vector_upl->u_size, KMF_NONE, KMEM_GUARD_SUBMAP);
 			vm_map_deallocate(v_upl_submap);
 			upl_unlock(vector_upl);
 			return KERN_SUCCESS;

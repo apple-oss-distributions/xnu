@@ -1401,7 +1401,7 @@ task_create_internal(
 	new_task->crashed_thread_id = 0;
 	new_task->exec_token = 0;
 	new_task->watchports = NULL;
-	new_task->restartable_ranges = NULL;
+	new_task->t_rr_ranges = NULL;
 
 	new_task->bank_context = NULL;
 
@@ -1934,8 +1934,8 @@ task_deallocate_internal(
 
 	vm_map_deallocate(task->map);
 	is_release(task->itk_space);
-	if (task->restartable_ranges) {
-		restartable_ranges_release(task->restartable_ranges);
+	if (task->t_rr_ranges) {
+		restartable_ranges_release(task->t_rr_ranges);
 	}
 
 	ledger_get_entries(task->ledger, task_ledgers.interrupt_wakeups,

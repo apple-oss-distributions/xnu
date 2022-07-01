@@ -45,12 +45,15 @@ def get_vme_offset(vme):
     return unsigned(vme.vme_offset) << 12
 
 def get_vme_object(vme):
-    """ Return vm_object associated with vme.. """
+    """ Return the vm object or submap associated with the entry """
     if vme.is_sub_map:
-        return vme.vme_object.vmo_submap
+        return kern.GetValueFromAddress(vme.vme_submap << 2, 'vm_map_t')
     if vme.vme_kernel_object:
         return kern.globals.kernel_object
-    return vme.vme_object.vmo_object
+    if hasattr(vme, 'vme_object'): # LP64
+        params = kern.globals.vm_page_packing_params
+        return vm_unpack_pointer(vme.vme_object, params, 'vm_object_t')
+    return kern.GetValueFromAddress(vme.vme_submap << 2, 'vm_object_t')
 
 def GetZPerCPU(root, cpu, element_type = None):
     """ Iterates over a percpu variable
@@ -4247,11 +4250,12 @@ def vm_page_lookup_in_map(map, vaddr):
         offset_in_vme = vaddr - unsigned(vme.links.start)
         print("  offset {:#018x} in map entry {: <#018x} [{:#018x}:{:#018x}] object {: <#018x} offset {:#018x}".format(offset_in_vme, vme, unsigned(vme.links.start), unsigned(vme.links.end), get_vme_object(vme), get_vme_offset(vme)))
         offset_in_object = offset_in_vme + get_vme_offset(vme)
+        obj_or_submap = get_vme_object(vme)
         if vme.is_sub_map:
-            print("vaddr {:#018x} in map {: <#018x}".format(offset_in_object, vme.vme_object.vmo_submap))
-            vm_page_lookup_in_map(vme.vme_object.vmo_submap, offset_in_object)
+            print("vaddr {:#018x} in map {: <#018x}".format(offset_in_object, obj_or_submap))
+            vm_page_lookup_in_map(obj_or_submap, offset_in_object)
         else:
-            vm_page_lookup_in_object(get_vme_object(vme), offset_in_object)
+            vm_page_lookup_in_object(obj_or_submap, offset_in_object)
 
 @lldb_command("vm_page_lookup_in_object")
 def VmPageLookupInObject(cmd_args=None):
@@ -4550,7 +4554,8 @@ def ShowAllVMNamedEntries(cmd_args=None):
         io_bits = unsigned(port.ip_object.io_bits)
         if (io_bits & 0x3ff) == ikot_named_entry:
             idx += 1
-            showmemoryentry(Cast(port.ip_kobject, 'struct vm_named_entry *'), idx=idx, port=port)
+            ko = Cast(port.ip_kobject, 'void *')
+            showmemoryentry(Cast(ko, 'struct vm_named_entry *'), idx=idx, port=port)
 
 @lldb_command('show_vm_named_entry')
 def ShowVMNamedEntry(cmd_args=None):
