@@ -25,6 +25,7 @@ PRIVATE_DATAFILES = \
 	flow_divert_proto.h \
 	igmp_var.h \
 	in.h \
+	in_private.h \
 	in_gif.h \
 	in_pcb.h \
 	in_tclass.h \
@@ -36,10 +37,20 @@ PRIVATE_DATAFILES = \
 	tcp.h \
 	tcp_cc.h \
 	tcp_debug.h \
+	tcp_private.h \
 	tcp_var.h \
 	tcp_cache.h \
 	udp.h \
 	in_stat.h
+
+# netinet_private.modulemap additionally excludes in6_private.h from
+# ../netinet6. in6_private.h is conceptually a part of in_private.h,
+# and so belongs to its module, but needs to be excluded or else clang
+# will attempt to compile in6_private.h independently. And that fails
+# because in6_private.h can only be included from in_private.h, it
+# cannot be used in any other context.
+PRIVATE_MODULEMAPFILES = \
+	netinet_private.modulemap
 
 DRIVERKIT_DATAFILES = \
 	in.h \
@@ -51,7 +62,12 @@ DRIVERKIT_DATAFILES = \
 	udp.h
 
 PRIVATE_KERNELFILES = ${KERNELFILES} \
-	ip_ecn.h ip_encap.h tcp_log.h
+	ip_ecn.h \
+	ip_encap.h \
+	tcp_log.h \
+	tcp_includes.h \
+	tcp_utils.h \
+	tcp_sysctls.h
 
 INSTALL_MI_LIST	= ${DATAFILES}
 
@@ -61,7 +77,11 @@ INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
 INSTALL_MI_DIR = netinet
 
-EXPORT_MI_LIST = ${DATAFILES} ${KERNELFILES}
+INSTALL_MI_LCL_LIST = in_private.h tcp_private.h
+
+INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
+
+EXPORT_MI_LIST = ${DATAFILES} ${INSTALL_MI_LCL_LIST} ${KERNELFILES}
 
 EXPORT_MI_DIR = ${INSTALL_MI_DIR}
 

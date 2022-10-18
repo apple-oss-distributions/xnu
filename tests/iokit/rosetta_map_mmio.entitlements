@@ -4,5 +4,7 @@
 <dict>
         <key>com.apple.iokit.test-service-management</key>
         <true/>
+        <key>com.apple.iokit.test-check-entitlement</key>
+        <true/>
 </dict>
 </plist>

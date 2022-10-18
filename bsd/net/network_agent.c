@@ -98,7 +98,8 @@ TAILQ_HEAD(netagent_token_list_s, netagent_token);
 #define NETAGENT_MAX_CLIENT_ERROR_COUNT 32
 
 struct netagent_wrapper {
-	LIST_ENTRY(netagent_wrapper) master_chain;
+	LIST_ENTRY(netagent_wrapper) list_chain;
+	lck_rw_t agent_lock;
 	u_int32_t control_unit;
 	netagent_event_f event_handler;
 	void *event_context;
@@ -117,6 +118,7 @@ struct netagent_wrapper {
 
 struct netagent_session {
 	u_int32_t control_unit; // A control unit of 0 indicates an agent owned by the kernel
+	lck_mtx_t session_lock;
 	struct netagent_wrapper *wrapper;
 	netagent_event_f event_handler;
 	void *event_context;
@@ -127,16 +129,37 @@ typedef enum {
 	kNetagentErrorDomainUserDefined         = 1,
 } netagent_error_domain_t;
 
-static LIST_HEAD(_netagent_list, netagent_wrapper) master_netagent_list =
+static LIST_HEAD(_netagent_list, netagent_wrapper) shared_netagent_list =
     LIST_HEAD_INITIALIZER(master_netagent_list);
 
-// Protected by netagent_lock
+// Protected by netagent_list_lock
 static u_int32_t g_next_generation = 1;
 
 static kern_ctl_ref     netagent_kctlref;
 static u_int32_t        netagent_family;
 static LCK_GRP_DECLARE(netagent_mtx_grp, NETAGENT_CONTROL_NAME);
-static LCK_RW_DECLARE(netagent_lock, &netagent_mtx_grp);
+static LCK_RW_DECLARE(netagent_list_lock, &netagent_mtx_grp);
+
+#define NETAGENT_LIST_LOCK_EXCLUSIVE() lck_rw_lock_exclusive(&netagent_list_lock)
+#define NETAGENT_LIST_LOCK_SHARED() lck_rw_lock_shared(&netagent_list_lock)
+#define NETAGENT_LIST_UNLOCK() lck_rw_done(&netagent_list_lock)
+#define NETAGENT_LIST_ASSERT_LOCKED() LCK_RW_ASSERT(&netagent_list_lock, LCK_RW_ASSERT_HELD)
+
+#define NETAGENT_SESSION_LOCK(session) lck_mtx_lock(&session->session_lock)
+#define NETAGENT_SESSION_UNLOCK(session) lck_mtx_unlock(&session->session_lock)
+
+#define NETAGENT_LOCK_EXCLUSIVE(wrapper) lck_rw_lock_exclusive(&wrapper->agent_lock)
+#define NETAGENT_LOCK_SHARED(wrapper) lck_rw_lock_shared(&wrapper->agent_lock)
+#define NETAGENT_LOCK_SHARED_TO_EXCLUSIVE(wrapper) lck_rw_lock_shared_to_exclusive(&wrapper->agent_lock)
+#define NETAGENT_UNLOCK(wrapper) lck_rw_done(&wrapper->agent_lock)
+#define NETAGENT_ASSERT_LOCKED(wrapper) LCK_RW_ASSERT(&wrapper->agent_lock, LCK_RW_ASSERT_HELD)
+
+// Locking Notes
+
+// Precedence, where 1 is the first lock that must be taken
+// 1. NETAGENT_LIST_LOCK - protects shared_netagent_list
+// 2. NETAGENT_SESSION_LOCK - protects the session->wrapper pointer
+// 3. NETAGENT_LOCK -> protects values in a wrapper
 
 static errno_t netagent_register_control(void);
 static errno_t netagent_ctl_connect(kern_ctl_ref kctlref, struct sockaddr_ctl *sac,
@@ -200,7 +223,8 @@ static errno_t netagent_handle_reset_client_error_setopt(struct netagent_session
 static void netagent_handle_get(struct netagent_session *session, u_int32_t message_id,
     size_t payload_length, mbuf_t packet, size_t offset);
 
-static struct netagent_wrapper *netagent_find_agent_with_uuid(uuid_t uuid);
+// Requires list lock being held
+static struct netagent_wrapper *netagent_find_agent_with_uuid_and_lock(uuid_t uuid, bool exclusively, bool ignore_lock);
 
 errno_t
 netagent_init(void)
@@ -708,6 +732,7 @@ netagent_create_session(u_int32_t control_unit)
 	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	NETAGENTLOG(LOG_DEBUG, "Create agent session, control unit %d", control_unit);
 	new_session->control_unit = control_unit;
+	lck_mtx_init(&new_session->session_lock, &netagent_mtx_grp, LCK_ATTR_NULL);
 
 	return new_session;
 }
@@ -742,12 +767,28 @@ netagent_alloc_wrapper_memory(uint32_t data_size)
 	new_wrapper->netagent = kalloc_data(sizeof(struct netagent) + data_size,
 	    Z_WAITOK | Z_NOFAIL);
 
+	lck_rw_init(&new_wrapper->agent_lock, &netagent_mtx_grp, LCK_ATTR_NULL);
+
 	return new_wrapper;
 }
 
 static void
 netagent_free_wrapper_memory(struct netagent_wrapper *wrapper)
 {
+	// Before destroying the lock, take the lock exclusively and then
+	// drop it again. This ensures that no other thread was holding
+	// onto the lock at the time of destroying it.
+	// This can happen in netagent_client_message_with_params due
+	// to the fact that the wrapper lock needs to be held during the
+	// event callout, while the list lock has been released. Taking
+	// this lock here ensures that any such remaining thread completes
+	// before this object is released. Since the wrapper object has
+	// already been removed from any and all lists by this point,
+	// there isn't any way for a new thread to start referencing it.
+	NETAGENT_LOCK_EXCLUSIVE(wrapper);
+	NETAGENT_UNLOCK(wrapper);
+	lck_rw_destroy(&wrapper->agent_lock, &netagent_mtx_grp);
+
 	kfree_data(wrapper->netagent, sizeof(struct netagent) +
 	    wrapper->netagent->netagent_data_size);
 	kfree_type(struct netagent_wrapper, wrapper);
@@ -782,8 +823,9 @@ netagent_unregister_session_wrapper(struct netagent_session *session)
 	bool unregistered = FALSE;
 	uuid_t unregistered_uuid;
 	struct netagent_wrapper *wrapper = NULL;
-	lck_rw_lock_exclusive(&netagent_lock);
+	NETAGENT_LIST_LOCK_EXCLUSIVE();
 	if (session != NULL) {
+		NETAGENT_SESSION_LOCK(session);
 		wrapper = session->wrapper;
 		if (wrapper != NULL) {
 			if (netagent_registered_count > 0) {
@@ -794,7 +836,7 @@ netagent_unregister_session_wrapper(struct netagent_session *session)
 				netagent_active_count--;
 			}
 
-			LIST_REMOVE(wrapper, master_chain);
+			LIST_REMOVE(wrapper, list_chain);
 
 			unregistered = TRUE;
 			uuid_copy(unregistered_uuid, session->wrapper->netagent->netagent_uuid);
@@ -803,8 +845,9 @@ netagent_unregister_session_wrapper(struct netagent_session *session)
 			session->wrapper = NULL;
 			NETAGENTLOG0(LOG_DEBUG, "Unregistered agent");
 		}
+		NETAGENT_SESSION_UNLOCK(session);
 	}
-	lck_rw_done(&netagent_lock);
+	NETAGENT_LIST_UNLOCK();
 
 	if (unregistered) {
 		ifnet_clear_netagent(unregistered_uuid);
@@ -817,6 +860,7 @@ netagent_delete_session(struct netagent_session *session)
 {
 	if (session != NULL) {
 		netagent_unregister_session_wrapper(session);
+		lck_mtx_destroy(&session->session_lock, &netagent_mtx_grp);
 		kfree_type(struct netagent_session, session);
 	}
 }
@@ -849,10 +893,12 @@ netagent_packet_get_netagent_data_size(mbuf_t packet, size_t offset, int *err)
 static errno_t
 netagent_handle_register_inner(struct netagent_session *session, struct netagent_wrapper *new_wrapper)
 {
-	lck_rw_lock_exclusive(&netagent_lock);
+	NETAGENT_LIST_LOCK_EXCLUSIVE();
 
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper != NULL) {
-		lck_rw_done(&netagent_lock);
+		NETAGENT_SESSION_UNLOCK(session);
+		NETAGENT_LIST_UNLOCK();
 		return EINVAL;
 	}
 
@@ -862,7 +908,7 @@ netagent_handle_register_inner(struct netagent_session *session, struct netagent
 	new_wrapper->generation = g_next_generation++;
 
 	session->wrapper = new_wrapper;
-	LIST_INSERT_HEAD(&master_netagent_list, new_wrapper, master_chain);
+	LIST_INSERT_HEAD(&shared_netagent_list, new_wrapper, list_chain);
 	TAILQ_INIT(&new_wrapper->token_list);
 	LIST_INIT(&new_wrapper->pending_triggers_list);
 
@@ -872,8 +918,8 @@ netagent_handle_register_inner(struct netagent_session *session, struct netagent
 		netagent_active_count++;
 	}
 
-	lck_rw_done(&netagent_lock);
-
+	NETAGENT_SESSION_UNLOCK(session);
+	NETAGENT_LIST_UNLOCK();
 	return 0;
 }
 
@@ -891,11 +937,6 @@ netagent_register(netagent_session_t _session, struct netagent *agent)
 
 	if (agent == NULL) {
 		NETAGENTLOG0(LOG_ERR, "Cannot register NULL agent");
-		return EINVAL;
-	}
-
-	if (session->wrapper != NULL) {
-		NETAGENTLOG0(LOG_ERR, "Session already has a registered agent");
 		return EINVAL;
 	}
 
@@ -941,12 +982,6 @@ netagent_handle_register_setopt(struct netagent_session *session, u_int8_t *payl
 
 	if (payload == NULL) {
 		NETAGENTLOG0(LOG_ERR, "No payload received");
-		response_error = EINVAL;
-		goto done;
-	}
-
-	if (session->wrapper != NULL) {
-		NETAGENTLOG0(LOG_ERR, "Session already has a registered agent");
 		response_error = EINVAL;
 		goto done;
 	}
@@ -1002,12 +1037,6 @@ netagent_handle_register_message(struct netagent_session *session, u_int32_t mes
 	if (session == NULL) {
 		NETAGENTLOG0(LOG_ERR, "Failed to find session");
 		response_error = NETAGENT_MESSAGE_ERROR_INTERNAL;
-		goto fail;
-	}
-
-	if (session->wrapper != NULL) {
-		NETAGENTLOG0(LOG_ERR, "Session already has a registered agent");
-		response_error = NETAGENT_MESSAGE_ERROR_ALREADY_REGISTERED;
 		goto fail;
 	}
 
@@ -1128,7 +1157,8 @@ netagent_send_cellular_failed_event(struct netagent_wrapper *wrapper,
 }
 
 static errno_t
-netagent_handle_update_inner(struct netagent_session *session, struct netagent_wrapper *new_wrapper, size_t data_size, u_int8_t *agent_changed, netagent_error_domain_t error_domain)
+netagent_handle_update_inner(struct netagent_session *session, struct netagent_wrapper *new_wrapper,
+    size_t data_size, u_int8_t *agent_changed, netagent_error_domain_t error_domain)
 {
 	errno_t response_error = 0;
 
@@ -1137,20 +1167,26 @@ netagent_handle_update_inner(struct netagent_session *session, struct netagent_w
 		return EINVAL;
 	}
 
-	lck_rw_lock_exclusive(&netagent_lock);
+	NETAGENT_LIST_LOCK_EXCLUSIVE();
 
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
-		lck_rw_done(&netagent_lock);
+		NETAGENT_SESSION_UNLOCK(session);
+		NETAGENT_LIST_UNLOCK();
 		response_error = ENOENT;
 		return response_error;
 	}
+
+	NETAGENT_LOCK_EXCLUSIVE(session->wrapper);
 
 	if (uuid_compare(session->wrapper->netagent->netagent_uuid, new_wrapper->netagent->netagent_uuid) != 0 ||
 	    memcmp(&session->wrapper->netagent->netagent_domain, &new_wrapper->netagent->netagent_domain,
 	    sizeof(new_wrapper->netagent->netagent_domain)) != 0 ||
 	    memcmp(&session->wrapper->netagent->netagent_type, &new_wrapper->netagent->netagent_type,
 	    sizeof(new_wrapper->netagent->netagent_type)) != 0) {
-		lck_rw_done(&netagent_lock);
+		NETAGENT_UNLOCK(session->wrapper);
+		NETAGENT_SESSION_UNLOCK(session);
+		NETAGENT_LIST_UNLOCK();
 		NETAGENTLOG0(LOG_ERR, "Basic agent parameters do not match, cannot update");
 		if (error_domain == kNetagentErrorDomainPOSIX) {
 			response_error = EINVAL;
@@ -1174,7 +1210,9 @@ netagent_handle_update_inner(struct netagent_session *session, struct netagent_w
 			LIST_REMOVE(search_client, client_chain);
 			LIST_INSERT_HEAD(&pending_triggers_list_copy, search_client, client_chain);
 		}
-		lck_rw_done(&netagent_lock);
+		NETAGENT_UNLOCK(session->wrapper);
+		NETAGENT_SESSION_UNLOCK(session);
+		NETAGENT_LIST_UNLOCK();
 
 		// Update pending client triggers without holding a lock
 		search_client = NULL;
@@ -1209,19 +1247,21 @@ netagent_handle_update_inner(struct netagent_session *session, struct netagent_w
 		netagent_active_count--;
 	}
 
-	LIST_REMOVE(session->wrapper, master_chain);
+	LIST_REMOVE(session->wrapper, list_chain);
+	NETAGENT_UNLOCK(session->wrapper);
 	netagent_free_wrapper(session->wrapper);
 	session->wrapper = new_wrapper;
 	new_wrapper->control_unit = session->control_unit;
 	new_wrapper->event_handler = session->event_handler;
 	new_wrapper->event_context = session->event_context;
-	LIST_INSERT_HEAD(&master_netagent_list, new_wrapper, master_chain);
+	LIST_INSERT_HEAD(&shared_netagent_list, new_wrapper, list_chain);
 	LIST_INIT(&new_wrapper->pending_triggers_list);
+
+	NETAGENT_SESSION_UNLOCK(session);
+	NETAGENT_LIST_UNLOCK();
 
 	NETAGENTLOG0(LOG_DEBUG, "Updated agent");
 	*agent_changed = TRUE;
-
-	lck_rw_done(&netagent_lock);
 
 	return response_error;
 }
@@ -1242,11 +1282,6 @@ netagent_update(netagent_session_t _session, struct netagent *agent)
 
 	if (agent == NULL) {
 		NETAGENTLOG0(LOG_ERR, "Cannot register NULL agent");
-		return EINVAL;
-	}
-
-	if (session->wrapper == NULL) {
-		NETAGENTLOG0(LOG_ERR, "Session has no agent to update");
 		return EINVAL;
 	}
 
@@ -1297,12 +1332,6 @@ netagent_handle_update_setopt(struct netagent_session *session, u_int8_t *payloa
 	if (payload == NULL) {
 		NETAGENTLOG0(LOG_ERR, "No payload received");
 		response_error = EINVAL;
-		goto done;
-	}
-
-	if (session->wrapper == NULL) {
-		NETAGENTLOG0(LOG_ERR, "Session has no agent to update");
-		response_error = ENOENT;
 		goto done;
 	}
 
@@ -1365,12 +1394,6 @@ netagent_handle_update_message(struct netagent_session *session, u_int32_t messa
 		goto fail;
 	}
 
-	if (session->wrapper == NULL) {
-		NETAGENTLOG0(LOG_ERR, "Session has no agent to update");
-		response_error = NETAGENT_MESSAGE_ERROR_NOT_REGISTERED;
-		goto fail;
-	}
-
 	if (payload_length < sizeof(struct netagent)) {
 		NETAGENTLOG(LOG_ERR, "Update message size too small for agent: (%zu < %zu)",
 		    payload_length, sizeof(struct netagent));
@@ -1401,11 +1424,15 @@ netagent_handle_update_message(struct netagent_session *session, u_int32_t messa
 
 	response_error = (u_int32_t)netagent_handle_update_inner(session, new_wrapper, data_size, &agent_changed, kNetagentErrorDomainUserDefined);
 	if (response_error != 0) {
+		if (response_error == ENOENT) {
+			response_error = NETAGENT_MESSAGE_ERROR_NOT_REGISTERED;
+		}
 		netagent_free_wrapper_memory(new_wrapper);
 		goto fail;
 	}
 
 	netagent_send_success_response(session, NETAGENT_MESSAGE_TYPE_UPDATE, message_id);
+
 	netagent_post_event(updated_uuid, KEV_NETAGENT_UPDATED, agent_changed, should_update_immediately);
 
 	if (agent_changed == FALSE) {
@@ -1433,20 +1460,23 @@ netagent_handle_get(struct netagent_session *session, u_int32_t message_id,
 		goto fail;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
-
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
-		lck_rw_done(&netagent_lock);
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent to get");
 		response_error = NETAGENT_MESSAGE_ERROR_NOT_REGISTERED;
 		goto fail;
 	}
+
+	NETAGENT_LOCK_SHARED(session->wrapper);
 
 	size_t response_size = sizeof(struct netagent_message_header)
 	    + sizeof(struct netagent)
 	    + session->wrapper->netagent->netagent_data_size;
 	response = (u_int8_t *)kalloc_data(response_size, Z_WAITOK);
 	if (response == NULL) {
+		NETAGENT_UNLOCK(session->wrapper);
+		NETAGENT_SESSION_UNLOCK(session);
 		goto fail;
 	}
 
@@ -1457,7 +1487,8 @@ netagent_handle_get(struct netagent_session *session, u_int32_t message_id,
 	memcpy(cursor, session->wrapper->netagent, sizeof(struct netagent) +
 	    session->wrapper->netagent->netagent_data_size);
 
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 
 	if (!netagent_send_ctl_data(session->control_unit, response, response_size)) {
 		NETAGENTLOG0(LOG_ERR, "Failed to send response");
@@ -1479,14 +1510,16 @@ netagent_assign_nexus(netagent_session_t _session, uuid_t necp_client_uuid,
 		return EINVAL;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
-		lck_rw_done(&netagent_lock);
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent");
 		return ENOENT;
 	}
+	NETAGENT_LOCK_SHARED(session->wrapper);
 	uuid_copy(netagent_uuid, session->wrapper->netagent->netagent_uuid);
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 
 	// Note that if the error is 0, NECP has taken over our malloc'ed buffer
 	int error = necp_assign_client_result(netagent_uuid, necp_client_uuid, assign_message, assigned_results_length);
@@ -1514,14 +1547,16 @@ netagent_update_flow_protoctl_event(netagent_session_t _session,
 		return EINVAL;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
-		lck_rw_done(&netagent_lock);
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent");
 		return ENOENT;
 	}
+	NETAGENT_LOCK_SHARED(session->wrapper);
 	uuid_copy(netagent_uuid, session->wrapper->netagent->netagent_uuid);
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 
 	error = necp_update_flow_protoctl_event(netagent_uuid,
 	    client_id, protoctl_event_code, protoctl_event_val, protoctl_event_tcp_seq_number);
@@ -1551,16 +1586,18 @@ netagent_handle_assign_nexus_setopt(struct netagent_session *session, u_int8_t *
 		goto done;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
-		lck_rw_done(&netagent_lock);
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent to get");
 		response_error = ENOENT;
 		goto done;
 	}
 
+	NETAGENT_LOCK_SHARED(session->wrapper);
 	uuid_copy(netagent_uuid, session->wrapper->netagent->netagent_uuid);
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 
 	if (payload_length < sizeof(uuid_t)) {
 		NETAGENTLOG0(LOG_ERR, "Assign message is too short");
@@ -1612,15 +1649,17 @@ netagent_handle_assign_nexus_message(struct netagent_session *session, u_int32_t
 		goto fail;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
-		lck_rw_done(&netagent_lock);
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent to get");
 		response_error = NETAGENT_MESSAGE_ERROR_NOT_REGISTERED;
 		goto fail;
 	}
+	NETAGENT_LOCK_SHARED(session->wrapper);
 	uuid_copy(netagent_uuid, session->wrapper->netagent->netagent_uuid);
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 
 	if (payload_length < sizeof(uuid_t)) {
 		NETAGENTLOG0(LOG_ERR, "Assign message is too short");
@@ -1691,16 +1730,18 @@ netagent_handle_assign_group_setopt(struct netagent_session *session, u_int8_t *
 		goto done;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
-		lck_rw_done(&netagent_lock);
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent to get");
 		response_error = ENOENT;
 		goto done;
 	}
 
+	NETAGENT_LOCK_SHARED(session->wrapper);
 	uuid_copy(netagent_uuid, session->wrapper->netagent->netagent_uuid);
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 
 	if (payload_length < sizeof(uuid_t)) {
 		NETAGENTLOG0(LOG_ERR, "Group assign message is too short");
@@ -1764,18 +1805,19 @@ netagent_handle_use_count_setopt(struct netagent_session *session, u_int8_t *pay
 
 	memcpy(&use_count, payload, sizeof(use_count));
 
-	lck_rw_lock_shared(&netagent_lock);
+	NETAGENT_SESSION_LOCK(session);
 
 	if (session->wrapper == NULL) {
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent registered");
 		response_error = ENOENT;
-		lck_rw_done(&netagent_lock);
 		goto done;
 	}
 
+	NETAGENT_LOCK_EXCLUSIVE(session->wrapper);
 	session->wrapper->use_count = use_count;
-
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 
 done:
 	return response_error;
@@ -1805,17 +1847,19 @@ netagent_handle_use_count_getopt(struct netagent_session *session, u_int8_t *buf
 		goto done;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
+	NETAGENT_SESSION_LOCK(session);
 
 	if (session->wrapper == NULL) {
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent registered");
 		response_error = ENOENT;
-		lck_rw_done(&netagent_lock);
 		goto done;
 	}
 
+	NETAGENT_LOCK_SHARED(session->wrapper);
 	use_count = session->wrapper->use_count;
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 
 	memcpy(buffer, &use_count, sizeof(use_count));
 	*buffer_length = sizeof(use_count);
@@ -1847,19 +1891,20 @@ netagent_handle_add_token_setopt(struct netagent_session *session, u_int8_t *tok
 		goto done;
 	}
 
-	lck_rw_lock_exclusive(&netagent_lock);
-
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent registered");
 		response_error = ENOENT;
-		lck_rw_done(&netagent_lock);
 		goto done;
 	}
 
+	NETAGENT_LOCK_EXCLUSIVE(session->wrapper);
 	if (session->wrapper->token_count >= NETAGENT_MAX_TOKEN_COUNT) {
+		NETAGENT_UNLOCK(session->wrapper);
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session cannot add more tokens");
 		response_error = EINVAL;
-		lck_rw_done(&netagent_lock);
 		goto done;
 	}
 
@@ -1877,7 +1922,8 @@ netagent_handle_add_token_setopt(struct netagent_session *session, u_int8_t *tok
 	// Reset deadline time, now that there are more than 0 tokens
 	session->wrapper->need_tokens_event_deadline = 0;
 
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 done:
 	return response_error;
 }
@@ -1893,15 +1939,15 @@ netagent_handle_flush_tokens_setopt(struct netagent_session *session, __unused u
 		goto done;
 	}
 
-	lck_rw_lock_exclusive(&netagent_lock);
-
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent registered");
 		response_error = ENOENT;
-		lck_rw_done(&netagent_lock);
 		goto done;
 	}
 
+	NETAGENT_LOCK_EXCLUSIVE(session->wrapper);
 	struct netagent_token *search_token = NULL;
 	struct netagent_token *temp_token = NULL;
 	TAILQ_FOREACH_SAFE(search_token, &session->wrapper->token_list, token_chain, temp_token) {
@@ -1909,8 +1955,8 @@ netagent_handle_flush_tokens_setopt(struct netagent_session *session, __unused u
 		netagent_token_free(search_token);
 	}
 	session->wrapper->token_count = 0;
-
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 done:
 	return response_error;
 }
@@ -1939,17 +1985,18 @@ netagent_handle_token_count_getopt(struct netagent_session *session, u_int8_t *b
 		goto done;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
-
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent registered");
 		response_error = ENOENT;
-		lck_rw_done(&netagent_lock);
 		goto done;
 	}
 
+	NETAGENT_LOCK_SHARED(session->wrapper);
 	token_count = session->wrapper->token_count;
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 
 	memcpy(buffer, &token_count, sizeof(token_count));
 	*buffer_length = sizeof(token_count);
@@ -1984,17 +2031,18 @@ netagent_handle_token_low_water_setopt(struct netagent_session *session, u_int8_
 
 	memcpy(&token_low_water, buffer, sizeof(token_low_water));
 
-	lck_rw_lock_exclusive(&netagent_lock);
-
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent registered");
 		response_error = ENOENT;
-		lck_rw_done(&netagent_lock);
 		goto done;
 	}
 
+	NETAGENT_LOCK_EXCLUSIVE(session->wrapper);
 	session->wrapper->token_low_water = token_low_water;
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 
 done:
 	return response_error;
@@ -2024,17 +2072,18 @@ netagent_handle_token_low_water_getopt(struct netagent_session *session, u_int8_
 		goto done;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
-
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent registered");
 		response_error = ENOENT;
-		lck_rw_done(&netagent_lock);
 		goto done;
 	}
 
+	NETAGENT_LOCK_SHARED(session->wrapper);
 	token_low_water = session->wrapper->token_low_water;
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 
 	memcpy(buffer, &token_low_water, sizeof(token_low_water));
 	*buffer_length = sizeof(token_low_water);
@@ -2054,15 +2103,15 @@ netagent_handle_reset_client_error_setopt(struct netagent_session *session, __un
 		goto done;
 	}
 
-	lck_rw_lock_exclusive(&netagent_lock);
-
+	NETAGENT_SESSION_LOCK(session);
 	if (session->wrapper == NULL) {
+		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENTLOG0(LOG_ERR, "Session has no agent registered");
 		response_error = ENOENT;
-		lck_rw_done(&netagent_lock);
 		goto done;
 	}
 
+	NETAGENT_LOCK_EXCLUSIVE(session->wrapper);
 	struct netagent_token *search_token = NULL;
 	struct netagent_token *temp_token = NULL;
 	TAILQ_FOREACH_SAFE(search_token, &session->wrapper->token_list, token_chain, temp_token) {
@@ -2072,18 +2121,28 @@ netagent_handle_reset_client_error_setopt(struct netagent_session *session, __un
 	session->wrapper->last_client_error = 0;
 	session->wrapper->client_error_count = 0;
 
-	lck_rw_done(&netagent_lock);
+	NETAGENT_UNLOCK(session->wrapper);
+	NETAGENT_SESSION_UNLOCK(session);
 done:
 	return response_error;
 }
 
 static struct netagent_wrapper *
-netagent_find_agent_with_uuid(uuid_t uuid)
+netagent_find_agent_with_uuid_and_lock(uuid_t uuid, bool exclusively, bool ignore_lock)
 {
+	NETAGENT_LIST_ASSERT_LOCKED();
+
 	struct netagent_wrapper *search_netagent = NULL;
 
-	LIST_FOREACH(search_netagent, &master_netagent_list, master_chain) {
+	LIST_FOREACH(search_netagent, &shared_netagent_list, list_chain) {
 		if (uuid_compare(search_netagent->netagent->netagent_uuid, uuid) == 0) {
+			if (!ignore_lock) {
+				if (exclusively) {
+					NETAGENT_LOCK_EXCLUSIVE(search_netagent);
+				} else {
+					NETAGENT_LOCK_SHARED(search_netagent);
+				}
+			}
 			return search_netagent;
 		}
 	}
@@ -2104,10 +2163,12 @@ netagent_post_updated_interfaces(uuid_t uuid)
 static u_int32_t
 netagent_dump_get_data_size_locked()
 {
+	NETAGENT_LIST_ASSERT_LOCKED();
+
 	struct netagent_wrapper *search_netagent = NULL;
 	u_int32_t total_netagent_data_size = 0;
-	// Traverse the master list to know how much data the client needs to allocate to get the list of agent UUIDs
-	LIST_FOREACH(search_netagent, &master_netagent_list, master_chain) {
+	// Traverse the shared list to know how much data the client needs to allocate to get the list of agent UUIDs
+	LIST_FOREACH(search_netagent, &shared_netagent_list, list_chain) {
 		total_netagent_data_size += sizeof(search_netagent->netagent->netagent_uuid);
 	}
 	return total_netagent_data_size;
@@ -2116,13 +2177,15 @@ netagent_dump_get_data_size_locked()
 static void
 netagent_dump_copy_data_locked(u_int8_t *buffer, u_int32_t buffer_length)
 {
+	NETAGENT_LIST_ASSERT_LOCKED();
+
 	size_t response_size = 0;
 	u_int8_t *cursor = NULL;
 	struct netagent_wrapper *search_netagent = NULL;
 
 	response_size = buffer_length; // We already know that buffer_length is the same as total_netagent_data_size.
 	cursor = buffer;
-	LIST_FOREACH(search_netagent, &master_netagent_list, master_chain) {
+	LIST_FOREACH(search_netagent, &shared_netagent_list, list_chain) {
 		memcpy(cursor, search_netagent->netagent->netagent_uuid, sizeof(search_netagent->netagent->netagent_uuid));
 		cursor += sizeof(search_netagent->netagent->netagent_uuid);
 	}
@@ -2148,11 +2211,11 @@ netagent_ioctl(u_long cmd, caddr_t data)
 		break;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
+	NETAGENT_LIST_LOCK_SHARED();
 	switch (cmd) {
 	case SIOCGIFAGENTDATA32: {
 		struct netagent_req32 *ifsir32 = (struct netagent_req32 *)(void *)data;
-		struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(ifsir32->netagent_uuid);
+		struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(ifsir32->netagent_uuid, false, false);
 		if (wrapper == NULL) {
 			error = ENOENT;
 			break;
@@ -2172,11 +2235,12 @@ netagent_ioctl(u_long cmd, caddr_t data)
 		} else {
 			error = EINVAL;
 		}
+		NETAGENT_UNLOCK(wrapper);
 		break;
 	}
 	case SIOCGIFAGENTDATA64: {
 		struct netagent_req64 *ifsir64 = (struct netagent_req64 *)(void *)data;
-		struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(ifsir64->netagent_uuid);
+		struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(ifsir64->netagent_uuid, false, false);
 		if (wrapper == NULL) {
 			error = ENOENT;
 			break;
@@ -2196,6 +2260,7 @@ netagent_ioctl(u_long cmd, caddr_t data)
 		} else {
 			error = EINVAL;
 		}
+		NETAGENT_UNLOCK(wrapper);
 		break;
 	}
 	case SIOCGIFAGENTLIST32: {
@@ -2251,7 +2316,7 @@ netagent_ioctl(u_long cmd, caddr_t data)
 		break;
 	}
 	}
-	lck_rw_done(&netagent_lock);
+	NETAGENT_LIST_UNLOCK();
 	return error;
 }
 
@@ -2259,14 +2324,15 @@ u_int32_t
 netagent_get_flags(uuid_t uuid)
 {
 	u_int32_t flags = 0;
-	lck_rw_lock_shared(&netagent_lock);
-	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(uuid);
+	NETAGENT_LIST_LOCK_SHARED();
+	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(uuid, false, false);
 	if (wrapper != NULL) {
 		flags = wrapper->netagent->netagent_flags;
+		NETAGENT_UNLOCK(wrapper);
 	} else {
 		NETAGENTLOG0(LOG_DEBUG, "Flags requested for invalid netagent");
 	}
-	lck_rw_done(&netagent_lock);
+	NETAGENT_LIST_UNLOCK();
 
 	return flags;
 }
@@ -2277,8 +2343,8 @@ netagent_set_flags(uuid_t uuid, u_int32_t flags)
 	errno_t error = 0;
 	bool updated = false;
 
-	lck_rw_lock_exclusive(&netagent_lock);
-	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(uuid);
+	NETAGENT_LIST_LOCK_SHARED();
+	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(uuid, true, false);
 	if (wrapper != NULL) {
 		// Don't allow the clients to clear
 		// NETAGENT_FLAG_REGISTERED.
@@ -2290,12 +2356,13 @@ netagent_set_flags(uuid_t uuid, u_int32_t flags)
 			wrapper->generation = g_next_generation++;
 			updated = true;
 		}
+		NETAGENT_UNLOCK(wrapper);
 	} else {
 		NETAGENTLOG0(LOG_DEBUG,
 		    "Attempt to set flags for invalid netagent");
 		error = ENOENT;
 	}
-	lck_rw_done(&netagent_lock);
+	NETAGENT_LIST_UNLOCK();
 	if (updated) {
 		netagent_post_event(uuid, KEV_NETAGENT_UPDATED, true, false);
 	}
@@ -2307,14 +2374,15 @@ u_int32_t
 netagent_get_generation(uuid_t uuid)
 {
 	u_int32_t generation = 0;
-	lck_rw_lock_shared(&netagent_lock);
-	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(uuid);
+	NETAGENT_LIST_LOCK_SHARED();
+	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(uuid, false, false);
 	if (wrapper != NULL) {
 		generation = wrapper->generation;
+		NETAGENT_UNLOCK(wrapper);
 	} else {
 		NETAGENTLOG0(LOG_DEBUG, "Generation requested for invalid netagent");
 	}
-	lck_rw_done(&netagent_lock);
+	NETAGENT_LIST_UNLOCK();
 
 	return generation;
 }
@@ -2328,16 +2396,17 @@ netagent_get_agent_domain_and_type(uuid_t uuid, char *domain, char *type)
 		return FALSE;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
-	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(uuid);
+	NETAGENT_LIST_LOCK_SHARED();
+	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(uuid, false, false);
 	if (wrapper != NULL) {
 		found = TRUE;
 		memcpy(domain, wrapper->netagent->netagent_domain, NETAGENT_DOMAINSIZE);
 		memcpy(type, wrapper->netagent->netagent_type, NETAGENT_TYPESIZE);
+		NETAGENT_UNLOCK(wrapper);
 	} else {
 		NETAGENTLOG0(LOG_ERR, "Type requested for invalid netagent");
 	}
-	lck_rw_done(&netagent_lock);
+	NETAGENT_LIST_UNLOCK();
 
 	return found;
 }
@@ -2347,8 +2416,8 @@ netagent_kernel_trigger(uuid_t uuid)
 {
 	int error = 0;
 
-	lck_rw_lock_shared(&netagent_lock);
-	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(uuid);
+	NETAGENT_LIST_LOCK_SHARED();
+	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(uuid, false, false);
 	if (wrapper == NULL) {
 		NETAGENTLOG0(LOG_ERR, "Requested netagent for kernel trigger could not be found");
 		error = ENOENT;
@@ -2372,7 +2441,10 @@ netagent_kernel_trigger(uuid_t uuid)
 	error = netagent_send_trigger(wrapper, current_proc(), NETAGENT_TRIGGER_FLAG_KERNEL, NETAGENT_MESSAGE_TYPE_TRIGGER);
 	NETAGENTLOG((error ? LOG_ERR : LOG_INFO), "Triggered netagent from kernel (error %d)", error);
 done:
-	lck_rw_done(&netagent_lock);
+	if (wrapper != NULL) {
+		NETAGENT_UNLOCK(wrapper);
+	}
+	NETAGENT_LIST_UNLOCK();
 	return error;
 }
 
@@ -2401,9 +2473,10 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 		return EINVAL;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
-	bool should_unlock = TRUE;
-	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(agent_uuid);
+	NETAGENT_LIST_LOCK_SHARED();
+	bool should_unlock_list = true;
+	bool should_unlock_wrapper = true;
+	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(agent_uuid, false, false);
 	if (wrapper == NULL) {
 		NETAGENTLOG0(LOG_DEBUG, "Requested netagent for nexus instance could not be found");
 		error = ENOENT;
@@ -2476,9 +2549,13 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 			// No event handler registered for kernel agent
 			error = EINVAL;
 		} else {
-			// We hold the shared lock during the event handler callout, so it is expected
+			// We hold the wrapper lock during the event handler callout, so it is expected
 			// that the event handler will not lead to any registrations or unregistrations
 			// of network agents.
+			// We release the list lock before calling the event handler to allow other threads
+			// to access the list while the event is processing.
+			NETAGENT_LIST_UNLOCK();
+			should_unlock_list = false;
 			error = wrapper->event_handler(message_type, necp_client_uuid, pid, handle,
 			    wrapper->event_context, parameters,
 			    assigned_results, assigned_results_length);
@@ -2498,7 +2575,7 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 			if (wrapper->last_client_error != client_error || // Always notify for an error change
 			    (client_error == 0 && wrapper->client_error_count == 0) || // Only notify once for no-error
 			    (client_error != 0 && wrapper->client_error_count < NETAGENT_MAX_CLIENT_ERROR_COUNT)) {
-				if (lck_rw_lock_shared_to_exclusive(&netagent_lock)) {
+				if (NETAGENT_LOCK_SHARED_TO_EXCLUSIVE(wrapper)) {
 					if (wrapper->last_client_error != client_error) {
 						wrapper->last_client_error = client_error;
 						wrapper->client_error_count = 1;
@@ -2507,8 +2584,8 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 					}
 					error = netagent_send_error_message(wrapper, necp_client_uuid, message_type, client_error);
 				} else {
-					// If lck_rw_lock_shared_to_exclusive fails, it unlocks automatically
-					should_unlock = FALSE;
+					// If NETAGENT_LOCK_SHARED_TO_EXCLUSIVE fails, it unlocks automatically
+					should_unlock_wrapper = false;
 				}
 			}
 		} else if (message_type == NETAGENT_MESSAGE_TYPE_ADD_GROUP_MEMBERS ||
@@ -2518,7 +2595,7 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 			error = netagent_send_client_message(wrapper, necp_client_uuid, message_type);
 		}
 		if (error == 0 && message_type == NETAGENT_MESSAGE_TYPE_CLIENT_TRIGGER) {
-			if (lck_rw_lock_shared_to_exclusive(&netagent_lock)) {
+			if (NETAGENT_LOCK_SHARED_TO_EXCLUSIVE(wrapper)) {
 				// Grab the lock exclusively to add a pending client to the list
 				struct netagent_client *new_pending_client = NULL;
 				new_pending_client = kalloc_type(struct netagent_client, Z_WAITOK);
@@ -2539,8 +2616,8 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 					LIST_INSERT_HEAD(&wrapper->pending_triggers_list, new_pending_client, client_chain);
 				}
 			} else {
-				// If lck_rw_lock_shared_to_exclusive fails, it unlocks automatically
-				should_unlock = FALSE;
+				// If NETAGENT_LOCK_SHARED_TO_EXCLUSIVE fails, it unlocks automatically
+				should_unlock_wrapper = false;
 			}
 		}
 	}
@@ -2551,8 +2628,11 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 		NETAGENTLOG(LOG_NOTICE, "Triggered network agent %s, error = %d", uuid_str, error);
 	}
 done:
-	if (should_unlock) {
-		lck_rw_done(&netagent_lock);
+	if (should_unlock_wrapper && wrapper != NULL) {
+		NETAGENT_UNLOCK(wrapper);
+	}
+	if (should_unlock_list) {
+		NETAGENT_LIST_UNLOCK();
 	}
 	return error;
 }
@@ -2568,8 +2648,8 @@ netagent_use(uuid_t agent_uuid, uint64_t *out_use_count)
 {
 	int error = 0;
 
-	lck_rw_lock_exclusive(&netagent_lock);
-	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(agent_uuid);
+	NETAGENT_LIST_LOCK_SHARED();
+	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(agent_uuid, true, false);
 	if (wrapper == NULL) {
 		NETAGENTLOG0(LOG_ERR, "netagent_assert: Requested netagent UUID is not registered");
 		error = ENOENT;
@@ -2584,7 +2664,10 @@ netagent_use(uuid_t agent_uuid, uint64_t *out_use_count)
 	}
 
 done:
-	lck_rw_done(&netagent_lock);
+	if (wrapper != NULL) {
+		NETAGENT_UNLOCK(wrapper);
+	}
+	NETAGENT_LIST_UNLOCK();
 	return error;
 }
 
@@ -2593,8 +2676,8 @@ netagent_copyout(uuid_t agent_uuid, user_addr_t user_addr, u_int32_t user_size)
 {
 	int error = 0;
 
-	lck_rw_lock_shared(&netagent_lock);
-	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(agent_uuid);
+	NETAGENT_LIST_LOCK_SHARED();
+	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(agent_uuid, false, false);
 	if (wrapper == NULL) {
 		NETAGENTLOG0(LOG_DEBUG, "Requested netagent for nexus instance could not be found");
 		error = ENOENT;
@@ -2612,7 +2695,10 @@ netagent_copyout(uuid_t agent_uuid, user_addr_t user_addr, u_int32_t user_size)
 
 	NETAGENTLOG((error ? LOG_ERR : LOG_DEBUG), "Copied agent content (error %d)", error);
 done:
-	lck_rw_done(&netagent_lock);
+	if (wrapper != NULL) {
+		NETAGENT_UNLOCK(wrapper);
+	}
+	NETAGENT_LIST_UNLOCK();
 	return error;
 }
 
@@ -2623,8 +2709,8 @@ netagent_acquire_token(uuid_t agent_uuid, user_addr_t user_addr, u_int32_t user_
 {
 	int error = 0;
 
-	lck_rw_lock_exclusive(&netagent_lock);
-	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(agent_uuid);
+	NETAGENT_LIST_LOCK_SHARED();
+	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(agent_uuid, true, false);
 	if (wrapper == NULL) {
 		NETAGENTLOG0(LOG_DEBUG, "Network agent for request UUID could not be found");
 		error = ENOENT;
@@ -2673,7 +2759,10 @@ netagent_acquire_token(uuid_t agent_uuid, user_addr_t user_addr, u_int32_t user_
 		(void)netagent_send_tokens_needed(wrapper);
 	}
 done:
-	lck_rw_done(&netagent_lock);
+	if (wrapper != NULL) {
+		NETAGENT_UNLOCK(wrapper);
+	}
+	NETAGENT_LIST_UNLOCK();
 	return error;
 }
 
@@ -2708,8 +2797,8 @@ netagent_trigger(struct proc *p, struct netagent_trigger_args *uap, int32_t *ret
 		return EINVAL;
 	}
 
-	lck_rw_lock_shared(&netagent_lock);
-	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(agent_uuid);
+	NETAGENT_LIST_LOCK_SHARED();
+	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid_and_lock(agent_uuid, false, false);
 	if (wrapper == NULL) {
 		NETAGENTLOG0(LOG_ERR, "Requested netagent UUID is not registered");
 		error = ENOENT;
@@ -2733,6 +2822,9 @@ netagent_trigger(struct proc *p, struct netagent_trigger_args *uap, int32_t *ret
 	error = netagent_send_trigger(wrapper, p, NETAGENT_TRIGGER_FLAG_USER, NETAGENT_MESSAGE_TYPE_TRIGGER);
 	NETAGENTLOG((error ? LOG_ERR : LOG_INFO), "Triggered netagent (error %d)", error);
 done:
-	lck_rw_done(&netagent_lock);
+	if (wrapper != NULL) {
+		NETAGENT_UNLOCK(wrapper);
+	}
+	NETAGENT_LIST_UNLOCK();
 	return error;
 }

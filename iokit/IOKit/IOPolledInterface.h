@@ -194,7 +194,7 @@ IOReturn IOPolledFileOpen(const char * filename,
 
 IOReturn IOPolledFileClose(IOPolledFileIOVars ** pVars,
     off_t write_offset, void * addr, size_t write_length,
-    off_t discard_offset, off_t discard_end);
+    off_t discard_offset, off_t discard_end, bool unlink);
 
 IOReturn IOPolledFilePollersSetup(IOPolledFileIOVars * vars, uint32_t openState);
 
@@ -252,7 +252,7 @@ kern_open_file_for_direct_io(const char * name,
 void
 kern_close_file_for_direct_io(struct kern_direct_file_io_ref_t * ref,
     off_t write_offset, void * addr, size_t write_length,
-    off_t discard_offset, off_t discard_end);
+    off_t discard_offset, off_t discard_end, bool unlink);
 int
 kern_write_file(struct kern_direct_file_io_ref_t * ref, off_t offset, void * addr, size_t len, int ioflag);
 int

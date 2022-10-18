@@ -60,7 +60,6 @@ const static size_t kVmObjectSize = 128 * (1UL << 20);
  */
 const static size_t kVmObjectSize = 4 * (1UL << 20);
 #endif /* (TARGET_OS_OSX || TARGET_OS_SIMULATOR) */
-static const clockid_t kWallTimeClock = CLOCK_MONOTONIC_RAW;
 static const clockid_t kThreadCPUTimeClock = CLOCK_THREAD_CPUTIME_ID;
 /* These globals are set dynamically during test setup based on sysctls. */
 static uint64_t kCacheLineSize = 0;

@@ -39,7 +39,7 @@
 
 #ifdef KERNEL
 #include "../../../osfmk/arm/arch.h"
-#include "../../../osfmk/arm/proc_reg.h"
+#include "../../../osfmk/arm64/proc_reg.h"
 
 #if __ARM_VFP__ < 3
 #error "Unsupported: __ARM_VFP__ < 3"

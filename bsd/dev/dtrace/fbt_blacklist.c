@@ -38,11 +38,11 @@
 #define UBSAN_MINIMAL_ONLY(s)
 #endif
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 #define ARM_ONLY(s) #s,
 #else
 #define ARM_ONLY(s)
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 #if defined(__x86_64__)
 #define X86_ONLY(s) #s,
 #else
@@ -97,8 +97,13 @@ const char * fbt_blacklist[] =
 	UBSAN_MINIMAL_ONLY(__ubsan)
 	ARM_ONLY(__udiv)
 	ARM_ONLY(__umod)
+	CLOSURE(_copyin)
+	CLOSURE(_copyout)
 	CRITICAL(_disable_preemption)
 	CRITICAL(_enable_preemption)
+#if SCHED_HYGIENE_DEBUG
+	CLOSURE(abandon_preemption_disable_measurement)
+#endif
 	CLOSURE(absolutetime_to_microtime)
 	X86_ONLY(acpi_)
 	X86_ONLY(act_machine)
@@ -181,14 +186,11 @@ const char * fbt_blacklist[] =
 	CLOSURE(memmove)
 	CRITICAL(ml_)
 	CLOSURE(mt_core_snap)
-	CLOSURE(mt_cur_cpu_cycles)
-	CLOSURE(mt_cur_cpu_instrs)
-	CLOSURE(mt_cur_thread_cycles)
-	CLOSURE(mt_cur_thread_instrs)
+	CLOSURE(mt_cur_cpu)
 	CLOSURE(mt_fixed_counts)
 	CLOSURE(mt_fixed_counts_internal)
 	CLOSURE(mt_mtc_update_count)
-	CLOSURE(mt_update_thread)
+	CLOSURE(mt_mtc_update_fixed_counts)
 	CRITICAL(nanoseconds_to_absolutetime)
 	CRITICAL(nanotime_to_absolutetime)
 	CRITICAL(no_asts)
@@ -225,9 +227,12 @@ const char * fbt_blacklist[] =
 	CRITICAL(preemption_underflow_panic)
 	CLOSURE(prf)
 	CLOSURE(proc_best_name)
+	CLOSURE(proc_get_task_raw)
 	CLOSURE(proc_is64bit)
 	CLOSURE(proc_require)
+	CLOSURE(proc_task)
 	CRITICAL(rbtrace_bt)
+	CLOSURE(recount_)
 	CRITICAL(register_cpu_setup_func)
 	CRITICAL(ret64_iret)
 	CRITICAL(ret_to_user)
@@ -249,6 +254,7 @@ const char * fbt_blacklist[] =
 	X86_ONLY(sync_iss_to_iks_unconditionally)
 	CLOSURE(systrace_stub)
 	CRITICAL(t_invop)
+	CLOSURE(task_get_proc_raw)
 	CLOSURE(thread_tid)
 	CLOSURE(timer_grab)
 	ARM_ONLY(timer_state_event)

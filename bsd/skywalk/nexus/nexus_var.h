@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -78,6 +78,7 @@ struct nxctl {
 	STAILQ_ENTRY(nxctl)     nxctl_link;
 	struct fileproc         *nxctl_fp;
 	kauth_cred_t            nxctl_cred;
+	void                   *nxctl_traffic_rule_storage;
 };
 
 #define NEXUSCTLF_ATTACHED      0x1
@@ -223,8 +224,8 @@ struct kern_nexus {
 	/* nexus port */
 	struct nx_port_info     *nx_ports;
 	bitmap_t                *nx_ports_bmap;
-	uint32_t                nx_active_ports;
-	uint32_t                nx_num_ports;
+	nexus_port_size_t       nx_active_ports;
+	nexus_port_size_t       nx_num_ports;
 };
 
 #define NXF_ATTACHED    0x1
@@ -302,7 +303,7 @@ struct kern_nexus_domain_provider {
 		int (*dp_cb_params)(struct kern_nexus_domain_provider *,
 		    const uint32_t, const struct nxprov_params *,
 		    struct nxprov_params *,
-		    struct skmem_region_params[SKMEM_REGIONS]);
+		    struct skmem_region_params[SKMEM_REGIONS], uint32_t);
 		int (*dp_cb_mem_new)(struct kern_nexus_domain_provider *,
 		    struct kern_nexus *, struct nexus_adapter *);
 		int (*dp_cb_config)(struct kern_nexus_domain_provider *,
@@ -360,6 +361,7 @@ struct nxdom {
 	struct nxp_bounds nxdom_tx_slots;
 	struct nxp_bounds nxdom_rx_slots;
 	struct nxp_bounds nxdom_buf_size;
+	struct nxp_bounds nxdom_large_buf_size;
 	struct nxp_bounds nxdom_meta_size;
 	struct nxp_bounds nxdom_stats_size;
 	struct nxp_bounds nxdom_pipes;
@@ -492,7 +494,15 @@ extern void nx_interface_advisory_notify(struct kern_nexus *);
 
 extern struct nxctl *nxctl_create(struct proc *, struct fileproc *,
     const uuid_t, int *);
-extern void nxctl_close(struct nxctl *nxctl);
+extern void nxctl_close(struct nxctl *);
+extern void nxctl_traffic_rule_clean(struct nxctl *);
+extern void nxctl_traffic_rule_init(void);
+extern void nxctl_traffic_rule_fini(void);
+extern int nxctl_inet_traffic_rule_find_qset_id_with_pkt(const char *,
+    struct __kern_packet *, uint64_t *);
+extern int nxctl_inet_traffic_rule_find_qset_id(const char *,
+    struct ifnet_traffic_descriptor_inet *, uint64_t *);
+extern int nxctl_inet_traffic_rule_get_count(const char *, uint32_t *);
 extern int nxctl_get_opt(struct nxctl *, struct sockopt *);
 extern int nxctl_set_opt(struct nxctl *, struct sockopt *);
 extern void nxctl_retain(struct nxctl *);
@@ -517,7 +527,6 @@ extern void nxprov_params_free(struct nxprov_params *);
 
 struct nxprov_adjusted_params {
 	nexus_meta_subtype_t *adj_md_subtype;
-	boolean_t *adj_md_magazines;
 	uint32_t *adj_stats_size;
 	uint32_t *adj_flowadv_max;
 	uint32_t *adj_nexusadv_size;
@@ -531,17 +540,19 @@ struct nxprov_adjusted_params {
 	uint32_t *adj_alloc_slots;
 	uint32_t *adj_free_slots;
 	uint32_t *adj_buf_size;
-	struct skmem_region_params *adj_buf_srp;
+	uint32_t *adj_buf_region_segment_size;
+	uint32_t *adj_pp_region_config_flags;
 	uint32_t *adj_max_frags;
 	uint32_t *adj_event_rings;
 	uint32_t *adj_event_slots;
 	uint32_t *adj_max_buffers;
+	uint32_t *adj_large_buf_size;
 };
 
 extern int nxprov_params_adjust(struct kern_nexus_domain_provider *,
     const uint32_t, const struct nxprov_params *, struct nxprov_params *,
     struct skmem_region_params[SKMEM_REGIONS], const struct nxdom *,
-    const struct nxdom *, const struct nxdom *,
+    const struct nxdom *, const struct nxdom *, uint32_t,
     int (*adjust_fn)(const struct kern_nexus_domain_provider *,
     const struct nxprov_params *, struct nxprov_adjusted_params *));
 
@@ -560,7 +571,7 @@ extern boolean_t nxdom_prov_release_locked(struct kern_nexus_domain_provider *);
 extern boolean_t nxdom_prov_release(struct kern_nexus_domain_provider *);
 extern int nxdom_prov_validate_params(struct kern_nexus_domain_provider *,
     const struct nxprov_reg *, struct nxprov_params *,
-    struct skmem_region_params[SKMEM_REGIONS], const uint32_t);
+    struct skmem_region_params[SKMEM_REGIONS], const uint32_t, uint32_t);
 
 extern struct nxbind *nxb_alloc(zalloc_flags_t);
 extern void nxb_free(struct nxbind *);
@@ -649,7 +660,7 @@ nx_has_rx_sync_packets(struct __kern_channel_ring *kring)
 
 __attribute__((always_inline))
 static __inline__ errno_t
-nx_tx_qset_notify(struct kern_nexus *nx, struct netif_qset *qset)
+nx_tx_qset_notify(struct kern_nexus *nx, void *qset_ctx)
 {
 	struct kern_nexus_provider *nxprov = NX_PROV(nx);
 	sk_protect_t protect;
@@ -657,7 +668,8 @@ nx_tx_qset_notify(struct kern_nexus *nx, struct netif_qset *qset)
 
 	ASSERT(nxprov->nxprov_netif_ext.nxnpi_tx_qset_notify != NULL);
 	protect = sk_tx_notify_protect();
-	err = nxprov->nxprov_netif_ext.nxnpi_tx_qset_notify(nxprov, nx, qset, 0);
+	err = nxprov->nxprov_netif_ext.nxnpi_tx_qset_notify(nxprov, nx,
+	    qset_ctx, 0);
 	sk_tx_notify_unprotect(protect);
 	return err;
 }

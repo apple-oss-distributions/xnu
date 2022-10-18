@@ -70,7 +70,8 @@
 #include <mach/mach_types.h>
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
-#include <ipc/ipc_types.h>
+#include <ipc/ipc_entry.h>
+
 /*
  * Exported interfaces
  */
@@ -103,35 +104,29 @@ extern void ipc_hash_delete(
 
 /* Lookup (space, obj) in local hash table */
 extern boolean_t ipc_hash_table_lookup(
-	ipc_entry_t             table,
+	ipc_entry_table_t       table,
 	ipc_object_t            obj,
 	mach_port_name_t        *namep,
 	ipc_entry_t             *entryp);
 
 /* Inserts an entry into the local reverse hash table */
 extern void ipc_hash_table_insert(
-	ipc_entry_t             table,
+	ipc_entry_table_t       table,
 	ipc_object_t            obj,
 	mach_port_index_t       index,
 	ipc_entry_t             entry);
 
 /* Delete an entry from the appropriate reverse hash table */
 extern void ipc_hash_table_delete(
-	ipc_entry_t             table,
+	ipc_entry_table_t       table,
 	ipc_object_t            obj,
 	mach_port_name_t        name,
 	ipc_entry_t             entry);
-
-#include <mach_ipc_debug.h>
-
-#if     MACH_IPC_DEBUG
 
 #include <mach_debug/hash_info.h>
 
 extern natural_t ipc_hash_info(
 	hash_info_bucket_t      *info,
 	natural_t count);
-
-#endif  /* MACH_IPC_DEBUG */
 
 #endif  /* _IPC_IPC_HASH_H_ */

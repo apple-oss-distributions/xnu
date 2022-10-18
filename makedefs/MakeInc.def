@@ -1,6 +1,6 @@
 # -*- mode: makefile;-*-
 #
-# Copyright (C) 1999-2021 Apple Inc. All rights reserved.
+# Copyright (C) 1999-2022 Apple Inc. All rights reserved.
 #
 # MakeInc.def contains global definitions for building,
 # linking, and installing files.
@@ -9,7 +9,7 @@
 #
 # Architecture Configuration options
 #
-SUPPORTED_ARCH_CONFIGS := X86_64 X86_64H ARM ARM64
+SUPPORTED_ARCH_CONFIGS := X86_64 X86_64H ARM64
 
 #
 # Kernel Configuration options
@@ -25,14 +25,11 @@ SUPPORTED_X86_64_MACHINE_CONFIGS = NONE
 SUPPORTED_X86_64H_MACHINE_CONFIGS = NONE
 
 ifneq ($(findstring _Sim,$(RC_ProjectName)),)
-SUPPORTED_ARM_MACHINE_CONFIGS = NONE
 SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
 else ifneq ($(findstring _host,$(RC_ProjectName)),)
-SUPPORTED_ARM_MACHINE_CONFIGS = NONE
 SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
 else
-SUPPORTED_ARM_MACHINE_CONFIGS = NONE
-SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000 T8101 VMAPPLE
+SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000 T8101 T8103 VMAPPLE
 
 endif
 
@@ -59,8 +56,9 @@ COMPONENT_LIST	= osfmk bsd libkern iokit pexpert libsa security san
 COMPONENT	= $(if $(word 2,$(subst /, ,$(RELATIVE_SOURCE_PATH))),$(word 2,$(subst /, ,$(RELATIVE_SOURCE_PATH))),$(firstword $(subst /, ,$(RELATIVE_SOURCE_PATH))))
 COMPONENT_IMPORT_LIST = $(filter-out $(COMPONENT),$(COMPONENT_LIST))
 
-MACHINE_FLAGS_ARM64_T8101 = -DARM64_BOARD_CONFIG_T8101_T8103			-mcpu=apple-a14
-MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 			-mcpu=apple-a14
+MACHINE_FLAGS_ARM64_T8101 = -DARM64_BOARD_CONFIG_T8101			-mcpu=apple-a14
+MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=apple-a14
+MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 		-mcpu=apple-a14
 MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
 MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
 
@@ -96,14 +94,8 @@ else
     DEPLOYMENT_LINKER_FLAGS =
 endif
 
-DEPLOYMENT_TARGET_DEFINES = -DPLATFORM_$(PLATFORM)
+DEPLOYMENT_TARGET_DEFINES = -DXNU_PLATFORM_$(PLATFORM)
 
-
-ifneq ($(RC_ENABLE_PRODUCT_INFO_FILTER),)
-SEED_DEFINES += -DRC_ENABLE_XNU_PRODUCT_INFO_FILTER
-else
-SEED_DEFINES += -URC_ENABLE_XNU_PRODUCT_INFO_FILTER
-endif
 
 #
 # Standard defines list
@@ -144,9 +136,11 @@ endif
 WARNFLAGS_STD := \
 	-Weverything \
 	-Wundef-prefix=TARGET_OS_ \
+	-Wundef-prefix=LCK_GRP_USE_ARG \
 	-Wno-pedantic \
 	$(WERROR) \
 	-Wno-bad-function-cast \
+	-Wno-bitwise-instead-of-logical \
 	-Wno-c++-compat \
 	-Wno-c++98-compat \
 	-Wno-conditional-uninitialized \
@@ -187,7 +181,8 @@ WARNFLAGS_STD := $(WARNFLAGS_STD) \
 
 # Opt-ins:
 WARNFLAGS_STD := $(WARNFLAGS_STD) \
-	-Wpointer-arith
+	-Wpointer-arith \
+	-Wxnu-typed-allocators
 
 CWARNFLAGS_STD = \
 	$(WARNFLAGS_STD)
@@ -226,7 +221,6 @@ ARCH_FLAGS_X86_64	  = -arch x86_64
 ARCH_FLAGS_X86_64H	  = -arch x86_64h
 
 ifeq ($(RC_ProjectName),xnu_libraries)
-WILL_BUILD_STATIC_KC := 1
 BUILD_STATIC_LINK := 1
 BUILD_XNU_LIBRARY := 1
 RC_NONARCH_CFLAGS += -D__BUILDING_XNU_LIBRARY__=1
@@ -240,35 +234,34 @@ else ifneq ($(findstring _host,$(RC_ProjectName)),)
 ARCH_FLAGS_ARM64          = -arch arm64e
 else
 
-ifndef ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG
+ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG ?=
+
+ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),)
 
 ifneq ($(EMBEDDED_DEVICE_MAP),)
 export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := $(shell $(EMBEDDED_DEVICE_MAP) -db $(EDM_DBPATH) -query SELECT DISTINCT KernelMachOArchitecture FROM Targets WHERE KernelPlatform IS \"$(CURRENT_MACHINE_CONFIG_LC)\" LIMIT 1 || echo UNKNOWN )
-else
-# Without embdedded device map, use a default arch string
-export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := $(shell echo $(CURRENT_ARCH_CONFIG) | tr A-Z a-z)
-ifneq ($(filter ARM64,$(CURRENT_ARCH_CONFIG)),)
-export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := arm64e
+ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),)
+ifeq ($(filter $(EXTRA_TARGET_CONFIGS_$(CURRENT_KERNEL_CONFIG)),$(CURRENT_MACHINE_CONFIG)),)
+$(error Machine config $(CURRENT_MACHINE_CONFIG_LC) not found in EmbeddedDeviceMap)
 endif
 endif
 endif
 
-#
-# This can have false negatives, and is used to avoid calling CTF when we'll build a static KC
-#
-ifndef WILL_BUILD_STATIC_KC
-ifneq ($(EMBEDDED_DEVICE_MAP),)
-export WILL_BUILD_STATIC_KC := $(shell $(EMBEDDED_DEVICE_MAP) -db $(EDM_DBPATH)	\
-				-query 'SELECT COUNT(*) != 0 FROM Targets WHERE KernelPlatform IS "$(CURRENT_MACHINE_CONFIG_LC)" \
-					AND (KernelMachOArchitecture LIKE "arm64e" OR ProductType LIKE "iphone10,%")')
-else
-export WILL_BUILD_STATIC_KC := 0
 endif
+
+ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),)
+
+# Without embdedded device map, use a default arch string
+export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := $(shell echo $(CURRENT_ARCH_CONFIG) | tr A-Z a-z)
+ifneq ($(filter arm64,$(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG)),)
+export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := arm64e
 endif
+
+endif
+
 
 BUILD_STATIC_LINK := 1
 
-ARCH_FLAGS_ARM		  = -arch $(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG)
 ARCH_FLAGS_ARM64	  = -arch $(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG)
 
 endif
@@ -325,9 +318,6 @@ CFLAGS_X86_64	= -Dx86_64 -DX86_64 -D__X86_64__ -DLP64 \
 
 CFLAGS_X86_64H = $(CFLAGS_X86_64)
 
-CFLAGS_ARM	= -Darm -DARM -D__ARM__ -DPAGE_SIZE_FIXED \
-			-momit-leaf-frame-pointer -fno-strict-aliasing -D__API__=v4
-
 LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY
 ARM64_PLKSEG_ADDR  =0xfffffff004004000
 ARM64_LINK_ADDR    =0xfffffff007004000
@@ -373,18 +363,15 @@ CFLAGS_PROFILEARM64 = -O2
 #
 # BOUND_CHECKS=0 disables, else support is dynamically detected
 #
-### ifndef BOUND_CHECKS
-### ifeq ($(shell $(CC) -E -fbounds-attributes /dev/null 2>/dev/null && echo 1),1)
-###     export BOUND_CHECKS := 1
-### else
-###     export BOUND_CHECKS := 0
-### endif
-### endif # ifndef BOUND_CHECKS
+ifndef BOUND_CHECKS
+ifeq ($(shell $(CC) -E -fbounds-attributes /dev/null 2>/dev/null && echo 1),1)
+    export BOUND_CHECKS := 1
+else
+    export BOUND_CHECKS := 0
+endif
+endif # ifndef BOUND_CHECKS
 ifeq ($(BOUND_CHECKS),1)
 CFLAGS_BOUND_CHECKS = -fbounds-attributes
-ifneq ($(shell $(CC) -E -fbounds-attributes /dev/null 2>/dev/null && echo 1),1)
-    $(error "your toolchain doesn't support bound checking")
-endif
 else
 CFLAGS_BOUND_CHECKS =
 endif
@@ -397,7 +384,7 @@ endif
 KCOV_RUNTIME := KASAN
 
 ifneq ($(filter RELEASE, $(KCOV_RUNTIME)),)
-$(error "Sanitizer runtime should not be eabled for RELEASE kernel.")
+$(error "Sanitizer runtime should not be enabled for RELEASE kernel.")
 endif
 
 
@@ -416,36 +403,25 @@ ifeq ($(KASAN),1)
 SAN=1
 BUILD_LTO=0
 
-# KASAN_CLASSIC is currently the default
-KASAN_CLASSIC=1
+# KASan Light support
+#
+# Light mode omits the HWASAN stack instrumentation.
+# Not supported by KASan Classic at this moment.
+
+KASAN_LIGHT_PLATFORM := WatchOS
+
+ifneq ($(filter $(PLATFORM), $(KASAN_LIGHT_PLATFORM)),)
+KASAN_LIGHT=1
+HWASAN_INSTRUMENT_STACK=0
+else
+KASAN_LIGHT=0
+HWASAN_INSTRUMENT_STACK=1
+endif
 
 KASAN_BLACKLIST=$(OBJROOT)/san/kasan-blacklist-$(CURRENT_ARCH_CONFIG_LC)
 
-# KASAN supports two different runtime models, KASAN_CLASSIC and KASAN_TBI.
-# Shadow map scale differs between the two. With KASAN_SCALE=N, the shadow memory consumes 1/2^N of
-# the virtual address space.
-ifeq ($(KASAN_TBI), 1)
-KASAN_SCALE=4
-KASAN_OFFSET_ARM64=0xf000000000000000
-KASAN_OFFSET=$(KASAN_OFFSET_ARM64)
-CFLAGS_KASAN_TBI = -fsanitize=kernel-hwaddress \
-        -fsanitize-blacklist=$(KASAN_BLACKLIST) \
-        -mllvm -hwasan-recover=0 \
-        -mllvm -hwasan-mapping-offset=$(KASAN_OFFSET) \
-        -mllvm -hwasan-instrument-atomics=0 \
-        -mllvm -hwasan-instrument-stack=0 \
-	-mllvm -hwasan-uar-retag-to-zero=1 \
-        -mllvm -hwasan-generate-tags-with-calls=1 \
-        -mllvm -hwasan-instrument-with-calls=0 \
-        -mllvm -hwasan-memory-access-callback-prefix="__asan_"
-
-CFLAGS_KASAN_MODEL_TAG=-DKASAN_TBI=1
-CFLAGS_KASAN_MODEL=$(CFLAGS_KASAN_TBI)
-else ifeq ($(KASAN_CLASSIC), 1)
-KASAN_SCALE=3
-KASAN_OFFSET_ARM64=0xe000000000000000
-# To calculate the kasan offset, subtract the lowest KVA to sanitize, shifted right by 3 bits,
-# from the base address of the kasan shadow area, (e.g. solve the following equation:
+# To calculate the kasan offset, subtract the lowest KVA to sanitize, shifted right by KASAN_SCALE_$INSTRUMENTATION bits,
+# from the base address of the kasan shadow area, (e.g. for x86_64 solve the following equation:
 # OFFSET = {VA mapped by the first KASAN PML4 [Currently #494]} - (LOWEST_KVA >> 3)
 # OFFSET = (0ULL - (512GiB * (512 - 494))) - (LOWEST_SAN_KVA >> 3)
 # OFFSET = FFFFF70000000000 - ((0ULL - (512GiB * (512 - 496))) >> 3) [PML4 #496 is the first possible KVA]
@@ -454,22 +430,38 @@ KASAN_OFFSET_ARM64=0xe000000000000000
 # ).
 KASAN_OFFSET_X86_64=0xdffff80000000000
 KASAN_OFFSET_X86_64H=$(KASAN_OFFSET_X86_64)
+KASAN_OFFSET_ARM64=0xf000000000000000
+
 KASAN_OFFSET=$($(addsuffix $(CURRENT_ARCH_CONFIG),KASAN_OFFSET_))
 
-CFLAGS_KASAN_CLASSIC= -fsanitize=address \
-                -mllvm -asan-globals-live-support \
-                -mllvm -asan-mapping-offset=$(KASAN_OFFSET) \
-                -fsanitize-blacklist=$(KASAN_BLACKLIST)
+# CLANG HWASAN/KHWASAN instrumentation powers KASAN_TBI. HWASAN traditional prefixing
+# is replaced by __asan_ to commonize exports across models.
+KASAN_SCALE_TBI=4
+CFLAGS_KASAN_INSTRUMENTATION_TBI = -DKASAN_TBI=1 -DKASAN_SCALE=$(KASAN_SCALE_TBI) \
+	-fsanitize=kernel-hwaddress \
+	-fsanitize-ignorelist=$(KASAN_BLACKLIST) \
+	-mllvm -hwasan-recover=0 \
+	-mllvm -hwasan-mapping-offset=$(KASAN_OFFSET) \
+	-mllvm -hwasan-instrument-atomics=0 \
+	-mllvm -hwasan-instrument-stack=$(HWASAN_INSTRUMENT_STACK) \
+	-mllvm -hwasan-uar-retag-to-zero=0 \
+	-mllvm -hwasan-generate-tags-with-calls=1 \
+	-mllvm -hwasan-instrument-with-calls=0 \
+	-mllvm -hwasan-use-short-granules=0 \
+	-mllvm -hwasan-memory-access-callback-prefix="__asan_"
 
-CFLAGS_KASAN_MODEL_TAG = -DKASAN_CLASSIC=1
-CFLAGS_KASAN_MODEL = $(CFLAGS_KASAN_CLASSIC)
 
-else
-$(error No KASAN model specified)
-endif
+KASAN_SCALE_CLASSIC=3
+CFLAGS_KASAN_INSTRUMENTATION_CLASSIC = -DKASAN_CLASSIC=1 -DKASAN_SCALE=$(KASAN_SCALE_CLASSIC) \
+	-fsanitize=address \
+	-mllvm -asan-globals-live-support \
+	-mllvm -asan-mapping-offset=$(KASAN_OFFSET) \
+	-fsanitize-ignorelist=$(KASAN_BLACKLIST)
 
-CFLAGS_GEN += -DKASAN=1 -DKASAN_OFFSET=$(KASAN_OFFSET) -DKASAN_SCALE=$(KASAN_SCALE) \
-	$(CFLAGS_KASAN_MODEL) $(CFLAGS_KASAN_MODEL_TAG)
+CFLAGS_KASANARM64 += $(CFLAGS_KASAN_INSTRUMENTATION_TBI)
+CFLAGS_KASANX86_64 += $(CFLAGS_KASAN_INSTRUMENTATION_CLASSIC)
+CFLAGS_KASANX86_64H += $(CFLAGS_KASAN_INSTRUMENTATION_CLASSIC)
+CFLAGS_GEN += -DKASAN=1 -DKASAN_OFFSET=$(KASAN_OFFSET) -DKASAN_LIGHT=$(KASAN_LIGHT)
 
 endif
 
@@ -521,7 +513,7 @@ ifneq ($(filter $(CURRENT_KERNEL_CONFIG), $(UBSAN_MINIMAL_RUNTIME)),)
 UBSAN_BLACKLIST=$(OBJROOT)/san/kasan-blacklist-$(CURRENT_ARCH_CONFIG_LC)
 
 UBSAN_CHECKS = signed-integer-overflow
-UBSAN_RUNTIME = -fsanitize-minimal-runtime -fsanitize-blacklist=$(UBSAN_BLACKLIST)
+UBSAN_RUNTIME = -fsanitize-minimal-runtime -fsanitize-ignorelist=$(UBSAN_BLACKLIST)
 UBSAN_CHECKS_TRAP =
 UBSAN_CHECKS_FATAL =
 UBSAN_DISABLED =
@@ -540,12 +532,12 @@ ifeq ($(KSANCOV),1)
 # Enable SanitizerCoverage instrumentation in xnu
 SAN = 1
 KCOV_BLACKLIST := $(OBJROOT)/san/kcov-blacklist-$(CURRENT_ARCH_CONFIG_LC)
-KCOV_CFLAGS := -fsanitize-coverage=trace-pc-guard -fsanitize-coverage-blocklist=$(KCOV_BLACKLIST)
+KCOV_CFLAGS := -fsanitize-coverage=trace-pc-guard -fsanitize-coverage-ignorelist=$(KCOV_BLACKLIST)
 CFLAGS_GEN += $(KCOV_CFLAGS) -DKSANCOV=1
 endif
 
 ifeq ($(SAN),1)
-CFLAGS_GEN += -fsanitize-blacklist=$(OBJROOT)/san/kasan-blacklist-$(CURRENT_ARCH_CONFIG_LC)
+CFLAGS_GEN += -fsanitize-ignorelist=$(OBJROOT)/san/kasan-blacklist-$(CURRENT_ARCH_CONFIG_LC)
 endif
 
 
@@ -599,7 +591,6 @@ SFLAGS_PROFILE	=
 
 SFLAGS_X86_64	= $(CFLAGS_X86_64)
 SFLAGS_X86_64H	= $(CFLAGS_X86_64H)
-SFLAGS_ARM	= $(CFLAGS_ARM)
 SFLAGS_ARM64	= $(CFLAGS_ARM64)
 
 SFLAGS	= $(SFLAGS_GEN) \
@@ -724,35 +715,6 @@ LDFLAGS_KERNEL_DEBUGX86_64H = $(LDFLAGS_KERNEL_RELEASEX86_64H)
 LDFLAGS_KERNEL_DEVELOPMENTX86_64H = $(LDFLAGS_KERNEL_RELEASEX86_64H)
 LDFLAGS_KERNEL_KASANX86_64H = $(LDFLAGS_KERNEL_KASANX86_64)
 LDFLAGS_KERNEL_PROFILEX86_64H = $(LDFLAGS_KERNEL_RELEASEX86_64H)
-
-# We preload ___udivmoddi4 in order to work around an issue with building
-# LTO on armv7.
-LDFLAGS_KERNEL_GENARM = \
-	-Wl,-pie \
-	-Wl,-static \
-	-Wl,-image_base,0x80001000 \
-	-Wl,-sectalign,__DATA,__const,0x1000 \
-	-Wl,-u,___udivmoddi4 \
-	-Wl,-rename_section,__KLD,__const,__KLDDATA,__const \
-	-Wl,-rename_section,__KLD,__cstring,__KLDDATA,__cstring \
-	-Wl,-segprot,__KLDDATA,rw-,rw- \
-	-Wl,-segprot,__KLD,r-x,r-x
-
-LDFLAGS_KERNEL_RELEASEARM     = \
-	$(LDFLAGS_KERNEL_GENARM) \
-	$(LDFLAGS_KERNEL_STRIP_LTO)
-
-LDFLAGS_KERNEL_ONLY_CONFIG_RELEASEARM     = \
-	-Wl,-exported_symbols_list,$(TARGET)/all-kpi.exp
-
-LDFLAGS_KERNEL_DEVELOPMENTARM     = \
-	$(LDFLAGS_KERNEL_GENARM) \
-	$(LDFLAGS_NOSTRIP_FLAG)
-
-LDFLAGS_KERNEL_ONLY_CONFIG_DEVELOPMENTARM =
-
-LDFLAGS_KERNEL_DEBUGARM = $(LDFLAGS_KERNEL_DEVELOPMENTARM)
-LDFLAGS_KERNEL_ONLY_CONFIG_DEBUGARM = $(LDFLAGS_KERNEL_ONLY_CONFIG_DEVELOPMENTARM)
 
 # Offset image base by page to have iBoot load kernel TEXT correctly.
 # First page is used for various purposes : sleep token, reset vector.
@@ -892,13 +854,6 @@ ifneq ($(PLATFORM),MacOSX)
 DO_CTFMERGE := 0
 endif
 endif
-ifneq ($(CURRENT_KERNEL_CONFIG),KASAN)
-ifneq ($(PLATFORM),MacOSX)
-ifeq ($(WILL_BUILD_STATIC_KC),1)
-DO_CTFMERGE := 0
-endif
-endif
-endif
 endif # DO_CTFMERGE
 
 
@@ -1015,6 +970,12 @@ endif
 
 FRAMEDIR = $(SDKHEADERSROOT)/System/Library/Frameworks
 
+IINCVERS = A
+IINCFRAME = $(FRAMEDIR)/IOKit.framework
+IINCDIR = $(IINCFRAME)/Versions/$(IINCVERS)/Headers
+IPINCDIR = $(IINCFRAME)/Versions/$(IINCVERS)/PrivateHeaders
+IRESDIR = $(IINCFRAME)/Versions/$(IINCVERS)/Resources
+
 SINCVERS = B
 SINCFRAME = $(FRAMEDIR)/System.framework
 SINCDIR = $(SINCFRAME)/Versions/$(SINCVERS)/Headers
@@ -1066,7 +1027,7 @@ XNU_PRIVATE_UNIFDEF += -UPEXPERT_KERNEL_PRIVATE
 XNU_PRIVATE_UNIFDEF += -UXNU_KERNEL_PRIVATE
 
 
-PLATFORM_UNIFDEF = $(foreach x,$(SUPPORTED_PLATFORMS),$(if $(filter $(PLATFORM),$(x)),-DPLATFORM_$(x) $(foreach token,$(PLATFORM_UNIFDEF_BLACKLIST_TOKENS_$(x)),-U$(token)),-UPLATFORM_$(x)))
+PLATFORM_UNIFDEF = $(foreach x,$(SUPPORTED_PLATFORMS),$(if $(filter $(PLATFORM),$(x)),-DXNU_PLATFORM_$(x) $(foreach token,$(PLATFORM_UNIFDEF_BLACKLIST_TOKENS_$(x)),-U$(token)),-UXNU_PLATFORM_$(x)))
 
 
 # Some header guards need to be present and checked in kernel headers but removed from userspace headers
@@ -1104,7 +1065,6 @@ DSYMUTIL_FLAGS_GEN	= --minimize
 
 DSYMUTIL_FLAGS_X86_64	= --arch=x86_64
 DSYMUTIL_FLAGS_X86_64H	= --arch=x86_64h
-DSYMUTIL_FLAGS_ARM	= --arch=arm
 DSYMUTIL_FLAGS_ARM64	=
 
 DSYMUTIL_FLAGS = $(DSYMUTIL_FLAGS_GEN) \

@@ -12,15 +12,17 @@ T_GLOBAL_META(
  * trying phys offsets from start of dram of:
  * macOS 3Gig
  */
-#define USEBOOTARG "bad_ram_pages=3221225472 bad_static_mfree=1"
+#define USEBOOTARG "ecc_bad_pages=3221225472 bad_static_mfree=1"
 
 T_DECL(retired_pages_test,
     "Test retiring pages at boot",
     T_META_BOOTARGS_SET(USEBOOTARG),
     T_META_ASROOT(true),
     T_META_CHECK_LEAKS(false),
-    T_META_ENABLED(TARGET_OS_OSX && TARGET_CPU_ARM64))
+    T_META_ENABLED(0))
 {
+	/* TODO: Joe will update/enable test in rdar://70008487 */
+
 	int err;
 	unsigned int count = 0;
 	size_t s = sizeof(count);

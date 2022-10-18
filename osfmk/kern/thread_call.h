@@ -346,15 +346,16 @@ __END_DECLS
 #include <kern/priority_queue.h>
 
 __enum_closed_decl(thread_call_index_t, uint16_t, {
-	THREAD_CALL_INDEX_HIGH          = 0,
-	THREAD_CALL_INDEX_KERNEL        = 1,
-	THREAD_CALL_INDEX_USER          = 2,
-	THREAD_CALL_INDEX_LOW           = 3,
-	THREAD_CALL_INDEX_KERNEL_HIGH   = 4,
-	THREAD_CALL_INDEX_QOS_UI        = 5,
-	THREAD_CALL_INDEX_QOS_IN        = 6,
-	THREAD_CALL_INDEX_QOS_UT        = 7,
-	THREAD_CALL_INDEX_MAX           = 8,    /* count of thread call indexes */
+	THREAD_CALL_INDEX_INVALID       = 0,    /* make sure zero tc_index is detected as invalid */
+	THREAD_CALL_INDEX_HIGH          = 1,
+	THREAD_CALL_INDEX_KERNEL        = 2,
+	THREAD_CALL_INDEX_USER          = 3,
+	THREAD_CALL_INDEX_LOW           = 4,
+	THREAD_CALL_INDEX_KERNEL_HIGH   = 5,
+	THREAD_CALL_INDEX_QOS_UI        = 6,
+	THREAD_CALL_INDEX_QOS_IN        = 7,
+	THREAD_CALL_INDEX_QOS_UT        = 8,
+	THREAD_CALL_INDEX_MAX           = 9,    /* count of thread call indexes */
 });
 
 __options_closed_decl(thread_call_flags_t, uint16_t, {
@@ -367,6 +368,7 @@ __options_closed_decl(thread_call_flags_t, uint16_t, {
 	THREAD_CALL_RESCHEDULE          = 0x0040,       /* enqueue is pending due to re-arm while running */
 	THREAD_CALL_RATELIMITED         = 0x0080,       /* timer doesn't fire until slop+deadline */
 	THREAD_CALL_FLAG_CONTINUOUS     = 0x0100,       /* deadline is in continuous time */
+	THREAD_CALL_INITIALIZED         = 0x0200,       /* thread call is initialized */
 });
 
 struct thread_call {

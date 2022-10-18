@@ -57,6 +57,7 @@ tables, ... Available hooks are:
 - Rank 1: `TUNABLE`, `TUNABLE_WRITEABLE`
 - Middle: globals that require complex initialization (e.g. SFI classes).
 
+
 `STARTUP_SUB_TIMEOUTS`
 ----------------------
 
@@ -70,8 +71,9 @@ detail.
 
 - Rank 1: `MACHINE_TIMEOUT`
 
-`STARTUP_SUB_LOCKS_EARLY`
--------------------------
+
+`STARTUP_SUB_LOCKS`
+-------------------
 
 ### Description
 
@@ -82,16 +84,15 @@ initialized. Available hooks are:
 - `LCK_ATTR_DECLARE`: automatically initialized lock attributes,
 - `LCK_SPIN_DECLARE*`: automatically initialized spinlocks,
 - `LCK_RW_DECLARE`: automatically initialized reader/writer lock,
-- `LCK_MTX_EARLY_DECLARE*`: automatically initialized mutexes, with statically
-  allocated buffers for statistics/tracing,
+- `LCK_MTX_DECLARE`: automatically initialized mutex,
 - `SIMPLE_LOCK_DECLARE*`: automatically initialized simple locks.
 
 ### Rank usage
 
 - Rank 1: Initializes the module (`lck_mod_init`),
-- Rank 2: `LCK_ATTR_DECLARE`,
-- Rank 3: `LCK_GRP_DECLARE*`
-- Rank 4: `LCK_SPIN_DECLARE*`, `LCK_MTX_EARLY_DECLARE*`,
+- Rank 2: `LCK_ATTR_DECLARE`, `LCK_GRP_DECLARE*`
+- Rank 3: compact lock group table init
+- Rank 4: `LCK_SPIN_DECLARE*`, `LCK_MTX_DECLARE*`,
   `LCK_RW_DECLARE`, `SIMPLE_LOCK_DECLARE*`.
 
 
@@ -119,29 +120,16 @@ Allows for subsystems to steal early memory.
 N/A.
 
 
-`STARTUP_SUB_VM_KERNEL`
------------------------
-
-### Description
-
-Denotes that the early kernel VM is initialized.
-
-### Rank usage
-
-N/A.
-
-
 `STARTUP_SUB_KMEM`
 ------------------
 
 ### Description
 
-Denotes that `kernel_memory_allocate` is now usable.
+Denotes that `kmem_alloc` is now usable.
 
 ### Rank usage
 
 N/A.
-
 
 `STARTUP_SUB_ZALLOC`
 --------------------
@@ -168,13 +156,22 @@ Initializes the zone allocator.
 
 - Rank 3: Initialize kalloc.
 
-- Rank 4: Enable zone caching & logging (uses kalloc)
+- Rank 4: Initialize kalloc type and run `ZONE_DEFINE` and `ZONE_INIT`.
 
-- Middle: for any initialization that only requires kalloc/zalloc
-          runs `ZONE_DEFINE` and `ZONE_INIT`.
+- Middle: Enable zone caching & logging
 
 - Last:   zone and kalloc heaps (`ZONE_VIEW_DEFINE`, `KALLOC_HEAP_DEFINE`).
 
+`STARTUP_SUB_KTRACE`
+--------------------
+
+### Description
+
+Initializes kdebug and kperf and starts tracing if requested with boot-args.
+
+### Rank usage
+
+N/A.
 
 `STARTUP_SUB_PERCPU`
 --------------------
@@ -191,17 +188,6 @@ Rank 1: allocates the percpu memory, `percpu_foreach_base` and `percpu_foreach`
 Rank 2: sets up static percpu counters.
 
 
-`STARTUP_SUB_LOCKS`
--------------------
-
-### Description
-
-Initializes kernel locks that might require allocations (due to statistics and
-tracing features). Available hooks are:
-
-- `LCK_MTX_DECLARE`: automatically initialized mutex,
-
-
 ### Rank usage
 
 - Rank 1: `LCK_MTX_DECLARE`.
@@ -216,7 +202,6 @@ Initializes the codesigning subsystem.
 ### Rank usage
 
 - Rank 1: calls the module initializer (`cs_init`).
-
 
 `STARTUP_SUB_OSLOG`
 -------------------

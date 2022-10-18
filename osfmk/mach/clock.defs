@@ -35,9 +35,9 @@
  */
 
 subsystem
-#if	KERNEL_SERVER
-	  KernelServer
-#endif	/* KERNEL_SERVER */
+#if	KERNEL_SERVER || KOBJECT_SERVER
+	KernelServer
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 		       clock 1000;
 
 #include <mach/std_types.defs>

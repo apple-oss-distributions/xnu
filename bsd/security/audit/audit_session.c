@@ -1275,7 +1275,7 @@ audit_session_self(proc_t p, __unused struct audit_session_self_args *uap,
 	 * process' mach port namespace.
 	 */
 	sendport = audit_session_mksend(aia_p, &se->se_port);
-	*ret_port = ipc_port_copyout_send(sendport, get_task_ipcspace(p->task));
+	*ret_port = ipc_port_copyout_send(sendport, get_task_ipcspace(proc_task(p)));
 
 done:
 	if (cred != NULL) {
@@ -1383,7 +1383,7 @@ audit_session_port(proc_t p, struct audit_session_port_args *uap,
 	 * and then copy out the mach port to the process' mach port namespace.
 	 */
 	sendport = audit_session_mksend(aia_p, &se->se_port);
-	portname = ipc_port_copyout_send(sendport, get_task_ipcspace(p->task));
+	portname = ipc_port_copyout_send(sendport, get_task_ipcspace(proc_task(p)));
 	if (!MACH_PORT_VALID(portname)) {
 		err = EINVAL;
 		goto done;
@@ -1397,7 +1397,7 @@ done:
 		audit_unref_session(se);
 	}
 	if (MACH_PORT_VALID(portname) && 0 != err) {
-		(void)mach_port_deallocate(get_task_ipcspace(p->task),
+		(void)mach_port_deallocate(get_task_ipcspace(proc_task(p)),
 		    portname);
 	}
 
@@ -1510,12 +1510,12 @@ audit_session_join(proc_t p, struct audit_session_join_args *uap,
 	int err = 0;
 
 
-	if (ipc_object_copyin(get_task_ipcspace(p->task), send,
+	if (ipc_object_copyin(get_task_ipcspace(proc_task(p)), send,
 	    MACH_MSG_TYPE_COPY_SEND, &port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND) != KERN_SUCCESS) {
 		*ret_asid = AU_DEFAUDITSID;
 		err = EINVAL;
 	} else {
-		err = audit_session_join_internal(p, p->task, port, ret_asid);
+		err = audit_session_join_internal(p, proc_task(p), port, ret_asid);
 	}
 
 	return err;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -112,9 +112,12 @@ typedef enum {
 	SKMEM_REGION_GUARD_HEAD = 0,    /* leading guard page(s) */
 	SKMEM_REGION_SCHEMA,            /* channel layout */
 	SKMEM_REGION_RING,              /* rings */
-	SKMEM_REGION_BUF,               /* rx/tx buffer */
-	SKMEM_REGION_RXBUF,             /* rx only buffers */
-	SKMEM_REGION_TXBUF,             /* tx only buffers */
+	SKMEM_REGION_BUF_DEF,           /* Default rx/tx buffer */
+	SKMEM_REGION_BUF_LARGE,         /* Large rx/tx buffer */
+	SKMEM_REGION_RXBUF_DEF,         /* Default rx only buffers */
+	SKMEM_REGION_RXBUF_LARGE,       /* Large rx only buffers */
+	SKMEM_REGION_TXBUF_DEF,         /* Default tx only buffers */
+	SKMEM_REGION_TXBUF_LARGE,       /* Large tx only buffers */
 	SKMEM_REGION_UMD,               /* userland metadata */
 	SKMEM_REGION_TXAUSD,            /* tx/alloc/event user slot descriptors */
 	SKMEM_REGION_RXFUSD,            /* rx/free user slot descriptors */
@@ -142,7 +145,7 @@ typedef enum {
 	SKMEM_REGIONS                   /* max */
 } skmem_region_id_t;
 
-#define SKMEM_PP_REGIONS 11
+#define SKMEM_PP_REGIONS 14
 extern const skmem_region_id_t skmem_pp_region_ids[SKMEM_PP_REGIONS];
 
 /*
@@ -186,6 +189,8 @@ typedef void (*sksegment_dtor_fn_t)(struct sksegment *,
 /*
  * Region.
  */
+#define SKR_MAX_CACHES    3 /* max # of caches allowed on a region */
+
 struct skmem_region {
 	decl_lck_mtx_data(, skr_lock);          /* region lock */
 
@@ -216,7 +221,7 @@ struct skmem_region {
 	IOSKRegionRef           skr_reg;        /* backing IOSKRegion */
 	struct zone             *skr_zreg;      /* backing zone (pseudo mode) */
 	void                    *skr_private;   /* opaque arg to callbacks */
-	struct skmem_cache      *skr_cache;     /* client slab/cache layer */
+	struct skmem_cache      *skr_cache[SKR_MAX_CACHES]; /* client slab/cache layer */
 
 	/*
 	 * Objects.
@@ -286,6 +291,7 @@ struct skmem_region {
 #define SKR_MODE_GUARD          0x1000  /* guard pages region */
 #define SKR_MODE_PUREDATA       0x2000  /* purely data; no pointers */
 #define SKR_MODE_PSEUDO         0x4000  /* external backing store */
+#define SKR_MODE_THREADSAFE     0x8000  /* thread safe */
 #define SKR_MODE_SLAB           (1U << 30) /* backend for slab layer */
 #define SKR_MODE_MIRRORED       (1U << 31) /* controlled by another region */
 
@@ -293,7 +299,8 @@ struct skmem_region {
 	"\020\01NOREDIRECT\02MMAPOK\03KREADONLY\04UREADONLY"    \
 	"\05PERSISTENT\06MONOLITHIC\07NOMAGAZINES\10NOCACHE"    \
 	"\11SEGPHYSCONTIG\012SHAREOK\013IODIR_IN\014IODIR_OUT"  \
-	"\015GUARD\016PUREDATA\017PSEUDO\037SLAB\040MIRRORED"
+	"\015GUARD\016PUREDATA\017PSEUDO\020THREADSAFE\037SLAB" \
+	"\040MIRRORED"
 
 /* valid values for skmem_region_create() */
 #define SKMEM_REGION_CR_NOREDIRECT      0x1     /* unaffected by defunct */
@@ -311,12 +318,13 @@ struct skmem_region {
 #define SKMEM_REGION_CR_GUARD           0x1000  /* guard pages region */
 #define SKMEM_REGION_CR_PUREDATA        0x2000  /* purely data; no pointers */
 #define SKMEM_REGION_CR_PSEUDO          0x4000  /* external backing store */
+#define SKMEM_REGION_CR_THREADSAFE      0x8000  /* thread safe */
 
 #define SKMEM_REGION_CR_BITS    \
 	"\020\01NOREDIRECT\02MMAPOK\03KREADONLY\04UREADONLY"    \
 	"\05PERSISTENT\06MONOLITHIC\07NOMAGAZINES\10NOCACHE"    \
 	"\11SEGPHYSCONTIG\012SHAREOK\013IODIR_IN\014IODIR_OUT"  \
-	"\015GUARD\016PUREDATA\017PSEUDO"
+	"\015GUARD\016PUREDATA\017PSEUDO\020THREADSAFE"
 
 __BEGIN_DECLS
 extern void skmem_region_init(void);
@@ -328,7 +336,7 @@ extern struct skmem_region *skmem_region_create(const char *,
     void *);
 extern void skmem_region_mirror(struct skmem_region *, struct skmem_region *);
 extern void skmem_region_slab_config(struct skmem_region *,
-    struct skmem_cache *);
+    struct skmem_cache *, bool);
 extern void *skmem_region_alloc(struct skmem_region *, void **,
     struct sksegment **, struct sksegment **, uint32_t);
 extern void skmem_region_free(struct skmem_region *, void *, void *);

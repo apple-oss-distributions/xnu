@@ -48,7 +48,13 @@ IONVRAMController::sync(void)
 }
 
 IOReturn
-IONVRAMController::nextBank(void)
+IONVRAMController::select(uint32_t bank)
+{
+	return kIOReturnUnsupported;
+}
+
+IOReturn
+IONVRAMController::eraseBank(void)
 {
 	return kIOReturnUnsupported;
 }

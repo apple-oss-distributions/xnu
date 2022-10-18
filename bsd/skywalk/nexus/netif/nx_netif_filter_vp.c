@@ -290,15 +290,15 @@ netif_filter_region_params_setup(struct nexus_adapter *na,
 	    srp[SKMEM_REGION_RXFKSD].srp_r_obj_cnt;
 	skmem_region_params_config(&srp[SKMEM_REGION_RXFUSD]);
 
-	srp[SKMEM_REGION_BUF].srp_cflags |= SKMEM_REGION_CR_UREADONLY;
-
 	/* max_mtu does not include the L2 header */
 	buf_sz = (filter_buf_sz != 0) ? filter_buf_sz :
 	    MAX(max_mtu + sizeof(struct ether_vlan_header), 2048);
 	buf_cnt = filter_pool_size;
-	pp_regions_params_adjust(&srp[SKMEM_REGION_BUF], &srp[SKMEM_REGION_KMD],
-	    &srp[SKMEM_REGION_UMD], NULL, NULL, NEXUS_META_TYPE_PACKET,
-	    NEXUS_META_SUBTYPE_RAW, buf_cnt, 1, buf_sz, buf_cnt);
+	pp_regions_params_adjust(srp, NEXUS_META_TYPE_PACKET,
+	    NEXUS_META_SUBTYPE_RAW, buf_cnt, 1, buf_sz, 0, buf_cnt, 0,
+	    (PP_REGION_CONFIG_BUF_IODIR_BIDIR |
+	    PP_REGION_CONFIG_MD_MAGAZINE_ENABLE |
+	    PP_REGION_CONFIG_BUF_UREADONLY));
 
 	nx_netif_vp_region_params_adjust(na, srp);
 	return 0;
@@ -334,10 +334,8 @@ netif_filter_na_mem_new(struct nexus_adapter *na)
 		if (srp[SKMEM_REGION_KMD].srp_max_frags > 1) {
 			pp_flags |= PPCREATEF_ONDEMAND_BUF;
 		}
-		pp = pp_create(pp_name, &srp[SKMEM_REGION_BUF],
-		    &srp[SKMEM_REGION_KMD], &srp[SKMEM_REGION_UMD],
-		    &srp[SKMEM_REGION_KBFT], &srp[SKMEM_REGION_UBFT], NULL,
-		    NULL, NULL, NULL, NULL, pp_flags);
+		pp = pp_create(pp_name, srp, NULL, NULL, NULL, NULL, NULL,
+		    pp_flags);
 		if (pp == NULL) {
 			SK_ERR("failed to create filter pp");
 			return ENOMEM;
@@ -345,7 +343,7 @@ netif_filter_na_mem_new(struct nexus_adapter *na)
 		nif->nif_filter_pp = pp;
 	}
 	na->na_arena = skmem_arena_create_for_nexus(na, srp,
-	    &nif->nif_filter_pp, NULL, FALSE, FALSE, NULL, &err);
+	    &nif->nif_filter_pp, NULL, 0, NULL, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 	ASSERT(nx->nx_tx_pp == NULL || (nx->nx_tx_pp->pp_md_type ==
 	    NX_DOM(nx)->nxdom_md_type && nx->nx_tx_pp->pp_md_subtype ==

@@ -29,11 +29,12 @@
 #include <pexpert/pexpert.h>
 #if __arm64__
 #include <pexpert/arm64/board_config.h>
+#include <arm64/hv_hvc.h>
 #endif /* __arm64__ */
 
 #include <arm/cpuid_internal.h>
 #include <arm/pmap.h>
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #include <machine/machine_cpuid.h>
 #include <machine/machine_routines.h>
 

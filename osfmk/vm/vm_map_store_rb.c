@@ -31,8 +31,7 @@
 
 RB_GENERATE(rb_head, vm_map_store, entry, rb_node_compare);
 
-#define VME_FOR_STORE( store)   \
-	(vm_map_entry_t)(((unsigned long)store) - ((unsigned long)sizeof(struct vm_map_links)))
+#define VME_FOR_STORE(ptr) __container_of(ptr, struct vm_map_entry, store)
 
 void
 vm_map_store_init_rb( struct vm_map_header* hdr )
@@ -47,7 +46,7 @@ rb_node_compare(struct vm_map_store *node, struct vm_map_store *parent)
 	vm_map_entry_t vme_p;
 
 	vme_c = VME_FOR_STORE(node);
-	vme_p =  VME_FOR_STORE(parent);
+	vme_p = VME_FOR_STORE(parent);
 	if (vme_c->vme_start < vme_p->vme_start) {
 		return -1;
 	}
@@ -84,9 +83,6 @@ vm_map_store_lookup_entry_rb(vm_map_t map, vm_map_offset_t address, vm_map_entry
 
 	while (rb_entry != (struct vm_map_store*)NULL) {
 		cur =  VME_FOR_STORE(rb_entry);
-		if (cur == VM_MAP_ENTRY_NULL) {
-			panic("no entry");
-		}
 		if (address >= cur->vme_start) {
 			if (address < cur->vme_end) {
 				*vm_entry = cur;
@@ -148,8 +144,6 @@ vm_map_store_copy_reset_rb( vm_map_copy_t copy, vm_map_entry_t entry, int nentri
 	}
 }
 
-extern zone_t   vm_map_holes_zone;      /* zone for vm map holes (vm_map_links) structures */
-
 void
 vm_map_combine_hole(vm_map_t map, vm_map_entry_t hole_entry);
 void
@@ -171,7 +165,7 @@ vm_map_combine_hole(__unused vm_map_t map, vm_map_entry_t hole_entry)
 	middle_hole_entry->vme_prev = NULL;
 	middle_hole_entry->vme_next = NULL;
 
-	zfree(vm_map_holes_zone, middle_hole_entry);
+	zfree_id(ZONE_ID_VM_MAP_HOLES, middle_hole_entry);
 
 	assert(hole_entry->vme_start < hole_entry->vme_end);
 	assert(last_hole_entry->vme_start < last_hole_entry->vme_end);
@@ -208,7 +202,7 @@ vm_map_delete_hole(vm_map_t map, vm_map_entry_t hole_entry)
 
 	hole_entry->vme_next = NULL;
 	hole_entry->vme_prev = NULL;
-	zfree(vm_map_holes_zone, hole_entry);
+	zfree_id(ZONE_ID_VM_MAP_HOLES, hole_entry);
 }
 
 
@@ -427,7 +421,7 @@ update_holes_on_entry_deletion(vm_map_t map, vm_map_entry_t old_entry)
 		struct vm_map_links     *new_hole_entry = NULL;
 		vm_map_entry_t          l_next, l_prev;
 
-		new_hole_entry = zalloc(vm_map_holes_zone);
+		new_hole_entry = zalloc_id(ZONE_ID_VM_MAP_HOLES, Z_WAITOK | Z_NOFAIL);
 
 		/*
 		 * First hole in the map?
@@ -553,7 +547,7 @@ update_holes_on_entry_creation(vm_map_t map, vm_map_entry_t new_entry)
 			/* Case B */
 			struct vm_map_links *new_hole_entry = NULL;
 
-			new_hole_entry = zalloc(vm_map_holes_zone);
+			new_hole_entry = zalloc_id(ZONE_ID_VM_MAP_HOLES, Z_WAITOK | Z_NOFAIL);
 
 #if DEBUG
 			copy_hole_info(hole_entry, &old_hole_entry);

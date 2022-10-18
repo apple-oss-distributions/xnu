@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
@@ -70,6 +70,7 @@ static void commpage_init_cpu_capabilities( void );
 
 SECURITY_READ_ONLY_LATE(vm_address_t)   commPagePtr = 0;
 SECURITY_READ_ONLY_LATE(vm_address_t)   sharedpage_rw_addr = 0;
+SECURITY_READ_ONLY_LATE(vm_address_t)   sharedpage_kernel_ro_addr = 0;
 SECURITY_READ_ONLY_LATE(uint64_t)       _cpu_capabilities = 0;
 SECURITY_READ_ONLY_LATE(vm_address_t)   sharedpage_rw_text_addr = 0;
 
@@ -109,11 +110,13 @@ extern int gARM_FEAT_ECV;
 extern int gARM_FEAT_LSE2;
 extern int gARM_FEAT_CSV2;
 extern int gARM_FEAT_CSV3;
+extern int gARM_FEAT_DIT;
 extern int gARM_AdvSIMD;
 extern int gARM_AdvSIMD_HPFPCvt;
 extern int gARM_FEAT_FP16;
 extern int gARM_FEAT_SSBS;
 extern int gARM_FEAT_BTI;
+extern int gARM_FP_SyncExceptions;
 
 extern int      gUCNormalMem;
 
@@ -124,21 +127,18 @@ commpage_populate(void)
 	int cpufamily;
 
 	// Create the data and the text commpage
-	vm_map_address_t kernel_data_addr, kernel_text_addr, user_text_addr;
-	pmap_create_sharedpages(&kernel_data_addr, &kernel_text_addr, &user_text_addr);
+	vm_map_address_t kernel_data_addr, kernel_text_addr, kernel_ro_data_addr, user_text_addr;
+	pmap_create_sharedpages(&kernel_data_addr, &kernel_text_addr, &kernel_ro_data_addr, &user_text_addr);
 
 	sharedpage_rw_addr = kernel_data_addr;
 	sharedpage_rw_text_addr = kernel_text_addr;
+	sharedpage_kernel_ro_addr = kernel_ro_data_addr;
 	commPagePtr = (vm_address_t) _COMM_PAGE_BASE_ADDRESS;
 
 #if __arm64__
 	commpage_text64_location = user_text_addr;
 	bcopy(_COMM_PAGE64_SIGNATURE_STRING, (void *)(_COMM_PAGE_SIGNATURE + _COMM_PAGE_RW_OFFSET),
 	    MIN(_COMM_PAGE_SIGNATURELEN, strlen(_COMM_PAGE64_SIGNATURE_STRING)));
-#else
-	commpage_text32_location = user_text_addr;
-	bcopy(_COMM_PAGE32_SIGNATURE_STRING, (void *)(_COMM_PAGE_SIGNATURE + _COMM_PAGE_RW_OFFSET),
-	    MIN(_COMM_PAGE_SIGNATURELEN, strlen(_COMM_PAGE32_SIGNATURE_STRING)));
 #endif
 
 	*((uint16_t*)(_COMM_PAGE_VERSION + _COMM_PAGE_RW_OFFSET)) = (uint16_t) _COMM_PAGE_THIS_VERSION;
@@ -165,21 +165,18 @@ commpage_populate(void)
 	*((uint8_t*)(_COMM_PAGE_LOGICAL_CPUS + _COMM_PAGE_RW_OFFSET)) = (uint8_t) machine_info.logical_cpu_max;
 	*((uint64_t*)(_COMM_PAGE_MEMORY_SIZE + _COMM_PAGE_RW_OFFSET)) = machine_info.max_mem;
 	*((uint32_t*)(_COMM_PAGE_CPUFAMILY + _COMM_PAGE_RW_OFFSET)) = (uint32_t)cpufamily;
-	*((uint32_t*)(_COMM_PAGE_DEV_FIRM + _COMM_PAGE_RW_OFFSET)) = (uint32_t)PE_i_can_has_debugger(NULL);
+	*((uint32_t*)(_COMM_PAGE_DEV_FIRM_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint32_t)PE_i_can_has_debugger(NULL);
+	*((uint32_t*)(_COMM_PAGE_DEV_FIRM + _COMM_PAGE_RO_OFFSET)) = (uint32_t)PE_i_can_has_debugger(NULL);
 	*((uint8_t*)(_COMM_PAGE_USER_TIMEBASE + _COMM_PAGE_RW_OFFSET)) = user_timebase_type();
 	*((uint8_t*)(_COMM_PAGE_CONT_HWCLOCK + _COMM_PAGE_RW_OFFSET)) = (uint8_t)user_cont_hwclock_allowed();
-	*((uint8_t*)(_COMM_PAGE_KERNEL_PAGE_SHIFT + _COMM_PAGE_RW_OFFSET)) = (uint8_t) page_shift;
+	*((uint8_t*)(_COMM_PAGE_KERNEL_PAGE_SHIFT_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) page_shift;
+	*((uint8_t*)(_COMM_PAGE_KERNEL_PAGE_SHIFT + _COMM_PAGE_RO_OFFSET)) = (uint8_t) page_shift;
 
 #if __arm64__
-	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_32 + _COMM_PAGE_RW_OFFSET)) = (uint8_t) page_shift_user32;
-	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RW_OFFSET)) = (uint8_t) SIXTEENK_PAGE_SHIFT;
-#elif (__ARM_ARCH_7K__ >= 2)
-	/* enforce 16KB alignment for watch targets with new ABI */
-	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_32 + _COMM_PAGE_RW_OFFSET)) = (uint8_t) SIXTEENK_PAGE_SHIFT;
-	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RW_OFFSET)) = (uint8_t) SIXTEENK_PAGE_SHIFT;
-#else /* __arm64__ */
-	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_32 + _COMM_PAGE_RW_OFFSET)) = (uint8_t) PAGE_SHIFT;
-	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RW_OFFSET)) = (uint8_t) PAGE_SHIFT;
+	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_32_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) page_shift_user32;
+	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_32 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) page_shift_user32;
+	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) SIXTEENK_PAGE_SHIFT;
+	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) SIXTEENK_PAGE_SHIFT;
 #endif /* __arm64__ */
 
 	commpage_update_timebase();
@@ -351,6 +348,12 @@ vm_address_t
 _get_commpage_priv_address(void)
 {
 	return sharedpage_rw_addr;
+}
+
+vm_address_t
+_get_commpage_ro_address(void)
+{
+	return sharedpage_kernel_ro_addr;
 }
 
 vm_address_t
@@ -544,6 +547,10 @@ commpage_init_arm_optional_features_pfr0(uint64_t *commpage_bits)
 		gARM_FEAT_CSV2 = 1;
 		bits |= kHasFeatCSV2;
 	}
+	if ((pfr0 & ID_AA64PFR0_EL1_DIT_MASK) >= ID_AA64PFR0_EL1_DIT_EN) {
+		gARM_FEAT_DIT = 1;
+		bits |= kHasFeatDIT;
+	}
 	if ((pfr0 & ID_AA64PFR0_EL1_AdvSIMD_MASK) != ID_AA64PFR0_EL1_AdvSIMD_DIS) {
 		gARM_AdvSIMD = 1;
 		bits |= kHasAdvSIMD;
@@ -577,17 +584,49 @@ commpage_init_arm_optional_features_pfr1(uint64_t *commpage_bits __unused)
 	}
 }
 
+
+/**
+ * Read the system register @name, attempt to set set bits of @mask if not
+ * already, test if bits were actually set, reset the register to its
+ * previous value if required, and 'return' @mask with only bits that
+ * were successfully set (or already set) in the system register. */
+#define _test_sys_bits(name, mask) ({ \
+	const uint64_t src = __builtin_arm_rsr64(#name); \
+    uint64_t test = src | mask; \
+    if (test != src) { \
+	__builtin_arm_wsr64(#name, test); \
+	test = __builtin_arm_rsr64(#name); \
+	if (test != src) { \
+	    __builtin_arm_wsr64(#name, src); \
+	}\
+    } \
+    mask & test; \
+})
+
+/**
+ * Reports whether FPU exceptions are supported.
+ * Possible FPU exceptions are :
+ * - input denormal;
+ * - inexact;
+ * - underflow;
+ * - overflow;
+ * - divide by 0;
+ * - invalid operation.
+ *
+ * Any of those can be supported or not but for now, we consider that
+ * it all or nothing : FPU exceptions support flag set <=> all 6 exceptions
+ * a supported.
+ */
 static void
-commpage_init_arm_optional_features_mmfr1(uint64_t *commpage_bits)
+commpage_init_arm_optional_features_fpcr(uint64_t *commpage_bits)
 {
-	uint64_t bits = 0;
-	const uint64_t mmfr1 = __builtin_arm_rsr64("ID_AA64MMFR1_EL1");
-
-	if ((mmfr1 & ID_AA64MMFR1_EL1_AFP_MASK) == ID_AA64MMFR1_EL1_AFP_EN) {
-		bits |= kHasARMv87AFP;
+	uint64_t support_mask = FPCR_IDE | FPCR_IXE | FPCR_UFE | FPCR_OFE |
+	    FPCR_DZE | FPCR_IOE;
+	uint64_t FPCR_bits = _test_sys_bits(FPCR, support_mask);
+	if (FPCR_bits == support_mask) {
+		gARM_FP_SyncExceptions = 1;
+		*commpage_bits |= kHasFP_SyncExceptions;
 	}
-
-	*commpage_bits |= bits;
 }
 
 /**
@@ -599,10 +638,10 @@ commpage_init_arm_optional_features(uint64_t *commpage_bits)
 	commpage_init_arm_optional_features_isar0(commpage_bits);
 	commpage_init_arm_optional_features_isar1(commpage_bits);
 	commpage_init_arm_optional_features_mmfr0(commpage_bits);
-	commpage_init_arm_optional_features_mmfr1(commpage_bits);
 	commpage_init_arm_optional_features_mmfr2(commpage_bits);
 	commpage_init_arm_optional_features_pfr0(commpage_bits);
 	commpage_init_arm_optional_features_pfr1(commpage_bits);
+	commpage_init_arm_optional_features_fpcr(commpage_bits);
 }
 #endif /* __arm64__ */
 
@@ -642,21 +681,8 @@ commpage_init_cpu_capabilities( void )
 
 	bits |= kFastThreadLocalStorage;        // TPIDRURO for TLS
 
-#if     __ARM_VFP__
 	bits |= kHasVfp;
-#if defined(__arm__)
-	arm_mvfp_info_t *mvfp_info = arm_mvfp_info();
-	if (mvfp_info->neon) {
-		bits |= kHasNeon;
-	}
-	if (mvfp_info->neon_hpfp) {
-		bits |= kHasNeonHPFP;
-	}
-	if (mvfp_info->neon_fp16) {
-		bits |= kHasNeonFP16;
-	}
-#endif /* defined(__arm__) */
-#endif
+
 #if defined(__arm64__)
 	bits |= kHasFMA;
 #endif
@@ -704,18 +730,17 @@ commpage_update_timebase(void)
 }
 
 /*
- * Update the commpage with current kdebug state. This currently has bits for
- * global trace state, and typefilter enablement. It is likely additional state
- * will be tracked in the future.
+ * Update the commpage with current kdebug state: whether tracing is enabled, a
+ * typefilter is present, and continuous time should be used for timestamps.
  *
- * INVARIANT: This value will always be 0 if global tracing is disabled. This
- * allows simple guard tests of "if (*_COMM_PAGE_KDEBUG_ENABLE) { ... }"
+ * Disregards configuration and set to 0 if tracing is disabled.
  */
 void
 commpage_update_kdebug_state(void)
 {
 	if (commPagePtr) {
-		*((volatile uint32_t*)(_COMM_PAGE_KDEBUG_ENABLE + _COMM_PAGE_RW_OFFSET)) = kdebug_commpage_state();
+		uint32_t state = kdebug_commpage_state();
+		*((volatile uint32_t *)(_COMM_PAGE_KDEBUG_ENABLE + _COMM_PAGE_RW_OFFSET)) = state;
 	}
 }
 
@@ -828,10 +853,6 @@ commpage_set_remotetime_params(double rate, uint64_t base_local_ts, uint64_t bas
 		paramsp->base_remote_ts = base_remote_ts;
 		__builtin_arm_dmb(DMB_ISH);
 		paramsp->base_local_ts = base_local_ts;  //This will act as a generation count
-#else
-		(void)rate;
-		(void)base_local_ts;
-		(void)base_remote_ts;
 #endif /* __arm64__ */
 	}
 }

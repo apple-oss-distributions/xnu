@@ -57,6 +57,12 @@
 #define kIORegistryEntryIDKey           "IORegistryEntryID"
 // property name to get array of property names
 #define kIORegistryEntryPropertyKeysKey "IORegistryEntryPropertyKeys"
+// property name to allow only the given keys present in an OSDictionary from
+// a user space call to IORegistryEntry::setProperties (OSArray)
+#define kIORegistryEntryAllowableSetPropertiesKey               "IORegistryEntryAllowableSetProperties"
+// property name to single thread a user space call to IORegistryEntry::setProperties (OSBoolean)
+#define kIORegistryEntryDefaultLockingSetPropertiesKey  "IORegistryEntryDefaultLockingSetProperties"
+
 
 // IOService class name
 #define kIOServiceClass                 "IOService"
@@ -68,6 +74,10 @@
 #define kIOClassKey                     "IOClass"
 #define kIOProbeScoreKey                "IOProbeScore"
 #define kIOKitDebugKey                  "IOKitDebug"
+
+// DriverKit class keys
+#define kIOUserClassKey                 "IOUserClass"
+#define kIOUserClassesKey               "IOUserClasses"
 
 // Properties to be supported as API
 #define kIOSupportedPropertiesKey       "IOSupportedProperties"
@@ -97,6 +107,11 @@
 #define kIORematchCountKey              "IORematchCount"
 #define kIODEXTMatchCountKey            "IODEXTMatchCount"
 
+// Property specifying the entitlement to check against an IOUserClient's opening process
+// kOSBooleanFalse - Allow access (no entitlements required)
+// string - If the opening process has the named entitlement with value == boolean true, allow access
+#define kIOUserClientEntitlementsKey   "IOUserClientEntitlements"
+
 // Entitlements to check against dext process
 // Property is an array, one or more of which may match, of:
 //   an array of entitlement strings, all must be present
@@ -115,10 +130,18 @@
 // in the dext providing the user client being opened
 #define kIODriverKitRequiredEntitlementsKey "com.apple.private.driverkit.driver-access"
 
+// Specifies that this driver is used for internal tests. This opts the driver out of our policy to
+// reboot the device if a driver crashes too often.
+#define kIODriverKitTestDriverEntitlementKey "com.apple.private.driverkit.test-driver"
+
 // Entitlement of a dext that allows any task to open one of its IOUserClients
 #define kIODriverKitUserClientEntitlementAllowAnyKey "com.apple.developer.driverkit.allow-any-userclient-access"
 
 #define kIODriverKitUserClientEntitlementAdministratorKey "com.apple.developer.driverkit.administrator"
+
+// Entitlements for third party drivers on iOS
+#define kIODriverKitUserClientEntitlementCommunicatesWithDriversKey "com.apple.developer.driverkit.communicates-with-drivers"
+#define kIODriverKitUserClientEntitlementAllowThirdPartyUserClientsKey "com.apple.developer.driverkit.allow-third-party-userclients"
 
 // Other DriverKit entitlements
 #define kIODriverKitUSBTransportEntitlementKey "com.apple.developer.driverkit.transport.usb"
@@ -159,7 +182,11 @@
 #if KERNEL_PRIVATE
 #define kIOUserClientMessageAppSuspendedKey     "IOUserClientMessageAppSuspended"
 #endif
-#define kIOUserClientDefaultLockingKey                  "IOUserClientDefaultLocking"
+
+#define kIOUserClientDefaultLockingKey                                          "IOUserClientDefaultLocking"
+#define kIOUserClientDefaultLockingSetPropertiesKey                 "IOUserClientDefaultLockingSetProperties"
+#define kIOUserClientDefaultLockingSingleThreadExternalMethodKey    "IOUserClientDefaultLockingSingleThreadExternalMethod"
+
 // diagnostic string describing the creating task
 #define kIOUserClientCreatorKey         "IOUserClientCreator"
 // the expected cdhash value of the userspace driver executable
@@ -168,6 +195,7 @@
 #define kIOUserUserClientKey                    "IOUserUserClient"
 
 #define kIOUserServerOneProcessKey      "IOUserServerOneProcess"
+#define kIOUserServerPreserveUserspaceRebootKey "IOUserServerPreserveUserspaceReboot"
 
 
 // IOService notification types
@@ -266,6 +294,9 @@
 #define kIOSystemStateSleepDescriptionKey                               "com.apple.iokit.pm.sleepdescription"
 #define kIOSystemStateSleepDescriptionReasonKey                 "com.apple.iokit.pm.sleepreason"
 #define kIOSystemStateSleepDescriptionHibernateStateKey      "com.apple.iokit.pm.hibernatestate"
+
+#define kIOSystemStateWakeDescriptionKey                               "com.apple.iokit.pm.wakedescription"
+#define kIOSystemStateWakeDescriptionWakeReasonKey      "com.apple.iokit.pm.wakereason"
 
 #define kIOSystemStateHaltDescriptionKey                               "com.apple.iokit.pm.haltdescription"
 #define kIOSystemStateHaltDescriptionHaltStateKey      "com.apple.iokit.pm.haltstate"

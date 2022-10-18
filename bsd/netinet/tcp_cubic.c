@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2013-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -25,31 +25,18 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+
+#include "tcp_includes.h"
+
 #include <sys/param.h>
-#include <sys/systm.h>
 #include <sys/kernel.h>
-#include <sys/protosw.h>
-#include <sys/socketvar.h>
 #include <sys/syslog.h>
 
-#include <net/route.h>
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
-
 #include <netinet/ip6.h>
-
 #include <netinet/ip_var.h>
-#include <netinet/tcp.h>
-#include <netinet/tcp_timer.h>
-#include <netinet/tcp_var.h>
-#include <netinet/tcp_fsm.h>
-#include <netinet/tcp_var.h>
-#include <netinet/tcp_cc.h>
-#include <netinet/tcpip.h>
-#include <netinet/tcp_seq.h>
-#include <kern/task.h>
-#include <libkern/OSAtomic.h>
 
 static int tcp_cubic_init(struct tcpcb *tp);
 static int tcp_cubic_cleanup(struct tcpcb *tp);
@@ -63,7 +50,6 @@ static int tcp_cubic_delay_ack(struct tcpcb *tp, struct tcphdr *th);
 static void tcp_cubic_switch_cc(struct tcpcb *tp);
 static uint32_t tcp_cubic_update(struct tcpcb *tp, uint32_t rtt);
 static inline void tcp_cubic_clear_state(struct tcpcb *tp);
-
 
 extern float cbrtf(float x);
 
@@ -88,25 +74,10 @@ static float tcp_cubic_fast_convergence_factor = 0.875f;
 
 static float tcp_cubic_beta = 0.8f;
 
-SYSCTL_SKMEM_TCP_INT(OID_AUTO, cubic_tcp_friendliness, CTLFLAG_RW | CTLFLAG_LOCKED,
-    static int, tcp_cubic_tcp_friendliness, 0, "Enable TCP friendliness");
-
-SYSCTL_SKMEM_TCP_INT(OID_AUTO, cubic_fast_convergence, CTLFLAG_RW | CTLFLAG_LOCKED,
-    static int, tcp_cubic_fast_convergence, 0, "Enable fast convergence");
-
-SYSCTL_SKMEM_TCP_INT(OID_AUTO, cubic_use_minrtt, CTLFLAG_RW | CTLFLAG_LOCKED,
-    static int, tcp_cubic_use_minrtt, 0, "use a min of 5 sec rtt");
-
-SYSCTL_SKMEM_TCP_INT(OID_AUTO, cubic_minor_fixes, CTLFLAG_RW | CTLFLAG_LOCKED,
-    int, tcp_cubic_minor_fixes, 1, "Minor fixes to TCP Cubic");
-
-SYSCTL_SKMEM_TCP_INT(OID_AUTO, cubic_rfc_compliant, CTLFLAG_RW | CTLFLAG_LOCKED,
-    int, tcp_cubic_rfc_compliant, 1, "RFC Compliance for TCP Cubic");
-
 static int
 tcp_cubic_init(struct tcpcb *tp)
 {
-	OSIncrementAtomic((volatile SInt32 *)&tcp_cc_cubic.num_sockets);
+	os_atomic_inc(&tcp_cc_cubic.num_sockets, relaxed);
 
 	if (tcp_cubic_rfc_compliant) {
 		tcp_cubic_backoff = 0.3f; /* multiplicative decrease factor */
@@ -127,7 +98,7 @@ static int
 tcp_cubic_cleanup(struct tcpcb *tp)
 {
 #pragma unused(tp)
-	OSDecrementAtomic((volatile SInt32 *)&tcp_cc_cubic.num_sockets);
+	os_atomic_dec(&tcp_cc_cubic.num_sockets, relaxed);
 	return 0;
 }
 
@@ -171,10 +142,11 @@ tcp_cubic_cwnd_init_or_reset(struct tcpcb *tp)
  * W(t) = C(t-K)^3 + W(last_max)
  */
 static uint32_t
-tcp_cubic_update(struct tcpcb *tp, u_int32_t rtt)
+tcp_cubic_update(struct tcpcb *tp, uint32_t rtt)
 {
+	struct tcp_globals *globals = tcp_get_globals(tp);
 	float K, var;
-	u_int32_t elapsed_time, win;
+	uint32_t elapsed_time, win;
 
 	win = min(tp->snd_cwnd, tp->snd_wnd);
 	if (tp->t_ccstate->cub_last_max == 0) {
@@ -187,7 +159,7 @@ tcp_cubic_update(struct tcpcb *tp, u_int32_t rtt)
 		 * the variables that we need to use for computing the
 		 * congestion window later.
 		 */
-		tp->t_ccstate->cub_epoch_start = tcp_now;
+		tp->t_ccstate->cub_epoch_start = tcp_globals_now(globals);
 		if (tp->t_ccstate->cub_epoch_start == 0) {
 			tp->t_ccstate->cub_epoch_start = 1;
 		}
@@ -217,7 +189,7 @@ tcp_cubic_update(struct tcpcb *tp, u_int32_t rtt)
 	 * Compute the target window for the next RTT using smoothed RTT
 	 * as an estimate for next RTT.
 	 */
-	elapsed_time = timer_diff(tcp_now, 0, tp->t_ccstate->cub_epoch_start, 0);
+	elapsed_time = timer_diff(tcp_globals_now(globals), 0, tp->t_ccstate->cub_epoch_start, 0);
 
 	if (tcp_cubic_use_minrtt) {
 		elapsed_time += max(tcp_cubic_use_minrtt, rtt);
@@ -227,7 +199,7 @@ tcp_cubic_update(struct tcpcb *tp, u_int32_t rtt)
 	var = (elapsed_time  - tp->t_ccstate->cub_epoch_period) / TCP_RETRANSHZ;
 	var = var * var * var * (tcp_cubic_coeff * tp->t_maxseg);
 
-	return (u_int32_t)(tp->t_ccstate->cub_origin_point + var);
+	return (uint32_t)(tp->t_ccstate->cub_origin_point + var);
 }
 
 /*
@@ -310,8 +282,8 @@ tcp_cubic_tcpwin(struct tcpcb *tp, struct tcphdr *th)
 static void
 tcp_cubic_congestion_avd(struct tcpcb *tp, struct tcphdr *th)
 {
-	u_int32_t cubic_target_win, tcp_win, rtt;
-	u_int64_t incr_win = UINT32_MAX;
+	uint32_t cubic_target_win, tcp_win, rtt;
+	uint64_t incr_win = UINT32_MAX;
 
 	/* Do not increase congestion window in non-validated phase */
 	if (tcp_cc_is_cwnd_nonvalidated(tp) != 0) {
@@ -349,8 +321,7 @@ tcp_cubic_congestion_avd(struct tcpcb *tp, struct tcphdr *th)
 			incr_win = (uint64_t)tp->snd_cwnd * tp->t_maxseg;
 			incr_win /= (cubic_target_win - tp->snd_cwnd);
 			if (!tcp_cubic_minor_fixes) {
-				if (incr_win > 0 &&
-				    tp->t_bytes_acked >= incr_win) {
+				if (incr_win > 0 && tp->t_bytes_acked >= incr_win) {
 					tp->t_bytes_acked -= incr_win;
 					tp->snd_cwnd =
 					    min((tp->snd_cwnd + tp->t_maxseg),
@@ -420,7 +391,7 @@ tcp_cubic_ack_rcvd(struct tcpcb *tp, struct tcphdr *th)
 static void
 tcp_cubic_pre_fr(struct tcpcb *tp)
 {
-	u_int32_t win, avg;
+	uint32_t win, avg;
 	int32_t dev;
 	tp->t_ccstate->cub_epoch_start = 0;
 	tp->t_ccstate->cub_tcp_win = 0;
@@ -496,7 +467,7 @@ tcp_cubic_pre_fr(struct tcpcb *tp)
 	}
 
 	/* Backoff congestion window by tcp_cubic_backoff factor */
-	win = (u_int32_t)(win - (win * tcp_cubic_backoff));
+	win = (uint32_t)(win - (win * tcp_cubic_backoff));
 	win = tcp_round_to(win, tp->t_maxseg);
 	if (win < 2 * tp->t_maxseg) {
 		win =  2 * tp->t_maxseg;
@@ -540,7 +511,7 @@ tcp_cubic_post_fr(struct tcpcb *tp, struct tcphdr *th)
 	 * EXIT_FASTRECOVERY. This here is basically dead code...
 	 */
 	if (SACK_ENABLED(tp) && tp->t_lossflightsize > 0 && !tcp_cubic_minor_fixes) {
-		u_int32_t total_rxt_size = 0, ncwnd;
+		uint32_t total_rxt_size = 0, ncwnd;
 		/*
 		 * When SACK is enabled, the number of retransmitted bytes
 		 * can be counted more accurately.
@@ -569,11 +540,11 @@ tcp_cubic_post_fr(struct tcpcb *tp, struct tcphdr *th)
 	 * avoid delayed acknowledgements. This is according to RFC 6582.
 	 */
 	if (flight_size < tp->snd_ssthresh) {
-		tp->snd_cwnd = max(flight_size, tp->t_maxseg)
-		    + tp->t_maxseg;
+		tp->snd_cwnd = max(flight_size, tp->t_maxseg) + tp->t_maxseg;
 	} else {
 		tp->snd_cwnd = tp->snd_ssthresh;
 	}
+
 	tp->t_ccstate->cub_tcp_win = 0;
 	tp->t_ccstate->cub_tcp_bytes_acked = 0;
 }
@@ -622,7 +593,7 @@ tcp_cubic_switch_cc(struct tcpcb *tp)
 {
 	tcp_cubic_cwnd_init_or_reset(tp);
 
-	OSIncrementAtomic((volatile SInt32 *)&tcp_cc_cubic.num_sockets);
+	os_atomic_inc(&tcp_cc_cubic.num_sockets, relaxed);
 }
 
 static inline void

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -293,6 +293,7 @@ STUB(sock_receive);
 STUB(sock_receivembuf);
 STUB(sock_send);
 STUB(sock_sendmbuf);
+STUB(sock_sendmbuf_can_wait);
 STUB(sock_setpriv);
 STUB(sock_setsockopt);
 STUB(sock_shutdown);
@@ -361,7 +362,6 @@ STUB(ifnet_get_buffer_status);
 STUB(ifnet_normalise_unsent_data);
 STUB(ifnet_set_low_power_mode);
 STUB(ifnet_notify_tcp_keepalive_offload_timeout);
-STUB(ifnet_interface_advisory_report);
 STUB(in6_localaddr);
 STUB(in_localaddr);
 STUB(in6addr_local);

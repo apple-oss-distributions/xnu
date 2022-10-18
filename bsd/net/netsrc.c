@@ -173,7 +173,7 @@ static void
 netsrc_policy_common(struct netsrc_req *request, struct netsrc_rep *reply)
 {
 	// Destination policy
-	struct in6_addrpolicy *policy = lookup_policy(&request->nrq_dst.sa);
+	struct in6_addrpolicy *policy = lookup_policy(SA(&request->nrq_dst.sa));
 	if (policy != NULL && policy->label != -1) {
 		/* Explicit cast because both policy and netsrc are public APIs
 		 * and apps might rely on it.
@@ -183,7 +183,7 @@ netsrc_policy_common(struct netsrc_req *request, struct netsrc_rep *reply)
 	}
 
 	// Source policy
-	policy = lookup_policy(&reply->nrp_src.sa);
+	policy = lookup_policy(SA(&reply->nrp_src.sa));
 	if (policy != NULL && policy->label != -1) {
 		/* Explicit cast because both policy and netsrc are public APIs
 		 * and apps might rely on it.
@@ -240,7 +240,7 @@ netsrc_ipv4(kern_ctl_ref kctl, uint32_t unit, struct netsrc_req *request)
 	// Unfortunately, IPv4 doesn't have a function like in6_selectsrc
 	// Look up the route
 	lck_mtx_lock(rnh_lock);
-	struct rtentry *rt = rt_lookup(TRUE, &request->nrq_dst.sa,
+	struct rtentry *rt = rt_lookup(TRUE, SA(&request->nrq_dst.sa),
 	    NULL, rt_tables[AF_INET],
 	    request->nrq_ifscope);
 	lck_mtx_unlock(rnh_lock);

@@ -36,7 +36,7 @@ int get_thread_lock_count(thread_t th);         /* forced forward */
 static int policy_flags = 0;
 
 
-#define CHECK_SET_HOOK(x)       .mpo_##x = (mpo_##x##_t *)common_hook,
+#define CHECK_SET_HOOK(x)       .mpo_##x = (mpo_##x##_t *)(void (*)(void))common_hook,
 
 /*
  * Init; currently, we only print our arrival notice.
@@ -121,7 +121,7 @@ common_hook(void)
 	return rv;
 }
 
-#if (MAC_POLICY_OPS_VERSION != 80)
+#if (MAC_POLICY_OPS_VERSION != 82)
 # error "struct mac_policy_ops doesn't match definition in mac_policy.h"
 #endif
 /*
@@ -178,8 +178,8 @@ const static struct mac_policy_ops policy_ops = {
 	CHECK_SET_HOOK(file_label_destroy)
 	CHECK_SET_HOOK(file_label_associate)
 	CHECK_SET_HOOK(file_notify_close)
+	CHECK_SET_HOOK(proc_check_launch_constraints)
 
-	.mpo_reserved06 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved07 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved08 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved09 = (mpo_reserved_hook_t *)common_hook,
@@ -218,8 +218,8 @@ const static struct mac_policy_ops policy_ops = {
 	CHECK_SET_HOOK(proc_check_set_task_special_port)
 
 	CHECK_SET_HOOK(vnode_notify_swap)
+	CHECK_SET_HOOK(vnode_notify_unlink)
 
-	.mpo_reserved31 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved32 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved33 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved34 = (mpo_reserved_hook_t *)common_hook,
@@ -273,7 +273,7 @@ const static struct mac_policy_ops policy_ops = {
 	CHECK_SET_HOOK(proc_notify_exec_complete)
 	CHECK_SET_HOOK(proc_notify_cs_invalidated)
 	CHECK_SET_HOOK(proc_check_syscall_unix)
-	CHECK_SET_HOOK(proc_check_expose_task)
+	.mpo_reserved45 = (mpo_reserved_hook_t *)common_hook,
 	CHECK_SET_HOOK(proc_check_set_host_special_port)
 	CHECK_SET_HOOK(proc_check_set_host_exception_port)
 	CHECK_SET_HOOK(exc_action_check_exception_send)
@@ -310,8 +310,8 @@ const static struct mac_policy_ops policy_ops = {
 
 	CHECK_SET_HOOK(proc_check_debug)
 	CHECK_SET_HOOK(proc_check_fork)
-	CHECK_SET_HOOK(proc_check_get_task_name)
-	CHECK_SET_HOOK(proc_check_get_task)
+	.mpo_reserved61 = (mpo_reserved_hook_t *)common_hook,
+	.mpo_reserved62 = (mpo_reserved_hook_t *)common_hook,
 	CHECK_SET_HOOK(proc_check_getaudit)
 	CHECK_SET_HOOK(proc_check_getauid)
 	CHECK_SET_HOOK(proc_check_getlcid)

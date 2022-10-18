@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -106,6 +106,7 @@
 #include <kern/misc_protos.h>
 #include <kern/processor.h>
 #include <kern/queue.h>
+#include <kern/restartable.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
 #include <kern/syscall_subr.h>
@@ -122,18 +123,20 @@
 #include <kern/policy_internal.h>
 #include <kern/turnstile.h>
 #include <kern/sched_clutch.h>
-#include <kern/hazard.h>
+#include <kern/recount.h>
+#include <kern/smr.h>
 #include <kern/ast.h>
+#include <kern/compact_id.h>
 
 #include <corpses/task_corpse.h>
 #if KPC
 #include <kern/kpc.h>
 #endif
 
-#if MONOTONIC
+#if CONFIG_PERVASIVE_CPI
 #include <kern/monotonic.h>
 #include <machine/monotonic.h>
-#endif /* MONOTONIC */
+#endif /* CONFIG_PERVASIVE_CPI */
 
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_port.h>
@@ -188,6 +191,7 @@ static struct mpsc_daemon_queue thread_stack_queue;
 static struct mpsc_daemon_queue thread_terminate_queue;
 static struct mpsc_daemon_queue thread_deallocate_queue;
 static struct mpsc_daemon_queue thread_exception_queue;
+static struct mpsc_daemon_queue thread_backtrace_queue;
 
 decl_simple_lock_data(static, crashed_threads_lock);
 static queue_head_t             crashed_threads_queue;
@@ -197,6 +201,13 @@ struct thread_exception_elt {
 	exception_type_t        exception_type;
 	task_t                  exception_task;
 	thread_t                exception_thread;
+};
+
+struct thread_backtrace_elt {
+	struct mpsc_queue_chain link;
+	exception_type_t        exception_type;
+	kcdata_object_t         obj;
+	exception_port_t        exc_ports[BT_EXC_PORTS_COUNT]; /* send rights */
 };
 
 static SECURITY_READ_ONLY_LATE(struct thread) thread_template = {
@@ -217,6 +228,20 @@ static SECURITY_READ_ONLY_LATE(struct thread) thread_template = {
 	/* timers are initialized in thread_bootstrap */
 };
 
+#define CTID_SIZE_BIT           20
+#define CTID_MASK               ((1u << CTID_SIZE_BIT) - 1)
+#define CTID_MAX_THREAD_NUMBER  (CTID_MASK - 1)
+static_assert(CTID_MAX_THREAD_NUMBER <= COMPACT_ID_MAX);
+
+#ifndef __LITTLE_ENDIAN__
+#error "ctid relies on the ls bits of uint32_t to be populated"
+#endif
+
+__startup_data
+static struct thread init_thread;
+static SECURITY_READ_ONLY_LATE(uint32_t) ctid_nonce;
+COMPACT_ID_TABLE_DEFINE(static, ctid_table);
+
 __startup_func
 static void
 thread_zone_startup(void)
@@ -227,14 +252,16 @@ thread_zone_startup(void)
 	size += roundup(uthread_size, _Alignof(struct thread));
 #endif
 	thread_zone = zone_create_ext("threads", size,
-	    ZC_ZFREE_CLEARMEM, ZONE_ID_THREAD, NULL);
+	    ZC_SEQUESTER | ZC_ZFREE_CLEARMEM, ZONE_ID_THREAD, NULL);
 }
-STARTUP(ZALLOC, STARTUP_RANK_MIDDLE, thread_zone_startup);
+STARTUP(ZALLOC, STARTUP_RANK_FOURTH, thread_zone_startup);
 
-__startup_data
-static struct thread init_thread;
 static void thread_deallocate_enqueue(thread_t thread);
 static void thread_deallocate_complete(thread_t thread);
+
+static void ctid_table_remove(thread_t thread);
+static void ctid_table_add(thread_t thread);
+static void ctid_table_init(void);
 
 #ifdef MACH_BSD
 extern void proc_exit(void *);
@@ -246,6 +273,7 @@ extern int      proc_selfpid(void);
 extern void     proc_name(int, char*, int);
 extern char *   proc_name_address(void *p);
 exception_type_t get_exception_from_corpse_crashinfo(kcdata_descriptor_t corpse_info);
+extern void kdebug_proc_name_args(struct proc *proc, long args[static 4]);
 #endif /* MACH_BSD */
 
 extern bool bsdthread_part_of_cooperative_workqueue(struct uthread *uth);
@@ -316,7 +344,7 @@ init_thread_from_template(thread_t thread)
 static void
 thread_ro_create(task_t parent_task, thread_t th, thread_ro_t tro_tpl)
 {
-#if __x86_64__ || __arm__
+#if __x86_64__
 	th->t_task = parent_task;
 #endif
 	tro_tpl->tro_owner = th;
@@ -362,20 +390,27 @@ thread_ro_update_flags(thread_ro_t tro, thread_ro_flags_t add, thread_ro_flags_t
 }
 #endif
 
+__startup_func
 thread_t
 thread_bootstrap(void)
 {
 	/*
 	 *	Fill in a template thread for fast initialization.
 	 */
-	timer_init(&thread_template.user_timer);
-	timer_init(&thread_template.system_timer);
-	timer_init(&thread_template.ptime);
 	timer_init(&thread_template.runnable_timer);
 
 	init_thread_from_template(&init_thread);
 	/* fiddle with init thread to skip asserts in set_sched_pri */
 	init_thread.sched_pri = MAXPRI_KERNEL;
+
+	/*
+	 * We can't quite use ctid yet, on ARM thread_bootstrap() is called
+	 * before we can call random or anything,
+	 * so we just make it barely work and it will get fixed up
+	 * when the first thread is actually made.
+	 */
+	*compact_id_resolve(&ctid_table, 0) = &init_thread;
+	init_thread.ctid = CTID_MASK;
 
 	return &init_thread;
 }
@@ -440,6 +475,7 @@ thread_terminate_self(void)
 	thread_t    thread = current_thread();
 	thread_ro_t tro    = get_thread_ro(thread);
 	task_t      task   = tro->tro_task;
+	void *bsd_info = get_bsdtask_info(task);
 	int threadcnt;
 
 	pal_thread_terminate_self(thread);
@@ -459,7 +495,21 @@ thread_terminate_self(void)
 
 	thread_depress_abort_locked(thread);
 
+	/*
+	 * Before we take the thread_lock right above,
+	 * act_set_ast_reset_pcs() might not yet observe
+	 * that the thread is inactive, and could have
+	 * requested an IPI Ack.
+	 *
+	 * Once we unlock the thread, we know that
+	 * act_set_ast_reset_pcs() can't fail to notice
+	 * that thread->active is false,
+	 * and won't set new ones.
+	 */
+	thread_reset_pcs_ack_IPI(thread);
+
 	thread_unlock(thread);
+
 	splx(s);
 
 #if CONFIG_TASKWATCH
@@ -486,30 +536,34 @@ thread_terminate_self(void)
 
 	uthread_cleanup(get_bsdthread_info(thread), tro);
 
-	if (kdebug_enable && task->bsd_info && !task_is_exec_copy(task)) {
+	if (kdebug_enable && bsd_info && !task_is_exec_copy(task)) {
 		/* trace out pid before we sign off */
 		long dbg_arg1 = 0;
 		long dbg_arg2 = 0;
 
-		kdbg_trace_data(task->bsd_info, &dbg_arg1, &dbg_arg2);
-#if MONOTONIC
+		kdbg_trace_data(get_bsdtask_info(task), &dbg_arg1, &dbg_arg2);
+#if CONFIG_PERVASIVE_CPI
 		if (kdebug_debugid_enabled(DBG_MT_INSTRS_CYCLES_THR_EXIT)) {
-			uint64_t counts[MT_CORE_NFIXED];
-			uint64_t thread_user_time;
-			uint64_t thread_system_time;
-			thread_user_time = timer_grab(&thread->user_timer);
-			thread_system_time = timer_grab(&thread->system_timer);
-			mt_fixed_thread_counts(thread, counts);
+			struct recount_usage usage = { 0 };
+			struct recount_usage perf_only = { 0 };
+			boolean_t intrs_end = ml_set_interrupts_enabled(FALSE);
+			recount_current_thread_usage_perf_only(&usage, &perf_only);
+			ml_set_interrupts_enabled(intrs_end);
 			KDBG_RELEASE(DBG_MT_INSTRS_CYCLES_THR_EXIT,
-#ifdef MT_CORE_INSTRS
-			    counts[MT_CORE_INSTRS],
-#else /* defined(MT_CORE_INSTRS) */
-			    0,
-#endif/* !defined(MT_CORE_INSTRS) */
-			    counts[MT_CORE_CYCLES],
-			    thread_system_time, thread_user_time);
+			    usage.ru_instructions,
+			    usage.ru_cycles,
+			    usage.ru_system_time_mach,
+			    usage.ru_user_time_mach);
+#if __AMP__
+			KDBG_RELEASE(DBG_MT_P_INSTRS_CYCLES_THR_EXIT,
+			    perf_only.ru_instructions,
+			    perf_only.ru_cycles,
+			    perf_only.ru_system_time_mach,
+			    perf_only.ru_user_time_mach);
+
+#endif // __AMP__
 		}
-#endif/* MONOTONIC */
+#endif/* CONFIG_PERVASIVE_CPI */
 		KDBG_RELEASE(TRACE_DATA_THREAD_TERMINATE_PID, dbg_arg1, dbg_arg2);
 	}
 
@@ -536,37 +590,38 @@ thread_terminate_self(void)
 	 * If we are the last thread to terminate and the task is
 	 * associated with a BSD process, perform BSD process exit.
 	 */
-	if (threadcnt == 0 && task->bsd_info != NULL && !task_is_exec_copy(task)) {
+	if (threadcnt == 0 && bsd_info != NULL) {
 		mach_exception_data_type_t subcode = 0;
 		if (kdebug_enable) {
 			/* since we're the last thread in this process, trace out the command name too */
-			long args[4] = {};
-			kdbg_trace_string(task->bsd_info, &args[0], &args[1], &args[2], &args[3]);
-#if MONOTONIC
+			long args[4] = { 0 };
+			kdebug_proc_name_args(bsd_info, args);
+#if CONFIG_PERVASIVE_CPI
 			if (kdebug_debugid_enabled(DBG_MT_INSTRS_CYCLES_PROC_EXIT)) {
-				uint64_t counts[MT_CORE_NFIXED];
-				uint64_t task_user_time;
-				uint64_t task_system_time;
-				mt_fixed_task_counts(task, counts);
-				/* since the thread time is not yet added to the task */
-				task_user_time = task->total_user_time + timer_grab(&thread->user_timer);
-				task_system_time = task->total_system_time + timer_grab(&thread->system_timer);
-				KDBG_RELEASE((DBG_MT_INSTRS_CYCLES_PROC_EXIT),
-#ifdef MT_CORE_INSTRS
-				    counts[MT_CORE_INSTRS],
-#else /* defined(MT_CORE_INSTRS) */
-				    0,
-#endif/* !defined(MT_CORE_INSTRS) */
-				    counts[MT_CORE_CYCLES],
-				    task_system_time, task_user_time);
+				struct recount_usage usage = { 0 };
+				struct recount_usage perf_only = { 0 };
+				recount_current_task_usage_perf_only(&usage, &perf_only);
+				KDBG_RELEASE(DBG_MT_INSTRS_CYCLES_PROC_EXIT,
+				    usage.ru_instructions,
+				    usage.ru_cycles,
+				    usage.ru_system_time_mach,
+				    usage.ru_user_time_mach);
+#if __AMP__
+				KDBG_RELEASE(DBG_MT_P_INSTRS_CYCLES_PROC_EXIT,
+				    perf_only.ru_instructions,
+				    perf_only.ru_cycles,
+				    perf_only.ru_system_time_mach,
+				    perf_only.ru_user_time_mach);
+#endif // __AMP__
 			}
-#endif/* MONOTONIC */
+#endif/* CONFIG_PERVASIVE_CPI */
 			KDBG_RELEASE(TRACE_STRING_PROC_EXIT, args[0], args[1], args[2], args[3]);
 		}
 
 		/* Get the exit reason before proc_exit */
-		subcode = proc_encode_exit_exception_code(task->bsd_info);
-		proc_exit(task->bsd_info);
+		subcode = proc_encode_exit_exception_code(bsd_info);
+		proc_exit(bsd_info);
+		bsd_info = NULL;
 		/*
 		 * if there is crash info in task
 		 * then do the deliver action since this is
@@ -666,17 +721,22 @@ thread_terminate_self(void)
 
 	assert(thread->th_work_interval_flags == TH_WORK_INTERVAL_FLAGS_NONE);
 	assert(thread->kern_promotion_schedpri == 0);
-	assert(thread->rwlock_count == 0);
+	if (thread->rwlock_count > 0) {
+		panic("rwlock_count is %d for thread %p, possibly it still holds a rwlock", thread->rwlock_count, thread);
+	}
 	assert(thread->priority_floor_count == 0);
 	assert(thread->handoff_thread == THREAD_NULL);
 	assert(thread->th_work_interval == NULL);
+	assert(thread->t_rr_state.trr_value == 0);
 
-	assert((thread->sched_flags & TH_SFLAG_WAITQ_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_RW_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_FLOOR_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_EXEC_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_THREAD_GROUP_AUTO_JOIN) == 0);
+	assert3u(0, ==, thread->sched_flags &
+	    (TH_SFLAG_WAITQ_PROMOTED |
+	    TH_SFLAG_RW_PROMOTED |
+	    TH_SFLAG_EXEC_PROMOTED |
+	    TH_SFLAG_FLOOR_PROMOTED |
+	    TH_SFLAG_PROMOTED |
+	    TH_SFLAG_DEPRESS));
+
 	thread_unlock(thread);
 	/* splsched */
 
@@ -732,7 +792,7 @@ thread_deallocate_complete(
 
 #if KPC
 	kpc_thread_destroy(thread);
-#endif
+#endif /* KPC */
 
 	ipc_thread_terminate(thread);
 
@@ -755,6 +815,7 @@ thread_deallocate_complete(
 	if (thread->turnstile) {
 		turnstile_deallocate(thread->turnstile);
 	}
+	turnstile_compact_id_put(thread->ctsid);
 
 	if (IPC_VOUCHER_NULL != thread->ith_voucher) {
 		ipc_voucher_release(thread->ith_voucher);
@@ -769,11 +830,13 @@ thread_deallocate_complete(
 	if (thread->preadopt_thread_group) {
 		thread_group_release(thread->preadopt_thread_group);
 	}
-#endif
+#endif /* CONFIG_PREADOPT_TG */
 
 	if (thread->kernel_stack != 0) {
 		stack_free(thread);
 	}
+
+	recount_thread_deinit(&thread->th_recount);
 
 	lck_mtx_destroy(&thread->mutex, &thread_lck_grp);
 	machine_thread_destroy(thread);
@@ -793,6 +856,8 @@ thread_deallocate_complete(
 
 	timer_call_free(thread->depress_timer);
 	timer_call_free(thread->wait_timer);
+
+	ctid_table_remove(thread);
 
 	thread_ro_destroy(thread);
 	zfree(thread_zone, thread);
@@ -861,6 +926,39 @@ thread_exception_queue_invoke(mpsc_queue_chain_t elm,
 	task_deliver_crash_notification(task, thread, etype, 0);
 }
 
+static void
+thread_backtrace_queue_invoke(mpsc_queue_chain_t elm,
+    __assert_only mpsc_daemon_queue_t dq)
+{
+	struct thread_backtrace_elt *elt;
+	kcdata_object_t obj;
+	exception_port_t exc_ports[BT_EXC_PORTS_COUNT]; /* send rights */
+	exception_type_t etype;
+
+	assert(dq == &thread_backtrace_queue);
+	elt = mpsc_queue_element(elm, struct thread_backtrace_elt, link);
+
+	obj = elt->obj;
+	memcpy(exc_ports, elt->exc_ports, sizeof(ipc_port_t) * BT_EXC_PORTS_COUNT);
+	etype = elt->exception_type;
+
+	kfree_type(struct thread_backtrace_elt, elt);
+
+	/* Deliver to backtrace exception ports */
+	exception_deliver_backtrace(obj, exc_ports, etype);
+
+	/*
+	 * Release port right and kcdata object refs given by
+	 * task_enqueue_exception_with_corpse()
+	 */
+
+	for (unsigned int i = 0; i < BT_EXC_PORTS_COUNT; i++) {
+		ipc_port_release_send(exc_ports[i]);
+	}
+
+	kcdata_object_release(obj);
+}
+
 /*
  *	thread_exception_enqueue:
  *
@@ -873,12 +971,28 @@ thread_exception_enqueue(
 	exception_type_t etype)
 {
 	assert(EXC_RESOURCE == etype || EXC_GUARD == etype);
-	struct thread_exception_elt *elt = kalloc_type(struct thread_exception_elt, Z_WAITOK);
+	struct thread_exception_elt *elt = kalloc_type(struct thread_exception_elt, Z_WAITOK | Z_NOFAIL);
 	elt->exception_type = etype;
 	elt->exception_task = task;
 	elt->exception_thread = thread;
 
 	mpsc_daemon_enqueue(&thread_exception_queue, &elt->link,
+	    MPSC_QUEUE_DISABLE_PREEMPTION);
+}
+
+void
+thread_backtrace_enqueue(
+	kcdata_object_t  obj,
+	exception_port_t ports[static BT_EXC_PORTS_COUNT],
+	exception_type_t etype)
+{
+	struct thread_backtrace_elt *elt = kalloc_type(struct thread_backtrace_elt, Z_WAITOK | Z_NOFAIL);
+	elt->obj = obj;
+	elt->exception_type = etype;
+
+	memcpy(elt->exc_ports, ports, sizeof(ipc_port_t) * BT_EXC_PORTS_COUNT);
+
+	mpsc_daemon_enqueue(&thread_backtrace_queue, &elt->link,
 	    MPSC_QUEUE_DISABLE_PREEMPTION);
 }
 
@@ -896,11 +1010,7 @@ thread_copy_resource_info(
 	dst_thread->c_switch = src_thread->c_switch;
 	dst_thread->p_switch = src_thread->p_switch;
 	dst_thread->ps_switch = src_thread->ps_switch;
-	dst_thread->precise_user_kernel_time = src_thread->precise_user_kernel_time;
-	dst_thread->user_timer = src_thread->user_timer;
-	dst_thread->user_timer_save = src_thread->user_timer_save;
-	dst_thread->system_timer = src_thread->system_timer;
-	dst_thread->system_timer_save = src_thread->system_timer_save;
+	dst_thread->sched_time_save = src_thread->sched_time_save;
 	dst_thread->runnable_timer = src_thread->runnable_timer;
 	dst_thread->vtimer_user_save = src_thread->vtimer_user_save;
 	dst_thread->vtimer_prof_save = src_thread->vtimer_prof_save;
@@ -909,6 +1019,7 @@ thread_copy_resource_info(
 	dst_thread->syscalls_unix = src_thread->syscalls_unix;
 	dst_thread->syscalls_mach = src_thread->syscalls_mach;
 	ledger_rollup(dst_thread->t_threadledger, src_thread->t_threadledger);
+	recount_thread_copy(&dst_thread->th_recount, &src_thread->th_recount);
 	*dst_thread->thread_io_stats = *src_thread->thread_io_stats;
 }
 
@@ -941,16 +1052,9 @@ thread_terminate_queue_invoke(mpsc_queue_chain_t e,
 		return;
 	}
 
+	recount_task_rollup_thread(&task->tk_recount, &thread->th_recount);
 
-	task->total_user_time += timer_grab(&thread->user_timer);
-	task->total_ptime += timer_grab(&thread->ptime);
 	task->total_runnable_time += timer_grab(&thread->runnable_timer);
-	if (thread->precise_user_kernel_time) {
-		task->total_system_time += timer_grab(&thread->system_timer);
-	} else {
-		task->total_user_time += timer_grab(&thread->system_timer);
-	}
-
 	task->c_switch += thread->c_switch;
 	task->p_switch += thread->p_switch;
 	task->ps_switch += thread->ps_switch;
@@ -961,12 +1065,7 @@ thread_terminate_queue_invoke(mpsc_queue_chain_t e,
 	task->task_timer_wakeups_bin_1 += thread->thread_timer_wakeups_bin_1;
 	task->task_timer_wakeups_bin_2 += thread->thread_timer_wakeups_bin_2;
 	task->task_gpu_ns += ml_gpu_stat(thread);
-	task->task_energy += ml_energy_stat(thread);
 	task->decompressions += thread->decompressions;
-
-#if MONOTONIC
-	mt_terminate_update(task, thread);
-#endif /* MONOTONIC */
 
 	thread_update_qos_cpu_time(thread);
 
@@ -1149,7 +1248,7 @@ thread_daemon_init(void)
 	thread_deallocate_daemon_register_queue(&thread_deallocate_queue,
 	    thread_deallocate_queue_invoke);
 
-	hazard_register_mpsc_queue();
+	smr_register_mpsc_queue();
 
 	ipc_object_deallocate_register_queue();
 
@@ -1166,8 +1265,17 @@ thread_daemon_init(void)
 	result = mpsc_daemon_queue_init_with_thread(&thread_exception_queue,
 	    thread_exception_queue_invoke, MINPRI_KERNEL,
 	    "daemon.thread-exception", MPSC_DAEMON_INIT_NONE);
+
 	if (result != KERN_SUCCESS) {
 		panic("thread_daemon_init: thread_exception_daemon");
+	}
+
+	result = mpsc_daemon_queue_init_with_thread(&thread_backtrace_queue,
+	    thread_backtrace_queue_invoke, MINPRI_KERNEL,
+	    "daemon.thread-backtrace", MPSC_DAEMON_INIT_NONE);
+
+	if (result != KERN_SUCCESS) {
+		panic("thread_daemon_init: thread_backtrace_daemon");
 	}
 }
 
@@ -1203,6 +1311,7 @@ thread_create_internal(
 	ipc_thread_init_options_t init_options = IPC_THREAD_INIT_NONE;
 	struct thread_ro          tro_tpl = { };
 	bool first_thread = false;
+	kern_return_t kr = KERN_FAILURE;
 
 	/*
 	 *	Allocate a thread and initialize static fields
@@ -1234,6 +1343,12 @@ thread_create_internal(
 		/* work around 74481146 */
 		memcpy(new_thread, &init_thread, sizeof(*new_thread));
 #pragma clang diagnostic pop
+
+		/*
+		 * Make the ctid table functional
+		 */
+		ctid_table_init();
+		new_thread->ctid = 0;
 	} else {
 		init_thread_from_template(new_thread);
 	}
@@ -1244,6 +1359,8 @@ thread_create_internal(
 
 	os_ref_init_count_raw(&new_thread->ref_count, &thread_refgrp, 2);
 	machine_thread_create(new_thread, parent_task, first_thread);
+
+	machine_thread_process_signature(new_thread, parent_task);
 
 #ifdef MACH_BSD
 	uthread_init(parent_task, get_bsdthread_info(new_thread),
@@ -1291,9 +1408,9 @@ thread_create_internal(
 	new_thread->thread_io_stats = kalloc_data(sizeof(struct io_stat_info),
 	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
-#if KASAN
+#if KASAN_CLASSIC
 	kasan_init_thread(&new_thread->kasan_data);
-#endif
+#endif /* KASAN_CLASSIC */
 
 #if CONFIG_KCOV
 	kcov_init_thread(&new_thread->kcov_data);
@@ -1336,27 +1453,19 @@ thread_create_internal(
 		task_unlock(parent_task);
 		lck_mtx_unlock(&tasks_threads_lock);
 
-#ifdef MACH_BSD
-		{
-			struct uthread *ut = get_bsdthread_info(new_thread);
-
-			uthread_cleanup(ut, &tro_tpl);
-			uthread_destroy(ut);
-		}
-#endif  /* MACH_BSD */
 		ipc_thread_disable(new_thread);
 		ipc_thread_terminate(new_thread);
 		kfree_data(new_thread->thread_io_stats,
 		    sizeof(struct io_stat_info));
 		lck_mtx_destroy(&new_thread->mutex, &thread_lck_grp);
-		machine_thread_destroy(new_thread);
-		thread_ro_destroy(new_thread);
-		zfree(thread_zone, new_thread);
-		return KERN_FAILURE;
+		kr = KERN_FAILURE;
+		goto out_thread_cleanup;
 	}
 
 	/* Protected by the tasks_threads_lock */
 	new_thread->thread_id = ++thread_unique_id;
+
+	ctid_table_add(new_thread);
 
 	/* New threads inherit any default state on the task */
 	machine_thread_inherit_taskwide(new_thread, parent_task);
@@ -1385,6 +1494,8 @@ thread_create_internal(
 	if (new_thread->t_ledger) {
 		ledger_reference(new_thread->t_ledger);
 	}
+
+	recount_thread_init(&new_thread->th_recount);
 
 #if defined(CONFIG_SCHED_MULTIQ)
 	/* Cache the task's sched_group */
@@ -1459,6 +1570,7 @@ thread_create_internal(
 	}
 	new_thread->corpse_dup = FALSE;
 	new_thread->turnstile = turnstile_alloc();
+	new_thread->ctsid = turnstile_compact_id_get();
 
 
 	*out_thread = new_thread;
@@ -1466,7 +1578,7 @@ thread_create_internal(
 	if (kdebug_enable) {
 		long args[4] = {};
 
-		kdbg_trace_data(parent_task->bsd_info, &args[1], &args[3]);
+		kdbg_trace_data(get_bsdtask_info(parent_task), &args[1], &args[3]);
 
 		/*
 		 * Starting with 26604425, exec'ing creates a new task/thread.
@@ -1487,15 +1599,33 @@ thread_create_internal(
 		KDBG_RELEASE(TRACE_DATA_NEWTHREAD, (uintptr_t)thread_tid(new_thread),
 		    args[1], args[2], args[3]);
 
-		kdbg_trace_string(parent_task->bsd_info, &args[0], &args[1],
-		    &args[2], &args[3]);
+		kdebug_proc_name_args(get_bsdtask_info(parent_task), args);
 		KDBG_RELEASE(TRACE_STRING_NEWTHREAD, args[0], args[1], args[2],
 		    args[3]);
 	}
 
 	DTRACE_PROC1(lwp__create, thread_t, *out_thread);
 
-	return KERN_SUCCESS;
+	kr = KERN_SUCCESS;
+	goto done;
+
+out_thread_cleanup:
+#ifdef MACH_BSD
+	{
+		struct uthread *ut = get_bsdthread_info(new_thread);
+
+		uthread_cleanup(ut, &tro_tpl);
+		uthread_destroy(ut);
+	}
+#endif  /* MACH_BSD */
+
+	machine_thread_destroy(new_thread);
+
+	thread_ro_destroy(new_thread);
+	zfree(thread_zone, new_thread);
+
+done:
+	return kr;
 }
 
 static kern_return_t
@@ -1585,6 +1715,7 @@ thread_create_waiting_internal(
 {
 	kern_return_t result;
 	thread_t thread;
+	wait_interrupt_t wait_interrupt = THREAD_INTERRUPTIBLE;
 
 	if (task == TASK_NULL || task == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
@@ -1607,8 +1738,10 @@ thread_create_waiting_internal(
 	if (options & TH_OPTION_WORKQ) {
 		thread->static_param = true;
 		event = workq_thread_init_and_wq_lock(task, thread);
+	} else if (options & TH_OPTION_MAINTHREAD) {
+		wait_interrupt = THREAD_UNINT;
 	}
-	thread_start_in_assert_wait(thread, event, THREAD_INTERRUPTIBLE);
+	thread_start_in_assert_wait(thread, event, wait_interrupt);
 	thread_mtx_unlock(thread);
 
 	task_unlock(task);
@@ -2090,105 +2223,46 @@ thread_info_internal(
 	return KERN_INVALID_ARGUMENT;
 }
 
+static void
+_convert_mach_to_time_value(uint64_t time_mach, time_value_t *time)
+{
+	clock_sec_t  secs;
+	clock_usec_t usecs;
+	absolutetime_to_microtime(time_mach, &secs, &usecs);
+	time->seconds = (typeof(time->seconds))secs;
+	time->microseconds = usecs;
+}
+
 void
 thread_read_times(
-	thread_t                thread,
-	time_value_t    *user_time,
-	time_value_t    *system_time,
-	time_value_t    *runnable_time)
+	thread_t      thread,
+	time_value_t *user_time,
+	time_value_t *system_time,
+	time_value_t *runnable_time)
 {
-	clock_sec_t             secs;
-	clock_usec_t    usecs;
-	uint64_t                tval_user, tval_system;
-
-	tval_user = timer_grab(&thread->user_timer);
-	tval_system = timer_grab(&thread->system_timer);
-
-	if (thread->precise_user_kernel_time) {
-		absolutetime_to_microtime(tval_user, &secs, &usecs);
-		user_time->seconds = (typeof(user_time->seconds))secs;
-		user_time->microseconds = usecs;
-
-		absolutetime_to_microtime(tval_system, &secs, &usecs);
-		system_time->seconds = (typeof(system_time->seconds))secs;
-		system_time->microseconds = usecs;
-	} else {
-		/* system_timer may represent either sys or user */
-		tval_user += tval_system;
-		absolutetime_to_microtime(tval_user, &secs, &usecs);
-		user_time->seconds = (typeof(user_time->seconds))secs;
-		user_time->microseconds = usecs;
-
-		system_time->seconds = 0;
-		system_time->microseconds = 0;
+	if (user_time && system_time) {
+		struct recount_times_mach times = recount_thread_times(thread);
+		_convert_mach_to_time_value(times.rtm_user, user_time);
+		_convert_mach_to_time_value(times.rtm_system, system_time);
 	}
 
 	if (runnable_time) {
-		uint64_t tval_runnable = timer_grab(&thread->runnable_timer);
-		absolutetime_to_microtime(tval_runnable, &secs, &usecs);
-		runnable_time->seconds = (typeof(runnable_time->seconds))secs;
-		runnable_time->microseconds = usecs;
+		uint64_t runnable_time_mach = timer_grab(&thread->runnable_timer);
+		_convert_mach_to_time_value(runnable_time_mach, runnable_time);
 	}
 }
 
 uint64_t
 thread_get_runtime_self(void)
 {
-	boolean_t interrupt_state;
-	uint64_t runtime;
-	thread_t thread = NULL;
-	processor_t processor = NULL;
-
-	thread = current_thread();
-
-	/* Not interrupt safe, as the scheduler may otherwise update timer values underneath us */
-	interrupt_state = ml_set_interrupts_enabled(FALSE);
-	processor = current_processor();
-	timer_update(processor->thread_timer, mach_absolute_time());
-	runtime = (timer_grab(&thread->user_timer) + timer_grab(&thread->system_timer));
+	/*
+	 * Must be guaranteed to stay on the same CPU and not be updated by the
+	 * scheduler.
+	 */
+	boolean_t interrupt_state = ml_set_interrupts_enabled(FALSE);
+	uint64_t time_mach = recount_current_thread_time_mach();
 	ml_set_interrupts_enabled(interrupt_state);
-
-	return runtime;
-}
-
-kern_return_t
-thread_assign(
-	__unused thread_t                       thread,
-	__unused processor_set_t        new_pset)
-{
-	return KERN_FAILURE;
-}
-
-/*
- *	thread_assign_default:
- *
- *	Special version of thread_assign for assigning threads to default
- *	processor set.
- */
-kern_return_t
-thread_assign_default(
-	thread_t                thread)
-{
-	return thread_assign(thread, &pset0);
-}
-
-/*
- *	thread_get_assignment
- *
- *	Return current assignment for this thread.
- */
-kern_return_t
-thread_get_assignment(
-	thread_t                thread,
-	processor_set_t *pset)
-{
-	if (thread == NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	*pset = &pset0;
-
-	return KERN_SUCCESS;
+	return time_mach;
 }
 
 /*
@@ -2522,8 +2596,9 @@ SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU(void)
 
 #ifdef MACH_BSD
 	pid = proc_selfpid();
-	if (task->bsd_info != NULL) {
-		procname = proc_name_address(task->bsd_info);
+	void *bsd_info = get_bsdtask_info(task);
+	if (bsd_info != NULL) {
+		procname = proc_name_address(bsd_info);
 	}
 #endif
 
@@ -2615,6 +2690,8 @@ SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU(void)
 	}
 }
 
+bool os_variant_has_internal_diagnostics(const char *subsystem);
+
 #if DEVELOPMENT || DEBUG
 void __attribute__((noinline))
 SENDING_NOTIFICATION__TASK_HAS_TOO_MANY_THREADS(task_t task, int thread_count)
@@ -2634,7 +2711,13 @@ SENDING_NOTIFICATION__TASK_HAS_TOO_MANY_THREADS(task_t task, int thread_count)
 
 	if (disable_exc_resource) {
 		printf("process %s[%d] crossed thread count high watermark (%d), EXC_RESOURCE "
-		    "supressed by a boot-arg. \n", procname, pid, thread_count);
+		    "supressed by a boot-arg.\n", procname, pid, thread_count);
+		return;
+	}
+
+	if (!os_variant_has_internal_diagnostics("com.apple.xnu")) {
+		printf("process %s[%d] crossed thread count high watermark (%d), EXC_RESOURCE "
+		    "supressed, internal diagnostics disabled.\n", procname, pid, thread_count);
 		return;
 	}
 
@@ -2658,7 +2741,7 @@ SENDING_NOTIFICATION__TASK_HAS_TOO_MANY_THREADS(task_t task, int thread_count)
 	EXC_RESOURCE_ENCODE_FLAVOR(code[0], FLAVOR_THREADS_HIGH_WATERMARK);
 	EXC_RESOURCE_THREADS_ENCODE_THREADS(code[0], thread_count);
 
-	task_enqueue_exception_with_corpse(task, EXC_RESOURCE, code, EXCEPTION_CODE_MAX, NULL);
+	task_enqueue_exception_with_corpse(task, EXC_RESOURCE, code, EXCEPTION_CODE_MAX, NULL, FALSE);
 }
 #endif /* DEVELOPMENT || DEBUG */
 
@@ -3065,10 +3148,11 @@ thread_dispatchqaddr(
 	}
 
 	task = get_threadtask(thread);
+	void *bsd_info = get_bsdtask_info(task);
 	if (thread->inspection == TRUE) {
 		dispatchqueue_addr = thread_handle + get_task_dispatchqueue_offset(task);
-	} else if (task->bsd_info) {
-		dispatchqueue_addr = thread_handle + get_dispatchqueue_offset_from_proc(task->bsd_info);
+	} else if (bsd_info) {
+		dispatchqueue_addr = thread_handle + get_dispatchqueue_offset_from_proc(bsd_info);
 	} else {
 		dispatchqueue_addr = 0;
 	}
@@ -3093,7 +3177,7 @@ thread_wqquantum_addr(thread_t thread)
 	}
 	task = get_threadtask(thread);
 
-	uint64_t wq_quantum_expiry_offset = get_wq_quantum_offset_from_proc(task->bsd_info);
+	uint64_t wq_quantum_expiry_offset = get_wq_quantum_offset_from_proc(get_bsdtask_info(task));
 	if (wq_quantum_expiry_offset == 0) {
 		return 0;
 	}
@@ -3109,6 +3193,7 @@ thread_rettokern_addr(
 	uint64_t        rettokern_offset;
 	uint64_t        thread_handle;
 	task_t          task;
+	void            *bsd_info;
 
 	if (thread == THREAD_NULL) {
 		return 0;
@@ -3119,9 +3204,10 @@ thread_rettokern_addr(
 		return 0;
 	}
 	task = get_threadtask(thread);
+	bsd_info = get_bsdtask_info(task);
 
-	if (task->bsd_info) {
-		rettokern_offset = get_return_to_kernel_offset_from_proc(task->bsd_info);
+	if (bsd_info) {
+		rettokern_offset = get_return_to_kernel_offset_from_proc(bsd_info);
 
 		/* Return 0 if return to kernel offset is not initialized. */
 		if (rettokern_offset == 0) {
@@ -3412,14 +3498,16 @@ proc_get_wqptr(void *proc);
 static bool
 task_supports_cooperative_workqueue(task_t task)
 {
+	void *bsd_info = get_bsdtask_info(task);
+
 	assert(task == current_task());
-	if (task->bsd_info == NULL) {
+	if (bsd_info == NULL) {
 		return false;
 	}
 
-	uint64_t wq_quantum_expiry_offset = get_wq_quantum_offset_from_proc(task->bsd_info);
+	uint64_t wq_quantum_expiry_offset = get_wq_quantum_offset_from_proc(bsd_info);
 	/* userspace may not yet have called workq_open yet */
-	struct workqueue *wq = proc_get_wqptr(task->bsd_info);
+	struct workqueue *wq = proc_get_wqptr(bsd_info);
 
 	return (wq != NULL) && (wq_quantum_expiry_offset != 0);
 }
@@ -3535,7 +3623,7 @@ thread_has_expired_workqueue_quantum(thread_t thread, bool should_trace)
 	 * In addition, the timers on the thread have just been updated recently so
 	 * we don't need to update them again.
 	 */
-	uint64_t runtime = (timer_grab(&thread->user_timer) + timer_grab(&thread->system_timer));
+	uint64_t runtime = recount_thread_time_mach(thread);
 	bool expired = runtime > thread->workq_quantum_deadline;
 
 	if (expired && should_trace) {
@@ -3797,6 +3885,100 @@ thread_self_region_page_shift_set(
 	current_thread()->thread_region_page_shift = pgshift;
 }
 
+__startup_func
+static void
+ctid_table_init(void)
+{
+	/*
+	 * Pretend the early boot setup didn't exist,
+	 * and pick a mangling nonce.
+	 */
+	*compact_id_resolve(&ctid_table, 0) = THREAD_NULL;
+	ctid_nonce = (uint32_t)early_random() & CTID_MASK;
+}
+
+
+/*
+ * This maps the [0, CTID_MAX_THREAD_NUMBER] range
+ * to [1, CTID_MAX_THREAD_NUMBER + 1 == CTID_MASK]
+ * so that in mangled form, '0' is an invalid CTID.
+ */
+static ctid_t
+ctid_mangle(compact_id_t cid)
+{
+	return (cid == ctid_nonce ? CTID_MASK : cid) ^ ctid_nonce;
+}
+
+static compact_id_t
+ctid_unmangle(ctid_t ctid)
+{
+	ctid ^= ctid_nonce;
+	return ctid == CTID_MASK ? ctid_nonce : ctid;
+}
+
+void
+ctid_table_add(thread_t thread)
+{
+	compact_id_t cid;
+
+	cid = compact_id_get(&ctid_table, CTID_MAX_THREAD_NUMBER, thread);
+	thread->ctid = ctid_mangle(cid);
+}
+
+void
+ctid_table_remove(thread_t thread)
+{
+	__assert_only thread_t value;
+
+	value = compact_id_put(&ctid_table, ctid_unmangle(thread->ctid));
+	assert3p(value, ==, thread);
+	thread->ctid = 0;
+}
+
+thread_t
+ctid_get_thread_unsafe(ctid_t ctid)
+{
+	if (ctid) {
+		return *compact_id_resolve(&ctid_table, ctid_unmangle(ctid));
+	}
+	return THREAD_NULL;
+}
+
+thread_t
+ctid_get_thread(ctid_t ctid)
+{
+	thread_t thread = THREAD_NULL;
+
+	if (ctid) {
+		thread = *compact_id_resolve(&ctid_table, ctid_unmangle(ctid));
+		assert(thread && thread->ctid == ctid);
+	}
+	return thread;
+}
+
+ctid_t
+thread_get_ctid(thread_t thread)
+{
+	return thread->ctid;
+}
+
+/*
+ * Adjust code signature dependent thread state.
+ *
+ * Called to allow code signature dependent adjustments to the thread
+ * state. Note that this is usually called twice for the main thread:
+ * Once at thread creation by thread_create, when the signature is
+ * potentially not attached yet (which is usually the case for the
+ * first/main thread of a task), and once after the task's signature
+ * has actually been attached.
+ *
+ */
+kern_return_t
+thread_process_signature(thread_t thread, task_t task)
+{
+	return machine_thread_process_signature(thread, task);
+}
+
 #if CONFIG_DTRACE
 uint32_t
 dtrace_get_thread_predcache(thread_t thread)
@@ -3919,18 +4101,13 @@ kcov_stksz_set_thread_stack(thread_t thread, vm_offset_t stack)
 int64_t
 dtrace_calc_thread_recent_vtime(thread_t thread)
 {
-	if (thread != THREAD_NULL) {
-		processor_t             processor = current_processor();
-		uint64_t                                abstime = mach_absolute_time();
-		timer_t                                 timer;
-
-		timer = processor->thread_timer;
-
-		return timer_grab(&(thread->system_timer)) + timer_grab(&(thread->user_timer)) +
-		       (abstime - timer->tstamp);          /* XXX need interrupts off to prevent missed time? */
-	} else {
+	if (thread == THREAD_NULL) {
 		return 0;
 	}
+
+	struct recount_usage usage = { 0 };
+	recount_current_thread_usage(&usage);
+	return (int64_t)(usage.ru_system_time_mach + usage.ru_user_time_mach);
 }
 
 void
@@ -3963,31 +4140,6 @@ dtrace_set_thread_inprobe(thread_t thread, uint16_t inprobe)
 	if (thread != THREAD_NULL) {
 		thread->t_dtrace_inprobe = inprobe;
 	}
-}
-
-vm_offset_t
-dtrace_set_thread_recover(thread_t thread, vm_offset_t recover)
-{
-	vm_offset_t prev = 0;
-
-	if (thread != THREAD_NULL) {
-		prev = thread->recover;
-		thread->recover = recover;
-	}
-	return prev;
-}
-
-vm_offset_t
-dtrace_sign_and_set_thread_recover(thread_t thread, vm_offset_t recover)
-{
-#if defined(HAS_APPLE_PAC)
-	return dtrace_set_thread_recover(thread,
-	           (vm_address_t)ptrauth_sign_unauthenticated((void *)recover,
-	           ptrauth_key_function_pointer,
-	           ptrauth_blend_discriminator(&thread->recover, PAC_DISCRIMINATOR_RECOVER)));
-#else /* defined(HAS_APPLE_PAC) */
-	return dtrace_set_thread_recover(thread, recover);
-#endif /* defined(HAS_APPLE_PAC) */
 }
 
 void

@@ -80,7 +80,7 @@ perfmon_dev_get_device(dev_t dev)
 {
 	int source_index = perfmon_dev_get_source_index(dev);
 	int dmin = minor(dev);
-	if (dmin >= perfmon_kind_max) {
+	if (dmin >= perfmon_kind_max || dmin < 0) {
 		panic("perfmon: invalid minor dev number: 0x%x", dev);
 	}
 

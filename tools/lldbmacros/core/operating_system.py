@@ -676,6 +676,7 @@ class OperatingSystemPlugIn(object):
             osplugin_target_obj = self._target
             self.current_session_id = GetUniqueSessionID(self.process)
             self.version = self._target.FindGlobalVariables('version', 1).GetValueAtIndex(0)
+            self.kasan_tbi = self._target.FindGlobalVariables('kasan_tbi_enabled', 1).GetValueAtIndex(0)
             self.kernel_stack_size = self._target.FindGlobalVariables('kernel_stack_size', 1).GetValueAtIndex(0).GetValueAsUnsigned()
             self.kernel_context_size = 0
             self.connected_over_kdp = False
@@ -721,6 +722,14 @@ class OperatingSystemPlugIn(object):
                 print("Instantiating threads completely from saved state in memory.")
 
     def create_thread(self, tid, context):
+        def strip_tbi(v):
+            if self.kasan_tbi and v != 0:
+                v |= (0xFF << 56)
+            return v
+
+        # Strip TBI explicitly in case create_thread() is called externally.
+        context = strip_tbi(context)
+
         # tid == deadbeef means its a custom thread which kernel does not know of.
         if tid == 0xdeadbeef :
             # tid manipulation should be the same as in "switchtoregs" code in lldbmacros/process.py .
@@ -742,13 +751,16 @@ class OperatingSystemPlugIn(object):
         if tid != thread_id:
             print("FATAL ERROR: Creating thread from memory 0x%x with tid in mem=%d when requested tid = %d " % (context, thread_id, tid))
             return None
+
+        wait_queue = strip_tbi(th.GetChildMemberWithName('wait_queue').GetValueAsUnsigned())
         thread_obj = { 'tid'   : thread_id,
                        'ptr'   : th.GetValueAsUnsigned(),
                        'name'  : hex(th.GetValueAsUnsigned()).rstrip('L'),
-                       'queue' : hex(th.GetChildMemberWithName('wait_queue').GetValueAsUnsigned()).rstrip('L'),
+                       'queue' : hex(wait_queue).rstrip('L'),
                        'state' : 'stopped',
                        'stop_reason' : 'none'
                      }
+
         if self.current_session_id != GetUniqueSessionID(self.process):
             self.thread_cache = {}
             self.current_session_id = GetUniqueSessionID(self.process)
@@ -756,14 +768,13 @@ class OperatingSystemPlugIn(object):
         self.thread_cache[tid] = thread_obj
         return thread_obj
 
-
     def get_thread_info(self):
         self.kdp_thread = None
         self.kdp_state = None
         if self.connected_over_kdp :
             kdp = self._target.FindGlobalVariables('kdp',1).GetValueAtIndex(0)
             kdp_state = kdp.GetChildMemberWithName('saved_state')
-            kdp_thread = kdp.GetChildMemberWithName('kdp_thread')
+            kdp_thread = self._strip_thread_tbi(kdp.GetChildMemberWithName('kdp_thread'))
             if kdp_thread and kdp_thread.GetValueAsUnsigned() != 0:
                 self.kdp_thread = kdp_thread
                 self.kdp_state = kdp_state
@@ -788,7 +799,7 @@ class OperatingSystemPlugIn(object):
         try:
             processor_list_val = PluginValue(self._target.FindGlobalVariables('processor_list',1).GetValueAtIndex(0))
             while processor_list_val.IsValid() and processor_list_val.GetValueAsUnsigned() !=0 :
-                th = processor_list_val.GetChildMemberWithName('active_thread')
+                th = self._strip_thread_tbi(processor_list_val.GetChildMemberWithName('active_thread'))
                 th_id = th.GetChildMemberWithName('thread_id').GetValueAsUnsigned()
                 cpu_id = processor_list_val.GetChildMemberWithName('cpu_id').GetValueAsUnsigned()
                 self.processors.append({'active_thread': th.GetValueAsUnsigned(), 'cpu_id': cpu_id})
@@ -813,6 +824,7 @@ class OperatingSystemPlugIn(object):
             thread_type = self._target.FindFirstType('thread')
             thread_ptr_type = thread_type.GetPointerType()
             for th in IterateQueue(thread_q_head, thread_ptr_type, 'threads'):
+                th = self._strip_thread_tbi(th)
                 th_id = th.GetChildMemberWithName('thread_id').GetValueAsUnsigned()
                 self.create_thread(th_id, th.GetValueAsUnsigned())
                 nth = self.thread_cache[th_id]
@@ -883,3 +895,9 @@ class OperatingSystemPlugIn(object):
         print("FATAL ERROR: Failed to get register state for thread id 0x%x " % tid)
         print(thobj)
         return regs.GetPackedRegisterState()
+
+    def _strip_thread_tbi(self, th):
+        if not self.kasan_tbi:
+            return th
+        addr = th.GetValueAsAddress()
+        return self.version.CreateValueFromExpression(str(addr), '(struct thread *)' + str(addr))

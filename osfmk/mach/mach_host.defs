@@ -65,9 +65,9 @@
  */
 
 subsystem
-#if	KERNEL_SERVER
-	  KernelServer
-#endif	/* KERNEL_SERVER */
+#if	KERNEL_SERVER || KOBJECT_SERVER
+	KernelServer
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 		       mach_host 200;
 
 /*
@@ -137,11 +137,16 @@ routine host_processor_info(
         out     out_processor_info  	: processor_info_array_t);
 
 /*
- * 	Return host IO master access port
+ * 	Return host IO main access port
  */
-routine host_get_io_master(
+routine
+#if	SANDBOX_SUPPORTS_HOST_IOMAIN || !SANDBOX_COMPILER
+host_get_io_main(
+#else
+host_get_io_master(
+#endif
                 host            : host_t;
-        out     io_master       : io_master_t);
+        out     io_main         : io_main_t);
 
 /*
  *	Get service port for a processor set.
@@ -180,10 +185,6 @@ skip; /* was enable_bluebox */
 skip; /* was disable_bluebox */
 
 /*
- * JMM - Keep processor_set related items at the end for easy
- * removal.
- */
-/*
  *	Get default processor set for host.
  */
 routine processor_set_default(
@@ -191,17 +192,17 @@ routine processor_set_default(
 	out	default_set	: processor_set_name_t);
 
 /*
- *	Create new processor set.  Returns real port for manipulations,
- *	and name port for obtaining information.
+ * OBSOLETE interfaces, removed from kernel
  */
+#if KERNEL_SERVER
+skip; /* processor_set_create */
+#else
+
 routine processor_set_create(
 		host		: host_t;
 	out	new_set		: processor_set_t;
 	out	new_name	: processor_set_name_t);
-
-/*
- * 	Temporary interfaces for conversion to 64 bit data path 
- */
+#endif
 
 routine mach_memory_object_memory_entry_64(
 		host		:host_t;
@@ -284,9 +285,11 @@ routine host_create_mach_voucher(
 		recipes		: mach_voucher_attr_raw_recipe_array_t;
 	out	voucher		: ipc_voucher_t);
 
-/*
- *	Register a resource manager with the kernel.  A new key is selected.
- */
+/* OBSOLETE */
+#if KERNEL_SERVER
+skip; /* was host_register_mach_voucher_attr_manager */
+skip; /* was host_register_well_known_mach_voucher_attr_manager */
+#else
 routine host_register_mach_voucher_attr_manager(
 		host		: host_t;
 		attr_manager	: mach_voucher_attr_manager_t;
@@ -294,16 +297,13 @@ routine host_register_mach_voucher_attr_manager(
 	out	new_key		: mach_voucher_attr_key_t;
 	out	new_attr_control: ipc_voucher_attr_control_t);
 
-/*
- *	Register a resource manager (with a well-known key value) with the kernel.
- */
 routine host_register_well_known_mach_voucher_attr_manager(
 		host		: host_t;
 		attr_manager	: mach_voucher_attr_manager_t;
 		default_value	: mach_voucher_attr_value_handle_t;
 		key		: mach_voucher_attr_key_t;
 	out	new_attr_control: ipc_voucher_attr_control_t);
-
+#endif
 
 /*
  * Update the global ATM diagnostic flag, readable from the commpage

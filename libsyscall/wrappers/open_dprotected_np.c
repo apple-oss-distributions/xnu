@@ -24,13 +24,21 @@
 #include <sys/types.h>
 #include <stdarg.h>
 #include <sys/fcntl.h>
+#include <sys/errno.h>
+#include <sys/content_protection.h>
 
 int __open_dprotected_np(const char* path, int flags, int class, int dpflags, int mode);
+int __openat_dprotected_np(int fd, const char* path, int flags, int class, int dpflags, int mode, int authfd);
 
 int
 open_dprotected_np(const char *path, int flags, int class, int dpflags, ...)
 {
 	int mode = 0;
+
+	if (dpflags & O_DP_AUTHENTICATE) {
+		errno = EINVAL;
+		return -1;
+	}
 
 	if (flags & O_CREAT) {
 		va_list ap;
@@ -39,4 +47,39 @@ open_dprotected_np(const char *path, int flags, int class, int dpflags, ...)
 		va_end(ap);
 	}
 	return __open_dprotected_np(path, flags, class, dpflags, mode);
+}
+
+int
+openat_dprotected_np(int fd, const char *path, int flags, int class, int dpflags, ...)
+{
+	int mode = 0;
+
+	if (dpflags & O_DP_AUTHENTICATE) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (flags & O_CREAT) {
+		va_list ap;
+		va_start(ap, dpflags);
+		mode = va_arg(ap, int);
+		va_end(ap);
+	}
+	return __openat_dprotected_np(fd, path, flags, class, dpflags, mode, AUTH_OPEN_NOAUTHFD);
+}
+
+int
+openat_authenticated_np(int fd, const char *path, int flags, int authfd)
+{
+	if (flags & O_CREAT) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if ((authfd != AUTH_OPEN_NOAUTHFD) && (authfd < 0)) {
+		errno = EBADF;
+		return -1;
+	}
+
+	return __openat_dprotected_np(fd, path, flags, PROTECTION_CLASS_DEFAULT, O_DP_AUTHENTICATE, 0, authfd);
 }

@@ -288,6 +288,11 @@
 #define CPUID_VMM_FAMILY_HVF            0x5
 #define CPUID_VMM_FAMILY_KVM            0x6
 
+/*
+ * KVM features
+ */
+
+#define CPUID_KVM_FEATURE_PV_UNHALT     _Bit(7)
 
 /*
  * Apple Paravirtualization CPUID leaves
@@ -309,6 +314,8 @@
 
 #define CPUID_LEAF_FEATURE_COREDUMP         _Bit(0)
 #define CPUID_LEAF_FEATURE_XNU_DEBUG        _Bit(1)
+#define CPUID_LEAF_FEATURE_MABS_OFFSET      _Bit(2)
+#define CPUID_LEAF_FEATURE_BOOTSESSIONUUID  _Bit(3)
 
 
 #ifndef ASSEMBLER
@@ -507,6 +514,7 @@ typedef struct {
 	uint32_t        cpuid_vmm_bus_frequency;
 	uint32_t        cpuid_vmm_tsc_frequency;
 	uint64_t        cpuid_vmm_applepv_features;
+	uint64_t        cpuid_vmm_kvm_features;
 } i386_vmm_info_t;
 
 typedef enum {
@@ -577,6 +585,7 @@ extern i386_cpu_info_t  *cpuid_info(void);
 extern void             cpuid_set_info(void);
 extern boolean_t        cpuid_vmm_present(void);
 extern uint32_t         cpuid_vmm_family(void);
+extern uint64_t         cpuid_vmm_get_kvm_features(void);
 extern uint64_t         cpuid_vmm_get_applepv_features(void);
 
 #ifdef MACH_KERNEL_PRIVATE

@@ -14,7 +14,7 @@ include $(MakeInc_def)
 EXPINC_SUBDIRS = ${INSTINC_SUBDIRS}
 
 MI_DIR = crypto
-ALL_HEADERS = md5.h sha1.h aes.h
+ALL_HEADERS = md5.h sha1.h aes.h sha2.h
 
 INSTALL_MI_DIR = $(MI_DIR)
 

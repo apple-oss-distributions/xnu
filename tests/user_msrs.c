@@ -13,6 +13,23 @@
 #include <unistd.h>
 #include <signal.h>
 
+/*
+ * What this test does and what this test does not do:
+ * - we test for unexpectedly-writeable MSRs in the implementaion-defined space
+ * - any that are found to be writeable are tested for ability to store at least a single bit
+ * - any found to do so are tested to reset in context switch or sooner
+ *
+ * This will detect any covert channels we create on accident
+ *
+ * What this test does not do:
+ * - test that registers that are allowed to be written per-thread are properly context switched
+ *
+ * And that is why there is a whitelist of regs that we DO intend to be writeable from userspace
+ * and we *KNOW* are properly context switched. Registers we *INTEND* userspace to write are
+ * in that list. Things like TPIDR_EL0, and others
+ *
+ */
+
 
 #define NUM_THREADS             256
 
@@ -29,10 +46,42 @@ enum msr_op_reason {
 
 typedef void (*msr_op)(enum msr_op_reason why, void *param);
 
+
 static pthread_mutex_t threads_please_die_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool did_fault;
 static bool threads_please_die;
 
+static const char *registers_skipped[] = {
+	"S3_3_C13_C0_2", //TPIDR_EL0
+	"S3_4_C15_C15_6", //JCTL_EL0
+};
+
+#define DECLARE_TEST(_op0, _op1, _n, _m, _op2)                                                                                     \
+	static void	__attribute__((optnone))                                                                                           \
+	msr_test_S ## _op0 ## _ ## _op1 ## _C ## _n ## _C ## _m ## _ ## _op2 (enum msr_op_reason why, void *param)                     \
+	{                                                                                                                              \
+	        switch (why) {                                                                                                         \
+	        case msr_get_name:                                                                                                     \
+	                *(const char **)param = "S" #_op0 "_" #_op1 "_C" #_n "_C" #_m "_" #_op2;                                       \
+	                break;                                                                                                         \
+                                                                                                                                   \
+	        case msr_read:                                                                                                         \
+	                *(uint64_t*)param = __builtin_arm_rsr64("S" #_op0 "_" #_op1 "_C" #_n "_C" #_m "_" #_op2);                      \
+	                break;                                                                                                         \
+                                                                                                                                   \
+	        case msr_write:                                                                                                        \
+	                __builtin_arm_wsr64("S" #_op0 "_" #_op1 "_C" #_n "_C" #_m "_" #_op2, *(const uint64_t*)param);                 \
+	                break;                                                                                                         \
+	        }                                                                                                                      \
+	}
+
+#include "user_msrs.inc"
+#undef DECLARE_TEST
+#define DECLARE_TEST(_op0, _op1, _n, _m, _op2) msr_test_S ## _op0 ## _ ## _op1 ## _C ## _n ## _C ## _m ## _ ## _op2,
+static msr_op tests[] = {
+	#include "user_msrs.inc"
+};
+#undef DECLARE_TEST
 
 static void*
 thread_func(void *param)
@@ -58,10 +107,17 @@ msr_test(msr_op op)
 	pthread_t threads[NUM_THREADS];
 	bool readable, writeable;
 	const char *reg_name;
-	int i;
+	unsigned i;
 
 	op(msr_get_name, &reg_name);
 	T_LOG("sub-test '%s'\n", reg_name);
+
+	for (i = 0; i < sizeof(registers_skipped) / sizeof(*registers_skipped); i++) {
+		if (!strcmp(registers_skipped[i], reg_name)) {
+			T_LOG("\tskipping this register by request");
+			return;
+		}
+	}
 
 	//let's see if we can read and write it
 	did_fault = false;
@@ -132,78 +188,6 @@ msr_test(msr_op op)
 }
 
 static void
-msr_test_1(enum msr_op_reason why, void *param)
-{
-	switch (why) {
-	case msr_get_name:
-		*(const char **)param = "S3_5_C15_C1_4";
-		break;
-
-	case msr_read:
-		*(uint64_t*)param = __builtin_arm_rsr64("S3_5_C15_C1_4");
-		break;
-
-	case msr_write:
-		__builtin_arm_wsr64("S3_5_C15_C1_4", *(const uint64_t*)param);
-		break;
-	}
-}
-
-static void
-msr_test_2(enum msr_op_reason why, void *param)
-{
-	switch (why) {
-	case msr_get_name:
-		*(const char **)param = "S3_5_C15_C10_1";
-		break;
-
-	case msr_read:
-		*(uint64_t*)param = __builtin_arm_rsr64("S3_5_C15_C10_1");
-		break;
-
-	case msr_write:
-		__builtin_arm_wsr64("S3_5_C15_C10_1", *(const uint64_t*)param);
-		break;
-	}
-}
-
-static void
-msr_test_3(enum msr_op_reason why, void *param)
-{
-	switch (why) {
-	case msr_get_name:
-		*(const char **)param = "TPIDRRO_EL0";
-		break;
-
-	case msr_read:
-		*(uint64_t*)param = __builtin_arm_rsr64("TPIDRRO_EL0");
-		break;
-
-	case msr_write:
-		__builtin_arm_wsr64("TPIDRRO_EL0", *(const uint64_t*)param);
-		break;
-	}
-}
-
-static void
-msr_test_4(enum msr_op_reason why, void *param)
-{
-	switch (why) {
-	case msr_get_name:
-		*(const char **)param = "TPIDR_EL1";
-		break;
-
-	case msr_read:
-		*(uint64_t*)param = __builtin_arm_rsr64("TPIDR_EL1");
-		break;
-
-	case msr_write:
-		__builtin_arm_wsr64("TPIDR_EL1", *(const uint64_t*)param);
-		break;
-	}
-}
-
-static void
 sig_caught(int signo, siginfo_t *sinfop, void *ucontext)
 {
 	_STRUCT_MCONTEXT64 *ctx = ((ucontext_t *)ucontext)->uc_mcontext;
@@ -220,7 +204,7 @@ sig_caught(int signo, siginfo_t *sinfop, void *ucontext)
 	instr = *(uint32_t*)pc;
 
 	if ((instr & 0xffd00000) != 0xd5100000) {
-		T_ASSERT_FAIL("We did not expect SIGILL on an instr that is not an MSR/MRS");
+		T_ASSERT_FAIL("We did not expect SIGILL on an instr that is not an MSR/MRS. [%p] = 0x%08x", (void*)pc, instr);
 	}
 
 	pc = (void (*)(void))(((uintptr_t)pc) + 4);
@@ -257,13 +241,14 @@ T_DECL(user_msrs, "Userspace MSR access test")
 #if defined(__arm64__) && defined(__LP64__)
 	if (is_release_kernel()) {
 		struct sigaction sa_old, sa_new = {.__sigaction_u = { .__sa_sigaction = sig_caught, }, .sa_flags = SA_SIGINFO, };
+		unsigned i;
 
 		sigaction(SIGILL, &sa_new, &sa_old);
-		msr_test(msr_test_1);
-		msr_test(msr_test_2);
-		msr_test(msr_test_3);
-		msr_test(msr_test_4);
-		//todo: macro autogen all of them
+
+		for (i = 0; i < sizeof(tests) / sizeof(*tests); i++) {
+			msr_test(tests[i]);
+		}
+
 		sigaction(SIGILL, &sa_old, NULL);
 
 		T_PASS("Userspace MSR access test passed");

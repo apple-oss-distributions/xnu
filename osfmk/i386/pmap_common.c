@@ -316,7 +316,7 @@ pmap_pagetable_corruption_log_setup(void)
 	if (pmap_pagetable_corruption_log_call == NULL) {
 		nanotime_to_absolutetime(PMAP_PAGETABLE_CORRUPTION_INTERVAL, 0, &pmap_pagetable_corruption_interval_abstime);
 		thread_call_setup(&pmap_pagetable_corruption_log_call_data,
-		    (thread_call_func_t) pmap_pagetable_corruption_msg_log,
+		    (thread_call_func_t) (void (*)(void))pmap_pagetable_corruption_msg_log,
 		    (thread_call_param_t) &printf);
 		pmap_pagetable_corruption_log_call = &pmap_pagetable_corruption_log_call_data;
 	}

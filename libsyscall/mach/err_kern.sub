@@ -90,6 +90,10 @@ static const char * const err_codes_kern[] = {
 	"(os/kern) code signing error",		/* 50 */
 	"(os/kern) policy is static",
 	"(os/kern) insufficient input buffer size",
+	"(os/kern) denied by security policy",
+	"(os/kern) missing kernel collection",
+	"(os/kern) invalid kernel collection",	/* 55 */
+	"(os/kern) result not found",
 };
 
 static const char * const err_codes_unix[] = {

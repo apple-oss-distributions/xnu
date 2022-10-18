@@ -66,11 +66,13 @@ extern kern_return_t ptrauth_data_tests(void);
  * which should be subject to pointer signing.
  */
 #define ALLOC_VALIDATE_DATA_PTR(structure, decl, member, discr) { \
+	__typed_allocators_ignore_push \
 	structure *tmp =  kalloc_data(sizeof(structure), Z_WAITOK | Z_ZERO); \
 	if (!tmp) return ENOMEM; \
 	tmp->member = (void*)0xffffffff41414141; \
 	VALIDATE_DATA_PTR(decl, tmp->member, discr) \
 	kfree_data(tmp, sizeof(structure)); \
+	__typed_allocators_ignore_pop \
 }
 
 #define VALIDATE_DATA_PTR(decl, ptr, discr) VALIDATE_PTR(decl, ptr, ptrauth_key_process_independent_data, discr)
@@ -92,10 +94,9 @@ sysctl_run_ptrauth_data_tests SYSCTL_HANDLER_ARGS
 	}
 
 	/* proc_t */
-	ALLOC_VALIDATE_DATA_PTR(struct proc, void *, task, "proc.task");
 	ALLOC_VALIDATE_DATA_PTR(struct proc, struct proc *, p_pptr, "proc.p_pptr");
 	ALLOC_VALIDATE_DATA_PTR(struct proc, struct vnode *, p_textvp, "proc.p_textvp");
-	ALLOC_VALIDATE_DATA_PTR(struct proc, struct pgrp *, p_pgrp.__hazard_ptr, "proc.p_pgrp");
+	ALLOC_VALIDATE_DATA_PTR(struct proc, struct pgrp *, p_pgrp.__smr_ptr, "proc.p_pgrp");
 
 	/* The rest of the tests live in osfmk/ */
 	kr = ptrauth_data_tests();

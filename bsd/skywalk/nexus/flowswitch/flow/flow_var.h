@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -224,6 +224,22 @@ struct flow_llhdr {
 #define flh_eth                 _flh._eth_padded._eth
 };
 
+typedef enum {
+	FE_QSET_SELECT_NONE,
+	FE_QSET_SELECT_FIXED,
+	FE_QSET_SELECT_DYNAMIC
+} flow_qset_select_t;
+
+extern kern_allocation_name_t skmem_tag_flow_demux;
+typedef int (*flow_demux_memcmp_mask_t)(const uint8_t *src1, const uint8_t *src2,
+    const uint8_t *byte_mask);
+
+struct kern_flow_demux_pattern {
+	struct flow_demux_pattern  fdp_demux_pattern;
+	flow_demux_memcmp_mask_t   fdp_memcmp_mask;
+};
+
+#define MAX_PKT_DEMUX_LIMIT        1000
 
 TAILQ_HEAD(flow_entry_list, flow_entry);
 
@@ -250,8 +266,14 @@ struct flow_entry {
 	struct pktq             fe_rx_pktq;
 	TAILQ_ENTRY(flow_entry) fe_rx_link;
 	flow_action_t           fe_rx_process;
-	uint32_t                fe_rx_largest_msize; /* used for mbuf batch allocation */
-	bool                    fe_rx_nodelay;
+
+	/*
+	 * largest allocated packet size.
+	 * used by:
+	 *  - mbuf batch allocation logic during RX aggregtion and netif copy.
+	 *  - packet allocation logic during RX aggregation.
+	 */
+	uint32_t                fe_rx_largest_size;
 
 	/**** Tx Group ****/
 	bool                    fe_tx_is_cont_frag;
@@ -292,10 +314,24 @@ struct flow_entry {
 	char                    fe_proc_name[FLOW_PROCESS_NAME_LENGTH];
 	char                    fe_eproc_name[FLOW_PROCESS_NAME_LENGTH];
 
-	uint32_t                fe_inp_flowhash; /* flowhash for looking up inpcb */
+	uint32_t                fe_flowid; /* globally unique flow ID */
 
 	/* Logical link related information */
 	struct netif_qset      *fe_qset;
+	uint64_t                fe_qset_id;
+	flow_qset_select_t      fe_qset_select;
+	uint32_t                fe_tr_genid;
+
+	/* Parent child information */
+	decl_lck_rw_data(, fe_child_list_lock);
+	struct flow_entry_list          fe_child_list;
+	TAILQ_ENTRY(flow_entry)         fe_child_link;
+#if DEVELOPMENT || DEBUG
+	int16_t                         fe_child_count;
+#endif // DEVELOPMENT || DEBUG
+	uint8_t                         fe_demux_pattern_count;
+	struct kern_flow_demux_pattern  *fe_demux_patterns;
+	uint8_t                         *fe_demux_pkt_data;
 };
 
 /* valid values for fe_flags */
@@ -309,6 +345,9 @@ struct flow_entry {
 #define FLOWENTF_CLOSE_NOTIFY   0x00002000 /* notify NECP upon tear down */
 #define FLOWENTF_EXTRL_PORT     0x00004000 /* port reservation is held externally */
 #define FLOWENTF_EXTRL_PROTO    0x00008000 /* proto reservation is held externally */
+#define FLOWENTF_EXTRL_FLOWID   0x00010000 /* flowid reservation is held externally */
+#define FLOWENT_CHILD           0x00020000 /* child flow */
+#define FLOWENT_PARENT          0X00040000 /* parent flow */
 #define FLOWENTF_ABORTED        0x01000000 /* has sent RST to peer */
 #define FLOWENTF_NONVIABLE      0x02000000 /* disabled; awaiting tear down */
 #define FLOWENTF_WITHDRAWN      0x04000000 /* flow has been withdrawn */
@@ -320,8 +359,8 @@ struct flow_entry {
 #define FLOWENTF_BITS                                            \
     "\020\01INITED\05TRACK\06CONNECTED\07LISTNER\011QOS_MARKING" \
     "\012LOW_LATENCY\015WAIT_CLOSE\016CLOSE_NOTIFY\017EXT_PORT"  \
-    "\020EXT_PROTO\031ABORTED\032NONVIABLE\033WITHDRAWN\034TORN_DOWN" \
-    "\035HALF_CLOSED\037DESTROYED\40LINGERING"
+    "\020EXT_PROTO\021EXT_FLOWID\031ABORTED\032NONVIABLE\033WITHDRAWN"  \
+    "\034TORN_DOWN\035HALF_CLOSED\037DESTROYED\40LINGERING"
 
 TAILQ_HEAD(flow_entry_linger_head, flow_entry);
 
@@ -550,8 +589,6 @@ struct flow_mgr {
 	const size_t    fm_route_id_buckets_cnt; /* total # of frib */
 	const size_t    fm_route_id_bucket_sz;   /* size of each frib */
 	const size_t    fm_route_id_bucket_tot_sz; /* allocated size of each frib */
-
-	struct flow_entry *fm_host_fe;
 };
 
 /*
@@ -833,6 +870,14 @@ flow_mgr_get_fob_idx(struct flow_mgr *fm,
 	       fm->fm_owner_bucket_sz);
 }
 
+__attribute__((always_inline))
+static inline size_t
+flow_mgr_get_num_flows(struct flow_mgr *mgr)
+{
+	ASSERT(mgr->fm_flow_table != NULL);
+	return cuckoo_hashtable_entries(mgr->fm_flow_table);
+}
+
 extern unsigned int sk_fo_size;
 extern struct skmem_cache *sk_fo_cache;
 
@@ -878,11 +923,9 @@ extern int flow_mgr_flow_hash_mask_add(struct flow_mgr *fm, uint32_t mask);
 extern int flow_mgr_flow_hash_mask_del(struct flow_mgr *fm, uint32_t mask);
 
 extern struct flow_entry * fe_alloc(boolean_t can_block);
-extern void flow_mgr_setup_host_flow(struct flow_mgr *fm, struct nx_flowswitch *fsw);
-extern void flow_mgr_teardown_host_flow(struct flow_mgr *fm);
 
 extern int flow_namespace_create(union sockaddr_in_4_6 *, uint8_t protocol,
-    netns_token *, boolean_t, struct ns_flow_info *);
+    netns_token *, uint16_t, struct ns_flow_info *);
 extern void flow_namespace_half_close(netns_token *token);
 extern void flow_namespace_withdraw(netns_token *);
 extern void flow_namespace_destroy(netns_token *);
@@ -918,7 +961,6 @@ extern struct flow_entry * flow_mgr_find_conflicting_fe(struct flow_mgr *fm,
     struct flow_key *fe_key);
 extern void flow_mgr_foreach_flow(struct flow_mgr *fm,
     void (^flow_handler)(struct flow_entry *fe));
-extern struct flow_entry * flow_mgr_get_host_fe(struct flow_mgr *fm);
 extern struct flow_entry *flow_entry_find_by_uuid(struct flow_owner *,
     uuid_t);
 extern struct flow_entry * flow_entry_alloc(struct flow_owner *fo,
@@ -929,6 +971,10 @@ extern void flow_entry_destroy(struct flow_owner *, struct flow_entry *, bool,
 extern void flow_entry_retain(struct flow_entry *fe);
 extern void flow_entry_release(struct flow_entry **pfe);
 extern uint32_t flow_entry_refcnt(struct flow_entry *fe);
+extern bool rx_flow_demux_match(struct nx_flowswitch *, struct flow_entry *, struct __kern_packet *);
+extern struct flow_entry *rx_lookup_child_flow(struct nx_flowswitch *fsw,
+    struct flow_entry *, struct __kern_packet *);
+extern struct flow_entry *tx_lookup_child_flow(struct flow_entry *, uuid_t);
 
 extern struct flow_entry_dead *flow_entry_dead_alloc(zalloc_flags_t);
 extern void flow_entry_dead_free(struct flow_entry_dead *);
@@ -942,7 +988,11 @@ extern void flow_track_stats(struct flow_entry *, uint64_t, uint64_t,
     bool, bool);
 extern int flow_pkt_track(struct flow_entry *, struct __kern_packet *, bool);
 extern boolean_t flow_track_tcp_want_abort(struct flow_entry *);
-extern void fsw_host_rx(struct nx_flowswitch *, struct flow_entry *);
+extern void flow_track_abort_tcp( struct flow_entry *fe,
+    struct __kern_packet *in_pkt, struct __kern_packet *rst_pkt);
+extern void flow_track_abort_quic(struct flow_entry *fe, uint8_t *token);
+
+extern void fsw_host_rx(struct nx_flowswitch *, struct pktq *);
 extern void fsw_host_sendup(struct ifnet *, struct mbuf *, struct mbuf *,
     uint32_t, uint32_t);
 
@@ -976,7 +1026,8 @@ extern boolean_t flow_route_laddr_validate(union sockaddr_in_4_6 *,
     struct ifnet *, uint32_t *);
 extern boolean_t flow_route_key_validate(struct flow_key *, struct ifnet *,
     uint32_t *);
-
+extern void flow_qset_select_dynamic(struct nx_flowswitch *,
+    struct flow_entry *, boolean_t);
 extern void flow_stats_init(void);
 extern void flow_stats_fini(void);
 extern struct flow_stats *flow_stats_alloc(boolean_t cansleep);

@@ -68,7 +68,7 @@
 /*
  *	Master privileged I/O object for this host
  */
-extern mach_port_t      master_device_port;
+extern mach_port_t      main_device_port;
 
 #define DEVICE_PAGER_GUARDED            0x1
 #define DEVICE_PAGER_COHERENT           0x2

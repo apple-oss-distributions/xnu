@@ -63,12 +63,12 @@
  */
 
 subsystem
+#if	KERNEL_SERVER || KOBJECT_SERVER
+	KernelServer
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 #if	KERNEL_USER
 	  KernelUser
 #endif	/* KERNEL_USER */
-#if	KERNEL_SERVER
-	  KernelServer
-#endif	/* KERNEL_SERVER */
 		     upl 2050;
 
 #include <mach/std_types.defs>

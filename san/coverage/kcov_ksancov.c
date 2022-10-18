@@ -448,8 +448,8 @@ ksancov_trace_alloc(ksancov_dev_t d, ksancov_mode_t mode, size_t maxpcs)
 	}
 
 	/* allocate the shared memory buffer */
-	kern_return_t kr = kernel_memory_allocate(kernel_map, &buf, sz,
-	    0, KMA_ZERO, VM_KERN_MEMORY_DIAG);
+	kern_return_t kr = kmem_alloc(kernel_map, &buf, sz,
+	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_DIAG);
 	if (kr != KERN_SUCCESS) {
 		return ENOMEM;
 	}
@@ -481,8 +481,8 @@ ksancov_counters_alloc(ksancov_dev_t d)
 	size_t sz = sizeof(struct ksancov_counters) + ksancov_edgemap->ke_nedges * sizeof(uint8_t);
 
 	/* allocate the shared memory buffer */
-	kern_return_t kr = kernel_memory_allocate(kernel_map, &buf, sz,
-	    0, KMA_ZERO, VM_KERN_MEMORY_DIAG);
+	kern_return_t kr = kmem_alloc(kernel_map, &buf, sz,
+	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_DIAG);
 	if (kr != KERN_SUCCESS) {
 		return ENOMEM;
 	}
@@ -758,8 +758,8 @@ ksancov_init_dev(void)
 	uintptr_t buf;
 	size_t sz = sizeof(struct ksancov_edgemap) + KSANCOV_MAX_EDGES * sizeof(uint32_t);
 
-	kern_return_t kr = kernel_memory_allocate(kernel_map, &buf, sz,
-	    0, KMA_ZERO, VM_KERN_MEMORY_DIAG);
+	kern_return_t kr = kmem_alloc(kernel_map, &buf, sz,
+	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_DIAG);
 	if (kr) {
 		printf("ksancov: failed to allocate edge addr map\n");
 		return -1;

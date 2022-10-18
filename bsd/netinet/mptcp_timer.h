@@ -31,9 +31,6 @@
 
 #ifdef BSD_KERNEL_PRIVATE
 
-#define MPT_REXMT       0       /* retransmit */
-#define MPT_TIMEWAIT    1       /* timewait timer */
-
 __BEGIN_DECLS
 extern uint32_t mptcp_timer(struct mppcbinfo *mppi);
 extern void mptcp_start_timer(struct mptses *mpte, int timer_type);

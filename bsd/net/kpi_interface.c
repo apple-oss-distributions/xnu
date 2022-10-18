@@ -230,13 +230,14 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 	if ((einit.tx_headroom & 0x7) != 0) {
 		return EINVAL;
 	}
-	/*
-	 * Currently Interface advisory reporting is supported only for
-	 * skywalk interface.
-	 */
-	if (((einit.flags & IFNET_INIT_IF_ADV) != 0) &&
-	    ((einit.flags & IFNET_INIT_SKYWALK_NATIVE) == 0)) {
-		return EINVAL;
+	if ((einit.flags & IFNET_INIT_SKYWALK_NATIVE) == 0) {
+		/*
+		 * Currently Interface advisory reporting is supported only
+		 * for skywalk interface.
+		 */
+		if ((einit.flags & IFNET_INIT_IF_ADV) != 0) {
+			return EINVAL;
+		}
 	}
 #endif /* SKYWALK */
 
@@ -634,17 +635,30 @@ ifnet_index(ifnet_t interface)
 errno_t
 ifnet_set_flags(ifnet_t interface, u_int16_t new_flags, u_int16_t mask)
 {
+	bool set_IFF_UP;
+	bool change_IFF_UP;
 	uint16_t old_flags;
 
 	if (interface == NULL) {
 		return EINVAL;
 	}
+	set_IFF_UP = (new_flags & IFF_UP) != 0;
+	change_IFF_UP = (mask & IFF_UP) != 0;
+#if SKYWALK
+	if (set_IFF_UP && change_IFF_UP) {
+		/*
+		 * When a native skywalk interface is marked IFF_UP, ensure
+		 * the flowswitch is attached.
+		 */
+		ifnet_attach_native_flowswitch(interface);
+	}
+#endif /* SKYWALK */
 
 	ifnet_lock_exclusive(interface);
 
 	/* If we are modifying the up/down state, call if_updown */
-	if ((mask & IFF_UP) != 0) {
-		if_updown(interface, (new_flags & IFF_UP) == IFF_UP);
+	if (change_IFF_UP) {
+		if_updown(interface, set_IFF_UP);
 	}
 
 	old_flags = interface->if_flags;
@@ -1075,6 +1089,9 @@ ifnet_set_offload(ifnet_t interface, ifnet_offload_t offload)
 	if ((offload & IFNET_TSO_IPV6)) {
 		ifcaps |= IFCAP_TSO6;
 	}
+	if ((offload & IFNET_LRO)) {
+		ifcaps |= IFCAP_LRO;
+	}
 	if ((offload & IFNET_VLAN_MTU)) {
 		ifcaps |= IFCAP_VLAN_MTU;
 	}
@@ -1121,6 +1138,9 @@ ifnet_set_tso_mtu(ifnet_t interface, sa_family_t family, u_int32_t mtuLen)
 	if (interface == NULL || mtuLen < interface->if_mtu) {
 		return EINVAL;
 	}
+	if (mtuLen > IP_MAXPACKET) {
+		return EINVAL;
+	}
 
 	switch (family) {
 	case AF_INET:
@@ -1142,6 +1162,15 @@ ifnet_set_tso_mtu(ifnet_t interface, sa_family_t family, u_int32_t mtuLen)
 	default:
 		error = EPROTONOSUPPORT;
 		break;
+	}
+
+	if (error == 0) {
+		struct ifclassq *ifq = interface->if_snd;
+		ASSERT(ifq != NULL);
+		/* Inform all transmit queues about the new TSO MTU */
+		IFCQ_LOCK(ifq);
+		ifnet_update_sndq(ifq, CLASSQ_EV_LINK_MTU);
+		IFCQ_UNLOCK(ifq);
 	}
 
 	return error;
@@ -1995,7 +2024,7 @@ ifnet_get_address_list_family(ifnet_t interface, ifaddr_t **addresses,
     sa_family_t family)
 {
 	return ifnet_get_address_list_family_internal(interface, addresses,
-	           family, 0, M_NOWAIT, 0);
+	           family, 0, Z_WAITOK, 0);
 }
 
 errno_t
@@ -2003,7 +2032,7 @@ ifnet_get_inuse_address_list(ifnet_t interface, ifaddr_t **addresses)
 {
 	return addresses == NULL ? EINVAL :
 	       ifnet_get_address_list_family_internal(interface, addresses,
-	           0, 0, M_NOWAIT, 1);
+	           0, 0, Z_WAITOK, 1);
 }
 
 extern uint32_t tcp_find_anypcb_byaddr(struct ifaddr *ifa);
@@ -3537,39 +3566,4 @@ ifnet_get_low_power_mode(ifnet_t ifp, boolean_t *on)
 
 	*on = ((ifp->if_xflags & IFXF_LOW_POWER) != 0);
 	return 0;
-}
-
-/*************************************************************************/
-/* Interface advisory notifications                                      */
-/*************************************************************************/
-errno_t
-ifnet_interface_advisory_report(ifnet_t ifp,
-    const struct ifnet_interface_advisory *advisory)
-{
-#if SKYWALK
-	if (__improbable(ifp == NULL || advisory == NULL ||
-	    advisory->version != IF_INTERFACE_ADVISORY_VERSION_CURRENT)) {
-		return EINVAL;
-	}
-	if (__improbable((advisory->direction !=
-	    IF_INTERFACE_ADVISORY_DIRECTION_TX) &&
-	    (advisory->direction != IF_INTERFACE_ADVISORY_DIRECTION_RX))) {
-		return EINVAL;
-	}
-	if (__improbable(!IF_FULLY_ATTACHED(ifp))) {
-		return ENXIO;
-	}
-	if (__improbable(((ifp->if_eflags & IFEF_ADV_REPORT) == 0) ||
-	    ((ifp->if_capabilities & IFCAP_SKYWALK) == 0))) {
-		return ENOTSUP;
-	}
-	if (__improbable(NA(ifp) == NULL)) {
-		return ENXIO;
-	}
-	return nx_netif_interface_advisory_report(&NA(ifp)->nifna_up, advisory);
-#else /* SKYWALK */
-#pragma unused(ifp)
-#pragma unused(advisory)
-	return ENOTSUP;
-#endif /* SKYWALK */
 }

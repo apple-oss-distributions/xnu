@@ -1,11 +1,12 @@
-/*
- *  ccdigest_init.c
- *  corecrypto
+/* Copyright (c) (2010,2011,2015,2019-2021) Apple Inc. All rights reserved.
  *
- *  Created on 11/30/2010
- *
- *  Copyright (c) 2010,2011,2015 Apple Inc. All rights reserved.
- *
+ * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
+ * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -32,51 +33,13 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include "cc_internal.h"
 #include <corecrypto/ccdigest_priv.h>
-#include <corecrypto/cc_priv.h>
-#include <corecrypto/ccmd4.h>
-
-#if 0
-#if CC_LOGGING_AVAILABLE
-#if CC_FEATURE_FLAGS_AVAILABLE
-
-#include "cclog_internal.h"
-#include <os/feature_private.h>
-
-static void
-log_trace(const struct ccdigest_info *di)
-{
-	if (!CC_FEATURE_ENABLED(ccdigest_logging)) {
-		return;
-	}
-
-	if (ccdigest_oid_equal(di, CC_DIGEST_OID_MD2)) {
-		cclog_error_backtrace(CCLOG_CATEGORY_DEFAULT, "trace: md2");
-	} else if (ccdigest_oid_equal(di, CC_DIGEST_OID_MD4)) {
-		cclog_error_backtrace(CCLOG_CATEGORY_DEFAULT, "trace: md4");
-	} else if (ccdigest_oid_equal(di, CC_DIGEST_OID_MD5)) {
-		cclog_error_backtrace(CCLOG_CATEGORY_ALGORITHM_MD5, "trace: md5");
-	} else if (ccdigest_oid_equal(di, CC_DIGEST_OID_SHA1)) {
-		cclog_error_backtrace(CCLOG_CATEGORY_ALGORITHM_SHA1, "trace: sha1");
-	} else if (ccdigest_oid_equal(di, CC_DIGEST_OID_RMD160)) {
-		cclog_error_backtrace(CCLOG_CATEGORY_DEFAULT, "trace: rmd160");
-	}
-}
-
-#endif // CC_FEATURE_FLAGS_AVAILABLE
-#endif // CC_LOGGING_AVAILABLE
-#endif
 
 void
 ccdigest_init(const struct ccdigest_info *di, ccdigest_ctx_t ctx)
 {
-#if 0
-#if CC_LOGGING_AVAILABLE
-#if CC_FEATURE_FLAGS_AVAILABLE
-	log_trace(di);
-#endif // CC_FEATURE_FLAGS_AVAILABLE
-#endif // CC_LOGGING_AVAILABLE
-#endif
+	CC_ENSURE_DIT_ENABLED
 
 	ccdigest_copy_state(di, ccdigest_state_ccn(di, ctx), di->initial_state);
 	ccdigest_nbits(di, ctx) = 0;

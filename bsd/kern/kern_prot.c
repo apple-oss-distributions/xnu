@@ -1689,7 +1689,7 @@ setlogin(proc_t p, struct setlogin_args *uap, __unused int32_t *retval)
 int
 set_security_token(proc_t p)
 {
-	return set_security_token_task_internal(p, p->task);
+	return set_security_token_task_internal(p, proc_task(p));
 }
 
 static void
@@ -1791,7 +1791,6 @@ get_audit_token_pid(audit_token_t *audit_token)
 /*
  * Fill in a struct xucred based on a kauth_cred_t.
  */
-__private_extern__
 void
 cru2x(kauth_cred_t cr, struct xucred *xcr)
 {

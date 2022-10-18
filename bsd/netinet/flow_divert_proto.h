@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017, 2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2017, 2020, 2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -88,6 +88,7 @@
 #define FLOW_DIVERT_TOKEN_FLAG_BOUND            0x0000008
 
 #define FLOW_DIVERT_GROUP_FLAG_NO_APP_MAP       0x0000001
+#define FLOW_DIVERT_GROUP_FLAG_DEFUNCT          0x0000002
 
 #define FLOW_DIVERT_IS_TRANSPARENT              0x80000000
 

@@ -91,7 +91,7 @@ Other makefile options
  * $ make -j8             # the standard command-line option is also accepted
  * $ make -w              # trace recursive make invocations. Useful in combination with VERBOSE=YES
  * $ make BUILD_LTO=0     # build without LLVM Link Time Optimization
- * $ make BOUND_CHECKS=1  # enable -fbound-attributes for this build
+ * $ make BOUND_CHECKS=0  # disable -fbound-attributes for this build
  * $ make REMOTEBUILD=user@remotehost # perform build on remote host
  * $ make BUILD_JSON_COMPILATION_DATABASE=1 # Build Clang JSON Compilation Database
 
@@ -173,8 +173,6 @@ Set up your build environment and from the top directory, run:
 How to install a new header file from XNU
 =========================================
 
-To install IOKit headers, see additional comments in [iokit/IOKit/Makefile]().
-
 XNU installs header files at the following locations -
 
     a. $(DSTROOT)/System/Library/Frameworks/Kernel.framework/Headers
@@ -182,10 +180,13 @@ XNU installs header files at the following locations -
     c. $(DSTROOT)/usr/include/
     d. $(DSTROOT)/usr/local/include/
     e. $(DSTROOT)/System/DriverKit/usr/include/
-    f. $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
+    f. $(DSTROOT)/System/Library/Frameworks/IOKit.framework/Headers
+    g. $(DSTROOT)/System/Library/Frameworks/IOKit.framework/PrivateHeaders
+    h. $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
 
 `Kernel.framework` is used by kernel extensions.\
 The `System.framework`, `/usr/include` and `/usr/local/include` are used by user level applications. \
+`IOKit.framework` is used by IOKit userspace clients. \
 `/System/DriverKit/usr/include` is used by userspace drivers. \
 The header files in framework's `PrivateHeaders` are only available for ** Apple Internal Development **.
 
@@ -266,28 +267,42 @@ member file lists and their default location are described below -
            INSTALL_MI_LCL_LIST =
            INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 
-    d.  `INSTALL_SF_MI_LCL_LIST` : Installs header file to a location that is available
+    d. `INSTALL_IF_MI_LIST` : Installs header file to location that is available
+       to everyone for IOKit userspace clients.
+       Locations -
+            $(DSTROOT)/System/Library/Frameworks/IOKit.framework/Headers
+       Definition -
+            INSTALL_IF_MI_LIST = ${DATAFILES}
+
+    e. `INSTALL_IF_MI_LCL_LIST` : Installs header file to location that is
+       available to Apple internal for IOKit userspace clients.
+       Locations -
+            $(DSTROOT)/System/Library/Frameworks/IOKit.framework/PrivateHeaders
+       Definition -
+            INSTALL_IF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
+
+    f.  `INSTALL_SF_MI_LCL_LIST` : Installs header file to a location that is available
        for Apple internal in user level.
        Locations -
            $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
        Definition -
            INSTALL_SF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
 
-    e. `INSTALL_KF_MI_LIST` : Installs header file to location that is available
+    g. `INSTALL_KF_MI_LIST` : Installs header file to location that is available
        to everyone for kernel extensions.
        Locations -
             $(DSTROOT)/System/Library/Frameworks/Kernel.framework/Headers
        Definition -
             INSTALL_KF_MI_LIST = ${KERNELFILES}
 
-    f. `INSTALL_KF_MI_LCL_LIST` : Installs header file to location that is
+    h. `INSTALL_KF_MI_LCL_LIST` : Installs header file to location that is
        available for Apple internal for kernel extensions.
        Locations -
             $(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders
        Definition -
             INSTALL_KF_MI_LCL_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
 
-    g. `EXPORT_MI_LIST` : Exports header file to all of xnu (bsd/, osfmk/, etc.)
+    i. `EXPORT_MI_LIST` : Exports header file to all of xnu (bsd/, osfmk/, etc.)
        for compilation only. Does not install anything into the SDK.
        Definition -
             EXPORT_MI_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
@@ -410,3 +425,4 @@ To load these macros automatically when attaching to the kernel, add the followi
 See the README in that directory for their usage, or use the built-in LLDB help with:
 
     (lldb) help showcurrentstacks
+

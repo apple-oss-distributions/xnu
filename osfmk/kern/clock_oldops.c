@@ -55,7 +55,6 @@
 
 #include <mach/clock_server.h>
 #include <mach/clock_reply.h>
-#include <mach/clock_priv_server.h>
 
 #include <mach/mach_host_server.h>
 #include <mach/host_priv_server.h>
@@ -168,12 +167,10 @@ SECURITY_READ_ONLY_LATE(struct clock) clock_list[] = {
 	[SYSTEM_CLOCK] = {
 		.cl_ops     = &sysclk_ops,
 		.cl_service = IPC_PORT_NULL,
-		.cl_control = IPC_PORT_NULL,
 	},
 	[CALENDAR_CLOCK] = {
 		.cl_ops     = &calend_ops,
 		.cl_service = IPC_PORT_NULL,
-		.cl_control = IPC_PORT_NULL,
 	},
 };
 int     clock_count = sizeof(clock_list) / sizeof(clock_list[0]);
@@ -259,28 +256,6 @@ host_get_clock_service(
 	clock_t                 *clock)         /* OUT */
 {
 	if (host == HOST_NULL || clock_id < 0 || clock_id >= clock_count) {
-		*clock = CLOCK_NULL;
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	*clock = &clock_list[clock_id];
-	if ((*clock)->cl_ops == 0) {
-		return KERN_FAILURE;
-	}
-	return KERN_SUCCESS;
-}
-
-/*
- * Get the control port on a clock.
- */
-kern_return_t
-host_get_clock_control(
-	host_priv_t             host_priv,
-	clock_id_t              clock_id,
-	clock_t                 *clock)         /* OUT */
-{
-	if (host_priv == HOST_PRIV_NULL ||
-	    clock_id < 0 || clock_id >= clock_count) {
 		*clock = CLOCK_NULL;
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -404,36 +379,6 @@ calend_getattr(
 	}
 
 	return KERN_SUCCESS;
-}
-
-/*
- * Set the current clock time.
- */
-kern_return_t
-clock_set_time(
-	clock_t                                 clock,
-	__unused mach_timespec_t        new_time)
-{
-	if (clock == CLOCK_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-	return KERN_FAILURE;
-}
-
-/*
- * Set the clock alarm resolution.
- */
-kern_return_t
-clock_set_attributes(
-	clock_t                                         clock,
-	__unused clock_flavor_t                 flavor,
-	__unused clock_attr_t                   attr,
-	__unused mach_msg_type_number_t count)
-{
-	if (clock == CLOCK_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-	return KERN_FAILURE;
 }
 
 /*

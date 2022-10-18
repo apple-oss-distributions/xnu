@@ -1,11 +1,12 @@
-/*
- *  ccdrbg_nisthmac.c
- *  corecrypto
+/* Copyright (c) (2014-2019,2021) Apple Inc. All rights reserved.
  *
- *  Created on 05/09/2014
- *
- *  Copyright (c) 2014,2015 Apple Inc. All rights reserved.
- *
+ * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
+ * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -32,13 +33,14 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include "cc_internal.h"
 #include <stdbool.h>
 
 #include <corecrypto/cc_priv.h>
 #include <corecrypto/ccdrbg.h>
 #include <corecrypto/cchmac.h>
 #include <corecrypto/ccsha2.h>
-#include <corecrypto/cc_macros.h>
+#include "cc_macros.h"
 
 // This HMAC DRBG is described in:
 
@@ -51,7 +53,7 @@
 // - 10.1.2 HMAC_DRBG
 // - B.2 HMAC_DRBGExample
 
-#define NISTHMAC_MAX_OUTPUT_SIZE (CCSHA512_OUTPUT_SIZE)
+#define NISTHMAC_MAX_OUTPUT_SIZE MAX_DIGEST_OUTPUT_SIZE
 
 #define MIN_REQ_ENTROPY(di) ((di)->output_size / 2)
 
@@ -65,7 +67,7 @@ struct ccdrbg_nisthmac_state {
 #define DRBG_NISTHMAC_DEBUG 0
 
 #if DRBG_NISTHMAC_DEBUG
-#include <corecrypto/cc_debug.h>
+#include "cc_debug.h"
 
 static void
 dump_state(const char *label, struct ccdrbg_nisthmac_state *drbg_ctx)
@@ -250,6 +252,8 @@ out:
 void
 ccdrbg_factory_nisthmac(struct ccdrbg_info *info, const struct ccdrbg_nisthmac_custom *custom)
 {
+	CC_ENSURE_DIT_ENABLED
+
 	info->size = sizeof(struct ccdrbg_nisthmac_state) + sizeof(struct ccdrbg_nisthmac_custom);
 	info->init = init;
 	info->generate = generate;

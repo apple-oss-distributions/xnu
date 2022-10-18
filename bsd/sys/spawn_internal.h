@@ -187,8 +187,8 @@ struct _posix_spawn_persona_info {
 };
 
 #define POSIX_SPAWN_PERSONA_FLAGS_NONE      0x0
-#define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE  0x1
-#define POSIX_SPAWN_PERSONA_FLAGS_VERIFY    0x2
+#define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE  0x1 /* noop, the only option */
+#define POSIX_SPAWN_PERSONA_FLAGS_VERIFY    0x2 /* noop, unimplemented */
 
 #define POSIX_SPAWN_PERSONA_ALL_FLAGS \
 	(POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE \
@@ -244,6 +244,9 @@ typedef struct _posix_spawnattr {
 	uint32_t        psa_port_hard_limit;     /* port space hard limit */
 	uint32_t        psa_filedesc_soft_limit; /* file descriptor soft limit */
 	uint32_t        psa_filedesc_hard_limit; /* file descriptor hard limit */
+	uint32_t        psa_crash_behavior;      /* crash behavior flags */
+	uint64_t        psa_crash_behavior_deadline; /* crash behavior deadline */
+	uint8_t         psa_launch_type;         /* type of launch for launch constraint enforcement */
 
 	/*
 	 * NOTE: Extensions array pointers must stay at the end so that

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -252,6 +252,23 @@ icmp6_errcount(struct icmp6errstat *stat, int type, int code)
 }
 
 /*
+ * Generate packet gencount for ICMPv6 for a given error type
+ * and code.
+ */
+static uint32_t
+icmp6_error_packet_gencount(int type, int code)
+{
+	return (PF_INET6 << 24) | (type << 16) | (code << 8);
+}
+
+static int suppress_icmp6_port_unreach = 0;
+
+SYSCTL_DECL(_net_inet6_icmp6);
+SYSCTL_INT(_net_inet6_icmp6, OID_AUTO, suppress_icmp6_port_unreach, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &suppress_icmp6_port_unreach, 0,
+    "Suppress ICMPv6 destination unreachable type with code port unreachable");
+
+/*
  * Generate an error packet of type error in response to bad IP6 packet.
  */
 void
@@ -272,6 +289,11 @@ icmp6_error_flag(struct mbuf *m, int type, int code, int param, int flags)
 
 	/* count per-type-code statistics */
 	icmp6_errcount(&icmp6stat.icp6s_outerrhist, type, code);
+
+	if (suppress_icmp6_port_unreach && type == ICMP6_DST_UNREACH &&
+	    code == ICMP6_DST_UNREACH_NOPORT) {
+		goto freeit;
+	}
 
 #ifdef M_DECRYPTED      /*not openbsd*/
 	if (m->m_flags & M_DECRYPTED) {
@@ -368,12 +390,6 @@ icmp6_error_flag(struct mbuf *m, int type, int code, int param, int flags)
 
 	oip6 = mtod(m, struct ip6_hdr *); /* adjust pointer */
 
-	/* Finally, do rate limitation check. */
-	if (icmp6_ratelimit(&oip6->ip6_src, type, code)) {
-		icmp6stat.icp6s_toofreq++;
-		goto freeit;
-	}
-
 	/*
 	 * OK, ICMP6 can be generated.
 	 */
@@ -382,11 +398,24 @@ icmp6_error_flag(struct mbuf *m, int type, int code, int param, int flags)
 		m_adj(m, ICMPV6_PLD_MAXLEN - m->m_pkthdr.len);
 	}
 
+	/*
+	 * To avoid some flavors of port scanning and other attacks,
+	 * use packet suppression without using any other sort of
+	 * rate limiting with static bounds.
+	 * XXX Not setting PKTF_FLOW_ID here because we were concerned
+	 * about it triggering regression elsewhere outside of network stack
+	 * where there might be an assumption around flow ID being non-zero.
+	 * It should be noted though that previously if PKTF_FLOW_ID was not
+	 * set, PF would have generated flow hash irrespective of ICMPv4/v6
+	 * type. That doesn't happen now and PF only computes hash for ICMP
+	 * types that need state creation (which is not true of error types).
+	 * It would have been a problem because we really want all the ICMP
+	 * error type packets to share the same flow ID for global suppression.
+	 */
+	m->m_pkthdr.comp_gencnt = icmp6_error_packet_gencount(type, code);
+
 	preplen = sizeof(struct ip6_hdr) + sizeof(struct icmp6_hdr);
 	M_PREPEND(m, preplen, M_DONTWAIT, 1);
-	if (m && m->m_len < preplen) {
-		m = m_pullup(m, preplen);
-	}
 	if (m == NULL) {
 		nd6log(debug, "ENOBUFS in icmp6_error %d\n", __LINE__);
 		return;
@@ -2150,9 +2179,7 @@ icmp6_rip6_input(struct mbuf **mp, int off)
 			if ((n = m_copy(m, 0, (int)M_COPYALL)) != NULL) {
 				if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
 				    SOFLOW_ENABLED(last->in6p_socket) ||
-				    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
-				    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
-				    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
+				    SO_RECV_CONTROL_OPTS(last->inp_socket)) {
 					ret = ip6_savecontrol(last, n, &opts);
 					if (ret != 0) {
 						m_freem(n);
@@ -2177,9 +2204,7 @@ icmp6_rip6_input(struct mbuf **mp, int off)
 	if (last) {
 		if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
 		    SOFLOW_ENABLED(last->in6p_socket) ||
-		    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
-		    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
-		    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
+		    SO_RECV_CONTROL_OPTS(last->inp_socket)) {
 			ret = ip6_savecontrol(last, m, &opts);
 			if (ret != 0) {
 				goto error;

@@ -99,12 +99,14 @@ typedef mach_voucher_attr_key_t *mach_voucher_attr_key_array_t;
 #define MACH_VOUCHER_ATTR_KEY_ATM               ((mach_voucher_attr_key_t)1)
 #define MACH_VOUCHER_ATTR_KEY_IMPORTANCE        ((mach_voucher_attr_key_t)2)
 #define MACH_VOUCHER_ATTR_KEY_BANK              ((mach_voucher_attr_key_t)3)
-#define MACH_VOUCHER_ATTR_KEY_PTHPRIORITY       ((mach_voucher_attr_key_t)4)
 
+/* following keys have been removed from embedded platforms */
+#define MACH_VOUCHER_ATTR_KEY_PTHPRIORITY       ((mach_voucher_attr_key_t)4)
 #define MACH_VOUCHER_ATTR_KEY_USER_DATA         ((mach_voucher_attr_key_t)7)
-#define MACH_VOUCHER_ATTR_KEY_BITS              MACH_VOUCHER_ATTR_KEY_USER_DATA /* deprecated */
+#define MACH_VOUCHER_ATTR_KEY_BITS              MACH_VOUCHER_ATTR_KEY_USER_DATA
 #define MACH_VOUCHER_ATTR_KEY_TEST              ((mach_voucher_attr_key_t)8)
 
+/* not used, for compatibility only */
 #define MACH_VOUCHER_ATTR_KEY_NUM_WELL_KNOWN    MACH_VOUCHER_ATTR_KEY_TEST
 
 /*

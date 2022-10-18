@@ -26,7 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#if defined(CONFIG_KDP_INTERACTIVE_DEBUGGING) && (defined(__arm__) || defined(__arm64__))
+#if defined(CONFIG_KDP_INTERACTIVE_DEBUGGING) && defined(__arm64__)
 
 #include <mach/mach_types.h>
 #include <IOKit/IOTypes.h>
@@ -402,7 +402,8 @@ shmem_stage_initialize(struct kdp_output_stage *stage)
 		kdp_hw_shmem_dbg_bufsize = KDP_CORE_HW_SHMEM_DBG_TOTAL_BUF_SIZE;
 		ret = kmem_alloc_contig(kernel_map, &kdp_core_hw_shmem_buf,
 		    kdp_hw_shmem_dbg_bufsize, VM_MAP_PAGE_MASK(kernel_map),
-		    0, 0, KMA_KOBJECT, VM_KERN_MEMORY_DIAG);
+		    0, 0, KMA_KOBJECT | KMA_DATA | KMA_PERMANENT,
+		    VM_KERN_MEMORY_DIAG);
 		assert(KERN_SUCCESS == ret);
 
 		/*
@@ -450,7 +451,8 @@ shmem_stage_initialize(struct kdp_output_stage *stage)
 
 	stage->kos_data_size = sizeof(struct shmem_stage_data);
 
-	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size, VM_KERN_MEMORY_DIAG);
+	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size,
+	    KMA_DATA, VM_KERN_MEMORY_DIAG);
 	if (KERN_SUCCESS != ret) {
 		return ret;
 	}
@@ -476,6 +478,14 @@ shmem_mark_as_busy(void)
 {
 	if (hwsd_info != NULL) {
 		hwsd_info->xhsdci_status = XHSDCI_STATUS_KERNEL_BUSY;
+	}
+}
+
+void
+shmem_unmark_as_busy(void)
+{
+	if (hwsd_info != NULL) {
+		hwsd_info->xhsdci_status = XHSDCI_STATUS_NONE;
 	}
 }
 
@@ -511,7 +521,11 @@ panic_spin_shmcon(void)
 			hwsd_info->xhsdci_seq_no = 0;
 			FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, sizeof(*hwsd_info));
 		}
+#ifdef __arm64__
+		/* Avoid stalling in WFE on arm32, which may not have a maximum WFE timeout like arm64. */
+		__builtin_arm_wfe();
+#endif
 	}
 }
 
-#endif /* defined(CONFIG_KDP_INTERACTIVE_DEBUGGING) && (defined(__arm__) || defined(__arm64__)) */
+#endif /* defined(CONFIG_KDP_INTERACTIVE_DEBUGGING) && defined(__arm64__) */

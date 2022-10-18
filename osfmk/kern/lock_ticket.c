@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -25,35 +25,23 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-#define ATOMIC_PRIVATE 1
-#define LOCK_PRIVATE 1
 
+#define LOCK_PRIVATE 1
 #include <stdint.h>
 #include <kern/thread.h>
-#include <machine/atomic.h>
+#include <kern/locks_internal.h>
 #include <kern/locks.h>
 #include <kern/lock_stat.h>
 #include <machine/machine_cpu.h>
-#include <os/atomic_private.h>
 #include <vm/pmap.h>
-
-#if defined(__x86_64__)
-#include <i386/mp.h>
-extern uint64_t LockTimeOutTSC;
-#define TICKET_LOCK_PANIC_TIMEOUT LockTimeOutTSC
-#define lock_enable_preemption enable_preemption
-#endif /* defined(__x86_64__) */
-
-#if defined(__arm__) || defined(__arm64__)
-extern uint64_t TLockTimeOut;
-#define TICKET_LOCK_PANIC_TIMEOUT TLockTimeOut
-#endif /* defined(__arm__) || defined(__arm64__) */
-
+#include <san/kasan.h>
 
 /*
  * "Ticket": A FIFO spinlock with constant backoff
  * cf. Algorithms for Scalable Synchronization on Shared-Memory Multiprocessors
  * by Mellor-Crumney and Scott, 1991
+ *
+ * Note: 'cticket' is 'now_serving', 'nticket' is 'next_ticket'
  */
 
 /*
@@ -66,71 +54,151 @@ extern uint64_t TLockTimeOut;
  * be profitable for overall throughput
  */
 
-static_assert(sizeof(hw_lck_ticket_t) == 4);
-static_assert(offsetof(hw_lck_ticket_t, tcurnext) == 2);
-static_assert(offsetof(hw_lck_ticket_t, cticket) == 2);
-static_assert(offsetof(hw_lck_ticket_t, nticket) == 3);
-static_assert(HW_LCK_TICKET_LOCK_VALID_BIT ==
-    (8 * offsetof(hw_lck_ticket_t, lck_valid)));
-static_assert(HW_LCK_TICKET_LOCK_INCREMENT ==
-    (1u << (8 * offsetof(hw_lck_ticket_t, nticket))));
+#if defined(__x86_64__)
+#include <i386/mp.h>
+extern uint64_t LockTimeOutTSC;
+#define TICKET_LOCK_PANIC_TIMEOUT LockTimeOutTSC
+#endif /* defined(__x86_64__) */
+
+#if defined(__arm64__)
+extern uint64_t TLockTimeOut;
+#define TICKET_LOCK_PANIC_TIMEOUT TLockTimeOut
+#endif /* defined(__arm64__) */
+
+#if CONFIG_PV_TICKET
+
+/*
+ * Tunable that controls how many pause/wfe loops
+ * to execute before checking for timeouts and
+ * issuing a "wait" hypercall.
+ */
+#if __x86_64__
+#define DEFAULT_TICKET_LOOPS (LOCK_SNOOP_SPINS)
+#else
+#define DEFAULT_TICKET_LOOPS (LOCK_SNOOP_SPINS / 8)
+#endif
+uint32_t ticket_lock_spins = DEFAULT_TICKET_LOOPS;
+#define TICKET_LOCK_SNOOP_LOOPS ticket_lock_spins
+
+#else /* CONFIG_PV_TICKET */
+
+/*
+ * How many pause/wfe loops to execute before
+ * checking for timeouts.
+ */
+#define TICKET_LOCK_SNOOP_LOOPS LOCK_SNOOP_SPINS
+
+#endif /* CONFIG_PV_TICKET */
 
 /*
  * Current ticket size limit--tickets can be trivially expanded
  * to 16-bits if needed
  */
-static_assert(MAX_CPUS < 256);
+static_assert(MAX_CPUS < (256 / HW_LCK_TICKET_LOCK_INCREMENT));
+static_assert(sizeof(hw_lck_ticket_t) == 4);
+static_assert(offsetof(hw_lck_ticket_t, tcurnext) == 2);
+static_assert(offsetof(hw_lck_ticket_t, cticket) == 2);
+static_assert(offsetof(hw_lck_ticket_t, nticket) == 3);
+static_assert(HW_LCK_TICKET_LOCK_INC_WORD ==
+    (HW_LCK_TICKET_LOCK_INCREMENT << (8 * offsetof(hw_lck_ticket_t, nticket))));
+#if 0 /* the expression below is sadly not constant, thank you for nothing C */
+static_assert((1u << HW_LCK_TICKET_LOCK_VALID_BIT) ==
+    ((hw_lck_ticket_t){ .lck_valid = 1 }).lck_value);
+#endif
 
-#if DEVELOPMENT || DEBUG
+__header_always_inline int
+equal_tickets(uint8_t t0, uint8_t t1)
+{
+	return !((t0 ^ t1) & ~HW_LCK_TICKET_LOCK_PVWAITFLAG);
+}
+
+__header_always_inline uint8_t
+ticket_count(uint8_t t)
+{
+	return t & ~HW_LCK_TICKET_LOCK_PVWAITFLAG;
+}
+
 __abortlike
 static void
-__hw_lck_invalid_panic(hw_lck_ticket_t *lck)
+__hw_lck_ticket_invalid_panic(hw_lck_ticket_t *lck)
 {
-	if (lck->lck_type != LCK_TICKET_TYPE) {
-		panic("Invalid ticket lock %p", lck);
-	} else {
-		panic("Ticket lock destroyed %p", lck);
-	}
+	panic("Invalid HW ticket lock %p <0x%08x>", lck, lck->lck_value);
 }
-#endif /* DEVELOPMENT || DEBUG */
+
+__abortlike
+static void
+__lck_ticket_invalid_panic(lck_ticket_t *lck)
+{
+	panic("Invalid ticket lock %p <0x%08x 0x%08x 0x%08x 0x%08x>",
+	    lck, *(uint32_t *)lck, lck->lck_ticket_owner,
+	    lck->tu.lck_value, lck->lck_ticket_padding);
+}
+
+__abortlike
+static void
+__lck_ticket_owned_panic(lck_ticket_t *lck)
+{
+	thread_t self = current_thread();
+
+	panic("Ticket lock %p is unexpectedly owned by thread %p", lck, self);
+}
+
+__abortlike
+static void
+__lck_ticket_not_owned_panic(lck_ticket_t *lck)
+{
+	thread_t self = current_thread();
+
+	panic("Ticket lock %p is unexpectedly not owned by thread %p", lck, self);
+}
 
 static inline void
 hw_lck_ticket_verify(hw_lck_ticket_t *lck)
 {
-#if DEVELOPMENT || DEBUG
-	if (lck->lck_type != LCK_TICKET_TYPE) {
-		__hw_lck_invalid_panic(lck);
+	if (lck->lck_type != LCK_TYPE_TICKET) {
+		__hw_lck_ticket_invalid_panic(lck);
 	}
-#else
-	(void)lck;
-#endif /* DEVELOPMENT || DEBUG */
 }
 
 static inline void
 lck_ticket_verify(lck_ticket_t *tlock)
 {
-	hw_lck_ticket_verify(&tlock->tu);
-#if DEVELOPMENT || DEBUG
-	if (tlock->lck_tag == LCK_TICKET_TAG_DESTROYED) {
-		__hw_lck_invalid_panic(&tlock->tu);
+	if (tlock->lck_ticket_type != LCK_TYPE_TICKET) {
+		__lck_ticket_invalid_panic(tlock);
 	}
-#endif /* DEVELOPMENT || DEBUG */
 }
 
-void
+#if DEVELOPMENT || DEBUG
+#define HW_LCK_TICKET_VERIFY(lck)      hw_lck_ticket_verify(lck)
+#define LCK_TICKET_VERIFY(lck)         lck_ticket_verify(lck)
+#define LCK_TICKET_UNLOCK_VERIFY(l)    ({ \
+	if ((l)->lck_ticket_owner != current_thread()->ctid) {  \
+	        __lck_ticket_not_owned_panic(l);                \
+	}                                                       \
+})
+#else
+#define HW_LCK_TICKET_VERIFY(lck)      ((void)0)
+#define LCK_TICKET_VERIFY(lck)         ((void)0)
+#define LCK_TICKET_UNLOCK_VERIFY(l)    ((void)0)
+#endif /* DEVELOPMENT || DEBUG */
+
+MARK_AS_HIBERNATE_TEXT void
 hw_lck_ticket_init(hw_lck_ticket_t *lck, lck_grp_t *grp)
 {
 	assert(((uintptr_t)lck & 3) == 0);
 	os_atomic_store(lck, ((hw_lck_ticket_t){
-		.lck_type = LCK_TICKET_TYPE,
+		.lck_type = LCK_TYPE_TICKET,
+#if CONFIG_PV_TICKET
+		.lck_is_pv = has_lock_pv,
+#endif /* CONFIG_PV_TICKET */
 		.lck_valid = 1,
 	}), relaxed);
 
-#if LOCK_STATS
+#if LCK_GRP_USE_ARG
 	if (grp) {
 		lck_grp_reference(grp, &grp->lck_grp_ticketcnt);
 	}
-#endif /* LOCK_STATS */
+#endif /* LCK_GRP_USE_ARG */
 }
 
 void
@@ -141,23 +209,40 @@ hw_lck_ticket_init_locked(hw_lck_ticket_t *lck, lck_grp_t *grp)
 	lock_disable_preemption_for_thread(current_thread());
 
 	os_atomic_store(lck, ((hw_lck_ticket_t){
-		.lck_type = LCK_TICKET_TYPE,
+		.lck_type = LCK_TYPE_TICKET,
+#if CONFIG_PV_TICKET
+		.lck_is_pv = has_lock_pv,
+#endif /* CONFIG_PV_TICKET */
 		.lck_valid = 1,
-		.nticket = 1,
+		.nticket = HW_LCK_TICKET_LOCK_INCREMENT,
 	}), relaxed);
 
-#if LOCK_STATS
+#if LCK_GRP_USE_ARG
 	if (grp) {
 		lck_grp_reference(grp, &grp->lck_grp_ticketcnt);
 	}
-#endif /* LOCK_STATS */
+#endif /* LCK_GRP_USE_ARG */
 }
 
-void
+MARK_AS_HIBERNATE_TEXT void
 lck_ticket_init(lck_ticket_t *tlock, __unused lck_grp_t *grp)
 {
-	memset(tlock, 0, sizeof(*tlock));
-	hw_lck_ticket_init(&tlock->tu, grp);
+	*tlock = (lck_ticket_t){
+		.lck_ticket_type = LCK_TYPE_TICKET,
+		.tu = {
+			.lck_type = LCK_TYPE_TICKET,
+#if CONFIG_PV_TICKET
+			.lck_is_pv = has_lock_pv,
+#endif /* CONFIG_PV_TICKET */
+			.lck_valid = 1,
+		},
+	};
+
+#if LCK_GRP_USE_ARG
+	if (grp) {
+		lck_grp_reference(grp, &grp->lck_grp_ticketcnt);
+	}
+#endif /* LCK_GRP_USE_ARG */
 }
 
 static inline void
@@ -168,7 +253,7 @@ hw_lck_ticket_destroy_internal(hw_lck_ticket_t *lck, bool sync
 
 	tmp.lck_value = os_atomic_load(&lck->lck_value, relaxed);
 
-	if (__improbable(sync && !tmp.lck_valid && tmp.nticket != tmp.cticket)) {
+	if (__improbable(sync && !tmp.lck_valid && !equal_tickets(tmp.nticket, tmp.cticket))) {
 		/*
 		 * If the lock has been invalidated and there are pending
 		 * reservations, it means hw_lck_ticket_lock_allow_invalid()
@@ -190,11 +275,11 @@ hw_lck_ticket_destroy_internal(hw_lck_ticket_t *lck, bool sync
 
 	os_atomic_store(&lck->lck_value, 0U, relaxed);
 
-#if LOCK_STATS
+#if LCK_GRP_USE_ARG
 	if (grp) {
 		lck_grp_deallocate(grp, &grp->lck_grp_ticketcnt);
 	}
-#endif /* LOCK_STATS */
+#endif /* LCK_GRP_USE_ARG */
 }
 
 void
@@ -208,8 +293,8 @@ void
 lck_ticket_destroy(lck_ticket_t *tlock, __unused lck_grp_t *grp)
 {
 	lck_ticket_verify(tlock);
-	assert(tlock->lck_owner == 0);
-	tlock->lck_tag = LCK_TICKET_TAG_DESTROYED;
+	assert(tlock->lck_ticket_owner == 0);
+	tlock->lck_ticket_type = LCK_TYPE_NONE;
 	hw_lck_ticket_destroy_internal(&tlock->tu, false LCK_GRP_ARG(grp));
 }
 
@@ -218,7 +303,7 @@ hw_lck_ticket_held(hw_lck_ticket_t *lck)
 {
 	hw_lck_ticket_t tmp;
 	tmp.tcurnext = os_atomic_load(&lck->tcurnext, relaxed);
-	return tmp.cticket != tmp.nticket;
+	return !equal_tickets(tmp.cticket, tmp.nticket);
 }
 
 bool
@@ -242,72 +327,106 @@ tlock_mark_owned(lck_ticket_t *tlock, thread_t cthread)
 	 * possible overhead, potential loss of micro-architectural fwd progress
 	 * properties of an unconditional fetch-add, and a 16 byte alignment requirement.
 	 */
-	assert(tlock->lck_owner == 0);
-	os_atomic_store(&tlock->lck_owner, (uintptr_t)cthread, relaxed);
+	assert3u(tlock->lck_ticket_owner, ==, 0);
+	os_atomic_store(&tlock->lck_ticket_owner, cthread->ctid, relaxed);
 }
 
 __abortlike
-static hw_lock_timeout_status_t
-hw_lck_ticket_timeout_panic(void *_lock, uint64_t timeout, uint64_t start, uint64_t now, uint64_t interrupt_time)
+static hw_spin_timeout_status_t
+hw_lck_ticket_timeout_panic(void *_lock, hw_spin_timeout_t to, hw_spin_state_t st)
 {
-#pragma unused(interrupt_time)
-
 	lck_spinlock_to_info_t lsti;
 	hw_lck_ticket_t *lck = _lock;
 	hw_lck_ticket_t tmp;
+
+	tmp.lck_value = os_atomic_load(&lck->lck_value, relaxed);
+
+	if (pmap_in_ppl()) {
+		panic("Ticket spinlock[%p] " HW_SPIN_TIMEOUT_FMT "; "
+		    "cticket: 0x%x, nticket: 0x%x, valid: %d, "
+		    HW_SPIN_TIMEOUT_DETAILS_FMT,
+		    lck, HW_SPIN_TIMEOUT_ARG(to, st),
+		    tmp.cticket, tmp.nticket, tmp.lck_valid,
+		    HW_SPIN_TIMEOUT_DETAILS_ARG(to, st));
+	}
 
 	lsti = lck_spinlock_timeout_hit(lck, 0);
-	tmp.tcurnext = os_atomic_load(&lck->tcurnext, relaxed);
-
-	panic("Ticket spinlock[%p] timeout after %llu ticks; "
-	    "cticket: 0x%x, nticket: 0x%x, waiting for 0x%x, "
-#if INTERRUPT_MASKED_DEBUG
-	    "interrupt time: %llu, "
-#endif /* INTERRUPT_MASKED_DEBUG */
-	    "start time: %llu, now: %llu, timeout: %llu",
-	    lck, now - start, tmp.cticket, tmp.nticket, lsti->extra,
-#if INTERRUPT_MASKED_DEBUG
-	    interrupt_time,
-#endif /* INTERRUPT_MASKED_DEBUG */
-	    start, now, timeout);
+	panic("Ticket spinlock[%p] " HW_SPIN_TIMEOUT_FMT "; "
+	    "cticket: 0x%x, nticket: 0x%x, waiting for 0x%x, valid: %d, "
+	    HW_SPIN_TIMEOUT_DETAILS_FMT,
+	    lck, HW_SPIN_TIMEOUT_ARG(to, st),
+	    tmp.cticket, tmp.nticket, lsti->extra, tmp.lck_valid,
+	    HW_SPIN_TIMEOUT_DETAILS_ARG(to, st));
 }
 
 __abortlike
-static hw_lock_timeout_status_t
-lck_ticket_timeout_panic(void *_lock, uint64_t timeout, uint64_t start, uint64_t now, uint64_t interrupt_time)
+static hw_spin_timeout_status_t
+lck_ticket_timeout_panic(void *_lock, hw_spin_timeout_t to, hw_spin_state_t st)
 {
-#pragma unused(interrupt_time)
 	lck_spinlock_to_info_t lsti;
-	hw_lck_ticket_t *lck = _lock;
-	lck_ticket_t *tlock = __container_of(lck, lck_ticket_t, tu);
+	lck_ticket_t *lck = _lock;
 	hw_lck_ticket_t tmp;
 
-	lsti = lck_spinlock_timeout_hit(lck, tlock->lck_owner);
-	tmp.tcurnext = os_atomic_load(&lck->tcurnext, relaxed);
+	lsti = lck_spinlock_timeout_hit(&lck->tu, lck->lck_ticket_owner);
+	tmp.tcurnext = os_atomic_load(&lck->tu.tcurnext, relaxed);
 
-	panic("Ticket spinlock[%p] timeout after %llu ticks; "
+	panic("Ticket spinlock[%p] " HW_SPIN_TIMEOUT_FMT "; "
 	    "cticket: 0x%x, nticket: 0x%x, waiting for 0x%x, "
 	    "current owner: %p (on CPU %d), "
 #if DEBUG || DEVELOPMENT
 	    "orig owner: %p, "
 #endif /* DEBUG || DEVELOPMENT */
-#if INTERRUPT_MASKED_DEBUG
-	    "interrupt time: %llu, "
-#endif /* INTERRUPT_MASKED_DEBUG */
-	    "start time: %llu, now: %llu, timeout: %llu",
-	    tlock, now - start, tmp.cticket, tmp.nticket, lsti->extra,
+	    HW_SPIN_TIMEOUT_DETAILS_FMT,
+	    lck, HW_SPIN_TIMEOUT_ARG(to, st),
+	    tmp.cticket, tmp.nticket, lsti->extra,
 	    (void *)lsti->owner_thread_cur, lsti->owner_cpu,
 #if DEBUG || DEVELOPMENT
 	    (void *)lsti->owner_thread_orig,
 #endif /* DEBUG || DEVELOPMENT */
-#if INTERRUPT_MASKED_DEBUG
-	    interrupt_time,
-#endif /* INTERRUPT_MASKED_DEBUG */
-	    start, now, timeout);
+	    HW_SPIN_TIMEOUT_DETAILS_ARG(to, st));
 }
 
+static const struct hw_spin_policy hw_lck_ticket_spin_policy = {
+	.hwsp_name              = "hw_lck_ticket_lock",
+	.hwsp_timeout           = &TICKET_LOCK_PANIC_TIMEOUT,
+	.hwsp_op_timeout        = hw_lck_ticket_timeout_panic,
+};
+
+static const struct hw_spin_policy lck_ticket_spin_policy = {
+	.hwsp_name              = "lck_ticket_lock",
+	.hwsp_timeout           = &TICKET_LOCK_PANIC_TIMEOUT,
+	.hwsp_lock_offset       = offsetof(lck_ticket_t, tu),
+	.hwsp_op_timeout        = lck_ticket_timeout_panic,
+};
+
+
+#if CONFIG_PV_TICKET
+
+#if DEBUG || DEVELOPMENT
+SCALABLE_COUNTER_DEFINE(ticket_wflag_cleared);
+SCALABLE_COUNTER_DEFINE(ticket_wflag_still);
+SCALABLE_COUNTER_DEFINE(ticket_just_unlock);
+SCALABLE_COUNTER_DEFINE(ticket_kick_count);
+SCALABLE_COUNTER_DEFINE(ticket_wait_count);
+SCALABLE_COUNTER_DEFINE(ticket_already_count);
+SCALABLE_COUNTER_DEFINE(ticket_spin_count);
+#endif
+
 static inline void
-hw_lck_ticket_unlock_internal(hw_lck_ticket_t *lck)
+hw_lck_ticket_unlock_inner_pv(hw_lck_ticket_t *lck)
+{
+	const uint8_t cticket = (uint8_t) os_atomic_add(&lck->cticket,
+	    HW_LCK_TICKET_LOCK_INCREMENT, acq_rel);
+	if (__improbable(cticket & HW_LCK_TICKET_LOCK_PVWAITFLAG)) {
+		hw_lck_ticket_unlock_kick_pv(lck, ticket_count(cticket));
+	} else {
+		PVTICKET_STATS_INC(just_unlock);
+	}
+}
+#endif /* CONFIG_PV_TICKET */
+
+__header_always_inline void
+hw_lck_ticket_unlock_inner(hw_lck_ticket_t *lck)
 {
 	_Atomic uint8_t *ctp = (_Atomic uint8_t *)&lck->cticket;
 	uint8_t cticket;
@@ -317,13 +436,31 @@ hw_lck_ticket_unlock_internal(hw_lck_ticket_t *lck)
 	 * so that the compiler can codegen an `incb` on Intel.
 	 */
 	cticket = atomic_load_explicit(ctp, memory_order_relaxed);
-	atomic_store_explicit(ctp, cticket + 1, memory_order_release);
-#if __arm__
-	set_event();
-#endif  // __arm__
+	atomic_store_explicit(ctp, cticket +
+	    HW_LCK_TICKET_LOCK_INCREMENT, memory_order_release);
+}
+
+__header_always_inline void
+hw_lck_ticket_unlock_internal_nopreempt(hw_lck_ticket_t *lck)
+{
+#if CONFIG_PV_TICKET
+	if (lck->lck_is_pv) {
+		hw_lck_ticket_unlock_inner_pv(lck);
+	} else {
+		hw_lck_ticket_unlock_inner(lck);
+	}
+#else
+	hw_lck_ticket_unlock_inner(lck);
+#endif
 #if CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_TICKET_LOCK_RELEASE, lck);
 #endif /* CONFIG_DTRACE */
+}
+
+__header_always_inline void
+hw_lck_ticket_unlock_internal(hw_lck_ticket_t *lck)
+{
+	hw_lck_ticket_unlock_internal_nopreempt(lck);
 	lock_enable_preemption();
 }
 
@@ -338,21 +475,16 @@ struct hw_lck_ticket_reserve_arg {
  */
 __result_use_check
 static hw_lock_status_t __attribute__((noinline))
-hw_lck_ticket_contended(hw_lck_ticket_t *lck, thread_t cthread, struct hw_lck_ticket_reserve_arg arg,
-    uint64_t timeout, hw_lock_timeout_handler_t handler LCK_GRP_ARG(lck_grp_t *grp))
+hw_lck_ticket_contended(
+	hw_lck_ticket_t        *lck,
+	struct hw_lck_ticket_reserve_arg arg,
+	hw_spin_policy_t       pol
+	LCK_GRP_ARG(lck_grp_t *grp))
 {
-#pragma unused(cthread)
-
-	uint64_t end = 0, start = 0, interrupts = 0;
-	bool     has_timeout = true;
-
-	uint8_t  cticket;
-	uint8_t  mt = arg.mt;
-#if INTERRUPT_MASKED_DEBUG
-	bool in_ppl = pmap_in_ppl();
-	bool interruptible = !in_ppl && ml_get_interrupts_enabled();
-	uint64_t start_interrupts = 0;
-#endif /* INTERRUPT_MASKED_DEBUG */
+	hw_spin_timeout_t to = hw_spin_compute_timeout(pol);
+	hw_spin_state_t   state = { };
+	uint32_t          pv_spin_count = 0;
+	hw_lck_ticket_t   value;
 
 #if CONFIG_DTRACE || LOCK_STATS
 	uint64_t begin = 0;
@@ -363,184 +495,201 @@ hw_lck_ticket_contended(hw_lck_ticket_t *lck, thread_t cthread, struct hw_lck_ti
 	}
 #endif /* CONFIG_DTRACE || LOCK_STATS */
 
-#if INTERRUPT_MASKED_DEBUG
-	timeout = hw_lock_compute_timeout(timeout, TICKET_LOCK_PANIC_TIMEOUT, in_ppl, interruptible);
-#else
-	timeout = hw_lock_compute_timeout(timeout, TICKET_LOCK_PANIC_TIMEOUT);
-#endif /* INTERRUPT_MASKED_DEBUG */
-	if (timeout == 0) {
-		has_timeout = false;
-	}
+	while (__improbable(!hw_spin_wait_until_n(TICKET_LOCK_SNOOP_LOOPS,
+	    &lck->lck_value, value.lck_value,
+	    (pv_spin_count++, equal_tickets(value.cticket, arg.mt))))) {
+		if (state.hwss_deadline == 0 && !hw_spin_in_ppl(to)) {
+			/* remember the droid we're looking for */
+			PERCPU_GET(lck_spinlock_to_info)->extra = arg.mt;
+		}
 
-	for (;;) {
-		for (int i = 0; i < LOCK_SNOOP_SPINS; i++) {
-#if OS_ATOMIC_HAS_LLSC
-			cticket = os_atomic_load_exclusive(&lck->cticket, acquire);
-			if (__improbable(cticket != mt)) {
-				wait_for_event();
-				continue;
-			}
-			os_atomic_clear_exclusive();
-#elif defined(__x86_64__)
-			__builtin_ia32_pause();
-			cticket = os_atomic_load(&lck->cticket, acquire);
-			if (__improbable(cticket != mt)) {
-				continue;
-			}
-#else
-#error unsupported architecture
-#endif
-
-			/*
-			 * We now have successfully acquired the lock
-			 */
-
+		if (__improbable(!hw_spin_should_keep_spinning(lck, pol, to, &state))) {
+#if CONFIG_PV_TICKET
+			PVTICKET_STATS_ADD(spin_count, pv_spin_count);
+#endif /* CONFIG_PV_TICKET */
 #if CONFIG_DTRACE || LOCK_STATS
 			if (__improbable(stat_enabled)) {
 				lck_grp_ticket_update_spin(lck LCK_GRP_ARG(grp),
 				    mach_absolute_time() - begin);
 			}
 			lck_grp_ticket_update_miss(lck LCK_GRP_ARG(grp));
-			lck_grp_ticket_update_held(lck LCK_GRP_ARG(grp));
 #endif /* CONFIG_DTRACE || LOCK_STATS */
-			if (__improbable(arg.validate && !lck->lck_valid)) {
-				/*
-				 * We got the lock, however the caller is
-				 * hw_lck_ticket_lock_allow_invalid() and the
-				 * lock has been invalidated while we were
-				 * waiting for our turn.
-				 *
-				 * We need to unlock and pretend we failed.
-				 */
-				hw_lck_ticket_unlock_internal(lck);
-				return HW_LOCK_INVALID;
-			}
-
-			return HW_LOCK_ACQUIRED;
+			return HW_LOCK_CONTENDED;
 		}
 
-		if (has_timeout) {
-			uint64_t now = ml_get_timebase();
-			if (end == 0) {
-#if INTERRUPT_MASKED_DEBUG
-				if (interruptible) {
-					start_interrupts = cthread->machine.int_time_mt;
-				}
-#endif /* INTERRUPT_MASKED_DEBUG */
-				start = now;
-				end = now + timeout;
-				/* remember the droid we're looking for */
-				PERCPU_GET(lck_spinlock_to_info)->extra = mt;
-			} else if (now < end) {
-				/* keep spinning */
-			} else {
-#if INTERRUPT_MASKED_DEBUG
-				if (interruptible) {
-					interrupts = cthread->machine.int_time_mt - start_interrupts;
-				}
-#endif /* INTERRUPT_MASKED_DEBUG */
-				if (handler(lck, timeout, start, now, interrupts)) {
-					/* push the deadline */
-					end += timeout;
-				} else {
-					break;
-				}
-			}
+#if CONFIG_PV_TICKET
+		if (lck->lck_is_pv) {
+			os_atomic_or(&lck->cticket, HW_LCK_TICKET_LOCK_PVWAITFLAG, acq_rel);
+			hw_lck_ticket_lock_wait_pv(lck, arg.mt);
 		}
+#endif /* CONFIG_PV_TICKET */
 	}
 
+	/*
+	 * We now have successfully acquired the lock
+	 */
+
+#if CONFIG_PV_TICKET
+	PVTICKET_STATS_ADD(spin_count, pv_spin_count);
+	if (__improbable(value.cticket & HW_LCK_TICKET_LOCK_PVWAITFLAG)) {
+		/*
+		 * Try and clear the wait flag
+		 */
+		const hw_lck_ticket_t olck = {
+			.cticket = value.cticket,
+			.nticket = ticket_count(value.cticket)
+		    + HW_LCK_TICKET_LOCK_INCREMENT,
+		};
+		const hw_lck_ticket_t nlck = {
+			.cticket = ticket_count(value.cticket),
+			.nticket = olck.nticket,
+		};
+		if (os_atomic_cmpxchg(&lck->tcurnext,
+		    olck.tcurnext, nlck.tcurnext, acq_rel)) {
+			PVTICKET_STATS_INC(wflag_cleared);
+		} else {
+			PVTICKET_STATS_INC(wflag_still);
+		}
+	}
+#endif /* CONFIG_PV_TICKET */
 #if CONFIG_DTRACE || LOCK_STATS
 	if (__improbable(stat_enabled)) {
 		lck_grp_ticket_update_spin(lck LCK_GRP_ARG(grp),
 		    mach_absolute_time() - begin);
 	}
 	lck_grp_ticket_update_miss(lck LCK_GRP_ARG(grp));
+	lck_grp_ticket_update_held(lck LCK_GRP_ARG(grp));
 #endif /* CONFIG_DTRACE || LOCK_STATS */
-	return HW_LOCK_CONTENDED;
+
+	if (__improbable(arg.validate && !value.lck_valid)) {
+		/*
+		 * We got the lock, however the caller is
+		 * hw_lck_ticket_lock_allow_invalid() and the
+		 * lock has been invalidated while we were
+		 * waiting for our turn.
+		 *
+		 * We need to unlock and pretend we failed.
+		 */
+		hw_lck_ticket_unlock_internal(lck);
+		return HW_LOCK_INVALID;
+	}
+
+	os_atomic_thread_fence(acquire);
+	return HW_LOCK_ACQUIRED;
 }
 
 static void __attribute__((noinline))
 lck_ticket_contended(lck_ticket_t *tlock, uint8_t mt, thread_t cthread
     LCK_GRP_ARG(lck_grp_t *grp))
 {
-	assertf(tlock->lck_owner != (uintptr_t) cthread,
-	    "Recursive ticket lock, owner: %p, current thread: %p",
-	    (void *) tlock->lck_owner, (void *) cthread);
+	if (cthread->ctid == tlock->lck_ticket_owner) {
+		__lck_ticket_owned_panic(tlock);
+	}
 
 	struct hw_lck_ticket_reserve_arg arg = { .mt = mt };
-	lck_spinlock_timeout_set_orig_owner(tlock->lck_owner);
-	(void)hw_lck_ticket_contended(&tlock->tu, cthread, arg, 0,
-	    lck_ticket_timeout_panic LCK_GRP_ARG(grp));
+	lck_spinlock_timeout_set_orig_ctid(tlock->lck_ticket_owner);
+	(void)hw_lck_ticket_contended(&tlock->tu, arg, &lck_ticket_spin_policy
+	    LCK_GRP_ARG(grp));
+	lck_spinlock_timeout_set_orig_ctid(0);
 	tlock_mark_owned(tlock, cthread);
 }
 
 static inline hw_lck_ticket_t
-hw_lck_ticket_reserve_orig(hw_lck_ticket_t *lck, thread_t cthread __unused)
+hw_lck_ticket_reserve_orig(hw_lck_ticket_t *lck)
 {
 	hw_lck_ticket_t tmp;
 
-	lock_disable_preemption_for_thread(cthread);
 	/*
 	 * Atomically load both the entier lock state, and increment the
 	 * "nticket". Wrap of the ticket field is OK as long as the total
 	 * number of contending CPUs is < maximum ticket
 	 */
 	tmp.lck_value = os_atomic_add_orig(&lck->lck_value,
-	    1U << (8 * offsetof(hw_lck_ticket_t, nticket)), acquire);
+	    HW_LCK_TICKET_LOCK_INC_WORD, acquire);
 
 	return tmp;
 }
 
-void
-hw_lck_ticket_lock(hw_lck_ticket_t *lck, lck_grp_t *grp)
+__header_always_inline void
+hw_lck_ticket_lock_internal(
+	hw_lck_ticket_t        *lck
+	LCK_GRP_ARG(lck_grp_t *grp))
 {
-	thread_t cthread = current_thread();
 	hw_lck_ticket_t tmp;
 
-	hw_lck_ticket_verify(lck);
-	tmp = hw_lck_ticket_reserve_orig(lck, cthread);
+	HW_LCK_TICKET_VERIFY(lck);
+	tmp = hw_lck_ticket_reserve_orig(lck);
 
-	if (__probable(tmp.cticket == tmp.nticket)) {
+	if (__probable(equal_tickets(tmp.cticket, tmp.nticket))) {
 		return lck_grp_ticket_update_held(lck LCK_GRP_ARG(grp));
 	}
 
 	/* Contention? branch to out of line contended block */
 	struct hw_lck_ticket_reserve_arg arg = { .mt = tmp.nticket };
-	lck_spinlock_timeout_set_orig_owner(0);
-	(void)hw_lck_ticket_contended(lck, cthread, arg, 0,
-	    hw_lck_ticket_timeout_panic LCK_GRP_ARG(grp));
+	(void)hw_lck_ticket_contended(lck, arg, &hw_lck_ticket_spin_policy
+	    LCK_GRP_ARG(grp));
 }
 
-hw_lock_status_t
-hw_lck_ticket_lock_to(hw_lck_ticket_t *lck, uint64_t timeout,
-    hw_lock_timeout_handler_t handler, lck_grp_t *grp)
+void
+hw_lck_ticket_lock_nopreempt(hw_lck_ticket_t *lck, lck_grp_t *grp)
 {
-	thread_t cthread = current_thread();
+	hw_lck_ticket_lock_internal(lck LCK_GRP_ARG(grp));
+}
+
+void
+hw_lck_ticket_lock(hw_lck_ticket_t *lck, lck_grp_t *grp)
+{
+	lock_disable_preemption_for_thread(current_thread());
+	hw_lck_ticket_lock_internal(lck LCK_GRP_ARG(grp));
+}
+
+__header_always_inline hw_lock_status_t
+hw_lck_ticket_lock_to_internal(
+	hw_lck_ticket_t        *lck,
+	hw_spin_policy_t        pol
+	LCK_GRP_ARG(lck_grp_t *grp))
+{
 	hw_lck_ticket_t tmp;
 
-	hw_lck_ticket_verify(lck);
-	tmp = hw_lck_ticket_reserve_orig(lck, cthread);
+	HW_LCK_TICKET_VERIFY(lck);
+	tmp = hw_lck_ticket_reserve_orig(lck);
 
-	if (__probable(tmp.cticket == tmp.nticket)) {
+	if (__probable(equal_tickets(tmp.cticket, tmp.nticket))) {
 		lck_grp_ticket_update_held(lck LCK_GRP_ARG(grp));
 		return HW_LOCK_ACQUIRED;
 	}
 
 	/* Contention? branch to out of line contended block */
 	struct hw_lck_ticket_reserve_arg arg = { .mt = tmp.nticket };
-	lck_spinlock_timeout_set_orig_owner(0);
-	return hw_lck_ticket_contended(lck, cthread, arg, timeout,
-	           handler LCK_GRP_ARG(grp));
+	return hw_lck_ticket_contended(lck, arg, pol LCK_GRP_ARG(grp));
 }
 
-void
-lck_ticket_lock(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+hw_lock_status_t
+hw_lck_ticket_lock_nopreempt_to(
+	hw_lck_ticket_t        *lck,
+	hw_spin_policy_t        pol,
+	lck_grp_t              *grp)
 {
-	thread_t cthread = current_thread();
+	return hw_lck_ticket_lock_to_internal(lck, pol LCK_GRP_ARG(grp));
+}
+
+hw_lock_status_t
+hw_lck_ticket_lock_to(
+	hw_lck_ticket_t        *lck,
+	hw_spin_policy_t        pol,
+	lck_grp_t              *grp)
+{
+	lock_disable_preemption_for_thread(current_thread());
+	return hw_lck_ticket_lock_to_internal(lck, pol LCK_GRP_ARG(grp));
+}
+
+__header_always_inline void
+lck_ticket_lock_internal(lck_ticket_t *tlock, thread_t cthread, __unused lck_grp_t *grp)
+{
 	hw_lck_ticket_t tmp;
 
-	lck_ticket_verify(tlock);
-	tmp = hw_lck_ticket_reserve_orig(&tlock->tu, cthread);
+	LCK_TICKET_VERIFY(tlock);
+	tmp = hw_lck_ticket_reserve_orig(&tlock->tu);
 
 	if (__probable(tmp.cticket == tmp.nticket)) {
 		tlock_mark_owned(tlock, cthread);
@@ -551,23 +700,47 @@ lck_ticket_lock(lck_ticket_t *tlock, __unused lck_grp_t *grp)
 	lck_ticket_contended(tlock, tmp.nticket, cthread LCK_GRP_ARG(grp));
 }
 
-bool
-hw_lck_ticket_lock_try(hw_lck_ticket_t *lck, lck_grp_t *grp)
+void
+lck_ticket_lock(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+{
+	thread_t cthread = current_thread();
+
+	lock_disable_preemption_for_thread(cthread);
+	lck_ticket_lock_internal(tlock, cthread, grp);
+}
+
+void
+lck_ticket_lock_nopreempt(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+{
+	thread_t cthread = current_thread();
+
+	lck_ticket_lock_internal(tlock, cthread, grp);
+}
+
+__header_always_inline bool
+hw_lck_ticket_lock_try_internal(
+	hw_lck_ticket_t        *lck,
+	bool                    nopreempt
+	LCK_GRP_ARG(lck_grp_t *grp))
 {
 	hw_lck_ticket_t olck, nlck;
 
-	hw_lck_ticket_verify(lck);
-	lock_disable_preemption_for_thread(current_thread());
+	HW_LCK_TICKET_VERIFY(lck);
+	if (!nopreempt) {
+		lock_disable_preemption_for_thread(current_thread());
+	}
 
 	os_atomic_rmw_loop(&lck->tcurnext, olck.tcurnext, nlck.tcurnext, acquire, {
-		if (__improbable(olck.cticket != olck.nticket)) {
+		if (__improbable(!equal_tickets(olck.cticket, olck.nticket))) {
 		        os_atomic_rmw_loop_give_up({
-				lock_enable_preemption();
+				if (!nopreempt) {
+				        lock_enable_preemption();
+				}
 				return false;
 			});
 		}
 		nlck.cticket = olck.cticket;
-		nlck.nticket = olck.nticket + 1;
+		nlck.nticket = olck.nticket + HW_LCK_TICKET_LOCK_INCREMENT;
 	});
 
 	lck_grp_ticket_update_held(lck LCK_GRP_ARG(grp));
@@ -575,23 +748,39 @@ hw_lck_ticket_lock_try(hw_lck_ticket_t *lck, lck_grp_t *grp)
 }
 
 bool
-lck_ticket_lock_try(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+hw_lck_ticket_lock_try(hw_lck_ticket_t *lck, lck_grp_t *grp)
+{
+	return hw_lck_ticket_lock_try_internal(lck, false LCK_GRP_ARG(grp));
+}
+
+bool
+hw_lck_ticket_lock_try_nopreempt(hw_lck_ticket_t *lck, lck_grp_t *grp)
+{
+	return hw_lck_ticket_lock_try_internal(lck, true LCK_GRP_ARG(grp));
+}
+
+__header_always_inline bool
+lck_ticket_lock_try_internal(lck_ticket_t *tlock, __unused lck_grp_t *grp, bool nopreempt)
 {
 	thread_t cthread = current_thread();
 	hw_lck_ticket_t olck, nlck;
 
-	lck_ticket_verify(tlock);
-	lock_disable_preemption_for_thread(cthread);
+	LCK_TICKET_VERIFY(tlock);
+	if (!nopreempt) {
+		lock_disable_preemption_for_thread(cthread);
+	}
 
 	os_atomic_rmw_loop(&tlock->tu.tcurnext, olck.tcurnext, nlck.tcurnext, acquire, {
-		if (__improbable(olck.cticket != olck.nticket)) {
+		if (__improbable(!equal_tickets(olck.cticket, olck.nticket))) {
 		        os_atomic_rmw_loop_give_up({
-				lock_enable_preemption();
+				if (!nopreempt) {
+				        lock_enable_preemption();
+				}
 				return false;
 			});
 		}
 		nlck.cticket = olck.cticket;
-		nlck.nticket = olck.nticket + 1;
+		nlck.nticket = olck.nticket + HW_LCK_TICKET_LOCK_INCREMENT;
 	});
 
 	tlock_mark_owned(tlock, cthread);
@@ -599,7 +788,20 @@ lck_ticket_lock_try(lck_ticket_t *tlock, __unused lck_grp_t *grp)
 	return true;
 }
 
+bool
+lck_ticket_lock_try(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+{
+	return lck_ticket_lock_try_internal(tlock, grp, false);
+}
+
+bool
+lck_ticket_lock_try_nopreempt(lck_ticket_t *tlock, __unused lck_grp_t *grp)
+{
+	return lck_ticket_lock_try_internal(tlock, grp, true);
+}
+
 /*
+ * Assembly routine that
  * Returns a "reserved" lock or a lock where `lck_valid` is 0.
  *
  * More or less equivalent to this:
@@ -621,17 +823,23 @@ lck_ticket_lock_try(lck_ticket_t *tlock, __unused lck_grp_t *grp)
  *		return o;
  *	}
  */
+
+#if KASAN_TBI
+extern hw_lck_ticket_t
+hw_lck_ticket_reserve_orig_allow_invalid(hw_lck_ticket_t *lck, const uint8_t *tag_addr);
+#else /* KASAN_TBI */
 extern hw_lck_ticket_t
 hw_lck_ticket_reserve_orig_allow_invalid(hw_lck_ticket_t *lck);
+#endif /* KASAN_TBI */
 
 bool
 hw_lck_ticket_reserve(hw_lck_ticket_t *lck, uint32_t *ticket, lck_grp_t *grp)
 {
-	thread_t cthread = current_thread();
 	hw_lck_ticket_t tmp;
 
-	hw_lck_ticket_verify(lck);
-	tmp = hw_lck_ticket_reserve_orig(lck, cthread);
+	HW_LCK_TICKET_VERIFY(lck);
+	lock_disable_preemption_for_thread(current_thread());
+	tmp = hw_lck_ticket_reserve_orig(lck);
 	*ticket = tmp.lck_value;
 
 	if (__probable(tmp.cticket == tmp.nticket)) {
@@ -649,7 +857,13 @@ hw_lck_ticket_reserve_allow_invalid(hw_lck_ticket_t *lck, uint32_t *ticket, lck_
 
 	lock_disable_preemption_for_thread(current_thread());
 
+#if KASAN_TBI
+	/* Expand the check to also include the tag value. See machine_routines_asm.s for the details */
+	tmp = hw_lck_ticket_reserve_orig_allow_invalid(lck,
+	    kasan_tbi_get_tag_address((vm_offset_t)lck));
+#else /* KASAN_TBI */
 	tmp = hw_lck_ticket_reserve_orig_allow_invalid(lck);
+#endif /* KASAN_TBI */
 	*ticket = tmp.lck_value;
 
 	if (__improbable(!tmp.lck_valid)) {
@@ -657,7 +871,7 @@ hw_lck_ticket_reserve_allow_invalid(hw_lck_ticket_t *lck, uint32_t *ticket, lck_
 		return HW_LOCK_INVALID;
 	}
 
-	if (__probable(tmp.cticket == tmp.nticket)) {
+	if (__probable(equal_tickets(tmp.cticket, tmp.nticket))) {
 		lck_grp_ticket_update_held(lck LCK_GRP_ARG(grp));
 		return HW_LOCK_ACQUIRED;
 	}
@@ -666,19 +880,22 @@ hw_lck_ticket_reserve_allow_invalid(hw_lck_ticket_t *lck, uint32_t *ticket, lck_
 }
 
 hw_lock_status_t
-hw_lck_ticket_wait(hw_lck_ticket_t *lck, uint32_t ticket, uint64_t timeout,
-    hw_lock_timeout_handler_t handler, lck_grp_t *grp)
+hw_lck_ticket_wait(
+	hw_lck_ticket_t        *lck,
+	uint32_t                ticket,
+	hw_spin_policy_t        pol,
+	lck_grp_t *grp)
 {
 	hw_lck_ticket_t tmp = { .lck_value = ticket };
 	struct hw_lck_ticket_reserve_arg arg = { .mt = tmp.nticket };
-	lck_spinlock_timeout_set_orig_owner(0);
-	return hw_lck_ticket_contended(lck, current_thread(), arg, timeout,
-	           handler LCK_GRP_ARG(grp));
+	return hw_lck_ticket_contended(lck, arg, pol LCK_GRP_ARG(grp));
 }
 
 hw_lock_status_t
-hw_lck_ticket_lock_allow_invalid(hw_lck_ticket_t *lck, uint64_t timeout,
-    hw_lock_timeout_handler_t handler, lck_grp_t *grp)
+hw_lck_ticket_lock_allow_invalid(
+	hw_lck_ticket_t        *lck,
+	hw_spin_policy_t        pol,
+	lck_grp_t              *grp)
 {
 	hw_lock_status_t st;
 	hw_lck_ticket_t tmp;
@@ -691,9 +908,7 @@ hw_lck_ticket_lock_allow_invalid(hw_lck_ticket_t *lck, uint64_t timeout,
 			.mt = tmp.nticket,
 			.validate = true,
 		};
-		lck_spinlock_timeout_set_orig_owner(0);
-		return hw_lck_ticket_contended(lck, current_thread(), arg, timeout,
-		           handler LCK_GRP_ARG(grp));
+		return hw_lck_ticket_contended(lck, arg, pol LCK_GRP_ARG(grp));
 	}
 
 	return st;
@@ -708,39 +923,49 @@ hw_lck_ticket_invalidate(hw_lck_ticket_t *lck)
 }
 
 void
+hw_lck_ticket_unlock_nopreempt(hw_lck_ticket_t *lck)
+{
+	HW_LCK_TICKET_VERIFY(lck);
+	hw_lck_ticket_unlock_internal_nopreempt(lck);
+}
+
+void
 hw_lck_ticket_unlock(hw_lck_ticket_t *lck)
 {
-	hw_lck_ticket_verify(lck);
-#if MACH_ASSERT
-	hw_lck_ticket_t tmp;
-	tmp.lck_value = os_atomic_load(&lck->lck_value, relaxed);
-	assertf(tmp.cticket != tmp.nticket,
-	    "Ticket lock %p is not locked (0x%08x)", lck, tmp.lck_value);
-#endif /* MACH_ASSERT */
+	HW_LCK_TICKET_VERIFY(lck);
 	hw_lck_ticket_unlock_internal(lck);
+}
+
+void
+lck_ticket_unlock_nopreempt(lck_ticket_t *tlock)
+{
+	LCK_TICKET_VERIFY(tlock);
+	LCK_TICKET_UNLOCK_VERIFY(tlock);
+	os_atomic_store(&tlock->lck_ticket_owner, 0, relaxed);
+	hw_lck_ticket_unlock_internal_nopreempt(&tlock->tu);
 }
 
 void
 lck_ticket_unlock(lck_ticket_t *tlock)
 {
-	lck_ticket_verify(tlock);
-
-	assertf(tlock->lck_owner == (uintptr_t)current_thread(),
-	    "Ticket unlock non-owned, owner: %p", (void *) tlock->lck_owner);
-	os_atomic_store(&tlock->lck_owner, 0, relaxed);
-
+	LCK_TICKET_VERIFY(tlock);
+	LCK_TICKET_UNLOCK_VERIFY(tlock);
+	os_atomic_store(&tlock->lck_ticket_owner, 0, relaxed);
 	hw_lck_ticket_unlock_internal(&tlock->tu);
 }
 
 void
-lck_ticket_assert_owned(__assert_only lck_ticket_t *tlock)
+lck_ticket_assert_owned(lck_ticket_t *tlock)
 {
-#if MACH_ASSERT
-	thread_t self, owner;
+	if (current_thread()->ctid != tlock->lck_ticket_owner) {
+		__lck_ticket_not_owned_panic(tlock);
+	}
+}
 
-	owner = (thread_t)os_atomic_load(&tlock->lck_owner, relaxed);
-	self = current_thread();
-	assertf(owner == self, "lck_ticket_assert_owned: owner %p, current: %p",
-	    owner, self);
-#endif /* MACH_ASSERT */
+void
+lck_ticket_assert_not_owned(lck_ticket_t *tlock)
+{
+	if (current_thread()->ctid == tlock->lck_ticket_owner) {
+		__lck_ticket_owned_panic(tlock);
+	}
 }

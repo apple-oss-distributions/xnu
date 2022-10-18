@@ -174,6 +174,11 @@ int proc_current_thread_schedinfo(void *buffer, size_t buffersize);
 int proc_suppress(pid_t pid, uint64_t *generation);
 #endif /* !TARGET_OS_SIMULATOR */
 
+/* for use by dyld when it relocates itself */
+int proc_set_dyld_all_image_info(void *buffer, int buffersize);
+
+
+
 __END_DECLS
 
 #endif /* _LIBPROC_INTERNALH_ */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2005-2021 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -80,7 +80,7 @@ sprlock(pid_t pid)
 		return PROC_NULL;
 	}
 
-	task_suspend_internal(p->task);
+	task_suspend_internal(proc_task(p));
 
 	dtrace_sprlock(p);
 
@@ -94,7 +94,7 @@ sprunlock(proc_t *p)
 	if (p != PROC_NULL) {
 		dtrace_sprunlock(p);
 
-		task_resume_internal(p->task);
+		task_resume_internal(proc_task(p));
 
 		proc_rele(p);
 	}
@@ -115,9 +115,9 @@ uread(proc_t *p, void *buf, user_size_t len, user_addr_t a)
 	kern_return_t ret;
 
 	ASSERT(p != PROC_NULL);
-	ASSERT(p->task != NULL);
+	ASSERT(proc_task(p) != NULL);
 
-	task_t task = p->task;
+	task_t task = proc_task(p);
 
 	/*
 	 * Grab a reference to the task vm_map_t to make sure
@@ -146,9 +146,9 @@ uwrite(proc_t *p, void *buf, user_size_t len, user_addr_t a)
 	kern_return_t ret;
 
 	ASSERT(p != NULL);
-	ASSERT(p->task != NULL);
+	ASSERT(proc_task(p) != NULL);
 
-	task_t task = p->task;
+	task_t task = proc_task(p);
 
 	/*
 	 * Grab a reference to the task vm_map_t to make sure
@@ -291,11 +291,7 @@ typedef struct wrap_timer_call {
 typedef struct cyc_list {
 	cyc_omni_handler_t cyl_omni;
 	wrap_timer_call_t cyl_wrap_by_cpus[];
-#if __arm__ && (__BIGGEST_ALIGNMENT__ > 4)
-} __attribute__ ((aligned(8))) cyc_list_t;
-#else
 } cyc_list_t;
-#endif
 
 /* CPU going online/offline notifications */
 void (*dtrace_cpu_state_changed_hook)(int, boolean_t) = NULL;
@@ -310,22 +306,21 @@ dtrace_install_cpu_hooks(void)
 void
 dtrace_cpu_state_changed(int cpuid, boolean_t is_running)
 {
-#pragma unused(cpuid)
 	wrap_timer_call_t       *wrapTC = NULL;
 	boolean_t               suspend = (is_running ? FALSE : TRUE);
 	dtrace_icookie_t        s;
 
 	/* Ensure that we're not going to leave the CPU */
 	s = dtrace_interrupt_disable();
-	assert(cpuid == cpu_number());
 
-	LIST_FOREACH(wrapTC, &(cpu_list[cpu_number()].cpu_cyc_list), entries) {
-		assert(wrapTC->cpuid == cpu_number());
+	LIST_FOREACH(wrapTC, &(cpu_list[cpuid].cpu_cyc_list), entries) {
+		assert3u(wrapTC->cpuid, ==, cpuid);
 		if (suspend) {
 			assert(!wrapTC->suspended);
 			/* If this fails, we'll panic anyway, so let's do this now. */
 			if (!timer_call_cancel(&wrapTC->call)) {
-				panic("timer_call_set_suspend() failed to cancel a timer call");
+				panic("timer_call_cancel() failed to cancel a timer call: %p",
+				    &wrapTC->call);
 			}
 			wrapTC->suspended = TRUE;
 		} else {
@@ -625,8 +620,11 @@ debug_enter(char *c)
  * kmem
  */
 
+// rdar://88962505
+__typed_allocators_ignore_push
+
 void *
-dt_kmem_alloc_site(size_t size, int kmflag, vm_allocation_site_t *site)
+dt_kmem_alloc_tag(size_t size, int kmflag, vm_tag_t tag)
 {
 #pragma unused(kmflag)
 
@@ -634,11 +632,11 @@ dt_kmem_alloc_site(size_t size, int kmflag, vm_allocation_site_t *site)
  * We ignore the M_NOWAIT bit in kmflag (all of kmflag, in fact).
  * Requests larger than 8K with M_NOWAIT fail in kalloc_ext.
  */
-	return kalloc_ext(KHEAP_DTRACE, size, Z_WAITOK, site).addr;
+	return kheap_alloc_tag(KHEAP_DTRACE, size, Z_WAITOK, tag);
 }
 
 void *
-dt_kmem_zalloc_site(size_t size, int kmflag, vm_allocation_site_t *site)
+dt_kmem_zalloc_tag(size_t size, int kmflag, vm_tag_t tag)
 {
 #pragma unused(kmflag)
 
@@ -646,7 +644,7 @@ dt_kmem_zalloc_site(size_t size, int kmflag, vm_allocation_site_t *site)
  * We ignore the M_NOWAIT bit in kmflag (all of kmflag, in fact).
  * Requests larger than 8K with M_NOWAIT fail in kalloc_ext.
  */
-	return kalloc_ext(KHEAP_DTRACE, size, Z_WAITOK | Z_ZERO, site).addr;
+	return kheap_alloc_tag(KHEAP_DTRACE, size, Z_WAITOK | Z_ZERO, tag);
 }
 
 void
@@ -655,6 +653,7 @@ dt_kmem_free(void *buf, size_t size)
 	kheap_free(KHEAP_DTRACE, buf, size);
 }
 
+__typed_allocators_ignore_pop
 
 
 /*
@@ -663,7 +662,7 @@ dt_kmem_free(void *buf, size_t size)
  */
 
 void*
-dt_kmem_alloc_aligned_site(size_t size, size_t align, int kmflag, vm_allocation_site_t *site)
+dt_kmem_alloc_aligned_tag(size_t size, size_t align, int kmflag, vm_tag_t tag)
 {
 	void *mem, **addr_to_free;
 	intptr_t mem_aligned;
@@ -678,7 +677,7 @@ dt_kmem_alloc_aligned_site(size_t size, size_t align, int kmflag, vm_allocation_
 	 * the address to free and the total size of the buffer.
 	 */
 	hdr_size = sizeof(size_t) + sizeof(void*);
-	mem = dt_kmem_alloc_site(size + align + hdr_size, kmflag, site);
+	mem = dt_kmem_alloc_tag(size + align + hdr_size, kmflag, tag);
 	if (mem == NULL) {
 		return NULL;
 	}
@@ -697,11 +696,11 @@ dt_kmem_alloc_aligned_site(size_t size, size_t align, int kmflag, vm_allocation_
 }
 
 void*
-dt_kmem_zalloc_aligned_site(size_t size, size_t align, int kmflag, vm_allocation_site_t *s)
+dt_kmem_zalloc_aligned_tag(size_t size, size_t align, int kmflag, vm_tag_t tag)
 {
 	void* buf;
 
-	buf = dt_kmem_alloc_aligned_site(size, align, kmflag, s);
+	buf = dt_kmem_alloc_aligned_tag(size, align, kmflag, tag);
 
 	if (!buf) {
 		return NULL;
@@ -956,9 +955,6 @@ static int
 dtrace_copycheck(user_addr_t uaddr, uintptr_t kaddr, size_t size)
 {
 #pragma unused(kaddr)
-
-	vm_offset_t recover = dtrace_set_thread_recover( current_thread(), 0 ); /* Snare any extant recovery point. */
-	dtrace_set_thread_recover( current_thread(), recover ); /* Put it back. We *must not* re-enter and overwrite. */
 
 	ASSERT(kaddr + size >= kaddr);
 

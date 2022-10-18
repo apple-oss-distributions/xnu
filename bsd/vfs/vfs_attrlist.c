@@ -3028,6 +3028,8 @@ vfs_attr_pack_ext(mount_t mp, vnode_t vp, uio_t uio, struct attrlist *alp, uint6
 	uint64_t orig_active;
 	struct attrlist orig_al;
 	enum vtype v_type;
+	uid_t ouid = vap->va_uid;
+	gid_t ogid = vap->va_gid;
 
 	if (vp) {
 		v_type = vnode_vtype(vp);
@@ -3048,10 +3050,18 @@ vfs_attr_pack_ext(mount_t mp, vnode_t vp, uio_t uio, struct attrlist *alp, uint6
 		goto out;
 	}
 
+	if (mp) {
+		vnode_attr_handle_uid_and_gid(vap, mp, ctx);
+	}
+
 	error = vfs_attr_pack_internal(mp, vp, uio, alp,
 	    options | FSOPT_REPORT_FULLSIZE, vap, NULL, ctx, 1, v_type,
 	    fixedsize);
 
+	if (mp) {
+		vap->va_uid = ouid;
+		vap->va_gid = ogid;
+	}
 	VATTR_CLEAR_SUPPORTED_ALL(vap);
 	vap->va_active = orig_active;
 	*alp = orig_al;
@@ -4287,7 +4297,6 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	kauth_action_t  action;
 	char            *user_buf, *cursor, *bufend, *fndrinfo, *cp, *volname;
 	int             proc_is64, error;
-	uint32_t        nace;
 	kauth_filesec_t rfsec;
 
 	user_buf = NULL;
@@ -4480,25 +4489,15 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 			VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: bad ACL supplied", ar.attr_length);
 			goto out;
 		}
-		nace = rfsec->fsec_entrycount;
-		if (nace == KAUTH_FILESEC_NOACL) {
-			nace = 0;
-		}
-		if (nace > KAUTH_ACL_MAX_ENTRIES) {                     /* ACL size invalid */
+
+		if (rfsec->fsec_entrycount == KAUTH_FILESEC_NOACL) {
+			/* deleting ACL */
+			VATTR_SET(&va, va_acl, NULL);
+		} else if (rfsec->fsec_entrycount > KAUTH_ACL_MAX_ENTRIES) {                     /* ACL size invalid */
 			error = EINVAL;
 			VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: bad ACL supplied");
 			goto out;
-		}
-		nace = rfsec->fsec_acl.acl_entrycount;
-		if (nace == KAUTH_FILESEC_NOACL) {
-			/* deleting ACL */
-			VATTR_SET(&va, va_acl, NULL);
 		} else {
-			if (nace > KAUTH_ACL_MAX_ENTRIES) {                     /* ACL size invalid */
-				error = EINVAL;
-				VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: supplied ACL is too large");
-				goto out;
-			}
 			VATTR_SET(&va, va_acl, &rfsec->fsec_acl);
 		}
 	}
@@ -4689,6 +4688,9 @@ setattrlist(proc_t p, struct setattrlist_args *uap, __unused int32_t *retval)
 	if ((uap->options & (FSOPT_NOFOLLOW | FSOPT_NOFOLLOW_ANY)) == 0) {
 		nameiflags |= FOLLOW;
 	}
+#if CONFIG_FILE_LEASES
+	nameiflags |= WANTPARENT;
+#endif
 	NDINIT(&nd, LOOKUP, OP_SETATTR, nameiflags, UIO_USERSPACE, uap->path, ctx);
 	if (uap->options & FSOPT_NOFOLLOW_ANY) {
 		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
@@ -4697,6 +4699,10 @@ setattrlist(proc_t p, struct setattrlist_args *uap, __unused int32_t *retval)
 		goto out;
 	}
 	vp = nd.ni_vp;
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(nd.ni_dvp, false, O_WRONLY);
+	vnode_put(nd.ni_dvp);
+#endif
 	nameidone(&nd);
 
 	error = setattrlist_internal(vp, uap, p, ctx);
@@ -4727,6 +4733,9 @@ setattrlistat(proc_t p, struct setattrlistat_args *uap, __unused int32_t *retval
 	if (!(uap->options & (FSOPT_NOFOLLOW | FSOPT_NOFOLLOW_ANY))) {
 		nameiflags |= FOLLOW;
 	}
+#if CONFIG_FILE_LEASES
+	nameiflags |= WANTPARENT;
+#endif
 	NDINIT(&nd, LOOKUP, OP_SETATTR, nameiflags, UIO_USERSPACE, uap->path, ctx);
 	if (uap->options & FSOPT_NOFOLLOW_ANY) {
 		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
@@ -4735,6 +4744,10 @@ setattrlistat(proc_t p, struct setattrlistat_args *uap, __unused int32_t *retval
 		goto out;
 	}
 	vp = nd.ni_vp;
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(nd.ni_dvp, false, O_WRONLY);
+	vnode_put(nd.ni_dvp);
+#endif
 	nameidone(&nd);
 
 	ap.path = 0;
@@ -4769,6 +4782,10 @@ fsetattrlist(proc_t p, struct fsetattrlist_args *uap, __unused int32_t *retval)
 		file_drop(uap->fd);
 		return error;
 	}
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(vp, true, O_WRONLY);
+#endif
 
 	ap.path = 0;
 	ap.alist = uap->alist;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -27,6 +27,8 @@
 #include <os/log.h>
 #include <firehose/tracepoint_private.h>
 #include <sys/queue.h>
+
+#define OS_LOG_MAX_SIZE_ORDER 10 // Maximum log size order (1024 bytes)
 
 __BEGIN_DECLS
 
@@ -68,26 +70,6 @@ __BEGIN_DECLS
 OS_EXPORT OS_NOTHROW OS_LOG_NOTAILCALL
 void
 os_log_with_args(os_log_t oslog, os_log_type_t type, const char *format, va_list args, void *ret_addr) __osloglike(3, 0);
-
-/*!
- * @enum oslog_stream_link_type_t
- */
-OS_ENUM(oslog_stream_link_type, uint8_t,
-    oslog_stream_link_type_log       = 0x0,
-    oslog_stream_link_type_metadata  = 0x1,
-    );
-
-/*!
- * @typedef oslog_stream_buf_entry_t
- */
-typedef struct oslog_stream_buf_entry_s {
-	STAILQ_ENTRY(oslog_stream_buf_entry_s) buf_entries;
-	uint64_t timestamp;
-	int offset;
-	uint16_t size;
-	oslog_stream_link_type_t type;
-	struct firehose_tracepoint_s *metadata;
-} *oslog_stream_buf_entry_t;
 
 __END_DECLS
 

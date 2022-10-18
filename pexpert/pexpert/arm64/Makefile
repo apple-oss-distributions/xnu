@@ -31,9 +31,11 @@ INSTALL_KF_MD_LIST = $(EMPTY)
 # Headers installed into Kernel.framework/PrivateHeaders (internal SDK only).
 INSTALL_KF_MD_LCL_LIST = $(PRIVATE_KERNELFILES)
 
+EXPORT_ONLY_FILES =	\
+			platform.h
+
 # Headers used to compile xnu
-EXPORT_MD_LIST = $(PRIVATE_KERNELFILES) \
-	platform.h
+EXPORT_MD_LIST = $(PRIVATE_KERNELFILES) $(EXPORT_ONLY_FILES)
 
 # These headers will be available with #include <pexpert/arm64/header_file.h>
 EXPORT_MD_DIR = pexpert/arm64

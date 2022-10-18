@@ -8,6 +8,8 @@
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.pfkey"),
 	T_META_ASROOT(true),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("NetworkExtension"),
 	T_META_CHECK_LEAKS(false));
 
 #define MAX_SPD_CHECK       100
@@ -1762,7 +1764,7 @@ T_DECL(sadb_update_60679513, "security association use after free")
 	dispatch_main();
 }
 
-T_DECL(sadb_dump_60768729, "security association sa dump heap overflow")
+T_DECL(sadb_dump_60768729, "security association sa dump heap overflow", T_META_ENABLED(false))
 {
 	test_id = TEST_SADB_DUMP_HEAP_OVERFLOW_60768729;
 
@@ -1775,7 +1777,8 @@ T_DECL(sadb_dump_60768729, "security association sa dump heap overflow")
 	dispatch_main();
 }
 
-T_DECL(sadb_policy_dump_60769680, "security association sa policy dump heap overflow")
+// Disabled due to rdar://92910783
+T_DECL(sadb_policy_dump_60769680, "security association sa policy dump heap overflow", T_META_ENABLED(false))
 {
 	test_id = TEST_SADB_POLICY_DUMP_HEAP_OVERFLOW_60769680;
 

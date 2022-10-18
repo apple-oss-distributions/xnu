@@ -309,6 +309,11 @@ static OSSharedPtr<const OSSymbol>         gIOPMPSPostDishargeWaitSecondsKey;
 #define kLocalEvalClamshellCommand  (1 << 15)
 #define kIdleSleepRetryInterval     (3 * 60 * 1000)
 
+// Minimum time in milliseconds after AP wake that we allow idle timer to expire.
+// We impose this minimum to avoid race conditions in the AP wake path where
+// userspace clients are not able to acquire power assertions before the idle timer expires.
+#define kMinimumTimeBeforeIdleSleep     1000
+
 #define DISPLAY_WRANGLER_PRESENT    (!NO_KERNEL_HID)
 
 enum {
@@ -538,7 +543,7 @@ uuid_string_t bootsessionuuid_string;
 #if defined(XNU_TARGET_OS_OSX)
 #if DISPLAY_WRANGLER_PRESENT
 static uint32_t         gDarkWakeFlags = kDarkWakeFlagPromotionNone;
-#elif CONFIG_ARROW
+#elif defined(__arm64__)
 // Enable temporary full wake promotion workarounds
 static uint32_t         gDarkWakeFlags = kDarkWakeFlagUserWakeWorkaround;
 #else
@@ -770,6 +775,7 @@ struct PMAssertStruct {
 	uint64_t                    assertCPUStartTime;
 	uint64_t                    assertCPUDuration;
 };
+OSDefineValueObjectForDependentType(PMAssertStruct)
 
 /*
  * PMAssertionsTracker
@@ -1094,23 +1100,30 @@ void
 IOPMrootDomain::updateConsoleUsers(void)
 {
 	IOService::updateConsoleUsers(NULL, kIOMessageSystemHasPoweredOn);
-	if (tasksSuspended) {
-		tasksSuspended = FALSE;
-		updateTasksSuspend();
-	}
+	updateTasksSuspend(kTasksSuspendUnsuspended, kTasksSuspendNoChange);
 }
 
-void
-IOPMrootDomain::updateTasksSuspend(void)
+bool
+IOPMrootDomain::updateTasksSuspend(int newTasksSuspended, int newAOTTasksSuspended)
 {
 	bool newSuspend;
 
+	WAKEEVENT_LOCK();
+	if (newTasksSuspended != kTasksSuspendNoChange) {
+		tasksSuspended = (newTasksSuspended != kTasksSuspendUnsuspended);
+	}
+	if (newAOTTasksSuspended != kTasksSuspendNoChange) {
+		_aotTasksSuspended = (newAOTTasksSuspended != kTasksSuspendUnsuspended);
+	}
 	newSuspend = (tasksSuspended || _aotTasksSuspended);
 	if (newSuspend == tasksSuspendState) {
-		return;
+		WAKEEVENT_UNLOCK();
+		return false;
 	}
 	tasksSuspendState = newSuspend;
+	WAKEEVENT_UNLOCK();
 	tasks_system_suspend(newSuspend);
+	return true;
 }
 
 //******************************************************************************
@@ -1331,7 +1344,7 @@ sysctl_bootreason SYSCTL_HANDLER_ARGS
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, bootreason,
-    CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_bootreason, "A", "");
 
 static int
@@ -1398,7 +1411,8 @@ sysctl_aotmetrics SYSCTL_HANDLER_ARGS
 		return ENOENT;
 	}
 	if (NULL == gRootDomain->_aotMetrics) {
-		return ENOENT;
+		IOPMAOTMetrics nullMetrics = {};
+		return sysctl_io_opaque(req, &nullMetrics, sizeof(IOPMAOTMetrics), NULL);
 	}
 	return sysctl_io_opaque(req, gRootDomain->_aotMetrics, sizeof(IOPMAOTMetrics), NULL);
 }
@@ -1593,7 +1607,6 @@ IOPMrootDomain::start( IOService * nub )
 	settingsCtrlLock = IOLockAlloc();
 	wakeEventLock = IOLockAlloc();
 	gHaltLogLock = IOLockAlloc();
-	setPMRootDomain(this);
 
 	extraSleepTimer = thread_call_allocate(
 		idleSleepTimerExpired,
@@ -1726,6 +1739,10 @@ IOPMrootDomain::start( IOService * nub )
 	    OSMemberFunctionCast(IOTimerEventSource::Action,
 	    this, &IOPMrootDomain::aotEvaluate));
 	gIOPMWorkLoop->addEventSource(_aotTimerES.get());
+
+	// Avoid publishing service early so gIOPMWorkLoop is
+	// guaranteed to be initialized by rootDomain.
+	setPMRootDomain(this);
 
 	// create our power parent
 	gPatriarch = new IORootParent;
@@ -2526,6 +2543,29 @@ IOPMrootDomain::startIdleSleepTimer( uint32_t inMilliSeconds )
 		return;
 	}
 	if (inMilliSeconds) {
+		if (inMilliSeconds < kMinimumTimeBeforeIdleSleep) {
+			AbsoluteTime    now;
+			uint64_t        nsec_since_wake;
+			uint64_t                msec_since_wake;
+
+			// Adjust idle timer so it will not expire until atleast kMinimumTimeBeforeIdleSleep milliseconds
+			// after the most recent AP wake.
+			clock_get_uptime(&now);
+			SUB_ABSOLUTETIME(&now, &gIOLastWakeAbsTime);
+			absolutetime_to_nanoseconds(now, &nsec_since_wake);
+			msec_since_wake = nsec_since_wake / NSEC_PER_MSEC;
+
+			if (msec_since_wake < kMinimumTimeBeforeIdleSleep) {
+				uint32_t newIdleTimer = kMinimumTimeBeforeIdleSleep - (uint32_t)msec_since_wake;
+
+				// Ensure that our new idle timer is not less than inMilliSeconds,
+				// as we should only be increasing the timer duration, not decreasing it
+				if (newIdleTimer > inMilliSeconds) {
+					DLOG("startIdleSleepTimer increasing timeout from %u to %u\n", inMilliSeconds, newIdleTimer);
+					inMilliSeconds = newIdleTimer;
+				}
+			}
+		}
 		clock_interval_to_deadline(inMilliSeconds, kMillisecondScale, &deadline);
 		thread_call_enter_delayed(extraSleepTimer, deadline);
 		idleSleepTimerPending = true;
@@ -3678,6 +3718,11 @@ IOPMrootDomain::tellChangeUp( unsigned long stateNum )
 
 		tracePoint( kIOPMTracePointWakeApplications );
 		tellClients( kIOMessageSystemHasPoweredOn );
+	} else if (stateNum == AOT_STATE) {
+		if (getPowerState() == AOT_STATE) {
+			// Sleep was cancelled by idle cancel or revert
+			startIdleSleepTimer(idleMilliSeconds);
+		}
 	}
 }
 
@@ -4096,10 +4141,8 @@ IOPMrootDomain::willNotifyPowerChildren( IOPMPowerStateIndex newPowerState )
 
 	if (SLEEP_STATE == newPowerState) {
 		notifierThread = current_thread();
-		if (!tasksSuspended) {
+		if (updateTasksSuspend(kTasksSuspendSuspended, kTasksSuspendNoChange)) {
 			AbsoluteTime deadline;
-			tasksSuspended = TRUE;
-			updateTasksSuspend();
 
 			clock_interval_to_deadline(10, kSecondScale, &deadline);
 #if defined(XNU_TARGET_OS_OSX)
@@ -4119,6 +4162,7 @@ IOPMrootDomain::willNotifyPowerChildren( IOPMPowerStateIndex newPowerState )
 		if (!_aotMode) {
 			_aotTestTime = 0;
 			_aotWakeTimeCalendar.selector = kPMCalendarTypeInvalid;
+			_aotLastWakeTime = 0;
 			if (_aotMetrics) {
 				bzero(_aotMetrics, sizeof(IOPMAOTMetrics));
 			}
@@ -7602,6 +7646,10 @@ IOPMrootDomain::setWakeTime(uint64_t wakeContinuousTime)
 	clock_usec_t    nowmicrosecs, wakemicrosecs;
 	uint64_t        nowAbs, wakeAbs;
 
+	if (!_aotMode) {
+		return kIOReturnNotReady;
+	}
+
 	clock_gettimeofday_and_absolute_time(&nowsecs, &nowmicrosecs, &nowAbs);
 	wakeAbs = continuoustime_to_absolutetime(wakeContinuousTime);
 	if (wakeAbs < nowAbs) {
@@ -7687,13 +7735,12 @@ IOPMrootDomain::aotExit(bool cps)
 
 	ASSERT_GATED();
 	_aotNow = false;
-	_aotTasksSuspended  = false;
 	_aotReadyToFullWake = false;
 	if (_aotTimerScheduled) {
 		_aotTimerES->cancelTimeout();
 		_aotTimerScheduled = false;
 	}
-	updateTasksSuspend();
+	updateTasksSuspend(kTasksSuspendNoChange, kTasksSuspendUnsuspended);
 
 	_aotMetrics->totalTime += mach_absolute_time() - _aotLastWakeTime;
 	_aotLastWakeTime = 0;
@@ -7769,6 +7816,12 @@ IOPMrootDomain::adjustPowerState( bool sleepASAP )
 		bool exitNow;
 
 		if (AOT_STATE != getPowerState()) {
+			return;
+		}
+		if (kIOPMDriverAssertionLevelOn == getPMAssertionLevel(kIOPMDriverAssertionCPUBit)) {
+			// Don't try to force sleep during AOT while IOMobileFramebuffer is holding a power assertion.
+			// Doing so will result in the sleep being cancelled anyway,
+			// but this check avoids unnecessary thrashing in the power state engine.
 			return;
 		}
 		WAKEEVENT_LOCK();
@@ -10356,6 +10409,11 @@ IOPMrootDomain::createPMAssertion(
 	ret = pmAssertions->createAssertion(whichAssertionBits, assertionLevel, ownerService, ownerDescription, &newAssertion);
 
 	if (kIOReturnSuccess == ret) {
+#if (DEVELOPMENT || DEBUG)
+		if (_aotNow) {
+			OSReportWithBacktrace("IOPMrootDomain::createPMAssertion(0x%qx)", newAssertion);
+		}
+#endif /* (DEVELOPMENT || DEBUG) */
 		return newAssertion;
 	} else {
 		return 0;
@@ -10365,10 +10423,14 @@ IOPMrootDomain::createPMAssertion(
 IOReturn
 IOPMrootDomain::releasePMAssertion(IOPMDriverAssertionID releaseAssertion)
 {
+#if (DEVELOPMENT || DEBUG)
+	if (_aotNow) {
+		OSReportWithBacktrace("IOPMrootDomain::releasePMAssertion(0x%qx)", releaseAssertion);
+	}
+#endif /* (DEVELOPMENT || DEBUG) */
 	if (!pmAssertions) {
 		return kIOReturnInternalError;
 	}
-
 	return pmAssertions->releaseAssertion(releaseAssertion);
 }
 
@@ -12180,7 +12242,7 @@ IOPMrootDomain::takeStackshot(bool wdogTrigger)
 {
 	swd_hdr *                hdr = NULL;
 	int                      cnt = 0;
-	int                      max_cnt = 2;
+	int                      max_cnt;
 	pid_t                    pid = 0;
 	kern_return_t            kr = KERN_SUCCESS;
 	uint64_t                 flags;
@@ -12237,13 +12299,16 @@ IOPMrootDomain::takeStackshot(bool wdogTrigger)
 	bufSize = hdr->alloc_size;
 
 	dstAddr = (char*)hdr + hdr->spindump_offset;
-	flags = STACKSHOT_KCDATA_FORMAT | STACKSHOT_NO_IO_STATS | STACKSHOT_SAVE_KEXT_LOADINFO | STACKSHOT_ACTIVE_KERNEL_THREADS_ONLY | STACKSHOT_THREAD_WAITINFO;
+	flags = STACKSHOT_KCDATA_FORMAT | STACKSHOT_NO_IO_STATS | STACKSHOT_SAVE_KEXT_LOADINFO | STACKSHOT_ACTIVE_KERNEL_THREADS_ONLY | STACKSHOT_THREAD_WAITINFO | STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL;
+
 	/* If not wdogTrigger only take kernel tasks stackshot
 	 */
 	if (wdogTrigger) {
 		pid = -1;
+		max_cnt = 3;
 	} else {
 		pid = 0;
+		max_cnt = 2;
 	}
 
 	/* Attempt to take stackshot with all ACTIVE_KERNEL_THREADS
@@ -12261,6 +12326,8 @@ IOPMrootDomain::takeStackshot(bool wdogTrigger)
 		if (kr == KERN_INSUFFICIENT_BUFFER_SIZE) {
 			if (pid == -1) {
 				pid = 0;
+			} else if (flags & STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL) {
+				flags = flags & ~STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL;
 			} else {
 				LOG("Insufficient buffer size for only kernel task\n");
 				break;
@@ -12308,9 +12375,12 @@ IOPMrootDomain::takeStackshot(bool wdogTrigger)
 						success = 1;
 						LOG("Successfully saved stackshot to NVRAM\n");
 					} else {
-						LOG("Compressed failure stackshot is too large. size=%d bytes\n", outlen);
 						if (pid == -1) {
+							LOG("Compressed failure stackshot is too large. size=%d bytes\n", outlen);
 							pid = 0;
+						} else if (flags & STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL) {
+							LOG("Compressed failure stackshot of kernel+dexts is too large size=%d bytes\n", outlen);
+							flags = flags & ~STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL;
 						} else {
 							LOG("Compressed failure stackshot of only kernel is too large size=%d bytes\n", outlen);
 							break;
@@ -12345,20 +12415,14 @@ skip_stackshot:
 				// then don't trigger again until at least 1 successful sleep & wake.
 				if (!(sleepCnt && (displayWakeCnt || darkWakeCnt))) {
 					LOG("Shutting down due to repeated Sleep/Wake failures\n");
-					if (!tasksSuspended) {
-						tasksSuspended = TRUE;
-						updateTasksSuspend();
-					}
+					updateTasksSuspend(kTasksSuspendSuspended, kTasksSuspendNoChange);
 					PEHaltRestart(kPEHaltCPU);
 					return;
 				}
 			}
 			if (gSwdPanic == 0) {
 				LOG("Calling panic prevented by swd_panic boot-args. Calling restart");
-				if (!tasksSuspended) {
-					tasksSuspended = TRUE;
-					updateTasksSuspend();
-				}
+				updateTasksSuspend(kTasksSuspendSuspended, kTasksSuspendNoChange);
 				PEHaltRestart(kPERestartCPU);
 			}
 		}

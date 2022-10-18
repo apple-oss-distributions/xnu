@@ -220,6 +220,33 @@ typedef struct queue_entry      queue_head_t;
 typedef struct queue_entry      queue_chain_t;
 typedef struct queue_entry      *queue_entry_t;
 
+#if defined(XNU_KERNEL_PRIVATE) || DRIVERKIT_FRAMEWORK_INCLUDE
+
+#if KERNEL
+__abortlike
+extern void __queue_element_linkage_invalid(queue_entry_t e);
+#else
+#define __queue_element_linkage_invalid(e)      __builtin_trap()
+#endif
+
+static inline void
+__QUEUE_ELT_VALIDATE(queue_entry_t elt)
+{
+	if (elt->prev->next != elt || elt->next->prev != elt) {
+		__queue_element_linkage_invalid(elt);
+	}
+}
+
+static inline void
+__DEQUEUE_ELT_CLEANUP(queue_entry_t elt)
+{
+	elt->next = elt->prev = (queue_entry_t)NULL;
+}
+#else
+#define __QUEUE_ELT_VALIDATE(elt)       ((void)0)
+#define __DEQUEUE_ELT_CLEANUP(elt)      ((void)0)
+#endif /* !(XNU_KERNEL_PRIVATE || DRIVERKIT_FRAMEWORK_INCLUDE)*/
+
 /*
  *	enqueue puts "elt" on the "queue".
  *	dequeue returns the first element in the "queue".
@@ -227,45 +254,9 @@ typedef struct queue_entry      *queue_entry_t;
  */
 
 #if !DRIVERKIT_FRAMEWORK_INCLUDE
-#define enqueue(queue, elt)      enqueue_tail(queue, elt)
+#define enqueue(queue, elt)     enqueue_tail(queue, elt)
 #define dequeue(queue)          dequeue_head(queue)
 #endif
-
-#if defined(XNU_KERNEL_PRIVATE) || DRIVERKIT_FRAMEWORK_INCLUDE
-#if !DRIVERKIT_FRAMEWORK_INCLUDE
-#include <kern/debug.h>
-#endif /* !DRIVERKIT_FRAMEWORK_INCLUDE */
-static inline void
-__QUEUE_ELT_VALIDATE(queue_entry_t elt)
-{
-	queue_entry_t   elt_next, elt_prev;
-
-	if (__improbable(elt == (queue_entry_t)NULL)) {
-		panic("Invalid queue element %p", elt);
-	}
-
-	elt_next = elt->next;
-	elt_prev = elt->prev;
-
-	if (__improbable(elt_next == (queue_entry_t)NULL || elt_prev == (queue_entry_t)NULL)) {
-		panic("Invalid queue element pointers for %p: next %p prev %p", elt, elt_next, elt_prev);
-	}
-	if (__improbable(elt_next->prev != elt || elt_prev->next != elt)) {
-		panic("Invalid queue element linkage for %p: next %p next->prev %p prev %p prev->next %p",
-		    elt, elt_next, elt_next->prev, elt_prev, elt_prev->next);
-	}
-}
-
-static inline void
-__DEQUEUE_ELT_CLEANUP(queue_entry_t elt)
-{
-	(elt)->next = (queue_entry_t)NULL;
-	(elt)->prev = (queue_entry_t)NULL;
-}
-#else
-#define __QUEUE_ELT_VALIDATE(elt) do { } while (0)
-#define __DEQUEUE_ELT_CLEANUP(elt) do { } while(0)
-#endif /* !(XNU_KERNEL_PRIVATE || DRIVERKIT_FRAMEWORK_INCLUDE)*/
 
 static __inline__ void
 enqueue_head(

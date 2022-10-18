@@ -1242,7 +1242,7 @@ struct vnop_allocate_args {
  *  PREALLOCATE:     preallocate allocation blocks.
  *  ALLOCATECONTIG:  allocate contigious space.
  *  ALLOCATEALL:     allocate all requested space or no space at all.
- *  FREEREMAINDER:   deallocate allocated but unfilled blocks.
+ *  ALLOCATEPERSIST:  do not deallocate allocated but unfilled blocks at close(2).
  *  ALLOCATEFROMPEOF: allocate from the physical eof.
  *  ALLOCATEFROMVOL:  allocate from the volume offset.
  *  @param bytesallocated  Additional bytes set aside for file. Set to 0 if none are allocated

@@ -87,10 +87,18 @@
  * runtime on top of each allocation.
  */
 
+_Static_assert(!KASAN_LIGHT, "Light mode not supported by KASan Classic.");
+
 /* Configuration options */
 static unsigned quarantine_enabled = 1;               /* Quarantine on/off */
 static unsigned free_yield = 0;                       /* ms yield after each free */
 static bool checks_enabled = false;                   /* Poision checking on/off */
+
+/*
+ * LLVM contains enough logic to inline check operations against the shadow
+ * table and uses this symbol as an anchor to find it in memory.
+ */
+const uintptr_t __asan_shadow_memory_dynamic_address = KASAN_OFFSET;
 
 void
 kasan_impl_init(void)
@@ -288,7 +296,7 @@ kasan_poison(vm_offset_t base, vm_size_t size, vm_size_t leftrz,
 		shadow[i] = l_flags;
 	}
 	for (; i < leftrz + size; i++) {
-		shadow[i] = ASAN_VALID; /* XXX: should not be necessary */
+		shadow[i] = ASAN_VALID;
 	}
 	/* Do we have any leftover valid byte? */
 	if (partial && (i < total)) {
@@ -492,11 +500,6 @@ footer_for_user_addr(vm_offset_t addr, vm_size_t *size)
 vm_size_t
 kasan_alloc_resize(vm_size_t size)
 {
-	vm_size_t tmp;
-	if (os_add_overflow(size, 4 * PAGE_SIZE, &tmp)) {
-		panic("allocation size overflow (%lu)", size);
-	}
-
 	if (size >= 128) {
 		/* Add a little extra right redzone to larger objects. Gives us extra
 		 * overflow protection, and more space for the backtrace. */
@@ -732,19 +735,18 @@ fle_crc(struct freelist_entry *fle)
  */
 void NOINLINE
 kasan_free_internal(void **addrp, vm_size_t *sizep, int type,
-    zone_t *zone, vm_size_t user_size, int locked,
+    zone_t *zonep, vm_size_t user_size, int locked,
     bool doquarantine)
 {
 	vm_size_t size = *sizep;
 	vm_offset_t addr = *(vm_offset_t *)addrp;
+	zone_t zone = *zonep;
 
 	assert(type >= 0 && type < KASAN_HEAP_TYPES);
 	if (type == KASAN_HEAP_KALLOC) {
-		/* zero-size kalloc allocations are allowed */
-		assert(!zone);
-	} else if (type == KASAN_HEAP_ZALLOC) {
-		assert(zone && user_size);
-	} else if (type == KASAN_HEAP_FAKESTACK) {
+		/* for kalloc the size can be 0 */
+		assert(zone);
+	} else {
 		assert(zone && user_size);
 	}
 
@@ -769,10 +771,7 @@ kasan_free_internal(void **addrp, vm_size_t *sizep, int type,
 	fle->size = size;
 	fle->user_size = user_size;
 	fle->frames = 0;
-	fle->zone = ZONE_NULL;
-	if (zone) {
-		fle->zone = *zone;
-	}
+	fle->zone = zone;
 	if (type != KASAN_HEAP_FAKESTACK) {
 		/* don't do expensive things on the fakestack path */
 		fle->frames = kasan_alloc_bt(fle->backtrace, fle->size - sizeof(struct freelist_entry), 3);
@@ -808,12 +807,7 @@ kasan_free_internal(void **addrp, vm_size_t *sizep, int type,
 		q->entries--;
 		q->size -= tofree->size;
 
-		if (type != KASAN_HEAP_KALLOC) {
-			assert((vm_offset_t)zone >= VM_MIN_KERNEL_AND_KEXT_ADDRESS &&
-			    (vm_offset_t)zone <= VM_MAX_KERNEL_ADDRESS);
-			*zone = tofree->zone;
-		}
-
+		zone = tofree->zone;
 		size = tofree->size;
 		addr = (vm_offset_t)tofree;
 
@@ -830,6 +824,8 @@ kasan_free_internal(void **addrp, vm_size_t *sizep, int type,
 	} else {
 		/* quarantine is not full - don't really free anything */
 		addr = 0;
+		zone = ZONE_NULL;
+		size = 0;
 	}
 
 free_current_locked:
@@ -842,14 +838,15 @@ free_current:
 	if (addr) {
 		kasan_unpoison((void *)addr, size);
 		*sizep = size;
+		*zonep = zone;
 	}
 }
 
 void NOINLINE
 kasan_free(void **addrp, vm_size_t *sizep, int type, zone_t *zone,
-    vm_size_t user_size, bool quarantine)
+    vm_size_t user_size)
 {
-	kasan_free_internal(addrp, sizep, type, zone, user_size, 0, quarantine);
+	kasan_free_internal(addrp, sizep, type, zone, user_size, 0, true);
 
 	if (free_yield) {
 		thread_yield_internal(free_yield);

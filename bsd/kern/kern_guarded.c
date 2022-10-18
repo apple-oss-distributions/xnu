@@ -31,9 +31,7 @@
 #include <sys/filedesc.h>
 #include <sys/kernel.h>
 #include <sys/file_internal.h>
-#include <kern/exc_guard.h>
 #include <sys/guarded.h>
-#include <kern/kalloc.h>
 #include <sys/sysproto.h>
 #include <sys/vnode.h>
 #include <sys/vnode_internal.h>
@@ -47,6 +45,11 @@
 #include <stdbool.h>
 #include <vm/vm_protos.h>
 #include <libkern/section_keywords.h>
+
+#include <kern/kalloc.h>
+#include <kern/task.h>
+#include <kern/exc_guard.h>
+
 #if CONFIG_MACF && CONFIG_VNGUARD
 #include <security/mac.h>
 #include <security/mac_framework.h>
@@ -57,10 +60,12 @@
 #endif
 
 #define f_flag fp_glob->fg_flag
-extern int dofilewrite(vfs_context_t ctx, struct fileproc *fp,
-    user_addr_t bufp, user_size_t nbyte, off_t offset,
-    int flags, user_ssize_t *retval );
-extern int do_uiowrite(struct proc *p, struct fileproc *fp, uio_t uio, int flags, user_ssize_t *retval);
+extern int writev_uio(struct proc *p, int fd, user_addr_t user_iovp,
+    int iovcnt, off_t offset, int flags, guardid_t *puguard,
+    user_ssize_t *retval);
+extern int write_internal(struct proc *p, int fd, user_addr_t buf,
+    user_size_t nbyte, off_t offset, int flags, guardid_t *puguard,
+    user_ssize_t *retval);
 extern int exit_with_guard_exception(void *p, mach_exception_data_type_t code,
     mach_exception_data_type_t subcode);
 /*
@@ -69,7 +74,6 @@ extern int exit_with_guard_exception(void *p, mach_exception_data_type_t code,
 
 kern_return_t task_exception_notify(exception_type_t exception,
     mach_exception_data_type_t code, mach_exception_data_type_t subcode);
-kern_return_t task_violated_guard(mach_exception_code_t, mach_exception_subcode_t, void *);
 
 #define GUARD_REQUIRED (GUARD_DUP)
 #define GUARD_ALL      (GUARD_REQUIRED |        \
@@ -102,6 +106,21 @@ guarded_fileproc_init(struct fileproc *fp, void *initarg)
 	assert(arg->gca_attrs);
 	fp->fp_guard = guarded_fileproc_alloc(arg->gca_guard);
 	fp->fp_guard_attrs = arg->gca_attrs;
+}
+
+/*
+ * This is called from fdt_fork(),
+ * where it needs to copy a guarded
+ * fd to the new shadow proc.
+ */
+void
+guarded_fileproc_copy_guard(struct fileproc *ofp, struct fileproc *nfp)
+{
+	struct gfp_crarg arg = {
+		.gca_guard = ofp->fp_guard->fpg_guard,
+		.gca_attrs = ofp->fp_guard_attrs
+	};
+	guarded_fileproc_init(nfp, &arg);
 }
 
 /*
@@ -145,7 +164,7 @@ fp_lookup_guarded_locked(proc_t p, int fd, guardid_t guard,
 	return 0;
 }
 
-static int
+int
 fp_lookup_guarded(proc_t p, int fd, guardid_t guard,
     struct fileproc **fpp, int locked)
 {
@@ -289,7 +308,7 @@ guarded_open_np(proc_t p, struct guarded_open_np_args *uap, int32_t *retval)
 	    uap->path, ctx);
 
 	return open1(ctx, &nd, uap->flags | O_CLOFORK, &va,
-	           guarded_fileproc_init, &crarg, retval);
+	           guarded_fileproc_init, &crarg, retval, AUTH_OPEN_NOAUTHFD);
 }
 
 /*
@@ -365,7 +384,7 @@ guarded_open_dprotected_np(proc_t p, struct guarded_open_dprotected_np_args *uap
 	}
 
 	return open1(ctx, &nd, uap->flags | O_CLOFORK, &va,
-	           guarded_fileproc_init, &crarg, retval);
+	           guarded_fileproc_init, &crarg, retval, AUTH_OPEN_NOAUTHFD);
 }
 
 /*
@@ -571,7 +590,7 @@ change_fdguard_np(proc_t p, struct change_fdguard_np_args *uap,
 			/*
 			 * Replace old guard with new guard
 			 */
-			if (oldg == fp->fp_guard->fpg_guard ||
+			if (oldg == fp->fp_guard->fpg_guard &&
 			    uap->guardflags == fp->fp_guard_attrs) {
 				/*
 				 * Must match existing guard + attributes
@@ -673,34 +692,15 @@ int
 guarded_write_np(struct proc *p, struct guarded_write_np_args *uap, user_ssize_t *retval)
 {
 	int error;
-	int fd = uap->fd;
 	guardid_t uguard;
-	struct fileproc *fp;
 
-	AUDIT_ARG(fd, fd);
+	AUDIT_ARG(fd, uap->fd);
 
 	if ((error = copyin(uap->guard, &uguard, sizeof(uguard))) != 0) {
 		return error;
 	}
 
-	error = fp_lookup_guarded(p, fd, uguard, &fp, 0);
-	if (error) {
-		return error;
-	}
-
-	if ((fp->f_flag & FWRITE) == 0) {
-		error = EBADF;
-	} else {
-		struct vfs_context context = *(vfs_context_current());
-		context.vc_ucred = fp->fp_glob->fg_cred;
-
-		error = dofilewrite(&context, fp, uap->cbuf, uap->nbyte,
-		    (off_t)-1, 0, retval);
-	}
-
-	fp_drop(p, fd, fp, 0);
-
-	return error;
+	return write_internal(p, uap->fd, uap->cbuf, uap->nbyte, 0, 0, &uguard, retval);
 }
 
 /*
@@ -712,57 +712,20 @@ guarded_write_np(struct proc *p, struct guarded_write_np_args *uap, user_ssize_t
 int
 guarded_pwrite_np(struct proc *p, struct guarded_pwrite_np_args *uap, user_ssize_t *retval)
 {
-	struct fileproc *fp;
 	int error;
-	int fd = uap->fd;
-	vnode_t vp  = (vnode_t)0;
 	guardid_t uguard;
 
-	AUDIT_ARG(fd, fd);
+	AUDIT_ARG(fd, uap->fd);
 
 	if ((error = copyin(uap->guard, &uguard, sizeof(uguard))) != 0) {
 		return error;
 	}
 
-	error = fp_lookup_guarded(p, fd, uguard, &fp, 0);
-	if (error) {
-		return error;
-	}
-
-	if ((fp->f_flag & FWRITE) == 0) {
-		error = EBADF;
-	} else {
-		struct vfs_context context = *vfs_context_current();
-		context.vc_ucred = fp->fp_glob->fg_cred;
-
-		if (FILEGLOB_DTYPE(fp->fp_glob) != DTYPE_VNODE) {
-			error = ESPIPE;
-			goto errout;
-		}
-		vp = (vnode_t)fp_get_data(fp);
-		if (vnode_isfifo(vp)) {
-			error = ESPIPE;
-			goto errout;
-		}
-		if ((vp->v_flag & VISTTY)) {
-			error = ENXIO;
-			goto errout;
-		}
-		if (uap->offset == (off_t)-1) {
-			error = EINVAL;
-			goto errout;
-		}
-
-		error = dofilewrite(&context, fp, uap->buf, uap->nbyte,
-		    uap->offset, FOF_OFFSET, retval);
-	}
-errout:
-	fp_drop(p, fd, fp, 0);
-
 	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_guarded_pwrite_np) | DBG_FUNC_NONE),
 	    uap->fd, uap->nbyte, (unsigned int)((uap->offset >> 32)), (unsigned int)(uap->offset), 0);
 
-	return error;
+	return write_internal(p, uap->fd, uap->buf, uap->nbyte, uap->offset, FOF_OFFSET,
+	           &uguard, retval);
 }
 
 /*
@@ -775,67 +738,16 @@ errout:
 int
 guarded_writev_np(struct proc *p, struct guarded_writev_np_args *uap, user_ssize_t *retval)
 {
-	uio_t auio = NULL;
 	int error;
-	struct fileproc *fp;
-	struct user_iovec *iovp;
 	guardid_t uguard;
 
 	AUDIT_ARG(fd, uap->fd);
 
-	/* Verify range bedfore calling uio_create() */
-	if (uap->iovcnt <= 0 || uap->iovcnt > UIO_MAXIOV) {
-		return EINVAL;
-	}
-
-	/* allocate a uio large enough to hold the number of iovecs passed */
-	auio = uio_create(uap->iovcnt, 0,
-	    (IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32),
-	    UIO_WRITE);
-
-	/* get location of iovecs within the uio.  then copyin the iovecs from
-	 * user space.
-	 */
-	iovp = uio_iovsaddr(auio);
-	if (iovp == NULL) {
-		error = ENOMEM;
-		goto ExitThisRoutine;
-	}
-	error = copyin_user_iovec_array(uap->iovp,
-	    IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32,
-	    uap->iovcnt, iovp);
-	if (error) {
-		goto ExitThisRoutine;
-	}
-
-	/* finalize uio_t for use and do the IO
-	 */
-	error = uio_calculateresid(auio);
-	if (error) {
-		goto ExitThisRoutine;
-	}
-
 	if ((error = copyin(uap->guard, &uguard, sizeof(uguard))) != 0) {
-		goto ExitThisRoutine;
+		return error;
 	}
 
-	error = fp_lookup_guarded(p, uap->fd, uguard, &fp, 0);
-	if (error) {
-		goto ExitThisRoutine;
-	}
-
-	if ((fp->f_flag & FWRITE) == 0) {
-		error = EBADF;
-	} else {
-		error = do_uiowrite(p, fp, auio, 0, retval);
-	}
-
-	fp_drop(p, uap->fd, fp, 0);
-ExitThisRoutine:
-	if (auio != NULL) {
-		uio_free(auio);
-	}
-	return error;
+	return writev_uio(p, uap->fd, uap->iovp, uap->iovcnt, 0, 0, &uguard, retval);
 }
 
 /*
@@ -1371,7 +1283,7 @@ vng_guard_violation(const struct vng_info *vgi,
 			if (*path && len) {
 				r = vng_reason_from_pathname(path, len);
 			}
-			task_violated_guard(code, subcode, r); /* not fatal */
+			task_violated_guard(code, subcode, r, TRUE); /* not fatal */
 			if (NULL != r) {
 				os_reason_free(r);
 			}

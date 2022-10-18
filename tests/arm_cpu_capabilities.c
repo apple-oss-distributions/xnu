@@ -43,7 +43,8 @@ T_GLOBAL_META(
 static volatile bool cap_usable;
 
 static size_t
-bad_instruction_handler(exception_type_t type __unused, mach_exception_data_t codes __unused)
+bad_instruction_handler(mach_port_t task __unused, mach_port_t thread __unused,
+    exception_type_t type __unused, mach_exception_data_t codes __unused)
 {
 	cap_usable = false;
 	return 4;
@@ -342,6 +343,34 @@ try_i8mm(void)
         );
 }
 
+
+static void
+try_fpexcp(void)
+{
+	/* FP Exceptions are supported if all exceptions bit can be set. */
+	const uint64_t flags = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 15);
+
+	uint64_t old_fpcr = __builtin_arm_rsr64("FPCR");
+	__builtin_arm_wsr64("FPCR", old_fpcr | flags);
+	uint64_t new_fpcr = __builtin_arm_rsr64("FPCR");
+	__builtin_arm_wsr64("FPCR", old_fpcr);
+
+	if ((new_fpcr & flags) != flags) {
+		cap_usable = false;
+	}
+}
+
+static void
+try_dit(void)
+{
+	asm volatile (
+                "msr DIT, x0"
+                :
+                :
+                : "x0"
+        );
+}
+
 static mach_port_t exc_port;
 
 static void
@@ -393,7 +422,7 @@ T_DECL(cpu_capabilities, "Verify ARM CPU capabilities") {
 	test_cpu_capability("SHA1", kHasFeatSHA1, true, "hw.optional.arm.FEAT_SHA1", try_sha1);
 	test_cpu_capability("SHA256", kHasFeatSHA256, true, "hw.optional.arm.FEAT_SHA256", try_sha256);
 	test_cpu_capability("PMULL", kHasFeatPMULL, true, "hw.optional.arm.FEAT_PMULL", try_pmull);
-	test_cpu_capability("FCMA (deprecatded sysctl)", kHasFeatFCMA, true, "hw.optional.armv8_3_compnum", NULL);
+	test_cpu_capability("FCMA (deprecated sysctl)", kHasFeatFCMA, true, "hw.optional.armv8_3_compnum", NULL);
 	test_cpu_capability("FCMA", kHasFeatFCMA, true, "hw.optional.arm.FEAT_FCMA", try_compnum);
 	test_cpu_capability("FlagM", kHasFEATFlagM, true, "hw.optional.arm.FEAT_FlagM", try_flagm);
 	test_cpu_capability("FlagM2", kHasFEATFlagM2, true, "hw.optional.arm.FEAT_FlagM2", try_flagm2);
@@ -408,11 +437,14 @@ T_DECL(cpu_capabilities, "Verify ARM CPU capabilities") {
 	test_cpu_capability("SPECRES", kHasFeatSPECRES, true, "hw.optional.arm.FEAT_SPECRES", try_specres);
 	test_cpu_capability("LRCPC", kHasFeatLRCPC, true, "hw.optional.arm.FEAT_LRCPC", try_lrcpc);
 	test_cpu_capability("LRCPC2", kHasFeatLRCPC2, true, "hw.optional.arm.FEAT_LRCPC2", try_lrcpc2);
+	test_cpu_capability("DIT", kHasFeatDIT, true, "hw.optional.arm.FEAT_DIT", try_dit);
+	test_cpu_capability("FP16", kHasFP_SyncExceptions, true, "hw.optional.arm.FP_SyncExceptions", try_fpexcp);
 
+	// The following features do not have a commpage entry
 	test_cpu_capability("BF16", 0, false, "hw.optional.arm.FEAT_BF16", try_bf16);
 	test_cpu_capability("I8MM", 0, false, "hw.optional.arm.FEAT_I8MM", try_i8mm);
 
-	// The following features do not add instructions
+	// The following features do not add instructions or registers to test for the presence of
 	test_cpu_capability("LSE2", kHasFeatLSE2, true, "hw.optional.arm.FEAT_LSE2", NULL);
 	test_cpu_capability("CSV2", kHasFeatCSV2, true, "hw.optional.arm.FEAT_CSV2", NULL);
 	test_cpu_capability("CSV3", kHasFeatCSV3, true, "hw.optional.arm.FEAT_CSV3", NULL);

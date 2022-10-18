@@ -35,7 +35,7 @@
 #include <sys/user.h>
 #include <sys/kauth.h>
 #include <kern/debug.h>
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 
 int             (*dtrace_pid_probe_ptr)(arm_saved_state_t *);
 int             (*dtrace_return_probe_ptr) (arm_saved_state_t *);

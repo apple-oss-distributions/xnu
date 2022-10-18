@@ -62,27 +62,6 @@
 #include <kern/kern_types.h>
 
 /*
- * Some platforms have very expensive timebase routines. An optimization
- * is to avoid switching timers on kernel exit/entry, which results in all
- * time billed to the system timer. However, when exposed to userspace,
- * we report as user time to indicate that work was done on behalf of
- * userspace.
- *
- * Although this policy is implemented as a global variable, we snapshot it
- * at key points in the thread structure (when the thread is locked and
- * executing in the kernel) to avoid imbalances.
- */
-extern int precise_user_kernel_time;
-
-/*
- * thread must be locked, or be the current executing thread, so that
- * it doesn't transition from user to kernel while updating the
- * thread-local value (or in kernel debugger context). In the future,
- * we make take into account task-level or thread-level policy.
- */
-#define use_precise_user_kernel_time(thread) (precise_user_kernel_time)
-
-/*
  * Definitions for high resolution timers.
  */
 
@@ -125,26 +104,6 @@ void timer_stop(timer_t timer, uint64_t tstamp);
  * Update the `timer` at time `tstamp`, leaving it running.
  */
 void timer_update(timer_t timer, uint64_t tstamp);
-
-/*
- * Update the `timer` with time `tstamp` and start `new_timer`.
- */
-void timer_switch(timer_t timer, uint64_t tstamp, timer_t new_timer);
-
-/*
- * Update the thread timer at an "event," like a context switch, at time
- * `tstamp`.  This stops the current timer and starts the `new_timer` running.
- *
- * Must be called with interrupts disabled.
- */
-void processor_timer_switch_thread(uint64_t tstamp, timer_t new_timer);
-
-/*
- * Return the difference between the `timer` and a previous value pointed to by
- * `prev_in_cur_out`.  Store the current value of the timer to
- * `prev_in_cur_out`.
- */
-uint64_t timer_delta(timer_t timer, uint64_t *prev_in_cur_out);
 
 /*
  * Read the accumulated time of `timer`.

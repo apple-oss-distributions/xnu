@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -40,6 +40,9 @@
 #ifdef KERNEL_PRIVATE
 struct ifnet_interface_advisory;
 #endif /* KERNEL_PRIVATE */
+
+struct ifnet_traffic_descriptor_common;
+struct ifnet_traffic_rule_action;
 
 /*
  * Nexus terminology and overview.  The relationship between the objects are
@@ -96,7 +99,7 @@ typedef uint8_t nexus_name_t[64];
 /*
  * Nexus instance port.
  */
-typedef uint32_t nexus_port_t;
+typedef uint16_t nexus_port_t;
 
 /*
  * User pipe Nexus has at most two ports: one client and server.
@@ -164,6 +167,7 @@ typedef enum {
 	 * The os channel will appear as defunct to the active peer.
 	 */
 	NEXUS_ATTR_REJECT_ON_CLOSE,
+	NEXUS_ATTR_LARGE_BUF_SIZE,     /* (g/s) size of large buffer (bytes) */
 } nexus_attr_type_t;
 
 /*
@@ -377,6 +381,35 @@ extern int os_nexus_controller_unbind_provider_instance(
  */
 extern int os_nexus_controller_read_provider_attr(const nexus_controller_t ctl,
     const uuid_t prov_uuid, nexus_attr_t attr);
+
+/*
+ * Traffic rules APIs.
+ */
+
+/* Persist after controller close. */
+#define NXCTL_ADD_TRAFFIC_RULE_FLAG_PERSIST 0x0001
+extern int os_nexus_controller_add_traffic_rule(const nexus_controller_t ctl,
+    const char *ifname, const struct ifnet_traffic_descriptor_common *td,
+    const struct ifnet_traffic_rule_action *ra, const uint32_t flags,
+    uuid_t *rule_uuid);
+
+extern int os_nexus_controller_remove_traffic_rule(const nexus_controller_t ctl,
+    const uuid_t rule_uuid);
+
+struct nexus_traffic_rule_info {
+	uuid_t *nri_rule_uuid;
+	char *nri_owner;
+	char *nri_ifname;
+	struct ifnet_traffic_descriptor_common *nri_td;
+	struct ifnet_traffic_rule_action *nri_ra;
+	uint32_t nri_flags;
+};
+/* Return TRUE to continue, FALSE to exit. */
+typedef boolean_t (nexus_traffic_rule_iterator_t)(void *,
+    const struct nexus_traffic_rule_info *);
+
+extern int os_nexus_controller_iterate_traffic_rules(const nexus_controller_t ctl,
+    nexus_traffic_rule_iterator_t itr, void *itr_arg);
 
 /*
  * Destroys a Nexus controller handle.
@@ -675,6 +708,8 @@ typedef errno_t (*nxprov_sync_packets_fn_t)(kern_nexus_provider_t nexus_prov,
 typedef enum {
 	/* periodic interface advisory notifications */
 	KERN_NEXUS_CAPAB_INTERFACE_ADVISORY = 1,
+	/* extends queue set functionality: e.g. notify steering info */
+	KERN_NEXUS_CAPAB_QSET_EXTENSIONS,
 } kern_nexus_capab_t;
 
 typedef errno_t (*nxprov_capab_config_fn_t)(kern_nexus_provider_t nexus_prov,
@@ -699,6 +734,23 @@ struct kern_nexus_capab_interface_advisory {
 	void *kncia_provider_context;
 	const kern_nexus_capab_interface_advisory_notify_fn_t kncia_notify;
 	kern_nexus_capab_interface_advisory_config_fn_t kncia_config;
+};
+
+/*
+ * struct kern_nexus_capab_qset_extensions
+ * @abstract qset extensions configuration callback.
+ * @param cqe_version Version of the capability structure.
+ * @param cqe_notify_steering_info callback provided by nexus provider.
+ * @param cqe_prov_ctx provider context for the above callback.
+ */
+#define KERN_NEXUS_CAPAB_QSET_EXTENSIONS_VERSION_1 1
+typedef errno_t (*kern_nexus_capab_qsext_notify_steering_info_fn_t)(
+	void *provider_context, void *qset_context,
+	struct ifnet_traffic_descriptor_common *td, bool add);
+struct kern_nexus_capab_qset_extensions {
+	uint32_t cqe_version;
+	void *cqe_prov_ctx;
+	kern_nexus_capab_qsext_notify_steering_info_fn_t cqe_notify_steering_info;
 };
 
 /*
@@ -998,6 +1050,13 @@ extern errno_t kern_nexus_netif_llink_add(struct kern_nexus *,
 
 extern errno_t kern_nexus_netif_llink_remove(struct kern_nexus *,
     kern_nexus_netif_llink_id_t);
+
+extern errno_t kern_netif_qset_tx_queue_len(kern_netif_qset_t,
+    uint32_t, uint32_t *, uint32_t *);
+
+extern void kern_netif_set_qset_combined(kern_netif_qset_t qset);
+
+extern void kern_netif_set_qset_separate(kern_netif_qset_t qset);
 
 /*
  * Misc.

@@ -73,7 +73,6 @@ MIGS="clock.defs
 	exc.defs
 	host_priv.defs
 	host_security.defs
-	lock_set.defs
 	mach_eventlink.defs
 	mach_host.defs
 	mach_port.defs

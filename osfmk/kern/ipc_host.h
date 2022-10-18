@@ -81,21 +81,16 @@ extern void ipc_clock_init(
 extern clock_t convert_port_to_clock(
 	ipc_port_t      port);
 
-/* Convert from a port to a clock control */
-extern clock_t convert_port_to_clock_ctrl(
-	ipc_port_t      port);
-
 /* Convert from a clock to a port */
 extern ipc_port_t convert_clock_to_port(
-	clock_t         clock);
-
-/* Convert from a clock control to a port */
-extern ipc_port_t convert_clock_ctrl_to_port(
 	clock_t         clock);
 
 /* Convert from a clock name to a clock pointer */
 extern clock_t port_name_to_clock(
 	mach_port_name_t clock_name);
+
+extern ipc_port_t host_port_copy_send(
+	ipc_port_t      port);
 
 /* Convert from a port to a host */
 extern host_t convert_port_to_host(
@@ -103,10 +98,6 @@ extern host_t convert_port_to_host(
 
 /* Convert from a port to a host privilege port */
 extern host_t convert_port_to_host_priv(
-	ipc_port_t      port);
-
-/*  Convert from a port to a host paging port */
-extern host_t convert_port_to_host_paging(
 	ipc_port_t      port);
 
 /* Convert from a host to a port */

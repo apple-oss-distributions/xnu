@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2020-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -192,13 +192,13 @@ unsigned int inuse_pmap_pages_count = 0;
 #define PV_BATCH_SIZE (PAGE_SIZE / sizeof(pv_entry_t))
 
 /* The batch allocation code assumes that a batch can fit within a single page. */
-#if defined(__arm__) || (defined(__arm64__) && __ARM_16K_PG__)
+#if defined(__arm64__) && __ARM_16K_PG__
 /**
  * PAGE_SIZE is a variable on arm64 systems with 4K VM pages, so no static
  * assert on those systems.
  */
 static_assert((PV_BATCH_SIZE * sizeof(pv_entry_t)) <= PAGE_SIZE);
-#endif /* defined(__arm__) || (defined(__arm64__) && __ARM_16K_PG__) */
+#endif /* defined(__arm64__) && __ARM_16K_PG__ */
 
 /**
  * The number of PVEs to attempt to keep in the kernel-dedicated free list. If
@@ -507,6 +507,15 @@ SECURITY_READ_ONLY_LATE(pmap_io_range_t*) io_attr_table = (pmap_io_range_t*)0;
 /* The number of ranges described by io_attr_table. */
 SECURITY_READ_ONLY_LATE(unsigned int) num_io_rgns = 0;
 
+/**
+ * Sorted representation of the pmap-io-filter entries in the device tree
+ * The entries are sorted and queried by {signature, range}.
+ */
+SECURITY_READ_ONLY_LATE(pmap_io_filter_entry_t*) io_filter_table = (pmap_io_filter_entry_t*)0;
+
+/* Number of total pmap-io-filter entries. */
+SECURITY_READ_ONLY_LATE(unsigned int) num_io_filter_entries = 0;
+
 #if XNU_MONITOR
 
 /**
@@ -528,12 +537,22 @@ SECURITY_READ_ONLY_LATE(pmap_paddr_t) pmap_stacks_end_pa = 0;
 SECURITY_READ_ONLY_LATE(pmap_paddr_t) ppl_cpu_save_area_start = 0;
 SECURITY_READ_ONLY_LATE(pmap_paddr_t) ppl_cpu_save_area_end = 0;
 
+#if HAS_GUARDED_IO_FILTER
+SECURITY_READ_ONLY_LATE(pmap_paddr_t) iofilter_stacks_start_pa = 0;
+SECURITY_READ_ONLY_LATE(pmap_paddr_t) iofilter_stacks_end_pa = 0;
+#endif /* HAS_GUARDED_IO_FILTER */
+
 #endif /* XNU_MONITOR */
 
 /* Prototypes used by pmap_data_bootstrap(). */
 vm_size_t pmap_compute_io_rgns(void);
 void pmap_load_io_rgns(void);
 void pmap_cpu_data_array_init(void);
+
+#if HAS_GUARDED_IO_FILTER
+vm_size_t pmap_compute_io_filters(void);
+void pmap_load_io_filters(void);
+#endif /* HAS_GUARDED_IO_FILTER */
 
 /**
  * This function is called once during pmap_bootstrap() to allocate and
@@ -624,6 +643,11 @@ pmap_data_bootstrap(void)
 	/* Scan the device tree and figure out how many PPL-owned I/O regions there are. */
 	const vm_size_t io_attr_table_size = pmap_compute_io_rgns();
 
+#if HAS_GUARDED_IO_FILTER
+	/* Scan the device tree for the size of pmap-io-filter entries. */
+	const vm_size_t io_filter_table_size = pmap_compute_io_filters();
+#endif /* HAS_GUARDED_IO_FILTER */
+
 	/**
 	 * Don't make any assumptions about the alignment of avail_start before
 	 * execution of this function. Always re-align it to ensure the first
@@ -641,7 +665,21 @@ pmap_data_bootstrap(void)
 	avail_start = PMAP_ALIGN(avail_start + pp_attr_table_size, __alignof(pmap_io_range_t));
 
 	io_attr_table = (pmap_io_range_t *)phystokv(avail_start);
+
+ #if HAS_GUARDED_IO_FILTER
+	/* Align avail_start to size of I/O filter entry. */
+	avail_start = PMAP_ALIGN(avail_start + io_attr_table_size, __alignof(pmap_io_filter_entry_t));
+
+	/* Allocate memory for io_filter_table. */
+	if (num_io_filter_entries != 0) {
+		io_filter_table = (pmap_io_filter_entry_t *)phystokv(avail_start);
+	}
+
+	/* Align avail_start for the next structure to be allocated. */
+	avail_start = PMAP_ALIGN(avail_start + io_filter_table_size, __alignof(pv_entry_t *));
+#else /* !HAS_GUARDED_IO_FILTER */
 	avail_start = PMAP_ALIGN(avail_start + io_attr_table_size, __alignof(pv_entry_t *));
+#endif /* HAS_GUARDED_IO_FILTER */
 
 	pv_head_table = (pv_entry_t **)phystokv(avail_start);
 
@@ -662,6 +700,11 @@ pmap_data_bootstrap(void)
 
 	/* Load data about the PPL-owned I/O regions into io_attr_table and sort it. */
 	pmap_load_io_rgns();
+
+#if HAS_GUARDED_IO_FILTER
+	/* Load the I/O filters into io_filter_table and sort them. */
+	pmap_load_io_filters();
+#endif /* HAS_GUARDED_IO_FILTER */
 
 #if XNU_MONITOR
 	/**
@@ -1155,6 +1198,14 @@ pmap_enqueue_pages(vm_page_t mem)
 	vm_object_unlock(pmap_object);
 }
 
+#if !XNU_MONITOR
+static inline boolean_t
+pmap_is_preemptible(void)
+{
+	return preemption_enabled() || (startup_phase < STARTUP_SUB_EARLY_BOOT);
+}
+#endif
+
 /**
  * Allocate a page for usage within the pmap and zero it out. If running on a
  * PPL-enabled system, this will allocate pages from the PPL page free list.
@@ -1185,7 +1236,10 @@ pmap_enqueue_pages(vm_page_t mem)
  *       jumping out of the PPL to allocate more pages.
  *
  * @return KERN_SUCCESS if a page was successfully allocated, or
- *         KERN_RESOURCE_SHORTAGE if a page failed to get allocated.
+ *         KERN_RESOURCE_SHORTAGE if a page failed to get allocated. This can
+ *         also be returned on non-PPL devices if preemption is disabled after
+ *         early boot since allocating memory from the VM requires grabbing a
+ *         mutex.
  */
 MARK_AS_PMAP_TEXT kern_return_t
 pmap_pages_alloc_zeroed(pmap_paddr_t *pa, unsigned size, unsigned options)
@@ -1219,6 +1273,16 @@ pmap_pages_alloc_zeroed(pmap_paddr_t *pa, unsigned size, unsigned options)
 #else /* XNU_MONITOR */
 	vm_page_t mem = VM_PAGE_NULL;
 	thread_t self = current_thread();
+
+	/**
+	 * It's not possible to allocate memory from the VM in a preemption disabled
+	 * environment except during early boot (since the VM needs to grab a mutex).
+	 * In those cases just return a resource shortage error and let the caller
+	 * deal with it.
+	 */
+	if (!pmap_is_preemptible()) {
+		return KERN_RESOURCE_SHORTAGE;
+	}
 
 	/**
 	 * We qualify for allocating reserved memory so set TH_OPT_VMPRIV to inform
@@ -1836,6 +1900,7 @@ pve_feed_page(unsigned alloc_flags)
  *            mapping.
  * @param lock_mode Which state the pmap lock is being held in if the mapping is
  *                  owned by a pmap, otherwise this is a don't care.
+ * @param options PMAP_OPTIONS_* family of options passed from the caller.
  * @param pvepp Output parameter that will get updated with a pointer to the
  *              allocated node if none of the free lists are empty, or a pointer
  *              to NULL otherwise. This pointer can't already be pointing to a
@@ -1860,6 +1925,7 @@ pv_alloc(
 	pmap_t pmap,
 	unsigned int pai,
 	pmap_lock_mode_t lock_mode,
+	unsigned int options,
 	pv_entry_t **pvepp)
 {
 	assert((pvepp != NULL) && (*pvepp == PV_ENTRY_NULL));
@@ -1903,6 +1969,12 @@ pv_alloc(
 			alloc_flags = PMAP_PAGES_ALLOCATE_NOWAIT | PMAP_PAGE_RECLAIM_NOWAIT;
 		}
 	}
+
+	/**
+	 * Make sure we have PMAP_PAGES_ALLOCATE_NOWAIT set in alloc_flags when the
+	 * input options argument has PMAP_OPTIONS_NOWAIT set.
+	 */
+	alloc_flags |= (options & PMAP_OPTIONS_NOWAIT) ? PMAP_PAGES_ALLOCATE_NOWAIT : 0;
 
 	/**
 	 * We ran out of PV entries all across the board, or this allocation is not
@@ -2085,6 +2157,7 @@ mapping_free_prime_internal(void)
  *            PVH_TYPE_PVEP.
  * @param lock_mode Which state the pmap lock is being held in if the mapping is
  *                  owned by a pmap, otherwise this is a don't care.
+ * @param options PMAP_OPTIONS_* family of options.
  *
  * @return PV_ALLOC_SUCCESS if the entry at `pai` was successfully converted
  *         into PVH_TYPE_PVEP, or the return value of pv_alloc() otherwise. See
@@ -2095,7 +2168,8 @@ MARK_AS_PMAP_TEXT static pv_alloc_return_t
 pepv_convert_ptep_to_pvep(
 	pmap_t pmap,
 	unsigned int pai,
-	pmap_lock_mode_t lock_mode)
+	pmap_lock_mode_t lock_mode,
+	unsigned int options)
 {
 	pvh_assert_locked(pai);
 
@@ -2103,7 +2177,7 @@ pepv_convert_ptep_to_pvep(
 	assert(pvh_test_type(pvh, PVH_TYPE_PTEP));
 
 	pv_entry_t *pvep = PV_ENTRY_NULL;
-	pv_alloc_return_t ret = pv_alloc(pmap, pai, lock_mode, &pvep);
+	pv_alloc_return_t ret = pv_alloc(pmap, pai, lock_mode, options, &pvep);
 	if (ret != PV_ALLOC_SUCCESS) {
 		return ret;
 	}
@@ -2214,6 +2288,7 @@ pmap_enter_pv(
 	}
 #endif /* XNU_MONITOR */
 
+
 #ifdef PVH_FLAG_CPU
 	/**
 	 * An IOMMU mapping may already be present for a page that hasn't yet had a
@@ -2269,7 +2344,7 @@ pmap_enter_pv(
 			 * to clobber those attributes.
 			 */
 			pvh_set_flags(pvh, pvh_flags);
-			if ((ret = pepv_convert_ptep_to_pvep(pmap, pai, lock_mode)) != PV_ALLOC_SUCCESS) {
+			if ((ret = pepv_convert_ptep_to_pvep(pmap, pai, lock_mode, options)) != PV_ALLOC_SUCCESS) {
 				return ret;
 			}
 
@@ -2300,7 +2375,7 @@ pmap_enter_pv(
 			pve_ptep_idx = 0;
 			pvh_set_flags(pvh, pvh_flags);
 			pvep = PV_ENTRY_NULL;
-			if ((ret = pv_alloc(pmap, pai, lock_mode, &pvep)) != PV_ALLOC_SUCCESS) {
+			if ((ret = pv_alloc(pmap, pai, lock_mode, options, &pvep)) != PV_ALLOC_SUCCESS) {
 				return ret;
 			}
 
@@ -2376,6 +2451,7 @@ pmap_remove_pv(
 		    __func__, pai, pvh_flags);
 	}
 #endif /* XNU_MONITOR */
+
 
 	if (pvh_test_type(pvh, PVH_TYPE_PTEP)) {
 		if (__improbable((ptep != pvh_ptep(pvh)))) {
@@ -2814,7 +2890,7 @@ ptd_info_init(
 	 * table resides at since more VA space is mapped the closer the page
 	 * table's level is to the root.
 	 */
-	ptdp->va[pt_index] = (vm_offset_t) va & ~pt_attr_ln_pt_offmask(pt_attr, level - 1);
+	ptdp->va[pt_index] = (vm_offset_t) va & ~pt_attr_ln_offmask(pt_attr, level - 1);
 
 	/**
 	 * Reference counts are only tracked on CPU leaf tables because those are
@@ -3623,6 +3699,261 @@ pmap_find_io_attr(pmap_paddr_t paddr)
 	return NULL;
 }
 
+#if HAS_GUARDED_IO_FILTER
+/**
+ * Parse the device tree and determine how many pmap-io-filters there are and
+ * how much memory is needed to store all of that data.
+ *
+ * @note See the definition of pmap_io_filter_entry_t for more information on what a
+ *       "pmap-io-filter" actually represents.
+ *
+ * @return The number of bytes needed to store metadata for all I/O filter
+ *         entries.
+ */
+vm_size_t
+pmap_compute_io_filters(void)
+{
+	DTEntry entry = NULL;
+	__assert_only int err = SecureDTLookupEntry(NULL, "/defaults", &entry);
+	assert(err == kSuccess);
+
+	void const *prop = NULL;
+	unsigned int prop_size = 0;
+	if (kSuccess != SecureDTGetProperty(entry, "pmap-io-filters", &prop, &prop_size)) {
+		return 0;
+	}
+
+	pmap_io_filter_entry_t const *entries = prop;
+
+	/* Determine the number of entries. */
+	for (unsigned int i = 0; i < (prop_size / sizeof(*entries)); ++i) {
+		if (entries[i].offset + entries[i].length > ARM_PGMASK) {
+			panic("%s: io filter entry %u offset 0x%hx length 0x%hx crosses page boundary",
+			    __func__, i, entries[i].offset, entries[i].length);
+		}
+
+		++num_io_filter_entries;
+	}
+
+	return num_io_filter_entries * sizeof(*entries);
+}
+
+/**
+ * Compares two I/O filter entries by signature.
+ *
+ * @note The numerical comparison of signatures does not carry any meaning
+ *       but it does give us a way to order and binary search the entries.
+ *
+ * @param a The first I/O filter entry to compare.
+ * @param b The second I/O filter entry to compare.
+ *
+ * @return < 0 for a < b
+ *           0 for a == b
+ *         > 0 for a > b
+ */
+static int
+cmp_io_filter_entries_by_signature(const void *a, const void *b)
+{
+	const pmap_io_filter_entry_t *entry_a = a;
+	const pmap_io_filter_entry_t *entry_b = b;
+
+	if (entry_b->signature < entry_a->signature) {
+		return 1;
+	} else if (entry_a->signature < entry_b->signature) {
+		return -1;
+	} else {
+		return 0;
+	}
+}
+
+/**
+ * Compares two I/O filter entries by address range.
+ *
+ * @note The function returns 0 as long as the ranges overlap. It allows
+ *       the user not only to detect overlaps across a list of entries,
+ *       but also to feed it an address with unit length and a range
+ *       to check for inclusion.
+ *
+ * @param a The first I/O filter entry to compare.
+ * @param b The second I/O filter entry to compare.
+ *
+ * @return < 0 for a < b
+ *           0 for a == b
+ *         > 0 for a > b
+ */
+static int
+cmp_io_filter_entries_by_addr(const void *a, const void *b)
+{
+	const pmap_io_filter_entry_t *entry_a = a;
+	const pmap_io_filter_entry_t *entry_b = b;
+
+	if ((entry_b->offset + entry_b->length) <= entry_a->offset) {
+		return 1;
+	} else if ((entry_a->offset + entry_a->length) <= entry_b->offset) {
+		return -1;
+	} else {
+		return 0;
+	}
+}
+
+/**
+ * Compares two I/O filter entries by signature, then by address range.
+ *
+ * @param a The first I/O filter entry to compare.
+ * @param b The second I/O filter entry to compare.
+ *
+ * @return < 0 for a < b
+ *           0 for a == b
+ *         > 0 for a > b
+ */
+static int
+cmp_io_filter_entries(const void *a, const void *b)
+{
+	const int cmp_signature_result = cmp_io_filter_entries_by_signature(a, b);
+	return (cmp_signature_result != 0) ? cmp_signature_result : cmp_io_filter_entries_by_addr(a, b);
+}
+
+/**
+ * Now that enough memory has been allocated to store all of the pmap-io-filters
+ * device tree nodes in memory, go ahead and do that copy and then sort the
+ * resulting array by address for quicker lookup later.
+ *
+ * @note This function assumes that the amount of memory required to store the
+ *       entire pmap-io-filters device tree node has already been calculated (via
+ *       pmap_compute_io_filters()) and allocated in io_filter_table.
+ *
+ * @note This function will leave io_attr_table sorted by signature and addresss to
+ *       allow for performing a binary search when doing future lookups.
+ */
+void
+pmap_load_io_filters(void)
+{
+	if (num_io_filter_entries == 0) {
+		return;
+	}
+
+	DTEntry entry = NULL;
+	int err = SecureDTLookupEntry(NULL, "/defaults", &entry);
+	assert(err == kSuccess);
+
+	void const *prop = NULL;
+	unsigned int prop_size;
+	err = SecureDTGetProperty(entry, "pmap-io-filters", &prop, &prop_size);
+	assert(err == kSuccess);
+
+	pmap_io_filter_entry_t const *entries = prop;
+	for (unsigned int i = 0; i < (prop_size / sizeof(*entries)); ++i) {
+		io_filter_table[i] = entries[i];
+	}
+
+	qsort(io_filter_table, num_io_filter_entries, sizeof(*entries), cmp_io_filter_entries);
+
+	for (unsigned int i = 0; i < num_io_filter_entries - 1; i++) {
+		if (io_filter_table[i].signature == io_filter_table[i + 1].signature) {
+			if (io_filter_table[i].offset + io_filter_table[i].length > io_filter_table[i + 1].offset) {
+				panic("%s: io filter entry %u and %u overlap.",
+				    __func__, i, i + 1);
+			}
+		}
+	}
+}
+
+/**
+ * Find and return the I/O filter entry that contains the passed in physical
+ * address.
+ *
+ * @note This function performs a binary search on the already sorted
+ *       io_filter_table, so it should be reasonably fast.
+ *
+ * @param paddr The physical address to query a specific I/O filter for.
+ * @param width The width of the I/O register at paddr, at most 8 bytes.
+ * @param io_range_outp If not NULL, this argument is set to the io_attr_table
+ *        entry containing paddr.
+ *
+ * @return A pointer to the pmap_io_range_t structure if one of the ranges
+ *         contains the passed in I/O register described by paddr and width.
+ *         Otherwise, NULL.
+ */
+pmap_io_filter_entry_t*
+pmap_find_io_filter_entry(pmap_paddr_t paddr, uint64_t width, const pmap_io_range_t **io_range_outp)
+{
+	/* Don't bother looking for it when we don't have any entries. */
+	if (__improbable(num_io_filter_entries == 0)) {
+		return NULL;
+	}
+
+	if (__improbable(width > 8)) {
+		return NULL;
+	}
+
+	/* Check if paddr is owned by PPL (Guarded mode SW). */
+	const pmap_io_range_t *io_range = pmap_find_io_attr(paddr);
+
+	/**
+	 * Just return NULL if paddr is not owned by PPL.
+	 */
+	if (io_range == NULL) {
+		return NULL;
+	}
+
+	const uint32_t signature = io_range->signature;
+	unsigned int begin = 0;
+	unsigned int end = num_io_filter_entries - 1;
+
+	/**
+	 * A dummy I/O filter entry to compare against when searching for a range that
+	 * includes `paddr`.
+	 */
+	const pmap_io_filter_entry_t wanted_filter = {
+		.signature = signature,
+		.offset = (uint16_t) ((paddr & ~0b11) & PAGE_MASK),
+		.length = (uint16_t) width // This downcast is safe because width is validated.
+	};
+
+	/* Perform a binary search to find the wanted filter entry. */
+	for (;;) {
+		const unsigned int middle = (begin + end) / 2;
+		const int cmp = cmp_io_filter_entries(&wanted_filter, &io_filter_table[middle]);
+
+		if (cmp == 0) {
+			/**
+			 * We have found a "match" by the definition of cmp_io_filter_entries,
+			 * meaning the dummy range and the io_filter_entry are overlapping. Make
+			 * sure the dummy range is contained entirely by the entry.
+			 */
+			const pmap_io_filter_entry_t entry_found = io_filter_table[middle];
+			if ((wanted_filter.offset >= entry_found.offset) &&
+			    ((wanted_filter.offset + wanted_filter.length) <= (entry_found.offset + entry_found.length))) {
+				if (io_range) {
+					*io_range_outp = io_range;
+				}
+
+				return &io_filter_table[middle];
+			} else {
+				/**
+				 * Under the assumption that there is no overlapping io_filter_entry,
+				 * if the dummy range is found overlapping but not contained by an
+				 * io_filter_entry, there cannot be another io_filter_entry containing
+				 * the dummy range, so return NULL here.
+				 */
+				return NULL;
+			}
+		} else if (begin == end) {
+			/* We've checked every range and didn't find a match. */
+			break;
+		} else if (cmp > 0) {
+			/* The wanted range is above the middle. */
+			begin = middle + 1;
+		} else {
+			/* The wanted range is below the middle. */
+			end = middle;
+		}
+	}
+
+	return NULL;
+}
+#endif /* HAS_GUARDED_IO_FILTER */
+
 /**
  * Initialize the pmap per-CPU data structure for a single CPU. This is called
  * once for each CPU in the system, on the CPU whose per-cpu data needs to be
@@ -3694,7 +4025,7 @@ pmap_cpu_data_array_init(void)
 #if XNU_MONITOR
 	/**
 	 * Enough virtual address space to cover all PPL stacks for every CPU should
-	 * have already been allocated by arm_vm_init() before pmap_boostrap() is
+	 * have already been allocated by arm_vm_init() before pmap_bootstrap() is
 	 * called.
 	 */
 	assert((pmap_stacks_start != NULL) && (pmap_stacks_end != NULL));
@@ -3711,7 +4042,7 @@ pmap_cpu_data_array_init(void)
 
 	/**
 	 * Globally save off the beginning of the PPL stacks physical space so that
-	 * we can update its physical aperture mappings in later in the bootstrap
+	 * we can update its physical aperture mappings later in the bootstrap
 	 * process.
 	 */
 	pmap_stacks_start_pa = avail_start;
@@ -3790,6 +4121,69 @@ pmap_cpu_data_array_init(void)
 		pmap_cpu_data_array[cpu_num].cpu_data.save_area = (arm_context_t *)phystokv(ppl_cpu_save_area_cur);
 		ppl_cpu_save_area_cur += sizeof(arm_context_t);
 	}
+
+#if HAS_GUARDED_IO_FILTER
+	/**
+	 * Enough virtual address space to cover all I/O filter stacks for every CPU should
+	 * have already been allocated by arm_vm_init() before pmap_bootstrap() is
+	 * called.
+	 */
+	assert((iofilter_stacks_start != NULL) && (iofilter_stacks_end != NULL));
+	assert(((uintptr_t)iofilter_stacks_end - (uintptr_t)iofilter_stacks_start) == IOFILTER_STACK_REGION_SIZE);
+
+	/* Each I/O filter stack contains guard pages before and after. */
+	vm_offset_t iofilter_stack_va = (vm_offset_t)iofilter_stacks_start + ARM_PGBYTES;
+
+	/**
+	 * Globally save off the beginning of the I/O filter stacks physical space so that
+	 * we can update its physical aperture mappings later in the bootstrap
+	 * process.
+	 */
+	iofilter_stacks_start_pa = avail_start;
+
+	/* Map the I/O filter stacks for each CPU. */
+	for (unsigned int cpu_num = 0; cpu_num < MAX_CPUS; cpu_num++) {
+		/**
+		 * Map all of the I/O filter stack into the kernel's address space.
+		 */
+		for (vm_offset_t cur_va = iofilter_stack_va; cur_va < (iofilter_stack_va + IOFILTER_STACK_SIZE); cur_va += ARM_PGBYTES) {
+			assert(cur_va < (vm_offset_t)iofilter_stacks_end);
+
+			pt_entry_t *ptep = pmap_pte(kernel_pmap, cur_va);
+			assert(*ptep == ARM_PTE_EMPTY);
+
+			pt_entry_t template = pa_to_pte(avail_start) | ARM_PTE_AF | ARM_PTE_SH(SH_OUTER_MEMORY) |
+			    ARM_PTE_TYPE | ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DEFAULT) | xprr_perm_to_pte(XPRR_PPL_RW_PERM);
+
+#if __ARM_KERNEL_PROTECT__
+			template |= ARM_PTE_NG;
+#endif /* __ARM_KERNEL_PROTECT__ */
+
+			write_pte(ptep, template);
+			__builtin_arm_isb(ISB_SY);
+
+			avail_start += ARM_PGBYTES;
+		}
+
+#if KASAN
+		kasan_map_shadow(iofilter_stack_va, IOFILTER_STACK_SIZE, false);
+#endif /* KASAN */
+
+		/**
+		 * Setup non-zero pmap per-cpu data fields. If the default value should
+		 * be zero, then you can assume the field is already set to that.
+		 */
+		pmap_cpu_data_array[cpu_num].cpu_data.iofilter_stack = (void*)(iofilter_stack_va + IOFILTER_STACK_SIZE);
+
+		/**
+		 * Get the first VA of the next CPU's IOFILTER stack. Need to skip the guard
+		 * page after the stack.
+		 */
+		iofilter_stack_va += (IOFILTER_STACK_SIZE + ARM_PGBYTES);
+	}
+
+	iofilter_stacks_end_pa = avail_start;
+#endif /* HAS_GUARDED_IO_FILTER */
 #endif /* XNU_MONITOR */
 
 	pmap_cpu_data_init();

@@ -635,6 +635,9 @@ OSSymbol::withCStringNoCopy(const char *cString)
 OSSharedPtr<const OSSymbol>
 OSSymbol::existingSymbolForString(const OSString *aString)
 {
+	if (!aString) {
+		return NULL;
+	}
 	if (OSDynamicCast(OSSymbol, aString)) {
 		OSSharedPtr<const OSSymbol> aStringNew((const OSSymbol *)aString, OSRetain);
 		return aStringNew;

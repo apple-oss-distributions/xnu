@@ -388,6 +388,9 @@ clock_timebase_init(void)
 {
 	uint64_t        abstime;
 
+	/*
+	 * BSD expects a tick to represent 10ms.
+	 */
 	nanoseconds_to_absolutetime(NSEC_PER_SEC / 100, &abstime);
 	hz_tick_interval = (uint32_t)abstime;
 

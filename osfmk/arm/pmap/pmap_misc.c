@@ -37,3 +37,19 @@
  * own file.
  */
 
+
+void
+pmap_abandon_measurement(void)
+{
+#if SCHED_HYGIENE_DEBUG && (DEVELOPMENT || DEBUG)
+	thread_t t = current_thread();
+
+	uint64_t istate = pmap_interrupts_disable();
+	pmap_pin_kernel_pages((vm_map_offset_t)&(t->machine), sizeof(t->machine));
+	if (t->machine.preemption_disable_mt != 0) {
+		t->machine.preemption_disable_abandon = true;
+	}
+	pmap_unpin_kernel_pages((vm_map_offset_t)&(t->machine), sizeof(t->machine));
+	pmap_interrupts_restore(istate);
+#endif /* SCHED_HYGIENE_DEBUG && (DEVELOPMENT || DEBUG) */
+}

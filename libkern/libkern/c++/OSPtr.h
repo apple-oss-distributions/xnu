@@ -68,6 +68,8 @@
 
 #if defined(IOKIT_ENABLE_SHARED_PTR)
 
+#define __returns_nonnull_osptr
+
 #if __cplusplus < 201703L
 #error "Your code must compile with C++17 or later to adopt shared pointers. Use Xcode's 'C++ Language Dialect' setting, or on clang's command-line use -std=gnu++17"
 #endif
@@ -83,6 +85,12 @@ template <typename T>
 using OSTaggedPtr = OSTaggedSharedPtr<T, OSCollection>;
 
 #else
+
+#if __has_attribute(returns_nonnull)
+#define __returns_nonnull_osptr __attribute__((returns_nonnull))
+#else
+#define __returns_nonnull_osptr
+#endif
 
 template <typename T>
 class __attribute__((trivial_abi)) OSSharedPtr;

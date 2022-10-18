@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2008-2009 Apple Inc.
+ * Copyright (c) 2008-2022 Apple Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -171,12 +171,6 @@ static const bsm_fcntl_cmd_t bsm_fcntl_cmdtab[] = {
 #endif
 #ifdef  F_RDAHEAD
 	{ BSM_F_RDAHEAD, F_RDAHEAD },
-#endif
-#ifdef  F_READBOOTSTRAP
-	{ BSM_F_READBOOTSTRAP, F_READBOOTSTRAP },
-#endif
-#ifdef  F_WRITEBOOTSTRAP
-	{ BSM_F_WRITEBOOTSTRAP, F_WRITEBOOTSTRAP },
 #endif
 #ifdef  F_NOCACHE
 	{ BSM_F_NOCACHE, F_NOCACHE },

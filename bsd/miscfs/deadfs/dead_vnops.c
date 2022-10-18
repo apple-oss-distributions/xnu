@@ -65,6 +65,7 @@
 #include <sys/systm.h>
 #include <sys/time.h>
 #include <sys/vnode_internal.h>
+#include <sys/buf_internal.h>
 #include <sys/errno.h>
 #include <sys/namei.h>
 #include <sys/buf.h>
@@ -78,10 +79,7 @@ int     chkvnlock(vnode_t vp);
 int     dead_badop(void *);
 int     dead_ebadf(void *);
 int     dead_lookup(struct vnop_lookup_args *);
-#define dead_create (int (*)(struct  vnop_create_args *))dead_badop
-#define dead_mknod (int (*)(struct  vnop_mknod_args *))dead_badop
 int     dead_open(struct vnop_open_args *);
-#define dead_close (int (*)(struct  vnop_close_args *))nullop
 #define dead_access (int (*)(struct  vnop_access_args *))dead_ebadf
 #define dead_getattr (int (*)(struct  vnop_getattr_args *))dead_ebadf
 #define dead_setattr (int (*)(struct  vnop_setattr_args *))dead_ebadf
@@ -89,37 +87,29 @@ int     dead_read(struct vnop_read_args *);
 int     dead_write(struct vnop_write_args *);
 int     dead_ioctl(struct vnop_ioctl_args *);
 int     dead_select(struct vnop_select_args *);
-#define dead_mmap (int (*)(struct  vnop_mmap_args *))dead_badop
-#define dead_fsync (int (*)(struct  vnop_fsync_args *))nullop
-#define dead_remove (int (*)(struct  vnop_remove_args ))dead_badop
-#define dead_link (int (*)(struct  vnop_link_args *))dead_badop
-#define dead_rename (int (*)(struct  vnop_rename_args *))dead_badop
-#define dead_mkdir (int (*)(struct  vnop_mkdir_args *))dead_badop
-#define dead_rmdir (int (*)(struct  vnop_rmdir_args *))dead_badop
-#define dead_symlink (int (*)(struct  vnop_symlink_args *))dead_badop
 #define dead_readdir (int (*)(struct  vnop_readdir_args *))dead_ebadf
 #define dead_readlink (int (*)(struct  vnop_readlink_args *))dead_ebadf
-#define dead_inactive (int (*)(struct  vnop_inactive_args *))nullop
-#define dead_reclaim (int (*)(struct  vnop_reclaim_args *))nullop
 int     dead_strategy(struct vnop_strategy_args *);
+int     dead_bwrite(struct vnop_bwrite_args *);
 #define dead_pathconf (int (*)(struct  vnop_pathconf_args *))dead_ebadf
 #define dead_advlock (int (*)(struct  vnop_advlock_args *))dead_ebadf
-#define dead_bwrite (int (*)(struct  vnop_bwrite_args *))nullop
 int     dead_pagein(struct vnop_pagein_args *);
 int     dead_pageout(struct vnop_pageout_args *);
 int dead_blktooff(struct vnop_blktooff_args *);
 int dead_offtoblk(struct vnop_offtoblk_args *);
 int dead_blockmap(struct vnop_blockmap_args *);
 
+#define dead_nullop (void (*)(void))nullop
+
 #define VOPFUNC int (*)(void *)
 int(**dead_vnodeop_p)(void *);
 const struct vnodeopv_entry_desc dead_vnodeop_entries[] = {
-	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)vn_default_error },
+	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)(void (*)(void ))vn_default_error },
 	{ .opve_op = &vnop_lookup_desc, .opve_impl = (VOPFUNC)dead_lookup },    /* lookup */
-	{ .opve_op = &vnop_create_desc, .opve_impl = (VOPFUNC)dead_create },    /* create */
+	{ .opve_op = &vnop_create_desc, .opve_impl = (VOPFUNC)dead_badop },    /* create */
 	{ .opve_op = &vnop_open_desc, .opve_impl = (VOPFUNC)dead_open },                /* open */
-	{ .opve_op = &vnop_mknod_desc, .opve_impl = (VOPFUNC)dead_mknod },              /* mknod */
-	{ .opve_op = &vnop_close_desc, .opve_impl = (VOPFUNC)dead_close },      /* close */
+	{ .opve_op = &vnop_mknod_desc, .opve_impl = (VOPFUNC)dead_badop },              /* mknod */
+	{ .opve_op = &vnop_close_desc, .opve_impl = (VOPFUNC)dead_nullop },      /* close */
 	{ .opve_op = &vnop_access_desc, .opve_impl = (VOPFUNC)dead_access },    /* access */
 	{ .opve_op = &vnop_getattr_desc, .opve_impl = (VOPFUNC)dead_getattr },  /* getattr */
 	{ .opve_op = &vnop_setattr_desc, .opve_impl = (VOPFUNC)dead_setattr },  /* setattr */
@@ -127,18 +117,18 @@ const struct vnodeopv_entry_desc dead_vnodeop_entries[] = {
 	{ .opve_op = &vnop_write_desc, .opve_impl = (VOPFUNC)dead_write },      /* write */
 	{ .opve_op = &vnop_ioctl_desc, .opve_impl = (VOPFUNC)dead_ioctl },      /* ioctl */
 	{ .opve_op = &vnop_select_desc, .opve_impl = (VOPFUNC)dead_select },    /* select */
-	{ .opve_op = &vnop_mmap_desc, .opve_impl = (VOPFUNC)dead_mmap },                /* mmap */
-	{ .opve_op = &vnop_fsync_desc, .opve_impl = (VOPFUNC)dead_fsync },      /* fsync */
-	{ .opve_op = &vnop_remove_desc, .opve_impl = (VOPFUNC)dead_remove },    /* remove */
-	{ .opve_op = &vnop_link_desc, .opve_impl = (VOPFUNC)dead_link },                /* link */
-	{ .opve_op = &vnop_rename_desc, .opve_impl = (VOPFUNC)dead_rename },    /* rename */
-	{ .opve_op = &vnop_mkdir_desc, .opve_impl = (VOPFUNC)dead_mkdir },      /* mkdir */
-	{ .opve_op = &vnop_rmdir_desc, .opve_impl = (VOPFUNC)dead_rmdir },      /* rmdir */
-	{ .opve_op = &vnop_symlink_desc, .opve_impl = (VOPFUNC)dead_symlink },  /* symlink */
+	{ .opve_op = &vnop_mmap_desc, .opve_impl = (VOPFUNC)dead_badop },                /* mmap */
+	{ .opve_op = &vnop_fsync_desc, .opve_impl = (VOPFUNC)dead_nullop},      /* fsync */
+	{ .opve_op = &vnop_remove_desc, .opve_impl = (VOPFUNC)dead_badop },    /* remove */
+	{ .opve_op = &vnop_link_desc, .opve_impl = (VOPFUNC)dead_badop },                /* link */
+	{ .opve_op = &vnop_rename_desc, .opve_impl = (VOPFUNC)dead_badop },    /* rename */
+	{ .opve_op = &vnop_mkdir_desc, .opve_impl = (VOPFUNC)dead_badop },      /* mkdir */
+	{ .opve_op = &vnop_rmdir_desc, .opve_impl = (VOPFUNC)dead_badop },      /* rmdir */
+	{ .opve_op = &vnop_symlink_desc, .opve_impl = (VOPFUNC)dead_badop },  /* symlink */
 	{ .opve_op = &vnop_readdir_desc, .opve_impl = (VOPFUNC)dead_readdir },  /* readdir */
 	{ .opve_op = &vnop_readlink_desc, .opve_impl = (VOPFUNC)dead_readlink },        /* readlink */
-	{ .opve_op = &vnop_inactive_desc, .opve_impl = (VOPFUNC)dead_inactive },        /* inactive */
-	{ .opve_op = &vnop_reclaim_desc, .opve_impl = (VOPFUNC)dead_reclaim },  /* reclaim */
+	{ .opve_op = &vnop_inactive_desc, .opve_impl = (VOPFUNC)dead_nullop },        /* inactive */
+	{ .opve_op = &vnop_reclaim_desc, .opve_impl = (VOPFUNC)dead_nullop },  /* reclaim */
 	{ .opve_op = &vnop_strategy_desc, .opve_impl = (VOPFUNC)dead_strategy },        /* strategy */
 	{ .opve_op = &vnop_pathconf_desc, .opve_impl = (VOPFUNC)dead_pathconf },        /* pathconf */
 	{ .opve_op = &vnop_advlock_desc, .opve_impl = (VOPFUNC)dead_advlock },  /* advlock */
@@ -236,12 +226,69 @@ dead_select(__unused struct vnop_select_args *ap)
 int
 dead_strategy(struct vnop_strategy_args *ap)
 {
-	if (buf_vnode(ap->a_bp) == NULL || !chkvnlock(buf_vnode(ap->a_bp))) {
+	vnode_t vp = buf_vnop_vnode(ap->a_bp);
+
+	if (!vp || !chkvnlock(vp)) {
+		if (vp) {
+			vnode_lock(vp);
+			if (!(vp->v_lflag & VL_DEAD) || vp->v_op != dead_vnodeop_p) {
+#if DEVELOPMENT || DEBUG
+				panic("%s: vnode %p (v_lflag 0x%x) is NOT in dead state",
+				    __func__, vp, vp->v_lflag);
+#else
+				printf("%s: vnode %p (v_lflag 0x%x) is NOT in dead state",
+				    __func__, vp, vp->v_lflag);
+#endif
+			}
+			vnode_unlock(vp);
+		}
 		buf_seterror(ap->a_bp, EIO);
 		buf_biodone(ap->a_bp);
 		return EIO;
 	}
-	return VNOP_STRATEGY(ap->a_bp);
+
+	return VOCALL(vp->v_op, VOFFSET(vnop_strategy), ap);
+}
+
+/*
+ * Return an error and complete the IO if the vnode is not changing state.
+ */
+int
+dead_bwrite(struct vnop_bwrite_args *ap)
+{
+	buf_t bp = ap->a_bp;
+	vnode_t vp = buf_vnop_vnode(bp);
+
+	if (!vp || !chkvnlock(vp)) {
+		vnode_t buf_vp = buf_vnode(bp);
+
+		if (vp) {
+			vnode_lock(vp);
+			if (!(vp->v_lflag & VL_DEAD) || vp->v_op != dead_vnodeop_p) {
+#if DEVELOPMENT || DEBUG
+				panic("%s: vnode %p (v_lflag 0x%x) is NOT in dead state",
+				    __func__, vp, vp->v_lflag);
+#else
+				printf("%s: vnode %p (v_lflag 0x%x) is NOT in dead state",
+				    __func__, vp, vp->v_lflag);
+#endif
+			}
+			vnode_unlock(vp);
+		}
+
+		buf_seterror(bp, EIO);
+
+		if (buf_vp) {
+			/*
+			 * buf_biodone is expecting this to be incremented (see buf_bwrite)
+			 */
+			OSAddAtomic(1, &buf_vp->v_numoutput);
+		}
+		buf_biodone(bp);
+		return EIO;
+	}
+
+	return VOCALL(vp->v_op, VOFFSET(vnop_bwrite), ap);
 }
 
 /*
@@ -284,9 +331,18 @@ dead_badop(__unused void *dummy)
  * in a state of change.
  */
 int
-chkvnlock(__unused vnode_t vp)
+chkvnlock(vnode_t vp)
 {
-	return 0;
+	vnode_lock(vp);
+	if (!(vp->v_lflag & VL_OPSCHANGE)) {
+		vnode_unlock(vp);
+		return 0;
+	}
+	while (vp->v_lflag & VL_DEAD) {
+		msleep(&vp->v_lflag, &vp->v_lock, PVFS, "chkvnlock", NULL);
+	}
+	vnode_unlock(vp);
+	return 1;
 }
 
 

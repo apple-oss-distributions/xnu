@@ -35,13 +35,6 @@
 #include <sys/cdefs.h>
 
 #ifdef __APPLE_API_PRIVATE
-int krpc_call(struct sockaddr_in *sin, u_int sotype,
-    u_int prog, u_int vers, u_int func,
-    mbuf_t *data, struct sockaddr_in *from);
-
-int krpc_portmap(struct sockaddr_in *sin,
-    u_int prog, u_int vers, u_int proto, u_int16_t *portp);
-
 
 /*
  * RPC definitions for the portmapper (portmap and rpcbind)

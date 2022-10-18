@@ -244,7 +244,7 @@ struct mptsub {
 	TAILQ_ENTRY(mptsub)   mpts_entry;     /* glue to peer subflows */
 	uint32_t              mpts_refcnt;    /* reference count */
 	uint32_t              mpts_flags;     /* see flags below */
-	long                  mpts_evctl;     /* subflow control events */
+	uint32_t              mpts_evctl;     /* subflow control events */
 	sae_connid_t          mpts_connid;    /* subflow connection ID */
 	int                   mpts_oldintval; /* sopt_val before sosetopt  */
 	struct mptses         *mpts_mpte;     /* back ptr to MPTCP session */
@@ -324,17 +324,9 @@ struct mptsub {
 	                                         */
 #define MPTSF_CELLICON_SET      0x00400000      /* This subflow set the cellicon */
 
-#define MPTSF_BITS \
-	"\020\1ATTACHED\2CONNECTING\3PENDING\4CONNECTED\5DISCONNECTING" \
-	"\6DISCONNECTED\7MP_CAPABLE\10MP_READY\11MP_DEGRADED" \
-	"\12PREFERRED\13SOPT_OLDVAL" \
-	"\14SOPT_INPROG\15FAILINGOVER\16ACTIVE\17MPCAP_CTRSET" \
-	"\20CLOSED\21TFO_REQD\22CLOSEREQD\23INITIALSUB\24READ_STALL" \
-	"\25WRITE_STALL\26CONFIRMED"
-
 /*
  * MPTCP states
- * Keep in sync with bsd/dev/dtrace/mptcp.d
+ * Keep in sync with bsd/dev/dtrace/scripts/mptcp.d
  */
 typedef enum mptcp_state {
 	MPTCPS_CLOSED           = 0,    /* closed */
@@ -348,6 +340,15 @@ typedef enum mptcp_state {
 	MPTCPS_TIME_WAIT        = 8,    /* in 2*MSL quiet wait after close */
 	MPTCPS_TERMINATE        = 9,    /* terminal state */
 } mptcp_state_t;
+
+/*
+ * WiFi Quality states from MPTCP's perspective
+ */
+typedef enum mptcp_wifi_quality {
+	MPTCP_WIFI_QUALITY_GOOD,
+	MPTCP_WIFI_QUALITY_BAD,
+	MPTCP_WIFI_QUALITY_UNSURE,
+} mptcp_wifi_quality_t;
 
 typedef u_int64_t       mptcp_key_t;
 typedef u_int32_t       mptcp_token_t;
@@ -441,12 +442,6 @@ struct mptcb {
 #define MPTCPF_FALLBACK_HEURISTIC       0x100   /* Send SYN without MP_CAPABLE due to heuristic */
 #define MPTCPF_HEURISTIC_TRAC           0x200   /* Tracked this connection in the heuristics as a failure */
 #define MPTCPF_REASS_INPROG             0x400   /* Reassembly is in progress */
-#define MPTCPF_UNICAST_IP               0x800
-
-#define MPTCPF_BITS \
-	"\020\1CHECKSUM\2FALLBACK_TO_TCP\3JOIN_READY\4RECVD_MPFAIL" \
-	"\5SND_64BITDSN\6SND_64BITACK\7RCVD_64BITACK\10POST_FALLBACK_SYNC" \
-	"\11FALLBACK_HEURISTIC\12HEURISTIC_TRAC\13REASS_INPROG"
 
 /* valid values for mpt_timer_vals */
 #define MPTT_REXMT              0x01    /* Starting Retransmit Timer */
@@ -488,20 +483,6 @@ extern os_log_t mptcp_log_handle;
 #define HMAC_TRUNCATED_ACK         20
 #define HMAC_TRUNCATED_ADD_ADDR         8
 
-/* MPTCP Debugging Levels */
-#define MPTCP_LOGLVL_NONE       0x0     /* No debug logging */
-#define MPTCP_LOGLVL_ERR        0x1     /* Errors in execution are logged */
-#define MPTCP_LOGLVL_LOG        0x2     /* Important logs */
-#define MPTCP_LOGLVL_VERBOSE    0x4     /* Verbose logs */
-
-/* MPTCP sub-components for debug logging */
-#define MPTCP_NO_DBG            0x00    /* No areas are logged */
-#define MPTCP_STATE_DBG         0x01    /* State machine logging */
-#define MPTCP_SOCKET_DBG        0x02    /* Socket call logging */
-#define MPTCP_SENDER_DBG        0x04    /* Sender side logging */
-#define MPTCP_RECEIVER_DBG      0x08    /* Receiver logging */
-#define MPTCP_EVENTS_DBG        0x10    /* Subflow events logging */
-
 /* Mask to obtain 32-bit portion of data sequence number */
 #define MPTCP_DATASEQ_LOW32_MASK        (0xffffffff)
 #define MPTCP_DATASEQ_LOW32(seq)        (seq & MPTCP_DATASEQ_LOW32_MASK)
@@ -513,10 +494,6 @@ extern os_log_t mptcp_log_handle;
 /* Mask to obtain 32-bit portion of data ack */
 #define MPTCP_DATAACK_LOW32_MASK        (0xffffffff)
 #define MPTCP_DATAACK_LOW32(ack)        (ack & MPTCP_DATAACK_LOW32_MASK)
-
-/* Mask to obtain upper 32-bit portion of data ack */
-#define MPTCP_DATAACK_HIGH32_MASK       (0xffffffff00000000)
-#define MPTCP_DATAACK_HIGH32(ack)       (ack & MPTCP_DATAACK_HIGH32_MASK)
 
 /*
  * x is the 64-bit data sequence number, y the 32-bit data seq number to be
@@ -555,19 +532,12 @@ extern os_log_t mptcp_log_handle;
 	}                                                               \
 }
 
-#define mptcplog(x, y, z)       do {                                    \
-	if ((mptcp_dbg_area & y) && (mptcp_dbg_level & z))              \
-	        log x;                                                  \
-} while (0)
-
 extern int mptcp_enable;        /* Multipath TCP */
 extern int mptcp_mpcap_retries; /* Multipath TCP retries */
 extern int mptcp_join_retries;  /* Multipath TCP Join retries */
 extern int mptcp_dss_csum;      /* Multipath DSS Option checksum */
 extern int mptcp_fail_thresh;   /* Multipath failover thresh of retransmits */
 extern int mptcp_subflow_keeptime; /* Multipath subflow TCP_KEEPALIVE opt */
-extern uint32_t mptcp_dbg_level;        /* Multipath TCP debugging level */
-extern uint32_t mptcp_dbg_area; /* Multipath TCP debugging area */
 extern int mptcp_developer_mode;        /* Allow aggregation mode */
 extern uint32_t mptcp_cellicon_refcount;
 extern uint32_t mptcp_enable_v1;
@@ -575,6 +545,8 @@ extern uint32_t mptcp_enable_v1;
 #define MPTCP_CELLICON_TOGGLE_RATE      (5 * TCP_RETRANSHZ) /* Only toggle every 5 seconds */
 
 extern int tcp_jack_rxmt;       /* Join ACK retransmission value in msecs */
+
+extern int mptcp_reass_total_qlen;
 
 __BEGIN_DECLS
 extern void mptcp_init(struct protosw *, struct domain *);
@@ -658,7 +630,7 @@ extern u_int32_t mptcp_get_notsent_lowat(struct mptses *mpte);
 extern int mptcp_notsent_lowat_check(struct socket *so);
 extern void mptcp_ask_symptoms(struct mptses *mpte);
 extern void mptcp_control_register(void);
-extern int mptcp_is_wifi_unusable_for_session(struct mptses *mpte);
+extern mptcp_wifi_quality_t mptcp_wifi_quality_for_session(struct mptses *mpte);
 extern boolean_t symptoms_is_wifi_lossy(void);
 extern void mptcp_session_necp_cb(void *, int, uint32_t, uint32_t, bool *);
 extern struct sockaddr *mptcp_get_session_dst(struct mptses *mpte,

@@ -24,6 +24,7 @@ SECURITY_READ_ONLY_LATE(bool) disable_kprintf_output = true;
 // disable_iolog_serial_output only disables IOLog, controlled by
 // SERIALMODE_NO_IOLOG.
 SECURITY_READ_ONLY_LATE(bool) disable_iolog_serial_output = false;
+SECURITY_READ_ONLY_LATE(bool) enable_dklog_serial_output = false;
 
 static SIMPLE_LOCK_DECLARE(kprintf_lock, 0);
 
@@ -124,7 +125,7 @@ kprintf(const char *fmt, ...)
 
 		simple_unlock(&kprintf_lock);
 
-#if INTERRUPT_MASKED_DEBUG
+#if SCHED_HYGIENE_DEBUG
 		/*
 		 * kprintf holds interrupts disabled for far too long
 		 * and would trip the spin-debugger.  If we are about to reenable

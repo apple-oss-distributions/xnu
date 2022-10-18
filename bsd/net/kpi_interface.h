@@ -96,7 +96,6 @@ struct ifnet_demux_desc;
  *       @constant IFNET_FAMILY_FIREWIRE An IEEE 1394 [Firewire] interface.
  *       @constant IFNET_FAMILY_BOND A virtual bonded interface.
  *       @constant IFNET_FAMILY_CELLULAR A cellular interface.
- *       @constant IFNET_FAMILY_6LOWPAN A 6LoWPAN interface.
  *       @constant IFNET_FAMILY_UTUN A utun interface.
  *       @constant IFNET_FAMILY_IPSEC An IPsec interface.
  */
@@ -117,7 +116,7 @@ enum {
 	IFNET_FAMILY_FIREWIRE           = 13,
 	IFNET_FAMILY_BOND               = 14,
 	IFNET_FAMILY_CELLULAR           = 15,
-	IFNET_FAMILY_6LOWPAN            = 16,
+	IFNET_FAMILY_UNUSED_16          = 16,   /* Un-used */
 	IFNET_FAMILY_UTUN               = 17,
 	IFNET_FAMILY_IPSEC              = 18
 };
@@ -148,6 +147,7 @@ enum {
 	IFNET_SUBFAMILY_QUICKRELAY      = 7,
 	IFNET_SUBFAMILY_DEFAULT         = 8,
 	IFNET_SUBFAMILY_VMNET           = 9,
+	IFNET_SUBFAMILY_SIMCELL         = 10,
 };
 
 /*
@@ -228,6 +228,10 @@ typedef u_int32_t protocol_family_t;
  *               transmission status (pass, fail or other errors) of whether
  *               the packet was successfully transmitted on the link, or the
  *               transmission was aborted, or transmission failed.
+ *       @constant IFNET_HW_TIMESTAMP Driver supports time stamping in hardware.
+ *       @constant IFNET_SW_TIMESTAMP Driver supports time stamping in software.
+ *       @constant IFNET_LRO Driver supports TCP Large Receive Offload.
+ *       @constant IFNET_RX_CSUM Driver supports receive checksum offload.
  *
  */
 
@@ -252,7 +256,9 @@ enum {
 	IFNET_TSO_IPV6          = 0x00400000,
 	IFNET_TX_STATUS         = 0x00800000,
 	IFNET_HW_TIMESTAMP      = 0x01000000,
-	IFNET_SW_TIMESTAMP      = 0x02000000
+	IFNET_SW_TIMESTAMP      = 0x02000000,
+	IFNET_LRO               = 0x10000000,
+	IFNET_RX_CSUM           = 0x20000000,
 };
 /*!
  *       @typedef ifnet_offload_t
@@ -725,8 +731,8 @@ struct ifnet_init_params {
 #define IFNET_INIT_INPUT_POLL   0x2     /* opportunistic input polling model */
 #define IFNET_INIT_NX_NOAUTO    0x4     /* do not auto config nexus */
 #define IFNET_INIT_ALLOC_KPI    0x8     /* allocated via the ifnet_alloc() KPI */
-#define IFNET_INIT_IF_ADV    0x40000000    /* Supports Interface advisory reporting */
-#define IFNET_INIT_SKYWALK_NATIVE     0x80000000 /* native Skywalk driver */
+#define IFNET_INIT_IF_ADV               0x40000000      /* Supports Interface advisory reporting */
+#define IFNET_INIT_SKYWALK_NATIVE       0x80000000      /* native Skywalk driver */
 
 /*
  *       @typedef ifnet_pre_enqueue_func
@@ -3773,21 +3779,6 @@ extern errno_t ifnet_touch_lastupdown(ifnet_t interface);
  *  to.
  */
 extern errno_t ifnet_updown_delta(ifnet_t interface, struct timeval *updown_delta);
-
-/*************************************************************************/
-/* Interface advisory notifications                                      */
-/*************************************************************************/
-/*!
- *       @function ifnet_interface_advisory_report
- *       @discussion KPI to let the driver provide interface advisory
- *       notifications to the user space.
- *       @param ifp The interface that is generating the advisory report.
- *       @param advisory structure containing the advisory notification
- *              information.
- *       @result Returns 0 on success, error number otherwise.
- */
-extern errno_t ifnet_interface_advisory_report(ifnet_t ifp,
-    const struct ifnet_interface_advisory *advisory);
 
 #endif /* KERNEL_PRIVATE */
 

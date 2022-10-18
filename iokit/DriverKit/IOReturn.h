@@ -40,11 +40,11 @@
 extern "C" {
 #endif
 
-#ifndef PLATFORM_DriverKit
+#ifndef XNU_PLATFORM_DriverKit
 
 #include <mach/error.h>
 
-#else  /* PLATFORM_DriverKit */
+#else  /* XNU_PLATFORM_DriverKit */
 
 #ifdef DRIVERKIT_PRIVATE
 
@@ -81,7 +81,7 @@ typedef int             kern_return_t;
 
 #endif  /* DRIVERKIT_PRIVATE */
 
-#endif /* PLATFORM_DriverKit */
+#endif /* XNU_PLATFORM_DriverKit */
 
 typedef kern_return_t           IOReturn;
 
@@ -121,6 +121,7 @@ typedef kern_return_t           IOReturn;
 #define sub_iokit_platform                err_sub(0x2A)
 #define sub_iokit_audio_video             err_sub(0x45)
 #define sub_iokit_cec                     err_sub(0x46)
+#define sub_iokit_arc                     err_sub(0x47)
 #define sub_iokit_baseband                err_sub(0x80)
 #define sub_iokit_HDA                     err_sub(0xFE)
 #define sub_iokit_hsic                    err_sub(0x147)

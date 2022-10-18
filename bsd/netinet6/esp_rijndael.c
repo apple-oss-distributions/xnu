@@ -989,6 +989,7 @@ esp_gcm_decrypt_aes(
 	/* Set Additional Authentication Data */
 	if (aes_decrypt_aad_gcm((unsigned char*)&esp, sizeof(esp), ctx->decrypt)) {
 		ipseclog((LOG_ERR, "%s: packet decryption AAD failure\n", __FUNCTION__));
+		m_freem(m);
 		return EINVAL;
 	}
 

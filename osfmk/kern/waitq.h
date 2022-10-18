@@ -57,12 +57,42 @@ __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
 
 #pragma GCC visibility push(hidden)
 
-/*
- * Constants and types used in the waitq APIs
+/*!
+ * @enum waitq_wakeup_flags_t
+ *
+ * @const WAITQ_DEFAULT
+ * Use the default behavior for wakeup.
+ *
+ * @const WAITQ_UPDATE_INHERITOR
+ * If the wait queue is a turnstile,
+ * set its inheritor to the woken up thread,
+ * or clear the inheritor if the last thread is woken up.
+ *
+ #if MACH_KERNEL_PRIVATE
+ * @const WAITQ_PROMOTE_PRIORITY (Mach IPC only)
+ * Promote the woken up thread(s) with a MINPRI_WAITQ floor,
+ * until it calls waitq_clear_promotion_locked().
+ *
+ * @const WAITQ_UNLOCK (waitq_wakeup64_*_locked only)
+ * Unlock the wait queue before any thread_go() is called for woken up threads.
+ *
+ * @const WAITQ_KEEP_LOCKED (waitq_wakeup64_*_locked only)
+ * Keep the wait queue locked for this call.
+ *
+ * @const WAITQ_HANDOFF (waitq_wakeup64_one, waitq_wakeup64_identify*)
+ * Attempt a handoff to the woken up thread.
+ #endif
  */
-#define WAITQ_ALL_PRIORITIES   (-1)
-#define WAITQ_PROMOTE_PRIORITY (-2)
-#define WAITQ_PROMOTE_ON_WAKE  (-3)
+__options_decl(waitq_wakeup_flags_t, uint32_t, {
+	WAITQ_WAKEUP_DEFAULT    = 0x0000,
+	WAITQ_UPDATE_INHERITOR  = 0x0001,
+#if MACH_KERNEL_PRIVATE
+	WAITQ_PROMOTE_PRIORITY  = 0x0002,
+	WAITQ_UNLOCK            = 0x0004,
+	WAITQ_KEEP_LOCKED       = 0x0000,
+	WAITQ_HANDOFF           = 0x0008,
+#endif /* MACH_KERNEL_PRIVATE */
+});
 
 /* Opaque sizes and alignment used for struct verification */
 #if __arm__ || __arm64__
@@ -520,7 +550,7 @@ extern kern_return_t waitq_wakeup64_one(
 	waitq_t                 waitq,
 	event64_t               wake_event,
 	wait_result_t           result,
-	int                     priority);
+	waitq_wakeup_flags_t    flags);
 
 /**
  * @functiong waitq_wakeup64_all()
@@ -528,13 +558,17 @@ extern kern_return_t waitq_wakeup64_one(
  * @brief
  * Wakeup all threads from a waitq that are waiting for a given event.
  *
+ * @description
+ * This function will set the inheritor of the wait queue
+ * to TURNSTILE_INHERITOR_NULL if it is a turnstile wait queue.
+ *
  * @c waitq must be unlocked
  */
 extern kern_return_t waitq_wakeup64_all(
 	waitq_t                 waitq,
 	event64_t               wake_event,
 	wait_result_t           result,
-	int                     priority);
+	waitq_wakeup_flags_t    flags);
 
 /**
  * @function waitq_wakeup64_identify()
@@ -555,7 +589,7 @@ extern thread_t waitq_wakeup64_identify(
 	waitq_t                 waitq,
 	event64_t               wake_event,
 	wait_result_t           result,
-	int                     priority);
+	waitq_wakeup_flags_t    flags);
 
 /**
  * @function waitq_wakeup64_thread()
@@ -577,16 +611,6 @@ extern kern_return_t waitq_wakeup64_thread(
 
 #pragma mark Mach-only assert_wait / wakeup
 #ifdef MACH_KERNEL_PRIVATE
-
-typedef enum e_waitq_lock_state {
-	WAITQ_KEEP_LOCKED    = 0x01,
-	WAITQ_UNLOCK         = 0x02,
-} waitq_lock_state_t;
-
-__options_decl(waitq_options_t, uint32_t, {
-	WQ_OPTION_NONE                 = 0,
-	WQ_OPTION_HANDOFF              = 1,
-});
 
 /**
  * @function waitq_clear_promotion_locked()
@@ -657,17 +681,12 @@ extern wait_result_t waitq_assert_wait64_locked(
  *
  * May temporarily disable and re-enable interrupts
  * and re-adjust thread priority of each awoken thread.
- *
- * If the input @c lock_state is @c WAITQ_UNLOCK then @c waitq will have
- * been unlocked before calling @c thread_go() on any returned threads,
- * and is guaranteed to be unlocked upon function return.
  */
 extern kern_return_t waitq_wakeup64_all_locked(
 	waitq_t                 waitq,
 	event64_t               wake_event,
 	wait_result_t           result,
-	int                     priority,
-	waitq_lock_state_t      lock_state);
+	waitq_wakeup_flags_t    flags);
 
 /**
  * @function waitq_wakeup64_one_locked()
@@ -684,9 +703,7 @@ extern kern_return_t waitq_wakeup64_one_locked(
 	waitq_t                 waitq,
 	event64_t               wake_event,
 	wait_result_t           result,
-	int                     priority,
-	waitq_lock_state_t      lock_state,
-	waitq_options_t         options);
+	waitq_wakeup_flags_t    flags);
 
 /**
  * @function waitq_wakeup64_identify_locked()
@@ -703,9 +720,8 @@ extern thread_t waitq_wakeup64_identify_locked(
 	waitq_t                 waitq,
 	event64_t               wake_event,
 	wait_result_t           result,
-	spl_t                  *spl,
-	int                     priority,
-	waitq_lock_state_t      lock_state);
+	waitq_wakeup_flags_t    flags,
+	spl_t                  *spl);
 
 /**
  * @function waitq_wakeup64_thread_and_unlock()
@@ -1011,8 +1027,7 @@ extern void select_set_reset(
 extern void select_waitq_wakeup_and_deinit(
 	struct waitq           *waitq,
 	event64_t               wake_event,
-	wait_result_t           result,
-	int                     priority);
+	wait_result_t           result);
 
 #endif /* XNU_KERNEL_PRIVATE */
 

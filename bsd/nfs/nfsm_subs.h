@@ -75,18 +75,10 @@
 
 #include <nfs/nfs_conf.h>
 
-int nfsm_rpchead(struct nfsreq *, mbuf_t, u_int64_t *, mbuf_t *);
-int nfsm_rpchead2(struct nfsmount *, int, int, int, int, int, kauth_cred_t, struct nfsreq *, mbuf_t, u_int64_t *, mbuf_t *);
-
 int nfsm_chain_new_mbuf(struct nfsm_chain *, size_t);
 int nfsm_chain_add_opaque_f(struct nfsm_chain *, const u_char *, size_t);
 int nfsm_chain_add_opaque_nopad_f(struct nfsm_chain *, const u_char *, size_t);
 int nfsm_chain_add_uio(struct nfsm_chain *, uio_t, size_t);
-int nfsm_chain_add_fattr4_f(struct nfsm_chain *, struct vnode_attr *, struct nfsmount *);
-int nfsm_chain_add_v2sattr_f(struct nfsm_chain *, struct vnode_attr *, uint32_t);
-int nfsm_chain_add_v3sattr_f(struct nfsmount *, struct nfsm_chain *, struct vnode_attr *);
-int nfsm_chain_add_string_nfc(struct nfsm_chain *, const uint8_t *, size_t);
-int nfsm_chaim_add_exclusive_create_verifier(int, struct nfsm_chain *, struct nfsmount *);
 
 int nfsm_chain_advance(struct nfsm_chain *, size_t);
 size_t nfsm_chain_offset(struct nfsm_chain *);
@@ -94,10 +86,6 @@ int nfsm_chain_reverse(struct nfsm_chain *, size_t);
 int nfsm_chain_get_opaque_pointer_f(struct nfsm_chain *, uint32_t, u_char **);
 int nfsm_chain_get_opaque_f(struct nfsm_chain *, size_t, u_char *);
 int nfsm_chain_get_uio(struct nfsm_chain *, size_t, uio_t);
-int nfsm_chain_get_fh_attr(struct nfsmount *, struct nfsm_chain *, nfsnode_t,
-    vfs_context_t, int, uint64_t *, fhandle_t *, struct nfs_vattr *);
-int nfsm_chain_get_wcc_data_f(struct nfsm_chain *, nfsnode_t, struct timespec *, int *, u_int64_t *);
-int nfsm_chain_get_secinfo(struct nfsm_chain *, uint32_t *, int *);
 
 #if CONFIG_NFS_SERVER
 void nfsm_adj(mbuf_t, int, int);
@@ -267,17 +255,6 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	                (NMC)->nmc_ptr - (caddr_t)mbuf_data((NMC)->nmc_mcur)); \
 	} while (0)
 
-/*
- *  set the TCP record mark at the head of an mbuf chain -
- *  assumes 4 bytes are already allocated in the head mbuf
- */
-#define nfsm_chain_set_recmark(E, NMC, VAL) \
-	do { \
-	        if (E) break; \
-	        *((uint32_t*)mbuf_data((NMC)->nmc_mhead)) \
-	                = txdr_unsigned(VAL); \
-	} while (0)
-
 /* make sure there's room for size bytes in current mbuf */
 #define nfsm_chain_check_size(E, NMC, SIZE) \
 	do { \
@@ -297,14 +274,6 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	        *((uint32_t*)(NMC)->nmc_ptr) = txdr_unsigned(VAL); \
 	        (NMC)->nmc_ptr += NFSX_UNSIGNED; \
 	        (NMC)->nmc_left -= NFSX_UNSIGNED; \
-	} while (0)
-
-/* update NFSv4 RPC statistics and add 32bit value to mbuf chain  */
-#define nfsm_chain_add_v4_op(E, NMC, OP) \
-	do { \
-	        nfsm_chain_add_32(E, NMC, OP); \
-	        if (OP < NFS_OP_COUNT) \
-	                OSAddAtomic64(1, &nfsclntstats.opcntv4[OP]); \
 	} while (0)
 
 /* add a 64bit value to an mbuf chain */
@@ -380,16 +349,6 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	        nfsm_chain_add_opaque((E), (NMC), (STR), (LEN)); \
 	} while (0)
 
-/* add a name to an mbuf chain */
-#define nfsm_chain_add_name(E, NMC, STR, LEN, NMP) \
-	do { \
-	        if (E) break; \
-	        if (NMFLAG((NMP), NFC)) \
-	                (E) = nfsm_chain_add_string_nfc((NMC), (const uint8_t*)(STR), (LEN)); \
-	        else \
-	                nfsm_chain_add_string((E), (NMC), (STR), (LEN)); \
-	} while (0)
-
 /* add an NFSv2 time to an mbuf chain */
 #define nfsm_chain_add_v2time(E, NMC, TVP) \
 	do { \
@@ -441,131 +400,12 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	        (E) = nfsm_chain_add_fattr((ND), (NMC), (VAP)); \
 	} while (0)
 
-/* Add an NFSv2 "sattr" structure to an mbuf chain */
-#define nfsm_chain_add_v2sattr(E, NMC, VAP, SZRDEV) \
-	do { \
-	        if (E) break; \
-	        (E) = nfsm_chain_add_v2sattr_f((NMC), (VAP), (SZRDEV)); \
-	} while (0)
-
-/* Add an NFSv3 "sattr" structure to an mbuf chain */
-#define nfsm_chain_add_v3sattr(NMP, E, NMC, VAP) \
-	do { \
-	        if (E) break; \
-	        (E) = nfsm_chain_add_v3sattr_f((NMP), (NMC), (VAP)); \
-	} while (0)
-
-/* Add an NFSv4 "fattr" structure to an mbuf chain */
-#define nfsm_chain_add_fattr4(E, NMC, VAP, NMP) \
-	do { \
-	        if (E) break; \
-	        (E) = nfsm_chain_add_fattr4_f((NMC), (VAP), (NMP)); \
-	} while (0)
-
 /* add NFSv3 WCC data to an mbuf chain */
 #define nfsm_chain_add_wcc_data(E, ND, NMC, PREERR, PREVAP, POSTERR, POSTVAP) \
 	do { \
 	        if (E) break; \
 	        (E) = nfsm_chain_add_wcc_data_f((ND), (NMC), \
 	                (PREERR), (PREVAP), (POSTERR), (POSTVAP)); \
-	} while (0)
-
-/* add NFSv4 COMPOUND header */
-#define NFS4_TAG_LENGTH 12
-#define nfsm_chain_add_compound_header(E, NMC, TAG, MINOR, NUMOPS) \
-	do { \
-	        if ((TAG) && strlen(TAG)) { \
-	/* put tags into a fixed-length space-padded field */ \
-	                char __nfstag[NFS4_TAG_LENGTH+1]; \
-	                snprintf(__nfstag, sizeof(__nfstag), "%-*s", NFS4_TAG_LENGTH, (TAG)); \
-	                nfsm_chain_add_32((E), (NMC), NFS4_TAG_LENGTH); \
-	                nfsm_chain_add_opaque((E), (NMC), __nfstag, NFS4_TAG_LENGTH); \
-	        } else { \
-	                nfsm_chain_add_32((E), (NMC), 0); \
-	        } \
-	        nfsm_chain_add_32((E), (NMC), (MINOR)); /*minorversion*/ \
-	        nfsm_chain_add_32((E), (NMC), (NUMOPS)); \
-	} while (0)
-
-/* add NFSv4 attr bitmap */
-#define nfsm_chain_add_bitmap(E, NMC, B, LEN) \
-	do { \
-	        int __i; \
-	        nfsm_chain_add_32((E), (NMC), (LEN)); \
-	        for (__i=0; __i < (LEN); __i++) \
-	                nfsm_chain_add_32((E), (NMC), (B)[__i]); \
-	} while (0)
-
-/* add NFSv4 attr bitmap masked with the given mask */
-#define nfsm_chain_add_bitmap_masked(E, NMC, B, LEN, MASK) \
-	do { \
-	        int __i; \
-	        nfsm_chain_add_32((E), (NMC), (LEN)); \
-	        for (__i=0; __i < (LEN); __i++) \
-	                nfsm_chain_add_32((E), (NMC), ((B)[__i] & (MASK)[__i])); \
-	} while (0)
-
-/* add NFSv4 attr bitmap masked with the supported attributes for this mount/node */
-#define nfsm_chain_add_bitmap_supported(E, NMC, B, NMP, NP) \
-	do { \
-	        uint32_t __bitmap[NFS_ATTR_BITMAP_LEN], *__bmp = (B); \
-	        int __nonamedattr = 0, __noacl = 0, __nomode = 0; \
-	        if (!((NMP)->nm_fsattr.nfsa_flags & NFS_FSFLAG_NAMED_ATTR) || \
-	            ((NP) && (((nfsnode_t)(NP))->n_flag & (NISDOTZFS|NISDOTZFSCHILD)))) \
-	                __nonamedattr = 1; \
-	        if (!((NMP)->nm_fsattr.nfsa_flags & NFS_FSFLAG_ACL)) \
-	                __noacl = 1; \
-	        if (NMFLAG((NMP), ACLONLY)) \
-	                __nomode = 1; \
-	        if (__nonamedattr || __noacl || __nomode) { \
-	/* don't ask for attrs we're not supporting */ \
-	/* some ".zfs" directories can't handle being asked for some attributes */ \
-	                int __ii; \
-	                NFS_CLEAR_ATTRIBUTES(__bitmap); \
-	                for (__ii=0; __ii < NFS_ATTR_BITMAP_LEN; __ii++) \
-	                        __bitmap[__ii] = (B)[__ii]; \
-	                if (__nonamedattr) \
-	                        NFS_BITMAP_CLR(__bitmap, NFS_FATTR_NAMED_ATTR); \
-	                if (__noacl) \
-	                        NFS_BITMAP_CLR(__bitmap, NFS_FATTR_ACL); \
-	                if (__nomode) \
-	                        NFS_BITMAP_CLR(__bitmap, NFS_FATTR_MODE); \
-	                __bmp = __bitmap; \
-	        } \
-	        nfsm_chain_add_bitmap_masked((E), (NMC), __bmp, NFS_ATTR_BITMAP_LEN, (NMP)->nm_fsattr.nfsa_supp_attr); \
-	} while (0)
-
-/* Add an NFSv4 "stateid" structure to an mbuf chain */
-#define nfsm_chain_add_stateid(E, NMC, SID) \
-	do { \
-	        nfsm_chain_add_32((E), (NMC), (SID)->seqid); \
-	        nfsm_chain_add_32((E), (NMC), (SID)->other[0]); \
-	        nfsm_chain_add_32((E), (NMC), (SID)->other[1]); \
-	        nfsm_chain_add_32((E), (NMC), (SID)->other[2]); \
-	} while (0)
-
-/* Add an NFSv4 "open-owner" structure to an mbuf chain */
-#define nfsm_chain_add_openowner(E, NMC, NMP, NOOP) \
-	do { \
-	        nfsm_chain_add_64(error, &nmreq, (NMP)->nm_clientid); \
-	        if (ISSET((NMP)->nm_state, NFSSTA_SPLIT_OPEN_OWNER)) { \
-	                nfsm_chain_add_32(error, &nmreq, NFSX_UNSIGNED * 2); \
-	                nfsm_chain_add_32(error, &nmreq, (NOOP)->noo_pid); \
-	        } else { \
-	               nfsm_chain_add_32(error, &nmreq, NFSX_UNSIGNED); \
-	        } \
-	        nfsm_chain_add_32(error, &nmreq, kauth_cred_getuid((NOOP)->noo_cred)); \
-	} while (0)
-
-/* add an NFSv4 lock owner structure to an mbuf chain */
-#define nfsm_chain_add_lock_owner4(E, NMC, NMP, NLOP) \
-	do { \
-	        nfsm_chain_add_64((E), (NMC), (NMP)->nm_clientid); \
-	        nfsm_chain_add_32((E), (NMC), 5*NFSX_UNSIGNED); \
-	        nfsm_chain_add_32((E), (NMC), (NLOP)->nlo_name); \
-	        nfsm_chain_add_32((E), (NMC), (NLOP)->nlo_pid); \
-	        nfsm_chain_add_64((E), (NMC), (NLOP)->nlo_pid_start.tv_sec); \
-	        nfsm_chain_add_32((E), (NMC), (NLOP)->nlo_pid_start.tv_usec); \
 	} while (0)
 
 /*
@@ -711,152 +551,6 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	        else \
 	                (TNSEC) *= 1000; \
 	} while (0)
-
-/* get postop attributes from an mbuf chain */
-#define nfsm_chain_postop_attr_get(NMP, E, NMC, F, VAP) \
-	do { \
-	        (F) = 0; \
-	        if ((E) || !(NMC)->nmc_mhead) break; \
-	        nfsm_chain_get_32((E), (NMC), (F)); \
-	        if ((E) || !(F)) break; \
-	        if (((E) = nfs_parsefattr((NMP), (NMC), NFS_VER3, (VAP)))) \
-	                (F) = 0; \
-	} while (0)
-
-/* update a node's attribute cache with postop attributes from an mbuf chain */
-/* (F returns whether the attributes were updated or not) */
-#define nfsm_chain_postop_attr_update_flag(E, NMC, NP, F, X) \
-	do { \
-	        struct nfs_vattr ttvattr; \
-	        nfsm_chain_postop_attr_get(NFSTONMP(NP), (E), (NMC), (F), &ttvattr); \
-	        if ((E) || !(F)) break; \
-	        if (((E) = nfs_loadattrcache((NP), &ttvattr, (X), 1))) { \
-	                (F) = 0; \
-	                break; \
-	        } \
-	        if (*(X) == 0) \
-	                (F) = 0; \
-	} while (0)
-
-/* update a node's attribute cache with postop attributes from an mbuf chain */
-#define nfsm_chain_postop_attr_update(E, NMC, NP, X) \
-	do { \
-	        int __dummy_flag = 0; \
-	        nfsm_chain_postop_attr_update_flag((E), (NMC), (NP), __dummy_flag, (X)); \
-	} while (0)
-
-/* get and process NFSv3 WCC data from an mbuf chain */
-#define nfsm_chain_get_wcc_data(E, NMC, NP, PREMTIME, NEWPOSTATTR, X) \
-	do { \
-	        if (E) break; \
-	        (E) = nfsm_chain_get_wcc_data_f((NMC), (NP), (PREMTIME), (NEWPOSTATTR), (X)); \
-	} while (0)
-
-#if CONFIG_NFS4
-/* separate v4 variant for loading attrs that only runs when NFSv4 is set */
-#define __nfsm_chain_loadattr_v4(E, NMC, VERS, X, VATTR) \
-	do { \
-	        (E) = nfs4_parsefattr((NMC), NULL, (VATTR), NULL, NULL, NULL); \
-	} while (0)
-#else
-#define __nfsm_chain_loadattr_v4(E, NMC, VERS, X, VATTR) \
-	do { \
-	        break; \
-	} while (0)
-#endif
-
-/* update a node's attribute cache with attributes from an mbuf chain */
-#define nfsm_chain_loadattr(E, NMC, NP, VERS, X) \
-	do { \
-	        struct nfs_vattr ttvattr; \
-	        if (E) break; \
-	        if ((VERS) == NFS_VER4) { \
-	                __nfsm_chain_loadattr_v4((E), (NMC), (VERS), (X), &ttvattr); \
-	        } else { \
-	                (E) = nfs_parsefattr(NFSTONMP(NP), (NMC), (VERS), &ttvattr); \
-	        } \
-	        if (!(E) && (NP)) \
-	                (E) = nfs_loadattrcache((NP), &ttvattr, (X), 0); \
-	        NVATTR_CLEANUP(&ttvattr); \
-	} while (0)
-
-/* get NFSv4 attr bitmap */
-#define nfsm_chain_get_bitmap(E, NMC, B, LEN) \
-	do { \
-	        uint32_t __len = 0, __i; \
-	        nfsm_chain_get_32((E), (NMC), __len); \
-	        if (E) break; \
-	        for (__i=0; __i < MIN(__len, (LEN)); __i++) \
-	                nfsm_chain_get_32((E), (NMC), (B)[__i]); \
-	        if (E) break; \
-	        for (; __i < __len; __i++) \
-	                nfsm_chain_adv((E), (NMC), NFSX_UNSIGNED); \
-	        for (; __i < (LEN); __i++) \
-	                (B)[__i] = 0; \
-	        (LEN) = __len; \
-	} while (0)
-
-/* get an NFSv4 "stateid" structure from an mbuf chain */
-#define nfsm_chain_get_stateid(E, NMC, SID) \
-	do { \
-	        nfsm_chain_get_32((E), (NMC), (SID)->seqid); \
-	        nfsm_chain_get_32((E), (NMC), (SID)->other[0]); \
-	        nfsm_chain_get_32((E), (NMC), (SID)->other[1]); \
-	        nfsm_chain_get_32((E), (NMC), (SID)->other[2]); \
-	} while (0)
-
-#define nfsm_chain_skip_tag(E, NMC) \
-	do { \
-	        uint32_t __val = 0; \
-	        nfsm_chain_get_32((E), (NMC), __val); \
-	        nfsm_chain_adv((E), (NMC), nfsm_rndup(__val)); \
-	} while (0)
-
-#define nfsm_chain_op_check(E, NMC, OP) \
-	do { \
-	        uint32_t __val = 0; \
-	        nfsm_chain_get_32((E), (NMC), __val); \
-	/* [sigh] some implementations return the "illegal" op for unsupported ops */ \
-	        nfsm_assert((E), ((__val == (OP)) || (__val == NFS_OP_ILLEGAL)), EBADRPC); \
-	        nfsm_chain_get_32((E), (NMC), __val); \
-	        nfsm_assert((E), (__val == NFS_OK), __val); \
-	} while (0)
-
-#define nfsm_chain_read_change_info(E, NMC, ATOMIC, BEFORE, AFTER) \
-	do { \
-	        nfsm_chain_get_32((E), (NMC), (ATOMIC)); \
-	        nfsm_chain_get_64((E), (NMC), (BEFORE)); \
-	        nfsm_chain_get_64((E), (NMC), (AFTER)); \
-} while (0)
-
-#define nfsm_chain_check_change_info_impl(ATOMIC, BEFORE, AFTER, DNP) \
-	do { \
-	        if ((ATOMIC) && ((BEFORE) == (DNP)->n_ncchange)) { \
-	                (DNP)->n_ncchange = (AFTER); \
-	        } else { \
-	                cache_purge(NFSTOV(DNP)); \
-	                (DNP)->n_ncgen++; \
-	        } \
-} while (0)
-
-#define nfsm_chain_check_change_info(E, NMC, DNP) \
-	do { \
-	        uint64_t __ci_before = 0, __ci_after = 0; \
-	        uint32_t __ci_atomic = 0; \
-	        nfsm_chain_read_change_info((E), (NMC), __ci_atomic, __ci_before, __ci_after); \
-	        if ((E) || !(DNP)) break; \
-	        nfsm_chain_check_change_info_impl(__ci_atomic, __ci_before, __ci_after, DNP); \
-	} while (0)
-
-#define nfsm_chain_check_change_info_open(E, NMC, DNP, CFLAGS) \
-	do { \
-	        uint64_t __ci_before = 0, __ci_after = 0; \
-	        uint32_t __ci_atomic = 0; \
-	        nfsm_chain_read_change_info((E), (NMC), __ci_atomic, __ci_before, __ci_after); \
-	        if ((E) || !(DNP) || !(CFLAGS)) break; \
-	        if ((CFLAGS) == NFS_CREATE_EXCLUSIVE || __ci_before != __ci_after || (DNP)->n_ncchange != __ci_after) \
-	                nfsm_chain_check_change_info_impl(__ci_atomic, __ci_before, __ci_after, DNP); \
-	        } while (0)
 
 #endif /* __APPLE_API_PRIVATE */
 #endif /* _NFS_NFSM_SUBS_H_ */

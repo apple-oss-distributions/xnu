@@ -198,6 +198,14 @@ proc_udata_info(int pid, int flavor, void *buffer, int buffersize)
 	return __proc_info(PROC_INFO_CALL_UDATA_INFO, pid, flavor, 0, buffer, buffersize);
 }
 
+/* only used by dyld which links with libsystem_kernel.a */
+__private_extern__ int
+proc_set_dyld_all_image_info(void *buffer, int buffersize)
+{
+	return __proc_info(PROC_INFO_CALL_SET_DYLD_IMAGES, getpid(), 0, 0, buffer, buffersize);
+}
+
+
 int
 proc_name(int pid, void * buffer, uint32_t buffersize)
 {
@@ -434,6 +442,23 @@ proc_terminate(pid_t pid, int *sig)
 	}
 
 	*sig = retval;
+
+	return 0;
+}
+
+int
+proc_terminate_all_rsr(int sig)
+{
+	int retval = 0;
+
+	if (sig != SIGKILL && sig != SIGTERM) {
+		return EINVAL;
+	}
+
+	retval = __proc_info(PROC_INFO_CALL_TERMINATE_RSR, 0, 0, sig, NULL, 0);
+	if (retval == -1) {
+		return errno;
+	}
 
 	return 0;
 }

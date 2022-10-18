@@ -4,7 +4,7 @@ from builtins import hex
 from builtins import range
 from builtins import bytes
 
-import sys, subprocess, os, re, time, getopt, shlex, inspect, xnudefines
+import sys, os, re, time, getopt, shlex, inspect, xnudefines
 import lldb
 from functools import wraps
 from ctypes import c_ulonglong as uint64_t
@@ -52,6 +52,16 @@ def header(initial_value):
         setattr(obj, 'header', initial_value)
         return obj
     return _set_header
+
+def md_header(fmt, args):
+    def _set_md_header(obj):
+        header = "|" + "|".join(fmt.split(" ")).format(*args) + "|"
+        
+        colhead = map(lambda fmt, col: "-"*len(fmt.format(col)), fmt.split(" "), args)
+        sub_header = "|" + "|".join(colhead) + "|"
+        setattr(obj, 'markdown', "\n".join([header, sub_header]))
+        return obj
+    return _set_md_header
 
 # holds type declarations done by xnu.
 #DONOTTOUCHME: Exclusive use of lldb_type_summary only.
@@ -620,25 +630,13 @@ def ProcessPanicStackshot(panic_stackshot_addr, panic_stackshot_len):
         print("Failed to save stackshot binary data to file")
         return
 
-    self_path = str(__file__)
-    base_dir_name = self_path[:self_path.rfind("/")]
-
-    # It is not possible to rely on sys.executable. When Python is embedded it
-    # returns containing binary (lldb in this case).
-    if PY3:
-        executable = "xcrun python3"
-    else:
-        executable = "xcrun python"
-
-    kcdata_cmd = "%s \"%s/kcdata.py\" \"%s\" -s \"%s\"" % (executable, base_dir_name, ss_binfile, ss_ipsfile)
-    print(kcdata_cmd)
-    (c, so, se) = RunShellCommand(kcdata_cmd)
-    if c == 0:
+    from kcdata import decode_kcdata_file
+    try:
+        with open(ss_binfile, "rb") as binfile:
+            decode_kcdata_file(binfile, ss_ipsfile)
         print("Saved ips stackshot file as %s" % ss_ipsfile)
-        return
-    else:
-        print("Failed to run command: exit code: %d, SO: %s SE: %s" % (c, so, se))
-        return
+    except Exception as e:
+        print("Failed to decode the stackshot: %s" % str(e))
 
 def ParseEmbeddedPanicLog(panic_header, cmd_options={}):
     panic_buf = Cast(panic_header, 'char *')
@@ -921,7 +919,7 @@ def __lldb_init_module(debugger, internal_dict):
         return
     _xnu_framework_init = True
     caching._GetDebuggerSessionID = GetDebuggerStopIDValue
-    debugger.HandleCommand('type summary add --regex --summary-string "${var%s}" -C yes -p -v "char \[[0-9]*\]"')
+    debugger.HandleCommand('type summary add --regex --summary-string "${var%s}" -C yes -p -v "char *\[[0-9]*\]"')
     debugger.HandleCommand('type format add --format hex -C yes uintptr_t')
     kern = KernelTarget(debugger)
     if not hasattr(lldb.SBValue, 'GetValueAsAddress'):
@@ -1139,8 +1137,12 @@ def IOTrace_cmd(cmd_args=[], cmd_options={}):
     """
     MAX_IOTRACE_BACKTRACES = 16
 
-    if kern.arch != "x86_64":
-        print("Sorry, iotrace is an x86-only command.")
+    if not hasattr(kern.globals, 'iotrace_entries_per_cpu'):
+        print("Sorry, iotrace is not supported.")
+        return
+
+    if kern.globals.iotrace_entries_per_cpu == 0:
+        print("Sorry, iotrace is disabled.")
         return
 
     hdrString = lambda : "%-19s %-8s %-10s %-20s SZ  %-18s %-17s DATA" % (
@@ -1335,3 +1337,6 @@ from sysreg import *
 from counter import *
 from btlog import *
 from refgrp import *
+from workload import *
+from recount import *
+from log import showLogStream, show_log_stream_info

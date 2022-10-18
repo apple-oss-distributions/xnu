@@ -17,6 +17,7 @@ MODULEMAPFILES = \
 
 PRIVATE_DATAFILES = \
 	in6.h \
+	in6_private.h \
 	in6_pcb.h \
 	in6_var.h \
 	ip6_var.h \
@@ -40,7 +41,10 @@ INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
 INSTALL_MI_DIR = netinet6
 
-EXPORT_MI_LIST = ${DATAFILES}
+# in6_private.h is covered by ../netinet/netinet_private.modulemap.
+INSTALL_MI_LCL_LIST = in6_private.h
+
+EXPORT_MI_LIST = ${DATAFILES} ${INSTALL_MI_LCL_LIST}
 
 EXPORT_MI_DIR = ${INSTALL_MI_DIR}
 

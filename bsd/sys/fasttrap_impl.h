@@ -199,7 +199,7 @@ extern int fasttrap_tracepoint_remove(proc_t *, fasttrap_tracepoint_t *);
 #if defined(__x86_64__)
 extern int fasttrap_pid_probe(x86_saved_state_t *regs);
 extern int fasttrap_return_probe(x86_saved_state_t* regs);
-#elif defined(__arm__) || defined(__arm64__)
+#elif defined(__arm64__)
 extern int fasttrap_pid_probe(arm_saved_state_t *rp);
 extern int fasttrap_return_probe(arm_saved_state_t *regs);
 #else

@@ -25,7 +25,7 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #include <arm64/asm.h>
 #include <arm64/machine_machdep.h>
 #include <arm64/proc_reg.h>

@@ -307,6 +307,7 @@ ipc_eventlink_destroy_internal(
 			 * Take a reference on the remote port, since it could go
 			 * away after eventlink lock is dropped.
 			 */
+			ip_validate(ipc_eventlink_port_remote);
 			ip_reference(ipc_eventlink_port_remote);
 		}
 		assert(temp_ipc_eventlink->el_port != IPC_PORT_NULL);
@@ -864,6 +865,7 @@ ipc_eventlink_signal_internal_locked(
 {
 	kern_return_t kr = KERN_NOT_WAITING;
 	struct ipc_eventlink_base *ipc_eventlink_base = signal_eventlink->el_base;
+	waitq_wakeup_flags_t flags = WAITQ_KEEP_LOCKED;
 
 	if (eventlink_option & IPC_EVENTLINK_FORCE_WAKEUP) {
 		/* Adjust the wait counter */
@@ -872,8 +874,7 @@ ipc_eventlink_signal_internal_locked(
 		kr = waitq_wakeup64_all_locked(
 			&ipc_eventlink_base->elb_waitq,
 			CAST_EVENT64_T(signal_eventlink),
-			THREAD_RESTART, WAITQ_ALL_PRIORITIES,
-			WAITQ_KEEP_LOCKED);
+			THREAD_RESTART, flags);
 		return kr;
 	}
 
@@ -882,8 +883,9 @@ ipc_eventlink_signal_internal_locked(
 
 	/* Check if thread needs to be woken up */
 	if (signal_eventlink->el_sync_counter > signal_eventlink->el_wait_counter) {
-		waitq_options_t wq_option = (eventlink_option & IPC_EVENTLINK_HANDOFF) ?
-		    WQ_OPTION_HANDOFF : WQ_OPTION_NONE;
+		if (eventlink_option & IPC_EVENTLINK_HANDOFF) {
+			flags |= WAITQ_HANDOFF;
+		}
 
 		/* Adjust the wait counter */
 		signal_eventlink->el_wait_counter = UINT64_MAX;
@@ -891,8 +893,7 @@ ipc_eventlink_signal_internal_locked(
 		kr = waitq_wakeup64_one_locked(
 			&ipc_eventlink_base->elb_waitq,
 			CAST_EVENT64_T(signal_eventlink),
-			THREAD_AWAKENED, WAITQ_ALL_PRIORITIES,
-			WAITQ_KEEP_LOCKED, wq_option);
+			THREAD_AWAKENED, flags);
 	}
 
 	return kr;

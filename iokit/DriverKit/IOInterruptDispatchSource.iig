@@ -132,6 +132,18 @@ public:
 	virtual kern_return_t
 	Cancel(IODispatchSourceCancelHandler handler) override LOCAL;
 
+    /*!
+     * @brief       Get the count and time of the last interrupt received by the kernel
+                    primary interrupt handler.
+     * @param       count Interrupt count.
+     * @param       time Interrupt time.
+     * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
+     */
+	virtual kern_return_t
+	GetLastInterrupt(
+		uint64_t   * count,
+		uint64_t   * time);
+
 private:
 	virtual kern_return_t
 	CheckForWork(bool synchronous) override LOCAL;

@@ -1,4 +1,5 @@
 _absolutetime_to_continuoustime
+_absolutetime_to_microtime
 _absolutetime_to_nanoseconds
 _assert_wait
 _assert_wait_deadline
@@ -35,6 +36,7 @@ _nanoseconds_to_absolutetime
 _preemption_enabled
 _read_random
 _read_frandom
+_record_system_event
 _semaphore_create
 _semaphore_dereference
 _semaphore_destroy

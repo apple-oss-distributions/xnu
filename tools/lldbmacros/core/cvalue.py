@@ -31,7 +31,7 @@ _CSTRING_REX = re.compile(r"((?:\s*|const\s+)\s*char(?:\s+\*|\s+[A-Za-z_0-9]*\s*
 
 # pragma pylint: disable=hex-method, div-method, rdiv-method, idiv-method, oct-method, nonzero-method
 class value(object):
-    '''A class designed to wrap lldb.SBValue() objects so the resulting object
+    """A class designed to wrap lldb.SBValue() objects so the resulting object
     can be used as a variable would be in code. So if you have a Point structure
     variable in your code in the current frame named "pt", you can initialize an instance
     of this class with it:
@@ -43,14 +43,44 @@ class value(object):
 
     pt = lldb.value(lldb.frame.FindVariable("rectangle_array"))
     print rectangle_array[12]
-    print rectangle_array[5].origin.x'''
+    print rectangle_array[5].origin.x
+    """
+    _kasan_tbi_build = None
+
     def __init__(self, sbvalue):
         # _sbval19k84obscure747 is specifically chosen to be obscure.
-        # This avoids conflicts when attributes could mean any field value in code
-        self._sbval19k84obscure747 = sbvalue
-        self._sbval19k84obscure747_type = sbvalue.GetType()
-        self._sbval19k84obscure747_is_ptr = sbvalue.GetType().GetTypeFlags() & lldb.eTypeIsPointer
+        # This avoids conflicts when attributes could mean any field value in code.
         self.sbvalue = sbvalue
+        self._sbval19k84obscure747 = self.sbvalue
+        self._sbval19k84obscure747_type = self.sbvalue.GetType()
+        self._sbval19k84obscure747_is_ptr = self.sbvalue.GetType().GetTypeFlags() & lldb.eTypeIsPointer
+
+        """Pointers need to have their TBI byte stripped if in use. TBI KASan,
+        for instance, tags pointers to detect improper memory accesses. Reading
+        values from such tagged pointers fails.
+
+        Stripping the pointers requires to learn whether TBI is in use or not.
+        We do that by checking presence of 'kasan_tbi_enabled' symbol which only
+        exists on the TBI KASan variant. Since KASan is one of more TBI
+        consumers (along with PAC or Sandbox) this is not an ideal approach.
+        Inspecting respective CPU state would be more appropriate.
+
+        Missing uniform TBI support in macros led to storing the TBI indication
+        in the 'value' class since it represents memory objects. In reality, it
+        is a property of the target itself where it rather belongs.
+        """
+        if value._IsKASanTBIBuild():
+            self._StripTBI()
+
+    @classmethod
+    def _IsKASanTBIBuild(cls):
+        """Returns true on TBI KASan targets, false otherwise."""
+        if cls._kasan_tbi_build is None:
+            if LazyTarget.GetTarget().FindGlobalVariables('kasan_tbi_enabled', 1):
+                cls._kasan_tbi_build = True
+            else:
+                cls._kasan_tbi_build = False
+        return cls._kasan_tbi_build
 
     def __bool__(self):
         return self._sbval19k84obscure747.__bool__() and self._GetValueAsUnsigned() != 0
@@ -97,7 +127,7 @@ class value(object):
 
     def __str__(self):
         global _CSTRING_REX
-        type_name = self._sbval19k84obscure747_type.GetName()
+        type_name = self._sbval19k84obscure747_type.GetCanonicalType().GetName()
         if len(_CSTRING_REX.findall(type_name)) > 0:
             return self._GetValueAsString()
         summary = self._sbval19k84obscure747.GetSummary()
@@ -398,6 +428,16 @@ class value(object):
 
         raise TypeError("Unsupported value format")
 
+    def _StripTBI(self):
+        """Strips the TBI byte value. Since the value is not a plain value but
+        represents a value of a variable, a register or an expression the
+        conversion is performed by (re-)creating the value through expression.
+        """
+        if not self._sbval19k84obscure747_is_ptr:
+            return
+        addr = self._sbval19k84obscure747.GetValueAsAddress()
+        sbv_new = self._sbval19k84obscure747.CreateValueFromExpression(None,'(void *)' + str(addr))
+        self._sbval19k84obscure747 = sbv_new.Cast(self._sbval19k84obscure747_type)
 
 def unsigned(val):
     """ Helper function to get unsigned value from core.value

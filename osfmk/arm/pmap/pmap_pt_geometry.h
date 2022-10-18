@@ -44,10 +44,7 @@
 #include <mach/vm_types.h>
 #include <mach_assert.h>
 
-#include <arm/proc_reg.h>
-#if defined(__arm64__)
 #include <arm64/proc_reg.h>
-#endif /* defined(__arm64__) */
 
 /**
  * arm/pmap.h is safe to be included in this file since it shouldn't rely on any
@@ -203,7 +200,6 @@ extern const struct page_table_attr * const native_pt_attr;
  * a three-level hierarchy, the root would be L1, the twig would be L2, and the
  * leaf would be L3.
  */
-#if (__ARM_VMSA__ > 7)
 /* Page size getter. */
 static inline uint64_t
 pt_attr_page_size(const pt_attr_t * const pt_attr)
@@ -241,24 +237,6 @@ static inline uint64_t
 pt_attr_ln_offmask(const pt_attr_t * const pt_attr, unsigned int level)
 {
 	return pt_attr->pta_level_info[level].offmask;
-}
-
-/**
- * On ARMv7 systems, the leaf page table size (1KB) is smaller than the page
- * size (4KB). To simplify our code, leaf tables are operated on in bundles of
- * four, so that four leaf page tables can be allocated with a single page.
- * Because of that, each page of leaf tables takes up four root/twig entries.
- *
- * This function returns the offset mask for a given level with that taken into
- * consideration. On ARMv8 systems, the granule size is identical to the page
- * size so this doesn't need to be taken into account.
- *
- * TODO __ARM_VMSA__ == 7: Remove this function when we remove ARMv7 from xnu.
- */
-__unused static inline uint64_t
-pt_attr_ln_pt_offmask(const pt_attr_t * const pt_attr, unsigned int level)
-{
-	return pt_attr_ln_offmask(pt_attr, level);
 }
 
 /**
@@ -477,160 +455,6 @@ pt_attr_leaf_x(const pt_attr_t * const pt_attr)
 	return pt_attr->ap_x;
 }
 
-#else /* (__ARM_VMSA__ > 7) */
-
-/**
- * Only the ARMv8 page tables are parameterized. ARMv7 page tables have a fixed
- * geometry.
- *
- * For documentation, see the ARMv8 equivalents to these functions above.
- */
-
-static inline uint64_t
-pt_attr_page_size(__unused const pt_attr_t * const pt_attr)
-{
-	return PAGE_SIZE;
-}
-
-__unused static inline unsigned int
-pt_attr_root_level(__unused const pt_attr_t * const pt_attr)
-{
-	return PMAP_TT_L1_LEVEL;
-}
-
-__unused static inline unsigned int
-pt_attr_commpage_level(__unused const pt_attr_t * const pt_attr)
-{
-	return PMAP_TT_L1_LEVEL;
-}
-
-static inline unsigned int
-pt_attr_twig_level(__unused const pt_attr_t * const pt_attr)
-{
-	return PMAP_TT_L1_LEVEL;
-}
-
-static inline uint64_t
-pt_attr_twig_size(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_TT_TWIG_SIZE;
-}
-
-static inline uint64_t
-pt_attr_twig_offmask(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_TT_TWIG_OFFMASK;
-}
-
-static inline uint64_t
-pt_attr_twig_shift(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_TT_TWIG_SHIFT;
-}
-
-static __unused inline uint64_t
-pt_attr_twig_index_mask(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_TT_TWIG_INDEX_MASK;
-}
-
-__unused static inline uint64_t
-pt_attr_leaf_size(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_TT_LEAF_SIZE;
-}
-
-__unused static inline uint64_t
-pt_attr_leaf_offmask(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_TT_LEAF_OFFMASK;
-}
-
-static inline uint64_t
-pt_attr_leaf_shift(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_TT_LEAF_SHIFT;
-}
-
-static __unused inline uint64_t
-pt_attr_leaf_index_mask(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_TT_LEAF_INDEX_MASK;
-}
-
-static inline uint64_t
-pt_attr_leaf_table_size(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_TT_L1_PT_SIZE;
-}
-
-static inline uint64_t
-pt_attr_leaf_table_offmask(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_TT_L1_PT_OFFMASK;
-}
-
-static inline uintptr_t
-pt_attr_leaf_rw(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_PTE_AP(AP_RWRW);
-}
-
-static inline uintptr_t
-pt_attr_leaf_ro(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_PTE_AP(AP_RORO);
-}
-
-static inline uintptr_t
-pt_attr_leaf_rona(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_PTE_AP(AP_RONA);
-}
-
-static inline uintptr_t
-pt_attr_leaf_rwna(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_PTE_AP(AP_RWNA);
-}
-
-static inline uintptr_t
-pt_attr_leaf_xn(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_PTE_NX;
-}
-
-static inline uintptr_t
-pt_attr_leaf_x(__unused const pt_attr_t * const pt_attr)
-{
-	return ARM_PTE_PNX;
-}
-
-__unused static inline uintptr_t
-pt_attr_ln_offmask(__unused const pt_attr_t * const pt_attr, unsigned int level)
-{
-	if (level == PMAP_TT_L1_LEVEL) {
-		return ARM_TT_L1_OFFMASK;
-	} else if (level == PMAP_TT_L2_LEVEL) {
-		return ARM_TT_L2_OFFMASK;
-	}
-
-	return 0;
-}
-
-static inline uintptr_t
-pt_attr_ln_pt_offmask(__unused const pt_attr_t * const pt_attr, unsigned int level)
-{
-	if (level == PMAP_TT_L1_LEVEL) {
-		return ARM_TT_L1_PT_OFFMASK;
-	} else if (level == PMAP_TT_L2_LEVEL) {
-		return ARM_TT_L2_OFFMASK;
-	}
-
-	return 0;
-}
-
-#endif /* (__ARM_VMSA__ > 7) */
 
 /**
  * Return the last level in the page table hierarchy.
@@ -641,31 +465,6 @@ pt_attr_leaf_level(const pt_attr_t * const pt_attr)
 	return pt_attr_twig_level(pt_attr) + 1;
 }
 
-#if (__ARM_VMSA__ == 7)
-
-/**
- * Return the index into a root/twig page table for a given virtual address.
- *
- * @param addr The virtual address to get the index from.
- */
-static inline unsigned int
-tte_index(__unused const pt_attr_t * const pt_attr, vm_map_address_t addr)
-{
-	return ttenum(addr);
-}
-
-/**
- * Return the index into a leaf page table for a given virtual address.
- *
- * @param addr The virtual address to get the index from.
- */
-static inline unsigned int
-pte_index(__unused const pt_attr_t * const pt_attr, vm_map_address_t addr)
-{
-	return ptenum(addr);
-}
-
-#else /* (__ARM_VMSA__ == 7) */
 
 /**
  * Return the index into a specific level of page table for a given virtual
@@ -706,103 +505,7 @@ pte_index(const pt_attr_t * const pt_attr, vm_map_address_t addr)
 	return ttn_index(pt_attr, addr, PMAP_TT_L3_LEVEL);
 }
 
-#endif /* (__ARM_VMSA__ == 7) */
 
-#if (__ARM_VMSA__ == 7)
-
-/**
- * Given an address and a map, compute the address of the corresponding
- * root/twig translation table entry.
- *
- * @param pmap The pmap whose root table to use.
- * @param addr The virtual address to calculate the root index off of.
- */
-static inline tt_entry_t *
-pmap_tte(pmap_t pmap, vm_map_address_t addr)
-{
-	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
-
-	/**
-	 * A full root table can address up to 4GB of virtual address space, but not
-	 * all pmaps support the full address space.
-	 */
-	if (tte_index(pt_attr, addr) >= pmap->tte_index_max) {
-		return TT_ENTRY_NULL;
-	}
-
-	return &pmap->tte[tte_index(pt_attr, addr)];
-}
-
-
-/**
- * Given an address and a map, compute the address of the leaf page table entry.
- * If the address is invalid with respect to the map then PT_ENTRY_NULL is
- * returned (and the map may need to grow).
- *
- * @param pmap The pmap whose page tables to parse.
- * @param addr The virtual address to calculate the table indices off of.
- */
-static inline pt_entry_t *
-pmap_pte(pmap_t pmap, vm_map_address_t addr)
-{
-	pt_entry_t *ptep = PT_ENTRY_NULL;
-	tt_entry_t *ttep = TT_ENTRY_NULL;
-	tt_entry_t tte = ARM_TTE_EMPTY;
-
-	ttep = pmap_tte(pmap, addr);
-	if (ttep == TT_ENTRY_NULL) {
-		return PT_ENTRY_NULL;
-	}
-
-	tte = *ttep;
-
-#if MACH_ASSERT
-	if ((tte & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_BLOCK) {
-		panic("%s: Attempt to demote L1 block, tte=0x%lx, pmap=%p, addr=%p",
-		    __func__, (unsigned long)tte, pmap, (void*)addr);
-	}
-#endif
-
-	if ((tte & ARM_TTE_TYPE_MASK) != ARM_TTE_TYPE_TABLE) {
-		return PT_ENTRY_NULL;
-	}
-
-	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
-	ptep = (pt_entry_t *) ttetokv(tte) + pte_index(pt_attr, addr);
-	return ptep;
-}
-
-/**
- * Given an address and a map, compute the address of the table entry at the
- * specified page table level. If the address is invalid with respect to the map
- * then TT_ENTRY_NULL is returned.
- *
- * @param pmap The pmap whose page tables to parse.
- * @param target_level The page table level at which to stop parsing the
- *                     hierarchy at.
- * @param addr The virtual address to calculate the table indices off of.
- */
-static inline tt_entry_t *
-pmap_ttne(pmap_t pmap, unsigned int target_level, vm_map_address_t addr)
-{
-	tt_entry_t *ret_ttep = TT_ENTRY_NULL;
-
-	switch (target_level) {
-	case PMAP_TT_L1_LEVEL:
-		ret_ttep = pmap_tte(pmap, addr);
-		break;
-	case PMAP_TT_L2_LEVEL:
-		ret_ttep = (tt_entry_t *)pmap_pte(pmap, addr);
-		break;
-	default:
-		panic("%s: bad level, pmap=%p, target_level=%u, addr=%p",
-		    __func__, pmap, target_level, (void *)addr);
-	}
-
-	return ret_ttep;
-}
-
-#else /* (__ARM_VMSA__ == 7) */
 
 /**
  * Given an address and a map, compute the address of the table entry at the
@@ -927,6 +630,5 @@ pmap_pte(pmap_t pmap, vm_map_address_t addr)
 	return pmap_tt3e(pmap, addr);
 }
 
-#endif /* (__ARM_VMSA__ == 7) */
 
 #endif /* _ARM_PMAP_PMAP_PT_GEOMETRY_H_ */

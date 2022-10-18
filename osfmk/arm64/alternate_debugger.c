@@ -131,7 +131,10 @@ alternate_debugger_init(void)
 		    VM_MAP_PAGE_MASK(kernel_map));
 
 		kern_return_t kr = KERN_SUCCESS;
-		kr = kmem_alloc_contig(kernel_map, &alt_va, alt_size, VM_MAP_PAGE_MASK(kernel_map), 0, 0, KMA_NOPAGEWAIT | KMA_KOBJECT | KMA_LOMEM, VM_KERN_MEMORY_DIAG);
+		kr = kmem_alloc_contig(kernel_map, &alt_va, alt_size,
+		    VM_MAP_PAGE_MASK(kernel_map), 0, 0,
+		    KMA_NOPAGEWAIT | KMA_KOBJECT | KMA_LOMEM | KMA_PERMANENT,
+		    VM_KERN_MEMORY_DIAG);
 		if (kr != KERN_SUCCESS) {
 			kprintf("########## ALTERNATE_DEBUGGER FAILED kmem_alloc_contig with %d\n", kr);
 			alt_va = 0;

@@ -51,7 +51,7 @@ extern void* proc_find_ident(struct proc_ident const *i);
 extern int proc_rele(void* p);
 extern task_t proc_task(void* p);
 extern struct proc_ident proc_ident(void* p);
-extern kern_return_t task_conversion_eval(task_t caller, task_t victim);
+extern kern_return_t task_conversion_eval(task_t caller, task_t victim, int flavor);
 
 /* Exported to kexts */
 extern typeof(task_id_token_port_name_to_task) task_id_token_port_name_to_task_external;
@@ -142,6 +142,7 @@ task_create_identity_token(
 	task_id_token_t *tokenp)
 {
 	task_id_token_t token;
+	void *bsd_info = NULL;
 
 	if (task == TASK_NULL || task == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
@@ -151,21 +152,22 @@ task_create_identity_token(
 
 	task_lock(task);
 
-	if (task->bsd_info) {
-		token->ident = proc_ident(task->bsd_info);
-	} else if (is_corpsetask(task)) {
+	bsd_info = get_bsdtask_info(task);
+	if (is_corpsetask(task)) {
 		token->task_uniqueid = task->task_uniqueid;
+	} else if (task->active && bsd_info != NULL) {
+		token->ident = proc_ident(bsd_info);
 	} else {
 		task_unlock(task);
 		zfree(task_id_token_zone, token);
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	task_unlock(task);
+
 	token->port = IP_NULL;
 	/* this reference will be donated to no-senders notification */
 	os_ref_init_count(&token->tidt_refs, NULL, 1);
-
-	task_unlock(task);
 
 	*tokenp = token;
 
@@ -248,7 +250,9 @@ task_identity_token_get_task_port(
 		*portp = convert_task_to_port_pinned(task); /* consumes task ref */
 		return KERN_SUCCESS;
 	}
-	if (flavor <= TASK_FLAVOR_INSPECT && task_conversion_eval(current_task(), task)) {
+
+	if (flavor <= TASK_FLAVOR_READ &&
+	    task_conversion_eval(current_task(), task, flavor)) {
 		task_deallocate(task);
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -325,7 +329,7 @@ ipc_port_t
 convert_task_id_token_to_port(
 	task_id_token_t token)
 {
-	boolean_t kr;
+	__assert_only bool kr;
 
 	if (token == TASK_ID_TOKEN_NULL) {
 		return IP_NULL;
@@ -334,8 +338,7 @@ convert_task_id_token_to_port(
 	zone_require(task_id_token_zone, token);
 
 	kr = ipc_kobject_make_send_lazy_alloc_port(&token->port,
-	    (ipc_kobject_t) token, IKOT_TASK_ID_TOKEN,
-	    IPC_KOBJECT_ALLOC_NONE, 0);
+	    token, IKOT_TASK_ID_TOKEN, IPC_KOBJECT_ALLOC_NONE);
 	assert(kr == TRUE); /* no-senders notification is armed, consumes token ref */
 
 	return token->port;

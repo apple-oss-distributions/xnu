@@ -36,7 +36,7 @@
 #include <skywalk/lib/cuckoo_hashtable.h>
 
 #define CUCKOO_TEST_TAG "com.apple.skywalk.libcuckoo.test"
-kern_allocation_name_t cuckoo_test_tag;
+SKMEM_TAG_DEFINE(cuckoo_test_tag, CUCKOO_TEST_TAG);
 
 os_refgrp_decl(static, cht_obj_refgrp, "CuckooTestRefGroup", NULL);
 
@@ -82,11 +82,11 @@ struct cht_obj {
 	uint32_t                co_seen;        // number of times seen
 };
 
-#if PLATFORM_WatchOS
+#if XNU_PLATFORM_WatchOS
 static const uint32_t CHT_OBJ_MAX = 16 * 1024;
-#else /* PLATFORM_WatchOS */
+#else /* XNU_PLATFORM_WatchOS */
 static const uint32_t CHT_OBJ_MAX = 512 * 1024;
-#endif /* !PLATFORM_WatchOS */
+#endif /* !XNU_PLATFORM_WatchOS */
 static struct cht_obj *cht_objs;
 
 static int
@@ -148,10 +148,6 @@ cht_test_init(void)
 {
 	if (OSCompareAndSwap(0, 1, &cht_inited)) {
 		lck_mtx_init(&cht_lock, &sk_lock_group, &sk_lock_attr);
-
-		ASSERT(cuckoo_test_tag == NULL);
-		cuckoo_test_tag = kern_allocation_name_allocate(CUCKOO_TEST_TAG, 0);
-		ASSERT(cuckoo_test_tag != NULL);
 	}
 }
 

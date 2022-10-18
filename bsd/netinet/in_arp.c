@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -948,11 +948,13 @@ arp_rtrequest(int req, struct rtentry *rt, struct sockaddr *sa)
 			if (la != NULL) {
 				arp_llreach_use(la); /* Mark use timestamp */
 			}
-			RT_UNLOCK(rt);
-			dlil_send_arp(rt->rt_ifp, ARPOP_REQUEST,
-			    SDL(gate), rt_key(rt), NULL, rt_key(rt), 0);
-			RT_LOCK(rt);
-			arpstat.txannounces++;
+			if ((rt->rt_ifp->if_flags & IFF_NOARP) == 0) {
+				RT_UNLOCK(rt);
+				dlil_send_arp(rt->rt_ifp, ARPOP_REQUEST,
+				    SDL(gate), rt_key(rt), NULL, rt_key(rt), 0);
+				RT_LOCK(rt);
+				arpstat.txannounces++;
+			}
 		}
 		OS_FALLTHROUGH;
 	case RTM_RESOLVE:
@@ -1406,6 +1408,11 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 		goto release;
 	}
 
+	if ((ifp->if_flags & IFF_NOARP) != 0) {
+		result = ENOTSUP;
+		goto release;
+	}
+
 	/*
 	 * Now that we have the right route, is it filled in?
 	 */
@@ -1495,11 +1502,6 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 		}
 	}
 
-	if (ifp->if_flags & IFF_NOARP) {
-		result = ENOTSUP;
-		goto release;
-	}
-
 	/*
 	 * Route wasn't complete/valid; we need to send out ARP request.
 	 * If we've exceeded the limit of la_holdq, drop from the head
@@ -1563,9 +1565,8 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 				if (sendkev) {
 					post_kev_in_arpfailure(ifp);
 				}
-				result = EJUSTRETURN;
 				RT_LOCK(route);
-				goto release;
+				goto release_just_return;
 			} else {
 				route->rt_flags |= RTF_REJECT;
 				rt_setexpire(route,
@@ -1598,10 +1599,12 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 		}
 	}
 
+
+release_just_return:
 	/* The packet is now held inside la_holdq or dropped */
 	result = EJUSTRETURN;
 	if (packet != NULL && !enqueued) {
-		mbuf_free(packet);
+		m_freem(packet);
 		packet = NULL;
 	}
 
@@ -1787,7 +1790,7 @@ match:
 		    "address %s\n", if_name(ifp),
 		    inet_ntop(AF_INET, &sender_ip->sin_addr, ipv4str,
 		    sizeof(ipv4str)), sdl_addr_to_hex(sender_hw, buf,
-		    sizeof(buf)));
+		    (int)sizeof(buf)));
 
 		/* Send a kernel event so anyone can learn of the conflict */
 		in_collision->link_data.if_family = ifp->if_family;
@@ -1873,7 +1876,7 @@ match:
 					log(LOG_INFO, "arp: %s on %s sent "
 					    "probe for %s, already on %s\n",
 					    sdl_addr_to_hex(sender_hw, buf,
-					    sizeof(buf)), if_name(ifp),
+					    (int)sizeof(buf)), if_name(ifp),
 					    inet_ntop(AF_INET,
 					    &target_ip->sin_addr, ipv4str,
 					    sizeof(ipv4str)),
@@ -1881,7 +1884,7 @@ match:
 					log(LOG_INFO, "arp: sending "
 					    "conflicting probe to %s on %s\n",
 					    sdl_addr_to_hex(sender_hw, buf,
-					    sizeof(buf)), if_name(ifp));
+					    (int)sizeof(buf)), if_name(ifp));
 				}
 				/* Mark use timestamp */
 				if (route->rt_llinfo != NULL) {
@@ -1968,7 +1971,7 @@ match:
 				    ipv4str, sizeof(ipv4str)),
 				    if_name(route->rt_ifp),
 				    sdl_addr_to_hex(sender_hw, buf,
-				    sizeof(buf)), if_name(ifp));
+				    (int)sizeof(buf)), if_name(ifp));
 			}
 			goto respond;
 		} else {
@@ -2057,15 +2060,15 @@ match:
 			log(LOG_INFO, "arp: %s moved from %s to %s on %s\n",
 			    inet_ntop(AF_INET, &sender_ip->sin_addr, ipv4str,
 			    sizeof(ipv4str)),
-			    sdl_addr_to_hex(gateway, buf, sizeof(buf)),
-			    sdl_addr_to_hex(sender_hw, buf2, sizeof(buf2)),
+			    sdl_addr_to_hex(gateway, buf, (int)sizeof(buf)),
+			    sdl_addr_to_hex(sender_hw, buf2, (int)sizeof(buf2)),
 			    if_name(ifp));
 		} else if (route->rt_expire == 0) {
 			if (arp_verbose || log_arp_warnings) {
 				log(LOG_ERR, "arp: %s attempts to modify "
 				    "permanent entry for %s on %s\n",
 				    sdl_addr_to_hex(sender_hw, buf,
-				    sizeof(buf)),
+				    (int)sizeof(buf)),
 				    inet_ntop(AF_INET, &sender_ip->sin_addr,
 				    ipv4str, sizeof(ipv4str)),
 				    if_name(ifp));
@@ -2268,7 +2271,9 @@ arp_ifinit(struct ifnet *ifp, struct ifaddr *ifa)
 	ifa->ifa_flags |= RTF_CLONING;
 	sa = ifa->ifa_addr;
 	IFA_UNLOCK(ifa);
-	dlil_send_arp(ifp, ARPOP_REQUEST, NULL, sa, NULL, sa, 0);
+	if ((ifp->if_flags & IFF_NOARP) == 0) {
+		dlil_send_arp(ifp, ARPOP_REQUEST, NULL, sa, NULL, sa, 0);
+	}
 }
 
 static int

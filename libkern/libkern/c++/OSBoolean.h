@@ -106,7 +106,7 @@ public:
  * <code>@link kOSBooleanFalse kOSBooleanFalse@/link</code>,
  * so that you can always use pointer comparison with OSBoolean objects.
  */
-	static OSPtr<OSBoolean> withBoolean(bool value);
+	static OSPtr<OSBoolean> withBoolean(bool value) __returns_nonnull_osptr;
 
 /*!
  * @function free

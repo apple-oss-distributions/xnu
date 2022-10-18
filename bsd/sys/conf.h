@@ -113,6 +113,8 @@ typedef int  select_fcn_t(dev_t dev, int which, void * wql, struct proc *p);
 typedef int  mmap_fcn_t(void);
 typedef int  rsvd_fcn_t(void);
 
+typedef void empty_fcn_t(void);
+
 #define d_open_t        open_close_fcn_t
 #define d_close_t       open_close_fcn_t
 #define d_read_t        read_write_fcn_t
@@ -124,6 +126,7 @@ typedef int  rsvd_fcn_t(void);
 #define d_mmap_t        mmap_fcn_t
 #define d_strategy_t    strategy_fcn_t
 
+
 __BEGIN_DECLS
 int             enodev(void);
 void    enodev_strat(void);
@@ -133,16 +136,16 @@ __END_DECLS
  * Versions of enodev() pointer, cast to appropriate function type. For use
  * in empty devsw slots.
  */
-#define eno_opcl                ((open_close_fcn_t *)&enodev)
-#define eno_strat               ((strategy_fcn_t *)&enodev_strat)
-#define eno_ioctl               ((ioctl_fcn_t *)&enodev)
-#define eno_dump                ((dump_fcn_t *)&enodev)
-#define eno_psize               ((psize_fcn_t *)&enodev)
-#define eno_rdwrt               ((read_write_fcn_t *)&enodev)
-#define eno_stop                ((stop_fcn_t *)&enodev)
-#define eno_reset               ((reset_fcn_t *)&enodev)
-#define eno_mmap                ((mmap_fcn_t *)&enodev)
-#define eno_select              ((select_fcn_t *)&enodev)
+#define eno_opcl                ((open_close_fcn_t *)(empty_fcn_t*)&enodev)
+#define eno_strat               ((strategy_fcn_t *)(empty_fcn_t*)&enodev_strat)
+#define eno_ioctl               ((ioctl_fcn_t *)(empty_fcn_t*)&enodev)
+#define eno_dump                ((dump_fcn_t *)(empty_fcn_t*)&enodev)
+#define eno_psize               ((psize_fcn_t *)(empty_fcn_t*)&enodev)
+#define eno_rdwrt               ((read_write_fcn_t *)(empty_fcn_t*)&enodev)
+#define eno_stop                ((stop_fcn_t *)(empty_fcn_t*)&enodev)
+#define eno_reset               ((reset_fcn_t *)(empty_fcn_t*)&enodev)
+#define eno_mmap                ((mmap_fcn_t *)(empty_fcn_t*)&enodev)
+#define eno_select              ((select_fcn_t *)(empty_fcn_t*)&enodev)
 
 /* For source backward compatibility only! */
 #define eno_getc                ((rsvd_fcn_t *)&enodev)
@@ -218,7 +221,8 @@ struct thread;
     {                                                                   \
 	eno_opcl,	eno_opcl,	eno_rdwrt,	eno_rdwrt,      \
 	eno_ioctl,	eno_stop,	eno_reset,	0,              \
-	(select_fcn_t *)seltrue,	eno_mmap,	eno_strat,	eno_getc,       \
+	(select_fcn_t *)(void (*)(void))seltrue,	eno_mmap,       \
+	eno_strat,	eno_getc,                                       \
 	eno_putc,	0                                               \
     }
 

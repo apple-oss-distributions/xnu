@@ -130,8 +130,10 @@ struct ip_moptions {
 	u_char  imo_multicast_loop;     /* 1 => hear sends if a member */
 	u_short imo_num_memberships;    /* no. memberships this socket */
 	u_short imo_max_memberships;    /* max memberships this socket */
-	struct  in_multi **imo_membership;      /* group memberships */
-	struct  in_mfilter *imo_mfilters;       /* source filters */
+	struct  in_multi **__counted_by(imo_max_memberships) imo_membership;
+	/* group memberships */
+	struct  in_mfilter *__counted_by(imo_max_memberships) imo_mfilters;
+	/* source filters */
 	u_int32_t imo_multicast_vif;    /* vif num outgoing multicasts */
 	struct  in_addr imo_multicast_addr; /* ifindex/addr on MULTICAST_IF */
 	void (*imo_trace)               /* callback fn for tracing refs */

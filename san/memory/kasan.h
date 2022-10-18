@@ -225,6 +225,8 @@ void __asan_init(void);
 void __asan_unregister_image_globals(uptr);
 void __asan_register_image_globals(uptr);
 
+void __hwasan_tag_memory(uintptr_t, unsigned char, uintptr_t);
+unsigned char __hwasan_generate_tag(void);
 
 __END_DECLS
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -56,20 +56,23 @@ extern uint32_t tcp_log_port;
 extern int tcp_log_privacy;
 
 #define TCP_ENABLE_FLAG_LIST \
-	X(TLEF_CONNECTION,	0x1, connection)        \
-	X(TLEF_RTT,		0x2, rtt)               \
-	X(TLEF_KEEP_ALIVE,	0x4, ka)                \
-	X(TLEF_LOG,		0x8, log)               \
-	X(TLEF_DST_LOOPBACK,	0x10, loop)             \
-	X(TLEF_DST_LOCAL,	0x20, local)            \
-	X(TLEF_DST_GW,		0x40, gw)               \
-	X(TLEF_THF_SYN,		0x100, syn)             \
-	X(TLEF_THF_FIN,		0x200, fin)             \
-	X(TLEF_THF_RST,		0x400, rst)             \
-	X(TLEF_DROP_NECP,	0x1000, dropnecp)       \
-	X(TLEF_DROP_PCB,	0x2000, droppcb)        \
-	X(TLEF_DROP_PKT,	0x4000, droppkt)        \
-	X(TLEF_FSW_FLOW,	0x8000, fswflow)
+	X(TLEF_CONNECTION,	0x00000001, connection) \
+	X(TLEF_RTT,		0x00000002, rtt)        \
+	X(TLEF_KEEP_ALIVE,	0x00000004, ka)         \
+	X(TLEF_LOG,		0x00000008, log)        \
+	X(TLEF_DST_LOOPBACK,	0x00000010, loop)       \
+	X(TLEF_DST_LOCAL,	0x00000020, local)      \
+	X(TLEF_DST_GW,		0x00000040, gw)         \
+	X(TLEF_THF_SYN,		0x00000100, syn)        \
+	X(TLEF_THF_FIN,		0x00000200, fin)        \
+	X(TLEF_THF_RST,		0x00000400, rst)        \
+	X(TLEF_DROP_NECP,	0x00001000, dropnecp)   \
+	X(TLEF_DROP_PCB,	0x00002000, droppcb)    \
+	X(TLEF_DROP_PKT,	0x00004000, droppkt)    \
+	X(TLEF_FSW_FLOW,	0x00008000, fswflow)    \
+	X(TLEF_STATE,           0x00010000, state)      \
+	X(TLEF_SYN_RXMT,	0x00020000, synrxmt)    \
+	X(TLEF_OUTPUT,	        0x00040000, output)
 
 /*
  * Flag values for tcp_log_enabled
@@ -81,8 +84,6 @@ enum {
 };
 
 #define TLEF_MASK_DST (TLEF_DST_LOOPBACK | TLEF_DST_LOCAL | TLEF_DST_GW)
-
-#define TLEF_MASK_THF (TLEF_THF_SYN | TLEF_THF_FIN | TLEF_THF_RST)
 
 extern void tcp_log_connection_summary(struct tcpcb *tp);
 extern void tcp_log_th_flags(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, struct ifnet *ifp);
@@ -96,6 +97,8 @@ extern void tcp_log_rtt_change(const char *func_name, int line_no, struct tcpcb 
 extern void tcp_log_keepalive(const char *func_name, int line_no, struct tcpcb *tp, int32_t idle_time);
 extern void tcp_log_message(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...) __printflike(4, 5);
 extern void tcp_log_fsw_flow(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...) __printflike(4, 5);
+extern void tcp_log_state_change(struct tcpcb *tp, int new_state);
+extern void tcp_log_output(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...) __printflike(4, 5);
 
 static inline bool
 tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
@@ -155,6 +158,9 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 #define TCP_LOG_CONNECT(tp, outgoing, error) if (tcp_is_log_enabled(tp, TLEF_CONNECTION)) \
     tcp_log_connection((tp), (outgoing) ? "connect outgoing" : "connect incoming", (error))
 
+#define TCP_LOG_CONNECTED(tp, error) if (tcp_is_log_enabled(tp, TLEF_CONNECTION)) \
+    tcp_log_connection((tp), "connected", (error))
+
 #define TCP_LOG_LISTEN(tp, error) if (tcp_is_log_enabled(tp, TLEF_CONNECTION)) \
     tcp_log_listen((tp), (error))
 
@@ -185,6 +191,11 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 #define TCP_LOG(tp, format, ...) if (tcp_is_log_enabled(tp, TLEF_LOG)) \
     tcp_log_message(__func__, __LINE__, tp, format, ## __VA_ARGS__)
 
+#define TCP_LOG_STATE(tp, new_state) if (tcp_log_enable_flags & TLEF_STATE) \
+    tcp_log_state_change((tp), (new_state))
+
+#define TCP_LOG_OUTPUT(tp, format, ...) if (tcp_is_log_enabled(tp, TLEF_OUTPUT)) \
+    tcp_log_output(__func__, __LINE__, tp, format, ## __VA_ARGS__)
 
 #endif /* BSD_KERNEL_RPIVATE */
 

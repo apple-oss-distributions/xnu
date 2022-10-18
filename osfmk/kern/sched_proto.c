@@ -255,8 +255,8 @@ sched_proto_timebase_init(void)
 	default_timeshare_computation = proto_quantum / 2;
 	default_timeshare_constraint = proto_quantum;
 
-	max_unsafe_computation = max_unsafe_quanta * proto_quantum;
-	sched_safe_duration = 2 * max_unsafe_quanta * proto_quantum;
+	sched_set_max_unsafe_rt_quanta(max_unsafe_rt_quanta);
+	sched_set_max_unsafe_fixed_quanta(max_unsafe_rt_quanta);
 }
 
 static void

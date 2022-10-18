@@ -305,7 +305,7 @@ vnode_issubdir(vnode_t vp, vnode_t dvp, int *is_subdir, vfs_context_t ctx)
 	while (1) {
 		boolean_t defer;
 		vnode_t pvp;
-		uint32_t vid;
+		uint32_t vid = 0;
 		struct componentname cn;
 		boolean_t is_subdir_locked = FALSE;
 
@@ -324,6 +324,7 @@ vnode_issubdir(vnode_t vp, vnode_t dvp, int *is_subdir, vfs_context_t ctx)
 
 		if (defer && tvp) {
 			vid = vnode_vid(tvp);
+			vnode_hold(tvp);
 		}
 
 		NAME_CACHE_UNLOCK();
@@ -349,6 +350,7 @@ vnode_issubdir(vnode_t vp, vnode_t dvp, int *is_subdir, vfs_context_t ctx)
 			}
 
 			error = vnode_getwithvid(tvp, vid);
+			vnode_drop(tvp);
 			if (error) {
 				if (error_retry_count++ < MAX_ERROR_RETRY) {
 					tvp = vp;
@@ -357,8 +359,9 @@ vnode_issubdir(vnode_t vp, vnode_t dvp, int *is_subdir, vfs_context_t ctx)
 				}
 				break;
 			}
-
 			vp_with_iocount = tvp;
+		} else {
+			tvp = vnode_drop(tvp);
 		}
 
 		bzero(&cn, sizeof(cn));
@@ -635,6 +638,7 @@ again:
 			}
 			vid = vp->v_id;
 
+			vnode_hold(vp);
 			NAME_CACHE_UNLOCK();
 
 			if (vp != first_vp && vp != parent_vp && vp != vp_with_iocount) {
@@ -643,10 +647,14 @@ again:
 					vp_with_iocount = NULLVP;
 				}
 				if (vnode_getwithvid(vp, vid)) {
+					vnode_drop(vp);
 					goto again;
 				}
 				vp_with_iocount = vp;
 			}
+
+			vnode_drop(vp);
+
 			VATTR_INIT(&va);
 			VATTR_WANTED(&va, va_parentid);
 
@@ -731,6 +739,7 @@ bad_news:
 		if (vp && (flags & BUILDPATH_CHECKACCESS)) {
 			vid = vp->v_id;
 
+			vnode_hold(vp);
 			NAME_CACHE_UNLOCK();
 
 			if (vp != first_vp && vp != parent_vp && vp != vp_with_iocount) {
@@ -739,10 +748,13 @@ bad_news:
 					vp_with_iocount = NULLVP;
 				}
 				if (vnode_getwithvid(vp, vid)) {
+					vnode_drop(vp);
 					goto again;
 				}
 				vp_with_iocount = vp;
 			}
+			vnode_drop(vp);
+
 			if ((ret = vnode_authorize(vp, NULL, KAUTH_VNODE_SEARCH, ctx))) {
 				goto out;       /* no peeking */
 			}
@@ -764,7 +776,7 @@ bad_news:
 
 #if CONFIG_FIRMLINKS
 			if (!(flags & BUILDPATH_NO_FIRMLINK) &&
-			    (tvp->v_flag & VFMLINKTARGET) && tvp->v_fmlink && (vp->v_fmlink->v_type == VDIR)) {
+			    (tvp->v_flag & VFMLINKTARGET) && tvp->v_fmlink && (tvp->v_fmlink->v_type == VDIR)) {
 				tvp = tvp->v_fmlink;
 				break;
 			}
@@ -849,10 +861,14 @@ vnode_getparent(vnode_t vp)
 	if (pvp != NULLVP) {
 		pvid = pvp->v_id;
 
+		vnode_hold(pvp);
 		NAME_CACHE_UNLOCK();
 
 		if (vnode_getwithvid(pvp, pvid) != 0) {
+			vnode_drop(pvp);
 			pvp = NULL;
+		} else {
+			vnode_drop(pvp);
 		}
 	} else {
 		NAME_CACHE_UNLOCK();
@@ -1073,6 +1089,7 @@ vnode_update_identity(vnode_t vp, vnode_t dvp, const char *name, int name_len, u
 	}
 	if (old_parentvp) {
 		struct  uthread *ut;
+		vnode_t vreclaims = NULLVP;
 
 		if (isstream) {
 			vnode_lock_spin(old_parentvp);
@@ -1094,6 +1111,7 @@ vnode_update_identity(vnode_t vp, vnode_t dvp, const char *name, int name_len, u
 		ut->uu_vreclaims = NULLVP;
 
 		while ((vp = old_parentvp) != NULLVP) {
+			vnode_hold(vp);
 			vnode_lock_spin(vp);
 			vnode_rele_internal(vp, 0, 0, 1);
 
@@ -1115,12 +1133,11 @@ vnode_update_identity(vnode_t vp, vnode_t dvp, const char *name, int name_len, u
 			 * this vnode on the list to be reaped by us, than
 			 * it has left this vnode with an iocount == 1
 			 */
-			if ((vp->v_iocount == 1) && (vp->v_usecount == 0) &&
-			    ((vp->v_lflag & (VL_MARKTERM | VL_TERMINATE | VL_DEAD)) == VL_MARKTERM)) {
+			if (ut->uu_vreclaims == vp) {
 				/*
-				 * vnode_rele wanted to do a vnode_reclaim on this vnode
-				 * it should be sitting on the head of the uu_vreclaims chain
-				 * pull the parent pointer now so that when we do the
+				 * This vnode is on the head of the uu_vreclaims chain
+				 * which means vnode_rele wanted to do a vnode_reclaim
+				 * on this vnode. Pull the parent pointer now so that when we do the
 				 * vnode_reclaim for each of the vnodes in the uu_vreclaims
 				 * list, we won't recurse back through here
 				 *
@@ -1141,12 +1158,14 @@ vnode_update_identity(vnode_t vp, vnode_t dvp, const char *name, int name_len, u
 				 */
 				old_parentvp = NULLVP;
 			}
-			vnode_unlock(vp);
+			vnode_drop_and_unlock(vp);
 		}
+		vreclaims = ut->uu_vreclaims;
+		ut->uu_vreclaims = NULLVP;
 		ut->uu_defer_reclaims = 0;
 
-		while ((vp = ut->uu_vreclaims) != NULLVP) {
-			ut->uu_vreclaims = vp->v_defer_reclaimlist;
+		while ((vp = vreclaims) != NULLVP) {
+			vreclaims = vp->v_defer_reclaimlist;
 
 			/*
 			 * vnode_put will drive the vnode_reclaim if
@@ -1858,11 +1877,14 @@ skiprsrcfork:
 	}
 	if (vp != NULLVP) {
 		vvid = vp->v_id;
+		vnode_hold(vp);
 	}
 	vid = dp->v_id;
 
+	vnode_hold(dp);
 	NAME_CACHE_UNLOCK();
 
+	tdp = NULLVP;
 	if ((vp != NULLVP) && (vp->v_type != VLNK) &&
 	    ((cnp->cn_flags & (ISLASTCN | LOCKPARENT | WANTPARENT | SAVESTART)) == ISLASTCN)) {
 		/*
@@ -1919,12 +1941,15 @@ need_dp:
 				} else {
 					error = ERECYCLE;
 				}
+				vnode_drop(dp);
 				goto errorout;
 			}
 		}
+		vnode_drop(dp);
 	}
 	if (vp != NULLVP) {
 		if ((vnode_getwithvid_drainok(vp, vvid))) {
+			vnode_drop(vp);
 			vp = NULLVP;
 
 			/*
@@ -1937,9 +1962,18 @@ need_dp:
 			 */
 			if (dp == NULLVP) {
 				dp = tdp;
+				tdp = NULLVP;
 				goto need_dp;
 			}
 		}
+		if (vp != NULLVP) {
+			vnode_drop(vp);
+		}
+	}
+
+	if (tdp) {
+		vnode_drop(tdp);
+		tdp = NULLVP;
 	}
 
 	ndp->ni_dvp = dp;
@@ -2117,9 +2151,11 @@ relook:
 		NCHSTAT(ncs_goodhits);
 
 		vid = vp->v_id;
+		vnode_hold(vp);
 		NAME_CACHE_UNLOCK();
 
 		if (vnode_getwithvid(vp, vid)) {
+			vnode_drop(vp);
 #if COLLECT_STATS
 			NAME_CACHE_LOCK();
 			NCHSTAT(ncs_badvid);
@@ -2127,6 +2163,7 @@ relook:
 #endif
 			return 0;
 		}
+		vnode_drop(vp);
 		*vpp = vp;
 		return -1;
 	}

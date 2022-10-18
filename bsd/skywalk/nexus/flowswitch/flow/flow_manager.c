@@ -34,6 +34,7 @@
 #include <netinet/in_var.h>
 #include <netinet6/ip6_var.h>
 #include <netkey/key.h>
+#include <netinet/udp.h>
 
 #include <skywalk/nexus/flowswitch/flow/flow_var.h>
 
@@ -44,7 +45,7 @@
 #include <net/net_api_stats.h>
 
 #define SKMEM_TAG_FSW_FLOW_MGR "com.apple.skywalk.fsw.flow_mgr"
-static kern_allocation_name_t skmem_tag_fsw_flow_mgr;
+static SKMEM_TAG_DEFINE(skmem_tag_fsw_flow_mgr, SKMEM_TAG_FSW_FLOW_MGR);
 
 static LCK_GRP_DECLARE(flow_mgr_lock_group, "sk_flow_mgr_lock");
 static LCK_RW_DECLARE(flow_mgr_lock, &flow_mgr_lock_group);
@@ -66,11 +67,6 @@ flow_mgr_init(void)
 {
 	ASSERT(!__flow_mgr_inited);
 
-	ASSERT(skmem_tag_fsw_flow_mgr == NULL);
-	skmem_tag_fsw_flow_mgr =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_FLOW_MGR, 0);
-	ASSERT(skmem_tag_fsw_flow_mgr != NULL);
-
 	RB_INIT(&flow_mgr_head);
 	__flow_mgr_inited = 1;
 }
@@ -80,11 +76,6 @@ flow_mgr_fini(void)
 {
 	if (__flow_mgr_inited) {
 		VERIFY(RB_EMPTY(&flow_mgr_head));
-
-		if (skmem_tag_fsw_flow_mgr != NULL) {
-			kern_allocation_name_release(skmem_tag_fsw_flow_mgr);
-			skmem_tag_fsw_flow_mgr = NULL;
-		}
 
 		__flow_mgr_inited = 0;
 	}
@@ -391,30 +382,6 @@ flow_mgr_terminate(struct flow_mgr *fm)
 	}
 }
 
-void
-flow_mgr_setup_host_flow(struct flow_mgr *fm, struct nx_flowswitch *fsw)
-{
-	struct flow_entry *host_fe = fe_alloc(true);
-	host_fe->fe_key.fk_mask = 0;
-	host_fe->fe_nx_port = FSW_VP_HOST;
-	*(struct nx_flowswitch **)(uintptr_t)&host_fe->fe_fsw = fsw;
-	host_fe->fe_svc_class = KPKT_SC_BE;
-	host_fe->fe_pid = proc_getpid(kernproc);
-	host_fe->fe_rx_process = fsw_host_rx;
-	(void) snprintf(host_fe->fe_proc_name, sizeof(host_fe->fe_proc_name),
-	    "%s", proc_name_address(kernproc));
-	flow_entry_retain(host_fe);
-	fm->fm_host_fe = host_fe;
-	KPKTQ_INIT(&host_fe->fe_rx_pktq);
-	KPKTQ_INIT(&host_fe->fe_rx_pktq);
-}
-
-void
-flow_mgr_teardown_host_flow(struct flow_mgr *fm)
-{
-	flow_entry_release(&fm->fm_host_fe);
-}
-
 /*
  * Must be matched with a call to flow_mgr_unlock().  Upon success will
  * return the flow manager address of the specified UUID, and will acquire
@@ -489,10 +456,10 @@ flow_req_check_mac_allowed(struct nx_flow_req *req)
 
 	if (req->nfr_flags & NXFLOWREQF_LISTENER) {
 		return mac_skywalk_flow_check_listen(req->nfr_proc, NULL,
-		           &req->nfr_saddr.sa, socktype, req->nfr_ip_protocol);
+		           SA(&req->nfr_saddr.sa), socktype, req->nfr_ip_protocol);
 	} else {
 		return mac_skywalk_flow_check_connect(req->nfr_proc, NULL,
-		           &req->nfr_daddr.sa, socktype, req->nfr_ip_protocol);
+		           SA(&req->nfr_daddr.sa), socktype, req->nfr_ip_protocol);
 	}
 }
 #endif /* CONFIG_MACF */
@@ -564,7 +531,7 @@ flow_req_prepare_namespace(struct nx_flow_req *req)
 			flow_set_port_info(&nfi, req);
 			err = flow_namespace_create(saddr,
 			    req->nfr_ip_protocol, &ns_token,
-			    req->nfr_flags & NXFLOWREQF_LISTENER, &nfi);
+			    req->nfr_flags, &nfi);
 			if (err != 0) {
 				SK_ERR("netns for %s.%u failed",
 				    sk_sa_ntop(SA(saddr), src_s, sizeof(src_s)),
@@ -780,6 +747,41 @@ flow_req_prepare(struct nx_flow_req *req, struct kern_nexus *nx,
 		req->nfr_transport_protocol = req->nfr_ip_protocol;
 	}
 
+	bool is_child_flow = !uuid_is_null(req->nfr_parent_flow_uuid);
+	if ((is_child_flow && req->nfr_flow_demux_count == 0) ||
+	    (!is_child_flow && req->nfr_flow_demux_count > 0)) {
+		err = EINVAL;
+		SK_ERR("invalid flow demux count");
+		goto fail;
+	}
+
+	if (req->nfr_flow_demux_count > 0) {
+		if (req->nfr_transport_protocol != IPPROTO_UDP) {
+			err = EINVAL;
+			SK_ERR("invalid transport protocol(%u) for flow demux",
+			    req->nfr_transport_protocol);
+			goto fail;
+		}
+
+		for (int i = 0; i < req->nfr_flow_demux_count; i++) {
+			if (req->nfr_flow_demux_patterns[i].fdp_len > FLOW_DEMUX_MAX_LEN ||
+			    req->nfr_flow_demux_patterns[i].fdp_len == 0) {
+				err = EINVAL;
+				SK_ERR("invalid flow demux pattern len %u",
+				    req->nfr_flow_demux_patterns[i].fdp_len);
+				goto fail;
+			}
+			if (req->nfr_flow_demux_patterns[i].fdp_offset +
+			    req->nfr_flow_demux_patterns[i].fdp_len > MAX_PKT_DEMUX_LIMIT) {
+				err = EINVAL;
+				SK_ERR("invalid demux offset plus length(%u > %d)",
+				    req->nfr_flow_demux_patterns[i].fdp_offset +
+				    req->nfr_flow_demux_patterns[i].fdp_len, MAX_PKT_DEMUX_LIMIT);
+				goto fail;
+			}
+		}
+	}
+
 	req->nfr_ifp = ifp;
 
 #if CONFIG_MACF
@@ -810,9 +812,12 @@ flow_req_prepare(struct nx_flow_req *req, struct kern_nexus *nx,
 		fr = NULL;
 	}
 
-	err = flow_req_prepare_namespace(req);
-	if (err != 0) {
-		goto fail;
+	/* child flow do not hold namespace references */
+	if (__probable(uuid_is_null(req->nfr_parent_flow_uuid))) {
+		err = flow_req_prepare_namespace(req);
+		if (err != 0) {
+			goto fail;
+		}
 	}
 
 	return 0;
@@ -944,7 +949,8 @@ flow_mgr_flow_add(struct kern_nexus *nx, struct flow_mgr *fm,
 
 	VERIFY(NETNS_TOKEN_VALID(&fe->fe_port_reservation) ||
 	    !(fe->fe_key.fk_mask & FKMASK_SPORT) ||
-	    req->nfr_flags & NXFLOWREQF_ASIS);
+	    req->nfr_flags & NXFLOWREQF_ASIS ||
+	    (fe->fe_flags & FLOWENT_CHILD));
 	VERIFY((req->nfr_flags & NXFLOWREQF_FLOWADV) ^
 	    (req->nfr_flowadv_idx == FLOWADV_IDX_NONE));
 	req->nfr_flowadv_idx = fe->fe_adv_idx;
@@ -1202,15 +1208,133 @@ flow_mgr_foreach_flow(struct flow_mgr *fm,
 		struct flow_entry *fe;
 		fe = container_of(node, struct flow_entry, fe_cnode);
 		flow_handler(fe);
+
+		if (fe->fe_flags & FLOWENT_PARENT) {
+		        struct flow_entry *child_fe;
+		        lck_rw_lock_shared(&fe->fe_child_list_lock);
+		        TAILQ_FOREACH(child_fe, &fe->fe_child_list, fe_child_link) {
+		                flow_handler(child_fe);
+			}
+		        lck_rw_unlock_shared(&fe->fe_child_list_lock);
+		}
 	}
 	    );
 }
 
-struct flow_entry *
-flow_mgr_get_host_fe(struct flow_mgr *fm)
+bool
+rx_flow_demux_match(struct nx_flowswitch *fsw, struct flow_entry *fe, struct __kern_packet *pkt)
 {
-	struct flow_entry *fe;
-	fe = fm->fm_host_fe;
-	flow_entry_retain(fe);
-	return fe;
+	struct udphdr *uh;
+	uint8_t *pkt_buf;
+	uint16_t bdlen, bdlim, bdoff;
+	uint16_t pkt_payload_len;
+	uint8_t *demux_data;
+
+	ASSERT(fe->fe_flags & FLOWENT_CHILD);
+	ASSERT(fe->fe_demux_pattern_count > 0);
+
+	if (fe->fe_flags & (FLOWENTF_TORN_DOWN | FLOWENTF_NONVIABLE)) {
+		return false;
+	}
+
+	/*
+	 * Demux only supported for UDP packets with payload
+	 */
+	if (__improbable(pkt->pkt_flow_ip_proto != IPPROTO_UDP)) {
+		return false;
+	}
+
+	uh = (struct udphdr *)pkt->pkt_flow_udp_hdr;
+	if (__improbable(uh == NULL || pkt->pkt_flow_ulen == 0)) {
+		return false;
+	}
+
+	int udp_payload_offset = pkt->pkt_l2_len + pkt->pkt_flow_ip_hlen + sizeof(*uh);
+
+	MD_BUFLET_ADDR_ABS_DLEN(pkt, pkt_buf, bdlen, bdlim, bdoff);
+	pkt_payload_len = bdlim - bdoff;
+	pkt_payload_len = (uint16_t)MIN(pkt_payload_len, pkt->pkt_length);
+	pkt_payload_len -= udp_payload_offset;
+
+	for (int index = 0; index < fe->fe_demux_pattern_count; index++) {
+		struct flow_demux_pattern *demux_pattern = &fe->fe_demux_patterns[index].fdp_demux_pattern;
+		ASSERT(demux_pattern->fdp_len > 0);
+
+		if (pkt->pkt_flow_ulen >= demux_pattern->fdp_offset + demux_pattern->fdp_len) {
+			if (__probable(pkt_payload_len >= demux_pattern->fdp_offset + demux_pattern->fdp_len)) {
+				demux_data = (uint8_t *)(uh + 1) + demux_pattern->fdp_offset;
+			} else {
+				if (pkt->pkt_pflags & PKT_F_MBUF_DATA) {
+					m_copydata(pkt->pkt_mbuf, udp_payload_offset + demux_pattern->fdp_offset,
+					    demux_pattern->fdp_len, fe->fe_demux_pkt_data);
+					demux_data = fe->fe_demux_pkt_data;
+				} else {
+					FSW_STATS_INC(FSW_STATS_RX_DEMUX_SHORT_ERR);
+					return false;
+				}
+			}
+
+			int result = -1;
+			if (fe->fe_demux_patterns[index].fdp_memcmp_mask != NULL) {
+				result = fe->fe_demux_patterns[index].fdp_memcmp_mask(demux_data,
+				    demux_pattern->fdp_value, demux_pattern->fdp_mask);
+			} else {
+				result = sk_memcmp_mask(demux_data, demux_pattern->fdp_value,
+				    demux_pattern->fdp_mask, demux_pattern->fdp_len);
+			}
+
+			if (result == 0) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+struct flow_entry *
+rx_lookup_child_flow(struct nx_flowswitch *fsw, struct flow_entry *parent_fe,
+    struct __kern_packet *pkt)
+{
+	struct flow_entry *child_fe;
+
+	/*
+	 * Demux only supported for UDP packets with payload
+	 */
+	if (__improbable(pkt->pkt_flow_ip_proto != IPPROTO_UDP)) {
+		return NULL;
+	}
+
+	lck_rw_lock_shared(&parent_fe->fe_child_list_lock);
+
+	TAILQ_FOREACH(child_fe, &parent_fe->fe_child_list, fe_child_link) {
+		if (rx_flow_demux_match(fsw, child_fe, pkt)) {
+			flow_entry_retain(child_fe);
+			lck_rw_unlock_shared(&parent_fe->fe_child_list_lock);
+			return child_fe;
+		}
+	}
+
+	lck_rw_unlock_shared(&parent_fe->fe_child_list_lock);
+	return NULL;
+}
+
+struct flow_entry *
+tx_lookup_child_flow(struct flow_entry *parent_fe, uuid_t flow_id)
+{
+	struct flow_entry *child_fe;
+
+	ASSERT(parent_fe->fe_flags & FLOWENT_PARENT);
+
+	lck_rw_lock_shared(&parent_fe->fe_child_list_lock);
+	TAILQ_FOREACH(child_fe, &parent_fe->fe_child_list, fe_child_link) {
+		if (_UUID_MATCH(flow_id, child_fe->fe_uuid)) {
+			flow_entry_retain(child_fe);
+			lck_rw_unlock_shared(&parent_fe->fe_child_list_lock);
+			return child_fe;
+		}
+	}
+
+	lck_rw_unlock_shared(&parent_fe->fe_child_list_lock);
+	return NULL;
 }

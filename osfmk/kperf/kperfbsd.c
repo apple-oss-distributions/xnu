@@ -831,6 +831,8 @@ SYSCTL_PROC(_kperf_limits, OID_AUTO, timer_min_bg_pet_period_ns,
     CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
     (void *)REQ_LIM_BG_PET_PERIOD_NS, sizeof(uint64_t), kperf_sysctl_limits,
     "Q", "Minimum background PET timer period in nanoseconds");
+SYSCTL_INT(_kperf_limits, OID_AUTO, max_action_count, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &kperf_max_actions, 0, "Maximum number of kperf actions");
 
 /* debug */
 SYSCTL_INT(_kperf, OID_AUTO, debug_level, CTLFLAG_RW | CTLFLAG_LOCKED,

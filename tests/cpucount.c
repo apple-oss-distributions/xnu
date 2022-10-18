@@ -10,6 +10,7 @@
  */
 
 #include <darwintest.h>
+#include "test_utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,7 +73,7 @@ fixed_os_cpu_number(void)
 }
 
 
-T_DECL(count_cpus, "Tests we can schedule bound threads on all hw.ncpus cores and that _os_cpu_number matches")
+T_DECL(count_cpus, "Tests we can schedule bound threads on all hw.ncpus cores and that _os_cpu_number matches", XNU_T_META_SOC_SPECIFIC)
 {
 	int rv;
 

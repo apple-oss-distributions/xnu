@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -205,6 +205,19 @@ kern_packet_get_service_class(const kern_packet_t ph)
 }
 
 errno_t
+kern_packet_set_compression_generation_count(const kern_packet_t ph,
+    uint32_t gencnt)
+{
+	return __packet_set_comp_gencnt(ph, gencnt);
+}
+
+errno_t
+kern_packet_get_compression_generation_count(const kern_packet_t ph, uint32_t *pgencnt)
+{
+	return __packet_get_comp_gencnt(ph, pgencnt);
+}
+
+errno_t
 kern_packet_get_service_class_index(const kern_packet_svc_class_t svc,
     uint32_t *index)
 {
@@ -262,16 +275,16 @@ kern_packet_get_traffic_class(const kern_packet_t ph)
 errno_t
 kern_packet_set_inet_checksum(const kern_packet_t ph,
     const packet_csum_flags_t flags, const uint16_t start,
-    const uint16_t stuff)
+    const uint16_t stuff, const boolean_t tx)
 {
-	return __packet_set_inet_checksum(ph, flags, start, stuff, FALSE);
+	return __packet_set_inet_checksum(ph, flags, start, stuff, tx);
 }
 
 packet_csum_flags_t
 kern_packet_get_inet_checksum(const kern_packet_t ph, uint16_t *start,
-    uint16_t *val)
+    uint16_t *val, const boolean_t tx)
 {
-	return __packet_get_inet_checksum(ph, start, val, TRUE);
+	return __packet_get_inet_checksum(ph, start, val, tx);
 }
 
 void
@@ -384,14 +397,17 @@ kern_packet_get_timestamp_requested(const kern_packet_t ph,
 void
 kern_packet_tx_completion(const kern_packet_t ph, ifnet_t ifp)
 {
-	kern_return_t tx_status;
 	struct __kern_packet *kpkt = SK_PTR_ADDR_KPKT(ph);
 
 	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
-	(void) __packet_get_tx_completion_status(ph, &tx_status);
-	if (tx_status != KERN_SUCCESS) {
-		(void) kern_channel_event_transmit_status(ph, ifp);
-	}
+	/*
+	 * handling of transmit completion events.
+	 */
+	(void) kern_channel_event_transmit_status_with_packet(ph, ifp);
+
+	/*
+	 * handling of transmit completion timestamp request callbacks.
+	 */
 	if ((kpkt->pkt_pflags & PKT_F_TX_COMPL_TS_REQ) != 0) {
 		__packet_perform_tx_completion_callbacks(ph, ifp);
 	}
@@ -448,6 +464,18 @@ kern_packet_set_expire_time(const kern_packet_t ph, const uint64_t ts)
 }
 
 errno_t
+kern_packet_get_expiry_action(const kern_packet_t ph, packet_expiry_action_t *pea)
+{
+	return __packet_get_expiry_action(ph, pea);
+}
+
+errno_t
+kern_packet_set_expiry_action(const kern_packet_t ph, packet_expiry_action_t pea)
+{
+	return __packet_set_expiry_action(ph, pea);
+}
+
+errno_t
 kern_packet_get_token(const kern_packet_t ph, void *token, uint16_t *len)
 {
 	return __packet_get_token(ph, token, len);
@@ -490,6 +518,13 @@ uint8_t
 kern_packet_get_vlan_priority(const uint16_t tag)
 {
 	return __packet_get_vlan_priority(tag);
+}
+
+errno_t
+kern_packet_get_app_metadata(const kern_packet_t ph,
+    packet_app_metadata_type_t *app_type, uint8_t *app_metadata)
+{
+	return __packet_get_app_metadata(ph, app_type, app_metadata);
 }
 
 void
@@ -672,6 +707,9 @@ kern_packet_clone_internal(const kern_packet_t ph1, kern_packet_t *ph2,
 			*__DECONST(uint16_t *, &p2->pkt_bufs_cnt) =
 			    p1->pkt_bufs_cnt;
 			_KBUF_COPY(p1_buf, p2_buf);
+			_CASSERT(sizeof(p2_buf->buf_flag) == sizeof(uint16_t));
+			*__DECONST(uint16_t *, &p2_buf->buf_flag) &=
+			    ~BUFLET_FLAG_EXTERNAL;
 			ASSERT(p2_buf->buf_nbft_addr == 0);
 			ASSERT(p2_buf->buf_nbft_idx == OBJ_IDX_NONE);
 		}
@@ -847,6 +885,84 @@ kern_buflet_set_data_limit(const kern_buflet_t buf, const uint16_t dlim)
 	return __buflet_set_data_limit(buf, dlim);
 }
 
+uint16_t
+kern_buflet_get_buffer_offset(const kern_buflet_t buf)
+{
+	return __buflet_get_buffer_offset(buf);
+}
+
+errno_t
+kern_buflet_set_buffer_offset(const kern_buflet_t buf, const uint16_t off)
+{
+	return __buflet_set_buffer_offset(buf, off);
+}
+
+uint16_t
+kern_buflet_get_gro_len(const kern_buflet_t buf)
+{
+	return __buflet_get_gro_len(buf);
+}
+
+errno_t
+kern_buflet_set_gro_len(const kern_buflet_t buf, const uint16_t len)
+{
+	return __buflet_set_gro_len(buf, len);
+}
+
+static int
+kern_buflet_clone_internal(const kern_buflet_t buf1, kern_buflet_t *pbuf_array,
+    uint32_t *size, kern_pbufpool_t pool, uint32_t skmflag)
+{
+	struct __kern_buflet *pbuf;
+	uint32_t itr;
+	int err;
+
+	if (skmflag & SKMEM_NOSLEEP) {
+		err = kern_pbufpool_alloc_batch_buflet_nosleep(pool, pbuf_array,
+		    size, FALSE);
+	} else {
+		err = kern_pbufpool_alloc_batch_buflet(pool, pbuf_array, size, FALSE);
+	}
+	if (__improbable(*size == 0)) {
+		SK_ERR("kern_buflet_clone failed to allocated buflet (err %d)", err);
+		return err;
+	}
+
+	for (itr = 0; itr < *size; itr++) {
+		pbuf = pbuf_array[itr];
+		/* Copy metadata from the src buflet */
+		_KBUF_COPY(buf1, pbuf);
+		_CASSERT(sizeof(pbuf->buf_flag) == sizeof(uint16_t));
+		*__DECONST(uint16_t *, &pbuf->buf_flag) |= BUFLET_FLAG_RAW;
+		BUF_NBFT_ADDR(pbuf, 0);
+		BUF_NBFT_IDX(pbuf, OBJ_IDX_NONE);
+	}
+
+	return err;
+}
+
+errno_t
+kern_buflet_clone(const kern_buflet_t buf1, kern_buflet_t *pbuf_array,
+    uint32_t *size, kern_pbufpool_t pool)
+{
+	return kern_buflet_clone_internal(buf1, pbuf_array, size, pool, 0);
+}
+
+errno_t
+kern_buflet_clone_nosleep(const kern_buflet_t buf1, kern_buflet_t *pbuf_array,
+    uint32_t *size, kern_pbufpool_t pool)
+{
+	return kern_buflet_clone_internal(buf1, pbuf_array, size,
+	           pool, SKMEM_NOSLEEP);
+}
+
+void *
+kern_buflet_get_next_buf(const kern_buflet_t buflet, const void *prev_buf)
+{
+	return __buflet_get_next_buf(buflet, prev_buf);
+}
+
+
 packet_trace_id_t
 kern_packet_get_trace_id(const kern_packet_t ph)
 {
@@ -894,4 +1010,59 @@ kern_packet_copy_bytes(kern_packet_t pkt, size_t off, size_t len, void* out_data
 	bcopy((void *) addr, out_data, count);
 
 	return 0;
+}
+
+
+errno_t
+kern_packet_get_flowid(const kern_packet_t ph, packet_flowid_t *pflowid)
+{
+	return __packet_get_flowid(ph, pflowid);
+}
+
+void
+kern_packet_set_trace_tag(const kern_packet_t ph, packet_trace_tag_t tag)
+{
+	__packet_set_trace_tag(ph, tag);
+}
+
+packet_trace_tag_t
+kern_packet_get_trace_tag(const kern_packet_t ph)
+{
+	return __packet_get_trace_tag(ph);
+}
+
+errno_t
+kern_packet_get_tx_nexus_port_id(const kern_packet_t ph, uint32_t *nx_port_id)
+{
+	return __packet_get_tx_nx_port_id(ph, nx_port_id);
+}
+
+errno_t
+kern_packet_get_protocol_segment_size(const kern_packet_t ph, uint16_t *seg_sz)
+{
+	return __packet_get_protocol_segment_size(ph, seg_sz);
+}
+
+void
+kern_packet_set_segment_count(const kern_packet_t ph, uint8_t segcount)
+{
+	__packet_set_segment_count(ph, segcount);
+}
+
+void *
+kern_packet_get_priv(const kern_packet_t ph)
+{
+	return __packet_get_priv(ph);
+}
+
+void
+kern_packet_set_priv(const kern_packet_t ph, void *priv)
+{
+	return __packet_set_priv(ph, priv);
+}
+
+void
+kern_packet_get_tso_flags(const kern_packet_t ph, packet_tso_flags_t *flags)
+{
+	return __packet_get_tso_flags(ph, flags);
 }

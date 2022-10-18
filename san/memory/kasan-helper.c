@@ -152,6 +152,17 @@ __asan_poison_cxx_array_cookie(uptr p)
 	uint8_t *shadow = SHADOW_FOR_ADDRESS(p);
 	*shadow = ASAN_ARRAY_COOKIE;
 }
+
+unsigned char
+__hwasan_generate_tag()
+{
+	return 0;
+}
+
+void
+__hwasan_tag_memory(uintptr_t __unused p, unsigned char __unused tag, uintptr_t __unused sz)
+{
+}
 #else /* KASAN_CLASSIC */
 uptr
 __asan_load_cxx_array_cookie(uptr __unused *p)

@@ -430,6 +430,15 @@ PE_init_panicheader()
 void
 PE_update_panicheader_nestedpanic()
 {
+	/*
+	 * if the panic header pointer is bogus (e.g. someone stomped on it) then bail.
+	 */
+	if (!panic_info) {
+		/* if this happens in development then blow up bigly */
+		assert(panic_info);
+		return;
+	}
+
 	/* If the panic log offset is not set, re-init the panic header */
 	if (panic_info->mph_panic_log_offset == 0) {
 		PE_init_panicheader();
@@ -444,6 +453,8 @@ PE_update_panicheader_nestedpanic()
 	    ((panic_info->mph_stackshot_offset != 0) && (panic_info->mph_stackshot_len != 0)))) {
 		kdb_printf("panic_info contains invalid stackshot metadata: mph_stackshot_offset 0x%x mph_stackshot_len 0x%x\n",
 		    panic_info->mph_stackshot_offset, panic_info->mph_stackshot_len);
+
+		panic_info->mph_panic_flags |= MACOS_PANIC_HEADER_FLAG_INCOHERENT_PANICLOG;
 	}
 
 	/*
@@ -457,7 +468,10 @@ PE_update_panicheader_nestedpanic()
 		if (panic_info->mph_other_log_len != 0) {
 			kdb_printf("panic_info contains invalid other log metadata (zero offset but non-zero length), length was 0x%x, zeroing value\n",
 			    panic_info->mph_other_log_len);
+
 			panic_info->mph_other_log_len = 0;
+
+			panic_info->mph_panic_flags |= MACOS_PANIC_HEADER_FLAG_INCOHERENT_PANICLOG;
 		}
 	}
 

@@ -13,6 +13,8 @@
 #include <mach/mach.h>
 #include <mach/task.h>
 
+#include <os/variant_private.h>
+
 #include <signal.h>
 #include <sys/sysctl.h>
 #include <sys/syslimits.h>
@@ -135,26 +137,14 @@ T_HELPER_DECL(exc_resource_helper, "exc_resource helper")
 	}
 }
 
-static void
-check_exc_resource_threads_enabled()
-{
-	int err;
-	int enabled;
-	size_t enabled_size = sizeof(enabled);
-	err = sysctlbyname("kern.exc_resource_threads_enabled", &enabled, &enabled_size, NULL, 0);
-
-	if (err || !enabled) {
-		T_SKIP("EXC_RESOURCE RESOURCE_TYPE_THREADS not enabled on this system");
-	}
-}
-
 T_DECL(exc_resource_threads, "Ensures that a process with a thread_limit set will receive an exc_resource when it crosses its thread limit",
     T_META_ASROOT(true),
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false),
+    T_META_REQUIRES_OS_VARIANT("HasInternalDiagnostics"),
+    T_META_REQUIRES_SYSCTL_EQ("kern.exc_resource_threads_enabled", 1)
+    )
 {
 	pthread_t handle_thread;
-
-	check_exc_resource_threads_enabled();
 
 	sync_sema = dispatch_semaphore_create(0);
 

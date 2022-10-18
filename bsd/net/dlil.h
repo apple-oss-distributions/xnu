@@ -261,6 +261,7 @@ extern errno_t dlil_send_arp_internal(ifnet_t, u_int16_t,
 #define NET_THREAD_RX_NOTIFY    0x80000 /* thread is doing RX notify */
 #define NET_THREAD_TX_NOTIFY    0x100000 /* thread is doing TX notify */
 #define NET_THREAD_AYSYNC_TX    0x200000 /* require use of starter thread */
+#define NET_THREAD_SYNC_RX      0x400000 /* request synchronous Rx handler */
 #endif /* SKYWALK */
 
 /*
@@ -359,6 +360,7 @@ extern boolean_t ifnet_attach_netif_nexus(ifnet_t ifp);
 extern boolean_t ifnet_detach_netif_nexus(ifnet_t ifp);
 extern boolean_t ifnet_add_netagent(ifnet_t ifp);
 extern boolean_t ifnet_remove_netagent(ifnet_t ifp);
+extern void      ifnet_attach_native_flowswitch(ifnet_t ifp);
 
 #endif /* SKYWALK */
 
@@ -387,7 +389,7 @@ extern const void *dlil_ifaddr_bytes(const struct sockaddr_dl *, size_t *,
 extern void dlil_report_issues(struct ifnet *, u_int8_t[DLIL_MODIDLEN],
     u_int8_t[DLIL_MODARGLEN]);
 
-#define PROTO_HASH_SLOTS        5
+#define PROTO_HASH_SLOTS       4
 
 extern int proto_hash_value(u_int32_t);
 
@@ -410,6 +412,11 @@ extern errno_t dlil_set_output_handler(struct ifnet *ifp, dlil_output_func fn);
 extern void dlil_reset_input_handler(struct ifnet *ifp);
 extern void dlil_reset_output_handler(struct ifnet *ifp);
 #endif /* SKYWALK */
+
+#if DEVELOPMENT || DEBUG
+extern void trace_pkt_dump_payload(struct ifnet *ifp, struct __kern_packet *pkt,
+    bool input);
+#endif /* DEVELOPMENT || DEBUG */
 
 /*
  * This is mostly called from the context of the DLIL input thread;

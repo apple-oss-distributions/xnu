@@ -42,7 +42,6 @@
 #include "kasan_internal.h"
 
 int __asan_option_detect_stack_use_after_return = 0;
-int fakestack_enabled = 0;
 
 #define FAKESTACK_HEADER_SZ 64
 #define FAKESTACK_NUM_SZCLASS 7

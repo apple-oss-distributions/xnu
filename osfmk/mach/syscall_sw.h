@@ -124,6 +124,10 @@ kernel_trap(task_name_for_pid,-44,3)
 kernel_trap(task_for_pid,-45,3)
 kernel_trap(pid_for_task,-46,2)
 
+#if defined(__LP64__) || defined(__arm64__)
+kernel_trap(mach_msg2_trap, -47, 8)
+#endif
+
 #if defined(__LP64__)
 kernel_trap(macx_swapon,-48, 4)
 kernel_trap(macx_swapoff,-49, 2)

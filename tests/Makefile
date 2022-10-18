@@ -6,7 +6,7 @@ ifdef BASEDSTROOT
 override DSTROOT = $(BASEDSTROOT)
 endif
 
-INVALID_ARCHS = i386
+INVALID_ARCHS = i386 $(filter armv7%,$(ARCH_CONFIGS))
 ENABLE_LTE_TESTS=YES
 
 OTHER_LTE_INCLUDE_FILES += \
@@ -32,8 +32,6 @@ OTHER_CFLAGS += --std=gnu11 -isystem $(SDKROOT)/System/Library/Frameworks/System
 OTHER_CFLAGS += -UT_NAMESPACE_PREFIX -DT_NAMESPACE_PREFIX=xnu -DT_LEAKS_DISABLE=1
 OTHER_CFLAGS += -F $(SDKROOT)/System/Library/PrivateFrameworks
 
-OTHER_CFLAGS += -Wl,-sectcreate,__INFO_FILTER,__disable,/dev/null
-
 
 CODESIGN:=$(shell xcrun -sdk "$(TARGETSDK)" -find codesign)
 CODESIGN_HARDENED_RUNTIME:=$(CODESIGN) -o runtime
@@ -45,8 +43,14 @@ else
   IOS_TEST_COMPAT = NO
 endif
 
-# to have custom compiler flags to
-# target: OTHER_CFLAGS += <my flags>
+# Subsystems
+
+include ktrace/Makefile
+
+INCLUDED_TEST_SOURCE_DIRS += recount
+include recount/Makefile
+
+# Miscellaneous Tests
 
 atm_diagnostic_flag: OTHER_CFLAGS += drop_priv.c
 
@@ -57,9 +61,9 @@ avx: INVALID_ARCHS = $(filter arm%,$(ARCH_CONFIGS))
 avx: OTHER_CFLAGS += -mavx512f -mavx512bw -mavx512vl
 avx: OTHER_CFLAGS += -I$(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
 avx: CONFIG_FLAGS := $(filter-out -O%,$(CONFIG_FLAGS))
-# Level 2 optimization must be used to prevent compiler from generating
-# invalid instructions when compiling with AVX-512 flags.
-avx: CONFIG_FLAGS += -O2
+# Add -mno-implicit-float to prevent the compiler from touching SIMD regs
+# unexpectedly
+avx: CONFIG_FLAGS += -mno-implicit-float
 # Disable vzeroupper insertion to work around rdar://problem/35035096
 avx: CONFIG_FLAGS += -mllvm -x86-use-vzeroupper=0
 ifneq (osx,$(TARGET_NAME))
@@ -85,9 +89,24 @@ restrict_jit: CODE_SIGN_ENTITLEMENTS = restrict_jit.entitlements
 backtracing_tests: OTHER_LDFLAGS += -framework CoreSymbolication
 backtracing_tests: CODE_SIGN_ENTITLEMENTS = kernel_symbolication_entitlements.plist
 
-data_protection: OTHER_LDFLAGS += -ldarwintest_utils -framework IOKit
+CUSTOM_TARGETS += corpse_backtrace2
 
-CUSTOM_TARGETS += immovable_send_client vm_spawn_tool port_exhaustion_client port_table_limits_client fd_table_limits_client
+corpse_backtrace2:
+		$(MIG) $(CFLAGS) \
+		-DMACH_EXC_SERVER_TASKIDTOKEN \
+		-DMACH_EXC_SERVER_BACKTRACE \
+		-sheader $(OBJROOT)/excserver_backtrace.h \
+		-server $(OBJROOT)/excserver_backtrace.c \
+		-header /dev/null -user /dev/null \
+		excserver_backtrace.defs
+
+install-corpse_backtrace2: ;
+
+corpse_backtrace: corpse_backtrace2 exc_helpers.c
+corpse_backtrace: OTHER_CFLAGS += $(OBJROOT)/excserver_backtrace.c
+corpse_backtrace: OTHER_CFLAGS += -I $(OBJROOT)
+
+CUSTOM_TARGETS += immovable_send_client vm_spawn_tool port_exhaustion_client port_table_limits_client fd_table_limits_client posix_spawnattr_set_crash_behavior_np_child
 
 exception_tests: excserver_protect exc_helpers.c
 exception_tests: CODE_SIGN_ENTITLEMENTS = exception_tests.entitlements
@@ -106,6 +125,22 @@ immovable_send_client: immovable_send_client.c
 install-immovable_send_client: immovable_send_client
 	mkdir -p $(INSTALLDIR)
 	cp $(SYMROOT)/immovable_send_client $(INSTALLDIR)/
+
+posix_spawnattr_set_crash_behavior_np: posix_spawnattr_set_crash_behavior_np_child
+posix_spawnattr_set_crash_behavior_np: CODE_SIGN_ENTITLEMENTS = posix_spawnattr_set_crash_behavior_np_entitlements.plist
+
+posix_spawnattr_set_crash_behavior_np_child: posix_spawnattr_set_crash_behavior_np_child.c
+	$(CC) $(DT_CFLAGS) -I $(OBJROOT) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) posix_spawnattr_set_crash_behavior_np_child.c -o $(SYMROOT)/posix_spawnattr_set_crash_behavior_np_child
+	$(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@
+
+install-posix_spawnattr_set_crash_behavior_np_child: posix_spawnattr_set_crash_behavior_np_child
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/posix_spawnattr_set_crash_behavior_np_child $(INSTALLDIR)/
+
+posix_spawnattr_set_launch_type_np: posix_spawnattr_set_launch_type_test
+posix_spawnattr_set_launch_type_np: OTHER_CFLAGS += -isystem $(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
+
+posix_spawn_launch_type: CODE_SIGN_ENTITLEMENTS = posix_spawn_launch_type-entitlements.plist
 
 port_exhaustion: OTHER_LDFLAGS += -ldarwintest_utils -lpthread
 port_exhaustion: port_exhaustion_client
@@ -161,64 +196,76 @@ imm_pinned_control_port: OTHER_LDFLAGS += -ldarwintest_utils -lpthread
 imm_pinned_control_port: imm_pinned_control_port_crasher
 
 imm_pinned_control_port_crasher: imm_pinned_control_port_crasher.c
-	$(CC) $(DT_CFLAGS) -I $(OBJROOT) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) imm_pinned_control_port_crasher.c -o $(SYMROOT)/imm_pinned_control_port_crasher
+	$(CC) $(DT_CFLAGS) -I $(OBJROOT) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) -I$(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders \
+	imm_pinned_control_port_crasher.c -o $(SYMROOT)/imm_pinned_control_port_crasher
 	$(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@
 
 install-imm_pinned_control_port_crasher: imm_pinned_control_port_crasher
 	mkdir -p $(INSTALLDIR)
 	cp $(SYMROOT)/imm_pinned_control_port_crasher $(INSTALLDIR)/
 
+CUSTOM_TARGETS += reply_port_defense_client
+
+reply_port_defense: excserver
+reply_port_defense: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
+reply_port_defense: OTHER_LDFLAGS += -ldarwintest_utils -lpthread
+reply_port_defense: reply_port_defense_client
+
+reply_port_defense_client: reply_port_defense_client.c
+	$(CC) $(DT_CFLAGS) -I $(OBJROOT) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) -I$(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders \
+	reply_port_defense_client.c -o $(SYMROOT)/reply_port_defense_client
+	$(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@
+
+install-reply_port_defense_client: reply_port_defense_client
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/reply_port_defense_client $(INSTALLDIR)/
+
 kas_info: OTHER_LDFLAGS += -framework CoreSymbolication
 kas_info: CODE_SIGN_ENTITLEMENTS = kernel_symbolication_entitlements.plist
 
-INCLUDED_TEST_SOURCE_DIRS += ktrace
-
-ktrace/kdebug_tests: INVALID_ARCHS = i386
-ktrace/kdebug_tests: OTHER_LDFLAGS = -framework ktrace -ldarwintest_utils -framework kperf
-ktrace/kdebug_tests: OTHER_CFLAGS += test_utils.c
-
-ktrace/kdebug_coproc_tests: INVALID_ARCHS = i386
-ktrace/kdebug_coproc_tests: OTHER_LDFLAGS = -framework ktrace -ldarwintest_utils -framework kperf
-ktrace/kdebug_coproc_tests: OTHER_CFLAGS += test_utils.c
-
-ktrace/kpc_tests: OTHER_LDFLAGS += -framework kperf -framework ktrace
-ktrace/kpc_tests: INVALID_ARCHS = i386
-
-ktrace/kperf_tests: OTHER_CFLAGS += ktrace/kperf_helpers.c drop_priv.c
-ktrace/kperf_tests: OTHER_LDFLAGS += -framework kperf -framework kperfdata -framework ktrace -ldarwintest_utils
-
-ktrace/kperf_backtracing_tests: OTHER_CFLAGS += ktrace/kperf_helpers.c
-ktrace/kperf_backtracing_tests: OTHER_LDFLAGS += -framework kperf -framework kperfdata -framework ktrace
-ktrace/kperf_backtracing_tests: OTHER_LDFLAGS += -framework CoreSymbolication
-ktrace/kperf_backtracing_tests: CODE_SIGN_ENTITLEMENTS = kernel_symbolication_entitlements.plist
-
-EXCLUDED_SOURCES += drop_priv.c ktrace/kperf_helpers.c xnu_quick_test_helpers.c memorystatus_assertion_helpers.c bpflib.c in_cksum.c test_utils.c inet_transfer.c
+EXCLUDED_SOURCES += drop_priv.c xnu_quick_test_helpers.c memorystatus_assertion_helpers.c bpflib.c in_cksum.c test_utils.c inet_transfer.c
 
 ifneq ($(IOS_TEST_COMPAT),YES)
-EXCLUDED_SOURCES += jumbo_va_spaces_28530648.c perf_compressor.c memorystatus_freeze_test.c vm/entitlement_increased_memory_limit.c
+EXCLUDED_SOURCES += jumbo_va_spaces_28530648.c perf_compressor.c vm/memorystatus_freeze_test.c vm/memorystatus_freeze_test_entitled.c vm/entitlement_increased_memory_limit.c vm/ios13extended_footprint.c vm/entitlement_internal_bands.c
 endif
 
 perf_compressor: OTHER_LDFLAGS += -ldarwintest_utils
 perf_compressor: CODE_SIGN_ENTITLEMENTS=./private_entitlement.plist
 
 
-memorystatus_freeze_test: CODE_SIGN_ENTITLEMENTS=./task_for_pid_entitlement.plist
-memorystatus_freeze_test: OTHER_LDFLAGS += -ldarwintest_utils
-memorystatus_freeze_test: OTHER_CFLAGS += -ldarwintest_utils memorystatus_assertion_helpers.c
+vm/memorystatus_freeze_test: CODE_SIGN_ENTITLEMENTS=./task_for_pid_entitlement.plist
+vm/memorystatus_freeze_test: OTHER_LDFLAGS += -ldarwintest_utils
+vm/memorystatus_freeze_test: memorystatus_assertion_helpers.c test_utils.c vm/memorystatus_freeze_test.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none --entitlements $(CODE_SIGN_ENTITLEMENTS) $(SYMROOT)/$@;
+
+vm/memorystatus_freeze_test_entitled: CODE_SIGN_ENTITLEMENTS=./vm/memorystatus_freeze_test_entitled.plist
+vm/memorystatus_freeze_test_entitled: OTHER_LDFLAGS += -ldarwintest_utils
+vm/memorystatus_freeze_test_entitled: test_utils.c vm/memorystatus_freeze_test_entitled.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none --entitlements $(CODE_SIGN_ENTITLEMENTS) $(SYMROOT)/$@;
 
 memorystatus_is_assertion: OTHER_LDFLAGS += -ldarwintest_utils
 memorystatus_is_assertion: OTHER_CFLAGS += memorystatus_assertion_helpers.c
 
 memorystatus_vm_map_fork: OTHER_CFLAGS += test_utils.c
+memorystatus_vm_map_fork: OTHER_LDFLAGS += -ldarwintest_utils
 
 shared_cache_tests: OTHER_LDFLAGS += -ldarwintest_utils
 
+stackshot_tests: ./stackshot-entitlements.plist
+stackshot_tests: CODE_SIGN_ENTITLEMENTS=./stackshot-entitlements.plist
 stackshot_tests: OTHER_CFLAGS += -Wno-objc-messaging-id
-stackshot_tests: OTHER_LDFLAGS += -lkdd -lz -ldarwintest_utils -framework Foundation
+stackshot_tests: OTHER_LDFLAGS += -lkdd -lz -ldarwintest_utils -framework Foundation -framework IOKit
 
+stackshot_accuracy: ./stackshot-entitlements.plist
+stackshot_accuracy: CODE_SIGN_ENTITLEMENTS=./stackshot-entitlements.plist
 stackshot_accuracy: OTHER_CFLAGS += -ldarwintest_utils -Wno-objc-messaging-id
 stackshot_accuracy: OTHER_LDFLAGS += -lkdd -ldarwintest_utils -framework Foundation
 stackshot_accuracy: INVALID_ARCHS = i386
+
+stackshot_spawn_exit_stress: ./stackshot-entitlements.plist
+stackshot_spawn_exit_stress: CODE_SIGN_ENTITLEMENTS=./stackshot-entitlements.plist
 
 ifeq ($(PLATFORM),MacOSX)
 CUSTOM_TARGETS += stackshot_translated_child
@@ -234,8 +281,12 @@ else
 EXCLUDED_SOURCES += stackshot_translated_child.c
 endif
 
+microstackshot_tests: ./stackshot-entitlements.plist
+microstackshot_tests: CODE_SIGN_ENTITLEMENTS=./stackshot-entitlements.plist
 microstackshot_tests: OTHER_LDFLAGS = -ldarwintest_utils -framework ktrace -framework kperf -framework CoreFoundation
 
+memorystatus_zone_test: ./stackshot-entitlements.plist
+memorystatus_zone_test: CODE_SIGN_ENTITLEMENTS=./stackshot-entitlements.plist
 memorystatus_zone_test: OTHER_CFLAGS += -isystem $(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
 memorystatus_zone_test: OTHER_LDFLAGS += -framework ktrace
 memorystatus_zone_test: OTHER_LDFLAGS += -ldarwintest_utils
@@ -264,23 +315,40 @@ codesigntests_sha256t: OTHER_CFLAGS += -DTESTNAME=codesigntests_sha256t
 
 codesigntests_sha256t: codesigntests.c
 	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(DT_LDFLAGS) $(LDFLAGS) $(CFLAGS) codesigntests.c -o $(SYMROOT)/$@;
-	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --digest=sha256T -s - --entitlements codesigntests-entitlements.plist $(SYMROOT)/$@; 
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --digest=sha256T -s - --entitlements codesigntests-entitlements.plist $(SYMROOT)/$@;
 install-codesigntests_sha256t: codesigntests_sha256t
 	mkdir -p $(INSTALLDIR)
 	cp $(SYMROOT)/codesigntests_sha256t $(INSTALLDIR)/
 
 
+ecc_test: OTHER_LDFLAGS += -ldarwintest_utils
+CUSTOM_TARGETS += ecc_test_helper
+
+ecc_test_helper:
+	$(CC) $(LDFLAGS) $(CFLAGS) ecc_test_helper.c -lm -o $(SYMROOT)/$@;
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@;
+
+install-ecc_test_helper: ecc_test_helper
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/ecc_test_helper $(INSTALLDIR)/
 
 kevent_qos: OTHER_CFLAGS += -Wno-unused-macros
 kevent_qos: OTHER_CFLAGS += -I $(OBJROOT)/
 
+test_knote_use_after_free: OTHER_CFLAGS += -Wno-unused-macros
+test_knote_use_after_free: OTHER_LDFLAGS += -ldarwintest_utils -lpthread
+
 mach_get_times: OTHER_LDFLAGS += -ldarwintest_utils
 
+monotonic_core: ./stackshot-entitlements.plist
+monotonic_core: CODE_SIGN_ENTITLEMENTS=./stackshot-entitlements.plist
 monotonic_core: OTHER_LDFLAGS += -framework ktrace
 
 perfmon_unit_tests: OTHER_CFLAGS += -Wno-missing-variable-declarations -Wno-format-pedantic -Wno-language-extension-token
 
 perf_exit: perf_exit_proc
+perf_exit: ./stackshot-entitlements.plist
+perf_exit: CODE_SIGN_ENTITLEMENTS=./stackshot-entitlements.plist
 perf_exit: OTHER_LDFLAGS = -framework ktrace -ldarwintest_utils
 perf_exit: CODE_SIGN_ENTITLEMENTS=./private_entitlement.plist
 
@@ -367,8 +435,13 @@ install-perf_exit_proc: perf_exit_proc
 	mkdir -p $(INSTALLDIR)
 	cp $(SYMROOT)/perf_exit_proc $(INSTALLDIR)/
 
+stackshot_idle_25570396: ./stackshot-entitlements.plist
+stackshot_idle_25570396: CODE_SIGN_ENTITLEMENTS=./stackshot-entitlements.plist
+stackshot_idle_25570396: OTHER_LDFLAGS += -lkdd -framework Foundation
 stackshot_idle_25570396: OTHER_LDFLAGS += -lkdd -framework Foundation
 
+stackshot_block_owner_14362384: ./stackshot-entitlements.plist
+stackshot_block_owner_14362384: CODE_SIGN_ENTITLEMENTS=./stackshot-entitlements.plist
 stackshot_block_owner_14362384: OTHER_LDFLAGS += -framework Foundation -lpthread -lkdd
 ifeq ($(PLATFORM),MacOSX)
 stackshot_block_owner_14362384: OTHER_LDFLAGS += -lpcre
@@ -436,7 +509,8 @@ EXCLUDED_SOURCES += vm/vm_allocation.c
 EXCLUDED_SOURCES += jumbo_va_spaces_common.c
 
 ifeq ($(IOS_TEST_COMPAT),YES)
-OTHER_TEST_TARGETS += jumbo_va_spaces_28530648_unentitled jumbo_va_spaces_52551256 vm_phys_footprint_legacy vm/entitlement_increased_memory_limit vm/entitlement_increased_memory_limit_unentitled
+OTHER_TEST_TARGETS += jumbo_va_spaces_28530648_unentitled jumbo_va_spaces_52551256 vm_phys_footprint_legacy vm/entitlement_increased_memory_limit vm/entitlement_increased_memory_limit_unentitled vm/ios13extended_footprint vm/memorystatus_freeze_test vm/memorystatus_freeze_test_entitled vm/entitlement_internal_bands vm/entitlement_internal_bands_unentitled
+
 jumbo_va_spaces_28530648: CODE_SIGN_ENTITLEMENTS = jumbo_va_spaces_28530648.entitlements
 jumbo_va_spaces_28530648: OTHER_CFLAGS += -DENTITLED=1 -DTESTNAME=jumbo_va_spaces_28530648
 jumbo_va_spaces_28530648: jumbo_va_spaces_common.c
@@ -467,6 +541,23 @@ vm/entitlement_increased_memory_limit_unentitled: OTHER_LDFLAGS += -ldarwintest_
 vm/entitlement_increased_memory_limit_unentitled: vm/entitlement_increased_memory_limit.c jumbo_va_spaces_common.c
 	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
 
+vm/entitlement_internal_bands: CODE_SIGN_ENTITLEMENTS = vm/entitlement_internal_bands.entitlements
+vm/entitlement_internal_bands: OTHER_CFLAGS += -DENTITLED=1
+vm/entitlement_internal_bands: OTHER_LDFLAGS += -ldarwintest_utils
+vm/entitlement_internal_bands: vm/entitlement_internal_bands.c memorystatus_assertion_helpers.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none --entitlements $(CODE_SIGN_ENTITLEMENTS) $(SYMROOT)/$@;
+
+vm/entitlement_internal_bands_unentitled: OTHER_LDFLAGS += -ldarwintest_utils
+vm/entitlement_internal_bands_unentitled: vm/entitlement_internal_bands.c memorystatus_assertion_helpers.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@;
+
+vm/ios13extended_footprint: CODE_SIGN_ENTITLEMENTS = vm/ios13extended_footprint.entitlements
+vm/ios13extended_footprint: vm/ios13extended_footprint.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none --entitlements $(CODE_SIGN_ENTITLEMENTS) $(SYMROOT)/$@;
+
 vm_phys_footprint_legacy: OTHER_LDFLAGS += -framework CoreFoundation -framework IOSurface
 vm_phys_footprint_legacy: OTHER_CFLAGS += -DLEGACY_FOOTPRINT_ENTITLED=1
 vm_phys_footprint_legacy: CODE_SIGN_ENTITLEMENTS=./legacy_footprint.entitlement
@@ -482,6 +573,7 @@ ipc_read_inspect: CODE_SIGN_ENTITLEMENTS = ./task_for_pid_entitlement.plist
 ipc_thread_ports_race: CODE_SIGN_ENTITLEMENTS = ./task_for_pid_entitlement.plist
 ipc_thread_ports_race: OTHER_LDFLAGS += -ldarwintest_utils
 
+proc_info: recount/recount_test_utils.c
 proc_info: CODE_SIGN_ENTITLEMENTS = ./task_for_pid_entitlement.plist
 proc_info: OTHER_LDFLAGS += -ldarwintest_utils
 
@@ -507,10 +599,13 @@ settimeofday_29193041: OTHER_CFLAGS += drop_priv.c
 settimeofday_29193041_entitled: CODE_SIGN_ENTITLEMENTS = settimeofday_29193041.entitlements
 settimeofday_29193041_entitled: OTHER_CFLAGS += drop_priv.c
 
+thread_group_set_32261625: ./stackshot-entitlements.plist
+thread_group_set_32261625: CODE_SIGN_ENTITLEMENTS=./stackshot-entitlements.plist
 thread_group_set_32261625: OTHER_LDFLAGS = -framework ktrace
 
 task_info: CODE_SIGN_ENTITLEMENTS = task_for_pid_entitlement.plist
 task_info: OTHER_CFLAGS += test_utils.c
+task_info: OTHER_LDFLAGS += -ldarwintest_utils
 
 extract_right_soft_fail: CODE_SIGN_ENTITLEMENTS = task_for_pid_entitlement.plist
 
@@ -522,7 +617,9 @@ ifneq ($(PLATFORM),iPhoneOS)
 	EXCLUDED_SOURCES += vm/compression_sweep.c
 endif
 
+udp_bind_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 tcp_bind_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
+tcp_send_implied_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 socket_bind_35243417: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 socket_bind_35685803: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 icmp_fragmetned_payload: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
@@ -602,7 +699,14 @@ rnserver:
 install-rnserver: ;
 
 
-x18: OTHER_CFLAGS += -Wno-language-extension-token
+x18_entitled: OTHER_CFLAGS += -Wno-language-extension-token
+x18_entitled: CODE_SIGN_ENTITLEMENTS = x18-entitlements.plist
+x18_unentitled: OTHER_CFLAGS += -Wno-language-extension-token
+ifneq ($(PLATFORM),MacOSX)
+EXCLUDED_SOURCES += x18_legacy.c
+else
+x18_legacy: OTHER_CFLAGS += -Wno-language-extension-token -Wl,-platform_version -Wl,macos -Wl,10.12 -Wl,10.12
+endif
 
 pmap_bench: INVALID_ARCHS = $(filter-out arm%,$(ARCH_CONFIGS))
 
@@ -629,6 +733,7 @@ decompression_failure: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
 
 ipc/kernel_signed_pac_thread_state: excserver
 ipc/kernel_signed_pac_thread_state: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
+ipc/kernel_signed_pac_thread_state: CODE_SIGN_ENTITLEMENTS = ipc/pac_exception_entitlement.plist
 
 ifeq ($(findstring arm64,$(ARCH_CONFIGS)),)
 EXCLUDED_SOURCES += arm_cpu_capabilities.c
@@ -687,8 +792,11 @@ port_object_description_race_77259918: iokit/port_object_description_race_772599
 OTHER_TEST_TARGETS += port_object_description_race_77259918
 
 EXCLUDED_SOURCES += get_shared_cache_address.c
+
+
 ifneq ($(filter iPhoneOS MacOSX, $(PLATFORM)),)
 CUSTOM_TARGETS += get_shared_cache_address
+
 get_shared_cache_address: INVALID_ARCHS = arm64 i386 x86_64
 get_shared_cache_address: get_shared_cache_address.c
 	$(CC) $(OTHER_CFLAGS) $(CFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/get_shared_cache_address
@@ -699,14 +807,6 @@ install-get_shared_cache_address: get_shared_cache_address
 	cp $(SYMROOT)/get_shared_cache_address $(INSTALLDIR)/
 endif
 
-ifneq ($(PLATFORM),MacOSX)
-EXCLUDED_SOURCES += hvtest_x86.m hvtest_x86_guest.c hvtest_x86_asm.s
-else
-EXCLUDED_SOURCES += hvtest_x86_guest.c hvtest_x86_asm.s
-hvtest_x86: CODE_SIGN_ENTITLEMENTS = hv_public.entitlements
-hvtest_x86: INVALID_ARCHS += arm64e arm64 i386
-hvtest_x86: OTHER_CFLAGS += hvtest_x86_guest.c hvtest_x86_asm.s -framework Hypervisor -framework Foundation
-endif
 
 OTHER_TEST_TARGETS += io_catalog_send_data vm_memory_share_tests
 
@@ -743,16 +843,29 @@ EXCLUDED_SOURCES += benchmark/helpers.c
 
 perf_vmfault: OTHER_CFLAGS += benchmark/helpers.c
 
-fault_throughput: vm/fault_throughput.c
-	mkdir -p $(SYMROOT)/vm
-	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/vm/$@
-fault_throughput: OTHER_CFLAGS += benchmark/helpers.c
+BATS_PLISTS += $(SRCROOT)/vm/fault_throughput.plist
 
-install-fault_throughput: fault_throughput
+vm/fault_throughput: OTHER_CFLAGS += benchmark/helpers.c
+
+.PHONY: install-vm/fault_throughput
+install-vm/fault_throughput: vm/fault_throughput
 	mkdir -p $(INSTALLDIR)/vm
 	cp $(SYMROOT)/vm/fault_throughput $(INSTALLDIR)/vm/
 
-BATS_PLISTS += $(SRCROOT)/vm/fault_throughput.plist
+$(SYMROOT)/vm/fault_throughput.lua: $(SRCROOT)/vm/fault_throughput.lua
+	mkdir -p $(SYMROOT)/vm
+	cp $< $@
+	chmod +x $@
+
+.PHONY: install-fault_throughput_benchrun
+install-$(SYMROOT)/vm/fault_throughput.lua: $(SYMROOT)/vm/fault_throughput.lua
+	mkdir -p $(INSTALLDIR)/vm
+	cp $(SYMROOT)/vm/fault_throughput.lua $(INSTALLDIR)/vm/
+	chmod +x $(INSTALLDIR)/vm/fault_throughput.lua
+
+EXCLUDED_SOURCES += vm/fault_throughput.plist
+
+CUSTOM_TARGETS += $(SYMROOT)/vm/fault_throughput.lua vm/fault_throughput
 
 ifeq ($(PLATFORM),MacOSX)
 mixed_pagesize: vm/mixed_pagesize.c
@@ -783,37 +896,50 @@ BATS_PLISTS += $(SRCROOT)/workqueue.plist
 EXCLUDED_SOURCES += manual_wq_cooperative.c workqueue.plist
 CUSTOM_TARGETS += manual_wq_cooperative
 
-fault_throughput_benchrun:
-	mkdir -p $(SYMROOT)/vm
-	cp $(SRCROOT)/vm/fault_throughput.lua $(SYMROOT)/vm/fault_throughput.lua
-	chmod +x $(SYMROOT)/vm/fault_throughput.lua
+# VM madvise(2) benchmark
 
-install-fault_throughput_benchrun: fault_throughput_benchrun
-	mkdir -p $(INSTALLDIR)/vm
-	cp $(SYMROOT)/vm/fault_throughput.lua $(INSTALLDIR)/vm
-	chmod +x $(INSTALLDIR)/vm/fault_throughput.lua
+vm/perf_madvise: OTHER_CFLAGS += benchmark/helpers.c
 
-CUSTOM_TARGETS += fault_throughput fault_throughput_benchrun
-EXCLUDED_SOURCES += vm/fault_throughput.plist vm/fault_throughput.c
-
-perf_madvise: vm/perf_madvise.c
-	mkdir -p $(SYMROOT)/vm
-	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/vm/$@
-perf_madvise: OTHER_CFLAGS += benchmark/helpers.c
-install-perf_madvise: perf_madvise
+.PHONY: install-vm/perf_madvise
+install-vm/perf_madvise: vm/perf_madvise
 	mkdir -p $(INSTALLDIR)/vm
 	cp $(SYMROOT)/vm/perf_madvise $(INSTALLDIR)/vm/
-perf_madvise_benchrun:
+
+$(SYMROOT)/vm/perf_madvise.lua: $(SRCROOT)/vm/perf_madvise.lua
 	mkdir -p $(SYMROOT)/vm
-	cp $(SRCROOT)/vm/perf_madvise.lua $(SYMROOT)/vm/perf_madvise.lua
-	chmod +x $(SYMROOT)/vm/perf_madvise.lua
-install-perf_madvise_benchrun: perf_madvise_benchrun
+	cp $< $@
+	chmod +x $@
+
+.PHONY: install-perf_madvise_benchrun
+install-$(SYMROOT)/vm/perf_madvise.lua: $(SYMROOT)/vm/perf_madvise.lua
 	mkdir -p $(INSTALLDIR)/vm
 	cp $(SYMROOT)/vm/perf_madvise.lua $(INSTALLDIR)/vm
 	chmod +x $(INSTALLDIR)/vm/perf_madvise.lua
 
-CUSTOM_TARGETS += perf_madvise perf_madvise_benchrun
-EXCLUDED_SOURCES += vm/perf_madvise.c
+CUSTOM_TARGETS += $(SYMROOT)/vm/perf_madvise.lua vm/perf_madvise
+
+BATS_PLISTS += $(SRCROOT)/vm/perf_compressor.plist
+EXCLUDED_SOURCES += vm/perf_compressor.plist
+
+vm/perf_compressor: OTHER_CFLAGS += benchmark/helpers.c
+
+.PHONY: install-vm/perf_compressor
+install-vm/perf_compressor: vm/perf_compressor
+	mkdir -p $(INSTALLDIR)/vm
+	cp $(SYMROOT)/vm/perf_compressor $(INSTALLDIR)/vm/
+
+$(SYMROOT)/vm/perf_compressor.lua: $(SRCROOT)/vm/perf_compressor.lua
+	mkdir -p $(SYMROOT)/vm
+	cp $< $@
+	chmod +x $@
+
+.PHONY: install-$(SYMROOT)/vm/perf_compressor_benchrun
+install-$(SYMROOT)/vm/perf_compressor.lua: $(SYMROOT)/vm/perf_compressor.lua
+	mkdir -p $(INSTALLDIR)/vm
+	cp $(SYMROOT)/vm/perf_compressor.lua $(INSTALLDIR)/vm/
+	chmod +x $(INSTALLDIR)/vm/perf_compressor.lua
+
+CUSTOM_TARGETS += $(SYMROOT)/vm/perf_compressor.lua vm/perf_compressor
 
 ioconnectasyncmethod_57641955: OTHER_LDFLAGS += -framework IOKit
 
@@ -832,29 +958,25 @@ EXCLUDED_SOURCES += counter/common.c
 counter/counter: OTHER_CFLAGS += counter/common.c test_utils.c
 counter/counter: OTHER_LDFLAGS += -ldarwintest_utils -ldarwintest
 
-counter/benchmark: counter/benchmark.c
-	mkdir -p $(SYMROOT)/counter
-	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
-	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@;
-
 counter/benchmark: OTHER_CFLAGS += counter/common.c benchmark/helpers.c
 
+.PHONY: install-counter/benchmark
 install-counter/benchmark: counter/benchmark
 	mkdir -p $(INSTALLDIR)/counter
 	cp $(SYMROOT)/counter/benchmark $(INSTALLDIR)/counter/
 
-counter/benchmark_benchrun:
+$(SYMROOT)/counter/benchmark.lua: $(SRCROOT)/counter/benchmark.lua
 	mkdir -p $(SYMROOT)/counter
-	cp $(SRCROOT)/counter/benchmark.lua $(SYMROOT)/counter/benchmark.lua
-	chmod +x $(SYMROOT)/counter/benchmark.lua
+	cp $< $@
+	chmod +x $@
 
-install-counter/benchmark_benchrun: counter/benchmark_benchrun
+.PHONY: install-counter_benchrun
+install-$(SYMROOT)/counter/benchmark.lua: $(SYMROOT)/counter/benchmark.lua
 	mkdir -p $(INSTALLDIR)/counter
 	cp $(SYMROOT)/counter/benchmark.lua $(INSTALLDIR)/counter/
 	chmod +x $(INSTALLDIR)/counter/benchmark.lua
 
-CUSTOM_TARGETS += counter/benchmark counter/benchmark_benchrun
-EXCLUDED_SOURCES += counter/benchmark.c
+CUSTOM_TARGETS += $(SYMROOT)/counter/benchmark.lua counter/benchmark
 
 ifneq ($(PLATFORM),MacOSX)
 EXCLUDED_SOURCES += vm/page_size_globals.c
@@ -886,6 +1008,7 @@ trial_experiments: trial_experiments.c drop_priv.c test_utils.c
 	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none --entitlements $(CODE_SIGN_ENTITLEMENTS) $(SYMROOT)/$@;
 
 trial_experiments_unentitled: OTHER_CFLAGS += drop_priv.c test_utils.c
+trial_experiments_unentitled: OTHER_LDFLAGS += -ldarwintest_utils
 trial_experiments_unentitled: trial_experiments.c
 	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
 	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@;
@@ -899,11 +1022,41 @@ install-print_apple_array: print_apple_array
 	mkdir -p $(INSTALLDIR)/tools
 	cp $(SYMROOT)/print_apple_array $(INSTALLDIR)/tools/
 
+persona: CODE_SIGN_ENTITLEMENTS = persona.entitlements
+persona_adoption: CODE_SIGN_ENTITLEMENTS = persona_adoption.entitlements
+
 OTHER_TEST_TARGETS += trial_experiments trial_experiments_unentitled
 
 entropy: OTHER_CFLAGS += -framework perfdata
 
-zero_to_n_tests: OTHER_LDFLAGS += -ldarwintest_utils
+zero_to_n_tests: OTHER_LDFLAGS += -ldarwintest_utils -framework perfdata
+
+debug_enable_syscall_rejection: OTHER_LDFLAGS += -ldarwintest_utils
+
+vm/app_swap: OTHER_LDFLAGS += -ldarwintest_utils
+
+CUSTOM_TARGETS += debug_syscall_rejection_helper
+debug_syscall_rejection_helper: debug_syscall_rejection_helper.c
+	$(CC) $(OTHER_CFLAGS) $(CFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@; \
+	echo $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@; \
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@;
+
+
+install-debug_syscall_rejection_helper: debug_syscall_rejection_helper
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/debug_syscall_rejection_helper $(INSTALLDIR)/
+
+file_leases: OTHER_CFLAGS += test_utils.c
+file_leases: OTHER_LDFLAGS += -ldarwintest_utils
+file_leases: CODE_SIGN_ENTITLEMENTS = file_leases.entitlements
+
+INCLUDED_TEST_SOURCE_DIRS += vfs
+vfs/freeable_vnodes: OTHER_LDFLAGS += -ldarwintest_utils
+
+vm/vm_reclaim: OTHER_CFLAGS += -Wno-language-extension-token -Wno-c++98-compat memorystatus_assertion_helpers.c
+vm/vm_reclaim: OTHER_LDFLAGS += -ldarwintest_utils
+
+vm/vm_reclaim: INVALID_ARCHS = armv7k arm64_32
 
 include $(DEVELOPER_DIR)/AppleInternal/Makefiles/darwintest/Makefile.targets
 

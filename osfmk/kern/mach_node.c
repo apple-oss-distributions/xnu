@@ -53,7 +53,6 @@
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_pset.h>
-#include <ipc/ipc_table.h>
 #include <ipc/ipc_entry.h>
 
 #include <ipc/flipc.h>

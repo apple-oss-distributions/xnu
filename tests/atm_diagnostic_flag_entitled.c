@@ -78,6 +78,8 @@ T_DECL(atm_diagnostic_flag_entitled_unprivileged,
     "change the atm_diagnostic_flag (entitled, unprivileged)",
     T_META_ASROOT(false))
 {
-	drop_priv();
+	if (running_as_root()) {
+		drop_priv();
+	}
 	_toggle_atm_diagnostic_flag();
 }

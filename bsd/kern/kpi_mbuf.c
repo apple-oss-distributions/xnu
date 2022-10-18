@@ -1969,14 +1969,15 @@ m_do_tx_compl_callback(struct mbuf *m, struct ifnet *ifp)
 			    m->m_pkthdr.drv_tx_status);
 		}
 	}
-	m->m_pkthdr.pkt_compl_callbacks = 0;
-
 #if (DEBUG || DEVELOPMENT)
-	atomic_add_64(&mbuf_tx_compl_callbacks, 1);
-	if (ifp == NULL) {
-		atomic_add_64(&mbuf_tx_compl_aborted, 1);
+	if (m->m_pkthdr.pkt_compl_callbacks != 0) {
+		atomic_add_64(&mbuf_tx_compl_callbacks, 1);
+		if (ifp == NULL) {
+			atomic_add_64(&mbuf_tx_compl_aborted, 1);
+		}
 	}
 #endif /* (DEBUG || DEVELOPMENT) */
+	m->m_pkthdr.pkt_compl_callbacks = 0;
 }
 
 errno_t

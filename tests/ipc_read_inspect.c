@@ -471,10 +471,14 @@ test_thread_port_mig_intrans(
 
 	{
 		/* 3. Test some inspect port interfaces */
+		thread_qos_policy_t info;
+		mach_msg_type_number_t count = THREAD_QOS_POLICY_COUNT;
+		boolean_t get_default = FALSE;
+
 		processor_set_name_t name = MACH_PORT_NULL;
-		kr = thread_get_assignment(tport, &name);
-		RESULT_CHECK(kr, flavor, THREAD_FLAVOR_INSPECT, "thread_get_assignment");
-		mach_port_deallocate(mach_task_self(), name);
+		kr = thread_policy_get(tport, THREAD_QOS_POLICY,
+		    (thread_policy_t)&info, &count, &get_default);
+		RESULT_CHECK(kr, flavor, THREAD_FLAVOR_INSPECT, "thread_policy_get");
 	}
 }
 

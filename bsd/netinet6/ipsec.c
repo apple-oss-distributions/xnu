@@ -2659,7 +2659,8 @@ ipsec6_update_routecache_and_output(
 	ip6 = mtod(state->m, struct ip6_hdr *);
 	ip6->ip6_plen = htons((u_int16_t)plen);
 
-	ipsec_set_pkthdr_for_interface(sav->sah->ipsec_if, state->m, AF_INET6);
+	ipsec_set_pkthdr_for_interface(sav->sah->ipsec_if, state->m, AF_INET6,
+	    sav->flowid);
 	ipsec_set_ip6oa_for_interface(sav->sah->ipsec_if, &ip6oa);
 
 	/* Increment statistics */
@@ -3328,6 +3329,11 @@ ipsec4_output_internal(struct ipsec_output_state *state, struct secasvar *sav)
 		goto bad;
 	}
 
+#if SKYWALK
+	state->m->m_pkthdr.pkt_flowid = sav->flowid;
+	state->m->m_pkthdr.pkt_flags |= PKTF_FLOW_ID;
+#endif /* !SKYWALK */
+
 	return 0;
 
 bad:
@@ -3585,6 +3591,11 @@ ipsec6_output_trans_internal(
 	ip6 = mtod(state->m, struct ip6_hdr *);
 	ip6->ip6_plen = htons((u_int16_t)plen);
 
+#if SKYWALK
+	ASSERT(state->m != NULL);
+	state->m->m_pkthdr.pkt_flowid = sav->flowid;
+	state->m->m_pkthdr.pkt_flags |= PKTF_FLOW_ID;
+#endif /* !SKYWALK */
 	return 0;
 bad:
 	return error;
@@ -3883,7 +3894,8 @@ ipsec6_output_tunnel_internal(struct ipsec_output_state *state, struct secasvar 
 				ROUTE_RELEASE(&ro4_copy);
 				goto bad;
 			}
-			ipsec_set_pkthdr_for_interface(sav->sah->ipsec_if, state->m, AF_INET);
+			ipsec_set_pkthdr_for_interface(sav->sah->ipsec_if, state->m,
+			    AF_INET, sav->flowid);
 			ipsec_set_ipoa_for_interface(sav->sah->ipsec_if, &ipoa);
 
 			ip = mtod(state->m, struct ip *);
@@ -4003,6 +4015,13 @@ ipsec6_output_tunnel_internal(struct ipsec_output_state *state, struct secasvar 
 	ip6 = mtod(state->m, struct ip6_hdr *);
 	ip6->ip6_plen = htons((u_int16_t)plen);
 done:
+#if SKYWALK
+	if (state->m != NULL) {
+		state->m->m_pkthdr.pkt_flowid = sav->flowid;
+		state->m->m_pkthdr.pkt_flags |= PKTF_FLOW_ID;
+	}
+#endif /* !SKYWALK */
+
 	return 0;
 
 bad:
@@ -4681,15 +4700,7 @@ struct ipsec_tag {
 	struct socket                   *socket;
 	u_int32_t                               history_count;
 	struct ipsec_history    history[];
-#if __arm__ && (__BIGGEST_ALIGNMENT__ > 4)
-/* For the newer ARMv7k ABI where 64-bit types are 64-bit aligned, but pointers
- * are 32-bit:
- * Aligning to 64-bit since we case to m_tag which is 64-bit aligned.
- */
-} __attribute__ ((aligned(8)));
-#else
 };
-#endif
 
 #define IPSEC_TAG_SIZE          (MLEN - sizeof(struct m_tag))
 #define IPSEC_TAG_HDR_SIZE      (offsetof(struct ipsec_tag, history[0]))

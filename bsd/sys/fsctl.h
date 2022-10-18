@@ -282,6 +282,46 @@ struct fsioc_cas_bsdflags {
 	uint32_t actual_flags;          /* [OUT] the actual flags in inode */
 };
 
+#ifdef KERNEL
+
+#define FSIOC_GRAFT_VERSION          2
+
+/* Grafting flags */
+#define FSCTL_GRAFT_PRESERVE_MOUNT              0x0001  /* Preserve underlying mount until shutdown */
+#define FSCTL_GRAFT_ALTERNATE_SHARED_REGION     0x0002  /* Binaries within should use alternate shared region */
+#define FSCTL_GRAFT_SYSTEM_CONTENT              0x0004  /* Cryptex contains system content */
+#define FSCTL_GRAFT_PANIC_ON_AUTHFAIL           0x0008  /* On failure to authenticate, panic */
+#define FSCTL_GRAFT_STRICT_AUTH                 0x0010  /* Strict authentication mode */
+#define FSCTL_GRAFT_PRESERVE_GRAFT              0x0020  /* Preserve graft itself until unmount */
+
+typedef struct fsioc_graft_fs {
+	uint32_t graft_version;
+	uint32_t graft_type;
+	uint32_t graft_4cc;
+	uint64_t graft_flags;
+	uint64_t dir_ino;
+
+	void *authentic_manifest;
+	size_t authentic_manifest_size;
+	void *user_manifest;
+	size_t user_manifest_size;
+	void *payload;
+	size_t payload_size;
+} fsioc_graft_fs_t;
+
+/* Ungrafting flags */
+#define FSCTL_UNGRAFT_UNGRAFTALL     0x001  /* Ungraft all currently grafted filesystems */
+
+typedef struct fsioc_ungraft_fs {
+	uint64_t ungraft_flags;
+} fsioc_ungraft_fs_t;
+
+typedef struct fsioc_auth_fs {
+	vnode_t authvp;
+} fsioc_auth_fs_t;
+
+#endif /* KERNEL */
+
 #define FSCTL_SYNC_FULLSYNC     (1<<0)  /* Flush the data fully to disk, if supported by the filesystem */
 #define FSCTL_SYNC_WAIT         (1<<1)  /* Wait for the sync to complete */
 
@@ -330,6 +370,19 @@ struct fsioc_cas_bsdflags {
 /* Check if a file is only open once (pass zero for the extra arg) */
 #define FSIOC_FD_ONLY_OPEN_ONCE _IOWR('A', 21, uint32_t)
 
+#ifdef KERNEL
+
+/* Graft a filesystem onto a directory in its parent filesystem */
+#define FSIOC_GRAFT_FS _IOW('A', 22, fsioc_graft_fs_t)
+
+/* Ungraft filesystem(s) */
+#define FSIOC_UNGRAFT_FS _IOW('A', 23, fsioc_ungraft_fs_t)
+
+/* Check if a file is on an authenticated volume/Cryptex */
+#define FSIOC_AUTH_FS _IOW('A', 24, fsioc_auth_fs_t)
+
+#endif /* KERNEL */
+
 //
 // Spotlight and fseventsd use these fsctl()'s to find out
 // the mount time of a volume and the last time it was
@@ -366,6 +419,9 @@ typedef struct generic_firmlink {
 } generic_firmlink_t;
 
 #define FSIOC_FIRMLINK_CTL _IOWR ('J', 60, generic_firmlink_t)
+
+/* For testing /dev/fsevents FSE_ACCESS_GRANTED. */
+#define FSIOC_TEST_FSE_ACCESS_GRANTED                    _IO('h', 52)
 
 #ifndef KERNEL
 

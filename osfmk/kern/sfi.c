@@ -416,14 +416,19 @@ sfi_timer_per_class_on(
 	sfi_class->class_in_on_phase = TRUE;
 	sfi_class->on_timer_programmed = FALSE;
 
+	simple_unlock(&sfi_lock);
+
+	/*
+	 * Issue the wakeup outside the lock to reduce lock hold time
+	 * rdar://problem/96463639
+	 */
+
 	kret = waitq_wakeup64_all(&sfi_class->waitq,
 	    CAST_EVENT64_T(sfi_class_id),
-	    THREAD_AWAKENED, WAITQ_ALL_PRIORITIES);
+	    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
 	assert(kret == KERN_SUCCESS || kret == KERN_NOT_WAITING);
 
 	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SFI, SFI_ON_TIMER) | DBG_FUNC_END, 0, 0, 0, 0, 0);
-
-	simple_unlock(&sfi_lock);
 
 	splx(s);
 }

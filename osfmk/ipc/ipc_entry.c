@@ -63,8 +63,6 @@
  *	Primitive functions to manipulate translation entries.
  */
 
-#include <mach_debug.h>
-
 #include <mach/kern_return.h>
 #include <mach/port.h>
 #include <kern/assert.h>
@@ -76,10 +74,25 @@
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_hash.h>
-#include <ipc/ipc_table.h>
 #include <ipc/ipc_port.h>
 #include <string.h>
 #include <sys/kdebug.h>
+
+KALLOC_ARRAY_TYPE_DEFINE(ipc_entry_table, struct ipc_entry, KT_PRIV_ACCT);
+
+/*
+ *	Routine: ipc_entry_table_count_max
+ *	Purpose:
+ *		returns the maximum number of entries an IPC space
+ *		is allowed to contain (the maximum size to which it will grow)
+ *	Conditions:
+ *		none
+ */
+unsigned int
+ipc_entry_table_count_max(void)
+{
+	return ipc_entry_table_size_to_count(CONFIG_IPC_TABLE_ENTRIES_SIZE_MAX);
+}
 
 /*
  *	Routine:	ipc_entry_lookup
@@ -96,21 +109,22 @@ ipc_entry_lookup(
 	mach_port_name_t        name)
 {
 	mach_port_index_t index;
-	ipc_entry_t entry, table;
+	ipc_entry_table_t table;
+	ipc_entry_t entry;
 
 	table = is_active_table(space);
 	index = MACH_PORT_INDEX(name);
-	if (index > 0 && index < table->ie_size) {
-		entry = &table[index];
-		if (IE_BITS_GEN(entry->ie_bits) != MACH_PORT_GEN(name) ||
-		    IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE) {
-			entry = IE_NULL;
-		}
-	} else {
-		entry = IE_NULL;
+	if (__improbable(index == 0)) {
+		return IE_NULL;
 	}
 
-	assert((entry == IE_NULL) || IE_BITS_TYPE(entry->ie_bits));
+	entry = ipc_entry_table_get(table, index);
+	if (__improbable(!entry ||
+	    IE_BITS_GEN(entry->ie_bits) != MACH_PORT_GEN(name) ||
+	    IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE)) {
+		return IE_NULL;
+	}
+
 	return entry;
 }
 
@@ -133,25 +147,32 @@ ipc_entries_hold(
 	ipc_space_t             space,
 	uint32_t                entries_needed)
 {
-	ipc_entry_t table = is_active_table(space);
 	mach_port_index_t next_free = 0;
+	ipc_entry_table_t table;
+	ipc_entry_t entry;
 	uint32_t i;
 
 	/*
 	 * Assume that all new entries will need hashing.
 	 * If the table is more than 87.5% full pretend we didn't have space.
 	 */
-	if (space->is_table_hashed + entries_needed > table->ie_size * 7 / 8) {
+	table = is_active_table(space);
+	if (space->is_table_hashed + entries_needed >
+	    ipc_entry_table_count(table) * 7 / 8) {
 		return KERN_NO_SPACE;
 	}
 
+	entry = ipc_entry_table_base(table);
+
 	for (i = 0; i < entries_needed; i++) {
-		next_free = table[next_free].ie_next;
+		next_free = entry->ie_next;
 		if (next_free == 0) {
 			return KERN_NO_SPACE;
 		}
-		assert(next_free < table->ie_size);
-		assert(table[next_free].ie_object == IO_NULL);
+
+		entry = ipc_entry_table_get(table, next_free);
+
+		assert(entry && entry->ie_object == IO_NULL);
 	}
 
 #if CONFIG_PROC_RESOURCE_LIMITS
@@ -180,23 +201,25 @@ ipc_entry_claim(
 	mach_port_name_t        *namep,
 	ipc_entry_t             *entryp)
 {
-	ipc_entry_t entry;
-	ipc_entry_t table;
+	ipc_entry_t base, entry;
+	ipc_entry_table_t table;
 	mach_port_index_t first_free;
 	mach_port_gen_t gen;
 	mach_port_name_t new_name;
 
 	table = is_active_table(space);
+	base  = ipc_entry_table_base(table);
 
-	first_free = table->ie_next;
+	first_free = base->ie_next;
 	assert(first_free != 0);
 
-	entry = &table[first_free];
-	table->ie_next = entry->ie_next;
+	entry = ipc_entry_table_get(table, first_free);
+	assert(entry &&
+	    ipc_entry_table_contains(table, entry->ie_next) &&
+	    entry->ie_object == IO_NULL);
+	base->ie_next = entry->ie_next;
 	space->is_table_free--;
 
-	assert(table->ie_next < table->ie_size);
-	assert(entry->ie_object == IO_NULL);
 	if (object && waitq_valid(io_waitq(object))) {
 		assert(waitq_held(io_waitq(object)));
 	}
@@ -294,25 +317,30 @@ ipc_entry_alloc_name(
 	mach_port_name_t        name,
 	ipc_entry_t             *entryp)
 {
-	mach_port_index_t index = MACH_PORT_INDEX(name);
+	const mach_port_index_t index = MACH_PORT_INDEX(name);
 	mach_port_gen_t gen = MACH_PORT_GEN(name);
 
-	if (index > ipc_table_max_entries()) {
+	/*
+	 * Callers today never pass MACH_PORT_NULL
+	 */
+	assert(MACH_PORT_VALID(name));
+
+	if (index > ipc_entry_table_count_max()) {
 		return KERN_NO_SPACE;
 	}
-
 	if (name != ipc_entry_name_mask(name)) {
 		/* must have valid generation bits */
 		return KERN_INVALID_VALUE;
 	}
-
-	assert(MACH_PORT_VALID(name));
-
+	if (index == 0) {
+		return KERN_FAILURE;
+	}
 
 	is_write_lock(space);
 
 	for (;;) {
-		ipc_entry_t table, entry;
+		ipc_entry_table_t table;
+		ipc_entry_t entry;
 
 		if (!is_active(space)) {
 			is_write_unlock(space);
@@ -325,77 +353,87 @@ ipc_entry_alloc_name(
 		 *	If we are under the table cutoff,
 		 *	there are usually four cases:
 		 *		1) The entry is reserved (index 0)
-		 *		2) The entry is inuse, for the same name
-		 *		3) The entry is inuse, for a different name
-		 *		4) The entry is free
+		 *		   dealt with on entry.
+		 *		2) The entry is free
+		 *		3) The entry is inuse, for the same name
+		 *		4) The entry is inuse, for a different name
+		 *
 		 *	For a task with a "fast" IPC space, we disallow
-		 *	cases 1) and 3), because ports cannot be renamed.
+		 *	cases 1) and 4), because ports cannot be renamed.
 		 */
-		if (index < table->ie_size) {
-			entry = &table[index];
 
-			if (index == 0) {
-				/* case #1 - the entry is reserved */
-				is_write_unlock(space);
-				return KERN_FAILURE;
-			} else if (IE_BITS_TYPE(entry->ie_bits)) {
-				if (IE_BITS_GEN(entry->ie_bits) == gen) {
-					/* case #2 -- the entry is inuse, for the same name */
-					*entryp = entry;
-					return KERN_SUCCESS;
-				} else {
-					/* case #3 -- the entry is inuse, for a different name. */
-					/* Collisions are not allowed */
-					is_write_unlock(space);
-					return KERN_FAILURE;
-				}
-			} else {
-				mach_port_index_t free_index, next_index;
-
-				/*
-				 *      case #4 -- the entry is free
-				 *	Rip the entry out of the free list.
-				 */
-
-				for (free_index = 0;
-				    (next_index = table[free_index].ie_next)
-				    != index;
-				    free_index = next_index) {
-					continue;
-				}
-
-				table[free_index].ie_next =
-				    table[next_index].ie_next;
-				space->is_table_free--;
-
-				/* mark the previous entry modified - reconstructing the name */
-				ipc_entry_modified(space,
-				    MACH_PORT_MAKE(free_index,
-				    IE_BITS_GEN(table[free_index].ie_bits)),
-				    &table[free_index]);
-
-				entry->ie_bits = gen;
-				entry->ie_request = IE_REQ_NONE;
-				*entryp = entry;
-
-				assert(entry->ie_object == IO_NULL);
-				return KERN_SUCCESS;
+		entry = ipc_entry_table_get(table, index);
+		if (!entry) {
+			/*
+			 *      We grow the table so that the name
+			 *	index fits in the array space.
+			 *      Because the space will be unlocked,
+			 *      we must restart.
+			 */
+			kern_return_t kr;
+			kr = ipc_entry_grow_table(space, index + 1);
+			if (kr != KERN_SUCCESS) {
+				/* space is unlocked */
+				return kr;
 			}
+			continue;
 		}
 
-		/*
-		 *      We grow the table so that the name
-		 *	index fits in the array space.
-		 *      Because the space will be unlocked,
-		 *      we must restart.
-		 */
-		kern_return_t kr;
-		kr = ipc_entry_grow_table(space, index + 1);
-		if (kr != KERN_SUCCESS) {
-			/* space is unlocked */
-			return kr;
+		if (!IE_BITS_TYPE(entry->ie_bits)) {
+			mach_port_index_t prev_index;
+			ipc_entry_t prev_entry;
+
+			/*
+			 *      case #2 -- the entry is free
+			 *	Rip the entry out of the free list.
+			 */
+
+			prev_index = 0;
+			prev_entry = ipc_entry_table_base(table);
+			while (prev_entry->ie_next != index) {
+				prev_index = prev_entry->ie_next;
+				prev_entry = ipc_entry_table_get(table, prev_index);
+			}
+
+			prev_entry->ie_next = entry->ie_next;
+			space->is_table_free--;
+
+			/*
+			 *	prev_index can be 0 here if the desired index
+			 *	happens to be at the top of the freelist.
+			 *
+			 *	Mark the previous entry modified -
+			 *	reconstructing the name.
+			 *
+			 *	Do not do so for the first entry, which is
+			 *	reserved and ipc_entry_grow_table() will handle
+			 *	its ie_next separately after the rescan loop.
+			 */
+			if (prev_index > 0) {
+				/*
+				 */
+				ipc_entry_modified(space,
+				    MACH_PORT_MAKE(prev_index,
+				    IE_BITS_GEN(prev_entry->ie_bits)),
+				    prev_entry);
+			}
+
+			entry->ie_bits = gen;
+			entry->ie_request = IE_REQ_NONE;
+			*entryp = entry;
+
+			assert(entry->ie_object == IO_NULL);
+			return KERN_SUCCESS;
+		} else if (IE_BITS_GEN(entry->ie_bits) == gen) {
+			/* case #3 -- the entry is inuse, for the same name */
+			*entryp = entry;
+			return KERN_SUCCESS;
+		} else {
+			/* case #4 -- the entry is inuse, for a different name. */
+			/* Collisions are not allowed */
+			is_write_unlock(space);
+			return KERN_FAILURE;
 		}
-		continue;
 	}
 }
 
@@ -415,9 +453,9 @@ ipc_entry_dealloc(
 	mach_port_name_t        name,
 	ipc_entry_t             entry)
 {
-	ipc_entry_t table;
-	ipc_entry_num_t size;
+	ipc_entry_table_t table;
 	mach_port_index_t index;
+	ipc_entry_t base;
 
 	assert(entry->ie_object == object);
 	assert(entry->ie_request == IE_REQ_NONE);
@@ -433,16 +471,15 @@ ipc_entry_dealloc(
 
 	index = MACH_PORT_INDEX(name);
 	table = is_active_table(space);
-	size  = table->ie_size;
+	base  = ipc_entry_table_base(table);
 
-	assert(index > 0 && index < size);
-	assert(entry == &table[index]);
+	assert(index > 0 && entry == ipc_entry_table_get(table, index));
 
 	assert(IE_BITS_GEN(entry->ie_bits) == MACH_PORT_GEN(name));
 	entry->ie_bits &= (IE_BITS_GEN_MASK | IE_BITS_ROLL_MASK);
-	entry->ie_next = table->ie_next;
+	entry->ie_next = base->ie_next;
 	entry->ie_object = IO_NULL;
-	table->ie_next = index;
+	base->ie_next = index;
 	space->is_table_free++;
 
 	ipc_entry_modified(space, name, entry);
@@ -464,19 +501,15 @@ ipc_entry_modified(
 	mach_port_name_t        name,
 	__assert_only ipc_entry_t entry)
 {
-	ipc_entry_t table;
-	ipc_entry_num_t size;
+	ipc_entry_table_t table;
 	mach_port_index_t index;
 
 	index = MACH_PORT_INDEX(name);
 	table = is_active_table(space);
-	size  = table->ie_size;
 
-	assert(index < size);
-	assert(entry == &table[index]);
-
-	assert(space->is_low_mod <= size);
-	assert(space->is_high_mod < size);
+	assert(entry == ipc_entry_table_get(table, index));
+	assert(space->is_low_mod <= ipc_entry_table_count(table));
+	assert(space->is_high_mod < ipc_entry_table_count(table));
 
 	if (index < space->is_low_mod) {
 		space->is_low_mod = index;
@@ -541,12 +574,12 @@ ipc_space_done_growing_and_unlock(ipc_space_t space)
 kern_return_t
 ipc_entry_grow_table(
 	ipc_space_t             space,
-	ipc_table_elems_t       target_size)
+	ipc_table_elems_t       target_count)
 {
-	ipc_entry_num_t osize, size, nsize, psize;
-
-	ipc_entry_t otable, table;
-	ipc_table_size_t oits, its, nits;
+	ipc_entry_num_t osize, nsize;
+	ipc_entry_num_t ocount, ncount;
+	ipc_entry_table_t otable, ntable;
+	ipc_entry_t obase, nbase;
 	mach_port_index_t free_index;
 	mach_port_index_t low_mod, hi_mod;
 	ipc_table_index_t sanity;
@@ -564,45 +597,30 @@ ipc_entry_grow_table(
 	}
 
 	otable = is_active_table(space);
-	its = space->is_table_next;
-	size = its->its_size;
+	obase  = ipc_entry_table_base(otable);
+	osize  = ipc_entry_table_size(otable);
+	ocount = ipc_entry_table_size_to_count(osize);
 
-	/*
-	 * Since is_table_next points to the next natural size
-	 * we can identify the current size entry.
-	 */
-	oits = its - 1;
-	osize = oits->its_size;
+	if (target_count == ITS_SIZE_NONE) {
+		nsize = ipc_entry_table_next_size(IPC_ENTRY_TABLE_MIN, osize,
+		    IPC_ENTRY_TABLE_PERIOD);
+	} else if (target_count <= ocount) {
+		return KERN_SUCCESS;
+	} else if (target_count > ipc_entry_table_count_max()) {
+		goto no_space;
+	} else {
+		uint32_t tsize = ipc_entry_table_count_to_size(target_count);
 
-	/*
-	 * If there is no target size, then the new size is simply
-	 * specified by is_table_next.  If there is a target
-	 * size, then search for the next entry.
-	 */
-	if (target_size != ITS_SIZE_NONE) {
-		if (target_size <= osize) {
-			/* the space is locked */
-			return KERN_SUCCESS;
-		}
-
-		psize = osize;
-		while ((psize != size) && (target_size > size)) {
-			psize = size;
-			its++;
-			size = its->its_size;
-		}
-		if (psize == size) {
-			goto no_space;
-		}
+		nsize = ipc_entry_table_next_size(IPC_ENTRY_TABLE_MIN, tsize,
+		    IPC_ENTRY_TABLE_PERIOD);
 	}
-
-	if (osize == size) {
+	if (nsize > CONFIG_IPC_TABLE_ENTRIES_SIZE_MAX) {
+		nsize = CONFIG_IPC_TABLE_ENTRIES_SIZE_MAX;
+	}
+	if (osize == nsize) {
 		goto no_space;
 	}
 
-	nits = its + 1;
-	nsize = nits->its_size;
-	assert((osize < size) && (size <= nsize));
 
 	/*
 	 * We'll attempt to grow the table.
@@ -614,24 +632,27 @@ ipc_entry_grow_table(
 	 * above that mark.  Eventually, we'll get done.
 	 */
 	ipc_space_start_growing(space);
-	space->is_low_mod = osize;
+	space->is_low_mod = ocount;
 	space->is_high_mod = 0;
 #if IPC_ENTRY_GROW_STATS
 	ipc_entry_grow_count++;
 #endif
 	is_write_unlock(space);
 
-	table = it_entries_alloc(its); /* zero-initialized */
-	if (table == IE_NULL) {
+	ntable = ipc_entry_table_alloc_by_size(nsize, Z_WAITOK | Z_ZERO);
+	if (ntable == NULL) {
 		is_write_lock(space);
 		ipc_space_done_growing_and_unlock(space);
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
-	ipc_space_rand_freelist(space, table, osize, size);
+	nbase  = ipc_entry_table_base(ntable);
+	nsize  = ipc_entry_table_size(ntable);
+	ncount = ipc_entry_table_count(ntable);
+	ipc_space_rand_freelist(space, nbase, ocount, ncount);
 
 	low_mod = 1;
-	hi_mod = osize - 1;
+	hi_mod = ocount - 1;
 rescan:
 	/*
 	 * Within the range of the table that changed, determine what we
@@ -642,11 +663,11 @@ rescan:
 	 * cautious with the values.
 	 */
 	assert(low_mod > 0);
-	for (mach_port_index_t i = low_mod; i <= hi_mod; i++) {
-		ipc_entry_t entry = &table[i];
-		ipc_object_t osnap_object = otable[i].ie_object;
-		ipc_entry_bits_t osnap_bits = otable[i].ie_bits;
-		ipc_entry_bits_t osnap_request = otable[i].ie_request;
+	for (mach_port_index_t i = MAX(1, low_mod); i <= hi_mod; i++) {
+		ipc_entry_t entry = &nbase[i];
+		ipc_object_t osnap_object = obase[i].ie_object;
+		ipc_entry_bits_t osnap_bits = obase[i].ie_bits;
+		ipc_entry_bits_t osnap_request = obase[i].ie_request;
 
 		/*
 		 * We need to make sure the osnap_* fields are never reloaded.
@@ -657,7 +678,7 @@ rescan:
 		    IE_BITS_TYPE(entry->ie_bits) != IE_BITS_TYPE(osnap_bits)) {
 			if (entry->ie_object != IO_NULL &&
 			    IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_SEND) {
-				ipc_hash_table_delete(table, entry->ie_object, i, entry);
+				ipc_hash_table_delete(ntable, entry->ie_object, i, entry);
 			}
 
 			entry->ie_object = osnap_object;
@@ -666,14 +687,14 @@ rescan:
 
 			if (osnap_object != IO_NULL &&
 			    IE_BITS_TYPE(osnap_bits) == MACH_PORT_TYPE_SEND) {
-				ipc_hash_table_insert(table, osnap_object, i, entry);
+				ipc_hash_table_insert(ntable, osnap_object, i, entry);
 			}
 		} else {
 			entry->ie_bits = osnap_bits;
 			entry->ie_request = osnap_request; /* or ie_next */
 		}
 	}
-	table[0].ie_next = otable[0].ie_next;  /* always rebase the freelist */
+	nbase[0].ie_next = obase[0].ie_next;  /* always rebase the freelist */
 
 	/*
 	 * find the end of the freelist (should be short). But be careful,
@@ -681,12 +702,12 @@ rescan:
 	 * (no problem stopping short in those cases, because we'll rescan).
 	 */
 	free_index = 0;
-	for (sanity = 0; sanity < osize; sanity++) {
-		if (table[free_index].ie_object != IPC_OBJECT_NULL) {
+	for (sanity = 0; sanity < ocount; sanity++) {
+		if (nbase[free_index].ie_object != IPC_OBJECT_NULL) {
 			break;
 		}
-		mach_port_index_t i = table[free_index].ie_next;
-		if (i == 0 || i >= osize) {
+		mach_port_index_t i = nbase[free_index].ie_next;
+		if (i == 0 || i >= ocount) {
 			break;
 		}
 		free_index = i;
@@ -713,19 +734,25 @@ rescan:
 		 */
 
 		ipc_space_done_growing_and_unlock(space);
-		ipc_space_free_table(table);
+		ipc_entry_table_free(&ntable);
 		is_write_lock(space);
 		return KERN_SUCCESS;
 	}
 
 	/* If the space changed while unlocked, go back and process the changes */
-	if (space->is_low_mod < osize) {
+	if (space->is_low_mod < ocount) {
 		assert(space->is_high_mod > 0);
 		low_mod = space->is_low_mod;
-		space->is_low_mod = osize;
+		space->is_low_mod = ocount;
 		hi_mod = space->is_high_mod;
 		space->is_high_mod = 0;
 		is_write_unlock(space);
+
+		if (hi_mod >= ocount) {
+			panic("corrupt hi_mod: %d, obase: %p, ocount: %d\n",
+			    hi_mod, obase, ocount);
+		}
+
 #if IPC_ENTRY_GROW_STATS
 		rescan_count++;
 		if (rescan_count > ipc_entry_grow_rescan_max) {
@@ -742,18 +769,14 @@ rescan:
 	}
 
 	/* link new free entries onto the rest of the freelist */
-	assert(table[free_index].ie_next == 0 &&
-	    table[free_index].ie_object == IO_NULL);
-	table[free_index].ie_next = osize;
+	assert(nbase[free_index].ie_next == 0 &&
+	    nbase[free_index].ie_object == IO_NULL);
+	nbase[free_index].ie_next = ocount;
 
-	assert(hazard_ptr_serialized_load(&space->is_table) == otable);
-	assert((space->is_table_next == its) ||
-	    (target_size != ITS_SIZE_NONE));
-	assert(otable->ie_size == osize);
+	assert(smr_serialized_load(&space->is_table) == otable);
 
-	space->is_table_next = nits;
-	space->is_table_free += size - osize;
-	hazard_ptr_serialized_store(&space->is_table, table);
+	space->is_table_free += ncount - ocount;
+	smr_serialized_store(&space->is_table, ntable);
 
 	ipc_space_done_growing_and_unlock(space);
 

@@ -132,7 +132,9 @@ zprint_panic_info(void)
 	num_sites = vm_page_diagnose_estimate();
 	panic_kext_memory_size = num_sites * sizeof(panic_kext_memory_info[0]);
 
-	kr = kmem_alloc(kernel_map, (vm_offset_t *)&panic_kext_memory_info, round_page(panic_kext_memory_size), VM_KERN_MEMORY_OSFMK);
+	kr = kmem_alloc(kernel_map, (vm_offset_t *)&panic_kext_memory_info,
+	    round_page(panic_kext_memory_size), KMA_DATA | KMA_ZERO,
+	    VM_KERN_MEMORY_OSFMK);
 	if (kr != KERN_SUCCESS) {
 		panic_kext_memory_info = NULL;
 		return;
@@ -151,10 +153,17 @@ __abortlike
 static void
 panic_kernel(int howto, char *message)
 {
+	uint64_t opts = DEBUGGER_OPTION_NONE;
+
 	if ((howto & RB_PANIC_ZPRINT) == RB_PANIC_ZPRINT) {
 		zprint_panic_info();
 	}
-	panic("userspace panic: %s", message);
+
+	if ((howto & RB_PANIC_FORCERESET) == RB_PANIC_FORCERESET) {
+		opts |= DEBUGGER_OPTION_PANICLOGANDREBOOT;
+	}
+
+	panic_with_options(0, NULL, opts, "userspace panic: %s", message);
 }
 
 extern boolean_t compressor_store_stop_compaction;
@@ -390,8 +399,6 @@ sd_log(vfs_context_t ctx, const char *fmt, ...)
 
 	va_end(arglist);
 }
-
-#define proc_is_driver(p) (task_is_driver((p)->task))
 
 static int
 sd_filt1(proc_t p, void * args)
@@ -735,7 +742,7 @@ sigterm_loop:
 	/*
 	 * Now that all other processes have been terminated, suspend init
 	 */
-	task_suspend_internal(initproc->task);
+	task_suspend_internal(proc_task(initproc));
 
 	/* drop the ref on initproc */
 	proc_rele(initproc);

@@ -43,7 +43,6 @@
 
 #include <sys/kdebug.h>
 
-#include <mach/mach_voucher_attr_control.h>
 #include <mach/machine/sdt.h>
 
 extern int      proc_pid(void *);
@@ -700,7 +699,7 @@ ipc_importance_task_propagate_helper(
 	ipc_kmsg_t temp_kmsg;
 
 	queue_iterate(&task_imp->iit_kmsgs, temp_kmsg, ipc_kmsg_t, ikm_inheritance) {
-		mach_msg_header_t *hdr = temp_kmsg->ikm_header;
+		mach_msg_header_t *hdr = ikm_header(temp_kmsg);
 		mach_port_delta_t delta;
 		ipc_port_t port;
 
@@ -1371,7 +1370,7 @@ ipc_importance_task_hold_legacy_external_assertion(ipc_importance_task_t task_im
 		printf("BUG in process %s[%d]: "
 		    "attempt to acquire an additional legacy external boost assertion without holding an existing legacy external assertion. "
 		    "(%d total, %d external, %d legacy-external)\n",
-		    proc_name_address(target_task->bsd_info), task_pid(target_task),
+		    proc_name_address(get_bsdtask_info(target_task)), task_pid(target_task),
 		    target_assertcnt, target_externcnt, target_legacycnt);
 	}
 
@@ -1463,7 +1462,7 @@ ipc_importance_task_drop_legacy_external_assertion(ipc_importance_task_t task_im
 	/* delayed printf for user-supplied data failures */
 	if (KERN_FAILURE == ret && TASK_NULL != target_task) {
 		printf("BUG in process %s[%d]: over-released legacy external boost assertions (%d total, %d external, %d legacy-external)\n",
-		    proc_name_address(target_task->bsd_info), task_pid(target_task),
+		    proc_name_address(get_bsdtask_info(target_task)), task_pid(target_task),
 		    target_assertcnt, target_externcnt, target_legacycnt);
 	}
 
@@ -1987,8 +1986,8 @@ task_importance_update_owner_info(task_t task)
 		ipc_importance_task_t task_elem = task->task_imp_base;
 
 		task_elem->iit_bsd_pid = task_pid(task);
-		if (task->bsd_info) {
-			strncpy(&task_elem->iit_procname[0], proc_name_address(task->bsd_info), 16);
+		if (get_bsdtask_info(task)) {
+			strncpy(&task_elem->iit_procname[0], proc_name_address(get_bsdtask_info(task)), 16);
 			task_elem->iit_procname[16] = '\0';
 		} else {
 			strncpy(&task_elem->iit_procname[0], "unknown", 16);
@@ -2494,7 +2493,8 @@ ipc_importance_send(
 	ipc_kmsg_t              kmsg,
 	mach_msg_option_t       option)
 {
-	ipc_port_t port = kmsg->ikm_header->msgh_remote_port;
+	mach_msg_header_t *hdr = ikm_header(kmsg);
+	ipc_port_t port = hdr->msgh_remote_port;
 	ipc_port_t voucher_port;
 	boolean_t port_lock_dropped = FALSE;
 	ipc_importance_elem_t elem;
@@ -2606,7 +2606,7 @@ ipc_importance_send(
 
 portupdate:
 	/* Mark the fact that we are (currently) donating through this message */
-	kmsg->ikm_header->msgh_bits |= MACH_MSGH_BITS_RAISEIMP;
+	hdr->msgh_bits |= MACH_MSGH_BITS_RAISEIMP;
 
 	/*
 	 * If we need to relock the port, do it with the importance still locked.
@@ -2622,10 +2622,9 @@ portupdate:
 
 #if IMPORTANCE_TRACE
 	if (kdebug_enable) {
-		mach_msg_max_trailer_t *dbgtrailer = (mach_msg_max_trailer_t *)
-		    ((vm_offset_t)kmsg->ikm_header + mach_round_msg(kmsg->ikm_header->msgh_size));
+		mach_msg_max_trailer_t *dbgtrailer = ipc_kmsg_get_trailer(kmsg, false);
 		unsigned int sender_pid = dbgtrailer->msgh_audit.val[5];
-		mach_msg_id_t imp_msgh_id = kmsg->ikm_header->msgh_id;
+		mach_msg_id_t imp_msgh_id = hdr->msgh_id;
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_MSG, IMP_MSG_SEND)) | DBG_FUNC_START,
 		    task_pid(task), sender_pid, imp_msgh_id, 0, 0);
 	}
@@ -2691,7 +2690,8 @@ ipc_importance_inherit_from_kmsg(ipc_kmsg_t kmsg)
 	ipc_importance_elem_t   elem;
 	task_t  task_self = current_task();
 
-	ipc_port_t port = kmsg->ikm_header->msgh_remote_port;
+	mach_msg_header_t *hdr = ikm_header(kmsg);
+	ipc_port_t port = hdr->msgh_remote_port;
 	ipc_importance_inherit_t inherit = III_NULL;
 	ipc_importance_inherit_t alloc = III_NULL;
 	boolean_t cleared_self_donation = FALSE;
@@ -2700,7 +2700,7 @@ ipc_importance_inherit_from_kmsg(ipc_kmsg_t kmsg)
 
 	/* The kmsg must have an importance donor or static boost to proceed */
 	if (IIE_NULL == kmsg->ikm_importance &&
-	    !MACH_MSGH_BITS_RAISED_IMPORTANCE(kmsg->ikm_header->msgh_bits)) {
+	    !MACH_MSGH_BITS_RAISED_IMPORTANCE(hdr->msgh_bits)) {
 		return III_NULL;
 	}
 
@@ -2732,8 +2732,8 @@ ipc_importance_inherit_from_kmsg(ipc_kmsg_t kmsg)
 		if (from_inherit->iii_to_task == task_imp) {
 			/* clear self-donation if not also present in inherit */
 			if (!from_inherit->iii_donating &&
-			    MACH_MSGH_BITS_RAISED_IMPORTANCE(kmsg->ikm_header->msgh_bits)) {
-				kmsg->ikm_header->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
+			    MACH_MSGH_BITS_RAISED_IMPORTANCE(hdr->msgh_bits)) {
+				hdr->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
 				cleared_self_donation = TRUE;
 			}
 			inherit = from_inherit;
@@ -2779,7 +2779,7 @@ ipc_importance_inherit_from_kmsg(ipc_kmsg_t kmsg)
 	 * In that case DO let the process permanently boost itself.
 	 */
 	if (IIE_NULL == from_elem) {
-		assert(MACH_MSGH_BITS_RAISED_IMPORTANCE(kmsg->ikm_header->msgh_bits));
+		assert(MACH_MSGH_BITS_RAISED_IMPORTANCE(hdr->msgh_bits));
 		ipc_importance_task_reference_internal(task_imp);
 		from_elem = (ipc_importance_elem_t)task_imp;
 	}
@@ -2806,7 +2806,7 @@ ipc_importance_inherit_from_kmsg(ipc_kmsg_t kmsg)
 	}
 
 	/* snapshot the donating status while we have importance locked */
-	donating = MACH_MSGH_BITS_RAISED_IMPORTANCE(kmsg->ikm_header->msgh_bits);
+	donating = MACH_MSGH_BITS_RAISED_IMPORTANCE(hdr->msgh_bits);
 
 	if (III_NULL != inherit) {
 		/* We found one, piggyback on that */
@@ -2870,7 +2870,7 @@ out_locked:
 	 * for those paths that came straight here: snapshot the donating status
 	 * (this should match previous snapshot for other paths).
 	 */
-	donating = MACH_MSGH_BITS_RAISED_IMPORTANCE(kmsg->ikm_header->msgh_bits);
+	donating = MACH_MSGH_BITS_RAISED_IMPORTANCE(hdr->msgh_bits);
 
 	/* unlink the kmsg inheritance (if any) */
 	elem = ipc_importance_kmsg_unlink(kmsg);
@@ -2929,10 +2929,10 @@ out_locked:
 
 	if (III_NULL != inherit) {
 		/* have an associated importance attr, even if currently not donating */
-		kmsg->ikm_header->msgh_bits |= MACH_MSGH_BITS_RAISEIMP;
+		hdr->msgh_bits |= MACH_MSGH_BITS_RAISEIMP;
 	} else {
 		/* we won't have an importance attribute associated with our message */
-		kmsg->ikm_header->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
+		hdr->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
 	}
 
 	return inherit;
@@ -3136,10 +3136,9 @@ ipc_importance_receive(
 
 #if IMPORTANCE_TRACE || LEGACY_IMPORTANCE_DELIVERY
 	task_t task_self = current_task();
-	unsigned int sender_pid = ((mach_msg_max_trailer_t *)
-	    ((vm_offset_t)kmsg->ikm_header +
-	    mach_round_msg(kmsg->ikm_header->msgh_size)))->msgh_audit.val[5];
+	unsigned int sender_pid = ipc_kmsg_get_trailer(kmsg, false)->msgh_audit.val[5];
 #endif
+	mach_msg_header_t *hdr = ikm_header(kmsg);
 
 	/* convert to a voucher with an inherit importance attribute? */
 	if ((option & MACH_RCV_VOUCHER) != 0) {
@@ -3201,7 +3200,7 @@ ipc_importance_receive(
 			assert(KERN_SUCCESS == kr);
 
 			/* swap the voucher port (and set voucher bits in case it didn't already exist) */
-			kmsg->ikm_header->msgh_bits |= (MACH_MSG_TYPE_MOVE_SEND << 16);
+			hdr->msgh_bits |= (MACH_MSG_TYPE_MOVE_SEND << 16);
 			ipc_port_release_send(voucher_port);
 			voucher_port = convert_voucher_to_port(recv_voucher);
 			ipc_kmsg_set_voucher_port(kmsg, voucher_port, MACH_MSG_TYPE_MOVE_SEND);
@@ -3224,8 +3223,8 @@ ipc_importance_receive(
 		}
 
 		/* With kmsg unlinked, can safely examine message importance attribute. */
-		if (MACH_MSGH_BITS_RAISED_IMPORTANCE(kmsg->ikm_header->msgh_bits)) {
-			ipc_port_t port = kmsg->ikm_header->msgh_remote_port;
+		if (MACH_MSGH_BITS_RAISED_IMPORTANCE(hdr->msgh_bits)) {
+			ipc_port_t port = hdr->msgh_remote_port;
 #if LEGACY_IMPORTANCE_DELIVERY
 			ipc_importance_task_t task_imp = task_self->task_imp_base;
 
@@ -3237,7 +3236,7 @@ ipc_importance_receive(
 #endif
 			{
 				/* The importance boost never applied to task (clear the bit) */
-				kmsg->ikm_header->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
+				hdr->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
 				impresult = 0;
 			}
 
@@ -3253,7 +3252,7 @@ ipc_importance_receive(
 	if (-1 < impresult) {
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_MSG, IMP_MSG_DELV)) | DBG_FUNC_NONE,
 		    sender_pid, task_pid(task_self),
-		    kmsg->ikm_header->msgh_id, impresult, 0);
+		    hdr->msgh_id, impresult, 0);
 	}
 	if (impresult == 2) {
 		/*
@@ -3282,12 +3281,13 @@ ipc_importance_unreceive(
 {
 	/* importance should already be in the voucher and out of the kmsg */
 	assert(IIE_NULL == kmsg->ikm_importance);
+	mach_msg_header_t *hdr = ikm_header(kmsg);
 
 	/* See if there is a legacy boost to be dropped from receiver */
-	if (MACH_MSGH_BITS_RAISED_IMPORTANCE(kmsg->ikm_header->msgh_bits)) {
+	if (MACH_MSGH_BITS_RAISED_IMPORTANCE(hdr->msgh_bits)) {
 		ipc_importance_task_t task_imp;
 
-		kmsg->ikm_header->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
+		hdr->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
 		task_imp = current_task()->task_imp_base;
 
 		if (!IP_VALID(ipc_kmsg_get_voucher_port(kmsg)) && IIT_NULL != task_imp) {
@@ -3316,6 +3316,7 @@ ipc_importance_clean(
 	ipc_kmsg_t              kmsg)
 {
 	ipc_port_t              port;
+	mach_msg_header_t *hdr = ikm_header(kmsg);
 
 	/* Is the kmsg still linked? If so, remove that first */
 	if (IIE_NULL != kmsg->ikm_importance) {
@@ -3329,9 +3330,9 @@ ipc_importance_clean(
 	}
 
 	/* See if there is a legacy importance boost to be dropped from port */
-	if (MACH_MSGH_BITS_RAISED_IMPORTANCE(kmsg->ikm_header->msgh_bits)) {
-		kmsg->ikm_header->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
-		port = kmsg->ikm_header->msgh_remote_port;
+	if (MACH_MSGH_BITS_RAISED_IMPORTANCE(hdr->msgh_bits)) {
+		hdr->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
+		port = hdr->msgh_remote_port;
 		if (IP_VALID(port)) {
 			ip_mq_lock(port);
 			/* inactive ports already had their importance boosts dropped */
@@ -3347,7 +3348,7 @@ void
 ipc_importance_assert_clean(__assert_only ipc_kmsg_t kmsg)
 {
 	assert(IIE_NULL == kmsg->ikm_importance);
-	assert(!MACH_MSGH_BITS_RAISED_IMPORTANCE(kmsg->ikm_header->msgh_bits));
+	assert(!MACH_MSGH_BITS_RAISED_IMPORTANCE(ikm_header(kmsg)->msgh_bits));
 }
 
 /*
@@ -3396,16 +3397,11 @@ ipc_importance_command(
 	mach_voucher_attr_content_t                     out_content,
 	mach_voucher_attr_content_size_t                *out_content_size);
 
-static void
-ipc_importance_manager_release(
-	ipc_voucher_attr_manager_t              manager);
-
 const struct ipc_voucher_attr_manager ipc_importance_manager = {
 	.ivam_release_value =   ipc_importance_release_value,
 	.ivam_get_value =       ipc_importance_get_value,
 	.ivam_extract_content = ipc_importance_extract_content,
 	.ivam_command =         ipc_importance_command,
-	.ivam_release =         ipc_importance_manager_release,
 	.ivam_flags =           IVAM_FLAGS_NONE,
 };
 
@@ -3776,25 +3772,6 @@ ipc_importance_command(
 }
 
 /*
- *	Routine:	ipc_importance_manager_release [Voucher Attribute Manager Interface]
- *	Purpose:
- *		Release the Voucher system's reference on the IPC importance attribute
- *		manager.
- *	Conditions:
- *		As this can only occur after the manager drops the Attribute control
- *		reference granted back at registration time, and that reference is never
- *		dropped, this should never be called.
- */
-__abortlike
-static void
-ipc_importance_manager_release(
-	ipc_voucher_attr_manager_t              __assert_only manager)
-{
-	IMPORTANCE_ASSERT_MANAGER(manager);
-	panic("Voucher importance manager released");
-}
-
-/*
  *	Routine:	ipc_importance_init
  *	Purpose:
  *		Initialize the  IPC importance manager.
@@ -3857,6 +3834,7 @@ task_importance_list_pids(task_t task, int flags, char *pid_list, unsigned int m
 	task_t temp_task;
 	ipc_importance_task_t task_imp = task->task_imp_base;
 	ipc_kmsg_t temp_kmsg;
+	mach_msg_header_t *temp_hdr;
 	ipc_importance_inherit_t temp_inherit;
 	ipc_importance_elem_t elem;
 	int target_pid = 0, previous_pid;
@@ -3894,7 +3872,10 @@ task_importance_list_pids(task_t task, int flags, char *pid_list, unsigned int m
 			continue;
 		}
 
-		if (!(temp_kmsg->ikm_header && MACH_MSGH_BITS_RAISED_IMPORTANCE(temp_kmsg->ikm_header->msgh_bits))) {
+		temp_hdr = ikm_header(temp_kmsg);
+
+		if (!(temp_hdr &&
+		    MACH_MSGH_BITS_RAISED_IMPORTANCE(temp_hdr->msgh_bits))) {
 			continue;
 		}
 

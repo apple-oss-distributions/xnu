@@ -100,7 +100,7 @@
  * KDBG_EVENTID(DBG_FSYSTEM, DBG_VFS, dcode) global event id, see bsd/sys/kdebug.h.
  * Note that dcode is multiplied by 4 and ORed as part of the construction. See bsd/kern/trace_codes
  * for list of system-wide {global event id, name} pairs. Currently DBG_VFS event ids are in range
- * [0x3130000, 0x3130184].
+ * [0x3130000, 0x3130188].
  */
 
 //#define VFS_TRACE_POLICY_OPS
@@ -1427,8 +1427,7 @@ out:
 	}
 
 	if (fatal_failure_desc_len > 0 && fatal_failure_desc != NULL) {
-		/* AMFI uses kalloc() which for kexts is redirected to KHEAP_KEXT */
-		kheap_free(KHEAP_KEXT, fatal_failure_desc, fatal_failure_desc_len);
+		__typed_allocators_ignore(kheap_free(KHEAP_DEFAULT, fatal_failure_desc, fatal_failure_desc_len));
 	}
 
 	return error;
@@ -2867,4 +2866,26 @@ mac_vnode_check_copyfile(vfs_context_t ctx, struct vnode *dvp,
 	    tvp, tvp ? mac_vnode_label(tvp) : NULL, fvp, mac_vnode_label(fvp), cnp, mode, flags);
 	VFS_KERNEL_DEBUG_END1(97, dvp);
 	return error;
+}
+
+void
+mac_vnode_notify_unlink(vfs_context_t ctx, struct vnode *dvp, struct vnode *vp,
+    struct componentname *cnp)
+{
+	kauth_cred_t cred;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_vnode_enforce) {
+		return;
+	}
+#endif
+	cred = vfs_context_ucred(ctx);
+	if (!mac_cred_check_enforce(cred)) {
+		return;
+	}
+	VFS_KERNEL_DEBUG_START1(98, vp);
+	MAC_PERFORM(vnode_notify_unlink, cred, dvp, mac_vnode_label(dvp), vp,
+	    mac_vnode_label(vp), cnp);
+	VFS_KERNEL_DEBUG_END1(98, vp);
 }

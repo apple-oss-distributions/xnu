@@ -542,6 +542,12 @@ munge_wwwsw(void *args)
 }
 
 void
+munge_llllllll(void *args __unused)
+{
+	/* Nothing to do, already all 64-bit */
+}
+
+void
 munge_llllll(void *args __unused)
 {
 	/* Nothing to do, already all 64-bit */
@@ -549,6 +555,12 @@ munge_llllll(void *args __unused)
 
 void
 munge_llll(void *args __unused)
+{
+	/* Nothing to do, already all 64-bit */
+}
+
+void
+munge_lll(void *args __unused)
 {
 	/* Nothing to do, already all 64-bit */
 }

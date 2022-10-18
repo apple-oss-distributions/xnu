@@ -549,6 +549,8 @@ OSRuntimeUnloadCPPForSegment(
 /*********************************************************************
 * C++ Allocators & Deallocators
 *********************************************************************/
+__typed_allocators_ignore_push
+
 void *
 operator new(size_t size)
 {
@@ -608,6 +610,8 @@ operator delete[](void * addr, size_t sz) noexcept
 		kheap_free(KERN_OS_MALLOC, addr, sz);
 	}
 }
+
+__typed_allocators_ignore_pop
 
 #endif /* __cplusplus >= 201103L */
 

@@ -30,12 +30,12 @@
  */
 
 subsystem
+#if	KERNEL_SERVER || KOBJECT_SERVER
+	KernelServer
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 #if	KERNEL_USER
 	  KernelUser
 #endif	/* KERNEL_USER */
-#if	KERNEL_SERVER
-	  KernelServer
-#endif	/* KERNEL_SERVER */
 		       ledger 5000;
 
 #ifdef	KERNEL_USER

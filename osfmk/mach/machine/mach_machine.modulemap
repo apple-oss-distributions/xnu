@@ -9,14 +9,14 @@ module Darwin.Mach.machine [system] {
   #endif
   // declares Value macro which can cause problems in other headers
   explicit module asm {
-    #ifdef PLATFORM_MacOSX
+    #ifdef XNU_PLATFORM_MacOSX
     header "mach/machine/asm.h"
     #endif
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     header "mach/i386/asm.h"
     #endif
     header "mach/arm/asm.h"
-    #ifdef PLATFORM_MacOSX
+    #ifdef XNU_PLATFORM_MacOSX
     header "mach/arm64/asm.h"
     #endif
 
@@ -25,7 +25,7 @@ module Darwin.Mach.machine [system] {
 
   module _structs {
     header "mach/machine/_structs.h"
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     header "mach/i386/_structs.h"
     #endif
     header "mach/arm/_structs.h"
@@ -35,7 +35,7 @@ module Darwin.Mach.machine [system] {
 
   module boolean {
     header "mach/machine/boolean.h"
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     header "mach/i386/boolean.h"
     #endif
     header "mach/arm/boolean.h"
@@ -45,7 +45,7 @@ module Darwin.Mach.machine [system] {
 
   module exception {
     header "mach/machine/exception.h"
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     header "mach/i386/exception.h"
     #endif
     header "mach/arm/exception.h"
@@ -53,7 +53,7 @@ module Darwin.Mach.machine [system] {
     export *
   }
 
-  #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+  #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
   module fp_reg {
     header "mach/i386/fp_reg.h"
     export *
@@ -62,7 +62,7 @@ module Darwin.Mach.machine [system] {
   #endif
   module kern_return {
     header "mach/machine/kern_return.h"
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     header "mach/i386/kern_return.h"
     #endif
     header "mach/arm/kern_return.h"
@@ -83,7 +83,7 @@ module Darwin.Mach.machine [system] {
     // because {i386,arm}/ndr_def.h can only be included once, which is from
     // mach/machine/ndr_def.h.
     #endif
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     exclude header "mach/i386/ndr_def.h"
     #endif
     exclude header "mach/arm/ndr_def.h"
@@ -91,7 +91,7 @@ module Darwin.Mach.machine [system] {
 
   module processor_info {
     header "mach/machine/processor_info.h"
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     header "mach/i386/processor_info.h"
     #endif
     header "mach/arm/processor_info.h"
@@ -101,7 +101,7 @@ module Darwin.Mach.machine [system] {
 
   module rpc {
     header "mach/machine/rpc.h"
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     header "mach/i386/rpc.h"
     #endif
     header "mach/arm/rpc.h"
@@ -110,23 +110,23 @@ module Darwin.Mach.machine [system] {
   }
 
   #ifdef XNU_KERNEL_PRIVATE
-  // The PLATFORM_MacOSX headers are in the public SDK for macOS,
+  // The XNU_PLATFORM_MacOSX headers are in the public SDK for macOS,
   // but mastered out of the public SDK for the other OSes.
   #endif
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module sdt {
     header "mach/machine/sdt.h"
     export *
   }
 
   #endif
-  #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+  #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
   module sdt_isa {
-    #ifdef PLATFORM_MacOSX
+    #ifdef XNU_PLATFORM_MacOSX
     header "mach/machine/sdt_isa.h"
     #endif
     header "mach/i386/sdt_isa.h"
-    #ifdef PLATFORM_MacOSX
+    #ifdef XNU_PLATFORM_MacOSX
     header "mach/arm/sdt_isa.h"
     #endif
 
@@ -140,7 +140,7 @@ module Darwin.Mach.machine [system] {
   #endif
   module thread_state {
     header "mach/machine/thread_state.h"
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     header "mach/i386/thread_state.h"
     #endif
     header "mach/arm/thread_state.h"
@@ -150,7 +150,7 @@ module Darwin.Mach.machine [system] {
 
   module thread_status {
     header "mach/machine/thread_status.h"
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     header "mach/i386/thread_status.h"
     #endif
     header "mach/arm/thread_status.h"
@@ -165,7 +165,7 @@ module Darwin.Mach.machine [system] {
 
   module vm_param {
     header "mach/machine/vm_param.h"
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     header "mach/i386/vm_param.h"
     #endif
     header "mach/arm/vm_param.h"
@@ -175,7 +175,7 @@ module Darwin.Mach.machine [system] {
 
   module vm_types {
     header "mach/machine/vm_types.h"
-    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    #if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_iPhoneSimulator) || defined(XNU_PLATFORM_AppleTVSimulator) || defined(XNU_PLATFORM_WatchSimulator)
     header "mach/i386/vm_types.h"
     #endif
     header "mach/arm/vm_types.h"
@@ -187,7 +187,7 @@ module Darwin.Mach.machine [system] {
   // includes mach/arm64/asm.h in __arm64__, and that's only public
   // in macOS.
   #endif
-  #ifndef PLATFORM_MacOSX
+  #ifndef XNU_PLATFORM_MacOSX
 
   exclude header "mach/machine/asm.h"
   #endif
@@ -196,7 +196,7 @@ module Darwin.Mach.machine [system] {
   // out of the public SDK for the other OSes. However, it doesn't
   // compile (missing include?).
   #endif
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
 
   exclude header "mach/arm/syscall_sw.h"
   #endif

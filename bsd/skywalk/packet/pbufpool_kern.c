@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -45,11 +45,6 @@ kern_pbufpool_create(const struct kern_pbufpool_init *init,
 {
 	/* XXX: woodford_s - find a way to get 'srp' off the kernel stack */
 	struct skmem_region_params srp[SKMEM_REGIONS];
-	struct skmem_region_params *buf_srp = NULL;
-	struct skmem_region_params *kmd_srp = NULL;
-	struct skmem_region_params *umd_srp = NULL;
-	struct skmem_region_params *ubft_srp = NULL;
-	struct skmem_region_params *kbft_srp = NULL;
 	struct kern_pbufpool *pp = NULL;
 	nexus_meta_type_t md_type;
 	nexus_meta_subtype_t md_subtype;
@@ -57,6 +52,7 @@ kern_pbufpool_create(const struct kern_pbufpool_init *init,
 	uint16_t max_frags;
 	uint32_t ppcreatef = PPCREATEF_EXTERNAL;
 	uint32_t pkt_cnt;
+	uint32_t pp_region_flags = 0;
 	int err = 0;
 	bool kernel_only;
 	bool tx_pool = true;
@@ -108,77 +104,47 @@ kern_pbufpool_create(const struct kern_pbufpool_init *init,
 		goto done;
 	}
 
-	/* pick the right md and buf region based on direction */
 	bzero(&srp, sizeof(srp));
-	srp[SKMEM_REGION_UMD] = *skmem_get_default(SKMEM_REGION_UMD);
-	umd_srp = &srp[SKMEM_REGION_UMD];
-
-	if (init->kbi_flags & KBIF_BUFFER_ON_DEMAND) {
-		srp[SKMEM_REGION_KBFT] = *skmem_get_default(SKMEM_REGION_KBFT);
-		kbft_srp = &srp[SKMEM_REGION_KBFT];
-	}
-	if ((kbft_srp != NULL) && (init->kbi_flags & KBIF_USER_ACCESS)) {
-		srp[SKMEM_REGION_UBFT] = *skmem_get_default(SKMEM_REGION_UBFT);
-		ubft_srp = &srp[SKMEM_REGION_UBFT];
+	for (int i = 0; i < SKMEM_REGIONS; i++) {
+		srp[i] = *skmem_get_default(i);
 	}
 
 	switch (init->kbi_flags & (KBIF_IODIR_IN | KBIF_IODIR_OUT)) {
 	case KBIF_IODIR_IN:
-		srp[SKMEM_REGION_RXBUF] = *skmem_get_default(SKMEM_REGION_RXBUF);
-		srp[SKMEM_REGION_RXKMD] = *skmem_get_default(SKMEM_REGION_RXKMD);
-		buf_srp = &srp[SKMEM_REGION_RXBUF];
-		kmd_srp = &srp[SKMEM_REGION_RXKMD];
+		pp_region_flags |= PP_REGION_CONFIG_BUF_IODIR_IN;
 		tx_pool = false;
 		break;
 	case KBIF_IODIR_OUT:
-		srp[SKMEM_REGION_TXBUF] = *skmem_get_default(SKMEM_REGION_TXBUF);
-		srp[SKMEM_REGION_TXKMD] = *skmem_get_default(SKMEM_REGION_TXKMD);
-		buf_srp = &srp[SKMEM_REGION_TXBUF];
-		kmd_srp = &srp[SKMEM_REGION_TXKMD];
+		pp_region_flags |= PP_REGION_CONFIG_BUF_IODIR_OUT;
 		break;
 	case (KBIF_IODIR_IN | KBIF_IODIR_OUT):
 	default:
-		srp[SKMEM_REGION_BUF] = *skmem_get_default(SKMEM_REGION_BUF);
-		srp[SKMEM_REGION_KMD] = *skmem_get_default(SKMEM_REGION_KMD);
-		buf_srp = &srp[SKMEM_REGION_BUF];
-		kmd_srp = &srp[SKMEM_REGION_KMD];
+		pp_region_flags |= PP_REGION_CONFIG_BUF_IODIR_BIDIR;
 		break;
 	}
 
+	if (init->kbi_flags & KBIF_BUFFER_ON_DEMAND) {
+		pp_region_flags |= PP_REGION_CONFIG_BUFLET;
+		if (init->kbi_flags & KBIF_RAW_BFLT) {
+			pp_region_flags |= PP_REGION_CONFIG_RAW_BUFLET;
+		}
+	}
+	if (kernel_only) {
+		pp_region_flags |= PP_REGION_CONFIG_KERNEL_ONLY;
+	}
 	if (init->kbi_flags & KBIF_KERNEL_READONLY) {
-		buf_srp->srp_cflags |= SKMEM_REGION_CR_KREADONLY;
+		pp_region_flags |= PP_REGION_CONFIG_BUF_KREADONLY;
 	}
-
+	if (init->kbi_flags & KBIF_THREADSAFE) {
+		pp_region_flags |= PP_REGION_CONFIG_BUF_THREADSAFE;
+	}
 	/*
-	 * Disable/enable magazine layer for metadata.
+	 * Enable magazine layer for metadata.
 	 */
-	if (init->kbi_flags & KBIF_NO_MAGAZINES) {
-		umd_srp->srp_cflags |= SKMEM_REGION_CR_NOMAGAZINES;
-		kmd_srp->srp_cflags |= SKMEM_REGION_CR_NOMAGAZINES;
-		if (kbft_srp != NULL) {
-			kbft_srp->srp_cflags |= SKMEM_REGION_CR_NOMAGAZINES;
-		}
-		if (ubft_srp != NULL) {
-			ubft_srp->srp_cflags |= SKMEM_REGION_CR_NOMAGAZINES;
-		}
-	} else {
-		umd_srp->srp_cflags &= ~SKMEM_REGION_CR_NOMAGAZINES;
-		kmd_srp->srp_cflags &= ~SKMEM_REGION_CR_NOMAGAZINES;
-		if (kbft_srp != NULL) {
-			kbft_srp->srp_cflags &= ~SKMEM_REGION_CR_NOMAGAZINES;
-		}
-		if (ubft_srp != NULL) {
-			ubft_srp->srp_cflags &= ~SKMEM_REGION_CR_NOMAGAZINES;
-		}
+	if (!(init->kbi_flags & KBIF_NO_MAGAZINES)) {
+		pp_region_flags |= PP_REGION_CONFIG_MD_MAGAZINE_ENABLE;
 	}
-	umd_srp->srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
-	kmd_srp->srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
-	if (kbft_srp != NULL) {
-		kbft_srp->srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
-	}
-	if (ubft_srp != NULL) {
-		ubft_srp->srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
-	}
+	pp_region_flags |= PP_REGION_CONFIG_MD_PERSISTENT;
 
 	pkt_cnt = init->kbi_packets;
 	/*
@@ -187,7 +153,7 @@ kern_pbufpool_create(const struct kern_pbufpool_init *init,
 	 * memory constrained, we can increase the pool to be atleast
 	 * 4K packets.
 	 */
-	if (tx_pool && !SKMEM_MEM_CONSTRAINED_DEVICE &&
+	if (tx_pool && !SKMEM_MEM_CONSTRAINED_DEVICE() &&
 #if (DEVELOPMENT || DEBUG)
 	    !skmem_test_enabled() &&
 #endif /* (DEVELOPMENT || DEBUG) */
@@ -206,11 +172,6 @@ kern_pbufpool_create(const struct kern_pbufpool_init *init,
 	/* make sure # of buffers is >= # of packets */
 	buf_cnt = MAX(pkt_cnt, init->kbi_buflets);
 
-	/* adjust region params; we may override below */
-	pp_regions_params_adjust(buf_srp, kmd_srp, umd_srp, kbft_srp,
-	    ubft_srp, md_type, md_subtype, pkt_cnt, max_frags,
-	    init->kbi_bufsize, buf_cnt);
-
 	/*
 	 * Apply same logic as in nxprov_create_common().
 	 */
@@ -218,35 +179,23 @@ kern_pbufpool_create(const struct kern_pbufpool_init *init,
 	    (KBIF_PERSISTENT | KBIF_MONOLITHIC | KBIF_INHIBIT_CACHE |
 	    KBIF_PHYS_CONTIGUOUS)) {
 		if (init->kbi_flags & KBIF_PERSISTENT) {
-			buf_srp->srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
-		} else {
-			buf_srp->srp_cflags &= ~SKMEM_REGION_CR_PERSISTENT;
+			pp_region_flags |= PP_REGION_CONFIG_BUF_PERSISTENT;
 		}
-
-		/*
-		 * Set SKMEM_REGION_CR_MONOLITHIC if the provider does
-		 * not want more than a single segment for entire region.
-		 */
 		if (init->kbi_flags & KBIF_MONOLITHIC) {
-			buf_srp->srp_cflags |= SKMEM_REGION_CR_MONOLITHIC;
-		} else {
-			buf_srp->srp_cflags &= ~SKMEM_REGION_CR_MONOLITHIC;
+			pp_region_flags |= PP_REGION_CONFIG_BUF_MONOLITHIC;
 		}
-
 		if (init->kbi_flags & KBIF_INHIBIT_CACHE) {
-			buf_srp->srp_cflags |= SKMEM_REGION_CR_NOCACHE;
-		} else {
-			buf_srp->srp_cflags &= ~SKMEM_REGION_CR_NOCACHE;
+			pp_region_flags |= PP_REGION_CONFIG_BUF_NOCACHE;
 		}
 		if (init->kbi_flags & KBIF_PHYS_CONTIGUOUS) {
-			buf_srp->srp_cflags |= SKMEM_REGION_CR_SEGPHYSCONTIG;
-		} else {
-			buf_srp->srp_cflags &= ~SKMEM_REGION_CR_SEGPHYSCONTIG;
+			pp_region_flags |= PP_REGION_CONFIG_BUF_SEGPHYSCONTIG;
 		}
 	}
 
-	buf_srp->srp_r_seg_size = init->kbi_buf_seg_size;
-	skmem_region_params_config(buf_srp);
+	/* adjust region params */
+	pp_regions_params_adjust(srp, md_type, md_subtype, pkt_cnt, max_frags,
+	    init->kbi_bufsize, 0, buf_cnt, init->kbi_buf_seg_size,
+	    pp_region_flags);
 
 	/*
 	 * Create packet pool.
@@ -257,6 +206,9 @@ kern_pbufpool_create(const struct kern_pbufpool_init *init,
 	}
 	if (init->kbi_flags & KBIF_BUFFER_ON_DEMAND) {
 		ppcreatef |= PPCREATEF_ONDEMAND_BUF;
+		if (init->kbi_flags & KBIF_RAW_BFLT) {
+			ppcreatef |= PPCREATEF_RAW_BFLT;
+		}
 	}
 	/*
 	 * Enable CPU-layer magazine resizing if this is a long-lived
@@ -265,8 +217,7 @@ kern_pbufpool_create(const struct kern_pbufpool_init *init,
 	if (!(init->kbi_flags & KBIF_VIRTUAL_DEVICE)) {
 		ppcreatef |= PPCREATEF_DYNAMIC;
 	}
-	if ((pp = pp_create((const char *)init->kbi_name, buf_srp, kmd_srp,
-	    umd_srp, &srp[SKMEM_REGION_KBFT], &srp[SKMEM_REGION_UBFT],
+	if ((pp = pp_create((const char *)init->kbi_name, srp,
 	    init->kbi_buf_seg_ctor, init->kbi_buf_seg_dtor,
 	    init->kbi_ctx, init->kbi_ctx_retain, init->kbi_ctx_release,
 	    ppcreatef)) == NULL) {
@@ -313,12 +264,13 @@ kern_pbufpool_get_memory_info(const kern_pbufpool_t pp,
 	if (pp->pp_flags & PPF_EXTERNAL) {
 		pp_info->kpm_flags |= KPMF_EXTERNAL;
 	}
-	pp_info->kpm_packets            = pp->pp_kmd_region->skr_c_obj_cnt;
-	pp_info->kpm_max_frags          = pp->pp_max_frags;
-	pp_info->kpm_buflets            = pp->pp_buf_region->skr_c_obj_cnt;
-	pp_info->kpm_bufsize            = pp->pp_buflet_size;
-	pp_info->kpm_bufsegs            = pp->pp_buf_region->skr_seg_max_cnt;
-	pp_info->kpm_buf_seg_size       = pp->pp_buf_region->skr_seg_size;
+	pp_info->kpm_packets      = pp->pp_kmd_region->skr_c_obj_cnt;
+	pp_info->kpm_max_frags    = pp->pp_max_frags;
+	pp_info->kpm_buflets      = PP_BUF_REGION_DEF(pp)->skr_c_obj_cnt;
+	pp_info->kpm_bufsize      = PP_BUF_SIZE_DEF(pp);
+	pp_info->kpm_buf_obj_size = PP_BUF_OBJ_SIZE_DEF(pp);
+	pp_info->kpm_bufsegs      = PP_BUF_REGION_DEF(pp)->skr_seg_max_cnt;
+	pp_info->kpm_buf_seg_size = PP_BUF_REGION_DEF(pp)->skr_seg_size;
 
 	return 0;
 }
@@ -477,14 +429,39 @@ kern_pbufpool_destroy(kern_pbufpool_t pp)
 }
 
 errno_t
-kern_pbufpool_alloc_buflet(const kern_pbufpool_t pp, kern_buflet_t *pbuf)
+kern_pbufpool_alloc_buflet(const kern_pbufpool_t pp, kern_buflet_t *pbuf,
+    bool attach_buffer)
 {
-	return pp_alloc_buflet(pp, pbuf, SKMEM_SLEEP);
+	return pp_alloc_buflet(pp, pbuf, SKMEM_SLEEP,
+	           attach_buffer ? PP_ALLOC_BFT_ATTACH_BUFFER : 0);
 }
 
 errno_t
 kern_pbufpool_alloc_buflet_nosleep(const kern_pbufpool_t pp,
-    kern_buflet_t *pbuf)
+    kern_buflet_t *pbuf, bool attach_buffer)
 {
-	return pp_alloc_buflet(pp, pbuf, SKMEM_NOSLEEP);
+	return pp_alloc_buflet(pp, pbuf, SKMEM_NOSLEEP,
+	           attach_buffer ? PP_ALLOC_BFT_ATTACH_BUFFER : 0);
+}
+
+errno_t
+kern_pbufpool_alloc_batch_buflet(const kern_pbufpool_t pp,
+    kern_buflet_t *pbuf_array, uint32_t *size, bool attach_buffer)
+{
+	return pp_alloc_buflet_batch(pp, (uint64_t *)pbuf_array, size, SKMEM_SLEEP,
+	           attach_buffer ? PP_ALLOC_BFT_ATTACH_BUFFER : 0);
+}
+
+errno_t
+kern_pbufpool_alloc_batch_buflet_nosleep(const kern_pbufpool_t pp,
+    kern_buflet_t *pbuf_array, uint32_t *size, bool attach_buffer)
+{
+	return pp_alloc_buflet_batch(pp, (uint64_t *)pbuf_array, size, SKMEM_NOSLEEP,
+	           attach_buffer ? PP_ALLOC_BFT_ATTACH_BUFFER : 0);
+}
+
+void
+kern_pbufpool_free_buflet(const kern_pbufpool_t pp, kern_buflet_t pbuf)
+{
+	return pp_free_buflet(pp, pbuf);
 }

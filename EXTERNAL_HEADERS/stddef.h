@@ -34,8 +34,6 @@
 #undef __null  // VC++ hack.
 #define NULL __null
 #endif
-#elif defined(__has_feature) && __has_feature(bounds_attributes)
-#define NULL __unsafe_forge_single(void *, 0)
 #else
 #define NULL ((void*)0)
 #endif

@@ -143,13 +143,6 @@ enum {
 #define kIOPMDarkWakeThermalEmergencyKey            "Dark Wake Thermal Emergency"
 #define kIOPMNotificationWakeExitKey                "Notification Wake Back to Sleep"
 
-/*! kIOPMPSRestrictedModeKey
- *  An IOPMPowerSource property key
- *  Its property has an integer value.
- *  - value = 1 when the device is in a low power state and not fully functional.
- *  - value = 0, or property missing altogether, when the device is
- *      not in a restricted mode power state.
-*/
 #define kIOPMPSRestrictedModeKey                    "RestrictedMode"
 
 // Private keys for kIOPMPSAdapterDetailsKey dictionary
@@ -1065,4 +1058,5 @@ enum {
   kIOPMPerformanceWarning   = 100
 };
 
-#endif /* ! _IOKIT_IOPMPRIVATE_H */
+
+#endif /* _IOKIT_IOPMPRIVATE_H */

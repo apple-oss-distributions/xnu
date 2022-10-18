@@ -53,6 +53,8 @@ extern const OSSymbol * gIONameKey;
 extern const OSSymbol * gIOLocationKey;
 extern const OSSymbol * gIORegistryEntryIDKey;
 extern const OSSymbol * gIORegistryEntryPropertyKeysKey;
+extern const OSSymbol * gIORegistryEntryAllowableSetPropertiesKey;
+extern const OSSymbol * gIORegistryEntryDefaultLockingSetPropertiesKey;
 
 class IORegistryEntry;
 class IORegistryPlane;

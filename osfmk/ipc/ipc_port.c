@@ -81,6 +81,7 @@
 #include <kern/policy_internal.h>
 #include <kern/thread.h>
 #include <kern/waitq.h>
+#include <kern/host_notify.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_object.h>
@@ -90,7 +91,6 @@
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_mqueue.h>
 #include <ipc/ipc_notify.h>
-#include <ipc/ipc_table.h>
 #include <ipc/ipc_importance.h>
 #include <machine/limits.h>
 #include <kern/turnstile.h>
@@ -108,6 +108,9 @@ extern zone_t ipc_kobject_label_zone;
 
 LCK_SPIN_DECLARE_ATTR(ipc_port_multiple_lock_data, &ipc_lck_grp, &ipc_lck_attr);
 ipc_port_timestamp_t ipc_port_timestamp_data;
+
+KALLOC_ARRAY_TYPE_DEFINE(ipc_port_request_table,
+    struct ipc_port_request, KT_DEFAULT);
 
 #if     MACH_ASSERT
 static void ipc_port_init_debug(ipc_port_t, void *fp);
@@ -149,6 +152,7 @@ ipc_port_release(ipc_port_t port)
 void
 ipc_port_reference(ipc_port_t port)
 {
+	ip_validate(port);
 	ip_reference(port);
 }
 
@@ -247,74 +251,93 @@ ipc_port_translate_receive(
  *		KERN_NO_SPACE		No index allocated.
  */
 
-#if IMPORTANCE_INHERITANCE
 kern_return_t
 ipc_port_request_alloc(
 	ipc_port_t                      port,
 	mach_port_name_t                name,
 	ipc_port_t                      soright,
-	boolean_t                       send_possible,
-	boolean_t                       immediate,
-	ipc_port_request_index_t        *indexp,
-	boolean_t                       *importantp)
-#else
-kern_return_t
-ipc_port_request_alloc(
-	ipc_port_t                      port,
-	mach_port_name_t                name,
-	ipc_port_t                      soright,
-	boolean_t                       send_possible,
-	boolean_t                       immediate,
+	ipc_port_request_opts_t         options,
 	ipc_port_request_index_t        *indexp)
-#endif /* IMPORTANCE_INHERITANCE */
 {
-	ipc_port_request_t ipr, table;
+	ipc_port_request_table_t table;
 	ipc_port_request_index_t index;
-	uintptr_t mask = 0;
-
-#if IMPORTANCE_INHERITANCE
-	*importantp = FALSE;
-#endif /* IMPORTANCE_INHERITANCE */
+	ipc_port_request_t ipr, base;
 
 	require_ip_active(port);
 	assert(name != MACH_PORT_NULL);
 	assert(soright != IP_NULL);
 
 	table = port->ip_requests;
-
-	if (table == IPR_NULL) {
+	if (table == NULL) {
 		return KERN_NO_SPACE;
 	}
 
-	index = table->ipr_next;
+	base  = ipc_port_request_table_base(table);
+	index = base->ipr_next;
 	if (index == 0) {
 		return KERN_NO_SPACE;
 	}
 
-	ipr = &table[index];
-	assert(ipr->ipr_name == MACH_PORT_NULL);
+	ipr = ipc_port_request_table_get(table, index);
+	assert(ipr->ipr_soright == IP_NULL);
 
-	table->ipr_next = ipr->ipr_next;
+	base->ipr_next = ipr->ipr_next;
 	ipr->ipr_name = name;
+	ipr->ipr_soright = IPR_SOR_MAKE(soright, options);
 
-	if (send_possible) {
-		mask |= IPR_SOR_SPREQ_MASK;
-		if (immediate) {
-			mask |= IPR_SOR_SPARM_MASK;
-			if (port->ip_sprequests == 0) {
-				port->ip_sprequests = 1;
-#if IMPORTANCE_INHERITANCE
-				/* TODO: Live importance support in send-possible */
-				if (port->ip_impdonation != 0 &&
-				    port->ip_spimportant == 0 &&
-				    (task_is_importance_donor(current_task()))) {
-					*importantp = TRUE;
-				}
-#endif /* IMPORTANCE_INHERTANCE */
-			}
-		}
+	if (options == (IPR_SOR_SPARM_MASK | IPR_SOR_SPREQ_MASK) &&
+	    port->ip_sprequests == 0) {
+		port->ip_sprequests = 1;
 	}
-	ipr->ipr_soright = IPR_SOR_MAKE(soright, mask);
+
+	*indexp = index;
+
+	return KERN_SUCCESS;
+}
+
+
+/*
+ *	Routine:	ipc_port_request_hnotify_alloc
+ *	Purpose:
+ *		Try to allocate a request slot.
+ *		If successful, returns the request index.
+ *		Otherwise returns zero.
+ *	Conditions:
+ *		The port is locked and active.
+ *	Returns:
+ *		KERN_SUCCESS		A request index was found.
+ *		KERN_NO_SPACE		No index allocated.
+ */
+
+kern_return_t
+ipc_port_request_hnotify_alloc(
+	ipc_port_t                      port,
+	struct host_notify_entry       *hnotify,
+	ipc_port_request_index_t       *indexp)
+{
+	ipc_port_request_table_t table;
+	ipc_port_request_index_t index;
+	ipc_port_request_t ipr, base;
+
+	require_ip_active(port);
+
+	table = port->ip_requests;
+	if (table == NULL) {
+		return KERN_NO_SPACE;
+	}
+
+	base  = ipc_port_request_table_base(table);
+	index = base->ipr_next;
+	if (index == 0) {
+		return KERN_NO_SPACE;
+	}
+
+	ipr = ipc_port_request_table_get(table, index);
+	assert(ipr->ipr_soright == IP_NULL);
+
+	base->ipr_next = ipr->ipr_next;
+	ipr->ipr_name = IPR_HOST_NOTIFY;
+	ipr->ipr_hnotify = hnotify;
 
 	*indexp = index;
 
@@ -339,40 +362,33 @@ ipc_port_request_alloc(
 
 kern_return_t
 ipc_port_request_grow(
-	ipc_port_t              port,
-	ipc_table_elems_t       target_size)
+	ipc_port_t              port)
 {
-	ipc_table_size_t its;
-	ipc_port_request_t otable, ntable;
+	ipc_port_request_table_t otable, ntable;
+	uint32_t osize, nsize;
+	uint32_t ocount, ncount;
+
 	require_ip_active(port);
 
 	otable = port->ip_requests;
-	if (otable == IPR_NULL) {
-		its = &ipc_table_requests[0];
+	if (otable) {
+		osize = ipc_port_request_table_size(otable);
 	} else {
-		its = otable->ipr_size + 1;
+		osize = 0;
 	}
-
-	if (target_size != ITS_SIZE_NONE) {
-		if ((otable != IPR_NULL) &&
-		    (target_size <= otable->ipr_size->its_size)) {
-			ip_mq_unlock(port);
-			return KERN_SUCCESS;
-		}
-		while ((its->its_size) && (its->its_size < target_size)) {
-			its++;
-		}
-		if (its->its_size == 0) {
-			ip_mq_unlock(port);
-			return KERN_NO_SPACE;
-		}
+	nsize = ipc_port_request_table_next_size(2, osize, 16);
+	if (nsize > CONFIG_IPC_TABLE_REQUEST_SIZE_MAX) {
+		nsize = CONFIG_IPC_TABLE_REQUEST_SIZE_MAX;
+	}
+	if (nsize == osize) {
+		return KERN_RESOURCE_SHORTAGE;
 	}
 
 	ip_reference(port);
 	ip_mq_unlock(port);
 
-	if ((its->its_size == 0) ||
-	    ((ntable = it_requests_alloc(its)) == IPR_NULL)) {
+	ntable = ipc_port_request_table_alloc_by_size(nsize, Z_WAITOK | Z_ZERO);
+	if (ntable == NULL) {
 		ip_release(port);
 		return KERN_RESOURCE_SHORTAGE;
 	}
@@ -386,54 +402,42 @@ ipc_port_request_grow(
 	 *	isn't sufficient; must check ipr_size.
 	 */
 
-	if (ip_active(port) && (port->ip_requests == otable) &&
-	    ((otable == IPR_NULL) || (otable->ipr_size + 1 == its))) {
-		ipc_table_size_t oits;
-		ipc_table_elems_t osize, nsize;
+	ocount = ipc_port_request_table_size_to_count(osize);
+	ncount = ipc_port_request_table_size_to_count(nsize);
+
+	if (ip_active(port) && port->ip_requests == otable) {
 		ipc_port_request_index_t free, i;
 
 		/* copy old table to new table */
 
-		if (otable != IPR_NULL) {
-			oits = otable->ipr_size;
-			osize = oits->its_size;
-			free = otable->ipr_next;
-
-			(void) memcpy((void *)(ntable + 1),
-			    (const void *)(otable + 1),
-			    (osize - 1) * sizeof(struct ipc_port_request));
+		if (otable != NULL) {
+			memcpy(ipc_port_request_table_base(ntable),
+			    ipc_port_request_table_base(otable),
+			    osize);
 		} else {
-			osize = 1;
-			oits = 0;
-			free = 0;
+			ocount = 1;
+			free   = 0;
 		}
-
-		nsize = its->its_size;
-		assert(nsize > osize);
 
 		/* add new elements to the new table's free list */
 
-		for (i = osize; i < nsize; i++) {
-			ipc_port_request_t ipr = &ntable[i];
-
-			ipr->ipr_name = MACH_PORT_NULL;
-			ipr->ipr_next = free;
+		for (i = ocount; i < ncount; i++) {
+			ipc_port_request_table_get_nocheck(ntable, i)->ipr_next = free;
 			free = i;
 		}
 
-		ntable->ipr_next = free;
-		ntable->ipr_size = its;
+		ipc_port_request_table_base(ntable)->ipr_next = free;
 		port->ip_requests = ntable;
 		ip_mq_unlock(port);
 		ip_release(port);
 
-		if (otable != IPR_NULL) {
-			it_requests_free(oits, otable);
+		if (otable != NULL) {
+			ipc_port_request_table_free(&otable);
 		}
 	} else {
 		ip_mq_unlock(port);
 		ip_release(port);
-		it_requests_free(its, ntable);
+		ipc_port_request_table_free(&ntable);
 	}
 
 	return KERN_SUCCESS;
@@ -459,14 +463,15 @@ ipc_port_request_sparm(
 	mach_msg_priority_t             priority)
 {
 	if (index != IE_REQ_NONE) {
-		ipc_port_request_t ipr, table;
+		ipc_port_request_table_t table;
+		ipc_port_request_t ipr;
 
 		require_ip_active(port);
 
 		table = port->ip_requests;
-		assert(table != IPR_NULL);
+		assert(table != NULL);
 
-		ipr = &table[index];
+		ipr = ipc_port_request_table_get(table, index);
 		assert(ipr->ipr_name == name);
 
 		/* Is there a valid destination? */
@@ -517,14 +522,15 @@ ipc_port_request_type(
 	__assert_only mach_port_name_t  name,
 	ipc_port_request_index_t        index)
 {
-	ipc_port_request_t ipr, table;
+	ipc_port_request_table_t table;
+	ipc_port_request_t ipr;
 	mach_port_type_t type = 0;
 
 	table = port->ip_requests;
-	assert(table != IPR_NULL);
+	assert(table != NULL);
 
 	assert(index != IE_REQ_NONE);
-	ipr = &table[index];
+	ipr = ipc_port_request_table_get(table, index);
 	assert(ipr->ipr_name == name);
 
 	if (IP_VALID(IPR_SOR_PORT(ipr->ipr_soright))) {
@@ -556,22 +562,24 @@ ipc_port_request_cancel(
 	__assert_only mach_port_name_t  name,
 	ipc_port_request_index_t        index)
 {
-	ipc_port_request_t ipr, table;
+	ipc_port_request_table_t table;
+	ipc_port_request_t base, ipr;
 	ipc_port_t request = IP_NULL;
 
 	require_ip_active(port);
 	table = port->ip_requests;
-	assert(table != IPR_NULL);
+	base  = ipc_port_request_table_base(table);
+	assert(table != NULL);
 
 	assert(index != IE_REQ_NONE);
-	ipr = &table[index];
+	ipr = ipc_port_request_table_get(table, index);
 	assert(ipr->ipr_name == name);
 	request = IPR_SOR_PORT(ipr->ipr_soright);
 
 	/* return ipr to the free list inside the table */
-	ipr->ipr_name = MACH_PORT_NULL;
-	ipr->ipr_next = table->ipr_next;
-	table->ipr_next = index;
+	ipr->ipr_next = base->ipr_next;
+	ipr->ipr_soright = IP_NULL;
+	base->ipr_next = index;
 
 	return request;
 }
@@ -668,9 +676,10 @@ ipc_port_clear_receiver(
 	port->ip_mscount = 0;
 	mqueue->imq_seqno = 0;
 	port->ip_context = port->ip_guarded = port->ip_strict_guard = 0;
+
 	/*
 	 * clear the immovable bit so the port can move back to anyone listening
-	 * for the port destroy notification
+	 * for the port destroy notification.
 	 */
 	port->ip_immovable_receive = 0;
 
@@ -717,6 +726,7 @@ ipc_port_init(
 	mach_port_name_t        name)
 {
 	int policy = SYNC_POLICY_FIFO;
+	task_t task = TASK_NULL;
 
 	/* the port has been 0 initialized when called */
 
@@ -734,7 +744,23 @@ ipc_port_init(
 	}
 	if (flags & IPC_PORT_INIT_SPECIAL_REPLY) {
 		port->ip_specialreply = true;
-		port->ip_immovable_receive = true;
+	}
+	if ((flags & IPC_PORT_INIT_REPLY) || (flags & IPC_PORT_INIT_SPECIAL_REPLY)) {
+		task = current_task_early();
+
+		/* Strict enforcement of reply port semantics are disabled for 3p - rdar://97441265. */
+		if (task && task_get_platform_binary(task)) {
+			port->ip_immovable_receive = true;
+			ip_mark_reply_port(port);
+		} else {
+			ip_mark_provisional_reply_port(port);
+		}
+	}
+	if (flags & IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS) {
+		ip_enforce_reply_port_semantics(port);
+	}
+	if (flags & IPC_PORT_INIT_PROVISIONAL_REPLY) {
+		ip_mark_provisional_reply_port(port);
 	}
 
 	port->ip_kernel_qos_override = THREAD_QOS_UNSPECIFIED;
@@ -885,29 +911,30 @@ ipc_port_spnotify(
 
 revalidate:
 	if (ip_active(port)) {
-		ipc_port_request_t requests;
+		ipc_port_request_table_t requests;
 
 		/* table may change each time port unlocked (reload) */
 		requests = port->ip_requests;
-		assert(requests != IPR_NULL);
+		assert(requests != NULL);
 
 		/*
 		 * no need to go beyond table size when first
 		 * we entered - those are future notifications.
 		 */
 		if (size == 0) {
-			size = requests->ipr_size->its_size;
+			size = ipc_port_request_table_count(requests);
 		}
 
 		/* no need to backtrack either */
 		while (++index < size) {
-			ipc_port_request_t ipr = &requests[index];
+			ipc_port_request_t ipr = ipc_port_request_table_get_nocheck(requests, index);
 			mach_port_name_t name = ipr->ipr_name;
 			ipc_port_t soright = IPR_SOR_PORT(ipr->ipr_soright);
 			boolean_t armed = IPR_SOR_SPARMED(ipr->ipr_soright);
 
 			if (MACH_PORT_VALID(name) && armed && IP_VALID(soright)) {
 				/* claim send-once right - slot still inuse */
+				assert(name != IPR_HOST_NOTIFY);
 				ipr->ipr_soright = IP_NULL;
 				ip_mq_unlock(port);
 
@@ -937,20 +964,29 @@ void
 ipc_port_dnnotify(
 	ipc_port_t      port)
 {
-	ipc_port_request_t requests = port->ip_requests;
+	ipc_port_request_table_t requests = port->ip_requests;
 
 	assert(!ip_active(port));
-	if (requests != IPR_NULL) {
-		ipc_table_size_t its = requests->ipr_size;
-		ipc_table_elems_t size = its->its_size;
-		ipc_port_request_index_t index;
-		for (index = 1; index < size; index++) {
-			ipc_port_request_t ipr = &requests[index];
-			mach_port_name_t name = ipr->ipr_name;
-			ipc_port_t soright = IPR_SOR_PORT(ipr->ipr_soright);
+	if (requests != NULL) {
+		ipc_port_request_t ipr = ipc_port_request_table_base(requests);
 
-			if (MACH_PORT_VALID(name) && IP_VALID(soright)) {
-				ipc_notify_dead_name(soright, name);
+		while ((ipr = ipc_port_request_table_next_elem(requests, ipr))) {
+			mach_port_name_t name = ipr->ipr_name;
+			ipc_port_t soright;
+
+			switch (name) {
+			case MACH_PORT_DEAD:
+			case MACH_PORT_NULL:
+				break;
+			case IPR_HOST_NOTIFY:
+				host_notify_cancel(ipr->ipr_hnotify);
+				break;
+			default:
+				soright = IPR_SOR_PORT(ipr->ipr_soright);
+				if (IP_VALID(soright)) {
+					ipc_notify_dead_name(soright, name);
+				}
+				break;
 			}
 		}
 	}
@@ -1615,7 +1651,7 @@ retry_alloc:
 	ip_mq_lock(port);
 
 	if (port_send_turnstile(port) == NULL ||
-	    port_send_turnstile(port)->ts_port_ref == 0) {
+	    port_send_turnstile(port)->ts_prim_count == 0) {
 		if (turnstile == TURNSTILE_NULL) {
 			ip_mq_unlock(port);
 			turnstile = turnstile_alloc();
@@ -1634,7 +1670,7 @@ retry_alloc:
 	}
 
 	/* Increment turnstile counter */
-	port_send_turnstile(port)->ts_port_ref++;
+	port_send_turnstile(port)->ts_prim_count++;
 	ip_mq_unlock(port);
 
 	if (send_turnstile) {
@@ -1664,8 +1700,8 @@ ipc_port_send_turnstile_complete(ipc_port_t port)
 	/* Drop turnstile count on dest port */
 	ip_mq_lock(port);
 
-	port_send_turnstile(port)->ts_port_ref--;
-	if (port_send_turnstile(port)->ts_port_ref == 0) {
+	port_send_turnstile(port)->ts_prim_count--;
+	if (port_send_turnstile(port)->ts_prim_count == 0) {
 		turnstile_complete((uintptr_t)port, port_send_turnstile_address(port),
 		    &turnstile, TURNSTILE_SYNC_IPC);
 		assert(turnstile != TURNSTILE_NULL);
@@ -2360,10 +2396,10 @@ ipc_port_get_watchport_inheritor(
  *		Returns receiver task pointer and its pid (if any) for port.
  *
  *	Conditions:
- *		Nothing locked. The routine takes port lock.
+ *		Assumes the port is locked.
  */
 pid_t
-ipc_port_get_receiver_task(ipc_port_t port, uintptr_t *task)
+ipc_port_get_receiver_task_locked(ipc_port_t port, uintptr_t *task)
 {
 	task_t receiver = TASK_NULL;
 	pid_t pid = -1;
@@ -2372,19 +2408,44 @@ ipc_port_get_receiver_task(ipc_port_t port, uintptr_t *task)
 		goto out;
 	}
 
-	ip_mq_lock(port);
 	if (ip_in_a_space(port) &&
 	    !ip_in_space(port, ipc_space_kernel) &&
 	    !ip_in_space(port, ipc_space_reply)) {
 		receiver = port->ip_receiver->is_task;
 		pid = task_pid(receiver);
 	}
-	ip_mq_unlock(port);
 
 out:
 	if (task) {
 		*task = (uintptr_t)receiver;
 	}
+	return pid;
+}
+
+/*
+ *	Routine:	ipc_port_get_receiver_task
+ *	Purpose:
+ *		Returns receiver task pointer and its pid (if any) for port.
+ *
+ *	Conditions:
+ *		Nothing locked. The routine takes port lock.
+ */
+pid_t
+ipc_port_get_receiver_task(ipc_port_t port, uintptr_t *task)
+{
+	pid_t pid = -1;
+
+	if (!port) {
+		if (task) {
+			*task = (uintptr_t)TASK_NULL;
+		}
+		return pid;
+	}
+
+	ip_mq_lock(port);
+	pid = ipc_port_get_receiver_task_locked(port, task);
+	ip_mq_unlock(port);
+
 	return pid;
 }
 
@@ -2651,18 +2712,8 @@ ipc_port_importance_delta(
 }
 #endif /* IMPORTANCE_INHERITANCE */
 
-/*
- *	Routine:	ipc_port_make_send_locked
- *	Purpose:
- *		Make a naked send right from a receive right.
- *
- *		See ipc_port_make_send for more extensive documentation.
- *
- *	Conditions:
- *		port locked and active.
- */
 ipc_port_t
-ipc_port_make_send_locked(
+ipc_port_make_send_any_locked(
 	ipc_port_t      port)
 {
 	require_ip_active(port);
@@ -2672,49 +2723,54 @@ ipc_port_make_send_locked(
 	return port;
 }
 
-/*
- *	Routine:	ipc_port_make_send
- *	Purpose:
- *		Make a naked send right from a receive right.
- *
- *		ipc_port_make_send should not be used in any generic IPC
- *		plumbing, as this is an operation that subsystem
- *		owners need to be able to synchronize against
- *		with the make-send-count and no-senders notifications.
- *
- *		It is especially important for kobject types,
- *		and in general MIG upcalls or replies from the kernel
- *		should never use MAKE_SEND dispositions, and prefer
- *		COPY_SEND or MOVE_SEND, so that subsystems can control
- *		where that send right comes from.
- */
 ipc_port_t
-ipc_port_make_send(
+ipc_port_make_send_any(
 	ipc_port_t      port)
 {
-	if (!IP_VALID(port)) {
-		return port;
+	ipc_port_t sright = port;
+
+	if (IP_VALID(port)) {
+		ip_mq_lock(port);
+		if (ip_active(port)) {
+			ipc_port_make_send_any_locked(port);
+		} else {
+			sright = IP_DEAD;
+		}
+		ip_mq_unlock(port);
 	}
 
-	ip_mq_lock(port);
-	if (ip_active(port)) {
-		ipc_port_make_send_locked(port);
-		ip_mq_unlock(port);
-		return port;
-	}
-	ip_mq_unlock(port);
-	return IP_DEAD;
+	return sright;
 }
 
-/*
- *	Routine:	ipc_port_copy_send_locked
- *	Purpose:
- *		Make a naked send right from another naked send right.
- *	Conditions:
- *		port locked.
- */
+ipc_port_t
+ipc_port_make_send_mqueue(
+	ipc_port_t      port)
+{
+	ipc_port_t sright = port;
+	ipc_kobject_type_t kotype;
+
+	if (IP_VALID(port)) {
+		kotype = ip_kotype(port);
+
+		ip_mq_lock(port);
+		if (__improbable(!ip_active(port))) {
+			sright = IP_DEAD;
+		} else if (kotype == IKOT_NONE) {
+			ipc_port_make_send_any_locked(port);
+		} else if (kotype == IKOT_TIMER) {
+			ipc_kobject_mktimer_require_locked(port);
+			ipc_port_make_send_any_locked(port);
+		} else {
+			sright = IP_NULL;
+		}
+		ip_mq_unlock(port);
+	}
+
+	return sright;
+}
+
 void
-ipc_port_copy_send_locked(
+ipc_port_copy_send_any_locked(
 	ipc_port_t      port)
 {
 	assert(port->ip_srights > 0);
@@ -2722,36 +2778,48 @@ ipc_port_copy_send_locked(
 	ip_reference(port);
 }
 
-/*
- *	Routine:	ipc_port_copy_send
- *	Purpose:
- *		Make a naked send right from another naked send right.
- *			IP_NULL		-> IP_NULL
- *			IP_DEAD		-> IP_DEAD
- *			dead port	-> IP_DEAD
- *			live port	-> port + ref
- *	Conditions:
- *		Nothing locked except possibly a space.
- */
-
 ipc_port_t
-ipc_port_copy_send(
+ipc_port_copy_send_any(
 	ipc_port_t      port)
 {
-	ipc_port_t sright;
+	ipc_port_t sright = port;
 
-	if (!IP_VALID(port)) {
-		return port;
+	if (IP_VALID(port)) {
+		ip_mq_lock(port);
+		if (ip_active(port)) {
+			ipc_port_copy_send_any_locked(port);
+		} else {
+			sright = IP_DEAD;
+		}
+		ip_mq_unlock(port);
 	}
 
-	ip_mq_lock(port);
-	if (ip_active(port)) {
-		ipc_port_copy_send_locked(port);
-		sright = port;
-	} else {
-		sright = IP_DEAD;
+	return sright;
+}
+
+ipc_port_t
+ipc_port_copy_send_mqueue(
+	ipc_port_t      port)
+{
+	ipc_port_t sright = port;
+	ipc_kobject_type_t kotype;
+
+	if (IP_VALID(port)) {
+		kotype = ip_kotype(port);
+
+		ip_mq_lock(port);
+		if (__improbable(!ip_active(port))) {
+			sright = IP_DEAD;
+		} else if (kotype == IKOT_NONE) {
+			ipc_port_copy_send_any_locked(port);
+		} else if (kotype == IKOT_TIMER) {
+			ipc_kobject_mktimer_require_locked(port);
+			ipc_port_copy_send_any_locked(port);
+		} else {
+			sright = IP_NULL;
+		}
+		ip_mq_unlock(port);
 	}
-	ip_mq_unlock(port);
 
 	return sright;
 }
@@ -2819,6 +2887,13 @@ ipc_port_copyout_send_pinned(
 	}
 }
 
+__abortlike
+static void
+__ipc_port_send_over_release_panic(ipc_port_t port)
+{
+	panic("Over-release of port %p send right!", port);
+}
+
 /*
  *	Routine:	ipc_port_release_send_and_unlock
  *	Purpose:
@@ -2835,7 +2910,7 @@ ipc_port_release_send_and_unlock(
 	ipc_notify_nsenders_t nsrequest = { };
 
 	if (port->ip_srights == 0) {
-		panic("Over-release of port %p send right!", port);
+		__ipc_port_send_over_release_panic(port);
 	}
 	port->ip_srights--;
 
@@ -2858,6 +2933,7 @@ ipc_port_release_send_and_unlock(
  *		Nothing locked.
  */
 
+__attribute__((flatten, noinline))
 void
 ipc_port_release_send(
 	ipc_port_t      port)
@@ -2912,6 +2988,13 @@ ipc_port_make_sonce(
 	return IP_DEAD;
 }
 
+__abortlike
+static void
+__ipc_port_send_once_over_release_panic(ipc_port_t port)
+{
+	panic("Over-release of port %p send-once right!", port);
+}
+
 /*
  *	Routine:	ipc_port_release_sonce
  *	Purpose:
@@ -2932,9 +3015,8 @@ ipc_port_release_sonce_and_unlock(
 	ip_mq_lock_held(port);
 
 	if (port->ip_sorights == 0) {
-		panic("Over-release of port %p send-once right!", port);
+		__ipc_port_send_once_over_release_panic(port);
 	}
-
 	port->ip_sorights--;
 
 	if (port->ip_specialreply) {
@@ -3024,7 +3106,7 @@ ipc_port_alloc_special(
 		return IP_NULL;
 	}
 
-	os_atomic_init(&port->ip_object.io_bits, io_makebits(TRUE, IOT_PORT, 0));
+	os_atomic_init(&port->ip_object.io_bits, io_makebits(IOT_PORT));
 	os_atomic_init(&port->ip_object.io_references, 1);
 
 	ipc_port_init(port, space, flags, MACH_PORT_SPECIAL_DEFAULT);
@@ -3096,9 +3178,10 @@ void
 ipc_port_finalize(
 	ipc_port_t              port)
 {
-	ipc_port_request_t requests = port->ip_requests;
+	ipc_port_request_table_t requests = port->ip_requests;
 
 	assert(port_send_turnstile(port) == TURNSTILE_NULL);
+
 	if (waitq_type(&port->ip_waitq) == WQT_PORT) {
 		assert(ipc_port_rcv_turnstile(port) == TURNSTILE_NULL);
 	}
@@ -3107,10 +3190,9 @@ ipc_port_finalize(
 		panic("Trying to free an active port. port %p", port);
 	}
 
-	if (requests != IPR_NULL) {
-		ipc_table_size_t its = requests->ipr_size;
-		it_requests_free(its, requests);
-		port->ip_requests = IPR_NULL;
+	if (requests) {
+		port->ip_requests = NULL;
+		ipc_port_request_table_free_noclear(requests);
 	}
 
 	/*
@@ -3121,8 +3203,7 @@ ipc_port_finalize(
 	if (IP_PREALLOC(port)) {
 		ipc_kmsg_t kmsg = port->ip_premsg;
 
-		if (kmsg == IKM_NULL || ikm_prealloc_inuse_port(kmsg) ||
-		    kmsg->ikm_turnstile != TURNSTILE_NULL) {
+		if (kmsg == IKM_NULL || ikm_prealloc_inuse_port(kmsg)) {
 			panic("port(%p, %p): prealloc message in an invalid state",
 			    port, kmsg);
 		}

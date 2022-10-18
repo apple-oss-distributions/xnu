@@ -32,6 +32,7 @@
 
 #include <kern/assert.h>
 #include <kern/clock.h>
+#include <kern/coalition.h>
 #include <kern/debug.h>
 #include <kern/host.h>
 #include <kern/kalloc.h>
@@ -99,6 +100,7 @@ struct telemetry_target {
 	uintptr_t                       *frames;
 	size_t                           frames_count;
 	bool                             user64_regs;
+	uint16_t                         async_start_index;
 	enum micro_snapshot_flags        microsnapshot_flags;
 	struct micro_snapshot_buffer    *buffer;
 	lck_mtx_t                       *buffer_mtx;
@@ -196,12 +198,12 @@ telemetry_init(void)
 		telemetry_buffer.size = TELEMETRY_MAX_BUFFER_SIZE;
 	}
 
-	ret = kmem_alloc(kernel_map, &telemetry_buffer.buffer, telemetry_buffer.size, VM_KERN_MEMORY_DIAG);
+	ret = kmem_alloc(kernel_map, &telemetry_buffer.buffer, telemetry_buffer.size,
+	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_DIAG);
 	if (ret != KERN_SUCCESS) {
 		kprintf("Telemetry: Allocation failed: %d\n", ret);
 		return;
 	}
-	bzero((void *) telemetry_buffer.buffer, telemetry_buffer.size);
 
 	if (!PE_parse_boot_argn("telemetry_notification_leeway",
 	    &telemetry_notification_leeway, sizeof(telemetry_notification_leeway))) {
@@ -289,7 +291,7 @@ telemetry_task_ctl_locked(task_t task, uint32_t reasons, int enable_disable)
 		if ((origflags & TF_TELEMETRY) == 0) {
 			OSIncrementAtomic(&telemetry_active_tasks);
 #if TELEMETRY_DEBUG
-			printf("%s: telemetry OFF -> ON (%d active)\n", proc_name_address(task->bsd_info), telemetry_active_tasks);
+			printf("%s: telemetry OFF -> ON (%d active)\n", proc_name_address(get_bsdtask_info(task)), telemetry_active_tasks);
 #endif
 		}
 	} else {
@@ -301,7 +303,7 @@ telemetry_task_ctl_locked(task_t task, uint32_t reasons, int enable_disable)
 			 */
 			OSDecrementAtomic(&telemetry_active_tasks);
 #if TELEMETRY_DEBUG
-			printf("%s: telemetry ON -> OFF (%d active)\n", proc_name_address(task->bsd_info), telemetry_active_tasks);
+			printf("%s: telemetry ON -> OFF (%d active)\n", proc_name_address(get_bsdtask_info(task)), telemetry_active_tasks);
 #endif
 		}
 	}
@@ -351,18 +353,18 @@ telemetry_timer_event(__unused uint64_t deadline, __unused uint64_t interval, __
 	return 0;
 }
 
-#if defined(MT_CORE_INSTRS) && defined(MT_CORE_CYCLES)
+#if MONOTONIC
 static void
 telemetry_pmi_handler(bool user_mode, __unused void *ctx)
 {
 	telemetry_mark_curthread(user_mode, TRUE);
 }
-#endif /* defined(MT_CORE_INSTRS) && defined(MT_CORE_CYCLES) */
+#endif /* MONOTONIC */
 
 int
 telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 {
-#if defined(MT_CORE_INSTRS) && defined(MT_CORE_CYCLES)
+#if MONOTONIC
 	static bool sample_all_tasks_aside = false;
 	static uint32_t active_tasks_aside = false;
 	int error = 0;
@@ -417,10 +419,10 @@ telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 out:
 	TELEMETRY_PMI_UNLOCK();
 	return error;
-#else /* defined(MT_CORE_INSTRS) && defined(MT_CORE_CYCLES) */
+#else /* MONOTONIC */
 #pragma unused(pmi_ctr, period)
 	return 1;
-#endif /* !defined(MT_CORE_INSTRS) || !defined(MT_CORE_CYCLES) */
+#endif /* !MONOTONIC */
 }
 
 /*
@@ -544,8 +546,10 @@ telemetry_take_sample(thread_t thread, enum micro_snapshot_flags flags)
 {
 	task_t                      task;
 	uintptr_t                   frames[128];
+	size_t                      frames_len = sizeof(frames) / sizeof(frames[0]);
 	uint32_t                    btcount;
 	struct backtrace_user_info  btinfo = BTUINFO_INIT;
+	uint16_t                    async_start_index = UINT16_MAX;
 
 	if (thread == THREAD_NULL) {
 		return;
@@ -560,15 +564,26 @@ telemetry_take_sample(thread_t thread, enum micro_snapshot_flags flags)
 	telemetry_instrumentation_begin(&telemetry_buffer, flags);
 
 	/* Collect backtrace from user thread. */
-	btcount = backtrace_user(
-		frames,                                 /* bt */
-		sizeof(frames) / sizeof(frames[0]),     /* btlen */
-		NULL,                                   /* ctl */
-		&btinfo                                 /* info_out */
-		);
-
+	btcount = backtrace_user(frames, frames_len, NULL, &btinfo);
 	if (btinfo.btui_error != 0) {
 		return;
+	}
+	if (btinfo.btui_async_frame_addr != 0 &&
+	    btinfo.btui_async_start_index != 0) {
+		/*
+		 * Put the async callstack inline after the frame pointer walk call
+		 * stack.
+		 */
+		async_start_index = (uint16_t)btinfo.btui_async_start_index;
+		uintptr_t frame_addr = btinfo.btui_async_frame_addr;
+		unsigned int frames_left = frames_len - async_start_index;
+		struct backtrace_control ctl = { .btc_frame_addr = frame_addr, };
+		btinfo = BTUINFO_INIT;
+		unsigned int async_filled = backtrace_user(frames + async_start_index,
+		    frames_left, &ctl, &btinfo);
+		if (btinfo.btui_error == 0) {
+			btcount = MIN(async_start_index + async_filled, frames_len);
+		}
 	}
 
 	/* Process the backtrace. */
@@ -579,7 +594,8 @@ telemetry_take_sample(thread_t thread, enum micro_snapshot_flags flags)
 		.user64_regs = (btinfo.btui_info & BTI_64_BIT) != 0,
 		.microsnapshot_flags = flags,
 		.buffer = &telemetry_buffer,
-		.buffer_mtx = &telemetry_mtx
+		.buffer_mtx = &telemetry_mtx,
+		.async_start_index = async_start_index,
 	};
 	telemetry_process_sample(&target, true, NULL);
 
@@ -595,7 +611,8 @@ telemetry_macf_take_sample(thread_t thread, enum micro_snapshot_flags flags)
 	vm_size_t                     btcapacity     = 128;
 	uintptr_t                     frames_stack[btcapacity];
 	uint32_t                      btcount        = 0;
-	uintptr_t                    *frames         = frames_stack;
+	typedef uintptr_t             telemetry_user_frame_t __kernel_data_semantics;
+	telemetry_user_frame_t        *frames        = frames_stack;
 	bool                          alloced_frames = false;
 
 	struct backtrace_user_info    btinfo         = BTUINFO_INIT;
@@ -908,8 +925,9 @@ copytobuffer:
 	tsnap->snapshot_magic = STACKSHOT_TASK_SNAPSHOT_MAGIC;
 	tsnap->pid = proc_pid(p);
 	tsnap->uniqueid = proc_uniqueid(p);
-	tsnap->user_time_in_terminated_threads = task->total_user_time;
-	tsnap->system_time_in_terminated_threads = task->total_system_time;
+	struct recount_times_mach times = recount_task_terminated_times(task);
+	tsnap->user_time_in_terminated_threads = times.rtm_user;
+	tsnap->system_time_in_terminated_threads = times.rtm_system;
 	tsnap->suspend_count = task->suspend_count;
 	tsnap->task_size = (typeof(tsnap->task_size))(get_task_phys_footprint(task) / PAGE_SIZE);
 	tsnap->faults = counter_load(&task->faults);
@@ -924,6 +942,12 @@ copytobuffer:
 	 */
 	tsnap->was_throttled = (uint32_t) proc_was_throttled(p);
 	tsnap->did_throttle = (uint32_t) proc_did_throttle(p);
+	/*
+	 * The  field is overloaded to represent the resource coalition ID of this
+	 * task.
+	 */
+	coalition_t rsrc_coal = task->coalition[COALITION_TYPE_RESOURCE];
+	tsnap->p_start_sec = rsrc_coal ? coalition_id(rsrc_coal) : 0;
 
 	if (task->t_flags & TF_TELEMETRY) {
 		tsnap->ss_flags |= kTaskRsrcFlagged;
@@ -954,7 +978,6 @@ copytobuffer:
 	if (user64_va) {
 		tsnap->ss_flags |= kUser64_p;
 	}
-
 
 	if (task->task_shared_region_slide != -1) {
 		tsnap->shared_cache_slide = task->task_shared_region_slide;
@@ -1019,21 +1042,18 @@ copytobuffer:
 	thsnap->ts_rqos = thread->requested_policy.thrp_qos;
 	thsnap->ts_rqos_override = MAX(thread->requested_policy.thrp_qos_override,
 	    thread->requested_policy.thrp_qos_workq_override);
+	memcpy(thsnap->_reserved + 1, &target->async_start_index,
+	    sizeof(target->async_start_index));
 
 	if (proc_get_effective_thread_policy(thread, TASK_POLICY_DARWIN_BG)) {
 		thsnap->ss_flags |= kThreadDarwinBG;
 	}
 
-	thsnap->user_time = timer_grab(&thread->user_timer);
-
-	uint64_t tval = timer_grab(&thread->system_timer);
-
-	if (thread->precise_user_kernel_time) {
-		thsnap->system_time = tval;
-	} else {
-		thsnap->user_time += tval;
-		thsnap->system_time = 0;
-	}
+	boolean_t interrupt_state = ml_set_interrupts_enabled(FALSE);
+	times = recount_current_thread_times();
+	ml_set_interrupts_enabled(interrupt_state);
+	thsnap->user_time = times.rtm_user;
+	thsnap->system_time = times.rtm_system;
 
 	current_buffer->current_position += sizeof(struct thread_snapshot);
 
@@ -1275,18 +1295,14 @@ telemetry_macf_init_locked(size_t buffer_size)
 
 	telemetry_macf_buffer.size = buffer_size;
 
-	kr = kmem_alloc(
-		kernel_map,
-		&telemetry_macf_buffer.buffer,
-		telemetry_macf_buffer.size,
-		VM_KERN_MEMORY_SECURITY);
+	kr = kmem_alloc(kernel_map, &telemetry_macf_buffer.buffer,
+	    telemetry_macf_buffer.size, KMA_DATA | KMA_ZERO | KMA_PERMANENT,
+	    VM_KERN_MEMORY_SECURITY);
 
 	if (kr != KERN_SUCCESS) {
 		kprintf("Telemetry (MACF): Allocation failed: %d\n", kr);
 		return ENOMEM;
 	}
-
-	bzero((void *)telemetry_macf_buffer.buffer, telemetry_macf_buffer.size);
 
 	return 0;
 }
@@ -1429,12 +1445,12 @@ bootprofile_init(void)
 		return;
 	}
 
-	ret = kmem_alloc(kernel_map, &bootprofile_buffer, bootprofile_buffer_size, VM_KERN_MEMORY_DIAG);
+	ret = kmem_alloc(kernel_map, &bootprofile_buffer, bootprofile_buffer_size,
+	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_DIAG);
 	if (ret != KERN_SUCCESS) {
 		kprintf("Boot profile: Allocation failed: %d\n", ret);
 		return;
 	}
-	bzero((void *) bootprofile_buffer, bootprofile_buffer_size);
 
 	kprintf("Boot profile: Sampling %s once per %u ms at %s\n",
 	    bootprofile_all_procs ? "all procs" : bootprofile_proc_name, bootprofile_interval_ms,
@@ -1490,8 +1506,8 @@ bootprofile_timer_call(
 		 * Nothing to do in that case.
 		 */
 
-		if ((current_task() != NULL) && (current_task()->bsd_info != NULL) &&
-		    (0 == strncmp(bootprofile_proc_name, proc_name_address(current_task()->bsd_info), 17))) {
+		if ((current_task() != NULL) && (get_bsdtask_info(current_task()) != NULL) &&
+		    (0 == strncmp(bootprofile_proc_name, proc_name_address(get_bsdtask_info(current_task())), 17))) {
 			pid_to_profile = proc_selfpid();
 		} else {
 			/*

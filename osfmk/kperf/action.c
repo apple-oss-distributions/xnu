@@ -73,6 +73,7 @@ static struct action *actionv = NULL;
 /* should emit tracepoint on context switch */
 int kperf_kdebug_cswitch = 0;
 
+int kperf_max_actions = ACTION_MAX;
 bool
 kperf_action_has_non_system(unsigned int actionid)
 {

@@ -113,6 +113,8 @@
 		C9DCEF011F01C3810000BD02 /* stackshot-sample-instrs-cycles in Resources */ = {isa = PBXBuildFile; fileRef = C9DCEF001F01C3790000BD02 /* stackshot-sample-instrs-cycles */; };
 		C9DCEF021F01C3810000BD02 /* stackshot-sample-instrs-cycles.plist.gz in Resources */ = {isa = PBXBuildFile; fileRef = C9DCEEFF1F01C3790000BD02 /* stackshot-sample-instrs-cycles.plist.gz */; };
 		C9DE39141ACB5A540020F4A3 /* kcdata_core.m in Sources */ = {isa = PBXBuildFile; fileRef = C9DE39131ACB5A540020F4A3 /* kcdata_core.m */; };
+		D668937327161F4A00166D02 /* stackshot-sample-multiple-sharedcaches.plist.gz in Resources */ = {isa = PBXBuildFile; fileRef = D668937127161F4A00166D02 /* stackshot-sample-multiple-sharedcaches.plist.gz */; };
+		D668937427161F4A00166D02 /* stackshot-sample-multiple-sharedcaches in Resources */ = {isa = PBXBuildFile; fileRef = D668937227161F4A00166D02 /* stackshot-sample-multiple-sharedcaches */; };
 		D66E8CF82683E87D009AF15F /* stackshot-sample-aot.plist.gz in Resources */ = {isa = PBXBuildFile; fileRef = D66E8CF42683E87D009AF15F /* stackshot-sample-aot.plist.gz */; };
 		D66E8CF92683E87D009AF15F /* stackshot-with-asyncinfo.plist.gz in Resources */ = {isa = PBXBuildFile; fileRef = D66E8CF52683E87D009AF15F /* stackshot-with-asyncinfo.plist.gz */; };
 		D66E8CFA2683E87D009AF15F /* stackshot-sample-aot in Resources */ = {isa = PBXBuildFile; fileRef = D66E8CF62683E87D009AF15F /* stackshot-sample-aot */; };
@@ -265,6 +267,8 @@
 		C9DCEEFF1F01C3790000BD02 /* stackshot-sample-instrs-cycles.plist.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; path = "stackshot-sample-instrs-cycles.plist.gz"; sourceTree = "<group>"; };
 		C9DCEF001F01C3790000BD02 /* stackshot-sample-instrs-cycles */ = {isa = PBXFileReference; lastKnownFileType = file; path = "stackshot-sample-instrs-cycles"; sourceTree = "<group>"; };
 		C9DE39131ACB5A540020F4A3 /* kcdata_core.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = kcdata_core.m; sourceTree = "<group>"; };
+		D668937127161F4A00166D02 /* stackshot-sample-multiple-sharedcaches.plist.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; path = "stackshot-sample-multiple-sharedcaches.plist.gz"; sourceTree = "<group>"; };
+		D668937227161F4A00166D02 /* stackshot-sample-multiple-sharedcaches */ = {isa = PBXFileReference; lastKnownFileType = file; path = "stackshot-sample-multiple-sharedcaches"; sourceTree = "<group>"; };
 		D66E8CF42683E87D009AF15F /* stackshot-sample-aot.plist.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; path = "stackshot-sample-aot.plist.gz"; sourceTree = "<group>"; };
 		D66E8CF52683E87D009AF15F /* stackshot-with-asyncinfo.plist.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; path = "stackshot-with-asyncinfo.plist.gz"; sourceTree = "<group>"; };
 		D66E8CF62683E87D009AF15F /* stackshot-sample-aot */ = {isa = PBXFileReference; lastKnownFileType = file; path = "stackshot-sample-aot"; sourceTree = "<group>"; };
@@ -319,6 +323,8 @@
 		08603F351BF69EDE007D3784 /* tests */ = {
 			isa = PBXGroup;
 			children = (
+				D668937227161F4A00166D02 /* stackshot-sample-multiple-sharedcaches */,
+				D668937127161F4A00166D02 /* stackshot-sample-multiple-sharedcaches.plist.gz */,
 				D6C81F4027161FB400453A41 /* stackshot-sample-portlabels */,
 				D6C81F4127161FB400453A41 /* stackshot-sample-portlabels.plist.gz */,
 				D66E8CF62683E87D009AF15F /* stackshot-sample-aot */,
@@ -640,6 +646,7 @@
 				F7F2F28422A159F700542597 /* stackshot-sample-turnstileinfo in Resources */,
 				13739E8620DB18B600D8D9B9 /* stackshot-with-shared-cache-layout in Resources */,
 				084422F82048BABB008A085B /* stackshot-sample-asid in Resources */,
+				D668937327161F4A00166D02 /* stackshot-sample-multiple-sharedcaches.plist.gz in Resources */,
 				084422F92048BABB008A085B /* stackshot-sample-asid.plist.gz in Resources */,
 				08F2AC0A1FA136EB00271A11 /* stackshot-sample-delta-thread-policy in Resources */,
 				18C577C61F96DB7100C67EB3 /* stackshot-sample-thread-groups-flags.plist.gz in Resources */,
@@ -697,6 +704,7 @@
 				08B4808B1BF9474A00B4AAE0 /* corpse-sample in Resources */,
 				08AD0BF01FBE370000CB41B2 /* stackshot-sample-stacktop in Resources */,
 				13D6C5D11C4DDDB8005E617C /* corpse-twr-sample.plist.gz in Resources */,
+				D668937427161F4A00166D02 /* stackshot-sample-multiple-sharedcaches in Resources */,
 				08B4808C1BF9474A00B4AAE0 /* corpse-sample.plist.gz in Resources */,
 				08B480881BF92E0500B4AAE0 /* kcdata.py in Resources */,
 				08B480831BF864D300B4AAE0 /* delta-stackshot-sample-new-arrays in Resources */,

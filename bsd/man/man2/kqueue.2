@@ -520,6 +520,10 @@ The file was unlocked by calling
 .Xr flock 2
 or
 .Xr close 2
+.It NOTE_LEASE_DOWNGRADE
+A lease break to downgrade the lease to read lease is requested on the file referenced by the descriptor.
+.It NOTE_LEASE_RELEASE
+A lease break to release the lease is requested on the file or directory referenced by the descriptor.
 .El
 .Pp
 On return,

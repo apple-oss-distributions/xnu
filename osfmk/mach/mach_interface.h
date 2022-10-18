@@ -35,7 +35,6 @@
 #include <mach/exc_server.h>
 #include <mach/host_priv.h>
 #include <mach/host_security.h>
-#include <mach/lock_set.h>
 #include <mach/mach_exc_server.h>
 #include <mach/mach_host.h>
 #include <mach/mach_port.h>
@@ -52,8 +51,6 @@
  * Raw EMMI interfaces are private to xnu
  * and subject to change.
  */
-#include <mach/memory_object_default_server.h>
-#include <mach/memory_object_control.h>
 #include <mach/upl.h>
 #endif
 

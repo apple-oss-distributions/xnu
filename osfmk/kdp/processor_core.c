@@ -29,11 +29,15 @@
 #include <kdp/kdp_core.h>
 #include <kdp/processor_core.h>
 #include <kern/assert.h>
+#if MONOTONIC
+#include <kern/monotonic.h>
+#endif // MONOTONIC
 #include <kern/zalloc.h>
 #include <libkern/kernel_mach_header.h>
 #include <libkern/OSAtomic.h>
 #include <libsa/types.h>
 #include <pexpert/pexpert.h>
+#include <vm/vm_map.h>
 
 #ifdef CONFIG_KDP_INTERACTIVE_DEBUGGING
 
@@ -54,6 +58,7 @@ typedef struct {
 } __attribute__((packed)) main_bin_spec;
 #define MAIN_BIN_SPEC_VERSION 1
 #define MAIN_BIN_SPEC_TYPE_KERNEL 1
+#define MAIN_BIN_SPEC_TYPE_USER 2
 #define MAIN_BIN_SPEC_TYPE_STANDALONE 3
 
 #define DATA_OWNER_LEGACY_BIN_SPEC "kern ver str"
@@ -65,6 +70,19 @@ typedef struct {
 	char version_string[KERN_COREDUMP_VERSIONSTRINGMAXSIZE];
 } __attribute__((packed)) legacy_bin_spec;
 #define LEGACY_BIN_SPEC_VERSION 1
+
+__enum_closed_decl(kern_coredump_type_t, uint8_t, {
+	XNU_COREDUMP,
+	USERSPACE_COREDUMP,
+	COPROCESSOR_COREDUMP,
+	NUM_COREDUMP_TYPES,
+});
+
+static uint32_t bin_spec_map[NUM_COREDUMP_TYPES] = {
+	[XNU_COREDUMP] = MAIN_BIN_SPEC_TYPE_KERNEL,
+	[USERSPACE_COREDUMP] = MAIN_BIN_SPEC_TYPE_USER,
+	[COPROCESSOR_COREDUMP] = MAIN_BIN_SPEC_TYPE_STANDALONE,
+};
 
 /*
  * The processor_core_context structure describes the current
@@ -81,7 +99,7 @@ typedef struct {
 	void *core_refcon;                           /* Reference constant associated with the coredump helper */
 	boolean_t core_should_be_skipped;            /* Indicates whether this specific core should not be dumped */
 	boolean_t core_is64bit;                      /* Bitness of CPU */
-	boolean_t core_isxnu;                        /* Indicates whether this core is the currently running xnu */
+	kern_coredump_type_t core_type;              /* Indicates type of this core*/
 	uint32_t core_mh_magic;                      /* Magic for mach header */
 	cpu_type_t core_cpu_type;                    /* CPU type for mach header */
 	cpu_subtype_t core_cpu_subtype;              /* CPU subtype for mach header */
@@ -117,7 +135,12 @@ struct kern_coredump_core {
 	cpu_type_t kcc_cpu_type;                         /* CPU type for mach header */
 	cpu_subtype_t kcc_cpu_subtype;                   /* CPU subtype for mach header */
 	kern_coredump_callback_config kcc_cb;            /* Registered processor callbacks for coredump */
-} * kern_coredump_core_list = NULL;
+};
+
+struct kern_coredump_core * kern_coredump_core_list = NULL;
+struct kern_coredump_core * kern_userspace_coredump_core_list = NULL;
+LCK_GRP_DECLARE(kern_userspace_coredump_core_list_lock_grp, "userspace coredump list");
+LCK_MTX_DECLARE(kern_userspace_coredump_core_list_lock, &kern_userspace_coredump_core_list_lock_grp);
 
 typedef kern_return_t (*legacy_sw_vers_registered_cb)(void *refcon, core_save_sw_vers_cb callback, void *context);
 
@@ -127,7 +150,7 @@ struct kern_coredump_core *kernel_helper = NULL;
 
 static struct kern_coredump_core *
 kern_register_coredump_helper_internal(int kern_coredump_config_vers, const kern_coredump_callback_config *kc_callbacks,
-    void *refcon, const char *core_description, boolean_t xnu_callback, boolean_t is64bit,
+    void *refcon, const char *core_description, kern_coredump_type_t type, boolean_t is64bit,
     uint32_t mh_magic, cpu_type_t cpu_type, cpu_subtype_t cpu_subtype)
 {
 	struct kern_coredump_core *core_helper = NULL;
@@ -189,9 +212,10 @@ kern_register_coredump_helper_internal(int kern_coredump_config_vers, const kern
 	core_helper = zalloc_permanent_type(struct kern_coredump_core);
 	core_helper->kcc_next = NULL;
 	core_helper->kcc_refcon = refcon;
-	if (xnu_callback) {
+	if (type == XNU_COREDUMP || type == USERSPACE_COREDUMP) {
 		snprintf((char *)&core_helper->kcc_corename, MACH_CORE_FILEHEADER_NAMELEN, "%s", core_description);
 	} else {
+		assert(type == COPROCESSOR_COREDUMP);
 		/* Make sure there's room for the -coproc suffix (16 - NULL char - strlen(-coproc)) */
 		snprintf((char *)&core_helper->kcc_corename, MACH_CORE_FILEHEADER_NAMELEN, "%.8s-coproc", core_description);
 	}
@@ -219,10 +243,16 @@ kern_register_coredump_helper_internal(int kern_coredump_config_vers, const kern
 		core_callbacks->kcc_coredump_save_sw_vers_detail = kc_callbacks->kcc_coredump_save_sw_vers_detail;
 	}
 
-	if (xnu_callback) {
+	if (type == XNU_COREDUMP) {
 		assert(kernel_helper == NULL);
 		kernel_helper = core_helper;
+	} else if (type == USERSPACE_COREDUMP) {
+		lck_mtx_lock(&kern_userspace_coredump_core_list_lock);
+		core_helper->kcc_next = kern_userspace_coredump_core_list;
+		kern_userspace_coredump_core_list = core_helper;
+		lck_mtx_unlock(&kern_userspace_coredump_core_list_lock);
 	} else {
+		assert(type == COPROCESSOR_COREDUMP);
 		do {
 			core_helper->kcc_next = kern_coredump_core_list;
 		} while (!OSCompareAndSwapPtr(kern_coredump_core_list, core_helper, &kern_coredump_core_list));
@@ -243,7 +273,7 @@ kern_register_coredump_helper(int kern_coredump_config_vers, const kern_coredump
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
-	if (kern_register_coredump_helper_internal(kern_coredump_config_vers, kc_callbacks, refcon, core_description, FALSE,
+	if (kern_register_coredump_helper_internal(kern_coredump_config_vers, kc_callbacks, refcon, core_description, COPROCESSOR_COREDUMP,
 	    is64bit, mh_magic, cpu_type, cpu_subtype) == NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -260,12 +290,100 @@ kern_register_xnu_coredump_helper(kern_coredump_callback_config *kc_callbacks)
 	boolean_t is64bit = FALSE;
 #endif
 
-	if (kern_register_coredump_helper_internal(KERN_COREDUMP_CONFIG_VERSION, kc_callbacks, NULL, "kernel", TRUE, is64bit,
+	if (kern_register_coredump_helper_internal(KERN_COREDUMP_CONFIG_VERSION, kc_callbacks, NULL, "kernel", XNU_COREDUMP, is64bit,
 	    _mh_execute_header.magic, _mh_execute_header.cputype, _mh_execute_header.cpusubtype) == NULL) {
 		return KERN_FAILURE;
 	}
 
 	return KERN_SUCCESS;
+}
+
+extern cpu_type_t
+process_cpu_type(void * bsd_info);
+
+extern cpu_type_t
+process_cpu_subtype(void * bsd_info);
+
+extern char     *proc_name_address(void *p);
+
+kern_return_t
+kern_register_userspace_coredump(task_t task, const char * name)
+{
+	kern_return_t result;
+	struct kern_userspace_coredump_context * context = NULL;
+	boolean_t is64bit;
+	uint32_t mh_magic;
+	uint32_t mh_cputype;
+	uint32_t mh_cpusubtype;
+	kern_coredump_callback_config userkc_callbacks;
+
+	is64bit = task_has_64Bit_addr(task);
+	mh_magic = is64bit ? MH_MAGIC_64 : MH_MAGIC;
+	mh_cputype = process_cpu_type(get_bsdtask_info(task));
+	mh_cpusubtype = process_cpu_subtype(get_bsdtask_info(task));
+
+
+	context = kalloc_type(struct kern_userspace_coredump_context, (zalloc_flags_t)(Z_WAITOK | Z_ZERO));
+	context->task = task;
+
+	userkc_callbacks.kcc_coredump_init = user_dump_init;
+	userkc_callbacks.kcc_coredump_get_summary = user_dump_save_summary;
+	userkc_callbacks.kcc_coredump_save_segment_descriptions = user_dump_save_seg_descriptions;
+	userkc_callbacks.kcc_coredump_save_thread_state = user_dump_save_thread_state;
+	userkc_callbacks.kcc_coredump_save_sw_vers_detail = user_dump_save_sw_vers_detail;
+	userkc_callbacks.kcc_coredump_save_segment_data = user_dump_save_segment_data;
+	userkc_callbacks.kcc_coredump_save_note_summary = user_dump_save_note_summary;
+	userkc_callbacks.kcc_coredump_save_note_descriptions = user_dump_save_note_descriptions;
+	userkc_callbacks.kcc_coredump_save_note_data = user_dump_save_note_data;
+
+	if (kern_register_coredump_helper_internal(KERN_COREDUMP_CONFIG_VERSION, &userkc_callbacks, context, name, USERSPACE_COREDUMP, is64bit,
+	    mh_magic, mh_cputype, mh_cpusubtype) == NULL) {
+		result = KERN_FAILURE;
+		goto finish;
+	}
+
+	result = KERN_SUCCESS;
+
+finish:
+	if (result != KERN_SUCCESS && context != NULL) {
+		kfree_type(struct kern_userspace_coredump_context, context);
+	}
+
+	return result;
+}
+
+kern_return_t
+kern_unregister_userspace_coredump(task_t task)
+{
+	struct kern_coredump_core * current_core = NULL;
+	struct kern_coredump_core * previous_core = NULL;
+
+	lck_mtx_lock(&kern_userspace_coredump_core_list_lock);
+	current_core = kern_userspace_coredump_core_list;
+	while (current_core) {
+		struct kern_userspace_coredump_context * context = (struct kern_userspace_coredump_context *)current_core->kcc_refcon;
+		assert(context != NULL);
+		if (context->task == task) {
+			/* remove current_core from the list */
+			if (previous_core == NULL) {
+				kern_userspace_coredump_core_list = current_core->kcc_next;
+			} else {
+				previous_core->kcc_next = current_core->kcc_next;
+			}
+			break;
+		}
+		previous_core = current_core;
+		current_core = current_core->kcc_next;
+	}
+	lck_mtx_unlock(&kern_userspace_coredump_core_list_lock);
+
+	if (current_core) {
+		kfree_type(struct kern_userspace_coredump_context, current_core->kcc_refcon);
+		OSAddAtomic(-1, &coredump_registered_count);
+		return KERN_SUCCESS;
+	}
+
+	return KERN_NOT_FOUND;
 }
 
 /*
@@ -405,20 +523,6 @@ coredump_save_summary(uint64_t core_segment_count, uint64_t core_byte_count,
 	return KERN_SUCCESS;
 }
 
-static void
-coredump_set_segment_name(char *seg_name, uint64_t seg_start)
-{
-	if (debug_is_in_phys_carveout(seg_start)) {
-		strlcpy(seg_name, "pcarveout", 16);
-		return;
-	}
-	if (debug_is_in_phys_carveout_metadata(seg_start)) {
-		strlcpy(seg_name, "pcarveout_md", 16);
-		return;
-	}
-	seg_name[0] = 0;
-}
-
 /*
  * Construct a segment command for the specified segment.
  */
@@ -455,7 +559,7 @@ coredump_save_segment_descriptions(uint64_t seg_start, uint64_t seg_end,
 
 		seg_command.cmd = LC_SEGMENT_64;
 		seg_command.cmdsize = sizeof(seg_command);
-		coredump_set_segment_name(&seg_command.segname[0], seg_start);
+		seg_command.segname[0] = 0;
 		seg_command.vmaddr = seg_start;
 		seg_command.vmsize = size;
 		seg_command.fileoff = core_context->core_cur_foffset;
@@ -492,7 +596,7 @@ coredump_save_segment_descriptions(uint64_t seg_start, uint64_t seg_end,
 
 		seg_command.cmd = LC_SEGMENT;
 		seg_command.cmdsize = sizeof(seg_command);
-		coredump_set_segment_name(&seg_command.segname[0], seg_start);
+		seg_command.segname[0] = 0;
 		seg_command.vmaddr = (uint32_t) seg_start;
 		seg_command.vmsize = (uint32_t) size;
 		seg_command.fileoff = (uint32_t) core_context->core_cur_foffset;
@@ -699,7 +803,7 @@ coredump_save_sw_vers(uint64_t address, uuid_t uuid, uint32_t log2_pagesize, voi
 	processor_core_context *core_context = (processor_core_context *)context;
 	int ret;
 
-	uint32_t type = core_context->core_isxnu ? MAIN_BIN_SPEC_TYPE_KERNEL : MAIN_BIN_SPEC_TYPE_STANDALONE;
+	uint32_t type = bin_spec_map[core_context->core_type];
 	main_bin_spec spec = { .version = MAIN_BIN_SPEC_VERSION,
 		               .type = type,
 		               .address = address,
@@ -716,12 +820,20 @@ coredump_save_sw_vers(uint64_t address, uuid_t uuid, uint32_t log2_pagesize, voi
 }
 
 static kern_return_t
-kern_coredump_routine(void *core_outvars, struct kern_coredump_core *current_core, uint64_t core_begin_offset, uint64_t *core_file_length, boolean_t *header_update_failed, boolean_t is_xnu)
+kern_coredump_routine(void *core_outvars, struct kern_coredump_core *current_core, uint64_t core_begin_offset, uint64_t *core_file_length, boolean_t *header_update_failed, kern_coredump_type_t type, uint64_t details_flags)
 {
+#if MONOTONIC
+	uint64_t start_cycles;
+	uint64_t end_cycles;
+#endif // MONOTONIC
 	kern_return_t ret;
 	processor_core_context context = { };
 	*core_file_length = 0;
 	*header_update_failed = FALSE;
+
+#if MONOTONIC
+	start_cycles = mt_cur_cpu_cycles();
+#endif // MONOTONIC
 
 	/* Setup the coredump context */
 	context.core_outvars = core_outvars;
@@ -731,7 +843,7 @@ kern_coredump_routine(void *core_outvars, struct kern_coredump_core *current_cor
 	context.core_mh_magic = current_core->kcc_mh_magic;
 	context.core_cpu_type = current_core->kcc_cpu_type;
 	context.core_cpu_subtype = current_core->kcc_cpu_subtype;
-	context.core_isxnu = is_xnu;
+	context.core_type = type;
 
 	kern_coredump_log(&context, "\nBeginning coredump of %s\n", current_core->kcc_corename);
 
@@ -902,9 +1014,14 @@ kern_coredump_routine(void *core_outvars, struct kern_coredump_core *current_cor
 	    current_core->kcc_corename, context.core_segment_count, context.core_segment_byte_total, context.core_thread_count,
 	    (context.core_thread_count * context.core_thread_state_size), context.core_file_length);
 
+#if MONOTONIC
+	end_cycles = mt_cur_cpu_cycles();
+	kern_coredump_log(&context, "\nCore dump took %llu cycles\n", end_cycles - start_cycles);
+#endif // MONOTONIC
+
 	if (core_begin_offset) {
 		/* If we're writing to disk (we have a begin offset), we need to update the header */
-		ret = kern_dump_record_file(context.core_outvars, current_core->kcc_corename, core_begin_offset, &context.core_file_length_compressed);
+		ret = kern_dump_record_file(context.core_outvars, current_core->kcc_corename, core_begin_offset, &context.core_file_length_compressed, details_flags);
 		if (ret != KERN_SUCCESS) {
 			*header_update_failed = TRUE;
 			kern_coredump_log(&context, "\n(kern_coredump_routine) : kern_dump_record_file failed with %d\n", ret);
@@ -919,38 +1036,25 @@ kern_coredump_routine(void *core_outvars, struct kern_coredump_core *current_cor
 	return KERN_SUCCESS;
 }
 
-kern_return_t
-kern_do_coredump(void *core_outvars, boolean_t kernel_only, uint64_t first_file_offset, uint64_t *last_file_offset)
+/*
+ * Collect coprocessor and userspace coredumps
+ */
+static kern_return_t
+kern_do_auxiliary_coredump(void * core_outvars, struct kern_coredump_core * list, uint64_t * last_file_offset, uint64_t details_flags)
 {
-	struct kern_coredump_core *current_core = NULL;
+	struct kern_coredump_core *current_core = list;
 	uint64_t prev_core_length = 0;
-	kern_return_t cur_ret = KERN_SUCCESS, ret = KERN_SUCCESS;
 	boolean_t header_update_failed = FALSE;
+	kern_coredump_type_t type = current_core == kern_userspace_coredump_core_list ? USERSPACE_COREDUMP : COPROCESSOR_COREDUMP;
+	kern_return_t ret = KERN_SUCCESS;
+	kern_return_t cur_ret = KERN_SUCCESS;
 
-	assert(last_file_offset != NULL);
-
-	*last_file_offset = first_file_offset;
-	cur_ret = kern_coredump_routine(core_outvars, kernel_helper, *last_file_offset, &prev_core_length, &header_update_failed, TRUE);
-	if (cur_ret != KERN_SUCCESS) {
-		// As long as we didn't fail while updating the header for the raw file, we should be able to try
-		// to capture other corefiles.
-		if (header_update_failed) {
-			// The header may be in an inconsistent state, so bail now
-			return KERN_FAILURE;
-		} else {
-			prev_core_length = 0;
-			ret = KERN_FAILURE;
-		}
+	if (type == USERSPACE_COREDUMP && kdp_lck_mtx_lock_spin_is_acquired(&kern_userspace_coredump_core_list_lock)) {
+		// Userspace coredump list was being modified at the time of the panic. Skip collecting userspace coredumps
+		kern_coredump_log(NULL, "Skipping userspace coredump, coredump list is locked\n");
+		return KERN_FAILURE;
 	}
 
-	*last_file_offset = roundup(((*last_file_offset) + prev_core_length), KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN);
-	prev_core_length = 0;
-
-	if (kernel_only) {
-		return ret;
-	}
-
-	current_core = kern_coredump_core_list;
 	while (current_core) {
 		/* Seek to the beginning of the next file */
 		cur_ret = kern_dump_seek_to_next_file(core_outvars, *last_file_offset);
@@ -959,7 +1063,7 @@ kern_do_coredump(void *core_outvars, boolean_t kernel_only, uint64_t first_file_
 			return KERN_FAILURE;
 		}
 
-		cur_ret = kern_coredump_routine(core_outvars, current_core, *last_file_offset, &prev_core_length, &header_update_failed, FALSE);
+		cur_ret = kern_coredump_routine(core_outvars, current_core, *last_file_offset, &prev_core_length, &header_update_failed, type, details_flags);
 		if (cur_ret != KERN_SUCCESS) {
 			// As long as we didn't fail while updating the header for the raw file, we should be able to try
 			// to capture other corefiles.
@@ -982,6 +1086,51 @@ kern_do_coredump(void *core_outvars, boolean_t kernel_only, uint64_t first_file_
 
 	return ret;
 }
+
+kern_return_t
+kern_do_coredump(void *core_outvars, boolean_t kernel_only, uint64_t first_file_offset, uint64_t *last_file_offset, uint64_t details_flags)
+{
+	uint64_t prev_core_length = 0;
+	kern_return_t cur_ret = KERN_SUCCESS, ret = KERN_SUCCESS;
+	boolean_t header_update_failed = FALSE;
+
+	assert(last_file_offset != NULL);
+
+	*last_file_offset = first_file_offset;
+	cur_ret = kern_coredump_routine(core_outvars, kernel_helper, *last_file_offset, &prev_core_length, &header_update_failed, XNU_COREDUMP, details_flags);
+	if (cur_ret != KERN_SUCCESS) {
+		// As long as we didn't fail while updating the header for the raw file, we should be able to try
+		// to capture other corefiles.
+		if (header_update_failed) {
+			// The header may be in an inconsistent state, so bail now
+			return KERN_FAILURE;
+		} else {
+			prev_core_length = 0;
+			ret = KERN_FAILURE;
+		}
+	}
+
+	*last_file_offset = roundup(((*last_file_offset) + prev_core_length), KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN);
+
+	if (kernel_only) {
+		return ret;
+	}
+
+	// Collect coprocessor coredumps first, in case userspace coredumps fail
+	ret = kern_do_auxiliary_coredump(core_outvars, kern_coredump_core_list, last_file_offset, details_flags);
+	if (ret != KERN_SUCCESS) {
+		kern_coredump_log(NULL, "Failed to dump coprocessor cores\n");
+		return ret;
+	}
+
+	ret = kern_do_auxiliary_coredump(core_outvars, kern_userspace_coredump_core_list, last_file_offset, details_flags);
+	if (ret != KERN_SUCCESS) {
+		kern_coredump_log(NULL, "Failed to dump userspace process cores\n");
+		return ret;
+	}
+
+	return KERN_SUCCESS;
+}
 #else /* CONFIG_KDP_INTERACTIVE_DEBUGGING */
 
 kern_return_t
@@ -990,6 +1139,21 @@ kern_register_coredump_helper(int kern_coredump_config_vers, const kern_coredump
     cpu_type_t cpu_type, cpu_subtype_t cpu_subtype)
 {
 #pragma unused(kern_coredump_config_vers, kc_callbacks, refcon, core_description, is64bit, mh_magic, cpu_type, cpu_subtype)
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t
+kern_register_userspace_coredump(task_t task, const char * name)
+{
+	(void)task;
+	(void)name;
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t
+kern_unregister_userspace_coredump(task_t task)
+{
+	(void)task;
 	return KERN_NOT_SUPPORTED;
 }
 #endif /* CONFIG_KDP_INTERACTIVE_DEBUGGING */
@@ -1007,7 +1171,7 @@ kern_coredump_log(void *context, const char *string, ...)
 	_doprnt(string, &coredump_log_args, consdebug_putc, 16);
 	va_end(coredump_log_args);
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	paniclog_flush();
 #endif
 }

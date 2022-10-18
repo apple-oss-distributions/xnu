@@ -796,14 +796,14 @@ utf8ToU32Code(int32_t u32char, const char** srcPtr, const char* srcLimit)
 			case 4:          /* count>=4 is always illegal: no more than 3 trail bytes in Unicode's UTF-8 */
 				break;
 			case 3:
-				trail = *src++ - 0X80;
+				trail = *src++ - (char)0X80;
 				u32char = (u32char << 6) | trail;
 				/* u32char>=0x110 would result in code point>0x10FFFF, outside Unicode */
 				if (u32char >= 0x110 || trail > 0X3F) {
 					break;
 				}
 			case 2:
-				trail = *src++ - 0X80;
+				trail = *src++ - (char)0X80;
 				u32char = (u32char << 6) | trail;
 				/*
 				 * test for a surrogate D800..DFFF:
@@ -813,7 +813,7 @@ utf8ToU32Code(int32_t u32char, const char** srcPtr, const char* srcLimit)
 					break;
 				}
 			case 1:
-				trail = *src++ - 0X80;
+				trail = *src++ - (char)0X80;
 				u32char = (u32char << 6) | trail;
 				if (trail > 0X3F) {
 					break;

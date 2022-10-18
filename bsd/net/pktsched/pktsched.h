@@ -125,6 +125,13 @@ pktsched_bit_clr(u_int32_t ix, pktsched_bitmap_t *pData)
 	*pData &= ~(1 << ix);
 }
 
+static inline void
+pktsched_bit_cpy(u_int32_t ix, pktsched_bitmap_t *pData_dst,
+    pktsched_bitmap_t *pData_src)
+{
+	*pData_dst ^= (-(*pData_src & (1 << ix)) ^ *pData_dst) & (1 << ix);
+}
+
 static inline pktsched_bitmap_t
 pktsched_ffs(pktsched_bitmap_t pData)
 {
@@ -172,7 +179,7 @@ extern void pktsched_init(void);
 extern int pktsched_setup(struct ifclassq *, u_int32_t, u_int32_t,
     classq_pkt_type_t);
 extern void pktsched_teardown(struct ifclassq *);
-extern int pktsched_getqstats(struct ifclassq *, u_int32_t,
+extern int pktsched_getqstats(struct ifclassq *, u_int32_t, u_int32_t,
     struct if_ifclassq_stats *);
 extern u_int64_t pktsched_abs_to_nsecs(u_int64_t);
 extern u_int64_t pktsched_nsecs_to_abstime(u_int64_t);

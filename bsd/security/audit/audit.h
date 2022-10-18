@@ -334,7 +334,7 @@ extern au_event_t sys_au_event[];
  */
 #define AUDIT_ARG(op, args...)  do {                                    \
 	if (AUDIT_SYSCALLS()) {                                         \
-	        struct kaudit_record *__ar = AUDIT_RECORD();            \
+	        struct kaudit_record *__single __ar = AUDIT_RECORD();   \
 	        if (AUDIT_AUDITING(__ar))                               \
 	                audit_arg_ ## op (__ar, ## args);               \
 	}                                                               \

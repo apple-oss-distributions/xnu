@@ -333,9 +333,7 @@ public:
 	static inline class MetaClass : public OSMetaClass
 	{
 public:
-		MetaClass() : OSMetaClass("OSValueObject", &OSObject::gMetaClass, sizeof(OSValueObject))
-		{
-		}
+		MetaClass();
 		virtual OSObject *
 		alloc() const APPLE_KEXT_OVERRIDE
 		{
@@ -371,6 +369,25 @@ protected:
 		return OSObject_typed_operator_delete(os_detail::GetOSValueObjectKTV(), mem, size);
 	}
 };
+
+/*!
+ * @define OSDefineValueObjectForDependentType
+ * @hidecontents
+ *
+ * @abstract
+ * Defines concrete instantiations of OSMetaClass registration,
+ * as templatized for a specific dependent type.
+ *
+ * @param typeName       The name of the type you use as an
+ *                       OSValueObject template argument.
+ *
+ * @discussion
+ * For each individual type for which you use OSValueObject to wrap,
+ * you must use this in an implementation file.
+ */
+#define OSDefineValueObjectForDependentType(typeName) \
+template <> OSValueObject<typeName>::MetaClass::MetaClass() : \
+OSMetaClass("OSValueObject<" #typeName ">", &OSObject::gMetaClass, sizeof(OSValueObject)) {}
 
 /*!
  * @function OSValueObjectWithValue

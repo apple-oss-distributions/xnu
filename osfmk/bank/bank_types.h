@@ -44,6 +44,8 @@ typedef uint32_t bank_action_t;
 #define BANK_PERSONA_ID         0x3
 #define BANK_PERSONA_ADOPT_ANY  0x4
 
+#define PROC_PERSONA_INFO_FLAG_ADOPTION_ALLOWED 0x1
+
 struct proc_persona_info {
 	uint64_t unique_pid;
 	int32_t  pid;

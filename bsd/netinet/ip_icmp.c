@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -139,39 +139,9 @@ SYSCTL_INT(_net_inet_icmp, OID_AUTO, log_redirect,
     &log_redirect, 0, "");
 
 const static int icmp_datalen = 8;
-
-#if ICMP_BANDLIM
-/* Default values in case CONFIG_ICMP_BANDLIM is not defined in the MASTER file */
-#ifndef CONFIG_ICMP_BANDLIM
-#if XNU_TARGET_OS_OSX
-#define CONFIG_ICMP_BANDLIM 250
-#else /* !XNU_TARGET_OS_OSX */
-#define CONFIG_ICMP_BANDLIM 50
-#endif /* !XNU_TARGET_OS_OSX */
-#endif /* CONFIG_ICMP_BANDLIM */
-
-/*
- * ICMP error-response bandwidth limiting sysctl.  If not enabled, sysctl
- *      variable content is -1 and read-only.
- */
-
-static int      icmplim = CONFIG_ICMP_BANDLIM;
-SYSCTL_INT(_net_inet_icmp, ICMPCTL_ICMPLIM, icmplim, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &icmplim, 0, "");
-#else /* ICMP_BANDLIM */
-static int      icmplim = -1;
-SYSCTL_INT(_net_inet_icmp, ICMPCTL_ICMPLIM, icmplim, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &icmplim, 0, "");
-#endif /* ICMP_BANDLIM */
-
-static int      icmplim_random_incr = CONFIG_ICMP_BANDLIM;
-SYSCTL_INT(_net_inet_icmp, ICMPCTL_ICMPLIM_INCR, icmplim_random_incr, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &icmplim_random_incr, 0, "");
-
 /*
  * ICMP broadcast echo sysctl
  */
-
 static int      icmpbmcastecho = 1;
 SYSCTL_INT(_net_inet_icmp, OID_AUTO, bmcastecho, CTLFLAG_RW | CTLFLAG_LOCKED,
     &icmpbmcastecho, 0, "");
@@ -184,6 +154,25 @@ SYSCTL_INT(_net_inet_icmp, OID_AUTO, verbose, CTLFLAG_RW | CTLFLAG_LOCKED,
 
 static void     icmp_reflect(struct mbuf *);
 static void     icmp_send(struct mbuf *, struct mbuf *);
+
+/*
+ * Generate packet gencount for ICMP for a given error type
+ * and code.
+ * We do it this way to ensure we only dedup the packets that belong
+ * to the same type, which is usually what port scanning and other such
+ * attack vectors depend on.
+ */
+static uint32_t
+icmp_error_packet_gencount(int type, int code)
+{
+	return (PF_INET << 24) | (type << 16) | (code << 8);
+}
+
+static int      suppress_icmp_port_unreach = 0;
+SYSCTL_INT(_net_inet_icmp, OID_AUTO, suppress_icmp_port_unreach,
+    CTLFLAG_RW | CTLFLAG_LOCKED,
+    &suppress_icmp_port_unreach, 0,
+    "Suppress ICMP destination unreachable type with code port unreachable");
 
 /*
  * Generate an error packet of type error
@@ -214,6 +203,11 @@ icmp_error(
 
 	if (type != ICMP_REDIRECT) {
 		icmpstat.icps_error++;
+	}
+
+	if (suppress_icmp_port_unreach &&
+	    type == ICMP_UNREACH && code == ICMP_UNREACH_PORT) {
+		goto freeit;
 	}
 	/*
 	 * Don't send error:
@@ -406,6 +400,22 @@ stdreply:       icmpelen = max(ICMP_MINLEN, min(icmp_datalen,
 	m->m_len += sizeof(struct ip);
 	m->m_pkthdr.len = m->m_len;
 	m->m_pkthdr.rcvif = n->m_pkthdr.rcvif;
+	/*
+	 * To avoid some flavors of port scanning and other attacks,
+	 * use packet suppression without using any other sort of
+	 * rate limiting with static bounds.
+	 * XXX Not setting PKTF_FLOW_ID here because we were concerned
+	 * about it triggering regression elsewhere outside of network stack
+	 * where there might be an assumption around flow ID being non-zero.
+	 * It should be noted though that previously if PKTF_FLOW_ID was not
+	 * set, PF would have generated flow hash irrespective of ICMPv4/v6
+	 * type. That doesn't happen now and PF only computes hash for ICMP
+	 * types that need state creation (which is not true of error types).
+	 * It would have been a problem because we really want all the ICMP
+	 * error type packets to share the same flow ID for global suppression.
+	 */
+	m->m_pkthdr.comp_gencnt = icmp_error_packet_gencount(type, code);
+
 	nip = mtod(m, struct ip *);
 	bcopy((caddr_t)oip, (caddr_t)nip, sizeof(struct ip));
 	nip->ip_len = (uint16_t)m->m_len;
@@ -654,11 +664,6 @@ badcode:
 		}
 
 		icp->icmp_type = ICMP_ECHOREPLY;
-#if ICMP_BANDLIM
-		if (badport_bandlim(BANDLIM_ICMP_ECHO)) {
-			goto freeit;
-		} else
-#endif
 		goto reflect;
 
 	case ICMP_TSTAMP:
@@ -678,11 +683,6 @@ badcode:
 		icp->icmp_type = ICMP_TSTAMPREPLY;
 		icp->icmp_rtime = iptime();
 		icp->icmp_ttime = icp->icmp_rtime;      /* bogus, do later! */
-#if ICMP_BANDLIM
-		if (badport_bandlim(BANDLIM_ICMP_TSTAMP)) {
-			goto freeit;
-		} else
-#endif
 		goto reflect;
 
 	case ICMP_MASKREQ:
@@ -1077,93 +1077,6 @@ ip_next_mtu(int mtu, int dir)
 		}
 	}
 }
-#endif
-
-#if ICMP_BANDLIM
-
-/*
- * badport_bandlim() - check for ICMP bandwidth limit
- *	Returns false when it is ok to send ICMP error and true to limit sending
- *	of ICMP error.
- *
- *	For now we separate the TCP and UDP subsystems w/ different 'which'
- *	values.  We may eventually remove this separation (and simplify the
- *	code further).
- *
- *	Note that the printing of the error message is delayed so we can
- *	properly print the icmp error rate that the system was trying to do
- *	(i.e. 22000/100 pps, etc...).  This can cause long delays in printing
- *	the 'final' error, but it doesn't make sense to solve the printing
- *	delay with more complex code.
- */
-
-boolean_t
-badport_bandlim(int which)
-{
-	static uint64_t lticks[BANDLIM_MAX + 1];
-	static int lpackets[BANDLIM_MAX + 1];
-	uint64_t time;
-	uint64_t secs;
-	static boolean_t is_initialized = FALSE;
-	static int icmplim_random;
-	const char *bandlimittype[] = {
-		"Limiting icmp unreach response",
-		"Limiting icmp ping response",
-		"Limiting icmp tstamp response",
-		"Limiting closed port RST response",
-		"Limiting open port RST response"
-	};
-
-	/* Return ok status if feature disabled or argument out of range. */
-
-	if (icmplim <= 0 || which > BANDLIM_MAX || which < 0) {
-		return false;
-	}
-
-	if (is_initialized == FALSE) {
-		if (icmplim_random_incr > 0 &&
-		    icmplim <= INT32_MAX - (icmplim_random_incr + 1)) {
-			icmplim_random = icmplim + (random() % icmplim_random_incr) + 1;
-		}
-		is_initialized = TRUE;
-	}
-
-	time = net_uptime();
-	secs = time - lticks[which];
-
-	/*
-	 * reset stats when cumulative delta exceeds one second.
-	 */
-
-	if (secs > 1) {
-		if (lpackets[which] > icmplim_random) {
-			printf("%s from %d to %d packets per second\n",
-			    bandlimittype[which],
-			    lpackets[which],
-			    icmplim_random
-			    );
-		}
-		lticks[which] = time;
-		lpackets[which] = 0;
-	}
-
-	/*
-	 * bump packet count
-	 */
-	if (++lpackets[which] > icmplim_random) {
-		/*
-		 * After hitting the randomized limit, we further randomize the
-		 * behavior of how we apply rate limitation.
-		 * We rate limit based on probability that increases with the
-		 * increase in lpackets[which] count.
-		 */
-		if ((random() % (lpackets[which] - icmplim_random)) != 0) {
-			return true;
-		}
-	}
-	return false;
-}
-
 #endif
 
 #if __APPLE__

@@ -59,15 +59,14 @@ __enum_decl(startup_subsystem_id_t, uint32_t, {
 
 	STARTUP_SUB_TUNABLES,         /**< support for the tunables subsystem  */
 	STARTUP_SUB_TIMEOUTS,         /**< configurable machine timeouts       */
-	STARTUP_SUB_LOCKS_EARLY,      /**< early locking, before zalloc        */
+	STARTUP_SUB_LOCKS,            /**< various subsystem locks             */
 	STARTUP_SUB_KPRINTF,          /**< kprintf initialization              */
 
 	STARTUP_SUB_PMAP_STEAL,       /**< to perform various pmap carveouts   */
-	STARTUP_SUB_VM_KERNEL,        /**< once the kernel VM is ready         */
 	STARTUP_SUB_KMEM,             /**< once kmem_alloc is ready            */
 	STARTUP_SUB_ZALLOC,           /**< initialize zalloc and kalloc        */
+	STARTUP_SUB_KTRACE,           /**< initialize kernel trace             */
 	STARTUP_SUB_PERCPU,           /**< initialize the percpu subsystem     */
-	STARTUP_SUB_LOCKS,            /**< various subsystem locks             */
 
 	STARTUP_SUB_CODESIGNING,      /**< codesigning subsystem               */
 	STARTUP_SUB_OSLOG,            /**< oslog and kernel loggging           */
@@ -420,13 +419,8 @@ __options_decl(tunable_dt_flags_t, uint32_t, {
  * relaxed ordering means that code that runs concurrently with
  * initialization only risks to see a disabled timeout during early
  * boot.
- *
- * On 64bit devices, _Atomic with relaxed should have no effect.  On
- * 32bit devices, _Atomic uint64_t will incur synchronization, so it
- * might be better to use machine_timeout32_t instead.
  */
 typedef _Atomic uint64_t machine_timeout_t;
-typedef _Atomic uint32_t machine_timeout32_t;
 
 /*
  * Units
@@ -458,7 +452,6 @@ struct machine_timeout_spec {
 	void *ptr;
 	uint64_t default_value;
 	uint64_t unit_scale;
-	bool is32;
 	char name[MACHINE_TIMEOUT_MAX_NAME_LEN + 1];
 	bool (*skip_predicate)(struct machine_timeout_spec const *);
 };
@@ -510,13 +503,12 @@ machine_timeout_bsd_init(void);
  *     bool skip_predicate (struct machine_timeout_spec const *)
  */
 
-#define _MACHINE_TIMEOUT(var, timeout_name, timeout_default, var_unit, var_is32, skip_pred) \
+#define _MACHINE_TIMEOUT(var, timeout_name, timeout_default, var_unit, skip_pred) \
 	struct machine_timeout_spec \
 	__machine_timeout_spec_ ## var = { \
 	        .ptr = &var, \
 	        .default_value = timeout_default, \
 	        .unit_scale = var_unit, \
-	        .is32 = var_is32, \
 	        .name = timeout_name, \
 	        .skip_predicate = skip_pred, \
 	}; \
@@ -525,34 +517,27 @@ machine_timeout_bsd_init(void);
 
 #define MACHINE_TIMEOUT(var, name, default, unit, skip_predicate)       \
 	SECURITY_READ_ONLY_LATE(machine_timeout_t) var = 0;                                     \
-	_MACHINE_TIMEOUT(var, name, default, unit, false, skip_predicate)
-
-#define MACHINE_TIMEOUT32(var, name, default, unit, skip_predicate)     \
-	SECURITY_READ_ONLY_LATE(machine_timeout32_t) var = 0;                           \
-	_MACHINE_TIMEOUT(var, name, default, unit, true, skip_predicate)
+	_MACHINE_TIMEOUT(var, name, default, unit, skip_predicate)
 
 #define MACHINE_TIMEOUT_WRITEABLE(var, name, default, unit, skip_predicate)       \
 	machine_timeout_t var = 0; \
-	_MACHINE_TIMEOUT(var, name, default, unit, false, skip_predicate)
-
-#define MACHINE_TIMEOUT32_WRITEABLE(var, name, default, unit, skip_predicate)     \
-	machine_timeout32_t var = 0; \
-	_MACHINE_TIMEOUT(var, name, default, unit, true, skip_predicate)
+	_MACHINE_TIMEOUT(var, name, default, unit, skip_predicate)
 
 /*!
  * @macro MACHINE_TIMEOUT_SPEC_REF
  *
  * @abstract
- * References a previously defined MACHINE_TIMEOUT or
- * MACHINE_TIMEOUT32.  This is primarily useful for overriding
- * individual timeouts at arbitrary times (even after boot), by
- * manually calling machine_timeout_init_with_suffix() with this macro
+ * References a previously defined MACHINE_TIMEOUT.
+ *
+ * This is primarily useful for overriding individual timeouts
+ * at arbitrary times (even after boot), by manually calling
+ * machine_timeout_init_with_suffix() with this macro
  * as first argument, and a suffix to apply to both device tree and
  * boot-arg as second argument.
  *
  * @param var
  * The name of the C variable used for storage, as it was specified
- * in MACHINE_TIMEOUT or MACHINE_TIMEOUT32.
+ * in MACHINE_TIMEOUT.
  */
 #define MACHINE_TIMEOUT_SPEC_REF(var) (&__machine_timeout_spec_ ## var)
 
@@ -565,7 +550,7 @@ machine_timeout_bsd_init(void);
  *
  * @param var
  * The name of the C variable used for storage, as it was specified
- * in MACHINE_TIMEOUT or MACHINE_TIMEOUT32.
+ * in MACHINE_TIMEOUT.
  */
 #define MACHINE_TIMEOUT_SPEC_DECL(var) extern struct machine_timeout_spec __machine_timeout_spec_ ## var
 

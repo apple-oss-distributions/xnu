@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -49,7 +49,8 @@
 #define FSE_UNMOUNT_PENDING     13 // iOS-only: client must respond via FSEVENTS_UNMOUNT_PENDING_ACK
 #define FSE_CLONE               14
 
-#define FSE_MAX_EVENTS          15
+#define FSE_ACCESS_GRANTED      15
+#define FSE_MAX_EVENTS          16
 #ifdef BSD_KERNEL_PRIVATE
 #define FSE_CONTENT_MODIFIED_NO_HLINK  997
 #endif /* BSD_KERNEL_PRIVATE */
@@ -79,9 +80,17 @@
 #define FSE_REPORT    1
 #define FSE_ASK       2    // Not implemented yet
 
+// The default disposition is to not report FSE_ACCESS_GRANTED
+// events.  (They are not useful to the vast majority of
+// /dev/fsevents clients.)
+#define FSE_REPORT_DEFAULT(e) \
+    ((e) == FSE_ACCESS_GRANTED ? FSE_IGNORE : FSE_REPORT)
+
 // The types of each of the arguments for an event
 // Each type is followed by the size and then the
 // data.  FSE_ARG_VNODE is just a path string
+// FSE_ARG_AUDIT_TOKEN is only delivered on FSE_ACCESS_GRANTED
+// events.
 #define FSE_ARG_VNODE    0x0001   // next arg is a vnode pointer
 #define FSE_ARG_STRING   0x0002   // next arg is length followed by string ptr
 #define FSE_ARG_PATH     0x0003   // next arg is a full path
@@ -94,9 +103,10 @@
 #define FSE_ARG_MODE     0x000a   // next arg is the file's mode (as an int32, file type only)
 #define FSE_ARG_GID      0x000b   // next arg is the file's gid (gid_t)
 #define FSE_ARG_FINFO    0x000c   // next arg is a packed finfo (dev, ino, mode, uid, gid)
+#define FSE_ARG_AUDIT_TOKEN 0x000d // next arg is an audit_token_t ptr
 #define FSE_ARG_DONE     0xb33f   // no more arguments
 
-#define FSE_MAX_ARGS     12
+#define FSE_MAX_ARGS     13
 
 //
 // These are special bits that be set in the 32-bit mode
@@ -163,6 +173,7 @@ void  release_pathbuff(char *path);
 
 int  need_fsevent(int type, vnode_t vp);
 int  add_fsevent(int type, vfs_context_t, ...);
+int  test_fse_access_granted(vnode_t vp, unsigned long type, vfs_context_t);
 
 #endif /* KERNEL_PRIVATE */
 

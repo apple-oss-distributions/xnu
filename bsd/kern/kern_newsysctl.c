@@ -96,6 +96,10 @@
 
 #include <libkern/coreanalytics/coreanalytics.h>
 
+#if DEBUG || DEVELOPMENT
+#include <os/system_event_log.h>
+#endif /* DEBUG || DEVELOPMENT */
+
 static LCK_GRP_DECLARE(sysctl_lock_group, "sysctl");
 static LCK_RW_DECLARE(sysctl_geometry_lock, &sysctl_lock_group);
 static LCK_MTX_DECLARE(sysctl_unlocked_node_lock, &sysctl_lock_group);
@@ -2206,6 +2210,22 @@ sysctl_vm_analytics_tick SYSCTL_HANDLER_ARGS
 
 SYSCTL_PROC(_vm, OID_AUTO, analytics_report, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0, &sysctl_vm_analytics_tick, "I", "");
 
+/* Manual trigger of record_system_event for testing on dev/debug kernel */
+static int
+sysctl_test_record_system_event SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error, val = 0;
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error || !req->newptr) {
+		return error;
+	}
+	record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_TEST, "sysctl test", "this is a test %s", "message");
+	return 0;
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, test_record_system_event, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0, &sysctl_test_record_system_event, "-", "");
+
 #endif /* DEBUG || DEVELOPMENT */
 
 
@@ -2241,3 +2261,115 @@ sysctl_test_ca_event SYSCTL_HANDLER_ARGS
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, test_ca_event, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0, &sysctl_test_ca_event, "I", "");
+
+
+#if DEVELOPMENT || DEBUG
+#if CONFIG_DEFERRED_RECLAIM
+/*
+ * VM reclaim testing
+ */
+extern bool vm_deferred_reclamation_block_until_pid_has_been_reclaimed(pid_t pid);
+
+static int
+sysctl_vm_reclaim_drain_async_queue SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error = EINVAL, pid = 0;
+	/*
+	 * Only send on write
+	 */
+	error = sysctl_handle_int(oidp, &pid, 0, req);
+	if (error || !req->newptr) {
+		return error;
+	}
+
+	bool success = vm_deferred_reclamation_block_until_pid_has_been_reclaimed(pid);
+	if (success) {
+		error = 0;
+	}
+
+	return error;
+}
+
+SYSCTL_PROC(_vm, OID_AUTO, reclaim_drain_async_queue,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0,
+    &sysctl_vm_reclaim_drain_async_queue, "I", "");
+
+extern uint64_t vm_reclaim_max_threshold;
+SYSCTL_QUAD(_vm, OID_AUTO, reclaim_max_threshold, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_reclaim_max_threshold, "");
+#endif /* CONFIG_DEFERRED_RECLAIM */
+
+kern_return_t
+run_compressor_perf_test(
+	user_addr_t buf,
+	size_t buffer_size,
+	uint64_t *time,
+	uint64_t *bytes_compressed,
+	uint64_t *compressor_growth);
+
+struct perf_compressor_data {
+	user_addr_t buffer;
+	size_t buffer_size;
+	uint64_t benchmark_time;
+	uint64_t bytes_processed;
+	uint64_t compressor_growth;
+};
+
+static int
+sysctl_perf_compressor SYSCTL_HANDLER_ARGS
+{
+	int error = EINVAL;
+	size_t len = sizeof(struct perf_compressor_data);
+	struct perf_compressor_data benchmark_data = {0};
+
+	if (req->oldptr == USER_ADDR_NULL || req->oldlen != len ||
+	    req->newptr == USER_ADDR_NULL || req->newlen != len) {
+		return EINVAL;
+	}
+
+	error = SYSCTL_IN(req, &benchmark_data, len);
+	if (error) {
+		return error;
+	}
+
+	kern_return_t ret = run_compressor_perf_test(benchmark_data.buffer, benchmark_data.buffer_size,
+	    &benchmark_data.benchmark_time, &benchmark_data.bytes_processed, &benchmark_data.compressor_growth);
+	switch (ret) {
+	case KERN_SUCCESS:
+		error = 0;
+		break;
+	case KERN_NOT_SUPPORTED:
+		error = ENOTSUP;
+		break;
+	case KERN_INVALID_ARGUMENT:
+		error = EINVAL;
+		break;
+	case KERN_RESOURCE_SHORTAGE:
+		error = EAGAIN;
+		break;
+	default:
+		error = ret;
+		break;
+	}
+	if (error != 0) {
+		return error;
+	}
+
+	return SYSCTL_OUT(req, &benchmark_data, len);
+}
+
+/*
+ * Compressor & swap performance test
+ */
+SYSCTL_PROC(_kern, OID_AUTO, perf_compressor, CTLFLAG_WR | CTLFLAG_MASKED | CTLTYPE_STRUCT,
+    0, 0, sysctl_perf_compressor, "S", "Compressor & swap benchmark");
+#endif /* DEVELOPMENT || DEBUG */
+
+#if CONFIG_JETSAM
+extern uint32_t swapout_sleep_threshold;
+#if DEVELOPMENT || DEBUG
+SYSCTL_UINT(_vm, OID_AUTO, swapout_sleep_threshold, CTLFLAG_RW | CTLFLAG_LOCKED, &swapout_sleep_threshold, 0, "");
+#else /* DEVELOPMENT || DEBUG */
+SYSCTL_UINT(_vm, OID_AUTO, swapout_sleep_threshold, CTLFLAG_RD | CTLFLAG_LOCKED, &swapout_sleep_threshold, 0, "");
+#endif /* DEVELOPMENT || DEBUG */
+#endif /* CONFIG_JETSAM */

@@ -92,14 +92,6 @@ mac_task_check_expose_task(struct task *task, mach_task_flavor_t flavor)
 	struct ucred *cred = kauth_cred_get();
 	proc_rele(p);
 
-	/* Also call the old hook for compatability, deprecating in rdar://66356944. */
-	if (flavor == TASK_FLAVOR_CONTROL) {
-		MAC_CHECK(proc_check_expose_task, cred, &pident);
-		if (error) {
-			return error;
-		}
-	}
-
 	MAC_CHECK(proc_check_expose_task_with_flavor, cred, &pident, flavor);
 
 	return error;

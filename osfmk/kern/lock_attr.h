@@ -38,7 +38,7 @@ typedef struct _lck_attr_ {
 	unsigned int    lck_attr_val;
 } lck_attr_t;
 
-extern lck_attr_t      LockDefaultLckAttr;
+extern lck_attr_t       lck_attr_default;
 
 #define LCK_ATTR_NONE                   0
 #define LCK_ATTR_DEBUG                  0x00000001

@@ -136,8 +136,7 @@ enum vtagtype   {
 #define ALLOCATECONTIG  0x00000002      /* allocate contigious space */
 #define ALLOCATEALL             0x00000004      /* allocate all requested space */
 /* or no space at all */
-#define FREEREMAINDER   0x00000008      /* deallocate allocated but */
-/* unfilled blocks */
+#define ALLOCATEPERSIST         0x00000008      /* do not deallocate allocated but unfilled blocks at close(2) */
 #define ALLOCATEFROMPEOF        0x00000010      /* allocate from the physical eof */
 #define ALLOCATEFROMVOL         0x00000020      /* allocate from the volume offset */
 
@@ -772,6 +771,7 @@ struct vnode_attr {
  */
 #define VA_DP_RAWENCRYPTED   0x0001
 #define VA_DP_RAWUNENCRYPTED 0x0002
+#define VA_DP_AUTHENTICATE   0x0004
 
 #endif
 
@@ -895,6 +895,44 @@ __BEGIN_DECLS
 errno_t vnode_create(uint32_t flavor, uint32_t size, void  *data, vnode_t *vpp);
 
 #ifdef KERNEL_PRIVATE
+
+__options_decl(vnode_create_options_t, uint32_t, {
+	VNODE_CREATE_DEFAULT = 0,
+	VNODE_CREATE_EMPTY   = 1,
+	VNODE_CREATE_NODEALLOC  = 2
+});
+
+#define VNODE_CREATE_DEFAULT VNODE_CREATE_DEFAULT
+
+/*!
+ *  @function vnode_create_ext
+ *  @abstract Create and initialize a vnode.
+ *  @discussion Returns wth an iocount held on the vnode which must eventually be dropped with vnode_put().
+ *  @param flavor Should be VNCREATE_FLAVOR.
+ *  @param size  Size of the struct vnode_fsparam in "data".
+ *  @param data  Pointer to a struct vnode_fsparam containing initialization information.
+ *  @param vpp  Pointer to a vnode pointer, to be filled in with newly created vnode.
+ *  @param vc_options  options for vnode creation, by default a vnode that can be deallocated is created,
+ *  use VNODE_CREATE_NODEALLOC to override the default behavior.
+ *  @return 0 for success, error code otherwise.
+ */
+errno_t vnode_create_ext(uint32_t flavor, uint32_t size, void  *data, vnode_t *vpp, vnode_create_options_t vc_options);
+
+/*
+ * vnode create options (vc_options)
+ *
+ * VNODE_CREATE_EMPTY:
+ * An "empty" vnode( i.e. a vnode not initialized with filesystem information) is returned
+ * This results in the flavor, size and data arguments to vnode_create_ext getting ignored.
+ *
+ * VNODE_CREATE_NODEALLOC:
+ * The filesystem does not support vnodes that can be deallocated. By default, vnodes
+ * that are created by using vnode_create_ext can be deallocated and the calling filesytem
+ * uses vnode_hold and vnode_drop approrpiately. This flag should be be used to override
+ * the default behavior.
+ *
+ */
+
 /*!
  *  @function vnode_create_empty
  *  @abstract Create an empty, uninitialized vnode.
@@ -1508,6 +1546,17 @@ int     vfs_context_is64bit(vfs_context_t ctx);
  */
 vfs_context_t vfs_context_create(vfs_context_t ctx);
 
+#ifdef KERNEL_PRIVATE
+/*!
+ *  @function vfs_context_create_with_proc
+ *  @abstract Create a new vfs_context_t with appropriate references held, using the specified proc as a template.
+ *  discussion The context must be released with vfs_context_rele() when no longer in use.
+ *  @param proc Process to use as a template for the new context.
+ *  @return The new context, or NULL in the event of failure.
+ */
+vfs_context_t vfs_context_create_with_proc(proc_t proc);
+#endif /* KERNEL_PRIVATE */
+
 /*!
  *  @function vfs_context_rele
  *  @abstract Release references on components of a context and deallocate it.
@@ -1686,6 +1735,31 @@ void    vnode_rele(vnode_t vp);
 int     vnode_isinuse(vnode_t vp, int refcnt);
 
 /*!
+ *  @function vnode_hold
+ *  @abstract Increase the holdcount on a vnode.
+ *  @discussion the resulting hold must be dropped with vnode_drop().
+ *  This function always succeeds and does not block but it can only be used in a context which already has a iocount or a usecount
+ *  or under a synchronization primitive which can block the reclaim (for example a filesystem hash table lock which is also taken in the
+ *  VNOP_RECLAIM implementation for that filesystem.)
+ *  A holdcount only prevents the vnode from being freed and provides no other guarantees. It allows safe access to vnode pointer
+ *  when the vnode access is no longer protected by an iocount, usecount or other sysnchronization primitive.
+ *  @param vp The vnode whose holdcount has to be incremented.
+ *
+ */
+void     vnode_hold(vnode_t vp);
+
+/*!
+ *  @function vnode_drop
+ *  @abstract decrease the holdcount on vnode.
+ *  @discussion If the holdcount goes to zero and the vnode has been reclaimed, the vnode may also be freed.
+ *  Any access to the vnode after calling vnode_drop is unsafe unless it is a under a iocount or a usecount which has
+ *  been acquired prior to calling vnode_drop.
+ *  @param vp The vnode whose holdcount has to be decremented.
+ *  @return vnode passed and NULLVP if the vnode was freed.
+ */
+vnode_t  vnode_drop(vnode_t vp);
+
+/*!
  *  @function vnode_recycle
  *  @abstract Cause a vnode to be reclaimed and prepared for reuse.
  *  @discussion Like all vnode KPIs, must be called with an iocount on the target vnode.
@@ -1824,7 +1898,8 @@ int     vn_getpath_fsenter_with_parent(struct vnode *dvp, struct vnode *vp, char
  *  @param flags flags for controlling behavior.
  *  @return 0 for success or an error.
  */
-int     vn_getpath_ext(struct vnode *vp, struct vnode *dvp, char *pathbuf, int *len, int flags);
+#define VN_GETPATH_NEW 0x0
+int     vn_getpath_ext(struct vnode *vp, struct vnode *dvp, char *pathbuf, size_t *len, int flags);
 
 /*!
  *  @function vn_getpath_ext_with_mntlen
@@ -1849,6 +1924,7 @@ int     vn_getpath_ext_with_mntlen(struct vnode *vp, struct vnode *dvp, char *pa
 #define VN_GETPATH_NO_FIRMLINK          0x0002
 #define VN_GETPATH_VOLUME_RELATIVE      0x0004 /* also implies VN_GETPATH_NO_FIRMLINK */
 #define VN_GETPATH_NO_PROCROOT          0x0008 /* Give the non chrooted path for a process */
+#define VN_GETPATH_CHECK_MOVED          0x0010 /* Return EAGAIN if the parent hierarchy is modified */
 
 #endif /* KERNEL_PRIVATE */
 
@@ -2353,6 +2429,14 @@ vnode_t vnode_parent(vnode_t vp);
  */
 thread_t vfs_context_thread(vfs_context_t ctx);
 
+/*
+ * @function vfs_context_task
+ * @abstract Return the Mach task associated with a vfs_context_t.
+ * @param ctx The context to use.
+ * @return The task for this context, or NULL, if there is not one.
+ */
+task_t vfs_context_task(vfs_context_t ctx);
+
 #endif /* KERNEL_PRIVATE */
 
 #ifdef BSD_KERNEL_PRIVATE
@@ -2504,19 +2588,22 @@ void vnode_iocs_record_and_free(vnode_t);
 #define BUILDPATH_NO_FIRMLINK     0x10 /* Return non-firmlinked path */
 #define BUILDPATH_NO_PROCROOT     0x20 /* Return path relative to system root, not the process root */
 
-int     build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs_context_t ctx);
-
 int vnode_issubdir(vnode_t vp, vnode_t dvp, int *is_subdir, vfs_context_t ctx);
 
 struct vniodesc;
 typedef struct vniodesc *vniodesc_t;
 
+#define VNIO_SUPPORT_PRESENT
 errno_t vnio_openfd(int fd, vniodesc_t *vniop);
 errno_t vnio_close(vniodesc_t);
 errno_t vnio_read(vniodesc_t, uio_t);
 vnode_t vnio_vnode(vniodesc_t);
 
 #endif // KERNEL_PRIVATE
+
+#ifdef XNU_KERNEL_PRIVATE
+int     build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs_context_t ctx);
+#endif
 
 __END_DECLS
 
@@ -2551,5 +2638,9 @@ struct iocs_store_buffer_entry {
 	char     path_name[IOCS_SBE_PATH_LEN];
 	struct io_compression_stats iocs;
 };
+
+#ifdef KERNEL_PRIVATE
+boolean_t vnode_is_rsr(vnode_t);
+#endif
 
 #endif /* !_VNODE_H_ */

@@ -178,10 +178,6 @@ extern int kpc_force_all_ctrs_arch( task_t task, int val );
 
 extern int kpc_set_sw_inc( uint32_t mask );
 
-/* disable/enable whitelist of allowed events */
-extern int kpc_get_whitelist_disabled( void );
-extern int kpc_disable_whitelist( int val );
-
 /*
  * Register the Power Manager as a PMCs user.
  *

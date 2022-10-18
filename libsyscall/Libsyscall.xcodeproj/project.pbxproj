@@ -116,12 +116,14 @@
 		24D1158311E671B20063D54D /* SYS.h in Headers */ = {isa = PBXBuildFile; fileRef = 24D1157411E671B20063D54D /* SYS.h */; };
 		24E4782712088267009A384D /* _libc_funcptr.c in Sources */ = {isa = PBXBuildFile; fileRef = 24E47824120881DF009A384D /* _libc_funcptr.c */; };
 		2561E8AA25082E6300EAA925 /* task.c in Sources */ = {isa = PBXBuildFile; fileRef = 2561E8A925082E6300EAA925 /* task.c */; };
+		2579B8A027556DDD00A8BC8E /* _libc_weak_funcptr.c in Sources */ = {isa = PBXBuildFile; fileRef = 2579B89F27556DDD00A8BC8E /* _libc_weak_funcptr.c */; };
 		291D3C281354FDD100D46061 /* mach_port.c in Sources */ = {isa = PBXBuildFile; fileRef = 291D3C261354FDD100D46061 /* mach_port.c */; };
 		291D3C291354FDD100D46061 /* mach_vm.c in Sources */ = {isa = PBXBuildFile; fileRef = 291D3C271354FDD100D46061 /* mach_vm.c */; };
 		29A59AE2183B0DE000E8B896 /* renameat.c in Sources */ = {isa = PBXBuildFile; fileRef = 29A59AE1183B0DE000E8B896 /* renameat.c */; };
 		29A59AE6183B110C00E8B896 /* unlinkat.c in Sources */ = {isa = PBXBuildFile; fileRef = 29A59AE5183B110C00E8B896 /* unlinkat.c */; };
 		2BA88DCC1810A3CE00EB63F6 /* coalition.c in Sources */ = {isa = PBXBuildFile; fileRef = 2BA88DCB1810A3CE00EB63F6 /* coalition.c */; };
 		2C4853EC221C82160008D1F5 /* os_channel_event.c in Sources */ = {isa = PBXBuildFile; fileRef = 2C4853EB221C82160008D1F5 /* os_channel_event.c */; settings = {COMPILER_FLAGS = "-fno-builtin"; }; };
+		3546C83B2758402300517973 /* event_wrappers.c in Sources */ = {isa = PBXBuildFile; fileRef = 3546C83A2758402300517973 /* event_wrappers.c */; };
 		3695DCC91F3D2C5F0072C0B3 /* reboot.c in Sources */ = {isa = PBXBuildFile; fileRef = 3695DCC81F3D2C5A0072C0B3 /* reboot.c */; };
 		374A36E314748F1300AAF39D /* varargs_wrappers.s in Sources */ = {isa = PBXBuildFile; fileRef = 374A36E214748EE400AAF39D /* varargs_wrappers.s */; };
 		3F538F891A659C5600B37EFD /* persona.c in Sources */ = {isa = PBXBuildFile; fileRef = 3F538F881A659C5600B37EFD /* persona.c */; };
@@ -161,6 +163,7 @@
 		9299E14A1B841E74005B7350 /* thread_state.h in Headers */ = {isa = PBXBuildFile; fileRef = 928336A21B8412C100873B90 /* thread_state.h */; };
 		9299E14B1B841F59005B7350 /* thread_state.h in Headers */ = {isa = PBXBuildFile; fileRef = 928336A21B8412C100873B90 /* thread_state.h */; };
 		929FD46F1C5711DB0087B9C8 /* mach_timebase_info.c in Sources */ = {isa = PBXBuildFile; fileRef = 929FD46E1C5711CF0087B9C8 /* mach_timebase_info.c */; };
+		96D0FB9E273B5CB8003032F5 /* vm_reclaim.c in Sources */ = {isa = PBXBuildFile; fileRef = 96D0FB9D273B5CB8003032F5 /* vm_reclaim.c */; };
 		978228281B8678DC008385AC /* pselect-darwinext.c in Sources */ = {isa = PBXBuildFile; fileRef = 978228271B8678CB008385AC /* pselect-darwinext.c */; };
 		978228291B8678DF008385AC /* pselect-darwinext-cancel.c in Sources */ = {isa = PBXBuildFile; fileRef = 978228261B8678C2008385AC /* pselect-darwinext-cancel.c */; };
 		9C4B507422273E0F00F068C1 /* log_data.c in Sources */ = {isa = PBXBuildFile; fileRef = 9C4B507322273E0F00F068C1 /* log_data.c */; };
@@ -187,6 +190,7 @@
 		BAFE90DE1C3A4D2D0012084F /* _libkernel_init.c in Sources */ = {isa = PBXBuildFile; fileRef = 247A08B311F8B05900E4693F /* _libkernel_init.c */; };
 		BAFE90E01C3A4D960012084F /* libsystem_kernel.a in CopyFiles */ = {isa = PBXBuildFile; fileRef = D2AAC0630554660B00DB518D /* libsystem_kernel.a */; };
 		BAFE90E21C3A4DB00012084F /* libsystem_kernel.a in CopyFiles */ = {isa = PBXBuildFile; fileRef = D2AAC0630554660B00DB518D /* libsystem_kernel.a */; };
+		C48FA19027A6A95200337F46 /* nfsclnt.c in Sources */ = {isa = PBXBuildFile; fileRef = C48FA18F27A6A95200337F46 /* nfsclnt.c */; };
 		C639F0E51741C25800A39F47 /* gethostuuid.h in Headers */ = {isa = PBXBuildFile; fileRef = C639F0E41741C09A00A39F47 /* gethostuuid.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C6460B7C182025DF00F73CCA /* sfi.c in Sources */ = {isa = PBXBuildFile; fileRef = C6460B7B182025DF00F73CCA /* sfi.c */; };
 		C6AB38DB174202C10036DD9F /* gethostuuid.h in Headers */ = {isa = PBXBuildFile; fileRef = C639F0E41741C09A00A39F47 /* gethostuuid.h */; settings = {ATTRIBUTES = (Public, ); }; };
@@ -243,7 +247,6 @@
 		C9D9BD2F114B00600000D8B9 /* vm_task.h in Headers */ = {isa = PBXBuildFile; fileRef = C9D9BCE3114B00600000D8B9 /* vm_task.h */; };
 		C9D9BD30114B00600000D8B9 /* host_priv.defs in Sources */ = {isa = PBXBuildFile; fileRef = C9D9BCE4114B00600000D8B9 /* host_priv.defs */; };
 		C9D9BD31114B00600000D8B9 /* host_security.defs in Sources */ = {isa = PBXBuildFile; fileRef = C9D9BCE5114B00600000D8B9 /* host_security.defs */; };
-		C9D9BD35114B00600000D8B9 /* lock_set.defs in Sources */ = {isa = PBXBuildFile; fileRef = C9D9BCEA114B00600000D8B9 /* lock_set.defs */; };
 		C9D9BD36114B00600000D8B9 /* mach_error_string.c in Sources */ = {isa = PBXBuildFile; fileRef = C9D9BCEB114B00600000D8B9 /* mach_error_string.c */; };
 		C9D9BD37114B00600000D8B9 /* mach_error.c in Sources */ = {isa = PBXBuildFile; fileRef = C9D9BCEC114B00600000D8B9 /* mach_error.c */; };
 		C9D9BD38114B00600000D8B9 /* mach_host.defs in Sources */ = {isa = PBXBuildFile; fileRef = C9D9BCED114B00600000D8B9 /* mach_host.defs */; };
@@ -558,12 +561,14 @@
 		24D1159911E6723E0063D54D /* create-syscalls.pl */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.script.perl; path = "create-syscalls.pl"; sourceTree = "<group>"; };
 		24E47824120881DF009A384D /* _libc_funcptr.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = _libc_funcptr.c; sourceTree = "<group>"; };
 		2561E8A925082E6300EAA925 /* task.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = task.c; sourceTree = "<group>"; };
+		2579B89F27556DDD00A8BC8E /* _libc_weak_funcptr.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = _libc_weak_funcptr.c; sourceTree = "<group>"; };
 		291D3C261354FDD100D46061 /* mach_port.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = mach_port.c; sourceTree = "<group>"; };
 		291D3C271354FDD100D46061 /* mach_vm.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = mach_vm.c; sourceTree = "<group>"; };
 		29A59AE1183B0DE000E8B896 /* renameat.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = renameat.c; sourceTree = "<group>"; };
 		29A59AE5183B110C00E8B896 /* unlinkat.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = unlinkat.c; sourceTree = "<group>"; };
 		2BA88DCB1810A3CE00EB63F6 /* coalition.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = coalition.c; sourceTree = "<group>"; };
 		2C4853EB221C82160008D1F5 /* os_channel_event.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = os_channel_event.c; path = skywalk/os_channel_event.c; sourceTree = "<group>"; };
+		3546C83A2758402300517973 /* event_wrappers.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = event_wrappers.c; sourceTree = "<group>"; };
 		3695DCC81F3D2C5A0072C0B3 /* reboot.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = reboot.c; sourceTree = "<group>"; };
 		374A36E214748EE400AAF39D /* varargs_wrappers.s */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.asm; path = varargs_wrappers.s; sourceTree = "<group>"; };
 		37DDFB7614748713009D3355 /* syscall.map */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = syscall.map; sourceTree = "<group>"; };
@@ -596,6 +601,7 @@
 		928336A01B83ED7800873B90 /* thread_register_state.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = thread_register_state.c; sourceTree = "<group>"; };
 		928336A21B8412C100873B90 /* thread_state.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = thread_state.h; sourceTree = "<group>"; };
 		929FD46E1C5711CF0087B9C8 /* mach_timebase_info.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = mach_timebase_info.c; sourceTree = "<group>"; };
+		96D0FB9D273B5CB8003032F5 /* vm_reclaim.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = vm_reclaim.c; sourceTree = "<group>"; };
 		978228261B8678C2008385AC /* pselect-darwinext-cancel.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "pselect-darwinext-cancel.c"; sourceTree = "<group>"; };
 		978228271B8678CB008385AC /* pselect-darwinext.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "pselect-darwinext.c"; sourceTree = "<group>"; };
 		9C4B507322273E0F00F068C1 /* log_data.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = log_data.c; sourceTree = "<group>"; };
@@ -612,6 +618,7 @@
 		BA5CDB4018AEBAD500E37982 /* __thread_selfusage.s */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.asm; path = __thread_selfusage.s; sourceTree = "<group>"; };
 		BA9973461C3B4C8A00B14D8C /* quota_obsolete.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = quota_obsolete.c; sourceTree = "<group>"; };
 		BABA36CA1A856C4700BBBCF7 /* host.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = host.c; sourceTree = "<group>"; };
+		C48FA18F27A6A95200337F46 /* nfsclnt.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = nfsclnt.c; sourceTree = "<group>"; };
 		C639F0E41741C09A00A39F47 /* gethostuuid.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = gethostuuid.h; sourceTree = "<group>"; };
 		C6460B7B182025DF00F73CCA /* sfi.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = sfi.c; sourceTree = "<group>"; };
 		C6BEE9171806840200D25AAB /* posix_sem_obsolete.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = posix_sem_obsolete.c; sourceTree = "<group>"; };
@@ -656,7 +663,6 @@
 		C9D9BCE3114B00600000D8B9 /* vm_task.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = vm_task.h; sourceTree = "<group>"; };
 		C9D9BCE4114B00600000D8B9 /* host_priv.defs */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.mig; path = host_priv.defs; sourceTree = "<group>"; };
 		C9D9BCE5114B00600000D8B9 /* host_security.defs */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.mig; path = host_security.defs; sourceTree = "<group>"; };
-		C9D9BCEA114B00600000D8B9 /* lock_set.defs */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.mig; path = lock_set.defs; sourceTree = "<group>"; };
 		C9D9BCEB114B00600000D8B9 /* mach_error_string.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = mach_error_string.c; sourceTree = "<group>"; };
 		C9D9BCEC114B00600000D8B9 /* mach_error.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = mach_error.c; sourceTree = "<group>"; };
 		C9D9BCED114B00600000D8B9 /* mach_host.defs */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.mig; path = mach_host.defs; sourceTree = "<group>"; };
@@ -757,6 +763,7 @@
 		08FB7795FE84155DC02AAC07 /* mach */ = {
 			isa = PBXGroup;
 			children = (
+				96D0FB9D273B5CB8003032F5 /* vm_reclaim.c */,
 				247A08FF11F8E18000E4693F /* abort.h */,
 				C9D9BCC5114B00600000D8B9 /* clock_priv.defs */,
 				C9D9BCC6114B00600000D8B9 /* clock_reply.defs */,
@@ -782,7 +789,6 @@
 				C9D9BCE4114B00600000D8B9 /* host_priv.defs */,
 				C9D9BCE5114B00600000D8B9 /* host_security.defs */,
 				BABA36CA1A856C4700BBBCF7 /* host.c */,
-				C9D9BCEA114B00600000D8B9 /* lock_set.defs */,
 				C9D9BCD8114B00600000D8B9 /* mach */,
 				C9D9BCEB114B00600000D8B9 /* mach_error_string.c */,
 				C9D9BCEC114B00600000D8B9 /* mach_error.c */,
@@ -864,10 +870,13 @@
 		247A08B011F8AF1700E4693F /* wrappers */ = {
 			isa = PBXGroup;
 			children = (
+				C48FA18F27A6A95200337F46 /* nfsclnt.c */,
+				3546C83A2758402300517973 /* event_wrappers.c */,
 				E4D45C2116F856900002AF25 /* __commpage_gettimeofday.c */,
 				C99A4F4E1305B1B70054B7B7 /* __get_cpu_capabilities.s */,
 				24A7C5CB11FF973C007669EB /* _errno.h */,
 				24E47824120881DF009A384D /* _libc_funcptr.c */,
+				2579B89F27556DDD00A8BC8E /* _libc_weak_funcptr.c */,
 				247A08B311F8B05900E4693F /* _libkernel_init.c */,
 				247A08B211F8B05900E4693F /* _libkernel_init.h */,
 				248BA04A121C8EE4008C073F /* cancelable */,
@@ -1442,7 +1451,6 @@
 				C9D9BD30114B00600000D8B9 /* host_priv.defs in Sources */,
 				409A78321E4EB3E300E0699B /* cpu_in_cksum.s in Sources */,
 				C9D9BD31114B00600000D8B9 /* host_security.defs in Sources */,
-				C9D9BD35114B00600000D8B9 /* lock_set.defs in Sources */,
 				C9D9BD38114B00600000D8B9 /* mach_host.defs in Sources */,
 				C9D9BD3D114B00600000D8B9 /* mach_port.defs in Sources */,
 				C9D9BD3F114B00600000D8B9 /* mach_vm.defs in Sources */,
@@ -1491,6 +1499,7 @@
 				242AB66611EBDC1200107336 /* errno.c in Sources */,
 				4BCDD8B220741C2F00FA37A3 /* mach_right.c in Sources */,
 				72DE4B6A224174D0007844CB /* proc.c in Sources */,
+				96D0FB9E273B5CB8003032F5 /* vm_reclaim.c in Sources */,
 				E4D45C2E16F868ED0002AF25 /* libproc.c in Sources */,
 				24A7C5BC11FF8DA6007669EB /* accept.c in Sources */,
 				24A7C5BD11FF8DA6007669EB /* bind.c in Sources */,
@@ -1502,6 +1511,7 @@
 				925559921CBC23C300E527CE /* mach_boottime.c in Sources */,
 				24A7C5C211FF8DA6007669EB /* lchown.c in Sources */,
 				2561E8AA25082E6300EAA925 /* task.c in Sources */,
+				C48FA19027A6A95200337F46 /* nfsclnt.c in Sources */,
 				24A7C5C311FF8DA6007669EB /* listen.c in Sources */,
 				24A7C5C411FF8DA6007669EB /* recvfrom.c in Sources */,
 				13CBF78224575F9F00B26F7D /* open-base.c in Sources */,
@@ -1549,6 +1559,7 @@
 				248BA093121DE369008C073F /* select.c in Sources */,
 				248BA095121DE565008C073F /* select-pre1050.c in Sources */,
 				BA0D9FB1199031AD007E8A73 /* kdebug_trace.c in Sources */,
+				3546C83B2758402300517973 /* event_wrappers.c in Sources */,
 				4BDD5F1E1891AB2F004BF300 /* mach_approximate_time.s in Sources */,
 				248BA0B3121DE760008C073F /* select-cancel.c in Sources */,
 				248BA0BE121DE902008C073F /* select.c in Sources */,
@@ -1565,6 +1576,7 @@
 				248AA967122C7CDA0085F5B1 /* rename.c in Sources */,
 				406E0B721E4ACD2000295EA3 /* cpu_copy_in_cksum.s in Sources */,
 				24B8C2621237F53900D36CC3 /* remove-counter.c in Sources */,
+				2579B8A027556DDD00A8BC8E /* _libc_weak_funcptr.c in Sources */,
 				C99A4F501305B2BD0054B7B7 /* __get_cpu_capabilities.s in Sources */,
 				978228291B8678DF008385AC /* pselect-darwinext-cancel.c in Sources */,
 				40DF0F741E5CD7BB0035A864 /* cpu_copy_in_cksum_gen.c in Sources */,

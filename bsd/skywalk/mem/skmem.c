@@ -105,9 +105,9 @@ static const struct skmem_region_params skmem_regions[SKMEM_REGIONS] = {
 	/*
 	 * Buffers: {mappable, shareable}
 	 */
-	[SKMEM_REGION_BUF] = {
-		.srp_name       = "buf",
-		.srp_id         = SKMEM_REGION_BUF,
+	[SKMEM_REGION_BUF_DEF] = {
+		.srp_name       = "buf_def",
+		.srp_id         = SKMEM_REGION_BUF_DEF,
 		.srp_cflags     = SKMEM_REGION_CR_MMAPOK |
     SKMEM_REGION_CR_NOMAGAZINES | SKMEM_REGION_CR_IODIR_IN |
     SKMEM_REGION_CR_IODIR_OUT | SKMEM_REGION_CR_SHAREOK |
@@ -115,9 +115,19 @@ static const struct skmem_region_params skmem_regions[SKMEM_REGIONS] = {
 		.srp_md_type    = NEXUS_META_TYPE_INVALID,
 		.srp_md_subtype = NEXUS_META_SUBTYPE_INVALID,
 	},
-	[SKMEM_REGION_RXBUF] = {
-		.srp_name       = "rxbuf",
-		.srp_id         = SKMEM_REGION_RXBUF,
+	[SKMEM_REGION_BUF_LARGE] = {
+		.srp_name       = "buf_large",
+		.srp_id         = SKMEM_REGION_BUF_LARGE,
+		.srp_cflags     = SKMEM_REGION_CR_MMAPOK |
+    SKMEM_REGION_CR_NOMAGAZINES | SKMEM_REGION_CR_IODIR_IN |
+    SKMEM_REGION_CR_IODIR_OUT | SKMEM_REGION_CR_SHAREOK |
+    SKMEM_REGION_CR_PUREDATA,
+		.srp_md_type    = NEXUS_META_TYPE_INVALID,
+		.srp_md_subtype = NEXUS_META_SUBTYPE_INVALID,
+	},
+	[SKMEM_REGION_RXBUF_DEF] = {
+		.srp_name       = "rxbuf_def",
+		.srp_id         = SKMEM_REGION_RXBUF_DEF,
 		.srp_cflags     = SKMEM_REGION_CR_MMAPOK |
     SKMEM_REGION_CR_NOMAGAZINES | SKMEM_REGION_CR_IODIR_IN |
     SKMEM_REGION_CR_SHAREOK | SKMEM_REGION_CR_PUREDATA,
@@ -125,9 +135,29 @@ static const struct skmem_region_params skmem_regions[SKMEM_REGIONS] = {
 		.srp_md_type    = NEXUS_META_TYPE_INVALID,
 		.srp_md_subtype = NEXUS_META_SUBTYPE_INVALID,
 	},
-	[SKMEM_REGION_TXBUF] = {
-		.srp_name       = "txbuf",
-		.srp_id         = SKMEM_REGION_TXBUF,
+	[SKMEM_REGION_RXBUF_LARGE] = {
+		.srp_name       = "rxbuf_large",
+		.srp_id         = SKMEM_REGION_RXBUF_LARGE,
+		.srp_cflags     = SKMEM_REGION_CR_MMAPOK |
+    SKMEM_REGION_CR_NOMAGAZINES | SKMEM_REGION_CR_IODIR_IN |
+    SKMEM_REGION_CR_SHAREOK | SKMEM_REGION_CR_PUREDATA,
+		.srp_r_obj_cnt  = 0,
+		.srp_md_type    = NEXUS_META_TYPE_INVALID,
+		.srp_md_subtype = NEXUS_META_SUBTYPE_INVALID,
+	},
+	[SKMEM_REGION_TXBUF_DEF] = {
+		.srp_name       = "txbuf_def",
+		.srp_id         = SKMEM_REGION_TXBUF_DEF,
+		.srp_cflags     = SKMEM_REGION_CR_MMAPOK |
+    SKMEM_REGION_CR_NOMAGAZINES | SKMEM_REGION_CR_IODIR_OUT |
+    SKMEM_REGION_CR_SHAREOK | SKMEM_REGION_CR_PUREDATA,
+		.srp_r_obj_cnt  = 0,
+		.srp_md_type    = NEXUS_META_TYPE_INVALID,
+		.srp_md_subtype = NEXUS_META_SUBTYPE_INVALID,
+	},
+	[SKMEM_REGION_TXBUF_LARGE] = {
+		.srp_name       = "txbuf_large",
+		.srp_id         = SKMEM_REGION_TXBUF_LARGE,
 		.srp_cflags     = SKMEM_REGION_CR_MMAPOK |
     SKMEM_REGION_CR_NOMAGAZINES | SKMEM_REGION_CR_IODIR_OUT |
     SKMEM_REGION_CR_SHAREOK | SKMEM_REGION_CR_PUREDATA,
@@ -359,9 +389,12 @@ static const struct skmem_region_params skmem_regions[SKMEM_REGIONS] = {
 };
 
 const skmem_region_id_t skmem_pp_region_ids[SKMEM_PP_REGIONS] = {
-	SKMEM_REGION_BUF,
-	SKMEM_REGION_RXBUF,
-	SKMEM_REGION_TXBUF,
+	SKMEM_REGION_BUF_DEF,
+	SKMEM_REGION_BUF_LARGE,
+	SKMEM_REGION_RXBUF_DEF,
+	SKMEM_REGION_RXBUF_LARGE,
+	SKMEM_REGION_TXBUF_DEF,
+	SKMEM_REGION_TXBUF_LARGE,
 	SKMEM_REGION_KMD,
 	SKMEM_REGION_RXKMD,
 	SKMEM_REGION_TXKMD,
@@ -406,7 +439,6 @@ skmem_init(void)
 	/* get CPU cache line size */
 	(void) skmem_cpu_cache_line_size();
 
-	skmem_arena_init();
 	skmem_cache_pre_init();
 	skmem_region_init();
 	skmem_cache_init();
@@ -427,7 +459,6 @@ skmem_fini(void)
 		pp_fini();
 		skmem_cache_fini();
 		skmem_region_fini();
-		skmem_arena_fini();
 
 		__skmem_inited = 0;
 	}
@@ -600,19 +631,24 @@ skmem_dump(struct skmem_region *skr)
 	    skr->skr_free);
 	SKMEM_WDT_DUMP_BUF_CHK();
 
-	if ((skr->skr_mode & SKR_MODE_SLAB) && (skm = skr->skr_cache) != NULL) {
-		k = skmem_snprintf(c, clen,
-		    "Cache %p\n"
-		    "  | Mode         : 0x%b\n"
-		    "  | Memory       : [%llu in use] / [%llu total]\n"
-		    "  | Transactions : [%llu alloc failures]\n"
-		    "  |                [%llu slab creates, %llu destroys]\n"
-		    "  |                [%llu slab allocs,  %llu frees]\n\n",
-		    skm, skm->skm_mode, SKM_MODE_BITS, skm->skm_sl_bufinuse,
-		    skm->skm_sl_bufmax, skm->skm_sl_alloc_fail,
-		    skm->skm_sl_create, skm->skm_sl_destroy, skm->skm_sl_alloc,
-		    skm->skm_sl_free);
-		SKMEM_WDT_DUMP_BUF_CHK();
+	if (skr->skr_mode & SKR_MODE_SLAB) {
+		for (int i = 0; i < SKR_MAX_CACHES; i++) {
+			if ((skm = skr->skr_cache[i]) == NULL) {
+				continue;
+			}
+			k = skmem_snprintf(c, clen, "Cache %p\n"
+			    "  | Mode         : 0x%b\n"
+			    "  | Memory       : [%llu in use] / [%llu total]\n"
+			    "  | Transactions : [%llu alloc failures]\n"
+			    "  |                [%llu slab creates, %llu destroys]\n"
+			    "  |                [%llu slab allocs,  %llu frees]\n\n",
+			    skm, skm->skm_mode, SKM_MODE_BITS,
+			    skm->skm_sl_bufinuse, skm->skm_sl_bufmax,
+			    skm->skm_sl_alloc_fail, skm->skm_sl_create,
+			    skm->skm_sl_destroy, skm->skm_sl_alloc,
+			    skm->skm_sl_free);
+			SKMEM_WDT_DUMP_BUF_CHK();
+		}
 	}
 
 	k = skmem_snprintf(c, clen,

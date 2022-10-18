@@ -57,6 +57,7 @@
 #include <IOKit/AppleKeyStoreInterface.h>
 #include <IOKit/pwr_mgt/RootDomain.h>
 #include <IOKit/IOCPU.h>
+#include <kern/cs_blobs.h>
 #include <mach/sync_policy.h>
 #include <mach/thread_info.h>
 #include <IOKit/assert.h>
@@ -155,11 +156,13 @@ const OSSymbol *                gIOMapperIDKey;
 const OSSymbol *                gIOUserClientClassKey;
 
 const OSSymbol *                gIOUserClassKey;
+const OSSymbol *                gIOUserClassesKey;
 const OSSymbol *                gIOUserServerClassKey;
 const OSSymbol *                gIOUserServerNameKey;
 const OSSymbol *                gIOUserServerTagKey;
 const OSSymbol *                gIOUserUserClientKey;
 const OSSymbol *                gIOUserServerOneProcessKey;
+const OSSymbol *                gIOUserServerPreserveUserspaceRebootKey;
 
 const OSSymbol *                gIOKitDebugKey;
 
@@ -193,11 +196,15 @@ const OSSymbol *                gIOFirstMatchNotification;
 const OSSymbol *                gIOTerminatedNotification;
 const OSSymbol *                gIOWillTerminateNotification;
 
+const OSSymbol *                gIOUserClientEntitlementsKey;
 const OSSymbol *                gIOServiceDEXTEntitlementsKey;
 const OSSymbol *                gIODriverKitEntitlementKey;
 const OSSymbol *                gIODriverKitUserClientEntitlementsKey;
 const OSSymbol *                gIODriverKitUserClientEntitlementAllowAnyKey;
 const OSSymbol *                gIODriverKitRequiredEntitlementsKey;
+const OSSymbol *                gIODriverKitTestDriverEntitlementKey;
+const OSSymbol *                gIODriverKitUserClientEntitlementCommunicatesWithDriversKey;
+const OSSymbol *                gIODriverKitUserClientEntitlementAllowThirdPartyUserClientsKey;
 const OSSymbol *                gIOMatchDeferKey;
 const OSSymbol *                gIOServiceMatchDeferredKey;
 const OSSymbol *                gIOServiceNotificationUserKey;
@@ -415,6 +422,7 @@ uint32_t              fSystemPowerAckRef;
 uint8_t               fSystemOff;
 uint8_t               fUserServerOff;
 uint8_t               fWaitingUserServers;
+thread_call_t         fUserServerAckTimer;
 
 void lock();
 void unlock();
@@ -429,6 +437,7 @@ IOReturn systemPowerChange(
 
 bool matchingStart(IOService * service);
 void matchingEnd(IOService * service);
+void userServerAckTimerExpired(void *, void *);
 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -478,6 +487,7 @@ IOService::initialize( void )
 	gIOUserClientClassKey = OSSymbol::withCStringNoCopy( kIOUserClientClassKey );
 
 	gIOUserClassKey       = OSSymbol::withCStringNoCopy(kIOUserClassKey);
+	gIOUserClassesKey     = OSSymbol::withCStringNoCopy(kIOUserClassesKey);
 
 	gIOUserServerClassKey  = OSSymbol::withCStringNoCopy(kIOUserServerClassKey);
 	gIOUserServerNameKey   = OSSymbol::withCStringNoCopy(kIOUserServerNameKey);
@@ -485,6 +495,7 @@ IOService::initialize( void )
 	gIOUserUserClientKey   = OSSymbol::withCStringNoCopy(kIOUserUserClientKey);
 
 	gIOUserServerOneProcessKey = OSSymbol::withCStringNoCopy(kIOUserServerOneProcessKey);
+	gIOUserServerPreserveUserspaceRebootKey = OSSymbol::withCStringNoCopy(kIOUserServerPreserveUserspaceRebootKey);
 
 	gIOResourcesKey       = OSSymbol::withCStringNoCopy( kIOResourcesClass );
 	gIOResourceMatchKey   = OSSymbol::withCStringNoCopy( kIOResourceMatchKey );
@@ -551,11 +562,19 @@ IOService::initialize( void )
 
 	gIOConsoleUsersSeedValue           = OSData::withValueNoCopy(gIOConsoleUsersSeed);
 
+	gIOUserClientEntitlementsKey           = OSSymbol::withCStringNoCopy( kIOUserClientEntitlementsKey );
 	gIOServiceDEXTEntitlementsKey           = OSSymbol::withCStringNoCopy( kIOServiceDEXTEntitlementsKey );
 	gIODriverKitEntitlementKey             = OSSymbol::withCStringNoCopy( kIODriverKitEntitlementKey );
 	gIODriverKitUserClientEntitlementsKey   = OSSymbol::withCStringNoCopy( kIODriverKitUserClientEntitlementsKey );
+#if XNU_TARGET_OS_OSX
 	gIODriverKitUserClientEntitlementAllowAnyKey   = OSSymbol::withCStringNoCopy( kIODriverKitUserClientEntitlementAllowAnyKey );
+#else
+	gIODriverKitUserClientEntitlementAllowAnyKey   = NULL;
+#endif
 	gIODriverKitRequiredEntitlementsKey   = OSSymbol::withCStringNoCopy( kIODriverKitRequiredEntitlementsKey );
+	gIODriverKitTestDriverEntitlementKey  = OSSymbol::withCStringNoCopy( kIODriverKitTestDriverEntitlementKey );
+	gIODriverKitUserClientEntitlementCommunicatesWithDriversKey = OSSymbol::withCStringNoCopy(kIODriverKitUserClientEntitlementCommunicatesWithDriversKey);
+	gIODriverKitUserClientEntitlementAllowThirdPartyUserClientsKey = OSSymbol::withCStringNoCopy(kIODriverKitUserClientEntitlementAllowThirdPartyUserClientsKey);
 
 	gIOMatchDeferKey                        = OSSymbol::withCStringNoCopy( kIOMatchDeferKey );
 	gIOServiceMatchDeferredKey              = OSSymbol::withCStringNoCopy( kIOServiceMatchDeferredKey );
@@ -630,12 +649,18 @@ IOService::initialize( void )
 
 	assert( gArbitrationLockQueueLock );
 
+	allocPMInitLock();
+
 	gIOTerminatePhase2List = OSArray::withCapacity( 2 );
 	gIOStopList            = OSArray::withCapacity( 16 );
 	gIOStopProviderList    = OSArray::withCapacity( 16 );
 	gIOFinalizeList        = OSArray::withCapacity( 16 );
 #if !NO_KEXTD
-	gIOMatchDeferList      = OSArray::withCapacity( 16 );
+	if (OSKext::iokitDaemonAvailable()) {
+		gIOMatchDeferList      = OSArray::withCapacity( 16 );
+	} else {
+		gIOMatchDeferList      = NULL;
+	}
 #endif
 	assert( gIOTerminatePhase2List && gIOStopList && gIOStopProviderList && gIOFinalizeList );
 
@@ -1186,6 +1211,9 @@ void
 IOService::iokitDaemonLaunched(void)
 {
 #if !NO_KEXTD
+	if (!OSKext::iokitDaemonAvailable()) {
+		panic(kIOKitDaemonName " is unavailable in this environment, but it was launched");
+	}
 	IOServiceTrace(IOSERVICE_KEXTD_READY, 0, 0, 0, 0);
 	startDeferredMatches();
 	getServiceRoot()->adjustBusy(-1);
@@ -1193,6 +1221,11 @@ IOService::iokitDaemonLaunched(void)
 #endif /* !NO_KEXTD */
 }
 
+/*
+ * Possibly called with IORWLock from IOCatalog held.
+ * This means that no calls to OSKext that could take
+ * sKextLock can be performed from this function.
+ */
 IOReturn
 IOService::catalogNewDrivers( OSOrderedSet * newTables )
 {
@@ -1456,14 +1489,15 @@ IOService::callPlatformFunction( const OSSymbol * functionName,
 	IOService *provider;
 
 	if (functionName == gIOPlatformQuiesceActionKey ||
-	    functionName == gIOPlatformActiveActionKey) {
+	    functionName == gIOPlatformActiveActionKey ||
+	    functionName == gIOPlatformPanicActionKey) {
 		/*
-		 * Services which register for IOPlatformQuiesceAction / IOPlatformActiveAction
+		 * Services which register for IOPlatformQuiesceAction / IOPlatformActiveAction / IOPlatformPanicAction
 		 * must consume that event themselves, without passing it up to super/IOService.
 		 */
-		if (gEnforceQuiesceSafety) {
-			panic("Class %s passed the quiesce/active action to IOService",
-			    getMetaClass()->getClassName());
+		if (gEnforcePlatformActionSafety) {
+			panic("Class %s passed the %s action to IOService",
+			    getMetaClass()->getClassName(), functionName->getCStringNoCopy());
 		}
 	}
 
@@ -2584,7 +2618,7 @@ IOService::terminatePhase1( IOOptionBits options )
 				victim->_adjustBusy( 1 );
 
 				if ((options & kIOServiceTerminateWithRematch) && (victim == this)) {
-					if ((options & kIOServiceTerminateWithRematchCurrentDext) && gIODextRelaunchMax) {
+					if ((options & kIOServiceTerminateWithRematchCurrentDext)) {
 						OSObject     * obj;
 						OSObject     * rematchProps;
 						OSNumber     * num;
@@ -3093,6 +3127,9 @@ IOService::actionStop( IOService * provider, IOService * client,
 	client->detach( provider );
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type"
+
 void
 IOService::terminateWorker( IOOptionBits options )
 {
@@ -3335,6 +3372,8 @@ IOService::terminateWorker( IOOptionBits options )
 	IOLockLock( gJobsLock );
 }
 
+#pragma clang diagnostic pop
+
 bool
 IOService::finalize( IOOptionBits options )
 {
@@ -3446,6 +3485,7 @@ IOService::open(   IOService *     forClient,
     void *          arg )
 {
 	bool                        ok;
+	kern_return_t               ret = kIOReturnSuccess;
 	ServiceOpenMessageContext   context;
 
 	context.service             = this;
@@ -3461,12 +3501,20 @@ IOService::open(   IOService *     forClient,
 	}
 
 	ok = (0 == (__state[0] & kIOServiceInactiveState));
-	if (ok) {
-		ok = handleOpen( forClient, options, arg );
-	}
 
 	if (ok && forClient && forClient->reserved->uvars && forClient->reserved->uvars->userServer) {
-		forClient->reserved->uvars->userServer->serviceOpen(this, forClient);
+		ret = forClient->reserved->uvars->userServer->serviceOpen(this, forClient);
+		if (ret != kIOReturnSuccess) {
+			ok = false;
+		}
+	}
+
+	if (ok) {
+		ok = handleOpen( forClient, options, arg );
+
+		if (!ok && forClient && forClient->reserved->uvars && forClient->reserved->uvars->userServer) {
+			forClient->reserved->uvars->userServer->serviceClose(this, forClient);
+		}
 	}
 
 	unlockForArbitration();
@@ -3785,7 +3833,7 @@ IOService::probeCandidates( OSOrderedSet * matches )
 #endif
 	IOService           *       client = NULL;
 	OSObject            *       prop1;
-	OSObject            *       prop2;
+	OSObject            *       rematchCountProp;
 	OSDictionary        *       rematchPersonality;
 	OSNumber            *       num;
 	uint32_t                    count;
@@ -3793,17 +3841,17 @@ IOService::probeCandidates( OSOrderedSet * matches )
 	bool                        isDext;
 	bool                        categoryConsumed;
 
-	prop2 = NULL;
+	rematchCountProp = NULL;
 	count = 0;
 	prop1 = copyProperty(gIORematchPersonalityKey);
 	rematchPersonality = OSDynamicCast(OSDictionary, prop1);
 	if (rematchPersonality) {
-		prop2 = copyProperty(gIORematchCountKey);
-		num   = OSDynamicCast(OSNumber, prop2);
+		rematchCountProp = copyProperty(gIORematchCountKey);
+		num = OSDynamicCast(OSNumber, rematchCountProp);
 		if (num) {
 			count = num->unsigned32BitValue();
 		}
-		OSSafeReleaseNULL(prop2);
+		removeProperty(gIORematchPersonalityKey);
 	}
 	dextCount = 0;
 
@@ -3839,6 +3887,9 @@ IOService::probeCandidates( OSOrderedSet * matches )
 			client = NULL;
 			isDext = (NULL != match->getObject(gIOUserServerNameKey));
 			if (isDext && !(kIODKEnable & gIODKDebug)) {
+				continue;
+			}
+			if (isDext && !gIODextRelaunchMax && rematchCountProp) {
 				continue;
 			}
 			newIsBoot = gIOCatalogue->personalityIsBoot(match);
@@ -3891,7 +3942,6 @@ IOService::probeCandidates( OSOrderedSet * matches )
 					break;
 				}
 			}
-
 			if (rematchPersonality) {
 				bool personalityMatch = match->isEqualTo(rematchPersonality);
 				if (count > gIODextRelaunchMax) {
@@ -3944,8 +3994,8 @@ IOService::probeCandidates( OSOrderedSet * matches )
 		OSSafeReleaseNULL(nextMatch);
 		OSSafeReleaseNULL(props);
 	}
-	matches->release();
-	matches = NULL;
+	OSSafeReleaseNULL(matches);
+	OSSafeReleaseNULL(rematchCountProp);
 
 	if (familyMatches) {
 		while (!needReloc
@@ -4070,14 +4120,12 @@ IOService::probeCandidates( OSOrderedSet * matches )
 			if (!startList) {
 				continue;
 			}
-
 			started = false;
 			while (true // (!started)
 			    && !matchDeferred
 			    && (inst = (IOService *)startList->getFirstObject())) {
 				inst->retain();
 				startList->removeObject(inst);
-
 #if IOMATCHDEBUG
 				debugFlags = getDebugFlags( inst );
 
@@ -4108,6 +4156,10 @@ IOService::probeCandidates( OSOrderedSet * matches )
 					IOLockUnlock(gJobsLock);
 #endif
 					if (!matchDeferred) {
+						/* TODO
+						 * If a dext fails to start because an upgrade happened
+						 * concurrently, then the matching process has to restart
+						 */
 						started = startCandidate( inst );
 #if IOMATCHDEBUG
 						if ((debugFlags & kIOLogStart) && (false == started)) {
@@ -4225,8 +4277,6 @@ IOService::willShutdown()
 	gIOKitWillTerminate = true;
 #if !NO_KEXTD
 	IOUserServerCheckInToken::cancelAll();
-
-	getPlatform()->waitQuiet(30 * NSEC_PER_SEC);
 #endif
 	OSKext::willShutdown();
 }
@@ -4241,30 +4291,32 @@ IOService::userSpaceWillReboot()
 	OSIterator * iter;
 
 	// Recreate the defer list if it does not exist
-	if (!gIOMatchDeferList) {
+	if (!gIOMatchDeferList && OSKext::iokitDaemonAvailable()) {
 		gIOMatchDeferList = OSArray::withCapacity( 16 );
 	}
 
-	iter = IORegistryIterator::iterateOver(gIOServicePlane, kIORegistryIterateRecursively);
-	if (iter) {
-		do {
-			iter->reset();
-			while ((service = (IOService *)iter->getNextObject())) {
-				/* Rematch providers of services that will be terminated on userspace reboot, after the userspace reboot
-				 * is complete. This normally happens automatically as the IOKit daemon sends personalities to the kernel
-				 * which triggers rematching. But if this doesn't happen (for example, if a feature flag is turned off),
-				 * then these services will never get rematched.
-				 */
-				if (service->propertyHasValue(gIOMatchDeferKey, kOSBooleanTrue) || service->hasUserServer()) {
-					provider = service->getProvider();
-					IOLog("deferring %s-%llx (provider of %s-%llx) matching after userspace reboot\n",
-					    provider->getName(), provider->getRegistryEntryID(), service->getName(), service->getRegistryEntryID());
-					gIOMatchDeferList->setObject(provider);
+	if (gIOMatchDeferList) {
+		iter = IORegistryIterator::iterateOver(gIOServicePlane, kIORegistryIterateRecursively);
+		if (iter) {
+			do {
+				iter->reset();
+				while ((service = (IOService *)iter->getNextObject())) {
+					/* Rematch providers of services that will be terminated on userspace reboot, after the userspace reboot
+					 * is complete. This normally happens automatically as the IOKit daemon sends personalities to the kernel
+					 * which triggers rematching. But if this doesn't happen (for example, if a feature flag is turned off),
+					 * then these services will never get rematched.
+					 */
+					if (service->propertyHasValue(gIOMatchDeferKey, kOSBooleanTrue) || service->hasUserServer()) {
+						provider = service->getProvider();
+						IOLog("deferring %s-%llx (provider of %s-%llx) matching after userspace reboot\n",
+						    provider->getName(), provider->getRegistryEntryID(), service->getName(), service->getRegistryEntryID());
+						gIOMatchDeferList->setObject(provider);
+					}
 				}
-			}
-		} while (!service && !iter->isValid());
+			} while (!service && !iter->isValid());
 
-		OSSafeReleaseNULL(iter);
+			OSSafeReleaseNULL(iter);
+		}
 	}
 #endif
 	gInUserspaceReboot = true;
@@ -4293,6 +4345,8 @@ IOServicePH::init(IOPMrootDomain * root)
 		gIOPriorityPowerStateInterest, &IOServicePH::systemPowerChange, NULL, NULL);
 
 	assert(fRootNotifier);
+
+	fUserServerAckTimer = thread_call_allocate(&IOServicePH::userServerAckTimerExpired, (thread_call_param_t)NULL);
 }
 
 void
@@ -4361,6 +4415,12 @@ IOServicePH::serverAck(IOUserServer * server)
 		ackTo             = fSystemPowerAckTo;
 		ackToRef          = fSystemPowerAckRef;
 		fSystemPowerAckTo = NULL;
+		if (ackTo) {
+			thread_call_cancel(fUserServerAckTimer);
+		}
+	}
+	if (fUserServersWait && fUserServersWait->getCount() > 0 && fMatchingWork && fMatchingWork->getCount() > 0) {
+		DKLOG("Waiting for %u user servers, %u matching work\n", fUserServersWait->getCount(), fMatchingWork->getCount());
 	}
 	unlock();
 
@@ -4461,6 +4521,35 @@ IOServicePH::matchingEnd(IOService * service)
 	serverAck(NULL);
 }
 
+void
+IOServicePH::userServerAckTimerExpired(void *, void *)
+{
+	OSArray * userServers = NULL;
+	lock();
+	if (fSystemPowerAckTo) {
+		DKLOG("ack timer expired\n");
+		userServers = fUserServersWait;
+		fUserServersWait = NULL;
+	}
+	unlock();
+
+	if (userServers != NULL) {
+		userServers->iterateObjects(^bool (OSObject *obj) {
+			IOUserServer * us = OSDynamicCast(IOUserServer, obj);
+			if (us) {
+			        DKLOG(DKS " power state transition failed\n", DKN(us));
+			        us->setPowerManagementFailed(true);
+			}
+			return false;
+		});
+		OSSafeReleaseNULL(userServers);
+	}
+
+	serverAck(NULL);
+}
+
+TUNABLE(uint32_t, dk_shutdown_timeout_ms, "dk_shutdown_timeout_ms", 5000);
+TUNABLE(bool, dk_panic_on_shutdown_hang, "dk_panic_on_shutdown_hang", false);
 
 void
 IOServicePH::systemHalt(int howto)
@@ -4483,13 +4572,19 @@ IOServicePH::systemHalt(int howto)
 	}
 
 	lock();
-	clock_interval_to_deadline(1000, kMillisecondScale, &deadline);
+	clock_interval_to_deadline(dk_shutdown_timeout_ms, kMillisecondScale, &deadline);
 	while (0 < fUserServers->getCount()) {
 		fWaitingUserServers = true;
 		__assert_only int waitResult =
 		    IOLockSleepDeadline(gJobsLock, &fWaitingUserServers, deadline, THREAD_UNINT);
 		assert((THREAD_AWAKENED == waitResult) || (THREAD_TIMED_OUT == waitResult));
 		if (THREAD_TIMED_OUT == waitResult) {
+			IOUserServer::beginLeakingObjects();
+#if DEVELOPMENT || DEBUG
+			if (dk_panic_on_shutdown_hang) {
+				panic("Shutdown timed out waiting for DK drivers to stop");
+			}
+#endif /* DEVELOPMENT || DEBUG */
 			break;
 		}
 	}
@@ -4510,6 +4605,8 @@ IOServicePH::serverSlept(void)
 	return ret;
 }
 
+TUNABLE(uint32_t, dk_power_state_timeout_ms, "dk_power_state_timeout_ms", 30000);
+
 IOReturn
 IOServicePH::systemPowerChange(
 	void * target,
@@ -4520,6 +4617,7 @@ IOServicePH::systemPowerChange(
 	IOReturn                               ret;
 	IOUserServer                         * us;
 	IOPMSystemCapabilityChangeParameters * params;
+	AbsoluteTime                           deadline;
 
 	us = NULL;
 
@@ -4540,14 +4638,17 @@ IOServicePH::systemPowerChange(
 		    (params->fromCapabilities & kIOPMSystemCapabilityCPU) &&
 		    ((params->toCapabilities & kIOPMSystemCapabilityCPU) == 0)) {
 			lock();
+			DKLOG("arming ack timer, %u ms\n", dk_power_state_timeout_ms);
+			clock_interval_to_deadline(dk_power_state_timeout_ms, kMillisecondScale, &deadline);
 			fSystemOff         = true;
 			fSystemPowerAckRef = params->notifyRef;
 			fSystemPowerAckTo  = service;
+			thread_call_enter_delayed(fUserServerAckTimer, deadline);
 			unlock();
 
 			matchingEnd(NULL);
 
-			params->maxWaitForReply = 60 * 1000 * 1000;
+			params->maxWaitForReply = dk_power_state_timeout_ms * 2 * 1000;
 			ret = kIOReturnSuccess;
 		} else if ((params->changeFlags & kIOPMSystemCapabilityWillChange) &&
 		    ((params->fromCapabilities & kIOPMSystemCapabilityCPU) == 0) &&
@@ -4618,6 +4719,7 @@ IOService::startCandidate( IOService * service )
 		OSNumber       * serverTag;
 		uint64_t         entryID;
 		IOUserServerCheckInToken * token;
+		OSData         * serverDUI;
 
 		if ((serverName = OSDynamicCast(OSString, obj))) {
 			obj       = service->copyProperty(gIOModuleIdentifierKey);
@@ -4664,7 +4766,8 @@ IOService::startCandidate( IOService * service )
 
 			sym = OSSymbol::withString(serverName);
 			bool reuse = service->propertyExists(gIOUserServerOneProcessKey);
-			userServer = IOUserServer::launchUserServer(bundleID, sym, serverTag, reuse, &token);
+			serverDUI = OSDynamicCast(OSData, service->getProperty(kOSBundleDextUniqueIdentifierKey));
+			userServer = IOUserServer::launchUserServer(bundleID, sym, serverTag, reuse, &token, serverDUI);
 			OSSafeReleaseNULL(sym);
 			OSSafeReleaseNULL(serverTag);
 			OSSafeReleaseNULL(serverName);
@@ -4722,6 +4825,18 @@ IOService::startCandidate( IOService * service )
 					return false;
 				}
 			}
+#if !XNU_TARGET_OS_OSX && !(DEVELOPMENT || DEBUG)
+			// Prevent third party drivers from matching IOUserResources/IOResources, except when signed for development
+			if (!userServer->isPlatformDriver() &&
+			    userServer->getCSValidationCategory() != CS_VALIDATION_CATEGORY_DEVELOPMENT
+			    && (this == gIOUserResources || this == gIOResources)) {
+				service->detach(this);
+				IOServicePH::matchingEnd(this);
+				userServer->exit("Third party driver may only match real hardware");
+				userServer->release();
+				return false;
+			}
+#endif /* !XNU_TARGET_OS_OSX && !(DEVELOPMENT || DEBUG) */
 
 			userServer->serviceAttach(service, this);
 		} else {
@@ -5149,14 +5264,13 @@ IOService::doServiceMatch( IOOptionBits options )
 			didRegister = (0 == (kIOServiceRegisteredState & __state[0]));
 			__state[0] |= kIOServiceRegisteredState;
 
-			if (gIOServiceHideIOMedia && metaCast(gIOMediaKey) && !(kIOServiceUserUnhidden & __state[1])) {
-				if (gIOServiceRootMediaParent && !hasParent(gIOServiceRootMediaParent)) {
-					OSObject * prop = copyProperty(gPhysicalInterconnectKey, gIOServicePlane);
-					if (!prop || !prop->isEqualTo(gVirtualInterfaceKey)) {
-						__state[0] |= kIOServiceUserInvisibleMatchState;
-					}
-					OSSafeReleaseNULL(prop);
-				}
+			if (gIOServiceHideIOMedia
+			    && metaCast(gIOMediaKey)
+			    && !(kIOServiceUserUnhidden & __state[1])
+			    && gIOServiceRootMediaParent
+			    && !hasParent(gIOServiceRootMediaParent)
+			    && propertyExists(gIOPrimaryDriverTerminateOptionsKey, gIOServicePlane)) {
+				__state[0] |= kIOServiceUserInvisibleMatchState;
 			}
 
 			keepGuessing &= (0 == (__state[0] & kIOServiceInactiveState));
@@ -5178,7 +5292,6 @@ IOService::doServiceMatch( IOOptionBits options )
 			UNLOCKNOTIFY();
 			unlockForArbitration();
 			invokeNotifiers(&notifiers[0]);
-
 			if (keepGuessing && matches->getCount() && (kIOReturnSuccess == getResources())) {
 				if ((this == gIOResources) || (this == gIOUserResources)) {
 					if (resourceKeys) {
@@ -5404,17 +5517,19 @@ IOService::waitForState( UInt32 mask, UInt32 value,
 }
 
 IOReturn
-IOService::waitQuiet( uint64_t timeout )
+IOService::waitQuietWithOptions( uint64_t timeout, IOOptionBits options )
 {
 	IOReturn ret;
 	uint32_t loops;
-	char *   string = NULL;
+	char *   busyEntriesString = NULL;
 	char *   panicString = NULL;
-	size_t   len;
+	size_t   busyEntriesStringLen;
 	size_t   panicStringLen;
 	uint64_t time;
 	uint64_t nano;
 	bool     pendingRequests;
+	bool     registryRootBusy;
+	bool     multipleEntries;
 	bool     dopanic = false;
 
 #if KASAN
@@ -5423,15 +5538,18 @@ IOService::waitQuiet( uint64_t timeout )
 	 * timeout extensions. This should help with issues like 41259215
 	 * where WindowServer was timing out waiting for kextd to get all the
 	 * kasan kexts loaded and started.
+	 *
+	 * On legacy/x86 systems give a bit more time since we may be
+	 * booting from a HDD.
 	 */
 	enum { kTimeoutExtensions = 8 };
 #define WITH_IOWAITQUIET_EXTENSIONS 1
-#elif XNU_TARGET_OS_OSX && defined(__arm64__)
-	enum { kTimeoutExtensions = 1 };
-#define WITH_IOWAITQUIET_EXTENSIONS 0
-#else
+#elif defined(__x86_64__)
 	enum { kTimeoutExtensions = 4 };
 #define WITH_IOWAITQUIET_EXTENSIONS 1
+#else
+	enum { kTimeoutExtensions = 1 };
+#define WITH_IOWAITQUIET_EXTENSIONS 0
 #endif
 
 	time = mach_absolute_time();
@@ -5459,15 +5577,19 @@ IOService::waitQuiet( uint64_t timeout )
 			IOService          * nextParent;
 			char               * s;
 			size_t               l;
+			size_t               busyEntriesStringRemaining;
 
-			len = 256;
+			busyEntriesStringLen = 256;
 			panicStringLen = 256;
-			if (!string) {
-				string      = IONewData(char, len);
+			if (!busyEntriesString) {
+				busyEntriesString = IONewZeroData(char, busyEntriesStringLen);
+				assert(busyEntriesString != NULL);
 			}
 			if (!panicString) {
-				panicString = IONewData(char, panicStringLen);
+				panicString = IONewZeroData(char, panicStringLen);
+				assert(panicString != NULL);
 			}
+
 			set = NULL;
 			pendingRequests = OSKext::pendingIOKitDaemonRequests();
 			iter = IORegistryIterator::iterateOver(this, gIOServicePlane, kIORegistryIterateRecursively);
@@ -5475,8 +5597,8 @@ IOService::waitQuiet( uint64_t timeout )
 			if (iter) {
 				set = iter->iterateAll();
 			}
-			if (string && panicString && leaves && set) {
-				string[0] = panicString[0] = 0;
+			if (leaves && set) {
+				busyEntriesString[0] = panicString[0] = 0;
 				set->setObject(this);
 				while ((next = (IOService *) set->getLastObject())) {
 					if (next->getBusyState()) {
@@ -5492,15 +5614,23 @@ IOService::waitQuiet( uint64_t timeout )
 					}
 					set->removeObject(next);
 				}
-				s = string;
-				while ((next = (IOService *) leaves->getLastObject())) {
-					l = snprintf(s, len, "%s'%s'", ((s == string) ? "" : ", "), next->getName());
-					if (l >= len) {
-						break;
+				registryRootBusy = leaves->getCount() == 1 && leaves->getObject(0) == getServiceRoot();
+				multipleEntries = leaves->getCount() > 1;
+				s = busyEntriesString;
+				busyEntriesStringRemaining = busyEntriesStringLen;
+
+				if (registryRootBusy) {
+					snprintf(s, busyEntriesStringRemaining, "registry root held busy, " kIOKitDaemonName " %s checked in", OSKext::iokitDaemonActive() ? "has" : "has not");
+				} else {
+					while ((next = (IOService *) leaves->getLastObject())) {
+						l = snprintf(s, busyEntriesStringRemaining, "%s'%s' (%x,%x)", ((s == busyEntriesString) ? "" : ", "), next->getName(), (uint32_t)next->__state[0], (uint32_t)next->__state[1]);
+						if (l >= busyEntriesStringRemaining) {
+							break;
+						}
+						s += l;
+						busyEntriesStringRemaining -= l;
+						leaves->removeObject(next);
 					}
-					s += l;
-					len -= l;
-					leaves->removeObject(next);
 				}
 			}
 			OSSafeReleaseNULL(leaves);
@@ -5508,15 +5638,26 @@ IOService::waitQuiet( uint64_t timeout )
 			OSSafeReleaseNULL(iter);
 		}
 
-		dopanic = (kIOWaitQuietPanics & gIOKitDebug);
+		dopanic = (kIOWaitQuietPanics & gIOKitDebug) && (options & kIOWaitQuietPanicOnFailure);
 #if WITH_IOWAITQUIET_EXTENSIONS
 		dopanic = (dopanic && (loops >= (kTimeoutExtensions - 1)));
 #endif
-		snprintf(panicString, panicStringLen,
-		    "%s[%d], (%llds): %s",
-		    pendingRequests ? "IOKit Daemon (" kIOKitDaemonName ") stall" : "busy timeout",
-		    loops, timeout / 1000000000ULL,
-		    string ? string : "");
+		assert(panicString != NULL);
+		if (multipleEntries) {
+			snprintf(panicString, panicStringLen,
+			    "%s[%d], (%llds): multiple entries holding the registry busy, IOKit termination queue depth %u: %s",
+			    pendingRequests ? "IOKit Daemon (" kIOKitDaemonName ") stall" : "busy timeout",
+			    loops, timeout / 1000000000ULL,
+			    (uint32_t)gIOTerminateWork,
+			    busyEntriesString ? busyEntriesString : "");
+		} else {
+			snprintf(panicString, panicStringLen,
+			    "%s[%d], (%llds): %s",
+			    pendingRequests ? "IOKit Daemon (" kIOKitDaemonName ") stall" : "busy timeout",
+			    loops, timeout / 1000000000ULL,
+			    busyEntriesString ? busyEntriesString : "");
+		}
+
 		IOLog("%s\n", panicString);
 		if (dopanic) {
 			panic("%s", panicString);
@@ -5525,14 +5666,20 @@ IOService::waitQuiet( uint64_t timeout )
 		}
 	}
 
-	if (string) {
-		IODeleteData(string, char, 256);
+	if (busyEntriesString) {
+		IODeleteData(busyEntriesString, char, busyEntriesStringLen);
 	}
 	if (panicString) {
 		IODeleteData(panicString, char, panicStringLen);
 	}
 
 	return ret;
+}
+
+IOReturn
+IOService::waitQuiet( uint64_t timeout )
+{
+	return waitQuietWithOptions(timeout);
 }
 
 IOReturn

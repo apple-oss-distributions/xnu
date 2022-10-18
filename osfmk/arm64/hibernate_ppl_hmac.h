@@ -40,7 +40,7 @@
 
 __BEGIN_DECLS
 
-kern_return_t ppl_hmac_init(void);
+void ppl_hmac_init(void);
 void ppl_hmac_reset(bool wired_pages);
 void ppl_hmac_hibernate_begin(void);
 void ppl_hmac_hibernate_end(void);

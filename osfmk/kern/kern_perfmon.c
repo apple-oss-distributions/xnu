@@ -52,24 +52,17 @@ _Atomic perfmon_config_t active_configs[perfmon_kind_max] = { NULL };
 
 const char * _Atomic perfmon_owners[perfmon_kind_max] = { NULL };
 
-static bool
-kpc_in_use(enum perfmon_kind id)
-{
-#if KPC
-	extern int kpc_get_force_all_ctrs(void);
-	return !(perfmon_cpmu == id && kpc_get_force_all_ctrs());
-#else // KPC
-#pragma unused(id)
-	return false;
-#endif // !KPC
-}
-
 __result_use_check bool
 perfmon_acquire(enum perfmon_kind kind, const char *name)
 {
 	assert(kind < perfmon_kind_max);
-	return kpc_in_use(kind) ||
-	       os_atomic_cmpxchg(&perfmon_owners[kind], NULL, name, acq_rel);
+#if KPC
+	extern int kpc_get_force_all_ctrs(void);
+	if (kind == perfmon_cpmu && kpc_get_force_all_ctrs()) {
+		return false;
+	}
+#endif // KPC
+	return os_atomic_cmpxchg(&perfmon_owners[kind], NULL, name, acq_rel);
 }
 
 bool
@@ -83,7 +76,7 @@ void
 perfmon_release(enum perfmon_kind kind, const char *name)
 {
 	assert(kind < perfmon_kind_max);
-	if (os_atomic_cmpxchg(&perfmon_owners[kind], name, NULL, acq_rel)) {
+	if (!os_atomic_cmpxchg(&perfmon_owners[kind], name, NULL, acq_rel)) {
 		panic("perfmon: unpaired release: %s on %u", name, kind);
 	}
 }

@@ -108,7 +108,8 @@ thread_quantum_expire(
 	assert(processor == current_processor());
 	assert(thread == current_thread());
 
-	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_QUANTUM_EXPIRED) | DBG_FUNC_START, 0, 0, 0, 0, 0);
+	KDBG_RELEASE(MACHDBG_CODE(
+		    DBG_MACH_SCHED, MACH_SCHED_QUANTUM_EXPIRED) | DBG_FUNC_START);
 
 	SCHED_STATS_INC(quantum_timer_expirations);
 
@@ -132,18 +133,18 @@ thread_quantum_expire(
 	}
 	thread->t_deduct_bank_ledger_time = 0;
 
-	ctime = mach_absolute_time();
-
+	struct recount_snap snap = { 0 };
+	recount_snapshot(&snap);
+	ctime = snap.rsn_time_mach;
 	check_monotonic_time(ctime);
-
 #ifdef CONFIG_MACH_APPROXIMATE_TIME
 	commpage_update_mach_approximate_time(ctime);
-#endif
+#endif /* CONFIG_MACH_APPROXIMATE_TIME */
+
 	sched_update_pset_avg_execution_time(processor->processor_set, thread->quantum_remaining, ctime, thread->th_sched_bucket);
 
-#if MONOTONIC
-	mt_sched_update(thread);
-#endif /* MONOTONIC */
+	recount_switch_thread(&snap, thread, get_threadtask(thread));
+	recount_log_switch_thread(&snap);
 
 	thread_lock(thread);
 
@@ -166,12 +167,28 @@ thread_quantum_expire(
 
 		new_computation = ctime - thread->computation_epoch;
 		new_computation += thread->computation_metered;
-		if (new_computation > max_unsafe_computation) {
+
+		bool demote = false;
+		switch (thread->sched_mode) {
+		case TH_MODE_REALTIME:
+			if (new_computation > max_unsafe_rt_computation) {
+				thread->safe_release = ctime + sched_safe_rt_duration;
+				demote = true;
+			}
+			break;
+		case TH_MODE_FIXED:
+			if (new_computation > max_unsafe_fixed_computation) {
+				thread->safe_release = ctime + sched_safe_fixed_duration;
+				demote = true;
+			}
+			break;
+		default:
+			panic("unexpected mode: %d", thread->sched_mode);
+		}
+
+		if (demote) {
 			KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_FAILSAFE) | DBG_FUNC_NONE,
 			    (uintptr_t)thread->sched_pri, (uintptr_t)thread->sched_mode, 0, 0, 0);
-
-			thread->safe_release = ctime + sched_safe_duration;
-
 			sched_thread_mode_demote(thread, TH_SFLAG_FAILSAFE);
 		}
 	}
@@ -196,19 +213,7 @@ thread_quantum_expire(
 
 	thread_quantum_init(thread);
 
-	/* Reload precise timing global policy to thread-local policy */
-	thread->precise_user_kernel_time = use_precise_user_kernel_time(thread);
-
-	/*
-	 * Since non-precise user/kernel time doesn't update the state/thread timer
-	 * during privilege transitions, synthesize an event now.
-	 */
-	if (!thread->precise_user_kernel_time) {
-		timer_update(processor->current_state, ctime);
-		timer_update(processor->thread_timer, ctime);
-		timer_update(&thread->runnable_timer, ctime);
-	}
-
+	timer_update(&thread->runnable_timer, ctime);
 
 	processor->quantum_end = ctime + thread->quantum_remaining;
 
@@ -256,11 +261,11 @@ thread_quantum_expire(
 	sched_timeshare_consider_maintenance(ctime);
 #endif /* CONFIG_SCHED_TIMESHARE_CORE */
 
-#if __arm__ || __arm64__
+#if __arm64__
 	if (thread->sched_mode == TH_MODE_REALTIME) {
 		sched_consider_recommended_cores(ctime, thread);
 	}
-#endif /* __arm__ || __arm64__ */
+#endif /* __arm64__ */
 
 	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_QUANTUM_EXPIRED) | DBG_FUNC_END, preempt, 0, 0, 0, 0);
 }
@@ -466,7 +471,7 @@ lightweight_update_priority(thread_t thread)
 		int priority;
 		uint32_t delta;
 
-		thread_timer_delta(thread, delta);
+		sched_tick_delta(thread, delta);
 
 		/*
 		 *	Accumulate timesharing usage only
@@ -657,7 +662,7 @@ update_priority(
 	/*
 	 *	Gather cpu usage data.
 	 */
-	thread_timer_delta(thread, delta);
+	sched_tick_delta(thread, delta);
 	if (ticks < SCHED_DECAY_TICKS) {
 		/*
 		 *	Accumulate timesharing usage only during contention for processor
@@ -916,6 +921,21 @@ sched_smt_update_thread_bucket(thread_t thread)
 	}
 }
 
+static inline void
+sched_validate_mode(sched_mode_t mode)
+{
+	switch (mode) {
+	case TH_MODE_FIXED:
+	case TH_MODE_REALTIME:
+	case TH_MODE_TIMESHARE:
+		break;
+
+	default:
+		panic("unexpected mode: %d", mode);
+		break;
+	}
+}
+
 /*
  * Set the thread's true scheduling mode
  * Called with thread mutex and thread locked
@@ -928,16 +948,7 @@ sched_set_thread_mode(thread_t thread, sched_mode_t new_mode)
 {
 	assert(thread->runq == PROCESSOR_NULL);
 
-	switch (new_mode) {
-	case TH_MODE_FIXED:
-	case TH_MODE_REALTIME:
-	case TH_MODE_TIMESHARE:
-		break;
-
-	default:
-		panic("unexpected mode: %d", new_mode);
-		break;
-	}
+	sched_validate_mode(new_mode);
 
 #if CONFIG_SCHED_AUTO_JOIN
 	/*
@@ -957,6 +968,26 @@ sched_set_thread_mode(thread_t thread, sched_mode_t new_mode)
 }
 
 /*
+ * TODO: Instead of having saved mode, have 'user mode' and 'true mode'.
+ * That way there's zero confusion over which the user wants
+ * and which the kernel wants.
+ */
+void
+sched_set_thread_mode_user(thread_t thread, sched_mode_t new_mode)
+{
+	assert(thread->runq == PROCESSOR_NULL);
+
+	sched_validate_mode(new_mode);
+
+	/* If demoted, only modify the saved mode. */
+	if (thread->sched_flags & TH_SFLAG_DEMOTED_MASK) {
+		thread->saved_mode = new_mode;
+	} else {
+		sched_set_thread_mode(thread, new_mode);
+	}
+}
+
+/*
  * Demote the true scheduler mode to timeshare (called with the thread locked)
  */
 void
@@ -967,6 +998,21 @@ sched_thread_mode_demote(thread_t thread, uint32_t reason)
 
 	if (thread->policy_reset) {
 		return;
+	}
+
+	switch (reason) {
+	case TH_SFLAG_THROTTLED:
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_DEMOTE_THROTTLED),
+		    thread_tid(thread), thread->sched_flags);
+		break;
+	case TH_SFLAG_FAILSAFE:
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_DEMOTE_FAILSAFE),
+		    thread_tid(thread), thread->sched_flags);
+		break;
+	case TH_SFLAG_RT_RESTRICTED:
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_DEMOTE_RT_RESTRICTED),
+		    thread_tid(thread), thread->sched_flags);
+		break;
 	}
 
 	if (thread->sched_flags & TH_SFLAG_DEMOTED_MASK) {
@@ -1003,6 +1049,21 @@ sched_thread_mode_undemote(thread_t thread, uint32_t reason)
 	assert(thread->saved_mode != TH_MODE_NONE);
 	assert(thread->sched_mode == TH_MODE_TIMESHARE);
 	assert(thread->policy_reset == 0);
+
+	switch (reason) {
+	case TH_SFLAG_THROTTLED:
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_UNDEMOTE_THROTTLED),
+		    thread_tid(thread), thread->sched_flags);
+		break;
+	case TH_SFLAG_FAILSAFE:
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_UNDEMOTE_FAILSAFE),
+		    thread_tid(thread), thread->sched_flags);
+		break;
+	case TH_SFLAG_RT_RESTRICTED:
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_UNDEMOTE_RT_RESTRICTED),
+		    thread_tid(thread), thread->sched_flags);
+		break;
+	}
 
 	thread->sched_flags &= ~reason;
 

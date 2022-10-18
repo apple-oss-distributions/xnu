@@ -160,6 +160,7 @@ rip6_input(
 	struct sockaddr_in6 rip6src;
 	int ret;
 	struct ifnet *ifp = m->m_pkthdr.rcvif;
+	boolean_t is_wake_pkt = false;
 
 	/* Expect 32-bit aligned data pointer on strict-align platforms */
 	MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
@@ -167,6 +168,10 @@ rip6_input(
 	rip6stat.rip6s_ipackets++;
 
 	init_sin6(&rip6src, m); /* general init */
+
+	if ((m->m_flags & M_PKTHDR) && (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
+		is_wake_pkt = true;
+	}
 
 	lck_rw_lock_shared(&ripcbinfo.ipi_lock);
 	LIST_FOREACH(in6p, &ripcb, inp_list) {
@@ -211,13 +216,12 @@ rip6_input(
 			if (n) {
 				if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
 				    SOFLOW_ENABLED(last->in6p_socket) ||
-				    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
-				    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
-				    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
+				    SO_RECV_CONTROL_OPTS(last->in6p_socket)) {
 					ret = ip6_savecontrol(last, n, &opts);
 					if (ret != 0) {
 						m_freem(n);
 						m_freem(opts);
+						opts = NULL;
 						last = in6p;
 						continue;
 					}
@@ -231,6 +235,10 @@ rip6_input(
 					rip6stat.rip6s_fullsock++;
 				} else {
 					sorwakeup(last->in6p_socket);
+				}
+				if (is_wake_pkt) {
+					soevent(in6p->in6p_socket,
+					    SO_FILT_HINT_LOCKED | SO_FILT_HINT_WAKE_PKT);
 				}
 				opts = NULL;
 			}
@@ -249,9 +257,7 @@ rip6_input(
 	if (last) {
 		if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
 		    SOFLOW_ENABLED(last->in6p_socket) ||
-		    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
-		    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
-		    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
+		    SO_RECV_CONTROL_OPTS(last->in6p_socket)) {
 			ret = ip6_savecontrol(last, m, &opts);
 			if (ret != 0) {
 				m_freem(m);
@@ -268,6 +274,10 @@ rip6_input(
 			rip6stat.rip6s_fullsock++;
 		} else {
 			sorwakeup(last->in6p_socket);
+		}
+		if (is_wake_pkt) {
+			soevent(last->in6p_socket,
+			    SO_FILT_HINT_LOCKED | SO_FILT_HINT_WAKE_PKT);
 		}
 	} else {
 		rip6stat.rip6s_nosock++;
@@ -523,7 +533,8 @@ rip6_output(
 	}
 
 	if (in6p->inp_flowhash == 0) {
-		in6p->inp_flowhash = inp_calc_flowhash(in6p);
+		inp_calc_flowhash(in6p);
+		ASSERT(in6p->inp_flowhash != 0);
 	}
 	/* update flowinfo - RFC 6437 */
 	if (in6p->inp_flow == 0 && in6p->in6p_flags & IN6P_AUTOFLOWLABEL) {

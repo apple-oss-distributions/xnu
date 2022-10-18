@@ -83,13 +83,14 @@
 #include <machine/commpage.h>
 #include <vm/vm_map.h>
 #include <pexpert/arm64/boot.h>
+#include <arm64/machine_machdep.h>
 #include <arm64/proc_reg.h>
 #include <prng/random.h>
 #if HIBERNATION
 #include <IOKit/IOHibernatePrivate.h>
 #include <machine/pal_hibernate.h>
 #endif /* HIBERNATION */
-
+#include <arm/pmap/pmap_data.h>
 /*
  * genassym.c is used to produce an
  * assembly file which, intermingled with unuseful assembly code,
@@ -122,15 +123,16 @@ main(int     argc,
 #if defined(HAS_APPLE_PAC)
 	DECLARE("TH_ROP_PID", offsetof(struct thread, machine.rop_pid));
 	DECLARE("TH_JOP_PID", offsetof(struct thread, machine.jop_pid));
-	DECLARE("TH_DISABLE_USER_JOP", offsetof(struct thread, machine.disable_user_jop));
 #endif /* defined(HAS_APPLE_PAC) */
+
+	DECLARE("TH_ARM_MACHINE_FLAGS", offsetof(struct thread, machine.arm_machine_flags));
 
 	/* These fields are being added on demand */
 	DECLARE("ACT_CONTEXT", offsetof(struct thread, machine.contextData));
 	DECLARE("TH_CTH_SELF", offsetof(struct thread, machine.cthread_self));
 	DECLARE("ACT_PREEMPT_CNT", offsetof(struct thread, machine.preemption_count));
-#if SCHED_PREEMPTION_DISABLE_DEBUG
-	DECLARE("ACT_PREEMPT_ADJ_MT", offsetof(struct thread, machine.preemption_disable_adj_mt));
+#if SCHED_HYGIENE_DEBUG
+	DECLARE("ACT_PREEMPT_MT", offsetof(struct thread, machine.preemption_disable_mt));
 #endif
 	DECLARE("ACT_CPUDATAP", offsetof(struct thread, machine.CpuDatap));
 	DECLARE("ACT_DEBUGDATA", offsetof(struct thread, machine.DebugData));
@@ -228,7 +230,10 @@ main(int     argc,
 	DECLARE("SS64_KERNEL_FP", offsetof(arm_kernel_context_t, ss.fp));
 	DECLARE("SS64_KERNEL_LR", offsetof(arm_kernel_context_t, ss.lr));
 	DECLARE("SS64_KERNEL_SP", offsetof(arm_kernel_context_t, ss.sp));
-	DECLARE("SS64_KERNEL_PC", offsetof(arm_kernel_context_t, ss.pc));
+	DECLARE("SS64_KERNEL_PC_WAS_IN_USER", offsetof(arm_kernel_context_t, ss.pc_was_in_userspace));
+	DECLARE("SS64_KERNEL_SSBS", offsetof(arm_kernel_context_t, ss.ssbs));
+	DECLARE("SS64_KERNEL_DIT", offsetof(arm_kernel_context_t, ss.dit));
+	DECLARE("SS64_KERNEL_UAO", offsetof(arm_kernel_context_t, ss.uao));
 
 	DECLARE("NS64_KERNEL_D8", offsetof(arm_kernel_context_t, ns.d[0]));
 	DECLARE("NS64_KERNEL_D9", offsetof(arm_kernel_context_t, ns.d[1]));
@@ -273,9 +278,9 @@ main(int     argc,
 	DECLARE("RTCLOCKDataSize", sizeof(rtclock_data_t));
 
 	DECLARE("rhdSize", sizeof(struct reset_handler_data));
-#if WITH_CLASSIC_S2R || !__arm64__
+#if WITH_CLASSIC_S2R
 	DECLARE("stSize", sizeof(SleepToken));
-#endif /* WITH_CLASSIC_S2R || !__arm64__ */
+#endif /* WITH_CLASSIC_S2R */
 
 	DECLARE("CPU_DATA_ENTRIES", offsetof(struct reset_handler_data, cpu_data_entries));
 
@@ -302,6 +307,10 @@ main(int     argc,
 	DECLARE("PMAP_CPU_DATA_PPL_STACK", offsetof(struct pmap_cpu_data, ppl_stack));
 	DECLARE("PMAP_CPU_DATA_KERN_SAVED_SP", offsetof(struct pmap_cpu_data, ppl_kern_saved_sp));
 	DECLARE("PMAP_CPU_DATA_SAVE_AREA", offsetof(struct pmap_cpu_data, save_area));
+#if HAS_GUARDED_IO_FILTER
+	DECLARE("PMAP_CPU_DATA_IOFILTER_STACK", offsetof(struct pmap_cpu_data, iofilter_stack));
+	DECLARE("PMAP_CPU_DATA_IOFILTER_SAVED_SP", offsetof(struct pmap_cpu_data, iofilter_saved_sp));
+#endif
 	DECLARE("PMAP_COUNT", PMAP_COUNT);
 #endif /* XNU_MONITOR */
 

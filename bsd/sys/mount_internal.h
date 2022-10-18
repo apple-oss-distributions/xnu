@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -77,6 +77,7 @@
 #include <sys/kernel_types.h>
 #include <sys/namei.h>
 #endif
+#include <sys/_types/_graftdmg_un.h>
 #include <sys/queue.h>
 #include <sys/lock.h>
 #include <net/radix.h>

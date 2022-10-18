@@ -52,7 +52,7 @@ class Waitq(object):
             return self._wq
         elif self._ty == GetEnumValue('waitq_type_t', 'WQT_PORT'):
             ts = self._wq.waitq_ts
-            if ts: return ts.waitq_ts
+            if ts: return ts.ts_waitq.waitq_ts
             return 0
         else:
             return _getSafeQ(self._wq)
@@ -60,7 +60,14 @@ class Waitq(object):
     def bitsStr(self):
         out_str = ""
 
-        if int(self._wq.waitq_interlock.nticket) != int(self._wq.waitq_interlock.cticket):
+        cticket = int(self._wq.waitq_interlock.cticket)
+        try:
+            kern.GetGlobalVariable('has_lock_pv')
+            cticket &= ~1
+        except:
+            pass
+
+        if cticket != int(self._wq.waitq_interlock.nticket):
             out_str += "L"
         else:
             out_str += "-"

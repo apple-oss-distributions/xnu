@@ -64,8 +64,6 @@ _doprnt_log(
 	void                    (*putc)(char),
 	int                     radix);
 
-#include <machine/io_map_entries.h>
-
 //------------------------------------------------------------------------
 // ??
 //typedef int kern_return_t;

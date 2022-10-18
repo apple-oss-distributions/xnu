@@ -56,22 +56,27 @@ enum {
 #define PERSONA_ID_NONE ((uid_t)-1)
 
 struct kpersona_info {
+	/* v1 fields */
 	uint32_t persona_info_version;
 
-	uid_t    persona_id; /* overlaps with UID */
+	uid_t    persona_id;
 	int      persona_type;
-	gid_t    persona_gid;
-	uint32_t persona_ngroups;
-	gid_t    persona_groups[NGROUPS];
-	uid_t    persona_gmuid;
+	gid_t    persona_gid; /* unused */
+	uint32_t persona_ngroups; /* unused */
+	gid_t    persona_groups[NGROUPS]; /* unused */
+	uid_t    persona_gmuid; /* unused */
 	char     persona_name[MAXLOGNAME + 1];
 
-	/* TODO: MAC policies?! */
-};
+	/* v2 fields */
+	uid_t    persona_uid;
+} __attribute__((packed));
 
 #define PERSONA_INFO_V1       1
-#define PERSONA_INFO_V1_SIZE  (sizeof(struct kpersona_info))
+#define PERSONA_INFO_V2       2
 
+// Userspace and the kernel must see the same struct layout. Assert that in
+// either case sizeof() is equal to the same pre-determined value.
+_Static_assert(sizeof(struct kpersona_info) == 348, "sizeof(kpersona_info) == 348");
 
 #define PERSONA_OP_ALLOC    1
 #define PERSONA_OP_PALLOC   2
@@ -226,7 +231,7 @@ int kpersona_pidinfo(pid_t pid, struct kpersona_info *info);
  *
  * Return:
  *         < 0: ERROR
- *        >= 0: The number of IDs found to match the input parameters
+ *        >= 0: Output value of idlen - may be larger than input size
  */
 int kpersona_find(const char *name, uid_t uid, uid_t *id, size_t *idlen);
 
@@ -244,7 +249,7 @@ int kpersona_find(const char *name, uid_t uid, uid_t *id, size_t *idlen);
  *                      (in number of IDs) - may be larger than input size
  * Return:
  *         < 0: ERROR
- *        >= 0: The number of IDs found to match the input parameters
+ *        >= 0: Output value of idlen - may be larger than input size
  */
 int kpersona_find_by_type(int persona_type, uid_t *id, size_t *idlen);
 #endif /* !KERNEL */
@@ -279,11 +284,7 @@ struct persona {
 	persona_type_t pna_type;
 	char         pna_login[MAXLOGNAME + 1];
 	char         *pna_path;
-
-	kauth_cred_t XNU_PTRAUTH_SIGNED_PTR("persona.pna_cred") pna_cred;
-	uid_t        pna_pgid;
-
-	int          pna_cred_locked; /* set upon first adoption */
+	uid_t        pna_uid;
 
 	LIST_ENTRY(persona) pna_list;
 
@@ -330,10 +331,9 @@ persona_desc(struct persona *persona, int locked)
 	char *end = p + sizeof(persona->pna_desc) - 1;
 
 	*end = 0;
-	p += scnprintf(p, end - p, "%s/%d:%d",
+	p += scnprintf(p, end - p, "%s/%d",
 	    persona->pna_login,
-	    kauth_cred_getuid(persona->pna_cred),
-	    kauth_cred_getgid(persona->pna_cred));
+	    persona->pna_id);
 
 	if (p <= end) {
 		*p = 0;
@@ -370,11 +370,11 @@ typedef struct ucred *kauth_cred_t;
 /* returns the persona ID for the given pesona structure */
 uid_t persona_get_id(struct persona *persona);
 
+/* returns the persona UID for the given pesona structure */
+uid_t persona_get_uid(struct persona *persona);
+
 /* returns the type of the persona (see enum above: PERSONA_GUEST, etc.) */
 int persona_get_type(struct persona *persona);
-
-/* returns ref on kauth_cred_t that must be dropped via kauth_cred_unref() */
-kauth_cred_t persona_get_cred(struct persona *persona);
 
 /* returns a reference that must be released with persona_put() */
 struct persona *persona_lookup(uid_t id);
@@ -414,6 +414,9 @@ struct persona *current_persona_get(void);
 /* get a reference to a persona structure */
 struct persona *persona_get(struct persona *persona);
 
+/* returns a reference to proc's persona that must be released with persona_put() */
+struct persona *proc_persona_get(proc_t p);
+
 /* release a reference to a persona structure */
 void persona_put(struct persona *persona);
 
@@ -436,6 +439,8 @@ void persona_put(struct persona *persona);
 int persona_find_by_type(persona_type_t persona_type, struct persona **persona,
     size_t *plen);
 
+boolean_t persona_is_adoption_allowed(struct persona *persona);
+
 #ifdef XNU_KERNEL_PRIVATE
 
 #if CONFIG_PERSONAS
@@ -447,14 +452,12 @@ int persona_find_by_type(persona_type_t persona_type, struct persona **persona,
 extern const uint32_t g_max_personas;
 
 struct persona *persona_alloc(uid_t id, const char *login,
-    persona_type_t type, char *path, int *error);
+    persona_type_t type, char *path, uid_t uid, int *error);
 
 int persona_init_begin(struct persona *persona);
 void persona_init_end(struct persona *persona, int error);
 
 struct persona *persona_lookup_and_invalidate(uid_t id);
-int persona_verify_and_set_uniqueness(struct persona *persona);
-boolean_t persona_is_unique(struct persona *persona);
 
 static inline int
 proc_has_persona(proc_t p)
@@ -476,26 +479,9 @@ persona_id_from_proc(proc_t p)
 
 int persona_proc_inherit(proc_t child, proc_t parent);
 
-int persona_proc_adopt_id(proc_t p, uid_t id,
-    kauth_cred_t auth_override);
 int persona_proc_adopt(proc_t p, struct persona *persona,
     kauth_cred_t auth_override);
 int persona_proc_drop(proc_t p);
-
-int persona_set_cred(struct persona *persona, kauth_cred_t cred);
-int persona_set_cred_from_proc(struct persona *persona, proc_t proc);
-
-uid_t persona_get_uid(struct persona *persona);
-
-int persona_set_gid(struct persona *persona, gid_t gid);
-gid_t persona_get_gid(struct persona *persona);
-
-int persona_set_groups(struct persona *persona, gid_t *groups, size_t ngroups, uid_t gmuid);
-int persona_get_groups(struct persona *persona, size_t *ngroups, gid_t *groups, size_t groups_sz);
-
-uid_t persona_get_gmuid(struct persona *persona);
-
-int persona_get_login(struct persona *persona, char login[MAXLOGNAME + 1]);
 
 /* returns a reference that must be released with persona_put() */
 struct persona *persona_proc_get(pid_t pid);

@@ -134,10 +134,10 @@ struct filedesc {
 	int                 fd_nfiles_hard_limit;   /* (L) fd_nfiles hard limit to terminate */
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
+	int                 fd_knlistsize;  /* (L) size of knlist */
 	struct fileproc   **XNU_PTRAUTH_SIGNED_PTR("filedesc.fd_ofiles") fd_ofiles; /* (L) file structures for open files */
 	char               *fd_ofileflags;  /* (L) per-process open file flags */
 
-	int                 fd_knlistsize;  /* (L) size of knlist */
 	struct  klist      *fd_knlist;      /* (L) list of attached knotes */
 
 	struct  kqworkq    *fd_wqkqueue;    /* (L) the workq kqueue */
@@ -354,13 +354,16 @@ fdt_destroy(proc_t p);
  * The vnode for the current thread's current working directory if it is
  * different from the parent process one.
  *
+ * @param in_exec
+ * The duplication of fdt is happening for exec
+ *
  * @returns
  * 0            Success
  * EPERM        Unable to acquire a reference to the current chroot directory
  * ENOMEM       Not enough memory to perform the clone operation
  */
 extern int
-fdt_fork(struct filedesc *child_fdt, proc_t parent_p, struct vnode *uth_cdir);
+fdt_fork(struct filedesc *child_fdt, proc_t parent_p, struct vnode *uth_cdir, bool in_exec);
 
 /*!
  * @function fdt_exec
@@ -381,9 +384,15 @@ fdt_fork(struct filedesc *child_fdt, proc_t parent_p, struct vnode *uth_cdir);
  *
  * @param posix_spawn_flags
  * A set of @c POSIX_SPAWN_* flags.
+ *
+ * @param thread
+ * new thread
+ *
+ * @param in_exec
+ * If the process is in exec
  */
 extern void
-fdt_exec(proc_t p, short posix_spawn_flags);
+fdt_exec(proc_t p, short posix_spawn_flags, thread_t thread, bool in_exec);
 
 /*!
  * @function fdt_invalidate

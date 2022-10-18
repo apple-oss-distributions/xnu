@@ -327,8 +327,8 @@ struct in_ifaddrhead in_ifaddrhead;             /* first inet address */
 struct in_ifaddrhashhead *in_ifaddrhashtbl;     /* inet addr hash table  */
 
 #define INADDR_NHASH    61
-static u_int32_t inaddr_nhash;                  /* hash table size */
-static u_int32_t inaddr_hashp;                  /* next largest prime */
+static uint32_t inaddr_nhash;                  /* hash table size */
+static uint32_t inaddr_hashp;                  /* next largest prime */
 
 static int ip_getstat SYSCTL_HANDLER_ARGS;
 struct ipstat ipstat;
@@ -593,8 +593,8 @@ in_ifaddrhashtbl_init(void)
 	inaddr_hashp = k;
 }
 
-u_int32_t
-inaddr_hashval(u_int32_t key)
+uint32_t
+inaddr_hashval(uint32_t key)
 {
 	/*
 	 * The hash index is the computed prime times the key modulo
@@ -606,6 +606,12 @@ inaddr_hashval(u_int32_t key)
 	} else {
 		return 0;
 	}
+}
+
+struct in_ifaddrhashhead *
+inaddr_hashlookup(uint32_t key)
+{
+	return &in_ifaddrhashtbl[inaddr_hashval(key)];
 }
 
 __private_extern__ void

@@ -243,14 +243,7 @@ static const char *user_bt[USER_FRAMES] = {
 	NULL,
 };
 
-#if defined(__arm__)
-
-#define KERNEL_FRAMES (2)
-static const char *kernel_bt[KERNEL_FRAMES] = {
-	"unix_syscall", "kdebug_trace64"
-};
-
-#elif defined(__arm64__)
+#if defined(__arm64__)
 
 #define KERNEL_FRAMES (4)
 static const char *kernel_bt[KERNEL_FRAMES] = {
@@ -266,7 +259,7 @@ static const char *kernel_bt[KERNEL_FRAMES] = {
 
 #else
 #error "architecture unsupported"
-#endif /* defined(__arm__) */
+#endif /* defined(__arm64__) */
 
 static dispatch_once_t backtrace_once;
 static dispatch_semaphore_t backtrace_started;

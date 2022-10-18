@@ -102,6 +102,18 @@ extern mach_msg_return_t mach_msg_trap(
 	mach_msg_timeout_t timeout,
 	mach_port_name_t notify);
 
+#if defined(__LP64__) || defined(__arm64__)
+extern mach_msg_return_t mach_msg2_trap(
+	void *data,
+	mach_msg_option64_t options,
+	uint64_t msgh_bits_and_send_size,
+	uint64_t msgh_remote_and_local_port,
+	uint64_t msgh_voucher_and_id,
+	uint64_t desc_count_and_rcv_name,
+	uint64_t rcv_size_and_priority,
+	uint64_t timeout);
+#endif
+
 extern mach_msg_return_t mach_msg_overwrite_trap(
 	mach_msg_header_t *msg,
 	mach_msg_option_t option,
@@ -448,6 +460,22 @@ extern mach_msg_return_t mach_msg_trap(
 	struct mach_msg_overwrite_trap_args *args);
 extern mach_msg_return_t mach_msg_overwrite_trap(
 	struct mach_msg_overwrite_trap_args *args);
+
+#if defined(__LP64__) || defined(__arm64__)
+struct mach_msg2_trap_args {
+	PAD_ARG_(mach_vm_address_t, data);
+	PAD_ARG_(mach_msg_option64_t, options);
+	PAD_ARG_(uint64_t, msgh_bits_and_send_size);
+	PAD_ARG_(uint64_t, msgh_remote_and_local_port);
+	PAD_ARG_(uint64_t, msgh_voucher_and_id);
+	PAD_ARG_(uint64_t, desc_count_and_rcv_name);
+	PAD_ARG_(uint64_t, rcv_size_and_priority);
+	PAD_ARG_(uint64_t, timeout);
+};
+
+extern mach_msg_return_t mach_msg2_trap(
+	struct mach_msg2_trap_args *args);
+#endif
 
 struct semaphore_signal_trap_args {
 	PAD_ARG_(mach_port_name_t, signal_name);

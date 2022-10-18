@@ -48,7 +48,7 @@ fsw_qos_set_ip_tos(struct ip *ip, uint8_t dscp)
 	uint8_t old_tos;
 	old_tos = ip->ip_tos;
 	ip->ip_tos &= IPTOS_ECN_MASK;
-	ip->ip_tos |= dscp << IPTOS_DSCP_SHIFT;
+	ip->ip_tos |= (u_char)(dscp << IPTOS_DSCP_SHIFT);
 	ip->ip_sum = fsw_qos_csum_fixup(ip->ip_sum, htons(old_tos),
 	    htons(ip->ip_tos));
 }

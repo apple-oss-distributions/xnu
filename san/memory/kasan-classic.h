@@ -104,10 +104,9 @@ vm_address_t kasan_realloc(vm_offset_t, vm_size_t, vm_size_t, vm_size_t);
 vm_address_t kasan_dealloc(vm_offset_t, vm_size_t *);
 vm_size_t kasan_user_size(vm_offset_t);
 void kasan_check_free(vm_offset_t, vm_size_t, unsigned);
-void kasan_free(void **, vm_size_t *, int, zone_t *, vm_size_t, bool);
 
 /* KASAN-CLASSIC Quarantine (zalloc) hooks */
-void kasan_free(void **, vm_size_t *, int, zone_t *, vm_size_t, bool);
+void kasan_free(void **, vm_size_t *, int, zone_t *, vm_size_t);
 void __asan_poison_cxx_array_cookie(uptr);
 uptr __asan_load_cxx_array_cookie(uptr *);
 void kasan_unpoison_cxx_array_cookie(void *);

@@ -150,6 +150,21 @@ process.
 .El
 .Pp
 New processes inherit the policy of their parent process.
+.It IOPOL_TYPE_VFS_DISALLOW_RW_FOR_O_EVTONLY
+This
+.Fa iotype
+lets users changes the file access modes accessed by the current process.
+.Pp
+IOPOL_TYPE_VFS_DISALLOW_RW_FOR_O_EVTONLY supports the following values for
+.Fa policy:
+.Bl -tag -width IOPOL_VFS_DISALLOW_RW_FOR_O_EVTONLY_DEFAULT
+.It IOPOL_VFS_DISALLOW_RW_FOR_O_EVTONLY_ON
+Disallows read and write access modes for files that the current process opens with O_EVTONLY flag. This policy is immutable once enabled.
+.It IOPOL_VFS_DISALLOW_RW_FOR_O_EVTONLY_DEFAULT
+This is the default I/O policy for the current process.
+.El
+.Pp
+New processes inherit the policy of their parent process.
 .El
 .Sh RETURN VALUES
 The

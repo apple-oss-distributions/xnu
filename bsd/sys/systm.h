@@ -156,11 +156,9 @@ void    nullsys(void);
 int     errsys(void);
 int     seltrue(dev_t dev, int which, struct proc *p);
 void    ttyprintf(struct tty *, const char *, ...) __printflike(2, 3);
-void    realitexpire(struct proc *);
+void    realitexpire(struct proc *, void*);
 int     hzto(struct timeval *tv);
 void    tablefull(const char *);
-int     kvprintf(char const *, void (*)(int, void*), void *, int,
-    __darwin_va_list) __printflike(1, 0);
 void    uprintf(const char *, ...) __printflike(1, 2);
 int     copywithin(void *saddr, void *daddr, size_t len);
 int64_t fulong(user_addr_t addr);

@@ -10,8 +10,6 @@
 
 #include <darwintest.h>
 
-#if !defined(__arm__)
-
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.workq"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
@@ -70,13 +68,3 @@ T_DECL(workq_sigprof, "test that workqueue threads can receive sigprof")
 
 	dispatch_main();
 }
-
-#else //!defined(__arm__)
-
-T_DECL(workq_sigprof, "test that workqueue threads can receive sigprof")
-{
-	T_EXPECTFAIL;
-	T_FAIL("<rdar://problem/25864196> setitimer/sigprof not supported on 32bit arm platforms");
-}
-
-#endif //!defined(__arm__)

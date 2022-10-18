@@ -165,6 +165,7 @@ __END_DECLS
 /* skip				((cpu_type_t) 20 */
 /* skip				((cpu_type_t) 21 */
 /* skip				((cpu_type_t) 22 */
+/* skip				((cpu_type_t) 23 */
 
 /*
  *	Machine subtypes (these are defined here, instead of in a machine
@@ -442,6 +443,7 @@ __END_DECLS
 #define CPUFAMILY_ARM_FIRESTORM_ICESTORM 0x1b588bb3
 #endif /* !RC_HIDE_XNU_FIRESTORM */
 
+/* Described in rdar://64125549 */
 #define CPUSUBFAMILY_UNKNOWN            0
 #define CPUSUBFAMILY_ARM_HP             1
 #define CPUSUBFAMILY_ARM_HG             2

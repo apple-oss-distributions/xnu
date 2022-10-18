@@ -75,6 +75,8 @@ struct proc_ro {
 #ifdef CONFIG_MACF
 		struct task_filter_ro_data task_filters;
 #endif
+		uint32_t t_flags_ro;                               /* RO-protected task flags (see osfmk/kern/task.h) */
+		uint32_t task_control_port_options;
 	});
 };
 

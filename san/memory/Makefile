@@ -73,13 +73,21 @@ endif
 
 ifeq ($(KASAN),1)
 
+# KASAN symbols are per-architecture, since on arm64/arm64e we use KASAN_TBI by default
+# and on x86/arm KASAN_CLASSIC
+ifeq ($(CURRENT_ARCH_CONFIG_LC),x86_64h)
+KASAN_ARCH_SUFFIX := x86_64
+else
+KASAN_ARCH_SUFFIX := $(CURRENT_ARCH_CONFIG_LC)
+endif
+
 # all build configs for the current variant
 CURRENT_VARIANT_BUILD_CONFIGS := $(strip $(call function_match_build_config_for_kernel_config, \
 		$(BUILD_CONFIGS), $(CURRENT_KERNEL_CONFIG)))
 
 KEXT_VARIANT := Kasan_$(CURRENT_KERNEL_CONFIG_LC)
 
-$(eval $(call san_symbolset_template,$(KEXT_VARIANT),Kasan_enabled))
+$(eval $(call san_symbolset_template,$(KEXT_VARIANT),Kasan_enabled.$(KASAN_ARCH_SUFFIX)))
 $(eval $(call san_kext_dstroot_rule_template,Kasan.kext,$(KEXT_VARIANT)))
 $(eval $(call san_kext_symroot_rule_template,Kasan.kext,$(KEXT_VARIANT),$(CURRENT_VARIANT_BUILD_CONFIGS)))
 

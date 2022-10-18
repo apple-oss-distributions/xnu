@@ -548,9 +548,14 @@ mach_port_kernel_object(
 	unsigned *object_addr)
 {
 	kern_return_t rv;
+	mach_vm_address_t addr;
 
-	rv = _kernelrpc_mach_port_kernel_object(task, name,
-	    object_type, object_addr);
+	rv = _kernelrpc_mach_port_kobject(task, name,
+	    object_type, &addr);
+
+	if (rv == KERN_SUCCESS && object_addr) {
+		*object_addr = (unsigned)addr;
+	}
 
 	return rv;
 }

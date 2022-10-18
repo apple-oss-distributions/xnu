@@ -44,7 +44,7 @@ struct TestIODeviceMemoryRosettaUserClientOutput {
 
 T_DECL(rosetta_map_mmio, "Test mapping MMIO memory at 4K-page aligned offsets in Rosetta processes")
 {
-#if defined(__arm64__) || defined(__arm__)
+#if defined(__arm64__)
 	T_SKIP("Test should run under Rosetta.");
 #else
 	io_service_t service;

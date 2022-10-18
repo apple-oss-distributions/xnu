@@ -51,6 +51,7 @@ extern "C" {
 
 struct IOPolledFileIOVars;
 struct mount;
+struct vnode;
 
 enum{
 	kIOMountChangeMount      = 0x00000101,
@@ -59,21 +60,31 @@ enum{
 	kIOMountChangeDidResize  = 0x00000202,
 };
 extern void IOBSDMountChange(struct mount *mp, uint32_t op);
+extern void IOBSDLowSpaceUnlinkKernelCore(void);
 /*
  *       Tests that the entitlement is present and true
  */
 extern boolean_t IOCurrentTaskHasEntitlement(const char * entitlement);
 extern boolean_t IOTaskHasEntitlement(task_t task, const char *entitlement);
 extern boolean_t IOVnodeHasEntitlement(struct vnode *vnode, int64_t off, const char *entitlement);
+extern char * IOCurrentTaskGetEntitlement(const char * entitlement);
+extern char * IOTaskGetEntitlement(task_t task, const char * entitlement);
 /*
  * IOVnodeGetEntitlement returns a null-terminated string that must be freed with kfree_data().
  */
 extern char *IOVnodeGetEntitlement(struct vnode *vnode, int64_t offset, const char *entitlement);
 
+/*
+ *       Tests that the entitlement is present and has matching value
+ */
+extern boolean_t IOCurrentTaskHasStringEntitlement(const char *entitlement, const char *value);
+extern boolean_t IOTaskHasStringEntitlement(task_t task, const char *entitlement, const char *value);
+
 typedef enum {
 	kIOPolledCoreFileModeNotInitialized,
 	kIOPolledCoreFileModeDisabled,
 	kIOPolledCoreFileModeClosed,
+	kIOPolledCoreFileModeUnlinked,
 	kIOPolledCoreFileModeStackshot,
 	kIOPolledCoreFileModeCoredump,
 } IOPolledCoreFileMode_t;

@@ -1,7 +1,6 @@
 include ../Makefile.common
 
 CFLAGS:=-c -Wall -pedantic -Os -isysroot $(SDKROOT) $(ARCH_FLAGS)
-CFLAGS += -Wl,-sectcreate,__INFO_FILTER,__disable,/dev/null
 LDFLAGS:= $(ARCH_FLAGS) -isysroot $(SDKROOT)
 
 SRCROOT?=$(shell /bin/pwd)

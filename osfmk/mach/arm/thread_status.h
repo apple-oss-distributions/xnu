@@ -40,6 +40,10 @@
 #include <mach/message.h>
 #include <mach/vm_types.h>
 
+#ifdef XNU_KERNEL_PRIVATE
+#include <os/refcnt.h>
+#endif
+
 /*
  *    Support for determining the state of a thread
  */
@@ -284,7 +288,7 @@ const_thread_state64(const arm_unified_thread_state_t *its)
 }
 
 #if defined(__arm__)
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 
 #define ARM_SAVED_STATE (THREAD_STATE_NONE + 1)
 
@@ -517,7 +521,11 @@ struct arm_kernel_saved_state {
 	uint64_t fp;        /* Frame pointer x29 */
 	uint64_t lr;        /* Link register x30 */
 	uint64_t sp;        /* Stack pointer x31 */
-	uint64_t pc;        /* Program counter */
+	/* Some things here we DO need to preserve */
+	uint8_t pc_was_in_userspace;
+	uint8_t ssbs;
+	uint8_t dit;
+	uint8_t uao;
 } __attribute__((aligned(16)));
 
 typedef struct arm_kernel_saved_state arm_kernel_saved_state_t;
@@ -922,6 +930,7 @@ struct arm_debug_aggregate_state {
 		arm_debug_state32_t ds32;
 		arm_debug_state64_t ds64;
 	} uds;
+	os_refcnt_t     ref;
 } __attribute__((aligned(16)));
 
 typedef struct arm_debug_aggregate_state arm_debug_state_t;

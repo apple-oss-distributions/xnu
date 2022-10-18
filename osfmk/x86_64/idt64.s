@@ -1533,14 +1533,6 @@ Entry(hndl_alltraps)
 Entry(return_from_trap)
 	movq	%gs:CPU_ACTIVE_THREAD,%r15	/* Get current thread */
 	movl	$-1, TH_IOTIER_OVERRIDE(%r15)	/* Reset IO tier override to -1 before returning to userspace */
-
-	cmpl	$0, TH_RWLOCK_COUNT(%r15)	/* Check if current thread has pending RW locks held */
-	jz	1f
-	xorq	%rbp, %rbp			/* clear framepointer */
-	mov	%r15, %rdi			/* Set RDI to current thread */
-	CCALL(lck_rw_clear_promotions_x86)	/* Clear promotions if needed */
-1:	
-
 	movq	TH_PCB_ISS(%r15), %r15		/* PCB stack */
 	movl	%gs:CPU_PENDING_AST,%eax
 	testl	%eax,%eax
@@ -1659,7 +1651,7 @@ UNWIND_PROLOGUE
 
 UNWIND_DIRECTIVES	
 	
-	TIME_INT_ENTRY			/* do timing */
+	CCALL1(recount_enter_intel_interrupt, %r15) /* update time and PMCs */
 
 	/* Check for active vtimers in the current task */
 	mov	%gs:CPU_ACTIVE_THREAD, %rcx
@@ -1679,7 +1671,7 @@ LEXT(return_to_iret)			/* (label for kdb_kintr and hardclock) */
 	decl	%gs:CPU_INTERRUPT_LEVEL
 	decl	%gs:CPU_PREEMPTION_LEVEL
 
-	TIME_INT_EXIT			/* do timing */
+	CCALL(recount_leave_intel_interrupt) /* update time and PMCs */
 
 	popq	%gs:CPU_INT_STATE 	/* reset/clear intr state pointer */
 	popq	%rsp			/* switch back to old stack */

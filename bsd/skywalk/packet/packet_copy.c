@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -94,6 +94,7 @@ pkt_copy_from_pkt(const enum txrx t, kern_packet_t dph, const uint16_t doff,
 	uint32_t partial;
 	uint16_t csum = 0;
 	uint8_t *sbaddr, *dbaddr;
+	boolean_t do_sum = copysum && !PACKET_HAS_FULL_CHECKSUM_FLAGS(spkt);
 
 	_CASSERT(sizeof(csum) == sizeof(uint16_t));
 
@@ -104,12 +105,12 @@ pkt_copy_from_pkt(const enum txrx t, kern_packet_t dph, const uint16_t doff,
 	MD_BUFLET_ADDR_ABS(dpkt, dbaddr);
 	ASSERT(dbaddr != NULL);
 	dbaddr += doff;
-	VERIFY((doff + len) <= dpkt->pkt_qum.qum_pp->pp_buflet_size);
+	VERIFY((doff + len) <= PP_BUF_SIZE_DEF(dpkt->pkt_qum.qum_pp));
 
 	switch (t) {
 	case NR_RX:
 		dpkt->pkt_csum_flags = 0;
-		if (__probable(copysum)) {
+		if (__probable(do_sum)) {
 			/*
 			 * Use pkt_copy() to copy the portion up to the
 			 * point where we need to start the checksum, and
@@ -126,8 +127,9 @@ pkt_copy_from_pkt(const enum txrx t, kern_packet_t dph, const uint16_t doff,
 			    start, csum, FALSE);
 		} else {
 			_pkt_copy(sbaddr, dbaddr, len);
-			dpkt->pkt_csum_rx_start_off = 0;
-			dpkt->pkt_csum_rx_value = 0;
+			dpkt->pkt_csum_rx_start_off = spkt->pkt_csum_rx_start_off;
+			dpkt->pkt_csum_rx_value = spkt->pkt_csum_rx_value;
+			dpkt->pkt_csum_flags |= spkt->pkt_csum_flags & PACKET_CSUM_RX_FLAGS;
 		}
 
 		SK_DF(SK_VERB_COPY | SK_VERB_RX,
@@ -172,7 +174,7 @@ pkt_copy_from_pkt(const enum txrx t, kern_packet_t dph, const uint16_t doff,
 		} else {
 			_pkt_copy(sbaddr, dbaddr, len);
 		}
-		dpkt->pkt_csum_flags = 0;
+		dpkt->pkt_csum_flags = spkt->pkt_csum_flags & (PACKET_CSUM_TSO_FLAGS);
 		dpkt->pkt_csum_tx_start_off = 0;
 		dpkt->pkt_csum_tx_stuff_off = 0;
 
@@ -635,15 +637,16 @@ pkt_copy_multi_buflet_from_pkt(const enum txrx t, kern_packet_t dph,
 	uint32_t partial;
 	uint16_t csum = 0;
 	struct __kern_packet *dpkt = SK_PTR_ADDR_KPKT(dph);
+	struct __kern_packet *spkt = SK_PTR_ADDR_KPKT(sph);
+	boolean_t do_sum = copysum && !PACKET_HAS_FULL_CHECKSUM_FLAGS(spkt);
 
-	VERIFY((doff + len) <=
-	    (dpkt->pkt_qum.qum_pp->pp_buflet_size *
+	VERIFY((doff + len) <= (PP_BUF_SIZE_DEF(dpkt->pkt_qum.qum_pp) *
 	    __packet_get_buflet_count(dph)));
 
 	switch (t) {
 	case NR_RX:
 		dpkt->pkt_csum_flags = 0;
-		if (__probable(copysum)) {
+		if (__probable(do_sum)) {
 			/*
 			 * copy the portion up to the point where we need to
 			 * start the checksum, and copy the remainder,
@@ -664,8 +667,9 @@ pkt_copy_multi_buflet_from_pkt(const enum txrx t, kern_packet_t dph,
 			rc = _pkt_copypkt_sum(sph, soff, dph, doff, len, NULL,
 			    FALSE);
 			ASSERT(rc);
-			dpkt->pkt_csum_rx_start_off = 0;
-			dpkt->pkt_csum_rx_value = 0;
+			dpkt->pkt_csum_rx_start_off = spkt->pkt_csum_rx_start_off;
+			dpkt->pkt_csum_rx_value = spkt->pkt_csum_rx_value;
+			dpkt->pkt_csum_flags |= spkt->pkt_csum_flags & PACKET_CSUM_RX_FLAGS;
 		}
 		break;
 
@@ -698,7 +702,7 @@ pkt_copy_multi_buflet_from_pkt(const enum txrx t, kern_packet_t dph,
 			 * first buffer.
 			 */
 			ASSERT((stuff + doff + sizeof(csum)) <=
-			    dpkt->pkt_qum.qum_pp->pp_buflet_size);
+			    PP_BUF_SIZE_DEF(dpkt->pkt_qum.qum_pp));
 			ASSERT(stuff <= (len - sizeof(csum)));
 
 			/* get first buflet buffer address from packet */
@@ -717,7 +721,7 @@ pkt_copy_multi_buflet_from_pkt(const enum txrx t, kern_packet_t dph,
 			    FALSE);
 			ASSERT(rc);
 		}
-		dpkt->pkt_csum_flags = 0;
+		dpkt->pkt_csum_flags = spkt->pkt_csum_flags & (PACKET_CSUM_TSO_FLAGS);
 		dpkt->pkt_csum_tx_start_off = 0;
 		dpkt->pkt_csum_tx_stuff_off = 0;
 		break;
@@ -753,13 +757,16 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 	MD_BUFLET_ADDR_ABS(pkt, baddr);
 	ASSERT(baddr != NULL);
 	baddr += poff;
-	VERIFY((poff + len) <= pkt->pkt_qum.qum_pp->pp_buflet_size);
+	VERIFY((poff + len) <= PP_BUF_SIZE_DEF(pkt->pkt_qum.qum_pp));
 
 	switch (t) {
 	case NR_RX:
-		pkt->pkt_csum_flags = 0;
+		pkt->pkt_csum_flags = m->m_pkthdr.csum_flags;
+		pkt->pkt_csum_rx_start_off = 0;
+		pkt->pkt_csum_rx_value = m->m_pkthdr.csum_rx_val;
 		pkt->pkt_svc_class = m_get_service_class(m);
-		if (__probable(copysum)) {
+		if (__probable(((m->m_pkthdr.csum_flags & CSUM_RX_FULL_FLAGS)
+		    != CSUM_RX_FULL_FLAGS) && copysum)) {
 			/*
 			 * Use m_copydata() to copy the portion up to the
 			 * point where we need to start the checksum, and
@@ -776,8 +783,6 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 			    start, csum, FALSE);
 		} else {
 			m_copydata(m, moff, len, baddr);
-			pkt->pkt_csum_rx_start_off = 0;
-			pkt->pkt_csum_rx_value = 0;
 		}
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_RX,
 		    "%s(%d) RX len %u, copy+sum %u (csum 0x%04x), start %u",
@@ -837,10 +842,21 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		pkt->pkt_csum_tx_start_off = 0;
 		pkt->pkt_csum_tx_stuff_off = 0;
 
+		if (m->m_pkthdr.csum_flags & CSUM_TSO_IPV4) {
+			pkt->pkt_csum_flags |= PACKET_TSO_IPV4;
+			ASSERT((pkt->pkt_csum_flags & PACKET_TSO_IPV6) == 0);
+		}
+		if (m->m_pkthdr.csum_flags & CSUM_TSO_IPV6) {
+			pkt->pkt_csum_flags |= PACKET_TSO_IPV6;
+			ASSERT((pkt->pkt_csum_flags & PACKET_TSO_IPV4) == 0);
+		}
+
 		/* translate mbuf metadata */
 		pkt->pkt_flowsrc_type = m->m_pkthdr.pkt_flowsrc;
+		pkt->pkt_flowsrc_token = m->m_pkthdr.pkt_mpriv_srcid;
 		pkt->pkt_flow_token = m->m_pkthdr.pkt_flowid;
 		pkt->pkt_comp_gencnt = m->m_pkthdr.comp_gencnt;
+		pkt->pkt_proto_seg_sz = (uint16_t)m->m_pkthdr.tso_segsz;
 		switch (m->m_pkthdr.pkt_proto) {
 		case IPPROTO_QUIC:
 			pkt->pkt_flow_ip_proto = IPPROTO_UDP;
@@ -1112,13 +1128,17 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 	MD_BUFLET_ADDR_ABS(pkt, baddr);
 	ASSERT(baddr != NULL);
 	baddr += poff;
-	VERIFY((poff + len) <= (pkt->pkt_qum.qum_pp->pp_buflet_size *
+	VERIFY((poff + len) <= (PP_BUF_SIZE_DEF(pkt->pkt_qum.qum_pp) *
 	    __packet_get_buflet_count(ph)));
 
 	switch (t) {
 	case NR_RX:
-		pkt->pkt_csum_flags = 0;
-		if (__probable(copysum)) {
+		pkt->pkt_csum_flags = m->m_pkthdr.csum_flags;
+		pkt->pkt_csum_rx_start_off = 0;
+		pkt->pkt_csum_rx_value = m->m_pkthdr.csum_rx_val;
+		pkt->pkt_svc_class = m_get_service_class(m);
+		if (__probable(((m->m_pkthdr.csum_flags & CSUM_RX_FULL_FLAGS)
+		    != CSUM_RX_FULL_FLAGS) && copysum)) {
 			/*
 			 * Use m_copydata() to copy the portion up to the
 			 * point where we need to start the checksum, and
@@ -1135,8 +1155,6 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 			METADATA_ADJUST_LEN(pkt, start, poff);
 		} else {
 			(void) m_copypkt_sum(m, moff, ph, poff, len, FALSE);
-			pkt->pkt_csum_rx_start_off = 0;
-			pkt->pkt_csum_rx_value = 0;
 		}
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_RX,
 		    "%s(%d) RX len %u, copy+sum %u (csum 0x%04x), start %u",
@@ -1197,10 +1215,21 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 		pkt->pkt_csum_tx_start_off = 0;
 		pkt->pkt_csum_tx_stuff_off = 0;
 
+		if (m->m_pkthdr.csum_flags & CSUM_TSO_IPV4) {
+			pkt->pkt_csum_flags |= PACKET_TSO_IPV4;
+			ASSERT((pkt->pkt_csum_flags & PACKET_TSO_IPV6) == 0);
+		}
+		if (m->m_pkthdr.csum_flags & CSUM_TSO_IPV6) {
+			pkt->pkt_csum_flags |= PACKET_TSO_IPV6;
+			ASSERT((pkt->pkt_csum_flags & PACKET_TSO_IPV4) == 0);
+		}
+
 		/* translate mbuf metadata */
 		pkt->pkt_flowsrc_type = m->m_pkthdr.pkt_flowsrc;
+		pkt->pkt_flowsrc_token = m->m_pkthdr.pkt_mpriv_srcid;
 		pkt->pkt_flow_token = m->m_pkthdr.pkt_flowid;
 		pkt->pkt_comp_gencnt = m->m_pkthdr.comp_gencnt;
+		pkt->pkt_proto_seg_sz = (uint16_t)m->m_pkthdr.tso_segsz;
 		switch (m->m_pkthdr.pkt_proto) {
 		case IPPROTO_QUIC:
 			pkt->pkt_flow_ip_proto = IPPROTO_UDP;
@@ -1283,6 +1312,8 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
  * caller may want to use the original value upon return.  We do, however,
  * adjust the length to reflect the total data span.
  *
+ * This routine supports copying into an mbuf chain for RX but not TX.
+ *
  * start/stuff is relative to poff, within [0, len], such that
  * [ 0 ... poff ... poff + start/stuff ... poff + len ... ]
  */
@@ -1292,43 +1323,66 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
     const boolean_t copysum, const uint16_t start)
 {
 	struct __kern_packet *pkt = SK_PTR_ADDR_KPKT(ph);
-	uint32_t partial;
+	struct mbuf *curr_m;
+	uint32_t partial = 0;
+	uint32_t remaining_len = len, copied_len = 0;
 	uint16_t csum = 0;
 	uint8_t *baddr;
 	uint8_t *dp;
+	boolean_t do_sum = copysum && !PACKET_HAS_FULL_CHECKSUM_FLAGS(pkt);
 
+	ASSERT(len >= start);
 	_CASSERT(sizeof(csum) == sizeof(uint16_t));
 
 	/* get buffer address from packet */
 	MD_BUFLET_ADDR_ABS(pkt, baddr);
 	ASSERT(baddr != NULL);
 	baddr += poff;
-	VERIFY((poff + len) <= pkt->pkt_qum.qum_pp->pp_buflet_size);
+	VERIFY((poff + len) <= PP_BUF_SIZE_DEF(pkt->pkt_qum.qum_pp));
 
-	ASSERT((m->m_flags & M_PKTHDR) && m->m_next == NULL);
+	ASSERT((m->m_flags & M_PKTHDR));
 	m->m_data += moff;
-	dp = (uint8_t *)m->m_data;
-	VERIFY(((intptr_t)dp - (intptr_t)mbuf_datastart(m)) + len <=
-	    (uint32_t)mbuf_maxlen(m));
-	m->m_len += len;
-	m->m_pkthdr.len += len;
-	VERIFY(m->m_len == m->m_pkthdr.len &&
-	    (uint32_t)m->m_len <= (uint32_t)mbuf_maxlen(m));
 
 	switch (t) {
 	case NR_RX:
 		m->m_pkthdr.csum_flags &= ~CSUM_RX_FLAGS;
-		if (__probable(copysum)) {
-			/*
-			 * Use pkt_copy() to copy the portion up to the
-			 * point where we need to start the checksum, and
-			 * copy the remainder, checksumming as we go.
-			 */
-			if (__probable(start != 0)) {
-				_pkt_copy(baddr, dp, start);
+
+		/*
+		 * Use pkt_copy() to copy the portion up to the
+		 * point where we need to start the checksum, and
+		 * copy the remainder, checksumming as we go.
+		 */
+		if (__probable(do_sum && start != 0)) {
+			ASSERT(M_TRAILINGSPACE(m) >= start);
+			ASSERT(m->m_len == 0);
+			dp = (uint8_t *)m->m_data;
+			_pkt_copy(baddr, dp, start);
+			remaining_len -= start;
+			copied_len += start;
+			m->m_len += start;
+			m->m_pkthdr.len += start;
+		}
+		curr_m = m;
+		while (curr_m != NULL && remaining_len != 0) {
+			uint32_t tmp_len = MIN(remaining_len,
+			    (uint32_t)M_TRAILINGSPACE(curr_m));
+			dp = (uint8_t *)curr_m->m_data + curr_m->m_len;
+			if (__probable(do_sum)) {
+				partial = __packet_copy_and_sum((baddr + copied_len),
+				    dp, tmp_len, partial);
+			} else {
+				_pkt_copy((baddr + copied_len), dp, tmp_len);
 			}
-			partial = __packet_copy_and_sum((baddr + start),
-			    (dp + start), (len - start), 0);
+
+			curr_m->m_len += tmp_len;
+			m->m_pkthdr.len += tmp_len;
+			copied_len += tmp_len;
+			remaining_len -= tmp_len;
+			curr_m = curr_m->m_next;
+		}
+		ASSERT(remaining_len == 0);
+
+		if (__probable(do_sum)) {
 			csum = __packet_fold_sum(partial);
 
 			m->m_pkthdr.csum_flags |=
@@ -1336,9 +1390,13 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 			m->m_pkthdr.csum_rx_start = start;
 			m->m_pkthdr.csum_rx_val = csum;
 		} else {
-			_pkt_copy(baddr, dp, len);
-			m->m_pkthdr.csum_rx_start = 0;
-			m->m_pkthdr.csum_rx_val = 0;
+			m->m_pkthdr.csum_rx_start = pkt->pkt_csum_rx_start_off;
+			m->m_pkthdr.csum_rx_val = pkt->pkt_csum_rx_value;
+			_CASSERT(CSUM_RX_FULL_FLAGS == PACKET_CSUM_RX_FULL_FLAGS);
+			m->m_pkthdr.csum_flags |= pkt->pkt_csum_flags & PACKET_CSUM_RX_FULL_FLAGS;
+			if (__improbable((pkt->pkt_csum_flags & PACKET_CSUM_PARTIAL) != 0)) {
+				m->m_pkthdr.csum_flags |= CSUM_PARTIAL;
+			}
 		}
 
 		/* translate packet metadata */
@@ -1363,6 +1421,16 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		break;
 
 	case NR_TX:
+		dp = (uint8_t *)m->m_data;
+		ASSERT(m->m_next == NULL);
+
+		VERIFY(((intptr_t)dp - (intptr_t)mbuf_datastart(m)) + len <=
+		    (uint32_t)mbuf_maxlen(m));
+		m->m_len += len;
+		m->m_pkthdr.len += len;
+		VERIFY(m->m_len == m->m_pkthdr.len &&
+		    (uint32_t)m->m_len <= (uint32_t)mbuf_maxlen(m));
+
 		if (__probable(copysum)) {
 			uint16_t stuff = pkt->pkt_csum_tx_stuff_off;
 			/*
@@ -1400,8 +1468,10 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		/* translate packet metadata */
 		m->m_pkthdr.pkt_flowsrc = pkt->pkt_flowsrc_type;
 		m->m_pkthdr.pkt_svc = pkt->pkt_svc_class;
+		m->m_pkthdr.pkt_mpriv_srcid = pkt->pkt_flowsrc_token;
 		m->m_pkthdr.pkt_flowid = pkt->pkt_flow_token;
 		m->m_pkthdr.comp_gencnt = pkt->pkt_comp_gencnt;
+		m->m_pkthdr.tso_segsz = pkt->pkt_proto_seg_sz;
 		m->m_pkthdr.pkt_proto = pkt->pkt_flow->flow_ip_proto;
 		mbuf_set_timestamp(m, pkt->pkt_timestamp,
 		    ((pkt->pkt_pflags & PKT_F_TS_VALID) != 0));
@@ -1444,6 +1514,8 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
  * This is a multi-buflet variant of pkt_copy_to_mbuf().
  * NOTE: poff is the offset within the packet.
  *
+ * This routine supports copying into an mbuf chain for RX but not TX.
+ *
  * start/stuff is relative to poff, within [0, len], such that
  * [ 0 ... poff ... poff + start/stuff ... poff + len ... ]
  */
@@ -1452,46 +1524,65 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
     const uint16_t poff, struct mbuf *m, const uint16_t moff,
     const uint32_t len, const boolean_t copysum, const uint16_t start)
 {
-#pragma unused(moff) /* may be PROC_NULL */
 	struct __kern_packet *pkt = SK_PTR_ADDR_KPKT(ph);
-	uint32_t partial;
+	struct mbuf *curr_m;
+	uint32_t partial = 0;
+	uint32_t remaining_len = len, copied_len = 0;
 	uint16_t csum = 0;
 	uint8_t *baddr;
 	uint8_t *dp;
+	boolean_t do_sum = copysum && !PACKET_HAS_FULL_CHECKSUM_FLAGS(pkt);
 
+	ASSERT(len >= start);
 	_CASSERT(sizeof(csum) == sizeof(uint16_t));
 
 	/* get buffer address from packet */
 	MD_BUFLET_ADDR_ABS(pkt, baddr);
 	ASSERT(baddr != NULL);
 	baddr += poff;
-	VERIFY((poff + len) <= (pkt->pkt_qum.qum_pp->pp_buflet_size *
+	VERIFY((poff + len) <= (PP_BUF_SIZE_DEF(pkt->pkt_qum.qum_pp) *
 	    __packet_get_buflet_count(ph)));
 
-	ASSERT((m->m_flags & M_PKTHDR) && m->m_next == NULL);
+	ASSERT((m->m_flags & M_PKTHDR));
 	m->m_data += moff;
-	dp = (uint8_t *)m->m_data;
-	VERIFY(((intptr_t)dp - (intptr_t)mbuf_datastart(m)) + len <=
-	    (uint32_t)mbuf_maxlen(m));
-	m->m_len += len;
-	m->m_pkthdr.len += len;
-	VERIFY(m->m_len == m->m_pkthdr.len &&
-	    (uint32_t)m->m_len <= (uint32_t)mbuf_maxlen(m));
 
 	switch (t) {
 	case NR_RX:
 		m->m_pkthdr.csum_flags &= ~CSUM_RX_FLAGS;
-		if (__probable(copysum)) {
-			/*
-			 * Use pkt_copy() to copy the portion up to the
-			 * point where we need to start the checksum, and
-			 * copy the remainder, checksumming as we go.
-			 */
-			if (__probable(start != 0)) {
-				_pkt_copy(baddr, dp, start);
+		if (__probable(do_sum && start != 0)) {
+			ASSERT(M_TRAILINGSPACE(m) >= start);
+			ASSERT(m->m_len == 0);
+			dp = (uint8_t *)m->m_data;
+			_pkt_copy(baddr, dp, start);
+			remaining_len -= start;
+			copied_len += start;
+			m->m_len += start;
+			m->m_pkthdr.len += start;
+		}
+		curr_m = m;
+		while (curr_m != NULL && remaining_len != 0) {
+			uint32_t tmp_len = MIN(remaining_len,
+			    (uint32_t)M_TRAILINGSPACE(curr_m));
+			uint16_t soff = poff + (uint16_t)copied_len;
+			dp = (uint8_t *)curr_m->m_data + curr_m->m_len;
+
+			if (__probable(do_sum)) {
+				partial = _pkt_copyaddr_sum(ph, soff,
+				    dp, tmp_len, TRUE, partial, NULL);
+			} else {
+				pkt_copyaddr_sum(ph, soff,
+				    dp, tmp_len, FALSE, 0, NULL);
 			}
-			partial = _pkt_copyaddr_sum(ph, (poff + start),
-			    (dp + start), (len - start), TRUE, 0, NULL);
+
+			curr_m->m_len += tmp_len;
+			m->m_pkthdr.len += tmp_len;
+			copied_len += tmp_len;
+			remaining_len -= tmp_len;
+			curr_m = curr_m->m_next;
+		}
+		ASSERT(remaining_len == 0);
+
+		if (__probable(do_sum)) {
 			csum = __packet_fold_sum(partial);
 
 			m->m_pkthdr.csum_flags |=
@@ -1499,9 +1590,13 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 			m->m_pkthdr.csum_rx_start = start;
 			m->m_pkthdr.csum_rx_val = csum;
 		} else {
-			(void) _pkt_copyaddr_sum(ph, poff, dp, len, FALSE, 0, NULL);
-			m->m_pkthdr.csum_rx_start = 0;
-			m->m_pkthdr.csum_rx_val = 0;
+			m->m_pkthdr.csum_rx_start = pkt->pkt_csum_rx_start_off;
+			m->m_pkthdr.csum_rx_val = pkt->pkt_csum_rx_value;
+			_CASSERT(CSUM_RX_FULL_FLAGS == PACKET_CSUM_RX_FULL_FLAGS);
+			m->m_pkthdr.csum_flags |= pkt->pkt_csum_flags & PACKET_CSUM_RX_FULL_FLAGS;
+			if (__improbable((pkt->pkt_csum_flags & PACKET_CSUM_PARTIAL) != 0)) {
+				m->m_pkthdr.csum_flags |= CSUM_PARTIAL;
+			}
 		}
 
 		/* translate packet metadata */
@@ -1524,8 +1619,15 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 		    (uint32_t)pkt->pkt_csum_rx_start_off,
 		    (uint32_t)pkt->pkt_csum_rx_value);
 		break;
-
 	case NR_TX:
+		dp = (uint8_t *)m->m_data;
+		ASSERT(m->m_next == NULL);
+		VERIFY(((intptr_t)dp - (intptr_t)mbuf_datastart(m)) + len <=
+		    (uint32_t)mbuf_maxlen(m));
+		m->m_len += len;
+		m->m_pkthdr.len += len;
+		VERIFY(m->m_len == m->m_pkthdr.len &&
+		    (uint32_t)m->m_len <= (uint32_t)mbuf_maxlen(m));
 		if (__probable(copysum)) {
 			uint16_t stuff = pkt->pkt_csum_tx_stuff_off;
 			/*
@@ -1563,8 +1665,10 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 		/* translate packet metadata */
 		m->m_pkthdr.pkt_flowsrc = pkt->pkt_flowsrc_type;
 		m->m_pkthdr.pkt_svc = pkt->pkt_svc_class;
+		m->m_pkthdr.pkt_mpriv_srcid = pkt->pkt_flowsrc_token;
 		m->m_pkthdr.pkt_flowid = pkt->pkt_flow_token;
 		m->m_pkthdr.comp_gencnt = pkt->pkt_comp_gencnt;
+		m->m_pkthdr.tso_segsz = pkt->pkt_proto_seg_sz;
 		m->m_pkthdr.pkt_proto = pkt->pkt_flow->flow_ip_proto;
 		mbuf_set_timestamp(m, pkt->pkt_timestamp,
 		    ((pkt->pkt_pflags & PKT_F_TS_VALID) != 0));
@@ -1751,11 +1855,11 @@ pkt_add_trailers(kern_packet_t ph, const uint32_t len, const uint16_t start)
 	/* get buffer address from packet */
 	MD_BUFLET_ADDR_ABS(pkt, baddr);
 	ASSERT(baddr != NULL);
-	ASSERT(len <= pkt->pkt_qum.qum_pp->pp_buflet_size);
+	ASSERT(len <= PP_BUF_SIZE_DEF(pkt->pkt_qum.qum_pp));
 
 	extra = MIN((uint32_t)pkt_trailers, (uint32_t)TRAILERS_MAX);
 	if (extra == 0 || extra > sizeof(tb) ||
-	    (len + extra) > pkt->pkt_qum.qum_pp->pp_buflet_size) {
+	    (len + extra) > PP_BUF_SIZE_DEF(pkt->pkt_qum.qum_pp)) {
 		return 0;
 	}
 
@@ -1815,7 +1919,7 @@ pkt_copypkt_sum(kern_packet_t sph, uint16_t soff, kern_packet_t dph,
 
 uint32_t
 pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *dbaddr,
-    uint16_t len, boolean_t do_csum, uint32_t initial_sum, boolean_t *odd_start)
+    uint32_t len, boolean_t do_csum, uint32_t initial_sum, boolean_t *odd_start)
 {
 	return _pkt_copyaddr_sum(sph, soff, dbaddr, len, do_csum, initial_sum, odd_start);
 }

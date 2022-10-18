@@ -63,6 +63,7 @@ libkern/os/log_queue.c					standard
 libkern/os/object.c					standard
 libkern/os/internal.c					standard
 libkern/os/refcnt.c					standard
+libkern/os/system_event_log.c					standard
 
 libkern/kernel_mach_header.c                            standard
 
@@ -133,3 +134,5 @@ libkern/kxld/kxld_vtable.c      optional config_kxld
 
 libkern/libclosure/runtime.cpp      optional config_blocks
 libkern/libclosure/libclosuredata.c optional config_blocks
+
+libkern/compression/compression.c	standard

@@ -66,11 +66,10 @@
 #define _I386_SIMPLE_LOCK_TYPES_H_
 
 #include <mach/boolean.h>
-#include <kern/kern_types.h>
+#include <kern/lock_types.h>
 
 #include <sys/appleapiopts.h>
 #if defined(MACH_KERNEL_PRIVATE) && defined(__APPLE_API_PRIVATE)
-#include <i386/hw_lock_types.h>
 #include <mach_ldebug.h>
 
 extern uint64_t LockTimeOutTSC; /* Lock timeout in TSC ticks */

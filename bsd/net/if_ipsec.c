@@ -950,12 +950,12 @@ ipsec_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		}
 
 		length = mbuf_pkthdr_len(data);
-		if (length > rx_pp->pp_buflet_size) {
+		if (length > PP_BUF_SIZE_DEF(rx_pp)) {
 			// Flush data
 			mbuf_freem(data);
 			kern_pbufpool_free(rx_pp, rx_ph);
 			os_log_error(OS_LOG_DEFAULT, "ipsec_kpipe_sync_rx %s: encrypted packet length %zu > %u\n",
-			    pcb->ipsec_ifp->if_xname, length, rx_pp->pp_buflet_size);
+			    pcb->ipsec_ifp->if_xname, length, PP_BUF_SIZE_DEF(rx_pp));
 			continue;
 		}
 
@@ -1504,13 +1504,13 @@ ipsec_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		}
 		}
 
-		if (length > rx_pp->pp_buflet_size ||
+		if (length > PP_BUF_SIZE_DEF(rx_pp) ||
 		    (pcb->ipsec_frag_size_set && length > pcb->ipsec_input_frag_size)) {
 			// We need to fragment to send up into the netif
 
-			u_int32_t fragment_mtu = rx_pp->pp_buflet_size;
+			u_int32_t fragment_mtu = PP_BUF_SIZE_DEF(rx_pp);
 			if (pcb->ipsec_frag_size_set &&
-			    pcb->ipsec_input_frag_size < rx_pp->pp_buflet_size) {
+			    pcb->ipsec_input_frag_size < PP_BUF_SIZE_DEF(rx_pp)) {
 				fragment_mtu = pcb->ipsec_input_frag_size;
 			}
 
@@ -1563,7 +1563,7 @@ ipsec_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 				STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
 				STATS_INC(nifs, NETIF_STATS_DROP);
 				os_log_error(OS_LOG_DEFAULT, "ipsec_netif_sync_rx %s: uknown legacy decrypted packet length %zu > %u\n",
-				    pcb->ipsec_ifp->if_xname, length, rx_pp->pp_buflet_size);
+				    pcb->ipsec_ifp->if_xname, length, PP_BUF_SIZE_DEF(rx_pp));
 				break;
 			}
 			}
@@ -1798,14 +1798,14 @@ ipsec_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 			}
 
 			length = mbuf_pkthdr_len(data);
-			if (length > rx_pp->pp_buflet_size) {
+			if (length > PP_BUF_SIZE_DEF(rx_pp)) {
 				// Flush data
 				mbuf_freem(data);
 				kern_pbufpool_free(rx_pp, rx_ph);
 				STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
 				STATS_INC(nifs, NETIF_STATS_DROP);
 				os_log_error(OS_LOG_DEFAULT, "ipsec_netif_sync_rx %s: decrypted packet length %zu > %u\n",
-				    pcb->ipsec_ifp->if_xname, length, rx_pp->pp_buflet_size);
+				    pcb->ipsec_ifp->if_xname, length, PP_BUF_SIZE_DEF(rx_pp));
 				continue;
 			}
 
@@ -2126,7 +2126,7 @@ ipsec_create_fs_provider_and_instance(struct ipsec_pcb *pcb,
 	 * This allows flowswitch to perform intra-stack packet aggregation.
 	 */
 	err = kern_nexus_attr_set(attr, NEXUS_ATTR_MAX_FRAGS,
-	    sk_fsw_rx_agg_tcp ? NX_PBUF_FRAGS_MAX : 1);
+	    NX_FSW_TCP_RX_AGG_ENABLED() ? NX_PBUF_FRAGS_MAX : 1);
 	VERIFY(err == 0);
 
 	snprintf((char *)provider_name, sizeof(provider_name),
@@ -3781,7 +3781,11 @@ ipsec_output(ifnet_t interface,
 		/* Set traffic class, set flow */
 		m_set_service_class(data, pcb->ipsec_output_service_class);
 		data->m_pkthdr.pkt_flowsrc = FLOWSRC_IFNET;
+#if SKYWALK
+		data->m_pkthdr.pkt_mpriv_srcid = interface->if_flowhash;
+#else /* !SKYWALK */
 		data->m_pkthdr.pkt_flowid = interface->if_flowhash;
+#endif /* !SKYWALK */
 		data->m_pkthdr.pkt_proto = ip->ip_p;
 		data->m_pkthdr.pkt_flags = (PKTF_FLOW_ID | PKTF_FLOW_ADV | PKTF_FLOW_LOCALSRC);
 
@@ -3865,7 +3869,11 @@ ipsec_output(ifnet_t interface,
 		/* Set traffic class, set flow */
 		m_set_service_class(data, pcb->ipsec_output_service_class);
 		data->m_pkthdr.pkt_flowsrc = FLOWSRC_IFNET;
+#if SKYWALK
+		data->m_pkthdr.pkt_mpriv_srcid = interface->if_flowhash;
+#else /* !SKYWALK */
 		data->m_pkthdr.pkt_flowid = interface->if_flowhash;
+#endif /* !SKYWALK */
 		data->m_pkthdr.pkt_proto = ip6->ip6_nxt;
 		data->m_pkthdr.pkt_flags = (PKTF_FLOW_ID | PKTF_FLOW_ADV | PKTF_FLOW_LOCALSRC);
 
@@ -4206,15 +4214,22 @@ ipsec_inject_inbound_packet(ifnet_t     interface,
 }
 
 void
-ipsec_set_pkthdr_for_interface(ifnet_t interface, mbuf_t packet, int family)
+ipsec_set_pkthdr_for_interface(ifnet_t interface, mbuf_t packet, int family,
+    uint32_t flowid)
 {
+#pragma unused (flowid)
 	if (packet != NULL && interface != NULL) {
 		struct ipsec_pcb *pcb = ifnet_softc(interface);
 		if (pcb != NULL) {
 			/* Set traffic class, set flow */
 			m_set_service_class(packet, pcb->ipsec_output_service_class);
 			packet->m_pkthdr.pkt_flowsrc = FLOWSRC_IFNET;
+#if SKYWALK
+			packet->m_pkthdr.pkt_mpriv_srcid = interface->if_flowhash;
+			packet->m_pkthdr.pkt_flowid = flowid;
+#else /* !SKYWALK */
 			packet->m_pkthdr.pkt_flowid = interface->if_flowhash;
+#endif /* !SKYWALK */
 			if (family == AF_INET) {
 				struct ip *ip = mtod(packet, struct ip *);
 				packet->m_pkthdr.pkt_proto = ip->ip_p;

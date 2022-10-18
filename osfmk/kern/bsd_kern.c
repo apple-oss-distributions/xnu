@@ -70,7 +70,6 @@ kern_return_t get_signalact(task_t, thread_t *, int);
 int fill_task_rusage(task_t task, rusage_info_current *ri);
 int fill_task_io_rusage(task_t task, rusage_info_current *ri);
 int fill_task_qos_rusage(task_t task, rusage_info_current *ri);
-void fill_task_monotonic_rusage(task_t task, rusage_info_current *ri);
 uint64_t get_task_logical_writes(task_t task, bool external);
 void fill_task_billed_usage(task_t task, rusage_info_current *ri);
 void task_bsdtask_kill(task_t);
@@ -94,8 +93,9 @@ extern void psignal(void *, int);
 void  *
 get_bsdtask_info(task_t t)
 {
-	proc_require(t->bsd_info, PROC_REQUIRE_ALLOW_NULL | PROC_REQUIRE_ALLOW_KERNPROC);
-	return t->bsd_info;
+	void *proc_from_task = task_get_proc_raw(t);
+	proc_require(proc_from_task, PROC_REQUIRE_ALLOW_NULL | PROC_REQUIRE_ALLOW_ALL);
+	return task_has_proc(t) ? proc_from_task : NULL;
 }
 
 void
@@ -121,7 +121,15 @@ get_bsdthreadtask_info(thread_t th)
 void
 set_bsdtask_info(task_t t, void * v)
 {
-	t->bsd_info = v;
+	void *proc_from_task = task_get_proc_raw(t);
+	if (v == NULL) {
+		task_clear_has_proc(t);
+	} else {
+		if (v != proc_from_task) {
+			panic("set_bsdtask_info trying to set random bsd_info %p", v);
+		}
+		task_set_has_proc(t);
+	}
 }
 
 __abortlike
@@ -1009,7 +1017,6 @@ task_act_iterate_wth_args(
 	task_unlock(task);
 }
 
-
 #include <sys/bsdtask_info.h>
 
 void
@@ -1032,12 +1039,7 @@ fill_taskprocinfo(task_t task, struct proc_taskinfo_internal * ptinfo)
 	ptinfo->pti_policy = ((task != kernel_task)?
 	    POLICY_TIMESHARE: POLICY_RR);
 
-	tinfo.threads_user = tinfo.threads_system = 0;
-	tinfo.total_user = task->total_user_time;
-	tinfo.total_system = task->total_system_time;
-
 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
-		uint64_t    tval;
 		spl_t x;
 
 		if (thread->options & TH_OPT_IDLE_THREAD) {
@@ -1051,20 +1053,6 @@ fill_taskprocinfo(task_t task, struct proc_taskinfo_internal * ptinfo)
 			numrunning++;
 		}
 		cswitch += thread->c_switch;
-		tval = timer_grab(&thread->user_timer);
-		tinfo.threads_user += tval;
-		tinfo.total_user += tval;
-
-		tval = timer_grab(&thread->system_timer);
-
-		if (thread->precise_user_kernel_time) {
-			tinfo.threads_system += tval;
-			tinfo.total_system += tval;
-		} else {
-			/* system_timer may represent either sys or user */
-			tinfo.threads_user += tval;
-			tinfo.total_user += tval;
-		}
 
 		syscalls_unix += thread->syscalls_unix;
 		syscalls_mach += thread->syscalls_mach;
@@ -1073,10 +1061,16 @@ fill_taskprocinfo(task_t task, struct proc_taskinfo_internal * ptinfo)
 		splx(x);
 	}
 
-	ptinfo->pti_total_system = tinfo.total_system;
-	ptinfo->pti_total_user = tinfo.total_user;
+	struct recount_times_mach term_times = recount_task_terminated_times(task);
+	struct recount_times_mach total_times = recount_task_times(task);
+
+	tinfo.threads_user = total_times.rtm_user - term_times.rtm_user;
+	tinfo.threads_system = total_times.rtm_system - term_times.rtm_system;
 	ptinfo->pti_threads_system = tinfo.threads_system;
 	ptinfo->pti_threads_user = tinfo.threads_user;
+
+	ptinfo->pti_total_system = total_times.rtm_system;
+	ptinfo->pti_total_user = total_times.rtm_user;
 
 	ptinfo->pti_faults = (int32_t) MIN(counter_load(&task->faults), INT32_MAX);
 	ptinfo->pti_pageins = (int32_t) MIN(counter_load(&task->pageins), INT32_MAX);
@@ -1187,7 +1181,7 @@ fill_taskthreadschedinfo(task_t task, uint64_t thread_id, struct proc_threadsche
 		return -1;
 	}
 
-#if INTERRUPT_MASKED_DEBUG
+#if SCHED_HYGIENE_DEBUG
 	absolutetime_to_nanoseconds(thread->machine.int_time_mt, &thread_sched_info->int_time_ns);
 #else
 	(void)thread;
@@ -1212,17 +1206,24 @@ fill_task_rusage(task_t task, rusage_info_current *ri)
 {
 	struct task_power_info powerinfo;
 
-	uint64_t runnable_time = 0;
-
 	assert(task != TASK_NULL);
 	task_lock(task);
 
-	task_power_info_locked(task, &powerinfo, NULL, NULL, &runnable_time);
+	struct task_power_info_extra extra = { 0 };
+	task_power_info_locked(task, &powerinfo, NULL, NULL, &extra);
 	ri->ri_pkg_idle_wkups = powerinfo.task_platform_idle_wakeups;
 	ri->ri_interrupt_wkups = powerinfo.task_interrupt_wakeups;
 	ri->ri_user_time = powerinfo.total_user;
 	ri->ri_system_time = powerinfo.total_system;
-	ri->ri_runnable_time = runnable_time;
+	ri->ri_runnable_time = extra.runnable_time;
+	ri->ri_cycles = extra.cycles;
+	ri->ri_instructions = extra.instructions;
+	ri->ri_pcycles = extra.pcycles;
+	ri->ri_pinstructions = extra.pinstructions;
+	ri->ri_user_ptime = extra.user_ptime;
+	ri->ri_system_ptime = extra.system_ptime;
+	ri->ri_energy_nj = extra.energy;
+	ri->ri_penergy_nj = extra.penergy;
 
 	ri->ri_phys_footprint = get_task_phys_footprint(task);
 	ledger_get_balance(task->ledger, task_ledgers.phys_mem,
@@ -1288,27 +1289,6 @@ fill_task_qos_rusage(task_t task, rusage_info_current *ri)
 	return 0;
 }
 
-void
-fill_task_monotonic_rusage(task_t task, rusage_info_current *ri)
-{
-#if MONOTONIC
-	if (!mt_core_supported) {
-		return;
-	}
-
-	assert(task != TASK_NULL);
-
-	uint64_t counts[MT_CORE_NFIXED] = { 0 };
-	mt_fixed_task_counts(task, counts);
-#ifdef MT_CORE_INSTRS
-	ri->ri_instructions = counts[MT_CORE_INSTRS];
-#endif /* defined(MT_CORE_INSTRS) */
-	ri->ri_cycles = counts[MT_CORE_CYCLES];
-#else /* MONOTONIC */
-#pragma unused(task, ri)
-#endif /* !MONOTONIC */
-}
-
 uint64_t
 get_task_logical_writes(task_t task, bool external)
 {
@@ -1328,9 +1308,10 @@ uint64_t
 get_task_dispatchqueue_serialno_offset(task_t task)
 {
 	uint64_t dq_serialno_offset = 0;
+	void *bsd_info = get_bsdtask_info(task);
 
-	if (task->bsd_info) {
-		dq_serialno_offset = get_dispatchqueue_serialno_offset_from_proc(task->bsd_info);
+	if (bsd_info) {
+		dq_serialno_offset = get_dispatchqueue_serialno_offset_from_proc(bsd_info);
 	}
 
 	return dq_serialno_offset;
@@ -1340,9 +1321,10 @@ uint64_t
 get_task_dispatchqueue_label_offset(task_t task)
 {
 	uint64_t dq_label_offset = 0;
+	void *bsd_info = get_bsdtask_info(task);
 
-	if (task->bsd_info) {
-		dq_label_offset = get_dispatchqueue_label_offset_from_proc(task->bsd_info);
+	if (bsd_info) {
+		dq_label_offset = get_dispatchqueue_label_offset_from_proc(bsd_info);
 	}
 
 	return dq_label_offset;
@@ -1351,8 +1333,10 @@ get_task_dispatchqueue_label_offset(task_t task)
 uint64_t
 get_task_uniqueid(task_t task)
 {
-	if (task->bsd_info) {
-		return proc_uniqueid_task(task->bsd_info, task);
+	void *bsd_info = get_bsdtask_info(task);
+
+	if (bsd_info) {
+		return proc_uniqueid_task(bsd_info, task);
 	} else {
 		return UINT64_MAX;
 	}
@@ -1361,8 +1345,10 @@ get_task_uniqueid(task_t task)
 int
 get_task_version(task_t task)
 {
-	if (task->bsd_info) {
-		return proc_pidversion(task->bsd_info);
+	void *bsd_info = get_bsdtask_info(task);
+
+	if (bsd_info) {
+		return proc_pidversion(bsd_info);
 	} else {
 		return INT_MAX;
 	}
@@ -1396,7 +1382,7 @@ fill_taskipctableinfo(task_t task, uint32_t *table_size, uint32_t *table_free)
 		return -1;
 	}
 
-	*table_size = is_active_table(space)->ie_size;
+	*table_size = ipc_entry_table_count(is_active_table(space));
 	*table_free = space->is_table_free;
 
 	is_read_unlock(space);
@@ -1408,9 +1394,11 @@ int
 get_task_cdhash(task_t task, char cdhash[static CS_CDHASH_LEN])
 {
 	int result = 0;
+	void *bsd_info = NULL;
 
 	task_lock(task);
-	result = task->bsd_info ? proc_getcdhash(task->bsd_info, cdhash) : ESRCH;
+	bsd_info = get_bsdtask_info(task);
+	result = bsd_info ? proc_getcdhash(bsd_info, cdhash) : ESRCH;
 	task_unlock(task);
 
 	return result;

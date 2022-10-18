@@ -62,7 +62,7 @@
 #ifdef MACH_KERNEL_PRIVATE
 /* Provide access to target-specific defintions which may be used by
  * consuming code, e.g. HYPERVISOR. */
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #endif
 
 
@@ -79,8 +79,15 @@
 
 #define TASK_ADDITIONS_UEXC uint64_t uexc[4];
 
+#if !__ARM_KERNEL_PROTECT__
+#define TASK_ADDITIONS_X18 bool preserve_x18;
+#else
+#define TASK_ADDITIONS_X18
+#endif
+
 #define MACHINE_TASK \
 	void * XNU_PTRAUTH_SIGNED_PTR("task.task_debug") task_debug; \
 	TASK_ADDITIONS_PAC \
 \
-	TASK_ADDITIONS_UEXC
+	TASK_ADDITIONS_UEXC \
+	TASK_ADDITIONS_X18

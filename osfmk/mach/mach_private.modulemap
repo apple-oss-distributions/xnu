@@ -9,7 +9,7 @@ module DarwinPrivate.Mach [system] {
     export *
   }
 
-  #ifndef PLATFORM_MacOSX
+  #ifndef XNU_PLATFORM_MacOSX
   module mach_vm {
     header "mach/mach_vm.h"
     export *
@@ -25,11 +25,21 @@ module DarwinPrivate.Mach [system] {
     header "mach/resource_monitors.h"
     export *
   }
-  #ifndef PLATFORM_MacOSX
+  #ifndef XNU_PLATFORM_MacOSX
 
   module shared_region {
     header "mach/shared_region.h"
     export *
   }
   #endif
+
+  module task_policy {
+    header "mach/task_policy_private.h"
+    export *
+  }
+
+  module thread_policy {
+    header "mach/thread_policy_private.h"
+    export *
+  }
 }

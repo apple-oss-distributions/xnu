@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -40,6 +40,7 @@
 #include <kern/startup.h>
 #include <kern/debug.h>
 #include <prng/random.h>
+#include <kern/ecc.h>
 #include <machine/machine_routines.h>
 #include <machine/commpage.h>
 #if HIBERNATION
@@ -49,20 +50,17 @@
 #if __arm64__
 #include <pexpert/arm64/apple_arm64_common.h>
 #include <pexpert/arm64/boot.h>
-#elif __arm__
-#include <pexpert/arm/boot.h>
 #else
 #error Unsupported arch
 #endif
 #include <pexpert/arm/consistent_debug.h>
 #include <pexpert/device_tree.h>
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #include <arm/pmap.h>
 #include <arm/caches_internal.h>
 #include <arm/cpu_internal.h>
 #include <arm/cpu_data_internal.h>
 #include <arm/cpuid_internal.h>
-#include <arm/io_map_entries.h>
 #include <arm/misc_protos.h>
 #include <arm/machine_cpu.h>
 #include <arm/rtclock.h>
@@ -100,8 +98,6 @@ extern void sleep_token_buffer_init(void);
 extern vm_offset_t intstack_top;
 #if __arm64__
 extern vm_offset_t excepstack_top;
-#else
-extern vm_offset_t fiqstack_top;
 #endif
 
 extern const char version[];
@@ -120,23 +116,24 @@ uint32_t bp_ret = 3;
 extern void set_bp_ret(void);
 #endif
 
-#if INTERRUPT_MASKED_DEBUG
+#if SCHED_HYGIENE_DEBUG
+boolean_t sched_hygiene_debug_pmc = 1;
+#endif
+
+#if SCHED_HYGIENE_DEBUG
 TUNABLE_DT_WRITEABLE(sched_hygiene_mode_t, interrupt_masked_debug_mode,
     "machine-timeouts", "interrupt-masked-debug-mode",
     "interrupt-masked-debug-mode",
     SCHED_HYGIENE_MODE_PANIC,
     TUNABLE_DT_CHECK_CHOSEN);
 
-boolean_t interrupt_masked_debug_pmc = 1;
-MACHINE_TIMEOUT32_WRITEABLE(interrupt_masked_timeout, "interrupt-masked",
+MACHINE_TIMEOUT_WRITEABLE(interrupt_masked_timeout, "interrupt-masked",
     0xd0000, MACHINE_TIMEOUT_UNIT_TIMEBASE,  /* 35.499ms */
     NULL);
 #if __arm64__
 #define SSHOT_INTERRUPT_MASKED_TIMEOUT 0xf9999 /* 64-bit: 42.599ms */
-#else
-#define SSHOT_INTERRUPT_MASKED_TIMEOUT 0x124f80 /* 32-bit: 50ms */
 #endif
-MACHINE_TIMEOUT32_WRITEABLE(stackshot_interrupt_masked_timeout, "sshot-interrupt-masked",
+MACHINE_TIMEOUT_WRITEABLE(stackshot_interrupt_masked_timeout, "sshot-interrupt-masked",
     SSHOT_INTERRUPT_MASKED_TIMEOUT, MACHINE_TIMEOUT_UNIT_TIMEBASE,
     NULL);
 #undef SSHOT_INTERRUPT_MASKED_TIMEOUT
@@ -172,7 +169,11 @@ SECURITY_READ_ONLY_LATE(uint64_t) gDramBase;
 SECURITY_READ_ONLY_LATE(uint64_t) gDramSize;
 
 SECURITY_READ_ONLY_LATE(bool) serial_console_enabled = false;
+#ifdef XNU_ENABLE_PROCESSOR_EXIT
+SECURITY_READ_ONLY_LATE(bool) enable_processor_exit = true;
+#else
 SECURITY_READ_ONLY_LATE(bool) enable_processor_exit = false;
+#endif
 
 /*
  * Forward definition
@@ -341,6 +342,8 @@ arm_init(
 	uint32_t        memsize;
 	uint64_t        xmaxmem;
 	thread_t        thread;
+	DTEntry chosen = NULL;
+	unsigned int dt_entry_size = 0;
 
 	arm_setup_pre_sign();
 
@@ -366,6 +369,25 @@ arm_init(
 
 	configure_misc_apple_boot_args();
 	configure_misc_apple_regs();
+
+#if (DEVELOPMENT || DEBUG)
+	unsigned long const *platform_stall_ptr = NULL;
+
+	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess) {
+		panic("%s: Unable to find 'chosen' DT node", __FUNCTION__);
+	}
+
+	// Not usable TUNABLE here because TUNABLEs are parsed at a later point.
+	if (SecureDTGetProperty(chosen, "xnu_platform_stall", (void const **)&platform_stall_ptr,
+	    &dt_entry_size) == kSuccess) {
+		xnu_platform_stall_value = *platform_stall_ptr;
+	}
+
+	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_ARM_INIT);
+
+	chosen = NULL; // Force a re-lookup later on since VM addresses are not final at this point
+	dt_entry_size = 0;
+#endif
 
 
 	{
@@ -406,17 +428,11 @@ arm_init(
 	assert(master_cpu >= 0 && master_cpu <= ml_get_max_cpu_number());
 
 	BootCpuData.cpu_number = (unsigned short)master_cpu;
-#if     __arm__
-	BootCpuData.cpu_exc_vectors = (vm_offset_t)&ExceptionVectorsTable;
-#endif
 	BootCpuData.intstack_top = (vm_offset_t) &intstack_top;
 	BootCpuData.istackptr = BootCpuData.intstack_top;
 #if __arm64__
 	BootCpuData.excepstack_top = (vm_offset_t) &excepstack_top;
 	BootCpuData.excepstackptr = BootCpuData.excepstack_top;
-#else
-	BootCpuData.fiqstack_top = (vm_offset_t) &fiqstack_top;
-	BootCpuData.fiqstackptr = BootCpuData.fiqstack_top;
 #endif
 	CpuDataEntries[master_cpu].cpu_data_vaddr = &BootCpuData;
 	CpuDataEntries[master_cpu].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
@@ -435,19 +451,6 @@ arm_init(
 	 * preemption level is not really meaningful for the bootstrap thread.
 	 */
 	thread->machine.preemption_count = 0;
-#if     __arm__ && __ARM_USER_PROTECT__
-	{
-		unsigned int ttbr0_val, ttbr1_val;
-		__asm__ volatile ("mrc p15,0,%0,c2,c0,0\n" : "=r"(ttbr0_val));
-		__asm__ volatile ("mrc p15,0,%0,c2,c0,1\n" : "=r"(ttbr1_val));
-		thread->machine.uptw_ttb = ttbr0_val;
-		thread->machine.kptw_ttb = ttbr1_val;
-	}
-#endif
-	processor_t boot_processor = PERCPU_GET_MASTER(processor);
-	boot_processor->kernel_timer = &thread->system_timer;
-	boot_processor->thread_timer = &thread->system_timer;
-
 	cpu_bootstrap();
 
 	rtclock_early_init();
@@ -472,23 +475,29 @@ arm_init(
 		xmaxmem = 0;
 	}
 
-#if INTERRUPT_MASKED_DEBUG
-	int wdt_boot_arg = 0;
-	/* Disable if WDT is disabled */
-	if ((PE_parse_boot_argn("wdt", &wdt_boot_arg,
-	    sizeof(wdt_boot_arg)) && (wdt_boot_arg == -1)) || kern_feature_override(KF_INTERRUPT_MASKED_DEBUG_OVRD)) {
-		interrupt_masked_debug_mode = SCHED_HYGIENE_MODE_OFF;
-	} else if (kern_feature_override(KF_INTERRUPT_MASKED_DEBUG_PMC_OVRD)) {
-		/*
-		 * The interrupt watchdog facility can, in adition to checking time, capture
-		 * metrics provided by the cycle and instruction counters available in some
-		 * systems. Check if we should enable this feature based on the validation
-		 * overrides.
-		 */
-		interrupt_masked_debug_pmc = 0;
-	}
+#if SCHED_HYGIENE_DEBUG
+	{
+		int wdt_boot_arg = 0;
+		bool const wdt_disabled = (PE_parse_boot_argn("wdt", &wdt_boot_arg, sizeof(wdt_boot_arg)) && (wdt_boot_arg == -1));
 
-#endif
+		/* Disable if WDT is disabled */
+		if (wdt_disabled || kern_feature_override(KF_INTERRUPT_MASKED_DEBUG_OVRD)) {
+			interrupt_masked_debug_mode = SCHED_HYGIENE_MODE_OFF;
+		} else if (kern_feature_override(KF_SCHED_HYGIENE_DEBUG_PMC_OVRD)) {
+			/*
+			 * The sched hygiene facility can, in adition to checking time, capture
+			 * metrics provided by the cycle and instruction counters available in some
+			 * systems. Check if we should enable this feature based on the validation
+			 * overrides.
+			 */
+			sched_hygiene_debug_pmc = 0;
+		}
+
+		if (wdt_disabled) {
+			sched_preemption_disable_debug_mode = SCHED_HYGIENE_MODE_OFF;
+		}
+	}
+#endif /* SCHED_HYGIENE_DEBUG */
 
 	nanoseconds_to_absolutetime(XCALL_ACK_TIMEOUT_NS, &xcall_ack_timeout_abstime);
 
@@ -525,6 +534,7 @@ arm_init(
 		/* Do we want a serial keyboard and/or console? */
 		kprintf("Serial mode specified: %08X\n", serialmode);
 		disable_iolog_serial_output = (serialmode & SERIALMODE_NO_IOLOG) != 0;
+		enable_dklog_serial_output = (serialmode & SERIALMODE_DKLOG) != 0;
 		int force_sync = serialmode & SERIALMODE_SYNCDRAIN;
 		if (force_sync || PE_parse_boot_argn("drain_uart_sync", &force_sync, sizeof(force_sync))) {
 			if (force_sync) {
@@ -559,12 +569,6 @@ arm_init(
 
 	cpu_machine_idle_init(TRUE);
 
-#if     (__ARM_ARCH__ == 7)
-	if (arm_diag & 0x8000) {
-		set_mmu_control((get_mmu_control()) ^ SCTLR_PREDIC);
-	}
-#endif
-
 	PE_init_platform(TRUE, &BootCpuData);
 
 #if __arm64__
@@ -596,10 +600,9 @@ arm_init(
 	 * the actual DRAM base address and size as reported by iBoot through the
 	 * device tree.
 	 */
-	DTEntry chosen;
-	unsigned int dt_entry_size;
 	unsigned long const *dram_base;
 	unsigned long const *dram_size;
+
 	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess) {
 		panic("%s: Unable to find 'chosen' DT node", __FUNCTION__);
 	}
@@ -650,9 +653,6 @@ arm_init_cpu(
 #endif
 
 	cpu_data_ptr->cpu_flags &= ~SleepState;
-#if     defined(ARMA7)
-	cpu_data_ptr->cpu_CLW_active = 1;
-#endif
 
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
@@ -670,7 +670,7 @@ arm_init_cpu(
 
 		// during hibernation, we captured the idle thread's state from inside the PPL context, so we have to
 		// fix up its preemption count
-		unsigned int expected_preemption_count = (gEnforceQuiesceSafety ? 2 : 1);
+		unsigned int expected_preemption_count = (gEnforcePlatformActionSafety ? 2 : 1);
 		if (cpu_data_ptr->cpu_active_thread->machine.preemption_count != expected_preemption_count) {
 			panic("unexpected preemption count %u on boot cpu thread (should be %u)",
 			    cpu_data_ptr->cpu_active_thread->machine.preemption_count,
@@ -690,11 +690,6 @@ arm_init_cpu(
 
 	cpu_init();
 
-#if     (__ARM_ARCH__ == 7)
-	if (arm_diag & 0x8000) {
-		set_mmu_control((get_mmu_control()) ^ SCTLR_PREDIC);
-	}
-#endif
 #ifdef  APPLETYPHOON
 	if ((cpus_defeatures & (0xF << 4 * cpu_data_ptr->cpu_number)) != 0) {
 		cpu_defeatures_set((cpus_defeatures >> 4 * cpu_data_ptr->cpu_number) & 0xF);
@@ -728,12 +723,17 @@ arm_init_cpu(
 	cpu_data_ptr->rtcPop = EndOfAllTime;
 	timer_resync_deadlines();
 
+	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, cpu_data_ptr);
+	bool should_kprintf = processor_should_kprintf(processor, true);
+
 #if DEVELOPMENT || DEBUG
-	PE_arm_debug_enable_trace();
+	PE_arm_debug_enable_trace(should_kprintf);
 #endif /* DEVELOPMENT || DEBUG */
 
 
-	kprintf("arm_cpu_init(): cpu %d online\n", cpu_data_ptr->cpu_number);
+	if (should_kprintf) {
+		kprintf("arm_cpu_init(): cpu %d online\n", cpu_data_ptr->cpu_number);
+	}
 
 	if (cpu_data_ptr == &BootCpuData) {
 		if (kdebug_enable == 0) {
@@ -758,6 +758,7 @@ arm_init_cpu(
 	}
 #endif
 
+
 	slave_main(NULL);
 }
 
@@ -772,9 +773,6 @@ arm_init_idle_cpu(
 #if __ARM_PAN_AVAILABLE__
 	__builtin_arm_wsr("pan", 1);
 #endif
-#if     defined(ARMA7)
-	cpu_data_ptr->cpu_CLW_active = 1;
-#endif
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
 
@@ -786,11 +784,6 @@ arm_init_idle_cpu(
 	__builtin_arm_wsr("DAIFClr", DAIFSC_ASYNCF);
 #endif
 
-#if     (__ARM_ARCH__ == 7)
-	if (arm_diag & 0x8000) {
-		set_mmu_control((get_mmu_control()) ^ SCTLR_PREDIC);
-	}
-#endif
 #ifdef  APPLETYPHOON
 	if ((cpus_defeatures & (0xF << 4 * cpu_data_ptr->cpu_number)) != 0) {
 		cpu_defeatures_set((cpus_defeatures >> 4 * cpu_data_ptr->cpu_number) & 0xF);
@@ -802,7 +795,9 @@ arm_init_idle_cpu(
 	 * This will force any thread with active debug state to resync the debug registers
 	 * if it returns to userspace on this CPU.
 	 */
-	cpu_data_ptr->cpu_user_debug = NULL;
+	if (cpu_data_ptr->cpu_user_debug != NULL) {
+		arm_debug_set(NULL);
+	}
 
 	fiq_context_init(FALSE);
 

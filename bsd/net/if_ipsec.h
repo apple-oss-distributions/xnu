@@ -46,7 +46,8 @@ boolean_t ipsec_interface_needs_netagent(ifnet_t interface);
 
 errno_t ipsec_inject_inbound_packet(ifnet_t     interface, mbuf_t packet);
 
-void ipsec_set_pkthdr_for_interface(ifnet_t interface, mbuf_t packet, int family);
+void ipsec_set_pkthdr_for_interface(ifnet_t interface, mbuf_t packet, int family,
+    uint32_t flowid);
 
 void ipsec_set_ipoa_for_interface(ifnet_t interface, struct ip_out_args *ipoa);
 

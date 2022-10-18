@@ -19,7 +19,10 @@ INSTALL_DTRACE_MI_SCRIPTS_LIST =	\
 
 INSTALL_DTRACE_LIBEXEC_LIST = \
 	log_unnest_badness.d \
+	suspicious_task_vm_info_count.d \
 	vm_map_delete_permanent.d \
+	vm_map_delete_permanent_deny.d \
+	vm_map_delete_permanent_prot_none.d \
 	vm_object_ownership.d
 
 ifneq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS),$(PLATFORM)),)

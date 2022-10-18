@@ -82,7 +82,8 @@ OSString::initWithCString(const char *cString)
 	}
 
 	newLength++;
-	newString = (char *)kalloc_data_container(newLength, Z_WAITOK);
+	newString = (char *)kalloc_data(newLength,
+	    Z_VM_TAG_BT(Z_WAITOK, VM_KERN_MEMORY_LIBKERN));
 	if (!newString) {
 		return false;
 	}
@@ -90,7 +91,7 @@ OSString::initWithCString(const char *cString)
 	bcopy(cString, newString, newLength);
 
 	if (!(flags & kOSStringNoCopy) && string) {
-		kfree_data_container(string, length);
+		kfree_data(string, length);
 		OSCONTAINER_ACCUMSIZE(-((size_t)length));
 	}
 	string = newString;
@@ -124,7 +125,8 @@ OSString::initWithStringOfLength(const char *cString, size_t inlength)
 	}
 
 	newLength = (unsigned int) (inlength + 1);
-	newString = (char *)kalloc_data_container(newLength, Z_WAITOK);
+	newString = (char *)kalloc_data(newLength,
+	    Z_VM_TAG_BT(Z_WAITOK, VM_KERN_MEMORY_LIBKERN));
 	if (!newString) {
 		return false;
 	}
@@ -133,7 +135,7 @@ OSString::initWithStringOfLength(const char *cString, size_t inlength)
 	newString[inlength] = 0;
 
 	if (!(flags & kOSStringNoCopy) && string) {
-		kfree_data_container(string, length);
+		kfree_data(string, length);
 		OSCONTAINER_ACCUMSIZE(-((size_t)length));
 	}
 
@@ -248,7 +250,7 @@ void
 OSString::free()
 {
 	if (!(flags & kOSStringNoCopy) && string) {
-		kfree_data_container(string, length);
+		kfree_data(string, length);
 		OSCONTAINER_ACCUMSIZE(-((size_t)length));
 	}
 

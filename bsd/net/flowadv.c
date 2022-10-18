@@ -213,7 +213,21 @@ flowadv_thread_cont(int err)
 				break;
 
 			case FLOWSRC_IFNET:
+#if SKYWALK
+				/*
+				 * when using the flowID allocator, IPSec
+				 * driver uses the "pkt_flowid" field in mbuf
+				 * packet header for the globally unique flowID
+				 * and the "pkt_mpriv_srcid" field carries the
+				 * interface flow control id (if_flowhash).
+				 * For IPSec flows, it is the IPSec driver
+				 * network interface which is flow controlled,
+				 * instead of the IPSec SA flow.
+				 */
+				ifnet_flowadv(fce->fce_flowsrc_token);
+#else /* !SKYWALK */
 				ifnet_flowadv(fce->fce_flowid);
+#endif /* !SKYWALK */
 				break;
 
 #if SKYWALK

@@ -18,12 +18,10 @@ EXPORT_ONLY_FILES =	\
 		    cpuid.h \
 		    eflags.h \
 		    fpu.h \
-			x86_hypercall.h \
-		    io_map_entries.h \
+		    x86_hypercall.h \
 		    lapic.h \
 		    lock.h \
 		    locks.h \
-		    locks_i386_inlines.h \
 		    machine_routines.h \
 		    machine_cpu.h \
 		    memory_types.h \

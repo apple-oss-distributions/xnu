@@ -30,13 +30,19 @@
 
 #include <skywalk/os_skywalk_private.h>
 
+/*
+ * Ignore -Wxnu-typed-allocators for this file, because
+ * this is test-only code
+ */
+__typed_allocators_ignore_push
+
 #define SKMEM_TEST_BUFSIZE      2048
 
-#if CONFIG_ARROW
+#if XNU_TARGET_OS_OSX && defined(__arm64__)
 #define TEST_OPTION_INHIBIT_CACHE    0
-#else /* !CONFIG_ARROW */
+#else /* !(XNU_TARGET_OS_OSX && defined(__arm64__)) */
 #define TEST_OPTION_INHIBIT_CACHE    KBIF_INHIBIT_CACHE
-#endif /* CONFIG_ARROW */
+#endif /* XNU_TARGET_OS_OSX && defined(__arm64__) */
 
 static void skmem_test_start(void *, wait_result_t);
 static void skmem_test_stop(void *, wait_result_t);
@@ -762,17 +768,22 @@ skmem_packet_tests(uint32_t flags)
 	kern_pbufpool_t pp_mb = NULL;
 	mach_vm_address_t baddr = 0;
 	uint8_t *buffer, *ref_buffer;
+	uint8_t *bflt_buffer;
 	kern_obj_idx_seg_t sg_idx;
 	kern_buflet_t buflet;
 	kern_segment_t sg;
 	kern_packet_t ph = 0, ph_mb = 0;
 	struct mbuf *m = NULL;
+	mach_vm_address_t buffer_addr = 0;
 	uint16_t len;
 	uint32_t i;
+	uint32_t bft_cnt;
 	uint32_t csum_eee_ref, csum_eeo_ref, csum_eoe_ref, csum_eoo_ref;
 	uint32_t csum_oee_ref, csum_oeo_ref, csum_ooe_ref, csum_ooo_ref, csum;
+	uint32_t ref_sum;
 	boolean_t test_unaligned;
-	kern_buflet_t bft0, bft1;
+	kern_buflet_t bft0, bft1, bft2;
+	kern_buflet_t bft_array[4];
 
 	SK_ERR("flags 0x%x", flags);
 
@@ -792,7 +803,7 @@ skmem_packet_tests(uint32_t flags)
 	pp_init_mb.kbi_buf_seg_size = skmem_usr_buf_seg_size;
 	(void) snprintf((char *)pp_init_mb.kbi_name,
 	    sizeof(pp_init_mb.kbi_name), "%s", "skmem_packet_tests_mb");
-	pp_init_mb.kbi_flags = flags | KBIF_BUFFER_ON_DEMAND;
+	pp_init_mb.kbi_flags = flags | KBIF_BUFFER_ON_DEMAND | KBIF_RAW_BFLT;
 	pp_init_mb.kbi_max_frags = 4;
 	pp_init_mb.kbi_packets = 64;
 	pp_init_mb.kbi_bufsize = 512;
@@ -817,7 +828,7 @@ skmem_packet_tests(uint32_t flags)
 
 	/* add buflet to a packet with buf count 1 */
 	VERIFY(kern_pbufpool_alloc(pp_mb, 1, &ph_mb) == 0);
-	VERIFY(kern_pbufpool_alloc_buflet(pp_mb, &bft1) == 0);
+	VERIFY(kern_pbufpool_alloc_buflet(pp_mb, &bft1, true) == 0);
 	VERIFY(bft1 != NULL);
 	VERIFY(kern_buflet_get_data_address(bft1) != NULL);
 	VERIFY(kern_buflet_get_object_address(bft1) != NULL);
@@ -831,11 +842,105 @@ skmem_packet_tests(uint32_t flags)
 	kern_pbufpool_free(pp_mb, ph_mb);
 	ph_mb = 0;
 
+	/* clone and add a buflet to a packet */
+	VERIFY(kern_pbufpool_alloc(pp_mb, 1, &ph_mb) == 0);
+	VERIFY((bft0 = kern_packet_get_next_buflet(ph_mb, NULL)) != NULL);
+	bft_cnt = 1;
+	VERIFY(kern_buflet_clone(bft0, &bft1, &bft_cnt, pp_mb) == 0);
+	VERIFY(bft_cnt == 1 && bft1 != NULL);
+
+	VERIFY(kern_buflet_get_data_address(bft1) != NULL);
+	VERIFY(kern_buflet_get_object_address(bft1) != NULL);
+	VERIFY(kern_buflet_get_data_address(bft0) ==
+	    kern_buflet_get_data_address(bft1));
+	VERIFY(kern_buflet_get_object_address(bft0) ==
+	    kern_buflet_get_object_address(bft1));
+
+	/* exercise some buflet KPIs here */
+	VERIFY(kern_buflet_set_data_length(bft0, 128) == 0);
+	VERIFY(kern_buflet_set_gro_len(bft0, 128) == 0);
+	buffer_addr = (mach_vm_address_t) kern_buflet_get_data_address(bft0);
+	VERIFY((mach_vm_address_t) kern_buflet_get_next_buf(bft0, NULL) == buffer_addr);
+	VERIFY(kern_buflet_get_next_buf(bft0, (void *)buffer_addr) == NULL);
+
+	VERIFY(kern_buflet_set_gro_len(bft1, 128) == 0);
+	VERIFY(kern_buflet_set_data_length(bft1, 512 - 128) == 0);
+	VERIFY(kern_buflet_set_buffer_offset(bft1, 128) == 0);
+	VERIFY((mach_vm_address_t) kern_buflet_get_data_address(bft1) ==
+	    buffer_addr + 128);
+	VERIFY((mach_vm_address_t) kern_buflet_get_next_buf(bft1, 0) ==
+	    buffer_addr + 128);
+	VERIFY((mach_vm_address_t) kern_buflet_get_next_buf(bft1,
+	    (void *)(buffer_addr + 128)) == buffer_addr + 256);
+
+	/* attach cloned buflet to pkt */
+	VERIFY(kern_packet_add_buflet(ph_mb, bft0, bft1) == 0);
+	VERIFY(kern_packet_get_buflet_count(ph_mb) == 2);
+	VERIFY(kern_packet_get_next_buflet(ph_mb, NULL) == bft0);
+	VERIFY(kern_packet_get_next_buflet(ph_mb, bft0) == bft1);
+	VERIFY(kern_packet_get_next_buflet(ph_mb, bft1) == NULL);
+	VERIFY(kern_packet_finalize(ph_mb) == 0);
+	kern_pbufpool_free(pp_mb, ph_mb);
+	ph_mb = 0;
+
+	/* clone and add 2 buflets to a packet */
+	VERIFY(kern_pbufpool_alloc(pp_mb, 1, &ph_mb) == 0);
+	VERIFY((bft0 = kern_packet_get_next_buflet(ph_mb, NULL)) != NULL);
+	bft_cnt = 2;
+	VERIFY(kern_buflet_clone(bft0, bft_array, &bft_cnt, pp_mb) == 0);
+	VERIFY(bft_cnt == 2 && bft_array[0] != NULL && bft_array[1] != NULL);
+	bft1 = bft_array[0];
+	bft2 = bft_array[1];
+	VERIFY(kern_buflet_get_data_address(bft1) != NULL);
+	VERIFY(kern_buflet_get_object_address(bft1) != NULL);
+	VERIFY(kern_buflet_get_data_address(bft0) ==
+	    kern_buflet_get_data_address(bft1));
+	VERIFY(kern_buflet_get_object_address(bft0) ==
+	    kern_buflet_get_object_address(bft1));
+	VERIFY(kern_buflet_get_data_address(bft0) ==
+	    kern_buflet_get_data_address(bft2));
+	VERIFY(kern_buflet_get_object_address(bft0) ==
+	    kern_buflet_get_object_address(bft2));
+
+	VERIFY(kern_buflet_set_data_length(bft0, 128) == 0);
+	VERIFY(kern_buflet_set_gro_len(bft0, 128) == 0);
+	buffer_addr = (mach_vm_address_t) kern_buflet_get_data_address(bft0);
+	VERIFY((mach_vm_address_t) kern_buflet_get_next_buf(bft0, NULL) == buffer_addr);
+	VERIFY(kern_buflet_get_next_buf(bft0, (void *)buffer_addr) == NULL);
+
+	VERIFY(kern_buflet_set_gro_len(bft1, 256) == 0);
+	VERIFY(kern_buflet_set_data_length(bft1, 256) == 0);
+	VERIFY(kern_buflet_set_buffer_offset(bft1, 128) == 0);
+	VERIFY((mach_vm_address_t) kern_buflet_get_data_address(bft1) ==
+	    buffer_addr + 128);
+	VERIFY((mach_vm_address_t) kern_buflet_get_next_buf(bft1, 0) ==
+	    buffer_addr + 128);
+
+	VERIFY(kern_buflet_set_gro_len(bft2, 128) == 0);
+	VERIFY(kern_buflet_set_data_length(bft2, 128) == 0);
+	VERIFY(kern_buflet_set_buffer_offset(bft2, 128 + 256) == 0);
+	VERIFY((mach_vm_address_t) kern_buflet_get_data_address(bft2) ==
+	    buffer_addr + 128 + 256);
+	VERIFY((mach_vm_address_t) kern_buflet_get_next_buf(bft2, 0) ==
+	    buffer_addr + 128 + 256);
+
+	/* attach cloned buflet to pkt */
+	VERIFY(kern_packet_add_buflet(ph_mb, bft0, bft1) == 0);
+	VERIFY(kern_packet_add_buflet(ph_mb, bft1, bft2) == 0);
+	VERIFY(kern_packet_get_buflet_count(ph_mb) == 3);
+	VERIFY(kern_packet_get_next_buflet(ph_mb, NULL) == bft0);
+	VERIFY(kern_packet_get_next_buflet(ph_mb, bft0) == bft1);
+	VERIFY(kern_packet_get_next_buflet(ph_mb, bft1) == bft2);
+	VERIFY(kern_packet_get_next_buflet(ph_mb, bft2) == NULL);
+	VERIFY(kern_packet_finalize(ph_mb) == 0);
+	kern_pbufpool_free(pp_mb, ph_mb);
+	ph_mb = 0;
+
 	/* add buflet to a packet with buf count 0 */
 	VERIFY(kern_pbufpool_alloc(pp_mb, 0, &ph_mb) == 0);
 	VERIFY(kern_packet_get_buflet_count(ph_mb) == 0);
 	VERIFY((bft0 = kern_packet_get_next_buflet(ph_mb, NULL)) == NULL);
-	VERIFY(kern_pbufpool_alloc_buflet(pp_mb, &bft1) == 0);
+	VERIFY(kern_pbufpool_alloc_buflet(pp_mb, &bft1, true) == 0);
 	VERIFY(bft1 != NULL);
 	VERIFY(kern_packet_add_buflet(ph_mb, bft0, bft1) == 0);
 	VERIFY(kern_packet_get_buflet_count(ph_mb) == 1);
@@ -923,6 +1028,45 @@ skmem_packet_tests(uint32_t flags)
 		    SK_KVA(SK_PTR_ADDR_KQUM(ph_mb)));
 	}
 	VERIFY(csum_eeo_ref == csum);
+	kern_pbufpool_free(pp_mb, ph_mb);
+	ph_mb = 0;
+
+	/* verify checksum on a packet with shared-buffer buflet */
+	VERIFY(kern_pbufpool_alloc(pp_mb, 1, &ph_mb) == 0);
+	VERIFY(kern_packet_get_buflet_count(ph_mb) == 1);
+	VERIFY((bft0 = kern_packet_get_next_buflet(ph_mb, NULL)) != NULL);
+	VERIFY((bflt_buffer = kern_buflet_get_data_address(bft0)) != NULL);
+
+	bufp = bflt_buffer;
+	for (i = 0; i < 512; i++) {
+		bufp[i] = ref_buffer[i];
+	}
+
+	bft_cnt = 1;
+	VERIFY(kern_buflet_clone(bft0, &bft1, &bft_cnt, pp_mb) == 0);
+	VERIFY(bft_cnt == 1 && bft1 != NULL);
+
+	VERIFY(kern_buflet_set_data_length(bft0, 128) == 0);
+	VERIFY(kern_buflet_set_gro_len(bft0, 128) == 0);
+
+	VERIFY(kern_buflet_set_buffer_offset(bft1, 128) == 0);
+	VERIFY(kern_buflet_set_gro_len(bft1, 512 - 128) == 0);
+	VERIFY(kern_buflet_set_data_length(bft1, 512 - 128) == 0);
+
+	VERIFY(kern_packet_add_buflet(ph_mb, bft0, bft1) == 0);
+	VERIFY(kern_packet_get_buflet_count(ph_mb) == 2);
+	METADATA_ADJUST_LEN(SK_PTR_ADDR_KQUM(ph_mb), 0, 0);
+	VERIFY(kern_packet_finalize(ph_mb) == 0);
+	csum = pkt_sum(ph_mb, 0, 512);
+
+	ref_sum = skmem_reference_sum(ref_buffer, 512, 0);
+	VERIFY(ref_sum == __packet_cksum(bflt_buffer, 512, 0));
+	if (__packet_cksum(ref_buffer, 512, 0) != csum) {
+		SK_ERR("pkt_sum: ref_sum 0x%x, "
+		    "0x%x, 0x%llx", ref_sum, csum,
+		    SK_KVA(SK_PTR_ADDR_KQUM(ph_mb)));
+	}
+	VERIFY(ref_sum == csum);
 	kern_pbufpool_free(pp_mb, ph_mb);
 	ph_mb = 0;
 
@@ -1863,11 +2007,14 @@ skmem_test_func(void *v, wait_result_t w)
 		if (skmth_pp->pp_kmd_cache != NULL) {
 			skmem_cache_reap_now(skmth_pp->pp_kmd_cache, TRUE);
 		}
-		if (skmth_pp->pp_buf_cache != NULL) {
-			skmem_cache_reap_now(skmth_pp->pp_buf_cache, TRUE);
+		if (PP_BUF_CACHE_DEF(skmth_pp) != NULL) {
+			skmem_cache_reap_now(PP_BUF_CACHE_DEF(skmth_pp), TRUE);
 		}
-		if (skmth_pp->pp_kbft_cache != NULL) {
-			skmem_cache_reap_now(skmth_pp->pp_kbft_cache, TRUE);
+		if (PP_KBFT_CACHE_DEF(skmth_pp) != NULL) {
+			skmem_cache_reap_now(PP_KBFT_CACHE_DEF(skmth_pp), TRUE);
+		}
+		if (skmth_pp->pp_raw_kbft_cache != NULL) {
+			skmem_cache_reap_now(skmth_pp->pp_raw_kbft_cache, TRUE);
 		}
 	}
 
@@ -2209,5 +2356,7 @@ done:
 SYSCTL_PROC(_kern_skywalk_mem, OID_AUTO, test,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0,
     sysctl_skmem_test, "I", "Start Skywalk memory test");
+
+__typed_allocators_ignore_pop
 
 #endif /* DEVELOPMENT || DEBUG */

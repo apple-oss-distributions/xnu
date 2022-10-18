@@ -26,7 +26,7 @@ T_DECL(task_fatal_port, "Create a child and kill it using the task fatal port")
 	int port_name_size, status, ret;
 	pid_t child, pid;
 
-#if defined(__arm__) || TARGET_OS_BRIDGE
+#if TARGET_OS_BRIDGE
 	T_SKIP("Skip this test on 32 bit kernels and bridgeos");
 #endif
 

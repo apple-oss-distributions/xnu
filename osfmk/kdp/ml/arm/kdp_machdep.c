@@ -30,7 +30,7 @@
 #include <mach/exception_types.h>
 #include <arm/exception.h>
 #include <arm/pmap.h>
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #include <arm/thread.h>
 #include <arm/trap.h>
 #include <arm/cpu_data_internal.h>
@@ -39,6 +39,7 @@
 #include <IOKit/IOPlatformExpert.h>
 #include <libkern/OSAtomic.h>
 #include <vm/vm_map.h>
+#include <arm/misc_protos.h>
 
 #if defined(HAS_APPLE_PAC)
 #include <ptrauth.h>
@@ -132,18 +133,7 @@ kdp_exception_ack(unsigned char * pkt, int len)
 static void
 kdp_getintegerstate(char * out_state)
 {
-#if defined(__arm__)
-	struct arm_thread_state thread_state;
-	struct arm_saved_state *saved_state;
-
-	saved_state = kdp.saved_state;
-
-	bzero((char *) &thread_state, sizeof(struct arm_thread_state));
-
-	saved_state_to_thread_state32(saved_state, &thread_state);
-
-	bcopy((char *) &thread_state, (char *) out_state, sizeof(struct arm_thread_state));
-#elif defined(__arm64__)
+#if defined(__arm64__)
 	struct arm_thread_state64 thread_state64;
 	arm_saved_state_t *saved_state;
 
@@ -164,13 +154,7 @@ kdp_error_t
 kdp_machine_read_regs(__unused unsigned int cpu, unsigned int flavor, char * data, int * size)
 {
 	switch (flavor) {
-#if defined(__arm__)
-	case ARM_THREAD_STATE:
-		dprintf(("kdp_readregs THREAD_STATE\n"));
-		kdp_getintegerstate(data);
-		*size = ARM_THREAD_STATE_COUNT * sizeof(int);
-		return KDPERR_NO_ERROR;
-#elif defined(__arm64__)
+#if defined(__arm64__)
 	case ARM_THREAD_STATE64:
 		dprintf(("kdp_readregs THREAD_STATE64\n"));
 		kdp_getintegerstate(data);
@@ -193,15 +177,7 @@ kdp_machine_read_regs(__unused unsigned int cpu, unsigned int flavor, char * dat
 static void
 kdp_setintegerstate(char * state_in)
 {
-#if defined(__arm__)
-	struct arm_thread_state thread_state;
-	struct arm_saved_state *saved_state;
-
-	bcopy((char *) state_in, (char *) &thread_state, sizeof(struct arm_thread_state));
-	saved_state = kdp.saved_state;
-
-	thread_state32_to_saved_state(&thread_state, saved_state);
-#elif defined(__arm64__)
+#if defined(__arm64__)
 	struct arm_thread_state64 thread_state64;
 	struct arm_saved_state *saved_state;
 
@@ -220,12 +196,7 @@ kdp_error_t
 kdp_machine_write_regs(__unused unsigned int cpu, unsigned int flavor, char * data, __unused int * size)
 {
 	switch (flavor) {
-#if defined(__arm__)
-	case ARM_THREAD_STATE:
-		dprintf(("kdp_writeregs THREAD_STATE\n"));
-		kdp_setintegerstate(data);
-		return KDPERR_NO_ERROR;
-#elif defined(__arm64__)
+#if defined(__arm64__)
 	case ARM_THREAD_STATE64:
 		dprintf(("kdp_writeregs THREAD_STATE64\n"));
 		kdp_setintegerstate(data);
@@ -346,20 +317,7 @@ kdp_trap(unsigned int exception, struct arm_saved_state * saved_state)
 {
 	handle_debugger_trap(exception, 0, 0, saved_state);
 
-#if defined(__arm__)
-	if (saved_state->cpsr & PSR_TF) {
-		unsigned short instr = *((unsigned short *)(saved_state->pc));
-		if ((instr == (GDB_TRAP_INSTR1 & 0xFFFF)) || (instr == (GDB_TRAP_INSTR2 & 0xFFFF))) {
-			saved_state->pc += 2;
-		}
-	} else {
-		unsigned int instr = *((unsigned int *)(saved_state->pc));
-		if ((instr == GDB_TRAP_INSTR1) || (instr == GDB_TRAP_INSTR2)) {
-			saved_state->pc += 4;
-		}
-	}
-
-#elif defined(__arm64__)
+#if defined(__arm64__)
 	assert(is_saved_state64(saved_state));
 
 	uint32_t instr = *((uint32_t *)get_saved_state_pc(saved_state));
@@ -388,148 +346,19 @@ kdp_trap(unsigned int exception, struct arm_saved_state * saved_state)
  */
 typedef uint32_t uint32_align2_t __attribute__((aligned(2)));
 
-#if !defined(__arm64__)
-
-int
-machine_trace_thread(thread_t thread,
-    char * tracepos,
-    char * tracebound,
-    int nframes,
-    uint32_t * thread_trace_flags)
+/*
+ * @function _was_in_userspace
+ *
+ * @abstract Unused function used to indicate that a CPU was in userspace
+ * before it was IPI'd to enter the Debugger context.
+ *
+ * @discussion This function should never actually be called.
+ */
+void __attribute__((__noreturn__))
+_was_in_userspace(void)
 {
-	uint32_align2_t * tracebuf = (uint32_align2_t *)tracepos;
-
-	vm_size_t framesize = sizeof(uint32_t);
-
-	vm_offset_t stacklimit        = 0;
-	vm_offset_t stacklimit_bottom = 0;
-	int framecount                = 0;
-	uint32_t short_fp             = 0;
-	vm_offset_t fp                = 0;
-	vm_offset_t pc, sp;
-	vm_offset_t prevfp            = 0;
-	uint32_t prevlr               = 0;
-	struct arm_saved_state * state;
-	vm_offset_t kern_virt_addr = 0;
-
-	nframes = (tracebound > tracepos) ? MIN(nframes, (int)((tracebound - tracepos) / framesize)) : 0;
-	if (!nframes) {
-		return 0;
-	}
-	framecount = 0;
-
-#if defined(__arm__)
-	/* kstackptr may not always be there, so recompute it */
-	state = &thread_get_kernel_state(thread)->machine;
-
-	stacklimit = VM_MAX_KERNEL_ADDRESS;
-	stacklimit_bottom = VM_MIN_KERNEL_ADDRESS;
-#else
-#error Unknown architecture.
-#endif
-
-	/* Get the frame pointer */
-	fp = get_saved_state_fp(state);
-
-	/* Fill in the current link register */
-	prevlr = (uint32_t)get_saved_state_lr(state);
-	pc = get_saved_state_pc(state);
-	sp = get_saved_state_sp(state);
-
-	if (!prevlr && !fp && !sp && !pc) {
-		return 0;
-	}
-
-	prevlr = (uint32_t)VM_KERNEL_UNSLIDE(prevlr);
-
-	for (; framecount < nframes; framecount++) {
-		*tracebuf++ = prevlr;
-
-		/* Invalid frame */
-		if (!fp) {
-			break;
-		}
-		/* Unaligned frame */
-		if (fp & 0x0000003) {
-			break;
-		}
-		/* Frame is out of range, maybe a user FP while doing kernel BT */
-		if (fp > stacklimit) {
-			break;
-		}
-		if (fp < stacklimit_bottom) {
-			break;
-		}
-		/* Stack grows downward */
-		if (fp < prevfp) {
-			boolean_t prev_in_interrupt_stack = FALSE;
-
-			/*
-			 * As a special case, sometimes we are backtracing out of an interrupt
-			 * handler, and the stack jumps downward because of the memory allocation
-			 * pattern during early boot due to KASLR.
-			 */
-			int cpu;
-			int max_cpu = ml_get_max_cpu_number();
-
-			for (cpu = 0; cpu <= max_cpu; cpu++) {
-				cpu_data_t      *target_cpu_datap;
-
-				target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
-				if (target_cpu_datap == (cpu_data_t *)NULL) {
-					continue;
-				}
-
-				if (prevfp >= (target_cpu_datap->intstack_top - INTSTACK_SIZE) && prevfp < target_cpu_datap->intstack_top) {
-					prev_in_interrupt_stack = TRUE;
-					break;
-				}
-
-				if (prevfp >= (target_cpu_datap->fiqstack_top - FIQSTACK_SIZE) && prevfp < target_cpu_datap->fiqstack_top) {
-					prev_in_interrupt_stack = TRUE;
-					break;
-				}
-			}
-
-			if (!prev_in_interrupt_stack) {
-				/* Corrupt frame pointer? */
-				break;
-			}
-		}
-		/* Assume there's a saved link register, and read it */
-		kern_virt_addr = fp + ARM32_LR_OFFSET;
-		bool ok = machine_trace_thread_validate_kva(kern_virt_addr);
-		if (!ok) {
-			if (thread_trace_flags != NULL) {
-				*thread_trace_flags |= kThreadTruncatedBT;
-			}
-			break;
-		}
-
-		prevlr = (uint32_t)VM_KERNEL_UNSLIDE(*(uint32_t *)kern_virt_addr);
-		prevfp = fp;
-
-		/*
-		 * Next frame; read the fp value into short_fp first
-		 * as it is 32-bit.
-		 */
-		kern_virt_addr = fp;
-		ok = machine_trace_thread_validate_kva(kern_virt_addr);
-		if (!ok) {
-			if (thread_trace_flags != NULL) {
-				*thread_trace_flags |= kThreadTruncatedBT;
-			}
-			fp = 0;
-			break;
-		}
-
-		short_fp = *(uint32_t *)kern_virt_addr;
-		fp = (vm_offset_t) short_fp;
-	}
-	return (int)(((char *)tracebuf) - tracepos);
+	panic("%s: should not have been invoked.", __FUNCTION__);
 }
-
-#endif // !defined(__arm64__)
 
 int
 machine_trace_thread64(thread_t thread,
@@ -538,10 +367,7 @@ machine_trace_thread64(thread_t thread,
     int nframes,
     uint32_t * thread_trace_flags)
 {
-#if defined(__arm__)
-#pragma unused(thread, tracepos, tracebound, nframes, thread_trace_flags)
-	return 0;
-#elif defined(__arm64__)
+#if defined(__arm64__)
 
 	uint64_t * tracebuf = (uint64_t *)tracepos;
 	vm_size_t framesize = sizeof(uint64_t);
@@ -575,7 +401,7 @@ machine_trace_thread64(thread_t thread,
 
 		fp = kstate->fp;
 		prevlr = kstate->lr;
-		pc = kstate->pc;
+		pc = kstate->pc_was_in_userspace ? (register_t)ptrauth_strip((void *)&_was_in_userspace, ptrauth_key_function_pointer) : 0;
 		sp = kstate->sp;
 	}
 
@@ -634,12 +460,7 @@ machine_trace_thread64(thread_t thread,
 					switched_stacks = true;
 					break;
 				}
-#if defined(__arm__)
-				if (prevfp >= (target_cpu_datap->fiqstack_top - FIQSTACK_SIZE) && prevfp < target_cpu_datap->fiqstack_top) {
-					switched_stacks = true;
-					break;
-				}
-#elif defined(__arm64__)
+#if defined(__arm64__)
 				if (prevfp >= (target_cpu_datap->excepstack_top - EXCEPSTACK_SIZE) && prevfp < target_cpu_datap->excepstack_top) {
 					switched_stacks = true;
 					break;

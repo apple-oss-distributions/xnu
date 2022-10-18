@@ -170,6 +170,38 @@ L_ipui_loop:
 	ret
 .endmacro
 
+#if defined(APPLE_ARM64_ARCH_FAMILY) && !APPLEVIRTUALPLATFORM
+/*
+ * Enables cache maintenance by VA instructions on Apple SoCs.
+ *
+ *	$0: Scratch register
+ *	$1: Scratch register
+ */
+.macro ENABLE_DC_MVA_OPS
+	isb		sy
+	ARM64_IS_PCORE $0
+	ARM64_READ_EP_SPR $0, $1, EHID4, HID4
+	and		$1, $1, (~ARM64_REG_HID4_DisDcMVAOps)
+	ARM64_WRITE_EP_SPR $0, $1, EHID4, HID4
+	isb		sy
+.endmacro
+
+/*
+ * Disables cache maintenance by VA instructions on Apple SoCs.
+ *
+ *	$0: Scratch register
+ *	$1: Scratch register
+ */
+.macro DISABLE_DC_MVA_OPS
+	isb		sy
+	ARM64_IS_PCORE $0
+	ARM64_READ_EP_SPR $0, $1, EHID4, HID4
+	orr		$1, $1, ARM64_REG_HID4_DisDcMVAOps
+	ARM64_WRITE_EP_SPR $0, $1, EHID4, HID4
+	isb		sy
+.endmacro
+#endif
+
 /*
  * void CleanPoC_Dcache(void)
  *
@@ -308,7 +340,7 @@ LEXT(CleanPoC_DcacheRegion_Force)
 	ARM64_STACK_EPILOG
 #else
 	b		EXT(CleanPoC_DcacheRegion_internal)
-#endif // APPLE_ARM64_ARCH_FAMILY
+#endif /* APPLE_ARM64_ARCH_FAMILY */
 
 /*
  *	void FlushPoC_Dcache(void)

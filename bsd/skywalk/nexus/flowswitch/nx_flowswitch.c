@@ -113,7 +113,7 @@ static int nx_fsw_prov_params_adjust(const struct kern_nexus_domain_provider *,
     const struct nxprov_params *, struct nxprov_adjusted_params *);
 static int nx_fsw_prov_params(struct kern_nexus_domain_provider *,
     const uint32_t, const struct nxprov_params *, struct nxprov_params *,
-    struct skmem_region_params[SKMEM_REGIONS]);
+    struct skmem_region_params[SKMEM_REGIONS], uint32_t);
 static int nx_fsw_prov_mem_new(struct kern_nexus_domain_provider *,
     struct kern_nexus *, struct nexus_adapter *);
 static int nx_fsw_prov_config(struct kern_nexus_domain_provider *,
@@ -161,6 +161,11 @@ struct nxdom nx_flowswitch_dom_s = {
 		.nb_def = NX_FSW_BUFSIZE,
 		.nb_min = NX_FSW_MINBUFSIZE,
 		.nb_max = NX_FSW_MAXBUFSIZE,
+	},
+	.nxdom_large_buf_size = {
+		.nb_def = NX_FSW_DEF_LARGE_BUFSIZE,
+		.nb_min = NX_FSW_MIN_LARGE_BUFSIZE,
+		.nb_max = NX_FSW_MAX_LARGE_BUFSIZE,
 	},
 	.nxdom_meta_size = {
 		.nb_def = NX_FSW_UMD_SIZE,
@@ -302,19 +307,13 @@ nx_fsw_prov_params_adjust(const struct kern_nexus_domain_provider *nxdom_prov,
 	*(adj->adj_alloc_slots) = *(adj->adj_free_slots) =
 	    NX_FSW_AFRINGSIZE;
 
-	if (adj->adj_buf_srp->srp_r_seg_size == 0) {
-		adj->adj_buf_srp->srp_r_seg_size = skmem_usr_buf_seg_size;
+	if (!SKMEM_MEM_CONSTRAINED_DEVICE() &&
+	    (*(adj->adj_buf_region_segment_size) < NX_FSW_BUF_SEG_SIZE)) {
+		*(adj->adj_buf_region_segment_size) = NX_FSW_BUF_SEG_SIZE;
 	}
-	if (!SKMEM_MEM_CONSTRAINED_DEVICE &&
-	    (adj->adj_buf_srp->srp_r_seg_size < NX_FSW_BUF_SEG_SIZE)) {
-		adj->adj_buf_srp->srp_r_seg_size = NX_FSW_BUF_SEG_SIZE;
-	}
-
-	/* enable magazines layer for metadata */
-	*(adj->adj_md_magazines) = TRUE;
 
 	if (*(adj->adj_max_frags) > 1) {
-		uint32_t fsw_maxbufs = SKMEM_MEM_CONSTRAINED_DEVICE ?
+		uint32_t fsw_maxbufs = SKMEM_MEM_CONSTRAINED_DEVICE() ?
 		    NX_FSW_MAXBUFFERS_MEM_CONSTRAINED : NX_FSW_MAXBUFFERS;
 		uint32_t magazine_max_objs;
 
@@ -339,18 +338,28 @@ nx_fsw_prov_params_adjust(const struct kern_nexus_domain_provider *nxdom_prov,
 			*(adj->adj_max_buffers) -= magazine_max_objs;
 		}
 	}
+	if (SKMEM_MEM_CONSTRAINED_DEVICE() || (fsw_use_dual_sized_pool == 0) ||
+	    (*(adj->adj_max_frags) <= 1)) {
+		*(adj->adj_large_buf_size) = 0;
+	}
 	return 0;
 }
 
 static int
 nx_fsw_prov_params(struct kern_nexus_domain_provider *nxdom_prov,
     const uint32_t req, const struct nxprov_params *nxp0,
-    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS])
+    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS],
+    uint32_t pp_region_config_flags)
 {
 	struct nxdom *nxdom = nxdom_prov->nxdom_prov_dom;
 
+	/* USD regions need to be writable to support user packet pool */
+	srp[SKMEM_REGION_TXAUSD].srp_cflags &= ~SKMEM_REGION_CR_UREADONLY;
+	srp[SKMEM_REGION_RXFUSD].srp_cflags &= ~SKMEM_REGION_CR_UREADONLY;
+
 	return nxprov_params_adjust(nxdom_prov, req, nxp0, nxp, srp,
-	           nxdom, nxdom, nxdom, nx_fsw_prov_params_adjust);
+	           nxdom, nxdom, nxdom, pp_region_config_flags,
+	           nx_fsw_prov_params_adjust);
 }
 
 static int
@@ -359,7 +368,6 @@ nx_fsw_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 {
 #pragma unused(nxdom_prov)
 	int err = 0;
-	struct skmem_region_params srp_tmp[SKMEM_REGIONS];
 	struct skmem_region_params *srp = NX_PROV(nx)->nxprov_region_params;
 
 	SK_DF(SK_VERB_FSW,
@@ -370,19 +378,6 @@ nx_fsw_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	ASSERT(na->na_type == NA_FLOWSWITCH_VP);
 	ASSERT(na->na_arena == NULL);
 	ASSERT((na->na_flags & NAF_USER_PKT_POOL) != 0);
-
-	srp = srp_tmp;
-	memcpy(srp, NX_PROV(nx)->nxprov_region_params, sizeof(srp_tmp));
-	srp[SKMEM_REGION_TXAUSD].srp_cflags &= ~SKMEM_REGION_CR_UREADONLY;
-	srp[SKMEM_REGION_RXFUSD].srp_cflags &= ~SKMEM_REGION_CR_UREADONLY;
-	if ((na->na_flags & NAF_LOW_LATENCY) != 0) {
-		srp[SKMEM_REGION_KMD].srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
-		srp[SKMEM_REGION_UMD].srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
-		srp[SKMEM_REGION_BUF].srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
-		srp[SKMEM_REGION_RXFKSD].srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
-		srp[SKMEM_REGION_RXFUSD].srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
-	}
-
 	/*
 	 * Each port in the flow switch is isolated from one another;
 	 * use NULL for the packet buffer pool references to indicate
@@ -394,10 +389,11 @@ nx_fsw_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	 * of providing port isolation, and also since we don't expose
 	 * the flow switch to external kernel clients.
 	 */
-	na->na_arena = skmem_arena_create_for_nexus(na, srp, NULL, NULL, FALSE,
-	    !NX_USER_CHANNEL_PROV(nx), &nx->nx_adv, &err);
+	uint32_t pp_flags = NX_USER_CHANNEL_PROV(nx) ?
+	    0 : SKMEM_PP_FLAG_TRUNCATED_BUF;
+	na->na_arena = skmem_arena_create_for_nexus(na, srp, NULL, NULL, pp_flags,
+	    &nx->nx_adv, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
-
 	return err;
 }
 
@@ -613,7 +609,8 @@ nx_fsw_dom_find_port(struct kern_nexus *nx, boolean_t rsvd,
 		last = NEXUS_PORT_FLOW_SWITCH_CLIENT;
 	} else {
 		first = NEXUS_PORT_FLOW_SWITCH_CLIENT;
-		last = NXDOM_MAX(NX_DOM(nx), ports);
+		ASSERT(NXDOM_MAX(NX_DOM(nx), ports) <= NEXUS_PORT_MAX);
+		last = (nexus_port_size_t)NXDOM_MAX(NX_DOM(nx), ports);
 	}
 	ASSERT(first <= last);
 
@@ -663,7 +660,8 @@ nx_fsw_dom_bind_port(struct kern_nexus *nx, nexus_port_t *nx_port,
 	 * they are used for internal purposes.
 	 */
 	first = NEXUS_PORT_FLOW_SWITCH_CLIENT;
-	last = NXDOM_MAX(NX_DOM(nx), ports);
+	ASSERT(NXDOM_MAX(NX_DOM(nx), ports) <= NEXUS_PORT_MAX);
+	last = (nexus_port_size_t)NXDOM_MAX(NX_DOM(nx), ports);
 	ASSERT(first <= last);
 
 	FSW_WLOCK(fsw);
@@ -728,12 +726,6 @@ nx_fsw_dom_connect(struct kern_nexus_domain_provider *nxdom_prov,
 
 	if (port != NEXUS_PORT_ANY && port >= NXDOM_MAX(NX_DOM(nx), ports)) {
 		err = EDOM;
-		goto done;
-	}
-
-	if (chr->cr_mode & CHMODE_EVENT_RING) {
-		SK_ERR("event ring is not supported for flowswitch");
-		err = ENOTSUP;
 		goto done;
 	}
 

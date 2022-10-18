@@ -224,6 +224,15 @@ public:
 		OSDictionary * properties);
 
     /*!
+     * @brief       Add an IOService created by Create() to the power manangement tree.
+     * @discussion  IOService objects created by matching on a provider are always added to the power management tree.
+     *              Any IOService created with the Create() API is not, but may be added by calling this method.
+     * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
+     */
+	virtual kern_return_t
+	JoinPMTree(void);
+
+    /*!
      * @brief       Notification of change in power state of a provider.
      * @discussion  DriverKit notifies of changes in power of a provider. The driver should make itself safe for
      *              the new state before passing the call to super. 
@@ -461,6 +470,17 @@ public:
 	 */
 	virtual kern_return_t
 	UserSetProperties(OSContainer * properties) LOCAL;
+
+    /*!
+     * @brief       Send the kIOMessageServicePropertyChange message
+     * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
+     */
+	virtual kern_return_t
+	SendIOMessageServicePropertyChange();
+
+	const char *
+	StringFromReturn(
+		 IOReturn    retval) LOCALONLY;
 #endif /* PRIVATE_WIFI_ONLY */
 
 	/*! @function RemoveProperty

@@ -1581,10 +1581,12 @@ devfs_update(struct vnode *vp, struct timeval *access, struct timeval *modify)
 
 #define VOPFUNC int (*)(void *)
 
+#define devfs_default_error (void (*)(void))vn_default_error
+
 /* The following ops are used by directories and symlinks */
 int(**devfs_vnodeop_p)(void *);
 const static struct vnodeopv_entry_desc devfs_vnodeop_entries[] = {
-	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)vn_default_error },
+	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)devfs_default_error },
 	{ .opve_op = &vnop_lookup_desc, .opve_impl = (VOPFUNC)devfs_lookup },           /* lookup */
 	{ .opve_op = &vnop_create_desc, .opve_impl = (VOPFUNC)err_create },             /* create */
 	{ .opve_op = &vnop_whiteout_desc, .opve_impl = (VOPFUNC)err_whiteout },         /* whiteout */
@@ -1631,7 +1633,7 @@ const struct vnodeopv_desc devfs_vnodeop_opv_desc =
 /* The following ops are used by the device nodes */
 int(**devfs_spec_vnodeop_p)(void *);
 const static struct vnodeopv_entry_desc devfs_spec_vnodeop_entries[] = {
-	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)vn_default_error },
+	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)devfs_default_error },
 	{ .opve_op = &vnop_lookup_desc, .opve_impl = (VOPFUNC)spec_lookup },            /* lookup */
 	{ .opve_op = &vnop_create_desc, .opve_impl = (VOPFUNC)spec_create },            /* create */
 	{ .opve_op = &vnop_mknod_desc, .opve_impl = (VOPFUNC)spec_mknod },              /* mknod */
@@ -1678,7 +1680,7 @@ const struct vnodeopv_desc devfs_spec_vnodeop_opv_desc =
 #if FDESC
 int(**devfs_devfd_vnodeop_p)(void*);
 const static struct vnodeopv_entry_desc devfs_devfd_vnodeop_entries[] = {
-	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)vn_default_error },
+	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)devfs_default_error },
 	{ .opve_op = &vnop_lookup_desc, .opve_impl = (VOPFUNC)devfs_devfd_lookup},      /* lookup */
 	{ .opve_op = &vnop_open_desc, .opve_impl = (VOPFUNC)nop_open },                 /* open */
 	{ .opve_op = &vnop_close_desc, .opve_impl = (VOPFUNC)devfs_close },             /* close */

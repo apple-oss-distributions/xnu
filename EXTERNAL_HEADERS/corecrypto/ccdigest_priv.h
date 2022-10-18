@@ -1,4 +1,4 @@
-/* Copyright (c) (2010,2011,2012,2015,2016,2017,2018,2019) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2012,2015-2019,2021) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to 
@@ -18,8 +18,6 @@
 
 CC_INLINE CC_NONNULL((1))
 bool ccdigest_oid_equal(const struct ccdigest_info *di, ccoid_t oid) {
-    if(di->oid == NULL && CCOID(oid) == NULL) return true;
-    if(di->oid == NULL || CCOID(oid) == NULL) return false;
     return ccoid_equal(di->oid, oid);
 }
 

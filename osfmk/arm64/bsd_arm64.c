@@ -27,7 +27,6 @@
  */
 
 #ifdef  MACH_BSD
-#include <mach_debug.h>
 #include <mach_ldebug.h>
 
 #include <mach/kern_return.h>
@@ -265,7 +264,7 @@ mach_syscall(struct arm_saved_state *state)
 #if CONFIG_DEBUG_SYSCALL_REJECTION
 	bitmap_t const *rejection_mask = uthread_get_syscall_rejection_mask(ut);
 	if (__improbable(rejection_mask != NULL &&
-	    debug_syscall_rejection_mode != 0) &&
+	    uthread_syscall_rejection_is_enabled(ut)) &&
 	    !bitmap_test(rejection_mask, call_number)) {
 		if (debug_syscall_rejection_handle(-call_number)) {
 			if (mach_trap_table[call_number].mach_trap_returns_port) {

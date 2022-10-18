@@ -58,18 +58,21 @@ os_ref_panic_underflow(void *rc)
 
 __abortlike
 static void
-os_ref_panic_resurrection(void *rc)
+os_ref_panic_overflow(void *rc)
 {
-	panic("os_refcnt: attempted resurrection (rc=%p)", rc);
+	panic("os_refcnt: overflow (rc=%p)", rc);
 	__builtin_unreachable();
 }
 
 __abortlike
 static void
-os_ref_panic_overflow(void *rc)
+os_ref_panic_retain(os_ref_atomic_t *rc)
 {
-	panic("os_refcnt: overflow (rc=%p)", rc);
-	__builtin_unreachable();
+	if (os_atomic_load(rc, relaxed) >= OS_REFCNT_MAX_COUNT) {
+		panic("os_refcnt: overflow (rc=%p)", rc);
+	} else {
+		panic("os_refcnt: attempted resurrection (rc=%p)", rc);
+	}
 }
 
 static inline void
@@ -91,10 +94,9 @@ os_ref_check_overflow(os_ref_atomic_t *rc, os_ref_count_t count)
 static inline void
 os_ref_check_retain(os_ref_atomic_t *rc, os_ref_count_t count, os_ref_count_t n)
 {
-	if (__improbable(count < n)) {
-		os_ref_panic_resurrection(rc);
+	if (__improbable(count < n || count >= OS_REFCNT_MAX_COUNT)) {
+		os_ref_panic_retain(rc);
 	}
-	os_ref_check_overflow(rc, count);
 }
 
 #if OS_REFCNT_DEBUG

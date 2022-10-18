@@ -14,8 +14,6 @@
 
 #include <corecrypto/cc_config.h>
 
-/* Only intel systems have these runtime switches today. */
-
 #if defined(__x86_64__) || defined(__i386__)
 
 #if CC_KERNEL
@@ -29,7 +27,7 @@
     #define CC_HAS_BMI2() ((cpuid_info()->cpuid_leaf7_features & CPUID_LEAF7_FEATURE_BMI2) != 0)
     #define CC_HAS_ADX() ((cpuid_info()->cpuid_leaf7_features & CPUID_LEAF7_FEATURE_ADX) != 0)
 
-#elif CC_XNU_KERNEL_AVAILABLE && CC_INTERNAL_SDK
+#elif CC_DARWIN && CC_INTERNAL_SDK
     #include <System/i386/cpu_capabilities.h>
     #define CC_HAS_RDRAND() (_get_cpu_capabilities() & kHasRDRAND)
     #define CC_HAS_AESNI() (_get_cpu_capabilities() & kHasAES)
@@ -41,15 +39,42 @@
     #define CC_HAS_ADX() (_get_cpu_capabilities() & kHasADX)
 
 #elif CC_SGX
-// SGX has no cpuid function, so these will fail
-    #define CC_HAS_AESNI() 0
-    #define CC_HAS_SupplementalSSE3() 0
-    #define CC_HAS_AVX1() 0
-    #define CC_HAS_AVX2() 0
+    #include <cpuid.h>
+    #include <stdbool.h>
+    #include <stdint.h>
+
+    #define CPUID_REG_RAX 0
+    #define CPUID_REG_RBX 1
+    #define CPUID_REG_RCX 2
+    #define CPUID_REG_RDX 3
+
+    #define CPUID_FEATURE_AES 25
+    #define CPUID_FEATURE_SSE3 0
+    #define CPUID_FEATURE_AVX1 28
+    #define CPUID_FEATURE_LEAF7_AVX2 5
+    #define CPUID_FEATURE_LEAF7_BMI2 8
+    #define CPUID_FEATURE_RDRAND 30
+    #define CPUID_FEATURE_LEAF7_ADX 19
+
+    CC_INLINE bool _cpu_supports(uint64_t leaf, uint64_t subleaf, uint8_t cpuid_register, uint8_t bit) {
+        uint64_t registers[4] = {0};
+        registers[CPUID_REG_RAX] = leaf;
+        registers[CPUID_REG_RCX] = subleaf;
+        if (oe_emulate_cpuid(&registers[CPUID_REG_RAX], &registers[CPUID_REG_RBX], &registers[CPUID_REG_RCX], &registers[CPUID_REG_RDX])) {
+            return false;
+        }
+        return (registers[cpuid_register] >> bit) & 1;
+    }
+
+
+    #define CC_HAS_AESNI() _cpu_supports(1, 0, CPUID_REG_RCX, CPUID_FEATURE_AES)
+    #define CC_HAS_SupplementalSSE3() _cpu_supports(1, 0, CPUID_REG_RCX, CPUID_FEATURE_SSE3)
+    #define CC_HAS_AVX1() _cpu_supports(1, 0, CPUID_REG_RCX, CPUID_FEATURE_AVX1)
+    #define CC_HAS_AVX2() _cpu_supports(7, 0, CPUID_REG_RBX, CPUID_FEATURE_LEAF7_AVX2)
     #define CC_HAS_AVX512_AND_IN_KERNEL() 0
-    #define CC_HAS_BMI2() 0
-    #define CC_HAS_RDRAND() 0
-    #define CC_HAS_ADX() 0
+    #define CC_HAS_BMI2() _cpu_supports(7, 0, CPUID_REG_RBX, CPUID_FEATURE_LEAF7_BMI2)
+    #define CC_HAS_RDRAND() _cpu_supports(1, 0, CPUID_REG_RCX, CPUID_FEATURE_RDRAND)
+    #define CC_HAS_ADX() _cpu_supports(7, 0, CPUID_REG_RBX, CPUID_FEATURE_LEAF7_ADX)
 #else
     #define CC_HAS_AESNI() __builtin_cpu_supports("aes")
     #define CC_HAS_SupplementalSSE3() __builtin_cpu_supports("ssse3")
@@ -85,5 +110,18 @@
 #endif
 
 #endif  // defined(__x86_64__) || defined(__i386__)
+
+#if defined(__arm64__)
+
+#if CC_DARWIN && CC_INTERNAL_SDK
+    #include <System/arm/cpu_capabilities.h>
+    #define CC_HAS_SHA512() (_get_cpu_capabilities() & kHasARMv82SHA512)
+    #define CC_HAS_SHA3() (_get_cpu_capabilities() & kHasARMv82SHA3)
+#else
+    #define CC_HAS_SHA512() (0)
+    #define CC_HAS_SHA3() (0)
+#endif
+
+#endif // defined(__arm64__)
 
 #endif /* CORECRYPTO_CC_RUNTIME_CONFIG_H_ */

@@ -860,8 +860,12 @@ public:
 	bool        isAOTMode(void);
 private:
 	// -- AOT
-
-	void        updateTasksSuspend(void);
+	enum {
+		kTasksSuspendUnsuspended = 0,
+		kTasksSuspendSuspended   = 1,
+		kTasksSuspendNoChange    = -1,
+	};
+	bool        updateTasksSuspend(int newTasksSuspended, int newAOTTasksSuspended);
 	int         findSuspendedPID(uint32_t pid, uint32_t *outRefCount);
 
 // IOPMrootDomain internal sleep call

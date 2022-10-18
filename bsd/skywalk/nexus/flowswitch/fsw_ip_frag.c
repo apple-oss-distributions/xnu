@@ -176,7 +176,8 @@ static uint32_t ipfq_freefq(struct fsw_ip_frag_mgr *mgr, struct ipfq *q,
 static struct ipf *ipf_alloc(struct fsw_ip_frag_mgr *mgr);
 static void ipf_free(struct fsw_ip_frag_mgr *mgr, struct ipf *f);
 static void ipf_free_pkt(struct ipf *f);
-static void ipfq_drain(struct fsw_ip_frag_mgr *);
+static void ipfq_drain(struct fsw_ip_frag_mgr *mgr);
+static void ipfq_reap(struct fsw_ip_frag_mgr *mgr);
 static int ipfq_drain_sysctl SYSCTL_HANDLER_ARGS;
 void ipf_icmp_param_err(struct fsw_ip_frag_mgr *, struct __kern_packet *pkt,
     int param);
@@ -270,7 +271,7 @@ fsw_ip_frag_mgr_destroy(struct fsw_ip_frag_mgr *mgr)
  *   Successfully processed (not fully reassembled)
  *     ret = 0, *pkt = NULL(ipfm owns it), *nfrags=0
  *   Successfully reassembled
- *     ret = 0, *pkt = 1st fragment(fragments chained in ordrer by pkt_nextpkt)
+ *     ret = 0, *pkt = 1st fragment(fragments chained in order by pkt_nextpkt)
  *     *nfrags = number of all fragments (>0)
  *   Error
  *     ret != 0 && *pkt unmodified (caller to decide what to do with *pkt)
@@ -799,6 +800,48 @@ ipfq_remque(struct ipfq *p6)
 	p6->ipfq_next->ipfq_prev = p6->ipfq_prev;
 }
 
+/*
+ * @internal drain reassembly queue till reaching target q count.
+ */
+static void
+_ipfq_reap(struct fsw_ip_frag_mgr *mgr, uint32_t target_q_count,
+    void (*ipf_cb)(struct fsw_ip_frag_mgr *, struct ipf *))
+{
+	uint32_t n_freed = 0;
+
+	LCK_MTX_ASSERT(&mgr->ipfm_lock, LCK_MTX_ASSERT_OWNED);
+
+	SK_DF(SK_VERB_IP_FRAG, "draining (frag %d/%d queue %d/%d)",
+	    mgr->ipfm_f_count, mgr->ipfm_f_limit, mgr->ipfm_q_count,
+	    mgr->ipfm_q_limit);
+
+	while (mgr->ipfm_q.ipfq_next != &mgr->ipfm_q &&
+	    mgr->ipfm_q_count > target_q_count) {
+		n_freed += ipfq_freefq(mgr, mgr->ipfm_q.ipfq_prev,
+		    mgr->ipfm_q.ipfq_prev->ipfq_is_dirty ? NULL : ipf_cb);
+	}
+
+	STATS_ADD(mgr->ipfm_stats, FSW_STATS_RX_FRAG_DROP_REAPED, n_freed);
+}
+
+/*
+ * @internal reap half reassembly queues to allow newer fragment assembly.
+ */
+static void
+ipfq_reap(struct fsw_ip_frag_mgr *mgr)
+{
+	_ipfq_reap(mgr, mgr->ipfm_q_count / 2, ipf_icmp_timeout_err);
+}
+
+/*
+ * @internal reap all reassembly queues, for shutdown etc.
+ */
+static void
+ipfq_drain(struct fsw_ip_frag_mgr *mgr)
+{
+	_ipfq_reap(mgr, 0, NULL);
+}
+
 static void
 ipfq_timeout(thread_call_param_t arg0, thread_call_param_t arg1)
 {
@@ -806,7 +849,7 @@ ipfq_timeout(thread_call_param_t arg0, thread_call_param_t arg1)
 	struct fsw_ip_frag_mgr *mgr = arg0;
 	struct ipfq *q;
 	uint64_t now, elapsed;
-	uint32_t nfreed = 0;
+	uint32_t n_freed = 0;
 
 	net_update_uptime();
 	now = _net_uptime;
@@ -821,27 +864,19 @@ ipfq_timeout(thread_call_param_t arg0, thread_call_param_t arg1)
 			if (elapsed > ipfm_frag_ttl) {
 				SK_DF(SK_VERB_IP_FRAG, "timing out q id %5d",
 				    q->ipfq_prev->ipfq_key.ipfk_ident);
-				nfreed = ipfq_freefq(mgr, q->ipfq_prev,
+				n_freed = ipfq_freefq(mgr, q->ipfq_prev,
 				    q->ipfq_is_dirty ? NULL :
 				    ipf_icmp_timeout_err);
 			}
 		}
 	}
+	STATS_ADD(mgr->ipfm_stats, FSW_STATS_RX_FRAG_DROP_TIMEOUT, n_freed);
 
 	/* If running out of resources, drain ipfm queues (oldest one first) */
 	if (mgr->ipfm_f_count >= mgr->ipfm_f_limit ||
 	    mgr->ipfm_q_count >= mgr->ipfm_q_limit) {
-		SK_DF(SK_VERB_IP_FRAG, "draining (frag %d/%d queue %d/%d)",
-		    mgr->ipfm_f_count, mgr->ipfm_f_limit, mgr->ipfm_q_count,
-		    mgr->ipfm_q_limit);
-		uint32_t target_q_count = mgr->ipfm_q_count / 2;
-		while (mgr->ipfm_q_count > target_q_count) {
-			nfreed += ipfq_freefq(mgr, mgr->ipfm_q.ipfq_prev,
-			    q->ipfq_is_dirty ? NULL : ipf_icmp_timeout_err);
-		}
+		ipfq_reap(mgr);
 	}
-
-	STATS_ADD(mgr->ipfm_stats, FSW_STATS_RX_FRAG_DROP_TIMEOUT, nfreed);
 
 	/* re-arm the purge timer if there's work to do */
 	if (mgr->ipfm_q_count > 0) {
@@ -869,21 +904,6 @@ ipfq_sched_timeout(struct fsw_ip_frag_mgr *mgr, boolean_t in_tcall)
 	}
 }
 
-/*
- * @internal drain all ressambly queue for shutdown.
- *
- * @discussion Shutdown is called when if_detach happens, so no time exceeded
- * icmp error are generated here.
- */
-static void
-ipfq_drain(struct fsw_ip_frag_mgr *mgr)
-{
-	LCK_MTX_ASSERT(&mgr->ipfm_lock, LCK_MTX_ASSERT_OWNED);
-	while (mgr->ipfm_q.ipfq_next != &mgr->ipfm_q) {
-		ipfq_freefq(mgr, mgr->ipfm_q.ipfq_next, NULL);
-	}
-}
-
 static int
 ipfq_drain_sysctl SYSCTL_HANDLER_ARGS
 {
@@ -906,9 +926,9 @@ ipfq_alloc(struct fsw_ip_frag_mgr *mgr, int how)
 	struct ipfq *q;
 
 	if (mgr->ipfm_q_count > mgr->ipfm_q_limit) {
-		STATS_INC(mgr->ipfm_stats, FSW_STATS_RX_FRAG_DROP_QUEUE_LIMIT);
-		return NULL;
+		ipfq_reap(mgr);
 	}
+	ASSERT(mgr->ipfm_q_count <= mgr->ipfm_q_limit);
 
 	t = m_get(how, MT_FTABLE);
 	if (t != NULL) {

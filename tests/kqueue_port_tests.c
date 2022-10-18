@@ -166,3 +166,48 @@ T_DECL(kqueue_machport, "basic EVFILT_MACHPORT tests")
 	T_EXPECT_EQ(rc, 1, "kevent(port-destroyed)");
 	T_EXPECT_EQ(ke[0].ident, (uintptr_t)pset, "event was for the pset");
 }
+
+static int
+kevent_attach_event(mach_port_t port, uint16_t flags, uint32_t fflags, int *error)
+{
+	int rc;
+
+	struct kevent_qos_s kev = {
+		.ident = port,
+		.filter = EVFILT_MACHPORT,
+		.flags = flags,
+		.qos = 0xA00,
+		.udata = 0x6666666666666666,
+		.fflags = fflags,
+	};
+
+	struct kevent_qos_s kev_err = {};
+
+	rc = kevent_id(0x88888887, &kev, 1, &kev_err, 1, NULL, NULL,
+	    KEVENT_FLAG_WORKLOOP  | KEVENT_FLAG_ERROR_EVENTS);
+
+	*error = (int)kev_err.data;
+	return rc;
+}
+
+/* rdar://95680295 (Turnstile Use-after-Free in XNU) */
+T_DECL(kqueue_machport_no_toggle_flags, "don't allow turnstile flags to be toggled for EVFILT_MACHPORT")
+{
+	kern_return_t kr;
+	int rc, error = 0;
+	mach_port_t port = MACH_PORT_NULL;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	T_EXPECT_MACH_SUCCESS(kr, "mach_port_allocate()");
+
+	rc = kevent_attach_event(port, EV_ADD | EV_ENABLE | EV_DISPATCH, 0, &error);
+	T_EXPECT_EQ(rc, 0, "kevent attach event");
+
+	rc = kevent_attach_event(port, 0, MACH_RCV_MSG, &error);
+	T_QUIET; T_EXPECT_EQ_INT(rc, 1, "registration failed");
+	T_EXPECT_EQ_INT(error, EINVAL, "cannot modify filter flag MACH_RCV_MSG");
+
+	rc = kevent_attach_event(port, 0, MACH_RCV_SYNC_PEEK, &error);
+	T_QUIET; T_EXPECT_EQ_INT(rc, 1, "registration failed");
+	T_EXPECT_EQ_INT(error, EINVAL, "cannot modify filter flag MACH_RCV_SYNC_PEEK");
+}

@@ -233,7 +233,7 @@ uiomove64(const addr64_t c_cp, int n, struct uio *uio)
 	}
 #endif /* LP64_DEBUG */
 
-	while (n > 0 && uio_resid(uio)) {
+	while (n > 0 && uio->uio_iovcnt > 0 && uio_resid(uio)) {
 		uio_update(uio, 0);
 		acnt = uio_curriovlen(uio);
 		if (acnt == 0) {

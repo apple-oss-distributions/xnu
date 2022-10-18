@@ -140,7 +140,6 @@ void fill_task_billed_usage(task_t task, rusage_info_current *ri);
 int fill_task_io_rusage(task_t task, rusage_info_current *ri);
 int fill_task_qos_rusage(task_t task, rusage_info_current *ri);
 uint64_t get_task_logical_writes(task_t task, bool external);
-void fill_task_monotonic_rusage(task_t task, rusage_info_current *ri);
 
 rlim_t maxdmap = MAXDSIZ;       /* XXX */
 rlim_t maxsmap = MAXSSIZ - PAGE_MAX_SIZE;       /* XXX */
@@ -966,7 +965,7 @@ dosetrlimit(struct proc *p, u_int which, struct rlimit *newrlim)
 	 * processes in the system to access the plimit while we are in the
 	 * middle of this setrlimit call.
 	 */
-	rlim = hazard_ptr_serialized_load(&p->p_limit)->pl_rlimit[which];
+	rlim = smr_serialized_load(&p->p_limit)->pl_rlimit[which];
 
 	proc_unlock(p);
 
@@ -994,7 +993,7 @@ dosetrlimit(struct proc *p, u_int which, struct rlimit *newrlim)
 	switch (which) {
 	case RLIMIT_CPU:
 		if (newrlim->rlim_cur == RLIM_INFINITY) {
-			task_vtimer_clear(p->task, TASK_VTIMER_RLIM);
+			task_vtimer_clear(proc_task(p), TASK_VTIMER_RLIM);
 			timerclear(&p->p_rlim_cpu);
 		} else {
 			task_absolutetime_info_data_t   tinfo;
@@ -1004,7 +1003,7 @@ dosetrlimit(struct proc *p, u_int which, struct rlimit *newrlim)
 			clock_usec_t                    tv_usec;
 
 			count = TASK_ABSOLUTETIME_INFO_COUNT;
-			task_info(p->task, TASK_ABSOLUTETIME_INFO, (task_info_t)&tinfo, &count);
+			task_info(proc_task(p), TASK_ABSOLUTETIME_INFO, (task_info_t)&tinfo, &count);
 			absolutetime_to_microtime(tinfo.total_user + tinfo.total_system, &tv_sec, &tv_usec);
 			ttv.tv_sec = tv_sec;
 			ttv.tv_usec = tv_usec;
@@ -1015,9 +1014,9 @@ dosetrlimit(struct proc *p, u_int which, struct rlimit *newrlim)
 
 			timerclear(&tv);
 			if (timercmp(&p->p_rlim_cpu, &tv, >)) {
-				task_vtimer_set(p->task, TASK_VTIMER_RLIM);
+				task_vtimer_set(proc_task(p), TASK_VTIMER_RLIM);
 			} else {
-				task_vtimer_clear(p->task, TASK_VTIMER_RLIM);
+				task_vtimer_clear(proc_task(p), TASK_VTIMER_RLIM);
 
 				timerclear(&p->p_rlim_cpu);
 
@@ -1083,13 +1082,17 @@ dosetrlimit(struct proc *p, u_int which, struct rlimit *newrlim)
 			mach_vm_size_t size;
 
 			/* grow stack */
-			size = round_page_64(newrlim->rlim_cur);
+			size = newrlim->rlim_cur;
+			if (round_page_overflow(size, &size)) {
+				error = EINVAL;
+				goto out;
+			}
 			size -= round_page_64(rlim.rlim_cur);
 
 			addr = (mach_vm_offset_t)(p->user_stack - round_page_64(newrlim->rlim_cur));
 			kr = mach_vm_protect(current_map(), addr, size, FALSE, VM_PROT_DEFAULT);
 			if (kr != KERN_SUCCESS) {
-				error =  EINVAL;
+				error = EINVAL;
 				goto out;
 			}
 		} else if (newrlim->rlim_cur < rlim.rlim_cur) {
@@ -1258,7 +1261,7 @@ calcru(struct proc *p, struct timeval *up, struct timeval *sp, struct timeval *i
 		timerclear(ip);
 	}
 
-	task = p->task;
+	task = proc_task(p);
 	if (task) {
 		mach_task_basic_info_data_t tinfo;
 		task_thread_times_info_data_t ttimesinfo;
@@ -1413,7 +1416,7 @@ static void
 proc_limit_release(struct plimit *plimit)
 {
 	if (os_ref_release(&plimit->pl_refcnt) == 0) {
-		hazard_retire(plimit, sizeof(*plimit), proc_limit_free);
+		smr_global_retire(plimit, sizeof(*plimit), proc_limit_free);
 	}
 }
 
@@ -1423,15 +1426,14 @@ proc_limit_release(struct plimit *plimit)
 rlim_t
 proc_limitgetcur(proc_t p, int which)
 {
-	hazard_guard_t guard;
 	rlim_t rlim_cur;
 
 	assert(p);
 	assert(which < RLIM_NLIMITS);
 
-	guard = hazard_guard_get(0);
-	rlim_cur = hazard_guard_acquire(guard, &p->p_limit)->pl_rlimit[which].rlim_cur;
-	hazard_guard_put(guard);
+	smr_global_enter();
+	rlim_cur = smr_entered_load(&p->p_limit)->pl_rlimit[which].rlim_cur;
+	smr_global_leave();
 
 	return rlim_cur;
 }
@@ -1463,14 +1465,13 @@ proc_limitsetcur_fsize(proc_t p, rlim_t value)
 struct rlimit
 proc_limitget(proc_t p, int which)
 {
-	hazard_guard_t guard;
 	struct rlimit lim;
 
 	assert(which < RLIM_NLIMITS);
 
-	guard = hazard_guard_get(0);
-	lim = hazard_guard_acquire(guard, &p->p_limit)->pl_rlimit[which];
-	hazard_guard_put(guard);
+	smr_global_enter();
+	lim = smr_entered_load(&p->p_limit)->pl_rlimit[which];
+	smr_global_leave();
 
 	return lim;
 }
@@ -1478,15 +1479,14 @@ proc_limitget(proc_t p, int which)
 void
 proc_limitfork(proc_t parent, proc_t child)
 {
-	hazard_guard_t guard;
 	struct plimit *plim;
 
-	guard = hazard_guard_get(0);
-	plim = hazard_guard_acquire(guard, &parent->p_limit);
+	smr_global_enter();
+	plim = smr_entered_load(&parent->p_limit);
 	os_ref_retain(&plim->pl_refcnt);
-	hazard_guard_put(guard);
+	smr_global_leave();
 
-	hazard_ptr_init(&child->p_limit, plim);
+	smr_init_store(&child->p_limit, plim);
 }
 
 void
@@ -1495,8 +1495,8 @@ proc_limitdrop(proc_t p)
 	struct plimit *plimit = NULL;
 
 	proc_lock(p);
-	plimit = hazard_ptr_serialized_load(&p->p_limit);
-	hazard_ptr_clear(&p->p_limit);
+	plimit = smr_serialized_load(&p->p_limit);
+	smr_clear_store(&p->p_limit);
 	proc_unlock(p);
 
 	proc_limit_release(plimit);
@@ -1553,7 +1553,7 @@ proc_limitupdate(proc_t p, bool unblock, void (^update)(struct plimit *))
 
 	proc_lock(p);
 
-	cur_plim = hazard_ptr_serialized_load(&p->p_limit);
+	cur_plim = smr_serialized_load(&p->p_limit);
 
 	os_ref_init_count(&copy_plim->pl_refcnt, &rlimit_refgrp, 1);
 	bcopy(cur_plim->pl_rlimit, copy_plim->pl_rlimit,
@@ -1561,7 +1561,7 @@ proc_limitupdate(proc_t p, bool unblock, void (^update)(struct plimit *))
 
 	update(copy_plim);
 
-	hazard_ptr_serialized_store(&p->p_limit, copy_plim);
+	smr_serialized_store(&p->p_limit, copy_plim);
 
 	if (unblock) {
 		proc_limitunblock(p);
@@ -1591,6 +1591,9 @@ static int
 iopolicysys_vfs_skip_mtime_update(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
 static int
 iopolicysys_vfs_allow_lowspace_writes(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
+static int
+iopolicysys_vfs_disallow_rw_for_o_evtonly(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
+static int iopolicysys_vfs_altlink(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
 
 /*
  * iopolicysys
@@ -1679,6 +1682,19 @@ iopolicysys(struct proc *p, struct iopolicysys_args *uap, int32_t *retval)
 			goto out;
 		}
 		break;
+	case IOPOL_TYPE_VFS_DISALLOW_RW_FOR_O_EVTONLY:
+		error = iopolicysys_vfs_disallow_rw_for_o_evtonly(p, uap->cmd, iop_param.iop_scope, iop_param.iop_policy, &iop_param);
+		if (error) {
+			goto out;
+		}
+		break;
+	case IOPOL_TYPE_VFS_ALTLINK:
+		error = iopolicysys_vfs_altlink(p, uap->cmd, iop_param.iop_scope, iop_param.iop_policy, &iop_param);
+		if (error) {
+			goto out;
+		}
+		break;
+
 	default:
 		error = EINVAL;
 		goto out;
@@ -2432,8 +2448,73 @@ out:
 	return error;
 }
 
+static int
+iopolicysys_vfs_disallow_rw_for_o_evtonly(struct proc *p, int cmd, int scope,
+    int policy, __unused struct _iopol_param_t *iop_param)
+{
+	int error = EINVAL;
 
-/* BSD call back function for task_policy networking changes */
+	switch (scope) {
+	case IOPOL_SCOPE_PROCESS:
+		break;
+	default:
+		goto out;
+	}
+
+	switch (cmd) {
+	case IOPOL_CMD_GET:
+		policy = (os_atomic_load(&p->p_vfs_iopolicy, relaxed) &
+		    P_VFS_IOPOLICY_DISALLOW_RW_FOR_O_EVTONLY) ?
+		    IOPOL_VFS_DISALLOW_RW_FOR_O_EVTONLY_ON :
+		    IOPOL_VFS_DISALLOW_RW_FOR_O_EVTONLY_DEFAULT;
+		iop_param->iop_policy = policy;
+		goto out_ok;
+	case IOPOL_CMD_SET:
+		break;
+	default:
+		goto out;
+	}
+
+	/* Once set, we don't allow the process to clear it. */
+	switch (policy) {
+	case IOPOL_VFS_DISALLOW_RW_FOR_O_EVTONLY_ON:
+		os_atomic_or(&p->p_vfs_iopolicy,
+		    P_VFS_IOPOLICY_DISALLOW_RW_FOR_O_EVTONLY, relaxed);
+		break;
+	default:
+		goto out;
+	}
+
+out_ok:
+	error = 0;
+out:
+	return error;
+}
+
+static int
+iopolicysys_vfs_altlink(struct proc *p, int cmd, int scope, int policy,
+    struct _iopol_param_t *iop_param)
+{
+	if (scope != IOPOL_SCOPE_PROCESS) {
+		return EINVAL;
+	}
+
+	if (cmd == IOPOL_CMD_GET) {
+		policy = (os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_ALTLINK) ?
+		    IOPOL_VFS_ALTLINK_ENABLED : IOPOL_VFS_ALTLINK_DISABLED;
+		iop_param->iop_policy = policy;
+		return 0;
+	}
+
+	/* Once set, we don't allow the process to clear it. */
+	if (policy == IOPOL_VFS_ALTLINK_ENABLED) {
+		os_atomic_or(&p->p_vfs_iopolicy, P_VFS_IOPOLICY_ALTLINK, relaxed);
+		return 0;
+	}
+
+	return EINVAL;
+}
+
 void
 proc_apply_task_networkbg(int pid, thread_t thread)
 {
@@ -2453,29 +2534,33 @@ gather_rusage_info(proc_t p, rusage_info_current *ru, int flavor)
 	assert(p->p_stats != NULL);
 	memset(ru, 0, sizeof(*ru));
 	switch (flavor) {
+	case RUSAGE_INFO_V6:
+		/* Any P-specific resource counters are captured in fill_task_rusage. */
+		OS_FALLTHROUGH;
+
 	case RUSAGE_INFO_V5:
 #if __has_feature(ptrauth_calls)
-		if (vm_shared_region_is_reslide(p->task)) {
+		if (vm_shared_region_is_reslide(proc_task(p))) {
 			ru->ri_flags |= RU_PROC_RUNS_RESLIDE;
 		}
 #endif /* __has_feature(ptrauth_calls) */
 		OS_FALLTHROUGH;
+
 	case RUSAGE_INFO_V4:
-		ru->ri_logical_writes = get_task_logical_writes(p->task, false);
-		ru->ri_lifetime_max_phys_footprint = get_task_phys_footprint_lifetime_max(p->task);
+		ru->ri_logical_writes = get_task_logical_writes(proc_task(p), false);
+		ru->ri_lifetime_max_phys_footprint = get_task_phys_footprint_lifetime_max(proc_task(p));
 #if CONFIG_LEDGER_INTERVAL_MAX
-		ru->ri_interval_max_phys_footprint = get_task_phys_footprint_interval_max(p->task, FALSE);
+		ru->ri_interval_max_phys_footprint = get_task_phys_footprint_interval_max(proc_task(p), FALSE);
 #endif
-		fill_task_monotonic_rusage(p->task, ru);
 		OS_FALLTHROUGH;
 
 	case RUSAGE_INFO_V3:
-		fill_task_qos_rusage(p->task, ru);
-		fill_task_billed_usage(p->task, ru);
+		fill_task_qos_rusage(proc_task(p), ru);
+		fill_task_billed_usage(proc_task(p), ru);
 		OS_FALLTHROUGH;
 
 	case RUSAGE_INFO_V2:
-		fill_task_io_rusage(p->task, ru);
+		fill_task_io_rusage(proc_task(p), ru);
 		OS_FALLTHROUGH;
 
 	case RUSAGE_INFO_V1:
@@ -2497,7 +2582,7 @@ gather_rusage_info(proc_t p, rusage_info_current *ru, int flavor)
 
 	case RUSAGE_INFO_V0:
 		proc_getexecutableuuid(p, (unsigned char *)&ru->ri_uuid, sizeof(ru->ri_uuid));
-		fill_task_rusage(p->task, ru);
+		fill_task_rusage(proc_task(p), ru);
 		ru->ri_proc_start_abstime = p->p_stats->ps_start;
 	}
 }
@@ -2507,7 +2592,6 @@ proc_get_rusage(proc_t p, int flavor, user_addr_t buffer, __unused int is_zombie
 {
 	rusage_info_current ri_current = {};
 
-	int error = 0;
 	size_t size = 0;
 
 	switch (flavor) {
@@ -2534,6 +2618,10 @@ proc_get_rusage(proc_t p, int flavor, user_addr_t buffer, __unused int is_zombie
 	case RUSAGE_INFO_V5:
 		size = sizeof(struct rusage_info_v5);
 		break;
+
+	case RUSAGE_INFO_V6:
+		size = sizeof(struct rusage_info_v6);
+		break;
 	default:
 		return EINVAL;
 	}
@@ -2546,16 +2634,13 @@ proc_get_rusage(proc_t p, int flavor, user_addr_t buffer, __unused int is_zombie
 	 * If task is still alive, collect info from the live task itself.
 	 * Otherwise, look to the cached info in the zombie proc.
 	 */
-	if (p->p_ru == NULL) {
+	if (p->p_ru) {
+		return copyout(&p->p_ru->ri, buffer, size);
+	} else {
 		gather_rusage_info(p, &ri_current, flavor);
 		ri_current.ri_proc_exit_abstime = 0;
-		error = copyout(&ri_current, buffer, size);
-	} else {
-		ri_current = p->p_ru->ri;
-		error = copyout(&p->p_ru->ri, buffer, size);
+		return copyout(&ri_current, buffer, size);
 	}
-
-	return error;
 }
 
 static int
@@ -2629,7 +2714,7 @@ proc_rlimit_control(__unused struct proc *p, struct proc_rlimit_control_args *ua
 		if ((error = copyin(uap->arg, &wakeupmon_args, sizeof(wakeupmon_args))) != 0) {
 			break;
 		}
-		if ((error = mach_to_bsd_rv(task_wakeups_monitor_ctl(targetp->task, &wakeupmon_args.wm_flags,
+		if ((error = mach_to_bsd_rv(task_wakeups_monitor_ctl(proc_task(targetp), &wakeupmon_args.wm_flags,
 		    &wakeupmon_args.wm_rate))) != 0) {
 			break;
 		}
@@ -2637,7 +2722,7 @@ proc_rlimit_control(__unused struct proc *p, struct proc_rlimit_control_args *ua
 		break;
 	case RLIMIT_CPU_USAGE_MONITOR:
 		cpumon_flags = (uint32_t)uap->arg; // XXX temporarily stashing flags in argp (12592127)
-		error = mach_to_bsd_rv(task_cpu_usage_monitor_ctl(targetp->task, &cpumon_flags));
+		error = mach_to_bsd_rv(task_cpu_usage_monitor_ctl(proc_task(targetp), &cpumon_flags));
 		break;
 	case RLIMIT_THREAD_CPULIMITS:
 		cpulimits_flags = (uint32_t)uap->arg; // only need a limited set of bits, pass in void * argument
@@ -2673,7 +2758,7 @@ proc_rlimit_control(__unused struct proc *p, struct proc_rlimit_control_args *ua
 			error = EINVAL;
 			break;
 		}
-		interval_max_footprint = get_task_phys_footprint_interval_max(targetp->task, TRUE);
+		interval_max_footprint = get_task_phys_footprint_interval_max(proc_task(targetp), TRUE);
 		break;
 #endif /* CONFIG_LEDGER_INTERVAL_MAX */
 	default:
@@ -2703,11 +2788,3 @@ thread_selfusage(struct proc *p __unused, struct thread_selfusage_args *uap __un
 
 	return 0;
 }
-
-#if !MONOTONIC
-int
-thread_selfcounts(__unused struct proc *p, __unused struct thread_selfcounts_args *uap, __unused int *ret_out)
-{
-	return ENOTSUP;
-}
-#endif /* !MONOTONIC */

@@ -34,10 +34,10 @@
 #include <sys/errno.h>
 #include <vm/vm_map.h>
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 #include <arm/cpu_data.h>
 #include <arm/cpu_data_internal.h>
-#endif // defined(__arm__) || defined(__arm64__)
+#endif // defined(__arm64__)
 
 #if defined(HAS_APPLE_PAC)
 #include <ptrauth.h>
@@ -248,26 +248,9 @@ interrupted_kernel_pc_fp(uintptr_t *pc, uintptr_t *fp)
 	*pc = get_saved_state_pc(state);
 	*fp = get_saved_state_fp(state);
 
-#elif defined(__arm__)
-
-	struct arm_saved_state *state;
-
-	state = getCpuDatap()->cpu_int_state;
-	if (!state) {
-		return KERN_FAILURE;
-	}
-
-	/* return early if interrupted a thread in user space */
-	if (PSR_IS_USER(get_saved_state_cpsr(state))) {
-		return KERN_FAILURE;
-	}
-
-	*pc = get_saved_state_pc(state);
-	*fp = get_saved_state_fp(state);
-
-#else // !defined(__arm__) && !defined(__arm64__) && !defined(__x86_64__)
+#else // !defined(__arm64__) && !defined(__x86_64__)
 #error "unsupported architecture"
-#endif // !defined(__arm__) && !defined(__arm64__) && !defined(__x86_64__)
+#endif // !defined(__arm64__) && !defined(__x86_64__)
 
 	return KERN_SUCCESS;
 }
@@ -453,7 +436,8 @@ backtrace_user(uintptr_t *bt, unsigned int max_frames,
 		if (thread != cur_thread) {
 			map = get_task_map_reference(task);
 			if (map == NULL) {
-				return ENOMEM;
+				error = ENOMEM;
+				goto out;
 			}
 			old_map = vm_map_switch(map);
 		}
@@ -483,7 +467,7 @@ backtrace_user(uintptr_t *bt, unsigned int max_frames,
 		fp = fp != 0 ? fp : saved_state32(state)->ebp;
 	}
 
-#elif defined(__arm64__) || defined(__arm__)
+#elif defined(__arm64__)
 
 	struct arm_saved_state *state = get_user_regs(thread);
 	if (!state) {
@@ -491,7 +475,6 @@ backtrace_user(uintptr_t *bt, unsigned int max_frames,
 		goto out;
 	}
 
-#if defined(__arm64__)
 	user_64 = is_saved_state64(state);
 	pc = get_saved_state_pc(state);
 	fp = fp != 0 ? fp : get_saved_state_fp(state);
@@ -499,17 +482,9 @@ backtrace_user(uintptr_t *bt, unsigned int max_frames,
 	// ARM expects stack frames to be aligned to 16 bytes.
 #define INVALID_USER_FP(FP) (((FP) & 0x3UL) != 0UL)
 
-#elif defined(__arm__)
-	// ARM expects stack frames to be aligned to 16 bytes.
-#define INVALID_USER_FP(FP) (((FP) & 0x3UL) != 0UL)
-#endif // !defined(__arm64__)
-
-	pc = get_saved_state_pc(state);
-	fp = fp != 0 ? fp : get_saved_state_fp(state);
-
-#else // defined(__arm__) || defined(__arm64__) || defined(__x86_64__)
+#else // defined(__arm64__) || defined(__x86_64__)
 #error "unsupported architecture"
-#endif // !defined(__arm__) && !defined(__arm64__) && !defined(__x86_64__)
+#endif // !defined(__arm64__) && !defined(__x86_64__)
 
 	// Only capture the save state PC without a custom frame pointer to walk.
 	if (!ctl || ctl->btc_frame_addr == 0) {

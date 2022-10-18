@@ -128,25 +128,6 @@ typedef struct {
 } plrecord_t;
 
 #if     DEVELOPMENT || DEBUG
-typedef enum {
-	IOTRACE_PHYS_READ = 1,
-	IOTRACE_PHYS_WRITE,
-	IOTRACE_IO_READ,
-	IOTRACE_IO_WRITE,
-	IOTRACE_PORTIO_READ,
-	IOTRACE_PORTIO_WRITE
-} iotrace_type_e;
-
-typedef struct {
-	iotrace_type_e  iotype;
-	int             size;
-	uint64_t        vaddr;
-	uint64_t        paddr;
-	uint64_t        val;
-	uint64_t        start_time_abs;
-	uint64_t        duration;
-	uint64_t        backtrace[MAX_TRACE_BTFRAMES];
-} iotrace_entry_t;
 
 typedef struct {
 	int             vector;                 /* Vector number of interrupt */
@@ -158,13 +139,6 @@ typedef struct {
 	uint64_t        duration;
 	uint64_t        backtrace[MAX_TRACE_BTFRAMES];
 } traptrace_entry_t;
-
-#define DEFAULT_IOTRACE_ENTRIES_PER_CPU (64)
-#define IOTRACE_MAX_ENTRIES_PER_CPU (256)
-extern volatile int mmiotrace_enabled;
-extern uint32_t iotrace_entries_per_cpu;
-PERCPU_DECL(uint32_t, iotrace_next);
-PERCPU_DECL(iotrace_entry_t * __unsafe_indexable, iotrace_ring);
 
 #define TRAPTRACE_INVALID_INDEX (~0U)
 #define DEFAULT_TRAPTRACE_ENTRIES_PER_CPU (16)
@@ -493,7 +467,7 @@ rbtrace_bt(uint64_t *__counted_by(maxframes)rets, int maxframes,
                      : "rax");
 	}
 
-	thread_t cplthread = cdata->cpu_active_thread;
+	thread_t __single cplthread = cdata->cpu_active_thread;
 	if (cplthread) {
 		uintptr_t csp;
 		if (use_cursp == true) {
@@ -572,44 +546,12 @@ pltrace_internal(boolean_t enable)
 
 extern int plctrace_enabled;
 
-static inline void
-iotrace(iotrace_type_e type, uint64_t vaddr, uint64_t paddr, int size, uint64_t val,
-    uint64_t sabs, uint64_t duration)
-{
-	cpu_data_t *cdata;
-	uint32_t nextidx;
-	iotrace_entry_t *cur_iotrace_ring;
-	uint32_t *nextidxp;
-
-	if (__improbable(mmiotrace_enabled == 0 || iotrace_entries_per_cpu == 0)) {
-		return;
-	}
-
-	cdata = current_cpu_datap();
-	nextidxp = PERCPU_GET(iotrace_next);
-	nextidx = *nextidxp;
-	cur_iotrace_ring = *PERCPU_GET(iotrace_ring);
-
-	cur_iotrace_ring[nextidx].iotype = type;
-	cur_iotrace_ring[nextidx].vaddr = vaddr;
-	cur_iotrace_ring[nextidx].paddr = paddr;
-	cur_iotrace_ring[nextidx].size = size;
-	cur_iotrace_ring[nextidx].val = val;
-	cur_iotrace_ring[nextidx].start_time_abs = sabs;
-	cur_iotrace_ring[nextidx].duration = duration;
-
-	*nextidxp = ((nextidx + 1) >= iotrace_entries_per_cpu) ? 0 : (nextidx + 1);
-
-	rbtrace_bt(&cur_iotrace_ring[nextidx].backtrace[0],
-	    MAX_TRACE_BTFRAMES - 1, cdata, (uint64_t)__builtin_frame_address(0), true);
-}
-
 static inline uint32_t
 traptrace_start(int vecnum, uint64_t ipc, uint64_t sabs, uint64_t frameptr)
 {
 	cpu_data_t *cdata;
 	uint32_t nextidx;
-	traptrace_entry_t *__unsafe_indexable cur_traptrace_ring;
+	traptrace_entry_t *cur_traptrace_ring;
 	uint32_t *nextidxp;
 
 	if (__improbable(traptrace_enabled == 0 || traptrace_entries_per_cpu == 0)) {
@@ -623,7 +565,8 @@ traptrace_start(int vecnum, uint64_t ipc, uint64_t sabs, uint64_t frameptr)
 	/* prevent nested interrupts from clobbering this record */
 	*nextidxp = (((nextidx + 1) >= (unsigned int)traptrace_entries_per_cpu) ? 0 : (nextidx + 1));
 
-	cur_traptrace_ring = *PERCPU_GET(traptrace_ring);
+	cur_traptrace_ring = __unsafe_forge_bidi_indexable(traptrace_entry_t *,
+	    *PERCPU_GET(traptrace_ring), sizeof(traptrace_entry_t) * traptrace_entries_per_cpu);
 	cur_traptrace_ring[nextidx].vector = vecnum;
 	cur_traptrace_ring[nextidx].curthread = current_thread_fast();
 	cur_traptrace_ring[nextidx].interrupted_pc = ipc;

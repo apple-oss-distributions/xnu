@@ -41,7 +41,7 @@
 #include <net/kext_net.h>
 #include <net/if.h>
 #include <net/net_api_stats.h>
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 #include <skywalk/lib/net_filter_event.h>
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
 #include <netinet/in_var.h>
@@ -117,7 +117,7 @@ static errno_t sflt_register_common(const struct sflt_filter *filter, int domain
 errno_t sflt_register(const struct sflt_filter *filter, int domain,
     int type, int protocol);
 
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 static bool net_check_compatible_sfltr(void);
 bool net_check_compatible_alf(void);
 static bool net_check_compatible_parental_controls(void);
@@ -1405,7 +1405,7 @@ sflt_register_common(const struct sflt_filter *filter, int domain, int type,
 			INC_ATOMIC_INT64_LIM(net_api_stats.nas_sfltr_register_os_total);
 		}
 	}
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 	net_filter_event_mark(NET_FILTER_EVENT_SOCKET,
 	    net_check_compatible_sfltr());
 	net_filter_event_mark(NET_FILTER_EVENT_ALF,
@@ -1569,7 +1569,7 @@ sflt_unregister(sflt_handle handle)
 		/* Release the filter */
 		sflt_release_locked(filter);
 	}
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 	net_filter_event_mark(NET_FILTER_EVENT_SOCKET,
 	    net_check_compatible_sfltr());
 	net_filter_event_mark(NET_FILTER_EVENT_ALF,
@@ -1709,7 +1709,7 @@ sockopt_copyout(sockopt_t sopt, void *data, size_t len)
 	return sooptcopyout(sopt, data, len);
 }
 
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 static bool
 net_check_compatible_sfltr(void)
 {

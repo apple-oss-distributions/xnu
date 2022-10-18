@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1330,7 +1330,7 @@ out_inm_release:
 	}
 
 	/* schedule timer now that we've dropped the lock(s) */
-	igmp_set_timeout(&itp);
+	igmp_set_fast_timeout(&itp);
 
 	return error;
 }
@@ -1403,7 +1403,7 @@ in_leavegroup(struct in_multi *inm, /*const*/ struct in_mfilter *imf)
 		INM_REMREF(inm);        /* for in_multihead list */
 	}
 	/* schedule timer now that we've dropped the lock(s) */
-	igmp_set_timeout(&itp);
+	igmp_set_fast_timeout(&itp);
 
 	return error;
 }
@@ -2196,7 +2196,9 @@ inp_join_group(struct inpcb *inp, struct sockopt *sopt)
 		}
 		ifp = ifindex2ifnet[gsr.gsr_interface];
 		ifnet_head_done();
-
+		if (ifp == NULL) {
+			return EADDRNOTAVAIL;
+		}
 		break;
 
 	default:
@@ -2515,6 +2517,9 @@ inp_leave_group(struct inpcb *inp, struct sockopt *sopt)
 
 		ifp = ifindex2ifnet[gsr.gsr_interface];
 		ifnet_head_done();
+		if (ifp == NULL) {
+			return EADDRNOTAVAIL;
+		}
 		break;
 
 	default:

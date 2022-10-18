@@ -607,7 +607,7 @@ run_test(void)
 {
 	uint64_t mem;
 	uint32_t testpath_buf_size, pages;
-	int ret, dev, pgsz, old_limit, new_limit = 0;
+	int ret, pgsz, old_limit, new_limit = 0;
 	size_t sysctl_size;
 	uint64_t zone_cur, zone_tot, zone_target;
 
@@ -615,13 +615,6 @@ run_test(void)
 	T_SETUPBEGIN;
 
 	main_start = time(NULL);
-	dev = 0;
-	sysctl_size = sizeof(dev);
-	ret = sysctlbyname("kern.development", &dev, &sysctl_size, NULL, 0);
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "sysctl kern.development failed");
-	if (dev == 0) {
-		T_SKIP("Skipping test on release kernel");
-	}
 
 	testpath_buf_size = sizeof(testpath);
 	ret = _NSGetExecutablePath(testpath, &testpath_buf_size);
@@ -776,6 +769,8 @@ T_DECL( memorystatus_vme_zone_test,
     T_META_TIMEOUT(1800),
 /*		T_META_LTEPHASE(LTE_POSTINIT),
  */
+    T_META_REQUIRES_SYSCTL_NE("kern.kasan.available", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
     T_META_SYSCTL_INT(ZONEMAP_JETSAM_LIMIT_SYSCTL))
 {
 	current_test = (test_config_struct) {
@@ -795,6 +790,8 @@ T_DECL( memorystatus_vm_objects_zone_test,
     T_META_TIMEOUT(1800),
 /*		T_META_LTEPHASE(LTE_POSTINIT),
  */
+    T_META_REQUIRES_SYSCTL_NE("kern.kasan.available", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
     T_META_SYSCTL_INT(ZONEMAP_JETSAM_LIMIT_SYSCTL))
 {
 	current_test = (test_config_struct) {
@@ -815,6 +812,8 @@ T_DECL( memorystatus_generic_zone_test,
     T_META_TIMEOUT(1800),
 /*		T_META_LTEPHASE(LTE_POSTINIT),
  */
+    T_META_REQUIRES_SYSCTL_NE("kern.kasan.available", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
     T_META_SYSCTL_INT(ZONEMAP_JETSAM_LIMIT_SYSCTL))
 {
 	current_test = (test_config_struct) {

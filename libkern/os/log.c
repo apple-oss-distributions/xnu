@@ -43,7 +43,7 @@
 
 #define OS_LOGMEM_BUF_ORDER 14
 #define OS_LOGMEM_MIN_LOG_ORDER 9
-#define OS_LOGMEM_MAX_LOG_ORDER 10
+#define OS_LOGMEM_MAX_LOG_ORDER (OS_LOG_MAX_SIZE_ORDER)
 
 struct os_log_s {
 	int a;
@@ -91,16 +91,12 @@ bool os_log_disabled(void);
 
 __osloglike(3, 0)
 static void
-_os_log_with_args_internal(os_log_t oslog __unused, os_log_type_t type __unused,
-    const char *format, va_list args, void *addr, void *dso, bool driverKit, bool addcr);
+_os_log_with_args_internal(os_log_t, os_log_type_t, const char *, va_list,
+    uint64_t, void *, void *, bool, bool);
 
 __osloglike(1, 0)
 static void
-_os_log_to_msgbuf_internal(const char *format, va_list args, bool safe, bool logging, bool addcr);
-
-__osloglike(2, 0)
-static void
-_os_log_to_log_internal(os_log_type_t type, const char *format, va_list args, void *addr, void *dso, bool driverKit);
+_os_log_to_msgbuf_internal(const char *, va_list, uint64_t, bool, bool, bool);
 
 __startup_func
 static void
@@ -128,8 +124,10 @@ oslog_init_logmem(void)
 	const size_t logmem_size = logmem_required_size(OS_LOGMEM_BUF_ORDER, OS_LOGMEM_MIN_LOG_ORDER);
 	vm_offset_t addr;
 
-	if (kmem_alloc(kernel_map, &addr, logmem_size, VM_KERN_MEMORY_LOG) == KERN_SUCCESS) {
-		logmem_init(&os_log_mem, (void *)addr, logmem_size,
+	if (kmem_alloc(kernel_map, &addr, logmem_size + ptoa(2),
+	    KMA_KOBJECT | KMA_PERMANENT | KMA_ZERO | KMA_GUARD_FIRST | KMA_GUARD_LAST,
+	    VM_KERN_MEMORY_LOG) == KERN_SUCCESS) {
+		logmem_init(&os_log_mem, (void *)(addr + PAGE_SIZE), logmem_size,
 		    OS_LOGMEM_BUF_ORDER, OS_LOGMEM_MIN_LOG_ORDER, OS_LOGMEM_MAX_LOG_ORDER);
 		printf("Long logs support configured: size: %u\n", os_log_mem.lm_cnt_free);
 	} else {
@@ -175,26 +173,35 @@ os_log_create(const char *subsystem __unused, const char *category __unused)
 }
 
 __attribute__((noinline, not_tail_called)) void
-_os_log_internal(void *dso, os_log_t log, uint8_t type, const char *message, ...)
+_os_log_internal(void *dso, os_log_t log, uint8_t type, const char *fmt, ...)
 {
-	va_list args;
+	uint64_t ts = firehose_tracepoint_time(firehose_activity_flags_default);
 	void *addr = __builtin_return_address(0);
+	va_list args;
 
-	va_start(args, message);
-
-	_os_log_with_args_internal(log, type, message, args, addr, dso, FALSE, FALSE);
-
+	va_start(args, fmt);
+	_os_log_with_args_internal(log, type, fmt, args, ts, addr, dso, FALSE, FALSE);
 	va_end(args);
+}
 
-	return;
+__attribute__((noinline, not_tail_called)) void
+_os_log_at_time(void *dso, os_log_t log, uint8_t type, uint64_t ts, const char *fmt, ...)
+{
+	void *addr = __builtin_return_address(0);
+	va_list args;
+
+	va_start(args, fmt);
+	_os_log_with_args_internal(log, type, fmt, args, ts, addr, dso, FALSE, FALSE);
+	va_end(args);
 }
 
 __attribute__((noinline, not_tail_called)) int
-_os_log_internal_driverKit(void *dso, os_log_t log, uint8_t type, const char *message, ...)
+_os_log_internal_driverKit(void *dso, os_log_t log, uint8_t type, const char *fmt, ...)
 {
-	va_list args;
+	uint64_t ts = firehose_tracepoint_time(firehose_activity_flags_default);
 	void *addr = __builtin_return_address(0);
 	bool driverKitLog = FALSE;
+	va_list args;
 
 	/*
 	 * We want to be able to identify dexts from the logs.
@@ -232,10 +239,9 @@ _os_log_internal_driverKit(void *dso, os_log_t log, uint8_t type, const char *me
 		driverKitLog = TRUE;
 		addr = (void*) loadTag;
 	}
-	va_start(args, message);
 
-	_os_log_with_args_internal(log, type, message, args, addr, dso, driverKitLog, true);
-
+	va_start(args, fmt);
+	_os_log_with_args_internal(log, type, fmt, args, ts, addr, dso, driverKitLog, true);
 	va_end(args);
 
 	return 0;
@@ -244,21 +250,177 @@ _os_log_internal_driverKit(void *dso, os_log_t log, uint8_t type, const char *me
 #pragma mark - shim functions
 
 __attribute__((noinline, not_tail_called)) void
-os_log_with_args(os_log_t oslog, os_log_type_t type, const char *format, va_list args, void *addr)
+os_log_with_args(os_log_t oslog, os_log_type_t type, const char *fmt,
+    va_list args, void *addr)
 {
+	uint64_t ts = firehose_tracepoint_time(firehose_activity_flags_default);
+
 	// if no address passed, look it up
 	if (addr == NULL) {
 		addr = __builtin_return_address(0);
 	}
 
-	_os_log_with_args_internal(oslog, type, format, args, addr, NULL, FALSE, FALSE);
+	_os_log_with_args_internal(oslog, type, fmt, args, ts, addr, NULL, FALSE, FALSE);
+}
+
+static firehose_stream_t
+firehose_stream(os_log_type_t type)
+{
+	return (type == OS_LOG_TYPE_INFO || type == OS_LOG_TYPE_DEBUG) ?
+	       firehose_stream_memory : firehose_stream_persist;
+}
+
+static firehose_tracepoint_id_t
+firehose_ftid(os_log_type_t type, const char *fmt, firehose_tracepoint_flags_t flags,
+    void *dso, void *addr, bool driverKit)
+{
+	uint32_t off;
+
+	if (driverKit) {
+		/*
+		 * Set FIREHOSE_TRACEPOINT_PC_DYNAMIC_BIT so logd will not try
+		 * to find the format string in the executable text.
+		 */
+		off = (uint32_t)((uintptr_t)addr | FIREHOSE_TRACEPOINT_PC_DYNAMIC_BIT);
+	} else {
+		off = _os_trace_offset(dso, fmt, (_firehose_tracepoint_flags_activity_t)flags);
+	}
+
+	return FIREHOSE_TRACE_ID_MAKE(firehose_tracepoint_namespace_log, type, flags, off);
+}
+
+static firehose_tracepoint_flags_t
+firehose_ftid_flags(const void *dso, bool driverKit)
+{
+	kc_format_t kcformat = KCFormatUnknown;
+	__assert_only bool result = PE_get_primary_kc_format(&kcformat);
+	assert(result);
+
+	if (kcformat == KCFormatStatic || kcformat == KCFormatKCGEN) {
+		return _firehose_tracepoint_flags_pc_style_shared_cache;
+	}
+
+	/*
+	 * driverKit will have the dso set as MH_EXECUTE (it is logging from a
+	 * syscall in the kernel) but needs logd to parse the address as an
+	 * absolute pc.
+	 */
+	const kernel_mach_header_t *mh = dso;
+	if (mh->filetype == MH_EXECUTE && !driverKit) {
+		return _firehose_tracepoint_flags_pc_style_main_exe;
+	}
+
+	return _firehose_tracepoint_flags_pc_style_absolute;
+}
+
+static void *
+resolve_dso(const char *fmt, void *dso, void *addr, bool driverKit)
+{
+	kc_format_t kcformat = KCFormatUnknown;
+
+	if (!addr || !PE_get_primary_kc_format(&kcformat)) {
+		return NULL;
+	}
+
+	switch (kcformat) {
+	case KCFormatStatic:
+	case KCFormatKCGEN:
+		dso = PE_get_kc_baseaddress(KCKindPrimary);
+		break;
+	case KCFormatDynamic:
+	case KCFormatFileset:
+		if (!dso && (dso = (void *)OSKextKextForAddress(fmt)) == NULL) {
+			return NULL;
+		}
+		if (!_os_trace_addr_in_text_segment(dso, fmt)) {
+			return NULL;
+		}
+		if (!driverKit && (dso != (void *)OSKextKextForAddress(addr))) {
+			return NULL;
+		}
+		break;
+	default:
+		panic("unknown KC format type");
+	}
+
+	return dso;
+}
+
+static inline uintptr_t
+resolve_location(firehose_tracepoint_flags_t flags, uintptr_t dso, uintptr_t addr,
+    bool driverKit, size_t *loc_size)
+{
+	switch (flags) {
+	case _firehose_tracepoint_flags_pc_style_shared_cache:
+	case _firehose_tracepoint_flags_pc_style_main_exe:
+		*loc_size = sizeof(uint32_t);
+		return addr - dso;
+	case _firehose_tracepoint_flags_pc_style_absolute:
+		*loc_size = sizeof(uintptr_t);
+		return driverKit ? addr : VM_KERNEL_UNSLIDE(addr);
+	default:
+		panic("Unknown firehose tracepoint flags %x", flags);
+	}
 }
 
 static void
-_os_log_with_args_internal(os_log_t oslog, os_log_type_t type,
-    const char *format, va_list args, void *addr, void *dso, bool driverKit, bool addcr)
+log_payload_init(log_payload_t lp, firehose_stream_t stream, firehose_tracepoint_id_u ftid,
+    uint64_t timestamp, size_t data_size)
 {
-	if (format[0] == '\0') {
+	lp->lp_stream = stream;
+	lp->lp_ftid = ftid;
+	lp->lp_timestamp = timestamp;
+	lp->lp_data_size = (uint16_t)data_size;
+}
+
+static void
+_os_log_to_log_internal(os_log_type_t type, const char *fmt, va_list args,
+    uint64_t ts, void *addr, void *dso, bool driverKit)
+{
+	counter_inc(&oslog_p_total_msgcount);
+
+	dso = resolve_dso(fmt, dso, addr, driverKit);
+	if (__improbable(!dso)) {
+		counter_inc(&oslog_p_unresolved_kc_msgcount);
+		return;
+	}
+
+	firehose_tracepoint_flags_t flags = firehose_ftid_flags(dso, driverKit);
+
+	size_t loc_sz = 0;
+	uintptr_t loc = resolve_location(flags, (uintptr_t)dso, (uintptr_t)addr,
+	    driverKit, &loc_sz);
+
+	firehose_tracepoint_id_u ftid;
+	ftid.ftid_value = firehose_ftid(type, fmt, flags, dso, addr, driverKit);
+
+	__attribute__((uninitialized, aligned(8)))
+	uint8_t buffer[OS_LOG_BUFFER_MAX_SIZE];
+	struct os_log_context_s ctx;
+
+	os_log_context_init(&ctx, &os_log_mem, buffer, sizeof(buffer));
+
+	if (!os_log_context_encode(&ctx, fmt, args, loc, loc_sz)) {
+		counter_inc(&oslog_p_error_count);
+		os_log_context_free(&ctx);
+		return;
+	}
+
+	log_payload_s log;
+	log_payload_init(&log, firehose_stream(type), ftid, ts, ctx.ctx_content_sz);
+
+	if (!log_queue_log(&log, ctx.ctx_buffer, true)) {
+		counter_inc(&oslog_p_dropped_msgcount);
+	}
+
+	os_log_context_free(&ctx);
+}
+
+static void
+_os_log_with_args_internal(os_log_t oslog, os_log_type_t type, const char *fmt,
+    va_list args, uint64_t ts, void *addr, void *dso, bool driverKit, bool addcr)
+{
+	if (fmt[0] == '\0') {
 		return;
 	}
 
@@ -267,16 +429,17 @@ _os_log_with_args_internal(os_log_t oslog, os_log_type_t type,
 	bool logging = !os_log_turned_off();
 
 	if (oslog != &_os_log_replay) {
-		_os_log_to_msgbuf_internal(format, args, safe, logging, addcr);
+		_os_log_to_msgbuf_internal(fmt, args, ts, safe, logging, addcr);
 	}
 
 	if (safe && logging) {
-		_os_log_to_log_internal(type, format, args, addr, dso, driverKit);
+		_os_log_to_log_internal(type, fmt, args, ts, addr, dso, driverKit);
 	}
 }
 
 static void
-_os_log_to_msgbuf_internal(const char *format, va_list args, bool safe, bool logging, bool addcr)
+_os_log_to_msgbuf_internal(const char *format, va_list args, uint64_t timestamp,
+    bool safe, bool logging, bool addcr)
 {
 	/*
 	 * The following threshold was determined empirically as the point where
@@ -362,7 +525,6 @@ _os_log_to_msgbuf_internal(const char *format, va_list args, bool safe, bool log
 	if (newlogline && (msgbufp->msg_size > MSGBUF_TIMESTAMP_THRESHOLD)) {
 		clock_sec_t secs;
 		clock_usec_t microsecs;
-		const uint64_t timestamp = firehose_tracepoint_time(firehose_activity_flags_default);
 		absolutetime_to_microtime(timestamp, &secs, &microsecs);
 		printf_log_locked(FALSE, "[%5lu.%06u]: ", (unsigned long)secs, microsecs);
 	}
@@ -379,123 +541,10 @@ _os_log_to_msgbuf_internal(const char *format, va_list args, bool safe, bool log
 	counter_inc(&oslog_msgbuf_msgcount);
 }
 
-static firehose_stream_t
-firehose_stream(os_log_type_t type)
-{
-	return (type == OS_LOG_TYPE_INFO || type == OS_LOG_TYPE_DEBUG) ?
-	       firehose_stream_memory : firehose_stream_persist;
-}
-
-static void
-log_payload_init(log_payload_t lp, firehose_stream_t stream, firehose_tracepoint_id_u ftid,
-    uint64_t timestamp, size_t data_size)
-{
-	lp->lp_stream = stream;
-	lp->lp_ftid = ftid;
-	lp->lp_timestamp = timestamp;
-	lp->lp_data_size = (uint16_t)data_size;
-}
-
-static void
-_os_log_actual(os_log_type_t type, const char *format, void *dso, void *addr, uint8_t *logdata, size_t logdata_sz,
-    firehose_tracepoint_flags_t flags, bool driverKit)
-{
-	firehose_tracepoint_id_u trace_id;
-
-	firehose_stream_t stream = firehose_stream(type);
-	uint64_t timestamp = firehose_tracepoint_time(firehose_activity_flags_default);
-
-	if (driverKit) {
-		// set FIREHOSE_TRACEPOINT_PC_DYNAMIC_BIT so logd will not try to find the format string in
-		// the executable text
-		trace_id.ftid_value = FIREHOSE_TRACE_ID_MAKE(firehose_tracepoint_namespace_log,
-		    type, flags, (uint32_t)((uintptr_t)addr | FIREHOSE_TRACEPOINT_PC_DYNAMIC_BIT));
-	} else {
-		// create trace_id after we've set additional flags
-		trace_id.ftid_value = FIREHOSE_TRACE_ID_MAKE(firehose_tracepoint_namespace_log,
-		    type, flags, _os_trace_offset(dso, format, (_firehose_tracepoint_flags_activity_t)flags));
-	}
-
-
-	log_payload_s log;
-	log_payload_init(&log, stream, trace_id, timestamp, logdata_sz);
-
-	if (!log_queue_log(&log, logdata, true)) {
-		counter_inc(&oslog_p_dropped_msgcount);
-	}
-}
-
-static void *
-resolve_dso(const char *fmt, void *dso, void *addr, bool driverKit)
-{
-	kc_format_t kcformat = KCFormatUnknown;
-
-	if (!PE_get_primary_kc_format(&kcformat)) {
-		return NULL;
-	}
-
-	switch (kcformat) {
-	case KCFormatStatic:
-	case KCFormatKCGEN:
-		dso = PE_get_kc_baseaddress(KCKindPrimary);
-		break;
-	case KCFormatDynamic:
-	case KCFormatFileset:
-		if (!dso && (dso = (void *)OSKextKextForAddress(fmt)) == NULL) {
-			return NULL;
-		}
-		if (!_os_trace_addr_in_text_segment(dso, fmt)) {
-			return NULL;
-		}
-		if (!driverKit && (dso != (void *)OSKextKextForAddress(addr))) {
-			return NULL;
-		}
-		break;
-	default:
-		panic("unknown KC format type");
-	}
-
-	return dso;
-}
-
-static void
-_os_log_to_log_internal(os_log_type_t type, const char *fmt, va_list args, void *addr, void *dso, bool driverKit)
-{
-	counter_inc(&oslog_p_total_msgcount);
-
-	if (addr == NULL) {
-		counter_inc(&oslog_p_unresolved_kc_msgcount);
-		return;
-	}
-
-	if ((dso = resolve_dso(fmt, dso, addr, driverKit)) == NULL) {
-		counter_inc(&oslog_p_unresolved_kc_msgcount);
-		return;
-	}
-
-	uint8_t buffer[OS_LOG_BUFFER_MAX_SIZE] __attribute__((aligned(8))) = { 0 };
-	struct os_log_context_s ctx;
-
-	os_log_context_init(&ctx, &os_log_mem, buffer, sizeof(buffer));
-
-	if (os_log_context_encode(&ctx, fmt, args, addr, dso, driverKit)) {
-		_os_log_actual(type, fmt, dso, addr, ctx.ctx_buffer, ctx.ctx_content_sz,
-		    ctx.ctx_ft_flags, driverKit);
-	} else {
-		counter_inc(&oslog_p_error_count);
-	}
-
-	os_log_context_free(&ctx);
-}
-
 bool
 os_log_coprocessor(void *buff, uint64_t buff_len, os_log_type_t type,
     const char *uuid, uint64_t timestamp, uint32_t offset, bool stream_log)
 {
-	firehose_tracepoint_id_u trace_id;
-	uint8_t                  pubdata[OS_LOG_BUFFER_MAX_SIZE];
-	size_t                   wr_pos = 0;
-
 	if (os_log_turned_off()) {
 		return false;
 	}
@@ -514,6 +563,10 @@ os_log_coprocessor(void *buff, uint64_t buff_len, os_log_type_t type,
 	// unlike kext, where pc is used to find uuid, in coprocessor logs the uuid is passed as part of the tracepoint
 	firehose_tracepoint_flags_t flags = _firehose_tracepoint_flags_pc_style_uuid_relative;
 
+	__attribute__((uninitialized))
+	uint8_t pubdata[OS_LOG_BUFFER_MAX_SIZE];
+	size_t wr_pos = 0;
+
 	memcpy(pubdata, &offset, sizeof(uint32_t));
 	wr_pos += sizeof(uint32_t);
 	memcpy(pubdata + wr_pos, uuid, 16);
@@ -522,6 +575,7 @@ os_log_coprocessor(void *buff, uint64_t buff_len, os_log_type_t type,
 	memcpy(pubdata + wr_pos, buff, buff_len);
 
 	// create firehose trace id
+	firehose_tracepoint_id_u trace_id;
 	trace_id.ftid_value = FIREHOSE_TRACE_ID_MAKE(firehose_tracepoint_namespace_log,
 	    type, flags, offset);
 
@@ -618,31 +672,28 @@ coproc_reg_type_to_firehost_code(os_log_coproc_reg_t reg_type)
 void
 os_log_coprocessor_register_with_type(const char *uuid, const char *file_path, os_log_coproc_reg_t reg_type)
 {
-	uint64_t                 stamp;
-	size_t                   path_size = strlen(file_path) + 1;
-	firehose_tracepoint_id_u trace_id;
-	size_t                   uuid_info_len = sizeof(struct firehose_trace_uuid_info_s) + path_size;
+	size_t path_size = strlen(file_path) + 1;
+	size_t uuid_info_len = sizeof(struct firehose_trace_uuid_info_s) + path_size;
+
+	if (os_log_disabled() || path_size > PATH_MAX) {
+		return;
+	}
+
+	__attribute__((uninitialized))
 	union {
 		struct firehose_trace_uuid_info_s uuid_info;
 		char path[PATH_MAX + sizeof(struct firehose_trace_uuid_info_s)];
 	} buf;
-
-	if (os_log_disabled()) {
-		return;
-	}
-
-	if (path_size > PATH_MAX) {
-		return;
-	}
 
 	// write metadata to uuid_info
 	memcpy(buf.uuid_info.ftui_uuid, uuid, sizeof(uuid_t));
 	buf.uuid_info.ftui_size    = 1;
 	buf.uuid_info.ftui_address = 1;
 
-	stamp = firehose_tracepoint_time(firehose_activity_flags_default);
+	uint64_t stamp = firehose_tracepoint_time(firehose_activity_flags_default);
 
 	// create tracepoint id
+	firehose_tracepoint_id_u trace_id;
 	trace_id.ftid_value = FIREHOSE_TRACE_ID_MAKE(firehose_tracepoint_namespace_metadata, _firehose_tracepoint_type_metadata_coprocessor,
 	    (firehose_tracepoint_flags_t)0, coproc_reg_type_to_firehost_code(reg_type));
 
@@ -774,6 +825,7 @@ GENOSLOGHELPER(test_oslog_default_helper, "oslog_default_helper", os_log);
 kern_return_t
 test_os_log()
 {
+	__attribute__((uninitialized))
 	char databuffer[256];
 	uint32_t uniqid = RandomULong();
 	size_t match_count = 0;

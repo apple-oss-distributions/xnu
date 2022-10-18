@@ -196,19 +196,19 @@ inline int P_LP64 = 0x00000004;  /* Process is LP64 */
 
 #pragma D binding "1.0" translator
 translator psinfo_t < struct proc * P > {
-	pr_nlwp = 	((struct task *)(P->task))->thread_count;
+	pr_nlwp = 	((struct task *)(P->p_proc_ro->pr_task))->thread_count;
 	pr_pid = 	P->p_pid;
 	pr_ppid = 	P->p_ppid;
-	pr_pgid = 	P->p_pgrp.__hazard_ptr->pg_id;
-	pr_sid = 	P->p_pgrp.__hazard_ptr->pg_session->s_sid;
+	pr_pgid = 	P->p_pgrp.__smr_ptr->pg_id;
+	pr_sid = 	P->p_pgrp.__smr_ptr->pg_session->s_sid;
  	pr_uid = 	P->p_proc_ro->p_ucred->cr_posix.cr_ruid;
  	pr_euid = 	P->p_proc_ro->p_ucred->cr_posix.cr_uid;
  	pr_gid = 	P->p_proc_ro->p_ucred->cr_posix.cr_rgid;
  	pr_egid = 	P->p_proc_ro->p_ucred->cr_posix.cr_groups[0];
 	pr_addr = 	(uintptr_t)P;
 
-	pr_ttydev = (P->p_pgrp.__hazard_ptr->pg_session->s_ttyvp == NULL) ? (dev_t)-1 :
-		P->p_pgrp.__hazard_ptr->pg_session->s_ttyp->t_dev;
+	pr_ttydev = (P->p_pgrp.__smr_ptr->pg_session->s_ttyvp == NULL) ? (dev_t)-1 :
+		P->p_pgrp.__smr_ptr->pg_session->s_ttyp->t_dev;
 
 	/*
 	 * timestruct_t (SECONDS, NANOSECONDS) is not available directly nor can a further translation

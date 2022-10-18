@@ -214,7 +214,7 @@ static int      sysctl_mld_v2enable SYSCTL_HANDLER_ARGS;
 
 static int mld_timeout_run;             /* MLD timer is scheduled to run */
 static void mld_timeout(void *);
-static void mld_sched_timeout(void);
+static void mld_sched_timeout(bool);
 
 /*
  * Normative references: RFC 2710, RFC 3590, RFC 3810.
@@ -1595,9 +1595,17 @@ mld_set_timeout(struct mld_tparams *mtp)
 		if (mtp->sct != 0) {
 			state_change_timers_running6 = 1;
 		}
-		mld_sched_timeout();
+		mld_sched_timeout(mtp->fast);
 		MLD_UNLOCK();
 	}
+}
+
+void
+mld_set_fast_timeout(struct mld_tparams *mtp)
+{
+	VERIFY(mtp != NULL);
+	mtp->fast = true;
+	mld_set_timeout(mtp);
 }
 
 /*
@@ -1606,7 +1614,6 @@ mld_set_timeout(struct mld_tparams *mtp)
 static void
 mld_timeout(void *arg)
 {
-#pragma unused(arg)
 	struct ifqueue           scq;   /* State-change packets */
 	struct ifqueue           qrq;   /* Query response packets */
 	struct ifnet            *ifp;
@@ -1614,6 +1621,7 @@ mld_timeout(void *arg)
 	struct in6_multi        *inm;
 	int                      uri_sec = 0;
 	unsigned int genid = mld_mli_list_genid;
+	bool                     fast = arg != NULL;
 
 	SLIST_HEAD(, in6_multi) in6m_dthead;
 
@@ -1628,10 +1636,18 @@ mld_timeout(void *arg)
 
 	MLD_LOCK();
 
-	MLD_PRINTF(("%s: qpt %d, it %d, cst %d, sct %d\n", __func__,
+	MLD_PRINTF(("%s: qpt %d, it %d, cst %d, sct %d, fast %d\n", __func__,
 	    querier_present_timers_running6, interface_timers_running6,
-	    current_state_timers_running6, state_change_timers_running6));
+	    current_state_timers_running6, state_change_timers_running6, fast));
 
+	if (fast) {
+		/*
+		 * When running the fast timer, skip processing
+		 * of "querier present" timers since they are
+		 * based on 1-second intervals.
+		 */
+		goto skip_query_timers;
+	}
 	/*
 	 * MLDv1 querier present timer processing.
 	 */
@@ -1705,8 +1721,7 @@ mld_timeout(void *arg)
 		mli->mli_flags &= ~MLIF_PROCESSED;
 	}
 
-
-
+skip_query_timers:
 	if (!current_state_timers_running6 &&
 	    !state_change_timers_running6) {
 		goto out_locked;
@@ -1825,7 +1840,7 @@ next:
 out_locked:
 	/* re-arm the timer if there's work to do */
 	mld_timeout_run = 0;
-	mld_sched_timeout();
+	mld_sched_timeout(false);
 	MLD_UNLOCK();
 
 	/* Now that we're dropped all locks, release detached records */
@@ -1833,7 +1848,7 @@ out_locked:
 }
 
 static void
-mld_sched_timeout(void)
+mld_sched_timeout(bool fast)
 {
 	MLD_LOCK_ASSERT_HELD();
 
@@ -1841,7 +1856,9 @@ mld_sched_timeout(void)
 	    (querier_present_timers_running6 || current_state_timers_running6 ||
 	    interface_timers_running6 || state_change_timers_running6)) {
 		mld_timeout_run = 1;
-		timeout(mld_timeout, NULL, hz);
+		int sched_hz = fast ? 0 : hz;
+		void *arg = fast ? (void *)mld_sched_timeout : NULL;
+		timeout(mld_timeout, arg, sched_hz);
 	}
 }
 

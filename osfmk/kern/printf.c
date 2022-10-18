@@ -175,7 +175,7 @@
 #include <i386/cpu_data.h>
 #endif /* __x86_64__ */
 
-#if __arm__ || __arm64__
+#if __arm64__
 #include <arm/cpu_data_internal.h>
 #endif
 
@@ -776,7 +776,11 @@ _doprnt_log(
 boolean_t       new_printf_cpu_number = FALSE;
 #endif  /* MP_PRINTF */
 
-SIMPLE_LOCK_DECLARE(bsd_log_spinlock, 0);
+#if defined(__x86_64__)
+SIMPLE_LOCK_DECLARE(log_lock, 0);
+#else
+LCK_TICKET_DECLARE(log_lock, LCK_GRP_NULL);
+#endif /* __x86_64__ */
 
 bool bsd_log_lock(bool);
 void bsd_log_lock_safe(void);
@@ -800,9 +804,17 @@ bsd_log_lock(bool safe)
 {
 	if (!safe) {
 		assert(!oslog_is_safe());
-		return simple_lock_try(&bsd_log_spinlock, LCK_GRP_NULL);
+#if defined(__x86_64__)
+		return simple_lock_try(&log_lock, LCK_GRP_NULL);
+#else
+		return lck_ticket_lock_try(&log_lock, LCK_GRP_NULL);
+#endif /* __x86_64__ */
 	}
-	simple_lock(&bsd_log_spinlock, LCK_GRP_NULL);
+#if defined(__x86_64__)
+	simple_lock(&log_lock, LCK_GRP_NULL);
+#else
+	lck_ticket_lock(&log_lock, LCK_GRP_NULL);
+#endif /* __x86_64__ */
 	return true;
 }
 
@@ -819,7 +831,11 @@ bsd_log_lock_safe(void)
 void
 bsd_log_unlock(void)
 {
-	simple_unlock(&bsd_log_spinlock);
+#if defined(__x86_64__)
+	simple_unlock(&log_lock);
+#else
+	lck_ticket_unlock(&log_lock);
+#endif /* __x86_64__ */
 }
 
 extern int disableConsoleOutput;
@@ -951,7 +967,7 @@ kdb_printf(const char *fmt, ...)
 	_doprnt_log(fmt, &listp, consdebug_putc, 16);
 	va_end(listp);
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	paniclog_flush();
 #endif
 
@@ -967,7 +983,7 @@ kdb_log(const char *fmt, ...)
 	_doprnt(fmt, &listp, consdebug_log, 16);
 	va_end(listp);
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	paniclog_flush();
 #endif
 
@@ -983,7 +999,7 @@ kdb_printf_unbuffered(const char *fmt, ...)
 	_doprnt(fmt, &listp, consdebug_putc_unbuffered, 16);
 	va_end(listp);
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	paniclog_flush();
 #endif
 

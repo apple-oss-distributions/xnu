@@ -214,7 +214,7 @@ typedef enum mpsc_queue_options {
 static inline mpsc_queue_chain_t
 __mpsc_queue_append_update_tail(mpsc_queue_head_t q, mpsc_queue_chain_t elm)
 {
-	os_atomic_store(&elm->mpqc_next, NULL, relaxed);
+	os_atomic_store(&elm->mpqc_next, (struct mpsc_queue_chain *__single)NULL, relaxed);
 	return os_atomic_xchg(&q->mpqh_tail, elm, release);
 }
 

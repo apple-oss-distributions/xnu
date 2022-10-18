@@ -63,9 +63,9 @@
  */
 
 subsystem
-#if	KERNEL_SERVER
-	  KernelServer
-#endif	/* KERNEL_SERVER */
+#if	KERNEL_SERVER || KOBJECT_SERVER
+	KernelServer
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 	  task 3400;
 
 #include <mach/std_types.defs>
@@ -92,15 +92,17 @@ subsystem
 
 
 /*
- *	Create a new task with an empty set of IPC rights,
- *	and having an address space constructed from the
- *	target task (or empty, if inherit_memory is FALSE).
+ * OBSOLETE interfaces, removed from kernel
  */
+#if KERNEL_SERVER
+skip; /* task_create */
+#else
 routine task_create(
 		target_task	: task_t;
 		ledgers		: ledger_array_t;
 		inherit_memory	: boolean_t;
 	out	child_task	: task_t);
+#endif
 
 /*
  *	Destroy the target task, causing all of its threads
@@ -158,6 +160,7 @@ routine task_info(
         out     task_info_out   : task_info_t, CountInOut);
 
 #endif
+
 /*
  * Set task information.
  */
@@ -295,7 +298,7 @@ routine	task_swap_exception_ports(
 	  out	old_flavors	: exception_flavor_array_t, SameCount);
 
 /*
- * OBSOLETE interface, removed from kernel
+ * OBSOLETE interfaces, removed from kernel
  */
 #if KERNEL_SERVER
 skip;
@@ -344,22 +347,25 @@ out	policy_info		: task_policy_t, CountInOut;
 inout	get_default		: boolean_t);
 
 /*
- *	Removed from the kernel.
+ *	OBSOLETE interfaces, removed from kernel.
  */
 #if KERNEL_SERVER
-skip;
+skip; /* task_sample */
+skip; /* task_policy */
+skip; /* task_set_emulation */
+skip; /* task_get_emulation_vector */
+skip; /* task_set_emulation_vector */
+skip; /* task_set_ras_pc */
+skip; /* task_zone_info */
+skip; /* task_assign */
+skip; /* task_assign_default */
+skip; /* task_get_assignment */
+skip; /* task_set_policy */
 #else
 routine task_sample(
 		task		: task_t;
 		reply		: mach_port_make_send_t);
-#endif
 
-/*
- * JMM - Everything from here down is likely to go away soon
- */
-/*
- * OBSOLETE interface.
- */
 routine task_policy(
 	task			: task_t;
 	policy			: policy_t;
@@ -367,48 +373,27 @@ routine task_policy(
 	set_limit		: boolean_t;
 	change			: boolean_t);
 
-
-/*
- *	Establish a user-level handler for the specified
- *	system call.
- */
 routine task_set_emulation(
 		target_port	: task_t;
 		routine_entry_pt: vm_address_t;
 		routine_number  : int);	
 
-/*
- *	Get user-level handler entry points for all
- *	emulated system calls.
- */
 routine task_get_emulation_vector(
 		task		: task_t;
 	out	vector_start	: int;
 	out	emulation_vector: emulation_vector_t);
 
-/*
- *	Establish user-level handlers for the specified
- *	system calls. Non-emulated system calls are specified
- *	with emulation_vector[i] == EML_ROUTINE_NULL.
- */
 routine task_set_emulation_vector(
 		task		: task_t;
 		vector_start	: int;
 		emulation_vector: emulation_vector_t);
 
 
-/*
- *      Establish restart pc for interrupted atomic sequences.
- */
 routine task_set_ras_pc(
 		target_task     : task_t;
 		basepc          : vm_address_t;
 		boundspc        : vm_address_t);
 
-
-/*
- * Return zone info as seen/used by this task.
- */
 routine task_zone_info(
 		target_task	: task_inspect_t;
 	out	names		: mach_zone_name_array_t,
@@ -416,36 +401,19 @@ routine task_zone_info(
 	out	info		: task_zone_info_array_t,
 					Dealloc);
 
-
-/* 
- * JMM - Want to eliminate processor_set so keep them at the end.
- */
-
-/*
- *	Assign task to processor set.
- */
 routine task_assign(
 		task		: task_t;
 		new_set		: processor_set_t;
 		assign_threads	: boolean_t);
 
-/*
- *	Assign task to default set.
- */
 routine task_assign_default(
 		task		: task_t;
 		assign_threads	: boolean_t);
 
-/*
- *	Get current assignment for task.
- */
 routine task_get_assignment(
 		task		: task_inspect_t;
 	out	assigned_set	: processor_set_name_t);
 
-/*
- * OBSOLETE interface.
- */
 routine task_set_policy(
 	task			: task_t;
 	pset			: processor_set_t;
@@ -453,6 +421,7 @@ routine task_set_policy(
 	base			: policy_base_t;
 	limit			: policy_limit_t;
 	change			: boolean_t);
+#endif
 
 /*
  * Read the selected state which is to be installed on new 
@@ -609,6 +578,12 @@ routine task_test_async_upcall_propagation(
 	port	: mach_port_t;
 	qos	: int;
 	iotier	: int);
-	
+
+routine task_map_kcdata_object_64(
+		task		:task_t;
+		kcdata_object	:kcdata_object_t;
+	out	kcd_addr_begin	:mach_vm_address_t;
+	out	kcd_size	:mach_vm_size_t);
+
 /* vim: set ft=c : */
 

@@ -38,15 +38,65 @@
  * `thread_selfcounts`.
  */
 __enum_decl(thread_selfcounts_kind_t, uint32_t, {
-	THSC_CPI = 0x01,
+	/*
+	 * Get the current thread's cycles and instructions -- may return ENOTSUP
+	 * on certain hardware.
+	 */
+	THSC_CPI = 1,
+	/*
+	 * Same as `THSC_CPI`, except fills in an array indexed by CPU perf-level,
+	 * with `sysctl hw.nperflevels` entries.
+	 */
+	THSC_CPI_PER_PERF_LEVEL = 2,
+	/*
+	 * Get the current thread's cycles, instructions, user time and system time.
+	 * Instructions and cycles may be left 0 on certain hardware.  System time
+	 * may be accounted for by user time and left 0 on certain hardware.
+	 */
+	THSC_TIME_CPI = 3,
+	/*
+	 * Same as `THSC_TIME_CPI`, except fills in an array indexed by CPU
+	 * perf-level, with `sysctl hw.nperflevels` entries.
+	 */
+	THSC_TIME_CPI_PER_PERF_LEVEL = 4,
+	/*
+	 * Get the current thread's cycles, instructions, times, and energy usage.
+	 */
+	THSC_TIME_ENERGY_CPI = 5,
+	/*
+	 * Same as `THSC_TIME_ENERGY_CPI`, except fills in an array indexd by CPU
+	 * perf-level, with `sysctl hw.nperflevels` entries.
+	 */
+	THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL = 6,
 });
 
 /*
- * The data structure expected by `thread_selfcounts(THSC_CPI, ...)`.
+ * The data structure expected by `THSC_CPI*`.
  */
 struct thsc_cpi {
 	uint64_t tcpi_instructions;
 	uint64_t tcpi_cycles;
+};
+
+/*
+ * The data structure expected by `THSC_TIME_CPI*`.
+ */
+struct thsc_time_cpi {
+	uint64_t ttci_instructions;
+	uint64_t ttci_cycles;
+	uint64_t ttci_user_time_mach;
+	uint64_t ttci_system_time_mach;
+};
+
+/*
+ * The data structure expected by `THSC_TIME_ENERGY_CPI*`.
+ */
+struct thsc_time_energy_cpi {
+	uint64_t ttec_instructions;
+	uint64_t ttec_cycles;
+	uint64_t ttec_user_time_mach;
+	uint64_t ttec_system_time_mach;
+	uint64_t ttec_energy_nj;
 };
 
 #ifndef KERNEL
@@ -62,12 +112,6 @@ __BEGIN_DECLS
  */
     __SPI_AVAILABLE(macos(12.4), ios(15.4), watchos(8.5), tvos(15.4))
 int thread_selfcounts(thread_selfcounts_kind_t kind, void *dst, size_t size);
-
-/*
- * Get the current thread's cycles and instructions.  May return ENOTSUP on
- * certain hardware.
- */
-#define thread_selfcounts_cpi(DST) thread_selfcounts(THSC_CPI, (DST), sizeof(struct thsc_cpi))
 
 __END_DECLS
 

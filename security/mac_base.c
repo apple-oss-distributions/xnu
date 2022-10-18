@@ -837,7 +837,7 @@ mac_policy_unregister(mac_policy_handle_t handle)
 
 	if (mpc->mpc_data) {
 		struct mac_module_data *mmd = mpc->mpc_data;
-		kfree_data(mmd, mmd->size);
+		__typed_allocators_ignore(kfree_data(mmd, mmd->size)); // rdar://87952845
 		mpc->mpc_data = NULL;
 	}
 
@@ -1802,6 +1802,13 @@ mac_label_set(struct label *l __unused, int slot __unused, intptr_t v __unused)
 int mac_iokit_check_hid_control(kauth_cred_t cred __unused);
 int
 mac_iokit_check_hid_control(kauth_cred_t cred __unused)
+{
+	return 0;
+}
+
+int mac_vnode_check_open(vfs_context_t ctx, struct vnode *vp, int acc_mode);
+int
+mac_vnode_check_open(vfs_context_t ctx __unused, struct vnode *vp __unused, int acc_mode __unused)
 {
 	return 0;
 }

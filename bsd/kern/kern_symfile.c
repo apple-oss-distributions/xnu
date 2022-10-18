@@ -81,6 +81,8 @@ get_kernel_symfile(__unused proc_t p, __unused char const **symfile)
 struct kern_direct_file_io_ref_t {
 	vfs_context_t      ctx;
 	struct vnode      * vp;
+	char              * name;
+	size_t              namesize;
 	dev_t               device;
 	uint32_t            blksize;
 	off_t               filelength;
@@ -254,16 +256,19 @@ kern_open_file_for_direct_io(const char * name,
 
 	p = kernproc;
 	ref->ctx = vfs_context_kernel();
+	ref->namesize = strlen(name) + 1;
+	ref->name = kalloc_data(ref->namesize, Z_WAITOK | Z_NOFAIL);
+	strlcpy(ref->name, name, ref->namesize);
 
 	fmode  = (kIOPolledFileCreate & iflags) ? (O_CREAT | FWRITE) : FWRITE;
 	cmode =  S_IRUSR | S_IWUSR;
 	ndflags = NOFOLLOW;
-	NDINIT(&nd, LOOKUP, OP_OPEN, ndflags, UIO_SYSSPACE, CAST_USER_ADDR_T(name), ref->ctx);
+	NDINIT(&nd, LOOKUP, OP_OPEN, ndflags, UIO_SYSSPACE, CAST_USER_ADDR_T(ref->name), ref->ctx);
 	VATTR_INIT(&va);
 	VATTR_SET(&va, va_mode, cmode);
 	VATTR_SET(&va, va_dataprotect_flags, VA_DP_RAWENCRYPTED);
 	VATTR_SET(&va, va_dataprotect_class, PROTECTION_CLASS_D);
-	if ((error = vn_open_auth(&nd, &fmode, &va))) {
+	if ((error = vn_open_auth(&nd, &fmode, &va, NULLVP))) {
 		kprintf("vn_open_auth(fmode: %d, cmode: %d) failed with error: %d\n", fmode, cmode, error);
 		goto out;
 	}
@@ -298,7 +303,7 @@ kern_open_file_for_direct_io(const char * name,
 	mpFree = freespace_mb(ref->vp);
 	mpFree <<= 20;
 	kprintf("kern_direct_file(%s): vp size %qd, alloc %qd, mp free %qd, keep free %qd\n",
-	    name, va.va_data_size, va.va_data_alloc, mpFree, fs_free_size);
+	    ref->name, va.va_data_size, va.va_data_alloc, mpFree, fs_free_size);
 
 	if (ref->vp->v_type == VREG) {
 		/* Don't dump files with links. */
@@ -323,7 +328,7 @@ kern_open_file_for_direct_io(const char * name,
 			for (idx = 0; idx < wbc_range.count; idx++) {
 				wbctotal += wbc_range.extents[idx].length;
 			}
-			kprintf("kern_direct_file(%s): wbc %qd\n", name, wbctotal);
+			kprintf("kern_direct_file(%s): wbc %qd\n", ref->name, wbctotal);
 			if (wbctotal) {
 				target = wbc_range.dev;
 			}
@@ -615,6 +620,10 @@ out:
 			ref->vp = NULLVP;
 		}
 		ref->ctx = NULL;
+		if (ref->name) {
+			kfree_data(ref->name, ref->namesize);
+			ref->name = NULL;
+		}
 		kfree_type(struct kern_direct_file_io_ref_t, ref);
 		ref = NULL;
 	}
@@ -654,7 +663,7 @@ kern_file_mount(struct kern_direct_file_io_ref_t * ref)
 void
 kern_close_file_for_direct_io(struct kern_direct_file_io_ref_t * ref,
     off_t write_offset, void * addr, size_t write_length,
-    off_t discard_offset, off_t discard_end)
+    off_t discard_offset, off_t discard_end, bool unlink)
 {
 	int error;
 	printf("kern_close_file_for_direct_io(%p)\n", ref);
@@ -713,9 +722,19 @@ kern_close_file_for_direct_io(struct kern_direct_file_io_ref_t * ref,
 		ref->vp = NULLVP;
 		kprintf("vnode_close(%d)\n", error);
 
+
+		if (unlink) {
+			int unlink1(vfs_context_t, vnode_t, user_addr_t, enum uio_seg, int);
+
+			error = unlink1(ref->ctx, NULLVP, CAST_USER_ADDR_T(ref->name), UIO_SYSSPACE, 0);
+			kprintf("%s: unlink1(%d)\n", __func__, error);
+		}
 	}
 
 	ref->ctx = NULL;
+
+	kfree_data(ref->name, ref->namesize);
+	ref->name = NULL;
 
 	kfree_type(struct kern_direct_file_io_ref_t, ref);
 }

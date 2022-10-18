@@ -37,7 +37,7 @@ def GetRegisterSetForCPU(cputype, subtype):
 
 class UserThreadObject(object):
     """representation of userspace thread"""
-    def __init__(self, thr_obj, cputype, cpusubtype, is_kern_64bit):
+    def __init__(self, thr_obj, cputype, cpusubtype):
         super(UserThreadObject, self).__init__()
         self.thread = thr_obj
         self.registerset = GetRegisterSetForCPU(cputype, cpusubtype)
@@ -57,16 +57,13 @@ class UserThreadObject(object):
                 self.saved_state = Cast(self.thread.machine.iss, 'x86_saved_state_t *').uss.ss_32
             if cputype == CPU_TYPE_ARM:
                 self.reg_type = "arm"
-                if not is_kern_64bit:
-                    self.saved_state = self.thread.machine.PcbData
-                else:
-                    self.saved_state = self.thread.machine.contextData.ss.uss.ss_32
+                self.saved_state = self.thread.machine.contextData.ss.uss.ss_32
             if cputype == CPU_TYPE_ARM64_32:
                 self.reg_type = "arm64"
                 self.saved_state = self.thread.machine.upcb.uss.ss_64
 
-        logging.debug("created thread id 0x%x of type %s, is_kern_64bit 0x%x cputype 0x%x"
-                      % (self.thread_id, self.reg_type, is_kern_64bit, cputype))
+        logging.debug("created thread id 0x%x of type %s, cputype 0x%x"
+                      % (self.thread_id, self.reg_type, cputype))
 
     def getRegisterValueByName(self, name):
         if self.reg_type == 'arm64':
@@ -104,7 +101,9 @@ class UserProcess(target.Process):
     """ Represent a user process and thread states """
     def __init__(self, task):
         self.task = task
-        self.proc = Cast(task.bsd_info, 'proc_t')
+        self.proc = GetProcFromTask(task)
+        if not self.proc:
+            raise ValueError("Task has no associated BSD process.")
         dataregisters64bit = False
         ptrsize = 4
 
@@ -112,8 +111,6 @@ class UserProcess(target.Process):
             ptrsize = 8
         if task.t_flags & 0x2:
             dataregisters64bit = True
-
-        is_kern_64bit = kern.arch in ['x86_64', 'x86_64h', 'arm64', 'arm64e']
 
         self.cputype = unsigned(self.proc.p_cputype)
         self.cpusubtype = unsigned(self.proc.p_cpusubtype)
@@ -131,7 +128,7 @@ class UserProcess(target.Process):
             self.hinfo['ostype'] = 'ios'
         dbg_message += " ostype:%s" % self.hinfo['ostype']
 
-        if is_kern_64bit and str(kern.arch).lower().startswith('arm'):
+        if str(kern.arch).lower().startswith('arm'):
             addressing_bits = 64 - int(kern.globals.gT1Sz)
             self.hinfo['addressing_bits'] = addressing_bits
             dbg_message += " addressing_bits:%d" % addressing_bits
@@ -142,7 +139,7 @@ class UserProcess(target.Process):
         self.threads_ids_list = []
         logging.debug("iterating over threads in process")
         for thval in IterateQueue(task.threads, 'thread *', 'task_threads'):
-            self.threads[unsigned(thval.thread_id)] = UserThreadObject(thval, self.cputype, self.cpusubtype, is_kern_64bit)
+            self.threads[unsigned(thval.thread_id)] = UserThreadObject(thval, self.cputype, self.cpusubtype)
             self.threads_ids_list.append(unsigned(thval.thread_id))
 
     def getRegisterDataForThread(self, th_id, reg_num):

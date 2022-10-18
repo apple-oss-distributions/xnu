@@ -96,6 +96,8 @@ int cs_entitlements_blob_get(proc_t, void **, size_t *);
 int cs_blob_get(proc_t, void **, size_t *);
 const char *cs_identity_get(proc_t);
 
+void ubc_cs_free_and_vnode_unlock(struct vnode *);
+
 int UBCINFOEXISTS(const struct vnode *);
 
 #endif

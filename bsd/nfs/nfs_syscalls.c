@@ -74,35 +74,13 @@
  * Version 2.0.
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/file_internal.h>
-#include <sys/filedesc.h>
-#include <sys/stat.h>
 #include <sys/vnode_internal.h>
-#include <sys/mount_internal.h>
-#include <sys/proc_internal.h> /* for fdflags */
 #include <sys/uio_internal.h>
-#include <sys/kauth.h>
 #include <sys/sysctl.h>
-#include <sys/ubc.h>
-#include <sys/uio.h>
-#include <sys/malloc.h>
-#include <sys/kpi_mbuf.h>
-#include <sys/socket.h>
 #include <sys/socketvar.h>
-#include <sys/domain.h>
-#include <sys/protosw.h>
-#include <sys/fcntl.h>
-#include <sys/lockf.h>
-#include <sys/syslog.h>
-#include <sys/user.h>
 #include <sys/sysproto.h>
-#include <sys/kpi_socket.h>
 #include <sys/fsevents.h>
-#include <libkern/OSAtomic.h>
-#include <kern/thread_call.h>
 #include <kern/task.h>
 
 #include <security/audit/audit.h>
@@ -116,14 +94,9 @@
 #include <nfs/nfsm_subs.h>
 #include <nfs/nfsrvcache.h>
 #include <nfs/nfs_gss.h>
-#include <nfs/nfsmount.h>
-#include <nfs/nfsnode.h>
-#include <nfs/nfs_lock.h>
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #endif
-
-kern_return_t   thread_terminate(thread_t); /* XXX */
 
 #if CONFIG_NFS_SERVER
 
@@ -158,39 +131,6 @@ void    nfsrv_slpfree(struct nfsrv_sock *);
 SYSCTL_DECL(_vfs_generic);
 SYSCTL_EXTENSIBLE_NODE(_vfs_generic, OID_AUTO, nfs, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "nfs hinge");
 
-#if CONFIG_NFS_CLIENT
-SYSCTL_NODE(_vfs_generic_nfs, OID_AUTO, client, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "nfs client hinge");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, initialdowndelay, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_tprintf_initial_delay, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, nextdowndelay, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_tprintf_delay, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, iosize, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_iosize, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, access_cache_timeout, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_access_cache_timeout, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, allow_async, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_allow_async, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, statfs_rate_limit, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_statfs_rate_limit, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, nfsiod_thread_max, CTLFLAG_RW | CTLFLAG_LOCKED, &nfsiod_thread_max, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, nfsiod_thread_count, CTLFLAG_RD | CTLFLAG_LOCKED, &nfsiod_thread_count, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, lockd_mounts, CTLFLAG_RD | CTLFLAG_LOCKED, &nfs_lockd_mounts, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, max_async_writes, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_max_async_writes, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, access_delete, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_access_delete, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, access_dotzfs, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_access_dotzfs, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, access_for_getattr, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_access_for_getattr, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, idmap_ctrl, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_idmap_ctrl, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, callback_port, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_callback_port, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, is_mobile, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_is_mobile, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, squishy_flags, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_squishy_flags, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, mount_timeout, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_mount_timeout, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, mount_quick_timeout, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_mount_quick_timeout, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, split_open_owner, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_split_open_owner, 0, "");
-SYSCTL_UINT(_vfs_generic_nfs_client, OID_AUTO, tcp_sockbuf, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_tcp_sockbuf, 0, "");
-SYSCTL_UINT(_vfs_generic_nfs_client, OID_AUTO, debug_ctl, CTLFLAG_RW | CTLFLAG_LOCKED, &nfsclnt_debug_ctl, 0, "");
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, readlink_nocache, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_readlink_nocache, 0, "");
-#if CONFIG_NFS_GSS
-SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, root_steals_gss_context, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_root_steals_ctx, 0, "");
-#endif
-#if CONFIG_NFS4
-SYSCTL_STRING(_vfs_generic_nfs_client, OID_AUTO, default_nfs4domain, CTLFLAG_RW | CTLFLAG_LOCKED, nfs4_default_domain, sizeof(nfs4_default_domain), "");
-#endif
-#endif /* CONFIG_NFS_CLIENT */
-
 #if CONFIG_NFS_SERVER
 SYSCTL_NODE(_vfs_generic_nfs, OID_AUTO, server, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "nfs server hinge");
 SYSCTL_INT(_vfs_generic_nfs_server, OID_AUTO, wg_delay, CTLFLAG_RW | CTLFLAG_LOCKED, &nfsrv_wg_delay, 0, "");
@@ -218,249 +158,26 @@ SYSCTL_INT(_vfs_generic_nfs_server, OID_AUTO, upcall_queue_count, CTLFLAG_RD | C
 #endif
 #endif /* CONFIG_NFS_SERVER */
 
-#if !CONFIG_NFS_CLIENT
-#define __no_nfs_client_unused      __unused
-#else
-#define __no_nfs_client_unused      /* nothing */
-#endif
-
-int
-nfsclnt(
-	__unused proc_t p,
-	struct nfsclnt_args *uap __no_nfs_client_unused,
-	__unused int *retval)
-{
-#if CONFIG_NFS_CLIENT
-	int error;
-	vnode_t vp;
-	vfs_context_t ctx = vfs_context_current();
-
-	if (nfsclnt_device_add()) {
-		printf("nfsclnt: unable to open chardev /dev/%s\n", NFSCLNT_DEVICE);
-	}
-
-	if ((error = vnode_lookup("/dev/" NFSCLNT_DEVICE, 0, &vp, ctx))) {
-		printf("nfsclnt: unable to find /dev/%s, err %d\n", NFSCLNT_DEVICE, error);
-		return ENOSYS;
-	}
-
-	if ((error = VNOP_IOCTL(vp, uap->flag, (caddr_t)uap->argp, 0, ctx))) {
-		printf("nfsclnt: ioctl of /dev/%s returned %d\n", NFSCLNT_DEVICE, error);
-		vnode_put(vp);
-		return error;
-	}
-
-	vnode_put(vp);
-	return 0;
-#else
-	return ENOSYS;
-#endif /* CONFIG_NFS_CLIENT */
-}
-
-#if CONFIG_NFS_CLIENT
-
-/*
- * Asynchronous I/O threads for client NFS.
- * They do read-ahead and write-behind operations on the block I/O cache.
- *
- * The pool of up to nfsiod_thread_max threads is launched on demand and exit
- * when unused for a while.  There are as many nfsiod structs as there are
- * nfsiod threads; however there's no strict tie between a thread and a struct.
- * Each thread puts an nfsiod on the free list and sleeps on it.  When it wakes
- * up, it removes the next struct nfsiod from the queue and services it.  Then
- * it will put the struct at the head of free list and sleep on it.
- * Async requests will pull the next struct nfsiod from the head of the free list,
- * put it on the work queue, and wake whatever thread is waiting on that struct.
- */
-
-/*
- * nfsiod thread exit routine
- *
- * Must be called with nfsiod_mutex held so that the
- * decision to terminate is atomic with the termination.
- */
-void
-nfsiod_terminate(struct nfsiod *niod)
-{
-	nfsiod_thread_count--;
-	lck_mtx_unlock(&nfsiod_mutex);
-	if (niod) {
-		kfree_type(struct nfsiod, niod);
-	} else {
-		printf("nfsiod: terminating without niod\n");
-	}
-	thread_terminate(current_thread());
-	/*NOTREACHED*/
-}
-
-/* nfsiod thread startup routine */
-void
-nfsiod_thread(void)
-{
-	struct nfsiod *niod;
-	int error;
-
-	niod = kalloc_type(struct nfsiod, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-	lck_mtx_lock(&nfsiod_mutex);
-	TAILQ_INSERT_HEAD(&nfsiodfree, niod, niod_link);
-	wakeup(current_thread());
-	error = msleep0(niod, &nfsiod_mutex, PWAIT | PDROP, "nfsiod", NFS_ASYNCTHREADMAXIDLE * hz, nfsiod_continue);
-	/* shouldn't return... so we have an error */
-	/* remove an old nfsiod struct and terminate */
-	lck_mtx_lock(&nfsiod_mutex);
-	if ((niod = TAILQ_LAST(&nfsiodfree, nfsiodlist))) {
-		TAILQ_REMOVE(&nfsiodfree, niod, niod_link);
-	}
-	nfsiod_terminate(niod);
-	/*NOTREACHED*/
-}
-
-/*
- * Start up another nfsiod thread.
- * (unless we're already maxed out and there are nfsiods running)
- */
-int
-nfsiod_start(void)
-{
-	thread_t thd = THREAD_NULL;
-
-	lck_mtx_lock(&nfsiod_mutex);
-	if ((nfsiod_thread_count >= NFSIOD_MAX) && (nfsiod_thread_count > 0)) {
-		lck_mtx_unlock(&nfsiod_mutex);
-		return EBUSY;
-	}
-	nfsiod_thread_count++;
-	if (kernel_thread_start((thread_continue_t)nfsiod_thread, NULL, &thd) != KERN_SUCCESS) {
-		lck_mtx_unlock(&nfsiod_mutex);
-		return EBUSY;
-	}
-	/* wait for the thread to complete startup */
-	msleep(thd, &nfsiod_mutex, PWAIT | PDROP, "nfsiodw", NULL);
-	thread_deallocate(thd);
-	return 0;
-}
-
-/*
- * Continuation for Asynchronous I/O threads for NFS client.
- *
- * Grab an nfsiod struct to work on, do some work, then drop it
- */
-int
-nfsiod_continue(__unused int error)
-{
-	struct nfsiod *niod;
-	struct nfsmount *nmp;
-	struct nfsreq *req, *treq;
-	struct nfs_reqqhead iodq;
-	int morework;
-
-	lck_mtx_lock(&nfsiod_mutex);
-	niod = TAILQ_FIRST(&nfsiodwork);
-	if (!niod) {
-		/* there's no work queued up */
-		/* remove an old nfsiod struct and terminate */
-		if ((niod = TAILQ_LAST(&nfsiodfree, nfsiodlist))) {
-			TAILQ_REMOVE(&nfsiodfree, niod, niod_link);
-		}
-		nfsiod_terminate(niod);
-		/*NOTREACHED*/
-	}
-	TAILQ_REMOVE(&nfsiodwork, niod, niod_link);
-
-worktodo:
-	while ((nmp = niod->niod_nmp)) {
-		if (nmp == NULL) {
-			niod->niod_nmp = NULL;
-			break;
-		}
-
-		/*
-		 * Service this mount's async I/O queue.
-		 *
-		 * In order to ensure some level of fairness between mounts,
-		 * we grab all the work up front before processing it so any
-		 * new work that arrives will be serviced on a subsequent
-		 * iteration - and we have a chance to see if other work needs
-		 * to be done (e.g. the delayed write queue needs to be pushed
-		 * or other mounts are waiting for an nfsiod).
-		 */
-		/* grab the current contents of the queue */
-		TAILQ_INIT(&iodq);
-		TAILQ_CONCAT(&iodq, &nmp->nm_iodq, r_achain);
-		/* Mark each iod request as being managed by an iod */
-		TAILQ_FOREACH(req, &iodq, r_achain) {
-			lck_mtx_lock(&req->r_mtx);
-			assert(!(req->r_flags & R_IOD));
-			req->r_flags |= R_IOD;
-			lck_mtx_unlock(&req->r_mtx);
-		}
-		lck_mtx_unlock(&nfsiod_mutex);
-
-		/* process the queue */
-		TAILQ_FOREACH_SAFE(req, &iodq, r_achain, treq) {
-			TAILQ_REMOVE(&iodq, req, r_achain);
-			req->r_achain.tqe_next = NFSREQNOLIST;
-			req->r_callback.rcb_func(req);
-		}
-
-		/* now check if there's more/other work to be done */
-		lck_mtx_lock(&nfsiod_mutex);
-		morework = !TAILQ_EMPTY(&nmp->nm_iodq);
-		if (!morework || !TAILQ_EMPTY(&nfsiodmounts)) {
-			/*
-			 * we're going to stop working on this mount but if the
-			 * mount still needs more work so queue it up
-			 */
-			if (morework && nmp->nm_iodlink.tqe_next == NFSNOLIST) {
-				TAILQ_INSERT_TAIL(&nfsiodmounts, nmp, nm_iodlink);
-			}
-			nmp->nm_niod = NULL;
-			niod->niod_nmp = NULL;
-		}
-	}
-
-	/* loop if there's still a mount to work on */
-	if (!niod->niod_nmp && !TAILQ_EMPTY(&nfsiodmounts)) {
-		niod->niod_nmp = TAILQ_FIRST(&nfsiodmounts);
-		TAILQ_REMOVE(&nfsiodmounts, niod->niod_nmp, nm_iodlink);
-		niod->niod_nmp->nm_iodlink.tqe_next = NFSNOLIST;
-	}
-	if (niod->niod_nmp) {
-		goto worktodo;
-	}
-
-	/* queue ourselves back up - if there aren't too many threads running */
-	if (nfsiod_thread_count <= NFSIOD_MAX) {
-		TAILQ_INSERT_HEAD(&nfsiodfree, niod, niod_link);
-		msleep0(niod, &nfsiod_mutex, PWAIT | PDROP, "nfsiod", NFS_ASYNCTHREADMAXIDLE * hz, nfsiod_continue);
-		/* shouldn't return... so we have an error */
-		/* remove an old nfsiod struct and terminate */
-		lck_mtx_lock(&nfsiod_mutex);
-		if ((niod = TAILQ_LAST(&nfsiodfree, nfsiodlist))) {
-			TAILQ_REMOVE(&nfsiodfree, niod, niod_link);
-		}
-	}
-	nfsiod_terminate(niod);
-	/*NOTREACHED*/
-	return 0;
-}
-
-#endif /* CONFIG_NFS_CLIENT */
-
 /* NFS hooks */
 
-/* NFS hooks variable */
-struct nfs_hooks nfsh = {
+/* NFS hooks variables */
+struct nfs_hooks_in nfsh = {
 	.f_vinvalbuf      = NULL,
 	.f_buf_page_inval = NULL
 };
 
 /* NFS hooks registration functions */
 void
-nfs_register_hooks(struct nfs_hooks *hooks)
+nfs_register_hooks(struct nfs_hooks_in *inh, struct nfs_hooks_out *outh)
 {
-	nfsh.f_vinvalbuf = hooks->f_vinvalbuf;
-	nfsh.f_buf_page_inval = hooks->f_buf_page_inval;
+	if (inh) {
+		nfsh.f_vinvalbuf = inh->f_vinvalbuf;
+		nfsh.f_buf_page_inval = inh->f_buf_page_inval;
+	}
+
+	if (outh) {
+		outh->f_get_bsdthreadtask_info = get_bsdthreadtask_info;
+	}
 }
 
 void
@@ -583,7 +300,7 @@ getfh(
 		 * The f_mntonname might be a firmlink path.  Resolve
 		 * it into a physical path and try again.
 		 */
-		int pathbuflen = MAXPATHLEN;
+		size_t pathbuflen = MAXPATHLEN;
 		vnode_t rvp;
 
 		error = VFS_ROOT(vnode_mount(vp), &rvp, vfs_context_current());
@@ -659,9 +376,7 @@ out:
 	error = copyout((caddr_t)&nfh, uap->fhp, sizeof(fhandle_t));
 	return error;
 }
-#endif /* CONFIG_NFS_SERVER */
 
-#if CONFIG_NFS_SERVER
 extern const struct fileops vnops;
 
 /*
@@ -831,9 +546,7 @@ bad:
 	vnode_put(vp);
 	return error;
 }
-#endif /* CONFIG_NFS_SERVER */
 
-#if CONFIG_NFS_SERVER
 /*
  * NFS server pseudo system call
  */
@@ -926,9 +639,6 @@ nfssvc(proc_t p __no_nfs_server_unused,
 	}
 	return error;
 }
-#endif /* CONFIG_NFS_SERVER */
-
-#if CONFIG_NFS_SERVER
 
 /*
  * Adds a socket to the list for servicing by nfsds.
@@ -940,7 +650,7 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 	int error = 0, sodomain, sotype, soprotocol, on = 1;
 	int first, sobufsize;
 	struct timeval timeo;
-	u_quad_t sbmaxsize;
+	uint32_t sbmaxsize;
 
 	/* make sure mbuf constants are set up */
 	if (!nfs_mbuf_mhlen) {
@@ -974,7 +684,7 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 	}
 
 	/* Calculate maximum supported socket buffers sizes */
-	sbmaxsize = (u_quad_t)sb_max * MCLBYTES / (MSIZE + MCLBYTES);
+	sbmaxsize = sb_max * MCLBYTES / (MSIZE + MCLBYTES);
 
 	/* Set socket buffer sizes for UDP/TCP */
 	sobufsize = min(sbmaxsize, (sotype == SOCK_DGRAM) ? NFS_UDPSOCKBUF : NFSRV_TCPSOCKBUF);

@@ -33,9 +33,5 @@ T_DECL(sysctl_hw_cpu, "ensure vital product and CPU-related sysctls exist")
 	ret = sysctlbyname("hw.cpu64bit_capable", &v, &v_size, NULL, 0);
 	T_ASSERT_POSIX_SUCCESS(ret, "hw.cpu64bit_capable");
 
-#if __arm__
-	T_EXPECT_EQ(v, 0, "cpu is not 64 bit capable");
-#else
 	T_EXPECT_EQ(v, 1, "cpu is 64 bit capable");
-#endif
 }

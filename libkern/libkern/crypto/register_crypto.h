@@ -110,6 +110,93 @@ typedef int (*ccrsa_verify_pkcs1v15_fn_t)(ccrsa_pub_ctx_t key, const uint8_t *oi
     size_t sig_len, const uint8_t *sig,
     bool *valid);
 
+__enum_decl(crypto_digest_alg_t, unsigned int, {
+	CRYPTO_DIGEST_ALG_NONE,
+	CRYPTO_DIGEST_ALG_MD5,
+	CRYPTO_DIGEST_ALG_SHA1,
+	CRYPTO_DIGEST_ALG_SHA256,
+	CRYPTO_DIGEST_ALG_SHA384,
+	CRYPTO_DIGEST_ALG_SHA512
+});
+
+typedef size_t (*crypto_digest_ctx_size_fn_t)(
+	crypto_digest_alg_t alg);
+
+typedef void (*crypto_digest_init_fn_t)(
+	crypto_digest_alg_t alg,
+	void *ctx,
+	size_t ctx_size);
+
+typedef void (*crypto_digest_update_fn_t)(
+	crypto_digest_alg_t alg,
+	void *ctx,
+	size_t ctx_size,
+	const void *data,
+	size_t data_size);
+
+typedef void (*crypto_digest_final_fn_t)(
+	crypto_digest_alg_t alg,
+	void *ctx,
+	size_t ctx_size,
+	void *digest,
+	size_t digest_size);
+
+typedef void (*crypto_digest_fn_t)(
+	crypto_digest_alg_t alg,
+	const void *data,
+	size_t data_size,
+	void *digest,
+	size_t digest_size);
+
+typedef size_t (*crypto_hmac_ctx_size_fn_t)(
+	crypto_digest_alg_t alg);
+
+typedef void (*crypto_hmac_init_fn_t)(
+	crypto_digest_alg_t alg,
+	void *ctx,
+	size_t ctx_size,
+	const void *key,
+	size_t key_size);
+
+typedef void (*crypto_hmac_update_fn_t)(
+	crypto_digest_alg_t alg,
+	void *ctx,
+	size_t ctx_size,
+	const void *data,
+	size_t data_size);
+
+typedef void (*crypto_hmac_final_generate_fn_t)(
+	crypto_digest_alg_t alg,
+	void *ctx,
+	size_t ctx_size,
+	void *tag,
+	size_t tag_size);
+
+typedef bool (*crypto_hmac_final_verify_fn_t)(
+	crypto_digest_alg_t alg,
+	void *ctx,
+	size_t ctx_size,
+	const void *tag,
+	size_t tag_size);
+
+typedef void (*crypto_hmac_generate_fn_t)(
+	crypto_digest_alg_t alg,
+	const void *key,
+	size_t key_size,
+	const void *data,
+	size_t data_size,
+	void *tag,
+	size_t tag_size);
+
+typedef bool (*crypto_hmac_verify_fn_t)(
+	crypto_digest_alg_t alg,
+	const void *key,
+	size_t key_size,
+	const void *data,
+	size_t data_size,
+	const void *tag,
+	size_t tag_size);
+
 typedef struct crypto_functions {
 	/* digests common functions */
 	ccdigest_init_fn_t ccdigest_init_fn;
@@ -169,6 +256,22 @@ typedef struct crypto_functions {
 	/* rsa */
 	ccrsa_make_pub_fn_t        ccrsa_make_pub_fn;
 	ccrsa_verify_pkcs1v15_fn_t ccrsa_verify_pkcs1v15_fn;
+
+	// Digest functions
+	crypto_digest_ctx_size_fn_t digest_ctx_size_fn;
+	crypto_digest_init_fn_t digest_init_fn;
+	crypto_digest_update_fn_t digest_update_fn;
+	crypto_digest_final_fn_t digest_final_fn;
+	crypto_digest_fn_t digest_fn;
+
+	// HMAC functions
+	crypto_hmac_ctx_size_fn_t hmac_ctx_size_fn;
+	crypto_hmac_init_fn_t hmac_init_fn;
+	crypto_hmac_update_fn_t hmac_update_fn;
+	crypto_hmac_final_generate_fn_t hmac_final_generate_fn;
+	crypto_hmac_final_verify_fn_t hmac_final_verify_fn;
+	crypto_hmac_generate_fn_t hmac_generate_fn;
+	crypto_hmac_verify_fn_t hmac_verify_fn;
 } *crypto_functions_t;
 
 int register_crypto_functions(const crypto_functions_t funcs);

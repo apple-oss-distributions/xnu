@@ -33,6 +33,6 @@ static const uint64_t kNumNanosecondsInSecond = kNumNanosecondsInMicrosecond * k
 /* Get a (wall-time) timestamp in nanoseconds */
 #define current_timestamp_ns() (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW));
 
-int get_ncpu(void);
+unsigned int get_ncpu(void);
 
 #endif /* !defined(BENCHMARK_PERF_HELPERS_H) */

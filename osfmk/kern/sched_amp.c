@@ -111,6 +111,9 @@ sched_amp_thread_group_recommendation_change(struct thread_group *tg, cluster_ty
 static bool
 sched_amp_thread_eligible_for_pset(thread_t thread, processor_set_t pset);
 
+static void
+sched_amp_cpu_init_completed(void);
+
 const struct sched_dispatch_table sched_amp_dispatch = {
 	.sched_name                                     = "amp",
 	.init                                           = sched_amp_init,
@@ -163,7 +166,7 @@ const struct sched_dispatch_table sched_amp_dispatch = {
 	.update_thread_bucket                           = sched_update_thread_bucket,
 	.pset_made_schedulable                          = sched_pset_made_schedulable,
 	.thread_group_recommendation_change             = sched_amp_thread_group_recommendation_change,
-	.cpu_init_completed                             = NULL,
+	.cpu_init_completed                             = sched_amp_cpu_init_completed,
 	.thread_eligible_for_pset                       = sched_amp_thread_eligible_for_pset,
 };
 
@@ -216,8 +219,11 @@ static void
 sched_amp_pset_init(processor_set_t pset)
 {
 	if (pset->pset_cluster_type == PSET_AMP_P) {
+		pset->pset_type = CLUSTER_TYPE_P;
 		pcore_set = pset;
 	} else {
+		assert(pset->pset_cluster_type == PSET_AMP_E);
+		pset->pset_type = CLUSTER_TYPE_E;
 		ecore_set = pset;
 	}
 	run_queue_init(&pset->pset_runq);
@@ -656,7 +662,6 @@ sched_amp_choose_processor(processor_set_t pset, processor_t processor, thread_t
 	bool choose_pcores;
 
 
-again:
 	choose_pcores = pcores_recommended(thread);
 
 	if (choose_pcores && (pset->pset_cluster_type != PSET_AMP_P)) {
@@ -674,8 +679,8 @@ again:
 
 	/* Now that the chosen pset is definitely locked, make sure nothing important has changed */
 	if (!pset_is_recommended(nset)) {
-		pset = nset;
-		goto again;
+		pset_unlock(nset);
+		return PROCESSOR_NULL;
 	}
 
 	return choose_processor(nset, processor, thread);
@@ -701,7 +706,47 @@ sched_amp_thread_eligible_for_pset(thread_t thread, processor_set_t pset)
 		return true;
 	} else {
 		/* E-recommended threads are eligible to execute on E clusters only */
-		return pset->pset_type == PSET_AMP_E;
+		return pset->pset_cluster_type == PSET_AMP_E;
+	}
+}
+
+static char *pct_name[] = {
+	"PSET_SMP",
+	"PSET_AMP_E",
+	"PSET_AMP_P"
+};
+
+static void
+sched_amp_cpu_init_completed(void)
+{
+	assert(pset_array[0] != NULL);
+	assert(pset_array[1] != NULL);
+
+	assert(ecore_set != NULL);
+	assert(pcore_set != NULL);
+
+	if (pset_array[0] == ecore_set) {
+		assert(pset_array[1] == pcore_set);
+	} else {
+		assert(pset_array[0] == pcore_set);
+		assert(pset_array[1] == ecore_set);
+	}
+
+	for (processor_t p = processor_list; p != NULL; p = p->processor_list) {
+		processor_set_t pset = p->processor_set;
+		kprintf("%s>cpu_id %02d in pset_id %02d type %s\n", __FUNCTION__, p->cpu_id, pset->pset_id,
+		    pct_name[pset->pset_cluster_type]);
+
+		assert(p == processor_array[p->cpu_id]);
+		assert(pset->pset_cluster_type != PSET_SMP);
+		if (pset->pset_cluster_type == PSET_AMP_E) {
+			assert(pset->pset_type == CLUSTER_TYPE_E);
+			assert(pset == ecore_set);
+		} else {
+			assert(pset->pset_cluster_type == PSET_AMP_P);
+			assert(pset->pset_type == CLUSTER_TYPE_P);
+			assert(pset == pcore_set);
+		}
 	}
 }
 

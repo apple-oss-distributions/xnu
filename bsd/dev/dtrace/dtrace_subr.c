@@ -157,7 +157,7 @@ dtrace_proc_exec_notification(proc_t *p) {
 
 	ASSERT(p);
 	ASSERT(proc_getpid(p) != -1);
-	ASSERT(current_task() != p->task);
+	ASSERT(current_task() != proc_task(p));
 
 	lck_mtx_lock(&dtrace_procwaitfor_lock);
 
@@ -187,7 +187,7 @@ dtrace_proc_exec_notification(proc_t *p) {
 
 		if (!strcmp(entry->pdesc->p_name, pname)) {
 			entry->pdesc->p_pid = proc_getpid(p);
-			task_pidsuspend(p->task);
+			task_pidsuspend(proc_task(p));
 			wakeup(entry);
 		}
 	}

@@ -42,7 +42,7 @@ typedef x86_saved_state_t savearea_t;
 #include <sys/dtrace.h>
 #include <sys/dtrace_impl.h>
 #include <libkern/OSAtomic.h>
-#include <kern/hvg_hypercall.h>
+#include <i386/x86_hypercall.h>
 #include <kern/thread_call.h>
 #include <kern/task.h>
 #include <kern/sched_prim.h>

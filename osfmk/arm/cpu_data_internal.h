@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -41,7 +41,7 @@
 #include <pexpert/pexpert.h>
 #include <arm/dbgwrap.h>
 #include <arm/machine_routines.h>
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #include <arm/thread.h>
 #include <arm/pmap.h>
 
@@ -56,9 +56,6 @@
 typedef struct reset_handler_data {
 	vm_offset_t     assist_reset_handler;           /* Assist handler phys address */
 	vm_offset_t     cpu_data_entries;                       /* CpuDataEntries phys address */
-#if !__arm64__
-	vm_offset_t     boot_args;                                      /* BootArgs phys address */
-#endif
 } reset_handler_data_t;
 
 extern  reset_handler_data_t    ResetHandlerData;
@@ -66,11 +63,7 @@ extern  reset_handler_data_t    ResetHandlerData;
 /* Put the static check for cpumap_t here as it's defined in <kern/processor.h> */
 static_assert(sizeof(cpumap_t) * CHAR_BIT >= MAX_CPUS, "cpumap_t bitvector is too small for current MAX_CPUS value");
 
-#ifdef  __arm__
-#define CPUWINDOWS_BASE_MASK            0xFFF00000UL
-#else
 #define CPUWINDOWS_BASE_MASK            0xFFFFFFFFFFE00000UL
-#endif
 #define CPUWINDOWS_BASE                 (VM_MAX_KERNEL_ADDRESS & CPUWINDOWS_BASE_MASK)
 #define CPUWINDOWS_TOP                  (CPUWINDOWS_BASE + (MAX_CPUS * CPUWINDOWS_MAX * ARM_PGBYTES))
 
@@ -80,11 +73,7 @@ static_assert((CPUWINDOWS_BASE >= VM_MIN_KERNEL_ADDRESS) && ((CPUWINDOWS_TOP - 1
 typedef struct cpu_data_entry {
 	void                           *cpu_data_paddr;         /* Cpu data physical address */
 	struct  cpu_data               *cpu_data_vaddr;         /* Cpu data virtual address */
-#if __arm__
-	uint32_t                        cpu_data_offset_8;
-	uint32_t                        cpu_data_offset_12;
-#elif __arm64__
-#else
+#if !defined(__arm64__)
 #error Check cpu_data_entry padding for this architecture
 #endif
 } cpu_data_entry_t;
@@ -129,9 +118,6 @@ typedef struct cpu_data {
 #if __arm64__
 	vm_offset_t                     excepstackptr;
 	vm_offset_t                     excepstack_top;
-#else
-	vm_offset_t                     fiqstackptr;
-	vm_offset_t                     fiqstack_top;
 #endif
 	thread_t                        cpu_active_thread;
 	vm_offset_t                     cpu_active_stack;
@@ -143,30 +129,6 @@ typedef struct cpu_data {
 #if __arm64__
 	uint64_t                        cpu_base_timebase;
 	uint64_t                        cpu_timebase;
-#else
-	union {
-		struct {
-			uint32_t        low;
-			uint32_t        high;
-		} split;
-		struct {
-			uint64_t        val;
-		} raw;
-	} cbtb;
-#define cpu_base_timebase_low cbtb.split.low
-#define cpu_base_timebase_high cbtb.split.high
-
-	union {
-		struct {
-			uint32_t        low;
-			uint32_t        high;
-		} split;
-		struct {
-			uint64_t        val;
-		} raw;
-	} ctb;
-#define cpu_timebase_low ctb.split.low
-#define cpu_timebase_high ctb.split.high
 #endif
 	bool                            cpu_hibernate; /* This cpu is currently hibernating the system */
 	bool                            cpu_running;
@@ -189,7 +151,7 @@ typedef struct cpu_data {
 	uint64_t                        cpu_idle_latency;
 	uint64_t                        cpu_idle_pop;
 
-#if     __arm__ || __ARM_KERNEL_PROTECT__
+#if     __ARM_KERNEL_PROTECT__
 	vm_offset_t                     cpu_exc_vectors;
 #endif /* __ARM_KERNEL_PROTECT__ */
 	vm_offset_t                     cpu_reset_handler;
@@ -222,13 +184,6 @@ typedef struct cpu_data {
 	void                            *cpu_imm_xcall_p0;
 	void                            *cpu_imm_xcall_p1;
 
-#if     defined(ARMA7)
-	volatile uint32_t               cpu_CLW_active;
-	volatile uint64_t               cpu_CLWFlush_req;
-	volatile uint64_t               cpu_CLWFlush_last;
-	volatile uint64_t               cpu_CLWClean_req;
-	volatile uint64_t               cpu_CLWClean_last;
-#endif
 
 #if     __arm64__
 	vm_offset_t                     coresight_base[CORESIGHT_REGIONS];
@@ -310,10 +265,7 @@ PERCPU_DECL(cpu_data_t, cpu_data);
 #define BootCpuData                     __PERCPU_NAME(cpu_data)
 extern  boot_args                      *BootArgs;
 
-#if __arm__
-extern  unsigned int                   *ExceptionLowVectorsBase;
-extern  unsigned int                   *ExceptionVectorsTable;
-#elif __arm64__
+#if __arm64__
 extern  unsigned int                    LowResetVectorBase;
 extern  unsigned int                    LowResetVectorEnd;
 #if WITH_CLASSIC_S2R

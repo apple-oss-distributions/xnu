@@ -115,15 +115,13 @@
 #include <sys/sysent.h>
 #include <sys/reason.h>
 #include <sys/proc_require.h>
+#include <sys/kern_debug.h>
 #include <IOKit/IOBSD.h>        /* IOTaskHasEntitlement() */
 #include <kern/ipc_kobject.h>   /* ipc_kobject_set_kobjidx() */
 #include <kern/ast.h>           /* proc_filedesc_ast */
 #include <libkern/amfi/amfi.h>
 #include <mach-o/loader.h>
-
-#ifdef CONFIG_32BIT_TELEMETRY
-#include <sys/kasl.h>
-#endif /* CONFIG_32BIT_TELEMETRY */
+#include <os/base.h>            /* OS_STRINGIFY */
 
 #if CONFIG_CSR
 #include <sys/csr.h>
@@ -137,10 +135,7 @@
 #endif
 
 #include <libkern/crypto/sha1.h>
-
-#ifdef CONFIG_32BIT_TELEMETRY
-#define MAX_32BIT_EXEC_SIG_SIZE 160
-#endif /* CONFIG_32BIT_TELEMETRY */
+#include <IOKit/IOKitKeys.h>
 
 /*
  * Structure associated with user cacheing.
@@ -158,10 +153,10 @@ static u_long uihash;          /* size of hash table - 1 */
  * Other process lists
  */
 #define PIDHASH(pid)    (&pidhashtbl[(pid) & pidhash])
-static SECURITY_READ_ONLY_LATE(struct proc_hp *) pidhashtbl;
+static SECURITY_READ_ONLY_LATE(struct proc_smr *) pidhashtbl;
 static SECURITY_READ_ONLY_LATE(u_long) pidhash;
 #define PGRPHASH(pgid)  (&pgrphashtbl[(pgid) & pgrphash])
-static SECURITY_READ_ONLY_LATE(struct pgrp_hp *) pgrphashtbl;
+static SECURITY_READ_ONLY_LATE(struct pgrp_smr *) pgrphashtbl;
 static SECURITY_READ_ONLY_LATE(u_long) pgrphash;
 SECURITY_READ_ONLY_LATE(struct sesshashhead *) sesshashtbl;
 SECURITY_READ_ONLY_LATE(u_long) sesshash;
@@ -174,6 +169,8 @@ static TUNABLE(bool, proc_ref_tracking_disabled, "-disable_procref_tracking", fa
 struct proclist allproc = LIST_HEAD_INITIALIZER(allproc);
 struct proclist zombproc = LIST_HEAD_INITIALIZER(zombproc);
 extern struct tty cons;
+extern size_t proc_struct_size;
+extern size_t proc_and_task_size;
 
 extern int cs_debug;
 
@@ -187,11 +184,20 @@ static TUNABLE(bool, syscallfilter_disable, "-disable_syscallfilter", false);
 #if CONFIG_COREDUMP
 /* Name to give to core files */
 #if defined(XNU_TARGET_OS_BRIDGE)
+__XNU_PRIVATE_EXTERN const char * defaultcorefiledir = "/private/var/internal";
 __XNU_PRIVATE_EXTERN char corefilename[MAXPATHLEN + 1] = {"/private/var/internal/%N.core"};
+__XNU_PRIVATE_EXTERN const char * defaultdrivercorefiledir = "/private/var/internal";
+__XNU_PRIVATE_EXTERN char drivercorefilename[MAXPATHLEN + 1] = {"/private/var/internal/%N.core"};
 #elif defined(XNU_TARGET_OS_OSX)
+__XNU_PRIVATE_EXTERN const char * defaultcorefiledir = "/cores";
 __XNU_PRIVATE_EXTERN char corefilename[MAXPATHLEN + 1] = {"/cores/core.%P"};
+__XNU_PRIVATE_EXTERN const char * defaultdrivercorefiledir = "/cores";
+__XNU_PRIVATE_EXTERN char drivercorefilename[MAXPATHLEN + 1] = {"/cores/core.%P"};
 #else
+__XNU_PRIVATE_EXTERN const char * defaultcorefiledir = "/private/var/cores";
 __XNU_PRIVATE_EXTERN char corefilename[MAXPATHLEN + 1] = {"/private/var/cores/%N.core"};
+__XNU_PRIVATE_EXTERN const char * defaultdrivercorefiledir = "/private/var/dextcores";
+__XNU_PRIVATE_EXTERN char drivercorefilename[MAXPATHLEN + 1] = {"/private/var/dextcores/%N.core"};
 #endif
 #endif
 
@@ -501,11 +507,32 @@ proc_list_exited(proc_t p)
 }
 
 #if CONFIG_DEBUG_SYSCALL_REJECTION
+uint64_t
+uthread_get_syscall_rejection_flags(void *uthread)
+{
+	uthread_t uth = (uthread_t) uthread;
+	return uth->syscall_rejection_flags;
+}
+
 uint64_t*
 uthread_get_syscall_rejection_mask(void *uthread)
 {
 	uthread_t uth = (uthread_t) uthread;
 	return uth->syscall_rejection_mask;
+}
+
+uint64_t*
+uthread_get_syscall_rejection_once_mask(void *uthread)
+{
+	uthread_t uth = (uthread_t) uthread;
+	return uth->syscall_rejection_once_mask;
+}
+
+bool
+uthread_syscall_rejection_is_enabled(void *uthread)
+{
+	uthread_t uth = (uthread_t) uthread;
+	return (debug_syscall_rejection_mode != 0) || (uth->syscall_rejection_flags & SYSCALL_REJECTION_FLAGS_FORCE_FATAL);
 }
 #endif /* CONFIG_DEBUG_SYSCALL_REJECTION */
 
@@ -550,7 +577,7 @@ proc_ref_try_fast(proc_t p)
 {
 	uint32_t bits;
 
-	proc_require(p, PROC_REQUIRE_ALLOW_KERNPROC);
+	proc_require(p, PROC_REQUIRE_ALLOW_ALL);
 
 	bits = os_ref_retain_try_mask(&p->p_refcount, P_REF_BITS,
 	    P_REF_NEW | P_REF_DEAD, NULL);
@@ -673,7 +700,7 @@ proc_rele(proc_t p)
 {
 	uint32_t o_bits, n_bits;
 
-	proc_require(p, PROC_REQUIRE_ALLOW_KERNPROC);
+	proc_require(p, PROC_REQUIRE_ALLOW_ALL);
 
 	os_atomic_rmw_loop(&p->p_refcount, o_bits, n_bits, release, {
 		n_bits = o_bits - (1u << P_REF_BITS);
@@ -698,6 +725,12 @@ proc_rele(proc_t p)
 		wakeup(&p->p_refcount);
 	}
 	return 0;
+}
+
+bool
+proc_is_shadow(proc_t p)
+{
+	return os_ref_get_raw_mask(&p->p_refcount) & P_REF_SHADOW;
 }
 
 proc_t
@@ -732,21 +765,14 @@ proc_ref(proc_t p, int locked)
 static void
 proc_free(void *_p)
 {
-	proc_t p = _p;
-	proc_t pn = hazard_ptr_serialized_load(&p->p_hash);
-
-	if (pn) {
-		/* release the reference taken in phash_remove_locked() */
-		proc_wait_release(pn);
-	}
-	zfree_id(ZONE_ID_PROC, p);
+	proc_release_proc_task_struct(_p);
 }
 
 void
 proc_wait_release(proc_t p)
 {
 	if (__probable(os_ref_release_raw(&p->p_waitref, &p_refgrp) == 0)) {
-		hazard_retire(p, sizeof(*p), proc_free);
+		smr_global_retire(p, sizeof(*p), proc_free);
 	}
 }
 
@@ -865,13 +891,44 @@ proc_refwake_did_exec(proc_t p)
 	wakeup(&p->p_waitref);
 }
 
+void
+proc_ref_hold_proc_task_struct(proc_t proc)
+{
+	os_atomic_or(&proc->p_refcount, P_REF_PROC_HOLD, relaxed);
+}
+
+void
+proc_release_proc_task_struct(proc_t proc)
+{
+	uint32_t old_ref = os_atomic_andnot_orig(&proc->p_refcount, P_REF_PROC_HOLD, relaxed);
+	if ((old_ref & P_REF_TASK_HOLD) == 0) {
+		zfree(proc_task_zone, proc);
+	}
+}
+
+void
+task_ref_hold_proc_task_struct(task_t task)
+{
+	proc_t proc_from_task = task_get_proc_raw(task);
+	os_atomic_or(&proc_from_task->p_refcount, P_REF_TASK_HOLD, relaxed);
+}
+
+void
+task_release_proc_task_struct(task_t task)
+{
+	proc_t proc_from_task = task_get_proc_raw(task);
+	uint32_t old_ref = os_atomic_andnot_orig(&proc_from_task->p_refcount, P_REF_TASK_HOLD, relaxed);
+
+	if ((old_ref & P_REF_PROC_HOLD) == 0) {
+		zfree(proc_task_zone, proc_from_task);
+	}
+}
+
 proc_t
 proc_parentholdref(proc_t p)
 {
 	proc_t parent = PROC_NULL;
 	proc_t pp;
-	int loopcnt = 0;
-
 
 	proc_list_lock();
 loop:
@@ -884,11 +941,6 @@ loop:
 	if ((pp->p_listflag & (P_LIST_CHILDDRSTART | P_LIST_CHILDDRAINED)) == P_LIST_CHILDDRSTART) {
 		pp->p_listflag |= P_LIST_CHILDDRWAIT;
 		msleep(&pp->p_childrencnt, &proc_list_mlock, 0, "proc_parent", 0);
-		loopcnt++;
-		if (loopcnt == 5) {
-			parent = PROC_NULL;
-			goto out;
-		}
 		goto loop;
 	}
 
@@ -963,6 +1015,7 @@ proc_checkdeadrefs(__unused proc_t p)
 	uint32_t bits;
 
 	bits = os_ref_release_raw_mask(&p->p_refcount, P_REF_BITS, NULL);
+	bits &= ~(P_REF_SHADOW | P_REF_PROC_HOLD | P_REF_TASK_HOLD);
 	if (bits != P_REF_DEAD) {
 		panic("proc being freed and unexpected refcount %p:%d:0x%x", p,
 		    bits >> P_REF_BITS, bits & P_REF_MASK);
@@ -985,16 +1038,13 @@ proc_require(proc_t proc, proc_require_flags_t flags)
 	if ((flags & PROC_REQUIRE_ALLOW_NULL) && proc == PROC_NULL) {
 		return;
 	}
-	if ((flags & PROC_REQUIRE_ALLOW_KERNPROC) && proc == &proc0) {
-		return;
-	}
-	zone_id_require(ZONE_ID_PROC, sizeof(struct proc), proc);
+	zone_id_require(ZONE_ID_PROC_TASK, proc_and_task_size, proc);
 }
 
 pid_t
 proc_getpid(proc_t p)
 {
-	if (p == &proc0) {
+	if (p == kernproc) {
 		return 0;
 	}
 
@@ -1005,7 +1055,7 @@ int
 proc_pid(proc_t p)
 {
 	if (p != NULL) {
-		proc_require(p, PROC_REQUIRE_ALLOW_KERNPROC);
+		proc_require(p, PROC_REQUIRE_ALLOW_ALL);
 		return proc_getpid(p);
 	}
 	return -1;
@@ -1015,7 +1065,7 @@ int
 proc_ppid(proc_t p)
 {
 	if (p != NULL) {
-		proc_require(p, PROC_REQUIRE_ALLOW_KERNPROC);
+		proc_require(p, PROC_REQUIRE_ALLOW_ALL);
 		return p->p_ppid;
 	}
 	return -1;
@@ -1025,7 +1075,7 @@ int
 proc_original_ppid(proc_t p)
 {
 	if (p != NULL) {
-		proc_require(p, PROC_REQUIRE_ALLOW_KERNPROC);
+		proc_require(p, PROC_REQUIRE_ALLOW_ALL);
 		return p->p_original_ppid;
 	}
 	return -1;
@@ -1064,7 +1114,7 @@ int
 proc_csflags(proc_t p, uint64_t *flags)
 {
 	if (p && flags) {
-		proc_require(p, PROC_REQUIRE_ALLOW_KERNPROC);
+		proc_require(p, PROC_REQUIRE_ALLOW_ALL);
 		*flags = proc_getcsflags(p);
 		return 0;
 	}
@@ -1176,20 +1226,54 @@ proc_parent(proc_t p)
 	proc_t pp;
 
 	proc_list_lock();
-loop:
-	pp = p->p_pptr;
-	parent = proc_ref(pp, true);
-	if (parent == PROC_NULL && ((pp->p_listflag & P_LIST_CHILDDRAINED) == 0)) {
-		/*
-		 * If we can't get a reference on the parent,
-		 * wait for all children to have been reparented.
+
+	while (1) {
+		pp = p->p_pptr;
+		parent = proc_ref(pp, true);
+		/* Check if we got a proc ref and it is still the parent */
+		if (parent != PROC_NULL) {
+			if (parent == p->p_pptr) {
+				/*
+				 * We have a ref on the parent and it is still
+				 * our parent, return the ref
+				 */
+				proc_list_unlock();
+				return parent;
+			}
+
+			/*
+			 * Our parent changed while we slept on proc_ref,
+			 * drop the ref on old parent and retry.
+			 */
+			proc_rele(parent);
+			continue;
+		}
+
+		if (pp != p->p_pptr) {
+			/*
+			 * We didn't get a ref, but parent changed from what
+			 * we last saw before we slept in proc_ref, try again
+			 * with new parent.
+			 */
+			continue;
+		}
+
+		if ((pp->p_listflag & P_LIST_CHILDDRAINED) == 0) {
+			/* Parent did not change, but we also did not get a
+			 * ref on parent, sleep if the parent has not drained
+			 * its children and then retry.
+			 */
+			pp->p_listflag |= P_LIST_CHILDLKWAIT;
+			msleep(&pp->p_childrencnt, &proc_list_mlock, 0, "proc_parent", 0);
+			continue;
+		}
+
+		/* Parent has died and drained its children and we still
+		 * point to it, return NULL.
 		 */
-		pp->p_listflag |= P_LIST_CHILDLKWAIT;
-		msleep(&pp->p_childrencnt, &proc_list_mlock, 0, "proc_parent", 0);
-		goto loop;
+		proc_list_unlock();
+		return PROC_NULL;
 	}
-	proc_list_unlock();
-	return parent;
 }
 
 static boolean_t
@@ -1453,13 +1537,34 @@ proc_suser(proc_t p)
 task_t
 proc_task(proc_t proc)
 {
-	return (task_t)proc->task;
+	task_t task_from_proc = proc_get_task_raw(proc);
+	return (proc->p_lflag & P_LHASTASK) ? task_from_proc : NULL;
 }
 
 void
 proc_set_task(proc_t proc, task_t task)
 {
-	proc->task = task;
+	task_t task_from_proc = proc_get_task_raw(proc);
+	if (task == NULL) {
+		proc->p_lflag &= ~P_LHASTASK;
+	} else {
+		if (task != task_from_proc) {
+			panic("proc_set_task trying to set random task %p", task);
+		}
+		proc->p_lflag |= P_LHASTASK;
+	}
+}
+
+task_t
+proc_get_task_raw(proc_t proc)
+{
+	return (task_t)((uintptr_t)proc + proc_struct_size);
+}
+
+proc_t
+task_get_proc_raw(task_t task)
+{
+	return (proc_t)((uintptr_t)task - proc_struct_size);
 }
 
 /*
@@ -1506,8 +1611,8 @@ proc_is64bit(proc_t p)
 int
 proc_is64bit_data(proc_t p)
 {
-	assert(p->task);
-	return (int)task_get_64bit_data(p->task);
+	assert(proc_task(p));
+	return (int)task_get_64bit_data(proc_task(p));
 }
 
 int
@@ -1553,7 +1658,7 @@ proc_getgid(proc_t p)
 uint64_t
 proc_uniqueid(proc_t p)
 {
-	if (p == &proc0) {
+	if (p == kernproc) {
 		return 0;
 	}
 
@@ -1571,11 +1676,11 @@ uint64_t proc_uniqueid_task(void *p_arg, void *t);
  * Only used by get_task_uniqueid(); do not add additional callers.
  */
 uint64_t
-proc_uniqueid_task(void *p_arg, void *t)
+proc_uniqueid_task(void *p_arg, void *t __unused)
 {
 	proc_t p = p_arg;
 	uint64_t uniqueid = proc_uniqueid(p);
-	return uniqueid ^ (__probable(t == (void *)p->task) ? 0 : (1ull << 63));
+	return uniqueid ^ (__probable(!proc_is_shadow(p)) ? 0 : (1ull << 63));
 }
 
 uint64_t
@@ -1588,7 +1693,7 @@ void
 proc_coalitionids(__unused proc_t p, __unused uint64_t ids[COALITION_NUM_TYPES])
 {
 #if CONFIG_COALITIONS
-	task_coalition_ids(p->task, ids);
+	task_coalition_ids(proc_task(p), ids);
 #else
 	memset(ids, 0, sizeof(uint64_t[COALITION_NUM_TYPES]));
 #endif
@@ -1610,6 +1715,9 @@ proc_did_throttle(proc_t p)
 int
 proc_getcdhash(proc_t p, unsigned char *cdhash)
 {
+	if (p == kernproc) {
+		return EINVAL;
+	}
 	return vn_getcdhash(p->p_textvp, p->p_textoff, cdhash);
 }
 
@@ -1760,6 +1868,9 @@ proc_gettty(proc_t p, vnode_t *vp)
 		session_lock(procsp);
 		vnode_t ttyvp = procsp->s_ttyvp;
 		int ttyvid = procsp->s_ttyvid;
+		if (ttyvp) {
+			vnode_hold(ttyvp);
+		}
 		session_unlock(procsp);
 
 		if (ttyvp) {
@@ -1767,6 +1878,7 @@ proc_gettty(proc_t p, vnode_t *vp)
 				*vp = ttyvp;
 				err = 0;
 			}
+			vnode_drop(ttyvp);
 		} else {
 			err = ENOENT;
 		}
@@ -1877,8 +1989,8 @@ phash_find_locked(pid_t pid)
 		return kernproc;
 	}
 
-	for (p = hazard_ptr_serialized_load(PIDHASH(pid)); p;
-	    p = hazard_ptr_serialized_load(&p->p_hash)) {
+	for (p = smr_serialized_load(PIDHASH(pid)); p;
+	    p = smr_serialized_load(&p->p_hash)) {
 		if (p->p_proc_ro && p->p_pid == pid) {
 			break;
 		}
@@ -1888,47 +2000,58 @@ phash_find_locked(pid_t pid)
 }
 
 void
-phash_insert_locked(pid_t pid, struct proc *p)
+phash_replace_locked(pid_t pid, struct proc *old_proc, struct proc *new_proc)
 {
-	struct proc_hp *head = PIDHASH(pid);
+	struct proc_smr *prev = PIDHASH(pid);
+	struct proc *pn;
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	hazard_ptr_serialized_store_relaxed(&p->p_hash,
-	    hazard_ptr_serialized_load(head));
-	hazard_ptr_serialized_store(head, p);
+	smr_serialized_store_relaxed(&new_proc->p_hash,
+	    smr_serialized_load(&old_proc->p_hash));
+
+	while ((pn = smr_serialized_load(prev)) != old_proc) {
+		prev = &pn->p_hash;
+	}
+
+	smr_serialized_store(prev, new_proc);
+}
+
+void
+phash_insert_locked(pid_t pid, struct proc *p)
+{
+	struct proc_smr *head = PIDHASH(pid);
+
+	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
+
+	smr_serialized_store_relaxed(&p->p_hash,
+	    smr_serialized_load(head));
+	smr_serialized_store(head, p);
 }
 
 void
 phash_remove_locked(pid_t pid, struct proc *p)
 {
-	struct proc_hp *prev = PIDHASH(pid);
+	struct proc_smr *prev = PIDHASH(pid);
 	struct proc *pn;
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	while ((pn = hazard_ptr_serialized_load(prev)) != p) {
+	while ((pn = smr_serialized_load(prev)) != p) {
 		prev = &pn->p_hash;
 	}
 
-	/*
-	 * Now that the proc is no longer in the hash,
-	 * it needs to keep its p_hash value alive.
-	 */
-	pn = hazard_ptr_serialized_load(&p->p_hash);
-	if (pn) {
-		os_ref_retain_raw(&pn->p_waitref, &p_refgrp);
-	}
-	hazard_ptr_serialized_store_relaxed(prev, pn);
+	pn = smr_serialized_load(&p->p_hash);
+	smr_serialized_store_relaxed(prev, pn);
 }
 
 proc_t
 proc_find(int pid)
 {
-	struct proc_hp *hp = PIDHASH(pid);
-	proc_t p = PROC_NULL;
-	hazard_guard_array_t g;
-	uint32_t bits = 0;
+	struct proc_smr *hp;
+	proc_t p;
+	uint32_t bits;
+	bool shadow_proc = false;
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_NOTOWNED);
 
@@ -1936,41 +2059,16 @@ proc_find(int pid)
 		return proc_ref(kernproc, false);
 	}
 
-	g = hazard_guard_get_n(0, 3);
+retry:
+	hp = PIDHASH(pid);
+	p = PROC_NULL;
+	bits = 0;
+	shadow_proc = false;
 
-	/*
-	 * Note: In theory, reusing a guard needs to use hazard_guard_reacquire(),
-	 *       however, using 3 guards helps us being smarter:
-	 *
-	 *       If one considers the sequence of guards being acquired be:
-	 *       <n>, <n+1>, <n+2>, <n+3> ...
-	 *
-	 *       then the pointer acquired at step <n> is used to acquire
-	 *       <n+1> but no longer used once <n+2> has been acquired.
-	 *
-	 *       Acquiring <n+2> has a full barrier which we can hence
-	 *       piggy back on, and make the <n+3> reuse of the same guard
-	 *       as <n> be an "acquire" instead of a "re-acquire".
-	 *
-	 *       This unrolling is good for the CPU too since it can help it
-	 *       speculate through values/barriers anyway.
-	 */
+	smr_global_enter();
+
 	for (;;) {
-		p = hazard_guard_acquire(&g[0], hp);
-		if (p == PROC_NULL ||
-		    (p->p_pid == pid && p->p_proc_ro != NULL)) {
-			break;
-		}
-		hp = &p->p_hash;
-
-		p = hazard_guard_acquire(&g[1], hp);
-		if (p == PROC_NULL ||
-		    (p->p_pid == pid && p->p_proc_ro != NULL)) {
-			break;
-		}
-		hp = &p->p_hash;
-
-		p = hazard_guard_acquire(&g[2], hp);
+		p = smr_entered_load(hp);
 		if (p == PROC_NULL ||
 		    (p->p_pid == pid && p->p_proc_ro != NULL)) {
 			break;
@@ -1980,9 +2078,18 @@ proc_find(int pid)
 
 	if (p) {
 		bits = proc_ref_try_fast(p);
+		shadow_proc = !!proc_is_shadow(p);
 	}
 
-	hazard_guard_put_n(g, 3);
+	smr_global_leave();
+
+	/* Retry if the proc is a shadow proc */
+	if (shadow_proc) {
+		if (bits) {
+			proc_rele(p);
+		}
+		goto retry;
+	}
 
 	if (__improbable(!bits)) {
 		return PROC_NULL;
@@ -1990,14 +2097,17 @@ proc_find(int pid)
 
 	if (__improbable(proc_ref_needs_wait_for_exec(bits))) {
 		p = proc_ref_wait_for_exec(p, bits, false);
-	}
-
-	if (p != PROC_NULL) {
 		/*
-		 * pair with proc_refwake_did_exec() to be able to observe
-		 * a fully formed proc_ro structure.
+		 * Retry if exec was successful since the old proc
+		 * would have become a shadow proc and might be in
+		 * middle of exiting.
 		 */
-		os_atomic_thread_fence(acquire);
+		if (p == PROC_NULL || proc_is_shadow(p)) {
+			if (p != PROC_NULL) {
+				proc_rele(p);
+			}
+			goto retry;
+		}
 	}
 
 	return p;
@@ -2008,9 +2118,32 @@ proc_find_locked(int pid)
 {
 	proc_t p = PROC_NULL;
 
+retry:
 	p = phash_find_locked(pid);
 	if (p != PROC_NULL) {
-		p = proc_ref(p, true);
+		uint32_t bits;
+
+		assert(!proc_is_shadow(p));
+
+		bits = proc_ref_try_fast(p);
+		if (__improbable(!bits)) {
+			return PROC_NULL;
+		}
+
+		if (__improbable(proc_ref_needs_wait_for_exec(bits))) {
+			p = proc_ref_wait_for_exec(p, bits, true);
+			/*
+			 * Retry if exec was successful since the old proc
+			 * would have become a shadow proc and might be in
+			 * middle of exiting.
+			 */
+			if (p == PROC_NULL || proc_is_shadow(p)) {
+				if (p != PROC_NULL) {
+					proc_rele(p);
+				}
+				goto retry;
+			}
+		}
 	}
 
 	return p;
@@ -2043,7 +2176,7 @@ pzfind(pid_t pid)
 	proc_list_lock();
 
 	LIST_FOREACH(p, &zombproc, p_list) {
-		if (proc_getpid(p) == pid) {
+		if (proc_getpid(p) == pid && !proc_is_shadow(p)) {
 			break;
 		}
 	}
@@ -2084,8 +2217,8 @@ pghash_find_locked(pid_t pgid)
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	for (pgrp = hazard_ptr_serialized_load(PGRPHASH(pgid)); pgrp;
-	    pgrp = hazard_ptr_serialized_load(&pgrp->pg_hash)) {
+	for (pgrp = smr_serialized_load(PGRPHASH(pgid)); pgrp;
+	    pgrp = smr_serialized_load(&pgrp->pg_hash)) {
 		if (pgrp->pg_id == pgid) {
 			break;
 		}
@@ -2097,64 +2230,43 @@ pghash_find_locked(pid_t pgid)
 void
 pghash_insert_locked(pid_t pgid, struct pgrp *pgrp)
 {
-	struct pgrp_hp *head = PGRPHASH(pgid);
+	struct pgrp_smr *head = PGRPHASH(pgid);
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	hazard_ptr_serialized_store_relaxed(&pgrp->pg_hash,
-	    hazard_ptr_serialized_load(head));
-	hazard_ptr_serialized_store(head, pgrp);
+	smr_serialized_store_relaxed(&pgrp->pg_hash,
+	    smr_serialized_load(head));
+	smr_serialized_store(head, pgrp);
 }
 
 static void
 pghash_remove_locked(pid_t pgid, struct pgrp *pgrp)
 {
-	struct pgrp_hp *prev = PGRPHASH(pgid);
+	struct pgrp_smr *prev = PGRPHASH(pgid);
 	struct pgrp *pgn;
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	while ((pgn = hazard_ptr_serialized_load(prev)) != pgrp) {
+	while ((pgn = smr_serialized_load(prev)) != pgrp) {
 		prev = &pgn->pg_hash;
 	}
 
-	/*
-	 * Now that the process group is out of the hash,
-	 * we need to protect its "next" for readers until
-	 * its death.
-	 */
-	pgn = hazard_ptr_serialized_load(&pgrp->pg_hash);
-	if (pgn) {
-		os_ref_retain_raw(&pgn->pg_hashref, &p_refgrp);
-	}
-	hazard_ptr_serialized_store_relaxed(prev, pgn);
+	pgn = smr_serialized_load(&pgrp->pg_hash);
+	smr_serialized_store_relaxed(prev, pgn);
 }
 
 struct pgrp *
 pgrp_find(pid_t pgid)
 {
-	struct pgrp_hp *hp = PGRPHASH(pgid);
+	struct pgrp_smr *hp = PGRPHASH(pgid);
 	struct pgrp *pgrp = PGRP_NULL;
-	hazard_guard_array_t g;
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_NOTOWNED);
 
-	g = hazard_guard_get_n(0, 3);
+	smr_global_enter();
 
 	for (;;) {
-		pgrp = hazard_guard_acquire(&g[0], hp);
-		if (pgrp == PGRP_NULL || pgrp->pg_id == pgid) {
-			break;
-		}
-		hp = &pgrp->pg_hash;
-
-		pgrp = hazard_guard_acquire(&g[1], hp);
-		if (pgrp == PGRP_NULL || pgrp->pg_id == pgid) {
-			break;
-		}
-		hp = &pgrp->pg_hash;
-
-		pgrp = hazard_guard_acquire(&g[2], hp);
+		pgrp = smr_entered_load(hp);
 		if (pgrp == PGRP_NULL || pgrp->pg_id == pgid) {
 			break;
 		}
@@ -2165,7 +2277,7 @@ pgrp_find(pid_t pgid)
 		pgrp = PGRP_NULL;
 	}
 
-	hazard_guard_put_n(g, 3);
+	smr_global_leave();
 
 	return pgrp;
 }
@@ -2181,16 +2293,15 @@ pgrp_add_member(struct pgrp *pgrp, struct proc *parent, struct proc *p)
 		os_atomic_andnot(&pgrp->pg_refcount, PGRP_REF_EMPTY, relaxed);
 	}
 	if (parent != PROC_NULL) {
-		assert(pgrp == hazard_ptr_serialized_load(&parent->p_pgrp));
-		LIST_INSERT_AFTER(parent, p, p_pglist);
-	} else {
-		LIST_INSERT_HEAD(&pgrp->pg_members, p, p_pglist);
+		assert(pgrp == smr_serialized_load(&parent->p_pgrp));
 	}
+
+	LIST_INSERT_HEAD(&pgrp->pg_members, p, p_pglist);
 	pgrp_unlock(pgrp);
 
 	p->p_pgrpid = pgrp->pg_id;
 	p->p_sessionid = pgrp->pg_session->s_sid;
-	hazard_ptr_serialized_store(&p->p_pgrp, pgrp);
+	smr_serialized_store(&p->p_pgrp, pgrp);
 }
 
 /* returns one ref from pgrp */
@@ -2306,6 +2417,7 @@ session_rele(struct session *sess)
  *
  * Parameters:	parent			The parent of the process to insert
  *		child			The child process to insert
+ *		in_exec			The child process is in exec
  *
  * Returns:	(void)
  *
@@ -2313,19 +2425,38 @@ session_rele(struct session *sess)
  *		the child the parent process pointer and PPID of the parent...
  */
 void
-pinsertchild(proc_t parent, proc_t child)
+pinsertchild(proc_t parent, proc_t child, bool in_exec)
 {
 	LIST_INIT(&child->p_children);
-	child->p_pptr = parent;
-	child->p_ppid = proc_getpid(parent);
-	child->p_original_ppid = proc_getpid(parent);
-	child->p_puniqueid = proc_uniqueid(parent);
-	child->p_xhighbits = 0;
+	proc_t sibling = parent;
+
+	/* For exec case, new proc is not a child of old proc, but its replacement */
+	if (in_exec) {
+		parent = proc_parent(parent);
+		assert(parent != PROC_NULL);
+
+		/* Copy the ptrace flags from sibling */
+		proc_lock(sibling);
+		child->p_oppid = sibling->p_oppid;
+		child->p_lflag |= (sibling->p_lflag & (P_LTRACED | P_LSIGEXC | P_LNOATTACH));
+		proc_unlock(sibling);
+	}
 
 	proc_list_lock();
+
+	child->p_pptr = parent;
+	child->p_ppid = proc_getpid(parent);
+	child->p_original_ppid = in_exec ? sibling->p_original_ppid : proc_getpid(parent);
+	child->p_puniqueid = proc_uniqueid(parent);
+	child->p_xhighbits = 0;
 #if CONFIG_MEMORYSTATUS
 	memorystatus_add(child, TRUE);
 #endif
+
+	/* If the parent is initproc and p_original pid is not 1, then set reparent flag */
+	if (in_exec && parent == initproc && child->p_original_ppid != 1) {
+		child->p_listflag |= P_LIST_DEADPARENT;
+	}
 
 	parent->p_childrencnt++;
 	LIST_INSERT_HEAD(&parent->p_children, child, p_sibling);
@@ -2335,6 +2466,44 @@ pinsertchild(proc_t parent, proc_t child)
 	os_atomic_andnot(&child->p_refcount, P_REF_NEW, relaxed);
 
 	proc_list_unlock();
+	if (in_exec) {
+		proc_rele(parent);
+	}
+}
+
+/*
+ * Reparent all children of old proc to new proc.
+ *
+ * Parameters:	old process		Old process.
+ *		new process		New process.
+ *
+ * Returns:	None.
+ */
+void
+p_reparentallchildren(proc_t old_proc, proc_t new_proc)
+{
+	proc_t child;
+
+	LIST_INIT(&new_proc->p_children);
+
+	/* Wait for parent ref to drop */
+	proc_childdrainstart(old_proc);
+
+	/* Reparent child from old proc to new proc */
+	while ((child = old_proc->p_children.lh_first) != NULL) {
+		LIST_REMOVE(child, p_sibling);
+		old_proc->p_childrencnt--;
+		child->p_pptr = new_proc;
+		LIST_INSERT_HEAD(&new_proc->p_children, child, p_sibling);
+		new_proc->p_childrencnt++;
+	}
+
+	new_proc->si_pid = old_proc->si_pid;
+	new_proc->si_status = old_proc->si_status;
+	new_proc->si_code = old_proc->si_code;
+	new_proc->si_uid = old_proc->si_uid;
+
+	proc_childdrainend(old_proc);
 }
 
 /*
@@ -2436,10 +2605,10 @@ pgrp_leave_locked(proc_t p)
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	pg = hazard_ptr_serialized_load(&p->p_pgrp);
+	pg = smr_serialized_load(&p->p_pgrp);
 	pgrp_del_member(pg, p);
 	p->p_pgrpid = PGRPID_DEAD;
-	hazard_ptr_clear(&p->p_pgrp);
+	smr_clear_store(&p->p_pgrp);
 
 	return pg;
 }
@@ -2451,7 +2620,7 @@ pgrp_enter_locked(struct proc *parent, struct proc *child)
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	pgrp = pg_ref(hazard_ptr_serialized_load(&parent->p_pgrp));
+	pgrp = pg_ref(smr_serialized_load(&parent->p_pgrp));
 	pgrp_add_member(pgrp, parent, child);
 	return pgrp;
 }
@@ -2462,14 +2631,7 @@ pgrp_enter_locked(struct proc *parent, struct proc *child)
 static void
 pgrp_free(void *_pg)
 {
-	struct pgrp *pg = _pg;
-	struct pgrp *pgn = hazard_ptr_serialized_load(&pg->pg_hash);
-
-	if (pgn && os_ref_release_raw(&pgn->pg_hashref, &p_refgrp) == 0) {
-		/* release the reference taken in pghash_remove_locked() */
-		hazard_retire(pgn, sizeof(*pgn), pgrp_free);
-	}
-	zfree(pgrp_zone, pg);
+	zfree(pgrp_zone, _pg);
 }
 
 __attribute__((noinline))
@@ -2491,7 +2653,7 @@ pgrp_destroy(struct pgrp *pgrp)
 
 	lck_mtx_destroy(&pgrp->pg_mlock, &proc_mlock_grp);
 	if (os_ref_release_raw(&pgrp->pg_hashref, &p_refgrp) == 0) {
-		hazard_retire(pgrp, sizeof(*pgrp), pgrp_free);
+		smr_global_retire(pgrp, sizeof(*pgrp), pgrp_free);
 	}
 }
 
@@ -2752,10 +2914,11 @@ out:
 }
 
 boolean_t
-proc_is_translated(proc_t p __unused)
+proc_is_translated(proc_t p)
 {
-	return 0;
+	return p && ((p->p_flag & P_TRANSLATED) != 0);
 }
+
 
 int
 proc_is_classic(proc_t p __unused)
@@ -2781,6 +2944,40 @@ proc_is_alien(
 		return false;
 	}
 	return task_is_alien(proc_task(p));
+}
+
+bool
+proc_is_driver(proc_t p)
+{
+	if (p == NULL) {
+		return false;
+	}
+	return task_is_driver(proc_task(p));
+}
+
+bool
+proc_is_third_party_debuggable_driver(proc_t p)
+{
+#if XNU_TARGET_OS_IOS
+	uint64_t csflags;
+	if (proc_csflags(p, &csflags) != 0) {
+		return false;
+	}
+
+	if (proc_is_driver(p) &&
+	    !csproc_get_platform_binary(p) &&
+	    IOTaskHasEntitlement(proc_task(p), kIODriverKitEntitlementKey) &&
+	    (csflags & CS_GET_TASK_ALLOW) != 0) {
+		return true;
+	}
+
+	return false;
+
+#else
+	/* On other platforms, fall back to existing rules for debugging */
+	(void)p;
+	return false;
+#endif /* XNU_TARGET_OS_IOS */
 }
 
 /* XXX Why does this function exist?  Need to kill it off... */
@@ -2820,32 +3017,51 @@ proc_allow_low_space_writes(proc_t p)
 	return os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES;
 }
 
+bool
+proc_disallow_rw_for_o_evtonly(proc_t p)
+{
+	return os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_DISALLOW_RW_FOR_O_EVTONLY;
+}
+
+bool
+proc_use_alternative_symlink_ea(proc_t p)
+{
+	return os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_ALTLINK;
+}
+
+bool
+proc_is_rsr(proc_t p)
+{
+	return os_atomic_load(&p->p_ladvflag, relaxed) & P_RSR;
+}
 
 #if CONFIG_COREDUMP
 /*
- * proc_core_name(name, uid, pid)
- * Expand the name described in corefilename, using name, uid, and pid.
- * corefilename is a printf-like string, with three format specifiers:
+ * proc_core_name(format, name, uid, pid)
+ * Expand the name described in format, using name, uid, and pid.
+ * format is a printf-like string, with four format specifiers:
  *	%N	name of process ("name")
  *	%P	process id (pid)
  *	%U	user id (uid)
+ *	%T  mach_continuous_time() timestamp
  * For example, "%N.core" is the default; they can be disabled completely
  * by using "/dev/null", or all core files can be stored in "/cores/%U/%N-%P".
  * This is controlled by the sysctl variable kern.corefile (see above).
  */
 __private_extern__ int
-proc_core_name(const char *name, uid_t uid, pid_t pid, char *cf_name,
+proc_core_name(const char *format, const char * name, uid_t uid, pid_t pid, char *cf_name,
     size_t cf_name_len)
 {
-	const char *format, *appendstr;
-	char id_buf[11];                /* Buffer for pid/uid -- max 4B */
+	const char *appendstr;
+	char id_buf[sizeof(OS_STRINGIFY(INT32_MAX))];          /* Buffer for pid/uid -- max 4B */
+	_Static_assert(sizeof(id_buf) == 11, "size mismatch");
+	char timestamp_buf[sizeof(OS_STRINGIFY(UINT64_MAX))];  /* Buffer for timestamp, including null terminator */
 	size_t i, l, n;
 
 	if (cf_name == NULL) {
 		goto toolong;
 	}
 
-	format = corefilename;
 	for (i = 0, n = 0; n < cf_name_len && format[i]; i++) {
 		switch (format[i]) {
 		case '%':       /* Format character */
@@ -2864,6 +3080,10 @@ proc_core_name(const char *name, uid_t uid, pid_t pid, char *cf_name,
 			case 'U':       /* user id */
 				snprintf(id_buf, sizeof(id_buf), "%u", uid);
 				appendstr = id_buf;
+				break;
+			case 'T':       /* timestamp */
+				snprintf(timestamp_buf, sizeof(timestamp_buf), "%llu", mach_continuous_time());
+				appendstr = timestamp_buf;
 				break;
 			case '\0': /* format string ended in % symbol */
 				goto endofstring;
@@ -2979,6 +3199,7 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 	case CS_OPS_BLOB:
 	case CS_OPS_TEAMID:
 	case CS_OPS_CLEAR_LV:
+	case CS_OPS_VALIDATION_CATEGORY:
 		break;          /* not restricted to root */
 	default:
 		if (forself == 0 && kauth_cred_issuser(kauth_cred_get()) != TRUE) {
@@ -3201,6 +3422,18 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		error = csops_copy_token(start, length, usize, uaddr);
 		goto out;
 	}
+
+	case CS_OPS_VALIDATION_CATEGORY:
+	{
+		unsigned int validation_category = CS_VALIDATION_CATEGORY_INVALID;
+		error = csproc_get_validation_category(pt, &validation_category);
+		if (error) {
+			goto out;
+		}
+		error = copyout(&validation_category, uaddr, sizeof(validation_category));
+		break;
+	}
+
 	case CS_OPS_MARKRESTRICT:
 		proc_lock(pt);
 		proc_csflags_set(pt, CS_RESTRICT);
@@ -3232,7 +3465,7 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		if (proc_getcsflags(pt) & CS_VALID) {
 			if ((flags & CS_ENFORCEMENT) &&
 			    !(proc_getcsflags(pt) & CS_ENFORCEMENT)) {
-				vm_map_cs_enforcement_set(get_task_map(pt->task), TRUE);
+				vm_map_cs_enforcement_set(get_task_map(proc_task(pt)), TRUE);
 			}
 			proc_csflags_set(pt, flags);
 		} else {
@@ -3270,7 +3503,7 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		 *
 		 * We also only allow altering ourselves.
 		 */
-		if (forself == 1 && IOTaskHasEntitlement(pt->task, CLEAR_LV_ENTITLEMENT)) {
+		if (forself == 1 && IOTaskHasEntitlement(proc_task(pt), CLEAR_LV_ENTITLEMENT)) {
 			proc_lock(pt);
 			proc_csflags_clear(pt, CS_REQUIRE_LV | CS_FORCED_LV);
 			proc_unlock(pt);
@@ -3423,7 +3656,7 @@ proc_iterate(
 		proc_t p;
 		ALLPROC_FOREACH(p) {
 			/* ignore processes that are being forked */
-			if (p->p_stat == SIDL) {
+			if (p->p_stat == SIDL || proc_is_shadow(p)) {
 				continue;
 			}
 			if ((filterfn != NULL) && (filterfn(p, filterarg) == 0)) {
@@ -3440,6 +3673,9 @@ proc_iterate(
 	    (flags & PROC_ZOMBPROCLIST)) {
 		proc_t p;
 		ZOMBPROC_FOREACH(p) {
+			if (proc_is_shadow(p)) {
+				continue;
+			}
 			if ((filterfn != NULL) && (filterfn(p, filterarg) == 0)) {
 				continue;
 			}
@@ -3536,7 +3772,8 @@ restart_foreach:
 		}
 		p = proc_ref(p, true);
 		if (!p) {
-			continue;
+			proc_list_unlock();
+			goto restart_foreach;
 		}
 
 		proc_list_unlock();
@@ -3582,9 +3819,10 @@ proc_childrenwalk(
 	u_int pid_count = 0;
 	proc_t p;
 	PCHILDREN_FOREACH(parent, p) {
-		if (p->p_stat == SIDL) {
+		if (p->p_stat == SIDL || proc_is_shadow(p)) {
 			continue;
 		}
+
 		pidlist_add_pid(pl, proc_pid(p));
 		if (++pid_count >= pid_count_available) {
 			break;
@@ -3719,7 +3957,7 @@ pgrp_replace(struct proc *p, struct pgrp *newpg)
 	struct pgrp *oldpg;
 
 	proc_list_lock();
-	oldpg = hazard_ptr_serialized_load(&p->p_pgrp);
+	oldpg = smr_serialized_load(&p->p_pgrp);
 	pgrp_del_member(oldpg, p);
 	pgrp_add_member(newpg, PROC_NULL, p);
 	proc_list_unlock();
@@ -3768,6 +4006,42 @@ session_find_locked(pid_t sessid)
 }
 
 void
+session_replace_leader(struct proc *old_proc, struct proc *new_proc)
+{
+	assert(old_proc == current_proc());
+
+	/* If old_proc is session leader, change the leader to new proc */
+	struct pgrp *pgrp = smr_serialized_load(&old_proc->p_pgrp);
+	struct session *sessp = pgrp->pg_session;
+	struct tty *ttyp = TTY_NULL;
+
+	if (sessp == SESSION_NULL || !SESS_LEADER(old_proc, sessp)) {
+		return;
+	}
+
+	session_lock(sessp);
+	if (sessp->s_ttyp && sessp->s_ttyp->t_session == sessp) {
+		ttyp = sessp->s_ttyp;
+		ttyhold(ttyp);
+	}
+
+	/* Do the dance to take tty lock and session lock */
+	if (ttyp) {
+		session_unlock(sessp);
+		tty_lock(ttyp);
+		session_lock(sessp);
+	}
+
+	sessp->s_leader = new_proc;
+	session_unlock(sessp);
+
+	if (ttyp) {
+		tty_unlock(ttyp);
+		ttyfree(ttyp);
+	}
+}
+
+void
 session_lock(struct session * sess)
 {
 	lck_mtx_lock(&sess->s_mlock);
@@ -3784,14 +4058,13 @@ struct pgrp *
 proc_pgrp(proc_t p, struct session **sessp)
 {
 	struct pgrp *pgrp = PGRP_NULL;
-	hazard_guard_t g;
 	bool success = false;
 
 	if (__probable(p != PROC_NULL)) {
-		g = hazard_guard_get(0);
-		pgrp = hazard_guard_acquire(g, &p->p_pgrp);
+		smr_global_enter();
+		pgrp = smr_entered_load(&p->p_pgrp);
 		success = pgrp == PGRP_NULL || pg_ref_try(pgrp);
-		hazard_guard_put(g);
+		smr_global_leave();
 
 		if (__improbable(!success)) {
 			/*
@@ -3799,7 +4072,7 @@ proc_pgrp(proc_t p, struct session **sessp)
 			 * go the slow, never failing way.
 			 */
 			proc_list_lock();
-			pgrp = pg_ref(hazard_ptr_serialized_load(&p->p_pgrp));
+			pgrp = pg_ref(smr_serialized_load(&p->p_pgrp));
 			proc_list_unlock();
 		}
 	}
@@ -3930,6 +4203,25 @@ proc_knote(struct proc * p, long hint)
 }
 
 void
+proc_transfer_knotes(struct proc *old_proc, struct proc *new_proc)
+{
+	struct knote *kn = NULL;
+
+	proc_klist_lock();
+	while ((kn = SLIST_FIRST(&old_proc->p_klist))) {
+		KNOTE_DETACH(&old_proc->p_klist, kn);
+		if (kn->kn_filtid == (uint8_t)~EVFILT_PROC) {
+			kn->kn_proc = new_proc;
+			KNOTE_ATTACH(&new_proc->p_klist, kn);
+		} else {
+			assert(kn->kn_filtid == (uint8_t)~EVFILT_SIGNAL);
+			kn->kn_proc = NULL;
+		}
+	}
+	proc_klist_unlock();
+}
+
+void
 proc_knote_drain(struct proc *p)
 {
 	struct knote *kn = NULL;
@@ -4044,7 +4336,7 @@ proc_dopcontrol(proc_t p)
 			PROC_SETACTION_STATE(p);
 			proc_unlock(p);
 			printf("low swap: suspending pid %d (%s)\n", proc_getpid(p), p->p_comm);
-			task_suspend(p->task);
+			task_suspend(proc_task(p));
 			break;
 
 		case P_PCKILL:
@@ -4106,7 +4398,7 @@ proc_resetpcontrol(int pid)
 			PROC_RESETACTION_STATE(p);
 			proc_unlock(p);
 			printf("low swap: resuming pid %d (%s)\n", proc_getpid(p), p->p_comm);
-			task_resume(p->task);
+			task_resume(proc_task(p));
 			break;
 
 		case P_PCKILL:
@@ -4155,7 +4447,7 @@ proc_pcontrol_filter(proc_t p, void *arg)
 
 	nps = (struct no_paging_space *)arg;
 
-	compressed = get_task_compressed(p->task);
+	compressed = get_task_compressed(proc_task(p));
 
 	if (PROC_CONTROL_STATE(p)) {
 		if (PROC_ACTION_STATE(p) == 0) {
@@ -4269,7 +4561,7 @@ no_paging_space_action()
 				 */
 				last_no_space_action = now;
 
-				printf("low swap: killing largest compressed process with pid %d (%s) and size %llu MB\n", proc_getpid(p), p->p_comm, (nps.pcs_max_size / MB_SIZE));
+				printf("low swap: killing largest compressed process with pid %d (%s) and size %llu MB\n", proc_getpid(p), p->p_comm, (nps.npcs_max_size / MB_SIZE));
 				kill_reason = os_reason_create(OS_REASON_JETSAM, JETSAM_REASON_LOWSWAP);
 				psignal_with_reason(p, SIGKILL, kill_reason);
 
@@ -4288,7 +4580,11 @@ no_paging_space_action()
 	 */
 	if (memorystatus_get_proccnt_upto_priority(max_kill_priority) > 0) {
 		last_no_space_action = now;
-		memorystatus_kill_on_VM_compressor_space_shortage(TRUE /* async */);
+		/*
+		 * TODO(jason): This is only mac OS right now, but we'll need
+		 * something like this on iPad...
+		 */
+		memorystatus_kill_on_VM_compressor_space_shortage(TRUE);
 		return 1;
 	}
 
@@ -4377,7 +4673,7 @@ proc_shadow_max(void)
 		if (p->p_stat == SIDL) {
 			continue;
 		}
-		task = p->task;
+		task = proc_task(p);
 		if (task == NULL) {
 			continue;
 		}
@@ -4470,13 +4766,13 @@ proc_set_syscall_filter_mask(proc_t p, int which, unsigned char *maskptr, size_t
 		if (maskptr != NULL && masklen != (size_t)mach_trap_count) {
 			return EINVAL;
 		}
-		mac_task_set_mach_filter_mask(p->task, maskptr);
+		mac_task_set_mach_filter_mask(proc_task(p), maskptr);
 		break;
 	case SYSCALL_MASK_KOBJ:
 		if (maskptr != NULL && masklen != (size_t)mach_kobj_count) {
 			return EINVAL;
 		}
-		mac_task_set_kobj_filter_mask(p->task, maskptr);
+		mac_task_set_kobj_filter_mask(proc_task(p), maskptr);
 		break;
 	default:
 		return EINVAL;
@@ -4557,83 +4853,6 @@ proc_is_traced(proc_t p)
 	proc_unlock(p);
 	return ret;
 }
-
-#ifdef CONFIG_32BIT_TELEMETRY
-void
-proc_log_32bit_telemetry(proc_t p)
-{
-	/* Gather info */
-	char signature_buf[MAX_32BIT_EXEC_SIG_SIZE] = { 0 };
-	char * signature_cur_end = &signature_buf[0];
-	char * signature_buf_end = &signature_buf[MAX_32BIT_EXEC_SIG_SIZE - 1];
-	int bytes_printed = 0;
-
-	const char * teamid = NULL;
-	const char * identity = NULL;
-	struct cs_blob * csblob = NULL;
-
-	proc_list_lock();
-
-	/*
-	 * Get proc name and parent proc name; if the parent execs, we'll get a
-	 * garbled name.
-	 */
-	bytes_printed = scnprintf(signature_cur_end,
-	    signature_buf_end - signature_cur_end,
-	    "%s,%s,", p->p_name,
-	    (p->p_pptr ? p->p_pptr->p_name : ""));
-
-	if (bytes_printed > 0) {
-		signature_cur_end += bytes_printed;
-	}
-
-	proc_list_unlock();
-
-	/* Get developer info. */
-	vnode_t v = proc_getexecutablevnode(p);
-
-	if (v) {
-		csblob = csvnode_get_blob(v, 0);
-
-		if (csblob) {
-			teamid = csblob_get_teamid(csblob);
-			identity = csblob_get_identity(csblob);
-		}
-	}
-
-	if (teamid == NULL) {
-		teamid = "";
-	}
-
-	if (identity == NULL) {
-		identity = "";
-	}
-
-	bytes_printed = scnprintf(signature_cur_end,
-	    signature_buf_end - signature_cur_end,
-	    "%s,%s", teamid, identity);
-
-	if (bytes_printed > 0) {
-		signature_cur_end += bytes_printed;
-	}
-
-	if (v) {
-		vnode_put(v);
-	}
-
-	/*
-	 * We may want to rate limit here, although the SUMMARIZE key should
-	 * help us aggregate events in userspace.
-	 */
-
-	/* Emit log */
-	kern_asl_msg(LOG_DEBUG, "messagetracer", 3,
-	    /* 0 */ "com.apple.message.domain", "com.apple.kernel.32bit_exec",
-	    /* 1 */ "com.apple.message.signature", signature_buf,
-	    /* 2 */ "com.apple.message.summarize", "YES",
-	    NULL);
-}
-#endif /* CONFIG_32BIT_TELEMETRY */
 
 #if CONFIG_PROC_RESOURCE_LIMITS
 int

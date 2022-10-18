@@ -324,13 +324,19 @@ memorystatus_vm_map_fork_parent(int test_variant)
 #if TARGET_OS_WATCH
 
 	/*
-	 * larger memory watches have a raised corpse size limit
+	 * Larger memory watches have a raised corpse size limit.
+	 * One coprse of 300Meg is allowed, others are 200M.
+	 * We pick 300 or 200 based on which test is being done.
 	 */
 	uint64_t hw_memsize = 0;
 	size = sizeof(hw_memsize);
 	T_ASSERT_POSIX_SUCCESS(sysctlbyname("hw.memsize", &hw_memsize, &size, NULL, 0), "read hw.memsize");
 	if (hw_memsize > 1024 * 1024 * 1024) {
-		active_limit_mb = MAX(active_limit_mb, 200);
+		if (test_variant == TEST_ALLOWED) {
+			active_limit_mb = MAX(active_limit_mb, 200);
+		} else {
+			active_limit_mb = MAX(active_limit_mb, 300);
+		}
 	}
 
 #endif /* TARGET_OS_WATCH */

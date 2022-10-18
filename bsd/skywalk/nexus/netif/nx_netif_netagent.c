@@ -215,7 +215,6 @@ static uint16_t forbidden_ethertypes[] = {
 	ETHERTYPE_IPV6,
 	ETHERTYPE_PAE,
 	ETHERTYPE_RSN_PREAUTH,
-	ETHERTYPE_IEEE802154,
 };
 #define FORBIDDEN_ETHERTYPES \
     (sizeof(forbidden_ethertypes) / sizeof(forbidden_ethertypes[0]))

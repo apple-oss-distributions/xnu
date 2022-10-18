@@ -213,7 +213,8 @@ struct  rusage {
 #define RUSAGE_INFO_V3  3
 #define RUSAGE_INFO_V4  4
 #define RUSAGE_INFO_V5  5
-#define RUSAGE_INFO_CURRENT     RUSAGE_INFO_V5
+#define RUSAGE_INFO_V6  6
+#define RUSAGE_INFO_CURRENT RUSAGE_INFO_V6
 
 /*
  * Flags for RUSAGE_INFO_V5
@@ -388,7 +389,54 @@ struct rusage_info_v5 {
 	uint64_t ri_flags;
 };
 
-typedef struct rusage_info_v5 rusage_info_current;
+struct rusage_info_v6 {
+	uint8_t  ri_uuid[16];
+	uint64_t ri_user_time;
+	uint64_t ri_system_time;
+	uint64_t ri_pkg_idle_wkups;
+	uint64_t ri_interrupt_wkups;
+	uint64_t ri_pageins;
+	uint64_t ri_wired_size;
+	uint64_t ri_resident_size;
+	uint64_t ri_phys_footprint;
+	uint64_t ri_proc_start_abstime;
+	uint64_t ri_proc_exit_abstime;
+	uint64_t ri_child_user_time;
+	uint64_t ri_child_system_time;
+	uint64_t ri_child_pkg_idle_wkups;
+	uint64_t ri_child_interrupt_wkups;
+	uint64_t ri_child_pageins;
+	uint64_t ri_child_elapsed_abstime;
+	uint64_t ri_diskio_bytesread;
+	uint64_t ri_diskio_byteswritten;
+	uint64_t ri_cpu_time_qos_default;
+	uint64_t ri_cpu_time_qos_maintenance;
+	uint64_t ri_cpu_time_qos_background;
+	uint64_t ri_cpu_time_qos_utility;
+	uint64_t ri_cpu_time_qos_legacy;
+	uint64_t ri_cpu_time_qos_user_initiated;
+	uint64_t ri_cpu_time_qos_user_interactive;
+	uint64_t ri_billed_system_time;
+	uint64_t ri_serviced_system_time;
+	uint64_t ri_logical_writes;
+	uint64_t ri_lifetime_max_phys_footprint;
+	uint64_t ri_instructions;
+	uint64_t ri_cycles;
+	uint64_t ri_billed_energy;
+	uint64_t ri_serviced_energy;
+	uint64_t ri_interval_max_phys_footprint;
+	uint64_t ri_runnable_time;
+	uint64_t ri_flags;
+	uint64_t ri_user_ptime;
+	uint64_t ri_system_ptime;
+	uint64_t ri_pinstructions;
+	uint64_t ri_pcycles;
+	uint64_t ri_energy_nj;
+	uint64_t ri_penergy_nj;
+	uint64_t ri_reserved[14];
+};
+
+typedef struct rusage_info_v6 rusage_info_current;
 
 #endif /* __DARWIN_C_LEVEL >= __DARWIN_C_FULL */
 
@@ -550,6 +598,10 @@ struct proc_rlimit_control_wakeupmon {
 #define IOPOL_TYPE_VFS_IGNORE_PERMISSIONS 7
 #define IOPOL_TYPE_VFS_SKIP_MTIME_UPDATE 8
 #define IOPOL_TYPE_VFS_ALLOW_LOW_SPACE_WRITES 9
+#define IOPOL_TYPE_VFS_DISALLOW_RW_FOR_O_EVTONLY 10
+#if PRIVATE
+#define IOPOL_TYPE_VFS_ALTLINK 11
+#endif
 
 /* scope */
 #define IOPOL_SCOPE_PROCESS   0
@@ -571,6 +623,9 @@ struct proc_rlimit_control_wakeupmon {
 #if PRIVATE
 #define IOPOL_VFS_HFS_CASE_SENSITIVITY_DEFAULT  0
 #define IOPOL_VFS_HFS_CASE_SENSITIVITY_FORCE_CASE_SENSITIVE     1
+
+#define IOPOL_VFS_ALTLINK_DISABLED 0
+#define IOPOL_VFS_ALTLINK_ENABLED  1
 #endif
 
 #define IOPOL_ATIME_UPDATES_DEFAULT     0
@@ -597,6 +652,9 @@ struct proc_rlimit_control_wakeupmon {
 
 #define IOPOL_VFS_ALLOW_LOW_SPACE_WRITES_OFF 0
 #define IOPOL_VFS_ALLOW_LOW_SPACE_WRITES_ON 1
+
+#define IOPOL_VFS_DISALLOW_RW_FOR_O_EVTONLY_DEFAULT 0
+#define IOPOL_VFS_DISALLOW_RW_FOR_O_EVTONLY_ON 1
 
 #ifdef PRIVATE
 /*

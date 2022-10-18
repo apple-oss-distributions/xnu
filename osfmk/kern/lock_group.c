@@ -62,21 +62,26 @@
 #include <mach/mach_host_server.h>
 #include <mach_debug/lockgroup_info.h>
 
+#if __x86_64__
+#include <i386/tsc.h>
+#endif
+
+#include <kern/compact_id.h>
 #include <kern/kalloc.h>
-#include <kern/locks.h>
 #include <kern/lock_stat.h>
+#include <kern/locks.h>
+
 #include <os/atomic_private.h>
 
 static KALLOC_TYPE_DEFINE(KT_LCK_GRP_ATTR, lck_grp_attr_t, KT_PRIV_ACCT);
 static KALLOC_TYPE_DEFINE(KT_LCK_GRP, lck_grp_t, KT_PRIV_ACCT);
 static KALLOC_TYPE_DEFINE(KT_LCK_ATTR, lck_attr_t, KT_PRIV_ACCT);
 
-SECURITY_READ_ONLY_LATE(lck_attr_t) LockDefaultLckAttr;
+SECURITY_READ_ONLY_LATE(lck_attr_t) lck_attr_default;
 static SECURITY_READ_ONLY_LATE(lck_grp_attr_t) lck_grp_attr_default;
 static lck_grp_t lck_grp_compat_grp;
-queue_head_t     lck_grp_queue;
-unsigned int     lck_grp_cnt;
-static LCK_MTX_DECLARE(lck_grp_lock, &lck_grp_compat_grp);
+COMPACT_ID_TABLE_DEFINE(static, lck_grp_table);
+struct lck_debug_state lck_debug_state;
 
 #pragma mark lock group attributes
 
@@ -115,29 +120,35 @@ __startup_func
 static void
 lck_group_init(void)
 {
-	queue_init(&lck_grp_queue);
-
 	if (LcksOpts & enaLkStat) {
 		lck_grp_attr_default.grp_attr_val |= LCK_GRP_ATTR_STAT;
 	}
 	if (LcksOpts & enaLkTimeStat) {
 		lck_grp_attr_default.grp_attr_val |= LCK_GRP_ATTR_TIME_STAT;
 	}
-
-#if __arm__ || __arm64__
-	/* <rdar://problem/4404579>: Using LCK_ATTR_DEBUG here causes panic at boot time for arm */
-	LcksOpts &= ~enaLkDeb;
-#endif
 	if (LcksOpts & enaLkDeb) {
-		LockDefaultLckAttr.lck_attr_val = LCK_ATTR_DEBUG;
-	} else {
-		LockDefaultLckAttr.lck_attr_val = LCK_ATTR_NONE;
+		lck_grp_attr_default.grp_attr_val |= LCK_GRP_ATTR_DEBUG;
 	}
 
+	if (LcksOpts & enaLkDeb) {
+		lck_attr_default.lck_attr_val = LCK_ATTR_DEBUG;
+	} else {
+		lck_attr_default.lck_attr_val = LCK_ATTR_NONE;
+	}
+
+	/*
+	 * This is a little gross, this allows us to use the table before
+	 * compact_table_init() is called on it, but we have a chicken
+	 * and egg problem otherwise.
+	 *
+	 * compact_table_init() really only inits the ticket lock
+	 * with the proper lock group
+	 */
 	lck_grp_init(&lck_grp_compat_grp, "Compatibility APIs",
 	    &lck_grp_attr_default);
+	*compact_id_resolve(&lck_grp_table, 0) = LCK_GRP_NULL;
 }
-STARTUP(LOCKS_EARLY, STARTUP_RANK_FIRST, lck_group_init);
+STARTUP(LOCKS, STARTUP_RANK_FIRST, lck_group_init);
 
 __startup_func
 void
@@ -150,7 +161,7 @@ lck_grp_startup_init(struct lck_grp_spec *sp)
 bool
 lck_grp_has_stats(lck_grp_t *grp)
 {
-	return grp->lck_grp_attr & LCK_GRP_ATTR_STAT;
+	return grp->lck_grp_attr_id & LCK_GRP_ATTR_STAT;
 }
 
 lck_grp_t *
@@ -180,54 +191,73 @@ lck_grp_t *
 lck_grp_init_flags(lck_grp_t *grp, const char *grp_name, lck_grp_options_t flags)
 {
 	bzero(grp, sizeof(lck_grp_t));
-
+	os_ref_init_raw(&grp->lck_grp_refcnt, NULL);
 	(void)strlcpy(grp->lck_grp_name, grp_name, LCK_GRP_MAX_NAME);
 
-	grp->lck_grp_attr = flags;
+#if CONFIG_DTRACE
+	lck_grp_stats_t *stats = &grp->lck_grp_stats;
 
-	if (grp->lck_grp_attr & LCK_GRP_ATTR_STAT) {
-		lck_grp_stats_t *stats = &grp->lck_grp_stats;
-
-#if LOCK_STATS
+	if (flags & LCK_GRP_ATTR_STAT) {
 		lck_grp_stat_enable(&stats->lgss_spin_held);
 		lck_grp_stat_enable(&stats->lgss_spin_miss);
-#endif /* LOCK_STATS */
+
+		lck_grp_stat_enable(&stats->lgss_ticket_held);
+		lck_grp_stat_enable(&stats->lgss_ticket_miss);
 
 		lck_grp_stat_enable(&stats->lgss_mtx_held);
-		lck_grp_stat_enable(&stats->lgss_mtx_miss);
 		lck_grp_stat_enable(&stats->lgss_mtx_direct_wait);
+		lck_grp_stat_enable(&stats->lgss_mtx_miss);
 		lck_grp_stat_enable(&stats->lgss_mtx_wait);
 	}
-	if (grp->lck_grp_attr & LCK_GRP_ATTR_TIME_STAT) {
-#if LOCK_STATS
-		lck_grp_stats_t *stats = &grp->lck_grp_stats;
+	if (flags & LCK_GRP_ATTR_TIME_STAT) {
 		lck_grp_stat_enable(&stats->lgss_spin_spin);
-#endif /* LOCK_STATS */
+		lck_grp_stat_enable(&stats->lgss_ticket_spin);
 	}
+#endif /* CONFIG_DTRACE */
 
-	os_ref_init(&grp->lck_grp_refcnt, NULL);
-
-	if (startup_phase >= STARTUP_SUB_LOCKS) {
-		lck_mtx_lock(&lck_grp_lock);
+	/* must be last as it publishes the group */
+	if (startup_phase > STARTUP_SUB_LOCKS) {
+		compact_id_table_lock(&lck_grp_table);
 	}
-
-	enqueue_tail(&lck_grp_queue, &grp->lck_grp_link);
-	lck_grp_cnt++;
-
-	if (startup_phase >= STARTUP_SUB_LOCKS) {
-		lck_mtx_unlock(&lck_grp_lock);
+	flags |= compact_id_get_locked(&lck_grp_table, LCK_GRP_ATTR_ID_MASK, grp);
+	grp->lck_grp_attr_id = flags;
+	if (startup_phase > STARTUP_SUB_LOCKS) {
+		compact_id_table_unlock(&lck_grp_table);
 	}
 
 	return grp;
 }
 
+lck_grp_t *
+lck_grp_resolve(uint32_t grp_attr_id)
+{
+	grp_attr_id &= LCK_GRP_ATTR_ID_MASK;
+	return *compact_id_resolve(&lck_grp_table, grp_attr_id);
+}
+
+__abortlike
+static void
+__lck_grp_assert_id_panic(lck_grp_t *grp, uint32_t grp_attr_id)
+{
+	panic("lck_grp_t %p has ID %d, but %d was expected", grp,
+	    grp->lck_grp_attr_id & LCK_GRP_ATTR_ID_MASK,
+	    grp_attr_id & LCK_GRP_ATTR_ID_MASK);
+}
+
+__attribute__((always_inline))
+void
+lck_grp_assert_id(lck_grp_t *grp, uint32_t grp_attr_id)
+{
+	if ((grp->lck_grp_attr_id ^ grp_attr_id) & LCK_GRP_ATTR_ID_MASK) {
+		__lck_grp_assert_id_panic(grp, grp_attr_id);
+	}
+}
+
 static void
 lck_grp_destroy(lck_grp_t *grp)
 {
-	lck_mtx_lock(&lck_grp_lock);
-	lck_grp_cnt--;
-	remque(&grp->lck_grp_link);
-	lck_mtx_unlock(&lck_grp_lock);
+	compact_id_put(&lck_grp_table,
+	    grp->lck_grp_attr_id & LCK_GRP_ATTR_ID_MASK);
 	zfree(KT_LCK_GRP, grp);
 }
 
@@ -237,15 +267,14 @@ lck_grp_free(lck_grp_t *grp)
 	lck_grp_deallocate(grp, NULL);
 }
 
-
 void
 lck_grp_reference(lck_grp_t *grp, uint32_t *cnt)
 {
 	if (cnt) {
 		os_atomic_inc(cnt, relaxed);
 	}
-	if (grp->lck_grp_attr & LCK_GRP_ATTR_ALLOCATED) {
-		os_ref_retain(&grp->lck_grp_refcnt);
+	if (grp->lck_grp_attr_id & LCK_GRP_ATTR_ALLOCATED) {
+		os_ref_retain_raw(&grp->lck_grp_refcnt, NULL);
 	}
 }
 
@@ -255,31 +284,45 @@ lck_grp_deallocate(lck_grp_t *grp, uint32_t *cnt)
 	if (cnt) {
 		os_atomic_dec(cnt, relaxed);
 	}
-	if ((grp->lck_grp_attr & LCK_GRP_ATTR_ALLOCATED) &&
-	    os_ref_release(&grp->lck_grp_refcnt) == 0) {
+	if ((grp->lck_grp_attr_id & LCK_GRP_ATTR_ALLOCATED) &&
+	    os_ref_release_raw(&grp->lck_grp_refcnt, 0) == 0) {
 		lck_grp_destroy(grp);
 	}
 }
 
-static void
-lck_grp_foreach_locked(bool (^block)(lck_grp_t *))
-{
-	lck_grp_t *grp;
-
-	qe_foreach_element(grp, &lck_grp_queue, lck_grp_link) {
-		if (!block(grp)) {
-			return;
-		}
-	}
-}
-
-
 void
 lck_grp_foreach(bool (^block)(lck_grp_t *))
 {
-	lck_mtx_lock(&lck_grp_lock);
-	lck_grp_foreach_locked(block);
-	lck_mtx_unlock(&lck_grp_lock);
+	compact_id_for_each(&lck_grp_table, 64, (bool (^)(void *))block);
+}
+
+void
+lck_grp_enable_feature(lck_debug_feature_t feat)
+{
+	uint32_t bit = 1u << feat;
+
+	compact_id_table_lock(&lck_grp_table);
+	if (lck_debug_state.lds_counts[feat]++ == 0) {
+		os_atomic_or(&lck_debug_state.lds_value, bit, relaxed);
+	}
+	compact_id_table_unlock(&lck_grp_table);
+}
+
+void
+lck_grp_disable_feature(lck_debug_feature_t feat)
+{
+	uint32_t bit = 1u << feat;
+	long v;
+
+	compact_id_table_lock(&lck_grp_table);
+	v = --lck_debug_state.lds_counts[feat];
+	if (v < 0) {
+		panic("lck_debug_state: feature %d imbalance", feat);
+	}
+	if (v == 0) {
+		os_atomic_andnot(&lck_debug_state.lds_value, bit, relaxed);
+	}
+	compact_id_table_unlock(&lck_grp_table);
 }
 
 kern_return_t
@@ -301,52 +344,43 @@ host_lockgroup_info(
 		return KERN_INVALID_HOST;
 	}
 
-	needed = os_atomic_load(&lck_grp_cnt, relaxed);
-
-	for (;;) {
-		size   = needed * sizeof(lockgroup_info_t);
-		vmsize = vm_map_round_page(size, VM_MAP_PAGE_MASK(ipc_kernel_map));
-		kr     = kernel_memory_allocate(ipc_kernel_map, &addr, vmsize,
-		    0, KMA_ZERO, VM_KERN_MEMORY_IPC);
-		if (kr != KERN_SUCCESS) {
-			return kr;
-		}
-
-		lck_mtx_lock(&lck_grp_lock);
-		if (needed >= lck_grp_cnt) {
-			break;
-		}
-		needed = lck_grp_cnt;
-		lck_mtx_unlock(&lck_grp_lock);
-
-		kmem_free(ipc_kernel_map, addr, vmsize);
+	/*
+	 * Give about 10% of slop here, lock groups are mostly allocated
+	 * during boot or kext loads, and is extremely unlikely to grow
+	 * rapidly.
+	 */
+	needed  = os_atomic_load(&lck_grp_table.cidt_count, relaxed);
+	needed += needed / 8;
+	size    = needed * sizeof(lockgroup_info_t);
+	vmsize = vm_map_round_page(size, VM_MAP_PAGE_MASK(ipc_kernel_map));
+	kr     = kmem_alloc(ipc_kernel_map, &addr, vmsize,
+	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IPC);
+	if (kr != KERN_SUCCESS) {
+		return kr;
 	}
 
 	info = (lockgroup_info_t *)addr;
 
-	lck_grp_foreach_locked(^bool (lck_grp_t *grp) {
+	lck_grp_foreach(^bool (lck_grp_t *grp) {
 		info[count].lock_spin_cnt = grp->lck_grp_spincnt;
 		info[count].lock_rw_cnt   = grp->lck_grp_rwcnt;
 		info[count].lock_mtx_cnt  = grp->lck_grp_mtxcnt;
 
-#if LOCK_STATS
+#if CONFIG_DTRACE
 		info[count].lock_spin_held_cnt = grp->lck_grp_stats.lgss_spin_held.lgs_count;
 		info[count].lock_spin_miss_cnt = grp->lck_grp_stats.lgss_spin_miss.lgs_count;
-#endif /* LOCK_STATS */
 
 		// Historically on x86, held was used for "direct wait" and util for "held"
 		info[count].lock_mtx_util_cnt = grp->lck_grp_stats.lgss_mtx_held.lgs_count;
 		info[count].lock_mtx_held_cnt = grp->lck_grp_stats.lgss_mtx_direct_wait.lgs_count;
 		info[count].lock_mtx_miss_cnt = grp->lck_grp_stats.lgss_mtx_miss.lgs_count;
 		info[count].lock_mtx_wait_cnt = grp->lck_grp_stats.lgss_mtx_wait.lgs_count;
+#endif /* CONFIG_DTRACE */
 
 		memcpy(info[count].lockgroup_name, grp->lck_grp_name, LOCKGROUP_MAX_NAME);
 
-		count++;
-		return true;
+		return ++count >= needed ? false : true;
 	});
-
-	lck_mtx_unlock(&lck_grp_lock);
 
 	/*
 	 * We might have found less groups than `needed`
@@ -399,7 +433,7 @@ lck_attr_alloc_init(void)
 void
 lck_attr_setdefault(lck_attr_t *attr)
 {
-	attr->lck_attr_val = LockDefaultLckAttr.lck_attr_val;
+	attr->lck_attr_val = lck_attr_default.lck_attr_val;
 }
 
 
@@ -427,7 +461,9 @@ lck_attr_free(lck_attr_t *attr)
 {
 	zfree(KT_LCK_ATTR, attr);
 }
+
 #pragma mark lock stat
+#if CONFIG_DTRACE
 
 void
 lck_grp_stat_enable(lck_grp_stat_t *stat)
@@ -448,24 +484,20 @@ lck_grp_stat_enabled(lck_grp_stat_t *stat)
 	return stat->lgs_enablings != 0;
 }
 
-#if CONFIG_DTRACE || LOCK_STATS
-#if LOCK_STATS || __x86_64__
 
-static inline void
-lck_grp_inc_stats(lck_grp_t *grp, lck_grp_stat_t *stat)
+__attribute__((always_inline))
+void
+lck_grp_stat_inc(lck_grp_t *grp, lck_grp_stat_t *stat, bool always)
 {
 #pragma unused(grp)
-	if (lck_grp_stat_enabled(stat)) {
+	if (always || lck_grp_stat_enabled(stat)) {
 		__unused uint64_t val = os_atomic_inc_orig(&stat->lgs_count, relaxed);
-#if CONFIG_DTRACE && LOCK_STATS
 		if (__improbable(stat->lgs_limit && (val % (stat->lgs_limit)) == 0)) {
-			lockprof_invoke(grp, stat, val);
+			lockprof_probe(grp, stat, val);
 		}
-#endif /* CONFIG_DTRACE && LOCK_STATS */
 	}
 }
 
-#endif
 #if LOCK_STATS
 
 static inline void
@@ -473,17 +505,15 @@ lck_grp_inc_time_stats(lck_grp_t *grp, lck_grp_stat_t *stat, uint64_t time)
 {
 	if (lck_grp_stat_enabled(stat)) {
 		__unused uint64_t val = os_atomic_add_orig(&stat->lgs_count, time, relaxed);
-#if CONFIG_DTRACE
 		if (__improbable(stat->lgs_limit)) {
 			while (__improbable(time > stat->lgs_limit)) {
 				time -= stat->lgs_limit;
-				lockprof_invoke(grp, stat, val);
+				lockprof_probe(grp, stat, val);
 			}
 			if (__improbable(((val % stat->lgs_limit) + time) > stat->lgs_limit)) {
-				lockprof_invoke(grp, stat, val);
+				lockprof_probe(grp, stat, val);
 			}
 		}
-#endif /* CONFIG_DTRACE */
 	}
 }
 
@@ -491,7 +521,7 @@ void
 __lck_grp_spin_update_held(lck_grp_t *grp)
 {
 	if (grp) {
-		lck_grp_inc_stats(grp, &grp->lck_grp_stats.lgss_spin_held);
+		lck_grp_stat_inc(grp, &grp->lck_grp_stats.lgss_spin_held, false);
 	}
 }
 
@@ -499,7 +529,7 @@ void
 __lck_grp_spin_update_miss(lck_grp_t *grp)
 {
 	if (grp) {
-		lck_grp_inc_stats(grp, &grp->lck_grp_stats.lgss_spin_miss);
+		lck_grp_stat_inc(grp, &grp->lck_grp_stats.lgss_spin_miss, false);
 	}
 }
 
@@ -516,7 +546,7 @@ void
 __lck_grp_ticket_update_held(lck_grp_t *grp)
 {
 	if (grp) {
-		lck_grp_inc_stats(grp, &grp->lck_grp_stats.lgss_ticket_held);
+		lck_grp_stat_inc(grp, &grp->lck_grp_stats.lgss_ticket_held, false);
 	}
 }
 
@@ -524,7 +554,7 @@ void
 __lck_grp_ticket_update_miss(lck_grp_t *grp)
 {
 	if (grp) {
-		lck_grp_inc_stats(grp, &grp->lck_grp_stats.lgss_ticket_miss);
+		lck_grp_stat_inc(grp, &grp->lck_grp_stats.lgss_ticket_miss, false);
 	}
 }
 
@@ -538,31 +568,25 @@ __lck_grp_ticket_update_spin(lck_grp_t *grp, uint64_t time)
 }
 
 #endif /* LOCK_STATS */
+
+void
+lck_mtx_time_stat_record(
+	enum lockstat_probe_id  pid,
+	lck_mtx_t              *mtx,
+	uint32_t                grp_attr_id,
+	uint64_t                start)
+{
+	uint32_t id = lockstat_probemap[pid];
+
+	if (__improbable(start && id)) {
+		uint64_t delta = ml_get_timebase() - start;
+		lck_grp_t *grp = lck_grp_resolve(grp_attr_id);
+
 #if __x86_64__
-
-void
-__lck_grp_mtx_update_miss(lck_grp_t *grp)
-{
-	lck_grp_inc_stats(grp, &grp->lck_grp_stats.lgss_mtx_miss);
+		delta = tmrCvt(delta, tscFCvtt2n);
+#endif
+		dtrace_probe(id, (uintptr_t)mtx, delta, (uintptr_t)grp, 0, 0);
+	}
 }
 
-void
-__lck_grp_mtx_update_direct_wait(lck_grp_t *grp)
-{
-	lck_grp_inc_stats(grp, &grp->lck_grp_stats.lgss_mtx_direct_wait);
-}
-
-void
-__lck_grp_mtx_update_wait(lck_grp_t *grp)
-{
-	lck_grp_inc_stats(grp, &grp->lck_grp_stats.lgss_mtx_wait);
-}
-
-void
-__lck_grp_mtx_update_held(lck_grp_t *grp)
-{
-	lck_grp_inc_stats(grp, &grp->lck_grp_stats.lgss_mtx_held);
-}
-
-#endif /* __x86_64__ */
-#endif /* CONFIG_DTRACE || LOCK_STATS */
+#endif /* CONFIG_DTRACE */

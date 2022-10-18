@@ -39,9 +39,9 @@ T_DECL(test_fd_table_set_soft_limit, "Allocate fds upto soft limit", T_META_IGNO
 	posix_spawnattr_t       attrs;
 	int err;
 
-#if __arm__ || TARGET_OS_BRIDGE
+#if TARGET_OS_BRIDGE
 	T_SKIP("Not running on target platforms");
-#endif /* __arm__ || TARGET_OS_BRIDGE */
+#endif /* TARGET_OS_BRIDGE */
 
 	/* Initialize posix_spawn attributes */
 	posix_spawnattr_init(&attrs);
@@ -80,9 +80,9 @@ T_DECL(test_fd_table_set_hard_limit, "Allocate fds upto hard limit", T_META_IGNO
 	posix_spawnattr_t       attrs;
 	int err;
 
-#if __arm__ || TARGET_OS_BRIDGE
+#if TARGET_OS_BRIDGE
 	T_SKIP("Not running on target platforms");
-#endif /* __arm__ || TARGET_OS_BRIDGE */
+#endif /* TARGET_OS_BRIDGE */
 
 	/* Initialize posix_spawn attributes */
 	posix_spawnattr_init(&attrs);
@@ -121,9 +121,9 @@ T_DECL(test_fd_table_setting_limits, "Allocate fds - both soft & hard limit", T_
 	posix_spawnattr_t       attrs;
 	int err;
 
-#if __arm__ || TARGET_OS_BRIDGE
+#if TARGET_OS_BRIDGE
 	T_SKIP("Not running on target platforms");
-#endif /* __arm__ || TARGET_OS_BRIDGE */
+#endif /* TARGET_OS_BRIDGE */
 
 	/* Initialize posix_spawn attributes */
 	posix_spawnattr_init(&attrs);
@@ -237,9 +237,9 @@ T_DECL(test_fd_table_hard_limit_with_resource_notify_port, "Allocate ports upto 
 	kern_return_t kr;
 	struct args*            server_args = (struct args*)malloc(sizeof(struct args));
 
-#if __arm__ || TARGET_OS_BRIDGE
+#if TARGET_OS_BRIDGE
 	T_SKIP("Not running on target platforms");
-#endif /* __arm__ || TARGET_OS_BRIDGE */
+#endif /* TARGET_OS_BRIDGE */
 
 	/* Create the bootstrap port */
 	parse_args(server_args);

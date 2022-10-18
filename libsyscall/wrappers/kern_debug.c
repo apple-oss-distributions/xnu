@@ -27,12 +27,14 @@
 #include <sys/kern_debug.h>
 
 /* Syscall entry points */
-int __debug_syscall_reject(uint64_t packed_selectors);
+int __debug_syscall_reject_config(uint64_t packed_selectors1, uint64_t packed_selectors2, uint64_t flags);
 
 static bool supported = true;
 
+typedef uint64_t packed_selector_t;
+
 int
-debug_syscall_reject(const syscall_rejection_selector_t *selectors, size_t len)
+debug_syscall_reject_config(const syscall_rejection_selector_t *selectors, size_t len, uint64_t flags)
 {
 	_Static_assert(sizeof(syscall_rejection_selector_t) == 1, "selector size is not 1 byte");
 
@@ -41,8 +43,8 @@ debug_syscall_reject(const syscall_rejection_selector_t *selectors, size_t len)
 		return 0;
 	}
 
-	if (len > 8) {
-		/* selectors are packed one per byte into an uint64_t */
+	if (len > (2 * 8 * sizeof(packed_selector_t)) / SYSCALL_REJECTION_SELECTOR_BITS) {
+		/* selectors are packed one per 7 bits into two uint64_ts */
 		errno = E2BIG;
 		return -1;
 	}
@@ -67,15 +69,23 @@ debug_syscall_reject(const syscall_rejection_selector_t *selectors, size_t len)
 	 * system call.
 	 */
 
-
-	uint64_t packed_selectors = 0;
+	uint64_t packed_selectors[2] = { 0 };
 	int shift = 0;
 
-	for (int i = 0; i < len; i++, shift += 8) {
-		packed_selectors |= ((uint64_t)(selectors[i]) & 0xff) << shift;
+#define s_left_shift(x, n) ((n) < 0 ? ((x) >> -(n)) : ((x) << (n)))
+
+	for (int i = 0; i < len; i++, shift += SYSCALL_REJECTION_SELECTOR_BITS) {
+		int const second_shift = shift - 64;
+
+		if (shift < 8 * sizeof(packed_selector_t)) {
+			packed_selectors[0] |= ((uint64_t)(selectors[i]) & SYSCALL_REJECTION_SELECTOR_MASK) << shift;
+		}
+		if (second_shift > -SYSCALL_REJECTION_SELECTOR_BITS) {
+			packed_selectors[1] |= s_left_shift((uint64_t)(selectors[i] & SYSCALL_REJECTION_SELECTOR_MASK), second_shift);
+		}
 	}
 
-	int ret = __debug_syscall_reject(packed_selectors);
+	int ret = __debug_syscall_reject_config(packed_selectors[0], packed_selectors[1], flags);
 
 	if (ret == -1 && errno == ENOTSUP) {
 		errno = 0;
@@ -84,4 +94,11 @@ debug_syscall_reject(const syscall_rejection_selector_t *selectors, size_t len)
 	}
 
 	return ret;
+}
+
+/* Compatibility to old system call. */
+int
+debug_syscall_reject(const syscall_rejection_selector_t *selectors, size_t len)
+{
+	return debug_syscall_reject_config(selectors, len, SYSCALL_REJECTION_FLAGS_DEFAULT);
 }

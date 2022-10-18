@@ -62,9 +62,9 @@
  */
 
 subsystem
-#if	KERNEL_SERVER
-	  KernelServer
-#endif	/* KERNEL_SERVER */
+#if	KERNEL_SERVER || KOBJECT_SERVER
+	KernelServer
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 #if !defined(_MACH_VM_PUBLISH_AS_LOCAL_)
 	  mach_vm
 #else
@@ -349,6 +349,7 @@ routine vm_behavior_set(
 #if !defined(_MACH_VM_PUBLISH_AS_LOCAL_)
 routine PREFIX(KERNEL_SERVER_SUFFIX(mach_vm_map)) (
 #else
+/* XXX: [[ARMv7_REMOVAL]: Is this safe to remove?] */
 #if defined(__arm__) && !LIBSYSCALL_INTERFACE
 routine _vm_map_arm(
 #else
@@ -543,6 +544,29 @@ routine PREFIX(KERNEL_SERVER_SUFFIX(vm_remap_new)) (
   inout	cur_protection	: vm_prot_t;
   inout	max_protection	: vm_prot_t;
 		inheritance	: vm_inherit_t);
+
+#if !defined(LIBSYSCALL_INTERFACE) && !defined(_MACH_VM_PUBLISH_AS_LOCAL_)
+
+routine mach_vm_deferred_reclamation_buffer_init(
+		target_task	: task_t;
+		address		: mach_vm_offset_t;
+		size		: mach_vm_size_t;
+		indices		: mach_vm_address_t);
+
+routine mach_vm_deferred_reclamation_buffer_synchronize(
+		target_task		: task_t;
+		num_entries_to_reclaim	: mach_vm_size_t);
+
+routine mach_vm_deferred_reclamation_buffer_update_reclaimable_bytes(
+		target_task		: task_t;
+		reclaimable_bytes	: mach_vm_size_t);
+
+#else
+skip;
+skip;
+skip;
+#endif
+
 
 /****************************** Legacy section ***************************/
 /*  The following definitions are exist to provide compatibility with    */

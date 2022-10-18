@@ -75,9 +75,9 @@ fork_and_wait_for_segfault()
 	int pid, ret;
 	pid = fork();
 	if (pid == 0) {
-		unsigned int *ptr = NULL; /* Cause a segfault so that we get a coredump */
+		unsigned int *ptr = 0x30; /* Cause a segfault so that we get a coredump */
 		*ptr = 0xdeadd00d;
-		T_FAIL("Expected segmentation fault on write to NULL pointer");
+		T_FAIL("Expected segmentation fault on write to invalid memory address 0x30");
 	}
 	T_ASSERT_TRUE(pid != -1, "Checking fork success in parent");
 

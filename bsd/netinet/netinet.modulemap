@@ -21,10 +21,10 @@ module Darwin.POSIX.netinet [system] {
 
 module Darwin.netinet [system] {
   #ifdef XNU_KERNEL_PRIVATE
-  // The PLATFORM_MacOSX headers are in the public SDK for macOS,
+  // The XNU_PLATFORM_MacOSX headers are in the public SDK for macOS,
   // but mastered out of the public SDK for the other OSes.
   #endif
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module bootp {
     header "netinet/bootp.h"
     export *
@@ -36,7 +36,7 @@ module Darwin.netinet [system] {
     export *
   }
 
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module icmp_var {
     header "netinet/icmp_var.h"
     export *
@@ -68,7 +68,7 @@ module Darwin.netinet [system] {
     export *
   }
 
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module in_var {
     header "netinet/in_var.h"
     export *
@@ -90,7 +90,7 @@ module Darwin.netinet [system] {
     export *
   }
 
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module ip_var {
     header "netinet/ip_var.h"
     export *
@@ -117,7 +117,7 @@ module Darwin.netinet [system] {
     export *
   }
 
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module tcpip {
     header "netinet/tcpip.h"
     export *
@@ -128,7 +128,7 @@ module Darwin.netinet [system] {
     header "netinet/udp.h"
     export *
   }
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
 
   module udp_var {
     header "netinet/udp_var.h"

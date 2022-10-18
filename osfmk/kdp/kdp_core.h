@@ -39,6 +39,7 @@
 #include <kern/thread.h>
 #include <kdp/kdp_protocol.h>
 #include <string.h>
+#include <IOKit/IOBSD.h>
 
 /*
  * Packet types.
@@ -85,11 +86,13 @@ struct  corehdr {
 
 #define CORE_REMOTE_PORT 1069 /* hardwired, we can't really query the services file */
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 
 void panic_spin_shmcon(void);
+void shmem_mark_as_busy(void);
+void shmem_unmark_as_busy(void);
 
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 
 void kdp_panic_dump(void);
 void begin_panic_transfer(void);
@@ -101,7 +104,7 @@ void kdp_get_dump_info(kdp_dumpinfo_reply_t *rp);
 enum kern_dump_type {
 	KERN_DUMP_DISK, /* local, on device core dump */
 	KERN_DUMP_NET, /* kdp network core dump */
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	KERN_DUMP_HW_SHMEM_DBG, /* coordinated hardware shared memory debugger core dump */
 #endif
 	KERN_DUMP_STACKSHOT_DISK, /* local, stackshot on device coredump */
@@ -122,9 +125,12 @@ int     kdp_send_crashdump_data(unsigned int request, char *corename,
 void kern_collectth_state_size(uint64_t * tstate_count, uint64_t * tstate_size);
 
 void kern_collectth_state(thread_t thread, void *buffer, uint64_t size, void **iter);
+void kern_collect_userth_state_size(task_t task, uint64_t * tstate_count, uint64_t * tstate_size);
+void kern_collect_userth_state(task_t task, thread_t thread, void *buffer, uint64_t size);
 
 boolean_t kdp_has_polled_corefile(void);
 kern_return_t kdp_polled_corefile_error(void);
+IOPolledCoreFileMode_t kdp_polled_corefile_mode(void);
 
 void kdp_core_init(void);
 
@@ -142,7 +148,7 @@ kern_return_t kdp_core_output(void *kdp_core_out_vars, uint64_t length, void * d
  */
 kern_return_t kdp_reset_output_vars(void *kdp_core_out_vars, uint64_t totalbytes, bool encrypt_core, bool *out_should_skip_coredump);
 
-kern_return_t kern_dump_record_file(void *kdp_core_out_vars, const char *filename, uint64_t file_offset, uint64_t *out_file_length);
+kern_return_t kern_dump_record_file(void *kdp_core_out_vars, const char *filename, uint64_t file_offset, uint64_t *out_file_length, uint64_t details_flags);
 
 kern_return_t kern_dump_seek_to_next_file(void *kdp_core_out_varss, uint64_t next_file_offset);
 
@@ -154,6 +160,13 @@ extern boolean_t bootloader_valid_page(ppnum_t ppn);
  * it will stay available for the remainder of the kernel lifetime.
  */
 kern_return_t kdp_core_handle_encryption_available(void);
+
+/*
+ * Called whenever the LZ4 functionality becomes available (e.g. when the Compression kext is loaded
+ * and registers its interface with libkern). It is expected that once LZ4 support is available,
+ * it will stay available for the remainder of the kernel lifetime.
+ */
+kern_return_t kdp_core_handle_lz4_available(void);
 
 #endif /* PRIVATE */
 

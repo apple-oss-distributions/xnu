@@ -62,8 +62,28 @@ static void mk_timer_port_destroy(ipc_port_t);
 static void mk_timer_expire(void *p0, void *p1);
 
 IPC_KOBJECT_DEFINE(IKOT_TIMER,
-    .iko_op_allow_upgrade = true,
-    .iko_op_destroy       = mk_timer_port_destroy);
+    .iko_op_destroy = mk_timer_port_destroy);
+
+__abortlike
+static void
+ipc_kobject_mktimer_require_panic(
+	ipc_port_t                  port)
+{
+	panic("port %p / mktimer %p: circularity check failed",
+	    port, ipc_kobject_get_raw(port, IKOT_TIMER));
+}
+
+void
+ipc_kobject_mktimer_require_locked(
+	ipc_port_t                  port)
+{
+	struct mk_timer *timer;
+
+	timer = ipc_kobject_get_locked(port, IKOT_TIMER);
+	if (timer->port != port) {
+		ipc_kobject_mktimer_require_panic(port);
+	}
+}
 
 mach_port_name_t
 mk_timer_create_trap(
@@ -83,7 +103,7 @@ mk_timer_create_trap(
 	thread_call_setup(&timer->mkt_thread_call, mk_timer_expire, timer);
 
 	/* Pre-allocate a kmsg for the timer messages */
-	kmsg = ipc_kmsg_alloc(sizeof(mk_timer_expire_msg_t), 0,
+	kmsg = ipc_kmsg_alloc(sizeof(mk_timer_expire_msg_t), 0, 0,
 	    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO |
 	    IPC_KMSG_ALLOC_SAVED | IPC_KMSG_ALLOC_NOFAIL);
 
@@ -99,10 +119,10 @@ mk_timer_create_trap(
 	ipc_kmsg_set_prealloc(kmsg, port);
 
 	/* port locked, receive right at user-space */
-	ipc_kobject_upgrade_locked(port, (ipc_kobject_t)timer, IKOT_TIMER);
+	ipc_kobject_upgrade_mktimer_locked(port, (ipc_kobject_t)timer);
 
 	/* make a (naked) send right for the timer to keep */
-	timer->port = ipc_port_make_send_locked(port);
+	timer->port = ipc_port_make_send_any_locked(port);
 
 	ip_mq_unlock(port);
 

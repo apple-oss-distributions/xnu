@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -592,6 +592,9 @@ nd6_ra_input(
 
 				lck_mtx_lock(nd6_mutex);
 				dr = defrtrlist_update(&dr0, NULL);
+				if (dr != NULL) {
+					dr->is_reachable = TRUE;
+				}
 				lck_mtx_unlock(nd6_mutex);
 				continue;
 			}
@@ -631,6 +634,9 @@ nd6_ra_input(
 		dr0.expire = net_uptime() + dr0.rtlifetime;
 		lck_mtx_lock(nd6_mutex);
 		dr = defrtrlist_update(&dr0, NULL);
+		if (dr != NULL) {
+			dr->is_reachable = TRUE;
+		}
 		lck_mtx_unlock(nd6_mutex);
 	}
 
@@ -1024,6 +1030,25 @@ defrouter_addreq(struct nd_defrouter *new, struct nd_route_info *rti, boolean_t 
 
 out:
 	NDDR_UNLOCK(new);
+}
+
+void
+defrouter_set_reachability(
+	struct in6_addr *addr,
+	struct ifnet *ifp,
+	boolean_t is_reachable)
+{
+	struct nd_defrouter *dr = NULL;
+
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
+
+	lck_mtx_lock(nd6_mutex);
+	dr = defrouter_lookup(NULL, addr, ifp);
+	if (dr != NULL) {
+		dr->is_reachable = is_reachable;
+		NDDR_REMREF(dr);
+	}
+	lck_mtx_unlock(nd6_mutex);
 }
 
 struct nd_defrouter *
@@ -2082,6 +2107,7 @@ defrtrlist_update_common(struct nd_defrouter *new, struct nd_drhead *nd_router_l
 	n->base_uptime = net_uptime();
 	n->ifp = new->ifp;
 	n->err = new->err;
+	n->is_reachable = TRUE;
 	NDDR_UNLOCK(n);
 insert:
 	/* get nd6_service() to be scheduled as soon as it's convenient */
@@ -3072,6 +3098,11 @@ find_pfxlist_reachable_router(struct nd_prefix *pr)
 		if (ifp != NULL && ifp->if_type == IFT_CELLULAR) {
 			break;
 		}
+
+		if (pfxrtr->router->is_reachable) {
+			break;
+		}
+
 		if (pfxrtr->router->stateflags & NDDRF_MAPPED) {
 			rtaddr = pfxrtr->router->rtaddr_mapped;
 		} else {
@@ -3298,9 +3329,20 @@ pfxlist_onlink_check(void)
 		pr->ndpr_stateflags |= NDPRF_PROCESSED_ONLINK;
 		NDPR_ADDREF(pr);
 		if (pr->ndpr_stateflags & NDPRF_DETACHED) {
+			/*
+			 * When a prefix is detached, make it deprecated by setting pltime
+			 * to 0, and let it expire according to its advertised vltime.
+			 * If its original vltime is infinite or longer than 2hr,
+			 * set it to 2hr.
+			 */
 			pr->ndpr_pltime = 0;
-			/* Do not extend its valid lifetime */
-			uint64_t pr_remaining_lifetime = pr->ndpr_vltime - (uint32_t)(timenow - pr->ndpr_base_uptime);
+			uint32_t pr_remaining_lifetime;
+			uint32_t original_lifetime = (uint32_t)(timenow - pr->ndpr_base_uptime);
+			if (pr->ndpr_vltime > original_lifetime) {
+				pr_remaining_lifetime = pr->ndpr_vltime - original_lifetime;
+			} else {
+				pr_remaining_lifetime = 0;
+			}
 			if (pr->ndpr_vltime == ND6_INFINITE_LIFETIME ||
 			    pr_remaining_lifetime >= TWOHOUR) {
 				pr->ndpr_vltime = TWOHOUR;
@@ -3413,13 +3455,25 @@ pfxlist_onlink_check(void)
 			NDPR_LOCK(ndpr);
 			NDPR_ADDREF(ndpr);
 			if (find_pfxlist_reachable_router(ndpr) == NULL) {
+				/*
+				 * When the prefix of an addr is detached, make the address
+				 * deprecated by setting pltime to 0, and let it expire according
+				 * to its advertised vltime. If its original vltime is infinite
+				 * or longer than 2hr, set it to 2hr.
+				 */
 				NDPR_UNLOCK(ndpr);
 				IFA_LOCK(&ifa->ia_ifa);
 				in6ifa_getlifetime(ifa, &lt6_tmp, 0);
 				/* We want to immediately deprecate the address */
 				lt6_tmp.ia6t_pltime = 0;
 				/* Do not extend its valid lifetime */
-				uint64_t remaining_lifetime = lt6_tmp.ia6t_vltime - (uint32_t)(timenow - ifa->ia6_updatetime);
+				uint32_t remaining_lifetime;
+				uint32_t original_lifetime = (uint32_t)(timenow - ifa->ia6_updatetime);
+				if (lt6_tmp.ia6t_vltime > original_lifetime) {
+					remaining_lifetime = lt6_tmp.ia6t_vltime - original_lifetime;
+				} else {
+					remaining_lifetime = 0;
+				}
 				if (lt6_tmp.ia6t_vltime == ND6_INFINITE_LIFETIME || remaining_lifetime >= TWOHOUR) {
 					lt6_tmp.ia6t_vltime = TWOHOUR;
 				} else {

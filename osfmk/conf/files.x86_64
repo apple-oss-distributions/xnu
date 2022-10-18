@@ -45,6 +45,7 @@ osfmk/i386/ktss.c		standard
 osfmk/i386/ldt.c		standard
 osfmk/x86_64/loose_ends.c	standard
 osfmk/x86_64/copyio.c		standard
+osfmk/i386/lock_ticket_pv.c	optional config_pv_ticket
 osfmk/i386/locks_i386.c		standard
 osfmk/i386/locks_i386_opt.c	standard
 osfmk/x86_64/locore.s	standard

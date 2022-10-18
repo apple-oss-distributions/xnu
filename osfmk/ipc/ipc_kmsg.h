@@ -78,22 +78,18 @@
 #include <kern/kern_types.h>
 #include <kern/assert.h>
 #include <kern/macro_help.h>
+#include <kern/circle_queue.h>
 #include <ipc/ipc_types.h>
 #include <ipc/ipc_object.h>
 #include <sys/kdebug.h>
 
-#if (DEVELOPMENT || DEBUG)
-/* Turn on to keep partial message signatures for better debug */
-#define IKM_PARTIAL_SIG        0
-#endif
-
 /*
  *	This structure is only the header for a kmsg buffer;
- *	the actual buffer is normally larger.  The rest of the buffer
+ *	the actual buffer is normally larger. The rest of the buffer
  *	holds the body of the message.
  *
  *	In a kmsg, the port fields hold pointers to ports instead
- *	of port names.  These pointers hold references.
+ *	of port names. These pointers hold references.
  *
  *	The ikm_header.msgh_remote_port field is the destination
  *	of the message.
@@ -102,34 +98,75 @@
  *	port, this fields could be deleted once we remove ip_prealloc.
  */
 
+/* A kmsg can be in one of the following four layouts */
+__enum_decl(ipc_kmsg_type_t, uint8_t, {
+	/*
+	 * IKM_TYPE_ALL_INLINED: The entire message (and aux) is allocated inline.
+	 * mach_msg_header_t is immediately after the kmsg header. An optional aux
+	 * may be following the inline message proper.
+	 */
+	IKM_TYPE_ALL_INLINED    = 0,
+	/*
+	 * IKM_TYPE_UDATA_OOL: Message header and descriptors are allocated inline,
+	 * and message data, trailer, and aux are in buffer pointed to by ikm_udata.
+	 * mach_msg_header_t is immediately after the kmsg header.
+	 */
+	IKM_TYPE_UDATA_OOL      = 1,
+	/*
+	 * IKM_TYPE_KDATA_OOL: The entire message is allocated out-of-line.
+	 * An ipc_kmsg_vector_t follows the kmsg header specifying the address and
+	 * size of the allocation. There is no aux data.
+	 */
+	IKM_TYPE_KDATA_OOL      = 2,
+	/*
+	 * IKM_TYPE_ALL_OOL: Everything is allocated out-of-line. Message header
+	 * and descriptors are allocated from typed kernel heap (kalloc_type), and
+	 * message data, trailer, and aux are in data buffer pointed to by ikm_udata.
+	 * An ipc_kmsg_vector_t follows the kmsg header specifying the address and
+	 * size of the kdata allocation.
+	 */
+	IKM_TYPE_ALL_OOL        = 3
+});
+
 struct ipc_kmsg {
-	struct ipc_kmsg            *ikm_next;        /* next message on port/discard queue */
-	struct ipc_kmsg            *ikm_prev;        /* prev message on port/discard queue */
+	queue_chain_t              ikm_link;
 	union {
-		ipc_port_t XNU_PTRAUTH_SIGNED_PTR("kmsg.ikm_prealloc") ikm_prealloc; /* port we were preallocated from */
-		void      *XNU_PTRAUTH_SIGNED_PTR("kmsg.ikm_data")     ikm_data;
+		/* port we were preallocated from, for IKM_TYPE_ALL_INLINED */
+		ipc_port_t XNU_PTRAUTH_SIGNED_PTR("kmsg.ikm_prealloc") ikm_prealloc;
+		/* user data buffer, unused for IKM_TYPE_ALL_INLINED */
+		void      *XNU_PTRAUTH_SIGNED_PTR("kmsg.ikm_udata")    ikm_udata;
 	};
-	mach_msg_header_t          *XNU_PTRAUTH_SIGNED_PTR("kmsg.ikm_header") ikm_header;
 	ipc_port_t                 XNU_PTRAUTH_SIGNED_PTR("kmsg.ikm_voucher_port") ikm_voucher_port;   /* voucher port carried */
 	struct ipc_importance_elem *ikm_importance;  /* inherited from */
 	queue_chain_t              ikm_inheritance;  /* inherited from link */
-	struct turnstile           *ikm_turnstile;   /* send turnstile for ikm_prealloc port */
 #if MACH_FLIPC
-	struct mach_node           *ikm_node;        /* Originating node - needed for ack */
+	struct mach_node           *ikm_node;        /* originating node - needed for ack */
 #endif
-	mach_msg_size_t            ikm_size;
+	mach_msg_size_t            ikm_aux_size;     /* size reserved for auxiliary data */
 	uint32_t                   ikm_ppriority;    /* pthread priority of this kmsg */
-#if IKM_PARTIAL_SIG
-	uintptr_t                  ikm_header_sig;   /* sig for just the header */
-	uintptr_t                  ikm_headtrail_sig;/* sif for header and trailer */
-#endif
-	uintptr_t                  ikm_signature;    /* sig for all kernel-processed data */
+	union {
+		struct {
+			/* For PAC-supported devices */
+			uint32_t           ikm_sig_partial;  /* partial sig for header + trailer */
+			uint32_t           ikm_sig_full;     /* upper 32 bits is full signature */
+		};
+		uint64_t               ikm_signature;    /* sig for all kernel-processed data */
+	};
 	ipc_object_copyin_flags_t  ikm_flags;
 	mach_msg_qos_t             ikm_qos_override; /* qos override on this kmsg */
-	mach_msg_type_name_t       ikm_voucher_type : 8; /* disposition type the voucher came in with */
 
-	uint8_t                    ikm_inline_data[] __attribute__((aligned(4)));
+	mach_msg_type_name_t       ikm_voucher_type: 6; /* disposition type the voucher came in with */
+	ipc_kmsg_type_t            ikm_type: 2;
+
+	/* size of buffer pointed to by ikm_udata, unused for IKM_TYPE_ALL_INLINED. */
+	mach_msg_size_t            ikm_udata_size;
+	/* inline data of size IKM_SAVED_MSG_SIZE follows */
 };
+
+typedef struct {
+	void                            *XNU_PTRAUTH_SIGNED_PTR("kmsgv.kmsgv_data") kmsgv_data;
+	mach_msg_size_t                 kmsgv_size; /* size of buffer, or descriptor count */
+} ipc_kmsg_vector_t;
 
 /*
  * XXX	For debugging.
@@ -154,80 +191,80 @@ extern zone_t ipc_kmsg_zone;
 MACRO_BEGIN                                                             \
 	assert((port) != IP_NULL);                                      \
 	(kmsg)->ikm_prealloc = (port);                                  \
+	ip_validate(port);                                              \
 	ip_reference(port);                                             \
 MACRO_END
 
-#define ikm_prealloc_clear_inuse(kmsg, port)                            \
+#define ikm_prealloc_clear_inuse(kmsg)                            \
 MACRO_BEGIN                                                             \
 	(kmsg)->ikm_prealloc = IP_NULL;                                 \
 MACRO_END
 
+/*
+ * Exported interfaces
+ */
 struct ipc_kmsg_queue {
 	struct ipc_kmsg *ikmq_base;
 };
 
-typedef struct ipc_kmsg_queue *ipc_kmsg_queue_t;
+typedef circle_queue_t                  ipc_kmsg_queue_t;
 
-#define IKMQ_NULL               ((ipc_kmsg_queue_t) 0)
+#define ipc_kmsg_queue_init(queue)      circle_queue_init(queue)
 
+#define ipc_kmsg_queue_empty(queue)     circle_queue_empty(queue)
 
-/*
- * Exported interfaces
- */
+#define ipc_kmsg_queue_element(elem) \
+	cqe_element(elem, struct ipc_kmsg, ikm_link)
 
-#define ipc_kmsg_queue_init(queue)              \
-MACRO_BEGIN                                     \
-	(queue)->ikmq_base = IKM_NULL;          \
-MACRO_END
+#define ipc_kmsg_queue_first(queue) \
+	cqe_queue_first(queue, struct ipc_kmsg, ikm_link)
 
-#define ipc_kmsg_queue_empty(queue)     ((queue)->ikmq_base == IKM_NULL)
+#define ipc_kmsg_queue_next(queue, elt) \
+	cqe_queue_next(&(elt)->ikm_link, queue, struct ipc_kmsg, ikm_link)
 
-/* Enqueue a kmsg */
-extern void ipc_kmsg_enqueue(
+#define ipc_kmsg_enqueue(queue, kmsg) \
+	circle_enqueue_tail(queue, &(kmsg)->ikm_link)
+
+#define ipc_kmsg_rmqueue(queue, kmsg) \
+	circle_dequeue(queue, &(kmsg)->ikm_link)
+
+extern bool ipc_kmsg_enqueue_qos(
 	ipc_kmsg_queue_t        queue,
 	ipc_kmsg_t              kmsg);
 
-extern boolean_t ipc_kmsg_enqueue_qos(
-	ipc_kmsg_queue_t        queue,
-	ipc_kmsg_t              kmsg);
+extern bool ipc_kmsg_too_large(
+	mach_msg_size_t         msg_size,
+	mach_msg_size_t         aux_size,
+	mach_msg_option64_t     options,
+	mach_msg_size_t         max_msg_size,
+	mach_msg_size_t         max_aux_size,
+	thread_t                receiver);
 
-extern boolean_t ipc_kmsg_override_qos(
+extern bool ipc_kmsg_override_qos(
 	ipc_kmsg_queue_t        queue,
 	ipc_kmsg_t              kmsg,
 	mach_msg_qos_t          qos_ovr);
-
-/* Dequeue and return a kmsg */
-extern ipc_kmsg_t ipc_kmsg_dequeue(
-	ipc_kmsg_queue_t        queue);
-
-/* Pull a kmsg out of a queue */
-extern void ipc_kmsg_rmqueue(
-	ipc_kmsg_queue_t        queue,
-	ipc_kmsg_t              kmsg);
 
 /* Pull the (given) first kmsg out of a queue */
 extern void ipc_kmsg_rmqueue_first(
 	ipc_kmsg_queue_t        queue,
 	ipc_kmsg_t              kmsg);
 
-#define ipc_kmsg_queue_first(queue)             ((queue)->ikmq_base)
-
-/* Return the kmsg following the given kmsg */
-extern ipc_kmsg_t ipc_kmsg_queue_next(
-	ipc_kmsg_queue_t        queue,
-	ipc_kmsg_t              kmsg);
-
 __options_decl(ipc_kmsg_alloc_flags_t, uint32_t, {
+	/* specify either user or kernel flag */
 	IPC_KMSG_ALLOC_USER     = 0x0000,
 	IPC_KMSG_ALLOC_KERNEL   = 0x0001,
+
 	IPC_KMSG_ALLOC_ZERO     = 0x0002,
 	IPC_KMSG_ALLOC_SAVED    = 0x0004,
 	IPC_KMSG_ALLOC_NOFAIL   = 0x0008,
+	IPC_KMSG_ALLOC_LINEAR   = 0x0010,
 });
 
 /* Allocate a kernel message */
 extern ipc_kmsg_t ipc_kmsg_alloc(
-	mach_msg_size_t         size,
+	mach_msg_size_t         msg_size,
+	mach_msg_size_t         aux_size,
 	mach_msg_size_t         user_descriptors,
 	ipc_kmsg_alloc_flags_t  flags);
 
@@ -235,16 +272,23 @@ extern ipc_kmsg_t ipc_kmsg_alloc(
 extern void ipc_kmsg_free(
 	ipc_kmsg_t              kmsg);
 
+__options_decl(ipc_kmsg_destroy_flags_t, uint32_t, {
+	IPC_KMSG_DESTROY_ALL           = 0x0000,
+	IPC_KMSG_DESTROY_SKIP_REMOTE   = 0x0001,
+	IPC_KMSG_DESTROY_SKIP_LOCAL    = 0x0002,
+	IPC_KMSG_DESTROY_NOT_SIGNED    = 0x0004,
+});
 /* Destroy kernel message */
 extern void ipc_kmsg_destroy(
-	ipc_kmsg_t              kmsg);
+	ipc_kmsg_t                kmsg,
+	ipc_kmsg_destroy_flags_t  flags);
 
 /* Enqueue kernel message for deferred destruction */
-extern boolean_t ipc_kmsg_delayed_destroy(
+extern bool ipc_kmsg_delayed_destroy(
 	ipc_kmsg_t              kmsg);
 
 /* Enqueue queue of kernel messages for deferred destruction */
-extern boolean_t ipc_kmsg_delayed_destroy_queue(
+extern bool ipc_kmsg_delayed_destroy_queue(
 	ipc_kmsg_queue_t        queue);
 
 /* Process all the delayed message destroys */
@@ -255,10 +299,27 @@ extern void ipc_kmsg_set_prealloc(
 	ipc_kmsg_t              kmsg,
 	ipc_port_t              port);
 
+/* get the unshifted message header of a kmsg */
+extern mach_msg_header_t *ikm_header(
+	ipc_kmsg_t         kmsg);
+
+/* get the size of auxiliary data for a kmsg */
+extern mach_msg_size_t ipc_kmsg_aux_data_size(
+	ipc_kmsg_t              kmsg);
+
+extern void ipc_kmsg_set_aux_data_header(
+	ipc_kmsg_t              kmsg,
+	mach_msg_aux_header_t   *header);
+
 /* Allocate a kernel message buffer and copy a user message to the buffer */
 extern mach_msg_return_t ipc_kmsg_get_from_user(
 	mach_vm_address_t       msg_addr,
-	mach_msg_size_t         size,
+	mach_msg_size_t         user_msg_size,
+	mach_vm_address_t       aux_addr,
+	mach_msg_size_t         aux_size,
+	mach_msg_user_header_t  user_header,
+	mach_msg_size_t         desc_count,
+	mach_msg_option64_t     option64,
 	ipc_kmsg_t              *kmsgp);
 
 /* Allocate a kernel message buffer and copy a kernel message to the buffer */
@@ -270,17 +331,20 @@ extern mach_msg_return_t ipc_kmsg_get_from_kernel(
 /* Send a message to a port */
 extern mach_msg_return_t ipc_kmsg_send(
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option,
+	mach_msg_option64_t     option64,
 	mach_msg_timeout_t      timeout_val);
 
 /* Copy a kernel message buffer to a user message */
 extern mach_msg_return_t ipc_kmsg_put_to_user(
-	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option,
-	mach_vm_address_t       rcv_addr,
-	mach_msg_size_t         rcv_size,
+	ipc_kmsg_t              kmsg,     /* scalar or vector */
+	mach_msg_option64_t     option,
+	mach_vm_address_t       rcv_msg_addr,
+	mach_msg_size_t         max_msg_size,
+	mach_vm_address_t       rcv_aux_addr,
+	mach_msg_size_t         max_aux_size,
 	mach_msg_size_t         trailer_size,
-	mach_msg_size_t         *size);
+	mach_msg_size_t         *msg_sizep,
+	mach_msg_size_t         *aux_sizep);
 
 /* Copy a kernel message buffer to a kernel message */
 extern void ipc_kmsg_put_to_kernel(
@@ -294,7 +358,7 @@ extern mach_msg_return_t ipc_kmsg_copyin_from_user(
 	ipc_space_t             space,
 	vm_map_t                map,
 	mach_msg_priority_t     priority,
-	mach_msg_option_t       *optionp,
+	mach_msg_option64_t     *optionp,
 	bool                    filter_nonfatal);
 
 /* Copyin port rights and out-of-line memory from a kernel message */
@@ -306,7 +370,6 @@ extern mach_msg_return_t ipc_kmsg_copyout(
 	ipc_kmsg_t              kmsg,
 	ipc_space_t             space,
 	vm_map_t                map,
-	mach_msg_body_t         *slist,
 	mach_msg_option_t       option);
 
 /* Copyout port rights and out-of-line memory to a user message,
@@ -314,8 +377,7 @@ extern mach_msg_return_t ipc_kmsg_copyout(
 extern mach_msg_return_t ipc_kmsg_copyout_pseudo(
 	ipc_kmsg_t              kmsg,
 	ipc_space_t             space,
-	vm_map_t                map,
-	mach_msg_body_t         *slist);
+	vm_map_t                map);
 
 /* Compute size of message as copied out to the specified space/map */
 extern mach_msg_size_t ipc_kmsg_copyout_size(
@@ -343,7 +405,6 @@ extern mach_msg_trailer_size_t ipc_kmsg_trailer_size(
 
 extern void ipc_kmsg_init_trailer(
 	ipc_kmsg_t              kmsg,
-	mach_msg_size_t         msg_size,
 	task_t                  sender);
 
 extern void ipc_kmsg_add_trailer(
@@ -354,6 +415,10 @@ extern void ipc_kmsg_add_trailer(
 	mach_port_seqno_t       seqno,
 	boolean_t               minimal_trailer,
 	mach_vm_offset_t        context);
+
+extern mach_msg_max_trailer_t *ipc_kmsg_get_trailer(
+	ipc_kmsg_t              kmsg,
+	bool                    body_copied_out);
 
 extern void ipc_kmsg_set_voucher_port(
 	ipc_kmsg_t              kmsg,
@@ -366,6 +431,10 @@ extern ipc_port_t ipc_kmsg_get_voucher_port(
 extern void ipc_kmsg_clear_voucher_port(
 	ipc_kmsg_t              kmsg);
 
+extern void ipc_kmsg_validate_sig(
+	ipc_kmsg_t              kmsg,
+	bool                    partial);
+
 #if (KDEBUG_LEVEL >= KDEBUG_LEVEL_STANDARD)
 extern void ipc_kmsg_trace_send(
 	ipc_kmsg_t              kmsg,
@@ -373,8 +442,5 @@ extern void ipc_kmsg_trace_send(
 #else
 #define ipc_kmsg_trace_send(a, b) do { } while (0)
 #endif
-
-extern mach_msg_header_t *
-    ipc_kmsg_msg_header(ipc_kmsg_t);
 
 #endif  /* _IPC_IPC_KMSG_H_ */

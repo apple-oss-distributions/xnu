@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -389,4 +389,11 @@ flush_core_tlb_allrange(uint64_t val)
 
 #endif // __ARM_RANGE_TLBI__
 
+
+
+static inline void
+arm64_sync_tlb(bool strong __unused)
+{
+	sync_tlb_flush();
+}
 

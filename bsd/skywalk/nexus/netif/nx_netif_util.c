@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -173,15 +173,15 @@ nx_netif_mbuf_to_filter_pkt(struct nexus_netif_adapter *nifna,
 	mlen = m_pktlen(m);
 
 	ASSERT(pp != NULL);
-	if (__improbable((off + mlen) > pp->pp_buflet_size)) {
-		VERIFY(off < pp->pp_buflet_size);
-		mlen = pp->pp_buflet_size - off;
+	if (__improbable((off + mlen) > PP_BUF_SIZE_DEF(pp))) {
+		VERIFY(off < PP_BUF_SIZE_DEF(pp));
+		mlen = PP_BUF_SIZE_DEF(pp) - off;
 		truncated = TRUE;
 
 		DTRACE_SKYWALK5(mbuf__truncated,
 		    struct nexus_netif_adapter *, nifna,
 		    struct mbuf *, m, uint8_t, off, int, mlen,
-		    uint32_t, pp->pp_buflet_size);
+		    uint32_t, PP_BUF_SIZE_DEF(pp));
 		STATS_INC(nifs, NETIF_STATS_FILTER_PKT_TRUNCATED);
 	}
 	fpkt = nx_netif_alloc_packet(pp, off + mlen, &fph);
@@ -366,15 +366,15 @@ nx_netif_pkt_to_filter_pkt(struct nexus_netif_adapter *nifna,
 		plen = pkt->pkt_length;
 	}
 	ASSERT(pp != NULL);
-	if (__improbable((off + plen) > pp->pp_buflet_size)) {
-		VERIFY(off < pp->pp_buflet_size);
-		plen = pp->pp_buflet_size - off;
+	if (__improbable((off + plen) > PP_BUF_SIZE_DEF(pp))) {
+		VERIFY(off < PP_BUF_SIZE_DEF(pp));
+		plen = PP_BUF_SIZE_DEF(pp) - off;
 		truncated = TRUE;
 
 		DTRACE_SKYWALK5(pkt__truncated,
 		    struct nexus_netif_adapter *, nifna,
 		    struct __kern_packet *, pkt, uint8_t, off,
-		    int, plen, uint32_t, pp->pp_buflet_size);
+		    int, plen, uint32_t, PP_BUF_SIZE_DEF(pp));
 		STATS_INC(nifs, NETIF_STATS_FILTER_PKT_TRUNCATED);
 	}
 	fpkt = nx_netif_alloc_packet(pp, off + plen, &fph);
@@ -628,12 +628,12 @@ nx_netif_pkt_to_pkt(struct nexus_netif_adapter *nifna,
 		    nifna, struct __kern_packet *, pkt);
 		goto drop;
 	}
-	if (__improbable((off + len) > pp->pp_buflet_size)) {
+	if (__improbable((off + len) > PP_BUF_SIZE_DEF(pp))) {
 		STATS_INC(nifs, NETIF_STATS_VP_DROP_PKT_TOO_BIG);
 		DTRACE_SKYWALK5(pkt__too__large,
 		    struct nexus_netif_adapter *, nifna,
 		    struct __kern_packet *, pkt, uint8_t, off, int, len,
-		    uint32_t, pp->pp_buflet_size);
+		    uint32_t, PP_BUF_SIZE_DEF(pp));
 		goto drop;
 	}
 	if (__improbable((pkt->pkt_link_flags & PKT_LINKF_ETHFCS) != 0 ||
@@ -663,6 +663,9 @@ nx_netif_pkt_to_pkt(struct nexus_netif_adapter *nifna,
 	/* Copy optional metadata */
 	dpkt->pkt_pflags = (pkt->pkt_pflags & PKT_F_COPY_MASK);
 	_PKT_COPY_OPT_DATA(pkt, dpkt);
+
+	/* Copy Transmit completion metadata */
+	_PKT_COPY_TX_PORT_DATA(pkt, dpkt);
 
 	/* Copy packet contents */
 	if (m != NULL) {

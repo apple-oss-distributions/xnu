@@ -96,6 +96,8 @@ int fifo_charcount(struct vnode *vp, int *count);
  */
 int     fifo_ebadf(void *);
 
+#define fifo_nullop (void (*)(void))nullop
+
 #define fifo_create (int (*) (struct  vnop_create_args *))err_create
 #define fifo_mknod (int (*) (struct  vnop_mknod_args *))err_mknod
 #define fifo_access (int (*) (struct  vnop_access_args *))fifo_ebadf
@@ -103,7 +105,7 @@ int     fifo_ebadf(void *);
 #define fifo_setattr (int (*) (struct  vnop_setattr_args *))fifo_ebadf
 #define fifo_revoke nop_revoke
 #define fifo_mmap (int (*) (struct  vnop_mmap_args *))err_mmap
-#define fifo_fsync (int (*) (struct  vnop_fsync_args *))nullop
+#define fifo_fsync (int (*) (struct  vnop_fsync_args *))fifo_nullop
 #define fifo_remove (int (*) (struct  vnop_remove_args *))err_remove
 #define fifo_link (int (*) (struct  vnop_link_args *))err_link
 #define fifo_rename (int (*) (struct  vnop_rename_args *))err_rename
@@ -112,11 +114,11 @@ int     fifo_ebadf(void *);
 #define fifo_symlink (int (*) (struct  vnop_symlink_args *))err_symlink
 #define fifo_readdir (int (*) (struct  vnop_readdir_args *))err_readdir
 #define fifo_readlink (int (*) (struct  vnop_readlink_args *))err_readlink
-#define fifo_reclaim (int (*) (struct  vnop_reclaim_args *))nullop
+#define fifo_reclaim (int (*) (struct  vnop_reclaim_args *))fifo_nullop
 #define fifo_strategy (int (*) (struct  vnop_strategy_args *))err_strategy
 #define fifo_valloc (int (*) (struct  vnop_valloc_args *))err_valloc
 #define fifo_vfree (int (*) (struct  vnop_vfree_args *))err_vfree
-#define fifo_bwrite (int (*) (struct  vnop_bwrite_args *))nullop
+#define fifo_bwrite (int (*) (struct  vnop_bwrite_args *))fifo_nullop
 #define fifo_blktooff (int (*) (struct vnop_blktooff_args *))err_blktooff
 
 int     fifo_lookup(struct vnop_lookup_args *);

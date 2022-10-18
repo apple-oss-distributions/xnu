@@ -110,7 +110,14 @@ struct net_port_info {
 #define npi_foreign_addr_in6 npi_foreign_addr_._in_a_6
 
 #define NPI_HAS_WAKE_EVENT_TUPLE 1
+#define NPI_HAS_PACKET_INFO 1
 
+/*
+ * struct net_port_info_una_wake_event is the event data for KEV_POWER_WAKE_PACKET
+ *
+ * una_wake_pkt_control_flags is valid when NPIF_TCP is set and contains the TCP packet
+ * header flags -- see TH_FLAGS in netinet/tcp.h
+ */
 struct net_port_info_wake_event {
 	uuid_t              wake_uuid;
 	struct timeval32    wake_pkt_timestamp; /* when processed by networking stack */
@@ -123,15 +130,24 @@ struct net_port_info_wake_event {
 	char                wake_pkt_effective_pname[MAXCOMLEN + 1];
 	uuid_t              wake_pkt_owner_uuid;
 	uuid_t              wake_pkt_effective_uuid;
-	/* Following added with NPI_HAS_WAKE_EVENT_TUPLE */
 	in_port_t           wake_pkt_foreign_port; /* network byte order */
 	union in_addr_4_6   wake_pkt_local_addr_;
 	union in_addr_4_6   wake_pkt_foreign_addr_;
 	char                wake_pkt_ifname[IFNAMSIZ]; /* name + unit */
+
+	/* Following fields added with NPI_HAS_PACKET_INFO */
+	uint32_t            wake_pkt_total_len; /* actual length of packet */
+	uint32_t            wake_pkt_data_len; /* exclude transport (TCP/UDP) header length */
+	uint16_t            wake_pkt_control_flags;
 };
 
 /*
- * Note: una_wake_ptk_flags is expected to have NPIF_SOCKET or NPIF_CHANNEL
+ * struct net_port_info_una_wake_event is the event data for KEV_POWER_UNATTRIBUTED_WAKE
+ *
+ * una_wake_pkt_proto is useful to track unexpected wake packets when NPIF_IPV4 or
+ * NPIF_IPV6 is set this is the IP protocol -- see IPPROTO_x from netinet/in.h.
+ * When NPIF_IPV4 and NPIF_IPV6 are not set the cotent of una_wake_pkt can give clues
+ * on the type of unexpected wake packet
  */
 #define NPI_MAX_UNA_WAKE_PKT_LEN 102
 struct net_port_info_una_wake_event {
@@ -142,12 +158,17 @@ struct net_port_info_una_wake_event {
 	uint16_t            _una_wake_pkt_reserved; /* not used */
 	uint16_t            una_wake_ptk_len; /* length of una_wake_pkt */
 	uint8_t             una_wake_pkt[NPI_MAX_UNA_WAKE_PKT_LEN]; /* initial portion of the IPv4/IPv6 packet  */
-	/* Following added with NPI_HAS_WAKE_EVENT_TUPLE */
 	in_port_t           una_wake_pkt_local_port; /* network byte order */
 	in_port_t           una_wake_pkt_foreign_port; /* network byte order */
 	union in_addr_4_6   una_wake_pkt_local_addr_;
 	union in_addr_4_6   una_wake_pkt_foreign_addr_;
 	char                una_wake_pkt_ifname[IFNAMSIZ]; /* name + unit */
+
+	/* Following fields added with NPI_HAS_PACKET_INFO */
+	uint32_t            una_wake_pkt_total_len; /* actual length of packet */
+	uint32_t            una_wake_pkt_data_len; /* exclude transport (TCP/UDP) header length */
+	uint16_t            una_wake_pkt_control_flags; /* for NPIF_TCP, see TH_FLAGS in netinet/tcp.h */
+	uint16_t            una_wake_pkt_proto; /* IPv4 or IPv6 protocol */
 };
 
 #define IFPU_HAS_MATCH_WAKE_PKT_NO_FLAG 1 /* ifpu_match_wake_pkt_no_flag is defined */

@@ -145,7 +145,10 @@ extern xstate_t         fpu_capability;
 extern xstate_t         current_xstate(void);
 extern int              fpUDflt(user_addr_t rip);
 #ifdef MACH_KERNEL_PRIVATE
+#if DEBUG || DEVELOPMENT
 extern uint32_t thread_fpsimd_hash(thread_t);
+extern bool thread_fpsimd_hash_enabled(void);
+#endif
 extern void vzeroall(void);
 extern void xmmzeroall(void);
 extern void avx512_zero(void);

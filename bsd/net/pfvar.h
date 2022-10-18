@@ -2262,6 +2262,7 @@ __private_extern__ int pf_rtlabel_match(struct pf_addr *, sa_family_t,
 __private_extern__ int pf_socket_lookup(int, struct pf_pdesc *);
 __private_extern__ struct pf_state_key *pf_alloc_state_key(struct pf_state *,
     struct pf_state_key *);
+__private_extern__ void pf_detach_state(struct pf_state *, int);
 __private_extern__ void pfr_initialize(void);
 __private_extern__ int pfr_match_addr(struct pfr_ktable *, struct pf_addr *,
     sa_family_t);
@@ -2405,7 +2406,7 @@ __private_extern__ struct pf_fragment_tag * pf_find_fragment_tag_pbuf(pbuf_t *);
 __private_extern__ struct pf_fragment_tag * pf_find_fragment_tag(struct mbuf *);
 __private_extern__ struct pf_fragment_tag * pf_copy_fragment_tag(struct mbuf *,
     struct pf_fragment_tag *, int);
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 __private_extern__ bool pf_check_compatible_rules(void);
 #endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 #else /* !KERNEL */

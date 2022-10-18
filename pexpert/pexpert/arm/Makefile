@@ -16,8 +16,7 @@ PRIVATE_KERNELFILES = \
 	dockchannel.h \
 	PL192_VIC.h \
 	protos.h \
-	apple_uart_regs.h \
-	T8002.h
+	apple_uart_regs.h
 
 # Headers installed into System.framework/PrivateHeaders (userspace internal SDK only).
 INSTALL_SF_MD_LCL_LIST = $(PRIVATE_DATAFILES)

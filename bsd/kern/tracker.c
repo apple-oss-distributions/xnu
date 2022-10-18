@@ -329,7 +329,7 @@ fill_hash_entry(struct tracker_hash_entry *entry, uuid_t appuuid, struct sockadd
 	switch (address->sa_family) {
 	case AF_INET:
 		sin = satosin(address);
-		if (sin->sin_len != sizeof(*sin)) {
+		if (sin->sin_len < sizeof(*sin)) {
 			return EINVAL;
 		}
 		if (sin->sin_addr.s_addr) {
@@ -339,7 +339,7 @@ fill_hash_entry(struct tracker_hash_entry *entry, uuid_t appuuid, struct sockadd
 		return 0;
 	case AF_INET6:
 		sin6 = satosin6(address);
-		if (sin6->sin6_len != sizeof(*sin6)) {
+		if (sin6->sin6_len < sizeof(*sin6)) {
 			return EINVAL;
 		}
 		if (!IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr)) {

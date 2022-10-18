@@ -31,7 +31,7 @@
 
 class IOPMinformee;
 class IOService;
-extern uint32_t gCanSleepTimeout;
+extern uint32_t gSleepAckTimeout;
 
 class IOPMinformeeList : public OSObject
 {

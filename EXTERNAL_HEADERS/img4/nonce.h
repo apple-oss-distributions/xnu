@@ -95,6 +95,18 @@ typedef struct _img4_nonce_domain img4_nonce_domain_t;
  * The enumerated constant corresponding to
  * {@link IMG4_NONCE_DOMAIN_EPHEMERAL_CRYPTEX}.
  *
+ * @const IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_SNUF_STUB
+ * The enumerated constant corresponding to
+ * {@link IMG4_NONCE_DOMAIN_CRYPTEX1_SNUF_STUB}.
+ *
+ * @const IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_BOOT
+ * The enumerated constant corresponding to
+ * {@link IMG4_NONCE_DOMAIN_CRYPTEX1_BOOT}.
+ *
+ * @const IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_ASSET
+ * The enumerated constant corresponding to
+ * {@link IMG4_NONCE_DOMAIN_CRYPTEX1_ASSET}.
+ *
  * @const _IMG4_NONCE_DOMAIN_INDEX_CNT
  * A sentinel value indicating the number of nonce domains.
  */
@@ -106,6 +118,9 @@ OS_CLOSED_ENUM(img4_nonce_domain_index, uint64_t,
 	IMG4_NONCE_DOMAIN_INDEX_CRYPTEX,
 	IMG4_NONCE_DOMAIN_INDEX_DDI,
 	IMG4_NONCE_DOMAIN_INDEX_EPHEMERAL_CRYPTEX,
+	IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_SNUF_STUB,
+	IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_BOOT,
+	IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_ASSET,
 	_IMG4_NONCE_DOMAIN_INDEX_CNT,
 );
 
@@ -122,11 +137,16 @@ OS_CLOSED_ENUM(img4_nonce_domain_index, uint64_t,
  *
  * @field i4n_length
  * The length of the nonce. Will be at most {@link IMG4_NONCE_MAX_LENGTH}.
+ *
+ * @discussion
+ * The {@link i4n_nonce} field was previously const. This was a terrible idea,
+ * and the const storage qualifier was removed without adjusting the structure
+ * version.
  */
 IMG4_API_AVAILABLE_20181106
 typedef struct _img4_nonce {
 	img4_struct_version_t i4n_version;
-	const uint8_t i4n_nonce[IMG4_NONCE_MAX_LENGTH];
+	uint8_t i4n_nonce[IMG4_NONCE_MAX_LENGTH];
 	uint32_t i4n_length;
 } img4_nonce_t;
 
@@ -252,6 +272,69 @@ const struct _img4_nonce_domain _img4_nonce_domain_ephemeral_cryptex;
 #endif
 
 /*!
+ * @const IMG4_NONCE_DOMAIN_CRYPTEX1_SNUF_STUB
+ * The nonce domain which acts as a null stub for the snuf value for Cryptex1
+ * processors. This domain corresponds to a value of 0 for the
+ * Cryptex1,NonceDomain tag. Use of this domain requires the
+ *
+ *     com.apple.private.img4.nonce.cryptex1.snuf-stub
+ *
+ * entitlement.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20220322
+OS_EXPORT
+const struct _img4_nonce_domain _img4_nonce_domain_cryptex1_snuf_stub;
+#define IMG4_NONCE_DOMAIN_CRYPTEX1_SNUF_STUB \
+		(&_img4_nonce_domain_cryptex1_snuf_stub)
+#else
+#define IMG4_NONCE_DOMAIN_CRYPTEX1_SNUF_STUB \
+		(img4if->i4if_v18.nonce_domain_cryptex1_snuf_stub)
+#endif
+
+/*!
+ * @const IMG4_NONCE_DOMAIN_CRYPTEX1_BOOT
+ * The nonce domain governing personalizations for the virtual Cryptex1
+ * coprocessor's boot objects. This domain corresponds to a value of 1 for the
+ * Cryptex1,NonceDomain tag. Use of this domain requires the
+ *
+ *     com.apple.private.img4.nonce.cryptex1.boot
+ *
+ * entitlement.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20211112
+OS_EXPORT
+const struct _img4_nonce_domain _img4_nonce_domain_cryptex1_boot;
+#define IMG4_NONCE_DOMAIN_CRYPTEX1_BOOT \
+		(&_img4_nonce_domain_cryptex1_boot)
+#else
+#define IMG4_NONCE_DOMAIN_CRYPTEX1_BOOT \
+		(img4if->i4if_v16.nonce_domain_cryptex1_boot)
+#endif
+
+/*!
+ * @const IMG4_NONCE_DOMAIN_CRYPTEX1_ASSET
+ * The nonce domain governing personalizations for the virtual Cryptex1
+ * coprocessor's asset brain objects. This domain corresponds to a value of 2
+ * for the Cryptex1,NonceDomain tag. Use of this domain requires the
+ *
+ *     com.apple.private.img4.nonce.cryptex1.asset
+ *
+ * entitlement.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20211112
+OS_EXPORT
+const struct _img4_nonce_domain _img4_nonce_domain_cryptex1_asset;
+#define IMG4_NONCE_DOMAIN_CRYPTEX1_ASSET \
+		(&_img4_nonce_domain_cryptex1_asset)
+#else
+#define IMG4_NONCE_DOMAIN_CRYPTEX1_ASSET \
+		(img4if->i4if_v16.nonce_domain_cryptex1_asset)
+#endif
+
+/*!
  * @function img4_nonce_domain_copy_nonce
  * Copies the current value of the nonce in the given domain.
  *
@@ -271,6 +354,8 @@ const struct _img4_nonce_domain _img4_nonce_domain_ephemeral_cryptex;
  *                  host must reboot in order to generate a new one
  *     [EPERM]      The caller lacked the entitlement necessary to read the
  *                  given nonce
+ *     [ENOTSUP]    Nonce management is not available on the host
+ *     [EACCES]     The nonce requested is not accessible in this environment
  */
 #if !XNU_KERNEL_PRIVATE
 IMG4_API_AVAILABLE_20210305
@@ -297,15 +382,54 @@ img4_nonce_domain_copy_nonce(const img4_nonce_domain_t *nd, img4_nonce_t *n);
  *
  *     [EPERM]      The caller lacked the entitlement necessary to roll the
  *                  given nonce
+ *     [EROFS]      The boot mode didn't allow committing to non-volatile storage
+ *     [ENOTSUP]    Nonce management is not available on the host
+ *     [EACCES]     The nonce requested is not accessible in this environment
  */
 #if !XNU_KERNEL_PRIVATE
 IMG4_API_AVAILABLE_20181106
-OS_EXPORT OS_NONNULL1
+OS_EXPORT OS_WARN_RESULT OS_NONNULL1
 errno_t
 img4_nonce_domain_roll_nonce(const img4_nonce_domain_t *nd);
 #else
 #define img4_nonce_domain_roll_nonce(...) \
 		(img4if->i4if_v1.nonce_domain_roll_nonce(__VA_ARGS__))
+#endif
+
+/*!
+ * @function img4_nonce_domain_preroll_nonce
+ * Generates a new nonce seed and returns the resulting hash. The new nonce seed
+ * will be in force at the next reboot if and only if the boot manifest hash
+ * changes. Otherwise, the current nonce seed value will remain stable (modulo
+ * the regeneration policy associated with its domain).
+ *
+ * @param nd
+ * The nonce domain.
+ *
+ * @param n
+ * Upon successful return, storage that will contain the current nonce. The
+ * provided structure's {@link i4n_version} must be initialized to
+ * {@link IMG4_NONCE_VERSION}.
+ *
+ * @result
+ * Upon success, zero is returned. The kernel implementation will never return
+ * a non-zero code. The userspace implementation may return one of the following
+ * error codes directly:
+ *
+ *     [EPERM]      The caller lacked the entitlement necessary to roll the
+ *                  given nonce
+ *     [EROFS]      The boot mode didn't allow committing to non-volatile storage
+ *     [ENOTSUP]    Nonce management is not available on the host
+ *     [EACCES]     The nonce requested is not accessible in this environment
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_FALL_2021_B
+OS_EXPORT OS_WARN_RESULT OS_NONNULL1 OS_NONNULL2
+errno_t
+img4_nonce_domain_preroll_nonce(const img4_nonce_domain_t *nd, img4_nonce_t *n);
+#else
+#define img4_nonce_domain_preroll_nonce(...) \
+		(img4if->i4if_v14.nonce_domain_preroll_nonce(__VA_ARGS__))
 #endif
 
 #endif // __IMG4_NONCE_H

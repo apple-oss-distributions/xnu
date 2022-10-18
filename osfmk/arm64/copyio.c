@@ -34,6 +34,7 @@
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
 #include <san/kasan.h>
+#include <arm/pmap.h>
 
 #undef copyin
 #undef copyout
@@ -88,6 +89,7 @@ user_access_enable(void)
 	assert(__builtin_arm_rsr("pan") != 0);
 	__builtin_arm_wsr("pan", 0);
 #endif  /* __ARM_PAN_AVAILABLE__ */
+
 }
 
 static inline void
@@ -96,6 +98,7 @@ user_access_disable(void)
 #if __ARM_PAN_AVAILABLE__
 	__builtin_arm_wsr("pan", 1);
 #endif  /* __ARM_PAN_AVAILABLE__ */
+
 }
 
 /*
@@ -175,26 +178,7 @@ copy_validate(const user_addr_t user_addr, uintptr_t kernel_addr,
 	}
 
 	if ((flags & COPYIO_VALIDATE_USER_ONLY) == 0) {
-		if (__probable(!zalloc_disable_copyio_check)) {
-			zone_t src_zone = NULL;
-			vm_offset_t oob_offs, size;
-
-			size = zone_element_size((void *)kernel_addr,
-			    &src_zone, false, &oob_offs);
-			size -= oob_offs;
-
-			/*
-			 * Size of elements in the permanent zone is not saved as a part of the
-			 * zone's info
-			 */
-			if (__improbable(src_zone && !src_zone->z_permanent &&
-			    size < nbytes)) {
-				panic("copyio_preflight: kernel buffer %p "
-				    "has size %lu < nbytes %lu",
-				    (void *)kernel_addr, size, nbytes);
-			}
-		}
-
+		zone_element_bounds_check(kernel_addr, nbytes);
 #if KASAN
 		/* For user copies, asan-check the kernel-side buffer */
 		if (flags & COPYIO_IN) {

@@ -1001,12 +1001,9 @@ ulock_wake(task_t task, uint32_t operation, user_addr_t addr, uint64_t wake_valu
 			ret = EALREADY;
 		}
 	} else if (flags & ULF_WAKE_ALL) {
-		if (set_owner) {
-			turnstile_update_inheritor(ts, THREAD_NULL,
-			    TURNSTILE_IMMEDIATE_UPDATE | TURNSTILE_INHERITOR_THREAD);
-		}
 		waitq_wakeup64_all(&ts->ts_waitq, CAST_EVENT64_T(ULOCK_TO_EVENT(ull)),
-		    THREAD_AWAKENED, 0);
+		    THREAD_AWAKENED,
+		    set_owner ? WAITQ_UPDATE_INHERITOR : WAITQ_WAKEUP_DEFAULT);
 	} else if (set_owner) {
 		/*
 		 * The turnstile waitq is priority ordered,
@@ -1015,10 +1012,10 @@ ulock_wake(task_t task, uint32_t operation, user_addr_t addr, uint64_t wake_valu
 		 */
 		new_owner = waitq_wakeup64_identify(&ts->ts_waitq,
 		    CAST_EVENT64_T(ULOCK_TO_EVENT(ull)),
-		    THREAD_AWAKENED, WAITQ_PROMOTE_ON_WAKE);
+		    THREAD_AWAKENED, WAITQ_UPDATE_INHERITOR);
 	} else {
 		waitq_wakeup64_one(&ts->ts_waitq, CAST_EVENT64_T(ULOCK_TO_EVENT(ull)),
-		    THREAD_AWAKENED, WAITQ_ALL_PRIORITIES);
+		    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
 	}
 
 	if (set_owner) {

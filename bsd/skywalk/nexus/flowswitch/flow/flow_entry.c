@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -35,6 +35,7 @@
 #include <skywalk/nexus/flowswitch/fsw_var.h>
 #include <skywalk/nexus/flowswitch/flow/flow_var.h>
 #include <skywalk/nexus/netif/nx_netif.h>
+#include <skywalk/namespace/flowidns.h>
 
 struct flow_entry *fe_alloc(boolean_t);
 static void fe_free(struct flow_entry *);
@@ -180,6 +181,228 @@ flow_entry_find_by_uuid(struct flow_owner *fo, uuid_t uuid)
 	return fe;
 }
 
+static uint32_t
+flow_entry_calc_flowid(struct flow_entry *fe)
+{
+	uint32_t flowid;
+	struct flowidns_flow_key fk;
+
+	bzero(&fk, sizeof(fk));
+	_CASSERT(sizeof(fe->fe_key.fk_src) == sizeof(fk.ffk_laddr));
+	_CASSERT(sizeof(fe->fe_key.fk_dst) == sizeof(fk.ffk_raddr));
+	bcopy(&fe->fe_key.fk_src, &fk.ffk_laddr, sizeof(fk.ffk_laddr));
+	bcopy(&fe->fe_key.fk_dst, &fk.ffk_raddr, sizeof(fk.ffk_raddr));
+
+	fk.ffk_lport = fe->fe_key.fk_sport;
+	fk.ffk_rport = fe->fe_key.fk_dport;
+	fk.ffk_af = (fe->fe_key.fk_ipver == 4) ? AF_INET : AF_INET6;
+	fk.ffk_proto = fe->fe_key.fk_proto;
+
+	flowidns_allocate_flowid(FLOWIDNS_DOMAIN_FLOWSWITCH, &fk, &flowid);
+	return flowid;
+}
+
+static bool
+flow_entry_add_child(struct flow_entry *parent_fe, struct flow_entry *child_fe)
+{
+	SK_LOG_VAR(char dbgbuf[FLOWENTRY_DBGBUF_SIZE]);
+	ASSERT(parent_fe->fe_flags & FLOWENT_PARENT);
+
+	lck_rw_lock_exclusive(&parent_fe->fe_child_list_lock);
+
+	if (parent_fe->fe_flags & FLOWENTF_NONVIABLE) {
+		SK_ERR("child entry add failed, parent fe \"%s\" non viable 0x%llx "
+		    "flags 0x%b %s(%d)", fe_as_string(parent_fe,
+		    dbgbuf, sizeof(dbgbuf)), SK_KVA(parent_fe), parent_fe->fe_flags,
+		    FLOWENTF_BITS, parent_fe->fe_proc_name,
+		    parent_fe->fe_pid);
+		lck_rw_unlock_exclusive(&parent_fe->fe_child_list_lock);
+		return false;
+	}
+
+	struct flow_entry *fe, *tfe;
+	TAILQ_FOREACH_SAFE(fe, &parent_fe->fe_child_list, fe_child_link, tfe) {
+		if (!fe_id_cmp(fe, child_fe)) {
+			lck_rw_unlock_exclusive(&parent_fe->fe_child_list_lock);
+			SK_ERR("child entry \"%s\" already exists at fe 0x%llx "
+			    "flags 0x%b %s(%d)", fe_as_string(fe,
+			    dbgbuf, sizeof(dbgbuf)), SK_KVA(fe), fe->fe_flags,
+			    FLOWENTF_BITS, fe->fe_proc_name,
+			    fe->fe_pid);
+			return false;
+		}
+
+		if (fe->fe_flags & FLOWENTF_NONVIABLE) {
+			TAILQ_REMOVE(&parent_fe->fe_child_list, fe, fe_child_link);
+			ASSERT(--parent_fe->fe_child_count >= 0);
+			flow_entry_release(&fe);
+		}
+	}
+
+	flow_entry_retain(child_fe);
+	TAILQ_INSERT_TAIL(&parent_fe->fe_child_list, child_fe, fe_child_link);
+	ASSERT(++parent_fe->fe_child_count > 0);
+
+	lck_rw_unlock_exclusive(&parent_fe->fe_child_list_lock);
+
+	return true;
+}
+
+static void
+flow_entry_remove_all_children(struct flow_entry *parent_fe, struct nx_flowswitch *fsw)
+{
+	bool sched_reaper_thread = false;
+
+	ASSERT(parent_fe->fe_flags & FLOWENT_PARENT);
+
+	lck_rw_lock_exclusive(&parent_fe->fe_child_list_lock);
+
+	struct flow_entry *fe, *tfe;
+	TAILQ_FOREACH_SAFE(fe, &parent_fe->fe_child_list, fe_child_link, tfe) {
+		if (!(fe->fe_flags & FLOWENTF_NONVIABLE)) {
+			/*
+			 * fsw_pending_nonviable is a hint for reaper thread;
+			 * due to the fact that setting fe_want_nonviable and
+			 * incrementing fsw_pending_nonviable counter is not
+			 * atomic, let the increment happen first, and the
+			 * thread losing the CAS does decrement.
+			 */
+			atomic_add_32(&fsw->fsw_pending_nonviable, 1);
+			if (atomic_test_set_32(&fe->fe_want_nonviable, 0, 1)) {
+				sched_reaper_thread = true;
+			} else {
+				atomic_add_32(&fsw->fsw_pending_nonviable, -1);
+			}
+		}
+
+		TAILQ_REMOVE(&parent_fe->fe_child_list, fe, fe_child_link);
+		ASSERT(--parent_fe->fe_child_count >= 0);
+		flow_entry_release(&fe);
+	}
+
+	lck_rw_unlock_exclusive(&parent_fe->fe_child_list_lock);
+
+	if (sched_reaper_thread) {
+		fsw_reap_sched(fsw);
+	}
+}
+
+static void
+flow_entry_set_demux_patterns(struct flow_entry *fe, struct nx_flow_req *req)
+{
+	ASSERT(fe->fe_flags & FLOWENT_CHILD);
+	ASSERT(req->nfr_flow_demux_count > 0);
+
+	fe->fe_demux_patterns = sk_alloc_type_array(struct kern_flow_demux_pattern, req->nfr_flow_demux_count,
+	    Z_WAITOK | Z_NOFAIL, skmem_tag_flow_demux);
+
+	for (int i = 0; i < req->nfr_flow_demux_count; i++) {
+		bcopy(&req->nfr_flow_demux_patterns[i], &fe->fe_demux_patterns[i].fdp_demux_pattern,
+		    sizeof(struct flow_demux_pattern));
+
+		fe->fe_demux_patterns[i].fdp_memcmp_mask = NULL;
+		if (req->nfr_flow_demux_patterns[i].fdp_len == 16) {
+			fe->fe_demux_patterns[i].fdp_memcmp_mask = sk_memcmp_mask_16B;
+		} else if (req->nfr_flow_demux_patterns[i].fdp_len == 32) {
+			fe->fe_demux_patterns[i].fdp_memcmp_mask = sk_memcmp_mask_32B;
+		} else if (req->nfr_flow_demux_patterns[i].fdp_len > 32) {
+			VERIFY(0);
+		}
+	}
+
+	fe->fe_demux_pattern_count = req->nfr_flow_demux_count;
+}
+
+static int
+convert_flowkey_to_inet_td(struct flow_key *key,
+    struct ifnet_traffic_descriptor_inet *td)
+{
+	if ((key->fk_mask & FKMASK_IPVER) != 0) {
+		td->inet_ipver = key->fk_ipver;
+		td->inet_mask |= IFNET_TRAFFIC_DESCRIPTOR_INET_IPVER;
+	}
+	if ((key->fk_mask & FKMASK_PROTO) != 0) {
+		td->inet_proto = key->fk_proto;
+		td->inet_mask |= IFNET_TRAFFIC_DESCRIPTOR_INET_PROTO;
+	}
+	if ((key->fk_mask & FKMASK_SRC) != 0) {
+		if (td->inet_ipver == IPVERSION) {
+			bcopy(&key->fk_src4, &td->inet_laddr.iia_v4addr,
+			    sizeof(key->fk_src4));
+		} else {
+			bcopy(&key->fk_src6, &td->inet_laddr,
+			    sizeof(key->fk_src6));
+		}
+		td->inet_mask |= IFNET_TRAFFIC_DESCRIPTOR_INET_LADDR;
+	}
+	if ((key->fk_mask & FKMASK_DST) != 0) {
+		if (td->inet_ipver == IPVERSION) {
+			bcopy(&key->fk_dst4, &td->inet_raddr.iia_v4addr,
+			    sizeof(key->fk_dst4));
+		} else {
+			bcopy(&key->fk_dst6, &td->inet_raddr,
+			    sizeof(key->fk_dst6));
+		}
+		td->inet_mask |= IFNET_TRAFFIC_DESCRIPTOR_INET_RADDR;
+	}
+	if ((key->fk_mask & FKMASK_SPORT) != 0) {
+		td->inet_lport = key->fk_sport;
+		td->inet_mask |= IFNET_TRAFFIC_DESCRIPTOR_INET_LPORT;
+	}
+	if ((key->fk_mask & FKMASK_DPORT) != 0) {
+		td->inet_rport = key->fk_dport;
+		td->inet_mask |= IFNET_TRAFFIC_DESCRIPTOR_INET_RPORT;
+	}
+	td->inet_common.itd_type = IFNET_TRAFFIC_DESCRIPTOR_TYPE_INET;
+	td->inet_common.itd_len = sizeof(*td);
+	td->inet_common.itd_flags = IFNET_TRAFFIC_DESCRIPTOR_FLAG_INBOUND |
+	    IFNET_TRAFFIC_DESCRIPTOR_FLAG_OUTBOUND;
+	return 0;
+}
+
+void
+flow_qset_select_dynamic(struct nx_flowswitch *fsw, struct flow_entry *fe,
+    boolean_t skip_if_no_change)
+{
+	struct ifnet_traffic_descriptor_inet td;
+	struct ifnet *ifp;
+	uint64_t qset_id;
+	struct nx_netif *nif;
+	boolean_t changed;
+	int err;
+
+	ifp = fsw->fsw_ifp;
+	changed = ifnet_sync_traffic_rule_genid(ifp, &fe->fe_tr_genid);
+	if (!changed && skip_if_no_change) {
+		return;
+	}
+	if (fe->fe_qset != NULL) {
+		nx_netif_qset_release(&fe->fe_qset);
+		ASSERT(fe->fe_qset == NULL);
+	}
+	if (ifp->if_traffic_rule_count == 0) {
+		DTRACE_SKYWALK2(no__rules, struct nx_flowswitch *, fsw,
+		    struct flow_entry *, fe);
+		return;
+	}
+	err = convert_flowkey_to_inet_td(&fe->fe_key, &td);
+	ASSERT(err == 0);
+	err = nxctl_inet_traffic_rule_find_qset_id(ifp->if_xname, &td, &qset_id);
+	if (err != 0) {
+		DTRACE_SKYWALK3(qset__id__not__found,
+		    struct nx_flowswitch *, fsw,
+		    struct flow_entry *, fe,
+		    struct ifnet_traffic_descriptor_inet *, &td);
+		return;
+	}
+	DTRACE_SKYWALK4(qset__id__found, struct nx_flowswitch *, fsw,
+	    struct flow_entry *, fe, struct ifnet_traffic_descriptor_inet *,
+	    &td, uint64_t, qset_id);
+	nif = NX_NETIF_PRIVATE(fsw->fsw_dev_ch->ch_na->na_nx);
+	ASSERT(fe->fe_qset == NULL);
+	fe->fe_qset = nx_netif_find_qset(nif, qset_id);
+}
+
 /* writer-lock must be owned for memory management functions */
 struct flow_entry *
 flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
@@ -187,6 +410,7 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 	SK_LOG_VAR(char dbgbuf[FLOWENTRY_DBGBUF_SIZE]);
 	nexus_port_t nx_port = req->nfr_nx_port;
 	struct flow_entry *fe = NULL;
+	struct flow_entry *parent_fe = NULL;
 	flowadv_idx_t fadv_idx = FLOWADV_IDX_NONE;
 	struct nexus_adapter *dev_na;
 	struct nx_netif *nif;
@@ -208,14 +432,26 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 	struct flow_mgr *fm = fo->fo_fsw->fsw_flow_mgr;
 	fe = flow_mgr_find_conflicting_fe(fm, &key);
 	if (fe != NULL) {
-		SK_ERR("entry \"%s\" already exists at fe 0x%llx "
-		    "flags 0x%b %s(%d)", fe_as_string(fe,
-		    dbgbuf, sizeof(dbgbuf)), SK_KVA(fe), fe->fe_flags,
-		    FLOWENTF_BITS, fe->fe_proc_name,
-		    fe->fe_pid);
-		/* don't return it */
-		flow_entry_release(&fe);
-		err = EEXIST;
+		if ((fe->fe_flags & FLOWENT_PARENT) &&
+		    uuid_compare(fe->fe_uuid, req->nfr_parent_flow_uuid) == 0) {
+			parent_fe = fe;
+			fe = NULL;
+		} else {
+			SK_ERR("entry \"%s\" already exists at fe 0x%llx "
+			    "flags 0x%b %s(%d)", fe_as_string(fe,
+			    dbgbuf, sizeof(dbgbuf)), SK_KVA(fe), fe->fe_flags,
+			    FLOWENTF_BITS, fe->fe_proc_name,
+			    fe->fe_pid);
+			/* don't return it */
+			flow_entry_release(&fe);
+			err = EEXIST;
+			goto done;
+		}
+	} else if (!uuid_is_null(req->nfr_parent_flow_uuid)) {
+		uuid_string_t uuid_str;
+		sk_uuid_unparse(req->nfr_parent_flow_uuid, uuid_str);
+		SK_ERR("parent entry \"%s\" does not exist", uuid_str);
+		err = ENOENT;
 		goto done;
 	}
 
@@ -270,21 +506,29 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 	fe->fe_tx_process = dp_flow_tx_process;
 	fe->fe_rx_process = dp_flow_rx_process;
 
-	if (nx_port == FSW_VP_HOST) {
-		fe->fe_rx_process = fsw_host_rx;
-	}
-
 	dev_na = fo->fo_fsw->fsw_dev_ch->ch_na;
 	nif = NX_NETIF_PRIVATE(dev_na->na_nx);
-	if (NETIF_LLINK_ENABLED(nif)) {
-		fe->fe_qset = nx_netif_find_qset(nif, req->nfr_qset_id);
+	if (NX_LLINK_PROV(nif->nif_nx) &&
+	    (fe->fe_key.fk_mask & (FKMASK_IPVER | FKMASK_PROTO | FKMASK_DST)) ==
+	    (FKMASK_IPVER | FKMASK_PROTO | FKMASK_DST)) {
+		if (req->nfr_qset_id != 0) {
+			fe->fe_qset_select = FE_QSET_SELECT_FIXED;
+			fe->fe_qset_id = req->nfr_qset_id;
+			fe->fe_qset = nx_netif_find_qset(nif, req->nfr_qset_id);
+		} else {
+			fe->fe_qset_select = FE_QSET_SELECT_DYNAMIC;
+			fe->fe_qset_id = 0;
+			flow_qset_select_dynamic(fo->fo_fsw, fe, FALSE);
+		}
+	} else {
+		fe->fe_qset_select = FE_QSET_SELECT_NONE;
 	}
 	if (req->nfr_flags & NXFLOWREQF_LOW_LATENCY) {
 		atomic_bitset_32(&fe->fe_flags, FLOWENTF_LOW_LATENCY);
 	}
 
 	fe->fe_transport_protocol = req->nfr_transport_protocol;
-	if (sk_fsw_rx_agg_tcp &&
+	if (NX_FSW_TCP_RX_AGG_ENABLED() &&
 	    (fo->fo_fsw->fsw_nx->nx_prov->nxprov_params->nxp_max_frags > 1) &&
 	    (fe->fe_key.fk_proto == IPPROTO_TCP) &&
 	    (fe->fe_key.fk_mask == FKMASK_5TUPLE)) {
@@ -307,6 +551,12 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 		atomic_bitset_32(&fe->fe_flags, FLOWENTF_QOS_MARKING);
 	}
 
+	if (req->nfr_flags & NXFLOWREQF_PARENT) {
+		atomic_bitset_32(&fe->fe_flags, FLOWENT_PARENT);
+		TAILQ_INIT(&fe->fe_child_list);
+		lck_rw_init(&fe->fe_child_list_lock, &nexus_lock_group, &nexus_lock_attr);
+	}
+
 	if (req->nfr_route != NULL) {
 		fe->fe_route = req->nfr_route;
 		req->nfr_route = NULL;
@@ -315,9 +565,19 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 	fe->fe_nx_port = nx_port;
 	fe->fe_adv_idx = fadv_idx;
 
+	if (req->nfr_inp_flowhash != 0) {
+		/*
+		 * BSD flow, use the inpcb flow hash value
+		 */
+		fe->fe_flowid = req->nfr_inp_flowhash;
+		fe->fe_flags |= FLOWENTF_EXTRL_FLOWID;
+	} else {
+		fe->fe_flowid = flow_entry_calc_flowid(fe);
+	}
+
 	if (fe->fe_adv_idx != FLOWADV_IDX_NONE && fo->fo_nx_port_na != NULL) {
 		na_flowadv_entry_alloc(fo->fo_nx_port_na, fe->fe_uuid,
-		    fe->fe_adv_idx);
+		    fe->fe_adv_idx, fe->fe_flowid);
 	}
 
 	if (KPKT_VALID_SVC(req->nfr_svc_class)) {
@@ -328,18 +588,26 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 
 	uuid_copy(fe->fe_eproc_uuid, req->nfr_euuid);
 	fe->fe_policy_id = req->nfr_policy_id;
-	fe->fe_inp_flowhash = req->nfr_inp_flowhash;
 
 	err = flow_mgr_flow_hash_mask_add(fm, fe->fe_key.fk_mask);
 	ASSERT(err == 0);
 
-	fe->fe_key_hash = flow_key_hash(&fe->fe_key);
-	err = cuckoo_hashtable_add_with_hash(fm->fm_flow_table, &fe->fe_cnode,
-	    fe->fe_key_hash);
-	if (err != 0) {
-		SK_ERR("flow table add failed (err %d)", err);
-		flow_mgr_flow_hash_mask_del(fm, fe->fe_key.fk_mask);
-		goto done;
+	if (parent_fe != NULL) {
+		atomic_bitset_32(&fe->fe_flags, FLOWENT_CHILD);
+		flow_entry_set_demux_patterns(fe, req);
+		fe->fe_demux_pkt_data = sk_alloc_data(FLOW_DEMUX_MAX_LEN, Z_WAITOK | Z_NOFAIL, skmem_tag_flow_demux);
+		if (!flow_entry_add_child(parent_fe, fe)) {
+			goto done;
+		}
+	} else {
+		fe->fe_key_hash = flow_key_hash(&fe->fe_key);
+		err = cuckoo_hashtable_add_with_hash(fm->fm_flow_table, &fe->fe_cnode,
+		    fe->fe_key_hash);
+		if (err != 0) {
+			SK_ERR("flow table add failed (err %d)", err);
+			flow_mgr_flow_hash_mask_del(fm, fe->fe_key.fk_mask);
+			goto done;
+		}
 	}
 
 	RB_INSERT(flow_entry_id_tree, &fo->fo_flow_entry_id_head, fe);
@@ -370,6 +638,9 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 #endif /* SK_LOG */
 
 done:
+	if (parent_fe != NULL) {
+		flow_entry_release(&parent_fe);
+	}
 	if (err != 0) {
 		if (fadv_idx != FLOWADV_IDX_NONE) {
 			flow_owner_flowadv_index_free(fo, fadv_idx);
@@ -421,7 +692,7 @@ flow_entry_teardown(struct flow_owner *fo, struct flow_entry *fe)
 		if (fe->fe_adv_idx != FLOWADV_IDX_NONE) {
 			if (fo->fo_nx_port_na != NULL) {
 				na_flowadv_entry_free(fo->fo_nx_port_na,
-				    fe->fe_uuid, fe->fe_adv_idx);
+				    fe->fe_uuid, fe->fe_adv_idx, fe->fe_flowid);
 			}
 			flow_owner_flowadv_index_free(fo, fe->fe_adv_idx);
 			fe->fe_adv_idx = FLOWADV_IDX_NONE;
@@ -429,6 +700,11 @@ flow_entry_teardown(struct flow_owner *fo, struct flow_entry *fe)
 	}
 	ASSERT(fe->fe_adv_idx == FLOWADV_IDX_NONE);
 	ASSERT(fe->fe_flags & FLOWENTF_TORN_DOWN);
+
+	/* mark child flow as nonviable */
+	if (fe->fe_flags & FLOWENT_PARENT) {
+		flow_entry_remove_all_children(fe, fsw);
+	}
 }
 
 void
@@ -440,17 +716,24 @@ flow_entry_destroy(struct flow_owner *fo, struct flow_entry *fe, bool nolinger,
 
 	FOB_LOCK_ASSERT_HELD(FO_BUCKET(fo));
 
-	/* one in flow_table, one in id_tree, one here */
-	ASSERT(flow_entry_refcnt(fe) > 2);
+	/*
+	 * regular flow: one in flow_table, one in id_tree, one here
+	 * child flow: one in id_tree, one here
+	 */
+	ASSERT(flow_entry_refcnt(fe) > 2 ||
+	    ((fe->fe_flags & FLOWENT_CHILD) && flow_entry_refcnt(fe) > 1));
 
 	flow_entry_teardown(fo, fe);
 
 	err = flow_mgr_flow_hash_mask_del(fm, fe->fe_key.fk_mask);
 	ASSERT(err == 0);
 
-	uint32_t hash;
-	hash = flow_key_hash(&fe->fe_key);
-	cuckoo_hashtable_del(fm->fm_flow_table, &fe->fe_cnode, hash);
+	/* only regular or parent flows have entries in flow_table */
+	if (__probable(!(fe->fe_flags & FLOWENT_CHILD))) {
+		uint32_t hash;
+		hash = flow_key_hash(&fe->fe_key);
+		cuckoo_hashtable_del(fm->fm_flow_table, &fe->fe_cnode, hash);
+	}
 
 	RB_REMOVE(flow_entry_id_tree, &fo->fo_flow_entry_id_head, fe);
 	struct flow_entry *tfe = fe;
@@ -461,7 +744,7 @@ flow_entry_destroy(struct flow_owner *fo, struct flow_entry *fe, bool nolinger,
 
 	if (fe->fe_transport_protocol == IPPROTO_QUIC) {
 		if (!nolinger && close_params != NULL) {
-			fsw_flow_abort_quic(fe, close_params);
+			flow_track_abort_quic(fe, close_params);
 		}
 		flow_entry_release(&fe);
 	} else if (nolinger || !(fe->fe_flags & FLOWENTF_WAIT_CLOSE)) {
@@ -507,6 +790,16 @@ flow_entry_release(struct flow_entry **pfe)
 		if (fe->fe_qset != NULL) {
 			nx_netif_qset_release(&fe->fe_qset);
 			ASSERT(fe->fe_qset == NULL);
+		}
+		if (fe->fe_demux_patterns != NULL) {
+			sk_free_type_array(struct kern_flow_demux_pattern,
+			    fe->fe_demux_pattern_count, fe->fe_demux_patterns);
+			fe->fe_demux_patterns = NULL;
+			fe->fe_demux_pattern_count = 0;
+		}
+		if (fe->fe_demux_pkt_data != NULL) {
+			sk_free_data(fe->fe_demux_pkt_data, FLOW_DEMUX_MAX_LEN);
+			fe->fe_demux_pkt_data = NULL;
 		}
 		fe_free(fe);
 	}
@@ -611,6 +904,12 @@ fe_stats_update(struct flow_entry *fe)
 	if (fe->fe_flags & FLOWENTF_LOW_LATENCY) {
 		sf->sf_flags |= SFLOWF_LOW_LATENCY;
 	}
+	if (fe->fe_flags & FLOWENT_PARENT) {
+		sf->sf_flags |= SFLOWF_PARENT;
+	}
+	if (fe->fe_flags & FLOWENT_CHILD) {
+		sf->sf_flags |= SFLOWF_CHILD;
+	}
 
 	sf->sf_bucket_idx = SFLOW_BUCKET_NONE;
 
@@ -699,6 +998,11 @@ fe_free(struct flow_entry *fe)
 		key_release_custom_ipsec(&fe->fe_ipsec_reservation);
 	}
 	fe->fe_ipsec_reservation = NULL;
+
+	if (!(fe->fe_flags & FLOWENTF_EXTRL_FLOWID) && (fe->fe_flowid != 0)) {
+		flowidns_release_flowid(fe->fe_flowid);
+		fe->fe_flowid = 0;
+	}
 
 	skmem_cache_free(sk_fe_cache, fe);
 }

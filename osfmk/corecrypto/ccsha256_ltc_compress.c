@@ -1,11 +1,12 @@
-/*
- *  ccsha256_ltc_compress.c
- *  corecrypto
+/* Copyright (c) (2010,2011,2015-2019,2021) Apple Inc. All rights reserved.
  *
- *  Created on 12/03/2010
- *
- *  Copyright (c) 2010,2011,2015 Apple Inc. All rights reserved.
- *
+ * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
+ * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -68,7 +69,7 @@
 #define Gamma0(x) (S(x, 7) ^ S(x, 18) ^ R(x, 3))
 #define Gamma1(x) (S(x, 17) ^ S(x, 19) ^ R(x, 10))
 
-#define set_W(i) CC_LOAD32_BE(W[i], buf + (4 * (i)))
+#define set_W(i) (W[i] = cc_load32_be(buf + (4 * (i))))
 
 // the round function
 #define RND(a, b, c, d, e, f, g, h, i)              \

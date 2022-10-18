@@ -135,10 +135,35 @@ fsw_netagent_flow_add(struct nx_flowswitch *fsw, uuid_t flow_uuid, pid_t pid,
 	if (cparams->use_stable_address) {
 		req.nfr_flags |= NXFLOWREQF_USE_STABLE_ADDRESS;
 	}
+	if (cparams->no_wake_from_sleep) {
+		req.nfr_flags |= NXFLOWREQF_NOWAKEFROMSLEEP;
+	}
+	if (cparams->reuse_port) {
+		req.nfr_flags |= NXFLOWREQF_REUSEPORT;
+	}
 
 	req.nfr_context = context;
 	req.nfr_pid = pid;
 	req.nfr_port_reservation = cparams->port_reservation;
+
+	if (cparams->is_demuxable_parent) {
+		req.nfr_flags |= NXFLOWREQF_PARENT;
+	} else {
+		uuid_copy(req.nfr_parent_flow_uuid, cparams->parent_flow_uuid);
+		if (cparams->demux_pattern_count > 0) {
+			if (cparams->demux_pattern_count > MAX_FLOW_DEMUX_PATTERN) {
+				error = EINVAL;
+				goto done;
+			}
+
+			_CASSERT(sizeof(struct necp_demux_pattern) == sizeof(struct flow_demux_pattern));
+			for (int i = 0; i < cparams->demux_pattern_count; i++) {
+				memcpy(&req.nfr_flow_demux_patterns[i], &cparams->demux_patterns[i],
+				    sizeof(struct flow_demux_pattern));
+			}
+			req.nfr_flow_demux_count = cparams->demux_pattern_count;
+		}
+	}
 
 	ASSERT(req.nfr_flags & NXFLOWREQF_FLOWADV);
 	fo = fsw_flow_add(fsw, &req, &error);
@@ -153,7 +178,7 @@ fsw_netagent_flow_add(struct nx_flowswitch *fsw, uuid_t flow_uuid, pid_t pid,
 	ASSERT(!uuid_is_null(fo->fo_key));
 	ASSERT(req.nfr_flowadv_idx != FLOWADV_IDX_NONE);
 	ASSERT(req.nfr_flow_stats != NULL);
-	ASSERT(flow_stats_refcnt(req.nfr_flow_stats) == 2);
+	ASSERT(flow_stats_refcnt(req.nfr_flow_stats) >= 1);
 
 	bzero(&local_endpoint, sizeof(local_endpoint));
 	bzero(&remote_endpoint, sizeof(remote_endpoint));

@@ -1644,24 +1644,30 @@ test_allocate_with_kernel_flags()
 	int flag                  = get_address_flag();
 	int bad_flag, i;
 	kern_return_t kr;
-	int kernel_flags[] = {0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000, 0x8000, INT_MAX};
-	int numofflags     = sizeof(kernel_flags) / sizeof(kernel_flags[0]);
+	int valid_flags = VM_FLAGS_USER_ALLOCATE | VM_FLAGS_USER_MAP | VM_FLAGS_USER_REMAP | VM_FLAGS_ALIAS_MASK;
 
 	logv("Allocating 0x%jx (%ju) byte%s", (uintmax_t)size, (uintmax_t)size, (size == 1) ? "" : "s");
 	if (!(flag & VM_FLAGS_ANYWHERE)) {
 		logv(" at address 0x%jx", (uintmax_t)address);
 	}
-	logv(" with various kernel flags...");
-	for (i = 0; i < numofflags; i++) {
-		bad_flag = kernel_flags[i] | flag;
+	logv(" with various invalid flags...");
+	for (i = 0; i < sizeof(int) * 8; i++) {
+		int test_flag = 1 << i;
+
+		/* Skip user valid flags */
+		if (valid_flags & test_flag) {
+			continue;
+		}
+
+		bad_flag = test_flag | flag;
 		kr = allocator(this_task, &address, size, bad_flag);
 		T_QUIET; T_ASSERT_EQ(kr, KERN_INVALID_ARGUMENT,
 		    "Allocator "
-		    "with kernel flag 0x%x unexpectedly returned: %s.\n"
+		    "with invalid flag 0x%x unexpectedly returned: %s.\n"
 		    "Should have returned: %s.",
 		    bad_flag, mach_error_string(kr), mach_error_string(KERN_INVALID_ARGUMENT));
 	}
-	logv("Returned expected error with each kernel flag: %s.", mach_error_string(KERN_INVALID_ARGUMENT));
+	logv("Returned expected error with each invalid flag: %s.", mach_error_string(KERN_INVALID_ARGUMENT));
 }
 
 /*****************************/

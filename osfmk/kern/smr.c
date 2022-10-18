@@ -26,9 +26,12 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include <kern/smr.h>
 #include <kern/cpu_data.h>
+#include <kern/mpsc_queue.h>
+#include <kern/percpu.h>
+#include <kern/smr.h>
 #include <kern/zalloc.h>
+#include <sys/queue.h>
 
 /*
  * This SMR scheme is directly FreeBSD's "Global Unbounded Sequences".
@@ -42,6 +45,7 @@ typedef long                    smr_delta_t;
 
 typedef struct smr_pcpu {
 	smr_seq_t               c_rd_seq;
+	unsigned long           c_rd_budget;
 } *smr_pcpu_t;
 
 #define SMR_SEQ_DELTA(a, b)     ((smr_delta_t)((a) - (b)))
@@ -51,22 +55,184 @@ typedef struct smr_pcpu {
 
 #define SMR_EARLY_COUNT         32
 
-/*
- * On 32 bit systems, the sequence numbers might wrap.
- */
-#if __LP64__
-#define smr_critical_enter()
-#define smr_critical_leave()
-#else
-#define smr_critical_enter()    disable_preemption()
-#define smr_critical_leave()    enable_preemption()
-#endif /* !__LP64__ */
-
 __startup_data
 static struct {
 	struct smr_pcpu array[SMR_EARLY_COUNT];
 	unsigned        used;
 } smr_boot;
+
+
+#pragma mark - manipulating an SMR clock
+
+/*
+ * SMR clocks have 3 state machines interacting at any given time:
+ *
+ *
+ * 1. reader critical sections
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ * Each CPU can disable preemption and do this sequence:
+ *
+ *     CPU::c_rd_seq = GLOBAL::c_wr_seq;
+ *
+ *     < unfortunate place to receive a long IRQ >                      [I]
+ *
+ *     os_atomic_thread_fence(seq_cst);                                 [R1]
+ *
+ *     {
+ *         // critical section
+ *     }
+ *
+ *     os_atomic_store(&CPU::c_rd_seq, INVALID, release);               [R2]
+ *
+ *
+ *
+ * 2. writer sequence advances
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ * Each writer can increment the global write sequence
+ * at any given time:
+ *
+ *    os_atomic_add(&GLOBAL::c_wr_seq, SMR_SEQ_INC, release);           [W]
+ *
+ *
+ *
+ * 3. synchronization sequence: poll/wait/scan
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ * This state machine synchronizes with the other two in order to decide
+ * if a given "goal" is in the past. Only the cases when the call
+ * is successful is interresting for barrier purposes, and we will focus
+ * on cases that do not take an early return for failures.
+ *
+ * a. __smr_poll:
+ *
+ *     rd_seq = os_atomic_load(&GLOBAL::c_rd_seq, acquire);             [S1]
+ *     if (goal < rd_seq) SUCCESS.
+ *     wr_seq = os_atomic_load(&GLOBAL::c_rd_seq, relaxed);
+ *
+ * b. __smr_scan
+ *
+ *     os_atomic_thread_fence(seq_cst)                                  [S2]
+ *
+ *     observe the minimum CPU::c_rd_seq "min_rd_seq"
+ *     value possible or rw_seq if no CPU was in a critical section.
+ *     (possibly spinning until it satisfies "goal")
+ *
+ * c. __smr_rd_advance
+ *
+ *     cur_rd_seq = load_exclusive(&GLOBAL::c_rd_seq);
+ *     os_atomic_thread_fence(seq_cst);                                 [S3]
+ *     if (min_rd_seq > cur_rd_seq) {
+ *         store_exlusive(&GLOBAL::c_rd_seq, min_rd_seq);
+ *     }
+ *
+ *
+ * One sentence summary
+ * ~~~~~~~~~~~~~~~~~~~~
+ *
+ * A simplistic one-sentence summary of the algorithm is that __smr_scan()
+ * works really hard to insert itself in the timeline of write sequences and
+ * observe a reasonnable bound for first safe-to-reclaim sequence, and
+ * issues [S3] to sequence everything around "c_rd_seq" (via [S3] -> [S1]):
+ *
+ *              GLOBAL::c_rd_seq                GLOBAL::c_wr_seq
+ *                             v                v
+ *       ──────────────────────┬────────────────┬─────────────────────
+ *       ... safe to reclaim   │    deferred    │   future         ...
+ *       ──────────────────────┴────────────────┴─────────────────────
+ *
+ *
+ * Detailed explanation
+ * ~~~~~~~~~~~~~~~~~~~~
+ *
+ * [W] -> [R1] establishes a "happens before" relationship between a given
+ * writer and this critical section. The loaded GLOBAL::c_wr_seq might
+ * however be stale with respect to the one [R1] really synchronizes with
+ * (see [I] explanation below).
+ *
+ *
+ * [R1] -> [S2] establishes a "happens before" relationship between all the
+ * active critical sections and the scanner.
+ * It lets us compute the oldest possible sequence pinned by an active
+ * critical section.
+ *
+ *
+ * [R2] -> [S3] establishes a "happens before" relationship between all the
+ * inactive critical sections and the scanner.
+ *
+ *
+ * [S3] -> [S1] is the typical expected fastpath: when the caller can decide
+ * that its goal is older than the last update an __smr_rd_advance() did.
+ * Note that [S3] doubles as an "[S1]" when two __smr_scan() race each other
+ * and one of them finishes last but observed a "worse" read sequence.
+ *
+ *
+ * [W], [S3] -> [S1] is the last crucial property: all updates to the global
+ * clock are totally ordered because they update the entire 128bit state
+ * every time with an RMW. This guarantees that __smr_poll() can't load
+ * an `rd_seq` that is younger than the `wr_seq` it loads next.
+ *
+ *
+ * [I] __smr_enter() also can be unfortunately delayed after observing
+ * a given write sequence and right before [R1] at [I].
+ *
+ * However for a read sequence to have move past what __smr_enter() observed,
+ * it means another __smr_scan() didn't observe the store to CPU::c_rd_seq
+ * made by __smr_enter() and thought the section was inactive.
+ *
+ * This can only happen if the scan's [S2] was issued before the delayed
+ * __smr_enter() [R1] (during the [I] window).
+ *
+ * As a consequence the outcome of that scan can be accepted as the "real"
+ * write sequence __smr_enter() should have observed.
+ *
+ *
+ * Litmus tests
+ * ~~~~~~~~~~~~
+ *
+ * This is the proof of [W] -> [R1] -> [S2] being established properly:
+ * - P0 sets a global and calls smr_synchronize()
+ * - P1 does smr_enter() and loads the global
+ *
+ *     AArch64 MP
+ *     {
+ *         global = 0;
+ *         wr_seq = 123;
+ *         p1_rd_seq = 0;
+ *
+ *         0:x0 = global; 0:x1 = wr_seq; 0:x2 = p1_rd_seq;
+ *         1:x0 = global; 1:x1 = wr_seq; 1:x2 = p1_rd_seq;
+ *     }
+ *      P0                     | P1                         ;
+ *      MOV      X8, #2        | LDR        X8, [X1]        ;
+ *      STR      X8, [X0]      | STR        X8, [X2]        ;
+ *      LDADDL   X8, X9, [X1]  | DMB        SY              ;
+ *      DMB      SY            | LDR        X10, [X0]       ;
+ *      LDR      X10, [X2]     |                            ;
+ *     exists (0:X10 = 0 /\ 1:X8 = 123 /\ 1:X10 = 0)
+ *
+ *
+ * This is the proof that deferred advances are also correct:
+ * - P0 sets a global and does a smr_deferred_advance()
+ * - P1 does an smr_synchronize() and reads the global
+ *
+ *     AArch64 MP
+ *     {
+ *         global = 0;
+ *         wr_seq = 123;
+ *
+ *         0:x0 = global; 0:x1 = wr_seq; 0:x2 = 2;
+ *         1:x0 = global; 1:x1 = wr_seq; 1:x2 = 2;
+ *     }
+ *      P0                     | P1                         ;
+ *      STR      X2, [X0]      | LDADDL     X2, X9, [X1]    ;
+ *      DMB      SY            | DMB        SY              ;
+ *      LDR      X9, [X1]      | LDR        X10, [X0]       ;
+ *      ADD      X9, X9, X2    |                            ;
+ *     exists (0:X9 = 125 /\ 1:X9 = 123 /\ 1:X10 = 0)
+ *
+ */
 
 static inline smr_pcpu_t __zpercpu
 smr_pcpu(smr_t smr)
@@ -110,6 +276,19 @@ smr_init(smr_t smr)
 }
 
 void
+smr_set_deferred_budget(smr_t smr, unsigned long budget)
+{
+	/*
+	 * No need to update the per-cpu budget variables,
+	 * calls to smr_deferred_advance() will eventually fix it.
+	 *
+	 * Note: we use `-1` because smr_deferred_advance_nopreempt()
+	 *       checks for overflow rather than hitting 0.
+	 */
+	smr->smr_budget = budget ? budget - 1 : 0;
+}
+
+void
 smr_destroy(smr_t smr)
 {
 	smr_synchronize(smr);
@@ -123,6 +302,7 @@ smr_entered_nopreempt(smr_t smr)
 	return zpercpu_get(smr_pcpu(smr))->c_rd_seq != SMR_SEQ_INVALID;
 }
 
+__attribute__((always_inline))
 bool
 smr_entered(smr_t smr)
 {
@@ -151,11 +331,12 @@ __smr_enter(smr_t smr, smr_pcpu_t pcpu)
 	 */
 	s_wr_seq = os_atomic_load(&smr->smr_clock.s_wr_seq, relaxed);
 #if __x86_64__
+	/* [R1] */
 	old_seq = os_atomic_add_orig(&pcpu->c_rd_seq, s_wr_seq, seq_cst);
 #else
 	old_seq = os_atomic_load(&pcpu->c_rd_seq, relaxed);
 	os_atomic_store(&pcpu->c_rd_seq, s_wr_seq, relaxed);
-	os_atomic_thread_fence(seq_cst);
+	os_atomic_thread_fence(seq_cst); /* [R1] */
 #endif
 	assert(old_seq == SMR_SEQ_INVALID);
 }
@@ -174,17 +355,17 @@ smr_leave(smr_t smr)
 {
 	smr_pcpu_t pcpu = zpercpu_get(smr_pcpu(smr));
 
+	/* [R2] */
 	os_atomic_store(&pcpu->c_rd_seq, SMR_SEQ_INVALID, release);
 	enable_preemption();
 }
 
-#if __LP64__
 static inline smr_seq_t
 __smr_wr_advance(smr_t smr)
 {
+	/* [W] */
 	return os_atomic_add(&smr->smr_clock.s_wr_seq, SMR_SEQ_INC, release);
 }
-#endif /* __LP64__ */
 
 static inline smr_clock_t
 __smr_wr_advance_combined(smr_t smr)
@@ -194,45 +375,66 @@ __smr_wr_advance_combined(smr_t smr)
 	/*
 	 * Do a combined increment to get consistent read/write positions.
 	 */
+
+	/* [W] */
 	clk.s_combined = os_atomic_add(&smr->smr_clock.s_combined,
 	    clk.s_combined, release);
 
 	return clk;
 }
 
-static inline smr_seq_t
-__smr_rd_advance(smr_t smr, smr_seq_t rd_seq)
+static inline bool
+__smr_rd_advance(smr_t smr, smr_seq_t goal, smr_seq_t rd_seq)
 {
-	smr_seq_t s_rd_seq;
+	smr_clock_t oclk, nclk;
 
-	s_rd_seq = os_atomic_load(&smr->smr_clock.s_rd_seq, relaxed);
+	os_atomic_rmw_loop(&smr->smr_clock.s_combined,
+	    oclk.s_combined, nclk.s_combined, relaxed, {
+		nclk = oclk;
 
-	if (SMR_SEQ_CMP(rd_seq, >, s_rd_seq)) {
-		if (os_atomic_cmpxchgv(&smr->smr_clock.s_rd_seq,
-		    s_rd_seq, rd_seq, &s_rd_seq, relaxed)) {
-			return rd_seq;
+		os_atomic_thread_fence(seq_cst); /* [S3] */
+
+		if (SMR_SEQ_CMP(rd_seq, <=, oclk.s_rd_seq)) {
+		        os_atomic_rmw_loop_give_up(break);
 		}
-	}
+		nclk.s_rd_seq = rd_seq;
+	});
 
-	return s_rd_seq;
+	return SMR_SEQ_CMP(goal, <=, nclk.s_rd_seq);
 }
 
 __attribute__((noinline))
 static bool
 __smr_scan(smr_t smr, smr_seq_t goal, smr_clock_t clk, bool wait)
 {
+	smr_delta_t delta;
 	smr_seq_t rd_seq;
 
 	/*
 	 * Validate that the goal is sane.
 	 */
-	if (SMR_SEQ_CMP(goal, >, clk.s_wr_seq)) {
+	delta = SMR_SEQ_DELTA(goal, clk.s_wr_seq);
+	if (delta == SMR_SEQ_INC && smr->smr_budget) {
+		/*
+		 * This SMR clock uses deferred advance,
+		 * and the goal is one inc in the future.
+		 *
+		 * If we can wait, then force the clock
+		 * to advance, else we can't possibly succeed.
+		 */
+		if (!wait) {
+			return false;
+		}
+		clk = __smr_wr_advance_combined(smr);
+	} else if (delta > 0) {
 		/*
 		 * Invalid goal: the caller held on it for too long,
 		 * and integers wrapped.
 		 */
 		return true;
 	}
+
+	os_atomic_thread_fence(seq_cst); /* [S2] */
 
 	/*
 	 * The read sequence can be no larger than the write sequence
@@ -249,18 +451,10 @@ __smr_scan(smr_t smr, smr_seq_t goal, smr_clock_t clk, bool wait)
 	 * might appear larger than s_rd_seq spuriously and we'd
 	 * __smr_rd_advance() incorrectly.
 	 *
-	 * On LP64 this is guaranteed by the fact that this represents
+	 * This is guaranteed by the fact that this represents
 	 * advancing 2^62 times. At one advance every nanosecond,
 	 * it takes more than a century, which makes it possible
 	 * to call smr_wait() or smr_poll() with preemption enabled.
-	 *
-	 * On 32bit systems, this represents 2^30 advances, which
-	 * at one advance per nanosecond, would take about 1s.
-	 * In order to prevent issues where a scanner would be preempted
-	 * while CPUs go crazy advanding and wrapping the interval,
-	 * preemption is disabled around manipulating either bounds.
-	 * No supported 32bit system has a high core count which
-	 * makes this protection sufficient.
 	 */
 	rd_seq = clk.s_wr_seq;
 
@@ -300,17 +494,7 @@ __smr_scan(smr_t smr, smr_seq_t goal, smr_clock_t clk, bool wait)
 	/*
 	 * Advance the rd_seq as long as we observed a more recent value.
 	 */
-	rd_seq = __smr_rd_advance(smr, rd_seq);
-
-	if (SMR_SEQ_CMP(goal, <=, rd_seq)) {
-		/*
-		 * Pairs with smr_leave() and smr_advance()
-		 */
-		os_atomic_thread_fence(acquire);
-		return true;
-	}
-
-	return false;
+	return __smr_rd_advance(smr, goal, rd_seq);
 }
 
 static inline bool
@@ -321,11 +505,10 @@ __smr_poll(smr_t smr, smr_seq_t goal, bool wait)
 	/*
 	 * Load both the s_rd_seq and s_wr_seq in the right order so that we
 	 * can't observe a s_rd_seq older than s_wr_seq.
-	 *
-	 * the "seq_cst" barriers pair with smr_leave() and __smr_wr_advance*()
-	 * This compiles to `ldar` on arm64, and acquire barriers elsewhere.
 	 */
-	clk.s_rd_seq = os_atomic_load(&smr->smr_clock.s_rd_seq, seq_cst);
+
+	/* [S1] */
+	clk.s_rd_seq = os_atomic_load(&smr->smr_clock.s_rd_seq, acquire);
 
 	/*
 	 * We expect this to be typical: the goal has already been observed.
@@ -334,7 +517,7 @@ __smr_poll(smr_t smr, smr_seq_t goal, bool wait)
 		return true;
 	}
 
-	clk.s_wr_seq = os_atomic_load(&smr->smr_clock.s_wr_seq, seq_cst);
+	clk.s_wr_seq = os_atomic_load(&smr->smr_clock.s_wr_seq, relaxed);
 
 	return __smr_scan(smr, goal, clk, wait);
 }
@@ -346,57 +529,63 @@ smr_advance(smr_t smr)
 
 	assert(!smr_entered(smr));
 
-#if __LP64__
 	/*
-	 * On LP64, we assume that there will at least be a successful
-	 * __smr_poll call every 2^61 calls to smr_advance() or so,
-	 * so we do not need to check if [s_rd_seq, s_wr_seq) is growing
-	 * too wide.
+	 * We assume that there will at least be a successful __smr_poll
+	 * call every 2^61 calls to smr_advance() or so, so we do not need
+	 * to check if [s_rd_seq, s_wr_seq) is growing too wide.
 	 */
-	clk.s_wr_seq = __smr_wr_advance(smr);
-#else
-	smr_critical_enter();
+	static_assert(sizeof(clk.s_wr_seq) == 8);
+	return __smr_wr_advance(smr);
+}
 
-	clk = __smr_wr_advance_combined(smr);
+smr_seq_t
+smr_deferred_advance_nopreempt(smr_t smr, unsigned long step)
+{
+	smr_pcpu_t pcpu = smr_pcpu(smr);
 
-	/*
-	 * The [s_rd_seq, s_rw_seq) interval MUST be smaller
-	 * than ULONG_MAX / 2 with a comfortable margin (we pick half that).
-	 *
-	 * So in case we keep advancing and never poll/wait,
-	 * the read sequence is forced to catch up.
-	 */
-	const smr_delta_t max_delta = ULONG_MAX / 4;
+	assert(get_preemption_level() && !smr_entered_nopreempt(smr));
 
-	if (__improbable(SMR_SEQ_DELTA(clk.s_wr_seq, clk.s_rd_seq) >= max_delta)) {
-		__smr_scan(smr, clk.s_wr_seq - max_delta / 2, clk, true);
+	if (os_sub_overflow(pcpu->c_rd_budget, step, &pcpu->c_rd_budget)) {
+		pcpu->c_rd_budget = smr->smr_budget;
+		return __smr_wr_advance(smr);
 	}
 
-	smr_critical_leave();
-#endif /* !__LP64__ */
+	/*
+	 * Deferred updates are about avoiding to touch the global c_wr_seq
+	 * as often, and we return a sequence number in the future.
+	 *
+	 * This full barrier establishes a "happen before" relationship
+	 * with the [W] barrier in the __smr_wr_advance() that will
+	 * actually generate it.
+	 */
+	os_atomic_thread_fence(seq_cst);
+	return SMR_SEQ_INC + os_atomic_load(&smr->smr_clock.s_wr_seq, relaxed);
+}
 
-	return clk.s_wr_seq;
+smr_seq_t
+smr_deferred_advance(smr_t smr, unsigned long step)
+{
+	smr_seq_t seq;
+
+	disable_preemption();
+	seq = smr_deferred_advance_nopreempt(smr, step);
+	enable_preemption();
+
+	return seq;
 }
 
 bool
 smr_poll(smr_t smr, smr_seq_t goal)
 {
-	bool success;
-
-	smr_critical_enter();
-	assert(!smr_entered(smr));
-	success = __smr_poll(smr, goal, false);
-	smr_critical_leave();
-	return success;
+	assert(!smr_entered(smr) && goal != SMR_SEQ_INVALID);
+	return __smr_poll(smr, goal, false);
 }
 
 void
 smr_wait(smr_t smr, smr_seq_t goal)
 {
-	smr_critical_enter();
-	assert(!smr_entered(smr));
+	assert(!smr_entered(smr) && goal != SMR_SEQ_INVALID);
 	(void)__smr_poll(smr, goal, true);
-	smr_critical_leave();
 }
 
 void
@@ -404,9 +593,186 @@ smr_synchronize(smr_t smr)
 {
 	smr_clock_t clk;
 
-	smr_critical_enter();
 	assert(!smr_entered(smr));
 	clk = __smr_wr_advance_combined(smr);
 	__smr_scan(smr, clk.s_wr_seq, clk, true);
-	smr_critical_leave();
 }
+
+
+#pragma mark - system global SMR
+
+typedef struct smr_record {
+	void                   *smrr_val;
+	void                  (*smrr_dtor)(void *);
+} *smr_record_t;
+
+typedef struct smr_bucket {
+	union {
+		struct mpsc_queue_chain  smrb_mplink;
+		STAILQ_ENTRY(smr_bucket) smrb_stqlink;
+	};
+	uint32_t             smrb_count;
+	uint32_t             smrb_size;
+	smr_seq_t            smrb_seq;
+	struct smr_record    smrb_recs[];
+} *smr_bucket_t;
+
+STAILQ_HEAD(smr_bucket_list, smr_bucket);
+
+static SMR_DEFINE_EARLY(smr_system);
+
+/*! per-cpu state for smr pointers. */
+static smr_bucket_t PERCPU_DATA(smr_bucket);
+
+/*! the minimum number of items cached in per-cpu buckets */
+static TUNABLE(uint32_t, smr_bucket_count_min, "smr_bucket_count_min", 8);
+
+/*! the amount of memory pending retiring that causes a foreceful flush */
+#if XNU_TARGET_OS_OSX
+#define SMR_RETIRE_THRESHOLD_DEFAULT    (256 << 10)
+#else
+#define SMR_RETIRE_THRESHOLD_DEFAULT    (64 << 10)
+#endif
+static TUNABLE(vm_size_t, smr_retire_threshold, "smr_retire_threshold",
+    SMR_RETIRE_THRESHOLD_DEFAULT);
+
+/*! the number of items cached in per-cpu buckets */
+static SECURITY_READ_ONLY_LATE(uint32_t) smr_bucket_count;
+
+/*! the queue of elements that couldn't be freed immediately */
+static struct smr_bucket_list smr_buckets_pending =
+    STAILQ_HEAD_INITIALIZER(smr_buckets_pending);
+
+/*! the atomic queue handling deferred deallocations */
+static struct mpsc_daemon_queue smr_deallocate_queue;
+
+__attribute__((always_inline))
+bool
+smr_global_entered(void)
+{
+	return smr_entered(&smr_system);
+}
+
+__attribute__((always_inline))
+void
+smr_global_enter(void)
+{
+	smr_enter(&smr_system);
+}
+
+__attribute__((always_inline))
+void
+smr_global_leave(void)
+{
+	smr_leave(&smr_system);
+}
+
+static smr_bucket_t
+smr_bucket_alloc(zalloc_flags_t flags)
+{
+	return kalloc_type(struct smr_bucket, struct smr_record,
+	           smr_bucket_count, Z_ZERO | flags);
+}
+
+static void
+smr_bucket_free(smr_bucket_t bucket)
+{
+	return kfree_type(struct smr_bucket, struct smr_record,
+	           smr_bucket_count, bucket);
+}
+
+void
+smr_global_retire(void *value, size_t size, void (*destructor)(void *))
+{
+	smr_bucket_t *slot;
+	smr_bucket_t bucket, free_bucket = NULL;
+
+	if (__improbable(startup_phase < STARTUP_SUB_EARLY_BOOT)) {
+		/*
+		 * The system is still single threaded and this module
+		 * is still not fully initialized.
+		 */
+		destructor(value);
+		return;
+	}
+
+again:
+	disable_preemption();
+	slot = PERCPU_GET(smr_bucket);
+	bucket = *slot;
+	if (bucket && bucket->smrb_seq) {
+		mpsc_daemon_enqueue(&smr_deallocate_queue,
+		    &bucket->smrb_mplink, MPSC_QUEUE_NONE);
+		*slot = bucket = NULL;
+	}
+	if (bucket == NULL) {
+		if (free_bucket) {
+			bucket = free_bucket;
+			free_bucket = NULL;
+		} else if ((bucket = smr_bucket_alloc(Z_NOWAIT)) == NULL) {
+			enable_preemption();
+			free_bucket = smr_bucket_alloc(Z_WAITOK | Z_NOFAIL);
+			goto again;
+		}
+		*slot = bucket;
+	}
+
+	bucket->smrb_recs[bucket->smrb_count].smrr_val = value;
+	bucket->smrb_recs[bucket->smrb_count].smrr_dtor = destructor;
+
+	if (os_add_overflow(bucket->smrb_size, size, &bucket->smrb_size)) {
+		bucket->smrb_size = UINT32_MAX;
+	}
+
+	if (++bucket->smrb_count == smr_bucket_count ||
+	    bucket->smrb_size >= smr_retire_threshold) {
+		/*
+		 * This will be retired the next time around,
+		 * to give readers a chance to notice the new clock.
+		 */
+		bucket->smrb_seq = smr_advance(&smr_system);
+	}
+	enable_preemption();
+
+	if (__improbable(free_bucket)) {
+		smr_bucket_free(free_bucket);
+	}
+}
+
+
+static void
+smr_deallocate_queue_invoke(mpsc_queue_chain_t e,
+    __assert_only mpsc_daemon_queue_t dq)
+{
+	smr_bucket_t bucket;
+
+	assert(dq == &smr_deallocate_queue);
+
+	bucket = mpsc_queue_element(e, struct smr_bucket, smrb_mplink);
+	smr_wait(&smr_system, bucket->smrb_seq);
+
+	for (uint32_t i = 0; i < bucket->smrb_count; i++) {
+		struct smr_record *smrr = &bucket->smrb_recs[i];
+
+		smrr->smrr_dtor(smrr->smrr_val);
+	}
+
+	smr_bucket_free(bucket);
+}
+
+void
+smr_register_mpsc_queue(void)
+{
+	thread_deallocate_daemon_register_queue(&smr_deallocate_queue,
+	    smr_deallocate_queue_invoke);
+}
+
+static void
+smr_startup(void)
+{
+	smr_bucket_count = zpercpu_count();
+	if (smr_bucket_count < smr_bucket_count_min) {
+		smr_bucket_count = smr_bucket_count_min;
+	}
+}
+STARTUP(PERCPU, STARTUP_RANK_LAST, smr_startup);

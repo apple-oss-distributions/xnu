@@ -2765,3 +2765,213 @@ inifa_ifpclatv4(struct ifnet * ifp)
 
 	return (struct in_ifaddr *)ifa;
 }
+
+/*
+ * IPPROTO_xxx.
+ *
+ * The switch statement below does nothing at runtime, as it serves as a
+ * compile time check to ensure that all of the IPPROTO_xxx constants are
+ * unique.  This works as long as this routine gets updated each time a
+ * new IPPROTO_xxx constant gets added.
+ *
+ * Any failures at compile time indicates duplicated IPPROTO_xxx values.
+ */
+static __attribute__((unused)) void
+ipproto_cassert(void)
+{
+	/*
+	 * This is equivalent to _CASSERT() and the compiler wouldn't
+	 * generate any instructions, thus for compile time only.
+	 */
+	switch ((u_int16_t)0) {
+	/* bsd/netinet/in.h */
+	case IPPROTO_IP:
+//	case IPPROTO_HOPOPTS: // same value as IPPROTO_IP
+	case IPPROTO_ICMP:
+	case IPPROTO_IGMP:
+	case IPPROTO_GGP:
+	case IPPROTO_IPV4:
+	// #define IPPROTO_IPIP            IPPROTO_IPV4
+	case IPPROTO_TCP:
+	case IPPROTO_ST:
+	case IPPROTO_EGP:
+	case IPPROTO_PIGP:
+	case IPPROTO_RCCMON:
+	case IPPROTO_NVPII:
+	case IPPROTO_PUP:
+	case IPPROTO_ARGUS:
+	case IPPROTO_EMCON:
+	case IPPROTO_XNET:
+	case IPPROTO_CHAOS:
+	case IPPROTO_UDP:
+	case IPPROTO_MUX:
+	case IPPROTO_MEAS:
+	case IPPROTO_HMP:
+	case IPPROTO_PRM:
+	case IPPROTO_IDP:
+	case IPPROTO_TRUNK1:
+	case IPPROTO_TRUNK2:
+	case IPPROTO_LEAF1:
+	case IPPROTO_LEAF2:
+	case IPPROTO_RDP:
+	case IPPROTO_IRTP:
+	case IPPROTO_TP:
+	case IPPROTO_BLT:
+	case IPPROTO_NSP:
+	case IPPROTO_INP:
+	case IPPROTO_SEP:
+	case IPPROTO_3PC:
+	case IPPROTO_IDPR:
+	case IPPROTO_XTP:
+	case IPPROTO_DDP:
+	case IPPROTO_CMTP:
+	case IPPROTO_TPXX:
+	case IPPROTO_IL:
+	case IPPROTO_IPV6:
+	case IPPROTO_SDRP:
+	case IPPROTO_ROUTING:
+	case IPPROTO_FRAGMENT:
+	case IPPROTO_IDRP:
+	case IPPROTO_RSVP:
+	case IPPROTO_GRE:
+	case IPPROTO_MHRP:
+	case IPPROTO_BHA:
+	case IPPROTO_ESP:
+	case IPPROTO_AH:
+	case IPPROTO_INLSP:
+	case IPPROTO_SWIPE:
+	case IPPROTO_NHRP:
+	case IPPROTO_ICMPV6:
+	case IPPROTO_NONE:
+	case IPPROTO_DSTOPTS:
+	case IPPROTO_AHIP:
+	case IPPROTO_CFTP:
+	case IPPROTO_HELLO:
+	case IPPROTO_SATEXPAK:
+	case IPPROTO_KRYPTOLAN:
+	case IPPROTO_RVD:
+	case IPPROTO_IPPC:
+	case IPPROTO_ADFS:
+	case IPPROTO_SATMON:
+	case IPPROTO_VISA:
+	case IPPROTO_IPCV:
+	case IPPROTO_CPNX:
+	case IPPROTO_CPHB:
+	case IPPROTO_WSN:
+	case IPPROTO_PVP:
+	case IPPROTO_BRSATMON:
+	case IPPROTO_ND:
+	case IPPROTO_WBMON:
+	case IPPROTO_WBEXPAK:
+	case IPPROTO_EON:
+	case IPPROTO_VMTP:
+	case IPPROTO_SVMTP:
+	case IPPROTO_VINES:
+	case IPPROTO_TTP:
+	case IPPROTO_IGP:
+	case IPPROTO_DGP:
+	case IPPROTO_TCF:
+	case IPPROTO_IGRP:
+	case IPPROTO_OSPFIGP:
+	case IPPROTO_SRPC:
+	case IPPROTO_LARP:
+	case IPPROTO_MTP:
+	case IPPROTO_AX25:
+	case IPPROTO_IPEIP:
+	case IPPROTO_MICP:
+	case IPPROTO_SCCSP:
+	case IPPROTO_ETHERIP:
+	case IPPROTO_ENCAP:
+	case IPPROTO_APES:
+	case IPPROTO_GMTP:
+	case IPPROTO_PIM:
+	case IPPROTO_IPCOMP:
+	case IPPROTO_PGM:
+	case IPPROTO_SCTP:
+	case IPPROTO_DIVERT:
+	case IPPROTO_RAW:
+	case IPPROTO_MAX:
+	case IPPROTO_DONE:
+
+	/* bsd/netinet/in_private.h */
+	case IPPROTO_QUIC:
+		;
+	}
+}
+
+static __attribute__((unused)) void
+ipsockopt_cassert(void)
+{
+	switch ((int)0) {
+	case 0:
+
+	/* bsd/netinet/in.h */
+	case IP_OPTIONS:
+	case IP_HDRINCL:
+	case IP_TOS:
+	case IP_TTL:
+	case IP_RECVOPTS:
+	case IP_RECVRETOPTS:
+	case IP_RECVDSTADDR:
+	case IP_RETOPTS:
+	case IP_MULTICAST_IF:
+	case IP_MULTICAST_TTL:
+	case IP_MULTICAST_LOOP:
+	case IP_ADD_MEMBERSHIP:
+	case IP_DROP_MEMBERSHIP:
+	case IP_MULTICAST_VIF:
+	case IP_RSVP_ON:
+	case IP_RSVP_OFF:
+	case IP_RSVP_VIF_ON:
+	case IP_RSVP_VIF_OFF:
+	case IP_PORTRANGE:
+	case IP_RECVIF:
+	case IP_IPSEC_POLICY:
+	case IP_FAITH:
+#ifdef __APPLE__
+	case IP_STRIPHDR:
+#endif
+	case IP_RECVTTL:
+	case IP_BOUND_IF:
+	case IP_PKTINFO:
+// #define IP_RECVPKTINFO          IP_PKTINFO
+	case IP_RECVTOS:
+	case IP_DONTFRAG:
+	case IP_FW_ADD:
+	case IP_FW_DEL:
+	case IP_FW_FLUSH:
+	case IP_FW_ZERO:
+	case IP_FW_GET:
+	case IP_FW_RESETLOG:
+	case IP_OLD_FW_ADD:
+	case IP_OLD_FW_DEL:
+	case IP_OLD_FW_FLUSH:
+	case IP_OLD_FW_ZERO:
+	case IP_OLD_FW_GET:
+	case IP_NAT__XXX:
+	case IP_OLD_FW_RESETLOG:
+	case IP_DUMMYNET_CONFIGURE:
+	case IP_DUMMYNET_DEL:
+	case IP_DUMMYNET_FLUSH:
+	case IP_DUMMYNET_GET:
+	case IP_TRAFFIC_MGT_BACKGROUND:
+	case IP_MULTICAST_IFINDEX:
+	case IP_ADD_SOURCE_MEMBERSHIP:
+	case IP_DROP_SOURCE_MEMBERSHIP:
+	case IP_BLOCK_SOURCE:
+	case IP_UNBLOCK_SOURCE:
+	case IP_MSFILTER:
+	case MCAST_JOIN_GROUP:
+	case MCAST_LEAVE_GROUP:
+	case MCAST_JOIN_SOURCE_GROUP:
+	case MCAST_LEAVE_SOURCE_GROUP:
+	case MCAST_BLOCK_SOURCE:
+	case MCAST_UNBLOCK_SOURCE:
+
+	/* bsd/netinet/in_private.h */
+	case IP_NO_IFT_CELLULAR:
+// #define IP_NO_IFT_PDP           IP_NO_IFT_CELLULAR /* deprecated */
+	case IP_OUT_IF:
+		;
+	}
+}

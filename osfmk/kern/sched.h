@@ -414,13 +414,15 @@ void sched_timeshare_consider_maintenance(uint64_t ctime);
 void sched_consider_recommended_cores(uint64_t ctime, thread_t thread);
 
 extern int32_t          sched_poll_yield_shift;
-extern uint64_t         sched_safe_duration;
+extern uint64_t         sched_safe_rt_duration;
+extern uint64_t         sched_safe_fixed_duration;
 
 extern uint32_t         sched_load_average, sched_mach_factor;
 
 extern uint32_t         avenrun[3], mach_factor[3];
 
-extern uint64_t         max_unsafe_computation;
+extern uint64_t         max_unsafe_rt_computation;
+extern uint64_t         max_unsafe_fixed_computation;
 extern uint64_t         max_poll_computation;
 
 extern uint32_t         sched_run_buckets[TH_BUCKET_MAX];
@@ -440,14 +442,14 @@ struct shift_data {
 };
 
 /*
- *	thread_timer_delta macro takes care of both thread timers.
+ * Save the current thread time and compute a delta since the last call for the
+ * scheduler tick.
  */
-#define thread_timer_delta(thread, delta)                                       \
-MACRO_BEGIN                                                                     \
-	(delta) = (typeof(delta))timer_delta(&(thread)->system_timer,           \
-	    &(thread)->system_timer_save);                                      \
-	(delta) += (typeof(delta))timer_delta(&(thread)->user_timer,            \
-	    &(thread)->user_timer_save);                                        \
+#define sched_tick_delta(thread, delta) \
+MACRO_BEGIN \
+    uint64_t _total = recount_thread_time_mach(thread); \
+    (delta) = (typeof(delta))(_total - thread->sched_time_save); \
+    thread->sched_time_save = _total; \
 MACRO_END
 
 #define SCHED_MAX_BACKUP_PROCESSORS             7

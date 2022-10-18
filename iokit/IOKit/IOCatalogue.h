@@ -129,6 +129,17 @@ public:
 #endif /* XNU_KERNEL_PRIVATE */
 
 /*!
+ *   @function exchangeDrivers
+ *   @abstract Remove driver personalities from the database based on matching information provided and adds an array of driver personalities to the database atomically.
+ *   @param matchingForRemove  A dictionary whose keys and values are used for matching personalities in the database.  For example, a matching dictionary containing a 'IOProviderClass' key with the value 'IOPCIDevice' will remove all personalities which have the key 'IOProviderClass' equal to 'IOPCIDevice'.
+ *   @param personalitiesToAdd Array of driver personalities to be added to the database.
+ *   @param doNubMatching Start matching process after personalities have been exchanged.  Matching criteria is based on IOProviderClass of those personalities which were removed and added.  This is to allow drivers which haven't been matched to match against NUB's which were blocked by the previous personalities.
+ *   @result Returns true if personalities were exchanged successfully. Failure is due to a memory allocation failure.
+ */
+	bool exchangeDrivers(OSDictionary * matchingForRemove, OSArray * personalitiesToAdd, bool doNubMatching = true);
+
+
+/*!
  *   @function getGenerationCount
  *   @abstract Get the current generation count of the database.
  */
@@ -176,18 +187,20 @@ public:
  *   @abstract Terminates all instances of a driver which depends on a particular module and unloads the module.
  *   @param moduleName Name of the module which is used to determine which driver instances to terminate and unload.
  *   @param unload Flag to cause the actual unloading of the module.
+ *   @param asynchronous Whether to terminate drivers asynchronously. Optional parameter, defaults to false.
  */
-	IOReturn terminateDriversForModule( OSString * moduleName, bool unload = true);
+	IOReturn terminateDriversForModule( OSString * moduleName, bool unload = true, bool asynchronous = false);
 
 /*!
  *   @function terminateDriversForModule
  *   @abstract Terminates all instances of a driver which depends on a particular module and unloads the module.
  *   @param moduleName Name of the module which is used to determine which driver instances to terminate and unload.
  *   @param unload Flag to cause the actual unloading of the module.
+ *   @param asynchronous Whether to terminate drivers asynchronously. Optional parameter, defaults to false.
  */
-	IOReturn terminateDriversForModule( const char * moduleName, bool unload = true);
+	IOReturn terminateDriversForModule( const char * moduleName, bool unload = true, bool asynchronous = false);
 #if XNU_KERNEL_PRIVATE
-	IOReturn terminateDrivers(OSDictionary * matching, io_name_t className);
+	IOReturn terminateDrivers(OSDictionary * matching, io_name_t className, bool asynchronous);
 
 	IOReturn terminateDriversForUserspaceReboot();
 

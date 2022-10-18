@@ -66,6 +66,11 @@ struct thread_snapshot {
 	char                    ts_rqos;     /* requested qos */
 	char                    ts_rqos_override; /* requested qos override */
 	char                    io_tier;
+	/*
+	 * In microstackshots, the low two bytes are the start of the first async
+	 * frame in the thread's user space call stack.  If the call stack lacks
+	 * async stack frames, it's `UINT16_MAX`.
+	 */
 	char                    _reserved[3]; /* pad for 4 byte alignement packing */
 
 	/*
@@ -109,6 +114,9 @@ struct task_snapshot {
 	int                     pageins;        /* number of actual pageins */
 	int                     cow_faults;     /* number of copy-on-write faults */
 	uint32_t                ss_flags;
+	/*
+	 * In microstackshots, `p_start_sec` is actually the resource coalition ID.
+	 */
 	uint64_t                p_start_sec;    /* from the bsd proc struct */
 	uint64_t                p_start_usec;   /* from the bsd proc struct */
 
@@ -265,6 +273,8 @@ __options_decl(stackshot_flags_t, uint64_t, {
 	STACKSHOT_ASID                             = 0x10000000,
 	STACKSHOT_PAGE_TABLES                      = 0x20000000,
 	STACKSHOT_DISABLE_LATENCY_INFO             = 0x40000000,
+	STACKSHOT_SAVE_DYLD_COMPACTINFO            = 0x80000000,
+	STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL = 0x100000000,
 }); // Note: Add any new flags to kcdata.py (stackshot_in_flags)
 
 __options_decl(microstackshot_flags_t, uint32_t, {
@@ -281,7 +291,6 @@ __options_decl(microstackshot_flags_t, uint32_t, {
 
 #define STACKSHOT_PAGETABLES_MASK_ALL           ~0
 
-#define KF_INITIALIZED (0x1)
 #define KF_SERIAL_OVRD (0x2)
 #define KF_PMAPV_OVRD (0x4)
 #define KF_MATV_OVRD (0x8)
@@ -291,12 +300,35 @@ __options_decl(microstackshot_flags_t, uint32_t, {
 #define KF_TRAPTRACE_OVRD (0x80)
 #define KF_IOTRACE_OVRD (0x100)
 #define KF_INTERRUPT_MASKED_DEBUG_STACKSHOT_OVRD (0x200)
-#define KF_INTERRUPT_MASKED_DEBUG_PMC_OVRD (0x400)
+#define KF_SCHED_HYGIENE_DEBUG_PMC_OVRD (0x400)
 #define KF_RW_LOCK_DEBUG_OVRD (0x800)
 #define KF_MADVISE_FREE_DEBUG_OVRD (0x1000)
+#define KF_DISABLE_FP_POPC_ON_PGFLT (0x2000)
+#define KF_IO_TIMEOUT_OVRD (0x8000)
 
 boolean_t kern_feature_override(uint32_t fmask);
 
+__options_decl(eph_panic_flags_t, uint64_t, {
+	EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_COMPLETE              = 0x01,                               /* INFO: coredump completed */
+	EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_SUCCEEDED            = 0x02,                               /* INFO: stackshot completed */
+	EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_DEBUGGERSYNC  = 0x04,                               /* ERROR: stackshot failed to sync with external debugger */
+	EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_ERROR         = 0x08,                               /* ERROR: stackshot failed */
+	EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_INCOMPLETE    = 0x10,                               /* ERROR: stackshot is partially complete */
+	EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_NESTED        = 0x20,                               /* ERROR: stackshot caused a nested panic */
+	EMBEDDED_PANIC_HEADER_FLAG_NESTED_PANIC                   = 0x40,                               /* ERROR: panic handler encountered a panic */
+	EMBEDDED_PANIC_HEADER_FLAG_BUTTON_RESET_PANIC             = 0x80,                               /* INFO: force-reset panic: user held power button to force shutdown */
+	EMBEDDED_PANIC_HEADER_FLAG_COPROC_INITIATED_PANIC         = 0x100,                              /* INFO: panic was triggered by a companion processor (not Xnu) */
+	EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_FAILED                = 0x200,                              /* ERROR: coredump failed to complete */
+	EMBEDDED_PANIC_HEADER_FLAG_COMPRESS_FAILED                = 0x400,                              /* ERROR: stackshot failed to compress */
+	EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_DATA_COMPRESSED      = 0x800,                              /* INFO: stackshot data is compressed */
+	EMBEDDED_PANIC_HEADER_FLAG_ENCRYPTED_COREDUMP_SKIPPED     = 0x1000,                             /* ERROR: coredump policy requires encryption, but encryptions is not initialized or available */
+	EMBEDDED_PANIC_HEADER_FLAG_KERNEL_COREDUMP_SKIPPED_EXCLUDE_REGIONS_UNAVAILABLE   = 0x2000,      /* ERROR: coredump region exclusion list is not available */
+	EMBEDDED_PANIC_HEADER_FLAG_COREFILE_UNLINKED              = 0x4000,                             /* ERROR: coredump output file is not linked */
+	EMBEDDED_PANIC_HEADER_FLAG_INCOHERENT_PANICLOG            = 0x8000                              /* ERROR: paniclog integrity check failed (a warning to consumer code i.e. DumpPanic) */
+});
+
+#define EMBEDDED_PANIC_HEADER_CURRENT_VERSION 4
+#define EMBEDDED_PANIC_MAGIC 0x46554E4B /* FUNK */
 #define EMBEDDED_PANIC_HEADER_OSVERSION_LEN 32
 
 /*
@@ -311,7 +343,7 @@ struct embedded_panic_header {
 	uint32_t eph_magic;                /* EMBEDDED_PANIC_MAGIC if valid */
 	uint32_t eph_crc;                  /* CRC of everything following the ph_crc in the header and the contents */
 	uint32_t eph_version;              /* embedded_panic_header version */
-	uint64_t eph_panic_flags;          /* Flags indicating any state or relevant details */
+	eph_panic_flags_t eph_panic_flags; /* Flags indicating any state or relevant details */
 	uint32_t eph_panic_log_offset;     /* Offset of the beginning of the panic log from the beginning of the header */
 	uint32_t eph_panic_log_len;        /* length of the panic log */
 	uint32_t eph_stackshot_offset;     /* Offset of the beginning of the panic stackshot from the beginning of the header */
@@ -329,56 +361,48 @@ struct embedded_panic_header {
 	};
 	char eph_os_version[EMBEDDED_PANIC_HEADER_OSVERSION_LEN];
 	char eph_macos_version[EMBEDDED_PANIC_HEADER_OSVERSION_LEN];
+	uuid_string_t eph_bootsessionuuid_string;                      /* boot session UUID */
+	uint64_t eph_roots_installed;                                  /* bitmap indicating which roots are installed on this system */
 } __attribute__((packed));
 
-#define EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_COMPLETE             0x01
-#define EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_SUCCEEDED           0x02
-#define EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_DEBUGGERSYNC 0x04
-#define EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_ERROR        0x08
-#define EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_INCOMPLETE   0x10
-#define EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_NESTED       0x20
-#define EMBEDDED_PANIC_HEADER_FLAG_NESTED_PANIC                  0x40
-#define EMBEDDED_PANIC_HEADER_FLAG_BUTTON_RESET_PANIC            0x80
-#define EMBEDDED_PANIC_HEADER_FLAG_COPROC_INITIATED_PANIC        0x100
-#define EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_FAILED               0x200
-#define EMBEDDED_PANIC_HEADER_FLAG_COMPRESS_FAILED               0x400
-#define EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_DATA_COMPRESSED     0x800
-#define EMBEDDED_PANIC_HEADER_FLAG_ENCRYPTED_COREDUMP_SKIPPED    0x1000
 
-#define EMBEDDED_PANIC_HEADER_CURRENT_VERSION 2
-#define EMBEDDED_PANIC_MAGIC 0x46554E4B /* FUNK */
+#define MACOS_PANIC_HEADER_CURRENT_VERSION 3
+#define MACOS_PANIC_MAGIC 0x44454544 /* DEED */
+
+__options_decl(mph_panic_flags_t, uint64_t, {
+	MACOS_PANIC_HEADER_FLAG_NESTED_PANIC                   = 0x01,                                /* ERROR: panic handler encountered a panic */
+	MACOS_PANIC_HEADER_FLAG_COPROC_INITIATED_PANIC         = 0x02,                                /* INFO: panic was triggered by a companion processor (not Xnu) */
+	MACOS_PANIC_HEADER_FLAG_STACKSHOT_SUCCEEDED            = 0x04,                                /* INFO: stackshot completed */
+	MACOS_PANIC_HEADER_FLAG_STACKSHOT_DATA_COMPRESSED      = 0x08,                                /* INFO: stackshot data is compressed */
+	MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_DEBUGGERSYNC  = 0x10,                                /* ERROR: stackshot failed to sync with external debugger */
+	MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_ERROR         = 0x20,                                /* ERROR: stackshot failed */
+	MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_INCOMPLETE    = 0x40,                                /* ERROR: stackshot is partially complete */
+	MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_NESTED        = 0x80,                                /* ERROR: stackshot caused a nested panic */
+	MACOS_PANIC_HEADER_FLAG_COREDUMP_COMPLETE              = 0x100,                               /* INFO: coredump completed */
+	MACOS_PANIC_HEADER_FLAG_COREDUMP_FAILED                = 0x200,                               /* ERROR: coredump failed to complete */
+	MACOS_PANIC_HEADER_FLAG_STACKSHOT_KERNEL_ONLY          = 0x400,                               /* ERROR: stackshot contains only kernel data (e.g. due to space limitations) */
+	MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_COMPRESS      = 0x800,                               /* ERROR: stackshot failed to compress */
+	MACOS_PANIC_HEADER_FLAG_ENCRYPTED_COREDUMP_SKIPPED     = 0x1000,                              /* ERROR: coredump policy requires encryption, but encryptions is not initialized or available */
+	MACOS_PANIC_HEADER_FLAG_KERNEL_COREDUMP_SKIPPED_EXCLUDE_REGIONS_UNAVAILABLE     = 0x2000,     /* ERROR: coredump region exclusion list is not available */
+	MACOS_PANIC_HEADER_FLAG_COREFILE_UNLINKED              = 0x4000,                              /* ERROR: coredump output file is not linked */
+	MACOS_PANIC_HEADER_FLAG_INCOHERENT_PANICLOG            = 0x8000                               /* ERROR: paniclog integrity check failed (a warning to consumer code i.e. DumpPanic) */
+});
 
 struct macos_panic_header {
 	uint32_t mph_magic;                   /* MACOS_PANIC_MAGIC if valid */
 	uint32_t mph_crc;                     /* CRC of everything following mph_crc in the header and the contents */
 	uint32_t mph_version;                 /* macos_panic_header version */
 	uint32_t mph_padding;                 /* unused */
-	uint64_t mph_panic_flags;             /* Flags indicating any state or relevant details */
+	mph_panic_flags_t mph_panic_flags;    /* Flags indicating any state or relevant details */
 	uint32_t mph_panic_log_offset;        /* Offset of the panic log from the beginning of the header */
 	uint32_t mph_panic_log_len;           /* length of the panic log */
-	uint32_t mph_stackshot_offset;  /* Offset of the panic stackshot from the beginning of the header */
-	uint32_t mph_stackshot_len;     /* length of the panic stackshot */
+	uint32_t mph_stackshot_offset;        /* Offset of the panic stackshot from the beginning of the header */
+	uint32_t mph_stackshot_len;           /* length of the panic stackshot */
 	uint32_t mph_other_log_offset;        /* Offset of the other log (any logging subsequent to the stackshot) from the beginning of the header */
 	uint32_t mph_other_log_len;           /* length of the other log */
+	uint64_t mph_roots_installed;         /* bitmap indicating which roots are installed on this system */
 	char     mph_data[];                  /* panic data -- DO NOT ACCESS THIS FIELD DIRECTLY. Use the offsets above relative to the beginning of the header */
 } __attribute__((packed));
-
-#define MACOS_PANIC_HEADER_CURRENT_VERSION 2
-#define MACOS_PANIC_MAGIC 0x44454544 /* DEED */
-
-#define MACOS_PANIC_HEADER_FLAG_NESTED_PANIC                  0x01
-#define MACOS_PANIC_HEADER_FLAG_COPROC_INITIATED_PANIC        0x02
-#define MACOS_PANIC_HEADER_FLAG_STACKSHOT_SUCCEEDED           0x04
-#define MACOS_PANIC_HEADER_FLAG_STACKSHOT_DATA_COMPRESSED     0x08
-#define MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_DEBUGGERSYNC 0x10
-#define MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_ERROR        0x20
-#define MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_INCOMPLETE   0x40
-#define MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_NESTED       0x80
-#define MACOS_PANIC_HEADER_FLAG_COREDUMP_COMPLETE             0x100
-#define MACOS_PANIC_HEADER_FLAG_COREDUMP_FAILED               0x200
-#define MACOS_PANIC_HEADER_FLAG_STACKSHOT_KERNEL_ONLY         0x400
-#define MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_COMPRESS     0x800
-#define MACOS_PANIC_HEADER_FLAG_ENCRYPTED_COREDUMP_SKIPPED    0x1000
 
 /*
  * Any change to the below structure should mirror the structure defined in MacEFIFirmware
@@ -411,6 +435,11 @@ struct efi_aurr_extended_panic_log {
 
 #endif /* __APPLE_API_UNSTABLE */
 #endif /* __APPLE_API_PRIVATE */
+
+/*
+ * If non-zero, this physical address had an ECC error that led to a panic.
+ */
+extern uint64_t ecc_panic_physical_address;
 
 #ifdef KERNEL
 
@@ -507,10 +536,6 @@ enum {
  */
 #define DEBUGGER_OPTION_NONE                        0x0ULL
 #define DEBUGGER_OPTION_PANICLOGANDREBOOT           0x1ULL /* capture a panic log and then reboot immediately */
-#define DEBUGGER_OPTION_RECURPANIC_ENTRY            0x2ULL
-#define DEBUGGER_OPTION_RECURPANIC_PRELOG           0x4ULL
-#define DEBUGGER_OPTION_RECURPANIC_POSTLOG          0x8ULL
-#define DEBUGGER_OPTION_RECURPANIC_POSTCORE         0x10ULL
 #define DEBUGGER_OPTION_INITPROC_PANIC              0x20ULL
 #define DEBUGGER_OPTION_COPROC_INITIATED_PANIC      0x40ULL /* panic initiated by a co-processor */
 #define DEBUGGER_OPTION_SKIP_LOCAL_COREDUMP         0x80ULL /* don't try to save local coredumps for this panic */
@@ -528,6 +553,23 @@ enum {
 #else
 #define PANIC_LOCATION __FILE__ ":" LINE_NUMBER(__LINE__)
 #define __FILE_NAME__ __FILE__
+#endif
+
+/* Macros for XNU platform stalls
+ *  The "location" macros specify points where we can stall or panic
+ *  The "action" macros specify the action to take at these points.
+ *  The default action is to stall. */
+#if (DEVELOPMENT || DEBUG)
+#define PLATFORM_STALL_XNU_DISABLE                              (0)
+#define PLATFORM_STALL_XNU_LOCATION_ARM_INIT                    (0x1ULL << 0)
+#define PLATFORM_STALL_XNU_LOCATION_KERNEL_BOOTSTRAP            (0x1ULL << 1)
+#define PLATFORM_STALL_XNU_LOCATION_BSD_INIT                    (0x1ULL << 2)
+#define PLATFORM_STALL_XNU_ACTION_PANIC                         (0x1ULL << 7)
+
+extern uint64_t xnu_platform_stall_value;
+
+void platform_stall_panic_or_spin(uint32_t req);
+
 #endif
 
 #if XNU_KERNEL_PRIVATE
@@ -691,7 +733,6 @@ extern void phys_carveout_init(void);
  * Check whether a kernel virtual address points within the physical carveout.
  */
 extern boolean_t debug_is_in_phys_carveout(vm_map_offset_t va);
-extern boolean_t debug_is_in_phys_carveout_metadata(vm_map_offset_t va);
 
 /*
  * Check whether the physical carveout should be included in a coredump.
@@ -701,9 +742,6 @@ extern boolean_t debug_can_coredump_phys_carveout(void);
 extern vm_offset_t phys_carveout;
 extern uintptr_t phys_carveout_pa;
 extern size_t phys_carveout_size;
-extern vm_offset_t phys_carveout_metadata;
-extern uintptr_t phys_carveout_metadata_pa;
-extern size_t phys_carveout_metadata_size;
 
 extern boolean_t kernel_debugging_restricted(void);
 
@@ -783,6 +821,23 @@ zone_leaks(const char * zoneName, uint32_t nameLen, leak_site_proc proc);
 
 extern void
 zone_leaks_scan(uintptr_t * instances, uint32_t count, uint32_t zoneSize, uint32_t * found);
+
+/* panic testing hooks */
+
+#define PANIC_TEST_CASE_DISABLED                    0
+#define PANIC_TEST_CASE_RECURPANIC_ENTRY            0x2    // recursive panic at panic entrypoint, before panic data structures are initialized
+#define PANIC_TEST_CASE_RECURPANIC_PRELOG           0x4    // recursive panic prior to paniclog being written
+#define PANIC_TEST_CASE_RECURPANIC_POSTLOG          0x8    // recursive panic after paniclog has been written
+#define PANIC_TEST_CASE_RECURPANIC_POSTCORE         0x10   // recursive panic after corefile has been written
+#define PANIC_TEST_CASE_COREFILE_IO_ERR             0x20   // single IO error in the corefile write path
+extern unsigned int    panic_test_case;
+
+#define PANIC_TEST_FAILURE_MODE_BADPTR 0x1                 // dereference a bad pointer
+#define PANIC_TEST_FAILURE_MODE_SPIN   0x2                 // spin until watchdog kicks in
+#define PANIC_TEST_FAILURE_MODE_PANIC  0x4                 // explicit panic
+extern unsigned int    panic_test_failure_mode;    // panic failure mode
+
+extern unsigned int    panic_test_action_count;    // test parameter, depends on test case
 
 #endif  /* DEBUG || DEVELOPMENT */
 

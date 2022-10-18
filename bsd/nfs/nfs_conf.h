@@ -29,17 +29,9 @@
 #ifndef _BSD_NFS_NFS_CONF_H_
 #define _BSD_NFS_NFS_CONF_H_
 
-#if NFSCLIENT
-#define CONFIG_NFS_CLIENT     1
-#endif /* NFSCLIENT */
-
 #if NFSSERVER
 #define CONFIG_NFS_SERVER     1
 #endif /* NFSSERVER */
 
-
-#if CONFIG_NFS_CLIENT || CONFIG_NFS_SERVER
-#define CONFIG_NFS            1
-#endif /* CONFIG_NFS_CLIENT || CONFIG_NFS_SERVER */
 
 #endif /* _BSD_NFS_NFS_CONF_H_ */

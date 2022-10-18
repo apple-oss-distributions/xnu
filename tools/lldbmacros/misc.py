@@ -12,37 +12,6 @@ import xnudefines
 
 from scheduler import *
 
-@lldb_command('showlogstream')
-def showLogStream(cmd_args=None):
-    """
-    Dump the state of the kernel log stream
-    """
-    mbp = kern.globals.oslog_streambufp
-    print("streaming buffer space avail: {0:>#x} of {1:>#x} bytes\n".format(kern.globals.oslog_stream_buf_bytesavail, kern.globals.oslog_stream_buf_size))
-    print(" read head: offset {0:>#x}\nwrite head: offset {1:>#x}\n".format(mbp.msg_bufr, mbp.msg_bufx))
-    count = 0
-    print("  id  timestamp   offset size off+size type metadata")
-    for entry in IterateSTAILQ_HEAD(kern.globals.oslog_stream_buf_head, "buf_entries"):
-        next_start = entry.offset + entry.size
-        if (next_start > 0x1000):
-            next_start = next_start - 0x1000
-        print("{0:>4d}: {1:<d}  {2:>5x} {3:>4d} {4:>5x} {5:<d}    {6:<d}".format(count, entry.timestamp, entry.offset, entry.size, next_start, entry.type, entry.metadata))
-        count = count + 1
-    print("found {} entries".format(count))
-
-    count = 0
-    for entry in IterateSTAILQ_HEAD(kern.globals.oslog_stream_free_head, "buf_entries"):
-        count = count + 1
-    print("free list: {} entries".format(count))
-
-    count = 0
-    for outer in IterateSTAILQ_HEAD(kern.globals.oslog_stream_buf_head, "buf_entries"):
-        for inner in IterateSTAILQ_HEAD(kern.globals.oslog_stream_buf_head, "buf_entries"):
-            if ((outer.offset > inner.offset) and
-                (outer.offset < inner.offset + inner.size)):
-                print("error: overlapping entries: {:>3x} <--> {:>3x}".format(outer.offset, inner.offset))
-        count = count + 1
-
 @lldb_command('showmcastate')
 def showMCAstate(cmd_args=None):
     """
@@ -86,7 +55,7 @@ def showMCAstate(cmd_args=None):
         print(lldb_run_command('p/x *(x86_saved_state_t *) ' + hex(reg)))
         cpu = cpu + 1
 
-def dumpTimerList(mpqueue):
+def dumpTimerList(mpqueue, processor=None):
     """
     Utility function to dump the timer entries in list (anchor).
     anchor is a struct mpqueue_head.
@@ -96,19 +65,14 @@ def dumpTimerList(mpqueue):
         print('(empty)')
         return
 
-    thdr = ' {:<24s}{:<17s}{:<16s} {:<14s} {:<18s} count: {:d} '
-    tval = ' {:#018x}: {:16d} {:16d} {:s}{:3d}.{:09d}  ({:#018x})({:#018x}, {:#018x}) ({:s}) {:s}'
+    thdr = ' {:<24s}{:^17s}{:^18s} {:^18s} {:^18s} {:^18s} {:^18s} {:9s} {:^18s} count: {:d} '
+    tval = ' {:#018x}{:s} {:18d} {:18d} {:18.06f} {:18.06f} {:18.06f} {:18.06f} {:>9s}  ({:#018x})({:#018x}, {:#018x}) ({:s}) {:s}'
 
-    print(thdr.format('Entry', 'Deadline', 'soft_deadline', 'Secs To Go', '(*func)(param0, param1)', mpqueue.count))
+    print(thdr.format('Entry', 'Soft Deadline', 'Deadline', 'Soft To Go', 'Hard To Go', 'Duration', 'Leeway', 'Flags', '(*func)(param0, param1)', mpqueue.count))
+
+    recent_timestamp = GetRecentTimestamp()
 
     for timer_call in ParanoidIterateLinkageChain(mpqueue.head, 'struct timer_call *', 'tc_qlink'):
-        recent_timestamp = GetRecentTimestamp()
-        if (recent_timestamp < timer_call.tc_pqlink.deadline):
-            delta_sign = ' '
-            timer_fire = timer_call.tc_pqlink.deadline - recent_timestamp
-        else:
-            delta_sign = '-'
-            timer_fire = recent_timestamp - timer_call.tc_pqlink.deadline
 
         func_name = kern.Symbolicate(timer_call.tc_func)
 
@@ -141,20 +105,52 @@ def dumpTimerList(mpqueue):
                     pid = GetProcPIDForTask(thread.t_tro.tro_task)
                     procname = GetProcNameForTask(thread.t_tro.tro_task)
 
-                    extra_string += "thread: 0x{:x} {:s} task:{:s}[{:d}]".format(
-                            tid, name, procname, pid)
+                    otherprocessor = ""
+                    if processor :
+                        if thread.last_processor != processor:
+                            otherprocessor = " (Not same processor - was on {:d})".format(thread.last_processor.cpu_id)
+
+                    extra_string += "thread: 0x{:x} {:s} task:{:s}[{:d}]{:s}".format(
+                            tid, name, procname, pid, otherprocessor)
             except:
                 print("exception generating extra_string for call: {:#018x}".format(timer_call))
                 if dumpTimerList.enable_debug :
                     raise
 
-        tval = ' {:#018x}: {:16d} {:16d} {:s}{:3d}.{:09d}  ({:#018x})({:#018x},{:#018x}) ({:s}) {:s}'
-        print(tval.format(timer_call,
-            timer_call.tc_pqlink.deadline,
+        timer_fire = timer_call.tc_pqlink.deadline - recent_timestamp
+        timer_fire_s = kern.GetNanotimeFromAbstime(timer_fire) / 1000000000.0
+
+        soft_timer_fire = timer_call.tc_soft_deadline - recent_timestamp
+        soft_timer_fire_s = kern.GetNanotimeFromAbstime(soft_timer_fire) / 1000000000.0
+
+        leeway = timer_call.tc_pqlink.deadline - timer_call.tc_soft_deadline
+        leeway_s = kern.GetNanotimeFromAbstime(leeway) / 1000000000.0
+
+        tc_ttd_s = kern.GetNanotimeFromAbstime(timer_call.tc_ttd) / 1000000000.0
+
+        flags = int(timer_call.tc_flags)
+        timer_call_flags = {0x0:'', 0x1:'C', 0x2:'B', 0x4:'X', 0x8:'X', 0x10:'U', 0x20:'E',
+                0x40:'L', 0x80:'R'}
+
+        flags_str = ''
+        mask = 0x1
+        while mask <= 0x80 :
+            flags_str += timer_call_flags[int(flags & mask)]
+            mask = mask << 1
+
+        colon = ":"
+
+        if addressof(timer_call.tc_pqlink) == mpqueue.mpq_pqhead.pq_root :
+            colon = "*"
+
+        print(tval.format(timer_call, colon,
             timer_call.tc_soft_deadline,
-            delta_sign,
-            timer_fire // 1000000000,
-            timer_fire%1000000000,
+            timer_call.tc_pqlink.deadline,
+            soft_timer_fire_s,
+            timer_fire_s,
+            tc_ttd_s,
+            leeway_s,
+            flags_str,
             timer_call.tc_func,
             timer_call.tc_param0,
             timer_call.tc_param1,
@@ -226,9 +222,21 @@ def processorTimers(cmd_args=None):
     """
     Print details of processor timers, noting anything suspicious
     Also include long-term timer details
+
+        Callout flags:
+
+        C - Critical
+        B - Background
+        U - User timer
+        E - Explicit Leeway
+        L - Local
+        R - Rate-limited - (App Nap)
     """
-    hdr = '{:15s}{:<18s} {:<18s} {:<18s} {:<18s}'
-    print(hdr.format('Processor #', 'Processor pointer', 'Last dispatch', 'Next deadline', 'Difference'))
+
+    recent_timestamp = GetRecentTimestamp()
+
+    hdr = '{:15s}{:<18s} {:<18s} {:<18s} {:<18s} {:<18s} {:<18s} {:<18s} Recent Timestamp: {:d}'
+    print(hdr.format('Processor #', 'Processor pointer', 'Last dispatch', 'Soft deadline', 'Soft To Go', 'Hard deadline', 'Hard To Go', 'Current Leeway', recent_timestamp))
     print("=" * 82)
     p = kern.globals.processor_list
     EndOfAllTime = signed(-1)
@@ -236,24 +244,65 @@ def processorTimers(cmd_args=None):
         cpu = p.cpu_id
         cpu_data = GetCpuDataForCpuID(cpu)
         rt_timer = cpu_data.rtclock_timer
-        diff = signed(rt_timer.deadline) - signed(p.last_dispatch)
+        diff = signed(rt_timer.deadline) - signed(recent_timestamp)
+        diff_s = kern.GetNanotimeFromAbstime(diff) / 1000000000.0
         valid_deadline = signed(rt_timer.deadline) != EndOfAllTime
-        tmr = 'Processor {:<3d}: {:#018x} {:#018x} {:18s} {:18s} {:s}'
+        soft_deadline = rt_timer.queue.earliest_soft_deadline
+        soft_diff = signed(soft_deadline) - signed(recent_timestamp)
+        soft_diff_s = kern.GetNanotimeFromAbstime(soft_diff) / 1000000000.0
+        valid_soft_deadline = signed(soft_deadline) != EndOfAllTime
+        leeway_s = kern.GetNanotimeFromAbstime(rt_timer.deadline - soft_deadline) / 1000000000.0
+        tmr = 'Processor {:<3d}: {:#018x} {:<18d} {:<18s} {:<18s} {:<18s} {:<18s} {:<18s} {:s} {:s}'
         print(tmr.format(cpu,
             p,
             p.last_dispatch,
-            "{:#018x}".format(rt_timer.deadline) if valid_deadline else "None",
-            "{:#018x}".format(diff) if valid_deadline else "N/A",
-            ['(PAST DEADLINE)', '(ok)'][int(diff > 0)] if valid_deadline else ""))
+            "{:d}".format(soft_deadline) if valid_soft_deadline else "None",
+            "{:<16.06f}".format(soft_diff_s) if valid_soft_deadline else "N/A",
+            "{:d}".format(rt_timer.deadline) if valid_deadline else "None",
+            "{:<16.06f}".format(diff_s) if valid_deadline else "N/A",
+            "{:<16.06f}".format(leeway_s) if valid_soft_deadline and valid_deadline else "N/A",
+            ['(PAST SOFT DEADLINE)', '(soft deadline ok)'][int(soft_diff > 0)] if valid_soft_deadline else "",
+            ['(PAST DEADLINE)', '(deadline ok)'][int(diff > 0)] if valid_deadline else ""))
         if valid_deadline:
             if kern.arch == 'x86_64':
                 print('Next deadline set at: {:#018x}. Timer call list:'.format(rt_timer.when_set))
-            dumpTimerList(rt_timer.queue)
+            dumpTimerList(rt_timer.queue, p)
         p = p.processor_list
     print("-" * 82)
     longtermTimers()
+    print("Running timers:")
     ShowRunningTimers()
 
+@header("{:<6s}  {:^18s} {:^18s}".format("cpu_id", "Processor", "cpu_data") )
+@lldb_command('showcpudata')
+def ShowCPUData(cmd_args=[]):
+    """ Prints the CPU Data struct of each processor
+        Passing a CPU ID prints the CPU Data of just that CPU
+        Usage: (lldb) showcpudata [cpu id]
+    """
+
+    format_string = "{:>#6d}: {: <#018x} {: <#018x}"
+
+    find_cpu_id = None
+
+    if cmd_args:
+        find_cpu_id = ArgumentStringToInt(cmd_args[0])
+
+    print (ShowCPUData.header)
+
+    processors = [p for p in IterateLinkedList(kern.globals.processor_list, 'processor_list')]
+
+    processors.sort(key=lambda p: p.cpu_id)
+
+    for processor in processors:
+        cpu_id = int(processor.cpu_id)
+
+        if find_cpu_id and cpu_id != find_cpu_id:
+            continue
+
+        cpu_data = GetCpuDataForCpuID(cpu_id)
+
+        print (format_string.format(cpu_id, processor, cpu_data))
 
 @lldb_command('showtimerwakeupstats')
 def showTimerWakeupStats(cmd_args=None):
@@ -263,8 +312,9 @@ def showTimerWakeupStats(cmd_args=None):
     CPU time with user/system break down where applicable, with thread tags.
     """
     for task in kern.tasks:
-        proc = Cast(task.bsd_info, 'proc_t')
+        proc = GetProcFromTask(task)
         print(dereference(task))
+        (user_time, sys_time) = GetTaskTerminatedUserSysTime(task)
         print('{:d}({:s}), terminated thread timer wakeups: {:d} {:d} 2ms: {:d} 5ms: {:d} UT: {:d} ST: {:d}'.format(
             GetProcPID(proc),
             GetProcName(proc),
@@ -273,13 +323,13 @@ def showTimerWakeupStats(cmd_args=None):
             0, #task.task_platform_idle_wakeups,
             task.task_timer_wakeups_bin_1,
             task.task_timer_wakeups_bin_2,
-            task.total_user_time,
-            task.total_system_time))
+            user_time, sys_time))
         tot_wakes = 0 #task.task_interrupt_wakeups
         tot_platform_wakes = 0 #task.task_platform_idle_wakeups
         for thread in IterateQueue(task.threads, 'thread_t', 'task_threads'):
 ##        if thread.thread_interrupt_wakeups == 0:
 ##              continue
+            (user_time, sys_time) = GetThreadUserSysTime(thread)
             print('\tThread ID 0x{:x}, Tag 0x{:x}, timer wakeups: {:d} {:d} {:d} {:d} <2ms: {:d}, <5ms: {:d} UT: {:d} ST: {:d}'.format(
                 thread.thread_id,
                 thread.thread_tag,
@@ -290,8 +340,7 @@ def showTimerWakeupStats(cmd_args=None):
                 0,0,0,0,
                 thread.thread_timer_wakeups_bin_1,
                 thread.thread_timer_wakeups_bin_2,
-                thread.user_timer.all_bits,
-                thread.system_timer.all_bits))
+                user_time, sys_time))
             tot_wakes += 0 #thread.thread_interrupt_wakeups
             tot_platform_wakes += 0 #thread.thread_platform_idle_wakeups
         print('Task total wakeups: {:d} {:d}'.format(
@@ -301,21 +350,33 @@ def showTimerWakeupStats(cmd_args=None):
 def ShowRunningTimers(cmd_args=None):
     """
     Print the state of all running timers.
-    
+
     Usage: showrunningtimers
     """
-    pset = addressof(kern.globals.pset0)
     processor_array = kern.globals.processor_array
+
+    recent_timestamp = GetRecentTimestamp()
+
+    hdr = '{:4s} {:^10s} {:^18s} {:^18s} {:^18s} {:^18s}'
+    print(hdr.format('CPU', 'State', 'Quantum', 'To Go', 'kperf', 'To Go', 'Hard To Go'))
+
+    cpu = '{:3d}: {:^10s} {:18d} {:16.06f} {:18d} {:16.06f}'
 
     i = 0
     while processor_array[i] != 0:
         processor = processor_array[i]
-        print('{}: {}'.format(
-                i, 'on' if processor.running_timers_active else 'off'))
-        print('\tquantum: {}'.format(
-                unsigned(processor.running_timers[0].tc_pqlink.deadline)))
-        print('\tkperf: {}'.format(
-                unsigned(processor.running_timers[1].tc_pqlink.deadline)))
+
+        statestr = 'runnning' if processor.running_timers_active else 'idle'
+
+        quantum = unsigned(processor.running_timers[0].tc_pqlink.deadline)
+        quantumdiff = signed(quantum) - signed(recent_timestamp)
+        quantumdiff_s = kern.GetNanotimeFromAbstime(quantumdiff) / 1000000000.0
+
+        kperf = unsigned(processor.running_timers[1].tc_pqlink.deadline)
+        kperfdiff = signed(kperf) - signed(recent_timestamp)
+        kperfdiff_s = kern.GetNanotimeFromAbstime(kperfdiff) / 1000000000.0
+
+        print (cpu.format(i, statestr, quantum, quantumdiff_s, kperf, kperfdiff_s))
         i += 1
 
 def DoReadMsr64(msr_address, lcpu):
@@ -460,502 +521,6 @@ def WriteMsr64(cmd_args=None):
     if not DoWriteMsr64(msr_address, lcpu, write_val):
         print("writemsr64 FAILED")
 
-def GetKernelDebugBufferEntry(kdbg_entry):
-    """ Extract the information from given kernel debug buffer entry and return the summary
-        params:
-            kdebug_entry - kd_buf - address of kernel debug buffer entry
-        returns: 
-            str - formatted output information of kd_buf entry
-    """
-    out_str = ""
-    code_info_str = ""
-    kdebug_entry = kern.GetValueFromAddress(kdbg_entry, 'kd_buf *')
-    debugid     = kdebug_entry.debugid
-    kdebug_arg1 = kdebug_entry.arg1
-    kdebug_arg2 = kdebug_entry.arg2
-    kdebug_arg3 = kdebug_entry.arg3
-    kdebug_arg4 = kdebug_entry.arg4
-    
-    if kern.arch == 'x86_64' or kern.arch.startswith('arm64'):
-        kdebug_cpu   = kdebug_entry.cpuid
-        ts_hi        = (kdebug_entry.timestamp >> 32) & 0xFFFFFFFF
-        ts_lo        = kdebug_entry.timestamp & 0xFFFFFFFF
-    else:
-        kdebug_cpu   = (kdebug_entry.timestamp >> 56)
-        ts_hi        = (kdebug_entry.timestamp >> 32) & 0x00FFFFFF
-        ts_lo        = kdebug_entry.timestamp & 0xFFFFFFFF
-    
-    kdebug_class    = (debugid >> 24) & 0x000FF
-    kdebug_subclass = (debugid >> 16) & 0x000FF
-    kdebug_code     = (debugid >>  2) & 0x03FFF
-    kdebug_qual     = (debugid) & 0x00003
-    
-    if kdebug_qual == 0:
-        kdebug_qual = '-'
-    elif kdebug_qual == 1:
-        kdebug_qual = 'S'
-    elif kdebug_qual == 2:
-        kdebug_qual = 'E'
-    elif kdebug_qual == 3:
-        kdebug_qual = '?'
-
-    # preamble and qual
-    out_str += "{:<#20x} {:>6d} {:>#12x} ".format(kdebug_entry, kdebug_cpu, kdebug_entry.arg5)
-    out_str += " {:#010x}{:08x} {:>6s} ".format(ts_hi, ts_lo, kdebug_qual)
-    
-    # class
-    kdbg_class = ""
-    if kdebug_class == 1:
-        kdbg_class = "MACH"
-    elif kdebug_class == 2:
-        kdbg_class = "NET "
-    elif kdebug_class == 3:
-        kdbg_class = "FS  "
-    elif kdebug_class == 4:
-        kdbg_class = "BSD "
-    elif kdebug_class == 5:
-        kdbg_class = "IOK "
-    elif kdebug_class == 6:
-        kdbg_class = "DRVR"
-    elif kdebug_class == 7:
-        kdbg_class = "TRAC"
-    elif kdebug_class == 8:
-        kdbg_class = "DLIL"
-    elif kdebug_class == 9:
-        kdbg_class = "WQ  "
-    elif kdebug_class == 10:
-        kdbg_class = "CS  "
-    elif kdebug_class == 11:
-        kdbg_class = "CG  "
-    elif kdebug_class == 20:
-        kdbg_class = "MISC"
-    elif kdebug_class == 30:
-        kdbg_class = "SEC "
-    elif kdebug_class == 31:
-        kdbg_class = "DYLD"
-    elif kdebug_class == 32:
-        kdbg_class = "QT  "
-    elif kdebug_class == 33:
-        kdbg_class = "APPS"
-    elif kdebug_class == 34:
-        kdbg_class = "LAUN"
-    elif kdebug_class == 36:
-        kdbg_class = "PPT "
-    elif kdebug_class == 37:
-        kdbg_class = "PERF"
-    elif kdebug_class == 38:
-        kdbg_class = "IMP "
-    elif kdebug_class == 39:
-        kdbg_class = "PCTL"
-    elif kdebug_class == 40:
-        kdbg_class = "BANK"
-    elif kdebug_class == 41:
-        kdbg_class = "XPC "
-    elif kdebug_class == 42:
-        kdbg_class = "ATM "
-    elif kdebug_class == 128:
-        kdbg_class = "ANS "
-    elif kdebug_class == 129:
-        kdbg_class = "SIO "
-    elif kdebug_class == 130:
-        kdbg_class = "SEP "
-    elif kdebug_class == 131:
-        kdbg_class = "ISP "
-    elif kdebug_class == 132:
-        kdbg_class = "OSCA"
-    elif kdebug_class == 133:
-        kdbg_class = "EGFX"
-    elif kdebug_class == 255:
-        kdbg_class = "MIG "
-    else:
-        out_str += "{:^#10x} ".format(kdebug_class)
-    
-    if kdbg_class:
-        out_str += "{:^10s} ".format(kdbg_class)
-
-    # subclass and code
-    out_str += " {:>#5x} {:>8d}   ".format(kdebug_subclass, kdebug_code)
-
-    # space for debugid-specific processing
-    code_info_str += "arg1={:#010x} ".format(kdebug_arg1)
-    code_info_str += "arg2={:#010x} ".format(kdebug_arg2)
-    code_info_str += "arg3={:#010x} ".format(kdebug_arg3)
-    code_info_str += "arg4={:#010x} ".format(kdebug_arg4)
-
-    # finish up
-    out_str += "{:<25s}\n".format(code_info_str)
-    return out_str
-
-@lldb_command('showkerneldebugbuffercpu')
-@header("{0: ^20s} {1: >6s} {2: >12s} {3: ^20s} {4: >6s} {5: ^10s} {6: >5s} {7: >8s} {8: ^25s}".
-    format('kd_buf', 'CPU', 'Thread', 'Timestamp', 'S/E', 'Class', 'Sub', 'Code', 'Code Specific Info'))
-def ShowKernelDebugBufferCPU(cmd_args=None):
-    """ Prints the last N entries in the kernel debug buffer for specified cpu
-        Syntax: showkerneldebugbuffercpu <cpu_num> <count>
-    """
-    if cmd_args == None or len(cmd_args) < 2:
-        raise ArgumentError("Invalid arguments passed.")
-    
-    out_str = ""
-    kdbg_str = ""
-    cpu_number = ArgumentStringToInt(cmd_args[0])
-    entry_count = ArgumentStringToInt(cmd_args[1])
-    debugentriesfound = 0
-    if (kern.globals.kd_ctrl_page_trace.kdebug_flags & xnudefines.KDBG_BUFINIT):   
-        out_str += ShowKernelDebugBufferCPU.header + "\n"
-        if entry_count == 0:
-            out_str += "<count> is 0, dumping 50 entries\n"
-            entry_count = 50
-
-        if cpu_number >= kern.globals.kd_ctrl_page_trace.kdebug_cpus:
-            kdbg_str += "cpu number too big\n"
-        else:
-            kdbp = addressof(kern.globals.kd_data_page_trace.kdbip[cpu_number])
-            kdsp = kdbp.kd_list_head
-            while ((kdsp.raw != 0 and kdsp.raw != 0x00000000ffffffff) and (entry_count > 0)):
-                kd_buffer = kern.globals.kd_data_page_trace.kd_bufs[kdsp.buffer_index]
-                kdsp_actual = addressof(kd_buffer.kdsb_addr[kdsp.offset])
-                if kdsp_actual.kds_readlast != kdsp_actual.kds_bufindx:
-                    kds_buf = kdsp_actual.kds_records[kdsp_actual.kds_bufindx]
-                    kds_bufptr = addressof(kds_buf)
-                    while (entry_count > 0) and \
-                        (unsigned(kds_bufptr) > unsigned(addressof(kdsp_actual.kds_records[kdsp_actual.kds_readlast]))):
-                        kds_bufptr = kds_bufptr - sizeof(kds_buf)
-                        entry_count = entry_count - 1
-                        kdbg_str += GetKernelDebugBufferEntry(kds_bufptr)
-                kdsp = kdsp_actual.kds_next
-    else:
-        kdbg_str += "Trace buffer not enabled for CPU {:d}\n".format(cpu_number)
-    
-    if kdbg_str:
-        out_str += kdbg_str
-        print(out_str)
-
-@lldb_command('showkerneldebugbuffer')
-def ShowKernelDebugBuffer(cmd_args=None):
-    """ Prints the last N entries in the kernel debug buffer per cpu
-        Syntax: showkerneldebugbuffer <count>
-    """
-    if cmd_args == None or len(cmd_args) < 1:
-        raise ArgumentError("Invalid arguments passed.")
-    
-    if (kern.globals.kd_ctrl_page_trace.kdebug_flags & xnudefines.KDBG_BUFINIT):
-        entrycount = ArgumentStringToInt(cmd_args[0])
-        if entrycount == 0:
-            print("<count> is 0, dumping 50 entries per cpu\n")
-            entrycount = 50
-        cpu_num = 0
-        while cpu_num < kern.globals.kd_ctrl_page_trace.kdebug_cpus:
-            ShowKernelDebugBufferCPU([str(cpu_num), str(entrycount)])
-            cpu_num += 1
-    else:
-        print("Trace buffer not enabled\n")
-
-@lldb_command('dumprawtracefile','U:')
-def DumpRawTraceFile(cmd_args=[], cmd_options={}):
-    """
-        support for ktrace(1)
-
-        NB: trace is not wordsize flexible, so use ktrace(1) compiled for the compatible model,
-        e.g. if you dump from __LP64__ system, you will need to run ktrace(1) compiled __LP64__ to process the raw data file.
-
-        read the kernel's debug trace buffer, and dump to a "raw" ktrace(1) file
-        Usage: dumprawtracefile <output_filename>
-            -U <uptime> : specify system uptime in nsec, obtained e.g. from paniclog
-        Be patient, it is teh slow.
-
-        cf. kdbg_read()\bsd/kern/kdebug.c
-    """
-
-    if (kern.globals.kd_ctrl_page_trace.kdebug_flags & xnudefines.KDBG_BUFINIT) == 0 :
-        print("Trace buffer not enabled\n")
-        return
-
-    if ((kern.arch == "x86_64") or kern.arch.startswith("arm64")) :
-        lp64 = True
-    elif kern.arch == "arm" :
-        lp64 = False
-    else :
-        print("unknown kern.arch {:s}\n".format(kern.arch))
-        return
-
-    # Various kern.globals are hashed by address, to
-    #  a) avoid redundant kdp fetch from, and
-    #  b) avoid all stores to
-    # the target system kernel structures.
-    # Stores to hashed structures remain strictly local to the lldb host,
-    # they are never written back to the target.
-    htab = {}
-
-    if lp64 :
-        KDBG_TIMESTAMP_MASK = 0xffffffffffffffff
-        KDBG_CPU_SHIFT      = 0
-    else :
-        KDBG_TIMESTAMP_MASK = 0x00ffffffffffffff
-        KDBG_CPU_SHIFT      = 56
-
-    barrier_min     = 0
-    barrier_max     = 0
-    out_of_events       = False
-    lostevents      = False
-    lostevent_timestamp = 0
-    lostevent_debugid   = (((xnudefines.DBG_TRACE & 0xff) << 24) | ((xnudefines.DBG_TRACE_INFO & 0xff) << 16) | ((2 & 0x3fff)  << 2)) # 0x01020008
-    events_count_lost   = 0
-    events_count_found  = 0
-
-    opt_verbose = config['verbosity']
-    opt_progress = (opt_verbose > vHUMAN) and (opt_verbose < vDETAIL)
-    progress_count = 0
-    progress_stride = 32
-
-    output_filename = str(cmd_args[0])
-    if opt_verbose > vHUMAN :
-        print("output file : {:s}".format(output_filename))
-    wfd = open(output_filename, "wb")
-
-    uptime = signed(-1)
-    if "-U" in cmd_options:
-        uptime = signed(cmd_options["-U"])
-    if opt_verbose > vHUMAN :
-        print("uptime : {:d}".format(uptime))
-
-    nkdbufs = kern.globals.kd_data_page_trace.nkdbufs
-
-    kd_ctrl_page_trace = kern.globals.kd_ctrl_page_trace
-    if not kd_ctrl_page_trace in htab :
-        htab[kd_ctrl_page_trace] = kern.globals.kd_ctrl_page_trace
-
-    if opt_verbose > vHUMAN :
-        print("kd_data_page_trace_nkdbufs {0:#x}, enabled {1:#x}, flags {2:#x}, cpus {3:#x}".format(nkdbufs, htab[kd_ctrl_page_trace].enabled, htab[kd_ctrl_page_trace].kdebug_flags, htab[kd_ctrl_page_trace].kdebug_cpus))
-
-    if nkdbufs == 0 :
-        print("0 kd_data_page_trace_nkdbufs, nothing extracted")
-        return
-
-    if htab[kd_ctrl_page_trace].enabled != 0 :
-        barrier_max = uptime & KDBG_TIMESTAMP_MASK
-
-        f = htab[kd_ctrl_page_trace].kdebug_flags
-        wrapped = f & xnudefines.KDBG_WRAPPED
-    if wrapped != 0 :
-        barrier_min = htab[kd_ctrl_page_trace].oldest_time
-        htab[kd_ctrl_page_trace].kdebug_flags = htab[kd_ctrl_page_trace].kdebug_flags & ~xnudefines.KDBG_WRAPPED
-        htab[kd_ctrl_page_trace].oldest_time = 0
-
-        for cpu in range(htab[kd_ctrl_page_trace].kdebug_cpus) :
-            kdbp = unsigned(addressof(kern.globals.kd_data_page_trace.kdbip[cpu]))
-            if not kdbp in htab :
-                htab[kdbp] = kern.globals.kd_data_page_trace.kdbip[cpu]
-
-            kdsp = htab[kdbp].kd_list_head.raw
-            if kdsp == xnudefines.KDS_PTR_NULL :
-                continue
-
-            ix = htab[kdbp].kd_list_head.buffer_index
-            off = htab[kdbp].kd_list_head.offset
-            kdsp_actual = unsigned(addressof(kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]))
-            if not kdsp_actual in htab :
-                htab[kdsp_actual] = kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]
-            htab[kdsp_actual].kds_lostevents = False
-
-
-    # generate trace file header; threadmap is stubbed/TBD
-    version_no = xnudefines.RAW_VERSION1
-    thread_count = 0
-    TOD_secs = uptime
-    TOD_usecs = 0
-    header = struct.pack('IIqI', version_no, thread_count, TOD_secs, TOD_usecs)
-    pad_bytes = 4096 - (len(header) & 4095)
-    header += b"\x00" * pad_bytes
-    wfd.write(memoryview(header))
-
-    count = kern.globals.kd_data_page_trace.nkdbufs
-    while count != 0 :
-        tempbuf = bytearray()
-        tempbuf_number = 0
-        tempbuf_count = min(count, kern.globals.kd_ctrl_page_trace.kdebug_kdcopybuf_count)
-
-        # while space
-        while tempbuf_count != 0 :
-
-            if opt_progress == True :
-                progress_count += 1
-                if (progress_count % progress_stride) == 0 :
-                    sys.stderr.write('.')
-                    sys.stderr.flush()
-
-            earliest_time = 0xffffffffffffffff
-            min_kdbp = None
-            min_cpu = 0
-
-            # Check all CPUs
-            for cpu in range(htab[kd_ctrl_page_trace].kdebug_cpus) :
-
-                kdbp = unsigned(addressof(kern.globals.kd_data_page_trace.kdbip[cpu]))
-                if not kdbp in htab :
-                    htab[kdbp] = kern.globals.kd_data_page_trace.kdbip[cpu]
-
-                # Skip CPUs without data.
-                kdsp = htab[kdbp].kd_list_head
-                if kdsp.raw == xnudefines.KDS_PTR_NULL :
-                    continue
-
-                kdsp_shadow = kdsp
-
-                # Get from cpu data to buffer header to buffer
-                ix = kdsp.buffer_index
-                off = kdsp.offset
-                kdsp_actual = unsigned(addressof(kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]))
-                if not kdsp_actual in htab :
-                    htab[kdsp_actual] = kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]
-
-                kdsp_actual_shadow = kdsp_actual
-
-                # Skip buffer if there are no events left.
-                rcursor = htab[kdsp_actual].kds_readlast
-                if rcursor == htab[kdsp_actual].kds_bufindx :
-                    continue
-
-                t = htab[kdsp_actual].kds_records[rcursor].timestamp & KDBG_TIMESTAMP_MASK
-
-                # Ignore events that have aged out due to wrapping.
-                goto_next_cpu = False;
-                while (t < unsigned(barrier_min)) :
-                    r = htab[kdsp_actual].kds_readlast
-                    htab[kdsp_actual].kds_readlast = r + 1
-                    rcursor = r + 1
-
-                    if rcursor >= xnudefines.EVENTS_PER_STORAGE_UNIT :
-
-                        kdsp = htab[kdbp].kd_list_head
-                        if kdsp.raw == xnudefines.KDS_PTR_NULL :
-                            goto_next_cpu = True
-                            break
-
-                        kdsp_shadow = kdsp;
-
-                        ix  = kdsp.buffer_index
-                        off = kdsp.offset
-                        kdsp_actual = unsigned(addressof(kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]))
-
-                        kdsp_actual_shadow = kdsp_actual;
-                        rcursor = htab[kdsp_actual].kds_readlast;
-
-                    t = htab[kdsp_actual].kds_records[rcursor].timestamp & KDBG_TIMESTAMP_MASK
-
-                if goto_next_cpu == True :
-                    continue
-
-                if (t > barrier_max) and (barrier_max > 0) :
-                    # Need to flush IOPs again before we
-                    # can sort any more data from the
-                    # buffers.  
-                    out_of_events = True
-                    break
-
-                if t < (htab[kdsp_actual].kds_timestamp & KDBG_TIMESTAMP_MASK) :
-                    # indicates we've not yet completed filling
-                    # in this event...
-                    # this should only occur when we're looking
-                    # at the buf that the record head is utilizing
-                    # we'll pick these events up on the next
-                    # call to kdbg_read
-                    # we bail at this point so that we don't
-                    # get an out-of-order timestream by continuing
-                    # to read events from the other CPUs' timestream(s)
-                    out_of_events = True
-                    break
-
-                if t < earliest_time :
-                    earliest_time = t
-                    min_kdbp = kdbp
-                    min_cpu = cpu
-
-
-            if (min_kdbp is None) or (out_of_events == True) :
-                # all buffers ran empty
-                                out_of_events = True
-                                break
-
-            kdsp = htab[min_kdbp].kd_list_head
-
-            ix = kdsp.buffer_index
-            off = kdsp.offset
-            kdsp_actual = unsigned(addressof(kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]))
-            if not kdsp_actual in htab :
-                htab[kdsp_actual] = kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]
-
-            # Copy earliest event into merged events scratch buffer.
-            r = htab[kdsp_actual].kds_readlast
-            htab[kdsp_actual].kds_readlast = r + 1
-            e = htab[kdsp_actual].kds_records[r]
-
-            # Concatenate event into buffer
-            # XXX condition here is on __LP64__
-            if lp64 :
-                tempbuf += struct.pack('QQQQQQIIQ', 
-                        unsigned(e.timestamp),
-                        unsigned(e.arg1),
-                        unsigned(e.arg2),
-                        unsigned(e.arg3),
-                        unsigned(e.arg4),
-                        unsigned(e.arg5),
-                        unsigned(e.debugid),
-                        unsigned(e.cpuid),
-                        unsigned(e.unused))
-            else :
-                tempbuf += struct.pack('QIIIIII',
-                        unsigned(e.timestamp),
-                        unsigned(e.arg1),
-                        unsigned(e.arg2),
-                        unsigned(e.arg3),
-                        unsigned(e.arg4),
-                        unsigned(e.arg5),
-                        unsigned(e.debugid))
-
-            # Watch for out of order timestamps
-            if earliest_time < (htab[min_kdbp].kd_prev_timebase & KDBG_TIMESTAMP_MASK) :
-                ## if so, use the previous timestamp + 1 cycle
-                htab[min_kdbp].kd_prev_timebase += 1
-
-                e.timestamp = htab[min_kdbp].kd_prev_timebase & KDBG_TIMESTAMP_MASK
-                if not lp64:
-                    e.timestamp |= (min_cpu << KDBG_CPU_SHIFT)
-            else :
-                htab[min_kdbp].kd_prev_timebase = earliest_time
-
-            if opt_verbose >= vDETAIL :
-                print("{0:#018x} {1:#018x} {2:#018x} {3:#018x} {4:#018x} {5:#018x} {6:#010x} {7:#010x} {8:#018x}".format(
-                    e.timestamp, e.arg1, e.arg2, e.arg3, e.arg4, e.arg5, e.debugid, e.cpuid, e.unused))
-
-            events_count_found += 1
-
-            # nextevent:
-            tempbuf_count -= 1
-            tempbuf_number += 1
-
-        if opt_progress == True :
-            sys.stderr.write('\n')
-            sys.stderr.flush()
-
-        if opt_verbose > vHUMAN :
-            print("events_count_lost {0:#x}, events_count_found {1:#x}, progress_count {2:#x}".format(events_count_lost, events_count_found, progress_count))
-
-        # write trace events to output file
-        if tempbuf_number != 0 :
-            count -= tempbuf_number
-            wfd.write(memoryview(tempbuf))
-
-        if out_of_events == True :
-            # all trace buffers are empty
-            if opt_verbose > vHUMAN :
-                print("out of events")
-            break
-
-    wfd.close()
-
-    return
-
 
 def GetTimebaseInfo():
     timebase_key = 'kern.rtc_timebase'
@@ -1082,7 +647,7 @@ def SymbolicateLBR():
         print("Last Branch Recoreds not present in this core file")
         return None
     try:
-        phys_carveout_md_addr = kern.GetLoadAddressForSymbol("phys_carveout_metadata")
+        phys_carveout_md_addr = kern.GetLoadAddressForSymbol("panic_lbr_header")
     except LookupError:
         print("Last Branch Recoreds not present in this core file")
         return None

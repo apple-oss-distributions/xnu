@@ -210,17 +210,8 @@
 /*
  * Maximum physical memory supported.
  */
-#define K32_MAXMEM      (32*GB)
 #define K64_MAXMEM      (2048*GB)
 #define KERNEL_MAXMEM   K64_MAXMEM
-
-/*
- * XXX
- * The kernel max VM address is limited to 0xFF3FFFFF for now because
- * some data structures are explicitly allocated at 0xFF400000 without
- * VM's knowledge (see osfmk/i386/locore.s for the allocation of PTmap and co.).
- * We can't let VM allocate memory from there.
- */
 
 /*
  * +-----------------------+--------+--------+------------------------+
@@ -294,9 +285,6 @@
  */
 #define KALLOC_MINSIZE          16      /* minimum allocation size */
 #define KALLOC_LOG2_MINALIGN    4       /* log2 minimum alignment */
-
-#define ZONE_MAP_MAX            (32ULL << 30)
-#define ZONE_MAP_VA_SIZE_LP64   (128ULL << 30)
 
 #define LINEAR_KERNEL_ADDRESS   ((vm_offset_t) 0x00000000)
 

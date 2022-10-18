@@ -10,6 +10,7 @@
 #include <mach/host_info.h>
 #include <mach/mach_host.h>
 #include <arm/cpuid.h>
+#include <kern/hvg_hypercall.h>
 #include <kern/zalloc.h>
 #include <libkern/libkern.h>
 #include <pexpert/device_tree.h>
@@ -19,7 +20,6 @@
 #endif
 
 extern uint64_t wake_abstime;
-extern int      lck_mtx_adaptive_spin_mode;
 
 #if DEVELOPMENT || DEBUG
 /* Various tuneables to modulate selection of WFE in the idle path */
@@ -293,11 +293,6 @@ SYSCTL_PROC(_machdep_cpu, OID_AUTO, brand_string,
     0, 0, make_brand_string, "A", "CPU brand string");
 
 
-static
-SYSCTL_INT(_machdep, OID_AUTO, lck_mtx_adaptive_spin_mode,
-    CTLFLAG_RW, &lck_mtx_adaptive_spin_mode, 0,
-    "Enable adaptive spin behavior for kernel mutexes");
-
 static int
 virtual_address_size SYSCTL_HANDLER_ARGS
 {
@@ -386,14 +381,14 @@ SYSCTL_PROC_MACHDEP_CPU_SYSREG(AIDR_EL1);
 #ifdef ML_IO_TIMEOUTS_ENABLED
 /* Timeouts for ml_{io|phys}_{read|write}... */
 
-SYSCTL_UINT(_machdep, OID_AUTO, report_phy_read_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &report_phy_read_delay_to, 0, "Maximum time before io/phys read gets reported or panics");
-SYSCTL_UINT(_machdep, OID_AUTO, report_phy_write_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &report_phy_write_delay_to, 0, "Maximum time before io/phys write gets reported or panics");
-SYSCTL_UINT(_machdep, OID_AUTO, trace_phy_read_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &trace_phy_read_delay_to, 0, "Maximum time before io/phys read gets ktraced");
-SYSCTL_UINT(_machdep, OID_AUTO, trace_phy_write_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &trace_phy_write_delay_to, 0, "Maximum time before io/phys write gets ktraced");
+SYSCTL_QUAD(_machdep, OID_AUTO, report_phy_read_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &report_phy_read_delay_to, "Maximum time before io/phys read gets reported or panics");
+SYSCTL_QUAD(_machdep, OID_AUTO, report_phy_write_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &report_phy_write_delay_to, "Maximum time before io/phys write gets reported or panics");
+SYSCTL_QUAD(_machdep, OID_AUTO, trace_phy_read_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &trace_phy_read_delay_to, "Maximum time before io/phys read gets ktraced");
+SYSCTL_QUAD(_machdep, OID_AUTO, trace_phy_write_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &trace_phy_write_delay_to, "Maximum time before io/phys write gets ktraced");
 SYSCTL_UINT(_machdep, OID_AUTO, report_phy_read_osbt, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
     &report_phy_read_osbt, 0, "Whether to report exceeding io/phys read duration via OSReportWithBacktrace");
 SYSCTL_UINT(_machdep, OID_AUTO, report_phy_write_osbt, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -401,7 +396,7 @@ SYSCTL_UINT(_machdep, OID_AUTO, report_phy_write_osbt, CTLFLAG_KERN | CTLFLAG_RW
 
 SYSCTL_INT(_machdep, OID_AUTO, phy_read_delay_panic, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
     &phy_read_panic, 0, "if set, report-phy-read-delay timeout panics");
-SYSCTL_INT(_machdep, OID_AUTO, phy_writedelay_panic, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_INT(_machdep, OID_AUTO, phy_write_delay_panic, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
     &phy_write_panic, 0, "if set, report-phy-write-delay timeout panics");
 
 #if ML_IO_SIMULATE_STRETCHED_ENABLED

@@ -171,10 +171,7 @@
 /* XXX should be in a header file somewhere */
 extern kern_return_t IOBSDGetPlatformUUID(__darwin_uuid_t uuid, mach_timespec_t timeoutp);
 
-int rd_uio(struct proc *p, int fdes, uio_t uio, int is_preadv, user_ssize_t *retval);
-int wr_uio(struct proc *p, int fdes, uio_t uio, int is_pwritev, user_ssize_t *retval);
 int do_uiowrite(struct proc *p, struct fileproc *fp, uio_t uio, int flags, user_ssize_t *retval);
-
 __private_extern__ int  dofileread(vfs_context_t ctx, struct fileproc *fp,
     user_addr_t bufp, user_size_t nbyte,
     off_t offset, int flags, user_ssize_t *retval);
@@ -182,6 +179,12 @@ __private_extern__ int  dofilewrite(vfs_context_t ctx, struct fileproc *fp,
     user_addr_t bufp, user_size_t nbyte,
     off_t offset, int flags, user_ssize_t *retval);
 static int preparefileread(struct proc *p, struct fileproc **fp_ret, int fd, int check_for_vnode);
+
+/* needed by guarded_writev, etc. */
+int write_internal(struct proc *p, int fd, user_addr_t buf, user_size_t nbyte,
+    off_t offset, int flags, guardid_t *puguard, user_ssize_t *retval);
+int writev_uio(struct proc *p, int fd, user_addr_t user_iovp, int iovcnt, off_t offset, int flags,
+    guardid_t *puguard, user_ssize_t *retval);
 
 #define f_flag fp_glob->fg_flag
 #define f_type fp_glob->fg_ops->fo_type
@@ -216,94 +219,6 @@ valid_for_random_access(struct fileproc *fp)
 
 	return 0;
 }
-
-/*
- * Read system call.
- *
- * Returns:	0			Success
- *	preparefileread:EBADF
- *	preparefileread:ESPIPE
- *	preparefileread:ENXIO
- *	preparefileread:EBADF
- *	dofileread:???
- */
-int
-read(struct proc *p, struct read_args *uap, user_ssize_t *retval)
-{
-	__pthread_testcancel(1);
-	return read_nocancel(p, (struct read_nocancel_args *)uap, retval);
-}
-
-int
-read_nocancel(struct proc *p, struct read_nocancel_args *uap, user_ssize_t *retval)
-{
-	struct fileproc *fp;
-	int error;
-	int fd = uap->fd;
-	struct vfs_context context;
-
-	if ((error = preparefileread(p, &fp, fd, 0))) {
-		return error;
-	}
-
-	context = *(vfs_context_current());
-	context.vc_ucred = fp->fp_glob->fg_cred;
-
-	error = dofileread(&context, fp, uap->cbuf, uap->nbyte,
-	    (off_t)-1, 0, retval);
-
-	fp_drop(p, fd, fp, 0);
-
-	return error;
-}
-
-/*
- * Pread system call
- *
- * Returns:	0			Success
- *	preparefileread:EBADF
- *	preparefileread:ESPIPE
- *	preparefileread:ENXIO
- *	preparefileread:EBADF
- *	dofileread:???
- */
-int
-pread(struct proc *p, struct pread_args *uap, user_ssize_t *retval)
-{
-	__pthread_testcancel(1);
-	return pread_nocancel(p, (struct pread_nocancel_args *)uap, retval);
-}
-
-int
-pread_nocancel(struct proc *p, struct pread_nocancel_args *uap, user_ssize_t *retval)
-{
-	struct fileproc *fp = NULL;     /* fp set by preparefileread() */
-	int fd = uap->fd;
-	int error;
-	struct vfs_context context;
-
-	if ((error = preparefileread(p, &fp, fd, 1))) {
-		goto out;
-	}
-
-	context = *(vfs_context_current());
-	context.vc_ucred = fp->fp_glob->fg_cred;
-
-	error = dofileread(&context, fp, uap->buf, uap->nbyte,
-	    uap->offset, FOF_OFFSET, retval);
-
-	fp_drop(p, fd, fp, 0);
-
-	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_pread) | DBG_FUNC_NONE),
-	    uap->fd, uap->nbyte, (unsigned int)((uap->offset >> 32)), (unsigned int)(uap->offset), 0);
-
-out:
-	return error;
-}
-
-/*
- * Code common for read and pread
- */
 
 /*
  * Returns:	0			Success
@@ -351,6 +266,37 @@ out:
 	return error;
 }
 
+static int
+fp_readv(vfs_context_t ctx, struct fileproc *fp, uio_t uio, int flags,
+    user_ssize_t *retval)
+{
+	int error;
+	user_ssize_t count;
+
+	if ((error = uio_calculateresid(uio))) {
+		*retval = 0;
+		return error;
+	}
+
+	count = uio_resid(uio);
+	error = fo_read(fp, uio, flags, ctx);
+
+	switch (error) {
+	case ERESTART:
+	case EINTR:
+	case EWOULDBLOCK:
+		if (uio_resid(uio) != count) {
+			error = 0;
+		}
+		break;
+
+	default:
+		break;
+	}
+
+	*retval = count - uio_resid(uio);
+	return error;
+}
 
 /*
  * Returns:	0			Success
@@ -362,40 +308,122 @@ dofileread(vfs_context_t ctx, struct fileproc *fp,
     user_addr_t bufp, user_size_t nbyte, off_t offset, int flags,
     user_ssize_t *retval)
 {
-	uio_t auio;
-	user_ssize_t bytecnt;
-	int error = 0;
 	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	uio_t uio;
+	int spacetype;
 
 	if (nbyte > INT_MAX) {
-		return EINVAL;
-	}
-
-	if (vfs_context_is64bit(ctx)) {
-		auio = uio_createwithbuffer(1, offset, UIO_USERSPACE64, UIO_READ,
-		    &uio_buf[0], sizeof(uio_buf));
-	} else {
-		auio = uio_createwithbuffer(1, offset, UIO_USERSPACE32, UIO_READ,
-		    &uio_buf[0], sizeof(uio_buf));
-	}
-	if (uio_addiov(auio, bufp, nbyte) != 0) {
 		*retval = 0;
 		return EINVAL;
 	}
 
-	bytecnt = nbyte;
+	spacetype = vfs_context_is64bit(ctx) ? UIO_USERSPACE64 : UIO_USERSPACE32;
+	uio = uio_createwithbuffer(1, offset, spacetype, UIO_READ, &uio_buf[0],
+	    sizeof(uio_buf));
 
-	if ((error = fo_read(fp, auio, flags, ctx))) {
-		if (uio_resid(auio) != bytecnt && (error == ERESTART ||
-		    error == EINTR || error == EWOULDBLOCK)) {
-			error = 0;
-		}
+	if (uio_addiov(uio, bufp, nbyte) != 0) {
+		*retval = 0;
+		return EINVAL;
 	}
-	bytecnt -= uio_resid(auio);
 
-	*retval = bytecnt;
+	return fp_readv(ctx, fp, uio, flags, retval);
+}
 
+static int
+readv_internal(struct proc *p, int fd, uio_t uio, int flags,
+    user_ssize_t *retval)
+{
+	struct fileproc *fp = NULL;
+	struct vfs_context context;
+	int error;
+
+	if ((error = preparefileread(p, &fp, fd, flags & FOF_OFFSET))) {
+		*retval = 0;
+		return error;
+	}
+
+	context = *(vfs_context_current());
+	context.vc_ucred = fp->fp_glob->fg_cred;
+
+	error = fp_readv(&context, fp, uio, flags, retval);
+
+	fp_drop(p, fd, fp, 0);
 	return error;
+}
+
+static int
+read_internal(struct proc *p, int fd, user_addr_t buf, user_size_t nbyte,
+    off_t offset, int flags, user_ssize_t *retval)
+{
+	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	uio_t uio;
+	int spacetype = IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32;
+
+	if (nbyte > INT_MAX) {
+		*retval = 0;
+		return EINVAL;
+	}
+
+	uio = uio_createwithbuffer(1, offset, spacetype, UIO_READ,
+	    &uio_buf[0], sizeof(uio_buf));
+
+	if (uio_addiov(uio, buf, nbyte) != 0) {
+		*retval = 0;
+		return EINVAL;
+	}
+
+	return readv_internal(p, fd, uio, flags, retval);
+}
+
+int
+read_nocancel(struct proc *p, struct read_nocancel_args *uap, user_ssize_t *retval)
+{
+	return read_internal(p, uap->fd, uap->cbuf, uap->nbyte, (off_t)-1, 0,
+	           retval);
+}
+
+/*
+ * Read system call.
+ *
+ * Returns:	0			Success
+ *	preparefileread:EBADF
+ *	preparefileread:ESPIPE
+ *	preparefileread:ENXIO
+ *	preparefileread:EBADF
+ *	dofileread:???
+ */
+int
+read(struct proc *p, struct read_args *uap, user_ssize_t *retval)
+{
+	__pthread_testcancel(1);
+	return read_nocancel(p, (struct read_nocancel_args *)uap, retval);
+}
+
+int
+pread_nocancel(struct proc *p, struct pread_nocancel_args *uap, user_ssize_t *retval)
+{
+	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_pread) | DBG_FUNC_NONE),
+	    uap->fd, uap->nbyte, (unsigned int)((uap->offset >> 32)), (unsigned int)(uap->offset), 0);
+
+	return read_internal(p, uap->fd, uap->buf, uap->nbyte, uap->offset,
+	           FOF_OFFSET, retval);
+}
+
+/*
+ * Pread system call
+ *
+ * Returns:	0			Success
+ *	preparefileread:EBADF
+ *	preparefileread:ESPIPE
+ *	preparefileread:ENXIO
+ *	preparefileread:EBADF
+ *	dofileread:???
+ */
+int
+pread(struct proc *p, struct pread_args *uap, user_ssize_t *retval)
+{
+	__pthread_testcancel(1);
+	return pread_nocancel(p, (struct pread_nocancel_args *)uap, retval);
 }
 
 /*
@@ -412,52 +440,51 @@ dofileread(vfs_context_t ctx, struct fileproc *fp,
  *     rd_uio:???
  */
 static int
-readv_preadv_uio(struct proc *p, int fdes,
-    user_addr_t user_iovp, int iovcnt, off_t offset, int is_preadv,
+readv_uio(struct proc *p, int fd,
+    user_addr_t user_iovp, int iovcnt, off_t offset, int flags,
     user_ssize_t *retval)
 {
-	uio_t auio = NULL;
+	uio_t uio = NULL;
 	int error;
 	struct user_iovec *iovp;
 
-	/* Verify range before calling uio_create() */
 	if (iovcnt <= 0 || iovcnt > UIO_MAXIOV) {
-		return EINVAL;
+		error = EINVAL;
+		goto out;
 	}
 
-	/* allocate a uio large enough to hold the number of iovecs passed */
-	auio = uio_create(iovcnt, offset,
+	uio = uio_create(iovcnt, offset,
 	    (IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32),
 	    UIO_READ);
 
-	/* get location of iovecs within the uio.  then copyin the iovecs from
-	 * user space.
-	 */
-	iovp = uio_iovsaddr(auio);
+	iovp = uio_iovsaddr(uio);
 	if (iovp == NULL) {
 		error = ENOMEM;
-		goto ExitThisRoutine;
+		goto out;
 	}
+
 	error = copyin_user_iovec_array(user_iovp,
 	    IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32,
 	    iovcnt, iovp);
+
 	if (error) {
-		goto ExitThisRoutine;
+		goto out;
 	}
 
-	/* finalize uio_t for use and do the IO
-	 */
-	error = uio_calculateresid(auio);
-	if (error) {
-		goto ExitThisRoutine;
-	}
-	error = rd_uio(p, fdes, auio, is_preadv, retval);
+	error = readv_internal(p, fd, uio, flags, retval);
 
-ExitThisRoutine:
-	if (auio != NULL) {
-		uio_free(auio);
+out:
+	if (uio != NULL) {
+		uio_free(uio);
 	}
+
 	return error;
+}
+
+int
+readv_nocancel(struct proc *p, struct readv_nocancel_args *uap, user_ssize_t *retval)
+{
+	return readv_uio(p, uap->fd, uap->iovp, uap->iovcnt, 0, 0, retval);
 }
 
 /*
@@ -471,9 +498,10 @@ readv(struct proc *p, struct readv_args *uap, user_ssize_t *retval)
 }
 
 int
-readv_nocancel(struct proc *p, struct readv_nocancel_args *uap, user_ssize_t *retval)
+sys_preadv_nocancel(struct proc *p, struct preadv_nocancel_args *uap, user_ssize_t *retval)
 {
-	return readv_preadv_uio(p, uap->fd, uap->iovp, uap->iovcnt, 0, 0, retval);
+	return readv_uio(p, uap->fd, uap->iovp, uap->iovcnt, uap->offset,
+	           FOF_OFFSET, retval);
 }
 
 /*
@@ -486,10 +514,200 @@ sys_preadv(struct proc *p, struct preadv_args *uap, user_ssize_t *retval)
 	return sys_preadv_nocancel(p, (struct preadv_nocancel_args *)uap, retval);
 }
 
-int
-sys_preadv_nocancel(struct proc *p, struct preadv_nocancel_args *uap, user_ssize_t *retval)
+/*
+ * Returns:	0			Success
+ *		EBADF
+ *		ESPIPE
+ *		ENXIO
+ *	fp_lookup:EBADF
+ *	fp_guard_exception:???
+ *  valid_for_random_access:ESPIPE
+ *  valid_for_random_access:ENXIO
+ */
+static int
+preparefilewrite(struct proc *p, struct fileproc **fp_ret, int fd, int check_for_pwrite,
+    guardid_t *puguard)
 {
-	return readv_preadv_uio(p, uap->fd, uap->iovp, uap->iovcnt, uap->offset, 1, retval);
+	int error;
+	struct fileproc *fp;
+
+	AUDIT_ARG(fd, fd);
+
+	proc_fdlock_spin(p);
+
+	if (puguard) {
+		error = fp_lookup_guarded(p, fd, *puguard, &fp, 1);
+		if (error) {
+			proc_fdunlock(p);
+			return error;
+		}
+
+		if ((fp->f_flag & FWRITE) == 0) {
+			error = EBADF;
+			goto out;
+		}
+	} else {
+		error = fp_lookup(p, fd, &fp, 1);
+		if (error) {
+			proc_fdunlock(p);
+			return error;
+		}
+
+		/* Allow EBADF first. */
+		if ((fp->f_flag & FWRITE) == 0) {
+			error = EBADF;
+			goto out;
+		}
+
+		if (fp_isguarded(fp, GUARD_WRITE)) {
+			error = fp_guard_exception(p, fd, fp, kGUARD_EXC_WRITE);
+			goto out;
+		}
+	}
+
+	if (check_for_pwrite) {
+		if ((error = valid_for_random_access(fp))) {
+			goto out;
+		}
+	}
+
+	*fp_ret = fp;
+
+	proc_fdunlock(p);
+	return 0;
+
+out:
+	fp_drop(p, fd, fp, 1);
+	proc_fdunlock(p);
+	return error;
+}
+
+static int
+fp_writev(vfs_context_t ctx, struct fileproc *fp, uio_t uio, int flags,
+    user_ssize_t *retval)
+{
+	int error;
+	user_ssize_t count;
+
+	if ((error = uio_calculateresid(uio))) {
+		*retval = 0;
+		return error;
+	}
+
+	count = uio_resid(uio);
+	error = fo_write(fp, uio, flags, ctx);
+
+	switch (error) {
+	case ERESTART:
+	case EINTR:
+	case EWOULDBLOCK:
+		if (uio_resid(uio) != count) {
+			error = 0;
+		}
+		break;
+
+	case EPIPE:
+		if (fp->f_type != DTYPE_SOCKET &&
+		    (fp->fp_glob->fg_lflags & FG_NOSIGPIPE) == 0) {
+			/* XXX Raise the signal on the thread? */
+			psignal(vfs_context_proc(ctx), SIGPIPE);
+		}
+		break;
+
+	default:
+		break;
+	}
+
+	if ((*retval = count - uio_resid(uio))) {
+		os_atomic_or(&fp->fp_glob->fg_flag, FWASWRITTEN, relaxed);
+	}
+
+	return error;
+}
+
+/*
+ * Returns:	0			Success
+ *		EINVAL
+ *	<fo_write>:EPIPE
+ *	<fo_write>:???			[indirect through struct fileops]
+ */
+__private_extern__ int
+dofilewrite(vfs_context_t ctx, struct fileproc *fp,
+    user_addr_t bufp, user_size_t nbyte, off_t offset, int flags,
+    user_ssize_t *retval)
+{
+	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	uio_t uio;
+	int spacetype;
+
+	if (nbyte > INT_MAX) {
+		*retval = 0;
+		return EINVAL;
+	}
+
+	spacetype = vfs_context_is64bit(ctx) ? UIO_USERSPACE64 : UIO_USERSPACE32;
+	uio = uio_createwithbuffer(1, offset, spacetype, UIO_WRITE, &uio_buf[0],
+	    sizeof(uio_buf));
+
+	if (uio_addiov(uio, bufp, nbyte) != 0) {
+		*retval = 0;
+		return EINVAL;
+	}
+
+	return fp_writev(ctx, fp, uio, flags, retval);
+}
+
+static int
+writev_internal(struct proc *p, int fd, uio_t uio, int flags,
+    guardid_t *puguard, user_ssize_t *retval)
+{
+	struct fileproc *fp = NULL;
+	struct vfs_context context;
+	int error;
+
+	if ((error = preparefilewrite(p, &fp, fd, flags & FOF_OFFSET, puguard))) {
+		*retval = 0;
+		return error;
+	}
+
+	context = *(vfs_context_current());
+	context.vc_ucred = fp->fp_glob->fg_cred;
+
+	error = fp_writev(&context, fp, uio, flags, retval);
+
+	fp_drop(p, fd, fp, 0);
+	return error;
+}
+
+int
+write_internal(struct proc *p, int fd, user_addr_t buf, user_size_t nbyte,
+    off_t offset, int flags, guardid_t *puguard, user_ssize_t *retval)
+{
+	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	uio_t uio;
+	int spacetype = IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32;
+
+	if (nbyte > INT_MAX) {
+		*retval = 0;
+		return EINVAL;
+	}
+
+	uio = uio_createwithbuffer(1, offset, spacetype, UIO_WRITE,
+	    &uio_buf[0], sizeof(uio_buf));
+
+	if (uio_addiov(uio, buf, nbyte) != 0) {
+		*retval = 0;
+		return EINVAL;
+	}
+
+	return writev_internal(p, fd, uio, flags, puguard, retval);
+}
+
+int
+write_nocancel(struct proc *p, struct write_nocancel_args *uap, user_ssize_t *retval)
+{
+	return write_internal(p, uap->fd, uap->cbuf, uap->nbyte, (off_t)-1, 0,
+	           NULL, retval);
 }
 
 /*
@@ -508,33 +726,18 @@ write(struct proc *p, struct write_args *uap, user_ssize_t *retval)
 }
 
 int
-write_nocancel(struct proc *p, struct write_nocancel_args *uap, user_ssize_t *retval)
+pwrite_nocancel(struct proc *p, struct pwrite_nocancel_args *uap, user_ssize_t *retval)
 {
-	struct fileproc *fp;
-	int error;
-	int fd = uap->fd;
+	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_pwrite) | DBG_FUNC_NONE),
+	    uap->fd, uap->nbyte, (unsigned int)((uap->offset >> 32)), (unsigned int)(uap->offset), 0);
 
-	AUDIT_ARG(fd, fd);
-
-	error = fp_lookup(p, fd, &fp, 0);
-	if (error) {
-		return error;
+	/* XXX: Should be < 0 instead? (See man page + pwritev) */
+	if (uap->offset == (off_t)-1) {
+		return EINVAL;
 	}
-	if ((fp->f_flag & FWRITE) == 0) {
-		error = EBADF;
-	} else if (fp_isguarded(fp, GUARD_WRITE)) {
-		proc_fdlock(p);
-		error = fp_guard_exception(p, fd, fp, kGUARD_EXC_WRITE);
-		proc_fdunlock(p);
-	} else {
-		struct vfs_context context = *(vfs_context_current());
-		context.vc_ucred = fp->fp_glob->fg_cred;
 
-		error = dofilewrite(&context, fp, uap->cbuf, uap->nbyte,
-		    (off_t)-1, 0, retval);
-	}
-	fp_drop(p, fd, fp, 0);
-	return error;
+	return write_internal(p, uap->fd, uap->buf, uap->nbyte, uap->offset,
+	           FOF_OFFSET, NULL, retval);
 }
 
 /*
@@ -556,211 +759,51 @@ pwrite(struct proc *p, struct pwrite_args *uap, user_ssize_t *retval)
 }
 
 int
-pwrite_nocancel(struct proc *p, struct pwrite_nocancel_args *uap, user_ssize_t *retval)
+writev_uio(struct proc *p, int fd,
+    user_addr_t user_iovp, int iovcnt, off_t offset, int flags,
+    guardid_t *puguard, user_ssize_t *retval)
 {
-	struct fileproc *fp;
-	int error;
-	int fd = uap->fd;
-	vnode_t vp  = (vnode_t)0;
-
-	AUDIT_ARG(fd, fd);
-
-	error = fp_get_ftype(p, fd, DTYPE_VNODE, ESPIPE, &fp);
-	if (error) {
-		return error;
-	}
-
-	if ((fp->f_flag & FWRITE) == 0) {
-		error = EBADF;
-	} else if (fp_isguarded(fp, GUARD_WRITE)) {
-		proc_fdlock(p);
-		error = fp_guard_exception(p, fd, fp, kGUARD_EXC_WRITE);
-		proc_fdunlock(p);
-	} else {
-		struct vfs_context context = *vfs_context_current();
-		context.vc_ucred = fp->fp_glob->fg_cred;
-
-		vp = (vnode_t)fp_get_data(fp);
-		if (vnode_isfifo(vp)) {
-			error = ESPIPE;
-			goto errout;
-		}
-		if ((vp->v_flag & VISTTY)) {
-			error = ENXIO;
-			goto errout;
-		}
-		if (uap->offset == (off_t)-1) {
-			error = EINVAL;
-			goto errout;
-		}
-
-		error = dofilewrite(&context, fp, uap->buf, uap->nbyte,
-		    uap->offset, FOF_OFFSET, retval);
-	}
-errout:
-	fp_drop(p, fd, fp, 0);
-
-	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_pwrite) | DBG_FUNC_NONE),
-	    uap->fd, uap->nbyte, (unsigned int)((uap->offset >> 32)), (unsigned int)(uap->offset), 0);
-
-	return error;
-}
-
-/*
- * Returns:	0			Success
- *		EINVAL
- *	<fo_write>:EPIPE
- *	<fo_write>:???			[indirect through struct fileops]
- */
-__private_extern__ int
-dofilewrite(vfs_context_t ctx, struct fileproc *fp,
-    user_addr_t bufp, user_size_t nbyte, off_t offset, int flags,
-    user_ssize_t *retval)
-{
-	uio_t auio;
-	int error = 0;
-	user_ssize_t bytecnt;
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
-
-	if (nbyte > INT_MAX) {
-		*retval = 0;
-		return EINVAL;
-	}
-
-	if (vfs_context_is64bit(ctx)) {
-		auio = uio_createwithbuffer(1, offset, UIO_USERSPACE64, UIO_WRITE,
-		    &uio_buf[0], sizeof(uio_buf));
-	} else {
-		auio = uio_createwithbuffer(1, offset, UIO_USERSPACE32, UIO_WRITE,
-		    &uio_buf[0], sizeof(uio_buf));
-	}
-	if (uio_addiov(auio, bufp, nbyte) != 0) {
-		*retval = 0;
-		return EINVAL;
-	}
-
-	bytecnt = nbyte;
-	if ((error = fo_write(fp, auio, flags, ctx))) {
-		if (uio_resid(auio) != bytecnt && (error == ERESTART ||
-		    error == EINTR || error == EWOULDBLOCK)) {
-			error = 0;
-		}
-		/* The socket layer handles SIGPIPE */
-		if (error == EPIPE && fp->f_type != DTYPE_SOCKET &&
-		    (fp->fp_glob->fg_lflags & FG_NOSIGPIPE) == 0) {
-			/* XXX Raise the signal on the thread? */
-			psignal(vfs_context_proc(ctx), SIGPIPE);
-		}
-	}
-	bytecnt -= uio_resid(auio);
-	if (bytecnt) {
-		os_atomic_or(&fp->fp_glob->fg_flag, FWASWRITTEN, relaxed);
-	}
-	*retval = bytecnt;
-
-	return error;
-}
-
-/*
- * Returns:	0			Success
- *		EBADF
- *		ESPIPE
- *		ENXIO
- *	fp_lookup:EBADF
- *	fp_guard_exception:???
- *  valid_for_random_access:ESPIPE
- *  valid_for_random_access:ENXIO
- */
-static int
-preparefilewrite(struct proc *p, struct fileproc **fp_ret, int fd, int check_for_pwrite)
-{
-	int error;
-	struct fileproc *fp;
-
-	AUDIT_ARG(fd, fd);
-
-	proc_fdlock_spin(p);
-
-	error = fp_lookup(p, fd, &fp, 1);
-
-	if (error) {
-		proc_fdunlock(p);
-		return error;
-	}
-	if ((fp->f_flag & FWRITE) == 0) {
-		error = EBADF;
-		goto ExitThisRoutine;
-	}
-	if (fp_isguarded(fp, GUARD_WRITE)) {
-		if ((error = fp_guard_exception(p, fd, fp, kGUARD_EXC_WRITE))) {
-			goto ExitThisRoutine;
-		}
-	}
-	if (check_for_pwrite) {
-		if ((error = valid_for_random_access(fp))) {
-			goto ExitThisRoutine;
-		}
-	}
-
-	*fp_ret = fp;
-
-	proc_fdunlock(p);
-	return 0;
-
-ExitThisRoutine:
-	fp_drop(p, fd, fp, 1);
-	proc_fdunlock(p);
-	return error;
-}
-
-static int
-writev_prwritev_uio(struct proc *p, int fd,
-    user_addr_t user_iovp, int iovcnt, off_t offset, int is_pwritev,
-    user_ssize_t *retval)
-{
-	uio_t auio = NULL;
+	uio_t uio = NULL;
 	int error;
 	struct user_iovec *iovp;
 
-	/* Verify range before calling uio_create() */
 	if (iovcnt <= 0 || iovcnt > UIO_MAXIOV || offset < 0) {
-		return EINVAL;
+		error = EINVAL;
+		goto out;
 	}
 
-	/* allocate a uio large enough to hold the number of iovecs passed */
-	auio = uio_create(iovcnt, offset,
+	uio = uio_create(iovcnt, offset,
 	    (IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32),
 	    UIO_WRITE);
 
-	/* get location of iovecs within the uio.  then copyin the iovecs from
-	 * user space.
-	 */
-	iovp = uio_iovsaddr(auio);
+	iovp = uio_iovsaddr(uio);
 	if (iovp == NULL) {
 		error = ENOMEM;
-		goto ExitThisRoutine;
+		goto out;
 	}
+
 	error = copyin_user_iovec_array(user_iovp,
 	    IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32,
 	    iovcnt, iovp);
+
 	if (error) {
-		goto ExitThisRoutine;
+		goto out;
 	}
 
-	/* finalize uio_t for use and do the IO
-	 */
-	error = uio_calculateresid(auio);
-	if (error) {
-		goto ExitThisRoutine;
+	error = writev_internal(p, fd, uio, flags, puguard, retval);
+
+out:
+	if (uio != NULL) {
+		uio_free(uio);
 	}
 
-	error = wr_uio(p, fd, auio, is_pwritev, retval);
-
-ExitThisRoutine:
-	if (auio != NULL) {
-		uio_free(auio);
-	}
 	return error;
+}
+
+int
+writev_nocancel(struct proc *p, struct writev_nocancel_args *uap, user_ssize_t *retval)
+{
+	return writev_uio(p, uap->fd, uap->iovp, uap->iovcnt, 0, 0, NULL, retval);
 }
 
 /*
@@ -774,9 +817,10 @@ writev(struct proc *p, struct writev_args *uap, user_ssize_t *retval)
 }
 
 int
-writev_nocancel(struct proc *p, struct writev_nocancel_args *uap, user_ssize_t *retval)
+sys_pwritev_nocancel(struct proc *p, struct pwritev_nocancel_args *uap, user_ssize_t *retval)
 {
-	return writev_prwritev_uio(p, uap->fd, uap->iovp, uap->iovcnt, 0, 0, retval);
+	return writev_uio(p, uap->fd, uap->iovp, uap->iovcnt, uap->offset,
+	           FOF_OFFSET, NULL, retval);
 }
 
 /*
@@ -787,109 +831,6 @@ sys_pwritev(struct proc *p, struct pwritev_args *uap, user_ssize_t *retval)
 {
 	__pthread_testcancel(1);
 	return sys_pwritev_nocancel(p, (struct pwritev_nocancel_args *)uap, retval);
-}
-
-int
-sys_pwritev_nocancel(struct proc *p, struct pwritev_nocancel_args *uap, user_ssize_t *retval)
-{
-	return writev_prwritev_uio(p, uap->fd, uap->iovp, uap->iovcnt, uap->offset, 1, retval);
-}
-
-/*
- * Returns:	0			Success
- *	preparefileread:EBADF
- *	preparefileread:ESPIPE
- *	preparefileread:ENXIO
- *	preparefileread:???
- *	fo_write:???
- */
-int
-wr_uio(struct proc *p, int fd, uio_t uio, int is_pwritev, user_ssize_t *retval)
-{
-	struct fileproc *fp;
-	int error;
-	int flags;
-
-	if ((error = preparefilewrite(p, &fp, fd, is_pwritev))) {
-		return error;
-	}
-
-	flags = is_pwritev ? FOF_OFFSET : 0;
-	error = do_uiowrite(p, fp, uio, flags, retval);
-
-	fp_drop(p, fd, fp, 0);
-
-	return error;
-}
-
-int
-do_uiowrite(struct proc *p, struct fileproc *fp, uio_t uio, int flags, user_ssize_t *retval)
-{
-	int error;
-	user_ssize_t count;
-	struct vfs_context context = *vfs_context_current();
-
-	count = uio_resid(uio);
-
-	context.vc_ucred = fp->f_cred;
-	error = fo_write(fp, uio, flags, &context);
-	if (error) {
-		if (uio_resid(uio) != count && (error == ERESTART ||
-		    error == EINTR || error == EWOULDBLOCK)) {
-			error = 0;
-		}
-		/* The socket layer handles SIGPIPE */
-		if (error == EPIPE && fp->f_type != DTYPE_SOCKET &&
-		    (fp->fp_glob->fg_lflags & FG_NOSIGPIPE) == 0) {
-			psignal(p, SIGPIPE);
-		}
-	}
-	count -= uio_resid(uio);
-	if (count) {
-		os_atomic_or(&fp->fp_glob->fg_flag, FWASWRITTEN, relaxed);
-	}
-	*retval = count;
-
-	return error;
-}
-
-/*
- * Returns:	0			Success
- *	preparefileread:EBADF
- *	preparefileread:ESPIPE
- *	preparefileread:ENXIO
- *	fo_read:???
- */
-int
-rd_uio(struct proc *p, int fdes, uio_t uio, int is_preadv, user_ssize_t *retval)
-{
-	struct fileproc *fp;
-	int error;
-	user_ssize_t count;
-	struct vfs_context context = *vfs_context_current();
-
-	if ((error = preparefileread(p, &fp, fdes, is_preadv))) {
-		return error;
-	}
-
-	count = uio_resid(uio);
-
-	context.vc_ucred = fp->f_cred;
-
-	int flags = is_preadv ? FOF_OFFSET : 0;
-	error = fo_read(fp, uio, flags, &context);
-
-	if (error) {
-		if (uio_resid(uio) != count && (error == ERESTART ||
-		    error == EINTR || error == EWOULDBLOCK)) {
-			error = 0;
-		}
-	}
-	*retval = count - uio_resid(uio);
-
-	fp_drop(p, fdes, fp, 0);
-
-	return error;
 }
 
 /*
@@ -2221,8 +2162,7 @@ selwakeup_internal(struct selinfo *sip, long hint, wait_result_t wr)
 	 * so that all linkages are garbage collected
 	 * in a combined wakeup-all + unlink + deinit call.
 	 */
-	select_waitq_wakeup_and_deinit(&sip->si_waitq, NO_EVENT64, wr,
-	    WAITQ_ALL_PRIORITIES);
+	select_waitq_wakeup_and_deinit(&sip->si_waitq, NO_EVENT64, wr);
 }
 
 
@@ -2369,7 +2309,7 @@ ledger(struct proc *p, struct ledger_args *args, __unused int32_t *retval)
 		}
 #endif
 
-		task = proc->task;
+		task = proc_task(proc);
 	}
 
 	switch (args->cmd) {
@@ -2855,19 +2795,15 @@ SYSCTL_INT(_kern, OID_AUTO, sched_edge_migrate_ipi_immediate, CTLFLAG_RW | CTLFL
 
 #endif /* __AMP__ */
 
-#if INTERRUPT_MASKED_DEBUG
+#if SCHED_HYGIENE_DEBUG
 
-SYSCTL_INT(_kern, OID_AUTO, interrupt_masked_threshold_mt, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &interrupt_masked_timeout, 0,
+SYSCTL_QUAD(_kern, OID_AUTO, interrupt_masked_threshold_mt, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &interrupt_masked_timeout,
     "Interrupt masked duration after which a tracepoint is emitted or the device panics (in mach timebase units)");
 
 SYSCTL_INT(_kern, OID_AUTO, interrupt_masked_debug_mode, CTLFLAG_RW | CTLFLAG_LOCKED,
     &interrupt_masked_debug_mode, 0,
     "Enable interrupt masked tracing or panic (0: off, 1: trace, 2: panic)");
-
-#endif /* INTERRUPT_MASKED_DEBUG */
-
-#if SCHED_PREEMPTION_DISABLE_DEBUG
 
 SYSCTL_QUAD(_kern, OID_AUTO, sched_preemption_disable_threshold_mt, CTLFLAG_RW | CTLFLAG_LOCKED,
     &sched_preemption_disable_threshold_mt,
@@ -2877,7 +2813,7 @@ SYSCTL_INT(_kern, OID_AUTO, sched_preemption_disable_debug_mode, CTLFLAG_RW | CT
     &sched_preemption_disable_debug_mode, 0,
     "Enable preemption disablement tracing or panic (0: off, 1: trace, 2: panic)");
 
-PERCPU_DECL(uint64_t, preemption_disable_max_mt);
+PERCPU_DECL(uint64_t _Atomic, preemption_disable_max_mt);
 
 static int
 sysctl_sched_preemption_disable_stats(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
@@ -2889,17 +2825,15 @@ sysctl_sched_preemption_disable_stats(__unused struct sysctl_oid *oidp, __unused
 	 * independent, and reading/writing them is atomic.
 	 */
 
-	static_assert(__LP64__); /* below is racy on armv7k, reminder to change if needed there. */
-
 	int cpu = 0;
 	percpu_foreach(max_stat, preemption_disable_max_mt) {
-		stats[cpu++] = *max_stat;
+		stats[cpu++] = os_atomic_load(max_stat, relaxed);
 	}
 
 	if (req->newlen > 0) {
 		// writing just resets all stats.
 		percpu_foreach(max_stat, preemption_disable_max_mt) {
-			*max_stat = 0;
+			os_atomic_store(max_stat, 0, relaxed);
 		}
 	}
 
@@ -2910,8 +2844,7 @@ SYSCTL_PROC(_kern, OID_AUTO, sched_preemption_disable_stats,
     CTLTYPE_OPAQUE | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, sysctl_sched_preemption_disable_stats, "I", "Preemption disablement statistics");
 
-#endif /* SCHED_PREEMPTION_DISABLE_DEBUG */
-
+#endif /* SCHED_HYGIENE_DEBUG */
 
 /* used for testing by exception_tests */
 extern uint32_t ipc_control_port_options;
@@ -3113,13 +3046,13 @@ SYSCTL_PROC(_machdep, OID_AUTO, task_get_fatal_port, CTLTYPE_INT | CTLFLAG_RW | 
 
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
-extern unsigned int ipc_table_max_entries(void);
+extern unsigned int ipc_entry_table_count_max(void);
 
 static int
 sysctl_mach_max_port_table_size SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
-	int old_value = ipc_table_max_entries();
+	int old_value = ipc_entry_table_count_max();
 	int error = sysctl_io_number(req, old_value, sizeof(int), NULL, NULL);
 
 	return error;
@@ -3139,7 +3072,9 @@ sysctl_coredump_encryption_key_update SYSCTL_HANDLER_ARGS
 {
 	kern_return_t ret = KERN_SUCCESS;
 	int error = 0;
-	struct kdp_core_encryption_key_descriptor key_descriptor = { MACH_CORE_FILEHEADER_V2_FLAG_NEXT_COREFILE_KEY_FORMAT_NIST_P256, 0, NULL };
+	struct kdp_core_encryption_key_descriptor key_descriptor = {
+		.kcekd_format = MACH_CORE_FILEHEADER_V2_FLAG_NEXT_COREFILE_KEY_FORMAT_NIST_P256,
+	};
 
 	/* Need to be root and have entitlement */
 	if (!kauth_cred_issuser(kauth_cred_get()) && !IOCurrentTaskHasEntitlement(COREDUMP_ENCRYPTION_KEY_ENTITLEMENT)) {
@@ -3151,32 +3086,30 @@ sysctl_coredump_encryption_key_update SYSCTL_HANDLER_ARGS
 		return EINVAL;
 	}
 
-	// It is allowed for the caller to pass in a NULL buffer. This indicates that they want us to forget about any public key
-	// we might have.
+	// It is allowed for the caller to pass in a NULL buffer.
+	// This indicates that they want us to forget about any public key we might have.
 	if (req->newptr) {
 		key_descriptor.kcekd_size = (uint16_t) req->newlen;
+		key_descriptor.kcekd_key = kalloc_data(key_descriptor.kcekd_size, Z_WAITOK);
 
-		ret = kmem_alloc(kernel_map, (vm_offset_t*) &(key_descriptor.kcekd_key), key_descriptor.kcekd_size, VM_KERN_MEMORY_DIAG);
-		if (KERN_SUCCESS != ret) {
+		if (key_descriptor.kcekd_key == NULL) {
 			return ENOMEM;
 		}
 
 		error = SYSCTL_IN(req, key_descriptor.kcekd_key, key_descriptor.kcekd_size);
 		if (error) {
-			return error;
+			goto out;
 		}
 	}
 
-	// If successful, kdp_core will take ownership of the 'kcekd_key' pointer
 	ret = IOProvideCoreFileAccess(kdp_core_handle_new_encryption_key, (void *)&key_descriptor);
 	if (KERN_SUCCESS != ret) {
 		printf("Failed to handle the new encryption key. Error 0x%x", ret);
-		if (key_descriptor.kcekd_key) {
-			kmem_free(kernel_map, (vm_offset_t) key_descriptor.kcekd_key, key_descriptor.kcekd_size);
-		}
-		return EFAULT;
+		error = EFAULT;
 	}
 
+out:
+	kfree_data(key_descriptor.kcekd_key, key_descriptor.kcekd_size);
 	return 0;
 }
 

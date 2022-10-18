@@ -36,7 +36,7 @@
 
 #define MZV_MAGIC (17185)
 #if defined(__arm64__)
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #endif
 
 #define LZ4_SCRATCH_ALIGN (64)
@@ -462,7 +462,7 @@ vm_compressor_algorithm_init(void)
 	    (new_codec == CMODE_LZ4) || (new_codec == CMODE_HYB)),
 	    "Invalid VM compression codec: %u", new_codec);
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	uint32_t tmpc;
 	if (PE_parse_boot_argn("-vm_compressor_wk", &tmpc, sizeof(tmpc))) {
 		new_codec = VM_COMPRESSOR_DEFAULT_CODEC;

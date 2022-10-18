@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -70,6 +70,7 @@
 #if SKYWALK
 #include <skywalk/os_skywalk_private.h>
 #include <skywalk/nexus/flowswitch/flow/flow_var.h>
+#include <skywalk/nexus/netif/nx_netif.h>
 #endif /* SKYWALK */
 
 #if CONFIG_MACF
@@ -160,7 +161,7 @@ static int necpop_kqfilter(struct fileproc *, struct knote *, struct kevent_qos_
 
 // Timer functions
 static int necp_timeout_microseconds = 1000 * 100; // 100ms
-static int necp_timeout_leeway_microseconds = 1000 * 500; // 500ms
+static int necp_timeout_leeway_microseconds = 1000 * 50; // 50ms
 #if SKYWALK
 static int necp_collect_stats_timeout_microseconds = 1000 * 1000 * 1; // 1s
 static int necp_collect_stats_timeout_leeway_microseconds = 1000 * 500; // 500ms
@@ -282,7 +283,7 @@ SYSCTL_UINT(_net_necp, OID_AUTO, necp_client_stats_rtt_ceiling, CTLFLAG_RW | CTL
 #endif /* SKYWALK */
 
 #define NECP_MAX_CLIENT_LIST_SIZE               1024 * 1024 // 1MB
-#define NECP_MAX_AGENT_ACTION_SIZE              256
+#define NECP_MAX_AGENT_ACTION_SIZE              10 * 1024 // 10K
 
 extern int tvtohz(struct timeval *);
 extern unsigned int get_maxmtu(struct rtentry *);
@@ -314,6 +315,7 @@ extern unsigned int get_maxmtu(struct rtentry *);
 #define NECP_PARSED_PARAMETERS_FIELD_LOCAL_ADDR_PREFERENCE              0x800000
 #define NECP_PARSED_PARAMETERS_FIELD_ATTRIBUTED_BUNDLE_IDENTIFIER       0x1000000
 #define NECP_PARSED_PARAMETERS_FIELD_PARENT_UUID                        0x2000000
+#define NECP_PARSED_PARAMETERS_FIELD_FLOW_DEMUX_PATTERN                 0x4000000
 
 
 #define NECP_MAX_INTERFACE_PARAMETERS 16
@@ -344,6 +346,8 @@ struct necp_client_parsed_parameters {
 	uuid_t effective_uuid;
 	uuid_t parent_uuid;
 	u_int32_t traffic_class;
+	struct necp_demux_pattern demux_patterns[NECP_MAX_DEMUX_PATTERNS];
+	u_int8_t demux_pattern_count;
 };
 
 static bool
@@ -463,7 +467,7 @@ RB_PROTOTYPE_PREV(_necp_client_flow_tree, necp_client_flow_registration, client_
 RB_GENERATE_PREV(_necp_client_flow_tree, necp_client_flow_registration, client_link, necp_client_flow_id_cmp);
 
 #define NECP_CLIENT_INTERFACE_OPTION_STATIC_COUNT 4
-#define NECP_CLIENT_MAX_INTERFACE_OPTIONS 16
+#define NECP_CLIENT_MAX_INTERFACE_OPTIONS 32
 
 #define NECP_CLIENT_INTERFACE_OPTION_EXTRA_COUNT (NECP_CLIENT_MAX_INTERFACE_OPTIONS - NECP_CLIENT_INTERFACE_OPTION_STATIC_COUNT)
 
@@ -482,9 +486,10 @@ struct necp_client {
 	unsigned legacy_client_is_flow : 1;
 
 	unsigned platform_binary : 1;
+	unsigned validated_parent : 1;
 
 	size_t result_length;
-	u_int8_t result[NECP_MAX_CLIENT_RESULT_SIZE];
+	u_int8_t result[NECP_BASE_CLIENT_RESULT_SIZE];
 
 	necp_policy_id policy_id;
 
@@ -515,6 +520,7 @@ struct necp_client {
 	netns_token port_reservation;
 	nstat_context nstat_context;
 	uuid_t latest_flow_registration_id;
+	uuid_t parent_client_id;
 	struct necp_client *original_parameters_source;
 #endif /* !SKYWALK */
 
@@ -541,6 +547,10 @@ necp_client_add_assertion(struct necp_client *client, uuid_t netagent_uuid);
 
 static bool
 necp_client_remove_assertion(struct necp_client *client, uuid_t netagent_uuid);
+
+static int
+necp_client_copy_parameters_locked(struct necp_client *client,
+    struct necp_client_nexus_parameters *parameters);
 
 LIST_HEAD(_necp_flow_registration_list, necp_client_flow_registration);
 static struct _necp_flow_registration_list necp_collect_stats_flow_list;
@@ -647,18 +657,6 @@ struct necp_fd_data {
 static LIST_HEAD(_necp_fd_list, necp_fd_data) necp_fd_list;
 static LIST_HEAD(_necp_fd_observer_list, necp_fd_data) necp_fd_observer_list;
 
-static ZONE_DEFINE(necp_client_fd_zone, "necp.clientfd",
-    sizeof(struct necp_fd_data), ZC_NONE);
-
-#define NECP_FLOW_ZONE_NAME                     "necp.flow"
-#define NECP_FLOW_REGISTRATION_ZONE_NAME        "necp.flowregistration"
-
-static unsigned int necp_flow_size;             /* size of necp_client_flow */
-static struct mcache *necp_flow_cache;  /* cache for necp_client_flow */
-
-static unsigned int necp_flow_registration_size;        /* size of necp_client_flow_registration */
-static struct mcache *necp_flow_registration_cache;     /* cache for necp_client_flow_registration */
-
 #if SKYWALK
 static ZONE_DEFINE(necp_arena_info_zone, "necp.arenainfo",
     sizeof(struct necp_arena_info), ZC_ZFREE_CLEARMEM);
@@ -716,6 +714,14 @@ static LCK_RW_DECLARE_ATTR(necp_collect_stats_list_lock, &necp_fd_mtx_grp, &necp
 // 7. NECP_CLIENT_ROUTE_LOCK (any)
 
 static thread_call_t necp_client_update_tcall;
+static uint32_t necp_update_all_clients_sched_cnt = 0;
+static uint64_t necp_update_all_clients_sched_abstime = 0;
+static LCK_RW_DECLARE_ATTR(necp_update_all_clients_lock, &necp_fd_mtx_grp, &necp_fd_mtx_attr);
+#define NECP_UPDATE_ALL_CLIENTS_LOCK_EXCLUSIVE() lck_rw_lock_exclusive(&necp_update_all_clients_lock)
+#define NECP_UPDATE_ALL_CLIENTS_SHARED_TO_EXCLUSIVE() lck_rw_lock_shared_to_exclusive(&necp_update_all_clients_lock)
+#define NECP_UPDATE_ALL_CLIENTS_SHARED() lck_rw_lock_shared(&necp_update_all_clients_lock)
+#define NECP_UPDATE_ALL_CLIENTS_UNLOCK() lck_rw_done(&necp_update_all_clients_lock)
+
 
 #if SKYWALK
 static thread_call_t necp_client_collect_stats_tcall;
@@ -744,12 +750,14 @@ static void *necp_arena_sysctls_obj(struct necp_fd_data *fd_data, mach_vm_offset
 #endif /* !SKYWALK */
 
 void necp_copy_inp_domain_info(struct inpcb *, struct socket *, nstat_domain_info *);
+void necp_with_inp_domain_name(struct socket *so, void *ctx, void (*with_func)(char *domain_name, void *ctx));
 
 static void
 necp_lock_socket_attributes(void)
 {
 	lck_mtx_lock(&necp_socket_attr_lock);
 }
+
 static void
 necp_unlock_socket_attributes(void)
 {
@@ -1626,13 +1634,13 @@ necp_destroy_client_flow_registration(struct necp_client *client,
 		} else {
 			OSDecrementAtomic(&necp_if_flow_count);
 		}
-		mcache_free(necp_flow_cache, search_flow);
+		kfree_type(struct necp_client_flow, search_flow);
 	}
 
 	RB_REMOVE(_necp_client_flow_tree, &client->flow_registrations, flow_registration);
 	flow_registration->client = NULL;
 
-	mcache_free(necp_flow_registration_cache, flow_registration);
+	kfree_type(struct necp_client_flow_registration, flow_registration);
 }
 
 static void
@@ -1825,8 +1833,7 @@ necpop_close(struct fileglob *fg, vfs_context_t ctx)
 			OSDecrementAtomic(&necp_client_fd_count);
 		}
 
-		zfree(necp_client_fd_zone, fd_data);
-		fd_data = NULL;
+		kfree_type(struct necp_fd_data, fd_data);
 
 		RB_FOREACH_SAFE(client, _necp_client_tree, &clients_to_close, temp_client) {
 			RB_REMOVE(_necp_client_tree, &clients_to_close, client);
@@ -1874,13 +1881,7 @@ necp_client_add_nexus_flow(struct necp_client_flow_registration *flow_registrati
     uint32_t interface_index,
     uint16_t interface_flags)
 {
-	struct necp_client_flow *new_flow = mcache_alloc(necp_flow_cache, MCR_SLEEP);
-	if (new_flow == NULL) {
-		NECPLOG0(LOG_ERR, "Failed to allocate nexus flow");
-		return;
-	}
-
-	memset(new_flow, 0, sizeof(*new_flow));
+	struct necp_client_flow *new_flow = kalloc_type(struct necp_client_flow, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	new_flow->nexus = TRUE;
 	uuid_copy(new_flow->u.nexus_agent, nexus_agent);
@@ -1931,13 +1932,7 @@ static struct necp_client_flow *
 necp_client_add_interface_flow(struct necp_client_flow_registration *flow_registration,
     uint32_t interface_index)
 {
-	struct necp_client_flow *new_flow = mcache_alloc(necp_flow_cache, MCR_SLEEP);
-	if (new_flow == NULL) {
-		NECPLOG0(LOG_ERR, "Failed to allocate interface flow");
-		return NULL;
-	}
-
-	memset(new_flow, 0, sizeof(*new_flow));
+	struct necp_client_flow *new_flow = kalloc_type(struct necp_client_flow, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	// Neither nexus nor socket
 	new_flow->interface_index = interface_index;
@@ -2240,7 +2235,7 @@ necp_client_update_flows(proc_t proc,
 					} else {
 						OSDecrementAtomic(&necp_if_flow_count);
 					}
-					mcache_free(necp_flow_cache, flow);
+					kfree_type(struct necp_client_flow, flow);
 				}
 			}
 
@@ -2498,7 +2493,7 @@ necp_client_add_browse_interface_options(struct necp_client *client,
 }
 
 static inline bool
-necp_client_address_is_valid(struct sockaddr *address)
+_necp_client_address_is_valid(struct sockaddr *address)
 {
 	if (address->sa_family == AF_INET) {
 		return address->sa_len == sizeof(struct sockaddr_in);
@@ -2508,6 +2503,8 @@ necp_client_address_is_valid(struct sockaddr *address)
 		return FALSE;
 	}
 }
+
+#define necp_client_address_is_valid(S) _necp_client_address_is_valid(SA(S))
 
 static inline bool
 necp_client_endpoint_is_unspecified(struct necp_client_endpoint *endpoint)
@@ -2730,6 +2727,21 @@ necp_client_trace_parsed_parameters(struct necp_client *client, struct necp_clie
 		uuid_unparse_lower(parsed_parameters->avoided_netagents[i], uuid_str);
 		NECP_CLIENT_PARAMS_LOG(client, "Parsed avoided_netagents[%d] <%s>", i, uuid_str);
 	}
+}
+
+static bool
+necp_client_strings_are_equal(const char *string1, size_t string1_length,
+    const char *string2, size_t string2_length)
+{
+	if (string1 == NULL || string2 == NULL) {
+		return false;
+	}
+	const size_t string1_actual_length = strnlen(string1, string1_length);
+	const size_t string2_actual_length = strnlen(string2, string2_length);
+	if (string1_actual_length != string2_actual_length) {
+		return false;
+	}
+	return strncmp(string1, string2, string1_actual_length) == 0;
 }
 
 static int
@@ -3028,8 +3040,14 @@ necp_client_parse_parameters(struct necp_client *client, u_int8_t *parameters,
 				}
 				case NECP_CLIENT_PARAMETER_RESOLVER_TAG: {
 					if (length > 0) {
-						resolver_tag = (u_int8_t *)value;
-						resolver_tag_length = length;
+						if (resolver_tag != NULL) {
+							// Multiple resolver tags is invalid
+							NECPLOG0(LOG_ERR, "Multiple resolver tags are not supported");
+							error = EINVAL;
+						} else {
+							resolver_tag = (u_int8_t *)value;
+							resolver_tag_length = length;
+						}
 					}
 					break;
 				}
@@ -3061,6 +3079,17 @@ necp_client_parse_parameters(struct necp_client *client, u_int8_t *parameters,
 					}
 					break;
 				}
+				case NECP_CLIENT_PARAMETER_FLOW_DEMUX_PATTERN: {
+					if (parsed_parameters->demux_pattern_count >= NECP_MAX_DEMUX_PATTERNS) {
+						break;
+					}
+					if (length >= sizeof(struct necp_demux_pattern)) {
+						memcpy(&parsed_parameters->demux_patterns[parsed_parameters->demux_pattern_count], value, sizeof(struct necp_demux_pattern));
+						parsed_parameters->demux_pattern_count++;
+						parsed_parameters->valid_fields |= NECP_PARSED_PARAMETERS_FIELD_FLOW_DEMUX_PATTERN;
+					}
+					break;
+				}
 				default: {
 					break;
 				}
@@ -3076,16 +3105,107 @@ necp_client_parse_parameters(struct necp_client *client, u_int8_t *parameters,
 	}
 
 	if (resolver_tag != NULL) {
-		union necp_sockaddr_union remote_addr;
-		memcpy(&remote_addr, &parsed_parameters->remote_addr, sizeof(remote_addr));
-		remote_addr.sin.sin_port = 0;
-		const bool validated = necp_validate_resolver_answer(parent_id,
-		    client_hostname, hostname_length,
-		    (u_int8_t *)&remote_addr, sizeof(remote_addr),
-		    resolver_tag, resolver_tag_length);
-		if (!validated) {
-			error = EAUTH;
-			NECPLOG(LOG_ERR, "Failed to validate answer for hostname %s", client_hostname);
+		struct necp_client_validatable *validatable = (struct necp_client_validatable *)resolver_tag;
+		if (resolver_tag_length <= sizeof(struct necp_client_validatable)) {
+			error = EINVAL;
+			NECPLOG(LOG_ERR, "Resolver tag length too short: %u", resolver_tag_length);
+		} else {
+			bool matches = true;
+
+			// Check the client UUID for client-specific results
+			if (validatable->signable.sign_type == NECP_CLIENT_SIGN_TYPE_RESOLVER_ANSWER ||
+			    validatable->signable.sign_type == NECP_CLIENT_SIGN_TYPE_BROWSE_RESULT ||
+			    validatable->signable.sign_type == NECP_CLIENT_SIGN_TYPE_SERVICE_RESOLVER_ANSWER) {
+				if (uuid_compare(parent_id, validatable->signable.client_id) != 0 &&
+				    uuid_compare(client->client_id, validatable->signable.client_id) != 0) {
+					NECPLOG0(LOG_ERR, "Resolver tag invalid client ID");
+					matches = false;
+				}
+			}
+
+			size_t data_length = resolver_tag_length - sizeof(struct necp_client_validatable);
+			switch (validatable->signable.sign_type) {
+			case NECP_CLIENT_SIGN_TYPE_RESOLVER_ANSWER:
+			case NECP_CLIENT_SIGN_TYPE_SYSTEM_RESOLVER_ANSWER: {
+				if (data_length < (sizeof(struct necp_client_host_resolver_answer) - sizeof(struct necp_client_signable))) {
+					NECPLOG0(LOG_ERR, "Resolver tag invalid length for resolver answer");
+					matches = false;
+				} else {
+					struct necp_client_host_resolver_answer *answer_struct = (struct necp_client_host_resolver_answer *)&validatable->signable;
+					if (data_length != (sizeof(struct necp_client_host_resolver_answer) + answer_struct->hostname_length - sizeof(struct necp_client_signable))) {
+						NECPLOG0(LOG_ERR, "Resolver tag invalid length for resolver answer");
+						matches = false;
+					} else {
+						if (answer_struct->hostname_length != 0 && // If the hostname on the signed answer is empty, ignore
+						    !necp_client_strings_are_equal((const char *)client_hostname, hostname_length,
+						    answer_struct->hostname, answer_struct->hostname_length)) {
+							NECPLOG0(LOG_ERR, "Resolver tag hostname does not match");
+							matches = false;
+						} else if (answer_struct->address_answer.sa.sa_family != parsed_parameters->remote_addr.sa.sa_family ||
+						    answer_struct->address_answer.sa.sa_len != parsed_parameters->remote_addr.sa.sa_len) {
+							NECPLOG0(LOG_ERR, "Resolver tag address type does not match");
+							matches = false;
+						} else if (answer_struct->address_answer.sin.sin_port != 0 && // If the port on the signed answer is empty, ignore
+						    answer_struct->address_answer.sin.sin_port != parsed_parameters->remote_addr.sin.sin_port) {
+							NECPLOG0(LOG_ERR, "Resolver tag port does not match");
+							matches = false;
+						} else if ((answer_struct->address_answer.sa.sa_family == AF_INET &&
+						    answer_struct->address_answer.sin.sin_addr.s_addr != parsed_parameters->remote_addr.sin.sin_addr.s_addr) ||
+						    (answer_struct->address_answer.sa.sa_family == AF_INET6 &&
+						    memcmp(&answer_struct->address_answer.sin6.sin6_addr, &parsed_parameters->remote_addr.sin6.sin6_addr, sizeof(struct in6_addr)) != 0)) {
+							NECPLOG0(LOG_ERR, "Resolver tag address does not match");
+							matches = false;
+						}
+					}
+				}
+				break;
+			}
+			case NECP_CLIENT_SIGN_TYPE_BROWSE_RESULT:
+			case NECP_CLIENT_SIGN_TYPE_SYSTEM_BROWSE_RESULT: {
+				if (data_length < (sizeof(struct necp_client_browse_result) - sizeof(struct necp_client_signable))) {
+					NECPLOG0(LOG_ERR, "Resolver tag invalid length for browse result");
+					matches = false;
+				} else {
+					struct necp_client_browse_result *answer_struct = (struct necp_client_browse_result *)&validatable->signable;
+					if (data_length != (sizeof(struct necp_client_browse_result) + answer_struct->service_length - sizeof(struct necp_client_signable))) {
+						NECPLOG0(LOG_ERR, "Resolver tag invalid length for browse result");
+						matches = false;
+					}
+				}
+				break;
+			}
+			case NECP_CLIENT_SIGN_TYPE_SERVICE_RESOLVER_ANSWER:
+			case NECP_CLIENT_SIGN_TYPE_SYSTEM_SERVICE_RESOLVER_ANSWER: {
+				if (data_length < (sizeof(struct necp_client_service_resolver_answer) - sizeof(struct necp_client_signable))) {
+					NECPLOG0(LOG_ERR, "Resolver tag invalid length for service resolver answer");
+					matches = false;
+				} else {
+					struct necp_client_service_resolver_answer *answer_struct = (struct necp_client_service_resolver_answer *)&validatable->signable;
+					if (data_length != (sizeof(struct necp_client_service_resolver_answer) + answer_struct->service_length + answer_struct->hostname_length - sizeof(struct necp_client_signable))) {
+						NECPLOG0(LOG_ERR, "Resolver tag invalid length for service resolver answer");
+						matches = false;
+					}
+				}
+				break;
+			}
+			default: {
+				NECPLOG(LOG_ERR, "Resolver tag unknown sign type: %u", validatable->signable.sign_type);
+				matches = false;
+				break;
+			}
+			}
+			if (!matches) {
+				error = EAUTH;
+			} else {
+				const bool validated = necp_validate_resolver_answer(validatable->signable.client_id,
+				    validatable->signable.sign_type,
+				    validatable->signable.signable_data, data_length,
+				    validatable->signature.signed_tag, sizeof(validatable->signature.signed_tag));
+				if (!validated) {
+					error = EAUTH;
+					NECPLOG0(LOG_ERR, "Failed to validate resolve answer");
+				}
+			}
 		}
 	}
 
@@ -3145,18 +3265,12 @@ necp_client_parse_result(u_int8_t *result,
 #if SKYWALK
 				case NECP_CLIENT_RESULT_NEXUS_FLOW_STATS: {
 					// this TLV contains flow_stats pointer which is refcnt'ed.
-					if (length >= sizeof(struct sk_stats_flow *)) {
+					if (flow_stats != NULL && length >= sizeof(struct sk_stats_flow *)) {
 						struct flow_stats *fs = *(void **)(void *)value;
-						if (flow_stats != NULL) {
-							// transfer the refcnt to flow_stats pointer
-							*flow_stats = fs;
-						} else {
-							// otherwise, release the refcnt
-							VERIFY(fs != NULL);
-							flow_stats_release(fs);
-						}
-						memset(value, 0, sizeof(struct flow_stats*));         // nullify TLV always
+						// transfer the refcnt to flow_stats pointer
+						*flow_stats = fs;
 					}
+					memset(value, 0, length); // nullify TLV always
 					break;
 				}
 #endif /* SKYWALK */
@@ -3179,12 +3293,7 @@ necp_client_create_flow_registration(struct necp_fd_data *fd_data, struct necp_c
 	NECP_FD_ASSERT_LOCKED(fd_data);
 	NECP_CLIENT_ASSERT_LOCKED(client);
 
-	struct necp_client_flow_registration *new_registration = mcache_alloc(necp_flow_registration_cache, MCR_SLEEP);
-	if (new_registration == NULL) {
-		return NULL;
-	}
-
-	memset(new_registration, 0, sizeof(*new_registration));
+	struct necp_client_flow_registration *new_registration = kalloc_type(struct necp_client_flow_registration, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	new_registration->last_interface_details = combine_interface_details(IFSCOPE_NONE, NSTAT_IFNET_IS_UNKNOWN_TYPE);
 
@@ -3227,13 +3336,7 @@ static void
 necp_client_add_socket_flow(struct necp_client_flow_registration *flow_registration,
     struct inpcb *inp)
 {
-	struct necp_client_flow *new_flow = mcache_alloc(necp_flow_cache, MCR_SLEEP);
-	if (new_flow == NULL) {
-		NECPLOG0(LOG_ERR, "Failed to allocate socket flow");
-		return;
-	}
-
-	memset(new_flow, 0, sizeof(*new_flow));
+	struct necp_client_flow *new_flow = kalloc_type(struct necp_client_flow, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	new_flow->socket = TRUE;
 	new_flow->u.socket_handle = inp;
@@ -3579,7 +3682,7 @@ necp_client_unregister_socket_flow(uuid_t client_id, void *handle)
 						flow_registration->flow_result_read = FALSE;
 						LIST_REMOVE(search_flow, flow_chain);
 						OSDecrementAtomic(&necp_socket_flow_count);
-						mcache_free(necp_flow_cache, search_flow);
+						kfree_type(struct necp_client_flow, search_flow);
 					}
 				}
 			}
@@ -3887,7 +3990,8 @@ necp_assign_client_result_locked(struct proc *proc,
     uuid_t netagent_uuid,
     u_int8_t *assigned_results,
     size_t assigned_results_length,
-    bool notify_fd)
+    bool notify_fd,
+    bool assigned_from_userspace_agent)
 {
 	bool client_updated = FALSE;
 
@@ -3908,7 +4012,8 @@ necp_assign_client_result_locked(struct proc *proc,
 			void *nexus_stats = NULL;
 			if (assigned_results != NULL && assigned_results_length > 0) {
 				int error = necp_client_parse_result(assigned_results, (u_int32_t)assigned_results_length,
-				    &flow->local_addr, &flow->remote_addr, &nexus_stats);
+				    &flow->local_addr, &flow->remote_addr,
+				    assigned_from_userspace_agent ? NULL : &nexus_stats); // Only assign stats from kernel agents
 				VERIFY(error == 0);
 			}
 
@@ -3964,7 +4069,7 @@ necp_assign_client_result(uuid_t netagent_uuid, uuid_t client_id,
 				// Found the right client and flow!
 				found_client = TRUE;
 				if (necp_assign_client_result_locked(proc, client_fd, client, flow_registration, netagent_uuid,
-				    assigned_results, assigned_results_length, true)) {
+				    assigned_results, assigned_results_length, true, true)) {
 					client_updated = TRUE;
 				}
 			}
@@ -4928,6 +5033,18 @@ necp_update_all_clients_callout(__unused thread_call_param_t dummy,
 {
 	struct necp_fd_data *client_fd = NULL;
 
+	NECP_UPDATE_ALL_CLIENTS_LOCK_EXCLUSIVE();
+	uint32_t count = necp_update_all_clients_sched_cnt;
+	necp_update_all_clients_sched_cnt = 0;
+	necp_update_all_clients_sched_abstime = 0;
+	NECP_UPDATE_ALL_CLIENTS_UNLOCK();
+
+	if (necp_debug > 0) {
+		NECPLOG(LOG_DEBUG,
+		    "necp_update_all_clients_callout running for coalesced %u updates",
+		    count);
+	}
+
 	struct _necp_flow_defunct_list defunct_list;
 	LIST_INIT(&defunct_list);
 
@@ -4981,8 +5098,59 @@ necp_update_all_clients_immediately_if_needed(bool should_update_immediately)
 	clock_interval_to_deadline(timeout_to_use, NSEC_PER_USEC, &deadline);
 	clock_interval_to_absolutetime_interval(leeway_to_use, NSEC_PER_USEC, &leeway);
 
-	thread_call_enter_delayed_with_leeway(necp_client_update_tcall, NULL,
-	    deadline, leeway, THREAD_CALL_DELAY_LEEWAY);
+	NECP_UPDATE_ALL_CLIENTS_LOCK_EXCLUSIVE();
+	bool need_cancel = false;
+	bool need_schedule = true;
+	uint64_t sched_abstime;
+
+	clock_absolutetime_interval_to_deadline(deadline + leeway, &sched_abstime);
+
+	/*
+	 * Do not push the timer if it is already scheduled
+	 */
+	if (necp_update_all_clients_sched_abstime != 0) {
+		need_schedule = false;
+
+		if (should_update_immediately) {
+			/*
+			 * To update immediately we may have to cancel the current timer
+			 * if it's scheduled too far out.
+			 */
+			if (necp_update_all_clients_sched_abstime > sched_abstime) {
+				need_cancel = true;
+				need_schedule = true;
+			}
+		}
+	}
+
+	/*
+	 * Record the time of the deadline with leeway
+	 */
+	if (need_schedule) {
+		necp_update_all_clients_sched_abstime = sched_abstime;
+	}
+
+	necp_update_all_clients_sched_cnt += 1;
+	uint32_t count = necp_update_all_clients_sched_cnt;
+	NECP_UPDATE_ALL_CLIENTS_UNLOCK();
+
+	if (need_schedule) {
+		/*
+		 * Wait if the thread call is currently executing to make sure the
+		 * next update will be delivered to all clients
+		 */
+		if (need_cancel) {
+			(void) thread_call_cancel_wait(necp_client_update_tcall);
+		}
+
+		(void) thread_call_enter_delayed_with_leeway(necp_client_update_tcall, NULL,
+		    deadline, leeway, THREAD_CALL_DELAY_LEEWAY);
+	}
+	if (necp_debug > 0) {
+		NECPLOG(LOG_DEBUG,
+		    "necp_update_all_clients immediate %s update %u",
+		    should_update_immediately ? "true" : "false", count);
+	}
 }
 
 bool
@@ -5299,19 +5467,19 @@ necp_ifnet_matches_local_address(struct ifnet *ifp, struct sockaddr *sa)
 }
 
 static bool
-necp_interface_type_is_primary_eligible(u_int8_t interface_type)
+necp_interface_type_should_match_unranked_interfaces(u_int8_t interface_type)
 {
 	switch (interface_type) {
-	// These types can never be primary, so a client requesting these types is allowed
-	// to match an interface that isn't currently eligible to be primary (has default
-	// route, dns, etc)
+	// These are the interface types we allow a client to request even if the matching
+	// interface isn't currently eligible to be primary (has default route, dns, etc)
 	case IFRTYPE_FUNCTIONAL_WIFI_AWDL:
 	case IFRTYPE_FUNCTIONAL_INTCOPROC:
-		return false;
+	case IFRTYPE_FUNCTIONAL_COMPANIONLINK:
+		return true;
 	default:
 		break;
 	}
-	return true;
+	return false;
 }
 
 #define NECP_IFP_IS_ON_ORDERED_LIST(_ifp) ((_ifp)->if_ordered_link.tqe_next != NULL || (_ifp)->if_ordered_link.tqe_prev != NULL)
@@ -5346,7 +5514,7 @@ necp_ifnet_matches_parameters(struct ifnet *ifp,
 #endif /* SKYWALK */
 
 	if (parsed_parameters->valid_fields & NECP_PARSED_PARAMETERS_FIELD_LOCAL_ADDR) {
-		if (!necp_ifnet_matches_local_address(ifp, &parsed_parameters->local_addr.sa)) {
+		if (!necp_ifnet_matches_local_address(ifp, SA(&parsed_parameters->local_addr.sa))) {
 			return FALSE;
 		}
 		if (require_scoped_field) {
@@ -5617,7 +5785,7 @@ necp_find_matching_interface_index(struct necp_client_parsed_parameters *parsed_
 	// Then check the remaining interfaces
 	if ((parsed_parameters->valid_fields & NECP_PARSED_PARAMETERS_SCOPED_FIELDS) &&
 	    ((!(parsed_parameters->valid_fields & NECP_PARSED_PARAMETERS_FIELD_REQUIRED_IFTYPE)) ||
-	    !necp_interface_type_is_primary_eligible(parsed_parameters->required_interface_type) ||
+	    necp_interface_type_should_match_unranked_interfaces(parsed_parameters->required_interface_type) ||
 	    (parsed_parameters->valid_fields & NECP_PARSED_PARAMETERS_FIELD_LOCAL_ADDR) ||
 	    is_listener) &&
 	    (*return_ifindex == 0 || has_preferred_fields)) {
@@ -5694,6 +5862,25 @@ necp_copy_inp_domain_info(struct inpcb *inp, struct socket *so, nstat_domain_inf
 	necp_unlock_socket_attributes();
 }
 
+void
+necp_with_inp_domain_name(struct socket *so, void *ctx, void (*with_func)(char *domain_name, void *ctx))
+{
+	struct inpcb *inp = NULL;
+
+	if (so == NULL || with_func == NULL) {
+		return;
+	}
+
+	inp = (struct inpcb *)so->so_pcb;
+	if (inp == NULL) {
+		return;
+	}
+
+	necp_lock_socket_attributes();
+	with_func(inp->inp_necp_attributes.inp_domain, ctx);
+	necp_unlock_socket_attributes();
+}
+
 static size_t
 necp_find_domain_info_common(struct necp_client *client,
     u_int8_t *parameters,
@@ -5712,6 +5899,8 @@ necp_find_domain_info_common(struct necp_client *client,
 	u_int32_t flags = 0;
 	u_int8_t *tracker_domain = NULL;
 	u_int8_t *domain = NULL;
+	size_t tracker_domain_length = 0;
+	size_t domain_length = 0;
 
 	NECP_CLIENT_FLOW_LOG(client, flow_registration, "Collecting stats");
 
@@ -5743,23 +5932,28 @@ necp_find_domain_info_common(struct necp_client *client,
 					break;
 				}
 				case NECP_CLIENT_PARAMETER_TRACKER_DOMAIN: {
+					tracker_domain_length = length;
 					tracker_domain = value;
 					break;
 				}
 				case NECP_CLIENT_PARAMETER_DOMAIN: {
+					domain_length = length;
 					domain = value;
 					break;
 				}
 				case NECP_CLIENT_PARAMETER_DOMAIN_OWNER: {
-					strlcpy(domain_info->domain_owner, (const char *)value, sizeof(domain_info->domain_owner));
+					size_t length_to_copy = MIN(length, sizeof(domain_info->domain_owner));
+					strlcpy(domain_info->domain_owner, (const char *)value, length_to_copy);
 					break;
 				}
 				case NECP_CLIENT_PARAMETER_DOMAIN_CONTEXT: {
-					strlcpy(domain_info->domain_tracker_ctxt, (const char *)value, sizeof(domain_info->domain_tracker_ctxt));
+					size_t length_to_copy = MIN(length, sizeof(domain_info->domain_tracker_ctxt));
+					strlcpy(domain_info->domain_tracker_ctxt, (const char *)value, length_to_copy);
 					break;
 				}
 				case NECP_CLIENT_PARAMETER_ATTRIBUTED_BUNDLE_IDENTIFIER: {
-					strlcpy(domain_info->domain_attributed_bundle_id, (const char *)value, sizeof(domain_info->domain_attributed_bundle_id));
+					size_t length_to_copy = MIN(length, sizeof(domain_info->domain_attributed_bundle_id));
+					strlcpy(domain_info->domain_attributed_bundle_id, (const char *)value, length_to_copy);
 					break;
 				}
 				case NECP_CLIENT_PARAMETER_REMOTE_ADDRESS: {
@@ -5780,10 +5974,12 @@ necp_find_domain_info_common(struct necp_client *client,
 		offset += sizeof(struct necp_tlv_header) + length;
 	}
 
-	if (domain_info->is_tracker && tracker_domain) {
-		strlcpy(domain_info->domain_name, (const char *)tracker_domain, sizeof(domain_info->domain_name));
-	} else if (domain) {
-		strlcpy(domain_info->domain_name, (const char *)domain, sizeof(domain_info->domain_name));
+	if (domain_info->is_tracker && tracker_domain != NULL && tracker_domain_length > 0) {
+		size_t length_to_copy = MIN(tracker_domain_length, sizeof(domain_info->domain_name));
+		strlcpy(domain_info->domain_name, (const char *)tracker_domain, length_to_copy);
+	} else if (domain != NULL && domain_length > 0) {
+		size_t length_to_copy = MIN(domain_length, sizeof(domain_info->domain_name));
+		strlcpy(domain_info->domain_name, (const char *)domain, length_to_copy);
 	}
 
 	// Log if it is a known tracker
@@ -5905,6 +6101,16 @@ necp_find_extension_info(userland_stats_provider_context *ctx,
 		}
 		memcpy(buf, client->parameters, client->parameters_length);
 		return client->parameters_length;
+
+	case NSTAT_EXTENDED_UPDATE_TYPE_FUUID:
+		if (buf == NULL) {
+			return sizeof(uuid_t);
+		}
+		if (buf_size < sizeof(uuid_t)) {
+			return 0;
+		}
+		uuid_copy(buf, flow_registration->registration_id);
+		return sizeof(uuid_t);
 
 	default:
 		return 0;
@@ -6607,12 +6813,7 @@ necp_open(struct proc *p, struct necp_open_args *uap, int *retval)
 		goto done;
 	}
 
-	if ((fd_data = zalloc(necp_client_fd_zone)) == NULL) {
-		error = ENOMEM;
-		goto done;
-	}
-
-	memset(fd_data, 0, sizeof(*fd_data));
+	fd_data = kalloc_type(struct necp_fd_data, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	fd_data->necp_fd_type = necp_fd_type_client;
 	fd_data->flags = uap->flags;
@@ -6670,8 +6871,7 @@ done:
 			fp = NULL;
 		}
 		if (fd_data != NULL) {
-			zfree(necp_client_fd_zone, fd_data);
-			fd_data = NULL;
+			kfree_type(struct necp_fd_data, fd_data);
 		}
 	}
 
@@ -6840,20 +7040,89 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 			}
 		}
 	}
+
+	struct necp_client *parent = NULL;
+	uuid_t parent_client_id;
+	uuid_clear(parent_client_id);
+	struct necp_client_nexus_parameters parent_parameters = {};
+	uint16_t num_flow_regs = 0;
 	if (parsed_parameters.valid_fields & NECP_PARSED_PARAMETERS_FIELD_PARENT_UUID) {
 		// The parent "should" be found on fd_data without having to search across the whole necp_fd_list
 		// It would be nice to do this a little further down where there's another instance of NECP_FD_LOCK
 		// but the logic here depends on the parse paramters
-		struct necp_client *parent = NULL;
 		NECP_FD_LOCK(fd_data);
 		parent = necp_client_fd_find_client_unlocked(fd_data, parsed_parameters.parent_uuid);
 		if (parent != NULL) {
 			necp_client_inherit_from_parent(client, parent);
+			necp_client_copy_parameters_locked(client, &parent_parameters);
+			uuid_copy(parent_client_id, parsed_parameters.parent_uuid);
+			struct necp_client_flow_registration *flow_registration = NULL;
+			RB_FOREACH(flow_registration, _necp_client_flow_tree, &parent->flow_registrations) {
+				num_flow_regs++;
+			}
 		}
 		NECP_FD_UNLOCK(fd_data);
 		if (parent == NULL) {
 			NECPLOG0(LOG_ERR, "necp_client_add, no necp_client_inherit_from_parent as can't find parent on fd_data");
 		}
+	}
+	if (parse_error == 0 && parent != NULL && parsed_parameters.valid_fields & NECP_PARSED_PARAMETERS_FIELD_FLOW_DEMUX_PATTERN) {
+		do {
+			if (parsed_parameters.demux_patterns[0].len == 0) {
+				NECPLOG0(LOG_INFO, "necp_client_add, child does not have a demux pattern");
+				break;
+			}
+
+			if (uuid_is_null(parent_client_id)) {
+				NECPLOG0(LOG_INFO, "necp_client_add, parent ID is null");
+				break;
+			}
+
+			if (num_flow_regs > 1) {
+				NECPLOG0(LOG_INFO, "necp_client_add, multiple parent flows not supported");
+				break;
+			}
+			if (parsed_parameters.ip_protocol != IPPROTO_UDP) {
+				NECPLOG(LOG_INFO, "necp_client_add, flow demux pattern not supported for %d protocol",
+				    parsed_parameters.ip_protocol);
+				break;
+			}
+			if (parsed_parameters.ip_protocol != parent_parameters.transport_protocol) {
+				NECPLOG0(LOG_INFO, "necp_client_add, parent/child ip protocol mismatch");
+				break;
+			}
+			if (parsed_parameters.local_addr.sa.sa_family != AF_INET && parsed_parameters.local_addr.sa.sa_family != AF_INET6) {
+				NECPLOG(LOG_INFO, "necp_client_add, flow demux pattern not supported for %d family",
+				    parsed_parameters.local_addr.sa.sa_family);
+				break;
+			}
+			if (parsed_parameters.local_addr.sa.sa_family != parsed_parameters.remote_addr.sa.sa_family) {
+				NECPLOG0(LOG_INFO, "necp_client_add, local/remote address family mismatch");
+				break;
+			}
+			if (parsed_parameters.local_addr.sa.sa_family != parent_parameters.local_addr.sa.sa_family) {
+				NECPLOG0(LOG_INFO, "necp_client_add, parent/child address family mismatch");
+				break;
+			}
+			if (memcmp(&parsed_parameters.local_addr.sa, &parent_parameters.local_addr.sa, parsed_parameters.local_addr.sa.sa_len)) {
+				NECPLOG0(LOG_INFO, "necp_client_add, parent/child local address mismatch");
+				break;
+			}
+			if (memcmp(&parsed_parameters.remote_addr.sa, &parent_parameters.remote_addr.sa, parsed_parameters.remote_addr.sa.sa_len)) {
+				NECPLOG0(LOG_INFO, "necp_client_add, parent/child remote address mismatch");
+				break;
+			}
+			if (parsed_parameters.local_addr.sin.sin_port != parent_parameters.local_addr.sin.sin_port) {
+				NECPLOG0(LOG_INFO, "necp_client_add, parent/child local port mismatch");
+				break;
+			}
+			if (parsed_parameters.remote_addr.sin.sin_port != parent_parameters.remote_addr.sin.sin_port) {
+				NECPLOG0(LOG_INFO, "necp_client_add, parent/child remote port mismatch");
+				break;
+			}
+			client->validated_parent = 1;
+			uuid_copy(client->parent_client_id, parent_client_id);
+		} while (false);
 	}
 
 #endif /* !SKYWALK */
@@ -6870,6 +7139,7 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 	// Prime the client result
 	NECP_CLIENT_LOCK(client);
 	(void)necp_update_client_result(current_proc(), fd_data, client, NULL);
+	necp_client_retain_locked(client);
 	NECP_CLIENT_UNLOCK(client);
 	NECP_FD_UNLOCK(fd_data);
 	// Now everything is set, it's safe to plumb this in to NetworkStatistics
@@ -6878,6 +7148,7 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 
 	client->nstat_context = nstat_provider_stats_open((nstat_provider_context)client,
 	    NSTAT_PROVIDER_CONN_USERLAND, (u_int64_t)ntstat_properties, necp_request_conn_netstats, necp_find_conn_extension_info);
+	necp_client_release(client);
 done:
 	if (error != 0 && client != NULL) {
 		necp_client_free(client);
@@ -7741,6 +8012,50 @@ necp_client_copy_parameters_locked(struct necp_client *client,
 		parameters->override_address_selection = false;
 	}
 
+	if ((parsed_parameters.valid_fields & NECP_PARSED_PARAMETERS_FIELD_FLAGS) &&
+	    (parsed_parameters.flags & NECP_CLIENT_PARAMETER_FLAG_NO_WAKE_FROM_SLEEP)) {
+		parameters->no_wake_from_sleep = true;
+	}
+
+	if ((parsed_parameters.valid_fields & NECP_PARSED_PARAMETERS_FIELD_FLAGS) &&
+	    (parsed_parameters.flags & NECP_CLIENT_PARAMETER_FLAG_REUSE_LOCAL)) {
+		parameters->reuse_port = true;
+	}
+
+#if SKYWALK
+	if (!parameters->is_listener) {
+		if (parsed_parameters.valid_fields & NECP_PARSED_PARAMETERS_FIELD_FLOW_DEMUX_PATTERN) {
+			if (parsed_parameters.demux_patterns[0].len == 0) {
+				parameters->is_demuxable_parent = 1;
+			} else {
+				if (client->validated_parent) {
+					ASSERT(!uuid_is_null(client->parent_client_id));
+
+					NECP_CLIENT_TREE_LOCK_SHARED();
+					struct necp_client *parent = necp_find_client_and_lock(client->parent_client_id);
+					if (parent != NULL) {
+						struct necp_client_flow_registration *parent_flow_registration = NULL;
+						RB_FOREACH(parent_flow_registration, _necp_client_flow_tree, &parent->flow_registrations) {
+							uuid_copy(parameters->parent_flow_uuid, parent_flow_registration->registration_id);
+							break;
+						}
+
+						NECP_CLIENT_UNLOCK(parent);
+					}
+					NECP_CLIENT_TREE_UNLOCK();
+
+					if (parsed_parameters.demux_pattern_count > 0) {
+						for (int i = 0; i < parsed_parameters.demux_pattern_count; i++) {
+							memcpy(&parameters->demux_patterns[i], &parsed_parameters.demux_patterns[i], sizeof(struct necp_demux_pattern));
+						}
+						parameters->demux_pattern_count = parsed_parameters.demux_pattern_count;
+					}
+				}
+			}
+		}
+	}
+#endif // SKYWALK
+
 	return error;
 }
 
@@ -7988,7 +8303,7 @@ necp_client_add_flow(struct necp_fd_data *fd_data, struct necp_client_action_arg
 				NECPLOG(LOG_ERR, "netagent_client_message error (%d)", error);
 			} else if (assigned_results != NULL) {
 				if (!necp_assign_client_result_locked(proc, fd_data, client, new_registration, add_request->agent_uuid,
-				    assigned_results, assigned_results_length, false)) {
+				    assigned_results, assigned_results_length, false, false)) {
 					kfree_data(assigned_results, assigned_results_length);
 				}
 			}
@@ -8217,7 +8532,7 @@ necp_client_request_nexus(struct necp_fd_data *fd_data, struct necp_client_actio
 
 		if (assigned_results != NULL) {
 			if (!necp_assign_client_result_locked(proc, fd_data, client, new_registration, nexus_uuid,
-			    assigned_results, assigned_results_length, false)) {
+			    assigned_results, assigned_results_length, false, false)) {
 				kfree_data(assigned_results, assigned_results_length);
 			}
 		}
@@ -8647,6 +8962,9 @@ necp_client_copy_interface(__unused struct necp_fd_data *fd_data, struct necp_cl
 			interface_details.flags |= NECP_INTERFACE_FLAG_HAS_NAT64;
 		}
 		interface_details.mtu = interface->if_mtu;
+#if SKYWALK
+		nx_netif_get_interface_tso_capabilities(interface, &interface_details.tso_max_segment_size_v4, &interface_details.tso_max_segment_size_v6);
+#endif /* SKYWALK */
 
 		u_int8_t ipv4_signature_len = sizeof(interface_details.ipv4_signature.signature);
 		u_int16_t ipv4_signature_flags;
@@ -9626,23 +9944,25 @@ done:
 	return error;
 }
 
-#define NECP_CLIENT_ACTION_SIGN_DEFAULT_HOSTNAME_LENGTH 64
-#define NECP_CLIENT_ACTION_SIGN_MAX_HOSTNAME_LENGTH 1024
-
-#define NECP_CLIENT_ACTION_SIGN_TAG_LENGTH 32
+// Most results will fit into this size
+struct necp_client_signable_default {
+	uuid_t client_id;
+	u_int32_t sign_type;
+	u_int8_t signable_data[NECP_CLIENT_ACTION_SIGN_DEFAULT_DATA_LENGTH];
+} __attribute__((__packed__));
 
 static NECP_CLIENT_ACTION_FUNCTION int
 necp_client_sign(__unused struct necp_fd_data *fd_data, struct necp_client_action_args *uap, int *retval)
 {
 	int error = 0;
-	u_int32_t hostname_length = 0;
 	u_int8_t tag[NECP_CLIENT_ACTION_SIGN_TAG_LENGTH] = {};
-	struct necp_client_signable signable = {};
-	union necp_sockaddr_union address_answer = {};
-	u_int8_t *client_hostname = NULL;
-	u_int8_t *allocated_hostname = NULL;
-	u_int8_t default_hostname[NECP_CLIENT_ACTION_SIGN_DEFAULT_HOSTNAME_LENGTH] = "";
-	uint32_t tag_size = sizeof(tag);
+	struct necp_client_signable *signable = NULL;
+	struct necp_client_signable *allocated_signable = NULL;
+	struct necp_client_signable_default default_signable = {};
+	size_t tag_size = sizeof(tag);
+
+	const size_t signable_length = uap->client_id_len;
+	const size_t return_tag_length = uap->buffer_size;
 
 	*retval = 0;
 
@@ -9653,74 +9973,97 @@ necp_client_sign(__unused struct necp_fd_data *fd_data, struct necp_client_actio
 		goto done;
 	}
 
-	if (uap->client_id == 0 || uap->client_id_len < sizeof(struct necp_client_signable)) {
+	if (uap->client_id == 0 || signable_length < sizeof(*signable) || signable_length > NECP_CLIENT_ACTION_SIGN_MAX_TOTAL_LENGTH) {
 		error = EINVAL;
 		goto done;
 	}
 
-	if (uap->buffer == 0 || uap->buffer_size != NECP_CLIENT_ACTION_SIGN_TAG_LENGTH) {
+	if (uap->buffer == 0 || return_tag_length != NECP_CLIENT_ACTION_SIGN_TAG_LENGTH) {
 		error = EINVAL;
 		goto done;
 	}
 
-	error = copyin(uap->client_id, &signable, sizeof(signable));
+	if (signable_length <= sizeof(default_signable)) {
+		signable = (struct necp_client_signable *)&default_signable;
+	} else {
+		if ((allocated_signable = (struct necp_client_signable *)kalloc_data(signable_length, Z_WAITOK | Z_ZERO)) == NULL) {
+			NECPLOG(LOG_ERR, "necp_client_sign allocate signable %zu failed", signable_length);
+			error = ENOMEM;
+			goto done;
+		}
+		signable = allocated_signable;
+	}
+
+	error = copyin(uap->client_id, signable, signable_length);
 	if (error) {
 		NECPLOG(LOG_ERR, "necp_client_sign copyin signable error (%d)", error);
 		goto done;
 	}
 
-	if (signable.sign_type != NECP_CLIENT_SIGN_TYPE_RESOLVER_ANSWER) {
-		NECPLOG(LOG_ERR, "necp_client_sign unknown signable type (%u)", signable.sign_type);
-		error = EINVAL;
-		goto done;
-	}
-
-	if (uap->client_id_len < sizeof(struct necp_client_resolver_answer)) {
-		error = EINVAL;
-		goto done;
-	}
-
-	error = copyin(uap->client_id + sizeof(signable), &address_answer, sizeof(address_answer));
-	if (error) {
-		NECPLOG(LOG_ERR, "necp_client_sign copyin address_answer error (%d)", error);
-		goto done;
-	}
-
-	error = copyin(uap->client_id + sizeof(signable) + sizeof(address_answer), &hostname_length, sizeof(hostname_length));
-	if (error) {
-		NECPLOG(LOG_ERR, "necp_client_sign copyin hostname_length error (%d)", error);
-		goto done;
-	}
-
-	if (hostname_length > NECP_CLIENT_ACTION_SIGN_MAX_HOSTNAME_LENGTH) {
-		error = EINVAL;
-		goto done;
-	}
-
-	if (hostname_length > NECP_CLIENT_ACTION_SIGN_DEFAULT_HOSTNAME_LENGTH) {
-		if ((allocated_hostname = (u_int8_t *)kalloc_data(hostname_length, Z_WAITOK | Z_ZERO)) == NULL) {
-			NECPLOG(LOG_ERR, "necp_client_sign malloc hostname %u failed", hostname_length);
-			error = ENOMEM;
+	size_t data_length = 0;
+	switch (signable->sign_type) {
+	case NECP_CLIENT_SIGN_TYPE_RESOLVER_ANSWER:
+	case NECP_CLIENT_SIGN_TYPE_SYSTEM_RESOLVER_ANSWER: {
+		data_length = (sizeof(struct necp_client_host_resolver_answer) - sizeof(struct necp_client_signable));
+		if (signable_length < (sizeof(struct necp_client_signable) + data_length)) {
+			error = EINVAL;
 			goto done;
 		}
-
-		client_hostname = allocated_hostname;
-	} else {
-		client_hostname = default_hostname;
+		struct necp_client_host_resolver_answer *signable_struct = (struct necp_client_host_resolver_answer *)signable;
+		if (signable_struct->hostname_length > NECP_CLIENT_ACTION_SIGN_MAX_STRING_LENGTH ||
+		    signable_length != (sizeof(struct necp_client_signable) + data_length + signable_struct->hostname_length)) {
+			error = EINVAL;
+			goto done;
+		}
+		data_length += signable_struct->hostname_length;
+		break;
 	}
-
-	error = copyin(uap->client_id + sizeof(signable) + sizeof(address_answer) + sizeof(hostname_length), client_hostname, hostname_length);
-	if (error) {
-		NECPLOG(LOG_ERR, "necp_client_sign copyin hostname error (%d)", error);
+	case NECP_CLIENT_SIGN_TYPE_BROWSE_RESULT:
+	case NECP_CLIENT_SIGN_TYPE_SYSTEM_BROWSE_RESULT: {
+		data_length = (sizeof(struct necp_client_browse_result) - sizeof(struct necp_client_signable));
+		if (signable_length < (sizeof(struct necp_client_signable) + data_length)) {
+			error = EINVAL;
+			goto done;
+		}
+		struct necp_client_browse_result *signable_struct = (struct necp_client_browse_result *)signable;
+		if (signable_struct->service_length > NECP_CLIENT_ACTION_SIGN_MAX_STRING_LENGTH ||
+		    signable_length != (sizeof(struct necp_client_signable) + data_length + signable_struct->service_length)) {
+			error = EINVAL;
+			goto done;
+		}
+		data_length += signable_struct->service_length;
+		break;
+	}
+	case NECP_CLIENT_SIGN_TYPE_SERVICE_RESOLVER_ANSWER:
+	case NECP_CLIENT_SIGN_TYPE_SYSTEM_SERVICE_RESOLVER_ANSWER: {
+		data_length = (sizeof(struct necp_client_service_resolver_answer) - sizeof(struct necp_client_signable));
+		if (signable_length < (sizeof(struct necp_client_signable) + data_length)) {
+			error = EINVAL;
+			goto done;
+		}
+		struct necp_client_service_resolver_answer *signable_struct = (struct necp_client_service_resolver_answer *)signable;
+		if (signable_struct->service_length > NECP_CLIENT_ACTION_SIGN_MAX_STRING_LENGTH ||
+		    signable_struct->hostname_length > NECP_CLIENT_ACTION_SIGN_MAX_STRING_LENGTH ||
+		    signable_length != (sizeof(struct necp_client_signable) + data_length + signable_struct->service_length + signable_struct->hostname_length)) {
+			error = EINVAL;
+			goto done;
+		}
+		data_length += signable_struct->service_length;
+		data_length += signable_struct->hostname_length;
+		break;
+	}
+	default: {
+		NECPLOG(LOG_ERR, "necp_client_sign unknown signable type (%u)", signable->sign_type);
+		error = EINVAL;
 		goto done;
 	}
+	}
 
-	address_answer.sin.sin_port = 0;
-	error = necp_sign_resolver_answer(signable.client_id, client_hostname, hostname_length,
-	    (u_int8_t *)&address_answer, sizeof(address_answer),
+	error = necp_sign_resolver_answer(signable->client_id, signable->sign_type,
+	    signable->signable_data, data_length,
 	    tag, &tag_size);
 	if (tag_size != sizeof(tag)) {
-		NECPLOG(LOG_ERR, "necp_client_sign unexpected tag size %u", tag_size);
+		NECPLOG(LOG_ERR, "necp_client_sign unexpected tag size %zu", tag_size);
 		error = EINVAL;
 		goto done;
 	}
@@ -9731,9 +10074,74 @@ necp_client_sign(__unused struct necp_fd_data *fd_data, struct necp_client_actio
 	}
 
 done:
-	if (allocated_hostname != NULL) {
-		kfree_data(allocated_hostname, hostname_length);
-		allocated_hostname = NULL;
+	if (allocated_signable != NULL) {
+		kfree_data(allocated_signable, signable_length);
+		allocated_signable = NULL;
+	}
+	*retval = error;
+	return error;
+}
+
+// Most results will fit into this size
+struct necp_client_validatable_default {
+	struct necp_client_signature signature;
+	struct necp_client_signable_default signable;
+} __attribute__((__packed__));
+
+static NECP_CLIENT_ACTION_FUNCTION int
+necp_client_validate(__unused struct necp_fd_data *fd_data, struct necp_client_action_args *uap, int *retval)
+{
+	int error = 0;
+	struct necp_client_validatable *validatable = NULL;
+	struct necp_client_validatable *allocated_validatable = NULL;
+	struct necp_client_validatable_default default_validatable = {};
+
+	const size_t validatable_length = uap->client_id_len;
+
+	*retval = 0;
+
+	const bool has_resolver_entitlement = (priv_check_cred(kauth_cred_get(), PRIV_NET_VALIDATED_RESOLVER, 0) == 0);
+	if (!has_resolver_entitlement) {
+		NECPLOG0(LOG_ERR, "Process does not hold the necessary entitlement to directly validate resolver answers");
+		error = EPERM;
+		goto done;
+	}
+
+	if (uap->client_id == 0 || validatable_length < sizeof(*validatable) ||
+	    validatable_length > (NECP_CLIENT_ACTION_SIGN_MAX_TOTAL_LENGTH + NECP_CLIENT_ACTION_SIGN_TAG_LENGTH)) {
+		error = EINVAL;
+		goto done;
+	}
+
+	if (validatable_length <= sizeof(default_validatable)) {
+		validatable = (struct necp_client_validatable *)&default_validatable;
+	} else {
+		if ((allocated_validatable = (struct necp_client_validatable *)kalloc_data(validatable_length, Z_WAITOK | Z_ZERO)) == NULL) {
+			NECPLOG(LOG_ERR, "necp_client_validate allocate struct %zu failed", validatable_length);
+			error = ENOMEM;
+			goto done;
+		}
+		validatable = allocated_validatable;
+	}
+
+	error = copyin(uap->client_id, validatable, validatable_length);
+	if (error) {
+		NECPLOG(LOG_ERR, "necp_client_validate copyin error (%d)", error);
+		goto done;
+	}
+
+	const bool validated = necp_validate_resolver_answer(validatable->signable.client_id, validatable->signable.sign_type,
+	    validatable->signable.signable_data, validatable_length - sizeof(struct necp_client_validatable),
+	    validatable->signature.signed_tag, sizeof(validatable->signature.signed_tag));
+	if (!validated) {
+		// Return EAUTH to indicate that the signature failed
+		error = EAUTH;
+	}
+
+done:
+	if (allocated_validatable != NULL) {
+		kfree_data(allocated_validatable, validatable_length);
+		allocated_validatable = NULL;
 	}
 	*retval = error;
 	return error;
@@ -9848,6 +10256,10 @@ necp_client_action(struct proc *p, struct necp_client_action_args *uap, int *ret
 	}
 	case NECP_CLIENT_ACTION_SIGN: {
 		return_value = necp_client_sign(fd_data, uap, retval);
+		break;
+	}
+	case NECP_CLIENT_ACTION_VALIDATE: {
+		return_value = necp_client_validate(fd_data, uap, retval);
 		break;
 	}
 	default: {
@@ -10123,6 +10535,99 @@ done:
 	return error;
 }
 
+int
+necp_set_socket_resolver_signature(struct inpcb *inp, struct sockopt *sopt)
+{
+	const size_t valsize = sopt->sopt_valsize;
+	if (valsize > NECP_CLIENT_ACTION_SIGN_MAX_TOTAL_LENGTH + NECP_CLIENT_ACTION_SIGN_TAG_LENGTH) {
+		return EINVAL;
+	}
+
+	necp_lock_socket_attributes();
+	if (inp->inp_resolver_signature != NULL) {
+		kfree_data(inp->inp_resolver_signature, inp->inp_resolver_signature_length);
+	}
+	inp->inp_resolver_signature_length = 0;
+
+	int error = 0;
+	if (valsize > 0) {
+		inp->inp_resolver_signature = kalloc_data(valsize, Z_WAITOK | Z_ZERO);
+		if ((error = sooptcopyin(sopt, inp->inp_resolver_signature, valsize,
+		    valsize)) != 0) {
+			// Free the signature buffer if the copyin failed
+			kfree_data(inp->inp_resolver_signature, valsize);
+		} else {
+			inp->inp_resolver_signature_length = valsize;
+		}
+	}
+	necp_unlock_socket_attributes();
+
+	return error;
+}
+
+int
+necp_get_socket_resolver_signature(struct inpcb *inp, struct sockopt *sopt)
+{
+	int error = 0;
+	necp_lock_socket_attributes();
+	if (inp->inp_resolver_signature == NULL ||
+	    inp->inp_resolver_signature_length == 0) {
+		error = ENOENT;
+	} else {
+		error = sooptcopyout(sopt, inp->inp_resolver_signature,
+		    inp->inp_resolver_signature_length);
+	}
+	necp_unlock_socket_attributes();
+	return error;
+}
+
+bool
+necp_socket_has_resolver_signature(struct inpcb *inp)
+{
+	necp_lock_socket_attributes();
+	bool has_signature = (inp->inp_resolver_signature != NULL && inp->inp_resolver_signature_length != 0);
+	necp_unlock_socket_attributes();
+	return has_signature;
+}
+
+bool
+necp_socket_resolver_signature_matches_address(struct inpcb *inp, union necp_sockaddr_union *address)
+{
+	bool matches_address = false;
+	necp_lock_socket_attributes();
+	if (inp->inp_resolver_signature != NULL && inp->inp_resolver_signature_length > 0 && address->sa.sa_len > 0) {
+		struct necp_client_validatable *validatable = (struct necp_client_validatable *)inp->inp_resolver_signature;
+		if (inp->inp_resolver_signature_length > sizeof(struct necp_client_validatable) &&
+		    validatable->signable.sign_type == NECP_CLIENT_SIGN_TYPE_SYSTEM_RESOLVER_ANSWER) {
+			size_t data_length = inp->inp_resolver_signature_length - sizeof(struct necp_client_validatable);
+			if (data_length >= (sizeof(struct necp_client_host_resolver_answer) - sizeof(struct necp_client_signable))) {
+				struct necp_client_host_resolver_answer *answer_struct = (struct necp_client_host_resolver_answer *)&validatable->signable;
+				if (data_length == (sizeof(struct necp_client_host_resolver_answer) + answer_struct->hostname_length - sizeof(struct necp_client_signable)) &&
+				    answer_struct->address_answer.sa.sa_family == address->sa.sa_family &&
+				    answer_struct->address_answer.sa.sa_len == address->sa.sa_len &&
+				    (answer_struct->address_answer.sin.sin_port == 0 ||
+				    answer_struct->address_answer.sin.sin_port == address->sin.sin_port) &&
+				    ((answer_struct->address_answer.sa.sa_family == AF_INET &&
+				    answer_struct->address_answer.sin.sin_addr.s_addr == address->sin.sin_addr.s_addr) ||
+				    (answer_struct->address_answer.sa.sa_family == AF_INET6 &&
+				    memcmp(&answer_struct->address_answer.sin6.sin6_addr, &address->sin6.sin6_addr, sizeof(struct in6_addr)) == 0))) {
+					// Address matches
+					const bool validated = necp_validate_resolver_answer(validatable->signable.client_id,
+					    validatable->signable.sign_type,
+					    validatable->signable.signable_data, data_length,
+					    validatable->signature.signed_tag, sizeof(validatable->signature.signed_tag));
+					if (validated) {
+						// Answer is validated
+						matches_address = true;
+					}
+				}
+			}
+		}
+	}
+	necp_unlock_socket_attributes();
+	return matches_address;
+}
+
 /*
  * necp_set_socket_domain_attributes
  * Called from soconnectlock/soconnectxlock to directly set the tracker domain and owner for
@@ -10171,6 +10676,8 @@ necp_set_socket_domain_attributes(struct socket *so, const char *domain, const c
 			if (buffer_to_free != NULL) {
 				kfree_data_addr(buffer_to_free);
 			}
+		} else {
+			kfree_data_addr(buffer);
 		}
 	} else {
 		// Protect switching of buffer pointer
@@ -10255,7 +10762,7 @@ fail:
 }
 
 void *
-necp_create_nexus_assign_message(uuid_t nexus_instance, u_int32_t nexus_port, void *key, uint32_t key_length,
+necp_create_nexus_assign_message(uuid_t nexus_instance, nexus_port_t nexus_port, void *key, uint32_t key_length,
     struct necp_client_endpoint *local_endpoint, struct necp_client_endpoint *remote_endpoint, struct ether_addr *local_ether_addr,
     u_int32_t flow_adv_index, void *flow_stats, size_t *message_length)
 {
@@ -10267,7 +10774,7 @@ necp_create_nexus_assign_message(uuid_t nexus_instance, u_int32_t nexus_port, vo
 	if (!uuid_is_null(nexus_instance)) {
 		has_nexus_assignment = TRUE;
 		valsize += sizeof(struct necp_tlv_header) + sizeof(uuid_t);
-		valsize += sizeof(struct necp_tlv_header) + sizeof(u_int32_t);
+		valsize += sizeof(struct necp_tlv_header) + sizeof(nexus_port_t);
 	}
 	if (flow_adv_index != NECP_FLOWADV_IDX_INVALID) {
 		valsize += sizeof(struct necp_tlv_header) + sizeof(u_int32_t);
@@ -10299,7 +10806,7 @@ necp_create_nexus_assign_message(uuid_t nexus_instance, u_int32_t nexus_port, vo
 	cursor = buffer;
 	if (has_nexus_assignment) {
 		cursor = necp_buffer_write_tlv(cursor, NECP_CLIENT_RESULT_NEXUS_INSTANCE, sizeof(uuid_t), nexus_instance, buffer, valsize);
-		cursor = necp_buffer_write_tlv(cursor, NECP_CLIENT_RESULT_NEXUS_PORT, sizeof(u_int32_t), &nexus_port, buffer, valsize);
+		cursor = necp_buffer_write_tlv(cursor, NECP_CLIENT_RESULT_NEXUS_PORT, sizeof(nexus_port_t), &nexus_port, buffer, valsize);
 	}
 	if (flow_adv_index != NECP_FLOWADV_IDX_INVALID) {
 		cursor = necp_buffer_write_tlv(cursor, NECP_CLIENT_RESULT_NEXUS_PORT_FLOW_INDEX, sizeof(u_int32_t), &flow_adv_index, buffer, valsize);
@@ -10358,6 +10865,10 @@ necp_inpcb_dispose(struct inpcb *inp)
 		kfree_data_addr(inp->inp_necp_attributes.inp_tracker_domain);
 		inp->inp_necp_attributes.inp_tracker_domain = NULL;
 	}
+	if (inp->inp_resolver_signature != NULL) {
+		kfree_data(inp->inp_resolver_signature, inp->inp_resolver_signature_length);
+	}
+	inp->inp_resolver_signature_length = 0;
 }
 
 void
@@ -10391,20 +10902,6 @@ necp_mppcb_dispose(struct mppcb *mpp)
 void
 necp_client_init(void)
 {
-	necp_flow_size = sizeof(struct necp_client_flow);
-	necp_flow_cache = mcache_create(NECP_FLOW_ZONE_NAME, necp_flow_size, sizeof(uint64_t), 0, MCR_SLEEP);
-	if (necp_flow_cache == NULL) {
-		panic("mcache_create(necp_flow_cache) failed");
-		/* NOTREACHED */
-	}
-
-	necp_flow_registration_size = sizeof(struct necp_client_flow_registration);
-	necp_flow_registration_cache = mcache_create(NECP_FLOW_REGISTRATION_ZONE_NAME, necp_flow_registration_size, sizeof(uint64_t), 0, MCR_SLEEP);
-	if (necp_flow_registration_cache == NULL) {
-		panic("mcache_create(necp_client_flow_registration) failed");
-		/* NOTREACHED */
-	}
-
 	necp_client_update_tcall = thread_call_allocate_with_options(necp_update_all_clients_callout, NULL,
 	    THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
 	VERIFY(necp_client_update_tcall != NULL);
@@ -10425,13 +10922,6 @@ necp_client_init(void)
 
 	RB_INIT(&necp_client_global_tree);
 	RB_INIT(&necp_client_flow_global_tree);
-}
-
-void
-necp_client_reap_caches(boolean_t purge)
-{
-	mcache_reap_now(necp_flow_cache, purge);
-	mcache_reap_now(necp_flow_registration_cache, purge);
 }
 
 #if SKYWALK

@@ -17,56 +17,33 @@ struct mpqueue_head {
 	struct priority_queue_deadline_min mpq_pqhead;
 	uint64_t                earliest_soft_deadline;
 	uint64_t                count;
-	lck_mtx_t               lock_data;
-#if defined(__i386__) || defined(__x86_64__)
-	lck_mtx_ext_t           lock_data_ext;
-#endif
+	lck_ticket_t            lock_data;
 };
 
 typedef struct mpqueue_head     mpqueue_head_t;
 
-#if defined(__i386__) || defined(__x86_64__)
-
 #define mpqueue_init(q, lck_grp, lck_attr)              \
 MACRO_BEGIN                                             \
 	queue_init(&(q)->head);                         \
-	lck_mtx_init_ext(&(q)->lock_data,               \
-	                 &(q)->lock_data_ext,           \
-	                 lck_grp,                       \
-	                 lck_attr);                     \
-	(q)->earliest_soft_deadline = UINT64_MAX;       \
-	(q)->count = 0;                                 \
+	lck_ticket_init(&(q)->lock_data, lck_grp);      \
 	priority_queue_init(&(q)->mpq_pqhead);          \
 MACRO_END
-
-#else
-
-#define mpqueue_init(q, lck_grp, lck_attr)              \
-MACRO_BEGIN                                             \
-	queue_init(&(q)->head);                         \
-	lck_mtx_init(&(q)->lock_data,                   \
-	              lck_grp,                          \
-	              lck_attr);                        \
-	priority_queue_init(&(q)->mpq_pqhead);          \
-MACRO_END
-#endif
-
 
 #define mpenqueue_tail(q, elt)                          \
 MACRO_BEGIN                                             \
-	lck_mtx_lock_spin_always(&(q)->lock_data);      \
+	lck_ticket_lock(&(q)->lock_data, LCK_GRP_NULL); \
 	enqueue_tail(&(q)->head, elt);                  \
-	lck_mtx_unlock_always(&(q)->lock_data);         \
+	lck_ticket_unlock(&(q)->lock_data);             \
 MACRO_END
 
 #define mpdequeue_head(q, elt)                          \
 MACRO_BEGIN                                             \
-	lck_mtx_lock_spin_always(&(q)->lock_data);      \
+	lck_ticket_lock(&(q)->lock_data, LCK_GRP_NULL); \
 	if (queue_empty(&(q)->head))                    \
 	        *(elt) = 0;                             \
 	else                                            \
 	        *(elt) = dequeue_head(&(q)->head);      \
-	lck_mtx_unlock_always(&(q)->lock_data);         \
+	lck_ticket_unlock(&(q)->lock_data);             \
 MACRO_END
 
 #endif  /* MACH_KERNEL_PRIVATE */

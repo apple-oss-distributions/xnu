@@ -30,7 +30,6 @@
 #define _KERN_SMR_H_
 
 #include <sys/cdefs.h>
-#include <sys/_endian.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <kern/startup.h>
@@ -59,7 +58,7 @@ typedef unsigned long           smr_seq_t;
  */
 typedef union {
 	struct {
-#if __DARWIN_BYTE_ORDER == __DARWIN_LITTLE_ENDIAN
+#ifdef __LITTLE_ENDIAN__
 		smr_seq_t       s_rd_seq;
 		smr_seq_t       s_wr_seq;
 #else
@@ -67,11 +66,7 @@ typedef union {
 		smr_seq_t       s_rd_seq;
 #endif
 	};
-#if __LP64__
 	__uint128_t             s_combined;
-#else
-	uint64_t                s_combined;
-#endif
 } smr_clock_t;
 
 /*!
@@ -83,8 +78,11 @@ typedef union {
 typedef struct smr {
 	smr_clock_t             smr_clock;
 	unsigned long           smr_pcpu;
+	unsigned long           smr_budget;
 } *smr_t;
 
+
+#pragma mark - pointers allowing hazardous access
 
 /*
  * SMR Accessors are meant to provide safe access to SMR protected
@@ -119,6 +117,18 @@ typedef struct smr {
 #define SMR_POINTER(type_t) \
 	SMR_POINTER_DECL(, type_t)
 
+
+/*!
+ * @macro smr_unsafe_load()
+ *
+ * @brief
+ * Read from an SMR protected pointer without any synchronization.
+ *
+ * @discussion
+ * This returns an integer on purpose as dereference is generally unsafe.
+ */
+#define smr_unsafe_load(ptr) \
+	({ (uintptr_t)((ptr)->__smr_ptr); })
 
 /*!
  * @macro smr_entered_load()
@@ -199,7 +209,7 @@ typedef struct smr {
  * Clear (sets to 0) an SMR protected pointer (this is always "allowed" to do).
  */
 #define smr_clear_store(ptr) \
-	smr_init_store(ptr, (typeof((ptr)->__smr_ptr))0)
+	smr_init_store(ptr, 0)
 
 /*!
  * @macro smr_serialized_store_assert()
@@ -231,6 +241,38 @@ typedef struct smr {
  */
 #define smr_serialized_store(ptr, value) \
 	smr_serialized_store_assert(ptr, value, true)
+
+/*!
+ * @macro smr_serialized_store_relaxed_assert()
+ *
+ * @brief
+ * Store @c value to an SMR protected pointer while serialized by an
+ * external mechanism.
+ *
+ * @discussion
+ * This function can be used when storing a value that was already
+ * previously stored with smr_serialized_store() (for example during
+ * a linked list removal).
+ */
+#define smr_serialized_store_relaxed_assert(ptr, value, held_cond)  ({ \
+	assertf(held_cond, "smr_serialized_store_relaxed: lock not held"); \
+	(ptr)->__smr_ptr = value; \
+})
+
+/*!
+ * @macro smr_serialized_store_relaxed()
+ *
+ * @brief
+ * Store @c value to an SMR protected pointer while serialized by an
+ * external mechanism.
+ *
+ * @discussion
+ * This function can be used when storing a value that was already
+ * previously stored with smr_serialized_store() (for example during
+ * a linked list removal).
+ */
+#define smr_serialized_store_relaxed(ptr, value) \
+	smr_serialized_store_relaxed_assert(ptr, value, true)
 
 /*!
  * @macro smr_serialized_swap_assert()
@@ -306,7 +348,8 @@ typedef struct smr {
 	SMR_DEFINE(var); \
 	STARTUP_ARG(TUNABLES, STARTUP_RANK_LAST, __smr_init, &var)
 
-extern void __smr_init(smr_t);
+
+#pragma mark - manipulating an SMR clock
 
 /*!
  * @function smr_init()
@@ -315,6 +358,14 @@ extern void __smr_init(smr_t);
  * Initialize an smr struct.
  */
 extern void smr_init(smr_t);
+
+/*!
+ * @function smr_set_deferred_budget()
+ *
+ * @brief
+ * Configures an SMR domain with a budget for smr_deferred_advance().
+ */
+extern void smr_set_deferred_budget(smr_t, unsigned long);
 
 /*!
  * @function smr_destroy()
@@ -360,11 +411,38 @@ extern void smr_leave(smr_t);
  * This guarantees that any changes made by the calling thread
  * prior to this call will be visible to all threads after
  * the read sequence meets or exceeds the return value.
- *
- * This function may busy loop if the readers are roughly 1 billion
- * sequence numbers behind the writers.
  */
 extern smr_seq_t smr_advance(smr_t) __result_use_check;
+
+/*!
+ * @function smr_deferred_advance()
+ *
+ * @brief
+ * Advance the write sequence and return the value
+ * for use as a wait goal.
+ *
+ * @discussion
+ * This guarantees that any changes made by the calling thread
+ * prior to this call will be visible to all threads after
+ * the read sequence meets or exceeds the return value.
+ */
+extern smr_seq_t smr_deferred_advance(smr_t, unsigned long) __result_use_check;
+
+/*!
+ * @function smr_deferred_advance()
+ *
+ * @brief
+ * Advance the write sequence and return the value
+ * for use as a wait goal.
+ *
+ * @discussion
+ * This guarantees that any changes made by the calling thread
+ * prior to this call will be visible to all threads after
+ * the read sequence meets or exceeds the return value.
+ *
+ * Preemption must be disabled.
+ */
+extern smr_seq_t smr_deferred_advance_nopreempt(smr_t, unsigned long) __result_use_check;
 
 /*!
  * @function smr_poll
@@ -409,6 +487,67 @@ extern void smr_wait(smr_t smr, smr_seq_t goal);
  * as there will be less chance of spinning while waiting for readers.
  */
 extern void smr_synchronize(smr_t);
+
+
+#pragma mark - system global SMR
+
+/*!
+ * @function smr_global_entered()
+ *
+ * @brief
+ * Returns whether the system wide global SMR critical section is entered.
+ */
+extern bool smr_global_entered(void) __result_use_check;
+
+/*!
+ * @function smr_global_entered()
+ *
+ * @brief
+ * Enter the system wide global SMR critical section.
+ */
+extern void smr_global_enter(void);
+
+/*!
+ * @function smr_global_leave()
+ *
+ * @brief
+ * Leave the system wide global SMR critical section.
+ */
+extern void smr_global_leave(void);
+
+/*!
+ * @function smr_global_retire()
+ *
+ * @brief
+ * Schedule a callback to free some memory once it is safe to collect it.
+ *
+ * @discussion
+ * The default system wide global SMR system provides a way
+ * for elements protected by it (using @c smr_global_enter()
+ * and @c smr_global_leave() to protect access) to be reclaimed
+ * when this is safe to.
+ *
+ * This function can't be called with preemption disabled as it may block.
+ * In particular it can't be called from within an SMR critical section.
+ *
+ * @param value         the address of the element to reclaim.
+ * @param size          an estimate of the size of the memory that will be freed.
+ * @param destructor    the callback to run to actually destroy the element.
+ */
+extern void smr_global_retire(
+	void                   *value,
+	size_t                  size,
+	void                  (*destructor)(void *));
+
+
+#pragma mark - implementation details
+
+extern void __smr_init(smr_t);
+
+#if MACH_KERNEL_PRIVATE
+extern void
+smr_register_mpsc_queue(void);
+#endif
 
 #pragma GCC visibility pop
 #endif // XNU_KERNEL_PRIVATE

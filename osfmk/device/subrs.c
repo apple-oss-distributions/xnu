@@ -197,8 +197,7 @@ strcmp(
  *      comparison runs for at most "n" characters.
  */
 
-#if !defined __arm__ && !defined __arm64__
-// ARM implementation in ../arm/strncmp.s
+#if !defined(__arm64__)
 // ARM64 implementation in ../arm64/strncmp.s
 int
 strncmp(
@@ -224,7 +223,7 @@ strncmp(
 
 	return 0;
 }
-#endif // #ifndef __arm__
+#endif // #ifndef __arm64__
 
 
 //
@@ -340,8 +339,8 @@ strcpy(
  *      to the "to" string.
  */
 
-#if !defined __arm__ && !defined __arm64__
-// ARM and ARM64 implementation in ../arm/strncpy.c
+#if !defined(__arm64__)
+// ARM64 implementation in ../arm/strncpy.c
 #undef strncpy
 char *
 strncpy(
@@ -363,7 +362,7 @@ strncpy(
 	}
 	return os1;
 }
-#endif // #ifndef __arm__
+#endif // #ifndef __arm64__
 
 /*
  * atoi:
@@ -398,8 +397,7 @@ atoi(const char *cp)
  *	length of s or max; whichever is smaller
  */
 
-#if !defined __arm__ && !defined __arm64__
-// ARM implementation in ../arm/strnlen.s
+#if !defined(__arm64__)
 // ARM64 implementation in ../arm64/strnlen.s
 #undef strnlen
 size_t
@@ -412,7 +410,7 @@ strnlen(const char *s, size_t max)
 
 	return p - s;
 }
-#endif // #ifndef __arm__
+#endif // #ifndef __arm64__
 
 /*
  * convert an integer to an ASCII string.
@@ -516,8 +514,8 @@ strlcat(char *dst, const char *src, size_t siz)
  * Returns strlen(src); if retval >= siz, truncation occurred.
  */
 
-#if !defined __arm__ && !defined __arm64__
-// ARM and ARM64 implementation in ../arm/strlcpy.c
+#if !defined(__arm64__)
+// ARM64 implementation in ../arm/strlcpy.c
 #undef strlcpy
 size_t
 strlcpy(char *dst, const char *src, size_t siz)
@@ -547,7 +545,7 @@ strlcpy(char *dst, const char *src, size_t siz)
 
 	return s - src - 1;    /* count does not include NUL */
 }
-#endif
+#endif /* !defined(__arm64) */
 
 /*
  * Return TRUE(1) if string 2 is a prefix of string 1.

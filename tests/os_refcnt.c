@@ -231,7 +231,7 @@ T_DECL(refcnt_groups, "Group accounting")
 enum {
 	OSREF_UNDERFLOW    = 1,
 	OSREF_OVERFLOW     = 2,
-	OSREF_RESURRECTION = 3,
+	OSREF_RETAIN       = 3,
 	OSREF_DEALLOC_LIVE = 4,
 };
 
@@ -253,8 +253,8 @@ handle_panic(const char *func, char *__unused str, ...)
 		ret = OSREF_UNDERFLOW;
 	} else if (strcmp(func, "os_ref_panic_overflow") == 0) {
 		ret = OSREF_OVERFLOW;
-	} else if (strcmp(func, "os_ref_panic_resurrection") == 0) {
-		ret = OSREF_RESURRECTION;
+	} else if (strcmp(func, "os_ref_panic_retain") == 0) {
+		ret = OSREF_RETAIN;
 	} else if (strcmp(func, "os_ref_panic_live") == 0) {
 		ret = OSREF_DEALLOC_LIVE;
 	} else {
@@ -291,7 +291,7 @@ T_DECL(refcnt_overflow, "Overflow")
 		(void)os_ref_retain_raw(&rc, NULL);
 		T_FAIL("overflow not caught");
 	} else {
-		T_ASSERT_EQ_INT(x, OSREF_OVERFLOW, "overflow caught");
+		T_ASSERT_EQ_INT(x, OSREF_RETAIN, "overflow caught");
 	}
 }
 
@@ -309,7 +309,7 @@ T_DECL(refcnt_resurrection, "Resurrection")
 		(void)os_ref_retain_raw(&rc, NULL);
 		T_FAIL("resurrection not caught");
 	} else {
-		T_ASSERT_EQ_INT(x, OSREF_RESURRECTION, "resurrection caught");
+		T_ASSERT_EQ_INT(x, OSREF_RETAIN, "resurrection caught");
 	}
 }
 

@@ -1,15 +1,13 @@
-/* Copyright (c) (2019) Apple Inc. All rights reserved.
+/* Copyright (c) (2019-2021) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
- * is contained in the License.txt file distributed with corecrypto) and only to 
- * people who accept that license. IMPORTANT:  Any license rights granted to you by 
- * Apple Inc. (if any) are limited to internal use within your organization only on 
- * devices and computers you own or control, for the sole purpose of verifying the 
- * security characteristics and correct functioning of the Apple Software.  You may 
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
-//  Created by Apple on 12/10/18.
-//
 
 #ifndef ccmode_siv_hmac_h
 #define ccmode_siv_hmac_h
@@ -47,7 +45,7 @@ struct ccmode_siv_hmac {
     const struct ccmode_ctr *ctr;
 };
 
-#define ccsiv_hmac_ctx_decl(_size_, _name_) cc_ctx_decl(ccsiv_hmac_ctx, _size_, _name_)
+#define ccsiv_hmac_ctx_decl(_size_, _name_) cc_ctx_decl_vla(ccsiv_hmac_ctx, _size_, _name_)
 #define ccsiv_hmac_ctx_clear(_size_, _name_) cc_clear(_size_, _name_)
 
 /*!
@@ -103,7 +101,7 @@ size_t ccsiv_hmac_plaintext_size(ccsiv_hmac_ctx *ctx, size_t ciphertext_size);
  @param      ctx                Alocated context to be intialized
  @param      key_byte_len       Length of the key:  Supported key sizes are 32, 48, 64 bytes
  @param      key                key for siv_hmac
- @param      tag_size           The length of the output tag requested. Must be at least 20 bytes, and can be as larged as the
+ @param      tag_size           The length of the output tag requested. Must be at least 20 bytes, and can be as large as the
  associated digest's output
  
  @discussion In order to  compute HMAC_SIV_Enc_k(a1,...,am, n, x) where ai is the ith piece of associated data, n is a nonce and x
@@ -118,8 +116,8 @@ int ccsiv_hmac_init(const struct ccmode_siv_hmac *mode, ccsiv_hmac_ctx *ctx, siz
  @function   ccsiv_hmac_aad
  @abstract   Add the next piece of associated data to the hmac_siv's computation of the tag. Note this call is optional and no
  associated data needs to be provided. Multiple pieces of associated data can be provided by multiple calls to this
- function. Each input is regarded as a seperate piece of associated data, and the mac is NOT simply computed on the
- concatenation of all of the associated data inputs. Therefore on decryption the same inputs must be prodivded and in
+ function. Each input is regarded as a separate piece of associated data, and the mac is NOT simply computed on the
+ concatenation of all of the associated data inputs. Therefore on decryption the same inputs must be provided in
  the same order.
  
  @param      mode               Descriptor for the mode
@@ -141,7 +139,7 @@ int ccsiv_hmac_aad(const struct ccmode_siv_hmac *mode, ccsiv_hmac_ctx *ctx, size
  @param      in                 Nonce data to be authenticated.
  
  @discussion The nonce is a special form of authenticated data. If provided ( a call to hmac_nonce is optional) it allows
- randomization of the of ciphertext (preventing deterministic encryption). While the length of the nonce is not limimited, the
+ randomization of the ciphertext (preventing deterministic encryption). While the length of the nonce is not limited, the
  amount of entropy that can be provided is limited by the number of bits in the block of the associated block-cipher in mode.
  */
 int ccsiv_hmac_set_nonce(const struct ccmode_siv_hmac *mode, ccsiv_hmac_ctx *ctx, size_t nbytes, const uint8_t *in);
@@ -172,7 +170,7 @@ int ccsiv_hmac_crypt(const struct ccmode_siv_hmac *mode, ccsiv_hmac_ctx *ctx, si
 
 /*!
  @function   ccsiv_hmac_reset
- @abstract   Resets the state of the siv_hamc ctx, maintaing the key, but preparing  the
+ @abstract   Resets the state of the siv_hamc ctx, maintaining the key, but preparing  the
  ctx to preform a new Associated Data Authenticated (En)/(De)cryption.
  @param      mode               Descriptor for the mode
  @param      ctx                Intialized ctx

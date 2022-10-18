@@ -83,6 +83,14 @@ static dtrace_pattr_t hv_attr = {
 };
 #endif /* __x86_64__ && HYPERVISOR */
 
+static dtrace_pattr_t sandbox_attr = {
+	{ DTRACE_STABILITY_EVOLVING, DTRACE_STABILITY_EVOLVING, DTRACE_CLASS_ISA },
+	{ DTRACE_STABILITY_PRIVATE, DTRACE_STABILITY_PRIVATE, DTRACE_CLASS_UNKNOWN },
+	{ DTRACE_STABILITY_PRIVATE, DTRACE_STABILITY_PRIVATE, DTRACE_CLASS_UNKNOWN },
+	{ DTRACE_STABILITY_PRIVATE, DTRACE_STABILITY_PRIVATE, DTRACE_CLASS_UNKNOWN },
+	{ DTRACE_STABILITY_EVOLVING, DTRACE_STABILITY_EVOLVING, DTRACE_CLASS_ISA },
+};
+
 sdt_provider_t sdt_providers[] = {
 	{ "vtrace", "__vtrace____", &vtrace_attr, 0 },
 	{ "sysinfo", "__cpu_sysinfo____", &info_attr, 0 },
@@ -114,6 +122,7 @@ sdt_provider_t sdt_providers[] = {
 #if defined(__x86_64__) && HYPERVISOR
 	{ "hv", "__hv____", &hv_attr, 0 },
 #endif /* __x86_64__ && HYPERVISOR */
+	{ "sandbox", "__sandbox____", &sandbox_attr, 0 },
 	{ NULL, NULL, NULL, 0 }
 };
 
@@ -1139,6 +1148,10 @@ sdt_argdesc_t sdt_args[] = {
 	{"hv", "tsc__offset__set", 2, 2, "uint64_t", "uint64_t"},
 	{"hv", "tsc__offset__set", 3, 3, "uint64_t", "uint64_t"},
 #endif /* __x86_64__ && HYPERVISOR */
+
+	{"sandbox", "allow", 0, 0, "uint64_t *", "uint64_t *"},
+	{"sandbox", "deny", 0, 0, "uint64_t *", "uint64_t *"},
+	{"sandbox", "generic", 0, 0, "uint64_t *", "uint64_t *" },
 
 	{ NULL, NULL, 0, 0, NULL, NULL }
 };

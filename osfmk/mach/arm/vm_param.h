@@ -129,11 +129,11 @@ extern int PAGE_SHIFT_CONST;
 #elif defined (__arm64__)
 
 #define VM_MIN_ADDRESS          ((vm_address_t) 0x0000000000000000ULL)
-#define VM_MAX_ADDRESS          ((vm_address_t) 0x0000000080000000ULL)
+#define VM_MAX_ADDRESS          ((vm_address_t) 0x00000000F0000000ULL)
 
 /* system-wide values */
 #define MACH_VM_MIN_ADDRESS_RAW 0x0ULL
-#if defined(PLATFORM_MacOSX) || defined(PLATFORM_DriverKit)
+#if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_DriverKit)
 #define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL
 #else
 #define MACH_VM_MAX_ADDRESS_RAW 0x0000000FC0000000ULL
@@ -156,6 +156,13 @@ extern int PAGE_SHIFT_CONST;
 
 #ifdef  KERNEL
 
+#if defined (__arm__)
+#define VM_KERNEL_POINTER_SIGNIFICANT_BITS  31
+#define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) 0x80000000)
+#define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) 0xFFFEFFFF)
+#define VM_HIGH_KERNEL_WINDOW   ((vm_address_t) 0xFFFE0000)
+
+#elif defined (__arm64__)
 /*
  * kalloc() parameters:
  *
@@ -169,29 +176,15 @@ extern int PAGE_SHIFT_CONST;
  * Note that most dynamically allocated data structures contain more than
  * one int/long/pointer member, so KALLOC_MINSIZE should probably start at 8.
  */
+#define TiB(x)                  ((0ULL + (x)) << 40)
+#define GiB(x)                  ((0ULL + (x)) << 30)
+#define KALLOC_MINSIZE          16      /* minimum allocation size */
+#define KALLOC_LOG2_MINALIGN    4       /* log2 minimum alignment */
 
-#if defined (__arm__)
-#define VM_KERNEL_POINTER_SIGNIFICANT_BITS  31
-#define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) 0x80000000)
-#define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) 0xFFFEFFFF)
-#define VM_HIGH_KERNEL_WINDOW   ((vm_address_t) 0xFFFE0000)
-
-#if XNU_KERNEL_PRIVATE
-#define KALLOC_MINSIZE          8       /* minimum allocation size */
-#define KALLOC_LOG2_MINALIGN    3       /* log2 minimum alignment */
-
-#define ZONE_MAP_MAX            (1024 * 1024 * 1536) /* 1.5GB for 32bit systems */
-#endif
-#elif defined (__arm64__)
 /*
  * The minimum and maximum kernel address; some configurations may
  * constrain the address space further.
  */
-#define TiB(x)                  ((0ULL + (x)) << 40)
-#define GiB(x)                  ((0ULL + (x)) << 30)
-
-#define KALLOC_MINSIZE          16      /* minimum allocation size */
-#define KALLOC_LOG2_MINALIGN    4       /* log2 minimum alignment */
 
 #if XNU_KERNEL_PRIVATE
 #if defined(ARM_LARGE_MEMORY)
@@ -216,8 +209,6 @@ extern int PAGE_SHIFT_CONST;
 // 1.25TB for static_memory_region, 512GB for kernel heap, 256GB for KASAN
 #define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) (VM_MIN_KERNEL_ADDRESS + GiB(64) + GiB(512) - 1))
 
-#define ZONE_MAP_MAX            GiB(32)
-#define ZONE_MAP_VA_SIZE_LP64   GiB(128)
 #else // ARM_LARGE_MEMORY
 /*
  * +-----------------------+--------+--------+------------------------+
@@ -237,8 +228,6 @@ extern int PAGE_SHIFT_CONST;
 #define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) 0xffffffe000000000ULL)
 #define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) 0xfffffffbffffffffULL)
 
-#define ZONE_MAP_MAX            GiB(8)
-#define ZONE_MAP_VA_SIZE_LP64   GiB(24)
 #endif // ARM_LARGE_MEMORY
 
 #else // !XNU_KERNEL_PRIVATE

@@ -79,7 +79,6 @@
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_hash.h>
-#include <ipc/ipc_table.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_right.h>
@@ -120,19 +119,11 @@ ipc_space_free(ipc_space_t space)
 }
 
 void
-ipc_space_free_table(ipc_entry_t table)
+ipc_space_retire_table(ipc_entry_table_t table)
 {
-	it_entries_free(table->ie_size, table);
+	smr_global_retire(table, ipc_entry_table_size(table),
+	    (void (*)(void*))ipc_entry_table_free_noclear);
 }
-
-#if MACH_LOCKFREE_SPACE
-void
-ipc_space_retire_table(ipc_entry_t table)
-{
-	hazard_retire(table, sizeof(struct ipc_entry) * table->ie_size,
-	    (void (*)(void*))ipc_space_free_table);
-}
-#endif /* MACH_LOCKFREE_SPACE */
 
 void
 ipc_space_reference(
@@ -264,8 +255,6 @@ ipc_space_rand_freelist(
 		curr = next;
 	}
 	table[curr].ie_bits   = IE_BITS_GEN_MASK;
-
-	table[0].ie_size = size;
 }
 
 
@@ -285,32 +274,27 @@ ipc_space_rand_freelist(
 
 kern_return_t
 ipc_space_create(
-	ipc_table_size_t        initial,
 	ipc_label_t             label,
 	ipc_space_t             *spacep)
 {
 	ipc_space_t space;
-	ipc_entry_t table;
-	ipc_entry_num_t new_size;
+	ipc_entry_table_t table;
+	ipc_entry_num_t count;
 
-	table = it_entries_alloc(initial); /* zero-initialized */
-	if (table == IE_NULL) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
+	table = ipc_entry_table_alloc_by_count(IPC_ENTRY_TABLE_MIN,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	space = ipc_space_alloc();
-	new_size = initial->its_size;
+	count = ipc_entry_table_count(table);
 
 	random_bool_init(&space->bool_gen);
-	ipc_space_rand_freelist(space, table, 0, new_size);
+	ipc_space_rand_freelist(space, ipc_entry_table_base(table), 0, count);
 
 	os_ref_init_count_mask(&space->is_bits, IS_FLAGS_BITS, &is_refgrp, 2, 0);
-	space->is_table_free = new_size - 1;
-	space->is_table_next = initial + 1;
+	space->is_table_free = count - 1;
 	space->is_label = label;
-	space->is_low_mod = new_size;
+	space->is_low_mod = count;
 	space->is_node_id = HOST_LOCAL_NODE; /* HOST_LOCAL_NODE, except proxy spaces */
-	hazard_ptr_init(&space->is_table, table);
+	smr_init_store(&space->is_table, table);
 
 	*spacep = space;
 	return KERN_SUCCESS;
@@ -420,8 +404,7 @@ void
 ipc_space_terminate(
 	ipc_space_t     space)
 {
-	ipc_entry_t table;
-	ipc_entry_num_t size;
+	ipc_entry_table_t table;
 
 	assert(space != IS_NULL);
 
@@ -431,8 +414,8 @@ ipc_space_terminate(
 		return;
 	}
 
-	table = hazard_ptr_serialized_load(&space->is_table);
-	hazard_ptr_clear(&space->is_table);
+	table = smr_serialized_load(&space->is_table);
+	smr_clear_store(&space->is_table);
 
 	/*
 	 *	If somebody is trying to grow the table,
@@ -455,24 +438,10 @@ ipc_space_terminate(
 	 *	was a receive right in this space.
 	 */
 
-	size = table->ie_size;
-
-	for (mach_port_index_t index = 1; index < size; index++) {
-		ipc_entry_t entry = &table[index];
-		mach_port_type_t type;
-
-		type = IE_BITS_TYPE(entry->ie_bits);
-		if (type & MACH_PORT_TYPE_RECEIVE) {
-			mach_port_name_t name;
-
-			name = MACH_PORT_MAKE(index,
-			    IE_BITS_GEN(entry->ie_bits));
-			ipc_right_terminate(space, name, entry);
-		}
-	}
-
-	for (mach_port_index_t index = 1; index < size; index++) {
-		ipc_entry_t entry = &table[index];
+	for (mach_port_index_t index = 1;
+	    ipc_entry_table_contains(table, index);
+	    index++) {
+		ipc_entry_t entry = ipc_entry_table_get_nocheck(table, index);
 		mach_port_type_t type;
 
 		type = IE_BITS_TYPE(entry->ie_bits);
@@ -538,7 +507,7 @@ ipc_space_set_table_size_limits(
 void
 ipc_space_check_limit_exceeded(ipc_space_t space)
 {
-	ipc_entry_num_t size = is_active_table(space)->ie_size;
+	size_t size = ipc_entry_table_count(is_active_table(space));
 
 	if (!is_above_soft_limit_notify(space) && space->is_table_size_soft_limit &&
 	    ((size - space->is_table_free) > space->is_table_size_soft_limit)) {
@@ -560,6 +529,7 @@ ipc_space_get_table_size_and_limits(
 	ipc_entry_num_t *hard_limit)
 {
 	kern_return_t kr = KERN_SUCCESS;
+	ipc_entry_table_t table;
 
 	if (space == IS_NULL) {
 		return KERN_INVALID_TASK;
@@ -572,7 +542,8 @@ ipc_space_get_table_size_and_limits(
 		goto exit;
 	}
 
-	*current_size = is_active_table(space)->ie_size - space->is_table_free;
+	table = is_active_table(space);
+	*current_size = ipc_entry_table_count(table) - space->is_table_free;
 	if (is_at_max_limit_notify(space)) {
 		if (is_at_max_limit_already_notified(space)) {
 			kr = KERN_FAILURE;

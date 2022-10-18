@@ -43,9 +43,9 @@ typedef enum serial_device {
 	SERIAL_DCC_UART=0x10
 } serial_device_t;
 
-kern_return_t serial_enable_irq(serial_device_t device);
-kern_return_t serial_ack_irq(serial_device_t device);
-bool serial_filter_irq(serial_device_t device);
+kern_return_t serial_irq_enable(serial_device_t device);
+kern_return_t serial_irq_action(serial_device_t device);
+bool serial_irq_filter(serial_device_t device);
 
 void serial_go_to_sleep(void);
 #endif /* PRIVATE */

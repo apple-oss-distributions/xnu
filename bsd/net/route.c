@@ -209,9 +209,6 @@
  * do RT_ADDREF in the function that is passing the entry as an argument,
  * in order to prevent the entry from being freed by the callee.
  */
-
-#define equal(a1, a2) (bcmp((caddr_t)(a1), (caddr_t)(a2), (a1)->sa_len) == 0)
-
 extern void kdp_set_gateway_mac(void *gatewaymac);
 
 __private_extern__ struct rtstat rtstat  = {
@@ -900,7 +897,7 @@ rtalloc_ign_common_locked(struct route *ro, uint32_t ignore,
 		RT_UNLOCK(rt);
 		ROUTE_RELEASE_LOCKED(ro);       /* rnh_lock already held */
 	}
-	ro->ro_rt = rtalloc1_common_locked(&ro->ro_dst, 1, ignore, ifscope);
+	ro->ro_rt = rtalloc1_common_locked(SA(&ro->ro_dst), 1, ignore, ifscope);
 	if (ro->ro_rt != NULL) {
 		RT_GENID_SYNC(ro->ro_rt);
 		RT_LOCK_ASSERT_NOTHELD(ro->ro_rt);
@@ -1069,7 +1066,7 @@ rtalloc1_common_locked(struct sockaddr *dst, int report, uint32_t ignflags,
 			    0, 0, newrt->rt_ifp->if_index);
 
 			if (defrt) {
-				if (equal(rt_key(newrt), defrt->rt_gateway)) {
+				if (sa_equal(rt_key(newrt), defrt->rt_gateway)) {
 					newrt->rt_flags |= RTF_ROUTER;
 				}
 				rtfree_locked(defrt);
@@ -1489,7 +1486,7 @@ rtredirect(struct ifnet *ifp, struct sockaddr *dst, struct sockaddr *gateway,
 	 * in_ifinit), so okay to access ifa_addr without locking.
 	 */
 	if (!(flags & RTF_DONE) && rt != NULL &&
-	    (!equal(src, rt->rt_gateway) || !equal(rt->rt_ifa->ifa_addr,
+	    (!sa_equal(src, rt->rt_gateway) || !sa_equal(rt->rt_ifa->ifa_addr,
 	    ifa->ifa_addr))) {
 		error = EINVAL;
 	} else {
@@ -1761,7 +1758,7 @@ ifa_ifwithroute_common_locked(int flags, const struct sockaddr *dst,
 	 * on new entries from rtinit, hence (ifa->ifa_addr != gw).
 	 */
 	if ((ifa == NULL || (gw != NULL &&
-	    !equal(ifa->ifa_addr, (struct sockaddr *)(size_t)gw))) &&
+	    !sa_equal(ifa->ifa_addr, (struct sockaddr *)(size_t)gw))) &&
 	    (rt = rtalloc1_scoped_locked((struct sockaddr *)(size_t)gw,
 	    0, 0, ifscope)) != NULL) {
 		if (ifa != NULL) {
@@ -2657,10 +2654,10 @@ rt_setgate(struct rtentry *rt, struct sockaddr *dst, struct sockaddr *gate)
 			(void) sa_copy(dst, &dst_ss, NULL);
 			(void) sa_copy(gate, &gate_ss, NULL);
 
-			loop = equal(SA(&dst_ss), SA(&gate_ss));
+			loop = sa_equal(SA(&dst_ss), SA(&gate_ss));
 		} else {
 			loop = (dst->sa_len == gate->sa_len &&
-			    equal(dst, gate));
+			    sa_equal(dst, gate));
 		}
 	}
 
@@ -3956,6 +3953,31 @@ ctrace_record(ctrace_t *tr)
 }
 
 void
+route_clear(struct route *ro)
+{
+	if (ro == NULL) {
+		return;
+	}
+
+	if (ro->ro_rt != NULL) {
+		rtfree(ro->ro_rt);
+		ro->ro_rt = NULL;
+	}
+
+        if (ro->ro_lle != NULL) {
+		LLE_REMREF(ro->ro_lle);
+		ro->ro_lle = NULL;
+	}
+
+	if (ro->ro_srcia != NULL) {
+		IFA_REMREF(ro->ro_srcia);
+		ro->ro_srcia = NULL;
+	}
+	return;
+}
+
+
+void
 route_copyout(struct route *dst, const struct route *src, size_t length)
 {
 	/* Copy everything (rt, srcif, flags, dst) from src */
@@ -4187,7 +4209,7 @@ lookup:
 			 * gateway portion of "rt" has changed.
 			 */
 			if (!(rt->rt_flags & RTF_UP) || gwrt == NULL ||
-			    gwrt == rt || !equal(gw, rt->rt_gateway)) {
+			    gwrt == rt || !sa_equal(gw, rt->rt_gateway)) {
 				if (gwrt == rt) {
 					RT_REMREF_LOCKED(gwrt);
 					gwrt = NULL;
@@ -4317,9 +4339,9 @@ rt_revalidate_gwroute(struct rtentry *rt, struct rtentry *gwrt)
 			(void) sa_copy(rt_key(gwrt), &key_ss, NULL);
 			(void) sa_copy(rt->rt_gateway, &gw_ss, NULL);
 
-			isequal = equal(SA(&key_ss), SA(&gw_ss));
+			isequal = sa_equal(SA(&key_ss), SA(&gw_ss));
 		} else {
-			isequal = equal(rt_key(gwrt), rt->rt_gateway);
+			isequal = sa_equal(rt_key(gwrt), rt->rt_gateway);
 		}
 
 		/* If they are the same, update gwrt */
@@ -4628,4 +4650,74 @@ route_op_entitlement_check(struct socket *so,
 		}
 	}
 	return -1;
+}
+
+/*
+ * RTM_xxx.
+ *
+ * The switch statement below does nothing at runtime, as it serves as a
+ * compile time check to ensure that all of the RTM_xxx constants are
+ * unique.  This works as long as this routine gets updated each time a
+ * new RTM_xxx constant gets added.
+ *
+ * Any failures at compile time indicates duplicated RTM_xxx values.
+ */
+static __attribute__((unused)) void
+rtm_cassert(void)
+{
+    /*
+     * This is equivalent to _CASSERT() and the compiler wouldn't
+     * generate any instructions, thus for compile time only.
+     */
+    switch ((u_int16_t)0) {
+    case 0:
+
+    /* bsd/net/route.h */
+    case RTM_ADD:
+    case RTM_DELETE:
+    case RTM_CHANGE:
+    case RTM_GET:
+    case RTM_LOSING:
+    case RTM_REDIRECT:
+    case RTM_MISS:
+    case RTM_LOCK:
+    case RTM_OLDADD:
+    case RTM_OLDDEL:
+    case RTM_RESOLVE:
+    case RTM_NEWADDR:
+    case RTM_DELADDR:
+    case RTM_IFINFO:
+    case RTM_NEWMADDR:
+    case RTM_DELMADDR:
+    case RTM_IFINFO2:
+    case RTM_NEWMADDR2:
+    case RTM_GET2:
+
+    /* bsd/net/route_private.h */
+    case RTM_GET_SILENT:
+    case RTM_GET_EXT:
+        ;
+    }
+}
+
+static __attribute__((unused)) void
+rtv_cassert(void)
+{
+    switch ((u_int16_t)0) {
+    case 0:
+
+    /* bsd/net/route.h */
+    case RTV_MTU:
+    case RTV_HOPCOUNT:
+    case RTV_EXPIRE:
+    case RTV_RPIPE:
+    case RTV_SPIPE:
+    case RTV_SSTHRESH:
+    case RTV_RTT:
+    case RTV_RTTVAR:
+
+    /* net/route_private.h */
+    case RTV_REFRESH_HOST:
+        ;
+    }
 }

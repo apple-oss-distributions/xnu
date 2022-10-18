@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1313,6 +1313,9 @@ IOSKMemoryBuffer::initWithSpec(
 	}
 	if (fSpec.physcontig) {
 		options |= kIOMemoryPhysicallyContiguous;
+	}
+	if (fSpec.threadSafe) {
+		options |= kIOMemoryThreadSafe;
 	}
 
 	setVMTags(VM_KERN_MEMORY_SKYWALK, VM_MEMORY_SKYWALK);

@@ -129,7 +129,7 @@ char    devcls[] = "devcls";
 
 int(**spec_vnodeop_p)(void *);
 const struct vnodeopv_entry_desc spec_vnodeop_entries[] = {
-	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)vn_default_error },
+	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)(void (*)(void))vn_default_error },
 	{ .opve_op = &vnop_lookup_desc, .opve_impl = (VOPFUNC)spec_lookup },            /* lookup */
 	{ .opve_op = &vnop_create_desc, .opve_impl = (VOPFUNC)err_create },             /* create */
 	{ .opve_op = &vnop_mknod_desc, .opve_impl = (VOPFUNC)err_mknod },               /* mknod */
@@ -855,7 +855,7 @@ spec_kqfilter(vnode_t vp, struct knote *kn, struct kevent_qos_s *kev)
 	kn->kn_sdata = tmp_sdata;
 #endif
 
-	if (major(dev) > nchrdev) {
+	if (major(dev) >= nchrdev) {
 		knote_set_error(kn, ENXIO);
 		return 0;
 	}
@@ -990,7 +990,7 @@ throttle_info_rel(struct _throttle_io_info_t *info)
 	 * Once reference count is zero, no one else should be able to take a
 	 * reference
 	 */
-	if ((info->throttle_refcnt == 0) && (info->throttle_alloc)) {
+	if ((oldValue == 1) && (info->throttle_alloc)) {
 		DEBUG_ALLOC_THROTTLE_INFO("Freeing info = %p\n", info);
 
 		lck_mtx_destroy(&info->throttle_lock, &throttle_lock_grp);
@@ -1177,7 +1177,7 @@ throttle_timer_start(struct _throttle_io_info_t *info, boolean_t update_io_count
 
 
 static void
-throttle_timer(struct _throttle_io_info_t *info)
+throttle_timer(struct _throttle_io_info_t *info, __unused thread_call_param_t p)
 {
 	uthread_t       ut, utlist;
 	struct timeval  elapsed;
@@ -2663,9 +2663,14 @@ spec_strategy(struct vnop_strategy_args *ap)
 	 */
 #define IO_SATISFIED_BY_CACHE  ((int)0xcafefeed)
 #define IO_SHOULD_BE_THROTTLED ((int)0xcafebeef)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type"
+
 	typedef int strategy_fcn_ret_t(struct buf *bp);
 
 	strategy_ret = (*(strategy_fcn_ret_t*)bdevsw[major(bdev)].d_strategy)(bp);
+
+#pragma clang diagnostic pop
 
 	// disk conditioner needs to track when this I/O actually starts
 	// which means track it after `strategy` which may include delays

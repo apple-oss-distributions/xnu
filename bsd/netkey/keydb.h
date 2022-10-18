@@ -116,6 +116,11 @@ struct secasvar {
 	u_int16_t       natt_encapsulated_src_port;     /* network byte order */
 	u_int16_t       natt_interval; /* Interval in seconds */
 	u_int16_t       natt_offload_interval; /* Hardware Offload Interval in seconds */
+	/*
+	 * Globally unique flow identifier for the SA.
+	 * Added on outgoing packets by the IPSec driver.
+	 */
+	uint32_t        flowid;
 
 	u_int8_t        always_expire; /* Send expire/delete messages even if unused */
 };

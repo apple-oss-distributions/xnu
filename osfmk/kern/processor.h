@@ -78,6 +78,7 @@
 #include <kern/locks.h>
 #include <kern/percpu.h>
 #include <kern/queue.h>
+#include <kern/recount.h>
 #include <kern/sched.h>
 #include <kern/sched_urgency.h>
 #include <kern/timer.h>
@@ -96,7 +97,7 @@ __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
  *	Processor state is accessed by locking the scheduling lock
  *	for the assigned processor set.
  *
- *           -------------------- SHUTDOWN
+ *           --- PENDING <------- SHUTDOWN
  *          /                     ^     ^
  *        _/                      |      \
  *  OFF_LINE ---> START ---> RUNNING ---> IDLE ---> DISPATCHING
@@ -120,7 +121,7 @@ __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
  */
 #if defined(CONFIG_SCHED_DEFERRED_AST)
 /*
- *           -------------------- SHUTDOWN
+ *           --- PENDING <------- SHUTDOWN
  *          /                     ^     ^
  *        _/                      |      \
  *  OFF_LINE ---> START ---> RUNNING ---> IDLE ---> DISPATCHING
@@ -140,14 +141,14 @@ __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
 #endif
 
 typedef enum {
-	PROCESSOR_OFF_LINE      = 0,    /* Not available */
-	PROCESSOR_SHUTDOWN      = 1,    /* Going off-line */
-	PROCESSOR_START         = 2,    /* Being started */
-	PROCESSOR_UNUSED        = 3,    /* Formerly Inactive (unavailable) */
-	PROCESSOR_IDLE          = 4,    /* Idle (available) */
-	PROCESSOR_DISPATCHING   = 5,    /* Dispatching (idle -> active) */
-	PROCESSOR_RUNNING       = 6,    /* Normal execution */
-	PROCESSOR_STATE_LEN     = (PROCESSOR_RUNNING + 1)
+	PROCESSOR_OFF_LINE        = 0,    /* Not available */
+	PROCESSOR_SHUTDOWN        = 1,    /* Going off-line, but schedulable */
+	PROCESSOR_START           = 2,    /* Being started */
+	PROCESSOR_PENDING_OFFLINE = 3,    /* Going off-line, not schedulable */
+	PROCESSOR_IDLE            = 4,    /* Idle (available) */
+	PROCESSOR_DISPATCHING     = 5,    /* Dispatching (idle -> active) */
+	PROCESSOR_RUNNING         = 6,    /* Normal execution */
+	PROCESSOR_STATE_LEN       = (PROCESSOR_RUNNING + 1)
 } processor_state_t;
 
 typedef enum {
@@ -208,6 +209,7 @@ struct processor_set {
 	cpumap_t                cpu_state_map[PROCESSOR_STATE_LEN];
 	cpumap_t                primary_map;
 	cpumap_t                realtime_map;
+	cpumap_t                cpu_available_map;
 
 #define SCHED_PSET_TLOCK (1)
 #if     defined(SCHED_PSET_TLOCK)
@@ -381,6 +383,8 @@ struct processor {
 	struct grrr_run_queue   grrr_runq;              /* Group Ratio Round-Robin runq */
 #endif /* CONFIG_SCHED_GRRR */
 
+	struct recount_processor pr_recount;
+
 	/*
 	 * Pointer to primary processor for secondary SMT processors, or a
 	 * pointer to ourselves for primaries or non-SMT.
@@ -391,18 +395,14 @@ struct processor {
 
 	processor_t             processor_list;         /* all existing processors */
 
-	/* Processor state statistics */
-	timer_data_t            idle_state;
-	timer_data_t            system_state;
-	timer_data_t            user_state;
-
-	timer_t                 current_state;          /* points to processor's idle, system, or user state timer */
-
-	/* Thread execution timers */
-	timer_t                 thread_timer;           /* points to current thread's user or system timer */
-	timer_t                 kernel_timer;           /* points to current thread's system_timer */
-
 	uint64_t                timer_call_ttd;         /* current timer call time-to-deadline */
+	decl_simple_lock_data(, start_state_lock);
+	processor_reason_t      last_startup_reason;
+	processor_reason_t      last_shutdown_reason;
+	processor_reason_t      last_recommend_reason;
+	processor_reason_t      last_derecommend_reason;
+	bool                    shutdown_temporary;     /* Shutdown should be transparent to user - don't update CPU counts */
+	bool                    shutdown_locked;        /* Processor may not be shutdown (or started up) except by SYSTEM */
 };
 
 extern processor_t processor_list;
@@ -456,12 +456,27 @@ extern void             processor_set_primary(
 	processor_t             primary);
 
 extern kern_return_t    processor_shutdown(
+	processor_t             processor,
+	processor_reason_t      reason,
+	uint32_t                flags);
+
+extern void             processor_wait_for_start(
 	processor_t             processor);
 
 extern kern_return_t    processor_start_from_user(
 	processor_t             processor);
 extern kern_return_t    processor_exit_from_user(
 	processor_t             processor);
+
+extern kern_return_t    processor_start_reason(
+	processor_t             processor,
+	processor_reason_t      reason,
+	uint32_t                flags);
+extern kern_return_t    processor_exit_reason(
+	processor_t             processor,
+	processor_reason_t      reason,
+	uint32_t                flags);
+
 
 extern kern_return_t    sched_processor_enable(
 	processor_t             processor,
@@ -496,8 +511,9 @@ extern kern_return_t    processor_info_count(
 	processor_flavor_t      flavor,
 	mach_msg_type_number_t  *count);
 
-#define pset_deallocate(x)
-#define pset_reference(x)
+extern void processor_cpu_load_info(
+	processor_t processor,
+	natural_t ticks[static CPU_STATE_MAX]);
 
 extern void             machine_run_count(
 	uint32_t                count);
@@ -524,20 +540,6 @@ next_pset(processor_set_t pset)
 
 extern pset_cluster_type_t recommended_pset_type(
 	thread_t                thread);
-#if CONFIG_THREAD_GROUPS
-extern pset_cluster_type_t thread_group_pset_recommendation(
-	struct thread_group     *tg,
-	cluster_type_t          recommendation);
-#endif /* CONFIG_THREAD_GROUPS */
-
-inline static bool
-pset_is_recommended(processor_set_t pset)
-{
-	if (!pset) {
-		return false;
-	}
-	return (pset->recommended_bitmask & pset->cpu_bitmask) != 0;
-}
 
 extern void             processor_state_update_idle(
 	processor_t             processor);
@@ -619,6 +621,14 @@ pset_update_processor_state(processor_set_t pset, processor_t processor, uint ne
 	bit_clear(pset->cpu_state_map[old_state], cpuid);
 	bit_set(pset->cpu_state_map[new_state], cpuid);
 
+	if (bit_test(pset->cpu_available_map, cpuid) && (new_state < PROCESSOR_IDLE)) {
+		/* No longer available for scheduling */
+		bit_clear(pset->cpu_available_map, cpuid);
+	} else if (!bit_test(pset->cpu_available_map, cpuid) && (new_state >= PROCESSOR_IDLE)) {
+		/* Newly available for scheduling */
+		bit_set(pset->cpu_available_map, cpuid);
+	}
+
 	if ((old_state == PROCESSOR_RUNNING) || (new_state == PROCESSOR_RUNNING)) {
 		sched_update_pset_load_average(pset, 0);
 		if (new_state == PROCESSOR_RUNNING) {
@@ -673,13 +683,7 @@ pset_update_processor_state(processor_set_t pset, processor_t processor, uint ne
 	}
 }
 
-#else   /* MACH_KERNEL_PRIVATE */
-
-extern void             pset_deallocate(
-	processor_set_t         pset);
-
-extern void             pset_reference(
-	processor_set_t         pset);
+decl_simple_lock_data(extern, sched_available_cores_lock);
 
 #endif  /* MACH_KERNEL_PRIVATE */
 #ifdef KERNEL_PRIVATE
@@ -688,6 +692,29 @@ extern unsigned int     processor_count;
 extern processor_t      cpu_to_processor(int cpu);
 
 extern kern_return_t    enable_smt_processors(bool enable);
+
+/*
+ * Update the scheduler with the set of cores that should be used to dispatch new threads.
+ * Non-recommended cores can still be used to field interrupts or run bound threads.
+ * This should be called with interrupts enabled and no scheduler locks held.
+ */
+#define ALL_CORES_RECOMMENDED   (~(uint64_t)0)
+#define ALL_CORES_POWERED       (~(uint64_t)0)
+
+extern void sched_perfcontrol_update_recommended_cores(uint32_t recommended_cores);
+extern void sched_perfcontrol_update_recommended_cores_reason(uint64_t recommended_cores, processor_reason_t reason, uint32_t flags);
+extern void sched_perfcontrol_update_powered_cores(uint64_t powered_cores, processor_reason_t reason, uint32_t flags);
+extern void sched_override_available_cores_for_sleep(void);
+extern void sched_restore_available_cores_after_sleep(void);
+extern bool sched_is_in_sleep(void);
+extern void sched_mark_processor_online_locked(processor_t processor, processor_reason_t reason);
+extern kern_return_t sched_mark_processor_offline(processor_t processor, processor_reason_t reason);
+extern bool processor_should_kprintf(processor_t processor, bool starting);
+extern void suspend_cluster_powerdown(void);
+extern void resume_cluster_powerdown(void);
+extern kern_return_t suspend_cluster_powerdown_from_user(void);
+extern kern_return_t resume_cluster_powerdown_from_user(void);
+extern int get_cluster_powerdown_user_suspended(void);
 
 #endif /* KERNEL_PRIVATE */
 

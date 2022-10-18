@@ -43,7 +43,7 @@
 /*
  * Define a macro to construct an include path for a sub-platform file.
  * Example: #include SUB_PLATFORM_SPDS_HEADER(p_acc)
- * where CURRENT_MACHINE_CONFIG_LC is txxxx, and where SPDS_CHIP_REV_LC is a0
+ * where ARM64_SOC_NAME is txxxx, and where SPDS_CHIP_REV_LC is a0
  * Expands: #include <soc/txxxx/a0/module/p_acc.h>
  * Lifted and adapted from iBoot/platform.h.
  */
@@ -52,20 +52,23 @@
 #define COMBINE5(a, b, c, d, e)                 NOQUOTE(a)NOQUOTE(b)NOQUOTE(c)NOQUOTE(d)NOQUOTE(e)
 #define COMBINE7(a, b, c, d, e, f, g)           NOQUOTE(a)NOQUOTE(b)NOQUOTE(c)NOQUOTE(d)NOQUOTE(e)NOQUOTE(f)NOQUOTE(g)
 
-#define SUB_PLATFORM_HEADER(x)                  <COMBINE5(platform/,x,_,CURRENT_MACHINE_CONFIG_LC,.h)>
-#define SUB_PLATFORM_SOC_HEADER(x)              <COMBINE5(platform/soc/,x,_,CURRENT_MACHINE_CONFIG_LC,.h)>
+#define SUB_PLATFORM_HEADER(x)                  <COMBINE5(platform/,x,_,ARM64_SOC_NAME,.h)>
+#define SUB_PLATFORM_SOC_HEADER(x)              <COMBINE5(platform/soc/,x,_,ARM64_SOC_NAME,.h)>
 #define SUB_PLATFORM_NONMODULE_HEADER(x)        <COMBINE5(soc/,PLATFORM_SPDS_CHIP_REV_LC,/,x,.h)>
 #define SUB_PLATFORM_SPDS_HEADER(x)             <COMBINE5(soc/,PLATFORM_SPDS_CHIP_REV_LC,/module/,x,.h)>
-#define SUB_PLATFORM_TARGET_HEADER(x)           <COMBINE5(target/,x,_,CURRENT_MACHINE_CONFIG_LC,.h)>
-#define SUB_PLATFORM_TUNABLE_HEADER(r, x)       <COMBINE7(platform/soc/tunables/,CURRENT_MACHINE_CONFIG_LC,/,r,/,x,.h)>
+#define SUB_PLATFORM_TARGET_HEADER(x)           <COMBINE5(target/,x,_,ARM64_SOC_NAME,.h)>
+#define SUB_PLATFORM_TUNABLE_HEADER(r, x)       <COMBINE7(platform/soc/tunables/,ARM64_SOC_NAME,/,r,/,x,.h)>
 #define SUB_TARGET_TUNABLE_HEADER(r, t, x)      <COMBINE7(target/tunables/,t,/,r,/,x,.h)>
 
+#ifndef ARM64_SOC_NAME
 #ifndef CURRENT_MACHINE_CONFIG_LC
 #error CURRENT_MACHINE_CONFIG_LC must be defined in makedefs/MakeInc.def
-#endif /* CURRENT_MACHINE_CONFIG_LC */
+#endif
+#define ARM64_SOC_NAME CURRENT_MACHINE_CONFIG_LC
+#endif /* ARM64_SOC_NAME */
 
 // rdar://72605444 (EmbeddedHeaders per SoC symlink to newest chip revision: <soc/txxxx/latest>)
 #define SPDS_CHIP_REV_LC a0 // default
-#define PLATFORM_SPDS_CHIP_REV_LC CURRENT_MACHINE_CONFIG_LC/SPDS_CHIP_REV_LC
+#define PLATFORM_SPDS_CHIP_REV_LC ARM64_SOC_NAME/SPDS_CHIP_REV_LC
 
 #endif /* !_PEXPERT_ARM64_PLATFORM_H_ */

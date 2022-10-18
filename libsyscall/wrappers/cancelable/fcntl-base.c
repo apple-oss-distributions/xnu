@@ -72,6 +72,7 @@ fcntl(int fd, int cmd, ...)
 	case F_SPECULATIVE_READ:
 	case F_CHECK_LV:
 	case F_GETSIGSINFO:
+	case F_ASSERT_BG_ACCESS:
 		arg = va_arg(ap, void *);
 		break;
 	default:

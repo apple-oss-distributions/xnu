@@ -1109,6 +1109,59 @@ SYSCTL_INT(_net_link_bridge, OID_AUTO, vmnet_pf_tagging,
     CTLFLAG_RW | CTLFLAG_LOCKED,
     &if_bridge_segmentation, 0, "Bridge interface enable vmnet PF tagging");
 
+#define BRIDGE_TSO_REDUCE_MSS_FORWARDING_MAX            256
+#define BRIDGE_TSO_REDUCE_MSS_FORWARDING_DEFAULT        110
+#define BRIDGE_TSO_REDUCE_MSS_TX_MAX                    256
+#define BRIDGE_TSO_REDUCE_MSS_TX_DEFAULT                0
+
+static u_int if_bridge_tso_reduce_mss_forwarding
+        = BRIDGE_TSO_REDUCE_MSS_FORWARDING_DEFAULT;
+static u_int if_bridge_tso_reduce_mss_tx
+        = BRIDGE_TSO_REDUCE_MSS_TX_DEFAULT;
+
+static int
+bridge_tso_reduce_mss(struct sysctl_req *req, u_int * val, u_int val_max)
+{
+	int     changed;
+	int     error;
+	u_int   new_value;
+
+	error = sysctl_io_number(req, *val, sizeof(*val), &new_value,
+	    &changed);
+	if (error == 0 && changed != 0) {
+		if (new_value > val_max) {
+			return EINVAL;
+		}
+		*val = new_value;
+	}
+	return error;
+}
+
+static int
+bridge_tso_reduce_mss_forwarding_sysctl SYSCTL_HANDLER_ARGS
+{
+	return bridge_tso_reduce_mss(req, &if_bridge_tso_reduce_mss_forwarding,
+    BRIDGE_TSO_REDUCE_MSS_FORWARDING_MAX);
+}
+
+SYSCTL_PROC(_net_link_bridge, OID_AUTO, tso_reduce_mss_forwarding,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, bridge_tso_reduce_mss_forwarding_sysctl, "IU",
+    "Bridge tso reduce mss when forwarding");
+
+static int
+bridge_tso_reduce_mss_tx_sysctl SYSCTL_HANDLER_ARGS
+{
+	return bridge_tso_reduce_mss(req, &if_bridge_tso_reduce_mss_tx,
+    BRIDGE_TSO_REDUCE_MSS_TX_MAX);
+}
+
+SYSCTL_PROC(_net_link_bridge, OID_AUTO, tso_reduce_mss_tx,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, bridge_tso_reduce_mss_tx_sysctl, "IU",
+    "Bridge tso reduce mss on transmit");
+
+
 #if DEBUG || DEVELOPMENT
 #define BRIDGE_FORCE_ONE        0x00000001
 #define BRIDGE_FORCE_TWO        0x00000002
@@ -3939,7 +3992,7 @@ bridge_iflinkevent(struct ifnet *ifp)
  *	Makes a delayed call
  */
 static void
-bridge_delayed_callback(void *param)
+bridge_delayed_callback(void *param, __unused void *param2)
 {
 	struct bridge_delayed_call *call = (struct bridge_delayed_call *)param;
 	struct bridge_softc *sc = call->bdc_sc;
@@ -4833,33 +4886,35 @@ bridge_send_tso(struct ifnet *dst_ifp, struct mbuf *m, bool is_ipv4)
  */
 static int
 tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
-    bool * need_sw_tso, bool * supports_cksum)
+    bool * need_sw_tso, bool * is_large_tcp)
 {
 	int             error = 0;
 	u_int32_t       if_csum;
 	u_int32_t       if_tso;
 	u_int32_t       mbuf_tso;
+	bool            supports_cksum = false;
 
+	*need_sw_tso = false;
+	*is_large_tcp = false;
 	if (is_ipv4) {
 		/*
 		 * Enable both TCP and IP offload if the hardware supports it.
-		 * If the hardware doesn't support TCP offload, *supports_cksum
+		 * If the hardware doesn't support TCP offload, supports_cksum
 		 * will be false so we won't set either offload.
 		 */
 		if_csum = ifp->if_hwassist & (CSUM_TCP | CSUM_IP);
-		*supports_cksum = (if_csum & CSUM_TCP) != 0;
+		supports_cksum = (if_csum & CSUM_TCP) != 0;
 		if_tso = IFNET_TSO_IPV4;
 		mbuf_tso = CSUM_TSO_IPV4;
 	} else {
-		*supports_cksum = (ifp->if_hwassist & CSUM_TCPIPV6) != 0;
+		supports_cksum = (ifp->if_hwassist & CSUM_TCPIPV6) != 0;
 		if_csum = CSUM_TCPIPV6;
 		if_tso = IFNET_TSO_IPV6;
 		mbuf_tso = CSUM_TSO_IPV6;
 	}
-	*need_sw_tso = false;
 	BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
 	    "%s: does%s support checksum 0x%x if_csum 0x%x",
-	    ifp->if_xname, *supports_cksum ? "" : " not",
+	    ifp->if_xname, supports_cksum ? "" : " not",
 	    ifp->if_hwassist, if_csum);
 	if ((ifp->if_hwassist & if_tso) != 0 &&
 	    ((*mp)->m_pkthdr.csum_flags & mbuf_tso) != 0) {
@@ -4868,7 +4923,7 @@ tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
 		/* verify that this is a large TCP frame */
 		uint32_t                csum_flags;
 		ip_packet_info          info;
-		u_int                   mss;
+		int                     mss;
 		struct bripstats        stats;
 		struct tcphdr *         tcp;
 
@@ -4896,14 +4951,16 @@ tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
 		(*mp)->m_pkthdr.pkt_proto = IPPROTO_TCP;
 		tcp = (struct tcphdr *)info.ip_proto_hdr;
 		mss = ifp->if_mtu - info.ip_hlen - info.ip_opt_len
-		    - (tcp->th_off << 2);
+		    - (tcp->th_off << 2) - if_bridge_tso_reduce_mss_tx;
+		assert(mss > 0);
 		csum_flags = mbuf_tso;
-		if (*supports_cksum) {
+		if (supports_cksum) {
 			csum_flags |= if_csum;
 		}
 		(*mp)->m_pkthdr.tso_segsz = mss;
 		(*mp)->m_pkthdr.csum_flags |= csum_flags;
 		(*mp)->m_pkthdr.csum_data = offsetof(struct tcphdr, th_sum);
+		*is_large_tcp = true;
 	}
 done:
 	return error;
@@ -4949,14 +5006,14 @@ bridge_enqueue(ifnet_t bridge_ifp, struct ifnet *src_ifp,
 		is_large_pkt = (len > (bridge_ifp->if_mtu + ETHER_HDR_LEN));
 		if (is_large_pkt) {
 			struct ether_header     *eh;
-			bool                    hw_supports_cksum = false;
+			bool                    is_large_tcp = false;
 
 			eh = mtod(m, struct ether_header *);
 			if (ether_header_type_is_ip(eh, &is_ipv4)) {
 				_error = tso_hwassist(&m, is_ipv4,
 				    dst_ifp, sizeof(struct ether_header),
-				    &need_sw_tso, &hw_supports_cksum);
-				if (_error == 0 && hw_supports_cksum) {
+				    &need_sw_tso, &is_large_tcp);
+				if (is_large_tcp) {
 					cksum_op = CHECKSUM_OPERATION_NONE;
 				}
 			} else {
@@ -5112,7 +5169,6 @@ bridge_member_output(struct bridge_softc *sc, ifnet_t ifp, mbuf_t *data)
 	if (dst_if == NULL) {
 		struct bridge_iflist *bif;
 		struct mbuf *mc;
-		int used = 0;
 		errno_t error;
 
 
@@ -5124,61 +5180,65 @@ bridge_member_output(struct bridge_softc *sc, ifnet_t ifp, mbuf_t *data)
 			return EJUSTRETURN;
 		}
 
+		/*
+		 * Duplicate and send the packet across all member interfaces
+		 * except the originating interface.
+		 */
 		TAILQ_FOREACH(bif, &sc->sc_iflist, bif_next) {
+			dst_if = bif->bif_ifp;
+			if (dst_if == ifp) {
+				/* skip the originating interface */
+				continue;
+			}
 			/* skip interface with inactive link status */
 			if ((bif->bif_flags & BIFF_MEDIA_ACTIVE) == 0) {
 				continue;
 			}
-			dst_if = bif->bif_ifp;
-
 #if 0
 			if (dst_if->if_type == IFT_GIF) {
 				continue;
 			}
 #endif
+			/* skip interface that isn't running */
 			if ((dst_if->if_flags & IFF_RUNNING) == 0) {
 				continue;
 			}
-			if (dst_if != ifp) {
-				/*
-				 * If this is not the original output interface,
-				 * and the interface is participating in spanning
-				 * tree, make sure the port is in a state that
-				 * allows forwarding.
-				 */
-				if ((bif->bif_ifflags & IFBIF_STP) &&
-				    bif->bif_stp.bp_state == BSTP_IFSTATE_DISCARDING) {
-					continue;
-				}
-				/*
-				 * If this is not the original output interface,
-				 * and the destination is the MAC NAT interface,
-				 * drop the packet. The packet can't be sent
-				 * if the source MAC is incorrect.
-				 */
-				if (dst_if == mac_nat_ifp) {
-					continue;
-				}
+			/*
+			 * If the interface is participating in spanning
+			 * tree, make sure the port is in a state that
+			 * allows forwarding.
+			 */
+			if ((bif->bif_ifflags & IFBIF_STP) &&
+			    bif->bif_stp.bp_state == BSTP_IFSTATE_DISCARDING) {
+				continue;
 			}
-			if (TAILQ_NEXT(bif, bif_next) == NULL) {
-				used = 1;
-				mc = m;
-			} else {
-				mc = m_dup(m, M_DONTWAIT);
-				if (mc == NULL) {
-					(void) ifnet_stat_increment_out(
-						bridge_ifp, 0, 0, 1);
-					continue;
-				}
+			/*
+			 * If the destination is the MAC NAT interface,
+			 * skip sending the packet. The packet can't be sent
+			 * if the source MAC is incorrect.
+			 */
+			if (dst_if == mac_nat_ifp) {
+				continue;
 			}
-			(void) bridge_enqueue(bridge_ifp, ifp, dst_if,
+
+			/* make a deep copy to send on this member interface */
+			mc = m_dup(m, M_DONTWAIT);
+			if (mc == NULL) {
+				(void)ifnet_stat_increment_out(bridge_ifp,
+				    0, 0, 1);
+				continue;
+			}
+			(void)bridge_enqueue(bridge_ifp, ifp, dst_if,
 			    mc, CHECKSUM_OPERATION_COMPUTE);
 		}
-		if (used == 0) {
-			m_freem(m);
-		}
 		BRIDGE_UNREF(sc);
-		return EJUSTRETURN;
+
+		if ((ifp->if_flags & IFF_RUNNING) == 0) {
+			m_freem(m);
+			return EJUSTRETURN;
+		}
+		/* allow packet to continue on the originating interface */
+		return 0;
 	}
 
 sendunicast:
@@ -5195,7 +5255,7 @@ sendunicast:
 
 	BRIDGE_UNLOCK(sc);
 	if (dst_if == ifp) {
-		/* just let the packet continue on its way */
+		/* allow packet to continue on the originating interface */
 		return 0;
 	}
 	if (dst_if != mac_nat_ifp) {
@@ -9475,7 +9535,12 @@ gso_ip_tcp(struct ifnet *ifp, struct mbuf **mp, struct gso_ip_tcp_state *state,
 #endif /* GSO_STATS */
 
 #if 1
-	mss = ifp->if_mtu - state->ip_hlen - state->tcp_hlen;
+	u_int reduce_mss;
+
+	reduce_mss = is_tx ? if_bridge_tso_reduce_mss_tx
+	    : if_bridge_tso_reduce_mss_forwarding;
+	mss = ifp->if_mtu - state->ip_hlen - state->tcp_hlen - reduce_mss;
+	assert(mss > 0);
 #else
 	if (m0->m_pkthdr.csum_flags & ifp->if_hwassist & CSUM_TSO) {/* TSO with GSO */
 		mss = ifp->if_hw_tsomax - state->ip_hlen - state->tcp_hlen;

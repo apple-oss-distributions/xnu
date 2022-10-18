@@ -68,6 +68,11 @@
 
 #include "kxld_object.h"
 
+/* NXArchInfo and friends are deprecated */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
+
 extern boolean_t isSplitKext;
 extern boolean_t isOldInterface;
 
@@ -2723,3 +2728,5 @@ target_supports_slideable_kexts(const KXLDObject *object)
 	return object->cputype != CPU_TYPE_I386 && object->include_kaslr_relocs;
 }
 #endif  /* KXLD_PIC_KEXTS */
+
+#pragma clang diagnostic pop

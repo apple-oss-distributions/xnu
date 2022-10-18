@@ -125,15 +125,20 @@ struct nexus_netif_adapter {
 		struct netif_filter     *nifna_filter;
 		struct netif_flow       *nifna_flow;
 	};
+	uint16_t                  nifna_gencnt;
 };
 
 struct netif_queue {
 	decl_lck_mtx_data(, nq_lock);
-	struct netif_qset    *nq_qset; /* backpointer to parent netif qset */
-	struct pktq          nq_pktq;
-	void                 *nq_ctx;
-	kern_packet_svc_class_t nq_svc; /* service class of TX queue */
-	uint16_t             nq_flags;
+	struct netif_qset               *nq_qset; /* backpointer to parent netif qset */
+	struct pktq                     nq_pktq;
+	struct netif_qstats             nq_stats;
+	uint64_t                        nq_accumulated_bytes;
+	uint64_t                        nq_accumulated_pkts;
+	uint64_t                        nq_accumulate_start; /* in seconds */
+	void                            *nq_ctx;
+	kern_packet_svc_class_t         nq_svc; /* service class of TX queue */
+	uint16_t                        nq_flags;
 }__attribute__((aligned(sizeof(uint64_t))));
 
 /* values for nq_flags */
@@ -183,6 +188,7 @@ struct netif_llink {
 	STAILQ_ENTRY(netif_llink)   nll_link;
 	SLIST_HEAD(, netif_qset)    nll_qset_list;
 	struct netif_qset           *nll_default_qset;
+	struct ifclassq             *nll_ifcq;
 	struct os_refcnt            nll_refcnt;
 #define NETIF_LLINK_ID_DEFAULT    0
 	kern_nexus_netif_llink_id_t nll_link_id;
@@ -258,6 +264,15 @@ typedef enum {
 	NETIF_MODE_LLW
 } netif_mode_t;
 
+/* nif capabilities */
+#define NETIF_CAPAB_INTERFACE_ADVISORY 0x00000001
+#define NETIF_CAPAB_QSET_EXTENSIONS    0x00000002
+
+struct netif_qset_extensions {
+	kern_nexus_capab_qsext_notify_steering_info_fn_t qe_notify_steering_info;
+	void *qe_prov_ctx;
+};
+
 /*
  * nx_netif is a descriptor for a netif nexus instance.
  */
@@ -324,9 +339,11 @@ struct nx_netif {
 	uint16_t                   nif_llink_cnt;
 
 	/* capability configuration callback function and context */
+	uint32_t                nif_extended_capabilities;
 	kern_nexus_capab_interface_advisory_config_fn_t nif_intf_adv_config;
 	void *nif_intf_adv_prov_ctx;
 
+	struct netif_qset_extensions nif_qset_extensions;
 #if (DEVELOPMENT || DEBUG)
 	struct skoid            nif_skoid;
 #endif /* !DEVELOPMENT && !DEBUG */
@@ -495,7 +512,7 @@ extern int nx_netif_common_intr(struct __kern_channel_ring *, struct proc *,
 extern int nx_netif_prov_init(struct kern_nexus_domain_provider *);
 extern int nx_netif_prov_params(struct kern_nexus_domain_provider *,
     const uint32_t, const struct nxprov_params *, struct nxprov_params *,
-    struct skmem_region_params[SKMEM_REGIONS]);
+    struct skmem_region_params[SKMEM_REGIONS], uint32_t);
 extern int nx_netif_prov_mem_new(struct kern_nexus_domain_provider *,
     struct kern_nexus *, struct nexus_adapter *);
 extern void nx_netif_prov_fini(struct kern_nexus_domain_provider *);
@@ -518,9 +535,10 @@ extern void nx_netif_copy_stats(struct nexus_netif_adapter *,
 extern struct nexus_netif_adapter * na_netif_alloc(zalloc_flags_t);
 extern void na_netif_free(struct nexus_adapter *);
 extern void na_netif_finalize(struct nexus_netif_adapter *, struct ifnet *);
-extern int nx_netif_interface_advisory_report(struct nexus_adapter *,
-    const struct ifnet_interface_advisory *);
+extern void nx_netif_detach_notify(struct nexus_netif_adapter *);
 extern void nx_netif_config_interface_advisory(struct kern_nexus *, bool);
+extern void nx_netif_get_interface_tso_capabilities(struct ifnet *, uint32_t *,
+    uint32_t *);
 
 /*
  * netif netagent API
@@ -638,6 +656,8 @@ extern struct netif_flow * nx_netif_flow_classify(struct nx_netif *,
 extern void nx_netif_flow_release(struct nx_netif *, struct netif_flow *);
 extern int netif_vp_na_create(struct kern_nexus *, struct chreq *,
     struct nexus_adapter **);
+extern errno_t netif_vp_na_channel_event(struct nx_netif *, uint32_t,
+    struct __kern_channel_event *, uint16_t);
 
 /*
  * Disable all checks on inbound/outbound packets on VP adapters
@@ -731,8 +751,6 @@ extern void netif_gso_fini(void);
 /*
  * Logical link functions
  */
-extern void nx_netif_llink_module_init(void);
-extern void nx_netif_llink_module_fini(void);
 extern void nx_netif_llink_retain(struct netif_llink *);
 extern void nx_netif_llink_release(struct netif_llink **);
 extern void nx_netif_qset_retain(struct netif_qset *);
@@ -754,7 +772,8 @@ extern int nx_netif_llink_add(struct nx_netif *,
     struct kern_nexus_netif_llink_init *, struct netif_llink **);
 extern int nx_netif_llink_remove(struct nx_netif *,
     kern_nexus_netif_llink_id_t);
-
+extern int nx_netif_notify_steering_info(struct nx_netif *,
+    struct netif_qset *, struct ifnet_traffic_descriptor_common *, bool);
 __END_DECLS
 #endif /* CONFIG_NEXUS_NETIF */
 #include <skywalk/nexus/netif/nx_netif_compat.h>

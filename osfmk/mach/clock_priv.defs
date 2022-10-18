@@ -35,9 +35,9 @@
  */
 
 subsystem
-#if	KERNEL_SERVER
-	  KernelServer
-#endif	/* KERNEL_SERVER */
+#if	KERNEL_SERVER || KOBJECT_SERVER
+	KernelServer
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 		       clock_priv 1200;
 
 #include <mach/std_types.defs>
@@ -45,22 +45,13 @@ subsystem
 #include <mach/clock_types.defs>
 
 /*
- * References to clock_priv objects are returned by:
- *	host_get_clock_control(host_priv_t,...) - Priviledged subclass
+ * Obsolete interfaces, removed from kernel.
  */
 
-/*
- *	Set the clock time.
- *	Privileged.
- */
 routine	clock_set_time(
 		clock_ctrl	: clock_ctrl_t;
 		new_time	: mach_timespec_t);
 
-/*
- *	Set clock attributes.
- *	Privileged.
- */
 routine	clock_set_attributes(
 		clock_ctrl	: clock_ctrl_t;
 	in	flavor		: clock_flavor_t;

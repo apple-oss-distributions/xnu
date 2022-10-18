@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2020 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2006-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -614,8 +614,8 @@ imageboot_read_file_internal(const char *path, const off_t offset, const bool pa
 		fsize = maxsize;
 	}
 
-	/* if fsize is larger than 2 GiB (or a configured limit), fail */
-	maxsize = INT_MAX;
+	/* if fsize is larger than the specified limit (presently 2.5GB) or a NVRAM-configured limit, fail */
+	maxsize = IMAGEBOOT_MAX_FILESIZE;
 	PE_parse_boot_argn("rootdmg-maxsize", &maxsize, sizeof(maxsize));
 	if (maxsize && (maxsize < (size_t)fsize)) {
 		AUTHPRNT("file is too large (%lld > %lld)", (long long) fsize, (long long) maxsize);
@@ -625,12 +625,19 @@ imageboot_read_file_internal(const char *path, const off_t offset, const bool pa
 
 	if (pageable) {
 		vm_offset_t addr = 0;
-		if (kmem_alloc_pageable(kernel_map, &addr, (vm_size_t)fsize, VM_KERN_MEMORY_KALLOC_DATA) == KERN_SUCCESS) {
+		if (kmem_alloc(kernel_map, &addr, (vm_size_t)fsize,
+		    KMA_PAGEABLE | KMA_DATA, VM_KERN_MEMORY_FILE) == KERN_SUCCESS) {
 			buf = (char *)addr;
 		} else {
 			buf = NULL;
 		}
 	} else {
+		//limit kalloc data calls to only 2GB.
+		if (fsize > IMAGEBOOT_MAX_KALLOCSIZE) {
+			AUTHPRNT("file is too large for non-pageable (%lld)", (long long) fsize);
+			err = ENOMEM;
+			goto out;
+		}
 		buf = (char *)kalloc_data((vm_size_t)fsize, Z_WAITOK);
 	}
 	if (buf == NULL) {

@@ -42,6 +42,13 @@ __BEGIN_DECLS
  *
  * @abstract
  * The opaque type of a lock group.
+ *
+ * @discussion
+ * A lock group is used to denote a set of locks that serve
+ * a similar purpose, and hold an equivalent "rank" in the lock hierarchy.
+ *
+ * This structure can then provide some statistics and anchor checks
+ * in development kernels for an entire family of locks.
  */
 typedef struct _lck_grp_        lck_grp_t;
 #define LCK_GRP_NULL            ((lck_grp_t *)NULL)
@@ -51,6 +58,11 @@ typedef struct _lck_grp_        lck_grp_t;
  *
  * @abstract
  * The opaque type for attributes to a group.
+ *
+ * @discussion
+ * A lock group attribute is meant to configure
+ * a group, as a group configuration becomes
+ * immutable once made.
  */
 typedef struct _lck_grp_attr_   lck_grp_attr_t;
 #define LCK_GRP_ATTR_NULL       ((lck_grp_attr_t *)NULL)
@@ -85,70 +97,89 @@ extern void             lck_grp_free(
  * NULL when LOCK_STATS is not set
  */
 #if LOCK_STATS
+#if !CONFIG_DTRACE
+#error invalid configuration: LOCK_STATS needs dtrace
+#endif
 #define LCK_GRP_ARG(expr)       , expr
 #define LCK_GRP_PROBEARG(grp)   grp
+#define LCK_GRP_USE_ARG         1
 #else
 #define LCK_GRP_ARG(expr)
 #define LCK_GRP_PROBEARG(grp)   LCK_GRP_NULL
+#define LCK_GRP_USE_ARG         0
 #endif /* LOCK_STATS */
 
+__enum_decl(lck_debug_feature_t, uint32_t, {
+	LCK_DEBUG_LOCKSTAT,
+	LCK_DEBUG_LOCKPROF,
+
+	LCK_DEBUG_MAX,
+});
+
 extern uint32_t LcksOpts;
+
+extern struct lck_debug_state {
+	uint32_t                lds_value;
+	long                    lds_counts[LCK_DEBUG_MAX];
+} lck_debug_state;
 
 __options_decl(lck_grp_options_t, uint32_t, {
 	LCK_GRP_ATTR_NONE       = 0x00000000,
 
 #if MACH_KERNEL_PRIVATE
-	LCK_GRP_ATTR_STAT       = 0x00000001,
-	LCK_GRP_ATTR_TIME_STAT  = 0x00000002,
-	LCK_GRP_ATTR_ALLOCATED  = 0x00000004,
+	LCK_GRP_ATTR_ID_MASK    = 0x0000ffff,
+	LCK_GRP_ATTR_STAT       = 0x00010000, /* enable non time stats         */
+	LCK_GRP_ATTR_TIME_STAT  = 0x00020000, /* enable time stats             */
+	LCK_GRP_ATTR_DEBUG      = 0x00040000, /* profile locks of this group   */
+	LCK_GRP_ATTR_ALLOCATED  = 0x80000000,
 #endif
 });
 
+#if CONFIG_DTRACE
 typedef struct _lck_grp_stat_ {
 	uint64_t lgs_count;
 	uint32_t lgs_enablings;
-#if CONFIG_DTRACE
 	/*
 	 * Protected by dtrace_lock
 	 */
 	uint32_t lgs_probeid;
 	uint64_t lgs_limit;
-#endif /* CONFIG_DTRACE */
 } lck_grp_stat_t;
 
 typedef struct _lck_grp_stats_ {
-#if LOCK_STATS
 	lck_grp_stat_t          lgss_spin_held;
 	lck_grp_stat_t          lgss_spin_miss;
 	lck_grp_stat_t          lgss_spin_spin;
+
 	lck_grp_stat_t          lgss_ticket_held;
 	lck_grp_stat_t          lgss_ticket_miss;
 	lck_grp_stat_t          lgss_ticket_spin;
-#endif /* LOCK_STATS */
 
 	lck_grp_stat_t          lgss_mtx_held;
 	lck_grp_stat_t          lgss_mtx_direct_wait;
 	lck_grp_stat_t          lgss_mtx_miss;
 	lck_grp_stat_t          lgss_mtx_wait;
 } lck_grp_stats_t;
+#endif /* CONFIG_DTRACE */
 
 #define LCK_GRP_MAX_NAME        64
 
-typedef struct _lck_grp_ {
-	queue_chain_t           lck_grp_link;
-	os_refcnt_t             lck_grp_refcnt;
+struct _lck_grp_ {
+	os_ref_atomic_t         lck_grp_refcnt;
+	uint32_t                lck_grp_attr_id;
 	uint32_t                lck_grp_spincnt;
 	uint32_t                lck_grp_ticketcnt;
 	uint32_t                lck_grp_mtxcnt;
 	uint32_t                lck_grp_rwcnt;
-	lck_grp_options_t       lck_grp_attr;
 	char                    lck_grp_name[LCK_GRP_MAX_NAME];
+#if CONFIG_DTRACE
 	lck_grp_stats_t         lck_grp_stats;
-} lck_grp_t;
+#endif /* CONFIG_DTRACE */
+};
 
-typedef struct _lck_grp_attr_ {
+struct _lck_grp_attr_ {
 	lck_grp_options_t       grp_attr_val;
-} lck_grp_attr_t;
+};
 
 struct lck_grp_spec {
 	lck_grp_t              *grp;
@@ -166,7 +197,7 @@ struct lck_grp_spec {
 	__PLACE_IN_SECTION("__DATA,__lock_grp") lck_grp_t var; \
 	static __startup_data struct lck_grp_spec \
 	__startup_lck_grp_spec_ ## var = { &var, name, flags }; \
-	STARTUP_ARG(LOCKS_EARLY, STARTUP_RANK_THIRD, lck_grp_startup_init, \
+	STARTUP_ARG(LOCKS, STARTUP_RANK_SECOND, lck_grp_startup_init, \
 	    &__startup_lck_grp_spec_ ## var)
 
 #define LCK_GRP_DECLARE(var, name) \
@@ -188,6 +219,18 @@ extern lck_grp_t       *lck_grp_init_flags(
 	const char*             grp_name,
 	lck_grp_options_t       grp_flags);
 
+extern lck_grp_t       *lck_grp_resolve(
+	uint32_t                grp_attr_id) __pure2;
+
+extern void             lck_grp_assert_id(
+	lck_grp_t              *grp,
+	uint32_t                grp_attr_id);
+#if DEBUG || DEVELOPMENT
+#define LCK_GRP_ASSERT_ID(...)  lck_grp_assert_id(__VA_ARGS__)
+#else
+#define LCK_GRP_ASSERT_ID(...)  ((void)0)
+#endif
+
 extern void             lck_grp_reference(
 	lck_grp_t              *grp,
 	uint32_t               *cnt);
@@ -199,6 +242,12 @@ extern void             lck_grp_deallocate(
 extern void             lck_grp_foreach(
 	bool                  (^block)(lck_grp_t *));
 
+
+extern void             lck_grp_enable_feature(
+	lck_debug_feature_t     feat);
+
+extern void             lck_grp_disable_feature(
+	lck_debug_feature_t     feat);
 #pragma GCC visibility pop
 #endif /* XNU_KERNEL_PRIVATE */
 

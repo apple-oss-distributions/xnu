@@ -69,14 +69,18 @@ __BEGIN_DECLS
 #define SOCD_TRACE4(x, a, b, c, d)         SOCD_TRACE_IMPL(x, SOCD_##a, SOCD_##b, SOCD_##c, SOCD_##d)
 
 #if defined(__arm64__)
+#  define SOCD_TRACE_ENABLED 1
+#endif
+
+#if SOCD_TRACE_ENABLED
 #define SOCD_TRACE_IMPL(x, a, b, c, d) \
 do { \
 	socd_client_trace((x), (socd_client_trace_arg_t)(a), (socd_client_trace_arg_t)(b), \
 	                        (socd_client_trace_arg_t)(c), (socd_client_trace_arg_t)(d)); \
 } while (0)
-#else // defined(__arm64__)
+#else // SOCD_TRACE_ENABLED
 #define SOCD_TRACE_IMPL(x, a, b, c, d)
-#endif // !defined(__arm64__)
+#endif // !SOCD_TRACE_ENABLED
 
 #define SOCD_ADDR(_a) (VM_KERNEL_UNSLIDE((vm_offset_t)(_a)))
 #define SOCD_VALUE(_v) (VM_KERNEL_ADDRESS((vm_offset_t)(_v)) ? (socd_client_trace_arg_t)0 : (socd_client_trace_arg_t)(_v))

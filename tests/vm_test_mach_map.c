@@ -410,11 +410,11 @@ task_footprint(void)
 	    &count);
 	T_QUIET;
 	T_ASSERT_MACH_SUCCESS(kr, "task_info()");
-#if defined(__arm64__) || defined(__arm__)
+#if defined(__arm64__)
 	T_QUIET;
 	T_ASSERT_EQ(count, TASK_VM_INFO_COUNT, "task_info() count = %d (expected %d)",
 	    count, TASK_VM_INFO_COUNT);
-#endif /* defined(__arm64__) || defined(__arm__) */
+#endif /* defined(__arm64__) */
 	return ti.phys_footprint;
 }
 
@@ -1769,4 +1769,43 @@ T_DECL(wire_text, "test wired text for rdar://problem/16783546 Wiring code in \
 	} else {
 		T_PASS("wire text");
 	}
+}
+
+T_DECL(remap_comm_page, "test remapping of the commpage - rdar://93177124",
+    T_META_ALL_VALID_ARCHS(true))
+{
+	kern_return_t           kr;
+	mach_vm_address_t       commpage_addr, remap_addr;
+	mach_vm_size_t          vmsize;
+	vm_prot_t               curprot, maxprot;
+
+#if __arm__
+	commpage_addr = 0xFFFF4000ULL;
+#elif __arm64__
+	commpage_addr = 0x0000000FFFFFC000ULL;
+#elif __x86_64__
+	commpage_addr = 0x00007FFFFFE00000ULL;
+#else
+	T_FAIL("unknown commpage address for this architecture");
+#endif
+
+	T_LOG("Remapping commpage from 0x%llx", commpage_addr);
+	vmsize = vm_kernel_page_size;
+	remap_addr = 0;
+	kr = mach_vm_remap(mach_task_self(),
+	    &remap_addr,
+	    vmsize,
+	    0, /* mask */
+	    VM_FLAGS_ANYWHERE,
+	    mach_task_self(),
+	    commpage_addr,
+	    TRUE, /* copy */
+	    &curprot,
+	    &maxprot,
+	    VM_INHERIT_DEFAULT);
+	if (kr == KERN_INVALID_ADDRESS) {
+		T_SKIP("No mapping found at 0x%llx\n", commpage_addr);
+		return;
+	}
+	T_ASSERT_MACH_SUCCESS(kr, "vm_remap() of commpage from 0x%llx", commpage_addr);
 }

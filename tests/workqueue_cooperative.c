@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <mach/mach_time.h>
+#include <mach/thread_policy.h>
 #include <pthread.h>
 
 #include <pthread/tsd_private.h>

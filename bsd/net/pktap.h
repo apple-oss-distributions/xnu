@@ -111,17 +111,23 @@ struct pktap_header {
 	uint32_t                pth_frame_post_length;
 	pid_t                   pth_pid;                        /* process ID */
 	char                    pth_comm[MAXCOMLEN + 1];          /* process name */
+	uint8_t                 pth_pad1;
+	uint16_t                pth_trace_tag;
 	uint32_t                pth_svc;                        /* service class */
 	uint16_t                pth_iftype;
 	uint16_t                pth_ifunit;
 	pid_t                   pth_epid;               /* effective process ID */
 	char                    pth_ecomm[MAXCOMLEN + 1]; /* effective command name */
+	uint8_t                 pth_pad2;
+	uint16_t                pth_pad3;
 	uint32_t                pth_flowid;
 	uint32_t                pth_ipproto;
 	struct timeval32        pth_tstamp;
 	uuid_t                  pth_uuid;
 	uuid_t                  pth_euuid;
 };
+
+#define PKTAP_HAS_TRACE_TAG 1
 
 /*
  * The original version 1 of the pktap_header structure always had the field

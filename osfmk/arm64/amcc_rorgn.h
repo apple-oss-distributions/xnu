@@ -31,6 +31,8 @@
 
 void rorgn_stash_range(void);
 void rorgn_lockdown(void);
+struct mach_vm_range rorgn_get_range(void);
+bool rorgn_contains(vm_offset_t addr, vm_size_t size);
 extern vm_offset_t ctrr_begin, ctrr_end;
 #if CONFIG_CSR_FROM_DT
 extern bool csr_unsafe_kernel_text;

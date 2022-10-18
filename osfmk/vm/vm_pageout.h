@@ -260,8 +260,8 @@ extern void               vm_page_free_list(
 	vm_page_t   mem,
 	boolean_t   prepare_object);
 
-extern kern_return_t      vm_page_alloc_list(
-	int         page_count,
+extern kern_return_t vm_page_alloc_list(
+	vm_size_t   page_count,
 	kma_flags_t flags,
 	vm_page_t  *list);
 
@@ -632,7 +632,8 @@ extern int vm_compressor_mode;
 extern kern_return_t vm_pageout_compress_page(void **, char *, vm_page_t);
 extern void vm_pageout_anonymous_pages(void);
 extern void vm_pageout_disconnect_all_pages(void);
-
+extern int vm_toggle_task_selfdonate_pages(task_t);
+extern void vm_task_set_selfdonate_pages(task_t, bool);
 
 struct  vm_config {
 	boolean_t       compressor_is_present;          /* compressor is initialized and can be used by the freezer, the sweep or the pager */
@@ -704,6 +705,7 @@ struct vm_pageout_state {
 
 	thread_t vm_pageout_external_iothread;
 	thread_t vm_pageout_internal_iothread;
+	thread_t vm_pageout_early_swapout_iothread;
 };
 
 extern struct vm_pageout_state vm_pageout_state;
@@ -746,6 +748,7 @@ struct vm_pageout_vminfo {
 
 extern struct vm_pageout_vminfo vm_pageout_vminfo;
 
+extern void vm_swapout_thread(void);
 
 #if DEVELOPMENT || DEBUG
 
@@ -792,6 +795,7 @@ struct vm_pageout_debug {
 	uint32_t vm_grab_anon_nops;
 
 	uint32_t vm_pageout_no_victim;
+	uint32_t vm_pageout_yield_for_free_pages;
 	unsigned long vm_pageout_throttle_up_count;
 	uint32_t vm_page_steal_pageout_page;
 
@@ -823,6 +827,23 @@ extern struct vm_pageout_debug vm_pageout_debug;
 
 #define MAX_COMPRESSOR_THREAD_COUNT      8
 
+/*
+ * Forward declarations for internal routines.
+ */
+struct cq {
+	struct vm_pageout_queue *q;
+	void                    *current_early_swapout_chead;
+	void                    *current_regular_swapout_chead;
+	void                    *current_late_swapout_chead;
+	char                    *scratch_buf;
+	int                     id;
+#if DEVELOPMENT || DEBUG
+	struct vm_pageout_queue *benchmark_q;
+#endif /* DEVELOPMENT || DEBUG */
+};
+
+extern struct cq ciq[MAX_COMPRESSOR_THREAD_COUNT];
+
 struct vm_compressor_swapper_stats {
 	uint64_t unripe_under_30s;
 	uint64_t unripe_under_60s;
@@ -842,6 +863,7 @@ typedef struct vmct_stats_s {
 	uint64_t vmct_runtimes[MAX_COMPRESSOR_THREAD_COUNT];
 	uint64_t vmct_pages[MAX_COMPRESSOR_THREAD_COUNT];
 	uint64_t vmct_iterations[MAX_COMPRESSOR_THREAD_COUNT];
+	// total mach absolute time that compressor threads has been running
 	uint64_t vmct_cthreads_total;
 	int32_t vmct_minpages[MAX_COMPRESSOR_THREAD_COUNT];
 	int32_t vmct_maxpages[MAX_COMPRESSOR_THREAD_COUNT];

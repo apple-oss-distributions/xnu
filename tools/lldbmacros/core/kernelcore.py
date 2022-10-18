@@ -16,6 +16,15 @@ from . import caching
 import lldb
 import six
 
+class UnsupportedArchitectureError(RuntimeError):
+    def __init__(self, arch, msg="Unsupported architecture"):
+        self._arch = arch
+        self._msg = msg
+        super().__init__(msg)
+
+    def __str__(self):
+        return '%s: %s' % (self._arch, self._msg)
+
 def IterateTAILQ_HEAD(headval, element_name, list_prefix=''):
     """ iterate over a TAILQ_HEAD in kernel. refer to bsd/sys/queue.h
         params:
@@ -161,36 +170,32 @@ def IterateQueue(queue_head, element_ptr_type, element_field_name, backwards=Fal
     if isinstance(element_ptr_type, six.string_types):
         element_ptr_type = gettype(element_ptr_type)
 
-    queue_head = queue_head.GetSBValue()
-    queue_head_addr = 0x0
-    if queue_head.TypeIsPointerType():
-        queue_head_addr = queue_head.GetValueAsUnsigned()
-    else:
-        queue_head_addr = queue_head.GetAddress().GetLoadAddress(LazyTarget.GetTarget())
-        
-    def unpack_ptr_and_recast(v):
-        if unpack_ptr_fn is None:
-            return v
-        v_unpacked = unpack_ptr_fn(v.GetValueAsUnsigned())
-        obj = v.CreateValueFromExpression(None,'(void *)'+str(v_unpacked))
-        obj.Cast(element_ptr_type)
-        return obj
+    next_direction = 'prev' if backwards else 'next'
 
-    if backwards:
-        cur_elt = unpack_ptr_and_recast(queue_head.GetChildMemberWithName('prev'))
-    else:
-        cur_elt = unpack_ptr_and_recast(queue_head.GetChildMemberWithName('next'))
+    def next_element(e):
+        next_elt = getattr(e, next_direction)
+        if not unpack_ptr_fn:
+            return next_elt
+        next_sbv = next_elt.GetSBValue()
+        addr = unpack_ptr_fn(next_sbv.GetValueAsUnsigned())
+        next_sbv = next_sbv.CreateValueFromExpression(None,'(void *)' + str(addr))
+        return value(next_sbv.Cast(element_ptr_type))
 
+    queue_head_sbv = queue_head.GetSBValue()
+
+    if queue_head_sbv.TypeIsPointerType():
+        queue_head_addr = queue_head_sbv.GetValueAsAddress()
+    else:
+        queue_head_addr = queue_head_sbv.GetAddress().GetLoadAddress(LazyTarget.GetTarget())
+
+    elt = next_element(queue_head)
     while True:
-
-        if not cur_elt.IsValid() or cur_elt.GetValueAsUnsigned() == 0 or cur_elt.GetValueAsUnsigned() == queue_head_addr:
+        sbv = elt.GetSBValue()
+        if not sbv.IsValid() or sbv.GetValueAsUnsigned() == 0 or sbv.GetValueAsAddress() == queue_head_addr:
             break
-        elt = cur_elt.Cast(element_ptr_type)
-        yield value(elt)
-        if backwards:
-            cur_elt = unpack_ptr_and_recast(elt.GetChildMemberWithName(element_field_name).GetChildMemberWithName('prev'))
-        else:
-            cur_elt = unpack_ptr_and_recast(elt.GetChildMemberWithName(element_field_name).GetChildMemberWithName('next'))
+        elt = cast(elt, element_ptr_type)
+        yield elt
+        elt = next_element(getattr(elt, element_field_name))
 
 
 def IterateRBTreeEntry(element, element_type, field_name):
@@ -544,14 +549,7 @@ class KernelTarget(object):
         else:
             raise ValueError("PhysToVirt does not support {0}".format(self.arch))
 
-    def GetNanotimeFromAbstime(self, abstime):
-        """ convert absolute time (which is in MATUs) to nano seconds.
-            Since based on architecture the conversion may differ.
-            params:
-                abstime - int absolute time as shown by mach_absolute_time
-            returns:
-                int - nanosecs of time
-        """
+    def GetUsecDivisor(self):
         usec_divisor = caching.GetStaticCacheData("kern.rtc_usec_divisor", None)
         if not usec_divisor:
             if self.arch == 'x86_64':
@@ -562,8 +560,17 @@ class KernelTarget(object):
                 usec_divisor = unsigned(rtc.rtc_usec_divisor)
             usec_divisor = int(usec_divisor)
             caching.SaveStaticCacheData('kern.rtc_usec_divisor', usec_divisor)
-        nsecs = (abstime * 1000) // usec_divisor
-        return nsecs
+        return usec_divisor
+
+    def GetNanotimeFromAbstime(self, abstime):
+        """ convert absolute time (which is in MATUs) to nano seconds.
+            Since based on architecture the conversion may differ.
+            params:
+                abstime - int absolute time as shown by mach_absolute_time
+            returns:
+                int - nanosecs of time
+        """
+        return (abstime * 1000) // self.GetUsecDivisor()
 
     def __getattribute__(self, name):
         if name == 'zones' :
@@ -687,7 +694,7 @@ class KernelTarget(object):
             if self._arch != None : return self._arch
             arch = LazyTarget.GetTarget().triple.split('-')[0]
             if arch in ('armv7', 'armv7s', 'armv7k'):
-                self._arch = 'arm'
+                raise UnsupportedArchitectureError(arch)
             else:
                 self._arch = arch
             caching.SaveStaticCacheData("kern.arch", self._arch)

@@ -33,8 +33,8 @@
 #include <arm/cpuid.h>
 #include <arm/cpuid_internal.h>
 #include <arm/cpu_data_internal.h>
+#include <arm64/proc_reg.h>
 #include <vm/vm_page.h>
-#include "proc_reg.h"
 
 #include <libkern/section_keywords.h>
 
@@ -94,26 +94,9 @@ do_cpuid(void)
 	cpuid_cpu_info.arm_info.arm_arch = CPU_ARCH_ARMv8;
 #endif /* defined(HAS_APPLE_PAC) */
 
-#elif (__ARM_ARCH__ == 7)
-#ifdef __ARM_SUB_ARCH__
-	cpuid_cpu_info.arm_info.arm_arch = __ARM_SUB_ARCH__;
-#else /* __ARM_SUB_ARCH__ */
-	cpuid_cpu_info.arm_info.arm_arch = CPU_ARCH_ARMv7;
-#endif /* __ARM_SUB_ARCH__ */
-#else /* (__ARM_ARCH__ != 7) && (__ARM_ARCH__ != 8) */
-	/* 1176 architecture lives in the extended feature register */
-	if (cpuid_cpu_info.arm_info.arm_arch == CPU_ARCH_EXTENDED) {
-		arm_isa_feat1_reg isa = machine_read_isa_feat1();
-
-		/*
-		 * if isa feature register 1 [15:12] == 0x2, this chip
-		 * supports sign extention instructions, which indicate ARMv6
-		 */
-		if (isa.field.sign_zero_ext_support == 0x2) {
-			cpuid_cpu_info.arm_info.arm_arch = CPU_ARCH_ARMv6;
-		}
-	}
-#endif /* (__ARM_ARCH__ != 7) && (__ARM_ARCH__ != 8) */
+#else /* (__ARM_ARCH__ != 8) */
+#error Unsupported arch
+#endif /* (__ARM_ARCH__ != 8) */
 }
 
 arm_cpu_info_t *

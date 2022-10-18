@@ -233,8 +233,38 @@ extern voucher_mach_msg_state_t voucher_mach_msg_adopt(mach_msg_header_t *msg);
  * @param state
  * The thread voucher state to restore.
  */
-
 extern void voucher_mach_msg_revert(voucher_mach_msg_state_t state);
+
+#if PRIVATE
+/*!
+ * @function voucher_mach_msg_fill_aux
+ *
+ * @abstract
+ * Copy auxiliary data to buffer pointed to by aux_hdr and return the size of
+ * auxiliary data filled.
+ *
+ * @discussion
+ * Used to transport voucher activity data. Should only be used with mach_msg2()
+ *
+ * @param aux_hdr
+ * The aux data header to fill.
+ *
+ * @param sz
+ * Size of the aux data buffer.
+ *
+ * @result
+ * The size of data copied to aux_hdr.
+ */
+extern mach_msg_size_t voucher_mach_msg_fill_aux(mach_msg_aux_header_t *aux_hdr, mach_msg_size_t sz);
+
+/*!
+ * @function voucher_mach_msg_fill_aux_supported
+ *
+ * @abstract
+ * Return whether voucher_mach_msg_fill_aux() function pointer exists.
+ */
+extern boolean_t voucher_mach_msg_fill_aux_supported(void);
+#endif /* PRIVATE */
 
 __END_DECLS
 

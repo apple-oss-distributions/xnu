@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -57,6 +57,8 @@ static uint32_t vp_rx_slots = 0;
  */
 uint32_t nx_netif_vp_accept_all = 0;
 
+static uint16_t nx_netif_vpna_gencnt = 0;
+
 #if (DEVELOPMENT || DEBUG)
 SYSCTL_UINT(_kern_skywalk_netif, OID_AUTO, outbound_check,
     CTLFLAG_RW | CTLFLAG_LOCKED, &outbound_check, 0,
@@ -80,7 +82,7 @@ SYSCTL_UINT(_kern_skywalk_netif, OID_AUTO, vp_accept_all,
 
 static int
 netif_vp_na_channel_event_notify(struct nexus_adapter *,
-    struct __kern_packet *, struct __kern_channel_event *, uint16_t);
+    struct __kern_channel_event *, uint16_t);
 
 static void
 netif_vp_dump_packet(struct __kern_packet *pkt)
@@ -420,6 +422,8 @@ netif_vp_na_activate_on(struct nexus_adapter *na)
 		return err;
 	}
 	nifna->nifna_flow = nf;
+	atomic_add_16(&nx_netif_vpna_gencnt, 1);
+	nifna->nifna_gencnt = nx_netif_vpna_gencnt;
 	atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
 	return 0;
 }
@@ -431,6 +435,10 @@ netif_vp_na_activate_off(struct nexus_adapter *na)
 	struct nexus_netif_adapter *nifna;
 	struct nx_netif *nif;
 
+	if (!NA_IS_ACTIVE(na)) {
+		DTRACE_SKYWALK1(already__off, struct nexus_adapter *, na);
+		return 0;
+	}
 	nifna = NIFNA(na);
 	nif = nifna->nifna_netif;
 	err = nx_netif_flow_remove(nif, nifna->nifna_flow);
@@ -707,6 +715,11 @@ netif_vp_na_txsync(struct __kern_channel_ring *kring, struct proc *p,
 		VERIFY(err == 0);
 		last_slot = slot;
 
+		if (NA_CHANNEL_EVENT_ATTACHED(KRNA(kring))) {
+			__packet_set_tx_nx_port(SK_PKT2PH(pkt),
+			    KRNA(kring)->na_nx_port, nifna->nifna_gencnt);
+		}
+
 		if (validate_packet(nifna, pkt)) {
 			nx_netif_snoop(nif, pkt, FALSE);
 			cnt++;
@@ -798,10 +811,6 @@ netif_vp_region_params_setup(struct nexus_adapter *na,
 	srp[SKMEM_REGION_TXAUSD].srp_cflags &= ~SKMEM_REGION_CR_UREADONLY;
 	srp[SKMEM_REGION_RXFUSD].srp_cflags &= ~SKMEM_REGION_CR_UREADONLY;
 
-	/* Enable per-CPU caching for UMD and KMD regions */
-	srp[SKMEM_REGION_UMD].srp_cflags &= ~SKMEM_REGION_CR_NOMAGAZINES;
-	srp[SKMEM_REGION_KMD].srp_cflags &= ~SKMEM_REGION_CR_NOMAGAZINES;
-
 	nslots = na_get_nslots(na, NR_TX);
 	afslots = na_get_nslots(na, NR_A);
 	evslots = na_get_nslots(na, NR_EV);
@@ -875,7 +884,7 @@ netif_vp_region_params_setup(struct nexus_adapter *na,
 		 */
 		ASSERT(nx->nx_rx_pp != NULL);
 		ASSERT(nx->nx_tx_pp != NULL);
-		buf_sz = nx->nx_tx_pp->pp_buflet_size;
+		buf_sz = PP_BUF_SIZE_DEF(nx->nx_tx_pp);
 	} else {
 		if ((err = nx_netif_get_max_mtu(na->na_ifp, &max_mtu)) != 0) {
 			/*
@@ -889,9 +898,10 @@ netif_vp_region_params_setup(struct nexus_adapter *na,
 		buf_sz = MAX(max_mtu + sizeof(struct ether_vlan_header), 2048);
 	}
 	buf_cnt = vp_pool_size;
-	pp_regions_params_adjust(&srp[SKMEM_REGION_BUF], &srp[SKMEM_REGION_KMD],
-	    &srp[SKMEM_REGION_UMD], NULL, NULL, NEXUS_META_TYPE_PACKET,
-	    NEXUS_META_SUBTYPE_RAW, buf_cnt, 1, buf_sz, buf_cnt);
+	pp_regions_params_adjust(srp, NEXUS_META_TYPE_PACKET,
+	    NEXUS_META_SUBTYPE_RAW, buf_cnt, 1, buf_sz, 0, buf_cnt, 0,
+	    PP_REGION_CONFIG_BUF_IODIR_BIDIR |
+	    PP_REGION_CONFIG_MD_MAGAZINE_ENABLE);
 
 	nx_netif_vp_region_params_adjust(na, srp);
 	return 0;
@@ -911,7 +921,7 @@ netif_vp_na_mem_new(struct kern_nexus *nx, struct nexus_adapter *na)
 	}
 	na->na_arena = skmem_arena_create_for_nexus(na, srp,
 	    tx_pp != NULL ? &tx_pp : NULL, NULL,
-	    FALSE, FALSE, &nx->nx_adv, &err);
+	    0, &nx->nx_adv, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 	return err;
 }
@@ -1065,10 +1075,8 @@ err:
 
 static int
 netif_vp_na_channel_event_notify(struct nexus_adapter *vpna,
-    struct __kern_packet *dev_pkt, struct __kern_channel_event *ev,
-    uint16_t ev_len)
+    struct __kern_channel_event *ev, uint16_t ev_len)
 {
-#pragma unused (dev_pkt)
 	int err;
 	char *baddr;
 	kern_packet_t ph;
@@ -1143,5 +1151,69 @@ error:
 		nx_netif_free_packet(vpna_pkt);
 	}
 	STATS_INC(nifs, NETIF_STATS_EV_DROP);
+	return err;
+}
+
+static inline struct nexus_adapter *
+nx_netif_find_port_vpna(struct nx_netif *netif, uint32_t nx_port_id)
+{
+	struct kern_nexus *nx = netif->nif_nx;
+	struct nexus_adapter *na = NULL;
+	nexus_port_t port;
+	uint16_t gencnt;
+
+	PKT_DECOMPOSE_NX_PORT_ID(nx_port_id, port, gencnt);
+	if (port < NEXUS_PORT_NET_IF_CLIENT) {
+		SK_ERR("non VPNA port");
+		return NULL;
+	}
+	if (__improbable(!nx_port_is_valid(nx, port))) {
+		SK_ERR("%s[%d] port no longer valid",
+		    if_name(netif->nif_ifp), port);
+		return NULL;
+	}
+	na = nx_port_get_na(nx, port);
+	if (na != NULL && NIFNA(na)->nifna_gencnt != gencnt) {
+		return NULL;
+	}
+	return na;
+}
+
+errno_t
+netif_vp_na_channel_event(struct nx_netif *nif, uint32_t nx_port_id,
+    struct __kern_channel_event *event, uint16_t event_len)
+{
+	int err = 0;
+	struct nexus_adapter *netif_vpna;
+	struct netif_stats *nifs = &nif->nif_stats;
+
+	NETIF_RLOCK(nif);
+	if (!NETIF_IS_LOW_LATENCY(nif)) {
+		err = ENOTSUP;
+		goto error;
+	}
+	if (__improbable(nif->nif_vp_cnt == 0)) {
+		STATS_INC(nifs, NETIF_STATS_EV_DROP_NO_VPNA);
+		err = ENXIO;
+		goto error;
+	}
+	netif_vpna = nx_netif_find_port_vpna(nif, nx_port_id);
+	if (__improbable(netif_vpna == NULL)) {
+		err = ENXIO;
+		STATS_INC(nifs, NETIF_STATS_EV_DROP_DEMUX_ERR);
+		goto error;
+	}
+	if (__improbable(netif_vpna->na_channel_event_notify == NULL)) {
+		err = ENOTSUP;
+		STATS_INC(nifs, NETIF_STATS_EV_DROP_EV_VPNA_NOTSUP);
+		goto error;
+	}
+	err = netif_vpna->na_channel_event_notify(netif_vpna, event, event_len);
+	NETIF_RUNLOCK(nif);
+	return err;
+
+error:
+	STATS_INC(nifs, NETIF_STATS_EV_DROP);
+	NETIF_RUNLOCK(nif);
 	return err;
 }

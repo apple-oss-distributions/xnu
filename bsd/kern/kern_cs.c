@@ -68,6 +68,7 @@
 
 
 #include <kern/assert.h>
+#include <kern/cs_blobs.h>
 
 #include <pexpert/pexpert.h>
 
@@ -148,7 +149,7 @@ SYSCTL_INT(_vm, OID_AUTO, cs_all_vnodes, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_all_vn
 
 #if !SECURE_KERNEL
 SYSCTL_INT(_vm, OID_AUTO, cs_system_enforcement, CTLFLAG_RD | CTLFLAG_LOCKED, &cs_system_enforcement_enable, 0, "");
-SYSCTL_INT(_vm, OID_AUTO, cs_process_enforcement, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_process_enforcement_enable, 0, "");
+SYSCTL_INT(_vm, OID_AUTO, cs_process_enforcement, CTLFLAG_RD | CTLFLAG_LOCKED, &cs_process_enforcement_enable, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, cs_enforcement_panic, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_enforcement_panic, 0, "");
 
 #if !CONFIG_ENFORCE_LIBRARY_VALIDATION
@@ -235,10 +236,10 @@ cs_allow_invalid(struct proc *p)
 	proc_unlock(p);
 
 	/* allow a debugged process to hide some (debug-only!) memory */
-	task_set_memory_ownership_transfer(p->task, TRUE);
+	task_set_memory_ownership_transfer(proc_task(p), TRUE);
 
-	vm_map_switch_protect(get_task_map(p->task), FALSE);
-	vm_map_cs_debugged_set(get_task_map(p->task), TRUE);
+	vm_map_switch_protect(get_task_map(proc_task(p)), FALSE);
+	vm_map_cs_debugged_set(get_task_map(proc_task(p)), TRUE);
 #endif
 	return (proc_getcsflags(p) & (CS_KILL | CS_HARD)) == 0;
 }
@@ -490,6 +491,55 @@ csblob_get_platform_binary(struct cs_blob *blob)
 }
 
 /*
+ * Function: csblob_invalidate_flags
+ *
+ * Description: This function is used to clear the CS_VALID bit on a blob
+ *              when a vnode may have been modified.
+ *
+ */
+void
+csblob_invalidate_flags(struct cs_blob *csblob)
+{
+	bool ro_blob = csblob == csblob->csb_ro_addr;
+	unsigned int current_flags = csblob->csb_flags;
+	unsigned int updated_flags = current_flags & (~CS_VALID);
+	if (ro_blob == true) {
+		zalloc_ro_update_field(ZONE_ID_CS_BLOB, csblob, csb_flags, &updated_flags);
+	} else {
+		csblob->csb_flags = updated_flags;
+	}
+	printf("Invalidated flags, old %x new %x\n", current_flags, csblob->csb_flags);
+}
+
+/*
+ * Function: csvnode_invalidate_flags
+ *
+ * Description: This function is used to clear the CS_VALID bit on all blobs
+ *              attached to a vnode.
+ *
+ */
+void
+csvnode_invalidate_flags(struct vnode *vp)
+{
+	struct cs_blob* oblob;
+	bool mark_ubcinfo = false;
+
+	for (oblob = ubc_get_cs_blobs(vp);
+	    oblob != NULL;
+	    oblob = oblob->csb_next) {
+		if (!mark_ubcinfo) {
+			mark_ubcinfo = true;
+			vnode_lock(vp);
+			if (vp->v_ubcinfo) {
+				vp->v_ubcinfo->ui_flags |= UI_CSBLOBINVALID;
+			}
+			vnode_unlock(vp);
+		}
+		csblob_invalidate_flags(oblob);
+	}
+}
+
+/*
  * Function: csblob_get_flags
  *
  * Description: This function returns the flags for a given blob
@@ -606,6 +656,72 @@ unsigned int
 csblob_get_signer_type(struct cs_blob *csblob)
 {
 	return csblob->csb_signer_type;
+}
+
+/*
+ * Function: csblob_set_validation_category
+ *
+ * Description: This function is used to set the validation
+ *              category on a cs_blob. Can only be set once,
+ *              except when set as none.
+ *
+ * Return: 0 on success, otherwise -1.
+ */
+int
+csblob_set_validation_category(struct cs_blob *csblob, unsigned int category)
+{
+	bool ro_blob = csblob == csblob->csb_ro_addr;
+
+	if ((csblob->csb_validation_category == CS_VALIDATION_CATEGORY_INVALID) ||
+	    (csblob->csb_validation_category == CS_VALIDATION_CATEGORY_NONE)) {
+		if (ro_blob == true) {
+			zalloc_ro_update_field(ZONE_ID_CS_BLOB, csblob, csb_validation_category, &category);
+		} else {
+			csblob->csb_validation_category = category;
+		}
+		return 0;
+	}
+
+	/* Always allow when setting to none */
+	if (category == CS_VALIDATION_CATEGORY_NONE) {
+		if (ro_blob == true) {
+			zalloc_ro_update_field(ZONE_ID_CS_BLOB, csblob, csb_validation_category, &category);
+		} else {
+			csblob->csb_validation_category = category;
+		}
+		return 0;
+	}
+
+	/* Allow setting to the same category */
+	if (category == csblob->csb_validation_category) {
+		return 0;
+	}
+
+	return -1;
+}
+
+/*
+ * Function: csblob_get_validation_category
+ *
+ * Description: This function is used to get the validation
+ *              category on a cs_blob.
+ */
+unsigned int
+csblob_get_validation_category(struct cs_blob *csblob)
+{
+	return csblob->csb_validation_category;
+}
+
+/*
+ * Function: csblob_get_code_directory
+ *
+ * Description: This function returns the best code directory
+ *              as chosen by the system
+ */
+const CS_CodeDirectory*
+csblob_get_code_directory(struct cs_blob *csblob)
+{
+	return csblob->csb_cd;
 }
 
 void *
@@ -799,7 +915,7 @@ csproc_disable_enforcement(struct proc* __unused p)
 	if (p != NULL) {
 		proc_lock(p);
 		proc_csflags_clear(p, CS_ENFORCEMENT);
-		vm_map_cs_enforcement_set(get_task_map(p->task), FALSE);
+		vm_map_cs_enforcement_set(get_task_map(proc_task(p)), FALSE);
 		proc_unlock(p);
 	}
 #endif
@@ -855,6 +971,36 @@ int
 csproc_get_prod_signed(struct proc *p)
 {
 	return (proc_getcsflags(p) & CS_DEV_CODE) == 0;
+}
+
+int
+csproc_get_validation_category(struct proc *pt, unsigned int *out_validation_category)
+{
+	struct cs_blob* blob = NULL;
+	unsigned int validation_category = CS_VALIDATION_CATEGORY_INVALID;
+	int error;
+
+	proc_lock(pt);
+	if ((proc_getcsflags(pt) & (CS_VALID | CS_DEBUGGED)) == 0) {
+		proc_unlock(pt);
+		error = EINVAL;
+		goto out;
+	}
+	blob = csproc_get_blob(pt);
+	proc_unlock(pt);
+
+	if (!blob) {
+		error = EBADEXEC;
+		goto out;
+	}
+
+	validation_category = csblob_get_validation_category(blob);
+	if (out_validation_category) {
+		*out_validation_category = validation_category;
+	}
+	error = KERN_SUCCESS;
+out:
+	return error;
 }
 
 
@@ -1207,6 +1353,62 @@ out:
 #else
 	// Supplemental Signatures are only available in CONFIG_SUPPLEMENTAL_SIGNATURES
 	// Return NULL if anyone asks
+	return NULL;
+#endif
+}
+
+/*
+ * Function: csfg_get_csblob
+ *
+ * Description: This returns a pointer to
+ *              the csblob for the fileglob fg
+ */
+struct cs_blob*
+csfg_get_csblob(struct fileglob *fg, uint64_t offset)
+{
+	vnode_t vp;
+
+	if (FILEGLOB_DTYPE(fg) != DTYPE_VNODE) {
+		return NULL;
+	}
+
+	vp = (struct vnode *)fg_get_data(fg);
+	if (vp == NULL) {
+		return NULL;
+	}
+
+	struct cs_blob *csblob = NULL;
+	if ((csblob = ubc_cs_blob_get(vp, -1, -1, offset)) == NULL) {
+		return NULL;
+	}
+
+	return csblob;
+}
+
+struct cs_blob*
+csfg_get_supplement_csblob(__unused struct fileglob *fg, __unused uint64_t offset)
+{
+#if CONFIG_SUPPLEMENTAL_SIGNATURES
+	vnode_t vp;
+
+	if (FILEGLOB_DTYPE(fg) != DTYPE_VNODE) {
+		return NULL;
+	}
+
+	vp = (struct vnode *)fg_get_data(fg);
+	if (vp == NULL) {
+		return NULL;
+	}
+
+	struct cs_blob *csblob = NULL;
+	if ((csblob = ubc_cs_blob_get_supplement(vp, offset)) == NULL) {
+		return NULL;
+	}
+
+	return csblob;
+#else
+	// Supplemental signatures are only available in CONFIG_SUPPLEMENTAL_SIGNATURES
+	// return NULL if anyone asks about them
 	return NULL;
 #endif
 }
@@ -1633,4 +1835,13 @@ cs_get_cdhash(struct proc *p)
 	}
 
 	return csblob->csb_cdhash;
+}
+
+/*
+ * return launch type of a process being created.
+ */
+cs_launch_type_t
+launch_constraint_data_get_launch_type(launch_constraint_data_t lcd)
+{
+	return lcd->launch_type;
 }

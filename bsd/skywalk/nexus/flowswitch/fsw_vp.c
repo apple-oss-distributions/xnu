@@ -54,15 +54,20 @@
 #include <skywalk/os_skywalk_private.h>
 #include <skywalk/nexus/flowswitch/nx_flowswitch.h>
 #include <skywalk/nexus/flowswitch/fsw_var.h>
+#include <sys/sdt.h>
 
 static void fsw_vp_na_dtor(struct nexus_adapter *);
 static int fsw_vp_na_special(struct nexus_adapter *,
     struct kern_channel *, struct chreq *, nxspec_cmd_t);
 static struct nexus_vp_adapter *fsw_vp_na_alloc(zalloc_flags_t);
 static void fsw_vp_na_free(struct nexus_adapter *);
+static int fsw_vp_na_channel_event_notify(struct nexus_adapter *vpna,
+    struct __kern_channel_event *ev, uint16_t ev_len);
 
 static ZONE_DEFINE(na_vp_zone, SKMEM_ZONE_PREFIX ".na.fsw.vp",
     sizeof(struct nexus_vp_adapter), ZC_ZFREE_CLEARMEM);
+
+static uint16_t fsw_vpna_gencnt = 0;
 
 /* na_activate() callback for flow switch ports */
 int
@@ -82,6 +87,10 @@ fsw_vp_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 	 * before being attached to a FlowSwitch.
 	 */
 	FSW_WLOCK(fsw);
+
+	atomic_add_16(&fsw_vpna_gencnt, 1);
+	vpna->vpna_gencnt = fsw_vpna_gencnt;
+
 	if (mode == NA_ACTIVATE_MODE_ON) {
 		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
 	}
@@ -399,6 +408,13 @@ fsw_vp_na_create(struct kern_nexus *nx, struct chreq *chr,
 		atomic_bitset_32(&na->na_flags, NAF_LOW_LATENCY);
 	}
 
+	if (chr->cr_mode & CHMODE_EVENT_RING) {
+		na_set_nrings(na, NR_EV, NX_FSW_EVENT_RING_NUM);
+		na_set_nslots(na, NR_EV, NX_FSW_EVENT_RING_SIZE);
+		atomic_bitset_32(&na->na_flags, NAF_EVENT_RING);
+		na->na_channel_event_notify = fsw_vp_na_channel_event_notify;
+	}
+
 	vpna->vpna_nx_port = chr->cr_port;
 	na->na_dtor = fsw_vp_na_dtor;
 	na->na_activate = fsw_vp_na_activate;
@@ -495,4 +511,169 @@ fsw_vp_channel_error_stats_fold(struct fsw_stats *fs,
 {
 	STATS_ADD(fs, FSW_STATS_CHAN_ERR_UPP_ALLOC,
 	    es->nxs_cres->cres_pkt_alloc_failures);
+}
+
+SK_NO_INLINE_ATTRIBUTE
+static struct __kern_packet *
+nx_fsw_alloc_packet(struct kern_pbufpool *pp, uint32_t sz, kern_packet_t *php)
+{
+	kern_packet_t ph;
+	ph = pp_alloc_packet_by_size(pp, sz, SKMEM_NOSLEEP);
+	if (__improbable(ph == 0)) {
+		DTRACE_SKYWALK2(alloc__fail, struct kern_pbufpool *,
+		    pp, size_t, sz);
+		return NULL;
+	}
+	if (php != NULL) {
+		*php = ph;
+	}
+	return SK_PTR_ADDR_KPKT(ph);
+}
+
+SK_NO_INLINE_ATTRIBUTE
+static void
+nx_fsw_free_packet(struct __kern_packet *pkt)
+{
+	pp_free_packet_single(pkt);
+}
+
+static int
+fsw_vp_na_channel_event_notify(struct nexus_adapter *vpna,
+    struct __kern_channel_event *ev, uint16_t ev_len)
+{
+	int err;
+	char *baddr;
+	kern_packet_t ph;
+	kern_buflet_t buf;
+	sk_protect_t protect;
+	kern_channel_slot_t slot;
+	struct __kern_packet *vpna_pkt = NULL;
+	struct __kern_channel_event_metadata *emd;
+	struct __kern_channel_ring *ring = &vpna->na_event_rings[0];
+	struct fsw_stats *fs = &((struct nexus_vp_adapter *)(vpna))->vpna_fsw->fsw_stats;
+
+	if (__improbable(!NA_IS_ACTIVE(vpna))) {
+		STATS_INC(fs, FSW_STATS_EV_DROP_NA_INACTIVE);
+		err = ENXIO;
+		goto error;
+	}
+	if (__improbable(NA_IS_DEFUNCT(vpna))) {
+		STATS_INC(fs, FSW_STATS_EV_DROP_NA_DEFUNCT);
+		err = ENXIO;
+		goto error;
+	}
+	if (!NA_CHANNEL_EVENT_ATTACHED(vpna)) {
+		STATS_INC(fs, FSW_STATS_EV_DROP_KEVENT_INACTIVE);
+		err = ENXIO;
+		goto error;
+	}
+	if (__improbable(KR_DROP(ring))) {
+		STATS_INC(fs, FSW_STATS_EV_DROP_KRDROP_MODE);
+		err = ENXIO;
+		goto error;
+	}
+
+	vpna_pkt = nx_fsw_alloc_packet(ring->ckr_pp, ev_len, &ph);
+	if (__improbable(vpna_pkt == NULL)) {
+		STATS_INC(fs, FSW_STATS_EV_DROP_NOMEM_PKT);
+		err = ENOMEM;
+		goto error;
+	}
+	buf = __packet_get_next_buflet(ph, NULL);
+	baddr = __buflet_get_data_address(buf);
+	emd = (struct __kern_channel_event_metadata *)(void *)baddr;
+	emd->emd_etype = CHANNEL_EVENT_PACKET_TRANSMIT_STATUS;
+	emd->emd_nevents = 1;
+	bcopy(ev, (baddr + __KERN_CHANNEL_EVENT_OFFSET), ev_len);
+	err = __buflet_set_data_length(buf,
+	    (ev_len + __KERN_CHANNEL_EVENT_OFFSET));
+	VERIFY(err == 0);
+	err = __packet_finalize(ph);
+	VERIFY(err == 0);
+	kr_enter(ring, TRUE);
+	protect = sk_sync_protect();
+	slot = kern_channel_get_next_slot(ring, NULL, NULL);
+	if (slot == NULL) {
+		sk_sync_unprotect(protect);
+		kr_exit(ring);
+		STATS_INC(fs, FSW_STATS_EV_DROP_KRSPACE);
+		err = ENOSPC;
+		goto error;
+	}
+	err = kern_channel_slot_attach_packet(ring, slot, ph);
+	VERIFY(err == 0);
+	vpna_pkt = NULL;
+	kern_channel_advance_slot(ring, slot);
+	sk_sync_unprotect(protect);
+	kr_exit(ring);
+	kern_channel_event_notify(&vpna->na_tx_rings[0]);
+	STATS_INC(fs, NETIF_STATS_EV_SENT);
+	return 0;
+
+error:
+	ASSERT(err != 0);
+	if (vpna_pkt != NULL) {
+		nx_fsw_free_packet(vpna_pkt);
+	}
+	STATS_INC(fs, FSW_STATS_EV_DROP);
+	return err;
+}
+
+static inline struct nexus_adapter *
+fsw_find_port_vpna(struct nx_flowswitch *fsw, uint32_t nx_port_id)
+{
+	struct kern_nexus *nx = fsw->fsw_nx;
+	struct nexus_adapter *na = NULL;
+	nexus_port_t port;
+	uint16_t gencnt;
+
+	PKT_DECOMPOSE_NX_PORT_ID(nx_port_id, port, gencnt);
+
+	if (port < FSW_VP_USER_MIN) {
+		SK_ERR("non VPNA port");
+		return NULL;
+	}
+
+	if (__improbable(!nx_port_is_valid(nx, port))) {
+		SK_ERR("%s[%d] port no longer valid",
+		    if_name(fsw->fsw_ifp), port);
+		return NULL;
+	}
+
+	na = nx_port_get_na(nx, port);
+	if (na != NULL && VPNA(na)->vpna_gencnt != gencnt) {
+		return NULL;
+	}
+	return na;
+}
+
+errno_t
+fsw_vp_na_channel_event(struct nx_flowswitch *fsw, uint32_t nx_port_id,
+    struct __kern_channel_event *event, uint16_t event_len)
+{
+	int err = 0;
+	struct nexus_adapter *fsw_vpna;
+
+	FSW_RLOCK(fsw);
+	struct fsw_stats *fs = &fsw->fsw_stats;
+
+	fsw_vpna = fsw_find_port_vpna(fsw, nx_port_id);
+	if (__improbable(fsw_vpna == NULL)) {
+		err = ENXIO;
+		STATS_INC(fs, FSW_STATS_EV_DROP_DEMUX_ERR);
+		goto error;
+	}
+	if (__improbable(fsw_vpna->na_channel_event_notify == NULL)) {
+		err = ENOTSUP;
+		STATS_INC(fs, FSW_STATS_EV_DROP_EV_VPNA_NOTSUP);
+		goto error;
+	}
+	err = fsw_vpna->na_channel_event_notify(fsw_vpna, event, event_len);
+	FSW_RUNLOCK(fsw);
+	return err;
+
+error:
+	STATS_INC(fs, FSW_STATS_EV_DROP);
+	FSW_RUNLOCK(fsw);
+	return err;
 }

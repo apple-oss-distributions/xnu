@@ -54,7 +54,6 @@
  * the rights to redistribute these changes.
  */
 
-#include <mach_debug.h>
 #include <mach_ldebug.h>
 
 #include <sys/kdebug.h>
@@ -865,6 +864,23 @@ machine_thread_destroy(
 	}
 	pcb->insn_state_copyin_failure_errorcode = 0;
 	pcb->insn_copy_optout = false;
+}
+
+/*
+ * machine_thread_process_signature
+ *
+ * Called to allow code signature dependent adjustments to the thread
+ * state. Note that this is usually called twice for the main thread:
+ * Once at thread creation by thread_create, when the signature is
+ * potentially not attached yet (which is usually the case for the
+ * first/main thread of a task), and once after the task's signature
+ * has actually been attached.
+ *
+ */
+kern_return_t
+machine_thread_process_signature(thread_t __unused thread, task_t __unused task)
+{
+	return KERN_SUCCESS;
 }
 
 kern_return_t

@@ -101,6 +101,14 @@
 
 #include <mach/vm_param.h>
 
+#ifndef ROUNDUP64
+#define ROUNDUP64(x) P2ROUNDUP((x), sizeof (u_int64_t))
+#endif
+
+#ifndef ADVANCE64
+#define ADVANCE64(p, n) (void*)((char *)(p) + ROUNDUP64(n))
+#endif
+
 /*
  * Maximum number of FDs that can be passed in an mbuf
  */
@@ -124,6 +132,19 @@ static struct unp_head unp_shead, unp_dhead;
 static int      unp_defer;
 static thread_call_t unp_gc_tcall;
 static LIST_HEAD(, fileglob) unp_msghead = LIST_HEAD_INITIALIZER(unp_msghead);
+
+SYSCTL_DECL(_net_local);
+
+static int      unp_rights;                     /* file descriptors in flight */
+static int      unp_disposed;                   /* discarded file descriptors */
+
+SYSCTL_INT(_net_local, OID_AUTO, inflight, CTLFLAG_RD | CTLFLAG_LOCKED, &unp_rights, 0, "");
+
+#define ULEF_CONNECTION 0x01
+uint32_t unp_log_enable_flags = 0;
+
+SYSCTL_UINT(_net_local, OID_AUTO, log, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &unp_log_enable_flags, 0, "");
 
 
 /*
@@ -244,8 +265,10 @@ uipc_accept(struct socket *so, struct sockaddr **nam)
 		*nam = dup_sockaddr((struct sockaddr *)
 		    unp->unp_conn->unp_addr, 1);
 	} else {
-		os_log(OS_LOG_DEFAULT, "%s: peer disconnected unp_gencnt %llu",
-		    __func__, unp->unp_gencnt);
+		if (unp_log_enable_flags & ULEF_CONNECTION) {
+			os_log(OS_LOG_DEFAULT, "%s: peer disconnected unp_gencnt %llu",
+			    __func__, unp->unp_gencnt);
+		}
 		*nam = dup_sockaddr((struct sockaddr *)&sun_noname, 1);
 	}
 	return 0;
@@ -457,6 +480,7 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 	int error = 0;
 	struct unpcb *unp = sotounpcb(so);
 	struct socket *so2;
+	int32_t len = m_pktlen(m);
 
 	if (unp == 0) {
 		error = EINVAL;
@@ -522,6 +546,8 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 			if (sb_notify(&so2->so_rcv)) {
 				sowakeup(so2, &so2->so_rcv, so);
 			}
+			so2->so_tc_stats[0].rxpackets += 1;
+			so2->so_tc_stats[0].rxbytes += len;
 		} else if (control != NULL && error == 0) {
 			/* A socket filter took control; don't touch it */
 			control = NULL;
@@ -620,6 +646,8 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 			if (sb_notify(&so2->so_rcv)) {
 				sowakeup(so2, &so2->so_rcv, so);
 			}
+			so2->so_tc_stats[0].rxpackets += 1;
+			so2->so_tc_stats[0].rxbytes += len;
 		} else if (control != NULL && error == 0) {
 			/* A socket filter took control; don't touch it */
 			control = NULL;
@@ -635,6 +663,9 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 	default:
 		panic("uipc_send unknown socktype");
 	}
+
+	so->so_tc_stats[0].txpackets += 1;
+	so->so_tc_stats[0].txbytes += len;
 
 	/*
 	 * SEND_EOF is equivalent to a SEND followed by
@@ -889,9 +920,6 @@ static u_int32_t        unpst_recvspace = PIPSIZ;
 static u_int32_t        unpdg_sendspace = 2 * 1024;       /* really max datagram size */
 static u_int32_t        unpdg_recvspace = 4 * 1024;
 
-static int      unp_rights;                     /* file descriptors in flight */
-static int      unp_disposed;                   /* discarded file descriptors */
-
 SYSCTL_DECL(_net_local_stream);
 SYSCTL_INT(_net_local_stream, OID_AUTO, sendspace, CTLFLAG_RW | CTLFLAG_LOCKED,
     &unpst_sendspace, 0, "");
@@ -904,8 +932,6 @@ SYSCTL_INT(_net_local_dgram, OID_AUTO, maxdgram, CTLFLAG_RW | CTLFLAG_LOCKED,
     &unpdg_sendspace, 0, "");
 SYSCTL_INT(_net_local_dgram, OID_AUTO, recvspace, CTLFLAG_RW | CTLFLAG_LOCKED,
     &unpdg_recvspace, 0, "");
-SYSCTL_DECL(_net_local);
-SYSCTL_INT(_net_local, OID_AUTO, inflight, CTLFLAG_RD | CTLFLAG_LOCKED, &unp_rights, 0, "");
 
 /*
  * Returns:	0			Success
@@ -925,6 +951,13 @@ unp_attach(struct socket *so)
 			break;
 
 		case SOCK_DGRAM:
+			/*
+			 * By default soreserve() will set the low water
+			 * mark to MCLBYTES which is too high given our
+			 * default sendspace.  Override it here to something
+			 * sensible.
+			 */
+			so->so_snd.sb_lowat = 1;
 			error = soreserve(so, unpdg_sendspace, unpdg_recvspace);
 			break;
 
@@ -1989,6 +2022,149 @@ SYSCTL_PROC(_net_local_stream, OID_AUTO, pcblist64,
     "List of active local stream sockets 64 bit");
 
 #endif /* XNU_TARGET_OS_OSX */
+
+static int
+unp_pcblist_n SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp,arg2)
+	int error = 0;
+	int i, n;
+	struct unpcb *unp;
+	unp_gen_t gencnt;
+	struct xunpgen xug;
+	struct unp_head *head;
+	void *buf = NULL;
+	size_t item_size = ROUNDUP64(sizeof(struct xunpcb_n)) +
+	    ROUNDUP64(sizeof(struct xsocket_n)) +
+	    2 * ROUNDUP64(sizeof(struct xsockbuf_n)) +
+	    ROUNDUP64(sizeof(struct xsockstat_n));
+
+	buf = kalloc_data(item_size, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+
+	lck_rw_lock_shared(&unp_list_mtx);
+
+	head = ((intptr_t)arg1 == SOCK_DGRAM ? &unp_dhead : &unp_shead);
+
+	/*
+	 * The process of preparing the PCB list is too time-consuming and
+	 * resource-intensive to repeat twice on every request.
+	 */
+	if (req->oldptr == USER_ADDR_NULL) {
+		n = unp_count;
+		req->oldidx = 2 * sizeof(xug) + (n + n / 8) * item_size;
+		goto done;
+	}
+
+	if (req->newptr != USER_ADDR_NULL) {
+		error = EPERM;
+		goto done;
+	}
+
+	/*
+	 * OK, now we're committed to doing something.
+	 */
+	gencnt = unp_gencnt;
+	n = unp_count;
+
+	bzero(&xug, sizeof(xug));
+	xug.xug_len = sizeof(xug);
+	xug.xug_count = n;
+	xug.xug_gen = gencnt;
+	xug.xug_sogen = so_gencnt;
+	error = SYSCTL_OUT(req, &xug, sizeof(xug));
+	if (error != 0) {
+		goto done;
+	}
+
+	/*
+	 * We are done if there is no pcb
+	 */
+	if (n == 0) {
+		goto done;
+	}
+
+	for (i = 0, unp = head->lh_first;
+	    i < n && unp != NULL;
+	    i++, unp = unp->unp_link.le_next) {
+		struct xunpcb_n *xu = (struct xunpcb_n *)buf;
+		struct xsocket_n *xso = (struct xsocket_n *)
+		    ADVANCE64(xu, sizeof(*xu));
+		struct xsockbuf_n *xsbrcv = (struct xsockbuf_n *)
+		    ADVANCE64(xso, sizeof(*xso));
+		struct xsockbuf_n *xsbsnd = (struct xsockbuf_n *)
+		    ADVANCE64(xsbrcv, sizeof(*xsbrcv));
+		struct xsockstat_n *xsostats = (struct xsockstat_n *)
+		    ADVANCE64(xsbsnd, sizeof(*xsbsnd));
+
+		if (unp->unp_gencnt > gencnt) {
+			continue;
+		}
+
+		bzero(buf, item_size);
+
+		xu->xunp_len = sizeof(struct xunpcb_n);
+		xu->xunp_kind = XSO_UNPCB;
+		xu->xunp_unpp = (uint64_t)VM_KERNEL_ADDRPERM(unp);
+		xu->xunp_vnode = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_vnode);
+		xu->xunp_ino = unp->unp_ino;
+		xu->xunp_conn = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_conn);
+		xu->xunp_refs = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_refs.lh_first);
+		xu->xunp_reflink = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_reflink.le_next);
+		xu->xunp_cc = unp->unp_cc;
+		xu->xunp_mbcnt = unp->unp_mbcnt;
+		xu->xunp_flags = unp->unp_flags;
+		xu->xunp_gencnt = unp->unp_gencnt;
+
+		if (unp->unp_addr) {
+			bcopy(unp->unp_addr, &xu->xu_au,
+			    unp->unp_addr->sun_len);
+		}
+		if (unp->unp_conn && unp->unp_conn->unp_addr) {
+			bcopy(unp->unp_conn->unp_addr,
+			    &xu->xu_cau,
+			    unp->unp_conn->unp_addr->sun_len);
+		}
+		sotoxsocket_n(unp->unp_socket, xso);
+		sbtoxsockbuf_n(unp->unp_socket ?
+		    &unp->unp_socket->so_rcv : NULL, xsbrcv);
+		sbtoxsockbuf_n(unp->unp_socket ?
+		    &unp->unp_socket->so_snd : NULL, xsbsnd);
+		sbtoxsockstat_n(unp->unp_socket, xsostats);
+
+		error = SYSCTL_OUT(req, buf, item_size);
+		if (error != 0) {
+			break;
+		}
+	}
+	if (error == 0) {
+		/*
+		 * Give the user an updated idea of our state.
+		 * If the generation differs from what we told
+		 * her before, she knows that something happened
+		 * while we were processing this request, and it
+		 * might be necessary to retry.
+		 */
+		bzero(&xug, sizeof(xug));
+		xug.xug_len = sizeof(xug);
+		xug.xug_gen = unp_gencnt;
+		xug.xug_sogen = so_gencnt;
+		xug.xug_count = unp_count;
+		error = SYSCTL_OUT(req, &xug, sizeof(xug));
+	}
+done:
+	lck_rw_done(&unp_list_mtx);
+	kfree_data(buf, item_size);
+	return error;
+}
+
+SYSCTL_PROC(_net_local_dgram, OID_AUTO, pcblist_n,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    (caddr_t)(long)SOCK_DGRAM, 0, unp_pcblist_n, "S,xunpcb_n",
+    "List of active local datagram sockets");
+SYSCTL_PROC(_net_local_stream, OID_AUTO, pcblist_n,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    (caddr_t)(long)SOCK_STREAM, 0, unp_pcblist_n, "S,xunpcb_n",
+    "List of active local stream sockets");
 
 static void
 unp_shutdown(struct unpcb *unp)

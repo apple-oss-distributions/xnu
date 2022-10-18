@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -31,6 +31,8 @@
 #include <sys/systm.h>
 #include <sys/sysctl.h>
 
+#include <kern/bits.h>
+
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 
@@ -44,23 +46,11 @@
 SYSCTL_NODE(_net_inet_tcp, OID_AUTO, log, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
     "TCP logs");
 
-static int tcp_log_level_info = 0;
-SYSCTL_INT(_net_inet_tcp_log, OID_AUTO, level_info,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_log_level_info, 0, "");
-
 #if (DEVELOPMENT || DEBUG)
-#if defined(XNU_TARGET_OS_OSX)
-/*
- * Log less on macOS as sockets are more prevalent than channels
- */
 #define TCP_LOG_ENABLE_DEFAULT \
     (TLEF_CONNECTION | TLEF_DST_LOCAL | TLEF_DST_GW | \
-    TLEF_DROP_NECP | TLEF_DROP_PCB)
-#else /* XNU_TARGET_OS_OSX */
-#define TCP_LOG_ENABLE_DEFAULT \
-    (TLEF_CONNECTION | TLEF_DST_LOCAL | TLEF_DST_GW | \
-    TLEF_DROP_NECP | TLEF_DROP_PCB | TLEF_DROP_PKT | TLEF_THF_SYN)
-#endif /* XNU_TARGET_OS_OSX */
+    TLEF_DROP_NECP | TLEF_DROP_PCB | TLEF_DROP_PKT | \
+    TLEF_SYN_RXMT)
 #else /* (DEVELOPMENT || DEBUG) */
 #define TCP_LOG_ENABLE_DEFAULT 0
 #endif /* (DEVELOPMENT || DEBUG) */
@@ -88,19 +78,19 @@ SYSCTL_UINT(_net_inet_tcp_log, OID_AUTO, rtt_port, CTLFLAG_RW | CTLFLAG_LOCKED,
     &tcp_log_port, 0, "");
 
 /*
- * Values for tcp_log_thflags_if_family when TLEF_THF_XXX is enabled:
- *  0: all interfaces
- *  other: only for interfaces with the corresponding interface functional type
+ * Bitmap for tcp_log_thflags_if_family when TLEF_THF_XXX is enabled:
+ *  0: off
+ *  other: only for interfaces with the corresponding interface family in the bitmap
  */
 #if (DEVELOPMENT || DEBUG)
-#define TCP_LOG_THFLAGS_IF_FAMILY_DEFAULT IFNET_FAMILY_IPSEC
+#define TCP_LOG_THFLAGS_IF_FAMILY_DEFAULT (0xfffffffe & ~BIT(IFNET_FAMILY_LOOPBACK))
 #else /* (DEVELOPMENT || DEBUG) */
 #define TCP_LOG_THFLAGS_IF_FAMILY_DEFAULT 0
 #endif /* (DEVELOPMENT || DEBUG) */
 
-static uint32_t tcp_log_thflags_if_family = TCP_LOG_THFLAGS_IF_FAMILY_DEFAULT;
-SYSCTL_UINT(_net_inet_tcp_log, OID_AUTO, thflags_if_family,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_log_thflags_if_family, 0, "");
+static uint64_t tcp_log_thflags_if_family = TCP_LOG_THFLAGS_IF_FAMILY_DEFAULT;
+SYSCTL_QUAD(_net_inet_tcp_log, OID_AUTO, thflags_if_family,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_log_thflags_if_family, "");
 
 #if (DEVELOPMENT || DEBUG)
 #define TCP_LOG_PRIVACY_DEFAULT 0
@@ -112,7 +102,7 @@ int tcp_log_privacy = TCP_LOG_PRIVACY_DEFAULT;
 SYSCTL_INT(_net_inet_tcp_log, OID_AUTO, privacy,
     CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_log_privacy, 0, "");
 
-#define TCP_LOG_RATE_LIMIT 600
+#define TCP_LOG_RATE_LIMIT 1000
 static unsigned int tcp_log_rate_limit = TCP_LOG_RATE_LIMIT;
 SYSCTL_UINT(_net_inet_tcp_log, OID_AUTO, rate_limit,
     CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_log_rate_limit, 0, "");
@@ -153,11 +143,13 @@ static uint64_t tcp_log_current_period = 0;
 
 #define TCP_LOG_COMMON_PCB_FMT \
 	TCP_LOG_COMMON_FMT \
+	"so_gencnt: %llu " \
 	"t_state: %s " \
 	"process: %s:%u "
 
 #define TCP_LOG_COMMON_PCB_ARGS \
 	TCP_LOG_COMMON_ARGS, \
+	so != NULL ? so->so_gencnt : 0, \
 	tcpstates[tp->t_state], \
 	inp->inp_last_proc_name, so->last_pid
 
@@ -211,8 +203,23 @@ tcp_log_inp_addresses(struct inpcb *inp, char *lbuf, socklen_t lbuflen, char *fb
 			strlcpy(fbuf, "<IPv4-redacted>", fbuflen);
 		}
 	} else if (inp->inp_vflag & INP_IPV6) {
-		inet_ntop(AF_INET6, (void *)&inp->in6p_laddr, lbuf, lbuflen);
-		inet_ntop(AF_INET6, (void *)&inp->in6p_faddr, fbuf, fbuflen);
+		struct in6_addr addr6;
+
+		if (IN6_IS_ADDR_LINKLOCAL(&inp->in6p_laddr)) {
+			addr6 = inp->in6p_laddr;
+			addr6.s6_addr16[1] = 0;
+			inet_ntop(AF_INET6, (void *)&addr6, lbuf, lbuflen);
+		} else {
+			inet_ntop(AF_INET6, (void *)&inp->in6p_laddr, lbuf, lbuflen);
+		}
+
+		if (IN6_IS_ADDR_LINKLOCAL(&inp->in6p_faddr)) {
+			addr6 = inp->in6p_faddr;
+			addr6.s6_addr16[1] = 0;
+			inet_ntop(AF_INET6, (void *)&addr6, fbuf, fbuflen);
+		} else {
+			inet_ntop(AF_INET6, (void *)&inp->in6p_faddr, fbuf, fbuflen);
+		}
 	} else {
 		inet_ntop(AF_INET, (void *)&inp->inp_laddr.s_addr, lbuf, lbuflen);
 		inet_ntop(AF_INET, (void *)&inp->inp_faddr.s_addr, fbuf, fbuflen);
@@ -409,6 +416,9 @@ tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 #define TCP_LOG_CONNECT_FMT \
 	    "tcp %s: " \
 	    TCP_LOG_COMMON_PCB_FMT \
+	    "SYN in/out: %u/%u " \
+	    "bytes in/out: %llu/%llu " \
+	    "pkts in/out: %llu/%llu " \
 	    "rtt: %u.%u ms " \
 	    "rttvar: %u.%u ms " \
 	    "base_rtt: %u ms " \
@@ -419,6 +429,9 @@ tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 #define TCP_LOG_CONNECT_ARGS \
 	    event, \
 	    TCP_LOG_COMMON_PCB_ARGS, \
+	    tp->t_syn_rcvd, tp->t_syn_sent, \
+	    inp->inp_stat->rxbytes, inp->inp_stat->txbytes, \
+	    inp->inp_stat->rxpackets, inp->inp_stat->txpackets, \
 	    P_MS(tp->t_srtt, TCP_RTT_SHIFT), \
 	    P_MS(tp->t_rttvar, TCP_RTTVAR_SHIFT), \
 	    get_base_rtt(tp), \
@@ -427,13 +440,8 @@ tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class
 
 	if (so->so_head == NULL) {
-		if (tcp_log_level_info == 0) {
-			os_log(OS_LOG_DEFAULT, TCP_LOG_CONNECT_FMT,
-			    TCP_LOG_CONNECT_ARGS);
-		} else {
-			os_log_info(OS_LOG_DEFAULT, TCP_LOG_CONNECT_FMT,
-			    TCP_LOG_CONNECT_ARGS);
-		}
+		os_log(OS_LOG_DEFAULT, TCP_LOG_CONNECT_FMT,
+		    TCP_LOG_CONNECT_ARGS);
 	} else {
 #define TCP_LOG_CONN_Q_FMT \
 	"so_qlimit: %d "\
@@ -445,13 +453,8 @@ tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 	so->so_head->so_qlen, \
 	so->so_head->so_incqlen
 
-		if (tcp_log_level_info == 0) {
-			os_log(OS_LOG_DEFAULT, TCP_LOG_CONNECT_FMT "\n" TCP_LOG_CONN_Q_FMT,
-			    TCP_LOG_CONNECT_ARGS, TCP_LOG_CONN_Q_ARGS);
-		} else {
-			os_log_info(OS_LOG_DEFAULT, TCP_LOG_CONNECT_FMT "\n" TCP_LOG_CONN_Q_FMT,
-			    TCP_LOG_CONNECT_ARGS, TCP_LOG_CONN_Q_ARGS);
-		}
+		os_log(OS_LOG_DEFAULT, TCP_LOG_CONNECT_FMT "\n" TCP_LOG_CONN_Q_FMT,
+		    TCP_LOG_CONNECT_ARGS, TCP_LOG_CONN_Q_ARGS);
 #undef TCP_LOG_CONN_Q_FMT
 #undef TCP_LOG_CONN_Q_ARGS
 	}
@@ -505,13 +508,8 @@ tcp_log_listen(struct tcpcb *tp, int error)
 	    so->so_error, \
 	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class
 
-	if (tcp_log_level_info == 0) {
-		os_log(OS_LOG_DEFAULT, TCP_LOG_LISTEN_FMT,
-		    TCP_LOG_LISTEN_ARGS);
-	} else {
-		os_log_info(OS_LOG_DEFAULT, TCP_LOG_LISTEN_FMT,
-		    TCP_LOG_LISTEN_ARGS);
-	}
+	os_log(OS_LOG_DEFAULT, TCP_LOG_LISTEN_FMT,
+	    TCP_LOG_LISTEN_ARGS);
 #undef TCP_LOG_LISTEN_FMT
 #undef TCP_LOG_LISTEN_ARGS
 }
@@ -569,19 +567,22 @@ tcp_log_connection_summary(struct tcpcb *tp)
 
 	tcp_log_inp_addresses(inp, laddr_buf, sizeof(laddr_buf), faddr_buf, sizeof(faddr_buf));
 
+	/*
+	 * Need to use 2 log messages because the size of the summary
+	 */
+
 #define TCP_LOG_CONNECTION_SUMMARY_FMT \
 	    "tcp_connection_summary " \
 	    TCP_LOG_COMMON_PCB_FMT \
 	    "Duration: %u.%u sec " \
 	    "Conn_Time: %u.%u sec " \
-	    "syn rxmit: %u\n" \
 	    "bytes in/out: %llu/%llu " \
 	    "pkts in/out: %llu/%llu " \
+	    "pkt rxmit: %u " \
+	    "ooo pkts: %u dup bytes in: %u ACKs delayed: %u delayed ACKs sent: %u\n" \
 	    "rtt: %u.%03u ms "  \
 	    "rttvar: %u.%03u ms " \
 	    "base rtt: %u ms " \
-	    "pkt rxmit: %u " \
-	    "ooo pkts: %u dup bytes in: %u ACKs delayed: %u delayed ACKs sent: %u " \
 	    "so_error: %d " \
 	    "svc/tc: %u"
 
@@ -589,24 +590,38 @@ tcp_log_connection_summary(struct tcpcb *tp)
 	    TCP_LOG_COMMON_PCB_ARGS, \
 	    duration / TCP_RETRANSHZ, duration % TCP_RETRANSHZ, \
 	    conntime / TCP_RETRANSHZ, conntime % TCP_RETRANSHZ,  \
-	    tp->t_stat.synrxtshift, \
 	    inp->inp_stat->rxbytes, inp->inp_stat->txbytes, \
 	    inp->inp_stat->rxpackets, inp->inp_stat->txpackets, \
+	    tp->t_stat.rxmitpkts, \
+	    tp->t_rcvoopack, tp->t_stat.rxduplicatebytes, tp->t_stat.acks_delayed, tp->t_stat.delayed_acks_sent, \
 	    P_MS(tp->t_srtt, TCP_RTT_SHIFT), \
 	    P_MS(tp->t_rttvar, TCP_RTTVAR_SHIFT), \
 	    get_base_rtt(tp), \
-	    tp->t_stat.rxmitpkts, \
-	    tp->t_rcvoopack, tp->t_stat.rxduplicatebytes, tp->t_stat.acks_delayed, tp->t_stat.delayed_acks_sent, \
 	    so->so_error, \
 	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class
 
-	if (tcp_log_level_info == 0) {
-		os_log(OS_LOG_DEFAULT, TCP_LOG_CONNECTION_SUMMARY_FMT,
-		    TCP_LOG_CONNECTION_SUMMARY_ARGS);
-	} else {
-		os_log_info(OS_LOG_DEFAULT, TCP_LOG_CONNECTION_SUMMARY_FMT,
-		    TCP_LOG_CONNECTION_SUMMARY_ARGS);
-	}
+	os_log(OS_LOG_DEFAULT, TCP_LOG_CONNECTION_SUMMARY_FMT,
+	    TCP_LOG_CONNECTION_SUMMARY_ARGS);
+#undef TCP_LOG_CONNECTION_SUMMARY_FMT
+#undef TCP_LOG_CONNECTION_SUMMARY_ARGS
+
+#define TCP_LOG_CONNECTION_SUMMARY_FMT \
+	    "tcp_connection_summary " \
+	    TCP_LOG_COMMON_PCB_FMT \
+	    "flowctl: %llu suspnd: %llu " \
+	    "SYN in/out: %u/%u " \
+	    "FIN in/out: %u/%u " \
+	    "RST in/out: %u/%u\n"
+
+#define TCP_LOG_CONNECTION_SUMMARY_ARGS \
+	    TCP_LOG_COMMON_PCB_ARGS, \
+	    inp->inp_fadv_flow_ctrl_cnt, inp->inp_fadv_suspended_cnt, \
+	    tp->t_syn_rcvd, tp->t_syn_sent, \
+	    tp->t_fin_rcvd, tp->t_fin_sent, \
+	    tp->t_rst_rcvd, tp->t_rst_sent
+
+	os_log(OS_LOG_DEFAULT, TCP_LOG_CONNECTION_SUMMARY_FMT,
+	    TCP_LOG_CONNECTION_SUMMARY_ARGS);
 #undef TCP_LOG_CONNECTION_SUMMARY_FMT
 #undef TCP_LOG_CONNECTION_SUMMARY_ARGS
 }
@@ -686,6 +701,12 @@ tcp_log_drop_pcb(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 		return;
 	}
 
+	/* Do not log common drops after the connection termination is logged */
+	if ((tp->t_flagsext & TF_LOGGED_CONN_SUMMARY) && ((so->so_state & SS_NOFDREF) ||
+	    (so->so_flags & SOF_DEFUNCT) || (so->so_state & SS_CANTRCVMORE))) {
+		return;
+	}
+
 	/* Do not log too much */
 	if (tcp_log_is_rate_limited()) {
 		return;
@@ -726,13 +747,8 @@ tcp_log_drop_pcb(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 	    so->so_error, \
 	    reason
 
-	if (tcp_log_level_info == 0) {
-		os_log(OS_LOG_DEFAULT, TCP_LOG_DROP_PCB_FMT,
-		    TCP_LOG_DROP_PCB_ARGS);
-	} else {
-		os_log_info(OS_LOG_DEFAULT, TCP_LOG_DROP_PCB_FMT,
-		    TCP_LOG_DROP_PCB_ARGS);
-	}
+	os_log(OS_LOG_DEFAULT, TCP_LOG_DROP_PCB_FMT,
+	    TCP_LOG_DROP_PCB_ARGS);
 #undef TCP_LOG_DROP_PCB_FMT
 #undef TCP_LOG_DROP_PCB_ARGS
 }
@@ -753,11 +769,45 @@ tcp_log_drop_pcb(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 	thflags & TH_ACK ? "ACK " : "", \
 	TCP_LOG_COMMON_ARGS
 
+static bool
+should_log_th_flags(uint8_t thflags, struct tcpcb *tp, bool outgoing, struct ifnet *ifp)
+{
+	/*
+	 * Check logging is enabled for interface for TCP control packets
+	 *
+	 * Note: the type of tcp_log_thflags_if_family is uint64_t but we
+	 * access its value as bit string so we have to pay extra care to avoid
+	 * out of bound access
+	 */
+	if (ifp != NULL && (ifp->if_family >= (sizeof(tcp_log_thflags_if_family) << 3) ||
+	    !bitstr_test((bitstr_t *)&tcp_log_thflags_if_family, ifp->if_family))) {
+		return false;
+	}
+	/*
+	 * Log when seeing 3 SYN retransmissions of more on a TCP PCB
+	 */
+	if (tp != NULL &&
+	    ((thflags & TH_SYN) && (tcp_log_enable_flags & TLEF_SYN_RXMT) &&
+	    ((outgoing && tp->t_syn_sent > 3) || (!outgoing && tp->t_syn_rcvd > 3)))) {
+		return true;
+	}
+	/*
+	 * Log control packet when enabled
+	 */
+	if ((((thflags & TH_SYN) && (tcp_log_enable_flags & TLEF_THF_SYN)) ||
+	    ((thflags & TH_FIN) && (tcp_log_enable_flags & TLEF_THF_FIN)) ||
+	    ((thflags & TH_RST) && (tcp_log_enable_flags & TLEF_THF_RST)))) {
+		return true;
+	}
+	return false;
+}
+
 __attribute__((noinline))
 void
 tcp_log_th_flags(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, struct ifnet *ifp)
 {
-	struct socket *so = tp->t_inpcb != NULL ? tp->t_inpcb->inp_socket : NULL;
+	struct inpcb *inp = tp->t_inpcb;
+	struct socket *so = inp != NULL ? inp->inp_socket : NULL;
 	char laddr_buf[ADDRESS_STR_LEN];
 	char faddr_buf[ADDRESS_STR_LEN];
 	in_port_t local_port;
@@ -768,6 +818,12 @@ tcp_log_th_flags(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 		return;
 	}
 
+	thflags = th->th_flags;
+
+	if (should_log_th_flags(thflags, tp, outgoing, ifp) == false) {
+		return;
+	}
+
 	if (outgoing) {
 		local_port = th->th_sport;
 		foreign_port = th->th_dport;
@@ -775,18 +831,6 @@ tcp_log_th_flags(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 		local_port = th->th_dport;
 		foreign_port = th->th_sport;
 	}
-	thflags = th->th_flags;
-
-	if ((((thflags & TH_SYN) && (tcp_log_enable_flags & TLEF_THF_SYN)) ||
-	    ((thflags & TH_FIN) && (tcp_log_enable_flags & TLEF_THF_FIN)) ||
-	    ((thflags & TH_RST) && (tcp_log_enable_flags & TLEF_THF_RST))) == false) {
-		return;
-	}
-
-	if (ifp != NULL && tcp_log_thflags_if_family != 0 && ifp->if_family != tcp_log_thflags_if_family) {
-		return;
-	}
-
 	if (!tcp_log_pkt_addresses(hdr, th, outgoing, laddr_buf, sizeof(laddr_buf), faddr_buf, sizeof(faddr_buf))) {
 		return;
 	}
@@ -799,41 +843,31 @@ tcp_log_th_flags(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 	/*
 	 * When no PCB or socket just log the packet
 	 */
-	if (tp == NULL || so == NULL) {
-		if (tcp_log_level_info == 0) {
-			os_log(OS_LOG_DEFAULT, TCP_LOG_TH_FLAGS_COMMON_FMT " no pcb",
-			    TCP_LOG_TH_FLAGS_COMMON_ARGS);
-		} else {
-			os_log_info(OS_LOG_DEFAULT, TCP_LOG_TH_FLAGS_COMMON_FMT,
-			    TCP_LOG_TH_FLAGS_COMMON_ARGS);
-		}
+	if (tp == NULL || so == NULL || inp == NULL) {
+#define TCP_LOG_TH_FLAGS_NO_PCB_FMT \
+	    TCP_LOG_TH_FLAGS_COMMON_FMT \
+	    TCP_LOG_COMMON_FMT
+#define TCP_LOG_TH_FLAGS_NO_PCB_ARGS \
+	    TCP_LOG_TH_FLAGS_COMMON_ARGS, \
+	    TCP_LOG_COMMON_ARGS
+
+		os_log(OS_LOG_DEFAULT, TCP_LOG_TH_FLAGS_NO_PCB_FMT,
+		    TCP_LOG_TH_FLAGS_NO_PCB_ARGS);
+#undef TCP_LOG_TH_FLAGS_NO_PCB_FMT
+#undef TCP_LOG_TH_FLAGS_NO_PCB_ARGS
 	} else {
 #define TCP_LOG_TH_FLAGS_PCB_FMT \
-	        TCP_LOG_TH_FLAGS_COMMON_FMT \
-	        "rtt: %u.%u ms " \
-	        "rttvar: %u.%u ms " \
-	        "syn rxmit: %u " \
-	        "pkt rxmit: %u " \
-	        "so_error: %d " \
-	        "svc/tc: %u "
+	    TCP_LOG_TH_FLAGS_COMMON_FMT \
+	    TCP_LOG_COMMON_PCB_FMT \
+	    "SYN in/out: %u/%u "
 
 #define TCP_LOG_TH_FLAGS_PCB_ARGS \
 	    TCP_LOG_TH_FLAGS_COMMON_ARGS, \
-	    tp->t_srtt >> TCP_RTT_SHIFT, tp->t_srtt - ((tp->t_srtt >> TCP_RTT_SHIFT) << TCP_RTT_SHIFT), \
-	    tp->t_rttvar >> TCP_RTTVAR_SHIFT, tp->t_rttvar - ((tp->t_rttvar >> TCP_RTTVAR_SHIFT) << TCP_RTTVAR_SHIFT), \
-	    tp->t_stat.synrxtshift, \
-	    tp->t_stat.rxmitpkts, \
-	    so->so_error, \
-	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? \
-	    so->so_netsvctype : so->so_traffic_class
+	    TCP_LOG_COMMON_PCB_ARGS, \
+	    tp->t_syn_rcvd, tp->t_syn_sent
 
-		if (tcp_log_level_info == 0) {
-			os_log(OS_LOG_DEFAULT, TCP_LOG_TH_FLAGS_PCB_FMT,
-			    TCP_LOG_TH_FLAGS_PCB_ARGS);
-		} else {
-			os_log_info(OS_LOG_DEFAULT, TCP_LOG_TH_FLAGS_PCB_FMT,
-			    TCP_LOG_TH_FLAGS_PCB_ARGS);
-		}
+		os_log(OS_LOG_DEFAULT, TCP_LOG_TH_FLAGS_PCB_FMT,
+		    TCP_LOG_TH_FLAGS_PCB_ARGS);
 #undef TCP_LOG_TH_FLAGS_PCB_FMT
 #undef TCP_LOG_TH_FLAGS_PCB_ARGS
 	}
@@ -858,13 +892,7 @@ tcp_log_drop_pkt(void *hdr, struct tcphdr *th, struct ifnet *ifp, const char *re
 	foreign_port = th->th_sport;
 	thflags = th->th_flags;
 
-	if ((((thflags & TH_SYN) && (tcp_log_enable_flags & TLEF_THF_SYN)) ||
-	    ((thflags & TH_FIN) && (tcp_log_enable_flags & TLEF_THF_FIN)) ||
-	    ((thflags & TH_RST) && (tcp_log_enable_flags & TLEF_THF_RST))) == false) {
-		return;
-	}
-
-	if (ifp != NULL && tcp_log_thflags_if_family != 0 && ifp->if_family != tcp_log_thflags_if_family) {
+	if (should_log_th_flags(thflags, NULL, outgoing, ifp) == false) {
 		return;
 	}
 
@@ -886,13 +914,8 @@ tcp_log_drop_pkt(void *hdr, struct tcphdr *th, struct ifnet *ifp, const char *re
 	    TCP_LOG_TH_FLAGS_COMMON_ARGS, \
 	    reason != NULL ? reason : ""
 
-	if (tcp_log_level_info == 0) {
-		os_log(OS_LOG_DEFAULT, TCP_LOG_DROP_PKT_FMT,
-		    TCP_LOG_DROP_PKT_ARGS);
-	} else {
-		os_log_info(OS_LOG_DEFAULT, TCP_LOG_DROP_PKT_FMT,
-		    TCP_LOG_DROP_PKT_ARGS);
-	}
+	os_log(OS_LOG_DEFAULT, TCP_LOG_DROP_PKT_FMT,
+	    TCP_LOG_DROP_PKT_ARGS);
 #undef TCP_LOG_DROP_PKT_FMT
 #undef TCP_LOG_DROP_PKT_ARGS
 }
@@ -937,20 +960,19 @@ tcp_log_message(const char *func_name, int line_no, struct tcpcb *tp, const char
 #define TCP_LOG_MESSAGE_FMT \
 	"tcp (%s:%d) " \
 	TCP_LOG_COMMON_PCB_FMT \
+	"bytes in/out: %llu/%llu " \
+	"pkts in/out: %llu/%llu " \
 	"%s"
 
 #define TCP_LOG_MESSAGE_ARGS \
 	func_name, line_no, \
 	TCP_LOG_COMMON_PCB_ARGS, \
+	inp->inp_stat->rxbytes, inp->inp_stat->txbytes, \
+	inp->inp_stat->rxpackets, inp->inp_stat->txpackets, \
 	message
 
-	if (tcp_log_level_info == 0) {
-		os_log(OS_LOG_DEFAULT, TCP_LOG_MESSAGE_FMT,
-		    TCP_LOG_MESSAGE_ARGS);
-	} else {
-		os_log_info(OS_LOG_DEFAULT, TCP_LOG_MESSAGE_FMT,
-		    TCP_LOG_MESSAGE_ARGS);
-	}
+	os_log(OS_LOG_DEFAULT, TCP_LOG_MESSAGE_FMT,
+	    TCP_LOG_MESSAGE_ARGS);
 #undef TCP_LOG_MESSAGE_FMT
 #undef TCP_LOG_MESSAGE_ARGS
 }
@@ -1007,14 +1029,137 @@ tcp_log_fsw_flow(const char *func_name, int line_no, struct tcpcb *tp, const cha
 	flow_uuid_str, \
 	message
 
-	if (tcp_log_level_info == 0) {
-		os_log(OS_LOG_DEFAULT, TCP_LOG_FSW_FLOW_MESSAGE_FMT,
-		    TCP_LOG_FSW_FLOW_MESSAGE_ARGS);
-	} else {
-		os_log_info(OS_LOG_DEFAULT, TCP_LOG_FSW_FLOW_MESSAGE_FMT,
-		    TCP_LOG_FSW_FLOW_MESSAGE_ARGS);
-	}
+	os_log(OS_LOG_DEFAULT, TCP_LOG_FSW_FLOW_MESSAGE_FMT,
+	    TCP_LOG_FSW_FLOW_MESSAGE_ARGS);
 #undef TCP_LOG_FSW_FLOW_MESSAGE_FMT
 #undef TCP_LOG_FSW_FLOW_MESSAGE_ARGS
 }
 #endif /* SKYWALK */
+
+void
+tcp_log_state_change(struct tcpcb *tp, int new_state)
+{
+	struct inpcb *inp;
+	struct socket *so;
+	struct ifnet *ifp;
+	uint32_t conntime = 0;
+	uint32_t duration = 0;
+	char laddr_buf[ADDRESS_STR_LEN];
+	char faddr_buf[ADDRESS_STR_LEN];
+	in_port_t local_port;
+	in_port_t foreign_port;
+
+	if (tp == NULL || tp->t_inpcb == NULL || tp->t_inpcb->inp_socket == NULL) {
+		return;
+	}
+	if (new_state == tp->t_state) {
+		return;
+	}
+
+	/* Do not log too much */
+	if (tcp_log_is_rate_limited()) {
+		return;
+	}
+
+	inp = tp->t_inpcb;
+	so = inp->inp_socket;
+
+	local_port = inp->inp_lport;
+	foreign_port = inp->inp_fport;
+
+	/*
+	 * t_connect_time is the time when the connection started on
+	 * the first SYN.
+	 *
+	 * t_starttime is when the three way handshake was completed.
+	 */
+	if (tp->t_connect_time > 0) {
+		duration = tcp_now - tp->t_connect_time;
+
+		if (tp->t_starttime > 0) {
+			conntime = tp->t_starttime - tp->t_connect_time;
+		}
+	}
+
+	ifp = inp->inp_last_outifp != NULL ? inp->inp_last_outifp :
+	    inp->inp_boundifp != NULL ? inp->inp_boundifp : NULL;
+
+	tcp_log_inp_addresses(inp, laddr_buf, sizeof(laddr_buf), faddr_buf, sizeof(faddr_buf));
+
+#define TCP_LOG_STATE_FMT \
+	    "tcp_state_changed " \
+	    TCP_LOG_COMMON_PCB_FMT
+
+#define TCP_LOG_STATE_ARGS \
+	TCP_LOG_COMMON_ARGS, \
+	so != NULL ? so->so_gencnt : 0, \
+	tcpstates[new_state], \
+	inp->inp_last_proc_name, so->last_pid
+
+	os_log(OS_LOG_DEFAULT, TCP_LOG_STATE_FMT,
+	    TCP_LOG_STATE_ARGS);
+#undef TCP_LOG_STATE_FMT
+#undef TCP_LOG_STATE_ARGS
+}
+
+__attribute__((noinline))
+void
+tcp_log_output(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...)
+{
+	struct inpcb *inp;
+	struct socket *so;
+	struct ifnet *ifp;
+	char laddr_buf[ADDRESS_STR_LEN];
+	char faddr_buf[ADDRESS_STR_LEN];
+	in_port_t local_port;
+	in_port_t foreign_port;
+	char message[256];
+
+	if (tp == NULL || tp->t_inpcb == NULL || tp->t_inpcb->inp_socket == NULL) {
+		return;
+	}
+	/* Log only when fron send() or connect() */
+	if ((tp->t_flagsext & TF_USR_OUTPUT) == 0) {
+		return;
+	}
+	/* Do not log too much */
+	if (tcp_log_is_rate_limited()) {
+		return;
+	}
+	inp = tp->t_inpcb;
+	so = inp->inp_socket;
+
+	local_port = inp->inp_lport;
+	foreign_port = inp->inp_fport;
+
+	ifp = inp->inp_last_outifp != NULL ? inp->inp_last_outifp :
+	    inp->inp_boundifp != NULL ? inp->inp_boundifp : NULL;
+
+	tcp_log_inp_addresses(inp, laddr_buf, sizeof(laddr_buf), faddr_buf, sizeof(faddr_buf));
+
+	va_list ap;
+	va_start(ap, format);
+	vsnprintf(message, sizeof(message), format, ap);
+	va_end(ap);
+
+#define TCP_LOG_MESSAGE_FMT \
+	"tcp (%s:%d) " \
+	TCP_LOG_COMMON_PCB_FMT \
+	"bytes in/out: %llu/%llu " \
+	"pkts in/out: %llu/%llu " \
+	"rxmit pkts/bytes: %u/%u" \
+	"%s"
+
+#define TCP_LOG_MESSAGE_ARGS \
+	func_name, line_no, \
+	TCP_LOG_COMMON_PCB_ARGS, \
+	inp->inp_stat->rxbytes, inp->inp_stat->txbytes, \
+	inp->inp_stat->rxpackets, inp->inp_stat->txpackets, \
+	tp->t_stat.rxmitpkts, tp->t_stat.txretransmitbytes, \
+	message
+
+	os_log(OS_LOG_DEFAULT, TCP_LOG_MESSAGE_FMT,
+	    TCP_LOG_MESSAGE_ARGS);
+#undef TCP_LOG_MESSAGE_FMT
+#undef TCP_LOG_MESSAGE_ARGS
+}

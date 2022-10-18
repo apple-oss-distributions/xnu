@@ -137,31 +137,41 @@
 
 /*
  * this function implements the same logic as dyld's "dyld_fall_2020_os_versions"
- * from dyld_priv.h. this way we can consistently deny / allow allocations based
- * on SDK version at fall 2020 level. Compare output to proc_sdk(current_proc())
+ * from dyld_priv.h. Basically, we attempt to draw the line of: "was this code
+ * compiled with an SDK from fall of 2020 or later?""
  */
-static uint32_t
-proc_2020_fall_os_sdk(void)
+static bool
+proc_2020_fall_os_sdk_or_later(void)
 {
+	const uint32_t proc_sdk_ver = proc_sdk(current_proc());
+
 	switch (proc_platform(current_proc())) {
 	case PLATFORM_MACOS:
-		return 0x000a1000; // DYLD_MACOSX_VERSION_10_16
+		return proc_sdk_ver >= 0x000a1000; // DYLD_MACOSX_VERSION_10_16
 	case PLATFORM_IOS:
 	case PLATFORM_IOSSIMULATOR:
 	case PLATFORM_MACCATALYST:
-		return 0x000e0000; // DYLD_IOS_VERSION_14_0
+		return proc_sdk_ver >= 0x000e0000; // DYLD_IOS_VERSION_14_0
 	case PLATFORM_BRIDGEOS:
-		return 0x00050000; // DYLD_BRIDGEOS_VERSION_5_0
+		return proc_sdk_ver >= 0x00050000; // DYLD_BRIDGEOS_VERSION_5_0
 	case PLATFORM_TVOS:
 	case PLATFORM_TVOSSIMULATOR:
-		return 0x000e0000; // DYLD_TVOS_VERSION_14_0
+		return proc_sdk_ver >= 0x000e0000; // DYLD_TVOS_VERSION_14_0
 	case PLATFORM_WATCHOS:
 	case PLATFORM_WATCHOSSIMULATOR:
-		return 0x00070000; // DYLD_WATCHOS_VERSION_7_0
+		return proc_sdk_ver >= 0x00070000; // DYLD_WATCHOS_VERSION_7_0
 	default:
-		return 0;
+		/*
+		 * tough call, but let's give new platforms the benefit of the doubt
+		 * to avoid a re-occurence of rdar://89843927
+		 */
+		return true;
 	}
 }
+
+#if MACH_ASSERT
+vnode_t fbdp_vp = NULL;
+#endif /* MACH_ASSERT */
 
 /*
  * XXX Internally, we use VM_PROT_* somewhat interchangeably, but the correct
@@ -237,7 +247,9 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	/*
 	 * verify no unknown flags are passed in, and if any are,
 	 * fail out early to make sure the logic below never has to deal
-	 * with invalid flag values
+	 * with invalid flag values. only do so for processes compiled
+	 * with Fall 2020 or later SDK, which is where we drew this
+	 * line and documented it as such.
 	 */
 	if (flags & ~(MAP_SHARED |
 	    MAP_PRIVATE |
@@ -259,7 +271,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 #endif
 	    MAP_TRANSLATED_ALLOW_EXECUTE |
 	    MAP_UNIX03)) {
-		if (proc_sdk(current_proc()) >= proc_2020_fall_os_sdk()) {
+		if (proc_2020_fall_os_sdk_or_later()) {
 			return EINVAL;
 		}
 	}
@@ -400,6 +412,11 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 
 	alloc_flags = 0;
 
+#if CONFIG_MAP_RANGES
+	/* default to placing mappings in the heap range. */
+	vmk_flags.vmkf_range_id = UMEM_RANGE_ID_HEAP;
+#endif /* CONFIG_MAP_RANGES */
+
 	if (flags & MAP_ANON) {
 		maxprot = VM_PROT_ALL;
 #if CONFIG_MACF
@@ -431,6 +448,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 			}
 			VM_GET_FLAGS_ALIAS(alloc_flags, tag);
 			alloc_flags &= ~VM_FLAGS_ALIAS_MASK;
+			vmk_flags.vmkf_range_id = VM_MAP_RANGE_ID(user_map, tag);
 		}
 
 		handle = NULL;
@@ -651,6 +669,18 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		vmk_flags.vmkf_map_jit = TRUE;
 	}
 
+#if CONFIG_ROSETTA
+	if (flags & MAP_TRANSLATED_ALLOW_EXECUTE) {
+		if (!proc_is_translated(p)) {
+			if (!mapanon) {
+				(void)vnode_put(vp);
+			}
+			error = EINVAL;
+			goto bad;
+		}
+		vmk_flags.vmkf_translated_allow_execute = TRUE;
+	}
+#endif
 
 	if (flags & MAP_RESILIENT_CODESIGN) {
 		alloc_flags |= VM_FLAGS_RESILIENT_CODESIGN;
@@ -732,6 +762,25 @@ map_anon_retry:
 			error = ENOMEM;
 			goto bad;
 		}
+
+#if MACH_ASSERT
+#define FBDP_PATH_NAME "/private/var/db/timezone/tz/2022a.1.1/icutz/"
+#define FBDP_FILE_NAME "icutz44l.dat"
+		if (fbdp_vp == NULL &&
+		    !strncmp(vp->v_name, FBDP_FILE_NAME, strlen(FBDP_FILE_NAME))) {
+			char *path;
+			int len;
+			len = MAXPATHLEN;
+			path = zalloc_flags(ZV_NAMEI, Z_WAITOK | Z_NOFAIL);
+			vn_getpath(vp, path, &len);
+			if (!strncmp(path, FBDP_PATH_NAME, strlen(FBDP_PATH_NAME))) {
+				fbdp_vp = vp;
+				memory_object_mark_for_fbdp(control);
+				printf("FBDP %s:%d marked vp %p \"%s\" moc %p as 'fbdp'\n", __FUNCTION__, __LINE__, vp, path, control);
+			}
+			zfree(ZV_NAMEI, path);
+		}
+#endif /* MACH_ASSERT */
 
 		/*
 		 *  Set credentials:
@@ -1020,12 +1069,6 @@ mprotect(__unused proc_t p, struct mprotect_args *uap, __unused int32_t *retval)
 		prot |= VM_PROT_READ;
 	}
 #endif  /* 3936456 */
-
-#if defined(__arm64__)
-	if (prot & VM_PROT_STRIP_READ) {
-		prot &= ~(VM_PROT_READ | VM_PROT_STRIP_READ);
-	}
-#endif
 
 #if CONFIG_MACF
 	/*

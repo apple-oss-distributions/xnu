@@ -1303,7 +1303,7 @@ out_in6m_release:
 	}
 
 	/* schedule timer now that we've dropped the lock(s) */
-	mld_set_timeout(&mtp);
+	mld_set_fast_timeout(&mtp);
 
 	return error;
 }
@@ -1379,7 +1379,7 @@ in6_mc_leave(struct in6_multi *inm, /*const*/ struct in6_mfilter *imf)
 		IN6M_REMREF(inm);       /* for in6_multihead list */
 	}
 	/* schedule timer now that we've dropped the lock(s) */
-	mld_set_timeout(&mtp);
+	mld_set_fast_timeout(&mtp);
 
 	return error;
 }

@@ -205,8 +205,18 @@ membar_sync(void)
 #define _CHANNEL_SCHEMA(_base, _off)                                    \
 	_CHANNEL_OFFSET(struct __user_channel_schema *, _base, _off)
 
-#define _CHANNEL_RING_BUF(_chrd, _ring, _idx)                           \
-	((_chrd)->chrd_buf_base_addr + ((_idx) * (_ring)->ring_buf_size))
+#define _CHANNEL_RING_DEF_BUF(_chrd, _ring, _idx, _off)                       \
+	((_chrd)->chrd_def_buf_base_addr +                              \
+	((_idx) * (_ring)->ring_def_buf_size) + _off)
+
+#define _CHANNEL_RING_LARGE_BUF(_chrd, _ring, _idx, _off)                     \
+	((_chrd)->chrd_large_buf_base_addr +                            \
+	((_idx) * (_ring)->ring_large_buf_size) + _off)
+
+#define _CHANNEL_RING_BUF(_chrd, _ring, _bft)                           \
+	BUFLET_HAS_LARGE_BUF(_bft) ?                                    \
+	_CHANNEL_RING_LARGE_BUF(_chrd, _ring, (_bft)->buf_idx, (_bft)->buf_boff) : \
+	_CHANNEL_RING_DEF_BUF(_chrd, _ring, (_bft)->buf_idx, (_bft)->buf_boff)
 
 #define _CHANNEL_RING_BFT(_chrd, _ring, _idx)                           \
 	((_chrd)->chrd_bft_base_addr + ((_idx) * (_ring)->ring_bft_size))
@@ -311,14 +321,16 @@ os_channel_init_ring(struct channel_ring_desc *chrd,
 	*(nexus_meta_subtype_t *)(uintptr_t)&chrd->chrd_md_subtype = md_subtype;
 	*(mach_vm_address_t *)(uintptr_t)&chrd->chrd_shmem_base_addr =
 	    CHD_INFO(chd)->cinfo_mem_base;
-	*(mach_vm_address_t *)(uintptr_t)&chrd->chrd_buf_base_addr =
-	    (mach_vm_address_t)((uintptr_t)ring + ring->ring_buf_base);
+	*(mach_vm_address_t *)(uintptr_t)&chrd->chrd_def_buf_base_addr =
+	    (mach_vm_address_t)((uintptr_t)ring + ring->ring_def_buf_base);
 	*(mach_vm_address_t *)(uintptr_t)&chrd->chrd_md_base_addr =
 	    (mach_vm_address_t)((uintptr_t)ring + ring->ring_md_base);
 	*(mach_vm_address_t *)(uintptr_t)&chrd->chrd_sd_base_addr =
 	    (mach_vm_address_t)((uintptr_t)ring + ring->ring_sd_base);
 	*(mach_vm_address_t *)(uintptr_t)&chrd->chrd_bft_base_addr =
 	    (mach_vm_address_t)((uintptr_t)ring + ring->ring_bft_base);
+	*(mach_vm_address_t *)(uintptr_t)&chrd->chrd_large_buf_base_addr =
+	    (mach_vm_address_t)((uintptr_t)ring + ring->ring_large_buf_base);
 	*(uint32_t *)(uintptr_t)&chrd->chrd_max_bufs =
 	    CHD_PARAMS(chd)->nxp_max_frags;
 }
@@ -376,7 +388,7 @@ _initialize_metadata_address(const channel_ring_t chrd,
 			if (__probable(pbft->buf_idx != OBJ_IDX_NONE)) {
 				*(mach_vm_address_t *)(uintptr_t)
 				&(pbft->buf_addr) = _CHANNEL_RING_BUF(chrd,
-				    ring, pbft->buf_idx);
+				    ring, pbft);
 			} else {
 				*(mach_vm_address_t *)(uintptr_t)
 				&(pbft->buf_addr) = NULL;
@@ -411,7 +423,7 @@ _initialize_metadata_address(const channel_ring_t chrd,
 		    sizeof(mach_vm_address_t));
 		/* immutable: compute pointers from the index */
 		*(mach_vm_address_t *)(uintptr_t)&ubft0->buf_addr =
-		    _CHANNEL_RING_BUF(chrd, ring, ubft0->buf_idx);
+		    _CHANNEL_RING_BUF(chrd, ring, ubft0);
 		break;
 	}
 
@@ -1073,7 +1085,7 @@ os_channel_get_next_slot(const channel_ring_t chrd, const channel_slot_t slot0,
 			prop->sp_mdata_ptr = q;
 			/* reset slot length if this is to be used for tx */
 			prop->sp_len = (ring_kind == CR_KIND_TX) ?
-			    ring->ring_buf_size : q->qum_len;
+			    ring->ring_def_buf_size : q->qum_len;
 		}
 	}
 
@@ -1333,6 +1345,7 @@ os_channel_attr_set(const channel_attr_t cha, const channel_attr_type_t type,
 	case CHANNEL_ATTR_NEXUS_ADV_SIZE:
 	case CHANNEL_ATTR_MAX_FRAGS:
 	case CHANNEL_ATTR_NUM_BUFFERS:
+	case CHANNEL_ATTR_LARGE_BUF_SIZE:
 		err = ENOTSUP;
 		break;
 
@@ -1563,6 +1576,10 @@ os_channel_attr_get(const channel_attr_t cha, const channel_attr_type_t type,
 		*value = (cha->cha_low_latency != 0);
 		break;
 
+	case CHANNEL_ATTR_LARGE_BUF_SIZE:
+		*value = cha->cha_large_buf_size;
+		break;
+
 	default:
 		err = EINVAL;
 		break;
@@ -1660,6 +1677,7 @@ os_channel_info2attr(struct channel *chd, channel_attr_t cha)
 	}
 	cha->cha_max_frags = CHD_PARAMS(chd)->nxp_max_frags;
 	cha->cha_num_buffers = cinfo->cinfo_num_bufs;
+	cha->cha_large_buf_size = CHD_PARAMS(chd)->nxp_large_buf_size;
 }
 
 void
@@ -1959,7 +1977,7 @@ os_channel_purge_packet_alloc_ring(const channel_t chd)
 			_PKT_BUFCNT_VERIFY(chrd, bcnt, 1);
 		}
 		*(mach_vm_address_t *) (uintptr_t)&q->qum_buf[0].buf_addr =
-		    _CHANNEL_RING_BUF(chrd, ring, q->qum_buf[0].buf_idx);
+		    _CHANNEL_RING_BUF(chrd, ring, &q->qum_buf[0]);
 		idx = _CHANNEL_RING_NEXT(ring, idx);
 		ring->ring_head = idx;
 		err = os_channel_packet_free(chd, ph);
@@ -2010,7 +2028,7 @@ os_channel_purge_buflet_alloc_ring(const channel_t chd)
 		 * Initialize the buflet metadata buffer address.
 		 */
 		*(mach_vm_address_t *)(uintptr_t)&(ubft->buf_addr) =
-		    _CHANNEL_RING_BUF(chrd, ring, ubft->buf_idx);
+		    _CHANNEL_RING_BUF(chrd, ring, ubft);
 		if (__improbable(ubft->buf_addr == 0)) {
 			SK_ABORT_WITH_CAUSE("buflet with NULL buffer",
 			    ubft->buf_idx);
@@ -2245,7 +2263,7 @@ os_channel_buflet_alloc(const channel_t chd, buflet_t *bft)
 	 * Initialize the buflet metadata buffer address.
 	 */
 	*(mach_vm_address_t *)(uintptr_t)&(ubft->buf_addr) =
-	    _CHANNEL_RING_BUF(chrd, ring, ubft->buf_idx);
+	    _CHANNEL_RING_BUF(chrd, ring, ubft);
 	if (__improbable(ubft->buf_addr == 0)) {
 		SK_ABORT_WITH_CAUSE("buflet alloc with NULL buffer",
 		    ubft->buf_idx);

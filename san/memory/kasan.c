@@ -83,12 +83,6 @@
  * or quarantines. See kasan-tbi.c for details.
  */
 
-/*
- * LLVM contains enough logic to inline check operations against the shadow
- * table and uses this symbol as an anchor to find it in memory.
- */
-const uintptr_t __asan_shadow_memory_dynamic_address = KASAN_OFFSET;
-
 /* Statistics: Track every KEXT that successfully initializes under KASAN */
 static unsigned kexts_loaded;
 
@@ -100,36 +94,16 @@ unsigned shadow_pages_used;
 vm_offset_t kernel_vbase;
 vm_offset_t kernel_vtop;
 
-decl_simple_lock_data(, kasan_vm_lock);
-static thread_t kasan_lock_holder;
+thread_t kasan_lock_holder;
 
 /* Global KASAN configuration. */
 unsigned kasan_enabled;
 unsigned kasan_enabled_checks = TYPE_ALL;
+int fakestack_enabled;
 
 /* imported osfmk functions */
 extern vm_offset_t ml_stack_base(void);
 extern vm_size_t ml_stack_size(void);
-
-/*
- * KASAN may be called from interrupt context, so we disable interrupts to
- * ensure atomicity manipulating the global objects.
- */
-void
-kasan_lock(boolean_t *b)
-{
-	*b = ml_set_interrupts_enabled(false);
-	simple_lock(&kasan_vm_lock, LCK_GRP_NULL);
-	kasan_lock_holder = current_thread();
-}
-
-void
-kasan_unlock(boolean_t b)
-{
-	kasan_lock_holder = THREAD_NULL;
-	simple_unlock(&kasan_vm_lock);
-	ml_set_interrupts_enabled(b);
-}
 
 /*
  * Return true if 'thread' holds the kasan lock. Only safe if 'thread' == current
@@ -337,7 +311,7 @@ kasan_init(void)
 {
 	unsigned arg;
 
-	simple_lock_init(&kasan_vm_lock, 0);
+	kasan_lock_init();
 	/* Map all of the kernel text and data */
 	kasan_map_shadow(kernel_vbase, kernel_vtop - kernel_vbase, false);
 	kasan_arch_init();
@@ -379,13 +353,8 @@ kasan_notify_address_internal(vm_offset_t address, vm_size_t size, bool cannot_p
 		return;
 	}
 
-	if (address < VM_MIN_KERNEL_AND_KEXT_ADDRESS) {
-		/* only map kernel addresses */
-		return;
-	}
-
-	if (!size) {
-		/* nothing to map */
+	if (address < VM_MIN_KERNEL_AND_KEXT_ADDRESS || size == 0) {
+		/* only map kernel addresses and actual allocations */
 		return;
 	}
 
@@ -464,6 +433,7 @@ SYSCTL_UINT(_kern_kasan, OID_AUTO, memtotal, CTLFLAG_RD, &shadow_pages_total, 0,
 SYSCTL_UINT(_kern_kasan, OID_AUTO, kexts, CTLFLAG_RD, &kexts_loaded, 0, "");
 
 /* Old-style configuration options, maintained for compatibility */
+SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, light, CTLFLAG_RD, NULL, KASAN_LIGHT, "");
 SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, debug, CTLFLAG_RD, NULL, KASAN_DEBUG, "");
 SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, zalloc, CTLFLAG_RD, NULL, KASAN_ZALLOC, "");
 SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, kalloc, CTLFLAG_RD, NULL, KASAN_KALLOC, "");

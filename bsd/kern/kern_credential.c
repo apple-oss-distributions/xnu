@@ -3414,8 +3414,9 @@ static LCK_MTX_DECLARE(kauth_cred_hash_mtx, &kauth_lck_grp);
  *		We also create the kernel and init creds before lockdown
  *		so that vfs_context0 and initcred pointers can be made constant.
  *
- *		We do this in the "LOCKS" stage because we need
- *		the kauth_cred_hash_mtx to be initialized.
+ *		We do this in the "ZALLOC" stage because we need
+ *		the kauth_cred_hash_mtx to be initialized,
+ *		and to allocate the kernel cred.
  */
 __startup_func
 static void
@@ -3433,7 +3434,7 @@ kauth_cred_init(void)
 
 	vfs_context0.vc_ucred = kauth_cred_create(&kernel_cred_template);
 }
-STARTUP(LOCKS, STARTUP_RANK_MIDDLE, kauth_cred_init);
+STARTUP(ZALLOC, STARTUP_RANK_LAST, kauth_cred_init);
 
 /*
  * kauth_getuid

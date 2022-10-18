@@ -129,9 +129,6 @@ _ID=-1
 _TYPE="invalid"
 _LOGIN=""
 _UID=-1
-_GID=-1
-_NGROUPS=-1
-_GROUPS=""
 
 ## get_persona_info {persona_id} {persona_login}
 #
@@ -154,9 +151,6 @@ function get_persona_info() {
 	_TYPE=-1
 	_LOGIN=""
 	_UID=-1
-	_GID=-1
-	_NGROUPS=-1
-	_GROUPS=()
 
 	local file="${TMPDIR}/plookup"
 
@@ -190,22 +184,6 @@ function get_persona_info() {
 
 	# these are always the same
 	_UID=$_ID
-
-	_GID=$(cat "${file}" | grep "+gid: " | head -1 | sed 's/.*+gid:[ ]*\([0-9][0-9]*\).*/\1/')
-	test_num "GID lookup:${largs}" "$_GID"
-
-	_NGROUPS=$(cat "${file}" | grep "ngroups: " | head -1 | sed 's/.*ngroups:[ ]*\([0-9][0-9]*\)[ ][ ]*{.*}.*/\1/')
-	test_num "NGROUPS lookup:${largs}" "$_NGROUPS"
-
-	_GROUPS=( $(cat "${file}" | grep "ngroups: " | head -1 | sed 's/.*ngroups:[ ]*[0-9][0-9]*[ ][ ]*{[ ]*\([^ ].*\)[ ][ ]*}.*/\1/') )
-	if [ $_NGROUPS -gt 0 ]; then
-		if [ -z "${_GROUPS}" ]; then
-			bail "lookup:${largs}: missing $_NGROUPS groups" $line
-		fi
-		if [ ${#_GROUPS[@]} -ne $_NGROUPS ]; then
-			bail "lookup:${largs} wrong number of groups ${#_GROUPS[@]} != $_NGROUPS" $line
-		fi
-	fi
 }
 
 ## validate_child_info [output_file] [persona_id] {uid} {gid} {groups}
@@ -264,7 +242,7 @@ function validate_child_info() {
 }
 
 
-## spawn_child [persona_id] {uid} {gid} {group_spec}
+## spawn_child [persona_id] [uid] {gid} {group_spec}
 #
 # Create a child process that is spawn'd into the persona given by
 # the first argument (pna_id). The new process can have its UID, GID,
@@ -272,7 +250,7 @@ function validate_child_info() {
 #
 function spawn_child() {
 	local pna_id=$1
-	local uid=${2:--1}
+	local uid=$2
 	local gid=${3:--1}
 	local groups=${4:- }
 	local line=$5
@@ -280,12 +258,8 @@ function spawn_child() {
 		line=${BASH_LINENO[0]}
 	fi
 
-	local file="child.${pna_id}"
-	local spawn_args="-I $pna_id"
-	if [ $uid -ge 0 ]; then
-		spawn_args+=" -u $uid"
-		file+=".u$uid"
-	fi
+	local file="child.${pna_id}.u$uid"
+	local spawn_args="-I $pna_id -u $uid"
 	if [ $gid -ge 0 ]; then
 		spawn_args+=" -g $gid"
 		file+=".g$gid"
@@ -301,18 +275,10 @@ function spawn_child() {
 
 	# Grab the specified persona's info so we can
 	# verify the child's info against it.
-	# This function puts data into global variables, e.g. _ID, _GID, etc.
+	# get_persona_info puts data into global variables, e.g. _UID, _LOGIN, etc.
 	get_persona_info ${pna_id} " " $line
 	if [ $uid -lt 0 ]; then
 		uid=$_UID
-	fi
-	if [ $gid -lt 0 ]; then
-		gid=$_GID
-	fi
-	if [ "$groups" == " " ]; then
-		# convert a bash array into a comma-separated list for validation
-		local _g="${_GROUPS[@]}"
-		groups="${_g// /,}"
 	fi
 
 	validate_child_info "${TMPDIR}/$file" "$pna_id" "$uid" "$gid" "$groups" $line
@@ -338,7 +304,7 @@ function get_created_id() {
 	return 0
 }
 
-## create_persona [login_name] [persona_type] {persona_id} {gid} {group_spec}
+## create_persona [login_name] [persona_type] {persona_id}
 #
 # Create a new persona with given parameters.
 #
@@ -348,8 +314,6 @@ function create_persona() {
 	local name=${1}
 	local type=${2}
 	local pna_id=${3:--1}
-	local gid=${4:--1}
-	local groups=${5:- }
 	local line=$6
 	if [ -z "$line" ]; then
 		line=${BASH_LINENO[0]}
@@ -371,15 +335,6 @@ function create_persona() {
 	spawn_args+=" -t $type"
 	file+=".$type"
 
-	if [ $gid -ge 0 ]; then
-		spawn_args+=" -g $gid"
-		file+=".g$gid"
-	fi
-	if [ "$groups" != " " ]; then
-		spawn_args+=" -G $groups"
-		file+="._groups"
-	fi
-
 	echo "CREATE: $file"
 	${PERSONA_MGR} create ${spawn_args} > "${TMPDIR}/${file}"
 	check_return "persona creation: ${file}" $line
@@ -396,7 +351,7 @@ function create_persona() {
 	fi
 
 	# validate the entire persona information (what a kpersona_lookup says we created)
-	# This function puts data into global variables, e.g. _ID, _LOGIN, _GID, etc.
+	# This function puts data into global variables, e.g. _ID, _LOGIN, etc.
 	echo "VALIDATE: ${file}"
 	get_persona_info ${pna_id} "$name" $line
 	if [ "$name" != "$_LOGIN" ]; then
@@ -408,17 +363,6 @@ function create_persona() {
 	if [ ${pna_id} -gt 0 ]; then
 		if [ ${pna_id} -ne $_ID ]; then
 			bail "${file}: unexpected ID '$_ID' != '${pna_id}'" $line
-		fi
-	fi
-	if [ $gid -ge 0 ]; then
-		if [ $gid -ne $_GID ]; then
-			bail "${file}: unexpected GID '$_GID' != '$gid'" $line
-		fi
-	fi
-	if [ "$groups" != " " ]; then
-		local _g="${_GROUPS[@]}"
-		if [ "${_g// /,}" != "$groups" ]; then
-			bail "${file}: unexpected groups '${_g// /,}' != '$groups'" $line
 		fi
 	fi
 
@@ -459,42 +403,12 @@ TEST_DEFAULT_PERSONA=$_ID
 create_persona "test0_1" "guest" 10001
 P0ID=$_ID
 
-spawn_child $P0ID
 spawn_child $P0ID 1100
 spawn_child $P0ID 0
-spawn_child $P0ID -1 1101
 spawn_child $P0ID 1100 1101
 spawn_child $P0ID 1100 1101 1000,2000,3000
 spawn_child $P0ID 1100 -1 1000,2000,3000
-spawn_child $P0ID -1 -1 1000,2000,3000
 destroy_persona $P0ID
-
-# specific ID, non-default group
-create_persona "test0_2" "guest" 10002 2000
-P0ID=$_ID
-spawn_child $P0ID
-spawn_child $P0ID 1100
-spawn_child $P0ID 0
-spawn_child $P0ID -1 1101
-spawn_child $P0ID 1100 1101
-spawn_child $P0ID 1100 1101 1000,2000,3000
-spawn_child $P0ID 1100 -1 1000,2000,3000
-spawn_child $P0ID -1 -1 1000,2000,3000
-destroy_persona $P0ID
-
-# non-default set of groups
-create_persona "test0_3" "guest" 10003 2000 2000,3000,4000
-P0ID=$_ID
-spawn_child $P0ID
-spawn_child $P0ID 1100
-spawn_child $P0ID 0
-spawn_child $P0ID -1 1101
-spawn_child $P0ID 1100 1101
-spawn_child $P0ID 1100 1101 1111,2222,3333
-spawn_child $P0ID 1100 -1 1111,2222,3333
-spawn_child $P0ID -1 -1 1111,2222,3333
-destroy_persona $P0ID
-
 
 ##
 ## Test Group 1: persona creation / re-creation

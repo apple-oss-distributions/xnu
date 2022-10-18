@@ -52,11 +52,13 @@ extern uint32_t serialmode;
 #define SERIALMODE_SYNCDRAIN 0x04
 #define SERIALMODE_BASE_TTY  0x08 /* Load Base/Recovery/FVUnlock TTY */
 #define SERIALMODE_NO_IOLOG  0x10 /* prevent IOLogs writing to serial */
+#define SERIALMODE_DKLOG     0x20 /* allow DriverKit os_log/IOLogs writing to serial */
 
 extern uint32_t cons_ops_index;
 extern const uint32_t nconsops;
 extern bool disable_serial_output;
 extern bool disable_iolog_serial_output;
+extern bool enable_dklog_serial_output;
 
 void console_init(void);
 

@@ -218,7 +218,6 @@
  *   LOAD_ADDR_GEN_DEF(arm_init_cpu)
  */
 
-#if SLIDABLE
 /* Definitions for a position dependent kernel using non-lazy pointers.
  */
 
@@ -268,28 +267,6 @@ GLUE_LABEL(label, __LINE__): ;                                                  
 label##$non_lazy_ptr: ;                                            \
 	.indirect_symbol	EXT(label) ;                       \
 	.long			0
-
-#else /* !SLIDABLE */
-
-/* Definitions for a position dependent kernel */
-#define LOAD_ADDR(reg, label)  \
-	ldr	reg, L_##label
-
-#if defined(__thumb__)
-#define LOAD_ADDR_PC(label)   \
-	ldr	pc, L_##label
-#else
-#define LOAD_ADDR_PC(label) \
-	b	EXT(label)
-#endif
-
-#define LOAD_ADDR_GEN_DEF(label)  \
-	.text ;                   \
-	.align 2 ;                \
-L_##label: ;                      \
-	.long	EXT(label)
-
-#endif /* SLIDABLE */
 
 /* The linker can deal with branching from ARM to thumb in unconditional
  *   branches, but not in conditional branches.  To support this in our

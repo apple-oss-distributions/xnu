@@ -82,13 +82,13 @@ def ZoneTriageMemoryLeak(cmd_args=None):
     CheckZoneBootArgs()
     ## Run showzonesbeinglogged. 
     print("(lldb) zstack_showzonesbeinglogged\n%s\n" % lldb_run_command("zstack_showzonesbeinglogged"))
-    for zval in kern.zones:
-        if zval.zlog_btlog:
+    for zval, _ in kern.zones:
+        if zval.z_btlog:
             print('%s:' % zval.z_name)
-            print("(lldb) zstack_findtop -N 5 0x%lx" % zval.zlog_btlog)
-            print(lldb_run_command("zstack_findtop -N 5 0x%lx" % zval.zlog_btlog))
-            print("(lldb) zstack_findleak 0x%lx" % zval.zlog_btlog)
-            print(lldb_run_command("zstack_findleak 0x%lx" % zval.zlog_btlog))
+            print("(lldb) zstack_findtop -N 5 0x%lx" % zval.z_btlog)
+            print(lldb_run_command("zstack_findtop -N 5 0x%lx" % zval.z_btlog))
+            print("(lldb) zstack_findleak 0x%lx" % zval.z_btlog)
+            print(lldb_run_command("zstack_findleak 0x%lx" % zval.z_btlog))
 
 def CheckZoneBootArgs(cmd_args=None):
     """ Check boot args to see if zone is being logged, if not, suggest new boot args
@@ -118,9 +118,9 @@ def FindZoneBTLog(zone):
     """ Returns the btlog address in the format 0x%lx for the zone name passed as a parameter
     """
     global kern
-    for zval in kern.zones:
-        if zval.zlog_btlog:
+    for zval, _ in kern.zones:
+        if zval.z_btlog:
             if zone == "%s" % zval.z_name:
-                return "0x%lx" % zval.zlog_btlog
+                return "0x%lx" % zval.z_btlog
     return None
 # EndMacro: zonetriage, zonetriage_freedelement, zonetriage_memoryleak

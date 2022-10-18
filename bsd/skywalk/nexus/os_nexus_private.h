@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -41,6 +41,9 @@
  * Ephemeral port, for NEXUSDOMCAPF_EPHEMERAL capable nexus.
  */
 #define NEXUS_PORT_ANY  ((nexus_port_t)-1)
+#define NEXUS_PORT_MAX  ((nexus_port_t)-1)
+
+typedef nexus_port_t nexus_port_size_t;
 
 #define NEXUSCTL_INIT_VERSION_1         1
 #define NEXUSCTL_INIT_CURRENT_VERSION   NEXUSCTL_INIT_VERSION_1
@@ -111,6 +114,7 @@ struct nxprov_params {
 	 * Only valid for user-pipe nexus.
 	 */
 	boolean_t       nxp_reject_on_close;
+	uint32_t        nxp_large_buf_size;   /* size of large buffer */
 } __attribute__((aligned(64)));
 
 /* valid values for nxp_flags */
@@ -170,13 +174,14 @@ struct nxprov_reg {
 #define NXPREQ_USER_CHANNEL     (1U << 18)      /* 0x00040000 */
 #define NXPREQ_MAX_FRAGS        (1U << 19)      /* 0x00080000 */
 #define NXPREQ_REJECT_ON_CLOSE  (1U << 20)      /* 0x00100000 */
+#define NXPREQ_LARGE_BUF_SIZE   (1U << 21)      /* 0x00200000 */
 
 #define NXPREQ_BITS                                                     \
 	"\020\01TX_RINGS\02RX_RINGS\03TX_SLOTS\04RX_SLOTS\05BUF_SIZE"   \
 	"\06META_SIZE\07STATS_SIZE\010ANONYMOUS\011EXTRA_BUFS\012PIPES" \
 	"\013EXTENSIONS\014MHINTS\015FLOWADV_MAX\016QMAP"               \
 	"\017CKSUM_OFFLOAD\020USER_PKT_POOL\021CAPABS\022NEXUSADV_SIZE" \
-	"\023IFINDEX\024USER_CHANNEL\025MAX_FRAGS\026REJ_CLOSE"
+	"\023IFINDEX\024USER_CHANNEL\025MAX_FRAGS\026REJ_CLOSE\027LBUF_SIZE"
 
 /*
  * Nexus provider registration entry.  Also argument for NXOPT_NEXUS_PROV_ENTRY.
@@ -277,6 +282,7 @@ struct ch_list_req {
 #define NXMIB_FLOW_OWNER        (((uint32_t)1) << 5)
 #define NXMIB_FLOW_ROUTE        (((uint32_t)1) << 6)
 #define NXMIB_LLINK_LIST        (((uint32_t)1) << 7)
+#define NXMIB_NETIF_QUEUE_STATS (((uint32_t)1) << 8)
 
 #define NXMIB_QUIC_STATS        (((uint32_t)1) << 27)
 #define NXMIB_UDP_STATS         (((uint32_t)1) << 28)
@@ -359,25 +365,41 @@ struct nx_spec_req {
 #endif /* KERNEL */
 
 /*
+ * Structure for flow demuxing for parent/child flows
+ */
+#define FLOW_DEMUX_MAX_LEN      32
+struct flow_demux_pattern {
+	uint16_t                fdp_offset;
+	uint16_t                fdp_len;
+	uint8_t                 fdp_mask[FLOW_DEMUX_MAX_LEN];
+	uint8_t                 fdp_value[FLOW_DEMUX_MAX_LEN];
+};
+
+#define MAX_FLOW_DEMUX_PATTERN  4
+
+/*
  * Argument structure for NXCFG_CMD_FLOW_{BIND,UNBIND}
  */
 struct nx_flow_req {
-	nexus_port_t            nfr_nx_port;
-	uint16_t                nfr_ethertype;
-	ether_addr_t            nfr_etheraddr;
-	union sockaddr_in_4_6   nfr_saddr;
-	union sockaddr_in_4_6   nfr_daddr;
-	uint8_t                 nfr_ip_protocol;
-	uint8_t                 nfr_transport_protocol;
-	uint16_t                nfr_flags;
-	uuid_t                  nfr_flow_uuid;
-	packet_svc_class_t      nfr_svc_class;
-	uuid_t                  nfr_euuid;
-	uint32_t                nfr_policy_id;
-	pid_t                   nfr_epid;
-	flowadv_idx_t           nfr_flowadv_idx;
-	uuid_t                  nfr_bind_key;
-	uint64_t                nfr_qset_id;
+	nexus_port_t                    nfr_nx_port;
+	uint16_t                        nfr_ethertype;
+	ether_addr_t                    nfr_etheraddr;
+	union sockaddr_in_4_6           nfr_saddr;
+	union sockaddr_in_4_6           nfr_daddr;
+	uint8_t                         nfr_ip_protocol;
+	uint8_t                         nfr_transport_protocol;
+	uint16_t                        nfr_flags;
+	uuid_t                          nfr_flow_uuid;
+	packet_svc_class_t              nfr_svc_class;
+	uuid_t                          nfr_euuid;
+	uint32_t                        nfr_policy_id;
+	pid_t                           nfr_epid;
+	flowadv_idx_t                   nfr_flowadv_idx;
+	uuid_t                          nfr_bind_key;
+	uint64_t                        nfr_qset_id;
+	uuid_t                          nfr_parent_flow_uuid;
+	uint8_t                         nfr_flow_demux_count;
+	struct flow_demux_pattern       nfr_flow_demux_patterns[MAX_FLOW_DEMUX_PATTERN];
 	// below is reserved kernel-only fields
 	union {
 #ifdef KERNEL
@@ -422,11 +444,15 @@ struct nx_flow_req {
 #define NXFLOWREQF_FLOWADV        0x0100  /* allocate flow advisory */
 #define NXFLOWREQF_ASIS           0x0200  /* create flow as is in nfr */
 #define NXFLOWREQF_LOW_LATENCY    0x0400  /* low latency flow */
+#define NXFLOWREQF_NOWAKEFROMSLEEP        0x0800  /* Don't wake for traffic to this flow */
+#define NXFLOWREQF_REUSEPORT      0x1000  /* Don't wake for traffic to this flow */
+#define NXFLOWREQF_PARENT         0x4000  /* Parent flow */
 
 #define NXFLOWREQF_BITS                                                   \
 	"\020\01TRACK\02QOS_MARKING\03FILTER\04CUSTOM_ETHER\05IPV6_ULA" \
 	"\06LISTENER\07OVERRIDE_ADDRESS_SELECTION\010USE_STABLE_ADDRESS" \
-	"\011ALLOC_FLOWADV\012ASIS\013LOW_LATENCY"
+	"\011ALLOC_FLOWADV\012ASIS\013LOW_LATENCY\014NOWAKEUPFROMSLEEP" \
+	"\015REUSEPORT\017PARENT"
 
 struct flow_ip_addr {
 	union {
@@ -494,7 +520,8 @@ extern const struct flow_key fk_mask_ipflow3;
     (NXFLOWREQF_TRACK | NXFLOWREQF_QOS_MARKING | NXFLOWREQF_FILTER | \
     NXFLOWREQF_CUSTOM_ETHER | NXFLOWREQF_IPV6_ULA | NXFLOWREQF_LISTENER | \
     NXFLOWREQF_OVERRIDE_ADDRESS_SELECTION | NXFLOWREQF_USE_STABLE_ADDRESS | \
-    NXFLOWREQF_FLOWADV | NXFLOWREQF_LOW_LATENCY)
+    NXFLOWREQF_FLOWADV | NXFLOWREQF_LOW_LATENCY | NXFLOWREQF_REUSEPORT | \
+    NXFLOWREQF_PARENT)
 
 #define NXFLOWREQF_EXT_PORT_RSV   0x1000  /* external port reservation */
 #define NXFLOWREQF_EXT_PROTO_RSV  0x2000  /* external proto reservation */
@@ -585,6 +612,7 @@ struct nexus_attr {
 	 * valid only for user-pipe nexus.
 	 */
 	uint64_t        nxa_reject_on_close;
+	uint64_t        nxa_large_buf_size;  /* size of large buffer */
 };
 
 /*
@@ -613,6 +641,7 @@ struct nexus_attr {
 #define NXA_REQ_USER_CHANNEL    (1ULL << 18)    /* 0x0000000000040000 */
 #define NXA_REQ_MAX_FRAGS       (1ULL << 19)    /* 0x0000000000080000 */
 #define NXA_REQ_REJECT_ON_CLOSE (1ULL << 20)    /* 0x0000000000100000 */
+#define NXA_REQ_LARGE_BUF_SIZE  (1ULL << 21)    /* 0x0000000000200000 */
 
 #ifndef KERNEL
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
@@ -652,6 +681,7 @@ __END_DECLS
 #endif /* !KERNEL */
 #if defined(LIBSYSCALL_INTERFACE) || defined(BSD_KERNEL_PRIVATE)
 #include <skywalk/nexus_common.h>
+#include <skywalk/nexus_ioctl.h>
 #endif /* LIBSYSCALL_INTERFACE || BSD_KERNEL_PRIVATE */
 #endif /* PRIVATE || BSD_KERNEL_PRIVATE */
 #endif /* !_SKYWALK_OS_NEXUS_PRIVATE_H_ */

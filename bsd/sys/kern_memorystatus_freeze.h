@@ -45,6 +45,7 @@ typedef struct memorystatus_freeze_entry {
 
 #ifdef PRIVATE
 #define FREEZE_PROCESSES_MAX 20
+#define FREEZE_PROCESSES_MAX_SWAP_ENABLED 36
 #endif /* PRIVATE */
 
 #ifdef XNU_KERNEL_PRIVATE
@@ -68,9 +69,12 @@ void memorystatus_freeze_init(void);
 extern int  memorystatus_freeze_process_sync(proc_t p);
 
 #ifdef CONFIG_FREEZE
+extern int memorystatus_entitled_max_task_footprint_mb;
 
 #define FREEZE_PAGES_MIN   ( 8 * 1024 * 1024 / PAGE_SIZE)
 #define FREEZE_PAGES_MAX   (max_task_footprint_mb == 0 ? INT_MAX : (max_task_footprint_mb << (20 - PAGE_SHIFT)))
+#define FREEZE_PAGES_MAX_SWAP_ENABLED \
+    (memorystatus_entitled_max_task_footprint_mb == 0 ? INT_MAX : (memorystatus_entitled_max_task_footprint_mb << (20 - PAGE_SHIFT)))
 
 #define FREEZE_SUSPENDED_THRESHOLD_DEFAULT 4
 
@@ -79,6 +83,7 @@ extern int  memorystatus_freeze_process_sync(proc_t p);
 
 #define MAX_FROZEN_SHARED_MB_PERCENT 10
 #define MAX_FROZEN_PROCESS_DEMOTIONS 2
+#define MAX_FROZEN_PROCESS_DEMOTIONS_SWAP_ENABLED 4
 #define MIN_THAW_DEMOTION_THRESHOLD  5
 #define MIN_THAW_REFREEZE_THRESHOLD  3  /* min # of global thaws needed for us to consider refreezing these processes. */
 
@@ -115,7 +120,7 @@ extern boolean_t memorystatus_freeze_enabled;
 extern int memorystatus_freeze_wakeup;
 extern int memorystatus_freeze_jetsam_band; /* the jetsam band which will contain P_MEMSTAT_FROZEN processes */
 
-boolean_t memorystatus_freeze_thread_should_run(void);
+bool memorystatus_freeze_thread_should_run(void);
 int memorystatus_set_process_is_freezable(pid_t pid, boolean_t is_freezable);
 int memorystatus_get_process_is_freezable(pid_t pid, int *is_freezable);
 int memorystatus_freezer_control(int32_t flags, user_addr_t buffer, size_t buffer_size, int32_t *retval);

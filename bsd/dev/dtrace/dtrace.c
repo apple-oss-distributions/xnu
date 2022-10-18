@@ -91,20 +91,21 @@
 #include <mach/exception_types.h>
 #include <sys/signalvar.h>
 #include <mach/task.h>
-#include <kern/zalloc.h>
 #include <kern/ast.h>
-#include <kern/sched_prim.h>
-#include <kern/task.h>
 #include <kern/hvg_hypercall.h>
+#include <kern/sched_prim.h>
+#include <kern/processor.h>
+#include <kern/task.h>
+#include <kern/zalloc.h>
 #include <netinet/in.h>
 #include <libkern/sysctl.h>
 #include <sys/kdebug.h>
 #include <sys/sdt_impl.h>
 
-#if MONOTONIC
+#if CONFIG_PERVASIVE_CPI
 #include <kern/monotonic.h>
 #include <machine/monotonic.h>
-#endif /* MONOTONIC */
+#endif /* CONFIG_PERVASIVE_CPI */
 
 #include "dtrace_xoroshiro128_plus.h"
 
@@ -487,7 +488,7 @@ static LCK_MTX_DECLARE_ATTR(dtrace_errlock, &dtrace_lck_grp, &dtrace_lck_attr);
  * no way for a global variable key signature to match a thread-local key
  * signature.
  */
-#if defined (__x86_64__) || defined(__arm__) || defined(__arm64__)
+#if defined (__x86_64__) || defined(__arm64__)
 #define	DTRACE_TLS_THRKEY(where) {                                           \
 	uint_t intr = ml_at_interrupt_context(); /* Note: just one measly bit */ \
 	uint64_t thr = thread_tid(current_thread());                             \
@@ -547,12 +548,12 @@ do {									\
 	((mstate)->dtms_scratch_base + (mstate)->dtms_scratch_size - \
 	(mstate)->dtms_scratch_ptr >= (alloc_sz))
 
-#define RECOVER_LABEL(bits) dtraceLoadRecover##bits:
-
-#if defined (__x86_64__) || (defined (__arm__) || defined (__arm64__))
+#if defined (__x86_64__) || defined (__arm64__)
 #define	DTRACE_LOADFUNC(bits)						\
 /*CSTYLED*/								\
 uint##bits##_t dtrace_load##bits(uintptr_t addr);			\
+									\
+extern int dtrace_nofault_copy##bits(uintptr_t, uint##bits##_t *);	\
 									\
 uint##bits##_t								\
 dtrace_load##bits(uintptr_t addr)					\
@@ -582,24 +583,19 @@ dtrace_load##bits(uintptr_t addr)					\
 	}								\
 									\
 	{								\
-	volatile vm_offset_t recover = (vm_offset_t)&&dtraceLoadRecover##bits;		\
 	*flags |= CPU_DTRACE_NOFAULT;					\
-	recover = dtrace_sign_and_set_thread_recover(current_thread(), recover);	\
 	/*CSTYLED*/							\
 	/*                                                              \
 	* PR6394061 - avoid device memory that is unpredictably		\
 	* mapped and unmapped                                   	\
 	*/								\
-        if (pmap_valid_page(pmap_find_phys(kernel_pmap, addr)))		\
-	    rval = *((volatile uint##bits##_t *)addr);			\
-	else {								\
+	if (!pmap_valid_page(pmap_find_phys(kernel_pmap, addr)) ||	\
+	    dtrace_nofault_copy##bits(addr, &rval)) {			\
 		*flags |= CPU_DTRACE_BADADDR;				\
 		cpu_core[CPU->cpu_id].cpuc_dtrace_illval = addr;	\
 		return (0);						\
 	}								\
 									\
-	RECOVER_LABEL(bits);						\
-	(void)dtrace_set_thread_recover(current_thread(), recover);	\
 	*flags &= ~CPU_DTRACE_NOFAULT;					\
 	}								\
 									\
@@ -3630,25 +3626,31 @@ dtrace_dif_variable(dtrace_mstate_t *mstate, dtrace_state_t *state, uint64_t v,
 		return ((uint64_t)(uintptr_t)zname);
 	}
 
-#if MONOTONIC
+#if CONFIG_PERVASIVE_CPI && MONOTONIC
 	case DIF_VAR_CPUINSTRS:
 		return mt_cur_cpu_instrs();
 
 	case DIF_VAR_CPUCYCLES:
 		return mt_cur_cpu_cycles();
 
-	case DIF_VAR_VINSTRS:
-		return mt_cur_thread_instrs();
+	case DIF_VAR_VINSTRS: {
+        struct recount_usage usage = { 0 };
+        recount_current_thread_usage(&usage);
+        return usage.ru_instructions;
+    }
 
-	case DIF_VAR_VCYCLES:
-		return mt_cur_thread_cycles();
-#else /* MONOTONIC */
+	case DIF_VAR_VCYCLES: {
+        struct recount_usage usage = { 0 };
+        recount_current_thread_usage(&usage);
+        return usage.ru_cycles;
+    }
+#else /* CONFIG_PERVASIVE_CPI && MONOTONIC */
 	case DIF_VAR_CPUINSTRS: /* FALLTHROUGH */
 	case DIF_VAR_CPUCYCLES: /* FALLTHROUGH */
 	case DIF_VAR_VINSTRS: /* FALLTHROUGH */
 	case DIF_VAR_VCYCLES: /* FALLTHROUGH */
 		return 0;
-#endif /* !MONOTONIC */
+#endif /* !CONFIG_PERVASIVE_CPI || !MONOTONIC */
 
 	case DIF_VAR_UID:
 		if (!dtrace_priv_proc_relaxed(state))
@@ -7006,9 +7008,26 @@ dtrace_probe_exit(dtrace_icookie_t cookie)
 	ASSERT(inprobe > 0);
 	dtrace_set_thread_inprobe(thread, inprobe - 1);
 
-#if INTERRUPT_MASKED_DEBUG
+#if SCHED_HYGIENE_DEBUG
+	/*
+	 * Probes can take a relatively long time depending on what the user has
+	 * requested be done in probe context.
+	 * Probes can fire from places where interrupts are already disabled
+	 * (like an interrupt handler) or where preemption has been disabled.
+	 * In order to not trip the interrupt or preemption thresholds, it is
+	 * important to reset timestamps when leaving probe context.
+	 */
+
+	/* Interrupts were disabled for the duration of this probe. */
 	ml_spin_debug_reset(thread);
-#endif /* INTERRUPT_MASKED_DEBUG */
+
+	/* May have been called from an interrupt handler. */
+	ml_irq_debug_abandon();
+
+	/* May have been called with preemption disabled. */
+	abandon_preemption_disable_measurement();
+
+#endif /* SCHED_HYGIENE_DEBUG */
 
 	dtrace_interrupt_enable(cookie);
 }
@@ -7698,13 +7717,12 @@ dtrace_probe(dtrace_id_t id, uint64_t arg0, uint64_t arg1,
 				 * into t_dtrace_vtime.
 				 */
 
-				/*				   
+				/*
 				 * Darwin sets the sign bit on t_dtrace_tracing
 				 * to suspend accumulation to it.
 				 */
 				dtrace_set_thread_tracing(current_thread(), 
 				    (1ULL<<63) | dtrace_get_thread_tracing(current_thread()));
-
 			}
 
 			/*
@@ -17341,7 +17359,7 @@ dtrace_attach(dev_info_t *devi)
 	    dtrace_provider, NULL, NULL, "END", 0, NULL);
 	dtrace_probeid_error = dtrace_probe_create((dtrace_provider_id_t)
 	    dtrace_provider, NULL, NULL, "ERROR", 3, NULL);
-#elif (defined(__arm__) || defined(__arm64__))
+#elif defined(__arm64__)
 	dtrace_probeid_begin = dtrace_probe_create((dtrace_provider_id_t)
 	    dtrace_provider, NULL, NULL, "BEGIN", 2, NULL);
 	dtrace_probeid_end = dtrace_probe_create((dtrace_provider_id_t)
@@ -17545,6 +17563,8 @@ dtrace_open(dev_t *devp, int flag, int otyp, cred_t *cred_p)
 	}
 	lck_mtx_unlock(&dtrace_lock);
 
+	/* Suspend cluster powerdown while DTrace device is opened. */
+	suspend_cluster_powerdown();
 	return (0);
 }
 
@@ -17621,6 +17641,8 @@ dtrace_close(dev_t dev, int flag, int otyp, cred_t *cred_p)
 	 */
 	dtrace_module_unloaded(NULL);
 
+	/* State is gone so resume cluster powerdown. */
+	resume_cluster_powerdown();
 	return (0);
 }
 
@@ -18879,7 +18901,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		if (pdesc.p_pid != -1) {
 			proc_t *proc = proc_find(pdesc.p_pid);
 			if (proc != PROC_NULL) {
-				task_pidresume(proc->task);
+				task_pidresume(proc_task(proc));
 				proc_rele(proc);
 			}
 		}
@@ -19108,6 +19130,8 @@ helper_ioctl(dev_t dev, u_long cmd, caddr_t data, int fflag, struct proc *p)
 
 #define HELPER_MAJOR  -24 /* let the kernel pick the device number */
 
+#define nulldevfp        (void (*)(void))&nulldev
+
 const static struct cdevsw helper_cdevsw =
 {
 	.d_open = helper_open,
@@ -19115,8 +19139,8 @@ const static struct cdevsw helper_cdevsw =
 	.d_read = eno_rdwrt,
 	.d_write = eno_rdwrt,
 	.d_ioctl = helper_ioctl,
-	.d_stop = (stop_fcn_t *)nulldev,
-	.d_reset = (reset_fcn_t *)nulldev,
+	.d_stop = eno_stop,
+	.d_reset = eno_reset,
 	.d_select = eno_select,
 	.d_mmap = eno_mmap,
 	.d_strategy = eno_strat,
@@ -19212,8 +19236,8 @@ static const struct cdevsw dtrace_cdevsw =
 	.d_read = eno_rdwrt,
 	.d_write = eno_rdwrt,
 	.d_ioctl = _dtrace_ioctl,
-	.d_stop = (stop_fcn_t *)nulldev,
-	.d_reset = (reset_fcn_t *)nulldev,
+	.d_stop = eno_stop,
+	.d_reset = eno_reset,
 	.d_select = eno_select,
 	.d_mmap = eno_mmap,
 	.d_strategy = eno_strat,
@@ -19305,11 +19329,6 @@ dtrace_init( void )
 		 * the structure is sized to avoid false sharing.
 		 */
 
-		/*
-		 * Initialize the CPU offline/online hooks.
-		 */
-		dtrace_install_cpu_hooks();
-
 		dtrace_modctl_list = NULL;
 
 		cpu_core = (cpu_core_t *)kmem_zalloc( ncpu * sizeof(cpu_core_t), KM_SLEEP );
@@ -19324,6 +19343,11 @@ dtrace_init( void )
 			LIST_INIT(&cpu_list[i].cpu_cyc_list);
 			lck_rw_init(&cpu_list[i].cpu_ft_lock, &dtrace_lck_grp, &dtrace_lck_attr);
 		}
+
+		/*
+		 * Initialize the CPU offline/online hooks.
+		 */
+		dtrace_install_cpu_hooks();
 
 		lck_mtx_lock(&cpu_lock);
 		for (i = 0; i < ncpu; ++i) 

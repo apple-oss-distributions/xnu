@@ -38,7 +38,7 @@
  */
 #if defined(__x86_64__) || defined(__i386__)
 #define KSANCOV_PC_OFFSET VM_MIN_KERNEL_ADDRESS
-#elif defined(__arm__) || defined(__arm64__)
+#elif defined(__arm64__)
 #define KSANCOV_PC_OFFSET VM_KERNEL_LINK_ADDRESS
 #else
 #error "Unsupported platform"

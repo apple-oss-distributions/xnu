@@ -762,7 +762,7 @@ IOPolledFileOpen(const char * filename,
 
 	if (kIOReturnSuccess != err) {
 		HIBLOG("error 0x%x opening polled file\n", err);
-		IOPolledFileClose(&vars, 0, NULL, 0, 0, 0);
+		IOPolledFileClose(&vars, 0, NULL, 0, 0, 0, false);
 		if (extentsData) {
 			extentsData->release();
 		}
@@ -796,7 +796,7 @@ IOPolledFileOpen(const char * filename,
 IOReturn
 IOPolledFileClose(IOPolledFileIOVars ** pVars,
     off_t write_offset, void * addr, size_t write_length,
-    off_t discard_offset, off_t discard_end)
+    off_t discard_offset, off_t discard_end, bool unlink)
 {
 	IOPolledFileIOVars * vars;
 
@@ -807,7 +807,7 @@ IOPolledFileClose(IOPolledFileIOVars ** pVars,
 
 	if (vars->fileRef) {
 		kern_close_file_for_direct_io(vars->fileRef, write_offset, addr, write_length,
-		    discard_offset, discard_end);
+		    discard_offset, discard_end, unlink);
 		vars->fileRef = NULL;
 	}
 	if (vars->fileExtents) {

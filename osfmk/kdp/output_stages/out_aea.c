@@ -33,14 +33,15 @@
 #include <kdp/output_stages/output_stages.h>
 #include <kdp/kdp_core.h>
 #include <kdp/processor_core.h>
+#include <machine/param.h>
 #include <libkern/apple_encrypted_archive/apple_encrypted_archive.h>
 
 struct aea_stage_data {
-	bool encryption_open;
+	bool     encryption_open;
 	uint64_t starting_corefile_offset;;
 	uint64_t current_corefile_offset;
-	void *state;
-	size_t state_size;
+	size_t   state_size;
+	char     state[];
 };
 
 static ssize_t
@@ -96,7 +97,7 @@ aea_stage_reset(struct kdp_output_stage *stage)
 
 	if (stage_data->encryption_open) {
 		aea_ret = apple_encrypted_archive->aea_close(stage_data->state, stage_data->state_size);
-		if (aea_ret < 0) {
+		if (aea_ret != 0) {
 			kern_coredump_log(NULL, "(aea_stage_reset) aea_close() returned %d\n", aea_ret);
 			// TODO return the error?
 		} else {
@@ -125,7 +126,7 @@ aea_stage_outproc(struct kdp_output_stage *stage, unsigned int request,
 		stage->kos_bypass = true;
 		if (stage_data->encryption_open) {
 			aea_ret = apple_encrypted_archive->aea_close(stage_data->state, stage_data->state_size);
-			if (aea_ret < 0) {
+			if (aea_ret != 0) {
 				kern_coredump_log(NULL, "(aea_stage_outproc) aea_close() returned %d\n", aea_ret);
 				err = KERN_FAILURE;
 			} else {
@@ -146,7 +147,7 @@ aea_stage_outproc(struct kdp_output_stage *stage, unsigned int request,
 				// Flush
 				if (stage_data->encryption_open) {
 					aea_ret = apple_encrypted_archive->aea_close(stage_data->state, stage_data->state_size);
-					if (aea_ret < 0) {
+					if (aea_ret != 0) {
 						kern_coredump_log(NULL, "(aea_stage_outproc) aea_close() returned %d\n", aea_ret);
 						err = KERN_FAILURE;
 					} else {
@@ -156,7 +157,7 @@ aea_stage_outproc(struct kdp_output_stage *stage, unsigned int request,
 			} else {
 				if (stage_data->encryption_open == false) {
 					aea_ret = apple_encrypted_archive->aea_open(stage_data->state, stage_data->state_size, (void *) stage, aea_write_callback, aea_read_callback);
-					if (aea_ret < 0) {
+					if (aea_ret != 0) {
 						kern_coredump_log(NULL, "(aea_stage_outproc) aea_open() returned %d\n", aea_ret);
 						err = KERN_FAILURE;
 					} else {
@@ -173,7 +174,7 @@ aea_stage_outproc(struct kdp_output_stage *stage, unsigned int request,
 							chunk = UINT32_MAX;
 						}
 						write_result = apple_encrypted_archive->aea_write(stage_data->state, stage_data->state_size, panic_data, chunk);
-						if (write_result < 0) {
+						if (write_result != chunk) {
 							kern_coredump_log(NULL, "(aea_stage_outproc) aea_write() returned %zd\n", write_result);
 							err = KERN_FAILURE;
 						}
@@ -230,8 +231,14 @@ aea_stage_initialize(struct kdp_output_stage *stage, const void *recipient_publi
 	assert(recipient_public_key_size != 0);
 
 	state_size = apple_encrypted_archive->aea_get_state_size();
+	if (0 == state_size) {
+		printf("AEA kext returned an error while calculating state size.");
+		ret = KERN_FAILURE;
+		return ret;
+	}
 	stage->kos_data_size = sizeof(struct aea_stage_data) + state_size;
-	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size, VM_KERN_MEMORY_DIAG);
+	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size,
+	    KMA_DATA, VM_KERN_MEMORY_DIAG);
 	if (KERN_SUCCESS != ret) {
 		printf("Failed to allocate memory (%zu bytes) for the AEA stage. Error 0x%x\n", stage->kos_data_size, ret);
 		return ret;
@@ -241,11 +248,10 @@ aea_stage_initialize(struct kdp_output_stage *stage, const void *recipient_publi
 	data->encryption_open = false;
 	data->starting_corefile_offset = 0;
 	data->current_corefile_offset = 0;
-	data->state = (void *) ((uintptr_t) data + sizeof(struct aea_stage_data));
 	data->state_size = state_size;
 
 	aea_ret = apple_encrypted_archive->aea_initialize_state(data->state, data->state_size, (const uint8_t *)recipient_public_key, recipient_public_key_size);
-	if (aea_ret < 0) {
+	if (aea_ret != 0) {
 		printf("WARNING: Coredump encryption failed to initialize. aea_initialize_state() returned %d\n", aea_ret);
 		aea_stage_free(stage);
 		return KERN_FAILURE;

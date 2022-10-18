@@ -167,7 +167,7 @@ public:
 		uint64_t deadline) LOCALONLY;
 
 	virtual void
-	Aborted(void) LOCAL;
+	Aborted(void) LOCALHOST;
 };
 
 #endif /* ! _IOKIT_OSACTION_H */

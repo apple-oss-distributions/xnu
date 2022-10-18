@@ -163,6 +163,7 @@ typedef enum {
 	CHANNEL_ATTR_MAX_FRAGS,         /* (g) max length of buflet chain */
 	CHANNEL_ATTR_NUM_BUFFERS,       /* (g) # of buffers in user pool */
 	CHANNEL_ATTR_LOW_LATENCY,       /* (g/s) bool: low latency channel */
+	CHANNEL_ATTR_LARGE_BUF_SIZE,    /* (g) large buffer size (bytes) */
 } channel_attr_type_t;
 
 /*

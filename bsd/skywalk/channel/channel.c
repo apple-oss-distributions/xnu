@@ -176,7 +176,7 @@ static int __ch_inited = 0;
 uint64_t __ch_umd_redzone_cookie = 0;
 
 #define SKMEM_TAG_CH_KEY        "com.apple.skywalk.channel.key"
-kern_allocation_name_t skmem_tag_ch_key;
+SKMEM_TAG_DEFINE(skmem_tag_ch_key, SKMEM_TAG_CH_KEY);
 
 static void
 ch_redzone_init(void)
@@ -208,10 +208,6 @@ channel_init(void)
 
 	ch_redzone_init();
 
-	ASSERT(skmem_tag_ch_key == NULL);
-	skmem_tag_ch_key = kern_allocation_name_allocate(SKMEM_TAG_CH_KEY, 0);
-	ASSERT(skmem_tag_ch_key != NULL);
-
 	__ch_inited = 1;
 
 	return error;
@@ -223,11 +219,6 @@ channel_fini(void)
 	SK_LOCK_ASSERT_HELD();
 
 	if (__ch_inited) {
-		if (skmem_tag_ch_key != NULL) {
-			kern_allocation_name_release(skmem_tag_ch_key);
-			skmem_tag_ch_key = NULL;
-		}
-
 		__ch_umd_redzone_cookie = 0;
 		__ch_inited = 0;
 	}
@@ -2123,8 +2114,7 @@ ch_connect(struct kern_nexus *nx, struct chreq *chr, struct kern_channel *ch0,
 	cinfo->cinfo_mem_map_size = ch->ch_mmap.ami_mapsize;
 	cinfo->cinfo_schema_offset = chr->cr_memoffset;
 	cinfo->cinfo_num_bufs =
-	    skmem_arena_nexus(ch->ch_na->na_arena)->
-	    arn_rx_pp->pp_buf_region->skr_params.srp_c_obj_cnt;
+	    PP_BUF_REGION_DEF(skmem_arena_nexus(ch->ch_na->na_arena)->arn_rx_pp)->skr_params.srp_c_obj_cnt;
 	/*
 	 * ch_last is really the number of rings, but we need to return
 	 * the actual zero-based ring ID to the client.  Make sure that

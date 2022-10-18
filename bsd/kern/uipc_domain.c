@@ -208,15 +208,15 @@ init_domain(struct domain *dp)
 	}
 
 	/* Recompute for new protocol */
-	if (_max_linkhdr < 16) {        /* XXX - Sheesh; everything's ether? */
-		_max_linkhdr = 16;
+	if (max_linkhdr < 16) {        /* XXX - Sheesh; everything's ether? */
+		max_linkhdr = 16;
 	}
-	_max_linkhdr = max_linkhdr;     /* round it up */
+	max_linkhdr = (int)P2ROUNDUP(max_linkhdr, sizeof(uint32_t));
 
-	if (dp->dom_protohdrlen > _max_protohdr) {
-		_max_protohdr = dp->dom_protohdrlen;
+	if (dp->dom_protohdrlen > max_protohdr) {
+		max_protohdr = dp->dom_protohdrlen;
 	}
-	_max_protohdr = max_protohdr;   /* round it up */
+	max_protohdr = (int)P2ROUNDUP(max_protohdr, sizeof(uint32_t));
 
 	max_hdr = max_linkhdr + max_protohdr;
 	max_datalen = MHLEN - max_hdr;

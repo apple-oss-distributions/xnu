@@ -192,20 +192,18 @@ class BTLog(object):
             return False
         return True
 
-    def iter_records(self, wantElement=None, wantBtref=None):
+    def _records_indices(self, reverse=False):
+        step = -1 if reverse else 1
+        count = step * self._cnt
+        return ((int(self._btll.btll_pos) + i) % self._cnt for i in range(0, count, step))
+
+    def iter_records(self, wantElement=None, wantBtref=None, reverse=False):
         if self.is_log():
-            cnt = self._cnt
-            pos = int(self._btll.btll_pos)
-            if pos:
-                for i in range(pos, cnt):
+            if int(self._btll.btll_pos):
+                for i in self._records_indices(reverse=reverse):
                     e = self._btll.btll_entries[i]
                     if e.btle_addr and self._entry_matches(e.btle_addr, e.btle_where, wantElement, wantBtref):
                         yield self._make_entry(i, e.btle_addr, e.btle_where)
-
-            for i in range(0, pos):
-                e = self._btll.btll_entries[i]
-                if e.btle_addr and self._entry_matches(e.btle_addr, e.btle_where, wantElement, wantBtref):
-                    yield self._make_entry(i, e.btle_addr, e.btle_where)
 
         elif self.is_hash():
             mask = self._hash_mask()
@@ -299,10 +297,13 @@ def ShowBTLog(cmd_args=None, cmd_options={}, O=None):
         Usage: showbtlog <btlog address>
     """
 
+    if not cmd_args:
+        return O.error('missing btlog address argument')
+
     with O.table(BTLog.__str__.header):
         print(BTLog(cmd_args[0]))
 
-@lldb_command('showbtlogrecords', 'B:E:F', fancy=True)
+@lldb_command('showbtlogrecords', 'B:E:C:FR', fancy=True)
 def ShowBTLogRecords(cmd_args=None, cmd_options={}, O=None):
     """ Print all records in the btlog from head to tail.
 
@@ -310,7 +311,9 @@ def ShowBTLogRecords(cmd_args=None, cmd_options={}, O=None):
 
             -B <btref>      limit output to elements with backtrace <ref>
             -E <addr>       limit output to elements with address <addr>
+            -C <num>        number of elements to show
             -F              show full backtraces
+            -R              reverse order
     """
 
     if not cmd_args:
@@ -326,12 +329,23 @@ def ShowBTLogRecords(cmd_args=None, cmd_options={}, O=None):
     else:
         element = None
 
+    if "-C" in cmd_options:
+        count = kern.GetValueFromAddress(cmd_options["-C"])
+    else:
+        count = None
+
+    reversed = "-R" in cmd_options
+
     btlib = BTLibrary()
     btlog = BTLog(cmd_args[0])
 
     with O.table("{:<10s}  {:<20s} {:>3s}  {:<10s}".format("idx", "element", "OP", "backtrace")):
-        for idx, addr, op, ref in btlog.iter_records(wantElement=element, wantBtref=btref):
+        for idx, addr, op, ref in btlog.iter_records(wantElement=element, wantBtref=btref, reverse=reversed):
             print(O.format("{:<10d}  {:<#20x} {:>3d}  {:#010x}", idx, addr, op, ref))
             if "-F" in cmd_options:
                 for s in btlib.get_stack(ref).symbolicated_frames():
                     print(O.format("    {:s}", s))
+            if count:
+                count -= 1
+                if count == 0:
+                    break

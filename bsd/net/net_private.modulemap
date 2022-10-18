@@ -1,6 +1,26 @@
 module DarwinPrivate.net [system] {
+  module if {
+    header "net/if_private.h"
+    export *
+  }
+
+  #ifndef XNU_PLATFORM_MacOSX
   module if_media {
     header "net/if_media.h"
+    export *
+  }
+
+  #endif
+  module if_var {
+    header "net/if_var_private.h"
+    export *
+  }
+
+  module route {
+    #ifndef XNU_PLATFORM_MacOSX
+    header "net/route.h"
+    #endif
+    header "net/route_private.h"
     export *
   }
 }

@@ -93,7 +93,7 @@ module Darwin.Mach [system] {
     export *
   }
 
-  #ifndef PLATFORM_MacOSX
+  #ifndef XNU_PLATFORM_MacOSX
   module hv {
     header "arm64/hv/hv_kern_types.h"
     export *
@@ -107,11 +107,6 @@ module Darwin.Mach [system] {
 
   module kmod {
     header "mach/kmod.h"
-    export *
-  }
-
-  module lock_set {
-    header "mach/lock_set.h"
     export *
   }
 
@@ -175,7 +170,7 @@ module Darwin.Mach [system] {
   // on the other platforms. Its actual contents are installed
   // to usr/local/include/mach/mach_vm.h on other platforms.
   #endif
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module mach_vm {
     header "mach/mach_vm.h"
     export *
@@ -273,10 +268,10 @@ module Darwin.Mach [system] {
   }
 
   #ifdef XNU_KERNEL_PRIVATE
-  // The PLATFORM_MacOSX headers are in the public SDK for macOS,
+  // The XNU_PLATFORM_MacOSX headers are in the public SDK for macOS,
   // but mastered out of the public SDK for the other OSes.
   #endif
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module sdt {
     header "mach/sdt.h"
     header "sys/sdt.h"
@@ -289,7 +284,7 @@ module Darwin.Mach [system] {
     export *
   }
 
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module shared_region {
     header "mach/shared_region.h"
     export *
@@ -450,7 +445,7 @@ module Darwin.Mach [system] {
   #endif
   exclude header "mach/mach_eventlink.h"
 
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   exclude header "mach/shared_memory_server.h" // deprecated
 
   #endif

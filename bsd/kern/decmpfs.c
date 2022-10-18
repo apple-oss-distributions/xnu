@@ -1303,7 +1303,7 @@ decmpfs_pagein_compressed(struct vnop_pagein_args *ap, int *is_compressed, decmp
 #if 0
 		/* There should be a decmpfs equivalent of this cluster_pagein call */
 		if (f_offset >= cachedSize) {
-			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_CLUSTER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_CL_PGIN_PAST_EOF), 0 /* arg */);
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_CLUSTER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_CL_PGIN_PAST_EOF), 0 /* arg */);
 		}
 #endif
 		err = EINVAL;

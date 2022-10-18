@@ -85,6 +85,7 @@
 #endif
 
 #include <security/_label.h>
+#include <kern/cs_blobs.h>
 
 struct attrlist;
 struct auditinfo;
@@ -116,6 +117,7 @@ struct tty;
 struct ucred;
 struct vfs_attr;
 struct vnode;
+struct sockaddr;
 /** @struct dummy */
 
 
@@ -551,6 +553,32 @@ typedef int mpo_cred_label_update_execve_t(
 typedef void mpo_cred_label_update_t(
 	kauth_cred_t cred,
 	struct label *newlabel
+	);
+/**
+ *  @brief Access control for launching a process with constraints
+ *  @param curr_p The new process
+ *  @param original_parent_id The pid of the original parent that spawned this process
+ *  @param responsible_pid  The pid of the responsible process that spawned this process
+ *  @param macpolicyattr MAC policy-specific spawn attribute data
+ *  @param macpolicyattrlen Length of policy-specific spawn attribute data
+ *  @param fatal_failure_desc Description of fatal failure
+ *  @param fatal_failure_desc_len Failure description len, failure is fatal if non-0
+ *
+ *  Detemine whether the process being spawned adheres to the launch
+ *  constraints (e.g. whether the process is spawned by launchd) and should
+ *  be allowed to execute. This call occurs during execve or posix_spawn.
+ *
+ *  @return Return 0 if process can be created, otherwise an appropriate value for
+ *  errno should be returned.
+ */
+typedef int mpo_proc_check_launch_constraints_t(
+	proc_t curr_p,
+	pid_t original_parent_id,
+	pid_t responsible_pid,
+	void *macpolicyattr,
+	size_t macpolicyattrlen,
+	launch_constraint_data_t lcd,
+	char **fatal_failure_desc, size_t *fatal_failure_desc_len
 	);
 /**
  *  @brief Create a new devfs device
@@ -3616,40 +3644,6 @@ typedef void mpo_sysvshm_label_init_t(
 typedef void mpo_sysvshm_label_recycle_t(
 	struct label *shmlabel
 	);
-/**
- *  @brief Access control check for getting a process's task name
- *  @param cred Subject credential
- *  @param pident Object unique process identifier
- *
- *  Determine whether the subject identified by the credential can get
- *  the passed process's task name port.
- *  This call is used by the task_name_for_pid(2) API.
- *
- *  @return Return 0 if access is granted, otherwise an appropriate value for
- *  errno should be returned. Suggested failure: EACCES for label mismatch,
- *  EPERM for lack of privilege, or ESRCH to hide visibility of the target.
- */
-typedef int mpo_proc_check_get_task_name_t(
-	kauth_cred_t cred,
-	struct proc_ident *pident
-	);
-/**
- *  @brief Access control check for getting a process's task port
- *  @param cred Subject credential
- *  @param pident Object unique process identifier
- *
- *  Determine whether the subject identified by the credential can get
- *  the passed process's task control port.
- *  This call is used by the task_for_pid(2) API.
- *
- *  @return Return 0 if access is granted, otherwise an appropriate value for
- *  errno should be returned. Suggested failure: EACCES for label mismatch,
- *  EPERM for lack of privilege, or ESRCH to hide visibility of the target.
- */
-typedef int mpo_proc_check_get_task_t(
-	kauth_cred_t cred,
-	struct proc_ident *pident
-	);
 
 /**
  *  @brief Access control check for getting a process's task ports of different flavors
@@ -3669,25 +3663,6 @@ typedef int mpo_proc_check_get_task_with_flavor_t(
 	kauth_cred_t cred,
 	struct proc_ident *pident,
 	mach_task_flavor_t flavor
-	);
-
-/**
- *  @brief Access control check for exposing a process's task port
- *  @param cred Subject credential
- *  @param pident Object unique process identifier
- *
- *  Determine whether the subject identified by the credential can expose
- *  the passed process's task control port.
- *  This call is used by the accessor APIs like processor_set_tasks() and
- *  processor_set_threads().
- *
- *  @return Return 0 if access is granted, otherwise an appropriate value for
- *  errno should be returned. Suggested failure: EACCES for label mismatch,
- *  EPERM for lack of privilege, or ESRCH to hide visibility of the target.
- */
-typedef int mpo_proc_check_expose_task_t(
-	kauth_cred_t cred,
-	struct proc_ident *pident
 	);
 
 /**
@@ -5776,6 +5751,27 @@ typedef void mpo_vnode_notify_reclaim_t(
 	struct vnode *vp
 	);
 
+/**
+ *  @brief Inform MAC policies that a vnode has been deleted
+ *  @param cred Subject credential
+ *  @param dvp Parent directory vnode
+ *  @param dlabel Policy label for dvp
+ *  @param vp Object vnode to delete
+ *  @param label Policy label for vp
+ *  @param cnp Component name for vp
+ *
+ *  Inform Mac policies that a vnode have been successfully deleted
+ *  (passing all MAC polices and DAC).
+ */
+typedef void mpo_vnode_notify_unlink_t(
+	kauth_cred_t cred,
+	struct vnode *dvp,
+	struct label *dlabel,
+	struct vnode *vp,
+	struct label *label,
+	struct componentname *cnp
+	);
+
 /*
  * Placeholder for future events that may need mac hooks.
  */
@@ -5787,7 +5783,7 @@ typedef void mpo_reserved_hook_t(void);
  * Please note that this should be kept in sync with the check assumptions
  * policy in bsd/kern/policy_check.c (policy_ops struct).
  */
-#define MAC_POLICY_OPS_VERSION 80 /* inc when new reserved slots are taken */
+#define MAC_POLICY_OPS_VERSION 82 /* inc when new reserved slots are taken */
 struct mac_policy_ops {
 	mpo_audit_check_postselect_t            *mpo_audit_check_postselect;
 	mpo_audit_check_preselect_t             *mpo_audit_check_preselect;
@@ -5836,8 +5832,8 @@ struct mac_policy_ops {
 	mpo_file_label_destroy_t                *mpo_file_label_destroy;    /* deprecated not called anymore */
 	mpo_file_label_associate_t              *mpo_file_label_associate;  /* deprecated not called anymore */
 	mpo_file_notify_close_t                 *mpo_file_notify_close;
+	mpo_proc_check_launch_constraints_t     *mpo_proc_check_launch_constraints;
 
-	mpo_reserved_hook_t                     *mpo_reserved06;
 	mpo_reserved_hook_t                     *mpo_reserved07;
 	mpo_reserved_hook_t                     *mpo_reserved08;
 	mpo_reserved_hook_t                     *mpo_reserved09;
@@ -5876,7 +5872,7 @@ struct mac_policy_ops {
 	mpo_proc_check_set_task_special_port_t  *mpo_proc_check_set_task_special_port;
 
 	mpo_vnode_notify_swap_t                 *mpo_vnode_notify_swap;
-	mpo_reserved_hook_t                     *mpo_reserved31;
+	mpo_vnode_notify_unlink_t               *mpo_vnode_notify_unlink;
 	mpo_reserved_hook_t                     *mpo_reserved32;
 	mpo_reserved_hook_t                     *mpo_reserved33;
 	mpo_reserved_hook_t                     *mpo_reserved34;
@@ -5929,7 +5925,7 @@ struct mac_policy_ops {
 	mpo_proc_notify_exec_complete_t         *mpo_proc_notify_exec_complete;
 	mpo_proc_notify_cs_invalidated_t        *mpo_proc_notify_cs_invalidated;
 	mpo_proc_check_syscall_unix_t           *mpo_proc_check_syscall_unix;
-	mpo_proc_check_expose_task_t            *mpo_proc_check_expose_task;            /* Deprecating, use mpo_proc_check_expose_task_with_flavor instead */
+	mpo_reserved_hook_t                     *mpo_reserved45;
 	mpo_proc_check_set_host_special_port_t  *mpo_proc_check_set_host_special_port;
 	mpo_proc_check_set_host_exception_port_t *mpo_proc_check_set_host_exception_port;
 	mpo_exc_action_check_exception_send_t   *mpo_exc_action_check_exception_send;
@@ -5966,8 +5962,8 @@ struct mac_policy_ops {
 
 	mpo_proc_check_debug_t                  *mpo_proc_check_debug;
 	mpo_proc_check_fork_t                   *mpo_proc_check_fork;
-	mpo_proc_check_get_task_name_t          *mpo_proc_check_get_task_name; /* Deprecating, use mpo_proc_check_get_task_with_flavor instead */
-	mpo_proc_check_get_task_t               *mpo_proc_check_get_task;      /* Deprecating, use mpo_proc_check_get_task_with_flavor instead */
+	mpo_reserved_hook_t                     *mpo_reserved61;
+	mpo_reserved_hook_t                     *mpo_reserved62;
 	mpo_proc_check_getaudit_t               *mpo_proc_check_getaudit;
 	mpo_proc_check_getauid_t                *mpo_proc_check_getauid;
 	mpo_proc_check_getlcid_t                *mpo_proc_check_getlcid;

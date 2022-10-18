@@ -54,6 +54,14 @@ public:
 	    IODispatchQueue * queue,
 	    IODataQueueDispatchSource ** source);
 
+    /*!
+     * @brief Represents the size of the data queue entry header independent of the actual size of the data in the entry.  This is the overhead of each entry in the queue.
+     * @param       dataQueueEntryHeaderSize  Out parameter for data queue entry header size
+     * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
+     */
+    static size_t
+    GetDataQueueEntryHeaderSize() LOCALONLY;
+
 	virtual bool
 	init() override;
 
@@ -169,6 +177,27 @@ public:
      */
 	kern_return_t
 	EnqueueWithCoalesce(uint32_t dataSize,  bool * sendDataAvailable, IODataQueueClientEnqueueEntryBlock callback) LOCALONLY;
+
+    /*!
+     * @brief       As a producer, check if the queue has sufficient free space for a queue entry with the specified size.
+     * @param       dataSize  size of the queue entry to check
+     * @return      kIOReturnSuccess if the queue has enough free space
+     *              kIOReturnOverrun if the queue is full
+     *              kIOReturnError if the queue was corrupt
+     */
+	kern_return_t
+	CanEnqueueData(uint32_t dataSize) LOCALONLY;
+
+    /*!
+     * @brief       As a producer, check if the queue has sufficient free space for queue entries with the specified size.
+     * @param       dataSize   size of the queue entry to check
+     * @param       entryCount number of queue entries to check. Entries are assumed to be the same size.
+     * @return      kIOReturnSuccess if the queue has enough free space
+     *              kIOReturnOverrun if the queue is full
+     *              kIOReturnError if the queue was corrupt
+     */
+	kern_return_t
+	CanEnqueueData(uint32_t dataSize, uint32_t entryCount) LOCALONLY;
 
     /*!
      * @brief       As a consumer, send the DataServiced notification indicated by DequeueWithCoalesce.

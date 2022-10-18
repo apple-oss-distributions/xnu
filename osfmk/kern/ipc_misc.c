@@ -153,9 +153,11 @@ kern_return_t
 fileport_walk(task_t task, size_t *countp,
     bool (^cb)(size_t i, mach_port_name_t, struct fileglob *))
 {
+	const uint32_t BATCH_SIZE = 4 << 10;
 	ipc_space_t space = task->itk_space;
-	ipc_entry_t table;
-	ipc_entry_num_t tsize;
+	ipc_entry_table_t table;
+	ipc_entry_num_t index;
+	ipc_entry_t entry;
 	size_t count = 0;
 
 	is_read_lock(space);
@@ -165,11 +167,15 @@ fileport_walk(task_t task, size_t *countp,
 	}
 
 	table = is_active_table(space);
-	tsize = table->ie_size;
+	entry = ipc_entry_table_base(table);
 
-	for (mach_msg_type_number_t index = 1; index < tsize; index++) {
-		ipc_entry_bits_t bits = table[index].ie_bits;
-		ipc_object_t io = table[index].ie_object;
+	/* skip the first element which is not a real entry */
+	index = 1;
+	entry = ipc_entry_table_next_elem(table, entry);
+
+	for (;;) {
+		ipc_entry_bits_t bits = entry->ie_bits;
+		ipc_object_t io = entry->ie_object;
 		mach_port_name_t name;
 		struct fileglob *fg;
 
@@ -177,16 +183,37 @@ fileport_walk(task_t task, size_t *countp,
 			name = MACH_PORT_MAKE(index, IE_BITS_GEN(bits));
 			fg   = fileport_port_to_fileglob(ip_object_to_port(io));
 
-			if (fg == NULL) {
-				continue;
-			}
-			if (cb && !cb(count, name, fg)) {
-				cb = NULL;
-				if (countp == NULL) {
-					break;
+			if (fg) {
+				if (cb && !cb(count, name, fg)) {
+					cb = NULL;
+					if (countp == NULL) {
+						break;
+					}
 				}
+				count++;
 			}
-			count++;
+		}
+
+		index++;
+		entry = ipc_entry_table_next_elem(table, entry);
+		if (!entry) {
+			break;
+		}
+		if (index % BATCH_SIZE == 0) {
+			/*
+			 * Give the system some breathing room,
+			 * validate that the space is still valid,
+			 * and reload the pointer and length.
+			 */
+			is_read_unlock(space);
+			is_read_lock(space);
+			if (!is_active(space)) {
+				is_read_unlock(space);
+				return KERN_INVALID_TASK;
+			}
+
+			table = is_active_table(space);
+			entry = ipc_entry_table_get_nocheck(table, index);
 		}
 	}
 

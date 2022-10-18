@@ -50,6 +50,7 @@ extern "C" {
 #include <uuid/uuid.h>
 #include <sys/vnode_internal.h>
 #include <sys/mount.h>
+#include <corecrypto/ccsha2.h>
 
 // how long to wait for matching root device, secs
 #if DEBUG
@@ -520,6 +521,37 @@ IOGetBootObjectsPath(char *path_prefix)
 	return result;
 }
 
+
+bool
+IOGetBootManifestHash(char *hash_data, size_t *hash_data_size)
+{
+	IORegistryEntry *entry = NULL;
+	OSData *manifest_hash_data = NULL;
+	bool result = false;
+
+	if ((entry = IORegistryEntry::fromPath("/chosen", gIODTPlane))) {
+		manifest_hash_data = (OSData *)entry->getProperty("boot-manifest-hash");
+		if (manifest_hash_data) {
+			unsigned int length = manifest_hash_data->getLength();
+			/* hashed with SHA2-384 or SHA1, the boot manifest hash should be 48 Bytes or less */
+			if ((length <= CCSHA384_OUTPUT_SIZE) && (*hash_data_size >= CCSHA384_OUTPUT_SIZE)) {
+				/* ensure caller's buffer is fully initialized: */
+				bzero(hash_data, CCSHA384_OUTPUT_SIZE);
+				/* copy the content of manifest_hash_data->getBytesNoCopy() into hash_data */
+				memcpy(hash_data, manifest_hash_data->getBytesNoCopy(), length);
+				*hash_data_size = length;
+				result = true;
+			} else {
+				hash_data = NULL;
+				*hash_data_size = 0;
+			}
+		}
+		OSSafeReleaseNULL(entry);
+	}
+
+	return result;
+}
+
 /*
  * Set NVRAM to boot into the right flavor of Recovery,
  * optionally passing a UUID of a volume that failed to boot.
@@ -616,26 +648,6 @@ do_reboot:
 	}
 
 	return true;
-}
-
-int
-IOGetVMMPresent(void)
-{
-	int hv_vmm_present = 0;
-
-#if defined(__arm64__)
-	if (IODTGetDefault("vmm-present", &hv_vmm_present, sizeof(hv_vmm_present)) < 0) {
-		return 0;
-	}
-
-	if (hv_vmm_present != 0) {
-		hv_vmm_present = 1;
-	}
-#elif defined(__x86_64__)
-	hv_vmm_present = cpuid_vmm_present();
-#endif
-
-	return hv_vmm_present;
 }
 
 kern_return_t
@@ -891,6 +903,8 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 #if XNU_TARGET_OS_OSX && defined(__arm64__)
 			// The disk isn't found - have the user pick from System Recovery.
 			(void)IOSetRecoveryBoot(BSD_BOOTFAIL_MEDIA_MISSING, NULL, true);
+#elif XNU_TARGET_OS_IOS
+			panic("Failed to mount root device");
 #endif
 		}
 	} while (!service);
@@ -1077,11 +1091,21 @@ IOBSDGetPlatformUUID( uuid_t uuid, mach_timespec_t timeout )
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include <sys/conf.h>
+#include <sys/lock.h>
 #include <sys/vnode.h>
+#include <sys/vnode_if.h>
 #include <sys/vnode_internal.h>
 #include <sys/fcntl.h>
+#include <sys/fsctl.h>
+#include <sys/mount.h>
 #include <IOKit/IOPolledInterface.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+
+// see HFSIOC_VOLUME_STATUS in APFS/HFS
+#define HFS_IOCTL_VOLUME_STATUS _IOR('h', 24, u_int32_t)
+
+LCK_GRP_DECLARE(gIOPolledCoreFileGrp, "polled_corefile");
+LCK_MTX_DECLARE(gIOPolledCoreFileMtx, &gIOPolledCoreFileGrp);
 
 IOPolledFileIOVars * gIOPolledCoreFileVars;
 kern_return_t gIOPolledCoreFileOpenRet = kIOReturnNotReady;
@@ -1136,6 +1160,27 @@ IOCoreFileGetSize(uint64_t *ideal_size, uint64_t *fallback_size, uint64_t *free_
 
 	*ideal_size = *fallback_size = *free_space_to_leave = 0;
 
+	// If a custom size was requested, override the ideal and requested sizes
+	if (PE_parse_boot_argn("corefile_size_mb", &requested_corefile_size,
+	    sizeof(requested_corefile_size))) {
+		IOLog("Boot-args specify %d MB kernel corefile\n", requested_corefile_size);
+
+		*ideal_size = *fallback_size = (requested_corefile_size * 1024ULL * 1024ULL);
+		return;
+	}
+
+	unsigned int status_flags = 0;
+	int error = VNOP_IOCTL(rootvnode, HFS_IOCTL_VOLUME_STATUS, (caddr_t)&status_flags, 0,
+	    vfs_context_kernel());
+	if (!error) {
+		if (status_flags & (VQ_VERYLOWDISK | VQ_LOWDISK | VQ_NEARLOWDISK)) {
+			IOLog("Volume is low on space. Not allocating kernel corefile.\n");
+			return;
+		}
+	} else {
+		IOLog("Couldn't retrieve volume status. Error %d\n", error);
+	}
+
 #if defined(XNU_TARGET_OS_BRIDGE)
 #pragma unused(mode)
 	*ideal_size = *fallback_size = kIOCoreDumpSize;
@@ -1160,12 +1205,6 @@ IOCoreFileGetSize(uint64_t *ideal_size, uint64_t *fallback_size, uint64_t *free_
 		*ideal_size = *fallback_size = *free_space_to_leave = kIOStackshotFileSize;
 	}
 #endif /* defined(XNU_TARGET_OS_BRIDGE) */
-	// If a custom size was requested, override the ideal and requested sizes
-	if (PE_parse_boot_argn("corefile_size_mb", &requested_corefile_size, sizeof(requested_corefile_size))) {
-		IOLog("Boot-args specify %d MB kernel corefile\n", requested_corefile_size);
-
-		*ideal_size = *fallback_size = (requested_corefile_size * 1024ULL * 1024ULL);
-	}
 
 	return;
 }
@@ -1206,6 +1245,10 @@ IOOpenPolledCoreFile(thread_call_param_t __unused, thread_call_param_t corefilen
 		return;
 	}
 
+	if (gIOPolledCoreFileMode == kIOPolledCoreFileModeUnlinked) {
+		return;
+	}
+
 	if (mode_to_init == kIOPolledCoreFileModeDisabled) {
 		gIOPolledCoreFileMode = kIOPolledCoreFileModeDisabled;
 		return;
@@ -1216,6 +1259,11 @@ IOOpenPolledCoreFile(thread_call_param_t __unused, thread_call_param_t corefilen
 	gIOPolledCoreFileMode = kIOPolledCoreFileModeClosed;
 
 	IOCoreFileGetSize(&corefile_size_bytes, &corefile_fallback_size_bytes, &free_space_to_leave_bytes, mode_to_init);
+
+	if (corefile_size_bytes == 0 && corefile_fallback_size_bytes == 0) {
+		gIOPolledCoreFileMode = kIOPolledCoreFileModeUnlinked;
+		return;
+	}
 
 	do {
 		err = IOPolledFileOpen(filename, kIOPolledFileCreate, corefile_size_bytes, free_space_to_leave_bytes,
@@ -1248,7 +1296,7 @@ IOOpenPolledCoreFile(thread_call_param_t __unused, thread_call_param_t corefilen
 
 	gIOPolledCoreFileOpenRet = IOPolledFilePollersSetup(gIOPolledCoreFileVars, kIOPolledPreflightCoreDumpState);
 	if (kIOReturnSuccess != gIOPolledCoreFileOpenRet) {
-		IOPolledFileClose(&gIOPolledCoreFileVars, 0, NULL, 0, 0, 0);
+		IOPolledFileClose(&gIOPolledCoreFileVars, 0, NULL, 0, 0, 0, false);
 		IOLog("IOPolledFilePollersSetup for corefile failed with error: 0x%x\n", err);
 	} else {
 		IOLog("Opened corefile of size %llu MB\n", (corefile_size_bytes / (1024ULL * 1024ULL)));
@@ -1303,7 +1351,19 @@ IOClosePolledCoreFile(void)
 	gIOPolledCoreFileOpenRet = kIOReturnNotOpen;
 	gIOPolledCoreFileMode = kIOPolledCoreFileModeClosed;
 	IOPolledFilePollersClose(gIOPolledCoreFileVars, kIOPolledPostflightCoreDumpState);
-	IOPolledFileClose(&gIOPolledCoreFileVars, 0, NULL, 0, 0, 0);
+	IOPolledFileClose(&gIOPolledCoreFileVars, 0, NULL, 0, 0, 0, false);
+}
+
+static void
+IOUnlinkPolledCoreFile(void)
+{
+	// Notify kdp core that the corefile is no longer available
+	(void) kdp_core_polled_io_polled_file_unavailable();
+
+	gIOPolledCoreFileOpenRet = kIOReturnNotOpen;
+	gIOPolledCoreFileMode = kIOPolledCoreFileModeUnlinked;
+	IOPolledFilePollersClose(gIOPolledCoreFileVars, kIOPolledPostflightCoreDumpState);
+	IOPolledFileClose(&gIOPolledCoreFileVars, 0, NULL, 0, 0, 0, true);
 }
 
 #endif /* IOPOLLED_COREFILE */
@@ -1317,6 +1377,8 @@ IOBSDMountChange(struct mount * mp, uint32_t op)
 	int pathLen;
 	vnode_t vn;
 	int result;
+
+	lck_mtx_lock(&gIOPolledCoreFileMtx);
 
 	switch (op) {
 	case kIOMountChangeMount:
@@ -1369,11 +1431,128 @@ IOBSDMountChange(struct mount * mp, uint32_t op)
 		}
 		break;
 	}
+
+	lck_mtx_unlock(&gIOPolledCoreFileMtx);
 #endif /* IOPOLLED_COREFILE */
+}
+
+extern "C" void
+IOBSDLowSpaceUnlinkKernelCore(void)
+{
+#if IOPOLLED_COREFILE
+	lck_mtx_lock(&gIOPolledCoreFileMtx);
+	if (gIOPolledCoreFileVars) {
+		thread_call_cancel_wait(corefile_open_call);
+		IOUnlinkPolledCoreFile();
+	}
+	lck_mtx_unlock(&gIOPolledCoreFileMtx);
+#endif
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+extern "C"
+OS_ALWAYS_INLINE
+boolean_t
+IOCurrentTaskHasStringEntitlement(const char *entitlement, const char *value)
+{
+	return IOTaskHasStringEntitlement(NULL, entitlement, value);
+}
+
+extern "C" boolean_t
+IOTaskHasStringEntitlement(task_t task, const char *entitlement, const char *value)
+{
+	if (task == kernel_task) {
+		return false;
+	} else if (!entitlement || !value) {
+		return false;
+	}
+
+	size_t name_length = strnlen(entitlement, CE_MAX_KEY_SIZE);
+	if (name_length >= CE_MAX_KEY_SIZE) {
+		printf("entitlement name length exceeds maximum allowed\n");
+		return false;
+	}
+
+	size_t value_length = strnlen(value, CE_MAX_KEY_SIZE);
+	if (value_length >= CE_MAX_KEY_SIZE) {
+		printf("entitlement value length exceeds maximum allowed\n");
+		return false;
+	}
+
+	CEQuery_t query = {
+		CESelectDictValueDynamic((const uint8_t*)entitlement, name_length),
+		CEIsDynamicStringAllowed((const uint8_t*)value, value_length)
+	};
+
+#if PMAP_CS_ENABLE && !CONFIG_X86_64_COMPAT
+
+	/*
+	 * If we have PMAP_CS available and code signing is enabled, then we perform
+	 * the entitlement check in the PPL.
+	 *
+	 * Note that the security benefits of doing so are questionable. The PPL has
+	 * already locked down the entitlements blob, so we could simply have XNU go
+	 * through the locked entitlements blob instead of switching into the PPL to
+	 * perform the check. Afterall, the entitlement will be enforced by XNU and
+	 * not the PPL, so trapping into the PPL for the check means little.
+	 *
+	 * Nevertheless, this is kept around to be consistent with how some of the
+	 * other interfaces perform their entitlement checks.
+	 */
+
+	if (pmap_cs_enabled()) {
+		if (task == NULL || task == current_task()) {
+			/* NULL task implies current_task */
+			return pmap_query_entitlements(NULL, query, 2, NULL);
+		}
+
+		vm_map_t task_map = get_task_map_reference(task);
+		if (task_map) {
+			pmap_t pmap = vm_map_get_pmap(task_map);
+			if (pmap && pmap_query_entitlements(pmap, query, 2, NULL)) {
+				vm_map_deallocate(task_map);
+				return true;
+			}
+			vm_map_deallocate(task_map);
+		}
+		return false;
+	}
+
+#endif
+
+	/* AMFI interface needs to be available */
+	if (amfi == NULL) {
+		panic("CoreEntitlements: (IOTask): AMFI interface not available");
+	}
+
+	if (task == NULL) {
+		/* NULL task implies current_task */
+		task = current_task();
+	}
+
+	proc_t p = (proc_t)get_bsdtask_info(task);
+	if (p == NULL) {
+		/* Cannot proceed if we don't have a proc structure */
+		return false;
+	}
+
+	struct cs_blob* csblob = csproc_get_blob(p);
+	if (csblob == NULL) {
+		/* Cannot proceed if process doesn't have a code signature */
+		return false;
+	}
+
+	void* osents = csblob_os_entitlements_get(csblob);
+	if (osents == NULL) {
+		return false;
+	}
+
+	CEError_t ce_err = amfi->CoreEntitlements.kQueryCannotBeSatisfied;
+	ce_err = amfi->OSEntitlements_query(osents, (uint8_t*)csblob_get_cdhash(csblob), query, 2);
+
+	return ce_err == amfi->CoreEntitlements.kNoError;
+}
 
 extern "C"
 OS_ALWAYS_INLINE
@@ -1474,5 +1653,45 @@ IOVnodeGetEntitlement(vnode_t vnode, int64_t off, const char *entitlement)
 		}
 		obj->release();
 	}
+	return value;
+}
+
+extern "C"
+OS_ALWAYS_INLINE
+char *
+IOCurrentTaskGetEntitlement(const char * entitlement)
+{
+	return IOTaskGetEntitlement(current_task(), entitlement);
+}
+
+extern "C" char *
+IOTaskGetEntitlement(task_t task, const char * entitlement)
+{
+	OSObject * obj = NULL;
+	OSDictionary * entitlements = NULL;
+	OSString * str = NULL;
+	size_t len = 0;
+	char * value = NULL;
+
+	if (task == kernel_task || task == NULL || entitlement == NULL) {
+		goto finish;
+	}
+
+	entitlements = IOUserClient::copyClientEntitlements(task);
+	if (entitlements == NULL) {
+		goto finish;
+	}
+
+	obj = entitlements->getObject(entitlement);
+	str = OSDynamicCast(OSString, obj);
+	if (str != NULL) {
+		len = str->getLength() + 1;
+		value = (char *)kalloc_data(len, (zalloc_flags_t)(Z_ZERO | Z_WAITOK | Z_NOFAIL));
+		strlcpy(value, str->getCStringNoCopy(), len);
+	}
+
+finish:
+	OSSafeReleaseNULL(entitlements);
+
 	return value;
 }

@@ -57,6 +57,8 @@
 #include <mach/vm_region.h>
 #include <mach/vm_statistics.h>
 
+#include <IOKit/IOBSD.h>
+
 #include <vm/vm_kern.h>
 #include <vm/vm_protos.h> /* last */
 #include <vm/vm_map.h>          /* current_map() */
@@ -70,6 +72,8 @@
 #include <security/mac_framework.h>
 #endif /* CONFIG_MACF */
 
+#define COREDUMP_CUSTOM_LOCATION_ENTITLEMENT "com.apple.private.custom-coredump-location"
+
 typedef struct {
 	int     flavor;                 /* the number for this flavor */
 	mach_msg_type_number_t  count;  /* count of ints in this flavor */
@@ -82,14 +86,6 @@ mythread_state_flavor_t thread_flavor_array[] = {
 	{x86_EXCEPTION_STATE, x86_EXCEPTION_STATE_COUNT},
 };
 int mynum_flavors = 3;
-#elif defined (__arm__)
-mythread_state_flavor_t thread_flavor_array[] = {
-	{ARM_THREAD_STATE, ARM_THREAD_STATE_COUNT},
-	{ARM_VFP_STATE, ARM_VFP_STATE_COUNT},
-	{ARM_EXCEPTION_STATE, ARM_EXCEPTION_STATE_COUNT}
-};
-int mynum_flavors = 3;
-
 #elif defined (__arm64__)
 mythread_state_flavor_t thread_flavor_array[] = {
 	{ARM_THREAD_STATE64, ARM_THREAD_STATE64_COUNT},
@@ -121,14 +117,14 @@ void task_act_iterate_wth_args(task_t, void (*)(thread_t, void *), void *);
 __XNU_PRIVATE_EXTERN int do_coredump = 0;       /* default: don't dump cores */
 #else
 __XNU_PRIVATE_EXTERN int do_coredump = 1;       /* default: dump cores */
-#endif
+#endif /* SECURE_KERNEL */
 __XNU_PRIVATE_EXTERN int sugid_coredump = 0; /* default: but not SGUID binaries */
 
 
 /* cpu_type returns only the most generic indication of the current CPU. */
 /* in a core we want to know the kind of process. */
 
-static cpu_type_t
+cpu_type_t
 process_cpu_type(proc_t core_proc)
 {
 	cpu_type_t what_we_think;
@@ -138,7 +134,7 @@ process_cpu_type(proc_t core_proc)
 	} else {
 		what_we_think = CPU_TYPE_I386;
 	}
-#elif defined (__arm__) || defined(__arm64__)
+#elif defined(__arm64__)
 	if (IS_64BIT_PROCESS(core_proc)) {
 		what_we_think = CPU_TYPE_ARM64;
 	} else {
@@ -149,7 +145,7 @@ process_cpu_type(proc_t core_proc)
 	return what_we_think;
 }
 
-static cpu_type_t
+cpu_type_t
 process_cpu_subtype(proc_t core_proc)
 {
 	cpu_type_t what_we_think;
@@ -159,7 +155,7 @@ process_cpu_subtype(proc_t core_proc)
 	} else {
 		what_we_think = CPU_SUBTYPE_I386_ALL;
 	}
-#elif defined (__arm__) || defined(__arm64__)
+#elif defined(__arm64__)
 	if (IS_64BIT_PROCESS(core_proc)) {
 		what_we_think = CPU_SUBTYPE_ARM64_ALL;
 	} else {
@@ -208,6 +204,12 @@ collectth_state(thread_t th_act, void *tirp)
 	t->hoffset = hoffset;
 }
 
+#if DEVELOPMENT || DEBUG
+#define COREDUMPLOG(fmt, args...) printf("coredump (%s, pid %d): " fmt "\n", core_proc->p_comm, proc_getpid(core_proc), ## args)
+#else
+#define COREDUMPLOG(fmt, args...)
+#endif
+
 /*
  * coredump
  *
@@ -237,7 +239,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 /* End assumptions */
 	kauth_cred_t cred = vfs_context_ucred(ctx);
 	int error = 0;
-	struct vnode_attr va;
+	struct vnode_attr *vap = NULL;
 	size_t          thread_count, segment_count;
 	size_t          command_size, header_size, tstate_size;
 	size_t          hoffset;
@@ -265,6 +267,13 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	int             is_64 = 0;
 	size_t          mach_header_sz = sizeof(struct mach_header);
 	size_t          segment_command_sz = sizeof(struct segment_command);
+	const char     *format = NULL;
+	char           *custom_location_entitlement = NULL;
+	size_t          custom_location_entitlement_len = 0;
+	char           *alloced_format = NULL;
+	size_t          alloced_format_len = 0;
+	bool            include_iokit_memory = task_is_driver(task);
+	bool            coredump_attempted = false;
 
 	if (current_proc() != core_proc) {
 		panic("coredump() called against proc that is not current_proc: %p", core_proc);
@@ -293,11 +302,42 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 
 	mapsize = get_vmmap_size(map);
 
+	custom_location_entitlement = IOCurrentTaskGetEntitlement(COREDUMP_CUSTOM_LOCATION_ENTITLEMENT);
+	if (custom_location_entitlement != NULL) {
+		custom_location_entitlement_len = strlen(custom_location_entitlement);
+		const char * dirname;
+		if (proc_is_driver(core_proc)) {
+			dirname = defaultdrivercorefiledir;
+		} else {
+			dirname = defaultcorefiledir;
+		}
+		size_t dirname_len = strlen(dirname);
+		size_t printed_len;
+
+		/* new format is dirname + "/" + string from entitlement */
+		alloced_format_len = dirname_len + 1 + custom_location_entitlement_len;
+		alloced_format = kalloc_data(alloced_format_len + 1, Z_ZERO | Z_WAITOK | Z_NOFAIL);
+		printed_len = snprintf(alloced_format, alloced_format_len + 1, "%s/%s", dirname, custom_location_entitlement);
+		assert(printed_len == alloced_format_len);
+
+		format = alloced_format;
+		coredump_flags |= COREDUMP_IGNORE_ULIMIT;
+	} else {
+		if (proc_is_driver(core_proc)) {
+			format = drivercorefilename;
+		} else {
+			format = corefilename;
+		}
+	}
+
 	if (((coredump_flags & COREDUMP_IGNORE_ULIMIT) == 0) &&
 	    (mapsize >= proc_limitgetcur(core_proc, RLIMIT_CORE))) {
 		error = EFAULT;
 		goto out2;
 	}
+
+	/* log coredump failures from here */
+	coredump_attempted = true;
 
 	(void) task_suspend_internal(task);
 
@@ -306,7 +346,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	/* create name according to sysctl'able format string */
 	/* if name creation fails, fall back to historical behaviour... */
 	if (alloced_name == NULL ||
-	    proc_core_name(core_proc->p_comm, kauth_cred_getuid(cred),
+	    proc_core_name(format, core_proc->p_comm, kauth_cred_getuid(cred),
 	    proc_getpid(core_proc), alloced_name, MAXPATHLEN)) {
 		snprintf(stack_name, sizeof(stack_name),
 		    "/cores/core.%d", proc_getpid(core_proc));
@@ -315,29 +355,35 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		name = alloced_name;
 	}
 
+	COREDUMPLOG("writing core to %s", name);
 	if ((error = vnode_open(name, (O_CREAT | FWRITE | O_NOFOLLOW), S_IRUSR, VNODE_LOOKUP_NOFOLLOW, &vp, ctx))) {
+		COREDUMPLOG("failed to open core dump file %s: error %d", name, error);
 		goto out2;
 	}
 
-	VATTR_INIT(&va);
-	VATTR_WANTED(&va, va_nlink);
+	vap = kalloc_type(struct vnode_attr, Z_WAITOK | Z_ZERO);
+	VATTR_INIT(vap);
+	VATTR_WANTED(vap, va_nlink);
 	/* Don't dump to non-regular files or files with links. */
 	if (vp->v_type != VREG ||
-	    vnode_getattr(vp, &va, ctx) || va.va_nlink != 1) {
+	    vnode_getattr(vp, vap, ctx) || vap->va_nlink != 1) {
+		COREDUMPLOG("failed to write core to non-regular file");
 		error = EFAULT;
 		goto out;
 	}
 
-	VATTR_INIT(&va);        /* better to do it here than waste more stack in vnode_setsize */
-	VATTR_SET(&va, va_data_size, 0);
+	VATTR_INIT(vap);        /* better to do it here than waste more stack in vnode_setsize */
+	VATTR_SET(vap, va_data_size, 0);
 	if (core_proc == initproc) {
-		VATTR_SET(&va, va_dataprotect_class, PROTECTION_CLASS_D);
+		VATTR_SET(vap, va_dataprotect_class, PROTECTION_CLASS_D);
 	}
-	vnode_setattr(vp, &va, ctx);
+	vnode_setattr(vp, vap, ctx);
 	core_proc->p_acflag |= ACORE;
 
+	COREDUMPLOG("map size: %lu", mapsize);
 	if ((reserve_mb > 0) &&
 	    ((freespace_mb(vp) - (mapsize >> 20)) < reserve_mb)) {
+		COREDUMPLOG("insufficient free space (free=%d MB, needed=%lu MB, reserve=%d MB)", freespace_mb(vp), (mapsize >> 20), reserve_mb);
 		error = ENOSPC;
 		goto out;
 	}
@@ -364,30 +410,35 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 
 		/* lhs = segment_count * segment_command_sz */
 		if (os_mul_overflow(segment_count, segment_command_sz, &lhs)) {
+			COREDUMPLOG("error: segment size overflow: segment_count=%lu, segment_command_sz=%lu", segment_count, segment_command_sz);
 			error = ENOMEM;
 			goto out;
 		}
 
 		/* rhs = (tstate_size + sizeof(struct thread_command)) * thread_count */
 		if (os_add_and_mul_overflow(tstate_size, sizeof(struct thread_command), thread_count, &rhs)) {
+			COREDUMPLOG("error: thread state size overflow: tstate_size=%lu, thread_count=%lu", tstate_size, thread_count);
 			error = ENOMEM;
 			goto out;
 		}
 
 		/* command_size = lhs + rhs */
 		if (os_add_overflow(lhs, rhs, &command_size)) {
+			COREDUMPLOG("error: command size overflow: lhs=%lu, rhs=%lu", lhs, rhs);
 			error = ENOMEM;
 			goto out;
 		}
 	}
 
 	if (os_add_overflow(command_size, mach_header_sz, &header_size)) {
+		COREDUMPLOG("error: header size overflow: command_size=%lu, mach_header_sz=%lu", command_size, mach_header_sz);
 		error = ENOMEM;
 		goto out;
 	}
 
-	if (kernel_memory_allocate(kernel_map, &header, (vm_size_t)header_size,
-	    0, KMA_ZERO, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
+	if (kmem_alloc(kernel_map, &header, (vm_size_t)header_size,
+	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
+		COREDUMPLOG("error: failed to allocate memory for header (size=%lu)", header_size);
 		error = ENOMEM;
 		goto out;
 	}
@@ -416,11 +467,13 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	hoffset = mach_header_sz;       /* offset into header */
 	foffset = round_page(header_size);      /* offset into file */
 	vmoffset = MACH_VM_MIN_ADDRESS;         /* offset into VM */
+	COREDUMPLOG("mach header size: %zu", header_size);
 
 	/*
 	 * We use to check for an error, here, now we try and get
 	 * as much as we can
 	 */
+	COREDUMPLOG("dumping %zu segments", segment_count);
 	while (segment_count > 0) {
 		struct segment_command          *sc;
 		struct segment_command_64       *sc64;
@@ -446,6 +499,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 			if (!(is_64) &&
 			    (vmoffset + vmsize > VM_MAX_ADDRESS)) {
 				kret = KERN_INVALID_ADDRESS;
+				COREDUMPLOG("exceeded allowable region for 32-bit process");
 				break;
 			}
 			if (vbr.is_submap) {
@@ -456,6 +510,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 			}
 		}
 		if (kret != KERN_SUCCESS) {
+			COREDUMPLOG("ending segment dump, kret=%d", kret);
 			break;
 		}
 
@@ -466,6 +521,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 			/*
 			 * Elide unreadable (likely reserved) segments
 			 */
+			COREDUMPLOG("eliding unreadable segment %llx->%llx", vmoffset, vmoffset + vmsize);
 			vmoffset += vmsize;
 			continue;
 		}
@@ -482,7 +538,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		 * But only try and perform the write if we can read it.
 		 */
 		int64_t fsize = ((maxprot & VM_PROT_READ) == VM_PROT_READ
-		    && vbr.user_tag != VM_MEMORY_IOKIT
+		    && (include_iokit_memory || vbr.user_tag != VM_MEMORY_IOKIT)
 		    && coredumpok(map, vmoffset)) ? vmsize : 0;
 
 		if (fsize) {
@@ -499,16 +555,20 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 				 * Mark segment as empty
 				 */
 				fsize = 0;
+				COREDUMPLOG("failed to write segment %llx->%llx: error %d", vmoffset, vmoffset + vmsize, error);
 			} else if (resid) {
 				/*
 				 * Partial write. Extend the file size so
 				 * that the segment command contains a valid
 				 * range of offsets, possibly creating a hole.
 				 */
-				VATTR_INIT(&va);
-				VATTR_SET(&va, va_data_size, foffset + fsize);
-				vnode_setattr(vp, &va, ctx);
+				VATTR_INIT(vap);
+				VATTR_SET(vap, va_data_size, foffset + fsize);
+				vnode_setattr(vp, vap, ctx);
+				COREDUMPLOG("partially wrote segment %llx->%llx, resid %lld", vmoffset, vmoffset + vmsize, resid);
 			}
+		} else {
+			COREDUMPLOG("skipping unreadable segment %llx->%llx", vmoffset, vmoffset + vmsize);
 		}
 
 		/*
@@ -550,6 +610,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		vmoffset += vmsize;
 		segment_count--;
 	}
+	COREDUMPLOG("max file offset: %lld", foffset);
 
 	/*
 	 * If there are remaining segments which have not been written
@@ -570,6 +631,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	tir1.hoffset = hoffset;
 	tir1.flavors = flavors;
 	tir1.tstate_size = tstate_size;
+	COREDUMPLOG("dumping %zu threads", thread_count);
 	task_act_iterate_wth_args(task, collectth_state, &tir1);
 
 	/*
@@ -578,13 +640,25 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	 */
 	error = vn_rdwr(UIO_WRITE, vp, (caddr_t)header, (int)MIN(header_size, INT_MAX), (off_t)0,
 	    UIO_SYSSPACE, IO_NODELOCKED | IO_UNIT, cred, (int *) 0, core_proc);
+	if (error != KERN_SUCCESS) {
+		COREDUMPLOG("failed to write mach header: error %d", error);
+	}
 	kmem_free(kernel_map, header, header_size);
 
 	if ((coredump_flags & COREDUMP_FULLFSYNC) && error == 0) {
 		error = VNOP_IOCTL(vp, F_FULLFSYNC, (caddr_t)NULL, 0, ctx);
+		if (error != KERN_SUCCESS) {
+			COREDUMPLOG("failed to FULLFSYNC core: error %d", error);
+		}
 	}
 out:
+	if (vap) {
+		kfree_type(struct vnode_attr, vap);
+	}
 	error1 = vnode_close(vp, FWRITE, ctx);
+	if (error1 != KERN_SUCCESS) {
+		COREDUMPLOG("failed to close core file: error %d", error1);
+	}
 out2:
 #if CONFIG_AUDIT
 	audit_proc_coredump(core_proc, name, error);
@@ -592,8 +666,22 @@ out2:
 	if (alloced_name != NULL) {
 		zfree(ZV_NAMEI, alloced_name);
 	}
+	if (alloced_format != NULL) {
+		kfree_data(alloced_format, alloced_format_len + 1);
+	}
+	if (custom_location_entitlement != NULL) {
+		kfree_data(custom_location_entitlement, custom_location_entitlement_len + 1);
+	}
 	if (error == 0) {
 		error = error1;
+	}
+
+	if (coredump_attempted) {
+		if (error != 0) {
+			COREDUMPLOG("core dump failed: error %d\n", error);
+		} else {
+			COREDUMPLOG("core dump succeeded");
+		}
 	}
 
 	return error;

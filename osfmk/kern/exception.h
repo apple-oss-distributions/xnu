@@ -53,6 +53,8 @@ struct exception_action {
 /* Initialize global state needed for exceptions. */
 extern void exception_init(void);
 
+extern ipc_port_t exception_port_copy_send(ipc_port_t port);
+
 /* Make an up-call to a thread's exception server */
 extern kern_return_t exception_triage(
 	exception_type_t        exception,
@@ -64,6 +66,12 @@ extern kern_return_t exception_triage_thread(
 	mach_exception_data_t   code,
 	mach_msg_type_number_t  codeCnt,
 	thread_t                thread);
+
+#define BT_EXC_PORTS_COUNT 3
+extern void exception_deliver_backtrace(
+	kcdata_object_t bt_object,
+	ipc_port_t      exc_ports[static BT_EXC_PORTS_COUNT],
+	exception_type_t exception);
 
 /* Notify system performance monitor */
 extern kern_return_t sys_perf_notify(thread_t thread, int pid);

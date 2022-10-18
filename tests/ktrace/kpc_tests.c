@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2020 Apple Inc.  All rights reserved.
+// Copyright (c) 2018-2022 Apple Inc.  All rights reserved.
 
 #include <darwintest.h>
 #include <ktrace/config.h>
@@ -16,6 +16,8 @@
 #include "ktrace_helpers.h"
 #include "kperf_helpers.h"
 #include "ktrace_meta.h"
+#include "test_utils.h"
+
 struct machine {
 	unsigned int ncpus;
 	unsigned int nfixed;
@@ -69,11 +71,11 @@ start_kpc(void)
 
 static void kpc_reset_atend(void);
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 #define CYCLES_EVENT 0x02
-#else // defined(__arm__) || defined(__arm64__)
+#else // defined(__arm64__)
 #define CYCLES_EVENT (0x10000 | 0x20000 | 0x3c)
-#endif // !defined(__arm__) && !defined(__arm64__)
+#endif // defined(__arm64__)
 
 static void
 prepare_kpc(struct machine *mch, bool config, uint64_t event)
@@ -246,7 +248,9 @@ check_tally(unsigned int ncpus, unsigned int nctrs, struct tally *tallies)
 #define TESTDUR_NS (5 * NSEC_PER_SEC)
 
 T_DECL(kpc_cpu_direct_configurable,
-    "test that configurable counters return monotonically increasing values")
+    "test that configurable counters return monotonically increasing values",
+    XNU_T_META_SOC_SPECIFIC,
+    T_META_BOOTARGS_SET("enable_skstb=1"))
 {
 	skip_if_unsupported();
 
@@ -290,7 +294,8 @@ T_DECL(kpc_cpu_direct_configurable,
 }
 
 T_DECL(kpc_thread_direct_instrs_cycles,
-    "test that fixed thread counters return monotonically increasing values")
+    "test that fixed thread counters return monotonically increasing values",
+    XNU_T_META_SOC_SPECIFIC)
 {
 	int err;
 	uint32_t ctrs_cnt;
@@ -360,7 +365,9 @@ struct cpu {
 };
 
 T_DECL(kpc_pmi_configurable,
-    "test that PMIs don't interfere with sampling counters in kperf")
+    "test that PMIs don't interfere with sampling counters in kperf",
+    XNU_T_META_SOC_SPECIFIC,
+    T_META_BOOTARGS_SET("enable_skstb=1"))
 {
 	skip_if_unsupported();
 
@@ -634,7 +641,9 @@ T_DECL(kpc_pmi_configurable,
 #define IS_ARM64 false
 #endif // !defined(__arm64__)
 
-T_DECL(kpc_pmu_config, "ensure PMU can be configured", T_META_ENABLED(IS_ARM64))
+T_DECL(kpc_pmu_config, "ensure PMU can be configured",
+    XNU_T_META_SOC_SPECIFIC,
+    T_META_ENABLED(IS_ARM64))
 {
 	T_SETUPBEGIN;
 	int ret = kpc_force_all_ctrs_set(1);
@@ -653,6 +662,7 @@ T_DECL(kpc_pmu_config, "ensure PMU can be configured", T_META_ENABLED(IS_ARM64))
 #define DTLB_MISS_EVENT (0xc1)
 
 T_DECL(pmi_pc_capture, "ensure PC capture works for PMCs 5, 6, and 7",
+    XNU_T_META_SOC_SPECIFIC,
     T_META_REQUIRES_SYSCTL_EQ("kpc.pc_capture_supported", 1))
 {
 	start_controlling_ktrace();
@@ -754,4 +764,3 @@ T_DECL(pmi_pc_capture, "ensure PC capture works for PMCs 5, 6, and 7",
 
 	dispatch_main();
 }
-

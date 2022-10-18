@@ -69,16 +69,16 @@ mmap_buffer(size_t memsize)
 	return addr;
 }
 
-int
+unsigned int
 get_ncpu(void)
 {
 	int ncpu;
 	size_t length = sizeof(ncpu);
 
 	int ret = sysctlbyname("hw.ncpu", &ncpu, &length, NULL, 0);
-	if (ret == -1) {
+	if (ret == -1 || ncpu < 0) {
 		fprintf(stderr, "failed to query hw.ncpu");
 		exit(1);
 	}
-	return ncpu;
+	return (unsigned int) ncpu;
 }

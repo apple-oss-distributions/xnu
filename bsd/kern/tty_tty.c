@@ -263,6 +263,9 @@ cttyvp(proc_t p)
 	session_lock(sessp);
 	vp = (p->p_flag & P_CONTROLT ? sessp->s_ttyvp : NULLVP);
 	vid = sessp->s_ttyvid;
+	if (vp) {
+		vnode_hold(vp);
+	}
 	session_unlock(sessp);
 
 	pgrp_rele(pg);
@@ -270,7 +273,10 @@ cttyvp(proc_t p)
 	if (vp != NULLVP) {
 		/* cannot get an IO reference, return NULLVP */
 		if (vnode_getwithvid(vp, vid) != 0) {
+			vnode_drop(vp);
 			vp = NULLVP;
+		} else {
+			vnode_drop(vp);
 		}
 	}
 	return vp;

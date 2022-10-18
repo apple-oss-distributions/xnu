@@ -1131,6 +1131,11 @@ _tr_tally(deflate_state *s, unsigned dist, unsigned lc)
  * @param ltree literal tree
  * @param dtree distance tree
  */
+
+__abortlike __printflike(1, 2)
+extern void panic(const char *string, ...);
+
+
 local void
 compress_block(deflate_state *s, ct_data *ltree, ct_data *dtree)
 {
@@ -1141,6 +1146,10 @@ compress_block(deflate_state *s, ct_data *ltree, ct_data *dtree)
     int extra;          /* number of extra bits to send */
 
     if (s->last_lit != 0) do {
+
+        if (&s->pending_buf[s->pending] > (Bytef *)&s->d_buf[lx]) {
+            panic("zlib deflate");
+        }
         dist = s->d_buf[lx];
         lc = s->l_buf[lx++];
         if (dist == 0) {

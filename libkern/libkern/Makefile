@@ -14,7 +14,8 @@ INSTINC_SUBDIRS = \
     coretrust \
     apple_encrypted_archive \
     amfi \
-    coreanalytics
+    coreanalytics \
+    compression 
 
 INSTINC_SUBDIRS_X86_64 = \
         i386
@@ -34,9 +35,7 @@ EXPINC_SUBDIRS_ARM64 = ${INSTINC_SUBDIRS_ARM64}
 # Files that are public on macOS, but private on embedded
 EMBEDDED_PRIVATE_DATAFILES = \
 	OSDebug.h \
-	OSKextLib.h \
-	OSReturn.h \
-	OSTypes.h
+	OSKextLib.h
 
 ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
 EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
@@ -49,6 +48,8 @@ endif
 DATAFILES = $(sort \
 	OSByteOrder.h \
 	_OSByteOrder.h \
+	OSReturn.h \
+	OSTypes.h \
 	$(EXTRA_DATAFILES))
 
 DRIVERKIT_DATAFILES = \

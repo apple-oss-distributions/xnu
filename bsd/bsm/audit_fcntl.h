@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2009 Apple Inc.
+ * Copyright (c) 2009-2022 Apple Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -98,8 +98,9 @@
 #define BSM_F_SETSIZE           343     /* Darwin-specific. */
 #define BSM_F_RDADVISE          344     /* Darwin-specific. */
 #define BSM_F_RDAHEAD           345     /* Darwin-specific. */
-#define BSM_F_READBOOTSTRAP     346     /* Darwin-specific. */
-#define BSM_F_WRITEBOOTSTRAP    347     /* Darwin-specific. */
+/*
+ * 346, 347 are now unused (was BSM_F_{READ,WRITE}BOOTSTRAP)
+ */
 #define BSM_F_NOCACHE           348     /* Darwin-specific. */
 #define BSM_F_LOG2PHYS          349     /* Darwin-specific. */
 #define BSM_F_GETPATH           350     /* Darwin-specific. */

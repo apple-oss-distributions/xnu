@@ -69,10 +69,12 @@ typedef uint64_t ipc_label_t;
 #define IPC_LABEL_SPECIAL       ((ipc_label_t)0x0003)
 #define IPC_LABEL_SPACE_MASK    ((ipc_label_t)0x00ff)
 
-#define IPC_LABEL_SUBST_TASK    ((ipc_label_t)0x0100)
-#define IPC_LABEL_SUBST_THREAD  ((ipc_label_t)0x0200)
-#define IPC_LABEL_SUBST_ONCE    ((ipc_label_t)0x0300)
-#define IPC_LABEL_SUBST_MASK    ((ipc_label_t)0xff00)
+#define IPC_LABEL_SUBST_TASK        ((ipc_label_t)0x0100)
+#define IPC_LABEL_SUBST_THREAD      ((ipc_label_t)0x0200)
+#define IPC_LABEL_SUBST_ONCE        ((ipc_label_t)0x0300)
+#define IPC_LABEL_SUBST_TASK_READ   ((ipc_label_t)0x0400)
+#define IPC_LABEL_SUBST_THREAD_READ ((ipc_label_t)0x0500)
+#define IPC_LABEL_SUBST_MASK        ((ipc_label_t)0xff00)
 
 typedef struct ipc_kobject_label *ipc_kobject_label_t;
 
@@ -87,13 +89,13 @@ typedef struct ipc_kobject_label *ipc_kobject_label_t;
 typedef void (*mach_msg_continue_t)(mach_msg_return_t); /* after wakeup */
 #define MACH_MSG_CONTINUE_NULL  ((mach_msg_continue_t)NULL)
 
-typedef struct ipc_importance_elem *ipc_importance_elem_t;
+typedef struct ipc_importance_elem *__single ipc_importance_elem_t;
 #define IIE_NULL        ((ipc_importance_elem_t)NULL)
 
-typedef struct ipc_importance_task *ipc_importance_task_t;
+typedef struct ipc_importance_task *__single ipc_importance_task_t;
 #define IIT_NULL        ((ipc_importance_task_t)NULL)
 
-typedef struct ipc_importance_inherit *ipc_importance_inherit_t;
+typedef struct ipc_importance_inherit *__single ipc_importance_inherit_t;
 #define III_NULL        ((ipc_importance_inherit_t)NULL)
 
 #else   /* MACH_KERNEL_PRIVATE */

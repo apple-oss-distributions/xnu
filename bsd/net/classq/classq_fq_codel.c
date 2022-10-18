@@ -26,13 +26,39 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+/*
+ * The migration of flow queue between the different states is summarised in
+ * the below state diagram. (RFC 8290)
+ *
+ * +-----------------+                +------------------+
+ * |                 |     Empty      |                  |
+ * |     Empty       |<---------------+       Old        +----+
+ * |                 |                |                  |    |
+ * +-------+---------+                +------------------+    |
+ *         |                             ^            ^       |Credits
+ *         |Arrival                      |            |       |Exhausted
+ *         v                             |            |       |
+ * +-----------------+                   |            |       |
+ * |                 |      Empty or     |            |       |
+ * |      New        +-------------------+            +-------+
+ * |                 | Credits Exhausted
+ * +-----------------+
+ *
+ * In this implementation of FQ-CODEL, flow queue is a dynamically allocated
+ * object. An active flow queue goes through the above cycle of state
+ * transitions very often. To avoid the cost of frequent flow queue object
+ * allocation/free, this implementation retains the flow queue object in
+ * [Empty] state on an Empty flow queue list with an active reference in flow
+ * queue hash table. The flow queue objects on the Empty flow queue list have
+ * an associated age and are purged accordingly.
+ */
+
 #include <sys/cdefs.h>
 #include <sys/param.h>
 #include <sys/mbuf.h>
 #include <sys/socket.h>
 #include <sys/sockio.h>
 #include <sys/systm.h>
-#include <sys/sysctl.h>
 #include <sys/syslog.h>
 #include <sys/proc.h>
 #include <sys/errno.h>
@@ -59,6 +85,15 @@ static struct mcache *flowq_cache = NULL;       /* mcache for flowq */
 #define DTYPE_FORCED    1       /* a "forced" drop */
 #define DTYPE_EARLY     2       /* an "unforced" (early) drop */
 
+static uint32_t pkt_compressor = 1;
+#if (DEBUG || DEVELOPMENT)
+SYSCTL_NODE(_net_classq, OID_AUTO, flow_q, CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, "FQ-CODEL parameters");
+
+SYSCTL_UINT(_net_classq_flow_q, OID_AUTO, pkt_compressor,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &pkt_compressor, 0, "enable pkt compression");
+#endif /* (DEBUG || DEVELOPMENT) */
+
 void
 fq_codel_init(void)
 {
@@ -74,6 +109,17 @@ fq_codel_init(void)
 		/* NOTREACHED */
 		__builtin_unreachable();
 	}
+
+	_CASSERT(AQM_KTRACE_AON_FLOW_HIGH_DELAY == 0x8300004);
+	_CASSERT(AQM_KTRACE_AON_THROTTLE == 0x8300008);
+	_CASSERT(AQM_KTRACE_AON_FLOW_OVERWHELMING == 0x830000c);
+	_CASSERT(AQM_KTRACE_AON_FLOW_DQ_STALL == 0x8300010);
+
+	_CASSERT(AQM_KTRACE_STATS_FLOW_ENQUEUE == 0x8310004);
+	_CASSERT(AQM_KTRACE_STATS_FLOW_DEQUEUE == 0x8310008);
+	_CASSERT(AQM_KTRACE_STATS_FLOW_CTL == 0x831000c);
+	_CASSERT(AQM_KTRACE_STATS_FLOW_ALLOC == 0x8310010);
+	_CASSERT(AQM_KTRACE_STATS_FLOW_DESTROY == 0x8310014);
 }
 
 void
@@ -93,7 +139,6 @@ fq_alloc(classq_pkt_type_t ptype)
 	}
 
 	bzero(fq, flowq_size);
-	fq->fq_ptype = ptype;
 	if (ptype == QP_MBUF) {
 		MBUFQ_INIT(&fq->fq_mbufq);
 	}
@@ -110,11 +155,12 @@ fq_alloc(classq_pkt_type_t ptype)
 }
 
 void
-fq_destroy(fq_t *fq)
+fq_destroy(fq_t *fq, classq_pkt_type_t ptype)
 {
-	VERIFY(fq->fq_flags & FQF_DESTROYED);
-	VERIFY(fq_empty(fq));
-	VERIFY(!(fq->fq_flags & (FQF_NEW_FLOW | FQF_OLD_FLOW)));
+	VERIFY(!fq->fq_in_dqlist);
+	VERIFY(fq_empty(fq, ptype));
+	VERIFY(!(fq->fq_flags & (FQF_NEW_FLOW | FQF_OLD_FLOW |
+	    FQF_EMPTY_FLOW)));
 	VERIFY(fq->fq_bytes == 0);
 	mcache_free(flowq_cache, fq);
 }
@@ -123,13 +169,15 @@ static inline void
 fq_detect_dequeue_stall(fq_if_t *fqs, fq_t *flowq, fq_if_classq_t *fq_cl,
     u_int64_t *now)
 {
-	u_int64_t maxgetqtime;
-	if (FQ_IS_DELAYHIGH(flowq) || flowq->fq_getqtime == 0 ||
-	    fq_empty(flowq) ||
+	u_int64_t maxgetqtime, update_interval;
+	if (FQ_IS_DELAY_HIGH(flowq) || flowq->fq_getqtime == 0 ||
+	    fq_empty(flowq, fqs->fqs_ptype) ||
 	    flowq->fq_bytes < FQ_MIN_FC_THRESHOLD_BYTES) {
 		return;
 	}
-	maxgetqtime = flowq->fq_getqtime + fqs->fqs_update_interval;
+
+	update_interval = FQ_UPDATE_INTERVAL(flowq);
+	maxgetqtime = flowq->fq_getqtime + update_interval;
 	if ((*now) > maxgetqtime) {
 		/*
 		 * there was no dequeue in an update interval worth of
@@ -141,6 +189,9 @@ fq_detect_dequeue_stall(fq_if_t *fqs, fq_t *flowq, fq_if_classq_t *fq_cl,
 		    "scidx: %d, flow: 0x%x, iface: %s", __func__,
 		    fq_cl->fcl_stat.fcl_dequeue_stall, flowq->fq_sc_index,
 		    flowq->fq_flowhash, if_name(fqs->fqs_ifq->ifcq_ifp));
+		KDBG(AQM_KTRACE_AON_FLOW_DQ_STALL, flowq->fq_flowhash,
+		    AQM_KTRACE_FQ_GRP_SC_IDX(flowq), flowq->fq_bytes,
+		    (*now) - flowq->fq_getqtime);
 	}
 }
 
@@ -188,14 +239,14 @@ static int
 fq_compressor(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl,
     pktsched_pkt_t *pkt)
 {
-	classq_pkt_type_t ptype = fq->fq_ptype;
+	classq_pkt_type_t ptype = fqs->fqs_ptype;
 	uint32_t comp_gencnt = 0;
 	uint64_t *pkt_timestamp;
 	uint64_t old_timestamp = 0;
 	uint32_t old_pktlen = 0;
 	struct ifclassq *ifq = fqs->fqs_ifq;
 
-	if (__improbable(!tcp_do_ack_compression)) {
+	if (__improbable(pkt_compressor == 0)) {
 		return 0;
 	}
 
@@ -208,7 +259,7 @@ fq_compressor(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl,
 
 	fq_cl->fcl_stat.fcl_pkts_compressible++;
 
-	if (fq_empty(fq)) {
+	if (fq_empty(fq, fqs->fqs_ptype)) {
 		return 0;
 	}
 
@@ -253,13 +304,17 @@ fq_compressor(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl,
 	IFCQ_DEC_LEN(ifq);
 	IFCQ_DEC_BYTES(ifq, old_pktlen);
 
+	FQ_GRP_DEC_LEN(fq);
+	FQ_GRP_DEC_BYTES(fq, old_pktlen);
+
 	*pkt_timestamp = old_timestamp;
 
 	return CLASSQEQ_COMPRESSED;
 }
 
 int
-fq_addq(fq_if_t *fqs, pktsched_pkt_t *pkt, fq_if_classq_t *fq_cl)
+fq_addq(fq_if_t *fqs, fq_if_group_t *fq_grp, pktsched_pkt_t *pkt,
+    fq_if_classq_t *fq_cl)
 {
 	int droptype = DTYPE_NODROP, fc_adv = 0, ret = CLASSQEQ_SUCCESS;
 	u_int64_t now;
@@ -268,6 +323,7 @@ fq_addq(fq_if_t *fqs, pktsched_pkt_t *pkt, fq_if_classq_t *fq_cl)
 	volatile uint32_t *pkt_flags;
 	uint32_t pkt_flowid, cnt;
 	uint8_t pkt_proto, pkt_flowsrc;
+	fq_tfc_type_t tfc_type = FQ_TFC_C;
 
 	cnt = pkt->pktsched_pcnt;
 	pktsched_get_pkt_vars(pkt, &pkt_flags, &pkt_timestamp, &pkt_flowid,
@@ -303,19 +359,24 @@ fq_addq(fq_if_t *fqs, pktsched_pkt_t *pkt, fq_if_classq_t *fq_cl)
 	ASSERT(now > 0);
 
 	/* find the flowq for this packet */
-	fq = fq_if_hash_pkt(fqs, pkt_flowid, pktsched_get_pkt_svc(pkt),
-	    now, TRUE, pkt->pktsched_ptype);
+	fq = fq_if_hash_pkt(fqs, fq_grp, pkt_flowid, pktsched_get_pkt_svc(pkt),
+	    now, true, tfc_type);
 	if (__improbable(fq == NULL)) {
 		DTRACE_IP1(memfail__drop, fq_if_t *, fqs);
 		/* drop the packet if we could not allocate a flow queue */
 		fq_cl->fcl_stat.fcl_drop_memfailure += cnt;
 		return CLASSQEQ_DROP;
 	}
-	VERIFY(fq->fq_ptype == pkt->pktsched_ptype);
+	VERIFY(fq->fq_group == fq_grp);
+	VERIFY(fqs->fqs_ptype == pkt->pktsched_ptype);
+
+	KDBG(AQM_KTRACE_STATS_FLOW_ENQUEUE, fq->fq_flowhash,
+	    AQM_KTRACE_FQ_GRP_SC_IDX(fq),
+	    fq->fq_bytes, pktsched_get_pkt_len(pkt));
 
 	fq_detect_dequeue_stall(fqs, fq, fq_cl, &now);
 
-	if (__improbable(FQ_IS_DELAYHIGH(fq) || FQ_IS_OVERWHELMING(fq))) {
+	if (__improbable(FQ_IS_DELAY_HIGH(fq) || FQ_IS_OVERWHELMING(fq))) {
 		if ((fq->fq_flags & FQF_FLOWCTL_CAPABLE) &&
 		    (*pkt_flags & PKTF_FLOW_ADV)) {
 			fc_adv = 1;
@@ -339,7 +400,7 @@ fq_addq(fq_if_t *fqs, pktsched_pkt_t *pkt, fq_if_classq_t *fq_cl)
 			 * ones. Try to drop from the head of the queue
 			 * instead of the latest packets.
 			 */
-			if (!fq_empty(fq)) {
+			if (!fq_empty(fq, fqs->fqs_ptype)) {
 				uint32_t i;
 
 				for (i = 0; i < cnt; i++) {
@@ -434,11 +495,13 @@ fq_addq(fq_if_t *fqs, pktsched_pkt_t *pkt, fq_if_classq_t *fq_cl)
 
 				/*
 				 * if this fq was freshly created and there
-				 * is nothing to enqueue, free it
+				 * is nothing to enqueue, move it to empty list
 				 */
-				if (fq_empty(fq) && !(fq->fq_flags &
-				    (FQF_NEW_FLOW | FQF_OLD_FLOW))) {
-					fq_if_destroy_flow(fqs, fq_cl, fq, true);
+				if (fq_empty(fq, fqs->fqs_ptype) &&
+				    !(fq->fq_flags & (FQF_NEW_FLOW |
+				    FQF_OLD_FLOW))) {
+					fq_if_move_to_empty_flow(fqs, fq_cl,
+					    fq, now);
 					fq = NULL;
 				}
 			} else {
@@ -448,7 +511,7 @@ fq_addq(fq_if_t *fqs, pktsched_pkt_t *pkt, fq_if_classq_t *fq_cl)
 				    uint32_t, cnt);
 
 				for (i = 0; i < cnt; i++) {
-					fq_if_drop_packet(fqs);
+					fq_if_drop_packet(fqs, now);
 				}
 			}
 		}
@@ -472,7 +535,8 @@ fq_addq(fq_if_t *fqs, pktsched_pkt_t *pkt, fq_if_classq_t *fq_cl)
 		}
 		DTRACE_IP5(fq_enqueue, fq_if_t *, fqs, fq_if_classq_t *, fq_cl,
 		    fq_t *, fq, pktsched_pkt_t *, pkt, uint32_t, cnt);
-		fq_enqueue(fq, pkt->pktsched_pkt, pkt->pktsched_tail, cnt);
+		fq_enqueue(fq, pkt->pktsched_pkt, pkt->pktsched_tail, cnt,
+		    pkt->pktsched_ptype);
 
 		fq->fq_bytes += chain_len;
 		fq_cl->fcl_stat.fcl_byte_cnt += chain_len;
@@ -512,7 +576,7 @@ fq_getq_flow_internal(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt)
 	fq_if_classq_t *fq_cl;
 	struct ifclassq *ifq = fqs->fqs_ifq;
 
-	fq_dequeue(fq, &p);
+	fq_dequeue(fq, &p, fqs->fqs_ptype);
 	if (p.cp_ptype == QP_INVALID) {
 		VERIFY(p.cp_mbuf == NULL);
 		return;
@@ -524,25 +588,26 @@ fq_getq_flow_internal(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt)
 	VERIFY(fq->fq_bytes >= plen);
 	fq->fq_bytes -= plen;
 
-	fq_cl = &fqs->fqs_classq[fq->fq_sc_index];
+	fq_cl = &FQ_CLASSQ(fq);
 	fq_cl->fcl_stat.fcl_byte_cnt -= plen;
 	fq_cl->fcl_stat.fcl_pkt_cnt--;
 	IFCQ_DEC_LEN(ifq);
 	IFCQ_DEC_BYTES(ifq, plen);
 
+	FQ_GRP_DEC_LEN(fq);
+	FQ_GRP_DEC_BYTES(fq, plen);
+
 	/* Reset getqtime so that we don't count idle times */
-	if (fq_empty(fq)) {
+	if (fq_empty(fq, fqs->fqs_ptype)) {
 		fq->fq_getqtime = 0;
 	}
 }
 
 void
-fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt)
+fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 {
 	fq_if_classq_t *fq_cl;
-	u_int64_t now;
 	int64_t qdelay = 0;
-	struct timespec now_ts;
 	volatile uint32_t *pkt_flags;
 	uint64_t *pkt_timestamp;
 
@@ -555,14 +620,11 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt)
 	pktsched_get_pkt_vars(pkt, &pkt_flags, &pkt_timestamp, NULL, NULL,
 	    NULL, NULL);
 
-	nanouptime(&now_ts);
-	now = (now_ts.tv_sec * NSEC_PER_SEC) + now_ts.tv_nsec;
-
 	/* this will compute qdelay in nanoseconds */
 	if (now > *pkt_timestamp) {
 		qdelay = now - *pkt_timestamp;
 	}
-	fq_cl = &fqs->fqs_classq[fq->fq_sc_index];
+	fq_cl = &FQ_CLASSQ(fq);
 
 	if (fq->fq_min_qdelay == 0 ||
 	    (qdelay > 0 && (u_int64_t)qdelay < fq->fq_min_qdelay)) {
@@ -607,8 +669,8 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt)
 	}
 
 	if (now >= fq->fq_updatetime) {
-		if (fq->fq_min_qdelay > fqs->fqs_target_qdelay) {
-			if (!FQ_IS_DELAYHIGH(fq)) {
+		if (fq->fq_min_qdelay > FQ_TARGET_DELAY(fq)) {
+			if (!FQ_IS_DELAY_HIGH(fq)) {
 				FQ_SET_DELAY_HIGH(fq);
 				os_log_error(OS_LOG_DEFAULT,
 				    "%s: high delay idx: %d, %llu, flow: 0x%x, "
@@ -620,23 +682,22 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt)
 			FQ_CLEAR_DELAY_HIGH(fq);
 		}
 		/* Reset measured queue delay and update time */
-		fq->fq_updatetime = now + fqs->fqs_update_interval;
+		fq->fq_updatetime = now + FQ_UPDATE_INTERVAL(fq);
 		fq->fq_min_qdelay = 0;
 	}
-
 	if (fqs->fqs_large_flow != fq || !fq_if_almost_at_drop_limit(fqs)) {
 		FQ_CLEAR_OVERWHELMING(fq);
 	}
-	if (!FQ_IS_DELAYHIGH(fq) || fq_empty(fq)) {
+	if (!FQ_IS_DELAY_HIGH(fq) || fq_empty(fq, fqs->fqs_ptype)) {
 		FQ_CLEAR_DELAY_HIGH(fq);
 	}
 
 	if ((fq->fq_flags & FQF_FLOWCTL_ON) &&
-	    !FQ_IS_DELAYHIGH(fq) && !FQ_IS_OVERWHELMING(fq)) {
+	    !FQ_IS_DELAY_HIGH(fq) && !FQ_IS_OVERWHELMING(fq)) {
 		fq_if_flow_feedback(fqs, fq, fq_cl);
 	}
 
-	if (fq_empty(fq)) {
+	if (fq_empty(fq, fqs->fqs_ptype)) {
 		/* Reset getqtime so that we don't count idle times */
 		fq->fq_getqtime = 0;
 	} else {

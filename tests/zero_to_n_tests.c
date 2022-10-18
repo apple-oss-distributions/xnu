@@ -1,9 +1,11 @@
 #include <darwintest.h>
 #include <darwintest_utils.h>
+#include <perfdata/perfdata.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <errno.h>
+#include "test_utils.h"
 
 #if defined(__arm64__)
 T_GLOBAL_META(
@@ -98,10 +100,16 @@ run_zn(char *name, char **cmd)
 		unlink(tracefile_path);
 		T_PASS("%s", name);
 	}
+
+	pdwriter_t writer = pdwriter_open_tmp("xnu", name, 0, 0, NULL, 0);
+	T_WITH_ERRNO;
+	T_ASSERT_NOTNULL(writer, "pdwriter_open_tmp");
+	pdwriter_new_value(writer, "scheduler_ok", PDUNIT_CUSTOM(passing), !test_failed);
+	pdwriter_close(writer);
 	T_END;
 }
 
-T_DECL(zn_rt, "Schedule 1 RT thread per performance core, and test max latency", T_META_ENABLED(!TARGET_OS_TV))
+T_DECL(zn_rt, "Schedule 1 RT thread per performance core, and test max latency", T_META_ENABLED(!TARGET_OS_TV), XNU_T_META_SOC_SPECIFIC)
 {
 	char *cmd[] = {"/usr/bin/ktrace", "artrace", "-o", "zn.artrace", "-c",
 		       "/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
@@ -119,7 +127,7 @@ T_DECL(zn_rt, "Schedule 1 RT thread per performance core, and test max latency",
 	run_zn("zn_rt", cmd);
 }
 
-T_DECL(zn_rt_smt, "Schedule 1 RT thread per primary core, verify that the secondaries are idle iff the RT threads are running", T_META_ASROOT(true), T_META_ENABLED(TARGET_CPU_X86_64))
+T_DECL(zn_rt_smt, "Schedule 1 RT thread per primary core, verify that the secondaries are idle iff the RT threads are running", T_META_ENABLED(TARGET_CPU_X86_64))
 {
 	char *cmd[] = {"/usr/bin/ktrace", "artrace", "-o", "zn.artrace", "-c",
 		       "/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
@@ -168,7 +176,7 @@ T_DECL(zn_rt_apt, "Emulate AVID Pro Tools with default latency deadlines", T_MET
 	run_zn("zn_rt_apt", cmd);
 }
 
-T_DECL(zn_rt_apt_ll, "Emulate AVID Pro Tools with low latency deadlines")
+T_DECL(zn_rt_apt_ll, "Emulate AVID Pro Tools with low latency deadlines", XNU_T_META_SOC_SPECIFIC)
 {
 	char *cmd[] = {"/usr/bin/ktrace", "artrace", "-o", "zn.artrace", "-c",
 		       "/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
@@ -185,7 +193,7 @@ T_DECL(zn_rt_apt_ll, "Emulate AVID Pro Tools with low latency deadlines")
 	run_zn("zn_rt_apt_ll", cmd);
 }
 
-T_DECL(zn_rt_edf, "Test max latency of earliest deadline RT threads in the presence of later deadline threads", T_META_ENABLED(!TARGET_OS_TV))
+T_DECL(zn_rt_edf, "Test max latency of earliest deadline RT threads in the presence of later deadline threads", T_META_ENABLED(!TARGET_OS_TV), XNU_T_META_SOC_SPECIFIC)
 {
 	char *cmd[] = {"/usr/bin/ktrace", "artrace", "-o", "zn.artrace", "-c",
 		       "/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",

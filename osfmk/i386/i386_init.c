@@ -927,6 +927,7 @@ i386_init(void)
 		kprintf("Serial mode specified: %08X\n", serialmode);
 		int force_sync = serialmode & SERIALMODE_SYNCDRAIN;
 		disable_iolog_serial_output = (serialmode & SERIALMODE_NO_IOLOG) != 0;
+		enable_dklog_serial_output = (serialmode & SERIALMODE_DKLOG) != 0;
 		if (force_sync || PE_parse_boot_argn("drain_uart_sync", &force_sync, sizeof(force_sync))) {
 			if (force_sync) {
 				serialmode |= SERIALMODE_SYNCDRAIN;
@@ -1001,6 +1002,10 @@ i386_init(void)
 	PE_init_platform(TRUE, kernelBootArgs);
 	PE_create_console();
 
+	/* set %gs early so that power management can use locks */
+	thread_t thread = thread_bootstrap();
+	machine_set_current_thread(thread);
+
 	kernel_debug_string_early("power_management_init");
 	power_management_init();
 	xcpm_bootstrap();
@@ -1010,8 +1015,6 @@ i386_init(void)
 #endif /* MONOTONIC */
 
 	processor_bootstrap();
-	thread_t thread = thread_bootstrap();
-	machine_set_current_thread(thread);
 
 	pstate_trace();
 	kernel_debug_string_early("machine_startup");

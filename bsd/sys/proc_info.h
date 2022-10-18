@@ -102,8 +102,8 @@ struct proc_bsdshortinfo {
 	uint32_t                pbsi_rfu;               /* reserved for future use*/
 };
 
-
 #ifdef  PRIVATE
+
 struct proc_uniqidentifierinfo {
 	uint8_t                 p_uuid[16];             /* UUID of the main executable */
 	uint64_t                p_uniqueid;             /* 64 bit unique identifier for process */
@@ -113,7 +113,6 @@ struct proc_uniqidentifierinfo {
 	uint64_t                p_reserve3;             /* reserved for future use */
 	uint64_t                p_reserve4;             /* reserved for future use */
 };
-
 
 struct proc_bsdinfowithuniqid {
 	struct proc_bsdinfo             pbsd;
@@ -149,8 +148,24 @@ struct proc_threadschedinfo {
 	uint64_t               int_time_ns;         /* time spent in interrupt context */
 };
 
-#endif
+// See PROC_PIDTHREADCOUNTS for a description of how to use these structures.
 
+struct proc_threadcounts_data {
+	uint64_t ptcd_instructions;
+	uint64_t ptcd_cycles;
+	uint64_t ptcd_user_time_mach;
+	uint64_t ptcd_system_time_mach;
+	uint64_t ptcd_energy_nj;
+};
+
+struct proc_threadcounts {
+	uint16_t ptc_len;
+	uint16_t ptc_reserved0;
+	uint32_t ptc_reserved1;
+	struct proc_threadcounts_data ptc_counts[];
+};
+
+#endif /* PRIVATE */
 
 /* pbi_flags values */
 #define PROC_FLAG_SYSTEM        1       /*  System process */
@@ -880,6 +895,38 @@ struct channel_fdinfo {
 #define PROC_PIDTHREADSCHEDINFO 33
 #define PROC_PIDTHREADSCHEDINFO_SIZE (sizeof(struct proc_threadschedinfo))
 
+// PROC_PIDTHREADCOUNTS returns a list of counters for the given thread,
+// separated out by the "perf-level" it was running on (typically either
+// "performance" or "efficiency").
+//
+// This interface works a bit differently from the other proc_info(3) flavors.
+// It copies out a structure with a variable-length array at the end of it.
+// The start of the `proc_threadcounts` structure contains a header indicating
+// the length of the subsequent array of `proc_threadcounts_data` elements.
+//
+// To use this interface, first read the `hw.nperflevels` sysctl to find out how
+// large to make the allocation that receives the counter data:
+//
+//     sizeof(proc_threadcounts) + nperflevels * sizeof(proc_threadcounts_data)
+//
+// Use the `hw.perflevel[0-9].name` sysctl to find out which perf-level maps to
+// each entry in the array.
+//
+// The complete usage would be (omitting error reporting):
+//
+//     uint32_t len = 0;
+//     int ret = sysctlbyname("hw.nperflevels", &len, &len_sz, NULL, 0);
+//     size_t size = sizeof(struct proc_threadcounts) +
+//             len * sizeof(struct proc_threadcounts_data);
+//     struct proc_threadcounts *counts = malloc(size);
+//     // Fill this in with a thread ID, like from `PROC_PIDLISTTHREADS`.
+//     uint64_t tid = 0;
+//     int size_copied = proc_info(getpid(), PROC_PIDTHREADCOUNTS, tid, counts,
+//             size);
+
+#define PROC_PIDTHREADCOUNTS 34
+#define PROC_PIDTHREADCOUNTS_SIZE (sizeof(struct proc_threadcounts))
+
 #endif /* PRIVATE */
 /* Flavors for proc_pidfdinfo */
 
@@ -1018,6 +1065,8 @@ struct channel_fdinfo {
 #define PROC_INFO_CALL_CANUSEFGHW        0xc
 #define PROC_INFO_CALL_PIDDYNKQUEUEINFO  0xd
 #define PROC_INFO_CALL_UDATA_INFO        0xe
+#define PROC_INFO_CALL_SET_DYLD_IMAGES   0xf
+#define PROC_INFO_CALL_TERMINATE_RSR     0x10
 
 /* __proc_info_extended_id() flags */
 #define PIF_COMPARE_IDVERSION           0x01

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -75,6 +75,7 @@ boolean_t ml_get_interrupts_enabled(void);
 uint64_t ml_pac_safe_interrupts_disable(void);
 void ml_pac_safe_interrupts_restore(uint64_t);
 #endif /* __has_feature(ptrauth_calls) */
+boolean_t ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t debug);
 boolean_t ml_set_interrupts_enabled(boolean_t enable);
 boolean_t ml_early_set_interrupts_enabled(boolean_t enable);
 
@@ -88,18 +89,14 @@ void ml_cause_interrupt(void);
 #ifdef XNU_KERNEL_PRIVATE
 /* Clear interrupt spin debug state for thread */
 
-#if SCHED_PREEMPTION_DISABLE_DEBUG
+#if SCHED_HYGIENE_DEBUG
 void ml_adjust_preemption_disable_time(thread_t thread, int64_t duration);
-#else
-#define ml_adjust_preemption_disable_time(t, d) { (void)(t); (void)(d); /* no op */ }
-#endif /* SCHED_PREEMPTION_DISABLE_DEBUG */
 
-#if INTERRUPT_MASKED_DEBUG
 void mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, uint64_t *instrs);
 
 #if MONOTONIC
 #define INTERRUPT_MASKED_DEBUG_CAPTURE_PMC(thread)                                          \
-	    if (interrupt_masked_debug_pmc) {                                                   \
+	    if (sched_hygiene_debug_pmc) {                                                      \
 	        mt_cur_cpu_cycles_instrs_speculative(&thread->machine.intmask_cycles,           \
 	                &thread->machine.intmask_instr);                                        \
 	    }
@@ -109,27 +106,29 @@ void mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, uint64_t *instrs);
 
 #define INTERRUPT_MASKED_DEBUG_START(handler_addr, type)                                    \
 do {                                                                                        \
-	if (interrupt_masked_debug_mode && os_atomic_load(&interrupt_masked_timeout, relaxed) > 0) { \
+	if ((interrupt_masked_debug_mode || sched_preemption_disable_debug_mode) && os_atomic_load(&interrupt_masked_timeout, relaxed) > 0) { \
 	    thread_t thread = current_thread();                                                 \
 	    thread->machine.int_type = type;                                                    \
-	    thread->machine.int_handler_addr = (uintptr_t)VM_KERNEL_STRIP_UPTR(handler_addr);    \
-	    thread->machine.inthandler_timestamp = ml_get_speculative_timebase();               \
+	    thread->machine.int_handler_addr = (uintptr_t)VM_KERNEL_STRIP_UPTR(handler_addr);   \
+	    thread->machine.inthandler_timestamp = ml_get_sched_hygiene_timebase();             \
 	    INTERRUPT_MASKED_DEBUG_CAPTURE_PMC(thread);                                         \
 	    thread->machine.int_vector = (uintptr_t)NULL;                                       \
     }                                                                                       \
 } while (0)
 
 #define INTERRUPT_MASKED_DEBUG_END()                                                                                   \
-    do {                                                                                                               \
-	if (interrupt_masked_debug_mode && os_atomic_load(&interrupt_masked_timeout, relaxed) > 0) {                  \
+do {                                                                                                               \
+	if ((interrupt_masked_debug_mode || sched_preemption_disable_debug_mode) && os_atomic_load(&interrupt_masked_timeout, relaxed) > 0) { \
 	    thread_t thread = current_thread();                                                                        \
 	    ml_handle_interrupt_handler_duration(thread);                                                               \
 	    thread->machine.inthandler_timestamp = 0;                                                                  \
+	    thread->machine.inthandler_abandon = false;                                                                    \
 	}                                                                                                              \
-    } while (0)
+} while (0)
 
 void ml_irq_debug_start(uintptr_t handler, uintptr_t vector);
 void ml_irq_debug_end(void);
+void ml_irq_debug_abandon(void);
 
 void ml_spin_debug_reset(thread_t thread);
 void ml_spin_debug_clear(thread_t thread);
@@ -137,10 +136,13 @@ void ml_spin_debug_clear_self(void);
 void ml_handle_interrupts_disabled_duration(thread_t thread);
 void ml_handle_stackshot_interrupt_disabled_duration(thread_t thread);
 void ml_handle_interrupt_handler_duration(thread_t thread);
-#else
+
+#else /* SCHED_HYGIENE_DEBUG */
+
 #define INTERRUPT_MASKED_DEBUG_START(handler_addr, type)
 #define INTERRUPT_MASKED_DEBUG_END()
-#endif
+
+#endif /* SCHED_HYGIENE_DEBUG */
 
 extern bool ml_snoop_thread_is_on_core(thread_t thread);
 extern boolean_t ml_is_quiescing(void);
@@ -269,6 +271,8 @@ void ml_parse_cpu_topology(void);
 unsigned int ml_get_cpu_count(void);
 
 unsigned int ml_get_cpu_number_type(cluster_type_t cluster_type, bool logical, bool available);
+
+unsigned int ml_get_cluster_number_type(cluster_type_t cluster_type);
 
 unsigned int ml_cpu_cache_sharing(unsigned int level, cluster_type_t cluster_type, bool include_all_cpu_types);
 
@@ -404,6 +408,7 @@ typedef struct ml_topology_info {
 	unsigned int                    chip_revision;
 	unsigned int                    cluster_types;
 	unsigned int                    cluster_type_num_cpus[MAX_CPU_TYPES];
+	unsigned int                    cluster_type_num_clusters[MAX_CPU_TYPES];
 } ml_topology_info_t;
 
 /*!
@@ -458,6 +463,7 @@ struct  tbd_ops {
 typedef struct tbd_ops        *tbd_ops_t;
 typedef struct tbd_ops        tbd_ops_data_t;
 #endif
+
 
 /*!
  * @function ml_processor_register
@@ -631,6 +637,13 @@ boolean_t ml_validate_nofault(
 #if     defined(PEXPERT_KERNEL_PRIVATE) || defined(MACH_KERNEL_PRIVATE)
 /* IO memory map services */
 
+extern vm_offset_t io_map(
+	vm_map_offset_t         phys_addr,
+	vm_size_t               size,
+	unsigned int            flags,
+	vm_prot_t               prot,
+	bool                    unmappable);
+
 /* Map memory map IO space */
 vm_offset_t ml_io_map(
 	vm_offset_t phys_addr,
@@ -639,6 +652,11 @@ vm_offset_t ml_io_map(
 vm_offset_t ml_io_map_wcomb(
 	vm_offset_t phys_addr,
 	vm_size_t size);
+
+vm_offset_t ml_io_map_unmappable(
+	vm_offset_t phys_addr,
+	vm_size_t size,
+	uint32_t flags);
 
 vm_offset_t ml_io_map_with_prot(
 	vm_offset_t phys_addr,
@@ -656,10 +674,6 @@ void ml_get_bouncepool_info(
 vm_map_address_t ml_map_high_window(
 	vm_offset_t     phys_addr,
 	vm_size_t       len);
-
-/* boot memory allocation */
-vm_offset_t ml_static_malloc(
-	vm_size_t size);
 
 void ml_init_timebase(
 	void            *args,
@@ -682,11 +696,6 @@ void ml_delay_on_yield(void);
 uint32_t ml_get_decrementer(void);
 
 #include <machine/config.h>
-
-#if !CONFIG_SKIP_PRECISE_USER_KERNEL_TIME || HAS_FAST_CNTVCT
-void timer_state_event_user_to_kernel(void);
-void timer_state_event_kernel_to_user(void);
-#endif /* !CONFIG_SKIP_PRECISE_USER_KERNEL_TIME || HAS_FAST_CNTVCT */
 
 uint64_t ml_get_hwclock(void);
 
@@ -770,6 +779,14 @@ vm_map_offset_t ml_get_max_offset(
 extern void     ml_cpu_init_completed(void);
 extern void     ml_cpu_up(void);
 extern void     ml_cpu_down(void);
+/*
+ * The update to CPU counts needs to be separate from other actions
+ * in ml_cpu_up() and ml_cpu_down()
+ * because we don't update the counts when CLPC causes temporary
+ * cluster powerdown events, as these must be transparent to the user.
+ */
+extern void     ml_cpu_up_update_counts(int cpu_id);
+extern void     ml_cpu_down_update_counts(int cpu_id);
 extern void     ml_arm_sleep(void);
 
 extern uint64_t ml_get_wake_timebase(void);
@@ -809,10 +826,6 @@ extern  void            arm_debug_set_cp14(arm_debug_state_t *debug_state);
 extern  void            fiq_context_init(boolean_t enable_fiq);
 
 extern  void            reenable_async_aborts(void);
-#ifdef __arm__
-extern  boolean_t       get_vfp_enabled(void);
-extern  void            cpu_idle_wfi(boolean_t wfi_fast);
-#endif
 
 #ifdef __arm64__
 uint64_t ml_cluster_wfe_timeout(uint32_t wfe_cluster_id);
@@ -847,10 +860,10 @@ extern int      be_tracing(void);
 typedef void (*broadcastFunc) (void *);
 unsigned int cpu_broadcast_xcall(uint32_t *, boolean_t, broadcastFunc, void *);
 unsigned int cpu_broadcast_xcall_simple(boolean_t, broadcastFunc, void *);
-kern_return_t cpu_xcall(int, broadcastFunc, void *);
+__result_use_check kern_return_t cpu_xcall(int, broadcastFunc, void *);
 unsigned int cpu_broadcast_immediate_xcall(uint32_t *, boolean_t, broadcastFunc, void *);
 unsigned int cpu_broadcast_immediate_xcall_simple(boolean_t, broadcastFunc, void *);
-kern_return_t cpu_immediate_xcall(int, broadcastFunc, void *);
+__result_use_check kern_return_t cpu_immediate_xcall(int, broadcastFunc, void *);
 
 #ifdef  KERNEL_PRIVATE
 
@@ -1167,22 +1180,9 @@ struct sched_perfcontrol_callbacks {
 typedef struct sched_perfcontrol_callbacks *sched_perfcontrol_callbacks_t;
 
 extern void sched_perfcontrol_register_callbacks(sched_perfcontrol_callbacks_t callbacks, unsigned long size_of_state);
-
-/*
- * Update the scheduler with the set of cores that should be used to dispatch new threads.
- * Non-recommended cores can still be used to field interrupts or run bound threads.
- * This should be called with interrupts enabled and no scheduler locks held.
- */
-#define ALL_CORES_RECOMMENDED   (~(uint32_t)0)
-
-extern void sched_perfcontrol_update_recommended_cores(uint32_t recommended_cores);
 extern void sched_perfcontrol_thread_group_recommend(void *data, cluster_type_t recommendation);
-extern void sched_override_recommended_cores_for_sleep(void);
-extern void sched_restore_recommended_cores_after_sleep(void);
 extern void sched_perfcontrol_inherit_recommendation_from_tg(perfcontrol_class_t perfctl_class, boolean_t inherit);
 extern const char* sched_perfcontrol_thread_group_get_name(void *data);
-
-extern void sched_usercontrol_update_recommended_cores(uint64_t recommended_cores);
 
 /*
  * Edge Scheduler-CLPC Interface
@@ -1236,6 +1236,13 @@ extern void sched_perfcontrol_edge_matrix_set(sched_clutch_edge *edge_matrix, bo
  * There can be only one outstanding timer globally.
  */
 extern boolean_t sched_perfcontrol_update_callback_deadline(uint64_t deadline);
+
+/*
+ * SFI configuration.
+ */
+extern kern_return_t sched_perfcontrol_sfi_set_window(uint64_t window_usecs);
+extern kern_return_t sched_perfcontrol_sfi_set_bg_offtime(uint64_t offtime_usecs);
+extern kern_return_t sched_perfcontrol_sfi_set_utility_offtime(uint64_t offtime_usecs);
 
 typedef enum perfcontrol_callout_type {
 	PERFCONTROL_CALLOUT_ON_CORE,
@@ -1319,7 +1326,6 @@ extern void wfe_timeout_init(void);
 
 void ml_timer_evaluate(void);
 boolean_t ml_timer_forced_evaluation(void);
-uint64_t ml_energy_stat(thread_t);
 void ml_gpu_stat_update(uint64_t);
 uint64_t ml_gpu_stat(thread_t);
 #endif /* __APPLE_API_PRIVATE */

@@ -116,6 +116,7 @@
 #include <kern/kalloc.h>
 #include <kern/kern_cdata.h>
 #include <kern/processor.h>
+#include <kern/recount.h>
 #include <kern/sched_prim.h>    /* for thread_wakeup */
 #include <kern/ipc_tt.h>
 #include <kern/host.h>
@@ -134,10 +135,10 @@
 #include <kern/telemetry.h>
 #endif
 
-#if MONOTONIC
+#if CONFIG_PERVASIVE_CPI
 #include <kern/monotonic.h>
 #include <machine/monotonic.h>
-#endif /* MONOTONIC */
+#endif /* CONFIG_PERVASIVE_CPI */
 
 #include <os/log.h>
 
@@ -148,6 +149,7 @@
 #include <vm/vm_protos.h>
 #include <vm/vm_purgeable_internal.h>
 #include <vm/vm_compressor_pager.h>
+#include <vm/vm_reclaim_internal.h>
 
 #include <sys/proc_ro.h>
 #include <sys/resource.h>
@@ -177,6 +179,7 @@
 #endif
 
 #include <IOKit/IOBSD.h>
+#include <kdp/processor_core.h>
 
 #if KPERF
 extern int kpc_force_all_ctrs(task_t, int);
@@ -185,10 +188,15 @@ extern int kpc_force_all_ctrs(task_t, int);
 SECURITY_READ_ONLY_LATE(task_t) kernel_task;
 
 int64_t         next_taskuniqueid = 0;
-
-ZONE_DEFINE_ID(ZONE_ID_TASK, "tasks", struct task, ZC_ZFREE_CLEARMEM);
+const size_t task_alignment = _Alignof(struct task);
+extern const size_t proc_alignment;
+extern size_t proc_struct_size;
+extern size_t proc_and_task_size;
+size_t task_struct_size;
 
 extern uint32_t ipc_control_port_options;
+
+extern int large_corpse_count;
 
 extern boolean_t proc_send_synchronous_EXC_RESOURCE(void *p);
 extern void task_disown_frozen_csegs(task_t owner_task);
@@ -196,6 +204,7 @@ extern void task_disown_frozen_csegs(task_t owner_task);
 static void task_port_no_senders(ipc_port_t, mach_msg_type_number_t);
 static void task_port_with_flavor_no_senders(ipc_port_t, mach_msg_type_number_t);
 static void task_suspension_no_senders(ipc_port_t, mach_msg_type_number_t);
+static inline void task_zone_init(void);
 
 IPC_KOBJECT_DEFINE(IKOT_TASK_NAME);
 IPC_KOBJECT_DEFINE(IKOT_TASK_CONTROL,
@@ -404,12 +413,13 @@ extern uint64_t get_dispatchqueue_offset_from_proc(void *);
 extern int kevent_proc_copy_uptrs(void *proc, uint64_t *buf, uint32_t bufsize);
 extern void workq_proc_suspended(struct proc *p);
 extern void workq_proc_resumed(struct proc *p);
+extern struct proc *kernproc;
 
 #if CONFIG_MEMORYSTATUS
 extern void     proc_memstat_skip(struct proc* p, boolean_t set);
 extern void     memorystatus_on_ledger_footprint_exceeded(int warning, boolean_t memlimit_is_active, boolean_t memlimit_is_fatal);
 extern void     memorystatus_log_exception(const int max_footprint_mb, boolean_t memlimit_is_active, boolean_t memlimit_is_fatal);
-extern boolean_t memorystatus_allowed_vm_map_fork(task_t task);
+extern boolean_t memorystatus_allowed_vm_map_fork(task_t task, bool *is_large);
 extern uint64_t  memorystatus_available_memory_internal(struct proc *p);
 
 #if DEVELOPMENT || DEBUG
@@ -485,6 +495,9 @@ static struct task_exc_guard_named_default task_exc_guard_named_defaults[] = {};
 static void task_hold_locked(task_t task);
 static void task_wait_locked(task_t task, boolean_t until_not_runnable);
 static void task_release_locked(task_t task);
+extern task_t proc_get_task_raw(void *proc);
+extern void task_ref_hold_proc_task_struct(task_t task);
+extern void task_release_proc_task_struct(task_t task);
 
 static void task_synchronizer_destroy_all(task_t task);
 static os_ref_count_t
@@ -589,13 +602,17 @@ task_set_platform_binary(
 	task_t task,
 	boolean_t is_platform)
 {
-	task_lock(task);
 	if (is_platform) {
-		task->t_flags |= TF_PLATFORM;
+		task_ro_flags_set(task, TFRO_PLATFORM);
 	} else {
-		task->t_flags &= ~(TF_PLATFORM);
+		task_ro_flags_clear(task, TFRO_PLATFORM);
 	}
-	task_unlock(task);
+}
+
+boolean_t
+task_get_platform_binary(task_t task)
+{
+	return (task_ro_flags_get(task) & TFRO_PLATFORM) != 0;
 }
 
 void
@@ -629,16 +646,48 @@ task_set_ca_client_wi(
 	return ret;
 }
 
-void
+/*
+ * task_set_dyld_info() is called at most three times.
+ * 1) at task struct creation to set addr/size to zero.
+ * 2) in mach_loader.c to set location of __all_image_info section in loaded dyld
+ * 3) is from dyld itself to update location of all_image_info
+ * For security any calls after that are ignored.  The TF_DYLD_ALL_IMAGE_SET bit is used to determine state.
+ */
+kern_return_t
 task_set_dyld_info(
-	task_t task,
+	task_t            task,
 	mach_vm_address_t addr,
-	mach_vm_size_t size)
+	mach_vm_size_t    size)
 {
+	mach_vm_address_t end;
+	if (os_add_overflow(addr, size, &end)) {
+		return KERN_FAILURE;
+	}
+
 	task_lock(task);
-	task->all_image_info_addr = addr;
-	task->all_image_info_size = size;
-	task_unlock(task);
+	/* don't accept updates if all_image_info_addr is final */
+	if ((task->t_flags & TF_DYLD_ALL_IMAGE_FINAL) == 0) {
+		bool inputNonZero   = ((addr != 0) || (size != 0));
+		bool currentNonZero = ((task->all_image_info_addr != 0) || (task->all_image_info_size != 0));
+		task->all_image_info_addr = addr;
+		task->all_image_info_size = size;
+		/* can only change from a non-zero value to another non-zero once */
+		if (inputNonZero && currentNonZero) {
+			task->t_flags |= TF_DYLD_ALL_IMAGE_FINAL;
+		}
+		task_unlock(task);
+		return KERN_SUCCESS;
+	} else {
+		task_unlock(task);
+		return KERN_FAILURE;
+	}
+}
+
+bool
+task_donates_own_pages(
+	task_t task)
+{
+	return task->donates_own_pages;
 }
 
 void
@@ -705,18 +754,16 @@ task_clear_return_wait(task_t task, uint32_t flags)
 		task->returnwait_inheritor = NULL;
 
 		if (task->t_returnwaitflags & TRW_LRETURNWAITER) {
-			struct turnstile *turnstile = turnstile_prepare((uintptr_t) task_get_return_wait_event(task),
-			    NULL, TURNSTILE_NULL, TURNSTILE_ULOCK);
+			struct turnstile *turnstile = turnstile_prepare_hash((uintptr_t) task_get_return_wait_event(task),
+			    TURNSTILE_ULOCK);
 
 			waitq_wakeup64_all(&turnstile->ts_waitq,
 			    CAST_EVENT64_T(task_get_return_wait_event(task)),
-			    THREAD_AWAKENED, 0);
+			    THREAD_AWAKENED, WAITQ_UPDATE_INHERITOR);
 
-			turnstile_update_inheritor(turnstile, NULL,
-			    TURNSTILE_IMMEDIATE_UPDATE | TURNSTILE_INHERITOR_THREAD);
 			turnstile_update_inheritor_complete(turnstile, TURNSTILE_INTERLOCK_HELD);
 
-			turnstile_complete((uintptr_t) task_get_return_wait_event(task), NULL, NULL, TURNSTILE_ULOCK);
+			turnstile_complete_hash((uintptr_t) task_get_return_wait_event(task), TURNSTILE_ULOCK);
 			turnstile_cleanup();
 			task->t_returnwaitflags &= ~TRW_LRETURNWAITER;
 		}
@@ -732,8 +779,8 @@ task_wait_to_return(void)
 	is_write_lock(task->itk_space);
 
 	if (task->t_returnwaitflags & TRW_LRETURNWAIT) {
-		struct turnstile *turnstile = turnstile_prepare((uintptr_t) task_get_return_wait_event(task),
-		    NULL, TURNSTILE_NULL, TURNSTILE_ULOCK);
+		struct turnstile *turnstile = turnstile_prepare_hash((uintptr_t) task_get_return_wait_event(task),
+		    TURNSTILE_ULOCK);
 
 		do {
 			task->t_returnwaitflags |= TRW_LRETURNWAITER;
@@ -753,7 +800,7 @@ task_wait_to_return(void)
 			is_write_lock(task->itk_space);
 		} while (task->t_returnwaitflags & TRW_LRETURNWAIT);
 
-		turnstile_complete((uintptr_t) task_get_return_wait_event(task), NULL, NULL, TURNSTILE_ULOCK);
+		turnstile_complete_hash((uintptr_t) task_get_return_wait_event(task), TURNSTILE_ULOCK);
 	}
 
 	is_write_unlock(task->itk_space);
@@ -770,25 +817,6 @@ task_wait_to_return(void)
 
 	thread_bootstrap_return();
 }
-
-#ifdef CONFIG_32BIT_TELEMETRY
-boolean_t
-task_consume_32bit_log_flag(task_t task)
-{
-	if ((task->t_procflags & TPF_LOG_32BIT_TELEMETRY) != 0) {
-		task->t_procflags &= ~TPF_LOG_32BIT_TELEMETRY;
-		return TRUE;
-	} else {
-		return FALSE;
-	}
-}
-
-void
-task_set_32bit_log_flag(task_t task)
-{
-	task->t_procflags |= TPF_LOG_32BIT_TELEMETRY;
-}
-#endif /* CONFIG_32BIT_TELEMETRY */
 
 boolean_t
 task_is_exec_copy(task_t task)
@@ -949,16 +977,26 @@ task_init(void)
 #endif /* CONFIG_COALITIONS */
 
 	task_ref_init();
+	task_zone_init();
+
+#ifdef __LP64__
+	boolean_t is_64bit = TRUE;
+#else
+	boolean_t is_64bit = FALSE;
+#endif
+
+	kernproc = (struct proc *)zalloc_flags(proc_task_zone, Z_WAITOK | Z_ZERO);
+	kernel_task = proc_get_task_raw(kernproc);
 
 	/*
 	 * Create the kernel task as the first task.
 	 */
-#ifdef __LP64__
-	if (task_create_internal(TASK_NULL, NULL, NULL, FALSE, TRUE, TRUE, TF_NONE, TPF_NONE, TWF_NONE, &kernel_task) != KERN_SUCCESS)
-#else
-	if (task_create_internal(TASK_NULL, NULL, NULL, FALSE, FALSE, FALSE, TF_NONE, TPF_NONE, TWF_NONE, &kernel_task) != KERN_SUCCESS)
-#endif
-	{ panic("task_init");}
+	if (task_create_internal(TASK_NULL, NULL, NULL, FALSE,
+	    is_64bit, is_64bit, TF_NONE, TPF_NONE, TWF_NONE, kernel_task) != KERN_SUCCESS) {
+		panic("task_init");
+	}
+
+	ipc_task_enable(kernel_task);
 
 #if defined(HAS_APPLE_PAC)
 	kernel_task->rop_pid = ml_default_rop_pid();
@@ -972,37 +1010,15 @@ task_init(void)
 	kernel_task->map = kernel_map;
 }
 
-/*
- * Create a task running in the kernel address space.  It may
- * have its own map of size mem_size and may have ipc privileges.
- */
-kern_return_t
-kernel_task_create(
-	__unused task_t         parent_task,
-	__unused vm_offset_t            map_base,
-	__unused vm_size_t              map_size,
-	__unused task_t         *child_task)
+static inline void
+task_zone_init(void)
 {
-	return KERN_INVALID_ARGUMENT;
-}
+	proc_struct_size = roundup(proc_struct_size, task_alignment);
+	task_struct_size = roundup(sizeof(struct task), proc_alignment);
+	proc_and_task_size = proc_struct_size + task_struct_size;
 
-kern_return_t
-task_create(
-	task_t                          parent_task,
-	__unused ledger_port_array_t    ledger_ports,
-	__unused mach_msg_type_number_t num_ledger_ports,
-	__unused boolean_t              inherit_memory,
-	__unused task_t                 *child_task)        /* OUT */
-{
-	if (parent_task == TASK_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	/*
-	 * No longer supported: too many calls assume that a task has a valid
-	 * process attached.
-	 */
-	return KERN_FAILURE;
+	proc_task_zone = zone_create_ext("proc_task", proc_and_task_size,
+	    ZC_ZFREE_CLEARMEM | ZC_SEQUESTER, ZONE_ID_PROC_TASK, NULL); /* sequester is needed for proc_rele() */
 }
 
 /*
@@ -1291,14 +1307,15 @@ init_task_ledgers(void)
 	    task_wakeups_rate_exceeded, NULL, NULL);
 	ledger_set_callback(t, task_ledgers.physical_writes, task_io_rate_exceeded, (void *)FLAVOR_IO_PHYSICAL_WRITES, NULL);
 
-#if XNU_MONITOR
-	ledger_template_complete_secure_alloc(t);
-#else /* XNU_MONITOR */
+#if !XNU_MONITOR
 	ledger_template_complete(t);
+#else /* !XNU_MONITOR */
+	ledger_template_complete_secure_alloc(t);
 #endif /* XNU_MONITOR */
 	task_ledger_template = t;
 }
 
+/* Create a task, but leave the task ports disabled */
 kern_return_t
 task_create_internal(
 	task_t             parent_task,            /* Null-able */
@@ -1310,18 +1327,17 @@ task_create_internal(
 	uint32_t           t_flags,
 	uint32_t           t_procflags,
 	uint8_t            t_returnwaitflags,
-	task_t             *child_task)            /* OUT */
+	task_t             child_task)
 {
 	task_t                  new_task;
 	vm_shared_region_t      shared_region;
 	ledger_t                ledger = NULL;
 	struct task_ro_data     task_ro_data = {};
+	uint32_t                parent_t_flags_ro = 0;
 
-	*child_task = NULL;
-	new_task = zalloc_id(ZONE_ID_TASK, Z_WAITOK | Z_NOFAIL);
+	new_task = child_task;
 
 	if (task_ref_count_init(new_task) != KERN_SUCCESS) {
-		zfree_id(ZONE_ID_TASK, new_task);
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
@@ -1330,7 +1346,6 @@ task_create_internal(
 	ledger = ledger_instantiate(task_ledger_template, LEDGER_CREATE_ACTIVE_ENTRIES);
 	if (ledger == NULL) {
 		task_ref_count_fini(new_task);
-		zfree_id(ZONE_ID_TASK, new_task);
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
@@ -1347,7 +1362,23 @@ task_create_internal(
 
 	/* if inherit_memory is true, parent_task MUST not be NULL */
 	if (!(t_flags & TF_CORPSE_FORK) && inherit_memory) {
+#if CONFIG_DEFERRED_RECLAIM
+		if (parent_task->deferred_reclamation_metadata) {
+			/*
+			 * Prevent concurrent reclaims while we're forking the parent_task's map,
+			 * so that the child's map is in sync with the forked reclamation
+			 * metadata.
+			 */
+			vm_deferred_reclamation_buffer_lock(parent_task->deferred_reclamation_metadata);
+		}
+#endif /* CONFIG_DEFERRED_RECLAIM */
 		new_task->map = vm_map_fork(ledger, parent_task->map, 0);
+#if CONFIG_DEFERRED_RECLAIM
+		if (parent_task->deferred_reclamation_metadata) {
+			new_task->deferred_reclamation_metadata =
+			    vm_deferred_reclamation_buffer_fork(new_task, parent_task->deferred_reclamation_metadata);
+		}
+#endif /* CONFIG_DEFERRED_RECLAIM */
 	} else {
 		unsigned int pmap_flags = is_64bit ? PMAP_CREATE_64BIT : 0;
 		pmap_t pmap = pmap_create_options(ledger, 0, pmap_flags);
@@ -1355,7 +1386,6 @@ task_create_internal(
 			counter_free(&new_task->faults);
 			ledger_dereference(ledger);
 			task_ref_count_fini(new_task);
-			zfree_id(ZONE_ID_TASK, new_task);
 			return KERN_RESOURCE_SHORTAGE;
 		}
 		new_task->map = vm_map_create_options(pmap,
@@ -1368,7 +1398,6 @@ task_create_internal(
 		counter_free(&new_task->faults);
 		ledger_dereference(ledger);
 		task_ref_count_fini(new_task);
-		zfree_id(ZONE_ID_TASK, new_task);
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
@@ -1401,12 +1430,23 @@ task_create_internal(
 	new_task->crashed_thread_id = 0;
 	new_task->exec_token = 0;
 	new_task->watchports = NULL;
-	new_task->restartable_ranges = NULL;
+	new_task->t_rr_ranges = NULL;
 
 	new_task->bank_context = NULL;
 
+	if (parent_task) {
+		parent_t_flags_ro = task_ro_flags_get(parent_task);
+	}
+
+#if __has_feature(ptrauth_calls)
+	/* Inherit the pac exception flags from parent if in fork */
+	if (parent_task && inherit_memory) {
+		task_ro_data.t_flags_ro |= (parent_t_flags_ro & (TFRO_PAC_ENFORCE_USER_STATE |
+		    TFRO_PAC_EXC_FATAL));
+	}
+#endif
+
 #ifdef MACH_BSD
-	new_task->bsd_info = NULL;
 	new_task->corpse_info = NULL;
 #endif /* MACH_BSD */
 
@@ -1448,8 +1488,6 @@ task_create_internal(
 	queue_init(&new_task->semaphore_list);
 	new_task->semaphores_owned = 0;
 
-	ipc_task_init(new_task, parent_task);
-
 	new_task->vtimers = 0;
 
 	new_task->shared_region = NULL;
@@ -1469,6 +1507,7 @@ task_create_internal(
 #if MACH_ASSERT
 	new_task->suspends_outstanding = 0;
 #endif
+	recount_task_init(&new_task->tk_recount);
 
 #if HYPERVISOR
 	new_task->hv_task_target = NULL;
@@ -1491,9 +1530,16 @@ task_create_internal(
 	if (parent_task != NULL) {
 		task_ro_data.task_tokens.sec_token = *task_get_sec_token(parent_task);
 		task_ro_data.task_tokens.audit_token = *task_get_audit_token(parent_task);
+
+		/* only inherit the option bits, no effect until task_set_immovable_pinned() */
+		task_ro_data.task_control_port_options = task_get_control_port_options(parent_task);
+
+		task_ro_data.t_flags_ro |= parent_t_flags_ro & TFRO_FILTER_MSG;
 	} else {
 		task_ro_data.task_tokens.sec_token = KERNEL_SECURITY_TOKEN;
 		task_ro_data.task_tokens.audit_token = KERNEL_AUDIT_TOKEN;
+
+		task_ro_data.task_control_port_options = TASK_CONTROL_PORT_OPTIONS_NONE;
 	}
 
 	/* must set before task_importance_init_from_parent: */
@@ -1503,6 +1549,8 @@ task_create_internal(
 		new_task->bsd_info_ro = proc_ro_alloc(NULL, NULL, new_task, &task_ro_data);
 	}
 
+	ipc_task_init(new_task, parent_task);
+
 	task_importance_init_from_parent(new_task, parent_task);
 
 	new_task->corpse_vmobject_list = NULL;
@@ -1510,7 +1558,9 @@ task_create_internal(
 	if (parent_task != TASK_NULL) {
 		/* inherit the parent's shared region */
 		shared_region = vm_shared_region_get(parent_task);
-		vm_shared_region_set(new_task, shared_region);
+		if (shared_region != NULL) {
+			vm_shared_region_set(new_task, shared_region);
+		}
 
 #if __has_feature(ptrauth_calls)
 		/* use parent's shared_region_id */
@@ -1540,9 +1590,6 @@ task_create_internal(
 		new_task->pset_hint = parent_task->pset_hint = task_choose_pset(parent_task);
 
 		new_task->task_exc_guard = parent_task->task_exc_guard;
-		/* only inherit the option bits, no effect until task_set_immovable_pinned() */
-		new_task->task_control_port_options = parent_task->task_control_port_options;
-
 		if (parent_task->t_flags & TF_NO_SMT) {
 			new_task->t_flags |= TF_NO_SMT;
 		}
@@ -1553,10 +1600,6 @@ task_create_internal(
 
 		if (parent_task->t_flags & TF_TECS) {
 			new_task->t_flags |= TF_TECS;
-		}
-
-		if (parent_task->t_flags & TF_FILTER_MSG) {
-			new_task->t_flags |= TF_FILTER_MSG;
 		}
 
 #if defined(__x86_64__)
@@ -1585,9 +1628,8 @@ task_create_internal(
 		new_task->pset_hint = PROCESSOR_SET_NULL;
 
 		new_task->task_exc_guard = TASK_EXC_GUARD_NONE;
-		new_task->task_control_port_options = TASK_CONTROL_PORT_OPTIONS_NONE;
 
-		if (kernel_task == TASK_NULL) {
+		if (new_task == kernel_task) {
 			new_task->priority = BASEPRI_KERNEL;
 			new_task->max_priority = MAXPRI_KERNEL;
 		} else {
@@ -1621,9 +1663,6 @@ task_create_internal(
 		task_store_owned_vmobject_info(new_task, parent_task);
 	} else {
 		/* Initialize to zero for standard fork/spawn case */
-		new_task->total_user_time = 0;
-		new_task->total_system_time = 0;
-		new_task->total_ptime = 0;
 		new_task->total_runnable_time = 0;
 		new_task->syscalls_mach = 0;
 		new_task->syscalls_unix = 0;
@@ -1654,19 +1693,18 @@ task_create_internal(
 #if CONFIG_PHYS_WRITE_ACCT
 		new_task->task_fs_metadata_writes = 0;
 #endif /* CONFIG_PHYS_WRITE_ACCT */
-
-		new_task->task_energy = 0;
-#if MONOTONIC
-		memset(&new_task->task_monotonic, 0, sizeof(new_task->task_monotonic));
-#endif /* MONOTONIC */
 	}
 
 
+	new_task->donates_own_pages = FALSE;
 #if CONFIG_COALITIONS
 	if (!(t_flags & TF_CORPSE_FORK)) {
 		/* TODO: there is no graceful failure path here... */
 		if (parent_coalitions && parent_coalitions[COALITION_TYPE_RESOURCE]) {
 			coalitions_adopt_task(parent_coalitions, new_task);
+			if (parent_coalitions[COALITION_TYPE_JETSAM]) {
+				new_task->donates_own_pages = coalition_is_swappable(parent_coalitions[COALITION_TYPE_JETSAM]);
+			}
 		} else if (parent_task && parent_task->coalition[COALITION_TYPE_RESOURCE]) {
 			/*
 			 * all tasks at least have a resource coalition, so
@@ -1674,6 +1712,9 @@ task_create_internal(
 			 * the parent is a part of
 			 */
 			coalitions_adopt_task(parent_task->coalition, new_task);
+			if (parent_task->coalition[COALITION_TYPE_JETSAM]) {
+				new_task->donates_own_pages = coalition_is_swappable(parent_task->coalition[COALITION_TYPE_JETSAM]);
+			}
 		} else {
 			/* TODO: assert that new_task will be PID 1 (launchd) */
 			coalitions_adopt_init_task(new_task);
@@ -1741,8 +1782,6 @@ task_create_internal(
 	queue_init(&new_task->io_user_clients);
 	new_task->loadTag = 0;
 
-	ipc_task_enable(new_task);
-
 	lck_mtx_lock(&tasks_threads_lock);
 	queue_enter(&tasks, new_task, task_t, tasks);
 	tasks_count++;
@@ -1750,8 +1789,8 @@ task_create_internal(
 		task_suspend_internal(new_task);
 	}
 	lck_mtx_unlock(&tasks_threads_lock);
+	task_ref_hold_proc_task_struct(new_task);
 
-	*child_task = new_task;
 	return KERN_SUCCESS;
 }
 
@@ -1766,9 +1805,7 @@ task_rollup_accounting_info(task_t to_task, task_t from_task)
 {
 	assert(from_task != to_task);
 
-	to_task->total_user_time = from_task->total_user_time;
-	to_task->total_system_time = from_task->total_system_time;
-	to_task->total_ptime = from_task->total_ptime;
+	recount_task_copy(&to_task->tk_recount, &from_task->tk_recount);
 	to_task->total_runnable_time = from_task->total_runnable_time;
 	counter_add(&to_task->faults, counter_load(&from_task->faults));
 	counter_add(&to_task->pageins, counter_load(&from_task->pageins));
@@ -1804,7 +1841,6 @@ task_rollup_accounting_info(task_t to_task, task_t from_task)
 #if CONFIG_PHYS_WRITE_ACCT
 	to_task->task_fs_metadata_writes = from_task->task_fs_metadata_writes;
 #endif /* CONFIG_PHYS_WRITE_ACCT */
-	to_task->task_energy = from_task->task_energy;
 
 #if CONFIG_MEMORYSTATUS
 	ledger_rollup_entry(to_task->ledger, from_task->ledger, task_ledgers.memorystatus_dirty_time);
@@ -1870,7 +1906,7 @@ task_deallocate_internal(
 	 * like threads, are gone before we trash the world.
 	 */
 	assert(queue_empty(&task->threads));
-	assert(task->bsd_info == NULL);
+	assert(get_bsdtask_info(task) == NULL);
 	assert(!is_active(task->itk_space));
 	assert(!task->active);
 	assert(task->active_thread_count == 0);
@@ -1900,6 +1936,9 @@ task_deallocate_internal(
 	/* let iokit know */
 	iokit_task_terminate(task);
 
+	/* Unregister task from userspace coredumps on panic */
+	kern_unregister_userspace_coredump(task);
+
 	if (task->affinity_space) {
 		task_affinity_deallocate(task);
 	}
@@ -1924,10 +1963,22 @@ task_deallocate_internal(
 		    task->task_owned_objects);
 	}
 
+#if CONFIG_DEFERRED_RECLAIM
+	if (task->deferred_reclamation_metadata != NULL) {
+		vm_deferred_reclamation_buffer_deallocate(task->deferred_reclamation_metadata);
+		task->deferred_reclamation_metadata = NULL;
+	}
+#endif /* CONFIG_DEFERRED_RECLAIM */
+
 	vm_map_deallocate(task->map);
+	if (task->is_large_corpse) {
+		assert(large_corpse_count > 0);
+		OSDecrementAtomic(&large_corpse_count);
+		task->is_large_corpse = false;
+	}
 	is_release(task->itk_space);
-	if (task->restartable_ranges) {
-		restartable_ranges_release(task->restartable_ranges);
+	if (task->t_rr_ranges) {
+		restartable_ranges_release(task->t_rr_ranges);
 	}
 
 	ledger_get_entries(task->ledger, task_ledgers.interrupt_wakeups,
@@ -1939,20 +1990,30 @@ task_deallocate_internal(
 	sched_group_destroy(task->sched_group);
 #endif
 
+	struct recount_times_mach sum = { 0 };
+	struct recount_times_mach p_only = { 0 };
+	recount_task_times_perf_only(task, &sum, &p_only);
+#if CONFIG_PERVASIVE_ENERGY
+	uint64_t energy = recount_task_energy_nj(task);
+#endif /* CONFIG_PERVASIVE_ENERGY */
+	recount_task_deinit(&task->tk_recount);
+
 	/* Accumulate statistics for dead tasks */
 	lck_spin_lock(&dead_task_statistics_lock);
-	dead_task_statistics.total_user_time += task->total_user_time;
-	dead_task_statistics.total_system_time += task->total_system_time;
+	dead_task_statistics.total_user_time += sum.rtm_user;
+	dead_task_statistics.total_system_time += sum.rtm_system;
 
 	dead_task_statistics.task_interrupt_wakeups += interrupt_wakeups;
 	dead_task_statistics.task_platform_idle_wakeups += platform_idle_wakeups;
 
 	dead_task_statistics.task_timer_wakeups_bin_1 += task->task_timer_wakeups_bin_1;
 	dead_task_statistics.task_timer_wakeups_bin_2 += task->task_timer_wakeups_bin_2;
-	dead_task_statistics.total_ptime += task->total_ptime;
+	dead_task_statistics.total_ptime += p_only.rtm_user + p_only.rtm_system;
 	dead_task_statistics.total_pset_switches += task->ps_switch;
 	dead_task_statistics.task_gpu_ns += task->task_gpu_ns;
-	dead_task_statistics.task_energy += task->task_energy;
+#if CONFIG_PERVASIVE_ENERGY
+	dead_task_statistics.task_energy += energy;
+#endif /* CONFIG_PERVASIVE_ENERGY */
 
 	lck_spin_unlock(&dead_task_statistics_lock);
 	lck_mtx_destroy(&task->lock, &task_lck_grp);
@@ -2015,7 +2076,7 @@ task_deallocate_internal(
 		task->bsd_info_ro = NULL;
 	}
 
-	zfree_id(ZONE_ID_TASK, task);
+	task_release_proc_task_struct(task);
 }
 
 /*
@@ -2131,8 +2192,8 @@ task_collect_crash_info(
 
 	task_lock(task);
 
-	assert(is_corpse_fork || task->bsd_info != NULL);
-	if (task->corpse_info == NULL && (is_corpse_fork || task->bsd_info != NULL)) {
+	assert(is_corpse_fork || get_bsdtask_info(task) != NULL);
+	if (task->corpse_info == NULL && (is_corpse_fork || get_bsdtask_info(task) != NULL)) {
 #if CONFIG_MACF
 		/* Set the crash label, used by the exception delivery mac hook */
 		free_label = get_task_crash_label(task);         // Most likely NULL.
@@ -2261,7 +2322,7 @@ task_terminate(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (task->bsd_info) {
+	if (get_bsdtask_info(task)) {
 		return KERN_FAILURE;
 	}
 
@@ -2313,7 +2374,7 @@ task_mark_corpse(task_t task)
 	assert(!task_is_a_corpse(task));
 
 #if CONFIG_MACF
-	crash_label = mac_exc_create_label_for_proc((struct proc*)task->bsd_info);
+	crash_label = mac_exc_create_label_for_proc((struct proc*)get_bsdtask_info(task));
 #endif
 
 	kr = task_collect_crash_info(task,
@@ -2598,7 +2659,8 @@ task_duplicate_map_and_threads(
 	}
 
 	/* Check with VM if vm_map_fork is allowed for this task */
-	if (memorystatus_allowed_vm_map_fork(task)) {
+	bool is_large = false;
+	if (memorystatus_allowed_vm_map_fork(task, &is_large)) {
 		/* Setup new task's vmmap, switch from parent task's map to it COW map */
 		oldmap = new_task->map;
 		new_task->map = vm_map_fork(new_task->ledger,
@@ -2607,6 +2669,7 @@ task_duplicate_map_and_threads(
 		    VM_MAP_FORK_PRESERVE_PURGEABLE |
 		    VM_MAP_FORK_CORPSE_FOOTPRINT));
 		if (new_task->map) {
+			new_task->is_large_corpse = is_large;
 			vm_map_deallocate(oldmap);
 
 			/* copy ledgers that impact the memory footprint */
@@ -2623,6 +2686,10 @@ task_duplicate_map_and_threads(
 				}
 			}
 		} else {
+			if (is_large) {
+				assert(large_corpse_count > 0);
+				OSDecrementAtomic(&large_corpse_count);
+			}
 			new_task->map = oldmap;
 #if DEVELOPMENT || DEBUG
 			memorystatus_abort_vm_map_fork(task);
@@ -2847,8 +2914,9 @@ task_terminate_internal(
 	}
 
 #ifdef MACH_BSD
-	if (task->bsd_info != NULL && !task_is_exec_copy(task)) {
-		pid = proc_pid(task->bsd_info);
+	void *bsd_info = get_bsdtask_info(task);
+	if (bsd_info != NULL) {
+		pid = proc_pid(bsd_info);
 	}
 #endif /* MACH_BSD */
 
@@ -2908,19 +2976,16 @@ task_terminate_internal(
 	 * at reap time, we do it explictly here.
 	 */
 
-	vm_map_lock(task->map);
-	vm_map_disable_hole_optimization(task->map);
-	vm_map_unlock(task->map);
-
 #if MACH_ASSERT
 	/*
 	 * Identify the pmap's process, in case the pmap ledgers drift
 	 * and we have to report it.
 	 */
 	char procname[17];
-	if (task->bsd_info && !task_is_exec_copy(task)) {
-		pid = proc_pid(task->bsd_info);
-		proc_name_kdp(task->bsd_info, procname, sizeof(procname));
+	void *proc = get_bsdtask_info(task);
+	if (proc) {
+		pid = proc_pid(proc);
+		proc_name_kdp(proc, procname, sizeof(procname));
 	} else {
 		pid = 0;
 		strlcpy(procname, "<unknown>", sizeof(procname));
@@ -3071,7 +3136,7 @@ task_start_halt_locked(task_t task, boolean_t should_mark_corpse)
 	 * gives us a better chance of not having to wait there.
 	 */
 	task_hold_locked(task);
-	dispatchqueue_offset = get_dispatchqueue_offset_from_proc(task->bsd_info);
+	dispatchqueue_offset = get_dispatchqueue_offset_from_proc(get_bsdtask_info(task));
 
 	/*
 	 * Terminate all the other threads in the task.
@@ -3083,10 +3148,16 @@ task_start_halt_locked(task_t task, boolean_t should_mark_corpse)
 		 * to be done after task_hold_locked() traps all threads to AST, but before
 		 * threads are marked inactive in thread_terminate_internal(). Takes thread
 		 * mutex lock.
+		 *
+		 * We need task_is_a_corpse() check so that we don't accidently update policy
+		 * for tasks that are doing posix_spawn().
+		 *
 		 * See: thread_policy_update_tasklocked().
 		 */
-		proc_set_thread_policy(thread, TASK_POLICY_ATTRIBUTE,
-		    TASK_POLICY_TERMINATED, TASK_POLICY_ENABLE);
+		if (task_is_a_corpse(task)) {
+			proc_set_thread_policy(thread, TASK_POLICY_ATTRIBUTE,
+			    TASK_POLICY_TERMINATED, TASK_POLICY_ENABLE);
+		}
 
 		if (should_mark_corpse) {
 			thread_mtx_lock(thread);
@@ -3162,17 +3233,7 @@ task_complete_halt(task_t task)
 	 * Clean out the address space, as we are going to be
 	 * getting a new one.
 	 */
-	vm_map_remove(task->map, task->map->min_offset,
-	    task->map->max_offset,
-	    /*
-	     * Final cleanup:
-	     * + no unnesting
-	     * + remove immutable mappings
-	     * + allow gaps in the range
-	     */
-	    (VM_MAP_REMOVE_NO_UNNESTING |
-	    VM_MAP_REMOVE_IMMUTABLE |
-	    VM_MAP_REMOVE_GAPS_OK));
+	vm_map_terminate(task->map);
 
 	/*
 	 * Kick out any IOKitUser handles to the task. At best they're stale,
@@ -3195,6 +3256,7 @@ task_hold_locked(
 	task_t          task)
 {
 	thread_t        thread;
+	void *bsd_info = get_bsdtask_info(task);
 
 	assert(task->active);
 
@@ -3202,8 +3264,8 @@ task_hold_locked(
 		return;
 	}
 
-	if (task->bsd_info) {
-		workq_proc_suspended(task->bsd_info);
+	if (bsd_info) {
+		workq_proc_suspended(bsd_info);
 	}
 
 	/*
@@ -3322,6 +3384,7 @@ task_release_locked(
 	task_t          task)
 {
 	thread_t        thread;
+	void *bsd_info = get_bsdtask_info(task);
 
 	assert(task->active);
 	assert(task->suspend_count > 0);
@@ -3330,8 +3393,8 @@ task_release_locked(
 		return;
 	}
 
-	if (task->bsd_info) {
-		workq_proc_resumed(task->bsd_info);
+	if (bsd_info) {
+		workq_proc_resumed(bsd_info);
 	}
 
 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
@@ -3703,10 +3766,14 @@ task_suspend(
 	 * notification on that port (if none outstanding).
 	 */
 	itk_lock(task);
-	(void)ipc_kobject_make_send_lazy_alloc_port((ipc_port_t *) &task->itk_resume,
-	    (ipc_kobject_t)task, IKOT_TASK_RESUME, IPC_KOBJECT_PTRAUTH_STORE,
-	    OS_PTRAUTH_DISCRIMINATOR("task.itk_resume"));
-	port = task->itk_resume; /* donates send right */
+	port = task->itk_resume;
+	if (port == IP_NULL) {
+		port = ipc_kobject_alloc_port(task, IKOT_TASK_RESUME,
+		    IPC_KOBJECT_ALLOC_NSREQUEST | IPC_KOBJECT_ALLOC_MAKE_SEND);
+		task->itk_resume = port;
+	} else {
+		(void)ipc_kobject_make_send_nsrequest(port, task, IKOT_TASK_RESUME);
+	}
 	itk_unlock(task);
 
 	/*
@@ -3724,8 +3791,8 @@ task_suspend(
 	if (kr != KERN_SUCCESS) {
 		printf("warning: %s(%d) failed to copyout suspension "
 		    "token for pid %d with error: %d\n",
-		    proc_name_address(current_task()->bsd_info),
-		    proc_pid(current_task()->bsd_info),
+		    proc_name_address(get_bsdtask_info(current_task())),
+		    proc_pid(get_bsdtask_info(current_task())),
 		    task_pid(task), kr);
 	}
 
@@ -3779,7 +3846,7 @@ task_resume(
 		is_write_unlock(space);
 		if (kr == KERN_SUCCESS) {
 			printf("warning: %s(%d) performed out-of-band resume on pid %d\n",
-			    proc_name_address(current_task()->bsd_info), proc_pid(current_task()->bsd_info),
+			    proc_name_address(get_bsdtask_info(current_task())), proc_pid(get_bsdtask_info(current_task())),
 			    task_pid(task));
 		}
 	}
@@ -4576,8 +4643,7 @@ task_disconnect_page_mappings(task_t task)
  * Conditions:
  *      The caller holds a reference to the task
  */
-extern void             vm_wake_compactor_swapper(void);
-extern queue_head_t     c_swapout_list_head;
+extern void     vm_wake_compactor_swapper(void);
 extern struct freezer_context freezer_context_global;
 
 kern_return_t
@@ -4663,7 +4729,7 @@ task_freeze(
 		 * and so will not be evaluating whether we need to do
 		 * a wakeup there.
 		 */
-		thread_wakeup((event_t)&c_swapout_list_head);
+		thread_wakeup((event_t)&vm_swapout_thread);
 	}
 
 	return kr;
@@ -4799,6 +4865,21 @@ task_set_info(
 	}
 }
 
+static void
+_task_fill_times(task_t task, time_value_t *user_time, time_value_t *sys_time)
+{
+	clock_sec_t sec;
+	clock_usec_t usec;
+
+	struct recount_times_mach times = recount_task_terminated_times(task);
+	absolutetime_to_microtime(times.rtm_user, &sec, &usec);
+	user_time->seconds = (typeof(user_time->seconds))sec;
+	user_time->microseconds = usec;
+	absolutetime_to_microtime(times.rtm_system, &sec, &usec);
+	sys_time->seconds = (typeof(sys_time->seconds))sec;
+	sys_time->microseconds = usec;
+}
+
 int radar_20146450 = 1;
 kern_return_t
 task_info(
@@ -4818,7 +4899,7 @@ task_info(
 	original_task_info_count = *task_info_count;
 	task_lock(task);
 
-	if ((task != current_task()) && (!task->active)) {
+	if (task != current_task() && !task->active) {
 		task_unlock(task);
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -4827,15 +4908,12 @@ task_info(
 	switch (flavor) {
 	case TASK_BASIC_INFO_32:
 	case TASK_BASIC2_INFO_32:
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	case TASK_BASIC_INFO_64:
 #endif
 		{
-			task_basic_info_32_t    basic_info;
-			vm_map_t                                map;
-			clock_sec_t                             secs;
-			clock_usec_t                    usecs;
-			ledger_amount_t tmp;
+			task_basic_info_32_t basic_info;
+			ledger_amount_t      tmp;
 
 			if (*task_info_count < TASK_BASIC_INFO_32_COUNT) {
 				error = KERN_INVALID_ARGUMENT;
@@ -4844,8 +4922,8 @@ task_info(
 
 			basic_info = (task_basic_info_32_t)task_info_out;
 
-			map = (task == kernel_task)? kernel_map: task->map;
-			basic_info->virtual_size = (typeof(basic_info->virtual_size))vm_map_adjusted_size(map);
+			basic_info->virtual_size = (typeof(basic_info->virtual_size))
+			    vm_map_adjusted_size(is_kernel_task ? kernel_map : task->map);
 			if (flavor == TASK_BASIC2_INFO_32) {
 				/*
 				 * The "BASIC2" flavor gets the maximum resident
@@ -4857,31 +4935,20 @@ task_info(
 			}
 			basic_info->resident_size = (natural_t) MIN((ledger_amount_t) UINT32_MAX, tmp);
 
-			basic_info->policy = ((task != kernel_task)?
-			    POLICY_TIMESHARE: POLICY_RR);
+			_task_fill_times(task, &basic_info->user_time,
+			    &basic_info->system_time);
+
+			basic_info->policy = is_kernel_task ? POLICY_RR : POLICY_TIMESHARE;
 			basic_info->suspend_count = task->user_stop_count;
-
-			absolutetime_to_microtime(task->total_user_time, &secs, &usecs);
-			basic_info->user_time.seconds =
-			    (typeof(basic_info->user_time.seconds))secs;
-			basic_info->user_time.microseconds = usecs;
-
-			absolutetime_to_microtime(task->total_system_time, &secs, &usecs);
-			basic_info->system_time.seconds =
-			    (typeof(basic_info->system_time.seconds))secs;
-			basic_info->system_time.microseconds = usecs;
 
 			*task_info_count = TASK_BASIC_INFO_32_COUNT;
 			break;
 		}
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	case TASK_BASIC_INFO_64_2:
 	{
 		task_basic_info_64_2_t  basic_info;
-		vm_map_t                                map;
-		clock_sec_t                             secs;
-		clock_usec_t                    usecs;
 
 		if (*task_info_count < TASK_BASIC_INFO_64_2_COUNT) {
 			error = KERN_INVALID_ARGUMENT;
@@ -4890,35 +4957,23 @@ task_info(
 
 		basic_info = (task_basic_info_64_2_t)task_info_out;
 
-		map = (task == kernel_task)? kernel_map: task->map;
-		basic_info->virtual_size  = vm_map_adjusted_size(map);
-		ledger_get_balance(task->ledger, task_ledgers.phys_mem, (ledger_amount_t *) &basic_info->resident_size);
-
-		basic_info->policy = ((task != kernel_task)?
-		    POLICY_TIMESHARE: POLICY_RR);
+		basic_info->virtual_size  = vm_map_adjusted_size(is_kernel_task ?
+		    kernel_map : task->map);
+		ledger_get_balance(task->ledger, task_ledgers.phys_mem,
+		    (ledger_amount_t *)&basic_info->resident_size);
+		basic_info->policy = is_kernel_task ? POLICY_RR : POLICY_TIMESHARE;
 		basic_info->suspend_count = task->user_stop_count;
-
-		absolutetime_to_microtime(task->total_user_time, &secs, &usecs);
-		basic_info->user_time.seconds =
-		    (typeof(basic_info->user_time.seconds))secs;
-		basic_info->user_time.microseconds = usecs;
-
-		absolutetime_to_microtime(task->total_system_time, &secs, &usecs);
-		basic_info->system_time.seconds =
-		    (typeof(basic_info->system_time.seconds))secs;
-		basic_info->system_time.microseconds = usecs;
+		_task_fill_times(task, &basic_info->user_time,
+		    &basic_info->system_time);
 
 		*task_info_count = TASK_BASIC_INFO_64_2_COUNT;
 		break;
 	}
 
-#else /* defined(__arm__) || defined(__arm64__) */
+#else /* defined(__arm64__) */
 	case TASK_BASIC_INFO_64:
 	{
-		task_basic_info_64_t    basic_info;
-		vm_map_t                                map;
-		clock_sec_t                             secs;
-		clock_usec_t                    usecs;
+		task_basic_info_64_t basic_info;
 
 		if (*task_info_count < TASK_BASIC_INFO_64_COUNT) {
 			error = KERN_INVALID_ARGUMENT;
@@ -4927,35 +4982,22 @@ task_info(
 
 		basic_info = (task_basic_info_64_t)task_info_out;
 
-		map = (task == kernel_task)? kernel_map: task->map;
-		basic_info->virtual_size  = vm_map_adjusted_size(map);
+		basic_info->virtual_size = vm_map_adjusted_size(is_kernel_task ?
+		    kernel_map : task->map);
 		ledger_get_balance(task->ledger, task_ledgers.phys_mem, (ledger_amount_t *)&basic_info->resident_size);
-
-		basic_info->policy = ((task != kernel_task)?
-		    POLICY_TIMESHARE: POLICY_RR);
+		basic_info->policy = is_kernel_task ? POLICY_RR : POLICY_TIMESHARE;
 		basic_info->suspend_count = task->user_stop_count;
-
-		absolutetime_to_microtime(task->total_user_time, &secs, &usecs);
-		basic_info->user_time.seconds =
-		    (typeof(basic_info->user_time.seconds))secs;
-		basic_info->user_time.microseconds = usecs;
-
-		absolutetime_to_microtime(task->total_system_time, &secs, &usecs);
-		basic_info->system_time.seconds =
-		    (typeof(basic_info->system_time.seconds))secs;
-		basic_info->system_time.microseconds = usecs;
+		_task_fill_times(task, &basic_info->user_time,
+		    &basic_info->system_time);
 
 		*task_info_count = TASK_BASIC_INFO_64_COUNT;
 		break;
 	}
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 
 	case MACH_TASK_BASIC_INFO:
 	{
 		mach_task_basic_info_t  basic_info;
-		vm_map_t                map;
-		clock_sec_t             secs;
-		clock_usec_t            usecs;
 
 		if (*task_info_count < MACH_TASK_BASIC_INFO_COUNT) {
 			error = KERN_INVALID_ARGUMENT;
@@ -4964,27 +5006,14 @@ task_info(
 
 		basic_info = (mach_task_basic_info_t)task_info_out;
 
-		map = (task == kernel_task) ? kernel_map : task->map;
-
-		basic_info->virtual_size  = vm_map_adjusted_size(map);
-
+		basic_info->virtual_size = vm_map_adjusted_size(is_kernel_task ?
+		    kernel_map : task->map);
 		ledger_get_balance(task->ledger, task_ledgers.phys_mem, (ledger_amount_t *) &basic_info->resident_size);
 		ledger_get_lifetime_max(task->ledger, task_ledgers.phys_mem, (ledger_amount_t *) &basic_info->resident_size_max);
-
-		basic_info->policy = ((task != kernel_task) ?
-		    POLICY_TIMESHARE : POLICY_RR);
-
+		basic_info->policy = is_kernel_task ? POLICY_RR : POLICY_TIMESHARE;
 		basic_info->suspend_count = task->user_stop_count;
-
-		absolutetime_to_microtime(task->total_user_time, &secs, &usecs);
-		basic_info->user_time.seconds =
-		    (typeof(basic_info->user_time.seconds))secs;
-		basic_info->user_time.microseconds = usecs;
-
-		absolutetime_to_microtime(task->total_system_time, &secs, &usecs);
-		basic_info->system_time.seconds =
-		    (typeof(basic_info->system_time.seconds))secs;
-		basic_info->system_time.microseconds = usecs;
+		_task_fill_times(task, &basic_info->user_time,
+		    &basic_info->system_time);
 
 		*task_info_count = MACH_TASK_BASIC_INFO_COUNT;
 		break;
@@ -4992,32 +5021,26 @@ task_info(
 
 	case TASK_THREAD_TIMES_INFO:
 	{
-		task_thread_times_info_t        times_info;
-		thread_t                                        thread;
+		task_thread_times_info_t times_info;
+		thread_t                 thread;
 
 		if (*task_info_count < TASK_THREAD_TIMES_INFO_COUNT) {
 			error = KERN_INVALID_ARGUMENT;
 			break;
 		}
 
-		times_info = (task_thread_times_info_t) task_info_out;
-		times_info->user_time.seconds = 0;
-		times_info->user_time.microseconds = 0;
-		times_info->system_time.seconds = 0;
-		times_info->system_time.microseconds = 0;
-
+		times_info = (task_thread_times_info_t)task_info_out;
+		times_info->user_time = (time_value_t){ 0 };
+		times_info->system_time = (time_value_t){ 0 };
 
 		queue_iterate(&task->threads, thread, thread_t, task_threads) {
-			time_value_t    user_time, system_time;
+			if ((thread->options & TH_OPT_IDLE_THREAD) == 0) {
+				time_value_t user_time, system_time;
 
-			if (thread->options & TH_OPT_IDLE_THREAD) {
-				continue;
+				thread_read_times(thread, &user_time, &system_time, NULL);
+				time_value_add(&times_info->user_time, &user_time);
+				time_value_add(&times_info->system_time, &system_time);
 			}
-
-			thread_read_times(thread, &user_time, &system_time, NULL);
-
-			time_value_add(&times_info->user_time, &user_time);
-			time_value_add(&times_info->system_time, &system_time);
 		}
 
 		*task_info_count = TASK_THREAD_TIMES_INFO_COUNT;
@@ -5027,7 +5050,6 @@ task_info(
 	case TASK_ABSOLUTETIME_INFO:
 	{
 		task_absolutetime_info_t        info;
-		thread_t                        thread;
 
 		if (*task_info_count < TASK_ABSOLUTETIME_INFO_COUNT) {
 			error = KERN_INVALID_ARGUMENT;
@@ -5035,41 +5057,15 @@ task_info(
 		}
 
 		info = (task_absolutetime_info_t)task_info_out;
-		info->threads_user = info->threads_system = 0;
 
+		struct recount_times_mach term_times =
+		    recount_task_terminated_times(task);
+		struct recount_times_mach total_times = recount_task_times(task);
 
-		info->total_user = task->total_user_time;
-		info->total_system = task->total_system_time;
-
-		queue_iterate(&task->threads, thread, thread_t, task_threads) {
-			uint64_t        tval;
-			spl_t           x;
-
-			if (thread->options & TH_OPT_IDLE_THREAD) {
-				continue;
-			}
-
-			x = splsched();
-			thread_lock(thread);
-
-			tval = timer_grab(&thread->user_timer);
-			info->threads_user += tval;
-			info->total_user += tval;
-
-			tval = timer_grab(&thread->system_timer);
-			if (thread->precise_user_kernel_time) {
-				info->threads_system += tval;
-				info->total_system += tval;
-			} else {
-				/* system_timer may represent either sys or user */
-				info->threads_user += tval;
-				info->total_user += tval;
-			}
-
-			thread_unlock(thread);
-			splx(x);
-		}
-
+		info->total_user = total_times.rtm_user;
+		info->total_system = total_times.rtm_system;
+		info->threads_user = total_times.rtm_user - term_times.rtm_user;
+		info->threads_system += total_times.rtm_system - term_times.rtm_system;
 
 		*task_info_count = TASK_ABSOLUTETIME_INFO_COUNT;
 		break;
@@ -5378,12 +5374,35 @@ task_info(
 		vm_map_t                map;
 		ledger_amount_t         tmp_amount;
 
-#if __arm64__
 		struct proc *p;
 		uint32_t platform, sdk;
 		p = current_proc();
 		platform = proc_platform(p);
 		sdk = proc_sdk(p);
+		if (original_task_info_count > TASK_VM_INFO_COUNT) {
+			/*
+			 * Some iOS apps pass an incorrect value for
+			 * task_info_count, expressed in number of bytes
+			 * instead of number of "natural_t" elements, which
+			 * can lead to binary compatibility issues (including
+			 * stack corruption) when the data structure is
+			 * expanded in the future.
+			 * Let's make this potential issue visible by
+			 * logging about it...
+			 */
+			printf("%s:%d %d[%s] task_info(flavor=%d) possibly invalid "
+			    "task_info_count=%d > TASK_VM_INFO_COUNT=%d platform %d sdk "
+			    "%d.%d.%d - please use TASK_VM_INFO_COUNT.\n",
+			    __FUNCTION__, __LINE__, proc_pid(p), proc_name_address(p),
+			    flavor, original_task_info_count, TASK_VM_INFO_COUNT,
+			    platform, (sdk >> 16), ((sdk >> 8) & 0xff), (sdk & 0xff));
+			DTRACE_VM4(suspicious_task_vm_info_count,
+			    mach_msg_type_number_t, original_task_info_count,
+			    mach_msg_type_number_t, TASK_VM_INFO_COUNT,
+			    uint32_t, platform,
+			    uint32_t, sdk);
+		}
+#if __arm64__
 		if (original_task_info_count > TASK_VM_INFO_REV2_COUNT &&
 		    platform == PLATFORM_IOS &&
 		    sdk != 0 &&
@@ -5399,7 +5418,11 @@ task_info(
 			 * of their buffer.
 			 */
 #if DEVELOPMENT || DEBUG
-			printf("%s:%d %d[%s] rdar://49484582 task_info_count %d -> %d platform %d sdk %d.%d.%d\n", __FUNCTION__, __LINE__, proc_pid(p), proc_name_address(p), original_task_info_count, TASK_VM_INFO_REV2_COUNT, platform, (sdk >> 16), ((sdk >> 8) & 0xff), (sdk & 0xff));
+			printf("%s:%d %d[%s] rdar://49484582 task_info_count %d -> %d "
+			    "platform %d sdk %d.%d.%d\n", __FUNCTION__, __LINE__, proc_pid(p),
+			    proc_name_address(p), original_task_info_count,
+			    TASK_VM_INFO_REV2_COUNT, platform, (sdk >> 16),
+			    ((sdk >> 8) & 0xff), (sdk & 0xff));
 #endif /* DEVELOPMENT || DEBUG */
 			DTRACE_VM4(workaround_task_vm_info_count,
 			    mach_msg_type_number_t, original_task_info_count,
@@ -5408,6 +5431,35 @@ task_info(
 			    uint32_t, sdk);
 			original_task_info_count = TASK_VM_INFO_REV2_COUNT;
 			*task_info_count = original_task_info_count;
+		}
+		if (original_task_info_count > TASK_VM_INFO_REV5_COUNT &&
+		    platform == PLATFORM_IOS &&
+		    sdk != 0 &&
+		    (sdk >> 16) <= 15) {
+			/*
+			 * Some iOS apps pass an incorrect value for
+			 * task_info_count, expressed in number of bytes
+			 * instead of number of "natural_t" elements.
+			 */
+			printf("%s:%d %d[%s] task_info_count=%d > TASK_VM_INFO_COUNT=%d "
+			    "platform %d sdk %d.%d.%d\n", __FUNCTION__, __LINE__, proc_pid(p),
+			    proc_name_address(p), original_task_info_count,
+			    TASK_VM_INFO_REV5_COUNT, platform, (sdk >> 16),
+			    ((sdk >> 8) & 0xff), (sdk & 0xff));
+			DTRACE_VM4(workaround_task_vm_info_count,
+			    mach_msg_type_number_t, original_task_info_count,
+			    mach_msg_type_number_t, TASK_VM_INFO_REV5_COUNT,
+			    uint32_t, platform,
+			    uint32_t, sdk);
+#if DEVELOPMENT || DEBUG
+			/*
+			 * For the sake of internal builds livability,
+			 * work around this user-space bug by capping the
+			 * buffer's size to what it was with the iOS15 SDK.
+			 */
+			original_task_info_count = TASK_VM_INFO_REV5_COUNT;
+			*task_info_count = original_task_info_count;
+#endif /* DEVELOPMENT || DEBUG */
 		}
 #endif /* __arm64__ */
 
@@ -5608,9 +5660,9 @@ task_info(
 			*task_info_count = TASK_VM_INFO_REV3_COUNT;
 		}
 		if (original_task_info_count >= TASK_VM_INFO_REV4_COUNT) {
-			if (task->bsd_info) {
+			if (get_bsdtask_info(task)) {
 				vm_info->limit_bytes_remaining =
-				    memorystatus_available_memory_internal(task->bsd_info);
+				    memorystatus_available_memory_internal(get_bsdtask_info(task));
 			} else {
 				vm_info->limit_bytes_remaining = 0;
 			}
@@ -5741,21 +5793,13 @@ task_info(
 		dbg_info->ipc_space_size = 0;
 
 		if (space) {
-#if MACH_LOCKFREE_SPACE
-			hazard_guard_t guard = hazard_guard_get(0);
-			ipc_entry_t table = hazard_guard_acquire(guard, &space->is_table);
+			smr_global_enter();
+			ipc_entry_table_t table = smr_entered_load(&space->is_table);
 			if (table) {
-				dbg_info->ipc_space_size = table->ie_size;
-			}
-			hazard_guard_put(guard);
-#else
-			is_read_lock(space);
-			if (is_active(space)) {
 				dbg_info->ipc_space_size =
-				    is_active_table(space)->ie_size;
+				    ipc_entry_table_count(table);
 			}
-			is_read_unlock(space);
-#endif
+			smr_global_leave();
 		}
 
 		dbg_info->suspend_count = task->suspend_count;
@@ -6108,11 +6152,11 @@ task_dyld_process_info_notify_deregister(
  */
 void
 task_power_info_locked(
-	task_t                  task,
-	task_power_info_t       info,
-	gpu_energy_data_t       ginfo,
-	task_power_info_v2_t    infov2,
-	uint64_t                *runnable_time)
+	task_t                        task,
+	task_power_info_t             info,
+	gpu_energy_data_t             ginfo,
+	task_power_info_v2_t          infov2,
+	struct task_power_info_extra *extra_info)
 {
 	thread_t                thread;
 	ledger_amount_t         tmp;
@@ -6129,28 +6173,29 @@ task_power_info_locked(
 	info->task_timer_wakeups_bin_1 = task->task_timer_wakeups_bin_1;
 	info->task_timer_wakeups_bin_2 = task->task_timer_wakeups_bin_2;
 
-	info->total_user = task->total_user_time;
-	info->total_system = task->total_system_time;
-	runnable_time_sum = task->total_runnable_time;
+	struct recount_usage usage = { 0 };
+	struct recount_usage usage_perf = { 0 };
+	recount_task_usage_perf_only(task, &usage, &usage_perf);
 
-#if defined(__arm__) || defined(__arm64__)
-	if (infov2) {
-		infov2->task_energy = task->task_energy;
-	}
-#endif /* defined(__arm__) || defined(__arm64__) */
+	info->total_user = usage.ru_user_time_mach;
+	info->total_system = usage.ru_system_time_mach;
+	runnable_time_sum = task->total_runnable_time;
 
 	if (ginfo) {
 		ginfo->task_gpu_utilisation = task->task_gpu_ns;
 	}
 
 	if (infov2) {
-		infov2->task_ptime = task->total_ptime;
+		infov2->task_ptime = usage_perf.ru_system_time_mach +
+		    usage_perf.ru_user_time_mach;
 		infov2->task_pset_switches = task->ps_switch;
+#if CONFIG_PERVASIVE_ENERGY
+		infov2->task_energy = usage.ru_energy_nj;
+#endif /* CONFIG_PERVASIVE_ENERGY */
 	}
 
 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
-		uint64_t        tval;
-		spl_t           x;
+		spl_t x;
 
 		if (thread->options & TH_OPT_IDLE_THREAD) {
 			continue;
@@ -6162,32 +6207,11 @@ task_power_info_locked(
 		info->task_timer_wakeups_bin_1 += thread->thread_timer_wakeups_bin_1;
 		info->task_timer_wakeups_bin_2 += thread->thread_timer_wakeups_bin_2;
 
-#if defined(__arm__) || defined(__arm64__)
 		if (infov2) {
-			infov2->task_energy += ml_energy_stat(thread);
-		}
-#endif /* defined(__arm__) || defined(__arm64__) */
-
-		tval = timer_grab(&thread->user_timer);
-		info->total_user += tval;
-
-		if (infov2) {
-			tval = timer_grab(&thread->ptime);
-			infov2->task_ptime += tval;
 			infov2->task_pset_switches += thread->ps_switch;
 		}
 
-		tval = timer_grab(&thread->system_timer);
-		if (thread->precise_user_kernel_time) {
-			info->total_system += tval;
-		} else {
-			/* system_timer may represent either sys or user */
-			info->total_user += tval;
-		}
-
-		tval = timer_grab(&thread->runnable_timer);
-
-		runnable_time_sum += tval;
+		runnable_time_sum += timer_grab(&thread->runnable_timer);
 
 		if (ginfo) {
 			ginfo->task_gpu_utilisation += ml_gpu_stat(thread);
@@ -6196,8 +6220,20 @@ task_power_info_locked(
 		splx(x);
 	}
 
-	if (runnable_time) {
-		*runnable_time = runnable_time_sum;
+	if (extra_info) {
+		extra_info->runnable_time = runnable_time_sum;
+#if CONFIG_PERVASIVE_CPI
+		extra_info->cycles = usage.ru_cycles;
+		extra_info->instructions = usage.ru_instructions;
+		extra_info->pcycles = usage_perf.ru_cycles;
+		extra_info->pinstructions = usage_perf.ru_instructions;
+		extra_info->user_ptime = usage_perf.ru_user_time_mach;
+		extra_info->system_ptime = usage_perf.ru_system_time_mach;
+#endif // CONFIG_PERVASIVE_CPI
+#if CONFIG_PERVASIVE_ENERGY
+		extra_info->energy = usage.ru_energy_nj;
+		extra_info->penergy = usage_perf.ru_energy_nj;
+#endif // CONFIG_PERVASIVE_ENERGY
 	}
 }
 
@@ -6234,69 +6270,6 @@ task_gpu_utilisation(
 #endif /* defined(__x86_64__) */
 	return gpu_time;
 }
-
-/*
- *	task_energy
- *
- *	Returns the total energy used by the all the threads of the task
- *  (both dead and alive)
- */
-uint64_t
-task_energy(
-	task_t  task)
-{
-	uint64_t energy = 0;
-	thread_t thread;
-
-	task_lock(task);
-	energy += task->task_energy;
-
-	queue_iterate(&task->threads, thread, thread_t, task_threads) {
-		spl_t x;
-		x = splsched();
-		thread_lock(thread);
-		energy += ml_energy_stat(thread);
-		thread_unlock(thread);
-		splx(x);
-	}
-
-	task_unlock(task);
-	return energy;
-}
-
-#if __AMP__
-
-uint64_t
-task_cpu_ptime(
-	task_t  task)
-{
-	uint64_t cpu_ptime = 0;
-	thread_t thread;
-
-	task_lock(task);
-	cpu_ptime += task->total_ptime;
-
-	queue_iterate(&task->threads, thread, thread_t, task_threads) {
-		if (thread->options & TH_OPT_IDLE_THREAD) {
-			continue;
-		}
-		cpu_ptime += timer_grab(&thread->ptime);
-	}
-
-	task_unlock(task);
-	return cpu_ptime;
-}
-
-#else /* __AMP__ */
-
-uint64_t
-task_cpu_ptime(
-	__unused task_t  task)
-{
-	return 0;
-}
-
-#endif /* __AMP__ */
 
 /* This function updates the cpu time in the arrays for each
  * effective and requested QoS class
@@ -6377,11 +6350,8 @@ task_vtimer_set(
 		queue_iterate(&task->threads, thread, thread_t, task_threads) {
 			x = splsched();
 			thread_lock(thread);
-			if (thread->precise_user_kernel_time) {
-				thread->vtimer_user_save = timer_grab(&thread->user_timer);
-			} else {
-				thread->vtimer_user_save = timer_grab(&thread->system_timer);
-			}
+			struct recount_times_mach times = recount_thread_times(thread);
+			thread->vtimer_user_save = times.rtm_user;
 			thread_unlock(thread);
 			splx(x);
 		}
@@ -6391,8 +6361,7 @@ task_vtimer_set(
 		queue_iterate(&task->threads, thread, thread_t, task_threads) {
 			x = splsched();
 			thread_lock(thread);
-			thread->vtimer_prof_save = timer_grab(&thread->user_timer);
-			thread->vtimer_prof_save += timer_grab(&thread->system_timer);
+			thread->vtimer_prof_save = recount_thread_time_mach(thread);
 			thread_unlock(thread);
 			splx(x);
 		}
@@ -6402,8 +6371,7 @@ task_vtimer_set(
 		queue_iterate(&task->threads, thread, thread_t, task_threads) {
 			x = splsched();
 			thread_lock(thread);
-			thread->vtimer_rlim_save = timer_grab(&thread->user_timer);
-			thread->vtimer_rlim_save += timer_grab(&thread->system_timer);
+			thread->vtimer_rlim_save = recount_thread_time_mach(thread);
 			thread_unlock(thread);
 			splx(x);
 		}
@@ -6418,8 +6386,6 @@ task_vtimer_clear(
 	task_t          task,
 	integer_t       which)
 {
-	assert(task == current_task());
-
 	task_lock(task);
 
 	task->vtimers &= ~which;
@@ -6451,20 +6417,16 @@ task_vtimer_update(
 	}
 
 	switch (which) {
-	case TASK_VTIMER_USER:
-		if (thread->precise_user_kernel_time) {
-			tdelt = (uint32_t)timer_delta(&thread->user_timer,
-			    &thread->vtimer_user_save);
-		} else {
-			tdelt = (uint32_t)timer_delta(&thread->system_timer,
-			    &thread->vtimer_user_save);
-		}
+	case TASK_VTIMER_USER:;
+		struct recount_times_mach times = recount_thread_times(thread);
+		tsum = times.rtm_user;
+		tdelt = (uint32_t)(tsum - thread->vtimer_user_save);
+		thread->vtimer_user_save = tsum;
 		absolutetime_to_microtime(tdelt, &secs, microsecs);
 		break;
 
 	case TASK_VTIMER_PROF:
-		tsum = timer_grab(&thread->user_timer);
-		tsum += timer_grab(&thread->system_timer);
+		tsum = recount_current_thread_time_mach();
 		tdelt = (uint32_t)(tsum - thread->vtimer_prof_save);
 		absolutetime_to_microtime(tdelt, &secs, microsecs);
 		/* if the time delta is smaller than a usec, ignore */
@@ -6474,8 +6436,7 @@ task_vtimer_update(
 		break;
 
 	case TASK_VTIMER_RLIM:
-		tsum = timer_grab(&thread->user_timer);
-		tsum += timer_grab(&thread->system_timer);
+		tsum = recount_current_thread_time_mach();
 		tdelt = (uint32_t)(tsum - thread->vtimer_rlim_save);
 		thread->vtimer_rlim_save = tsum;
 		absolutetime_to_microtime(tdelt, &secs, microsecs);
@@ -6486,107 +6447,11 @@ task_vtimer_update(
 	splx(s);
 }
 
-/*
- *	task_assign:
- *
- *	Change the assigned processor set for the task
- */
-kern_return_t
-task_assign(
-	__unused task_t         task,
-	__unused processor_set_t        new_pset,
-	__unused boolean_t      assign_threads)
-{
-	return KERN_FAILURE;
-}
-
-/*
- *	task_assign_default:
- *
- *	Version of task_assign to assign to default processor set.
- */
-kern_return_t
-task_assign_default(
-	task_t          task,
-	boolean_t       assign_threads)
-{
-	return task_assign(task, &pset0, assign_threads);
-}
-
-/*
- *	task_get_assignment
- *
- *	Return name of processor set that task is assigned to.
- */
-kern_return_t
-task_get_assignment(
-	task_t          task,
-	processor_set_t *pset)
-{
-	if (!task || !task->active) {
-		return KERN_FAILURE;
-	}
-
-	*pset = &pset0;
-
-	return KERN_SUCCESS;
-}
-
 uint64_t
 get_task_dispatchqueue_offset(
 	task_t          task)
 {
 	return task->dispatchqueue_offset;
-}
-
-/*
- *      task_policy
- *
- *	Set scheduling policy and parameters, both base and limit, for
- *	the given task. Policy must be a policy which is enabled for the
- *	processor set. Change contained threads if requested.
- */
-kern_return_t
-task_policy(
-	__unused task_t                 task,
-	__unused policy_t                       policy_id,
-	__unused policy_base_t          base,
-	__unused mach_msg_type_number_t count,
-	__unused boolean_t                      set_limit,
-	__unused boolean_t                      change)
-{
-	return KERN_FAILURE;
-}
-
-/*
- *	task_set_policy
- *
- *	Set scheduling policy and parameters, both base and limit, for
- *	the given task. Policy can be any policy implemented by the
- *	processor set, whether enabled or not. Change contained threads
- *	if requested.
- */
-kern_return_t
-task_set_policy(
-	__unused task_t                 task,
-	__unused processor_set_t                pset,
-	__unused policy_t                       policy_id,
-	__unused policy_base_t          base,
-	__unused mach_msg_type_number_t base_count,
-	__unused policy_limit_t         limit,
-	__unused mach_msg_type_number_t limit_count,
-	__unused boolean_t                      change)
-{
-	return KERN_FAILURE;
-}
-
-kern_return_t
-task_set_ras_pc(
-	__unused task_t task,
-	__unused vm_offset_t    pc,
-	__unused vm_offset_t    endpc)
-{
-	return KERN_FAILURE;
 }
 
 void
@@ -6663,10 +6528,11 @@ task_get_state(
 
 
 static kern_return_t __attribute__((noinline, not_tail_called))
-PROC_VIOLATED_GUARD__SEND_EXC_GUARD_AND_SUSPEND(
+PROC_VIOLATED_GUARD__SEND_EXC_GUARD(
 	mach_exception_code_t code,
 	mach_exception_subcode_t subcode,
-	void *reason)
+	void *reason,
+	boolean_t backtrace_only)
 {
 #ifdef MACH_BSD
 	if (1 == proc_selfpid()) {
@@ -6679,12 +6545,13 @@ PROC_VIOLATED_GUARD__SEND_EXC_GUARD_AND_SUSPEND(
 	};
 	task_t task = current_task();
 	kern_return_t kr;
+	void *bsd_info = get_bsdtask_info(task);
 
 	/* (See jetsam-related comments below) */
 
-	proc_memstat_skip(task->bsd_info, TRUE);
-	kr = task_enqueue_exception_with_corpse(task, EXC_GUARD, codes, 2, reason);
-	proc_memstat_skip(task->bsd_info, FALSE);
+	proc_memstat_skip(bsd_info, TRUE);
+	kr = task_enqueue_exception_with_corpse(task, EXC_GUARD, codes, 2, reason, backtrace_only);
+	proc_memstat_skip(bsd_info, FALSE);
 	return kr;
 }
 
@@ -6692,9 +6559,10 @@ kern_return_t
 task_violated_guard(
 	mach_exception_code_t code,
 	mach_exception_subcode_t subcode,
-	void *reason)
+	void *reason,
+	bool backtrace_only)
 {
-	return PROC_VIOLATED_GUARD__SEND_EXC_GUARD_AND_SUSPEND(code, subcode, reason);
+	return PROC_VIOLATED_GUARD__SEND_EXC_GUARD(code, subcode, reason, backtrace_only);
 }
 
 
@@ -6809,6 +6677,7 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 	const char                                      *procname       = "unknown";
 	mach_exception_data_type_t      code[EXCEPTION_CODE_MAX];
 	boolean_t send_sync_exc_resource = FALSE;
+	void *cur_bsd_info = get_bsdtask_info(current_task());
 
 #ifdef MACH_BSD
 	pid = proc_selfpid();
@@ -6821,9 +6690,9 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 		return;
 	}
 
-	if (task->bsd_info != NULL) {
-		procname = proc_name_address(current_task()->bsd_info);
-		send_sync_exc_resource = proc_send_synchronous_EXC_RESOURCE(current_task()->bsd_info);
+	if (cur_bsd_info != NULL) {
+		procname = proc_name_address(cur_bsd_info);
+		send_sync_exc_resource = proc_send_synchronous_EXC_RESOURCE(cur_bsd_info);
 	}
 #endif
 #if CONFIG_COREDUMP
@@ -6839,7 +6708,7 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 		 * be filling up the disk; and ignore the core size resource limit for this
 		 * core file.
 		 */
-		if ((error = coredump(current_task()->bsd_info, HWM_USERCORE_MINSPACE, COREDUMP_IGNORE_ULIMIT)) != 0) {
+		if ((error = coredump(cur_bsd_info, HWM_USERCORE_MINSPACE, COREDUMP_IGNORE_ULIMIT)) != 0) {
 			printf("couldn't take coredump of %s[%d]: %d\n", procname, pid, error);
 		}
 		/*
@@ -6850,7 +6719,7 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 		end = mach_absolute_time();
 		absolutetime_to_microtime(end - starttime, &secs, &microsecs);
 		printf("coredump of %s[%d] taken in %d secs %d microsecs\n",
-		    proc_name_address(current_task()->bsd_info), pid, (int)secs, microsecs);
+		    proc_name_address(cur_bsd_info), pid, (int)secs, microsecs);
 	}
 #endif /* CONFIG_COREDUMP */
 
@@ -6870,7 +6739,7 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 	 * the jetsam thread kills the process.
 	 * Note that proc_memstat_skip is a no-op on release kernels.
 	 */
-	proc_memstat_skip(current_task()->bsd_info, TRUE);
+	proc_memstat_skip(cur_bsd_info, TRUE);
 
 	code[0] = code[1] = 0;
 	EXC_RESOURCE_ENCODE_TYPE(code[0], RESOURCE_TYPE_MEMORY);
@@ -6898,7 +6767,7 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 			    "supressed due to audio playback.\n", procname, pid, max_footprint_mb);
 		} else {
 			task_enqueue_exception_with_corpse(task, EXC_RESOURCE,
-			    code, EXCEPTION_CODE_MAX, NULL);
+			    code, EXCEPTION_CODE_MAX, NULL, FALSE);
 		}
 	}
 
@@ -6907,7 +6776,7 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 	 * P_MEMSTAT_SKIP flag so that the process can again be
 	 * considered for jetsam if the memorystatus_thread wakes up.
 	 */
-	proc_memstat_skip(current_task()->bsd_info, FALSE);         /* clear the flag */
+	proc_memstat_skip(cur_bsd_info, FALSE);         /* clear the flag */
 }
 
 /*
@@ -6917,6 +6786,9 @@ void
 task_footprint_exceeded(int warning, __unused const void *param0, __unused const void *param1)
 {
 	ledger_amount_t max_footprint, max_footprint_mb;
+#if CONFIG_DEFERRED_RECLAIM
+	ledger_amount_t current_footprint;
+#endif /* CONFIG_DEFERRED_RECLAIM */
 	task_t task;
 	boolean_t is_warning;
 	boolean_t memlimit_is_active;
@@ -6944,6 +6816,19 @@ task_footprint_exceeded(int warning, __unused const void *param0, __unused const
 	task = current_task();
 
 	ledger_get_limit(task->ledger, task_ledgers.phys_footprint, &max_footprint);
+#if CONFIG_DEFERRED_RECLAIM
+	if (task->deferred_reclamation_metadata != NULL) {
+		/*
+		 * Task is enrolled in deferred reclamation.
+		 * Do a reclaim to ensure it's really over its limit.
+		 */
+		vm_deferred_reclamation_reclaim_from_task_sync(task, UINT64_MAX);
+		ledger_get_balance(task->ledger, task_ledgers.phys_footprint, &current_footprint);
+		if (current_footprint < max_footprint) {
+			return;
+		}
+	}
+#endif /* CONFIG_DEFERRED_RECLAIM */
 	max_footprint_mb = max_footprint >> 20;
 
 	memlimit_is_active = task_get_memlimit_is_active(task);
@@ -7196,6 +7081,12 @@ task_get_mach_kobj_filter_mask(task_t task)
 	return task_get_ro(task)->task_filters.mach_kobj_filter_mask;
 }
 
+mach_vm_address_t
+task_get_all_image_info_addr(task_t task)
+{
+	return task->all_image_info_addr;
+}
+
 void
 task_set_mach_kobj_filter_mask(task_t task, uint8_t *mask)
 {
@@ -7429,9 +7320,10 @@ int
 pid_from_task(task_t task)
 {
 	int pid = -1;
+	void *bsd_info = get_bsdtask_info(task);
 
-	if (task->bsd_info) {
-		pid = proc_pid(task->bsd_info);
+	if (bsd_info) {
+		pid = proc_pid(bsd_info);
 	} else {
 		pid = task_pid(task);
 	}
@@ -7575,8 +7467,8 @@ SENDING_NOTIFICATION__THIS_PROCESS_IS_CAUSING_TOO_MANY_WAKEUPS(void)
 
 #ifdef MACH_BSD
 	pid = proc_selfpid();
-	if (task->bsd_info != NULL) {
-		procname = proc_name_address(current_task()->bsd_info);
+	if (get_bsdtask_info(task) != NULL) {
+		procname = proc_name_address(get_bsdtask_info(current_task()));
 	}
 #endif
 
@@ -7917,8 +7809,8 @@ SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_MACH_PORTS(task_t task, uint32_t
 
 #ifdef MACH_BSD
 	pid = proc_selfpid();
-	if (task->bsd_info != NULL) {
-		procname = proc_name_address(task->bsd_info);
+	if (get_bsdtask_info(task) != NULL) {
+		procname = proc_name_address(get_bsdtask_info(task));
 	}
 #endif
 	/*
@@ -7990,8 +7882,8 @@ SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_FILE_DESCRIPTORS(task_t task, in
 
 #ifdef MACH_BSD
 	pid = proc_selfpid();
-	if (task->bsd_info != NULL) {
-		procname = proc_name_address(task->bsd_info);
+	if (get_bsdtask_info(task) != NULL) {
+		procname = proc_name_address(get_bsdtask_info(task));
 	}
 #endif
 	/*
@@ -8233,7 +8125,7 @@ kern_return_t
 task_inspect(task_inspect_t task_insp, task_inspect_flavor_t flavor,
     task_inspect_info_t info_out, mach_msg_type_number_t *size_in_out)
 {
-#if MONOTONIC
+#if CONFIG_PERVASIVE_CPI
 	task_t task = (task_t)task_insp;
 	kern_return_t kr = KERN_SUCCESS;
 	mach_msg_type_number_t size;
@@ -8246,22 +8138,17 @@ task_inspect(task_inspect_t task_insp, task_inspect_flavor_t flavor,
 
 	switch (flavor) {
 	case TASK_INSPECT_BASIC_COUNTS: {
-		struct task_inspect_basic_counts *bc;
-		uint64_t task_counts[MT_CORE_NFIXED] = { 0 };
-
+		struct task_inspect_basic_counts *bc =
+		    (struct task_inspect_basic_counts *)info_out;
+		struct recount_usage stats = { 0 };
 		if (size < TASK_INSPECT_BASIC_COUNTS_COUNT) {
 			kr = KERN_INVALID_ARGUMENT;
 			break;
 		}
 
-		mt_fixed_task_counts(task, task_counts);
-		bc = (struct task_inspect_basic_counts *)info_out;
-#ifdef MT_CORE_INSTRS
-		bc->instructions = task_counts[MT_CORE_INSTRS];
-#else /* defined(MT_CORE_INSTRS) */
-		bc->instructions = 0;
-#endif /* !defined(MT_CORE_INSTRS) */
-		bc->cycles = task_counts[MT_CORE_CYCLES];
+		recount_sum(&recount_task_plan, task->tk_recount.rtk_lifetime, &stats);
+		bc->instructions = stats.ru_instructions;
+		bc->cycles = stats.ru_cycles;
 		size = TASK_INSPECT_BASIC_COUNTS_COUNT;
 		break;
 	}
@@ -8274,10 +8161,10 @@ task_inspect(task_inspect_t task_insp, task_inspect_flavor_t flavor,
 		*size_in_out = size;
 	}
 	return kr;
-#else /* MONOTONIC */
+#else /* CONFIG_PERVASIVE_CPI */
 #pragma unused(task_insp, flavor, info_out, size_in_out)
 	return KERN_NOT_SUPPORTED;
-#endif /* !MONOTONIC */
+#endif /* !CONFIG_PERVASIVE_CPI */
 }
 
 #if CONFIG_SECLUDED_MEMORY
@@ -8475,7 +8362,9 @@ task_set_exc_guard_ctrl_port_default(
 	uint32_t platform,
 	uint32_t sdk)
 {
-	if (task->t_flags & TF_PLATFORM) {
+	task_control_port_options_t opts = TASK_CONTROL_PORT_OPTIONS_NONE;
+
+	if (task_get_platform_binary(task)) {
 		/* set exc guard default behavior for first-party code */
 		task->task_exc_guard = (task_exc_guard_default & TASK_EXC_GUARD_ALL);
 
@@ -8499,12 +8388,12 @@ task_set_exc_guard_ctrl_port_default(
 		}
 
 		/* set control port options for 1p code, inherited from parent task by default */
-		task->task_control_port_options = (ipc_control_port_options & ICP_OPTIONS_1P_MASK);
+		opts = ipc_control_port_options & ICP_OPTIONS_1P_MASK;
 	} else {
 		/* set exc guard default behavior for third-party code */
 		task->task_exc_guard = ((task_exc_guard_default >> TASK_EXC_GUARD_THIRD_PARTY_DEFAULT_SHIFT) & TASK_EXC_GUARD_ALL);
 		/* set control port options for 3p code, inherited from parent task by default */
-		task->task_control_port_options = (ipc_control_port_options & ICP_OPTIONS_3P_MASK) >> ICP_OPTIONS_3P_SHIFT;
+		opts = (ipc_control_port_options & ICP_OPTIONS_3P_MASK) >> ICP_OPTIONS_3P_SHIFT;
 	}
 
 	if (is_simulated) {
@@ -8515,9 +8404,11 @@ task_set_exc_guard_ctrl_port_default(
 			task->task_exc_guard = TASK_EXC_GUARD_NONE;
 		}
 		/* Disable protection for control ports for simulated binaries */
-		task->task_control_port_options = TASK_CONTROL_PORT_OPTIONS_NONE;
+		opts = TASK_CONTROL_PORT_OPTIONS_NONE;
 	}
 
+
+	task_set_control_port_options(task, opts);
 
 	task_set_immovable_pinned(task);
 	main_thread_set_immovable_pinned(main_thread);
@@ -8636,7 +8527,7 @@ task_set_extra_footprint_limit(
 	}
 	task->task_extra_footprint_limit = TRUE;
 	task_unlock(task);
-	memorystatus_act_on_legacy_footprint_entitlement(task->bsd_info, TRUE);
+	memorystatus_act_on_legacy_footprint_entitlement(get_bsdtask_info(task), TRUE);
 }
 
 void
@@ -8653,7 +8544,7 @@ task_set_ios13extended_footprint_limit(
 	}
 	task->task_ios13extended_footprint_limit = TRUE;
 	task_unlock(task);
-	memorystatus_act_on_ios13extended_footprint_entitlement(task->bsd_info);
+	memorystatus_act_on_ios13extended_footprint_entitlement(get_bsdtask_info(task));
 }
 #endif /* __arm64__ */
 
@@ -8861,27 +8752,22 @@ task_set_filter_msg_flag(
 {
 	assert(task != TASK_NULL);
 
-	task_lock(task);
 	if (flag) {
-		task->t_flags |= TF_FILTER_MSG;
+		task_ro_flags_set(task, TFRO_FILTER_MSG);
 	} else {
-		task->t_flags &= ~TF_FILTER_MSG;
+		task_ro_flags_clear(task, TFRO_FILTER_MSG);
 	}
-	task_unlock(task);
 }
 
 boolean_t
 task_get_filter_msg_flag(
 	task_t task)
 {
-	uint32_t flags = 0;
-
 	if (!task) {
 		return false;
 	}
 
-	flags = os_atomic_load(&task->t_flags, relaxed);
-	return (flags & TF_FILTER_MSG) ? TRUE : FALSE;
+	return (task_ro_flags_get(task) & TFRO_FILTER_MSG) ? TRUE : FALSE;
 }
 bool
 task_is_exotic(
@@ -8964,9 +8850,18 @@ task_transfer_mach_filter_bits(
 #endif
 	/* If filter message flag is set then set it in the new task. */
 	if (task_get_filter_msg_flag(old_task)) {
-		new_task->t_flags |= TF_FILTER_MSG;
+		task_ro_flags_set(new_task, TFRO_FILTER_MSG);
 	}
 }
+
+#if CONFIG_ROSETTA
+bool
+task_is_translated(task_t task)
+{
+	extern boolean_t proc_is_translated(struct proc* p);
+	return task && proc_is_translated(get_bsdtask_info(task));
+}
+#endif
 
 
 #if __has_feature(ptrauth_calls)
@@ -8987,6 +8882,7 @@ task_set_pac_exception_fatal_flag(
 {
 	assert(task != TASK_NULL);
 	bool pac_entitlement = false;
+	uint32_t set_flags = 0;
 
 	if (enable_pac_exception && IOTaskHasEntitlement(task, SKIP_PAC_EXCEPTION_ENTITLEMENT)) {
 		return;
@@ -8996,25 +8892,33 @@ task_set_pac_exception_fatal_flag(
 		pac_entitlement = true;
 	}
 
-	task_lock(task);
-	if (pac_entitlement || (enable_pac_exception && task->t_flags & TF_PLATFORM)) {
-		task->t_flags |= TF_PAC_EXC_FATAL;
+	if (pac_entitlement) {
+		set_flags |= TFRO_PAC_ENFORCE_USER_STATE;
 	}
-	task_unlock(task);
+	if (pac_entitlement || (enable_pac_exception && task_get_platform_binary(task))) {
+		set_flags |= TFRO_PAC_EXC_FATAL;
+	}
+	if (set_flags != 0) {
+		task_ro_flags_set(task, set_flags);
+	}
 }
 
 bool
 task_is_pac_exception_fatal(
 	task_t task)
 {
-	uint32_t flags = 0;
-
 	assert(task != TASK_NULL);
-
-	flags = os_atomic_load(&task->t_flags, relaxed);
-	return (bool)(flags & TF_PAC_EXC_FATAL);
+	return !!(task_ro_flags_get(task) & TFRO_PAC_EXC_FATAL);
 }
 #endif /* __has_feature(ptrauth_calls) */
+
+bool
+task_needs_user_signed_thread_state(
+	task_t task)
+{
+	assert(task != TASK_NULL);
+	return !!(task_ro_flags_get(task) & TFRO_PAC_ENFORCE_USER_STATE);
+}
 
 void
 task_set_tecs(task_t task)
@@ -9187,4 +9091,56 @@ task_get_ro(task_t t)
 	}
 
 	return ro;
+}
+
+uint32_t
+task_ro_flags_get(task_t task)
+{
+	return task_get_ro(task)->t_flags_ro;
+}
+
+void
+task_ro_flags_set(task_t task, uint32_t flags)
+{
+	zalloc_ro_update_field_atomic(ZONE_ID_PROC_RO, task_get_ro(task),
+	    t_flags_ro, ZRO_ATOMIC_OR_32, flags);
+}
+
+void
+task_ro_flags_clear(task_t task, uint32_t flags)
+{
+	zalloc_ro_update_field_atomic(ZONE_ID_PROC_RO, task_get_ro(task),
+	    t_flags_ro, ZRO_ATOMIC_AND_32, ~flags);
+}
+
+task_control_port_options_t
+task_get_control_port_options(task_t task)
+{
+	return task_get_ro(task)->task_control_port_options;
+}
+
+void
+task_set_control_port_options(task_t task, task_control_port_options_t opts)
+{
+	zalloc_ro_update_field(ZONE_ID_PROC_RO, task_get_ro(task),
+	    task_control_port_options, &opts);
+}
+
+/*!
+ * @function kdp_task_is_locked
+ *
+ * @abstract
+ * Checks if task is locked.
+ *
+ * @discussion
+ * NOT SAFE: To be used only by kernel debugger.
+ *
+ * @param task task to check
+ *
+ * @returns TRUE if the task is locked.
+ */
+boolean_t
+kdp_task_is_locked(task_t task)
+{
+	return kdp_lck_mtx_lock_spin_is_acquired(&task->lock);
 }

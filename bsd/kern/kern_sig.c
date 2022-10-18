@@ -132,7 +132,7 @@ extern kern_return_t get_signalact(task_t, thread_t *, int);
 extern unsigned int get_useraddr(void);
 extern boolean_t task_did_exec(task_t task);
 extern boolean_t task_is_exec_copy(task_t task);
-extern void vm_shared_region_reslide_stale(void);
+extern void vm_shared_region_reslide_stale(boolean_t driverkit);
 
 /*
  * ---
@@ -317,6 +317,13 @@ cansignal_nomac(proc_t src, kauth_cred_t uc_src, proc_t dst, int signum)
 		return 1;
 	}
 
+#if XNU_TARGET_OS_IOS
+	// Allow debugging of third party drivers on iOS
+	if (proc_is_third_party_debuggable_driver(dst)) {
+		return 1;
+	}
+#endif /* XNU_TARGET_OS_IOS */
+
 	/* the source process must be authorized to signal the target */
 	{
 		int allowed = 0;
@@ -374,7 +381,7 @@ cansignal(proc_t src, kauth_cred_t uc_src, proc_t dst, int signum)
  */
 static TUNABLE(unsigned, sigrestrict_arg, "sigrestrict", 0);
 
-#if PLATFORM_WatchOS
+#if XNU_PLATFORM_WatchOS
 static int
 sigrestrictmask(void)
 {
@@ -389,7 +396,7 @@ signal_is_restricted(proc_t p, int signum)
 {
 	if (sigmask(signum) & sigrestrictmask()) {
 		if (sigrestrict_arg == 0 &&
-		    task_get_apptype(p->task) == TASK_APPTYPE_APP_DEFAULT) {
+		    task_get_apptype(proc_task(p)) == TASK_APPTYPE_APP_DEFAULT) {
 			return ENOTSUP;
 		} else {
 			return EINVAL;
@@ -407,7 +414,7 @@ signal_is_restricted(proc_t p, int signum)
 	(void)signum;
 	return 0;
 }
-#endif /* !PLATFORM_WatchOS */
+#endif /* !XNU_PLATFORM_WatchOS */
 
 /*
  * Returns:	0			Success
@@ -998,105 +1005,6 @@ __posix_sem_syscall_return(kern_return_t kern_result)
 	unix_syscall_return(error);
 	/* does not return */
 }
-
-#if OLD_SEMWAIT_SIGNAL
-/*
- * Returns:	0			Success
- *		EINTR
- *		ETIMEDOUT
- *		EINVAL
- *      EFAULT if timespec is NULL
- */
-int
-__old_semwait_signal(proc_t p, struct __old_semwait_signal_args *uap,
-    int32_t *retval)
-{
-	__pthread_testcancel(0);
-	return __old_semwait_signal_nocancel(p, (struct __old_semwait_signal_nocancel_args *)uap, retval);
-}
-
-int
-__old_semwait_signal_nocancel(proc_t p, struct __old_semwait_signal_nocancel_args *uap,
-    __unused int32_t *retval)
-{
-	kern_return_t kern_result;
-	int error;
-	mach_timespec_t then;
-	struct timespec now;
-	struct user_timespec ts;
-	boolean_t truncated_timeout = FALSE;
-
-	if (uap->timeout) {
-		if (IS_64BIT_PROCESS(p)) {
-			struct user64_timespec ts64;
-			error = copyin(uap->ts, &ts64, sizeof(ts64));
-			ts.tv_sec = (user_time_t)ts64.tv_sec;
-			ts.tv_nsec = (user_long_t)ts64.tv_nsec;
-		} else {
-			struct user32_timespec ts32;
-			error = copyin(uap->ts, &ts32, sizeof(ts32));
-			ts.tv_sec = ts32.tv_sec;
-			ts.tv_nsec = ts32.tv_nsec;
-		}
-
-		if (error) {
-			return error;
-		}
-
-		if ((ts.tv_sec & 0xFFFFFFFF00000000ULL) != 0) {
-			ts.tv_sec = 0xFFFFFFFF;
-			ts.tv_nsec = 0;
-			truncated_timeout = TRUE;
-		}
-
-		if (uap->relative) {
-			then.tv_sec = (unsigned int)ts.tv_sec;
-			then.tv_nsec = (clock_res_t)ts.tv_nsec;
-		} else {
-			nanotime(&now);
-
-			/* if time has elapsed, set time to null timepsec to bailout rightaway */
-			if (now.tv_sec == ts.tv_sec ?
-			    now.tv_nsec > ts.tv_nsec :
-			    now.tv_sec > ts.tv_sec) {
-				then.tv_sec = 0;
-				then.tv_nsec = 0;
-			} else {
-				then.tv_sec = (unsigned int)(ts.tv_sec - now.tv_sec);
-				then.tv_nsec = (clock_res_t)(ts.tv_nsec - now.tv_nsec);
-				if (then.tv_nsec < 0) {
-					then.tv_nsec += NSEC_PER_SEC;
-					then.tv_sec--;
-				}
-			}
-		}
-
-		if (uap->mutex_sem == 0) {
-			kern_result = semaphore_timedwait_trap_internal((mach_port_name_t)uap->cond_sem, then.tv_sec, then.tv_nsec, __posix_sem_syscall_return);
-		} else {
-			kern_result = semaphore_timedwait_signal_trap_internal(uap->cond_sem, uap->mutex_sem, then.tv_sec, then.tv_nsec, __posix_sem_syscall_return);
-		}
-	} else {
-		if (uap->mutex_sem == 0) {
-			kern_result = semaphore_wait_trap_internal(uap->cond_sem, __posix_sem_syscall_return);
-		} else {
-			kern_result = semaphore_wait_signal_trap_internal(uap->cond_sem, uap->mutex_sem, __posix_sem_syscall_return);
-		}
-	}
-
-	if (kern_result == KERN_SUCCESS && !truncated_timeout) {
-		return 0;
-	} else if (kern_result == KERN_SUCCESS && truncated_timeout) {
-		return EINTR; /* simulate an exceptional condition because Mach doesn't support a longer timeout */
-	} else if (kern_result == KERN_ABORTED) {
-		return EINTR;
-	} else if (kern_result == KERN_OPERATION_TIMED_OUT) {
-		return ETIMEDOUT;
-	} else {
-		return EINVAL;
-	}
-}
-#endif /* OLD_SEMWAIT_SIGNAL*/
 
 /*
  * Returns:	0			Success
@@ -1915,9 +1823,11 @@ threadsignal(thread_t sig_actthread, int signum, mach_exception_code_t code, boo
 
 /* Called with proc locked */
 static void
-set_thread_extra_flags(struct uthread *uth, os_reason_t reason)
+set_thread_extra_flags(task_t task, struct uthread *uth, os_reason_t reason)
 {
 	extern int vm_shared_region_reslide_restrict;
+	boolean_t reslide_shared_region = FALSE;
+	boolean_t driver = task_is_driver(task);
 	assert(uth != NULL);
 	/*
 	 * Check whether the userland fault address falls within the shared
@@ -1944,10 +1854,23 @@ set_thread_extra_flags(struct uthread *uth, os_reason_t reason)
 
 #if __has_feature(ptrauth_calls)
 			if (!vm_shared_region_reslide_restrict || csproc_get_platform_binary(current_proc())) {
-				vm_shared_region_reslide_stale();
+				reslide_shared_region = TRUE;
 			}
 #endif /* __has_feature(ptrauth_calls) */
 		}
+
+		if (driver) {
+			/*
+			 * Always reslide the DriverKit shared region if the driver faulted.
+			 * The memory cost is acceptable because the DriverKit shared cache is small
+			 * and there are relatively few driver processes.
+			 */
+			reslide_shared_region = TRUE;
+		}
+	}
+
+	if (reslide_shared_region) {
+		vm_shared_region_reslide_stale(driver);
 	}
 }
 
@@ -1955,7 +1878,7 @@ void
 set_thread_exit_reason(void *th, void *reason, boolean_t proc_locked)
 {
 	struct uthread *targ_uth = get_bsdthread_info(th);
-	struct task *targ_task = NULL;
+	struct task *targ_task = get_threadtask(th);
 	proc_t targ_proc = NULL;
 
 	os_reason_t exit_reason = (os_reason_t)reason;
@@ -1965,13 +1888,12 @@ set_thread_exit_reason(void *th, void *reason, boolean_t proc_locked)
 	}
 
 	if (!proc_locked) {
-		targ_task = get_threadtask(th);
 		targ_proc = (proc_t)(get_bsdtask_info(targ_task));
 
 		proc_lock(targ_proc);
 	}
 
-	set_thread_extra_flags(targ_uth, exit_reason);
+	set_thread_extra_flags(targ_task, targ_uth, exit_reason);
 
 	if (targ_uth->uu_exit_reason == OS_REASON_NULL) {
 		targ_uth->uu_exit_reason = exit_reason;
@@ -2017,7 +1939,7 @@ again:
 				/* Workqueue threads may be parked in the kernel unable to
 				 * deliver signals for an extended period of time, so skip them
 				 * in favor of pthreads in a first pass. (rdar://50054475). */
-			} else if (check_actforsig(p->task, th, 1) == KERN_SUCCESS) {
+			} else if (check_actforsig(proc_task(p), th, 1) == KERN_SUCCESS) {
 				*thr = th;
 				return KERN_SUCCESS;
 			}
@@ -2027,7 +1949,7 @@ again:
 		skip_wqthreads = false;
 		goto again;
 	}
-	if (get_signalact(p->task, thr, 1) == KERN_SUCCESS) {
+	if (get_signalact(proc_task(p), thr, 1) == KERN_SUCCESS) {
 		return KERN_SUCCESS;
 	}
 
@@ -2144,7 +2066,7 @@ psignal_internal(proc_t p, task_t task, thread_t thread, int flavor, int signum,
 			    (p->p_name[0] != '\0' ? p->p_name : "initproc"),
 			    ((proc_getcsflags(p) & CS_KILLED) ? "(CS_KILLED)" : ""));
 		} else {
-			launchd_exit_reason_desc = launchd_exit_reason_get_string_desc(signal_reason);
+			launchd_exit_reason_desc = exit_reason_get_string_desc(signal_reason);
 			panic_plain("unexpected SIGKILL of %s %s with reason -- namespace %d code 0x%llx description %." LAUNCHD_PANIC_REASON_STRING_MAXLEN "s",
 			    (p->p_name[0] != '\0' ? p->p_name : "initproc"),
 			    ((proc_getcsflags(p) & CS_KILLED) ? "(CS_KILLED)" : ""),
@@ -2168,11 +2090,11 @@ psignal_internal(proc_t p, task_t task, thread_t thread, int flavor, int signum,
 		sig_proc = (proc_t)get_bsdtask_info(sig_task);
 	} else if (flavor & PSIG_TRY_THREAD) {
 		assert((thread == current_thread()) && (p == current_proc()));
-		sig_task = p->task;
+		sig_task = proc_task(p);
 		sig_thread = thread;
 		sig_proc = p;
 	} else {
-		sig_task = p->task;
+		sig_task = proc_task(p);
 		sig_thread = THREAD_NULL;
 		sig_proc = p;
 	}
@@ -2224,7 +2146,7 @@ psignal_internal(proc_t p, task_t task, thread_t thread, int flavor, int signum,
 		uth = get_bsdthread_info(sig_thread);
 		if (((uth->uu_flag & UT_NO_SIGMASK) == 0) &&
 		    (((uth->uu_sigmask & mask) == 0) || (uth->uu_sigwait & mask)) &&
-		    ((kret = check_actforsig(sig_proc->task, sig_thread, 1)) == KERN_SUCCESS)) {
+		    ((kret = check_actforsig(proc_task(sig_proc), sig_thread, 1)) == KERN_SUCCESS)) {
 			/* deliver to specified thread */
 		} else {
 			/* deliver to any willing thread */
@@ -2799,7 +2721,7 @@ issignal_locked(proc_t p)
 				 *	XXX Have to really stop for debuggers;
 				 *	XXX stop() doesn't do the right thing.
 				 */
-				task = p->task;
+				task = proc_task(p);
 				task_suspend_internal(task);
 
 				proc_lock(p);
@@ -3093,7 +3015,7 @@ stop(proc_t p, proc_t parent)
 		wakeup((caddr_t)parent);
 		proc_list_unlock();
 	}
-	(void) task_suspend_internal(p->task);
+	(void) task_suspend_internal(proc_task(p));
 }
 
 /*
@@ -3110,6 +3032,7 @@ postsig_locked(int signum)
 	int mask, returnmask;
 	struct uthread * ut;
 	os_reason_t ut_exit_reason = OS_REASON_NULL;
+	int coredump_flags = 0;
 
 #if DIAGNOSTIC
 	if (signum == 0) {
@@ -3155,8 +3078,11 @@ postsig_locked(int signum)
 			p->p_sigacts.ps_sig = signum;
 			proc_signalend(p, 1);
 			proc_unlock(p);
+			if (task_is_driver(proc_task(p))) {
+				coredump_flags |= COREDUMP_FULLFSYNC;
+			}
 #if CONFIG_COREDUMP
-			if (coredump(p, 0, 0) == 0) {
+			if (coredump(p, 0, coredump_flags) == 0) {
 				signum |= WCOREFLAG;
 			}
 #endif
@@ -3284,11 +3210,14 @@ filt_sigattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 static void
 filt_sigdetach(struct knote *kn)
 {
-	proc_t p = kn->kn_proc;
+	proc_t p;
 
 	proc_klist_lock();
-	kn->kn_proc = NULL;
-	KNOTE_DETACH(&p->p_klist, kn);
+	p = kn->kn_proc;
+	if (p != NULL) {
+		kn->kn_proc = NULL;
+		KNOTE_DETACH(&p->p_klist, kn);
+	}
 	proc_klist_unlock();
 }
 
@@ -3367,21 +3296,16 @@ bsd_ast(thread_t thread)
 		return;
 	}
 
-	/* don't run bsd ast on exec copy or exec'ed tasks */
-	if (task_did_exec(current_task()) || task_is_exec_copy(current_task())) {
-		return;
-	}
-
 	if (timerisset(&p->p_vtimer_user.it_value)) {
 		uint32_t        microsecs;
 
-		task_vtimer_update(p->task, TASK_VTIMER_USER, &microsecs);
+		task_vtimer_update(proc_task(p), TASK_VTIMER_USER, &microsecs);
 
 		if (!itimerdecr(p, &p->p_vtimer_user, microsecs)) {
 			if (timerisset(&p->p_vtimer_user.it_value)) {
-				task_vtimer_set(p->task, TASK_VTIMER_USER);
+				task_vtimer_set(proc_task(p), TASK_VTIMER_USER);
 			} else {
-				task_vtimer_clear(p->task, TASK_VTIMER_USER);
+				task_vtimer_clear(proc_task(p), TASK_VTIMER_USER);
 			}
 
 			psignal_try_thread(p, thread, SIGVTALRM);
@@ -3391,13 +3315,13 @@ bsd_ast(thread_t thread)
 	if (timerisset(&p->p_vtimer_prof.it_value)) {
 		uint32_t        microsecs;
 
-		task_vtimer_update(p->task, TASK_VTIMER_PROF, &microsecs);
+		task_vtimer_update(proc_task(p), TASK_VTIMER_PROF, &microsecs);
 
 		if (!itimerdecr(p, &p->p_vtimer_prof, microsecs)) {
 			if (timerisset(&p->p_vtimer_prof.it_value)) {
-				task_vtimer_set(p->task, TASK_VTIMER_PROF);
+				task_vtimer_set(proc_task(p), TASK_VTIMER_PROF);
 			} else {
-				task_vtimer_clear(p->task, TASK_VTIMER_PROF);
+				task_vtimer_clear(proc_task(p), TASK_VTIMER_PROF);
 			}
 
 			psignal_try_thread(p, thread, SIGPROF);
@@ -3407,7 +3331,7 @@ bsd_ast(thread_t thread)
 	if (timerisset(&p->p_rlim_cpu)) {
 		struct timeval          tv;
 
-		task_vtimer_update(p->task, TASK_VTIMER_RLIM, (uint32_t *) &tv.tv_usec);
+		task_vtimer_update(proc_task(p), TASK_VTIMER_RLIM, (uint32_t *) &tv.tv_usec);
 
 		proc_spinlock(p);
 		if (p->p_rlim_cpu.tv_sec > 0 || p->p_rlim_cpu.tv_usec > tv.tv_usec) {
@@ -3418,7 +3342,7 @@ bsd_ast(thread_t thread)
 			timerclear(&p->p_rlim_cpu);
 			proc_spinunlock(p);
 
-			task_vtimer_clear(p->task, TASK_VTIMER_RLIM);
+			task_vtimer_clear(proc_task(p), TASK_VTIMER_RLIM);
 
 			psignal_try_thread(p, thread, SIGXCPU);
 		}
@@ -3436,7 +3360,7 @@ bsd_ast(thread_t thread)
 		proc_lock(p);
 		p->p_dtrace_stop = 1;
 		proc_unlock(p);
-		(void)task_suspend_internal(p->task);
+		(void)task_suspend_internal(proc_task(p));
 	}
 
 	if (ut->t_dtrace_resumepid) {
@@ -3448,7 +3372,7 @@ bsd_ast(thread_t thread)
 			if (resumeproc->p_dtrace_stop) {
 				resumeproc->p_dtrace_stop = 0;
 				proc_unlock(resumeproc);
-				task_resume_internal(resumeproc->task);
+				task_resume_internal(proc_task(resumeproc));
 			} else {
 				proc_unlock(resumeproc);
 			}
@@ -3466,12 +3390,6 @@ bsd_ast(thread_t thread)
 	}
 	proc_unlock(p);
 
-#ifdef CONFIG_32BIT_TELEMETRY
-	if (task_consume_32bit_log_flag(p->task)) {
-		proc_log_32bit_telemetry(p);
-	}
-#endif /* CONFIG_32BIT_TELEMETRY */
-
 	if (!bsd_init_done) {
 		bsd_init_done = 1;
 		bsdinit_task();
@@ -3484,7 +3402,7 @@ pt_setrunnable(proc_t p)
 {
 	task_t task;
 
-	task = p->task;
+	task = proc_task(p);
 
 	if (p->p_lflag & P_LTRACED) {
 		proc_lock(p);
@@ -3623,8 +3541,8 @@ sig_lock_to_exit(proc_t p)
 	p->exit_thread = self;
 	proc_unlock(p);
 
-	task_hold(p->task);
-	task_wait(p->task, FALSE);
+	task_hold(proc_task(p));
+	task_wait(proc_task(p), FALSE);
 
 	proc_lock(p);
 }

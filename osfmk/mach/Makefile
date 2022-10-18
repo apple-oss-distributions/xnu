@@ -32,7 +32,6 @@ MIG_DEFS =	\
 	host_notify_reply.defs \
 	host_priv.defs \
 	host_security.defs \
-	lock_set.defs \
 	mach_exc.defs \
 	mach_host.defs \
 	mach_port.defs \
@@ -40,6 +39,7 @@ MIG_DEFS =	\
 	mach_voucher.defs \
 	mach_voucher_attr_control.defs \
 	memory_entry.defs \
+	memory_error_notification.defs \
 	notify.defs \
 	processor.defs \
 	processor_set.defs \
@@ -51,7 +51,8 @@ MIG_DEFS =	\
 
 MIG_PRIVATE_DEFS = \
 	mach_eventlink.defs \
-	restartable.defs
+	restartable.defs \
+	sysdiagnose_notification.defs
 
 MACH_PRIVATE_DEFS = \
 	coalition_notification.defs \
@@ -60,9 +61,7 @@ MACH_PRIVATE_DEFS = \
 	ktrace_background.defs \
 	mach_notify.defs \
 	mach_test_upcall.defs \
-	memory_object_control.defs \
-	memory_object_default.defs \
-	sysdiagnose_notification.defs \
+	memory_error_notification.defs \
 	upl.defs \
 	vfs_nspace.defs \
 	vm32_map.defs \
@@ -79,8 +78,8 @@ MIG_USHDRS = \
 	exc_server.h \
 	fairplayd_notification_server.h \
 	arcade_upcall_server.h \
+	memory_error_notification_server.h \
 	mach_exc_server.h \
-	memory_object_default_server.h \
 	notify_server.h \
 	task_access_server.h \
 	telemetry_notification_server.h \
@@ -94,14 +93,12 @@ MIG_UUHDRS = \
 	host_priv.h \
 	host_security.h \
 	ktrace_background.h \
-	lock_set.h \
 	mach_host.h \
 	mach_port.h \
 	mach_vm.h \
 	mach_voucher.h \
 	mach_voucher_attr_control.h \
 	memory_entry.h \
-	memory_object_control.h \
 	processor.h \
 	processor_set.h \
 	task.h \
@@ -115,7 +112,8 @@ MIGINCLUDES = ${MIG_UUHDRS} ${MIG_USHDRS}
 
 # Files that are public on macOS, but private on embedded
 EMBEDDED_PRIVATE_DATAFILES = \
-	shared_region.h
+	shared_region.h \
+	dyld_pager.h
 
 ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
 EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
@@ -214,6 +212,7 @@ PRIVATE_DATAFILES = $(sort \
 	mach_eventlink_types.h \
 	mach_host.defs \
 	mach_traps.h \
+	memory_error_notification.defs \
 	memory_object_types.h \
 	mig.h \
 	mk_timer.h \
@@ -227,10 +226,13 @@ PRIVATE_DATAFILES = $(sort \
 	task_info.h \
 	task_inspect.h \
 	task_policy.h \
+	task_policy_private.h \
 	thread_policy.h \
+	thread_policy_private.h \
 	thread_switch.h \
 	vfs_nspace.defs \
 	vm_prot.h \
+	vm_reclaim.h \
 	${EXTRA_PRIVATE_DATAFILES} \
 	${MIG_PRIVATE_DEFS})
 
@@ -239,7 +241,7 @@ PRIVATE_DATAFILES = $(sort \
 PRIVATE_MODULEMAPFILES = \
 	mach_private.modulemap
 
-INSTALL_MI_LCL_LIST = $(sort resource_monitors.h ${EXTRA_PRIVATE_DATAFILES})
+INSTALL_MI_LCL_LIST = $(sort resource_monitors.h task_policy_private.h thread_policy_private.h ${EXTRA_PRIVATE_DATAFILES})
 
 INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 
@@ -252,6 +254,8 @@ INSTALL_KF_MI_LIST = $(sort \
 INSTALL_KF_MI_LCL_LIST = $(sort \
 	coalition.h \
 	mach_interface.h \
+	task_policy_private.h \
+	thread_policy_private.h \
 	$(filter-out mach_traps.h mach_syscalls.h thread_switch.h, ${DATAFILES} ${EXTRA_PRIVATE_DATAFILES}))
 
 INSTALL_MI_GEN_LIST =
@@ -261,7 +265,10 @@ INSTALL_MI_DIR = mach
 EXPORT_MI_LIST	= $(sort \
 	coalition.h \
 	mach_interface.h \
+	memory_object_control.h \
 	resource_monitors.h \
+	task_policy_private.h \
+	thread_policy_private.h \
 	mach_eventlink_types.h \
 	sfi_class.h \
 	${DATAFILES} \
@@ -316,9 +323,6 @@ MIG_KUHDRS = \
 	mach_exc.h \
 	mach_notify.h \
 	mach_test_upcall.h \
-	memory_object.h \
-	memory_object_control.h \
-	memory_object_default.h \
 	resource_notify.h \
 	task_access.h \
 	upl.h \
@@ -334,12 +338,10 @@ MIG_KUSRC = \
 	arcade_upcall_user.c \
 	host_notify_reply_user.c \
 	ktrace_background_user.c \
+	memory_error_notification_user.c \
 	mach_exc_user.c \
 	mach_notify_user.c \
 	mach_test_upcall_user.c \
-	memory_object_user.c \
-	memory_object_control_user.c \
-	memory_object_default_user.c \
 	resource_notify_user.c \
 	task_access_user.c \
 	telemetry_notification_user.c \
@@ -352,7 +354,6 @@ MIG_KUSRC = \
 MIG_KSHDRS = \
 	arcade_register_server.h \
 	clock_server.h \
-	clock_priv_server.h \
 	mach_eventlink_server.h \
 	exc_server.h \
 	host_priv_server.h \
@@ -363,10 +364,7 @@ MIG_KSHDRS = \
 	mach_port_server.h \
 	mach_vm_server.h \
 	mach_voucher_server.h \
-	mach_voucher_attr_control_server.h \
 	memory_entry_server.h \
-	memory_object_control_server.h \
-	memory_object_default_server.h \
 	processor_server.h \
 	processor_set_server.h \
 	restartable_server.h \
@@ -379,7 +377,6 @@ MIG_KSHDRS = \
 MIG_KSSRC = \
 	arcade_register_server.c \
 	clock_server.c \
-	clock_priv_server.c \
 	mach_eventlink_server.c \
 	exc_server.c \
 	host_priv_server.c \
@@ -390,10 +387,7 @@ MIG_KSSRC = \
 	mach_port_server.c \
 	mach_vm_server.c \
 	mach_voucher_server.c \
-	mach_voucher_attr_control_server.c \
 	memory_entry_server.c \
-	memory_object_control_server.c \
-	memory_object_default_server.c \
 	processor_server.c \
 	processor_set_server.c \
 	restartable_server.c \

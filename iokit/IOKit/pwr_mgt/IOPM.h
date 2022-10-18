@@ -643,7 +643,7 @@ enum {
 #define kIOPMPSAdapterDetailsAmperageKey            "Current"
 #define kIOPMPSAdapterDetailsDescriptionKey         "Description"
 #define kIOPMPSAdapterDetailsPMUConfigurationKey    "PMUConfiguration"
-#define kIOPMPSAdapterDetailsVoltage                "Voltage"
+#define kIOPMPSAdapterDetailsVoltage                "AdapterVoltage"
 #define kIOPMPSAdapterDetailsSourceIDKey            "Source"
 #define kIOPMPSAdapterDetailsErrorFlagsKey          "ErrorFlags"
 #define kIOPMPSAdapterDetailsSharedSourceKey        "SharedSource"

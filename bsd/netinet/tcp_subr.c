@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -65,6 +65,8 @@
  * is included in support of clause 2.2 (b) of the Apple Public License,
  * Version 2.0.
  */
+
+#include "tcp_includes.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -239,6 +241,14 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, init_rtt_from_cache,
 static int tso_debug = 0;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, tso_debug, CTLFLAG_RW | CTLFLAG_LOCKED,
     &tso_debug, 0, "TSO verbosity");
+
+static int tcp_rxt_seg_max = 1024;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, rxt_seg_max, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &tcp_rxt_seg_max, 0, "");
+
+static unsigned long tcp_rxt_seg_drop = 0;
+SYSCTL_ULONG(_net_inet_tcp, OID_AUTO, rxt_seg_drop, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &tcp_rxt_seg_drop, "");
 
 static void     tcp_notify(struct inpcb *, int);
 
@@ -497,6 +507,11 @@ tcp_init(struct protosw *pp, struct domain *dp)
 	}
 	tcp_initialized = 1;
 
+#if DEBUG || DEVELOPMENT
+	(void) PE_parse_boot_argn("tcp_rxt_seg_max", &tcp_rxt_seg_max,
+	    sizeof(tcp_rxt_seg_max));
+#endif /* DEBUG || DEVELOPMENT */
+
 	tcp_ccgen = 1;
 	tcp_keepinit = TCPTV_KEEP_INIT;
 	tcp_keepidle = TCPTV_KEEP_IDLE;
@@ -572,16 +587,12 @@ tcp_init(struct protosw *pp, struct domain *dp)
 	str_size = (vm_size_t)P2ROUNDUP(sizeof(struct bwmeas), sizeof(u_int64_t));
 	tcp_bwmeas_zone = zone_create("tcp_bwmeas_zone", str_size, ZC_ZFREE_CLEARMEM);
 
-	str_size = (vm_size_t)P2ROUNDUP(sizeof(struct tcp_ccstate), sizeof(u_int64_t));
-	tcp_cc_zone = zone_create("tcp_cc_zone", str_size, ZC_NONE);
-
 	str_size = (vm_size_t)P2ROUNDUP(sizeof(struct tcp_rxt_seg), sizeof(u_int64_t));
 	tcp_rxt_seg_zone = zone_create("tcp_rxt_seg_zone", str_size, ZC_NONE);
 
 #define TCP_MINPROTOHDR (sizeof(struct ip6_hdr) + sizeof(struct tcphdr))
 	if (max_protohdr < TCP_MINPROTOHDR) {
-		_max_protohdr = TCP_MINPROTOHDR;
-		_max_protohdr = (int)max_protohdr;   /* round it up */
+		max_protohdr = (int)P2ROUNDUP(TCP_MINPROTOHDR, sizeof(uint32_t));
 	}
 	if (max_linkhdr + max_protohdr > MCLBYTES) {
 		panic("tcp_init");
@@ -619,7 +630,9 @@ tcp_init(struct protosw *pp, struct domain *dp)
 		tcp_log_privacy = 1;
 	}
 
-	PE_parse_boot_argn("tcp_log", &tcp_log_enable_flags, sizeof(tcp_log_enable_flags));
+	if (PE_parse_boot_argn("tcp_log", &tcp_log_enable_flags, sizeof(tcp_log_enable_flags))) {
+		os_log(OS_LOG_DEFAULT, "tcp_init: set tcp_log_enable_flags to 0x%x", tcp_log_enable_flags);
+	}
 
 	/*
 	 * If more than 4GB of actual memory is available, increase the
@@ -1167,13 +1180,11 @@ tcp_newtcpcb(struct inpcb *inp)
 	tp->t_twentry.tqe_prev = NULL;
 
 	read_frandom(&random_32, sizeof(random_32));
-	if (__probable(tcp_do_ack_compression)) {
-		tp->t_comp_gencnt = random_32;
-		if (tp->t_comp_gencnt <= TCP_ACK_COMPRESSION_DUMMY) {
-			tp->t_comp_gencnt = TCP_ACK_COMPRESSION_DUMMY + 1;
-		}
-		tp->t_comp_lastinc = tcp_now;
+	tp->t_comp_gencnt = random_32;
+	if (tp->t_comp_gencnt <= TCP_ACK_COMPRESSION_DUMMY) {
+		tp->t_comp_gencnt = TCP_ACK_COMPRESSION_DUMMY + 1;
 	}
+	tp->t_comp_lastinc = tcp_now;
 
 	if (__probable(tcp_randomize_timestamps)) {
 		tp->t_ts_offset = random_32;
@@ -1205,6 +1216,7 @@ tcp_drop(struct tcpcb *tp, int errno)
 	if (TCPS_HAVERCVDSYN(tp->t_state)) {
 		DTRACE_TCP4(state__change, void, NULL, struct inpcb *, inp,
 		    struct tcpcb *, tp, int32_t, TCPS_CLOSED);
+		TCP_LOG_STATE(tp, TCPS_CLOSED);
 		tp->t_state = TCPS_CLOSED;
 		(void) tcp_output(tp);
 		tcpstat.tcps_drops++;
@@ -1509,6 +1521,7 @@ tcp_close(struct tcpcb *tp)
 			DTRACE_TCP4(state__change, void, NULL,
 			    struct inpcb *, inp, struct tcpcb *, tp,
 			    int32_t, TCPS_CLOSED);
+			TCP_LOG_STATE(tp, TCPS_CLOSED);
 			tp->t_state = TCPS_CLOSED;
 			goto no_valid_rt;
 		}
@@ -1634,6 +1647,7 @@ no_valid_rt:
 		inp->inp_saved_ppcb = (caddr_t) tp;
 	}
 
+	TCP_LOG_STATE(tp, TCPS_CLOSED);
 	tp->t_state = TCPS_CLOSED;
 
 	/*
@@ -1663,10 +1677,6 @@ no_valid_rt:
 		CC_ALGO(tp)->cleanup(tp);
 	}
 
-	if (tp->t_ccstate != NULL) {
-		zfree(tcp_cc_zone, tp->t_ccstate);
-		tp->t_ccstate = NULL;
-	}
 	tp->tcp_cc_index = TCP_CC_ALGO_NONE;
 
 	if (TCP_USE_RLEDBAT(tp, so) && tcp_cc_rledbat.cleanup != NULL) {
@@ -1704,14 +1714,21 @@ tcp_freeq(struct tcpcb *tp)
 {
 	struct tseg_qent *q;
 	int rv = 0;
+	int count = 0;
 
 	while ((q = LIST_FIRST(&tp->t_segq)) != NULL) {
 		LIST_REMOVE(q, tqe_q);
+		tp->t_reassq_mbcnt -= MSIZE + (q->tqe_m->m_flags & M_EXT) ?
+		    q->tqe_m->m_ext.ext_size : 0;
 		m_freem(q->tqe_m);
 		zfree(tcp_reass_zone, q);
 		rv = 1;
+		count++;
 	}
 	tp->t_reassqlen = 0;
+	if (count > 0) {
+		OSAddAtomic(-count, &tcp_reass_total_qlen);
+	}
 	return rv;
 }
 
@@ -3696,6 +3713,23 @@ tcp_rxtseg_insert(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 		return;
 	}
 
+	if (tcp_rxt_seg_max > 0 && tp->t_rxt_seg_count >= tcp_rxt_seg_max) {
+		rxseg = SLIST_FIRST(&tp->t_rxt_segments);
+		if (prev == rxseg) {
+			prev = NULL;
+		}
+		SLIST_REMOVE(&tp->t_rxt_segments, rxseg,
+		    tcp_rxt_seg, rx_link);
+
+		tcp_rxt_seg_drop++;
+		tp->t_rxt_seg_drop++;
+		TCP_LOG(tp, "removed rxseg list overflow %u:%u ",
+		    rxseg->rx_start, rxseg->rx_end);
+		zfree(tcp_rxt_seg_zone, rxseg);
+
+		tp->t_rxt_seg_count -= 1;
+	}
+
 	rxseg = zalloc_flags(tcp_rxt_seg_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	rxseg->rx_start = start;
 	rxseg->rx_end = end;
@@ -3706,12 +3740,14 @@ tcp_rxtseg_insert(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 	} else {
 		SLIST_INSERT_HEAD(&tp->t_rxt_segments, rxseg, rx_link);
 	}
+	tp->t_rxt_seg_count += 1;
 }
 
 struct tcp_rxt_seg *
 tcp_rxtseg_find(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 {
 	struct tcp_rxt_seg *rxseg;
+
 	if (SLIST_EMPTY(&tp->t_rxt_segments)) {
 		return NULL;
 	}
@@ -3732,6 +3768,7 @@ void
 tcp_rxtseg_set_spurious(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 {
 	struct tcp_rxt_seg *rxseg;
+
 	if (SLIST_EMPTY(&tp->t_rxt_segments)) {
 		return;
 	}
@@ -3765,6 +3802,7 @@ tcp_rxtseg_clean(struct tcpcb *tp)
 		    tcp_rxt_seg, rx_link);
 		zfree(tcp_rxt_seg_zone, rxseg);
 	}
+	tp->t_rxt_seg_count = 0;
 	tp->t_dsack_lastuna = tp->snd_max;
 }
 
@@ -3795,26 +3833,6 @@ tcp_rxtseg_detect_bad_rexmt(struct tcpcb *tp, tcp_seq th_ack)
 		}
 	}
 	return bad_rexmt;
-}
-
-boolean_t
-tcp_rxtseg_dsack_for_tlp(struct tcpcb *tp)
-{
-	boolean_t dsack_for_tlp = FALSE;
-	struct tcp_rxt_seg *rxseg;
-	if (SLIST_EMPTY(&tp->t_rxt_segments)) {
-		return FALSE;
-	}
-
-	SLIST_FOREACH(rxseg, &tp->t_rxt_segments, rx_link) {
-		if (rxseg->rx_count == 1 &&
-		    SLIST_NEXT(rxseg, rx_link) == NULL &&
-		    (rxseg->rx_flags & TCP_RXT_DSACK_FOR_TLP)) {
-			dsack_for_tlp = TRUE;
-			break;
-		}
-	}
-	return dsack_for_tlp;
 }
 
 u_int32_t
@@ -4416,6 +4434,23 @@ inp_get_sndbytes_allunsent(struct socket *so, u_int32_t th_ack)
 	return 0;
 }
 
+uint8_t
+tcp_get_ace(struct tcphdr *th)
+{
+	uint8_t ace = 0;
+	if (th->th_flags & TH_ECE) {
+		ace += 1;
+	}
+	if (th->th_flags & TH_CWR) {
+		ace += 2;
+	}
+	if (th->th_x2 & (TH_AE >> 8)) {
+		ace += 4;
+	}
+
+	return ace;
+}
+
 #define IFP_PER_FLOW_STAT(_ipv4_, _stat_) { \
 	if (_ipv4_) { \
 	        ifp->if_ipv4_stat->_stat_++; \
@@ -4550,6 +4585,7 @@ tcp_update_stats_per_flow(struct ifnet_stats_per_flow *ifs,
 #if SKYWALK
 
 #include <skywalk/core/skywalk_var.h>
+#include <skywalk/nexus/flowswitch/nx_flowswitch.h>
 
 void
 tcp_add_fsw_flow(struct tcpcb *tp, struct ifnet *ifp)
@@ -4560,7 +4596,7 @@ tcp_add_fsw_flow(struct tcpcb *tp, struct ifnet *ifp)
 	struct nx_flow_req nfr;
 	int err;
 
-	if (sk_fsw_rx_agg_tcp == 0) {
+	if (!NX_FSW_TCP_RX_AGG_ENABLED()) {
 		return;
 	}
 
@@ -4619,6 +4655,7 @@ tcp_add_fsw_flow(struct tcpcb *tp, struct ifnet *ifp)
 		nfr.nfr_port_reservation = inp->inp_netns_token;
 		nfr.nfr_flags |= NXFLOWREQF_EXT_PORT_RSV;
 	}
+	ASSERT(inp->inp_flowhash != 0);
 	nfr.nfr_inp_flowhash = inp->inp_flowhash;
 
 	uuid_generate_random(nfr.nfr_flow_uuid);

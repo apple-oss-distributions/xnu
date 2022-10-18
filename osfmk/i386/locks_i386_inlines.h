@@ -33,6 +33,8 @@
 #include <kern/lock_stat.h>
 #include <kern/turnstile.h>
 
+#if LCK_MTX_USE_ARCH
+
 // Enforce program order of loads and stores.
 #define ordered_load(target) os_atomic_load(target, compiler_acq_rel)
 #define ordered_store_release(target, value) ({ \
@@ -42,8 +44,8 @@
 
 /* Enforce program order of loads and stores. */
 #define ordered_load_mtx_state(lock)                    ordered_load(&(lock)->lck_mtx_state)
-#define ordered_store_mtx_state_release(lock, value)            ordered_store_release(&(lock)->lck_mtx_state, (value))
-#define ordered_store_mtx_owner(lock, value)    os_atomic_store(&(lock)->lck_mtx_owner, (value), compiler_acq_rel)
+#define ordered_store_mtx_state_release(lock, value)    ordered_store_release(&(lock)->lck_mtx_state, (value))
+#define ordered_store_mtx_owner(lock, value)            os_atomic_store(&(lock)->lck_mtx_owner, (value), compiler_acq_rel)
 
 #if DEVELOPMENT | DEBUG
 void lck_mtx_owner_check_panic(lck_mtx_t       *mutex) __abortlike;
@@ -65,44 +67,32 @@ __attribute__((always_inline))
 static inline void
 lck_mtx_lock_finish_inline(
 	lck_mtx_t       *mutex,
-	uint32_t        state,
-	boolean_t       indirect)
+	uint32_t        state)
 {
 	assert(state & LCK_MTX_ILOCKED_MSK);
 
 	/* release the interlock and re-enable preemption */
 	lck_mtx_ilk_unlock_inline(mutex, state);
 
-#if     CONFIG_DTRACE
-	if (indirect) {
-		LOCKSTAT_RECORD(LS_LCK_MTX_EXT_LOCK_ACQUIRE, mutex, 0);
-	} else {
-		LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_ACQUIRE, mutex, 0);
-	}
-#endif
+	LCK_MTX_ACQUIRED(mutex, mutex->lck_mtx_grp, false,
+	    state & LCK_MTX_PROFILE_MSK);
 }
 
 __attribute__((always_inline))
 static inline void
 lck_mtx_lock_finish_inline_with_cleanup(
 	lck_mtx_t       *mutex,
-	uint32_t        state,
-	boolean_t       indirect)
+	uint32_t        state)
 {
 	assert(state & LCK_MTX_ILOCKED_MSK);
 
 	/* release the interlock and re-enable preemption */
 	lck_mtx_ilk_unlock_inline(mutex, state);
 
-	turnstile_cleanup();
+	LCK_MTX_ACQUIRED(mutex, mutex->lck_mtx_grp, false,
+	    state & LCK_MTX_PROFILE_MSK);
 
-#if     CONFIG_DTRACE
-	if (indirect) {
-		LOCKSTAT_RECORD(LS_LCK_MTX_EXT_LOCK_ACQUIRE, mutex, 0);
-	} else {
-		LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_ACQUIRE, mutex, 0);
-	}
-#endif
+	turnstile_cleanup();
 }
 
 __attribute__((always_inline))
@@ -113,10 +103,8 @@ lck_mtx_try_lock_finish_inline(
 {
 	/* release the interlock and re-enable preemption */
 	lck_mtx_ilk_unlock_inline(mutex, state);
-
-#if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_LOCK_ACQUIRE, mutex, 0);
-#endif
+	LCK_MTX_TRY_ACQUIRED(mutex, mutex->lck_mtx_grp, false,
+	    state & LCK_MTX_PROFILE_MSK);
 }
 
 __attribute__((always_inline))
@@ -137,17 +125,12 @@ __attribute__((always_inline))
 static inline void
 lck_mtx_unlock_finish_inline(
 	lck_mtx_t       *mutex,
-	boolean_t       indirect)
+	uint32_t        state)
 {
 	enable_preemption();
-
-#if     CONFIG_DTRACE
-	if (indirect) {
-		LOCKSTAT_RECORD(LS_LCK_MTX_EXT_UNLOCK_RELEASE, mutex, 0);
-	} else {
-		LOCKSTAT_RECORD(LS_LCK_MTX_UNLOCK_RELEASE, mutex, 0);
-	}
-#endif  // CONFIG_DTRACE
+	LCK_MTX_RELEASED(mutex, mutex->lck_mtx_grp,
+	    state & LCK_MTX_PROFILE_MSK);
 }
 
+#endif /* LCK_MTX_USE_ARCH */
 #endif /* _I386_LOCKS_I386_INLINES_H_ */

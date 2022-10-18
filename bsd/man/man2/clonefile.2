@@ -68,6 +68,9 @@ the current user does not have privileges to change ownership
 .
 .It
 setuid and setgid bits are turned off in the mode bits for regular files.
+.It
+inherit target directory's access control lists. If the optional flag CLONE_ACL is passed, it will additionally
+copy the ACLs from the source file and also apply the inherited ACLs from the target directory.
 .El
 .Pp
 Subsequent writes to either the original or cloned file are private to the file being modified (copy-on-write).
@@ -143,6 +146,12 @@ The symbolic link is itself cloned if
 .Fa src
 names a symbolic link.
 .
+.El
+.Pp
+.Bl -tag -width CLONE_ACL
+.
+.It CLONE_ACL
+Copy ACLs from the source file.
 .El
 .Pp
 The

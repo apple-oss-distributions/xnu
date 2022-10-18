@@ -210,7 +210,7 @@ nanos_to_abs(uint64_t ns)
 inline static void
 yield(void)
 {
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	asm volatile ("yield");
 #elif defined(__x86_64__) || defined(__i386__)
 	asm volatile ("pause");

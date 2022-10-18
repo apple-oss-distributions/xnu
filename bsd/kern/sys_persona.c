@@ -43,6 +43,9 @@
 #include <libkern/libkern.h>
 #include <IOKit/IOBSD.h>
 
+#define PERSONA_INFO_V1_SIZE offsetof(struct kpersona_info, persona_uid)
+#define PERSONA_INFO_V2_SIZE sizeof(struct kpersona_info)
+
 extern kern_return_t bank_get_bank_ledger_thread_group_and_persona(void *voucher,
     void *bankledger, void **banktg, uint32_t *persona_id);
 
@@ -51,18 +54,30 @@ kpersona_copyin(user_addr_t infop, struct kpersona_info *kinfo)
 {
 	uint32_t info_v = 0;
 	int error;
+	size_t kinfo_size;
+
+	memset(kinfo, 0, sizeof(struct kpersona_info));
+	/* Initialize fields introduced in newer versions. They won't be covered by
+	 * the copyin() if the caller passed an old version.
+	 */
+	kinfo->persona_uid = KAUTH_UID_NONE;
 
 	error = copyin(infop, &info_v, sizeof(info_v));
 	if (error) {
 		return error;
 	}
 
-	/* only support a single version of the struct for now */
-	if (info_v != PERSONA_INFO_V1) {
+	switch (info_v) {
+	case PERSONA_INFO_V1:
+		kinfo_size = PERSONA_INFO_V1_SIZE;
+		break;
+	case PERSONA_INFO_V2:
+		kinfo_size = PERSONA_INFO_V2_SIZE;
+		break;
+	default:
 		return EINVAL;
 	}
-
-	error = copyin(infop, kinfo, sizeof(*kinfo));
+	error = copyin(infop, kinfo, kinfo_size);
 
 	/* enforce NULL termination on strings */
 	kinfo->persona_name[MAXLOGNAME] = 0;
@@ -75,19 +90,32 @@ kpersona_copyout(struct kpersona_info *kinfo, user_addr_t infop)
 {
 	uint32_t info_v;
 	int error;
+	size_t kinfo_size;
 
 	error = copyin(infop, &info_v, sizeof(info_v));
 	if (error) {
 		return error;
 	}
 
-	/* only support a single version of the struct for now */
-	/* TODO: in the future compare info_v to kinfo->persona_info_version */
-	if (info_v != PERSONA_INFO_V1) {
+	switch (info_v) {
+	case PERSONA_INFO_V1:
+		kinfo_size = PERSONA_INFO_V1_SIZE;
+		break;
+	case PERSONA_INFO_V2:
+		kinfo_size = PERSONA_INFO_V2_SIZE;
+		break;
+	default:
 		return EINVAL;
 	}
 
-	error = copyout(kinfo, infop, sizeof(*kinfo));
+	/* preserve version field specified by the caller */
+	uint32_t original_version = kinfo->persona_info_version;
+	kinfo->persona_info_version = info_v;
+
+	error = copyout(kinfo, infop, kinfo_size);
+
+	kinfo->persona_info_version = original_version;
+
 	return error;
 }
 
@@ -128,7 +156,7 @@ kpersona_alloc_syscall(user_addr_t infop, user_addr_t idp, user_addr_t path)
 	}
 
 	error = 0;
-	persona = persona_alloc(id, login, kinfo.persona_type, pna_path, &error);
+	persona = persona_alloc(id, login, kinfo.persona_type, pna_path, kinfo.persona_uid, &error);
 	if (!persona) {
 		if (pna_path != NULL) {
 			zfree(ZV_NAMEI, pna_path);
@@ -144,27 +172,6 @@ kpersona_alloc_syscall(user_addr_t infop, user_addr_t idp, user_addr_t path)
 		goto out_persona_err;
 	}
 
-	if (kinfo.persona_gid) {
-		error = persona_set_gid(persona, kinfo.persona_gid);
-		if (error) {
-			goto out_persona_err;
-		}
-	}
-
-	if (kinfo.persona_ngroups > 0) {
-		/* force gmuid 0 to *opt-out* of memberd */
-		if (kinfo.persona_gmuid == 0) {
-			kinfo.persona_gmuid = KAUTH_UID_NONE;
-		}
-
-		error = persona_set_groups(persona, kinfo.persona_groups,
-		    kinfo.persona_ngroups,
-		    kinfo.persona_gmuid);
-		if (error) {
-			goto out_persona_err;
-		}
-	}
-
 	error = copyout(&persona->pna_id, idp, sizeof(persona->pna_id));
 	if (error) {
 		goto out_persona_err;
@@ -172,11 +179,6 @@ kpersona_alloc_syscall(user_addr_t infop, user_addr_t idp, user_addr_t path)
 
 	kinfo.persona_id = persona->pna_id;
 	error = kpersona_copyout(&kinfo, infop);
-	if (error) {
-		goto out_persona_err;
-	}
-
-	error = persona_verify_and_set_uniqueness(persona);
 	if (error) {
 		goto out_persona_err;
 	}
@@ -301,6 +303,23 @@ kpersona_getpath_syscall(user_addr_t idp, user_addr_t path)
 	return error;
 }
 
+static void
+kpersona_populate(struct kpersona_info *kinfo, struct persona *persona)
+{
+	memset(kinfo, 0, sizeof(struct kpersona_info));
+
+	kinfo->persona_info_version = PERSONA_INFO_V2;
+	kinfo->persona_id = persona->pna_id;
+	kinfo->persona_type = persona->pna_type;
+	kinfo->persona_uid = persona->pna_uid;
+
+	/*
+	 * NULL termination is assured b/c persona_name is
+	 * exactly MAXLOGNAME + 1 bytes (and has been memset to 0)
+	 */
+	strncpy(kinfo->persona_name, persona->pna_login, MAXLOGNAME);
+}
+
 static int
 kpersona_info_syscall(user_addr_t idp, user_addr_t infop)
 {
@@ -333,25 +352,10 @@ kpersona_info_syscall(user_addr_t idp, user_addr_t infop)
 		return ESRCH;
 	}
 
-	persona_dbg("FOUND: persona: id:%d, gid:%d, login:\"%s\"",
-	    persona->pna_id, persona_get_gid(persona),
-	    persona->pna_login);
+	persona_dbg("FOUND: persona: id:%d, login:\"%s\"",
+	    persona->pna_id, persona->pna_login);
 
-	memset(&kinfo, 0, sizeof(kinfo));
-	kinfo.persona_info_version = PERSONA_INFO_V1;
-	kinfo.persona_id = persona->pna_id;
-	kinfo.persona_type = persona->pna_type;
-	kinfo.persona_gid = persona_get_gid(persona);
-	size_t ngroups = 0;
-	persona_get_groups(persona, &ngroups, kinfo.persona_groups, NGROUPS);
-	kinfo.persona_ngroups = (uint32_t)ngroups;
-	kinfo.persona_gmuid = persona_get_gmuid(persona);
-
-	/*
-	 * NULL termination is assured b/c persona_name is
-	 * exactly MAXLOGNAME + 1 bytes (and has been memset to 0)
-	 */
-	strncpy(kinfo.persona_name, persona->pna_login, MAXLOGNAME);
+	kpersona_populate(&kinfo, persona);
 
 	persona_put(persona);
 
@@ -383,17 +387,7 @@ kpersona_pidinfo_syscall(user_addr_t idp, user_addr_t infop)
 		return ESRCH;
 	}
 
-	memset(&kinfo, 0, sizeof(kinfo));
-	kinfo.persona_info_version = PERSONA_INFO_V1;
-	kinfo.persona_id = persona->pna_id;
-	kinfo.persona_type = persona->pna_type;
-	kinfo.persona_gid = persona_get_gid(persona);
-	size_t ngroups = 0;
-	persona_get_groups(persona, &ngroups, kinfo.persona_groups, NGROUPS);
-	kinfo.persona_ngroups = (uint32_t)ngroups;
-	kinfo.persona_gmuid = persona_get_gmuid(persona);
-
-	strncpy(kinfo.persona_name, persona->pna_login, MAXLOGNAME);
+	kpersona_populate(&kinfo, persona);
 
 	persona_put(persona);
 

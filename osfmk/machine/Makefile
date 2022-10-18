@@ -14,7 +14,6 @@ KERNELFILES = \
 	config.h		\
 	cpu_capabilities.h	\
 	cpu_number.h	\
-	io_map_entries.h \
 	lock.h	\
 	locks.h	\
 	machine_cpuid.h		\

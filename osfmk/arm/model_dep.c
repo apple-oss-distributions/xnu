@@ -58,6 +58,7 @@
 #include <kdp/kdp_callout.h>
 #include <kdp/kdp_dyld.h>
 #include <kdp/kdp_internal.h>
+#include <kdp/kdp_common.h>
 #include <uuid/uuid.h>
 #include <sys/codesign.h>
 #include <sys/time.h>
@@ -83,6 +84,7 @@
 #include <kern/kern_cdata.h>
 #include <kern/ledger.h>
 
+
 #if     MACH_KDP
 void    kdp_trap(unsigned int, struct arm_saved_state *);
 #endif
@@ -99,10 +101,14 @@ extern int              kdp_stack_snapshot_bytes_uncompressed(void);
  * Increment the PANICLOG_VERSION if you change the format of the panic
  * log in any way.
  */
-#define PANICLOG_VERSION 13
+#define PANICLOG_VERSION 14
 static struct kcdata_descriptor kc_panic_data;
 
-extern char                 firmware_version[];
+extern char iBoot_version[];
+#if defined(TARGET_OS_OSX) && defined(__arm64__)
+extern char iBoot_Stage_2_version[];
+#endif /* defined(TARGET_OS_OSX) && defined(__arm64__) */
+
 extern volatile uint32_t        debug_enabled;
 extern unsigned int         not_in_kdp;
 
@@ -147,8 +153,9 @@ extern struct timeval    gIOLastWakeTime;
 extern boolean_t                 is_clock_configured;
 extern boolean_t kernelcache_uuid_valid;
 extern uuid_t kernelcache_uuid;
+extern uuid_string_t bootsessionuuid_string;
 
-extern void stackshot_memcpy(void *dst, const void *src, size_t len);
+extern uint64_t roots_installed;
 
 /* Definitions for frame pointers */
 #define FP_ALIGNMENT_MASK      ((uint32_t)(0x3))
@@ -157,7 +164,7 @@ extern void stackshot_memcpy(void *dst, const void *src, size_t len);
 #define FP_MAX_NUM_TO_EVALUATE (50)
 
 /* Timeout for all processors responding to debug crosscall */
-MACHINE_TIMEOUT32(debug_ack_timeout, "debug-ack", 240000, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT(debug_ack_timeout, "debug-ack", 240000, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
 
 /* Forward functions definitions */
 void panic_display_times(void);
@@ -181,6 +188,7 @@ uint8_t PE_smc_stashed_x86_efi_boot_state = 0xFF;
 uint8_t PE_smc_stashed_x86_shutdown_cause = 0xFF;
 uint64_t PE_smc_stashed_x86_prev_power_transitions = UINT64_MAX;
 uint32_t PE_pcie_stashed_link_state = UINT32_MAX;
+uint64_t PE_nvram_stashed_x86_macos_slide = UINT64_MAX;
 #endif
 
 
@@ -288,6 +296,16 @@ print_one_backtrace(pmap_t pmap, vm_offset_t topfp, const char *cur_marker,
 extern void panic_print_vnodes(void);
 
 static void
+panic_display_tpidrs(void)
+{
+#if defined(__arm64__)
+	paniclog_append_noflush("TPIDRx_ELy = {1: 0x%016llx  0: 0x%016llx  0ro: 0x%016llx }\n",
+	    __builtin_arm_rsr64("TPIDR_EL1"), __builtin_arm_rsr64("TPIDR_EL0"),
+	    __builtin_arm_rsr64("TPIDRRO_EL0"));
+#endif //defined(__arm64__)
+}
+
+static void
 panic_display_hung_cpus_help(void)
 {
 #if defined(__arm64__)
@@ -385,9 +403,7 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 	kc_format_t kc_format;
 	bool filesetKC = false;
 
-#if defined(__arm__)
-	__asm__         volatile ("mov %0, r7":"=r"(cur_fp));
-#elif defined(__arm64__)
+#if defined(__arm64__)
 	__asm__         volatile ("add %0, xzr, fp":"=r"(cur_fp));
 #else
 #error Unknown architecture.
@@ -440,8 +456,19 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 	}
 	panic_display_kernel_uuid();
 
-	paniclog_append_noflush("iBoot version: %.128s\n", firmware_version);
+	if (bootsessionuuid_string[0] != '\0') {
+		paniclog_append_noflush("Boot session UUID: %s\n", bootsessionuuid_string);
+	} else {
+		paniclog_append_noflush("Boot session UUID not yet initialized\n");
+	}
+
+	paniclog_append_noflush("iBoot version: %.128s\n", iBoot_version);
+#if defined(TARGET_OS_OSX) && defined(__arm64__)
+	paniclog_append_noflush("iBoot Stage 2 version: %.128s\n", iBoot_Stage_2_version);
+#endif /* defined(TARGET_OS_OSX) && defined(__arm64__) */
+
 	paniclog_append_noflush("secure boot?: %s\n", debug_enabled ? "NO": "YES");
+	paniclog_append_noflush("roots installed: %lld\n", roots_installed);
 #if defined(XNU_TARGET_OS_BRIDGE)
 	paniclog_append_noflush("x86 EFI Boot State: ");
 	if (PE_smc_stashed_x86_efi_boot_state != 0xFF) {
@@ -479,6 +506,12 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 	} else {
 		paniclog_append_noflush("not available\n");
 	}
+	paniclog_append_noflush("macOS kernel slide: ");
+	if (PE_nvram_stashed_x86_macos_slide != UINT64_MAX) {
+		paniclog_append_noflush("%#llx\n", PE_nvram_stashed_x86_macos_slide);
+	} else {
+		paniclog_append_noflush("not available\n");
+	}
 #endif
 	if (panic_data_buffers != NULL) {
 		paniclog_append_noflush("%s data: ", panic_data_buffers->producer_name);
@@ -494,6 +527,7 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 	panic_display_times();
 	panic_display_zalloc();
 	panic_display_hung_cpus_help();
+	panic_display_tpidrs();
 	panic_display_pvhs_locked();
 	panic_display_pvh_to_lock();
 	panic_display_last_pc_lr();
@@ -614,6 +648,11 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 		    macosproductversion, macosversion);
 	}
 #endif
+	if (bootsessionuuid_string[0] != '\0') {
+		memcpy(panic_info->eph_bootsessionuuid_string, bootsessionuuid_string,
+		    sizeof(panic_info->eph_bootsessionuuid_string));
+	}
+	panic_info->eph_roots_installed = roots_installed;
 
 	if (debug_ack_timeout_count) {
 		panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_DEBUGGERSYNC;
@@ -638,7 +677,7 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 			    STACKSHOT_DISABLE_LATENCY_INFO | STACKSHOT_NO_IO_STATS | STACKSHOT_THREAD_WAITINFO | STACKSHOT_GET_DQ |
 			    STACKSHOT_COLLECT_SHAREDCACHE_LAYOUT);
 
-			err = kcdata_init_compress(&kc_panic_data, KCDATA_BUFFER_BEGIN_STACKSHOT, stackshot_memcpy, KCDCT_ZLIB);
+			err = kcdata_init_compress(&kc_panic_data, KCDATA_BUFFER_BEGIN_STACKSHOT, kdp_memcpy, KCDCT_ZLIB);
 			if (err != KERN_SUCCESS) {
 				panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_COMPRESS_FAILED;
 				stackshot_flags &= ~STACKSHOT_DO_COMPRESS;
@@ -774,6 +813,8 @@ SavePanicInfo(
 	 * early-boot panic there.
 	 */
 	while (!panic_info || panic_info->eph_panic_log_offset == 0) {
+		// rdar://87170225 (PanicHardening: audit panic code for naked spinloops)
+		// rdar://88094367 (Add test hooks for panic at different stages in XNU)
 		;
 	}
 
@@ -798,7 +839,7 @@ SavePanicInfo(
 	 */
 	if (PanicInfoSaved && (debug_buf_base >= (char*)gPanicBase) && (debug_buf_base < (char*)gPanicBase + gPanicSize)) {
 		unsigned int pi_size = (unsigned int)(debug_buf_ptr - gPanicBase);
-		PE_save_buffer_to_vram((unsigned char*)gPanicBase, &pi_size);
+		PE_update_panic_crc((unsigned char*)gPanicBase, &pi_size);
 		PE_sync_panic_buffers(); // extra precaution; panic path likely isn't reliable if we're here
 	}
 
@@ -842,7 +883,7 @@ paniclog_flush()
 	 * Updates the metadata at the beginning of the panic buffer,
 	 * updates the CRC.
 	 */
-	PE_save_buffer_to_vram((unsigned char *)gPanicBase, &panicbuf_length);
+	PE_update_panic_crc((unsigned char *)gPanicBase, &panicbuf_length);
 
 	/*
 	 * This is currently unused by platform KEXTs on embedded but is
@@ -851,20 +892,6 @@ paniclog_flush()
 	PESavePanicInfo((unsigned char *)gPanicBase, panicbuf_length);
 
 	PE_sync_panic_buffers();
-}
-
-/*
- * @function _was_in_userspace
- *
- * @abstract Unused function used to indicate that a CPU was in userspace
- * before it was IPI'd to enter the Debugger context.
- *
- * @discussion This function should never actually be called.
- */
-static void __attribute__((__noreturn__))
-_was_in_userspace(void)
-{
-	panic("%s: should not have been invoked.", __FUNCTION__);
 }
 
 /*
@@ -915,17 +942,10 @@ DebuggerXCallEnter(
 #pragma unused(is_stackshot)
 
 	/*
-	 * We need a barrier here to ensure CPUs see mp_kdp_trap and spin when responding
-	 * to the signal.
-	 */
-	__builtin_arm_dmb(DMB_ISH);
-
-	/*
 	 * Try to signal all CPUs (except ourselves, of course).  Use debugger_sync to
 	 * synchronize with every CPU that we appeared to signal successfully (cpu_signal
 	 * is not synchronous).
 	 */
-	bool cpu_signal_failed = false;
 	max_cpu = ml_get_max_cpu_number();
 
 	boolean_t immediate_halt = FALSE;
@@ -941,11 +961,11 @@ DebuggerXCallEnter(
 				continue;
 			}
 
-			if (KERN_SUCCESS == cpu_signal(target_cpu_datap, SIGPdebug, (void *)NULL, NULL)) {
+			kern_return_t ret = cpu_signal(target_cpu_datap, SIGPdebug, (void *)NULL, NULL);
+			if (ret == KERN_SUCCESS) {
 				os_atomic_inc(&debugger_sync, relaxed);
 				os_atomic_inc(&debug_cpus_spinning, relaxed);
-			} else {
-				cpu_signal_failed = true;
+			} else if (proceed_on_sync_failure) {
 				kprintf("cpu_signal failed in DebuggerXCallEnter\n");
 			}
 		}
@@ -970,9 +990,39 @@ DebuggerXCallEnter(
 		}
 	}
 
-	if (cpu_signal_failed && !proceed_on_sync_failure) {
-		DebuggerXCallReturn();
-		return KERN_FAILURE;
+	if (!proceed_on_sync_failure && (max_mabs_time > 0 && current_mabs_time >= max_mabs_time)) {
+		__builtin_arm_dmb(DMB_ISH);
+		for (cpu = 0; cpu <= max_cpu; cpu++) {
+			target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
+
+			if ((target_cpu_datap == NULL) || (target_cpu_datap == cpu_data_ptr)) {
+				continue;
+			}
+			if (!(target_cpu_datap->cpu_signal & SIGPdebug)) {
+				continue;
+			}
+			if (processor_array[cpu]->state <= PROCESSOR_PENDING_OFFLINE) {
+				/*
+				 * This is a processor that was successfully sent a SIGPdebug signal
+				 * but which hasn't acknowledged it because it went offline with
+				 * interrupts disabled before the IPI was delivered, so count it
+				 * here.
+				 */
+				os_atomic_dec(&debugger_sync, relaxed);
+				kprintf("%s>found CPU %d offline, debugger_sync=%d\n", __FUNCTION__, cpu, debugger_sync);
+				continue;
+			}
+
+			kprintf("%s>Debugger synch pending on cpu %d\n", __FUNCTION__, cpu);
+		}
+
+		if (debugger_sync == 0) {
+			return KERN_SUCCESS;
+		} else {
+			DebuggerXCallReturn();
+			kprintf("%s>returning KERN_OPERATION_TIMED_OUT\n", __FUNCTION__);
+			return KERN_OPERATION_TIMED_OUT;
+		}
 	} else if (immediate_halt || (max_mabs_time > 0 && current_mabs_time >= max_mabs_time)) {
 		/*
 		 * For the moment, we're aiming for a timeout that the user shouldn't notice,
@@ -1023,7 +1073,7 @@ DebuggerXCallEnter(
 			if (immediate_halt) {
 				paniclog_append_noflush("Immediate halt requested on all cores\n");
 			} else {
-				paniclog_append_noflush("Debugger synchronization timed out; waited %u nanoseconds\n",
+				paniclog_append_noflush("Debugger synchronization timed out; waited %llu nanoseconds\n",
 				    os_atomic_load(&debug_ack_timeout, relaxed));
 			}
 			debug_ack_timeout_count++;
@@ -1077,12 +1127,41 @@ DebuggerXCallReturn(
 	 * CPUS to update debugger_sync. If we time out, let's hope for all CPUs to be
 	 * spinning in a debugger-safe context
 	 */
-	while ((debug_cpus_spinning != 0) && (max_mabs_time == 0 || current_mabs_time < max_mabs_time)) {
+	while ((os_atomic_load_exclusive(&debug_cpus_spinning, relaxed) != 0) &&
+	    (max_mabs_time == 0 || current_mabs_time < max_mabs_time)) {
+		__builtin_arm_wfe();
 		current_mabs_time = mach_absolute_time();
 	}
+	os_atomic_clear_exclusive();
+}
 
-	/* Do we need a barrier here? */
-	__builtin_arm_dmb(DMB_ISH);
+extern void wait_while_mp_kdp_trap(bool check_SIGPdebug);
+/*
+ * Spin while mp_kdp_trap is set.
+ *
+ * processor_offline() calls this with check_SIGPdebug=true
+ * to break out of the spin loop if the cpu has SIGPdebug
+ * pending.
+ */
+void
+wait_while_mp_kdp_trap(bool check_SIGPdebug)
+{
+	bool found_mp_kdp_trap = false;
+	bool found_SIGPdebug = false;
+
+	while (os_atomic_load_exclusive(&mp_kdp_trap, relaxed) != 0) {
+		found_mp_kdp_trap = true;
+		if (check_SIGPdebug && cpu_has_SIGPdebug_pending()) {
+			found_SIGPdebug = true;
+			break;
+		}
+		__builtin_arm_wfe();
+	}
+	os_atomic_clear_exclusive();
+
+	if (check_SIGPdebug && found_mp_kdp_trap) {
+		kprintf("%s>found_mp_kdp_trap=true found_SIGPdebug=%s\n", __FUNCTION__, found_SIGPdebug ? "true" : "false");
+	}
 }
 
 void
@@ -1099,8 +1178,6 @@ DebuggerXCall(
 		current_cpu_datap()->ipi_lr = (uint64_t)get_saved_state_lr(regs);
 		current_cpu_datap()->ipi_fp = (uint64_t)get_saved_state_fp(regs);
 		save_context = PSR64_IS_KERNEL(get_saved_state_cpsr(regs));
-#else
-		save_context = PSR_IS_KERNEL(regs->cpsr);
 #endif
 	}
 
@@ -1114,25 +1191,13 @@ DebuggerXCall(
 		current_thread()->machine.kpcb = regs;
 	} else if (regs) {
 		/* zero old state so machine_trace_thread knows not to backtrace it */
-		register_t pc = (register_t)ptrauth_strip((void *)&_was_in_userspace, ptrauth_key_function_pointer);
 		state->fp = 0;
-		state->pc = pc;
+		state->pc_was_in_userspace = true;
 		state->lr = 0;
 		state->sp = 0;
-	}
-#else
-	arm_saved_state_t *state = (arm_saved_state_t *)kstackptr;
-
-	if (save_context) {
-		/* Save the interrupted context before acknowledging the signal */
-		copy_signed_thread_state(state, regs);
-	} else if (regs) {
-		/* zero old state so machine_trace_thread knows not to backtrace it */
-		register_t pc = (register_t)ptrauth_strip((void *)&_was_in_userspace, ptrauth_key_function_pointer);
-		set_saved_state_fp(state, 0);
-		set_saved_state_pc(state, pc);
-		set_saved_state_lr(state, 0);
-		set_saved_state_sp(state, 0);
+		state->ssbs = 0;
+		state->uao = 0;
+		state->dit = 0;
 	}
 #endif
 
@@ -1150,12 +1215,9 @@ DebuggerXCall(
 	}
 
 	os_atomic_dec(&debugger_sync, relaxed);
-	__builtin_arm_dmb(DMB_ISH);
 
 
-	while (mp_kdp_trap) {
-		;
-	}
+	wait_while_mp_kdp_trap(false);
 
 	/**
 	 * Alert the triggering CPU that this CPU is done spinning. The CPU that
@@ -1163,6 +1225,20 @@ DebuggerXCall(
 	 * all of the CPUs to exit the above loop before continuing.
 	 */
 	os_atomic_dec(&debug_cpus_spinning, relaxed);
+
+#if SCHED_HYGIENE_DEBUG
+	/*
+	 * We also abandon the measurement for preemption disable
+	 * timeouts, if any. Normally, time in interrupt handlers would be
+	 * subtracted from preemption disable time, and this will happen
+	 * up to this point here, but since we here "end" the interrupt
+	 * handler prematurely (from the point of view of interrupt masked
+	 * debugging), the time spinning would otherwise still be
+	 * attributed to preemption disable time, and potentially trigger
+	 * an event, which could be a panic.
+	 */
+	abandon_preemption_disable_measurement();
+#endif /* SCHED_HYGIENE_DEBUG */
 
 	if ((serialmode & SERIALMODE_OUTPUT) || stackshot_active()) {
 		INTERRUPT_MASKED_DEBUG_START(current_thread()->machine.int_handler_addr, current_thread()->machine.int_type);

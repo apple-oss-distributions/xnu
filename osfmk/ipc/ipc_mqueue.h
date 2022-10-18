@@ -88,7 +88,7 @@ struct ipc_object_waitq {
 };
 
 typedef struct ipc_mqueue {
-	struct ipc_kmsg_queue   imq_messages;
+	circle_queue_head_t     imq_messages;
 	mach_port_seqno_t       imq_seqno;
 	mach_port_name_t        imq_receiver_name;
 	uint16_t                imq_msgcount;
@@ -177,16 +177,19 @@ extern void ipc_mqueue_override_send_locked(
 /* Receive a message from a message queue */
 extern void ipc_mqueue_receive(
 	waitq_t                 waitq,
-	mach_msg_option_t       option,
+	mach_msg_option64_t     option64,
 	mach_msg_size_t         max_size,
+	mach_msg_size_t         max_aux_size,
 	mach_msg_timeout_t      timeout_val,
-	int                     interruptible);
+	int                     interruptible,
+	bool                    has_continuation);
 
 /* Receive a message from a message queue using a specified thread */
 extern wait_result_t ipc_mqueue_receive_on_thread_and_unlock(
 	waitq_t                 waitq,
-	mach_msg_option_t       option,
+	mach_msg_option64_t     option64,
 	mach_msg_size_t         max_size,
+	mach_msg_size_t         max_aux_size,
 	mach_msg_timeout_t      rcv_timeout,
 	int                     interruptible,
 	thread_t                thread);
@@ -199,8 +202,9 @@ extern void ipc_mqueue_receive_continue(
 /* Select a message from a queue and try to post it to ourself */
 extern void ipc_mqueue_select_on_thread_locked(
 	ipc_mqueue_t            port_mq,
-	mach_msg_option_t       option,
+	mach_msg_option64_t     option64,
 	mach_msg_size_t         max_size,
+	mach_msg_size_t         max_aux_size,
 	thread_t                thread);
 
 /* Peek into a messaqe queue to see if there are messages */
@@ -222,7 +226,7 @@ extern unsigned ipc_mqueue_peek_locked(
 	ipc_kmsg_t              *kmsgp);
 
 #if MACH_FLIPC
-/* Release an mqueue/port reference that was granted by MACH_PEEK_MSG */
+/* Release an mqueue/port reference that was granted by MACH64_PEEK_MSG */
 extern void ipc_mqueue_release_peek_ref(
 	ipc_mqueue_t            mqueue);
 #endif /* MACH_FLIPC */

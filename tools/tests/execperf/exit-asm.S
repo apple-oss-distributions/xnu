@@ -38,17 +38,6 @@ _sysenter_trap:
 	mov %esp, %ecx
 	sysenter
 	nop
-#elif defined(__arm__)
-	push	{ lr }
-	mov	r0, #42
-	mov	r12, #1
-	svc	0x00000080
-	bcc	1f
-1:	
-	nop
-	nop
-	nop
-	nop
 #elif defined(__arm64__)
 	movz	x0, #42
 	movz	x16, #1

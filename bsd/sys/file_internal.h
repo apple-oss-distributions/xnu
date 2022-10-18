@@ -72,6 +72,7 @@
 #include <sys/errno.h>
 #include <sys/queue.h>
 #include <sys/cdefs.h>
+#include <sys/constrained_ctypes.h>
 #include <sys/lock.h>
 #include <sys/file.h>
 #include <sys/filedesc.h>
@@ -127,7 +128,7 @@ struct fileproc {
 		struct fileproc_guard *fp_guard;  /* fp_guard_attrs != 0 */
 	};
 };
-
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct fileproc, fileproc);
 #define FILEPROC_NULL ((struct fileproc *)0)
 
 /* file types */
@@ -513,18 +514,20 @@ int fp_tryswap(proc_t, int fd, struct fileproc *nfp);
 int fp_drop(struct proc *p, int fd, struct fileproc *fp, int locked);
 void fp_free(struct proc * p, int fd, struct fileproc * fp);
 int fp_lookup(struct proc *p, int fd, struct fileproc **resultfp, int locked);
+int fp_lookup_guarded(struct proc *p, int fd, guardid_t guard, struct fileproc **resultfp, int locked);
 int fp_isguarded(struct fileproc *fp, u_int attribs);
 int fp_guard_exception(proc_t p, int fd, struct fileproc *fp, u_int attribs);
 struct nameidata;
 struct vnode_attr;
 int open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
     struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg,
-    int32_t *retval);
+    int32_t *retval, int authfd);
 int chdir_internal(proc_t p, vfs_context_t ctx, struct nameidata *ndp, int per_thread);
 int kqueue_internal(struct proc *p, fp_initfn_t, void *initarg, int32_t *retval);
 void procfdtbl_releasefd(struct proc * p, int fd, struct fileproc * fp);
 extern struct fileproc *fileproc_alloc_init(void);
 extern void fileproc_free(struct fileproc *fp);
+extern void guarded_fileproc_copy_guard(struct fileproc *ofp, struct fileproc *nfp);
 extern void guarded_fileproc_unguard(struct fileproc *fp);
 extern void fg_vn_data_free(void *fgvndata);
 extern int nameiat(struct nameidata *ndp, int dirfd);

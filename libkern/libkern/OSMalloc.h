@@ -43,7 +43,7 @@
 
 __BEGIN_DECLS
 
-#if PLATFORM_MacOSX
+#if XNU_PLATFORM_MacOSX
 
 /*!
  * @header
@@ -282,7 +282,7 @@ extern void OSFree(
 	uint32_t    size,
 	OSMallocTag tag);
 
-#endif /* PLATFORM_MacOSX */
+#endif /* XNU_PLATFORM_MacOSX */
 
 __END_DECLS
 

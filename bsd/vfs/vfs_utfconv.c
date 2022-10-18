@@ -458,7 +458,7 @@ utf8_decodestr(const u_int8_t* utf8p, size_t utf8len, u_int16_t* ucsp,
 	bufend = (u_int16_t *)((u_int8_t *)ucsp + buflen);
 
 	while (utf8len-- > 0 && (byte = *utf8p++) != '\0') {
-		if (ucsp >= bufend) {
+		if ((ucsp + 1) > bufend) {
 			goto toolong;
 		}
 

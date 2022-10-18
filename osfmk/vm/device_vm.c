@@ -73,11 +73,8 @@ const struct memory_object_pager_ops device_pager_ops = {
 	.memory_object_data_request = device_pager_data_request,
 	.memory_object_data_return = device_pager_data_return,
 	.memory_object_data_initialize = device_pager_data_initialize,
-	.memory_object_data_unlock = device_pager_data_unlock,
-	.memory_object_synchronize = device_pager_synchronize,
 	.memory_object_map = device_pager_map,
 	.memory_object_last_unmap = device_pager_last_unmap,
-	.memory_object_data_reclaim = NULL,
 	.memory_object_backing_object = NULL,
 	.memory_object_pager_name = "device pager"
 };
@@ -440,37 +437,12 @@ device_pager_data_initialize(
 }
 
 kern_return_t
-device_pager_data_unlock(
-	__unused memory_object_t                mem_obj,
-	__unused memory_object_offset_t offset,
-	__unused memory_object_size_t           size,
-	__unused vm_prot_t              desired_access)
-{
-	return KERN_FAILURE;
-}
-
-kern_return_t
 device_pager_terminate(
 	__unused memory_object_t        mem_obj)
 {
 	return KERN_SUCCESS;
 }
 
-
-
-/*
- *
- */
-kern_return_t
-device_pager_synchronize(
-	__unused memory_object_t        mem_obj,
-	__unused memory_object_offset_t offset,
-	__unused memory_object_size_t   length,
-	__unused vm_sync_t              sync_flags)
-{
-	panic("device_pager_synchronize: memory_object_synchronize no longer supported");
-	return KERN_FAILURE;
-}
 
 /*
  *

@@ -66,7 +66,6 @@
 #include <kern/ipc_kobject.h>
 #include <kern/task_ref.h>
 #include <ipc/ipc_space.h>
-#include <ipc/ipc_table.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_right.h>
 #include <ipc/ipc_entry.h>

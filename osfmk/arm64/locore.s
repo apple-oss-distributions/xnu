@@ -556,15 +556,15 @@ fleh_dispatch64:
 	mov		x26, #0
 #endif
 
-#if	!CONFIG_SKIP_PRECISE_USER_KERNEL_TIME || HAS_FAST_CNTVCT
+#if PRECISE_USER_KERNEL_TIME
 	tst		x23, PSR64_MODE_EL_MASK				// If any EL MODE bits are set, we're coming from
 	b.ne	1f									// kernel mode, so skip precise time update
 	PUSH_FRAME
-	bl		EXT(timer_state_event_user_to_kernel)
+	bl		EXT(recount_leave_user)
 	POP_FRAME
 	mov		x0, x21								// Reload arm_context_t pointer
 1:
-#endif  /* !CONFIG_SKIP_PRECISE_USER_KERNEL_TIME || HAS_FAST_CNTVCT */
+#endif /* PRECISE_USER_KERNEL_TIME */
 
 	/* Dispatch to FLEH */
 
@@ -808,8 +808,8 @@ LEXT(return_to_kernel)
 	msr		DAIFSet, #DAIFSC_ALL                    // Disable exceptions
 	cbnz	x1, exception_return_unint_tpidr_x3     // If preemption disabled, skip AST check
 	ldr		x1, [x3, ACT_CPUDATAP]                  // Get current CPU data pointer
-	ldr		x2, [x1, CPU_PENDING_AST]               // Get ASTs
-	tst		x2, AST_URGENT                          // If no urgent ASTs, skip ast_taken
+	ldr		w2, [x1, CPU_PENDING_AST]               // Get ASTs
+	tst		w2, AST_URGENT                          // If no urgent ASTs, skip ast_taken
 	b.eq	exception_return_unint_tpidr_x3
 	mov		sp, x21                                 // Switch to thread stack for preemption
 	PUSH_FRAME
@@ -822,6 +822,11 @@ LEXT(return_to_kernel)
 LEXT(thread_bootstrap_return)
 #if CONFIG_DTRACE
 	bl		EXT(dtrace_thread_bootstrap)
+#endif
+#if KASAN && CONFIG_KERNEL_TBI
+	PUSH_FRAME
+	bl		EXT(__asan_handle_no_return)
+	POP_FRAME
 #endif
 	b		EXT(arm64_thread_exception_return)
 
@@ -843,6 +848,11 @@ LEXT(arm64_thread_exception_return)
  * x28 is a bit indicating whether or not we should check if pc is in pfz */
 return_to_user:
 check_user_asts:
+#if KASAN && CONFIG_KERNEL_TBI
+	PUSH_FRAME
+	bl		EXT(__asan_handle_no_return)
+	POP_FRAME
+#endif
 	mrs		x3, TPIDR_EL1					// Load thread pointer
 
 	movn		w2, #0
@@ -855,8 +865,8 @@ check_user_asts:
 
 	msr		DAIFSet, #DAIFSC_ALL				// Disable exceptions
 	ldr		x4, [x3, ACT_CPUDATAP]				// Get current CPU data pointer
-	ldr		x0, [x4, CPU_PENDING_AST]			// Get ASTs
-	cbz		x0, no_asts							// If no asts, skip ahead
+	ldr		w0, [x4, CPU_PENDING_AST]			// Get ASTs
+	cbz		w0, no_asts							// If no asts, skip ahead
 
 	cbz		x28, user_take_ast					// If we don't need to check PFZ, just handle asts
 
@@ -887,13 +897,13 @@ restore_and_check_ast:
 no_asts:
 
 
-#if	!CONFIG_SKIP_PRECISE_USER_KERNEL_TIME || HAS_FAST_CNTVCT
+#if PRECISE_USER_KERNEL_TIME
 	mov		x19, x3						// Preserve thread pointer across function call
 	PUSH_FRAME
-	bl		EXT(timer_state_event_kernel_to_user)
+	bl		EXT(recount_enter_user)
 	POP_FRAME
 	mov		x3, x19
-#endif  /* !CONFIG_SKIP_PRECISE_USER_KERNEL_TIME || HAS_FAST_CNTVCT */
+#endif /* PRECISE_USER_KERNEL_TIME */
 
 #if (CONFIG_KERNEL_INTEGRITY && KERNEL_INTEGRITY_WT)
 	/* Watchtower
@@ -940,12 +950,6 @@ L_skip_user_set_debug_state:
 
 	b		exception_return_unint_tpidr_x3
 
-	//
-	// Fall through from return_to_user to exception_return.
-	// Note that if we move exception_return or add a new routine below
-	// return_to_user, the latter will have to change.
-	//
-
 exception_return:
 	msr		DAIFSet, #DAIFSC_ALL				// Disable exceptions
 exception_return_unint:
@@ -953,10 +957,27 @@ exception_return_unint:
 exception_return_unint_tpidr_x3:
 	mov		sp, x21						// Reload the pcb pointer
 
-exception_return_unint_tpidr_x3_dont_trash_x18:
+#if !__ARM_KERNEL_PROTECT__
+	/*
+	 * Restore x18 only if the task has the entitlement that allows
+	 * usage. Those are very few, and can move to something else
+	 * once we use x18 for something more global.
+	 *
+	 * This is not done here on devices with __ARM_KERNEL_PROTECT__, as
+	 * that uses x18 as one of the global use cases (and will reset
+	 * x18 later down below).
+	 *
+	 * It's also unconditionally skipped for translated threads,
+	 * as those are another use case, one where x18 must be preserved.
+	 */
+	ldr		w0, [x3, TH_ARM_MACHINE_FLAGS]
+	mov		x18, #0
+	tbz		w0, ARM_MACHINE_THREAD_PRESERVE_X18_SHIFT, Lexception_return_restore_registers
 
+exception_return_unint_tpidr_x3_restore_x18:
+	ldr		x18, [sp, SS64_X18]
 
-#if __ARM_KERNEL_PROTECT__
+#else /* !__ARM_KERNEL_PROTECT__ */
 	/*
 	 * If we are going to eret to userspace, we must return through the EL0
 	 * eret mapping.
@@ -974,7 +995,7 @@ exception_return_unint_tpidr_x3_dont_trash_x18:
 	br		x0
 
 Lskip_el0_eret_mapping:
-#endif /* __ARM_KERNEL_PROTECT__ */
+#endif /* !__ARM_KERNEL_PROTECT__ */
 
 Lexception_return_restore_registers:
 	mov 	x0, sp								// x0 = &pcb
@@ -1022,7 +1043,8 @@ Lexception_return_restore_registers:
 	ldp		x12, x13, [x0, SS64_X12]
 	ldp		x14, x15, [x0, SS64_X14]
 	// Skip x16, x17 - already loaded + authed by AUTH_THREAD_STATE_IN_X0
-	ldp		x18, x19, [x0, SS64_X18]
+	// Skip x18 - already restored or trashed above (below with __ARM_KERNEL_PROTECT__)
+	ldr		x19, [x0, SS64_X19]
 	ldp		x20, x21, [x0, SS64_X20]
 	ldp		x22, x23, [x0, SS64_X22]
 	ldp		x24, x25, [x0, SS64_X24]
@@ -1349,7 +1371,7 @@ Lno_preempt_underflow:
 	/* Lower the preemption count. */
 	sub		w12, w12, #1
 
-#if SCHED_PREEMPTION_DISABLE_DEBUG
+#if SCHED_HYGIENE_DEBUG
 	/* Collect preemption disable measurement if necessary. */
 
 	/* Only collect measurement if this reenabled preemption. */
@@ -1357,7 +1379,7 @@ Lno_preempt_underflow:
 	b.ne	Lskip_collect_measurement
 
 	/* Only collect measurement if a start time was set. */
-	ldr		x14, [x10, ACT_PREEMPT_ADJ_MT]
+	ldr		x14, [x10, ACT_PREEMPT_MT]
 	cmp		x14, #0
 	b.eq	Lskip_collect_measurement
 
@@ -1379,7 +1401,7 @@ Lno_preempt_underflow:
 	mrs		x10, TPIDR_EL1
 
 Lskip_collect_measurement:
-#endif /* SCHED_PREEMPTION_DISABLE_DEBUG */
+#endif /* SCHED_HYGIENE_DEBUG */
 
 	/* Save the lowered preemption count. */
 	str		w12, [x10, ACT_PREEMPT_CNT]
@@ -1396,8 +1418,8 @@ Lskip_collect_measurement:
 
 	/* IF there is no urgent AST, skip the AST. */
 	ldr		x12, [x10, ACT_CPUDATAP]
-	ldr		x14, [x12, CPU_PENDING_AST]
-	tst		x14, AST_URGENT
+	ldr		w14, [x12, CPU_PENDING_AST]
+	tst		w14, AST_URGENT
 	b.eq	Lppl_skip_ast_taken
 
 	/* Stash our return value and return reason. */

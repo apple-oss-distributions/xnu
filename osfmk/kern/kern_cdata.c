@@ -36,6 +36,7 @@
 #include <kern/task.h>
 #include <kern/kern_cdata.h>
 #include <kern/kalloc.h>
+#include <kern/ipc_kobject.h>
 #include <mach/mach_vm.h>
 
 static kern_return_t kcdata_get_memory_addr_with_flavor(kcdata_descriptor_t data, uint32_t type, uint32_t size, uint64_t flags, mach_vm_address_t *user_addr);
@@ -44,6 +45,7 @@ static kern_return_t kcdata_compress_chunk_with_flags(kcdata_descriptor_t data, 
 static kern_return_t kcdata_compress_chunk(kcdata_descriptor_t data, uint32_t type, const void *input_data, uint32_t input_size);
 static kern_return_t kcdata_write_compression_stats(kcdata_descriptor_t data);
 static kern_return_t kcdata_get_compression_stats(kcdata_descriptor_t data, uint64_t *totalout, uint64_t *totalin);
+static void kcdata_object_no_senders(ipc_port_t port, mach_port_mscount_t mscount);
 
 #ifndef ROUNDUP
 #define ROUNDUP(x, y)            ((((x)+(y)-1)/(y))*(y))
@@ -72,6 +74,199 @@ struct _uint32_with_description_data {
 };
 
 #pragma pack(pop)
+
+int _Atomic lw_corpse_obj_cnt = 0;
+
+IPC_KOBJECT_DEFINE(IKOT_KCDATA,
+    .iko_op_stable     = true,
+    .iko_op_no_senders = kcdata_object_no_senders);
+
+KALLOC_TYPE_DEFINE(KCDATA_OBJECT, struct kcdata_object, KT_DEFAULT);
+
+os_refgrp_decl(static, kcdata_object_refgrp, "kcdata_object", NULL);
+
+/* Grab a throttle slot for rate-limited kcdata object type(s) */
+kern_return_t
+kcdata_object_throttle_get(
+	kcdata_obj_flags_t flags)
+{
+	int oval, nval;
+
+	/* Currently only lightweight corpse is rate-limited */
+	assert(flags & KCDATA_OBJECT_TYPE_LW_CORPSE);
+	if (flags & KCDATA_OBJECT_TYPE_LW_CORPSE) {
+		os_atomic_rmw_loop(&lw_corpse_obj_cnt, oval, nval, relaxed, {
+			if (oval >= MAX_INFLIGHT_KCOBJECT_LW_CORPSE) {
+			        printf("Too many lightweight corpse in flight: %d\n", oval);
+			        os_atomic_rmw_loop_give_up(return KERN_RESOURCE_SHORTAGE);
+			}
+			nval = oval + 1;
+		});
+	}
+
+	return KERN_SUCCESS;
+}
+
+/* Release a throttle slot for rate-limited kcdata object type(s) */
+void
+kcdata_object_throttle_release(
+	kcdata_obj_flags_t flags)
+{
+	int oval, nval;
+
+	/* Currently only lightweight corpse is rate-limited */
+	assert(flags & KCDATA_OBJECT_TYPE_LW_CORPSE);
+	if (flags & KCDATA_OBJECT_TYPE_LW_CORPSE) {
+		os_atomic_rmw_loop(&lw_corpse_obj_cnt, oval, nval, relaxed, {
+			nval = oval - 1;
+			if (__improbable(nval < 0)) {
+			        os_atomic_rmw_loop_give_up(panic("Lightweight corpse kcdata object over-released"));
+			}
+		});
+	}
+}
+
+/*
+ * Create an object representation for the given kcdata.
+ *
+ * Captures kcdata descripter ref in object. If the object creation
+ * should be rate-limited, kcdata_object_throttle_get() must be called
+ * manually before invoking kcdata_create_object(), so as to save
+ * work (of creating the enclosed kcdata blob) if a throttled reference
+ * cannot be obtained in the first place.
+ */
+kern_return_t
+kcdata_create_object(
+	kcdata_descriptor_t data,
+	kcdata_obj_flags_t flags,
+	uint32_t        size,
+	kcdata_object_t *objp)
+{
+	kcdata_object_t obj;
+
+	if (data == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	obj = zalloc_flags(KCDATA_OBJECT, Z_ZERO | Z_WAITOK | Z_NOFAIL);
+
+	obj->ko_data = data;
+	obj->ko_flags = flags;
+	obj->ko_alloc_size = size;
+	obj->ko_port = IP_NULL;
+
+	os_ref_init_count(&obj->ko_refs, &kcdata_object_refgrp, 1);
+
+	*objp = obj;
+
+	return KERN_SUCCESS;
+}
+
+void
+kcdata_object_reference(kcdata_object_t obj)
+{
+	if (obj == KCDATA_OBJECT_NULL) {
+		return;
+	}
+
+	os_ref_retain(&obj->ko_refs);
+}
+
+static void
+kcdata_object_destroy(kcdata_object_t obj)
+{
+	void *begin_addr;
+	ipc_port_t port;
+	kcdata_obj_flags_t flags;
+
+	if (obj == KCDATA_OBJECT_NULL) {
+		return;
+	}
+
+	port = obj->ko_port;
+	flags = obj->ko_flags;
+
+	/* Release the port */
+	if (IP_VALID(port)) {
+		ipc_kobject_dealloc_port(port, 0, IKOT_KCDATA);
+	}
+
+	/* Release the ref for rate-limited kcdata object type(s) */
+	kcdata_object_throttle_release(flags);
+
+	/* Destroy the kcdata backing captured in the object */
+	begin_addr = kcdata_memory_get_begin_addr(obj->ko_data);
+	kfree_data(begin_addr, obj->ko_alloc_size);
+	kcdata_memory_destroy(obj->ko_data);
+
+	/* Free the object */
+	zfree(KCDATA_OBJECT, obj);
+}
+
+void
+kcdata_object_release(kcdata_object_t obj)
+{
+	if (obj == KCDATA_OBJECT_NULL) {
+		return;
+	}
+
+	if (os_ref_release(&obj->ko_refs) > 0) {
+		return;
+	}
+	/* last ref */
+
+	kcdata_object_destroy(obj);
+}
+
+/* Produces kcdata object ref */
+kcdata_object_t
+convert_port_to_kcdata_object(ipc_port_t port)
+{
+	kcdata_object_t obj = KCDATA_OBJECT_NULL;
+
+	if (IP_VALID(port)) {
+		obj = ipc_kobject_get_stable(port, IKOT_KCDATA);
+		if (obj != KCDATA_OBJECT_NULL) {
+			zone_require(KCDATA_OBJECT->kt_zv.zv_zone, obj);
+			kcdata_object_reference(obj);
+		}
+	}
+
+	return obj;
+}
+
+/* Consumes kcdata object ref */
+ipc_port_t
+convert_kcdata_object_to_port(kcdata_object_t obj)
+{
+	if (obj == KCDATA_OBJECT_NULL) {
+		return IP_NULL;
+	}
+
+	zone_require(KCDATA_OBJECT->kt_zv.zv_zone, obj);
+
+	if (!ipc_kobject_make_send_lazy_alloc_port(&obj->ko_port,
+	    obj, IKOT_KCDATA, IPC_KOBJECT_ALLOC_NONE)) {
+		kcdata_object_release(obj);
+	}
+	/* object ref consumed */
+
+	return obj->ko_port;
+}
+
+static void
+kcdata_object_no_senders(
+	ipc_port_t port,
+	__unused mach_port_mscount_t mscount)
+{
+	kcdata_object_t obj;
+
+	obj = ipc_kobject_get_stable(port, IKOT_KCDATA);
+	assert(obj != KCDATA_OBJECT_NULL);
+
+	/* release the ref given by no-senders notification */
+	kcdata_object_release(obj);
+}
 
 /*
  * Estimates how large of a buffer that should be allocated for a buffer that will contain

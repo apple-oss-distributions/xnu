@@ -38,7 +38,8 @@
 .Os BSD 4.2
 .Sh NAME
 .Nm readlink ,
-.Nm readlinkat
+.Nm readlinkat ,
+.Nm freadlink
 .Nd read value of a symbolic link
 .Sh SYNOPSIS
 .Fd #include <unistd.h>
@@ -51,6 +52,10 @@
 .Ft ssize_t
 .Fo readlinkat
 .Fa "int fd" "const char *restrict path" "char *restrict buf" "size_t bufsize"
+.Fc
+.Ft ssize_t
+.Fo freadlink
+.Fa "int fd" "char *restrict buf" "size_t bufsize"
 .Fc
 .Sh DESCRIPTION
 .Fn readlink
@@ -86,6 +91,10 @@ in the
 parameter, the current working directory is used and the behavior is
 identical to a call to
 .Fn readlink .
+The
+.Fn freadlink
+system call returns the same information about an open symbolic link file referenced by descriptor 
+.Fa fd .
 .Sh RETURN VALUES
 The call returns the count of characters placed in the buffer
 if it succeeds, or a -1 if an error occurs, placing the error
@@ -182,4 +191,7 @@ function call appeared in
 .Bx 4.2 .
 The
 .Fn readlinkat
-system call appeared in OS X 10.10
+system call appeared in OS X 10.10.
+The
+.Fn freadlink
+system call appeared in macOS 13.0.

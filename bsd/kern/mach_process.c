@@ -171,6 +171,8 @@ retry_trace_me: ;
 		if (pproc == NULL) {
 			return EINVAL;
 		}
+		/* holding ref on pproc */
+
 #if CONFIG_MACF
 		/*
 		 * NB: Cannot call kauth_authorize_process(..., KAUTH_PROCESS_CANTRACE, ...)
@@ -182,6 +184,7 @@ retry_trace_me: ;
 		struct proc_ident pproc_ident = proc_ident(pproc);
 		kauth_cred_t pproc_cred = kauth_cred_proc_ref(pproc);
 
+		/* Release pproc and find it again after MAC call to avoid deadlock */
 		proc_rele(pproc);
 		error = mac_proc_check_debug(&pproc_ident, pproc_cred, &p_ident);
 		kauth_cred_unref(&pproc_cred);
@@ -192,12 +195,13 @@ retry_trace_me: ;
 		if (proc_find_ident(&pproc_ident) == PROC_NULL) {
 			return ESRCH;
 		}
+		/* re-holding ref on pproc */
 #endif
 		proc_lock(p);
 		/* Make sure the process wasn't re-parented. */
 		if (p->p_ppid != proc_getpid(pproc)) {
 			proc_unlock(p);
-			proc_rele(pproc);
+			proc_rele(pproc);  /* pproc ref released */
 			goto retry_trace_me;
 		}
 		SET(p->p_lflag, P_LTRACED);
@@ -207,7 +211,7 @@ retry_trace_me: ;
 		/* Child and parent will have to be able to run modified code. */
 		cs_allow_invalid(p);
 		cs_allow_invalid(pproc);
-		proc_rele(pproc);
+		proc_rele(pproc);  /* pproc ref released */
 
 		return error;
 	}
@@ -230,6 +234,7 @@ retry_trace_me: ;
 		return EPERM;
 	}
 
+retry_proc_find:
 	/*
 	 *	Locate victim, and make sure it is traceable.
 	 */
@@ -237,9 +242,16 @@ retry_trace_me: ;
 		return ESRCH;
 	}
 
+	/* Check if the proc has trace wait flag set */
+	if (t->p_lflag & P_LTRACE_WAIT) {
+		proc_rele(t);
+		delay(1);
+		goto retry_proc_find;
+	}
+
 	AUDIT_ARG(process, t);
 
-	task = t->task;
+	task = proc_task(t);
 	if (uap->req == PT_ATTACHEXC) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -248,7 +260,7 @@ retry_trace_me: ;
 	}
 	if (uap->req == PT_ATTACH) {
 #pragma clang diagnostic pop
-		int             err;
+		int             err, cb_err;
 
 #if !defined(XNU_TARGET_OS_OSX)
 		if (tr_sigexc == 0) {
@@ -258,7 +270,7 @@ retry_trace_me: ;
 #endif
 
 		err = kauth_authorize_process(kauth_cred_get(), KAUTH_PROCESS_CANTRACE,
-		    t, (uintptr_t)&err, 0, 0);
+		    t, (uintptr_t)&cb_err, 0, 0);
 
 		if (err == 0) {
 			/* it's OK to attach */
@@ -296,7 +308,7 @@ retry_trace_me: ;
 			error = 0;
 			goto out;
 		} else {
-			error = err;
+			error = cb_err;
 			if (error == ESRCH) {
 				/*
 				 * The target 't' is not valid anymore as it
@@ -509,7 +521,6 @@ int
 cantrace(proc_t cur_procp, kauth_cred_t creds, proc_t traced_procp, int *errp)
 {
 	int             my_err;
-	kauth_cred_t    traced_cred;
 	/*
 	 * You can't trace a process if:
 	 *	(1) it's the process that's doing the tracing,
@@ -527,19 +538,23 @@ cantrace(proc_t cur_procp, kauth_cred_t creds, proc_t traced_procp, int *errp)
 		return 0;
 	}
 
-	/*
-	 *	(3) it's not owned by you, or is set-id on exec
-	 *	    (unless you're root).
-	 */
-	traced_cred = kauth_cred_proc_ref(traced_procp);
-	if ((kauth_cred_getruid(creds) != kauth_cred_getruid(traced_cred) ||
-	    ISSET(traced_procp->p_flag, P_SUGID)) &&
-	    (my_err = suser(creds, &cur_procp->p_acflag)) != 0) {
+	if (!proc_is_third_party_debuggable_driver(traced_procp)) {
+		kauth_cred_t    traced_cred;
+
+		/*
+		 *	(3) it's not owned by you, or is set-id on exec
+		 *	    (unless you're root).
+		 */
+		traced_cred = kauth_cred_proc_ref(traced_procp);
+		if ((kauth_cred_getruid(creds) != kauth_cred_getruid(traced_cred) ||
+		    ISSET(traced_procp->p_flag, P_SUGID)) &&
+		    (my_err = suser(creds, &cur_procp->p_acflag)) != 0) {
+			kauth_cred_unref(&traced_cred);
+			*errp = my_err;
+			return 0;
+		}
 		kauth_cred_unref(&traced_cred);
-		*errp = my_err;
-		return 0;
 	}
-	kauth_cred_unref(&traced_cred);
 
 	if ((cur_procp->p_lflag & P_LTRACED) && isinferior(cur_procp, traced_procp)) {
 		*errp = EPERM;
@@ -568,6 +583,7 @@ cantrace(proc_t cur_procp, kauth_cred_t creds, proc_t traced_procp, int *errp)
 		*errp = ESRCH;
 		return 0;
 	}
+	/* restored ref on traced_procp */
 	if (my_err != 0) {
 		*errp = my_err;
 		return 0;

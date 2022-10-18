@@ -69,26 +69,19 @@
  *	Declarations for letting a port represent a kernel object.
  */
 
+#ifndef _KERN_IPC_KOBJECT_H_
+#define _KERN_IPC_KOBJECT_H_
+
 #ifdef MACH_KERNEL_PRIVATE
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_port.h>
 #include <kern/startup.h>
 #endif /* MACH_KERNEL_PRIVATE */
-
-#ifndef _KERN_IPC_KOBJECT_H_
-#define _KERN_IPC_KOBJECT_H_
-
-__BEGIN_DECLS
-
-#ifdef KERNEL_PRIVATE
-/*
- * This is the legacy in-kernel ipc-object mechanism.  Over the next
- * several months, this will be phased out in favor of a mechanism that
- * is less Mach IPC specific, and common across in-mach, in-kernel-component,
- * and user-level-component (Plugin) models.
- */
 #include <mach/machine/vm_types.h>
 #include <mach/mach_types.h>
+
+__BEGIN_DECLS
+#pragma GCC visibility push(hidden)
 
 __enum_decl(ipc_kotype_t, natural_t, {
 	IKOT_NONE                     = 0,
@@ -107,23 +100,23 @@ __enum_decl(ipc_kotype_t, natural_t, {
 	// IKOT_XMM_KERNEL            = 13,
 	// IKOT_XMM_REPLY             = 14,
 	IKOT_UND_REPLY                = 15,
-	IKOT_HOST_NOTIFY              = 16,
+	// IKOT_HOST_NOTIFY           = 16,
 	// IKOT_HOST_SECURITY         = 17,
 	// IKOT_LEDGER                = 18,
-	IKOT_MASTER_DEVICE            = 19,
+	IKOT_MAIN_DEVICE              = 19,
 	IKOT_TASK_NAME                = 20,
 	// IKOT_SUBSYSTEM             = 21,
 	// IKOT_IO_DONE_QUEUE         = 22,
 	IKOT_SEMAPHORE                = 23,
 	// IKOT_LOCK_SET              = 24,
 	IKOT_CLOCK                    = 25,
-	IKOT_CLOCK_CTRL               = 26,
+	// IKOT_CLOCK_CTRL            = 26,
 	IKOT_IOKIT_IDENT              = 27,
 	IKOT_NAMED_ENTRY              = 28,
 	IKOT_IOKIT_CONNECT            = 29,
 	IKOT_IOKIT_OBJECT             = 30,
 	// IKOT_UPL                   = 31,
-	IKOT_MEM_OBJ_CONTROL          = 32,
+	// IKOT_MEM_OBJ_CONTROL       = 32,
 #if CONFIG_AUDIT
 	IKOT_AU_SESSIONPORT           = 33,
 #endif
@@ -131,7 +124,7 @@ __enum_decl(ipc_kotype_t, natural_t, {
 	// IKOT_LABELH                = 35,
 	IKOT_TASK_RESUME              = 36,
 	IKOT_VOUCHER                  = 37,
-	IKOT_VOUCHER_ATTR_CONTROL     = 38,
+	// IKOT_VOUCHER_ATTR_CONTROL  = 38,
 	IKOT_WORK_INTERVAL            = 39,
 	IKOT_UX_HANDLER               = 40,
 	IKOT_UEXT_OBJECT              = 41,
@@ -149,6 +142,8 @@ __enum_decl(ipc_kotype_t, natural_t, {
 #if CONFIG_PROC_RESOURCE_LIMITS
 	IKOT_TASK_FATAL               = 51,
 #endif
+	IKOT_KCDATA                   = 52,
+
 	/* magic catch-all; should be the last entry */
 	IKOT_UNKNOWN,
 });
@@ -167,9 +162,7 @@ extern kern_return_t ipc_kobject_set_kobjidx(
 	int                         msgid,
 	int                         index);
 
-#endif /* KERNEL_PRIVATE */
 #ifdef MACH_KERNEL_PRIVATE
-#pragma GCC visibility push(hidden)
 
 /*!
  * @typedef ipc_kobject_ops_t
@@ -179,9 +172,6 @@ extern kern_return_t ipc_kobject_set_kobjidx(
  *
  * @field iko_ko_type
  * An @c IKOT_* value.
- *
- * @field iko_op_allow_upgrade
- * Whether this kobject type is made (upgraded) rather than born.
  *
  * @field iko_op_stable
  * The kobject/port association is stable:
@@ -215,7 +205,6 @@ extern kern_return_t ipc_kobject_set_kobjidx(
 typedef const struct ipc_kobject_ops {
 	ipc_kobject_type_t iko_op_type;
 	unsigned long
-	    iko_op_allow_upgrade : 1,
 	    iko_op_stable        : 1,
 	    iko_op_permanent     : 1;
 	const char        *iko_op_name;
@@ -253,8 +242,6 @@ __options_decl(ipc_kobject_alloc_options_t, uint32_t, {
 	IPC_KOBJECT_ALLOC_LABEL     = 0x00000010,
 	/* Mark the port as pinned (non dealloc-able) in an ipc space */
 	IPC_KOBJECT_ALLOC_PINNED    = 0x00000020,
-	/* Use ptrauth_discriminator in ipc_kobject_make_send_lazy_alloc_port */
-	IPC_KOBJECT_PTRAUTH_STORE   = 0x00000040,
 });
 
 /* Allocates a kobject port, never fails */
@@ -274,12 +261,11 @@ extern ipc_port_t ipc_kobject_alloc_subst_once(
 	ipc_port_t                  target);
 
 /* Makes a send right, lazily allocating a kobject port, arming for no-senders, never fails */
-extern boolean_t ipc_kobject_make_send_lazy_alloc_port(
+extern bool ipc_kobject_make_send_lazy_alloc_port(
 	ipc_port_t                 *port_store,
 	ipc_kobject_t               kobject,
 	ipc_kobject_type_t          type,
-	ipc_kobject_alloc_options_t alloc_opts,
-	uint64_t                    ptrauth_discriminator) __result_use_check;
+	ipc_kobject_alloc_options_t alloc_opts);
 
 /* Makes a send right, lazily allocating a kobject port, arming for no-senders, never fails */
 extern boolean_t ipc_kobject_make_send_lazy_alloc_labeled_port(
@@ -293,9 +279,84 @@ extern kern_return_t ipc_kobject_nsrequest(
 	mach_port_mscount_t         sync,
 	mach_port_mscount_t        *mscount) __result_use_check;
 
-/* Makes a send right, and arms no-senders */
+/*!
+ * @function ipc_kobject_copy_send()
+ *
+ * @brief
+ * Copies a naked send right for the specified kobject port.
+ *
+ * @decription
+ * This function will validate that the specified port is pointing
+ * to the expected kobject pointer and type (by calling ipc_kobject_require()).
+ *
+ * @param port          The target port.
+ * @param kobject       The kobject pointer this port should be associated to.
+ * @param kotype        The kobject type this port should have.
+ *
+ * @returns
+ * - IP_DEAD            if @c port was dead.
+ * - @c port            if @c port was valid, in which case
+ *                      a naked send right was made.
+ */
+extern ipc_port_t ipc_kobject_copy_send(
+	ipc_port_t                  port,
+	ipc_kobject_t               kobject,
+	ipc_kobject_type_t          kotype) __result_use_check;
+
+/*!
+ * @function ipc_kobject_make_send()
+ *
+ * @brief
+ * Makes a naked send right for the specified kobject port.
+ *
+ * @decription
+ * @see ipc_port_make_send_any_locked() for a general warning about
+ * making send rights.
+ *
+ * This function will validate that the specified port is pointing
+ * to the expected kobject pointer and type (by calling ipc_kobject_require()).
+ *
+ * @param port          The target port.
+ * @param kobject       The kobject pointer this port should be associated to.
+ * @param kotype        The kobject type this port should have.
+ *
+ * @returns
+ * - IP_DEAD            if @c port was dead.
+ * - @c port            if @c port was valid, in which case
+ *                      a naked send right was made.
+ */
+extern ipc_port_t ipc_kobject_make_send(
+	ipc_port_t                  port,
+	ipc_kobject_t               kobject,
+	ipc_kobject_type_t          kotype) __result_use_check;
+
+/*!
+ * @function ipc_kobject_make_send_nsrequest()
+ *
+ * @brief
+ * Makes a naked send right for the specified kobject port,
+ * and arms no-more-senders if it wasn't already.
+ *
+ * @decription
+ * @see ipc_port_make_send_any_locked() for a general warning about
+ * making send rights.
+ *
+ * This function will validate that the specified port is pointing
+ * to the expected kobject pointer and type (by calling ipc_kobject_require()).
+ *
+ * @param port          The target port.
+ * @param kobject       The kobject pointer this port should be associated to.
+ * @param kotype        The kobject type this port should have.
+ *
+ * @returns
+ * - KERN_SUCCESS:           the notification was armed
+ * - KERN_ALREADY_WAITING:   the notification was already armed
+ * - KERN_INVALID_RIGHT:     the port is dead
+ */
 extern kern_return_t ipc_kobject_make_send_nsrequest(
-	ipc_port_t                  port) __result_use_check;
+	ipc_port_t                  port,
+	ipc_kobject_t               kobject,
+	ipc_kobject_type_t          kotype) __result_use_check;
 
 extern ipc_kobject_t ipc_kobject_dealloc_port_and_unlock(
 	ipc_port_t                  port,
@@ -311,6 +372,30 @@ extern void         ipc_kobject_enable(
 	ipc_port_t                  port,
 	ipc_kobject_t               kobject,
 	ipc_kobject_type_t          type);
+
+/*!
+ * @function ipc_kobject_require()
+ *
+ * @brief
+ * Asserts that a given port is of the specified type
+ * with the expected kobject pointer.
+ *
+ * @decription
+ * Port type confusion can lead to catastrophic system compromise,
+ * this function can be used in choke points to ensure ports are
+ * what they're expected to be before their use.
+ *
+ * @note It is allowed for the kobject pointer to be NULL,
+ *       as in some cases ipc_kobject_disable() can be raced with this check.
+ *
+ * @param port          The target port.
+ * @param kobject       The kobject pointer this port should be associated to.
+ * @param kotype        The kobject type this port should have.
+ */
+extern void         ipc_kobject_require(
+	ipc_port_t                  port,
+	ipc_kobject_t               kobject,
+	ipc_kobject_type_t          kotype);
 
 extern ipc_kobject_t ipc_kobject_get_raw(
 	ipc_port_t                  port,
@@ -332,17 +417,12 @@ extern ipc_kobject_t ipc_kobject_disable(
 	ipc_port_t                  port,
 	ipc_kobject_type_t          type);
 
-extern void         ipc_kobject_upgrade_locked(
+extern void         ipc_kobject_upgrade_mktimer_locked(
 	ipc_port_t                  port,
-	ipc_kobject_t               kobject,
-	ipc_kobject_type_t          type);
+	ipc_kobject_t               kobject);
 
-extern kern_return_t ipc_kobject_upgrade(
-	ipc_port_t                  port,
-	ipc_kobject_t               kobject,
-	ipc_kobject_type_t          type) __result_use_check;
-
-extern ipc_kobject_t ipc_kobject_downgrade_host_notify(
+/* in mk_timer.c */
+extern void         ipc_kobject_mktimer_require_locked(
 	ipc_port_t                  port);
 
 /* Check if a kobject can be copied out to a given space */
@@ -402,9 +482,9 @@ extern kern_return_t uext_server(
 	ipc_kmsg_t                  request,
 	ipc_kmsg_t                  *reply);
 
-#pragma GCC visibility pop
 #endif /* MACH_KERNEL_PRIVATE */
 
+#pragma GCC visibility pop
 __END_DECLS
 
 #endif /* _KERN_IPC_KOBJECT_H_ */

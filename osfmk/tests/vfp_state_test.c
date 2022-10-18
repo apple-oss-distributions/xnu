@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -30,6 +30,7 @@
 #error "Testing is not enabled on RELEASE configurations"
 #endif
 
+#if defined(__arm64__)
 #include <tests/xnupost.h>
 #include <kern/kalloc.h>
 #include <kern/clock.h>
@@ -40,15 +41,9 @@
 #define VFP_STATE_TEST_N_REGS                   8
 #define VFP_STATE_TEST_N_ITER                   100
 #define VFP_STATE_TEST_DELAY_USEC               10000
-#if __arm__
-#define VFP_STATE_TEST_NZCV_SHIFT               28
-#define VFP_STATE_TEST_NZCV_MAX                 16
-#else
 #define VFP_STATE_TEST_RMODE_STRIDE_SHIFT       20
 #define VFP_STATE_TEST_RMODE_STRIDE_MAX         16
-#endif
 
-#if __ARM_VFP__
 extern kern_return_t vfp_state_test(void);
 
 const uint64_t vfp_state_test_regs[VFP_STATE_TEST_N_REGS] = {
@@ -60,11 +55,8 @@ const uint64_t vfp_state_test_regs[VFP_STATE_TEST_N_REGS] = {
 
 struct vfp_state_test_args {
 	uint64_t vfp_reg_rand;
-#if __arm__
-	uint32_t fp_control_mask;
-#else
 	uint64_t fp_control_mask;
-#endif
+
 	int result;
 	int *start_barrier;
 	int *end_barrier;
@@ -103,11 +95,8 @@ vfp_state_test_thread_routine(void *args, __unused wait_result_t wr)
 	struct vfp_state_test_args *vfp_state_test_args = (struct vfp_state_test_args *)args;
 	uint64_t *vfp_regs, *vfp_regs_expected;
 	int retval;
-#if __arm__
-	uint32_t fp_control, fp_control_expected;
-#else
 	uint64_t fp_control, fp_control_expected;
-#endif
+
 
 	vfp_state_test_args->result = -1;
 
@@ -124,24 +113,6 @@ vfp_state_test_thread_routine(void *args, __unused wait_result_t wr)
 		vfp_regs_expected[i] ^= vfp_state_test_args->vfp_reg_rand;
 	}
 
-#if __arm__
-	asm volatile ("vldr d8, [%0, #0] \t\n vldr d9, [%0, #8] \t\n\
-				   vldr d10, [%0, #16] \t\n vldr d11, [%0, #24] \t\n\
-				   vldr d12, [%0, #32] \t\n vldr d13, [%0, #40] \t\n\
-				   vldr d14, [%0, #48] \t\n vldr d15, [%0, #56]" \
-                                   : : "r"(vfp_regs_expected) : \
-                                   "memory", "d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15");
-
-	/*
-	 * Set FPSCR to a known value, so we can validate the save/restore path.
-	 * Only touch NZCV flags, since 1) writing them does not have visible side-effects
-	 * and 2) they're only set by the CPU as a result of executing an FP comparison,
-	 * which do not exist in this function.
-	 */
-	asm volatile ("fmrx	%0, fpscr" : "=r"(fp_control_expected));
-	fp_control_expected |= vfp_state_test_args->fp_control_mask;
-	asm volatile ("fmxr	fpscr, %0" : : "r"(fp_control_expected));
-#else
 	asm volatile ("ldr d8, [%0, #0] \t\n ldr d9, [%0, #8] \t\n\
 				   ldr d10, [%0, #16] \t\n ldr d11, [%0, #24] \t\n\
 				   ldr d12, [%0, #32] \t\n ldr d13, [%0, #40] \t\n\
@@ -152,7 +123,6 @@ vfp_state_test_thread_routine(void *args, __unused wait_result_t wr)
 	asm volatile ("mrs	%0, fpcr" : "=r"(fp_control_expected));
 	fp_control_expected |= vfp_state_test_args->fp_control_mask;
 	asm volatile ("msr	fpcr, %0" : : "r"(fp_control_expected));
-#endif
 
 	/* Make sure all threads start at roughly the same time */
 	wake_threads(vfp_state_test_args->start_barrier);
@@ -162,21 +132,12 @@ vfp_state_test_thread_routine(void *args, __unused wait_result_t wr)
 	for (int i = 0; i < VFP_STATE_TEST_N_ITER; i++) {
 		bzero(vfp_regs, sizeof(vfp_state_test_regs));
 
-#if __arm__
-		asm volatile ("vstr d8, [%0, #0] \t\n vstr d9, [%0, #8] \t\n\
-					   vstr d10, [%0, #16] \t\n vstr d11, [%0, #24] \t\n\
-					   vstr d12, [%0, #32] \t\n vstr d13, [%0, #40] \t\n\
-					   vstr d14, [%0, #48] \t\n vstr d15, [%0, #56]" \
-                                           : : "r"(vfp_regs) : "memory");
-		asm volatile ("fmrx	%0, fpscr" : "=r"(fp_control));
-#else
 		asm volatile ("str d8, [%0, #0] \t\n str d9, [%0, #8] \t\n\
 					   str d10, [%0, #16] \t\n str d11, [%0, #24] \t\n\
 					   str d12, [%0, #32] \t\n str d13, [%0, #40] \t\n\
 					   str d14, [%0, #48] \t\n str d15, [%0, #56]" \
                                            : : "r"(vfp_regs) : "memory");
 		asm volatile ("mrs	%0, fpcr" : "=r"(fp_control));
-#endif
 
 		retval = bcmp(vfp_regs, vfp_regs_expected, sizeof(vfp_state_test_regs));
 		if ((retval != 0) || (fp_control != fp_control_expected)) {
@@ -214,11 +175,7 @@ vfp_state_test(void)
 	for (int i = 0; i < VFP_STATE_TEST_N_THREADS; i++) {
 		vfp_state_test_args[i].start_barrier = &start_barrier;
 		vfp_state_test_args[i].end_barrier = &end_barrier;
-#if __arm__
-		vfp_state_test_args[i].fp_control_mask = (i % VFP_STATE_TEST_NZCV_MAX) << VFP_STATE_TEST_NZCV_SHIFT;
-#else
 		vfp_state_test_args[i].fp_control_mask = (i % VFP_STATE_TEST_RMODE_STRIDE_MAX) << VFP_STATE_TEST_RMODE_STRIDE_SHIFT;
-#endif
 		read_random(&vfp_state_test_args[i].vfp_reg_rand, sizeof(uint64_t));
 
 		retval = kernel_thread_start((thread_continue_t)vfp_state_test_thread_routine,
@@ -238,4 +195,4 @@ vfp_state_test(void)
 
 	return KERN_SUCCESS;
 }
-#endif /* __ARM_VFP__ */
+#endif /* defined(__arm64__) */

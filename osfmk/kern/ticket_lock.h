@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -32,16 +32,15 @@
 #ifndef __ASSEMBLER__
 #include <kern/lock_types.h>
 #include <kern/lock_group.h>
+#if XNU_KERNEL_PRIVATE
+#include <kern/counter.h>
+#endif /* XNU_KERNEL_PRIVATE */
 #endif /* __ASSEMBLER__ */
 
-/*
- * TODO <rdar://problem/72157773>. We do not need to make
- * the header available only to KERNEL_PRIVATE.
- */
-#if KERNEL_PRIVATE
 #ifndef __ASSEMBLER__
 
 __BEGIN_DECLS
+#pragma GCC visibility push(hidden)
 
 #ifdef MACH_KERNEL_PRIVATE
 
@@ -53,8 +52,8 @@ __BEGIN_DECLS
  * @c lck_ticket_t provides a higher level abstraction
  * that also provides thread ownership information.
  *
- * This lock is meant to be exactly 32bits to be able to replace
- * hw_lock_bit_t locks when needed.
+ * This is a low level lock meant to be part of data structures
+ * that are very constrained on space, or is part of a larger lock.
  *
  * This lower level interface supports an @c *_allow_invalid()
  * to implement advanced memory reclamation schemes using sequestering.
@@ -118,8 +117,10 @@ __BEGIN_DECLS
  */
 typedef union {
 	struct {
-		uint8_t lck_type;
-		uint8_t lck_valid;
+		uint8_t         lck_type;
+		uint8_t         lck_valid  : 1;
+		uint8_t         lck_is_pv  : 1;
+		uint8_t         lck_unused : 6;
 		union {
 			struct {
 				uint8_t cticket;
@@ -139,90 +140,234 @@ typedef union {
  * like other kernel locks, which admits thread ownership information.
  */
 typedef struct {
-	union {
-		uintptr_t lck_owner __kernel_data_semantics;
-		uintptr_t lck_tag __kernel_data_semantics;
-	};
-	hw_lck_ticket_t tu;
+	uint32_t                __lck_ticket_unused : 24;
+	uint32_t                lck_ticket_type     :  8;
+	uint32_t                lck_ticket_padding;
+	hw_lck_ticket_t         tu;
+	uint32_t                lck_ticket_owner;
 } lck_ticket_t;
 
-#define LCK_TICKET_TYPE                 0x44
-#define LCK_TICKET_TAG_DESTROYED        0xdead
+#else /* !MACH_KERNEL_PRIVATE */
 
-#pragma GCC visibility push(hidden)
+typedef struct {
+	uint32_t                opaque0;
+	uint32_t                opaque1;
+	uint32_t                opaque2;
+	uint32_t                opaque3;
+} lck_ticket_t;
 
-void hw_lck_ticket_init(hw_lck_ticket_t * tlock LCK_GRP_ARG(lck_grp_t *grp));
-void hw_lck_ticket_init_locked(hw_lck_ticket_t * tlock LCK_GRP_ARG(lck_grp_t *grp));
-void hw_lck_ticket_destroy(hw_lck_ticket_t * tlock LCK_GRP_ARG(lck_grp_t *grp));
+#endif /* !MACH_KERNEL_PRIVATE */
+#if MACH_KERNEL_PRIVATE
 
-bool hw_lck_ticket_held(hw_lck_ticket_t *tlock) __result_use_check;
-void hw_lck_ticket_lock(hw_lck_ticket_t * tlock LCK_GRP_ARG(lck_grp_t *grp));
-hw_lock_status_t hw_lck_ticket_lock_to(hw_lck_ticket_t * tlock, uint64_t timeout,
-    hw_lock_timeout_handler_t handler LCK_GRP_ARG(lck_grp_t *grp));
-bool hw_lck_ticket_lock_try(hw_lck_ticket_t * tlock LCK_GRP_ARG(lck_grp_t *grp)) __result_use_check;
-void hw_lck_ticket_unlock(hw_lck_ticket_t *tlock);
-
-bool hw_lck_ticket_reserve(hw_lck_ticket_t * tlock, uint32_t *ticket LCK_GRP_ARG(lck_grp_t *grp)) __result_use_check;
-hw_lock_status_t hw_lck_ticket_reserve_allow_invalid(hw_lck_ticket_t * tlock,
-    uint32_t *ticket LCK_GRP_ARG(lck_grp_t *grp)) __result_use_check;
-hw_lock_status_t hw_lck_ticket_wait(hw_lck_ticket_t * tlock, uint32_t ticket,
-    uint64_t timeout, hw_lock_timeout_handler_t handler LCK_GRP_ARG(lck_grp_t *grp));
-
-hw_lock_status_t hw_lck_ticket_lock_allow_invalid(hw_lck_ticket_t * tlock,
-    uint64_t timeout, hw_lock_timeout_handler_t handler LCK_GRP_ARG(lck_grp_t *grp));
-void hw_lck_ticket_invalidate(hw_lck_ticket_t *tlock);
-
-#if !LOCK_STATS
+#if !LCK_GRP_USE_ARG
 #define hw_lck_ticket_init(lck, grp)             hw_lck_ticket_init(lck)
 #define hw_lck_ticket_init_locked(lck, grp)      hw_lck_ticket_init_locked(lck)
 #define hw_lck_ticket_destroy(lck, grp)          hw_lck_ticket_destroy(lck)
 #define hw_lck_ticket_lock(lck, grp)             hw_lck_ticket_lock(lck)
-#define hw_lck_ticket_lock_to(lck, to, cb, grp)  hw_lck_ticket_lock_to(lck, to, cb)
+#define hw_lck_ticket_lock_nopreempt(lck, grp)   hw_lck_ticket_lock_nopreempt(lck)
+#define hw_lck_ticket_lock_to(lck, pol, grp)     hw_lck_ticket_lock_to(lck, pol)
+#define hw_lck_ticket_lock_nopreempt_to(lck, pol, grp) \
+	hw_lck_ticket_lock_nopreempt_to(lck, pol)
 #define hw_lck_ticket_lock_try(lck, grp)         hw_lck_ticket_lock_try(lck)
-#define hw_lck_ticket_lock_allow_invalid(lck, to, cb, grp) \
-	hw_lck_ticket_lock_allow_invalid(lck, to, cb)
+#define hw_lck_ticket_lock_try_nopreempt(lck, grp) \
+	hw_lck_ticket_lock_try_nopreempt(lck)
+#define hw_lck_ticket_lock_allow_invalid(lck, pol, grp) \
+	hw_lck_ticket_lock_allow_invalid(lck, pol)
 #define hw_lck_ticket_reserve(lck, t, grp)       hw_lck_ticket_reserve(lck, t)
 #define hw_lck_ticket_reserve_allow_invalid(lck, t, grp) \
 	hw_lck_ticket_reserve_allow_invalid(lck, t)
-#define hw_lck_ticket_wait(lck, ticket, to, cb, grp) \
-	hw_lck_ticket_wait(lck, ticket, to, cb)
-#endif /* !LOCK_STATS */
+#define hw_lck_ticket_wait(lck, ticket, pol, grp) \
+	hw_lck_ticket_wait(lck, ticket, pol)
+#endif /* !LCK_GRP_USE_ARG */
 
-#pragma GCC visibility pop
-#else /* MACH_KERNEL_PRIVATE */
 
-typedef struct {
-	uintptr_t       opaque1 __kernel_data_semantics;
-	uint32_t        opaque2;
-} lck_ticket_t;
+/* init/destroy */
+
+extern void hw_lck_ticket_init(
+	hw_lck_ticket_t        *tlock,
+	lck_grp_t              *grp);
+
+extern void hw_lck_ticket_init_locked(
+	hw_lck_ticket_t        *tlock,
+	lck_grp_t              *grp);
+
+extern void hw_lck_ticket_destroy(
+	hw_lck_ticket_t        *tlock,
+	lck_grp_t              *grp);
+
+extern void hw_lck_ticket_invalidate(
+	hw_lck_ticket_t        *tlock);
+
+extern bool hw_lck_ticket_held(
+	hw_lck_ticket_t        *tlock) __result_use_check;
+
+
+/* lock */
+
+extern void hw_lck_ticket_lock(
+	hw_lck_ticket_t        *tlock,
+	lck_grp_t              *grp);
+
+extern void hw_lck_ticket_lock_nopreempt(
+	hw_lck_ticket_t        *tlock,
+	lck_grp_t              *grp);
+
+extern hw_lock_status_t hw_lck_ticket_lock_to(
+	hw_lck_ticket_t        *tlock,
+	hw_spin_policy_t        policy,
+	lck_grp_t              *grp);
+
+extern hw_lock_status_t hw_lck_ticket_lock_nopreempt_to(
+	hw_lck_ticket_t        *tlock,
+	hw_spin_policy_t        policy,
+	lck_grp_t              *grp);
+
+
+/* lock_try */
+
+extern bool hw_lck_ticket_lock_try(
+	hw_lck_ticket_t        *tlock,
+	lck_grp_t              *grp) __result_use_check;
+
+extern bool hw_lck_ticket_lock_try_nopreempt(
+	hw_lck_ticket_t        *tlock,
+	lck_grp_t              *grp) __result_use_check;
+
+
+/* unlock */
+
+extern void hw_lck_ticket_unlock(
+	hw_lck_ticket_t        *tlock);
+
+extern void hw_lck_ticket_unlock_nopreempt(
+	hw_lck_ticket_t        *tlock);
+
+
+/* reserve/wait */
+
+extern bool hw_lck_ticket_reserve(
+	hw_lck_ticket_t        *tlock,
+	uint32_t               *ticket,
+	lck_grp_t              *grp) __result_use_check;
+
+extern hw_lock_status_t hw_lck_ticket_reserve_allow_invalid(
+	hw_lck_ticket_t        *tlock,
+	uint32_t               *ticket,
+	lck_grp_t              *grp) __result_use_check;
+
+extern hw_lock_status_t hw_lck_ticket_wait(
+	hw_lck_ticket_t        *tlock,
+	uint32_t                ticket,
+	hw_spin_policy_t        policy,
+	lck_grp_t             *grp);
+
+extern hw_lock_status_t hw_lck_ticket_lock_allow_invalid(
+	hw_lck_ticket_t        *tlock,
+	hw_spin_policy_t        policy,
+	lck_grp_t              *grp);
+
+/* pv */
+
+extern void hw_lck_ticket_unlock_kick_pv(
+	hw_lck_ticket_t        *tlock,
+	uint8_t                 value);
+
+extern void hw_lck_ticket_lock_wait_pv(
+	hw_lck_ticket_t         *tlock,
+	uint8_t                  value);
 
 #endif /* MACH_KERNEL_PRIVATE */
-
-void lck_ticket_init(lck_ticket_t *tlock, lck_grp_t *grp);
-void lck_ticket_destroy(lck_ticket_t *tlock, lck_grp_t *grp);
-void lck_ticket_lock(lck_ticket_t *tlock, lck_grp_t *grp);
-void lck_ticket_unlock(lck_ticket_t *tlock);
-void lck_ticket_assert_owned(lck_ticket_t *tlock);
-#if MACH_ASSERT
-#define LCK_TICKET_ASSERT_OWNED(tlock) lck_ticket_assert_owned(tlock)
-#else
-#define LCK_TICKET_ASSERT_OWNED(tlock) (void)(tlock)
-#endif
-
 #if XNU_KERNEL_PRIVATE
-bool lck_ticket_lock_try(lck_ticket_t *tlock, lck_grp_t *grp) __result_use_check;
-bool kdp_lck_ticket_is_acquired(lck_ticket_t *lck) __result_use_check;
+
+extern bool kdp_lck_ticket_is_acquired(
+	lck_ticket_t            *tlock) __result_use_check;
+
+extern void lck_ticket_lock_nopreempt(
+	lck_ticket_t            *tlock,
+	lck_grp_t               *grp);
+
+extern bool lck_ticket_lock_try(
+	lck_ticket_t            *tlock,
+	lck_grp_t               *grp) __result_use_check;
+
+extern bool lck_ticket_lock_try_nopreempt(
+	lck_ticket_t            *tlock,
+	lck_grp_t               *grp) __result_use_check;
+
+extern void lck_ticket_unlock_nopreempt(
+	lck_ticket_t            *tlock);
+
+#endif /* XNU_KERNEL_PRIVATE */
+
+extern __exported void lck_ticket_init(
+	lck_ticket_t            *tlock,
+	lck_grp_t               *grp);
+
+extern __exported void lck_ticket_destroy(
+	lck_ticket_t            *tlock,
+	lck_grp_t               *grp);
+
+extern __exported void lck_ticket_lock(
+	lck_ticket_t            *tlock,
+	lck_grp_t               *grp);
+
+extern __exported void lck_ticket_unlock(
+	lck_ticket_t            *tlock);
+
+extern __exported void lck_ticket_assert_owned(
+	lck_ticket_t            *tlock);
+
+extern __exported void lck_ticket_assert_not_owned(
+	lck_ticket_t            *tlock);
+
+#if MACH_ASSERT
+#define LCK_TICKET_ASSERT_OWNED(tlock)     lck_ticket_assert_owned(tlock)
+#define LCK_TICKET_ASSERT_NOT_OWNED(tlock) lck_ticket_assert_owned(tlock)
+#else
+#define LCK_TICKET_ASSERT_OWNED(tlock)     (void)(tlock)
+#define LCK_TICKET_ASSERT_NOT_OWNED(tlock) (void)(tlock)
 #endif
 
+#pragma GCC visibility pop
 __END_DECLS
 
 #endif /* __ASSEMBLER__ */
+#if XNU_KERNEL_PRIVATE
 
-#define HW_LCK_TICKET_LOCK_INCREMENT  0x01000000
 #define HW_LCK_TICKET_LOCK_VALID_BIT  8
 
-#else /* KERNEL_PRIVATE */
-#error header not supported
-#endif /* KERNEL_PRIVATE */
+#if CONFIG_PV_TICKET
 
+/*
+ * For the PV case, the lsbit of cticket is treated as as wait flag,
+ * and the ticket counters are incremented by 2
+ */
+#define HW_LCK_TICKET_LOCK_PVWAITFLAG ((uint8_t)1)
+#define HW_LCK_TICKET_LOCK_INCREMENT  ((uint8_t)2)
+#define HW_LCK_TICKET_LOCK_INC_WORD   0x02000000
+
+#if !defined(__ASSEMBLER__) && (DEBUG || DEVELOPMENT)
+/* counters for sysctls */
+SCALABLE_COUNTER_DECLARE(ticket_wflag_cleared);
+SCALABLE_COUNTER_DECLARE(ticket_wflag_still);
+SCALABLE_COUNTER_DECLARE(ticket_just_unlock);
+SCALABLE_COUNTER_DECLARE(ticket_kick_count);
+SCALABLE_COUNTER_DECLARE(ticket_wait_count);
+SCALABLE_COUNTER_DECLARE(ticket_already_count);
+SCALABLE_COUNTER_DECLARE(ticket_spin_count);
+#define PVTICKET_STATS_ADD(var, i)    counter_add_preemption_disabled(&ticket_##var, (i))
+#define PVTICKET_STATS_INC(var)       counter_inc_preemption_disabled(&ticket_##var)
+#else
+#define PVTICKET_STATS_ADD(var, i)    /* empty */
+#define PVTICKET_STATS_INC(var)       /* empty */
+#endif
+
+#else /* CONFIG_PV_TICKET */
+
+#define HW_LCK_TICKET_LOCK_PVWAITFLAG ((uint8_t)0)
+#define HW_LCK_TICKET_LOCK_INCREMENT  ((uint8_t)1)
+#define HW_LCK_TICKET_LOCK_INC_WORD   0x01000000
+
+#endif /* CONFIG_PV_TICKET */
+#endif /* XNU_KERNEL_PRIVATE */
 #endif /* _KERN_TICKET_LOCK_H_ */

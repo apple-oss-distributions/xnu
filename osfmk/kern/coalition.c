@@ -42,6 +42,7 @@
 #include <kern/task.h>
 #include <kern/thread_group.h>
 #include <kern/zalloc.h>
+#include <vm/vm_pageout.h>
 
 #include <libkern/OSAtomic.h>
 
@@ -206,11 +207,11 @@ struct i_resource_coalition {
 	uint64_t logical_deferred_writes_to_external;
 	uint64_t logical_invalidated_writes_to_external;
 	uint64_t logical_metadata_writes_to_external;
-	uint64_t cpu_ptime;
 	uint64_t cpu_time_eqos[COALITION_NUM_THREAD_QOS_TYPES];      /* cpu time per effective QoS class */
 	uint64_t cpu_time_rqos[COALITION_NUM_THREAD_QOS_TYPES];      /* cpu time per requested QoS class */
 	uint64_t cpu_instructions;
 	uint64_t cpu_cycles;
+	struct recount_coalition co_recount;
 
 	uint64_t task_count;      /* tasks that have started in this coalition */
 	uint64_t dead_task_count; /* tasks that have exited in this coalition;
@@ -254,6 +255,7 @@ struct i_jetsam_coalition {
 	queue_head_t services;
 	queue_head_t other;
 	struct thread_group *thread_group;
+	bool swap_enabled;
 };
 
 
@@ -546,9 +548,11 @@ coalition_notify_user(uint64_t id, uint32_t flags)
 static kern_return_t
 i_coal_resource_init(coalition_t coal, boolean_t privileged, boolean_t efficient)
 {
-	(void)privileged;
-	(void)efficient;
+#pragma unused(privileged, efficient)
+
 	assert(coal && coal->type == COALITION_TYPE_RESOURCE);
+
+	recount_coalition_init(&coal->r.co_recount);
 	coal->r.ledger = ledger_instantiate(coalition_task_ledger_template,
 	    LEDGER_CREATE_ACTIVE_ENTRIES);
 	if (coal->r.ledger == NULL) {
@@ -571,6 +575,7 @@ i_coal_resource_dealloc(coalition_t coal)
 {
 	assert(coal && coal->type == COALITION_TYPE_RESOURCE);
 
+	recount_coalition_deinit(&coal->r.co_recount);
 	ledger_dereference(coal->r.ledger);
 	ledger_dereference(coal->r.resource_monitor_ledger);
 }
@@ -644,10 +649,6 @@ i_coal_resource_remove_task(coalition_t coal, task_t task)
 		cr->gpu_time += task_gpu_utilisation(task);
 #endif /* defined(__x86_64__) */
 
-#if defined(__arm__) || defined(__arm64__)
-		cr->energy += task_energy(task);
-#endif /* defined(__arm__) || defined(__arm64__) */
-
 		cr->logical_immediate_writes += task->task_writes_counters_internal.task_immediate_writes;
 		cr->logical_deferred_writes += task->task_writes_counters_internal.task_deferred_writes;
 		cr->logical_invalidated_writes += task->task_writes_counters_internal.task_invalidated_writes;
@@ -659,16 +660,8 @@ i_coal_resource_remove_task(coalition_t coal, task_t task)
 #if CONFIG_PHYS_WRITE_ACCT
 		cr->fs_metadata_writes += task->task_fs_metadata_writes;
 #endif /* CONFIG_PHYS_WRITE_ACCT */
-		cr->cpu_ptime += task_cpu_ptime(task);
 		task_update_cpu_time_qos_stats(task, cr->cpu_time_eqos, cr->cpu_time_rqos);
-#if MONOTONIC
-		uint64_t counts[MT_CORE_NFIXED] = {};
-		(void)mt_fixed_task_counts(task, counts);
-		cr->cpu_cycles += counts[MT_CORE_CYCLES];
-#if defined(MT_CORE_INSTRS)
-		cr->cpu_instructions += counts[MT_CORE_INSTRS];
-#endif /* defined(MT_CORE_INSTRS) */
-#endif /* MONOTONIC */
+		recount_coalition_rollup_task(&cr->co_recount, &task->tk_recount);
 	}
 
 	/* remove the task from the coalition's list */
@@ -751,7 +744,6 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	uint64_t bytesread = coal->r.bytesread;
 	uint64_t byteswritten = coal->r.byteswritten;
 	uint64_t gpu_time = coal->r.gpu_time;
-	uint64_t energy = coal->r.energy;
 	uint64_t logical_immediate_writes = coal->r.logical_immediate_writes;
 	uint64_t logical_deferred_writes = coal->r.logical_deferred_writes;
 	uint64_t logical_invalidated_writes = coal->r.logical_invalidated_writes;
@@ -767,14 +759,12 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	int64_t cpu_time_billed_to_others = 0;
 	int64_t energy_billed_to_me = 0;
 	int64_t energy_billed_to_others = 0;
-	uint64_t cpu_ptime = coal->r.cpu_ptime;
-	uint64_t cpu_time_eqos[COALITION_NUM_THREAD_QOS_TYPES];
-	memcpy(cpu_time_eqos, coal->r.cpu_time_eqos, sizeof(cpu_time_eqos));
-	uint64_t cpu_time_rqos[COALITION_NUM_THREAD_QOS_TYPES];
-	memcpy(cpu_time_rqos, coal->r.cpu_time_rqos, sizeof(cpu_time_rqos));
-	uint64_t cpu_instructions = coal->r.cpu_instructions;
-	uint64_t cpu_cycles = coal->r.cpu_cycles;
-
+	struct recount_usage stats_sum = { 0 };
+	struct recount_usage stats_perf_only = { 0 };
+	recount_coalition_usage_perf_only(&coal->r.co_recount, &stats_sum,
+	    &stats_perf_only);
+	uint64_t cpu_time_eqos[COALITION_NUM_THREAD_QOS_TYPES] = { 0 };
+	uint64_t cpu_time_rqos[COALITION_NUM_THREAD_QOS_TYPES] = { 0 };
 	/*
 	 * Add to that all the active tasks' ledgers. Tasks cannot deallocate
 	 * out from under us, since we hold the coalition lock.
@@ -796,10 +786,6 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 		gpu_time += task_gpu_utilisation(task);
 #endif /* defined(__x86_64__) */
 
-#if defined(__arm__) || defined(__arm64__)
-		energy += task_energy(task);
-#endif /* defined(__arm__) || defined(__arm64__) */
-
 		logical_immediate_writes += task->task_writes_counters_internal.task_immediate_writes;
 		logical_deferred_writes += task->task_writes_counters_internal.task_deferred_writes;
 		logical_invalidated_writes += task->task_writes_counters_internal.task_invalidated_writes;
@@ -812,16 +798,8 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 		fs_metadata_writes += task->task_fs_metadata_writes;
 #endif /* CONFIG_PHYS_WRITE_ACCT */
 
-		cpu_ptime += task_cpu_ptime(task);
 		task_update_cpu_time_qos_stats(task, cpu_time_eqos, cpu_time_rqos);
-#if MONOTONIC
-		uint64_t counts[MT_CORE_NFIXED] = {};
-		(void)mt_fixed_task_counts(task, counts);
-		cpu_cycles += counts[MT_CORE_CYCLES];
-#if defined(MT_CORE_INSTRS)
-		cpu_instructions += counts[MT_CORE_INSTRS];
-#endif /* defined(MT_CORE_INSTRS) */
-#endif /* MONOTONIC */
+		recount_task_usage_perf_only(task, &stats_sum, &stats_perf_only);
 	}
 
 	kr = ledger_get_balance(sum_ledger, task_ledgers.cpu_time_billed_to_me, (int64_t *)&cpu_time_billed_to_me);
@@ -882,7 +860,6 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	cru_out->bytesread = bytesread;
 	cru_out->byteswritten = byteswritten;
 	cru_out->gpu_time = gpu_time;
-	cru_out->energy = energy;
 	cru_out->logical_immediate_writes = logical_immediate_writes;
 	cru_out->logical_deferred_writes = logical_deferred_writes;
 	cru_out->logical_invalidated_writes = logical_invalidated_writes;
@@ -896,13 +873,24 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 #else
 	cru_out->fs_metadata_writes = 0;
 #endif /* CONFIG_PHYS_WRITE_ACCT */
-	cru_out->cpu_ptime = cpu_ptime;
 	cru_out->cpu_time_eqos_len = COALITION_NUM_THREAD_QOS_TYPES;
 	memcpy(cru_out->cpu_time_eqos, cpu_time_eqos, sizeof(cru_out->cpu_time_eqos));
-	cru_out->cpu_cycles = cpu_cycles;
-	cru_out->cpu_instructions = cpu_instructions;
+
+	cru_out->cpu_ptime = stats_perf_only.ru_system_time_mach +
+	    stats_perf_only.ru_user_time_mach;
+#if CONFIG_PERVASIVE_CPI
+	cru_out->cpu_cycles = stats_sum.ru_cycles;
+	cru_out->cpu_instructions = stats_sum.ru_instructions;
+	cru_out->cpu_pinstructions = stats_perf_only.ru_instructions;
+	cru_out->cpu_pcycles = stats_perf_only.ru_cycles;
+#endif // CONFIG_PERVASIVE_CPI
+
 	ledger_dereference(sum_ledger);
 	sum_ledger = LEDGER_NULL;
+
+#if CONFIG_PERVASIVE_ENERGY
+	cru_out->energy = stats_sum.ru_energy_nj;
+#endif /* CONFIG_PERVASIVE_ENERGY */
 
 #if CONFIG_PHYS_WRITE_ACCT
 	// kernel_pm_writes are only recorded under kernel_task coalition
@@ -949,7 +937,7 @@ i_coal_jetsam_init(coalition_t coal, boolean_t privileged, boolean_t efficient)
 		coal->j.thread_group = thread_group_find_by_id_and_retain(THREAD_GROUP_BACKGROUND);
 		break;
 	default:
-		coal->j.thread_group = thread_group_create_and_retain(efficient);
+		coal->j.thread_group = thread_group_create_and_retain(efficient ? THREAD_GROUP_FLAGS_EFFICIENT : THREAD_GROUP_FLAGS_DEFAULT);
 	}
 	assert(coal->j.thread_group != NULL);
 #endif
@@ -1425,6 +1413,23 @@ task_coalition_roles(task_t task, int roles[COALITION_NUM_TYPES])
 	}
 }
 
+int
+task_coalition_role_for_type(task_t task, int coalition_type)
+{
+	coalition_t coal;
+	int role;
+	if (coalition_type >= COALITION_NUM_TYPES) {
+		panic("Attempt to call task_coalition_role_for_type with invalid coalition_type: %d\n", coalition_type);
+	}
+	coal = task->coalition[coalition_type];
+	if (coal == NULL) {
+		return COALITION_TASKROLE_NONE;
+	}
+	coalition_lock(coal);
+	role = coal_call(coal, get_taskrole, task);
+	coalition_unlock(coal);
+	return role;
+}
 
 int
 coalition_type(coalition_t coal)
@@ -1600,6 +1605,19 @@ task_coalition_thread_group_focal_update(task_t task)
 	} else {
 		thread_group_clear_flags_locked(task_coalition_get_thread_group(task), THREAD_GROUP_FLAGS_UI_APP);
 	}
+	thread_group_flags_update_unlock();
+}
+
+void
+task_coalition_thread_group_application_set(task_t task)
+{
+	/*
+	 * Setting the "Application" flag on the thread group is a one way transition.
+	 * Once a coalition has a single task with an application apptype, the
+	 * thread group associated with the coalition is tagged as Application.
+	 */
+	thread_group_flags_update_lock();
+	thread_group_set_flags_locked(task_coalition_get_thread_group(task), THREAD_GROUP_FLAGS_APPLICATION);
 	thread_group_flags_update_unlock();
 }
 
@@ -2531,4 +2549,42 @@ unlock_coal:
 	}
 
 	return ntasks;
+}
+
+static void
+mark_coalition_member_as_swappable(__unused coalition_t coal, __unused void *ctx, task_t task)
+{
+	vm_task_set_selfdonate_pages(task, true);
+}
+
+void
+coalition_mark_swappable(coalition_t coal)
+{
+	struct i_jetsam_coalition *cj = NULL;
+
+	coalition_lock(coal);
+	assert(coal && coal->type == COALITION_TYPE_JETSAM);
+
+	cj = &coal->j;
+	cj->swap_enabled = true;
+
+	i_coal_jetsam_iterate_tasks(coal, NULL, mark_coalition_member_as_swappable);
+
+	coalition_unlock(coal);
+}
+
+bool
+coalition_is_swappable(coalition_t coal)
+{
+	struct i_jetsam_coalition *cj = NULL;
+
+	coalition_lock(coal);
+	assert(coal && coal->type == COALITION_TYPE_JETSAM);
+
+	cj = &coal->j;
+	bool enabled = cj->swap_enabled;
+
+	coalition_unlock(coal);
+
+	return enabled;
 }

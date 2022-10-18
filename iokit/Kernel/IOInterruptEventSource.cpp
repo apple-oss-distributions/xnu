@@ -84,6 +84,10 @@ IOInterruptEventSource::init(OSObject *inOwner,
 {
 	bool res = true;
 
+	if (inIntIndex < 0) {
+		return false;
+	}
+
 	if (!super::init(inOwner, (IOEventSourceAction) inAction)) {
 		return false;
 	}

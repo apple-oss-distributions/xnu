@@ -55,6 +55,10 @@ extern void             _enable_preemption(void);
 #define enable_preemption()                     _enable_preemption()
 #endif
 
+#if SCHED_HYGIENE_DEBUG
+extern void abandon_preemption_disable_measurement(void);
+#endif
+
 __END_DECLS
 
 #endif  /* _KERN_CPU_DATA_H_ */

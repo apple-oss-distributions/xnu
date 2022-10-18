@@ -243,6 +243,8 @@ void    psignal_sigkill_with_reason(struct proc *p, struct os_reason *signal_rea
 #define COREDUMP_IGNORE_ULIMIT  0x0001 /* Ignore the process's core file ulimit. */
 #define COREDUMP_FULLFSYNC      0x0002 /* Run F_FULLFSYNC on the core file's vnode */
 
+cpu_type_t process_cpu_type(struct proc * core_proc);
+cpu_type_t process_cpu_subtype(struct proc * core_proc);
 int     coredump(struct proc *p, uint32_t reserve_mb, int coredump_flags);
 void set_thread_exit_reason(void *th, void *reason, boolean_t proc_locked);
 

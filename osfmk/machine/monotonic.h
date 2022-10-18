@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -32,8 +32,6 @@
 #include <x86_64/monotonic.h>
 #elif defined(__arm64__)
 #include <arm64/monotonic.h>
-#elif defined(__arm__)
-#include <arm/monotonic.h>
 #else
 #error unsupported architecture
 #endif
@@ -51,15 +49,6 @@ struct mt_cpu {
 	 * Whether this CPU should be using PMCs.
 	 */
 	bool mtc_active;
-};
-
-struct mt_thread {
-	_Atomic uint64_t mth_gen;
-	uint64_t mth_counts[MT_CORE_NFIXED];
-};
-
-struct mt_task {
-	uint64_t mtk_counts[MT_CORE_NFIXED];
 };
 
 struct mt_cpu *mt_cur_cpu(void);

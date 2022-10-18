@@ -59,6 +59,46 @@ kern_collectth_state_size(uint64_t * tstate_count, uint64_t * ptstate_size)
 }
 
 void
+kern_collect_userth_state_size(task_t task, uint64_t * tstate_count, uint64_t * tstate_size)
+{
+	uint64_t per_thread_size = 0;
+	const x86_state_hdr_t * flavors = thread_flavor_array;
+	size_t num_flavors = sizeof(thread_flavor_array) / sizeof(thread_flavor_array[0]);
+
+	for (size_t i = 0; i < num_flavors; i++) {
+		per_thread_size += sizeof(x86_state_hdr_t) + flavors[i].count * sizeof(natural_t);
+	}
+
+	*tstate_count = task->thread_count;
+	*tstate_size  = sizeof(struct thread_command) + per_thread_size;
+}
+
+void
+kern_collect_userth_state(task_t task __unused, thread_t thread, void *buffer, uint64_t size)
+{
+	kern_return_t ret;
+	const x86_state_hdr_t * flavors = thread_flavor_array;
+	size_t num_flavors = sizeof(thread_flavor_array) / sizeof(thread_flavor_array[0]);
+
+	struct thread_command *tc = (struct thread_command *)buffer;
+	tc->cmd = LC_THREAD;
+	tc->cmdsize = (uint32_t)size;
+
+	x86_state_hdr_t *hdr = (x86_state_hdr_t *)(tc + 1);
+
+	for (size_t i = 0; i < num_flavors; i++) {
+		hdr->flavor = flavors[i].flavor;
+		hdr->count = flavors[i].count;
+		/* Ensure we can't write past the end of the buffer */
+		assert(hdr->count + sizeof(x86_state_hdr_t) + ((uintptr_t)hdr - (uintptr_t)buffer) <= size);
+		ret = machine_thread_get_state(thread, hdr->flavor, (thread_state_t)(hdr + 1), &hdr->count);
+		assert(ret == KERN_SUCCESS);
+
+		hdr = (x86_state_hdr_t *)((uintptr_t)(hdr + 1) + hdr->count * sizeof(natural_t));
+	}
+}
+
+void
 kern_collectth_state(thread_t thread, void *buffer, uint64_t size, void ** iter)
 {
 	size_t          hoffset;

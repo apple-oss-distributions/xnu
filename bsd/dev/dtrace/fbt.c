@@ -49,7 +49,7 @@
 /* #include <machine/trap.h> */
 struct savearea_t; /* Used anonymously */
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 typedef kern_return_t (*perfCallback)(int, struct savearea_t *, __unused int, __unused int);
 extern perfCallback tempDTraceTrapHook;
 extern kern_return_t fbt_perfCallback(int, struct savearea_t *, __unused int, __unused int);
@@ -163,12 +163,12 @@ fbt_enable(void *arg, dtrace_id_t id, void *parg)
 		}
 
 		if (fbt->fbtp_currentval != fbt->fbtp_patchval) {
-#if KASAN
+#if KASAN_CLASSIC
 			/* Since dtrace probes can call into KASan and vice versa, things can get
 			 * very slow if we have a lot of probes. This call will disable the KASan
 			 * fakestack after a threshold of probes is reached. */
 			kasan_fakestack_suspend();
-#endif
+#endif /* KASAN_CLASSIC */
 
 			(void)ml_nofault_copy((vm_offset_t)&fbt->fbtp_patchval, (vm_offset_t)fbt->fbtp_patchpoint,
 			    sizeof(fbt->fbtp_patchval));
@@ -218,9 +218,9 @@ fbt_disable(void *arg, dtrace_id_t id, void *parg)
 			ASSERT(ctl->mod_nenabled > 0);
 			ctl->mod_nenabled--;
 
-#if KASAN
+#if KASAN && KASAN_CLASSIC
 			kasan_fakestack_resume();
-#endif
+#endif /* KASAN && KASAN_CLASSIC */
 		}
 	}
 	dtrace_membar_consumer();
@@ -376,13 +376,6 @@ fbt_provide_kernel_section(struct modctl *ctl, kernel_section_t *sect, kernel_nl
 		if (*name == '_') {
 			name += 1;
 		}
-
-#if defined(__arm__)
-		// Skip non-thumb functions on arm32
-		if (sym[i].n_sect == 1 && !(sym[i].n_desc & N_ARM_THUMB_DEF)) {
-			continue;
-		}
-#endif /* defined(__arm__) */
 
 		if (fbt_excluded(name)) {
 			continue;
@@ -590,8 +583,8 @@ static const struct cdevsw fbt_cdevsw =
 	.d_read = eno_rdwrt,
 	.d_write = eno_rdwrt,
 	.d_ioctl = eno_ioctl,
-	.d_stop = (stop_fcn_t *)nulldev,
-	.d_reset = (reset_fcn_t *)nulldev,
+	.d_stop = eno_stop,
+	.d_reset = eno_reset,
 	.d_select = eno_select,
 	.d_mmap = eno_mmap,
 	.d_strategy = eno_strat,

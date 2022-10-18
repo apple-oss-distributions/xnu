@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2021 Apple Inc.  All rights reserved.
+// Copyright (c) 2020-2022 Apple Inc.  All rights reserved.
 
 #include <darwintest.h>
 #include <darwintest_utils.h>
@@ -87,8 +87,8 @@ T_DECL(kdebug_trace_syscall, "test that kdebug_trace(2) emits correct events")
 #define STRING_SIZE (1024)
 
 T_DECL(kdebug_trace_string_syscall,
-    "test that kdebug_trace_string(2) emits correct events",
-    T_META_ENABLED(IS_64BIT))
+		"test that kdebug_trace_string(2) emits correct events",
+		T_META_ENABLED(IS_64BIT))
 {
 	start_controlling_ktrace();
 
@@ -160,7 +160,7 @@ T_DECL(kdebug_trace_string_syscall,
 #define SIGNPOST_PAIRED_CODE (0x20U)
 
 T_DECL(kdebug_signpost_syscall,
-    "test that kdebug_signpost(2) emits correct events")
+		"test that kdebug_signpost(2) emits correct events")
 {
 	start_controlling_ktrace();
 
@@ -404,11 +404,13 @@ _drain_until_event(uint32_t debugid)
 	static kd_buf events[256] = { 0 };
 	size_t events_size = sizeof(events);
 	uint64_t start_time_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+	unsigned int reads = 0;
 	while (true) {
 		T_QUIET;
 		T_ASSERT_POSIX_SUCCESS(sysctl(
 				(int[]){ CTL_KERN, KERN_KDEBUG, KERN_KDREADTR, }, 3,
 				events, &events_size, NULL, 0), "reading trace data");
+		reads += 1;
 		size_t events_count = events_size;
 		for (size_t i = 0; i < events_count; i++) {
 			if (events[i].debugid == debugid) {
@@ -417,8 +419,11 @@ _drain_until_event(uint32_t debugid)
 			}
 		}
 		uint64_t cur_time_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC);
-		if (cur_time_ns - start_time_ns < DRAIN_TIMEOUT_NS) {
-			T_ASSERT_FAIL("timed out while waiting for event 0x%x", debugid);
+		if (cur_time_ns - start_time_ns > DRAIN_TIMEOUT_NS) {
+			T_ASSERT_FAIL("timed out after %f seconds waiting for 0x%x,"
+					" after %u reads",
+					(double)(cur_time_ns - start_time_ns) / 1e9, debugid,
+					reads);
 		}
 	}
 }
@@ -477,6 +482,7 @@ T_DECL(reject_old_events,
 
 	ktrace_session_t s = ktrace_session_create();
 	T_QUIET; T_WITH_ERRNO; T_ASSERT_NOTNULL(s, "created session");
+	ktrace_set_collection_interval(s, 100);
 
 	__block int events = 0;
 	ktrace_events_single(s, KDBG_EVENTID(DBG_BSD, DBG_BSD_KDEBUG_TEST, 1),
@@ -508,7 +514,7 @@ T_DECL(reject_old_events,
 
 T_DECL(ascending_time_order,
     "ensure that kdebug events are in ascending order based on time",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), XNU_T_META_SOC_SPECIFIC)
 {
 	__block uint64_t prev_ts = 0;
 	__block uint32_t prev_debugid = 0;
@@ -920,13 +926,13 @@ T_DECL(kernel_events_filtered, "ensure that the filtered kernel macros work")
 	    ^(unsigned int dev_seen, unsigned int rel_seen,
 	    unsigned int filt_seen, unsigned int noprocfilt_seen) {
 		T_EXPECT_EQ(rel_seen, EXP_KERNEL_EVENTS, NULL);
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 		T_EXPECT_EQ(dev_seen, is_development_kernel() ? EXP_KERNEL_EVENTS : 0U,
 		NULL);
 #else
 		T_EXPECT_EQ(dev_seen, EXP_KERNEL_EVENTS,
 		"development-only events seen");
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 		T_EXPECT_EQ(filt_seen, 0U, "no filter-only events seen");
 		T_EXPECT_EQ(noprocfilt_seen, EXP_KERNEL_EVENTS,
 		"process filter-agnostic events seen");
@@ -1336,6 +1342,19 @@ T_DECL(event_coverage, "ensure events appear up to the end of tracing")
 }
 
 static unsigned int
+get_nevents(void)
+{
+	kbufinfo_t bufinfo = { 0 };
+	T_QUIET;
+	T_ASSERT_POSIX_SUCCESS(sysctl(
+		    (int[]){ CTL_KERN, KERN_KDEBUG, KERN_KDGETBUF }, 3,
+		    &bufinfo, &(size_t){ sizeof(bufinfo) }, NULL, 0),
+	    "get kdebug buffer size");
+
+	return (unsigned int)bufinfo.nkdbufs;
+}
+
+static unsigned int
 set_nevents(unsigned int nevents)
 {
 	T_QUIET;
@@ -1348,12 +1367,7 @@ set_nevents(unsigned int nevents)
 		    (int[]){ CTL_KERN, KERN_KDEBUG, KERN_KDSETUP, (int)nevents }, 4,
 		    NULL, 0, NULL, 0), "setup kdebug buffers");
 
-	kbufinfo_t bufinfo = { 0 };
-	T_QUIET;
-	T_ASSERT_POSIX_SUCCESS(sysctl(
-		    (int[]){ CTL_KERN, KERN_KDEBUG, KERN_KDGETBUF }, 3,
-		    &bufinfo, &(size_t){ sizeof(bufinfo) }, NULL, 0),
-	    "get kdebug buffer size");
+	unsigned int nevents_allocated = get_nevents();
 
 	T_QUIET;
 	T_ASSERT_POSIX_SUCCESS(sysctl(
@@ -1361,10 +1375,11 @@ set_nevents(unsigned int nevents)
 		    NULL, 0, NULL, 0),
 	    "remove kdebug buffers");
 
-	return (unsigned int)bufinfo.nkdbufs;
+	return nevents_allocated;
 }
 
-T_DECL(set_buffer_size, "ensure large buffer sizes can be set")
+T_DECL(set_buffer_size, "ensure large buffer sizes can be set",
+		XNU_T_META_SOC_SPECIFIC)
 {
 	T_SETUPBEGIN;
 	uint64_t memsize = 0;
@@ -1535,19 +1550,37 @@ T_DECL(lookup_long_paths, "lookup long path names")
 
 #pragma mark - boot tracing
 
+static void
+expect_kernel_task_tracing(void)
+{
+	unsigned int state = 0;
+	size_t state_size = sizeof(state);
+	int ret = sysctlbyname("ktrace.state", &state, &state_size, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "sysctl(ktrace.state)");
+	T_ASSERT_EQ(state, 1, "state is foreground");
+
+	char configured_by[1024] = "";
+	size_t configured_by_size = sizeof(configured_by);
+	ret = sysctlbyname("ktrace.configured_by", &configured_by,
+	    &configured_by_size, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "sysctl(ktrace.configured_by)");
+	T_ASSERT_EQ_STR(configured_by, "kernel_task", "configured by kernel_task");
+}
+
 static const char *expected_subsystems[] = {
-	"tunables", "locks_early", "kprintf", "pmap_steal", "vm_kernel",
-	"kmem", "zalloc",
+	"tunables", "locks", "kprintf", "pmap_steal", "kmem", "zalloc",
 	/* "percpu", only has a startup phase on Intel */
-	"locks", "codesigning", "oslog", "early_boot",
+	"codesigning", "oslog", "early_boot",
 };
 #define EXPECTED_SUBSYSTEMS_LEN \
 		(sizeof(expected_subsystems) / sizeof(expected_subsystems[0]))
 
 T_DECL(early_boot_tracing, "ensure early boot strings are present",
-	T_META_BOOTARGS_SET("trace=100000"))
+	T_META_BOOTARGS_SET("trace=1000000"), XNU_T_META_SOC_SPECIFIC)
 {
 	T_ATEND(reset_ktrace);
+
+	expect_kernel_task_tracing();
 
 	T_SETUPBEGIN;
 	ktrace_session_t s = ktrace_session_create();
@@ -1562,7 +1595,7 @@ T_DECL(early_boot_tracing, "ensure early boot strings are present",
 #endif /* !defined(__x86_64__) */
 
 	__block bool seen_event = false;
-	__block unsigned int cur_subsystem = 0;
+	__block size_t cur_subsystem = 0;
 	ktrace_events_single(s, TRACE_INFO_STRING, ^(struct trace_point *tp) {
 		char early_str[33] = "";
 		size_t argsize = ktrace_is_kernel_64_bit(s) ? 8 : 4;
@@ -1587,9 +1620,11 @@ T_DECL(early_boot_tracing, "ensure early boot strings are present",
 		seen_event = true;
 
 		if (strcmp(early_str, expected_subsystems[cur_subsystem]) == 0) {
-			T_LOG("found log for subsystem %s",
+			T_LOG("found log for subsystem `%s'",
 					expected_subsystems[cur_subsystem]);
 			cur_subsystem++;
+		} else {
+			T_LOG("saw extra log for subsystem `%s'", early_str);
 		}
 
 		if (cur_subsystem == EXPECTED_SUBSYSTEMS_LEN) {
@@ -1600,7 +1635,7 @@ T_DECL(early_boot_tracing, "ensure early boot strings are present",
 
 	ktrace_set_completion_handler(s, ^{
 		T_EXPECT_TRUE(seen_event, "should see an early boot string event");
-		T_EXPECT_TRUE(cur_subsystem == EXPECTED_SUBSYSTEMS_LEN,
+		T_EXPECT_EQ(cur_subsystem, EXPECTED_SUBSYSTEMS_LEN,
 				"should see logs from all subsystems");
 		if (cur_subsystem != EXPECTED_SUBSYSTEMS_LEN) {
 			T_LOG("missing log for %s", expected_subsystems[cur_subsystem]);
@@ -1616,6 +1651,16 @@ T_DECL(early_boot_tracing, "ensure early boot strings are present",
 	dispatch_main();
 }
 
+// Allocating ~4TB should be clamped to some lower number.
+T_DECL(early_boot_tracing_too_large,
+    "ensure early boot tracing can allocate up to a clamped size",
+	T_META_BOOTARGS_SET("trace=64000000000"), XNU_T_META_SOC_SPECIFIC)
+{
+	expect_kernel_task_tracing();
+	T_EXPECT_NE(get_nevents(), 0, "allocated some events");
+}
+
+// Not SoC-specific because the typefilter parsing logic is generic.
 T_DECL(typefilter_boot_arg, "ensure typefilter is set up correctly at boot",
 	T_META_BOOTARGS_SET("trace=100000 trace_typefilter=S0x0c00,C0xfe"))
 {
@@ -1653,6 +1698,8 @@ sighandler(int sig)
 	recvd_sigchild = 1;
 }
 
+#define END_EVENT (0xfeedfac0)
+
 T_DECL(instrs_and_cycles_on_proc_exit,
 		"instructions and cycles should be traced on thread exit",
 		T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1))
@@ -1670,6 +1717,7 @@ T_DECL(instrs_and_cycles_on_proc_exit,
 
 	ktrace_session_t s = ktrace_session_create();
 	T_QUIET; T_WITH_ERRNO; T_ASSERT_NOTNULL(s, "ktrace_session_create");
+	ktrace_set_collection_interval(s, 100);
 
 	__block pid_t pid;
 	__block bool seen_event = false;
@@ -1687,6 +1735,11 @@ T_DECL(instrs_and_cycles_on_proc_exit,
 			proc_usr_time = tp->arg4;
 			ktrace_end(s, 1);
 		}
+	});
+	T_QUIET; T_WITH_ERRNO; T_ASSERT_POSIX_ZERO(error, "trace single event");
+	error = ktrace_events_single(s, END_EVENT, ^(ktrace_event_t __unused tp){
+		T_LOG("saw ending event, stopping trace session");
+		ktrace_end(s, 0);
 	});
 	T_QUIET; T_WITH_ERRNO; T_ASSERT_POSIX_ZERO(error, "trace single event");
 	ktrace_set_completion_handler(s, ^{
@@ -1721,6 +1774,7 @@ T_DECL(instrs_and_cycles_on_proc_exit,
 		T_QUIET; T_ASSERT_POSIX_ZERO(error, "rusage");
 		error = waitpid(pid, &status, 0);
 		T_QUIET; T_ASSERT_POSIX_SUCCESS(error, "waitpid");
+		kdebug_trace(END_EVENT, 0, 0, 0, 0);
 	}
 	dispatch_main();
 }
@@ -1744,7 +1798,7 @@ get_thread_counters(void* ptr)
 	// Just to increase the instr, cycle count
 	T_LOG("printing %llu\n", tc_info->thread_id);
 	tc_info->cpu_time = __thread_selfusage();
-	(void)thread_selfcounts_cpi(&tc_info->counts);
+	(void)thread_selfcounts(THSC_CPI, &tc_info->counts, sizeof(tc_info->counts));
 	return NULL;
 }
 

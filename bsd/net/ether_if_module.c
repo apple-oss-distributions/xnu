@@ -96,7 +96,6 @@
 #include <net/ether_if_module.h>
 #include <sys/socketvar.h>
 #include <net/if_vlan_var.h>
-#include <net/if_6lowpan_var.h>
 #if BOND
 #include <net/if_bond_internal.h>
 #endif /* BOND */
@@ -396,12 +395,6 @@ ether_demux(ifnet_t ifp, mbuf_t m, char *frame_header,
 		}
 	}
 
-	/* check for IEEE 802.15.4 */
-	if (ether_type == htons(ETHERTYPE_IEEE802154)) {
-		*protocol_family = PF_802154;
-		return 0;
-	}
-
 	/* check for VLAN */
 	if ((m->m_pkthdr.csum_flags & CSUM_VLAN_TAG_VALID) != 0) {
 		if (EVL_VLANOFTAG(m->m_pkthdr.vlan_tag) != 0) {
@@ -662,9 +655,6 @@ ether_family_init(void)
 #if IF_HEADLESS
 	if_headless_init();
 #endif /* IF_HEADLESS */
-#if SIXLOWPAN
-	sixlowpan_family_init();
-#endif /* VLAN */
 done:
 
 	return error;

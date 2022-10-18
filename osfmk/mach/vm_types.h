@@ -103,7 +103,7 @@ typedef struct vm_object        *vm_object_t;
 typedef struct vm_object_fault_info     *vm_object_fault_info_t;
 
 #define PMAP_NULL               ((pmap_t) NULL)
-#define VM_OBJECT_NULL  ((vm_object_t) NULL)
+#define VM_OBJECT_NULL          ((vm_object_t) NULL)
 
 #else   /* KERNEL_PRIVATE */
 
@@ -128,12 +128,26 @@ typedef mach_port_t             vm_map_t, vm_map_read_t, vm_map_inspect_t;
 typedef uint64_t                vm_object_offset_t;
 typedef uint64_t                vm_object_size_t;
 
+/*!
+ * @typedef
+ *
+ * @brief
+ * Pair of a min/max address used to denote a memory region.
+ *
+ * @discussion
+ * @c min_address must be smaller or equal to @c max_address.
+ */
+typedef struct mach_vm_range {
+	mach_vm_offset_t        min_address;
+	mach_vm_offset_t        max_address;
+} *mach_vm_range_t;
+
 
 #ifdef XNU_KERNEL_PRIVATE
 
 #define VM_TAG_ACTIVE_UPDATE    1
 
-typedef uint16_t vm_tag_t;
+typedef uint16_t                vm_tag_t;
 
 #define VM_TAG_NAME_LEN_MAX     0x7F
 #define VM_TAG_NAME_LEN_SHIFT   0
@@ -189,10 +203,6 @@ struct vm_allocation_site {
 	/* char      name[0]; -- this is placed after subtotals, see KA_NAME() */
 };
 typedef struct vm_allocation_site vm_allocation_site_t;
-
-#define VM_ALLOC_SITE_STATIC(iflags, itag)                                          \
-	static vm_allocation_site_t site __attribute__((section("__DATA, __data"))) \
-	 = { .refcount = 2, .tag = (itag), .flags = (iflags) };
 
 extern int vmrtf_extract(uint64_t, boolean_t, unsigned long, void *, unsigned long *);
 extern unsigned int vmrtfaultinfo_bufsz(void);

@@ -1,63 +1,64 @@
 #!/usr/bin/env python
 
+from __future__ import absolute_import
 import sys
-import re
+
 
 def type_map(x):
-	return "TYPE_" + x.upper()
+    return "TYPE_" + x.upper()
 
-re_comments=re.compile(r'#.*$')
 
-nentries = 0
-extra_entries = 5
-bl = file(sys.argv[1])
+def print_preamble():
+    print(r'struct blacklist_entry blacklist[] = {')
 
-print r'struct blacklist_entry blacklist[] = {'
 
-for line in bl.readlines():
-	line = re_comments.sub("", line).strip()
+def print_entry(kext, func, type):
+    strkext = '"' + kext + '"' if kext != "" else "NULL"
+    strfunc = '"' + func + '"' if func != "" else "NULL"
 
-	if not line:
-		continue
+    strtype = "0"
+    if type:
+        strtype = type_map(type) if type != "" else "normal"
 
-	fields = line.split(":")
-	if len(fields) != 3:
-		continue
-
-	(kext, func, ty) = fields
-
-	if kext == "":
-		kext = "NULL";
-	else:
-		kext = '"' + kext + '"'
-
-	if func == "":
-		func = "NULL";
-	else:
-		func = '"' + func + '"'
-
-	if ty == "":
-		ty = "normal";
-
-	print """	{{
+    print("""	{{
 		.kext_name = {},
 		.func_name = {},
 		.type_mask = {},
-	}},""".format(kext, func, type_map(ty))
-	nentries += 1
+	}},""".format(strkext, strfunc, strtype))
 
-# add space for new entries added at runtime
-print ''
-print r'	/* Unused entries that can be populated at runtime */'
-for i in xrange(0, extra_entries):
-	print """	{{
-		.kext_name = {},
-		.func_name = {},
-		.type_mask = {},
-	}},""".format("NULL", "NULL", 0)
 
-print r'};'
-print
+def print_postamble(nentries, extra_entries):
+    print('') # add space for new entries added at runtime
+    print(r'	/* Unused entries that can be populated at runtime */')
 
-print 'static size_t blacklist_entries = {};'.format(nentries)
-print 'static const size_t blacklist_max_entries = {};'.format(nentries + extra_entries)
+    for _ in range(extra_entries):
+        print_entry("", "", None)
+
+    print("};\n")
+
+    print('static size_t blacklist_entries = {};'.format(nentries))
+    print('static const size_t blacklist_max_entries = {};'.format(
+        nentries + extra_entries))
+
+
+def extract_symbol(line):
+    fields = line.split(":")
+    if len(fields) == 3:
+        return [field.strip() for field in fields]
+    raise Exception("Invalid exclusion rule: {}".format(line))
+
+
+with open(sys.argv[1]) as fd:
+    nentries = 0
+    extra_entries = 5
+
+    print_preamble()
+
+    for line in fd.readlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            kext, func, ty = extract_symbol(line)
+            print_entry(kext, func, ty)
+            nentries += 1
+
+    print_postamble(nentries, extra_entries)

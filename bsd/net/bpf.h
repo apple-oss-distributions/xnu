@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -187,6 +187,19 @@ struct bpf_version {
 	u_short bv_major;
 	u_short bv_minor;
 };
+
+#ifdef PRIVATE
+struct bpf_comp_stats {
+	uint64_t bcs_total_read; /* number of packets read from device */
+	uint64_t bcs_total_size; /* total size of filtered packets */
+	uint64_t bcs_total_hdr_size; /* total header size of captured packets */
+	uint64_t bcs_count_no_common_prefix; /* count of packets not compressible */
+	uint64_t bcs_count_compressed_prefix; /* count of compressed packets */
+	uint64_t bcs_total_compressed_prefix_size; /* total size of compressed data */
+	uint64_t bcs_max_compressed_prefix_size; /* max compressed data size */
+};
+#endif /* PRIVATE */
+
 #if defined(__LP64__)
 #include <sys/_types/_timeval32.h>
 
@@ -252,6 +265,10 @@ struct bpf_version {
 #define BIOCSETUP       _IOW('B', 131, struct bpf_setup_args)
 #define BIOCSPKTHDRV2   _IOW('B', 132, int)
 #define BIOCGPKTHDRV2   _IOW('B', 133, int)
+#define BIOCGHDRCOMP    _IOR('B', 134, int)
+#define BIOCSHDRCOMP    _IOW('B', 135, int)
+#define BIOCGHDRCOMPSTATS    _IOR('B', 136, struct bpf_comp_stats)
+#define BIOCGHDRCOMPON  _IOR('B', 137, int)
 #endif /* PRIVATE */
 /*
  * Structure prepended to each packet.
@@ -282,34 +299,90 @@ struct bpf_hdr_ext {
 	bpf_u_int32     bh_caplen;      /* length of captured portion */
 	bpf_u_int32     bh_datalen;     /* original length of packet */
 	u_short         bh_hdrlen;      /* length of bpf header */
-	u_short         bh_flags;
-#define BPF_HDR_EXT_FLAGS_DIR_IN        0x0000
-#define BPF_HDR_EXT_FLAGS_DIR_OUT       0x0001
+	u_char          bh_complen;
+	u_char          bh_flags;
+#define BPF_HDR_EXT_FLAGS_DIR_IN        0x00
+#define BPF_HDR_EXT_FLAGS_DIR_OUT       0x01
+#ifdef BSD_KERNEL_PRIVATE
+#define BPF_HDR_EXT_FLAGS_TCP           0x02
+#define BPF_HDR_EXT_FLAGS_UDP           0x04
+#endif /* BSD_KERNEL_PRIVATE */
 	pid_t           bh_pid;         /* process PID */
 	char            bh_comm[MAXCOMLEN + 1]; /* process command */
-	u_char          _bh_pad2[1];
 	u_char          bh_pktflags;
 #define BPF_PKTFLAGS_TCP_REXMT  0x01
 #define BPF_PKTFLAGS_START_SEQ  0x02
 #define BPF_PKTFLAGS_LAST_PKT   0x04
 #define BPF_PKTFLAGS_WAKE_PKT   0x08
-	u_char          bh_proto;       /* kernel reserved; 0 in userland */
+	uint16_t        bh_trace_tag;
 	bpf_u_int32     bh_svc;         /* service class */
 	bpf_u_int32     bh_flowid;      /* kernel reserved; 0 in userland */
 	bpf_u_int32     bh_unsent_bytes; /* unsent bytes at interface */
 	bpf_u_int32     bh_unsent_snd; /* unsent bytes at socket buffer */
 };
 
-#define BPF_CONTROL_NAME        "com.apple.net.bpf"
+#define BPF_HDR_EXT_HAS_TRACE_TAG 1
 
-struct bpf_mtag {
-	char            bt_comm[MAXCOMLEN];
-	pid_t           bt_pid;
-	bpf_u_int32     bt_svc;
-	unsigned char   bt_direction;
-#define BPF_MTAG_DIR_IN         0
-#define BPF_MTAG_DIR_OUT        1
+/*
+ * External representation of the bpf descriptor
+ */
+struct xbpf_d {
+	uint32_t        bd_structsize;  /* Size of this structure. */
+	int32_t         bd_dev_minor;
+	int32_t         bd_sig;
+	uint32_t        bd_slen;
+	uint32_t        bd_hlen;
+	uint32_t        bd_bufsize;
+	pid_t           bd_pid;
+
+	uint8_t         bd_promisc;
+	uint8_t         bd_immediate;
+	uint8_t         bd_hdrcmplt;
+	uint8_t         bd_async;
+
+	uint8_t         bd_headdrop;
+	uint8_t         bd_seesent;
+	uint8_t         bh_compreq;
+	uint8_t         bh_compenabled;
+
+	uint8_t         bd_exthdr;
+	uint8_t         bd_trunc;
+	uint8_t         bd_pkthdrv2;
+	uint8_t         bd_pad;
+
+	uint64_t        bd_rcount;
+	uint64_t        bd_dcount;
+	uint64_t        bd_fcount;
+	uint64_t        bd_wcount;
+	uint64_t        bd_wdcount;
+
+	char            bd_ifname[IFNAMSIZ];
+
+	uint64_t        bd_comp_count;
+	uint64_t        bd_comp_size;
+
+	uint32_t        bd_scnt;        /* number of packets in store buffer */
+	uint32_t        bd_hcnt;        /* number of packets in hold buffer */
+
+	uint64_t        bd_read_count;
+	uint64_t        bd_fsize;
 };
+
+#define _HAS_STRUCT_XBPF_D_ 2
+
+struct bpf_comp_hdr {
+	struct BPF_TIMEVAL bh_tstamp;   /* time stamp */
+	bpf_u_int32     bh_caplen;      /* length of captured portion */
+	bpf_u_int32     bh_datalen;     /* original length of packet */
+	u_short         bh_hdrlen;      /* length of bpf header (this struct
+	                                 *  plus alignment padding) */
+	u_char          bh_complen;     /* data portion compressed */
+	u_char          bh_padding;     /* data portion compressed */
+};
+
+#define HAS_BPF_HDR_COMP 1
+#define BPF_HDR_COMP_LEN_MAX 255
+
 
 #endif /* PRIVATE */
 #endif /* !defined(DRIVERKIT) */

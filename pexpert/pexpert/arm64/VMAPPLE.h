@@ -38,6 +38,7 @@
 #define CPU_HAS_APPLE_PAC         1
 #define HAS_PARAVIRTUALIZED_PAC   1
 #define HAS_GIC_V3                1
+#define HAS_ARM_FEAT_SSBS2        1
 
 #define __ARM_PAN_AVAILABLE__     1
 #define __ARM_16K_PG__            1
@@ -80,13 +81,5 @@
 
 #define ICC_SRE_SRE                             0x1
 /* End of GICv3 register definitions */
-
-#define VMAPPLE_HVC_NAMESPACE                   0xC1000000
-#define VMAPPLE_PAC_SET_INITIAL_STATE           (VMAPPLE_HVC_NAMESPACE | 0x0)
-#define VMAPPLE_PAC_GET_DEFAULT_KEYS            (VMAPPLE_HVC_NAMESPACE | 0x1)
-#define VMAPPLE_PAC_SET_A_KEYS                  (VMAPPLE_HVC_NAMESPACE | 0x2)
-#define VMAPPLE_PAC_SET_B_KEYS                  (VMAPPLE_HVC_NAMESPACE | 0x3)
-#define VMAPPLE_PAC_SET_EL0_DIVERSIFIER         (VMAPPLE_HVC_NAMESPACE | 0x4)
-#define VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1  (VMAPPLE_HVC_NAMESPACE | 0x5)
 
 #endif /* ! _PEXPERT_ARM64_VMAPPLE_H */

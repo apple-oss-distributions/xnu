@@ -72,8 +72,8 @@ IPC_KOBJECT_DEFINE(IKOT_UX_HANDLER,
 void
 ux_handler_init(void)
 {
-	ux_handler_port = ipc_kobject_alloc_port((ipc_kobject_t)&ux_handler_kobject,
-	    IKOT_UX_HANDLER, IPC_KOBJECT_ALLOC_NONE);
+	ux_handler_port = ipc_kobject_alloc_port(&ux_handler_kobject,
+	    IKOT_UX_HANDLER, IPC_KOBJECT_ALLOC_MAKE_SEND);
 }
 
 /*
@@ -84,13 +84,16 @@ ux_handler_init(void)
 void
 ux_handler_setup(void)
 {
-	ipc_port_t ux_handler_send_right = ipc_port_make_send(ux_handler_port);
+	ipc_port_t ux_handler_send_right;
+	kern_return_t kr = KERN_SUCCESS;
+
+	ux_handler_send_right = ipc_kobject_make_send(ux_handler_port,
+	    &ux_handler_kobject, IKOT_UX_HANDLER);
 
 	if (!IP_VALID(ux_handler_send_right)) {
 		panic("Couldn't allocate send right for ux_handler_port!");
 	}
 
-	kern_return_t kr = KERN_SUCCESS;
 
 	/*
 	 * Consumes 1 send right.
@@ -125,27 +128,21 @@ is_ux_handler_port(mach_port_t port)
 kern_return_t
 catch_mach_exception_raise(
 	mach_port_t                  exception_port,
-	mach_port_t                  thread_port,
-	mach_port_t                  task_port,
+	mach_port_t                  thread_port, /* control or read port */
+	mach_port_t                  task_port,   /* control or read port */
 	exception_type_t             exception,
 	mach_exception_data_t        code,
 	__unused mach_msg_type_number_t       codeCnt)
 {
+	kern_return_t kr;
+	thread_t target_thread;
+
 	if (exception_port != ux_handler_port) {
 		return KERN_FAILURE;
 	}
 
-	kern_return_t kr = KERN_SUCCESS;
-
-	thread_t    target_thread   = THREAD_NULL;
-	task_t      target_task     = TASK_NULL;
-
-	if ((target_thread = convert_port_to_thread(thread_port)) == THREAD_NULL) {
-		kr = KERN_INVALID_ARGUMENT;
-		goto out;
-	}
-
-	if ((target_task = convert_port_to_task(task_port)) == TASK_NULL) {
+	/* thread_port can be a read port if Developer Mode is off */
+	if ((target_thread = convert_port_to_thread_read(thread_port)) == THREAD_NULL) {
 		kr = KERN_INVALID_ARGUMENT;
 		goto out;
 	}
@@ -168,8 +165,6 @@ out:
 	}
 
 	thread_deallocate(target_thread);
-	task_deallocate(target_task);
-
 	return kr;
 }
 
@@ -268,6 +263,17 @@ catch_mach_exception_raise_identity_protected(
 	__unused mach_port_t               exception_port,
 	__unused uint64_t                  thread_id,
 	__unused mach_port_t               task_id_token,
+	__unused exception_type_t          exception,
+	__unused mach_exception_data_t     code,
+	__unused mach_msg_type_number_t    codeCnt)
+{
+	return KERN_INVALID_ARGUMENT;
+}
+
+kern_return_t
+catch_mach_exception_raise_backtrace(
+	__unused mach_port_t               exception_port,
+	__unused mach_port_t               kcdata_object,
 	__unused exception_type_t          exception,
 	__unused mach_exception_data_t     code,
 	__unused mach_msg_type_number_t    codeCnt)

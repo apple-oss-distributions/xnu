@@ -37,7 +37,12 @@ OS_ASSUME_NONNULL_BEGIN
  * The security domain as documented in 2.1.5. Authoritative manifests will
  * specify a security domain which is equal to that that of the chip.
  *
- * Unsigned 32-bit integer.
+ * Unsigned 32-bit integer. Valid values are
+ *
+ *     0    Manufacturing
+ *     1    Darwin
+ *     2    Data Center (unsure)
+ *     3    Unused
  *
  * @const IMG4_IDENTIFIER_ECID
  * The unique chip identifier as documented in 2.1.4. Authoritative manifests
@@ -97,6 +102,9 @@ OS_ASSUME_NONNULL_BEGIN
  *
  * Boolean.
  *
+ * This identifier was never recognized by SecureROM and has been obsoleted by
+ * {@link IMG4_IDENTIFIER_ESDM}.
+ *
  * @const IMG4_IDENTIFIER_CHMH
  * The chained manifest hash from the previous stage of secure boot as described
  * in 2.2.11. An authoritative manifest will either
@@ -138,6 +146,99 @@ OS_ASSUME_NONNULL_BEGIN
  *
  * C string.
  *
+ * @const IMG4_IDENTIFIER_ESDM
+ * The extended security domain of the chip. Authoritative manifests will
+ * specify an extended security domain which is equal to that of the chip.
+ *
+ * Unsigned 32-bit integer. This integer represents 8 fusing bits, and therefore
+ * the maximum valid value is 0xff.
+ *
+ * @const IMG4_IDENTIFIER_FPGT
+ * The factory pre-release global trust status of the chip. This is in effect an
+ * alias for the {@link IMG4_IDENTIFIER_IUOU} property. Either property being
+ * present in the environment will satisfy a manifest's iuob constraint.
+ *
+ * Boolean.
+ *
+ * @const IMG4_IDENTIFIER_UDID
+ * The universal device identifier of the chip. This uniquely identifies the SoC
+ * globally across all SoCs. Authoritative manifests will specify a UDID which
+ * is equal to that of the chip.
+ *
+ * 128-bit octet string.
+ *
+ * @const IMG4_IDENTIFIER_FCHP
+ * The chip identifier of the Cryptex coprocessor associated with the chip. This
+ * distinguishes the software Crytpex coprocessor instances which operate on the
+ * AP. Authoritative manifests will specify a Cryptex chip identifier that is
+ * equal to that of the chip.
+ *
+ * Runtimes are not capable of reporting this value, and queries for it should
+ * return ENOENT. This invariant is defined for convenience to the
+ * implementation.
+ *
+ * Unsigned 32-bit integer.
+ *
+ * @const IMG4_IDENTIFIER_TYPE
+ * The type identifier of the Cryptex coprocessor associated with the chip. This
+ * distinguishes software Cryptex coprocessor instances of the same chip
+ * identifier which operate on the AP. Authoritative manifests will specify a
+ * Cryptex type that is equal to that of the chip.
+ *
+ * Runtimes are not capable of reporting this value, and queries for it should
+ * return ENOENT. This invariant is defined for convenience to the
+ * implementation.
+ *
+ * Unsigned 32-bit integer.
+ *
+ * @const IMG4_IDENTIFIER_STYP
+ * The subtype identifier of the Cryptex coprocessor associated with the chip.
+ * This permits an additional level of granularity to distinguish Cryptex
+ * coprocessor instances from one another. Authoritative manifests will specify
+ * a Cryptex subtype that is equal to that of the chip.
+ *
+ * Runtimes are not capable of reporting this value, and queries for it should
+ * return ENOENT. This invariant is defined for convenience to the
+ * implementation.
+ *
+ * Unsigned 32-bit integer.
+ *
+ * @const IMG4_IDENTIFIER_CLAS
+ * The product class of the Cryptex coprocessor associated with the chip.
+ * Authoritative manifests will specify a product class that is equal to that of
+ * the chip.
+ *
+ * Valid values for this property are:
+ *
+ *     0xf0 - Intel Mac (with or without T2 security chip)
+ *     0xf1 - Apple Silicon Mac
+ *     0xf2 - iPhone/iPad/iPod touch
+ *     0xf3 - watch
+ *     0xf4 - tv/HomePod
+ *
+ * Unsigned 32-bit integer.
+ *
+ * @const IMG4_IDENTIFIER_SPIH
+ * The booted supplemental manifest hash.
+ *
+ * Digest.
+ *
+ * @const IMG4_IDENTIFIER_NSPH
+ * The preboot supplemental manifest hash intended to become active at the next
+ * boot.
+ *
+ * Digest.
+ *
+ * @const IMG4_IDENTIFIER_STNG
+ * The generation number of the last-executed blessed local policy on the AP.
+ *
+ * Unsigned 64-bit integer.
+ *
+ * @const IMG4_IDENTIFIER_VUID
+ * The volume group UUID that the chip is booting from.
+ *
+ * 128-bit octet string.
+ *
  * @const _IMG4_IDENTIFIER_CNT
  * A convenience value representing the number of known identifiers.
  */
@@ -158,110 +259,19 @@ OS_CLOSED_ENUM(img4_identifier, uint64_t,
 	IMG4_IDENTIFIER_AMNM,
 	IMG4_IDENTIFIER_EUOU,
 	IMG4_IDENTIFIER_LOVE,
+	IMG4_IDENTIFIER_ESDM,
+	IMG4_IDENTIFIER_FPGT,
+	IMG4_IDENTIFIER_UDID,
+	IMG4_IDENTIFIER_FCHP,
+	IMG4_IDENTIFIER_TYPE,
+	IMG4_IDENTIFIER_STYP,
+	IMG4_IDENTIFIER_CLAS,
+	IMG4_IDENTIFIER_SPIH,
+	IMG4_IDENTIFIER_NSPH,
+	IMG4_IDENTIFIER_STNG,
+	IMG4_IDENTIFIER_VUID,
 	_IMG4_IDENTIFIER_CNT,
 );
-
-/*!
- * @const IMG4_DGST_STRUCT_VERSION
- * The version of the {@link img4_dgst_t} structure supported by the
- * implementation.
- */
-#define IMG4_DGST_STRUCT_VERSION (0u)
-
-/*!
- * @const IMG4_DGST_MAX_LEN
- * The maximum length of a digest representable by an {@link img4_dgst_t}.
- */
-#define IMG4_DGST_MAX_LEN (48u)
-
-/*!
- * @typedef img4_dgst_t
- * A structure representing an Image4 digest.
- *
- * @field i4d_len
- * The version of the structure. Initialize to {@link IMG4_DGST_STRUCT_VERSION}.
- *
- * @field i4d_len
- * The length of the digest.
- *
- * @field i4d_bytes
- * The digest bytes.
- */
-IMG4_API_AVAILABLE_20200508
-typedef struct _img4_dgst {
-	img4_struct_version_t i4d_version;
-	size_t i4d_len;
-	uint8_t i4d_bytes[IMG4_DGST_MAX_LEN];
-} img4_dgst_t;
-
-/*!
- * @const IMG4_DGST_INIT
- * A convenience initializer for an {@link img4_dgst_t} structure.
- */
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
-#define IMG4_DGST_INIT (img4_dgst_t){ \
-	.i4d_version = IMG4_DGST_STRUCT_VERSION, \
-	.i4d_len = 0, \
-	.i4d_bytes = {0}, \
-}
-#elif defined(__cplusplus) && __cplusplus >= 201103L
-#define IMG4_DGST_INIT (img4_dgst_t{ \
-	IMG4_DGST_STRUCT_VERSION, \
-	0, \
-	{0}, \
-})
-#elif defined(__cplusplus)
-#define IMG4_DGST_INIT (img4_nonce_t((img4_nonce_t){ \
-	IMG4_DGST_STRUCT_VERSION, \
-	0, \
-	{0}, \
-}))
-#else
-#define IMG4_DGST_INIT {IMG4_DGST_STRUCT_VERSION}
-#endif
-
-/*!
- * @struct _img4_cstr
- * A structure describing a C-string identifier.
- *
- * @field i4b_len
- * The length of the C-string, not including the null terminating byte.
- *
- * @field i4b_cstr
- * The null-terminated C-string.
- *
- * @discussion
- * This structure is intentionally unversioned. It should never evolve into
- * anything more complex than it is.
- */
-struct _img4_cstr {
-	size_t i4cs_len;
-	char i4cs_cstr[64];
-};
-
-/*!
- * @const IMG4_CSTR_INIT
- * A convenience initializer for an {@link img4_cstr_t}.
- */
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
-#define IMG4_CSTR_INIT (img4_cstr_t){ \
-	.i4cs_len = 0, \
-	.i4cs_cstr = {0}, \
-}
-#elif defined(__cplusplus) && __cplusplus >= 201103L
-#define IMG4_CSTR_INIT (img4_cstr_t{ \
-	0, \
-	{0}, \
-})
-#elif defined(__cplusplus)
-#define IMG4_CSTR_INIT \
-		(img4_cstr_t((img4_cstr_t){ \
-	0, \
-	{0}, \
-}))
-#else
-#define IMG4_CSTR_INIT {0}
-#endif
 
 /*!
  * @typedef img4_pmap_data_t
@@ -285,12 +295,22 @@ typedef struct _img4_pmap_data img4_pmap_data_t;
  * @const IMG4_RUNTIME_OBJECT_SPEC_INDEX_SUPPLEMENTAL_OBJECT
  * The enumerated constant which refers to the
  * {@link IMG4_RUNTIME_OBJECT_SPEC_SUPPLEMENTAL_OBJECT} object.
+ *
+ * @const IMG4_RUNTIME_OBJECT_SPEC_INDEX_LOCAL_POLICY
+ * The enumerated constant which refers to the
+ * {@link IMG4_RUNTIME_OBJECT_SPEC_LOCAL_POLICY} object.
+ *
+ * @const _IMG4_RUNTIME_OBJECT_SPEC_INDEX_CNT
+ * A sentinel value representing the total number of executable object
+ * specifications.
  */
 IMG4_API_AVAILABLE_20210521
 OS_CLOSED_ENUM(img4_runtime_object_spec_index, uint64_t,
 	IMG4_RUNTIME_OBJECT_SPEC_INDEX_MANIFEST,
 	IMG4_RUNTIME_OBJECT_SPEC_INDEX_SUPPLEMENTAL_ROOT,
 	IMG4_RUNTIME_OBJECT_SPEC_INDEX_SUPPLEMENTAL_OBJECT,
+	IMG4_RUNTIME_OBJECT_SPEC_INDEX_LOCAL_POLICY,
+	_IMG4_RUNTIME_OBJECT_SPEC_INDEX_CNT,
 );
 
 /*!
@@ -758,7 +778,9 @@ typedef void (*img4_runtime_roll_nonce_t)(
  * The index of the nonce domain whose nonce should be queried.
  *
  * @param n
- * Upon successful return, the value of the nonce indicated by {@link nd}.
+ * Upon successful return, the value of the nonce indicated by {@link nd}. If
+ * the caller simply wishes to check if the nonce has been invalidated, this
+ * parameter may be NULL, and the caller can check for ESTALE.
  *
  * @result
  * Upon success, zero is returned. The implementation may also return one of the
@@ -771,7 +793,7 @@ IMG4_API_AVAILABLE_20210521
 typedef errno_t (*img4_runtime_copy_nonce_t)(
 	const img4_runtime_t *rt,
 	img4_nonce_domain_index_t ndi,
-	img4_nonce_t *n
+	img4_nonce_t *_Nullable n
 );
 
 /*!
@@ -973,12 +995,14 @@ const img4_runtime_t _img4_runtime_default;
 
 /*!
  * @const IMG4_RUNTIME_PMAP_CS
- * The runtime for the xnu pmap monitor. This runtime is not available outside
- * the kernel-proper. On architectures which do not have an xnu monitor, this
- * is merely an alias for the default kernel runtime.
+ * The runtime for the xnu pmap layer which is safe to be executed in a
+ * supervisor execution level if supported by hardware. This runtime is not
+ * available outside the kernel-proper.
  */
 #if XNU_KERNEL_PRIVATE
 #define IMG4_RUNTIME_PMAP_CS (img4if->i4if_v7.runtime_pmap_cs)
+#elif _DARWIN_BUILDING_TARGET_APPLEIMAGE4
+#define IMG4_RUNTIME_PMAP_CS (&_img4_runtime_pmap_cs)
 #endif
 
 /*!
@@ -1019,8 +1043,8 @@ img4_buff_dealloc(img4_buff_t *_Nullable buff);
 /*!
  * @const IMG4_RUNTIME_OBJECT_SPEC_SUPPLEMENTAL_ROOT
  * The DER representation of the certificate to use as the root of trust for
- * evaluating the supplemental software package. This object can only be set
- * once for any given boot session.
+ * evaluating the supplemental software package. This object can only be
+ * executed once for any given boot session.
  */
 #if !XNU_KERNEL_PRIVATE
 IMG4_API_AVAILABLE_20210205
@@ -1031,6 +1055,24 @@ const img4_runtime_object_spec_t _img4_runtime_object_spec_supplemental_root;
 #else
 #define IMG4_RUNTIME_OBJECT_SPEC_SUPPLEMENTAL_ROOT \
 		(img4if->i4if_v11.runtime_object_spec_supplemental_root)
+#endif
+
+/*!
+ * @const IMG4_RUNTIME_OBJECT_SPEC_LOCAL_POLICY
+ * The local policy object which has been authorized by the user for a
+ * subsequent boot of the system. This object may be executed multiple times in
+ * a given boot session. A subsequent local policy must have been authorized by
+ * the user after the currently-active one in order to successfully execute.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210205
+OS_EXPORT
+const img4_runtime_object_spec_t _img4_runtime_object_spec_local_policy;
+#define IMG4_RUNTIME_OBJECT_SPEC_LOCAL_POLICY \
+		(&_img4_runtime_object_spec_local_policy)
+#else
+#define IMG4_RUNTIME_OBJECT_SPEC_LOCAL_POLICY \
+		(img4if->i4if_v18.runtime_object_spec_local_policy)
 #endif
 
 #pragma mark API
@@ -1096,7 +1138,7 @@ img4_runtime_execute_object(const img4_runtime_t *rt,
 		const img4_buff_t *_Nullable manifest);
 #else
 #define img4_runtime_execute_object(...) \
-		(img4if->i4if_v11.execute_object(__VA_ARGS__))
+		(img4if->i4if_v11.runtime_execute_object(__VA_ARGS__))
 #endif
 
 /*!
@@ -1136,7 +1178,7 @@ img4_runtime_copy_object(const img4_runtime_t *rt,
 		size_t *_Nullable payload_len);
 #else
 #define img4_runtime_copy_object(...) \
-		(img4if->i4if_v11.copy_object(__VA_ARGS__))
+		(img4if->i4if_v11.runtime_copy_object(__VA_ARGS__))
 #endif
 
 OS_ASSUME_NONNULL_END

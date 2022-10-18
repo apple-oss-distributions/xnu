@@ -54,14 +54,11 @@
 #
 
 options		INET		#				# <inet>
-options		HW_AST		# Hardware ast support		# <hw_ast>
-options 	HW_FOOTPRINT	# Cache footprint support	# <hw_foot>
 
 options 	MACH		# Standard Mach features	# <mach>
 options		MACH_FLIPC	# Fast-Local IPC		# <mach_flipc>
 options		LOOP		# loopback support		# <loop>
 options		VLAN		#				# <vlan>
-options		SIXLOWPAN	# 6LoWPAN support		# <sixlowpan>
 options		BOND		#				# <bond>
 options		IF_FAKE		#				# <if_fake>
 options		IF_HEADLESS	#				# <if_headless>
@@ -74,7 +71,6 @@ options		DUMMYNET	# dummynet support		# <dummynet>
 options		TRAFFIC_MGT	# traffic management support		# <traffic_mgt>
 options		MULTICAST	# Internet Protocol Class-D	$
 options		TCPDEBUG	# TCP debug			# <tcpdebug>
-options		ICMP_BANDLIM	# ICMP bandwidth limiting sysctl
 options		IFNET_INPUT_SANITY_CHK	# allow dlil/ifnet input sanity check # <ifnet_input_chk>
 options		MULTIPATH	# Multipath domain		# <multipath>
 options		MPTCP		# Multipath TCP			# <mptcp>
@@ -97,8 +93,6 @@ options		CONFIG_NEXUS_NETIF	#	# <config_nexus_netif>
 # secure_kernel - secure kernel from user programs
 options     SECURE_KERNEL       # <secure_kernel>
 
-options     OLD_SEMWAIT_SIGNAL  # old semwait_signal handler
-
 #
 #	4.4 general kernel
 #
@@ -113,7 +107,6 @@ options		CONFIG_MBUF_JUMBO	# jumbo cluster pool	# <config_mbuf_jumbo>
 options		CONFIG_IMAGEBOOT_IMG4	# authenticate image with AppleImage4	# <config_imageboot_img4>
 options		CONFIG_IMAGEBOOT_CHUNKLIST	# authenticate image with a chunk list	# <config_imageboot_chunklist>
 
-options		CONFIG_WORKQUEUE	# <config_workqueue>
 options		CONFIG_WORKLOOP_DEBUG	# <config_workloop_debug>
 
 #
@@ -149,6 +142,7 @@ options 	CONFIG_MOUNT_PREBOOTRECOVERY # mount Preboot and/or Recovery volume on 
 options		CONFIG_DATALESS_FILES # support dataless file materialization # <config_dataless_files>
 options         CONFIG_BASESYSTEMROOT # mount BaseSystem as initial root filesystem on some kinds of startup # <config_basesystemroot>
 options         CONFIG_UNION_MOUNTS # support union mounts # <config_union_mounts>
+options		CONFIG_FILE_LEASES # local file leasing support # <config_file_leases>
 
 #
 # VFS debugging
@@ -157,11 +151,8 @@ options		CONFIG_IOCOUNT_TRACE	# enable vnode's iocount tracing # <config_iocount
 
 # NFS support
 #
-options		NFSCLIENT	# Be an NFS client		# <nfsclient>
 options		NFSSERVER	# Be an NFS server		# <nfsserver>
-options		CONFIG_NFS_GSS	# Support NFS GSSAPI		# <config_nfs_gss>
-options		CONFIG_NFS4	# Use NFSv4			# <config_nfs4>
-options		CONFIG_NETBOOT	# network booting (requires NFSCLIENT) # <config_netboot>
+options		CONFIG_NETBOOT	# network booting		# <config_netboot>
 
 #
 # Machine Independent Apple Features
@@ -252,12 +243,6 @@ options CONFIG_TCBHASHSIZE=4096		# <medium,large,xlarge>
 options CONFIG_TCBHASHSIZE=128		# <xsmall,small,bsmall>
 
 #
-# Configure bandwidth limiting sysctl
-#
-options CONFIG_ICMP_BANDLIM=250		# <medium,large,xlarge>
-options CONFIG_ICMP_BANDLIM=50		# <xsmall,small,bsmall>
-
-#
 #  configurable async IO options
 #  CONFIG_AIO_MAX - system wide limit of async IO requests.
 #  CONFIG_AIO_PROCESS_MAX - process limit of async IO requests.
@@ -304,8 +289,10 @@ options   CONFIG_MSG_BSIZE=CONFIG_MSG_BSIZE_DEV	# <development,debug>
 #
 # maximum size of the per-process Mach IPC table
 #
-options   CONFIG_IPC_TABLE_ENTRIES_STEPS=64  	# 137898 entries	# <bsmall,small,xsmall>
-options   CONFIG_IPC_TABLE_ENTRIES_STEPS=256 	# 300714 entries	# <medium,large,xlarge>
+options   CONFIG_IPC_TABLE_ENTRIES_SIZE_MAX=3145728  	# 3M == 131072 entries	# <bsmall,small,xsmall>
+options   CONFIG_IPC_TABLE_ENTRIES_SIZE_MAX=7340032 	# 7M == 305834 entries	# <medium,large,xlarge>
+options   CONFIG_IPC_TABLE_REQUEST_SIZE_MAX=1048576 	# 1M == 65536 requests	# <bsmall,small,xsmall>
+options   CONFIG_IPC_TABLE_REQUEST_SIZE_MAX=2097152 	# 2M == 131072 requests	# <medium,large,xlarge>
 
 #
 # maximum copyout size for IPC debugging tools
@@ -329,8 +316,6 @@ options   CONFIG_VSPRINTF               # <vsprintf>
 # embedded device
 #
 options   CONFIG_EMBEDDED			# <config_embedded>
-
-options   CONFIG_ARROW              # <config_arrow>
 
 
 options   NOS_ARM_ASM			# <nos_arm_asm>
@@ -375,6 +360,8 @@ options		CONFIG_VPS_DYNAMIC_PRIO		# <vps_dynamic_prio>
 #
 options		CONFIG_MEMORYSTATUS		# <memorystatus>
 
+options		CONFIG_DEFERRED_RECLAIM		# <config_deferred_reclaim>
+
 #
 # enable jetsam - used on embedded
 #
@@ -409,8 +396,6 @@ options		CONFIG_PHANTOM_CACHE		# <phantom_cache>
 options		VM_PRESSURE_EVENTS		# <vm_pressure_events>
 
 options		CONFIG_SECLUDED_MEMORY		# <config_secluded_memory>
-
-options		CONFIG_BACKGROUND_QUEUE		# <config_background_queue>
 
 #
 # Ledger features
@@ -455,6 +440,16 @@ options		CONFIG_COREDUMP			# <config_coredump>
 options		CONFIG_VNGUARD			# <config_vnguard>
 
 #
+# Paravirtualization
+#
+options		CONFIG_PV_TICKET		# <config_pv_ticket>
+
+#
+# Enable extended VM address space and user heap segregation
+#
+options     CONFIG_MAP_RANGES       # <config_map_ranges>
+
+#
 #  Ethernet (ARP)
 #
 pseudo-device	ether				# <networking,inet>
@@ -475,11 +470,6 @@ pseudo-device  pty       8 init pty_init       # <bsmall>
 # Cloning pseudo terminal service
 #
 pseudo-device	ptmx	1 init ptmx_init
-
-#
-# vnode device
-#
-pseudo-device  vndevice		4       init    vndevice_init   # <development,debug>
 
 #
 # memory device
@@ -585,25 +575,10 @@ options		CONFIG_PROC_RESOURCE_LIMITS	# Per process limits for resources like fil
 #	of this option is significant.
 #
 options		MACH_ASSERT	#		# <mach_assert>
-#
-# MACH_DEBUG enables the mach_debug_server, a message interface used to
-#	retrieve or control various statistics. This interface may expose data
-#	structures that would not normally be allowed outside the kernel, and
-#	MUST NOT be enabled on a released configuration.
-#	Other options here enable information retrieval for specific subsystems
-#
-options		MACH_DEBUG	# IPC debugging interface	# <mdebug>
-options		MACH_IPC_DEBUG	# Enable IPC debugging calls	# <ipc_debug>
-options		MACH_LOCKFREE_SPACE	# Enable lockfree IPC space # <ipc_lockfree_space>
 options		MACH_VM_DEBUG	#				# <debug>
 options		CONFIG_ZLEAKS	# Live zone leak debugging	# <zleaks>
 options		CONFIG_VOUCHER_DEPRECATED # Enable deprecated voucher managers # <config_voucher_deprecated>
 
-#
-# CONFIG_TASK_ZONE_INFO allows per-task zone information to be extracted
-# Primarily useful for xnu debug and development.
-#
-options		CONFIG_TASK_ZONE_INFO		# <task_zone_info>
 #
 # CONFIG_DEBUGGER_FOR_ZONE_INFO restricts zone info so that it is only
 # available when the kernel is being debugged.
@@ -636,6 +611,11 @@ options		LOCK_STATS		#		    # <lock_stats>
 options     KPERF                  # <kperf>
 options     KPC                    # <kpc>
 
+
+options     CONFIG_PERVASIVE_CPI    # <config_pervasive_cpi>
+options     CONFIG_PERVASIVE_ENERGY # <config_pervasive_energy>
+
+options     CONFIG_IOTRACE          # Physical IO tracing    # <config_iotrace>
 
 #
 # CONFIG_PERFMON enables code to interface with performance monitoring hardware,
@@ -672,13 +652,6 @@ options   CONFIG_TASK_MAX=512			# <xsmall,bsmall>
 #
 options   CONFIG_ZONE_MAP_MIN=120586240	# <xsmall,bsmall,small,medium,large,xlarge>
 
-# Sizes must be a power of two for the zhash to
-# be able to just mask off bits instead of mod
-options	  CONFIG_ZLEAK_ALLOCATION_MAP_NUM=16384 #<medium,large,xlarge>
-options	  CONFIG_ZLEAK_ALLOCATION_MAP_NUM=8192	#<small,xsmall,bsmall>
-options   CONFIG_ZLEAK_TRACE_MAP_NUM=8192 #<medium,large,xlarge>
-options   CONFIG_ZLEAK_TRACE_MAP_NUM=4096 #<small,xsmall,bsmall>
-
 # vc_progress_white - make the progress gear white instead of black
 options	  CONFIG_VC_PROGRESS_WHITE		# <vc_progress_white>
 
@@ -693,10 +666,10 @@ options		CONFIG_SCHED_MULTIQ		# <config_sched_multiq>
 options		CONFIG_SCHED_TIMESHARE_CORE	# <config_sched_traditional,config_sched_multiq>
 options		CONFIG_CLUTCH			# <config_clutch>
 options 	CONFIG_SCHED_AUTO_JOIN		# <config_sched_auto_join>
+options 	CONFIG_SCHED_RT_RESTRICT		# <config_sched_rt_restrict>
 
 options		CONFIG_SCHED_IDLE_IN_PLACE	# <config_sched_idle_in_place>
 options		CONFIG_SCHED_SFI		# <config_sched_sfi>
-options		CONFIG_GZALLOC			# <config_gzalloc>
 options		CONFIG_PROB_GZALLOC		# <pgzalloc>
 options		CONFIG_SCHED_DEFERRED_AST	# <config_sched_deferred_ast>
 
@@ -706,6 +679,7 @@ options		CONFIG_PREADOPT_TG_DEBUG	# <config_preadopt_tg_debug>
 # Enable allocation of contiguous physical memory through vm_map_enter_cpm()
 options		VM_CPM				# <vm_cpm>
 
+# This is overridden by the board configuration's HAS_FAST_CNTVCT.
 options	    CONFIG_SKIP_PRECISE_USER_KERNEL_TIME    # <config_skip_precise_user_kernel_time>
 
 #
@@ -770,11 +744,6 @@ options		COPYOUT_SHIM			# Shim for copyout memory analysis via kext #<copyout_sh
 options		CONFIG_MACH_BRIDGE_SEND_TIME #  # <config_mach_bridge_send_time>
 options		CONFIG_MACH_BRIDGE_RECV_TIME #  # <config_mach_bridge_recv_time>
 
-#
-# Telemetry for 32-bit process launch
-#
-options		CONFIG_32BIT_TELEMETRY # # <config_32bit_telemetry>
-
 options		CONFIG_QUIESCE_COUNTER # Support for _COMM_PAGE_CPU_QUIESCENT_COUNTER # <config_quiesce_counter>
 options		CONFIG_ARM_PFZ	# Support for PFZ on ARM # <config_arm_pfz>
 
@@ -802,13 +771,10 @@ options		CONFIG_PROC_UDATA_STORAGE # <config_proc_udata_storage>
 
 pseudo-device ksancov 1 init ksancov_init_dev # <config_ksancov>
 
-# Debug instrumentation to catch code that leaves interrupts masked
-# for an excessive period of time
-options		INTERRUPT_MASKED_DEBUG # <interrupt_masked_debug>
-
-# Statistics for disabled preemption duration and emitting trace points
-# or panicking when the duration crosses a threshold.
-options		SCHED_PREEMPTION_DISABLE_DEBUG # <sched_preemption_disable_debug>
+# Debug instrumentation for statistics and catching of code that
+# leaves interrupts masked or preemption disabled for an excessive
+# period of time.
+options		SCHED_HYGIENE_DEBUG # <sched_hygiene_debug>
 
 # support for system call rejection/tracing
 options		CONFIG_DEBUG_SYSCALL_REJECTION	# <config_debug_syscall_rejection>

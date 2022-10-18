@@ -43,8 +43,6 @@
 
 #if defined (__arm64__)
 #include <arm/cpu_data_internal.h>
-#elif defined (__arm__)
-#include <arm/cpu_data_internal.h>
 #endif
 
 /* global for whether to read PMCs on context switch */

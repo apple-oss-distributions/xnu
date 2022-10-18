@@ -432,6 +432,8 @@ void kernel_debug_filtered(uint32_t debugid, uintptr_t arg1, uintptr_t arg2,
 
 #ifdef XNU_KERNEL_PRIVATE
 
+void kdebug_startup(void);
+
 /* Used in early boot to log events. */
 void kernel_debug_early(uint32_t  debugid, uintptr_t arg1, uintptr_t arg2,
     uintptr_t arg3, uintptr_t arg4);
@@ -466,20 +468,24 @@ void kdebug_free_early_buf(void);
 
 struct proc;
 void kdbg_trace_data(struct proc *proc, long *arg_pid, long *arg_uniqueid);
-void kdbg_trace_string(struct proc *proc, long *arg1, long *arg2, long *arg3,
-    long *arg4);
 
 #define KDBG_VFS_LOOKUP_FLAG_LOOKUP 0x01
 #define KDBG_VFS_LOOKUP_FLAG_NOPROCFILT 0x02
 void kdebug_vfs_lookup(unsigned long *path_words, int path_len, void *vnp,
     uint32_t flags);
 
-void kernel_triage_record(uint64_t thread_id, uint64_t debugid, uintptr_t arg1);
-void kernel_triage_extract(uint64_t thread_id, void *buf, uint32_t bufsz);
+void ktriage_extract(uint64_t thread_id, void *buf, uint32_t bufsz);
 
 #endif /* XNU_KERNEL_PRIVATE */
 
 #ifdef KERNEL_PRIVATE
+
+typedef struct ktriage_strings {
+	int num_strings;
+	const char **strings;
+} ktriage_strings_t;
+
+void ktriage_record(uint64_t thread_id, uint64_t debugid, uintptr_t arg1);
 
 #define NUMPARMS 23
 void kdebug_lookup_gen_events(long *path_words, int path_len, void *vnp,

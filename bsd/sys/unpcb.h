@@ -244,6 +244,31 @@ struct xunpcb64 {
 
 #endif /* XNU_TARGET_OS_OSX || KERNEL || !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
 
+struct  xunpcb_n {
+	u_int32_t                       xunp_len;       /* length of this structure */
+	u_int32_t                       xunp_kind;      /* XSO_UNPCB */
+	u_int64_t                       xunp_unpp;      /* to help netstat, fstat */
+	u_int64_t                       xunp_vnode;     /* if associated with file */
+	u_int64_t                       xunp_ino;       /* fake inode number */
+	u_int64_t                       xunp_conn;      /* control block of connected socket */
+	u_int64_t                       xunp_refs;      /* referencing socket linked list */
+	u_int64_t                       xunp_reflink;   /* link in unp_refs list */
+	int                             xunp_cc;        /* copy of rcv.sb_cc */
+	int                             xunp_mbcnt;     /* copy of rcv.sb_mbcnt */
+	int                             xunp_flags;     /* flags */
+	unp_gen_t                       xunp_gencnt;    /* generation count of this instance */
+	union {
+		struct sockaddr_un      xuu_addr;       /* our bound address */
+		char                    xu_dummy1[256];
+	} xu_au;
+#define xu_addr xu_au.xuu_addr
+	union {
+		struct sockaddr_un      xuu_caddr;      /* their bound address */
+		char                    xu_dummy2[256];
+	} xu_cau;
+#define xu_caddr xu_cau.xuu_caddr
+};
+
 #pragma pack()
 
 #endif /* _SYS_SOCKETVAR_H_ */

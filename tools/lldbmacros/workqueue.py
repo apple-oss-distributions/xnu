@@ -39,8 +39,9 @@ def GetWorkqueueSummary(proc, wq):
         if wq.wq_flags & pended: s += 'P'
         s += ']'
         wq_flags.append(s)
+    task = GetTaskFromProc(proc)
 
-    return "{p.task: <#020x} {p: <#020x} {wq: <#020x} {wq.wq_threads_scheduled: <10d} {wq.wq_reqcount: <10d} {wq.wq_thidlecount: <10d} {wq.wq_thdying_count: <10d} {wq.wq_creations: <10d} {wq.wq_fulfilled: <10d} {wq_flags: <30s}".format(p=proc, wq=wq, wq_flags=" ".join(wq_flags));
+    return "{task: <#020x} {p: <#020x} {wq: <#020x} {wq.wq_threads_scheduled: <10d} {wq.wq_reqcount: <10d} {wq.wq_thidlecount: <10d} {wq.wq_thdying_count: <10d} {wq.wq_creations: <10d} {wq.wq_fulfilled: <10d} {wq_flags: <30s}".format(task=task, p=proc, wq=wq, wq_flags=" ".join(wq_flags));
 
 @header("{:<20s} {:<20s} {:>10s}  {:9s} {:<20s} {:<10s} {:<30s}".format(
     'thread', 'uthread', 'thport', 'kind', 'kqueue', 'idle (ms)', 'uu_workq_flags'))
@@ -195,7 +196,9 @@ def ShowAllWorkqueues(cmd_args=None, cmd_options={}, O=None):
 
     with O.table(GetWorkqueueSummary.header):
         for t in kern.tasks:
-            proc = Cast(t.bsd_info, 'proc *')
+            proc = GetProcFromTask(t)
+            if not proc:
+                continue
             wq = Cast(proc.p_wqptr, "struct workqueue *");
             if wq:
                 print(GetWorkqueueSummary(proc, wq))

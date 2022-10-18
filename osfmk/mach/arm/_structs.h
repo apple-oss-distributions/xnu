@@ -99,16 +99,19 @@ _STRUCT_ARM_THREAD_STATE
 #define __DARWIN_OPAQUE_ARM_THREAD_STATE64 0
 #define __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH 0x1
 #define __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR 0x2
-#define __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED 0x4
+#define __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC 0x4
+#define __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR 0x8
 
-#define __DARWIN_ARM_THREAD_STATE64_SIGRETURN_TOKEN_MASK 0xffff0000
+#define __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK 0xff000000
+#define __DARWIN_ARM_THREAD_STATE64_SIGRETURN_PC_MASK 0x000f0000
+#define __DARWIN_ARM_THREAD_STATE64_SIGRETURN_LR_MASK 0x00f00000
 
-#define __DARWIN_ARM_THREAD_STATE64_SET_SIGRETURN_TOKEN(ts, token) \
-    ((ts)->flags |= (((uint32_t)(token)) & __DARWIN_ARM_THREAD_STATE64_SIGRETURN_TOKEN_MASK))
+#define __DARWIN_ARM_THREAD_STATE64_SET_SIGRETURN_TOKEN(ts, token, mask) \
+    ((ts)->flags |= (((uint32_t)(token)) & (mask)))
 
-#define __DARWIN_ARM_THREAD_STATE64_CHECK_SIGRETURN_TOKEN(ts, token) \
-    (((ts)->flags & __DARWIN_ARM_THREAD_STATE64_SIGRETURN_TOKEN_MASK) == \
-    (((uint32_t)(token)) & __DARWIN_ARM_THREAD_STATE64_SIGRETURN_TOKEN_MASK))
+#define __DARWIN_ARM_THREAD_STATE64_CHECK_SIGRETURN_TOKEN(ts, token, mask) \
+    (((ts)->flags & (mask)) == \
+    (((uint32_t)(token)) & (mask)))
 
 #define _STRUCT_ARM_THREAD_STATE64      struct arm_thread_state64
 _STRUCT_ARM_THREAD_STATE64
@@ -213,7 +216,10 @@ _STRUCT_ARM_THREAD_STATE64
 
 #define __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH 0x1
 #define __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR 0x2
-#define __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED 0x4
+#define __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC 0x4
+#define __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR 0x8
+
+#define __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK 0xff000000
 
 /* Return pc field of arm_thread_state64_t as a data pointer value */
 #define __darwin_arm_thread_state64_get_pc(ts) \
@@ -222,6 +228,14 @@ _STRUCT_ARM_THREAD_STATE64
 	__DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH) ?                   \
 	ptrauth_auth_data(__tsp->__opaque_pc,                             \
 	ptrauth_key_process_independent_code,                             \
+	((__tsp->__opaque_flags &                                         \
+	__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC) == 0 &&       \
+	(__tsp->__opaque_flags &                                          \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK)) ?             \
+	ptrauth_blend_discriminator((void *)(unsigned long)               \
+	(__tsp->__opaque_flags &                                          \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK),               \
+	ptrauth_string_discriminator("pc")) :                             \
 	ptrauth_string_discriminator("pc")) : __tsp->__opaque_pc); })
 /* Return pc field of arm_thread_state64_t as a function pointer. May return
  * NULL if a valid function pointer cannot be constructed, the caller should
@@ -232,6 +246,14 @@ _STRUCT_ARM_THREAD_STATE64
 	__DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH) ?                   \
 	ptrauth_auth_function(__tsp->__opaque_pc,                         \
 	ptrauth_key_process_independent_code,                             \
+	((__tsp->__opaque_flags &                                         \
+	__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC) == 0 &&       \
+	(__tsp->__opaque_flags &                                          \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK)) ?             \
+	ptrauth_blend_discriminator((void *)(unsigned long)               \
+	(__tsp->__opaque_flags &                                          \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK),               \
+	ptrauth_string_discriminator("pc")) :                             \
 	ptrauth_string_discriminator("pc")) : NULL); })
 /* Set pc field of arm_thread_state64_t to a function pointer */
 #define __darwin_arm_thread_state64_set_pc_fptr(ts, fptr) \
@@ -241,10 +263,16 @@ _STRUCT_ARM_THREAD_STATE64
 	__DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH) ?               \
 	ptrauth_auth_and_resign(__f, ptrauth_key_function_pointer, 0, \
 	ptrauth_key_process_independent_code,                         \
+	(__tsp->__opaque_flags &                                      \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK) ?          \
+	ptrauth_blend_discriminator((void *)(unsigned long)           \
+	(__tsp->__opaque_flags &                                      \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK),           \
+	ptrauth_string_discriminator("pc")) :                         \
 	ptrauth_string_discriminator("pc")) : ptrauth_auth_data(__f,  \
 	ptrauth_key_function_pointer, 0)) : __f);                     \
 	__tsp->__opaque_flags &=                                      \
-	~__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED; })
+	~__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC; })
 /* Return lr field of arm_thread_state64_t as a data pointer value */
 #define __darwin_arm_thread_state64_get_lr(ts) \
 	__extension__ ({ const _STRUCT_ARM_THREAD_STATE64 *__tsp = &(ts); \
@@ -253,6 +281,14 @@ _STRUCT_ARM_THREAD_STATE64
 	__DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR)) ?                \
 	ptrauth_auth_data(__tsp->__opaque_lr,                             \
 	ptrauth_key_process_independent_code,                             \
+	((__tsp->__opaque_flags &                                         \
+	__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR) == 0 &&       \
+	(__tsp->__opaque_flags &                                          \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK)) ?             \
+	ptrauth_blend_discriminator((void *)(unsigned long)               \
+	(__tsp->__opaque_flags &                                          \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK),               \
+	ptrauth_string_discriminator("lr")) :                             \
 	ptrauth_string_discriminator("lr")) : __tsp->__opaque_lr); })
 /* Return lr field of arm_thread_state64_t as a function pointer. May return
  * NULL if a valid function pointer cannot be constructed, the caller should
@@ -264,6 +300,14 @@ _STRUCT_ARM_THREAD_STATE64
 	__DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR)) ?                \
 	ptrauth_auth_function(__tsp->__opaque_lr,                         \
 	ptrauth_key_process_independent_code,                             \
+	((__tsp->__opaque_flags &                                         \
+	__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR) == 0 &&       \
+	(__tsp->__opaque_flags &                                          \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK)) ?             \
+	ptrauth_blend_discriminator((void *)(unsigned long)               \
+	(__tsp->__opaque_flags &                                          \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK),               \
+	ptrauth_string_discriminator("lr")) :                             \
 	ptrauth_string_discriminator("lr")) : NULL); })
 /* Set lr field of arm_thread_state64_t to a function pointer */
 #define __darwin_arm_thread_state64_set_lr_fptr(ts, fptr) \
@@ -274,9 +318,15 @@ _STRUCT_ARM_THREAD_STATE64
 	&= ~__DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR ,                   \
 	ptrauth_auth_and_resign(__f, ptrauth_key_function_pointer, 0,          \
 	ptrauth_key_process_independent_code,                                  \
+	(__tsp->__opaque_flags &                                               \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK) ?                   \
+	ptrauth_blend_discriminator((void *)(unsigned long)                    \
+	(__tsp->__opaque_flags &                                               \
+	__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK),                    \
+	ptrauth_string_discriminator("lr")) :                                  \
 	ptrauth_string_discriminator("lr"))) : ptrauth_auth_data(__f,          \
 	ptrauth_key_function_pointer, 0)) : __f); __tsp->__opaque_flags &=     \
-	~__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED; })
+	~__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR; })
 /* Return sp field of arm_thread_state64_t as a data pointer value */
 #define __darwin_arm_thread_state64_get_sp(ts) \
 	__extension__ ({ const _STRUCT_ARM_THREAD_STATE64 *__tsp = &(ts); \
@@ -293,9 +343,7 @@ _STRUCT_ARM_THREAD_STATE64
 	__DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH) ?             \
 	ptrauth_sign_unauthenticated(__p,                           \
 	ptrauth_key_process_independent_data,                       \
-	ptrauth_string_discriminator("sp")) : __p);                 \
-	__tsp->__opaque_flags &=                                    \
-	~__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED; })
+	ptrauth_string_discriminator("sp")) : __p); })
 /* Return fp field of arm_thread_state64_t as a data pointer value */
 #define __darwin_arm_thread_state64_get_fp(ts) \
 	__extension__ ({ const _STRUCT_ARM_THREAD_STATE64 *__tsp = &(ts); \
@@ -312,9 +360,7 @@ _STRUCT_ARM_THREAD_STATE64
 	__DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH) ?             \
 	ptrauth_sign_unauthenticated(__p,                           \
 	ptrauth_key_process_independent_data,                       \
-	ptrauth_string_discriminator("fp")) : __p);                 \
-	__tsp->__opaque_flags &=                                    \
-	~__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED; })
+	ptrauth_string_discriminator("fp")) : __p); })
 
 /* Strip ptr auth bits from pc, lr, sp and fp field of arm_thread_state64_t */
 #define __darwin_arm_thread_state64_ptrauth_strip(ts) \
@@ -334,7 +380,8 @@ _STRUCT_ARM_THREAD_STATE64
 	ptrauth_strip(__tsp->__opaque_fp, ptrauth_key_process_independent_data)); \
 	__tsp->__opaque_flags |=                                                  \
 	__DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH; __tsp->__opaque_flags &=    \
-	~__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED; })
+	~(__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC |                    \
+	__DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR); })
 
 #else /* __has_feature(ptrauth_calls) && defined(__LP64__) */
 

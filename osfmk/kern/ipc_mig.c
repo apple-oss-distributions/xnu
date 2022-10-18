@@ -162,7 +162,7 @@ kernel_mach_msg_send_common(
 	mr = ipc_kmsg_send(kmsg, option, timeout_val);
 
 	if (mr != MACH_MSG_SUCCESS) {
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_ALL);
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 	}
 
@@ -205,6 +205,7 @@ kernel_mach_msg_send_with_builder(
 {
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
+	mach_msg_header_t *hdr;
 
 	KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
 
@@ -212,16 +213,17 @@ kernel_mach_msg_send_with_builder(
 		*message_moved = FALSE;
 	}
 
-	kmsg = ipc_kmsg_alloc(send_size, 0,
+	kmsg = ipc_kmsg_alloc(send_size, 0, 0,
 	    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO);
 	if (kmsg == IKM_NULL) {
 		mr = MACH_SEND_NO_BUFFER;
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
 	}
+	hdr = ikm_header(kmsg);
 
-	builder(kmsg->ikm_header, send_size);
-	kmsg->ikm_header->msgh_size = send_size;
+	builder(hdr, send_size);
+	hdr->msgh_size = send_size;
 
 	return kernel_mach_msg_send_common(kmsg, option, timeout_val, message_moved);
 }
@@ -262,6 +264,7 @@ kernel_mach_msg_rpc(
 	ipc_port_t dest = IPC_PORT_NULL;
 	ipc_port_t reply;
 	ipc_kmsg_t kmsg;
+	mach_msg_header_t *hdr;
 	mach_port_seqno_t seqno;
 	mach_msg_return_t mr;
 
@@ -278,6 +281,7 @@ kernel_mach_msg_rpc(
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
 	}
+	hdr = ikm_header(kmsg);
 
 	reply = self->ith_kernel_reply_port;
 	if (reply == IP_NULL) {
@@ -300,9 +304,9 @@ kernel_mach_msg_rpc(
 	}
 
 	/* insert send-once right for the reply port and send right for the adopted voucher */
-	kmsg->ikm_header->msgh_local_port = reply;
+	ikm_header(kmsg)->msgh_local_port = reply;
 	ipc_kmsg_set_voucher_port(kmsg, voucher_port, MACH_MSG_TYPE_MOVE_SEND);
-	kmsg->ikm_header->msgh_bits |=
+	ikm_header(kmsg)->msgh_bits |=
 	    MACH_MSGH_BITS_SET_PORTS(0, MACH_MSG_TYPE_MAKE_SEND_ONCE, MACH_MSG_TYPE_MOVE_SEND);
 
 	mr = ipc_kmsg_copyin_from_kernel(kmsg);
@@ -332,13 +336,13 @@ kernel_mach_msg_rpc(
 	 * Sync IPC linkage with kernel special reply port, grab a reference
 	 * of the destination port before it gets donated to mqueue in ipc_kmsg_send.
 	 */
-	dest = kmsg->ikm_header->msgh_remote_port;
+	dest = ikm_header(kmsg)->msgh_remote_port;
 	ip_reference(dest);
 
 	mr = ipc_kmsg_send(kmsg, option, MACH_MSG_TIMEOUT_NONE);
 	if (mr != MACH_MSG_SUCCESS) {
 		ip_release(dest);
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_ALL);
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
 	}
@@ -358,13 +362,13 @@ kernel_mach_msg_rpc(
 		ipc_port_link_special_reply_port(reply,
 		    dest, FALSE);
 
-		self->ith_continuation = (void (*)(mach_msg_return_t))0;
-
 		ipc_mqueue_receive(&reply->ip_waitq,
-		    MACH_MSG_OPTION_NONE,
+		    MACH64_MSG_OPTION_NONE,
 		    MACH_MSG_SIZE_MAX,
+		    0,
 		    MACH_MSG_TIMEOUT_NONE,
-		    interruptible ? THREAD_INTERRUPTIBLE : THREAD_UNINT);
+		    interruptible ? THREAD_INTERRUPTIBLE : THREAD_UNINT,
+		    /* continuation ? */ false);
 
 		mr = self->ith_state;
 		kmsg = self->ith_kmsg;
@@ -380,7 +384,7 @@ kernel_mach_msg_rpc(
 		assert(interruptible);
 		assert(reply == self->ith_kernel_reply_port);
 
-		if (self->ast & AST_APC) {
+		if (thread_ast_peek(self, AST_APC)) {
 			ip_release(dest);
 			thread_dealloc_kernel_special_reply_port(current_thread());
 			return mr;
@@ -391,7 +395,7 @@ kernel_mach_msg_rpc(
 	ip_release(dest);
 	dest = IPC_PORT_NULL;
 
-	mach_msg_size_t kmsg_size = kmsg->ikm_header->msgh_size;
+	mach_msg_size_t kmsg_size = ikm_header(kmsg)->msgh_size;
 	mach_msg_size_t kmsg_and_max_trailer_size;
 
 	/*
@@ -405,7 +409,7 @@ kernel_mach_msg_rpc(
 
 	/* The message header and body itself must be receivable */
 	if (rcv_size < kmsg_size) {
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_ALL);
 		return MACH_RCV_TOO_LARGE;
 	}
 
@@ -417,7 +421,7 @@ kernel_mach_msg_rpc(
 	ipc_kmsg_copyout_dest_to_kernel(kmsg, ipc_space_reply);
 
 	mach_msg_format_0_trailer_t *trailer =  (mach_msg_format_0_trailer_t *)
-	    ((vm_offset_t)kmsg->ikm_header + kmsg_size);
+	    ipc_kmsg_get_trailer(kmsg, false);
 
 	/* Determine what trailer bits we can receive (as no option specified) */
 	if (rcv_size < kmsg_size + MACH_MSG_TRAILER_MINIMUM_SIZE) {

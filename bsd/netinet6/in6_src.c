@@ -1204,7 +1204,7 @@ getroute:
 		sa6->sin6_addr = *dst;
 		if (IN6_IS_ADDR_MC_LINKLOCAL(dst)) {
 			ro->ro_rt = rtalloc1_scoped(
-				&((struct route *)ro)->ro_dst, 0, 0, ifscope);
+				SA(&((struct route *)ro)->ro_dst), 0, 0, ifscope);
 		} else {
 			rtalloc_scoped((struct route *)ro, ifscope);
 		}

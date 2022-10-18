@@ -265,6 +265,7 @@ nxdom_attach(struct nxdom *nxdom)
 
 	/* verify that parameters are sane */
 	ASSERT(NXDOM_MAX(nxdom, ports) > 0);
+	ASSERT(NXDOM_MAX(nxdom, ports) <= NEXUS_PORT_MAX);
 	ASSERT_NXDOM_PARAMS(nxdom, ports);
 	ASSERT_NXDOM_PARAMS(nxdom, tx_rings);
 	ASSERT_NXDOM_PARAMS(nxdom, rx_rings);
@@ -1760,18 +1761,20 @@ nxdom_prov_retain(struct kern_nexus_domain_provider *nxdom_prov)
 static int
 nxdom_prov_params_default(struct kern_nexus_domain_provider *nxdom_prov,
     const uint32_t req, const struct nxprov_params *nxp0,
-    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS])
+    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS],
+    uint32_t pp_region_config_flags)
 {
 	struct nxdom *nxdom = nxdom_prov->nxdom_prov_dom;
 
 	return nxprov_params_adjust(nxdom_prov, req, nxp0, nxp, srp,
-	           nxdom, nxdom, nxdom, NULL);
+	           nxdom, nxdom, nxdom, pp_region_config_flags, NULL);
 }
 
 int
 nxdom_prov_validate_params(struct kern_nexus_domain_provider *nxdom_prov,
     const struct nxprov_reg *reg, struct nxprov_params *nxp,
-    struct skmem_region_params srp[SKMEM_REGIONS], const uint32_t oflags)
+    struct skmem_region_params srp[SKMEM_REGIONS], const uint32_t oflags,
+    uint32_t pp_region_config_flags)
 {
 	const struct nxprov_params *nxp0 = &reg->nxpreg_params;
 	const uint32_t req = reg->nxpreg_requested;
@@ -1802,10 +1805,10 @@ nxdom_prov_validate_params(struct kern_nexus_domain_provider *nxdom_prov,
 
 	if (nxdom_prov->nxdom_prov_params != NULL) {
 		err = nxdom_prov->nxdom_prov_params(nxdom_prov, req, nxp0,
-		    nxp, srp);
+		    nxp, srp, pp_region_config_flags);
 	} else {
 		err = nxdom_prov_params_default(nxdom_prov, req, nxp0,
-		    nxp, srp);
+		    nxp, srp, pp_region_config_flags);
 	}
 	return err;
 }
@@ -1901,7 +1904,7 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
     const uint32_t req, const struct nxprov_params *nxp0,
     struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS],
     const struct nxdom *nxdom_def, const struct nxdom *nxdom_min,
-    const struct nxdom *nxdom_max,
+    const struct nxdom *nxdom_max, uint32_t pp_region_config_flags,
     int (*adjust_fn)(const struct kern_nexus_domain_provider *,
     const struct nxprov_params *, struct nxprov_adjusted_params *))
 {
@@ -1910,15 +1913,15 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 	uint32_t flowadv_max;
 	uint32_t nexusadv_size;
 	uint32_t capabs;
-	uint32_t tx_rings, rx_rings, alloc_rings = 0, free_rings = 0, ev_rings = 0;
-	uint32_t tx_slots, rx_slots, alloc_slots = 0, free_slots = 0, ev_slots = 0;
-	uint32_t buf_size, max_buffers = 0;
+	uint32_t tx_rings, rx_rings;
+	uint32_t alloc_rings = 0, free_rings = 0, ev_rings = 0;
+	uint32_t tx_slots, rx_slots;
+	uint32_t alloc_slots = 0, free_slots = 0, ev_slots = 0;
+	uint32_t buf_size, buf_region_segment_size, max_buffers = 0;
 	uint32_t tmp1, tmp2, tmp3, tmp4xpipes, tmpsumrings;
 	uint32_t tmpsumall, tmp4xpipesplusrings;
-	boolean_t md_magazines;
+	uint32_t large_buf_size;
 	int overflowline = 0;
-	struct skmem_region_params *ubft_srp = NULL;
-	struct skmem_region_params *kbft_srp = NULL;
 	int err = 0;
 
 	NXPROV_PARAMS_ADJUST(NXPREQ_TX_RINGS, tx_rings);
@@ -1926,6 +1929,7 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 	NXPROV_PARAMS_ADJUST(NXPREQ_TX_SLOTS, tx_slots);
 	NXPROV_PARAMS_ADJUST(NXPREQ_RX_SLOTS, rx_slots);
 	NXPROV_PARAMS_ADJUST(NXPREQ_BUF_SIZE, buf_size);
+	NXPROV_PARAMS_ADJUST(NXPREQ_LARGE_BUF_SIZE, large_buf_size);
 	NXPROV_PARAMS_ADJUST(NXPREQ_STATS_SIZE, stats_size);
 	NXPROV_PARAMS_ADJUST(NXPREQ_FLOWADV_MAX, flowadv_max);
 	NXPROV_PARAMS_ADJUST(NXPREQ_NEXUSADV_SIZE, nexusadv_size);
@@ -1975,16 +1979,13 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 	tx_slots = nxp->nxp_tx_slots;
 	rx_slots = nxp->nxp_rx_slots;
 	buf_size = nxp->nxp_buf_size;
-
-	ASSERT((srp[SKMEM_REGION_UMD].srp_cflags & SKMEM_REGION_CR_NOMAGAZINES) ==
-	    (srp[SKMEM_REGION_RXKMD].srp_cflags & SKMEM_REGION_CR_NOMAGAZINES));
-	md_magazines = !(srp[SKMEM_REGION_UMD].srp_cflags &
-	    SKMEM_REGION_CR_NOMAGAZINES);
+	large_buf_size = nxp->nxp_large_buf_size;
+	buf_region_segment_size = skmem_usr_buf_seg_size;
+	ASSERT(pp_region_config_flags & PP_REGION_CONFIG_MD_MAGAZINE_ENABLE);
 
 	if (adjust_fn != NULL) {
 		struct nxprov_adjusted_params adj = {
 			.adj_md_subtype = &nxp->nxp_md_subtype,
-			.adj_md_magazines = &md_magazines,
 			.adj_stats_size = &stats_size,
 			.adj_flowadv_max = &flowadv_max,
 			.adj_nexusadv_size = &nexusadv_size,
@@ -1998,11 +1999,13 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 			.adj_alloc_slots = &alloc_slots,
 			.adj_free_slots = &free_slots,
 			.adj_buf_size = &buf_size,
-			.adj_buf_srp = &srp[SKMEM_REGION_BUF],
+			.adj_buf_region_segment_size = &buf_region_segment_size,
+			.adj_pp_region_config_flags = &pp_region_config_flags,
 			.adj_max_frags = &nxp->nxp_max_frags,
 			.adj_event_rings = &ev_rings,
 			.adj_event_slots = &ev_slots,
 			.adj_max_buffers = &max_buffers,
+			.adj_large_buf_size = &large_buf_size,
 		};
 		err = adjust_fn(nxdom_prov, nxp, &adj);
 		if (err != 0) {
@@ -2057,6 +2060,7 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 	nxp->nxp_buf_size = buf_size;
 	nxp->nxp_tx_slots = tx_slots;
 	nxp->nxp_rx_slots = rx_slots;
+	nxp->nxp_large_buf_size = large_buf_size;
 
 	SK_D("nxdom \"%s\" (0x%llx) type %d",
 	    nxdom_prov->nxdom_prov_dom->nxdom_name,
@@ -2067,15 +2071,16 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 	SK_D("  req 0x%b rings %u/%u/%u/%u/%u slots %u/%u/%u/%u/%u buf %u "
 	    "type %u subtype %u stats %u flowadv_max %u nexusadv_size %u "
 	    "capabs 0x%b pipes %u extensions %u max_frags %u headguard %u "
-	    "tailguard %u", req, NXPREQ_BITS, tx_rings, rx_rings, alloc_rings,
-	    free_rings, ev_rings, tx_slots, rx_slots, alloc_slots, free_slots,
-	    ev_slots, nxp->nxp_buf_size, nxp->nxp_md_type, nxp->nxp_md_subtype,
-	    stats_size, flowadv_max, nexusadv_size, capabs, NXPCAP_BITS,
-	    nxp->nxp_pipes, nxp->nxp_extensions, nxp->nxp_max_frags,
-	    srp[SKMEM_REGION_GUARD_HEAD].srp_r_obj_size *
+	    "tailguard %u large_buf %u", req, NXPREQ_BITS, tx_rings, rx_rings,
+	    alloc_rings, free_rings, ev_rings, tx_slots, rx_slots, alloc_slots,
+	    free_slots, ev_slots, nxp->nxp_buf_size, nxp->nxp_md_type,
+	    nxp->nxp_md_subtype, stats_size, flowadv_max, nexusadv_size,
+	    capabs, NXPCAP_BITS, nxp->nxp_pipes, nxp->nxp_extensions,
+	    nxp->nxp_max_frags, srp[SKMEM_REGION_GUARD_HEAD].srp_r_obj_size *
 	    srp[SKMEM_REGION_GUARD_HEAD].srp_r_obj_cnt,
 	    srp[SKMEM_REGION_GUARD_TAIL].srp_r_obj_size *
-	    srp[SKMEM_REGION_GUARD_TAIL].srp_r_obj_cnt);
+	    srp[SKMEM_REGION_GUARD_TAIL].srp_r_obj_cnt,
+	    nxp->nxp_large_buf_size);
 
 	/*
 	 * tmp4xpipes = 4 * nxp->nxp_pipes
@@ -2089,7 +2094,8 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 	ADD(tx_rings, tmp4xpipes, &tmp4xpipesplusrings);
 
 	/*
-	 * tmpsumrings = tx_rings + rx_rings + alloc_rings + free_rings + ev_rings
+	 * tmpsumrings = tx_rings + rx_rings + alloc_rings + free_rings +
+	 *               ev_rings
 	 */
 	ADD(tx_rings, rx_rings, &tmpsumrings);
 	ADD(tmpsumrings, alloc_rings, &tmpsumrings);
@@ -2142,6 +2148,7 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 	ADD(tmp3, buf_cnt, &buf_cnt);
 
 	if (nxp->nxp_max_frags > 1) {
+		pp_region_config_flags |= PP_REGION_CONFIG_BUFLET;
 		buf_cnt = MIN((((uint32_t)P2ROUNDUP(NX_MAX_AGGR_PKT_SIZE,
 		    nxp->nxp_buf_size) / nxp->nxp_buf_size) * buf_cnt),
 		    (buf_cnt * nxp->nxp_max_frags));
@@ -2151,33 +2158,16 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 		buf_cnt = MIN(max_buffers, buf_cnt);
 	}
 
-	/* enable/disable magazines layer on metadata regions */
-	if (md_magazines) {
-		srp[SKMEM_REGION_UMD].srp_cflags &=
-		    ~SKMEM_REGION_CR_NOMAGAZINES;
-		srp[SKMEM_REGION_KMD].srp_cflags &=
-		    ~SKMEM_REGION_CR_NOMAGAZINES;
-	} else {
-		srp[SKMEM_REGION_UMD].srp_cflags |=
-		    SKMEM_REGION_CR_NOMAGAZINES;
-		srp[SKMEM_REGION_KMD].srp_cflags |=
-		    SKMEM_REGION_CR_NOMAGAZINES;
-	}
-
-	if (nxp->nxp_max_frags > 1) {
-		kbft_srp = &srp[SKMEM_REGION_KBFT];
-		kbft_srp->srp_cflags &= ~SKMEM_REGION_CR_NOMAGAZINES;
-	}
-	if ((kbft_srp != NULL) && (nxp->nxp_flags & NXPF_USER_CHANNEL)) {
-		ubft_srp = &srp[SKMEM_REGION_UBFT];
-		ubft_srp->srp_cflags &= ~SKMEM_REGION_CR_NOMAGAZINES;
+	if ((nxp->nxp_flags & NXPF_USER_CHANNEL) == 0) {
+		pp_region_config_flags |= PP_REGION_CONFIG_KERNEL_ONLY;
 	}
 
 	/* # of metadata objects is same as the # of buffer objects */
-	pp_regions_params_adjust(&srp[SKMEM_REGION_BUF], &srp[SKMEM_REGION_KMD],
-	    &srp[SKMEM_REGION_UMD], kbft_srp, ubft_srp, nxp->nxp_md_type,
-	    nxp->nxp_md_subtype, buf_cnt, (uint16_t)nxp->nxp_max_frags,
-	    nxp->nxp_buf_size, buf_cnt);
+	ASSERT(buf_region_segment_size != 0);
+	pp_regions_params_adjust(srp, nxp->nxp_md_type, nxp->nxp_md_subtype,
+	    buf_cnt, (uint16_t)nxp->nxp_max_frags, nxp->nxp_buf_size,
+	    nxp->nxp_large_buf_size, buf_cnt, buf_region_segment_size,
+	    pp_region_config_flags);
 
 	/* statistics region size */
 	if (stats_size != 0) {
@@ -2231,7 +2221,8 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 	 */
 	srp[SKMEM_REGION_TXAKSD].srp_r_obj_size =
 	    (MAX(MAX(tx_slots, alloc_slots), ev_slots)) * SLOT_DESC_SZ;
-	srp[SKMEM_REGION_TXAKSD].srp_r_obj_cnt = tx_rings + alloc_rings + ev_rings;
+	srp[SKMEM_REGION_TXAKSD].srp_r_obj_cnt = tx_rings + alloc_rings +
+	    ev_rings;
 	skmem_region_params_config(&srp[SKMEM_REGION_TXAKSD]);
 
 	/* USD and KSD objects share the same size and count */

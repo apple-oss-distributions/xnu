@@ -460,6 +460,8 @@ typedef uint64_t kqueue_id_t;
 #define NOTE_REVOKE     0x00000040              /* vnode access was revoked */
 #define NOTE_NONE       0x00000080              /* No specific vnode event: to test for EVFILT_READ activation*/
 #define NOTE_FUNLOCK    0x00000100              /* vnode was unlocked by flock(2) */
+#define NOTE_LEASE_DOWNGRADE 0x00000200         /* lease downgrade requested */
+#define NOTE_LEASE_RELEASE 0x00000400           /* lease release requested */
 
 /*
  * data/hint fflags for EVFILT_PROC, shared with userspace
@@ -614,6 +616,7 @@ typedef enum vm_pressure_level {
 #define NOTE_DISCONNECTED       0x00001000 /* socket is disconnected */
 #define NOTE_CONNINFO_UPDATED   0x00002000 /* connection info was updated */
 #define NOTE_NOTIFY_ACK         0x00004000 /* notify acknowledgement */
+#define NOTE_WAKE_PKT           0x00008000 /* received wake packet */
 
 #define EVFILT_SOCK_LEVEL_TRIGGER_MASK \
 	        (NOTE_READCLOSED | NOTE_WRITECLOSED | NOTE_SUSPEND | NOTE_RESUME | \
@@ -624,7 +627,7 @@ typedef enum vm_pressure_level {
 	        NOTE_NOSRCADDR | NOTE_IFDENIED | NOTE_SUSPEND | NOTE_RESUME | \
 	        NOTE_KEEPALIVE | NOTE_ADAPTIVE_WTIMO | NOTE_ADAPTIVE_RTIMO | \
 	        NOTE_CONNECTED | NOTE_DISCONNECTED | NOTE_CONNINFO_UPDATED | \
-	        NOTE_NOTIFY_ACK)
+	        NOTE_NOTIFY_ACK | NOTE_WAKE_PKT)
 
 #endif /* PRIVATE */
 
@@ -1056,6 +1059,9 @@ struct filterops {
  *
  *     This also will reset the event QoS, so FILTER_ADJUST_EVENT_QOS() must
  *     also be used if an override should be maintained.
+ *
+ *     Note: when this is used in f_touch, the incoming qos validation
+ *           is under the responsiblity of the filter.
  *
  *     Valid:    f_touch
  *     Implicit: f_attach

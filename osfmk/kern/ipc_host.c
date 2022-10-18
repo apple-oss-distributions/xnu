@@ -71,10 +71,15 @@
 #include <kern/thread.h>
 #include <kern/ipc_host.h>
 #include <kern/ipc_kobject.h>
+#include <kern/ux_handler.h>
 #include <kern/misc_protos.h>
 #include <kern/spl.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
+
+#if CONFIG_CSR
+#include <sys/csr.h>
+#endif
 
 #if CONFIG_MACF
 #include <security/mac_mach_internal.h>
@@ -168,7 +173,7 @@ host_self_trap(
 	mach_port_name_t name;
 
 	itk_lock(self);
-	sright = ipc_port_copy_send(self->itk_host);
+	sright = host_port_copy_send(self->itk_host);
 	itk_unlock(self);
 	name = ipc_port_copyout_send(sright, current_space());
 	return name;
@@ -354,6 +359,39 @@ convert_port_to_pset_name(
 }
 
 /*
+ *	Routine:	host_port_copy_send
+ *	Purpose:
+ *		Copies a send right for a host port (priv or not)
+ *	Conditions:
+ *		Nothing locked.
+ */
+
+ipc_port_t
+host_port_copy_send(ipc_port_t port)
+{
+	if (IP_VALID(port)) {
+		ipc_kobject_type_t kotype = ip_kotype(port);
+
+		if (kotype == IKOT_HOST) {
+			port = ipc_kobject_copy_send(port,
+			    host_self(), IKOT_HOST);
+		} else if (kotype == IKOT_HOST_PRIV) {
+			port = ipc_kobject_copy_send(port,
+			    host_priv_self(), IKOT_HOST_PRIV);
+#if CONFIG_CSR
+		} else if (kotype == IKOT_NONE &&
+		    (csr_check(CSR_ALLOW_KERNEL_DEBUGGER) == 0)) {
+			port = ipc_port_copy_send_mqueue(port);
+#endif
+		} else {
+			panic("port %p is an invalid host port", port);
+		}
+	}
+
+	return port;
+}
+
+/*
  *	Routine:	convert_host_to_port
  *	Purpose:
  *		Convert from a host to a port.
@@ -389,7 +427,7 @@ convert_processor_to_port(
 	ipc_port_t port = processor->processor_self;
 
 	if (port != IP_NULL) {
-		port = ipc_port_make_send(port);
+		port = ipc_kobject_make_send(port, processor, IKOT_PROCESSOR);
 	}
 	return port;
 }
@@ -408,13 +446,7 @@ ipc_port_t
 convert_pset_to_port(
 	processor_set_t         pset)
 {
-	ipc_port_t port = pset->pset_self;
-
-	if (port != IP_NULL) {
-		port = ipc_port_make_send(port);
-	}
-
-	return port;
+	return ipc_kobject_make_send(pset->pset_self, pset, IKOT_PSET);
 }
 
 /*
@@ -431,13 +463,7 @@ ipc_port_t
 convert_pset_name_to_port(
 	processor_set_name_t            pset)
 {
-	ipc_port_t port = pset->pset_name_self;
-
-	if (port != IP_NULL) {
-		port = ipc_port_make_send(port);
-	}
-
-	return port;
+	return ipc_kobject_make_send(pset->pset_name_self, pset, IKOT_PSET_NAME);
 }
 
 /*
@@ -501,7 +527,8 @@ host_set_exception_ports(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED
+	if (((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED ||
+	    (new_behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED))
 	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -541,7 +568,7 @@ host_set_exception_ports(
 			old_port[i] = host_priv->exc_actions[i].port;
 
 			host_priv->exc_actions[i].port =
-			    ipc_port_copy_send(new_port);
+			    exception_port_copy_send(new_port);
 			host_priv->exc_actions[i].behavior = new_behavior;
 			host_priv->exc_actions[i].flavor = new_flavor;
 		} else {
@@ -635,7 +662,7 @@ host_get_exception_ports(
 			if (j == count && count < *CountCnt) {
 				masks[j] = (1 << i);
 				ports[j] =
-				    ipc_port_copy_send(host_priv->exc_actions[i].port);
+				    exception_port_copy_send(host_priv->exc_actions[i].port);
 				behaviors[j] = host_priv->exc_actions[i].behavior;
 				flavors[j] = host_priv->exc_actions[i].flavor;
 				count++;
@@ -695,7 +722,8 @@ host_swap_exception_ports(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED
+	if (((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED ||
+	    (new_behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED))
 	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -748,14 +776,14 @@ host_swap_exception_ports(
 			if (j == count) {
 				masks[j] = (1 << i);
 				ports[j] =
-				    ipc_port_copy_send(host_priv->exc_actions[i].port);
+				    exception_port_copy_send(host_priv->exc_actions[i].port);
 				behaviors[j] = host_priv->exc_actions[i].behavior;
 				flavors[j] = host_priv->exc_actions[i].flavor;
 				count++;
 			}
 			old_port[i] = host_priv->exc_actions[i].port;
 			host_priv->exc_actions[i].port =
-			    ipc_port_copy_send(new_port);
+			    exception_port_copy_send(new_port);
 			host_priv->exc_actions[i].behavior = new_behavior;
 			host_priv->exc_actions[i].flavor = new_flavor;
 		} else {

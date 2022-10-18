@@ -88,6 +88,7 @@
 #define RB_QUICK        0x400   /* quick and ungraceful reboot with file system caches flushed*/
 #define RB_PANIC        0x800   /* panic the kernel */
 #define RB_PANIC_ZPRINT 0x1000   /* add zprint info to panic string */
+#define RB_PANIC_FORCERESET 0x2000   /* do force-reset panic */
 
 #ifndef KERNEL
 __BEGIN_DECLS
@@ -141,7 +142,7 @@ __END_DECLS
 
 #endif /* __APPLE_API_OBSOLETE */
 
-#ifdef BSD_KERNEL_PRIVATE
+#ifdef XNU_KERNEL_PRIVATE
 
 __BEGIN_DECLS
 int     reboot_kernel(int, char *);
@@ -149,7 +150,7 @@ __END_DECLS
 
 #define PROC_SHUTDOWN_LOG "/var/log/kernel-shutdown.log"
 
-#endif /* BSD_KERNEL_PRIVATE */
+#endif /* XNU_KERNEL_PRIVATE */
 
 #if KERNEL_PRIVATE
 __BEGIN_DECLS

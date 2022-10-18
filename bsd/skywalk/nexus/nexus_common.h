@@ -131,6 +131,11 @@ __nexus_attr_set(const nexus_attr_t nxa, const nexus_attr_type_t type,
 		nxa->nxa_reject_on_close = (value != 0);
 		break;
 
+	case NEXUS_ATTR_LARGE_BUF_SIZE:
+		nxa->nxa_requested |= NXA_REQ_LARGE_BUF_SIZE;
+		nxa->nxa_large_buf_size = value;
+		break;
+
 	case NEXUS_ATTR_FLOWADV_MAX:
 	case NEXUS_ATTR_STATS_SIZE:
 	case NEXUS_ATTR_SLOT_META_SIZE:
@@ -240,6 +245,10 @@ __nexus_attr_get(const nexus_attr_t nxa, const nexus_attr_type_t type,
 		*value = nxa->nxa_reject_on_close;
 		break;
 
+	case NEXUS_ATTR_LARGE_BUF_SIZE:
+		*value = nxa->nxa_large_buf_size;
+		break;
+
 	default:
 		err = EINVAL;
 		break;
@@ -275,6 +284,7 @@ __nexus_attr_from_params(nexus_attr_t nxa, const struct nxprov_params *p)
 	nxa->nxa_user_channel = !!(p->nxp_flags & NXPF_USER_CHANNEL);
 	nxa->nxa_max_frags = p->nxp_max_frags;
 	nxa->nxa_reject_on_close = (p->nxp_reject_on_close != 0);
+	nxa->nxa_large_buf_size = p->nxp_large_buf_size;
 }
 
 __attribute__((always_inline))
@@ -382,6 +392,11 @@ __nexus_provider_reg_prepare(struct nxprov_reg *reg, const nexus_name_t name,
 			reg->nxpreg_requested |= NXPREQ_REJECT_ON_CLOSE;
 			p->nxp_reject_on_close =
 			    (nxa->nxa_reject_on_close != 0);
+		}
+		if (nxa->nxa_requested & NXA_REQ_LARGE_BUF_SIZE) {
+			reg->nxpreg_requested |= NXPREQ_LARGE_BUF_SIZE;
+			p->nxp_large_buf_size =
+			    (uint32_t)nxa->nxa_large_buf_size;
 		}
 	}
 done:

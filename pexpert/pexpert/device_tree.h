@@ -281,6 +281,23 @@ extern int SecureDTIterateProperties(DTPropertyIterator iterator,
 
 extern int SecureDTRestartPropertyIteration(DTPropertyIterator iterator);
 
+/*
+ *  -------------------------------------------------------------------------------
+ *  Conventional Device Tree Types
+ *  -------------------------------------------------------------------------------
+ */
+
+/*
+ * Memory Ranges
+ * Used in the chosen/memory-map node, populated by iBoot.
+ */
+
+typedef struct DTMemoryMapRange {
+	vm_offset_t paddr;
+	size_t length;
+} DTMemoryMapRange;
+
+
 #ifdef __cplusplus
 }
 #endif

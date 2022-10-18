@@ -1066,7 +1066,7 @@ memorystatus_klist_reset_all_for_level(vm_pressure_level_t pressure_level_to_cle
 		proc_t p = knote_get_kq(kn)->kq_p;
 
 		if (p == proc_ref(p, false)) {
-			task_clear_has_been_notified(p->task, pressure_level_to_clear);
+			task_clear_has_been_notified(proc_task(p), pressure_level_to_clear);
 			proc_rele(p);
 		}
 	}
@@ -1156,7 +1156,7 @@ vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int
 		}
 #endif /* CONFIG_MEMORYSTATUS */
 
-		t = (struct task *)(p->task);
+		t = (struct task *)(proc_task(p));
 		telemetry_update = update_knote_footprint_history(kn, t, curr_ts);
 		*next_telemetry_update = MIN(*next_telemetry_update, telemetry_update);
 
@@ -1305,6 +1305,11 @@ SYSCTL_INT(_kern, OID_AUTO, memorystatus_sustained_pressure_maximum_band, CTLTYP
 
 #if CONFIG_JETSAM
 
+/*
+ * TODO(jason): The memorystatus thread should be responsible for this
+ * It can just check how long the pressure level has been at warning and the timestamp
+ * of the last sustained pressure kill.
+ */
 static void
 sustained_pressure_handler(void* arg0 __unused, void* arg1 __unused)
 {
@@ -1322,7 +1327,7 @@ sustained_pressure_handler(void* arg0 __unused, void* arg1 __unused)
 	max_kills = memorystatus_get_proccnt_upto_priority(memorystatus_sustained_pressure_maximum_band) * 2;
 	os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Pressure level has been elevated for too long. killing up to %d idle processes", max_kills);
 	while (memorystatus_vm_pressure_level != kVMPressureNormal && kill_count < max_kills) {
-		boolean_t killed = memorystatus_kill_on_sustained_pressure(false);
+		boolean_t killed = memorystatus_kill_on_sustained_pressure();
 		if (killed) {
 			/*
 			 * Pause before our next kill & see if pressure reduces.
@@ -1381,7 +1386,7 @@ update_footprints_for_telemetry(void* arg0 __unused, void* arg1 __unused)
 		if (p == PROC_NULL) {
 			continue;
 		}
-		t = (struct task *)(p->task);
+		t = (struct task *)(proc_task(p));
 		proc_rele(p);
 		p = PROC_NULL;
 		telemetry_update = update_knote_footprint_history(kn, t, curr_ts);
@@ -1585,7 +1590,7 @@ memorystatus_update_vm_pressure(boolean_t target_foreground_process)
 
 		target_pid = proc_getpid(target_proc);
 
-		task = (struct task *)(target_proc->task);
+		task = (struct task *)(proc_task(target_proc));
 
 		if (level_snapshot != kVMPressureNormal) {
 			if (level_snapshot == kVMPressureWarning || level_snapshot == kVMPressureUrgent) {

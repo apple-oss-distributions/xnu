@@ -32,14 +32,7 @@
 
 __BEGIN_DECLS
 
-#ifdef  XNU_KERNEL_PRIVATE
-#if __x86_64__
-/*
- * Extended mutexes are only implemented on x86_64
- */
-#define HAS_EXT_MUTEXES 1
-#endif /* __x86_64__ */
-#endif /* XNU_KERNEL_PRIVATE */
+#define LCK_SLEEP_MASK           0x3f     /* Valid actions */
 
 /*!
  * @enum lck_sleep_action_t
@@ -57,14 +50,46 @@ __options_decl(lck_sleep_action_t, unsigned int, {
 	LCK_SLEEP_SPIN_ALWAYS  = 0x20,    /**< Reclaim the lock in spin-always mode (mutex only) */
 });
 
-#define LCK_SLEEP_MASK           0x3f     /* Valid actions */
-
 __options_decl(lck_wake_action_t, unsigned int, {
 	LCK_WAKE_DEFAULT                = 0x00,  /* If waiters are present, transfer their push to the wokenup thread */
 	LCK_WAKE_DO_NOT_TRANSFER_PUSH   = 0x01,  /* Do not transfer waiters push when waking up */
 });
 
+typedef const struct hw_spin_policy *hw_spin_policy_t;
+
 #if MACH_KERNEL_PRIVATE
+
+/*
+ *	The "hardware lock".  Low-level locking primitives that
+ *	MUST be exported by machine-dependent code; this abstraction
+ *	must provide atomic, non-blocking mutual exclusion that
+ *	is invulnerable to uniprocessor or SMP races, interrupts,
+ *	traps or any other events.
+ *
+ *		hw_lock_data_t		machine-specific lock data structure
+ *		hw_lock_t		pointer to hw_lock_data_t
+ *
+ *	An implementation must export these data types and must
+ *	also provide routines to manipulate them (see prototypes,
+ *	below).  These routines may be external, inlined, optimized,
+ *	or whatever, based on the kernel configuration.  In the event
+ *	that the implementation wishes to define its own prototypes,
+ *	macros, or inline functions, it may define LOCK_HW_PROTOS
+ *	to disable the definitions below.
+ *
+ *	Mach does not expect these locks to support statistics,
+ *	debugging, tracing or any other complexity.  In certain
+ *	configurations, Mach will build other locking constructs
+ *	on top of this one.  A correctly functioning Mach port need
+ *	only implement these locks to be successful.  However,
+ *	greater efficiency may be gained with additional machine-
+ *	dependent optimizations for the locking constructs defined
+ *	later in kern/lock.h..
+ */
+struct hslock {
+	uintptr_t       lock_data __kernel_data_semantics;
+};
+typedef struct hslock hw_lock_data_t, *hw_lock_t;
 
 /*!
  * @enum hw_lock_status_t
@@ -103,7 +128,7 @@ __enum_closed_decl(hw_lock_status_t, int, {
 });
 
 /*!
- * @enum hw_lock_timeout_status_t
+ * @enum hw_spin_timeout_status_t
  *
  * @abstract
  * Used by spinlock timeout handlers.
@@ -115,13 +140,46 @@ __enum_closed_decl(hw_lock_status_t, int, {
  * @const HW_LOCK_TIMEOUT_CONTINUE
  * Keep spinning for another "timeout".
  */
-__enum_closed_decl(hw_lock_timeout_status_t, _Bool, {
+__enum_closed_decl(hw_spin_timeout_status_t, _Bool, {
 	HW_LOCK_TIMEOUT_RETURN,         /**< return without taking the lock */
 	HW_LOCK_TIMEOUT_CONTINUE,       /**< keep spinning                  */
 });
 
+
 /*!
- * @typedef hw_lock_timeout_handler_t
+ * @typedef hw_spin_timeout_t
+ *
+ * @abstract
+ * Describes the timeout used for a given spinning session.
+ */
+typedef struct {
+	uint64_t                hwst_timeout;
+#if SCHED_HYGIENE_DEBUG
+	bool                    hwst_in_ppl;
+	bool                    hwst_interruptible;
+#endif /* SCHED_HYGIENE_DEBUG */
+} hw_spin_timeout_t;
+
+
+/*!
+ * @typedef hw_spin_state_t
+ *
+ * @abstract
+ * Keeps track of the various timings used for spinning
+ */
+typedef struct {
+	uint64_t                hwss_start;
+	uint64_t                hwss_now;
+	uint64_t                hwss_deadline;
+#if SCHED_HYGIENE_DEBUG
+	uint64_t                hwss_irq_start;
+	uint64_t                hwss_irq_end;
+#endif /* SCHED_HYGIENE_DEBUG */
+} hw_spin_state_t;
+
+
+/*!
+ * @typedef hw_spin_timeout_fn_t
  *
  * @abstract
  * The type of the timeout handlers for low level locking primitives.
@@ -129,10 +187,68 @@ __enum_closed_decl(hw_lock_timeout_status_t, _Bool, {
  * @discussion
  * Typical handlers are written to just panic and not return
  * unless some very specific conditions are met (debugging, ...).
+ *
+ * For formatting purposes, we provide HW_SPIN_TIMEOUT{,_DETAILS}{_FMT,_ARG}
+ *
+ * Those are meant to be used inside an hw_spin_timeout_fn_t function
+ * to form informative panic strings, like this:
+ *
+ *    panic("MyLock[%p] " HW_SPIN_TIMEOUT_FMT "; "
+ *         "<lock specific things> " HW_SPIN_TIMEOUT_DETAILS_FMT,
+ *         lock_address, HW_SPIN_TIMEOUT_ARG(to, st),
+ *         <lock specific args>, HW_SPIN_TIMEOUT_DETAILS_ARG(to, st));
+ *
+ * This ensures consistent panic string style, and transparent adoption
+ * for any new diagnostic/debugging features at all call-sites.
  */
-typedef hw_lock_timeout_status_t (*hw_lock_timeout_handler_t)(void *lock,
-    uint64_t timeout, uint64_t start, uint64_t now, uint64_t interrupt_time);
+typedef hw_spin_timeout_status_t (hw_spin_timeout_fn_t)(void *lock,
+    hw_spin_timeout_t to, hw_spin_state_t st);
 
+#define HW_SPIN_TIMEOUT_FMT \
+	"timeout after %llu ticks"
+#define HW_SPIN_TIMEOUT_ARG(to, st) \
+	((st).hwss_now - (st).hwss_start)
+
+#if SCHED_HYGIENE_DEBUG
+#define HW_SPIN_TIMEOUT_SCHED_HYGIENE_FMT \
+	", irq time: %llu"
+#define HW_SPIN_TIMEOUT_SCHED_HYGIENE_ARG(to, st) \
+	, ((st).hwss_irq_end - (st).hwss_irq_start)
+#else
+#define HW_SPIN_TIMEOUT_SCHED_HYGIENE_FMT
+#define HW_SPIN_TIMEOUT_SCHED_HYGIENE_ARG(to, st)
+#endif
+
+#define HW_SPIN_TIMEOUT_DETAILS_FMT \
+	"start time: %llu, now: %llu, timeout: %llu" \
+	HW_SPIN_TIMEOUT_SCHED_HYGIENE_FMT
+#define HW_SPIN_TIMEOUT_DETAILS_ARG(to, st) \
+	(st).hwss_start, (st).hwss_now, (to).hwst_timeout \
+	HW_SPIN_TIMEOUT_SCHED_HYGIENE_ARG(to, st)
+
+/*!
+ * @struct hw_spin_policy
+ *
+ * @abstract
+ * Describes the spinning policy for a given lock.
+ */
+struct hw_spin_policy {
+	const char             *hwsp_name;
+	union {
+		const uint64_t *hwsp_timeout;
+		const _Atomic uint64_t *hwsp_timeout_atomic;
+	};
+	uint16_t                hwsp_timeout_shift;
+	uint16_t                hwsp_lock_offset;
+
+	hw_spin_timeout_fn_t   *hwsp_op_timeout;
+};
+
+#if __x86_64__
+#define LCK_MTX_USE_ARCH 1
+#else
+#define LCK_MTX_USE_ARCH 0
+#endif
 #endif /* MACH_KERNEL_PRIVATE */
 
 __END_DECLS

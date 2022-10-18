@@ -237,41 +237,40 @@ typedef struct {
 extern cpu_signal_event_log_t   *cpu_signal[];
 extern cpu_signal_event_log_t   *cpu_handle[];
 
-#define DBGLOG(log, _cpu, _event) {                                     \
-	boolean_t		spl = ml_set_interrupts_enabled(FALSE); \
-	cpu_signal_event_log_t	*logp = log[cpu_number()];              \
-	int			next = logp->next_entry;                \
-	cpu_signal_event_t	*eventp = &logp->entry[next];           \
-                                                                        \
-	logp->count[_event]++;                                          \
-                                                                        \
-	eventp->time = rdtsc64();                                       \
-	eventp->cpu = _cpu;                                             \
-	eventp->event = _event;                                         \
-	if (next == (LOG_NENTRIES - 1))                                 \
-	        logp->next_entry = 0;                                   \
-	else                                                            \
-	        logp->next_entry++;                                     \
-                                                                        \
-	(void) ml_set_interrupts_enabled(spl);                          \
+#define DBGLOG(log, _cpu, _event) {                                             \
+	boolean_t		spl = ml_set_interrupts_enabled(FALSE);         \
+	cpu_signal_event_log_t	*logp = log[cpu_number()];                      \
+	int			next = logp->next_entry;                        \
+	cpu_signal_event_t	*eventp = &logp->entry[next];                   \
+                                                                                \
+	logp->count[_event]++;                                                  \
+                                                                                \
+	eventp->time = rdtsc64();                                               \
+	eventp->cpu = _cpu;                                                     \
+	eventp->event = _event;                                                 \
+	if (next == (LOG_NENTRIES - 1))                                         \
+	        logp->next_entry = 0;                                           \
+	else                                                                    \
+	        logp->next_entry++;                                             \
+                                                                                \
+	(void) ml_set_interrupts_enabled(spl);                                  \
 }
 
-#define DBGLOG_CPU_INIT(cpu)    {                                       \
-	cpu_signal_event_log_t	**sig_logpp = &cpu_signal[cpu];         \
-	cpu_signal_event_log_t	**hdl_logpp = &cpu_handle[cpu];         \
-                                                                        \
-	if (*sig_logpp == NULL &&                                       \
-	        kmem_alloc(kernel_map,                                  \
-	                (vm_offset_t *) sig_logpp,                      \
-	                sizeof(cpu_signal_event_log_t)) != KERN_SUCCESS)\
-	        panic("DBGLOG_CPU_INIT cpu_signal allocation failed\n");\
-	bzero(*sig_logpp, sizeof(cpu_signal_event_log_t));              \
-	if (*hdl_logpp == NULL &&                                       \
-	        kmem_alloc(kernel_map,                                  \
-	                (vm_offset_t *) hdl_logpp,                      \
-	                sizeof(cpu_signal_event_log_t)) != KERN_SUCCESS)\
-	        panic("DBGLOG_CPU_INIT cpu_handle allocation failed\n");\
-	bzero(*hdl_logpp, sizeof(cpu_signal_event_log_t));              \
+#define DBGLOG_CPU_INIT(cpu)    {                                               \
+	cpu_signal_event_log_t	**sig_logpp = &cpu_signal[cpu];                 \
+	cpu_signal_event_log_t	**hdl_logpp = &cpu_handle[cpu];                 \
+	vm_size_t log_size = round_page(sizeof(cpu_signal_event_log_t));        \
+	kma_flags_t log_flags = KMA_NOFAIL | KMA_KOBJECT |                      \
+	    KMA_PERMANENT | KMA_ZERO;                                           \
+                                                                                \
+	if (*sig_logpp == NULL) {                                               \
+	        kmem_alloc(kernel_map, (vm_offset_t *)sig_logpp,                \
+	            log_size, log_flags, VM_KERN_MEMORY_DIAG);                  \
+	}                                                                       \
+	if (*sig_logpp == NULL) {                                               \
+	        kmem_alloc(kernel_map, (vm_offset_t *)hdl_logpp,                \
+	            log_size, log_flags, VM_KERN_MEMORY_DIAG);                  \
+	}                                                                       \
 }
 #else   /* MP_DEBUG */
 #define DBGLOG(log, _cpu, _event)

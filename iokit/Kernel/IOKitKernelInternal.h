@@ -124,6 +124,7 @@ struct IODMACommandInternal {
 	UInt8  fIOVMAddrValid;
 	UInt8  fForceDoubleBuffer;
 	UInt8  fSetActiveNoMapper;
+	UInt8  fDextOwned;
 
 	vm_page_t fCopyPageAlloc;
 	vm_page_t fCopyNext;

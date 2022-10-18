@@ -1,11 +1,11 @@
-/* Copyright (c) (2018,2019) Apple Inc. All rights reserved.
+/* Copyright (c) (2018-2021) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
- * is contained in the License.txt file distributed with corecrypto) and only to 
- * people who accept that license. IMPORTANT:  Any license rights granted to you by 
- * Apple Inc. (if any) are limited to internal use within your organization only on 
- * devices and computers you own or control, for the sole purpose of verifying the 
- * security characteristics and correct functioning of the Apple Software.  You may 
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
@@ -15,6 +15,12 @@
 #include <stdbool.h>
 
 #include <corecrypto/cc.h>
+#include "ccrng_fortuna.h"
+#include "ccrng_crypto.h"
+#include <corecrypto/ccrng_schedule.h>
+#include <corecrypto/ccentropy.h>
+#include <corecrypto/ccdrbg.h>
+#include "cc_lock.h"
 
 // This is a Fortuna-inspired PRNG. While it differs from Fortuna in
 // many minor details, the biggest difference is its support for
@@ -69,156 +75,7 @@
 // i.e. it is safe to call cckprng_reseed or cckprng_refresh while
 // another thread is calling cckprng_generate.
 
-#define CCKPRNG_NPOOLS 32
 #define CCKPRNG_SEED_NBYTES 32
-#define CCKPRNG_POOL_NBYTES 32
-#define CCKPRNG_KEY_NBYTES 32
-
-struct cckprng_gen_diag {
-    // The number of times this generator has been rekeyed from the master seed
-    uint64_t nrekeys;
-
-    // The number of requests this generator has fulfilled
-    uint64_t out_nreqs;
-
-    // The total number of bytes this generator has generated over all requests
-    uint64_t out_nbytes;
-
-    // The maximum number of bytes this generator has generated in any one request
-    uint64_t out_nbytes_req_max;
-
-    // The total number of bytes this generator has generated since the last rekey
-    uint64_t out_nbytes_key;
-
-    // The maximum total number of bytes this generator has generated between two rekeys
-    uint64_t out_nbytes_key_max;
-};
-
-struct cckprng_pool_diag {
-    // The number of samples currently resident in the pool
-    uint64_t nsamples;
-
-    // The number of times this pool has been drained in a reseed
-    uint64_t ndrains;
-
-    // The maximum number of samples this pool has held at any one time
-    uint64_t nsamples_max;
-};
-
-struct cckprng_diag {
-    // The number of reseeds via user input (e.g. by writing to /dev/random)
-    uint64_t userreseed_nreseeds;
-
-    // The number of reseeds via the scheduler
-    uint64_t schedreseed_nreseeds;
-
-    // The maximum number of samples included in any one scheduler reseed
-    uint64_t schedreseed_nsamples_max;
-
-    // The maximum number of samples included in any one entropy input
-    uint64_t addentropy_nsamples_max;
-
-    // Diagnostics corresponding to individual output generators
-    unsigned ngens;
-    CC_ALIGNED(8) struct cckprng_gen_diag *gens;
-
-    // Diagnostics corresponding to internal entropy pools
-    struct cckprng_pool_diag pools[CCKPRNG_NPOOLS];
-};
-
-#if CC_KERNEL
-
-#include <kern/locks.h>
-
-typedef lck_grp_t *cckprng_lock_group;
-typedef lck_mtx_t *cckprng_lock_mutex;
-
-struct cckprng_lock_ctx {
-    cckprng_lock_group group;
-    cckprng_lock_mutex mutex;
-};
-
-#elif CC_ANDROID || CC_LINUX
-
-#include <pthread.h>
-
-typedef pthread_mutex_t cckprng_lock_mutex;
-
-struct cckprng_lock_ctx {
-    cckprng_lock_mutex mutex;
-};
-
-#else
-
-#include <os/lock.h>
-
-typedef os_unfair_lock cckprng_lock_mutex;
-
-struct cckprng_lock_ctx {
-    cckprng_lock_mutex mutex;
-};
-
-#endif
-
-struct cckprng_key_ctx {
-    uint8_t data[CCKPRNG_KEY_NBYTES];
-};
-
-struct cckprng_gen_ctx {
-    // We maintain two keys (one live and one idle) to allow
-    // concurrent generation and reseeding
-    struct cckprng_key_ctx keys[2];
-    _Atomic unsigned swap;
-    unsigned key_live_idx;
-    unsigned key_idle_idx;
-
-    // A counter used in CTR mode
-    uint8_t ctr[16];
-
-    // Whether the generator has been initialized
-    bool init;
-
-    // A mutex governing this generator's state (but note the idle key
-    // context is under control of the PRNG's shared mutex)
-    struct {
-        cckprng_lock_mutex mutex;
-    } lock;
-};
-
-struct cckprng_pool_ctx {
-    uint8_t data[CCKPRNG_POOL_NBYTES];
-};
-
-// This is a handle to an "entropy buffer" to be managed externally
-// (i.e. in xnu). This is a non-cryptographic
-// accumulator. Practically, the buffer is filled with timestamps
-// collected during interrupts. The existing state of the buffer is
-// rotated and new timestamps are added in. A counter of raw timing
-// samples is also managed externally. The buffer and the counter are
-// both subject to data races, which we tolerate.
-
-struct cckprng_entropybuf {
-
-    // A read-only handle to an "entropy buffer" (a non-cryptographic accumulator) to be managed externally
-    const void *buf;
-
-    // The size of the entropy buffer
-    size_t nbytes;
-
-    // A read-only handle to a count of raw samples in the buffer
-    const uint32_t *nsamples;
-
-    // The count of raw samples in the buffer at time of last read
-    uint32_t nsamples_last;
-};
-
-struct cckprng_sched_ctx {
-    // A counter governing the set of entropy pools to drain
-    uint64_t reseed_sched;
-
-    // An index used to add entropy to pools in a round-robin style
-    unsigned pool_idx;
-};
 
 // A function pointer to fill an entropy buffer. It should return some
 // estimate of entropy (e.g. the number of timing samples resident in
@@ -230,72 +87,53 @@ struct cckprng_sched_ctx {
 // input buffer, and the implementation should set it to the number of
 // bytes it has initialized. The third argument is arbitrary state the
 // implementation provides and receives back on each call.
-typedef int32_t (*cckprng_getentropy)(size_t *entropy_nbytes,
-                                      void *entropy,
-                                      void *arg);
+typedef ccrng_fortuna_getentropy cckprng_getentropy;
+
+#define CCKPRNG_ENTROPY_SIZE 64
+#define CCKPRNG_DRBG_STATE_MAX_SIZE ((size_t)1280)
+#define CCKPRNG_CACHED_BUF_SIZE ((size_t)256)
+#define CCKPRNG_MAX_REQUEST_SIZE ((size_t)4096)
 
 struct cckprng_ctx {
-    // The master secret of the PRNG
-    struct cckprng_key_ctx key;
+    // A flag set every time Fortuna reseeds itself
+    ccrng_schedule_atomic_flag_ctx_t schedule_ctx;
 
-    // A counter used in CTR mode (with the master secret)
-    uint8_t ctr[16];
+    ccentropy_rng_ctx_t entropy_ctx;
 
-    // State used to schedule entropy consumption and reseeds
-    struct cckprng_sched_ctx sched;
+    cc_lock_ctx_t lock_ctx;
 
-    // A mutex governing access to shared state
-    struct cckprng_lock_ctx lock;
+    struct ccdrbg_info drbg_info;
+    uint8_t drbg_state[CCKPRNG_DRBG_STATE_MAX_SIZE];
 
-    // The maximum number of generators that may be allocated
-    unsigned max_ngens;
+    uint8_t cache[CCKPRNG_CACHED_BUF_SIZE];
 
-    // The actual number of generators that have been initialized
-    unsigned ngens;
+    ccrng_crypto_ctx_t rng_ctx;
 
-    // An array of output generators (allocated dynamically) of length max_ngens
-    struct cckprng_gen_ctx *gens;
-
-    // A set of entropy pools
-    struct cckprng_pool_ctx pools[CCKPRNG_NPOOLS];
-
-    // A handle to an entropy source managed externally
-    struct cckprng_entropybuf entropybuf;
-
-    // Diagnostics for the PRNG
-    struct cckprng_diag diag;
-
-    // A function pointer to get entropy
-    cckprng_getentropy getentropy;
-
-    // An arbitrary piece of state to be provided to the entropy function
-    void *getentropy_arg;
+    struct ccrng_fortuna_ctx fortuna_ctx;
 };
 
 // This collection of function pointers is just a convenience for
 // registering the PRNG with xnu
 struct cckprng_funcs {
     void (*CC_SPTR(cckprng_funcs, init))(struct cckprng_ctx *ctx,
-										 unsigned max_ngens,
-										 size_t entropybuf_nbytes,
-										 const void *entropybuf,
-										 const uint32_t *entropybuf_nsamples,
-										 size_t seed_nbytes,
-										 const void *seed,
-										 size_t nonce_nbytes,
-										 const void *nonce);
+                                         size_t seed_nbytes,
+                                         const void *seed,
+                                         size_t nonce_nbytes,
+                                         const void *nonce,
+                                         cckprng_getentropy getentropy,
+                                         void *getentropy_arg);
     void (*CC_SPTR(cckprng_funcs, initgen))(struct cckprng_ctx *ctx, unsigned gen_idx);
     void (*CC_SPTR(cckprng_funcs, reseed))(struct cckprng_ctx *ctx, size_t nbytes, const void *seed);
     void (*CC_SPTR(cckprng_funcs, refresh))(struct cckprng_ctx *ctx);
     void (*CC_SPTR(cckprng_funcs, generate))(struct cckprng_ctx *ctx, unsigned gen_idx, size_t nbytes, void *out);
-	void (*CC_SPTR(cckprng_funcs, init_with_getentropy))(struct cckprng_ctx *ctx,
-														 unsigned max_ngens,
-														 size_t seed_nbytes,
-														 const void *seed,
-														 size_t nonce_nbytes,
-														 const void *nonce,
-														 cckprng_getentropy getentropy,
-														 void *getentropy_arg);
+    void (*CC_SPTR(cckprng_funcs, init_with_getentropy))(struct cckprng_ctx *ctx,
+                                                         unsigned max_ngens,
+                                                         size_t seed_nbytes,
+                                                         const void *seed,
+                                                         size_t nonce_nbytes,
+                                                         const void *nonce,
+                                                         cckprng_getentropy getentropy,
+                                                         void *getentropy_arg);
 };
 
 /*
@@ -303,25 +141,23 @@ struct cckprng_funcs {
   @abstract Initialize a kernel PRNG context.
 
   @param ctx Context for this instance
-  @param max_ngens Maximum count of generators that may be allocated
-  @param entropybuf_nbytes Length of the entropy buffer in bytes
-  @param entropybuf Read-only pointer to a long-lived entropy buffer
-  @param entropybuf_nsamples Read-only pointer to a counter of samples in the entropy buffer
   @param seed_nbytes Length of the seed in bytes
   @param seed Pointer to a high-entropy seed
   @param nonce_nbytes Length of the nonce in bytes
+  @param nonce Pointer to a single-use nonce
+  @param getentropy A function pointer to fill an entropy buffer
+  @param getentropy_arg State provided to the entropy function
 
-  @discussion @p max_ngens should be set based on an upper bound of CPUs available on the device. The entropy buffer should be managed outside the PRNG and updated continuously (e.g. by an interrupt handler). The count of samples in the entropy buffer needn't be better than a rough estimate.
+  @discussion See the @p cckprng_getentropy type definition for discussion on its semantics.
+
 */
 void cckprng_init(struct cckprng_ctx *ctx,
-                  unsigned max_ngens,
-                  size_t entropybuf_nbytes,
-                  const void *entropybuf,
-                  const uint32_t *entropybuf_nsamples,
                   size_t seed_nbytes,
                   const void *seed,
                   size_t nonce_nbytes,
-                  const void *nonce);
+                  const void *nonce,
+                  cckprng_getentropy getentropy,
+                  void *getentropy_arg);
 
 /*
   @function cckprng_init_with_getentropy
@@ -332,7 +168,7 @@ void cckprng_init(struct cckprng_ctx *ctx,
   @param seed_nbytes Length of the seed in bytes
   @param seed Pointer to a high-entropy seed
   @param nonce_nbytes Length of the nonce in bytes
-  @param seed Pointer to a single-use nonce
+  @param nonce Pointer to a single-use nonce
   @param getentropy A function pointer to fill an entropy buffer
   @param getentropy_arg State provided to the entropy function
 

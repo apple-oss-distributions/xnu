@@ -57,7 +57,7 @@ const img4_object_spec_t _img4_chip_spec;
  * A constant describing the recommended stack allocation required for a
  * {@link img4_chip_t} object.
  */
-#define IMG4_CHIP_SIZE_RECOMMENDED (256u)
+#define IMG4_CHIP_SIZE_RECOMMENDED (384u)
 
 /*!
  * @const IMG4_PMAP_DATA_SPEC

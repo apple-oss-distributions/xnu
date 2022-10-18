@@ -201,7 +201,7 @@ kasan_dybl_load_kext(uintptr_t addr, const char *kextname)
 			kernel_segment_command_t *seg = (void *)cmd;
 			bool is_exec = seg->initprot & VM_PROT_EXECUTE;
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 			if (is_exec && strcmp("__TEXT_EXEC", seg->segname) != 0) {
 				is_exec = false;
 			}
@@ -241,7 +241,7 @@ kasan_dybl_unload_kext(uintptr_t addr)
 		if (cmd->cmd == LC_SEGMENT_KERNEL) {
 			kernel_segment_command_t *seg = (void *)cmd;
 			bool is_exec = seg->initprot & VM_PROT_EXECUTE;
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 			if (is_exec && strcmp("__TEXT_EXEC", seg->segname) != 0) {
 				is_exec = false;
 			}

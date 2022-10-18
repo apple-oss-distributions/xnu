@@ -30,13 +30,10 @@
 #define _I386_LOCKS_H_
 
 #include <sys/appleapiopts.h>
-#include <kern/kern_types.h>
+#include <kern/lock_types.h>
 #include <kern/assert.h>
 
 #ifdef  MACH_KERNEL_PRIVATE
-#define LOCKS_INDIRECT_ALLOW    1
-
-#include <i386/hw_lock_types.h>
 
 #define enaLkDeb                0x00000001      /* Request debug in default attribute */
 #define enaLkStat               0x00000002      /* Request statistic in default attribute */
@@ -46,67 +43,35 @@
 
 #endif /* MACH_KERNEL_PRIVATE */
 
-#if     defined(MACH_KERNEL_PRIVATE)
+#ifdef MACH_KERNEL_PRIVATE
 typedef struct {
 	volatile uintptr_t      interlock __kernel_data_semantics;
-#if     MACH_LDEBUG
-	unsigned long   lck_spin_pad[9];        /* XXX - usimple_lock_data_t */
+#if MACH_LDEBUG
+	unsigned long           lck_spin_pad[9];        /* XXX - usimple_lock_data_t */
 #endif
 } lck_spin_t;
 
-#define LCK_SPIN_TAG_DESTROYED          0x00002007      /* lock marked as Destroyed */
+#define LCK_SPIN_TAG_DESTROYED 0x00002007      /* lock marked as Destroyed */
 
-#else /* MACH_KERNEL_PRIVATE */
-#ifdef  KERNEL_PRIVATE
-typedef struct {
-	unsigned long    opaque[10];
-} lck_spin_t;
-#else /* KERNEL_PRIVATE */
-typedef struct __lck_spin_t__   lck_spin_t;
-#endif /* KERNEL_PRIVATE */
-#endif /* MACH_KERNEL_PRIVATE */
+#if LCK_MTX_USE_ARCH
 
-#ifdef  MACH_KERNEL_PRIVATE
-/* The definition of this structure, including the layout of the
- * state bitfield, is tailored to the asm implementation in i386_lock.s
- */
 typedef struct _lck_mtx_ {
-	/*
-	 * The mtx_owner which holds a thread_t can be "data semantics"
-	 * because any dereference of it that leads to mutation
-	 * will zone_id_require() that it is indeed a proper thread
-	 * from the thread zone.
-	 *
-	 * This allows us to leave pure data with a lock into
-	 * the kalloc data heap.
-	 */
 	union {
 		struct {
-			volatile uintptr_t              lck_mtx_owner __kernel_data_semantics;
-			union {
-				struct {
-					volatile uint32_t
-					    lck_mtx_waiters:16,
-					    lck_mtx_pri:8, // unused
-					    lck_mtx_ilocked:1,
-					    lck_mtx_mlocked:1,
-					    lck_mtx_promoted:1, // unused
-					    lck_mtx_spin:1,
-					    lck_mtx_is_ext:1,
-					    lck_mtx_pad3:3;
-				};
-				uint32_t        lck_mtx_state;
-			};
-			/* Pad field used as a canary, initialized to ~0 */
-			uint32_t                        lck_mtx_pad32;
+			volatile uint32_t
+			    lck_mtx_waiters:16,
+			    lck_mtx_pri:8, // unused
+			    lck_mtx_ilocked:1,
+			    lck_mtx_mlocked:1,
+			    lck_mtx_spin:1,
+			    lck_mtx_profile:1,
+			    lck_mtx_pad3:4;
 		};
-		struct {
-			/* Marked as data as it is only dereferenced under LCK_ATTR_DEBUG */
-			struct _lck_mtx_ext_            *lck_mtx_ptr __kernel_data_semantics;
-			uint32_t                        lck_mtx_tag;
-			uint32_t                        lck_mtx_pad32_2;
-		};
+		uint32_t        lck_mtx_state;
 	};
+	volatile uint32_t       lck_mtx_owner; /* a ctid_t */
+	uint32_t                lck_mtx_grp;
+	uint32_t                lck_mtx_padding;
 } lck_mtx_t;
 
 #define LCK_MTX_WAITERS_MSK             0x0000ffff
@@ -114,16 +79,51 @@ typedef struct _lck_mtx_ {
 #define LCK_MTX_PRIORITY_MSK            0x00ff0000
 #define LCK_MTX_ILOCKED_MSK             0x01000000
 #define LCK_MTX_MLOCKED_MSK             0x02000000
-#define LCK_MTX_SPIN_MSK                0x08000000
+#define LCK_MTX_SPIN_MSK                0x04000000
+#define LCK_MTX_PROFILE_MSK             0x08000000
 
 /* This pattern must subsume the interlocked, mlocked and spin bits */
-#define LCK_MTX_TAG_INDIRECT                    0x07ff1007      /* lock marked as Indirect  */
-#define LCK_MTX_TAG_DESTROYED                   0x07fe2007      /* lock marked as Destroyed */
+#define LCK_MTX_TAG_DESTROYED           0x07fe2007      /* lock marked as Destroyed */
+
+#endif /* LCK_MTX_USE_ARCH */
+#elif KERNEL_PRIVATE
+
+typedef struct {
+	unsigned long opaque[10] __kernel_data_semantics;
+} lck_spin_t;
+
+typedef struct {
+	unsigned long opaque[2] __kernel_data_semantics;
+} lck_mtx_t;
+
+typedef struct {
+	unsigned long opaque[10];
+} lck_mtx_ext_t;
+
+#else /* KERNEL_PRIVATE */
+
+typedef struct __lck_spin_t__           lck_spin_t;
+typedef struct __lck_mtx_t__            lck_mtx_t;
+typedef struct __lck_mtx_ext_t__        lck_mtx_ext_t;
+
+#endif /* !KERNEL_PRIVATE */
+#ifdef  MACH_KERNEL_PRIVATE
+
+/*
+ * static panic deadline, in timebase units, for
+ * hw_lock_{bit,lock}{,_nopreempt} and hw_wait_while_equals()
+ */
+extern uint64_t _Atomic lock_panic_timeout;
 
 /* Adaptive spin before blocking */
 extern uint64_t         MutexSpin;
 extern uint64_t         low_MutexSpin;
-extern int64_t         high_MutexSpin;
+extern int64_t          high_MutexSpin;
+
+#if CONFIG_PV_TICKET
+extern bool             has_lock_pv;
+#endif
+#if LCK_MTX_USE_ARCH
 
 typedef enum lck_mtx_spinwait_ret_type {
 	LCK_MTX_SPINWAIT_ACQUIRED = 0,
@@ -138,97 +138,47 @@ typedef enum lck_mtx_spinwait_ret_type {
 
 extern lck_mtx_spinwait_ret_type_t              lck_mtx_lock_spinwait_x86(lck_mtx_t *mutex);
 struct turnstile;
-extern void                                     lck_mtx_lock_wait_x86(lck_mtx_t *mutex, struct turnstile **ts);
-extern void                                     lck_mtx_lock_acquire_x86(lck_mtx_t *mutex);
+extern void             lck_mtx_lock_wait_x86(lck_mtx_t *mutex, struct turnstile **ts);
+extern void             lck_mtx_lock_acquire_x86(lck_mtx_t *mutex);
 
-extern void                                     lck_mtx_lock_slow(lck_mtx_t *lock);
-extern boolean_t                                lck_mtx_try_lock_slow(lck_mtx_t *lock);
-extern void                                     lck_mtx_unlock_slow(lck_mtx_t *lock);
-extern void                                     lck_mtx_lock_spin_slow(lck_mtx_t *lock);
-extern boolean_t                                lck_mtx_try_lock_spin_slow(lck_mtx_t *lock);
-extern void                                     hw_lock_byte_init(volatile uint8_t *lock_byte);
-extern void                                     hw_lock_byte_lock(volatile uint8_t *lock_byte);
-extern void                                     hw_lock_byte_unlock(volatile uint8_t *lock_byte);
+extern void             lck_mtx_lock_slow(lck_mtx_t *lock);
+extern boolean_t        lck_mtx_try_lock_slow(lck_mtx_t *lock);
+extern void             lck_mtx_unlock_slow(lck_mtx_t *lock);
+extern void             lck_mtx_lock_spin_slow(lck_mtx_t *lock);
+extern boolean_t        lck_mtx_try_lock_spin_slow(lck_mtx_t *lock);
 
-typedef struct {
-	unsigned int            type;
-	unsigned int            pad4;
-	vm_offset_t             pc;
-	vm_offset_t             thread;
-} lck_mtx_deb_t;
+#endif /* LCK_MTX_USE_ARCH */
 
-#define MUTEX_TAG       0x4d4d
+extern void             hw_lock_byte_init(volatile uint8_t *lock_byte);
+extern void             hw_lock_byte_lock(volatile uint8_t *lock_byte);
+extern void             hw_lock_byte_unlock(volatile uint8_t *lock_byte);
+extern void             kernel_preempt_check(void);
 
-typedef struct {
-	unsigned int            lck_mtx_stat_data;
-} lck_mtx_stat_t;
+#ifdef LOCK_PRIVATE
 
-typedef struct _lck_mtx_ext_ {
-	lck_mtx_t               lck_mtx;
-	struct _lck_grp_        *lck_mtx_grp;
-	unsigned int            lck_mtx_attr;
-	unsigned int            lck_mtx_pad1;
-	lck_mtx_deb_t           lck_mtx_deb;
-	uint64_t                lck_mtx_stat;
-	unsigned int            lck_mtx_pad2[2];
-} lck_mtx_ext_t;
-
-#define LCK_MTX_ATTR_DEBUG      0x1
-#define LCK_MTX_ATTR_DEBUGb     0
-#define LCK_MTX_ATTR_STAT       0x2
-#define LCK_MTX_ATTR_STATb      1
-
-#define LCK_MTX_EVENT(lck)        ((event_t)(((unsigned int*)(lck))+(sizeof(lck_mtx_t)-1)/sizeof(unsigned int)))
-#define LCK_EVENT_TO_MUTEX(event) ((lck_mtx_t *)(uintptr_t)(((unsigned int *)(event)) - ((sizeof(lck_mtx_t)-1)/sizeof(unsigned int))))
-
-#else /* MACH_KERNEL_PRIVATE */
-#ifdef  XNU_KERNEL_PRIVATE
-typedef struct {
-	unsigned long           opaque[2];
-} lck_mtx_t;
-
-typedef struct {
-	unsigned long           opaque[10];
-} lck_mtx_ext_t;
-#else /* XNU_KERNEL_PRIVATE */
-#ifdef  KERNEL_PRIVATE
-typedef struct {
-	unsigned long           opaque[2];
-} lck_mtx_t;
-
-typedef struct {
-	unsigned long           opaque[10];
-} lck_mtx_ext_t;
-
-#else /* KERNEL_PRIVATE */
-typedef struct __lck_mtx_t__            lck_mtx_t;
-typedef struct __lck_mtx_ext_t__        lck_mtx_ext_t;
-#endif /* KERNEL_PRIVATE */
-#endif /* XNU_KERNEL_PRIVATE */
-#endif /* MACH_KERNEL_PRIVATE */
-
-#ifdef  MACH_KERNEL_PRIVATE
-
-/*
- * static panic deadline, in timebase units, for
- * hw_lock_{bit,lock}{,_nopreempt} and hw_wait_while_equals()
- */
-extern uint64_t _Atomic lock_panic_timeout;
-
-#if LOCK_PRIVATE
-
-#define lock_disable_preemption_for_thread(t)   disable_preemption_internal()
-#define lock_preemption_disabled_for_thread(t)  (get_preemption_level() > 0)
-
-#define LCK_MTX_THREAD_TO_STATE(t)      ((uintptr_t)t)
-#define PLATFORM_LCK_ILOCK              0
+#if LCK_MTX_USE_ARCH
+#define LCK_MTX_EVENT(lck)      CAST_EVENT64_T(&(lck)->lck_mtx_owner)
+#define LCK_EVENT_TO_MUTEX(e)   __container_of((uint32_t *)(event), lck_mtx_t, lck_mtx_owner)
+#define LCK_MTX_HAS_WAITERS(l)  ((l)->lck_mtx_waiters != 0)
+#endif /* LCK_MTX_USE_ARCH */
 
 #define LOCK_SNOOP_SPINS        1000
 #define LOCK_PRETEST            1
 
-#endif  // LOCK_PRIVATE
+#define lock_disable_preemption_for_thread(t)   disable_preemption_internal()
+#define lock_preemption_level_for_thread(t)     get_preemption_level()
+#define lock_preemption_disabled_for_thread(t)  (get_preemption_level() > 0)
+#define lock_enable_preemption()                enable_preemption_internal()
+#define current_thread()                        current_thread_fast()
 
-extern void             kernel_preempt_check(void);
+#define __hw_spin_wait_load(ptr, load_var, cond_result, cond_expr) ({ \
+	load_var = os_atomic_load(ptr, relaxed);                                \
+	cond_result = (cond_expr);                                              \
+	if (!(cond_result)) {                                                   \
+	        cpu_pause();                                                    \
+	}                                                                       \
+})
 
+#endif /* LOCK_PRIVATE */
 #endif /* MACH_KERNEL_PRIVATE */
-#endif  /* _I386_LOCKS_H_ */
+#endif /* _I386_LOCKS_H_ */

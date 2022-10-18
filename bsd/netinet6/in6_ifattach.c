@@ -287,7 +287,6 @@ in6_iid_from_hw(struct ifnet *ifp, struct in6_addr *in6)
 	case IFT_IEEE80211:
 #endif
 	case IFT_BRIDGE:
-	case IFT_6LOWPAN:
 		/* IEEE802/EUI64 cases - what others? */
 		/* IEEE1394 uses 16byte length address starting with EUI64 */
 		if (addrlen > 8) {

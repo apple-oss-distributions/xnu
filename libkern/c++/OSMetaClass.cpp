@@ -1106,7 +1106,7 @@ OSMetaClass::applyToInstances(OSOrderedSet * set,
         maxDepth = sDeepestClass;
         if (maxDepth > kLocalDepth) {
                 nextIndex = IONewData(typeof(nextIndex[0]), maxDepth);
-                sets      = IONewData(typeof(sets[0]), maxDepth);
+                sets      = IONew(typeof(sets[0]), maxDepth);
 	}
         done = false;
         level = 0;
@@ -1138,7 +1138,7 @@ OSMetaClass::applyToInstances(OSOrderedSet * set,
 	}while (!done);
         if (maxDepth > kLocalDepth) {
                 IODeleteData(nextIndex, typeof(nextIndex[0]), maxDepth);
-                IODeleteData(sets, typeof(sets[0]), maxDepth);
+                IODelete(sets, typeof(sets[0]), maxDepth);
 	}
 }
 
@@ -1545,6 +1545,8 @@ finish:
 
 #if IOTRACKING
 
+__typed_allocators_ignore_push
+
 void *
 OSMetaClass::trackedNew(size_t size)
 {
@@ -1573,6 +1575,8 @@ OSMetaClass::trackedDelete(void * instance, size_t size)
         kheap_free(KHEAP_DEFAULT, mem, size + sizeof(IOTracking));
         OSIVAR_ACCUMSIZE(-size);
 }
+
+__typed_allocators_ignore_pop
 
 void
 OSMetaClass::trackedInstance(OSObject * instance) const

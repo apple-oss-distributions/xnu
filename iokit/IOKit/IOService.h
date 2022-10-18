@@ -145,11 +145,13 @@ extern const OSSymbol *     gIODEXTMatchCountKey;
 extern const OSSymbol *     gIOUserClientClassKey;
 
 extern const OSSymbol *     gIOUserClassKey;
+extern const OSSymbol *     gIOUserClassesKey;
 extern const OSSymbol *     gIOUserServerClassKey;
 extern const OSSymbol *     gIOUserServerNameKey;
 extern const OSSymbol *     gIOUserServerTagKey;
 extern const OSSymbol *     gIOUserUserClientKey;
 extern const OSSymbol *     gIOAssociatedServicesKey;
+extern const OSSymbol *     gIOUserServerPreserveUserspaceRebootKey;
 
 extern const OSSymbol *     gIOKitDebugKey;
 extern const OSSymbol *     gIOServiceKey;
@@ -186,11 +188,15 @@ extern const OSSymbol *     gIOBSDMajorKey;
 extern const OSSymbol *     gIOBSDMinorKey;
 extern const OSSymbol *     gIOBSDUnitKey;
 
+extern const OSSymbol *     gIOUserClientEntitlementsKey;
 extern const OSSymbol *     gIODriverKitEntitlementKey;
 extern const OSSymbol *     gIOServiceDEXTEntitlementsKey;
 extern const OSSymbol *     gIODriverKitUserClientEntitlementsKey;
 extern const OSSymbol *     gIODriverKitUserClientEntitlementAllowAnyKey;
 extern const OSSymbol *     gIODriverKitRequiredEntitlementsKey;
+extern const OSSymbol *     gIODriverKitTestDriverEntitlementKey;
+extern const OSSymbol *     gIODriverKitUserClientEntitlementCommunicatesWithDriversKey;
+extern const OSSymbol *     gIODriverKitUserClientEntitlementAllowThirdPartyUserClientsKey;
 extern const OSSymbol *     gIOMatchDeferKey;
 
 extern const OSSymbol *     gIOAllCPUInitializedKey;
@@ -785,6 +791,17 @@ public:
  *   @param delta The delta to be applied to the IOService object's <code>busyState</code>. */
 
 	virtual void adjustBusy( SInt32 delta );
+
+#ifdef XNU_KERNEL_PRIVATE
+/*! @function waitQuietWithOptions
+ *   @abstract Waits for an IOService object's <code>busyState</code> to be zero.
+ *   @discussion Blocks the caller until an IOService object is non busy.
+ *   @param timeout The maximum time to wait in nanoseconds. Default is to wait forever.
+ *   @param options Options to configure behavior of this call
+ *   @result Returns an error code if Mach synchronization primitives fail, <code>kIOReturnTimeout</code>, or <code>kIOReturnSuccess</code>. */
+
+	IOReturn waitQuietWithOptions(uint64_t timeout = UINT64_MAX, IOOptionBits options = 0);
+#endif /* XNU_KERNEL_PRIVATE */
 
 	APPLE_KEXT_COMPATIBILITY_VIRTUAL
 	IOReturn waitQuiet(mach_timespec_t * timeout)
@@ -1567,6 +1584,7 @@ public:
 	bool hasUserServer() const;
 	static void userSpaceWillReboot();
 	static void userSpaceDidReboot();
+	kern_return_t CopyProperties_Local(OSDictionary ** properties);
 
 	IOStateNotificationItem * stateNotificationItemCopy(OSString * itemName, OSDictionary * schema);
 	kern_return_t stateNotificationListenerAdd(OSArray * items,
@@ -2151,6 +2169,7 @@ private:
 	IOReturn powerDomainWillChangeTo( IOPMPowerFlags, IOPowerConnection * );
 	IOReturn powerDomainDidChangeTo( IOPMPowerFlags, IOPowerConnection * );
 #endif
+	static void allocPMInitLock( void );
 	void PMfree( void );
 	bool tellChangeDown1( unsigned long );
 	bool tellChangeDown2( unsigned long );
@@ -2209,7 +2228,7 @@ private:
 	static IOReturn actionDriverCalloutDone(OSObject *, void *, void *, void *, void * );
 	static IOPMRequest * acquirePMRequest( IOService * target, IOOptionBits type, IOPMRequest * active = NULL );
 	static void releasePMRequest( IOPMRequest * request );
-	static void pmDriverCallout( IOService * from );
+	static void pmDriverCallout( IOService * from, thread_call_param_t );
 	static void pmTellAppWithResponse( OSObject * object, void * context );
 	static void pmTellClientWithResponse( OSObject * object, void * context );
 	static void pmTellCapabilityAppWithResponse( OSObject * object, void * arg );

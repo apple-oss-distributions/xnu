@@ -56,7 +56,12 @@ typedef natural_t               iv_index_t;
 typedef iv_index_t              *iv_entry_t;
 #define IVE_NULL                ((iv_entry_t) 0)
 
-#define IV_ENTRIES_INLINE MACH_VOUCHER_ATTR_KEY_NUM_WELL_KNOWN
+/* actual number of attribute managers supported by kernel */
+#if CONFIG_VOUCHER_DEPRECATED
+#define MACH_VOUCHER_ATTR_KEY_NUM    MACH_VOUCHER_ATTR_KEY_TEST
+#else
+#define MACH_VOUCHER_ATTR_KEY_NUM    MACH_VOUCHER_ATTR_KEY_BANK
+#endif /* CONFIG_VOUCHER_DEPRECATED */
 
 /*
  * IPC Voucher
@@ -69,9 +74,7 @@ struct ipc_voucher {
 	iv_index_t              iv_hash;        /* checksum hash */
 	iv_index_t              iv_sum;         /* checksum of values */
 	os_refcnt_t             iv_refs;        /* reference count */
-	iv_index_t              iv_table_size;  /* size of the voucher table */
-	iv_index_t              iv_inline_table[IV_ENTRIES_INLINE];
-	iv_entry_t              iv_table;       /* table of voucher attr entries */
+	iv_index_t              iv_table[MACH_VOUCHER_ATTR_KEY_NUM];
 	ipc_port_t              iv_port;        /* port representing the voucher */
 	queue_chain_t           iv_hash_link;   /* link on hash chain */
 };
@@ -145,7 +148,6 @@ struct ipc_voucher_attr_control {
 	iv_index_t              ivac_table_size;        /* size of the attr value table */
 	iv_index_t              ivac_init_table_size;   /* size of the attr value table */
 	iv_index_t              ivac_freelist;          /* index of the first free element */
-	ipc_port_t              ivac_port;              /* port for accessing the cache control  */
 	lck_spin_t              ivac_lock_data;
 	iv_index_t              ivac_key_index;         /* key index for this value */
 };
@@ -178,8 +180,6 @@ extern kern_return_t ipc_get_pthpriority_from_kmsg_voucher(ipc_kmsg_t kmsg, ipc_
 	                                THREAD_UNINT, &ipc_lck_grp)
 #define ivac_wakeup(ivac) thread_wakeup((event_t)(ivac))
 
-extern void ivac_dealloc(ipc_voucher_attr_control_t ivac);
-
 static inline void
 ivac_reference(ipc_voucher_attr_control_t ivac)
 {
@@ -197,7 +197,7 @@ ivac_release(ipc_voucher_attr_control_t ivac)
 	}
 
 	if (os_ref_release(&ivac->ivac_refs) == 0) {
-		ivac_dealloc(ivac);
+		panic("voucher attribute control %p over-released", ivac);
 	}
 }
 
@@ -301,7 +301,6 @@ struct ipc_voucher_attr_manager {
 	ipc_voucher_attr_manager_get_value_t            ivam_get_value;
 	ipc_voucher_attr_manager_extract_content_t      ivam_extract_content;
 	ipc_voucher_attr_manager_command_t              ivam_command;
-	ipc_voucher_attr_manager_release_t              ivam_release;
 	ipc_voucher_attr_manager_flags                  ivam_flags;
 };
 
@@ -335,22 +334,6 @@ extern void ipc_voucher_release(
 extern ipc_port_t convert_voucher_to_port(
 	ipc_voucher_t           voucher);
 
-/* convert from a voucher attribute control to a port */
-extern ipc_port_t convert_voucher_attr_control_to_port(
-	ipc_voucher_attr_control_t      control);
-
-/* add a reference to the specified voucher */
-extern void ipc_voucher_attr_control_reference(
-	ipc_voucher_attr_control_t      control);
-
-/* drop the reference picked up above */
-extern void ipc_voucher_attr_control_release(
-	ipc_voucher_attr_control_t      control);
-
-/* convert from a port to a voucher attribute control */
-extern ipc_voucher_attr_control_t convert_port_to_voucher_attr_control(
-	ipc_port_t              port);
-
 /*
  * In-kernel equivalents to the user syscalls
  */
@@ -374,13 +357,12 @@ ipc_register_well_known_mach_voucher_attr_manager(
 	mach_voucher_attr_key_t                 key,
 	ipc_voucher_attr_control_t              *control);
 
-
 extern kern_return_t
-ipc_register_mach_voucher_attr_manager(
-	ipc_voucher_attr_manager_t              manager,
-	mach_voucher_attr_value_handle_t        default_value,
-	mach_voucher_attr_key_t                 *key,
-	ipc_voucher_attr_control_t              *control);
+mach_voucher_attr_control_get_values(
+	ipc_voucher_attr_control_t              control,
+	ipc_voucher_t                           voucher,
+	mach_voucher_attr_value_handle_t        *out_values,
+	mach_msg_type_number_t                  *in_out_size);
 
 __END_DECLS
 

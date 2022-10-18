@@ -41,7 +41,7 @@
 #include <net/route.h>
 #include <net/kpi_protocol.h>
 #include <net/net_api_stats.h>
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 #include <skywalk/lib//net_filter_event.h>
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
@@ -88,7 +88,7 @@ extern errno_t ipf_addv6(const struct ipf_filter *filter,
 static errno_t ipf_add(const struct ipf_filter *filter,
     ipfilter_t *filter_ref, struct ipfilter_list *head, bool is_internal);
 
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 static bool net_check_compatible_ipf(void);
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
@@ -138,7 +138,7 @@ ipf_unref(void)
 			}
 		}
 	}
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 	net_filter_event_mark(NET_FILTER_EVENT_IP,
 	    net_check_compatible_ipf());
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
@@ -172,7 +172,7 @@ ipf_add(
 		OSIncrementAtomic64(&net_api_stats.nas_ipf_add_os_count);
 		INC_ATOMIC_INT64_LIM(net_api_stats.nas_ipf_add_os_total);
 	}
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 	net_filter_event_mark(NET_FILTER_EVENT_IP,
 	    net_check_compatible_ipf());
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
@@ -293,7 +293,7 @@ ipf_remove(
 			return 0;
 		}
 	}
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 	net_filter_event_mark(NET_FILTER_EVENT_IP,
 	    net_check_compatible_ipf());
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
@@ -638,7 +638,7 @@ ipf_get_inject_filter(struct mbuf *m)
 	return filter_ref;
 }
 
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 bool
 net_check_compatible_ipf(void)
 {

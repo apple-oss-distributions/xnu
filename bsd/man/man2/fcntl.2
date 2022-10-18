@@ -1,5 +1,5 @@
 .\"
-.\" Copyright (c) 2011 Apple Inc.  All rights reserved.
+.\" Copyright (c) 2011-2022 Apple Inc.  All rights reserved.
 .\"
 .\" @APPLE_LICENSE_HEADER_START@
 .\" 
@@ -56,7 +56,7 @@
 .\"
 .\"     @(#)fcntl.2	8.2 (Berkeley) 1/12/94
 .\"
-.Dd June 17, 2021
+.Dd August 12, 2021
 .Dt FCNTL 2
 .Os BSD 4.2
 .Sh NAME
@@ -78,7 +78,7 @@ The argument
 is a descriptor to be operated on by
 .Fa cmd
 as follows:
-.Bl -tag -width F_WRITEBOOTSTRAPX
+.Bl -tag -width F_GETPATH_NOFIRMLINKX
 .It Dv F_DUPFD
 Return a new descriptor as follows:
 .Pp
@@ -261,6 +261,13 @@ match those of the
 .Fa arg
 of
 .Dv F_SETNOSIGPIPE .
+.It Dv F_TRANSFEREXTENTS
+Transfer any extra space in the file past the logical EOF (as previously
+allocated via
+.Dv F_PREALLOCATE )
+to another file.  The other file is specified via a file descriptor
+as the lone extra argument.  Both descriptors must reference regular
+files in the same volume.
 .El
 .Pp
 The flags for the
@@ -526,6 +533,10 @@ Allocate contiguous space. (Note that the file system may ignore this request if
 is very large.)
 .It Dv F_ALLOCATEALL
 Allocate all requested space or no space at all.
+.It Dv F_ALLOCATEPERSIST
+Allocate space that is not freed when
+.Xr close 2
+is called. (Note that the file system may ignore this request.)
 .El
 .Pp
 The position modes (fst_posmode) for the
@@ -649,13 +660,11 @@ exclusive-locked by another process;
 or the type is an exclusive lock and some portion of the
 segment of a file to be locked is already shared-locked or
 exclusive-locked by another process.
-.It Bq Er EACCESS
+.It Bq Er EACCES
 The argument
 .Fa cmd
-is either
+is
 .Dv F_SETSIZE
-or
-.Dv F_WRITEBOOTSTRAP
 and the calling process does not have root privileges.
 .\" ==========
 .It Bq Er EBADF
@@ -706,6 +715,13 @@ or
 and
 .Fa fildes
 is not a valid file descriptor open for reading.
+.Pp
+The argument
+.Fa cmd
+is
+.Dv F_TRANSFEREXTENTS
+and either file descriptor does not correspond to a valid
+regular file, or either file is not open for writing.
 .\" ==========
 .It Bq Er EDEADLK
 The argument
@@ -783,11 +799,22 @@ either
 .Fa fp_offset
 or
 .Fa fp_length
-are negative, or both
+are negative, or when both
 .Fa fp_offset
 and
 .Fa fp_length
-are not multiples of the file system block size.
+are not multiples of the file system block size, or when either
+.Fa fp_flags
+or
+.Fa reserved
+is non-zero value.
+.Pp
+The argument
+.Fa cmd
+is
+.Dv F_TRANSFEREXTENTS
+and the additional file descriptor is negative or both file
+descriptors reference the same file.
 .\" ==========
 .It Bq Er EMFILE
 .Fa Cmd
@@ -862,6 +889,18 @@ is
 .Dv F_SETOWN
 and
 the process ID given as argument is not in use.
+.\" ==========
+.It Bq Er ENOTSUP
+.Fa Cmd
+is
+.Dv F_TRANSFEREXTENTS
+and the given files aren't on an APFS volume.
+.\" ==========
+.It Bq Er EXDEV
+.Fa Cmd
+is
+.Dv F_TRANSFEREXTENTS
+and the referenced files are not in the same volume.
 .El
 .Sh SEE ALSO
 .Xr close 2 ,

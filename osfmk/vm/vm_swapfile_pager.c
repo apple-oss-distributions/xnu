@@ -98,14 +98,6 @@ kern_return_t swapfile_pager_data_return(memory_object_t mem_obj,
 kern_return_t swapfile_pager_data_initialize(memory_object_t mem_obj,
     memory_object_offset_t offset,
     memory_object_cluster_size_t data_cnt);
-kern_return_t swapfile_pager_data_unlock(memory_object_t mem_obj,
-    memory_object_offset_t offset,
-    memory_object_size_t size,
-    vm_prot_t desired_access);
-kern_return_t swapfile_pager_synchronize(memory_object_t mem_obj,
-    memory_object_offset_t offset,
-    memory_object_size_t length,
-    vm_sync_t sync_flags);
 kern_return_t swapfile_pager_map(memory_object_t mem_obj,
     vm_prot_t prot);
 kern_return_t swapfile_pager_last_unmap(memory_object_t mem_obj);
@@ -122,11 +114,8 @@ const struct memory_object_pager_ops swapfile_pager_ops = {
 	.memory_object_data_request = swapfile_pager_data_request,
 	.memory_object_data_return = swapfile_pager_data_return,
 	.memory_object_data_initialize = swapfile_pager_data_initialize,
-	.memory_object_data_unlock = swapfile_pager_data_unlock,
-	.memory_object_synchronize = swapfile_pager_synchronize,
 	.memory_object_map = swapfile_pager_map,
 	.memory_object_last_unmap = swapfile_pager_last_unmap,
-	.memory_object_data_reclaim = NULL,
 	.memory_object_backing_object = NULL,
 	.memory_object_pager_name = "swapfile pager"
 };
@@ -275,16 +264,6 @@ swapfile_pager_data_initialize(
 	return KERN_FAILURE;
 }
 
-kern_return_t
-swapfile_pager_data_unlock(
-	__unused memory_object_t        mem_obj,
-	__unused memory_object_offset_t offset,
-	__unused memory_object_size_t           size,
-	__unused vm_prot_t              desired_access)
-{
-	return KERN_FAILURE;
-}
-
 /*
  * swapfile_pager_data_request()
  *
@@ -310,11 +289,9 @@ swapfile_pager_data_request(
 	unsigned int            pl_count;
 	vm_object_t             dst_object;
 	kern_return_t           kr, retval;
-	vm_map_offset_t         kernel_mapping;
-	vm_offset_t             dst_vaddr;
+	vm_offset_t             kernel_mapping;
 	char                    *dst_ptr;
 	vm_offset_t             cur_offset;
-	vm_map_entry_t          map_entry;
 
 	PAGER_DEBUG(PAGER_ALL, ("swapfile_pager_data_request: %p, %llx, %x, %x\n", mem_obj, offset, length, protection_required));
 
@@ -356,24 +333,13 @@ swapfile_pager_data_request(
 	 * Reserve a virtual page in the kernel address space to map each
 	 * destination physical page when it's its turn to be processed.
 	 */
-	vm_object_reference(kernel_object);     /* ref. for mapping */
-	kr = vm_map_find_space(kernel_map,
-	    &kernel_mapping,
-	    PAGE_SIZE_64,
-	    0,
-	    VM_MAP_KERNEL_FLAGS_NONE,
-	    VM_KERN_MEMORY_NONE,
-	    &map_entry);
+	kr = kmem_alloc(kernel_map, &kernel_mapping, PAGE_SIZE,
+	    KMA_DATA | KMA_KOBJECT | KMA_PAGEABLE, VM_KERN_MEMORY_NONE);
 	if (kr != KERN_SUCCESS) {
-		vm_object_deallocate(kernel_object);
 		retval = kr;
 		goto done;
 	}
-	VME_OBJECT_SET(map_entry, kernel_object);
-	VME_OFFSET_SET(map_entry, kernel_mapping - VM_MIN_KERNEL_ADDRESS);
-	vm_map_unlock(kernel_map);
-	dst_vaddr = CAST_DOWN(vm_offset_t, kernel_mapping);
-	dst_ptr = (char *) dst_vaddr;
+	dst_ptr = (char *)kernel_mapping;
 
 	/*
 	 * Fill in the contents of the pages requested by VM.
@@ -455,15 +421,11 @@ done:
 		upl_deallocate(upl);
 		upl = NULL;
 	}
+
 	if (kernel_mapping != 0) {
 		/* clean up the mapping of the source and destination pages */
-		kr = vm_map_remove(kernel_map,
-		    kernel_mapping,
-		    kernel_mapping + PAGE_SIZE_64,
-		    VM_MAP_REMOVE_NO_FLAGS);
-		assert(kr == KERN_SUCCESS);
+		kmem_free(kernel_map, kernel_mapping, PAGE_SIZE);
 		kernel_mapping = 0;
-		dst_vaddr = 0;
 	}
 
 	return retval;
@@ -624,20 +586,6 @@ swapfile_pager_terminate(
 	PAGER_DEBUG(PAGER_ALL, ("swapfile_pager_terminate: %p\n", mem_obj));
 
 	return KERN_SUCCESS;
-}
-
-/*
- *
- */
-kern_return_t
-swapfile_pager_synchronize(
-	__unused memory_object_t        mem_obbj,
-	__unused memory_object_offset_t offset,
-	__unused memory_object_size_t   length,
-	__unused vm_sync_t              sync_flags)
-{
-	panic("swapfile_pager_synchronize: memory_object_synchronize no longer supported");
-	return KERN_FAILURE;
 }
 
 /*

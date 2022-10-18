@@ -54,6 +54,7 @@ typedef struct kcdata_item      *task_crashinfo_item_t;
 #ifdef XNU_KERNEL_PRIVATE
 
 #define CORPSEINFO_ALLOCATION_SIZE (1024 * 16)
+#define BTINFO_ALLOCATION_SIZE (1024 * 20)
 
 #if XNU_TARGET_OS_WATCH
 #define TOTAL_CORPSES_ALLOWED 4
@@ -84,6 +85,8 @@ extern kcdata_descriptor_t task_get_corpseinfo(task_t task);
 extern kcdata_descriptor_t  task_crashinfo_alloc_init(
 	mach_vm_address_t crash_data_p,
 	unsigned size, corpse_flags_t kc_u_flags, unsigned kc_flags);
+extern kcdata_descriptor_t task_btinfo_alloc_init(
+	mach_vm_address_t addr, unsigned size);
 extern kern_return_t task_crashinfo_destroy(kcdata_descriptor_t data);
 
 extern unsigned long total_corpses_count(void) __attribute__((pure));
@@ -112,6 +115,14 @@ extern kern_return_t task_duplicate_map_and_threads(
 
 extern kern_return_t task_enqueue_exception_with_corpse(
 	task_t task,
+	exception_type_t etype,
+	mach_exception_data_t code,
+	mach_msg_type_number_t codeCnt,
+	void *reason,
+	boolean_t lightweight);
+
+extern kern_return_t current_thread_collect_backtrace_info(
+	kcdata_descriptor_t *new_desc,
 	exception_type_t etype,
 	mach_exception_data_t code,
 	mach_msg_type_number_t codeCnt,

@@ -77,6 +77,9 @@ SYSCTL_UINT(_kern_skywalk, OID_AUTO, ring_stat_enable,
 	(old) = _avg;                                                   \
 } while (0)
 
+#define _BUF_DLIM(_buf, _pp)    (BUFLET_HAS_LARGE_BUF(_buf) ?           \
+	PP_BUF_SIZE_LARGE(_pp) : PP_BUF_SIZE_DEF(_pp))
+
 void
 kr_init_to_mhints(struct __kern_channel_ring *kring, uint32_t nslots)
 {
@@ -861,7 +864,17 @@ kr_rxprologue_nodetach(struct kern_channel *ch,
 		    kring->ckr_rtail, kring->ckr_ring->ring_head,
 		    kring->ckr_ring->ring_tail);
 		*err_reason = SKYWALK_KILL_REASON_INCONSISTENT_READY_BYTES;
+#if (DEVELOPMENT || DEBUG)
+		if (kr_disable_panic_on_sync_err == 0) {
+			panic("kr(0x%llx), inconsistent, head %u, ready %llu, "
+			    "cnt %u", SK_KVA(kring), head,
+			    kring->ckr_ready_bytes, *byte_count);
+			/* NOTREACHED */
+			__builtin_unreachable();
+		}
+#else /* (DEVELOPMENT || DEBUG) */
 		return -1;
+#endif /* !(DEVELOPMENT || DEBUG) */
 	}
 	kring->ckr_ready_bytes -= *byte_count;
 
@@ -1218,7 +1231,7 @@ kr_txsync_finalize(struct kern_channel *ch, struct __kern_channel_ring *kring,
 	 * number of possible slots. This is effectively what userspace can
 	 * write to.
 	 */
-	slot_size = kring->ckr_pp->pp_buflet_size;
+	slot_size = PP_BUF_SIZE_DEF(kring->ckr_pp);
 	slot_diff = kring->ckr_rhead - ckr_khead;
 	if (slot_diff < 0) {
 		slot_diff += kring->ckr_num_slots;
@@ -1737,13 +1750,14 @@ kr_internalize_metadata(struct kern_channel *ch,
 		}
 		ASSERT(ubuf != NULL);
 		ASSERT((kbuf != pkbuf) && (ubuf != pubuf));
-		ASSERT(kbuf->buf_dlim == kqum->qum_pp->pp_buflet_size);
+		ASSERT(kbuf->buf_dlim == _BUF_DLIM(kbuf, kqum->qum_pp));
 		ASSERT(kbuf->buf_addr != 0);
 		/*
 		 * For now, user-facing pool does not support shared
 		 * buffer, since otherwise the ubuf and kbuf buffer
 		 * indices would not match.  Assert this is the case.
 		 */
+		ASSERT(kbuf->buf_boff == 0);
 		ASSERT(kbuf->buf_addr == (mach_vm_address_t)kbuf->buf_objaddr);
 
 		kbuf->buf_dlen = ubuf->buf_dlen;
@@ -1785,7 +1799,7 @@ kr_internalize_metadata(struct kern_channel *ch,
 	}
 
 	if ((err == 0) && (md_type == NEXUS_META_TYPE_PACKET)) {
-		bdlim = kqum->qum_pp->pp_buflet_size;
+		bdlim = PP_BUF_SIZE_DEF(kqum->qum_pp);
 		switch (md_subtype) {
 		case NEXUS_META_SUBTYPE_RAW:
 			/*

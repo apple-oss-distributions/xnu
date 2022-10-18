@@ -270,16 +270,20 @@ processor_init(
 	processor->processor_self = IP_NULL;
 	processor->processor_list = NULL;
 	processor->must_idle = false;
+	processor->last_startup_reason = REASON_SYSTEM;
+	processor->last_shutdown_reason = REASON_NONE;
+	processor->shutdown_temporary = false;
+	processor->shutdown_locked = false;
+	processor->last_recommend_reason = REASON_SYSTEM;
+	processor->last_derecommend_reason = REASON_NONE;
 	processor->running_timers_active = false;
 	for (int i = 0; i < RUNNING_TIMER_MAX; i++) {
 		timer_call_setup(&processor->running_timers[i],
 		    running_timer_funcs[i], processor);
 		running_timer_clear(processor, i);
 	}
-
-	timer_init(&processor->idle_state);
-	timer_init(&processor->system_state);
-	timer_init(&processor->user_state);
+	recount_processor_init(processor);
+	simple_lock_init(&processor->start_state_lock, 0);
 
 	s = splsched();
 	pset_lock(pset);
@@ -489,6 +493,9 @@ pset_node_root(void)
 	return &pset_node0;
 }
 
+LCK_GRP_DECLARE(pset_create_grp, "pset_create");
+LCK_MTX_DECLARE(pset_create_lock, &pset_create_grp);
+
 processor_set_t
 pset_create(
 	pset_node_t node,
@@ -571,6 +578,7 @@ pset_init(
 	pset->recommended_bitmask = 0;
 	pset->primary_map = 0;
 	pset->realtime_map = 0;
+	pset->cpu_available_map = 0;
 
 	for (uint i = 0; i < PROCESSOR_STATE_LEN; i++) {
 		pset->cpu_state_map[i] = 0;
@@ -633,6 +641,20 @@ processor_info_count(
 	return KERN_SUCCESS;
 }
 
+void
+processor_cpu_load_info(processor_t processor,
+    natural_t ticks[static CPU_STATE_MAX])
+{
+	struct recount_usage usage = { 0 };
+	uint64_t idle_time = 0;
+	recount_processor_usage(&processor->pr_recount, &usage, &idle_time);
+
+	ticks[CPU_STATE_USER] += (uint32_t)(usage.ru_user_time_mach /
+	    hz_tick_interval);
+	ticks[CPU_STATE_SYSTEM] += (uint32_t)(usage.ru_system_time_mach /
+	    hz_tick_interval);
+	ticks[CPU_STATE_IDLE] += (uint32_t)(idle_time / hz_tick_interval);
+}
 
 kern_return_t
 processor_info(
@@ -664,7 +686,7 @@ processor_info(
 		basic_info->cpu_type = slot_type(cpu_id);
 		basic_info->cpu_subtype = slot_subtype(cpu_id);
 		state = processor->state;
-		if (state == PROCESSOR_OFF_LINE
+		if (((state == PROCESSOR_OFF_LINE || state == PROCESSOR_PENDING_OFFLINE) && !processor->shutdown_temporary)
 #if defined(__x86_64__)
 		    || !processor->is_recommended
 #endif
@@ -689,71 +711,17 @@ processor_info(
 	case PROCESSOR_CPU_LOAD_INFO:
 	{
 		processor_cpu_load_info_t       cpu_load_info;
-		timer_t         idle_state;
-		uint64_t        idle_time_snapshot1, idle_time_snapshot2;
-		uint64_t        idle_time_tstamp1, idle_time_tstamp2;
-
-		/*
-		 * We capture the accumulated idle time twice over
-		 * the course of this function, as well as the timestamps
-		 * when each were last updated. Since these are
-		 * all done using non-atomic racy mechanisms, the
-		 * most we can infer is whether values are stable.
-		 * timer_grab() is the only function that can be
-		 * used reliably on another processor's per-processor
-		 * data.
-		 */
 
 		if (*count < PROCESSOR_CPU_LOAD_INFO_COUNT) {
 			return KERN_FAILURE;
 		}
 
 		cpu_load_info = (processor_cpu_load_info_t) info;
-		if (precise_user_kernel_time) {
-			cpu_load_info->cpu_ticks[CPU_STATE_USER] =
-			    (uint32_t)(timer_grab(&processor->user_state) / hz_tick_interval);
-			cpu_load_info->cpu_ticks[CPU_STATE_SYSTEM] =
-			    (uint32_t)(timer_grab(&processor->system_state) / hz_tick_interval);
-		} else {
-			uint64_t tval = timer_grab(&processor->user_state) +
-			    timer_grab(&processor->system_state);
 
-			cpu_load_info->cpu_ticks[CPU_STATE_USER] = (uint32_t)(tval / hz_tick_interval);
-			cpu_load_info->cpu_ticks[CPU_STATE_SYSTEM] = 0;
-		}
-
-		idle_state = &processor->idle_state;
-		idle_time_snapshot1 = timer_grab(idle_state);
-		idle_time_tstamp1 = idle_state->tstamp;
-
-		/*
-		 * Idle processors are not continually updating their
-		 * per-processor idle timer, so it may be extremely
-		 * out of date, resulting in an over-representation
-		 * of non-idle time between two measurement
-		 * intervals by e.g. top(1). If we are non-idle, or
-		 * have evidence that the timer is being updated
-		 * concurrently, we consider its value up-to-date.
-		 */
-		if (processor->current_state != idle_state) {
-			cpu_load_info->cpu_ticks[CPU_STATE_IDLE] =
-			    (uint32_t)(idle_time_snapshot1 / hz_tick_interval);
-		} else if ((idle_time_snapshot1 != (idle_time_snapshot2 = timer_grab(idle_state))) ||
-		    (idle_time_tstamp1 != (idle_time_tstamp2 = idle_state->tstamp))) {
-			/* Idle timer is being updated concurrently, second stamp is good enough */
-			cpu_load_info->cpu_ticks[CPU_STATE_IDLE] =
-			    (uint32_t)(idle_time_snapshot2 / hz_tick_interval);
-		} else {
-			/*
-			 * Idle timer may be very stale. Fortunately we have established
-			 * that idle_time_snapshot1 and idle_time_tstamp1 are unchanging
-			 */
-			idle_time_snapshot1 += mach_absolute_time() - idle_time_tstamp1;
-
-			cpu_load_info->cpu_ticks[CPU_STATE_IDLE] =
-			    (uint32_t)(idle_time_snapshot1 / hz_tick_interval);
-		}
-
+		cpu_load_info->cpu_ticks[CPU_STATE_SYSTEM] = 0;
+		cpu_load_info->cpu_ticks[CPU_STATE_USER] = 0;
+		cpu_load_info->cpu_ticks[CPU_STATE_IDLE] = 0;
+		processor_cpu_load_info(processor, cpu_load_info->cpu_ticks);
 		cpu_load_info->cpu_ticks[CPU_STATE_NICE] = 0;
 
 		*count = PROCESSOR_CPU_LOAD_INFO_COUNT;
@@ -772,9 +740,36 @@ processor_info(
 	}
 }
 
-kern_return_t
-processor_start(
-	processor_t                     processor)
+void
+processor_wait_for_start(processor_t processor)
+{
+	spl_t s = splsched();
+	simple_lock(&processor->start_state_lock, LCK_GRP_NULL);
+	while (processor->state == PROCESSOR_START) {
+		assert_wait_timeout((event_t)&processor->state, THREAD_UNINT, 1000, 1000 * NSEC_PER_USEC); /* 1 second */
+		simple_unlock(&processor->start_state_lock);
+		splx(s);
+
+		wait_result_t wait_result = thread_block(THREAD_CONTINUE_NULL);
+		if (wait_result == THREAD_TIMED_OUT) {
+			panic("%s>cpu %d failed to start\n", __FUNCTION__, processor->cpu_id);
+		}
+
+		s = splsched();
+		simple_lock(&processor->start_state_lock, LCK_GRP_NULL);
+	}
+	simple_unlock(&processor->start_state_lock);
+	splx(s);
+}
+
+LCK_GRP_DECLARE(processor_updown_grp, "processor_updown");
+LCK_MTX_DECLARE(processor_updown_lock, &processor_updown_grp);
+
+static kern_return_t
+processor_startup(
+	processor_t                     processor,
+	processor_reason_t              reason,
+	uint32_t                        flags)
 {
 	processor_set_t         pset;
 	thread_t                        thread;
@@ -785,8 +780,18 @@ processor_start(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	if ((flags & (LOCK_STATE | UNLOCK_STATE)) && (reason != REASON_SYSTEM)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	lck_mtx_lock(&processor_updown_lock);
+
 	if (processor == master_processor) {
 		processor_t             prev;
+
+		processor->last_startup_reason = reason;
+
+		ml_cpu_power_enable(processor->cpu_id);
 
 		prev = thread_bind(processor);
 		thread_block(THREAD_CONTINUE_NULL);
@@ -795,6 +800,7 @@ processor_start(
 
 		thread_bind(prev);
 
+		lck_mtx_unlock(&processor_updown_lock);
 		return result;
 	}
 
@@ -802,6 +808,7 @@ processor_start(
 
 	if ((processor->processor_primary != processor) && (sched_enable_smt == 0)) {
 		if (cpu_can_exit(processor->cpu_id)) {
+			lck_mtx_unlock(&processor_updown_lock);
 			return KERN_SUCCESS;
 		}
 		/*
@@ -811,19 +818,35 @@ processor_start(
 		scheduler_disable = true;
 	}
 
-	ml_cpu_begin_state_transition(processor->cpu_id);
 	s = splsched();
 	pset = processor->processor_set;
 	pset_lock(pset);
-	if (processor->state != PROCESSOR_OFF_LINE) {
+	if (flags & LOCK_STATE) {
+		processor->shutdown_locked = true;
+	} else if (flags & UNLOCK_STATE) {
+		processor->shutdown_locked = false;
+	}
+
+	if (processor->state == PROCESSOR_START) {
 		pset_unlock(pset);
 		splx(s);
-		ml_cpu_end_state_transition(processor->cpu_id);
 
+		processor_wait_for_start(processor);
+
+		lck_mtx_unlock(&processor_updown_lock);
+		return KERN_SUCCESS;
+	}
+
+	if ((processor->state != PROCESSOR_OFF_LINE) || ((flags & SHUTDOWN_TEMPORARY) && !processor->shutdown_temporary)) {
+		pset_unlock(pset);
+		splx(s);
+
+		lck_mtx_unlock(&processor_updown_lock);
 		return KERN_FAILURE;
 	}
 
 	pset_update_processor_state(pset, processor, PROCESSOR_START);
+	processor->last_startup_reason = reason;
 	pset_unlock(pset);
 	splx(s);
 
@@ -838,8 +861,8 @@ processor_start(
 			pset_update_processor_state(pset, processor, PROCESSOR_OFF_LINE);
 			pset_unlock(pset);
 			splx(s);
-			ml_cpu_end_state_transition(processor->cpu_id);
 
+			lck_mtx_unlock(&processor_updown_lock);
 			return result;
 		}
 	}
@@ -858,8 +881,8 @@ processor_start(
 			pset_update_processor_state(pset, processor, PROCESSOR_OFF_LINE);
 			pset_unlock(pset);
 			splx(s);
-			ml_cpu_end_state_transition(processor->cpu_id);
 
+			lck_mtx_unlock(&processor_updown_lock);
 			return result;
 		}
 
@@ -879,8 +902,13 @@ processor_start(
 		ipc_processor_init(processor);
 	}
 
+	ml_cpu_power_enable(processor->cpu_id);
+	ml_cpu_begin_state_transition(processor->cpu_id);
 	ml_broadcast_cpu_event(CPU_BOOT_REQUESTED, processor->cpu_id);
 	result = cpu_start(processor->cpu_id);
+#if defined (__arm__) || defined (__arm64__)
+	assert(result == KERN_SUCCESS);
+#else
 	if (result != KERN_SUCCESS) {
 		s = splsched();
 		pset_lock(pset);
@@ -889,11 +917,17 @@ processor_start(
 		splx(s);
 		ml_cpu_end_state_transition(processor->cpu_id);
 
+		lck_mtx_unlock(&processor_updown_lock);
 		return result;
 	}
+#endif
 	if (scheduler_disable) {
 		assert(processor->processor_primary != processor);
 		sched_processor_enable(processor, FALSE);
+	}
+
+	if (flags & WAIT_FOR_START) {
+		processor_wait_for_start(processor);
 	}
 
 	ml_cpu_end_state_transition(processor->cpu_id);
@@ -903,58 +937,84 @@ processor_start(
 	kcov_start_cpu(processor->cpu_id);
 #endif
 
+	lck_mtx_unlock(&processor_updown_lock);
 	return KERN_SUCCESS;
 }
 
+kern_return_t
+processor_exit_reason(processor_t processor, processor_reason_t reason, uint32_t flags)
+{
+	if (processor == PROCESSOR_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (sched_is_in_sleep() && (reason != REASON_SYSTEM)) {
+#ifdef RHODES_CLUSTER_POWERDOWN_WORKAROUND
+		/*
+		 * Must allow CLPC to finish powering down the whole cluster,
+		 * or IOCPUSleepKernel() will fail to restart the offline cpus.
+		 */
+		if (reason != REASON_CLPC_SYSTEM) {
+			return KERN_FAILURE;
+		}
+#else
+		return KERN_FAILURE;
+#endif
+	}
+
+	if ((reason == REASON_USER) && !cpu_can_exit(processor->cpu_id)) {
+		return sched_processor_enable(processor, FALSE);
+	} else if ((reason == REASON_SYSTEM) || cpu_can_exit(processor->cpu_id)) {
+		return processor_shutdown(processor, reason, flags);
+	}
+
+	return KERN_INVALID_ARGUMENT;
+}
 
 kern_return_t
 processor_exit(
 	processor_t     processor)
 {
-	if (processor == PROCESSOR_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	return processor_shutdown(processor);
-}
-
-
-kern_return_t
-processor_start_from_user(
-	processor_t                     processor)
-{
-	kern_return_t ret;
-
-	if (processor == PROCESSOR_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (!cpu_can_exit(processor->cpu_id)) {
-		ret = sched_processor_enable(processor, TRUE);
-	} else {
-		ret = processor_start(processor);
-	}
-
-	return ret;
+	return processor_exit_reason(processor, REASON_SYSTEM, 0);
 }
 
 kern_return_t
 processor_exit_from_user(
 	processor_t     processor)
 {
-	kern_return_t ret;
+	return processor_exit_reason(processor, REASON_USER, 0);
+}
 
+kern_return_t
+processor_start_reason(processor_t processor, processor_reason_t reason, uint32_t flags)
+{
 	if (processor == PROCESSOR_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (!cpu_can_exit(processor->cpu_id)) {
-		ret = sched_processor_enable(processor, FALSE);
-	} else {
-		ret = processor_shutdown(processor);
+	if (sched_is_in_sleep() && (reason != REASON_SYSTEM)) {
+		return KERN_FAILURE;
 	}
 
-	return ret;
+	if ((reason == REASON_USER) && !cpu_can_exit(processor->cpu_id)) {
+		return sched_processor_enable(processor, TRUE);
+	} else {
+		return processor_startup(processor, reason, flags);
+	}
+}
+
+kern_return_t
+processor_start(
+	processor_t                     processor)
+{
+	return processor_start_reason(processor, REASON_SYSTEM, 0);
+}
+
+kern_return_t
+processor_start_from_user(
+	processor_t                     processor)
+{
+	return processor_start_reason(processor, REASON_USER, 0);
 }
 
 kern_return_t
@@ -998,6 +1058,14 @@ enable_smt_processors(bool enable)
 	return KERN_SUCCESS;
 }
 
+bool
+processor_should_kprintf(processor_t processor, bool starting)
+{
+	processor_reason_t reason = starting ? processor->last_startup_reason : processor->last_shutdown_reason;
+
+	return reason != REASON_CLPC_SYSTEM;
+}
+
 kern_return_t
 processor_control(
 	processor_t             processor,
@@ -1012,22 +1080,6 @@ processor_control(
 }
 
 kern_return_t
-processor_set_create(
-	__unused host_t         host,
-	__unused processor_set_t        *new_set,
-	__unused processor_set_t        *new_name)
-{
-	return KERN_FAILURE;
-}
-
-kern_return_t
-processor_set_destroy(
-	__unused processor_set_t        pset)
-{
-	return KERN_FAILURE;
-}
-
-kern_return_t
 processor_get_assignment(
 	processor_t     processor,
 	processor_set_t *pset)
@@ -1039,7 +1091,7 @@ processor_get_assignment(
 	}
 
 	state = processor->state;
-	if (state == PROCESSOR_SHUTDOWN || state == PROCESSOR_OFF_LINE) {
+	if (state == PROCESSOR_SHUTDOWN || state == PROCESSOR_OFF_LINE || state == PROCESSOR_PENDING_OFFLINE) {
 		return KERN_FAILURE;
 	}
 
@@ -1216,51 +1268,6 @@ processor_set_statistics(
 }
 
 /*
- *	processor_set_max_priority:
- *
- *	Specify max priority permitted on processor set.  This affects
- *	newly created and assigned threads.  Optionally change existing
- *      ones.
- */
-kern_return_t
-processor_set_max_priority(
-	__unused processor_set_t        pset,
-	__unused int                    max_priority,
-	__unused boolean_t              change_threads)
-{
-	return KERN_INVALID_ARGUMENT;
-}
-
-/*
- *	processor_set_policy_enable:
- *
- *	Allow indicated policy on processor set.
- */
-
-kern_return_t
-processor_set_policy_enable(
-	__unused processor_set_t        pset,
-	__unused int                    policy)
-{
-	return KERN_INVALID_ARGUMENT;
-}
-
-/*
- *	processor_set_policy_disable:
- *
- *	Forbid indicated policy on processor set.  Time sharing cannot
- *	be forbidden.
- */
-kern_return_t
-processor_set_policy_disable(
-	__unused processor_set_t        pset,
-	__unused int                    policy,
-	__unused boolean_t              change_threads)
-{
-	return KERN_INVALID_ARGUMENT;
-}
-
-/*
  *	processor_set_things:
  *
  *	Common internals for processor_set_{threads,tasks}
@@ -1360,8 +1367,8 @@ processor_set_things(
 				continue;
 			}
 #endif
-			if (task_is_exec_copy_internal(task)) {
-				/* skip threads belonging to tasks in the middle of exec */
+			if (!task->ipc_active || task_is_exec_copy(task)) {
+				/* skip threads in inactive tasks (in the middle of exec/fork/spawn) */
 				continue;
 			}
 
@@ -1381,8 +1388,8 @@ processor_set_things(
 				continue;
 			}
 #endif
-			if (task_is_exec_copy_internal(task)) {
-				/* skip new tasks created in the middle of exec */
+			if (!task->ipc_active || task_is_exec_copy(task)) {
+				/* skip inactive tasks (in the middle of exec/fork/spawn) */
 				continue;
 			}
 
@@ -1623,72 +1630,6 @@ processor_set_threads(
 	}
 	return KERN_SUCCESS;
 }
-#endif
-
-/*
- *	processor_set_policy_control
- *
- *	Controls the scheduling attributes governing the processor set.
- *	Allows control of enabled policies, and per-policy base and limit
- *	priorities.
- */
-kern_return_t
-processor_set_policy_control(
-	__unused processor_set_t                pset,
-	__unused int                            flavor,
-	__unused processor_set_info_t   policy_info,
-	__unused mach_msg_type_number_t count,
-	__unused boolean_t                      change)
-{
-	return KERN_INVALID_ARGUMENT;
-}
-
-#undef pset_deallocate
-void pset_deallocate(processor_set_t pset);
-void
-pset_deallocate(
-	__unused processor_set_t        pset)
-{
-	return;
-}
-
-#undef pset_reference
-void pset_reference(processor_set_t pset);
-void
-pset_reference(
-	__unused processor_set_t        pset)
-{
-	return;
-}
-
-#if CONFIG_THREAD_GROUPS
-
-pset_cluster_type_t
-thread_group_pset_recommendation(__unused struct thread_group *tg, __unused cluster_type_t recommendation)
-{
-#if __AMP__
-	switch (recommendation) {
-	case CLUSTER_TYPE_SMP:
-	default:
-		/*
-		 * In case of SMP recommendations, check if the thread
-		 * group has special flags which restrict it to the E
-		 * cluster.
-		 */
-		if (thread_group_smp_restricted(tg)) {
-			return PSET_AMP_E;
-		}
-		return PSET_AMP_P;
-	case CLUSTER_TYPE_E:
-		return PSET_AMP_E;
-	case CLUSTER_TYPE_P:
-		return PSET_AMP_P;
-	}
-#else /* __AMP__ */
-	return PSET_SMP;
-#endif /* __AMP__ */
-}
-
 #endif
 
 pset_cluster_type_t

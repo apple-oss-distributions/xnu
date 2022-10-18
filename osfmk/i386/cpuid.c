@@ -102,7 +102,7 @@ typedef struct cpuid_cache_descriptor {
 /*
  * Intel cache descriptor table:
  */
-static cpuid_cache_descriptor_t intel_cpuid_leaf2_descriptor_table[] = {
+static const cpuid_cache_descriptor_t intel_cpuid_leaf2_descriptor_table[] = {
 //	-------------------------------------------------------
 //	value	type	level		ways	size	entries
 //	-------------------------------------------------------
@@ -223,7 +223,7 @@ static void cpuid_vmm_detect_pv_interface(i386_vmm_info_t *info_p, const char *s
     bool (*)(i386_vmm_info_t*, const uint32_t, const uint32_t));
 static bool cpuid_vmm_detect_applepv_features(i386_vmm_info_t *info_p, const uint32_t base, const uint32_t max_leaf);
 
-static inline cpuid_cache_descriptor_t *
+static inline const cpuid_cache_descriptor_t *
 cpuid_leaf2_find(uint8_t value)
 {
 	unsigned int    i;
@@ -334,6 +334,7 @@ cpuid_set_cache_info( i386_cpu_info_t * info_p )
 	unsigned int    i;
 	unsigned int    j;
 	boolean_t       cpuid_deterministic_supported = FALSE;
+	unsigned int    dcnt = 0;
 
 	DBG("cpuid_set_cache_info(%p)\n", info_p);
 
@@ -342,25 +343,19 @@ cpuid_set_cache_info( i386_cpu_info_t * info_p )
 	/* Get processor cache descriptor info using leaf 2.  We don't use
 	 * this internally, but must publish it for KEXTs.
 	 */
-	cpuid_fn(2, cpuid_result);
-	for (j = 0; j < 4; j++) {
-		if ((cpuid_result[j] >> 31) == 1) {     /* bit31 is validity */
-			continue;
-		}
-		((uint32_t *)(void *)info_p->cache_info)[j] = cpuid_result[j];
-	}
-	/* first byte gives number of cpuid calls to get all descriptors */
-	for (i = 1; i < info_p->cache_info[0]; i++) {
-		if (i * 16 > sizeof(info_p->cache_info)) {
+	for (i = 0; i < sizeof(info_p->cache_info) / 16; i++) {
+		/* byte 0 gives number of cpuid calls to get all descriptors */
+		if (i > 0 && i >= info_p->cache_info[0]) {
 			break;
 		}
+
 		cpuid_fn(2, cpuid_result);
 		for (j = 0; j < 4; j++) {
 			if ((cpuid_result[j] >> 31) == 1) {
 				continue;
 			}
-			((uint32_t *)(void *)info_p->cache_info)[4 * i + j] =
-			    cpuid_result[j];
+			memcpy(&info_p->cache_info[dcnt], &cpuid_result[j], 4);
+			dcnt += 4;
 		}
 	}
 
@@ -526,7 +521,7 @@ cpuid_set_cache_info( i386_cpu_info_t * info_p )
 	 */
 	DBG(" %ld leaf2 descriptors:\n", sizeof(info_p->cache_info));
 	for (i = 1; i < sizeof(info_p->cache_info); i++) {
-		cpuid_cache_descriptor_t        *descp;
+		const cpuid_cache_descriptor_t  *descp;
 		int                             id;
 		int                             level;
 		int                             page;
@@ -1429,6 +1424,11 @@ cpuid_init_vmm_info(i386_vmm_info_t *info_p)
 	} else if (0 == bcmp(info_p->cpuid_vmm_vendor, CPUID_VMM_ID_KVM, 12)) {
 		/* KVM identification string */
 		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_KVM;
+		if (max_vmm_leaf >= 0x40000001) {
+			cpuid_fn(0x40000001, reg);
+			info_p->cpuid_vmm_kvm_features =
+			    quad(reg[edx], reg[eax]);
+		}
 	} else {
 		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_UNKNOWN;
 	}
@@ -1469,6 +1469,12 @@ uint32_t
 cpuid_vmm_family(void)
 {
 	return cpuid_vmm_info()->cpuid_vmm_family;
+}
+
+uint64_t
+cpuid_vmm_get_kvm_features(void)
+{
+	return cpuid_vmm_info()->cpuid_vmm_kvm_features;
 }
 
 uint64_t

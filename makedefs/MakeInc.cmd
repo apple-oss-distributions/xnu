@@ -104,7 +104,7 @@ ifeq ($(VERBOSE),YES)
 else
 	_v = @
 	_vstdout = > /dev/null
-	_vstderr = 2&> /dev/null
+	_vstderr = 2> /dev/null
 	XCRUN = /usr/bin/xcrun
 endif
 
@@ -239,6 +239,9 @@ ifeq ($(origin CTFMERGE),undefined)
 	ifeq (,$(wildcard $(CTFMERGE)))
 		export DO_CTFMERGE := 0
 	endif
+endif
+ifeq ($(origin CTFDUMP),undefined)
+	export CTFDUMP := $(shell $(XCRUN) -sdk $(SDKROOT) -find ctfdump 2> /dev/null)
 endif
 
 #

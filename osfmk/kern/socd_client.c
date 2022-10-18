@@ -110,7 +110,7 @@ socd_client_trace(
 		len = os_atomic_load_with_dependency_on(&socd_client_cfg.trace_buff_len, available);
 		offset = os_atomic_load_with_dependency_on(&socd_client_cfg.trace_buff_offset, available);
 		/* trace_idx is allowed to overflow */
-		trace_idx = os_atomic_inc(&socd_client_state.trace_idx, relaxed);
+		trace_idx = os_atomic_inc_orig(&socd_client_state.trace_idx, relaxed);
 		buff_idx = trace_idx % len;
 
 		absolutetime_to_nanoseconds(mach_continuous_time(), &time_ns);

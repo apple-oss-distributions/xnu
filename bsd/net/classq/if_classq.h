@@ -64,6 +64,7 @@ typedef struct cqrq_throttle {
 /* classq service class stats request argument */
 typedef struct cqrq_stat_sc {
 	mbuf_svc_class_t        sc;     /* (in) service class */
+	u_int8_t                grp_idx; /* group index */
 	u_int32_t               packets; /* (out) packets enqueued */
 	u_int32_t               bytes;  /* (out) bytes enqueued */
 } cqrq_stat_sc_t;
@@ -200,6 +201,13 @@ typedef enum cqev {
 } cqev_t;
 #endif /* BSD_KERNEL_PRIVATE */
 
+#define IF_CLASSQ_DEF                   0x0
+#define IF_CLASSQ_LOW_LATENCY           0x1
+#define IF_CLASSQ_L4S                   0x2
+#define IF_DEFAULT_GRP                  0x4
+
+#define IF_CLASSQ_ALL_GRPS              UINT8_MAX
+
 #include <net/classq/classq.h>
 #include <net/pktsched/pktsched_fq_codel.h>
 
@@ -246,12 +254,12 @@ struct if_ifclassq_stats {
 /*
  * For ifclassq operations
  */
-#define IFCQ_TBR_DEQUEUE(_ifcq, _p) do {                                \
-	ifclassq_tbr_dequeue(_ifcq, _p);                                \
+#define IFCQ_TBR_DEQUEUE(_ifcq, _p, _idx) do {                      \
+	ifclassq_tbr_dequeue(_ifcq, _p, _idx);                          \
 } while (0)
 
-#define IFCQ_TBR_DEQUEUE_SC(_ifcq, _sc, _p) do {                        \
-	ifclassq_tbr_dequeue_sc(_ifcq, _sc, _p);                        \
+#define IFCQ_TBR_DEQUEUE_SC(_ifcq, _sc, _p, _idx) do {                        \
+	ifclassq_tbr_dequeue_sc(_ifcq, _sc, _p, _idx);                        \
 } while (0)
 
 #define IFCQ_LEN(_ifcq)         ((_ifcq)->ifcq_len)
@@ -286,36 +294,41 @@ extern int ifclassq_pktsched_setup(struct ifclassq *);
 extern void ifclassq_set_maxlen(struct ifclassq *, u_int32_t);
 extern u_int32_t ifclassq_get_maxlen(struct ifclassq *);
 extern int ifclassq_get_len(struct ifclassq *, mbuf_svc_class_t,
-    u_int32_t *, u_int32_t *);
+    u_int8_t, u_int32_t *, u_int32_t *);
 extern errno_t ifclassq_enqueue(struct ifclassq *, classq_pkt_t *,
     classq_pkt_t *, u_int32_t, u_int32_t, boolean_t *);
 extern errno_t ifclassq_dequeue(struct ifclassq *, u_int32_t, u_int32_t,
-    classq_pkt_t *, classq_pkt_t *, u_int32_t *, u_int32_t *);
+    classq_pkt_t *, classq_pkt_t *, u_int32_t *, u_int32_t *, u_int8_t);
 extern errno_t ifclassq_dequeue_sc(struct ifclassq *, mbuf_svc_class_t,
     u_int32_t, u_int32_t, classq_pkt_t *, classq_pkt_t *, u_int32_t *,
-    u_int32_t *);
+    u_int32_t *, u_int8_t);
 extern void *ifclassq_poll(struct ifclassq *, classq_pkt_type_t *);
 extern void *ifclassq_poll_sc(struct ifclassq *, mbuf_svc_class_t,
     classq_pkt_type_t *);
 extern void ifclassq_update(struct ifclassq *, cqev_t);
 extern int ifclassq_attach(struct ifclassq *, u_int32_t, void *);
 extern void ifclassq_detach(struct ifclassq *);
-extern int ifclassq_getqstats(struct ifclassq *, u_int32_t,
+extern int ifclassq_getqstats(struct ifclassq *, u_int8_t, u_int32_t,
     void *, u_int32_t *);
 extern const char *ifclassq_ev2str(cqev_t);
 extern int ifclassq_tbr_set(struct ifclassq *, struct tb_profile *, boolean_t);
-extern void ifclassq_tbr_dequeue(struct ifclassq *, classq_pkt_t *);
+extern void ifclassq_tbr_dequeue(struct ifclassq *, classq_pkt_t *, u_int8_t);
 extern void ifclassq_tbr_dequeue_sc(struct ifclassq *, mbuf_svc_class_t,
-    classq_pkt_t *);
+    classq_pkt_t *, u_int8_t);
 extern void ifclassq_calc_target_qdelay(struct ifnet *ifp,
-    u_int64_t *if_target_qdelay);
-extern void ifclassq_calc_update_interval(u_int64_t *update_interval);
+    uint64_t *if_target_qdelay, uint32_t flags);
+extern void ifclassq_calc_update_interval(uint64_t *update_interval,
+    uint32_t flags);
 extern void ifclassq_set_packet_metadata(struct ifclassq *ifq,
     struct ifnet *ifp, classq_pkt_t *p);
 extern void ifclassq_reap_caches(boolean_t);
 extern struct ifclassq *ifclassq_alloc(void);
 extern void ifclassq_retain(struct ifclassq *);
 extern void ifclassq_release(struct ifclassq **);
+extern int ifclassq_setup_group(struct ifclassq *ifcq, uint8_t grp_idx,
+    uint8_t flags);
+extern void ifclassq_set_grp_combined(struct ifclassq *ifcq, uint8_t grp_idx);
+extern void ifclassq_set_grp_separated(struct ifclassq *ifcq, uint8_t grp_idx);
 
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* PRIVATE */

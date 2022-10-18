@@ -465,6 +465,8 @@ struct kcdata_type_definition {
                                                              /* type-range: 0x900 - 0x93f */
 #define KCDATA_BUFFER_BEGIN_DELTA_STACKSHOT 0xDE17A59Au      /* owner: sys/stackshot.h */
                                                              /* type-range: 0x940 - 0x9ff */
+#define KCDATA_BUFFER_BEGIN_BTINFO    0x46414E47u            /* owner: kern/kern_exit.c */
+                                                             /* type-range: 0xa01 - 0xaff */
 #define KCDATA_BUFFER_BEGIN_OS_REASON 0x53A20900u            /* owner: sys/reason.h */
                                                              /* type-range: 0x1000-0x103f */
 #define KCDATA_BUFFER_BEGIN_XNUPOST_CONFIG 0x1e21c09fu       /* owner: osfmk/tests/kernel_tests.c */
@@ -519,7 +521,7 @@ struct kcdata_type_definition {
 #define STACKSHOT_KCTYPE_JETSAM_COALITION_SNAPSHOT   0x920u /* struct jetsam_coalition_snapshot */
 #define STACKSHOT_KCTYPE_JETSAM_COALITION            0x921u /* uint64_t */
 #define STACKSHOT_KCTYPE_THREAD_POLICY_VERSION       0x922u /* THREAD_POLICY_INTERNAL_STRUCT_VERSION in uint32 */
-#define STACKSHOT_KCTYPE_INSTRS_CYCLES               0x923u /* struct instrs_cycles_snapshot */
+#define STACKSHOT_KCTYPE_INSTRS_CYCLES               0x923u /* struct instrs_cycles_snapshot_v2 */
 #define STACKSHOT_KCTYPE_USER_STACKTOP               0x924u /* struct stack_snapshot_stacktop */
 #define STACKSHOT_KCTYPE_ASID                        0x925u /* uint32_t */
 #define STACKSHOT_KCTYPE_PAGE_TABLES                 0x926u /* uint64_t */
@@ -539,9 +541,14 @@ struct kcdata_type_definition {
 #define STACKSHOT_KCCONTAINER_PORTLABEL              0x934u /* container for port label info */
 #define STACKSHOT_KCTYPE_PORTLABEL                   0x935u /* struct stackshot_portlabel */
 #define STACKSHOT_KCTYPE_PORTLABEL_NAME              0x936u /* string port name */
+#define STACKSHOT_KCTYPE_DYLD_COMPACTINFO            0x937u /* binary blob of dyld info (variable size) */
 
-#define STACKSHOT_KCTYPE_TASK_DELTA_SNAPSHOT 0x940u   /* task_delta_snapshot_v2 */
-#define STACKSHOT_KCTYPE_THREAD_DELTA_SNAPSHOT 0x941u /* thread_delta_snapshot_v* */
+#define STACKSHOT_KCTYPE_TASK_DELTA_SNAPSHOT         0x940u   /* task_delta_snapshot_v2 */
+#define STACKSHOT_KCTYPE_THREAD_DELTA_SNAPSHOT       0x941u /* thread_delta_snapshot_v* */
+#define STACKSHOT_KCCONTAINER_SHAREDCACHE            0x942u /* container for shared cache info */
+#define STACKSHOT_KCTYPE_SHAREDCACHE_INFO            0x943u /* dyld_shared_cache_loadinfo_v2 */
+#define STACKSHOT_KCTYPE_SHAREDCACHE_AOTINFO         0x944u /* struct dyld_aot_cache_uuid_info */
+#define STACKSHOT_KCTYPE_SHAREDCACHE_ID              0x945u /* uint32_t in task: if we aren't attached to Primary, which one */
 
 struct stack_snapshot_frame32 {
 	uint32_t lr;
@@ -574,6 +581,12 @@ struct dyld_uuid_info_64_v2 {
 	uint64_t imageSlidBaseAddress; /* slid base address or slid first mapping of image */
 };
 
+enum dyld_shared_cache_flags {
+	kSharedCacheSystemPrimary = 0x1, /* primary shared cache on the system; attached tasks will have kTaskSharedRegionSystem set */
+	kSharedCacheDriverkit = 0x2, /* driverkit shared cache */
+	kSharedCacheAOT = 0x4,    /* Rosetta shared cache */
+};
+
 /*
  * This is the renamed version of dyld_uuid_info_64 with more accurate
  * field names, for STACKSHOT_KCTYPE_SHAREDCACHE_LOADINFO.  Any users
@@ -585,7 +598,21 @@ struct dyld_uuid_info_64_v2 {
  * imageUUID              sharedCacheUUID
  * imageSlidBaseAddress   sharedCacheUnreliableSlidBaseAddress
  * -                      sharedCacheSlidFirstMapping
+ * -                      sharedCacheID
+ * -                      sharedCacheFlags
  */
+struct dyld_shared_cache_loadinfo_v2 {
+	uint64_t sharedCacheSlide;      /* image slide value */
+	uuid_t   sharedCacheUUID;
+	/* end of version 1 of dyld_uuid_info_64. sizeof v1 was 24 */
+	uint64_t sharedCacheUnreliableSlidBaseAddress;  /* for backwards-compatibility; use sharedCacheSlidFirstMapping if available */
+	/* end of version 2 of dyld_uuid_info_64. sizeof v2 was 32 */
+	uint64_t sharedCacheSlidFirstMapping; /* slid base address of first mapping */
+	/* end of version 1 of dyld_shared_cache_loadinfo. sizeof was 40 */
+	uint32_t sharedCacheID; /* ID of shared cache */
+	uint32_t sharedCacheFlags;
+};
+
 struct dyld_shared_cache_loadinfo {
 	uint64_t sharedCacheSlide;      /* image slide value */
 	uuid_t   sharedCacheUUID;
@@ -651,8 +678,13 @@ enum task_snapshot_flags {
 	kTaskAllowIdleExit                    = 0x8000000,
 	kTaskIsTranslated                     = 0x10000000,
 	kTaskSharedRegionNone                 = 0x20000000,     /* task doesn't have a shared region */
-	kTaskSharedRegionSystem               = 0x40000000,     /* task is attached to system shared region */
+	kTaskSharedRegionSystem               = 0x40000000,     /* task attached to region with kSharedCacheSystemPrimary set */
 	kTaskSharedRegionOther                = 0x80000000,     /* task is attached to a different shared region */
+	kTaskDyldCompactInfoNone              = 0x100000000,
+	kTaskDyldCompactInfoTooBig            = 0x200000000,
+	kTaskDyldCompactInfoFaultedIn         = 0x400000000,
+	kTaskDyldCompactInfoMissing           = 0x800000000,
+	kTaskDyldCompactInfoTriedFault        = 0x1000000000,
 }; // Note: Add any new flags to kcdata.py (ts_ss_flags)
 
 enum task_transition_type {
@@ -783,9 +815,20 @@ struct thread_group_snapshot {
 	char tgs_name[16];
 } __attribute__((packed));
 
+/*
+ * In general these flags mirror their THREAD_GROUP_FLAGS_ counterparts.
+ * THREAD_GROUP_FLAGS_UI_APP was repurposed and THREAD_GROUP_FLAGS_APPLICATION
+ * introduced to take its place. To remain compatible, kThreadGroupUIApp is
+ * kept around and kThreadGroupUIApplication introduced.
+ */
 enum thread_group_flags {
-	kThreadGroupEfficient = 0x1,
-	kThreadGroupUIApp = 0x2
+	kThreadGroupEfficient     = 0x1,
+	kThreadGroupApplication   = 0x2,
+	kThreadGroupUIApp         = 0x2,
+	kThreadGroupCritical      = 0x4,
+	kThreadGroupBestEffort    = 0x8,
+	kThreadGroupUIApplication = 0x100,
+	kThreadGroupManaged       = 0x200,
 }; // Note: Add any new flags to kcdata.py (tgs_flags)
 
 struct thread_group_snapshot_v2 {
@@ -818,6 +861,13 @@ struct jetsam_coalition_snapshot {
 struct instrs_cycles_snapshot {
 	uint64_t ics_instructions;
 	uint64_t ics_cycles;
+} __attribute__((packed));
+
+struct instrs_cycles_snapshot_v2 {
+	uint64_t ics_instructions;
+	uint64_t ics_cycles;
+	uint64_t ics_p_instructions;
+	uint64_t ics_p_cycles;
 } __attribute__((packed));
 
 struct thread_delta_snapshot_v2 {
@@ -1150,6 +1200,68 @@ struct kernel_triage_info_v1 {
 #define TASK_CRASHINFO_EXCEPTION_TYPE                           0x838 /* int */
 
 #define TASK_CRASHINFO_END                  KCDATA_TYPE_BUFFER_END
+
+/**************** definitions for backtrace info *********************/
+
+/* tstate is variable length with count elements */
+struct btinfo_thread_state_data_t {
+	uint32_t flavor;
+	uint32_t count;
+	int tstate[];
+};
+
+struct btinfo_sc_load_info64 {
+	uint64_t sharedCacheSlide;
+	uuid_t   sharedCacheUUID;
+	uint64_t sharedCacheBaseAddress;
+};
+
+struct btinfo_sc_load_info {
+	uint32_t sharedCacheSlide;
+	uuid_t   sharedCacheUUID;
+	uint32_t sharedCacheBaseAddress;
+};
+
+#define TASK_BTINFO_BEGIN                                       KCDATA_BUFFER_BEGIN_BTINFO
+
+/* Shared keys with CRASHINFO */
+#define TASK_BTINFO_PID                                         0xA01
+#define TASK_BTINFO_PPID                                        0xA02
+#define TASK_BTINFO_PROC_NAME                                   0xA03
+#define TASK_BTINFO_PROC_PATH                                   0xA04
+#define TASK_BTINFO_UID                                         0xA05
+#define TASK_BTINFO_GID                                         0xA06
+#define TASK_BTINFO_PROC_FLAGS                                  0xA07
+#define TASK_BTINFO_CPUTYPE                                     0xA08
+#define TASK_BTINFO_EXCEPTION_CODES                             0xA09
+#define TASK_BTINFO_EXCEPTION_TYPE                              0xA0A
+#define TASK_BTINFO_RUSAGE_INFO                                 0xA0B
+#define TASK_BTINFO_COALITION_ID                                0xA0C
+
+/* Only in BTINFO */
+#define TASK_BTINFO_THREAD_ID                                   0xA20 /* uint64_t */
+#define TASK_BTINFO_THREAD_NAME                                 0xA21 /* string of len MAXTHREADNAMESIZE */
+#define TASK_BTINFO_THREAD_STATE                                0xA22 /* struct btinfo_thread_state_data_t */
+#define TASK_BTINFO_THREAD_EXCEPTION_STATE                      0xA23 /* struct btinfo_thread_state_data_t */
+#define TASK_BTINFO_BACKTRACE                                   0xA24 /* array of uintptr_t */
+#define TASK_BTINFO_BACKTRACE64                                 0xA25 /* array of uintptr_t */
+#define TASK_BTINFO_ASYNC_BACKTRACE64                           0xA26 /* array of uintptr_t */
+#define TASK_BTINFO_ASYNC_START_INDEX                           0xA27 /* uint32_t */
+#define TASK_BTINFO_PLATFORM                                    0xA28 /* uint32_t */
+#define TASK_BTINFO_SC_LOADINFO                                 0xA29 /* struct btinfo_sc_load_info */
+#define TASK_BTINFO_SC_LOADINFO64                               0xA2A /* struct btinfo_sc_load_info64 */
+
+#define TASK_BTINFO_DYLD_LOADINFO                               KCDATA_TYPE_LIBRARY_LOADINFO
+#define TASK_BTINFO_DYLD_LOADINFO64                             KCDATA_TYPE_LIBRARY_LOADINFO64
+
+/* Last one */
+#define TASK_BTINFO_FLAGS                                       0xAFF /* uint32_t */
+#define TASK_BTINFO_FLAG_BT_TRUNCATED                           0x1
+#define TASK_BTINFO_FLAG_ASYNC_BT_TRUNCATED                     0x2
+#define TASK_BTINFO_FLAG_TASK_TERMINATED                        0x4 /* task is terminated */
+#define TASK_BTINFO_FLAG_KCDATA_INCOMPLETE                      0x8 /* lw corpse collection is incomplete */
+
+#define TASK_BTINFO_END                                         KCDATA_TYPE_BUFFER_END
 
 /**************** definitions for os reasons *********************/
 

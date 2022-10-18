@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -30,12 +30,16 @@
 
 __BEGIN_DECLS
 
-extern int netem_config(struct netem **ne, const char *name,
+struct kern_pbufpool;
+
+typedef int (netem_output_func_t)(void *handle, pktsched_pkt_t *pkts,
+    uint32_t n_pkts);
+
+extern int netem_config(struct netem **ne, const char *name, struct ifnet *ifp,
     const struct if_netem_params *p, void *output_handle,
-    int (*output)(void *handle, pktsched_pkt_t *pkts, uint32_t n_pkts),
-    uint32_t output_max_batch_size);
+    netem_output_func_t *output_func, uint32_t output_max_batch_size);
 extern void netem_get_params(struct netem *ne, struct if_netem_params *p);
 extern void netem_destroy(struct netem *ne);
-extern int netem_enqueue(struct netem *ne, classq_pkt_t *p, boolean_t *pdrop);
+extern int netem_enqueue(struct netem *ne, classq_pkt_t *p, bool *pdrop);
 
 __END_DECLS

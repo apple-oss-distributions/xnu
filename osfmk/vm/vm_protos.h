@@ -99,7 +99,7 @@ extern int max_task_footprint_mb;       /* Per-task limit on physical memory con
 
 /* Some loose-ends VM stuff */
 
-extern vm_size_t        msg_ool_size_small;
+extern const vm_size_t msg_ool_size_small;
 
 extern kern_return_t vm_tests(void);
 extern void consider_machine_adjust(void);
@@ -121,6 +121,10 @@ extern kern_return_t vm_map_purgable_control(
 	int                     *state);
 
 #if MACH_ASSERT
+extern void vm_map_pmap_set_process(
+	vm_map_t        map,
+	int             pid,
+	char            *procname);
 extern void vm_map_pmap_check_ledgers(
 	pmap_t          pmap,
 	ledger_t        ledger,
@@ -423,11 +427,6 @@ extern kern_return_t vnode_pager_data_initialize(
 	memory_object_cluster_size_t);
 extern void vnode_pager_reference(
 	memory_object_t         mem_obj);
-extern kern_return_t vnode_pager_synchronize(
-	memory_object_t         mem_obj,
-	memory_object_offset_t  offset,
-	memory_object_size_t            length,
-	vm_sync_t               sync_flags);
 extern kern_return_t vnode_pager_map(
 	memory_object_t         mem_obj,
 	vm_prot_t               prot);
@@ -473,14 +472,6 @@ extern kern_return_t device_pager_data_return(memory_object_t,
 extern kern_return_t device_pager_data_initialize(memory_object_t,
     memory_object_offset_t,
     memory_object_cluster_size_t);
-extern kern_return_t device_pager_data_unlock(memory_object_t,
-    memory_object_offset_t,
-    memory_object_size_t,
-    vm_prot_t);
-extern kern_return_t device_pager_synchronize(memory_object_t,
-    memory_object_offset_t,
-    memory_object_size_t,
-    vm_sync_t);
 extern kern_return_t device_pager_map(memory_object_t, vm_prot_t);
 extern kern_return_t device_pager_last_unmap(memory_object_t);
 extern kern_return_t device_pager_populate_object(
@@ -558,6 +549,14 @@ extern kern_return_t memory_entry_access_tracking_internal(
 	uint32_t        *access_tracking_reads,
 	uint32_t        *access_tracking_writes);
 
+extern kern_return_t mach_memory_object_memory_entry_64(
+	host_t                  host,
+	boolean_t               internal,
+	vm_object_offset_t      size,
+	vm_prot_t               permission,
+	memory_object_t         pager,
+	ipc_port_t              *entry_handle);
+
 extern kern_return_t mach_memory_entry_purgable_control(
 	ipc_port_t      entry_port,
 	vm_purgable_t   control,
@@ -611,8 +610,6 @@ extern void vm_named_entry_associate_vm_object(
 	vm_object_size_t        size,
 	vm_prot_t               prot);
 
-extern void vm_paging_map_init(void);
-
 extern int macx_backing_store_compaction(int flags);
 extern unsigned int mach_vm_ctl_page_free_wanted(void);
 
@@ -636,8 +633,10 @@ extern kern_return_t compressor_memory_object_create(
 	memory_object_t *);
 
 extern boolean_t vm_compressor_low_on_space(void);
+extern bool vm_compressor_compressed_pages_nearing_limit(void);
 extern boolean_t vm_compressor_out_of_space(void);
 extern int       vm_swap_low_on_space(void);
+extern int       vm_swap_out_of_space(void);
 void             do_fastwake_warmup_all(void);
 
 #if defined(__arm64__)
@@ -713,6 +712,11 @@ extern void             memory_object_mark_eligible_for_secluded(
 	boolean_t                       eligible_for_secluded);
 
 #endif /* CONFIG_SECLUDED_MEMORY */
+
+#if MACH_ASSERT
+extern void             memory_object_mark_for_fbdp(
+	memory_object_control_t         control);
+#endif /* MACH_ASSERT */
 
 #define MAX_PAGE_RANGE_QUERY    (1ULL * 1024 * 1024 * 1024) /* 1 GB */
 

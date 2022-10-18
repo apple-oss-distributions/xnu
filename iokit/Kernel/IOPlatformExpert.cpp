@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -84,7 +84,7 @@ static void getCStringForObject(OSObject *inObj, char *outStr, size_t outStrLen)
  *
  * <rdar://problem/33831837> tracks turning this on by default.
  */
-uint32_t gEnforceQuiesceSafety = 0;
+uint32_t gEnforcePlatformActionSafety = 0;
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -188,8 +188,8 @@ IOPlatformExpert::start( IOService * provider )
 	}
 #endif
 
-	PE_parse_boot_argn("enforce_quiesce_safety", &gEnforceQuiesceSafety,
-	    sizeof(gEnforceQuiesceSafety));
+	PE_parse_boot_argn("enforce_platform_action_safety", &gEnforcePlatformActionSafety,
+	    sizeof(gEnforcePlatformActionSafety));
 
 	return configure(provider);
 }
@@ -344,6 +344,7 @@ IOPlatformExpert::haltRestart(unsigned int type)
 
 	if (type == kPEHangCPU) {
 		while (true) {
+			asm volatile ("");
 		}
 	}
 
@@ -975,8 +976,9 @@ PEInitiatePanic(void)
 	 * Trigger a TLB flush so any hard hangs exercise the SoC diagnostic
 	 * collection flow rather than hanging late in panic (see rdar://58062030)
 	 */
-	flush_mmu_tlb_entry(0);
-#endif
+	flush_mmu_tlb_entry_async(0);
+	arm64_sync_tlb(true);
+#endif // defined(__arm64__)
 }
 
 int
@@ -1009,7 +1011,7 @@ PEHaltRestartInternal(unsigned int type, uint32_t details)
 		 *  the timer expires. If the device wants a different
 		 *  timeout, use that value instead of 30 seconds.
 		 */
-#if  defined(__arm__) || defined(__arm64__)
+#if  defined(__arm64__)
 #define RESTART_NODE_PATH    "/defaults"
 #else
 #define RESTART_NODE_PATH    "/chosen"
@@ -1091,6 +1093,8 @@ PEHaltRestartInternal(unsigned int type, uint32_t details)
 
 skip_to_haltRestart:
 	if (gIOPlatform) {
+		// note that this will not necessarily halt or restart the system...
+		// Implementors of this function will check the type and take action accordingly
 		return gIOPlatform->haltRestart(type);
 	} else {
 		return -1;
@@ -1501,14 +1505,15 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
 	IOReturn   ret;
 
 	if (functionName == gIOPlatformQuiesceActionKey ||
-	    functionName == gIOPlatformActiveActionKey) {
+	    functionName == gIOPlatformActiveActionKey ||
+	    functionName == gIOPlatformPanicActionKey) {
 		/*
-		 * Services which register for IOPlatformQuiesceAction / IOPlatformActiveAction
+		 * Services which register for IOPlatformQuiesceAction / IOPlatformActiveAction / IOPlatformPanicAction
 		 * must consume that event themselves, without passing it up to super/IOPlatformExpert.
 		 */
-		if (gEnforceQuiesceSafety) {
-			panic("Class %s passed the quiesce/active action to IOPlatformExpert",
-			    getMetaClass()->getClassName());
+		if (gEnforcePlatformActionSafety) {
+			panic("Class %s passed the %s action to IOPlatformExpert",
+			    getMetaClass()->getClassName(), functionName->getCStringNoCopy());
 		}
 	}
 

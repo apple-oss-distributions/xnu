@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -82,6 +82,7 @@ int
 flow_pkt_classify(struct __kern_packet *pkt, struct ifnet *ifp, sa_family_t af,
     bool input)
 {
+#pragma unused(ifp)
 	/* these begin at the same offset in the packet, hence the unions */
 	union {
 		volatile struct ip *_iph;
@@ -375,14 +376,19 @@ done:
 		    ntohs(pkt->pkt_flow_tcp_dst));
 		/* on output, trim metadata length if not same as IP length */
 		if (!input) {
-			if (__improbable(pkt->pkt_length != l3tlen)) {
+			if (__improbable(pkt->pkt_length != (l3tlen + pkt->pkt_l2_len))) {
 				SK_ERR("packet is too long (%u), trimming to "
-				    "IP length (%d)", pkt->pkt_length, l3tlen);
-				METADATA_SET_LEN(pkt, l3tlen, bdoff);
+				    "IP + L2 length (%d)", pkt->pkt_length,
+				    l3tlen + pkt->pkt_l2_len);
+				METADATA_SET_LEN(pkt, l3tlen + pkt->pkt_l2_len, bdoff);
 			}
-			if (__improbable(pkt->pkt_length > mtu)) {
-				SK_ERR("dropped; length (%u) exceeds MTU (%d)",
-				    pkt->pkt_length, mtu);
+			if (__improbable(((pkt->pkt_length > mtu) &&
+			    (pkt->pkt_proto_seg_sz == 0)) ||
+			    (pkt->pkt_proto_seg_sz > mtu))) {
+				SK_ERR("dropped; length (%u) exceeds MTU (%d) "
+				    " proto_seg_sz %d",
+				    pkt->pkt_length, mtu,
+				    pkt->pkt_proto_seg_sz);
 				SK_ERR("%s", sk_dump("buf", l3_hdr, cls_len,
 				    128, NULL, 0));
 				error = EMSGSIZE;

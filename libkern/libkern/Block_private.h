@@ -225,15 +225,42 @@ typedef uintptr_t BlockByrefDestroyFunction;
 
 #endif
 
-#if __has_feature(ptrauth_calls)
-#define _Block_get_relative_function_pointer(field, type)           \
-	((type)ptrauth_sign_unauthenticated(                              \
-	                (void *)((uintptr_t)(intptr_t)(field) + (uintptr_t)&(field)), \
-	                ptrauth_key_function_pointer, 0))
-#else
-#define _Block_get_relative_function_pointer(field, type)       \
-	((type)((uintptr_t)(intptr_t)(field) + (uintptr_t)&(field)))
+#if !__has_feature(ptrauth_calls)
+#define BLOCK_SMALL_DESCRIPTOR_SUPPORTED 1
 #endif
+
+#if BLOCK_SMALL_DESCRIPTOR_SUPPORTED
+#if __has_feature(ptrauth_signed_block_descriptors)
+#define _Block_get_relative_function_pointer(aBlock, field, type) \
+	({ \
+	        __typeof__(type) _fn; \
+	        __asm__ ( \
+	                "mov	x17, %[bds] \n\t" \
+	                "movk	x17, %[disc], lsl 48 \n\t" \
+	                "ldr	x16, [%[bds]] \n\t" \
+	                "autda	x16, x17 \n\t" \
+	                "add	x16, x16, %[offset] \n\t" \
+	                "ldrsw	x17, [x16] \n\t" \
+	                "add	x16, x16, x17 \n\t" \
+	                "paciza	x16 \n\t" \
+	                "mov	%[fn], x16 \n\t" \
+	                : [fn] "=r" (_fn) \
+	                : [disc] "i" (_Block_descriptor_ptrauth_discriminator), \
+	                  [bds] "r" (&(aBlock)->descriptor), \
+	                  [offset] "i" (offsetof(struct Block_descriptor_small, field)) \
+	                : "x16", "x17" \
+	        ); \
+	        _fn; \
+	})
+#else /* __has_feature(ptrauth_calls) */
+#define _Block_get_relative_function_pointer(aBlock, field, type) \
+	({ \
+	        struct Block_descriptor_small *_bds = (struct Block_descriptor_small *) \
+	                (aBlock)->descriptor; \
+	        (type)((uintptr_t)&_bds->field + (uintptr_t)(intptr_t)_bds->field); \
+	})
+#endif /* __has_feature(ptrauth_calls) */
+#endif /* BLOCK_SMALL_DESCRIPTOR_SUPPORTED */
 
 #define _Block_descriptor_ptrauth_discriminator 0xC0BB
 
@@ -242,7 +269,11 @@ enum {
 	BLOCK_DEALLOCATING =      (0x0001),// runtime
 	BLOCK_REFCOUNT_MASK =     (0xfffe),// runtime
 	BLOCK_INLINE_LAYOUT_STRING = (1 << 21), // compiler
-	BLOCK_SMALL_DESCRIPTOR =  (1 << 22), // compiler
+
+#if BLOCK_SMALL_DESCRIPTOR_SUPPORTED
+	BLOCK_SMALL_DESCRIPTOR =  (1 << 22),// compiler
+#endif
+
 	BLOCK_IS_NOESCAPE =       (1 << 23), // compiler
 	BLOCK_NEEDS_FREE =        (1 << 24),// runtime
 	BLOCK_HAS_COPY_DISPOSE =  (1 << 25),// compiler
@@ -451,14 +482,14 @@ _Block_get_copy_function(struct Block_layout *aBlock)
 		return NULL;
 	}
 
-	void *desc = _Block_get_descriptor(aBlock);
+#if BLOCK_SMALL_DESCRIPTOR_SUPPORTED
 	if (aBlock->flags & BLOCK_SMALL_DESCRIPTOR) {
-		struct Block_descriptor_small *bds =
-		    (struct Block_descriptor_small *)desc;
 		return _Block_get_relative_function_pointer(
-			bds->copy, void (*)(void *, const void *));
+			aBlock, copy, void (*)(void *, const void *));
 	}
+#endif
 
+	void *desc = _Block_get_descriptor(aBlock);
 	struct Block_descriptor_2 *bd2 =
 	    (struct Block_descriptor_2 *)((unsigned char *)desc +
 	    sizeof(struct Block_descriptor_1));
@@ -472,14 +503,14 @@ _Block_get_dispose_function(struct Block_layout *aBlock)
 		return NULL;
 	}
 
-	void *desc = _Block_get_descriptor(aBlock);
+#if BLOCK_SMALL_DESCRIPTOR_SUPPORTED
 	if (aBlock->flags & BLOCK_SMALL_DESCRIPTOR) {
-		struct Block_descriptor_small *bds =
-		    (struct Block_descriptor_small *)desc;
 		return _Block_get_relative_function_pointer(
-			bds->dispose, void (*)(const void *));
+			aBlock, dispose, void (*)(const void *));
 	}
+#endif
 
+	void *desc = _Block_get_descriptor(aBlock);
 	struct Block_descriptor_2 *bd2 =
 	    (struct Block_descriptor_2 *)((unsigned char *)desc +
 	    sizeof(struct Block_descriptor_1));

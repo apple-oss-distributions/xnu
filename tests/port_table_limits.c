@@ -45,7 +45,7 @@ T_DECL(test_port_table_setting_limits,
 	posix_spawnattr_t       attrs;
 	int err;
 
-#if __arm__ || TARGET_OS_BRIDGE
+#if TARGET_OS_BRIDGE
 	T_SKIP("Not running on target platforms");
 #endif
 
@@ -241,7 +241,7 @@ T_DECL(test_port_table_hard_limit_with_resource_notify_port,
 	kern_return_t kr;
 	struct args*            server_args = (struct args*)malloc(sizeof(struct args));
 
-#if __arm__ || TARGET_OS_BRIDGE
+#if TARGET_OS_BRIDGE
 	T_SKIP("Not running on target platforms");
 #endif
 

@@ -2936,21 +2936,25 @@ ttyinfo_locked(struct tty *tp)
 	/* SAFE: All callers drop the lock on return */
 	tty_unlock(tp);
 	pgrp_rele(pg);
-	tty_lock(tp);
 
 	pick = proc_find(pickpid);
 	if (pick == PROC_NULL) {
+		tty_lock(tp);
 		return;
 	}
 
+	tty_lock(tp);
+	proc_lock(pick);
 	if (TAILQ_EMPTY(&pick->p_uthlist) ||
 	    (uthread = TAILQ_FIRST(&pick->p_uthlist)) == NULL ||
 	    (thread_info_internal(get_machthread(uthread), THREAD_BASIC_INFO, (thread_info_t)&basic_info, &mmtn) != KERN_SUCCESS)) {
+		proc_unlock(pick);
 		ttyprintf(tp, "foreground process without thread\n");
 		tp->t_rocount = 0;
 		proc_rele(pick);
 		return;
 	}
+	proc_unlock(pick);
 
 	switch (basic_info.run_state) {
 	case TH_STATE_RUNNING:
@@ -3228,7 +3232,8 @@ isbackground(proc_t p, struct tty *tp)
 {
 	TTY_LOCK_OWNED(tp);
 
-	if (tp->t_pgrp == NULL || tp->t_pgrp == hazard_ptr_load(&p->p_pgrp)) {
+	if (tp->t_pgrp == NULL ||
+	    (uintptr_t)tp->t_pgrp == smr_unsafe_load(&p->p_pgrp)) {
 		return false;
 	}
 

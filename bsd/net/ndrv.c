@@ -310,12 +310,10 @@ ndrv_connect(struct socket *so, struct sockaddr *nam, __unused struct proc *p)
 	}
 
 	/* Allocate memory to store the remote address */
-	np->nd_faddr = (struct sockaddr_ndrv *) kalloc_data(nam->sa_len, Z_WAITOK);
-	if (np->nd_faddr == NULL) {
-		return ENOMEM;
-	}
+	np->nd_faddr = kalloc_type(struct sockaddr_ndrv, Z_WAITOK | Z_NOFAIL | Z_ZERO);
 
-	bcopy((caddr_t) nam, (caddr_t) np->nd_faddr, nam->sa_len);
+	bcopy((caddr_t) nam, (caddr_t) np->nd_faddr, MIN(sizeof(struct sockaddr_ndrv), nam->sa_len));
+	np->nd_faddr->snd_len = sizeof(struct sockaddr_ndrv);
 	soisconnected(so);
 	return 0;
 }
@@ -361,10 +359,10 @@ ndrv_bind(struct socket *so, struct sockaddr *nam, __unused struct proc *p)
 		return EINVAL;                  /* XXX */
 	}
 	/* I think we just latch onto a copy here; the caller frees */
-	np->nd_laddr = kalloc_type(struct sockaddr_ndrv, Z_WAITOK | Z_NOFAIL);
-	bcopy((caddr_t) sa, (caddr_t) np->nd_laddr, sizeof(struct sockaddr_ndrv));
-	dname = (char *) sa->snd_name;
+	np->nd_laddr = kalloc_type(struct sockaddr_ndrv, Z_WAITOK | Z_NOFAIL | Z_ZERO);
+	bcopy((caddr_t) sa, (caddr_t) np->nd_laddr, MIN(sizeof(struct sockaddr_ndrv), sa->snd_len));
 	np->nd_laddr->snd_len = sizeof(struct sockaddr_ndrv);
+	dname = (char *) sa->snd_name;
 	if (*dname == '\0') {
 		return EINVAL;
 	}
@@ -610,7 +608,6 @@ ndrv_do_detach(struct ndrv_cb *np)
 	}
 	if (np->nd_laddr != NULL) {
 		kfree_type(struct sockaddr_ndrv, np->nd_laddr);
-		np->nd_laddr = NULL;
 	}
 	kfree_type(struct ndrv_cb, np);
 	so->so_pcb = 0;
@@ -627,8 +624,7 @@ ndrv_do_disconnect(struct ndrv_cb *np)
 	printf("NDRV disconnect: %x\n", np);
 #endif
 	if (np->nd_faddr) {
-		kfree_data(np->nd_faddr, np->nd_faddr->snd_len);
-		np->nd_faddr = 0;
+		kfree_type(struct sockaddr_ndrv, np->nd_faddr);
 	}
 	/*
 	 * A multipath subflow socket would have its SS_NOFDREF set by default,
@@ -720,6 +716,14 @@ ndrv_setspec(struct ndrv_cb *np, struct sockopt *sopt)
 		user_addr = CAST_USER_ADDR_T(ndrvSpec32.demux_list);
 	}
 
+	/*
+	 * Do not allow PF_NDRV as it's non-sensical and most importantly because
+	 * we use PF_NDRV to see if the protocol family has already been set
+	 */
+	if (ndrvSpec.protocol_family == PF_NDRV) {
+		return EINVAL;
+	}
+
 	/* Verify the parameter */
 	if (ndrvSpec.version > NDRV_PROTOCOL_DESC_VERS) {
 		return ENOTSUP; // version is too new!
@@ -740,7 +744,7 @@ ndrv_setspec(struct ndrv_cb *np, struct sockopt *sopt)
 
 	/* Allocate enough ifnet_demux_descs */
 	proto_param.demux_array = kalloc_type(struct ifnet_demux_desc,
-	    ndrvSpec.demux_count, Z_WAITOK);
+	    ndrvSpec.demux_count, Z_WAITOK | Z_ZERO);
 	if (proto_param.demux_array == NULL) {
 		error = ENOMEM;
 	}
@@ -771,13 +775,20 @@ ndrv_setspec(struct ndrv_cb *np, struct sockopt *sopt)
 	}
 
 	if (error == 0) {
-		/* We've got all our ducks lined up...lets attach! */
+		/*
+		 * Set the protocol family to prevent other threads from
+		 * attaching a protocol while the socket is unlocked
+		 */
+		np->nd_proto_family = ndrvSpec.protocol_family;
 		socket_unlock(so, 0);
 		error = ifnet_attach_protocol(np->nd_if, ndrvSpec.protocol_family,
 		    &proto_param);
 		socket_lock(so, 0);
-		if (error == 0) {
-			np->nd_proto_family = ndrvSpec.protocol_family;
+		/*
+		 * Upon failure, indicate that no protocol is attached
+		 */
+		if (error != 0) {
+			np->nd_proto_family = PF_NDRV;
 		}
 	}
 

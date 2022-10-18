@@ -80,10 +80,52 @@ typedef int (*coretrust_CTEvaluateProvisioningProfile_t)(
 	size_t *profile_content_length
 	);
 
+#define XNU_SUPPORTS_CORETRUST_MULTI_STEP_AMFI 1
+
+typedef int (*coretrust_CTParseKey_t)(
+	const uint8_t *cert_data,
+	size_t cert_length,
+	const uint8_t **key_data,
+	size_t *key_length
+	);
+
+typedef int (*coretrust_CTParseAmfiCMS_t)(
+	const uint8_t *cms_data,
+	size_t cms_length,
+	CoreTrustDigestType max_digest_type,
+	const uint8_t **leaf_cert, size_t *leaf_cert_length,
+	const uint8_t **content_data, size_t *content_length,
+	CoreTrustDigestType *cms_digest_type,
+	CoreTrustPolicyFlags *policy_flags
+	);
+
+typedef int (*coretrust_CTVerifyAmfiCMS_t)(
+	const uint8_t *cms_data,
+	size_t cms_length,
+	const uint8_t *digest_data,
+	size_t digest_length,
+	CoreTrustDigestType max_digest_type,
+	CoreTrustDigestType *hash_agility_digest_type,
+	const uint8_t **agility_digest_data,
+	size_t *agility_digest_length
+	);
+
+typedef int (*coretrust_CTVerifyAmfiCertificateChain_t)(
+	const uint8_t *cms_data,
+	size_t cms_length,
+	bool allow_test_hierarchy,
+	CoreTrustDigestType max_digest_type,
+	CoreTrustPolicyFlags *policy_flags
+	);
+
 typedef struct _coretrust {
 	coretrust_CTEvaluateAMFICodeSignatureCMS_t CTEvaluateAMFICodeSignatureCMS;
 	coretrust_CTEvaluateAMFICodeSignatureCMSPubKey_t CTEvaluateAMFICodeSignatureCMSPubKey;
 	coretrust_CTEvaluateProvisioningProfile_t CTEvaluateProvisioningProfile;
+	coretrust_CTParseKey_t CTParseKey;
+	coretrust_CTParseAmfiCMS_t CTParseAmfiCMS;
+	coretrust_CTVerifyAmfiCMS_t CTVerifyAmfiCMS;
+	coretrust_CTVerifyAmfiCertificateChain_t CTVerifyAmfiCertificateChain;
 } coretrust_t;
 
 __BEGIN_DECLS

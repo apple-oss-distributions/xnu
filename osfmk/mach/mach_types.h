@@ -137,6 +137,7 @@ typedef struct arcade_register          *arcade_register_t;
 typedef struct ipc_eventlink            *ipc_eventlink_t;
 typedef struct ipc_port                 *eventlink_port_pair_t[2];
 typedef struct task_id_token            *task_id_token_t;
+typedef struct kcdata_object            *kcdata_object_t;
 
 /*
  * OBSOLETE: lock_set interfaces are obsolete.
@@ -202,6 +203,7 @@ typedef mach_port_t             arcade_register_t;
 typedef mach_port_t             ipc_eventlink_t;
 typedef mach_port_t             eventlink_port_pair_t[2];
 typedef mach_port_t             task_id_token_t;
+typedef mach_port_t             kcdata_object_t;
 
 #endif  /* KERNEL */
 
@@ -221,7 +223,7 @@ typedef mach_port_t             mem_entry_name_port_t;
 typedef mach_port_t             exception_handler_t;
 typedef exception_handler_t     *exception_handler_array_t;
 typedef mach_port_t             vm_task_entry_t;
-typedef mach_port_t             io_master_t;
+typedef mach_port_t             io_main_t;
 typedef mach_port_t             UNDServerRef;
 typedef mach_port_t             mach_eventlink_t;
 
@@ -305,6 +307,7 @@ typedef char nspace_name_t[1024]; /* 1024 == PATH_MAX */
 #define MACH_EVENTLINK_NULL     ((mach_eventlink_t) 0)
 #define IPC_EVENTLINK_NULL      ((ipc_eventlink_t) NULL)
 #define TASK_ID_TOKEN_NULL      ((task_id_token_t) NULL)
+#define KCDATA_OBJECT_NULL      ((kcdata_object_t) NULL)
 #else
 #define TASK_NULL               ((task_t) 0)
 #define TASK_NAME_NULL          ((task_name_t) 0)
@@ -334,6 +337,7 @@ typedef char nspace_name_t[1024]; /* 1024 == PATH_MAX */
 #define MACH_EVENTLINK_NULL     ((mach_eventlink_t) 0)
 #define IPC_EVENTLINK_NULL      ((ipc_eventlink_t) 0)
 #define TASK_ID_TOKEN_NULL      ((task_id_token_t) 0)
+#define KCDATA_OBJECT_NULL      ((kcdata_object_t) 0)
 #endif
 
 /* capability strictly _DECREASING_.

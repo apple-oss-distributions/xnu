@@ -155,6 +155,7 @@ typedef enum {
 } overlap_t;
 
 static int       lf_clearlock(struct lockf *);
+static int       lf_transferlock(struct lockf *);
 static overlap_t lf_findoverlap(struct lockf *,
     struct lockf *, int, struct lockf ***, struct lockf **);
 static struct lockf *lf_getblock(struct lockf *, pid_t);
@@ -344,6 +345,17 @@ lf_advlock(struct vnop_advlock_args *ap)
 
 	case F_UNLCK:
 		error = lf_clearlock(lock);
+		zfree(KT_LOCKF, lock);
+		break;
+
+	case F_TRANSFER:
+		/*
+		 * The new owner is passed in the context, set the new owner
+		 * in the lf_owner field.
+		 */
+		lock->lf_owner = vfs_context_proc(context);
+		assert(lock->lf_owner != current_proc());
+		error = lf_transferlock(lock);
 		zfree(KT_LOCKF, lock);
 		break;
 
@@ -1055,6 +1067,62 @@ lf_clearlock(struct lockf *unlock)
 #ifdef LOCKF_DEBUGGING
 	if (LOCKF_DEBUGP(LF_DBG_LOCKOP)) {
 		lf_printlist("lf_clearlock", unlock);
+	}
+#endif /* LOCKF_DEBUGGING */
+	return 0;
+}
+
+
+/*
+ * lf_transferlock
+ *
+ * Description: Transfer a give lock from old_proc to new proc during exec
+ *
+ * Parameters:	unlock			The lock to transfer
+ *
+ * Returns:	0			Success
+ *
+ * Notes:	A caller may transfer all the locks owned by the caller by
+ *		specifying the entire file range; locks owned by other
+ *		callers are not effected by this operation.
+ */
+static int
+lf_transferlock(struct lockf *transfer)
+{
+	struct lockf **head = transfer->lf_head;
+	struct lockf *lf = *head;
+	struct lockf *overlap, **prev;
+	overlap_t ovcase;
+
+	if (lf == NOLOCKF) {
+		return 0;
+	}
+#ifdef LOCKF_DEBUGGING
+	if (transfer->lf_type != F_TRANSFER) {
+		panic("lf_transferlock: bad type");
+	}
+	if (LOCKF_DEBUGP(LF_DBG_LOCKOP)) {
+		lf_print("lf_transferlock", transfer);
+	}
+#endif /* LOCKF_DEBUGGING */
+	prev = head;
+	while ((ovcase = lf_findoverlap(lf, transfer, SELF, &prev, &overlap)) != OVERLAP_NONE) {
+		/* For POSIX Locks, change lf_id and lf_owner */
+		if (overlap->lf_flags & F_POSIX) {
+			overlap->lf_id = (caddr_t)transfer->lf_owner;
+			overlap->lf_owner = transfer->lf_owner;
+		} else if (overlap->lf_flags & F_OFD_LOCK) {
+			/* Change the owner of the ofd style lock, if there is an owner */
+			if (overlap->lf_owner) {
+				overlap->lf_owner = transfer->lf_owner;
+			}
+		}
+		/* Find the next lock */
+		lf = overlap->lf_next;
+	}
+#ifdef LOCKF_DEBUGGING
+	if (LOCKF_DEBUGP(LF_DBG_LOCKOP)) {
+		lf_printlist("lf_transferlock", transfer);
 	}
 #endif /* LOCKF_DEBUGGING */
 	return 0;

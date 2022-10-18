@@ -30,7 +30,8 @@
 #include "cuckoo_hashtable.h"
 
 #define CUCKOO_TAG "com.apple.skywalk.libcuckoo"
-kern_allocation_name_t cuckoo_tag;
+SKMEM_TAG_DEFINE(cuckoo_tag, CUCKOO_TAG);
+
 
 SYSCTL_NODE(_kern_skywalk, OID_AUTO, libcuckoo, CTLFLAG_RW | CTLFLAG_LOCKED,
     0, "Skywalk Cuckoo Hashtable Library");
@@ -218,6 +219,8 @@ struct cuckoo_hashtable {
 	void (*_obj_release)(struct cuckoo_node *);
 } __attribute__((aligned(_CHT_CACHELINE_CHUNK)));
 
+static_assert(sizeof(struct _bucket) <= _CHT_CACHELINE_CHUNK);
+
 static inline void
 __slot_set(struct _slot *slt, uint32_t hash, struct cuckoo_node *node)
 {
@@ -379,15 +382,6 @@ __resize_end(struct cuckoo_hashtable *h)
 		wakeup(&h->_resize_waiters);
 	}
 	lck_mtx_unlock(&h->_lock);
-}
-
-void
-cuckoo_hashtable_init(void)
-{
-	_CASSERT(sizeof(struct _bucket) <= _CHT_CACHELINE_CHUNK);
-	ASSERT(cuckoo_tag == NULL);
-	cuckoo_tag = kern_allocation_name_allocate(CUCKOO_TAG, 0);
-	ASSERT(cuckoo_tag != NULL);
 }
 
 struct cuckoo_hashtable *

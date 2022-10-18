@@ -104,10 +104,6 @@ ml_static_protect(
 	vm_size_t size,
 	vm_prot_t new_prot);
 
-/* boot memory allocation */
-vm_offset_t ml_static_malloc(
-	vm_size_t size);
-
 vm_offset_t ml_static_slide(
 	vm_offset_t vaddr);
 
@@ -142,6 +138,8 @@ void ml_set_max_cpus(
 
 extern void     ml_cpu_up(void);
 extern void     ml_cpu_down(void);
+extern void     ml_cpu_up_update_counts(int cpu_id);
+extern void     ml_cpu_down_update_counts(int cpu_id);
 
 void bzero_phys_nc(
 	addr64_t phys_address,
@@ -158,11 +156,26 @@ extern uint32_t idle_entry_timer_processing_hdeadline_threshold;
 #if     defined(PEXPERT_KERNEL_PRIVATE) || defined(MACH_KERNEL_PRIVATE)
 /* IO memory map services */
 
+extern vm_offset_t      io_map(
+	vm_map_offset_t         phys_addr,
+	vm_size_t               size,
+	unsigned int            flags,
+	vm_prot_t               prot,
+	bool                    unmappable);
+
 /* Map memory map IO space */
 vm_offset_t ml_io_map(
 	vm_offset_t phys_addr,
 	vm_size_t size);
 
+vm_offset_t ml_io_map_wcomb(
+	vm_offset_t phys_addr,
+	vm_size_t size);
+
+vm_offset_t ml_io_map_unmappable(
+	vm_offset_t phys_addr,
+	vm_size_t size,
+	unsigned int flags);
 
 void    ml_get_bouncepool_info(
 	vm_offset_t *phys_addr,
@@ -354,6 +367,7 @@ extern uint64_t ml_get_booter_memory_size(void);
 unsigned int ml_cpu_cache_sharing(unsigned int level, cluster_type_t cluster_type, bool include_all_cpu_types);
 void ml_cpu_get_info_type(ml_cpu_info_t * ml_cpu_info, cluster_type_t cluster_type);
 unsigned int ml_get_cpu_number_type(cluster_type_t cluster_type, bool logical, bool available);
+unsigned int ml_get_cluster_number_type(cluster_type_t cluster_type);
 unsigned int ml_get_cpu_types(void);
 #endif
 
@@ -387,7 +401,6 @@ void timer_queue_expire_rescan(void*);
 void ml_timer_evaluate(void);
 boolean_t ml_timer_forced_evaluation(void);
 
-uint64_t ml_energy_stat(thread_t);
 void ml_gpu_stat_update(uint64_t);
 uint64_t ml_gpu_stat(thread_t);
 boolean_t ml_recent_wake(void);
@@ -404,11 +417,6 @@ void i386_lbr_enable(void);
 void i386_lbr_disable(void);
 extern lbr_modes_t last_branch_enabled_modes;
 #endif
-
-#define ALL_CORES_RECOMMENDED   (~(uint64_t)0)
-
-extern void sched_usercontrol_update_recommended_cores(uint64_t recommended_cores);
-
 
 extern uint64_t report_phy_read_delay;
 extern uint64_t report_phy_write_delay;

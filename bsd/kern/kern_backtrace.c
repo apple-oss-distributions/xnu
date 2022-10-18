@@ -34,6 +34,12 @@
 
 #if DEVELOPMENT || DEBUG
 
+/*
+ * Ignore -Wxnu-typed-allocators for this file, as it implements
+ * sysctls that are only available for DEVELOPMENT || DEBUG builds.
+ */
+__typed_allocators_ignore_push
+
 #define MAX_BACKTRACE  (128)
 
 #define BACKTRACE_USER (0)
@@ -196,5 +202,7 @@ out:
 	kfree_data(bt, bt_size);
 	return error;
 }
+
+__typed_allocators_ignore_pop
 
 #endif /* DEVELOPMENT || DEBUG */

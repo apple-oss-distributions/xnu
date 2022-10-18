@@ -54,36 +54,31 @@ typedef union {
 		    can_sleep:              1,      /* Can attempts to lock go to sleep? */
 		    _pad2:                  8,      /* padding */
 		    tag_valid:              1;      /* Field is actually a tag, not a bitfield */
-#if __arm64__
-		uint32_t        _pad4;
-#endif
 	};
-	struct {
-		uint32_t        data;               /* Single word version of bitfields and shared count */
-#if __arm64__
-		uint32_t        lck_rw_pad4;
-#endif
-	};
+	uint32_t        data;                       /* Single word version of bitfields and shared count */
 } lck_rw_word_t;
 
 typedef struct {
-	lck_rw_word_t   word;
-	thread_t        lck_rw_owner __kernel_data_semantics;
+	uint32_t        lck_rw_unused : 24; /* tsid one day ... */
+	uint32_t        lck_rw_type   :  8; /* LCK_TYPE_RW */
+	uint32_t        lck_rw_padding;
+	lck_rw_word_t   lck_rw;
+	uint32_t        lck_rw_owner;       /* ctid_t */
 } lck_rw_t;     /* arm: 8  arm64: 16 x86: 16 */
 
-#define lck_rw_shared_count     word.shared_count
-#define lck_rw_interlock        word.interlock
-#define lck_rw_priv_excl        word.priv_excl
-#define lck_rw_want_upgrade     word.want_upgrade
-#define lck_rw_want_excl        word.want_excl
-#define lck_r_waiting           word.r_waiting
-#define lck_w_waiting           word.w_waiting
-#define lck_rw_can_sleep        word.can_sleep
-#define lck_rw_data             word.data
+#define lck_rw_shared_count     lck_rw.shared_count
+#define lck_rw_interlock        lck_rw.interlock
+#define lck_rw_priv_excl        lck_rw.priv_excl
+#define lck_rw_want_upgrade     lck_rw.want_upgrade
+#define lck_rw_want_excl        lck_rw.want_excl
+#define lck_r_waiting           lck_rw.r_waiting
+#define lck_w_waiting           lck_rw.w_waiting
+#define lck_rw_can_sleep        lck_rw.can_sleep
+#define lck_rw_data             lck_rw.data
 // tag and data reference the same memory. When the tag_valid bit is set,
 // the data word should be treated as a tag instead of a bitfield.
-#define lck_rw_tag_valid        word.tag_valid
-#define lck_rw_tag              word.data
+#define lck_rw_tag_valid        lck_rw.tag_valid
+#define lck_rw_tag              lck_rw.data
 
 #define LCK_RW_SHARED_READER_OFFSET      0
 #define LCK_RW_INTERLOCK_BIT            16
@@ -108,17 +103,13 @@ typedef struct {
 
 #define LCK_RW_TAG_DESTROYED            ((LCK_RW_TAG_VALID | 0xdddddeadu))      /* lock marked as Destroyed */
 
-#else /* MACH_KERNEL_PRIVATE */
-
-#ifdef  KERNEL_PRIVATE
-// TODO does this need pragma pack(1)?
+#elif KERNEL_PRIVATE
 typedef struct {
-	uintptr_t       opaque[2] __kernel_data_semantics;
+	uintptr_t               opaque[2] __kernel_data_semantics;
 } lck_rw_t;
-#else /* KERNEL_PRIVATE */
+#else /* @KERNEL_PRIVATE */
 typedef struct __lck_rw_t__     lck_rw_t;
-#endif /* KERNEL_PRIVATE */
-#endif /* MACH_KERNEL_PRIVATE */
+#endif /* !KERNEL_PRIVATE */
 
 #if DEVELOPMENT || DEBUG
 #ifdef XNU_KERNEL_PRIVATE
@@ -197,7 +188,7 @@ extern void             lck_rw_startup_init(
 	lck_rw_t var; \
 	static __startup_data struct lck_rw_startup_spec \
 	__startup_lck_rw_spec_ ## var = { &var, grp, attr }; \
-	STARTUP_ARG(LOCKS_EARLY, STARTUP_RANK_FOURTH, lck_rw_startup_init, \
+	STARTUP_ARG(LOCKS, STARTUP_RANK_FOURTH, lck_rw_startup_init, \
 	    &__startup_lck_rw_spec_ ## var)
 
 #define LCK_RW_DECLARE(var, grp) \
@@ -363,6 +354,61 @@ extern void             lck_rw_unlock(
  */
 extern void             lck_rw_lock_shared(
 	lck_rw_t                *lck);
+
+
+#if MACH_KERNEL_PRIVATE
+/*!
+ * @function lck_rw_lock_shared_b
+ *
+ * @abstract
+ * Locks a rw_lock in shared mode. Returns early if the lock can't be acquired
+ * and the specified block returns true.
+ *
+ * @discussion
+ * Identical to lck_rw_lock_shared() but can return early if the lock can't be
+ * acquired and the specified block returns true. The block is called
+ * repeatedly when waiting to acquire the lock.
+ * Should only be called when the lock cannot sleep (i.e. when
+ * lock->lck_rw_can_sleep is false).
+ *
+ * @param lock           rw_lock to lock.
+ * @param lock_pause     block invoked while waiting to acquire lock
+ *
+ * @returns              Returns TRUE if the lock is successfully taken,
+ *                       FALSE if the block returns true and the lock has
+ *                       not been acquired.
+ */
+extern boolean_t
+    lck_rw_lock_shared_b(
+	lck_rw_t        * lock,
+	bool            (^lock_pause)(void));
+
+/*!
+ * @function lck_rw_lock_exclusive_b
+ *
+ * @abstract
+ * Locks a rw_lock in exclusive mode. Returns early if the lock can't be acquired
+ * and the specified block returns true.
+ *
+ * @discussion
+ * Identical to lck_rw_lock_exclusive() but can return early if the lock can't be
+ * acquired and the specified block returns true. The block is called
+ * repeatedly when waiting to acquire the lock.
+ * Should only be called when the lock cannot sleep (i.e. when
+ * lock->lck_rw_can_sleep is false).
+ *
+ * @param lock           rw_lock to lock.
+ * @param lock_pause     block invoked while waiting to acquire lock
+ *
+ * @returns              Returns TRUE if the lock is successfully taken,
+ *                       FALSE if the block returns true and the lock has
+ *                       not been acquired.
+ */
+extern boolean_t
+    lck_rw_lock_exclusive_b(
+	lck_rw_t        * lock,
+	bool            (^lock_pause)(void));
+#endif /* MACH_KERNEL_PRIVATE */
 
 /*!
  * @function lck_rw_lock_shared_to_exclusive
@@ -565,9 +611,36 @@ extern bool             lck_rw_lock_exclusive_check_contended(
  *
  * @returns TRUE if the lock was yield, FALSE otherwise
  */
-extern boolean_t        lck_rw_lock_yield_shared(
+extern bool             lck_rw_lock_yield_shared(
 	lck_rw_t                *lck,
 	boolean_t               force_yield);
+
+__enum_decl(lck_rw_yield_t, uint32_t, {
+	LCK_RW_YIELD_WRITERS_ONLY,
+	LCK_RW_YIELD_ANY_WAITER,
+	LCK_RW_YIELD_ALWAYS,
+});
+
+/*!
+ * @function lck_rw_lock_yield_exclusive
+ *
+ * @abstract
+ * Yields a rw_lock held in exclusive mode.
+ *
+ * @discussion
+ * This function can block.
+ * Yields the lock in case there are writers waiting.
+ * The yield will unlock, block, and re-lock the lock in exclusive mode.
+ *
+ * @param lck           rw_lock already held in exclusive mode to yield.
+ * @param mode          when to yield.
+ *
+ * @returns TRUE if the lock was yield, FALSE otherwise
+ */
+extern bool             lck_rw_lock_yield_exclusive(
+	lck_rw_t                *lck,
+	lck_rw_yield_t          mode);
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 #if MACH_KERNEL_PRIVATE

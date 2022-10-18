@@ -79,6 +79,6 @@ T_DECL(exc_raise_identity_protected, "Test identity-protected exception delivery
 {
 	mach_port_t exc_port = create_exception_port_behavior64(EXC_MASK_BAD_ACCESS, EXCEPTION_IDENTITY_PROTECTED);
 
-	run_exception_handler_behavior64(exc_port, exc_handler_identity_protected, EXCEPTION_IDENTITY_PROTECTED);
+	run_exception_handler_behavior64(exc_port, NULL, exc_handler_identity_protected, EXCEPTION_IDENTITY_PROTECTED);
 	*(void *volatile*)0 = 0;
 }

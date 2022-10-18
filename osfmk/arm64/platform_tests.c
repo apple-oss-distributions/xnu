@@ -339,18 +339,10 @@ lt_grab_hw_lock_with_try()
 	hw_lock_unlock(&lt_hw_lock);
 }
 
-static __abortlike hw_lock_timeout_status_t
-lt_hw_lock_to_panic(void *lock, uint64_t timeout, uint64_t start, uint64_t now, uint64_t interrupt_time)
-{
-#pragma unused(timeout, start, now, interrupt_time)
-	panic("%s> acquiring lock %p timed out", __func__, lock);
-}
-
 static void
 lt_grab_hw_lock_with_to()
 {
-	(void)hw_lock_to(&lt_hw_lock, os_atomic_load(&LockTimeOut, relaxed),
-	    lt_hw_lock_to_panic, LCK_GRP_NULL);
+	(void)hw_lock_to(&lt_hw_lock, &hw_lock_spin_policy, LCK_GRP_NULL);
 	lt_counter++;
 	lt_spin_a_little_bit();
 	hw_lock_unlock(&lt_hw_lock);
@@ -394,13 +386,6 @@ lt_reset()
 	OSMemoryBarrier();
 }
 
-static hw_lock_timeout_status_t
-lt_hw_lock_to_allow(void *lock, uint64_t timeout, uint64_t start, uint64_t now, uint64_t interrupt_time)
-{
-#pragma unused(lock, timeout, start, now, interrupt_time)
-	return HW_LOCK_TIMEOUT_RETURN;
-}
-
 static void
 lt_trylock_hw_lock_with_to()
 {
@@ -409,8 +394,8 @@ lt_trylock_hw_lock_with_to()
 		lt_sleep_a_little_bit();
 		OSMemoryBarrier();
 	}
-	lt_thread_lock_success = hw_lock_to(&lt_hw_lock, 100,
-	    lt_hw_lock_to_allow, LCK_GRP_NULL);
+	lt_thread_lock_success = hw_lock_to(&lt_hw_lock,
+	    &hw_lock_test_give_up_policy, LCK_GRP_NULL);
 	OSMemoryBarrier();
 	mp_enable_preemption();
 }
@@ -551,7 +536,7 @@ lt_test_trylocks()
 	lt_target_done_threads = 1;
 	OSMemoryBarrier();
 	lt_start_trylock_thread(lt_trylock_hw_lock_with_to);
-	success = hw_lock_to(&lt_hw_lock, 100, lt_hw_lock_to_allow, LCK_GRP_NULL);
+	success = hw_lock_to(&lt_hw_lock, &hw_lock_test_give_up_policy, LCK_GRP_NULL);
 	T_ASSERT_NOTNULL(success, "First spin lock with timeout should succeed");
 	if (real_ncpus == 1) {
 		mp_enable_preemption(); /* if we re-enable preemption, the other thread can timeout and exit */
@@ -725,6 +710,18 @@ lt_start_lock_thread_bound(thread_continue_t func)
 static kern_return_t
 lt_test_locks()
 {
+#if SCHED_HYGIENE_DEBUG
+	/*
+	 * When testing, the preemption disable threshold may be hit (for
+	 * example when testing a lock timeout). To avoid this, the preemption
+	 * disable measurement is temporarily disabled during lock testing.
+	 */
+	int old_mode = sched_preemption_disable_debug_mode;
+	if (old_mode == SCHED_HYGIENE_MODE_PANIC) {
+		sched_preemption_disable_debug_mode = SCHED_HYGIENE_MODE_OFF;
+	}
+#endif /* SCHED_HYGIENE_DEBUG */
+
 	kern_return_t kr = KERN_SUCCESS;
 	lck_grp_attr_t *lga = lck_grp_attr_alloc_init();
 	lck_grp_t *lg = lck_grp_alloc_init("lock test", lga);
@@ -994,6 +991,10 @@ lt_test_locks()
 	lt_start_lock_thread(lt_grab_spin_lock_with_try);
 	lt_wait_for_lock_test_threads();
 	T_EXPECT_EQ_UINT(lt_counter, LOCK_TEST_ITERATIONS * lt_target_done_threads, NULL);
+
+#if SCHED_HYGIENE_DEBUG
+	sched_preemption_disable_debug_mode = old_mode;
+#endif /* SCHED_HYGIENE_DEBUG */
 
 	return KERN_SUCCESS;
 }

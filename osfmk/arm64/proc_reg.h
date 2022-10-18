@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,12 +26,258 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
- * Processor registers for ARM64
+ * @OSF_COPYRIGHT@
+ */
+/* CMU_ENDHIST */
+/*
+ * Mach Operating System
+ * Copyright (c) 1991,1990 Carnegie Mellon University
+ * All Rights Reserved.
+ *
+ * Permission to use, copy, modify and distribute this software and its
+ * documentation is hereby granted, provided that both the copyright
+ * notice and this permission notice appear in all copies of the
+ * software, derivative works or modified versions, and any portions
+ * thereof, and that both notices appear in supporting documentation.
+ *
+ * CARNEGIE MELLON ALLOWS FREE USE OF THIS SOFTWARE IN ITS "AS IS"
+ * CONDITION.  CARNEGIE MELLON DISCLAIMS ANY LIABILITY OF ANY KIND FOR
+ * ANY DAMAGES WHATSOEVER RESULTING FROM THE USE OF THIS SOFTWARE.
+ *
+ * Carnegie Mellon requests users of this software to return to
+ *
+ *  Software Distribution Coordinator  or  Software.Distribution@CS.CMU.EDU
+ *  School of Computer Science
+ *  Carnegie Mellon University
+ *  Pittsburgh PA 15213-3890
+ *
+ * any improvements or extensions that they make and grant Carnegie Mellon
+ * the rights to redistribute these changes.
+ */
+
+/*
+ * Processor registers for ARM/ARM64
  */
 #ifndef _ARM64_PROC_REG_H_
 #define _ARM64_PROC_REG_H_
 
-#include <arm/proc_reg.h>
+#if defined (__arm64__)
+#include <pexpert/arm64/board_config.h>
+#elif defined (__arm__)
+#include <pexpert/arm/board_config.h>
+#endif
+
+/*
+ * Processor registers for ARM
+ */
+#if __ARM_42BIT_PA_SPACE__
+/* For now, force the issue! */
+/* We need more VA space for the identity map to bootstrap the MMU */
+#undef __ARM64_PMAP_SUBPAGE_L1__
+#endif /* __ARM_42BIT_PA_SPACE__ */
+
+/* For arm platforms, create one pset per cluster */
+#define MAX_PSETS MAX_CPU_CLUSTERS
+
+/*
+ * The clutch scheduler is enabled only on non-AMP platforms for now.
+ */
+#if CONFIG_CLUTCH
+
+#if __ARM_AMP__
+
+/* Enable the Edge scheduler for all AS Mac platforms */
+#if XNU_TARGET_OS_OSX
+#define CONFIG_SCHED_CLUTCH 1
+#define CONFIG_SCHED_EDGE   1
+#endif /* XNU_TARGET_OS_OSX */
+
+#else /* __ARM_AMP__ */
+#define CONFIG_SCHED_CLUTCH 1
+#endif /* __ARM_AMP__ */
+
+#endif /* CONFIG_CLUTCH */
+
+/* Thread groups are enabled on all ARM platforms (irrespective of scheduler) */
+#define CONFIG_THREAD_GROUPS 1
+
+#ifdef XNU_KERNEL_PRIVATE
+
+#if __ARM_VFP__
+#define ARM_VFP_DEBUG 0
+#endif /* __ARM_VFP__ */
+
+#endif /* XNU_KERNEL_PRIVATE */
+
+/*
+ * FSR registers
+ *
+ * CPSR: Current Program Status Register
+ * SPSR: Saved Program Status Registers
+ *
+ *  31 30 29 28 27     24     19   16      9  8  7  6  5  4   0
+ * +-----------------------------------------------------------+
+ * | N| Z| C| V| Q|...| J|...|GE[3:0]|...| E| A| I| F| T| MODE |
+ * +-----------------------------------------------------------+
+ */
+
+/*
+ * Flags
+ */
+#define PSR_NF 0x80000000 /* Negative/Less than */
+#define PSR_ZF 0x40000000 /* Zero */
+#define PSR_CF 0x20000000 /* Carry/Borrow/Extend */
+#define PSR_VF 0x10000000 /* Overflow */
+
+/*
+ * Modified execution mode flags
+ */
+#define PSR_TF  0x00000020 /* thumb flag (BX ARMv4T) */
+
+/*
+ * CPU mode
+ */
+#define PSR_USER_MODE 0x00000010 /* User mode */
+
+#define PSR_MODE_MASK      0x0000001F
+#define PSR_IS_KERNEL(psr) (((psr) & PSR_MODE_MASK) != PSR_USER_MODE)
+#define PSR_IS_USER(psr)   (((psr) & PSR_MODE_MASK) == PSR_USER_MODE)
+
+#define PSR_USERDFLT  PSR_USER_MODE
+
+/*
+ * Cache configuration
+ */
+
+#if defined (APPLETYPHOON)
+
+/* I-Cache */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache */
+#define MMU_CLINE   6                      /* cache line size as 1<<MMU_CLINE (64) */
+
+#elif defined (APPLETWISTER)
+
+/* I-Cache */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEHURRICANE)
+
+/* I-Cache */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEMONSOON)
+
+/* I-Cache, 96KB for Monsoon, 48KB for Mistral, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 64KB for Monsoon, 32KB for Mistral, 4-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEVORTEX)
+
+/* I-Cache, 128KB 8-way for Vortex, 48KB 6-way for Tempest. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 128KB 8-way for Vortex, 32KB 4-way for Tempest. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLELIGHTNING)
+
+/* I-Cache, 192KB for Lightning, 96KB for Thunder, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 128KB for Lightning, 8-way. 48KB for Thunder, 6-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEFIRESTORM)
+
+/* I-Cache, 256KB for Firestorm, 128KB for Icestorm, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 160KB for Firestorm, 8-way. 64KB for Icestorm, 6-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (BCM2837) /* Raspberry Pi 3 */
+
+/* I-Cache. We don't have detailed spec so we just follow the ARM technical reference. */
+#define MMU_I_CLINE 6
+
+/* D-Cache. */
+#define MMU_CLINE   6
+
+#elif defined (VMAPPLE)
+
+/* I-Cache. */
+#define MMU_I_CLINE 6
+
+/* D-Cache. */
+#define MMU_CLINE   6
+
+#else
+#error processor not supported
+#endif
+
+#define MAX_L2_CLINE_BYTES (1 << MAX_L2_CLINE)
+
+/*
+ * Format of the Debug & Watchpoint Breakpoint Value and Control Registers
+ */
+#define ARM_DBG_VR_ADDRESS_MASK             0xFFFFFFFC            /* BVR & WVR */
+#define ARM_DBG_VR_ADDRESS_MASK64           0xFFFFFFFFFFFFFFFCull /* BVR & WVR */
+
+#define ARM_DBG_CR_ADDRESS_MASK_MASK        0x1F000000 /* BCR & WCR */
+#define ARM_DBGBCR_MATCH_MASK               (1 << 22)  /* BCR only  */
+#define ARM_DBGBCR_TYPE_MASK                (1 << 21)  /* BCR only */
+#define ARM_DBGBCR_TYPE_IVA                 (0 << 21)
+#define ARM_DBG_CR_LINKED_MASK              (1 << 20)  /* BCR & WCR */
+#define ARM_DBG_CR_LINKED_UNLINKED          (0 << 20)
+#define ARM_DBG_CR_SECURITY_STATE_BOTH      (0 << 14)
+#define ARM_DBG_CR_HIGHER_MODE_ENABLE       (1 << 13)
+#define ARM_DBGWCR_BYTE_ADDRESS_SELECT_MASK 0x00001FE0 /* WCR only  */
+#define ARM_DBG_CR_BYTE_ADDRESS_SELECT_MASK 0x000001E0 /* BCR & WCR */
+#define ARM_DBGWCR_ACCESS_CONTROL_MASK      (3 << 3)   /* WCR only */
+#define ARM_DBG_CR_MODE_CONTROL_PRIVILEGED  (1 << 1)   /* BCR & WCR */
+#define ARM_DBG_CR_MODE_CONTROL_USER        (2 << 1)   /* BCR & WCR */
+#define ARM_DBG_CR_ENABLE_MASK              (1 << 0)   /* BCR & WCR */
+#define ARM_DBG_CR_ENABLE_ENABLE            (1 << 0)
+
+/*
+ * Format of the OS Lock Access (DBGOSLAR) and Lock Access Registers (DBGLAR)
+ */
+#define ARM_DBG_LOCK_ACCESS_KEY 0xC5ACCE55
+
+/* ARM Debug registers of interest */
+#define ARM_DEBUG_OFFSET_DBGPRCR       (0x310)
+#define ARM_DEBUG_OFFSET_DBGLAR        (0xFB0)
+
+/*
+ * Main ID Register (MIDR)
+ *
+ *  31 24 23 20 19  16 15   4 3   0
+ * +-----+-----+------+------+-----+
+ * | IMP | VAR | ARCH | PNUM | REV |
+ * +-----+-----+------+------+-----+
+ *
+ * where:
+ *   IMP:  Implementor code
+ *   VAR:  Variant number
+ *   ARCH: Architecture code
+ *   PNUM: Primary part number
+ *   REV:  Minor revision number
+ */
+#define MIDR_REV_SHIFT  0
+#define MIDR_REV_MASK   (0xf << MIDR_REV_SHIFT)
+#define MIDR_VAR_SHIFT  20
+#define MIDR_VAR_MASK   (0xf << MIDR_VAR_SHIFT)
+
 
 #if __ARM_KERNEL_PROTECT__
 /*
@@ -169,6 +415,15 @@
 #define PSR64_V_SHIFT    28
 #define PSR64_V          (1 << PSR64_V_SHIFT)
 
+#define PSR64_TCO_SHIFT  25
+#define PSR64_TCO        (1 << PSR64_TCO_SHIFT)
+
+#define PSR64_DIT_SHIFT  24
+#define PSR64_DIT        (1 << PSR64_DIT_SHIFT)
+
+#define PSR64_UAO_SHIFT  23
+#define PSR64_UAO        (1 << PSR64_UAO_SHIFT)
+
 #define PSR64_PAN_SHIFT  22
 #define PSR64_PAN        (1 << PSR64_PAN_SHIFT)
 
@@ -208,7 +463,7 @@
 
 #define SPSR_INTERRUPTS_ENABLED(x) (!(x & DAIF_FIQF))
 
-#if __ARM_ARCH_8_5__
+#if HAS_ARM_FEAT_SSBS2
 #define PSR64_SSBS_U32_DEFAULT  PSR64_SSBS_32
 #define PSR64_SSBS_U64_DEFAULT  PSR64_SSBS_64
 #define PSR64_SSBS_KRN_DEFAULT  PSR64_SSBS_64
@@ -228,6 +483,7 @@
 #define DAIFSC_FIQF             (1 << 0)
 #define DAIFSC_ALL              (DAIFSC_DEBUGF | DAIFSC_ASYNCF | DAIFSC_IRQF | DAIFSC_FIQF)
 #define DAIFSC_STANDARD_DISABLE (DAIFSC_ASYNCF | DAIFSC_IRQF | DAIFSC_FIQF)
+#define DAIFSC_NOASYNC          (DAIFSC_DEBUGF | DAIFSC_IRQF | DAIFSC_FIQF)
 
 /*
  * ARM64_TODO: unify with ARM?
@@ -1486,11 +1742,13 @@ typedef enum {
 	ESR_EC_MCRR_MRRC_CP14_TRAP = 0x0c,
 	ESR_EC_ILLEGAL_INSTR_SET   = 0x0e,
 	ESR_EC_SVC_32              = 0x11,
+	ESR_EC_HVC_32              = 0x12,
 	ESR_EC_SVC_64              = 0x15,
+	ESR_EC_HVC_64              = 0x16,
 	ESR_EC_MSR_TRAP            = 0x18,
-#ifdef __ARM_ARCH_8_6__
+#if __has_feature(ptrauth_calls)
 	ESR_EC_PAC_FAIL            = 0x1C,
-#endif /* __ARM_ARCH_8_6__ */
+#endif /* __has_feature(ptrauth_calls) */
 	ESR_EC_IABORT_EL0          = 0x20,
 	ESR_EC_IABORT_EL1          = 0x21,
 	ESR_EC_PC_ALIGN            = 0x22,
@@ -1535,6 +1793,20 @@ typedef enum {
 	FSC_DEBUG_FAULT            = 0x22,
 } fault_status_t;
 #endif /* ASSEMBLER */
+
+/*
+ * HVC event
+ *  24     16 15  0
+ * +---------+-----+
+ * |000000000| IMM |
+ * +---------+-----+
+ *
+ * where:
+ *   IMM: Immediate value
+ */
+
+#define ISS_HVC_IMM_MASK  0xffff
+#define ISS_HVC_IMM(x)    ((x) & ISS_HVC_IMM_MASK)
 
 /*
  * Software step debug event ISS (EL1)
@@ -1702,12 +1974,6 @@ typedef enum {
 #define CNTP_CTL_EL0_IMASKED     CNTV_CTL_EL0_IMASKED
 #define CNTP_CTL_EL0_ENABLE      CNTV_CTL_EL0_ENABLE
 
-/*
- * At present all other uses of ARM_DBG_* are shared bit compatibly with the 32bit definitons.
- * (cf. osfmk/arm/proc_reg.h)
- */
-#define ARM_DBG_VR_ADDRESS_MASK64 0xFFFFFFFFFFFFFFFCull /* BVR & WVR */
-
 #define MIDR_EL1_REV_SHIFT  0
 #define MIDR_EL1_REV_MASK   (0xf << MIDR_EL1_REV_SHIFT)
 #define MIDR_EL1_PNUM_SHIFT 4
@@ -1749,6 +2015,7 @@ typedef enum {
 #define MIDR_JADE_DIE_ICESTORM          (0x028 << MIDR_EL1_PNUM_SHIFT)
 #define MIDR_JADE_DIE_FIRESTORM         (0x029 << MIDR_EL1_PNUM_SHIFT)
 #endif
+
 
 
 
@@ -1900,6 +2167,23 @@ typedef enum {
 #define ID_AA64ISAR1_EL1_DPB2_EN        (2ull << ID_AA64ISAR1_EL1_DPB_OFFSET)
 
 /*
+ * ID_AA64ISAR2_EL1 - AArch64 Instruction Set Attribute Register 2
+ *
+ *  63   8 7     4 3    0
+ * +------+-------+------+
+ * | res0 | RPRES | WFxT |
+ * +------+-------+------+
+ */
+
+#define ID_AA64ISAR2_EL1_RPRES_OFFSET   4
+#define ID_AA64ISAR2_EL1_RPRES_MASK     (0xfull << ID_AA64ISAR2_EL1_RPRES_OFFSET)
+#define ID_AA64ISAR2_EL1_RPRES_EN       (1ull << ID_AA64ISAR2_EL1_RPRES_OFFSET)
+
+#define ID_AA64ISAR2_EL1_WFxT_OFFSET    0
+#define ID_AA64ISAR2_EL1_WFxT_MASK      (0xfull << ID_AA64ISAR2_EL1_WFxT_OFFSET)
+#define ID_AA64ISAR2_EL1_WFxT_EN        (1ull << ID_AA64ISAR2_EL1_WFxT_OFFSET)
+
+/*
  * ID_AA64MMFR0_EL1 - AArch64 Memory Model Feature Register 0
  *  63   60 59   56 55        48 47   44 43      40 39       36 35       32 31    28 27     24 23     20 19       16 15    12 11     8 7        4 3       0
  * +-------+-------+------------+-------+----------+-----------+-----------+--------+---------+---------+-----------+--------+--------+----------+---------+
@@ -1938,6 +2222,10 @@ typedef enum {
 #define ID_AA64PFR0_EL1_CSV2_OFFSET     56
 #define ID_AA64PFR0_EL1_CSV2_MASK       (0xfull << ID_AA64PFR0_EL1_CSV2_OFFSET)
 #define ID_AA64PFR0_EL1_CSV2_EN         (1ull << ID_AA64PFR0_EL1_CSV2_OFFSET)
+
+#define ID_AA64PFR0_EL1_DIT_OFFSET     48
+#define ID_AA64PFR0_EL1_DIT_MASK       (0xfull << ID_AA64PFR0_EL1_DIT_OFFSET)
+#define ID_AA64PFR0_EL1_DIT_EN         (1ull << ID_AA64PFR0_EL1_DIT_OFFSET)
 
 #define ID_AA64PFR0_EL1_AdvSIMD_OFFSET  20
 #define ID_AA64PFR0_EL1_AdvSIMD_MASK    (0xfull << ID_AA64PFR0_EL1_AdvSIMD_OFFSET)
@@ -1988,6 +2276,11 @@ typedef enum {
 #define ACTLR_EL1_EnPRSV  (1ULL << 6)
 
 
+#if HAS_USAT_BIT
+#define ACTLR_EL1_USAT_OFFSET    0
+#define ACTLR_EL1_USAT_MASK      (1ULL << ACTLR_EL1_USAT_OFFSET)
+#define ACTLR_EL1_USAT           ACTLR_EL1_USAT_MASK
+#endif
 #define ACTLR_EL1_DisHWP_OFFSET  3
 #define ACTLR_EL1_DisHWP_MASK    (1ULL << ACTLR_EL1_DisHWP_OFFSET)
 #define ACTLR_EL1_DisHWP         ACTLR_EL1_DisHWP_MASK

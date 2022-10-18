@@ -175,7 +175,7 @@ extern uint32_t bg_ss_fltsz;
  */
 struct tcp_cc_algo {
 	char name[TCP_CA_NAME_MAX];
-	uint32_t num_sockets;
+	_Atomic uint32_t num_sockets;
 	uint32_t flags;
 
 	/* init the congestion algorithm for the specified control block */
@@ -218,8 +218,6 @@ struct tcp_cc_algo {
 	void (*switch_to)(struct tcpcb *tp);
 } __attribute__((aligned(4)));
 
-extern struct zone *tcp_cc_zone;
-
 extern struct tcp_cc_algo* tcp_cc_algo_list[TCP_CC_ALGO_COUNT];
 
 #define CC_ALGO(tp) (tcp_cc_algo_list[tp->tcp_cc_index])
@@ -234,7 +232,7 @@ extern struct tcp_cc_algo* tcp_cc_algo_list[TCP_CC_ALGO_COUNT];
 /* Less than BE congestion control algo for receive window */
 struct tcp_rcv_cc_algo {
 	char name[TCP_CA_NAME_MAX];
-	uint32_t num_sockets;
+	_Atomic uint32_t num_sockets;
 	uint32_t flags;
 
 	/* init the congestion algorithm for the specified control block */
@@ -264,13 +262,11 @@ struct tcp_rcv_cc_algo {
 
 extern struct tcp_rcv_cc_algo tcp_cc_rledbat;
 
-extern void     tcp_cc_init(void);
+extern void tcp_cc_init(void);
 extern void tcp_cc_resize_sndbuf(struct tcpcb *tp);
 extern void tcp_bad_rexmt_fix_sndbuf(struct tcpcb *tp);
 extern void tcp_cc_cwnd_init_or_reset(struct tcpcb *tp);
 extern int tcp_cc_delay_ack(struct tcpcb *tp, struct tcphdr *th);
-extern void tcp_ccdbg_trace(struct tcpcb *tp, struct tcphdr *th,
-    int32_t event);
 extern void tcp_cc_allocate_state(struct tcpcb *tp);
 extern void tcp_cc_after_idle_stretchack(struct tcpcb *tp);
 extern uint32_t tcp_cc_is_cwnd_nonvalidated(struct tcpcb *tp);
@@ -281,12 +277,6 @@ extern void tcp_clear_pipeack_state(struct tcpcb *tp);
 static inline uint32_t
 tcp_initial_cwnd(struct tcpcb *tp)
 {
-#if (DEVELOPMENT || DEBUG)
-	/* only used for testing */
-	if (tcp_use_ledbat) {
-		return bg_ss_fltsz * tp->t_maxseg;
-	}
-#endif
 	if (tcp_cubic_minor_fixes) {
 		return TCP_CC_CWND_INIT_PKTS * tp->t_maxseg;
 	} else {

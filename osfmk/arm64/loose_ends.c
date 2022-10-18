@@ -32,6 +32,7 @@
 #include <kern/timer.h>
 #include <kern/clock.h>
 #include <kern/machine.h>
+#include <kern/iotrace.h>
 #include <mach/machine.h>
 #include <mach/machine/vm_param.h>
 #include <mach_kdp.h>
@@ -348,9 +349,7 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 	if (__improbable(timeread)) {
 		eabs = mach_absolute_time();
 
-#ifdef ML_IO_IOTRACE_ENABLED
 		iotrace(IOTRACE_PHYS_READ, 0, addr, size, result, sabs, eabs - sabs);
-#endif /* ML_IO_IOTRACE_ENABLED */
 
 		if (__improbable((eabs - sabs) > report_phy_read_delay)) {
 			ml_set_interrupts_enabled(istate);
@@ -522,9 +521,7 @@ ml_phys_write_data(pmap_paddr_t paddr, uint64_t data, int size)
 	if (__improbable(timewrite)) {
 		eabs = mach_absolute_time();
 
-#ifdef ML_IO_IOTRACE_ENABLED
 		iotrace(IOTRACE_PHYS_WRITE, 0, paddr, size, data, sabs, eabs - sabs);
-#endif /*  ML_IO_IOTRACE_ENABLED */
 
 		if (__improbable((eabs - sabs) > report_phy_write_delay)) {
 			ml_set_interrupts_enabled(istate);

@@ -41,8 +41,6 @@
  *	Contiguous physical memory allocator.
  */
 
-#include <mach_counters.h>
-
 #include <mach/mach_types.h>
 #include <vm/vm_page.h>
 /*

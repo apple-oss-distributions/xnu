@@ -72,8 +72,11 @@
 #include <sys/proc_internal.h>
 #include <sys/kauth.h>
 #include <sys/imgact.h>
+#include <sys/reason.h>
+#include <sys/vnode_internal.h>
 #include <mach/mach_types.h>
 #include <kern/task.h>
+#include <kern/zalloc.h>
 
 #include <os/hash.h>
 
@@ -81,6 +84,11 @@
 #include <security/mac_mach_internal.h>
 
 #include <bsd/security/audit/audit.h>
+
+#include <os/log.h>
+#include <kern/cs_blobs.h>
+#include <sys/spawn.h>
+#include <sys/spawn_internal.h>
 
 struct label *
 mac_cred_label_alloc(void)
@@ -402,21 +410,6 @@ mac_proc_check_get_task(struct ucred *cred, proc_ident_t pident, mach_task_flavo
 
 	assert(flavor <= TASK_FLAVOR_NAME);
 
-	/* Also call the old hook for compatability, deprecating in rdar://66356944. */
-	if (flavor == TASK_FLAVOR_CONTROL) {
-		MAC_CHECK(proc_check_get_task, cred, pident);
-		if (error) {
-			return error;
-		}
-	}
-
-	if (flavor == TASK_FLAVOR_NAME) {
-		MAC_CHECK(proc_check_get_task_name, cred, pident);
-		if (error) {
-			return error;
-		}
-	}
-
 	MAC_CHECK(proc_check_get_task_with_flavor, cred, pident, flavor);
 
 	return error;
@@ -429,21 +422,19 @@ mac_proc_check_expose_task(struct ucred *cred, proc_ident_t pident, mach_task_fl
 
 	assert(flavor <= TASK_FLAVOR_NAME);
 
-	/* Also call the old hook for compatability, deprecating in rdar://66356944. */
-	if (flavor == TASK_FLAVOR_CONTROL) {
-		MAC_CHECK(proc_check_expose_task, cred, pident);
-		if (error) {
-			return error;
-		}
-	}
-
 	MAC_CHECK(proc_check_expose_task_with_flavor, cred, pident, flavor);
 
 	return error;
 }
 
 int
-mac_proc_check_inherit_ipc_ports(struct proc *p, struct vnode *cur_vp, off_t cur_offset, struct vnode *img_vp, off_t img_offset, struct vnode *scriptvp)
+mac_proc_check_inherit_ipc_ports(
+	struct proc *p,
+	struct vnode *cur_vp,
+	off_t cur_offset,
+	struct vnode *img_vp,
+	off_t img_offset,
+	struct vnode *scriptvp)
 {
 	int error;
 
@@ -903,6 +894,120 @@ mac_proc_check_settid(proc_t curp, uid_t uid, gid_t gid)
 	MAC_CHECK(proc_check_settid, pcred, tcred, uid, gid);
 	kauth_cred_unref(&tcred);
 	kauth_cred_unref(&pcred);
+
+	return error;
+}
+
+int
+mac_proc_check_launch_constraints(proc_t curp, struct image_params *imgp, os_reason_t *reasonp)
+{
+	char *fatal_failure_desc = NULL;
+	size_t fatal_failure_desc_len = 0;
+
+	pid_t original_parent_id = proc_original_ppid(curp);
+
+	pid_t responsible_pid = curp->p_responsible_pid;
+
+	int error = 0;
+
+	/* Vnode of the file */
+	struct vnode *vp = imgp->ip_vp;
+
+	char *vn_path = NULL;
+	vm_size_t vn_pathlen = MAXPATHLEN;
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce || !mac_vnode_enforce) {
+		return 0;
+	}
+#endif
+
+	MAC_POLICY_ITERATE({
+		mpo_proc_check_launch_constraints_t *hook = mpc->mpc_ops->mpo_proc_check_launch_constraints;
+		if (hook == NULL) {
+		        continue;
+		}
+
+		size_t spawnattrlen = 0;
+		void *spawnattr = exec_spawnattr_getmacpolicyinfo(&imgp->ip_px_smpx, mpc->mpc_name, &spawnattrlen);
+		struct _posix_spawnattr *psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
+		struct launch_constraint_data lcd;
+		lcd.launch_type = CS_LAUNCH_TYPE_NONE;
+
+		/* Check to see if psa_launch_type was initalized */
+		if (psa != (struct _posix_spawnattr*)NULL) {
+		        lcd.launch_type = psa->psa_launch_type;
+		}
+
+		error = mac_error_select(
+			hook(curp, original_parent_id, responsible_pid,
+			spawnattr, spawnattrlen, &lcd, &fatal_failure_desc, &fatal_failure_desc_len), error);
+
+		/*
+		 * Early exit in case of failure in case we have multiple registered callers.
+		 * This is to avoid other MACF policies from stomping on each other's failure description
+		 */
+		if (fatal_failure_desc_len) {
+		        goto policy_fail;
+		}
+	});
+
+policy_fail:
+	if (fatal_failure_desc_len) {
+		/*
+		 * A fatal code signature validation failure occured, formulate a crash
+		 * reason.
+		 */
+
+		char const *path = NULL;
+
+		vn_path = zalloc(ZV_NAMEI);
+		if (vn_getpath(vp, vn_path, (int*)&vn_pathlen) == 0) {
+			path = vn_path;
+		} else {
+			path = "(get vnode path failed)";
+		}
+
+		if (error == 0) {
+			panic("%s: MAC hook returned no error, but status is claimed to be fatal? "
+			    "path: '%s', fatal_failure_desc_len: %ld, fatal_failure_desc:\n%s\n",
+			    __func__, path, fatal_failure_desc_len, fatal_failure_desc);
+		}
+
+		os_reason_t reason = os_reason_create(OS_REASON_CODESIGNING,
+		    CODESIGNING_EXIT_REASON_LAUNCH_CONSTRAINT_VIOLATION);
+
+		*reasonp = reason;
+
+		reason->osr_flags = (OS_REASON_FLAG_GENERATE_CRASH_REPORT |
+		    OS_REASON_FLAG_CONSISTENT_FAILURE);
+
+		if (fatal_failure_desc != NULL) {
+			mach_vm_address_t data_addr = 0;
+
+			int reason_error = 0;
+			int kcdata_error = 0;
+
+			if ((reason_error = os_reason_alloc_buffer_noblock(reason,
+			    kcdata_estimate_required_buffer_size(1,
+			    (uint32_t)fatal_failure_desc_len))) == 0) {
+				if ((kcdata_error = kcdata_get_memory_addr(&reason->osr_kcd_descriptor,
+				    EXIT_REASON_USER_DESC, (uint32_t)fatal_failure_desc_len,
+				    &data_addr)) == KERN_SUCCESS) {
+					kcdata_memcpy(&reason->osr_kcd_descriptor, (mach_vm_address_t)data_addr,
+					    fatal_failure_desc, (uint32_t)fatal_failure_desc_len);
+				}
+			}
+		}
+	}
+
+	if (vn_path) {
+		zfree(ZV_NAMEI, vn_path);
+	}
+
+	if (fatal_failure_desc_len > 0 && fatal_failure_desc != NULL) {
+		kfree_data(fatal_failure_desc, fatal_failure_desc_len);
+	}
 
 	return error;
 }

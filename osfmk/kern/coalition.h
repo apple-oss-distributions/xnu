@@ -63,6 +63,7 @@ kern_return_t coalitions_set_roles(coalition_t coalitions[COALITION_NUM_TYPES],
 uint64_t coalition_id(coalition_t coal);
 void     task_coalition_ids(task_t task, uint64_t ids[COALITION_NUM_TYPES]);
 void     task_coalition_roles(task_t task, int roles[COALITION_NUM_TYPES]);
+int      task_coalition_role_for_type(task_t task, int coalition_type);
 int      coalition_type(coalition_t coal);
 
 void     task_coalition_update_gpu_stats(task_t task, uint64_t gpu_ns_delta);
@@ -75,6 +76,7 @@ void     coalition_set_thread_group(coalition_t coal, struct thread_group *tg);
 struct thread_group *kdp_coalition_get_thread_group(coalition_t coal);
 struct thread_group *coalition_get_thread_group(coalition_t coal);
 void task_coalition_thread_group_focal_update(task_t task);
+void task_coalition_thread_group_application_set(task_t task);
 
 void coalition_for_each_task(coalition_t coal, void *ctx,
     void (*callback)(coalition_t, void *, task_t));
@@ -89,6 +91,22 @@ void coalition_io_monitor_ctl(struct coalition *coalition, uint32_t flags, int64
 ledger_t coalition_ledger_get_from_task(task_t task);
 void coalition_io_rate_exceeded(int warning, const void *param0, __unused const void *param1);
 void coalition_io_ledger_update(task_t task, int32_t flavor, boolean_t is_credit, uint32_t io_size);
+/*
+ * Mark this coalition as eligible for swap.
+ * All tasks currently in this coalition will become swap enabled
+ * and new tasks launched into this coalition will be swap enabled.
+ *
+ * Note:
+ * This function can only be called on jetsam coalitions.
+ */
+void coalition_mark_swappable(coalition_t coal);
+/*
+ * Returns true iff the coalition has been marked as swappable.
+ *
+ * Note:
+ * This function can only be called on jetsam coalitions.
+ */
+bool coalition_is_swappable(coalition_t coal);
 
 /* Max limit for coalition logical_writes ledger in MB. Setting to 16 TB */
 #define COALITION_MAX_LOGICAL_WRITES_LIMIT ((ledger_amount_t)(1ULL << 24))
@@ -195,6 +213,18 @@ coalition_for_each_task(__unused coalition_t coal,
     __unused void (*callback)(coalition_t, void *, task_t))
 {
 	return;
+}
+
+static inline void
+coalition_mark_swappable(__unused coalition_t coal)
+{
+	return;
+}
+
+static inline bool
+coalition_is_swappable(__unused coalition_t coal)
+{
+	return false;
 }
 
 #endif /* CONFIG_COALITIONS */

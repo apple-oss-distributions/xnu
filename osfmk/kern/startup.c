@@ -122,6 +122,8 @@
 #include <sys/kdebug.h>
 #include <sys/random.h>
 #include <sys/ktrace.h>
+#include <sys/trust_caches.h>
+#include <sys/code_signing.h>
 #include <libkern/section_keywords.h>
 
 #include <kern/waitq.h>
@@ -219,15 +221,6 @@ extern int serverperfmode;
 
 TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
 
-/* size of kernel trace buffer, disabled by default */
-TUNABLE(unsigned int, new_nkdbufs, "trace", 0);
-TUNABLE(unsigned int, wake_nkdbufs, "trace_wake", 0);
-TUNABLE(unsigned int, write_trace_on_panic, "trace_panic", 0);
-TUNABLE(unsigned int, trace_wrap, "trace_wrap", 0);
-
-/* mach leak logging */
-TUNABLE(int, log_leaks, "-l", 0);
-
 static inline void
 kernel_bootstrap_log(const char *message)
 {
@@ -288,9 +281,9 @@ kernel_startup_bootstrap(void)
 	qsort(startup_entries, n, sizeof(struct startup_entry), startup_entry_cmp);
 
 	/*
-	 * Then initialize all tunables, timeouts, and early locks
+	 * Then initialize all tunables, timeouts, and locks
 	 */
-	kernel_startup_initialize_upto(STARTUP_SUB_LOCKS_EARLY);
+	kernel_startup_initialize_upto(STARTUP_SUB_LOCKS);
 }
 
 __startup_func
@@ -360,17 +353,16 @@ kernel_startup_log(startup_subsystem_id_t subsystem)
 	static const char *names[] = {
 		[STARTUP_SUB_TUNABLES] = "tunables",
 		[STARTUP_SUB_TIMEOUTS] = "timeouts",
-		[STARTUP_SUB_LOCKS_EARLY] = "locks_early",
+		[STARTUP_SUB_LOCKS] = "locks",
 		[STARTUP_SUB_KPRINTF] = "kprintf",
 
 		[STARTUP_SUB_PMAP_STEAL] = "pmap_steal",
-		[STARTUP_SUB_VM_KERNEL] = "vm_kernel",
 		[STARTUP_SUB_KMEM] = "kmem",
 		[STARTUP_SUB_ZALLOC] = "zalloc",
 		[STARTUP_SUB_PERCPU] = "percpu",
-		[STARTUP_SUB_LOCKS] = "locks",
 
 		[STARTUP_SUB_CODESIGNING] = "codesigning",
+		[STARTUP_SUB_KTRACE] = "ktrace",
 		[STARTUP_SUB_OSLOG] = "oslog",
 		[STARTUP_SUB_MACH_IPC] = "mach_ipc",
 		[STARTUP_SUB_THREAD_CALL] = "thread_call",
@@ -590,9 +582,6 @@ SECURITY_READ_ONLY_LATE(vm_offset_t) vm_kernel_addrperm_ext;
 SECURITY_READ_ONLY_LATE(uint64_t) vm_kernel_addrhash_salt;
 SECURITY_READ_ONLY_LATE(uint64_t) vm_kernel_addrhash_salt_ext;
 
-extern void kdebug_lck_init(void);
-extern int create_buffers_triage(bool);
-
 /*
  * Now running in a thread.  Kick off other services,
  * invoke user bootstrap, enter pageout loop.
@@ -600,7 +589,11 @@ extern int create_buffers_triage(bool);
 static void
 kernel_bootstrap_thread(void)
 {
-	processor_t             processor = current_processor();
+	processor_t processor = current_processor();
+
+#if (DEVELOPMENT || DEBUG)
+	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_KERNEL_BOOTSTRAP);
+#endif
 
 	kernel_bootstrap_thread_log("idle_thread_create");
 	/*
@@ -663,10 +656,6 @@ kernel_bootstrap_thread(void)
 	alternate_debugger_init();
 #endif
 
-#if KPC
-	kpc_init();
-#endif
-
 #if HYPERVISOR
 	kernel_bootstrap_thread_log("hv_support_init");
 	hv_support_init();
@@ -676,25 +665,6 @@ kernel_bootstrap_thread(void)
 	kernel_bootstrap_log("bootprofile_init");
 	bootprofile_init();
 #endif
-
-	char trace_typefilter[256] = {};
-	PE_parse_boot_arg_str("trace_typefilter", trace_typefilter,
-	    sizeof(trace_typefilter));
-#if KPERF
-	kperf_init();
-#endif /* KPERF */
-
-	/* Init the spinlocks contained in the kd_ctrl_page_XXX
-	 * structures because the kdebug system can try to use
-	 * it very early. Eg. tailspind->kdbg_disable_typefilter
-	 * even before create_buffers_trace() is called ie init-ing
-	 * there would be too late.
-	 */
-	kdebug_lck_init();
-	kdebug_init(new_nkdbufs, trace_typefilter,
-	    (trace_wrap ? KDOPT_WRAPPING : 0) | KDOPT_ATBOOT);
-
-	create_buffers_triage(TRUE /*early trace*/);
 
 	kernel_startup_initialize_upto(STARTUP_SUB_SYSCTL);
 
@@ -711,7 +681,7 @@ kernel_bootstrap_thread(void)
 	 */
 	kernel_startup_initialize_upto(STARTUP_SUB_EARLY_BOOT);
 
-#if INTERRUPT_MASKED_DEBUG
+#if SCHED_HYGIENE_DEBUG
 	// Reset interrupts masked timeout before we enable interrupts
 	ml_spin_debug_clear_self();
 #endif
@@ -744,8 +714,18 @@ kernel_bootstrap_thread(void)
 #endif
 
 #ifndef BCM2837
-	kernel_bootstrap_log("trust_cache_init");
-	trust_cache_init();
+	kernel_bootstrap_log("code_signing_init");
+
+#if CODE_SIGNING_MONITOR
+	/* Intialize the data for managing provisioning profiles */
+	initialize_provisioning_profiles();
+#endif
+
+	/* Initialize the runtime for the trust cache interface */
+	trust_cache_runtime_init();
+
+	/* Load the static and engineering trust caches */
+	load_static_trust_cache();
 #endif
 
 	kernel_startup_initialize_upto(STARTUP_SUB_LOCKDOWN);
@@ -961,24 +941,21 @@ load_context(
 	processor->deadline = UINT64_MAX;
 	thread->last_processor = processor;
 	processor_up(processor);
-	processor->last_dispatch = mach_absolute_time();
-	timer_start(&thread->system_timer, processor->last_dispatch);
-	processor->thread_timer = processor->kernel_timer = &thread->system_timer;
-
-	timer_start(&processor->system_state, processor->last_dispatch);
-	processor->current_state = &processor->system_state;
-
-#if __AMP__
-	if (processor->processor_set->pset_cluster_type == PSET_AMP_P) {
-		timer_start(&thread->ptime, processor->last_dispatch);
-	}
-#endif
+	struct recount_snap snap = { 0 };
+	recount_snapshot(&snap);
+	processor->last_dispatch = snap.rsn_time_mach;
+	recount_processor_run(&processor->pr_recount, &snap);
+	recount_update_snap(&snap);
 
 	cpu_quiescent_counter_join(processor->last_dispatch);
 
 	PMAP_ACTIVATE_USER(thread, processor->cpu_id);
 
 	load_context_kprintf("machine_load_context\n");
+
+#if KASAN && CONFIG_KERNEL_TBI
+	__asan_handle_no_return();
+#endif /* KASAN && CONFIG_KERNEL_TBI */
 
 	machine_load_context(thread);
 	/*NOTREACHED*/

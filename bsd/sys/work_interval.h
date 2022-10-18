@@ -158,6 +158,10 @@ __BEGIN_DECLS
  * to be able to finish at the provided deadline and no sooner. */
 #define WORK_INTERVAL_FLAG_FINISH_AT_DEADLINE           (0x40)
 
+/* Internal-only flag: workinterval will have the SET_WORKLOAD_ID operation called on it immediately
+ * after creation. */
+#define WORK_INTERVAL_FLAG_HAS_WORKLOAD_ID              (0x80)
+
 /* Flags to describe the interval flavor to the performance controller */
 #define WORK_INTERVAL_TYPE_MASK                 (0xF0000000)
 #define WORK_INTERVAL_TYPE_DEFAULT              (0x0 << 28)
@@ -168,6 +172,7 @@ __BEGIN_DECLS
 #define WORK_INTERVAL_TYPE_HID_DELIVERY         (0x4 << 28)
 #define WORK_INTERVAL_TYPE_COREMEDIA            (0x5 << 28)
 #define WORK_INTERVAL_TYPE_ARKIT                (0x6 << 28)
+#define WORK_INTERVAL_TYPE_FRAME_COMPOSITOR     (0x7 << 28)
 #define WORK_INTERVAL_TYPE_LAST                 (0xF << 28)
 
 #ifndef KERNEL
@@ -286,6 +291,28 @@ int     work_interval_leave(void);
 #define WORK_INTERVAL_OPERATION_CREATE2 0x00000004      /* arg is a work_interval_create_params */
 #define WORK_INTERVAL_OPERATION_JOIN    0x00000005      /* arg is a port_name */
 #define WORK_INTERVAL_OPERATION_GET_FLAGS 0x00000009    /* arg is a port name */
+#define WORK_INTERVAL_OPERATION_SET_NAME  0x0000000a    /* arg is name string (char[WORK_INTERVAL_NAME_MAX])*/
+#define WORK_INTERVAL_OPERATION_SET_WORKLOAD_ID  0x0000000b    /* arg is a work_interval_workload_id_params */
+
+#define WORK_INTERVAL_NAME_MAX  32
+#define WORK_INTERVAL_WORKLOAD_ID_NAME_MAX  64
+
+/* Flags passed in work_interval_workload_id_params wlidp_flags field */
+#define WORK_INTERVAL_WORKLOAD_ID_HAS_ID                (1u << 0)
+#define WORK_INTERVAL_WORKLOAD_ID_RT_ALLOWED            (1u << 1)
+#define WORK_INTERVAL_WORKLOAD_ID_RT_CRITICAL           (1u << 2)
+
+/* Flags allowed to be passed in from userspace as part of kern_work_interval_set_workload_id() */
+#define WORK_INTERVAL_SET_WORKLOAD_ID_FLAGS_MASK        (WORK_INTERVAL_WORKLOAD_ID_RT_CRITICAL | WORK_INTERVAL_WORKLOAD_ID_RT_ALLOWED)
+
+#ifdef XNU_KERNEL_PRIVATE
+
+/* Marker that workinterval was joined before workload ID was set */
+#define WORK_INTERVAL_WORKLOAD_ID_ALREADY_JOINED        (1u << 31)
+/* Work interval is allowed to provide complexity values per frame as part of {start, update, finish} calls */
+#define WORK_INTERVAL_WORKLOAD_ID_COMPLEXITY_ALLOWED    (1u << 30)
+
+#endif /* XNU_KERNEL_PRIVATE */
 
 struct work_interval_notification {
 	uint64_t        start;
@@ -301,6 +328,13 @@ struct work_interval_create_params {
 	uint64_t        wicp_id;          /* in/out param */
 	mach_port_name_t wicp_port;       /* in/out param */
 	uint32_t        wicp_create_flags;
+};
+
+struct work_interval_workload_id_params {
+	uint32_t        wlidp_flags;            /* in/out param */
+	uint32_t        wlidp_wicreate_flags;   /* in/out param */
+	uint64_t        wlidp_name;             /* in param (pointer to char[WORK_INTERVAL_WORKLOAD_ID_NAME_MAX])*/
+	uint64_t        wlidp_syscall_mask[2];  /* out param (needs to fit MACH_TRAP_TABLE_COUNT + nsysent bits) */
 };
 
 

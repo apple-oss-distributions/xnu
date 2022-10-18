@@ -1,9 +1,9 @@
 module Darwin.netinet6 [system] {
   #ifdef XNU_KERNEL_PRIVATE
-  // The PLATFORM_MacOSX headers are in the public SDK for macOS,
+  // The XNU_PLATFORM_MacOSX headers are in the public SDK for macOS,
   // but mastered out of the public SDK for the other OSes.
   #endif
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module ah {
     header "netinet6/ah.h"
     export *
@@ -30,7 +30,7 @@ module Darwin.netinet6 [system] {
     export *
   }
 
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module raw_ip6 {
     header "netinet6/raw_ip6.h"
     export *
@@ -45,7 +45,7 @@ module Darwin.netinet6 [system] {
   // nd6.h doesn't compile because it uses struct prf_ra which
   // only exists in the context of struct in6_prflags.
   #endif
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
 
   exclude header "netinet6/nd6.h"
   #endif

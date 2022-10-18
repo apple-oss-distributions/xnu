@@ -39,6 +39,7 @@
 #include <arm64/instructions.h>
 
 #include <kern/debug.h>
+#include <kern/restartable.h>
 #include <kern/socd_client.h>
 #include <kern/thread.h>
 #include <mach/exception.h>
@@ -70,6 +71,7 @@
 
 
 
+#include <arm64/platform_error_handler.h>
 
 #if CONFIG_KERNEL_TBI && KASAN_TBI
 #include <san/kasan.h>
@@ -136,7 +138,7 @@ static void handle_mach_absolute_time_trap(arm_saved_state_t *);
 static void handle_mach_continuous_time_trap(arm_saved_state_t *);
 
 static void handle_msr_trap(arm_saved_state_t *state, uint32_t esr);
-#ifdef __ARM_ARCH_8_6__
+#if __has_feature(ptrauth_calls)
 static void handle_pac_fail(arm_saved_state_t *state, uint32_t esr) __dead2;
 #endif
 
@@ -163,9 +165,9 @@ static int is_vm_fault(fault_status_t);
 static int is_translation_fault(fault_status_t);
 static int is_alignment_fault(fault_status_t);
 
-typedef void (*abort_handler_t)(arm_saved_state_t *, uint32_t, vm_offset_t, fault_status_t, vm_prot_t, vm_offset_t, expected_fault_handler_t);
-static void handle_user_abort(arm_saved_state_t *, uint32_t, vm_offset_t, fault_status_t, vm_prot_t, vm_offset_t, expected_fault_handler_t);
-static void handle_kernel_abort(arm_saved_state_t *, uint32_t, vm_offset_t, fault_status_t, vm_prot_t, vm_offset_t, expected_fault_handler_t);
+typedef void (*abort_handler_t)(arm_saved_state_t *, uint32_t, vm_offset_t, fault_status_t, vm_prot_t, expected_fault_handler_t);
+static void handle_user_abort(arm_saved_state_t *, uint32_t, vm_offset_t, fault_status_t, vm_prot_t, expected_fault_handler_t);
+static void handle_kernel_abort(arm_saved_state_t *, uint32_t, vm_offset_t, fault_status_t, vm_prot_t, expected_fault_handler_t);
 
 static void handle_pc_align(arm_saved_state_t *ss) __dead2;
 static void handle_sp_align(arm_saved_state_t *ss) __dead2;
@@ -175,7 +177,7 @@ static void handle_fp_trap(arm_saved_state_t *ss, uint32_t esr) __dead2;
 
 static void handle_watchpoint(vm_offset_t fault_addr) __dead2;
 
-static void handle_abort(arm_saved_state_t *, uint32_t, vm_offset_t, vm_offset_t, abort_inspector_t, abort_handler_t, expected_fault_handler_t);
+static void handle_abort(arm_saved_state_t *, uint32_t, vm_offset_t, abort_inspector_t, abort_handler_t, expected_fault_handler_t);
 
 static void handle_user_trapped_instruction32(arm_saved_state_t *, uint32_t esr) __dead2;
 
@@ -257,6 +259,59 @@ TUNABLE(bool, fp_exceptions_enabled, "-fp_exceptions", false);
 
 extern vm_offset_t static_memory_end;
 
+/*
+ * Fault copyio_recovery_entry in copyin/copyout routines.
+ *
+ * Offets are expressed in bytes from &copy_recovery_table
+ */
+struct copyio_recovery_entry {
+	ptrdiff_t cre_start;
+	ptrdiff_t cre_end;
+	ptrdiff_t cre_recovery;
+};
+
+extern struct copyio_recovery_entry copyio_recover_table[];
+extern struct copyio_recovery_entry copyio_recover_table_end[];
+
+static inline ptrdiff_t
+copyio_recovery_offset(uintptr_t addr)
+{
+	return (ptrdiff_t)(addr - (uintptr_t)copyio_recover_table);
+}
+
+static inline uintptr_t
+copyio_recovery_addr(ptrdiff_t offset)
+{
+	return (uintptr_t)copyio_recover_table + (uintptr_t)offset;
+}
+
+static inline struct copyio_recovery_entry *
+find_copyio_recovery_entry(arm_saved_state_t *state)
+{
+	ptrdiff_t offset = copyio_recovery_offset(get_saved_state_pc(state));
+	struct copyio_recovery_entry *e;
+
+	for (e = copyio_recover_table; e < copyio_recover_table_end; e++) {
+		if (offset >= e->cre_start && offset < e->cre_end) {
+			return e;
+		}
+	}
+
+	return NULL;
+}
+
+static inline uintptr_t
+copyio_recovery_get_recover_addr(
+	arm_saved_state_t              *state)
+{
+	struct copyio_recovery_entry *e = find_copyio_recovery_entry(state);
+	if (e == NULL) {
+		panic("copyio recovery: couldn't find a range for %p",
+		    (void *)get_saved_state_pc(state));
+	}
+	return copyio_recovery_addr(e->cre_recovery);
+}
+
 static inline int
 is_vm_fault(fault_status_t status)
 {
@@ -314,8 +369,12 @@ static inline int
 is_parity_error(fault_status_t status)
 {
 	switch (status) {
-	case FSC_SYNC_PARITY:
+	/*
+	 * TODO: According to ARM ARM, Async Parity (0b011001) is a DFSC that is
+	 * only applicable to AArch32 HSR register. Can this be removed?
+	 */
 	case FSC_ASYNC_PARITY:
+	case FSC_SYNC_PARITY:
 	case FSC_SYNC_PARITY_TT_L1:
 	case FSC_SYNC_PARITY_TT_L2:
 	case FSC_SYNC_PARITY_TT_L3:
@@ -324,6 +383,7 @@ is_parity_error(fault_status_t status)
 		return FALSE;
 	}
 }
+
 
 __dead2 __unused
 static void
@@ -377,12 +437,13 @@ kernel_integrity_error_handler(uint32_t esr, vm_offset_t far)
 #endif
 
 static void
-arm64_platform_error(arm_saved_state_t *state, uint32_t esr, vm_offset_t far)
+arm64_platform_error(arm_saved_state_t *state, uint32_t esr, vm_offset_t far, platform_error_source_t source)
 {
 #if CONFIG_KERNEL_INTEGRITY
 	kernel_integrity_error_handler(esr, far);
 #endif
 
+	(void)source;
 	cpu_data_t *cdp = getCpuDatap();
 
 	if (PE_handle_platform_error(far)) {
@@ -470,6 +531,9 @@ thread_exception_return()
 		thread->machine.exception_trace_code = 0;
 	}
 
+#if KASAN && CONFIG_KERNEL_TBI
+	kasan_unpoison_curstack(true);
+#endif /* KASAN && CONFIG_KERNEL_TBI */
 	arm64_thread_exception_return();
 	__builtin_unreachable();
 }
@@ -488,7 +552,7 @@ task_vtimer_check(thread_t thread)
 	task_t task = get_threadtask_early(thread);
 
 	if (__improbable(task != NULL && task->vtimers)) {
-		thread->ast |= AST_BSD;
+		thread_ast_set(thread, AST_BSD);
 		thread->machine.CpuDatap->cpu_pending_ast |= AST_BSD;
 	}
 }
@@ -511,12 +575,29 @@ sleh_get_preemption_level(void)
 }
 #endif // MACH_ASSERT
 
+static inline bool
+is_platform_error(uint32_t esr)
+{
+	esr_exception_class_t class = ESR_EC(esr);
+	uint32_t iss = ESR_ISS(esr);
+	fault_status_t fault_code;
+
+	if (class == ESR_EC_DABORT_EL0 || class == ESR_EC_DABORT_EL1) {
+		fault_code = ISS_DA_FSC(iss);
+	} else if (class == ESR_EC_IABORT_EL0 || class == ESR_EC_IABORT_EL1) {
+		fault_code = ISS_IA_FSC(iss);
+	} else {
+		return false;
+	}
+
+	return fault_code == FSC_SYNC_PARITY;
+}
+
 void
 sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 {
 	esr_exception_class_t  class   = ESR_EC(esr);
 	arm_saved_state_t    * state   = &context->ss;
-	vm_offset_t            recover = 0;
 	thread_t               thread  = current_thread();
 #if MACH_ASSERT
 	int                    preemption_level = sleh_get_preemption_level();
@@ -573,12 +654,6 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		}
 	}
 
-	/* Don't run exception handler with recover handler set in case of double fault */
-	if (thread->recover) {
-		recover = thread->recover;
-		thread->recover = (vm_offset_t)NULL;
-	}
-
 #ifdef CONFIG_XNUPOST
 	if (thread->machine.expected_fault_handler != NULL) {
 		saved_expected_fault_handler = thread->machine.expected_fault_handler;
@@ -592,6 +667,21 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		}
 	}
 #endif /* CONFIG_XNUPOST */
+
+	if (__improbable(is_platform_error(esr))) {
+		/*
+		 * Must gather error info in platform error handler before
+		 * thread is preempted to another core/cluster to guarantee
+		 * accurate error details
+		 */
+
+		arm64_platform_error(state, esr, far, PLAT_ERR_SRC_SYNC);
+		return;
+	}
+
+	if (is_user && class == ESR_EC_DABORT_EL0) {
+		thread_reset_pcs_will_fault(thread);
+	}
 
 	/* Inherit the interrupt masks from previous context */
 	if (SPSR_INTERRUPTS_ENABLED(get_saved_state_cpsr(state))) {
@@ -608,22 +698,28 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		break;
 
 	case ESR_EC_DABORT_EL0:
-		handle_abort(state, esr, far, recover, inspect_data_abort, handle_user_abort, expected_fault_handler);
+		handle_abort(state, esr, far, inspect_data_abort, handle_user_abort, expected_fault_handler);
 		break;
 
 	case ESR_EC_MSR_TRAP:
 		handle_msr_trap(state, esr);
 		break;
-
-#ifdef __ARM_ARCH_8_6__
+/**
+ * Some APPLEVIRTUALPLATFORM targets do not specify armv8.6, but it's still possible for
+ * them to be hosted by a host that implements ARM_FPAC. There's no way for such a host
+ * to disable it or trap it without substantial performance penalty. Therefore, the FPAC
+ * handler here needs to be built into the guest kernels to prevent the exception to fall
+ * through.
+ */
+#if __has_feature(ptrauth_calls)
 	case ESR_EC_PAC_FAIL:
 		handle_pac_fail(state, esr);
 		__builtin_unreachable();
 
-#endif /* __ARM_ARCH_8_6__ */
+#endif /* __has_feature(ptrauth_calls) */
 
 	case ESR_EC_IABORT_EL0:
-		handle_abort(state, esr, far, recover, inspect_instruction_abort, handle_user_abort, expected_fault_handler);
+		handle_abort(state, esr, far, inspect_instruction_abort, handle_user_abort, expected_fault_handler);
 		break;
 
 	case ESR_EC_IABORT_EL1:
@@ -640,7 +736,7 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		__builtin_unreachable();
 
 	case ESR_EC_DABORT_EL1:
-		handle_abort(state, esr, far, recover, inspect_data_abort, handle_kernel_abort, expected_fault_handler);
+		handle_abort(state, esr, far, inspect_data_abort, handle_kernel_abort, expected_fault_handler);
 		break;
 
 	case ESR_EC_UNCATEGORIZED:
@@ -757,9 +853,6 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 	}
 #endif /* CONFIG_XNUPOST */
 
-	if (recover) {
-		thread->recover = recover;
-	}
 	if (is_user) {
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
 		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, thread->machine.exception_trace_code) | DBG_FUNC_END,
@@ -970,12 +1063,12 @@ handle_breakpoint(arm_saved_state_t *state, uint32_t esr __unused)
 	mach_exception_data_type_t codes[2]  = {EXC_ARM_BREAKPOINT};
 	mach_msg_type_number_t     numcodes  = 2;
 
-#if __has_feature(ptrauth_calls) && !__ARM_ARCH_8_6__
+#if __has_feature(ptrauth_calls)
 	if (ESR_EC(esr) == ESR_EC_BRK_AARCH64 &&
 	    brk_comment_is_ptrauth(ISS_BRK_COMMENT(esr))) {
 		exception |= EXC_PTRAUTH_BIT;
 	}
-#endif /* __has_feature(ptrauth_calls) && !__ARM_ARCH_8_6__ */
+#endif /* __has_feature(ptrauth_calls) */
 
 	codes[1] = get_saved_state_pc(state);
 	exception_triage(exception, codes, numcodes);
@@ -995,14 +1088,14 @@ handle_watchpoint(vm_offset_t fault_addr)
 }
 
 static void
-handle_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr, vm_offset_t recover,
+handle_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr,
     abort_inspector_t inspect_abort, abort_handler_t handler, expected_fault_handler_t expected_fault_handler)
 {
 	fault_status_t fault_code;
 	vm_prot_t      fault_type;
 
 	inspect_abort(ESR_ISS(esr), &fault_code, &fault_type);
-	handler(state, esr, fault_addr, fault_code, fault_type, recover, expected_fault_handler);
+	handler(state, esr, fault_addr, fault_code, fault_type, expected_fault_handler);
 }
 
 static void
@@ -1035,19 +1128,19 @@ inspect_data_abort(uint32_t iss, fault_status_t *fault_code, vm_prot_t *fault_ty
 }
 
 #if __has_feature(ptrauth_calls)
-#ifdef __ARM_ARCH_8_6__
 static inline uint64_t
 fault_addr_bitmask(unsigned int bit_from, unsigned int bit_to)
 {
 	return ((1ULL << (bit_to - bit_from + 1)) - 1) << bit_from;
 }
-#else
+
 static inline bool
 fault_addr_bit(vm_offset_t fault_addr, unsigned int bit)
 {
 	return (bool)((fault_addr >> bit) & 1);
 }
-#endif /* __ARM_ARCH_8_6__ */
+
+extern int gARM_FEAT_PAuth2;
 
 /**
  * Determines whether a fault address taken at EL0 contains a PAC error code
@@ -1058,29 +1151,30 @@ user_fault_addr_matches_pac_error_code(vm_offset_t fault_addr, bool data_key)
 {
 	bool instruction_tbi = !(get_tcr() & TCR_TBID0_TBI_DATA_ONLY);
 	bool tbi = data_key || __improbable(instruction_tbi);
-#ifdef __ARM_ARCH_8_6__
-	/*
-	 * EnhancedPAC2 CPUs don't encode error codes at fixed positions, so
-	 * treat all non-canonical address bits like potential poison bits.
-	 */
-	uint64_t mask = fault_addr_bitmask(T0SZ_BOOT, 54);
-	if (!tbi) {
-		mask |= fault_addr_bitmask(56, 63);
-	}
-	return (fault_addr & mask) != 0;
-#else /* !__ARM_ARCH_8_6__ */
-	unsigned int poison_shift;
-	if (tbi) {
-		poison_shift = 53;
-	} else {
-		poison_shift = 61;
-	}
 
-	/* PAC error codes are always in the form key_number:NOT(key_number) */
-	bool poison_bit_1 = fault_addr_bit(fault_addr, poison_shift);
-	bool poison_bit_2 = fault_addr_bit(fault_addr, poison_shift + 1);
-	return poison_bit_1 != poison_bit_2;
-#endif /* __ARM_ARCH_8_6__ */
+	if (gARM_FEAT_PAuth2) {
+		/*
+		 * EnhancedPAC2 CPUs don't encode error codes at fixed positions, so
+		 * treat all non-canonical address bits like potential poison bits.
+		 */
+		uint64_t mask = fault_addr_bitmask(T0SZ_BOOT, 54);
+		if (!tbi) {
+			mask |= fault_addr_bitmask(56, 63);
+		}
+		return (fault_addr & mask) != 0;
+	} else {
+		unsigned int poison_shift;
+		if (tbi) {
+			poison_shift = 53;
+		} else {
+			poison_shift = 61;
+		}
+
+		/* PAC error codes are always in the form key_number:NOT(key_number) */
+		bool poison_bit_1 = fault_addr_bit(fault_addr, poison_shift);
+		bool poison_bit_2 = fault_addr_bit(fault_addr, poison_shift + 1);
+		return poison_bit_1 != poison_bit_2;
+	}
 }
 #endif /* __has_feature(ptrauth_calls) */
 
@@ -1255,44 +1349,8 @@ handle_sw_step_debug(arm_saved_state_t *state)
 }
 
 static void
-set_saved_state_pc_to_recovery_handler(arm_saved_state_t *iss, vm_offset_t recover)
-{
-#if defined(HAS_APPLE_PAC)
-	thread_t thread = current_thread();
-	const uintptr_t disc = ptrauth_blend_discriminator(&thread->recover, PAC_DISCRIMINATOR_RECOVER);
-	const char *panic_msg = "Illegal thread->recover value %p";
-
-	MANIPULATE_SIGNED_THREAD_STATE(iss,
-	    // recover = (vm_offset_t)ptrauth_auth_data((void *)recover, ptrauth_key_function_pointer,
-	    //     ptrauth_blend_discriminator(&thread->recover, PAC_DISCRIMINATOR_RECOVER));
-	    "mov	x1, %[recover]		\n"
-	    "mov	x6, %[disc]		\n"
-	    "autia	x1, x6			\n"
-#if !__ARM_ARCH_8_6__
-	    // if (recover != (vm_offset_t)ptrauth_strip((void *)recover, ptrauth_key_function_pointer)) {
-	    "mov	x6, x1			\n"
-	    "xpaci	x6			\n"
-	    "cmp	x1, x6			\n"
-	    "beq	1f			\n"
-	    //         panic("Illegal thread->recover value %p", (void *)recover);
-	    "mov	x0, %[panic_msg]	\n"
-	    "bl		_panic			\n"
-	    // }
-	    "1:					\n"
-#endif /* !__ARM_ARCH_8_6__ */
-	    "str	x1, [x0, %[SS64_PC]]	\n",
-	    [recover]     "r"(recover),
-	    [disc]        "r"(disc),
-	    [panic_msg]   "r"(panic_msg)
-	    );
-#else
-	set_saved_state_pc(iss, recover);
-#endif
-}
-
-static void
 handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr,
-    fault_status_t fault_code, vm_prot_t fault_type, vm_offset_t recover, expected_fault_handler_t expected_fault_handler)
+    fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
 {
 	exception_type_t           exc      = EXC_BAD_ACCESS;
 	mach_exception_data_type_t codes[2];
@@ -1308,6 +1366,11 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 
 	thread->iotier_override = THROTTLE_LEVEL_NONE; /* Reset IO tier override before handling abort from userspace */
 
+	if (!is_vm_fault(fault_code) &&
+	    thread->t_rr_state.trr_fault_state != TRR_FAULT_NONE) {
+		thread_reset_pcs_done_faulting(thread);
+	}
+
 	if (is_vm_fault(fault_code)) {
 		vm_map_t        map = thread->map;
 		vm_offset_t     vm_fault_addr = fault_addr;
@@ -1319,40 +1382,23 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 			vm_fault_addr = tbi_clear(fault_addr);
 		}
 
-#if CONFIG_DTRACE
-		if (thread->t_dtrace_inprobe) { /* Executing under dtrace_probe? */
-			if (dtrace_tally_fault(vm_fault_addr)) { /* Should a user mode fault under dtrace be ignored? */
-				if (recover) {
-					thread->machine.recover_esr = esr;
-					thread->machine.recover_far = vm_fault_addr;
-					set_saved_state_pc_to_recovery_handler(state, recover);
-				} else {
-					panic_with_thread_kernel_state("copyin/out has no recovery point", state);
-				}
-				return;
-			} else {
-				panic_with_thread_kernel_state("Unexpected UMW page fault under dtrace_probe", state);
-			}
-		}
-#else
-		(void)recover;
-#endif
-
 		/* check to see if it is just a pmap ref/modify fault */
 		if (!is_translation_fault(fault_code)) {
 			result = arm_fast_fault(map->pmap,
 			    vm_fault_addr,
 			    fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), TRUE);
 		}
-		if (result == KERN_SUCCESS) {
-			return;
-		}
+		if (result != KERN_SUCCESS) {
 
-		{
-			/* We have to fault the page in */
-			result = vm_fault(map, vm_fault_addr, fault_type,
-			    /* change_wiring */ FALSE, VM_KERN_MEMORY_NONE, THREAD_ABORTSAFE,
-			    /* caller_pmap */ NULL, /* caller_pmap_addr */ 0);
+			{
+				/* We have to fault the page in */
+				result = vm_fault(map, vm_fault_addr, fault_type,
+				    /* change_wiring */ FALSE, VM_KERN_MEMORY_NONE, THREAD_ABORTSAFE,
+				    /* caller_pmap */ NULL, /* caller_pmap_addr */ 0);
+			}
+		}
+		if (thread->t_rr_state.trr_fault_state != TRR_FAULT_NONE) {
+			thread_reset_pcs_done_faulting(thread);
 		}
 		if (result == KERN_SUCCESS || result == KERN_ABORTED) {
 			return;
@@ -1414,10 +1460,9 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 		}
 	} else if (is_parity_error(fault_code)) {
 #if defined(APPLE_ARM64_ARCH_FAMILY)
-		if (fault_code == FSC_SYNC_PARITY) {
-			arm64_platform_error(state, esr, fault_addr);
-			return;
-		}
+		/*
+		 * Platform errors are handled in sleh_sync before interrupts are enabled.
+		 */
 #else
 		panic("User parity error.");
 #endif
@@ -1436,40 +1481,32 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 	__builtin_unreachable();
 }
 
-#if __ARM_PAN_AVAILABLE__
-static int
-is_pan_fault(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr, fault_status_t fault_code)
+static void
+handle_kernel_abort_recover(
+	arm_saved_state_t              *state,
+	uint32_t                        esr,
+	vm_offset_t                     fault_addr,
+	thread_t                        thread)
 {
-	// PAN (Privileged Access Never) fault occurs for data read/write in EL1 to
-	// virtual address that is readable/writeable from both EL1 and EL0
-
-	// To check for PAN fault, we evaluate if the following conditions are true:
-	// 1. This is a permission fault
-	// 2. PAN is enabled
-	// 3. AT instruction (on which PAN has no effect) on the same faulting address
-	// succeeds
-
-	vm_offset_t pa;
-
-	if (!(is_permission_fault(fault_code) && get_saved_state_cpsr(state) & PSR64_PAN)) {
-		return FALSE;
-	}
-
-	if (esr & ISS_DA_WNR) {
-		pa = mmu_kvtop_wpreflight(fault_addr);
-	} else {
-		pa = mmu_kvtop(fault_addr);
-	}
-	return (pa)? TRUE: FALSE;
-}
+	thread->machine.recover_esr = esr;
+	thread->machine.recover_far = fault_addr;
+#if defined(HAS_APPLE_PAC)
+	MANIPULATE_SIGNED_THREAD_STATE(state,
+	    "mov	x1, %[pc]		\n"
+	    "str	x1, [x0, %[SS64_PC]]	\n",
+	    [pc] "r"(copyio_recovery_get_recover_addr(state))
+	    );
+#else
+	saved_state64(state)->pc = copyio_recovery_get_recover_addr(state);
 #endif
+}
 
 static void
 handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr,
-    fault_status_t fault_code, vm_prot_t fault_type, vm_offset_t recover, expected_fault_handler_t expected_fault_handler)
+    fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
 {
 	thread_t thread = current_thread();
-	(void)esr;
+	bool recover = find_copyio_recovery_entry(state) != 0;
 
 #ifndef CONFIG_XNUPOST
 	(void)expected_fault_handler;
@@ -1482,9 +1519,7 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
 			 * Point to next instruction, or recovery handler if set.
 			 */
 			if (recover) {
-				thread->machine.recover_esr = esr;
-				thread->machine.recover_far = fault_addr;
-				set_saved_state_pc_to_recovery_handler(state, recover);
+				handle_kernel_abort_recover(state, esr, fault_addr, thread);
 			} else {
 				add_saved_state_pc(state, 4);
 			}
@@ -1520,7 +1555,13 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
 			panic_with_thread_kernel_state("Unexpected fault in kernel static region\n", state);
 		}
 
-		if (VM_KERNEL_ADDRESS(fault_addr) || thread == THREAD_NULL) {
+		if (VM_KERNEL_ADDRESS(fault_addr) || thread == THREAD_NULL || recover == 0) {
+			/*
+			 * If no recovery handler is supplied, always drive the fault against
+			 * the kernel map.  If the fault was taken against a userspace VA, indicating
+			 * an unprotected access to user address space, vm_fault() should fail and
+			 * ultimately lead to a panic here.
+			 */
 			map = kernel_map;
 			interruptible = THREAD_UNINT;
 		} else {
@@ -1563,31 +1604,20 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
 		 *  If we have a recover handler, invoke it now.
 		 */
 		if (recover) {
-			thread->machine.recover_esr = esr;
-			thread->machine.recover_far = fault_addr;
-			set_saved_state_pc_to_recovery_handler(state, recover);
+			handle_kernel_abort_recover(state, esr, fault_addr, thread);
 			return;
 		}
-
-#if __ARM_PAN_AVAILABLE__
-		if (is_pan_fault(state, esr, fault_addr, fault_code)) {
-			panic_with_thread_kernel_state("Privileged access never abort.", state);
-		}
-#endif
 	} else if (is_alignment_fault(fault_code)) {
 		if (recover) {
-			thread->machine.recover_esr = esr;
-			thread->machine.recover_far = fault_addr;
-			set_saved_state_pc_to_recovery_handler(state, recover);
+			handle_kernel_abort_recover(state, esr, fault_addr, thread);
 			return;
 		}
 		panic_with_thread_kernel_state("Unaligned kernel data abort.", state);
 	} else if (is_parity_error(fault_code)) {
 #if defined(APPLE_ARM64_ARCH_FAMILY)
-		if (fault_code == FSC_SYNC_PARITY) {
-			arm64_platform_error(state, esr, fault_addr);
-			return;
-		}
+		/*
+		 * Platform errors are handled in sleh_sync before interrupts are enabled.
+		 */
 #else
 		panic_with_thread_kernel_state("Kernel parity error.", state);
 #endif
@@ -1686,7 +1716,7 @@ handle_msr_trap(arm_saved_state_t *state, uint32_t esr)
 	__builtin_unreachable();
 }
 
-#ifdef __ARM_ARCH_8_6__
+#if __has_feature(ptrauth_calls)
 static void
 autxx_instruction_extract_reg(uint32_t instr, char reg[4])
 {
@@ -1766,7 +1796,7 @@ handle_pac_fail(arm_saved_state_t *state, uint32_t esr)
 	exception_triage(exception, codes, numcodes);
 	__builtin_unreachable();
 }
-#endif /* __ARM_ARCH_8_6__ */
+#endif /* __has_feature(ptrauth_calls) */
 
 static void
 handle_user_trapped_instruction32(arm_saved_state_t *state, uint32_t esr)
@@ -1959,7 +1989,7 @@ sleh_serror(arm_context_t *context, uint32_t esr, vm_offset_t far)
 
 
 	ASSERT_CONTEXT_SANITY(context);
-	arm64_platform_error(state, esr, far);
+	arm64_platform_error(state, esr, far, PLAT_ERR_SRC_ASYNC);
 #if MACH_ASSERT
 	if (preemption_level != sleh_get_preemption_level()) {
 		panic("serror changed preemption level from %d to %d", preemption_level, sleh_get_preemption_level());

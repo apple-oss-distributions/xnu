@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2013-2019, 2022 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -103,20 +103,7 @@ struct cfil_opt_sock_info {
  * How many filter may be active simultaneously
  */
 
-#ifdef XNU_KERNEL_PRIVATE
-#if !XNU_TARGET_OS_OSX
-#define CFIL_MAX_FILTER_COUNT   2
-#else
 #define CFIL_MAX_FILTER_COUNT   8
-#endif /* !XNU_TARGET_OS_OSX */
-#else
-#if !TARGET_OS_OSX
-#define CFIL_MAX_FILTER_COUNT   2
-#else
-#define CFIL_MAX_FILTER_COUNT   8
-#endif /* !TARGET_OS_OSX */
-#endif /* XNU_KERNEL_PRIVATE */
-
 
 /*
  * Crypto Support
@@ -199,7 +186,10 @@ struct cfil_msg_hdr {
 #define CFS_CONNECTION_DIR_IN  0
 #define CFS_CONNECTION_DIR_OUT 1
 
-#define CFS_AUDIT_TOKEN            1
+#define CFS_REAL_AUDIT_TOKEN            1
+
+#define CFS_MAX_DOMAIN_NAME_LENGTH 256
+
 
 /*
  * struct cfil_msg_sock_attached
@@ -227,8 +217,10 @@ struct cfil_msg_sock_attached {
 	union sockaddr_in_4_6   cfs_dst;
 	int                     cfs_conn_dir;
 	unsigned int            cfs_audit_token[8];             /* Must match audit_token_t */
+	unsigned int            cfs_real_audit_token[8];        /* Must match audit_token_t */
 	cfil_crypto_signature   cfs_signature;
 	uint32_t                cfs_signature_length;
+	char                    cfs_remote_domain_name[CFS_MAX_DOMAIN_NAME_LENGTH];
 };
 
 /*

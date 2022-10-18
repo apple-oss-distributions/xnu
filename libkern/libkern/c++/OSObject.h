@@ -304,12 +304,7 @@ protected:
  * release@/link</code>
  * instead.
  */
-#ifdef XNU_KERNEL_PRIVATE
-	static void operator delete(void * mem, size_t size)
-	__XNU_INTERNAL(OSObject_operator_delete);
-#else
 	static void operator delete(void * mem, size_t size);
-#endif
 
 
 // XXX: eventually we can flip this switch
@@ -331,12 +326,7 @@ public:
  * @result
  * A pointer to block of memory if available, <code>NULL</code> otherwise.
  */
-#ifdef XNU_KERNEL_PRIVATE
-	static void * operator new(size_t size)
-	__XNU_INTERNAL(OSObject_operator_new);
-#else
 	static void * operator new(size_t size);
-#endif
 
 public:
 

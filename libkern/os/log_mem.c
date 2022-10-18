@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2020-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -43,7 +43,7 @@
 
 #define BITMAP_BUCKET_SIZE (8 * sizeof(((logmem_t *)0)->lm_mem_map[0]))
 #define BITMAP_BUCKET(i) ((i) / BITMAP_BUCKET_SIZE)
-#define BITMAP_BIT(i) (1 << (BITMAP_BUCKET_SIZE - ((i) % BITMAP_BUCKET_SIZE) - 1))
+#define BITMAP_BIT(i) (uint8_t)(1 << (BITMAP_BUCKET_SIZE - ((i) % BITMAP_BUCKET_SIZE) - 1))
 
 #define logmem_lock(lock, lm) if ((lock)) lck_spin_lock(&(lm)->lm_lock)
 #define logmem_unlock(lock, lm) if ((lock)) lck_spin_unlock(&(lm)->lm_lock)

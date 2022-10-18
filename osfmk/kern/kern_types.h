@@ -336,6 +336,24 @@ typedef enum perfcontrol_class {
 	PERFCONTROL_CLASS_MAX            = 9,
 } perfcontrol_class_t;
 
+typedef enum {
+	REASON_NONE,
+	REASON_SYSTEM,
+	REASON_USER,
+	REASON_CLPC_SYSTEM,
+	REASON_CLPC_USER,
+} processor_reason_t;
+
+#define SHUTDOWN_TEMPORARY      0x0001
+#define LOCK_STATE              0x0002
+#define UNLOCK_STATE            0x0004
+#define WAIT_FOR_START          0x0008
+#define WAIT_FOR_LAST_START     0x0010
+#if DEVELOPMENT || DEBUG
+#define ASSERT_IN_SLEEP            0x10000000
+#define ASSERT_POWERDOWN_SUSPENDED 0x20000000
+#endif
+
 /*
  * struct sched_clutch_edge
  *

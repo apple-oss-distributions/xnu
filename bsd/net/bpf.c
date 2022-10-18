@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -128,6 +128,7 @@
 #include <net/dlil.h>
 #include <net/pktap.h>
 
+#include <kern/assert.h>
 #include <kern/locks.h>
 #include <kern/thread_call.h>
 #include <libkern/section_keywords.h>
@@ -135,6 +136,7 @@
 #include <os/log.h>
 
 extern int tvtohz(struct timeval *);
+extern char *proc_name_address(void *p);
 
 #define BPF_BUFSIZE 4096
 #define UIOMOVE(cp, len, code, uio) uiomove(cp, len, uio)
@@ -153,16 +155,21 @@ static unsigned int bpf_bufsize = BPF_BUFSIZE;
 SYSCTL_INT(_debug, OID_AUTO, bpf_bufsize, CTLFLAG_RW | CTLFLAG_LOCKED,
     &bpf_bufsize, 0, "");
 
-static int sysctl_bpf_maxbufsize SYSCTL_HANDLER_ARGS;
-extern const int copysize_limit_panic;
-#define BPF_MAXSIZE_CAP (copysize_limit_panic >> 1)
 __private_extern__ unsigned int bpf_maxbufsize = BPF_MAXBUFSIZE;
+static int sysctl_bpf_maxbufsize SYSCTL_HANDLER_ARGS;
 SYSCTL_PROC(_debug, OID_AUTO, bpf_maxbufsize, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     &bpf_maxbufsize, 0,
     sysctl_bpf_maxbufsize, "I", "Default BPF max buffer size");
 
+extern const int copysize_limit_panic;
+#define BPF_BUFSIZE_CAP (copysize_limit_panic >> 1)
+static int sysctl_bpf_bufsize_cap SYSCTL_HANDLER_ARGS;
+SYSCTL_PROC(_debug, OID_AUTO, bpf_bufsize_cap, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0,
+    sysctl_bpf_bufsize_cap, "I", "Upper limit on BPF max buffer size");
+
 static unsigned int bpf_maxdevices = 256;
-SYSCTL_UINT(_debug, OID_AUTO, bpf_maxdevices, CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_UINT(_debug, OID_AUTO, bpf_maxdevices, CTLFLAG_RD | CTLFLAG_LOCKED,
     &bpf_maxdevices, 0, "");
 /*
  * bpf_wantpktap controls the defaul visibility of DLT_PKTAP
@@ -185,12 +192,20 @@ static unsigned long bpf_trunc_overflow = 0;
 SYSCTL_ULONG(_debug, OID_AUTO, bpf_trunc_overflow, CTLFLAG_RD | CTLFLAG_LOCKED,
     &bpf_trunc_overflow, "");
 
+static int bpf_hdr_comp_enable = 1;
+SYSCTL_INT(_debug, OID_AUTO, bpf_hdr_comp_enable, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &bpf_hdr_comp_enable, 1, "");
+
+static int sysctl_bpf_stats SYSCTL_HANDLER_ARGS;
+SYSCTL_PROC(_debug, OID_AUTO, bpf_stats, CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0,
+    sysctl_bpf_stats, "S", "BPF statistics");
+
 /*
  *  bpf_iflist is the list of interfaces; each corresponds to an ifnet
  *  bpf_dtab holds pointer to the descriptors, indexed by minor device #
  */
 static struct bpf_if    *bpf_iflist;
-#ifdef __APPLE__
 /*
  * BSD now stores the bpf_d in the dev_t which is a struct
  * on their system. Our dev_t is an int, so we still store
@@ -202,23 +217,22 @@ static struct bpf_if    *bpf_iflist;
  *  other: device <n> opened with pointer to storage
  */
 #define BPF_DEV_RESERVED ((struct bpf_d *)(uintptr_t)1)
-static struct bpf_d     **bpf_dtab = NULL;
+static struct bpf_d **bpf_dtab = NULL;
 static unsigned int bpf_dtab_size = 0;
-static unsigned int     nbpfilter = 0;
+static unsigned int nbpfilter = 0;
+static unsigned bpf_bpfd_cnt = 0;
 
 static LCK_GRP_DECLARE(bpf_mlock_grp, "bpf");
 static LCK_MTX_DECLARE(bpf_mlock_data, &bpf_mlock_grp);
 static lck_mtx_t *const bpf_mlock = &bpf_mlock_data;
 
-#endif /* __APPLE__ */
-
 static int      bpf_allocbufs(struct bpf_d *);
 static errno_t  bpf_attachd(struct bpf_d *d, struct bpf_if *bp);
-static int      bpf_detachd(struct bpf_d *d, int);
+static int      bpf_detachd(struct bpf_d *d);
 static void     bpf_freed(struct bpf_d *);
 static int      bpf_movein(struct uio *, int,
     struct mbuf **, struct sockaddr *, int *);
-static int      bpf_setif(struct bpf_d *, ifnet_t ifp, bool, bool);
+static int      bpf_setif(struct bpf_d *, ifnet_t ifp, bool, bool, bool);
 static void     bpf_timed_out(void *, void *);
 static void     bpf_wakeup(struct bpf_d *);
 static uint32_t get_pkt_trunc_len(struct bpf_packet *);
@@ -437,8 +451,6 @@ bad:
 	return error;
 }
 
-#ifdef __APPLE__
-
 /*
  * The dynamic addition of a new device node must block all processes that
  * are opening the last device so that no process will get an unexpected
@@ -473,7 +485,7 @@ bpf_make_dev_t(int maj)
 		new_dtab = krealloc_type(struct bpf_d *,
 		    bpf_dtab_size, new_dtab_size, bpf_dtab, Z_WAITOK | Z_ZERO);
 		if (new_dtab == 0) {
-			printf("bpf_make_dev_t: malloc bpf_dtab failed\n");
+			os_log_error(OS_LOG_DEFAULT, "bpf_make_dev_t: malloc bpf_dtab failed");
 			goto done;
 		}
 		bpf_dtab = new_dtab;
@@ -487,8 +499,6 @@ done:
 	bpf_growing = 0;
 	wakeup((caddr_t)&bpf_growing);
 }
-
-#endif
 
 /*
  * Attach file to the bpf interface, i.e. make d listen on bp.
@@ -507,6 +517,7 @@ bpf_attachd(struct bpf_d *d, struct bpf_if *bp)
 	d->bd_bif = bp;
 	d->bd_next = bp->bif_dlist;
 	bp->bif_dlist = d;
+	bpf_bpfd_cnt++;
 
 	/*
 	 * Take a reference on the device even if an error is returned
@@ -558,7 +569,7 @@ bpf_attachd(struct bpf_d *d, struct bpf_if *bp)
  * Return 1 if was closed by some thread, 0 otherwise
  */
 static int
-bpf_detachd(struct bpf_d *d, int closing)
+bpf_detachd(struct bpf_d *d)
 {
 	struct bpf_d **p;
 	struct bpf_if *bp;
@@ -579,12 +590,6 @@ bpf_detachd(struct bpf_d *d, int closing)
 	ifp = d->bd_bif->bif_ifp;
 	bp = d->bd_bif;
 
-	if (bpf_debug != 0) {
-		printf("%s: %llx %s%s\n",
-		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(d),
-		    if_name(ifp), closing ? " closing" : "");
-	}
-
 	/* Remove d from the interface's descriptor list. */
 	p = &bp->bif_dlist;
 	while (*p != d) {
@@ -594,6 +599,7 @@ bpf_detachd(struct bpf_d *d, int closing)
 		}
 	}
 	*p = (*p)->bd_next;
+	bpf_bpfd_cnt--;
 	if (bp->bif_dlist == 0) {
 		/*
 		 * Let the driver know that there are no more listeners.
@@ -630,7 +636,9 @@ bpf_detachd(struct bpf_d *d, int closing)
 			 * take it out.
 			 * Most likely the network interface is gone.
 			 */
-			printf("%s: ifnet_set_promiscuous failed\n", __func__);
+			os_log_error(OS_LOG_DEFAULT,
+			    "%s: bpf%d ifnet_set_promiscuous %s failed",
+			    __func__, d->bd_dev_minor, if_name(ifp));
 		}
 		lck_mtx_lock(bpf_mlock);
 	}
@@ -644,20 +652,17 @@ bpf_detachd(struct bpf_d *d, int closing)
 
 	/* Refresh the local variable as d could have been modified */
 	bpf_closed = d->bd_flags & BPF_CLOSING;
+
+	os_log(OS_LOG_DEFAULT, "bpf%d%s detached from %s fcount %llu dcount %llu",
+	    d->bd_dev_minor, bpf_closed ? " closed and" : "", if_name(ifp),
+	    d->bd_fcount, d->bd_dcount);
+
 	/*
 	 * Note that We've kept the reference because we may have dropped
 	 * the lock when turning off promiscuous mode
 	 */
 	bpf_release_d(d);
-
 done:
-	/*
-	 * When closing makes sure no other thread refer to the bpf_d
-	 */
-	if (bpf_debug != 0) {
-		printf("%s: %llx done\n",
-		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(d));
-	}
 	/*
 	 * Let the caller know the bpf_d is closed
 	 */
@@ -803,10 +808,11 @@ bpfopen(dev_t dev, int flags, __unused int fmt,
 		lck_mtx_unlock(bpf_mlock);
 		return EBUSY;
 	}
-	d = kalloc_type(struct bpf_d, M_WAIT | Z_ZERO);
+	d = kalloc_type(struct bpf_d, Z_WAITOK | Z_ZERO);
 	if (d == NULL) {
 		/* this really is a catastrophic failure */
-		printf("bpfopen: malloc bpf_d failed\n");
+		os_log_error(OS_LOG_DEFAULT,
+		    "bpfopen: bpf%d kalloc_type bpf_d failed", minor(dev));
 		bpf_dtab[minor(dev)] = NULL;
 		lck_mtx_unlock(bpf_mlock);
 		return ENOMEM;
@@ -826,9 +832,11 @@ bpfopen(dev_t dev, int flags, __unused int fmt,
 	} else {
 		d->bd_flags &= ~BPF_WANT_PKTAP;
 	}
+
 	d->bd_thread_call = thread_call_allocate(bpf_timed_out, d);
 	if (d->bd_thread_call == NULL) {
-		printf("bpfopen: malloc thread call failed\n");
+		os_log_error(OS_LOG_DEFAULT, "bpfopen: bpf%d malloc thread call failed",
+		    minor(dev));
 		bpf_dtab[minor(dev)] = NULL;
 		bpf_release_d(d);
 		lck_mtx_unlock(bpf_mlock);
@@ -837,10 +845,16 @@ bpfopen(dev_t dev, int flags, __unused int fmt,
 	}
 	d->bd_opened_by = p;
 	uuid_generate(d->bd_uuid);
+	d->bd_pid = proc_pid(p);
 
+	d->bd_dev_minor = minor(dev);
 	bpf_dtab[minor(dev)] = d; /* Mark opened */
 	lck_mtx_unlock(bpf_mlock);
 
+	if (bpf_debug) {
+		os_log(OS_LOG_DEFAULT, "bpf%u opened by %s.%u",
+		    d->bd_dev_minor, proc_name_address(p), d->bd_pid);
+	}
 	return 0;
 }
 
@@ -870,8 +884,8 @@ bpfclose(dev_t dev, __unused int flags, __unused int fmt,
 	d->bd_flags |= BPF_CLOSING;
 
 	if (bpf_debug != 0) {
-		printf("%s: %llx\n",
-		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(d));
+		os_log(OS_LOG_DEFAULT, "%s: bpf%d",
+		    __func__, d->bd_dev_minor);
 	}
 
 	bpf_dtab[minor(dev)] = BPF_DEV_RESERVED; /* Reserve while closing */
@@ -932,13 +946,20 @@ bpfclose(dev_t dev, __unused int flags, __unused int fmt,
 	}
 
 	if (d->bd_bif) {
-		bpf_detachd(d, 1);
+		bpf_detachd(d);
 	}
 	selthreadclear(&d->bd_sel);
 	thread_call_free(d->bd_thread_call);
 
 	while (d->bd_hbuf_read != 0) {
 		msleep((caddr_t)d, bpf_mlock, PRINET, "bpf_reading", NULL);
+	}
+
+	if (bpf_debug) {
+		os_log(OS_LOG_DEFAULT,
+		    "bpf%u closed by %s.%u dcount %llu fcount %llu ccount %llu",
+		    d->bd_dev_minor, proc_name_address(p), d->bd_pid,
+		    d->bd_dcount, d->bd_fcount, d->bd_bcs.bcs_count_compressed_prefix);
 	}
 
 	bpf_freed(d);
@@ -994,8 +1015,12 @@ bpf_finalize_pktap(struct bpf_hdr *hp, struct pktap_header *pktaphdr)
  * Rotate the packet buffers in descriptor d.  Move the store buffer
  * into the hold slot, and the free buffer into the store slot.
  * Zero the length of the new store buffer.
+ *
+ * Note: in head drop mode, the hold buffer can be dropped so the fist packet of the
+ * store buffer cannot be compressed as it otherwise would refer to deleted data
+ * in a dropped hold buffer that the reader process does know about
  */
-#define ROTATE_BUFFERS(d) \
+#define ROTATE_BUFFERS(d) do { \
 	if (d->bd_hbuf_read != 0) \
 	        panic("rotating bpf buffers during read"); \
 	(d)->bd_hbuf = (d)->bd_sbuf; \
@@ -1004,7 +1029,11 @@ bpf_finalize_pktap(struct bpf_hdr *hp, struct pktap_header *pktaphdr)
 	(d)->bd_sbuf = (d)->bd_fbuf; \
 	(d)->bd_slen = 0; \
 	(d)->bd_scnt = 0; \
-	(d)->bd_fbuf = NULL;
+	(d)->bd_fbuf = NULL; \
+	if ((d)->bd_headdrop != 0) \
+	        (d)->bd_prev_slen = 0; \
+} while(false)
+
 /*
  *  bpfread - read next chunk of packets from buffers
  */
@@ -1135,8 +1164,8 @@ bpfread(dev_t dev, struct uio *uio, int ioflag)
 			bpf_release_d(d);
 			lck_mtx_unlock(bpf_mlock);
 			if (error == ERESTART) {
-				printf("%s: %llx ERESTART to EINTR\n",
-				    __func__, (uint64_t)VM_KERNEL_ADDRPERM(d));
+				os_log(OS_LOG_DEFAULT, "%s: bpf%d ERESTART to EINTR",
+				    __func__, d->bd_dev_minor);
 				error = EINTR;
 			}
 			return error;
@@ -1179,9 +1208,9 @@ bpfread(dev_t dev, struct uio *uio, int ioflag)
 	hbuf = d->bd_hbuf;
 	hbuf_len = d->bd_hlen;
 	flags = d->bd_flags;
+	d->bd_bcs.bcs_total_read += d->bd_hcnt;
 	lck_mtx_unlock(bpf_mlock);
 
-#ifdef __APPLE__
 	/*
 	 * Before we move data to userland, we fill out the extended
 	 * header fields.
@@ -1198,10 +1227,12 @@ bpfread(dev_t dev, struct uio *uio, int ioflag)
 
 			ehp = (struct bpf_hdr_ext *)(void *)p;
 			if ((flowid = ehp->bh_flowid) != 0) {
-				if (ehp->bh_proto == IPPROTO_TCP) {
+				if (ehp->bh_flags & BPF_HDR_EXT_FLAGS_TCP) {
+					ehp->bh_flags &= ~BPF_HDR_EXT_FLAGS_TCP;
 					found = inp_findinpcb_procinfo(&tcbinfo,
 					    flowid, &soprocinfo);
-				} else if (ehp->bh_proto == IPPROTO_UDP) {
+				} else if (ehp->bh_flags == BPF_HDR_EXT_FLAGS_UDP) {
+					ehp->bh_flags &= ~BPF_HDR_EXT_FLAGS_UDP;
 					found = inp_findinpcb_procinfo(&udbinfo,
 					    flowid, &soprocinfo);
 				}
@@ -1212,7 +1243,7 @@ bpfread(dev_t dev, struct uio *uio, int ioflag)
 				ehp->bh_flowid = 0;
 			}
 
-			if (flags & BPF_FINALIZE_PKTAP) {
+			if ((flags & BPF_FINALIZE_PKTAP) != 0 && ehp->bh_complen == 0) {
 				struct pktap_header *pktaphdr;
 
 				pktaphdr = (struct pktap_header *)(void *)
@@ -1227,11 +1258,28 @@ bpfread(dev_t dev, struct uio *uio, int ioflag)
 		char *p;
 
 		p = hbuf;
+
 		while (p < hbuf + hbuf_len) {
 			struct bpf_hdr *hp;
 			struct pktap_header *pktaphdr;
 
 			hp = (struct bpf_hdr *)(void *)p;
+
+			/*
+			 * Cannot finalize a compressed pktap header as we may not have
+			 * all the fields present
+			 */
+			if (d->bd_flags & BPF_COMP_ENABLED) {
+				struct bpf_comp_hdr *hcp;
+
+				hcp = (struct bpf_comp_hdr *)(void *)p;
+
+				if (hcp->bh_complen != 0) {
+					p += BPF_WORDALIGN(hcp->bh_hdrlen + hcp->bh_caplen);
+					continue;
+				}
+			}
+
 			pktaphdr = (struct pktap_header *)(void *)
 			    (p + BPF_WORDALIGN(hp->bh_hdrlen));
 
@@ -1240,7 +1288,6 @@ bpfread(dev_t dev, struct uio *uio, int ioflag)
 			p += BPF_WORDALIGN(hp->bh_hdrlen + hp->bh_caplen);
 		}
 	}
-#endif
 
 	/*
 	 * Move data from hold buffer into user space.
@@ -1344,7 +1391,10 @@ bpfwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 
 	bpf_acquire_d(d);
 
+	++d->bd_wcount;
+
 	if (d->bd_bif == 0) {
+		++d->bd_wdcount;
 		bpf_release_d(d);
 		lck_mtx_unlock(bpf_mlock);
 		return ENXIO;
@@ -1353,6 +1403,7 @@ bpfwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 	ifp = d->bd_bif->bif_ifp;
 
 	if ((ifp->if_flags & IFF_UP) == 0) {
+		++d->bd_wdcount;
 		bpf_release_d(d);
 		lck_mtx_unlock(bpf_mlock);
 		return ENETDOWN;
@@ -1380,7 +1431,8 @@ bpfwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 
 	/* take the lock again */
 	lck_mtx_lock(bpf_mlock);
-	if (error) {
+	if (error != 0) {
+		++d->bd_wdcount;
 		bpf_release_d(d);
 		lck_mtx_unlock(bpf_mlock);
 		return error;
@@ -1388,6 +1440,7 @@ bpfwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 
 	/* verify the device is still open */
 	if ((d->bd_flags & BPF_CLOSING) != 0) {
+		++d->bd_wdcount;
 		bpf_release_d(d);
 		lck_mtx_unlock(bpf_mlock);
 		m_freem(m);
@@ -1395,6 +1448,7 @@ bpfwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 	}
 
 	if (d->bd_bif == NULL) {
+		++d->bd_wdcount;
 		bpf_release_d(d);
 		lck_mtx_unlock(bpf_mlock);
 		m_free(m);
@@ -1402,6 +1456,7 @@ bpfwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 	}
 
 	if ((unsigned)datlen > ifp->if_mtu) {
+		++d->bd_wdcount;
 		bpf_release_d(d);
 		lck_mtx_unlock(bpf_mlock);
 		m_freem(m);
@@ -1427,6 +1482,9 @@ bpfwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 	}
 
 	lck_mtx_lock(bpf_mlock);
+	if (error != 0) {
+		++d->bd_wdcount;
+	}
 	bpf_release_d(d);
 	lck_mtx_unlock(bpf_mlock);
 
@@ -1455,6 +1513,11 @@ reset_d(struct bpf_d *d)
 	d->bd_hcnt = 0;
 	d->bd_rcount = 0;
 	d->bd_dcount = 0;
+	d->bd_fcount = 0;
+	d->bd_wcount = 0;
+	d->bd_wdcount = 0;
+
+	d->bd_prev_slen = 0;
 }
 
 static struct bpf_d *
@@ -1497,14 +1560,14 @@ bpf_setup(struct bpf_d *d_to, uuid_t uuid_from, ifnet_t ifp)
 	d_from = bpf_get_device_from_uuid(uuid_from);
 	if (d_from == NULL) {
 		error = ENOENT;
-		os_log_info(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "%s: uuids not found error %d",
 		    __func__, error);
 		return error;
 	}
 	if (d_from->bd_opened_by != d_to->bd_opened_by) {
 		error = EACCES;
-		os_log_info(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "%s: processes not matching error %d",
 		    __func__, error);
 		return error;
@@ -1528,14 +1591,14 @@ bpf_setup(struct bpf_d *d_to, uuid_t uuid_from, ifnet_t ifp)
 	 */
 	if (d_to->bd_flags & BPF_CLOSING) {
 		error = ENXIO;
-		os_log_info(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "%s: d_to is closing error %d",
 		    __func__, error);
 		goto done;
 	}
 	if (d_from->bd_flags & BPF_CLOSING) {
 		error = ENXIO;
-		os_log_info(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "%s: d_from is closing error %d",
 		    __func__, error);
 		goto done;
@@ -1546,20 +1609,26 @@ bpf_setup(struct bpf_d *d_to, uuid_t uuid_from, ifnet_t ifp)
 	 */
 	if (d_from->bd_bufsize != d_to->bd_bufsize) {
 		error = EINVAL;
-		os_log_info(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "%s: bufsizes not matching error %d",
 		    __func__, error);
 		goto done;
 	}
 
 	/*
-	 * Attach to the interface
+	 * Copy relevant options and flags
 	 */
-	error = bpf_setif(d_to, ifp, false, true);
+	d_to->bd_flags = d_from->bd_flags & (BPF_EXTENDED_HDR | BPF_WANT_PKTAP |
+	    BPF_FINALIZE_PKTAP | BPF_TRUNCATE | BPF_PKTHDRV2 |
+	    BPF_COMP_REQ | BPF_COMP_ENABLED);
+
+	d_to->bd_headdrop = d_from->bd_headdrop;
+
+	/*
+	 * Allocate and copy the buffers
+	 */
+	error = bpf_allocbufs(d_to);
 	if (error != 0) {
-		os_log_info(OS_LOG_DEFAULT,
-		    "%s: bpf_setif() failed error %d",
-		    __func__, error);
 		goto done;
 	}
 
@@ -1585,11 +1654,29 @@ bpf_setup(struct bpf_d *d_to, uuid_t uuid_from, ifnet_t ifp)
 	d_to->bd_hlen = d_from->bd_hlen;
 	d_to->bd_hcnt = d_from->bd_hcnt;
 
-	if (bpf_debug > 0) {
-		os_log_info(OS_LOG_DEFAULT,
-		    "%s: done slen %u scnt %u hlen %u hcnt %u",
-		    __func__, d_to->bd_slen, d_to->bd_scnt,
-		    d_to->bd_hlen, d_to->bd_hcnt);
+	if (d_to->bd_flags & BPF_COMP_REQ) {
+		ASSERT(d_to->bd_prev_sbuf != NULL);
+		ASSERT(d_to->bd_prev_fbuf != NULL);
+
+		d_to->bd_prev_slen = d_from->bd_prev_slen;
+		ASSERT(d_to->bd_prev_slen <= BPF_HDR_COMP_LEN_MAX);
+		memcpy(d_to->bd_prev_sbuf, d_from->bd_prev_sbuf, BPF_HDR_COMP_LEN_MAX);
+	}
+
+	d_to->bd_bcs = d_from->bd_bcs;
+
+	/*
+	 * Attach to the interface:
+	 * - don't reset the buffers
+	 * - we already prevent reads
+	 * - the buffers are already allocated
+	 */
+	error = bpf_setif(d_to, ifp, false, true, true);
+	if (error != 0) {
+		os_log_error(OS_LOG_DEFAULT,
+		    "%s: bpf_setif() failed error %d",
+		    __func__, error);
+		goto done;
 	}
 done:
 	d_from->bd_hbuf_read = 0;
@@ -1600,6 +1687,75 @@ done:
 
 	return error;
 }
+
+#if DEVELOPMENT || DEBUG
+#define BPF_IOC_LIST \
+	X(FIONREAD) \
+	X(SIOCGIFADDR) \
+	X(BIOCGBLEN) \
+	X(BIOCSBLEN) \
+	X(BIOCSETF32) \
+	X(BIOCSETFNR32) \
+	X(BIOCSETF64) \
+	X(BIOCSETFNR64) \
+	X(BIOCFLUSH) \
+	X(BIOCPROMISC) \
+	X(BIOCGDLT) \
+	X(BIOCGDLTLIST) \
+	X(BIOCSDLT) \
+	X(BIOCGETIF) \
+	X(BIOCSETIF) \
+	X(BIOCSRTIMEOUT32) \
+	X(BIOCSRTIMEOUT64) \
+	X(BIOCGRTIMEOUT32) \
+	X(BIOCGRTIMEOUT64) \
+	X(BIOCGSTATS) \
+	X(BIOCIMMEDIATE) \
+	X(BIOCVERSION) \
+	X(BIOCGHDRCMPLT) \
+	X(BIOCSHDRCMPLT) \
+	X(BIOCGSEESENT) \
+	X(BIOCSSEESENT) \
+	X(BIOCSETTC) \
+	X(BIOCGETTC) \
+	X(FIONBIO) \
+	X(FIOASYNC) \
+	X(BIOCSRSIG) \
+	X(BIOCGRSIG) \
+	X(BIOCSEXTHDR) \
+	X(BIOCGIFATTACHCOUNT) \
+	X(BIOCGWANTPKTAP) \
+	X(BIOCSWANTPKTAP) \
+	X(BIOCSHEADDROP) \
+	X(BIOCGHEADDROP) \
+	X(BIOCSTRUNCATE) \
+	X(BIOCGETUUID) \
+	X(BIOCSETUP) \
+	X(BIOCSPKTHDRV2) \
+	X(BIOCGHDRCOMP) \
+	X(BIOCSHDRCOMP) \
+	X(BIOCGHDRCOMPSTATS) \
+	X(BIOCGHDRCOMPON)
+
+static void
+log_bpf_ioctl_str(struct bpf_d *d, u_long cmd)
+{
+	const char *p = NULL;
+	char str[32];
+
+#define X(x) case x: { p = #x ; printf("%s\n", p); break; }
+	switch (cmd) {
+		BPF_IOC_LIST
+	}
+#undef X
+	if (p == NULL) {
+		snprintf(str, sizeof(str), "0x%08x", (unsigned int)cmd);
+		p = str;
+	}
+	os_log(OS_LOG_DEFAULT, "bpfioctl bpf%u %s",
+	    d->bd_dev_minor, p);
+}
+#endif /* DEVELOPMENT || DEBUG */
 
 /*
  *  FIONREAD		Check for read packet available.
@@ -1634,7 +1790,7 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 	struct bpf_d *d;
 	int error = 0;
 	u_int int_arg;
-	struct ifreq ifr;
+	struct ifreq ifr = {};
 
 	lck_mtx_lock(bpf_mlock);
 
@@ -1651,6 +1807,12 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 		bpf_stop_timer(d);
 	}
 	d->bd_state = BPF_IDLE;
+
+#if DEVELOPMENT || DEBUG
+	if (bpf_debug > 0) {
+		log_bpf_ioctl_str(d, cmd);
+	}
+#endif /* DEVELOPMENT || DEBUG */
 
 	switch (cmd) {
 	default:
@@ -1698,16 +1860,6 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 	 */
 	case BIOCSBLEN: {               /* u_int */
 		u_int size;
-		unsigned int maxbufsize = bpf_maxbufsize;
-
-		/*
-		 * Allow larger buffer in head drop mode to with the
-		 * assumption the reading process may be low priority but
-		 * is interested in the most recent traffic
-		 */
-		if (d->bd_headdrop != 0) {
-			maxbufsize = 2 * bpf_maxbufsize;
-		}
 
 		if (d->bd_bif != 0 || (d->bd_flags & BPF_DETACHING)) {
 			/*
@@ -1718,20 +1870,24 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 		}
 		bcopy(addr, &size, sizeof(size));
 
-		if (size > maxbufsize) {
-			d->bd_bufsize = maxbufsize;
+		if (size > BPF_BUFSIZE_CAP) {
+			d->bd_bufsize = BPF_BUFSIZE_CAP;
 
 			os_log_info(OS_LOG_DEFAULT,
-			    "%s bufsize capped to %u from %u",
-			    __func__, d->bd_bufsize, size);
+			    "bpf%d BIOCSBLEN capped to %u from %u",
+			    minor(dev), d->bd_bufsize, size);
 		} else if (size < BPF_MINBUFSIZE) {
 			d->bd_bufsize = BPF_MINBUFSIZE;
 
 			os_log_info(OS_LOG_DEFAULT,
-			    "%s bufsize bumped to %u from %u",
-			    __func__, d->bd_bufsize, size);
+			    "bpf%d BIOCSBLEN bumped to %u from %u",
+			    minor(dev), d->bd_bufsize, size);
 		} else {
 			d->bd_bufsize = size;
+
+			os_log_info(OS_LOG_DEFAULT,
+			    "bpf%d BIOCSBLEN %u",
+			    minor(dev), d->bd_bufsize);
 		}
 
 		/* It's a read/write ioctl */
@@ -1863,7 +2019,7 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 		if (ifp == NULL) {
 			error = ENXIO;
 		} else {
-			error = bpf_setif(d, ifp, true, false);
+			error = bpf_setif(d, ifp, true, false, false);
 		}
 		break;
 	}
@@ -1937,8 +2093,8 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 		struct bpf_stat bs;
 
 		bzero(&bs, sizeof(bs));
-		bs.bs_recv = d->bd_rcount;
-		bs.bs_drop = d->bd_dcount;
+		bs.bs_recv = (u_int)d->bd_rcount;
+		bs.bs_drop = (u_int)d->bd_dcount;
 		bcopy(&bs, addr, sizeof(bs));
 		break;
 	}
@@ -2013,25 +2169,7 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 	case FIOASYNC:          /* Send signal on receive packets; int */
 		bcopy(addr, &d->bd_async, sizeof(int));
 		break;
-#ifndef __APPLE__
-	case FIOSETOWN:
-		error = fsetown(*(int *)addr, &d->bd_sigio);
-		break;
 
-	case FIOGETOWN:
-		*(int *)addr = fgetown(d->bd_sigio);
-		break;
-
-	/* This is deprecated, FIOSETOWN should be used instead. */
-	case TIOCSPGRP:
-		error = fsetown(-(*(int *)addr), &d->bd_sigio);
-		break;
-
-	/* This is deprecated, FIOGETOWN should be used instead. */
-	case TIOCGPGRP:
-		*(int *)addr = -fgetown(d->bd_sigio);
-		break;
-#endif
 	case BIOCSRSIG: {       /* Set receive signal; u_int */
 		u_int sig;
 
@@ -2047,7 +2185,7 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 	case BIOCGRSIG:                 /* u_int */
 		bcopy(&d->bd_sig, addr, sizeof(u_int));
 		break;
-#ifdef __APPLE__
+
 	case BIOCSEXTHDR:               /* u_int */
 		bcopy(addr, &int_arg, sizeof(int_arg));
 		if (int_arg) {
@@ -2096,7 +2234,6 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 			d->bd_flags &= ~BPF_WANT_PKTAP;
 		}
 		break;
-#endif
 
 	case BIOCSHEADDROP:
 		bcopy(addr, &int_arg, sizeof(int_arg));
@@ -2129,7 +2266,7 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 		ifp = ifunit(bsa.bsa_ifname);
 		if (ifp == NULL) {
 			error = ENXIO;
-			os_log_info(OS_LOG_DEFAULT,
+			os_log_error(OS_LOG_DEFAULT,
 			    "%s: ifnet not found for %s error %d",
 			    __func__, bsa.bsa_ifname, error);
 			break;
@@ -2149,8 +2286,49 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 
 	case BIOCGPKTHDRV2:
 		int_arg = d->bd_flags & BPF_PKTHDRV2 ? 1 : 0;
-		bcopy(&int_arg, addr, sizeof(int));
+		bcopy(&int_arg, addr, sizeof(int_arg));
 		break;
+
+	case BIOCGHDRCOMP:
+		int_arg = d->bd_flags & BPF_COMP_REQ ? 1 : 0;
+		bcopy(&int_arg, addr, sizeof(int_arg));
+		break;
+
+	case BIOCSHDRCOMP:
+		bcopy(addr, &int_arg, sizeof(int_arg));
+		if (int_arg != 0 && int_arg != 1) {
+			return EINVAL;
+		}
+		if (d->bd_bif != 0 || (d->bd_flags & BPF_DETACHING)) {
+			/*
+			 * Interface already attached, unable to change buffers
+			 */
+			error = EINVAL;
+			break;
+		}
+		if (int_arg != 0) {
+			d->bd_flags |= BPF_COMP_REQ;
+			if (bpf_hdr_comp_enable != 0) {
+				d->bd_flags |= BPF_COMP_ENABLED;
+			}
+		} else {
+			d->bd_flags &= ~(BPF_COMP_REQ | BPF_COMP_ENABLED);
+		}
+		break;
+
+	case BIOCGHDRCOMPON:
+		int_arg = d->bd_flags & BPF_COMP_ENABLED ? 1 : 0;
+		bcopy(&int_arg, addr, sizeof(int_arg));
+		break;
+
+	case BIOCGHDRCOMPSTATS: {
+		struct bpf_comp_stats bcs = {};
+
+		bcs = d->bd_bcs;
+
+		bcopy(&bcs, addr, sizeof(bcs));
+		break;
+	}
 	}
 
 	bpf_release_d(d);
@@ -2196,12 +2374,10 @@ bpf_setf(struct bpf_d *d, u_int bf_len, user_addr_t bf_insns,
 	}
 
 	size = flen * sizeof(struct bpf_insn);
-	fcode = (struct bpf_insn *) kalloc_data(size, M_WAIT);
-#ifdef __APPLE__
+	fcode = (struct bpf_insn *) kalloc_data(size, Z_WAITOK | Z_ZERO);
 	if (fcode == NULL) {
-		return ENOBUFS;
+		return ENOMEM;
 	}
-#endif
 	if (copyin(bf_insns, (caddr_t)fcode, size) == 0 &&
 	    bpf_validate(fcode, (int)flen)) {
 		d->bd_filter = fcode;
@@ -2226,7 +2402,8 @@ bpf_setf(struct bpf_d *d, u_int bf_len, user_addr_t bf_insns,
  * Return an errno or 0.
  */
 static int
-bpf_setif(struct bpf_d *d, ifnet_t theywant, bool do_reset, bool has_hbuf_read)
+bpf_setif(struct bpf_d *d, ifnet_t theywant, bool do_reset, bool has_hbuf_read,
+    bool has_bufs_allocated)
 {
 	struct bpf_if *bp;
 	int error;
@@ -2264,16 +2441,18 @@ bpf_setif(struct bpf_d *d, ifnet_t theywant, bool do_reset, bool has_hbuf_read)
 		 * We found the requested interface.
 		 * Allocate the packet buffers.
 		 */
-		error = bpf_allocbufs(d);
-		if (error != 0) {
-			return error;
+		if (has_bufs_allocated == false) {
+			error = bpf_allocbufs(d);
+			if (error != 0) {
+				return error;
+			}
 		}
 		/*
 		 * Detach if attached to something else.
 		 */
 		if (bp != d->bd_bif) {
 			if (d->bd_bif != NULL) {
-				if (bpf_detachd(d, 0) != 0) {
+				if (bpf_detachd(d) != 0) {
 					return ENXIO;
 				}
 			}
@@ -2284,6 +2463,8 @@ bpf_setif(struct bpf_d *d, ifnet_t theywant, bool do_reset, bool has_hbuf_read)
 		if (do_reset) {
 			reset_d(d);
 		}
+		os_log(OS_LOG_DEFAULT, "bpf%u attached to %s",
+		    d->bd_dev_minor, if_name(theywant));
 		return 0;
 	}
 	/* Not found. */
@@ -2380,13 +2561,14 @@ bpf_setdlt(struct bpf_d *d, uint32_t dlt)
 	}
 	if (bp != NULL) {
 		opromisc = d->bd_promisc;
-		if (bpf_detachd(d, 0) != 0) {
+		if (bpf_detachd(d) != 0) {
 			return ENXIO;
 		}
 		error = bpf_attachd(d, bp);
-		if (error) {
-			printf("bpf_setdlt: bpf_attachd %s%d failed (%d)\n",
-			    ifnet_name(bp->bif_ifp), ifnet_unit(bp->bif_ifp),
+		if (error != 0) {
+			os_log_error(OS_LOG_DEFAULT,
+			    "bpf_setdlt: bpf%d bpf_attachd %s error %d",
+			    d->bd_dev_minor, if_name(bp->bif_ifp),
 			    error);
 			return error;
 		}
@@ -2395,10 +2577,10 @@ bpf_setdlt(struct bpf_d *d, uint32_t dlt)
 			lck_mtx_unlock(bpf_mlock);
 			error = ifnet_set_promiscuous(bp->bif_ifp, 1);
 			lck_mtx_lock(bpf_mlock);
-			if (error) {
-				printf("%s: ifpromisc %s%d failed (%d)\n",
-				    __func__, ifnet_name(bp->bif_ifp),
-				    ifnet_unit(bp->bif_ifp), error);
+			if (error != 0) {
+				os_log_error(OS_LOG_DEFAULT,
+				    "bpf_setdlt: bpf%d ifpromisc %s error %d",
+				    d->bd_dev_minor, if_name(bp->bif_ifp), error);
 			} else {
 				d->bd_promisc = 1;
 			}
@@ -2674,21 +2856,32 @@ filt_bpfprocess(struct knote *kn, struct kevent_qos_s *kev)
  * from m_copydata in kern/uipc_mbuf.c.
  */
 static void
-bpf_mcopy(struct mbuf * m, void *dst_arg, size_t len)
+bpf_mcopy(struct mbuf *m, void *dst_arg, size_t len, size_t offset)
 {
 	u_int count;
 	u_char *dst;
 
 	dst = dst_arg;
-	while (len > 0) {
-		if (m == 0) {
+
+	while (offset >= m->m_len) {
+		offset -= m->m_len;
+		m = m->m_next;
+		if (m == NULL) {
 			panic("bpf_mcopy");
 		}
-		count = MIN(m->m_len, (u_int)len);
-		bcopy(mbuf_data(m), dst, count);
+		continue;
+	}
+
+	while (len > 0) {
+		if (m == NULL) {
+			panic("bpf_mcopy");
+		}
+		count = MIN(m->m_len - (u_int)offset, (u_int)len);
+		bcopy((u_char *)mbuf_data(m) + offset, dst, count);
 		m = m->m_next;
 		dst += count;
 		len -= count;
+		offset = 0;
 	}
 }
 
@@ -2747,32 +2940,33 @@ bpf_tap_imp(
 		slen = bpf_filter(d->bd_filter, (u_char *)bpf_pkt,
 		    (u_int)bpf_pkt->bpfp_total_length, 0);
 
-		if (bp->bif_ifp->if_type == IFT_PKTAP &&
-		    bp->bif_dlt == DLT_PKTAP) {
-			if (d->bd_flags & BPF_TRUNCATE) {
-				slen = min(slen, get_pkt_trunc_len(bpf_pkt));
-			}
-			/*
-			 * Need to copy the bpf_pkt because the conversion
-			 * to v2 pktap header modifies the content of the
-			 * bpfp_header
-			 */
-			if ((d->bd_flags & BPF_PKTHDRV2) &&
-			    bpf_pkt->bpfp_header_length <= sizeof(bpfp_header_tmp)) {
-				bpf_pkt_tmp = *bpf_pkt;
-
-				bpf_pkt = &bpf_pkt_tmp;
-
-				memcpy(&bpfp_header_tmp, bpf_pkt->bpfp_header,
-				    bpf_pkt->bpfp_header_length);
-
-				bpf_pkt->bpfp_header = &bpfp_header_tmp;
-
-				convert_to_pktap_header_to_v2(bpf_pkt,
-				    !!(d->bd_flags & BPF_TRUNCATE));
-			}
-		}
 		if (slen != 0) {
+			if (bp->bif_ifp->if_type == IFT_PKTAP &&
+			    bp->bif_dlt == DLT_PKTAP) {
+				if (d->bd_flags & BPF_TRUNCATE) {
+					slen = min(slen, get_pkt_trunc_len(bpf_pkt));
+				}
+				/*
+				 * Need to copy the bpf_pkt because the conversion
+				 * to v2 pktap header modifies the content of the
+				 * bpfp_header
+				 */
+				if ((d->bd_flags & BPF_PKTHDRV2) &&
+				    bpf_pkt->bpfp_header_length <= sizeof(bpfp_header_tmp)) {
+					bpf_pkt_tmp = *bpf_pkt;
+
+					bpf_pkt = &bpf_pkt_tmp;
+
+					memcpy(&bpfp_header_tmp, bpf_pkt->bpfp_header,
+					    bpf_pkt->bpfp_header_length);
+
+					bpf_pkt->bpfp_header = &bpfp_header_tmp;
+
+					convert_to_pktap_header_to_v2(bpf_pkt,
+					    !!(d->bd_flags & BPF_TRUNCATE));
+				}
+			}
+			++d->bd_fcount;
 			catchpacket(d, bpf_pkt, slen, outbound);
 		}
 		bpf_pkt = bpf_pkt_saved;
@@ -2849,7 +3043,7 @@ bpf_tap_callback(struct ifnet *ifp, struct mbuf *m)
 #include <skywalk/os_skywalk_private.h>
 
 static void
-bpf_pktcopy(kern_packet_t pkt, void *dst_arg, size_t len)
+bpf_pktcopy(kern_packet_t pkt, void *dst_arg, size_t len, size_t offset)
 {
 	kern_buflet_t   buflet = NULL;
 	size_t count;
@@ -2867,10 +3061,15 @@ bpf_pktcopy(kern_packet_t pkt, void *dst_arg, size_t len)
 		VERIFY(addr != NULL);
 		addr += kern_buflet_get_data_offset(buflet);
 		buflet_length = kern_buflet_get_data_length(buflet);
-		count = MIN(buflet_length, len);
-		bcopy((void *)addr, (void *)dst, count);
+		if (offset >= buflet_length) {
+			offset -= buflet_length;
+			continue;
+		}
+		count = MIN(buflet_length - offset, len);
+		bcopy((void *)(addr + offset), (void *)dst, count);
 		dst += count;
 		len -= count;
+		offset = 0;
 	}
 }
 
@@ -2950,15 +3149,20 @@ bpf_copydata(struct bpf_packet *pkt, size_t off, size_t len, void* out_data)
 }
 
 static void
-copy_bpf_packet(struct bpf_packet * pkt, void * dst, size_t len)
+copy_bpf_packet_offset(struct bpf_packet * pkt, void * dst, size_t len, size_t offset)
 {
 	/* copy the optional header */
-	if (pkt->bpfp_header_length != 0) {
-		size_t  count = MIN(len, pkt->bpfp_header_length);
-		bcopy(pkt->bpfp_header, dst, count);
+	if (offset < pkt->bpfp_header_length) {
+		size_t  count = MIN(len, pkt->bpfp_header_length - offset);
+		caddr_t src = (caddr_t)pkt->bpfp_header;
+		bcopy(src + offset, dst, count);
 		len -= count;
 		dst = (void *)((uintptr_t)dst + count);
+		offset = 0;
+	} else {
+		offset -= pkt->bpfp_header_length;
 	}
+
 	if (len == 0) {
 		/* nothing past the header */
 		return;
@@ -2966,16 +3170,22 @@ copy_bpf_packet(struct bpf_packet * pkt, void * dst, size_t len)
 	/* copy the packet */
 	switch (pkt->bpfp_type) {
 	case BPF_PACKET_TYPE_MBUF:
-		bpf_mcopy(pkt->bpfp_mbuf, dst, len);
+		bpf_mcopy(pkt->bpfp_mbuf, dst, len, offset);
 		break;
 #if SKYWALK
 	case BPF_PACKET_TYPE_PKT:
-		bpf_pktcopy(pkt->bpfp_pkt, dst, len);
+		bpf_pktcopy(pkt->bpfp_pkt, dst, len, offset);
 		break;
 #endif /* SKYWALK */
 	default:
 		break;
 	}
+}
+
+static void
+copy_bpf_packet(struct bpf_packet * pkt, void * dst, size_t len)
+{
+	copy_bpf_packet_offset(pkt, dst, len, 0);
 }
 
 static uint32_t
@@ -3275,7 +3485,6 @@ get_ether_trunc_len(struct bpf_packet *pkt, uint32_t off, const uint32_t remaini
 	return ethlen;
 }
 
-#include <kern/assert.h>
 
 static uint32_t
 get_pkt_trunc_len(struct bpf_packet *pkt)
@@ -3350,7 +3559,7 @@ get_pkt_trunc_len(struct bpf_packet *pkt)
 		do_panic = true;
 #endif /* DEBUG */
 		if (do_panic) {
-			panic("%s:%d tlen %u > bpfp_total_length %lu bpfp_header_length %lu pth_frame_pre_length %u pre_adjust %u in_pkt_len %u out_pkt_len %u\n",
+			panic("%s:%d tlen %u > bpfp_total_length %lu bpfp_header_length %lu pth_frame_pre_length %u pre_adjust %u in_pkt_len %u out_pkt_len %u",
 			    __func__, __LINE__,
 			    tlen, pkt->bpfp_total_length, pkt->bpfp_header_length, pktap->pth_frame_pre_length, pre_adjust, in_pkt_len, out_pkt_len);
 		} else {
@@ -3366,6 +3575,22 @@ get_pkt_trunc_len(struct bpf_packet *pkt)
 	return tlen;
 }
 
+static uint8_t
+get_common_prefix_size(const void *a, const void *b, uint8_t max_bytes)
+{
+	uint8_t max_words = max_bytes >> 2;
+	const uint32_t *x = (const uint32_t *)a;
+	const uint32_t *y = (const uint32_t *)b;
+	uint8_t i;
+
+	for (i = 0; i < max_words; i++) {
+		if (x[i] != y[i]) {
+			break;
+		}
+	}
+	return (uint8_t)(i << 2);
+}
+
 /*
  * Move the packet data from interface memory (pkt) into the
  * store buffer.  Return 1 if it's time to wakeup a listener (buffer full),
@@ -3377,13 +3602,14 @@ catchpacket(struct bpf_d *d, struct bpf_packet * pkt,
 {
 	struct bpf_hdr *hp;
 	struct bpf_hdr_ext *ehp;
-	int totlen, curlen;
-	int hdrlen, caplen;
+	uint32_t totlen, curlen;
+	uint32_t hdrlen, caplen;
 	int do_wakeup = 0;
 	u_char *payload;
 	struct timeval tv;
 
 	hdrlen = (d->bd_flags & BPF_EXTENDED_HDR) ? d->bd_bif->bif_exthdrlen :
+	    (d->bd_flags & BPF_COMP_REQ) ? d->bd_bif->bif_comphdrlen:
 	    d->bd_bif->bif_hdrlen;
 	/*
 	 * Figure out how many bytes to move.  If the packet is
@@ -3478,7 +3704,11 @@ catchpacket(struct bpf_d *d, struct bpf_packet * pkt,
 				    (PKTF_FLOW_ID | PKTF_FLOW_LOCALSRC) &&
 				    m->m_pkthdr.pkt_flowsrc == FLOWSRC_INPCB) {
 					ehp->bh_flowid = m->m_pkthdr.pkt_flowid;
-					ehp->bh_proto = m->m_pkthdr.pkt_proto;
+					if (m->m_pkthdr.pkt_proto == IPPROTO_TCP) {
+						ehp->bh_flags |= BPF_HDR_EXT_FLAGS_TCP;
+					} else if (m->m_pkthdr.pkt_proto == IPPROTO_UDP) {
+						ehp->bh_flags |= BPF_HDR_EXT_FLAGS_UDP;
+					}
 				}
 				ehp->bh_svc = so_svc2tc(m->m_pkthdr.pkt_svc);
 				if (m->m_pkthdr.pkt_flags & PKTF_TCP_REXMT) {
@@ -3504,6 +3734,7 @@ catchpacket(struct bpf_d *d, struct bpf_packet * pkt,
 #if SKYWALK
 		} else {
 			kern_packet_t kern_pkt = pkt->bpfp_pkt;
+			packet_flowid_t flowid = 0;
 
 			if (outbound) {
 				/*
@@ -3522,10 +3753,15 @@ catchpacket(struct bpf_d *d, struct bpf_packet * pkt,
 					ehp->bh_pktflags |= BPF_PKTFLAGS_WAKE_PKT;
 				}
 			}
+			ehp->bh_trace_tag = kern_packet_get_trace_tag(kern_pkt);
+			if (kern_packet_get_flowid(kern_pkt, &flowid) == 0) {
+				ehp->bh_flowid = flowid;
+			}
 #endif /* SKYWALK */
 		}
 	} else {
 		hp = (struct bpf_hdr *)(void *)(d->bd_sbuf + curlen);
+		memset(hp, 0, BPF_WORDALIGN(sizeof(*hp)));
 		hp->bh_tstamp.tv_sec = (int)tv.tv_sec;
 		hp->bh_tstamp.tv_usec = tv.tv_usec;
 		hp->bh_datalen = (bpf_u_int32)pkt->bpfp_total_length;
@@ -3533,53 +3769,135 @@ catchpacket(struct bpf_d *d, struct bpf_packet * pkt,
 		caplen = hp->bh_caplen = totlen - hdrlen;
 		payload = (u_char *)hp + hdrlen;
 	}
-	/*
-	 * Copy the packet data into the store buffer and update its length.
-	 */
-	copy_bpf_packet(pkt, payload, caplen);
-	d->bd_slen = curlen + totlen;
+	if (d->bd_flags & BPF_COMP_REQ) {
+		uint8_t common_prefix_size = 0;
+		uint8_t copy_len = MIN((uint8_t)caplen, BPF_HDR_COMP_LEN_MAX);
+
+		copy_bpf_packet(pkt, d->bd_prev_fbuf, copy_len);
+
+		if (d->bd_prev_slen != 0) {
+			common_prefix_size = get_common_prefix_size(d->bd_prev_fbuf,
+			    d->bd_prev_sbuf, MIN(copy_len, d->bd_prev_slen));
+		}
+
+		if (d->bd_flags & BPF_COMP_ENABLED) {
+			assert3u(caplen, >=, common_prefix_size);
+			copy_bpf_packet_offset(pkt, payload, caplen - common_prefix_size,
+			    common_prefix_size);
+			d->bd_slen = curlen + totlen - common_prefix_size;
+		} else {
+			copy_bpf_packet(pkt, payload, caplen);
+			d->bd_slen = curlen + totlen;
+		}
+
+		/*
+		 * Update the caplen only if compression is enabled -- the caller
+		 * must pay attention to bpf_hdr_comp_enable
+		 */
+		if (d->bd_flags & BPF_EXTENDED_HDR) {
+			ehp->bh_complen = common_prefix_size;
+			if (d->bd_flags & BPF_COMP_ENABLED) {
+				ehp->bh_caplen -= common_prefix_size;
+			}
+		} else {
+			struct bpf_comp_hdr *hcp;
+
+			hcp = (struct bpf_comp_hdr *)(void *)(d->bd_sbuf + curlen);
+			hcp->bh_complen = common_prefix_size;
+			if (d->bd_flags & BPF_COMP_ENABLED) {
+				hcp->bh_caplen -= common_prefix_size;
+			}
+		}
+
+		if (common_prefix_size > 0) {
+			d->bd_bcs.bcs_total_compressed_prefix_size += common_prefix_size;
+			if (common_prefix_size > d->bd_bcs.bcs_max_compressed_prefix_size) {
+				d->bd_bcs.bcs_max_compressed_prefix_size = common_prefix_size;
+			}
+			d->bd_bcs.bcs_count_compressed_prefix += 1;
+		} else {
+			d->bd_bcs.bcs_count_no_common_prefix += 1;
+		}
+
+		/* The current compression buffer becomes the previous one */
+		caddr_t tmp = d->bd_prev_sbuf;
+		d->bd_prev_sbuf = d->bd_prev_fbuf;
+		d->bd_prev_slen = copy_len;
+		d->bd_prev_fbuf = tmp;
+	} else {
+		/*
+		 * Copy the packet data into the store buffer and update its length.
+		 */
+		copy_bpf_packet(pkt, payload, caplen);
+		d->bd_slen = curlen + totlen;
+	}
 	d->bd_scnt += 1;
+	d->bd_bcs.bcs_total_hdr_size += pkt->bpfp_header_length;
+	d->bd_bcs.bcs_total_size += caplen;
 
 	if (do_wakeup) {
 		bpf_wakeup(d);
 	}
 }
 
+
+static void
+bpf_freebufs(struct bpf_d *d)
+{
+	if (d->bd_sbuf != NULL) {
+		kfree_data_addr(d->bd_sbuf);
+	}
+	if (d->bd_hbuf != NULL) {
+		kfree_data_addr(d->bd_hbuf);
+	}
+	if (d->bd_fbuf != NULL) {
+		kfree_data_addr(d->bd_fbuf);
+	}
+
+	if (d->bd_prev_sbuf != NULL) {
+		kfree_data_addr(d->bd_prev_sbuf);
+	}
+	if (d->bd_prev_fbuf != NULL) {
+		kfree_data_addr(d->bd_prev_fbuf);
+	}
+}
 /*
  * Initialize all nonzero fields of a descriptor.
  */
 static int
 bpf_allocbufs(struct bpf_d *d)
 {
-	if (d->bd_sbuf != NULL) {
-		kfree_data_addr(d->bd_sbuf);
-		d->bd_sbuf = NULL;
-	}
-	if (d->bd_hbuf != NULL) {
-		kfree_data_addr(d->bd_hbuf);
-		d->bd_hbuf = NULL;
-	}
-	if (d->bd_fbuf != NULL) {
-		kfree_data_addr(d->bd_fbuf);
-		d->bd_fbuf = NULL;
-	}
+	bpf_freebufs(d);
 
-	d->bd_fbuf = (caddr_t) kalloc_data(d->bd_bufsize, M_WAIT);
+	d->bd_fbuf = (caddr_t) kalloc_data(d->bd_bufsize, Z_WAITOK | Z_ZERO);
 	if (d->bd_fbuf == NULL) {
-		return ENOBUFS;
+		goto nobufs;
 	}
 
-	d->bd_sbuf = (caddr_t) kalloc_data(d->bd_bufsize, M_WAIT);
+	d->bd_sbuf = (caddr_t) kalloc_data(d->bd_bufsize, Z_WAITOK | Z_ZERO);
 	if (d->bd_sbuf == NULL) {
-		kfree_data(d->bd_fbuf, d->bd_bufsize);
-		d->bd_fbuf = NULL;
-		return ENOBUFS;
+		goto nobufs;
 	}
 	d->bd_slen = 0;
 	d->bd_hlen = 0;
 	d->bd_scnt = 0;
 	d->bd_hcnt = 0;
+
+	d->bd_prev_slen = 0;
+	if (d->bd_flags & BPF_COMP_REQ) {
+		d->bd_prev_sbuf = (caddr_t) kalloc_data(BPF_HDR_COMP_LEN_MAX, Z_WAITOK | Z_ZERO);
+		if (d->bd_prev_sbuf == NULL) {
+			goto nobufs;
+		}
+		d->bd_prev_fbuf = (caddr_t) kalloc_data(BPF_HDR_COMP_LEN_MAX, Z_WAITOK | Z_ZERO);
+		if (d->bd_prev_fbuf == NULL) {
+			goto nobufs;
+		}
+	}
 	return 0;
+nobufs:
+	bpf_freebufs(d);
+	return ENOMEM;
 }
 
 /*
@@ -3598,15 +3916,8 @@ bpf_freed(struct bpf_d *d)
 		panic("bpf buffer freed during read");
 	}
 
-	if (d->bd_sbuf != 0) {
-		kfree_data_addr(d->bd_sbuf);
-		if (d->bd_hbuf != 0) {
-			kfree_data_addr(d->bd_hbuf);
-		}
-		if (d->bd_fbuf != 0) {
-			kfree_data_addr(d->bd_fbuf);
-		}
-	}
+	bpf_freebufs(d);
+
 	if (d->bd_filter) {
 		kfree_data_addr(d->bd_filter);
 	}
@@ -3625,11 +3936,11 @@ bpfattach(struct ifnet *ifp, u_int dlt, u_int hdrlen)
 
 errno_t
 bpf_attach(
-	ifnet_t                 ifp,
-	u_int32_t               dlt,
-	u_int32_t               hdrlen,
-	bpf_send_func   send,
-	bpf_tap_func    tap)
+	ifnet_t ifp,
+	u_int32_t dlt,
+	u_int32_t hdrlen,
+	bpf_send_func send,
+	bpf_tap_func tap)
 {
 	struct bpf_if *bp;
 	struct bpf_if *bp_new;
@@ -3638,10 +3949,10 @@ bpf_attach(
 	struct bpf_if *bp_last = NULL;
 	boolean_t found;
 
-	bp_new = kalloc_type(struct bpf_if, M_WAIT | Z_ZERO);
-	if (bp_new == 0) {
-		panic("bpfattach");
-	}
+	/*
+	 * Z_NOFAIL will cause a panic if the allocation fails
+	 */
+	bp_new = kalloc_type(struct bpf_if, Z_WAITOK | Z_NOFAIL | Z_ZERO);
 
 	lck_mtx_lock(bpf_mlock);
 
@@ -3671,7 +3982,8 @@ bpf_attach(
 	}
 	if (found) {
 		lck_mtx_unlock(bpf_mlock);
-		printf("bpfattach - %s with dlt %d is already attached\n",
+		os_log_error(OS_LOG_DEFAULT,
+		    "bpfattach - %s with dlt %d is already attached",
 		    if_name(ifp), dlt);
 		kfree_type(struct bpf_if, bp_new);
 		return EEXIST;
@@ -3713,17 +4025,13 @@ bpf_attach(
 	bp_new->bif_hdrlen = BPF_WORDALIGN(hdrlen + SIZEOF_BPF_HDR) - hdrlen;
 	bp_new->bif_exthdrlen = BPF_WORDALIGN(hdrlen +
 	    sizeof(struct bpf_hdr_ext)) - hdrlen;
+	bp_new->bif_comphdrlen = BPF_WORDALIGN(hdrlen +
+	    sizeof(struct bpf_comp_hdr)) - hdrlen;
 
 	/* Take a reference on the interface */
 	ifnet_reference(ifp);
 
 	lck_mtx_unlock(bpf_mlock);
-
-#ifndef __APPLE__
-	if (bootverbose) {
-		printf("bpf: %s attached\n", if_name(ifp));
-	}
-#endif
 
 	return 0;
 }
@@ -3741,7 +4049,7 @@ bpfdetach(struct ifnet *ifp)
 	struct bpf_d    *d;
 
 	if (bpf_debug != 0) {
-		printf("%s: %s\n", __func__, if_name(ifp));
+		os_log(OS_LOG_DEFAULT, "%s: %s", __func__, if_name(ifp));
 	}
 
 	lck_mtx_lock(bpf_mlock);
@@ -3774,7 +4082,7 @@ bpfdetach(struct ifnet *ifp)
 			 * the reference for the interface list
 			 */
 			bpf_acquire_d(d);
-			bpf_detachd(d, 0);
+			bpf_detachd(d);
 			bpf_wakeup(d);
 			bpf_release_d(d);
 		}
@@ -3787,15 +4095,25 @@ bpfdetach(struct ifnet *ifp)
 void
 bpf_init(__unused void *unused)
 {
-#ifdef __APPLE__
 	int     maj;
+
+	/* bpf_comp_hdr is an overlay of bpf_hdr */
+	_CASSERT(BPF_WORDALIGN(sizeof(struct bpf_hdr)) ==
+	    BPF_WORDALIGN(sizeof(struct bpf_comp_hdr)));
+
+	/* compression length must fits in a byte */
+	_CASSERT(BPF_HDR_COMP_LEN_MAX <= UCHAR_MAX );
+
+	(void) PE_parse_boot_argn("bpf_hdr_comp", &bpf_hdr_comp_enable,
+	    sizeof(bpf_hdr_comp_enable));
 
 	if (bpf_devsw_installed == 0) {
 		bpf_devsw_installed = 1;
 		maj = cdevsw_add(CDEV_MAJOR, &bpf_cdevsw);
 		if (maj == -1) {
 			bpf_devsw_installed = 0;
-			printf("bpf_init: failed to allocate a major number\n");
+			os_log_error(OS_LOG_DEFAULT,
+			    "bpf_init: failed to allocate a major number");
 			return;
 		}
 
@@ -3803,14 +4121,7 @@ bpf_init(__unused void *unused)
 			bpf_make_dev_t(maj);
 		}
 	}
-#else
-	cdevsw_add(&bpf_cdevsw);
-#endif
 }
-
-#ifndef __APPLE__
-SYSINIT(bpfdev, SI_SUB_DRIVERS, SI_ORDER_MIDDLE + CDEV_MAJOR, bpf_drvinit, NULL);
-#endif
 
 static int
 sysctl_bpf_maxbufsize SYSCTL_HANDLER_ARGS
@@ -3825,10 +4136,122 @@ sysctl_bpf_maxbufsize SYSCTL_HANDLER_ARGS
 		return err;
 	}
 
-	if (i < 0 || i > BPF_MAXSIZE_CAP) {
-		i = BPF_MAXSIZE_CAP;
+	if (i < 0 || i > BPF_BUFSIZE_CAP) {
+		i = BPF_BUFSIZE_CAP;
 	}
 
 	bpf_maxbufsize = i;
 	return err;
+}
+
+static int
+sysctl_bpf_bufsize_cap SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int i, err;
+
+	i = BPF_BUFSIZE_CAP;
+
+	err = sysctl_handle_int(oidp, &i, 0, req);
+	if (err != 0 || req->newptr == USER_ADDR_NULL) {
+		return err;
+	}
+
+	return err;
+}
+
+/*
+ * Fill filter statistics
+ */
+static void
+bpfstats_fill_xbpf(struct xbpf_d *d, struct bpf_d *bd)
+{
+	LCK_MTX_ASSERT(bpf_mlock, LCK_MTX_ASSERT_OWNED);
+
+	d->bd_structsize = sizeof(struct xbpf_d);
+	d->bd_promisc = bd->bd_promisc != 0 ? 1 : 0;
+	d->bd_immediate = d->bd_immediate != 0 ? 1 : 0;
+	d->bd_hdrcmplt = bd->bd_hdrcmplt != 0 ? 1 : 0;
+	d->bd_async = bd->bd_async != 0 ? 1 : 0;
+	d->bd_headdrop = bd->bd_headdrop != 0 ? 1 : 0;
+	d->bd_seesent = bd->bd_seesent != 0 ? 1 : 0;
+	d->bh_compreq = bd->bd_flags & BPF_COMP_REQ ? 1 : 0;
+	d->bh_compenabled = bd->bd_flags & BPF_COMP_ENABLED ? 1 : 0;
+	d->bd_exthdr = bd->bd_flags & BPF_EXTENDED_HDR ? 1 : 0;
+	d->bd_trunc = bd->bd_flags & BPF_TRUNCATE ? 1 : 0;
+	d->bd_pkthdrv2 = bd->bd_flags & BPF_PKTHDRV2 ? 1 : 0;
+
+	d->bd_dev_minor = (uint8_t)bd->bd_dev_minor;
+
+	d->bd_sig = bd->bd_sig;
+
+	d->bd_rcount = bd->bd_rcount;
+	d->bd_dcount = bd->bd_dcount;
+	d->bd_fcount = bd->bd_fcount;
+	d->bd_slen = bd->bd_slen;
+	d->bd_hlen = bd->bd_hlen;
+	d->bd_bufsize = bd->bd_bufsize;
+	d->bd_pid = bd->bd_pid;
+	if (bd->bd_bif != NULL && bd->bd_bif->bif_ifp != NULL) {
+		strlcpy(d->bd_ifname,
+		    bd->bd_bif->bif_ifp->if_xname, IFNAMSIZ);
+	}
+
+	d->bd_comp_count = bd->bd_bcs.bcs_count_compressed_prefix;
+	d->bd_comp_size = bd->bd_bcs.bcs_total_compressed_prefix_size;
+
+	d->bd_scnt = bd->bd_scnt;
+	d->bd_hcnt = bd->bd_hcnt;
+
+	d->bd_read_count = bd->bd_bcs.bcs_total_read;
+	d->bd_fsize = bd->bd_bcs.bcs_total_size;
+}
+
+/*
+ * Handle `netstat -B' stats request
+ */
+static int
+sysctl_bpf_stats SYSCTL_HANDLER_ARGS
+{
+	int error;
+	struct xbpf_d *xbdbuf;
+	unsigned int x_cnt;
+	vm_size_t buf_size;
+
+	if (req->oldptr == USER_ADDR_NULL) {
+		return SYSCTL_OUT(req, 0, nbpfilter * sizeof(struct xbpf_d));
+	}
+	if (nbpfilter == 0) {
+		return SYSCTL_OUT(req, 0, 0);
+	}
+	buf_size = req->oldlen;
+	xbdbuf = kalloc_data(buf_size, Z_WAITOK | Z_ZERO);
+
+	lck_mtx_lock(bpf_mlock);
+	if (buf_size < (nbpfilter * sizeof(struct xbpf_d))) {
+		lck_mtx_unlock(bpf_mlock);
+		kfree_data(xbdbuf, buf_size);
+		return ENOMEM;
+	}
+	x_cnt = 0;
+	unsigned int i;
+
+	for (i = 0; i < nbpfilter; i++) {
+		struct bpf_d *bd = bpf_dtab[i];
+		struct xbpf_d *xbd;
+
+		if (bd == NULL || bd == BPF_DEV_RESERVED ||
+		    (bd->bd_flags & BPF_CLOSING) != 0) {
+			continue;
+		}
+		VERIFY(x_cnt < nbpfilter);
+
+		xbd = &xbdbuf[x_cnt++];
+		bpfstats_fill_xbpf(xbd, bd);
+	}
+	lck_mtx_unlock(bpf_mlock);
+
+	error = SYSCTL_OUT(req, xbdbuf, x_cnt * sizeof(struct xbpf_d));
+	kfree_data(xbdbuf, buf_size);
+	return error;
 }

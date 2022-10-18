@@ -60,7 +60,6 @@
 #include <sys/imageboot.h>
 #include <pexpert/pexpert.h>
 
-extern int      nfs_mountroot(void);    /* nfs_boot.c */
 extern int (*mountroot)(void);
 
 extern unsigned char    rootdevice[];
@@ -91,7 +90,7 @@ IOBSDRegistryEntryGetData(void * entry, const char * property_name,
 
 typedef enum {
 	kNetBootImageTypeUnknown = 0,
-	kNetBootImageTypeNFS = 1,
+	kNetBootImageTypeNFS = 1, // Deprecated
 	kNetBootImageTypeHTTP = 2,
 } NetBootImageType;
 
@@ -348,40 +347,8 @@ netboot_info_init(struct in_addr iaddr)
 
 		if (parse_image_path(root_path, &server_ip, &server_name,
 		    &mount_point, &image_path)) {
-			info->image_type = kNetBootImageTypeNFS;
-			info->server_ip = server_ip;
-			info->server_name_length = strlen(server_name) + 1;
-			info->server_name = kalloc_data(info->server_name_length,
-			    Z_WAITOK);
-			info->mount_point_length = strlen(mount_point) + 1;
-			info->mount_point = kalloc_data(info->mount_point_length,
-			    Z_WAITOK);
-			strlcpy(info->server_name, server_name, info->server_name_length);
-			strlcpy(info->mount_point, mount_point, info->mount_point_length);
-
-			printf("netboot: NFS Server %s Mount %s",
-			    server_name, info->mount_point);
-			if (image_path != NULL) {
-				boolean_t       needs_slash = FALSE;
-
-				info->image_path_length = strlen(image_path) + 1;
-				if (image_path[0] != '/') {
-					needs_slash = TRUE;
-					info->image_path_length++;
-				}
-				info->image_path = kalloc_data(info->image_path_length,
-				    Z_WAITOK);
-				if (needs_slash) {
-					info->image_path[0] = '/';
-					strlcpy(info->image_path + 1, image_path,
-					    info->image_path_length - 1);
-				} else {
-					strlcpy(info->image_path, image_path,
-					    info->image_path_length);
-				}
-				printf(" Image %s", info->image_path);
-			}
-			printf("\n");
+			/* kNetBootImageTypeNFS is deprecated */
+			printf("netboot: NFS boot is deprecated\n");
 		} else if (strncmp(root_path, kNetBootRootPathPrefixHTTP,
 		    strlen(kNetBootRootPathPrefixHTTP)) == 0) {
 			info->image_type = kNetBootImageTypeHTTP;
@@ -558,14 +525,6 @@ default_route_add(struct in_addr router, boolean_t proxy_arp)
 	return route_cmd(RTM_ADD, zeroes, router, zeroes, flags, IFSCOPE_NONE);
 }
 
-static int
-host_route_delete(struct in_addr host, unsigned int ifscope)
-{
-	struct in_addr              zeroes = { .s_addr = 0 };
-
-	return route_cmd(RTM_DELETE, host, zeroes, zeroes, RTF_HOST, ifscope);
-}
-
 static struct ifnet *
 find_interface(void)
 {
@@ -632,7 +591,6 @@ netboot_mountroot(void)
 	proc_t                      procp = current_proc();
 	struct in_addr              router = { .s_addr = 0 };
 	struct socket *             so = NULL;
-	unsigned int                try;
 
 	bzero(&ifr, sizeof(ifr));
 
@@ -693,44 +651,8 @@ netboot_mountroot(void)
 	switch (S_netboot_info_p->image_type) {
 	default:
 	case kNetBootImageTypeNFS:
-		for (try = 1; TRUE; try++) {
-			error = nfs_mountroot();
-			if (error == 0) {
-				break;
-			}
-			printf("netboot: nfs_mountroot() attempt %u failed; "
-			    "clearing ARP entry and trying again\n", try);
-			/*
-			 * error is either EHOSTDOWN or EHOSTUNREACH, which likely means
-			 * that the port we're plugged into has spanning tree enabled,
-			 * and either the router or the server can't answer our ARP
-			 * requests.  Clear the incomplete ARP entry by removing the
-			 * appropriate route, depending on the error code:
-			 *     EHOSTDOWN		NFS server's route
-			 *     EHOSTUNREACH		router's route
-			 */
-			switch (error) {
-			default:
-			/* NOT REACHED */
-			case EHOSTDOWN:
-				/* remove the server's arp entry */
-				error = host_route_delete(S_netboot_info_p->server_ip,
-				    ifp->if_index);
-				if (error) {
-					printf("netboot: host_route_delete(" IP_FORMAT
-					    ") failed %d\n",
-					    IP_LIST(&S_netboot_info_p->server_ip), error);
-				}
-				break;
-			case EHOSTUNREACH:
-				error = host_route_delete(router, ifp->if_index);
-				if (error) {
-					printf("netboot: host_route_delete(" IP_FORMAT
-					    ") failed %d\n", IP_LIST(&router), error);
-				}
-				break;
-			}
-		}
+		/* kNetBootImageTypeNFS is deprecated */
+		error = ENOTSUP;
 		break;
 	case kNetBootImageTypeHTTP:
 		error = netboot_setup();

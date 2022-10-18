@@ -59,6 +59,7 @@
 char *proc_name_address(void *p);
 #include <sys/sysctl.h>
 #include <sys/vm.h>
+#include <os/log.h>
 
 #include <kern/locks.h>
 #include <kern/assert.h>
@@ -78,7 +79,7 @@ static LCK_MTX_DECLARE(ktrace_mtx, &ktrace_grp);
  * or in background mode.  The state determines which processes can configure
  * ktrace.
  */
-static enum ktrace_state ktrace_state = KTRACE_STATE_OFF;
+static ktrace_state_t ktrace_state = KTRACE_STATE_OFF;
 
 /* The true owner of ktrace, checked by ktrace_access_check(). */
 static uint64_t ktrace_owning_unique_id = 0;
@@ -144,6 +145,21 @@ int ktrace_root_set_owner_allowed = 0;
  * (e.g., during boot or wake) this flag disables locking requirements.
  */
 static bool ktrace_single_threaded = false;
+
+__startup_func
+static void
+ktrace_startup(void)
+{
+	extern void kpc_init(void);
+#if KPC
+	kpc_init();
+#endif /* KPC */
+#if KPERF
+	kperf_init();
+#endif /* KPERF */
+	kdebug_startup();
+}
+STARTUP(KTRACE, STARTUP_RANK_FIRST, ktrace_startup);
 
 void
 ktrace_lock(void)
@@ -227,6 +243,8 @@ static void
 ktrace_promote_background(void)
 {
 	assert(ktrace_state != KTRACE_STATE_BG);
+
+	os_log(OS_LOG_DEFAULT, "ktrace: promoting background tool");
 
 	/*
 	 * Remember to send a background available notification on the next init
@@ -327,7 +345,7 @@ ktrace_configure(uint32_t config_mask)
 }
 
 void
-ktrace_disable(enum ktrace_state state_to_match)
+ktrace_disable(ktrace_state_t state_to_match)
 {
 	if (ktrace_state == state_to_match) {
 		kernel_debug_disable();
@@ -417,6 +435,7 @@ ktrace_init_background(void)
 void
 ktrace_set_invalid_owning_pid(void)
 {
+	os_log(OS_LOG_DEFAULT, "ktrace: manually invalidating owning process");
 	if (ktrace_keep_ownership_on_reset) {
 		ktrace_keep_ownership_on_reset = false;
 		ktrace_reset_internal(ktrace_active_mask);
@@ -447,6 +466,7 @@ ktrace_set_owning_pid(int pid)
 	}
 
 	ktrace_keep_ownership_on_reset = true;
+	os_log(OS_LOG_DEFAULT, "ktrace: manually setting owning process");
 	ktrace_set_owning_proc(p);
 
 	proc_rele(p);
@@ -458,6 +478,7 @@ ktrace_set_owning_proc(proc_t p)
 {
 	ktrace_assert_lock_held();
 	assert(p != NULL);
+	ktrace_state_t old_state = ktrace_state;
 
 	if (ktrace_state != KTRACE_STATE_FG) {
 		if (proc_uniqueid(p) == ktrace_bg_unique_id) {
@@ -483,6 +504,9 @@ ktrace_set_owning_proc(proc_t p)
 	ktrace_owning_pid = proc_pid(p);
 	strlcpy(ktrace_last_owner_execname, proc_name_address(p),
 	    sizeof(ktrace_last_owner_execname));
+	os_log(OS_LOG_DEFAULT, "ktrace: changing state from %d to %d, owned by "
+	    "%s[%d]", old_state, ktrace_state, ktrace_last_owner_execname,
+	    ktrace_owning_pid);
 }
 
 static void
@@ -500,6 +524,10 @@ SYSCTL_NODE(, OID_AUTO, ktrace, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "ktrace");
 
 SYSCTL_UINT(_ktrace, OID_AUTO, state, CTLFLAG_RD | CTLFLAG_LOCKED,
     &ktrace_state, 0,
+    "");
+
+SYSCTL_UINT(_ktrace, OID_AUTO, active_mask, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &ktrace_active_mask, 0,
     "");
 
 SYSCTL_INT(_ktrace, OID_AUTO, owning_pid, CTLFLAG_RD | CTLFLAG_LOCKED,

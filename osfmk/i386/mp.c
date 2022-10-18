@@ -132,7 +132,7 @@ SIMPLE_LOCK_DECLARE(debugger_callback_lock, 0);
 struct debugger_callback *debugger_callback = NULL;
 
 static LCK_GRP_DECLARE(smp_lck_grp, "i386_smp");
-static LCK_MTX_EARLY_DECLARE(mp_cpu_boot_lock, &smp_lck_grp);
+static LCK_MTX_DECLARE(mp_cpu_boot_lock, &smp_lck_grp);
 
 /* Variables needed for MP rendezvous. */
 SIMPLE_LOCK_DECLARE(mp_rv_lock, 0);
@@ -167,7 +167,7 @@ static void        (*mp_bc_action_func)(void *arg);
 static void        *mp_bc_func_arg;
 static int      mp_bc_ncpus;
 static volatile long   mp_bc_count;
-static LCK_MTX_EARLY_DECLARE(mp_bc_lock, &smp_lck_grp);
+static LCK_MTX_DECLARE(mp_bc_lock, &smp_lck_grp);
 static  volatile int    debugger_cpu = -1;
 volatile long    NMIPI_acks = 0;
 volatile long    NMI_count = 0;
@@ -1242,6 +1242,9 @@ mp_cpus_call_action(void)
 	mp_call_head_unlock(cqp, intrs_enabled);
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type"
+
 /*
  * mp_cpus_call() runs a given function on cpus specified in a given cpu mask.
  * Possible modes are:
@@ -1270,6 +1273,8 @@ mp_cpus_call(
 		NULL,
 		NULL);
 }
+
+#pragma clang diagnostic pop
 
 static void
 mp_cpus_call_wait(boolean_t     intrs_enabled,

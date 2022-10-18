@@ -60,7 +60,7 @@
 #if defined (__x86_64__)
 #define SYSTRACE_ARTIFICIAL_FRAMES      2
 #define MACHTRACE_ARTIFICIAL_FRAMES 3
-#elif defined(__arm__) || defined(__arm64__)
+#elif defined(__arm64__)
 #define SYSTRACE_ARTIFICIAL_FRAMES  2
 #define MACHTRACE_ARTIFICIAL_FRAMES 3
 #else
@@ -131,23 +131,6 @@ dtrace_systrace_syscall(struct proc *pp, void *uap, int *rv)
 				vm_offset_t params = (vm_offset_t) (saved_state32(tagged_regs)->uesp + sizeof(int));
 				code = fuword(params);
 			}
-		}
-	}
-#elif defined(__arm__)
-	{
-		/*
-		 * On arm, syscall numbers depend on a flavor (indirect or not)
-		 * and can be in either r0 or r12  (always u32)
-		 */
-
-		/* See bsd/dev/arm/systemcalls.c:arm_get_syscall_number */
-		arm_saved_state_t *arm_regs = (arm_saved_state_t *) find_user_regs(current_thread());
-
-		/* Check for indirect system call */
-		if (arm_regs->r[12] != 0) {
-			code = arm_regs->r[12];
-		} else {
-			code = arm_regs->r[0];
 		}
 	}
 #elif defined(__arm64__)
@@ -692,14 +675,6 @@ dtrace_machtrace_syscall(struct mach_call_args *args)
 			code = -saved_state32(tagged_regs)->eax;
 		}
 	}
-#elif defined(__arm__)
-	{
-		/* r12 has the machcall number, but it is -ve */
-		arm_saved_state_t *arm_regs = (arm_saved_state_t *) find_user_regs(current_thread());
-		code = (int)arm_regs->r[12];
-		ASSERT(code < 0);    /* Otherwise it would be a Unix syscall */
-		code = -code;
-	}
 #elif defined(__arm64__)
 	{
 		/* From arm/thread_status.h:get_saved_state_svc_number */
@@ -969,8 +944,8 @@ static struct cdevsw systrace_cdevsw =
 	.d_read = eno_rdwrt,
 	.d_write = eno_rdwrt,
 	.d_ioctl = eno_ioctl,
-	.d_stop = (stop_fcn_t *)nulldev,
-	.d_reset = (reset_fcn_t *)nulldev,
+	.d_stop = eno_stop,
+	.d_reset = eno_reset,
 	.d_select = eno_select,
 	.d_mmap = eno_mmap,
 	.d_strategy = eno_strat,

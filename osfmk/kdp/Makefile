@@ -10,7 +10,7 @@ DATAFILES = \
 		kdp_callout.h \
 		kdp_en_debugger.h
 
-PRIVATE_KERNELFILES = processor_core.h
+PRIVATE_KERNELFILES = processor_core.h core_exclude.h
 
 EXPORT_MI_LIST	= ${DATAFILES} kdp_dyld.h
 

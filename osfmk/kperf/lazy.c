@@ -92,13 +92,8 @@ kperf_lazy_wait_sample(thread_t thread, thread_continue_t continuation,
 	/* take a sample if thread was waiting for longer than threshold */
 	uint64_t wait_time = thread_get_last_wait_duration(thread);
 	if (wait_time > kperf_lazy_wait_time_threshold) {
-		uint64_t time_now = mach_absolute_time();
-		timer_update(&thread->runnable_timer, time_now);
-		timer_update(&thread->system_timer, time_now);
-
 		uint64_t runnable_time = timer_grab(&thread->runnable_timer);
-		uint64_t running_time = timer_grab(&thread->user_timer) +
-		    timer_grab(&thread->system_timer);
+		uint64_t running_time = recount_thread_time_mach(thread);
 
 		BUF_DATA(PERF_LZ_WAITSAMPLE, wait_time, runnable_time, running_time);
 
@@ -134,16 +129,17 @@ kperf_lazy_cpu_sample(thread_t thread, unsigned int flags, bool interrupt)
 
 	/* take a sample if this CPU's last sample time is beyond the threshold */
 	processor_t processor = current_processor();
+#if __arm__ || __arm64__
+	uint64_t time_now = ml_get_speculative_timebase();
+#else // __arm__ || __arm64__
 	uint64_t time_now = mach_absolute_time();
+#endif // !__arm__ && !__arm64__
+
 	uint64_t since_last_sample = time_now - processor->kperf_last_sample_time;
 	if (since_last_sample > kperf_lazy_cpu_time_threshold) {
 		processor->kperf_last_sample_time = time_now;
-		timer_update(&thread->runnable_timer, time_now);
-		timer_update(&thread->system_timer, time_now);
-
 		uint64_t runnable_time = timer_grab(&thread->runnable_timer);
-		uint64_t running_time = timer_grab(&thread->user_timer) +
-		    timer_grab(&thread->system_timer);
+		uint64_t running_time = recount_thread_time_mach(thread);
 
 		BUF_DATA(PERF_LZ_CPUSAMPLE, running_time, runnable_time,
 		    thread->sched_pri, interrupt ? 1 : 0);

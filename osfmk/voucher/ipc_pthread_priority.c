@@ -40,7 +40,6 @@
 #include <kern/ledger.h>
 #include <sys/kdebug.h>
 #include <IOKit/IOBSD.h>
-#include <mach/mach_voucher_attr_control.h>
 #include <pthread/priority_private.h>
 
 ipc_voucher_attr_control_t  ipc_pthread_priority_voucher_attr_control;    /* communication channel from PTHPRIORITY to voucher system */
@@ -90,9 +89,6 @@ ipc_pthread_priority_command(
 	mach_voucher_attr_content_t out_content,
 	mach_voucher_attr_content_size_t *in_out_content_size);
 
-void
-ipc_pthread_priority_release(ipc_voucher_attr_manager_t __assert_only manager);
-
 /*
  * communication channel from voucher system to IPC_PTHREAD_PRIORITY
  */
@@ -101,7 +97,6 @@ const struct ipc_voucher_attr_manager ipc_pthread_priority_manager = {
 	.ivam_get_value        = ipc_pthread_priority_get_value,
 	.ivam_extract_content  = ipc_pthread_priority_extract_content,
 	.ivam_command          = ipc_pthread_priority_command,
-	.ivam_release          = ipc_pthread_priority_release,
 	.ivam_flags            = IVAM_FLAGS_NONE,
 };
 
@@ -280,11 +275,4 @@ ipc_pthread_priority_command(
 	assert(manager == &ipc_pthread_priority_manager);
 
 	return KERN_FAILURE;
-}
-
-void
-ipc_pthread_priority_release(
-	ipc_voucher_attr_manager_t              __assert_only manager)
-{
-	assert(manager == &ipc_pthread_priority_manager);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020 Apple, Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -80,6 +80,7 @@ typedef struct {
 	boolean_t inhibitCache;         /* cache-inhibit */
 	boolean_t physcontig;           /* physically contiguous */
 	boolean_t puredata;             /* data only, no pointers */
+	boolean_t threadSafe;           /* thread safe */
 } IOSKMemoryBufferSpec;
 
 typedef struct {
@@ -92,7 +93,7 @@ IOSKMemoryBufferRef IOSKMemoryBufferCreate( mach_vm_size_t capacity,
     const IOSKMemoryBufferSpec * spec,
     mach_vm_address_t * kvaddr );
 
-IOSKMemoryArrayRef  IOSKMemoryArrayCreate( const IOSKMemoryRef refs[],
+IOSKMemoryArrayRef  IOSKMemoryArrayCreate( const IOSKMemoryRef refs[__counted_by(count)],
     uint32_t count );
 
 void                IOSKMemoryDestroy( IOSK_CONSUMED IOSKMemoryRef reference );

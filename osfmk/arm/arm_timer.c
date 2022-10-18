@@ -80,9 +80,9 @@ timer_intr(__unused int inuser, __unused uint64_t iaddr)
 		cpu_data_ptr->idle_timer_deadline = 0x0ULL;
 		new_idle_timeout_ticks = 0x0ULL;
 
-		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_COMMON, MACHDBG_CODE(DBG_MACH_EXCP_DECI, 3) | DBG_FUNC_START, 0, 0, 0, 0, 0);
+		KDBG_RELEASE(DECR_PM_DEADLINE | DBG_FUNC_START);
 		cpu_data_ptr->idle_timer_notify(cpu_data_ptr->idle_timer_refcon, &new_idle_timeout_ticks);
-		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_COMMON, MACHDBG_CODE(DBG_MACH_EXCP_DECI, 3) | DBG_FUNC_END, 0, 0, 0, 0, 0);
+		KDBG_RELEASE(DECR_PM_DEADLINE | DBG_FUNC_END);
 
 		/* if a new idle timeout was requested set the new idle timer deadline */
 		if (new_idle_timeout_ticks != 0x0ULL) {
@@ -179,9 +179,7 @@ timer_resync_deadlines(void)
 
 		decr = setPop(deadline);
 
-		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
-		    MACHDBG_CODE(DBG_MACH_EXCP_DECI, 1) | DBG_FUNC_NONE,
-		    decr, 2, 0, 0, 0);
+		KDBG_RELEASE(DECR_SET_DEADLINE | DBG_FUNC_NONE, decr, 2);
 	}
 	splx(s);
 }

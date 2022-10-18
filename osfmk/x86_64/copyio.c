@@ -198,25 +198,7 @@ copyio(int copy_type, user_addr_t user_addr, char *kernel_addr,
 		if (__improbable((vm_offset_t)kernel_addr < VM_MIN_KERNEL_AND_KEXT_ADDRESS)) {
 			panic("Invalid copy parameter, copy type: %d, kernel address: %p", copy_type, kernel_addr);
 		}
-		if (__probable(!zalloc_disable_copyio_check)) {
-			zone_t src_zone = NULL;
-			vm_offset_t oob_offs, size;
-
-			size = zone_element_size((void *)kernel_addr,
-			    &src_zone, false, &oob_offs);
-			size -= oob_offs;
-
-			/*
-			 * Size of elements in the permanent zone is not saved as a part of the
-			 * zone's info
-			 */
-			if (__improbable(src_zone && !src_zone->z_permanent &&
-			    size < nbytes)) {
-				panic("copyio: kernel buffer %p "
-				    "has size %lu < nbytes %lu",
-				    (void *)kernel_addr, size, nbytes);
-			}
-		}
+		zone_element_bounds_check((vm_offset_t)kernel_addr, nbytes);
 	}
 
 	/* Sanity and security check for addresses to/from a user */

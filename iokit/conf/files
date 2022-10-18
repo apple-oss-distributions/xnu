@@ -104,6 +104,7 @@ iokit/Tests/TestIOMemoryDescriptor.cpp      optional iokitcpp
 # iokit/Tests/TestCollections.cpp           optional iokitcpp
 iokit/Tests/TestServices/TestIOConnectMapMemoryPortLeak45265408.cpp optional iokitcpp
 iokit/Tests/TestServices/TestIODeviceMemoryRosetta.cpp optional iokitcpp
+iokit/Tests/TestServices/TestIOUserClient2022Entitlements.cpp optional iokitcpp
 iokit/Tests/TestServices/TestIOServiceUserNotification.cpp optional iokitcpp
 
 iokit/Kernel/IOStatistics.cpp				optional iokitcpp
@@ -141,6 +142,9 @@ iokit/Families/IOSystemManagement/IOWatchDogTimer.cpp	optional iokitcpp
 
 # Performance Control
 iokit/Kernel/IOPerfControl.cpp		optional iokitcpp
+
+# Workload Configuration
+iokit/Kernel/IOWorkloadConfig.cpp			optional iokitcpp
 
 # Skywalk
 iokit/bsddev/skywalk/IOSkywalkSupport.cpp		optional iokitcpp skywalk

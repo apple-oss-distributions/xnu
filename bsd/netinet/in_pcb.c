@@ -122,6 +122,10 @@
 
 #include <os/log.h>
 
+#if SKYWALK
+#include <skywalk/namespace/flowidns.h>
+#endif /* SKYWALK */
+
 extern const char *proc_name_address(struct proc *);
 
 static LCK_GRP_DECLARE(inpcb_lock_grp, "inpcb");
@@ -287,7 +291,9 @@ struct inp_flowhash_key {
 	u_int32_t                       infh_rand2;
 };
 
+#if !SKYWALK
 static u_int32_t inp_hash_seed = 0;
+#endif /* !SKYWALK */
 
 static int infc_cmp(const struct inpcb *, const struct inpcb *);
 
@@ -3217,6 +3223,48 @@ inp_clear_want_app_policy(struct inpcb *inp)
 u_int32_t
 inp_calc_flowhash(struct inpcb *inp)
 {
+#if SKYWALK
+
+	uint32_t flowid;
+	struct flowidns_flow_key fk;
+
+	bzero(&fk, sizeof(fk));
+
+	if (inp->inp_vflag & INP_IPV4) {
+		fk.ffk_af = AF_INET;
+		fk.ffk_laddr_v4 = inp->inp_laddr;
+		fk.ffk_raddr_v4 = inp->inp_faddr;
+	} else {
+		fk.ffk_af = AF_INET6;
+		fk.ffk_laddr_v6 = inp->in6p_laddr;
+		fk.ffk_raddr_v6 = inp->in6p_faddr;
+		/* clear embedded scope ID */
+		if (IN6_IS_SCOPE_EMBED(&fk.ffk_laddr_v6)) {
+			fk.ffk_laddr_v6.s6_addr16[1] = 0;
+		}
+		if (IN6_IS_SCOPE_EMBED(&fk.ffk_raddr_v6)) {
+			fk.ffk_raddr_v6.s6_addr16[1] = 0;
+		}
+	}
+
+	fk.ffk_lport = inp->inp_lport;
+	fk.ffk_rport = inp->inp_fport;
+	fk.ffk_proto = (inp->inp_ip_p != 0) ? inp->inp_ip_p :
+	    (uint8_t)SOCK_PROTO(inp->inp_socket);
+	flowidns_allocate_flowid(FLOWIDNS_DOMAIN_INPCB, &fk, &flowid);
+	/* Insert the inp into inp_fc_tree */
+	lck_mtx_lock_spin(&inp_fc_lck);
+	ASSERT(inp->inp_flowhash == 0);
+	ASSERT((inp->inp_flags2 & INP2_IN_FCTREE) == 0);
+	inp->inp_flowhash = flowid;
+	VERIFY(RB_INSERT(inp_fc_tree, &inp_fc_tree, inp) == NULL);
+	inp->inp_flags2 |= INP2_IN_FCTREE;
+	lck_mtx_unlock(&inp_fc_lck);
+
+	return flowid;
+
+#else /* !SKYWALK */
+
 	struct inp_flowhash_key fh __attribute__((aligned(8)));
 	u_int32_t flowhash = 0;
 	struct inpcb *tmp_inp = NULL;
@@ -3268,6 +3316,8 @@ try_again:
 	lck_mtx_unlock(&inp_fc_lck);
 
 	return flowhash;
+
+#endif /* !SKYWALK */
 }
 
 void
@@ -3309,11 +3359,17 @@ inp_fc_getinp(u_int32_t flowhash, u_int32_t flags)
 	}
 
 	if (flags & INPFC_REMOVE) {
+		ASSERT((inp->inp_flags2 & INP2_IN_FCTREE) != 0);
+		lck_mtx_convert_spin(&inp_fc_lck);
 		RB_REMOVE(inp_fc_tree, &inp_fc_tree, inp);
-		lck_mtx_unlock(&inp_fc_lck);
-
 		bzero(&(inp->infc_link), sizeof(inp->infc_link));
+#if SKYWALK
+		VERIFY(inp->inp_flowhash != 0);
+		flowidns_release_flowid(inp->inp_flowhash);
+		inp->inp_flowhash = 0;
+#endif /* !SKYWALK */
 		inp->inp_flags2 &= ~INP2_IN_FCTREE;
+		lck_mtx_unlock(&inp_fc_lck);
 		return NULL;
 	}
 
@@ -3407,9 +3463,11 @@ inp_set_fc_state(struct inpcb *inp, int advcode)
 		switch (advcode) {
 		case FADV_FLOW_CONTROLLED:
 			inp->inp_flags |= INP_FLOW_CONTROLLED;
+			inp->inp_fadv_flow_ctrl_cnt++;
 			break;
 		case FADV_SUSPENDED:
 			inp->inp_flags |= INP_FLOW_SUSPENDED;
+			inp->inp_fadv_suspended_cnt++;
 			soevent(inp->inp_socket,
 			    (SO_FILT_HINT_LOCKED | SO_FILT_HINT_SUSPEND));
 
@@ -3630,6 +3688,7 @@ inp_update_necp_policy(struct inpcb *inp, struct sockaddr *override_local_addr, 
 	    IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr)) {
 		// If we should rescope, and the socket is not yet bound
 		inp_bindif(inp, necp_socket_get_rescope_if_index(inp), NULL);
+		inp->inp_flags2 |= INP2_SCOPED_BY_NECP;
 	}
 }
 #endif /* NECP */

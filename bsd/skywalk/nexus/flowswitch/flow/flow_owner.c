@@ -54,7 +54,12 @@ flow_owner_buckets_alloc(size_t fob_cnt, size_t *fob_sz, size_t *tot_sz)
 
 	/* total size includes extra for alignment requirements */
 	*tot_sz = fob_tot_sz = (sizeof(void *) + (fob_cnt * (*fob_sz)) + cache_sz);
+	// rdar://88962126
+	/* BEGIN IGNORE CODESTYLE */
+	__typed_allocators_ignore_push
 	fob_buf = sk_alloc(fob_tot_sz, Z_WAITOK, skmem_tag_fsw_fob_hash);
+	__typed_allocators_ignore_pop
+	/* END IGNORE CODESTYLE */
 	if (__improbable(fob_buf == NULL)) {
 		return NULL;
 	}
@@ -91,7 +96,10 @@ flow_owner_buckets_free(struct flow_owner_bucket *fob, size_t tot_sz)
 	fob_buf = *fob_pbuf;
 	SK_DF(SK_VERB_MEM, "fob 0x%llx (fob_buf 0x%llx) FREE", SK_KVA(fob),
 	    SK_KVA(fob_buf));
+	// rdar://88962126
+	__typed_allocators_ignore_push
 	sk_free(fob_buf, tot_sz);
+	__typed_allocators_ignore_pop
 }
 
 void
@@ -222,11 +230,13 @@ flow_owner_bucket_activate_nx_port_common(struct flow_owner_bucket *fob,
 			VERIFY(fe->fe_nx_port == fo->fo_nx_port);
 			if (fe->fe_adv_idx != FLOWADV_IDX_NONE) {
 				if (mode == NA_ACTIVATE_MODE_ON) {
-					na_flowadv_entry_alloc(fo->fo_nx_port_na,
-					    fe->fe_uuid, fe->fe_adv_idx);
+					na_flowadv_entry_alloc(
+						fo->fo_nx_port_na, fe->fe_uuid,
+						fe->fe_adv_idx, fe->fe_flowid);
 				} else if (fo->fo_nx_port_na != NULL) {
 					na_flowadv_entry_free(fo->fo_nx_port_na,
-					    fe->fe_uuid, fe->fe_adv_idx);
+					    fe->fe_uuid, fe->fe_adv_idx,
+					    fe->fe_flowid);
 				}
 			}
 		}

@@ -9,6 +9,7 @@
 #include <sys/sysctl.h>
 
 #include <darwintest.h>
+#include "test_utils.h"
 
 T_GLOBAL_META(T_META_RADAR_COMPONENT_NAME("xnu"),
     T_META_RADAR_COMPONENT_VERSION("scheduler"));
@@ -81,7 +82,7 @@ get_ncpu(void)
 #define SPINNER_THREAD_LOAD_FACTOR (4)
 
 T_DECL(test_cluster_bound_thread_timeshare, "Make sure the low priority bound threads get CPU in the presence of non-bound CPU spinners",
-    T_META_BOOTARGS_SET("enable_skstb=1"), T_META_ASROOT(true), T_META_ENABLED(TARGET_CPU_ARM64 && TARGET_OS_OSX))
+    T_META_BOOTARGS_SET("enable_skstb=1"), T_META_ASROOT(true), T_META_ENABLED(TARGET_CPU_ARM64 && TARGET_OS_OSX), XNU_T_META_SOC_SPECIFIC)
 {
 	pthread_setname_np("main thread");
 

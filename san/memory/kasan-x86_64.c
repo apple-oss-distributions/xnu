@@ -34,6 +34,7 @@
 #include <i386/proc_reg.h>
 #include <i386/machine_routines.h>
 #include <kern/debug.h>
+#include <kern/thread.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_param.h>
 #include <sys/param.h>
@@ -52,6 +53,8 @@
 #define STOLEN_MEM_PERCENT  25UL
 #define STOLEN_MEM_BYTES    0
 
+extern thread_t kasan_lock_holder;
+
 extern uint64_t *IdlePML4;
 #define phys2virt(x) ((uintptr_t)(x) + physmap_base)
 
@@ -61,6 +64,7 @@ vm_offset_t shadow_pnext;
 unsigned shadow_stolen_idx;
 
 static vm_offset_t zero_superpage_phys;
+decl_simple_lock_data(, kasan_vm_lock);
 
 typedef struct {
 	unsigned int pml4   : 9;
@@ -360,4 +364,30 @@ kasan_is_shadow_mapped(uintptr_t shadowp)
 	}
 
 	return false;
+}
+
+void
+kasan_lock_init(void)
+{
+	simple_lock_init(&kasan_vm_lock, 0);
+}
+
+/*
+ * KASAN may be called from interrupt context, so we disable interrupts to
+ * ensure atomicity manipulating the global objects.
+ */
+void
+kasan_lock(boolean_t *b)
+{
+	*b = ml_set_interrupts_enabled(false);
+	simple_lock(&kasan_vm_lock, LCK_GRP_NULL);
+	kasan_lock_holder = current_thread();
+}
+
+void
+kasan_unlock(boolean_t b)
+{
+	kasan_lock_holder = THREAD_NULL;
+	simple_unlock(&kasan_vm_lock);
+	ml_set_interrupts_enabled(b);
 }

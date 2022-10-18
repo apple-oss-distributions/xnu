@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -223,6 +223,9 @@ struct inpcb {
 		short   inp6_hops;
 	} inp_depend6;
 
+	uint64_t inp_fadv_flow_ctrl_cnt;
+	uint64_t inp_fadv_suspended_cnt;
+
 	caddr_t inp_saved_ppcb;         /* place to save pointer while cached */
 #if IPSEC
 	struct inpcbpolicy *inp_sp;     /* for IPsec */
@@ -232,6 +235,8 @@ struct inpcb {
 	struct necp_inpcb_result inp_policyresult;
 	uuid_t necp_client_uuid;
 	necp_client_flow_cb necp_cb;
+	u_int8_t *inp_resolver_signature;
+	size_t inp_resolver_signature_length;
 #endif
 #if SKYWALK
 	netns_token inp_netns_token;    /* shared namespace state */
@@ -732,6 +737,7 @@ struct inpcbinfo {
 #define INP2_EXTERNAL_PORT      0x00000400 /* The port is registered externally, for NECP listeners */
 #define INP2_NO_IFF_CONSTRAINED 0x00000800 /* do not use constrained interface */
 #define INP2_DONTFRAG           0x00001000 /* mark the DF bit in the IP header to avoid fragmentation */
+#define INP2_SCOPED_BY_NECP     0x00002000 /* NECP scoped the pcb */
 
 /*
  * Flags passed to in_pcblookup*() functions.

@@ -1,4 +1,4 @@
-/* Copyright (c) (2012,2013,2014,2015,2016,2017,2018,2019) Apple Inc. All rights reserved.
+/* Copyright (c) (2012,2013,2014,2015,2016,2017,2018,2019,2021) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to 
@@ -12,16 +12,10 @@
 #ifndef _CORECRYPTO_CCDER_H_
 #define _CORECRYPTO_CCDER_H_
 
+#include <corecrypto/cc.h>
 #include <corecrypto/ccasn1.h>
 #include <corecrypto/ccn.h>
-
-#define CCDER_MULTIBYTE_TAGS 1
-
-#ifdef CCDER_MULTIBYTE_TAGS
-typedef unsigned long ccder_tag;
-#else
-typedef uint8_t ccder_tag;
-#endif
+#include <corecrypto/ccder_blob.h>
 
 /* DER types to be used with ccder_decode and ccder_encode functions. */
 #define CCDER_EOL CCASN1_EOL
@@ -88,7 +82,7 @@ typedef uint8_t ccder_tag;
 #define CCDER_CONSTRUCTED_SET (CCDER_SET | CCDER_CONSTRUCTED)
 #define CCDER_CONSTRUCTED_SEQUENCE (CCDER_SEQUENCE | CCDER_CONSTRUCTED)
 
-// MARK: ccder_sizeof_ functions
+// MARK: - ccder_sizeof_ functions
 
 /* Returns the size of an asn1 encoded item of length l in bytes. */
 CC_CONST
@@ -102,6 +96,7 @@ size_t ccder_sizeof_implicit_octet_string(ccder_tag implicit_tag, cc_size n, con
 
 CC_CONST
 size_t ccder_sizeof_implicit_raw_octet_string(ccder_tag implicit_tag, size_t s_size);
+
 CC_CONST
 size_t ccder_sizeof_implicit_uint64(ccder_tag implicit_tag, uint64_t value);
 
@@ -126,69 +121,74 @@ size_t ccder_sizeof_tag(ccder_tag tag);
 CC_CONST
 size_t ccder_sizeof_uint64(uint64_t value);
 
-// MARK: ccder_encode_ functions.
+CC_PURE
+size_t ccder_sizeof_eckey(size_t priv_size, ccoid_t oid, size_t pub_size);
+
+/* alias of ccder_sizeof_eckey */
+CC_PURE
+size_t ccder_encode_eckey_size(size_t priv_size, ccoid_t oid, size_t pub_size);
+
+/* All of the original functions are unavailable in a ptrcheck build. */
+// MARK: - Encode/decode functions, unavailable in ptrcheck
 
 /* Encode a tag backwards, der_end should point to one byte past the end of
    destination for the tag, returns a pointer to the first byte of the tag.
    Returns NULL if there is an encoding error. */
-CC_NONNULL((2))
+CC_NONNULL((2)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_tag(ccder_tag tag, const uint8_t *der, uint8_t *der_end);
 
 /* Returns a pointer to the start of the len field.  returns NULL if there
  is an encoding error. */
-CC_NONNULL((2))
+CC_NONNULL((2)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_len(size_t len, const uint8_t *der, uint8_t *der_end);
 
 /* der_end should point to the first byte of the content of this der item. */
-CC_NONNULL((3))
+CC_NONNULL((3)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_tl(ccder_tag tag, size_t len, const uint8_t *der, uint8_t *der_end);
 
-CC_PURE CC_NONNULL((2)) uint8_t *ccder_encode_body_nocopy(size_t size, const uint8_t *der, uint8_t *der_end);
+CC_PURE CC_NONNULL((2)) cc_ptrcheck_unavailable()
+uint8_t *ccder_encode_body_nocopy(size_t size, const uint8_t *der, uint8_t *der_end);
 
 /* Encode the tag and length of a constructed object.  der is the lower
    bound, der_end is one byte paste where we want to write the length and
    body_end is one byte past the end of the body of the der object we are
    encoding the tag and length of. */
-CC_NONNULL((2, 3))
+CC_NONNULL((2, 3)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_constructed_tl(ccder_tag tag, const uint8_t *body_end, const uint8_t *der, uint8_t *der_end);
 
-/* Encodes oid into der and returns
- der + ccder_sizeof_oid(oid). */
-CC_NONNULL((1, 2))
+/* Encodes oid into der and returns der + ccder_sizeof_oid(oid). */
+CC_NONNULL((1, 2)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_oid(ccoid_t oid, const uint8_t *der, uint8_t *der_end);
 
-CC_NONNULL((3, 4))
+CC_NONNULL((3, 4)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_implicit_integer(ccder_tag implicit_tag, cc_size n, const cc_unit *s, const uint8_t *der, uint8_t *der_end);
 
-CC_NONNULL((2, 3))
+CC_NONNULL((2, 3)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_integer(cc_size n, const cc_unit *s, const uint8_t *der, uint8_t *der_end);
 
-CC_NONNULL((3))
+CC_NONNULL((3)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_implicit_uint64(ccder_tag implicit_tag, uint64_t value, const uint8_t *der, uint8_t *der_end);
 
-CC_NONNULL((2))
+CC_NONNULL((2)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_uint64(uint64_t value, const uint8_t *der, uint8_t *der_end);
 
-CC_NONNULL((3, 4))
-uint8_t *
-ccder_encode_implicit_octet_string(ccder_tag implicit_tag, cc_size n, const cc_unit *s, const uint8_t *der, uint8_t *der_end);
+CC_NONNULL((3, 4)) cc_ptrcheck_unavailable()
+uint8_t *ccder_encode_implicit_octet_string(ccder_tag implicit_tag, cc_size n, const cc_unit *s, const uint8_t *der, uint8_t *der_end);
 
-CC_NONNULL((2, 3))
+CC_NONNULL((2, 3)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_octet_string(cc_size n, const cc_unit *s, const uint8_t *der, uint8_t *der_end);
 
-CC_NONNULL((3, 4))
+CC_NONNULL((3, 4)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_implicit_raw_octet_string(ccder_tag implicit_tag,
                                                 size_t s_size,
                                                 const uint8_t *s,
                                                 const uint8_t *der,
                                                 uint8_t *der_end);
 
-CC_NONNULL((2, 3))
+CC_NONNULL((2, 3)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_raw_octet_string(size_t s_size, const uint8_t *s, const uint8_t *der, uint8_t *der_end);
 
-size_t ccder_encode_eckey_size(size_t priv_size, ccoid_t oid, size_t pub_size);
-
-CC_NONNULL((2, 5, 6, 7))
+CC_NONNULL((2, 5, 6)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_eckey(size_t priv_size,
                             const uint8_t *priv_key,
                             ccoid_t oid,
@@ -201,17 +201,15 @@ uint8_t *ccder_encode_eckey(size_t priv_size,
    It's inefficient – especially when you already have to convert to get to
    the form for the body.
    see encode integer for the right way to unify conversion and insertion */
-CC_NONNULL((3))
+CC_NONNULL((3)) cc_ptrcheck_unavailable()
 uint8_t *ccder_encode_body(size_t size, const uint8_t *body, const uint8_t *der, uint8_t *der_end);
-
-// MARK: ccder_decode_ functions.
 
 /* Returns a pointer to the start of the length field, and returns the decoded tag in tag.
  returns NULL if there is a decoding error. */
-CC_NONNULL((1, 3))
+CC_NONNULL((1, 3)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_tag(ccder_tag *tagp, const uint8_t *der, const uint8_t *der_end);
 
-CC_NONNULL((1, 3))
+CC_NONNULL((1, 3)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_len(size_t *lenp, const uint8_t *der, const uint8_t *der_end);
 
 /*!
@@ -224,12 +222,12 @@ const uint8_t *ccder_decode_len(size_t *lenp, const uint8_t *der, const uint8_t 
 
  @result     First byte after the parsed length or NULL if the length is not valid (i.e. when the length isn't DER encoded)
  */
-CC_NONNULL((1, 3))
+CC_NONNULL((1, 3)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_len_strict(size_t *lenp, const uint8_t *der, const uint8_t *der_end);
 
 /* Returns a pointer to the start of the der object, and returns the length in len.
  returns NULL if there is a decoding error. */
-CC_NONNULL((2, 4))
+CC_NONNULL((2, 4)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_tl(ccder_tag expected_tag, size_t *lenp, const uint8_t *der, const uint8_t *der_end);
 
 /*!
@@ -243,12 +241,14 @@ const uint8_t *ccder_decode_tl(ccder_tag expected_tag, size_t *lenp, const uint8
 
  @result     Pointer to the DER object with the length contained in `lenp` otherwise NULL.
  */
-CC_NONNULL((2, 4))
+CC_NONNULL((2, 4)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_tl_strict(ccder_tag expected_tag, size_t *lenp, const uint8_t *der, const uint8_t *der_end);
 
-CC_NONNULL((2, 4))
-const uint8_t *
-ccder_decode_constructed_tl(ccder_tag expected_tag, const uint8_t **body_end, const uint8_t *der, const uint8_t *der_end);
+CC_NONNULL((2, 4)) cc_ptrcheck_unavailable()
+const uint8_t *ccder_decode_constructed_tl(ccder_tag expected_tag,
+                                           const uint8_t **body_end,
+                                           const uint8_t *der,
+                                           const uint8_t *der_end);
 
 /*!
  @function   ccder_decode_constructed_tl_strict
@@ -262,10 +262,10 @@ ccder_decode_constructed_tl(ccder_tag expected_tag, const uint8_t **body_end, co
  @result     Pointer to the first DER object within the constructed object and the length of the total constructed object
  contained in `lenp`; NULL otherwise.
  */
-CC_NONNULL((2, 4))
+CC_NONNULL((2, 4)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_constructed_tl_strict(ccder_tag expected_tag, const uint8_t **body_end, const uint8_t *der, const uint8_t *der_end);
 
-CC_NONNULL((1, 3))
+CC_NONNULL((1, 3)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_sequence_tl(const uint8_t **body_end, const uint8_t *der, const uint8_t *der_end);
 
 /*!
@@ -278,7 +278,7 @@ const uint8_t *ccder_decode_sequence_tl(const uint8_t **body_end, const uint8_t 
 
  @result     Pointer to the first DER object within the sequence otherwise NULL.
  */
-CC_NONNULL((1, 3))
+CC_NONNULL((1, 3)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_sequence_tl_strict(const uint8_t **body_end, const uint8_t *der, const uint8_t *der_end);
 
 /*!
@@ -292,8 +292,7 @@ const uint8_t *ccder_decode_sequence_tl_strict(const uint8_t **body_end, const u
  @result     First byte after the parsed integer or
         NULL if the integer is not valid (negative) or reach der_end when reading the integer
  */
-
-CC_NONNULL((3))
+CC_NONNULL((3)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_uint_n(cc_size *n, const uint8_t *der, const uint8_t *der_end);
 
 /*!
@@ -310,7 +309,7 @@ NULL if the integer is not valid (negative)
             reach der_end when reading the integer
             n cc_unit is not enough to represent the integer
  */
-CC_NONNULL((4))
+CC_NONNULL((4)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_uint(cc_size n, cc_unit *r, const uint8_t *der, const uint8_t *der_end);
 
 /*!
@@ -324,16 +323,16 @@ const uint8_t *ccder_decode_uint(cc_size n, cc_unit *r, const uint8_t *der, cons
 
  @result     First byte after the parsed integer or NULL if the integer is not valid.
  */
-CC_NONNULL((4))
+CC_NONNULL((4)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_uint_strict(cc_size n, cc_unit *r, const uint8_t *der, const uint8_t *der_end);
 
-CC_NONNULL((3))
+CC_NONNULL((3)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_uint64(uint64_t *r, const uint8_t *der, const uint8_t *der_end);
 
 /* Decode SEQUENCE { r, s -- (unsigned)integer } in ber into r and s.
    Returns NULL on decode errors, returns pointer just past the end of the
    sequence of integers otherwise. */
-CC_NONNULL((2, 3, 5))
+CC_NONNULL((2, 3, 5)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_seqii(cc_size n, cc_unit *r, cc_unit *s, const uint8_t *der, const uint8_t *der_end);
 
 /*!
@@ -348,16 +347,29 @@ const uint8_t *ccder_decode_seqii(cc_size n, cc_unit *r, cc_unit *s, const uint8
 
  @result     Null on error, otherwise a pointer just past the end of the sequence buffer
  */
-CC_NONNULL((2, 3, 5))
+CC_NONNULL((2, 3, 5)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_seqii_strict(cc_size n, cc_unit *r, cc_unit *s, const uint8_t *der, const uint8_t *der_end);
 
-CC_NONNULL((1, 3))
+/*!
+ @function   ccder_decode_oid
+ @abstract   Parse a DER sequence representing an oid.
+
+ @param      oidp     Pointer to OID
+ @param      der      Beginning of input DER buffer
+ @param      der_end  End of input DER buffer
+
+ @result     Null on error, otherwise a pointer just past the end of the sequence buffer.
+ 
+ @warning    In case of error, *oidp is set to NULL.
+             Otherwise, *oidp is a pointer to a buffer of "unsigned char" of size >= 2.
+ */
+CC_NONNULL((1, 3)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_oid(ccoid_t *oidp, const uint8_t *der, const uint8_t *der_end);
 
-CC_NONNULL((1, 2, 4))
+CC_NONNULL((1, 2, 4)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_bitstring(const uint8_t **bit_string, size_t *bit_length, const uint8_t *der, const uint8_t *der_end);
 
-CC_NONNULL((1, 2, 3, 4, 5, 6, 8))
+CC_NONNULL((1, 2, 3, 4, 5, 6, 7)) cc_ptrcheck_unavailable()
 const uint8_t *ccder_decode_eckey(uint64_t *version,
                                   size_t *priv_size,
                                   const uint8_t **priv_key,
@@ -366,6 +378,8 @@ const uint8_t *ccder_decode_eckey(uint64_t *version,
                                   const uint8_t **pub_key,
                                   const uint8_t *der,
                                   const uint8_t *der_end);
+
+// MARK: -
 
 #define CC_EC_OID_SECP192R1                                           \
     {                                                                 \

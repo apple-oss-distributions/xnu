@@ -64,6 +64,7 @@ SECURITY_READ_ONLY_LATE(bool) disable_serial_output = false;
 SECURITY_READ_ONLY_LATE(bool) disable_serial_output = true;
 #endif
 SECURITY_READ_ONLY_LATE(bool) disable_iolog_serial_output = false;
+SECURITY_READ_ONLY_LATE(bool) enable_dklog_serial_output = false;
 
 static SIMPLE_LOCK_DECLARE(kprintf_lock, 0);
 

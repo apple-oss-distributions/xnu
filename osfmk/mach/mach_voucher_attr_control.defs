@@ -27,14 +27,20 @@
  */
 
 subsystem
-#if	KERNEL_SERVER
-	  KernelServer
-#endif	/* KERNEL_SERVER */
+#if	KERNEL_SERVER || KOBJECT_SERVER
+	KernelServer
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 		       mach_voucher_attr_control 5600;
 
 #include <mach/std_types.defs>
 #include <mach/mach_types.defs>
 
+/* Obsolete Interfaces */
+
+#if KERNEL_SERVER
+skip; /* was mach_voucher_attr_control_get_values */
+skip; /* was mach_voucher_attr_control_create_mach_voucher */
+#else
 /* Extract the given voucher-control's value-handle from the supplied voucher */
 routine mach_voucher_attr_control_get_values(
 		control		: ipc_voucher_attr_control_t;
@@ -46,3 +52,4 @@ routine mach_voucher_attr_control_create_mach_voucher(
 		control		: ipc_voucher_attr_control_t;
 		recipes		: mach_voucher_attr_raw_recipe_array_t;
 	out	voucher		: ipc_voucher_t);
+#endif

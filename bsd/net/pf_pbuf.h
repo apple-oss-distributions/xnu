@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -49,6 +49,7 @@ struct pbuf_memory {
 	uint8_t pm_proto;
 	uint8_t pm_flowsrc;
 	uint32_t pm_flowid;
+	uint32_t pm_flow_gencnt;
 	uint32_t pm_flags;
 	struct pf_mtag pm_pftag;
 	struct pf_fragment_tag  pm_pf_fragtag;
@@ -73,6 +74,7 @@ typedef struct pbuf {
 	uint8_t         *pb_proto;
 	uint8_t         *pb_flowsrc;
 	uint32_t        *pb_flowid;
+	uint32_t        *pb_flow_gencnt;
 	uint32_t        *pb_flags;
 	struct pf_mtag  *pb_pftag;
 	struct pf_fragment_tag  *pb_pf_fragtag;

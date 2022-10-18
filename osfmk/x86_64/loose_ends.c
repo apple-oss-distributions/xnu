@@ -61,6 +61,7 @@
 #include <mach/boolean.h>
 #include <mach/i386/vm_types.h>
 #include <mach/i386/vm_param.h>
+#include <kern/iotrace.h>
 #include <kern/kern_types.h>
 #include <kern/misc_protos.h>
 #include <kern/locks.h>
@@ -360,9 +361,7 @@ ml_phys_read_data(uint64_t paddr, int size)
 	if (__improbable(timeread == TRUE)) {
 		eabs = mach_absolute_time();
 
-#if DEVELOPMENT || DEBUG
 		iotrace(IOTRACE_PHYS_READ, 0, paddr, size, result, sabs, eabs - sabs);
-#endif
 
 		if (__improbable((eabs - sabs) > report_phy_read_delay)) {
 			(void)ml_set_interrupts_enabled(istate);
@@ -510,9 +509,7 @@ ml_phys_write_data(uint64_t paddr, unsigned long long data, int size)
 	if (__improbable(timewrite == TRUE)) {
 		eabs = mach_absolute_time();
 
-#if DEVELOPMENT || DEBUG
 		iotrace(IOTRACE_PHYS_WRITE, 0, paddr, size, data, sabs, eabs - sabs);
-#endif
 
 		if (__improbable((eabs - sabs) > report_phy_write_delay)) {
 			(void)ml_set_interrupts_enabled(istate);
@@ -643,9 +640,7 @@ ml_port_io_read(uint16_t ioport, int size)
 	if (__improbable(timeread == TRUE)) {
 		eabs = mach_absolute_time();
 
-#if DEVELOPMENT || DEBUG
 		iotrace(IOTRACE_PORTIO_READ, 0, ioport, size, result, sabs, eabs - sabs);
-#endif
 
 		if (__improbable((eabs - sabs) > report_phy_read_delay)) {
 			(void)ml_set_interrupts_enabled(istate);
@@ -714,9 +709,7 @@ ml_port_io_write(uint16_t ioport, uint32_t val, int size)
 	if (__improbable(timewrite == TRUE)) {
 		eabs = mach_absolute_time();
 
-#if DEVELOPMENT || DEBUG
 		iotrace(IOTRACE_PORTIO_WRITE, 0, ioport, size, val, sabs, eabs - sabs);
-#endif
 
 		if (__improbable((eabs - sabs) > report_phy_write_delay)) {
 			(void)ml_set_interrupts_enabled(istate);
@@ -822,7 +815,6 @@ ml_probe_read_64(addr64_t paddr64, unsigned int *val)
 	*val = ml_phys_read_64(paddr64);
 	return TRUE;
 }
-
 
 #undef bcmp
 int

@@ -54,7 +54,7 @@ extern uint64_t _rtc_tsc_to_nanoseconds(
 	uint64_t    value,
 	pal_rtc_nanotime_t      *rntp);
 
-extern void     rtclock_intr(x86_saved_state_t *regs);
+extern int     rtclock_intr(x86_saved_state_t *regs);
 
 
 /*

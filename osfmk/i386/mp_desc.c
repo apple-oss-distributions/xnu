@@ -543,10 +543,9 @@ static void
 cpu_data_startup_init(void)
 {
 	int flags = KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_PERMANENT |
-	    KMA_ZERO | KMA_KOBJECT;
+	    KMA_ZERO | KMA_KOBJECT | KMA_NOFAIL;
 	uint32_t cpus = max_cpus_from_firmware;
 	vm_size_t size = percpu_section_size() * (cpus - 1);
-	kern_return_t kr;
 
 	percpu_base.size = percpu_section_size();
 	if (cpus == 0) {
@@ -557,12 +556,8 @@ cpu_data_startup_init(void)
 		return;
 	}
 
-	kr = kernel_memory_allocate(kernel_map, &percpu_base.start,
-	    round_page(size) + 2 * PAGE_SIZE, 0,
-	    flags, VM_KERN_MEMORY_CPU);
-	if (kr != KERN_SUCCESS) {
-		panic("percpu: kmem_alloc failed (%d)", kr);
-	}
+	kmem_alloc(kernel_map, &percpu_base.start,
+	    round_page(size) + ptoa(2), flags, VM_KERN_MEMORY_CPU);
 
 	percpu_base.start += PAGE_SIZE - percpu_section_start();
 	percpu_base.end    = percpu_base.start + size - 1;
@@ -572,7 +567,6 @@ STARTUP(PERCPU, STARTUP_RANK_FIRST, cpu_data_startup_init);
 cpu_data_t *
 cpu_data_alloc(boolean_t is_boot_cpu)
 {
-	int             ret;
 	cpu_data_t      *cdp;
 
 	if (is_boot_cpu) {
@@ -609,14 +603,10 @@ cpu_data_alloc(boolean_t is_boot_cpu)
 	/*
 	 * Allocate interrupt stack:
 	 */
-	ret = kmem_alloc(kernel_map,
-	    (vm_offset_t *) &cdp->cpu_int_stack_top,
-	    INTSTACK_SIZE, VM_KERN_MEMORY_CPU);
-	if (ret != KERN_SUCCESS) {
-		panic("cpu_data_alloc() int stack failed, ret=%d", ret);
-	}
-	bzero((void*) cdp->cpu_int_stack_top, INTSTACK_SIZE);
-	cdp->cpu_int_stack_top += INTSTACK_SIZE;
+	kmem_alloc(kernel_map, (vm_offset_t *)&cdp->cpu_int_stack_top,
+	    INTSTACK_SIZE + ptoa(2), KMA_NOFAIL | KMA_PERMANENT | KMA_ZERO |
+	    KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_KOBJECT, VM_KERN_MEMORY_CPU);
+	cdp->cpu_int_stack_top += INTSTACK_SIZE + PAGE_SIZE;
 
 	/*
 	 * Allocate descriptor table:
@@ -633,10 +623,9 @@ cpu_data_alloc(boolean_t is_boot_cpu)
 		 * Allocate LDT
 		 */
 		vm_offset_t ldtalloc = 0, ldtallocsz = round_page_64(MAX_CPUS * sizeof(struct real_descriptor) * LDTSZ);
-		ret = kmem_alloc(kernel_map, (vm_offset_t *) &ldtalloc, ldtallocsz, VM_KERN_MEMORY_CPU);
-		if (ret != KERN_SUCCESS) {
-			panic("cpu_data_alloc() ldt failed, kmem_alloc=%d", ret);
-		}
+
+		kmem_alloc(kernel_map, (vm_offset_t *)&ldtalloc,
+		    ldtallocsz, KMA_NOFAIL | KMA_KOBJECT, VM_KERN_MEMORY_CPU);
 
 		simple_lock(&ncpus_lock, LCK_GRP_NULL);
 		if (dyn_ldts == NULL) {
@@ -781,17 +770,15 @@ valid_user_segment_selectors(uint16_t cs,
 void
 cpu_data_realloc(void)
 {
-	int             ret;
 	vm_offset_t     istk;
 	cpu_data_t      *cdp;
 	boolean_t       istate;
 
-	ret = kmem_alloc(kernel_map, &istk, INTSTACK_SIZE, VM_KERN_MEMORY_CPU);
-	if (ret != KERN_SUCCESS) {
-		panic("cpu_data_realloc() stack alloc, ret=%d", ret);
-	}
-	bzero((void*) istk, INTSTACK_SIZE);
-	istk += INTSTACK_SIZE;
+	kmem_alloc(kernel_map, &istk,
+	    INTSTACK_SIZE + ptoa(2), KMA_NOFAIL | KMA_PERMANENT | KMA_ZERO |
+	    KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_KOBJECT, VM_KERN_MEMORY_CPU);
+
+	istk += INTSTACK_SIZE + PAGE_SIZE;
 
 	cdp = &scdatas[0];
 

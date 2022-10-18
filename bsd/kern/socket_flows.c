@@ -261,7 +261,7 @@ soflow_fill_hash_entry_from_address(struct soflow_hash_entry *entry, bool isLoca
 	switch (addr->sa_family) {
 	case AF_INET:
 		sin = satosin(addr);
-		if (sin->sin_len != sizeof(*sin)) {
+		if (sin->sin_len < sizeof(*sin)) {
 			return FALSE;
 		}
 		if (isLocal == TRUE) {
@@ -289,7 +289,7 @@ soflow_fill_hash_entry_from_address(struct soflow_hash_entry *entry, bool isLoca
 		return TRUE;
 	case AF_INET6:
 		sin6 = satosin6(addr);
-		if (sin6->sin6_len != sizeof(*sin6)) {
+		if (sin6->sin6_len < sizeof(*sin6)) {
 			return FALSE;
 		}
 		if (isLocal == TRUE) {

@@ -101,6 +101,11 @@ typedef const struct _libkernel_voucher_functions {
 	voucher_mach_msg_state_t (*voucher_mach_msg_adopt)(mach_msg_header_t*);
 	void (*voucher_mach_msg_revert)(voucher_mach_msg_state_t);
 
+	/* version 2 is skipped */
+
+	/* The following functions are included in version 3 of this structure */
+	mach_msg_size_t (*voucher_mach_msg_fill_aux)(mach_msg_aux_header_t*, mach_msg_size_t);
+
 	/* Subsequent versions must only add pointers! */
 } *_libkernel_voucher_functions_t;
 

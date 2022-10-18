@@ -555,7 +555,7 @@ T_DECL(kperf_timer_not_oversampling,
 
 	// Track the decrementer's latency values to find any unexpectedly long
 	// interrupt latencies that could affect the firing cadence.
-	ktrace_events_single(s, MACHDBG_CODE(DBG_MACH_EXCP_DECI, 0),
+	ktrace_events_single(s, DECR_TRAP_LATENCY,
 			^(struct trace_point *tp) {
 		uint64_t cur_ns = relns_from_abs(s, tp->timestamp);
 		uint64_t latency_ns = ns_from_abs(s, 0 - tp->arg1);

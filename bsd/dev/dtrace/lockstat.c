@@ -41,8 +41,6 @@
 
 #include <kern/lock_stat.h>
 
-#define membar_producer dtrace_membar_producer
-
 #define PROBE_ARGS0(a, b, c, d, e) "\000"
 #define PROBE_ARGS1(a, b, c, d, e) a "\000"
 #define PROBE_ARGS2(a, b, c, d, e) a "\000" b "\000"
@@ -57,7 +55,7 @@
 
 #if defined(__x86_64__)
 #define LOCKSTAT_AFRAMES 1
-#elif   defined(__arm__) || defined(__arm64__)
+#elif   defined(__arm64__)
 #define LOCKSTAT_AFRAMES 2
 #else
 #error "architecture not supported"
@@ -74,24 +72,17 @@ typedef struct lockstat_probe {
 lockstat_probe_t lockstat_probes[] =
 {
 	// Mutex probes
-	LOCKSTAT_PROBE(LS_LCK_MTX_LOCK, LSA_ACQUIRE, LS_LCK_MTX_LOCK_ACQUIRE, "lck_mtx_t"),
-	LOCKSTAT_PROBE(LS_LCK_MTX_LOCK, LSA_SPIN, LS_LCK_MTX_LOCK_ADAPTIVE_SPIN, "lck_mtx_t", "uint64_t"),
-	LOCKSTAT_PROBE(LS_LCK_MTX_LOCK, LSA_BLOCK, LS_LCK_MTX_LOCK_BLOCK, "lck_mtx_t", "uint64_t"),
-	LOCKSTAT_PROBE(LS_LCK_MTX_LOCK_SPIN, LSA_SPIN, LS_LCK_MTX_LOCK_SPIN_SPIN, "lck_mtx_t", "uint64_t"),
+	// .. acquire/release
+	LOCKSTAT_PROBE(LS_LCK_MTX_LOCK, LSA_ACQUIRE, LS_LCK_MTX_LOCK_ACQUIRE, "lck_mtx_t", "lck_grp_t"),
+	LOCKSTAT_PROBE(LS_LCK_MTX_LOCK_SPIN, LSA_ACQUIRE, LS_LCK_MTX_LOCK_SPIN_ACQUIRE, "lck_mtx_t", "lck_grp_t"),
+	LOCKSTAT_PROBE(LS_LCK_MTX_TRY_LOCK, LSA_ACQUIRE, LS_LCK_MTX_TRY_LOCK_ACQUIRE, "lck_mtx_t", "lck_grp_t"),
+	LOCKSTAT_PROBE(LS_LCK_MTX_TRY_LOCK_SPIN, LSA_ACQUIRE, LS_LCK_MTX_TRY_LOCK_SPIN_ACQUIRE, "lck_mtx_t", "lck_grp_t"),
+	LOCKSTAT_PROBE(LS_LCK_MTX_UNLOCK, LSA_RELEASE, LS_LCK_MTX_UNLOCK_RELEASE, "lck_mtx_t", "lck_grp_t"),
 
-	LOCKSTAT_PROBE(LS_LCK_MTX_LOCK_SPIN, LSA_ACQUIRE, LS_LCK_MTX_LOCK_SPIN_ACQUIRE, "lck_mtx_t"),
-
-	LOCKSTAT_PROBE(LS_LCK_MTX_TRY_LOCK, LSA_ACQUIRE, LS_LCK_MTX_TRY_LOCK_ACQUIRE, "lck_mtx_t"),
-	LOCKSTAT_PROBE(LS_LCK_MTX_TRY_LOCK_SPIN, LSA_ACQUIRE, LS_LCK_MTX_TRY_LOCK_SPIN_ACQUIRE, "lck_mtx_t"),
-	LOCKSTAT_PROBE(LS_LCK_MTX_UNLOCK, LSA_RELEASE, LS_LCK_MTX_UNLOCK_RELEASE, "lck_mtx_t"),
-	// Extended mutexes are only implemented on Intel
-#if defined(__x86_64__)
-	LOCKSTAT_PROBE(LS_LCK_MTX_EXT_LOCK, LSA_SPIN, LS_LCK_MTX_EXT_LOCK_SPIN_SPIN, "lck_mtx_t", "uint64_t"),
-	LOCKSTAT_PROBE(LS_LCK_MTX_EXT_LOCK, LSA_SPIN, LS_LCK_MTX_EXT_LOCK_ADAPTIVE_SPIN, "lck_mtx_t", "uint64_t"),
-	LOCKSTAT_PROBE(LS_LCK_MTX_EXT_LOCK, LSA_ACQUIRE, LS_LCK_MTX_EXT_LOCK_ACQUIRE, "lck_mtx_t"),
-	LOCKSTAT_PROBE(LS_LCK_MTX_EXT_LOCK, LSA_BLOCK, LS_LCK_MTX_EXT_LOCK_BLOCK, "lck_mtx_t", "uint64_t"),
-	LOCKSTAT_PROBE(LS_LCK_MTX_EXT_UNLOCK, LSA_RELEASE, LS_LCK_MTX_EXT_UNLOCK_RELEASE, "lck_mtx_t"),
-#endif
+	// .. blocking and spinning
+	LOCKSTAT_PROBE(LS_LCK_MTX_LOCK, LSA_BLOCK, LS_LCK_MTX_LOCK_BLOCK, "lck_mtx_t", "uint64_t", "lck_grp_t"),
+	LOCKSTAT_PROBE(LS_LCK_MTX_LOCK, LSA_SPIN, LS_LCK_MTX_LOCK_ADAPTIVE_SPIN, "lck_mtx_t", "uint64_t", "lck_grp_t"),
+	LOCKSTAT_PROBE(LS_LCK_MTX_LOCK_SPIN, LSA_SPIN, LS_LCK_MTX_LOCK_SPIN_SPIN, "lck_mtx_t", "uint64_t", "lck_grp_t"),
 
 	// RW lock probes
 	// TODO: This should not be a uint64_t !
@@ -140,7 +131,7 @@ lockstat_enable(void *arg, dtrace_id_t id, void *parg)
 	ASSERT(!lockstat_probemap[probe->lsp_probe]);
 
 	lockstat_probemap[probe->lsp_probe] = id;
-	membar_producer();
+	lck_grp_enable_feature(LCK_DEBUG_LOCKSTAT);
 
 	return 0;
 }
@@ -156,7 +147,7 @@ lockstat_disable(void *arg, dtrace_id_t id, void *parg)
 	ASSERT(lockstat_probemap[probe->lsp_probe]);
 
 	lockstat_probemap[probe->lsp_probe] = 0;
-	membar_producer();
+	lck_grp_disable_feature(LCK_DEBUG_LOCKSTAT);
 }
 
 /*ARGSUSED*/
@@ -268,8 +259,8 @@ static const struct cdevsw lockstat_cdevsw =
 	.d_read = eno_rdwrt,
 	.d_write = eno_rdwrt,
 	.d_ioctl = eno_ioctl,
-	.d_stop = (stop_fcn_t *)nulldev,
-	.d_reset = (reset_fcn_t *)nulldev,
+	.d_stop = eno_stop,
+	.d_reset = eno_reset,
 	.d_select = eno_select,
 	.d_mmap = eno_mmap,
 	.d_strategy = eno_strat,

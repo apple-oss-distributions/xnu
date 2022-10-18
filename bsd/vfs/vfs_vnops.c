@@ -85,6 +85,7 @@
 #include <sys/namei.h>
 #include <sys/vnode_internal.h>
 #include <sys/ioctl.h>
+#include <sys/fsctl.h>
 #include <sys/tty.h>
 /* Temporary workaround for ubc.h until <rdar://4714366 is resolved */
 #define ubc_setcred ubc_setcred_deprecated
@@ -177,7 +178,7 @@ vn_open_modflags(struct nameidata *ndp, int *fmodep, int cmode)
 	VATTR_INIT(vap);
 	VATTR_SET(vap, va_mode, (mode_t)cmode);
 
-	error = vn_open_auth(ndp, fmodep, vap);
+	error = vn_open_auth(ndp, fmodep, vap, NULLVP);
 
 	kfree_type(struct vnode_attr, vap);
 
@@ -337,6 +338,10 @@ out:
  *					information to be used for the open
  *		vap			A pointer to the vnode attribute
  *					descriptor to be used for the open
+ *		authvp		If non-null and VA_DP_AUTHENTICATE is set in vap,
+ *					have a supporting filesystem verify that the file
+ *					to be opened is on the same volume as authvp and
+ *					that authvp is on an authenticated volume
  *
  * Indirect:	*			Contents of the data structures pointed
  *					to by the parameters are modified as
@@ -371,7 +376,7 @@ out:
  *		in the code they originated.
  */
 int
-vn_open_auth(struct nameidata *ndp, int *fmodep, struct vnode_attr *vap)
+vn_open_auth(struct nameidata *ndp, int *fmodep, struct vnode_attr *vap, vnode_t authvp)
 {
 	struct vnode *vp;
 	struct vnode *dvp;
@@ -396,10 +401,15 @@ again:
 	fmode = *fmodep;
 	origcnflags = ndp->ni_cnd.cn_flags;
 
-	// If raw encrypted mode is requested, handle that here
-	if (VATTR_IS_ACTIVE(vap, va_dataprotect_flags)
-	    && ISSET(vap->va_dataprotect_flags, VA_DP_RAWENCRYPTED)) {
-		fmode |= FENCRYPTED;
+	if (VATTR_IS_ACTIVE(vap, va_dataprotect_flags)) {
+		if ((authvp != NULLVP)
+		    && !ISSET(vap->va_dataprotect_flags, VA_DP_AUTHENTICATE)) {
+			return EINVAL;
+		}
+		// If raw encrypted mode is requested, handle that here
+		if (ISSET(vap->va_dataprotect_flags, VA_DP_RAWENCRYPTED)) {
+			fmode |= FENCRYPTED;
+		}
 	}
 
 	if ((fmode & O_NOFOLLOW_ANY) && (fmode & (O_SYMLINK | O_NOFOLLOW))) {
@@ -574,6 +584,18 @@ continue_create_lookup:
 					if ((ndp->ni_flag & NAMEI_CONTLOOKUP) == 0) {
 						panic("EKEEPLOOKING, but continue flag not set?");
 					}
+				} else if ((fmode & (FREAD | FWRITE | FEXEC)) == FEXEC) {
+					/*
+					 * Some file systems fail in vnop_open call with absense of
+					 * both FREAD and FWRITE access modes. Retry the vnop_open
+					 * call again with FREAD access mode added.
+					 */
+					error = VNOP_COMPOUND_OPEN(dvp, &ndp->ni_vp, ndp, 0,
+					    fmode | FREAD, NULL, NULL, ctx);
+					if (error == 0) {
+						vp = ndp->ni_vp;
+						need_vnop_open = FALSE;
+					}
 				}
 			}
 		} while (error == EKEEPLOOKING);
@@ -612,23 +634,43 @@ continue_create_lookup:
 			}
 		}
 
-		if (VATTR_IS_ACTIVE(vap, va_dataprotect_flags)
-		    && ISSET(vap->va_dataprotect_flags, VA_DP_RAWUNENCRYPTED)) {
-			/* Don't allow unencrypted io request from user space unless entitled */
-			boolean_t entitled = FALSE;
+		if (VATTR_IS_ACTIVE(vap, va_dataprotect_flags)) {
+			if (ISSET(vap->va_dataprotect_flags, VA_DP_RAWUNENCRYPTED)) {
+				/* Don't allow unencrypted io request from user space unless entitled */
+				boolean_t entitled = FALSE;
 #if !SECURE_KERNEL
-			entitled = IOCurrentTaskHasEntitlement("com.apple.private.security.file-unencrypt-access");
-#endif
-			if (!entitled) {
-				error = EPERM;
-				goto bad;
+				entitled = IOCurrentTaskHasEntitlement("com.apple.private.security.file-unencrypt-access");
+#endif /* SECURE_KERNEL */
+				if (!entitled) {
+					error = EPERM;
+					goto bad;
+				}
+				fmode |= FUNENCRYPTED;
 			}
-			fmode |= FUNENCRYPTED;
+
+			if (ISSET(vap->va_dataprotect_flags, VA_DP_AUTHENTICATE)) {
+				fsioc_auth_fs_t afs = { .authvp = authvp };
+
+				error = VNOP_IOCTL(vp, FSIOC_AUTH_FS, (caddr_t)&afs, 0, ctx);
+				if (error) {
+					goto bad;
+				}
+			}
 		}
 
 		error = VNOP_OPEN(vp, fmode, ctx);
 		if (error) {
-			goto bad;
+			/*
+			 * Some file systems fail in vnop_open call with absense of both
+			 * FREAD and FWRITE access modes. Retry the vnop_open call again
+			 * with FREAD access mode added.
+			 */
+			if ((fmode & (FREAD | FWRITE | FEXEC)) == FEXEC) {
+				error = VNOP_OPEN(vp, fmode | FREAD, ctx);
+			}
+			if (error) {
+				goto bad;
+			}
 		}
 		need_vnop_open = FALSE;
 	}
@@ -1380,6 +1422,19 @@ vn_write(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 			ubc_setcred(vp, p);
 		}
 	}
+
+#if CONFIG_FILE_LEASES
+	/*
+	 * On success, break the parent dir lease as the file's attributes (size
+	 * and/or mtime) have changed. Best attempt to break lease, just drop the
+	 * the error upon failure as there is no point to return error when the
+	 * write has completed successfully.
+	 */
+	if (__probable(error == 0)) {
+		vnode_breakdirlease(vp, true, O_WRONLY);
+	}
+#endif /* CONFIG_FILE_LEASES */
+
 	(void)vnode_put(vp);
 	return error;
 
@@ -1677,6 +1732,12 @@ vn_ioctl(struct fileproc *fp, u_long com, caddr_t data, vfs_context_t ctx)
 			goto out;
 		}
 
+		/* Should not be able to check if filesystem is authenticated from user space */
+		if (com == FSIOC_AUTH_FS) {
+			error = ENOTTY;
+			goto out;
+		}
+
 		if (com == FIODTYPE) {
 			if (vp->v_type == VBLK) {
 				if (major(vp->v_rdev) >= nblkdev) {
@@ -1778,6 +1839,12 @@ vn_closefile(struct fileglob *fg, vfs_context_t ctx)
 				    F_UNLCK, &lf, F_OFD_LOCK, ctx, NULL);
 			}
 		}
+#if CONFIG_FILE_LEASES
+		if (FILEGLOB_DTYPE(fg) == DTYPE_VNODE && !LIST_EMPTY(&vp->v_leases)) {
+			/* Expected open count doesn't matter for release. */
+			(void)vnode_setlease(vp, fg, F_UNLCK, 0, ctx);
+		}
+#endif
 		error = vn_close(vp, fg->fg_flag, ctx);
 		(void) vnode_put(vp);
 	}
@@ -1917,6 +1984,7 @@ vn_kqfilter(struct fileproc *fp, struct knote *kn, struct kevent_qos_s *kev)
 
 			kn->kn_hook = (void*)vp;
 			kn->kn_filtid = EVFILTID_VN;
+			vnode_hold(vp);
 
 			vnode_lock(vp);
 			KNOTE_ATTACH(&vp->v_knotes, kn);
@@ -1948,8 +2016,10 @@ filt_vndetach(struct knote *kn)
 	struct vnode *vp = (struct vnode *)kn->kn_hook;
 	uint32_t vid = vnode_vid(vp);
 	if (vnode_getwithvid(vp, vid)) {
+		vnode_drop(vp);
 		return;
 	}
+	vnode_drop(vp);
 
 	vnode_lock(vp);
 	KNOTE_DETACH(&vp->v_knotes, kn);
@@ -2072,7 +2142,7 @@ filt_vnode_common(struct knote *kn, struct kevent_qos_s *kev, vnode_t vp, long h
 		case EVFILT_VNODE:
 			/* Check events this note matches against the hint */
 			if (kn->kn_sfflags & hint) {
-				kn->kn_fflags |= hint;         /* Set which event occurred */
+				kn->kn_fflags |= (uint32_t)hint; /* Set which event occurred */
 			}
 			activate = (kn->kn_fflags != 0);
 			break;

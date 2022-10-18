@@ -75,6 +75,13 @@ __BEGIN_DECLS
 extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 extern void ipc_port_release_send(ipc_port_t port);
 
+extern kern_return_t
+mach_memory_entry_ownership(
+	ipc_port_t      entry_port,
+	task_t          owner,
+	int             ledger_tag,
+	int             ledger_flags);
+
 __END_DECLS
 
 #define kIOMapperWaitSystem     ((IOMapper *) 1)
@@ -417,33 +424,24 @@ IOMemoryReference *
 IOGeneralMemoryDescriptor::memoryReferenceAlloc(uint32_t capacity, IOMemoryReference * realloc)
 {
 	IOMemoryReference * ref;
-	size_t              newSize, oldSize, copySize;
+	size_t              oldCapacity;
 
-	newSize = (sizeof(IOMemoryReference)
-	    - sizeof(ref->entries)
-	    + capacity * sizeof(ref->entries[0]));
-	ref = (typeof(ref))IOMalloc(newSize);
 	if (realloc) {
-		oldSize = (sizeof(IOMemoryReference)
-		    - sizeof(realloc->entries)
-		    + realloc->capacity * sizeof(realloc->entries[0]));
-		copySize = oldSize;
-		if (copySize > newSize) {
-			copySize = newSize;
-		}
-		if (ref) {
-			bcopy(realloc, ref, copySize);
-		}
-		IOFree(realloc, oldSize);
-	} else if (ref) {
-		bzero(ref, sizeof(*ref));
-		ref->refCount = 1;
-		OSIncrementAtomic(&gIOMemoryReferenceCount);
+		oldCapacity = realloc->capacity;
+	} else {
+		oldCapacity = 0;
 	}
-	if (!ref) {
-		return NULL;
+
+	// Use the kalloc API instead of manually handling the reallocation
+	ref = krealloc_type(IOMemoryReference, IOMemoryEntry,
+	    oldCapacity, capacity, realloc, Z_WAITOK_ZERO);
+	if (ref) {
+		if (oldCapacity == 0) {
+			ref->refCount = 1;
+			OSIncrementAtomic(&gIOMemoryReferenceCount);
+		}
+		ref->capacity = capacity;
 	}
-	ref->capacity = capacity;
 	return ref;
 }
 
@@ -451,7 +449,6 @@ void
 IOGeneralMemoryDescriptor::memoryReferenceFree(IOMemoryReference * ref)
 {
 	IOMemoryEntry * entries;
-	size_t          size;
 
 	if (ref->mapRef) {
 		memoryReferenceFree(ref->mapRef);
@@ -463,10 +460,7 @@ IOGeneralMemoryDescriptor::memoryReferenceFree(IOMemoryReference * ref)
 		entries--;
 		ipc_port_release_send(entries->entry);
 	}
-	size = (sizeof(IOMemoryReference)
-	    - sizeof(ref->entries)
-	    + ref->capacity * sizeof(ref->entries[0]));
-	IOFree(ref, size);
+	kfree_type(IOMemoryReference, IOMemoryEntry, ref->capacity, ref);
 
 	OSDecrementAtomic(&gIOMemoryReferenceCount);
 }
@@ -844,6 +838,7 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
 	vm_map_offset_t                 addr;
 	mach_vm_size_t                  size;
 	mach_vm_size_t                  guardSize;
+	vm_map_kernel_flags_t           vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 
 	addr = ref->mapped;
 	size = ref->size;
@@ -857,6 +852,14 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
 		size += 2 * guardSize;
 	}
 
+	/*
+	 * Mapping memory into the kernel_map using IOMDs use the data range.
+	 * Memory being mapped should not contain kernel pointers.
+	 */
+	if (map == kernel_map) {
+		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
+	}
+
 	err = vm_map_enter_mem_object(map, &addr, size,
 #if __ARM_MIXED_PAGE_SIZE__
 	    // TODO4K this should not be necessary...
@@ -867,7 +870,7 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
 	    (((ref->options & kIOMapAnywhere)
 	    ? VM_FLAGS_ANYWHERE
 	    : VM_FLAGS_FIXED)),
-	    VM_MAP_KERNEL_FLAGS_NONE,
+	    vmk_flags,
 	    ref->tag,
 	    IPC_PORT_NULL,
 	    (memory_object_offset_t) 0,
@@ -3803,6 +3806,12 @@ IOMemoryDescriptor::getDMAMapLength(uint64_t * offset)
 			length += round_page(sourceAddr + segLen) - trunc_page(sourceAddr);
 			iterate += segLen;
 		}
+		if (!iterate) {
+			length = getLength();
+			if (offset) {
+				*offset = 0;
+			}
+		}
 		if (kIOMemoryThreadSafe & _flags) {
 			UNLOCK;
 		}
@@ -3845,13 +3854,13 @@ IOMemoryDescriptor::getPageCounts( IOByteCount * residentPageCount,
 }
 
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 extern "C" void dcache_incoherent_io_flush64(addr64_t pa, unsigned int count, unsigned int remaining, unsigned int *res);
 extern "C" void dcache_incoherent_io_store64(addr64_t pa, unsigned int count, unsigned int remaining, unsigned int *res);
-#else /* defined(__arm__) || defined(__arm64__) */
+#else /* defined(__arm64__) */
 extern "C" void dcache_incoherent_io_flush64(addr64_t pa, unsigned int count);
 extern "C" void dcache_incoherent_io_store64(addr64_t pa, unsigned int count);
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 
 static void
 SetEncryptOp(addr64_t pa, unsigned int count)
@@ -3884,7 +3893,7 @@ IOMemoryDescriptor::performOperation( IOOptionBits options,
 	IOByteCount remaining;
 	unsigned int res;
 	void (*func)(addr64_t pa, unsigned int count) = NULL;
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	void (*func_ext)(addr64_t pa, unsigned int count, unsigned int remaining, unsigned int *result) = NULL;
 #endif
 
@@ -3895,7 +3904,7 @@ IOMemoryDescriptor::performOperation( IOOptionBits options,
 
 	switch (options) {
 	case kIOMemoryIncoherentIOFlush:
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 		func_ext = &dcache_incoherent_io_flush64;
 #if __ARM_COHERENT_IO__
 		func_ext(0, 0, 0, &res);
@@ -3903,12 +3912,12 @@ IOMemoryDescriptor::performOperation( IOOptionBits options,
 #else /* __ARM_COHERENT_IO__ */
 		break;
 #endif /* __ARM_COHERENT_IO__ */
-#else /* defined(__arm__) || defined(__arm64__) */
+#else /* defined(__arm64__) */
 		func = &dcache_incoherent_io_flush64;
 		break;
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 	case kIOMemoryIncoherentIOStore:
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 		func_ext = &dcache_incoherent_io_store64;
 #if __ARM_COHERENT_IO__
 		func_ext(0, 0, 0, &res);
@@ -3916,10 +3925,10 @@ IOMemoryDescriptor::performOperation( IOOptionBits options,
 #else /* __ARM_COHERENT_IO__ */
 		break;
 #endif /* __ARM_COHERENT_IO__ */
-#else /* defined(__arm__) || defined(__arm64__) */
+#else /* defined(__arm64__) */
 		func = &dcache_incoherent_io_store64;
 		break;
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 
 	case kIOMemorySetEncrypted:
 		func = &SetEncryptOp;
@@ -3929,15 +3938,15 @@ IOMemoryDescriptor::performOperation( IOOptionBits options,
 		break;
 	}
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	if ((func == NULL) && (func_ext == NULL)) {
 		return kIOReturnUnsupported;
 	}
-#else /* defined(__arm__) || defined(__arm64__) */
+#else /* defined(__arm64__) */
 	if (!func) {
 		return kIOReturnUnsupported;
 	}
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 
 	if (kIOMemoryThreadSafe & _flags) {
 		LOCK;
@@ -3966,7 +3975,7 @@ IOMemoryDescriptor::performOperation( IOOptionBits options,
 			remaining = UINT_MAX;
 		}
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 		if (func) {
 			(*func)(dstAddr64, (unsigned int) dstLen);
 		}
@@ -3977,9 +3986,9 @@ IOMemoryDescriptor::performOperation( IOOptionBits options,
 				break;
 			}
 		}
-#else /* defined(__arm__) || defined(__arm64__) */
+#else /* defined(__arm64__) */
 		(*func)(dstAddr64, (unsigned int) dstLen);
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 
 		offset    += dstLen;
 		remaining -= dstLen;
@@ -4007,7 +4016,7 @@ extern vm_offset_t kc_highest_nonlinkedit_vmaddr;
 #define io_kernel_static_start  vm_kernel_stext
 #define io_kernel_static_end    (kc_highest_nonlinkedit_vmaddr ? kc_highest_nonlinkedit_vmaddr : vm_kernel_etext)
 
-#elif defined(__arm__) || defined(__arm64__)
+#elif defined(__arm64__)
 
 extern vm_offset_t              static_memory_end;
 
@@ -6116,6 +6125,12 @@ _IOMemoryDescriptorMixedData::withCapacity(size_t capacity)
 	return me;
 }
 
+/*
+ * Ignore -Wxnu-typed-allocators within IOMemoryDescriptorMixedData
+ * because it implements an allocator.
+ */
+__typed_allocators_ignore_push
+
 bool
 _IOMemoryDescriptorMixedData::initWithCapacity(size_t capacity)
 {
@@ -6166,6 +6181,9 @@ _IOMemoryDescriptorMixedData::appendBytes(const void * bytes, size_t length)
 
 	if (newLength > _capacity) {
 		void * const newData = IOMalloc(newLength);
+		if (!newData) {
+			return false;
+		}
 		if (_data) {
 			bcopy(_data, newData, oldLength);
 			IOFree(_data, _capacity);
@@ -6200,6 +6218,8 @@ _IOMemoryDescriptorMixedData::setLength(size_t length)
 	}
 	_length = length;
 }
+
+__typed_allocators_ignore_pop
 
 const void *
 _IOMemoryDescriptorMixedData::getBytes() const

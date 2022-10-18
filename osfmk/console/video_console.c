@@ -98,7 +98,6 @@
 
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
-#include <machine/io_map_entries.h>
 #include <machine/machine_cpu.h>
 
 #include <pexpert/pexpert.h>
@@ -1238,6 +1237,9 @@ vcputc_options(char c, __unused bool poll)
 			gc_putchar(c);
 			gc_show_cursor(gc_x, gc_y);
 		}
+#if SCHED_HYGIENE_DEBUG
+		abandon_preemption_disable_measurement();
+#endif /* SCHED_HYGIENE_DEBUG */
 		VCPUTC_LOCK_UNLOCK();
 	}
 }
@@ -1985,22 +1987,8 @@ vc_blit_rect_8(int x, int y, __unused int bx,
 	}
 }
 
-/* For ARM, 16-bit is 565 (RGB); it is 1555 (XRGB) on other platforms */
+/* 16-bit is 1555 (XRGB) on all platforms */
 
-#ifdef __arm__
-#define CLUT_MASK_R     0xf8
-#define CLUT_MASK_G     0xfc
-#define CLUT_MASK_B     0xf8
-#define CLUT_SHIFT_R    << 8
-#define CLUT_SHIFT_G    << 3
-#define CLUT_SHIFT_B    >> 3
-#define MASK_R          0xf800
-#define MASK_G          0x07e0
-#define MASK_B          0x001f
-#define MASK_R_8        0x7f800
-#define MASK_G_8        0x01fe0
-#define MASK_B_8        0x000ff
-#else
 #define CLUT_MASK_R     0xf8
 #define CLUT_MASK_G     0xf8
 #define CLUT_MASK_B     0xf8
@@ -2013,7 +2001,6 @@ vc_blit_rect_8(int x, int y, __unused int bx,
 #define MASK_R_8        0x3fc00
 #define MASK_G_8        0x01fe0
 #define MASK_B_8        0x000ff
-#endif
 
 static void
 vc_blit_rect_16( int x, int y, int bx,
@@ -2790,21 +2777,6 @@ gc_pause( boolean_t pause, boolean_t graphics_now )
 static void
 vc_initialize(__unused struct vc_info * vinfo_p)
 {
-#ifdef __arm__
-	unsigned long cnt, data16, data32;
-
-	if (vinfo.v_depth == 16) {
-		for (cnt = 0; cnt < 8; cnt++) {
-			data32 = vc_colors[cnt][2];
-			data16  = (data32 & 0x0000F8) <<  8;
-			data16 |= (data32 & 0x00FC00) >>  5;
-			data16 |= (data32 & 0xF80000) >> 19;
-			data16 |= data16 << 16;
-			vc_colors[cnt][1] = data16;
-		}
-	}
-#endif
-
 	vinfo.v_rows = vinfo.v_height / ISO_CHAR_HEIGHT;
 	vinfo.v_columns = vinfo.v_width / ISO_CHAR_WIDTH;
 	vinfo.v_rowscanbytes = ((vinfo.v_depth + 7) / 8) * vinfo.v_width;
@@ -2900,7 +2872,7 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
 				} else {
 					newMapSize = (unsigned int) round_page(new_vinfo.v_height * new_vinfo.v_rowbytes);                      /* Remember size */
 				}
-				newVideoVirt = io_map_spec((vm_map_offset_t)new_vinfo.v_physaddr, newMapSize, flags);   /* Allocate address space for framebuffer */
+				newVideoVirt = ml_io_map_unmappable((vm_map_offset_t)new_vinfo.v_physaddr, newMapSize, flags);   /* Allocate address space for framebuffer */
 			}
 			new_vinfo.v_baseaddr = newVideoVirt + boot_vinfo->v_offset;                     /* Set the new framebuffer address */
 		}

@@ -71,10 +71,10 @@ def IterateAllKqueues():
             kq - yields each kqueue in the system
     """
     for t in kern.tasks:
-        proc = unsigned(t.bsd_info)
-        if proc == 0:
+        proc = GetProcFromTask(t)
+        if not proc:
             continue
-        proc = kern.GetValueFromAddress(proc, 'proc_t')
+        proc = kern.GetValueFromAddress(unsigned(proc), 'proc_t')
         for kq in IterateProcKqueues(proc):
             yield kq
 

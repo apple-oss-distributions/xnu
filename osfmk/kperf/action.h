@@ -37,6 +37,8 @@ struct kperf_sample;
 struct kperf_usample;
 struct kperf_context;
 
+extern int kperf_max_actions;
+
 /* bits for defining what to do on an action */
 #define SAMPLER_TH_INFO       (1U << 0)
 #define SAMPLER_TH_SNAPSHOT   (1U << 1)

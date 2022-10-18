@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -65,6 +65,7 @@
 
 #include <mach/machine/sdt.h>
 
+#include <kern/locks_internal.h>
 #include <kern/zalloc.h>
 #include <kern/lock_stat.h>
 #include <kern/locks.h>
@@ -76,13 +77,14 @@
 #include <kern/debug.h>
 #include <kern/kcdata.h>
 #include <kern/percpu.h>
+#include <kern/hvg_hypercall.h>
 #include <string.h>
 #include <arm/cpu_internal.h>
 #include <os/hash.h>
 #include <arm/cpu_data.h>
 
 #include <arm/cpu_data_internal.h>
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #include <arm/smp.h>
 #include <machine/atomic.h>
 #include <machine/machine_cpu.h>
@@ -97,100 +99,18 @@
 // These are undesirable when in a panic or a debugger is runnning.
 #define LOCK_CORRECTNESS_PANIC() (kernel_debugger_entry_count == 0)
 
-#define ADAPTIVE_SPIN_ENABLE 0x1
-
-int lck_mtx_adaptive_spin_mode = ADAPTIVE_SPIN_ENABLE;
-
-#define SPINWAIT_OWNER_CHECK_COUNT 4
-
-typedef enum {
-	SPINWAIT_ACQUIRED,     /* Got the lock. */
-	SPINWAIT_INTERLOCK,    /* Got the interlock, no owner, but caller must finish acquiring the lock. */
-	SPINWAIT_DID_SPIN_HIGH_THR, /* Got the interlock, spun, but failed to get the lock. */
-	SPINWAIT_DID_SPIN_OWNER_NOT_CORE, /* Got the interlock, spun, but failed to get the lock. */
-	SPINWAIT_DID_SPIN_NO_WINDOW_CONTENTION, /* Got the interlock, spun, but failed to get the lock. */
-	SPINWAIT_DID_SPIN_SLIDING_THR,/* Got the interlock, spun, but failed to get the lock. */
-	SPINWAIT_DID_NOT_SPIN, /* Got the interlock, did not spin. */
-} spinwait_result_t;
-
 /* Forwards */
 
 extern unsigned int not_in_kdp;
 
-/*
- *	We often want to know the addresses of the callers
- *	of the various lock routines.  However, this information
- *	is only used for debugging and statistics.
- */
-typedef void   *pc_t;
-#define INVALID_PC      ((void *) VM_MAX_KERNEL_ADDRESS)
-#define INVALID_THREAD  ((void *) VM_MAX_KERNEL_ADDRESS)
-
-#ifdef  lint
-/*
- *	Eliminate lint complaints about unused local pc variables.
- */
-#define OBTAIN_PC(pc, l) ++pc
-#else                           /* lint */
-#define OBTAIN_PC(pc, l)
-#endif                          /* lint */
-
-
-/*
- *	Portable lock package implementation of usimple_locks.
- */
-
-/*
- * Owner thread pointer when lock held in spin mode
- */
-#define LCK_MTX_SPIN_TAG  0xfffffff0
-
-
-#define interlock_lock(lock)    hw_lock_bit    ((hw_lock_bit_t*)(&(lock)->lck_mtx_data), LCK_ILOCK_BIT, LCK_GRP_NULL)
-#define interlock_try(lock)             hw_lock_bit_try((hw_lock_bit_t*)(&(lock)->lck_mtx_data), LCK_ILOCK_BIT, LCK_GRP_NULL)
-#define interlock_unlock(lock)  hw_unlock_bit  ((hw_lock_bit_t*)(&(lock)->lck_mtx_data), LCK_ILOCK_BIT)
-#define load_memory_barrier()   os_atomic_thread_fence(acquire)
-
-// Enforce program order of loads and stores.
-#define ordered_load(target) \
-	        os_atomic_load(target, compiler_acq_rel)
-#define ordered_store(target, value) \
-	        os_atomic_store(target, value, compiler_acq_rel)
-
-#define ordered_load_mtx(lock)                  ordered_load(&(lock)->lck_mtx_data)
-#define ordered_store_mtx(lock, value)  ordered_store(&(lock)->lck_mtx_data, (value))
-#define ordered_load_hw(lock)                   ordered_load(&(lock)->lock_data)
-#define ordered_store_hw(lock, value)   ordered_store(&(lock)->lock_data, (value))
-#define ordered_load_bit(lock)                  ordered_load((lock))
-#define ordered_store_bit(lock, value)  ordered_store((lock), (value))
-
-
-// Prevent the compiler from reordering memory operations around this
-#define compiler_memory_fence() __asm__ volatile ("" ::: "memory")
-
-MACHINE_TIMEOUT32(lock_panic_timeout, "lock-panic",
+MACHINE_TIMEOUT(lock_panic_timeout, "lock-panic",
     0xc00000 /* 12.5 m ticks ~= 524ms with 24MHz OSC */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
 
 #define NOINLINE                __attribute__((noinline))
 
-
-#if __arm__
-#define interrupts_disabled(mask) (mask & PSR_INTMASK)
-#else
 #define interrupts_disabled(mask) (mask & DAIF_IRQF)
-#endif
-
-
-#if __arm__
-#define enable_fiq()            __asm__ volatile ("cpsie  f" ::: "memory");
-#define enable_interrupts()     __asm__ volatile ("cpsie if" ::: "memory");
-#endif
 
 KALLOC_TYPE_DEFINE(KT_LCK_SPIN, lck_spin_t, KT_PRIV_ACCT);
-
-KALLOC_TYPE_DEFINE(KT_LCK_MTX, lck_mtx_t, KT_PRIV_ACCT);
-
-KALLOC_TYPE_DEFINE(KT_LCK_MTX_EXT, lck_mtx_ext_t, KT_PRIV_ACCT);
 
 #pragma GCC visibility push(hidden)
 /*
@@ -208,19 +128,12 @@ load_exclusive32(uint32_t *target, enum memory_order ord)
 {
 	uint32_t        value;
 
-#if __arm__
-	if (_os_atomic_mo_has_release(ord)) {
-		// Pre-load release barrier
-		atomic_thread_fence(memory_order_release);
-	}
-	value = __builtin_arm_ldrex(target);
-#else
 	if (_os_atomic_mo_has_acquire(ord)) {
 		value = __builtin_arm_ldaex(target);    // ldaxr
 	} else {
 		value = __builtin_arm_ldrex(target);    // ldxr
 	}
-#endif  // __arm__
+
 	return value;
 }
 
@@ -229,19 +142,12 @@ store_exclusive32(uint32_t *target, uint32_t value, enum memory_order ord)
 {
 	boolean_t err;
 
-#if __arm__
-	err = __builtin_arm_strex(value, target);
-	if (_os_atomic_mo_has_acquire(ord)) {
-		// Post-store acquire barrier
-		atomic_thread_fence(memory_order_acquire);
-	}
-#else
 	if (_os_atomic_mo_has_release(ord)) {
 		err = __builtin_arm_stlex(value, target);       // stlxr
 	} else {
 		err = __builtin_arm_strex(value, target);       // stxr
 	}
-#endif  // __arm__
+
 	return !err;
 }
 
@@ -250,7 +156,7 @@ atomic_exchange_begin32(uint32_t *target, uint32_t *previous, enum memory_order 
 {
 	uint32_t        val;
 
-#if __ARM_ATOMICS_8_1
+#if !OS_ATOMIC_USE_LLSC
 	ord = memory_order_relaxed;
 #endif
 	val = load_exclusive32(target, ord);
@@ -261,7 +167,7 @@ atomic_exchange_begin32(uint32_t *target, uint32_t *previous, enum memory_order 
 boolean_t
 atomic_exchange_complete32(uint32_t *target, uint32_t previous, uint32_t newval, enum memory_order ord)
 {
-#if __ARM_ATOMICS_8_1
+#if !OS_ATOMIC_USE_LLSC
 	return __c11_atomic_compare_exchange_strong((_Atomic uint32_t *)target, &previous, newval, ord, memory_order_relaxed);
 #else
 	(void)previous;         // Previous not needed, monitor is held
@@ -298,10 +204,11 @@ atomic_test_and_set32(uint32_t *target, uint32_t test_mask, uint32_t set_mask, e
 }
 
 #pragma GCC visibility pop
+#pragma mark preemption
 
-#if SCHED_PREEMPTION_DISABLE_DEBUG
+#if SCHED_HYGIENE_DEBUG
 
-uint64_t PERCPU_DATA(preemption_disable_max_mt);
+uint64_t _Atomic PERCPU_DATA_HACK_78750602(preemption_disable_max_mt);
 
 MACHINE_TIMEOUT_WRITEABLE(sched_preemption_disable_threshold_mt, "sched-preemption", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, kprintf_spam_mt_pred);
 
@@ -336,58 +243,142 @@ _prepare_preemption_disable_measurement(thread_t thread)
 		 * long intervals of preemption disablement are counted
 		 * towards that.
 		 */
-		thread->machine.preemption_disable_adj_mt = ml_get_speculative_timebase();
+
+		bool istate = ml_set_interrupts_enabled_with_debug(false, false); // don't take int masked timestamp
+		thread->machine.preemption_disable_abandon = false;
+		thread->machine.preemption_disable_mt = ml_get_sched_hygiene_timebase();
+		thread->machine.preemption_disable_adjust = 0;
+#if MONOTONIC
+		if (sched_hygiene_debug_pmc) {
+			mt_cur_cpu_cycles_instrs_speculative(&thread->machine.preemption_disable_cycles, &thread->machine.preemption_disable_instr);
+		}
+#endif
+		ml_set_interrupts_enabled_with_debug(istate, false);
 	}
 }
 
 NOINLINE void
 _collect_preemption_disable_measurement(thread_t thread)
 {
-	bool istate = ml_set_interrupts_enabled(false);
+	bool istate = ml_set_interrupts_enabled_with_debug(false, false); // don't take int masked timestamp
 	/*
 	 * Collect start time and current time with interrupts disabled.
 	 * Otherwise an interrupt coming in after grabbing the timestamp
 	 * could spuriously inflate the measurement, because it will
-	 * adjust preemption_disable_adj_mt only after we already grabbed
+	 * adjust preemption_disable_mt only after we already grabbed
 	 * it.
 	 *
 	 * (Even worse if we collected the current time first: Then a
-	 * subsequent interrupt could adjust preemption_disable_adj_mt to
+	 * subsequent interrupt could adjust preemption_disable_mt to
 	 * make the duration go negative after subtracting the already
 	 * grabbed time. With interrupts disabled we don't care much about
 	 * the order.)
 	 */
 
-	uint64_t const mt = thread->machine.preemption_disable_adj_mt;
-	uint64_t const now = ml_get_speculative_timebase();
+	uint64_t const mt = thread->machine.preemption_disable_mt;
+	uint64_t const adjust = thread->machine.preemption_disable_adjust;
+	uint64_t const now = ml_get_sched_hygiene_timebase();
+	thread->machine.preemption_disable_mt = 0;
+	thread->machine.preemption_disable_adjust = 0;
+
+	/*
+	 * Don't need to reset (or even save) preemption_disable_abandon
+	 * here: abandon_preemption_disable_measurement is a no-op anyway
+	 * if preemption_disable_mt == 0 (which we just set), and it
+	 * will stay that way until the next call to
+	 * _collect_preemption_disable_measurement.
+	 */
 
 	os_compiler_barrier(acq_rel);
 
-	ml_set_interrupts_enabled(istate);
+	ml_set_interrupts_enabled_with_debug(istate, false);
 
-	int64_t const duration = now - mt;
+	/*
+	 * Fine to get with interrupts enabled:
+	 * Above we set preemption_disable_mt to 0, which turns
+	 * abandon_preemption_disable_measurement() into a no-op
+	 * until the next collection starts.
+	 */
+	if (thread->machine.preemption_disable_abandon) {
+		return;
+	}
 
+	int64_t const gross_duration = now - mt;
+	int64_t const net_duration = gross_duration - adjust;
 
-	uint64_t * const max_duration = PERCPU_GET(preemption_disable_max_mt);
+	uint64_t _Atomic * const max_duration = PERCPU_GET(preemption_disable_max_mt);
 
-	if (__improbable(duration > *max_duration)) {
-		*max_duration = duration;
+	if (__improbable(net_duration > *max_duration)) {
+		os_atomic_store(max_duration, net_duration, relaxed);
 	}
 
 	uint64_t const threshold = os_atomic_load(&sched_preemption_disable_threshold_mt, relaxed);
-	if (__improbable(threshold > 0 && duration >= threshold)) {
+	if (__improbable(threshold > 0 && net_duration >= threshold)) {
+		uint64_t average_freq = 0;
+		uint64_t average_cpi_whole = 0;
+		uint64_t average_cpi_fractional = 0;
+
+#if MONOTONIC
+		if (sched_hygiene_debug_pmc) {
+			uint64_t current_cycles = 0, current_instrs = 0;
+
+			/*
+			 * We're getting these values a bit late, but getting them
+			 * is a bit expensive, so we take the slight hit in
+			 * accuracy for the reported values (which aren't very
+			 * stable anyway).
+			 */
+			istate = ml_set_interrupts_enabled_with_debug(false, false);
+			mt_cur_cpu_cycles_instrs_speculative(&current_cycles, &current_instrs);
+			ml_set_interrupts_enabled_with_debug(istate, false);
+
+			uint64_t duration_ns;
+			absolutetime_to_nanoseconds(gross_duration, &duration_ns);
+
+			average_freq = (current_cycles - thread->machine.preemption_disable_cycles) / (duration_ns / 1000);
+			average_cpi_whole = (current_cycles - thread->machine.preemption_disable_cycles) / (current_instrs - thread->machine.preemption_disable_instr);
+			average_cpi_fractional =
+			    (((current_cycles - thread->machine.preemption_disable_cycles) * 100) / (current_instrs - thread->machine.preemption_disable_instr)) % 100;
+		}
+#endif
+
 		if (sched_preemption_disable_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
-			panic("preemption disable timeout exceeded: %llu >= %llu timebase ticks", duration, threshold);
+			panic("preemption disable timeout exceeded: %llu >= %llu mt ticks (start: %llu, now: %llu, gross: %llu, inttime: %llu), "
+			    "freq = %llu MHz, CPI = %llu.%llu",
+			    net_duration, threshold, mt, now, gross_duration, adjust,
+			    average_freq, average_cpi_whole, average_cpi_fractional);
 		}
 
-		DTRACE_SCHED1(mach_preemption_expired, uint64_t, duration);
+		DTRACE_SCHED4(mach_preemption_expired, uint64_t, net_duration, uint64_t, gross_duration,
+		    uint64_t, average_cpi_whole, uint64_t, average_cpi_fractional);
 		if (__improbable(kdebug_debugid_enabled(sched_preemption_disable_debug_dbgid))) {
-			KDBG(sched_preemption_disable_debug_dbgid, duration);
+			KDBG(sched_preemption_disable_debug_dbgid, net_duration, gross_duration, average_cpi_whole, average_cpi_fractional);
 		}
 	}
-
-	thread->machine.preemption_disable_adj_mt = 0;
 }
+
+#if SCHED_HYGIENE_DEBUG
+
+/*
+ * Abandon a potential preemption disable measurement. Useful for
+ * example for the idle thread, which would just spuriously
+ * trigger the threshold while actually idling, which we don't
+ * care about.
+ */
+void
+abandon_preemption_disable_measurement(void)
+{
+	thread_t t = current_thread();
+	bool istate = ml_set_interrupts_enabled_with_debug(false, false); // don't take int masked timestamp
+
+	if (t->machine.preemption_disable_mt != 0) {
+		t->machine.preemption_disable_abandon = true;
+	}
+	ml_set_interrupts_enabled_with_debug(istate, false);
+}
+
+#endif
+
 
 /*
  * Skip predicate for sched_preemption_disable, which would trigger
@@ -400,7 +391,7 @@ kprintf_spam_mt_pred(struct machine_timeout_spec const __unused *spec)
 	return kprintf_spam_enabled;
 }
 
-#endif /* SCHED_PREEMPTION_DISABLE_DEBUG */
+#endif /* SCHED_HYGIENE_DEBUG */
 
 /*
  * To help _disable_preemption() inline everywhere with LTO,
@@ -426,8 +417,7 @@ _disable_preemption(void)
 
 	os_atomic_store(&thread->machine.preemption_count, count, compiler_acq_rel);
 
-#if SCHED_PREEMPTION_DISABLE_DEBUG
-
+#if SCHED_HYGIENE_DEBUG
 	/*
 	 * Note that this is not the only place preemption gets disabled,
 	 * it also gets modified on ISR and PPL entry/exit. Both of those
@@ -439,7 +429,7 @@ _disable_preemption(void)
 	if (count == 1 && sched_preemption_disable_debug_mode) {
 		_prepare_preemption_disable_measurement(thread);
 	}
-#endif /* SCHED_PREEMPTION_DISABLE_DEBUG */
+#endif /* SCHED_HYGIENE_DEBUG */
 }
 
 /*
@@ -458,18 +448,9 @@ _disable_preemption_without_measurements(void)
 {
 	_disable_preemption();
 
-#if SCHED_PREEMPTION_DISABLE_DEBUG
-	/*
-	 * Abandon a potential preemption disable measurement. Useful for
-	 * example for the idle thread, which would just spuriously
-	 * trigger the threshold while actually idling, which we don't
-	 * care about.
-	 */
-	thread_t t = current_thread();
-	if (t->machine.preemption_disable_adj_mt != 0) {
-		t->machine.preemption_disable_adj_mt = 0;
-	}
-#endif /* SCHED_PREEMPTION_DISABLE_DEBUG */
+#if SCHED_HYGIENE_DEBUG
+	abandon_preemption_disable_measurement();
+#endif /* SCHED_HYGIENE_DEBUG */
 }
 
 /*
@@ -490,41 +471,27 @@ _disable_preemption_without_measurements(void)
 static NOINLINE void
 kernel_preempt_check(thread_t thread)
 {
-	long        state;
-
-#if __arm__
-#define INTERRUPT_MASK PSR_IRQF
-#else   // __arm__
-#define INTERRUPT_MASK DAIF_IRQF
-#endif  // __arm__
+	uint64_t state;
 
 	/* If interrupts are masked, we can't take an AST here */
-	state = get_interrupts();
-	if ((state & INTERRUPT_MASK) == 0) {
-		disable_interrupts_noread();                    // Disable interrupts
-
-		/*
-		 * Reload cpu_pending_ast: a context switch would cause it to change.
-		 * Now that interrupts are disabled, this will debounce false positives.
-		 */
-		if (thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT) {
-#if __arm__
-#if __ARM_USER_PROTECT__
-			uintptr_t up = arm_user_protect_begin(thread);
-#endif  // __ARM_USER_PROTECT__
-			enable_fiq();
-#endif  // __arm__
-			ast_taken_kernel();                 // Handle urgent AST
-#if __arm__
-#if __ARM_USER_PROTECT__
-			arm_user_protect_end(thread, up, TRUE);
-#endif  // __ARM_USER_PROTECT__
-			enable_interrupts();
-			return;                             // Return early on arm only due to FIQ enabling
-#endif  // __arm__
-		}
-		restore_interrupts(state);              // Enable interrupts
+	state = __builtin_arm_rsr64("DAIF");
+	if (state & DAIF_IRQF) {
+		return;
 	}
+
+	/* disable interrupts (IRQ FIQ ASYNCF) */
+	__builtin_arm_wsr64("DAIFSet", DAIFSC_STANDARD_DISABLE);
+
+	/*
+	 * Reload cpu_pending_ast: a context switch would cause it to change.
+	 * Now that interrupts are disabled, this will debounce false positives.
+	 */
+	if (thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT) {
+		ast_taken_kernel();
+	}
+
+	/* restore the original interrupt mask */
+	__builtin_arm_wsr64("DAIF", state);
 }
 
 /*
@@ -550,11 +517,11 @@ _enable_preemption(void)
 	}
 	count -= 1;
 
-#if SCHED_PREEMPTION_DISABLE_DEBUG
-	if (count == 0 && thread->machine.preemption_disable_adj_mt != 0) {
+#if SCHED_HYGIENE_DEBUG
+	if (count == 0 && thread->machine.preemption_disable_mt != 0) {
 		_collect_preemption_disable_measurement(thread);
 	}
-#endif /* SCHED_PREEMPTION_DISABLE_DEBUG */
+#endif /* SCHED_HYGIENE_DEBUG */
 
 	os_atomic_store(&thread->machine.preemption_count, count, compiler_acq_rel);
 	if (count == 0) {
@@ -576,13 +543,28 @@ get_preemption_level(void)
 	return current_thread()->machine.preemption_count;
 }
 
-/*
- *      Routine:        lck_spin_alloc_init
- */
-lck_spin_t     *
-lck_spin_alloc_init(
-	lck_grp_t * grp,
-	lck_attr_t * attr)
+#if CONFIG_PV_TICKET
+__startup_func
+void
+lck_init_pv(void)
+{
+	uint32_t pvtck = 1;
+	PE_parse_boot_argn("pvticket", &pvtck, sizeof(pvtck));
+	if (pvtck == 0) {
+		return;
+	}
+	has_lock_pv = hvg_is_hcall_available(HVG_HCALL_VCPU_WFK) &&
+	    hvg_is_hcall_available(HVG_HCALL_VCPU_KICK);
+}
+STARTUP(LOCKS, STARTUP_RANK_FIRST, lck_init_pv);
+#endif
+
+
+#pragma mark lck_spin_t
+#if LCK_SPIN_IS_TICKET_LOCK
+
+lck_spin_t *
+lck_spin_alloc_init(lck_grp_t *grp, lck_attr_t *attr)
 {
 	lck_spin_t *lck;
 
@@ -591,26 +573,145 @@ lck_spin_alloc_init(
 	return lck;
 }
 
-/*
- *      Routine:        lck_spin_free
- */
 void
-lck_spin_free(
-	lck_spin_t * lck,
-	lck_grp_t * grp)
+lck_spin_free(lck_spin_t *lck, lck_grp_t *grp)
 {
 	lck_spin_destroy(lck, grp);
 	zfree(KT_LCK_SPIN, lck);
 }
 
-/*
- *      Routine:        lck_spin_init
- */
 void
-lck_spin_init(
-	lck_spin_t * lck,
-	lck_grp_t * grp,
-	__unused lck_attr_t * attr)
+lck_spin_init(lck_spin_t *lck, lck_grp_t *grp, __unused lck_attr_t *attr)
+{
+	lck_ticket_init(lck, grp);
+}
+
+/*
+ * arm_usimple_lock is a lck_spin_t without a group or attributes
+ */
+MARK_AS_HIBERNATE_TEXT void inline
+arm_usimple_lock_init(simple_lock_t lck, __unused unsigned short initial_value)
+{
+	lck_ticket_init((lck_ticket_t *)lck, LCK_GRP_NULL);
+}
+
+void
+lck_spin_assert(lck_spin_t *lock, unsigned int type)
+{
+	if (type == LCK_ASSERT_OWNED) {
+		lck_ticket_assert_owned(lock);
+	} else if (type == LCK_ASSERT_NOTOWNED) {
+		lck_ticket_assert_not_owned(lock);
+	} else {
+		panic("lck_spin_assert(): invalid arg (%u)", type);
+	}
+}
+
+void
+lck_spin_lock(lck_spin_t *lock)
+{
+	lck_ticket_lock(lock, LCK_GRP_NULL);
+}
+
+void
+lck_spin_lock_nopreempt(lck_spin_t *lock)
+{
+	lck_ticket_lock_nopreempt(lock, LCK_GRP_NULL);
+}
+
+int
+lck_spin_try_lock(lck_spin_t *lock)
+{
+	return lck_ticket_lock_try(lock, LCK_GRP_NULL);
+}
+
+int
+lck_spin_try_lock_nopreempt(lck_spin_t *lock)
+{
+	return lck_ticket_lock_try_nopreempt(lock, LCK_GRP_NULL);
+}
+
+void
+lck_spin_unlock(lck_spin_t *lock)
+{
+	lck_ticket_unlock(lock);
+}
+
+void
+lck_spin_destroy(lck_spin_t *lck, lck_grp_t *grp)
+{
+	lck_ticket_destroy(lck, grp);
+}
+
+/*
+ * those really should be in an alias file instead,
+ * but you can't make that conditional.
+ *
+ * it will be good enough for perf evals for now
+ *
+ * we also can't make aliases for symbols that
+ * are in alias files like lck_spin_init and friends,
+ * so this suffers double jump penalties for kexts
+ * (LTO does the right thing for XNU).
+ */
+#define make_alias(a, b) asm(".globl _" #a "\n" ".set   _" #a ", _" #b "\n")
+make_alias(lck_spin_lock_grp, lck_ticket_lock);
+make_alias(lck_spin_lock_nopreempt_grp, lck_ticket_lock_nopreempt);
+make_alias(lck_spin_try_lock_grp, lck_ticket_lock_try);
+make_alias(lck_spin_try_lock_nopreempt_grp, lck_ticket_lock_try_nopreempt);
+make_alias(lck_spin_unlock_nopreempt, lck_ticket_unlock_nopreempt);
+make_alias(kdp_lck_spin_is_acquired, kdp_lck_ticket_is_acquired);
+#undef make_alias
+
+#else /* !LCK_SPIN_IS_TICKET_LOCK */
+
+#if DEVELOPMENT || DEBUG
+__abortlike
+static void
+__lck_spin_invalid_panic(lck_spin_t *lck)
+{
+	const char *how = "Invalid";
+
+	if (lck->type == LCK_SPIN_TYPE_DESTROYED ||
+	    lck->lck_spin_data == LCK_SPIN_TAG_DESTROYED) {
+		how = "Destroyed";
+	}
+
+	panic("%s spinlock %p: <0x%016lx 0x%16lx>",
+	    how, lck, lck->lck_spin_data, lck->type);
+}
+
+static inline void
+lck_spin_verify(lck_spin_t *lck)
+{
+	if (lck->type != LCK_SPIN_TYPE ||
+	    lck->lck_spin_data == LCK_SPIN_TAG_DESTROYED) {
+		__lck_spin_invalid_panic(lck);
+	}
+}
+#else /* DEVELOPMENT || DEBUG */
+#define lck_spin_verify(lck)            ((void)0)
+#endif /* DEVELOPMENT || DEBUG */
+
+lck_spin_t *
+lck_spin_alloc_init(lck_grp_t *grp, lck_attr_t *attr)
+{
+	lck_spin_t *lck;
+
+	lck = zalloc(KT_LCK_SPIN);
+	lck_spin_init(lck, grp, attr);
+	return lck;
+}
+
+void
+lck_spin_free(lck_spin_t *lck, lck_grp_t *grp)
+{
+	lck_spin_destroy(lck, grp);
+	zfree(KT_LCK_SPIN, lck);
+}
+
+void
+lck_spin_init(lck_spin_t *lck, lck_grp_t *grp, __unused lck_attr_t *attr)
 {
 	lck->type = LCK_SPIN_TYPE;
 	hw_lock_init(&lck->hwlock);
@@ -629,18 +730,37 @@ arm_usimple_lock_init(simple_lock_t lck, __unused unsigned short initial_value)
 	hw_lock_init(&lck->hwlock);
 }
 
-
-/*
- *      Routine:        lck_spin_lock
- */
 void
-lck_spin_lock(lck_spin_t *lock)
+lck_spin_assert(lck_spin_t *lock, unsigned int type)
 {
-#if     DEVELOPMENT || DEBUG
+	thread_t thread, holder;
+
 	if (lock->type != LCK_SPIN_TYPE) {
 		panic("Invalid spinlock %p", lock);
 	}
-#endif  // DEVELOPMENT || DEBUG
+
+	holder = HW_LOCK_STATE_TO_THREAD(lock->lck_spin_data);
+	thread = current_thread();
+	if (type == LCK_ASSERT_OWNED) {
+		if (holder == 0) {
+			panic("Lock not owned %p = %p", lock, holder);
+		}
+		if (holder != thread) {
+			panic("Lock not owned by current thread %p = %p", lock, holder);
+		}
+	} else if (type == LCK_ASSERT_NOTOWNED) {
+		if (holder != THREAD_NULL && holder == thread) {
+			panic("Lock owned by current thread %p = %p", lock, holder);
+		}
+	} else {
+		panic("lck_spin_assert(): invalid arg (%u)", type);
+	}
+}
+
+void
+lck_spin_lock(lck_spin_t *lock)
+{
+	lck_spin_verify(lock);
 	hw_lock_lock(&lock->hwlock, LCK_GRP_NULL);
 }
 
@@ -648,25 +768,14 @@ void
 lck_spin_lock_grp(lck_spin_t *lock, lck_grp_t *grp)
 {
 #pragma unused(grp)
-#if     DEVELOPMENT || DEBUG
-	if (lock->type != LCK_SPIN_TYPE) {
-		panic("Invalid spinlock %p", lock);
-	}
-#endif  // DEVELOPMENT || DEBUG
+	lck_spin_verify(lock);
 	hw_lock_lock(&lock->hwlock, grp);
 }
 
-/*
- *      Routine:        lck_spin_lock_nopreempt
- */
 void
 lck_spin_lock_nopreempt(lck_spin_t *lock)
 {
-#if     DEVELOPMENT || DEBUG
-	if (lock->type != LCK_SPIN_TYPE) {
-		panic("Invalid spinlock %p", lock);
-	}
-#endif  // DEVELOPMENT || DEBUG
+	lck_spin_verify(lock);
 	hw_lock_lock_nopreempt(&lock->hwlock, LCK_GRP_NULL);
 }
 
@@ -674,20 +783,14 @@ void
 lck_spin_lock_nopreempt_grp(lck_spin_t *lock, lck_grp_t *grp)
 {
 #pragma unused(grp)
-#if     DEVELOPMENT || DEBUG
-	if (lock->type != LCK_SPIN_TYPE) {
-		panic("Invalid spinlock %p", lock);
-	}
-#endif  // DEVELOPMENT || DEBUG
+	lck_spin_verify(lock);
 	hw_lock_lock_nopreempt(&lock->hwlock, grp);
 }
 
-/*
- *      Routine:        lck_spin_try_lock
- */
 int
 lck_spin_try_lock(lck_spin_t *lock)
 {
+	lck_spin_verify(lock);
 	return hw_lock_try(&lock->hwlock, LCK_GRP_NULL);
 }
 
@@ -695,15 +798,14 @@ int
 lck_spin_try_lock_grp(lck_spin_t *lock, lck_grp_t *grp)
 {
 #pragma unused(grp)
+	lck_spin_verify(lock);
 	return hw_lock_try(&lock->hwlock, grp);
 }
 
-/*
- *      Routine:        lck_spin_try_lock_nopreempt
- */
 int
 lck_spin_try_lock_nopreempt(lck_spin_t *lock)
 {
+	lck_spin_verify(lock);
 	return hw_lock_try_nopreempt(&lock->hwlock, LCK_GRP_NULL);
 }
 
@@ -711,55 +813,32 @@ int
 lck_spin_try_lock_nopreempt_grp(lck_spin_t *lock, lck_grp_t *grp)
 {
 #pragma unused(grp)
+	lck_spin_verify(lock);
 	return hw_lock_try_nopreempt(&lock->hwlock, grp);
 }
 
-/*
- *      Routine:        lck_spin_unlock
- */
 void
 lck_spin_unlock(lck_spin_t *lock)
 {
-#if     DEVELOPMENT || DEBUG
-	if ((LCK_MTX_STATE_TO_THREAD(lock->lck_spin_data) != current_thread()) && LOCK_CORRECTNESS_PANIC()) {
-		panic("Spinlock not owned by thread %p = %lx", lock, lock->lck_spin_data);
-	}
-	if (lock->type != LCK_SPIN_TYPE) {
-		panic("Invalid spinlock type %p", lock);
-	}
-#endif  // DEVELOPMENT || DEBUG
+	lck_spin_verify(lock);
 	hw_lock_unlock(&lock->hwlock);
 }
 
-/*
- *      Routine:        lck_spin_unlock_nopreempt
- */
 void
 lck_spin_unlock_nopreempt(lck_spin_t *lock)
 {
-#if     DEVELOPMENT || DEBUG
-	if ((LCK_MTX_STATE_TO_THREAD(lock->lck_spin_data) != current_thread()) && LOCK_CORRECTNESS_PANIC()) {
-		panic("Spinlock not owned by thread %p = %lx", lock, lock->lck_spin_data);
-	}
-	if (lock->type != LCK_SPIN_TYPE) {
-		panic("Invalid spinlock type %p", lock);
-	}
-#endif  // DEVELOPMENT || DEBUG
+	lck_spin_verify(lock);
 	hw_lock_unlock_nopreempt(&lock->hwlock);
 }
 
-/*
- *      Routine:        lck_spin_destroy
- */
 void
-lck_spin_destroy(
-	lck_spin_t * lck,
-	lck_grp_t * grp)
+lck_spin_destroy(lck_spin_t *lck, lck_grp_t *grp)
 {
-	if (lck->lck_spin_data == LCK_SPIN_TAG_DESTROYED) {
-		return;
-	}
-	lck->lck_spin_data = LCK_SPIN_TAG_DESTROYED;
+	lck_spin_verify(lck);
+	*lck = (lck_spin_t){
+		.lck_spin_data = LCK_SPIN_TAG_DESTROYED,
+		.type = LCK_SPIN_TYPE_DESTROYED,
+	};
 	if (grp) {
 		lck_grp_deallocate(grp, &grp->lck_grp_spincnt);
 	}
@@ -777,6 +856,8 @@ kdp_lck_spin_is_acquired(lck_spin_t *lck)
 	}
 	return ((lck->lck_spin_data & ~LCK_SPIN_TAG_DESTROYED) != 0) ? TRUE:FALSE;
 }
+
+#endif /* !LCK_SPIN_IS_TICKET_LOCK */
 
 /*
  *	Initialize a usimple_lock.
@@ -807,8 +888,6 @@ void
 	simple_lock((simple_lock_t) l, LCK_GRP_PROBEARG(grp));
 }
 
-
-extern void     sync(void);
 
 /*
  *	Release a usimple_lock.
@@ -844,1027 +923,4 @@ int
 	LCK_GRP_ARG(lck_grp_t *grp))
 {
 	return simple_lock_try((simple_lock_t) l, grp);
-}
-
-/*
- * The C portion of the mutex package.  These routines are only invoked
- * if the optimized assembler routines can't do the work.
- */
-
-/*
- *      Routine:        lck_mtx_alloc_init
- */
-lck_mtx_t      *
-lck_mtx_alloc_init(
-	lck_grp_t * grp,
-	lck_attr_t * attr)
-{
-	lck_mtx_t      *lck;
-
-	lck = zalloc(KT_LCK_MTX);
-	lck_mtx_init(lck, grp, attr);
-	return lck;
-}
-
-/*
- *      Routine:        lck_mtx_free
- */
-void
-lck_mtx_free(
-	lck_mtx_t * lck,
-	lck_grp_t * grp)
-{
-	lck_mtx_destroy(lck, grp);
-	zfree(KT_LCK_MTX, lck);
-}
-
-/*
- *      Routine:        lck_mtx_init
- */
-void
-lck_mtx_init(
-	lck_mtx_t * lck,
-	lck_grp_t * grp,
-	lck_attr_t * attr)
-{
-	lck_mtx_ext_t  *lck_ext = NULL;
-
-	if (attr == LCK_ATTR_NULL) {
-		attr = &LockDefaultLckAttr;
-	}
-#ifdef  BER_XXX
-	if (attr->lck_attr_val & LCK_ATTR_DEBUG) {
-		lck_ext = zalloc(KT_LCK_MTX_EXT);
-	}
-#endif
-	lck_mtx_init_ext(lck, lck_ext, grp, attr);
-}
-
-/*
- *      Routine:        lck_mtx_init_ext
- */
-void
-lck_mtx_init_ext(
-	lck_mtx_t * lck,
-	lck_mtx_ext_t * lck_ext __unused,
-	lck_grp_t * grp,
-	lck_attr_t * attr)
-{
-	if (attr == LCK_ATTR_NULL) {
-		attr = &LockDefaultLckAttr;
-	}
-
-	*lck = (lck_mtx_t){
-		.lck_mtx_type = LCK_MTX_TYPE,
-	};
-
-#if LOCKS_INDIRECT_ALLOW
-	if (__improbable(lck_ext && (attr->lck_attr_val & LCK_ATTR_DEBUG))) {
-		*lck_ext = (lck_mtx_ext_t){
-			.lck_mtx_deb.type = MUTEX_TAG,
-			.lck_mtx_grp = grp,
-			.lck_mtx = *lck,
-		};
-		lck->lck_mtx_tag = LCK_MTX_TAG_INDIRECT;
-		lck->lck_mtx_ptr = lck_ext;
-	}
-#endif /* LOCKS_INDIRECT_ALLOW */
-
-	lck_grp_reference(grp, &grp->lck_grp_mtxcnt);
-}
-
-/* The slow versions */
-static void lck_mtx_lock_contended(lck_mtx_t *lock, thread_t thread, boolean_t interlocked);
-static boolean_t lck_mtx_try_lock_contended(lck_mtx_t *lock, thread_t thread);
-static void lck_mtx_unlock_contended(lck_mtx_t *lock, thread_t thread, boolean_t interlocked);
-
-/* The adaptive spin function */
-static spinwait_result_t lck_mtx_lock_contended_spinwait_arm(lck_mtx_t *lock, thread_t thread, boolean_t interlocked);
-
-/*
- *	Routine:	lck_mtx_verify
- *
- *	Verify if a mutex is valid
- */
-static inline void
-lck_mtx_verify(lck_mtx_t *lock)
-{
-	if (lock->lck_mtx_type != LCK_MTX_TYPE) {
-		panic("Invalid mutex %p", lock);
-	}
-#if     DEVELOPMENT || DEBUG
-	if (lock->lck_mtx_tag == LCK_MTX_TAG_DESTROYED) {
-		panic("Mutex destroyed %p", lock);
-	}
-#endif  /* DEVELOPMENT || DEBUG */
-}
-
-/*
- *	Routine:	lck_mtx_check_preemption
- *
- *	Verify preemption is enabled when attempting to acquire a mutex.
- */
-
-static inline void
-lck_mtx_check_preemption(lck_mtx_t *lock)
-{
-#if     DEVELOPMENT || DEBUG
-	if (current_cpu_datap()->cpu_hibernate) {
-		return;
-	}
-
-	int pl = get_preemption_level();
-
-	if (pl != 0) {
-		panic("Attempt to take mutex with preemption disabled. Lock=%p, level=%d", lock, pl);
-	}
-#else
-	(void)lock;
-#endif
-}
-
-/*
- *	Routine:	lck_mtx_lock
- */
-void
-lck_mtx_lock(lck_mtx_t *lock)
-{
-	thread_t        thread;
-
-	lck_mtx_verify(lock);
-	lck_mtx_check_preemption(lock);
-	thread = current_thread();
-	if (os_atomic_cmpxchg(&lock->lck_mtx_data,
-	    0, LCK_MTX_THREAD_TO_STATE(thread), acquire)) {
-#if     CONFIG_DTRACE
-		LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_ACQUIRE, lock, 0);
-#endif /* CONFIG_DTRACE */
-		return;
-	}
-	lck_mtx_lock_contended(lock, thread, FALSE);
-}
-
-/*
- *       This is the slow version of mutex locking.
- */
-static void NOINLINE
-lck_mtx_lock_contended(lck_mtx_t *lock, thread_t thread, boolean_t interlocked)
-{
-	thread_t                holding_thread;
-	uintptr_t               state;
-	int                     waiters = 0;
-	spinwait_result_t       sw_res;
-	struct turnstile        *ts = NULL;
-
-	/* Loop waiting until I see that the mutex is unowned */
-	for (;;) {
-		sw_res = lck_mtx_lock_contended_spinwait_arm(lock, thread, interlocked);
-		interlocked = FALSE;
-
-		switch (sw_res) {
-		case SPINWAIT_ACQUIRED:
-			if (ts != NULL) {
-				interlock_lock(lock);
-				turnstile_complete((uintptr_t)lock, NULL, NULL, TURNSTILE_KERNEL_MUTEX);
-				interlock_unlock(lock);
-			}
-			goto done;
-		case SPINWAIT_INTERLOCK:
-			goto set_owner;
-		default:
-			break;
-		}
-
-		state = ordered_load_mtx(lock);
-		holding_thread = LCK_MTX_STATE_TO_THREAD(state);
-		if (holding_thread == NULL) {
-			break;
-		}
-		ordered_store_mtx(lock, (state | LCK_ILOCK | ARM_LCK_WAITERS)); // Set waiters bit and wait
-		lck_mtx_lock_wait(lock, holding_thread, &ts);
-		/* returns interlock unlocked */
-	}
-
-set_owner:
-	/* Hooray, I'm the new owner! */
-	state = ordered_load_mtx(lock);
-
-	if (state & ARM_LCK_WAITERS) {
-		/* Skip lck_mtx_lock_acquire if there are no waiters. */
-		waiters = lck_mtx_lock_acquire(lock, ts);
-		/*
-		 * lck_mtx_lock_acquire will call
-		 * turnstile_complete
-		 */
-	} else {
-		if (ts != NULL) {
-			turnstile_complete((uintptr_t)lock, NULL, NULL, TURNSTILE_KERNEL_MUTEX);
-		}
-	}
-
-	state = LCK_MTX_THREAD_TO_STATE(thread);
-	if (waiters != 0) {
-		state |= ARM_LCK_WAITERS;
-	}
-	state |= LCK_ILOCK;                             // Preserve interlock
-	ordered_store_mtx(lock, state); // Set ownership
-	interlock_unlock(lock);                 // Release interlock, enable preemption
-
-done:
-	load_memory_barrier();
-
-	assert(thread->turnstile != NULL);
-
-	if (ts != NULL) {
-		turnstile_cleanup();
-	}
-
-#if CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_ACQUIRE, lock, 0);
-#endif /* CONFIG_DTRACE */
-}
-
-/*
- * Routine: lck_mtx_lock_spinwait_arm
- *
- * Invoked trying to acquire a mutex when there is contention but
- * the holder is running on another processor. We spin for up to a maximum
- * time waiting for the lock to be released.
- */
-static spinwait_result_t
-lck_mtx_lock_contended_spinwait_arm(lck_mtx_t *lock, thread_t thread, boolean_t interlocked)
-{
-	int                     has_interlock = (int)interlocked;
-	__kdebug_only uintptr_t trace_lck = VM_KERNEL_UNSLIDE_OR_PERM(lock);
-	thread_t        owner, prev_owner;
-	uint64_t        window_deadline, sliding_deadline, high_deadline;
-	uint64_t        start_time, cur_time, avg_hold_time, bias, delta;
-	int             loopcount = 0;
-	uint            i, prev_owner_cpu;
-	int             total_hold_time_samples, window_hold_time_samples, unfairness;
-	bool            owner_on_core, adjust;
-	uintptr_t       state, new_state, waiters;
-	spinwait_result_t       retval = SPINWAIT_DID_SPIN_HIGH_THR;
-
-	if (__improbable(!(lck_mtx_adaptive_spin_mode & ADAPTIVE_SPIN_ENABLE))) {
-		if (!has_interlock) {
-			interlock_lock(lock);
-		}
-
-		return SPINWAIT_DID_NOT_SPIN;
-	}
-
-	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_LCK_SPIN_CODE) | DBG_FUNC_START,
-	    trace_lck, VM_KERNEL_UNSLIDE_OR_PERM(LCK_MTX_STATE_TO_THREAD(state)), lock->lck_mtx_waiters, 0, 0);
-
-	start_time = mach_absolute_time();
-	/*
-	 * window_deadline represents the "learning" phase.
-	 * The thread collects statistics about the lock during
-	 * window_deadline and then it makes a decision on whether to spin more
-	 * or block according to the concurrency behavior
-	 * observed.
-	 *
-	 * Every thread can spin at least low_MutexSpin.
-	 */
-	window_deadline = start_time + low_MutexSpin;
-	/*
-	 * Sliding_deadline is the adjusted spin deadline
-	 * computed after the "learning" phase.
-	 */
-	sliding_deadline = window_deadline;
-	/*
-	 * High_deadline is a hard deadline. No thread
-	 * can spin more than this deadline.
-	 */
-	if (high_MutexSpin >= 0) {
-		high_deadline = start_time + high_MutexSpin;
-	} else {
-		high_deadline = start_time + low_MutexSpin * real_ncpus;
-	}
-
-	/*
-	 * Do not know yet which is the owner cpu.
-	 * Initialize prev_owner_cpu with next cpu.
-	 */
-	prev_owner_cpu = (cpu_number() + 1) % real_ncpus;
-	total_hold_time_samples = 0;
-	window_hold_time_samples = 0;
-	avg_hold_time = 0;
-	adjust = TRUE;
-	bias = (os_hash_kernel_pointer(lock) + cpu_number()) % real_ncpus;
-
-	/* Snoop the lock state */
-	state = ordered_load_mtx(lock);
-	owner = LCK_MTX_STATE_TO_THREAD(state);
-	prev_owner = owner;
-
-	if (has_interlock) {
-		if (owner == NULL) {
-			retval = SPINWAIT_INTERLOCK;
-			goto done_spinning;
-		} else {
-			/*
-			 * We are holding the interlock, so
-			 * we can safely dereference owner.
-			 */
-			if (!machine_thread_on_core(owner) || (owner->state & TH_IDLE)) {
-				retval = SPINWAIT_DID_NOT_SPIN;
-				goto done_spinning;
-			}
-		}
-		interlock_unlock(lock);
-		has_interlock = 0;
-	}
-
-	/*
-	 * Spin while:
-	 *   - mutex is locked, and
-	 *   - it's locked as a spin lock, and
-	 *   - owner is running on another processor, and
-	 *   - we haven't spun for long enough.
-	 */
-	do {
-		/*
-		 * Try to acquire the lock.
-		 */
-		owner = LCK_MTX_STATE_TO_THREAD(state);
-		if (owner == NULL) {
-			waiters = state & ARM_LCK_WAITERS;
-			if (waiters) {
-				/*
-				 * preserve the waiter bit
-				 * and try acquire the interlock.
-				 * Note: we will successfully acquire
-				 * the interlock only if we can also
-				 * acquire the lock.
-				 */
-				new_state = ARM_LCK_WAITERS | LCK_ILOCK;
-				has_interlock = 1;
-				retval = SPINWAIT_INTERLOCK;
-				disable_preemption();
-			} else {
-				new_state = LCK_MTX_THREAD_TO_STATE(thread);
-				retval = SPINWAIT_ACQUIRED;
-			}
-
-			/*
-			 * The cmpxchg will succed only if the lock
-			 * is not owned (doesn't have an owner set)
-			 * and it is not interlocked.
-			 * It will not fail if there are waiters.
-			 */
-			if (os_atomic_cmpxchgv(&lock->lck_mtx_data,
-			    waiters, new_state, &state, acquire)) {
-				goto done_spinning;
-			} else {
-				if (waiters) {
-					has_interlock = 0;
-					enable_preemption();
-				}
-			}
-		}
-
-		cur_time = mach_absolute_time();
-
-		/*
-		 * Never spin past high_deadline.
-		 */
-		if (cur_time >= high_deadline) {
-			retval = SPINWAIT_DID_SPIN_HIGH_THR;
-			break;
-		}
-
-		/*
-		 * Check if owner is on core. If not block.
-		 */
-		owner = LCK_MTX_STATE_TO_THREAD(state);
-		if (owner) {
-			i = prev_owner_cpu;
-			owner_on_core = FALSE;
-
-			disable_preemption();
-			state = ordered_load_mtx(lock);
-			owner = LCK_MTX_STATE_TO_THREAD(state);
-
-			/*
-			 * For scalability we want to check if the owner is on core
-			 * without locking the mutex interlock.
-			 * If we do not lock the mutex interlock, the owner that we see might be
-			 * invalid, so we cannot dereference it. Therefore we cannot check
-			 * any field of the thread to tell us if it is on core.
-			 * Check if the thread that is running on the other cpus matches the owner.
-			 */
-			if (owner) {
-				do {
-					cpu_data_t *cpu_data_ptr = CpuDataEntries[i].cpu_data_vaddr;
-					if ((cpu_data_ptr != NULL) && (cpu_data_ptr->cpu_active_thread == owner)) {
-						owner_on_core = TRUE;
-						break;
-					}
-					if (++i >= real_ncpus) {
-						i = 0;
-					}
-				} while (i != prev_owner_cpu);
-				enable_preemption();
-
-				if (owner_on_core) {
-					prev_owner_cpu = i;
-				} else {
-					prev_owner = owner;
-					state = ordered_load_mtx(lock);
-					owner = LCK_MTX_STATE_TO_THREAD(state);
-					if (owner == prev_owner) {
-						/*
-						 * Owner is not on core.
-						 * Stop spinning.
-						 */
-						if (loopcount == 0) {
-							retval = SPINWAIT_DID_NOT_SPIN;
-						} else {
-							retval = SPINWAIT_DID_SPIN_OWNER_NOT_CORE;
-						}
-						break;
-					}
-					/*
-					 * Fall through if the owner changed while we were scanning.
-					 * The new owner could potentially be on core, so loop
-					 * again.
-					 */
-				}
-			} else {
-				enable_preemption();
-			}
-		}
-
-		/*
-		 * Save how many times we see the owner changing.
-		 * We can roughly estimate the the mutex hold
-		 * time and the fairness with that.
-		 */
-		if (owner != prev_owner) {
-			prev_owner = owner;
-			total_hold_time_samples++;
-			window_hold_time_samples++;
-		}
-
-		/*
-		 * Learning window expired.
-		 * Try to adjust the sliding_deadline.
-		 */
-		if (cur_time >= window_deadline) {
-			/*
-			 * If there was not contention during the window
-			 * stop spinning.
-			 */
-			if (window_hold_time_samples < 1) {
-				retval = SPINWAIT_DID_SPIN_NO_WINDOW_CONTENTION;
-				break;
-			}
-
-			if (adjust) {
-				/*
-				 * For a fair lock, we'd wait for at most (NCPU-1) periods,
-				 * but the lock is unfair, so let's try to estimate by how much.
-				 */
-				unfairness = total_hold_time_samples / real_ncpus;
-
-				if (unfairness == 0) {
-					/*
-					 * We observed the owner changing `total_hold_time_samples` times which
-					 * let us estimate the average hold time of this mutex for the duration
-					 * of the spin time.
-					 * avg_hold_time = (cur_time - start_time) / total_hold_time_samples;
-					 *
-					 * In this case spin at max avg_hold_time * (real_ncpus - 1)
-					 */
-					delta = cur_time - start_time;
-					sliding_deadline = start_time + (delta * (real_ncpus - 1)) / total_hold_time_samples;
-				} else {
-					/*
-					 * In this case at least one of the other cpus was able to get the lock twice
-					 * while I was spinning.
-					 * We could spin longer but it won't necessarily help if the system is unfair.
-					 * Try to randomize the wait to reduce contention.
-					 *
-					 * We compute how much time we could potentially spin
-					 * and distribute it over the cpus.
-					 *
-					 * bias is an integer between 0 and real_ncpus.
-					 * distributed_increment = ((high_deadline - cur_time) / real_ncpus) * bias
-					 */
-					delta = high_deadline - cur_time;
-					sliding_deadline = cur_time + ((delta * bias) / real_ncpus);
-					adjust = FALSE;
-				}
-			}
-
-			window_deadline += low_MutexSpin;
-			window_hold_time_samples = 0;
-		}
-
-		/*
-		 * Stop spinning if we past
-		 * the adjusted deadline.
-		 */
-		if (cur_time >= sliding_deadline) {
-			retval = SPINWAIT_DID_SPIN_SLIDING_THR;
-			break;
-		}
-
-		/*
-		 * We want to arm the monitor for wfe,
-		 * so load exclusively the lock.
-		 *
-		 * NOTE:
-		 * we rely on the fact that wfe will
-		 * eventually return even if the cache line
-		 * is not modified. This way we will keep
-		 * looping and checking if the deadlines expired.
-		 */
-		state = os_atomic_load_exclusive(&lock->lck_mtx_data, relaxed);
-		owner = LCK_MTX_STATE_TO_THREAD(state);
-		if (owner != NULL) {
-			wait_for_event();
-			state = ordered_load_mtx(lock);
-		} else {
-			atomic_exchange_abort();
-		}
-
-		loopcount++;
-	} while (TRUE);
-
-done_spinning:
-#if     CONFIG_DTRACE
-	/*
-	 * Note that we record a different probe id depending on whether
-	 * this is a direct or indirect mutex.  This allows us to
-	 * penalize only lock groups that have debug/stats enabled
-	 * with dtrace processing if desired.
-	 */
-#if LOCKS_INDIRECT_ALLOW
-	if (__probable(lock->lck_mtx_tag != LCK_MTX_TAG_INDIRECT)) {
-		LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_ADAPTIVE_SPIN, lock,
-		    mach_absolute_time() - start_time);
-	} else {
-		LOCKSTAT_RECORD(LS_LCK_MTX_EXT_LOCK_ADAPTIVE_SPIN, lock,
-		    mach_absolute_time() - start_time);
-	}
-#else
-	LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_ADAPTIVE_SPIN, lock,
-	    mach_absolute_time() - start_time);
-#endif /* LOCKS_INDIRECT_ALLOW */
-	/* The lockstat acquire event is recorded by the caller. */
-#endif
-
-	state = ordered_load_mtx(lock);
-
-	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_LCK_SPIN_CODE) | DBG_FUNC_END,
-	    trace_lck, VM_KERNEL_UNSLIDE_OR_PERM(LCK_MTX_STATE_TO_THREAD(state)), lock->lck_mtx_waiters, retval, 0);
-	if ((!has_interlock) && (retval != SPINWAIT_ACQUIRED)) {
-		/* We must own either the lock or the interlock on return. */
-		interlock_lock(lock);
-	}
-
-	return retval;
-}
-
-
-/*
- *	Common code for mutex locking as spinlock
- */
-static inline void
-lck_mtx_lock_spin_internal(lck_mtx_t *lock, boolean_t allow_held_as_mutex)
-{
-	uintptr_t       state;
-#if CONFIG_DTRACE
-	bool stat_enabled = false;
-	uint64_t start_time = 0;
-
-	if (interlock_try(lock)) {
-		goto interlock_locked;
-	}
-
-#if LOCKS_INDIRECT_ALLOW
-	bool indirect = (lock->lck_mtx_tag == LCK_MTX_TAG_INDIRECT);
-
-	if ((lockstat_probemap[LS_LCK_MTX_LOCK_SPIN_SPIN] && !indirect) ||
-	    (lockstat_probemap[LS_LCK_MTX_EXT_LOCK_SPIN_SPIN] && indirect))
-#else
-	if (lockstat_probemap[LS_LCK_MTX_LOCK_SPIN_SPIN])
-#endif /* LOCKS_INDIRECT_ALLOW */
-	{
-		stat_enabled = true;
-		start_time = mach_absolute_time();
-	}
-#endif /* CONFIG_DTRACE */
-
-	interlock_lock(lock);
-
-#if CONFIG_DTRACE
-	if (stat_enabled) {
-#if LOCKS_INDIRECT_ALLOW
-		if (indirect) {
-			LOCKSTAT_RECORD(LS_LCK_MTX_EXT_LOCK_SPIN_SPIN, lock,
-			    mach_absolute_time() - start_time);
-		} else
-#endif /* LOCKS_INDIRECT_ALLOW */
-		{
-			LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_SPIN_SPIN, lock,
-			    mach_absolute_time() - start_time);
-		}
-	}
-
-interlock_locked:
-#endif /* CONFIG_DTRACE */
-
-	state = ordered_load_mtx(lock);
-	if (LCK_MTX_STATE_TO_THREAD(state)) {
-		if (allow_held_as_mutex) {
-			lck_mtx_lock_contended(lock, current_thread(), TRUE);
-		} else {
-			// "Always" variants can never block. If the lock is held and blocking is not allowed
-			// then someone is mixing always and non-always calls on the same lock, which is
-			// forbidden.
-			panic("Attempting to block on a lock taken as spin-always %p", lock);
-		}
-		return;
-	}
-	state &= ARM_LCK_WAITERS;                                               // Preserve waiters bit
-	state |= (LCK_MTX_SPIN_TAG | LCK_ILOCK);        // Add spin tag and maintain interlock
-	ordered_store_mtx(lock, state);
-	load_memory_barrier();
-
-#if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_SPIN_ACQUIRE, lock, 0);
-#endif /* CONFIG_DTRACE */
-}
-
-/*
- *	Routine:	lck_mtx_lock_spin
- */
-void
-lck_mtx_lock_spin(lck_mtx_t *lock)
-{
-	lck_mtx_check_preemption(lock);
-	lck_mtx_lock_spin_internal(lock, TRUE);
-}
-
-/*
- *	Routine:	lck_mtx_lock_spin_always
- */
-void
-lck_mtx_lock_spin_always(lck_mtx_t *lock)
-{
-	lck_mtx_lock_spin_internal(lock, FALSE);
-}
-
-/*
- *	Routine:	lck_mtx_try_lock
- */
-boolean_t
-lck_mtx_try_lock(lck_mtx_t *lock)
-{
-	thread_t        thread = current_thread();
-
-	lck_mtx_verify(lock);
-	if (os_atomic_cmpxchg(&lock->lck_mtx_data,
-	    0, LCK_MTX_THREAD_TO_STATE(thread), acquire)) {
-#if     CONFIG_DTRACE
-		LOCKSTAT_RECORD(LS_LCK_MTX_TRY_LOCK_ACQUIRE, lock, 0);
-#endif /* CONFIG_DTRACE */
-		return TRUE;
-	}
-	return lck_mtx_try_lock_contended(lock, thread);
-}
-
-static boolean_t NOINLINE
-lck_mtx_try_lock_contended(lck_mtx_t *lock, thread_t thread)
-{
-	thread_t        holding_thread;
-	uintptr_t       state;
-	int             waiters;
-
-	if (!interlock_try(lock)) {
-		return FALSE;
-	}
-	state = ordered_load_mtx(lock);
-	holding_thread = LCK_MTX_STATE_TO_THREAD(state);
-	if (holding_thread) {
-		interlock_unlock(lock);
-		return FALSE;
-	}
-	waiters = lck_mtx_lock_acquire(lock, NULL);
-	state = LCK_MTX_THREAD_TO_STATE(thread);
-	if (waiters != 0) {
-		state |= ARM_LCK_WAITERS;
-	}
-	state |= LCK_ILOCK;                             // Preserve interlock
-	ordered_store_mtx(lock, state); // Set ownership
-	interlock_unlock(lock);                 // Release interlock, enable preemption
-	load_memory_barrier();
-
-	turnstile_cleanup();
-
-#if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_LOCK_ACQUIRE, lock, 0);
-#endif /* CONFIG_DTRACE */
-
-	return TRUE;
-}
-
-static inline boolean_t
-lck_mtx_try_lock_spin_internal(lck_mtx_t *lock, boolean_t allow_held_as_mutex)
-{
-	uintptr_t       state;
-
-	if (!interlock_try(lock)) {
-		return FALSE;
-	}
-	state = ordered_load_mtx(lock);
-	if (LCK_MTX_STATE_TO_THREAD(state)) {
-		// Lock is held as mutex
-		if (allow_held_as_mutex) {
-			interlock_unlock(lock);
-		} else {
-			// "Always" variants can never block. If the lock is held as a normal mutex
-			// then someone is mixing always and non-always calls on the same lock, which is
-			// forbidden.
-			panic("Spin-mutex held as full mutex %p", lock);
-		}
-		return FALSE;
-	}
-	state &= ARM_LCK_WAITERS;                                               // Preserve waiters bit
-	state |= (LCK_MTX_SPIN_TAG | LCK_ILOCK);        // Add spin tag and maintain interlock
-	ordered_store_mtx(lock, state);
-	load_memory_barrier();
-
-#if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_LOCK_SPIN_ACQUIRE, lock, 0);
-#endif /* CONFIG_DTRACE */
-	return TRUE;
-}
-
-/*
- *	Routine: lck_mtx_try_lock_spin
- */
-boolean_t
-lck_mtx_try_lock_spin(lck_mtx_t *lock)
-{
-	return lck_mtx_try_lock_spin_internal(lock, TRUE);
-}
-
-/*
- *	Routine: lck_mtx_try_lock_spin_always
- */
-boolean_t
-lck_mtx_try_lock_spin_always(lck_mtx_t *lock)
-{
-	return lck_mtx_try_lock_spin_internal(lock, FALSE);
-}
-
-
-
-/*
- *	Routine:	lck_mtx_unlock
- */
-void
-lck_mtx_unlock(lck_mtx_t *lock)
-{
-	thread_t        thread = current_thread();
-	uintptr_t       state;
-	boolean_t       ilk_held = FALSE;
-
-	lck_mtx_verify(lock);
-
-	state = ordered_load_mtx(lock);
-	if (state & LCK_ILOCK) {
-		if (LCK_MTX_STATE_TO_THREAD(state) == (thread_t)LCK_MTX_SPIN_TAG) {
-			ilk_held = TRUE;        // Interlock is held by (presumably) this thread
-		}
-		goto slow_case;
-	}
-	// Locked as a mutex
-	if (os_atomic_cmpxchg(&lock->lck_mtx_data,
-	    LCK_MTX_THREAD_TO_STATE(thread), 0, release)) {
-#if     CONFIG_DTRACE
-		LOCKSTAT_RECORD(LS_LCK_MTX_UNLOCK_RELEASE, lock, 0);
-#endif /* CONFIG_DTRACE */
-		return;
-	}
-slow_case:
-	lck_mtx_unlock_contended(lock, thread, ilk_held);
-}
-
-static void NOINLINE
-lck_mtx_unlock_contended(lck_mtx_t *lock, thread_t thread, boolean_t ilk_held)
-{
-	uintptr_t       state;
-	boolean_t               cleanup = FALSE;
-
-	if (ilk_held) {
-		state = ordered_load_mtx(lock);
-	} else {
-		interlock_lock(lock);
-		state = ordered_load_mtx(lock);
-		if (thread != LCK_MTX_STATE_TO_THREAD(state)) {
-			panic("lck_mtx_unlock(): Attempt to release lock not owned by thread (%p)", lock);
-		}
-		if (state & ARM_LCK_WAITERS) {
-			if (lck_mtx_unlock_wakeup(lock, thread)) {
-				state = ARM_LCK_WAITERS;
-			} else {
-				state = 0;
-			}
-			cleanup = TRUE;
-			goto unlock;
-		}
-	}
-	state &= ARM_LCK_WAITERS;   /* Clear state, retain waiters bit */
-unlock:
-	state |= LCK_ILOCK;
-	ordered_store_mtx(lock, state);
-	interlock_unlock(lock);
-	if (cleanup) {
-		/*
-		 * Do not do any turnstile operations outside of this block.
-		 * lock/unlock is called at early stage of boot with single thread,
-		 * when turnstile is not yet initialized.
-		 * Even without contention we can come throught the slow path
-		 * if the mutex is acquired as a spin lock.
-		 */
-		turnstile_cleanup();
-	}
-
-#if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_MTX_UNLOCK_RELEASE, lock, 0);
-#endif /* CONFIG_DTRACE */
-}
-
-/*
- *	Routine:	lck_mtx_assert
- */
-void
-lck_mtx_assert(lck_mtx_t *lock, unsigned int type)
-{
-	thread_t        thread, holder;
-	uintptr_t       state;
-
-	state = ordered_load_mtx(lock);
-	holder = LCK_MTX_STATE_TO_THREAD(state);
-	if (holder == (thread_t)LCK_MTX_SPIN_TAG) {
-		// Lock is held in spin mode, owner is unknown.
-		return; // Punt
-	}
-	thread = current_thread();
-	if (type == LCK_MTX_ASSERT_OWNED) {
-		if (thread != holder) {
-			panic("lck_mtx_assert(): mutex (%p) owned", lock);
-		}
-	} else if (type == LCK_MTX_ASSERT_NOTOWNED) {
-		if (thread == holder) {
-			panic("lck_mtx_assert(): mutex (%p) not owned", lock);
-		}
-	} else {
-		panic("lck_mtx_assert(): invalid arg (%u)", type);
-	}
-}
-
-/*
- *	Routine:	lck_mtx_ilk_unlock
- */
-boolean_t
-lck_mtx_ilk_unlock(lck_mtx_t *lock)
-{
-	interlock_unlock(lock);
-	return TRUE;
-}
-
-/*
- *	Routine:	lck_mtx_convert_spin
- *
- *	Convert a mutex held for spin into a held full mutex
- */
-void
-lck_mtx_convert_spin(lck_mtx_t *lock)
-{
-	thread_t        thread = current_thread();
-	uintptr_t       state;
-	int                     waiters;
-
-	state = ordered_load_mtx(lock);
-	if (LCK_MTX_STATE_TO_THREAD(state) == thread) {
-		return;         // Already owned as mutex, return
-	}
-	if ((state & LCK_ILOCK) == 0 || (LCK_MTX_STATE_TO_THREAD(state) != (thread_t)LCK_MTX_SPIN_TAG)) {
-		panic("lck_mtx_convert_spin: Not held as spinlock (%p)", lock);
-	}
-	state &= ~(LCK_MTX_THREAD_MASK);                // Clear the spin tag
-	ordered_store_mtx(lock, state);
-	waiters = lck_mtx_lock_acquire(lock, NULL);   // Acquire to manage priority boosts
-	state = LCK_MTX_THREAD_TO_STATE(thread);
-	if (waiters != 0) {
-		state |= ARM_LCK_WAITERS;
-	}
-	state |= LCK_ILOCK;
-	ordered_store_mtx(lock, state);                 // Set ownership
-	interlock_unlock(lock);                                 // Release interlock, enable preemption
-	turnstile_cleanup();
-}
-
-
-/*
- *      Routine:        lck_mtx_destroy
- */
-void
-lck_mtx_destroy(
-	lck_mtx_t * lck,
-	lck_grp_t * grp)
-{
-	if (lck->lck_mtx_type != LCK_MTX_TYPE) {
-		panic("Destroying invalid mutex %p", lck);
-	}
-	if (lck->lck_mtx_tag == LCK_MTX_TAG_DESTROYED) {
-		panic("Destroying previously destroyed lock %p", lck);
-	}
-	lck_mtx_assert(lck, LCK_MTX_ASSERT_NOTOWNED);
-	lck->lck_mtx_tag = LCK_MTX_TAG_DESTROYED;
-	lck_grp_deallocate(grp, &grp->lck_grp_mtxcnt);
-}
-
-/*
- *	Routine:	lck_spin_assert
- */
-void
-lck_spin_assert(lck_spin_t *lock, unsigned int type)
-{
-	thread_t        thread, holder;
-	uintptr_t       state;
-
-	if (lock->type != LCK_SPIN_TYPE) {
-		panic("Invalid spinlock %p", lock);
-	}
-
-	state = lock->lck_spin_data;
-	holder = (thread_t)(state & ~LCK_ILOCK);
-	thread = current_thread();
-	if (type == LCK_ASSERT_OWNED) {
-		if (holder == 0) {
-			panic("Lock not owned %p = %lx", lock, state);
-		}
-		if (holder != thread) {
-			panic("Lock not owned by current thread %p = %lx", lock, state);
-		}
-		if ((state & LCK_ILOCK) == 0) {
-			panic("Lock bit not set %p = %lx", lock, state);
-		}
-	} else if (type == LCK_ASSERT_NOTOWNED) {
-		if (holder != 0) {
-			if (holder == thread) {
-				panic("Lock owned by current thread %p = %lx", lock, state);
-			}
-		}
-	} else {
-		panic("lck_spin_assert(): invalid arg (%u)", type);
-	}
-}
-
-/*
- * Routine: kdp_lck_mtx_lock_spin_is_acquired
- * NOT SAFE: To be used only by kernel debugger to avoid deadlock.
- */
-boolean_t
-kdp_lck_mtx_lock_spin_is_acquired(lck_mtx_t *lck)
-{
-	uintptr_t       state;
-
-	if (not_in_kdp) {
-		panic("panic: spinlock acquired check done outside of kernel debugger");
-	}
-	state = ordered_load_mtx(lck);
-	if (state == LCK_MTX_TAG_DESTROYED) {
-		return FALSE;
-	}
-	if (LCK_MTX_STATE_TO_THREAD(state) || (state & LCK_ILOCK)) {
-		return TRUE;
-	}
-	return FALSE;
-}
-
-void
-kdp_lck_mtx_find_owner(__unused struct waitq * waitq, event64_t event, thread_waitinfo_t * waitinfo)
-{
-	lck_mtx_t * mutex = LCK_EVENT_TO_MUTEX(event);
-	waitinfo->context = VM_KERNEL_UNSLIDE_OR_PERM(mutex);
-	uintptr_t state   = ordered_load_mtx(mutex);
-	thread_t holder   = LCK_MTX_STATE_TO_THREAD(state);
-	if ((uintptr_t)holder == (uintptr_t)LCK_MTX_SPIN_TAG) {
-		waitinfo->owner = STACKSHOT_WAITOWNER_MTXSPIN;
-	} else {
-		assertf(state != (uintptr_t)LCK_MTX_TAG_DESTROYED, "state=0x%llx", (uint64_t)state);
-#if LOCKS_INDIRECT_ALLOW
-		assertf(state != (uintptr_t)LCK_MTX_TAG_INDIRECT, "state=0x%llx", (uint64_t)state);
-#endif /* LOCKS_INDIRECT_ALLOW */
-		waitinfo->owner = thread_tid(holder);
-	}
 }

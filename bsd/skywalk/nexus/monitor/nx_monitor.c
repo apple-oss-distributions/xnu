@@ -173,7 +173,7 @@ static int nx_mon_prov_params_adjust(const struct kern_nexus_domain_provider *,
     const struct nxprov_params *, struct nxprov_adjusted_params *);
 static int nx_mon_prov_params(struct kern_nexus_domain_provider *,
     const uint32_t, const struct nxprov_params *, struct nxprov_params *,
-    struct skmem_region_params[SKMEM_REGIONS]);
+    struct skmem_region_params[SKMEM_REGIONS], uint32_t);
 static int nx_mon_prov_mem_new(struct kern_nexus_domain_provider *,
     struct kern_nexus *, struct nexus_adapter *);
 static void nx_mon_prov_fini(struct kern_nexus_domain_provider *);
@@ -221,6 +221,11 @@ struct nxdom nx_monitor_dom_s = {
 		.nb_def = 64,
 		.nb_min = 64,
 		.nb_max = 64,
+	},
+	.nxdom_large_buf_size = {
+		.nb_def = 0,
+		.nb_min = 0,
+		.nb_max = 0,
 	},
 	.nxdom_meta_size = {
 		.nb_def = NX_METADATA_OBJ_MIN_SZ,
@@ -295,18 +300,13 @@ static ZONE_DEFINE(na_mon_zone, SKMEM_ZONE_PREFIX ".na.mon",
     sizeof(struct nexus_monitor_adapter), ZC_ZFREE_CLEARMEM);
 
 #define SKMEM_TAG_MONITORS      "com.apple.skywalk.monitors"
-static kern_allocation_name_t skmem_tag_monitors;
+static SKMEM_TAG_DEFINE(skmem_tag_monitors, SKMEM_TAG_MONITORS);
 
 static void
 nx_mon_dom_init(struct nxdom *nxdom)
 {
 	SK_LOCK_ASSERT_HELD();
 	ASSERT(!(nxdom->nxdom_flags & NEXUSDOMF_INITIALIZED));
-
-	ASSERT(skmem_tag_monitors == NULL);
-	skmem_tag_monitors =
-	    kern_allocation_name_allocate(SKMEM_TAG_MONITORS, 0);
-	ASSERT(skmem_tag_monitors != NULL);
 
 	(void) nxdom_prov_add(nxdom, &nx_monitor_prov_s);
 }
@@ -319,11 +319,6 @@ nx_mon_dom_terminate(struct nxdom *nxdom)
 	STAILQ_FOREACH_SAFE(nxdom_prov, &nxdom->nxdom_prov_head,
 	    nxdom_prov_link, tnxdp) {
 		(void) nxdom_prov_del(nxdom_prov);
-	}
-
-	if (skmem_tag_monitors != NULL) {
-		kern_allocation_name_release(skmem_tag_monitors);
-		skmem_tag_monitors = NULL;
 	}
 }
 
@@ -411,12 +406,14 @@ nx_mon_prov_params_adjust(const struct kern_nexus_domain_provider *nxdom_prov,
 static int
 nx_mon_prov_params(struct kern_nexus_domain_provider *nxdom_prov,
     const uint32_t req, const struct nxprov_params *nxp0,
-    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS])
+    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS],
+    uint32_t pp_region_config_flags)
 {
 	struct nxdom *nxdom = nxdom_prov->nxdom_prov_dom;
 
 	return nxprov_params_adjust(nxdom_prov, req, nxp0, nxp, srp,
-	           nxdom, nxdom, nxdom, nx_mon_prov_params_adjust);
+	           nxdom, nxdom, nxdom, pp_region_config_flags,
+	           nx_mon_prov_params_adjust);
 }
 
 static int
@@ -442,8 +439,7 @@ nx_mon_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	 * monitor to external kernel clients.
 	 */
 	na->na_arena = skmem_arena_create_for_nexus(na,
-	    NX_PROV(nx)->nxprov_region_params, NULL, NULL, FALSE,
-	    FALSE, NULL, &err);
+	    NX_PROV(nx)->nxprov_region_params, NULL, NULL, 0, NULL, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 
 	return err;
@@ -558,16 +554,15 @@ static int
 nx_mon_kr_alloc(struct __kern_channel_ring *kring, uint32_t n)
 {
 	struct __kern_channel_ring **nm;
-	size_t len, oldlen;
 
 	if (n <= kring->ckr_max_monitors) {
 		/* we already have more entries that requested */
 		return 0;
 	}
 
-	oldlen = sizeof(struct __kern_channel_ring *) * kring->ckr_max_monitors;
-	len = sizeof(struct __kern_channel_ring *) * n;
-	nm = sk_realloc(kring->ckr_monitors, oldlen, len, Z_WAITOK, skmem_tag_monitors);
+	nm = sk_realloc_type_array(struct __kern_channel_ring *,
+	    kring->ckr_max_monitors, n, kring->ckr_monitors,
+	    Z_WAITOK, skmem_tag_monitors);
 	if (nm == NULL) {
 		return ENOMEM;
 	}
@@ -588,8 +583,8 @@ nx_mon_kr_dealloc(struct __kern_channel_ring *kring)
 			    "(%u dangling monitors)!", kring->ckr_name,
 			    kring->ckr_n_monitors);
 		}
-		sk_free(kring->ckr_monitors,
-		    sizeof(struct __kern_channel_ring *) * kring->ckr_max_monitors);
+		sk_free_type_array(struct __kern_channel_ring *,
+		    kring->ckr_max_monitors, kring->ckr_monitors);
 		kring->ckr_monitors = NULL;
 		kring->ckr_max_monitors = 0;
 		kring->ckr_n_monitors = 0;
@@ -1200,7 +1195,7 @@ nx_mon_parent_sync(struct __kern_channel_ring *kring, struct proc *p,
 		struct nexus_monitor_adapter *mna =
 		    (struct nexus_monitor_adapter *)dst_na;
 		uint32_t max_len = mkring->ckr_pp->pp_max_frags *
-		    mkring->ckr_pp->pp_buflet_size;
+		    PP_BUF_SIZE_DEF(mkring->ckr_pp);
 
 		/*
 		 * src and dst adapters must share the same nexus;

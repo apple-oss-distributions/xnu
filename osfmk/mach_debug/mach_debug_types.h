@@ -87,6 +87,7 @@
 /* The following are defined for mach_core_details_v2 */
 #define MACH_CORE_DETAILS_V2_FLAG_ENCRYPTED_AEA   (1ULL << 0) /* This core is encrypted using AEA */
 #define MACH_CORE_DETAILS_V2_FLAG_COMPRESSED_ZLIB (1ULL << 8) /* This core is compressed using ZLib */
+#define MACH_CORE_DETAILS_V2_FLAG_COMPRESSED_LZ4 (1ULL << 9) /* This core is compressed using LZ4 */
 
 typedef char    symtab_name_t[32];
 
@@ -147,25 +148,25 @@ struct mach_core_fileheader {
  * uint64_t signature
  * uint32_t version
  * uint64_t flags
- * uint64_t pub_key_offset                                                         >---+
- * uint16_t pub_key_length                                                             |
- * uint64_t log_offset                                                       >---+     |
- * uint64_t log_length                                                           |     |
- * uint64_t num_files                                                            |     |
- * mach_core_details_v2 files[]                                                  |     |
- *   |--> uint64_t flags                                                         |     |
- *   |    uint64_t offset                                              >---+     |     |
- *   |    uint64_t length                                                  |     |     |
- *   |    char core_name[]                                                 |     |     |
- *   |--> uint64_t flags                                                   |     |     |
- *   |    uint64_t offset                                        >---+     |     |     |
- *   |    uint64_t length                                            |     |     |     |
- *   |    char core_name[]                                           |     |     |     |
- *   |--> [...]                                                      |     |     |     |
- * [public key data]                                                 |     |     | <---+
- * [log data. Plain-text or an AEA container]                        |     | <---+
- * [core #1 data. Zlib compressed. Possibly in an AEA container]     | <---+
- * [core #2 data. Zlib compressed. Possibly in an AEA container] <---+
+ * uint64_t pub_key_offset                                                             >---+
+ * uint16_t pub_key_length                                                                 |
+ * uint64_t log_offset                                                           >---+     |
+ * uint64_t log_length                                                               |     |
+ * uint64_t num_files                                                                |     |
+ * mach_core_details_v2 files[]                                                      |     |
+ *   |--> uint64_t flags                                                             |     |
+ *   |    uint64_t offset                                                  >---+     |     |
+ *   |    uint64_t length                                                      |     |     |
+ *   |    char core_name[]                                                     |     |     |
+ *   |--> uint64_t flags                                                       |     |     |
+ *   |    uint64_t offset                                            >---+     |     |     |
+ *   |    uint64_t length                                                |     |     |     |
+ *   |    char core_name[]                                               |     |     |     |
+ *   |--> [...]                                                          |     |     |     |
+ * [public key data]                                                     |     |     | <---+
+ * [log data. Plain-text or an AEA container]                            |     | <---+
+ * [core #1 data. Zlib/LZ4 compressed. Possibly in an AEA container]     | <---+
+ * [core #2 data. Zlib/LZ4 compressed. Possibly in an AEA container] <---+
  * [core #x data...]
  */
 

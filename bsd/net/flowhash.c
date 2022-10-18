@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2011-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -613,6 +613,8 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 #endif /* !defined(__i386__) && !defined(__x86_64__) */
 		/* read 32-bit chunks */
 		const u_int32_t *k = (const u_int32_t *)key;
+		const u_int16_t *k16 = (const u_int16_t *)key;
+		const u_int8_t *k8 = (const u_int8_t *)key;
 
 		/*
 		 * all but last block:
@@ -627,16 +629,7 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 			k += 3;
 		}
 
-		/*
-		 * handle the last (probably partial) block
-		 *
-		 * "k[2] & 0xffffff" actually reads beyond the end of the
-		 * string, but then masks off the part it's not allowed
-		 * to read.  Because the string is aligned, the masked-off
-		 * tail is in the same word as the rest of the string.
-		 * The masking trick does make the hash noticably faster
-		 * for short strings (like English words).
-		 */
+		/* handle the last (probably partial) block */
 		switch (len) {
 		case 12:
 			c += k[2];
@@ -645,19 +638,20 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 			break;
 
 		case 11:
-			c += k[2] & 0xffffff;
+			c += ((u_int32_t)k8[10]) << 16;
+			c += k16[4];
 			b += k[1];
 			a += k[0];
 			break;
 
 		case 10:
-			c += k[2] & 0xffff;
+			c += k16[4];
 			b += k[1];
 			a += k[0];
 			break;
 
 		case 9:
-			c += k[2] & 0xff;
+			c += k8[8];
 			b += k[1];
 			a += k[0];
 			break;
@@ -668,17 +662,18 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 			break;
 
 		case 7:
-			b += k[1] & 0xffffff;
+			b += ((u_int32_t)k8[6]) << 16;
+			b += k16[2];
 			a += k[0];
 			break;
 
 		case 6:
-			b += k[1] & 0xffff;
+			b += k16[2];
 			a += k[0];
 			break;
 
 		case 5:
-			b += k[1] & 0xff;
+			b += k8[4];
 			a += k[0];
 			break;
 
@@ -687,15 +682,16 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 			break;
 
 		case 3:
-			a += k[0] & 0xffffff;
+			a += ((u_int32_t)k8[2]) << 16;
+			a += k16[0];
 			break;
 
 		case 2:
-			a += k[0] & 0xffff;
+			a += k16[0];
 			break;
 
 		case 1:
-			a += k[0] & 0xff;
+			a += k8[0];
 			break;
 
 		case 0:

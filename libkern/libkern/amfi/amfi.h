@@ -31,10 +31,14 @@
 
 #include <os/base.h>
 #include <sys/cdefs.h>
-#include <sys/types.h>
 #include <kern/cs_blobs.h>
 
-#define KERN_AMFI_INTERFACE_VERSION 5
+#if __has_include(<TrustCache/API.h>)
+#define KERN_AMFI_SUPPORTS_TRUST_CACHE_API 1
+#include <TrustCache/API.h>
+#endif
+
+#define KERN_AMFI_INTERFACE_VERSION 6
 #define KERN_AMFI_SUPPORTS_DATA_ALLOC 1
 
 #if XNU_KERNEL_PRIVATE
@@ -51,6 +55,80 @@ typedef bool (*amfi_get_legacy_profile_exemptions)(const uint8_t **profile, size
 typedef bool (*amfi_get_udid)(const uint8_t **udid, size_t *udidLength);
 typedef void* (*amfi_query_context_to_object)(CEQueryContext_t ctx);
 
+#if KERN_AMFI_SUPPORTS_TRUST_CACHE_API
+
+typedef TCReturn_t (*loadModule_t)(
+	TrustCacheRuntime_t *runtime,
+	const TCType_t type,
+	TrustCache_t *trustCache,
+	const uintptr_t dataAddr,
+	const size_t dataSize
+	);
+
+typedef TCReturn_t (*load_t)(
+	TrustCacheRuntime_t *runtime,
+	TCType_t type,
+	TrustCache_t *trustCache,
+	const uintptr_t payloadAddr,
+	const size_t payloadSize,
+	const uintptr_t manifestAddr,
+	const size_t manifestSize
+	);
+
+typedef TCReturn_t (*query_t)(
+	const TrustCacheRuntime_t *runtime,
+	TCQueryType_t queryType,
+	const uint8_t CDHash[kTCEntryHashSize],
+	TrustCacheQueryToken_t *queryToken
+	);
+
+typedef TCReturn_t (*getCapabilities_t)(
+	const TrustCache_t *trustCache,
+	TCCapabilities_t *capabilities
+	);
+
+typedef TCReturn_t (*queryGetTCType_t)(
+	const TrustCacheQueryToken_t *queryToken,
+	TCType_t *typeRet
+	);
+
+typedef TCReturn_t (*queryGetCapabilities_t)(
+	const TrustCacheQueryToken_t *queryToken,
+	TCCapabilities_t *capabilities
+	);
+
+typedef TCReturn_t (*queryGetHashType_t)(
+	const TrustCacheQueryToken_t *queryToken,
+	uint8_t *hashTypeRet
+	);
+
+typedef TCReturn_t (*queryGetFlags_t)(
+	const TrustCacheQueryToken_t *queryToken,
+	uint64_t *flagsRet
+	);
+
+typedef TCReturn_t (*queryGetConstraintCategory_t)(
+	const TrustCacheQueryToken_t *queryToken,
+	uint8_t *constraintCategoryRet
+	);
+
+#define TRUST_CACHE_INTERFACE_VERSION 2u
+
+typedef struct _TrustCacheInterface {
+	uint32_t version;
+	loadModule_t loadModule;
+	load_t load;
+	query_t query;
+	getCapabilities_t getCapabilities;
+	queryGetTCType_t queryGetTCType;
+	queryGetCapabilities_t queryGetCapabilities;
+	queryGetHashType_t queryGetHashType;
+	queryGetFlags_t queryGetFlags;
+	queryGetConstraintCategory_t queryGetConstraintCategory;
+} TrustCacheInterface_t;
+
+#endif /* KERN_AMFI_SUPPORTS_TRUST_CACHE_API */
+
 typedef struct _amfi {
 	amfi_OSEntitlements_invalidate OSEntitlements_invalidate;
 	amfi_OSEntitlements_asDict OSEntitlements_asdict;
@@ -61,6 +139,11 @@ typedef struct _amfi {
 	amfi_get_legacy_profile_exemptions get_legacy_profile_exemptions;
 	amfi_get_udid get_udid;
 	amfi_query_context_to_object query_context_to_object;
+
+#if KERN_AMFI_SUPPORTS_TRUST_CACHE_API
+	/* Interface to interact with libTrustCache */
+	TrustCacheInterface_t TrustCache;
+#endif
 } amfi_t;
 
 __BEGIN_DECLS

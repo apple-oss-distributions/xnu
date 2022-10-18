@@ -189,6 +189,8 @@ check1:
 			memcpy(&leaked, ev.nd.netagent_uuid, sizeof(leaked));
 			T_ASSERT_FAIL("netagent register event leaked data: 0x%08lx", leaked);
 		}
+
+		break;
 	}
 
 	finished = 1;
@@ -222,6 +224,8 @@ check2:
 			memcpy(&leaked, ev.nd.netagent_uuid, sizeof(leaked));
 			T_ASSERT_FAIL("netagent register event leaked data: 0x%08lx", leaked);
 		}
+
+		break;
 	}
 
 	finished = 1;

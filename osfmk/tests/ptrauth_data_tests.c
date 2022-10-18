@@ -65,11 +65,13 @@ kern_return_t ptrauth_data_tests(void);
  * which should be subject to pointer signing.
  */
 #define ALLOC_VALIDATE_DATA_PTR(structure, decl, member, discr) { \
+	__typed_allocators_ignore_push \
 	structure *tmp = kalloc_data(sizeof(structure), Z_WAITOK | Z_ZERO); \
 	if (!tmp) return KERN_NO_SPACE; \
 	tmp->member = (void*)0xffffffff41414141; \
 	VALIDATE_DATA_PTR(decl, tmp->member, discr) \
 	kfree_data(tmp, sizeof(structure)); \
+	__typed_allocators_ignore_pop \
 }
 
 #define VALIDATE_DATA_PTR(decl, ptr, discr) VALIDATE_PTR(decl, ptr, ptrauth_key_process_independent_data, discr)
@@ -91,7 +93,6 @@ ptrauth_data_tests(void)
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_bootstrap, "task.itk_bootstrap");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_debug_control, "task.itk_debug_control");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_space *, itk_space, "task.itk_space");
-	ALLOC_VALIDATE_DATA_PTR(struct task, void *, bsd_info, "task.bsd_info");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_task_access, "task.itk_task_access");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_resume, "task.itk_resume");
 
@@ -109,8 +110,7 @@ ptrauth_data_tests(void)
 
 	/* ipc_kmsg */
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, struct ipc_port *, ikm_prealloc, "kmsg.ikm_prealloc");
-	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, void *, ikm_data, "kmsg.ikm_data");
-	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, mach_msg_header_t *, ikm_header, "kmsg.ikm_header");
+	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, void *, ikm_udata, "kmsg.ikm_udata");
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, struct ipc_port *, ikm_voucher_port, "kmsg.ikm_voucher_port");
 
 	return kr;

@@ -74,6 +74,7 @@
 
 #include <sys/appleapiopts.h>
 #include <sys/cdefs.h>
+#include <sys/constrained_ctypes.h>
 #include <sys/types.h> /* u_quad_t */
 #ifdef KERNEL_PRIVATE
 #include <sys/queue.h>                  /* for TAILQ macros */
@@ -208,7 +209,7 @@ struct socket {
 	caddr_t so_tpcb;                /* Misc. protocol control block, used
 	                                 *  by some kexts */
 
-	void            (*so_event)(struct socket *, void *, long);
+	void            (*so_event)(struct socket *, void *, uint32_t);
 	void            *so_eventarg;   /* Arg for above */
 	kauth_cred_t    so_cred;        /* cred of who opened the socket */
 	/* NB: generation count must not be first; easiest to make it last. */
@@ -216,6 +217,7 @@ struct socket {
 	STAILQ_ENTRY(socket) so_cache_ent;      /* socache entry */
 	caddr_t         so_saved_pcb;           /* Saved pcb when cacheing */
 	u_int64_t       cache_timestamp;        /* time socket was cached */
+	uint32_t        so_eventmask;           /* event mask */
 
 	pid_t           last_pid;       /* pid of most recent accessor */
 	u_int64_t       last_upid;      /* upid of most recent accessor */
@@ -257,56 +259,6 @@ struct socket {
 #define SOF_DELEGATED           0x10000000 /* on behalf of another process */
 #define SOF_CONTENT_FILTER      0x20000000 /* Content filter enabled */
 
-	uint32_t        so_upcallusecount; /* number of upcalls in progress */
-	int             so_usecount;    /* refcounting of socket use */
-	int             so_retaincnt;
-	uint32_t        so_filteruse;   /* usecount for the socket filters */
-	uint16_t        so_traffic_class;
-	int8_t          so_netsvctype;
-	uint8_t         so_restrictions;
-	thread_t        so_send_filt_thread;
-
-	/* for debug pruposes */
-#define SO_LCKDBG_MAX 4 /* number of debug locking Link Registers recorded */
-	void    *lock_lr[SO_LCKDBG_MAX];        /* locking calling history */
-	void    *unlock_lr[SO_LCKDBG_MAX];      /* unlocking caller history */
-	u_int8_t        next_lock_lr;
-	u_int8_t        next_unlock_lr;
-
-	u_int16_t       so_pktheadroom; /* headroom before packet payload */
-
-	u_int32_t       so_ifdenied_notifies; /* # of notifications generated */
-
-	thread_t        so_background_thread;   /* thread that marked
-	                                         *  this socket background */
-	struct data_stats so_tc_stats[SO_TC_STATS_MAX];
-	struct klist    so_klist;               /* klist for EV_SOCK events */
-
-	struct flow_divert_pcb  *so_fd_pcb;     /* Flow Divert control block */
-
-#if CONTENT_FILTER
-	struct cfil_info    *so_cfil;
-	u_int32_t           so_state_change_cnt; /* incr for each connect, disconnect */
-#endif
-	struct soflow_db    *so_flow_db;
-
-	u_int32_t       so_eventmask;           /* event mask */
-
-	pid_t           e_pid;          /* pid of the effective owner */
-	u_int64_t       e_upid;         /* upid of the effective owner */
-#if XNU_TARGET_OS_OSX
-	pid_t           so_rpid;        /* pid of the responsible process */
-#endif /* XNU_TARGET_OS_OSX */
-
-	uuid_t          last_uuid;      /* uuid of most recent accessor */
-	uuid_t          e_uuid;         /* uuid of effective owner */
-	uuid_t          so_vuuid;       /* UUID of the Voucher originator */
-#if XNU_TARGET_OS_OSX
-	uuid_t          so_ruuid;       /* UUID of the responsible process */
-#endif /* XNU_TARGET_OS_OSX */
-
-	int32_t         so_policy_gencnt; /* UUID policy gencnt */
-
 	u_int32_t       so_flags1;
 #define SOF1_POST_FALLBACK_SYNC         0x00000001 /* fallback to TCP */
 #define SOF1_AWDL_PRIVILEGED            0x00000002 /* unused */
@@ -339,6 +291,54 @@ struct socket {
 #define SOF1_TRACKER_NON_APP_INITIATED  0x10000000 /* Tracker connection is non-app initiated */
 #define SOF1_APPROVED_APP_DOMAIN            0x20000000 /* Connection is for an approved associated app domain */
 
+	uint32_t        so_upcallusecount; /* number of upcalls in progress */
+	int             so_usecount;    /* refcounting of socket use */
+	int             so_retaincnt;
+	uint16_t        so_traffic_class;
+	int8_t          so_netsvctype;
+	uint8_t         so_restrictions;
+	thread_t        so_send_filt_thread;
+
+	/* for debug pruposes */
+#define SO_LCKDBG_MAX 4 /* number of debug locking Link Registers recorded */
+	void    *lock_lr[SO_LCKDBG_MAX];        /* locking calling history */
+	void    *unlock_lr[SO_LCKDBG_MAX];      /* unlocking caller history */
+	u_int8_t        next_lock_lr;
+	u_int8_t        next_unlock_lr;
+
+	u_int16_t       so_pktheadroom; /* headroom before packet payload */
+
+	u_int32_t       so_ifdenied_notifies; /* # of notifications generated */
+
+	thread_t        so_background_thread;   /* thread that marked
+	                                         *  this socket background */
+	struct data_stats so_tc_stats[SO_TC_STATS_MAX];
+	struct klist    so_klist;               /* klist for EV_SOCK events */
+
+	struct flow_divert_pcb  *so_fd_pcb;     /* Flow Divert control block */
+
+	struct soflow_db    *so_flow_db;
+
+#if CONTENT_FILTER
+	struct cfil_info    *so_cfil;
+	u_int32_t           so_state_change_cnt; /* incr for each connect, disconnect */
+#endif
+
+	pid_t           e_pid;          /* pid of the effective owner */
+	u_int64_t       e_upid;         /* upid of the effective owner */
+#if XNU_TARGET_OS_OSX
+	pid_t           so_rpid;        /* pid of the responsible process */
+#endif /* XNU_TARGET_OS_OSX */
+
+	uuid_t          last_uuid;      /* uuid of most recent accessor */
+	uuid_t          e_uuid;         /* uuid of effective owner */
+	uuid_t          so_vuuid;       /* UUID of the Voucher originator */
+#if XNU_TARGET_OS_OSX
+	uuid_t          so_ruuid;       /* UUID of the responsible process */
+#endif /* XNU_TARGET_OS_OSX */
+
+	int32_t         so_policy_gencnt; /* UUID policy gencnt */
+
 	u_int64_t       so_extended_bk_start;
 
 	u_int8_t        so_fallback_mode;
@@ -349,8 +349,8 @@ struct socket {
 #define SO_FALLBACK_MODE_PREFER           4 /* Fell back with a headstart */
 
 	u_int8_t        so_log_seqn;    /* Multi-layer Packet Logging rolling sequence number */
-	uuid_t          so_mpkl_send_uuid;
 	uint8_t         so_mpkl_send_proto;
+	uuid_t          so_mpkl_send_uuid;
 };
 
 /* Control message accessor in mbufs */
@@ -374,6 +374,14 @@ struct socket {
 	(struct cmsghdr *)0L /* NULL */ :                               \
 	(struct cmsghdr *)(void *)((unsigned char *)(cmsg) +            \
 	__DARWIN_ALIGN32((__uint32_t)(cmsg)->cmsg_len)))
+
+/*
+ * Need receive options
+ */
+#define SO_RECV_CONTROL_OPTS(so) \
+    (((so)->so_options & \
+    (SO_TIMESTAMP | SO_TIMESTAMP_MONOTONIC | SO_TIMESTAMP_CONTINUOUS)) || \
+    ((so)->so_flags & (SOF_RECV_TRAFFIC_CLASS | SOF_RECV_WAKE_PKT)))
 
 /*
  * Socket state bits.
@@ -425,7 +433,7 @@ struct xsockbuf {
 /*
  * Externalized form of struct socket used by the sysctl(3) interface.
  */
-struct  xsocket {
+struct xsocket {
 	u_int32_t               xso_len;        /* length of this structure */
 	_XSOCKET_PTR(struct socket *) xso_so;   /* makes a convenient handle */
 	short                   so_type;
@@ -481,6 +489,7 @@ struct  xsocket64 {
 #define XSO_KCREG       0x040
 #define XSO_KCB         0x080
 #define XSO_EVT         0x100
+#define XSO_UNPCB       0x200
 
 struct  xsocket_n {
 	u_int32_t               xso_len;        /* length of this structure */
@@ -503,7 +512,21 @@ struct  xsocket_n {
 	uid_t                   so_uid;         /* XXX */
 	pid_t                   so_last_pid;
 	pid_t                   so_e_pid;
+	so_gen_t                so_gencnt;
+	u_int32_t               so_flags;
+	u_int32_t               so_flags1;
+	int32_t                 so_usecount;
+	int32_t                 so_retaincnt;
+	u_int32_t               xso_filter_flags;
 };
+
+/*
+ * Values for xso_filter_flags
+ */
+#define XSOFF_SO_FILT   0x01    /* socket filter attached */
+#define XSOFF_FLOW_DB   0x02    /* flow database attached */
+#define XSOFF_CFIL      0x04    /* content filter attached */
+#define XSOFF_FLOW_DIV  0x08    /* flow divert attached */
 
 struct xsockbuf_n {
 	u_int32_t               xsb_len;        /* length of this structure */
@@ -607,13 +630,14 @@ struct kextcb {
 #define SO_FILT_HINT_MPCANTRCVMORE      0x00040000      /* MPTCP DFIN Received */
 #define SO_FILT_HINT_NOTIFY_ACK         0x00080000      /* Notify Acknowledgement */
 #define SO_FILT_HINT_MP_SUB_ERROR       0x00100000      /* Error happend on subflow */
+#define SO_FILT_HINT_WAKE_PKT           0x00200000      /* received wake packet */
 
 #define SO_FILT_HINT_BITS \
 	"\020\1LOCKED\2CONNRESET\3CANTRCVMORE\4CANTSENDMORE\5TIMEOUT"   \
 	"\6NOSRCADDR\7IFDENIED\10SUSPEND\11RESUME\12KEEPALIVE\13AWTIMO" \
 	"\14ARTIMO\15CONNECTED\16DISCONNECTED\17CONNINFO_UPDATED"       \
 	"\20MPFAILOVER\21MPSTATUS\22MUSTRST\23MPCANTRCVMORE\24NOTIFYACK"\
-	"\25MPSUBERROR"
+	"\25MPSUBERROR\26WAKEPKT"
 
 /* Mask for hints that have corresponding kqueue events */
 #define SO_FILT_HINT_EV                                                 \
@@ -624,7 +648,7 @@ struct kextcb {
 	SO_FILT_HINT_KEEPALIVE | SO_FILT_HINT_ADAPTIVE_WTIMO |          \
 	SO_FILT_HINT_ADAPTIVE_RTIMO | SO_FILT_HINT_CONNECTED |          \
 	SO_FILT_HINT_DISCONNECTED | SO_FILT_HINT_CONNINFO_UPDATED |     \
-	SO_FILT_HINT_NOTIFY_ACK)
+	SO_FILT_HINT_NOTIFY_ACK | SO_FILT_HINT_WAKE_PKT)
 
 #if SENDFILE
 struct sf_buf {
@@ -737,11 +761,13 @@ struct recv_msg_elem {
 	int which;
 	int flags;
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct recv_msg_elem, recv_msg_elem);
 
 /*
  * From uipc_socket and friends
  */
 __BEGIN_DECLS
+__ASSUME_PTR_ABI_SINGLE_BEGIN
 /* Exported */
 extern int sbappendaddr(struct sockbuf *sb, struct sockaddr *asa,
     struct mbuf *m0, struct mbuf *control, int *error_out);
@@ -764,7 +790,7 @@ extern void soisdisconnecting(struct socket *so);
 extern struct socket *sonewconn(struct socket *head, int connstatus,
     const struct sockaddr *from);
 extern int sopoll(struct socket *so, int events, struct ucred *cred, void *wql);
-extern int sooptcopyin(struct sockopt *sopt, void *data, size_t len,
+extern int sooptcopyin(struct sockopt *sopt, void * __sized_by(len), size_t len,
     size_t minlen)
 __attribute__ ((warn_unused_result));
 extern int sooptcopyout(struct sockopt *sopt, void *data, size_t len)
@@ -784,12 +810,13 @@ extern int sosend_list(struct socket *so, struct uio **uio, u_int uiocnt,
     int flags);
 extern int soreceive_list(struct socket *so, struct recv_msg_elem *msgarray,
     u_int msgcnt, int *flags);
-extern void sonullevent(struct socket *so, void *arg, long hint);
+extern void sonullevent(struct socket *so, void *arg, uint32_t hint);
 extern struct mbuf *sbconcat_mbufs(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
     struct mbuf *control);
 
 
-__END_DECLS
+__ASSUME_PTR_ABI_SINGLE_END
+    __END_DECLS
 
 #ifdef BSD_KERNEL_PRIVATE
 struct file;
@@ -797,6 +824,7 @@ struct filedesc;
 struct so_tcdbg;
 
 __BEGIN_DECLS
+__ASSUME_PTR_ABI_SINGLE_BEGIN
 /* Not exported */
 extern void socketinit(void);
 extern struct sockaddr *dup_sockaddr(struct sockaddr *sa, int canwait);
@@ -841,12 +869,16 @@ extern void *alloc_sockaddr(size_t size, zalloc_flags_t flags);
 
 #if XNU_TARGET_OS_OSX
 #define free_sockaddr(sa) do {                                  \
+	__typed_allocators_ignore_push                          \
 	kheap_free_addr(KHEAP_SONAME, (sa));                    \
+	__typed_allocators_ignore_pop                           \
 } while (0)
 #else /* XNU_TARGET_OS_OSX */
 #define free_sockaddr(sa) do {                                  \
 if ((sa) != NULL) {                                             \
+	__typed_allocators_ignore_push                          \
 	kheap_free_bounded(KHEAP_SONAME, (sa), 1, UINT8_MAX);   \
+	__typed_allocators_ignore_pop                           \
 }                                                               \
 } while (0)
 #endif /* XNU_TARGET_OS_OSX */
@@ -877,7 +909,6 @@ extern int soconnectxlocked(struct socket *so, struct sockaddr *src,
     sae_connid_t *, uint32_t, void *, u_int32_t, uio_t, user_ssize_t *);
 extern int sodisconnectx(struct socket *so, sae_associd_t, sae_connid_t);
 extern int sodisconnectxlocked(struct socket *so, sae_associd_t, sae_connid_t);
-extern void soevupcall(struct socket *so, long hint);
 /* flags for socreate_internal */
 #define SOCF_MPTCP      0x1     /* MPTCP-subflow */
 extern int socreate_internal(int dom, struct socket **aso, int type, int proto,
@@ -914,7 +945,7 @@ extern int socket_try_lock(struct socket *so);
 extern void socket_unlock(struct socket *so, int refcount);
 extern int sogetaddr_locked(struct socket *, struct sockaddr **, int);
 extern const char *solockhistory_nr(struct socket *);
-extern void soevent(struct socket *so, long hint);
+extern void soevent(struct socket *so, uint32_t hint);
 extern void sorflush(struct socket *so);
 extern void sowflush(struct socket *so);
 extern void sowakeup(struct socket *so, struct sockbuf *sb, struct socket *so2);
@@ -985,14 +1016,6 @@ extern void soflow_detach(struct socket *);
 #define PKT_SCF_TCP_ACK         0x00000002      /* Pure TCP ACK */
 #define PKT_SCF_TCP_SYN         0x00000004      /* TCP SYN */
 
-/*
- * Flags for connectx(2) user-protocol request routine.
- */
-
-#define CONNREQF_MPTCP  0x1     /* called internally by MPTCP */
-#define CONNREQF_UIO    0x2     /* there's data */
-#define CONNREQF_IDEM   0x4     /* data is idempotent */
-
 extern void set_packet_service_class(struct mbuf *, struct socket *,
     mbuf_svc_class_t, u_int32_t);
 extern void so_tc_update_stats(struct mbuf *, struct socket *,
@@ -1040,14 +1063,15 @@ extern void netpolicy_post_msg(uint32_t, struct netpolicy_event_data *,
 
 extern int tcp_notsent_lowat_check(struct socket *so);
 
-extern user_ssize_t uio_array_resid(struct uio **, u_int);
-extern user_ssize_t recv_msg_array_resid(struct recv_msg_elem *, u_int);
+extern user_ssize_t uio_array_resid(struct uio ** __counted_by(count), u_int count);
+extern user_ssize_t recv_msg_array_resid(struct recv_msg_elem * __counted_by(count), u_int count);
 
 void sotoxsocket_n(struct socket *, struct xsocket_n *);
 void sbtoxsockbuf_n(struct sockbuf *, struct xsockbuf_n *);
 void sbtoxsockstat_n(struct socket *, struct xsockstat_n *);
 
-__END_DECLS
+__ASSUME_PTR_ABI_SINGLE_END
+    __END_DECLS
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* KERNEL_PRIVATE */
 

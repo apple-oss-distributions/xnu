@@ -177,6 +177,10 @@ __posix_spawnattr_init(struct _posix_spawnattr *psattrp)
 	/* Default is no file descriptor limit */
 	psattrp->psa_filedesc_soft_limit = 0;
 	psattrp->psa_filedesc_hard_limit = 0;
+
+	psattrp->psa_crash_behavior = 0;
+	psattrp->psa_crash_behavior_deadline = 0;
+	psattrp->psa_launch_type = 0;
 }
 
 /*
@@ -1164,6 +1168,49 @@ posix_spawnattr_set_alt_rosetta_np(posix_spawnattr_t *attr, uint32_t flags)
 	psattr = *(_posix_spawnattr_t *)attr;
 
 	psattr->psa_options |= PSA_OPTION_ALT_ROSETTA;
+	(void)flags;
+	return 0;
+}
+
+/*
+ * posix_spawnattr_set_crash_behavior_np
+ * Description: Set flags to control behavior of the process on crash
+ */
+int
+posix_spawnattr_set_crash_behavior_np(posix_spawnattr_t *attr, uint32_t flags)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+
+	psattr->psa_crash_behavior = flags;
+	return 0;
+}
+
+/*
+ * posix_spawnattr_set_crash_behavior_deadline_np
+ * Description: Set mach_continuous_time deadline for crash_behavior to panic
+ *   A deadline of 0 indicates no deadline
+ *   A non-zero deadline indicates that the crash behavior mode will be valid
+ *   until the deadline. After the deadline the crash behavior field will
+ *   be ignored.
+ */
+int
+posix_spawnattr_set_crash_behavior_deadline_np(posix_spawnattr_t *attr, uint64_t deadline, uint32_t flags)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+
+	psattr->psa_crash_behavior_deadline = deadline;
 	(void)flags;
 	return 0;
 }
@@ -2333,10 +2380,6 @@ posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t * __restrict attr, ui
 		return EINVAL;
 	}
 
-	if (!(persona->pspi_flags & (POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE | POSIX_SPAWN_PERSONA_FLAGS_VERIFY))) {
-		return EINVAL;
-	}
-
 	persona->pspi_uid = uid;
 
 	persona->pspi_flags |= POSIX_SPAWN_PERSONA_UID;
@@ -2357,10 +2400,6 @@ posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t * __restrict attr, gi
 	psattr = *(_posix_spawnattr_t *)attr;
 	persona = psattr->psa_persona_info;
 	if (!persona) {
-		return EINVAL;
-	}
-
-	if (!(persona->pspi_flags & (POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE | POSIX_SPAWN_PERSONA_FLAGS_VERIFY))) {
 		return EINVAL;
 	}
 
@@ -2392,10 +2431,6 @@ posix_spawnattr_set_persona_groups_np(const posix_spawnattr_t * __restrict attr,
 	psattr = *(_posix_spawnattr_t *)attr;
 	persona = psattr->psa_persona_info;
 	if (!persona) {
-		return EINVAL;
-	}
-
-	if (!(persona->pspi_flags & (POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE | POSIX_SPAWN_PERSONA_FLAGS_VERIFY))) {
 		return EINVAL;
 	}
 
@@ -2693,6 +2728,25 @@ posix_spawnattr_set_jetsam_ttr_np(const posix_spawnattr_t * __restrict attr, uin
 		}
 	}
 	psattr->psa_jetsam_flags |= relaunch_jetsam_flags[highest_frequency_bucket];
+	return 0;
+}
+
+/*
+ * posix_spawnattr_set_launch_type_np
+ * Description: sets the launch type in posix_spawnattr_t attr
+ */
+int
+posix_spawnattr_set_launch_type_np(posix_spawnattr_t *attr, uint8_t launch_type)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+	psattr->psa_launch_type = launch_type;
+
 	return 0;
 }
 

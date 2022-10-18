@@ -29,8 +29,10 @@
 extern "C" {
 #include <kern/debug.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/arm64/board_config.h>
 };
 
+#include <kern/bits.h>
 #include <kern/processor.h>
 #include <kern/thread.h>
 #include <kperf/kperf.h>
@@ -65,6 +67,11 @@ static unsigned int boot_cpu;
 
 // array index is a cpu_id (so some elements may be NULL)
 static processor_t *machProcessors;
+
+bool cluster_power_supported = false;
+static uint64_t cpu_power_state_mask;
+static uint64_t all_clusters_mask;
+static uint64_t online_clusters_mask;
 
 static void
 processor_idle_wrapper(cpu_id_t /*cpu_id*/, boolean_t enter, uint64_t *new_timeout_ticks)
@@ -140,7 +147,7 @@ register_aic_handlers(const ml_topology_cpu *cpu_info,
 
 	// Conditional, because on Skye and later, we use an FIQ instead of an external IRQ.
 	if (pmi_handler && irqcount == 1) {
-		if (cpu->registerInterrupt(1, NULL, (IOInterruptAction)pmi_handler, NULL) != kIOReturnSuccess ||
+		if (cpu->registerInterrupt(1, NULL, (IOInterruptAction)(void (*)(void))pmi_handler, NULL) != kIOReturnSuccess ||
 		    cpu->enableInterrupt(1) != kIOReturnSuccess) {
 			panic("Error registering PMI");
 		}
@@ -161,6 +168,29 @@ cpu_boot_thread(void */*unused0*/, wait_result_t /*unused1*/)
 	gAIC = static_cast<IOInterruptController *>(gCPUIC->waitForChildController());
 
 	ml_set_max_cpus(topology_info->max_cpu_id + 1);
+
+#if XNU_CLUSTER_POWER_DOWN
+	cluster_power_supported = true;
+	/*
+	 * If a boot-arg is set that allows threads to be bound
+	 * to a cpu or cluster, cluster_power_supported must
+	 * default to false.
+	 */
+#ifdef CONFIG_XNUPOST
+	uint64_t kernel_post = 0;
+	PE_parse_boot_argn("kernPOST", &kernel_post, sizeof(kernel_post));
+	if (kernel_post != 0) {
+		cluster_power_supported = false;
+	}
+#endif
+	if (PE_parse_boot_argn("enable_skstb", NULL, 0)) {
+		cluster_power_supported = false;
+	}
+	if (PE_parse_boot_argn("enable_skstsct", NULL, 0)) {
+		cluster_power_supported = false;
+	}
+#endif
+	PE_parse_boot_argn("cluster_power", &cluster_power_supported, sizeof(cluster_power_supported));
 
 	matching = IOService::serviceMatching("IOPMGR");
 	gPMGR = OSDynamicCast(IOPMGR,
@@ -212,6 +242,12 @@ IOCPUInitialize(void)
 {
 	topology_info = ml_get_topology_info();
 	boot_cpu = topology_info->boot_cpu->cpu_id;
+
+	for (unsigned int i = 0; i < topology_info->num_clusters; i++) {
+		bit_set(all_clusters_mask, topology_info->clusters[i].cluster_id);
+	}
+	// iBoot powers up every cluster (at least for now)
+	online_clusters_mask = all_clusters_mask;
 
 	thread_t thread;
 	kernel_thread_start(&cpu_boot_thread, NULL, &thread);
@@ -316,6 +352,21 @@ PE_cpu_machine_quiesce(cpu_id_t target)
 	ml_arm_sleep();
 }
 
+static bool
+is_cluster_powering_down(int cpu_id)
+{
+	// Don't kill the cluster power if any other CPUs in this cluster are still awake
+	unsigned int target_cluster_id = topology_info->cpus[cpu_id].cluster_id;
+	for (int i = 0; i < topology_info->num_cpus; i++) {
+		if (topology_info->cpus[i].cluster_id == target_cluster_id &&
+		    cpu_id != i &&
+		    bit_test(cpu_power_state_mask, i)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 // Takes one secondary CPU core offline at runtime.  Runs on the target CPU.
 // Returns true if the platform code should go into deep sleep WFI, false otherwise.
 bool
@@ -324,7 +375,8 @@ PE_cpu_down(cpu_id_t target)
 	unsigned int cpu_id = target_to_cpu_id(target);
 	assert(cpu_id != boot_cpu);
 	gPMGR->disableCPUCore(cpu_id);
-	return false;
+	ml_broadcast_cpu_event(CPU_DOWN, cpu_id);
+	return cluster_power_supported && is_cluster_powering_down(cpu_id);
 }
 
 void
@@ -334,15 +386,54 @@ PE_handle_ext_interrupt(void)
 }
 
 void
+PE_cpu_power_disable(int cpu_id)
+{
+	bit_clear(cpu_power_state_mask, cpu_id);
+	if (!cluster_power_supported || cpu_id == boot_cpu) {
+		return;
+	}
+
+	// Don't kill the cluster power if any other CPUs in this cluster are still awake
+	unsigned int target_cluster_id = topology_info->cpus[cpu_id].cluster_id;
+	if (!is_cluster_powering_down(cpu_id)) {
+		return;
+	}
+
+	if (processor_should_kprintf(machProcessors[cpu_id], false)) {
+		kprintf("%s>turning off power to cluster %d\n", __FUNCTION__, target_cluster_id);
+	}
+	ml_broadcast_cpu_event(CLUSTER_EXIT_REQUESTED, target_cluster_id);
+	bit_clear(online_clusters_mask, target_cluster_id);
+	gPMGR->disableCPUCluster(target_cluster_id);
+}
+
+void
+PE_cpu_power_enable(int cpu_id)
+{
+	bit_set(cpu_power_state_mask, cpu_id);
+	if (!cluster_power_supported || cpu_id == boot_cpu) {
+		return;
+	}
+
+	unsigned int cluster_id = topology_info->cpus[cpu_id].cluster_id;
+	if (!bit_test(online_clusters_mask, cluster_id)) {
+		if (processor_should_kprintf(machProcessors[cpu_id], true)) {
+			kprintf("%s>turning on power to cluster %d\n", __FUNCTION__, cluster_id);
+		}
+		gPMGR->enableCPUCluster(cluster_id);
+		bit_set(online_clusters_mask, cluster_id);
+		ml_broadcast_cpu_event(CLUSTER_ACTIVE, cluster_id);
+	}
+}
+
+void
 IOCPUSleepKernel(void)
 {
 	IOPMrootDomain  *rootDomain = IOService::getPMRootDomain();
 	unsigned int i;
 
 	printf("IOCPUSleepKernel enter\n");
-#if defined(__arm64__)
-	sched_override_recommended_cores_for_sleep();
-#endif
+	sched_override_available_cores_for_sleep();
 
 	rootDomain->tracePoint( kIOPMTracePointSleepPlatformActions );
 	IOPlatformActionsPreSleep();
@@ -383,7 +474,16 @@ IOCPUSleepKernel(void)
 	/*
 	 * The system is now coming back from sleep on the boot CPU.
 	 * The kQueueActive actions have already been called.
+	 *
+	 * The reconfig engine is programmed to power up all clusters on S2R resume.
 	 */
+	online_clusters_mask = all_clusters_mask;
+
+	/*
+	 * processor_start() never gets called for the boot CPU, so it needs to
+	 * be explicitly marked as online here.
+	 */
+	PE_cpu_power_enable(boot_cpu);
 
 	ml_set_is_quiescing(false);
 
@@ -400,12 +500,10 @@ IOCPUSleepKernel(void)
 		}
 	}
 
-#if defined(__arm64__)
-	sched_restore_recommended_cores_after_sleep();
-#endif
-
 	rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
 	IOPlatformActionsPostResume();
+
+	sched_restore_available_cores_after_sleep();
 
 	thread_kern_set_pri(self, old_pri);
 	printf("IOCPUSleepKernel exit\n");

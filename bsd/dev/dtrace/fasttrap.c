@@ -1956,7 +1956,7 @@ fasttrap_add_probe(fasttrap_probe_spec_t *pdata)
 			tp->ftt_pc = pdata->ftps_offs[i] + pdata->ftps_pc;
 			tp->ftt_pid = pdata->ftps_pid;
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 			/*
 			 * On arm the subinfo is used to distinguish between arm
 			 * and thumb modes.  On arm64 there is no thumb mode, so
@@ -2018,7 +2018,7 @@ fasttrap_add_probe(fasttrap_probe_spec_t *pdata)
 			tp->ftt_pc = pdata->ftps_offs[i] + pdata->ftps_pc;
 			tp->ftt_pid = pdata->ftps_pid;
 
-#if defined(__arm__) || defined (__arm64__)
+#if defined (__arm64__)
 			/*
 			 * On arm the subinfo is used to distinguish between arm
 			 * and thumb modes.  On arm64 there is no thumb mode, so
@@ -2272,7 +2272,7 @@ fasttrap_meta_create_probe(void *arg, void *parg,
 		 * Both 32 & 64 bit want to go back one byte, to point at the first NOP
 		 */
 		tp->ftt_pc = dhpb->dthpb_base + (int64_t)dhpb->dthpb_offs[i] - 1;
-#elif defined(__arm__) || defined(__arm64__)
+#elif defined(__arm64__)
 		/*
 		 * All ARM and ARM64 probes are zero offset. We need to zero out the
 		 * thumb bit because we still support 32bit user processes.
@@ -2309,7 +2309,7 @@ fasttrap_meta_create_probe(void *arg, void *parg,
 		 * Both 32 & 64 bit want to go forward two bytes, to point at a single byte nop.
 		 */
 		tp->ftt_pc = dhpb->dthpb_base + (int64_t)dhpb->dthpb_enoffs[j] + 2;
-#elif defined(__arm__) || defined(__arm64__)
+#elif defined(__arm64__)
 		/*
 		 * All ARM and ARM64 probes are zero offset. We need to zero out the
 		 * thumb bit because we still support 32bit user processes.
@@ -2730,8 +2730,8 @@ static const struct cdevsw fasttrap_cdevsw =
 	.d_read = eno_rdwrt,
 	.d_write = eno_rdwrt,
 	.d_ioctl = _fasttrap_ioctl,
-	.d_stop = (stop_fcn_t *)nulldev,
-	.d_reset = (reset_fcn_t *)nulldev,
+	.d_stop = eno_stop,
+	.d_reset = eno_reset,
 	.d_select = eno_select,
 	.d_mmap = eno_mmap,
 	.d_strategy = eno_strat,

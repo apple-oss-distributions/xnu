@@ -136,6 +136,7 @@
  *
  *   arg0 - KERNEL_MODE or HIBERNATE_MODE
  *   x0 - Address of the save area
+ *   x25 - Return the value of FPCR
  */
 #define KERNEL_MODE 0
 #define HIBERNATE_MODE 1
@@ -158,7 +159,6 @@
 	str		lr, [x0, SS64_LR]
 
 	/* Save arm_neon_saved_state64 */
-
 	stp		q0, q1, [x0, NS64_Q0]
 	stp		q2, q3, [x0, NS64_Q2]
 	stp		q4, q5, [x0, NS64_Q4]
@@ -175,11 +175,14 @@
 	stp		q26, q27, [x0, NS64_Q26]
 	stp		q28, q29, [x0, NS64_Q28]
 	stp		q30, q31, [x0, NS64_Q30]
+	mrs		x24, FPSR
+	str		w24, [x0, NS64_FPSR]
+	mrs		x25, FPCR
+	str		w25, [x0, NS64_FPCR]
+Lsave_neon_state_done_\@:
 
 	mrs		x22, ELR_EL1                                                     // Get exception link register
 	mrs		x23, SPSR_EL1                                                   // Load CPSR into var reg x23
-	mrs		x24, FPSR
-	mrs		x25, FPCR
 
 #if defined(HAS_APPLE_PAC)
 	.if \mode != HIBERNATE_MODE
@@ -215,8 +218,6 @@
 
 	str		x22, [x0, SS64_PC]                                               // Save ELR to PCB
 	str		w23, [x0, SS64_CPSR]                                    // Save CPSR to PCB
-	str		w24, [x0, NS64_FPSR]
-	str		w25, [x0, NS64_FPCR]
 
 	mrs		x20, FAR_EL1
 	mrs		x21, ESR_EL1

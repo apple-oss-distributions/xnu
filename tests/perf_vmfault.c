@@ -9,6 +9,7 @@
 #include <perfcheck_keys.h>
 
 #include "benchmark/helpers.h"
+#include "test_utils.h"
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vm.perf"),
@@ -444,7 +445,8 @@ T_DECL(zero_fill_fault,
 }
 
 T_DECL(zero_fill_fault_multithreaded,
-    "Zero fill faults (multi-threaded)")
+    "Zero fill faults (multi-threaded)",
+    XNU_T_META_SOC_SPECIFIC)
 {
 	char *e;
 	int nthreads;

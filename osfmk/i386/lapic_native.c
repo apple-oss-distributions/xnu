@@ -120,26 +120,12 @@ lapic_cpu_map_dump(void)
 static void
 map_local_apic(void)
 {
-	vm_map_offset_t lapic_vbase64;
-	int             result;
 	kern_return_t   kr;
-	vm_map_entry_t  entry;
 
 	if (lapic_vbase == 0) {
-		lapic_vbase64 = (vm_offset_t)vm_map_min(kernel_map);
-		result = vm_map_find_space(kernel_map,
-		    &lapic_vbase64,
-		    round_page(LAPIC_SIZE), 0,
-		    VM_MAP_KERNEL_FLAGS_NONE,
-		    VM_KERN_MEMORY_IOKIT,
-		    &entry);
-		/* Convert 64-bit vm_map_offset_t to "pointer sized" vm_offset_t
-		 */
-		lapic_vbase = (vm_offset_t) lapic_vbase64;
-		if (result != KERN_SUCCESS) {
-			panic("legacy_init: vm_map_find_entry FAILED (err=%d)", result);
-		}
-		vm_map_unlock(kernel_map);
+		kmem_alloc(kernel_map, &lapic_vbase, round_page(LAPIC_SIZE),
+		    KMA_PERMANENT | KMA_NOFAIL | KMA_KOBJECT | KMA_VAONLY,
+		    VM_KERN_MEMORY_IOKIT);
 
 		/*
 		 * Map in the local APIC non-cacheable, as recommended by Intel

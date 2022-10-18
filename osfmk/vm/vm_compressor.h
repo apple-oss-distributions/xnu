@@ -25,6 +25,8 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+#ifndef _VM_VM_COMPRESSOR_H_
+#define _VM_VM_COMPRESSOR_H_
 
 #include <vm/vm_compressor_pager.h>
 #include <vm/vm_kern.h>
@@ -39,7 +41,7 @@
 #include <sys/kdebug.h>
 
 #if defined(__arm64__)
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #endif
 
 #define C_SEG_OFFSET_BITS       16
@@ -48,7 +50,7 @@
 
 #if defined(__arm64__) && (DEVELOPMENT || DEBUG)
 
-#if defined(PLATFORM_WatchOS)
+#if defined(XNU_PLATFORM_WatchOS)
 #define VALIDATE_C_SEGMENTS (1)
 #endif
 #endif /* defined(__arm64__) && (DEVELOPMENT || DEBUG) */
@@ -190,16 +192,8 @@ struct c_segment {
 	task_t          c_task_owner;
 #endif /* CONFIG_FREEZE */
 
-#define C_SEG_MAX_LIMIT         (1 << 20)       /* this needs to track the size of c_mysegno */
-	uint32_t        c_mysegno:20,
-	    c_busy:1,
-	    c_busy_swapping:1,
-	    c_wanted:1,
-	    c_on_minorcompact_q:1,              /* can also be on the age_q, the majorcompact_q or the swappedin_q */
-
-	    c_state:4,                          /* what state is the segment in which dictates which q to find it on */
-	    c_overage_swap:1,
-	    c_reserved:3;
+#define C_SEG_MAX_LIMIT         (UINT_MAX)       /* this needs to track the size of c_mysegno */
+	uint32_t        c_mysegno;
 
 	uint32_t        c_creation_ts;
 	uint64_t        c_generation_id;
@@ -232,6 +226,29 @@ struct c_segment {
 	uint32_t        c_agedin_ts;
 	uint32_t        c_swappedin_ts;
 	bool            c_swappedin;
+	/*
+	 * Do not pull c_swappedin above into the bitfield below.
+	 * We update it without always taking the segment
+	 * lock and rely on the segment being busy instead.
+	 * The bitfield needs the segment lock. So updating
+	 * this state, if in the bitfield, without the lock
+	 * will race with the updates to the other fields and
+	 * result in a mess.
+	 */
+	uint32_t        c_busy:1,
+	    c_busy_swapping:1,
+	    c_wanted:1,
+	    c_on_minorcompact_q:1,              /* can also be on the age_q, the majorcompact_q or the swappedin_q */
+
+	    c_state:4,                          /* what state is the segment in which dictates which q to find it on */
+	    c_overage_swap:1,
+	    c_has_donated_pages:1,
+#if CONFIG_FREEZE
+	    c_has_freezer_pages:1,
+	    c_reserved:21;
+#else /* CONFIG_FREEZE */
+	c_reserved:22;
+#endif /* CONFIG_FREEZE */
 
 	int             c_slot_var_array_len;
 	struct  c_slot  *c_slot_var_array;
@@ -250,6 +267,8 @@ typedef struct c_slot_mapping *c_slot_mapping_t;
 
 extern  int             c_seg_fixed_array_len;
 extern  vm_offset_t     c_buffers;
+extern int64_t c_segment_compressed_bytes;
+
 #define C_SEG_BUFFER_ADDRESS(c_segno)   ((c_buffers + ((uint64_t)c_segno * (uint64_t)c_seg_allocsize)))
 
 #define C_SEG_SLOT_FROM_INDEX(cseg, index)      (index < c_seg_fixed_array_len ? &(cseg->c_slot_fixed_array[index]) : &(cseg->c_slot_var_array[index - c_seg_fixed_array_len]))
@@ -355,6 +374,8 @@ void vm_consider_waking_compactor_swapper(void);
 void vm_consider_swapping(void);
 void vm_compressor_flush(void);
 void c_seg_free(c_segment_t);
+bool vm_compressor_is_thrashing(void);
+bool vm_compressor_needs_to_swap(bool wake_memorystatus_thread);
 void c_seg_free_locked(c_segment_t);
 void c_seg_insert_into_age_q(c_segment_t);
 void c_seg_need_delayed_compaction(c_segment_t, boolean_t);
@@ -400,12 +421,15 @@ extern int              c_overage_swapped_limit;
 
 extern queue_head_t     c_minor_list_head;
 extern queue_head_t     c_age_list_head;
-extern queue_head_t     c_swapout_list_head;
+extern queue_head_t     c_major_list_head;
+extern queue_head_t     c_early_swapout_list_head;
+extern queue_head_t     c_regular_swapout_list_head;
+extern queue_head_t     c_late_swapout_list_head;
 extern queue_head_t     c_swappedout_list_head;
 extern queue_head_t     c_swappedout_sparse_list_head;
 
 extern uint32_t         c_age_count;
-extern uint32_t         c_swapout_count;
+extern uint32_t         c_early_swapout_count, c_regular_swapout_count, c_late_swapout_count;
 extern uint32_t         c_swappedout_count;
 extern uint32_t         c_swappedout_sparse_count;
 
@@ -504,4 +528,11 @@ if (vm_ktrace_enabled) {        \
 	KDBG(x, ## __VA_ARGS__);\
 }                               \
 MACRO_END
+
+#if DEVELOPMENT || DEBUG
+extern bool compressor_running_perf_test;
+extern uint64_t compressor_perf_test_pages_processed;
+#endif /* DEVELOPMENT || DEBUG */
 #endif
+
+#endif /* _VM_VM_COMPRESSOR_H_ */

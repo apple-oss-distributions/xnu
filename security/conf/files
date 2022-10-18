@@ -3,7 +3,6 @@
 # OPTIONS/kdebug                        optional kdebug
 OPTIONS/audit				optional audit
 OPTIONS/config_macf			optional config_macf
-OPTIONS/config_macf_socket_subset	optional config_macf_socket_subset
 OPTIONS/config_fse			optional config_fse
 
 # security

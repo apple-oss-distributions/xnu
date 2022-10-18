@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -95,6 +95,8 @@ listener_thread(void *unused)
 		if (n < 0) {
 			T_SKIP("ERROR in recvfrom");
 		}
+		T_LOG("received from sender: %.5s", buf);
+
 
 		hostp = gethostbyaddr((const char *)&clientaddr.sin_addr.s_addr,
 		    sizeof(clientaddr.sin_addr.s_addr),
@@ -112,6 +114,7 @@ listener_thread(void *unused)
 		if (n < 0) {
 			T_SKIP("ERROR in sendto");
 		}
+		T_LOG("sent response to sender");
 	}
 }
 
@@ -226,7 +229,7 @@ do_kqueue(int kq, int sockfd)
 		}
 	}
 
-	T_FAIL("timeout after 10s");
+	T_SKIP("timeout after 10s");
 }
 
 void

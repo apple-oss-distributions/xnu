@@ -37,7 +37,8 @@
 .Dt MKNOD 2
 .Os BSD 4
 .Sh NAME
-.Nm mknod
+.Nm mknod ,
+.Nm mknodat
 .Nd make a special file node
 .Sh SYNOPSIS
 .Fd #include <sys/stat.h>
@@ -47,6 +48,8 @@
 .Fa "mode_t mode"
 .Fa "dev_t dev"
 .Fc
+.Ft int
+.Fn mknodat "int fd" "const char *path" "mode_t mode" "dev_t dev"
 .Sh DESCRIPTION
 The device special file
 .Fa path
@@ -72,6 +75,27 @@ is ignored.
 .Pp
 .Fn mknod
 requires super-user privileges.
+.Pp
+The
+.Fn mknodat
+system call is equivalent to
+.Fn mknod
+except in the case where
+.Fa path
+specifies a relative path.
+In this case the newly created fifo file is created relative to the
+directory associated with the file descriptor
+.Fa fd
+instead of the current working directory.
+If
+.Fn mknodat
+is passed the special value
+.Dv AT_FDCWD
+in the
+.Fa fd
+parameter, the current working directory is used and the behavior is
+identical to a call to
+.Fn mknod .
 .Sh RETURN VALUES
 Upon successful completion, a value of 0 is returned.
 Otherwise, a value of -1 is returned and
@@ -145,6 +169,30 @@ The process's effective user ID is not super-user.
 .It Bq Er EROFS
 The created node would reside on a read-only file system.
 .El
+.Pp
+In addition to the errors returned by the
+.Fn mknod ,
+the
+.Fn mknodat
+function may fail if:
+.Bl -tag -width Er
+.It Bq Er EBADF
+The
+.Fa path
+argument does not specify an absolute path and the
+.Fa fd
+argument is neither
+.Dv AT_FDCWD
+nor a valid file descriptor open for searching.
+.It Bq Er ENOTDIR
+The
+.Fa path
+argument is not an absolute path and
+.Fa fd
+is neither
+.Dv AT_FDCWD
+nor a file descriptor associated with a directory.
+.El
 .Sh LEGACY SYNOPSIS
 .Fd #include <unistd.h>
 .Pp
@@ -159,3 +207,6 @@ A
 .Fn mknod
 function call appeared in 
 .At v6 .
+The
+.Fn mknodat
+system call appeared in macOS 13.0.

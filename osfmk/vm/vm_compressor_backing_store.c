@@ -35,7 +35,7 @@
 #include <kern/policy_internal.h>
 
 LCK_GRP_DECLARE(vm_swap_data_lock_grp, "vm_swap_data");
-LCK_MTX_EARLY_DECLARE(vm_swap_data_lock, &vm_swap_data_lock_grp);
+LCK_MTX_DECLARE(vm_swap_data_lock, &vm_swap_data_lock_grp);
 
 #if defined(XNU_TARGET_OS_OSX)
 /*
@@ -58,9 +58,11 @@ uint64_t        vm_swap_put_failures_no_swap_file = 0; /* Possibly not fatal bec
 int             vm_num_swap_files_config = 0;
 int             vm_num_swap_files = 0;
 int             vm_num_pinned_swap_files = 0;
+uint64_t        vm_swap_volume_capacity = 0;
 int             vm_swapout_thread_processed_segments = 0;
 int             vm_swapout_thread_awakened = 0;
 bool            vm_swapout_thread_running = FALSE;
+_Atomic bool    vm_swapout_wake_pending = false;
 int             vm_swapfile_create_thread_awakened = 0;
 int             vm_swapfile_create_thread_running = 0;
 int             vm_swapfile_gc_thread_awakened = 0;
@@ -117,7 +119,7 @@ boolean_t               hibernate_in_progress_with_pinned_swap = FALSE;
 
 static void vm_swapout_thread_throttle_adjust(void);
 static void vm_swap_free_now(struct swapfile *swf, uint64_t f_offset);
-static void vm_swapout_thread(void);
+void vm_swapout_thread(void);
 static void vm_swapfile_create_thread(void);
 static void vm_swapfile_gc_thread(void);
 static void vm_swap_defragment(void);
@@ -139,6 +141,19 @@ boolean_t vm_swap_force_defrag = FALSE, vm_swap_force_reclaim = FALSE;
  * that the memory overhead is similar for performance comparisons.
  */
 #define VM_MAX_SWAP_FILE_NUM            5
+#if defined(__arm64__) && defined(ARM_LARGE_MEMORY)
+#define VM_MAX_SWAP_FILE_SWAP_ENABLED_NUM (64ULL * (1ULL << 30) / MAX_SWAP_FILE_SIZE)
+#define VM_MIN_SWAP_FILE_SWAP_ENABLED_NUM (16ULL * (1ULL << 30) / MAX_SWAP_FILE_SIZE)
+#else /* defined(__arm64__) && defined(ARM_LARGE_MEMORY) */
+/*
+ * We reserve compressor pool VA at boot for the max # of swap files. If someone
+ * has enabled app swap but we're not an arm large memory device we can't hog
+ * all of the VA so we only go up to 4GB.
+ */
+#define VM_MAX_SWAP_FILE_SWAP_ENABLED_NUM (4ULL * (1ULL << 30) / MAX_SWAP_FILE_SIZE)
+#define VM_MIN_SWAP_FILE_SWAP_ENABLED_NUM (4ULL * (1ULL << 30) / MAX_SWAP_FILE_SIZE)
+#endif /* defined(__arm64__) && defined(ARM_LARGE_MEMORY) */
+#define VM_SWAP_MIN_VOLUME_CAPACITY (128ULL * (1ULL << 30))
 
 #define VM_SWAPFILE_DELAYED_TRIM_MAX    4
 
@@ -165,7 +180,7 @@ boolean_t vm_swap_force_defrag = FALSE, vm_swap_force_reclaim = FALSE;
 #define VM_SWAP_SHOULD_ABORT_RECLAIM()  (((vm_swap_force_reclaim == FALSE) && ((vm_swapfile_total_segs_alloced - vm_swapfile_total_segs_used) <= swapfile_reclam_minimum_segs)) ? 1 : 0)
 #define VM_SWAPFILE_DELAYED_CREATE      15
 
-#define VM_SWAP_BUSY()  ((c_swapout_count && (vm_swapper_throttle == THROTTLE_LEVEL_COMPRESSOR_TIER0)) ? 1 : 0)
+#define VM_SWAP_BUSY()  (((c_early_swapout_count + c_regular_swapout_count + c_late_swapout_count) && (vm_swapper_throttle == THROTTLE_LEVEL_COMPRESSOR_TIER0)) ? 1 : 0)
 
 
 #if CHECKSUM_THE_SWAP
@@ -403,6 +418,46 @@ vm_swap_decrypt(c_segment_t c_seg)
 #endif /* ENCRYPTED_SWAP */
 
 uint64_t compressed_swap_chunk_size, vm_swapfile_hiwater_segs, swapfile_reclaim_threshold_segs, swapfile_reclam_minimum_segs;
+extern bool memorystatus_swap_all_apps;
+
+void
+vm_compressor_swap_init_swap_file_limit(void)
+{
+	vm_num_swap_files_config = VM_MAX_SWAP_FILE_NUM;
+#if CONFIG_JETSAM
+	if (memorystatus_swap_all_apps) {
+		if (vm_swap_volume_capacity == 0) {
+			/*
+			 * Early in boot we don't know the swap volume capacity.
+			 * That's fine. Reserve space for the maximum config
+			 * and we'll lower this later in boot once we have the capacity.
+			 */
+			vm_num_swap_files_config = VM_MAX_SWAP_FILE_SWAP_ENABLED_NUM;
+		} else {
+			static uint64_t kFixedPointFactor = 100;
+			/*
+			 * Scale the max number of swap files linearly.
+			 * But we can never go above VM_MAX_SWAP_FILE_SWAP_ENABLED_NUM.
+			 */
+			vm_num_swap_files_config = vm_swap_volume_capacity * kFixedPointFactor / VM_SWAP_MIN_VOLUME_CAPACITY
+			    * VM_MIN_SWAP_FILE_SWAP_ENABLED_NUM / kFixedPointFactor;
+			vm_num_swap_files_config = MAX(vm_num_swap_files_config, VM_MIN_SWAP_FILE_SWAP_ENABLED_NUM);
+			vm_num_swap_files_config = MIN(vm_num_swap_files_config, VM_MAX_SWAP_FILE_SWAP_ENABLED_NUM);
+		}
+	}
+#endif /* CONFIG_JETSAM */
+#if DEVELOPMENT || DEBUG
+	typeof(vm_num_swap_files_config) parsed_vm_max_num_swap_files = 0;
+	if (PE_parse_boot_argn("vm_max_num_swap_files", &parsed_vm_max_num_swap_files, sizeof(parsed_vm_max_num_swap_files))) {
+		if (parsed_vm_max_num_swap_files > 0) {
+			vm_num_swap_files_config = parsed_vm_max_num_swap_files;
+		} else {
+			printf("WARNING: Ignoring vm_max_num_swap_files=%d boot-arg. Value must be > 0\n", parsed_vm_max_num_swap_files);
+		}
+	}
+#endif
+	printf("Maximum number of VM swap files: %d\n", vm_num_swap_files_config);
+}
 void
 vm_compressor_swap_init(void)
 {
@@ -424,18 +479,6 @@ vm_compressor_swap_init(void)
 	vm_swapfile_hiwater_segs = (MIN_SWAP_FILE_SIZE / compressed_swap_chunk_size);
 	swapfile_reclaim_threshold_segs = ((17 * (MAX_SWAP_FILE_SIZE / compressed_swap_chunk_size)) / 10);
 	swapfile_reclam_minimum_segs = ((13 * (MAX_SWAP_FILE_SIZE / compressed_swap_chunk_size)) / 10);
-	vm_num_swap_files_config = VM_MAX_SWAP_FILE_NUM;
-#if DEVELOPMENT || DEBUG
-	typeof(vm_num_swap_files_config) parsed_vm_max_num_swap_files = 0;
-	if (PE_parse_boot_argn("vm_max_num_swap_files", &parsed_vm_max_num_swap_files, sizeof(parsed_vm_max_num_swap_files))) {
-		if (parsed_vm_max_num_swap_files > 0) {
-			vm_num_swap_files_config = parsed_vm_max_num_swap_files;
-		} else {
-			printf("WARNING: Ignoring vm_max_num_swap_files=%d boot-arg. Value must be > 0\n", parsed_vm_max_num_swap_files);
-		}
-	}
-#endif
-	printf("Maximum number of VM swap files: %d\n", vm_num_swap_files_config);
 
 	if (kernel_thread_start_priority((thread_continue_t)vm_swapout_thread, NULL,
 	    BASEPRI_VM, &thread) != KERN_SUCCESS) {
@@ -600,7 +643,8 @@ int vm_swap_defragment_free = 0;
 int vm_swap_defragment_busy = 0;
 
 #if CONFIG_FREEZE
-extern uint32_t c_segment_pages_compressed_incore;
+extern int32_t c_segment_pages_compressed_incore;
+extern int32_t c_segment_pages_compressed_incore_late_swapout;
 extern uint32_t c_segment_pages_compressed_nearing_limit;
 extern uint32_t c_segment_count;
 extern uint32_t c_segments_nearing_limit;
@@ -664,6 +708,20 @@ vm_swap_defragment()
 
 #if CONFIG_FREEZE
 			if (freezer_incore_cseg_acct) {
+				/*
+				 * TODO(jason): These two are tricky because they're pre-emptive jetsams.
+				 * The system is not unhealthy, but we know that it's about to become unhealthy once
+				 * we do this swapin.
+				 * So we're waking up the memorystatus thread to make space
+				 * (hopefully) before this segment comes in.
+				 *
+				 * I think the compressor_backing_store needs to keep track of
+				 * two new globals that will track the number of segments
+				 * being swapped in due to defrag and the number of slots used
+				 * in those segments.
+				 * Then the health check below can be called from the memorystatus
+				 * thread.
+				 */
 				if ((c_seg->c_slots_used + c_segment_pages_compressed_incore) >= c_segment_pages_compressed_nearing_limit) {
 					memorystatus_kill_on_VM_compressor_space_shortage(TRUE /* async */);
 				}
@@ -1096,13 +1154,43 @@ vm_swapout_complete_soc(struct swapout_io_completion *soc)
 }
 
 bool vm_swapout_thread_inited = false;
-static void
+extern uint32_t c_donate_swapout_count;
+#if CONFIG_JETSAM
+bool memorystatus_swap_over_trigger(uint64_t adjustment_factor);
+/*
+ * swapout_sleep_threshold sets the percentage of the swapout threshold at which
+ * the swap thread will stop processing the swapout queue.
+ * By default this is 90 which means we will swap until the
+ * swapout queue size is at 90% of the threshold to wake the swap thread.
+ * By definition the queue  length must be >= 100% of the threshold when the.
+ * swap thread is woken up. On development builds this can be adjusted with
+ * the vm.swapout_sleep_threshold sysctl.
+ */
+uint32_t swapout_sleep_threshold = 90;
+#endif /* CONFIG_JETSAM */
+static bool
+should_process_swapout_queue(const queue_head_t *swapout_list_head)
+{
+	bool process_queue = !queue_empty(swapout_list_head) &&
+	    vm_swapout_soc_busy < vm_swapout_limit &&
+	    !compressor_store_stop_compaction;
+#if CONFIG_JETSAM
+	if (memorystatus_swap_all_apps && swapout_list_head == &c_late_swapout_list_head) {
+		process_queue = process_queue && memorystatus_swap_over_trigger(swapout_sleep_threshold);
+	}
+#endif /* CONFIG_JETSAM */
+	return process_queue;
+}
+
+void
 vm_swapout_thread(void)
 {
 	uint32_t        size = 0;
 	c_segment_t     c_seg = NULL;
 	kern_return_t   kr = KERN_SUCCESS;
 	struct swapout_io_completion *soc;
+	queue_head_t    *swapout_list_head;
+	bool            queues_empty = false;
 
 	if (!vm_swapout_thread_inited) {
 #if CONFIG_THREAD_GROUPS
@@ -1116,10 +1204,12 @@ vm_swapout_thread(void)
 
 	lck_mtx_lock_spin_always(c_list_lock);
 
+	swapout_list_head = &c_early_swapout_list_head;
 	vm_swapout_thread_running = TRUE;
+	os_atomic_store(&vm_swapout_wake_pending, false, relaxed);
 again:
-	while (!queue_empty(&c_swapout_list_head) && vm_swapout_soc_busy < vm_swapout_limit && !compressor_store_stop_compaction) {
-		c_seg = (c_segment_t)queue_first(&c_swapout_list_head);
+	while (should_process_swapout_queue(swapout_list_head)) {
+		c_seg = (c_segment_t)queue_first(swapout_list_head);
 
 		lck_mtx_lock_spin_always(&c_seg->c_lock);
 
@@ -1141,13 +1231,13 @@ again:
 		if (size == 0) {
 			assert(c_seg->c_bytes_used == 0);
 
-			if (!c_seg->c_on_minorcompact_q) {
-				c_seg_need_delayed_compaction(c_seg, TRUE);
-			}
-
-			c_seg_switch_state(c_seg, C_IS_EMPTY, FALSE);
-			lck_mtx_unlock_always(&c_seg->c_lock);
-			lck_mtx_unlock_always(c_list_lock);
+			/*
+			 * c_seg_free_locked will drop the c_list_lock and
+			 * the c_seg->c_lock.
+			 */
+			C_SEG_BUSY(c_seg);
+			c_seg_free_locked(c_seg);
+			c_seg = NULL;
 
 			vm_swapout_found_empty++;
 			goto c_seg_is_empty;
@@ -1194,7 +1284,7 @@ again:
 		}
 
 c_seg_is_empty:
-		if (c_swapout_count == 0) {
+		if (!(c_early_swapout_count + c_regular_swapout_count + c_late_swapout_count)) {
 			vm_swap_consider_defragmenting(VM_SWAP_FLAGS_NONE);
 		}
 
@@ -1227,7 +1317,43 @@ c_seg_is_empty:
 		goto again;
 	}
 
-	assert_wait((event_t)&c_swapout_list_head, THREAD_UNINT);
+#if XNU_TARGET_OS_OSX
+	queues_empty = queue_empty(&c_early_swapout_list_head) && queue_empty(&c_regular_swapout_list_head) && queue_empty(&c_late_swapout_list_head);
+#else /* XNU_TARGET_OS_OSX */
+	queues_empty = queue_empty(&c_early_swapout_list_head) && queue_empty(&c_late_swapout_list_head);
+#endif /* XNU_TARGET_OS_OSX */
+
+	if (!queues_empty) {
+		swapout_list_head = NULL;
+		if (!queue_empty(&c_early_swapout_list_head)) {
+			swapout_list_head = &c_early_swapout_list_head;
+		} else {
+#if XNU_TARGET_OS_OSX
+			/*
+			 * On macOS we _always_ processs all swapout queues.
+			 */
+			if (!queue_empty(&c_regular_swapout_list_head)) {
+				swapout_list_head = &c_regular_swapout_list_head;
+			} else {
+				swapout_list_head = &c_late_swapout_list_head;
+			}
+#else /* XNU_TARGET_OS_OSX */
+			/*
+			 * On non-macOS swap-capable platforms, we might want to
+			 * processs just the early queue (Freezer) or process both
+			 * early and late queues (app swap). We processed the early
+			 * queue up above. The late Q will only be processed if the
+			 * checks in should_process_swapout_queue give the go-ahead.
+			 */
+			swapout_list_head = &c_late_swapout_list_head;
+#endif /* XNU_TARGET_OS_OSX */
+		}
+		if (swapout_list_head && should_process_swapout_queue(swapout_list_head)) {
+			goto again;
+		}
+	}
+
+	assert_wait((event_t)&vm_swapout_thread, THREAD_UNINT);
 
 	vm_swapout_thread_running = FALSE;
 
@@ -1253,7 +1379,7 @@ vm_swapout_iodone(void *io_context, int error)
 	vm_swapout_soc_done++;
 
 	if (!vm_swapout_thread_running) {
-		thread_wakeup((event_t)&c_swapout_list_head);
+		thread_wakeup((event_t)&vm_swapout_thread);
 	}
 
 	lck_mtx_unlock_always(c_list_lock);
@@ -1266,7 +1392,7 @@ vm_swapout_finish(c_segment_t c_seg, uint64_t f_offset, uint32_t size, kern_retu
 	PAGE_REPLACEMENT_DISALLOWED(TRUE);
 
 	if (kr == KERN_SUCCESS) {
-		kernel_memory_depopulate(compressor_map, (vm_offset_t)c_seg->c_store.c_buffer, size,
+		kernel_memory_depopulate((vm_offset_t)c_seg->c_store.c_buffer, size,
 		    KMA_COMPRESSOR, VM_KERN_MEMORY_COMPRESSOR);
 	}
 #if ENCRYPTED_SWAP
@@ -1308,6 +1434,9 @@ vm_swapout_finish(c_segment_t c_seg, uint64_t f_offset, uint32_t size, kern_retu
 		 */
 		OSAddAtomic(-(c_seg->c_slots_used), &c_segment_pages_compressed_incore);
 		assertf(c_segment_pages_compressed_incore >= 0, "-ve incore count %p 0x%x", c_seg, c_segment_pages_compressed_incore);
+		if (c_seg->c_has_donated_pages) {
+			OSAddAtomic(-(c_seg->c_slots_used), &c_segment_pages_compressed_incore_late_swapout);
+		}
 #endif /* CONFIG_FREEZE */
 	} else {
 		if (c_seg->c_overage_swap == TRUE) {
@@ -1316,12 +1445,27 @@ vm_swapout_finish(c_segment_t c_seg, uint64_t f_offset, uint32_t size, kern_retu
 		}
 
 #if CONFIG_FREEZE
-		if (c_seg->c_task_owner) {
-			c_seg_update_task_owner(c_seg, NULL);
-		}
+		if (c_seg->c_has_freezer_pages) {
+			if (c_seg->c_task_owner) {
+				c_seg_update_task_owner(c_seg, NULL);
+			}
+			/*
+			 * We failed to swapout a frozen cseg. We need
+			 * to put it back in the queues, specifically the
+			 * AGE_Q. So clear the donated bit otherwise it'll
+			 * land on the swapped_in Q.
+			 */
+			c_seg->c_has_donated_pages = 0;
+			c_seg_switch_state(c_seg, C_ON_AGE_Q, FALSE);
+		} else
 #endif /* CONFIG_FREEZE */
-
-		c_seg_switch_state(c_seg, C_ON_AGE_Q, FALSE);
+		{
+			if (c_seg->c_has_donated_pages) {
+				c_seg_switch_state(c_seg, C_ON_SWAPPEDIN_Q, FALSE);
+			} else {
+				c_seg_switch_state(c_seg, C_ON_AGE_Q, FALSE);
+			}
+		}
 
 		if (!c_seg->c_on_minorcompact_q && C_SEG_UNUSED_BYTES(c_seg) >= PAGE_SIZE) {
 			c_seg_need_delayed_compaction(c_seg, TRUE);
@@ -1592,7 +1736,7 @@ retry:
 					continue;
 				}
 
-				(swf->swp_bitmap)[byte_for_segidx] |= (1 << offset_within_byte);
+				(swf->swp_bitmap)[byte_for_segidx] |= (uint8_t)(1 << offset_within_byte);
 
 				file_offset = segidx * compressed_swap_chunk_size;
 				swf->swp_nseginuse++;
@@ -1965,9 +2109,8 @@ vm_swap_reclaim(void)
 
 	c_segment_t     c_seg = NULL;
 
-	if (kernel_memory_allocate(compressor_map, (vm_offset_t *)(&addr), c_seg_bufsize, 0, KMA_KOBJECT, VM_KERN_MEMORY_COMPRESSOR) != KERN_SUCCESS) {
-		panic("vm_swap_reclaim: kernel_memory_allocate failed");
-	}
+	kmem_alloc(compressor_map, (vm_offset_t *)&addr, c_seg_bufsize,
+	    KMA_NOFAIL | KMA_KOBJECT, VM_KERN_MEMORY_COMPRESSOR);
 
 	lck_mtx_lock(&vm_swap_data_lock);
 
@@ -2130,7 +2273,9 @@ ReTry_for_cseg:
 			 */
 			c_buffer = (vm_offset_t)C_SEG_BUFFER_ADDRESS(c_seg->c_mysegno);
 
-			kernel_memory_populate(compressor_map, c_buffer, c_size, KMA_COMPRESSOR, VM_KERN_MEMORY_COMPRESSOR);
+			kernel_memory_populate(c_buffer, c_size,
+			    KMA_NOFAIL | KMA_COMPRESSOR,
+			    VM_KERN_MEMORY_COMPRESSOR);
 
 			memcpy((char *)c_buffer, (char *)addr, c_size);
 

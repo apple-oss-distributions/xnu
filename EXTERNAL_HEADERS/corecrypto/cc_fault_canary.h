@@ -1,4 +1,4 @@
-/* Copyright (c) (2020) Apple Inc. All rights reserved.
+/* Copyright (c) (2019-2021) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -9,11 +9,12 @@
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
-
 #ifndef corecrypto_cc_fault_canary_h
 #define corecrypto_cc_fault_canary_h
 
 #include "cc.h"
+
+CC_PTRCHECK_CAPABLE_HEADER()
 
 #define CC_FAULT_CANARY_SIZE 16
 typedef uint8_t cc_fault_canary_t[CC_FAULT_CANARY_SIZE];

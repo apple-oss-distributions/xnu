@@ -41,6 +41,7 @@ struct thread_group;
 #endif
 
 #if CONFIG_THREAD_GROUPS
+#include <kern/assert.h>
 #include <kern/queue.h>
 #include <machine/machine_routines.h>
 
@@ -56,25 +57,58 @@ struct thread_group;
 #define THREAD_GROUP_INVALID    UINT64_MAX
 
 /* Thread group flags */
+
+/* Flags in the bottom 8 bits are exclusive. */
+#define THREAD_GROUP_EXCLUSIVE_FLAGS_MASK 0xff
+
+/* Exclusive flags */
+#define THREAD_GROUP_FLAGS_DEFAULT      0x0
 #define THREAD_GROUP_FLAGS_EFFICIENT    0x1
-#define THREAD_GROUP_FLAGS_UI_APP       0x2
-#define THREAD_GROUP_FLAGS_SMP_RESTRICT 0x4
-#define THREAD_GROUP_FLAGS_VALID        (THREAD_GROUP_FLAGS_EFFICIENT | THREAD_GROUP_FLAGS_UI_APP | THREAD_GROUP_FLAGS_SMP_RESTRICT)
+#define THREAD_GROUP_FLAGS_APPLICATION  0x2
+#define THREAD_GROUP_FLAGS_CRITICAL     0x4
+#define THREAD_GROUP_FLAGS_BEST_EFFORT  0x8
+
+/* Shared flags */
+#define THREAD_GROUP_FLAGS_UI_APP       0x100
+#define THREAD_GROUP_FLAGS_MANAGED      0x200
+
+
+#define THREAD_GROUP_FLAGS_EXCLUSIVE ( \
+    THREAD_GROUP_FLAGS_EFFICIENT |     \
+    THREAD_GROUP_FLAGS_APPLICATION |   \
+    THREAD_GROUP_FLAGS_CRITICAL |      \
+    THREAD_GROUP_FLAGS_BEST_EFFORT)
+
+#define THREAD_GROUP_FLAGS_ABSENT 0xffffffff
+
+static_assert(
+	(THREAD_GROUP_FLAGS_EXCLUSIVE & ~THREAD_GROUP_EXCLUSIVE_FLAGS_MASK) == 0,
+	"valid exclusive flags");
+
+/* Shared flags */
+#define THREAD_GROUP_FLAGS_SHARED ( \
+    THREAD_GROUP_FLAGS_UI_APP |     \
+    THREAD_GROUP_FLAGS_MANAGED)
+
+static_assert(
+	(THREAD_GROUP_FLAGS_SHARED & THREAD_GROUP_EXCLUSIVE_FLAGS_MASK) == 0,
+	"valid shared flags");
 
 __BEGIN_DECLS
 
 void            thread_group_init(void);
 void            thread_group_resync(boolean_t create);
-struct thread_group *thread_group_create_and_retain(boolean_t efficient);
+struct thread_group *thread_group_create_and_retain(uint32_t flags);
 void            thread_group_init_thread(thread_t t, task_t task);
 void            thread_group_set_name(struct thread_group *tg, const char *name);
 void            thread_group_flags_update_lock(void);
 void            thread_group_flags_update_unlock(void);
-void            thread_group_set_flags(struct thread_group *tg, uint64_t flags);
+void            thread_group_set_flags(struct thread_group *tg, uint32_t flags);
 uint32_t        thread_group_get_flags(struct thread_group *);
-void            thread_group_clear_flags(struct thread_group *tg, uint64_t flags);
-void            thread_group_set_flags_locked(struct thread_group *tg, uint64_t flags);
-void            thread_group_clear_flags_locked(struct thread_group *tg, uint64_t flags);
+void            thread_group_clear_flags(struct thread_group *tg, uint32_t flags);
+void            thread_group_set_flags_locked(struct thread_group *tg, uint32_t flags);
+void            thread_group_clear_flags_locked(struct thread_group *tg, uint32_t flags);
+boolean_t       thread_group_valid_flags(uint32_t flags);
 struct thread_group *thread_group_find_by_name_and_retain(char *name);
 struct thread_group *thread_group_find_by_id_and_retain(uint64_t id);
 struct thread_group *thread_group_retain(struct thread_group *tg);
@@ -94,7 +128,6 @@ cluster_type_t  thread_group_recommendation(struct thread_group *tg);
 
 typedef         void (*thread_group_iterate_fn_t)(void*, int, struct thread_group *);
 kern_return_t   thread_group_iterate_stackshot(thread_group_iterate_fn_t callout, void *arg);
-boolean_t       thread_group_smp_restricted(struct thread_group *tg);
 void            thread_group_update_recommendation(struct thread_group *tg, cluster_type_t new_recommendation);
 uint64_t        thread_group_id(struct thread_group *tg);
 

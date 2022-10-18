@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -28,16 +28,17 @@
 
 #include <skywalk/os_skywalk_private.h>
 #include <skywalk/nexus/netif/nx_netif.h>
+#include <skywalk/nexus/flowswitch/fsw_var.h>
+#include <skywalk/nexus/flowswitch/nx_flowswitch.h>
 
 /* function to send the packet transmit status event on the channel */
-errno_t
-kern_channel_event_transmit_status(const kern_packet_t ph, const ifnet_t ifp)
+static inline errno_t
+kern_channel_event_transmit_status_notify(const ifnet_t ifp,
+    os_channel_event_packet_transmit_status_t *pkt_tx_status,
+    uint32_t nx_port_id)
 {
-	errno_t err;
-	packet_id_t pktid;
-	kern_return_t tx_status;
-	struct nexus_adapter *devna;
-	char buf[CHANNEL_EVENT_TX_STATUS_LEN]__attribute((aligned(sizeof(uint64_t))));
+	char buf[CHANNEL_EVENT_TX_STATUS_LEN]
+	__attribute((aligned(sizeof(uint64_t))));
 	struct __kern_channel_event *event =
 	    (struct __kern_channel_event *)(void *)buf;
 	os_channel_event_packet_transmit_status_t *ts_ev =
@@ -46,33 +47,55 @@ kern_channel_event_transmit_status(const kern_packet_t ph, const ifnet_t ifp)
 	if (!IF_FULLY_ATTACHED(ifp)) {
 		return ENXIO;
 	}
-	devna = &NA(ifp)->nifna_up;
-	ASSERT((devna->na_type == NA_NETIF_DEV) ||
-	    (devna->na_type == NA_NETIF_COMPAT_DEV));
-	if (devna->na_channel_event_notify == NULL) {
-		return ENOTSUP;
-	}
-	/*
-	 * currently interface advisory is only supported for netif
-	 * in low latency mode.
-	 */
-	if (!NETIF_IS_LOW_LATENCY(NIFNA(devna)->nifna_netif)) {
-		return ENOTSUP;
-	}
-	err = __packet_get_packetid(ph, &pktid);
-	if (err != 0) {
-		return err;
-	}
-	(void) __packet_get_tx_completion_status(ph, &tx_status);
-	ASSERT(tx_status != 0);
+
 	event->ev_type = CHANNEL_EVENT_PACKET_TRANSMIT_STATUS;
 	event->ev_flags = 0;
 	event->_reserved = 0;
 	event->ev_dlen = sizeof(os_channel_event_packet_transmit_status_t);
-	ts_ev->packet_status = tx_status;
-	ts_ev->packet_id = pktid;
-	return devna->na_channel_event_notify(devna, SK_PTR_ADDR_KPKT(ph),
-	           event, CHANNEL_EVENT_TX_STATUS_LEN);
+	*ts_ev = *pkt_tx_status;
+
+	struct nx_flowswitch *fsw = fsw_ifp_to_fsw(ifp);
+	if (fsw == NULL) {
+		return netif_vp_na_channel_event(NA(ifp)->nifna_netif,
+		           nx_port_id, event, CHANNEL_EVENT_TX_STATUS_LEN);
+	} else {
+		return fsw_vp_na_channel_event(fsw, nx_port_id, event,
+		           CHANNEL_EVENT_TX_STATUS_LEN);
+	}
+}
+
+errno_t
+kern_channel_event_transmit_status_with_packet(const kern_packet_t ph,
+    const ifnet_t ifp)
+{
+	int err;
+	uint32_t nx_port_id;
+	os_channel_event_packet_transmit_status_t pkt_tx_status;
+
+	(void) __packet_get_tx_completion_status(ph,
+	    &pkt_tx_status.packet_status);
+	if (pkt_tx_status.packet_status == KERN_SUCCESS) {
+		return 0;
+	}
+	err = __packet_get_packetid(ph, &pkt_tx_status.packet_id);
+	if (__improbable(err != 0)) {
+		return err;
+	}
+	err = __packet_get_tx_nx_port_id(ph, &nx_port_id);
+	if (__improbable(err != 0)) {
+		return err;
+	}
+	return kern_channel_event_transmit_status_notify(ifp, &pkt_tx_status,
+	           nx_port_id);
+}
+
+errno_t
+kern_channel_event_transmit_status(const ifnet_t ifp,
+    os_channel_event_packet_transmit_status_t *pkt_tx_status,
+    uint32_t nx_port_id)
+{
+	return kern_channel_event_transmit_status_notify(ifp, pkt_tx_status,
+	           nx_port_id);
 }
 
 /* routine to post kevent notification for the event ring */

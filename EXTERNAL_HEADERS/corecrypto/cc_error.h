@@ -1,4 +1,4 @@
-/* Copyright (c) (2017,2018,2019,2020) Apple Inc. All rights reserved.
+/* Copyright (c) (2017-2021) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to 
@@ -97,7 +97,7 @@ enum {
     CCDRBG_STATUS_NEED_RESEED = -62,
     CCDRBG_STATUS_PARAM_ERROR = -63,
     // If this value is returned, the caller must abort or panic the process for
-    // security reasons. for example in the case of catastrophic error in
+    // security reasons. For example in the case of catastrophic error in
     // http://csrc.nist.gov/publications/drafts/800-90/sp800_90a_r1_draft.pdf
     // ccdrbg calls abort() or panic(), if they are available in the system.
     CCDRBG_STATUS_ABORT = -64,
@@ -166,6 +166,32 @@ enum {
     CCERR_IOSERVICE_GETMATCHING = -147,
     CCERR_IOSERVICE_OPEN = -148,
     CCERR_IOCONNECT_CALL = -149,
+    
+    CCEC_KEY_CANNOT_BE_UNIT = -160,
+    CCEC_COMPRESSED_POINT_ENCODING_ERROR = -161,
+
+    CCERR_RNG_NOT_SEEDED = -162,
+    
+    CCERR_BUFFER_TOO_SMALL = -163,
+
+    CCERR_XTS_KEYS_EQUAL = -164,
+
+    CCERR_RETRY = -165,
+
+    CCDH_GP_P_NOTPRIME = -166,
+    CCDH_GP_Q_NOTPRIME = -167,
+    CCDH_GP_NONSAFE_PRIME = -168,
+
+    CCELGAMAL_DECRYPTION_FAILED = -169,
+
+    CCEC_POINT_CANNOT_BE_UNIT = CCEC_KEY_CANNOT_BE_UNIT,
+    CCEC_UNCOMPRESSED_POINT_ENCODING_ERROR = -170,
+    CCEC_HYBRID_POINT_ENCODING_ERROR = -171,
+    CCEC_COMPACT_POINT_ENCODING_ERROR = -172,
+
+    CCERR_NOT_SUPPORTED = -173,
+    
+    CCEC_INVALID_BSGS_TABLE_VERSION = -174,
 };
 
 #define CCDRBG_STATUS_OK CCERR_OK

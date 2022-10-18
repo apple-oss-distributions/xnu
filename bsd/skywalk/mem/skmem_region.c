@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -215,13 +215,13 @@ static uint32_t skmem_drv_buf_seg_eff_size = SKMEM_DRV_BUF_SEG_SIZE;
 uint32_t skmem_usr_buf_seg_size = SKMEM_USR_BUF_SEG_SIZE;
 
 #define SKMEM_TAG_SEGMENT_BMAP  "com.apple.skywalk.segment.bmap"
-static kern_allocation_name_t skmem_tag_segment_bmap;
+static SKMEM_TAG_DEFINE(skmem_tag_segment_bmap, SKMEM_TAG_SEGMENT_BMAP);
 
 #define SKMEM_TAG_SEGMENT_HASH  "com.apple.skywalk.segment.hash"
-static kern_allocation_name_t skmem_tag_segment_hash;
+static SKMEM_TAG_DEFINE(skmem_tag_segment_hash, SKMEM_TAG_SEGMENT_HASH);
 
 #define SKMEM_TAG_REGION_MIB     "com.apple.skywalk.region.mib"
-static kern_allocation_name_t skmem_tag_region_mib;
+static SKMEM_TAG_DEFINE(skmem_tag_region_mib, SKMEM_TAG_REGION_MIB);
 
 #define BMAPSZ  64
 
@@ -246,35 +246,41 @@ skmem_region_init(void)
 	_CASSERT(SKMEM_REGION_GUARD_HEAD == 0);
 	_CASSERT(SKMEM_REGION_SCHEMA == 1);
 	_CASSERT(SKMEM_REGION_RING == 2);
-	_CASSERT(SKMEM_REGION_BUF == 3);
-	_CASSERT(SKMEM_REGION_RXBUF == 4);
-	_CASSERT(SKMEM_REGION_TXBUF == 5);
-	_CASSERT(SKMEM_REGION_UMD == 6);
-	_CASSERT(SKMEM_REGION_TXAUSD == 7);
-	_CASSERT(SKMEM_REGION_RXFUSD == 8);
-	_CASSERT(SKMEM_REGION_UBFT == 9);
-	_CASSERT(SKMEM_REGION_USTATS == 10);
-	_CASSERT(SKMEM_REGION_FLOWADV == 11);
-	_CASSERT(SKMEM_REGION_NEXUSADV == 12);
-	_CASSERT(SKMEM_REGION_SYSCTLS == 13);
-	_CASSERT(SKMEM_REGION_GUARD_TAIL == 14);
-	_CASSERT(SKMEM_REGION_KMD == 15);
-	_CASSERT(SKMEM_REGION_RXKMD == 16);
-	_CASSERT(SKMEM_REGION_TXKMD == 17);
-	_CASSERT(SKMEM_REGION_KBFT == 18);
-	_CASSERT(SKMEM_REGION_RXKBFT == 19);
-	_CASSERT(SKMEM_REGION_TXKBFT == 20);
-	_CASSERT(SKMEM_REGION_TXAKSD == 21);
-	_CASSERT(SKMEM_REGION_RXFKSD == 22);
-	_CASSERT(SKMEM_REGION_KSTATS == 23);
-	_CASSERT(SKMEM_REGION_INTRINSIC == 24);
+	_CASSERT(SKMEM_REGION_BUF_DEF == 3);
+	_CASSERT(SKMEM_REGION_BUF_LARGE == 4);
+	_CASSERT(SKMEM_REGION_RXBUF_DEF == 5);
+	_CASSERT(SKMEM_REGION_RXBUF_LARGE == 6);
+	_CASSERT(SKMEM_REGION_TXBUF_DEF == 7);
+	_CASSERT(SKMEM_REGION_TXBUF_LARGE == 8);
+	_CASSERT(SKMEM_REGION_UMD == 9);
+	_CASSERT(SKMEM_REGION_TXAUSD == 10);
+	_CASSERT(SKMEM_REGION_RXFUSD == 11);
+	_CASSERT(SKMEM_REGION_UBFT == 12);
+	_CASSERT(SKMEM_REGION_USTATS == 13);
+	_CASSERT(SKMEM_REGION_FLOWADV == 14);
+	_CASSERT(SKMEM_REGION_NEXUSADV == 15);
+	_CASSERT(SKMEM_REGION_SYSCTLS == 16);
+	_CASSERT(SKMEM_REGION_GUARD_TAIL == 17);
+	_CASSERT(SKMEM_REGION_KMD == 18);
+	_CASSERT(SKMEM_REGION_RXKMD == 19);
+	_CASSERT(SKMEM_REGION_TXKMD == 20);
+	_CASSERT(SKMEM_REGION_KBFT == 21);
+	_CASSERT(SKMEM_REGION_RXKBFT == 22);
+	_CASSERT(SKMEM_REGION_TXKBFT == 23);
+	_CASSERT(SKMEM_REGION_TXAKSD == 24);
+	_CASSERT(SKMEM_REGION_RXFKSD == 25);
+	_CASSERT(SKMEM_REGION_KSTATS == 26);
+	_CASSERT(SKMEM_REGION_INTRINSIC == 27);
 
 	_CASSERT(SREG_GUARD_HEAD == SKMEM_REGION_GUARD_HEAD);
 	_CASSERT(SREG_SCHEMA == SKMEM_REGION_SCHEMA);
 	_CASSERT(SREG_RING == SKMEM_REGION_RING);
-	_CASSERT(SREG_BUF == SKMEM_REGION_BUF);
-	_CASSERT(SREG_RXBUF == SKMEM_REGION_RXBUF);
-	_CASSERT(SREG_TXBUF == SKMEM_REGION_TXBUF);
+	_CASSERT(SREG_BUF_DEF == SKMEM_REGION_BUF_DEF);
+	_CASSERT(SREG_BUF_LARGE == SKMEM_REGION_BUF_LARGE);
+	_CASSERT(SREG_RXBUF_DEF == SKMEM_REGION_RXBUF_DEF);
+	_CASSERT(SREG_RXBUF_LARGE == SKMEM_REGION_RXBUF_LARGE);
+	_CASSERT(SREG_TXBUF_DEF == SKMEM_REGION_TXBUF_DEF);
+	_CASSERT(SREG_TXBUF_LARGE == SKMEM_REGION_TXBUF_LARGE);
 	_CASSERT(SREG_UMD == SKMEM_REGION_UMD);
 	_CASSERT(SREG_TXAUSD == SKMEM_REGION_TXAUSD);
 	_CASSERT(SREG_RXFUSD == SKMEM_REGION_RXFUSD);
@@ -309,6 +315,7 @@ skmem_region_init(void)
 	_CASSERT(SKR_MODE_SHAREOK == SREG_MODE_SHAREOK);
 	_CASSERT(SKR_MODE_PUREDATA == SREG_MODE_PUREDATA);
 	_CASSERT(SKR_MODE_PSEUDO == SREG_MODE_PSEUDO);
+	_CASSERT(SKR_MODE_THREADSAFE == SREG_MODE_THREADSAFE);
 	_CASSERT(SKR_MODE_SLAB == SREG_MODE_SLAB);
 	_CASSERT(SKR_MODE_MIRRORED == SREG_MODE_MIRRORED);
 
@@ -372,21 +379,6 @@ skmem_region_init(void)
 
 	TAILQ_INIT(&skmem_region_head);
 
-	ASSERT(skmem_tag_segment_hash == NULL);
-	skmem_tag_segment_hash =
-	    kern_allocation_name_allocate(SKMEM_TAG_SEGMENT_HASH, 0);
-	ASSERT(skmem_tag_segment_hash != NULL);
-
-	ASSERT(skmem_tag_segment_bmap == NULL);
-	skmem_tag_segment_bmap =
-	    kern_allocation_name_allocate(SKMEM_TAG_SEGMENT_BMAP, 0);
-	ASSERT(skmem_tag_segment_bmap != NULL);
-
-	ASSERT(skmem_tag_region_mib == NULL);
-	skmem_tag_region_mib =
-	    kern_allocation_name_allocate(SKMEM_TAG_REGION_MIB, 0);
-	ASSERT(skmem_tag_region_mib != NULL);
-
 	skmem_region_update_tc =
 	    thread_call_allocate_with_options(skmem_region_update_func,
 	    NULL, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
@@ -422,19 +414,6 @@ skmem_region_fini(void)
 		if (skmem_sg_cache != NULL) {
 			skmem_cache_destroy(skmem_sg_cache);
 			skmem_sg_cache = NULL;
-		}
-
-		if (skmem_tag_segment_hash != NULL) {
-			kern_allocation_name_release(skmem_tag_segment_hash);
-			skmem_tag_segment_hash = NULL;
-		}
-		if (skmem_tag_segment_bmap != NULL) {
-			kern_allocation_name_release(skmem_tag_segment_bmap);
-			skmem_tag_segment_bmap = NULL;
-		}
-		if (skmem_tag_region_mib != NULL) {
-			kern_allocation_name_release(skmem_tag_region_mib);
-			skmem_tag_region_mib = NULL;
 		}
 
 		__skmem_region_inited = 0;
@@ -521,9 +500,9 @@ skmem_region_params_config(struct skmem_region_params *srp)
 			srp->srp_r_seg_size = skmem_md_seg_size;
 			break;
 
-		case SKMEM_REGION_BUF:
-		case SKMEM_REGION_RXBUF:
-		case SKMEM_REGION_TXBUF:
+		case SKMEM_REGION_BUF_DEF:
+		case SKMEM_REGION_RXBUF_DEF:
+		case SKMEM_REGION_TXBUF_DEF:
 			/*
 			 * Use the effective driver buffer segment size,
 			 * since it reflects any randomization done at
@@ -814,6 +793,9 @@ skmem_region_create(const char *name, struct skmem_region_params *srp,
 	if (cflags & SKMEM_REGION_CR_PSEUDO) {
 		skr->skr_mode |= SKR_MODE_PSEUDO;
 	}
+	if (cflags & SKMEM_REGION_CR_THREADSAFE) {
+		skr->skr_mode |= SKR_MODE_THREADSAFE;
+	}
 
 #if XNU_TARGET_OS_OSX
 	/*
@@ -839,6 +821,7 @@ skmem_region_create(const char *name, struct skmem_region_params *srp,
 	skr->skr_bufspec.iodir_in = !!(skr->skr_mode & SKR_MODE_IODIR_IN);
 	skr->skr_bufspec.iodir_out = !!(skr->skr_mode & SKR_MODE_IODIR_OUT);
 	skr->skr_bufspec.puredata = !!(skr->skr_mode & SKR_MODE_PUREDATA);
+	skr->skr_bufspec.threadSafe = !!(skr->skr_mode & SKR_MODE_THREADSAFE);
 	skr->skr_regspec.noRedirect = !!(skr->skr_mode & SKR_MODE_NOREDIRECT);
 
 	/* allocate segment bitmaps */
@@ -1027,21 +1010,39 @@ skmem_region_mirror(struct skmem_region *skr, struct skmem_region *mskr)
 }
 
 void
-skmem_region_slab_config(struct skmem_region *skr, struct skmem_cache *skm)
+skmem_region_slab_config(struct skmem_region *skr, struct skmem_cache *skm,
+    bool attach)
 {
+	int i;
+
 	SKR_LOCK(skr);
-	if (skm != NULL) {
-		ASSERT(!(skr->skr_mode & SKR_MODE_SLAB));
+	if (attach) {
+		for (i = 0; i < SKR_MAX_CACHES && skr->skr_cache[i] != NULL;
+		    i++) {
+			;
+		}
+		VERIFY(i < SKR_MAX_CACHES);
+		ASSERT(skr->skr_cache[i] == NULL);
 		skr->skr_mode |= SKR_MODE_SLAB;
-		ASSERT(skr->skr_cache == NULL);
-		skr->skr_cache = skm;
+		skr->skr_cache[i] = skm;
 		skmem_region_retain_locked(skr);
 		SKR_UNLOCK(skr);
 	} else {
 		ASSERT(skr->skr_mode & SKR_MODE_SLAB);
-		skr->skr_mode &= ~SKR_MODE_SLAB;
-		ASSERT(skr->skr_cache != NULL);
-		skr->skr_cache = NULL;
+		for (i = 0; i < SKR_MAX_CACHES && skr->skr_cache[i] != skm;
+		    i++) {
+			;
+		}
+		VERIFY(i < SKR_MAX_CACHES);
+		ASSERT(skr->skr_cache[i] == skm);
+		skr->skr_cache[i] = NULL;
+		for (i = 0; i < SKR_MAX_CACHES && skr->skr_cache[i] == NULL;
+		    i++) {
+			;
+		}
+		if (i == SKR_MAX_CACHES) {
+			skr->skr_mode &= ~SKR_MODE_SLAB;
+		}
 		if (!skmem_region_release_locked(skr)) {
 			SKR_UNLOCK(skr);
 		}
@@ -1120,7 +1121,13 @@ skmem_region_alloc(struct skmem_region *skr, void **maddr,
 				 * layer is caching extra amount, so ask
 				 * skmem_cache to reap/purge its caches.
 				 */
-				skmem_cache_reap_now(skr->skr_cache, TRUE);
+				for (int i = 0; i < SKR_MAX_CACHES; i++) {
+					if (skr->skr_cache[i] == NULL) {
+						continue;
+					}
+					skmem_cache_reap_now(skr->skr_cache[i],
+					    TRUE);
+				}
 				SKR_LOCK(skr);
 				/*
 				 * If we manage to get some freed, try again.
@@ -2162,16 +2169,28 @@ skmem_region_id2name(skmem_region_id_t id)
 		name = "RING";
 		break;
 
-	case SKMEM_REGION_BUF:
-		name = "BUF";
+	case SKMEM_REGION_BUF_DEF:
+		name = "BUF_DEF";
 		break;
 
-	case SKMEM_REGION_RXBUF:
-		name = "RXBUF";
+	case SKMEM_REGION_BUF_LARGE:
+		name = "BUF_LARGE";
 		break;
 
-	case SKMEM_REGION_TXBUF:
-		name = "TXBUF";
+	case SKMEM_REGION_RXBUF_DEF:
+		name = "RXBUF_DEF";
+		break;
+
+	case SKMEM_REGION_RXBUF_LARGE:
+		name = "RXBUF_LARGE";
+		break;
+
+	case SKMEM_REGION_TXBUF_DEF:
+		name = "TXBUF_DEF";
+		break;
+
+	case SKMEM_REGION_TXBUF_LARGE:
+		name = "TXBUF_LARGE";
 		break;
 
 	case SKMEM_REGION_UMD:

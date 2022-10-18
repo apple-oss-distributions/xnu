@@ -50,6 +50,7 @@
 
 #include <kern/locks.h>
 #include <mach/memory_object_types.h>
+#include <vm/pmap_cs.h>
 
 #include <libkern/ptrauth_utils.h>
 
@@ -140,9 +141,12 @@ struct cs_blob {
 		unsigned int    csb_platform_path:1;
 	});
 
+	/* Validation category used for TLE */
+	unsigned int    csb_validation_category;
 
-	vm_address_t    profile_kaddr;
-	vm_size_t       profile_allocation_size;
+#if PMAP_CS_INCLUDE_CODE_SIGNING
+	pmap_cs_code_directory_t *csb_pmap_cs_entry;
+#endif
 };
 
 /*
@@ -186,6 +190,7 @@ struct ubc_info {
 #define UI_MAPBUSY      0x00000020      /* vnode is being mapped or unmapped */
 #define UI_MAPWAITING   0x00000040      /* someone waiting for UI_MAPBUSY */
 #define UI_MAPPEDWRITE  0x00000080      /* it's mapped with PROT_WRITE */
+#define UI_CSBLOBINVALID  0x00000100    /* Exisitng csblobs are invalid */
 
 /*
  * exported primitives for loadable file systems.

@@ -410,7 +410,12 @@ perfmon_machine_configure(enum perfmon_kind kind, const perfmon_config_t config)
 				continue;
 			}
 			struct perfmon_counter *counter = &config->pc_counters[pmc];
-			uint64_t event = counter->pc_number & 0xff;
+			uint64_t event = counter->pc_number &
+#if CPMU_16BIT_EVENTS
+			    0xffff;
+#else // CPMU_16BIT_EVENTS
+			    0xff;
+#endif // !CPMU_16BIT_EVENTS
 
 			unsigned int enable_offset = pmc > 7 ? 32 : 0;
 			cpmu_reg_state.pcr_pmcr0 |= 1ULL << (enable_offset + pmc);
@@ -422,8 +427,12 @@ perfmon_machine_configure(enum perfmon_kind kind, const perfmon_config_t config)
 			unsigned int pmesr_shift = pmc > 5 ? pmc - 6 :
 			    pmc - cpmu_fixed_count;
 			// 8-bits for each event.
+#if CPMU_16BIT_EVENTS
+			pmesr_shift *= 16;
+#else // CPMU_16BIT_EVENTS
 			pmesr_shift *= 8;
-			uint64_t pmesr_bits = (event & 0xff) << pmesr_shift;
+#endif // !CPMU_16BIT_EVENTS
+			uint64_t pmesr_bits = event << pmesr_shift;
 			cpmu_reg_state.pcr_pmesr[pmesr_index] |= pmesr_bits;
 		}
 		perfmon_set_attrs(cpmu_reg_state.pcr_attr_regs,

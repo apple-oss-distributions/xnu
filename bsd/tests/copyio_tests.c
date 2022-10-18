@@ -252,7 +252,7 @@ copyinstr_test(struct copyio_test_data *data)
 	data->thread_ptr = &lencopied;
 
 	err = copyio_test_run_in_thread(copyinstr_from_kernel, data);
-#if defined(__arm__) || defined (__arm64__)
+#if defined (__arm64__)
 	T_EXPECT_EQ_INT(err, EFAULT, "copyinstr() from kernel address in kernel_task thread should return EFAULT");
 #else
 	T_EXPECT_EQ_INT(err, 0, "copyinstr() from kernel address in kernel_task thread should succeed");
@@ -324,7 +324,7 @@ copyoutstr_test(struct copyio_test_data *data)
 	data->thread_ptr = &lencopied;
 
 	err = copyio_test_run_in_thread(copyoutstr_to_kernel, data);
-#if defined(__arm__) || defined (__arm64__)
+#if defined (__arm64__)
 	T_EXPECT_EQ_INT(err, EFAULT, "copyoutstr() to kernel address in kernel_task thread should return EFAULT");
 #else
 	T_EXPECT_EQ_INT(err, 0, "copyoutstr() to kernel address in kernel_task thread should succeed");
@@ -512,7 +512,7 @@ copyio_test(void)
 	 */
 	proc_t proc = current_proc();
 	assert(proc_getpid(proc) == 1);
-	data.user_map = get_task_map_reference(proc->task);
+	data.user_map = get_task_map_reference(proc_task(proc));
 
 	user_addr = data.user_addr;
 	ret = mach_vm_allocate_kernel(data.user_map, &user_addr, copyio_test_buf_size + PAGE_SIZE, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);

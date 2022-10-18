@@ -49,6 +49,8 @@ work_interval_ctl(__unused proc_t p, struct work_interval_ctl_args *uap,
 
 	struct work_interval_create_params create_params;
 	struct kern_work_interval_create_args create_args;
+	struct work_interval_workload_id_params workload_id_params;
+	struct kern_work_interval_workload_id_args workload_id_args;
 	mach_port_name_t port_name;
 
 	switch (operation) {
@@ -124,6 +126,74 @@ work_interval_ctl(__unused proc_t p, struct work_interval_ctl_args *uap,
 		}
 
 		if ((error = copyout(&create_params, uap->arg, sizeof(create_params)))) {
+			return error;
+		}
+		break;
+	case WORK_INTERVAL_OPERATION_SET_NAME:
+		if (uap->arg == USER_ADDR_NULL || uap->len < WORK_INTERVAL_NAME_MAX) {
+			return EINVAL;
+		}
+		port_name = (mach_port_name_t) uap->work_interval_id;
+		if (!MACH_PORT_VALID(port_name)) {
+			return EINVAL;
+		}
+		size_t wi_name_len = 0;
+		char wi_name[WORK_INTERVAL_NAME_MAX];
+		if ((error = copyinstr(uap->arg, wi_name, sizeof(wi_name), &wi_name_len)) != 0) {
+			return error;
+		}
+
+		kret = kern_work_interval_set_name(port_name, wi_name, wi_name_len);
+		if (kret != KERN_SUCCESS) {
+			return EINVAL;
+		}
+		break;
+	case WORK_INTERVAL_OPERATION_SET_WORKLOAD_ID:
+		if (uap->arg == USER_ADDR_NULL ||
+		    uap->len < sizeof(struct work_interval_workload_id_params)) {
+			return EINVAL;
+		}
+		port_name = (mach_port_name_t) uap->work_interval_id;
+		if (!MACH_PORT_VALID(port_name)) {
+			return EINVAL;
+		}
+		if ((error = copyin(uap->arg, &workload_id_params,
+		    sizeof(workload_id_params)))) {
+			return error;
+		}
+
+		size_t wlid_name_len = 0;
+		char wlid_name[WORK_INTERVAL_WORKLOAD_ID_NAME_MAX] = {};
+		user_addr_t wlidp_name = CAST_USER_ADDR_T(workload_id_params.wlidp_name);
+		if (wlidp_name != USER_ADDR_NULL) {
+			if ((error = copyinstr(wlidp_name, wlid_name, sizeof(wlid_name),
+			    &wlid_name_len)) != 0) {
+				return error;
+			}
+		}
+
+		workload_id_args = (struct kern_work_interval_workload_id_args) {
+			.wlida_flags = workload_id_params.wlidp_flags,
+			.wlida_wicreate_flags = workload_id_params.wlidp_wicreate_flags,
+			.wlida_name = wlid_name,
+		};
+
+		kret = kern_work_interval_set_workload_id(port_name, &workload_id_args);
+		if (kret != KERN_SUCCESS) {
+			return EINVAL;
+		}
+
+		workload_id_params = (struct work_interval_workload_id_params) {
+			.wlidp_flags = workload_id_args.wlida_flags,
+			.wlidp_wicreate_flags = workload_id_args.wlida_wicreate_flags,
+			.wlidp_syscall_mask = {
+				[0] = workload_id_args.wlida_syscall_mask[0],
+				[1] = workload_id_args.wlida_syscall_mask[1],
+			},
+		};
+
+		if ((error = copyout(&workload_id_params, uap->arg,
+		    sizeof(workload_id_params)))) {
 			return error;
 		}
 		break;

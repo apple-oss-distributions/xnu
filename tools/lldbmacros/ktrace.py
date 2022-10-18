@@ -8,8 +8,10 @@ from xnu import *
 from utils import *
 from core.lazytarget import *
 from misc import *
+from scheduler import *
 from kcdata import kcdata_item_iterator, KCObject, GetTypeForName, KCCompressedBufferObject
 from collections import namedtuple
+from future.utils import PY2
 import heapq
 import os
 import plistlib
@@ -134,13 +136,13 @@ def GetKdebugStatus():
     """
     out = ''
 
-    kdebug_flags = kern.globals.kd_ctrl_page_trace.kdebug_flags
-    out += 'kdebug flags: {}\n'.format(xnudefines.GetStateString(xnudefines.kdebug_flags_strings, kdebug_flags))
-    events = kern.globals.kd_data_page_trace.nkdbufs
+    kdc_flags = kern.globals.kd_control_trace.kdc_flags
+    out += 'kdebug flags: {}\n'.format(xnudefines.GetStateString(xnudefines.kdebug_flags_strings, kdc_flags))
+    events = kern.globals.kd_buffer_trace.kdb_event_count
     buf_mb = events * (64 if kern.arch == 'x86_64' or kern.arch.startswith('arm64') else 32) // 1000000
     out += 'events allocated: {:<d} ({:<d} MB)\n'.format(events, buf_mb)
     out += 'enabled: {}\n'.format('yes' if kern.globals.kdebug_enable != 0 else 'no')
-    if kdebug_flags & xnudefines.KDBG_TYPEFILTER_CHECK:
+    if kdc_flags & xnudefines.KDBG_TYPEFILTER_CHECK:
         out += 'typefilter:\n'
         out += GetKdebugTypefilter.header + '\n'
         out += '-' * len(GetKdebugTypefilter.header) + '\n'
@@ -279,17 +281,18 @@ def GetKtraceStatus():
     out = ''
 
     state = kern.globals.ktrace_state
-    if state == GetEnumValue('ktrace_state::KTRACE_STATE_OFF'):
+    if state == GetEnumValue('ktrace_state_t::KTRACE_STATE_OFF'):
         out += 'ktrace is off\n'
     else:
         out += 'ktrace is active ('
-        if state == GetEnumValue('ktrace_state::KTRACE_STATE_FG'):
+        if state == GetEnumValue('ktrace_state_t::KTRACE_STATE_FG'):
             out += 'foreground)'
         else:
             out += 'background)'
         out += '\n'
         owner = kern.globals.ktrace_last_owner_execname
-        out += 'owned by: {0: <s} [%u]\n'.format(owner)
+        owner_pid = kern.globals.ktrace_owning_pid
+        out += 'owned by: {:<s} [{}]\n'.format(owner, unsigned(owner_pid))
         active_mask = kern.globals.ktrace_active_mask
         out += 'active systems: {:<#x}\n'.format(active_mask)
 
@@ -298,12 +301,12 @@ def GetKtraceStatus():
 
 def GetKtraceConfig():
     kdebug_state = 0
-    if (kern.globals.kd_ctrl_page_trace.kdebug_flags & xnudefines.KDBG_BUFINIT) != 0:
+    if (kern.globals.kd_control_trace.kdc_flags & xnudefines.KDBG_BUFINIT) != 0:
         kdebug_state = 1
     if kern.globals.kdebug_enable:
         kdebug_state = 3
     kdebug_wrapping = True
-    if (kern.globals.kd_ctrl_page_trace.kdebug_flags & xnudefines.KDBG_NOWRAP):
+    if (kern.globals.kd_control_trace.kdc_live_flags & xnudefines.KDBG_NOWRAP):
         kdebug_wrapping = False
 
     kperf_state = 3 if (
@@ -344,8 +347,8 @@ def GetKtraceConfig():
         'owner_pid': int(kern.globals.ktrace_owning_pid),
 
         'kdebug_state': kdebug_state,
-        'kdebug_buffer_size': unsigned(kern.globals.kd_data_page_trace.nkdbufs),
-        'kdebug_typefilter': plistlib.Data(struct.pack('B', 0xff) * 4096 * 2), # XXX
+        'kdebug_buffer_size': unsigned(kern.globals.kd_buffer_trace.kdb_event_count),
+        'kdebug_typefilter': plist_data(struct.pack('B', 0xff) * 4096 * 2), # XXX
         'kdebug_procfilt_mode': 0, # XXX
         'kdebug_procfilt': [], # XXX
         'kdebug_wrapping': kdebug_wrapping,
@@ -423,7 +426,7 @@ class KDCPU(object):
     """
     Represents all events from a single CPU.
     """
-    def __init__(self, cpuid, k64, verbose):
+    def __init__(self, cpuid, k64, verbose, starting_timestamp=None):
         self.cpuid = cpuid
         self.iter_store = None
         self.k64 = k64
@@ -431,15 +434,34 @@ class KDCPU(object):
         self.timestamp_mask = ((1 << 48) - 1) if not self.k64 else ~0
         self.last_timestamp = 0
 
-        kdstoreinfo = kern.globals.kd_data_page_trace.kdbip[cpuid]
+        kdstoreinfo = kern.globals.kd_buffer_trace.kdb_info[cpuid]
         self.kdstorep = kdstoreinfo.kd_list_head
 
         if self.kdstorep.raw == xnudefines.KDS_PTR_NULL:
-            # Returns an empty iterrator. It will immediatelly stop at
-            # first call to __next__().
+            # Return no events and stop at first call to __next__.
             return
 
         self.iter_store = self.get_kdstore(self.kdstorep)
+        skipped_storage_count = 0
+        if starting_timestamp:
+            while True:
+                newest_event = addressof(self.iter_store.kds_records[xnudefines.EVENTS_PER_STORAGE_UNIT - 1])
+                timestamp = unsigned(newest_event.timestamp) & self.timestamp_mask
+                if timestamp >= starting_timestamp:
+                    if verbose:
+                        print('done skipping events at time {}'.format(timestamp))
+                    break
+                next_store = self.iter_store.kds_next
+                if next_store.raw == xnudefines.KDS_PTR_NULL:
+                    if verbose:
+                        print('found no valid events from CPU {}'.format(cpuid))
+                    self.iter_store = None
+                    return
+                self.iter_store = self.get_kdstore(next_store)
+                skipped_storage_count += 1
+        if verbose and skipped_storage_count > 0:
+            print('CPU {} skipped {} storage units'.format(
+                    cpuid, skipped_storage_count))
 
         # XXX Doesn't have the same logic to avoid un-mergeable events
         #     (respecting barrier_min and bufindx) as the C code.
@@ -450,8 +472,8 @@ class KDCPU(object):
         """
         See POINTER_FROM_KDSPTR.
         """
-        buf = kern.globals.kd_data_page_trace.kd_bufs[kdstorep.buffer_index]
-        return addressof(buf.kdsb_addr[kdstorep.offset])
+        buf = kern.globals.kd_buffer_trace.kd_bufs[kdstorep.buffer_index]
+        return addressof(buf.kdr_addr[kdstorep.offset])
 
     # Event iterator implementation returns KDEvent instance
 
@@ -459,7 +481,7 @@ class KDCPU(object):
         return self
 
     def __next__(self):
-        # This CPU is out of events
+        # This CPU is out of events.
         if self.iter_store is None:
             raise StopIteration
 
@@ -474,11 +496,10 @@ class KDCPU(object):
                     self.cpuid, timestamp))
         self.last_timestamp = timestamp
 
-        # check for writer overrun
+        # Check for writer overrun.
         if timestamp < self.iter_store.kds_timestamp:
             raise StopIteration
 
-        # Advance iterator
         self.iter_idx += 1
 
         if self.iter_idx == xnudefines.EVENTS_PER_STORAGE_UNIT:
@@ -499,35 +520,60 @@ class KDCPU(object):
         return self.__next__()
 
 
-def IterateKdebugEvents(verbose=False):
+def IterateKdebugEvents(verbose=False, humanize=False, last=None,
+        include_coprocessors=True):
     """
     Yield events from the in-memory kdebug trace buffers.
     """
-    ctrl = kern.globals.kd_ctrl_page_trace
+    ctrl = kern.globals.kd_control_trace
 
-    if (ctrl.kdebug_flags & xnudefines.KDBG_BUFINIT) == 0:
+    if (ctrl.kdc_flags & xnudefines.KDBG_BUFINIT) == 0:
         return
 
-    barrier_min = ctrl.oldest_time
+    barrier_min = ctrl.kdc_oldest_time
 
-    if (ctrl.kdebug_flags & xnudefines.KDBG_WRAPPED) != 0:
+    if (ctrl.kdc_live_flags & xnudefines.KDBG_WRAPPED) != 0:
         # TODO Yield a wrap event with the barrier_min timestamp.
         pass
 
     k64 = kern.ptrsize == 8
+
+    cpu_count = kern.globals.machine_info.logical_cpu_max
+    if include_coprocessors:
+        cpu_count = ctrl.kdebug_cpus
+
+    start_timestamp = None
+    if last is not None:
+        (numer, denom) = GetTimebaseInfo()
+        duration = (last * 1e9) * denom / numer
+        now = GetRecentTimestamp()
+        start_timestamp = unsigned(now - duration)
+        if verbose:
+            print('starting at time {} ({} - {})'.format(
+                    start_timestamp, now, duration))
+
     # Merge sort all events from all CPUs.
-    cpus = [KDCPU(cpuid, k64, verbose) for cpuid in range(ctrl.kdebug_cpus)]
+    cpus = [KDCPU(cpuid, k64, verbose, starting_timestamp=start_timestamp)
+            for cpuid in range(cpu_count)]
     last_timestamp = 0
     warned = False
     for event in heapq.merge(*cpus):
         if event.timestamp < last_timestamp and not warned:
-            print('warning: events seem to be out-of-order')
+            # Human-readable output might have garbage on the rest of the line.
+            # Use a CSI escape sequence to clear it out.
+            clear_line_csi = '\033[K'
+            print(
+                    'warning: events seem to be out-of-order',
+                    end=((clear_line_csi + '\n') if humanize else '\n'))
             warned = True
         last_timestamp = event.timestamp
         yield event.get_kevent()
 
 
-def GetKdebugEvent(event, k64):
+@header('{:>12s} {:>10s} {:>18s} {:>18s} {:>18s} {:>18s} {:>5s} {:>8s}'.format(
+        'timestamp', 'debugid', 'arg1', 'arg2', 'arg3', 'arg4', 'cpuid',
+        'tid'))
+def GetKdebugEvent(event, k64, symbolicate=False, O=None):
     """
     Return a string representing a kdebug trace event.
     """
@@ -537,41 +583,73 @@ def GetKdebugEvent(event, k64):
     else:
         timestamp = event.timestamp
         cpuid = event.cpuid
+    def fmt_arg(a):
+        return '0x{:016x}'.format(unsigned(a))
+    def sym_arg(a):
+        slid_addr = kern.globals.vm_kernel_slide + unsigned(a)
+        syms = kern.SymbolicateFromAddress(slid_addr)
+        return syms[0].GetName() if syms else fmt_arg(a)
+    args = list(map(
+            sym_arg if symbolicate else fmt_arg,
+            [event.arg1, event.arg2, event.arg3, event.arg4]))
+    return O.format(
+            '{:12d} 0x{:08x} {:18s} {:18s} {:18s} {:18s} {:5d} {:8d}',
+            unsigned(timestamp), unsigned(event.debugid),
+            args[0], args[1], args[2], args[3], unsigned(cpuid),
+            unsigned(event.arg5))
 
-    return '{:16} {:8} {:8x} {:16} {:16} {:16} {:16} {:4} {:8} {}'.format(
-            unsigned(timestamp), 0, unsigned(event.debugid),
-            unsigned(event.arg1), unsigned(event.arg2),
-            unsigned(event.arg3), unsigned(event.arg4), unsigned(cpuid),
-            unsigned(event.arg5), "")
 
-
-@lldb_command('showkdebugtrace')
-def ShowKdebugTrace(cmd_args=None):
+@lldb_command('showkdebugtrace', 'L:S', fancy=True)
+def ShowKdebugTrace(cmd_args=None, cmd_options={}, O=None):
     """
     List the events present in the kdebug trace buffers.
 
-    (lldb) showkdebugtrace
+    (lldb) showkdebugtrace [-S] [-L <last-seconds>]
+
+        -L <last-seconds>: only show events from the last <last-seconds> seconds
+        -S: attempt to symbolicate arguments as kernel addresses
 
     Caveats:
         * Events from IOPs may be missing or cut-off -- they weren't informed
           of this kind of buffer collection.
     """
     k64 = kern.ptrsize == 8
-    for event in IterateKdebugEvents(config['verbosity'] > vHUMAN):
-        print(GetKdebugEvent(event, k64))
+    last = cmd_options.get('-L', None)
+    if last:
+        try:
+            last = float(last)
+        except ValueError:
+            raise ArgumentError(
+                    'error: -L argument must be a number, not {}'.format(last))
+    with O.table(GetKdebugEvent.header):
+        for event in IterateKdebugEvents(
+                config['verbosity'] > vHUMAN, humanize=True, last=last):
+            print(GetKdebugEvent(
+                    event, k64, symbolicate='-S' in cmd_options, O=O))
 
 
 def binary_plist(o):
-    with tempfile.NamedTemporaryFile(delete=False) as f:
-        plistlib.writePlist(o, f)
-        name = f.name
+    if PY2:
+        # Python 2 lacks a convenient binary plist writer.
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            plistlib.writePlist(o, f)
+            name = f.name
 
-    subprocess.check_output(['plutil', '-convert', 'binary1', name])
-    with open(name, mode='rb') as f:
-        plist = f.read()
+        subprocess.check_output(['plutil', '-convert', 'binary1', name])
+        with open(name, mode='rb') as f:
+            plist = f.read()
 
-    os.unlink(name)
-    return plist
+        os.unlink(name)
+        return plist
+    else:
+        return plistlib.dumps(o, fmt=plistlib.FMT_BINARY)
+
+
+def plist_data(d):
+    if PY2:
+        return plistlib.Data(d)
+    else:
+        return d
 
 
 def align_next_chunk(f, offset, verbose):
@@ -629,23 +707,30 @@ def append_chunk(f, file_offset, tag, major, minor, data, verbose):
     return offset + align_next_chunk(f, file_offset + offset, verbose)
 
 
-@lldb_command('savekdebugtrace', 'N:M')
+@lldb_command('savekdebugtrace', 'IL:MN:')
 def SaveKdebugTrace(cmd_args=None, cmd_options={}):
     """
     Save any valid ktrace events to a file.
 
-    (lldb) savekdebugtrace [-M] [-N <n-events>] <file-to-write>
+    (lldb) savekdebugtrace [-IM] [-N <n-events> | -L <last-secs>] <output-path>
 
+        -I: ignore coprocessor (IOP) events entirely
+        -L <last-seconds>: only save events from the <last-seconds> seconds
         -N <n-events>: only save the last <n-events> events
         -M: ensure output is machine-friendly
 
+    Tips:
+        * To speed up the process, use the -I and -L options to avoid
+          processing events based on source or time.
+
     Caveats:
-        * 32-bit kernels are unsupported.
         * Fewer than the requested number of events may end up in the file.
         * The machine and config chunks may be missing crucial information
           required for tools to analyze them.
-        * Events from IOPs may be missing or cut-off -- they weren't informed
-          of this kind of buffer collection.
+        * Events from coprocessors may be missing or cut-off -- they weren't
+          informed of this kind of buffer collection.
+        * Chunks related to post-processing, like symbolication data or a
+          catalog will need to be added manually.
     """
 
     k64 = kern.ptrsize == 8
@@ -653,7 +738,17 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
     if len(cmd_args) != 1:
         raise ArgumentError('error: path to trace file is required')
 
-    nevents = unsigned(kern.globals.kd_data_page_trace.nkdbufs)
+    last = cmd_options.get('-L', None)
+    if last and '-N' in cmd_options:
+        raise ArgumentError('error: -L and -N are mutually exclusive')
+    if last:
+        try:
+            last = float(last)
+        except ValueError:
+            raise ArgumentError(
+                    'error: -L argument must be a number, not {}'.format(last))
+
+    nevents = unsigned(kern.globals.kd_buffer_trace.kdb_event_count)
     if nevents == 0:
         print('error: kdebug buffers are not set up')
         return
@@ -685,7 +780,6 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
         wall_secs = 0
         wall_usecs = 0
 
-        # XXX 32-bit is NYI
         event_size = 64 if k64 else 32
 
         file_hdr = struct.pack(
@@ -733,7 +827,9 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
         seen_nevents = 0
         start_time = time.time()
         update_every = 1000 if humanize else 25000
-        for event in IterateKdebugEvents(verbose):
+        for event in IterateKdebugEvents(
+                verbose, include_coprocessors='-I' not in cmd_options,
+                humanize=humanize, last=last):
             seen_nevents += 1
             if skip_nevents >= seen_nevents:
                 if seen_nevents % update_every == 0:
@@ -820,3 +916,24 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
                     len(machine_bytes), header_size_offset))
 
     return
+
+# Obsolete commands.
+
+@lldb_command('showkerneldebugbuffercpu')
+def ShowKernelDebugBufferCPU(cmd_args=None):
+    """ REMOVED: Use showkdebugtrace instead. """
+    raise NotImplementedError("Use showkdebugtrace instead")
+
+
+@lldb_command('showkerneldebugbuffer')
+def ShowKernelDebugBuffer(cmd_args=None):
+    """ REMOVED: Use showkdebugtrace instead. """
+    raise NotImplementedError("Use showkdebugtrace instead")
+
+
+@lldb_command('dumprawtracefile')
+def DumpRawTraceFile(cmd_args=[], cmd_options={}):
+    """ REMOVED: Use savekdebugtrace instead. """
+    raise NotImplementedError("Use savekdebugtrace instead")
+
+

@@ -96,10 +96,14 @@ __options_closed_decl(ipc_object_copyout_flags_t, uint32_t, {
 });
 
 __options_closed_decl(ipc_object_copyin_flags_t, uint16_t, {
-	IPC_OBJECT_COPYIN_FLAGS_NONE                     = 0x0,
-	IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND     = 0x1, /* Dest port contains an immovable send right */
-	IPC_OBJECT_COPYIN_FLAGS_ALLOW_DEAD_SEND_ONCE     = 0x2,
-	IPC_OBJECT_COPYIN_FLAGS_DEADOK                   = 0x4,
+	IPC_OBJECT_COPYIN_FLAGS_NONE                          = 0x0,
+	IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND          = 0x1, /* Dest port contains an immovable send right */
+	IPC_OBJECT_COPYIN_FLAGS_ALLOW_DEAD_SEND_ONCE          = 0x2,
+	IPC_OBJECT_COPYIN_FLAGS_DEADOK                        = 0x4,
+	IPC_OBJECT_COPYIN_FLAGS_ALLOW_REPLY_MAKE_SEND_ONCE    = 0x8,  /* Port is a reply port. */
+	IPC_OBJECT_COPYIN_FLAGS_ALLOW_REPLY_MOVE_SEND_ONCE    = 0x10, /* Port is a reply port. */
+	IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_RECEIVE       = 0x20,
+	IPC_OBJECT_COPYIN_FLAGS_ALLOW_CONN_IMMOVABLE_RECEIVE  = 0x40, /* Port is a libxpc connection port. */
 });
 
 /*
@@ -141,12 +145,11 @@ struct ipc_object {
  */
 #define IO_BITS_PORT_INFO       0x0000f000      /* stupid port tricks */
 #define IO_BITS_KOTYPE          0x000003ff      /* used by the object */
-#define IO_BITS_KOBJECT         0x00000800      /* port belongs to a kobject */
 #define IO_BITS_KOLABEL         0x00000400      /* The kobject has a label */
 #define IO_BITS_OTYPE           0x7fff0000      /* determines a zone */
 #define IO_BITS_ACTIVE          0x80000000      /* is object alive? */
 
-#define io_bits(io)             os_atomic_load(&(io)->io_bits, relaxed)
+#define io_bits(io)             atomic_load_explicit(&(io)->io_bits, memory_order_relaxed)
 
 static inline void
 io_bits_or(ipc_object_t io, ipc_object_bits_t bits)
@@ -172,10 +175,9 @@ io_bits_andnot(ipc_object_t io, ipc_object_bits_t bits)
 
 #define io_otype(io)            ((io_bits(io) & IO_BITS_OTYPE) >> 16)
 #define io_kotype(io)           (io_bits(io) & IO_BITS_KOTYPE)
-#define io_is_kobject(io)       ((io_bits(io) & IO_BITS_KOBJECT) != 0)
+#define io_is_kobject(io)       (io_kotype(io) != 0)
 #define io_is_kolabeled(io)     ((io_bits(io) & IO_BITS_KOLABEL) != 0)
-#define io_makebits(active, otype, kotype)      \
-	(((active) ? IO_BITS_ACTIVE : 0) | ((otype) << 16) | (kotype))
+#define io_makebits(otype)      (IO_BITS_ACTIVE | ((otype) << 16))
 
 /*
  * Object types: ports, port sets, kernel-loaded ports
@@ -226,10 +228,8 @@ extern struct label *io_getlabel(ipc_object_t obj);
 extern void ipc_object_lock(
 	ipc_object_t    object);
 
-#if MACH_LOCKFREE_SPACE
 extern bool ipc_object_lock_allow_invalid(
 	ipc_object_t    object) __result_use_check;
-#endif
 
 extern bool ipc_object_lock_try(
 	ipc_object_t    object);
@@ -280,11 +280,6 @@ extern kern_return_t
 ipc_object_alloc_dead(
 	ipc_space_t             space,
 	mach_port_name_t        *namep);
-
-/*  Allocate a dead-name entry, with a specific name */
-extern kern_return_t ipc_object_alloc_dead_name(
-	ipc_space_t             space,
-	mach_port_name_t        name);
 
 /* Allocate an object */
 extern kern_return_t ipc_object_alloc(

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2021 Apple Inc.
+ * Copyright (c) 2019-2022 Apple Inc.
  * All rights reserved.
  */
 
@@ -112,8 +112,8 @@ cfil_crypto_cleanup_state(cfil_crypto_state_t state)
 
 static void
 cfil_crypto_update_context(const struct ccdigest_info *di,
-    cchmac_ctx_t ctx,
-    cfil_crypto_data_t data)
+    cchmac_ctx_t ctx, cfil_crypto_data_t data,
+    const struct iovec *extra_data, size_t extra_data_count)
 {
 	const uint8_t context[32] = {[0 ... 31] = 0x20}; // 0x20 repeated 32 times
 	const char *context_string = "NEFilterCrypto";
@@ -122,10 +122,16 @@ cfil_crypto_update_context(const struct ccdigest_info *di,
 	cchmac_update(di, ctx, strlen(context_string), context_string);
 	cchmac_update(di, ctx, sizeof(separator), &separator);
 	cchmac_update(di, ctx, sizeof(struct cfil_crypto_data), data);
+	for (size_t extra_idx = 0; extra_idx < extra_data_count; extra_idx++) {
+		if (extra_data[extra_idx].iov_base != NULL && extra_data[extra_idx].iov_len > 0) {
+			cchmac_update(di, ctx, extra_data[extra_idx].iov_len, extra_data[extra_idx].iov_base);
+		}
+	}
 }
 
 int
 cfil_crypto_sign_data(cfil_crypto_state_t state, cfil_crypto_data_t data,
+    const struct iovec *extra_data, size_t extra_data_count,
     cfil_crypto_signature signature, u_int32_t *signature_length)
 {
 	u_int8_t *ptr = NULL;
@@ -152,7 +158,7 @@ cfil_crypto_sign_data(cfil_crypto_state_t state, cfil_crypto_data_t data,
 	cchmac_init(state->digest_info, ctx,
 	    sizeof(state->key),
 	    state->key);
-	cfil_crypto_update_context(state->digest_info, ctx, data);
+	cfil_crypto_update_context(state->digest_info, ctx, data, extra_data, extra_data_count);
 	cchmac_final(state->digest_info, ctx, signature);
 
 	if (cfil_log_level >= LOG_DEBUG) {

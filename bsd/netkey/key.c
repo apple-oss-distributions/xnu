@@ -118,6 +118,10 @@
 
 #include <net/net_osdep.h>
 
+#if SKYWALK
+#include <skywalk/namespace/flowidns.h>
+#endif /* SKYWALK */
+
 #define FULLMASK        0xff
 
 static LCK_GRP_DECLARE(sadb_mutex_grp, "sadb");
@@ -521,6 +525,67 @@ int ipsec_send_natt_keepalive(struct secasvar *sav);
 bool ipsec_fill_offload_frame(ifnet_t ifp, struct secasvar *sav, struct ifnet_keepalive_offload_frame *frame, size_t frame_data_offset);
 
 void key_init(struct protosw *, struct domain *);
+
+static void
+key_get_flowid(struct secasvar *sav)
+{
+#if SKYWALK
+	struct flowidns_flow_key fk;
+	struct secashead *sah = sav->sah;
+
+	if ((sah->dir != IPSEC_DIR_OUTBOUND) && (sah->dir != IPSEC_DIR_ANY)) {
+		return;
+	}
+
+	bzero(&fk, sizeof(fk));
+	ASSERT(sah->saidx.src.ss_family == sah->saidx.dst.ss_family);
+	switch (sah->saidx.src.ss_family) {
+	case AF_INET:
+		ASSERT(sah->saidx.src.ss_len == sizeof(struct sockaddr_in));
+		ASSERT(sah->saidx.dst.ss_len == sizeof(struct sockaddr_in));
+		fk.ffk_laddr_v4 =
+		    ((struct sockaddr_in *)&(sah->saidx.src))->sin_addr;
+		fk.ffk_raddr_v4 =
+		    ((struct sockaddr_in *)&(sah->saidx.dst))->sin_addr;
+		break;
+
+	case AF_INET6:
+		ASSERT(sah->saidx.src.ss_len == sizeof(struct sockaddr_in6));
+		ASSERT(sah->saidx.dst.ss_len == sizeof(struct sockaddr_in6));
+		fk.ffk_laddr_v6 =
+		    ((struct sockaddr_in6 *)&(sah->saidx.src))->sin6_addr;
+		fk.ffk_raddr_v6 =
+		    ((struct sockaddr_in6 *)&(sah->saidx.dst))->sin6_addr;
+		break;
+
+	default:
+		VERIFY(0);
+		break;
+	}
+
+	ASSERT(sav->spi != 0);
+	fk.ffk_spi = sav->spi;;
+	fk.ffk_af = sah->saidx.src.ss_family;
+	fk.ffk_proto = (uint8_t)(sah->saidx.proto);
+
+	flowidns_allocate_flowid(FLOWIDNS_DOMAIN_IPSEC, &fk, &sav->flowid);
+#else /* !SKYWALK */
+	sav->flowid = 0;
+#endif /* !SKYWALK */
+}
+
+static void
+key_release_flowid(struct secasvar *sav)
+{
+#if SKYWALK
+	if (sav->flowid != 0) {
+		flowidns_release_flowid(sav->flowid);
+		sav->flowid = 0;
+	}
+#else /* !SKYWALK */
+	VERIFY(sav->flowid == 0);
+#endif /* !SKYWALK */
+}
 
 /*
  * PF_KEY init
@@ -1336,7 +1401,7 @@ key_allocsa_extended(u_int family,
 			}
 		}
 
-		if (key_sockaddrcmp(&dst_address.sa, sah_dst, 0) != 0) {
+		if (key_sockaddrcmp(SA(&dst_address.sa), sah_dst, 0) != 0) {
 			continue;
 		}
 
@@ -4062,6 +4127,8 @@ key_reset_sav(struct secasvar *sav)
 		kfree_data(sav->iv, sav->ivlen);
 		sav->iv = NULL;
 	}
+	key_release_flowid(sav);
+	return;
 }
 
 /*
@@ -7221,6 +7288,8 @@ key_add(
 	if ((error = key_mature(newsav)) != 0) {
 		goto fail;
 	}
+
+	key_get_flowid(newsav);
 
 	newsah->use_count--;
 	lck_mtx_unlock(sadb_mutex);

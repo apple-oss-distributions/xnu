@@ -182,6 +182,13 @@
 #define __cold
 #endif
 
+/* __returns_nonnull marks functions that return a non-null pointer. */
+#if __has_attribute(returns_nonnull)
+#define __returns_nonnull __attribute((returns_nonnull))
+#else
+#define __returns_nonnull
+#endif
+
 /* __exported denotes symbols that should be exported even when symbols
  * are hidden by default.
  * __exported_push/_exported_pop are pragmas used to delimit a range of
@@ -246,7 +253,7 @@
  * 3rd party kexts macOS arm:   __unavailable
  */
 #define __kpi_deprecated_arm64_macos_unavailable
-#elif !KERNEL || !PLATFORM_MacOSX
+#elif !KERNEL || !XNU_PLATFORM_MacOSX
 #define __kpi_deprecated_arm64_macos_unavailable
 #elif KERNEL_PRIVATE
 #define __kpi_deprecated_arm64_macos_unavailable __deprecated
@@ -533,79 +540,79 @@
 #define __DARWIN14_ALIAS(sym)
 #endif
 #else /* !KERNEL */
-#ifdef PLATFORM_iPhoneOS
+#ifdef XNU_PLATFORM_iPhoneOS
 /* Platform: iPhoneOS */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_iPhoneOS */
-#ifdef PLATFORM_iPhoneSimulator
+#endif /* XNU_PLATFORM_iPhoneOS */
+#ifdef XNU_PLATFORM_iPhoneSimulator
 /* Platform: iPhoneSimulator */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_iPhoneSimulator */
-#ifdef PLATFORM_tvOS
+#endif /* XNU_PLATFORM_iPhoneSimulator */
+#ifdef XNU_PLATFORM_tvOS
 /* Platform: tvOS */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_tvOS */
-#ifdef PLATFORM_AppleTVOS
+#endif /* XNU_PLATFORM_tvOS */
+#ifdef XNU_PLATFORM_AppleTVOS
 /* Platform: AppleTVOS */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_AppleTVOS */
-#ifdef PLATFORM_tvSimulator
+#endif /* XNU_PLATFORM_AppleTVOS */
+#ifdef XNU_PLATFORM_tvSimulator
 /* Platform: tvSimulator */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_tvSimulator */
-#ifdef PLATFORM_AppleTVSimulator
+#endif /* XNU_PLATFORM_tvSimulator */
+#ifdef XNU_PLATFORM_AppleTVSimulator
 /* Platform: AppleTVSimulator */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_AppleTVSimulator */
-#ifdef PLATFORM_iPhoneOSNano
+#endif /* XNU_PLATFORM_AppleTVSimulator */
+#ifdef XNU_PLATFORM_iPhoneOSNano
 /* Platform: iPhoneOSNano */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_iPhoneOSNano */
-#ifdef PLATFORM_iPhoneNanoSimulator
+#endif /* XNU_PLATFORM_iPhoneOSNano */
+#ifdef XNU_PLATFORM_iPhoneNanoSimulator
 /* Platform: iPhoneNanoSimulator */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_iPhoneNanoSimulator */
-#ifdef PLATFORM_WatchOS
+#endif /* XNU_PLATFORM_iPhoneNanoSimulator */
+#ifdef XNU_PLATFORM_WatchOS
 /* Platform: WatchOS */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_WatchOS */
-#ifdef PLATFORM_WatchSimulator
+#endif /* XNU_PLATFORM_WatchOS */
+#ifdef XNU_PLATFORM_WatchSimulator
 /* Platform: WatchSimulator */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_WatchSimulator */
-#ifdef PLATFORM_BridgeOS
+#endif /* XNU_PLATFORM_WatchSimulator */
+#ifdef XNU_PLATFORM_BridgeOS
 /* Platform: BridgeOS */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_BridgeOS */
-#ifdef PLATFORM_DriverKit
+#endif /* XNU_PLATFORM_BridgeOS */
+#ifdef XNU_PLATFORM_DriverKit
 /* Platform: DriverKit */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_DriverKit */
-#ifdef PLATFORM_MacOSX
+#endif /* XNU_PLATFORM_DriverKit */
+#ifdef XNU_PLATFORM_MacOSX
 /* Platform: MacOSX */
 #if defined(__i386__)
 #define __DARWIN_ONLY_64_BIT_INO_T      0
@@ -620,7 +627,7 @@
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
 #endif
-#endif /* PLATFORM_MacOSX */
+#endif /* XNU_PLATFORM_MacOSX */
 #endif /* KERNEL */
 
 /*
@@ -957,7 +964,19 @@
  * catastrophic run-time failures.
  */
 #ifndef __CAST_AWAY_QUALIFIER
-#define __CAST_AWAY_QUALIFIER(variable, qualifier, type)  (type) (long)(variable)
+/*
+ * XXX: this shouldn't ignore anything more than -Wcast-qual,
+ * but the old implementation made it an almighty cast that
+ * ignored everything, so things break left and right if you
+ * make it only ignore -Wcast-qual.
+ */
+#define __CAST_AWAY_QUALIFIER(variable, qualifier, type) \
+	_Pragma("GCC diagnostic push") \
+	_Pragma("GCC diagnostic ignored \"-Wcast-qual\"") \
+	_Pragma("GCC diagnostic ignored \"-Wcast-align\"") \
+	_Pragma("GCC diagnostic ignored \"-Waddress-of-packed-member\"") \
+	((type)(variable)) \
+	_Pragma("GCC diagnostic pop")
 #endif
 
 /*
@@ -982,6 +1001,8 @@
 #define __counted_by(N)
 #define __sized_by(N)
 #define __ended_by(E)
+#define __terminated_by(T)
+#define __null_terminated
 
 /*
  * Similarly, we intentionally define to nothing the
@@ -996,10 +1017,30 @@
 /* __unsafe_forge intrinsics are defined as regular C casts. */
 #define __unsafe_forge_bidi_indexable(T, P, S) ((T)(P))
 #define __unsafe_forge_single(T, P) ((T)(P))
+#define __terminated_by_to_indexable(P) (P)
+#define __unsafe_terminated_by_to_indexable(P) (P)
+#define __null_terminated_to_indexable(P) (P)
+#define __unsafe_null_terminated_to_indexable(P) (P)
+#define __unsafe_terminated_by_from_indexable(T, P, ...) (P)
+#define __unsafe_null_terminated_from_indexable(P, ...) (P)
 
 /* decay operates normally; attribute is meaningless without pointer checks. */
 #define __array_decay_dicards_count_in_parameters
+
+/* this is a write-once variable; not useful without pointer checks. */
+#define __unsafe_late_const
 #endif /* !__has_include(<ptrcheck.h>) */
+
+#if KERNEL && !BOUND_CHECKS && !__has_ptrcheck
+/*
+ * With pointer checks disabled, we define __indexable to allow source to still
+ * contain these annotations. This is safe in builds which _uniformly_ disable
+ * pointer checks (but not in builds which inconsistently have them enabled).
+ */
+
+#define __indexable
+#define __bidi_indexable
+#endif
 
 #define __ASSUME_PTR_ABI_SINGLE_BEGIN       __ptrcheck_abi_assume_single()
 #define __ASSUME_PTR_ABI_SINGLE_END         __ptrcheck_abi_assume_unsafe_indexable()
@@ -1136,5 +1177,26 @@
 #define __kernel_dual_semantics
 
 #endif /* defined(KERNEL) && __has_attribute(xnu_usage_semantics) */
+
+#if XNU_KERNEL_PRIVATE
+/*
+ * Compiler-dependent macros that bracket portions of code where the
+ * "-Wxnu-typed-allocators" warning should be ignored.
+ */
+#if defined(__clang__)
+# define __typed_allocators_ignore_push \
+	 _Pragma("clang diagnostic push") \
+	 _Pragma("clang diagnostic ignored \"-Wxnu-typed-allocators\"")
+# define __typed_allocators_ignore_pop \
+	 _Pragma("clang diagnostic pop")
+# define __typed_allocators_ignore(x) __typed_allocators_ignore_push \
+	                              x                              \
+	                              __typed_allocators_ignore_pop
+#else
+# define __typed_allocators_ignore_push
+# define __typed_allocators_ignore_push
+# define __typed_allocators_ignore(x) x
+#endif /* __clang */
+#endif /* XNU_KERNEL_PRIVATE */
 
 #endif /* !_CDEFS_H_ */

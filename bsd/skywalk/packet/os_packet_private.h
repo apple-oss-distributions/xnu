@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -238,6 +238,10 @@ struct __flow {
 
 /*
  * Common buflet structure shared by {__user,__kern}_buflet.
+ *
+ * |     boff    |   doff   |       dlen        |         |             |
+ * +-------------+----------+-------------------+---------+-------------+
+ * objaddr      baddr                                    dlim         objlim
  */
 struct __buflet {
 	union {
@@ -258,7 +262,12 @@ struct __buflet {
 	uint16_t        __dlen;         /* length of data in buflet */
 	uint16_t        __doff;         /* offset of data in buflet */
 	const uint16_t  __flag;
+	const uint16_t  __gro_len;      /* length of each gro segement */
+	/* offset of buf_addr relative to the start of the buffer object */
+	const uint16_t  __buf_off;
 #define BUFLET_FLAG_EXTERNAL    0x0001
+#define BUFLET_FLAG_LARGE_BUF   0x0002 /* buflet holds large buffer */
+#define BUFLET_FLAG_RAW         0x0004 /* buflet comes from the raw bflt cache */
 } __attribute((packed));
 
 /*
@@ -282,7 +291,14 @@ struct __user_buflet {
 #define buf_doff        buf_com.__doff
 #define buf_flag        buf_com.__flag
 #define buf_bft_idx_reg buf_com.__bft_idx
+#define buf_grolen      buf_com.__gro_len
+#define buf_boff        buf_com.__buf_off
 };
+
+#define BUFLET_HAS_LARGE_BUF(_buf)          \
+	(((_buf)->buf_flag & BUFLET_FLAG_LARGE_BUF) != 0)
+#define BUFLET_FROM_RAW_BFLT_CACHE(_buf)    \
+	(((_buf)->buf_flag & BUFLET_FLAG_RAW) != 0)
 
 #define BUF_BADDR(_buf, _addr)                                              \
 	*__DECONST(mach_vm_address_t *, &(_buf)->buf_addr) =                \
@@ -308,17 +324,22 @@ struct __user_buflet {
 } while (0)
 
 #ifdef KERNEL
-#define BUF_CTOR(_buf, _baddr, _bidx, _dlim, _dlen, _doff, _nbaddr, _nbidx, _bflag) do {  \
+#define BUF_CTOR(_buf, _baddr, _bidx, _dlim, _dlen, _doff, _nbaddr, _nbidx, _bflag, _boff, _grolen) do {  \
 	_CASSERT(sizeof ((_buf)->buf_addr) == sizeof (mach_vm_address_t)); \
 	_CASSERT(sizeof ((_buf)->buf_idx) == sizeof (obj_idx_t));       \
 	_CASSERT(sizeof ((_buf)->buf_dlim) == sizeof (uint16_t));       \
+	_CASSERT(sizeof ((_buf)->buf_boff) == sizeof (uint16_t));       \
+	_CASSERT(sizeof ((_buf)->buf_grolen) == sizeof (uint16_t));     \
+	_CASSERT(sizeof ((_buf)->buf_flag) == sizeof (uint16_t));       \
 	BUF_BADDR(_buf, _baddr);                                        \
 	BUF_NBFT_ADDR(_buf, _nbaddr);                                   \
 	BUF_BIDX(_buf, _bidx);                                          \
 	BUF_NBFT_IDX(_buf, _nbidx);                                     \
-	*(uint16_t *)(uintptr_t)&(_buf)->buf_dlim = (_dlim);            \
 	(_buf)->buf_dlen = (_dlen);                                     \
 	(_buf)->buf_doff = (_doff);                                     \
+	*(uint16_t *)(uintptr_t)&(_buf)->buf_dlim = (_dlim);            \
+	*(uint16_t *)(uintptr_t)&(_buf)->buf_boff = (_boff);            \
+	*(uint16_t *)(uintptr_t)&(_buf)->buf_grolen = (_grolen);        \
 	*(uint16_t *)(uintptr_t)&(_buf)->buf_flag = (_bflag);           \
 } while (0)
 
@@ -334,7 +355,9 @@ struct __user_buflet {
 	((_buf)->buf_addr >= (mach_vm_address_t)(_buf)->buf_objaddr &&  \
 	((uintptr_t)(_buf)->buf_addr + (_buf)->buf_dlim) <=             \
 	((uintptr_t)(_buf)->buf_objaddr + (_buf)->buf_objlim) &&        \
-	((_buf)->buf_doff + (_buf)->buf_dlen) <= (_buf)->buf_dlim)
+	((mach_vm_address_t)(_buf)->buf_objaddr + (_buf)->buf_boff == (_buf)->buf_addr) && \
+	((_buf)->buf_doff + (_buf)->buf_dlen) <= (_buf)->buf_dlim &&    \
+	(_buf)->buf_grolen <= (_buf)->buf_dlen)
 #else /* !KERNEL */
 #define BUF_IN_RANGE(_buf)                                              \
 	(((_buf)->buf_doff + (_buf)->buf_dlen) <= (_buf)->buf_dlim)
@@ -462,7 +485,7 @@ struct __user_quantum {
 	_CASSERT(sizeof(METADATA_IDX(_kqum)) == sizeof(obj_idx_t));          \
 	*(obj_idx_t *)(uintptr_t)&METADATA_IDX(_kqum) = (_qidx);             \
 	BUF_CTOR(&(_kqum)->qum_buf[0], (_baddr), (_bidx), (_dlim), 0, 0, 0,  \
-	    OBJ_IDX_NONE, 0);                                                \
+	    OBJ_IDX_NONE, 0, 0, 0);                                          \
 } while (0)
 
 #define _KQUM_INIT(_kqum, _flags, _len, _qidx) do {                          \
@@ -547,10 +570,10 @@ struct __packet_com {
 	packet_trace_id_t __trace_id;
 
 	/* Aggregation type */
-	uint8_t __aggr_type;                           /* PKT_AGGR_* values */
-	uint8_t __seg_cnt;                             /* Number of LRO-packets */
+	uint8_t __aggr_type;                     /* PKT_AGGR_* values */
+	uint8_t __seg_cnt;                       /* Number of LRO-packets */
 
-	uint8_t __padding[2];
+	uint16_t __proto_seg_sz;                 /* Protocol segment size */
 
 	/*
 	 * See notes on _PKT_{INTERNALIZE,EXTERNALIZE}() regarding portion
@@ -579,6 +602,7 @@ struct __packet {
 #define __p_comp_gencnt         __pkt_com.__comp_gencnt
 #define __p_aggr_type           __pkt_com.__aggr_type
 #define __p_seg_cnt             __pkt_com.__seg_cnt
+#define __p_proto_seg_sz        __pkt_com.__proto_seg_sz
 #define __p_trace_id            __pkt_com.__trace_id
 #define __p_flags32             __pkt_com.__flags32
 #define __p_flags               __pkt_com.__flags
@@ -592,14 +616,17 @@ struct __packet {
 #define PKT_OPT_MAX_TOKEN_SIZE          16
 
 struct __packet_opt_com {
-	uint32_t        __token_type;
-	uint16_t        __token_len;
-	uint16_t        __vlan_tag;
 	union {
 		uint64_t        __token_data[2];
 		uint8_t         __token[PKT_OPT_MAX_TOKEN_SIZE];
 	};
 	uint64_t        __expire_ts;
+	uint16_t        __vlan_tag;
+	uint16_t        __token_len;
+	uint8_t         __token_type;
+	uint8_t         __expiry_action;
+	uint8_t         __app_type;
+	uint8_t         __app_metadata;
 } __attribute((aligned(sizeof(uint64_t))));
 
 struct __packet_opt {
@@ -613,6 +640,9 @@ struct __packet_opt {
 #define __po_token_data         __pkt_opt_com.__token_data
 #define __po_token              __pkt_opt_com.__token
 #define __po_expire_ts          __pkt_opt_com.__expire_ts
+#define __po_expiry_action      __pkt_opt_com.__expiry_action
+#define __po_app_type           __pkt_opt_com.__app_type
+#define __po_app_metadata       __pkt_opt_com.__app_metadata
 };
 
 /*
@@ -625,6 +655,12 @@ struct __packet_opt {
  */
 struct __user_packet {
 	struct __user_quantum   pkt_qum;
+/*
+ * pkt_flow_id is the flow identifier used by user space stack to identfy a
+ * flow. This identifier is passed as a metadata on all packets generated by
+ * the user space stack. On RX flowswitch fills in this metadata on every
+ * packet and can be used by user space stack for flow classification purposes.
+ */
 #define pkt_flow_id             pkt_qum.qum_flow_id
 #define pkt_flow_id_64          pkt_qum.qum_flow_id_val64
 #define pkt_qum_qflags          pkt_qum.qum_qflags
@@ -633,9 +669,14 @@ struct __user_packet {
 #define pkt_svc_class           pkt_qum.qum_svc_class
 #ifdef KERNEL
 /*
- * We are using the first 4 bytes of flow_id as the AQM flow identifier.
- * flow identifier should be a psuedo random number. flow_id should be
- * generated using uuid_generate() where the first 4 bytes are random.
+ * pkt_flow_token is a globally unique flow identifier generated by the
+ * flowswitch for each flow. Flowswitch stamps every TX packet with this
+ * identifier. This is the flow identifier which would be visible to the AQM
+ * logic and the driver.
+ * pkt_flow_token uses the first 4 bytes of pkt_flow_id as the storage space.
+ * This is not a problem as pkt_flow_id is only for flowswitch consumption
+ * and is not required by any other module after the flowswitch TX processing
+ * stage.
  */
 #define pkt_flow_token          pkt_qum.qum_flow_id_val32[0]
 #endif /* KERNEL */
@@ -656,6 +697,7 @@ struct __user_packet {
 #define pkt_comp_gencnt         pkt_com.__p_comp_gencnt
 #define pkt_aggr_type           pkt_com.__p_aggr_type
 #define pkt_seg_cnt             pkt_com.__p_seg_cnt
+#define pkt_proto_seg_sz        pkt_com.__p_proto_seg_sz
 #define pkt_trace_id            pkt_com.__p_trace_id
 #if BYTE_ORDER == LITTLE_ENDIAN
 #define pkt_pflags32            pkt_com.__p_flags32[0]
@@ -768,9 +810,9 @@ struct __user_packet {
 #define PKT_F_PROMISC           0x0000020000000000ULL /* (U+K) */
 #define PKT_F_OPT_VLTAG         0x0000040000000000ULL /* (U+K) */
 #define PKT_F_OPT_VLTAG_IN_PKT  0x0000080000000000ULL /* (U+K) */
-/*                              0x0000100000000000ULL */
-/*                              0x0000200000000000ULL */
-/*                              0x0000400000000000ULL */
+#define __PKT_F_TX_PORT_DATA    0x0000100000000000ULL /* (K) */
+#define PKT_F_OPT_EXP_ACTION    0x0000200000000000ULL /* (U+K) */
+#define PKT_F_OPT_APP_METADATA  0x0000400000000000ULL /* (U+K) */
 /*                              0x0000800000000000ULL */
 /*                              0x0001000000000000ULL */
 /*                              0x0002000000000000ULL */
@@ -795,7 +837,8 @@ struct __user_packet {
 #define PKT_F_OPT_DATA                                                  \
 	(PKT_F_OPT_GROUP_START | PKT_F_OPT_GROUP_END |                  \
 	PKT_F_OPT_EXPIRE_TS | PKT_F_OPT_TOKEN |                         \
-	PKT_F_OPT_VLTAG | PKT_F_OPT_VLTAG_IN_PKT)
+	PKT_F_OPT_VLTAG | PKT_F_OPT_VLTAG_IN_PKT | PKT_F_OPT_EXP_ACTION | \
+	PKT_F_OPT_APP_METADATA)
 
 #ifdef KERNEL
 /*
@@ -809,7 +852,7 @@ struct __user_packet {
 /*
  * Aliases for kernel-only flags.  See notes above.  The ones marked
  * with (common) have corresponding PKTF_* definitions and are also
- * included in PKF_F_COMMON_MASK below.
+ * included in PKT_F_COMMON_MASK below.
  */
 #define PKT_F_FLOW_ID           __PKT_F_FLOW_ID         /* (common) */
 #define PKT_F_FLOW_ADV          __PKT_F_FLOW_ADV        /* (common) */
@@ -824,6 +867,7 @@ struct __user_packet {
 #define PKT_F_OPT_ALLOC         __PKT_F_OPT_ALLOC
 #define PKT_F_FLOW_ALLOC        __PKT_F_FLOW_ALLOC
 #define PKT_F_TX_COMPL_ALLOC    __PKT_F_TX_COMPL_ALLOC
+#define PKT_F_TX_PORT_DATA      __PKT_F_TX_PORT_DATA
 
 /*
  * Flags related to mbuf attached to the packet.

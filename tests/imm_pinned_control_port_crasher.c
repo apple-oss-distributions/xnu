@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <mach/task.h>
+#include <mach/mk_timer.h>
 
 /*
  * DO NOT run this test file by itself.
@@ -18,7 +19,12 @@
  *
  * The type of exception raised (if any) is checked on control_port_options side.
  */
-#define MAX_TEST_NUM 17
+#define MAX_TEST_NUM 21
+
+#ifndef MACH64_SEND_ANY
+#define MACH64_SEND_ANY 0x0000000800000000ull
+#define MACH64_SEND_MQ_CALL 0x0000000400000000ull
+#endif
 
 static int
 attempt_send_immovable_port(mach_port_name_t port, mach_msg_type_name_t disp)
@@ -294,6 +300,113 @@ immovable_test_copy_send_thread_read(void)
 	mach_port_deallocate(mach_task_self(), th_port);
 }
 
+static void
+cfi_test_no_bit_set(void)
+{
+	printf("[Crasher]: Try sending mach_msg2() without setting CFI bits\n");
+
+	mach_msg_header_t header;
+	kern_return_t kr;
+
+	header.msgh_local_port = MACH_PORT_NULL;
+	header.msgh_remote_port = mach_task_self();
+	header.msgh_id = 3409;
+	header.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND, 0, 0, 0);
+	header.msgh_size = sizeof(header);
+
+	kr = mach_msg2(&header, MACH64_SEND_MSG, header, header.msgh_size, 0, MACH_PORT_NULL,
+	    0, MACH_MSG_PRIORITY_UNSPECIFIED);
+	/* crash */
+	printf("[Crasher cfi_test_no_bit_set]: mach_msg2() returned %d\n", kr);
+}
+
+static void
+cfi_test_two_bits_set(void)
+{
+	printf("[Crasher]: Try sending mach_msg2() but setting 2 CFI bits\n");
+
+	mach_msg_header_t header;
+	kern_return_t kr;
+
+	header.msgh_local_port = MACH_PORT_NULL;
+	header.msgh_remote_port = mach_task_self();
+	header.msgh_id = 3409;
+	header.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND, 0, 0, 0);
+	header.msgh_size = sizeof(header);
+
+	kr = mach_msg2(&header, MACH64_SEND_MSG | MACH64_SEND_ANY | MACH64_SEND_KOBJECT_CALL,
+	    header, header.msgh_size, 0, MACH_PORT_NULL,
+	    0, MACH_MSG_PRIORITY_UNSPECIFIED);
+	/* crash */
+	printf("[Crasher cfi_test_two_bits_set]: mach_msg2() returned %d\n", kr);
+}
+
+static void
+cfi_test_msg_to_timer_port(void)
+{
+	printf("[Crasher]: Try sending mach_msg2() to timer port\n");
+
+	mach_port_t timer = MACH_PORT_NULL;
+	struct oversize_msg {
+		mach_msg_header_t header;
+		char data[2048];
+	} msg;
+
+	kern_return_t kr;
+	natural_t kotype;
+	mach_vm_address_t addr;
+
+#define IKOT_TIMER 8
+	timer = mk_timer_create();
+	assert(timer != MACH_PORT_NULL);
+
+	/* Make sure it's a kobject port */
+	kr = mach_port_kobject(mach_task_self(), timer, &kotype, &addr);
+	assert(kr == KERN_SUCCESS);
+	assert(kotype == IKOT_TIMER);
+
+	msg.header.msgh_local_port = MACH_PORT_NULL;
+	msg.header.msgh_remote_port = timer;
+	msg.header.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MAKE_SEND, 0, 0, 0);
+	msg.header.msgh_size = sizeof(msg);
+
+	/* Timer port must use MACH64_SEND_MQ_CALL */
+	kr = mach_msg2(&msg, MACH64_SEND_MSG | MACH64_SEND_MQ_CALL,
+	    msg.header, msg.header.msgh_size, 0, MACH_PORT_NULL,
+	    0, MACH_MSG_PRIORITY_UNSPECIFIED);
+	assert(kr == KERN_SUCCESS);
+	printf("Message sent to timer port successfully\n");
+
+	/* Using MACH64_SEND_KOBJECT_CALL should crash */
+	kr = mach_msg2(&msg, MACH64_SEND_MSG | MACH64_SEND_KOBJECT_CALL,
+	    msg.header, msg.header.msgh_size, 0, MACH_PORT_NULL,
+	    0, MACH_MSG_PRIORITY_UNSPECIFIED);
+	/* crash */
+	printf("[Crasher cfi_test_timer_port]: mach_msg2() returned %d\n", kr);
+}
+
+static void
+cfi_test_wrong_bit_set(void)
+{
+	printf("[Crasher]: Try sending mach_msg2() but setting wrong CFI bits\n");
+
+	mach_msg_header_t header;
+	kern_return_t kr;
+
+	header.msgh_local_port = MACH_PORT_NULL;
+	header.msgh_remote_port = mach_task_self();
+	header.msgh_id = 3409;
+	header.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND, 0, 0, 0);
+	header.msgh_size = sizeof(header);
+
+	/* Using MACH64_SEND_MQ_CALL but destination is a kobject port */
+	kr = mach_msg2(&header, MACH64_SEND_MSG | MACH64_SEND_MQ_CALL,
+	    header, header.msgh_size, 0, MACH_PORT_NULL,
+	    0, MACH_MSG_PRIORITY_UNSPECIFIED);
+	/* crash */
+	printf("[Crasher cfi_test_wrong_bit_set]: mach_msg2() returned %d\n", kr);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -315,7 +428,12 @@ main(int argc, char *argv[])
 		immovable_test_move_send_thread_inspect,
 		immovable_test_copy_send_thread_read,
 		immovable_test_move_send_as_remote_port,
-		immovable_test_move_send_raw_thread
+		immovable_test_move_send_raw_thread,
+
+		cfi_test_no_bit_set,
+		cfi_test_two_bits_set,
+		cfi_test_wrong_bit_set,
+		cfi_test_msg_to_timer_port,
 	};
 	printf("[Crasher]: My Pid: %d\n", getpid());
 

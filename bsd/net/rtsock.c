@@ -1746,9 +1746,9 @@ sysctl_iflist(int af, struct walkarg *w)
 	struct ifnet *ifp;
 	struct ifaddr *ifa;
 	struct  rt_addrinfo info;
-	int     len = 0, error = 0;
+	int     error = 0;
 	int     pass = 0;
-	int     total_len = 0, total_buffer_len = 0, current_len = 0;
+	size_t  len = 0, total_len = 0, total_buffer_len = 0, current_len = 0;
 	char    *total_buffer = NULL, *cp = NULL;
 	kauth_cred_t cred;
 
@@ -1777,7 +1777,11 @@ sysctl_iflist(int af, struct walkarg *w)
 			info.rti_info[RTAX_IFP] = ifa->ifa_addr;
 			len = rt_msg2(RTM_IFINFO, &info, NULL, NULL, &cred);
 			if (pass == 0) {
-				total_len += len;
+				if (os_add_overflow(total_len, len, &total_len)) {
+					ifnet_lock_done(ifp);
+					error = ENOBUFS;
+					break;
+				}
 			} else {
 				struct if_msghdr *ifm;
 
@@ -1809,6 +1813,7 @@ sysctl_iflist(int af, struct walkarg *w)
 				cp += len;
 				VERIFY(IS_P2ALIGNED(cp, sizeof(u_int32_t)));
 				current_len += len;
+				VERIFY(current_len <= total_len);
 			}
 			while ((ifa = ifa->ifa_link.tqe_next) != NULL) {
 				IFA_LOCK(ifa);
@@ -1828,7 +1833,11 @@ sysctl_iflist(int af, struct walkarg *w)
 				len = rt_msg2(RTM_NEWADDR, &info, NULL, NULL,
 				    &cred);
 				if (pass == 0) {
-					total_len += len;
+					if (os_add_overflow(total_len, len, &total_len)) {
+						IFA_UNLOCK(ifa);
+						error = ENOBUFS;
+						break;
+					}
 				} else {
 					struct ifa_msghdr *ifam;
 
@@ -1851,6 +1860,7 @@ sysctl_iflist(int af, struct walkarg *w)
 					VERIFY(IS_P2ALIGNED(cp,
 					    sizeof(u_int32_t)));
 					current_len += len;
+					VERIFY(current_len <= total_len);
 				}
 				IFA_UNLOCK(ifa);
 			}
@@ -1863,8 +1873,8 @@ sysctl_iflist(int af, struct walkarg *w)
 
 		if (error != 0) {
 			if (error == ENOBUFS) {
-				printf("%s: current_len (%d) + len (%d) > "
-				    "total_len (%d)\n", __func__, current_len,
+				printf("%s: current_len (%lu) + len (%lu) > "
+				    "total_len (%lu)\n", __func__, current_len,
 				    len, total_len);
 			}
 			break;
@@ -1879,7 +1889,7 @@ sysctl_iflist(int af, struct walkarg *w)
 			total_buffer_len = total_len;
 			total_buffer = (char *) kalloc_data(total_len, Z_ZERO | Z_WAITOK);
 			if (total_buffer == NULL) {
-				printf("%s: kalloc_data(%d) failed\n", __func__,
+				printf("%s: kalloc_data(%lu) failed\n", __func__,
 				    total_len);
 				error = ENOBUFS;
 				break;
@@ -1908,9 +1918,9 @@ sysctl_iflist2(int af, struct walkarg *w)
 	struct ifnet *ifp;
 	struct ifaddr *ifa;
 	struct  rt_addrinfo info;
-	int     len = 0, error = 0;
+	int     error = 0;
 	int     pass = 0;
-	int     total_len = 0, total_buffer_len = 0, current_len = 0;
+	size_t  len = 0, total_len = 0, total_buffer_len = 0, current_len = 0;
 	char    *total_buffer = NULL, *cp = NULL;
 	kauth_cred_t cred;
 
@@ -1941,7 +1951,11 @@ sysctl_iflist2(int af, struct walkarg *w)
 			info.rti_info[RTAX_IFP] = ifa->ifa_addr;
 			len = rt_msg2(RTM_IFINFO2, &info, NULL, NULL, &cred);
 			if (pass == 0) {
-				total_len += len;
+				if (os_add_overflow(total_len, len, &total_len)) {
+					ifnet_lock_done(ifp);
+					error = ENOBUFS;
+					break;
+				}
 			} else {
 				struct if_msghdr2 *ifm;
 
@@ -1978,6 +1992,7 @@ sysctl_iflist2(int af, struct walkarg *w)
 				cp += len;
 				VERIFY(IS_P2ALIGNED(cp, sizeof(u_int32_t)));
 				current_len += len;
+				VERIFY(current_len <= total_len);
 			}
 			while ((ifa = ifa->ifa_link.tqe_next) != NULL) {
 				IFA_LOCK(ifa);
@@ -1998,7 +2013,11 @@ sysctl_iflist2(int af, struct walkarg *w)
 				len = rt_msg2(RTM_NEWADDR, &info, NULL, NULL,
 				    &cred);
 				if (pass == 0) {
-					total_len += len;
+					if (os_add_overflow(total_len, len, &total_len)) {
+						IFA_UNLOCK(ifa);
+						error = ENOBUFS;
+						break;
+					}
 				} else {
 					struct ifa_msghdr *ifam;
 
@@ -2021,6 +2040,7 @@ sysctl_iflist2(int af, struct walkarg *w)
 					VERIFY(IS_P2ALIGNED(cp,
 					    sizeof(u_int32_t)));
 					current_len += len;
+					VERIFY(current_len <= total_len);
 				}
 				IFA_UNLOCK(ifa);
 			}
@@ -2091,8 +2111,8 @@ sysctl_iflist2(int af, struct walkarg *w)
 
 		if (error) {
 			if (error == ENOBUFS) {
-				printf("%s: current_len (%d) + len (%d) > "
-				    "total_len (%d)\n", __func__, current_len,
+				printf("%s: current_len (%lu) + len (%lu) > "
+				    "total_len (%lu)\n", __func__, current_len,
 				    len, total_len);
 			}
 			break;
@@ -2107,7 +2127,7 @@ sysctl_iflist2(int af, struct walkarg *w)
 			total_buffer_len = total_len;
 			total_buffer = (char *) kalloc_data(total_len, Z_ZERO | Z_WAITOK);
 			if (total_buffer == NULL) {
-				printf("%s: kalloc_data(%d) failed\n", __func__,
+				printf("%s: kalloc_data(%lu) failed\n", __func__,
 				    total_len);
 				error = ENOBUFS;
 				break;

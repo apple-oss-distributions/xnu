@@ -30,15 +30,20 @@
 #include <sys/kernel_types.h>
 #include <sys/types.h>
 #endif
+
+#if XNU_KERNEL_PRIVATE
+#include <img4/4xnu.h>
+#endif
 #endif // IMG4_TARGET_XNU
 
 #if IMG4_TARGET_DARWIN
 #include <os/stdio.h>
 #include <sys/types.h>
+#include <img4/4ignition.h>
+#include <img4/4MSU.h>
 #endif
 
-__BEGIN_DECLS;
-
+__BEGIN_DECLS
 OS_ASSUME_NONNULL_BEGIN
 
 /*!
@@ -58,13 +63,117 @@ IMG4_API_AVAILABLE_20200508
 typedef struct _img4_buff img4_buff_t;
 
 /*!
- * @typedef img4_cstr_t
+ * @const IMG4_DGST_STRUCT_VERSION
+ * The version of the {@link img4_dgst_t} structure supported by the
+ * implementation.
+ */
+#define IMG4_DGST_STRUCT_VERSION (0u)
+
+/*!
+ * @const IMG4_DGST_MAX_LEN
+ * The maximum length of a digest representable by an {@link img4_dgst_t}.
+ */
+#define IMG4_DGST_MAX_LEN (48u)
+
+/*!
+ * @typedef img4_dgst_t
+ * A type representing an Image4 identifier which is a digest.
+ *
+ * @field i4d_len
+ * The version of the structure. Initialize to {@link IMG4_DGST_STRUCT_VERSION}.
+ *
+ * @field i4d_len
+ * The length of the digest.
+ *
+ * @field i4d_bytes
+ * The digest bytes.
+ */
+IMG4_API_AVAILABLE_20200508
+typedef struct _img4_dgst {
+	img4_struct_version_t i4d_version;
+	size_t i4d_len;
+	uint8_t i4d_bytes[IMG4_DGST_MAX_LEN];
+} img4_dgst_t;
+
+/*!
+ * @const IMG4_DGST_INIT
+ * A convenience initializer for an {@link img4_dgst_t} structure.
+ */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+#define IMG4_DGST_INIT (img4_dgst_t){ \
+	.i4d_version = IMG4_DGST_STRUCT_VERSION, \
+	.i4d_len = 0, \
+	.i4d_bytes = {0}, \
+}
+#elif defined(__cplusplus) && __cplusplus >= 201103L
+#define IMG4_DGST_INIT (img4_dgst_t{ \
+	IMG4_DGST_STRUCT_VERSION, \
+	0, \
+	{0}, \
+})
+#elif defined(__cplusplus)
+#define IMG4_DGST_INIT (img4_nonce_t((img4_nonce_t){ \
+	IMG4_DGST_STRUCT_VERSION, \
+	0, \
+	{0}, \
+}))
+#else
+#define IMG4_DGST_INIT {IMG4_DGST_STRUCT_VERSION}
+#endif
+
+/*!
+ * @struct _img4_cstr
  * A type representing an Image4 identifier which is a C-string. These
- * identifiers can be no more than 128 bytes in length, including the null
+ * identifiers can be no more than 64 bytes in length, including the null
  * terminating byte.
+ *
+ * @field i4b_len
+ * The length of the C-string, not including the null terminating byte.
+ *
+ * @field i4b_cstr
+ * The null-terminated C-string.
+ *
+ * @discussion
+ * This structure is intentionally unversioned. It should never evolve into
+ * anything more complex than it is.
  */
 IMG4_API_AVAILABLE_20210113
-typedef struct _img4_cstr img4_cstr_t;
+typedef struct _img4_cstr {
+	size_t i4cs_len;
+	char i4cs_cstr[64];
+} img4_cstr_t;
+
+/*!
+ * @const IMG4_CSTR_INIT
+ * A convenience initializer for an {@link img4_cstr_t}.
+ */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+#define IMG4_CSTR_INIT (img4_cstr_t){ \
+	.i4cs_len = 0, \
+	.i4cs_cstr = {0}, \
+}
+#elif defined(__cplusplus) && __cplusplus >= 201103L
+#define IMG4_CSTR_INIT (img4_cstr_t{ \
+	0, \
+	{0}, \
+})
+#elif defined(__cplusplus)
+#define IMG4_CSTR_INIT \
+		(img4_cstr_t((img4_cstr_t){ \
+	0, \
+	{0}, \
+}))
+#else
+#define IMG4_CSTR_INIT {0}
+#endif
+
+/*!
+ * @typedef img4_chip_t
+ * An opaque type describing a destination chip environment for the firmware
+ * image.
+ */
+IMG4_API_AVAILABLE_20200508
+typedef struct _img4_chip img4_chip_t;
 
 /*!
  * @typedef img4_firmware_t
@@ -93,6 +202,12 @@ OS_ASSUME_NONNULL_END
 #include <img4/nonce.h>
 #include <img4/object.h>
 #include <img4/chip.h>
+#include <img4/chip_ap.h>
+#include <img4/chip_ap_category.h>
+#include <img4/chip_ap_software.h>
+#include <img4/chip_cryptex1.h>
+#include <img4/chip_sep.h>
+#include <img4/chip_x86.h>
 #include <img4/image.h>
 #include <img4/runtime.h>
 
@@ -232,6 +347,11 @@ typedef struct _img4_firmware_execution_context {
  * @const IMG4_FIRMWARE_FLAG_PASSTHROUGH
  * Causes the wrapped payload bytes to be delivered to the image execution
  * callback. These bytes do not have the Image4 wrapping stripped.
+ *
+ * @const IMG4_FIRMWARE_FLAG_FORCE_ANTI_REPLAY
+ * Force anti-replay enforcement even when performing just manifest evaluation
+ * without executing a firmware. When executing a firmware, this flag need not
+ * be passed in since anti-replay enforcement is always enabled.
  */
 IMG4_API_AVAILABLE_20200508
 OS_CLOSED_OPTIONS(img4_firmware_flags, uint64_t,
@@ -241,6 +361,7 @@ OS_CLOSED_OPTIONS(img4_firmware_flags, uint64_t,
 	IMG4_FIRMWARE_FLAG_SUBSEQUENT_STAGE = (1 << 2),
 	IMG4_FIRMWARE_FLAG_RESPECT_AMNM = (1 << 3),
 	IMG4_FIRMWARE_FLAG_PASSTHROUGH = (1 << 4),
+	IMG4_FIRMWARE_FLAG_FORCE_ANTI_REPLAY = (1 << 5),
 );
 
 /*!
@@ -456,6 +577,44 @@ img4_firmware_init(img4_firmware_t fw,
 #endif
 
 /*!
+ * @function img4_firmware_init_sentinel
+ * Initialize a firmware object as a sentinel without any manifest attached.
+ * This firmware has no object tag and is not executable. It is only suitable
+ * for use with {@link img4_firmware_attach_manifest} and
+ * {@link img4_firmware_evaluate} to determine whether a manifest is acceptable
+ * to a particular chip environment.
+ *
+ * @param fw
+ * A pointer to the storage for the firmware object. This pointer should refer
+ * to a region of memory that is sufficient to hold a {@link img4_firmware_t}
+ * object. This size should be queried with the {@link i4rt_object_size}
+ * function of the runtime.
+ *
+ * @param rt
+ * The runtime in which to initialize the object.
+ *
+ * @param flags
+ * Flags modifying the behavior of the object.
+ *
+ * @discussion
+ * Sentinel firmwares do not enforce anti-replay, so
+ * {@link img4_firmware_evaluate} will not return ESTALE when evaluating such
+ * firmwares. Anti-replay enforcement can be enabled by using
+ * {@link IMG4_FIRMWARE_FLAG_FORCE_ANTI_REPLAY}.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20211126
+OS_EXPORT OS_NONNULL1 OS_NONNULL2
+void
+img4_firmware_init_sentinel(img4_firmware_t fw,
+		const img4_runtime_t *rt,
+		img4_firmware_flags_t flags);
+#else
+#define img4_firmware_init_sentinel(...) \
+		(img4if->i4if_v17.firmware_init_sentinel(__VA_ARGS__))
+#endif
+
+/*!
  * @function img4_firmware_attach_manifest
  * Attaches a signed manifest to the firmware.
  *
@@ -662,7 +821,6 @@ img4_firmware_destroy(img4_firmware_t _Nonnull *_Nullable fw);
 #endif
 
 OS_ASSUME_NONNULL_END
-
-__END_DECLS;
+__END_DECLS
 
 #endif // __IMG4_FIRMWARE_H

@@ -26,18 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include <sys/sysctl.h>
-
-#include <netinet/in.h>
-#include <netinet/ip.h>
-#include <netinet/ip6.h>
-#include <netinet/ip_var.h>
-
-#include <netinet/tcp.h>
-#include <netinet/tcp_fsm.h>
-#include <netinet/tcp_seq.h>
-#include <netinet/tcp_var.h>
-#include <netinet/tcp_cc.h>
+#include "tcp_includes.h"
 
 /*
  * This file implements a LBE congestion control algorithm
@@ -46,10 +35,7 @@
  */
 
 #define GAIN_CONSTANT               (16)
-#define DEFER_SLOWDOWN_DURATION     (30 * 1000) /* 30s */
-
-SYSCTL_SKMEM_TCP_INT(OID_AUTO, rledbat, CTLFLAG_RW | CTLFLAG_LOCKED,
-    int, tcp_rledbat, 1, "Use Receive LEDBAT");
+#define TCP_BASE_RTT_INTERVAL       (60 * TCP_RETRANSHZ)
 
 void tcp_rledbat_init(struct tcpcb *tp);
 void tcp_rledbat_cleanup(struct tcpcb *tp);
@@ -85,7 +71,7 @@ rledbat_clear_state(struct tcpcb *tp)
 void
 tcp_rledbat_init(struct tcpcb *tp)
 {
-	OSIncrementAtomic((volatile int *)&tcp_cc_rledbat.num_sockets);
+	os_atomic_inc(&tcp_cc_rledbat.num_sockets, relaxed);
 	rledbat_clear_state(tp);
 
 	tp->t_rlstate.win = tp->t_maxseg * bg_ss_fltsz;
@@ -96,7 +82,7 @@ void
 tcp_rledbat_cleanup(struct tcpcb *tp)
 {
 #pragma unused(tp)
-	OSDecrementAtomic((volatile int *)&tcp_cc_rledbat.num_sockets);
+	os_atomic_dec(&tcp_cc_rledbat.num_sockets, relaxed);
 }
 
 /*
@@ -129,19 +115,19 @@ rledbat_gain(uint32_t base_rtt)
  */
 static void
 rledbat_congestion_avd(struct tcpcb *tp, uint32_t segment_len,
-    uint32_t base_rtt, uint32_t curr_rtt)
+    uint32_t base_rtt, uint32_t curr_rtt, uint32_t now)
 {
 	uint32_t update = 0;
 	/*
 	 * Set the next slowdown time i.e. 9 times the duration
 	 * of previous slowdown except the initial slowdown.
+	 *
+	 * Updated: we will slowdown once in 60s based on our
+	 * base RTT interval.
 	 */
 	if (tp->t_rlstate.slowdown_ts == 0) {
-		uint32_t slowdown_duration = 0;
+		uint32_t slowdown_duration = TCP_BASE_RTT_INTERVAL;
 		if (tp->t_rlstate.num_slowdown_events > 0) {
-			slowdown_duration = tcp_now -
-			    tp->t_rlstate.slowdown_begin;
-
 			if (tp->t_rlstate.ssthresh > tp->t_rlstate.win) {
 				/*
 				 * Special case for slowdowns (other than initial)
@@ -151,11 +137,8 @@ rledbat_congestion_avd(struct tcpcb *tp, uint32_t segment_len,
 				slowdown_duration *= 2;
 			}
 		}
-		tp->t_rlstate.slowdown_ts = tcp_now +
-		    (9 * slowdown_duration);
-		if (slowdown_duration == 0) {
-			tp->t_rlstate.slowdown_ts += (2 * (tp->rcv_srtt >> TCP_RTT_SHIFT));
-		}
+		tp->t_rlstate.slowdown_ts = now + slowdown_duration;
+
 		/* Reset the start */
 		tp->t_rlstate.slowdown_begin = 0;
 
@@ -181,15 +164,15 @@ rledbat_congestion_avd(struct tcpcb *tp, uint32_t segment_len,
 				tp->t_rlstate.ssthresh = tp->t_rlstate.win;
 			}
 			tp->t_rlstate.win += update;
-			tp->t_rlstate.win = min(tcp_round_to(tp->t_rlstate.win,
-			    tp->t_maxseg), TCP_MAXWIN << tp->rcv_scale);
+			tp->t_rlstate.win = min(tcp_round_to(tp->t_rlstate.win, tp->t_maxseg),
+			    TCP_MAXWIN << tp->rcv_scale);
 		}
 	} else {
 		/*
 		 * If we are still within 1 RTT of previous reduction
 		 * due to loss, do nothing
 		 */
-		if (tcp_now < tp->t_rlstate.reduction_end) {
+		if (now < tp->t_rlstate.reduction_end) {
 			return;
 		}
 		/*
@@ -222,9 +205,8 @@ rledbat_congestion_avd(struct tcpcb *tp, uint32_t segment_len,
 			}
 
 			if (tp->t_rlstate.slowdown_ts != 0) {
-				/* As the window has been reduced, defer the slowdown */
-				tp->t_rlstate.slowdown_ts = tcp_now +
-				    DEFER_SLOWDOWN_DURATION;
+				/* As the window has been reduced, defer the slowdown. */
+				tp->t_rlstate.slowdown_ts = now + TCP_BASE_RTT_INTERVAL;
 			}
 		}
 	}
@@ -241,23 +223,27 @@ tcp_rledbat_data_rcvd(struct tcpcb *tp, struct tcphdr *th,
 	const uint32_t base_rtt = get_base_rtt(tp);
 	const uint32_t curr_rtt = tcp_use_min_curr_rtt ? tp->curr_rtt_min :
 	    tp->t_rttcur;
+	const uint32_t srtt = tp->rcv_srtt >> TCP_RTT_SHIFT;
 	const uint32_t ss_target = (uint32_t)(3 * target_qdelay / 4);
 	tp->t_rlstate.drained_bytes += segment_len;
+	struct tcp_globals *globals = tcp_get_globals(tp);
 
 	/*
 	 * Slowdown period - first slowdown
 	 * is 2RTT after we exit initial slow start.
 	 * Subsequent slowdowns are after 9 times the
 	 * previous slow down durations.
+	 *
+	 * Updated: slowdown periods are once
+	 * every 60s unless they are deferred.
 	 */
 	if (tp->t_rlstate.slowdown_ts != 0 &&
-	    tcp_now >= tp->t_rlstate.slowdown_ts) {
+	    tcp_globals_now(globals) >= tp->t_rlstate.slowdown_ts) {
 		if (tp->t_rlstate.slowdown_begin == 0) {
-			tp->t_rlstate.slowdown_begin = tcp_now;
+			tp->t_rlstate.slowdown_begin = tcp_globals_now(globals);
 			tp->t_rlstate.num_slowdown_events++;
 		}
-		if (tcp_now < tp->t_rlstate.slowdown_ts +
-		    (2 * (tp->rcv_srtt >> TCP_RTT_SHIFT))) {
+		if (tcp_globals_now(globals) < tp->t_rlstate.slowdown_ts + (2 * srtt)) {
 			// Set rwnd to 2 packets and return
 			if (tp->t_rlstate.win > bg_ss_fltsz * tp->t_maxseg) {
 				if (tp->t_rlstate.ssthresh < tp->t_rlstate.win) {
@@ -282,7 +268,7 @@ tcp_rledbat_data_rcvd(struct tcpcb *tp, struct tcphdr *th,
 	 */
 	if (SEQ_LT(th->th_seq + segment_len, tp->rcv_high) &&
 	    TSTMP_GEQ(to->to_tsval, tp->tsv_high)) {
-		if (tcp_now < tp->t_rlstate.reduction_end) {
+		if (tcp_globals_now(globals) < tp->t_rlstate.reduction_end) {
 			/* still need to wait for reduction end to elapse */
 			return;
 		}
@@ -300,13 +286,12 @@ tcp_rledbat_data_rcvd(struct tcpcb *tp, struct tcphdr *th,
 		tp->t_rlstate.md_rcvd_bytes = 0;
 
 		/* Update the reduction end time */
-		tp->t_rlstate.reduction_end = tcp_now + 2 *
-		    (tp->rcv_srtt >> TCP_RTT_SHIFT);
+		tp->t_rlstate.reduction_end = tcp_globals_now(globals) + 2 * srtt;
 
 		if (tp->t_rlstate.slowdown_ts != 0) {
 			/* As the window has been halved, defer the slowdown. */
-			tp->t_rlstate.slowdown_ts = tcp_now +
-			    DEFER_SLOWDOWN_DURATION;
+			tp->t_rlstate.slowdown_ts = tcp_globals_now(globals) +
+			    TCP_BASE_RTT_INTERVAL;
 		}
 		return;
 	}
@@ -320,7 +305,7 @@ tcp_rledbat_data_rcvd(struct tcpcb *tp, struct tcphdr *th,
 		    TCP_MAXWIN << tp->rcv_scale);
 	} else if (tp->t_rlstate.win < tp->t_rlstate.ssthresh &&
 	    ((tp->t_rlstate.num_slowdown_events > 0 &&
-	    curr_rtt <= (base_rtt + (uint32_t)target_qdelay)) ||
+	    curr_rtt <= (base_rtt + ((uint32_t)target_qdelay << 1))) ||
 	    curr_rtt <= (base_rtt + ss_target))) {
 		/*
 		 * Modified slow start with a dynamic GAIN
@@ -328,6 +313,11 @@ tcp_rledbat_data_rcvd(struct tcpcb *tp, struct tcphdr *th,
 		 * delay, exit slow start, iff, it is the initial slow start.
 		 * After the initial slow start, during CA, window growth
 		 * will be bound by ssthresh.
+		 *
+		 * We enter slow start again only after a slowdown event
+		 * and in that case, we want to allow the window to grow. The
+		 * check for target_qdelay is only a safety net in case
+		 * the queuing delay increases more than twice.
 		 */
 		tp->t_rlstate.rcvd_bytes += segment_len;
 		uint32_t gain_factor = rledbat_gain(base_rtt);
@@ -336,8 +326,8 @@ tcp_rledbat_data_rcvd(struct tcpcb *tp, struct tcphdr *th,
 			    TCP_CC_CWND_INIT_PKTS * tp->t_maxseg);
 			tp->t_rlstate.rcvd_bytes = 0;
 			tp->t_rlstate.win += update;
-			tp->t_rlstate.win = min(tcp_round_to(tp->t_rlstate.win,
-			    tp->t_maxseg), TCP_MAXWIN << tp->rcv_scale);
+			tp->t_rlstate.win = min(tcp_round_to(tp->t_rlstate.win, tp->t_maxseg),
+			    TCP_MAXWIN << tp->rcv_scale);
 		}
 
 		/* Reset the next slowdown timestamp */
@@ -346,7 +336,7 @@ tcp_rledbat_data_rcvd(struct tcpcb *tp, struct tcphdr *th,
 		}
 	} else {
 		/* Congestion avoidance */
-		rledbat_congestion_avd(tp, segment_len, base_rtt, curr_rtt);
+		rledbat_congestion_avd(tp, segment_len, base_rtt, curr_rtt, tcp_globals_now(globals));
 	}
 }
 
@@ -355,8 +345,7 @@ tcp_rledbat_get_rlwin(struct tcpcb *tp)
 {
 	/* rlwin is either greater or smaller by at most drained bytes */
 	if (tp->t_rlstate.win > tp->t_rlstate.win_ws ||
-	    tp->t_rlstate.win_ws - tp->t_rlstate.win <
-	    tp->t_rlstate.drained_bytes) {
+	    tp->t_rlstate.win_ws - tp->t_rlstate.win < tp->t_rlstate.drained_bytes) {
 		tp->t_rlstate.win_ws = tp->t_rlstate.win;
 	} else if (tp->t_rlstate.win < tp->t_rlstate.win_ws) {
 		/*
@@ -368,8 +357,7 @@ tcp_rledbat_get_rlwin(struct tcpcb *tp)
 	}
 	tp->t_rlstate.drained_bytes = 0;
 	/* Round up to the receive window scale */
-	tp->t_rlstate.win_ws = tcp_round_up(tp->t_rlstate.win_ws,
-	    1 << tp->rcv_scale);
+	tp->t_rlstate.win_ws = tcp_round_up(tp->t_rlstate.win_ws, 1 << tp->rcv_scale);
 
 	return tp->t_rlstate.win_ws;
 }
@@ -391,8 +379,7 @@ void
 tcp_rledbat_switch_to(struct tcpcb *tp)
 {
 	rledbat_clear_state(tp);
-
-	uint32_t win = 0;
+	uint32_t recwin = 0;
 
 	if (tp->t_rlstate.win == 0) {
 		/*
@@ -400,17 +387,26 @@ tcp_rledbat_switch_to(struct tcpcb *tp)
 		 * will quickly reduce the window if there is still
 		 * high queueing delay.
 		 */
-		win = (tp->rcv_adv - tp->rcv_nxt) / 2;
+		int32_t win = tcp_sbspace(tp);
+		if (win < 0) {
+			win = 0;
+		}
+
+		recwin = MAX(win, (int)(tp->rcv_adv - tp->rcv_nxt));
+		recwin = recwin / 2;
 	} else {
-		/* Reduce the window by half from the previous value */
-		win = tp->t_rlstate.win / 2;
+		/*
+		 * Reduce the window by half from the previous value
+		 * but it should be at least 64K
+		 */
+		recwin = MAX(tp->t_rlstate.win / 2, TCP_MAXWIN);
 	}
 
-	win = tcp_round_to(win, tp->t_maxseg);
-	if (win < bg_ss_fltsz * tp->t_maxseg) {
-		win = bg_ss_fltsz * tp->t_maxseg;
+	recwin = tcp_round_to(recwin, tp->t_maxseg);
+	if (recwin < bg_ss_fltsz * tp->t_maxseg) {
+		recwin = bg_ss_fltsz * tp->t_maxseg;
 	}
-	tp->t_rlstate.win = win;
+	tp->t_rlstate.win = recwin;
 
 	/* ssthresh should be at most the inital value */
 	if (tp->t_rlstate.ssthresh == 0) {

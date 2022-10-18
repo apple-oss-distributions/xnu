@@ -17,7 +17,8 @@ endif
 
 # Files that are public on macOS, but private on embedded
 EMBEDDED_PRIVATE_DATAFILES = \
-	if_media.h
+	if_media.h \
+	route.h
 
 ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
 EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
@@ -36,11 +37,11 @@ DATAFILES= $(sort \
 	if_mib.h \
 	if_types.h \
 	if_var.h \
+	if_var_status.h \
 	if_utun.h \
 	kext_net.h \
 	ndrv.h \
-	pfkeyv2.h \
-	route.h	\
+	pfkeyv2.h	\
 	net_kev.h \
 	$(EXTRA_DATAFILES))
 
@@ -57,6 +58,7 @@ PRIVATE_DATAFILES = $(sort \
 	etherdefs.h \
 	firewire.h \
 	if.h \
+	if_private.h \
 	if_bond_var.h \
 	if_bond_internal.h \
 	if_bridgevar.h \
@@ -69,9 +71,9 @@ PRIVATE_DATAFILES = $(sort \
 	if_ppp.h \
 	if_utun.h \
 	if_var.h \
+	if_var_private.h \
 	if_vlan_var.h \
 	if_fake_var.h \
-	if_6lowpan_var.h \
 	iptap.h \
 	lacp.h \
 	multi_layer_pkt_log.h \
@@ -89,24 +91,21 @@ PRIVATE_DATAFILES = $(sort \
 	ppp_defs.h \
 	radix.h \
 	raw_cb.h \
-	route.h \
+	route_private.h \
 	net_perf.h \
 	net_kev.h \
-	sixxlowpan.h \
-	frame802154.h \
 	nat464_utils.h \
 	$(MACOS_PRIVATE_DATAFILES) \
 	$(EXTRA_PRIVATE_DATAFILES))
 
-ifneq ($(EXTRA_PRIVATE_DATAFILES),)
 PRIVATE_MODULEMAPFILES = \
 	net_private.modulemap
-endif
 
 DRIVERKIT_DATAFILES = \
 	bpf.h \
 	if.h \
 	if_var.h \
+	if_var_status.h \
 	if_media.h \
 	ethernet.h
 
@@ -123,7 +122,7 @@ INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
 INSTALL_MI_DIR = net
 
-INSTALL_MI_LCL_LIST = ${EXTRA_PRIVATE_DATAFILES}
+INSTALL_MI_LCL_LIST = $(sort if_private.h if_var_private.h route_private.h ${EXTRA_PRIVATE_DATAFILES})
 
 INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 

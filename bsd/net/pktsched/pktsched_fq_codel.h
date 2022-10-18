@@ -71,12 +71,15 @@ struct fcl_stat {
 };
 
 /*
- * Use the top most 8 bits of flow id as the tag for set associative
+ * Use 8 bits from the flow id as the tag for set associative
  * hashing
+ * NOTE: The first 2 bits of the flow id is being used to encode the flow
+ * domain information, so don't use the top 8 bits as it won't have a uniform
+ * distribution.
  */
 
 #define FQ_IF_HASH_TAG_SIZE     8
-#define FQ_IF_HASH_TAG_SHIFT    24
+#define FQ_IF_HASH_TAG_SHIFT    16
 #define FQ_IF_HASH_TAG_MASK     0xFF
 #define FQ_IF_HASH_TABLE_SIZE   (1 << FQ_IF_HASH_TAG_SIZE)
 
@@ -90,17 +93,26 @@ _Static_assert(FQ_IF_MAX_CLASSES < 127,
 
 #define FQ_IF_LARGE_FLOW_BYTE_LIMIT     15000
 
+/* Max number of classq groups currently supported */
+#define FQ_IF_MAX_GROUPS                16
+
+typedef enum : uint8_t {
+	FQ_TFC_C            = 0, /* classic traffic */
+	FQ_TFC_L4S          = 1, /* L4S traffic */
+	FQ_TFC_CNT          = 2,
+} fq_tfc_type_t;
+
 struct flowq;
 typedef u_int32_t pktsched_bitmap_t;
 struct if_ifclassq_stats;
 
-enum fq_if_state {
+typedef enum : uint8_t {
 	FQ_IF_ER = 0,           /* eligible, ready */
 	FQ_IF_IR = 1,           /* ineligible, ready */
 	FQ_IF_EB = 2,           /* eligible blocked */
 	FQ_IF_IB = 3,           /* ineligible, blocked */
 	FQ_IF_MAX_STATE
-};
+} fq_if_state;
 
 /*
  * This priority index is used for QFQ state bitmaps, lower index gets
@@ -130,22 +142,122 @@ typedef struct fq_if_classq {
 	flowq_stailq_t fcl_old_flows;   /* List of old flows */
 	struct fcl_stat fcl_stat;
 } fq_if_classq_t;
+typedef struct fq_codel_classq_group {
+	/* Target queue delays (ns) */
+	uint64_t                fqg_target_qdelays[FQ_TFC_CNT];
+	/* update intervals (ns) */
+	uint64_t                fqg_update_intervals[FQ_TFC_CNT];
+	/* classq bitmaps */
+	pktsched_bitmap_t       fqg_bitmaps[FQ_IF_MAX_STATE];
+	TAILQ_ENTRY(fq_codel_classq_group) fqg_grp_link;
+	uint32_t                fqg_bytes;     /* bytes count */
+	uint32_t                fqg_len;       /* pkts count */
+	uint8_t                 fqg_flags;     /* flags */
+#define FQ_IF_DEFAULT_GRP                   0x1
+	uint8_t                 fqg_index;     /* group index */
+	fq_if_classq_t          fqg_classq[FQ_IF_MAX_CLASSES]; /* class queues */
+	struct flowq            *fqg_large_flow; /* flow has highest number of bytes */
+} fq_if_group_t;
+
+#define FQG_LEN(_fqg)           ((_fqg)->fqg_len)
+#define FQG_IS_EMPTY(_fqg)      (FQG_LEN(_fqg) == 0)
+#define FQG_INC_LEN(_fqg)       (FQG_LEN(_fqg)++)
+#define FQG_DEC_LEN(_fqg)       (FQG_LEN(_fqg)--)
+#define FQG_ADD_LEN(_fqg, _len) (FQG_LEN(_fqg) += (_len))
+#define FQG_SUB_LEN(_fqg, _len) (FQG_LEN(_fqg) -= (_len))
+#define FQG_BYTES(_fqg)         ((_fqg)->fqg_bytes)
+
+#define FQG_INC_BYTES(_fqg, _len)     \
+    ((_fqg)->fqg_bytes = (_fqg)->fqg_bytes + (_len))
+#define FQG_DEC_BYTES(_fqg, _len)     \
+    ((_fqg)->fqg_bytes = (_fqg)->fqg_bytes - (_len))
+
+typedef TAILQ_HEAD(, fq_codel_classq_group) fq_grp_tailq_t;
+
+typedef int (* fq_if_bitmaps_ffs)(fq_grp_tailq_t *, int, fq_if_state, fq_if_group_t **);
+typedef boolean_t (* fq_if_bitmaps_zeros)(fq_grp_tailq_t *, int, fq_if_state);
+typedef void (* fq_if_bitmaps_cpy)(fq_grp_tailq_t *, int, fq_if_state, fq_if_state);
+typedef void (* fq_if_bitmaps_clr)(fq_grp_tailq_t *, int, fq_if_state);
+
+/*
+ * Functions that are used to look at groups'
+ * bitmaps and decide which pri and group are the
+ * next one to dequeue from.
+ */
+typedef struct fq_if_bitmap_ops {
+	fq_if_bitmaps_ffs       ffs;
+	fq_if_bitmaps_zeros     zeros;
+	fq_if_bitmaps_cpy       cpy;
+	fq_if_bitmaps_clr       clr;
+} bitmap_ops_t;
 
 typedef struct fq_codel_sched_data {
-	struct ifclassq *fqs_ifq;       /* back pointer to ifclassq */
-	u_int64_t       fqs_target_qdelay;      /* Target queue delay (ns) */
-	u_int64_t       fqs_update_interval;    /* update interval (ns) */
-	flowq_list_t    fqs_flows[FQ_IF_HASH_TABLE_SIZE]; /* flows table */
-	pktsched_bitmap_t       fqs_bitmaps[FQ_IF_MAX_STATE];
-	u_int32_t       fqs_pkt_droplimit;      /* drop limit */
-	u_int8_t        fqs_throttle;   /* throttle on or off */
-	u_int8_t        fqs_flags;      /* flags */
+	struct ifclassq         *fqs_ifq;       /* back pointer to ifclassq */
+	flowq_list_t            fqs_flows[FQ_IF_HASH_TABLE_SIZE]; /* flows table */
+	uint32_t                fqs_pkt_droplimit;  /* drop limit */
+	uint8_t                 fqs_throttle;   /* throttle on or off */
+	uint8_t                 fqs_flags;      /* flags */
 #define FQS_DRIVER_MANAGED      0x1
-	fq_if_classq_t  fqs_classq[FQ_IF_MAX_CLASSES]; /* class queues */
 	struct flowadv_fclist   fqs_fclist; /* flow control state */
-	struct flowq    *fqs_large_flow; /* flow has highest number of bytes */
+	struct flowq            *fqs_large_flow; /* flow has highest number of bytes */
+	TAILQ_HEAD(, flowq)     fqs_empty_list; /* list of empty flows */
+	/* list of groups in combined mode */
+	fq_grp_tailq_t          fqs_combined_grp_list;
+	uint32_t                fqs_empty_list_cnt;
+	/* bitmap indicating which grp is in combined mode */
+	pktsched_bitmap_t       fqs_combined_grp_bitmap;
 	classq_pkt_type_t       fqs_ptype;
+	bitmap_ops_t            *fqs_bm_ops;
+#define grp_bitmaps_ffs     fqs_bm_ops->ffs
+#define grp_bitmaps_zeros   fqs_bm_ops->zeros
+#define grp_bitmaps_cpy     fqs_bm_ops->cpy
+#define grp_bitmaps_clr     fqs_bm_ops->clr
+	fq_if_group_t           *fqs_classq_groups[FQ_IF_MAX_GROUPS];
 } fq_if_t;
+
+#define FQS_GROUP(_fqs, _group_idx)                                      \
+	(fq_if_find_grp((_fqs), (_group_idx)))
+
+#define FQS_CLASSQ(_fqs, _group_idx, _sc_idx)                            \
+    (FQS_GROUP((_fqs), (_group_idx))->fqg_classq[_sc_idx])
+
+#define FQ_GROUP(_fq)                                      \
+	((_fq)->fq_group)
+
+#define FQ_GRP_LEN(_fq)                                    \
+	(FQ_GROUP((_fq))->fqg_len)
+#define FQ_GRP_IS_EMPTY(_fq)                               \
+	(FQ_GRP_LEN((_fq)) == 0)
+#define FQ_GRP_INC_LEN(_fq)                                \
+    (FQ_GRP_LEN((_fq))++)
+#define FQ_GRP_DEC_LEN(_fq)                                \
+    (FQ_GRP_LEN((_fq))--)
+#define FQ_GRP_ADD_LEN(_fq, _len)                          \
+	(FQ_GRP_LEN((_fq)) += (_len))
+#define FQ_GRP_SUB_LEN(_fq, _len)                          \
+	(FQ_GRP_LEN((_fq)) -= (_len))
+
+#define FQS_GRP_ADD_LEN(_fqs, _grp_idx, _len)              \
+	(FQS_GROUP(_fqs, grp_idx)->fqg_len += (_len))
+
+
+#define FQ_GRP_BYTES(_fq)                     \
+	(FQ_GROUP((_fq))->fqg_bytes)
+#define FQ_GRP_INC_BYTES(_fq, _len)           \
+    (FQ_GRP_BYTES((_fq)) += (_len))
+#define FQ_GRP_DEC_BYTES(_fq, _len)           \
+    (FQ_GRP_BYTES((_fq)) -= (_len))
+
+#define FQS_GRP_INC_BYTES(_fqs, grp_idx, _len)           \
+	(FQS_GROUP(_fqs, grp_idx)->fqg_bytes += (_len))
+
+#define FQ_CLASSQ(_fq)                                   \
+	(FQ_GROUP((_fq))->fqg_classq[(_fq)->fq_sc_index])
+
+#define FQ_TARGET_DELAY(_fq)              \
+	(FQ_GROUP((_fq))->fqg_target_qdelays[(_fq)->fq_tfc_type])
+#define FQ_UPDATE_INTERVAL(_fq)           \
+	(FQ_GROUP((_fq))->fqg_update_intervals[(_fq)->fq_tfc_type])
 
 #endif /* BSD_KERNEL_PRIVATE */
 
@@ -200,26 +312,27 @@ struct fq_codel_classstats {
 };
 
 #ifdef BSD_KERNEL_PRIVATE
-
+extern void pktsched_fq_init(void);
 extern void fq_codel_scheduler_init(void);
 extern int fq_if_enqueue_classq(struct ifclassq *ifq, classq_pkt_t *h,
     classq_pkt_t *t, uint32_t cnt, uint32_t bytes, boolean_t *pdrop);
-extern void fq_if_dequeue_classq(struct ifclassq *ifq, classq_pkt_t *pkt);
+extern void fq_if_dequeue_classq(struct ifclassq *ifq, classq_pkt_t *pkt,
+    uint8_t grp_idx);
 extern void fq_if_dequeue_sc_classq(struct ifclassq *ifq, mbuf_svc_class_t svc,
-    classq_pkt_t *pkt);
+    classq_pkt_t *pkt, uint8_t grp_idx);
 extern int fq_if_dequeue_classq_multi(struct ifclassq *ifq, u_int32_t maxpktcnt,
     u_int32_t maxbytecnt, classq_pkt_t *first_packet, classq_pkt_t *last_packet,
-    u_int32_t *retpktcnt, u_int32_t *retbytecnt);
+    u_int32_t *retpktcnt, u_int32_t *retbytecnt, uint8_t grp_idx);
 extern int fq_if_dequeue_sc_classq_multi(struct ifclassq *ifq,
     mbuf_svc_class_t svc, u_int32_t maxpktcnt, u_int32_t maxbytecnt,
     classq_pkt_t *first_packet, classq_pkt_t *last_packet, u_int32_t *retpktcnt,
-    u_int32_t *retbytecnt);
+    u_int32_t *retbytecnt, uint8_t grp_idx);
 extern int fq_if_request_classq(struct ifclassq *ifq, cqrq_t rq, void *arg);
-extern struct flowq *fq_if_hash_pkt(fq_if_t *, u_int32_t, mbuf_svc_class_t,
-    u_int64_t, boolean_t, classq_pkt_type_t);
+extern struct flowq *fq_if_hash_pkt(fq_if_t *, fq_if_group_t *,
+    u_int32_t, mbuf_svc_class_t, u_int64_t, bool, fq_tfc_type_t);
 extern boolean_t fq_if_at_drop_limit(fq_if_t *);
-extern void fq_if_drop_packet(fq_if_t *);
 extern boolean_t fq_if_almost_at_drop_limit(fq_if_t *fqs);
+extern void fq_if_drop_packet(fq_if_t *, uint64_t);
 extern void fq_if_is_flow_heavy(fq_if_t *, struct flowq *);
 extern boolean_t fq_if_add_fcentry(fq_if_t *, pktsched_pkt_t *, uint8_t,
     struct flowq *, fq_if_classq_t *);
@@ -227,12 +340,15 @@ extern void fq_if_flow_feedback(fq_if_t *, struct flowq *, fq_if_classq_t *);
 extern int fq_if_setup_ifclassq(struct ifclassq *ifq, u_int32_t flags,
     classq_pkt_type_t ptype);
 extern void fq_if_teardown_ifclassq(struct ifclassq *ifq);
-extern int fq_if_getqstats_ifclassq(struct ifclassq *ifq, u_int32_t qid,
-    struct if_ifclassq_stats *ifqs);
-extern void fq_if_destroy_flow(fq_if_t *, fq_if_classq_t *,
-    struct flowq *, bool);
-
-
+extern int fq_if_getqstats_ifclassq(struct ifclassq *ifq, uint8_t gid,
+    u_int32_t qid, struct if_ifclassq_stats *ifqs);
+extern void fq_if_destroy_flow(fq_if_t *, fq_if_classq_t *, struct flowq *);
+extern void fq_if_move_to_empty_flow(fq_if_t *, fq_if_classq_t *,
+    struct flowq *, uint64_t);
+extern int fq_if_create_grp(struct ifclassq *ifcq, uint8_t qset_idx, uint8_t flags);
+extern void fq_if_set_grp_combined(struct ifclassq *ifcq, uint8_t qset_idx);
+extern void fq_if_set_grp_separated(struct ifclassq *ifcq, uint8_t qset_idx);
+extern fq_if_group_t *fq_if_find_grp(fq_if_t *fqs, uint8_t grp_idx);
 #endif /* BSD_KERNEL_PRIVATE */
 
 #ifdef __cplusplus

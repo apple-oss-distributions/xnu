@@ -55,9 +55,30 @@
 	stp		x25, x26, [$0, SS64_KERNEL_X25]
 	stp		x27, x28, [$0, SS64_KERNEL_X27]
 	stp		fp, lr, [$0, SS64_KERNEL_FP]
-	str		xzr, [$0, SS64_KERNEL_PC]
+	strb	wzr, [$0, SS64_KERNEL_PC_WAS_IN_USER]
 	mov		x$1, sp
 	str		x$1, [$0, SS64_KERNEL_SP]
+#if HAS_ARM_FEAT_SSBS2
+#if APPLEVIRTUALPLATFORM
+	adrp	x$1, EXT(gARM_FEAT_SSBS)@page
+	ldrh	w$1, [x$1, EXT(gARM_FEAT_SSBS)@pageoff]
+	cbz		x$1, 1f
+#endif
+	mrs		x$1, SSBS
+	lsr     x$1, x$1, #0 + PSR64_SSBS_SHIFT_64
+	strb	w$1, [$0, SS64_KERNEL_SSBS]
+1:
+#endif // HAS_ARM_FEAT_SSBS2
+#if __ARM_ARCH_8_4__
+	mrs		x$1, DIT
+	lsr     x$1, x$1, #0 + PSR64_DIT_SHIFT
+	strb	w$1, [$0, SS64_KERNEL_DIT]
+#endif //__ARM_ARCH_8_4__
+#if __ARM_ARCH_8_2__
+	mrs		x$1, UAO
+	lsr     x$1, x$1, #0 + PSR64_UAO_SHIFT
+	strb	w$1, [$0, SS64_KERNEL_UAO]
+#endif //__ARM_ARCH_8_2__
 
 /* AAPCS-64 Page 14
  *
@@ -99,6 +120,27 @@
 	ldp		fp, lr, [$0, SS64_KERNEL_FP]
 	ldr		x$1, [$0, SS64_KERNEL_SP]
 	mov		sp, x$1
+#if HAS_ARM_FEAT_SSBS2
+#if APPLEVIRTUALPLATFORM
+	adrp	x$1, EXT(gARM_FEAT_SSBS)@page
+	ldrh	w$1, [x$1, EXT(gARM_FEAT_SSBS)@pageoff]
+	cbz		x$1, 1f
+#endif // APPLEVIRTUALPLATFORM
+	ldrb	w$1, [$0, SS64_KERNEL_SSBS]
+	lsl     x$1, x$1, #0 + PSR64_SSBS_SHIFT_64
+	msr		SSBS, x$1
+1:
+#endif // HAS_ARM_FEAT_SSBS2
+#if __ARM_ARCH_8_4__
+	ldrb	w$1, [$0, SS64_KERNEL_DIT]
+	lsl     x$1, x$1, #0 + PSR64_DIT_SHIFT
+	msr		DIT, x$1
+#endif //__ARM_ARCH_8_4__
+#if __ARM_ARCH_8_2__
+	ldrb	w$1, [$0, SS64_KERNEL_UAO]
+	lsl     x$1, x$1, #0 + PSR64_UAO_SHIFT
+	msr		UAO, x$1
+#endif //__ARM_ARCH_8_4__
 
 	ldr		d8,	[$0, NS64_KERNEL_D8]
 	ldr		d9,	[$0, NS64_KERNEL_D9]

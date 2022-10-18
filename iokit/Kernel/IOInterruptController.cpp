@@ -479,7 +479,7 @@ IOInterruptController::timeStampInterruptHandlerInternal(bool isStart, IOInterru
 
 
 	if (isStart) {
-#if INTERRUPT_MASKED_DEBUG
+#if SCHED_HYGIENE_DEBUG
 		ml_irq_debug_start((uintptr_t)vector->handler, (uintptr_t)vector);
 #endif
 		IOTimeStampStartConstant(IODBG_INTC(IOINTC_HANDLER), (uintptr_t)vectorNumber, (uintptr_t)unslidHandler,
@@ -487,7 +487,7 @@ IOInterruptController::timeStampInterruptHandlerInternal(bool isStart, IOInterru
 	} else {
 		IOTimeStampEndConstant(IODBG_INTC(IOINTC_HANDLER), (uintptr_t)vectorNumber, (uintptr_t)unslidHandler,
 		    (uintptr_t)unslidTarget, (uintptr_t)providerID);
-#if INTERRUPT_MASKED_DEBUG
+#if SCHED_HYGIENE_DEBUG
 		ml_irq_debug_end();
 #endif
 	}
@@ -689,6 +689,10 @@ IOSharedInterruptController::unregisterInterrupt(IOService *nub,
 
 		// Soft disable the source and the controller too.
 		disableInterrupt(nub, source);
+
+		// Free vectorData
+		IOInterruptSource *interruptSources = nub->_interruptSources;
+		OSSafeReleaseNULL(interruptSources[source].vectorData);
 
 		// Clear all the storage for the vector except for interruptLock.
 		vector->interruptActive = 0;

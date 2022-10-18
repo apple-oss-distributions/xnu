@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -542,7 +542,7 @@ ether_inet_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 		(void) m_set_service_class(m, MBUF_SC_CTL);
 	}
 
-	ifnet_output_raw(ifp, PF_INET, m);
+	ifnet_output_raw(ifp, IS_INTF_CLAT46(ifp) ? 0 : AF_INET, m);
 
 	return 0;
 }

@@ -54,10 +54,11 @@ using nullptr_t = decltype(nullptr);
 // that those elements are in the bounds of the sequence (which are provided
 // when the `bounded_array_ref` is constructed).
 //
-// This class does not own the underlying data, it is expected to be used in
+// This class does not own the underlying data. It is expected to be used in
 // situations where the data resides in some other buffer, whose lifetime
-// extends past that of the `bounded_array_ref`. For this reason, it is not
-// in general safe to store a `bounded_array_ref`.
+// extends past that of the `bounded_array_ref`. For this reason, storing a
+// `bounded_array_ref` adds the risk of a dangling pointer if the lifetime of
+// the `bounded_array_ref` extends past that of the underlying data.
 //
 // `bounded_array_ref` is trivially copyable and it should be passed by value.
 template <typename T, typename TrappingPolicy>
@@ -194,7 +195,15 @@ struct bounded_array_ref {
 	// This method returns `0` if the `bounded_array_ref` is null, since
 	// such an array ref behaves the same as an empty range.
 	constexpr size_t
-	size() const
+	size() const noexcept
+	{
+		return size_;
+	}
+
+	// This has the same behavior as size(), but is intended to avoid confusion
+	// about whether it is returning an array count or size in bytes.
+	constexpr size_t
+	length() const noexcept
 	{
 		return size_;
 	}

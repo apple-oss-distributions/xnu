@@ -135,6 +135,8 @@ argument must include exactly one of the following file access modes:
 O_RDONLY	open for reading only
 O_WRONLY	open for writing only
 O_RDWR		open for reading and writing
+O_SEARCH	open directory for searching
+O_EXEC		open for execute only
 .Ed
 .Pp
 In addition any combination of the following values can be
@@ -290,7 +292,7 @@ The named file is opened unless:
 Search permission is denied for a component of the path prefix.
 .\" ===========
 .It Bq Er EACCES
-The required permissions (for reading and/or writing)
+The required permissions (for reading and/or writing or search or executing)
 are denied for the given flags.
 .\" ===========
 .It Bq Er EACCES
@@ -353,6 +355,10 @@ allocating the inode for
 The named file is a directory, and the arguments specify
 that it is to be opened for writing.
 .\" ===========
+.It Bq Er EISDIR
+The named file is a directory, and the arguments specify
+that it is to be opened for executing.
+.\" ===========
 .It Bq Er ELOOP
 Too many symbolic links are encountered in translating the pathname.
 This is taken to be indicative of a looping symbolic link.
@@ -372,6 +378,10 @@ The system file table is full.
 .\" ===========
 .It Bq Er ENOTDIR
 .Dv O_DIRECTORY
+was specified and the target is not a directory.
+.\" ===========
+.It Bq Er ENOTDIR
+.Dv O_SEARCH
 was specified and the target is not a directory.
 .\" ===========
 .It Bq Er ELOOP
@@ -407,7 +417,7 @@ file is being created.
 .\" ===========
 .It Bq Er ENOTDIR
 A component of the path prefix is not a directory.
- .\" ===========
+.\" ===========
 .It Bq Er EDEADLK
 A component of the pathname refers to a
 .Dq dataless
@@ -466,6 +476,8 @@ is neither
 nor a file descriptor associated with a directory.
 .It Bq Er EILSEQ
 The filename does not match the encoding rules.
+.It Bq Er EWOULDBLOCK
+O_SHLOCK or O_EXLOCK is specified, but the file is locked and the O_NONBLOCK option was specified.
 .El
 .Sh COMPATIBILITY
 .Fn open

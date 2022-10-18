@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2020-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,7 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-/* -*- compile-command: "xcrun --sdk iphoneos.internal make recvmsg_x_test" -*- */
+/* -*- compile-command: "xcrun --sdk macosx.internal make -C tests recvmsg_x_test" -*- */
 
 
 #include <sys/errno.h>
@@ -211,6 +211,4 @@ T_DECL(recvmsg_x_test, "exercise revcmsg_x() with various parameter")
 
 	close(sendSocket);
 	close(recvSocket);
-
-	T_LOG("\n================= PASS =================\n");
 }

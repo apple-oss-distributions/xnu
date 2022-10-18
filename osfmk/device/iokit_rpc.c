@@ -61,7 +61,7 @@
 #if defined(__i386__) || defined(__x86_64__)
 #include <i386/pmap.h>
 #endif
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 #include <arm/pmap.h>
 #endif
 #include <IOKit/IOKitServer.h>
@@ -268,7 +268,7 @@ iokit_make_port_of_type(io_object_t obj, ipc_kobject_type_t type)
 
 	port = iokit_port_for_object( obj, type );
 	if (port) {
-		sendPort = ipc_port_make_send( port);
+		sendPort = ipc_kobject_make_send( port, obj, type );
 		iokit_release_port( port );
 	} else {
 		sendPort = IP_NULL;
@@ -355,7 +355,7 @@ iokit_make_send_right( task_t task, io_object_t obj, ipc_kobject_type_t type )
 
 	port = iokit_port_for_object( obj, type );
 	if (port) {
-		sendPort = ipc_port_make_send( port);
+		sendPort = ipc_kobject_make_send( port, obj, type );
 		iokit_release_port( port );
 	} else {
 		sendPort = IP_NULL;
@@ -601,7 +601,7 @@ IOGetLastPageNumber(void)
 		}
 	}
 	return highest;
-#elif __arm__ || __arm64__
+#elif __arm64__
 	return 0;
 #else
 #error unknown arch

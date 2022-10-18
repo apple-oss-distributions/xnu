@@ -34,6 +34,7 @@
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
+#include <netinet/udp.h>
 #include <netinet/in_stat.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
@@ -231,13 +232,12 @@ flow_track_tcp_rtt(struct flow_entry *fe, boolean_t input,
  * The implementation is borrowed from Packet Filter, and is further
  * simplified to cater for our use cases.
  */
-#define FTF_NODELAY     0x1     /* want flow to get immediate attention */
-#define FTF_HALFCLOSED  0x2     /* want flow to be marked as half closed */
-#define FTF_WAITCLOSE   0x4     /* want flow to linger after close */
-#define FTF_CLOSENOTIFY 0x8     /* want to notify NECP upon torn down */
-#define FTF_WITHDRAWN   0x10     /* want flow to be torn down */
-#define FTF_SYN_RLIM    0x20    /* want flow to rate limit SYN */
-#define FTF_RST_RLIM    0x40    /* want flow to rate limit RST */
+#define FTF_HALFCLOSED  0x1     /* want flow to be marked as half closed */
+#define FTF_WAITCLOSE   0x2     /* want flow to linger after close */
+#define FTF_CLOSENOTIFY 0x4     /* want to notify NECP upon torn down */
+#define FTF_WITHDRAWN   0x8     /* want flow to be torn down */
+#define FTF_SYN_RLIM    0x10    /* want flow to rate limit SYN */
+#define FTF_RST_RLIM    0x20    /* want flow to rate limit RST */
 __attribute__((always_inline))
 static inline int
 flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
@@ -319,7 +319,7 @@ flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
 					dws = dst->fse_wscale;
 				} else {
 					/* fixup other window */
-					dst->fse_max_win <<= dst->fse_wscale;
+					dst->fse_max_win = (uint16_t)(dst->fse_max_win << dst->fse_wscale);
 					/* in case of a retrans SYN|ACK */
 					dst->fse_wscale = 0;
 				}
@@ -404,14 +404,12 @@ flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
 		if (tcp_flags & TH_SYN) {
 			if (src->fse_state < TCPS_SYN_SENT) {
 				src->fse_state = TCPS_SYN_SENT;
-				ftflags |= FTF_NODELAY;
 			}
 		}
 		if (tcp_flags & TH_FIN) {
 			if (src->fse_state < TCPS_CLOSING) {
 				src->fse_seqlast = orig_seq;
 				src->fse_state = TCPS_CLOSING;
-				ftflags |= FTF_NODELAY;
 			}
 		}
 		if (tcp_flags & TH_ACK) {
@@ -424,12 +422,11 @@ flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
 			if (dst->fse_state == TCPS_SYN_SENT &&
 			    !(tcp_flags & TH_RST)) {
 				dst->fse_state = TCPS_ESTABLISHED;
-				ftflags |= (FTF_WAITCLOSE | FTF_CLOSENOTIFY |
-				    FTF_NODELAY);
+				ftflags |= (FTF_WAITCLOSE | FTF_CLOSENOTIFY);
 			} else if (dst->fse_state == TCPS_CLOSING &&
 			    ack == dst->fse_seqlast + 1) {
 				dst->fse_state = TCPS_FIN_WAIT_2;
-				ftflags |= (FTF_WAITCLOSE | FTF_NODELAY);
+				ftflags |= FTF_WAITCLOSE;
 				if (src->fse_state >= TCPS_FIN_WAIT_2) {
 					ftflags |= FTF_WITHDRAWN;
 				} else {
@@ -446,10 +443,7 @@ flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
 			 * state as is, e.g. SYN_SENT.
 			 */
 			src->fse_state = dst->fse_state = TCPS_TIME_WAIT;
-			ftflags |= (FTF_WITHDRAWN | FTF_WAITCLOSE | FTF_NODELAY);
-		}
-		if (tcp_flags & TH_PUSH) {
-			ftflags |= FTF_NODELAY;
+			ftflags |= (FTF_WITHDRAWN | FTF_WAITCLOSE);
 		}
 	} else if ((dst->fse_state < TCPS_SYN_SENT ||
 	    dst->fse_state >= TCPS_FIN_WAIT_2 ||
@@ -497,15 +491,11 @@ flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
 			if (src->fse_state < TCPS_CLOSING) {
 				src->fse_seqlast = orig_seq;
 				src->fse_state = TCPS_CLOSING;
-				ftflags |= FTF_NODELAY;
 			}
 		}
 		if (tcp_flags & TH_RST) {
 			src->fse_state = dst->fse_state = TCPS_TIME_WAIT;
-			ftflags |= (FTF_WAITCLOSE | FTF_NODELAY);
-		}
-		if (tcp_flags & TH_PUSH) {
-			ftflags |= FTF_NODELAY;
+			ftflags |= FTF_WAITCLOSE;
 		}
 	} else {
 		if (dst->fse_state == TCPS_SYN_SENT &&
@@ -517,16 +507,6 @@ flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
 	}
 
 done:
-	/*
-	 * If this needs immediate attention, indicate so.
-	 */
-	if (__improbable((ftflags & FTF_NODELAY) != 0)) {
-		fe->fe_rx_nodelay = true;
-		ftflags &= ~FTF_NODELAY;
-	} else {
-		fe->fe_rx_nodelay = false;
-	}
-
 	if (__improbable((ftflags & FTF_HALFCLOSED) != 0)) {
 		atomic_bitset_32(&fe->fe_flags, FLOWENTF_HALF_CLOSED);
 		ftflags &= ~FTF_HALFCLOSED;
@@ -589,7 +569,6 @@ done:
 
 	return err;
 }
-#undef FTF_NODELAY
 #undef FTF_WAITCLOSE
 #undef FTF_CLOSENOTIFY
 #undef FTF_WITHDRAWN
@@ -745,4 +724,311 @@ flow_pkt_track(struct flow_entry *fe, struct __kern_packet *pkt, bool in)
 	}
 
 	return ret;
+}
+
+/*
+ * @function flow_track_abort_tcp
+ * @abstract send RST for a given TCP flow.
+ * @param in_pkt incoming packet that triggers RST.
+ * @param rst_pkt use as RST template for SEQ/ACK information.
+ */
+void
+flow_track_abort_tcp(struct flow_entry *fe, struct __kern_packet *in_pkt,
+    struct __kern_packet *rst_pkt)
+{
+	struct nx_flowswitch *fsw = fe->fe_fsw;
+	struct flow_track *src, *dst;
+	struct ip *ip;
+	struct ip6_hdr *ip6;
+	struct tcphdr *th;
+	uint16_t len, tlen;
+	struct mbuf *m;
+
+	/* guaranteed by caller */
+	ASSERT(fsw->fsw_ifp != NULL);
+	ASSERT(in_pkt == NULL || rst_pkt == NULL);
+
+	src = &fe->fe_ltrack;
+	dst = &fe->fe_rtrack;
+
+	tlen = sizeof(struct tcphdr);
+	if (fe->fe_key.fk_ipver == IPVERSION) {
+		len = sizeof(struct ip) + tlen;
+	} else {
+		ASSERT(fe->fe_key.fk_ipver == IPV6_VERSION);
+		len = sizeof(struct ip6_hdr) + tlen;
+	}
+
+	m = m_gethdr(M_NOWAIT, MT_HEADER);
+	if (__improbable(m == NULL)) {
+		return;
+	}
+
+	m->m_pkthdr.pkt_proto = IPPROTO_TCP;
+	m->m_data += max_linkhdr;               /* 32-bit aligned */
+	m->m_pkthdr.len = m->m_len = len;
+
+	/* zero out for checksum */
+	bzero(m->m_data, len);
+
+	if (fe->fe_key.fk_ipver == IPVERSION) {
+		ip = mtod(m, struct ip *);
+
+		/* IP header fields included in the TCP checksum */
+		ip->ip_p = IPPROTO_TCP;
+		ip->ip_len = htons(tlen);
+		if (rst_pkt == NULL) {
+			ip->ip_src = fe->fe_key.fk_src4;
+			ip->ip_dst = fe->fe_key.fk_dst4;
+		} else {
+			ip->ip_src = rst_pkt->pkt_flow_ipv4_src;
+			ip->ip_dst = rst_pkt->pkt_flow_ipv4_dst;
+		}
+
+		th = (struct tcphdr *)(void *)((char *)ip + sizeof(*ip));
+	} else {
+		ip6 = mtod(m, struct ip6_hdr *);
+
+		/* IP header fields included in the TCP checksum */
+		ip6->ip6_nxt = IPPROTO_TCP;
+		ip6->ip6_plen = htons(tlen);
+		if (rst_pkt == NULL) {
+			ip6->ip6_src = fe->fe_key.fk_src6;
+			ip6->ip6_dst = fe->fe_key.fk_dst6;
+		} else {
+			ip6->ip6_src = rst_pkt->pkt_flow_ipv6_src;
+			ip6->ip6_dst = rst_pkt->pkt_flow_ipv6_dst;
+		}
+
+		th = (struct tcphdr *)(void *)((char *)ip6 + sizeof(*ip6));
+	}
+
+	/*
+	 * TCP header (fabricate a pure RST).
+	 */
+	if (in_pkt != NULL) {
+		th->th_sport = in_pkt->pkt_flow_tcp_dst;
+		th->th_dport = in_pkt->pkt_flow_tcp_src;
+		if (__probable(in_pkt->pkt_flow_tcp_flags | TH_ACK)) {
+			/* <SEQ=SEG.ACK><CTL=RST> */
+			th->th_seq = in_pkt->pkt_flow_tcp_ack;
+			th->th_ack = 0;
+			th->th_flags = TH_RST;
+		} else {
+			/* <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK> */
+			th->th_seq = 0;
+			th->th_ack = in_pkt->pkt_flow_tcp_seq +
+			    in_pkt->pkt_flow_ulen;
+			th->th_flags = TH_RST | TH_ACK;
+		}
+	} else if (rst_pkt != NULL) {
+		th->th_sport = rst_pkt->pkt_flow_tcp_src;
+		th->th_dport = rst_pkt->pkt_flow_tcp_dst;
+		th->th_seq = rst_pkt->pkt_flow_tcp_seq;
+		th->th_ack = rst_pkt->pkt_flow_tcp_ack;
+		th->th_flags = rst_pkt->pkt_flow_tcp_flags;
+	} else {
+		th->th_sport = fe->fe_key.fk_sport;
+		th->th_dport = fe->fe_key.fk_dport;
+		th->th_seq = htonl(src->fse_seqlo);     /* peer's last ACK */
+		th->th_ack = 0;
+		th->th_flags = TH_RST;
+	}
+	th->th_off = (tlen >> 2);
+	th->th_win = 0;
+
+	FSW_STATS_INC(FSW_STATS_FLOWS_ABORTED);
+
+	if (fe->fe_key.fk_ipver == IPVERSION) {
+		struct ip_out_args ipoa;
+		struct route ro;
+
+		bzero(&ipoa, sizeof(ipoa));
+		ipoa.ipoa_boundif = fsw->fsw_ifp->if_index;
+		ipoa.ipoa_flags = (IPOAF_SELECT_SRCIF | IPOAF_BOUND_IF |
+		    IPOAF_BOUND_SRCADDR);
+		ipoa.ipoa_sotc = SO_TC_UNSPEC;
+		ipoa.ipoa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
+
+		/* TCP checksum */
+		th->th_sum = in_cksum(m, len);
+
+		ip->ip_v = IPVERSION;
+		ip->ip_hl = sizeof(*ip) >> 2;
+		ip->ip_tos = 0;
+		/*
+		 * ip_output() expects ip_len and ip_off to be in host order.
+		 */
+		ip->ip_len = len;
+		ip->ip_off = IP_DF;
+		ip->ip_ttl = (uint8_t)ip_defttl;
+		ip->ip_sum = 0;
+
+		bzero(&ro, sizeof(ro));
+		(void) ip_output(m, NULL, &ro, IP_OUTARGS, NULL, &ipoa);
+		ROUTE_RELEASE(&ro);
+	} else {
+		struct ip6_out_args ip6oa;
+		struct route_in6 ro6;
+
+		bzero(&ip6oa, sizeof(ip6oa));
+		ip6oa.ip6oa_boundif = fsw->fsw_ifp->if_index;
+		ip6oa.ip6oa_flags = (IP6OAF_SELECT_SRCIF | IP6OAF_BOUND_IF |
+		    IP6OAF_BOUND_SRCADDR);
+		ip6oa.ip6oa_sotc = SO_TC_UNSPEC;
+		ip6oa.ip6oa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
+
+		/* TCP checksum */
+		th->th_sum = in6_cksum(m, IPPROTO_TCP,
+		    sizeof(struct ip6_hdr), tlen);
+
+		ip6->ip6_vfc |= IPV6_VERSION;
+		ip6->ip6_hlim = IPV6_DEFHLIM;
+
+		bzero(&ro6, sizeof(ro6));
+		(void) ip6_output(m, NULL, &ro6, IPV6_OUTARGS,
+		    NULL, NULL, &ip6oa);
+		ROUTE_RELEASE(&ro6);
+	}
+}
+
+void
+flow_track_abort_quic(struct flow_entry *fe, uint8_t *token)
+{
+	struct quic_stateless_reset {
+		uint8_t ssr_header[30];
+		uint8_t ssr_token[QUIC_STATELESS_RESET_TOKEN_SIZE];
+	};
+	struct nx_flowswitch *fsw = fe->fe_fsw;
+	struct ip *ip;
+	struct ip6_hdr *ip6;
+	struct udphdr *uh;
+	struct quic_stateless_reset *qssr;
+	uint16_t len, l3hlen, ulen;
+	struct mbuf *m;
+	unsigned int one = 1;
+	int error;
+
+	/* guaranteed by caller */
+	ASSERT(fsw->fsw_ifp != NULL);
+
+	/* skip zero token */
+	bool is_zero_token = true;
+	for (size_t i = 0; i < QUIC_STATELESS_RESET_TOKEN_SIZE; i++) {
+		if (token[i] != 0) {
+			is_zero_token = false;
+			break;
+		}
+	}
+	if (is_zero_token) {
+		return;
+	}
+
+	ulen = sizeof(struct udphdr) + sizeof(struct quic_stateless_reset);
+	if (fe->fe_key.fk_ipver == IPVERSION) {
+		l3hlen = sizeof(struct ip);
+	} else {
+		ASSERT(fe->fe_key.fk_ipver == IPV6_VERSION);
+		l3hlen = sizeof(struct ip6_hdr);
+	}
+
+	len = l3hlen + ulen;
+
+	error = mbuf_allocpacket(MBUF_DONTWAIT, max_linkhdr + len, &one, &m);
+	if (__improbable(error != 0)) {
+		return;
+	}
+	VERIFY(m != 0);
+
+	m->m_pkthdr.pkt_proto = IPPROTO_UDP;
+	m->m_data += max_linkhdr;               /* 32-bit aligned */
+	m->m_pkthdr.len = m->m_len = len;
+
+	/* zero out for checksum */
+	bzero(m->m_data, len);
+
+	if (fe->fe_key.fk_ipver == IPVERSION) {
+		ip = mtod(m, struct ip *);
+		ip->ip_p = IPPROTO_UDP;
+		ip->ip_len = htons(ulen);
+		ip->ip_src = fe->fe_key.fk_src4;
+		ip->ip_dst = fe->fe_key.fk_dst4;
+		uh = (struct udphdr *)(void *)((char *)ip + sizeof(*ip));
+	} else {
+		ip6 = mtod(m, struct ip6_hdr *);
+		ip6->ip6_nxt = IPPROTO_UDP;
+		ip6->ip6_plen = htons(ulen);
+		ip6->ip6_src = fe->fe_key.fk_src6;
+		ip6->ip6_dst = fe->fe_key.fk_dst6;
+		uh = (struct udphdr *)(void *)((char *)ip6 + sizeof(*ip6));
+	}
+
+	/* UDP header */
+	uh->uh_sport = fe->fe_key.fk_sport;
+	uh->uh_dport = fe->fe_key.fk_dport;
+	uh->uh_ulen = htons(ulen);
+
+	/* QUIC stateless reset */
+	qssr = (struct quic_stateless_reset *)(uh + 1);
+	read_frandom(&qssr->ssr_header, sizeof(qssr->ssr_header));
+	qssr->ssr_header[0] = (qssr->ssr_header[0] & 0x3f) | 0x40;
+	memcpy(qssr->ssr_token, token, QUIC_STATELESS_RESET_TOKEN_SIZE);
+
+	FSW_STATS_INC(FSW_STATS_FLOWS_ABORTED);
+
+	if (fe->fe_key.fk_ipver == IPVERSION) {
+		struct ip_out_args ipoa;
+		struct route ro;
+
+		bzero(&ipoa, sizeof(ipoa));
+		ipoa.ipoa_boundif = fsw->fsw_ifp->if_index;
+		ipoa.ipoa_flags = (IPOAF_SELECT_SRCIF | IPOAF_BOUND_IF |
+		    IPOAF_BOUND_SRCADDR);
+		ipoa.ipoa_sotc = SO_TC_UNSPEC;
+		ipoa.ipoa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
+
+		uh->uh_sum = in_cksum(m, len);
+		if (uh->uh_sum == 0) {
+			uh->uh_sum = 0xffff;
+		}
+
+		ip->ip_v = IPVERSION;
+		ip->ip_hl = sizeof(*ip) >> 2;
+		ip->ip_tos = 0;
+		/*
+		 * ip_output() expects ip_len and ip_off to be in host order.
+		 */
+		ip->ip_len = len;
+		ip->ip_off = IP_DF;
+		ip->ip_ttl = (uint8_t)ip_defttl;
+		ip->ip_sum = 0;
+
+		bzero(&ro, sizeof(ro));
+		(void) ip_output(m, NULL, &ro, IP_OUTARGS, NULL, &ipoa);
+		ROUTE_RELEASE(&ro);
+	} else {
+		struct ip6_out_args ip6oa;
+		struct route_in6 ro6;
+
+		bzero(&ip6oa, sizeof(ip6oa));
+		ip6oa.ip6oa_boundif = fsw->fsw_ifp->if_index;
+		ip6oa.ip6oa_flags = (IP6OAF_SELECT_SRCIF | IP6OAF_BOUND_IF |
+		    IP6OAF_BOUND_SRCADDR);
+		ip6oa.ip6oa_sotc = SO_TC_UNSPEC;
+		ip6oa.ip6oa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
+
+		uh->uh_sum = in6_cksum(m, IPPROTO_UDP, sizeof(struct ip6_hdr),
+		    ulen);
+		if (uh->uh_sum == 0) {
+			uh->uh_sum = 0xffff;
+		}
+
+		ip6->ip6_vfc |= IPV6_VERSION;
+		ip6->ip6_hlim = IPV6_DEFHLIM;
+
+		bzero(&ro6, sizeof(ro6));
+		(void) ip6_output(m, NULL, &ro6, IPV6_OUTARGS,
+		    NULL, NULL, &ip6oa);
+		ROUTE_RELEASE(&ro6);
+	}
 }

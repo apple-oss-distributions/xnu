@@ -73,12 +73,10 @@ static const struct {
 	{"ticket-held-", 0, offsetof(lck_grp_t, lck_grp_ticketcnt), offsetof(lck_grp_stats_t, lgss_ticket_held)},
 	{"ticket-miss-", 0, offsetof(lck_grp_t, lck_grp_ticketcnt), offsetof(lck_grp_stats_t, lgss_ticket_miss)},
 	{"ticket-spin-", TIME_EVENT, offsetof(lck_grp_t, lck_grp_ticketcnt), offsetof(lck_grp_stats_t, lgss_ticket_spin)},
-#if HAS_EXT_MUTEXES
 	{"adaptive-held-", STAT_NEEDED, offsetof(lck_grp_t, lck_grp_mtxcnt), offsetof(lck_grp_stats_t, lgss_mtx_held)},
 	{"adaptive-miss-", STAT_NEEDED, offsetof(lck_grp_t, lck_grp_mtxcnt), offsetof(lck_grp_stats_t, lgss_mtx_miss)},
 	{"adaptive-wait-", STAT_NEEDED, offsetof(lck_grp_t, lck_grp_mtxcnt), offsetof(lck_grp_stats_t, lgss_mtx_wait)},
 	{"adaptive-direct-wait-", STAT_NEEDED, offsetof(lck_grp_t, lck_grp_mtxcnt), offsetof(lck_grp_stats_t, lgss_mtx_direct_wait)},
-#endif /* HAS_EXT_MUTEXES */
 	{NULL, false, 0, 0}
 };
 
@@ -106,12 +104,6 @@ typedef struct lockprof_probe {
 	uint64_t lockprof_limit;
 	lck_grp_t *lockprof_grp;
 } lockprof_probe_t;
-
-void
-lockprof_invoke(lck_grp_t *grp, lck_grp_stat_t *stat, uint64_t val)
-{
-	dtrace_probe(stat->lgs_probeid, (uintptr_t)grp, val, 0, 0, 0);
-}
 
 static int
 lockprof_lock_count(lck_grp_t *grp, int kind)
@@ -297,6 +289,7 @@ lockprof_enable(void *arg, dtrace_id_t id, void *parg)
 	stat->lgs_limit = probe->lockprof_limit;
 	stat->lgs_probeid = probe->lockprof_id;
 	lck_grp_stat_enable(stat);
+	lck_grp_enable_feature(LCK_DEBUG_LOCKPROF);
 
 	return 0;
 }
@@ -324,6 +317,7 @@ lockprof_disable(void *arg, dtrace_id_t id, void *parg)
 	stat->lgs_limit = 0;
 	stat->lgs_probeid = 0;
 	lck_grp_stat_disable(stat);
+	lck_grp_disable_feature(LCK_DEBUG_LOCKPROF);
 }
 
 static void
@@ -391,8 +385,8 @@ static const struct cdevsw lockprof_cdevsw =
 	.d_read = eno_rdwrt,
 	.d_write = eno_rdwrt,
 	.d_ioctl = eno_ioctl,
-	.d_stop = (stop_fcn_t *)nulldev,
-	.d_reset = (reset_fcn_t *)nulldev,
+	.d_stop = eno_stop,
+	.d_reset = eno_reset,
 	.d_select = eno_select,
 	.d_mmap = eno_mmap,
 	.d_strategy = eno_strat,

@@ -458,7 +458,7 @@ affinity_set_add(affinity_set_t aset, thread_t thread)
 	aset->aset_thread_count++;
 	s = splsched();
 	thread_lock(thread);
-	thread->affinity_set = affinity_sets_enabled ? aset : NULL;
+	thread->affinity_set = aset;
 	thread_unlock(thread);
 	splx(s);
 }

@@ -101,7 +101,7 @@ enum {
 };
 extern void IOSystemShutdownNotification(int howto, int stage);
 
-extern uint32_t gEnforceQuiesceSafety;
+extern uint32_t gEnforcePlatformActionSafety;
 #endif /* XNU_KERNEL_PRIVATE */
 
 #ifdef KERNEL_PRIVATE

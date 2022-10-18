@@ -40,6 +40,8 @@
 #include <kern/coalition.h>
 #include <kern/policy_internal.h>
 #include <kern/mpsc_queue.h>
+#include <kern/workload_config.h>
+#include <kern/assert.h>
 
 #include <mach/kern_return.h>
 #include <mach/notify.h>
@@ -125,6 +127,11 @@ struct work_interval_auto_join_info {
 };
 #endif /* CONFIG_SCHED_AUTO_JOIN */
 
+#if CONFIG_THREAD_GROUPS
+/* Flags atomically set in wi_group_flags wi_group_flags */
+#define WORK_INTERVAL_GROUP_FLAGS_THREAD_JOINED 0x1
+#endif
+
 /*
  * Work Interval structs
  *
@@ -161,7 +168,12 @@ struct work_interval {
 	uint32_t wi_creator_pid;
 	int wi_creator_pidversion;
 
+	/* flags set by work_interval_set_workload_id and reflected onto
+	 *  thread->th_work_interval_flags upon join */
+	uint32_t wi_wlid_flags;
+
 #if CONFIG_THREAD_GROUPS
+	uint32_t wi_group_flags;
 	struct thread_group *wi_group;  /* holds +1 ref on group */
 #endif /* CONFIG_THREAD_GROUPS */
 
@@ -177,6 +189,13 @@ struct work_interval {
 	 */
 	struct mpsc_queue_chain   wi_deallocate_link;
 #endif /* CONFIG_SCHED_AUTO_JOIN */
+
+	/*
+	 * Work interval class info - determines thread priority for threads
+	 * with a work interval driven policy.
+	 */
+	wi_class_t wi_class;
+	uint8_t wi_class_offset;
 };
 
 #if CONFIG_SCHED_AUTO_JOIN
@@ -301,8 +320,10 @@ work_interval_deallocate(struct work_interval *work_interval)
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_WORKGROUP, WORKGROUP_INTERVAL_DESTROY),
 	    work_interval->wi_id);
 #if CONFIG_THREAD_GROUPS
-	thread_group_release(work_interval->wi_group);
-	work_interval->wi_group = NULL;
+	if (work_interval->wi_group) {
+		thread_group_release(work_interval->wi_group);
+		work_interval->wi_group = NULL;
+	}
 #endif /* CONFIG_THREAD_GROUPS */
 	kfree_type(struct work_interval, work_interval);
 }
@@ -606,6 +627,94 @@ work_interval_port_type(mach_port_name_t port_name)
 	return work_interval_type;
 }
 
+/*
+ * Sparse - not all work interval classes imply a scheduling policy change.
+ * Realtime threads are managed elsewhere.
+ */
+static const struct {
+	int          priority;
+	sched_mode_t sched_mode;
+} work_interval_class_data[WI_CLASS_COUNT] = {
+	[WI_CLASS_BEST_EFFORT] = {
+		BASEPRI_DEFAULT, // 31
+		TH_MODE_TIMESHARE,
+	},
+
+	[WI_CLASS_SYSTEM_CRITICAL] = {
+		MAXPRI_USER + 1, // 64
+		TH_MODE_FIXED,
+	},
+};
+
+/*
+ * Called when a thread gets its scheduling priority from its associated work
+ * interval.
+ */
+int
+work_interval_get_priority(thread_t thread)
+{
+	const struct work_interval *work_interval = thread->th_work_interval;
+	assert(work_interval != NULL);
+
+	assert3u(work_interval->wi_class, <, WI_CLASS_COUNT);
+	int priority = work_interval_class_data[work_interval->wi_class].priority;
+	assert(priority != 0);
+
+	priority += work_interval->wi_class_offset;
+	assert3u(priority, <=, MAXPRI);
+
+	return priority;
+}
+
+/*
+ * Switch to a policy driven by the work interval (if applicable).
+ */
+static void
+work_interval_set_policy(thread_t thread)
+{
+	/*
+	 * Ignore policy changes if the workload context shouldn't affect the
+	 * scheduling policy.
+	 */
+	workload_config_flags_t flags = WLC_F_NONE;
+
+	/* There may be no config at all. That's ok. */
+	if (workload_config_get_flags(&flags) != KERN_SUCCESS ||
+	    (flags & WLC_F_THREAD_POLICY) == 0) {
+		return;
+	}
+
+	const struct work_interval *work_interval = thread->th_work_interval;
+	assert(work_interval != NULL);
+
+	assert3u(work_interval->wi_class, <, WI_CLASS_COUNT);
+	const sched_mode_t mode = work_interval_class_data[work_interval->wi_class].sched_mode;
+
+	if (mode == TH_MODE_NONE) {
+		return;
+	}
+
+	proc_set_thread_policy(thread, TASK_POLICY_ATTRIBUTE,
+	    TASK_POLICY_WI_DRIVEN, mode);
+
+	assert(thread->requested_policy.thrp_wi_driven);
+
+	return;
+}
+
+/*
+ * Clear a work interval driven policy.
+ */
+static void
+work_interval_clear_policy(thread_t thread)
+{
+	if (!thread->requested_policy.thrp_wi_driven) {
+		return;
+	}
+
+	proc_set_thread_policy(thread, TASK_POLICY_ATTRIBUTE,
+	    TASK_POLICY_WI_DRIVEN, TH_MODE_NONE);
+}
 
 /*
  * thread_set_work_interval()
@@ -640,8 +749,28 @@ thread_set_work_interval(thread_t thread,
 		assert((options & THREAD_WI_THREAD_LOCK_HELD) != 0);
 	}
 
+#if CONFIG_THREAD_GROUPS
+	if (work_interval && !work_interval->wi_group) {
+		/* Reject join on work intervals with deferred thread group creation */
+		return KERN_INVALID_ARGUMENT;
+	}
+#endif /* CONFIG_THREAD_GROUPS */
+
 	if (work_interval) {
 		uint32_t work_interval_type = work_interval->wi_create_flags & WORK_INTERVAL_TYPE_MASK;
+
+		if (options & THREAD_WI_EXPLICIT_JOIN_POLICY) {
+			/* Ensure no kern_work_interval_set_workload_id can happen after this point */
+			uint32_t wlid_flags;
+			(void)os_atomic_cmpxchgv(&work_interval->wi_wlid_flags, 0,
+			    WORK_INTERVAL_WORKLOAD_ID_ALREADY_JOINED, &wlid_flags, relaxed);
+			if (wlid_flags & WORK_INTERVAL_WORKLOAD_ID_RT_ALLOWED) {
+				/* For workload IDs with rt-allowed, neuter the check below to
+				 * enable joining before the thread has become realtime for all
+				 * work interval types */
+				work_interval_type = WORK_INTERVAL_TYPE_DEFAULT;
+			}
+		}
 
 		if ((work_interval_type == WORK_INTERVAL_TYPE_COREAUDIO) &&
 		    (thread->sched_mode != TH_MODE_REALTIME) && (thread->saved_mode != TH_MODE_REALTIME)) {
@@ -649,10 +778,17 @@ thread_set_work_interval(thread_t thread,
 		}
 	}
 
+	/*
+	 * Ensure a work interval scheduling policy is not used if the thread is
+	 * leaving the work interval.
+	 */
+	if (work_interval == NULL &&
+	    (options & THREAD_WI_EXPLICIT_JOIN_POLICY) != 0) {
+		work_interval_clear_policy(thread);
+	}
+
 	struct work_interval *old_th_wi = thread->th_work_interval;
 #if CONFIG_SCHED_AUTO_JOIN
-	bool old_wi_auto_joined = ((thread->sched_flags & TH_SFLAG_THREAD_GROUP_AUTO_JOIN) != 0);
-
 	spl_t s;
 	/* Take the thread lock if needed */
 	if (options & THREAD_WI_THREAD_LOCK_NEEDED) {
@@ -682,11 +818,11 @@ thread_set_work_interval(thread_t thread,
 		return KERN_SUCCESS;
 	}
 
-	old_wi_auto_joined = ((thread->sched_flags & TH_SFLAG_THREAD_GROUP_AUTO_JOIN) != 0);
+	const bool old_wi_auto_joined = ((thread->sched_flags & TH_SFLAG_THREAD_GROUP_AUTO_JOIN) != 0);
 
 	if ((options & THREAD_WI_AUTO_JOIN_POLICY) || old_wi_auto_joined) {
-		__kdebug_only uint64_t old_tg_id = (old_th_wi) ? thread_group_get_id(old_th_wi->wi_group) : ~0;
-		__kdebug_only uint64_t new_tg_id = (work_interval) ? thread_group_get_id(work_interval->wi_group) : ~0;
+		__kdebug_only uint64_t old_tg_id = (old_th_wi && old_th_wi->wi_group) ? thread_group_get_id(old_th_wi->wi_group) : ~0;
+		__kdebug_only uint64_t new_tg_id = (work_interval && work_interval->wi_group) ? thread_group_get_id(work_interval->wi_group) : ~0;
 		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_WI_AUTO_JOIN),
 		    thread_tid(thread), old_tg_id, new_tg_id, options);
 	}
@@ -726,7 +862,22 @@ thread_set_work_interval(thread_t thread,
 	}
 #endif /* CONFIG_SCHED_AUTO_JOIN */
 
+	/*
+	 * The thread got a new work interval. It may come with a work interval
+	 * scheduling policy that needs to be applied.
+	 */
+	if (work_interval != NULL &&
+	    (options & THREAD_WI_EXPLICIT_JOIN_POLICY) != 0) {
+		work_interval_set_policy(thread);
+	}
+
 #if CONFIG_THREAD_GROUPS
+	if (work_interval) {
+		/* Prevent thread_group_set_name after CLPC may have already heard
+		 * about the thread group */
+		(void)os_atomic_cmpxchg(&work_interval->wi_group_flags, 0,
+		    WORK_INTERVAL_GROUP_FLAGS_THREAD_JOINED, relaxed);
+	}
 	struct thread_group *new_tg = (work_interval) ? (work_interval->wi_group) : NULL;
 
 	if (options & THREAD_WI_AUTO_JOIN_POLICY) {
@@ -737,6 +888,40 @@ thread_set_work_interval(thread_t thread,
 		thread_set_work_interval_thread_group(thread, new_tg);
 	}
 #endif /* CONFIG_THREAD_GROUPS */
+
+	if (options & THREAD_WI_EXPLICIT_JOIN_POLICY) {
+		/* Construct mask to XOR with th_work_interval_flags to clear the
+		* currently present flags and set the new flags in wlid_flags. */
+		uint32_t wlid_flags = 0;
+		if (work_interval) {
+			wlid_flags = os_atomic_load(&work_interval->wi_wlid_flags, relaxed);
+		}
+		thread_work_interval_flags_t th_wi_xor_mask = os_atomic_load(
+			&thread->th_work_interval_flags, relaxed);
+		th_wi_xor_mask &= (TH_WORK_INTERVAL_FLAGS_HAS_WORKLOAD_ID |
+		    TH_WORK_INTERVAL_FLAGS_RT_ALLOWED |
+		    TH_WORK_INTERVAL_FLAGS_RT_CRITICAL);
+		if (wlid_flags & WORK_INTERVAL_WORKLOAD_ID_HAS_ID) {
+			th_wi_xor_mask ^= TH_WORK_INTERVAL_FLAGS_HAS_WORKLOAD_ID;
+			if (wlid_flags & WORK_INTERVAL_WORKLOAD_ID_RT_ALLOWED) {
+				th_wi_xor_mask ^= TH_WORK_INTERVAL_FLAGS_RT_ALLOWED;
+			}
+			if (wlid_flags & WORK_INTERVAL_WORKLOAD_ID_RT_CRITICAL) {
+				th_wi_xor_mask ^= TH_WORK_INTERVAL_FLAGS_RT_CRITICAL;
+			}
+		}
+		if (th_wi_xor_mask) {
+			os_atomic_xor(&thread->th_work_interval_flags, th_wi_xor_mask, relaxed);
+		}
+
+		/*
+		 * Now that the interval flags have been set, re-evaluate
+		 * whether the thread needs to be undemoted - the new work
+		 * interval may have the RT_ALLOWED flag. and the thread may
+		 * have have a realtime policy but be demoted.
+		 */
+		thread_rt_evaluate(thread);
+	}
 
 	if (old_th_wi != NULL) {
 		work_interval_release(old_th_wi, options);
@@ -894,14 +1079,20 @@ kern_work_interval_create(thread_t thread,
 	__kdebug_only uint64_t tg_id = 0;
 #if CONFIG_THREAD_GROUPS
 	struct thread_group *tg;
-	if (create_flags & WORK_INTERVAL_FLAG_GROUP) {
+	if ((create_flags &
+	    (WORK_INTERVAL_FLAG_GROUP | WORK_INTERVAL_FLAG_HAS_WORKLOAD_ID)) ==
+	    (WORK_INTERVAL_FLAG_GROUP | WORK_INTERVAL_FLAG_HAS_WORKLOAD_ID)) {
+		/* defer creation of the thread group until the
+		 * kern_work_interval_set_workload_id() call */
+		work_interval->wi_group = NULL;
+	} else if (create_flags & WORK_INTERVAL_FLAG_GROUP) {
 		/* create a new group for the interval to represent */
 		char name[THREAD_GROUP_MAXNAME] = "";
 
-		snprintf(name, sizeof(name), "WI[%d] #%lld",
-		    work_interval->wi_creator_pid, work_interval_id);
+		snprintf(name, sizeof(name), "WI%lld (pid %d)", work_interval_id,
+		    work_interval->wi_creator_pid);
 
-		tg = thread_group_create_and_retain(FALSE);
+		tg = thread_group_create_and_retain(THREAD_GROUP_FLAGS_DEFAULT);
 
 		thread_group_set_name(tg, name);
 
@@ -916,7 +1107,7 @@ kern_work_interval_create(thread_t thread,
 	}
 
 	/* Capture the tg_id for tracing purposes */
-	tg_id = thread_group_get_id(work_interval->wi_group);
+	tg_id = work_interval->wi_group ? thread_group_get_id(work_interval->wi_group) : ~0;
 
 #endif /* CONFIG_THREAD_GROUPS */
 
@@ -954,8 +1145,10 @@ kern_work_interval_create(thread_t thread,
 
 	create_params->wica_id = work_interval_id;
 
-	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_WORKGROUP, WORKGROUP_INTERVAL_CREATE),
-	    work_interval_id, create_flags, pid_from_task(creating_task), tg_id);
+	if (tg_id != ~0) {
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_WORKGROUP, WORKGROUP_INTERVAL_CREATE),
+		    work_interval_id, create_flags, pid_from_task(creating_task), tg_id);
+	}
 	return KERN_SUCCESS;
 }
 
@@ -978,6 +1171,214 @@ kern_work_interval_get_flags_from_port(mach_port_name_t port_name, uint32_t *fla
 	work_interval_release(work_interval, THREAD_WI_THREAD_LOCK_NEEDED);
 
 	return KERN_SUCCESS;
+}
+
+#if CONFIG_THREAD_GROUPS
+_Static_assert(WORK_INTERVAL_NAME_MAX == THREAD_GROUP_MAXNAME,
+    "WORK_INTERVAL_NAME_MAX does not match THREAD_GROUP_MAXNAME");
+#endif /* CONFIG_THREAD_GROUPS */
+
+kern_return_t
+kern_work_interval_set_name(mach_port_name_t port_name, __unused char *name,
+    size_t len)
+{
+	kern_return_t kr;
+	struct work_interval *work_interval;
+
+	if (len > WORK_INTERVAL_NAME_MAX) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	kr = port_name_to_work_interval(port_name, &work_interval);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+
+	assert(work_interval != NULL);
+
+#if CONFIG_THREAD_GROUPS
+	uint32_t wi_group_flags = os_atomic_load(
+		&work_interval->wi_group_flags, relaxed);
+	if (wi_group_flags & WORK_INTERVAL_GROUP_FLAGS_THREAD_JOINED) {
+		kr = KERN_INVALID_ARGUMENT;
+		goto out;
+	}
+	if (!work_interval->wi_group) {
+		kr = KERN_INVALID_ARGUMENT;
+		goto out;
+	}
+
+	if (name[0] && (work_interval->wi_create_flags & WORK_INTERVAL_FLAG_GROUP)) {
+		char tgname[THREAD_GROUP_MAXNAME];
+		snprintf(tgname, sizeof(tgname), "WI%lld %s", work_interval->wi_id,
+		    name);
+		thread_group_set_name(work_interval->wi_group, tgname);
+	}
+
+out:
+#endif /* CONFIG_THREAD_GROUPS */
+	work_interval_release(work_interval, THREAD_WI_THREAD_LOCK_NEEDED);
+
+	return kr;
+}
+
+kern_return_t
+kern_work_interval_set_workload_id(mach_port_name_t port_name,
+    struct kern_work_interval_workload_id_args *workload_id_args)
+{
+	kern_return_t kr;
+	struct work_interval *work_interval;
+	uint32_t wlida_flags = 0;
+	uint32_t wlid_flags = 0;
+#if CONFIG_THREAD_GROUPS
+	uint32_t tg_flags = 0;
+#endif
+	bool from_workload_config = false;
+
+	/* Ensure workload ID name is non-empty. */
+	if (!workload_id_args->wlida_name[0]) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	kr = port_name_to_work_interval(port_name, &work_interval);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+
+	assert(work_interval != NULL);
+	if (!(work_interval->wi_create_flags & WORK_INTERVAL_FLAG_JOINABLE)) {
+		kr = KERN_INVALID_ARGUMENT;
+		goto out;
+	}
+
+	if (!(work_interval->wi_create_flags & WORK_INTERVAL_FLAG_HAS_WORKLOAD_ID)) {
+		/* Reject work intervals that didn't indicate they will have a workload ID
+		 * at creation. In particular if the work interval has its own thread group,
+		 * its creation must have been deferred in kern_work_interval_create */
+		kr = KERN_INVALID_ARGUMENT;
+		goto out;
+	}
+
+	workload_config_t wl_config = {};
+	kr = workload_config_lookup_default(workload_id_args->wlida_name, &wl_config);
+	if (kr == KERN_SUCCESS) {
+		if ((wl_config.wc_create_flags & WORK_INTERVAL_TYPE_MASK) !=
+		    (work_interval->wi_create_flags & WORK_INTERVAL_TYPE_MASK)) {
+			if ((wl_config.wc_create_flags & WORK_INTERVAL_TYPE_MASK) == WORK_INTERVAL_TYPE_CA_RENDER_SERVER &&
+			    (work_interval->wi_create_flags & WORK_INTERVAL_TYPE_MASK) == WORK_INTERVAL_TYPE_FRAME_COMPOSITOR) {
+				/* WORK_INTERVAL_TYPE_FRAME_COMPOSITOR is a valid related type of WORK_INTERVAL_TYPE_CA_RENDER_SERVER */
+			} else {
+				kr = KERN_INVALID_ARGUMENT;
+				goto out;
+			}
+		}
+
+		wlida_flags = wl_config.wc_flags;
+
+		wlida_flags &= ~WORK_INTERVAL_WORKLOAD_ID_RT_CRITICAL;
+
+#if CONFIG_THREAD_GROUPS
+		tg_flags = wl_config.wc_thread_group_flags;
+		if (tg_flags != THREAD_GROUP_FLAGS_ABSENT &&
+		    (work_interval->wi_create_flags & WORK_INTERVAL_FLAG_GROUP) == 0) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto out;
+		}
+#endif /* CONFIG_THREAD_GROUPS */
+		work_interval->wi_class = wl_config.wc_class;
+		work_interval->wi_class_offset = wl_config.wc_class_offset;
+
+		from_workload_config = true;
+	} else {
+		/* If the workload is not present in the table, perform basic validation
+		 * that the create flags passed in match the ones used at work interval
+		 * create time */
+		if ((workload_id_args->wlida_wicreate_flags & WORK_INTERVAL_TYPE_MASK) !=
+		    (work_interval->wi_create_flags & WORK_INTERVAL_TYPE_MASK)) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto out;
+		}
+
+		const bool wc_avail = workload_config_available();
+		if (!wc_avail) {
+			wlida_flags = WORK_INTERVAL_WORKLOAD_ID_RT_ALLOWED;
+		}
+
+		/*
+		 * If the workload config wasn't even loaded then fallback to
+		 * older behaviour where the new thread group gets the default
+		 * thread group flags (when WORK_INTERVAL_FLAG_GROUP is set).
+		 */
+#if CONFIG_THREAD_GROUPS
+		if (!wc_avail) {
+			tg_flags = THREAD_GROUP_FLAGS_DEFAULT;
+		} else {
+			struct thread_group *home_group =
+			    thread_group_get_home_group(current_thread());
+			if (home_group != NULL) {
+				tg_flags = thread_group_get_flags(home_group);
+			}
+		}
+#endif /* CONFIG_THREAD_GROUPS */
+	}
+
+	workload_id_args->wlida_wicreate_flags = work_interval->wi_create_flags;
+
+	/* cmpxchg a non-zero workload ID flags value (indicating that workload ID
+	 * has been set). */
+	wlida_flags |= WORK_INTERVAL_WORKLOAD_ID_HAS_ID;
+	if (os_atomic_cmpxchgv(&work_interval->wi_wlid_flags, 0, wlida_flags,
+	    &wlid_flags, relaxed)) {
+#if CONFIG_THREAD_GROUPS
+		if (work_interval->wi_create_flags & WORK_INTERVAL_FLAG_GROUP) {
+			/* Perform deferred thread group creation, now that tgflags are known */
+			struct thread_group *tg;
+			tg = thread_group_create_and_retain(tg_flags == THREAD_GROUP_FLAGS_ABSENT ?
+			    THREAD_GROUP_FLAGS_DEFAULT : tg_flags);
+
+			char tgname[THREAD_GROUP_MAXNAME] = "";
+			snprintf(tgname, sizeof(tgname), "WI%lld %s", work_interval->wi_id,
+			    workload_id_args->wlida_name);
+			thread_group_set_name(tg, tgname);
+
+			assert(work_interval->wi_group == NULL);
+			work_interval->wi_group = tg;
+
+			KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_WORKGROUP, WORKGROUP_INTERVAL_CREATE),
+			    work_interval->wi_id, work_interval->wi_create_flags,
+			    work_interval->wi_creator_pid, thread_group_get_id(tg));
+		}
+#endif /* CONFIG_THREAD_GROUPS */
+	} else {
+		/* Workload ID has previously been set (or a thread has already joined). */
+		if (wlid_flags & WORK_INTERVAL_WORKLOAD_ID_ALREADY_JOINED) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto out;
+		}
+		/* Treat this request as a query for the out parameters of the ID */
+		workload_id_args->wlida_flags = wlid_flags;
+	}
+
+	/*
+	 * Emit tracepoints for successfully setting the workload ID.
+	 *
+	 * After rdar://89342390 has been fixed and a new work interval ktrace
+	 * provider has been added, it will be possible to associate a numeric
+	 * ID with an ID name. Thus, for those cases where the ID name has been
+	 * looked up successfully (`from_workload_config` is true) it will no
+	 * longer be necessary to emit a tracepoint with the full ID name.
+	 */
+	KDBG(MACHDBG_CODE(DBG_MACH_WORKGROUP, WORKGROUP_INTERVAL_SET_WORKLOAD_ID),
+	    work_interval->wi_id, from_workload_config);
+	kernel_debug_string_simple(
+		MACHDBG_CODE(DBG_MACH_WORKGROUP, WORKGROUP_INTERVAL_SET_WORKLOAD_ID_NAME),
+		workload_id_args->wlida_name);
+
+	kr = KERN_SUCCESS;
+
+out:
+	work_interval_release(work_interval, THREAD_WI_THREAD_LOCK_NEEDED);
+
+	return kr;
 }
 
 

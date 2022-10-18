@@ -52,8 +52,8 @@ extern void kperf_kernel_configure(char *);
 
 extern "C" void console_suspend();
 extern "C" void console_resume();
-extern "C" void sched_override_recommended_cores_for_sleep(void);
-extern "C" void sched_restore_recommended_cores_after_sleep(void);
+extern "C" void sched_override_available_cores_for_sleep(void);
+extern "C" void sched_restore_available_cores_after_sleep(void);
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -143,26 +143,26 @@ PE_cpu_machine_init(cpu_id_t target, boolean_t bootb)
 	}
 
 	targetCPU->initCPU(bootb);
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	if (!bootb && (targetCPU->getCPUNumber() == (UInt32)master_cpu)) {
 		ml_set_is_quiescing(false);
 	}
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 }
 
 void
 PE_cpu_machine_quiesce(cpu_id_t target)
 {
 	IOCPU *targetCPU = (IOCPU*)target;
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	if (targetCPU->getCPUNumber() == (UInt32)master_cpu) {
 		ml_set_is_quiescing(true);
 	}
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 	targetCPU->quiesceCPU();
 }
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 static perfmon_interrupt_handler_func pmi_handler = NULL;
 
 kern_return_t
@@ -222,9 +222,7 @@ IOCPUSleepKernel(void)
 	IOPMrootDomain  *rootDomain = IOService::getPMRootDomain();
 
 	printf("IOCPUSleepKernel enter\n");
-#if defined(__arm64__)
-	sched_override_recommended_cores_for_sleep();
-#endif
+	sched_override_available_cores_for_sleep();
 
 	rootDomain->tracePoint( kIOPMTracePointSleepPlatformActions );
 	IOPlatformActionsPreSleep();
@@ -309,12 +307,10 @@ IOCPUSleepKernel(void)
 		}
 	}
 
-#if defined(__arm64__)
-	sched_restore_recommended_cores_after_sleep();
-#endif
-
 	rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
 	IOPlatformActionsPostResume();
+
+	sched_restore_available_cores_after_sleep();
 
 	thread_kern_set_pri(self, old_pri);
 	printf("IOCPUSleepKernel exit\n");

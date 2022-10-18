@@ -303,3 +303,25 @@ machine_task_init(task_t new_task,
 		new_task->xstate = fpu_default;
 	}
 }
+
+/*
+ * machine_task_process_signature
+ *
+ * Called to allow code signature dependent adjustments to the task
+ * state. It is not safe to assume that this function is only called
+ * once per task, as a signature may be attached later.
+ *
+ * On error, this function should point error_msg to a static error
+ * string (the caller will not free it).
+ */
+kern_return_t
+machine_task_process_signature(
+	task_t __unused task,
+	uint32_t const __unused platform,
+	uint32_t const __unused sdk,
+	char const ** __unused error_msg)
+{
+	assert(error_msg != NULL);
+
+	return KERN_SUCCESS;
+}

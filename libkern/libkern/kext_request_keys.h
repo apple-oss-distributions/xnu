@@ -132,6 +132,23 @@ extern "C" {
  */
 #define kKextRequestPredicateGetKextsInCollection   "Get Kexts in Collection"
 
+/* Predicate: Get Dexts
+ * Arguments: (None)
+ * InfoKeysArguments: Group of dexts to retrive - kOSBundleDextActiveKey,
+ *                    kOSBundleDextLoadedKey, kOSBundleDextUnLoadedKey
+ *                    or kOSBundleDextPendingUpgradeKey.
+ * Response:  A dictionary of dext groups with information about the dexts in
+ *            that group.
+ *            If no group is requested it defaults to kOSBundleDextActiveKey and
+ *            kOSBundleDextPendingUpgradeKey.
+ *
+ * Op result: OSReturn indicating any errors in processing (see OSKextLib.h)
+ *
+ * Retrieves an array of dictionaries whose properties describe every dext
+ * present in the group requested.
+ */
+#define kKextRequestPredicateGetDexts   "Get Dexts"
+
 
 /*********************************************************************
  * Privileged requests from user -> kernel
@@ -353,13 +370,27 @@ extern "C" {
 
 /* Predicate: Dext Daemon Launch
  * Argument: kKextRequestArgumentBundleIdentifierKey
- * Argument: IOUserServerName
+ * Argument: kKextRequestArgumentDriverExtensionServerName
+ * Argument: kKextRequestArgumentDriverExtensionServerTag
+ * Argument: kKextRequestArgumentDriverExtensionReslideSharedCache
+ * Argument: (optional) kKextRequestArgumentDriverUniqueIdentifier
  * Response: Asynchronous via a DriverKit daemon checking in
  * Op result: OSReturn indicating result (see OSKextLib.h)
  *
  * Requests kextd to launch a driver extension userspace daemon.
  */
 #define kKextRequestPredicateRequestDaemonLaunch "Dext Daemon Launch"
+
+/* Predicate: Dext Daemon Upgrade
+ * Argument: kKextRequestArgumentBundleIdentifierKey
+ * Argument: kKextRequestArgumentDriverUniqueIdentifier
+ * Response: None
+ * Op result: OSReturn indicating result (see OSKextLib.h)
+ *
+ * Informs kextd of an upgrade of driver extension userspace daemon.
+ */
+#define kKextRequestPredicateRequestDaemonUpgradeNotification "Dext Daemon Upgrade"
+
 
 #if PRAGMA_MARK
 /********************************************************************/
@@ -576,6 +607,24 @@ extern "C" {
  */
 #define kKextRequestArgumentDriverExtensionServerName  "Driver Extension Server Name"
 
+/* Argument: DriverKit Reslide Shared Cache
+ * Type:     Boolean
+ * Default:  N/A
+ *
+ * Set this option to reslide the DriverKit shared cache. This helps prevent ASLR circumvention
+ * with brute-forcing attacks.
+ */
+#define kKextRequestArgumentDriverExtensionReslideSharedCache  "DriverKit Reslide Shared Cache"
+
+/* Argument: DriverKit dext unique identifier
+ * Type:     Data
+ * Default:  N/A
+ *
+ * A DriverKit daemon launch request can include the dext unique identifier
+ * This name is also used for the upgrade notifation.
+ */
+#define kKextRequestArgumentDriverUniqueIdentifier kOSBundleDextUniqueIdentifierKey
+
 #if PRAGMA_MARK
 #pragma mark Missing AuxKC Bundles Arguments
 #endif
@@ -696,15 +745,6 @@ extern "C" {
  *     Any      -- return all kexts in a collection
  */
 #define kKextRequestArgumentLoadedStateKey             "Loaded State"
-
-/* Argument:  Enable DriverKit Shared Region
- * Type:      Number
- * Default:   0
- *
- * If this is 1, this enables using a separate shared region for DriverKit processes.
- *
- */
-#define kKextRequestEnableDriverKitSharedRegionKey     "Enable DriverKit Shared Region"
 
 #ifdef __cplusplus
 };

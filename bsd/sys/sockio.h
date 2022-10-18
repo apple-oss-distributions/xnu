@@ -297,6 +297,7 @@
 #define SIOCSECNMODE            _IOW('i', 177, struct ifreq)
 
 #define SIOCSIFORDER    _IOWR('i', 178, struct if_order)
+#define SIOCGIFORDER    _IOWR('i', 179, struct if_order)
 
 #define SIOCSQOSMARKINGMODE     _IOWR('i', 180, struct ifreq)
 #define SIOCSFASTLANECAPABLE    SIOCSQOSMARKINGMODE
@@ -364,6 +365,9 @@
 #define SIOCSIFRADIODETAILS _IOWR('i', 213, struct ifreq) /* set ifru_radio_details */
 
 #define SIOCSIFLINKQUALITYMETRIC _IOWR('i', 214, struct ifreq) /* set LQM */
+
+#define SIOCSIFNOTRAFFICSHAPING _IOWR('i', 215, struct ifreq) /* skip dummynet and netem traffic shaping */
+#define SIOCGIFNOTRAFFICSHAPING _IOWR('i', 216, struct ifreq) /* skip dummynet and netem traffic shaping */
 #endif /* PRIVATE */
 
 #endif /* !_SYS_SOCKIO_H_ */

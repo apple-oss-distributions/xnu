@@ -114,7 +114,6 @@ typedef struct  ether_addr {
 #define ETHERTYPE_PTP           0x88f7  /* IEEE 1588 Precision Time Protocol */
 #define ETHERTYPE_LOOPBACK      0x9000  /* used to test interfaces */
 /* XXX - add more useful types here */
-#define ETHERTYPE_IEEE802154    0x0809  /* 802.15.4 */
 
 /*
  * The ETHERTYPE_NTRAILER packet types starting at ETHERTYPE_TRAIL have

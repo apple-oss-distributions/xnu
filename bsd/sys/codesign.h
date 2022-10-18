@@ -57,6 +57,7 @@
 #define CS_OPS_TEAMID       14  /* get team id */
 #define CS_OPS_CLEAR_LV     15  /* clear the library validation flag */
 #define CS_OPS_DER_ENTITLEMENTS_BLOB 16  /* get der entitlements blob */
+#define CS_OPS_VALIDATION_CATEGORY 17   /* get process validation category */
 
 #define CS_MAX_TEAMID_LEN       64
 
@@ -101,26 +102,39 @@ int     cs_entitlements_dictionary_copy(struct proc *, void **);
 #endif
 int     cs_restricted(struct proc *);
 uint8_t * cs_get_cdhash(struct proc *);
+cs_launch_type_t launch_constraint_data_get_launch_type(launch_constraint_data_t lcd);
 
 struct cs_blob * csproc_get_blob(struct proc *);
 struct cs_blob * csvnode_get_blob(struct vnode *, off_t);
 void             csvnode_print_debug(struct vnode *);
 
-off_t                   csblob_get_base_offset(struct cs_blob *);
-vm_size_t               csblob_get_size(struct cs_blob *);
+off_t           csblob_get_base_offset(struct cs_blob *);
+vm_size_t       csblob_get_size(struct cs_blob *);
 vm_address_t    csblob_get_addr(struct cs_blob *);
 const char *    csblob_get_teamid(struct cs_blob *);
 const char *    csblob_get_identity(struct cs_blob *);
 const uint8_t * csblob_get_cdhash(struct cs_blob *);
-int                             csblob_get_platform_binary(struct cs_blob *);
+const CS_CodeDirectory* csblob_get_code_directory(struct cs_blob *csblob);
+int             csblob_get_platform_binary(struct cs_blob *);
+void            csblob_invalidate_flags(struct cs_blob *blob);
+void            csvnode_invalidate_flags(struct vnode * vp);
 unsigned int    csblob_get_flags(struct cs_blob *);
-uint8_t                 csblob_get_hashtype(struct cs_blob const *);
+uint8_t         csblob_get_hashtype(struct cs_blob const *);
 unsigned int    csblob_get_signer_type(struct cs_blob *);
 #if DEVELOPMENT || DEBUG
-void                    csproc_clear_platform_binary(struct proc *);
+void            csproc_clear_platform_binary(struct proc *);
 #endif
 
+#define XNU_CSBLOB_HAS_VALIDATION_CATEGORY 1
+int             csblob_set_validation_category(struct cs_blob *, unsigned int);
+unsigned int    csblob_get_validation_category(struct cs_blob *);
+
+#include <uuid/uuid.h>
+
 int csblob_register_profile(struct cs_blob *, void*, vm_size_t);
+
+#define XNU_SUPPORTS_PROVISIONING_PROFILE_UUID 1
+int csblob_register_profile_uuid(struct cs_blob *, const uuid_t, void*, vm_size_t);
 
 void csproc_disable_enforcement(struct proc* p);
 void csproc_mark_invalid_allowed(struct proc* p);
@@ -129,6 +143,8 @@ int csproc_hardened_runtime(struct proc* p);
 
 int             csblob_get_entitlements(struct cs_blob *, void **, size_t *);
 int             csblob_get_der_entitlements(struct cs_blob *, const CS_GenericBlob **, size_t *);
+#define XNU_HAS_GET_DER_ENTITLEMENTS_UNSAFE 1
+const CS_GenericBlob* csblob_get_der_entitlements_unsafe(struct cs_blob *);
 
 const CS_GenericBlob *
     csblob_find_blob(struct cs_blob *, uint32_t, uint32_t);
@@ -170,6 +186,9 @@ uint8_t csfg_get_platform_identifier(struct fileglob *, off_t);
 uint8_t csvnode_get_platform_identifier(struct vnode *, off_t);
 uint8_t csproc_get_platform_identifier(struct proc *);
 
+struct cs_blob* csfg_get_csblob(struct fileglob*, uint64_t);
+struct cs_blob* csfg_get_supplement_csblob(struct fileglob*, uint64_t);
+
 extern int cs_debug;
 extern int cs_debug_fail_on_unsigned_code;
 extern unsigned int cs_debug_unsigned_exec_failures;
@@ -186,6 +205,7 @@ int     cs_allow_invalid(struct proc *);
 int     cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed);
 void    cs_process_invalidated(struct proc *);
 int     csproc_get_platform_path(struct proc *);
+int     csproc_get_validation_category(struct proc *, unsigned int *);
 
 #if !SECURE_KERNEL
 extern int cs_enforcement_panic;
@@ -193,10 +213,7 @@ extern int cs_enforcement_panic;
 
 #endif /* XNU_KERNEL_PRIVATE */
 
-
 __END_DECLS
-
-
 
 #endif /* KERNEL */
 

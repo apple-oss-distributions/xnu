@@ -103,8 +103,9 @@ static LCK_MTX_DECLARE(netns_lock, &netns_lock_group);
  */
 struct ns_reservation {
 	RB_ENTRY(ns_reservation) nsr_link;
-	in_port_t nsr_port;
 	uint32_t nsr_refs[NETNS_OWNER_MAX + 1];
+	in_port_t nsr_port;
+	bool nsr_reuseport:1;
 };
 
 #define NETNS_REF_COUNT(nsr, flags)     \
@@ -232,12 +233,12 @@ static struct skmem_cache *netns_ns_flow_info_cache; /* for ns_flow_info */
 static unsigned int netns_ns_reservation_size; /* size of zone element */
 static struct skmem_cache *netns_ns_reservation_cache; /* for ns_reservation */
 
-static struct ns_reservation *netns_ns_reservation_alloc(boolean_t, in_port_t);
+static struct ns_reservation *netns_ns_reservation_alloc(in_port_t, uint32_t);
 static void netns_ns_reservation_free(struct ns_reservation *);
 static struct ns *netns_ns_alloc(zalloc_flags_t);
 static void netns_ns_free(struct ns *);
 static void netns_ns_cleanup(struct ns *);
-static struct ns_token *netns_ns_token_alloc(boolean_t, boolean_t);
+static struct ns_token *netns_ns_token_alloc(boolean_t);
 static void netns_ns_token_free(struct ns_token *);
 
 /*
@@ -253,20 +254,18 @@ static int _netns_reserve_kpi_common(struct ns *, netns_token *, uint32_t *,
 static void _netns_set_ifnet_internal(struct ns_token *, struct ifnet *);
 
 static struct ns_reservation *
-netns_ns_reservation_alloc(boolean_t can_block, in_port_t port)
+netns_ns_reservation_alloc(in_port_t port, uint32_t flags)
 {
 	struct ns_reservation *res;
 
 	VERIFY(port != 0);
 
-	res = skmem_cache_alloc(netns_ns_reservation_cache,
-	    can_block ? SKMEM_SLEEP : SKMEM_NOSLEEP);
-	if (res == NULL) {
-		return NULL;
-	}
+	res = skmem_cache_alloc(netns_ns_reservation_cache, SKMEM_SLEEP);
+	ASSERT(res != NULL);
 
 	bzero(res, netns_ns_reservation_size);
 	res->nsr_port = port;
+	res->nsr_reuseport = ((flags & NETNS_REUSEPORT) != 0);
 	return res;
 }
 
@@ -367,28 +366,22 @@ netns_ns_cleanup(struct ns *namespace)
 }
 
 static struct ns_token *
-netns_ns_token_alloc(boolean_t can_block, boolean_t with_nfi)
+netns_ns_token_alloc(boolean_t with_nfi)
 {
 	struct ns_token *token;
 
 	NETNS_LOCK_ASSERT_HELD();
 	NETNS_LOCK_CONVERT();
 
-	token = skmem_cache_alloc(netns_ns_token_cache,
-	    can_block ? SKMEM_SLEEP : SKMEM_NOSLEEP);
-	if (token == NULL) {
-		return NULL;
-	}
+	token = skmem_cache_alloc(netns_ns_token_cache, SKMEM_SLEEP);
+	ASSERT(token != NULL);
 
 	bzero(token, netns_ns_token_size);
 
 	if (with_nfi) {
 		token->nt_flow_info =  skmem_cache_alloc(netns_ns_flow_info_cache,
-		    can_block ? SKMEM_SLEEP : SKMEM_NOSLEEP);
-		if (token->nt_flow_info == NULL) {
-			skmem_cache_free(netns_ns_token_cache, token);
-			return NULL;
-		}
+		    SKMEM_SLEEP);
+		ASSERT(token->nt_flow_info != NULL);
 	}
 	SLIST_INSERT_HEAD(&netns_all_tokens, token, nt_all_link);
 
@@ -540,10 +533,11 @@ _netns_is_port_used(struct ns * gns, struct ns_reservation *curr_res, in_port_t 
 
 	res = ns_reservation_tree_find(&gns->ns_reservations, port);
 	if (res != NULL && res != curr_res) {
-		if (NETNS_REF_COUNT(res, NETNS_BSD) > 0 ||
+		if (!res->nsr_reuseport &&
+		    (NETNS_REF_COUNT(res, NETNS_BSD) > 0 ||
 		    NETNS_REF_COUNT(res, NETNS_PF) > 0 ||
 		    NETNS_REF_COUNT(res, NETNS_LISTENER) > 0 ||
-		    NETNS_REF_COUNT(res, NETNS_SKYWALK) > 0) {
+		    NETNS_REF_COUNT(res, NETNS_SKYWALK) > 0)) {
 			return TRUE;
 		}
 	}
@@ -570,7 +564,7 @@ _netns_reserve_common(struct ns *namespace, in_port_t port, uint32_t flags)
 	proto = namespace->ns_proto;
 	addr_len = namespace->ns_addr_len;
 	NETNS_LOCK_CONVERT();
-	res = netns_ns_reservation_alloc(TRUE, port);
+	res = netns_ns_reservation_alloc(port, flags);
 	if (res == NULL) {
 		SK_DF(NS_VERB_IP(addr_len) | NS_VERB_PROTO(proto),
 		    "ERROR %s:%s:%d // flags 0x%x // OUT OF MEMORY",
@@ -1072,13 +1066,7 @@ _netns_reserve_kpi_common(struct ns *ns, netns_token *token, uint32_t *addr,
 		}
 	}
 
-	nt = netns_ns_token_alloc(true, nfi != NULL ? true : false);
-	if (nt == NULL) {
-		SK_ERR("netns_ns_token_alloc() failed");
-		err = ENOMEM;
-		goto done;
-	}
-
+	nt = netns_ns_token_alloc(nfi != NULL ? true : false);
 	ASSERT(nt->nt_ifp == NULL);
 	_netns_set_ifnet_internal(nt, ifp);
 
@@ -1790,10 +1778,19 @@ static inline void
 netns_local_port_scan_flow_entry(struct flow_entry *fe, protocol_family_t protocol,
     u_int32_t flags, u_int8_t *bitfield)
 {
-	struct ns_token *token = fe->fe_port_reservation;
+	struct ns_token *token;
 	boolean_t iswildcard = false;
 
-	if (fe == NULL || token == NULL) {
+	if (fe == NULL) {
+		return;
+	}
+
+	if (fe->fe_flags & FLOWENTF_EXTRL_PORT) {
+		return;
+	}
+
+	token = fe->fe_port_reservation;
+	if (token == NULL) {
 		return;
 	}
 
@@ -1891,10 +1888,12 @@ netns_get_if_local_ports(ifnet_t ifp, protocol_family_t protocol,
 		goto done;
 	}
 	FSW_RLOCK(fsw);
+	NETNS_LOCK();
 	flow_mgr_foreach_flow(fsw->fsw_flow_mgr, ^(struct flow_entry *_fe) {
 		netns_local_port_scan_flow_entry(_fe, protocol, flags,
 		bitfield);
 	});
+	NETNS_UNLOCK();
 	FSW_UNLOCK(fsw);
 done:
 	ifnet_decr_iorefcnt(ifp);

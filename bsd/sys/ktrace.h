@@ -30,18 +30,17 @@
 #define SYS_KTRACE_H
 
 #include <stdint.h>
-
+#include <os/base.h>
 #include <kern/locks.h>
 
-/* The states that ktrace can be in. */
-enum ktrace_state {
+__enum_decl(ktrace_state_t, unsigned int, {
 	/* No tool has configured ktrace. */
 	KTRACE_STATE_OFF = 0,
 	/* A foreground tool has configured ktrace. */
 	KTRACE_STATE_FG,
 	/* A background tool has configured ktrace. */
-	KTRACE_STATE_BG
-};
+	KTRACE_STATE_BG,
+});
 
 void ktrace_lock(void);
 void ktrace_unlock(void);
@@ -108,7 +107,7 @@ void ktrace_kernel_configure(uint32_t config_mask);
  *
  * `ktrace_lock` must be held.
  */
-void ktrace_disable(enum ktrace_state state_to_match);
+void ktrace_disable(ktrace_state_t state_to_match);
 
 /*
  * Returns the pid of the process that owns ktrace.  If ktrace is unowned,
@@ -132,8 +131,5 @@ bool ktrace_background_active(void);
 extern bool ktrace_keep_ownership_on_reset;
 extern int ktrace_root_set_owner_allowed;
 int ktrace_set_owning_pid(int pid);
-
-/* Initialize ktrace.  Must only be called by the bootstrap thread. */
-void ktrace_init(void);
 
 #endif /* SYS_KTRACE_H */

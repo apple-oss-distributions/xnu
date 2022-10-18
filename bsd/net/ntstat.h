@@ -786,10 +786,11 @@ enum{
 	, NSTAT_EXTENDED_UPDATE_TYPE_NECP_TLV           = 2
 	, NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_NECP_TLV  = 3
 	, NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_DOMAIN    = 4
+	, NSTAT_EXTENDED_UPDATE_TYPE_FUUID              = 5
 };
 
 #define NSTAT_EXTENDED_UPDATE_TYPE_MIN  NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN
-#define NSTAT_EXTENDED_UPDATE_TYPE_MAX  NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_DOMAIN
+#define NSTAT_EXTENDED_UPDATE_TYPE_MAX  NSTAT_EXTENDED_UPDATE_TYPE_FUUID
 
 
 #define NSTAT_EXTENDED_UPDATE_FLAG_MASK    0x00ffffffull    /* Maximum of 24 extension types allowed due to restrictions on specifying via filter flags */
@@ -1379,6 +1380,9 @@ void ntstat_userland_stats_close(nstat_userland_context nstat_ctx);
 void ntstat_userland_stats_event(nstat_userland_context nstat_ctx, uint64_t event);
 
 void nstats_userland_stats_defunct_for_process(int pid);
+
+errno_t nstat_userland_mark_rnf_override(uuid_t fuuid, bool rnf_override);
+
 
 // Servicing a sysctl for information of TCP or UDP flows
 int ntstat_userland_count(short proto);

@@ -81,76 +81,58 @@
  *	New version based on 4.4 and NS3.3
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/conf.h>
-#include <sys/reboot.h>
-#include <sys/msgbuf.h>
-#include <sys/proc_internal.h>
-#include <sys/ioctl.h>
-#include <sys/tty.h>
-#include <sys/file_internal.h>
-#include <sys/tprintf.h>
-#include <sys/syslog.h>
 #include <stdarg.h>
-#include <sys/malloc.h>
+#include <sys/conf.h>
+#include <sys/file_internal.h>
+#include <sys/ioctl.h>
 #include <sys/lock.h>
+#include <sys/malloc.h>
+#include <sys/msgbuf.h>
+#include <sys/param.h>
+#include <sys/proc_internal.h>
+#include <sys/reboot.h>
 #include <sys/subr_prf.h>
+#include <sys/syslog.h>
+#include <sys/systm.h>
+#include <sys/tprintf.h>
+#include <sys/tty.h>
 
-#include <kern/cpu_number.h>    /* for cpu_number() */
+#include <console/serial_protos.h>
+#include <kern/task.h> /* for get_bsdthreadtask_info() */
 #include <libkern/libkern.h>
 #include <os/log_private.h>
-
-/* for vaddlog(): the following are implemented in osfmk/kern/printf.c  */
-extern bool bsd_log_lock(bool);
-extern void bsd_log_unlock(void);
-
-uint32_t vaddlog_msgcount = 0;
-uint32_t vaddlog_msgcount_dropped = 0;
-
-/* Keep this around only because it's exported */
-void _printf(int, struct tty *, const char *, ...);
 
 struct snprintf_arg {
 	char *str;
 	size_t remain;
 };
 
-
-/*
- * In case console is off,
- * debugger_panic_str contains argument to last
- * call to panic.
- */
-extern const char       *debugger_panic_str;
-
-extern  void console_write_char(char);  /* standard console putc */
-
-extern  struct tty cons;                /* standard console tty */
-extern struct   tty *constty;           /* pointer to console "window" tty */
-extern int  __doprnt(const char *fmt,
-    va_list    argp,
-    void       (*)(int, void *),
-    void       *arg,
-    int        radix,
-    int        is_log);
-
-/*
- *	Record cpu that panic'd and lock around panic data
- */
-
-extern  void logwakeup(struct msgbuf *);
-extern  void halt_cpu(void);
-
-static void
-snprintf_func(int ch, void *arg);
-
 struct putchar_args {
 	int flags;
 	struct tty *tty;
 	bool last_char_was_cr;
 };
+
+static void snprintf_func(int, void *);
 static void putchar(int c, void *arg);
+
+/*
+ * In case console is off, debugger_panic_str contains argument to last call to
+ * panic.
+ */
+extern const char *debugger_panic_str;
+
+extern struct tty cons;     /* standard console tty */
+extern struct tty *constty; /* pointer to console "window" tty */
+
+extern int __doprnt(const char *, va_list, void (*)(int, void *), void *, int, int);
+extern void console_write_char(char);  /* standard console putc */
+extern void logwakeup(struct msgbuf *);
+extern bool bsd_log_lock(bool);
+extern void bsd_log_unlock(void);
+
+uint32_t vaddlog_msgcount = 0;
+uint32_t vaddlog_msgcount_dropped = 0;
 
 static void
 putchar_args_init(struct putchar_args *pca, struct session *sessp)
@@ -228,16 +210,10 @@ tprintf_close(tpr_t pg)
 	pgrp_rele(pg);
 }
 
-/*
- * tprintf prints on the controlling terminal associated
- * with the given session.
- *
- * NOTE:	No one else should call this function!!!
- */
-void
-tprintf(tpr_t tpr, const char *fmt, ...)
+static void
+tprintf_impl(tpr_t tpr, const char *fmt, va_list ap)
 {
-	va_list ap;
+	va_list ap2;
 	struct putchar_args pca;
 
 	if (tpr) {
@@ -248,9 +224,9 @@ tprintf(tpr_t tpr, const char *fmt, ...)
 			tty_lock(pca.tty);
 			if (ttycheckoutq(pca.tty, 0)) {
 				/* going to the tty; leave locked */
-				va_start(ap, fmt);
-				__doprnt(fmt, ap, putchar, &pca, 10, FALSE);
-				va_end(ap);
+				va_copy(ap2, ap);
+				__doprnt(fmt, ap2, putchar, &pca, 10, FALSE);
+				va_end(ap2);
 			}
 			tty_unlock(pca.tty);
 		}
@@ -260,10 +236,42 @@ tprintf(tpr_t tpr, const char *fmt, ...)
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
-	va_start(ap, fmt);
 	os_log_with_args(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, fmt, ap, __builtin_return_address(0));
-	va_end(ap);
 #pragma clang diagnostic pop
+}
+
+/*
+ * tprintf prints on the controlling terminal associated
+ * with the given session.
+ *
+ * NOTE:	No one else should call this function!!!
+ */
+void
+tprintf(tpr_t tpr, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	tprintf_impl(tpr, fmt, ap);
+	va_end(ap);
+}
+
+/*
+ * tprintf_thd takes the session reference, calls tprintf
+ * with user inputs, and then drops the reference.
+ */
+void
+tprintf_thd(thread_t thd, const char *fmt, ...)
+{
+	struct proc * p = thd ? get_bsdthreadtask_info(thd) : NULL;
+	tpr_t tpr = p ? tprintf_open(p) : NULL;
+	va_list ap;
+
+	va_start(ap, fmt);
+	tprintf_impl(tpr, fmt, ap);
+	va_end(ap);
+
+	tprintf_close(tpr);
 }
 
 /*
@@ -330,26 +338,6 @@ vaddlog(const char *fmt, va_list ap)
 
 	os_atomic_inc(&vaddlog_msgcount, relaxed);
 	return 0;
-}
-
-void
-_printf(int flags, struct tty *ttyp, const char *format, ...)
-{
-	va_list ap;
-	struct putchar_args pca;
-
-	pca.flags = flags;
-	pca.tty   = ttyp;
-
-	if (ttyp != NULL) {
-		tty_lock(ttyp);
-
-		va_start(ap, format);
-		__doprnt(format, ap, putchar, &pca, 10, TRUE);
-		va_end(ap);
-
-		tty_unlock(ttyp);
-	}
 }
 
 int
@@ -436,7 +424,7 @@ vprintf_log_locked(const char *fmt, va_list ap, bool driverkit)
 	struct putchar_args pca;
 
 	pca.flags = TOLOGLOCKED;
-	if (driverkit) {
+	if (driverkit && enable_dklog_serial_output) {
 		pca.flags |= TOCONS;
 	}
 	pca.tty   = NULL;
@@ -508,12 +496,20 @@ vsnprintf(char *str, size_t size, const char *format, va_list ap)
 int
 vscnprintf(char *buf, size_t size, const char *fmt, va_list args)
 {
-	ssize_t ssize = size;
 	int i;
 
 	i = vsnprintf(buf, size, fmt, args);
-
-	return (i >= ssize) ? (int)(ssize - 1) : i;
+	/* Note: XNU's printf never returns negative values */
+	if ((uint32_t)i < size) {
+		return i;
+	}
+	if (size == 0) {
+		return 0;
+	}
+	if (size > INT_MAX) {
+		return INT_MAX;
+	}
+	return (int)(size - 1);
 }
 
 int
@@ -538,11 +534,4 @@ snprintf_func(int ch, void *arg)
 		*info->str++ = (char)ch;
 		info->remain--;
 	}
-}
-
-int
-kvprintf(char const *fmt, void (*func)(int, void*), void *arg, int radix, va_list ap)
-{
-	__doprnt(fmt, ap, func, arg, radix, TRUE);
-	return 0;
 }

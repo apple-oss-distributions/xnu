@@ -90,6 +90,38 @@ typedef enum {
 	SOCD_TRACE_CODE_XNU_MAX
 } socd_client_trace_code_xnu_t;
 
+/* *
+ * Records socd client header information. Also used to determine
+ * proper offset when appending trace data to SoCD report.
+ *
+ * SoCD Trace Layout in memory:
+ *  socd_push_header_t:
+ *     (5 bytes) socd_generic_header_t
+ *     (3 bytes) --padding for alignment--
+ *     (4 bytes) socd_desc_t (size of overall region, number of records that are supported === 1)
+ *  socd_push_record_t:
+ *     (1 byte) agent ID
+ *     (1 byte) version
+ *     (2 bytes) offset into buff for start of record in 32-bit words
+ *     (2 bytes) size (same accounting)
+ *     (2 bytes) --padding for alignement--
+ *  socd_client_hdr_t: <--- header reports offset 0x14 here
+ *     (4 bytes) version
+ *     (8 bytes) boot time
+ *     (16 bytes) kernel uuid
+ *     (16 bytes) primary KC uuid
+ *  socd_client_trace_entry_t:
+ *     (8 bytes) timestamp
+ *     (4 bytes) debugid
+ *     (8 bytes) arg1
+ *     (8 bytes) arg2
+ *     (8 bytes) arg3
+ *     (8 bytes) arg4
+ *  <repeating trace records here, each is 44 bytes)
+ *
+ * Trace report will store as many entries as possible within the
+ * allotted space.
+ */
 typedef struct {
 	uint32_t version;
 	uint64_t boot_time;

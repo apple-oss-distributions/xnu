@@ -63,6 +63,8 @@
 
 #include <san/kcov_stksz.h>
 
+#include <IOKit/IOBSD.h>
+
 extern int debug_task;
 
 /* zone for debug_state area */
@@ -196,6 +198,29 @@ machine_thread_on_core(thread_t thread)
 	return thread->machine.CpuDatap != NULL;
 }
 
+boolean_t
+machine_thread_on_core_allow_invalid(thread_t thread)
+{
+	extern int _copyin_atomic64(const char *src, uint64_t *dst);
+	uint64_t addr;
+
+	/*
+	 * Utilize that the thread zone is sequestered which means
+	 * that this kernel-to-kernel copyin can't read data
+	 * from anything but a thread, zeroed or freed memory.
+	 */
+	assert(get_preemption_level() > 0);
+	thread = pgz_decode_allow_invalid(thread, ZONE_ID_THREAD);
+	if (thread == THREAD_NULL) {
+		return false;
+	}
+	thread_require(thread);
+	if (_copyin_atomic64((void *)&thread->machine.CpuDatap, &addr) == 0) {
+		return addr != 0;
+	}
+	return false;
+}
+
 
 /*
  * Routine: machine_thread_create
@@ -214,6 +239,7 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
 		// setting this offset will cause trying to use it to panic
 		thread->machine.pcpu_data_base = (vm_offset_t)VM_MIN_KERNEL_ADDRESS;
 	}
+	thread->machine.arm_machine_flags = 0;
 	thread->machine.preemption_count = 0;
 	thread->machine.cthread_self = 0;
 	thread->machine.kpcb = NULL;
@@ -221,8 +247,11 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
 #if defined(HAS_APPLE_PAC)
 	thread->machine.rop_pid = task->rop_pid;
 	thread->machine.jop_pid = task->jop_pid;
-	thread->machine.disable_user_jop = task->disable_user_jop;
+	if (task->disable_user_jop) {
+		thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_DISABLE_USER_JOP;
+	}
 #endif
+
 
 
 
@@ -239,6 +268,7 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
 			thread->machine.upcb->ash.count = ARM_SAVED_STATE64_COUNT;
 			thread->machine.uNeon->nsh.flavor = ARM_NEON_SAVED_STATE64;
 			thread->machine.uNeon->nsh.count = ARM_NEON_SAVED_STATE64_COUNT;
+
 		} else {
 			thread->machine.upcb->ash.flavor = ARM_SAVED_STATE32;
 			thread->machine.upcb->ash.count = ARM_SAVED_STATE32_COUNT;
@@ -255,6 +285,76 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
 
 	bzero(&thread->machine.perfctrl_state, sizeof(thread->machine.perfctrl_state));
 	machine_thread_state_initialize(thread);
+}
+
+/*
+ * Routine: machine_thread_process_signature
+ *
+ * Called to allow code signature dependent adjustments to the thread
+ * state. Note that this is usually called twice for the main thread:
+ * Once at thread creation by thread_create, when the signature is
+ * potentially not attached yet (which is usually the case for the
+ * first/main thread of a task), and once after the task's signature
+ * has actually been attached.
+ *
+ */
+kern_return_t
+machine_thread_process_signature(thread_t __unused thread, task_t __unused task)
+{
+	kern_return_t result = KERN_SUCCESS;
+
+	/*
+	 * Reset to default state.
+	 *
+	 * In general, this function must not assume anything about the
+	 * previous signature dependent thread state.
+	 *
+	 * At least at the time of writing this, threads don't transition
+	 * to different code signatures, so each thread this function
+	 * operates on is "fresh" in the sense that
+	 * machine_thread_process_signature() has either not even been
+	 * called on it yet, or only been called as part of thread
+	 * creation when there was no signature yet.
+	 *
+	 * But for easier reasoning, and to prevent future bugs, this
+	 * function should always recalculate all signature-dependent
+	 * thread state, as if the signature could actually change from an
+	 * actual signature to another.
+	 */
+#if !__ARM_KERNEL_PROTECT__
+	thread->machine.arm_machine_flags &= ~(ARM_MACHINE_THREAD_PRESERVE_X18);
+#endif /* !__ARM_KERNEL_PROTECT__ */
+
+
+	/*
+	 * Set signature dependent state.
+	 */
+	if (task != kernel_task && task_has_64Bit_data(task)) {
+#if !__ARM_KERNEL_PROTECT__
+#if CONFIG_ROSETTA
+		if (task_is_translated(task)) {
+			/* Note that for x86_64 translation specifically, the
+			 * context switch path implicitly switches x18 regardless
+			 * of this flag. */
+			thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_PRESERVE_X18;
+		}
+#endif /* CONFIG_ROSETTA */
+
+		if (task->preserve_x18) {
+			thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_PRESERVE_X18;
+		}
+	} else {
+		/*
+		 * For informational value only, context switch only trashes
+		 * x18 for user threads.  (Except for devices with
+		 * __ARM_KERNEL_PROTECT__, which make real destructive use of
+		 * x18.)
+		 */
+		thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_PRESERVE_X18;
+#endif /* !__ARM_KERNEL_PROTECT__ */
+	}
+
+	return result;
 }
 
 /*
@@ -282,7 +382,9 @@ machine_thread_destroy(thread_t thread)
 			arm_debug_set(NULL);
 		}
 
-		zfree(ads_zone, thread->machine.DebugData);
+		if (os_ref_release(&thread->machine.DebugData->ref) == 0) {
+			zfree(ads_zone, thread->machine.DebugData);
+		}
 	}
 }
 
@@ -372,7 +474,7 @@ machine_stack_attach(thread_t thread,
 	savestate = &context->ss;
 	savestate->fp = 0;
 	savestate->sp = thread->machine.kstackptr;
-	savestate->pc = 0;
+	savestate->pc_was_in_userspace = false;
 #if defined(HAS_APPLE_PAC)
 	/* Sign the initial kernel stack saved state */
 	uint64_t intr = ml_pac_safe_interrupts_disable();
@@ -425,6 +527,9 @@ machine_stack_handoff(thread_t old,
 	if (stack == old->reserved_stack) {
 		assert(new->reserved_stack);
 		old->reserved_stack = new->reserved_stack;
+#if KASAN && CONFIG_KERNEL_TBI
+		kasan_unpoison_stack(old->reserved_stack, kernel_stack_size);
+#endif /* KASAN && CONFIG_KERNEL_TBI */
 		new->reserved_stack = stack;
 	}
 
@@ -448,7 +553,8 @@ call_continuation(thread_continue_t continuation,
 #define call_continuation_kprintf(x...) \
 	/* kprintf("call_continuation_kprintf:" x) */
 
-	call_continuation_kprintf("thread = %p continuation = %p, stack = %p\n", current_thread(), continuation, current_thread()->machine.kstackptr);
+	call_continuation_kprintf("thread = %p continuation = %p, stack = %lx\n",
+	    current_thread(), continuation, current_thread()->machine.kstackptr);
 	Call_continuation(continuation, parameter, wresult, enable_interrupts);
 }
 
@@ -477,17 +583,31 @@ arm_debug_set32(arm_debug_state_t *debug_state)
 	arm_debug_info_t * debug_info    = arm_debug_info();
 	boolean_t          intr;
 	arm_debug_state_t  off_state;
+	arm_debug_state_t  *cpu_debug;
 	uint64_t           all_ctrls = 0;
 
 	intr = ml_set_interrupts_enabled(FALSE);
 	cpu_data_ptr = getCpuDatap();
+	cpu_debug = cpu_data_ptr->cpu_user_debug;
 
-	// Set current user debug
-	cpu_data_ptr->cpu_user_debug = debug_state;
-
-	if (NULL == debug_state) {
+	/*
+	 * Retain and set new per-cpu state.
+	 * Reference count does not matter when turning off debug state.
+	 */
+	if (debug_state == NULL) {
 		bzero(&off_state, sizeof(off_state));
+		cpu_data_ptr->cpu_user_debug = NULL;
 		debug_state = &off_state;
+	} else {
+		os_ref_retain(&debug_state->ref);
+		cpu_data_ptr->cpu_user_debug = debug_state;
+	}
+
+	/* Release previous debug state. */
+	if (cpu_debug != NULL) {
+		if (os_ref_release(&cpu_debug->ref) == 0) {
+			zfree(ads_zone, cpu_debug);
+		}
 	}
 
 	switch (debug_info->num_breakpoint_pairs) {
@@ -652,13 +772,9 @@ arm_debug_set32(arm_debug_state_t *debug_state)
 		mask_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
 	} else {
 		update_mdscr(0x1, 0);
-
-#if SINGLE_STEP_RETIRE_ERRATA
-		// Workaround for radar 20619637
-		__builtin_arm_isb(ISB_SY);
-#endif
 	}
 
+	__builtin_arm_isb(ISB_SY);
 	(void) ml_set_interrupts_enabled(intr);
 }
 
@@ -669,17 +785,31 @@ arm_debug_set64(arm_debug_state_t *debug_state)
 	arm_debug_info_t * debug_info    = arm_debug_info();
 	boolean_t          intr;
 	arm_debug_state_t  off_state;
+	arm_debug_state_t  *cpu_debug;
 	uint64_t           all_ctrls = 0;
 
 	intr = ml_set_interrupts_enabled(FALSE);
 	cpu_data_ptr = getCpuDatap();
+	cpu_debug = cpu_data_ptr->cpu_user_debug;
 
-	// Set current user debug
-	cpu_data_ptr->cpu_user_debug = debug_state;
-
-	if (NULL == debug_state) {
+	/*
+	 * Retain and set new per-cpu state.
+	 * Reference count does not matter when turning off debug state.
+	 */
+	if (debug_state == NULL) {
 		bzero(&off_state, sizeof(off_state));
+		cpu_data_ptr->cpu_user_debug = NULL;
 		debug_state = &off_state;
+	} else {
+		os_ref_retain(&debug_state->ref);
+		cpu_data_ptr->cpu_user_debug = debug_state;
+	}
+
+	/* Release previous debug state. */
+	if (cpu_debug != NULL) {
+		if (os_ref_release(&cpu_debug->ref) == 0) {
+			zfree(ads_zone, cpu_debug);
+		}
 	}
 
 	switch (debug_info->num_breakpoint_pairs) {
@@ -844,13 +974,9 @@ arm_debug_set64(arm_debug_state_t *debug_state)
 		mask_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
 	} else {
 		update_mdscr(0x1, 0);
-
-#if SINGLE_STEP_RETIRE_ERRATA
-		// Workaround for radar 20619637
-		__builtin_arm_isb(ISB_SY);
-#endif
 	}
 
+	__builtin_arm_isb(ISB_SY);
 	(void) ml_set_interrupts_enabled(intr);
 }
 

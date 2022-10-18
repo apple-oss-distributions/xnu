@@ -1174,6 +1174,14 @@ kauth_filesec_acl_setendian(int kendian, kauth_filesec_t fsec, kauth_acl_t acl)
 	}
 }
 
+/*
+ * rdar://88962576
+ *
+ * Before adopting the typed allocators for ACLs, we need to carefully
+ * audit their usage outside of core kernel, to make sure there are
+ * no paths cross-freeing them across kext boundaries.
+ */
+__typed_allocators_ignore_push
 
 /*
  * Allocate an ACL buffer.
@@ -1199,13 +1207,11 @@ kauth_acl_alloc(int count)
 void
 kauth_acl_free(kauth_acl_t aclp)
 {
-	/*
-	 * It's possible this may have have been allocated in a kext using
-	 * MALLOC. Using KHEAP_ANY will allow us to free it here.
-	 */
-	kheap_free_addr(KHEAP_ANY, aclp);
+	kheap_free_addr(KM_KAUTH, aclp);
 }
 
+
+__typed_allocators_ignore_pop
 
 /*
  * WARNING - caller must hold KAUTH_SCOPELOCK

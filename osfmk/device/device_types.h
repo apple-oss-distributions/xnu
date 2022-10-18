@@ -76,7 +76,7 @@
 #include <stdint.h>
 
 #if PRIVATE
-#define IOKIT_SERVER_VERSION    20190926
+#define IOKIT_SERVER_VERSION    20210810
 #endif
 
 

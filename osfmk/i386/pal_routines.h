@@ -156,9 +156,10 @@ static inline void
 pal_get_resource_property(const char **property_name, int *property_value)
 {
 	*property_name = PAL_AICPM_PROPERTY_NAME;
-	*property_value = PAL_XCPM_PROPERTY_VALUE;
 	if (virtualized) {
 		*property_value = PAL_VIRTUALIZED_PROPERTY_VALUE;
+	} else {
+		*property_value = PAL_XCPM_PROPERTY_VALUE;
 	}
 }
 

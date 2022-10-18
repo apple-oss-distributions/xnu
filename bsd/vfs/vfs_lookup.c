@@ -991,6 +991,10 @@ lookup_handle_emptyname(struct nameidata *ndp, struct componentname *cnp, int wa
 		error = ENOTDIR;
 		goto out;
 	}
+	if (cnp->cn_nameiop == CREATE && dp == rootvnode) {
+		error = EEXIST;
+		goto out;
+	}
 	if (cnp->cn_nameiop != LOOKUP) {
 		error = EISDIR;
 		goto out;
@@ -1668,7 +1672,7 @@ lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, bool *new_dp_has_i
 	uio_t auio;
 	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
 	int need_newpathbuf;
-	u_int linklen;
+	u_int linklen = 0;
 	struct componentname *cnp = &ndp->ni_cnd;
 	vnode_t dp;
 	char *tmppn;

@@ -33,6 +33,7 @@
 #include "IOReporterDefs.h"
 
 #include <string.h>
+#include <sys/param.h>
 #include <IOKit/IORegistryEntry.h>
 
 #define super OSObject
@@ -187,7 +188,7 @@ IOReporter::init(IOService *reportingService,
 	_channelType = channelType;
 	// FIXME: need to look up dynamically
 	if (unit == kIOReportUnitHWTicks) {
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 		unit = kIOReportUnit24MHzTicks;
 #elif defined(__i386__) || defined(__x86_64__)
 		// Most, but not all Macs use 1GHz
@@ -660,6 +661,10 @@ finish:
 	return res;
 }
 
+static const uint32_t UNLOCK_PERIOD = 1 << 5;
+static_assert(powerof2(UNLOCK_PERIOD),
+    "unlock period not a power of 2: period check must be efficient");
+static const uint32_t UNLOCK_PERIOD_MASK = UNLOCK_PERIOD - 1;
 
 IOReturn
 IOReporter::handleUpdateReport(IOReportChannelList *channelList,
@@ -689,6 +694,19 @@ IOReporter::handleUpdateReport(IOReportChannelList *channelList,
 	}
 
 	for (chIdx = 0; chIdx < channelList->nchannels; chIdx++) {
+		// Drop the lock periodically to allow reporters to emit data, as they
+		// might be running in interrupt context.
+		//
+		// This is safe because the spinlock is really only protecting the
+		// element array, any other changes to the reporter will need to
+		// take the configuration lock.   Keeping the lock between channels
+		// isn't protecting us from anything, because there's no API to
+		// update multiple channels atomically anyway.
+		if ((chIdx & UNLOCK_PERIOD_MASK) == UNLOCK_PERIOD_MASK) {
+			unlockReporter();
+			delay(1);
+			lockReporter();
+		}
 		if (getChannelIndex(channelList->channels[chIdx].channel_id,
 		    &channel_index) == kIOReturnSuccess) {
 			//IORLOG("%s - found channel_id %llx @ index %d", __func__,

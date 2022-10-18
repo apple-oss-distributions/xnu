@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -466,6 +466,38 @@ os_log_debug_enabled(os_log_t log);
 })
 
 /*!
+ * @function os_log_at_time
+ *
+ * @abstract
+ * Log a message using a specific type and a timestamp.
+ *
+ * @discussion
+ * Will log a message with the provided os_log_type_t and a timestamp
+ * signifying a moment of a log message creation.
+ *
+ * @param log
+ * Pass OS_LOG_DEFAULT or a log object previously created with os_log_create.
+ *
+ * @param type
+ * Pass a valid type from os_log_type_t.
+ *
+ * @param ts
+ * Pass a uint64_t value (timestamp) of mach continuous time clock.
+ *
+ * @param format
+ * A format string to generate a human-readable log message when the log
+ * line is decoded. This string must be a constant string, not dynamically
+ * generated. Supports all standard printf types.
+ */
+#define os_log_at_time(log, type, ts, format, ...) __extension__({                       \
+    _Static_assert(__builtin_constant_p(format), "format string must be constant");         \
+    __attribute__((section("__TEXT,__os_log"))) static const char _os_log_fmt[] = format;   \
+    _os_log_verify_format_str(format, ##__VA_ARGS__);                                       \
+    _os_log_at_time(&__dso_handle, log, type, ts, _os_log_fmt, ##__VA_ARGS__);       \
+    __asm__(""); /* avoid tailcall */                                                       \
+})
+
+/*!
  * @function os_log_driverKit
  *
  * @abstract
@@ -534,47 +566,6 @@ typedef enum {
 void
 os_log_coprocessor_register_with_type(const char *uuid, const char *file_path, os_log_coproc_reg_t register_type);
 
-/*!
- * @function os_log_sensitive_debug
- *
- * @abstract
- * Insert a debug log message containing sensitive content (i.e., personal
- * identifying information).
- *
- * @discussion
- * Insert a debug log message containing sensitive content (i.e., personal
- * identifying information) in accordance with the preferences specified by
- * the provided log object.
- *
- * All strings are considered potentially sensitive, though this call
- * specifically signifies the message as containing sensitive content.
- * The message will be stored separately from other messages.
- *
- * When an os_activity_id_t is present, the log message will also be scoped by
- * that identifier.  Activities provide granular filtering of log messages
- * across threads and processes.
- *
- * There is a physical cap of 256 bytes per entry for dynamic content,
- * i.e., %s and %@, that can be written to the persistence store.  As such,
- * all content exceeding the limit will be truncated before written to disk.
- * Live streams will continue to show the full content.
- *
- * @param log
- * Pass OS_LOG_DEFAULT or a log object previously created with os_log_create.
- *
- * @param format
- * A format string to generate a human-readable log message when the log
- * line is decoded.  This string must be a constant string, not dynamically
- * generated.  Supports all standard printf types and %@ (objects).
- */
-#define os_log_sensitive_debug(log, format, ...) __extension__({                                                      \
-    _Static_assert(__builtin_constant_p(format), "format string must be constant");                                   \
-    __attribute__((section("__TEXT,__os_log_sens"))) static const char _os_log_fmt[] = format;                        \
-    _os_log_verify_format_str(format, ##__VA_ARGS__);                                                                 \
-    _os_log_sensitive(&__dso_handle, log, OS_LOG_TYPE_DEBUG, _os_log_fmt, ##__VA_ARGS__);                             \
-    __asm__(""); /* avoid tailcall */                                                                                 \
-})
-
 #ifdef XNU_KERNEL_PRIVATE
 #define os_log_with_startup_serial(log, format, ...) __extension__({                                                  \
     if (startup_serial_logging_active) { printf(format, ##__VA_ARGS__); }                                             \
@@ -603,6 +594,17 @@ __WATCHOS_AVAILABLE(6.0) __OSX_AVAILABLE(10.15) __IOS_AVAILABLE(13.0) __TVOS_AVA
 OS_EXPORT OS_NOTHROW
 int
 _os_log_internal_driverKit(void *dso, os_log_t log, os_log_type_t type, const char *message, ...) __osloglike(4, 5);
+
+/*!
+ * @function _os_log_internal_props
+ *
+ * @abstract
+ * Internal function used by macros.
+ */
+__WATCHOS_AVAILABLE(9.0) __OSX_AVAILABLE(13) __IOS_AVAILABLE(16.0) __TVOS_AVAILABLE(16.0)
+OS_EXPORT OS_NOTHROW
+void
+_os_log_at_time(void *dso, os_log_t log, os_log_type_t type, uint64_t ts, const char *message, ...) __osloglike(5, 6);
 
 __END_DECLS
 

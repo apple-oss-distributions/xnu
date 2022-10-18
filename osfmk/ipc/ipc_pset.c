@@ -182,7 +182,7 @@ ipc_pset_alloc_special(
 		return IPS_NULL;
 	}
 
-	os_atomic_init(&pset->ips_object.io_bits, io_makebits(TRUE, IOT_PORT_SET, 0));
+	os_atomic_init(&pset->ips_object.io_bits, io_makebits(IOT_PORT_SET));
 	os_atomic_init(&pset->ips_object.io_references, 1);
 
 	ipc_port_set_init(pset, MACH_PORT_SPECIAL_DEFAULT, 0);
@@ -850,6 +850,18 @@ filt_machporttouch(
 	ipc_object_t object = kn->kn_ipc_obj;
 	int result = 0;
 
+	/*
+	 * Specificying MACH_RCV_MSG or MACH_RCV_SYNC_PEEK during attach results in
+	 * allocation of a turnstile. Modifying the filter flags to include these
+	 * flags later, without a turnstile being allocated, leads to
+	 * inconsistencies.
+	 */
+	if ((kn->kn_sfflags ^ kev->fflags) & (MACH_RCV_MSG | MACH_RCV_SYNC_PEEK)) {
+		kev->flags |= EV_ERROR;
+		kev->data = EINVAL;
+		return 0;
+	}
+
 	/* copy in new settings and save off new input fflags */
 	kn->kn_sfflags = kev->fflags;
 	kn->kn_ext[0] = kev->ext[0];
@@ -878,14 +890,19 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	kevent_ctx_t kectx = NULL;
 
 	wait_result_t wresult;
-	mach_msg_option_t option;
-	mach_vm_address_t addr;
-	mach_msg_size_t size;
+	mach_msg_option64_t option64;
+	mach_vm_address_t msg_addr;
+	mach_msg_size_t max_msg_size, cpout_aux_size, cpout_msg_size;
+	uint32_t ppri;
+	mach_msg_qos_t oqos;
+
 	int result = FILTER_ACTIVE;
 
 	/* Capture current state */
 	knote_fill_kevent(kn, kev, MACH_PORT_NULL);
-	kev->ext[3] = 0; /* hide our port reference from userspace */
+
+	/* Clear port reference, use ext3 as size of msg aux data */
+	kev->ext[3] = 0;
 
 	/* If already deallocated/moved return one last EOF event */
 	if (kev->flags & EV_EOF) {
@@ -894,34 +911,45 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 
 	/*
 	 * Only honor supported receive options. If no options are
-	 * provided, just force a MACH_RCV_TOO_LARGE to detect the
+	 * provided, just force a MACH_RCV_LARGE to detect the
 	 * name of the port and sizeof the waiting message.
+	 *
+	 * Extend kn_sfflags to 64 bits.
 	 */
-	option = kn->kn_sfflags & (MACH_RCV_MSG | MACH_RCV_LARGE | MACH_RCV_LARGE_IDENTITY |
+	option64 = (mach_msg_option64_t)kn->kn_sfflags & (MACH_RCV_MSG |
+	    MACH_RCV_LARGE | MACH_RCV_LARGE_IDENTITY |
 	    MACH_RCV_TRAILER_MASK | MACH_RCV_VOUCHER | MACH_MSG_STRICT_REPLY);
 
-	if (option & MACH_RCV_MSG) {
-		addr = (mach_vm_address_t) kn->kn_ext[0];
-		size = (mach_msg_size_t) kn->kn_ext[1];
+	if (option64 & MACH_RCV_MSG) {
+		msg_addr = (mach_vm_address_t) kn->kn_ext[0];
+		max_msg_size = (mach_msg_size_t) kn->kn_ext[1];
+
+		/*
+		 * Copy out the incoming message as vector, and append aux data
+		 * immediately after the message proper (if any) and report its
+		 * size on ext3.
+		 */
+		option64 |= (MACH64_MSG_VECTOR | MACH64_RCV_LINEAR_VECTOR);
 
 		/*
 		 * If the kevent didn't specify a buffer and length, carve a buffer
 		 * from the filter processing data according to the flags.
 		 */
-		if (size == 0) {
+		if (max_msg_size == 0) {
 			kectx = kevent_get_context(self);
-			addr  = (mach_vm_address_t)kectx->kec_data_out;
-			size  = (mach_msg_size_t)kectx->kec_data_resid;
-			option |= (MACH_RCV_LARGE | MACH_RCV_LARGE_IDENTITY);
+			msg_addr  = (mach_vm_address_t)kectx->kec_data_out;
+			max_msg_size  = (mach_msg_size_t)kectx->kec_data_resid;
+			option64 |= (MACH_RCV_LARGE | MACH_RCV_LARGE_IDENTITY);
+			/* Receive vector linearly onto stack */
 			if (kectx->kec_process_flags & KEVENT_FLAG_STACK_DATA) {
-				option |= MACH_RCV_STACK;
+				option64 |= MACH64_RCV_STACK;
 			}
 		}
 	} else {
 		/* just detect the port name (if a set) and size of the first message */
-		option = MACH_RCV_LARGE;
-		addr = 0;
-		size = 0;
+		option64 = MACH_RCV_LARGE;
+		msg_addr = 0;
+		max_msg_size = 0;
 	}
 
 	/*
@@ -935,13 +963,19 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	 *       the knote has a reference on `object` that we can borrow.
 	 */
 	self->ith_object = object;
-	self->ith_msg_addr = addr;
-	self->ith_rsize = size;
+
+	/* Using msg_addr as combined buffer for message proper and aux */
+	self->ith_msg_addr = msg_addr;
+	self->ith_max_msize = max_msg_size;
 	self->ith_msize = 0;
-	self->ith_option = option;
+
+	self->ith_aux_addr = 0;
+	self->ith_max_asize = 0;
+	self->ith_asize = 0;
+
+	self->ith_option = option64;
 	self->ith_receiver_name = MACH_PORT_NULL;
-	self->ith_continuation = NULL;
-	option |= MACH_RCV_TIMEOUT; // never wait
+	option64 |= MACH_RCV_TIMEOUT; // never wait
 	self->ith_state = MACH_RCV_IN_PROGRESS;
 	self->ith_knote = kn;
 
@@ -949,9 +983,10 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 
 	wresult = ipc_mqueue_receive_on_thread_and_unlock(
 		io_waitq(object),
-		option,
-		size,         /* max_size */
-		0,         /* immediate timeout */
+		option64,
+		self->ith_max_msize,       /* max msg suze */
+		0,                         /* max aux size 0, using combined buffer */
+		0,                         /* immediate timeout */
 		THREAD_INTERRUPTIBLE,
 		self);
 	/* port unlocked */
@@ -959,6 +994,7 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	/* If we timed out, or the process is exiting, just zero.  */
 	if (wresult == THREAD_RESTART || self->ith_state == MACH_RCV_TIMED_OUT) {
 		assert(self->turnstile != TURNSTILE_NULL);
+		self->ith_knote = ITH_KNOTE_NULL;
 		return 0;
 	}
 
@@ -970,10 +1006,11 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	 * directly, we need to return the port name in
 	 * the kevent structure.
 	 */
-	if ((option & MACH_RCV_MSG) != MACH_RCV_MSG) {
+	if ((option64 & MACH_RCV_MSG) != MACH_RCV_MSG) {
 		assert(self->ith_state == MACH_RCV_TOO_LARGE);
 		assert(self->ith_kmsg == IKM_NULL);
 		kev->data = self->ith_receiver_name;
+		self->ith_knote = ITH_KNOTE_NULL;
 		return result;
 	}
 
@@ -1010,7 +1047,8 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	 * the results in the fflags field.
 	 */
 	io_reference(object);
-	kev->fflags = mach_msg_receive_results(&size);
+	kev->fflags = mach_msg_receive_results_kevent(&cpout_msg_size,
+	    &cpout_aux_size, &ppri, &oqos);
 
 	/* kmsg and object reference consumed */
 
@@ -1021,13 +1059,15 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	 */
 	if (kev->fflags == MACH_RCV_TOO_LARGE) {
 		kev->ext[1] = self->ith_msize;
-		if (option & MACH_RCV_LARGE_IDENTITY) {
+		kev->ext[3] = self->ith_asize;  /* Only lower 32 bits of ext3 are used */
+		if (option64 & MACH_RCV_LARGE_IDENTITY) {
 			kev->data = self->ith_receiver_name;
 		} else {
 			kev->data = MACH_PORT_NULL;
 		}
 	} else {
-		kev->ext[1] = size;
+		kev->ext[1] = cpout_msg_size;
+		kev->ext[3] = cpout_aux_size; /* Only lower 32 bits of ext3 are used */
 		kev->data = MACH_PORT_NULL;
 	}
 
@@ -1037,13 +1077,13 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	 * other parameters for future use.
 	 */
 	if (kectx) {
-		assert(kectx->kec_data_resid >= size);
-		kectx->kec_data_resid -= size;
+		assert(kectx->kec_data_resid >= cpout_msg_size + cpout_aux_size);
+		kectx->kec_data_resid -= cpout_msg_size + cpout_aux_size;
 		if ((kectx->kec_process_flags & KEVENT_FLAG_STACK_DATA) == 0) {
 			kev->ext[0] = kectx->kec_data_out;
-			kectx->kec_data_out += size;
+			kectx->kec_data_out += cpout_msg_size + cpout_aux_size;
 		} else {
-			assert(option & MACH_RCV_STACK);
+			assert(option64 & MACH64_RCV_STACK);
 			kev->ext[0] = kectx->kec_data_out + kectx->kec_data_resid;
 		}
 	}
@@ -1051,15 +1091,13 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	/*
 	 * Apply message-based QoS values to output kevent as prescribed.
 	 * The kev->ext[2] field gets (msg-qos << 32) | (override-qos).
-	 *
-	 * The mach_msg_receive_results() call saved off the message
-	 * QoS values in the continuation save area on successful receive.
 	 */
 	if (kev->fflags == MACH_MSG_SUCCESS) {
-		kev->ext[2] = ((uint64_t)self->ith_ppriority << 32) |
-		    _pthread_priority_make_from_thread_qos(self->ith_qos_override, 0, 0);
+		kev->ext[2] = ((uint64_t)ppri << 32) |
+		    _pthread_priority_make_from_thread_qos(oqos, 0, 0);
 	}
 
+	self->ith_knote = ITH_KNOTE_NULL;
 	return result;
 }
 

@@ -54,7 +54,6 @@
  * the rights to redistribute these changes.
  */
 
-#include <mach_debug.h>
 #include <mach_ldebug.h>
 
 #include <sys/kdebug.h>
@@ -517,6 +516,29 @@ boolean_t
 machine_thread_on_core(thread_t thread)
 {
 	return thread->machine.specFlags & OnProc;
+}
+
+boolean_t
+machine_thread_on_core_allow_invalid(thread_t thread)
+{
+	extern int _copyin_atomic32(const char *src, uint32_t *dst);
+	uint32_t flags;
+
+	/*
+	 * Utilize that the thread zone is sequestered which means
+	 * that this kernel-to-kernel copyin can't read data
+	 * from anything but a thread, zeroed or freed memory.
+	 */
+	assert(get_preemption_level() > 0);
+	thread = pgz_decode_allow_invalid(thread, ZONE_ID_THREAD);
+	if (thread == THREAD_NULL) {
+		return false;
+	}
+	thread_require(thread);
+	if (_copyin_atomic32((void *)&thread->machine.specFlags, &flags) == 0) {
+		return flags & OnProc;
+	}
+	return false;
 }
 
 thread_t

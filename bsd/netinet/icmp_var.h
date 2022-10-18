@@ -109,14 +109,6 @@ struct  icmpstat {
 }
 
 SYSCTL_DECL(_net_inet_icmp);
-#ifdef ICMP_BANDLIM
-extern boolean_t badport_bandlim(int which);
-#endif
-#define BANDLIM_ICMP_UNREACH 0
-#define BANDLIM_ICMP_ECHO 1
-#define BANDLIM_ICMP_TSTAMP 2
-#define BANDLIM_MAX 4
-
 extern struct   icmpstat icmpstat;
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* _NETINET_ICMP_VAR_H_ */

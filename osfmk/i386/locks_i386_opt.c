@@ -48,6 +48,8 @@
 #include <sys/kdebug.h>
 #include <i386/locks_i386_inlines.h>
 
+#if LCK_MTX_USE_ARCH
+
 /*
  * Fast path routines for lck_mtx locking and unlocking functions.
  * Fast paths will try a single compare and swap instruction to acquire/release the lock
@@ -128,11 +130,13 @@ lck_mtx_lock(
 	/*
 	 * Fast path only if the mutex is not held
 	 * interlock is not contended and there are no waiters.
-	 * Indirect mutexes will fall through the slow path as
+	 *
+	 * Mutexes with extensions will fall through the slow path as
 	 * well as destroyed mutexes.
 	 */
 
-	prev = state & ~(LCK_MTX_ILOCKED_MSK | LCK_MTX_MLOCKED_MSK | LCK_MTX_WAITERS_MSK);
+	prev = state & ~(LCK_MTX_ILOCKED_MSK | LCK_MTX_MLOCKED_MSK |
+	    LCK_MTX_WAITERS_MSK | LCK_MTX_PROFILE_MSK);
 	state = prev | LCK_MTX_ILOCKED_MSK | LCK_MTX_MLOCKED_MSK;
 
 	disable_preemption();
@@ -143,9 +147,8 @@ lck_mtx_lock(
 
 	/* mutex acquired, interlock acquired and preemption disabled */
 
-	thread_t thread = current_thread();
 	/* record owner of mutex */
-	ordered_store_mtx_owner(lock, (uintptr_t)thread);
+	ordered_store_mtx_owner(lock, current_thread()->ctid);
 
 #if MACH_LDEBUG
 	if (thread) {
@@ -154,7 +157,7 @@ lck_mtx_lock(
 #endif
 
 	/* release interlock and re-enable preemption */
-	lck_mtx_lock_finish_inline(lock, state, FALSE);
+	lck_mtx_lock_finish_inline(lock, state);
 }
 
 /*
@@ -182,11 +185,13 @@ lck_mtx_try_lock(
 	/*
 	 * Fast path only if the mutex is not held
 	 * interlock is not contended and there are no waiters.
-	 * Indirect mutexes will fall through the slow path as
+	 *
+	 * Mutexes with extensions will fall through the slow path as
 	 * well as destroyed mutexes.
 	 */
 
-	prev = state & ~(LCK_MTX_ILOCKED_MSK | LCK_MTX_MLOCKED_MSK | LCK_MTX_WAITERS_MSK);
+	prev = state & ~(LCK_MTX_ILOCKED_MSK | LCK_MTX_MLOCKED_MSK |
+	    LCK_MTX_WAITERS_MSK | LCK_MTX_PROFILE_MSK);
 	state = prev | LCK_MTX_ILOCKED_MSK | LCK_MTX_MLOCKED_MSK;
 
 	disable_preemption();
@@ -197,9 +202,8 @@ lck_mtx_try_lock(
 
 	/* mutex acquired, interlock acquired and preemption disabled */
 
-	thread_t thread = current_thread();
 	/* record owner of mutex */
-	ordered_store_mtx_owner(lock, (uintptr_t)thread);
+	ordered_store_mtx_owner(lock, current_thread()->ctid);
 
 #if MACH_LDEBUG
 	if (thread) {
@@ -244,11 +248,12 @@ lck_mtx_lock_spin_always(
 	 * Fast path only if the mutex is not held
 	 * neither as mutex nor as spin and
 	 * interlock is not contended.
-	 * Indirect mutexes will fall through the slow path as
+	 *
+	 * Mutexes with extensions will fall through the slow path as
 	 * well as destroyed mutexes.
 	 */
 
-	if (state & (LCK_MTX_ILOCKED_MSK | LCK_MTX_SPIN_MSK)) {
+	if (state & (LCK_MTX_ILOCKED_MSK | LCK_MTX_SPIN_MSK | LCK_MTX_PROFILE_MSK)) {
 		return lck_mtx_lock_spin_slow(lock);
 	}
 
@@ -264,9 +269,8 @@ lck_mtx_lock_spin_always(
 
 	/* mutex acquired as spinlock, interlock acquired and preemption disabled */
 
-	thread_t thread = current_thread();
 	/* record owner of mutex */
-	ordered_store_mtx_owner(lock, (uintptr_t)thread);
+	ordered_store_mtx_owner(lock, current_thread()->ctid);
 
 #if MACH_LDEBUG
 	if (thread) {
@@ -274,9 +278,7 @@ lck_mtx_lock_spin_always(
 	}
 #endif
 
-#if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_SPIN_ACQUIRE, lock, 0);
-#endif
+	LCK_MTX_ACQUIRED(lock, lock->lck_mtx_grp, true, false);
 	/* return with the interlock held and preemption disabled */
 	return;
 }
@@ -335,12 +337,14 @@ lck_mtx_try_lock_spin_always(
 	 * Fast path only if the mutex is not held
 	 * neither as mutex nor as spin and
 	 * interlock is not contended.
-	 * Indirect mutexes will fall through the slow path as
+	 *
+	 * Mutexes with extensions will fall through the slow path as
 	 * well as destroyed mutexes.
 	 */
 
 	/* Note LCK_MTX_SPIN_MSK is set only if LCK_MTX_ILOCKED_MSK is set */
-	prev = state & ~(LCK_MTX_ILOCKED_MSK | LCK_MTX_MLOCKED_MSK);
+	prev = state & ~(LCK_MTX_ILOCKED_MSK | LCK_MTX_MLOCKED_MSK |
+	    LCK_MTX_PROFILE_MSK);
 	state = prev | LCK_MTX_ILOCKED_MSK | LCK_MTX_SPIN_MSK;
 
 	disable_preemption();
@@ -351,9 +355,8 @@ lck_mtx_try_lock_spin_always(
 
 	/* mutex acquired as spinlock, interlock acquired and preemption disabled */
 
-	thread_t thread = current_thread();
 	/* record owner of mutex */
-	ordered_store_mtx_owner(lock, (uintptr_t)thread);
+	ordered_store_mtx_owner(lock, current_thread()->ctid);
 
 #if MACH_LDEBUG
 	if (thread) {
@@ -419,16 +422,18 @@ lck_mtx_unlock(
 	 * Only full mutex will go through the fast path
 	 * (if the lock was acquired as a spinlock it will
 	 * fall through the slow path).
-	 * If there are waiters it will fall
-	 * through the slow path.
-	 * If it is indirect it will fall through the slow path.
+	 * If there are waiters it will fall through the slow path.
+	 *
+	 * Mutexes with extensions will fall through the slow path as
+	 * well as destroyed mutexes.
 	 */
 
 	/*
 	 * Fast path state:
 	 * interlock not held, no waiters, no promotion and mutex held.
 	 */
-	prev = state & ~(LCK_MTX_ILOCKED_MSK | LCK_MTX_WAITERS_MSK);
+	prev = state & ~(LCK_MTX_ILOCKED_MSK | LCK_MTX_WAITERS_MSK |
+	    LCK_MTX_PROFILE_MSK);
 	prev |= LCK_MTX_MLOCKED_MSK;
 
 	state = prev | LCK_MTX_ILOCKED_MSK;
@@ -445,8 +450,7 @@ lck_mtx_unlock(
 	/* mutex released, interlock acquired and preemption disabled */
 
 #if DEVELOPMENT | DEBUG
-	thread_t owner = (thread_t)lock->lck_mtx_owner;
-	if (__improbable(owner != current_thread())) {
+	if (__improbable(lock->lck_mtx_owner != current_thread()->ctid)) {
 		lck_mtx_owner_check_panic(lock);
 	}
 #endif
@@ -465,5 +469,7 @@ lck_mtx_unlock(
 #endif  /* MACH_LDEBUG */
 
 	/* re-enable preemption */
-	lck_mtx_unlock_finish_inline(lock, FALSE);
+	lck_mtx_unlock_finish_inline(lock, state);
 }
+
+#endif /* LCK_MTX_USE_ARCH */

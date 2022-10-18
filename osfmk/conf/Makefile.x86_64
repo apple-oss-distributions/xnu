@@ -28,6 +28,11 @@ boot_pt.o_CFLAGS_ADD += $(CFLAGS_NOLTO_FLAG)
 
 # fast path lock C leaf functions must be built without stack frames
 locks_i386_opt.o_CFLAGS_ADD += -momit-leaf-frame-pointer -O2
+ifeq ($(KASAN),1)
+# rdar://92180818: the fakestack implementation uses ticket locks
+# so we need to disable stack use-after-return checks, to avoid deadlocks.
+lock_ticket.o_CFLAGS_ADD += -fsanitize-address-use-after-return=never
+endif
 
 ######################################################################
 #END	Machine dependent Makefile fragment for x86_64

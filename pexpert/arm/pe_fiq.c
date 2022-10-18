@@ -3,17 +3,13 @@
  */
 
 #include <stdint.h>
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #include <kern/clock.h>
 #include <mach/mach_time.h>
 #include <machine/atomic.h>
 #include <machine/machine_routines.h>
 #include <pexpert/device_tree.h>
-#if defined(__arm__)
-#include <pexpert/arm/board_config.h>
-#elif defined(__arm64__)
 #include <pexpert/arm64/board_config.h>
-#endif
 
 
 #if HAS_GIC_V3

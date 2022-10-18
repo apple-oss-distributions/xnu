@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -229,7 +229,7 @@ pmap_memory_region_t pmap_memory_regions[PMAP_MEMORY_REGIONS_SIZE];
 #define current_pmap()          (vm_map_pmap(current_thread()->map))
 
 struct pmap     kernel_pmap_store;
-SECURITY_READ_ONLY_LATE(pmap_t)          kernel_pmap = NULL;
+const pmap_t    kernel_pmap = &kernel_pmap_store;
 SECURITY_READ_ONLY_LATE(zone_t)          pmap_zone; /* zone of pmap structures */
 SECURITY_READ_ONLY_LATE(zone_t)          pmap_anchor_zone;
 SECURITY_READ_ONLY_LATE(zone_t)          pmap_uanchor_zone;
@@ -369,8 +369,11 @@ pmap_ro_zone_validate_element_dst(
 	vm_offset_t         offset,
 	vm_size_t           new_data_size)
 {
-	vm_size_t elem_size = zone_elem_size_ro(zid);
-	vm_offset_t sum = 0, page = trunc_page(va);
+	vm_size_t elem_size = zone_ro_size_params[zid].z_elem_size;
+
+	/* Check element is from correct zone and properly aligned */
+	zone_require_ro(zid, elem_size, (void*)va);
+
 	if (__improbable(new_data_size > (elem_size - offset))) {
 		panic("%s: New data size %lu too large for elem size %lu at addr %p",
 		    __func__, (uintptr_t)new_data_size, (uintptr_t)elem_size, (void*)va);
@@ -379,18 +382,6 @@ pmap_ro_zone_validate_element_dst(
 		panic("%s: Offset %lu too large for elem size %lu at addr %p",
 		    __func__, (uintptr_t)offset, (uintptr_t)elem_size, (void*)va);
 	}
-	if (__improbable(os_add3_overflow(va, offset, new_data_size, &sum))) {
-		panic("%s: Integer addition overflow %p + %lu + %lu = %lu",
-		    __func__, (void*)va, (uintptr_t)offset, (uintptr_t) new_data_size,
-		    (uintptr_t)sum);
-	}
-	if (__improbable((va - page) % elem_size)) {
-		panic("%s: Start of element %p is not aligned to element size %lu",
-		    __func__, (void *)va, (uintptr_t)elem_size);
-	}
-
-	/* Check element is from correct zone */
-	zone_require_ro(zid, elem_size, (void*)va);
 }
 
 static void
@@ -497,7 +488,6 @@ pmap_bootstrap(
 	 *	correctly at this part of the boot sequence.
 	 */
 
-	kernel_pmap = &kernel_pmap_store;
 	os_ref_init(&kernel_pmap->ref_count, NULL);
 #if DEVELOPMENT || DEBUG
 	kernel_pmap->nx_enabled = TRUE;
@@ -764,11 +754,21 @@ pmap_pv_fixup(vm_offset_t start_va, vm_offset_t end_va)
 			pv_h->va_and_flags = start_va;
 			pv_h->pmap = kernel_pmap;
 			queue_init(&pv_h->qlink);
+			/*
+			 * Note that pmap_query_pagesize does not enforce start_va is aligned
+			 * on a 2M boundary if it's within a large page
+			 */
 			if (pmap_query_pagesize(kernel_pmap, start_va) == I386_LPGBYTES) {
 				pgsz = I386_LPGBYTES;
 			}
 		}
-		start_va += pgsz;
+		if (os_add_overflow(start_va, pgsz, &start_va)) {
+#if DEVELOPMENT || DEBUG
+			panic("pmap_pv_fixup: Unexpected address wrap (0x%lx after adding 0x%x)", start_va, pgsz);
+#else
+			start_va = end_va;
+#endif
+		}
 	}
 }
 
@@ -816,13 +816,10 @@ pmap_init(void)
 	    + pv_hash_lock_table_size((npvhashbuckets))
 	    + npages);
 	s = round_page(s);
-	if (kernel_memory_allocate(kernel_map, &addr, s, 0,
-	    KMA_KOBJECT | KMA_PERMANENT, VM_KERN_MEMORY_PMAP)
-	    != KERN_SUCCESS) {
-		panic("pmap_init");
-	}
 
-	memset((char *)addr, 0, s);
+	kmem_alloc(kernel_map, &addr, s,
+	    KMA_NOFAIL | KMA_ZERO | KMA_KOBJECT | KMA_PERMANENT,
+	    VM_KERN_MEMORY_PMAP);
 
 	vaddr = addr;
 	vsize = s;
@@ -937,9 +934,13 @@ pmap_init(void)
 void
 pmap_mark_range(pmap_t npmap, uint64_t sv, uint64_t nxrosz, boolean_t NX, boolean_t ro)
 {
-	uint64_t ev = sv + nxrosz, cv = sv;
+	uint64_t ev, cv = sv;
 	pd_entry_t *pdep;
 	pt_entry_t *ptep = NULL;
+
+	if (os_add_overflow(sv, nxrosz, &ev)) {
+		panic("pmap_mark_range: Unexpected address overflow: start=0x%llx size=0x%llx", sv, nxrosz);
+	}
 
 	/* XXX what if nxrosz is 0?  we end up marking the page whose address is passed in via sv -- is that kosher? */
 	assert(!is_ept_pmap(npmap));
@@ -972,9 +973,13 @@ pmap_mark_range(pmap_t npmap, uint64_t sv, uint64_t nxrosz, boolean_t NX, boolea
 			} else {
 				*pdep |= INTEL_PTE_WRITE;
 			}
-			cv += NBPD;
-			cv &= ~((uint64_t) PDEMASK);
-			pdep = pmap_pde(npmap, cv);
+
+			if (os_add_overflow(cv, NBPD, &cv)) {
+				cv = ev;
+			} else {
+				cv &= ~((uint64_t) PDEMASK);
+				pdep = pmap_pde(npmap, cv);
+			}
 			continue;
 		}
 
@@ -1890,10 +1895,17 @@ pmap_protect_options(
 	cur_vaddr = sva;
 	while (sva < eva) {
 		uint64_t vaddr_incr;
-		lva = (sva + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE - 1);
-		if (lva > eva) {
+
+		if (os_add_overflow(sva, PDE_MAPPED_SIZE, &lva)) {
 			lva = eva;
+		} else {
+			lva &= ~(PDE_MAPPED_SIZE - 1);
+
+			if (lva > eva) {
+				lva = eva;
+			}
 		}
+
 		pde = pmap_pde(map, sva);
 		if (pde && (*pde & PTE_VALID_MASK(is_ept))) {
 			if (*pde & PTE_PS) {
@@ -2616,7 +2628,7 @@ pmap_list_resident_pages(
 #if CONFIG_COREDUMP
 /* temporary workaround */
 boolean_t
-coredumpok(__unused vm_map_t map, __unused mach_vm_offset_t va)
+coredumpok(vm_map_t map, mach_vm_offset_t va)
 {
 #if 0
 	pt_entry_t     *ptep;
@@ -2627,6 +2639,9 @@ coredumpok(__unused vm_map_t map, __unused mach_vm_offset_t va)
 	}
 	return (*ptep & (INTEL_PTE_NCACHE | INTEL_PTE_WIRED)) != (INTEL_PTE_NCACHE | INTEL_PTE_WIRED);
 #else
+	if (vm_map_entry_has_device_pager(map, va)) {
+		return FALSE;
+	}
 	return TRUE;
 #endif
 }
@@ -3232,7 +3247,7 @@ pmap_check_ledgers(
 	int     pid;
 	char    *procname;
 
-	if (pmap->pmap_pid == 0) {
+	if (pmap->pmap_pid == 0 || pmap->pmap_pid == -1) {
 		/*
 		 * This pmap was not or is no longer fully associated
 		 * with a task (e.g. the old pmap after a fork()/exec() or
@@ -3260,7 +3275,7 @@ pmap_set_process(
 	int pid,
 	char *procname)
 {
-	if (pmap == NULL) {
+	if (pmap == NULL || pmap->pmap_pid == -1) {
 		return;
 	}
 
@@ -3336,40 +3351,6 @@ pmap_verify_noncacheable(uintptr_t vaddr)
 	panic("pmap_verify_noncacheable: IO read from a cacheable address? address: 0x%lx, PTE: %p, *PTE: 0x%llx", vaddr, ptep, *ptep);
 	/*NOTREACHED*/
 	return 0;
-}
-
-void
-trust_cache_init(void)
-{
-	// Unsupported on this architecture.
-}
-
-kern_return_t
-pmap_load_legacy_trust_cache(struct pmap_legacy_trust_cache __unused *trust_cache,
-    const vm_size_t __unused trust_cache_len)
-{
-	// Unsupported on this architecture.
-	return KERN_NOT_SUPPORTED;
-}
-
-pmap_tc_ret_t
-pmap_load_image4_trust_cache(struct pmap_image4_trust_cache __unused *trust_cache,
-    const vm_size_t __unused trust_cache_len,
-    uint8_t const * __unused img4_manifest,
-    const vm_size_t __unused img4_manifest_buffer_len,
-    const vm_size_t __unused img4_manifest_actual_len,
-    bool __unused dry_run)
-{
-	// Unsupported on this architecture.
-	return PMAP_TC_UNKNOWN_FORMAT;
-}
-
-
-bool
-pmap_is_trust_cache_loaded(const uuid_t __unused uuid)
-{
-	// Unsupported on this architecture.
-	return false;
 }
 
 bool
@@ -3511,6 +3492,20 @@ pmap_has_ppl(void)
 	return false;
 }
 
+bool
+pmap_has_iofilter_protected_write()
+{
+	// Not supported on this architecture.
+	return false;
+}
+
+__attribute__((__noreturn__))
+void
+pmap_iofilter_protected_write(__unused vm_address_t addr, __unused uint64_t value, __unused uint64_t width)
+{
+	panic("%s called on an unsupported platform.", __FUNCTION__);
+}
+
 void* __attribute__((noreturn))
 pmap_image4_pmap_data(
 	__unused size_t *allocated_size)
@@ -3558,18 +3553,6 @@ pmap_image4_copy_object(
 	__unused size_t *object_length)
 {
 	panic("PMAP_IMG4: copy object API not supported on this architecture");
-}
-
-void
-pmap_lockdown_image4_slab(__unused vm_offset_t slab, __unused vm_size_t slab_len, __unused uint64_t flags)
-{
-	// Unsupported on this architecture.
-}
-
-void
-pmap_lockdown_image4_late_slab(__unused vm_offset_t slab, __unused vm_size_t slab_len, __unused uint64_t flags)
-{
-	// Unsupported on this architecture.
 }
 
 kern_return_t

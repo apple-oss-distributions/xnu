@@ -3,6 +3,8 @@
 #include <mach/mach_error.h>
 #include <mach/mach_host.h>
 
+#include "drop_priv.h"
+
 T_GLOBAL_META(T_META_NAMESPACE("xnu.debugging"));
 
 /*
@@ -10,8 +12,6 @@ T_GLOBAL_META(T_META_NAMESPACE("xnu.debugging"));
  * of the upper 8 bits to ensure round-tripping.
  */
 #define LIBTRACE_PRIVATE_DATA  0x01000000
-
-extern void drop_priv(void);
 
 static bool _needs_reset;
 static uint32_t _original;
@@ -79,6 +79,8 @@ T_DECL(atm_diagnostic_flag_unentitled_unprivileged,
     "expect to fail to set the atm_diagnostic_flag (unentitled, unprivileged)",
     T_META_ASROOT(false))
 {
-	drop_priv();
+	if (running_as_root()) {
+		drop_priv();
+	}
 	_toggle_atm_diagnostic_flag();
 }

@@ -58,35 +58,47 @@
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
 #include <arm/pmap.h>
-#include <arm/io_map_entries.h>
 #include <san/kasan.h>
 
-extern vm_offset_t      virtual_space_start;     /* Next available kernel VA */
+extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
 
-/*
- * Allocate and map memory for devices that may need to be mapped before
- * Mach VM is running.
- */
-vm_offset_t
-io_map(vm_map_offset_t phys_addr, vm_size_t size, unsigned int flags)
+#define IO_MAP_SIZE            (8ul << 20)
+
+__startup_data static struct mach_vm_range io_range;
+static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
+KMEM_RANGE_REGISTER_STATIC(io_submap, &io_range, IO_MAP_SIZE);
+
+__startup_func
+static void
+io_map_init(void)
 {
-	return io_map_with_prot(phys_addr, size, flags, VM_PROT_READ | VM_PROT_WRITE);
+	vm_map_will_allocate_early_map(&io_submap);
+	io_submap = kmem_suballoc(kernel_map, &io_range.min_address, IO_MAP_SIZE,
+	    VM_MAP_CREATE_NEVER_FAULTS | VM_MAP_CREATE_DISABLE_HOLELIST,
+	    VM_FLAGS_FIXED_RANGE_SUBALLOC, KMS_PERMANENT | KMS_NOFAIL,
+	    VM_KERN_MEMORY_IOKIT).kmr_submap;
 }
+STARTUP(KMEM, STARTUP_RANK_LAST, io_map_init);
 
 /*
  * Allocate and map memory for devices that may need to be mapped before
  * Mach VM is running. Allows caller to specify mapping protection
  */
 vm_offset_t
-io_map_with_prot(vm_map_offset_t phys_addr, vm_size_t size, unsigned int flags, vm_prot_t prot)
+io_map(
+	vm_map_offset_t         phys_addr,
+	vm_size_t               size,
+	unsigned int            flags,
+	vm_prot_t               prot,
+	bool                    unmappable)
 {
-	vm_offset_t     start, start_offset;
+	vm_offset_t start_offset = phys_addr - trunc_page(phys_addr);
+	vm_offset_t alloc_size   = round_page(size + start_offset);
+	vm_offset_t start;
 
-	start_offset = phys_addr & PAGE_MASK;
-	size += start_offset;
-	phys_addr -= start_offset;
+	phys_addr = trunc_page(phys_addr);
 
-	if (kernel_map == VM_MAP_NULL) {
+	if (startup_phase < STARTUP_SUB_KMEM) {
 		/*
 		 * VM is not initialized.  Grab memory.
 		 */
@@ -96,27 +108,26 @@ io_map_with_prot(vm_map_offset_t phys_addr, vm_size_t size, unsigned int flags, 
 		assert(flags == VM_WIMG_WCOMB || flags == VM_WIMG_IO);
 
 		if (flags == VM_WIMG_WCOMB) {
-			(void) pmap_map_bd_with_options(start, phys_addr, phys_addr + round_page(size),
-			    prot, PMAP_MAP_BD_WCOMB);
+			pmap_map_bd_with_options(start, phys_addr,
+			    phys_addr + alloc_size, prot, PMAP_MAP_BD_WCOMB);
 		} else {
-			(void) pmap_map_bd(start, phys_addr, phys_addr + round_page(size),
-			    prot);
+			pmap_map_bd(start, phys_addr, phys_addr + alloc_size, prot);
 		}
-	} else {
-		(void) kmem_alloc_pageable(kernel_map, &start, round_page(size), VM_KERN_MEMORY_IOKIT);
-		(void) pmap_map(start, phys_addr, phys_addr + round_page(size),
-		    prot, flags);
-	}
 #if KASAN
-	kasan_notify_address(start + start_offset, size);
+		kasan_notify_address(start + start_offset, size);
 #endif
+	} else {
+		kma_flags_t kmaflags = KMA_NOFAIL | KMA_PAGEABLE;
+
+		if (unmappable) {
+			kmaflags |= KMA_DATA;
+		} else {
+			kmaflags |= KMA_PERMANENT;
+		}
+
+		kmem_alloc(unmappable ? kernel_map : io_submap,
+		    &start, alloc_size, kmaflags, VM_KERN_MEMORY_IOKIT);
+		pmap_map(start, phys_addr, phys_addr + alloc_size, prot, flags);
+	}
 	return start + start_offset;
-}
-
-/* just wrap this since io_map handles it */
-
-vm_offset_t
-io_map_spec(vm_map_offset_t phys_addr, vm_size_t size, unsigned int flags)
-{
-	return io_map(phys_addr, size, flags);
 }

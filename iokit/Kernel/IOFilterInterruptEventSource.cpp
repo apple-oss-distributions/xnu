@@ -146,7 +146,7 @@ IOFilterInterruptEventSource
 	}
 
 	if (me
-	    && !me->init(inOwner, (Action) NULL, (Filter) filter, inProvider, inIntIndex)) {
+	    && !me->init(inOwner, (Action) NULL, (Filter) (void (*)(void))filter, inProvider, inIntIndex)) {
 		Block_release(filter);
 		return nullptr;
 	}

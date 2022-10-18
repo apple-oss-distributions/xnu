@@ -184,10 +184,10 @@ extern void socket_post_kev_msg_closed(struct socket *);
  * Hash table for IPv4 addresses.
  */
 extern TAILQ_HEAD(in_ifaddrhead, in_ifaddr) in_ifaddrhead;
-extern TAILQ_HEAD(in_ifaddrhashhead, in_ifaddr) * in_ifaddrhashtbl;
+TAILQ_HEAD(in_ifaddrhashhead, in_ifaddr);
 extern lck_rw_t in_ifaddr_rwlock;
 
-#define INADDR_HASH(x)  (&in_ifaddrhashtbl[inaddr_hashval(x)])
+#define INADDR_HASH(x)  inaddr_hashlookup(x)
 
 extern  u_char  inetctlerrmap[];
 
@@ -519,7 +519,8 @@ extern void ip_input(struct mbuf *);
 extern void ip_input_process_list(struct mbuf *);
 extern int in_ifadown(struct ifaddr *ifa, int);
 extern void in_ifscrub(struct ifnet *, struct in_ifaddr *, int);
-extern u_int32_t inaddr_hashval(u_int32_t);
+extern uint32_t inaddr_hashval(uint32_t);
+extern struct in_ifaddrhashhead *inaddr_hashlookup(uint32_t);
 extern void in_purgeaddrs(struct ifnet *);
 extern void gre_input(struct mbuf *, int);
 extern void imf_leave(struct in_mfilter *);

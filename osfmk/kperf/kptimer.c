@@ -122,11 +122,6 @@ const uint64_t kptimer_minperiods_ns[KTPL_MAX] = {
 	[KTPL_BG] = 1 * NSEC_PER_MSEC,
 	[KTPL_FG_PET] = 2 * NSEC_PER_MSEC,
 	[KTPL_BG_PET] = 10 * NSEC_PER_MSEC,
-#elif defined(__arm__)
-	[KTPL_FG] = 100 * NSEC_PER_USEC,
-	[KTPL_BG] = 10 * NSEC_PER_MSEC,
-	[KTPL_FG_PET] = 2 * NSEC_PER_MSEC,
-	[KTPL_BG_PET] = 50 * NSEC_PER_MSEC,
 #else
 #error unexpected architecture
 #endif

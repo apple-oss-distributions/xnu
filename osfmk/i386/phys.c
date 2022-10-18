@@ -54,7 +54,6 @@
  * the rights to redistribute these changes.
  */
 
-#include <mach_debug.h>
 #include <mach_ldebug.h>
 
 #include <sys/kdebug.h>
@@ -195,7 +194,7 @@ kvtophys(
 }
 
 extern pt_entry_t *debugger_ptep;
-extern vm_map_offset_t debugger_window_kva;
+extern vm_offset_t debugger_window_kva;
 extern int _bcopy(const void *, void *, vm_size_t);
 extern int _bcopy2(const void *, void *);
 extern int _bcopy4(const void *, void *);

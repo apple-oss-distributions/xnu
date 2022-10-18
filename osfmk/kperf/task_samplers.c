@@ -55,7 +55,7 @@ kperf_task_snapshot_sample(task_t task, struct kperf_task_snapshot *tksn)
 	}
 #if CONFIG_MEMORYSTATUS
 	boolean_t dirty = FALSE, dirty_tracked = FALSE, allow_idle_exit = FALSE;
-	memorystatus_proc_flags_unsafe(task->bsd_info, &dirty, &dirty_tracked, &allow_idle_exit);
+	memorystatus_proc_flags_unsafe(get_bsdtask_info(task), &dirty, &dirty_tracked, &allow_idle_exit);
 	if (dirty) {
 		tksn->kptksn_flags |= KPERF_TASK_FLAG_DIRTY;
 	}
@@ -69,8 +69,9 @@ kperf_task_snapshot_sample(task_t task, struct kperf_task_snapshot *tksn)
 
 	tksn->kptksn_suspend_count = task->suspend_count;
 	tksn->kptksn_pageins = (integer_t) MIN(counter_load(&task->pageins), INT32_MAX);
-	tksn->kptksn_user_time_in_terminated_threads = task->total_user_time;
-	tksn->kptksn_system_time_in_terminated_threads = task->total_system_time;
+	struct recount_times_mach times = recount_task_terminated_times(task);
+	tksn->kptksn_user_time_in_terminated_threads = times.rtm_user;
+	tksn->kptksn_system_time_in_terminated_threads = times.rtm_system;
 
 	BUF_INFO(PERF_TK_SNAP_SAMPLE | DBG_FUNC_END);
 }

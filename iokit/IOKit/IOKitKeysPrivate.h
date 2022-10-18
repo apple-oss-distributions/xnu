@@ -30,6 +30,7 @@
 #define _IOKIT_IOKITKEYSPRIVATE_H
 
 #include <IOKit/IOKitKeys.h>
+#include <libkern/OSTypes.h>
 
 // properties found in the registry root
 #define kIOConsoleLockedKey                     "IOConsoleLocked"               /* value is OSBoolean */
@@ -121,6 +122,13 @@ enum {
 	kIOClassNameOverrideNone = 0x00000001,
 };
 
+#define kIOWaitQuietPanicsEntitlement "com.apple.private.security.waitquiet-panics"
+#define kIOSystemStateEntitlement "com.apple.private.iokit.systemstate"
+
+enum {
+	kIOWaitQuietPanicOnFailure = 0x00000001,
+};
+
 #define kIOServiceLegacyMatchingRegistryIDKey "IOServiceLegacyMatchingRegistryID"
 
 #define kIOServiceMatchDeferredKey      "IOServiceMatchDeferred"
@@ -130,5 +138,34 @@ enum {
 #define kIOPrimaryDriverTerminateOptionsKey "IOPrimaryDriverTerminateOptions"
 
 #define kIOServiceNotificationUserKey   "IOServiceNotificationUser"
+
+// IONVRAMSystemVariableList:
+// "one-time-boot-command" - Needed for diags customer install flows
+// "prevent-restores" - Keep for factory <rdar://problem/70476321>
+// "sep-debug-args" - Needed to simplify debug flows for SEP
+// "StartupMute" - Set by customers via nvram tool
+
+#define IONVRAMSystemVariableList "allow-root-hash-mismatch", \
+	                          "auto-boot", \
+	                          "auto-boot-halt-stage", \
+	                          "base-system-path", \
+	                          "boot-args", \
+	                          "boot-command", \
+	                          "boot-image", \
+	                          "bootdelay", \
+	                          "com.apple.System.boot-nonce", \
+	                          "darkboot", \
+	                          "emu", \
+	                          "one-time-boot-command", \
+	                          "policy-nonce-digests", \
+	                          "prevent-restores", \
+	                          "prev-lang:kbd", \
+	                          "root-live-fs", \
+	                          "sep-debug-args", \
+	                          "StartupMute", \
+	                          "SystemAudioVolume", \
+	                          "SystemAudioVolumeExtension", \
+	                          "SystemAudioVolumeSaved"
+
 
 #endif /* ! _IOKIT_IOKITKEYSPRIVATE_H */

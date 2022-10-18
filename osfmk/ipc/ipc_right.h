@@ -73,6 +73,8 @@
 
 #define ipc_right_lookup_two_read       ipc_right_lookup_two_write
 
+extern bool service_port_defense_enabled;
+
 /* Find an entry in a space, given the name */
 extern kern_return_t ipc_right_lookup_read(
 	ipc_space_t             space,
@@ -105,8 +107,7 @@ extern bool          ipc_right_reverse(
 extern kern_return_t ipc_right_request_alloc(
 	ipc_space_t             space,
 	mach_port_name_t        name,
-	boolean_t               immediate,
-	boolean_t               send_possible,
+	ipc_port_request_opts_t options,
 	ipc_port_t              notify,
 	ipc_port_t              *previousp);
 
@@ -182,7 +183,9 @@ extern boolean_t ipc_right_copyin_check_reply(
 	ipc_space_t              space,
 	mach_port_name_t         reply_name,
 	ipc_entry_t              reply_entry,
-	mach_msg_type_name_t     reply_type);
+	mach_msg_type_name_t     reply_type,
+	ipc_entry_t              dest_entry,
+	boolean_t                *reply_port_semantics_violation);
 
 /* Copyin a capability from a space */
 extern kern_return_t ipc_right_copyin(
@@ -205,6 +208,8 @@ extern kern_return_t ipc_right_copyin_two(
 	ipc_entry_t               entry,
 	mach_msg_type_name_t      msgt_one,
 	mach_msg_type_name_t      msgt_two,
+	ipc_object_copyin_flags_t flags_one,
+	ipc_object_copyin_flags_t flags_two,
 	ipc_object_t              *objectp,
 	ipc_port_t                *sorightp,
 	ipc_port_t                *releasep);

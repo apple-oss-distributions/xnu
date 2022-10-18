@@ -395,7 +395,10 @@ configure_mxcsr_capability_mask(x86_ext_thread_state_t *fps)
 	set_ts();
 }
 
-int fpsimd_fault_popc = 0;
+#if DEBUG || DEVELOPMENT
+int fpsimd_fault_popc = 1;
+#endif
+
 /*
  * Look for FPU and initialize it.
  * Called on each CPU.
@@ -432,8 +435,6 @@ init_fpu(void)
 	}
 
 	fpu_capability = fpu_default = FP;
-
-	PE_parse_boot_argn("fpsimd_fault_popc", &fpsimd_fault_popc, sizeof(fpsimd_fault_popc));
 
 	static boolean_t is_avx512_enabled = TRUE;
 	if (cpu_number() == master_cpu) {
@@ -650,6 +651,15 @@ fpu_module_init(void)
 
 	/* Determine MXCSR reserved bits and configure initial FPU state*/
 	configure_mxcsr_capability_mask(&initial_fp_state);
+
+#if DEBUG || DEVELOPMENT
+	if (kern_feature_override(KF_DISABLE_FP_POPC_ON_PGFLT)) {
+		fpsimd_fault_popc = 0;
+	}
+
+	/* Allow the explicit boot-arg to override the validation disables */
+	PE_parse_boot_argn("fpsimd_fault_popc", &fpsimd_fault_popc, sizeof(fpsimd_fault_popc));
+#endif
 }
 
 /*
@@ -1717,6 +1727,7 @@ fpu_switch_addrmode(thread_t thread, boolean_t is_64bit)
 	mp_enable_preemption();
 }
 
+#if DEBUG || DEVELOPMENT
 static inline uint32_t
 fpsimd_pop(uintptr_t ins, int sz)
 {
@@ -1750,13 +1761,15 @@ fpsimd_pop(uintptr_t ins, int sz)
 	return rv;
 }
 
-uint32_t
+bool
+thread_fpsimd_hash_enabled(void)
+{
+	return fpsimd_fault_popc ? true : false;
+}
+
+uint32_t __attribute__((noinline))
 thread_fpsimd_hash(thread_t ft)
 {
-	if (fpsimd_fault_popc == 0) {
-		return 0;
-	}
-
 	uint32_t prv = 0;
 	boolean_t istate = ml_set_interrupts_enabled(FALSE);
 	struct x86_fx_thread_state *pifps = THREAD_TO_PCB(ft)->ifps;
@@ -1767,16 +1780,20 @@ thread_fpsimd_hash(thread_t ft)
 			    sizeof(pifps->fx_XMM_reg));
 		} else {
 			uintptr_t cr0 = get_cr0();
-			clear_ts();
-			fp_save(ft);
-			prv = fpsimd_pop((uintptr_t) &pifps->fx_XMM_reg[0][0],
-			    sizeof(pifps->fx_XMM_reg));
-			pifps->fp_valid = FALSE;
-			if (cr0 & CR0_TS) {
-				set_cr0(cr0);
+			/*
+			 * The unusual case where the fp save area is not valid, yet TS is set,
+			 * is used to perform a lazy-init of FP state, so for this specific case,
+			 * assume that the popcount of the FP regs is 0.
+			 */
+			if (!(cr0 & CR0_TS)) {
+				fp_save(ft);
+				prv = fpsimd_pop((uintptr_t) &pifps->fx_XMM_reg[0][0],
+				    sizeof(pifps->fx_XMM_reg));
+				pifps->fp_valid = FALSE;
 			}
 		}
 	}
 	ml_set_interrupts_enabled(istate);
 	return prv;
 }
+#endif /* DEBUG || DEVELOPMENT */

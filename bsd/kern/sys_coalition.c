@@ -194,7 +194,7 @@ coalition(proc_t p, struct coalition_args *cap, __unused int32_t *retval)
 	int error = 0;
 	int type = COALITION_CREATE_FLAGS_GET_TYPE(flags);
 
-	if (!task_is_in_privileged_coalition(p->task, type)) {
+	if (!task_is_in_privileged_coalition(proc_task(p), type)) {
 		return EPERM;
 	}
 
@@ -279,14 +279,9 @@ coalition_info_efficiency(coalition_t coal, user_addr_t buffer, user_size_t bufs
 	}
 	if (flags & COALITION_FLAGS_EFFICIENT) {
 		// No longer supported; this flag must be set during create.
-#if CONFIG_THREAD_GROUPS
-		// TODO: remove when 69955352 lands
-		struct thread_group *tg = coalition_get_thread_group(coal);
-		thread_group_set_flags(tg, THREAD_GROUP_FLAGS_EFFICIENT);
-		thread_group_release(tg);
-#endif /* CONFIG_THREAD_GROUPS */
+		return ENOTSUP;
 	}
-	return error;  // TODO: change to ENOTSUP
+	return error;
 }
 
 static int
@@ -446,7 +441,7 @@ static int sysctl_coalition_get_ids SYSCTL_HANDLER_ARGS
 		return ESRCH;
 	}
 
-	task_coalition_ids(tproc->task, ids);
+	task_coalition_ids(proc_task(tproc), ids);
 	proc_rele(tproc);
 
 	return SYSCTL_OUT(req, ids, sizeof(ids));
@@ -482,7 +477,7 @@ static int sysctl_coalition_get_roles SYSCTL_HANDLER_ARGS
 		return ESRCH;
 	}
 
-	task_coalition_roles(tproc->task, roles);
+	task_coalition_roles(proc_task(tproc), roles);
 	proc_rele(tproc);
 
 	return SYSCTL_OUT(req, roles, sizeof(roles));
@@ -522,7 +517,7 @@ static int sysctl_coalition_get_page_count SYSCTL_HANDLER_ARGS
 	memset(pgcount, 0, sizeof(pgcount));
 
 	for (int t = 0; t < COALITION_NUM_TYPES; t++) {
-		coal = task_get_coalition(tproc->task, t);
+		coal = task_get_coalition(proc_task(tproc), t);
 		if (coal != COALITION_NULL) {
 			int ntasks = 0;
 			pgcount[t] = coalition_get_page_count(coal, &ntasks);
@@ -587,7 +582,7 @@ static int sysctl_coalition_get_pid_list SYSCTL_HANDLER_ARGS
 		return ESRCH;
 	}
 
-	coal = task_get_coalition(tproc->task, type);
+	coal = task_get_coalition(proc_task(tproc), type);
 	if (coal == COALITION_NULL) {
 		goto out;
 	}

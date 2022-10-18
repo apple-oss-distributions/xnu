@@ -68,7 +68,7 @@ struct name {                                                   \
 #define KPKTQ_PREPEND(q, p)     do {                            \
 	if ((KPKTQ_NEXT(p) = KPKTQ_FIRST(q)) == NULL) {         \
 	        ASSERT((q)->kq_len == 0);                       \
-	        (q)->kq_last = &KPKTKQ_NEXT(p);                 \
+	        (q)->kq_last = &KPKTQ_NEXT(p);                 \
 	}                                                       \
 	KPKTQ_FIRST(q) = (p);                                   \
 	(q)->kq_len++;                                          \

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -41,10 +41,12 @@ typedef enum {
 #endif /* LIBSYSCALL_INTERFACE || BSD_KERNEL_PRIVATE */
 } os_channel_event_type_t;
 
-typedef enum {
+typedef enum : int32_t {
 	CHANNEL_EVENT_SUCCESS = 0,
 	CHANNEL_EVENT_PKT_TRANSMIT_STATUS_ERR_FLUSH = 1,
 	CHANNEL_EVENT_PKT_TRANSMIT_STATUS_ERR_RETRY_FAILED = 2,
+	CHANNEL_EVENT_PKT_TRANSMIT_STATUS_ERR_TIMEOUT_EXPIRED_DROPPED = 3,
+	CHANNEL_EVENT_PKT_TRANSMIT_STATUS_ERR_TIMEOUT_EXPIRED_NODROP = 4,
 } os_channel_event_error_t;
 
 typedef struct os_channel_event_packet_transmit_status {
@@ -103,13 +105,20 @@ struct __kern_channel_event {
 
 #if defined(BSD_KERNEL_PRIVATE)
 __BEGIN_DECLS
-extern errno_t kern_channel_event_transmit_status(const kern_packet_t,
-    const ifnet_t);
+extern errno_t kern_channel_event_transmit_status_with_packet(
+	const kern_packet_t, const ifnet_t);
 extern void kern_channel_event_notify(struct __kern_channel_ring *);
 extern int kern_channel_event_sync(struct __kern_channel_ring *, struct proc *,
     uint32_t);
 __END_DECLS
 #endif /* BSD_KERNEL_PRIVATE */
+
+#ifdef KERNEL
+__BEGIN_DECLS
+extern errno_t kern_channel_event_transmit_status(const ifnet_t,
+    os_channel_event_packet_transmit_status_t *, uint32_t);
+__END_DECLS
+#endif /* KERNEL */
 
 #endif /* PRIVATE */
 #endif /* !_SKYWALK_OS_CHANNEL_EVENT_H_ */

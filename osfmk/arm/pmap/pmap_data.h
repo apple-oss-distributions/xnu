@@ -43,10 +43,7 @@
 
 #include <arm/cpu_data.h>
 #include <arm/machine_routines.h>
-#include <arm/proc_reg.h>
-#if defined(__arm64__)
 #include <arm64/proc_reg.h>
-#endif /* defined(__arm64__) */
 
 /* Temporary include before moving all ledger functions into pmap_data.c */
 #include <os/refcnt.h>
@@ -248,6 +245,7 @@ pai_to_pvh(unsigned int pai)
  */
 #define PVH_FLAG_LOCKDOWN_RO (1ULL << 56)
 
+
 /**
  * Marking a pv_head_table entry with any bit in this mask denotes that this page
  * has been locked down by the PPL.  Locked down pages can't have new mappings
@@ -265,13 +263,6 @@ pai_to_pvh(unsigned int pai)
  */
 #define PVH_HIGH_FLAGS (PVH_FLAG_CPU | PVH_FLAG_LOCK | PVH_FLAG_EXEC | PVH_FLAG_LOCKDOWN_MASK | PVH_FLAG_HASHED)
 
-#else /* defined(__arm64__) */
-
-/* See the equivalent arm64 pv_head_table flags above for descriptions of these flags. */
-#define PVH_LOCK_BIT   31
-#define PVH_FLAG_LOCK  (1UL << PVH_LOCK_BIT)
-#define PVH_HIGH_FLAGS PVH_FLAG_LOCK
-
 #endif /* defined(__arm64__) */
 
 /* Mask used to clear out the TYPE bits from a pv_head_table entry/pointer. */
@@ -280,8 +271,6 @@ pai_to_pvh(unsigned int pai)
 /* Which 32-bit word in each pv_head_table entry/pointer contains the LOCK bit. */
 #if defined(__arm64__)
 #define PVH_LOCK_WORD 1 /* Assumes little-endian */
-#else /* defined(__arm64__) */
-#define PVH_LOCK_WORD 0
 #endif /* defined(__arm64__) */
 
 /**
@@ -508,6 +497,13 @@ pvh_strip_ptep(const pt_entry_t *ptep)
  * @note See the definition for PP_ATTR_ALTACCT for a more detailed description
  *       of what "alternate accounting" actually means in respect to the
  *       footprint ledger.
+ *
+ * Since some code (KernelDiskImages, e.g.) might map a phsyical page as
+ * "device" memory (i.e. external) while it's also being used as regular
+ * "anonymous" memory (i.e. internal) in user space, we have to manage the
+ * "internal" attribute per mapping rather than per physical page.
+ * When there are multiple mappings, we use the next least significant bit of
+ * the corresponding "pve_pte" pointer for that.
  */
 #define PVE_PTEP_ALTACCT ((uintptr_t) 0x1)
 #define PVE_PTEP_INTERNAL ((uintptr_t) 0x2)
@@ -526,7 +522,6 @@ pve_set_altacct(pv_entry_t *pvep, unsigned idx)
 	assert(idx < PTE_PER_PVE);
 	pvep->pve_ptep[idx] = (pt_entry_t *)((uintptr_t)pvep->pve_ptep[idx] | PVE_PTEP_ALTACCT);
 }
-
 /**
  * Set the INTERNAL bit for a specific PTE pointer.
  *
@@ -554,7 +549,6 @@ pve_clr_altacct(pv_entry_t *pvep, unsigned idx)
 	assert(idx < PTE_PER_PVE);
 	pvep->pve_ptep[idx] = (pt_entry_t *)((uintptr_t)pvep->pve_ptep[idx] & ~PVE_PTEP_ALTACCT);
 }
-
 /**
  * Clear the INTERNAL bit for a specific PTE pointer.
  *
@@ -582,7 +576,6 @@ pve_get_altacct(pv_entry_t *pvep, unsigned idx)
 	assert(idx < PTE_PER_PVE);
 	return (uintptr_t)pvep->pve_ptep[idx] & PVE_PTEP_ALTACCT;
 }
-
 /**
  * Return the INTERNAL bit for a specific PTE pointer.
  *
@@ -734,8 +727,7 @@ pve_add(pv_entry_t **pvh, pv_entry_t *pvep)
  *
  * @note This function will clobber any existing flags stored in the PVH
  *       pointer. It's up to the caller to preserve flags if that functionality
- *       is needed (either by ensuring `pvep` contains those flags, or by
- *       manually setting the flags after this call).
+ *       is needed.
  *
  * @param pvh The pv_head_table entry of the PVE list to remove a mapping from.
  *            This is the first entry in the list of pv_entry_t mappings.
@@ -767,7 +759,7 @@ pve_remove(pv_entry_t **pvh, pv_entry_t **pvepp, pv_entry_t *pvep)
 	} else {
 		/**
 		 * Move the previous entry's next field to the entry after the one being
-		 * removed. This will clobber the ALTACCT bit.
+		 * removed. This will clobber the ALTACCT and INTERNAL bits.
 		 */
 		*pvepp = pve_next(pvep);
 	}
@@ -795,11 +787,6 @@ pve_remove(pv_entry_t **pvh, pv_entry_t **pvepp, pv_entry_t *pvep)
  * pv_head_table entry (per VM page), so on some systems, one PTD might have to
  * keep track of up to four different page tables.
  */
-#if (__ARM_VMSA__ == 7)
-
-#define PT_INDEX_MAX 1
-
-#else /* (__ARM_VMSA__ == 7) */
 
 #if __ARM_MIXED_PAGE_SIZE__
 #define PT_INDEX_MAX (ARM_PGBYTES / 4096)
@@ -811,7 +798,6 @@ pve_remove(pv_entry_t **pvh, pv_entry_t **pvepp, pv_entry_t *pvep)
 #error Unsupported ARM_PGSHIFT
 #endif /* __ARM_MIXED_PAGE_SIZE__ || ARM_PGSHIFT == 14 || ARM_PGSHIFT == 12 */
 
-#endif /* (__ARM_VMSA__ == 7) */
 
 /**
  * Page table descriptor (PTD) info structure.
@@ -942,7 +928,7 @@ ptep_get_ptd(const pt_entry_t *ptep)
 	pv_entry_t **pvh = pai_to_pvh(pa_index(ml_static_vtop(pt_base_va)));
 
 	if (__improbable(!pvh_test_type(pvh, PVH_TYPE_PTDP))) {
-		panic("%s: invalid PV head 0x%llx for PTE 0x%p", __func__, (uint64_t)(*pvh), ptep);
+		panic("%s: invalid PV head 0x%llx for PTE %p", __func__, (uint64_t)(*pvh), ptep);
 	}
 
 	return pvh_ptd(pvh);
@@ -1545,17 +1531,17 @@ ppattr_is_altacct(unsigned int pai)
 {
 	return ppattr_test_bits(pai, PP_ATTR_ALTACCT);
 }
-
 /**
  * Get the PP_ATTR_INTERNAL flag on a specific pp_attr_table entry.
  *
  * @note This is only valid when the INTERNAL flag is being tracked using the
- *       pp_attr_table. See the descriptions above the PVE_PTEP_ALTACCT and
- *       PP_ATTR_ALTACCT definitions for more information.
+ *       pp_attr_table. See the descriptions above the PVE_PTEP_INTERNAL and
+ *       PP_ATTR_INTERNAL definitions for more information.
  *
  * @param pai The physical address index for the entry to test.
  *
- * @return True if the passed in page is "internal", false otherwise.
+ * @return True if the passed in page is accounted for as "internal", false
+ *         otherwise.
  */
 static inline bool
 ppattr_is_internal(unsigned int pai)
@@ -1585,7 +1571,6 @@ ppattr_pve_is_altacct(unsigned int pai, pv_entry_t *pvep, unsigned idx)
 {
 	return (pvep == PV_ENTRY_NULL) ? ppattr_is_altacct(pai) : pve_get_altacct(pvep, idx);
 }
-
 /**
  * The "internal" (INTERNAL) status for a page is tracked differently
  * depending on whether there are one or multiple mappings to a page. This
@@ -1593,7 +1578,7 @@ ppattr_pve_is_altacct(unsigned int pai, pv_entry_t *pvep, unsigned idx)
  * a page and provides a single function for determining whether "internal"
  * is set for a mapping.
  *
- * @note See the descriptions above the PVE_PTEP_ALTACCT and PP_ATTR_ALTACCT
+ * @note See the descriptions above the PVE_PTEP_INTERNAL and PP_ATTR_INTERNAL
  *       definitions for more information.
  *
  * @param pai The physical address index for the entry to test.
@@ -1631,7 +1616,6 @@ ppattr_pve_set_altacct(unsigned int pai, pv_entry_t *pvep, unsigned idx)
 		pve_set_altacct(pvep, idx);
 	}
 }
-
 /**
  * The "internal" (INTERNAL) status for a page is tracked differently
  * depending on whether there are one or multiple mappings to a page. This
@@ -1639,7 +1623,7 @@ ppattr_pve_set_altacct(unsigned int pai, pv_entry_t *pvep, unsigned idx)
  * a page and provides a single function for setting the "internal" status
  * for a mapping.
  *
- * @note See the descriptions above the PVE_PTEP_ALTACCT and PP_ATTR_ALTACCT
+ * @note See the descriptions above the PVE_PTEP_INTERNAL and PP_ATTR_INTERNAL
  *       definitions for more information.
  *
  * @param pai The physical address index for the entry to update.
@@ -1679,7 +1663,6 @@ ppattr_pve_clr_altacct(unsigned int pai, pv_entry_t *pvep, unsigned idx)
 		pve_clr_altacct(pvep, idx);
 	}
 }
-
 /**
  * The "internal" (INTERNAL) status for a page is tracked differently
  * depending on whether there are one or multiple mappings to a page. This
@@ -1687,7 +1670,7 @@ ppattr_pve_clr_altacct(unsigned int pai, pv_entry_t *pvep, unsigned idx)
  * a page and provides a single function for clearing the "internal" status
  * for a mapping.
  *
- * @note See the descriptions above the PVE_PTEP_ALTACCT and PP_ATTR_ALTACCT
+ * @note See the descriptions above the PVE_PTEP_INTERNAL and PP_ATTR_INTERNAL
  *       definitions for more information.
  *
  * @param pai The physical address index for the entry to update.
@@ -1873,7 +1856,7 @@ typedef enum {
 } pv_alloc_return_t;
 
 extern pv_alloc_return_t pv_alloc(
-	pmap_t, unsigned int, pmap_lock_mode_t, pv_entry_t **);
+	pmap_t, unsigned int, pmap_lock_mode_t, unsigned int, pv_entry_t **);
 extern void pv_free(pv_entry_t *);
 extern void pv_list_free(pv_entry_t *, pv_entry_t *, int);
 extern void pmap_compute_pv_targets(void);
@@ -1916,7 +1899,10 @@ typedef struct pmap_io_range {
 	/* Physical address of the PPL-owned I/O range. */
 	uint64_t addr;
 
-	/* Length (in bytes) of the PPL-owned I/O range. */
+	/**
+	 * Length (in bytes) of the PPL-owned I/O range. Has to be the size
+	 * of a page if the range will be refered to by pmap_io_filter_entries.
+	 */
 	uint64_t len;
 
 	/* Strong DSB required for pages in this range. */
@@ -1937,7 +1923,13 @@ typedef struct pmap_io_range {
 	 */
 	uint32_t wimg;
 
-	/* 4 Character Code (4CC) describing what this range is. */
+	/**
+	 * 4 Character Code (4CC) describing what this range is.
+	 *
+	 * This has to be unique for each "type" of pages, meaning pages sharing
+	 * the same register layout, if it is used for the I/O filter descriptors
+	 * below. Otherwise it doesn't matter.
+	 */
 	uint32_t signature;
 } pmap_io_range_t;
 
@@ -1945,6 +1937,31 @@ typedef struct pmap_io_range {
 _Static_assert(sizeof(pmap_io_range_t) == 24, "unexpected size for pmap_io_range_t");
 
 extern pmap_io_range_t* pmap_find_io_attr(pmap_paddr_t);
+
+/**
+ * This structure describes a sub-page-size I/O region owned by PPL but the kernel can write to.
+ *
+ * @note I/O filter software will use a collection of such data structures to determine access
+ *       permissions to a page owned by PPL.
+ *
+ * @note The {signature, offset} key is used to index a collection of such data structures to
+ *       optimize for space in the case where one page layout is repeated for many devices, such
+ *       as the memory controller channels.
+ */
+typedef struct pmap_io_filter_entry {
+	/* 4 Character Code (4CC) describing what this range (page) is. */
+	uint32_t signature;
+
+	/* Offset within the page. It has to be within [0, PAGE_SIZE). */
+	uint16_t offset;
+
+	/* Length of the range, and (offset + length) has to be within [0, PAGE_SIZE). */
+	uint16_t length;
+} pmap_io_filter_entry_t;
+
+_Static_assert(sizeof(pmap_io_filter_entry_t) == 8, "unexpected size for pmap_io_filter_entry_t");
+
+extern pmap_io_filter_entry_t *pmap_find_io_filter_entry(pmap_paddr_t, uint64_t, const pmap_io_range_t **);
 
 extern void pmap_cpu_data_init_internal(unsigned int);
 

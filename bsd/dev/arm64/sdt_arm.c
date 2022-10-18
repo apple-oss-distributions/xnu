@@ -84,7 +84,11 @@ sdt_getarg(void *arg, dtrace_id_t id, void *parg, int argno, int aframes)
 
 	for (i = 1; i <= aframes; i++) {
 		fp = fp->backchain;
+#if __has_feature(ptrauth_returns)
+		pc = (uintptr_t)ptrauth_strip((void*)fp->retaddr, ptrauth_key_return_address);
+#else
 		pc = fp->retaddr;
+#endif
 
 		if (dtrace_invop_callsite_pre != NULL
 		    && pc > (uintptr_t)dtrace_invop_callsite_pre

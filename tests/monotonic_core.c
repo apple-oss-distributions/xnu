@@ -1,11 +1,7 @@
-/*
- * Must come before including darwintest.h
- */
-#ifdef T_NAMESPACE
-#undef T_NAMESPACE
-#endif /* defined(T_NAMESPACE) */
+// Copyright (c) 2021-2022 Apple Inc.  All rights reserved.
 
 #include <darwintest.h>
+#include "test_utils.h"
 #include <fcntl.h>
 #include <inttypes.h>
 #ifndef PRIVATE
@@ -68,26 +64,8 @@ check_fixed_counts(struct thsc_cpi counts[2])
 	    "monotonically-increasing cycles");
 }
 
-T_DECL(core_fixed_thread_self, "check the current thread's fixed counters",
-    T_META_ASROOT(true))
-{
-	int err;
-	struct thsc_cpi counts[2] = { 0 };
-
-	T_SETUPBEGIN;
-	skip_if_unsupported();
-	T_SETUPEND;
-
-	err = thread_selfcounts_cpi(&counts[0]);
-	T_ASSERT_POSIX_ZERO(err, "thread_selfcounts");
-	err = thread_selfcounts_cpi(&counts[1]);
-	T_ASSERT_POSIX_ZERO(err, "thread_selfcounts");
-
-	check_fixed_counts(counts);
-}
-
 T_DECL(core_fixed_task, "check that task counting is working",
-    T_META_ASROOT(true))
+    XNU_T_META_SOC_SPECIFIC, T_META_ASROOT(true))
 {
 	task_t task = mach_task_self();
 	kern_return_t kr;
@@ -163,7 +141,7 @@ spin_thread_self_counts(__unused void *arg)
 {
 	struct thsc_cpi counts = { 0 };
 	while (true) {
-		(void)thread_selfcounts_cpi(&counts);
+		(void)thread_selfcounts(THSC_CPI, &counts, sizeof(counts));
 	}
 }
 
@@ -248,48 +226,20 @@ perf_sysctl_deltas(const char *sysctl_name, const char *stat_name)
 }
 
 T_DECL(perf_core_fixed_cpu, "test the performance of fixed CPU counter access",
-    T_META_ASROOT(true), T_META_TAG_PERF)
+    T_META_ASROOT(true), XNU_T_META_SOC_SPECIFIC, T_META_TAG_PERF)
 {
 	perf_sysctl_deltas("kern.monotonic.fixed_cpu_perf", "fixed_cpu_counters");
 }
 
 T_DECL(perf_core_fixed_thread, "test the performance of fixed thread counter access",
-    T_META_ASROOT(true), T_META_TAG_PERF)
+    T_META_ASROOT(true), XNU_T_META_SOC_SPECIFIC, T_META_TAG_PERF)
 {
 	perf_sysctl_deltas("kern.monotonic.fixed_thread_perf",
 	    "fixed_thread_counters");
 }
 
 T_DECL(perf_core_fixed_task, "test the performance of fixed task counter access",
-    T_META_ASROOT(true), T_META_TAG_PERF)
+    T_META_ASROOT(true), XNU_T_META_SOC_SPECIFIC, T_META_TAG_PERF)
 {
 	perf_sysctl_deltas("kern.monotonic.fixed_task_perf", "fixed_task_counters");
-}
-
-T_DECL(perf_core_fixed_thread_self, "test the performance of thread self counts",
-    T_META_TAG_PERF)
-{
-	struct thsc_cpi counts[2];
-
-	T_SETUPBEGIN;
-	dt_stat_t instrs = dt_stat_create("fixed_thread_self_instrs", "instructions");
-	dt_stat_t cycles = dt_stat_create("fixed_thread_self_cycles", "cycles");
-
-	skip_if_unsupported();
-	T_SETUPEND;
-
-	while (!dt_stat_stable(instrs) || !dt_stat_stable(cycles)) {
-		int r1, r2;
-
-		r1 = thread_selfcounts_cpi(&counts[0]);
-		r2 = thread_selfcounts_cpi(&counts[1]);
-		T_QUIET; T_ASSERT_POSIX_ZERO(r1, "thread_selfcounts");
-		T_QUIET; T_ASSERT_POSIX_ZERO(r2, "thread_selfcounts");
-
-		dt_stat_add(instrs, counts[1].tcpi_instructions - counts[0].tcpi_instructions);
-		dt_stat_add(cycles, counts[1].tcpi_cycles - counts[0].tcpi_cycles);
-	}
-
-	dt_stat_finalize(instrs);
-	dt_stat_finalize(cycles);
 }

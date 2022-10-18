@@ -196,7 +196,7 @@ struct lltable {
 	SLIST_ENTRY(lltable)    llt_link;
 	int                     llt_af;
 	int                     llt_hsize;
-	struct llentries        *lle_head;
+	struct llentries        *__counted_by(llt_hsize) lle_head;
 	struct ifnet            *llt_ifp;
 
 	llt_lookup_t            *llt_lookup;
@@ -280,7 +280,7 @@ int lltable_foreach_lle(struct lltable *llt, llt_foreach_cb_t *f,
 static __inline struct llentry *
 lla_lookup(struct lltable *llt, uint16_t flags, const struct sockaddr *l3addr)
 {
-	return llt->llt_lookup(llt, flags, l3addr);
+	return __unsafe_forge_single(struct llentry *, llt->llt_lookup(llt, flags, l3addr));
 }
 
 int lla_rt_output(struct rt_msghdr *, struct rt_addrinfo *);

@@ -39,8 +39,6 @@ extern "C" {
 #define LS_LCK_MTX_TRY_LOCK_SPIN        "lck_mtx_try_lock_spin"
 #define LS_LCK_MTX_TRY_LOCK             "lck_mtx_try_lock"
 #define LS_LCK_MTX_UNLOCK               "lck_mtx_unlock"
-#define LS_LCK_MTX_EXT_LOCK             "lck_mtx_ext_lock"
-#define LS_LCK_MTX_EXT_UNLOCK           "lck_mtx_ext_unlock"
 
 #define LS_LCK_SPIN_LOCK                "lck_spin_lock"
 #define LS_LCK_SPIN_TRY_LOCK            "lck_spin_try_lock"
@@ -63,7 +61,7 @@ extern "C" {
 #define LS_UPGRADE                      "upgrade"
 #define LS_DOWNGRADE                    "downgrade"
 
-#define LS_TYPE_ADAPTIVE                "adaptive"
+#define LS_TYPE_ADAPTIVE                "adaptive" /* this really means "mutex" */
 #define LS_TYPE_SPIN                    "spin"
 #define LS_TYPE_RW                      "rw"
 #define LS_TYPE_TICKET                  "ticket"

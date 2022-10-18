@@ -30,6 +30,7 @@
 #define _KERN_CODESIGN_H_
 
 #include <stdint.h>
+#include <string.h>
 
 /* code signing attributes of a process */
 #define CS_VALID                    0x00000001  /* dynamically valid */
@@ -97,6 +98,7 @@ enum {
 	CSMAGIC_EMBEDDED_DER_ENTITLEMENTS = 0xfade7172, /* embedded DER encoded entitlements */
 	CSMAGIC_DETACHED_SIGNATURE = 0xfade0cc1, /* multi-arch collection of embedded signatures */
 	CSMAGIC_BLOBWRAPPER = 0xfade0b01,       /* CMS Signature, among other things */
+	CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT = 0xfade8181, /* Light weight code requirement */
 
 	CS_SUPPORTSSCATTER = 0x20100,
 	CS_SUPPORTSTEAMID = 0x20200,
@@ -112,6 +114,9 @@ enum {
 	CSSLOT_APPLICATION = 4,
 	CSSLOT_ENTITLEMENTS = 5,
 	CSSLOT_DER_ENTITLEMENTS = 7,
+	CSSLOT_LAUNCH_CONSTRAINT_SELF = 8,
+	CSSLOT_LAUNCH_CONSTRAINT_PARENT = 9,
+	CSSLOT_LAUNCH_CONSTRAINT_RESPONSIBLE = 10,
 
 	CSSLOT_ALTERNATE_CODEDIRECTORIES = 0x1000, /* first alternate CodeDirectory, if any */
 	CSSLOT_ALTERNATE_CODEDIRECTORY_MAX = 5,         /* max number of alternate CD slots */
@@ -147,6 +152,52 @@ enum {
 	CS_SUPPL_SIGNER_TYPE_UNKNOWN = 0,
 	CS_SUPPL_SIGNER_TYPE_TRUSTCACHE = 7,
 	CS_SUPPL_SIGNER_TYPE_LOCAL = 8,
+
+	CS_SIGNER_TYPE_OOPJIT = 9,
+
+	/* Validation categories used for trusted launch environment */
+	CS_VALIDATION_CATEGORY_INVALID = 0,
+	CS_VALIDATION_CATEGORY_PLATFORM = 1,
+	CS_VALIDATION_CATEGORY_TESTFLIGHT = 2,
+	CS_VALIDATION_CATEGORY_DEVELOPMENT = 3,
+	CS_VALIDATION_CATEGORY_APP_STORE = 4,
+	CS_VALIDATION_CATEGORY_ENTERPRISE = 5,
+	CS_VALIDATION_CATEGORY_DEVELOPER_ID = 6,
+	CS_VALIDATION_CATEGORY_LOCAL_SIGNING = 7,
+	CS_VALIDATION_CATEGORY_ROSETTA = 8,
+	CS_VALIDATION_CATEGORY_OOPJIT = 9,
+	CS_VALIDATION_CATEGORY_NONE = 10,
+};
+
+/* The set of application types we support for linkage signatures */
+enum {
+	CS_LINKAGE_APPLICATION_INVALID = 0,
+	CS_LINKAGE_APPLICATION_ROSETTA = 1,
+
+	/* XOJIT has been renamed to OOP-JIT */
+	CS_LINKAGE_APPLICATION_XOJIT = 2,
+	CS_LINKAGE_APPLICATION_OOPJIT = 2,
+};
+
+/* The set of application sub-types we support for linkage signatures */
+enum {
+	/*
+	 * For backwards compatibility with older signatures, the AOT sub-type is kept
+	 * as 0.
+	 */
+	CS_LINKAGE_APPLICATION_ROSETTA_AOT = 0,
+
+	/* OOP-JIT sub-types -- XOJIT type kept for external dependencies */
+	CS_LINKAGE_APPLICATION_XOJIT_PREVIEWS = 1,
+	CS_LINKAGE_APPLICATION_OOPJIT_INVALID = 0,
+	CS_LINKAGE_APPLICATION_OOPJIT_PREVIEWS = 1,
+	CS_LINKAGE_APPLICATION_OOPJIT_TOTAL,
+};
+
+/* Integer to string conversion of OOP-JIT types */
+static const char *oop_jit_conversion[CS_LINKAGE_APPLICATION_OOPJIT_TOTAL] = {
+	[CS_LINKAGE_APPLICATION_OOPJIT_INVALID] = NULL,
+	[CS_LINKAGE_APPLICATION_OOPJIT_PREVIEWS] = "previews",
 };
 
 #define KERNEL_HAVE_CS_CODEDIRECTORY 1
@@ -191,6 +242,7 @@ typedef struct __CodeDirectory {
 	uint64_t execSegLimit;                  /* limit of executable segment */
 	uint64_t execSegFlags;                  /* executable segment flags */
 	char end_withExecSeg[0];
+
 	/* Version 0x20500 */
 	uint32_t runtime;
 	uint32_t preEncryptOffset;
@@ -198,12 +250,11 @@ typedef struct __CodeDirectory {
 
 	/* Version 0x20600 */
 	uint8_t linkageHashType;
-	uint8_t linkageTruncated;
-	uint16_t spare4;
+	uint8_t linkageApplicationType;
+	uint16_t linkageApplicationSubType;
 	uint32_t linkageOffset;
 	uint32_t linkageSize;
 	char end_withLinkage[0];
-
 
 	/* followed by dynamic content as located by offset fields above */
 } CS_CodeDirectory
@@ -244,5 +295,18 @@ typedef struct __SC_Scatter {
 } SC_Scatter
 __attribute__ ((aligned(1)));
 
+
+/*
+ * Defined launch types
+ */
+__enum_decl(cs_launch_type_t, uint8_t, {
+	CS_LAUNCH_TYPE_NONE = 0,
+	CS_LAUNCH_TYPE_SYSTEM_SERVICE = 1,
+});
+
+struct launch_constraint_data {
+	cs_launch_type_t launch_type;
+};
+typedef struct launch_constraint_data* launch_constraint_data_t;
 
 #endif /* _KERN_CODESIGN_H */

@@ -1465,6 +1465,8 @@ kaudit_to_bsm(struct kaudit_record *kar, struct au_record **pau)
 	case AUE_MKDIRAT:
 	case AUE_GETATTRLISTAT:
 	case AUE_SETATTRLISTAT:
+	case AUE_MKFIFOAT:
+	case AUE_MKNODAT:
 		if (ARG_IS_VALID(kar, ARG_FD)) {
 			tok = au_to_arg32(1, "dir fd", ar->ar_arg_fd);
 			kau_write(rec, tok);

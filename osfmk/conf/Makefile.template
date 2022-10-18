@@ -129,7 +129,6 @@ pcb_native.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
 pmap_pcid.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
 pmap_x86_common.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
 sched_clutch.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
-thread_group.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
 trap.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
 uat.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
 video_console.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
@@ -166,6 +165,7 @@ vm_init.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
 vm_kern.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
 vm_object.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
 vm_shared_region_pager.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
+vm_dyld_pager.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
 vm_swapfile_pager.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
 vm_user.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
 # -Wno-sign-conversion
@@ -212,7 +212,6 @@ ecc_logging.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 entropy.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 exception.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 fpu.o_CWARNFLAGS_ADD += -Wno-sign-conversion
-gzalloc.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 host.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 host_notify.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 hv.o_CWARNFLAGS_ADD += -Wno-sign-conversion
@@ -368,6 +367,8 @@ xcpm_dvfs.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 xcpm_fi.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 xcpm_idle.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 xcpm_ioctl.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+# -Wno-xnu-typed-allocators
+kalloc.o_CWARNFLAGS_ADD += -Wno-xnu-typed-allocators
 
 # Rebuild if per-file overrides change
 ${OBJS}: $(firstword $(MAKEFILE_LIST))

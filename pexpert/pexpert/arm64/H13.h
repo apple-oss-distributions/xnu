@@ -42,8 +42,13 @@
 #define HAS_UCNORMAL_MEM        1 /* Supports completely un-cacheable normal memory type */
 #define HAS_TWO_STAGE_SPR_LOCK  1 /* SPR locks are split into RO_CTL and LOCK registers */
 #define HAS_FAST_CNTVCT         1
+#define HAS_ACNTVCT             1 /* Supports private ISA non speculative MRS reads of timebase registers (ACNTPCT/ACNTVCT) */
+#define HAS_USAT_BIT            1 /* ACTLR has USAT bit (H12+) */
 #define HAS_E0PD                1 /* Supports E0PD0 and E0PD1 in TCR for Meltdown mitigation (ARMv8.5)*/
+#define HAS_ARM_FEAT_SSBS2      1 /* Supports Speculative Store Bypass Safe with MSR controls */
 #define HAS_ICACHE_FUSION_BUG   1 /* HW bug that causes incorrect reporting of instruction aborts on fused instructions */
+#define HAS_CPU_DPE_COUNTER     1 /* Has a hardware counter for digital power estimation */
+#define HAS_GUARDED_IO_FILTER   1 /* Has a guarded runtime dedicated to the fine-grained IO access filter */
 
 #define CPU_HAS_APPLE_PAC                    1
 #define HAS_UNCORE_CTRS                      1

@@ -100,16 +100,6 @@ def _PrintARMUserStack(task, cur_pc, cur_fp, framesize, frametype, frameformat, 
             break
         print(frameformat.format(frameno, cur_fp, cur_pc, GetBinaryNameForPC(cur_pc, user_lib_info)))
 
-def ShowARMUserStack(thread, user_lib_info = None):
-    cur_pc = unsigned(thread.machine.PcbData.pc)
-    cur_fp = unsigned(thread.machine.PcbData.r[7])
-    frameformat = "{0:>2d} FP: 0x{1:x}  PC: 0x{2:x}"
-    if user_lib_info is not None:
-        frameformat = "{0:>2d} {3: <30s}  0x{2:0>8x}"
-    framesize = 8
-    frametype = "uint32_t"
-    _PrintARMUserStack(thread.t_tro.tro_task, cur_pc, cur_fp, framesize, frametype, frameformat, user_lib_info=user_lib_info)
-
 def ShowARM64UserStack(thread, user_lib_info = None):
     SAVED_STATE_FLAVOR_ARM=20
     SAVED_STATE_FLAVOR_ARM64=21
@@ -148,8 +138,6 @@ def ShowThreadUserStack(cmd_args=None):
     thread = kern.GetValueFromAddress(ArgumentStringToInt(cmd_args[0]), 'thread *')
     if kern.arch == "x86_64":
         ShowX86UserStack(thread)
-    elif kern.arch == "arm":
-        ShowARMUserStack(thread)
     elif kern.arch.startswith("arm64"):
         ShowARM64UserStack(thread)
     return True
@@ -216,7 +204,10 @@ def ShowTaskUserArgs(cmd_args=None, cmd_options={}):
         raise ArgumentError("Insufficient arguments")
 
     task = kern.GetValueFromAddress(cmd_args[0], 'task *')
-    proc = Cast(task.bsd_info, 'proc *')
+    proc = GetProcFromTask(task)
+    if not proc:
+        print("Task has no associated BSD process.")
+        return False
     ptrsize = 8 if int(task.t_flags) & 0x1 else 4
 
     format_string = "Q" if ptrsize == 8 else "I"
@@ -259,7 +250,7 @@ def ShowTaskUserArgs(cmd_args=None, cmd_options={}):
 
 def ShowTaskUserStacks(task):
     #print GetTaskSummary.header + " " + GetProcSummary.header
-    pval = Cast(task.bsd_info, 'proc *')
+    pval = GetProcFromTask(task)
     #print GetTaskSummary(task) + " " + GetProcSummary(pval) + "\n \n"
     crash_report_format_string = """\
 Process:         {pname:s} [{pid:d}]
@@ -334,9 +325,7 @@ Synthetic crash log generated from Kernel userstacks
         usertask_lib_info.append([int(arr[0][0],16), int(arr[0][1],16), str(arr[0][2]).strip()])
 
     printthread_user_stack_ptr = ShowX86UserStack
-    if kern.arch == "arm":
-        printthread_user_stack_ptr = ShowARMUserStack
-    elif kern.arch.startswith("arm64"):
+    if kern.arch.startswith("arm64"):
         printthread_user_stack_ptr = ShowARM64UserStack
 
     counter = 0
@@ -371,7 +360,7 @@ def ShowTaskUserStacksCmdHelper(cmd_args=None, cmd_options={}):
     elif "-P" in cmd_options:
         pidval = ArgumentStringToInt(cmd_options["-P"])
         for t in kern.tasks:
-            pval = Cast(t.bsd_info, 'proc *')
+            pval = GetProcFromTask(t)
             if pval and GetProcPID(pval) == pidval:
                 task_list.append(t)
                 break
@@ -856,15 +845,11 @@ def SaveDataToFile(start_addr, length, outputfile, task=None,):
     if task:
         memory_data = GetUserDataAsString(task, start_addr, length)
     else:
-        data_ptr = kern.GetValueFromAddress(start_addr, 'uint8_t *')
-        if data_ptr == 0:
-            print("invalid kernel start address specified")
+        err = lldb.SBError()
+        memory_data = LazyTarget.GetProcess().ReadMemory(start_addr, length, err)
+        if not err.Success():
+            print("Failed to read process memory. {:d} bytes from address {: <#020x}. Error: {}".format(length, start_addr, err.description))
             return False
-        memory_data = bytearray()
-        for i in range(length):
-            memory_data.append(data_ptr[i])
-            if i % 50000 == 0:
-                print("%d of %d            \r" % (i, length), end=' ')
 
     if len(memory_data) != length:
         print("Failed to read {:d} bytes from address {: <#020x}".format(length, start_addr))

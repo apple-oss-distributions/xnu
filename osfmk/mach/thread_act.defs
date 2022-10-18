@@ -63,9 +63,9 @@
  */
 
 subsystem
-#if	KERNEL_SERVER
-	  KernelServer
-#endif	/* KERNEL_SERVER */
+#if	KERNEL_SERVER || KOBJECT_SERVER
+	KernelServer
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 	  thread_act 3600;
 
 #include <mach/std_types.defs>
@@ -100,7 +100,7 @@ subsystem
  *	of reference ownership transfers (just sharing).
  */
 routine KERNEL_SERVER_SUFFIX_SANDBOX(thread_terminate)(
-		target_act	: thread_act_consume_ref_t); 
+		target_act	: thread_act_consume_ref_t);
 
 
 /*
@@ -259,7 +259,7 @@ routine thread_info(
 /*
  * Set an exception handler for a thread on one or more exception types
  */
-routine		thread_set_exception_ports(
+routine	thread_set_exception_ports(
 			thread		: thread_act_t;
 			exception_mask	: exception_mask_t;
 			new_port	: mach_port_t;
@@ -269,7 +269,7 @@ routine		thread_set_exception_ports(
 /*
  * Lookup some of the old exception handlers for a thread
  */
-routine		
+routine
 #if KERNEL_SERVER
 thread_get_exception_ports_from_user(
 			port        : mach_port_t;
@@ -288,7 +288,7 @@ thread_get_exception_ports(
  * At the same time, return the previously defined exception handlers for
  * those types.
  */
-routine		thread_swap_exception_ports(
+routine	thread_swap_exception_ports(
 			thread		: thread_act_t;
 			exception_mask	: exception_mask_t;
 			new_port	: mach_port_t;
@@ -328,43 +328,31 @@ inout	get_default		: boolean_t);
  *	Removed from the kernel.
  */
 #if KERNEL_SERVER
-skip;
+skip; /* thread_sample */
+skip; /* etap_trace_thread */
+skip; /* thread_assign */
+skip; /* thread_assign_default */
+skip; /* thread_get_assignment */
 #else
 routine thread_sample(
 		thread		: thread_act_t;
 		reply		: mach_port_make_send_t);
-#endif
 
-/*
- *	ETAP has been removed from the kernel.
- */
-#if KERNEL_SERVER
-skip;
-#else
 routine	etap_trace_thread(
 		target_act	: thread_act_t;
 		trace_status	: boolean_t);
-#endif
 
-/*
- *	Assign thread to processor set.
- */
 routine	thread_assign(
 		thread		: thread_act_t;
 		new_set		: processor_set_t);
 
-/*
- *	Assign thread to default set.
- */
 routine thread_assign_default(
 		thread		: thread_act_t);
 
-/*
- *	Get current assignment for thread.
- */
 routine thread_get_assignment(
 		thread		: thread_inspect_t;
 	out	assigned_set	: processor_set_name_t);
+#endif
 
 /*
  * OBSOLETE interface.
@@ -384,7 +372,7 @@ routine thread_get_mach_voucher(
 routine thread_set_mach_voucher(
 		thr_act		: thread_act_t;
 		voucher		: ipc_voucher_t);
-	
+
 routine thread_swap_mach_voucher(
 		thr_act		: thread_act_t;
 		new_voucher	: ipc_voucher_t;
@@ -398,7 +386,19 @@ routine thread_convert_thread_state(
 	out	out_state	: thread_state_t, CountInOut);
 
 #ifdef XNU_KERNEL_PRIVATE
+#if CONFIG_ROSETTA
+/*
+ *  For userland binary translation to cause specific exceptions
+ */
+routine thread_raise_exception(
+    target_act : thread_act_t;
+    exception  : int;
+    code_count : natural_t;
+    code       : int64_t;
+    sub_code   : int64_t);
+#else
 	skip;
+#endif /* CONFIG_ROSETTA */
 #else
 	skip;
 #endif /* XNU_KERNEL_PRIVATE */

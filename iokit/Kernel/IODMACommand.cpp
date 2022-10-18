@@ -335,6 +335,7 @@ IODMACommand::setSpecification(SegmentFunction        outSegFunc,
 	}
 
 	fInternalState->fIterateOnly = (0 != (kIterateOnly & mappingOptions));
+	fInternalState->fDextOwned   = (0 != (kIODMAMapOptionDextOwner & mappingOptions));
 	fInternalState->fDevice = device;
 
 	return kIOReturnSuccess;
@@ -344,6 +345,9 @@ void
 IODMACommand::free()
 {
 	if (reserved) {
+		if (fActive && fInternalState->fDextOwned) {
+			CompleteDMA(kIODMACommandCompleteDMANoOptions);
+		}
 		IOFreeType(reserved, IODMACommandInternal);
 	}
 

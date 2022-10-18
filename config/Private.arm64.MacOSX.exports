@@ -28,6 +28,7 @@ _csfg_get_supplement_linkage_cdhash
 _csfg_get_supplement_prod_signed
 _csfg_get_supplement_signer_type
 _csfg_get_supplement_teamid
+_csfg_get_supplement_csblob
 _xts_decrypt
 _xts_done
 _xts_encrypt
@@ -38,3 +39,10 @@ _csproc_mark_invalid_allowed
 _csproc_check_invalid_allowed
 _csproc_hardened_runtime
 _csproc_forced_lv
+#macOS ECC error reporting
+_ecc_panic_physical_address
+
+__ZN16IOUserClient202226_RESERVEDIOUserClient20220Ev
+__ZN16IOUserClient202226_RESERVEDIOUserClient20221Ev
+__ZN16IOUserClient202226_RESERVEDIOUserClient20222Ev
+__ZN16IOUserClient202226_RESERVEDIOUserClient20223Ev

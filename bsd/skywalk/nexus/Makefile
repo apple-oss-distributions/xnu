@@ -22,7 +22,7 @@ KERNELFILES= \
 # Installs header file for Apple internal use in user level -
 #	  $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
 PRIVATE_DATAFILES = \
-	os_nexus.h os_nexus_private.h nexus_common.h
+	os_nexus.h os_nexus_private.h nexus_common.h nexus_ioctl.h
 
 # Installs header file for Apple internal use for kernel extensions -
 #	  $(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders

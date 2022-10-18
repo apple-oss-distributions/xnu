@@ -29,7 +29,22 @@
 #include <machine/machine_cpu.h>
 #include <kern/locks.h>
 #include <kern/mpsc_queue.h>
+#include <kern/queue.h>
 #include <kern/thread.h>
+
+#pragma mark Validaation panics for queues in general
+
+__abortlike
+void
+__queue_element_linkage_invalid(queue_entry_t elt)
+{
+	queue_entry_t prev = elt->prev;
+	queue_entry_t next = elt->next;
+
+	panic("Invalid queue linkage: elt:%p {prev:%p, next:%p, "
+	    "prev->next:%p, next->prev:%p}",
+	    elt, prev, next, prev->next, next->prev);
+}
 
 #pragma mark Single Consumer calls
 

@@ -4403,7 +4403,7 @@ bondport_receive_machine_port_disabled(bondport_ref p, LAEvent event,
 			tv.tv_sec = 1;
 			tv.tv_usec = 0;
 			devtimer_set_relative(p->po_current_while_timer, tv,
-			    (devtimer_timeout_func)
+			    (devtimer_timeout_func)(void (*)(void))
 			    bondport_receive_machine_port_disabled,
 			    (void *)LAEventTimeout, NULL);
 		} else if (p->po_selected == SelectedState_STANDBY) {
@@ -4454,7 +4454,7 @@ bondport_receive_machine_expired(bondport_ref p, LAEvent event,
 		tv.tv_sec = LACP_SHORT_TIMEOUT_TIME;
 		tv.tv_usec = 0;
 		devtimer_set_relative(p->po_current_while_timer, tv,
-		    (devtimer_timeout_func)
+		    (devtimer_timeout_func)(void (*)(void))
 		    bondport_receive_machine_expired,
 		    (void *)LAEventTimeout, NULL);
 
@@ -4547,7 +4547,7 @@ bondport_receive_machine_current(bondport_ref p, LAEvent event,
 		}
 		tv.tv_usec = 0;
 		devtimer_set_relative(p->po_current_while_timer, tv,
-		    (devtimer_timeout_func)
+		    (devtimer_timeout_func)(void (*)(void))
 		    bondport_receive_machine_current,
 		    (void *)LAEventTimeout, NULL);
 		break;
@@ -4616,7 +4616,7 @@ bondport_periodic_transmit_machine(bondport_ref p, LAEvent event,
 			tv.tv_usec = 0;
 			tv.tv_sec = interval;
 			devtimer_set_relative(p->po_periodic_timer, tv,
-			    (devtimer_timeout_func)
+			    (devtimer_timeout_func)(void (*)(void))
 			    bondport_periodic_transmit_machine,
 			    (void *)LAEventTimeout, NULL);
 			if (if_bond_debug) {
@@ -4630,7 +4630,7 @@ bondport_periodic_transmit_machine(bondport_ref p, LAEvent event,
 		bondport_flags_set_ntt(p);
 		tv.tv_sec = p->po_periodic_interval;
 		tv.tv_usec = 0;
-		devtimer_set_relative(p->po_periodic_timer, tv, (devtimer_timeout_func)
+		devtimer_set_relative(p->po_periodic_timer, tv, (devtimer_timeout_func)(void (*)(void))
 		    bondport_periodic_transmit_machine,
 		    (void *)LAEventTimeout, NULL);
 		if (if_bond_debug > 1) {
@@ -4694,7 +4694,7 @@ bondport_transmit_machine(bondport_ref p, LAEvent event,
 				}
 			} else {
 				devtimer_set_absolute(p->po_transmit_timer, next_tick_time,
-				    (devtimer_timeout_func)
+				    (devtimer_timeout_func)(void (*)(void))
 				    bondport_transmit_machine,
 				    (void *)LAEventTimeout, NULL);
 				if (if_bond_debug > 0) {
@@ -4907,7 +4907,7 @@ bondport_mux_machine_waiting(bondport_ref p, LAEvent event,
 		tv.tv_sec = LACP_AGGREGATE_WAIT_TIME;
 		tv.tv_usec = 0;
 		devtimer_set_relative(p->po_wait_while_timer, tv,
-		    (devtimer_timeout_func)
+		    (devtimer_timeout_func)(void (*)(void))
 		    bondport_mux_machine_waiting,
 		    (void *)LAEventTimeout, NULL);
 		break;

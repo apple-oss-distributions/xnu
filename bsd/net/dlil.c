@@ -77,7 +77,7 @@
 #include <net/classq/classq_sfb.h>
 #include <net/flowhash.h>
 #include <net/ntstat.h>
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 #include <skywalk/lib/net_filter_event.h>
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
 #include <net/if_llatbl.h>
@@ -149,8 +149,12 @@
 #define DBG_FNC_DLIL_OUTPUT     DLILDBG_CODE(DBG_DLIL_STATIC, (2 << 8))
 #define DBG_FNC_DLIL_IFOUT      DLILDBG_CODE(DBG_DLIL_STATIC, (3 << 8))
 
+#define IFNET_KTRACE_TX_PKT_DUMP   IFNETDBG_CODE(DBG_IFNET, 0x001)
+#define IFNET_KTRACE_RX_PKT_DUMP   IFNETDBG_CODE(DBG_IFNET, 0x002)
+
 #define MAX_FRAME_TYPE_SIZE 4 /* LONGWORDS */
 #define MAX_LINKADDR        4 /* LONGWORDS */
+
 
 #if 1
 #define DLIL_PRINTF     printf
@@ -476,6 +480,7 @@ static int sysctl_tx_chain_len_stats SYSCTL_HANDLER_ARGS;
 static int sysctl_input_thread_termination_spin SYSCTL_HANDLER_ARGS;
 #endif /* TEST_INPUT_THREAD_TERMINATION */
 
+
 /* The following are protected by dlil_ifnet_lock */
 static TAILQ_HEAD(, ifnet) ifnet_detaching_head;
 static u_int32_t ifnet_detaching_cnt;
@@ -676,6 +681,14 @@ u_int32_t ifnet_delay_start_disabled = 0;
 SYSCTL_UINT(_net_link_generic_system, OID_AUTO, start_delay_disabled,
     CTLFLAG_RW | CTLFLAG_LOCKED, &ifnet_delay_start_disabled, 0,
     "number of times start was delayed");
+
+#if DEVELOPMENT || DEBUG
+static int packet_dump_trace_update SYSCTL_HANDLER_ARGS;
+
+struct flow_key flow_key_trace;
+SYSCTL_PROC(_net_link_generic_system, OID_AUTO, flow_key_trace, CTLFLAG_WR | CTLFLAG_LOCKED |
+    CTLFLAG_KERN | CTLFLAG_ANYBODY, 0, 0, packet_dump_trace_update, "S", "Set flow key for packet tracing");
+#endif /* DEVELOPMENT || DEBUG */
 
 static inline void
 ifnet_delay_start_disabled_increment(void)
@@ -1204,8 +1217,8 @@ dlil_siocgifdevmtu(struct ifnet * ifp, struct ifdevmtu * ifdm_p)
 }
 
 static inline int
-_dlil_get_flowswitch_buffer_size(ifnet_t ifp, uuid_t netif, uint64_t *buf_size,
-    bool *use_multi_buflet)
+_dlil_get_flowswitch_buffer_size(ifnet_t ifp, uuid_t netif, uint32_t *buf_size,
+    bool *use_multi_buflet, uint32_t *large_buf_size)
 {
 	struct kern_pbufpool_memory_info rx_pp_info;
 	struct kern_pbufpool_memory_info tx_pp_info;
@@ -1218,8 +1231,9 @@ _dlil_get_flowswitch_buffer_size(ifnet_t ifp, uuid_t netif, uint64_t *buf_size,
 	 * To perform intra-stack RX aggregation flowswitch needs to use
 	 * multi-buflet packet.
 	 */
-	*use_multi_buflet = (sk_fsw_rx_agg_tcp != 0);
+	*use_multi_buflet = NX_FSW_TCP_RX_AGG_ENABLED();
 
+	*large_buf_size = *use_multi_buflet ? NX_FSW_DEF_LARGE_BUFSIZE : 0;
 	/*
 	 * IP over Thunderbolt interface can deliver the largest IP packet,
 	 * but the driver advertises the MAX MTU as only 9K.
@@ -1287,8 +1301,33 @@ skip_mtu_ioctl:
 		*use_multi_buflet = true;
 		/* default flowswitch buffer size */
 		*buf_size = NX_FSW_BUFSIZE;
+		*large_buf_size = MIN(NX_FSW_MAX_LARGE_BUFSIZE, drv_buf_size);
 	} else {
 		*buf_size = MAX(drv_buf_size, NX_FSW_BUFSIZE);
+	}
+
+	/*
+	 * if HW TSO is enabled on a Skywalk native interface then make
+	 * the flowswitch default buffer be able to handle max TSO segment.
+	 */
+	uint32_t tso_v4_mtu = 0;
+	uint32_t tso_v6_mtu = 0;
+#ifdef XNU_TARGET_OS_OSX
+	if (dlil_is_native_netif_nexus(ifp)) {
+		if ((ifp->if_hwassist & IFNET_TSO_IPV4) != 0) {
+			tso_v4_mtu = ifp->if_tso_v4_mtu;
+		}
+		if ((ifp->if_hwassist & IFNET_TSO_IPV6) != 0) {
+			tso_v6_mtu = ifp->if_tso_v6_mtu;
+		}
+	}
+#endif /* XNU_TARGET_OS_OSX */
+	if ((tso_v4_mtu != 0) || (tso_v6_mtu != 0)) {
+		*buf_size = max(*buf_size, max(tso_v4_mtu, tso_v6_mtu));
+		ASSERT(*buf_size <= NX_FSW_MAXBUFSIZE);
+	}
+	if (*buf_size >= *large_buf_size) {
+		*large_buf_size = 0;
 	}
 	return 0;
 }
@@ -1300,7 +1339,8 @@ _dlil_attach_flowswitch_nexus(ifnet_t ifp, if_nexus_flowswitch_t nexus_fsw)
 	nexus_controller_t      controller;
 	errno_t                 err = 0;
 	uuid_t                  netif;
-	uint64_t                buf_size = 0;
+	uint32_t                buf_size = 0;
+	uint32_t                large_buf_size = 0;
 	bool                    multi_buflet;
 
 	if (ifnet_nx_noauto(ifp) || ifnet_nx_noauto_flowswitch(ifp) ||
@@ -1334,14 +1374,18 @@ _dlil_attach_flowswitch_nexus(ifnet_t ifp, if_nexus_flowswitch_t nexus_fsw)
 	}
 
 	err = _dlil_get_flowswitch_buffer_size(ifp, netif, &buf_size,
-	    &multi_buflet);
+	    &multi_buflet, &large_buf_size);
 	if (err != 0) {
 		goto failed;
 	}
 	ASSERT((buf_size >= NX_FSW_BUFSIZE) && (buf_size <= NX_FSW_MAXBUFSIZE));
+	ASSERT(large_buf_size <= NX_FSW_MAX_LARGE_BUFSIZE);
 
 	/* Configure flowswitch buffer size */
 	err = kern_nexus_attr_set(attr, NEXUS_ATTR_SLOT_BUF_SIZE, buf_size);
+	VERIFY(err == 0);
+	err = kern_nexus_attr_set(attr, NEXUS_ATTR_LARGE_BUF_SIZE,
+	    large_buf_size);
 	VERIFY(err == 0);
 
 	/*
@@ -1439,6 +1483,27 @@ dlil_detach_flowswitch_nexus(if_nexus_flowswitch_t nexus_fsw)
 {
 	dlil_detach_nexus(__func__, nexus_fsw->if_fsw_provider,
 	    nexus_fsw->if_fsw_instance, nexus_fsw->if_fsw_device);
+}
+
+__attribute__((noinline))
+static void
+dlil_netif_detach_notify(ifnet_t ifp)
+{
+	void (*detach_notify)(struct nexus_netif_adapter *);
+
+	/*
+	 * This is only needed for low latency interfaces for now.
+	 */
+	if (!ifnet_is_low_latency(ifp)) {
+		return;
+	}
+	detach_notify = (ifp->if_na_ops != NULL) ? ifp->if_na_ops->ni_detach_notify : NULL;
+	if (detach_notify != NULL) {
+		(*detach_notify)(ifp->if_na);
+	} else {
+		DLIL_PRINTF("%s: %s has no detach notify calback\n",
+		    __func__, if_name(ifp));
+	}
 }
 
 __attribute__((noinline))
@@ -1551,6 +1616,16 @@ ifnet_detach_netif_nexus(ifnet_t ifp)
 	           nexus_netif.if_nif_instance, nexus_netif.if_nif_attach);
 }
 
+void
+ifnet_attach_native_flowswitch(ifnet_t ifp)
+{
+	if (!dlil_is_native_netif_nexus(ifp)) {
+		/* not a native netif */
+		return;
+	}
+	ifnet_attach_flowswitch_nexus(ifp);
+}
+
 #endif /* SKYWALK */
 
 #define DLIL_INPUT_CHECK(m, ifp) {                                      \
@@ -1632,11 +1707,9 @@ proto_hash_value(u_int32_t protocol_family)
 		return 1;
 	case PF_VLAN:
 		return 2;
-	case PF_802154:
-		return 3;
 	case PF_UNSPEC:
 	default:
-		return 4;
+		return 3;
 	}
 }
 
@@ -2313,7 +2386,7 @@ dlil_affinity_set(struct thread *tp, u_int32_t tag)
 	           (thread_policy_t)&policy, THREAD_AFFINITY_POLICY_COUNT);
 }
 
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 static void
 dlil_filter_event(struct eventhandler_entry_arg arg __unused,
     enum net_filter_event_subsystems state)
@@ -2431,7 +2504,6 @@ dlil_init(void)
 	_CASSERT(IFRTYPE_FAMILY_FIREWIRE == IFNET_FAMILY_FIREWIRE);
 	_CASSERT(IFRTYPE_FAMILY_BOND == IFNET_FAMILY_BOND);
 	_CASSERT(IFRTYPE_FAMILY_CELLULAR == IFNET_FAMILY_CELLULAR);
-	_CASSERT(IFRTYPE_FAMILY_6LOWPAN == IFNET_FAMILY_6LOWPAN);
 	_CASSERT(IFRTYPE_FAMILY_UTUN == IFNET_FAMILY_UTUN);
 	_CASSERT(IFRTYPE_FAMILY_IPSEC == IFNET_FAMILY_IPSEC);
 
@@ -2749,7 +2821,7 @@ dlil_attach_filter(struct ifnet *ifp, const struct iff_filter *if_filter,
 	if_flt_monitor_leave(ifp);
 	lck_mtx_unlock(&ifp->if_flt_lock);
 
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 	net_filter_event_mark(NET_FILTER_EVENT_INTERFACE,
 	    net_check_compatible_if_filter(NULL));
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
@@ -2877,7 +2949,7 @@ destroy:
 	if (filter->filt_flags & DLIL_IFF_INTERNAL) {
 		VERIFY(OSDecrementAtomic64(&net_api_stats.nas_iflt_attach_os_count) > 0);
 	}
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 	net_filter_event_mark(NET_FILTER_EVENT_INTERFACE,
 	    net_check_compatible_if_filter(NULL));
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
@@ -3836,6 +3908,7 @@ dlil_reset_input_handler(struct ifnet *ifp)
 		;
 	}
 }
+
 errno_t
 dlil_set_output_handler(struct ifnet *ifp, dlil_output_func fn)
 {
@@ -3872,7 +3945,14 @@ dlil_input_handler(struct ifnet *ifp, struct mbuf *m_head,
 		inp = dlil_main_input_thread;
 	}
 
-	return inp->dlth_strategy(inp, ifp, m_head, m_tail, s, poll, tp);
+#if (DEVELOPMENT || DEBUG)
+	if (__improbable(net_thread_is_marked(NET_THREAD_SYNC_RX))) {
+		return dlil_input_sync(inp, ifp, m_head, m_tail, s, poll, tp);
+	} else
+#endif /* (DEVELOPMENT || DEBUG) */
+	{
+		return inp->dlth_strategy(inp, ifp, m_head, m_tail, s, poll, tp);
+	}
 }
 
 static errno_t
@@ -4717,7 +4797,7 @@ ifnet_get_sndq_len(struct ifnet *ifp, u_int32_t *pkts)
 		err = ENXIO;
 	} else {
 		err = ifclassq_get_len(ifp->if_snd, MBUF_SC_UNSPEC,
-		    pkts, NULL);
+		    IF_CLASSQ_ALL_GRPS, pkts, NULL);
 	}
 
 	return err;
@@ -4735,7 +4815,8 @@ ifnet_get_service_class_sndq_len(struct ifnet *ifp, mbuf_svc_class_t sc,
 	} else if (!(ifp->if_eflags & IFEF_TXSTART)) {
 		err = ENXIO;
 	} else {
-		err = ifclassq_get_len(ifp->if_snd, sc, pkts, bytes);
+		err = ifclassq_get_len(ifp->if_snd, sc, IF_CLASSQ_ALL_GRPS,
+		    pkts, bytes);
 	}
 
 	return err;
@@ -5175,14 +5256,15 @@ ifnet_enqueue_ifclassq(struct ifnet *ifp, struct ifclassq *ifcq,
 }
 
 static inline errno_t
-ifnet_enqueue_ifclassq_chain(struct ifnet *ifp, classq_pkt_t *head,
-    classq_pkt_t *tail, uint32_t cnt, uint32_t bytes, boolean_t flush,
-    boolean_t *pdrop)
+ifnet_enqueue_ifclassq_chain(struct ifnet *ifp, struct ifclassq *ifcq,
+    classq_pkt_t *head, classq_pkt_t *tail, uint32_t cnt, uint32_t bytes,
+    boolean_t flush, boolean_t *pdrop)
 {
 	int error;
 
 	/* enqueue the packet (caller consumes object) */
-	error = ifclassq_enqueue(ifp->if_snd, head, tail, cnt, bytes, pdrop);
+	error = ifclassq_enqueue(ifcq != NULL ? ifcq : ifp->if_snd, head, tail,
+	    cnt, bytes, pdrop);
 
 	/*
 	 * Tell the driver to start dequeueing; do this even when the queue
@@ -5194,6 +5276,112 @@ ifnet_enqueue_ifclassq_chain(struct ifnet *ifp, classq_pkt_t *head,
 	}
 	return error;
 }
+
+#if DEVELOPMENT || DEBUG
+void
+trace_pkt_dump_payload(struct ifnet *ifp, struct __kern_packet *kpkt, bool input)
+{
+#define MIN_TRACE_DUMP_PKT_SIZE  32
+	struct ether_header *eh = NULL;
+	struct udphdr *uh = NULL;
+
+	if (__probable(kdebug_enable == 0 || (flow_key_trace.fk_ipver != IPVERSION &&
+	    flow_key_trace.fk_ipver != IPV6_VERSION))) {
+		return;
+	}
+
+	uint16_t bdlim, bdlen, bdoff;
+	uint8_t *baddr;
+
+	MD_BUFLET_ADDR_ABS_DLEN(kpkt, baddr, bdlen, bdlim, bdoff);
+
+	if (!(kpkt->pkt_qum_qflags & QUM_F_FLOW_CLASSIFIED)) {
+		if (!IFNET_IS_ETHERNET(ifp)) {
+			return;
+		}
+
+		sa_family_t af = AF_UNSPEC;
+		ASSERT(kpkt->pkt_l2_len > 0);
+
+		baddr += kpkt->pkt_headroom;
+		eh = (struct ether_header *)(void *)baddr;
+		if (__improbable(sizeof(*eh) > kpkt->pkt_length)) {
+			return;
+		}
+		if (__improbable(kpkt->pkt_headroom + sizeof(*eh) > bdlim)) {
+			return;
+		}
+		uint16_t ether_type = ntohs(eh->ether_type);
+		if (ether_type == ETHERTYPE_IP) {
+			af = AF_INET;
+		} else if (ether_type == ETHERTYPE_IPV6) {
+			af = AF_INET6;
+		} else {
+			return;
+		}
+		flow_pkt_classify(kpkt, ifp, af, input);
+	}
+
+	if (kpkt->pkt_flow_ip_ver != flow_key_trace.fk_ipver) {
+		return;
+	}
+
+	if (kpkt->pkt_flow_ip_proto != IPPROTO_UDP) {
+		return;
+	}
+
+	uint16_t sport = input ? flow_key_trace.fk_dport : flow_key_trace.fk_sport;
+	uint16_t dport = input ? flow_key_trace.fk_sport : flow_key_trace.fk_dport;
+
+	if (kpkt->pkt_flow_udp_src != sport ||
+	    kpkt->pkt_flow_udp_dst != dport) {
+		return;
+	}
+
+	if (kpkt->pkt_flow_ip_ver == IPVERSION) {
+		struct ip *ip_header = (struct ip *)kpkt->pkt_flow_ip_hdr;
+		struct in_addr *saddr = input ? &flow_key_trace.fk_dst4 : &flow_key_trace.fk_src4;
+		struct in_addr *daddr = input ? &flow_key_trace.fk_src4 : &flow_key_trace.fk_dst4;
+
+		if (ip_header->ip_src.s_addr != saddr->s_addr ||
+		    ip_header->ip_dst.s_addr != daddr->s_addr) {
+			return;
+		}
+	} else if (kpkt->pkt_flow_ip_ver == IPV6_VERSION) {
+		struct ip6_hdr *ip6_header = (struct ip6_hdr *)kpkt->pkt_flow_ip_hdr;
+		struct in6_addr *saddr = input ? &flow_key_trace.fk_dst6 : &flow_key_trace.fk_src6;
+		struct in6_addr *daddr = input ? &flow_key_trace.fk_src6 : &flow_key_trace.fk_dst6;
+
+		if (!IN6_ARE_ADDR_EQUAL(&ip6_header->ip6_src, saddr) ||
+		    !IN6_ARE_ADDR_EQUAL(&ip6_header->ip6_dst, daddr)) {
+			return;
+		}
+	}
+
+	int udp_payload_offset = kpkt->pkt_l2_len + kpkt->pkt_flow_ip_hlen + sizeof(struct udphdr);
+
+	uint16_t pkt_payload_len = bdlim - bdoff;
+	pkt_payload_len = (uint16_t)MIN(pkt_payload_len, kpkt->pkt_length);
+	pkt_payload_len -= udp_payload_offset;
+
+	if (pkt_payload_len >= MIN_TRACE_DUMP_PKT_SIZE) {
+		uh = (struct udphdr *)kpkt->pkt_flow_udp_hdr;
+		uint8_t *payload = (uint8_t *)(uh + 1);
+
+		/* Trace 32 bytes of UDP transport payload */
+		uint64_t *trace1 = __DECONST(uint64_t *, payload);
+		uint64_t *trace2 = trace1 + 1;
+		uint64_t *trace3 = trace2 + 1;
+		uint64_t *trace4 = trace3 + 1;
+
+		if (input) {
+			KDBG(IFNET_KTRACE_RX_PKT_DUMP, *trace1, *trace2, *trace3, *trace4);
+		} else {
+			KDBG(IFNET_KTRACE_TX_PKT_DUMP, *trace1, *trace2, *trace3, *trace4);
+		}
+	}
+}
+#endif /* DEVELOPMENT || DEBUG */
 
 int
 ifnet_enqueue_netem(void *handle, pktsched_pkt_t *pkts, uint32_t n_pkts)
@@ -5218,8 +5406,25 @@ static inline errno_t
 ifnet_enqueue_common(struct ifnet *ifp, struct ifclassq *ifcq,
     classq_pkt_t *pkt, boolean_t flush, boolean_t *pdrop)
 {
+#if DEVELOPMENT || DEBUG
+	switch (pkt->cp_ptype) {
+	case QP_PACKET: {
+		trace_pkt_dump_payload(ifp, pkt->cp_kpkt, false);
+		break;
+	}
+	case QP_MBUF:
+	case QP_INVALID: {
+		break;
+	}
+	}
+#endif /* DEVELOPMENT || DEBUG */
+
 	if (ifp->if_output_netem != NULL) {
-		return netem_enqueue(ifp->if_output_netem, pkt, pdrop);
+		bool drop;
+		errno_t error;
+		error = netem_enqueue(ifp->if_output_netem, pkt, &drop);
+		*pdrop = drop ? TRUE : FALSE;
+		return error;
 	} else {
 		return ifnet_enqueue_ifclassq(ifp, ifcq, pkt, flush, pdrop);
 	}
@@ -5288,7 +5493,7 @@ ifnet_enqueue_mbuf_chain(struct ifnet *ifp, struct mbuf *m_head,
 
 	CLASSQ_PKT_INIT_MBUF(&head, m_head);
 	CLASSQ_PKT_INIT_MBUF(&tail, m_tail);
-	return ifnet_enqueue_ifclassq_chain(ifp, &head, &tail, cnt, bytes,
+	return ifnet_enqueue_ifclassq_chain(ifp, NULL, &head, &tail, cnt, bytes,
 	           flush, pdrop);
 }
 
@@ -5340,10 +5545,10 @@ ifnet_enqueue_ifcq_pkt(struct ifnet *ifp, struct ifclassq *ifcq,
 	return ifnet_enqueue_pkt_common(ifp, ifcq, kpkt, flush, pdrop);
 }
 
-errno_t
-ifnet_enqueue_pkt_chain(struct ifnet *ifp, struct __kern_packet *k_head,
-    struct __kern_packet *k_tail, uint32_t cnt, uint32_t bytes, boolean_t flush,
-    boolean_t *pdrop)
+static errno_t
+ifnet_enqueue_pkt_chain_common(struct ifnet *ifp, struct ifclassq *ifcq,
+    struct __kern_packet *k_head, struct __kern_packet *k_tail, uint32_t cnt,
+    uint32_t bytes, boolean_t flush, boolean_t *pdrop)
 {
 	classq_pkt_t head, tail;
 
@@ -5365,8 +5570,26 @@ ifnet_enqueue_pkt_chain(struct ifnet *ifp, struct __kern_packet *k_head,
 
 	CLASSQ_PKT_INIT_PACKET(&head, k_head);
 	CLASSQ_PKT_INIT_PACKET(&tail, k_tail);
-	return ifnet_enqueue_ifclassq_chain(ifp, &head, &tail, cnt, bytes,
+	return ifnet_enqueue_ifclassq_chain(ifp, ifcq, &head, &tail, cnt, bytes,
 	           flush, pdrop);
+}
+
+errno_t
+ifnet_enqueue_pkt_chain(struct ifnet *ifp, struct __kern_packet *k_head,
+    struct __kern_packet *k_tail, uint32_t cnt, uint32_t bytes, boolean_t flush,
+    boolean_t *pdrop)
+{
+	return ifnet_enqueue_pkt_chain_common(ifp, NULL, k_head, k_tail,
+	           cnt, bytes, flush, pdrop);
+}
+
+errno_t
+ifnet_enqueue_ifcq_pkt_chain(struct ifnet *ifp, struct ifclassq *ifcq,
+    struct __kern_packet *k_head, struct __kern_packet *k_tail, uint32_t cnt,
+    uint32_t bytes, boolean_t flush, boolean_t *pdrop)
+{
+	return ifnet_enqueue_pkt_chain_common(ifp, ifcq, k_head, k_tail,
+	           cnt, bytes, flush, pdrop);
 }
 #endif /* SKYWALK */
 
@@ -5390,7 +5613,7 @@ ifnet_dequeue(struct ifnet *ifp, struct mbuf **mp)
 	ASSERT(!(ifp->if_eflags & IFEF_SKYWALK_NATIVE));
 #endif /* SKYWALK */
 	rc = ifclassq_dequeue(ifp->if_snd, 1, CLASSQ_DEQUEUE_MAX_BYTE_LIMIT,
-	    &pkt, NULL, NULL, NULL);
+	    &pkt, NULL, NULL, NULL, 0);
 	VERIFY((pkt.cp_ptype == QP_MBUF) || (pkt.cp_mbuf == NULL));
 	ifnet_decr_iorefcnt(ifp);
 	*mp = pkt.cp_mbuf;
@@ -5418,7 +5641,7 @@ ifnet_dequeue_service_class(struct ifnet *ifp, mbuf_svc_class_t sc,
 	ASSERT(!(ifp->if_eflags & IFEF_SKYWALK_NATIVE));
 #endif /* SKYWALK */
 	rc = ifclassq_dequeue_sc(ifp->if_snd, sc, 1,
-	    CLASSQ_DEQUEUE_MAX_BYTE_LIMIT, &pkt, NULL, NULL, NULL);
+	    CLASSQ_DEQUEUE_MAX_BYTE_LIMIT, &pkt, NULL, NULL, NULL, 0);
 	VERIFY((pkt.cp_ptype == QP_MBUF) || (pkt.cp_mbuf == NULL));
 	ifnet_decr_iorefcnt(ifp);
 	*mp = pkt.cp_mbuf;
@@ -5447,7 +5670,7 @@ ifnet_dequeue_multi(struct ifnet *ifp, u_int32_t pkt_limit,
 	ASSERT(!(ifp->if_eflags & IFEF_SKYWALK_NATIVE));
 #endif /* SKYWALK */
 	rc = ifclassq_dequeue(ifp->if_snd, pkt_limit,
-	    CLASSQ_DEQUEUE_MAX_BYTE_LIMIT, &pkt_head, &pkt_tail, cnt, len);
+	    CLASSQ_DEQUEUE_MAX_BYTE_LIMIT, &pkt_head, &pkt_tail, cnt, len, 0);
 	VERIFY((pkt_head.cp_ptype == QP_MBUF) || (pkt_head.cp_mbuf == NULL));
 	ifnet_decr_iorefcnt(ifp);
 	*head = pkt_head.cp_mbuf;
@@ -5479,7 +5702,7 @@ ifnet_dequeue_multi_bytes(struct ifnet *ifp, u_int32_t byte_limit,
 	ASSERT(!(ifp->if_eflags & IFEF_SKYWALK_NATIVE));
 #endif /* SKYWALK */
 	rc = ifclassq_dequeue(ifp->if_snd, CLASSQ_DEQUEUE_MAX_PKT_LIMIT,
-	    byte_limit, &pkt_head, &pkt_tail, cnt, len);
+	    byte_limit, &pkt_head, &pkt_tail, cnt, len, 0);
 	VERIFY((pkt_head.cp_ptype == QP_MBUF) || (pkt_head.cp_mbuf == NULL));
 	ifnet_decr_iorefcnt(ifp);
 	*head = pkt_head.cp_mbuf;
@@ -5514,7 +5737,7 @@ ifnet_dequeue_service_class_multi(struct ifnet *ifp, mbuf_svc_class_t sc,
 #endif /* SKYWALK */
 	rc = ifclassq_dequeue_sc(ifp->if_snd, sc, pkt_limit,
 	    CLASSQ_DEQUEUE_MAX_BYTE_LIMIT, &pkt_head, &pkt_tail,
-	    cnt, len);
+	    cnt, len, 0);
 	VERIFY((pkt_head.cp_ptype == QP_MBUF) || (pkt_head.cp_mbuf == NULL));
 	ifnet_decr_iorefcnt(ifp);
 	*head = pkt_head.cp_mbuf;
@@ -7460,6 +7683,11 @@ dlil_send_arp_internal(ifnet_t ifp, u_short arpop,
 	struct if_proto *proto;
 	errno_t result = 0;
 
+	if ((ifp->if_flags & IFF_NOARP) != 0) {
+		result = ENOTSUP;
+		goto done;
+	}
+
 	/* callee holds a proto refcnt upon success */
 	ifnet_lock_shared(ifp);
 	proto = find_attached_proto(ifp, target_proto->sa_family);
@@ -7489,7 +7717,7 @@ dlil_send_arp_internal(ifnet_t ifp, u_short arpop,
 		}
 		if_proto_free(proto);
 	}
-
+done:
 	return result;
 }
 
@@ -9313,6 +9541,7 @@ ifnet_detach_final(struct ifnet *ifp)
 	int i;
 
 #if SKYWALK
+	dlil_netif_detach_notify(ifp);
 	/*
 	 * Wait for the datapath to quiesce before tearing down
 	 * netif/flowswitch nexuses.
@@ -12207,6 +12436,28 @@ if_clear_xflags(ifnet_t interface, u_int32_t clear_flags)
 	_clear_flags(&interface->if_xflags, clear_flags);
 }
 
+__private_extern__ void
+ifnet_update_traffic_rule_genid(ifnet_t ifp)
+{
+	atomic_add_32(&ifp->if_traffic_rule_genid, 1);
+}
+
+__private_extern__ boolean_t
+ifnet_sync_traffic_rule_genid(ifnet_t ifp, uint32_t *genid)
+{
+	if (*genid != ifp->if_traffic_rule_genid) {
+		*genid = ifp->if_traffic_rule_genid;
+		return TRUE;
+	}
+	return FALSE;
+}
+__private_extern__ void
+ifnet_update_traffic_rule_count(ifnet_t ifp, uint32_t count)
+{
+	atomic_set_32(&ifp->if_traffic_rule_count, count);
+	ifnet_update_traffic_rule_genid(ifp);
+}
+
 static void
 log_hexdump(void *data, size_t len)
 {
@@ -12235,7 +12486,7 @@ log_hexdump(void *data, size_t len)
 	}
 }
 
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 static bool
 net_check_compatible_if_filter(struct ifnet *ifp)
 {
@@ -12251,3 +12502,116 @@ net_check_compatible_if_filter(struct ifnet *ifp)
 	return true;
 }
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
+
+#define DUMP_BUF_CHK() {        \
+	clen -= k;              \
+	if (clen < 1)           \
+	        goto done;      \
+	c += k;                 \
+}
+
+int dlil_dump_top_if_qlen(char *, int);
+int
+dlil_dump_top_if_qlen(char *str, int str_len)
+{
+	char *c = str;
+	int k, clen = str_len;
+	struct ifnet *top_ifcq_ifp = NULL;
+	uint32_t top_ifcq_len = 0;
+	struct ifnet *top_inq_ifp = NULL;
+	uint32_t top_inq_len = 0;
+
+	for (int ifidx = 1; ifidx < if_index; ifidx++) {
+		struct ifnet *ifp = ifindex2ifnet[ifidx];
+		struct dlil_ifnet *dl_if = (struct dlil_ifnet *)ifp;
+
+		if (ifp == NULL) {
+			continue;
+		}
+		if (ifp->if_snd != NULL && ifp->if_snd->ifcq_len > top_ifcq_len) {
+			top_ifcq_len = ifp->if_snd->ifcq_len;
+			top_ifcq_ifp = ifp;
+		}
+		if (dl_if->dl_if_inpstorage.dlth_pkts.qlen > top_inq_len) {
+			top_inq_len = dl_if->dl_if_inpstorage.dlth_pkts.qlen;
+			top_inq_ifp = ifp;
+		}
+	}
+
+	if (top_ifcq_ifp != NULL) {
+		k = scnprintf(c, clen, "\ntop ifcq_len %u packets by %s\n",
+		    top_ifcq_len, top_ifcq_ifp->if_xname);
+		DUMP_BUF_CHK();
+	}
+	if (top_inq_ifp != NULL) {
+		k = scnprintf(c, clen, "\ntop inq_len %u packets by %s\n",
+		    top_inq_len, top_inq_ifp->if_xname);
+		DUMP_BUF_CHK();
+	}
+done:
+	return str_len - clen;
+}
+
+#if DEVELOPMENT || DEBUG
+__private_extern__ int
+packet_dump_trace_update(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	struct flow_key key = {};
+	int error = 0;
+
+	if (req->newptr == USER_ADDR_NULL) {
+		return EINVAL;
+	}
+	if (req->newlen < sizeof(struct flow_key)) {
+		return EINVAL;
+	}
+	error = SYSCTL_IN(req, &key, sizeof(struct flow_key));
+	if (error != 0) {
+		return error;
+	}
+
+	switch (key.fk_ipver) {
+	case IPVERSION:
+		if (key.fk_proto != IPPROTO_UDP ||
+		    key.fk_sport == 0 || key.fk_dport == 0) {
+			return EINVAL;
+		}
+
+		if (key.fk_src4.s_addr == INADDR_ANY ||
+		    key.fk_dst4.s_addr == INADDR_ANY) {
+			return EINVAL;
+		}
+
+		break;
+	case IPV6_VERSION:
+		if (key.fk_proto != IPPROTO_UDP ||
+		    key.fk_sport == 0 || key.fk_dport == 0) {
+			return EINVAL;
+		}
+
+		if (IN6_IS_ADDR_UNSPECIFIED(&key.fk_src6) ||
+		    IN6_IS_ADDR_UNSPECIFIED(&key.fk_dst6)) {
+			return EINVAL;
+		}
+
+		break;
+	case 0:
+		if (key.fk_proto != 0 ||
+		    key.fk_sport != 0 || key.fk_dport != 0) {
+			return EINVAL;
+		}
+
+		if (!IN6_IS_ADDR_UNSPECIFIED(&key.fk_src6) ||
+		    !IN6_IS_ADDR_UNSPECIFIED(&key.fk_dst6)) {
+			return EINVAL;
+		}
+
+		break;
+	default:
+		return EINVAL;
+	}
+
+	memcpy(&flow_key_trace, &key, sizeof(struct flow_key));
+	return 0;
+}
+#endif /* DEVELOPMENT || DEBUG */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1099,7 +1099,6 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 			ln_setexpire(ln, timenow + nd6_gctimer);
 		}
 
-
 		/*
 		 * Enqueue work item to invoke callback for this
 		 * route entry
@@ -1109,6 +1108,9 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 
 		if ((ln->ln_router = (short)is_router) != 0) {
 			struct radix_node_head  *rnh = NULL;
+			struct in6_addr rt_addr = SIN6(rt_key(rt))->sin6_addr;
+			struct ifnet *rt_ifp = rt->rt_ifp;
+
 			struct route_event rt_ev;
 			route_event_init(&rt_ev, rt, NULL, ROUTE_LLENTRY_RESOLVED);
 			/*
@@ -1119,6 +1121,7 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 			 * take one for the unlock/lock.
 			 */
 			RT_UNLOCK(rt);
+			defrouter_set_reachability(&rt_addr, rt_ifp, TRUE);
 			lck_mtx_lock(rnh_lock);
 			rnh = rt_tables[AF_INET6];
 
@@ -1241,8 +1244,11 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 			 */
 			if (ln->ln_router && is_router && llchange) {
 				struct radix_node_head  *rnh = NULL;
+				struct in6_addr rt_addr = SIN6(rt_key(rt))->sin6_addr;
+				struct ifnet *rt_ifp = rt->rt_ifp;
 				struct route_event rt_ev;
 				route_event_init(&rt_ev, rt, NULL, ROUTE_LLENTRY_CHANGED);
+
 				/*
 				 * This means a router's state has changed from
 				 * non-reachable to probably reachable, and might
@@ -1252,6 +1258,7 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 				 * We don't need to take another one for unlock/lock.
 				 */
 				RT_UNLOCK(rt);
+				defrouter_set_reachability(&rt_addr, rt_ifp, TRUE);
 				lck_mtx_lock(rnh_lock);
 				rnh = rt_tables[AF_INET6];
 
@@ -1622,7 +1629,6 @@ nd6_ifptomac(
 #endif
 	case IFT_BRIDGE:
 	case IFT_ISO88025:
-	case IFT_6LOWPAN:
 		return (caddr_t)IF_LLADDR(ifp);
 	default:
 		return NULL;
@@ -2461,6 +2467,7 @@ nd6_alt_node_addr_decompose(struct ifnet *ifp, struct sockaddr *sa,
 	sdl->sdl_family = AF_LINK;
 	sdl->sdl_type = ifp->if_type;
 	sdl->sdl_index = ifp->if_index;
+	sdl->sdl_nlen = 0;
 
 	switch (sa->sa_family) {
 	case AF_INET6: {
@@ -2468,10 +2475,6 @@ nd6_alt_node_addr_decompose(struct ifnet *ifp, struct sockaddr *sa,
 		struct in6_addr *in6 = &sin6a->sin6_addr;
 
 		VERIFY(sa->sa_len == sizeof *sin6);
-		VERIFY(strlen(ifp->if_name) <= IFNAMSIZ);
-
-		sdl->sdl_nlen = (u_char)strlen(ifp->if_name);
-		bcopy(ifp->if_name, sdl->sdl_data, sdl->sdl_nlen);
 		if (in6->s6_addr[11] == 0xff && in6->s6_addr[12] == 0xfe) {
 			sdl->sdl_alen = ETHER_ADDR_LEN;
 			LLADDR(sdl)[0] = (in6->s6_addr[8] ^ ND6_EUI64_UBIT);

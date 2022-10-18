@@ -5,13 +5,13 @@
 XNU proposes two ways to allocate memory:
 
 - the VM subsystem that provides allocations at the granularity of pages (with
-  `kernel_memory_allocate` and similar interfaces);
+  `kmem_alloc` and similar interfaces);
 - the zone allocator subsystem (`<kern/zalloc.h>`) which is a slab-allocator of
   objects of fixed size.
 
 In addition to that, `<kern/kalloc.h>` provides a variable-size general purpose
 allocator implemented as a collection of zones of fixed size, and overflowing to
-`kernel_memory_allocate` for allocations larger than a few pages (32KB when this
+`kmem_alloc` for allocations larger than a few pages (32KB when this
 document was being written but this is subject to change/tuning in the future).
 
 
@@ -264,6 +264,14 @@ the kernel pointers and the second that is untyped and data-only.
 
 ## C++ classes and operator new.
 
+This section covers how typed allocators should be adopted to use
+`operator new/delete` in C++. For C++ classes, the approach required
+differs based on whether the class inherits from `OSObject` or not.
+
+Most, if not all, C++ objects used in conjuction with IOKit APIs
+should probably use OSObject as a base class. C++ operators
+and non-POD types should be used seldomly.
+
 ### `OSObject` subclasses
 
 All subclasses of `OSObject` must declare and define one of IOKit's
@@ -275,28 +283,57 @@ Note that idiomatic IOKit is supposed to use `OSTypeAlloc(Class)`.
 ### Other classes
 
 Unlike `OSObject` subclasses, regular C++ classes must adopt typed allocators
-manually. If your struct or class is POD then replacing usage of `new/delete`
-with `IOMallocType/IOFreeType` is safe. However, if you have non default
-structors or members of your class/struct have non default structors, then you
-must override operator new/delete as follows, which lets you to continue to use
-C++'s new and delete keywords to allocate/deallocate instances.
+manually. If your struct or class is POD (Plain Old Data), then replacing usage of
+`new/delete` (resp. `new[]/delete[]`) with `IOMallocType/IOFreeType` (resp.
+`IONew/IODelete`) is safe.
+
+However, if you have non default structors, or members of your class/struct
+have non default structors, you will need to manually enroll it into `kalloc_type`.
+This can be accomplished through one of the following approaches, and it lets you
+to continue to use C++'s new and delete keywords to allocate/deallocate instances.
+
+The first approach is to subclass the IOTypedOperatorsMixin struct. This will
+adopt typed allocators for your class/struct by providing the appropriate
+implementations for `operator new/delete`:
+
+```cpp
+struct Type : public IOTypedOperatorsMixin<Type> {
+    ...
+};
+```
+
+Alternatively, if you cannot use the mixin approach, you can use the
+`IOOverrideTypedOperators` macro to override `operator new/delete`
+within your class/struct declaration:
 
 ```cpp
 struct Type {
-public:
-    void *operator new(size_t size)
-    {
-        return IOMallocType(Type);
-    }
-
-    void operator delete(void *mem, size_t size __unused)
-    {
-        IOFreeType(mem, Type);
-    }
-}
+    IOOverrideTypedOperators(Type);
+    ...
+};
 ```
-When operator new/delete is overriden for a specific class, all its subclasses
-must also redefine their operator new/delete to use the typed allocators.
+
+Finally, if you need to decouple the declaration of the operators from
+their implementation, you can use `IODeclareTypedOperators` paired with
+`IODefineTypedOperators`, to declare the operators within your class/struct
+declaration and then provide their definition out of line:
+
+```cpp
+// declaration
+struct Type {
+    IODeclareTypedOperators(Type);
+    ...
+};
+
+// definition
+IODefineTypedOperators(Type)
+```
+
+When a class/struct adopts typed allocators through one of those approaches,
+all its subclasses must also explicitly adopt typed allocators. It is not
+sufficient for a common parent within the class hierarchy to enroll, in order to
+automatically provide the implementation of the operators for all of its children:
+each and every subclass in the class hierarchy must also explicitly do the same.
 
 ### The case of `operator new[]`
 
@@ -309,39 +346,24 @@ context as this denormalized information is at the begining
 of the structure, making it relatively easy to attack with
 out-of-bounds bugs.
 
-However, if those must be used, the following can be used
-to adopt typed allocators:
+For this reason, the default variants of the mixin and the macros
+presented above will delete the implementation of `operator new[]`
+from the class they are applied to.
 
-```cpp
-struct Type {
-    /* C++ ABI for operator new[] */
-    struct cpp_array_header {
-        size_t esize;
-        size_t count;
-    };
+However, if those must be used, you can add adopt the typed
+allocators on your class by using the appropriate variant
+which explicitly implements the support for array operators:
+- `IOTypedOperatorsMixinSupportingArrayOperators`
+- `IOOverrideTypedOperatorsSupportingArrayOperators`
+- `IO{Declare, Define}TypedOperatorsSupportingArrayOperators`
 
-public:
-    void *operator new[](size_t count)
-    {
-        struct cpp_array_hdr *hdr;
-        hdr = IONew(struct cpp_array_hdr, Type, count);
-        if (hdr) {
-            hdr->esize = sizeof(Type);
-            hdr->count = count;
-            return (void *)(&hdr[1]);
-        }
-        return nullptr;
-    }
+### Scalar types
 
-    void operator delete[](void *ptr)
-    {
-        struct cpp_array_hdr *hdr;
-
-        hdr = (struct cpp_array_hdr *)((uintptr_t)ptr - sizeof(*hdr));
-        IODelete(hdr, struct cpp_array_hdr, Type, hdr->count);
-    }
-}
-```
+The only accepted ways of using `operator new/delete` and their variants are the ones
+described above. You should never use the operators on scalar types. Instead, you
+should use the appropriate typed allocator API based on the semantics of the memory
+being allocated (i.e. `IOMallocData` for data only buffers, and `IOMallocType`/`IONew`
+for any other type).
 
 ### Wrapping C++ type allocation in container OSObjects
 The blessed way of wrapping and passing a C++ type allocation for use in the

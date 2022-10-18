@@ -218,7 +218,6 @@ IOHistogramReporter::initWith(IOService *reportingService,
 			}
 
 			if (_histogramSegmentsConfig[cnt].scale_flag) {
-				// FIXME: Could use pow() but not sure how to include math.h
 				int64_t power = 1;
 				int exponent = cnt2 + 1;
 				while (exponent) {

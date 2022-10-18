@@ -65,7 +65,11 @@ typedef uint8_t OSKextExcludeLevel;
 
 #define kOSKextCodelessKextLoadAddr (0x7FFFFFFFFFFFFFFFULL)
 
+#if XNU_TARGET_OS_OSX
 #define kIOKitDaemonName "kernelmanagerd"
+#else
+#define kIOKitDaemonName "driverkitd"
+#endif /* XNU_TARGET_OS_OSX */
 
 #if PRAGMA_MARK
 #pragma mark -
@@ -175,11 +179,19 @@ typedef uint8_t OSKextExcludeLevel;
 #define kOSBundleKextsInKernelTextKey           "OSBundleKextsInKernelText"
 // OSKextCopyLoadedKextInfo includes non-started kexts when present:
 #define kOSBundleAllPrelinkedKey                "OSBundleAllPrelinked"
+// OSKextCopyDextsInfo states:
+#define kOSBundleDextStateKey                   "OSBundleDextState"
+#define kOSBundleDextStateActiveKey             "OSBundleDextStateActive"
+#define kOSBundleDextStateActiveLoadedKey       "OSBundleDextStateActiveLoaded"
+#define kOSBundleDextStateActiveUnloadedKey     "OSBundleDextStateActiveUnloaded"
+#define kOSBundleDextStatePendingUpgradeKey     "OSBundleDextStatePendingUpgrade"
+
 
 /* Dictionary of metaclass info keyed by classname.
  */
 #define kOSBundleClassesKey                     "OSBundleClasses"
 
+#define kOSBundleDextUniqueIdentifierKey        "kOSBundleDextUniqueIdentifier"
 /* These are contained in kOSBundleClassesKey. kOSMetaClassSuperclassNameKey
  * may be absent (for the root class).
  */
@@ -728,6 +740,8 @@ Boolean OSKextVersionGetString(
 	char          * buffer,
 	uint32_t        bufferSize);
 
+
+#define KOSBundleDextUniqueIdentifierMaxLength (1024)
 
 #ifdef KERNEL
 

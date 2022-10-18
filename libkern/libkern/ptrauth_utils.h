@@ -42,6 +42,8 @@ __BEGIN_DECLS
  * Description:	Sign a blob of data with the GA key and extra data, optionally
  * diversified by its storage address.
  *
+ * WARNING: Lower 32 bits are always zeroes.
+ *
  * Caveat: A race window exists between the blob being written to memory and its signature being
  * calculated by this function. In normal operation, standard thread safety semantics prevent this being
  * an issue, however in the malicious case it should be acknowledged that an attacker may be able to accurately

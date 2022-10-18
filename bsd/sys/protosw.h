@@ -69,6 +69,8 @@
 #include <sys/appleapiopts.h>
 #include <sys/cdefs.h>
 
+__ASSUME_PTR_ABI_SINGLE_BEGIN
+
 /* XXX: this will go away */
 #define PR_SLOWHZ       2               /* 2 slow timeouts per second */
 
@@ -204,7 +206,7 @@ struct protosw {
 	(struct socket *so, int refcnt, void *debug);
 	int     (*pr_unlock)            /* unlock for protocol */
 	(struct socket *so, int refcnt, void *debug);
-	lck_mtx_t *(*pr_getlock)        /* retrieve protocol lock */
+	lck_mtx_t * __single (*pr_getlock)        /* retrieve protocol lock */
 	(struct socket *so, int flags);
 	/*
 	 * Implant hooks
@@ -284,7 +286,7 @@ struct protosw {
 	(struct socket *so, int refcnt, void *debug);
 	int     (*pr_unlock)            /* unlock for protocol */
 	(struct socket *so, int refcnt, void *debug);
-	lck_mtx_t *(*pr_getlock)        /* retrieve protocol lock */
+	lck_mtx_t * __single (*pr_getlock)        /* retrieve protocol lock */
 	(struct socket *so, int flags);
 	/*
 	 * misc
@@ -484,8 +486,9 @@ struct pr_usrreqs {
 	int     (*pru_sosend)(struct socket *so, struct sockaddr *addr,
 	    struct uio *uio, struct mbuf *top, struct mbuf *control,
 	    int flags);
+	// rdar://87088674
 	int     (*pru_soreceive)(struct socket *so, struct sockaddr **paddr,
-	    struct uio *uio, struct mbuf **mp0, struct mbuf **controlp,
+	    struct uio *uio, struct mbuf **mp0, struct mbuf *__single *controlp,
 	    int *flagsp);
 	int     (*pru_sopoll)(struct socket *so, int events,
 	    struct ucred *cred, void *);
@@ -630,4 +633,7 @@ extern struct protosw *pffindproto(int family, int protocol, int type);
 #endif /* XNU_KERNEL_PRIVATE */
 __END_DECLS
 #endif /* KERNEL_PRIVATE */
+
+__ASSUME_PTR_ABI_SINGLE_END
+
 #endif  /* !_SYS_PROTOSW_H_ */

@@ -355,15 +355,18 @@ ast_taken_user(void)
 	 * upon return to userspace.
 	 */
 	assert(thread->kern_promotion_schedpri == 0);
-	assert(thread->rwlock_count == 0);
+	if (thread->rwlock_count > 0) {
+		panic("rwlock_count is %d for thread %p, possibly it still holds a rwlock", thread->rwlock_count, thread);
+	}
 	assert(thread->priority_floor_count == 0);
 
-	assert((thread->sched_flags & TH_SFLAG_WAITQ_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_RW_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_EXEC_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_FLOOR_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_PROMOTED) == 0);
-	assert((thread->sched_flags & TH_SFLAG_DEPRESS) == 0);
+	assert3u(0, ==, thread->sched_flags &
+	    (TH_SFLAG_WAITQ_PROMOTED |
+	    TH_SFLAG_RW_PROMOTED |
+	    TH_SFLAG_EXEC_PROMOTED |
+	    TH_SFLAG_FLOOR_PROMOTED |
+	    TH_SFLAG_PROMOTED |
+	    TH_SFLAG_DEPRESS));
 }
 
 /*
@@ -430,7 +433,7 @@ ast_context(thread_t thread)
 {
 	ast_t *pending_ast = ast_pending();
 
-	*pending_ast = ((*pending_ast & ~AST_PER_THREAD) | thread->ast);
+	*pending_ast = (*pending_ast & ~AST_PER_THREAD) | thread_ast_get(thread);
 }
 
 /*
@@ -440,7 +443,7 @@ ast_context(thread_t thread)
 void
 ast_propagate(thread_t thread)
 {
-	ast_on(thread->ast);
+	ast_on(thread_ast_get(thread));
 }
 
 void

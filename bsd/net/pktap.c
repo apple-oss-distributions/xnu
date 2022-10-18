@@ -1415,6 +1415,7 @@ pktap_bpf_tap_packet(struct ifnet *ifp, protocol_family_t proto, uint32_t dlt,
 	if (kern_packet_get_wake_flag(pkt)) {
 		hdr->pth_flags |= PTH_FLAG_WAKE_PKT;
 	}
+	hdr->pth_trace_tag = kern_packet_get_trace_tag(pkt);
 	hdr->pth_protocol_family = proto;
 	hdr->pth_svc = so_svc2tc((mbuf_svc_class_t)
 	    kern_packet_get_service_class(pkt));

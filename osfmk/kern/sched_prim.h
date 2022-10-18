@@ -134,8 +134,8 @@ extern boolean_t        thread_unblock(
 /* Unblock and dispatch thread */
 extern kern_return_t    thread_go(
 	thread_t                thread,
-	wait_result_t   wresult,
-	waitq_options_t option);
+	wait_result_t           wresult,
+	bool                    try_handoff);
 
 /* Check if direct handoff is allowed */
 extern boolean_t
@@ -193,6 +193,14 @@ extern void             sched_set_kernel_thread_priority(
 /* Set the thread's true scheduling mode */
 extern void             sched_set_thread_mode(thread_t thread,
     sched_mode_t mode);
+
+/*
+ * Set the thread's scheduling mode taking into account that the thread may have
+ * been demoted.
+ * */
+extern void             sched_set_thread_mode_user(thread_t thread,
+    sched_mode_t mode);
+
 /* Demote the true scheduler mode */
 extern void             sched_thread_mode_demote(thread_t thread,
     uint32_t reason);
@@ -276,6 +284,9 @@ extern processor_set_t choose_starting_pset(
 	processor_t *processor_hint);
 
 extern int pset_available_cpu_count(
+	processor_set_t pset);
+
+extern bool pset_is_recommended(
 	processor_set_t pset);
 
 extern pset_node_t sched_choose_node(
@@ -539,14 +550,14 @@ extern kern_return_t thread_bind_cluster_id(thread_t thread, uint32_t cluster_id
 extern int sched_get_rt_n_backup_processors(void);
 extern void sched_set_rt_n_backup_processors(int n);
 
-extern int sched_get_rt_constraint_ll(void);
-extern void sched_set_rt_constraint_ll(int new_constraint_us);
-
 extern int sched_get_rt_deadline_epsilon(void);
 extern void sched_set_rt_deadline_epsilon(int new_epsilon_us);
 
 /* Toggles a global override to turn off CPU Throttling */
 extern void     sys_override_cpu_throttle(boolean_t enable_override);
+
+extern int sched_get_powered_cores(void);
+extern void sched_set_powered_cores(int n);
 
 /*
  ****************** Only exported until BSD stops using ********************
@@ -589,6 +600,86 @@ extern struct waitq     *assert_wait_queue(event_t event);
 extern kern_return_t thread_wakeup_one_with_pri(event_t event, int priority);
 
 extern thread_t thread_wakeup_identify(event_t event, int priority);
+
+/*
+ * sched_cond_t:
+ *
+ * A atomic condition variable used to synchronize wake/block operations on threads.
+ * Bits defined below are reserved for use by sched_prim. Remaining
+ * bits may be used by caller for additional synchronization semantics.
+ */
+__options_decl(sched_cond_t, uint32_t, {
+	SCHED_COND_INIT = 0x0000,    /* initialize all bits to zero (inactive and not awoken) */
+	SCHED_COND_ACTIVE = 0x0001,  /* target thread is active */
+	SCHED_COND_WAKEUP = 0x0002   /* wakeup has been issued for target thread */
+});
+typedef _Atomic sched_cond_t sched_cond_atomic_t;
+
+/*
+ * sched_cond_init:
+ *
+ * Initialize an atomic condition variable. Note that this does not occur atomically and should be
+ * performed during thread initialization, before the condition is observable by other threads.
+ */
+extern void sched_cond_init(
+	sched_cond_atomic_t *cond);
+
+/*
+ * sched_cond_signal:
+ *
+ * Wakeup the specified thread if it is waiting on this event and it has not already been issued a wakeup.
+ *
+ * parameters:
+ *      thread    thread to awaken
+ *      cond      atomic condition variable
+ */
+extern kern_return_t sched_cond_signal(
+	sched_cond_atomic_t *cond,
+	thread_t thread);
+
+/*
+ * sched_cond_wait:
+ *
+ * Assert wait and block on cond if no wakeup has been issued.
+ * If a wakeup has been issued on cond since the last `sched_cond_ack`, clear_wait and
+ * return `THREAD_AWAKENED`.
+ *
+ * `sched_cond_wait` must be paired with `sched_cond_ack`.
+ *
+ * NOTE: `continuation` will only be jumped to if a wakeup has not been issued
+ *
+ * parameters:
+ *      cond             atomic condition variable to synchronize on
+ *      interruptible    interruptible value to pass to assert_wait
+ *      continuation     continuation if block succeeds
+ */
+extern wait_result_t sched_cond_wait(
+	sched_cond_atomic_t *cond,
+	wait_interrupt_t interruptible,
+	thread_continue_t continuation);
+
+/*
+ * sched_cond_ack:
+ *
+ * Acknowledge an issued wakeup by clearing WAKEUP and setting ACTIVE (via XOR).
+ * It is the callers responsibility to ensure that the ACTIVE bit is always low prior to calling
+ * (i.e. by calling `sched_cond_wait` prior to any rerun or block).
+ * Synchronization schemes that allow for WAKEUP bit to be reset prior to wakeup
+ * (e.g. a cancellation mechanism) should check that WAKEUP was indeed cleared.
+ *
+ * e.g.
+ * ```
+ * if (sched_cond_ack(&my_state) & SCHED_THREAD_WAKEUP) {
+ *     // WAKEUP bit was no longer set by the time this thread woke up
+ *     do_cancellation_policy();
+ * }
+ * ```
+ *
+ * parameters:
+ *      cond:    atomic condition variable
+ */
+extern sched_cond_t sched_cond_ack(
+	sched_cond_atomic_t *cond);
 
 #endif  /* XNU_KERNEL_PRIVATE */
 
@@ -652,6 +743,7 @@ extern wait_result_t    assert_wait_deadline_with_leeway(
 	wait_timeout_urgency_t  urgency,
 	uint64_t                        deadline,
 	uint64_t                        leeway);
+
 
 /* Wake up thread (or threads) waiting on a particular event */
 extern kern_return_t    thread_wakeup_prim(
@@ -913,6 +1005,8 @@ extern const struct sched_dispatch_table sched_clutch_dispatch;
 extern const struct sched_dispatch_table sched_edge_dispatch;
 #endif
 
+extern void sched_set_max_unsafe_rt_quanta(int max);
+extern void sched_set_max_unsafe_fixed_quanta(int max);
 
 #endif  /* MACH_KERNEL_PRIVATE */
 

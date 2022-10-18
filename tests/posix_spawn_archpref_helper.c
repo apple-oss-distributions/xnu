@@ -14,8 +14,6 @@ main(void)
 	return CPU_SUBTYPE_ARM64_ALL;
 #elif defined(__arm64__)
 	return CPU_SUBTYPE_ARM64_32_ALL;
-#elif defined(__arm__)
-	return CPU_SUBTYPE_ARM_V7K;
 #else
 #error unknown architecture
 #endif

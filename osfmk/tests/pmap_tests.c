@@ -138,7 +138,7 @@ test_pmap_extended(void)
 void
 test_pmap_call_overhead(unsigned int num_loops __unused)
 {
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	pmap_t pmap = current_thread()->map->pmap;
 	for (unsigned int i = 0; i < num_loops; ++i) {
 		pmap_nop(pmap);
@@ -150,7 +150,7 @@ uint64_t
 test_pmap_page_protect_overhead(unsigned int num_loops __unused, unsigned int num_aliases __unused)
 {
 	uint64_t duration = 0;
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	pmap_t new_pmap = pmap_create_wrapper(0);
 	vm_page_t m = vm_page_grab();
 	kern_return_t kr = KERN_SUCCESS;

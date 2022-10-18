@@ -57,6 +57,13 @@ struct kern_work_interval_create_args {
 	uint32_t        wica_create_flags;
 };
 
+struct kern_work_interval_workload_id_args {
+	uint32_t        wlida_flags;            /* in/out param */
+	uint32_t        wlida_wicreate_flags;   /* in/out param */
+	char *          wlida_name;             /* in param */
+	uint64_t        wlida_syscall_mask[2];  /* out param */
+};
+
 /*
  * Allocate/assign a single work interval ID for a thread,
  * and support deallocating it.
@@ -74,6 +81,11 @@ kern_work_interval_join(thread_t thread, mach_port_name_t port_name);
 
 extern kern_return_t
 kern_work_interval_notify(thread_t thread, struct kern_work_interval_args* kwi_args);
+extern kern_return_t
+kern_work_interval_set_name(mach_port_name_t port_name, char *name, size_t len);
+extern kern_return_t
+kern_work_interval_set_workload_id(mach_port_name_t port_name,
+    struct kern_work_interval_workload_id_args *workload_id_args);
 
 #ifdef MACH_KERNEL_PRIVATE
 
@@ -87,7 +99,26 @@ void work_interval_auto_join_demote(thread_t thread);
 #endif /* CONFIG_SCHED_AUTO_JOIN */
 
 extern kern_return_t work_interval_thread_terminate(thread_t thread);
+extern int work_interval_get_priority(thread_t thread);
+
 #endif /* MACH_KERNEL_PRIVATE */
+
+#ifdef KERNEL_PRIVATE
+
+__enum_closed_decl(wi_class_t, uint8_t, {
+	WI_CLASS_NONE              = 0,
+	WI_CLASS_DISCRETIONARY     = 1,
+	WI_CLASS_BEST_EFFORT       = 2,
+	WI_CLASS_APPLICATION       = 3,
+	WI_CLASS_SYSTEM            = 4,
+	WI_CLASS_SYSTEM_CRITICAL   = 5,
+	WI_CLASS_REALTIME          = 6,
+	WI_CLASS_REALTIME_CRITICAL = 7,
+
+	WI_CLASS_COUNT
+});
+
+#endif
 
 __END_DECLS
 

@@ -479,51 +479,26 @@ log_encode_fmt(os_log_context_t ctx, const char *format, va_list args)
 }
 
 static inline size_t
-write_address_location(uint8_t buf[static sizeof(uint64_t)],
-    void *dso, const void *address, firehose_tracepoint_flags_t *flags, bool driverKit)
+write_address_location(uint8_t buf[static sizeof(uint64_t)], uintptr_t loc, size_t loc_size)
 {
-	uintptr_t shift_addr = (uintptr_t)address - (uintptr_t)dso;
-
-	kc_format_t kcformat = KCFormatUnknown;
-	__assert_only bool result = PE_get_primary_kc_format(&kcformat);
-	assert(result);
-
-	if (kcformat == KCFormatStatic || kcformat == KCFormatKCGEN) {
-		*flags = _firehose_tracepoint_flags_pc_style_shared_cache;
-		memcpy(buf, (uint32_t[]){ (uint32_t)shift_addr }, sizeof(uint32_t));
-		return sizeof(uint32_t);
-	}
-
-	/*
-	 * driverKit will have the dso set as MH_EXECUTE (it is logging from a
-	 * syscall in the kernel) but needs logd to parse the address as an
-	 * absolute pc.
-	 */
-	kernel_mach_header_t *mh = dso;
-	if (mh->filetype == MH_EXECUTE && !driverKit) {
-		*flags = _firehose_tracepoint_flags_pc_style_main_exe;
-		memcpy(buf, (uint32_t[]){ (uint32_t)shift_addr }, sizeof(uint32_t));
-		return sizeof(uint32_t);
-	}
-
-	*flags = _firehose_tracepoint_flags_pc_style_absolute;
-	shift_addr = driverKit ? (uintptr_t)address : VM_KERNEL_UNSLIDE(address);
-	size_t len = sizeof(uintptr_t);
-
+	if (loc_size == sizeof(uintptr_t)) {
 #if __LP64__
-	len = 6; // 48 bits are enough
+		loc_size = 6; // 48 bits are enough
 #endif
-	memcpy(buf, (uintptr_t[]){ shift_addr }, len);
-
-	return len;
+		memcpy(buf, (uintptr_t[]){ loc }, loc_size);
+	} else {
+		assert(loc_size == sizeof(uint32_t));
+		memcpy(buf, (uint32_t[]){ (uint32_t)loc }, loc_size);
+	}
+	return loc_size;
 }
 
 static void
-os_log_encode_location(os_log_context_t ctx, void *addr, void *dso, bool driverKit,
-    firehose_tracepoint_flags_t *ft_flags)
+os_log_encode_location(os_log_context_t ctx, uintptr_t loc, size_t loc_size)
 {
-	const size_t hdr_size = write_address_location(ctx->ctx_buffer, dso, addr, ft_flags, driverKit);
+	const size_t hdr_size = write_address_location(ctx->ctx_buffer, loc, loc_size);
 	ctx->ctx_hdr = (os_log_fmt_hdr_t)&ctx->ctx_buffer[hdr_size];
+	bzero(ctx->ctx_hdr, sizeof(*ctx->ctx_hdr));
 	ctx->ctx_content_sz = (uint16_t)(ctx->ctx_buffer_sz - hdr_size - sizeof(*ctx->ctx_hdr));
 }
 
@@ -534,9 +509,10 @@ os_log_encode_location(os_log_context_t ctx, void *addr, void *dso, bool driverK
  * metadata (like strings).
  */
 bool
-os_log_context_encode(os_log_context_t ctx, const char *fmt, va_list args, void *addr, void *dso, bool driverKit)
+os_log_context_encode(os_log_context_t ctx, const char *fmt, va_list args,
+    uintptr_t loc, size_t loc_size)
 {
-	os_log_encode_location(ctx, addr, dso, driverKit, &ctx->ctx_ft_flags);
+	os_log_encode_location(ctx, loc, loc_size);
 
 	va_list args_copy;
 	va_copy(args_copy, args);

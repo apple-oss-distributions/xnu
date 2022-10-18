@@ -113,7 +113,7 @@
 
 #include "net/net_str_id.h"
 
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 #include <skywalk/lib/net_filter_event.h>
 
 extern bool net_check_compatible_alf(void);
@@ -1719,6 +1719,14 @@ filt_timertouch(struct knote *kn, struct kevent_qos_s *kev)
 	uint32_t changed_flags = (kn->kn_sfflags ^ kev->fflags);
 	int error;
 
+	if (kev->qos && (knote_get_kq(kn)->kq_state & KQ_WORKLOOP) &&
+	    !_pthread_priority_thread_qos(kev->qos)) {
+		/* validate usage of FILTER_UPDATE_REQ_QOS */
+		kev->flags |= EV_ERROR;
+		kev->data = ERANGE;
+		return 0;
+	}
+
 	if (changed_flags & NOTE_ABSOLUTE) {
 		kev->flags |= EV_ERROR;
 		kev->data = EINVAL;
@@ -2557,11 +2565,11 @@ kdp_workloop_sync_wait_find_owner(__assert_only thread_t thread,
 	if (kqwl_owner != THREAD_NULL) {
 		thread_require(kqwl_owner);
 		waitinfo->owner = thread_tid(kqwl->kqwl_owner);
-	} else if (kqr_thread_requested_pending(kqr)) {
-		waitinfo->owner = STACKSHOT_WAITOWNER_THREQUESTED;
 	} else if ((kqr->tr_state >= WORKQ_TR_STATE_BINDING) && (kqr->tr_thread != NULL)) {
 		thread_require(kqr->tr_thread);
 		waitinfo->owner = thread_tid(kqr->tr_thread);
+	} else if (kqr_thread_requested_pending(kqr)) { /* > idle, < bound */
+		waitinfo->owner = STACKSHOT_WAITOWNER_THREQUESTED;
 	} else {
 		waitinfo->owner = 0;
 	}
@@ -3837,6 +3845,9 @@ restart:
 	error = kevent_register_validate_priority(kq, kn, kev);
 	result = 0;
 	if (error) {
+		if (kn) {
+			kqunlock(kq);
+		}
 		goto out;
 	}
 
@@ -7187,9 +7198,6 @@ kqueue_process(kqueue_t kqu, int flags, kevent_ctx_t kectx,
 	struct knote *kn;
 	int error = 0, rc = 0;
 	struct kqtailq *base_queue, *queue;
-#if DEBUG || DEVELOPMENT
-	int retries = 64;
-#endif
 	uint16_t kq_type = (kqu.kq->kq_state & (KQ_WORKQ | KQ_WORKLOOP));
 
 	if (kq_type & KQ_WORKQ) {
@@ -7275,12 +7283,6 @@ stop_processing:
 		return rc;
 	}
 
-#if DEBUG || DEVELOPMENT
-	if (retries-- == 0) {
-		panic("kevent: way too many knote_process retries, kq: %p (0x%04x)",
-		    kqu.kq, kqu.kq->kq_state);
-	}
-#endif
 	if (kq_type & (KQ_WORKQ | KQ_WORKLOOP)) {
 		assert(flags & KEVENT_FLAG_PARKING);
 		goto process_again;
@@ -8257,7 +8259,7 @@ kev_post_msg_internal(struct kev_msg *event_msg, int wait)
 	u_int32_t total_size;
 	int i;
 
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 	/*
 	 * Special hook for ALF state updates
 	 */

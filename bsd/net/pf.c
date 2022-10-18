@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -125,6 +125,10 @@
 #include <netinet/ip_dummynet.h>
 #endif /* DUMMYNET */
 
+#if SKYWALK
+#include <skywalk/namespace/flowidns.h>
+#endif /* SKYWALK */
+
 /*
  * For RandomULong(), to get a 32 bits random value
  * Note that random() returns a 31 bits value, see rdar://11159750
@@ -242,7 +246,6 @@ static struct pf_rule   *pf_get_translation_aux(struct pf_pdesc *,
     );
 static void              pf_attach_state(struct pf_state_key *,
     struct pf_state *, int);
-static void              pf_detach_state(struct pf_state *, int);
 static u_int32_t         pf_tcp_iss(struct pf_pdesc *);
 static int               pf_test_rule(struct pf_rule **, struct pf_state **,
     int, struct pfi_kif *, pbuf_t *, int,
@@ -343,7 +346,7 @@ struct pf_pool_limit pf_pool_limits[PF_LIMIT_MAX] = {
 	{ .pp = &pfr_kentry_pl, .limit = PFR_KENTRY_HIWAT },
 };
 
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 const char *compatible_anchors[] = {
 	"com.apple.internet-sharing",
 	"com.apple/250.ApplicationFirewall",
@@ -429,6 +432,23 @@ pf_state_lookup_aux(struct pf_state **state, struct pfi_kif *kif,
 	        }                                                        \
 	        if (pf_state_lookup_aux(state, kif, direction, &action)) \
 	                return (action);                                 \
+	} while (0)
+
+/*
+ * This macro resets the flowID information in a packet descriptor which was
+ * copied in from a PF state. This should be used after a protocol state lookup
+ * finds a matching PF state, but then decides to not use it for various
+ * reasons.
+ */
+#define PD_CLEAR_STATE_FLOWID(_pd)                                       \
+	do {                                                             \
+	        if (__improbable(((_pd)->pktflags & PKTF_FLOW_ID) &&     \
+	            ((_pd)->flowsrc == FLOWSRC_PF))) {                   \
+	                (_pd)->flowhash = 0;                             \
+	                (_pd)->flowsrc = 0;                              \
+	                (_pd)->pktflags &= ~PKTF_FLOW_ID;                \
+	        }                                                        \
+                                                                         \
 	} while (0)
 
 #define STATE_ADDR_TRANSLATE(sk)                                        \
@@ -1363,6 +1383,7 @@ pf_insert_src_node(struct pf_src_node **sn, struct pf_rule *rule,
 				printf("\n");
 			}
 			pool_put(&pf_src_tree_pl, *sn);
+			*sn = NULL; /* signal the caller that no additional cleanup is needed */
 			return -1;
 		}
 		(*sn)->creation = pf_time_second();
@@ -2092,6 +2113,40 @@ pf_calc_skip_steps(struct pf_rulequeue *rules)
 u_int32_t
 pf_calc_state_key_flowhash(struct pf_state_key *sk)
 {
+#if SKYWALK
+	uint32_t flowid;
+	struct flowidns_flow_key fk;
+
+	VERIFY(sk->flowsrc == FLOWSRC_PF);
+	bzero(&fk, sizeof(fk));
+	_CASSERT(sizeof(sk->lan.addr) == sizeof(fk.ffk_laddr));
+	_CASSERT(sizeof(sk->ext_lan.addr) == sizeof(fk.ffk_laddr));
+	bcopy(&sk->lan.addr, &fk.ffk_laddr, sizeof(fk.ffk_laddr));
+	bcopy(&sk->ext_lan.addr, &fk.ffk_raddr, sizeof(fk.ffk_raddr));
+	fk.ffk_af = sk->af_lan;
+	fk.ffk_proto = sk->proto;
+
+	switch (sk->proto) {
+	case IPPROTO_ESP:
+	case IPPROTO_AH:
+		fk.ffk_spi = sk->lan.xport.spi;
+		break;
+	default:
+		if (sk->lan.xport.spi <= sk->ext_lan.xport.spi) {
+			fk.ffk_lport = sk->lan.xport.port;
+			fk.ffk_rport = sk->ext_lan.xport.port;
+		} else {
+			fk.ffk_lport = sk->ext_lan.xport.port;
+			fk.ffk_rport = sk->lan.xport.port;
+		}
+		break;
+	}
+
+	flowidns_allocate_flowid(FLOWIDNS_DOMAIN_PF, &fk, &flowid);
+	return flowid;
+
+#else /* !SKYWALK */
+
 	struct pf_flowhash_key fh __attribute__((aligned(8)));
 	uint32_t flowhash = 0;
 
@@ -2122,6 +2177,8 @@ try_again:
 	}
 
 	return flowhash;
+
+#endif /* !SKYWALK */
 }
 
 static int
@@ -4317,6 +4374,19 @@ pf_attach_state(struct pf_state_key *sk, struct pf_state *s, int tail)
 }
 
 static void
+pf_state_key_release_flowid(struct pf_state_key *sk)
+{
+#pragma unused (sk)
+#if SKYWALK
+	if ((sk->flowsrc == FLOWSRC_PF) && (sk->flowhash != 0)) {
+		flowidns_release_flowid(sk->flowhash);
+		sk->flowhash = 0;
+		sk->flowsrc = 0;
+	}
+#endif /* SKYWALK */
+}
+
+void
 pf_detach_state(struct pf_state *s, int flags)
 {
 	struct pf_state_key     *sk = s->state_key;
@@ -4339,6 +4409,7 @@ pf_detach_state(struct pf_state *s, int flags)
 		if (sk->app_state) {
 			pool_put(&pf_app_state_pl, sk->app_state);
 		}
+		pf_state_key_release_flowid(sk);
 		pool_put(&pf_state_key_pl, sk);
 	}
 }
@@ -4367,9 +4438,16 @@ pf_alloc_state_key(struct pf_state *s, struct pf_state_key *psk)
 		sk->direction = psk->direction;
 		sk->proto_variant = psk->proto_variant;
 		VERIFY(psk->app_state == NULL);
+		ASSERT(psk->flowsrc != FLOWSRC_PF);
 		sk->flowsrc = psk->flowsrc;
 		sk->flowhash = psk->flowhash;
 		/* don't touch tree entries, states and refcnt on sk */
+	}
+
+	if (sk->flowhash == 0) {
+		ASSERT(sk->flowsrc == 0);
+		sk->flowsrc = FLOWSRC_PF;
+		sk->flowhash = pf_calc_state_key_flowhash(sk);
 	}
 
 	return sk;
@@ -4837,6 +4915,8 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 	struct pf_state_key      psk;
 
 	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
+
+	PD_CLEAR_STATE_FLOWID(pd);
 
 	if (direction == PF_IN && pf_check_congestion(ifq)) {
 		REASON_SET(&reason, PFRES_CONGEST);
@@ -5616,16 +5696,15 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 		psk.flowsrc = pd->flowsrc;
 		psk.flowhash = pd->flowhash;
 	} else {
-		/* compute flow hash and store it in state key */
-		psk.flowsrc = FLOWSRC_PF;
-		psk.flowhash = pf_calc_state_key_flowhash(&psk);
-		pd->flowsrc = psk.flowsrc;
-		pd->flowhash = psk.flowhash;
-		pd->pktflags |= PKTF_FLOW_ID;
+		/*
+		 * Allocation of flow identifier is deferred until a PF state
+		 * creation is needed for this flow.
+		 */
 		pd->pktflags &= ~PKTF_FLOW_ADV;
+		pd->flowhash = 0;
 	}
 
-	if (pf_tag_packet(pbuf, pd->pf_mtag, tag, rtableid, pd)) {
+	if (__improbable(pf_tag_packet(pbuf, pd->pf_mtag, tag, rtableid, pd))) {
 		REASON_SET(&reason, PFRES_MEMORY);
 #if SKYWALK
 		netns_release(&nstoken);
@@ -5730,11 +5809,14 @@ cleanup:
 				pf_status.src_nodes--;
 				pool_put(&pf_src_tree_pl, nsn);
 			}
-			if (sk != NULL) {
+			if (s != NULL) {
+				pf_detach_state(s, 0);
+			} else if (sk != NULL) {
 				if (sk->app_state) {
 					pool_put(&pf_app_state_pl,
 					    sk->app_state);
 				}
+				pf_state_key_release_flowid(sk);
 				pool_put(&pf_state_key_pl, sk);
 			}
 #if SKYWALK
@@ -5863,7 +5945,7 @@ cleanup:
 		}
 
 		/* allocate state key and import values from psk */
-		if ((sk = pf_alloc_state_key(s, &psk)) == NULL) {
+		if (__improbable((sk = pf_alloc_state_key(s, &psk)) == NULL)) {
 			REASON_SET(&reason, PFRES_MEMORY);
 			/*
 			 * XXXSCW: This will leak the freshly-allocated
@@ -5871,6 +5953,23 @@ cleanup:
 			 * eventually be aged-out and removed.
 			 */
 			goto cleanup;
+		}
+
+		if (pd->flowhash == 0) {
+			ASSERT(sk->flowhash != 0);
+			ASSERT(sk->flowsrc != 0);
+			pd->flowsrc = sk->flowsrc;
+			pd->flowhash = sk->flowhash;
+			pd->pktflags |= PKTF_FLOW_ID;
+			pd->pktflags &= ~PKTF_FLOW_ADV;
+			if (__improbable(pf_tag_packet(pbuf, pd->pf_mtag,
+			    tag, rtableid, pd))) {
+				/*
+				 * this shouldn't fail as the packet tag has
+				 * already been allocated.
+				 */
+				panic_plain("pf_tag_packet failed");
+			}
 		}
 
 		pf_set_rt_ifp(s, saddr, af);    /* needs s->state_key set */
@@ -5935,7 +6034,7 @@ cleanup:
 			}
 		}
 
-		if (pf_insert_state(BOUND_IFACE(r, kif), s)) {
+		if (__improbable(pf_insert_state(BOUND_IFACE(r, kif), s))) {
 			if (pd->proto == IPPROTO_TCP) {
 				pf_normalize_tcp_cleanup(s);
 			}
@@ -6104,6 +6203,10 @@ pf_test_dummynet(struct pf_rule **rm, int direction, struct pfi_kif *kif,
 	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (!pf_is_dummynet_enabled()) {
+		return PF_PASS;
+	}
+
+	if (kif->pfik_ifp->if_xflags & IFXF_NO_TRAFFIC_SHAPING) {
 		return PF_PASS;
 	}
 
@@ -6571,8 +6674,8 @@ pf_pptp_handler(struct pf_state *s, int direction, int off,
 		gsk->gwy.xport.call_id = 0;
 		gsk->ext_lan.xport.call_id = 0;
 		gsk->ext_gwy.xport.call_id = 0;
-		gsk->flowsrc = FLOWSRC_PF;
-		gsk->flowhash = pf_calc_state_key_flowhash(gsk);
+		ASSERT(gsk->flowsrc == FLOWSRC_PF);
+		ASSERT(gsk->flowhash != 0);
 		memset(gas, 0, sizeof(*gas));
 		gas->u.grev1.pptp_state = s;
 		STATE_INC_COUNTERS(gs);
@@ -7690,6 +7793,23 @@ pf_test_state_udp(struct pf_state **state, int direction, struct pfi_kif *kif,
 	return PF_PASS;
 }
 
+static u_int32_t
+pf_compute_packet_icmp_gencnt(uint32_t af, u_int32_t type, u_int32_t code)
+{
+	if (af == PF_INET) {
+		if (type != ICMP_UNREACH && type != ICMP_TIMXCEED) {
+			return 0;
+		}
+	} else {
+		if (type != ICMP6_DST_UNREACH && type != ICMP6_PARAM_PROB &&
+		    type != ICMP6_TIME_EXCEEDED) {
+			return 0;
+		}
+	}
+	return (af << 24) | (type << 16) | (code << 8);
+}
+
+
 static __attribute__((noinline)) int
 pf_test_state_icmp(struct pf_state **state, int direction, struct pfi_kif *kif,
     pbuf_t *pbuf, int off, void *h, struct pf_pdesc *pd, u_short *reason)
@@ -7699,6 +7819,7 @@ pf_test_state_icmp(struct pf_state **state, int direction, struct pfi_kif *kif,
 	struct in_addr  srcv4_inaddr = saddr->v4addr;
 	u_int16_t        icmpid = 0, *icmpsum = NULL;
 	u_int8_t         icmptype = 0;
+	u_int32_t        icmpcode = 0;
 	int              state_icmp = 0;
 	struct pf_state_key_cmp key;
 	struct pf_state_key     *sk;
@@ -7714,6 +7835,7 @@ pf_test_state_icmp(struct pf_state **state, int direction, struct pfi_kif *kif,
 		icmptype = pd->hdr.icmp->icmp_type;
 		icmpid = pd->hdr.icmp->icmp_id;
 		icmpsum = &pd->hdr.icmp->icmp_cksum;
+		icmpcode = pd->hdr.icmp->icmp_code;
 
 		if (ICMP_ERRORTYPE(icmptype)) {
 			state_icmp++;
@@ -7724,11 +7846,18 @@ pf_test_state_icmp(struct pf_state **state, int direction, struct pfi_kif *kif,
 		icmptype = pd->hdr.icmp6->icmp6_type;
 		icmpid = pd->hdr.icmp6->icmp6_id;
 		icmpsum = &pd->hdr.icmp6->icmp6_cksum;
+		icmpcode = pd->hdr.icmp6->icmp6_code;
 
 		if (ICMP6_ERRORTYPE(icmptype)) {
 			state_icmp++;
 		}
 		break;
+	}
+
+	if (pbuf != NULL && pbuf->pb_flow_gencnt != NULL &&
+	    *pbuf->pb_flow_gencnt == 0) {
+		u_int32_t af = pd->proto == IPPROTO_ICMP ? PF_INET : PF_INET6;
+		*pbuf->pb_flow_gencnt = pf_compute_packet_icmp_gencnt(af, icmptype, icmpcode);
 	}
 
 	if (!state_icmp) {
@@ -9788,6 +9917,7 @@ nonormalize:
 #endif /* DUMMYNET */
 		action = pf_test_state_icmp(&s, dir, kif, pbuf, off, h, &pd,
 		    &reason);
+
 		if (action == PF_NAT64) {
 			goto done;
 		}
@@ -10946,7 +11076,7 @@ hook_runloop(struct hook_desc_head *head, int flags)
 	}
 }
 
-#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
 static bool
 pf_check_compatible_anchor(const char *anchor_path)
 {

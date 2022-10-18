@@ -167,8 +167,6 @@ mptcp_start_timer(struct mptses *mpte, int timer_type)
 	microuptime(&now);
 
 	DTRACE_MPTCP2(start__timer, struct mptcb *, mp_tp, int, timer_type);
-	mptcplog((LOG_DEBUG, "MPTCP Socket: %s: %d\n", __func__, timer_type),
-	    MPTCP_SOCKET_DBG, MPTCP_LOGLVL_VERBOSE);
 
 	socket_lock_assert_owned(mptetoso(mpte));
 
@@ -307,7 +305,11 @@ mptcp_set_urgency_timer(struct mptses *mpte)
 	time_now = mach_continuous_time();
 
 	if ((int64_t)(mpte->mpte_time_target - time_now) > 0) {
-		mptcp_check_subflows_and_remove(mpte);
+		ret = thread_call_enter(mpte->mpte_stop_urgency);
+
+		if (!ret) {
+			mp_so->so_usecount++;
+		}
 
 		ret = thread_call_enter_delayed_with_leeway(mpte->mpte_time_thread, NULL,
 		    mpte->mpte_time_target, 0, THREAD_CALL_CONTINUOUS);

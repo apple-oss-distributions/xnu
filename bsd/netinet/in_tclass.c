@@ -479,6 +479,7 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 	pid_t pid = so_tcdbg->so_tcdbg_pid;
 	int tclass = so_tcdbg->so_tcdbg_tclass;
 	int netsvctype = so_tcdbg->so_tcdbg_netsvctype;
+	uint8_t ecn_val = so_tcdbg->so_tcdbg_ecn_val;
 
 	p = proc_find(pid);
 	if (p == NULL) {
@@ -505,7 +506,7 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 
 	if (tfp != NULL) {
 		struct fileproc *fp;
-
+		proc_fdlock(p);
 		fdt_foreach(fp, p) {
 			struct socket *so;
 
@@ -523,6 +524,18 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 				so->so_flags1 |= SOF1_QOSMARKING_ALLOWED;
 			} else if (tfp->tfp_qos_mode == QOS_MODE_MARKING_POLICY_DISABLE) {
 				so->so_flags1 &= ~SOF1_QOSMARKING_ALLOWED;
+			}
+
+			struct inpcb *inp = so ? sotoinpcb(so) : NULL;
+			struct tcpcb *tp = inp ? intotcpcb(inp) : NULL;
+
+			if (tp != NULL) {
+				if (ecn_val == IPTOS_ECN_ECT1 || ecn_val == IPTOS_ECN_ECT0) {
+					tp->ecn_flags |= (ecn_val == IPTOS_ECN_ECT1) ?
+					    TE_FORCE_ECT1 : TE_FORCE_ECT0;
+				} else {
+					tp->ecn_flags &= ~(TE_FORCE_ECT1 | TE_FORCE_ECT0);
+				}
 			}
 			socket_unlock(so, 1);
 

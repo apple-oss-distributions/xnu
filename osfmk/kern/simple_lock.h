@@ -87,6 +87,10 @@ __BEGIN_DECLS
 #pragma GCC visibility push(hidden)
 
 #ifdef MACH_KERNEL_PRIVATE
+
+#define HW_LOCK_STATE_TO_THREAD(state)  ((thread_t)(state))
+#define HW_LOCK_THREAD_TO_STATE(thread) ((uintptr_t)(thread))
+
 extern void                     hw_lock_init(
 	hw_lock_t);
 
@@ -100,14 +104,12 @@ extern void                     hw_lock_lock_nopreempt(
 
 extern unsigned int             hw_lock_to(
 	hw_lock_t,
-	uint64_t,
-	hw_lock_timeout_handler_t
+	hw_spin_policy_t
 	LCK_GRP_ARG(lck_grp_t*)) __result_use_check;
 
 extern unsigned int             hw_lock_to_nopreempt(
 	hw_lock_t,
-	uint64_t,
-	hw_lock_timeout_handler_t
+	hw_spin_policy_t
 	LCK_GRP_ARG(lck_grp_t*)) __result_use_check;
 
 extern unsigned int             hw_lock_try(
@@ -118,25 +120,25 @@ extern unsigned int             hw_lock_try_nopreempt(
 	hw_lock_t
 	LCK_GRP_ARG(lck_grp_t*)) __result_use_check;
 
-#if !LOCK_STATS
+#if !LCK_GRP_USE_ARG
 #define hw_lock_lock(lck, grp) \
 	hw_lock_lock(lck)
 
 #define hw_lock_lock_nopreempt(lck, grp) \
 	hw_lock_lock_nopreempt(lck)
 
-#define hw_lock_to(lck, timeout, handler, grp) \
-	hw_lock_to(lck, timeout, handler)
+#define hw_lock_to(lck, spec, grp) \
+	hw_lock_to(lck, spec)
 
-#define hw_lock_to_nopreempt(lck, timeout, handler, grp) \
-	hw_lock_to_nopreempt(lck, timeout, handler)
+#define hw_lock_to_nopreempt(lck, spec, grp) \
+	hw_lock_to_nopreempt(lck, spec)
 
 #define hw_lock_try(lck, grp) \
 	hw_lock_try(lck)
 
 #define hw_lock_try_nopreempt(lck, grp) \
 	hw_lock_try_nopreempt(lck)
-#endif /* !LOCK_STATS */
+#endif /* !LCK_GRP_USE_ARG */
 
 extern void                     hw_lock_unlock(
 	hw_lock_t);
@@ -188,17 +190,17 @@ boolean_t                       store_exclusive32(
 extern void                     usimple_unlock_nopreempt(
 	usimple_lock_t);
 
-#if INTERRUPT_MASKED_DEBUG
-uint64_t hw_lock_compute_timeout(
-	uint64_t in_timeout,
-	uint64_t default_timeout,
-	bool in_ppl,
-	bool interruptible);
-#else
-uint64_t        hw_lock_compute_timeout(
-	uint64_t in_timeout,
-	uint64_t default_timeout);
-#endif /* INTERRUPT_MASKED_DEBUG */
+extern hw_spin_timeout_t hw_spin_compute_timeout(
+	hw_spin_policy_t         policy);
+
+extern bool hw_spin_in_ppl(
+	hw_spin_timeout_t       to) __pure2;
+
+extern bool hw_spin_should_keep_spinning(
+	void                   *lock,
+	hw_spin_policy_t        policy,
+	hw_spin_timeout_t       to,
+	hw_spin_state_t        *state);
 
 #endif /* MACH_KERNEL_PRIVATE */
 
@@ -214,16 +216,16 @@ extern void                     usimple_lock_startup_init(
 	decl_simple_lock_data(, var); \
 	static __startup_data struct usimple_lock_startup_spec \
 	__startup_usimple_lock_spec_ ## var = { &var, arg }; \
-	STARTUP_ARG(LOCKS_EARLY, STARTUP_RANK_FOURTH, usimple_lock_startup_init, \
+	STARTUP_ARG(LOCKS, STARTUP_RANK_FOURTH, usimple_lock_startup_init, \
 	    &__startup_usimple_lock_spec_ ## var)
 
-extern uint32_t                 hw_wait_while_equals32(
-	uint32_t *address,
-	uint32_t  current);
+extern uint32_t hw_wait_while_equals32(
+	uint32_t               *address,
+	uint32_t                current);
 
-extern uint64_t                 hw_wait_while_equals64(
-	uint64_t *address,
-	uint64_t  current);
+extern uint64_t hw_wait_while_equals64(
+	uint64_t               *address,
+	uint64_t                current);
 
 #if __LP64__
 #define hw_wait_while_equals_long(ptr, cur) ({ \
@@ -269,7 +271,7 @@ extern unsigned int     usimple_lock_try_lock_mp_signal_safe_loop_duration(
 extern void                     usimple_unlock(
 	usimple_lock_t);
 
-#if !LOCK_STATS
+#if !LCK_GRP_USE_ARG
 #define usimple_lock(lck, grp) \
 	usimple_lock(lck)
 
@@ -285,7 +287,7 @@ extern void                     usimple_unlock(
 #define usimple_lock_try_lock_mp_signal_safe_loop_duration(lck, dur, grp) \
 	usimple_lock_try_lock_mp_signal_safe_loop_duration(lck, dur)
 #endif
-#endif /* !LOCK_STATS */
+#endif /* !LCK_GRP_USE_ARG */
 
 
 /*
@@ -310,6 +312,15 @@ extern void                     usimple_unlock(
 
 typedef uint32_t hw_lock_bit_t;
 
+#if __arm64__
+extern const struct hw_spin_policy hw_lock_bit_policy_2s;
+#endif
+extern const struct hw_spin_policy hw_lock_spin_policy;
+extern const struct hw_spin_policy hw_lock_spin_panic_policy;
+#if DEBUG || DEVELOPMENT
+extern const struct hw_spin_policy hw_lock_test_give_up_policy;
+#endif /* DEBUG || DEVELOPMENT */
+
 extern void     hw_lock_bit(
 	hw_lock_bit_t *,
 	unsigned int
@@ -329,15 +340,7 @@ extern unsigned int hw_lock_bit_try(
 extern unsigned int hw_lock_bit_to(
 	hw_lock_bit_t *,
 	unsigned int,
-	uint64_t,
-	hw_lock_timeout_handler_t
-	LCK_GRP_ARG(lck_grp_t*)) __result_use_check;
-
-extern hw_lock_status_t hw_lock_bit_to_allow_invalid(
-	hw_lock_bit_t *,
-	unsigned int,
-	uint64_t,
-	hw_lock_timeout_handler_t
+	hw_spin_policy_t
 	LCK_GRP_ARG(lck_grp_t*)) __result_use_check;
 
 extern void     hw_unlock_bit(
@@ -351,7 +354,7 @@ extern void     hw_unlock_bit_nopreempt(
 #define hw_lock_bit_held(l, b) \
 	(((*(l)) & (1 << (b))) != 0)
 
-#if !LOCK_STATS
+#if !LCK_GRP_USE_ARG
 #define hw_lock_bit(lck, bit, grp) \
 	hw_lock_bit(lck, bit)
 
@@ -362,12 +365,10 @@ extern void     hw_unlock_bit_nopreempt(
 #define hw_lock_bit_try(lck, bit, grp) \
 	hw_lock_bit_try(lck, bit)
 
-#define hw_lock_bit_to(lck, bit, timeout, handler, grp) \
-	hw_lock_bit_to(lck, bit, timeout, handler)
+#define hw_lock_bit_to(lck, bit, spec, grp) \
+	hw_lock_bit_to(lck, bit, spec)
 
-#define hw_lock_bit_to_allow_invalid(lck, bit, timeout, handler, grp) \
-	hw_lock_bit_to_allow_invalid(lck, bit, timeout, handler)
-#endif /* !LOCK_STATS */
+#endif /* !LCK_GRP_USE_ARG */
 #endif  /* MACH_KERNEL_PRIVATE */
 
 __END_DECLS

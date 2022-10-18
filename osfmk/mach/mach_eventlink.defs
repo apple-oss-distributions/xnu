@@ -27,9 +27,9 @@
  */
 
 subsystem
-#if	KERNEL_SERVER
+#if	KERNEL_SERVER || KOBJECT_SERVER
 	KernelServer
-#endif	/* KERNEL_SERVER */
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 			mach_eventlink 716200;
 
 #include <mach/std_types.defs>

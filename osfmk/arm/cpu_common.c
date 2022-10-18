@@ -37,6 +37,7 @@
 #include <kern/percpu.h>
 #include <kern/timer_queue.h>
 #include <kern/locks.h>
+#include <kern/clock.h>
 #include <arm/cpu_data.h>
 #include <arm/cpuid.h>
 #include <arm/caches_internal.h>
@@ -54,7 +55,7 @@
 #include <pexpert/device_tree.h>
 #include <sys/kdebug.h>
 #include <arm/machine_routines.h>
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #include <libkern/OSAtomic.h>
 
 SECURITY_READ_ONLY_LATE(struct percpu_base) percpu_base;
@@ -376,16 +377,17 @@ cpu_xcall_internal(unsigned int signal, int cpu_number, broadcastFunc func, void
 	cpu_data_t      *target_cpu_datap;
 
 	if ((cpu_number < 0) || (cpu_number > ml_get_max_cpu_number())) {
-		return KERN_INVALID_ARGUMENT;
+		panic("cpu_xcall_internal: invalid cpu_number %d", cpu_number);
 	}
 
 	if (func == NULL || param == NULL) {
-		return KERN_INVALID_ARGUMENT;
+		// cpu_handle_xcall uses non-NULL-ness to tell when the value is ready
+		panic("cpu_xcall_internal: cannot have null func/param: %p %p", func, param);
 	}
 
 	target_cpu_datap = (cpu_data_t*)CpuDataEntries[cpu_number].cpu_data_vaddr;
 	if (target_cpu_datap == NULL) {
-		return KERN_INVALID_ARGUMENT;
+		panic("cpu_xcall_internal: cpu %d not initialized", cpu_number);
 	}
 
 	return cpu_signal(target_cpu_datap, signal, ptrauth_nop_cast(void*, ptrauth_auth_and_resign(func, ptrauth_key_function_pointer, ptrauth_type_discriminator(broadcastFunc), ptrauth_key_function_pointer, target_cpu_datap)), param);
@@ -412,7 +414,7 @@ cpu_signal_internal(cpu_data_t *target_proc,
 {
 	unsigned int    Check_SIGPdisabled;
 	int             current_signals;
-	Boolean         swap_success;
+	bool            swap_success;
 	boolean_t       interruptible = ml_set_interrupts_enabled(FALSE);
 	cpu_data_t      *current_proc = getCpuDatap();
 
@@ -439,8 +441,8 @@ cpu_signal_internal(cpu_data_t *target_proc,
 				ml_set_interrupts_enabled(interruptible);
 				return KERN_FAILURE;
 			}
-			swap_success = OSCompareAndSwap(current_signals & (~signal), current_signals | signal,
-			    &target_proc->cpu_signal);
+			swap_success = os_atomic_cmpxchg(&target_proc->cpu_signal, current_signals & (~signal),
+			    current_signals | signal, release);
 
 			if (!swap_success && (signal == SIGPxcallImm) && (target_proc->cpu_signal & SIGPxcallImm)) {
 				ml_set_interrupts_enabled(interruptible);
@@ -483,18 +485,18 @@ cpu_signal_internal(cpu_data_t *target_proc,
 				return KERN_FAILURE;
 			}
 
-			swap_success = OSCompareAndSwap(current_signals, current_signals | signal,
-			    &target_proc->cpu_signal);
+			swap_success = os_atomic_cmpxchg(&target_proc->cpu_signal, current_signals,
+			    current_signals | signal, release);
 		} while (!swap_success);
 	}
 
 	/*
-	 * Issue DSB here to guarantee: 1) prior stores to pending signal mask and xcall params
-	 * will be visible to other cores when the IPI is dispatched, and 2) subsequent
-	 * instructions to signal the other cores will not execute until after the barrier.
-	 * DMB would be sufficient to guarantee 1) but not 2).
+	 * DSB is needed here to ensure prior stores to the pending signal mask and xcall params
+	 * will be visible by the time the other cores are signaled.  The IPI mechanism on any
+	 * given platform will very likely use either an MSR or a non-coherent store that would
+	 * not be ordered by a simple DMB.
 	 */
-	__builtin_arm_dsb(DSB_ISH);
+	__builtin_arm_dsb(DSB_ISHST);
 
 	if (!(target_proc->cpu_signal & SIGPdisabled)) {
 		if (defer) {
@@ -562,6 +564,14 @@ cpu_signal_handler(void)
 	cpu_signal_handler_internal(FALSE);
 }
 
+bool
+cpu_has_SIGPdebug_pending(void)
+{
+	cpu_data_t *cpu_data_ptr = getCpuDatap();
+
+	return cpu_data_ptr->cpu_signal & SIGPdebug;
+}
+
 void
 cpu_signal_handler_internal(boolean_t disable_signal)
 {
@@ -572,7 +582,15 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 	cpu_data_ptr->cpu_stat.ipi_cnt_wake++;
 	SCHED_STATS_INC(ipi_count);
 
-	cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, 0, relaxed);
+	/*
+	 * Employ an acquire barrier when loading cpu_signal to ensure that
+	 * loads within individual signal handlers won't be speculated ahead
+	 * of the load of cpu_signal.  This pairs with the release barrier
+	 * in cpu_signal_internal() to ensure that once a flag has been set in
+	 * the cpu_signal mask, any prerequisite setup is also visible to signal
+	 * handlers.
+	 */
+	cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, 0, acquire);
 
 	if ((!(cpu_signal & SIGPdisabled)) && (disable_signal == TRUE)) {
 		os_atomic_or(&cpu_data_ptr->cpu_signal, SIGPdisabled, relaxed);
@@ -611,22 +629,8 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 			DebuggerXCall(cpu_data_ptr->cpu_int_state);
 			INTERRUPT_MASKED_DEBUG_END();
 		}
-#if     defined(ARMA7)
-		if (cpu_signal & SIGPLWFlush) {
-			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPLWFlush, relaxed);
-			INTERRUPT_MASKED_DEBUG_START(cache_xcall_handler, DBG_INTR_TYPE_IPI);
-			cache_xcall_handler(LWFlush);
-			INTERRUPT_MASKED_DEBUG_END();
-		}
-		if (cpu_signal & SIGPLWClean) {
-			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPLWClean, relaxed);
-			INTERRUPT_MASKED_DEBUG_START(cache_xcall_handler, DBG_INTR_TYPE_IPI);
-			cache_xcall_handler(LWClean);
-			INTERRUPT_MASKED_DEBUG_END();
-		}
-#endif
 
-		cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, 0, relaxed);
+		cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, 0, acquire);
 	}
 }
 
@@ -641,8 +645,16 @@ cpu_exit_wait(int cpu_id)
 		volatile uint64_t *cpu_sts = (void *)(cpu->cpu_IMPL_regs + CPU_PIO_CPU_STS_OFFSET);
 
 		// Poll the "CPU running state" field until it is 0 (off)
+		// This loop typically finishes in about 600ns.  Sometimes it takes as long as 10us.
+		// If it takes longer than 10s, assume something went horribly wrong and panic.
+		uint64_t start = mach_absolute_time(), interval;
+		nanoseconds_to_absolutetime(10 * NSEC_PER_SEC, &interval);
+
 		while ((*cpu_sts & CPU_PIO_CPU_STS_cpuRunSt_mask) != 0x00) {
 			__builtin_arm_dsb(DSB_ISH);
+			if (mach_absolute_time() > start + interval) {
+				panic("CPU%d failed to shut down", cpu_id);
+			}
 		}
 		return;
 	}
@@ -832,7 +844,7 @@ ml_cpu_signal_is_enabled(void)
 }
 
 bool
-ml_cpu_can_exit(__unused int cpu_id)
+ml_cpu_can_exit(__unused int cpu_id, processor_reason_t reason)
 {
 	/* processor_exit() is always allowed on the S2R path */
 	if (ml_is_quiescing()) {
@@ -843,9 +855,19 @@ ml_cpu_can_exit(__unused int cpu_id)
 	 * Until the feature is known to be stable, guard it with a boot-arg
 	 */
 	extern bool enable_processor_exit;
-	if (!enable_processor_exit) {
+	extern bool cluster_power_supported;
+
+	if (!(enable_processor_exit || cluster_power_supported)) {
 		return false;
 	}
+
+	if (!enable_processor_exit) {
+		/* Only cluster_power_supported so disallow any USER reason */
+		if ((reason == REASON_USER) || (reason == REASON_CLPC_USER)) {
+			return false;
+		}
+	}
+
 	/*
 	 * Cyprus and newer chips can disable individual non-boot CPUs. The
 	 * implementation polls cpuX_IMPL_CPU_STS, which differs on older chips.
@@ -853,6 +875,8 @@ ml_cpu_can_exit(__unused int cpu_id)
 	if (CpuDataEntries[cpu_id].cpu_data_vaddr != &BootCpuData) {
 		return true;
 	}
+#else
+	(void)reason;
 #endif
 	return false;
 }
@@ -887,6 +911,18 @@ ml_cpu_end_loop(void)
 	lck_rw_unlock_shared(&cpu_state_lock);
 }
 
+void
+ml_cpu_power_enable(int cpu_id)
+{
+	PE_cpu_power_enable(cpu_id);
+}
+
+void
+ml_cpu_power_disable(int cpu_id)
+{
+	PE_cpu_power_disable(cpu_id);
+}
+
 #else /* USE_APPLEARMSMP */
 
 void
@@ -906,6 +942,16 @@ ml_cpu_begin_loop(void)
 
 void
 ml_cpu_end_loop(void)
+{
+}
+
+void
+ml_cpu_power_enable(__unused int cpu_id)
+{
+}
+
+void
+ml_cpu_power_disable(__unused int cpu_id)
 {
 }
 

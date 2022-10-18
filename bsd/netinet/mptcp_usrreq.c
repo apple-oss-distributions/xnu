@@ -48,6 +48,7 @@
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_timer.h>
+#include <netinet/mptcp.h>
 #include <netinet/mptcp_var.h>
 #include <netinet/mptcp_timer.h>
 
@@ -98,12 +99,6 @@ struct pr_usrreqs mptcp_usrreqs = {
 	.pru_preconnect =       mptcp_usr_preconnect,
 };
 
-
-#if (DEVELOPMENT || DEBUG)
-static int mptcp_disable_entitlements = 0;
-SYSCTL_INT(_net_inet_mptcp, OID_AUTO, disable_entitlements, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &mptcp_disable_entitlements, 0, "Disable Multipath TCP Entitlement Checking");
-#endif
 
 int mptcp_developer_mode = 0;
 SYSCTL_INT(_net_inet_mptcp, OID_AUTO, allow_aggregate, CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -473,11 +468,11 @@ mptcp_getconninfo(struct mptses *mpte, sae_connid_t *cid, uint32_t *flags,
 	*aux_type = 0;
 	*ifindex = 0;
 	*soerror = 0;
+	struct mptcb *mp_tp = mpte->mpte_mptcb;
 
 	/* MPTCP-level global stats */
 	if (*cid == SAE_CONNID_ALL) {
 		struct socket *mp_so = mptetoso(mpte);
-		struct mptcb *mp_tp = mpte->mpte_mptcb;
 		struct conninfo_multipathtcp mptcp_ci;
 		int error = 0;
 
@@ -502,6 +497,9 @@ mptcp_getconninfo(struct mptses *mpte, sae_connid_t *cid, uint32_t *flags,
 		}
 		if (mp_tp->mpt_flags & MPTCPF_FALLBACK_TO_TCP) {
 			*flags |= CIF_MP_DEGRADED;
+		}
+		if (mp_tp->mpt_version == MPTCP_VERSION_1) {
+			*flags |= CIF_MP_V1;
 		}
 
 		*src_len = 0;
@@ -606,6 +604,9 @@ mptcp_getconninfo(struct mptses *mpte, sae_connid_t *cid, uint32_t *flags,
 		if (mpts->mpts_flags & MPTSF_ACTIVE) {
 			*flags |= CIF_MP_ACTIVE;
 		}
+		if (mp_tp->mpt_version == MPTCP_VERSION_1) {
+			*flags |= CIF_MP_V1;
+		}
 
 		return 0;
 	} else {
@@ -670,6 +671,9 @@ mptcp_getconninfo(struct mptses *mpte, sae_connid_t *cid, uint32_t *flags,
 		}
 		if (mpts->mpts_flags & MPTSF_ACTIVE) {
 			*flags |= CIF_MP_ACTIVE;
+		}
+		if (mp_tp->mpt_version == MPTCP_VERSION_1) {
+			*flags |= CIF_MP_V1;
 		}
 
 		/*
@@ -1432,6 +1436,7 @@ mptcp_usr_socheckopt(struct socket *mp_so, struct sockopt *sopt)
 	case SO_NOWAKEFROMSLEEP:
 	case SO_NOAPNFALLBK:
 	case SO_MARK_CELLFALLBACK:
+	case SO_MARK_CELLFALLBACK_UUID:
 	case SO_MARK_KNOWN_TRACKER:
 	case SO_MARK_KNOWN_TRACKER_NON_APP_INITIATED:
 	case SO_MARK_APPROVED_APP_DOMAIN:

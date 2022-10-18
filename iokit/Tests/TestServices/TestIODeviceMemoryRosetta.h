@@ -13,13 +13,16 @@ public:
 	virtual bool start(IOService *provider) override;
 };
 
-class TestIODeviceMemoryRosettaUserClient : public IOUserClient {
+class TestIODeviceMemoryRosettaUserClient : public IOUserClient2022 {
 	OSDeclareDefaultStructors(TestIODeviceMemoryRosettaUserClient);
 
+
 public:
+	virtual bool start(IOService * provider) override;
 	virtual IOReturn clientClose() override;
-	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments * args,
-	    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference) override;
+	IOReturn externalMethod(uint32_t selector, IOExternalMethodArgumentsOpaque * args) override;
+	IOReturn
+	externalMethodDispatched(IOExternalMethodArguments * args);
 };
 
 #endif /* (DEVELOPMENT || DEBUG) && XNU_TARGET_OS_OSX */

@@ -97,9 +97,28 @@ typedef struct vm_shared_region *vm_shared_region_t;
 
 #define PAGE_SIZE_FOR_SR_SLIDE  4096
 
-/* Documentation for the slide info format can be found in the dyld project in
- * the file 'launch-cache/dyld_cache_format.h'. */
+/*
+ * Documentation for the slide info format can be found in the dyld project in
+ * the file 'launch-cache/dyld_cache_format.h'.
+ */
 
+typedef struct vm_shared_region_slide_info_entry_v1 *vm_shared_region_slide_info_entry_v1_t;
+struct vm_shared_region_slide_info_entry_v1 {
+	uint32_t        version;
+	uint32_t        toc_offset;     // offset from start of header to table-of-contents
+	uint32_t        toc_count;      // number of entries in toc (same as number of pages in r/w mapping)
+	uint32_t        entry_offset;
+	uint32_t        entry_count;
+	uint32_t        entries_size;
+	// uint16_t	toc[toc_count];
+	// entrybitmap	entries[entries_count];
+};
+
+#define NUM_SLIDING_BITMAPS_PER_PAGE    (0x1000/sizeof(int)/8) /*128*/
+typedef struct slide_info_entry_toc     *slide_info_entry_toc_t;
+struct slide_info_entry_toc {
+	uint8_t entry[NUM_SLIDING_BITMAPS_PER_PAGE];
+};
 
 typedef struct vm_shared_region_slide_info_entry_v2 *vm_shared_region_slide_info_entry_v2_t;
 struct vm_shared_region_slide_info_entry_v2 {
@@ -158,15 +177,17 @@ struct vm_shared_region_slide_info_entry_v4 {
 typedef union vm_shared_region_slide_info_entry *vm_shared_region_slide_info_entry_t;
 union vm_shared_region_slide_info_entry {
 	uint32_t version;
+	struct vm_shared_region_slide_info_entry_v1 v1;
 	struct vm_shared_region_slide_info_entry_v2 v2;
 	struct vm_shared_region_slide_info_entry_v3 v3;
 	struct vm_shared_region_slide_info_entry_v4 v4;
 };
 
 #define MIN_SLIDE_INFO_SIZE \
+    MIN(sizeof(struct vm_shared_region_slide_info_entry_v1), \
     MIN(sizeof(struct vm_shared_region_slide_info_entry_v2), \
     MIN(sizeof(struct vm_shared_region_slide_info_entry_v3), \
-    sizeof(struct vm_shared_region_slide_info_entry_v4)))
+    sizeof(struct vm_shared_region_slide_info_entry_v4))))
 
 /*
  * This is the information used by the shared cache pager for sub-sections
@@ -186,9 +207,9 @@ typedef struct vm_shared_region_slide_info {
 	uint64_t                si_jop_key;
 	struct vm_shared_region *si_shared_region; /* so we can ref/dealloc for authenticated slide info */
 #endif /* __has_feature(ptrauth_calls) */
-	mach_vm_address_t       si_slid_address;
-	mach_vm_offset_t        si_start;           /* start offset in si_slide_object */
-	mach_vm_offset_t        si_end;
+	mach_vm_address_t       si_slid_address __kernel_data_semantics;
+	mach_vm_offset_t        si_start __kernel_data_semantics; /* start offset in si_slide_object */
+	mach_vm_offset_t        si_end __kernel_data_semantics;
 	vm_object_t             si_slide_object;    /* The source object for the pages to be modified */
 	mach_vm_size_t          si_slide_info_size; /* size of dyld provided relocation information */
 	vm_shared_region_slide_info_entry_t si_slide_info_entry; /* dyld provided relocation information */
@@ -213,6 +234,9 @@ struct vm_shared_region {
 	thread_call_t           sr_timer_call;
 	uuid_t                  sr_uuid;
 
+#if __ARM_MIXED_PAGE_SIZE__
+	uint8_t                 sr_page_shift;
+#endif /* __ARM_MIXED_PAGE_SIZE__ */
 	bool                    sr_mapping_in_progress; /* sr_first_mapping will be != -1 when done */
 	bool                    sr_slide_in_progress;
 	bool                    sr_64bit;
@@ -223,11 +247,15 @@ struct vm_shared_region {
 
 #if __has_feature(ptrauth_calls)
 	bool                    sr_reslide;            /* Special shared region for suspected attacked processes */
-#define NUM_SR_AUTH_SECTIONS 4     /* 1 RW and 1 RO section in up to 2 files - should be made dynamic */
-	vm_shared_region_slide_info_t sr_auth_section[NUM_SR_AUTH_SECTIONS];
-	uint_t                  sr_num_auth_section;
+	uint_t                  sr_num_auth_section;  /* num entries in sr_auth_section */
+	uint_t                  sr_next_auth_section; /* used while filling in sr_auth_section */
+	vm_shared_region_slide_info_t *sr_auth_section;
 #endif /* __has_feature(ptrauth_calls) */
 
+	uint32_t                sr_rsr_version;
+
+	uint64_t                sr_install_time; /* mach_absolute_time() of installation into global list */
+	uint32_t                sr_id; /* identifier for shared cache */
 	uint32_t                sr_images_count;
 	struct dyld_uuid_info_64 *sr_images;
 };
@@ -268,10 +296,11 @@ extern kern_return_t vm_shared_region_enter(
 	cpu_type_t              cpu,
 	cpu_subtype_t           cpu_subtype,
 	boolean_t               reslide,
-	boolean_t               is_driverkit);
-extern kern_return_t vm_shared_region_remove(
-	struct _vm_map          *map,
-	struct task             *task);
+	boolean_t               is_driverkit,
+	uint32_t                rsr_version);
+extern void vm_shared_region_remove(
+	struct task             *task,
+	struct vm_shared_region *sr);
 extern vm_shared_region_t vm_shared_region_get(
 	struct task             *task);
 extern vm_shared_region_t vm_shared_region_trim_and_get(
@@ -288,8 +317,10 @@ extern vm_shared_region_t vm_shared_region_lookup(
 	cpu_type_t              cpu,
 	cpu_subtype_t           cpu_subtype,
 	boolean_t               is_64bit,
+	int                     target_page_shift,
 	boolean_t               reslide,
-	boolean_t               is_driverkit);
+	boolean_t               is_driverkit,
+	uint32_t                rsr_version);
 extern kern_return_t vm_shared_region_start_address(
 	struct vm_shared_region *shared_region,
 	mach_vm_offset_t        *start_address,
@@ -326,7 +357,7 @@ int vm_shared_region_slide(uint32_t,
     memory_object_control_t,
     vm_prot_t);
 extern void vm_shared_region_pivot(void);
-extern void vm_shared_region_reslide_stale(void);
+extern void vm_shared_region_reslide_stale(boolean_t driverkit);
 #if __has_feature(ptrauth_calls)
 __attribute__((noinline))
 extern kern_return_t vm_shared_region_auth_remap(vm_shared_region_t sr);

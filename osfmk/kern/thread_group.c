@@ -127,32 +127,19 @@ thread_group_init(void)
 	tg_zone = zone_create("thread_groups", tg_size, ZC_ALIGNMENT_REQUIRED);
 
 	queue_head_init(tg_queue);
-	tg_system = thread_group_create_and_retain(FALSE);
+	tg_system = thread_group_create_and_retain(THREAD_GROUP_FLAGS_DEFAULT);
 	thread_group_set_name(tg_system, "system");
-	tg_background = thread_group_create_and_retain(FALSE);
+	tg_background = thread_group_create_and_retain(THREAD_GROUP_FLAGS_DEFAULT);
 	thread_group_set_name(tg_background, "background");
 	lck_mtx_lock(&tg_lock);
 	tg_next_id++;  // Skip ID 2, which used to be the "adaptive" group. (It was never used.)
 	lck_mtx_unlock(&tg_lock);
-	tg_vm = thread_group_create_and_retain(FALSE);
+	tg_vm = thread_group_create_and_retain(THREAD_GROUP_FLAGS_DEFAULT);
 	thread_group_set_name(tg_vm, "VM");
-	tg_io_storage = thread_group_create_and_retain(FALSE);
+	tg_io_storage = thread_group_create_and_retain(THREAD_GROUP_FLAGS_DEFAULT);
 	thread_group_set_name(tg_io_storage, "io storage");
-	tg_perf_controller = thread_group_create_and_retain(FALSE);
+	tg_perf_controller = thread_group_create_and_retain(THREAD_GROUP_FLAGS_DEFAULT);
 	thread_group_set_name(tg_perf_controller, "perf_controller");
-
-	/*
-	 * If CLPC is disabled, it would recommend SMP for all thread groups.
-	 * In that mode, the scheduler would like to restrict the kernel thread
-	 * groups to the E-cluster while all other thread groups are run on the
-	 * P-cluster. To identify the kernel thread groups, mark them with a
-	 * special flag THREAD_GROUP_FLAGS_SMP_RESTRICT which is looked at by
-	 * recommended_pset_type().
-	 */
-	tg_system->tg_flags |= THREAD_GROUP_FLAGS_SMP_RESTRICT;
-	tg_vm->tg_flags |= THREAD_GROUP_FLAGS_SMP_RESTRICT;
-	tg_io_storage->tg_flags |= THREAD_GROUP_FLAGS_SMP_RESTRICT;
-	tg_perf_controller->tg_flags |= THREAD_GROUP_FLAGS_SMP_RESTRICT;
 
 	/*
 	 * The thread group deallocation queue must be a thread call based queue
@@ -197,7 +184,7 @@ sched_clutch_for_thread_group(struct thread_group *thread_group)
  * by the thread group.
  */
 static void
-sched_clutch_update_tg_flags(sched_clutch_t clutch, uint8_t flags)
+sched_clutch_update_tg_flags(__unused sched_clutch_t clutch, __unused uint32_t flags)
 {
 	sched_clutch_tg_priority_t sc_tg_pri = 0;
 	if (flags & THREAD_GROUP_FLAGS_UI_APP) {
@@ -286,16 +273,14 @@ thread_group_resync(boolean_t create)
  * Create new thread group and add new reference to it.
  */
 struct thread_group *
-thread_group_create_and_retain(boolean_t efficient)
+thread_group_create_and_retain(uint32_t flags)
 {
 	struct thread_group *tg;
 
 	tg = zalloc_flags(tg_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	assert((uintptr_t)tg % TG_MACHINE_DATA_ALIGN_SIZE == 0);
 
-	if (efficient) {
-		tg->tg_flags |= THREAD_GROUP_FLAGS_EFFICIENT;
-	}
+	tg->tg_flags = flags;
 
 #if CONFIG_SCHED_CLUTCH
 	/*
@@ -325,6 +310,9 @@ thread_group_create_and_retain(boolean_t efficient)
 	lck_mtx_unlock(&tg_lock);
 
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_THREAD_GROUP, MACH_THREAD_GROUP_NEW), thread_group_id(tg), thread_group_get_flags(tg));
+	if (flags) {
+		KDBG(MACHDBG_CODE(DBG_MACH_THREAD_GROUP, MACH_THREAD_GROUP_FLAGS), thread_group_id(tg), thread_group_get_flags(tg), 0);
+	}
 
 	return tg;
 }
@@ -353,7 +341,7 @@ thread_group_set_name(__unused struct thread_group *tg, __unused const char *nam
 	if (!thread_group_retain_try(tg)) {
 		return;
 	}
-	if (tg->tg_name[0] == '\0') {
+	if (name[0] != '\0') {
 		strncpy(&tg->tg_name[0], name, THREAD_GROUP_MAXNAME);
 #if defined(__LP64__)
 		KDBG(MACHDBG_CODE(DBG_MACH_THREAD_GROUP, MACH_THREAD_GROUP_NAME),
@@ -375,15 +363,41 @@ thread_group_set_name(__unused struct thread_group *tg, __unused const char *nam
 }
 
 void
-thread_group_set_flags(struct thread_group *tg, uint64_t flags)
+thread_group_set_flags(struct thread_group *tg, uint32_t flags)
 {
 	thread_group_flags_update_lock();
 	thread_group_set_flags_locked(tg, flags);
 	thread_group_flags_update_unlock();
 }
 
+/*
+ * Return true if flags are valid, false otherwise.
+ * Some flags are mutually exclusive.
+ */
+boolean_t
+thread_group_valid_flags(uint32_t flags)
+{
+	const uint32_t sflags = flags & ~THREAD_GROUP_EXCLUSIVE_FLAGS_MASK;
+	const uint32_t eflags = flags & THREAD_GROUP_EXCLUSIVE_FLAGS_MASK;
+
+	if ((sflags & THREAD_GROUP_FLAGS_SHARED) != sflags) {
+		return false;
+	}
+
+	if ((eflags & THREAD_GROUP_FLAGS_EXCLUSIVE) != eflags) {
+		return false;
+	}
+
+	/* Only one of the exclusive flags may be set. */
+	if (((eflags - 1) & eflags) != 0) {
+		return false;
+	}
+
+	return true;
+}
+
 void
-thread_group_clear_flags(struct thread_group *tg, uint64_t flags)
+thread_group_clear_flags(struct thread_group *tg, uint32_t flags)
 {
 	thread_group_flags_update_lock();
 	thread_group_clear_flags_locked(tg, flags);
@@ -394,23 +408,48 @@ thread_group_clear_flags(struct thread_group *tg, uint64_t flags)
  * Set thread group flags and perform related actions.
  * The tg_flags_update_lock should be held.
  * Currently supported flags are:
+ * Exclusive Flags:
  * - THREAD_GROUP_FLAGS_EFFICIENT
+ * - THREAD_GROUP_FLAGS_APPLICATION
+ * - THREAD_GROUP_FLAGS_CRITICAL
+ * Shared Flags:
  * - THREAD_GROUP_FLAGS_UI_APP
  */
 
 void
-thread_group_set_flags_locked(struct thread_group *tg, uint64_t flags)
+thread_group_set_flags_locked(struct thread_group *tg, uint32_t flags)
 {
-	if ((flags & THREAD_GROUP_FLAGS_VALID) != flags) {
-		panic("thread_group_set_flags: Invalid flags %llu", flags);
+	if (!thread_group_valid_flags(flags)) {
+		panic("thread_group_set_flags: Invalid flags %u", flags);
 	}
 
+	/* Disallow any exclusive flags from being set after creation, with the
+	 * exception of moving from default to application */
+	if ((flags & THREAD_GROUP_EXCLUSIVE_FLAGS_MASK) &&
+	    !((flags & THREAD_GROUP_FLAGS_APPLICATION) &&
+	    (tg->tg_flags & THREAD_GROUP_EXCLUSIVE_FLAGS_MASK) ==
+	    THREAD_GROUP_FLAGS_DEFAULT)) {
+		flags &= ~THREAD_GROUP_EXCLUSIVE_FLAGS_MASK;
+	}
 	if ((tg->tg_flags & flags) == flags) {
+		return;
+	}
+
+	if (tg == tg_system) {
+		/*
+		 * The system TG is used for kernel and launchd. It is also used
+		 * for processes which are getting spawned and do not have a home
+		 * TG yet (see task_coalition_get_thread_group()). Make sure the
+		 * policies for those processes do not update the flags for the
+		 * system TG. The flags for this thread group should only be set
+		 * at creation via thread_group_create_and_retain().
+		 */
 		return;
 	}
 
 	__kdebug_only uint64_t old_flags = tg->tg_flags;
 	tg->tg_flags |= flags;
+
 	machine_thread_group_flags_update(tg, tg->tg_flags);
 #if CONFIG_SCHED_CLUTCH
 	sched_clutch_update_tg_flags(&(tg->tg_sched_clutch), tg->tg_flags);
@@ -423,17 +462,25 @@ thread_group_set_flags_locked(struct thread_group *tg, uint64_t flags)
  * Clear thread group flags and perform related actions
  * The tg_flags_update_lock should be held.
  * Currently supported flags are:
+ * Exclusive Flags:
  * - THREAD_GROUP_FLAGS_EFFICIENT
+ * - THREAD_GROUP_FLAGS_APPLICATION
+ * - THREAD_GROUP_FLAGS_CRITICAL
+ * Shared Flags:
  * - THREAD_GROUP_FLAGS_UI_APP
  */
 
 void
-thread_group_clear_flags_locked(struct thread_group *tg, uint64_t flags)
+thread_group_clear_flags_locked(struct thread_group *tg, uint32_t flags)
 {
-	if ((flags & THREAD_GROUP_FLAGS_VALID) != flags) {
-		panic("thread_group_clear_flags: Invalid flags %llu", flags);
+	if (!thread_group_valid_flags(flags)) {
+		panic("thread_group_clear_flags: Invalid flags %u", flags);
 	}
 
+	/* Disallow any exclusive flags from being cleared */
+	if (flags & THREAD_GROUP_EXCLUSIVE_FLAGS_MASK) {
+		flags &= ~THREAD_GROUP_EXCLUSIVE_FLAGS_MASK;
+	}
 	if ((tg->tg_flags & flags) == 0) {
 		return;
 	}
@@ -1262,20 +1309,6 @@ uint32_t
 thread_group_get_flags(struct thread_group *tg)
 {
 	return tg->tg_flags;
-}
-
-/*
- * Returns whether the thread group is restricted to the E-cluster when CLPC is
- * turned off.
- */
-boolean_t
-thread_group_smp_restricted(struct thread_group *tg)
-{
-	if (tg->tg_flags & THREAD_GROUP_FLAGS_SMP_RESTRICT) {
-		return true;
-	} else {
-		return false;
-	}
 }
 
 void

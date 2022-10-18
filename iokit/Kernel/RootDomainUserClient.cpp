@@ -39,11 +39,11 @@
 #include <IOKit/pwr_mgt/IOPMPrivate.h>
 #include <sys/proc.h>
 
-#define super IOUserClient
+#define super IOUserClient2022
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-OSDefineMetaClassAndStructors(RootDomainUserClient, IOUserClient)
+OSDefineMetaClassAndStructors(RootDomainUserClient, IOUserClient2022)
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -74,6 +74,11 @@ RootDomainUserClient::start( IOService * provider )
 	}
 	fOwner = (IOPMrootDomain *)provider;
 
+	setProperty(kIOUserClientDefaultLockingKey, kOSBooleanTrue);
+	setProperty(kIOUserClientDefaultLockingSetPropertiesKey, kOSBooleanTrue);
+	setProperty(kIOUserClientDefaultLockingSingleThreadExternalMethodKey, kOSBooleanFalse);
+
+	setProperty(kIOUserClientEntitlementsKey, kOSBooleanFalse);
 
 	return true;
 }
@@ -238,132 +243,260 @@ RootDomainUserClient::stop( IOService *provider)
 }
 
 IOReturn
-RootDomainUserClient::externalMethod(
-	uint32_t selector,
-	IOExternalMethodArguments * arguments,
-	IOExternalMethodDispatch * dispatch __unused,
-	OSObject * target __unused,
-	void * reference __unused )
+RootDomainUserClient::externalMethod(uint32_t selector, IOExternalMethodArgumentsOpaque * args )
+{
+	static const IOExternalMethodDispatch2022 dispatchArray[] = {
+		[kPMSetAggressiveness] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 2,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 1,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMGetAggressiveness] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 1,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 1,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMSleepSystem] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 1,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMAllowPowerChange] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 1,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMCancelPowerChange] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 1,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMShutdownSystem] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMRestartSystem] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMSleepSystemOptions] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = kIOUCVariableStructureSize,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = sizeof(uint32_t),
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMSetMaintenanceWakeCalendar] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = sizeof(IOPMCalendarStruct),
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = sizeof(uint32_t),
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMSetUserAssertionLevels] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 1,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMActivityTickle] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMSetClamshellSleepState] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 1,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMGetSystemSleepType] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 2,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMSleepWakeWatchdogEnable] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMSleepWakeDebugTrig] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMSetDisplayPowerOn] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 1,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+	};
+
+	return dispatchExternalMethod(selector, args, dispatchArray, sizeof(dispatchArray) / sizeof(dispatchArray[0]), this, NULL);
+}
+IOReturn
+RootDomainUserClient::externalMethodDispatched(OSObject * target, void * reference, IOExternalMethodArguments * arguments)
 {
 	IOReturn    ret = kIOReturnBadArgument;
-
-	switch (selector) {
+	RootDomainUserClient * me = (typeof(me))target;
+	switch (arguments->selector) {
 	case kPMSetAggressiveness:
-		if ((2 == arguments->scalarInputCount)
-		    && (1 == arguments->scalarOutputCount)) {
-			ret = this->secureSetAggressiveness(
-				(unsigned long)arguments->scalarInput[0],
-				(unsigned long)arguments->scalarInput[1],
-				(int *)&arguments->scalarOutput[0]);
-		}
+		ret = me->secureSetAggressiveness(
+			(unsigned long)arguments->scalarInput[0],
+			(unsigned long)arguments->scalarInput[1],
+			(int *)&arguments->scalarOutput[0]);
 		break;
 
 	case kPMGetAggressiveness:
-		if ((1 == arguments->scalarInputCount)
-		    && (1 == arguments->scalarOutputCount)) {
-			ret = fOwner->getAggressiveness(
-				(unsigned long)arguments->scalarInput[0],
-				(unsigned long *)&arguments->scalarOutput[0]);
-		}
+		ret = me->fOwner->getAggressiveness(
+			(unsigned long)arguments->scalarInput[0],
+			(unsigned long *)&arguments->scalarOutput[0]);
 		break;
 
 	case kPMSleepSystem:
-		if (1 == arguments->scalarOutputCount) {
-			ret = this->secureSleepSystem(
-				(uint32_t *)&arguments->scalarOutput[0]);
-		}
+		ret = me->secureSleepSystem(
+			(uint32_t *)&arguments->scalarOutput[0]);
 		break;
 
 	case kPMAllowPowerChange:
-		if (1 == arguments->scalarInputCount) {
-			ret = fOwner->allowPowerChange(
-				arguments->scalarInput[0]);
-		}
+		ret = me->fOwner->allowPowerChange(
+			arguments->scalarInput[0]);
 		break;
 
 	case kPMCancelPowerChange:
-		if (1 == arguments->scalarInputCount) {
-			ret = fOwner->cancelPowerChange(
-				arguments->scalarInput[0]);
-		}
+		ret = me->fOwner->cancelPowerChange(
+			arguments->scalarInput[0]);
 		break;
 
 	case kPMShutdownSystem:
-		// deperecated interface
+		// deprecated interface
 		ret = kIOReturnUnsupported;
 		break;
 
 	case kPMRestartSystem:
-		// deperecated interface
+		// deprecated interface
 		ret = kIOReturnUnsupported;
 		break;
 
 	case kPMSleepSystemOptions:
-		ret = this->secureSleepSystemOptions(
+		ret = me->secureSleepSystemOptions(
 			arguments->structureInput,
 			arguments->structureInputSize,
-			(uint32_t *)&arguments->scalarOutput[0]);
+			(uint32_t *)&arguments->structureOutput);
 		break;
 	case kPMSetMaintenanceWakeCalendar:
-		if ((arguments->structureInputSize >= sizeof(IOPMCalendarStruct)) &&
-		    (arguments->structureOutputSize >= sizeof(uint32_t))) {
-			ret = this->secureSetMaintenanceWakeCalendar(
-				(IOPMCalendarStruct *)arguments->structureInput,
-				(uint32_t *)&arguments->structureOutput);
-			arguments->structureOutputSize = sizeof(uint32_t);
-		}
+		ret = me->secureSetMaintenanceWakeCalendar(
+			(IOPMCalendarStruct *)arguments->structureInput,
+			(uint32_t *)&arguments->structureOutput);
+		arguments->structureOutputSize = sizeof(uint32_t);
 		break;
 
 	case kPMSetUserAssertionLevels:
-		ret = this->secureSetUserAssertionLevels(
+		ret = me->secureSetUserAssertionLevels(
 			(uint32_t)arguments->scalarInput[0]);
 		break;
 
 	case kPMActivityTickle:
-		if (fOwner->checkSystemCanSustainFullWake()) {
-			fOwner->reportUserInput();
-			fOwner->setProperty(kIOPMRootDomainWakeTypeKey, "UserActivity Assertion");
+		if (me->fOwner->checkSystemCanSustainFullWake()) {
+			me->fOwner->reportUserInput();
+			me->fOwner->setProperty(kIOPMRootDomainWakeTypeKey, "UserActivity Assertion");
 		}
 		ret = kIOReturnSuccess;
 		break;
 
 	case kPMSetClamshellSleepState:
-		fOwner->setClamShellSleepDisable(arguments->scalarInput[0] ? true : false,
+		me->fOwner->setClamShellSleepDisable(arguments->scalarInput[0] ? true : false,
 		    IOPMrootDomain::kClamshellSleepDisablePowerd);
 		ret = kIOReturnSuccess;
 		break;
 
 	case kPMGetSystemSleepType:
-		if (2 == arguments->scalarOutputCount) {
-			ret = this->secureGetSystemSleepType(
-				(uint32_t *) &arguments->scalarOutput[0],
-				(uint32_t *) &arguments->scalarOutput[1]);
-		}
+		ret = me->secureGetSystemSleepType(
+			(uint32_t *) &arguments->scalarOutput[0],
+			(uint32_t *) &arguments->scalarOutput[1]);
 		break;
 
 #if defined(__i386__) || defined(__x86_64__)
 	case kPMSleepWakeWatchdogEnable:
-		ret = clientHasPrivilege(fOwningTask, kIOClientPrivilegeAdministrator);
+		ret = clientHasPrivilege(me->fOwningTask, kIOClientPrivilegeAdministrator);
 		if (ret == kIOReturnSuccess) {
-			fOwner->sleepWakeDebugEnableWdog();
+			me->fOwner->sleepWakeDebugEnableWdog();
 		}
 		break;
 
 
 	case kPMSleepWakeDebugTrig:
-		ret = clientHasPrivilege(fOwningTask, kIOClientPrivilegeAdministrator);
+		ret = clientHasPrivilege(me->fOwningTask, kIOClientPrivilegeAdministrator);
 		if (ret == kIOReturnSuccess) {
-			fOwner->sleepWakeDebugTrig(false);
+			me->fOwner->sleepWakeDebugTrig(false);
 		}
 		break;
 #endif
 
 	case kPMSetDisplayPowerOn:
-		if (1 == arguments->scalarInputCount) {
-			ret = clientHasPrivilege(fOwningTask, kIOClientPrivilegeAdministrator);
-			if (ret == kIOReturnSuccess) {
-				fOwner->setDisplayPowerOn((uint32_t)arguments->scalarInput[0]);
-			}
+		ret = clientHasPrivilege(me->fOwningTask, kIOClientPrivilegeAdministrator);
+		if (ret == kIOReturnSuccess) {
+			me->fOwner->setDisplayPowerOn((uint32_t)arguments->scalarInput[0]);
 		}
 		break;
 

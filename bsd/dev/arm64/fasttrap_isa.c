@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2022 Apple Inc. All rights reserved.
  */
 /*
  * CDDL HEADER START
@@ -322,10 +322,10 @@ static int
 condition_true(int cond, int cpsr)
 {
 	int taken = 0;
-	int zf = (cpsr & PSR_ZF) ? 1 : 0,
-	    nf = (cpsr & PSR_NF) ? 1 : 0,
-	    cf = (cpsr & PSR_CF) ? 1 : 0,
-	    vf = (cpsr & PSR_VF) ? 1 : 0;
+	int zf = (cpsr & PSR64_Z) ? 1 : 0,
+	    nf = (cpsr & PSR64_N) ? 1 : 0,
+	    cf = (cpsr & PSR64_C) ? 1 : 0,
+	    vf = (cpsr & PSR64_V) ? 1 : 0;
 
 	switch (cond) {
 	case 0: taken = zf; break;

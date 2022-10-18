@@ -195,6 +195,10 @@ struct uthread {
 			user_addr_t      ulock_addr;
 			mach_port_name_t kport;
 		} uus_bsdthread_terminate;
+
+		struct _exec_data {
+			struct image_params *imgp;
+		} uus_exec_data;
 	} uu_save;
 
 	/* Persistent memory allocations across system calls */
@@ -211,6 +215,7 @@ struct uthread {
 	sigset_t uu_sigmask;                            /* signal mask for the thread */
 	sigset_t uu_oldmask;                            /* signal mask saved before sigpause */
 	user_addr_t uu_sigreturn_token;                 /* random token used to validate sigreturn arguments */
+	uint32_t uu_sigreturn_diversifier;              /* random diversifier used to validate user signed sigreturn pc/lr */
 	int uu_pending_sigreturn;                       /* Pending sigreturn count */
 
 	TAILQ_ENTRY(uthread) uu_list;       /* List of uthreads in proc */
@@ -258,10 +263,36 @@ struct uthread {
 	vm_offset_t uu_workq_stackaddr;
 	mach_port_name_t uu_workq_thport;
 	struct uu_workq_policy {
-		uint16_t qos_req : 4;         /* requested QoS */
-		uint16_t qos_max : 4;         /* current acked max qos */
-		uint16_t qos_override : 4;    /* received async override */
-		uint16_t qos_bucket : 4;      /* current acked bucket */
+		/* Requested QoS.
+		 *
+		 *	- Modified on self during qos updates, or on idle threads we are setting
+		 *	up to run (eg. creator, threads for dispatch apply, etc) while holding
+		 *	wq lock
+		 *	- Read from self
+		 *
+		 *	Synchronization is subtle since it's generally on self but when
+		 *	modifying on non-self threads, we rely on the fact that they are
+		 *	previously idle and therefore, not modifying it on self at the same time
+		 *	until they take the wq lock.
+		 */
+		uint16_t qos_req : 4;
+		/* Current acked max qos - from kevent.
+		 *
+		 * Synchronized by being modified on self. Also generally under the wq lock
+		 * but that's more of a happy coincidence.
+		 */
+		uint16_t qos_max : 4;
+		/* Async QoS override received - workqueue override
+		 *
+		 * Synchronized with the thread mutex and wq lock since it can be modified
+		 * by another thread.
+		 */
+		uint16_t qos_override : 4;
+		/* Current acked bucket.
+		 *
+		 * Synchronized by only being read or written on self.
+		 */
+		uint16_t qos_bucket : 4;
 	} uu_workq_pri;
 
 	uint16_t uu_workq_flags;
@@ -345,7 +376,9 @@ struct uthread {
 	struct os_reason *uu_exit_reason;
 
 #if CONFIG_DEBUG_SYSCALL_REJECTION
+	uint64_t        syscall_rejection_flags;  /* flags for syscall rejection behavior */
 	uint64_t        *syscall_rejection_mask;  /* mach_trap_count + nsysent bits */
+	uint64_t        *syscall_rejection_once_mask;  /* mach_trap_count + nsysent bits */
 #endif /* CONFIG_DEBUG_SYSCALL_REJECTION */
 };
 

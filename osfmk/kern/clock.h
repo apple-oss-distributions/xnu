@@ -89,7 +89,6 @@ typedef struct clock_ops        clock_ops_data_t;
 struct  clock {
 	clock_ops_t             cl_ops;         /* operations list */
 	struct ipc_port         *cl_service;    /* service port */
-	struct ipc_port         *cl_control;    /* control port */
 };
 typedef struct clock            clock_data_t;
 
@@ -171,11 +170,6 @@ extern void                     clock_get_boottime_microtime(
 	clock_sec_t                     *secs,
 	clock_nsec_t            *microsecs);
 
-extern void                     absolutetime_to_microtime(
-	uint64_t                        abstime,
-	clock_sec_t                     *secs,
-	clock_usec_t            *microsecs);
-
 extern void                     clock_deadline_for_periodic_event(
 	uint64_t                        interval,
 	uint64_t                        abstime,
@@ -252,6 +246,11 @@ extern void                             absolutetime_to_nanoseconds(
 extern void                             nanoseconds_to_absolutetime(
 	uint64_t                nanoseconds,
 	uint64_t                *result);
+
+extern void                             absolutetime_to_microtime(
+	uint64_t                abstime,
+	clock_sec_t             *secs,
+	clock_usec_t            *microsecs);
 
 /*
  * Absolute <-> Continuous Time conversion routines

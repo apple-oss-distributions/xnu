@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -49,22 +49,14 @@ uintptr_t
 get_tpidrro(void)
 {
 	uintptr_t       uthread;
-#if __arm__
-	uthread = __builtin_arm_mrc(15, 0, 13, 0, 3);   // TPIDRURO
-#else
 	__asm__ volatile ("mrs %0, TPIDRRO_EL0" : "=r" (uthread));
-#endif
 	return uthread;
 }
 
 void
 set_tpidrro(uintptr_t uthread)
 {
-#if __arm__
-	__builtin_arm_mcr(15, 0, uthread, 13, 0, 3);    // TPIDRURO
-#else
 	__asm__ volatile ("msr TPIDRRO_EL0, %0" : : "r" (uthread));
-#endif
 }
 
 kern_return_t
@@ -79,12 +71,6 @@ thread_get_cthread_self(void)
 	uintptr_t       self;
 
 	self = get_tpidrro();
-#if __arm__
-	self &= ~3;
-	assert( self == current_thread()->machine.cthread_self);
-	return (kern_return_t) current_thread()->machine.cthread_self;
-#else
 	assert( self == current_thread()->machine.cthread_self);
 	return self;
-#endif
 }

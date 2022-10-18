@@ -163,7 +163,7 @@ names a symbolic link, a new link is created for the symbolic link
 .Fa name1
 and not its target. On OS X, not assigning AT_SYMLINK_FOLLOW to
 .Fa flag
-may result in some filesystems returning an error.
+may result in some file systems returning an error.
 .Sh RETURN VALUES
 Upon successful completion, a value of 0 is returned.  Otherwise,
 a value of -1 is returned and
@@ -286,7 +286,9 @@ argument is not valid.
 .It Bq Er ENOTSUP
 .Fa flag
 was not set to
-.Dv AT_SYMLINK_FOLLOW (some filesystems only)
+.Dv AT_SYMLINK_FOLLOW (some file systems only).
+.It Bq Er ENOTSUP
+The underlying file system does not support this call.
 .It Bq Er ENOTDIR
 The
 .Fa name1

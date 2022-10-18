@@ -99,12 +99,16 @@ kasan_tbi_get_tag(long ptr)
 	                            KASAN_TBI_ESR_IGNORE | KASAN_TBI_ESR_SIZE_MASK)
 #define KASAN_TBI_GET_SIZE(x)       (1 << ((x) & KASAN_TBI_ESR_SIZE_MASK))
 
-void __hwasan_tag_memory(uintptr_t, unsigned char, uintptr_t);
-unsigned char __hwasan_generate_tag(void);
-vm_offset_t kasan_tbi_tag_zalloc(vm_offset_t, vm_offset_t, boolean_t);
+uint8_t kasan_tbi_get_memory_tag(vm_offset_t);
+uint8_t *kasan_tbi_get_tag_address(vm_offset_t);
+void kasan_tbi_copy_tags(vm_offset_t, vm_offset_t, vm_size_t);
+vm_offset_t kasan_tbi_tag_zalloc(vm_offset_t, vm_size_t, vm_size_t, boolean_t);
 vm_offset_t kasan_tbi_tag_zfree(vm_offset_t, vm_offset_t, boolean_t);
-vm_offset_t kasan_tbi_tag_zalloc_default(vm_offset_t, vm_offset_t, boolean_t);
+vm_offset_t kasan_tbi_tag_zalloc_default(vm_offset_t, vm_size_t, boolean_t);
 vm_offset_t kasan_tbi_fix_address_tag(vm_offset_t);
+vm_offset_t kasan_tbi_tag_large_alloc(vm_offset_t, vm_size_t, vm_size_t);
+vm_offset_t kasan_tbi_tag_large_free(vm_offset_t, vm_size_t);
+
 void kasan_handle_brk_failure(vm_offset_t, uint16_t);
 
 #endif /* _KASAN_TBI_H_ */

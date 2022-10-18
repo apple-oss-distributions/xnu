@@ -611,3 +611,69 @@ IODataQueueDispatchSource::EnqueueWithCoalesce(uint32_t callerDataSize,
 
 	return retVal;
 }
+
+kern_return_t
+IODataQueueDispatchSource::CanEnqueueData(uint32_t callerDataSize)
+{
+	return CanEnqueueData(callerDataSize, 1);
+}
+
+kern_return_t
+IODataQueueDispatchSource::CanEnqueueData(uint32_t callerDataSize, uint32_t dataCount)
+{
+	IODataQueueMemory * dataQueue;
+	uint32_t            head;
+	uint32_t            tail;
+	uint32_t            dataSize;
+	uint32_t            queueSize;
+	uint32_t            entrySize;
+
+	dataQueue = ivars->dataQueue;
+	if (!dataQueue) {
+		return kIOReturnNoMemory;
+	}
+	queueSize = ivars->queueByteCount;
+
+	// Force a single read of head and tail
+	tail = __c11_atomic_load((_Atomic uint32_t *)&dataQueue->tail, __ATOMIC_RELAXED);
+	head = __c11_atomic_load((_Atomic uint32_t *)&dataQueue->head, __ATOMIC_ACQUIRE);
+
+	if (os_add_overflow(callerDataSize, 3, &dataSize)) {
+		return kIOReturnOverrun;
+	}
+	dataSize &= ~3U;
+
+	// Check for overflow of entrySize
+	if (os_add_overflow(DATA_QUEUE_ENTRY_HEADER_SIZE, dataSize, &entrySize)) {
+		return kIOReturnOverrun;
+	}
+
+	// Check for underflow of (getQueueSize() - tail)
+	if (queueSize < tail || queueSize < head) {
+		return kIOReturnError;
+	}
+
+	if (tail >= head) {
+		uint32_t endSpace = queueSize - tail;
+		uint32_t endElements = endSpace / entrySize;
+		uint32_t beginElements = head / entrySize;
+		if (endElements < dataCount && endElements + beginElements <= dataCount) {
+			return kIOReturnOverrun;
+		}
+	} else {
+		// Do not allow the tail to catch up to the head when the queue is full.
+		uint32_t space = head - tail - 1;
+		uint32_t elements = space / entrySize;
+		if (elements < dataCount) {
+			return kIOReturnOverrun;
+		}
+	}
+
+	return kIOReturnSuccess;
+}
+
+size_t
+IODataQueueDispatchSource::GetDataQueueEntryHeaderSize()
+{
+	return DATA_QUEUE_ENTRY_HEADER_SIZE;
+}

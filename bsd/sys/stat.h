@@ -571,6 +571,8 @@ mode_t  umask(mode_t);
 int     fchmodat(int, const char *, mode_t, int) __OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
 int     fstatat(int, const char *, struct stat *, int) __DARWIN_INODE64(fstatat) __OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
 int     mkdirat(int, const char *, mode_t) __OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
+int     mkfifoat(int, const char *, mode_t) __API_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(9.0));
+int     mknodat(int, const char *, mode_t, dev_t) __API_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(9.0));
 
 #define UTIME_NOW       -1
 #define UTIME_OMIT      -2

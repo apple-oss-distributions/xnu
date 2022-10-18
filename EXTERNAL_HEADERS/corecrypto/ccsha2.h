@@ -1,11 +1,11 @@
-/* Copyright (c) (2010,2011,2012,2014,2015,2016,2017,2018,2019) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2012,2014-2019,2021) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
- * is contained in the License.txt file distributed with corecrypto) and only to 
- * people who accept that license. IMPORTANT:  Any license rights granted to you by 
- * Apple Inc. (if any) are limited to internal use within your organization only on 
- * devices and computers you own or control, for the sole purpose of verifying the 
- * security characteristics and correct functioning of the Apple Software.  You may 
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
@@ -13,6 +13,8 @@
 #define _CORECRYPTO_CCSHA2_H_
 
 #include <corecrypto/ccdigest.h>
+
+CC_PTRCHECK_CAPABLE_HEADER()
 
 /* sha2 selectors */
 const struct ccdigest_info *ccsha224_di(void);
@@ -38,19 +40,19 @@ const struct ccdigest_info *ccsha512_256_di(void);  // SHA512/256 (cf FIPS 180-4
 
 /* SHA256 */
 #define CCSHA256_BLOCK_SIZE  64
-#define	CCSHA256_OUTPUT_SIZE 32
-#define	CCSHA256_STATE_SIZE  32
+#define CCSHA256_OUTPUT_SIZE 32
+#define CCSHA256_STATE_SIZE  32
 extern const struct ccdigest_info ccsha256_ltc_di;
-#if  CCSHA2_VNG_INTEL
+#if CCSHA2_VNG_INTEL
 extern const struct ccdigest_info ccsha224_vng_intel_SupplementalSSE3_di;
 extern const struct ccdigest_info ccsha256_vng_intel_SupplementalSSE3_di;
 #endif
-#if  CCSHA2_VNG_ARM
+#if CCSHA2_VNG_ARM
 extern const struct ccdigest_info ccsha224_vng_arm_di;
 extern const struct ccdigest_info ccsha256_vng_arm_di;
-#if CC_ACCELERATECRYPTO && defined(__arm64__) && CCSHA2_VNG_ARM
+#if defined(__arm64__)
 extern const struct ccdigest_info ccsha256_vng_arm64neon_di;
-#endif  // CC_ACCELERATECRYPTO
+#endif
 extern const struct ccdigest_info ccsha384_vng_arm_di;
 extern const struct ccdigest_info ccsha512_vng_arm_di;
 extern const struct ccdigest_info ccsha512_256_vng_arm_di;

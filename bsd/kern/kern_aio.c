@@ -1348,7 +1348,7 @@ aio_try_enqueue_work_locked(proc_t procp, aio_workq_entry *entryp,
 	aio_workq_lock_spin(queue);
 	aio_workq_add_entry_locked(queue, entryp);
 	waitq_wakeup64_one(&queue->aioq_waitq, CAST_EVENT64_T(queue),
-	    THREAD_AWAKENED, WAITQ_ALL_PRIORITIES);
+	    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
 	aio_workq_unlock(queue);
 
 	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_AIO, AIO_work_queued) | DBG_FUNC_START,
@@ -1536,7 +1536,7 @@ aio_work_thread(void *arg __unused, wait_result_t wr __unused)
 		 * of the IO.  Note: don't need to have the entryp locked,
 		 * because the proc and map don't change until it's freed.
 		 */
-		currentmap = get_task_map((current_proc())->task);
+		currentmap = get_task_map(proc_task(current_proc()));
 		if (currentmap != entryp->aio_map) {
 			uthreadp = (struct uthread *) current_uthread();
 			oldaiotask = uthreadp->uu_aio_task;
@@ -1546,7 +1546,7 @@ aio_work_thread(void *arg __unused, wait_result_t wr __unused)
 			 * which means that it is safe to dereference p->task without
 			 * holding a lock or taking references.
 			 */
-			uthreadp->uu_aio_task = p->task;
+			uthreadp->uu_aio_task = proc_task(p);
 			oldmap = vm_map_switch(entryp->aio_map);
 		}
 
@@ -1708,7 +1708,7 @@ aio_create_queue_entry(proc_t procp, user_addr_t aiocbp, aio_entry_flags_t flags
 	}
 
 	/* get a reference to the user land map in order to keep it around */
-	entryp->aio_map = get_task_map(procp->task);
+	entryp->aio_map = get_task_map(proc_task(procp));
 	vm_map_reference(entryp->aio_map);
 
 	/* get a reference on the current_thread, which is passed in vfs_context. */

@@ -60,7 +60,7 @@
 #include <mach/mach_traps.h>
 
 #include <kern/syscall_sw.h>
-#if CONFIG_REQUIRES_U32_MUNGING || (__arm__ && (__BIGGEST_ALIGNMENT__ > 4))
+#if CONFIG_REQUIRES_U32_MUNGING
 #include <sys/munge.h>
 #endif
 
@@ -100,6 +100,7 @@ int kern_invalid_debug = 0;
 
 #include <kern/clock.h>
 #include <mach/mk_timer.h>
+
 
 const mach_trap_t       mach_trap_table[MACH_TRAP_TABLE_COUNT] = {
 /* 0 */ MACH_TRAP(kern_invalid, 0, 0, NULL),
@@ -149,7 +150,11 @@ const mach_trap_t       mach_trap_table[MACH_TRAP_TABLE_COUNT] = {
 /* 44 */ MACH_TRAP(task_name_for_pid, 3, 3, munge_www),
 /* 45 */ MACH_TRAP(task_for_pid, 3, 3, munge_www),
 /* 46 */ MACH_TRAP(pid_for_task, 2, 2, munge_ww),
-/* 47 */ MACH_TRAP(kern_invalid, 0, 0, NULL),
+#if defined(__LP64__) || defined(__arm64__)
+/* 47 */ MACH_TRAP(mach_msg2_trap, 8, 16, munge_llllllll),
+#else
+/* 47 */ MACH_TRAP(kern_invalid, 0, 0, NULL), /* Do not take */
+#endif
 /* 48 */ MACH_TRAP(macx_swapon, 4, 5, munge_lwww),
 /* 49 */ MACH_TRAP(macx_swapoff, 2, 3, munge_lw),
 /* 50 */ MACH_TRAP(thread_get_special_reply_port, 0, 0, NULL, .mach_trap_returns_port = 1),
@@ -281,7 +286,11 @@ const char * const mach_syscall_name_table[MACH_TRAP_TABLE_COUNT] = {
 /* 44 */ "task_name_for_pid",
 /* 45 */ "task_for_pid",
 /* 46 */ "pid_for_task",
+#if defined(__LP64__) || defined(__arm64__)
+/* 47 */ "mach_msg2_trap",
+#else
 /* 47 */ "kern_invalid",
+#endif
 /* 48 */ "macx_swapon",
 /* 49 */ "macx_swapoff",
 /* 50 */ "thread_get_special_reply_port",

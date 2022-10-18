@@ -177,7 +177,7 @@ proc_apply_sfi_managed(proc_t p, void * arg)
 		KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SFI, SFI_PID_CLEAR_MANAGED) | DBG_FUNC_NONE, pid, 0, 0, 0, 0);
 	}
 
-	proc_set_task_policy(p->task,
+	proc_set_task_policy(proc_task(p),
 	    TASK_POLICY_ATTRIBUTE, TASK_POLICY_SFI_MANAGED,
 	    managed_enabled ? TASK_POLICY_ENABLE : TASK_POLICY_DISABLE);
 
@@ -245,7 +245,7 @@ sfi_pidctl(struct proc *p __unused, struct sfi_pidctl_args *uap, int32_t *retval
 			break;
 		}
 
-		managed_enabled = proc_get_task_policy(targetp->task, TASK_POLICY_ATTRIBUTE, TASK_POLICY_SFI_MANAGED);
+		managed_enabled = proc_get_task_policy(proc_task(targetp), TASK_POLICY_ATTRIBUTE, TASK_POLICY_SFI_MANAGED);
 
 		proc_rele(targetp);
 

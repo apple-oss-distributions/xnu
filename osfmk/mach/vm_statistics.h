@@ -66,9 +66,9 @@
 #ifndef _MACH_VM_STATISTICS_H_
 #define _MACH_VM_STATISTICS_H_
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include <sys/cdefs.h>
+
+__BEGIN_DECLS
 
 #include <mach/machine/vm_types.h>
 #include <mach/machine/kern_return.h>
@@ -263,25 +263,26 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
  *	cached so that they will be stolen first if memory runs low.
  */
 
-#define VM_FLAGS_FIXED          0x0000
-#define VM_FLAGS_ANYWHERE       0x0001
-#define VM_FLAGS_PURGABLE       0x0002
-#define VM_FLAGS_4GB_CHUNK      0x0004
-#define VM_FLAGS_RANDOM_ADDR    0x0008
-#define VM_FLAGS_NO_CACHE       0x0010
-#define VM_FLAGS_RESILIENT_CODESIGN     0x0020
-#define VM_FLAGS_RESILIENT_MEDIA        0x0040
-#define VM_FLAGS_PERMANENT      0x0080
-#define VM_FLAGS_OVERWRITE      0x4000  /* delete any existing mappings first */
+#define VM_FLAGS_FIXED                  0x00000000
+#define VM_FLAGS_ANYWHERE               0x00000001
+#define VM_FLAGS_PURGABLE               0x00000002
+#define VM_FLAGS_4GB_CHUNK              0x00000004
+#define VM_FLAGS_RANDOM_ADDR            0x00000008
+#define VM_FLAGS_NO_CACHE               0x00000010
+#define VM_FLAGS_RESILIENT_CODESIGN     0x00000020
+#define VM_FLAGS_RESILIENT_MEDIA        0x00000040
+#define VM_FLAGS_PERMANENT              0x00000080
+#define VM_FLAGS_TPRO                   0x00001000
+#define VM_FLAGS_OVERWRITE              0x00004000  /* delete any existing mappings first */
 /*
  * VM_FLAGS_SUPERPAGE_MASK
  *	3 bits that specify whether large pages should be used instead of
  *	base pages (!=0), as well as the requested page size.
  */
-#define VM_FLAGS_SUPERPAGE_MASK 0x70000 /* bits 0x10000, 0x20000, 0x40000 */
-#define VM_FLAGS_RETURN_DATA_ADDR       0x100000 /* Return address of target data, rather than base of page */
-#define VM_FLAGS_RETURN_4K_DATA_ADDR    0x800000 /* Return 4K aligned address of target data */
-#define VM_FLAGS_ALIAS_MASK     0xFF000000
+#define VM_FLAGS_SUPERPAGE_MASK         0x00070000 /* bits 0x10000, 0x20000, 0x40000 */
+#define VM_FLAGS_RETURN_DATA_ADDR       0x00100000 /* Return address of target data, rather than base of page */
+#define VM_FLAGS_RETURN_4K_DATA_ADDR    0x00800000 /* Return 4K aligned address of target data */
+#define VM_FLAGS_ALIAS_MASK             0xFF000000
 #define VM_GET_FLAGS_ALIAS(flags, alias)                        \
 	        (alias) = ((flags) & VM_FLAGS_ALIAS_MASK) >> 24
 #if !XNU_KERNEL_PRIVATE
@@ -300,6 +301,7 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
 	                         VM_FLAGS_PERMANENT |           \
 	                         VM_FLAGS_OVERWRITE |           \
 	                         VM_FLAGS_SUPERPAGE_MASK |      \
+	                         VM_FLAGS_TPRO |                \
 	                         VM_FLAGS_ALIAS_MASK)
 #define VM_FLAGS_USER_MAP       (VM_FLAGS_USER_ALLOCATE |       \
 	                         VM_FLAGS_RETURN_4K_DATA_ADDR | \
@@ -329,17 +331,82 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
 
 /* Reasons for exception for virtual memory */
 enum virtual_memory_guard_exception_codes {
-	kGUARD_EXC_DEALLOC_GAP  = 1u << 0
+	kGUARD_EXC_DEALLOC_GAP  = 1u << 0,
+	kGUARD_EXC_RECLAIM_COPYIO_FAILURE = 1u << 1,
+	kGUARD_EXC_RECLAIM_INDEX_FAILURE = 1u << 2,
+	kGUARD_EXC_RECLAIM_DEALLOCATE_FAILURE = 1u << 3,
 };
 
-#ifdef KERNEL_PRIVATE
+#ifdef XNU_KERNEL_PRIVATE
+
+/*!
+ * @enum vm_map_range_id_t
+ *
+ * @brief
+ * Enumerate a particular vm_map range.
+ *
+ * @discussion
+ * The kernel_map VA has been split into the following ranges. Userspace
+ * VA for any given process can also optionally be split by the following user
+ * ranges.
+ *
+ * @const KMEM_RANGE_ID_NONE
+ * This range is only used for early initialization.
+ *
+ * @const KMEM_RANGE_ID_PTR_*
+ * Range containing general purpose allocations from kalloc, etc that
+ * contain pointers.
+ *
+ * @const KMEM_RANGE_ID_DATA
+ * Range containing allocations that are bags of bytes and contain no
+ * pointers.
+ *
+ * @const UMEM_RANGE_ID_DEFAULT
+ * Range containing default allocation calls
+ *
+ * @const UMEM_RANGE_ID_HEAP
+ * Range containing heap allocation calls
+ */
+__enum_decl(vm_map_range_id_t, uint32_t, {
+	KMEM_RANGE_ID_NONE,
+	KMEM_RANGE_ID_PTR_0,
+	KMEM_RANGE_ID_PTR_1,
+	KMEM_RANGE_ID_DATA,
+	KMEM_RANGE_ID_MAX = KMEM_RANGE_ID_DATA,
+	UMEM_RANGE_ID_DEFAULT = 0,
+	UMEM_RANGE_ID_HEAP,
+	UMEM_RANGE_ID_MAX = UMEM_RANGE_ID_HEAP,
+
+#define KMEM_RANGE_COUNT    (KMEM_RANGE_ID_MAX + 1)
+#define UMEM_RANGE_COUNT    (UMEM_RANGE_ID_MAX + 1)
+});
+
+typedef vm_map_range_id_t   kmem_range_id_t;
+
+#define kmem_log2down(mask)   (31 - __builtin_clz(mask))
+#define KMEM_RANGE_BITS kmem_log2down(KMEM_RANGE_ID_MAX * 2)
+
+#if CONFIG_MAP_RANGES
+/*
+ * These should only be used for the kernel_map in contexts which
+ * are known to be allocating/mapping in KMEM_RANGE_ID_DATA. They should not
+ * be used when other ranges may be the target.
+ */
+#define VM_MAP_RANGE_ID(map, tag) \
+	((map == kernel_map) ? KMEM_RANGE_ID_DATA : \
+	vm_map_get_user_range_id(map, tag))
+
+#define VM_MAP_REMAP_RANGE_ID(src_map, dst_map, addr, len) \
+	(dst_map == kernel_map ? KMEM_RANGE_ID_DATA : \
+	vm_map_get_user_range_id(src_map, addr, len))
+#else
+#define VM_MAP_RANGE_ID(map, tag) (KMEM_RANGE_ID_DATA)
+#define VM_MAP_REMAP_RANGE_ID(src_map, dst_map, addr, len) (KMEM_RANGE_ID_DATA)
+#endif /* CONFIG_MAP_RANGES */
+
 typedef struct {
 	unsigned int
-	    vmkf_atomic_entry:1,        /* keep entry atomic (no coalescing) */
 	    vmkf_permanent:1,           /* mapping can NEVER be unmapped */
-	    vmkf_guard_after:1,         /* guard page after the mapping */
-	    vmkf_guard_before:1,        /* guard page before the mapping */
-	    vmkf_submap:1,              /* mapping a VM submap */
 	    vmkf_already:1,             /* OK if same mapping already exists */
 	    vmkf_beyond_max:1,          /* map beyond the map's max offset */
 	    vmkf_no_pmap_check:1,       /* do not check that pmap is empty */
@@ -353,15 +420,38 @@ typedef struct {
 	    vmkf_cs_enforcement:1,      /* new value for CS_ENFORCEMENT */
 	    vmkf_nested_pmap:1,         /* use a nested pmap */
 	    vmkf_no_copy_on_read:1,     /* do not use copy_on_read */
-	    vmkf_32bit_map_va:1,        /* allocate in low 32-bits range */
 	    vmkf_copy_single_object:1,  /* vm_map_copy only 1 VM object */
 	    vmkf_copy_pageable:1,       /* vm_map_copy with pageable entries */
 	    vmkf_copy_same_map:1,       /* vm_map_copy to remap in original map */
 	    vmkf_translated_allow_execute:1,    /* allow execute in translated processes */
+
+	/*
+	 * Submap creation, altering vm_map_enter() only
+	 */
+	    vmkf_submap:1,              /* mapping a VM submap */
+	    vmkf_submap_atomic:1,       /* keep entry atomic (no splitting/coalescing) */
+	    vmkf_submap_adjust:1,       /* the submap needs to be adjusted */
+
+	/*
+	 * Flags altering the behavior of vm_map_locate_space()
+	 */
+	    vmkf_32bit_map_va:1,        /* allocate in low 32-bits range */
+	    vmkf_guard_before:1,        /* guard page before the mapping */
 	    vmkf_last_free:1,           /* find space from the end */
-	    __vmkf_unused:8;
+	    vmkf_random_address:1,      /* pick a random address */
+	    vmkf_range_id:KMEM_RANGE_BITS,      /* kmem range to allocate in */
+
+	    __vmkf_unused:5;
 } vm_map_kernel_flags_t;
-#define VM_MAP_KERNEL_FLAGS_NONE (vm_map_kernel_flags_t){ }
+
+#define VM_MAP_KERNEL_FLAGS_NONE \
+	(vm_map_kernel_flags_t){ }
+
+#define VM_MAP_KERNEL_FLAGS_PERMANENT \
+	(vm_map_kernel_flags_t){ .vmkf_permanent = 1 }
+
+#define VM_MAP_KERNEL_FLAGS_DATA \
+	(vm_map_kernel_flags_t){ .vmkf_range_id = KMEM_RANGE_ID_DATA }
 
 typedef struct {
 	unsigned int
@@ -375,7 +465,7 @@ typedef struct {
 	.__vmnekf_unused = 0                                                   \
 }
 
-#endif /* KERNEL_PRIVATE */
+#endif /* XNU_KERNEL_PRIVATE */
 
 /* current accounting postmark */
 #define __VM_LEDGER_ACCOUNTING_POSTMARK 2019032600
@@ -388,6 +478,8 @@ typedef struct {
 #define VM_LEDGER_TAG_GRAPHICS  0x00000004
 #define VM_LEDGER_TAG_NEURAL    0x00000005
 #define VM_LEDGER_TAG_MAX       0x00000005
+#define VM_LEDGER_TAG_UNCHANGED ((int)-1)
+
 /* individual bits: */
 #define VM_LEDGER_FLAG_NO_FOOTPRINT               (1 << 0)
 #define VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG    (1 << 1)
@@ -579,6 +671,9 @@ typedef struct {
 /* ColorSync is using mmap for read-only copies of ICC profile data */
 #define VM_MEMORY_COLORSYNC 104
 
+/* backtrace info for simulated crashes */
+#define VM_MEMORY_BTINFO 105
+
 /* Reserve 230-239 for Rosetta */
 #define VM_MEMORY_ROSETTA 230
 #define VM_MEMORY_ROSETTA_THREAD_CONTEXT 231
@@ -592,6 +687,8 @@ typedef struct {
 /* Reserve 240-255 for application */
 #define VM_MEMORY_APPLICATION_SPECIFIC_1 240
 #define VM_MEMORY_APPLICATION_SPECIFIC_16 255
+
+#define VM_MEMORY_COUNT 256
 
 #if !XNU_KERNEL_PRIVATE
 #define VM_MAKE_TAG(tag) ((tag) << 24)
@@ -637,7 +734,9 @@ typedef struct {
 #define VM_KERN_MEMORY_RETIRED          30
 #define VM_KERN_MEMORY_KALLOC_TYPE      31
 #define VM_KERN_MEMORY_TRIAGE           32
-#define VM_KERN_MEMORY_FIRST_DYNAMIC    33
+#define VM_KERN_MEMORY_RECOUNT          33
+/* add new tags here and adjust first-dynamic value */
+#define VM_KERN_MEMORY_FIRST_DYNAMIC    34
 
 /* out of tags: */
 #define VM_KERN_MEMORY_ANY              255
@@ -683,8 +782,6 @@ typedef struct {
 
 #endif /* KERNEL_PRIVATE */
 
-#ifdef __cplusplus
-}
-#endif
+__END_DECLS
 
 #endif  /* _MACH_VM_STATISTICS_H_ */

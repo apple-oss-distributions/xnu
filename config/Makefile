@@ -58,7 +58,12 @@ Kcov_EXPORTS := $(SRCROOT)/config/Kcov_enabled.exports
 endif
 
 ifeq ($(KASAN),1)
-Kasan_EXPORTS := $(SRCROOT)/config/Kasan_enabled.exports
+ifeq ($(CURRENT_ARCH_CONFIG_LC),x86_64h)
+KASAN_ARCH_SUFFIX := x86_64
+else
+KASAN_ARCH_SUFFIX := $(CURRENT_ARCH_CONFIG_LC)
+endif
+Kasan_EXPORTS := $(SRCROOT)/config/Kasan_enabled.$(KASAN_ARCH_SUFFIX).exports
 endif
 
 define symbol_set_template

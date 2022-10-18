@@ -29,6 +29,9 @@
 #define _MACHINE_CONFIG_H
 
 #if defined (__i386__) || defined (__x86_64__)
+
+#define PRECISE_USER_KERNEL_TIME 1
+
 #elif defined (__arm__)
 #include <pexpert/arm/board_config.h>
 #elif defined (__arm64__)

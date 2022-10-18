@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -74,6 +74,7 @@
 
 #include <sys/types.h>
 #include <sys/cdefs.h>
+#include <sys/constrained_ctypes.h>
 #include <machine/_param.h>
 #include <net/net_kev.h>
 
@@ -139,6 +140,7 @@
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #define SO_USELOOPBACK  0x0040          /* bypass hardware when possible */
 #define SO_LINGER       0x0080          /* linger on close if data present (in ticks) */
+#define SO_LINGER_SEC   0x1080          /* linger on close if data present (in seconds) */
 #else
 #define SO_LINGER       0x1080          /* linger on close if data present (in seconds) */
 #endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
@@ -189,7 +191,6 @@
 #define SO_NOTIFYCONFLICT       0x1026  /* APPLE: send notification if there is a bind on a port which is already in use */
 #define SO_UPCALLCLOSEWAIT      0x1027  /* APPLE: block on close until an upcall returns */
 #endif
-#define SO_LINGER_SEC   0x1080          /* linger on close if data present (in seconds) */
 #ifdef PRIVATE
 #define SO_RESTRICTIONS 0x1081          /* APPLE: deny flag set */
 #define  SO_RESTRICT_DENY_IN    0x1     /* deny inbound (trapdoor) */
@@ -361,6 +362,18 @@
 #define SO_MARK_APPROVED_APP_DOMAIN 0x1129 /* Mark connection as being for an approved associated app domain */
 #define SO_FALLBACK_MODE           0x1130  /* Indicates the mode of fallback used */
 #endif /* PRIVATE */
+
+#define SO_RESOLVER_SIGNATURE      0x1131  /* A signed data blob from the system resolver */
+#ifdef PRIVATE
+#define SO_MARK_CELLFALLBACK_UUID  0x1132  /* Mark as initiated by cell fallback using UUID of the connection */
+
+struct so_mark_cellfallback_uuid_args {
+	uuid_t flow_uuid;
+	int flow_cellfallback;
+};
+
+#endif
+
 
 /* When adding new socket-options, you need to make sure MPTCP supports these as well! */
 
@@ -617,7 +630,22 @@ struct so_np_extensions {
 struct sockaddr {
 	__uint8_t       sa_len;         /* total length */
 	sa_family_t     sa_family;      /* [XSI] address family */
-	char            sa_data[14];    /* [XSI] addr value (actually larger) */
+#if __has_ptrcheck
+	char            sa_data[__counted_by(sa_len - 2)];
+#else
+	char            sa_data[14];    /* [XSI] addr value (actually smaller or larger) */
+#endif
+};
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct sockaddr, sockaddr);
+
+/*
+ * Least amount of information that a sockaddr requires.
+ * Sockaddr_header is a compatible prefix structure of
+ * all sockaddr objects.
+ */
+struct __sockaddr_header {
+	__uint8_t           sa_len;
+	sa_family_t         sa_family;
 };
 
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
@@ -654,6 +682,7 @@ struct sockaddr_storage {
 	__int64_t       __ss_align;     /* force structure storage alignment */
 	char                    __ss_pad2[_SS_PAD2SIZE];
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct sockaddr_storage, sockaddr_storage);
 
 /*
  * Protocol families, same as address families for now.
@@ -713,7 +742,6 @@ struct sockaddr_storage {
 #define PF_BOND         ((uint32_t)0x626f6e64)  /* 'bond' */
 #ifdef KERNEL_PRIVATE
 #define PF_BRIDGE       ((uint32_t)0x62726467)  /* 'brdg' */
-#define PF_802154       ((uint32_t)0x38313534)  /* '8154' */
 #endif /* KERNEL_PRIVATE */
 
 /*
@@ -880,6 +908,7 @@ struct user_msghdr {
 	socklen_t       msg_controllen;         /* ancillary data buffer len */
 	int             msg_flags;              /* flags on received message */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user_msghdr, user_msghdr);
 
 /*
  * LP64 user version of struct msghdr.
@@ -895,6 +924,7 @@ struct user64_msghdr {
 	socklen_t       msg_controllen;         /* ancillary data buffer len */
 	int             msg_flags;              /* flags on received message */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user64_msghdr, user64_msghdr);
 
 /*
  * ILP32 user version of struct msghdr.
@@ -910,6 +940,7 @@ struct user32_msghdr {
 	socklen_t       msg_controllen; /* ancillary data buffer len */
 	int             msg_flags;      /* flags on received message */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user32_msghdr, user32_msghdr);
 
 /*
  * In-kernel representation of "struct msghdr_x" from
@@ -927,6 +958,8 @@ struct user_msghdr_x {
 	int             msg_flags;      /* flags on received message */
 	size_t          msg_datalen;    /* byte length of buffer in msg_iov */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user_msghdr_x, user_msghdr_x);
+
 
 /*
  * LP64 user version of struct msghdr_x
@@ -943,6 +976,7 @@ struct user64_msghdr_x {
 	int             msg_flags;      /* flags on received message */
 	user64_size_t   msg_datalen;    /* byte length of buffer in msg_iov */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user64_msghdr_x, user64_msghdr_x);
 
 /*
  * ILP32 user version of struct msghdr_x
@@ -959,6 +993,7 @@ struct user32_msghdr_x {
 	int             msg_flags;      /* flags on received message */
 	user32_size_t   msg_datalen;    /* byte length of buffer in msg_iov */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user32_msghdr_x, user32_msghdr_x);
 
 /*
  * In-kernel representation of "struct sa_endpoints" from
@@ -1317,6 +1352,7 @@ struct so_cinforeq64 {
 #define CIF_MP_READY            0x200   /* multipath protocol confirmed */
 #define CIF_MP_DEGRADED         0x400   /* has lost its multipath capability */
 #define CIF_MP_ACTIVE           0x800   /* this is the active subflow */
+#define CIF_MP_V1               0x1000  /* MPTCP v1 is used */
 
 /* valid connection info auxiliary data types */
 #define CIAUX_TCP       0x1     /* TCP auxiliary data (conninfo_tcp_t) */

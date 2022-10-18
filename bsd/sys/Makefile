@@ -30,7 +30,7 @@ endif
 # in with headers from other projects in sys/.
 DATAFILES = $(sort \
 	appleapiopts.h	acct.h aio.h attr.h \
-	buf.h cdefs.h clonefile.h conf.h \
+	buf.h cdefs.h clonefile.h conf.h constrained_ctypes.h \
 	dir.h dirent.h dkstat.h dtrace.h dtrace_glue.h dtrace_impl.h \
 	errno.h ev.h event.h fasttrap.h fasttrap_isa.h fcntl.h file.h filedesc.h filio.h fsgetpath.h gmon.h \
 	ioccom.h ioctl.h \
@@ -41,10 +41,10 @@ DATAFILES = $(sort \
 	sbuf.h posix_sem.h posix_shm.h random.h sdt.h\
 	select.h sem.h semaphore.h shm.h signal.h signalvar.h snapshot.h socket.h socketvar.h sockio.h stat.h stdio.h \
 	sysctl.h syslimits.h syslog.h sys_domain.h termios.h  time.h \
-	timeb.h times.h tprintf.h trace.h tty.h ttycom.h \
+	timeb.h times.h trace.h tty.h ttycom.h \
 	ttydefaults.h types.h ubc.h ucontext.h ucred.h uio.h un.h unistd.h unpcb.h \
 	user.h utfconv.h utsname.h vadvise.h vcmd.h \
-	vm.h vmmeter.h vmparam.h vnioctl.h vnode_if.h vsock.h vstat.h wait.h xattr.h \
+	vm.h vmmeter.h vmparam.h vnode_if.h vsock.h vstat.h wait.h xattr.h \
 	_select.h _structs.h _types.h _endian.h domain.h protosw.h \
 	spawn.h timex.h commpage.h log_data.h \
 	$(EXTRA_DATAFILES))
@@ -56,7 +56,7 @@ MODULEMAPFILES = \
 # Installs header file for DriverKit drivers -
 #	  $(DSTROOT)/System/DriverKit/System/usr/include/
 DRIVERKIT_DATAFILES = \
-	cdefs.h _types.h _endian.h
+	cdefs.h _types.h _endian.h time.h
 
 # Installs header file for Apple internal use in user level -
 #	  $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
@@ -68,6 +68,7 @@ PRIVATE_DATAFILES = $(sort \
 	clonefile.h \
 	coalition.h \
 	codesign.h \
+	constrained_ctypes.h \
 	content_protection.h \
 	csr.h \
 	decmpfs.h \
@@ -75,6 +76,7 @@ PRIVATE_DATAFILES = $(sort \
 	disklabel.h \
 	domain.h \
 	event.h \
+	event_log.h \
 	fcntl.h \
 	fileport.h \
 	fsctl.h \
@@ -101,6 +103,7 @@ PRIVATE_DATAFILES = $(sort \
 	monotonic.h \
 	perfmon_private.h \
 	persona.h \
+	preoslog.h \
 	priv.h \
 	proc.h \
 	proc_info.h \
@@ -123,6 +126,7 @@ PRIVATE_DATAFILES = $(sort \
 	ulock.h \
 	unpcb.h \
 	ux_exception.h \
+	variant_internal.h \
 	vsock.h \
 	work_interval.h \
 	process_policy.h \
@@ -143,7 +147,7 @@ DRIVERKIT_PRIVATE_DATAFILES = \
 #	  $(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders
 KERNELFILES = \
 	appleapiopts.h	 attr.h \
-	buf.h cdefs.h conf.h \
+	buf.h cdefs.h conf.h constrained_ctypes.h \
 	dir.h dirent.h disk.h disklabel.h dkstat.h  \
 	errno.h ev.h event.h fcntl.h file.h filio.h \
 	ioccom.h ioctl.h ipc.h \
@@ -175,6 +179,7 @@ PRIVATE_KERNELFILES = \
 	decmpfs.h \
 	disktab.h \
 	eventhandler.h \
+	event_log.h \
 	fbt.h \
 	fileport.h \
 	fsctl.h \
@@ -192,6 +197,7 @@ PRIVATE_KERNELFILES = \
 	msgbuf.h \
 	eventvar.h \
 	persona.h \
+	preoslog.h \
 	proc_info.h \
 	pthread_shims.h \
 	quota.h \
@@ -202,6 +208,7 @@ PRIVATE_KERNELFILES = \
 	signalvar.h \
 	stackshot.h \
 	timeb.h times.h \
+	tprintf.h \
 	tty.h  ttychars.h \
 	ttydefaults.h ttydev.h \
 	user.h \
@@ -217,6 +224,8 @@ PRIVATE_KERNELFILES = \
 	work_interval.h \
 	kern_sysctl.h \
 	vsock_transport.h \
+	trust_caches.h \
+	code_signing.h \
 
 XNU_ONLY_EXPORTS = \
 	bsdtask_info.h \
@@ -260,9 +269,9 @@ EXPORT_MI_DIR = sys
 
 # /usr/local/include
 INSTALL_MI_LCL_LIST = $(sort \
-	codesign.h content_protection.h decmpfs.h fsevents.h kdebug_private.h \
-	kern_memorystatus.h perfmon_private.h reason.h resource_private.h \
-	stackshot.h work_interval.h \
+	codesign.h content_protection.h csr.h decmpfs.h fsevents.h kdebug_private.h \
+	kern_memorystatus.h perfmon_private.h preoslog.h reason.h resource_private.h \
+	stackshot.h work_interval.h event_log.h \
 	${EXTRA_PRIVATE_DATAFILES})
 
 # /System/Library/Frameworks/System.framework/PrivateHeaders
@@ -290,6 +299,7 @@ $(OBJROOT)/cscope.genhdrs:
 $(OBJROOT)/syscall.codes: $(TARGET)/bsd.syscalls.master
 	@$(LOG_GENERATE) "$(ColorLF)$@$(Color0) from $(ColorF)$(<F)$(Color0)"
 	$(_v)$(MAKESYSCALLS) $< trace > $@
+
 
 $(OBJROOT)/trace.codes: $(SRCROOT)/bsd/kern/trace_codes $(OBJROOT)/syscall.codes
 	$(_v)sort -g $(SRCROOT)/bsd/kern/trace_codes $(OBJROOT)/syscall.codes >$@

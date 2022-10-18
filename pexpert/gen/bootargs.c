@@ -28,6 +28,10 @@
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
 
+#if defined(CONFIG_XNUPOST)
+#include <tests/xnupost.h>
+#endif
+
 typedef boolean_t (*argsep_func_t) (char c);
 
 static boolean_t isargsep( char c);
@@ -41,7 +45,9 @@ static int getval(char *s, long long *val, argsep_func_t issep, boolean_t skip_e
 boolean_t get_range_bounds(char * c, int64_t * lower, int64_t * upper);
 
 extern int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize);
-
+#if defined(CONFIG_XNUPOST)
+kern_return_t parse_boot_arg_test(void);
+#endif
 
 struct i24 {
 	int32_t i24 : 24;
@@ -53,19 +59,18 @@ struct i24 {
 
 static boolean_t
 PE_parse_boot_argn_internal(
+	char *args,
 	const char *arg_string,
 	void *      arg_ptr,
 	int         max_len,
 	boolean_t   force_string)
 {
-	char *args;
 	char *cp, c;
 	uintptr_t i;
 	long long val = 0;
 	boolean_t arg_boolean;
 	boolean_t arg_found;
 
-	args = PE_boot_args();
 	if (*args == '\0') {
 		return FALSE;
 	}
@@ -93,9 +98,6 @@ PE_parse_boot_argn_internal(
 		while (!isargsep(*cp) && *cp != '=') {
 			cp++;
 		}
-		if (*cp != '=' && !arg_boolean) {
-			goto gotit;
-		}
 
 		c = *cp;
 
@@ -106,13 +108,15 @@ PE_parse_boot_argn_internal(
 		}
 
 		if (arg_boolean) {
-			if (!force_string) {
-				if (max_len > 0) {
+			if (max_len > 0) {
+				if (force_string) {
+					argstrcpy2("1", arg_ptr, max_len);
+				} else {
 					argnumcpy(1, arg_ptr, max_len);/* max_len of 0 performs no copy at all*/
-					arg_found = TRUE;
-				} else if (max_len == 0) {
-					arg_found = TRUE;
 				}
+				arg_found = TRUE;
+			} else if (max_len == 0) {
+				arg_found = TRUE;
 			}
 			break;
 		} else {
@@ -133,7 +137,7 @@ PE_parse_boot_argn_internal(
 				}
 				break;
 			}
-			switch ((force_string && *cp == '=') ? STR : getval(cp, &val, isargsep, FALSE)) {
+			switch (force_string ? STR : getval(cp, &val, isargsep, FALSE)) {
 			case NUM:
 				if (max_len > 0) {
 					argnumcpy(val, arg_ptr, max_len);
@@ -143,18 +147,27 @@ PE_parse_boot_argn_internal(
 				}
 				break;
 			case STR:
-				if (max_len > 0) {
-					argstrcpy2(++cp, (char *)arg_ptr, max_len - 1);        /*max_len of 0 performs no copy at all*/
-					arg_found = TRUE;
-				} else if (max_len == 0) {
-					arg_found = TRUE;
-				}
+				if (*cp == '=') {
+					if (max_len > 0) {
+						argstrcpy2(++cp, (char *)arg_ptr, max_len - 1);        /*max_len of 0 performs no copy at all*/
+						arg_found = TRUE;
+					} else if (max_len == 0) {
+						arg_found = TRUE;
+					}
 #if defined(__x86_64__)
-				else if (max_len == -1) {         /* unreachable on embedded */
-					argstrcpy(++cp, (char *)arg_ptr);
-					arg_found = TRUE;
-				}
+					else if (max_len == -1) {         /* unreachable on embedded */
+						argstrcpy(++cp, (char *)arg_ptr);
+						arg_found = TRUE;
+					}
 #endif
+				} else {
+					if (max_len > 0) {
+						argstrcpy2("1", arg_ptr, max_len);
+						arg_found = TRUE;
+					} else if (max_len == 0) {
+						arg_found = TRUE;
+					}
+				}
 				break;
 			}
 			goto gotit;
@@ -180,7 +193,7 @@ PE_parse_boot_argn(
 	void            *arg_ptr,
 	int                     max_len)
 {
-	return PE_parse_boot_argn_internal(arg_string, arg_ptr, max_len, FALSE);
+	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, max_len, FALSE);
 }
 
 boolean_t
@@ -189,8 +202,108 @@ PE_parse_boot_arg_str(
 	char            *arg_ptr,
 	int                     strlen)
 {
-	return PE_parse_boot_argn_internal(arg_string, arg_ptr, strlen, TRUE);
+	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, strlen, TRUE);
 }
+
+#if defined(CONFIG_XNUPOST)
+kern_return_t
+parse_boot_arg_test(void)
+{
+	// Tests are derived from libc/tests/darwin_bsd.c
+	static struct string_test_case {
+		char *args;
+		const char *argname;
+		char *argvalue;
+		boolean_t found;
+	} string_test_cases[] = {
+		{"-x -a b=3 y=42", "-a", "1", TRUE},
+		{"-x -a b=3 y=42", "b", "3", TRUE},
+		{"-x -a b=2 ba=3 y=42", "b", "2", TRUE},
+		{"-x -a ba=3 b=2 y=42", "b", "2", TRUE},
+		{"-x -a b=2 ba=3 y=42", "ba", "3", TRUE},
+		{"-x -a ba=3 b=2 y=42", "ba", "3", TRUE},
+		{"-x -ab -aa y=42", "-a", NULL, FALSE},
+		{"-x b=96 y=42", "bx", NULL, FALSE},
+		{"-x ab=96 y=42", "a", NULL, FALSE},
+		{"hello=world -foobar abc debug=0xBAADF00D", "notarealthing", NULL,
+		 FALSE},
+		{"hello=world -foobar abc debug=0xBAADF00D", "hello", "world", TRUE},
+		{"hello=world -foobar abc debug=0xBAADF00D", "debug", "0xBAADF00D",
+		 TRUE},
+		{"hello=world -foobar abc debug=0xBAADF00D", "-foobar", "1", TRUE},
+		{"hello=world -foobar abc debug=0xBAADF00D", "abc", "1", TRUE},
+	};
+
+	T_LOG("Testing boot-arg string parsing.\n");
+	for (int i = 0; i < (int)(sizeof(string_test_cases) /
+	    sizeof(string_test_cases[0])); i++) {
+		struct string_test_case *test_case = &string_test_cases[i];
+
+		char result[256] = "NOT_FOUND";
+		boolean_t found = PE_parse_boot_argn_internal(test_case->args,
+		    test_case->argname, result, sizeof(result), TRUE);
+
+		if (test_case->found) {
+			T_LOG("\"%s\": Looking for \"%s\", expecting \"%s\" found",
+			    test_case->args, test_case->argname, test_case->argvalue);
+			T_EXPECT(found, "Should find argument");
+			T_EXPECT_EQ_STR(result, test_case->argvalue,
+			    "Should find correct result");
+		} else {
+			T_LOG("\"%s\": Looking for \"%s\", expecting not found",
+			    test_case->args, test_case->argname, test_case->argvalue);
+			T_EXPECT(!found, "Should not find argument");
+		}
+	}
+
+	static struct integer_test_case {
+		char *args;
+		const char *argname;
+		int argvalue;
+		boolean_t found;
+	} integer_test_cases[] = {
+		{"-x -a b=3 y=42", "-a", 1, TRUE},
+		{"-x -a b=3 y=42", "b", 3, TRUE},
+		{"-x -a b=2 ba=3 y=42", "b", 2, TRUE},
+		{"-x -a ba=3 b=2 y=42", "b", 2, TRUE},
+		{"-x -a b=2 ba=3 y=42", "ba", 3, TRUE},
+		{"-x -a ba=3 b=2 y=42", "ba", 3, TRUE},
+		{"-x -ab -aa y=42", "-a", 0, FALSE},
+		{"-x b=96 y=42", "bx", 0, FALSE},
+		{"-x ab=96 y=42", "a", 0, FALSE},
+		{"hello=world -foobar abc debug=0xBAADF00D", "notarealthing", 0, FALSE},
+		{"hello=world -foobar abc debug=0xBAADF00D", "hello",
+		 0x00726F77 /* "wor" */, TRUE},
+		{"hello=world -foobar abc debug=0xBAADF00D", "debug", 0xBAADF00D, TRUE},
+		{"hello=world -foobar abc debug=0xBAADF00D", "-foobar", 1, TRUE},
+		{"hello=world -foobar abc debug=0xBAADF00D", "abc", 1, TRUE},
+	};
+
+	T_LOG("Testing boot-arg integer parsing.\n");
+	for (int i = 0; i < (int)(sizeof(integer_test_cases) /
+	    sizeof(integer_test_cases[0])); i++) {
+		struct integer_test_case *test_case = &integer_test_cases[i];
+
+		int result = 0xCAFEFACE;
+		boolean_t found = PE_parse_boot_argn_internal(test_case->args,
+		    test_case->argname, &result, sizeof(result), FALSE);
+
+		if (test_case->found) {
+			T_LOG("\"%s\": Looking for \"%s\", expecting %d found",
+			    test_case->args, test_case->argname, test_case->argvalue);
+			T_EXPECT(found, "Should find argument");
+			T_EXPECT_EQ_INT(result, test_case->argvalue,
+			    "Should find correct result");
+		} else {
+			T_LOG("\"%s\": Looking for \"%s\", expecting not found",
+			    test_case->args, test_case->argname, test_case->argvalue);
+			T_EXPECT(!found, "Should not find argument");
+		}
+	}
+
+	return KERN_SUCCESS;
+}
+#endif /* defined(CONFIG_XNUPOST) */
 
 static boolean_t
 isargsep(char c)

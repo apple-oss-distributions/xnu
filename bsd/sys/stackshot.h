@@ -49,6 +49,13 @@ typedef struct stackshot_config {
 	uint64_t                sc_pagetable_mask;      /* Mask of page table levels to dump, must pass STACKSHOT_PAGE_TABLES */
 } stackshot_config_t;
 
+typedef struct stackshot_stats {
+	uint64_t        ss_last_start;          /* mach_absolute_time of last start */
+	uint64_t        ss_last_end;            /* mach_absolute_time of last end */
+	uint64_t        ss_count;               /* count of stackshots taken */
+	uint64_t        ss_duration;            /* sum(mach_absolute_time) of taken stackshots */
+} stackshot_stats_t;
+
 #ifndef KERNEL
 
 stackshot_config_t * stackshot_config_create(void);

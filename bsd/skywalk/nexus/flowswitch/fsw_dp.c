@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -97,8 +97,6 @@
 #include <net/pktap.h>
 #include <net/pktsched/pktsched_netem.h>
 #include <netinet/tcp.h>
-#include <netinet/tcp_fsm.h>
-#include <netinet/tcp_seq.h>
 #include <netinet/udp.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
@@ -107,10 +105,6 @@ extern kern_return_t thread_terminate(thread_t);
 
 #define FSW_ZONE_MAX                  256
 #define FSW_ZONE_NAME                 "skywalk.nx.fsw"
-
-#define FSW_STATS_VAL(x)        STATS_VAL(&fsw->fsw_stats, x)
-#define FSW_STATS_INC(x)        STATS_INC(&fsw->fsw_stats, x)
-#define FSW_STATS_ADD(x, n)     STATS_ADD(&fsw->fsw_stats, x, n)
 
 static uint64_t fsw_reap_last __sk_aligned(8);
 static uint64_t fsw_want_purge __sk_aligned(8);
@@ -349,7 +343,7 @@ fsw_snoop(struct nx_flowswitch *fsw, struct flow_entry *fe, bool input)
 			pktap_input_packet(fsw->fsw_ifp, af,
 			    fsw->fsw_ifp_dlt, pid, proc_name, epid,
 			    eproc_name, SK_PKT2PH(pkt), NULL, 0,
-			    IPPROTO_TCP, fe->fe_inp_flowhash,
+			    IPPROTO_TCP, fe->fe_flowid,
 			    tap_early ? PTH_FLAG_SOCKET: PTH_FLAG_NEXUS_CHAN);
 		}
 	} else {
@@ -457,7 +451,8 @@ validate_pkt_len(struct __kern_packet *spkt, kern_packet_t dph,
 	*copy_len = splen;
 
 	return tlen <= ((__packet_get_buflet_count(dph) *
-	       SK_PTR_ADDR_KPKT(dph)->pkt_qum.qum_pp->pp_buflet_size) - headroom);
+	       PP_BUF_SIZE_DEF(SK_PTR_ADDR_KPKT(dph)->pkt_qum.qum_pp)) -
+	       headroom);
 }
 
 #if SK_LOG
@@ -508,7 +503,7 @@ copy_packet_from_dev(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 	if (__improbable(!validate_pkt_len(spkt, dph, skip_l2h_len, 0, 0,
 	    &dlen))) {
 		SK_ERR("bufcnt %d, bufsz %d", __packet_get_buflet_count(dph),
-		    dpkt->pkt_qum.qum_pp->pp_buflet_size);
+		    PP_BUF_SIZE_DEF(dpkt->pkt_qum.qum_pp));
 		FSW_STATS_INC(FSW_STATS_RX_COPY_BAD_LEN);
 		return EINVAL;
 	}
@@ -600,7 +595,8 @@ rx_process_ip_frag(struct nx_flowswitch *fsw, struct __kern_packet *pkt)
 	case FSW_IP_REASS_FORCE_ON:
 		break;
 	default:
-		if (!FSW_NETAGENT_ENABLED(fsw)) {
+		if (!FSW_NETAGENT_ENABLED(fsw) ||
+		    flow_mgr_get_num_flows(fsw->fsw_flow_mgr) == 0) {
 			return pkt;
 		}
 		break;
@@ -684,11 +680,11 @@ rx_prepare_packet(struct nx_flowswitch *fsw, struct __kern_packet *pkt)
 }
 
 static struct flow_entry *
-lookup_flow_with_key(struct nx_flowswitch *fsw, struct __kern_packet *pkt,
+lookup_flow_with_pkt(struct nx_flowswitch *fsw, struct __kern_packet *pkt,
     bool input, struct flow_entry *prev_fe)
 {
 	struct flow_key key __sk_aligned(16);
-	struct flow_entry *fe;
+	struct flow_entry *fe = NULL;
 
 	ASSERT(pkt->pkt_qum_qflags & QUM_F_FLOW_CLASSIFIED);
 	flow_pkt2key(pkt, input, &key);
@@ -696,18 +692,52 @@ lookup_flow_with_key(struct nx_flowswitch *fsw, struct __kern_packet *pkt,
 	if (__probable(prev_fe != NULL &&
 	    prev_fe->fe_key.fk_mask == FKMASK_5TUPLE)) {
 		uint16_t saved_mask = key.fk_mask;
-		bool match;
 		key.fk_mask = FKMASK_5TUPLE;
-		match = (flow_key_cmp_mask(&prev_fe->fe_key,
-		    &key, &fk_mask_5tuple)) == 0;
-		if (match) {
+		if (flow_key_cmp_mask(&prev_fe->fe_key, &key, &fk_mask_5tuple) == 0) {
 			flow_entry_retain(prev_fe);
-			return prev_fe;
+			fe = prev_fe;
+		} else {
+			key.fk_mask = saved_mask;
 		}
-		key.fk_mask = saved_mask;
 	}
 
-	fe = flow_mgr_find_fe_by_key(fsw->fsw_flow_mgr, &key);
+top:
+	if (__improbable(fe == NULL)) {
+		fe = flow_mgr_find_fe_by_key(fsw->fsw_flow_mgr, &key);
+	}
+
+	if (__improbable(fe != NULL &&
+	    (fe->fe_flags & (FLOWENT_PARENT | FLOWENT_CHILD)) != 0)) {
+		/* Rx */
+		if (input) {
+			if (fe->fe_flags & FLOWENT_PARENT) {
+				struct flow_entry *child_fe = rx_lookup_child_flow(fsw, fe, pkt);
+				if (child_fe != NULL) {
+					flow_entry_release(&fe);
+					fe = child_fe;
+				}
+			} else {
+				if (!rx_flow_demux_match(fsw, fe, pkt)) {
+					flow_entry_release(&fe);
+					fe = NULL;
+					goto top;
+				}
+			}
+		} else {
+			/* Tx */
+			if (__improbable(!_UUID_MATCH(pkt->pkt_flow_id, fe->fe_uuid))) {
+				if (__probable(fe->fe_flags & FLOWENT_PARENT)) {
+					struct flow_entry *parent_fe = fe;
+					fe = tx_lookup_child_flow(parent_fe, pkt->pkt_flow_id);
+					flow_entry_release(&parent_fe);
+				} else {
+					flow_entry_release(&fe);
+					fe = NULL;
+					goto top;
+				}
+			}
+		}
+	}
 
 	SK_LOG_VAR(char fkbuf[FLOWKEY_DBGBUF_SIZE]);
 	SK_DF(SK_VERB_FSW_DP | SK_VERB_LOOKUP,
@@ -725,19 +755,20 @@ rx_lookup_flow(struct nx_flowswitch *fsw, struct __kern_packet *pkt,
     struct flow_entry *prev_fe)
 {
 	struct flow_entry *fe;
-	fe = lookup_flow_with_key(fsw, pkt, true, prev_fe);
+
+	fe = lookup_flow_with_pkt(fsw, pkt, true, prev_fe);
 	_FSW_INJECT_ERROR(2, fe, NULL, flow_entry_release, &fe);
 	if (fe == NULL) {
 		FSW_STATS_INC(FSW_STATS_RX_FLOW_NOT_FOUND);
-		fe = flow_mgr_get_host_fe(fsw->fsw_flow_mgr);
+		return NULL;
 	}
 
 	if (__improbable(fe->fe_flags & FLOWENTF_TORN_DOWN)) {
 		FSW_STATS_INC(FSW_STATS_RX_FLOW_TORNDOWN);
 		SK_DF(SK_VERB_FSW_DP | SK_VERB_RX | SK_VERB_FLOW,
-		    "Rx flow torn down, use host fe");
+		    "Rx flow torn down");
 		flow_entry_release(&fe);
-		fe = flow_mgr_get_host_fe(fsw->fsw_flow_mgr);
+		fe = NULL;
 	}
 
 	return fe;
@@ -799,6 +830,7 @@ fsw_ring_dequeue_pktq(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
 	slot_idx_t idx, idx_end;
 	idx = r->ckr_khead;
 	idx_end = r->ckr_rhead;
+	struct nexus_vp_adapter *vpna = VPNA(KRNA(r));
 
 	*n_bytes = 0;
 	for (; n_pkts < n_pkts_max && idx != idx_end;
@@ -816,6 +848,10 @@ fsw_ring_dequeue_pktq(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
 			FSW_STATS_INC(FSW_STATS_DROP);
 			pp_free_packet_single(pkt);
 			continue;
+		}
+		if (NA_CHANNEL_EVENT_ATTACHED(&vpna->vpna_up)) {
+			__packet_set_tx_nx_port(SK_PKT2PH(pkt),
+			    vpna->vpna_nx_port, vpna->vpna_gencnt);
 		}
 
 		n_pkts++;
@@ -838,6 +874,8 @@ fsw_ring_enqueue_pktq(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
 	uint32_t kr_space_avail = 0;
 	uint32_t n, n_pkts = 0, n_bytes = 0;
 	slot_idx_t idx = 0, idx_start = 0, idx_end = 0;
+
+	kr_enter(r, TRUE);
 
 	idx_start = r->ckr_ktail;
 	kr_space_avail = kr_available_slots_rxring(r);
@@ -871,8 +909,7 @@ fsw_ring_enqueue_pktq(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
 
 	r->ckr_ktail = idx_end;
 
-	/* ensure global visibility */
-	membar_sync();
+	kr_exit(r);
 
 	r->ckr_na_notify(r, kernproc, NA_NOTEF_PUSH);
 
@@ -897,14 +934,12 @@ pkts_to_pktq(struct __kern_packet *pkts[], uint32_t n_pkts, struct pktq *pktq)
  */
 SK_NO_INLINE_ATTRIBUTE
 static void
-convert_native_pkt_to_mbuf_chain(struct nx_flowswitch *fsw,
-    struct flow_entry *fe, struct __kern_packet *pkt_chain,
-    struct mbuf **m_chain, struct mbuf **m_tail, uint32_t *cnt,
-    uint32_t *bytes)
+convert_native_pktq_to_mbufs(struct nx_flowswitch *fsw, struct pktq *pktq,
+    struct mbuf **m_headp, struct mbuf **m_tailp, uint32_t *cnt, uint32_t *bytes)
 {
 	uint32_t tot_cnt;
-	unsigned int one = 1;
-	struct mbuf *mhead, *chain = NULL, *tail = NULL, **tailp = &chain;
+	unsigned int num_segs = 1;
+	struct mbuf *mhead, *head = NULL, *tail = NULL, **tailp = &head;
 	uint32_t mhead_cnt, mhead_bufsize;
 	uint32_t mhead_waste = 0;
 	uint32_t mcnt = 0, mbytes = 0;
@@ -912,29 +947,35 @@ convert_native_pkt_to_mbuf_chain(struct nx_flowswitch *fsw,
 	struct __kern_packet *pkt;
 	struct kern_pbufpool *pp;
 
-	tot_cnt = *cnt;
+	tot_cnt = KPKTQ_LEN(pktq);
 	ASSERT(tot_cnt > 0);
 	mhead_cnt = tot_cnt;
 
 	/*
 	 * Opportunistically batch-allocate the mbufs based on the largest
 	 * packet size we've seen in the recent past.  Note that we reset
-	 * fe_rx_largest_msize below if we notice that we're under-utilizing the
+	 * fe_rx_largest_size below if we notice that we're under-utilizing the
 	 * allocated buffers (thus disabling this batch allocation).
 	 */
-	if (__probable((largest = fe->fe_rx_largest_msize) != 0)) {
+	largest = *(volatile uint32_t*)&fsw->fsw_rx_largest_size; /* read once */
+	if (__probable(largest != 0)) {
 		if (largest <= MCLBYTES) {
 			mhead = m_allocpacket_internal(&mhead_cnt, MCLBYTES,
-			    &one, M_WAIT, 1, 0);
+			    &num_segs, M_NOWAIT, 1, 0);
 			mhead_bufsize = MCLBYTES;
 		} else if (largest <= MBIGCLBYTES) {
 			mhead = m_allocpacket_internal(&mhead_cnt, MBIGCLBYTES,
-			    &one, M_WAIT, 1, 0);
+			    &num_segs, M_NOWAIT, 1, 0);
 			mhead_bufsize = MBIGCLBYTES;
 		} else if (largest <= M16KCLBYTES) {
 			mhead = m_allocpacket_internal(&mhead_cnt, M16KCLBYTES,
-			    &one, M_WAIT, 1, 0);
+			    &num_segs, M_NOWAIT, 1, 0);
 			mhead_bufsize = M16KCLBYTES;
+		} else if (largest <= M16KCLBYTES * 2) {
+			num_segs = 2;
+			mhead = m_allocpacket_internal(&mhead_cnt, M16KCLBYTES * 2,
+			    &num_segs, M_NOWAIT, 1, 0);
+			mhead_bufsize = M16KCLBYTES * 2;
 		} else {
 			mhead = NULL;
 			mhead_bufsize = mhead_cnt = 0;
@@ -946,10 +987,10 @@ convert_native_pkt_to_mbuf_chain(struct nx_flowswitch *fsw,
 	DTRACE_SKYWALK4(bufstats, uint32_t, largest, uint32_t, mhead_bufsize,
 	    uint32_t, mhead_cnt, uint32_t, tot_cnt);
 
-	pp = __DECONST(struct kern_pbufpool *, pkt_chain->pkt_qum.qum_pp);
-	max_pkt_len = pp->pp_buflet_size * pp->pp_max_frags;
+	pp = __DECONST(struct kern_pbufpool *, KPKTQ_FIRST(pktq)->pkt_qum.qum_pp);
+	max_pkt_len = PP_BUF_SIZE_DEF(pp) * pp->pp_max_frags;
 
-	for (pkt = pkt_chain; pkt != NULL; pkt = pkt->pkt_nextpkt) {
+	KPKTQ_FOREACH(pkt, pktq) {
 		uint32_t tot_len, len;
 		uint16_t pad, llhlen, iphlen;
 		boolean_t do_cksum_rx;
@@ -970,8 +1011,8 @@ convert_native_pkt_to_mbuf_chain(struct nx_flowswitch *fsw,
 		tot_len = pad + len;
 
 		/* remember largest packet size */
-		if (__improbable(fe->fe_rx_largest_msize < tot_len)) {
-			fe->fe_rx_largest_msize = MAX(tot_len, MCLBYTES);
+		if (__improbable(largest < tot_len)) {
+			largest = MAX(tot_len, MCLBYTES);
 		}
 
 		/*
@@ -981,9 +1022,12 @@ convert_native_pkt_to_mbuf_chain(struct nx_flowswitch *fsw,
 		m = mhead;
 		if (__improbable(m == NULL || tot_len > mhead_bufsize)) {
 			ASSERT(mhead != NULL || mhead_cnt == 0);
-			one = 1;
-			if ((error = mbuf_allocpacket(MBUF_WAITOK, tot_len,
-			    &one, &m)) != 0) {
+			num_segs = 1;
+			if (tot_len > M16KCLBYTES) {
+				num_segs = 0;
+			}
+			if ((error = mbuf_allocpacket(MBUF_DONTWAIT, tot_len,
+			    &num_segs, &m)) != 0) {
 				DTRACE_SKYWALK2(bad__len,
 				    struct nx_flowswitch *, fsw,
 				    struct __kern_packet *, pkt);
@@ -1001,6 +1045,9 @@ convert_native_pkt_to_mbuf_chain(struct nx_flowswitch *fsw,
 			if (__improbable(mhead_bufsize > MCLBYTES &&
 			    tot_len < (mhead_bufsize >> 1))) {
 				++mhead_waste;
+			}
+			if (__improbable(mhead_bufsize >= tot_len + M16KCLBYTES)) {
+				FSW_STATS_INC(FSW_STATS_RX_WASTED_16KMBUF);
 			}
 		}
 		m->m_data += pad;
@@ -1058,13 +1105,18 @@ convert_native_pkt_to_mbuf_chain(struct nx_flowswitch *fsw,
 	/* reset if most packets (>50%) are smaller than our batch buffers */
 	if (__improbable(mhead_waste > ((uint32_t)tot_cnt >> 1))) {
 		DTRACE_SKYWALK4(mhead__waste, struct nx_flowswitch *, fsw,
-		    struct flow_entry *, fe, uint32_t, mhead_waste,
+		    struct flow_entry *, NULL, uint32_t, mhead_waste,
 		    uint32_t, tot_cnt);
-		fe->fe_rx_largest_msize = 0;
+		largest = 0;
 	}
-	pp_free_packet_chain(pkt_chain, NULL);
-	*m_chain = chain;
-	*m_tail = tail;
+
+	if (largest != fsw->fsw_rx_largest_size) {
+		atomic_set_32(&fsw->fsw_rx_largest_size, largest);
+	}
+
+	pp_free_pktq(pktq);
+	*m_headp = head;
+	*m_tailp = tail;
 	*cnt = mcnt;
 	*bytes = mbytes;
 }
@@ -1115,17 +1167,14 @@ convert_compat_pkt_to_mbuf(struct nx_flowswitch *fsw, struct __kern_packet *pkt)
 
 SK_NO_INLINE_ATTRIBUTE
 static void
-convert_compat_pkt_to_mbuf_chain(struct nx_flowswitch *fsw,
-    struct flow_entry *fe, struct __kern_packet *pkt_chain,
-    struct mbuf **m_chain, struct mbuf **m_tail, uint32_t *cnt,
-    uint32_t *bytes)
+convert_compat_pktq_to_mbufs(struct nx_flowswitch *fsw, struct pktq *pktq,
+    struct mbuf **m_head, struct mbuf **m_tail, uint32_t *cnt, uint32_t *bytes)
 {
-#pragma unused (fe)
 	struct __kern_packet *pkt;
 	struct mbuf *m, *head = NULL, *tail = NULL, **tailp = &head;
 	uint32_t c = 0, b = 0;
 
-	for (pkt = pkt_chain; pkt != NULL; pkt = pkt->pkt_nextpkt) {
+	KPKTQ_FOREACH(pkt, pktq) {
 		m = convert_compat_pkt_to_mbuf(fsw, pkt);
 		if (__improbable(m == NULL)) {
 			continue;
@@ -1136,16 +1185,15 @@ convert_compat_pkt_to_mbuf_chain(struct nx_flowswitch *fsw,
 		c++;
 		b += m_pktlen(m);
 	}
-	ASSERT(c <= *cnt);
-	pp_free_packet_chain(pkt_chain, NULL);
-	*m_chain = head;
+	pp_free_pktq(pktq);
+	*m_head = head;
 	*m_tail = tail;
 	*cnt = c;
 	*bytes = b;
 }
 
 void
-fsw_host_sendup(ifnet_t ifp, struct mbuf *m_chain, struct mbuf *m_tail,
+fsw_host_sendup(ifnet_t ifp, struct mbuf *m_head, struct mbuf *m_tail,
     uint32_t cnt, uint32_t bytes)
 {
 	struct ifnet_stat_increment_param s;
@@ -1153,43 +1201,32 @@ fsw_host_sendup(ifnet_t ifp, struct mbuf *m_chain, struct mbuf *m_tail,
 	bzero(&s, sizeof(s));
 	s.packets_in = cnt;
 	s.bytes_in = bytes;
-	dlil_input_handler(ifp, m_chain, m_tail, &s, FALSE, NULL);
+	dlil_input_handler(ifp, m_head, m_tail, &s, FALSE, NULL);
 }
 
 void
-fsw_host_rx(struct nx_flowswitch *fsw, struct flow_entry *fe)
+fsw_host_rx(struct nx_flowswitch *fsw, struct pktq *pktq)
 {
-	struct pktq *q;
-	struct __kern_packet *pkt_chain;
-	struct mbuf *m_chain = NULL, *m_tail = NULL;
+	struct mbuf *m_head = NULL, *m_tail = NULL;
 	uint32_t cnt = 0, bytes = 0;
 	boolean_t compat;
 
-	q = &fe->fe_rx_pktq;
-	pkt_chain = KPKTQ_FIRST(q);
-	cnt = KPKTQ_LEN(q);
-	KPKTQ_INIT(q);
-	if (__improbable(pkt_chain == NULL)) {
-		DTRACE_SKYWALK2(empty__pktq, struct nx_flowswitch *,
-		    fsw, struct flow_entry *, fe);
-		return;
-	}
+	ASSERT(!KPKTQ_EMPTY(pktq));
 
-	/* All packets in the chain must have the same type */
-	compat = ((pkt_chain->pkt_pflags & PKT_F_MBUF_DATA) != 0);
+	/* All packets in the pktq must have the same type */
+	compat = ((KPKTQ_FIRST(pktq)->pkt_pflags & PKT_F_MBUF_DATA) != 0);
 	if (compat) {
-		convert_compat_pkt_to_mbuf_chain(fsw, fe, pkt_chain, &m_chain,
-		    &m_tail, &cnt, &bytes);
+		convert_compat_pktq_to_mbufs(fsw, pktq, &m_head, &m_tail, &cnt,
+		    &bytes);
 	} else {
-		convert_native_pkt_to_mbuf_chain(fsw, fe, pkt_chain, &m_chain,
-		    &m_tail, &cnt, &bytes);
+		convert_native_pktq_to_mbufs(fsw, pktq, &m_head, &m_tail, &cnt,
+		    &bytes);
 	}
-	if (__improbable(m_chain == NULL)) {
-		DTRACE_SKYWALK2(empty__chain, struct nx_flowswitch *, fsw,
-		    struct flow_entry *, fe);
+	if (__improbable(m_head == NULL)) {
+		DTRACE_SKYWALK1(empty__head, struct nx_flowswitch *, fsw);
 		return;
 	}
-	fsw_host_sendup(fsw->fsw_ifp, m_chain, m_tail, cnt, bytes);
+	fsw_host_sendup(fsw->fsw_ifp, m_head, m_tail, cnt, bytes);
 }
 
 void
@@ -1344,7 +1381,6 @@ dp_flow_route_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 		    SK_KVA(fe));
 		return false;
 	}
-
 	return true;
 }
 
@@ -1366,9 +1402,9 @@ void
 dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 {
 	struct pktq dpkts;              /* dst pool alloc'ed packets */
-	struct pktq disposed_pkts;      /* done src packets */
-	struct pktq dropped_pkts;       /* dropped src packets */
-	struct pktq transferred_pkts;   /* dst packet ready for ring */
+	struct pktq disposed_pkts;         /* done src packets */
+	struct pktq dropped_pkts;         /* dropped src packets */
+	struct pktq transferred_pkts;         /* dst packet ready for ring */
 	struct __kern_packet *pkt, *tpkt;
 	struct kern_pbufpool *dpp;
 	uint32_t n_pkts = KPKTQ_LEN(&fe->fe_rx_pktq);
@@ -1395,7 +1431,7 @@ dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 		 * the enqueue path below. This path should only be hit
 		 * for the rare tcp fragmentation case.
 		 */
-		fsw_host_rx(fsw, fe);
+		fsw_host_rx(fsw, &fe->fe_rx_pktq);
 		return;
 	}
 
@@ -1428,13 +1464,13 @@ dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 	/*
 	 * estimate total number of buflets for the packet chain.
 	 */
-	cnt = howmany(fe->fe_rx_pktq_bytes, dpp->pp_buflet_size);
+	cnt = howmany(fe->fe_rx_pktq_bytes, PP_BUF_SIZE_DEF(dpp));
 	if (cnt > n_pkts) {
 		ASSERT(dpp->pp_max_frags > 1);
 		cnt -= n_pkts;
 		buf_cnt = MIN(RX_BUFLET_BATCH_COUNT, cnt);
 		err = pp_alloc_buflet_batch(dpp, buf_array, &buf_cnt,
-		    SKMEM_NOSLEEP);
+		    SKMEM_NOSLEEP, PP_ALLOC_BFT_ATTACH_BUFFER);
 		if (__improbable(buf_cnt == 0)) {
 			KPKTQ_CONCAT(&dropped_pkts, &fe->fe_rx_pktq);
 			FSW_STATS_ADD(FSW_STATS_DROP_NOMEM_PKT, n_pkts);
@@ -1459,13 +1495,9 @@ dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 		if (__improbable(err != 0)) {
 			SK_ERR("flow_pkt_track failed (err %d)", err);
 			FSW_STATS_INC(FSW_STATS_RX_FLOW_TRACK_ERR);
-			/* if need to trigger RST then deliver to host */
+			/* if need to trigger RST */
 			if (err == ENETRESET) {
-				struct flow_entry *host_fe;
-				host_fe =
-				    flow_mgr_get_host_fe(fsw->fsw_flow_mgr);
-				KPKTQ_ENQUEUE(&host_fe->fe_rx_pktq, pkt);
-				continue;
+				flow_track_abort_tcp(fe, pkt, NULL);
 			}
 			KPKTQ_ENQUEUE(&dropped_pkts, pkt);
 			continue;
@@ -1483,14 +1515,14 @@ dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 				KPKTQ_ENQUEUE(&dropped_pkts, pkt);
 				continue;
 			}
-			n_bufs = howmany(pkt->pkt_length, dpp->pp_buflet_size);
+			n_bufs = howmany(pkt->pkt_length, PP_BUF_SIZE_DEF(dpp));
 			n_bufs--;
 			for (i = 0; i < n_bufs; i++) {
 				if (__improbable(buf_cnt == 0)) {
 					ASSERT(dpp->pp_max_frags > 1);
 					buf_array_iter = 0;
 					cnt = howmany(fe->fe_rx_pktq_bytes,
-					    dpp->pp_buflet_size);
+					    PP_BUF_SIZE_DEF(dpp));
 					n_pkts = KPKTQ_LEN(&fe->fe_rx_pktq);
 					if (cnt >= n_pkts) {
 						cnt -= n_pkts;
@@ -1503,7 +1535,7 @@ dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 					cnt = buf_cnt;
 					err = pp_alloc_buflet_batch(dpp,
 					    buf_array, &buf_cnt,
-					    SKMEM_NOSLEEP);
+					    SKMEM_NOSLEEP, PP_ALLOC_BFT_ATTACH_BUFFER);
 					if (__improbable(buf_cnt == 0)) {
 						FSW_STATS_INC(FSW_STATS_DROP_NOMEM_PKT);
 						KPKTQ_ENQUEUE(&dropped_pkts,
@@ -1618,18 +1650,18 @@ dp_rx_process_wake_packet(struct nx_flowswitch *fsw, struct __kern_packet *pkt)
 }
 
 static void
-dp_rx_pktq(struct nx_flowswitch *fsw, struct pktq *pktq)
+_fsw_receive_locked(struct nx_flowswitch *fsw, struct pktq *pktq)
 {
 	struct __kern_packet *pkt, *tpkt;
 	struct flow_entry_list fes = TAILQ_HEAD_INITIALIZER(fes);
 	struct flow_entry *fe, *prev_fe;
 	sa_family_t af;
-	struct pktq dropped_pkts;
+	struct pktq host_pkts, dropped_pkts;
 	int err;
 
+	KPKTQ_INIT(&host_pkts);
 	KPKTQ_INIT(&dropped_pkts);
 
-	FSW_RLOCK(fsw);
 	if (__improbable(FSW_QUIESCED(fsw))) {
 		DTRACE_SKYWALK1(rx__quiesced, struct nx_flowswitch *, fsw);
 		KPKTQ_CONCAT(&dropped_pkts, pktq);
@@ -1657,16 +1689,16 @@ dp_rx_pktq(struct nx_flowswitch *fsw, struct pktq *pktq)
 
 		af = fsw->fsw_demux(fsw, pkt);
 		if (__improbable(af == AF_UNSPEC)) {
-			fe = flow_mgr_get_host_fe(fsw->fsw_flow_mgr);
-			goto flow_batch;
+			KPKTQ_ENQUEUE(&host_pkts, pkt);
+			continue;
 		}
 
 		err = flow_pkt_classify(pkt, fsw->fsw_ifp, af, TRUE);
 		_FSW_INJECT_ERROR(1, err, ENXIO, null_func);
 		if (__improbable(err != 0)) {
 			FSW_STATS_INC(FSW_STATS_RX_FLOW_EXTRACT_ERR);
-			fe = flow_mgr_get_host_fe(fsw->fsw_flow_mgr);
-			goto flow_batch;
+			KPKTQ_ENQUEUE(&host_pkts, pkt);
+			continue;
 		}
 
 		if (__improbable(pkt->pkt_flow_ip_is_frag)) {
@@ -1676,10 +1708,13 @@ dp_rx_pktq(struct nx_flowswitch *fsw, struct pktq *pktq)
 			}
 		}
 
-		fe = rx_lookup_flow(fsw, pkt, prev_fe);
+#if DEVELOPMENT || DEBUG
+		trace_pkt_dump_payload(fsw->fsw_ifp, pkt, true);
+#endif /* DEVELOPMENT || DEBUG */
+
+		prev_fe = fe = rx_lookup_flow(fsw, pkt, prev_fe);
 		if (__improbable(fe == NULL)) {
-			KPKTQ_ENQUEUE(&dropped_pkts, pkt);
-			prev_fe = NULL;
+			KPKTQ_ENQUEUE_LIST(&host_pkts, pkt);
 			continue;
 		}
 
@@ -1687,7 +1722,6 @@ dp_rx_pktq(struct nx_flowswitch *fsw, struct pktq *pktq)
 
 		dp_rx_process_wake_packet(fsw, pkt);
 
-flow_batch:
 		rx_flow_batch_packet(&fes, fe, pkt);
 		prev_fe = fe;
 	}
@@ -1701,40 +1735,276 @@ flow_batch:
 		flow_entry_release(&fe);
 	}
 
-	/* XXX(OPTIMIZE) need to re-circulate extras back to HOST */
-	fe = flow_mgr_get_host_fe(fsw->fsw_flow_mgr);
-	if (!KPKTQ_EMPTY(&fe->fe_rx_pktq)) {
-		ASSERT(KPKTQ_LEN(&fe->fe_rx_pktq) != 0);
-		SK_DF(SK_VERB_FSW_DP | SK_VERB_RX,
-		    "re-circulate %d pkts to HOST", KPKTQ_LEN(&fe->fe_rx_pktq));
-		rx_flow_process(fsw, fe);
+	if (!KPKTQ_EMPTY(&host_pkts)) {
+		fsw_host_rx(fsw, &host_pkts);
 	}
-	flow_entry_release(&fe);
 
 done:
-	FSW_RUNLOCK(fsw);
-
 	dp_drop_pktq(fsw, &dropped_pkts);
 }
 
+#if (DEVELOPMENT || DEBUG)
 static void
-dp_rx_pkts(struct nx_flowswitch *fsw, struct __kern_packet *pkts[],
-    uint32_t n_pkts)
+fsw_rps_rx(struct nx_flowswitch *fsw, uint32_t id,
+    struct __kern_packet *pkt)
 {
-	struct pktq pktq;
-	KPKTQ_INIT(&pktq);
-	pkts_to_pktq(pkts, n_pkts, &pktq);
-	dp_rx_pktq(fsw, &pktq);
-	KPKTQ_FINI(&pktq);
+	struct fsw_rps_thread *frt = &fsw->fsw_rps_threads[id];
+
+	lck_mtx_lock_spin(&frt->frt_lock);
+	KPKTQ_ENQUEUE(&frt->frt_pktq, pkt);
+	lck_mtx_unlock(&frt->frt_lock);
+}
+
+static void
+fsw_rps_thread_schedule(struct nx_flowswitch *fsw, uint32_t id)
+{
+	struct fsw_rps_thread *frt = &fsw->fsw_rps_threads[id];
+
+	ASSERT(frt->frt_thread != THREAD_NULL);
+	lck_mtx_lock_spin(&frt->frt_lock);
+	ASSERT(!(frt->frt_flags & (FRT_TERMINATING | FRT_TERMINATED)));
+
+	frt->frt_requests++;
+	if (!(frt->frt_flags & FRT_RUNNING)) {
+		thread_wakeup((caddr_t)frt);
+	}
+	lck_mtx_unlock(&frt->frt_lock);
+}
+
+__attribute__((noreturn))
+static void
+fsw_rps_thread_cont(void *v, wait_result_t w)
+{
+	struct fsw_rps_thread *frt = v;
+	struct nx_flowswitch *fsw = frt->frt_fsw;
+
+	lck_mtx_lock(&frt->frt_lock);
+	if (__improbable(w == THREAD_INTERRUPTIBLE ||
+	    (frt->frt_flags & FRT_TERMINATING) != 0)) {
+		goto terminate;
+	}
+	if (KPKTQ_EMPTY(&frt->frt_pktq)) {
+		goto done;
+	}
+	frt->frt_flags |= FRT_RUNNING;
+
+	for (;;) {
+		uint32_t requests = frt->frt_requests;
+		struct pktq pkts;
+
+		KPKTQ_INIT(&pkts);
+		KPKTQ_CONCAT(&pkts, &frt->frt_pktq);
+		lck_mtx_unlock(&frt->frt_lock);
+
+		sk_protect_t protect;
+		protect = sk_sync_protect();
+		FSW_RLOCK(fsw);
+		_fsw_receive_locked(fsw, &pkts);
+		FSW_RUNLOCK(fsw);
+		sk_sync_unprotect(protect);
+
+		lck_mtx_lock(&frt->frt_lock);
+		if ((frt->frt_flags & FRT_TERMINATING) != 0 ||
+		    requests == frt->frt_requests) {
+			frt->frt_requests = 0;
+			break;
+		}
+	}
+
+done:
+	lck_mtx_unlock(&frt->frt_lock);
+	if (!(frt->frt_flags & FRT_TERMINATING)) {
+		frt->frt_flags &= ~FRT_RUNNING;
+		assert_wait(frt, THREAD_UNINT);
+		thread_block_parameter(fsw_rps_thread_cont, frt);
+		__builtin_unreachable();
+	} else {
+terminate:
+		LCK_MTX_ASSERT(&frt->frt_lock, LCK_MTX_ASSERT_OWNED);
+		frt->frt_flags &= ~(FRT_RUNNING | FRT_TERMINATING);
+		frt->frt_flags |= FRT_TERMINATED;
+
+		if (frt->frt_flags & FRT_TERMINATEBLOCK) {
+			thread_wakeup((caddr_t)&frt);
+		}
+		lck_mtx_unlock(&frt->frt_lock);
+
+		SK_D("fsw_rx_%s_%d terminated", if_name(fsw->fsw_ifp),
+		    frt->frt_idx);
+
+		/* for the extra refcnt from kernel_thread_start() */
+		thread_deallocate(current_thread());
+		/* this is the end */
+		thread_terminate(current_thread());
+		/* NOTREACHED */
+		__builtin_unreachable();
+	}
+
+	/* must never get here */
+	VERIFY(0);
+	/* NOTREACHED */
+	__builtin_unreachable();
+}
+
+__attribute__((noreturn))
+static void
+fsw_rps_thread_func(void *v, wait_result_t w)
+{
+#pragma unused(w)
+	struct fsw_rps_thread *frt = v;
+	struct nx_flowswitch *fsw = frt->frt_fsw;
+
+	char thread_name[MAXTHREADNAMESIZE];
+	bzero(thread_name, sizeof(thread_name));
+	(void) snprintf(thread_name, sizeof(thread_name), "fsw_rx_%s_%d",
+	    if_name(fsw->fsw_ifp), frt->frt_idx);
+	thread_set_thread_name(frt->frt_thread, thread_name);
+	SK_D("%s spawned", thread_name);
+
+	net_thread_marks_push(NET_THREAD_SYNC_RX);
+	assert_wait(frt, THREAD_UNINT);
+	(void) thread_block_parameter(fsw_rps_thread_cont, frt);
+
+	__builtin_unreachable();
+}
+
+static void
+fsw_rps_thread_join(struct nx_flowswitch *fsw, uint32_t i)
+{
+	struct fsw_rps_thread *frt = &fsw->fsw_rps_threads[i];
+	uint64_t f = (1 * NSEC_PER_MSEC);
+	uint64_t s = (1000 * NSEC_PER_SEC);
+	uint32_t c = 0;
+
+	lck_mtx_lock(&frt->frt_lock);
+	frt->frt_flags |= FRT_TERMINATING;
+
+	while (!(frt->frt_flags & FRT_TERMINATED)) {
+		uint64_t t = 0;
+		nanoseconds_to_absolutetime((c++ == 0) ? f : s, &t);
+		clock_absolutetime_interval_to_deadline(t, &t);
+		ASSERT(t != 0);
+
+		frt->frt_flags |= FRT_TERMINATEBLOCK;
+		if (!(frt->frt_flags & FRT_RUNNING)) {
+			thread_wakeup_one((caddr_t)frt);
+		}
+		(void) assert_wait_deadline(&frt->frt_thread, THREAD_UNINT, t);
+		lck_mtx_unlock(&frt->frt_lock);
+		thread_block(THREAD_CONTINUE_NULL);
+		lck_mtx_lock(&frt->frt_lock);
+		frt->frt_flags &= ~FRT_TERMINATEBLOCK;
+	}
+	ASSERT(frt->frt_flags & FRT_TERMINATED);
+	lck_mtx_unlock(&frt->frt_lock);
+	frt->frt_thread = THREAD_NULL;
+}
+
+static void
+fsw_rps_thread_spawn(struct nx_flowswitch *fsw, uint32_t i)
+{
+	kern_return_t error;
+	struct fsw_rps_thread *frt = &fsw->fsw_rps_threads[i];
+	lck_mtx_init(&frt->frt_lock, &nexus_lock_group, &nexus_lock_attr);
+	frt->frt_idx = i;
+	frt->frt_fsw = fsw;
+	error = kernel_thread_start(fsw_rps_thread_func, frt, &frt->frt_thread);
+	ASSERT(!error);
+	KPKTQ_INIT(&frt->frt_pktq);
 }
 
 int
-fsw_dev_input_netem_dequeue(void *handle, pktsched_pkt_t *pkts,
+fsw_rps_set_nthreads(struct nx_flowswitch* fsw, uint32_t n)
+{
+	if (n > FSW_RPS_MAX_NTHREADS) {
+		SK_ERR("rps nthreads %d, max %d", n, FSW_RPS_MAX_NTHREADS);
+		return EINVAL;
+	}
+
+	FSW_WLOCK(fsw);
+	if (n < fsw->fsw_rps_nthreads) {
+		for (uint32_t i = n; i < fsw->fsw_rps_nthreads; i++) {
+			fsw_rps_thread_join(fsw, i);
+		}
+		fsw->fsw_rps_threads = krealloc_type(struct fsw_rps_thread,
+		    fsw->fsw_rps_nthreads, n, fsw->fsw_rps_threads,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		ASSERT(n != 0 ^ fsw->fsw_rps_threads == NULL);
+	} else if (n > fsw->fsw_rps_nthreads) {
+		fsw->fsw_rps_threads = krealloc_type(struct fsw_rps_thread,
+		    fsw->fsw_rps_nthreads, n, fsw->fsw_rps_threads,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		for (uint32_t i = fsw->fsw_rps_nthreads; i < n; i++) {
+			fsw_rps_thread_spawn(fsw, i);
+		}
+	}
+	fsw->fsw_rps_nthreads = n;
+	FSW_WUNLOCK(fsw);
+	return 0;
+}
+
+static uint32_t
+get_rps_id(struct nx_flowswitch *fsw, struct __kern_packet *pkt)
+{
+	sa_family_t af = fsw->fsw_demux(fsw, pkt);
+	if (__improbable(af == AF_UNSPEC)) {
+		return 0;
+	}
+
+	flow_pkt_classify(pkt, fsw->fsw_ifp, af, true);
+
+	if (__improbable((pkt->pkt_qum_qflags &
+	    QUM_F_FLOW_CLASSIFIED) == 0)) {
+		return 0;
+	}
+
+	struct flow_key key;
+	flow_pkt2key(pkt, true, &key);
+	key.fk_mask = FKMASK_5TUPLE;
+
+	uint32_t id = flow_key_hash(&key) % fsw->fsw_rps_nthreads;
+
+	return id;
+}
+
+#endif /* !DEVELOPMENT && !DEBUG */
+
+void
+fsw_receive(struct nx_flowswitch *fsw, struct pktq *pktq)
+{
+	FSW_RLOCK(fsw);
+#if (DEVELOPMENT || DEBUG)
+	if (fsw->fsw_rps_nthreads != 0) {
+		struct __kern_packet *pkt, *tpkt;
+		bitmap_t map = 0;
+
+		_CASSERT(BITMAP_LEN(FSW_RPS_MAX_NTHREADS) == 1);
+		KPKTQ_FOREACH_SAFE(pkt, pktq, tpkt) {
+			uint32_t id = get_rps_id(fsw, pkt);
+			KPKTQ_REMOVE(pktq, pkt);
+			fsw_rps_rx(fsw, id, pkt);
+			bitmap_set(&map, id);
+		}
+		for (int i = bitmap_first(&map, 64); i >= 0;
+		    i = bitmap_next(&map, i)) {
+			fsw_rps_thread_schedule(fsw, i);
+		}
+	} else
+#endif /* !DEVELOPMENT && !DEBUG */
+	{
+		_fsw_receive_locked(fsw, pktq);
+	}
+	FSW_RUNLOCK(fsw);
+}
+
+int
+fsw_dev_input_netem_dequeue(void *handle, pktsched_pkt_t * pkts,
     uint32_t n_pkts)
 {
 #pragma unused(handle)
 	struct nx_flowswitch *fsw = handle;
 	struct __kern_packet *kpkts[FSW_VP_DEV_BATCH_MAX];
+	struct pktq pktq;
 	sk_protect_t protect;
 	uint32_t i;
 
@@ -1747,7 +2017,11 @@ fsw_dev_input_netem_dequeue(void *handle, pktsched_pkt_t *pkts,
 	}
 
 	protect = sk_sync_protect();
-	dp_rx_pkts(fsw, kpkts, n_pkts);
+	KPKTQ_INIT(&pktq);
+	pkts_to_pktq(kpkts, n_pkts, &pktq);
+
+	fsw_receive(fsw, &pktq);
+	KPKTQ_FINI(&pktq);
 	sk_sync_unprotect(protect);
 
 	return 0;
@@ -1764,7 +2038,7 @@ fsw_dev_input_netem_enqueue(struct nx_flowswitch *fsw, struct pktq *q)
 	ne = fsw->fsw_ifp->if_input_netem;
 	ASSERT(ne != NULL);
 	KPKTQ_FOREACH_SAFE(pkt, q, tpkt) {
-		boolean_t pdrop;
+		bool pdrop;
 		KPKTQ_REMOVE(q, pkt);
 		CLASSQ_PKT_INIT_PACKET(&p, pkt);
 		netem_enqueue(ne, &p, &pdrop);
@@ -1772,10 +2046,10 @@ fsw_dev_input_netem_enqueue(struct nx_flowswitch *fsw, struct pktq *q)
 }
 
 void
-fsw_devna_rx(struct nexus_adapter *devna, struct __kern_packet *pkt_chain,
+fsw_devna_rx(struct nexus_adapter *devna, struct __kern_packet *pkt_head,
     struct nexus_pkt_stats *out_stats)
 {
-	struct __kern_packet *pkt = pkt_chain, *next;
+	struct __kern_packet *pkt = pkt_head, *next;
 	struct nx_flowswitch *fsw;
 	uint32_t n_bytes = 0, n_pkts = 0;
 	uint64_t total_pkts = 0, total_bytes = 0;
@@ -1785,7 +2059,7 @@ fsw_devna_rx(struct nexus_adapter *devna, struct __kern_packet *pkt_chain,
 	if (__improbable(devna->na_ifp == NULL ||
 	    (fsw = fsw_ifp_to_fsw(devna->na_ifp)) == NULL)) {
 		SK_ERR("fsw not attached, dropping %d pkts", KPKTQ_LEN(&q));
-		pp_free_packet_chain(pkt_chain, NULL);
+		pp_free_packet_chain(pkt_head, NULL);
 		return;
 	}
 	while (pkt != NULL) {
@@ -1808,10 +2082,10 @@ fsw_devna_rx(struct nexus_adapter *devna, struct __kern_packet *pkt_chain,
 		}
 		n_pkts = KPKTQ_LEN(&q);
 		if (n_pkts == fsw_rx_batch || (next == NULL && n_pkts > 0)) {
-			if (__probable(fsw->fsw_ifp->if_input_netem == NULL)) {
-				dp_rx_pktq(fsw, &q);
-			} else {
+			if (__improbable(fsw->fsw_ifp->if_input_netem != NULL)) {
 				fsw_dev_input_netem_enqueue(fsw, &q);
+			} else {
+				fsw_receive(fsw, &q);
 			}
 			total_pkts += n_pkts;
 			total_bytes += n_bytes;
@@ -1940,7 +2214,7 @@ dp_copy_to_dev_log(struct nx_flowswitch *fsw, const struct kern_pbufpool *pp,
 		SK_ERR("packet too long, hr(fr+tx)+slen (%u+%u)+%u > "
 		    "dev_pp_max %u", (uint32_t)fsw->fsw_frame_headroom,
 		    (uint32_t)ifp->if_tx_headroom, spkt->pkt_length,
-		    (uint32_t)pp->pp_max_frags * pp->pp_buflet_size);
+		    (uint32_t)pp->pp_max_frags * PP_BUF_SIZE_DEF(pp));
 	} else if (error == ENOBUFS) {
 		SK_DF(logflags, "%s(%d) packet allocation failure",
 		    sk_proc_name_address(p), sk_proc_pid(p));
@@ -1979,6 +2253,7 @@ dp_copy_to_dev(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 	/* Copy packet metadata */
 	_QUM_COPY(&(spkt)->pkt_qum, &(dpkt)->pkt_qum);
 	_PKT_COPY(spkt, dpkt);
+	_PKT_COPY_TX_PORT_DATA(spkt, dpkt);
 	ASSERT((dpkt->pkt_qum.qum_qflags & QUM_F_KERNEL_ONLY) ||
 	    !PP_KERNEL_ONLY(dpkt->pkt_qum.qum_pp));
 	ASSERT(dpkt->pkt_mbuf == NULL);
@@ -1999,7 +2274,7 @@ dp_copy_to_dev(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 	case QP_PACKET:
 		dev_pkt_len = fsw->fsw_frame_headroom + ifp->if_tx_headroom +
 		    spkt->pkt_length;
-		if (dev_pkt_len > pp->pp_max_frags * pp->pp_buflet_size) {
+		if (dev_pkt_len > pp->pp_max_frags * PP_BUF_SIZE_DEF(pp)) {
 			FSW_STATS_INC(FSW_STATS_TX_COPY_BAD_LEN);
 			err = ERANGE;
 			goto done;
@@ -2056,12 +2331,12 @@ convert_pkt_to_mbuf(struct __kern_packet *pkt)
 }
 
 static void
-convert_pkt_to_mbuf_chain(struct __kern_packet *pkt_chain,
-    struct mbuf **chain, struct mbuf **tail,
+convert_pkt_to_mbuf_list(struct __kern_packet *pkt_list,
+    struct mbuf **head, struct mbuf **tail,
     uint32_t *cnt, uint32_t *bytes)
 {
-	struct __kern_packet *pkt = pkt_chain, *next;
-	struct mbuf *m_chain = NULL, **m_tailp = &m_chain, *m = NULL;
+	struct __kern_packet *pkt = pkt_list, *next;
+	struct mbuf *m_head = NULL, **m_tailp = &m_head, *m = NULL;
 	uint32_t c = 0, b = 0;
 
 	while (pkt != NULL) {
@@ -2076,8 +2351,8 @@ convert_pkt_to_mbuf_chain(struct __kern_packet *pkt_chain,
 		b += m_pktlen(m);
 		pkt = next;
 	}
-	if (chain != NULL) {
-		*chain = m_chain;
+	if (head != NULL) {
+		*head = m_head;
 	}
 	if (tail != NULL) {
 		*tail = m;
@@ -2101,11 +2376,7 @@ classq_enqueue_flow_single(struct nx_flowswitch *fsw,
 
 	FSW_LOCK_ASSERT_HELD(fsw);
 	ASSERT(fsw->fsw_classq_enabled);
-	/*
-	 * we are using the first 4 bytes of flow_id as the AQM flow
-	 * identifier.
-	 */
-	ASSERT(!uuid_is_null(pkt->pkt_flow_id));
+	ASSERT(pkt->pkt_flow_token != 0);
 	fsw_ifp_inc_traffic_class_out_pkt(ifp, pkt->pkt_svc_class,
 	    1, pkt->pkt_length);
 
@@ -2163,7 +2434,7 @@ classq_enqueue_flow_single(struct nx_flowswitch *fsw,
 
 static int
 classq_enqueue_flow_chain(struct nx_flowswitch *fsw,
-    struct __kern_packet *pkt_chain, struct __kern_packet *pkt_tail,
+    struct __kern_packet *pkt_head, struct __kern_packet *pkt_tail,
     uint32_t cnt, uint32_t bytes)
 {
 	struct ifnet *ifp = fsw->fsw_ifp;
@@ -2173,33 +2444,29 @@ classq_enqueue_flow_chain(struct nx_flowswitch *fsw,
 
 	FSW_LOCK_ASSERT_HELD(fsw);
 	ASSERT(fsw->fsw_classq_enabled);
-	/*
-	 * we are using the first 4 bytes of flow_id as the AQM flow
-	 * identifier.
-	 */
-	ASSERT(!uuid_is_null(pkt_chain->pkt_flow_id));
+	ASSERT(pkt_head->pkt_flow_token != 0);
 
 	/*
 	 * All packets in the flow should have the same svc.
 	 */
-	svc = pkt_chain->pkt_svc_class;
+	svc = pkt_head->pkt_svc_class;
 	fsw_ifp_inc_traffic_class_out_pkt(ifp, svc, cnt, bytes);
 
 	switch (fsw->fsw_classq_enq_ptype) {
 	case QP_MBUF: {                         /* compat interface */
-		struct mbuf *m_chain = NULL, *m_tail = NULL;
+		struct mbuf *m_head = NULL, *m_tail = NULL;
 		uint32_t c = 0, b = 0;
 
-		convert_pkt_to_mbuf_chain(pkt_chain, &m_chain, &m_tail, &c, &b);
-		ASSERT(m_chain != NULL && m_tail != NULL);
+		convert_pkt_to_mbuf_list(pkt_head, &m_head, &m_tail, &c, &b);
+		ASSERT(m_head != NULL && m_tail != NULL);
 		ASSERT(c == cnt);
 		ASSERT(b == bytes);
-		pkt_chain = NULL;
+		pkt_head = NULL;
 
 		/* ifnet_enqueue consumes mbuf */
-		err = ifnet_enqueue_mbuf_chain(ifp, m_chain, m_tail, cnt,
+		err = ifnet_enqueue_mbuf_chain(ifp, m_head, m_tail, cnt,
 		    bytes, FALSE, &pkt_drop);
-		m_chain = NULL;
+		m_head = NULL;
 		m_tail = NULL;
 #if (DEVELOPMENT || DEBUG)
 		if (__improbable(!pkt_drop)) {
@@ -2215,9 +2482,9 @@ classq_enqueue_flow_chain(struct nx_flowswitch *fsw,
 	}
 	case QP_PACKET: {                       /* native interface */
 		/* ifnet_enqueue consumes packet */
-		err = ifnet_enqueue_pkt_chain(ifp, pkt_chain, pkt_tail, cnt,
+		err = ifnet_enqueue_pkt_chain(ifp, pkt_head, pkt_tail, cnt,
 		    bytes, FALSE, &pkt_drop);
-		pkt_chain = NULL;
+		pkt_head = NULL;
 #if (DEVELOPMENT || DEBUG)
 		if (__improbable(!pkt_drop)) {
 			_FSW_INJECT_ERROR(14, pkt_drop, TRUE, null_func);
@@ -2245,7 +2512,7 @@ classq_enqueue_flow_chain(struct nx_flowswitch *fsw,
  */
 static void
 classq_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
-    boolean_t chain, uint32_t cnt, uint32_t bytes)
+    bool chain, uint32_t cnt, uint32_t bytes)
 {
 	bool flowadv_is_set = false;
 	struct __kern_packet *pkt, *tail, *tpkt;
@@ -2321,7 +2588,7 @@ classq_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
  */
 static void
 classq_qset_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
-    boolean_t chain, uint32_t cnt, uint32_t bytes)
+    bool chain, uint32_t cnt, uint32_t bytes)
 {
 	struct __kern_packet *pkt, *tail;
 	flowadv_idx_t flow_adv_idx;
@@ -2403,6 +2670,9 @@ dp_flow_tx_route_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 	if (__improbable(!dp_flow_route_process(fsw, fe))) {
 		return false;
 	}
+	if (fe->fe_qset_select == FE_QSET_SELECT_DYNAMIC) {
+		flow_qset_select_dynamic(fsw, fe, TRUE);
+	}
 
 	_FSW_INJECT_ERROR(35, fr->fr_flags, fr->fr_flags,
 	    _fsw_error35_handler, 1, fr, NULL, NULL);
@@ -2464,13 +2734,14 @@ frame:
 static void
 dp_listener_flow_tx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 {
+#pragma unused(fsw)
 	struct __kern_packet *pkt, *tpkt;
 	KPKTQ_FOREACH_SAFE(pkt, &fe->fe_tx_pktq, tpkt) {
 		KPKTQ_REMOVE(&fe->fe_tx_pktq, pkt);
 		/* listener is only allowed TCP RST */
 		if (pkt->pkt_flow_ip_proto == IPPROTO_TCP &&
 		    (pkt->pkt_flow_tcp_flags & TH_RST) != 0) {
-			fsw_flow_abort_tcp(fsw, fe, pkt);
+			flow_track_abort_tcp(fe, NULL, pkt);
 		} else {
 			char *addr;
 			MD_BUFLET_ADDR_ABS(pkt, addr);
@@ -2521,7 +2792,7 @@ fsw_update_timestamps(struct __kern_packet *pkt, volatile uint64_t *fg_ts,
  * We can check the flow entry as well to only allow chain enqueue
  * on flows matching a certain criteria.
  */
-static boolean_t
+static bool
 fsw_chain_enqueue_enabled(struct nx_flowswitch *fsw, struct flow_entry *fe)
 {
 #pragma unused(fe)
@@ -2535,11 +2806,12 @@ void
 dp_flow_tx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 {
 	struct pktq dropped_pkts;
-	boolean_t chain;
+	bool chain;
 	uint32_t cnt = 0, bytes = 0;
 	volatile struct sk_nexusadv *nxadv = NULL;
 	volatile uint64_t *fg_ts = NULL;
 	volatile uint64_t *rt_ts = NULL;
+	uint8_t qset_idx = (fe->fe_qset != NULL) ? fe->fe_qset->nqs_idx : 0;
 
 	KPKTQ_INIT(&dropped_pkts);
 	ASSERT(!KPKTQ_EMPTY(&fe->fe_tx_pktq));
@@ -2584,8 +2856,10 @@ dp_flow_tx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 		} else {
 			pkt->pkt_pflags &= ~PKT_F_FLOW_ADV;
 		}
+		_UUID_CLEAR(pkt->pkt_flow_id);
+		pkt->pkt_flow_token = fe->fe_flowid;
 		pkt->pkt_pflags |= PKT_F_FLOW_ID;
-
+		pkt->pkt_qset_idx = qset_idx;
 		/*
 		 * The same code is exercised per packet for the non-chain case
 		 * (see ifnet_enqueue_ifclassq()). It's replicated here to avoid
@@ -2663,7 +2937,7 @@ tx_lookup_flow(struct nx_flowswitch *fsw, struct __kern_packet *pkt,
 {
 	struct flow_entry *fe;
 
-	fe = lookup_flow_with_key(fsw, pkt, false, prev_fe);
+	fe = lookup_flow_with_pkt(fsw, pkt, false, prev_fe);
 	if (__improbable(fe == NULL)) {
 		goto done;
 	}
@@ -2879,7 +3153,7 @@ fsw_dev_ring_flush(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
 		total_bytes += n_bytes;
 
 		if (__probable(fsw->fsw_ifp->if_input_netem == NULL)) {
-			dp_rx_pktq(fsw, &pktq);
+			fsw_receive(fsw, &pktq);
 		} else {
 			fsw_dev_input_netem_enqueue(fsw, &pktq);
 		}
@@ -3019,8 +3293,6 @@ fsw_dp_ctor(struct nx_flowswitch *fsw)
 		return error;
 	}
 
-	flow_mgr_setup_host_flow(fsw->fsw_flow_mgr, fsw);
-
 	/* generic name; will be customized upon ifattach */
 	(void) snprintf(fsw->fsw_reap_name, sizeof(fsw->fsw_reap_name),
 	    FSW_REAP_THREADNAME, name, "");
@@ -3043,9 +3315,18 @@ fsw_dp_ctor(struct nx_flowswitch *fsw)
 void
 fsw_dp_dtor(struct nx_flowswitch *fsw)
 {
-	uint64_t f = (1 * NSEC_PER_MSEC);       /* 1 ms */
-	uint64_t s = (1000 * NSEC_PER_SEC);    /* 1 sec */
+	uint64_t f = (1 * NSEC_PER_MSEC);         /* 1 ms */
+	uint64_t s = (1000 * NSEC_PER_SEC);         /* 1 sec */
 	uint32_t i = 0;
+
+#if (DEVELOPMENT || DEBUG)
+	if (fsw->fsw_rps_threads != NULL) {
+		for (i = 0; i < fsw->fsw_rps_nthreads; i++) {
+			fsw_rps_thread_join(fsw, i);
+		}
+		kfree_type(struct fsw_rps_thread, fsw->fsw_rps_threads);
+	}
+#endif /* !DEVELOPMENT && !DEBUG */
 
 	nx_advisory_free(fsw->fsw_nx);
 
@@ -3088,10 +3369,10 @@ fsw_dp_dtor(struct nx_flowswitch *fsw)
 	fsw_linger_purge(fsw);
 
 	if (fsw->fsw_flow_mgr != NULL) {
-		flow_mgr_teardown_host_flow(fsw->fsw_flow_mgr);
 		flow_mgr_destroy(fsw->fsw_flow_mgr);
 		fsw->fsw_flow_mgr = NULL;
 	}
+
 
 	lck_mtx_destroy(&fsw->fsw_detach_barrier_lock, &nexus_lock_group);
 	lck_mtx_destroy(&fsw->fsw_reap_lock, &nexus_lock_group);
@@ -3454,7 +3735,6 @@ fsw_purge_cache(struct nx_flowswitch *fsw, boolean_t low)
 	eventhandler_reap_caches(purge);
 	netns_reap_caches(purge);
 	skmem_reap_caches(purge);
-	necp_client_reap_caches(purge);
 
 	if (if_is_fsw_transport_netagent_enabled() && purge) {
 		mbuf_drain(FALSE);
@@ -3627,7 +3907,7 @@ fsw_process_linger(struct nx_flowswitch *fsw, uint32_t *abort)
 		if (flow_track_tcp_want_abort(fe)) {
 			VERIFY(fe->fe_flags & FLOWENTF_ABORTED);
 			ASSERT(!uuid_is_null(fe->fe_uuid));
-			fsw_flow_abort_tcp(fsw, fe, NULL);
+			flow_track_abort_tcp(fe, NULL, NULL);
 			(*abort)++;
 			SK_LOG_VAR(char dbgbuf[FLOWENTRY_DBGBUF_SIZE]);
 			SK_DF(SK_VERB_FLOW, "entry \"%s\" fe 0x%llx "
@@ -3664,301 +3944,6 @@ fsw_process_linger(struct nx_flowswitch *fsw, uint32_t *abort)
 	lck_mtx_unlock(&fsw->fsw_linger_lock);
 
 	return freed;
-}
-
-/* Send RST for a given TCP flow; Use @pkt as template if given */
-void
-fsw_flow_abort_tcp(struct nx_flowswitch *fsw, struct flow_entry *fe,
-    struct __kern_packet *pkt)
-{
-	struct flow_track *src, *dst;
-	struct ip *ip;
-	struct ip6_hdr *ip6;
-	struct tcphdr *th;
-	uint16_t len, tlen;
-	struct mbuf *m;
-	uint8_t ipver;
-
-	/* guaranteed by caller */
-	ASSERT(fsw->fsw_ifp != NULL);
-
-	src = &fe->fe_ltrack;
-	dst = &fe->fe_rtrack;
-
-	if (pkt != NULL) {
-		ipver = pkt->pkt_flow_ip_ver;
-	} else {
-		ipver = fe->fe_key.fk_ipver;
-	}
-
-	tlen = sizeof(struct tcphdr);
-	if (ipver == IPVERSION) {
-		len = sizeof(struct ip) + tlen;
-	} else {
-		ASSERT(ipver == IPV6_VERSION);
-		len = sizeof(struct ip6_hdr) + tlen;
-	}
-
-	m = m_gethdr(M_WAITOK, MT_HEADER);
-	VERIFY(m != NULL);
-
-	m->m_pkthdr.pkt_proto = IPPROTO_TCP;
-	m->m_data += max_linkhdr;               /* 32-bit aligned */
-	m->m_pkthdr.len = m->m_len = len;
-
-	/* zero out for checksum */
-	bzero(m->m_data, len);
-
-	if (ipver == IPVERSION) {
-		ip = mtod(m, struct ip *);
-
-		/* IP header fields included in the TCP checksum */
-		ip->ip_p = IPPROTO_TCP;
-		ip->ip_len = htons(tlen);
-		if (pkt == NULL) {
-			ip->ip_src = fe->fe_key.fk_src4;
-			ip->ip_dst = fe->fe_key.fk_dst4;
-		} else {
-			ip->ip_src = pkt->pkt_flow_ipv4_src;
-			ip->ip_dst = pkt->pkt_flow_ipv4_dst;
-		}
-
-		th = (struct tcphdr *)(void *)((char *)ip + sizeof(*ip));
-	} else {
-		ip6 = mtod(m, struct ip6_hdr *);
-
-		/* IP header fields included in the TCP checksum */
-		ip6->ip6_nxt = IPPROTO_TCP;
-		ip6->ip6_plen = htons(tlen);
-		if (pkt == NULL) {
-			ip6->ip6_src = fe->fe_key.fk_src6;
-			ip6->ip6_dst = fe->fe_key.fk_dst6;
-		} else {
-			ip6->ip6_src = pkt->pkt_flow_ipv6_src;
-			ip6->ip6_dst = pkt->pkt_flow_ipv6_dst;
-		}
-
-		th = (struct tcphdr *)(void *)((char *)ip6 + sizeof(*ip6));
-	}
-
-	/*
-	 * TCP header (fabricate a pure RST).
-	 */
-	if (pkt == NULL) {
-		th->th_sport = fe->fe_key.fk_sport;
-		th->th_dport = fe->fe_key.fk_dport;
-		th->th_seq = htonl(src->fse_seqlo);     /* peer's last ACK */
-		th->th_ack = 0;
-		th->th_flags = TH_RST;
-	} else {
-		th->th_sport = pkt->pkt_flow_tcp_src;
-		th->th_dport = pkt->pkt_flow_tcp_dst;
-		th->th_seq = pkt->pkt_flow_tcp_seq;
-		th->th_ack = pkt->pkt_flow_tcp_ack;
-		th->th_flags = pkt->pkt_flow_tcp_flags;
-	}
-	th->th_off = (tlen >> 2);
-	th->th_win = 0;
-
-	FSW_STATS_INC(FSW_STATS_FLOWS_ABORTED);
-
-	if (ipver == IPVERSION) {
-		struct ip_out_args ipoa;
-		struct route ro;
-
-		bzero(&ipoa, sizeof(ipoa));
-		ipoa.ipoa_boundif = fsw->fsw_ifp->if_index;
-		ipoa.ipoa_flags = (IPOAF_SELECT_SRCIF | IPOAF_BOUND_IF |
-		    IPOAF_BOUND_SRCADDR);
-		ipoa.ipoa_sotc = SO_TC_UNSPEC;
-		ipoa.ipoa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
-
-		/* TCP checksum */
-		th->th_sum = in_cksum(m, len);
-
-		ip->ip_v = IPVERSION;
-		ip->ip_hl = sizeof(*ip) >> 2;
-		ip->ip_tos = 0;
-		/*
-		 * ip_output() expects ip_len and ip_off to be in host order.
-		 */
-		ip->ip_len = len;
-		ip->ip_off = IP_DF;
-		ip->ip_ttl = (uint8_t)ip_defttl;
-		ip->ip_sum = 0;
-
-		bzero(&ro, sizeof(ro));
-		(void) ip_output(m, NULL, &ro, IP_OUTARGS, NULL, &ipoa);
-		ROUTE_RELEASE(&ro);
-	} else {
-		struct ip6_out_args ip6oa;
-		struct route_in6 ro6;
-
-		bzero(&ip6oa, sizeof(ip6oa));
-		ip6oa.ip6oa_boundif = fsw->fsw_ifp->if_index;
-		ip6oa.ip6oa_flags = (IP6OAF_SELECT_SRCIF | IP6OAF_BOUND_IF |
-		    IP6OAF_BOUND_SRCADDR);
-		ip6oa.ip6oa_sotc = SO_TC_UNSPEC;
-		ip6oa.ip6oa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
-
-		/* TCP checksum */
-		th->th_sum = in6_cksum(m, IPPROTO_TCP,
-		    sizeof(struct ip6_hdr), tlen);
-
-		ip6->ip6_vfc |= IPV6_VERSION;
-		ip6->ip6_hlim = IPV6_DEFHLIM;
-
-		ip6_output_setsrcifscope(m, fsw->fsw_ifp->if_index, NULL);
-		ip6_output_setdstifscope(m, fsw->fsw_ifp->if_index, NULL);
-
-		bzero(&ro6, sizeof(ro6));
-		(void) ip6_output(m, NULL, &ro6, IPV6_OUTARGS,
-		    NULL, NULL, &ip6oa);
-		ROUTE_RELEASE(&ro6);
-	}
-}
-
-void
-fsw_flow_abort_quic(struct flow_entry *fe, uint8_t *token)
-{
-	struct quic_stateless_reset {
-		uint8_t ssr_header[30];
-		uint8_t ssr_token[QUIC_STATELESS_RESET_TOKEN_SIZE];
-	};
-	struct nx_flowswitch *fsw = fe->fe_fsw;
-	struct ip *ip;
-	struct ip6_hdr *ip6;
-	struct udphdr *uh;
-	struct quic_stateless_reset *qssr;
-	uint16_t len, l3hlen, ulen;
-	struct mbuf *m;
-	unsigned int one = 1;
-	int error;
-
-	/* guaranteed by caller */
-	ASSERT(fsw->fsw_ifp != NULL);
-
-	/* skip zero token */
-	bool is_zero_token = true;
-	for (size_t i = 0; i < QUIC_STATELESS_RESET_TOKEN_SIZE; i++) {
-		if (token[i] != 0) {
-			is_zero_token = false;
-			break;
-		}
-	}
-	if (is_zero_token) {
-		return;
-	}
-
-	ulen = sizeof(struct udphdr) + sizeof(struct quic_stateless_reset);
-	if (fe->fe_key.fk_ipver == IPVERSION) {
-		l3hlen = sizeof(struct ip);
-	} else {
-		ASSERT(fe->fe_key.fk_ipver == IPV6_VERSION);
-		l3hlen = sizeof(struct ip6_hdr);
-	}
-
-	len = l3hlen + ulen;
-
-	error = mbuf_allocpacket(MBUF_DONTWAIT, max_linkhdr + len, &one, &m);
-	if (error != 0) {
-		return;
-	}
-	VERIFY(m != 0);
-
-	m->m_pkthdr.pkt_proto = IPPROTO_UDP;
-	m->m_data += max_linkhdr;               /* 32-bit aligned */
-	m->m_pkthdr.len = m->m_len = len;
-
-	/* zero out for checksum */
-	bzero(m->m_data, len);
-
-	if (fe->fe_key.fk_ipver == IPVERSION) {
-		ip = mtod(m, struct ip *);
-		ip->ip_p = IPPROTO_UDP;
-		ip->ip_len = htons(ulen);
-		ip->ip_src = fe->fe_key.fk_src4;
-		ip->ip_dst = fe->fe_key.fk_dst4;
-		uh = (struct udphdr *)(void *)((char *)ip + sizeof(*ip));
-	} else {
-		ip6 = mtod(m, struct ip6_hdr *);
-		ip6->ip6_nxt = IPPROTO_UDP;
-		ip6->ip6_plen = htons(ulen);
-		ip6->ip6_src = fe->fe_key.fk_src6;
-		ip6->ip6_dst = fe->fe_key.fk_dst6;
-		uh = (struct udphdr *)(void *)((char *)ip6 + sizeof(*ip6));
-	}
-
-	/* UDP header */
-	uh->uh_sport = fe->fe_key.fk_sport;
-	uh->uh_dport = fe->fe_key.fk_dport;
-	uh->uh_ulen = htons(ulen);
-
-	/* QUIC stateless reset */
-	qssr = (struct quic_stateless_reset *)(uh + 1);
-	read_frandom(&qssr->ssr_header, sizeof(qssr->ssr_header));
-	qssr->ssr_header[0] = (qssr->ssr_header[0] & 0x3f) | 0x40;
-	memcpy(qssr->ssr_token, token, QUIC_STATELESS_RESET_TOKEN_SIZE);
-
-	FSW_STATS_INC(FSW_STATS_FLOWS_ABORTED);
-
-	if (fe->fe_key.fk_ipver == IPVERSION) {
-		struct ip_out_args ipoa;
-		struct route ro;
-
-		bzero(&ipoa, sizeof(ipoa));
-		ipoa.ipoa_boundif = fsw->fsw_ifp->if_index;
-		ipoa.ipoa_flags = (IPOAF_SELECT_SRCIF | IPOAF_BOUND_IF |
-		    IPOAF_BOUND_SRCADDR);
-		ipoa.ipoa_sotc = SO_TC_UNSPEC;
-		ipoa.ipoa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
-
-		uh->uh_sum = in_cksum(m, len);
-		if (uh->uh_sum == 0) {
-			uh->uh_sum = 0xffff;
-		}
-
-		ip->ip_v = IPVERSION;
-		ip->ip_hl = sizeof(*ip) >> 2;
-		ip->ip_tos = 0;
-		/*
-		 * ip_output() expects ip_len and ip_off to be in host order.
-		 */
-		ip->ip_len = len;
-		ip->ip_off = IP_DF;
-		ip->ip_ttl = (uint8_t)ip_defttl;
-		ip->ip_sum = 0;
-
-		bzero(&ro, sizeof(ro));
-		(void) ip_output(m, NULL, &ro, IP_OUTARGS, NULL, &ipoa);
-		ROUTE_RELEASE(&ro);
-	} else {
-		struct ip6_out_args ip6oa;
-		struct route_in6 ro6;
-
-		bzero(&ip6oa, sizeof(ip6oa));
-		ip6oa.ip6oa_boundif = fsw->fsw_ifp->if_index;
-		ip6oa.ip6oa_flags = (IP6OAF_SELECT_SRCIF | IP6OAF_BOUND_IF |
-		    IP6OAF_BOUND_SRCADDR);
-		ip6oa.ip6oa_sotc = SO_TC_UNSPEC;
-		ip6oa.ip6oa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
-
-		uh->uh_sum = in6_cksum(m, IPPROTO_UDP, sizeof(struct ip6_hdr),
-		    ulen);
-		if (uh->uh_sum == 0) {
-			uh->uh_sum = 0xffff;
-		}
-
-		ip6->ip6_vfc |= IPV6_VERSION;
-		ip6->ip6_hlim = IPV6_DEFHLIM;
-		ip6_output_setsrcifscope(m, fsw->fsw_ifp->if_index, NULL);
-		ip6_output_setdstifscope(m, fsw->fsw_ifp->if_index, NULL);
-
-		bzero(&ro6, sizeof(ro6));
-		(void) ip6_output(m, NULL, &ro6, IPV6_OUTARGS,
-		    NULL, NULL, &ip6oa);
-		ROUTE_RELEASE(&ro6);
-	}
 }
 
 __attribute__((always_inline))

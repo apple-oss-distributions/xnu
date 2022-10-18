@@ -1,0 +1,31 @@
+/*
+ * Copyright (c) 2021, Apple Inc.  All rights reserved.
+ * 
+ * MIG server interface for memory error reporting.
+ */
+
+
+subsystem
+#if	KERNEL_USER
+    KernelUser
+#endif	/* KERNEL_USER */
+    memory_error_notification 5900;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+
+type mcc_ecc_event_t = struct[10] of uint32_t;
+
+simpleroutine   memory_error_notification(
+	RequestPort memory_error_port   : mach_port_t;
+	in          physical_address    : uint64_t;
+	in          ecc_flags           : uint32_t;
+	in          ce_count            : uint32_t;
+	ServerAuditToken atoken         : audit_token_t);
+
+simpleroutine   mcc_memory_error_notification(
+	RequestPort memory_error_port   : mach_port_t;
+	in          event               : mcc_ecc_event_t;
+	ServerAuditToken atoken         : audit_token_t);
+
+import <kern/ecc.h>;

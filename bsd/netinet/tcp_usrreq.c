@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -119,6 +119,8 @@
 #include <libkern/sysctl.h>
 #include <skywalk/os_stats_private.h>
 #endif /* SKYWALK */
+
+extern char *proc_name_address(void *p);
 
 errno_t tcp_fill_info_for_info_tuple(struct info_tuple *, struct tcp_info *);
 
@@ -315,6 +317,7 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 {
 	int error = 0;
 	struct inpcb *inp = sotoinpcb(so);
+	const uint8_t old_flags = inp->inp_vflag;
 	struct tcpcb *tp;
 	struct sockaddr_in6 *sin6p;
 
@@ -350,12 +353,19 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 			in6_sin6_2_sin(&sin, sin6p);
 			inp->inp_vflag |= INP_IPV4;
 			inp->inp_vflag &= ~INP_IPV6;
+
 			error = in_pcbbind(inp, (struct sockaddr *)&sin, p);
+			if (error != 0) {
+				inp->inp_vflag = old_flags;
+				route_clear(&inp->inp_route);
+			}
 			goto out;
 		}
 	}
 	error = in6_pcbbind(inp, nam, p);
 	if (error) {
+		inp->inp_vflag = old_flags;
+		route_clear(&inp->inp_route);
 		goto out;
 	}
 	COMMON_END(PRU_BIND);
@@ -386,6 +396,7 @@ tcp_usr_listen(struct socket *so, struct proc *p)
 		error = in_pcbbind(inp, NULL, p);
 	}
 	if (error == 0) {
+		TCP_LOG_STATE(tp, TCPS_LISTEN);
 		tp->t_state = TCPS_LISTEN;
 	}
 	TCP_LOG_LISTEN(tp, error);
@@ -408,6 +419,7 @@ tcp6_usr_listen(struct socket *so, struct proc *p)
 		error = in6_pcbbind(inp, NULL, p);
 	}
 	if (error == 0) {
+		TCP_LOG_STATE(tp, TCPS_LISTEN);
 		tp->t_state = TCPS_LISTEN;
 	}
 	TCP_LOG_LISTEN(tp, error);
@@ -433,7 +445,9 @@ tcp_connect_complete(struct socket *so)
 		tp->snd_wnd = tp->t_maxseg;
 		tp->max_sndwnd = tp->snd_wnd;
 	} else {
+		tp->t_flagsext |= TF_USR_OUTPUT;
 		error = tcp_output(tp);
+		tp->t_flagsext &= ~TF_USR_OUTPUT;
 	}
 
 #if NECP
@@ -445,6 +459,130 @@ tcp_connect_complete(struct socket *so)
 	}
 #endif /* NECP */
 
+	return error;
+}
+
+__attribute__((noinline))
+static void
+tcp_log_address_error(int error, struct sockaddr *nam, struct proc *p)
+{
+	char buffer[MAX_IPv6_STR_LEN];
+
+	if (nam->sa_family == AF_INET6) {
+		struct sockaddr_in6 *sin6p = (struct sockaddr_in6 *)(void *)nam;
+
+		inet_ntop(AF_INET6, &sin6p->sin6_addr, buffer, sizeof(buffer));
+	} else {
+		struct sockaddr_in *sinp = (struct sockaddr_in *)(void *)nam;
+
+		inet_ntop(AF_INET, &sinp->sin_addr, buffer, sizeof(buffer));
+	}
+	if (p == NULL) {
+		p = current_proc();
+	}
+	os_log(OS_LOG_DEFAULT, "connect address error %d for %s process %s:%u",
+	    error, buffer, proc_name_address(p), proc_pid(p));
+}
+
+/*
+ * Note that connecting to the all-zeros address is OK and is treated as the
+ * loopback address
+ */
+static int
+tcp_usr_connect_common(struct socket *so, struct tcpcb *tp, struct sockaddr *nam,
+    struct proc *p, bool isipv6, bool need_connect_complete)
+{
+	int error = 0;
+	struct inpcb *inp = sotoinpcb(so);
+
+	if (isipv6 == 0) {
+		struct sockaddr_in *sinp;
+
+		if (nam->sa_family != 0 && nam->sa_family != AF_INET) {
+			error = EAFNOSUPPORT;
+			goto out;
+		}
+		/*
+		 * Disallow connecting to multicast and broadcast addresses.
+		 */
+		sinp = (struct sockaddr_in *)(void *)nam;
+		if (sinp->sin_family == AF_INET &&
+		    (IN_MULTICAST(ntohl(sinp->sin_addr.s_addr)) ||
+		    sinp->sin_addr.s_addr == INADDR_BROADCAST)) {
+			error = EAFNOSUPPORT;
+			goto out;
+		}
+
+		if ((error = tcp_connect(tp, nam, p)) != 0) {
+			goto out;
+		}
+	} else {
+		struct sockaddr_in6 *sin6p;
+
+		if (nam->sa_family != 0 && nam->sa_family != AF_INET6) {
+			error = EAFNOSUPPORT;
+			goto out;
+		}
+
+		/*
+		 * Disallow connecting to multicast and broadcast addresses.
+		 */
+		sin6p = (struct sockaddr_in6 *)(void *)nam;
+		if (sin6p->sin6_family == AF_INET6 &&
+		    IN6_IS_ADDR_MULTICAST(&sin6p->sin6_addr)) {
+			error = EAFNOSUPPORT;
+			goto out;
+		}
+
+		if (IN6_IS_ADDR_V4MAPPED(&sin6p->sin6_addr)) {
+			struct sockaddr_in sin;
+
+			if ((inp->inp_flags & IN6P_IPV6_V6ONLY) != 0) {
+				error = EINVAL;
+				goto out;
+			}
+
+			in6_sin6_2_sin(&sin, sin6p);
+			/*
+			 * Disallow connecting to multicast and broadcast addresses.
+			 */
+			if (IN_MULTICAST(ntohl(sin.sin_addr.s_addr)) ||
+			    sin.sin_addr.s_addr == INADDR_BROADCAST) {
+				error = EAFNOSUPPORT;
+				goto out;
+			}
+			inp->inp_vflag |= INP_IPV4;
+			inp->inp_vflag &= ~INP_IPV6;
+			if ((error = tcp_connect(tp, (struct sockaddr *)&sin, p)) != 0) {
+				goto out;
+			}
+
+			goto out;
+		} else if (IN6_IS_ADDR_V4COMPAT(&sin6p->sin6_addr)) {
+			/*
+			 * Disallow connecting to multicast and broadcast addresses.
+			 */
+			if (IN_MULTICAST(ntohl(sin6p->sin6_addr.s6_addr32[3])) ||
+			    sin6p->sin6_addr.s6_addr32[3] == INADDR_BROADCAST) {
+				error = EAFNOSUPPORT;
+				goto out;
+			}
+		}
+
+		inp->inp_vflag &= ~INP_IPV4;
+		inp->inp_vflag |= INP_IPV6;
+		if ((error = tcp6_connect(tp, nam, p)) != 0) {
+			goto out;
+		}
+	}
+out:
+	if (need_connect_complete && error == 0) {
+		error = tcp_connect_complete(so);
+	}
+	TCP_LOG_CONNECT(tp, true, error);
+	if (error == EAFNOSUPPORT) {
+		tcp_log_address_error(error, nam, p);
+	}
 	return error;
 }
 
@@ -461,7 +599,6 @@ tcp_usr_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 	int error = 0;
 	struct inpcb *inp = sotoinpcb(so);
 	struct tcpcb *tp;
-	struct sockaddr_in *sinp;
 
 	TCPDEBUG0;
 	if (inp == NULL) {
@@ -497,29 +634,10 @@ tcp_usr_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 
 	calculate_tcp_clock();
 
-	if (nam->sa_family != 0 && nam->sa_family != AF_INET) {
-		error = EAFNOSUPPORT;
+	error = tcp_usr_connect_common(so, tp, nam, p, false, true);
+	if (error != 0) {
 		goto out;
 	}
-	/*
-	 * Must disallow TCP ``connections'' to multicast and broadcast addresses.
-	 */
-	sinp = (struct sockaddr_in *)(void *)nam;
-	if (sinp->sin_family == AF_INET &&
-	    (IN_MULTICAST(ntohl(sinp->sin_addr.s_addr)) ||
-	    sinp->sin_addr.s_addr == INADDR_BROADCAST)) {
-		error = EAFNOSUPPORT;
-		goto out;
-	}
-
-	if ((error = tcp_connect(tp, nam, p)) != 0) {
-		TCP_LOG_CONNECT(tp, true, error);
-		goto out;
-	}
-
-	error = tcp_connect_complete(so);
-
-	TCP_LOG_CONNECT(tp, true, error);
 
 	COMMON_END(PRU_CONNECT);
 }
@@ -640,7 +758,6 @@ tcp6_usr_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 	int error = 0;
 	struct inpcb *inp = sotoinpcb(so);
 	struct tcpcb *tp;
-	struct sockaddr_in6 *sin6p;
 
 	TCPDEBUG0;
 	if (inp == NULL) {
@@ -677,68 +794,11 @@ tcp6_usr_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 
 	calculate_tcp_clock();
 
-	if (nam->sa_family != 0 && nam->sa_family != AF_INET6) {
-		error = EAFNOSUPPORT;
+	error = tcp_usr_connect_common(so, tp, nam, p, true, true);
+	if (error != 0) {
+		route_clear(&inp->inp_route);
 		goto out;
 	}
-
-	/*
-	 * Must disallow TCP ``connections'' to multicast and broadcast addresses
-	 */
-	sin6p = (struct sockaddr_in6 *)(void *)nam;
-	if (sin6p->sin6_family == AF_INET6 &&
-	    IN6_IS_ADDR_MULTICAST(&sin6p->sin6_addr)) {
-		error = EAFNOSUPPORT;
-		goto out;
-	}
-
-	if (IN6_IS_ADDR_V4MAPPED(&sin6p->sin6_addr)) {
-		struct sockaddr_in sin;
-
-		if ((inp->inp_flags & IN6P_IPV6_V6ONLY) != 0) {
-			error = EINVAL;
-			goto out;
-		}
-
-		in6_sin6_2_sin(&sin, sin6p);
-		/*
-		 * Must disallow TCP ``connections'' to multicast and broadcast addresses.
-		 */
-		if (IN_MULTICAST(ntohl(sin.sin_addr.s_addr)) ||
-		    sin.sin_addr.s_addr == INADDR_BROADCAST) {
-			error = EAFNOSUPPORT;
-			goto out;
-		}
-		inp->inp_vflag |= INP_IPV4;
-		inp->inp_vflag &= ~INP_IPV6;
-		if ((error = tcp_connect(tp, (struct sockaddr *)&sin, p)) != 0) {
-			TCP_LOG_CONNECT(tp, true, error);
-			goto out;
-		}
-
-		error = tcp_connect_complete(so);
-		goto out;
-	} else if (IN6_IS_ADDR_V4COMPAT(&sin6p->sin6_addr)) {
-		/*
-		 * Must disallow TCP ``connections'' to multicast and broadcast addresses.
-		 */
-		if (IN_MULTICAST(ntohl(sin6p->sin6_addr.s6_addr32[3])) ||
-		    sin6p->sin6_addr.s6_addr32[3] == INADDR_BROADCAST) {
-			error = EAFNOSUPPORT;
-			goto out;
-		}
-	}
-
-	inp->inp_vflag &= ~INP_IPV4;
-	inp->inp_vflag |= INP_IPV6;
-	if ((error = tcp6_connect(tp, nam, p)) != 0) {
-		TCP_LOG_CONNECT(tp, true, error);
-		goto out;
-	}
-
-	error = tcp_connect_complete(so);
-
-	TCP_LOG_CONNECT(tp, true, error);
 
 	COMMON_END(PRU_CONNECT);
 }
@@ -978,15 +1038,12 @@ tcp_usr_rcvd(struct socket *so, int flags)
 
 __attribute__((noinline))
 static int
-tcp_send_implied_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p, int isipv6)
+tcp_send_implied_connect(struct socket *so, struct tcpcb *tp, struct sockaddr *nam,
+    struct proc *p, bool isipv6)
 {
 	int error = 0;
 
-	if (isipv6) {
-		error = tcp6_connect(tp, nam, p);
-	} else {
-		error = tcp_connect(tp, nam, p);
-	}
+	error = tcp_usr_connect_common(so, tp, nam, p, isipv6, false);
 	if (error != 0) {
 		goto out;
 	}
@@ -999,8 +1056,6 @@ tcp_send_implied_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p,
 	tp->max_sndwnd = tp->snd_wnd;
 	tcp_mss(tp, -1, IFSCOPE_NONE);
 out:
-	TCP_LOG_CONNECT(tp, true, error);
-
 	return error;
 }
 
@@ -1072,8 +1127,8 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 	uint32_t mpkl_len = 0; /* length of mbuf chain */
 	uint32_t mpkl_seq = 0; /* sequence number where new data is added */
 	struct so_mpkl_send_info mpkl_send_info = {};
+	bool isipv6;
 
-	int isipv6;
 	TCPDEBUG0;
 
 	if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD
@@ -1103,7 +1158,7 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 		TCPDEBUG1();
 		goto out;
 	}
-	isipv6 = nam && nam->sa_family == AF_INET6;
+	isipv6 = nam && nam->sa_family == AF_INET6 ? true : false;
 	tp = intotcpcb(inp);
 	TCPDEBUG1();
 
@@ -1157,7 +1212,7 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 			/*
 			 * Do implied connect if not yet connected,
 			 */
-			error = tcp_send_implied_connect(tp, nam, p, isipv6);
+			error = tcp_send_implied_connect(so, tp, nam, p, isipv6);
 			if (error != 0) {
 				goto out;
 			}
@@ -1177,7 +1232,9 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 			if (flags & PRUS_MORETOCOME) {
 				tp->t_flags |= TF_MORETOCOME;
 			}
+			tp->t_flagsext |= TF_USR_OUTPUT;
 			error = tcp_output(tp);
+			tp->t_flagsext &= ~TF_USR_OUTPUT;
 			if (flags & PRUS_MORETOCOME) {
 				tp->t_flags &= ~TF_MORETOCOME;
 			}
@@ -1206,14 +1263,16 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 			 * initialize maxseg/maxopd using peer's cached
 			 * MSS.
 			 */
-			error = tcp_send_implied_connect(tp, nam, p, isipv6);
+			error = tcp_send_implied_connect(so, tp, nam, p, isipv6);
 			if (error != 0) {
 				goto out;
 			}
 		}
 		tp->snd_up = tp->snd_una + so->so_snd.sb_cc;
 		tp->t_flagsext |= TF_FORCE;
+		tp->t_flagsext |= TF_USR_OUTPUT;
 		error = tcp_output(tp);
+		tp->t_flagsext &= ~TF_USR_OUTPUT;
 		tp->t_flagsext &= ~TF_FORCE;
 	}
 
@@ -1494,13 +1553,15 @@ skip_oinp:
 	lck_rw_done(&inp->inp_pcbinfo->ipi_lock);
 
 	if (inp->inp_flowhash == 0) {
-		inp->inp_flowhash = inp_calc_flowhash(inp);
+		inp_calc_flowhash(inp);
+		ASSERT(inp->inp_flowhash != 0);
 	}
 
 	tcp_set_max_rwinscale(tp, so);
 
 	soisconnecting(so);
 	tcpstat.tcps_connattempt++;
+	TCP_LOG_STATE(tp, TCPS_SYN_SENT);
 	tp->t_state = TCPS_SYN_SENT;
 	tp->t_timer[TCPT_KEEP] = OFFSET_FROM_START(tp, TCP_CONN_KEEPINIT(tp));
 	tp->iss = tcp_new_isn(tp);
@@ -1619,7 +1680,8 @@ tcp6_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p)
 	lck_rw_done(&inp->inp_pcbinfo->ipi_lock);
 
 	if (inp->inp_flowhash == 0) {
-		inp->inp_flowhash = inp_calc_flowhash(inp);
+		inp_calc_flowhash(inp);
+		ASSERT(inp->inp_flowhash != 0);
 	}
 	/* update flowinfo - RFC 6437 */
 	if (inp->inp_flow == 0 && inp->in6p_flags & IN6P_AUTOFLOWLABEL) {
@@ -1632,6 +1694,7 @@ tcp6_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p)
 
 	soisconnecting(so);
 	tcpstat.tcps_connattempt++;
+	TCP_LOG_STATE(tp, TCPS_SYN_SENT);
 	tp->t_state = TCPS_SYN_SENT;
 	tp->t_timer[TCPT_KEEP] = OFFSET_FROM_START(tp,
 	    TCP_CONN_KEEPINIT(tp));
@@ -1767,9 +1830,9 @@ tcp_fill_info(struct tcpcb *tp, struct tcp_info *ti)
 	ti->tcpi_tfo_recv_blackhole = !!(tp->t_tfo_stats & TFO_S_RECV_BLACKHOLE);
 	ti->tcpi_tfo_onebyte_proxy = !!(tp->t_tfo_stats & TFO_S_ONE_BYTE_PROXY);
 
-	ti->tcpi_ecn_client_setup = !!(tp->ecn_flags & TE_SETUPSENT);
-	ti->tcpi_ecn_server_setup = !!(tp->ecn_flags & TE_SETUPRECEIVED);
-	ti->tcpi_ecn_success = (tp->ecn_flags & TE_ECN_ON) == TE_ECN_ON ? 1 : 0;
+	ti->tcpi_ecn_client_setup = !!(tp->ecn_flags & (TE_SETUPSENT | TE_ACE_SETUPSENT));
+	ti->tcpi_ecn_server_setup = !!(tp->ecn_flags & (TE_SETUPRECEIVED | TE_ACE_SETUPRECEIVED));
+	ti->tcpi_ecn_success = (TCP_ECN_ENABLED(tp) || TCP_ACC_ECN_ON(tp)) ? 1 : 0;
 	ti->tcpi_ecn_lost_syn = !!(tp->ecn_flags & TE_LOST_SYN);
 	ti->tcpi_ecn_lost_synack = !!(tp->ecn_flags & TE_LOST_SYNACK);
 
@@ -2060,7 +2123,6 @@ tcp_lookup_peer_pid_locked(struct socket *so, pid_t *out_pid)
 void
 tcp_getconninfo(struct socket *so, struct conninfo_tcp *tcp_ci)
 {
-	(void) tcp_lookup_peer_pid_locked(so, &tcp_ci->tcpci_peer_pid);
 	tcp_fill_info(sototcpcb(so), &tcp_ci->tcpci_tcp_info);
 }
 
@@ -2980,6 +3042,7 @@ tcp_attach(struct socket *so, struct proc *p)
 	if (nstat_collect) {
 		nstat_tcp_new_pcb(inp);
 	}
+	TCP_LOG_STATE(tp, TCPS_CLOSED);
 	tp->t_state = TCPS_CLOSED;
 	return 0;
 }
@@ -3052,6 +3115,7 @@ tcp_usrclosed(struct tcpcb *tp)
 		    struct inpcb *, tp->t_inpcb,
 		    struct tcpcb *, tp,
 		    int32_t, TCPS_FIN_WAIT_1);
+		TCP_LOG_STATE(tp, TCPS_FIN_WAIT_1);
 		tp->t_state = TCPS_FIN_WAIT_1;
 		TCP_LOG_CONNECTION_SUMMARY(tp);
 		break;
@@ -3061,6 +3125,7 @@ tcp_usrclosed(struct tcpcb *tp)
 		    struct inpcb *, tp->t_inpcb,
 		    struct tcpcb *, tp,
 		    int32_t, TCPS_LAST_ACK);
+		TCP_LOG_STATE(tp, TCPS_LAST_ACK);
 		tp->t_state = TCPS_LAST_ACK;
 		TCP_LOG_CONNECTION_SUMMARY(tp);
 		break;
@@ -3131,4 +3196,59 @@ tcp_get_mpkl_send_info(struct mbuf *control,
 		return 0;
 	}
 	return ENOMSG;
+}
+
+/*
+ * tcp socket options.
+ *
+ * The switch statement below does nothing at runtime, as it serves as a
+ * compile time check to ensure that all of the tcp socket options are
+ * unique.  This works as long as this routine gets updated each time a
+ * new tcp socket option gets added.
+ *
+ * Any failures at compile time indicates duplicated tcp socket option
+ * values.
+ */
+static __attribute__((unused)) void
+tcpsockopt_cassert(void)
+{
+	/*
+	 * This is equivalent to _CASSERT() and the compiler wouldn't
+	 * generate any instructions, thus for compile time only.
+	 */
+	switch ((int)0) {
+	case 0:
+
+	/* bsd/netinet/tcp.h */
+	case TCP_NODELAY:
+	case TCP_MAXSEG:
+	case TCP_NOPUSH:
+	case TCP_NOOPT:
+	case TCP_KEEPALIVE:
+	case TCP_CONNECTIONTIMEOUT:
+	case PERSIST_TIMEOUT:
+	case TCP_RXT_CONNDROPTIME:
+	case TCP_RXT_FINDROP:
+	case TCP_KEEPINTVL:
+	case TCP_KEEPCNT:
+	case TCP_SENDMOREACKS:
+	case TCP_ENABLE_ECN:
+	case TCP_FASTOPEN:
+	case TCP_CONNECTION_INFO:
+	case TCP_NOTSENT_LOWAT:
+
+	/* bsd/netinet/tcp_private.h */
+	case TCP_INFO:
+	case TCP_MEASURE_SND_BW:
+	case TCP_MEASURE_BW_BURST:
+	case TCP_PEER_PID:
+	case TCP_ADAPTIVE_READ_TIMEOUT:
+	case TCP_OPTION_UNUSED_0:
+	case TCP_ADAPTIVE_WRITE_TIMEOUT:
+	case TCP_NOTIMEWAIT:
+	case TCP_DISABLE_BLACKHOLE_DETECTION:
+	case TCP_ECN_MODE:
+	case TCP_KEEPALIVE_OFFLOAD:
+		;
+	}
 }

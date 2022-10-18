@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2013-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,61 +26,23 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include "tcp_includes.h"
+
 #include <sys/param.h>
-#include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/syslog.h>
-#include <sys/protosw.h>
-#include <sys/socketvar.h>
 #include <sys/kern_control.h>
 #include <sys/domain.h>
 
 #include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <netinet/tcp_var.h>
-#include <netinet/tcp_cc.h>
 #include <mach/sdt.h>
 #include <libkern/OSAtomic.h>
 
-static int tcp_cc_debug;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, cc_debug, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tcp_cc_debug, 0, "Enable debug data collection");
+#include <libkern/OSTypes.h>
 
 extern struct tcp_cc_algo tcp_cc_newreno;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, newreno_sockets,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &tcp_cc_newreno.num_sockets,
-    0, "Number of sockets using newreno");
-
 extern struct tcp_cc_algo tcp_cc_ledbat;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, background_sockets,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &tcp_cc_ledbat.num_sockets,
-    0, "Number of sockets using background transport");
-
-#if (DEVELOPMENT || DEBUG)
-SYSCTL_SKMEM_TCP_INT(OID_AUTO, use_ledbat,
-    CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_use_ledbat, 0,
-    "Use TCP LEDBAT for testing");
-#else
-SYSCTL_SKMEM_TCP_INT(OID_AUTO, use_ledbat,
-    CTLFLAG_RD | CTLFLAG_LOCKED, int, tcp_use_ledbat, 0,
-    "Use TCP LEDBAT for testing");
-#endif /* (DEVELOPMENT || DEBUG) */
-
 extern struct tcp_cc_algo tcp_cc_cubic;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, cubic_sockets,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &tcp_cc_cubic.num_sockets,
-    0, "Number of sockets using cubic");
-
-SYSCTL_SKMEM_TCP_INT(OID_AUTO, use_newreno,
-    CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_use_newreno, 0,
-    "Use TCP NewReno by default");
-
-static int tcp_check_cwnd_nonvalidated = 1;
-#if (DEBUG || DEVELOPMENT)
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, cwnd_nonvalidated,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_check_cwnd_nonvalidated, 0,
-    "Check if congestion window is non-validated");
-#endif /* (DEBUG || DEVELOPMENT) */
 
  #define SET_SNDSB_IDEAL_SIZE(sndsb, size) \
 	sndsb->sb_idealsize = min(max(tcp_sendspace, tp->snd_ssthresh), \
@@ -88,18 +50,7 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, cwnd_nonvalidated,
 
 /* Array containing pointers to currently implemented TCP CC algorithms */
 struct tcp_cc_algo* tcp_cc_algo_list[TCP_CC_ALGO_COUNT];
-struct zone *tcp_cc_zone;
 
-#define TCP_CCDBG_NOUNIT 0xffffffff
-static kern_ctl_ref tcp_ccdbg_ctlref = NULL;
-volatile UInt32 tcp_ccdbg_unit = TCP_CCDBG_NOUNIT;
-
-void tcp_cc_init(void);
-static void tcp_cc_control_register(void);
-static errno_t tcp_ccdbg_control_connect(kern_ctl_ref kctl,
-    struct sockaddr_ctl *sac, void **uinfo);
-static errno_t tcp_ccdbg_control_disconnect(kern_ctl_ref kctl,
-    u_int32_t unit, void *uinfo);
 static struct tcp_cc_algo tcp_cc_algo_none;
 /*
  * Initialize TCP congestion control algorithms.
@@ -116,139 +67,7 @@ tcp_cc_init(void)
 	tcp_cc_algo_list[TCP_CC_ALGO_BACKGROUND_INDEX] = &tcp_cc_ledbat;
 	tcp_cc_algo_list[TCP_CC_ALGO_CUBIC_INDEX] = &tcp_cc_cubic;
 
-	tcp_cc_control_register();
-}
-
-static void
-tcp_cc_control_register(void)
-{
-	struct kern_ctl_reg ccdbg_control;
-	errno_t err;
-
-	bzero(&ccdbg_control, sizeof(ccdbg_control));
-	strlcpy(ccdbg_control.ctl_name, TCP_CC_CONTROL_NAME,
-	    sizeof(ccdbg_control.ctl_name));
-	ccdbg_control.ctl_connect = tcp_ccdbg_control_connect;
-	ccdbg_control.ctl_disconnect = tcp_ccdbg_control_disconnect;
-	ccdbg_control.ctl_flags |= CTL_FLAG_PRIVILEGED;
-	ccdbg_control.ctl_flags |= CTL_FLAG_REG_SOCK_STREAM;
-	ccdbg_control.ctl_sendsize = 32 * 1024;
-
-	err = ctl_register(&ccdbg_control, &tcp_ccdbg_ctlref);
-	if (err != 0) {
-		log(LOG_ERR, "failed to register tcp_cc debug control");
-	}
-}
-
-/* Allow only one socket to connect at any time for debugging */
-static errno_t
-tcp_ccdbg_control_connect(kern_ctl_ref kctl, struct sockaddr_ctl *sac,
-    void **uinfo)
-{
-#pragma unused(kctl)
-#pragma unused(uinfo)
-
-	UInt32 old_value = TCP_CCDBG_NOUNIT;
-	UInt32 new_value = sac->sc_unit;
-
-	if (tcp_ccdbg_unit != old_value) {
-		return EALREADY;
-	}
-
-	if (OSCompareAndSwap(old_value, new_value, &tcp_ccdbg_unit)) {
-		return 0;
-	} else {
-		return EALREADY;
-	}
-}
-
-static errno_t
-tcp_ccdbg_control_disconnect(kern_ctl_ref kctl, u_int32_t unit, void *uinfo)
-{
-#pragma unused(kctl, unit, uinfo)
-
-	if (unit == tcp_ccdbg_unit) {
-		UInt32 old_value = tcp_ccdbg_unit;
-		UInt32 new_value = TCP_CCDBG_NOUNIT;
-		if (tcp_ccdbg_unit == new_value) {
-			return 0;
-		}
-
-		if (!OSCompareAndSwap(old_value, new_value,
-		    &tcp_ccdbg_unit)) {
-			log(LOG_DEBUG,
-			    "failed to disconnect tcp_cc debug control");
-		}
-	}
-	return 0;
-}
-
-inline void
-tcp_ccdbg_trace(struct tcpcb *tp, struct tcphdr *th, int32_t event)
-{
-#if !CONFIG_DTRACE
-#pragma unused(th)
-#endif /* !CONFIG_DTRACE */
-	struct inpcb *inp = tp->t_inpcb;
-
-	if (tcp_cc_debug && tcp_ccdbg_unit > 0) {
-		struct tcp_cc_debug_state dbg_state;
-		struct timespec tv;
-
-		bzero(&dbg_state, sizeof(dbg_state));
-
-		nanotime(&tv);
-		/* Take time in seconds */
-		dbg_state.ccd_tsns = (tv.tv_sec * 1000000000) + tv.tv_nsec;
-		inet_ntop(SOCK_DOM(inp->inp_socket),
-		    ((SOCK_DOM(inp->inp_socket) == PF_INET) ?
-		    (void *)&inp->inp_laddr.s_addr :
-		    (void *)&inp->in6p_laddr), dbg_state.ccd_srcaddr,
-		    sizeof(dbg_state.ccd_srcaddr));
-		dbg_state.ccd_srcport = ntohs(inp->inp_lport);
-		inet_ntop(SOCK_DOM(inp->inp_socket),
-		    ((SOCK_DOM(inp->inp_socket) == PF_INET) ?
-		    (void *)&inp->inp_faddr.s_addr :
-		    (void *)&inp->in6p_faddr), dbg_state.ccd_destaddr,
-		    sizeof(dbg_state.ccd_destaddr));
-		dbg_state.ccd_destport = ntohs(inp->inp_fport);
-
-		dbg_state.ccd_snd_cwnd = tp->snd_cwnd;
-		dbg_state.ccd_snd_wnd = tp->snd_wnd;
-		dbg_state.ccd_snd_ssthresh = tp->snd_ssthresh;
-		dbg_state.ccd_pipeack = tp->t_pipeack;
-		dbg_state.ccd_rttcur = tp->t_rttcur;
-		dbg_state.ccd_rxtcur = tp->t_rxtcur;
-		dbg_state.ccd_srtt = tp->t_srtt >> TCP_RTT_SHIFT;
-		dbg_state.ccd_event = event;
-		dbg_state.ccd_sndcc = inp->inp_socket->so_snd.sb_cc;
-		dbg_state.ccd_sndhiwat = inp->inp_socket->so_snd.sb_hiwat;
-		dbg_state.ccd_bytes_acked = tp->t_bytes_acked;
-		dbg_state.ccd_cc_index = tp->tcp_cc_index;
-		switch (tp->tcp_cc_index) {
-		case TCP_CC_ALGO_CUBIC_INDEX:
-			dbg_state.u.cubic_state.ccd_last_max =
-			    tp->t_ccstate->cub_last_max;
-			dbg_state.u.cubic_state.ccd_tcp_win =
-			    tp->t_ccstate->cub_tcp_win;
-			dbg_state.u.cubic_state.ccd_avg_lastmax =
-			    tp->t_ccstate->cub_avg_lastmax;
-			dbg_state.u.cubic_state.ccd_mean_deviation =
-			    tp->t_ccstate->cub_mean_dev;
-			break;
-		case TCP_CC_ALGO_BACKGROUND_INDEX:
-			dbg_state.u.ledbat_state.led_base_rtt =
-			    get_base_rtt(tp);
-			break;
-		default:
-			break;
-		}
-
-		ctl_enqueuedata(tcp_ccdbg_ctlref, tcp_ccdbg_unit,
-		    &dbg_state, sizeof(dbg_state), 0);
-	}
-	DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
-	    struct tcpcb *, tp, struct tcphdr *, th, int32_t, event);
+	tcp_ccdbg_control_register();
 }
 
 void
@@ -396,18 +215,9 @@ tcp_cc_allocate_state(struct tcpcb *tp)
 	if ((tp->tcp_cc_index == TCP_CC_ALGO_CUBIC_INDEX ||
 	    tp->tcp_cc_index == TCP_CC_ALGO_BACKGROUND_INDEX) &&
 	    tp->t_ccstate == NULL) {
-		tp->t_ccstate = (struct tcp_ccstate *)zalloc(tcp_cc_zone);
+		tp->t_ccstate = &tp->_t_ccstate;
 
-		/*
-		 * If we could not allocate memory for congestion control
-		 * state, revert to using TCP NewReno as it does not
-		 * require any state
-		 */
-		if (tp->t_ccstate == NULL) {
-			tp->tcp_cc_index = TCP_CC_ALGO_NEWRENO_INDEX;
-		} else {
-			bzero(tp->t_ccstate, sizeof(*tp->t_ccstate));
-		}
+		bzero(tp->t_ccstate, sizeof(*tp->t_ccstate));
 	}
 }
 
@@ -415,17 +225,19 @@ tcp_cc_allocate_state(struct tcpcb *tp)
  * If stretch ack was disabled automatically on long standing connections,
  * re-evaluate the situation after 15 minutes to enable it.
  */
-#define TCP_STRETCHACK_DISABLE_WIN      (15 * 60 * TCP_RETRANSHZ)
+#define TCP_STRETCHACK_DISABLE_WIN (15 * 60 * TCP_RETRANSHZ)
 void
 tcp_cc_after_idle_stretchack(struct tcpcb *tp)
 {
+	struct tcp_globals *globals;
 	int32_t tdiff;
 
 	if (!(tp->t_flagsext & TF_DISABLE_STRETCHACK)) {
 		return;
 	}
 
-	tdiff = timer_diff(tcp_now, 0, tp->rcv_nostrack_ts, 0);
+	globals = tcp_get_globals(tp);
+	tdiff = timer_diff(tcp_globals_now(globals), 0, tp->rcv_nostrack_ts, 0);
 	if (tdiff < 0) {
 		tdiff = -tdiff;
 	}
@@ -439,15 +251,15 @@ tcp_cc_after_idle_stretchack(struct tcpcb *tp)
 }
 
 /*
- * Detect if the congestion window is non-vlidated according to
+ * Detect if the congestion window is non-validated according to
  * draft-ietf-tcpm-newcwv-07
  */
-
 inline uint32_t
 tcp_cc_is_cwnd_nonvalidated(struct tcpcb *tp)
 {
 	struct socket *so = tp->t_inpcb->inp_socket;
-	if (tp->t_pipeack == 0 || tcp_check_cwnd_nonvalidated == 0) {
+
+	if (tp->t_pipeack == 0) {
 		tp->t_flagsext &= ~TF_CWND_NONVALIDATED;
 		return 0;
 	}
@@ -463,6 +275,7 @@ tcp_cc_is_cwnd_nonvalidated(struct tcpcb *tp)
 	} else {
 		tp->t_flagsext |= TF_CWND_NONVALIDATED;
 	}
+
 	return tp->t_flagsext & TF_CWND_NONVALIDATED;
 }
 
@@ -490,10 +303,10 @@ tcp_cc_adjust_nonvalidated_cwnd(struct tcpcb *tp)
  * TCP_PIPEACK_SAMPLE_COUNT is 3 at this time, it will be simpler to do
  * a comparision. We should change ths if the number of samples increases.
  */
-inline u_int32_t
+inline uint32_t
 tcp_get_max_pipeack(struct tcpcb *tp)
 {
-	u_int32_t max_pipeack = 0;
+	uint32_t max_pipeack = 0;
 	max_pipeack = (tp->t_pipeack_sample[0] > tp->t_pipeack_sample[1]) ?
 	    tp->t_pipeack_sample[0] : tp->t_pipeack_sample[1];
 	max_pipeack = (tp->t_pipeack_sample[2] > max_pipeack) ?

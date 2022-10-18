@@ -73,6 +73,8 @@
 #include <Availability.h>
 #endif /* KERNEL */
 
+#ifndef DRIVERKIT
+
 /*
  * [XSI] The fd_set type shall be defined as described in <sys/select.h>.
  * The timespec structure shall be defined as described in <time.h>
@@ -258,5 +260,9 @@ int     utimes(const char *, const struct timeval *);
 __END_DECLS
 
 #endif /* !KERNEL */
+
+#else /* !DRIVERKIT */
+#include <sys/_types/_time_t.h>
+#endif /* DRIVERKIT */
 
 #endif /* !_SYS_TIME_H_ */

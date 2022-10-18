@@ -105,11 +105,8 @@ const struct memory_object_pager_ops vnode_pager_ops = {
 	.memory_object_data_request = vnode_pager_data_request,
 	.memory_object_data_return = vnode_pager_data_return,
 	.memory_object_data_initialize = vnode_pager_data_initialize,
-	.memory_object_data_unlock = vnode_pager_data_unlock,
-	.memory_object_synchronize = vnode_pager_synchronize,
 	.memory_object_map = vnode_pager_map,
 	.memory_object_last_unmap = vnode_pager_last_unmap,
-	.memory_object_data_reclaim = NULL,
 	.memory_object_backing_object = NULL,
 	.memory_object_pager_name = "vnode pager"
 };
@@ -453,16 +450,6 @@ vnode_pager_data_initialize(
 	return KERN_FAILURE;
 }
 
-kern_return_t
-vnode_pager_data_unlock(
-	__unused memory_object_t                mem_obj,
-	__unused memory_object_offset_t offset,
-	__unused memory_object_size_t           size,
-	__unused vm_prot_t              desired_access)
-{
-	return KERN_FAILURE;
-}
-
 void
 vnode_pager_dirtied(
 	memory_object_t         mem_obj,
@@ -698,20 +685,6 @@ vnode_pager_terminate(
  *
  */
 kern_return_t
-vnode_pager_synchronize(
-	__unused memory_object_t        mem_obj,
-	__unused memory_object_offset_t offset,
-	__unused memory_object_size_t   length,
-	__unused vm_sync_t              sync_flags)
-{
-	panic("vnode_pager_synchronize: memory_object_synchronize no longer supported");
-	return KERN_FAILURE;
-}
-
-/*
- *
- */
-kern_return_t
 vnode_pager_map(
 	memory_object_t         mem_obj,
 	vm_prot_t               prot)
@@ -894,7 +867,7 @@ vnode_pager_cluster_read(
 			 */
 		}
 
-		kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGER_CLREAD_NO_UPL), 0 /* arg */);
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGER_CLREAD_NO_UPL), 0 /* arg */);
 		return KERN_FAILURE;
 	}
 
@@ -1301,7 +1274,8 @@ fill_vnodeinfoforaddr(
 		return 0;
 	} else if (!object->pager_ready ||
 	    object->terminating ||
-	    !object->alive) {
+	    !object->alive ||
+	    object->pager == NULL) {
 		vm_object_unlock(object);
 		return 0;
 	} else {
@@ -1393,8 +1367,12 @@ find_vnode_object(
 				vm_object_unlock(object);
 			}
 
-			if (object && !object->internal && object->pager_ready && !object->terminating &&
-			    object->alive) {
+			if (object &&
+			    !object->internal &&
+			    object->pager_ready &&
+			    !object->terminating &&
+			    object->alive &&
+			    object->pager != NULL) {
 				memory_object = object->pager;
 				pager_ops = memory_object->mo_pager_ops;
 

@@ -41,37 +41,39 @@
 #define JETSAM_PRIORITY_IDLE_HEAD                -2
 /* The value -1 is an alias to JETSAM_PRIORITY_DEFAULT */
 #define JETSAM_PRIORITY_IDLE                      0
-#define JETSAM_PRIORITY_IDLE_DEFERRED             1 /* Keeping this around till all xnu_quick_tests can be moved away from it.*/
+#define JETSAM_PRIORITY_ENTITLED_MAX              9 /* Entitled processes may use bands 1-9 for experimentation */
+#define JETSAM_PRIORITY_IDLE_DEFERRED             10 /* Keeping this around till all xnu_quick_tests can be moved away from it.*/
 #define JETSAM_PRIORITY_AGING_BAND1               JETSAM_PRIORITY_IDLE_DEFERRED
-#define JETSAM_PRIORITY_BACKGROUND_OPPORTUNISTIC  2
+#define JETSAM_PRIORITY_BACKGROUND_OPPORTUNISTIC  20
 #define JETSAM_PRIORITY_AGING_BAND2               JETSAM_PRIORITY_BACKGROUND_OPPORTUNISTIC
-#define JETSAM_PRIORITY_BACKGROUND                3
+#define JETSAM_PRIORITY_BACKGROUND                30
 /*
  * NB: This band is no longer used by mail, but IS used by many active
  * processes doing background work.
  */
-#define JETSAM_PRIORITY_MAIL                      4
+#define JETSAM_PRIORITY_MAIL                      40
 #define JETSAM_PRIORITY_ELEVATED_INACTIVE         JETSAM_PRIORITY_MAIL
-#define JETSAM_PRIORITY_PHONE                     5
-#define JETSAM_PRIORITY_UI_SUPPORT                8
-#define JETSAM_PRIORITY_FOREGROUND_SUPPORT        9
-#define JETSAM_PRIORITY_FOREGROUND               10
-#define JETSAM_PRIORITY_AUDIO_AND_ACCESSORY      12
-#define JETSAM_PRIORITY_CONDUCTOR                13
-#define JETSAM_PRIORITY_DRIVER_APPLE             15
-#define JETSAM_PRIORITY_HOME                     16
-#define JETSAM_PRIORITY_EXECUTIVE                17
-#define JETSAM_PRIORITY_IMPORTANT                18
-#define JETSAM_PRIORITY_CRITICAL                 19
+#define JETSAM_PRIORITY_PHONE                     50
+#define JETSAM_PRIORITY_FREEZER                   75
+#define JETSAM_PRIORITY_UI_SUPPORT                80
+#define JETSAM_PRIORITY_FOREGROUND_SUPPORT        90
+#define JETSAM_PRIORITY_FOREGROUND               100
+#define JETSAM_PRIORITY_AUDIO_AND_ACCESSORY      120
+#define JETSAM_PRIORITY_CONDUCTOR                130
+#define JETSAM_PRIORITY_DRIVER_APPLE             150
+#define JETSAM_PRIORITY_HOME                     160
+#define JETSAM_PRIORITY_EXECUTIVE                170
+#define JETSAM_PRIORITY_IMPORTANT                180
+#define JETSAM_PRIORITY_CRITICAL                 190
 
-#define JETSAM_PRIORITY_MAX                      21
+#define JETSAM_PRIORITY_MAX                      210
 
 /* TODO - tune. This should probably be lower priority */
-#define JETSAM_PRIORITY_DEFAULT                  18
-#define JETSAM_PRIORITY_TELEPHONY                19
+#define JETSAM_PRIORITY_DEFAULT                  180
+#define JETSAM_PRIORITY_TELEPHONY                190
 
 /* Compatibility */
-#define DEFAULT_JETSAM_PRIORITY                  18
+#define DEFAULT_JETSAM_PRIORITY                  180
 
 /*
  * The deferral time used by default for apps and daemons in all aging
@@ -370,6 +372,11 @@ __END_DECLS
 
 #define MEMORYSTATUS_CMD_GET_PROCESS_IS_FROZEN 24 /* Check if the process is frozen. */
 
+#define MEMORYSTATUS_CMD_MARK_PROCESS_COALITION_SWAPPABLE 25 /* Set the coalition led by this process as swappable. This is a one-way transition. Swappable coalitions can never be made non-swappable. */
+#define MEMORYSTATUS_CMD_GET_PROCESS_COALITION_IS_SWAPPABLE 26 /* Get the swappable status for this process' coalition. */
+
+#define MEMORYSTATUS_CMD_CONVERT_MEMLIMIT_MB 28 /* Given a memlimit value (which may be 0 or -1), convert it to an actual limit in megabytes. */
+
 /* Commands that act on a group of processes */
 #define MEMORYSTATUS_CMD_GRP_SET_PROPERTIES           100
 
@@ -508,7 +515,7 @@ typedef struct memorystatus_memlimit_properties2 {
 #define P_MEMSTAT_PRIORITYUPDATED      0x00000080 /* Process had its jetsam priority updated */
 #define P_MEMSTAT_FOREGROUND           0x00000100 /* Process is in the FG jetsam band...unused??? */
 #define P_MEMSTAT_REFREEZE_ELIGIBLE    0x00000400 /* Process was once thawed i.e. its state was brought back from disk. It is now refreeze eligible.*/
-#define P_MEMSTAT_MANAGED              0x00000800 /* Process is managed by assertiond i.e. is either application or extension */
+#define P_MEMSTAT_MANAGED              0x00000800 /* Process is managed by RunningBoard i.e. is either application or extension */
 #define P_MEMSTAT_INTERNAL             0x00001000 /* Process is a system-critical-not-be-jetsammed process i.e. launchd */
 #define P_MEMSTAT_FATAL_MEMLIMIT                  0x00002000   /* current fatal state of the process's memlimit */
 #define P_MEMSTAT_MEMLIMIT_ACTIVE_FATAL           0x00004000   /* if set, exceeding limit is fatal when the process is active   */
@@ -624,12 +631,23 @@ typedef enum memorystatus_policy {
 	kPolicyDefault        = 0x0,
 	kPolicyMoreFree       = 0x1,
 } memorystatus_policy_t;
+extern unsigned int memorystatus_swap_all_apps;
 
-boolean_t memorystatus_kill_on_VM_page_shortage(boolean_t async);
-boolean_t memorystatus_kill_on_FC_thrashing(boolean_t async);
-boolean_t memorystatus_kill_on_VM_compressor_thrashing(boolean_t async);
+/*
+ * Synchronous memorystatus kill calls.
+ */
+
+boolean_t memorystatus_kill_on_VM_page_shortage(void);
 boolean_t memorystatus_kill_on_vnode_limit(void);
-boolean_t memorystatus_kill_on_sustained_pressure(boolean_t async);
+boolean_t memorystatus_kill_on_sustained_pressure(void);
+
+/*
+ * Wake up the memorystatus thread so it can do async kills.
+ * The memorystatus thread will keep killing until the system is
+ * considered healthy.
+ */
+void memorystatus_thread_wake(void);
+
 /*
  * Attempt to kill the specified pid with the given reason.
  * Consumes a reference on the jetsam_reason.
@@ -638,6 +656,14 @@ boolean_t memorystatus_kill_with_jetsam_reason_sync(pid_t pid, os_reason_t jetsa
 
 void jetsam_on_ledger_cpulimit_exceeded(void);
 void memorystatus_fast_jetsam_override(boolean_t enable_override);
+/*
+ * Disable memorystatus_swap_all_apps.
+ * Used by vm_pageout at boot if the swap volume is too small to support app swap.
+ * Returns true iff app swap is now disabled.
+ * On development or debug kernels, app swap can be enabled via a boot-arg and in
+ * that case can not be disabled.
+ */
+bool memorystatus_disable_swap(void);
 
 #endif /* CONFIG_JETSAM */
 
@@ -663,7 +689,9 @@ void memorystatus_get_task_page_counts(task_t task, uint32_t *footprint, uint32_
 void memorystatus_invalidate_idle_demotion_locked(proc_t p, boolean_t clean_state);
 void memorystatus_update_priority_locked(proc_t p, int priority, boolean_t head_insert, boolean_t skip_demotion_check);
 
-extern bool memorystatus_task_has_increased_memory_limit_entitlement(task_t task);
+bool memorystatus_task_has_increased_memory_limit_entitlement(task_t task);
+bool memorystatus_task_has_legacy_footprint_entitlement(task_t task);
+bool memorystatus_task_has_ios13extended_footprint_limit(task_t task);
 
 #if VM_PRESSURE_EVENTS
 

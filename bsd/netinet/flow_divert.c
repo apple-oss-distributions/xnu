@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -98,11 +98,13 @@
 	        }                                                                                                                                       \
 	} while (0)
 
+#define FDGRP_RETAIN(grp)  if ((grp) != NULL) OSIncrementAtomic(&(grp)->ref_count)
+#define FDGRP_RELEASE(grp) if ((grp) != NULL && 1 == OSDecrementAtomic(&(grp)->ref_count)) flow_divert_group_destroy(grp)
+
 #define FDLOCK(pcb)                                             lck_mtx_lock(&(pcb)->mtx)
 #define FDUNLOCK(pcb)                                   lck_mtx_unlock(&(pcb)->mtx)
 
 #define FD_CTL_SENDBUFF_SIZE                    (128 * 1024)
-#define FD_CTL_RCVBUFF_SIZE                             (128 * 1024)
 
 #define GROUP_BIT_CTL_ENQUEUE_BLOCKED   0
 
@@ -122,6 +124,8 @@ struct flow_divert_trie_node {
 #define TRIE_NODE(t, i)                 ((t)->nodes[(i)])
 #define TRIE_CHILD(t, i, b)             (((t)->child_maps + (CHILD_MAP_SIZE * TRIE_NODE(t, i).child_map))[(b)])
 #define TRIE_BYTE(t, i)                 ((t)->bytes[(i)])
+
+#define SO_IS_DIVERTED(s) (((s)->so_flags & SOF_FLOW_DIVERT) && (s)->so_fd_pcb != NULL)
 
 static struct flow_divert_pcb           nil_pcb;
 
@@ -170,6 +174,8 @@ flow_divert_get_buffered_target_address(mbuf_t buffer);
 
 static void
 flow_divert_disconnect_socket(struct socket *so, bool is_connected);
+
+static void flow_divert_group_destroy(struct flow_divert_group *group);
 
 static inline uint8_t
 flow_divert_syslog_type_to_oslog_type(int syslog_type)
@@ -230,41 +236,70 @@ flow_divert_pcb_lookup(uint32_t hash, struct flow_divert_group *group)
 	return fd_cb;
 }
 
-static errno_t
-flow_divert_pcb_insert(struct flow_divert_pcb *fd_cb, uint32_t ctl_unit)
+static struct flow_divert_group *
+flow_divert_group_lookup(uint32_t ctl_unit, struct flow_divert_pcb *fd_cb)
 {
-	errno_t                                                 error                                           = 0;
-	struct                                          flow_divert_pcb *exist          = NULL;
-	struct flow_divert_group        *group;
-	static uint32_t                         g_nextkey                                       = 1;
-	static uint32_t                         g_hash_seed                                     = 0;
-	int                                                     try_count                                       = 0;
-
-	if (ctl_unit == 0 || ctl_unit >= GROUP_COUNT_MAX) {
-		return EINVAL;
-	}
-
-	socket_unlock(fd_cb->so, 0);
+	struct flow_divert_group *group = NULL;
 	lck_rw_lock_shared(&g_flow_divert_group_lck);
-
 	if (g_flow_divert_groups == NULL || g_active_group_count == 0) {
-		FDLOG0(LOG_ERR, &nil_pcb, "No active groups, flow divert cannot be used for this socket");
-		error = ENETUNREACH;
-		goto done;
+		if (fd_cb != NULL) {
+			FDLOG0(LOG_ERR, fd_cb, "No active groups, flow divert cannot be used for this socket");
+		}
+	} else if (ctl_unit == 0 || ctl_unit >= GROUP_COUNT_MAX) {
+		FDLOG(LOG_ERR, fd_cb, "Cannot lookup group with invalid control unit (%u)", ctl_unit);
+	} else {
+		group = g_flow_divert_groups[ctl_unit];
+		if (group == NULL) {
+			if (fd_cb != NULL) {
+				FDLOG(LOG_ERR, fd_cb, "Group for control unit %u is NULL, flow divert cannot be used for this socket", ctl_unit);
+			}
+		} else {
+			FDGRP_RETAIN(group);
+		}
 	}
+	lck_rw_done(&g_flow_divert_group_lck);
+	return group;
+}
 
-	group = g_flow_divert_groups[ctl_unit];
+static errno_t
+flow_divert_pcb_insert(struct flow_divert_pcb *fd_cb, struct flow_divert_group *group)
+{
+	int error = 0;
+	lck_rw_lock_exclusive(&group->lck);
+	if (!(group->flags & FLOW_DIVERT_GROUP_FLAG_DEFUNCT)) {
+		if (NULL == RB_INSERT(fd_pcb_tree, &group->pcb_tree, fd_cb)) {
+			fd_cb->group = group;
+			fd_cb->control_group_unit = group->ctl_unit;
+			FDRETAIN(fd_cb); /* The group now has a reference */
+		} else {
+			FDLOG(LOG_ERR, fd_cb, "Group %u already contains a PCB with hash %u", group->ctl_unit, fd_cb->hash);
+			error = EEXIST;
+		}
+	} else {
+		FDLOG(LOG_ERR, fd_cb, "Group %u is defunct, cannot insert", group->ctl_unit);
+		error = ENOENT;
+	}
+	lck_rw_done(&group->lck);
+	return error;
+}
+
+static errno_t
+flow_divert_add_to_group(struct flow_divert_pcb *fd_cb, uint32_t ctl_unit)
+{
+	errno_t error = 0;
+	struct flow_divert_group *group = NULL;
+	static uint32_t g_nextkey = 1;
+	static uint32_t g_hash_seed = 0;
+	int try_count = 0;
+
+	group = flow_divert_group_lookup(ctl_unit, fd_cb);
 	if (group == NULL) {
-		FDLOG(LOG_ERR, &nil_pcb, "Group for control unit %u is NULL, flow divert cannot be used for this socket", ctl_unit);
-		error = ENETUNREACH;
-		goto done;
+		return ENOENT;
 	}
-
-	socket_lock(fd_cb->so, 0);
 
 	do {
-		uint32_t        key[2];
-		uint32_t        idx;
+		uint32_t key[2];
+		uint32_t idx;
 
 		key[0] = g_nextkey++;
 		key[1] = RandomULong();
@@ -273,41 +308,35 @@ flow_divert_pcb_insert(struct flow_divert_pcb *fd_cb, uint32_t ctl_unit)
 			g_hash_seed = RandomULong();
 		}
 
+		error = 0;
 		fd_cb->hash = net_flowhash(key, sizeof(key), g_hash_seed);
 
-		for (idx = 1; idx < GROUP_COUNT_MAX; idx++) {
-			struct flow_divert_group *curr_group = g_flow_divert_groups[idx];
-			if (curr_group != NULL && curr_group != group) {
+		for (idx = 1; idx < GROUP_COUNT_MAX && error == 0; idx++) {
+			if (idx == ctl_unit) {
+				continue;
+			}
+			struct flow_divert_group *curr_group = flow_divert_group_lookup(idx, NULL);
+			if (curr_group != NULL) {
 				lck_rw_lock_shared(&curr_group->lck);
-				exist = RB_FIND(fd_pcb_tree, &curr_group->pcb_tree, fd_cb);
-				lck_rw_done(&curr_group->lck);
-				if (exist != NULL) {
-					break;
+				if (NULL != RB_FIND(fd_pcb_tree, &curr_group->pcb_tree, fd_cb)) {
+					error = EEXIST;
 				}
+				lck_rw_done(&curr_group->lck);
+				FDGRP_RELEASE(curr_group);
 			}
 		}
 
-		if (exist == NULL) {
-			lck_rw_lock_exclusive(&group->lck);
-			exist = RB_INSERT(fd_pcb_tree, &group->pcb_tree, fd_cb);
-			lck_rw_done(&group->lck);
+		if (error == 0) {
+			error = flow_divert_pcb_insert(fd_cb, group);
 		}
-	} while (exist != NULL && try_count++ < 3);
+	} while (error == EEXIST && try_count++ < 3);
 
-	if (exist == NULL) {
-		fd_cb->group = group;
-		FDRETAIN(fd_cb);                /* The group now has a reference */
-	} else {
+	if (error == EEXIST) {
+		FDLOG0(LOG_ERR, fd_cb, "Failed to create a unique hash");
 		fd_cb->hash = 0;
-		error = EEXIST;
 	}
 
-	socket_unlock(fd_cb->so, 0);
-
-done:
-	lck_rw_done(&g_flow_divert_group_lck);
-	socket_lock(fd_cb->so, 0);
-
+	FDGRP_RELEASE(group);
 	return error;
 }
 
@@ -341,7 +370,9 @@ flow_divert_pcb_destroy(struct flow_divert_pcb *fd_cb)
 	if (fd_cb->app_data != NULL) {
 		kfree_data(fd_cb->app_data, fd_cb->app_data_length);
 	}
-	free_sockaddr(fd_cb->original_remote_endpoint);
+	if (fd_cb->original_remote_endpoint != NULL) {
+		free_sockaddr(fd_cb->original_remote_endpoint);
+	}
 	zfree(flow_divert_pcb_zone, fd_cb);
 }
 
@@ -517,21 +548,16 @@ flow_divert_packet_compute_hmac(mbuf_t packet, struct flow_divert_group *group, 
 static int
 flow_divert_packet_verify_hmac(mbuf_t packet, uint32_t ctl_unit)
 {
-	int                                                     error = 0;
-	struct flow_divert_group        *group = NULL;
-	int                                                     hmac_offset;
-	uint8_t                                         packet_hmac[SHA_DIGEST_LENGTH];
-	uint8_t                                         computed_hmac[SHA_DIGEST_LENGTH];
-	mbuf_t                                          tail;
+	int error = 0;
+	struct flow_divert_group *group = NULL;
+	int hmac_offset;
+	uint8_t packet_hmac[SHA_DIGEST_LENGTH];
+	uint8_t computed_hmac[SHA_DIGEST_LENGTH];
+	mbuf_t tail;
 
-	lck_rw_lock_shared(&g_flow_divert_group_lck);
-
-	if (g_flow_divert_groups != NULL && g_active_group_count > 0) {
-		group = g_flow_divert_groups[ctl_unit];
-	}
-
+	group = flow_divert_group_lookup(ctl_unit, NULL);
 	if (group == NULL) {
-		lck_rw_done(&g_flow_divert_group_lck);
+		FDLOG(LOG_ERR, &nil_pcb, "Failed to lookup group for control unit %u", ctl_unit);
 		return ENOPROTOOPT;
 	}
 
@@ -572,8 +598,10 @@ flow_divert_packet_verify_hmac(mbuf_t packet, uint32_t ctl_unit)
 	}
 
 done:
-	lck_rw_done(&group->lck);
-	lck_rw_done(&g_flow_divert_group_lck);
+	if (group != NULL) {
+		lck_rw_done(&group->lck);
+		FDGRP_RELEASE(group);
+	}
 	return error;
 }
 
@@ -1173,6 +1201,25 @@ flow_divert_send_packet(struct flow_divert_pcb *fd_cb, mbuf_t packet, Boolean en
 	return error;
 }
 
+static void
+flow_divert_append_domain_name(char *domain_name, void *ctx)
+{
+	mbuf_t packet = (mbuf_t)ctx;
+	size_t domain_name_length = 0;
+
+	if (packet == NULL || domain_name == NULL) {
+		return;
+	}
+
+	domain_name_length = strlen(domain_name);
+	if (domain_name_length > 0 && domain_name_length < FLOW_DIVERT_MAX_NAME_SIZE) {
+		int error = flow_divert_packet_append_tlv(packet, FLOW_DIVERT_TLV_TARGET_HOSTNAME, (uint32_t)domain_name_length, domain_name);
+		if (error) {
+			FDLOG(LOG_ERR, &nil_pcb, "Failed to append %s: %d", domain_name, error);
+		}
+	}
+}
+
 static int
 flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr *to, struct socket *so, proc_t p, mbuf_t *out_connect_packet)
 {
@@ -1204,11 +1251,7 @@ flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr
 		}
 	}
 
-	socket_unlock(so, 0);
-
 	error = flow_divert_add_all_proc_info(fd_cb, so, p, signing_id, connect_packet);
-
-	socket_lock(so, 0);
 
 	if (signing_id != NULL) {
 		kfree_data(signing_id, sid_size + 1);
@@ -1255,12 +1298,7 @@ flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr
 			goto done;
 		}
 
-		if (inp->inp_necp_attributes.inp_domain != NULL) {
-			size_t domain_length = strlen(inp->inp_necp_attributes.inp_domain);
-			if (domain_length > 0 && domain_length <= FLOW_DIVERT_MAX_NAME_SIZE) {
-				error = flow_divert_packet_append_tlv(connect_packet, FLOW_DIVERT_TLV_TARGET_HOSTNAME, (uint32_t)domain_length, inp->inp_necp_attributes.inp_domain);
-			}
-		}
+		necp_with_inp_domain_name(so, connect_packet, flow_divert_append_domain_name);
 	}
 
 	if (fd_cb->local_endpoint.sa.sa_family == AF_INET || fd_cb->local_endpoint.sa.sa_family == AF_INET6) {
@@ -1885,8 +1923,10 @@ flow_divert_set_remote_endpoint(struct flow_divert_pcb *fd_cb, struct sockaddr *
 }
 
 static uint32_t
-flow_divert_derive_kernel_control_unit(uint32_t ctl_unit, uint32_t *aggregate_unit, bool *is_aggregate)
+flow_divert_derive_kernel_control_unit(uint32_t *ctl_unit, uint32_t *aggregate_unit, bool *is_aggregate)
 {
+	uint32_t result = *ctl_unit;
+
 	*is_aggregate = false;
 	if (aggregate_unit != NULL && *aggregate_unit != 0) {
 		uint32_t counter;
@@ -1900,82 +1940,70 @@ flow_divert_derive_kernel_control_unit(uint32_t ctl_unit, uint32_t *aggregate_un
 			*is_aggregate = true;
 			return counter + 1;
 		} else {
-			return ctl_unit;
+			*ctl_unit = 0;
+			return result;
 		}
 	} else {
-		return ctl_unit;
+		*ctl_unit = 0;
+		return result;
 	}
 }
 
 static int
-flow_divert_try_next(struct flow_divert_pcb *fd_cb)
+flow_divert_try_next_group(struct flow_divert_pcb *fd_cb)
 {
-	uint32_t current_ctl_unit = 0;
-	uint32_t next_ctl_unit = 0;
-	struct flow_divert_group *current_group = NULL;
-	struct flow_divert_group *next_group = NULL;
 	int error = 0;
-	bool is_aggregate = false;
+	uint32_t policy_control_unit = fd_cb->policy_control_unit;
 
-	next_ctl_unit = flow_divert_derive_kernel_control_unit(fd_cb->policy_control_unit, &(fd_cb->aggregate_unit), &is_aggregate);
-	current_ctl_unit = fd_cb->control_group_unit;
+	flow_divert_pcb_remove(fd_cb);
 
-	if (current_ctl_unit == next_ctl_unit) {
-		FDLOG0(LOG_NOTICE, fd_cb, "Next control unit is the same as the current control unit, disabling flow divert");
-		error = EALREADY;
-		goto done;
+	do {
+		struct flow_divert_group *next_group = NULL;
+		bool is_aggregate = false;
+		uint32_t next_ctl_unit = flow_divert_derive_kernel_control_unit(&policy_control_unit, &(fd_cb->aggregate_unit), &is_aggregate);
+
+		if (fd_cb->control_group_unit == next_ctl_unit) {
+			FDLOG0(LOG_NOTICE, fd_cb, "Next control unit is the same as the current control unit, disabling flow divert");
+			error = EALREADY;
+			break;
+		}
+
+		if (next_ctl_unit == 0 || next_ctl_unit >= GROUP_COUNT_MAX) {
+			FDLOG0(LOG_NOTICE, fd_cb, "No more valid control units, disabling flow divert");
+			error = ENOENT;
+			break;
+		}
+
+		next_group = flow_divert_group_lookup(next_ctl_unit, fd_cb);
+		if (next_group == NULL) {
+			FDLOG(LOG_NOTICE, fd_cb, "Group for control unit %u does not exist", next_ctl_unit);
+			continue;
+		}
+
+		FDLOG(LOG_NOTICE, fd_cb, "Moving from %u to %u", fd_cb->control_group_unit, next_ctl_unit);
+
+		error = flow_divert_pcb_insert(fd_cb, next_group);
+		if (error == 0) {
+			if (is_aggregate) {
+				fd_cb->flags |= FLOW_DIVERT_FLOW_IS_TRANSPARENT;
+			} else {
+				fd_cb->flags &= ~FLOW_DIVERT_FLOW_IS_TRANSPARENT;
+			}
+		}
+		FDGRP_RELEASE(next_group);
+	} while (fd_cb->group == NULL);
+
+	if (fd_cb->group == NULL) {
+		return error ? error : ENOENT;
 	}
-
-	if (next_ctl_unit == 0 || next_ctl_unit >= GROUP_COUNT_MAX) {
-		FDLOG0(LOG_NOTICE, fd_cb, "No more valid control units, disabling flow divert");
-		error = ENOENT;
-		goto done;
-	}
-
-	if (g_flow_divert_groups == NULL || g_active_group_count == 0) {
-		FDLOG0(LOG_NOTICE, fd_cb, "No active groups, disabling flow divert");
-		error = ENOENT;
-		goto done;
-	}
-
-	next_group = g_flow_divert_groups[next_ctl_unit];
-	if (next_group == NULL) {
-		FDLOG(LOG_NOTICE, fd_cb, "Group for control unit %u does not exist", next_ctl_unit);
-		error = ENOENT;
-		goto done;
-	}
-
-	current_group = fd_cb->group;
-
-	lck_rw_lock_exclusive(&(current_group->lck));
-	lck_rw_lock_exclusive(&(next_group->lck));
-
-	FDLOG(LOG_NOTICE, fd_cb, "Moving from %u to %u", current_ctl_unit, next_ctl_unit);
-
-	RB_REMOVE(fd_pcb_tree, &(current_group->pcb_tree), fd_cb);
-	if (RB_INSERT(fd_pcb_tree, &(next_group->pcb_tree), fd_cb) != NULL) {
-		panic("group with unit %u already contains a connection with hash %u", next_ctl_unit, fd_cb->hash);
-	}
-
-	fd_cb->group = next_group;
-	fd_cb->control_group_unit = next_ctl_unit;
-	if (is_aggregate) {
-		fd_cb->flags |= FLOW_DIVERT_FLOW_IS_TRANSPARENT;
-	} else {
-		fd_cb->flags &= ~FLOW_DIVERT_FLOW_IS_TRANSPARENT;
-	}
-
-	lck_rw_done(&(next_group->lck));
-	lck_rw_done(&(current_group->lck));
 
 	error = flow_divert_send_connect_packet(fd_cb);
 	if (error) {
-		FDLOG(LOG_NOTICE, fd_cb, "Failed to send the connect packet to %u, disabling flow divert", next_ctl_unit);
+		FDLOG(LOG_NOTICE, fd_cb, "Failed to send the connect packet to %u, disabling flow divert", fd_cb->control_group_unit);
+		flow_divert_pcb_remove(fd_cb);
 		error = ENOENT;
-		goto done;
 	}
 
-done:
 	return error;
 }
 
@@ -1988,7 +2016,6 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	proc_t last_proc = NULL;
 	struct sockaddr *remote_endpoint = fd_cb->original_remote_endpoint;
 	bool do_connect = !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT);
-	bool unset_connecting = false;
 	struct inpcb *inp = NULL;
 
 	so = fd_cb->so;
@@ -1997,8 +2024,6 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	}
 
 	FDLOG0(LOG_NOTICE, fd_cb, "Skipped all flow divert services, disabling flow divert");
-
-	unset_connecting = (SOCK_TYPE(so) == SOCK_STREAM || (fd_cb->flags & FLOW_DIVERT_HAS_TOKEN));
 
 	/* Restore the IP state */
 	inp = sotoinpcb(so);
@@ -2023,20 +2048,17 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	so->so_fd_pcb = NULL;
 	fd_cb->so = NULL;
 
-	/* Remove from the group */
-	flow_divert_pcb_remove(fd_cb);
-
 	FDRELEASE(fd_cb); /* Release the socket's reference */
 
 	/* Revert back to the original protocol */
 	so->so_proto = pffindproto(SOCK_DOM(so), SOCK_PROTO(so), SOCK_TYPE(so));
 
+	/* Reset the socket state to avoid confusing NECP */
+	so->so_state &= ~(SS_ISCONNECTING | SS_ISCONNECTED);
+
 	last_proc = proc_find(so->last_pid);
 
 	if (do_connect) {
-		if (unset_connecting) {
-			so->so_state &= ~SS_ISCONNECTING; /* Get out of the connecting state to avoid confusing NECP */
-		}
 		/* Connect using the original protocol */
 		error = (*so->so_proto->pr_usrreqs->pru_connect)(so, remote_endpoint, (last_proc != NULL ? last_proc : current_proc()));
 		if (error) {
@@ -2076,7 +2098,7 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 		    (last_proc != NULL ? last_proc : current_proc()));
 
 		if (error && error != EWOULDBLOCK) {
-			FDLOG(LOG_ERR, fd_cb, "Failed to send queued data using the socket's original protocol: %d", error);
+			FDLOG(LOG_ERR, fd_cb, "Failed to send queued TCP data using the socket's original protocol: %d", error);
 		} else {
 			error = 0;
 		}
@@ -2164,7 +2186,7 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 			}
 
 			if (error) {
-				FDLOG(LOG_ERR, fd_cb, "Failed to send queued data using the socket's original protocol: %d", error);
+				FDLOG(LOG_ERR, fd_cb, "Failed to send queued UDP data using the socket's original protocol: %d", error);
 			}
 		}
 	}
@@ -2262,7 +2284,6 @@ flow_divert_handle_connect_result(struct flow_divert_pcb *fd_cb, mbuf_t packet, 
 	uint32_t                                        connect_error = 0;
 	uint32_t                                        ctl_unit                        = 0;
 	int                                                     error                           = 0;
-	struct flow_divert_group        *grp                            = NULL;
 	union sockaddr_in_4_6 local_endpoint = {};
 	union sockaddr_in_4_6 remote_endpoint = {};
 	int                                                     out_if_index            = 0;
@@ -2313,29 +2334,10 @@ flow_divert_handle_connect_result(struct flow_divert_pcb *fd_cb, mbuf_t packet, 
 	}
 
 	error = 0;
-	ctl_unit                = ntohl(ctl_unit);
-
-	lck_rw_lock_shared(&g_flow_divert_group_lck);
-
-	if (connect_error == 0 && ctl_unit > 0) {
-		if (ctl_unit >= GROUP_COUNT_MAX) {
-			FDLOG(LOG_ERR, fd_cb, "Connect result contains an invalid control unit: %u", ctl_unit);
-			error = EINVAL;
-		} else if (g_flow_divert_groups == NULL || g_active_group_count == 0) {
-			FDLOG0(LOG_ERR, fd_cb, "No active groups, dropping connection");
-			error = EINVAL;
-		} else {
-			grp = g_flow_divert_groups[ctl_unit];
-			if (grp == NULL) {
-				error = ECONNRESET;
-			}
-		}
-	}
 
 	FDLOCK(fd_cb);
 	if (fd_cb->so != NULL) {
-		struct inpcb                            *inp = NULL;
-		struct flow_divert_group        *old_group;
+		struct inpcb *inp = NULL;
 		struct socket *so = fd_cb->so;
 		bool local_address_is_valid = false;
 
@@ -2357,7 +2359,7 @@ flow_divert_handle_connect_result(struct flow_divert_pcb *fd_cb, mbuf_t packet, 
 			goto set_socket_state;
 		}
 
-		if (flow_divert_is_sockaddr_valid(&(local_endpoint.sa))) {
+		if (flow_divert_is_sockaddr_valid(SA(&local_endpoint))) {
 			if (local_endpoint.sa.sa_family == AF_INET) {
 				local_endpoint.sa.sa_len = sizeof(struct sockaddr_in);
 				if ((inp->inp_vflag & INP_IPV4) && local_endpoint.sin.sin_addr.s_addr != INADDR_ANY) {
@@ -2380,15 +2382,15 @@ flow_divert_handle_connect_result(struct flow_divert_pcb *fd_cb, mbuf_t packet, 
 		}
 
 		flow_divert_scope(fd_cb, out_if_index, !local_address_is_valid);
-		flow_divert_set_local_endpoint(fd_cb, &(fd_cb->local_endpoint.sa));
+		flow_divert_set_local_endpoint(fd_cb, SA(&fd_cb->local_endpoint));
 
-		if (flow_divert_is_sockaddr_valid(&(remote_endpoint.sa)) && SOCK_TYPE(so) == SOCK_STREAM) {
+		if (flow_divert_is_sockaddr_valid(SA(&remote_endpoint)) && SOCK_TYPE(so) == SOCK_STREAM) {
 			if (remote_endpoint.sa.sa_family == AF_INET) {
 				remote_endpoint.sa.sa_len = sizeof(struct sockaddr_in);
 			} else if (remote_endpoint.sa.sa_family == AF_INET6) {
 				remote_endpoint.sa.sa_len = sizeof(struct sockaddr_in6);
 			}
-			flow_divert_set_remote_endpoint(fd_cb, &(remote_endpoint.sa));
+			flow_divert_set_remote_endpoint(fd_cb, SA(&remote_endpoint));
 		}
 
 		if (app_data_length > 0) {
@@ -2421,21 +2423,31 @@ flow_divert_handle_connect_result(struct flow_divert_pcb *fd_cb, mbuf_t packet, 
 			goto set_socket_state;
 		}
 
-		if (grp != NULL) {
-			old_group = fd_cb->group;
+		ctl_unit = ntohl(ctl_unit);
+		if (ctl_unit > 0) {
+			int insert_error = 0;
+			struct flow_divert_group *grp = NULL;
 
-			lck_rw_lock_exclusive(&old_group->lck);
-			lck_rw_lock_exclusive(&grp->lck);
-
-			RB_REMOVE(fd_pcb_tree, &old_group->pcb_tree, fd_cb);
-			if (RB_INSERT(fd_pcb_tree, &grp->pcb_tree, fd_cb) != NULL) {
-				panic("group with unit %u already contains a connection with hash %u", grp->ctl_unit, fd_cb->hash);
+			if (ctl_unit >= GROUP_COUNT_MAX) {
+				FDLOG(LOG_ERR, fd_cb, "Connect result contains an invalid control unit: %u", ctl_unit);
+				error = EINVAL;
+				goto set_socket_state;
 			}
 
-			fd_cb->group = grp;
+			grp = flow_divert_group_lookup(ctl_unit, fd_cb);
+			if (grp == NULL) {
+				error = ECONNRESET;
+				goto set_socket_state;
+			}
 
-			lck_rw_done(&grp->lck);
-			lck_rw_done(&old_group->lck);
+			flow_divert_pcb_remove(fd_cb);
+			insert_error = flow_divert_pcb_insert(fd_cb, grp);
+			FDGRP_RELEASE(grp);
+
+			if (insert_error != 0) {
+				error = ECONNRESET;
+				goto set_socket_state;
+			}
 		}
 
 		fd_cb->send_window = ntohl(send_window);
@@ -2448,11 +2460,13 @@ set_socket_state:
 
 		if (connect_error || error) {
 			if (connect_error && fd_cb->control_group_unit != fd_cb->policy_control_unit) {
-				error = flow_divert_try_next(fd_cb);
-				if (error) {
+				error = flow_divert_try_next_group(fd_cb);
+				if (error && fd_cb->policy_control_unit == 0) {
 					flow_divert_disable(fd_cb);
+					goto done;
+				} else if (error == 0) {
+					goto done;
 				}
-				goto done;
 			}
 
 			if (!connect_error) {
@@ -2471,6 +2485,10 @@ set_socket_state:
 				socket_unlock(so, 0);
 				necp_client_assign_from_socket(so->last_pid, inp->necp_client_uuid, inp);
 				socket_lock(so, 0);
+				if (!(so->so_flags & SOF_FLOW_DIVERT)) {
+					/* The socket was closed while it was unlocked */
+					goto done;
+				}
 			}
 #endif /* NECP */
 
@@ -2490,8 +2508,6 @@ done:
 		socket_unlock(so, 0);
 	}
 	FDUNLOCK(fd_cb);
-
-	lck_rw_done(&g_flow_divert_group_lck);
 }
 
 static void
@@ -2745,6 +2761,12 @@ flow_divert_handle_group_init(struct flow_divert_group *group, mbuf_t packet, in
 
 	lck_rw_lock_exclusive(&group->lck);
 
+	if (group->flags & FLOW_DIVERT_GROUP_FLAG_DEFUNCT) {
+		FDLOG(LOG_ERR, &nil_pcb, "Skipping (re)initialization of defunct group %u", group->ctl_unit);
+		lck_rw_done(&group->lck);
+		return;
+	}
+
 	if (group->token_key != NULL) {
 		kfree_data(group->token_key, group->token_key_size);
 		group->token_key = NULL;
@@ -2800,7 +2822,7 @@ flow_divert_handle_properties_update(struct flow_divert_pcb *fd_cb, mbuf_t packe
 
 		if (out_if_index > 0) {
 			flow_divert_scope(fd_cb, out_if_index, true);
-			flow_divert_set_local_endpoint(fd_cb, &(fd_cb->local_endpoint.sa));
+			flow_divert_set_local_endpoint(fd_cb, SA(&fd_cb->local_endpoint));
 		}
 
 		if (app_data_length > 0) {
@@ -3007,12 +3029,6 @@ flow_divert_input(mbuf_t packet, struct flow_divert_group *group)
 		goto done;
 	}
 
-	if (mbuf_pkthdr_len(packet) > FD_CTL_RCVBUFF_SIZE) {
-		FDLOG(LOG_ERR, &nil_pcb, "got a bad packet, length (%lu) > %d", mbuf_pkthdr_len(packet), FD_CTL_RCVBUFF_SIZE);
-		error = EINVAL;
-		goto done;
-	}
-
 	error = mbuf_copydata(packet, 0, sizeof(hdr), &hdr);
 	if (error) {
 		FDLOG(LOG_ERR, &nil_pcb, "mbuf_copydata failed for the header: %d", error);
@@ -3090,6 +3106,8 @@ flow_divert_close_all(struct flow_divert_group *group)
 		SLIST_INSERT_HEAD(&tmp_list, fd_cb, tmp_list_entry);
 	}
 
+	group->flags |= FLOW_DIVERT_GROUP_FLAG_DEFUNCT;
+
 	lck_rw_done(&group->lck);
 
 	while (!SLIST_EMPTY(&tmp_list)) {
@@ -3114,7 +3132,9 @@ flow_divert_detach(struct socket *so)
 {
 	struct flow_divert_pcb  *fd_cb          = so->so_fd_pcb;
 
-	VERIFY((so->so_flags & SOF_FLOW_DIVERT) && so->so_fd_pcb != NULL);
+	if (!SO_IS_DIVERTED(so)) {
+		return;
+	}
 
 	so->so_flags &= ~SOF_FLOW_DIVERT;
 	so->so_fd_pcb = NULL;
@@ -3145,7 +3165,9 @@ flow_divert_close(struct socket *so)
 {
 	struct flow_divert_pcb  *fd_cb          = so->so_fd_pcb;
 
-	VERIFY((so->so_flags & SOF_FLOW_DIVERT) && so->so_fd_pcb != NULL);
+	if (!SO_IS_DIVERTED(so)) {
+		return EINVAL;
+	}
 
 	FDLOG0(LOG_INFO, fd_cb, "Closing");
 
@@ -3180,7 +3202,9 @@ flow_divert_shutdown(struct socket *so)
 {
 	struct flow_divert_pcb  *fd_cb          = so->so_fd_pcb;
 
-	VERIFY((so->so_flags & SOF_FLOW_DIVERT) && so->so_fd_pcb != NULL);
+	if (!SO_IS_DIVERTED(so)) {
+		return EINVAL;
+	}
 
 	FDLOG0(LOG_INFO, fd_cb, "Can't send more");
 
@@ -3196,10 +3220,13 @@ static int
 flow_divert_rcvd(struct socket *so, int flags __unused)
 {
 	struct flow_divert_pcb  *fd_cb = so->so_fd_pcb;
-	int space = sbspace(&so->so_rcv);
+	int space = 0;
 
-	VERIFY((so->so_flags & SOF_FLOW_DIVERT) && so->so_fd_pcb != NULL);
+	if (!SO_IS_DIVERTED(so)) {
+		return EINVAL;
+	}
 
+	space = sbspace(&so->so_rcv);
 	FDLOG(LOG_DEBUG, fd_cb, "app read bytes, space = %d", space);
 	if ((fd_cb->flags & FLOW_DIVERT_NOTIFY_ON_RECEIVED) &&
 	    (space > 0) &&
@@ -3343,7 +3370,9 @@ flow_divert_ctloutput(struct socket *so, struct sockopt *sopt)
 {
 	struct flow_divert_pcb  *fd_cb  = so->so_fd_pcb;
 
-	VERIFY((so->so_flags & SOF_FLOW_DIVERT) && so->so_fd_pcb != NULL);
+	if (!SO_IS_DIVERTED(so)) {
+		return EINVAL;
+	}
 
 	if (sopt->sopt_name == SO_TRAFFIC_CLASS) {
 		if (sopt->sopt_dir == SOPT_SET && fd_cb->flags & FLOW_DIVERT_CONNECT_STARTED) {
@@ -3369,7 +3398,9 @@ flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t 
 	mbuf_t                                  connect_packet = NULL;
 	int                                             do_send = 1;
 
-	VERIFY((so->so_flags & SOF_FLOW_DIVERT) && so->so_fd_pcb != NULL);
+	if (!SO_IS_DIVERTED(so)) {
+		return EINVAL;
+	}
 
 	if (fd_cb->group == NULL) {
 		error = ENETUNREACH;
@@ -3406,6 +3437,12 @@ flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t 
 			goto done;
 		}
 
+		if (!flow_divert_is_sockaddr_valid(to)) {
+			FDLOG0(LOG_ERR, fd_cb, "Destination address is not valid when creating connect packet");
+			error = EINVAL;
+			goto done;
+		}
+
 		fd_cb->original_remote_endpoint = dup_sockaddr(to, 0);
 		if (fd_cb->original_remote_endpoint == NULL) {
 			FDLOG0(LOG_ERR, fd_cb, "Failed to dup the remote endpoint");
@@ -3435,6 +3472,8 @@ flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t 
 		}
 
 		if (to->sa_family == AF_INET6) {
+			struct sockaddr_in6 *to6 = satosin6(to);
+
 			inp->inp_vflag &= ~INP_IPV4;
 			inp->inp_vflag |= INP_IPV6;
 			fd_cb->local_endpoint.sin6.sin6_len = sizeof(struct sockaddr_in6);
@@ -3452,6 +3491,20 @@ flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t 
 			if (ifp != NULL) {
 				inp->in6p_last_outifp = ifp;
 				ifnet_release(ifp);
+			}
+
+			if (IN6_IS_SCOPE_EMBED(&(fd_cb->local_endpoint.sin6.sin6_addr)) &&
+			    in6_embedded_scope &&
+			    fd_cb->local_endpoint.sin6.sin6_addr.s6_addr16[1] != 0) {
+				fd_cb->local_endpoint.sin6.sin6_scope_id = ntohs(fd_cb->local_endpoint.sin6.sin6_addr.s6_addr16[1]);
+				fd_cb->local_endpoint.sin6.sin6_addr.s6_addr16[1] = 0;
+			}
+
+			if (IN6_IS_SCOPE_EMBED(&(to6->sin6_addr)) &&
+			    in6_embedded_scope &&
+			    to6->sin6_addr.s6_addr16[1] != 0) {
+				to6->sin6_scope_id = ntohs(to6->sin6_addr.s6_addr16[1]);
+				to6->sin6_addr.s6_addr16[1] = 0;
 			}
 		} else if (to->sa_family == AF_INET) {
 			inp->inp_vflag |= INP_IPV4;
@@ -3497,7 +3550,7 @@ flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t 
 
 		if (!implicit || SOCK_TYPE(so) == SOCK_STREAM) {
 			flow_divert_set_remote_endpoint(fd_cb, to);
-			flow_divert_set_local_endpoint(fd_cb, &(fd_cb->local_endpoint.sa));
+			flow_divert_set_local_endpoint(fd_cb, SA(&fd_cb->local_endpoint));
 		}
 
 		if (implicit) {
@@ -3642,7 +3695,9 @@ flow_divert_data_out(struct socket *so, int flags, mbuf_t data, struct sockaddr 
 	struct m_tag *cfil_tag = NULL;
 #endif
 
-	VERIFY((so->so_flags & SOF_FLOW_DIVERT) && so->so_fd_pcb != NULL);
+	if (!SO_IS_DIVERTED(so)) {
+		return EINVAL;
+	}
 
 	inp = sotoinpcb(so);
 	if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD) {
@@ -3736,7 +3791,9 @@ flow_divert_preconnect(struct socket *so)
 	int error = 0;
 	struct flow_divert_pcb  *fd_cb  = so->so_fd_pcb;
 
-	VERIFY((so->so_flags & SOF_FLOW_DIVERT) && so->so_fd_pcb != NULL);
+	if (!SO_IS_DIVERTED(so)) {
+		return EINVAL;
+	}
 
 	if (!(fd_cb->flags & FLOW_DIVERT_CONNECT_STARTED)) {
 		FDLOG0(LOG_INFO, fd_cb, "Pre-connect read: sending saved connect packet");
@@ -3809,39 +3866,41 @@ static errno_t
 flow_divert_pcb_init_internal(struct socket *so, uint32_t ctl_unit, uint32_t aggregate_unit)
 {
 	errno_t error = 0;
-	struct flow_divert_pcb *fd_cb;
+	struct flow_divert_pcb *fd_cb = NULL;
 	uint32_t agg_unit = aggregate_unit;
+	uint32_t policy_control_unit = ctl_unit;
 	bool is_aggregate = false;
-	uint32_t group_unit = flow_divert_derive_kernel_control_unit(ctl_unit, &agg_unit, &is_aggregate);
-
-	if (group_unit == 0) {
-		return EINVAL;
-	}
 
 	if (so->so_flags & SOF_FLOW_DIVERT) {
 		return EALREADY;
 	}
 
 	fd_cb = flow_divert_pcb_create(so);
-	if (fd_cb != NULL) {
-		so->so_fd_pcb = fd_cb;
-		so->so_flags |= SOF_FLOW_DIVERT;
-		fd_cb->control_group_unit = group_unit;
-		fd_cb->policy_control_unit = ctl_unit;
-		fd_cb->aggregate_unit = agg_unit;
-		if (is_aggregate) {
-			fd_cb->flags |= FLOW_DIVERT_FLOW_IS_TRANSPARENT;
-		} else {
-			fd_cb->flags &= ~FLOW_DIVERT_FLOW_IS_TRANSPARENT;
+	if (fd_cb == NULL) {
+		return ENOMEM;
+	}
+
+	do {
+		uint32_t group_unit = flow_divert_derive_kernel_control_unit(&policy_control_unit, &agg_unit, &is_aggregate);
+		if (group_unit == 0 || group_unit >= GROUP_COUNT_MAX) {
+			FDLOG0(LOG_ERR, fd_cb, "No valid group is available, cannot init flow divert");
+			error = EINVAL;
+			break;
 		}
 
-		error = flow_divert_pcb_insert(fd_cb, group_unit);
-		if (error) {
-			FDLOG(LOG_ERR, fd_cb, "pcb insert failed: %d", error);
-			so->so_fd_pcb = NULL;
-			so->so_flags &= ~SOF_FLOW_DIVERT;
-			FDRELEASE(fd_cb);
-		} else {
+		error = flow_divert_add_to_group(fd_cb, group_unit);
+		if (error == 0) {
+			so->so_fd_pcb = fd_cb;
+			so->so_flags |= SOF_FLOW_DIVERT;
+			fd_cb->control_group_unit = group_unit;
+			fd_cb->policy_control_unit = ctl_unit;
+			fd_cb->aggregate_unit = agg_unit;
+			if (is_aggregate) {
+				fd_cb->flags |= FLOW_DIVERT_FLOW_IS_TRANSPARENT;
+			} else {
+				fd_cb->flags &= ~FLOW_DIVERT_FLOW_IS_TRANSPARENT;
+			}
+
 			if (SOCK_TYPE(so) == SOCK_STREAM) {
 				flow_divert_set_protosw(so);
 			} else if (SOCK_TYPE(so) == SOCK_DGRAM) {
@@ -3849,9 +3908,13 @@ flow_divert_pcb_init_internal(struct socket *so, uint32_t ctl_unit, uint32_t agg
 			}
 
 			FDLOG0(LOG_INFO, fd_cb, "Created");
+		} else if (error != ENOENT) {
+			FDLOG(LOG_ERR, fd_cb, "pcb insert failed: %d", error);
 		}
-	} else {
-		error = ENOMEM;
+	} while (error == ENOENT);
+
+	if (error != 0) {
+		FDRELEASE(fd_cb);
 	}
 
 	return error;
@@ -3944,10 +4007,7 @@ flow_divert_token_set(struct socket *so, struct sockopt *sopt)
 	aggregate_unit = ntohl(aggregate_unit);
 
 	if (ctl_unit > 0 && ctl_unit < GROUP_COUNT_MAX) {
-		socket_unlock(so, 0);
 		hmac_error = flow_divert_packet_verify_hmac(token, (key_unit != 0 ? key_unit : ctl_unit));
-		socket_lock(so, 0);
-
 		if (hmac_error && hmac_error != ENOENT) {
 			FDLOG(LOG_ERR, &nil_pcb, "HMAC verfication failed: %d", hmac_error);
 			error = hmac_error;
@@ -3997,12 +4057,10 @@ flow_divert_token_get(struct socket *so, struct sockopt *sopt)
 	mbuf_t                                          token                                           = NULL;
 	struct flow_divert_group        *control_group                          = NULL;
 
-	if (!(so->so_flags & SOF_FLOW_DIVERT)) {
+	if (!SO_IS_DIVERTED(so)) {
 		error = EINVAL;
 		goto done;
 	}
-
-	VERIFY((so->so_flags & SOF_FLOW_DIVERT) && so->so_fd_pcb != NULL);
 
 	if (fd_cb->group == NULL) {
 		error = EINVAL;
@@ -4034,14 +4092,7 @@ flow_divert_token_get(struct socket *so, struct sockopt *sopt)
 		}
 	}
 
-	socket_unlock(so, 0);
-	lck_rw_lock_shared(&g_flow_divert_group_lck);
-
-	if (g_flow_divert_groups != NULL && g_active_group_count > 0 &&
-	    fd_cb->control_group_unit > 0 && fd_cb->control_group_unit < GROUP_COUNT_MAX) {
-		control_group = g_flow_divert_groups[fd_cb->control_group_unit];
-	}
-
+	control_group = flow_divert_group_lookup(fd_cb->control_group_unit, fd_cb);
 	if (control_group != NULL) {
 		lck_rw_lock_shared(&control_group->lck);
 		ctl_unit = htonl(control_group->ctl_unit);
@@ -4050,12 +4101,10 @@ flow_divert_token_get(struct socket *so, struct sockopt *sopt)
 			error = flow_divert_packet_compute_hmac(token, control_group, hmac);
 		}
 		lck_rw_done(&control_group->lck);
+		FDGRP_RELEASE(control_group);
 	} else {
 		error = ENOPROTOOPT;
 	}
-
-	lck_rw_done(&g_flow_divert_group_lck);
-	socket_lock(so, 0);
 
 	if (error) {
 		goto done;
@@ -4086,6 +4135,32 @@ done:
 	return error;
 }
 
+void
+flow_divert_group_destroy(struct flow_divert_group *group)
+{
+	lck_rw_lock_exclusive(&group->lck);
+
+	FDLOG(LOG_NOTICE, &nil_pcb, "Destroying group %u", group->ctl_unit);
+
+	if (group->token_key != NULL) {
+		memset(group->token_key, 0, group->token_key_size);
+		kfree_data(group->token_key, group->token_key_size);
+		group->token_key = NULL;
+		group->token_key_size = 0;
+	}
+
+	/* Re-set the current trie */
+	if (group->signing_id_trie.memory != NULL) {
+		kfree_data_addr(group->signing_id_trie.memory);
+	}
+	memset(&group->signing_id_trie, 0, sizeof(group->signing_id_trie));
+	group->signing_id_trie.root = NULL_TRIE_IDX;
+
+	lck_rw_done(&group->lck);
+
+	zfree(flow_divert_group_zone, group);
+}
+
 static errno_t
 flow_divert_kctl_connect(kern_ctl_ref kctlref __unused, struct sockaddr_ctl *sac, void **unitinfo)
 {
@@ -4105,6 +4180,7 @@ flow_divert_kctl_connect(kern_ctl_ref kctlref __unused, struct sockaddr_ctl *sac
 	new_group->ctl_unit = sac->sc_unit;
 	MBUFQ_INIT(&new_group->send_queue);
 	new_group->signing_id_trie.root = NULL_TRIE_IDX;
+	new_group->ref_count = 1;
 
 	lck_rw_lock_exclusive(&g_flow_divert_group_lck);
 
@@ -4173,26 +4249,7 @@ flow_divert_kctl_disconnect(kern_ctl_ref kctlref __unused, uint32_t unit, void *
 
 	if (group != NULL) {
 		flow_divert_close_all(group);
-
-		lck_rw_lock_exclusive(&group->lck);
-
-		if (group->token_key != NULL) {
-			memset(group->token_key, 0, group->token_key_size);
-			kfree_data(group->token_key, group->token_key_size);
-			group->token_key = NULL;
-			group->token_key_size = 0;
-		}
-
-		/* Re-set the current trie */
-		if (group->signing_id_trie.memory != NULL) {
-			kfree_data_addr(group->signing_id_trie.memory);
-		}
-		memset(&group->signing_id_trie, 0, sizeof(group->signing_id_trie));
-		group->signing_id_trie.root = NULL_TRIE_IDX;
-
-		lck_rw_done(&group->lck);
-
-		zfree(flow_divert_group_zone, group);
+		FDGRP_RELEASE(group);
 	} else {
 		error = EINVAL;
 	}
@@ -4201,21 +4258,31 @@ flow_divert_kctl_disconnect(kern_ctl_ref kctlref __unused, uint32_t unit, void *
 }
 
 static errno_t
-flow_divert_kctl_send(kern_ctl_ref kctlref __unused, uint32_t unit __unused, void *unitinfo, mbuf_t m, int flags __unused)
+flow_divert_kctl_send(__unused kern_ctl_ref kctlref, uint32_t unit, __unused void *unitinfo, mbuf_t m, __unused int flags)
 {
-	return flow_divert_input(m, (struct flow_divert_group *)unitinfo);
+	errno_t error = 0;
+	struct flow_divert_group *group = flow_divert_group_lookup(unit, NULL);
+	if (group != NULL) {
+		error = flow_divert_input(m, group);
+		FDGRP_RELEASE(group);
+	} else {
+		error = ENOENT;
+	}
+	return error;
 }
 
 static void
-flow_divert_kctl_rcvd(kern_ctl_ref kctlref __unused, uint32_t unit __unused, void *unitinfo, int flags __unused)
+flow_divert_kctl_rcvd(__unused kern_ctl_ref kctlref, uint32_t unit, __unused void *unitinfo, __unused int flags)
 {
-	struct flow_divert_group        *group  = (struct flow_divert_group *)unitinfo;
+	struct flow_divert_group *group = flow_divert_group_lookup(unit, NULL);
+	if (group == NULL) {
+		return;
+	}
 
 	if (!OSTestAndClear(GROUP_BIT_CTL_ENQUEUE_BLOCKED, &group->atomic_bits)) {
 		struct flow_divert_pcb                  *fd_cb;
 		SLIST_HEAD(, flow_divert_pcb)   tmp_list;
 
-		lck_rw_lock_shared(&g_flow_divert_group_lck);
 		lck_rw_lock_exclusive(&group->lck);
 
 		while (!MBUFQ_EMPTY(&group->send_queue)) {
@@ -4227,7 +4294,6 @@ flow_divert_kctl_rcvd(kern_ctl_ref kctlref __unused, uint32_t unit __unused, voi
 				FDLOG(LOG_DEBUG, &nil_pcb, "ctl_enqueuembuf returned an error: %d", error);
 				OSTestAndSet(GROUP_BIT_CTL_ENQUEUE_BLOCKED, &group->atomic_bits);
 				lck_rw_done(&group->lck);
-				lck_rw_done(&g_flow_divert_group_lck);
 				return;
 			}
 			MBUFQ_DEQUEUE(&group->send_queue, next_packet);
@@ -4254,9 +4320,9 @@ flow_divert_kctl_rcvd(kern_ctl_ref kctlref __unused, uint32_t unit __unused, voi
 			FDUNLOCK(fd_cb);
 			FDRELEASE(fd_cb);
 		}
-
-		lck_rw_done(&g_flow_divert_group_lck);
 	}
+
+	FDGRP_RELEASE(group);
 }
 
 static int
@@ -4271,7 +4337,6 @@ flow_divert_kctl_init(void)
 	ctl_reg.ctl_name[sizeof(ctl_reg.ctl_name) - 1] = '\0';
 	ctl_reg.ctl_flags = CTL_FLAG_PRIVILEGED | CTL_FLAG_REG_EXTENDED;
 	ctl_reg.ctl_sendsize = FD_CTL_SENDBUFF_SIZE;
-	ctl_reg.ctl_recvsize = FD_CTL_RCVBUFF_SIZE;
 
 	ctl_reg.ctl_connect = flow_divert_kctl_connect;
 	ctl_reg.ctl_disconnect = flow_divert_kctl_disconnect;

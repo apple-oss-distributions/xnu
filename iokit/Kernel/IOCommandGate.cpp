@@ -72,6 +72,9 @@ do { \
 
 #endif /* IOKITSTATS */
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type"
+
 bool
 IOCommandGate::init(OSObject *inOwner, Action inAction)
 {
@@ -173,6 +176,7 @@ IOCommandGate::attemptCommand(void *arg0, void *arg1,
 	return attemptAction((Action) action, arg0, arg1, arg2, arg3);
 }
 
+#pragma clang diagnostic pop
 
 static IOReturn
 IOCommandGateActionToBlock(OSObject *owner,

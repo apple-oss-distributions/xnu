@@ -9,8 +9,14 @@
 #error "Please #include <img4/firmware.h> instead of this file directly"
 #endif // __IMG4_INDIRECT
 
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
 #if KERNEL
+#define IMG4_TARGET_SHIM_FOUND 1
 #define IMG4_TARGET_XNU 1
+
 #if __has_include(<img4/shim_xnu.h>)
 #include <img4/shim_xnu.h>
 #endif
@@ -20,17 +26,28 @@
 #else
 #define IMG4_TARGET_XNU_PROPER 0
 #endif
-#elif EFI
+#endif // KERNEL
+
+
+#if !IMG4_TARGET_SHIM_FOUND
+#if EFI
 #define IMG4_TARGET_EFI 1
 #if __has_include(<img4/shim_efi.h>)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpragma-pack"
 #include <img4/shim_efi.h>
-#endif
-#else
+#pragma clang diagnostic pop
+#endif // __has_include(<img4/shim_efi.h>)
+#elif SEP // EFI
+#define IMG4_TARGET_SEP 1
+#include <img4/shim_sep.h>
+#else // EFI
 #define IMG4_TARGET_DARWIN 1
 #if __has_include(<img4/shim_darwin.h>)
 #include <img4/shim_darwin.h>
 #endif
-#endif // KERNEL
+#endif // EFI
+#endif // !IMG4_TARGET_SHIM_FOUND
 
 #if IMG4_TARGET_XNU || IMG4_TARGET_DARWIN
 #define IMG4_TARGET_DARWIN_GENERIC 1

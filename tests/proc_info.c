@@ -29,6 +29,8 @@
 #include <unistd.h>
 #undef PRIVATE
 
+#include "recount/recount_test_utils.h"
+
 T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
 #define ACT_CHANGE_UID 1
@@ -1039,6 +1041,23 @@ T_DECL(proc_info_pidt_bsdinfowithuniqid,
 	free_proc_info(proc_info, 4);
 }
 
+static void
+_expect_increasing_taskinfo_times(const char *name, struct proc_taskinfo *early,
+    struct proc_taskinfo *late)
+{
+	if (has_user_system_times()) {
+		T_EXPECT_GT(late->pti_total_system, early->pti_total_system,
+		    "%s returned increasing pti_total_system time", name);
+		T_EXPECT_GT(late->pti_threads_system, early->pti_threads_system,
+		    "%s returned increasing pti_threads_system time", name);
+	}
+
+	T_EXPECT_GT(late->pti_threads_user, early->pti_threads_user,
+	    "%s returned increasing pti_threads_user time", name);
+	T_EXPECT_GT(late->pti_total_user, early->pti_total_user,
+	    "%s returned increasing pti_total_user time", name);
+}
+
 T_DECL(proc_info_proc_pidtask_info,
     "Test to verify PROC_PIDTASKINFO returns valid information about the process",
     T_META_ASROOT(true))
@@ -1051,20 +1070,9 @@ T_DECL(proc_info_proc_pidtask_info,
 	T_EXPECT_GE_ULLONG((p_task_info_new->pti_virtual_size - p_task_info->pti_virtual_size), (unsigned long long)PAGE_SIZE,
 	    "PROC_PIDTASKINFO returned valid value for pti_virtual_size");
 	T_EXPECT_GE_ULLONG((p_task_info_new->pti_resident_size - p_task_info->pti_resident_size), (unsigned long long)PAGE_SIZE,
-	    "PROC_PIDTASKINFO returned valid value for pti_virtual_size");
-	T_EXPECT_EQ_INT(p_task_info_new->pti_policy, POLICY_TIMESHARE, "PROC_PIDTASKINFO returned valid value for pti_virtual_size");
-	T_EXPECT_GE_ULLONG(p_task_info->pti_threads_user, 1ULL, "PROC_PIDTASKINFO returned valid value for pti_threads_user");
-#if defined(__arm__) || defined(__arm64__)
-	T_EXPECT_GE_ULLONG(p_task_info->pti_threads_system, 0ULL, "PROC_PIDTASKINFO returned valid value for pti_threads_system");
-	T_EXPECT_GE_ULLONG((p_task_info_new->pti_total_system - p_task_info->pti_total_system), 0ULL,
-	    "PROC_PIDTASKINFO returned valid value for pti_total_system");
-#else
-	T_EXPECT_GE_ULLONG(p_task_info->pti_threads_system, 1ULL, "PROC_PIDTASKINFO returned valid value for pti_threads_system");
-	T_EXPECT_GT_ULLONG((p_task_info_new->pti_total_system - p_task_info->pti_total_system), 0ULL,
-	    "PROC_PIDTASKINFO returned valid value for pti_total_system");
-#endif
-	T_EXPECT_GT_ULLONG((p_task_info_new->pti_total_user - p_task_info->pti_total_user), 0ULL,
-	    "PROC_PIDTASKINFO returned valid value for pti_total_user");
+	    "PROC_PIDTASKINFO returned valid value for pti_resident_size");
+	T_EXPECT_EQ_INT(p_task_info_new->pti_policy, POLICY_TIMESHARE, "PROC_PIDTASKINFO returned valid value for pti_policy");
+	_expect_increasing_taskinfo_times("PROC_PIDTASKINFO", p_task_info, p_task_info_new);
 	T_EXPECT_GE_INT((p_task_info_new->pti_faults - p_task_info->pti_faults), 1,
 	    "PROC_PIDTASKINFO returned valid value for pti_faults");
 	T_EXPECT_GE_INT((p_task_info_new->pti_cow_faults - p_task_info->pti_cow_faults), 1,
@@ -1127,24 +1135,12 @@ T_DECL(proc_info_proc_pidtaskallinfo,
 	T_EXPECT_EQ_UINT(pall->pbsd.pbi_pjobc, pbsd->pbi_pjobc, "PROC_PIDTASKALLINFO returned valid pbi_pjobc");
 	T_EXPECT_NE_UINT(pall->pbsd.e_tdev, 0U, "PROC_PIDTASKALLINFO returned valid e_tdev");
 
-#if defined(__arm__) || defined(__arm64__)
-	T_EXPECT_GE_ULLONG(pall->ptinfo.pti_threads_system, 0ULL, "PROC_PIDTASKALLINFO returned valid value for pti_threads_system");
-	T_EXPECT_GE_ULLONG((pall->ptinfo.pti_total_system - p_task_info->pti_total_system), 0ULL,
-	    "PROC_PIDTASKALLINFO returned valid value for pti_total_system");
-#else
-	T_EXPECT_GE_ULLONG(pall->ptinfo.pti_threads_system, 1ULL, "PROC_PIDTASKALLINFO returned valid value for pti_threads_system");
-	T_EXPECT_GT_ULLONG((pall->ptinfo.pti_total_system - p_task_info->pti_total_system), 0ULL,
-	    "PROC_PIDTASKALLINFO returned valid value for pti_total_system");
-#endif /* ARM */
-
 	T_EXPECT_GE_ULLONG((pall->ptinfo.pti_virtual_size - p_task_info->pti_virtual_size), (unsigned long long)PAGE_SIZE,
 	    "PROC_PIDTASKALLINFO returned valid value for pti_virtual_size");
 	T_EXPECT_GE_ULLONG((pall->ptinfo.pti_resident_size - p_task_info->pti_resident_size), (unsigned long long)PAGE_SIZE,
-	    "PROC_PIDTASKALLINFO returned valid value for pti_virtual_size");
-	T_EXPECT_EQ_INT(pall->ptinfo.pti_policy, POLICY_TIMESHARE, "PROC_PIDTASKALLINFO returned valid value for pti_virtual_size");
-	T_EXPECT_GE_ULLONG(pall->ptinfo.pti_threads_user, 1ULL, "PROC_PIDTASKALLINFO returned valid value for pti_threads_user ");
-	T_EXPECT_GT_ULLONG((pall->ptinfo.pti_total_user - p_task_info->pti_total_user), 0ULL,
-	    "PROC_PIDTASKALLINFO returned valid value for pti_total_user");
+	    "PROC_PIDTASKALLINFO returned valid value for pti_resident_size");
+	T_EXPECT_EQ_INT(pall->ptinfo.pti_policy, POLICY_TIMESHARE, "PROC_PIDTASKALLINFO returned valid value for pti_policy");
+	_expect_increasing_taskinfo_times("PROC_PIDTASKALLLINFO", p_task_info, &pall->ptinfo);
 	T_EXPECT_GE_INT((pall->ptinfo.pti_faults - p_task_info->pti_faults), 1,
 	    "PROC_PIDTASKALLINFO returned valid value for pti_faults");
 	T_EXPECT_GE_INT((pall->ptinfo.pti_cow_faults - p_task_info->pti_cow_faults), 1,
@@ -1286,7 +1282,7 @@ T_DECL(proc_info_proc_pidarchinfo,
 	proc_info_caller(PAI, proc_info, NULL);
 	struct proc_archinfo pai = *((struct proc_archinfo *)proc_info[0]);
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	if (!((pai.p_cputype & CPU_TYPE_ARM) == CPU_TYPE_ARM) && !((pai.p_cputype & CPU_TYPE_ARM64) == CPU_TYPE_ARM64)) {
 		T_EXPECT_EQ_INT(pai.p_cputype, CPU_TYPE_ARM, "PROC_PIDARCHINFO returned valid value for p_cputype");
 	}

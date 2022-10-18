@@ -42,6 +42,17 @@
 kern_return_t buffer_stage_initialize(struct kdp_output_stage *stage, size_t buffer_size);
 
 /*
+ * A non-terminal output stage that compresses the output data with LZ4 before
+ * sending it over to the next stage.
+ */
+kern_return_t lz4_stage_initialize(struct kdp_output_stage *stage);
+
+/*
+ * Instructs the LZ4 stage to start monitoring for the Compression kext.
+ */
+void lz4_stage_monitor_availability(void);
+
+/*
  * A non-terminal output stage that compresses (using ZLib) the output data before
  * sending it over to the next stage.
  *
@@ -99,19 +110,15 @@ kern_return_t progress_notify_stage_initialize(struct kdp_output_stage *stage);
 
 #if defined(__arm64__)
 /*
- * A non-terminal output stage that handles memory accesses to special device memory if the memory
- * being saved is outside of DRAM.
+ * A non-terminal output stage that handles memory accesses to special device memory.
  */
 kern_return_t memory_backing_aware_buffer_stage_initialize(struct kdp_output_stage *stage);
 #endif /* defined(__arm64__) */
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 /*
  * A terminal output stage that streams the data out to an external
  * agent (a debugger) over a shared memory region.
  */
 kern_return_t shmem_stage_initialize(struct kdp_output_stage *stage);
-
-void shmem_mark_as_busy(void);
-
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */

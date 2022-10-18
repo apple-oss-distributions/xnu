@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -177,15 +177,13 @@ os_packet_get_service_class(const packet_t ph)
 int
 os_packet_set_compression_generation_count(const packet_t ph, const uint32_t gencnt)
 {
-	__packet_set_comp_gencnt(ph, gencnt);
-
-	return 0;
+	return __packet_set_comp_gencnt(ph, gencnt);
 }
 
-uint32_t
-os_packet_get_compression_generation_count(const packet_t ph)
+int
+os_packet_get_compression_generation_count(const packet_t ph, uint32_t *pgencnt)
 {
-	return __packet_get_comp_gencnt(ph);
+	return __packet_get_comp_gencnt(ph, pgencnt);
 }
 
 int
@@ -268,6 +266,18 @@ os_packet_set_expire_time(const packet_t ph, const uint64_t ts)
 }
 
 int
+os_packet_get_expiry_action(const packet_t ph, packet_expiry_action_t *pea)
+{
+	return __packet_get_expiry_action(ph, pea);
+}
+
+int
+os_packet_set_expiry_action(const packet_t ph, const packet_expiry_action_t pea)
+{
+	return __packet_set_expiry_action(ph, pea);
+}
+
+int
 os_packet_get_token(const packet_t ph, void *token, uint16_t *len)
 {
 	return __packet_get_token(ph, token, len);
@@ -315,6 +325,13 @@ uint8_t
 os_packet_get_vlan_priority(const uint16_t tag)
 {
 	return __packet_get_vlan_priority(tag);
+}
+
+int
+os_packet_set_app_metadata(const packet_t ph,
+    const packet_app_metadata_type_t app_type, const uint8_t app_metadata)
+{
+	return __packet_set_app_metadata(ph, app_type, app_metadata);
 }
 
 boolean_t
@@ -466,6 +483,24 @@ os_buflet_get_data_limit(const buflet_t buf)
 	return __buflet_get_data_limit(buf);
 }
 
+uint16_t
+os_buflet_get_object_offset(const buflet_t buf)
+{
+	return __buflet_get_buffer_offset(buf);
+}
+
+uint16_t
+os_buflet_get_gro_len(const buflet_t buf)
+{
+	return __buflet_get_gro_len(buf);
+}
+
+void *
+os_buflet_get_next_buf(const buflet_t buflet, const void *prev_buf)
+{
+	return __buflet_get_next_buf(buflet, prev_buf);
+}
+
 packet_trace_id_t
 os_packet_get_trace_id(const packet_t ph)
 {
@@ -482,4 +517,16 @@ void
 os_packet_trace_event(const packet_t ph, uint32_t event)
 {
 	return __packet_trace_event(ph, event);
+}
+
+int
+os_packet_set_protocol_segment_size(const packet_t ph, uint16_t proto_seg_sz)
+{
+	return __packet_set_protocol_segment_size(ph, proto_seg_sz);
+}
+
+void
+os_packet_set_tso_flags(const packet_t ph, packet_tso_flags_t flags)
+{
+	return __packet_set_tso_flags(ph, flags);
 }

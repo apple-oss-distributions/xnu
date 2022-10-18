@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -58,6 +58,7 @@
 #include <net/if_fake_var.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -3920,6 +3921,14 @@ system_cmd(const char *cmd, bool fail_on_error)
 	}
 }
 
+static bool
+executable_is_present(const char * path)
+{
+	struct stat statb = {};
+
+	return stat(path, &statb) == 0 && (statb.st_mode & S_IXUSR) != 0;
+}
+
 static void
 cleanup_pf(void)
 {
@@ -3983,6 +3992,11 @@ filter_test(uint8_t af)
 	bool input = true;
 	const char* ifnames[2];
 
+#define PFCTL_PATH      "/sbin/pfctl"
+	if (!executable_is_present(PFCTL_PATH)) {
+		T_SKIP("%s not present", PFCTL_PATH);
+		return;
+	}
 	signal(SIGINT, sigint_handler);
 
 	T_ATEND(cleanup);

@@ -1727,6 +1727,33 @@ in6ctl_aifaddr(struct ifnet *ifp, struct in6_aliasreq *ifra)
 	VERIFY(ifp != NULL && ifra != NULL);
 	ia = NULL;
 
+	/*
+	 * XXX This interface is not meant to be used for static LLA
+	 * configuration.
+	 * Instead one can use SIOCLL_START can be used to configure LLA
+	 * statically.
+	 * For bin-compat reasons though, allow it for now and only make
+	 * sure that scope gets communicated correctly.
+	 */
+	if (IN6_IS_ADDR_LINKLOCAL(&ifra->ifra_addr.sin6_addr)) {
+		if (in6_embedded_scope) {
+			ifra->ifra_addr.sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+		} else {
+			/*
+			 * XXX May be we should rather also check if sin6_scope_id
+			 * is already set or enforce if set that it is same
+			 * as interface index?
+			 * For now to avoid any unintended consequence, just use
+			 * interface index and set sin6_scope_id.
+			 * Also should we just prohibit this interface to configure
+			 * additional link local and limti LLA configuration through
+			 * other *_start ioctls?
+			 */
+			ifra->ifra_addr.sin6_addr.s6_addr16[1] = 0;
+			ifra->ifra_addr.sin6_scope_id = ifp->if_index;
+		}
+	}
+
 	/* Attempt to attach the protocol, in case it isn't attached */
 	error = in6_domifattach(ifp);
 	if (error == 0) {
@@ -4038,8 +4065,6 @@ in6_if2idlen(struct ifnet *ifp)
 		return 64;    /* Packet Data over Cellular */
 	case IFT_BRIDGE:
 		return 64;    /* Transparent bridge interface */
-	case IFT_6LOWPAN:
-		return 64;    /* 6LoWPAN */
 	default:
 		/*
 		 * Unknown link type:
@@ -5172,4 +5197,104 @@ in6_iahash_insert_ptp(struct in6_ifaddr *ia)
 		    ia, ia6_hash);
 	}
 	IFA_ADDREF_LOCKED(&ia->ia_ifa);
+}
+
+/*
+ * ipv6 socket options.
+ *
+ * The switch statement below does nothing at runtime, as it serves as a
+ * compile time check to ensure that all of the ipv6 socket options are
+ * unique.  This works as long as this routine gets updated each time a
+ * new ipv6 socket option gets added.
+ *
+ * Any failures at compile time indicates duplicated ipv6 socket option
+ * values.
+ */
+static __attribute__((unused)) void
+tcpsockopt_cassert(void)
+{
+	/*
+	 * This is equivalent to _CASSERT() and the compiler wouldn't
+	 * generate any instructions, thus for compile time only.
+	 */
+	switch ((int)0) {
+	case 0:
+
+	/* bsd/netinet6/in6.h */
+	case IPV6_SOCKOPT_RESERVED1:
+	case IPV6_UNICAST_HOPS:
+	case IPV6_MULTICAST_IF:
+	case IPV6_MULTICAST_HOPS:
+	case IPV6_MULTICAST_LOOP:
+	case IPV6_JOIN_GROUP:
+	case IPV6_LEAVE_GROUP:
+	case IPV6_PORTRANGE:
+	case ICMP6_FILTER:
+	case IPV6_2292PKTINFO:
+	case IPV6_2292HOPLIMIT:
+	case IPV6_2292NEXTHOP:
+	case IPV6_2292HOPOPTS:
+	case IPV6_2292DSTOPTS:
+	case IPV6_2292RTHDR:
+	case IPV6_2292PKTOPTIONS:
+#ifdef __APPLE_USE_RFC_2292
+// #define IPV6_PKTINFO    IPV6_3542PKTINFO
+// #define IPV6_HOPLIMIT   IPV6_3542HOPLIMIT
+// #define IPV6_NEXTHOP    IPV6_3542NEXTHOP
+// #define IPV6_HOPOPTS    IPV6_3542HOPOPTS
+// #define IPV6_DSTOPTS    IPV6_3542DSTOPTS
+// #define IPV6_RTHDR      IPV6_3542RTHDR
+	case IPV6_PKTOPTIONS:
+#endif /* __APPLE_USE_RFC_2292 */
+	case IPV6_CHECKSUM:
+	case IPV6_V6ONLY:
+#ifndef KERNEL
+// #define IPV6_BINDV6ONLY         IPV6_V6ONLY
+#endif /* KERNEL */
+	case IPV6_IPSEC_POLICY:
+	case IPV6_FAITH:
+	case IPV6_FW_ADD:
+	case IPV6_FW_DEL:
+	case IPV6_FW_FLUSH:
+	case IPV6_FW_ZERO:
+	case IPV6_FW_GET:
+	case IPV6_RECVTCLASS:
+	case IPV6_TCLASS:
+#ifdef __APPLE_USE_RFC_3542
+	case IPV6_RTHDRDSTOPTS:
+	case IPV6_RECVPKTINFO:
+	case IPV6_RECVHOPLIMIT:
+	case IPV6_RECVRTHDR:
+	case IPV6_RECVHOPOPTS:
+	case IPV6_RECVDSTOPTS:
+#ifdef KERNEL
+	case IPV6_RECVRTHDRDSTOPTS:
+#endif
+	case IPV6_USE_MIN_MTU:
+	case IPV6_RECVPATHMTU:
+	case IPV6_PATHMTU:
+	case IPV6_3542PKTINFO:
+	case IPV6_3542HOPLIMIT:
+	case IPV6_3542NEXTHOP:
+	case IPV6_3542HOPOPTS:
+	case IPV6_3542DSTOPTS:
+	case IPV6_3542RTHDR:
+// #define IPV6_PKTINFO    IPV6_3542PKTINFO
+// #define IPV6_HOPLIMIT   IPV6_3542HOPLIMIT
+// #define IPV6_NEXTHOP    IPV6_3542NEXTHOP
+// #define IPV6_HOPOPTS    IPV6_3542HOPOPTS
+// #define IPV6_DSTOPTS    IPV6_3542DSTOPTS
+// #define IPV6_RTHDR      IPV6_3542RTHDR
+	case IPV6_AUTOFLOWLABEL:
+	case IPV6_DONTFRAG:
+	case IPV6_PREFER_TEMPADDR:
+	case IPV6_MSFILTER:
+#endif /* __APPLE_USE_RFC_3542 */
+	case IPV6_BOUND_IF:
+
+	/* bsd/netinet6/in6_private.h */
+	case IPV6_NO_IFT_CELLULAR:
+	case IPV6_OUT_IF:
+		;
+	}
 }

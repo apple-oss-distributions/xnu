@@ -1,11 +1,12 @@
-/*
- *  ccsha2_internal.h
- *  corecrypto
+/* Copyright (c) (2010-2012,2014-2019,2021) Apple Inc. All rights reserved.
  *
- *  Created on 12/19/2017
- *
- *  Copyright (c) 2017 Apple Inc. All rights reserved.
- *
+ * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
+ * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -43,30 +44,10 @@
 
 #define CCSHA2_SHA256_USE_SHA512_K (CC_SMALL_CODE && !CCSHA2_DISABLE_SHA512)
 
-extern const struct ccdigest_info ccsha256_v6m_di;
-void ccsha256_v6m_compress(ccdigest_state_t state, size_t nblocks, const void *buf);
-
 void ccsha256_ltc_compress(ccdigest_state_t state, size_t nblocks, const void *buf);
 void ccsha512_ltc_compress(ccdigest_state_t state, size_t nblocks, const void *in);
 
-#if  CCSHA2_VNG_INTEL
-#if defined __x86_64__
-void ccsha256_vng_intel_avx2_compress(ccdigest_state_t state, size_t nblocks, const void *in) __asm__("_ccsha256_vng_intel_avx2_compress");
-void ccsha256_vng_intel_avx1_compress(ccdigest_state_t state, size_t nblocks, const void *in) __asm__("_ccsha256_vng_intel_avx1_compress");
-void ccsha256_vng_intel_ssse3_compress(ccdigest_state_t state, size_t nblocks, const void *in) __asm__("_ccsha256_vng_intel_sse3_compress");
-void ccsha512_vng_intel_avx2_compress(ccdigest_state_t state, size_t nblocks, const void *in) __asm__("_ccsha512_vng_intel_avx2_compress");
-void ccsha512_vng_intel_avx1_compress(ccdigest_state_t state, size_t nblocks, const void *in) __asm__("_ccsha512_vng_intel_avx1_compress");
-void ccsha512_vng_intel_ssse3_compress(ccdigest_state_t state, size_t nblocks, const void *in) __asm__("_ccsha512_vng_intel_ssse3_compress");
-
-#if CC_ACCELERATECRYPTO
-// AccelerateCrypto
-extern const struct ccdigest_info ccsha224_vng_intel_di;
-extern const struct ccdigest_info ccsha256_vng_intel_di;
-extern const struct ccdigest_info ccsha384_vng_intel_di;
-extern const struct ccdigest_info ccsha512_vng_intel_di;
-extern const struct ccdigest_info ccsha512_256_vng_intel_di;
-#endif
-
+#if CCSHA2_VNG_INTEL && defined(__x86_64__)
 extern const struct ccdigest_info ccsha224_vng_intel_AVX2_di;
 extern const struct ccdigest_info ccsha224_vng_intel_AVX1_di;
 extern const struct ccdigest_info ccsha256_vng_intel_AVX2_di;
@@ -80,9 +61,6 @@ extern const struct ccdigest_info ccsha512_vng_intel_SupplementalSSE3_di;
 extern const struct ccdigest_info ccsha512_256_vng_intel_AVX2_di;
 extern const struct ccdigest_info ccsha512_256_vng_intel_AVX1_di;
 extern const struct ccdigest_info ccsha512_256_vng_intel_SupplementalSSE3_di;
-
-#endif
-void ccsha256_vng_intel_sse3_compress(ccdigest_state_t state, size_t nblocks, const void *in) __asm__("_ccsha256_vng_intel_sse3_compress");
 #endif
 
 extern const uint32_t ccsha256_K[64];

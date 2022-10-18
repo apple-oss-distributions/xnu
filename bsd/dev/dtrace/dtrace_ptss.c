@@ -167,7 +167,7 @@ dtrace_ptss_allocate_page(struct proc* p)
 	}
 
 	// Now allocate a page in user space and set its protections to allow execute.
-	task_t task = p->task;
+	task_t task = proc_task(p);
 	vm_map_t map = get_task_map_reference(task);
 	if (map == NULL) {
 		goto err;
@@ -237,7 +237,7 @@ void
 dtrace_ptss_free_page(struct proc* p, struct dtrace_ptss_page* ptss_page)
 {
 	// Grab the task and get a reference to its vm_map
-	task_t task = p->task;
+	task_t task = proc_task(p);
 	vm_map_t map = get_task_map_reference(task);
 
 	mach_vm_address_t addr = ptss_page->entries[0].addr;

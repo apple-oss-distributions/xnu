@@ -27,12 +27,16 @@
  */
 
 #include <mach/vm_param.h>
-#include <kasan-tbi.h>
+#include "kasan-tbi.h"
 
 #ifndef _KASAN_TBI_ARM64_H_
 #define _KASAN_TBI_ARM64_H_
 
+#if KASAN_LIGHT
+#define STOLEN_MEM_PERCENT      5UL
+#else
 #define STOLEN_MEM_PERCENT      7UL
+#endif /* KASAN_LIGHT */
 /* No need for quarantine with KASAN-TBI */
 #define STOLEN_MEM_BYTES            MiB(20)
 

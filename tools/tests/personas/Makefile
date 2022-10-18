@@ -3,10 +3,9 @@ include ../Makefile.common
 SYMROOT?=$(shell /bin/pwd)
 
 CFLAGS := -g -O2 -isysroot $(SDKROOT) -I$(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
-CFLAGS += -Wl,-sectcreate,__INFO_FILTER,__disable,/dev/null
 
 # $(ARCH_CONFIGS) is set my Makefile.common
-ARCH_FLAGS := $(if $(ARCH_CONFIGS_64), $(ARCH_FLAGS_64)) $(if $(ARCH_CONFIGS_32), $(ARCH_FLAGS_32))
+ARCH_FLAGS := $(if $(ARCH_CONFIGS_64), $(ARCH_FLAGS_64))
 
 DSTROOT?=$(shell /bin/pwd)
 

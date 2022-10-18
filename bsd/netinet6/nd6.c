@@ -996,6 +996,8 @@ again:
 				 */
 				route_event_enqueue_nwk_wq_entry(rt, NULL,
 				    ROUTE_LLENTRY_UNREACH, NULL, FALSE);
+				defrouter_set_reachability(&SIN6(rt_key(rt))->sin6_addr, rt->rt_ifp,
+				    FALSE);
 				nd6_free(rt);
 				ap->killed++;
 				lck_mtx_lock(rnh_lock);
@@ -1110,7 +1112,8 @@ again:
 				 */
 				route_event_enqueue_nwk_wq_entry(rt, NULL,
 				    ROUTE_LLENTRY_UNREACH, NULL, FALSE);
-
+				defrouter_set_reachability(&SIN6(rt_key(rt))->sin6_addr, rt->rt_ifp,
+				    FALSE);
 				lck_mtx_lock(rnh_lock);
 				/*
 				 * nd6_free above would flush out the routing table of
@@ -2393,15 +2396,27 @@ nd6_lookup(struct in6_addr *addr6, int create, struct ifnet *ifp, int rt_locked)
 			RT_LOCK(rt);
 			if (rt->rt_llinfo) {
 				struct llinfo_nd6 *ln = rt->rt_llinfo;
-				struct nd_ifinfo *ndi = ND_IFINFO(rt->rt_ifp);
+				boolean_t nud_enabled = FALSE;
 
-				VERIFY((NULL != ndi) && (TRUE == ndi->initialized));
+				/*
+				 * The IPv6 initialization of the loopback interface
+				 * may happen after another interface gets assigned
+				 * an IPv6 address.
+				 * To avoid asserting treat local routes as special
+				 * case.
+				 */
+				if (rt->rt_ifp != lo_ifp) {
+					struct nd_ifinfo *ndi = ND_IFINFO(rt->rt_ifp);
+					VERIFY((NULL != ndi) && (TRUE == ndi->initialized));
+					nud_enabled = !!(ndi->flags & ND6_IFF_PERFORMNUD);
+				}
+
 				/*
 				 * For interface's that do not perform NUD
 				 * neighbor cache entres must always be marked
 				 * reachable with no expiry
 				 */
-				if (ndi->flags & ND6_IFF_PERFORMNUD) {
+				if (nud_enabled) {
 					ND6_CACHE_STATE_TRANSITION(ln, ND6_LLINFO_NOSTATE);
 				} else {
 					ND6_CACHE_STATE_TRANSITION(ln, ND6_LLINFO_REACHABLE);
@@ -2678,9 +2693,21 @@ nd6_rtrequest(int req, struct rtentry *rt, struct sockaddr *sa)
 	struct ifaddr *ifa;
 	uint64_t timenow;
 	char buf[MAX_IPv6_STR_LEN];
-	struct nd_ifinfo *ndi = ND_IFINFO(rt->rt_ifp);
+	boolean_t nud_enabled = FALSE;
 
-	VERIFY((NULL != ndi) && (TRUE == ndi->initialized));
+	/*
+	 * The IPv6 initialization of the loopback interface
+	 * may happen after another interface gets assigned
+	 * an IPv6 address.
+	 * To avoid asserting treat local routes as special
+	 * case.
+	 */
+	if (rt->rt_ifp != lo_ifp) {
+		struct nd_ifinfo *ndi = ND_IFINFO(rt->rt_ifp);
+		VERIFY((NULL != ndi) && (TRUE == ndi->initialized));
+		nud_enabled = !!(ndi->flags & ND6_IFF_PERFORMNUD);
+	}
+
 	VERIFY(nd6_init_done);
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
 	RT_LOCK_ASSERT_HELD(rt);
@@ -2852,8 +2879,7 @@ nd6_rtrequest(int req, struct rtentry *rt, struct sockaddr *sa)
 		 * neighbor cache entries must always be marked
 		 * reachable with no expiry
 		 */
-		if ((req == RTM_ADD) ||
-		    !(ndi->flags & ND6_IFF_PERFORMNUD)) {
+		if ((req == RTM_ADD) || !nud_enabled) {
 			/*
 			 * gate should have some valid AF_LINK entry,
 			 * and ln->ln_expire should have some lifetime
@@ -3944,6 +3970,8 @@ fail:
 
 		if (ln->ln_router || (rt->rt_flags & RTF_ROUTER)) {
 			struct radix_node_head  *rnh = NULL;
+			struct in6_addr rt_addr = SIN6(rt_key(rt))->sin6_addr;
+			struct ifnet *rt_ifp = rt->rt_ifp;
 			struct route_event rt_ev;
 			route_event_init(&rt_ev, rt, NULL, llchange ? ROUTE_LLENTRY_CHANGED :
 			    ROUTE_LLENTRY_RESOLVED);
@@ -3953,6 +3981,7 @@ fail:
 			 * We therefore don't need an extra reference here
 			 */
 			RT_UNLOCK(rt);
+			defrouter_set_reachability(&rt_addr, rt_ifp, TRUE);
 			lck_mtx_lock(rnh_lock);
 
 			rnh = rt_tables[AF_INET6];
@@ -4594,7 +4623,6 @@ nd6_need_cache(struct ifnet *ifp)
 #endif
 	case IFT_BRIDGE:
 	case IFT_CELLULAR:
-	case IFT_6LOWPAN:
 		return 1;
 	default:
 		return 0;

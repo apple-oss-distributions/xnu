@@ -740,7 +740,7 @@ SYSCTL_DECL(_hw_features);
 #define KERN_NISDOMAINNAME      22      /* string: YP domain name */
 #define KERN_DOMAINNAME         KERN_NISDOMAINNAME
 #define KERN_MAXPARTITIONS      23      /* int: number of partitions/disk */
-#define KERN_KDEBUG                     24      /* int: kernel trace points */
+#define KERN_KDEBUG             24      /* int: kernel trace points */
 #define KERN_UPDATEINTERVAL     25      /* int: update process sleep time */
 #define KERN_OSRELDATE          26      /* int: OS release date */
 #define KERN_NTP_PLL            27      /* node: NTP PLL control */
@@ -1420,7 +1420,6 @@ extern char     macosversion[];
 #endif
 
 void    sysctl_mib_init(void);
-void    hvg_bsd_init(void);
 
 #endif /* BSD_KERNEL_PRIVATE */
 #else   /* !KERNEL */

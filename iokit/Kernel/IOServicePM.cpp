@@ -98,6 +98,7 @@ static IOPMCompletionQueue * gIOPMCompletionQueue   = NULL;
 static IOPMRequest *         gIOPMRequest           = NULL;
 static IOService *           gIOPMRootNode          = NULL;
 static IOPlatformExpert *    gPlatform              = NULL;
+static IOLock *              gIOPMInitLock          = NULL;
 
 // log setPowerStates and powerStateChange longer than (ns):
 static uint64_t              gIOPMSetPowerStateLogNS =
@@ -117,7 +118,7 @@ const OSSymbol *             gIOPMPowerClientRootDomain = NULL;
 static const OSSymbol *      gIOPMPowerClientAdvisoryTickle = NULL;
 static bool                  gIOPMAdvisoryTickleEnabled = true;
 static thread_t              gIOPMWatchDogThread        = NULL;
-TUNABLE_WRITEABLE(uint32_t, gCanSleepTimeout, "pmtimeout", 0);
+TUNABLE_WRITEABLE(uint32_t, gSleepAckTimeout, "pmtimeout", 0);
 
 static uint32_t
 getPMRequestType( void )
@@ -129,7 +130,7 @@ getPMRequestType( void )
 	return type;
 }
 
-SYSCTL_UINT(_kern, OID_AUTO, pmtimeout, CTLFLAG_RW | CTLFLAG_LOCKED, &gCanSleepTimeout, 0, "Power Management Timeout");
+SYSCTL_UINT(_kern, OID_AUTO, pmtimeout, CTLFLAG_RW | CTLFLAG_LOCKED, &gSleepAckTimeout, 0, "Power Management Timeout");
 
 //******************************************************************************
 // Macros
@@ -172,10 +173,13 @@ do {                                  \
 #define ns_per_us                   1000
 #define k30Seconds                  (30*us_per_s)
 #define k5Seconds                   ( 5*us_per_s)
+#define k7Seconds                   ( 7*us_per_s)
 #if !defined(XNU_TARGET_OS_OSX)
 #define kCanSleepMaxTimeReq         k5Seconds
+#define kWillSleepMaxTimeReq        k7Seconds
 #else /* defined(XNU_TARGET_OS_OSX) */
 #define kCanSleepMaxTimeReq         k30Seconds
+#define kWillSleepMaxTimeReq        k30Seconds
 #endif /* defined(XNU_TARGET_OS_OSX) */
 #define kMaxTimeRequested           k30Seconds
 #define kMinAckTimeoutTicks         (10*1000000)
@@ -314,6 +318,19 @@ enum {
 };
 
 //*********************************************************************************
+// [private static] allocPMInitLock
+//
+// Allocate gIOPMInitLock prior to gIOPMWorkLoop initialization.
+//*********************************************************************************
+
+void
+IOService::allocPMInitLock( void )
+{
+	gIOPMInitLock = IOLockAlloc();
+	assert(gIOPMInitLock);
+}
+
+//*********************************************************************************
 // [public] PMinit
 //
 // Initialize power management.
@@ -323,10 +340,12 @@ void
 IOService::PMinit( void )
 {
 	if (!initialized) {
+		IOLockLock(gIOPMInitLock);
 		if (!gIOPMInitialized) {
 			gPlatform = getPlatform();
 			gIOPMWorkLoop = IOWorkLoop::workLoop();
 			if (gIOPMWorkLoop) {
+				assert(OSDynamicCast(IOPMrootDomain, this));
 				gIOPMRequestQueue = IOPMRequestQueue::create(
 					this, OSMemberFunctionCast(IOPMRequestQueue::Action,
 					this, &IOService::actionPMRequestQueue));
@@ -401,6 +420,9 @@ IOService::PMinit( void )
 			}
 #endif
 		}
+
+		IOLockUnlock(gIOPMInitLock);
+
 		if (!gIOPMInitialized) {
 			return;
 		}
@@ -4107,7 +4129,8 @@ IOService::actionDriverCalloutDone(
 }
 
 void
-IOService::pmDriverCallout( IOService * from )
+IOService::pmDriverCallout( IOService * from,
+    __unused thread_call_param_t p)
 {
 	assert(from);
 	switch (from->fDriverCallReason) {
@@ -6112,8 +6135,14 @@ IOService::tellClientsWithResponse( int messageType )
 		}
 		if (context.messageType == kIOMessageCanSystemSleep) {
 			maxTimeOut = kCanSleepMaxTimeReq;
-			if (gCanSleepTimeout) {
-				maxTimeOut = (gCanSleepTimeout * us_per_s);
+			if (gSleepAckTimeout) {
+				maxTimeOut = (gSleepAckTimeout * us_per_s);
+			}
+		}
+		if (context.messageType == kIOMessageSystemWillSleep) {
+			maxTimeOut = kWillSleepMaxTimeReq;
+			if (gSleepAckTimeout) {
+				maxTimeOut = (gSleepAckTimeout * us_per_s);
 			}
 		}
 		context.maxTimeRequested = maxTimeOut;
@@ -6143,8 +6172,8 @@ IOService::tellClientsWithResponse( int messageType )
 		    pmTellCapabilityAppWithResponse, (void *) &context );
 		if (context.messageType == kIOMessageCanSystemSleep) {
 			maxTimeOut = kCanSleepMaxTimeReq;
-			if (gCanSleepTimeout) {
-				maxTimeOut = (gCanSleepTimeout * us_per_s);
+			if (gSleepAckTimeout) {
+				maxTimeOut = (gSleepAckTimeout * us_per_s);
 			}
 		}
 		context.maxTimeRequested = maxTimeOut;
@@ -6221,10 +6250,10 @@ IOService::pmTellAppWithResponse( OSObject * object, void * arg )
 			proc = proc_find(clientPID);
 
 			if (proc) {
-				proc_suspended = get_task_pidsuspended((task_t) proc->task);
+				proc_suspended = get_task_pidsuspended((task_t) proc_task(proc));
 				if (proc_suspended) {
 					logClientIDForNotification(object, context, "PMTellAppWithResponse - Suspended");
-				} else if (getPMRootDomain()->isAOTMode() && get_task_suspended((task_t) proc->task)) {
+				} else if (getPMRootDomain()->isAOTMode() && get_task_suspended((task_t) proc_task(proc))) {
 					proc_suspended = true;
 					context->skippedInDark++;
 				}
@@ -6440,10 +6469,10 @@ IOService::pmTellCapabilityAppWithResponse( OSObject * object, void * arg )
 			clientID->release();
 			proc = proc_find(clientPID);
 			if (proc) {
-				proc_suspended = get_task_pidsuspended((task_t) proc->task);
+				proc_suspended = get_task_pidsuspended((task_t) proc_task(proc));
 				if (proc_suspended) {
 					logClientIDForNotification(object, context, "PMTellCapablityAppWithResponse - Suspended");
-				} else if (get_task_suspended((task_t) proc->task)) {
+				} else if (get_task_suspended((task_t) proc_task(proc))) {
 					proc_suspended = true;
 					context->skippedInDark++;
 				}
@@ -6792,10 +6821,10 @@ tellAppClientApplier( OSObject * object, void * arg )
 			proc = proc_find(clientPID);
 
 			if (proc) {
-				proc_suspended = get_task_pidsuspended((task_t) proc->task);
+				proc_suspended = get_task_pidsuspended((task_t) proc_task(proc));
 				if (proc_suspended) {
 					logClientIDForNotification(object, context, "tellAppClientApplier - Suspended");
-				} else if (IOService::getPMRootDomain()->isAOTMode() && get_task_suspended((task_t) proc->task)) {
+				} else if (IOService::getPMRootDomain()->isAOTMode() && get_task_suspended((task_t) proc_task(proc))) {
 					proc_suspended = true;
 					context->skippedInDark++;
 				}
@@ -8582,6 +8611,9 @@ IOPMRequest::detachRootRequest( void )
 
 OSDefineMetaClassAndStructors( IOPMRequestQueue, IOEventSource );
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type"
+
 IOPMRequestQueue *
 IOPMRequestQueue::create( IOService * inOwner, Action inAction )
 {
@@ -8604,6 +8636,8 @@ IOPMRequestQueue::init( IOService * inOwner, Action inAction )
 	fLock = IOLockAlloc();
 	return fLock != NULL;
 }
+
+#pragma clang diagnostic pop
 
 void
 IOPMRequestQueue::free( void )
@@ -8653,7 +8687,7 @@ IOPMRequestQueue::queuePMRequestChain( IOPMRequest ** requests, IOItemCount coun
 bool
 IOPMRequestQueue::checkForWork( void )
 {
-	Action          dqAction = (Action) action;
+	Action          dqAction = (Action) (void (*)(void))action;
 	IOPMRequest *   request;
 	IOService *     target;
 	int             dequeueCount = 0;
@@ -8939,6 +8973,9 @@ IOPMWorkQueue::finishQuiesceRequest( IOPMRequest * quiesceRequest )
 
 OSDefineMetaClassAndStructors( IOPMCompletionQueue, IOEventSource );
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type"
+
 IOPMCompletionQueue *
 IOPMCompletionQueue::create( IOService * inOwner, Action inAction )
 {
@@ -8960,6 +8997,7 @@ IOPMCompletionQueue::init( IOService * inOwner, Action inAction )
 	queue_init(&fQueue);
 	return true;
 }
+
 
 bool
 IOPMCompletionQueue::queuePMRequest( IOPMRequest * request )
@@ -8996,6 +9034,8 @@ IOPMCompletionQueue::checkForWork( void )
 
 	return more;
 }
+
+#pragma clang diagnostic pop
 
 // MARK: -
 // MARK: IOServicePM

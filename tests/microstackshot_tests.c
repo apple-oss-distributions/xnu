@@ -133,11 +133,11 @@ query_pmi_params(unsigned int *pmi_counter, uint64_t *pmi_period)
 #define MT_MICROSTACKSHOT KDBG_EVENTID(DBG_MONOTONIC, 2, 1)
 #define MS_RECORD MACHDBG_CODE(DBG_MACH_STACKSHOT, \
 	        MICROSTACKSHOT_RECORD)
-#if defined(__arm64__) || defined(__arm__)
+#if defined(__arm64__)
 #define INSTRS_PERIOD (100ULL * 1000 * 1000)
-#else /* defined(__arm64__) || defined(__arm__) */
+#else /* defined(__arm64__) */
 #define INSTRS_PERIOD (1ULL * 1000 * 1000 * 1000)
-#endif /* !defined(__arm64__) && !defined(__arm__) */
+#endif /* defined(__arm64__) */
 #define SLEEP_SECS 10
 
 T_DECL(pmi_sampling, "attempt to configure microstackshots on PMI",

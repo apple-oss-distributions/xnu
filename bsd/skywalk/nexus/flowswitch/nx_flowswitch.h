@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -92,12 +92,17 @@
 #define NX_FSW_BUFSIZE          (2 * 1024)  /* default buffer size */
 
 #define NX_FSW_MINBUFSIZE       512  /* min buffer size */
-#define NX_FSW_MAXBUFSIZE       (16 * 1024) /* max buffer size */
+#define NX_FSW_MAXBUFSIZE       (32 * 1024) /* max buffer size */
 #define NX_FSW_MAXBUFFERS       (4 * 1024) /* max number of buffers */
 /* max number of buffers for memory constrained device */
 #define NX_FSW_MAXBUFFERS_MEM_CONSTRAINED (2 * 1024)
 /* default user buffer segment size for non memory-constrained device */
 #define NX_FSW_BUF_SEG_SIZE     (32 * 1024)
+
+/* {min, def, max} values for large buffer size */
+#define NX_FSW_MIN_LARGE_BUFSIZE    0
+#define NX_FSW_DEF_LARGE_BUFSIZE    (16 * 1024)
+#define NX_FSW_MAX_LARGE_BUFSIZE    (32 * 1024)
 
 /*
  * TODO: adi@apple.com -- minimum buflets for now; we will need to
@@ -106,6 +111,15 @@
  */
 #define NX_FSW_UMD_SIZE _USER_PACKET_SIZE(BUFLETS_MIN)
 #define NX_FSW_KMD_SIZE _KERN_PACKET_SIZE(BUFLETS_MIN)
+
+#define NX_FSW_EVENT_RING_NUM      1     /* number of event rings */
+#define NX_FSW_EVENT_RING_SIZE     32    /* default event ring size */
+
+
+/*
+ * macro to check if TCP RX aggregation is enabled in flowswitch.
+ */
+#define NX_FSW_TCP_RX_AGG_ENABLED()    (sk_fsw_rx_agg_tcp != 0)
 
 struct nx_flowswitch;
 
@@ -129,6 +143,7 @@ struct nexus_vp_adapter {
 	 */
 	struct nx_flowswitch *vpna_fsw;
 	nexus_port_t    vpna_nx_port;
+	uint16_t        vpna_gencnt;
 	boolean_t       vpna_retry;
 	boolean_t       vpna_pid_bound;
 	boolean_t       vpna_defunct;
@@ -152,6 +167,25 @@ struct nexus_vp_adapter {
 
 #define FSW_NETAGENT_ENABLED(_fsw)                                      \
     (((_fsw)->fsw_state_flags & FSW_STATEF_NETAGENT_ENABLED) != 0)
+
+#if (DEVELOPMENT || DEBUG)
+#define FSW_RPS_MAX_NTHREADS    64
+struct fsw_rps_thread {
+	lck_mtx_t               frt_lock;
+	struct nx_flowswitch    *frt_fsw;
+	struct thread           *frt_thread;
+	struct pktq             frt_pktq;
+
+	uint32_t                frt_idx;
+	uint32_t                frt_flags;
+	uint32_t                frt_requests;
+};
+
+#define FRT_RUNNING             0x00000001
+#define FRT_TERMINATEBLOCK      0x10000000
+#define FRT_TERMINATING         0x20000000
+#define FRT_TERMINATED          0x40000000
+#endif /* !DEVELOPMENT && !DEBUG */
 
 /*
  * nx_flowswitch is a descriptor for a flow switch instance.
@@ -195,6 +229,7 @@ struct nx_flowswitch {
 	struct nexus_adapter    *fsw_nifna;      /* netif adapter */
 	uint32_t                fsw_state_flags; /* FSW_STATEF_* */
 
+
 	union {
 		uint64_t _buf[1];
 		uint8_t _eth_src[ETHER_ADDR_LEN];
@@ -229,7 +264,13 @@ struct nx_flowswitch {
 	uint32_t                fsw_detach_barriers;
 	uint32_t                fsw_detach_waiters;
 
-	u_int                   fsw_ifp_dlt;
+	uint32_t                fsw_ifp_dlt;
+
+	/*
+	 * largest allocated packet size.
+	 * used by: mbuf batch allocation logic during netif copy.
+	 */
+	uint32_t                fsw_rx_largest_size;
 
 	void (*fsw_ctor)(struct nx_flowswitch *, struct flow_route *);
 
@@ -265,6 +306,11 @@ struct nx_flowswitch {
 	decl_lck_mtx_data(, fsw_linger_lock);
 	struct flow_entry_linger_head fsw_linger_head;
 	uint32_t                fsw_linger_cnt;
+
+#if (DEVELOPMENT || DEBUG)
+	uint32_t                fsw_rps_nthreads;
+	struct fsw_rps_thread   *fsw_rps_threads;
+#endif /* !DEVELOPMENT && !DEBUG */
 };
 
 #define NX_FSW_PRIVATE(_nx) ((struct nx_flowswitch *)(_nx)->nx_arg)

@@ -74,11 +74,13 @@
 #define MAXLDISC 8
 #endif
 
-#define l_noopen        ((l_open_t *)  &enodev)
-#define l_noclose       ((l_close_t *) &enodev)
-#define l_noread        ((l_read_t *)  &enodev)
-#define l_nowrite       ((l_write_t *) &enodev)
-#define l_norint        ((l_rint_t *)  &enodev)
+#define l_nodev         (void (*)(void))&enodev
+
+#define l_noopen        ((l_open_t *)  l_nodev)
+#define l_noclose       ((l_close_t *) l_nodev)
+#define l_noread        ((l_read_t *)  l_nodev)
+#define l_nowrite       ((l_write_t *) l_nodev)
+#define l_norint        ((l_rint_t *)  l_nodev)
 
 static l_ioctl_t        l_noioctl;
 static l_start_t        l_nostart;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2013-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -36,6 +36,12 @@
 #include <netinet/in_stat.h>
 #include <sys/socket.h>
 #include <net/if.h>
+
+#if SKYWALK
+#include <skywalk/os_nexus_private.h>
+#else /* !SKYWALK */
+typedef uint16_t nexus_port_t;
+#endif /* !SKYWALK */
 
 /*
  * Name registered by the NECP
@@ -118,6 +124,7 @@ struct necp_packet_header {
  * Condition flags
  */
 #define NECP_POLICY_CONDITION_FLAGS_NEGATIVE    0x01 // Negative
+#define NECP_POLICY_CONDITION_FLAGS_EXACT       0x02 // For conditions that would otherwise have more inclusive matching, require an exact match
 
 /*
  * Conditions
@@ -166,6 +173,7 @@ struct necp_packet_header {
 #define NECP_POLICY_CONDITION_ATTRIBUTED_BUNDLE_IDENTIFIER 36   // String, app to which traffic is attributed to
 #define NECP_POLICY_CONDITION_SCHEME_PORT               37      // u_int16_t, the port associated with the scheme for a connection
 #define NECP_POLICY_CONDITION_DOMAIN_FILTER             38      // struct net_bloom_filter
+#define NECP_POLICY_CONDITION_SYSTEM_SIGNED_RESULT      39      // N/A
 
 /*
  * Policy Packet tags
@@ -183,10 +191,10 @@ struct necp_packet_header {
 #define NECP_POLICY_RESULT_SOCKET_FILTER                5       // u_int32_t, filter control unit
 #define NECP_POLICY_RESULT_IP_TUNNEL                    6       // String, interface name
 #define NECP_POLICY_RESULT_IP_FILTER                    7       // ?
-#define NECP_POLICY_RESULT_TRIGGER                              8       // service uuid_t
-#define NECP_POLICY_RESULT_TRIGGER_IF_NEEDED    9       // service uuid_t
-#define NECP_POLICY_RESULT_TRIGGER_SCOPED               10      // service uuid_t
-#define NECP_POLICY_RESULT_NO_TRIGGER_SCOPED    11      // service uuid_t
+#define NECP_POLICY_RESULT_TRIGGER                              8       // Deprecated
+#define NECP_POLICY_RESULT_TRIGGER_IF_NEEDED    9       // Deprecated
+#define NECP_POLICY_RESULT_TRIGGER_SCOPED               10      // Deprecated
+#define NECP_POLICY_RESULT_NO_TRIGGER_SCOPED    11      // Deprecated
 #define NECP_POLICY_RESULT_SOCKET_SCOPED                12      // String, interface name
 #define NECP_POLICY_RESULT_ROUTE_RULES                  13      // N/A, must have route rules defined
 #define NECP_POLICY_RESULT_USE_NETAGENT                 14      // netagent uuid_t
@@ -255,7 +263,10 @@ struct necp_policy_condition_tc_range {
 struct necp_policy_condition_addr {
 	u_int8_t                prefix;
 	union {
+#if !__has_ptrcheck
 		struct sockaddr                 sa;
+#endif
+		struct __sockaddr_header        sah;
 		struct sockaddr_in              sin;
 		struct sockaddr_in6             sin6;
 	} address;
@@ -263,12 +274,18 @@ struct necp_policy_condition_addr {
 
 struct necp_policy_condition_addr_range {
 	union {
+#if !__has_ptrcheck
 		struct sockaddr                 sa;
+#endif
+		struct __sockaddr_header        sah;
 		struct sockaddr_in              sin;
 		struct sockaddr_in6             sin6;
 	} start_address;
 	union {
+#if !__has_ptrcheck
 		struct sockaddr                 sa;
+#endif
+		struct __sockaddr_header        sah;
 		struct sockaddr_in              sin;
 		struct sockaddr_in6             sin6;
 	} end_address;
@@ -287,15 +304,16 @@ struct necp_policy_condition_sdk_version {
 
 #define NECP_SESSION_PRIORITY_UNKNOWN                   0
 #define NECP_SESSION_PRIORITY_CONTROL                   1
-#define NECP_SESSION_PRIORITY_PRIVILEGED_TUNNEL         2
-#define NECP_SESSION_PRIORITY_HIGH                      3
-#define NECP_SESSION_PRIORITY_HIGH_1                    4
-#define NECP_SESSION_PRIORITY_HIGH_2                    5
-#define NECP_SESSION_PRIORITY_HIGH_3                    6
-#define NECP_SESSION_PRIORITY_HIGH_4                    7
-#define NECP_SESSION_PRIORITY_HIGH_RESTRICTED           8
-#define NECP_SESSION_PRIORITY_DEFAULT                   9
-#define NECP_SESSION_PRIORITY_LOW                       10
+#define NECP_SESSION_PRIORITY_CONTROL_1                 2
+#define NECP_SESSION_PRIORITY_PRIVILEGED_TUNNEL         3
+#define NECP_SESSION_PRIORITY_HIGH                      4
+#define NECP_SESSION_PRIORITY_HIGH_1                    5
+#define NECP_SESSION_PRIORITY_HIGH_2                    6
+#define NECP_SESSION_PRIORITY_HIGH_3                    7
+#define NECP_SESSION_PRIORITY_HIGH_4                    8
+#define NECP_SESSION_PRIORITY_HIGH_RESTRICTED           9
+#define NECP_SESSION_PRIORITY_DEFAULT                   10
+#define NECP_SESSION_PRIORITY_LOW                       11
 #define NECP_SESSION_NUM_PRIORITIES                             NECP_SESSION_PRIORITY_LOW
 
 typedef u_int32_t necp_policy_id;
@@ -530,7 +548,9 @@ typedef struct necp_cache_buffer {
  * NECP Client definitions
  */
 #define NECP_MAX_CLIENT_PARAMETERS_SIZE                                 1024
-#define NECP_MAX_CLIENT_RESULT_SIZE                                             512
+#define NECP_MAX_CLIENT_RESULT_SIZE                                     512 // Legacy
+#define NECP_BASE_CLIENT_RESULT_SIZE                                    1024
+#define NECP_CLIENT_FLOW_RESULT_SIZE                                    512
 
 #define NECP_OPEN_FLAG_OBSERVER                                                 0x01 // Observers can query clients they don't own
 #define NECP_OPEN_FLAG_BACKGROUND                                               0x02 // Mark this fd as backgrounded
@@ -557,9 +577,10 @@ typedef struct necp_cache_buffer {
 #define NECP_CLIENT_ACTION_ADD_FLOW                                             17 // Add a flow. Input: client_id; Output: struct necp_client_add_flow
 #define NECP_CLIENT_ACTION_REMOVE_FLOW                                  18 // Remove a flow. Input: flow_id, optional struct ifnet_stats_per_flow
 #define NECP_CLIENT_ACTION_CLAIM                                       19 // Claim a client that has been added for this unique PID. Input: client_id
-#define NECP_CLIENT_ACTION_SIGN                                       20 // Sign a resolver answer. Input: struct necp_client_resolver_answer; Output: signed tag, expected to be 32 bytes
+#define NECP_CLIENT_ACTION_SIGN                                       20 // Sign a query answer. Input: struct necp_client_signable; Output: struct necp_client_signature
 #define NECP_CLIENT_ACTION_GET_INTERFACE_ADDRESS                       21 // Get the best interface local address for given remote address. Input: ifindex, remote sockaddr; Output: matching local sockaddr
 #define NECP_CLIENT_ACTION_ACQUIRE_AGENT_TOKEN                         22 // Get a one-time use token from an agent. Input: agent UUID; Output: token buffer
+#define NECP_CLIENT_ACTION_VALIDATE                                    23 // Validate a query answer. Input: struct necp_client_validatable; Output: None
 
 #define NECP_CLIENT_PARAMETER_APPLICATION                               NECP_POLICY_CONDITION_APPLICATION               // Requires entitlement
 #define NECP_CLIENT_PARAMETER_REAL_APPLICATION                  NECP_POLICY_CONDITION_REAL_APPLICATION  // Requires entitlement
@@ -613,7 +634,7 @@ typedef struct necp_cache_buffer {
 #define NECP_CLIENT_PARAMETER_LOCAL_ENDPOINT                    200             // struct necp_client_endpoint
 #define NECP_CLIENT_PARAMETER_REMOTE_ENDPOINT                   201             // struct necp_client_endpoint
 #define NECP_CLIENT_PARAMETER_BROWSE_DESCRIPTOR                  202             // struct necp_client_endpoint
-#define NECP_CLIENT_PARAMETER_RESOLVER_TAG                      203                             // Tag as bytes, expected to be 32 bytes
+#define NECP_CLIENT_PARAMETER_RESOLVER_TAG                      203                             // struct necp_client_validatable
 #define NECP_CLIENT_PARAMETER_ADVERTISE_DESCRIPTOR                  204             // struct necp_client_endpoint
 #define NECP_CLIENT_PARAMETER_GROUP_DESCRIPTOR                  205             // struct necp_client_group
 
@@ -629,6 +650,7 @@ typedef struct necp_cache_buffer {
 #define NECP_CLIENT_PARAMETER_LOCAL_ADDRESS_PREFERENCE_STABLE                    2
 
 #define NECP_CLIENT_PARAMETER_FLAGS                                             250             // u_int32_t, see NECP_CLIENT_PAREMETER_FLAG_* values
+#define NECP_CLIENT_PARAMETER_FLOW_DEMUX_PATTERN                                251 // struct necp_demux_pattern
 
 #define NECP_CLIENT_PARAMETER_FLAG_MULTIPATH                    0x0001  // Get multipath interface results
 #define NECP_CLIENT_PARAMETER_FLAG_BROWSE                               0x0002  // Agent assertions on nexuses are requests to browse
@@ -652,6 +674,8 @@ typedef struct necp_cache_buffer {
 #define NECP_CLIENT_PARAMETER_FLAG_THIRD_PARTY_WEB_CONTENT    0x80000  // Third-party web content, not main load
 #define NECP_CLIENT_PARAMETER_FLAG_SILENT                    0x100000  // Private browsing - do not log/track
 #define NECP_CLIENT_PARAMETER_FLAG_APPROVED_APP_DOMAIN       0x200000  // Approved associated app domain; domain is "owned" by app
+#define NECP_CLIENT_PARAMETER_FLAG_NO_WAKE_FROM_SLEEP        0x400000  // Don't wake from sleep on traffic for this client
+#define NECP_CLIENT_PARAMETER_FLAG_REUSE_LOCAL               0x800000  // Request support for local address/port reuse
 
 #define NECP_CLIENT_RESULT_CLIENT_ID                                    1               // uuid_t
 #define NECP_CLIENT_RESULT_POLICY_RESULT                                2               // u_int32_t
@@ -674,7 +698,7 @@ typedef struct necp_cache_buffer {
 #define NECP_CLIENT_RESULT_FLOW_DIVERT_AGGREGATE_UNIT                   19              // u_int32_t
 
 #define NECP_CLIENT_RESULT_NEXUS_INSTANCE                               100             // uuid_t
-#define NECP_CLIENT_RESULT_NEXUS_PORT                                   101             // u_int16_t
+#define NECP_CLIENT_RESULT_NEXUS_PORT                                   101             // nexus_port_t
 #define NECP_CLIENT_RESULT_NEXUS_KEY                                    102             // uuid_t
 #define NECP_CLIENT_RESULT_NEXUS_PORT_FLOW_INDEX                103             // u_int32_t
 #define NECP_CLIENT_RESULT_NEXUS_FLOW_STATS                             104             // struct sk_stats_flow *
@@ -747,6 +771,14 @@ struct necp_interface_details {
 	struct necp_interface_signature ipv6_signature;
 	u_int32_t ipv4_netmask;
 	u_int32_t ipv4_broadcast;
+	/*
+	 * This serves as a temporary header guard to protect libnetcore builds
+	 * until the xnu changes are available in the build.
+	 * XXX: Should be removed in a future build.
+	 */
+#define NECP_INTERFACE_SUPPORTS_TSO    1
+	u_int32_t tso_max_segment_size_v4;
+	u_int32_t tso_max_segment_size_v6;
 	u_int8_t  radio_type;
 	u_int8_t  radio_channel;
 };
@@ -793,6 +825,8 @@ struct necp_client_interface_option {
 	u_int32_t interface_generation;
 	uuid_t nexus_agent;
 };
+
+#define NECP_CLIENT_ENDPOINT_TYPE_APPLICATION_SERVICE 6
 
 struct necp_client_endpoint {
 	union {
@@ -872,20 +906,74 @@ struct necp_client_observer_update {
 	u_int8_t tlv_buffer[0]; // Parameters or result as TLVs, based on type
 };
 
-#define NECP_CLIENT_SIGN_TYPE_RESOLVER_ANSWER           1
+// These sign types are tied to specific clients.
+// The client_id UUID is then the NECP client UUID that generated the query.
+#define NECP_CLIENT_SIGN_TYPE_RESOLVER_ANSWER                   1       // struct necp_client_host_resolver_answer
+#define NECP_CLIENT_SIGN_TYPE_BROWSE_RESULT                     2       // struct necp_client_browse_result
+#define NECP_CLIENT_SIGN_TYPE_SERVICE_RESOLVER_ANSWER           3       // struct necp_client_service_resolver_answer
 
+// These sign types are valid for system-wide use.
+// The client_id UUID is a unique per-query UUID.
+// These should be generated only on behalf of trusted or entitled processes.
+#define NECP_CLIENT_SIGN_TYPE_SYSTEM_RESOLVER_ANSWER            4       // struct necp_client_host_resolver_answer
+#define NECP_CLIENT_SIGN_TYPE_SYSTEM_BROWSE_RESULT              5       // struct necp_client_browse_result
+#define NECP_CLIENT_SIGN_TYPE_SYSTEM_SERVICE_RESOLVER_ANSWER    6       // struct necp_client_service_resolver_answer
+
+struct necp_client_signature {
+	u_int8_t signed_tag[32];
+} __attribute__((__packed__));
+
+//
 struct necp_client_signable {
-	uuid_t client_id;
+	uuid_t client_id; // Interpretation depends on sign_type
 	u_int32_t sign_type;
+	u_int8_t signable_data[0];
 } __attribute__((__packed__));
 
 struct necp_client_resolver_answer {
 	uuid_t client_id;
 	u_int32_t sign_type;
-	union sockaddr_in_4_6 address_answer;
+	union sockaddr_in_4_6 address_answer; // Can include port
 	u_int32_t hostname_length;
-	// hostname
+	char hostname[0];
 } __attribute__((__packed__));
+
+struct necp_client_host_resolver_answer {
+	struct necp_client_signable header;
+	u_int32_t metadata_hash; // Extra metadata that can be signed along with the answer, such as a network signature.
+	union sockaddr_in_4_6 address_answer; // Can include port
+	u_int32_t hostname_length;
+	char hostname[0];
+} __attribute__((__packed__));
+
+struct necp_client_browse_result {
+	struct necp_client_signable header;
+	u_int32_t metadata_hash; // Extra metadata that can be signed along with the service, which may include a TXT record or a network signature
+	u_int16_t service_length;
+	char service[0];
+} __attribute__((__packed__));
+
+struct necp_client_service_resolver_answer {
+	struct necp_client_signable header;
+	u_int32_t metadata_hash; // Extra metadata that can be signed along with the service, which may include a TXT record or a network signature
+	u_int16_t service_length;
+	u_int16_t port;
+	u_int16_t hostname_length;
+	char service[0];
+	char hostname[0];
+} __attribute__((__packed__));
+
+struct necp_client_validatable {
+	struct necp_client_signature signature;
+	struct necp_client_signable signable;
+} __attribute__((__packed__));
+
+#define NECP_CLIENT_ACTION_SIGN_MAX_STRING_LENGTH 1024
+
+#define NECP_CLIENT_ACTION_SIGN_TAG_LENGTH 32
+
+#define NECP_CLIENT_ACTION_SIGN_DEFAULT_DATA_LENGTH 128
+#define NECP_CLIENT_ACTION_SIGN_MAX_TOTAL_LENGTH 4096
 
 #define NECP_FILTER_UNIT_NO_FILTER              UINT32_MAX // Reserved filter unit value that prohibits all filters and socket filters
 
@@ -905,6 +993,15 @@ struct necp_drop_dest_entry {
 struct necp_drop_dest_policy {
 	u_int32_t entry_count;
 	struct necp_drop_dest_entry entries[MAX_NECP_DROP_DEST_LEVEL_ADDRS];
+};
+
+
+#define NECP_DEMUX_MAX_LEN  32
+struct necp_demux_pattern {
+	uint16_t offset;
+	uint16_t len;
+	uint8_t mask[NECP_DEMUX_MAX_LEN];
+	uint8_t value[NECP_DEMUX_MAX_LEN];
 };
 
 #ifdef BSD_KERNEL_PRIVATE
@@ -959,7 +1056,10 @@ enum necp_fd_type_t {
 };
 
 union necp_sockaddr_union {
+#if !__has_ptrcheck
 	struct sockaddr                 sa;
+#endif
+	struct __sockaddr_header        sah;
 	struct sockaddr_in              sin;
 	struct sockaddr_in6             sin6;
 };
@@ -1060,10 +1160,6 @@ typedef u_int32_t necp_app_id;
 #define NECP_KERNEL_POLICY_RESULT_SOCKET_FILTER                 NECP_POLICY_RESULT_SOCKET_FILTER
 #define NECP_KERNEL_POLICY_RESULT_IP_TUNNEL                             NECP_POLICY_RESULT_IP_TUNNEL
 #define NECP_KERNEL_POLICY_RESULT_IP_FILTER                             NECP_POLICY_RESULT_IP_FILTER
-#define NECP_KERNEL_POLICY_RESULT_TRIGGER                               NECP_POLICY_RESULT_TRIGGER
-#define NECP_KERNEL_POLICY_RESULT_TRIGGER_IF_NEEDED             NECP_POLICY_RESULT_TRIGGER_IF_NEEDED
-#define NECP_KERNEL_POLICY_RESULT_TRIGGER_SCOPED                NECP_POLICY_RESULT_TRIGGER_SCOPED
-#define NECP_KERNEL_POLICY_RESULT_NO_TRIGGER_SCOPED             NECP_POLICY_RESULT_NO_TRIGGER_SCOPED
 #define NECP_KERNEL_POLICY_RESULT_SOCKET_SCOPED                 NECP_POLICY_RESULT_SOCKET_SCOPED
 #define NECP_KERNEL_POLICY_RESULT_ROUTE_RULES                   NECP_POLICY_RESULT_ROUTE_RULES
 #define NECP_KERNEL_POLICY_RESULT_USE_NETAGENT                  NECP_POLICY_RESULT_USE_NETAGENT
@@ -1115,7 +1211,6 @@ struct necp_kernel_socket_policy {
 	u_int32_t                                       cond_app_id;                                    // Locally assigned ID value stored
 	u_int32_t                                       cond_real_app_id;                               // Locally assigned ID value stored
 	char                                            *cond_custom_entitlement;               // String
-	u_int8_t                                        cond_custom_entitlement_matched;// Boolean if entitlement matched app
 	u_int32_t                                       cond_account_id;                                // Locally assigned ID value stored
 	char                                            *cond_domain;                                   // String
 	u_int8_t                                        cond_domain_dot_count;                  // Number of dots in cond_domain
@@ -1223,6 +1318,10 @@ struct inp_necp_attributes;
 extern errno_t necp_set_socket_attributes(struct inp_necp_attributes *attributes, struct sockopt *sopt);
 extern errno_t necp_get_socket_attributes(struct inp_necp_attributes *attributes, struct sockopt *sopt);
 extern errno_t necp_set_socket_domain_attributes(struct socket *so, const char *domain, const char *domain_owner);
+extern int necp_set_socket_resolver_signature(struct inpcb *inp, struct sockopt *sopt);
+extern int necp_get_socket_resolver_signature(struct inpcb *inp, struct sockopt *sopt);
+extern bool necp_socket_has_resolver_signature(struct inpcb *inp);
+extern bool necp_socket_resolver_signature_matches_address(struct inpcb *inp, union necp_sockaddr_union *address);
 extern void necp_inpcb_remove_cb(struct inpcb *inp);
 extern void necp_inpcb_dispose(struct inpcb *inp);
 
@@ -1286,13 +1385,13 @@ extern bool necp_packet_is_allowed_over_interface(struct mbuf *packet, struct if
 extern int necp_mark_packet_as_keepalive(struct mbuf *packet, bool is_keepalive);
 extern bool necp_get_is_keepalive_from_packet(struct mbuf *packet);
 
-extern int necp_sign_resolver_answer(uuid_t client_id, u_int8_t *query, u_int32_t query_length,
-    u_int8_t *answer, u_int32_t answer_length,
-    u_int8_t *tag, u_int32_t *out_tag_length);
+extern int necp_sign_resolver_answer(uuid_t client_id, u_int32_t sign_type,
+    u_int8_t *data, size_t data_length,
+    u_int8_t *tag, size_t *out_tag_length);
 
-extern bool necp_validate_resolver_answer(uuid_t client_id, u_int8_t *query, u_int32_t query_length,
-    u_int8_t *answer, u_int32_t answer_length,
-    u_int8_t *tag, u_int32_t tag_length);
+extern bool necp_validate_resolver_answer(uuid_t client_id, u_int32_t sign_type,
+    u_int8_t *data, size_t data_length,
+    u_int8_t *tag, size_t tag_length);
 
 extern void necp_update_all_clients(void); // Handle general re-evaluate event
 extern void necp_update_all_clients_immediately_if_needed(bool should_update_immediately); // Handle general re-evaluate event
@@ -1334,11 +1433,13 @@ necp_update_flow_protoctl_event(uuid_t netagent_uuid, uuid_t client_id,
     uint32_t protoctl_event_tcp_seq_num);
 
 #define NECP_FLOWADV_IDX_INVALID        UINT32_MAX
-extern void *necp_create_nexus_assign_message(uuid_t nexus_instance, u_int32_t nexus_port, void *key, uint32_t key_length,
+extern void *necp_create_nexus_assign_message(uuid_t nexus_instance, nexus_port_t nexus_port, void *key, uint32_t key_length,
     struct necp_client_endpoint *local_endpoint, struct necp_client_endpoint *remote_endpoint,
     struct ether_addr *local_ether_addr,
     u_int32_t flow_adv_index, void *flow_stats, size_t *message_length);
 
+
+#define NECP_MAX_DEMUX_PATTERNS 4
 struct necp_client_nexus_parameters {
 	pid_t pid;
 	pid_t epid;
@@ -1361,6 +1462,13 @@ struct necp_client_nexus_parameters {
 	unsigned allow_qos_marking:1;
 	unsigned override_address_selection:1;
 	unsigned use_stable_address:1; // Used if override_address_selection is set
+	unsigned no_wake_from_sleep:1;
+	unsigned is_demuxable_parent:1;
+	unsigned reuse_port:1;
+
+	uuid_t parent_flow_uuid;
+	struct necp_demux_pattern demux_patterns[NECP_MAX_DEMUX_PATTERNS];
+	uint8_t demux_pattern_count;
 };
 
 struct necp_client_group_members {
@@ -1391,8 +1499,6 @@ struct necp_client_add_flow_default {
 
 typedef void (*necp_client_flow_cb)(void *handle, int action, uint32_t interface_index, uint32_t necp_flags, bool *viable);
 
-extern void necp_client_reap_caches(boolean_t purge);
-
 #if SKYWALK
 struct skmem_arena_mmap_info;
 
@@ -1408,6 +1514,7 @@ extern void necp_client_early_close(uuid_t client_id); // Cause a single client 
 #ifdef KERNEL_PRIVATE
 struct nstat_domain_info;
 extern void necp_copy_inp_domain_info(struct inpcb *, struct socket *, struct nstat_domain_info *);
+extern void necp_with_inp_domain_name(struct socket *so, void *ctx, void (*with_func)(char *domain_name, void *ctx));
 extern bool net_domain_contains_hostname(char *hostname_string, char *domain_string);
 #endif /* KERNEL_PRIVATE */
 #endif /* KERNEL */

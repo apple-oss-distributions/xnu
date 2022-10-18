@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,7 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
-	This file provides armv7+neon hand implementation of the following function
+	This file provides armv8+neon hand implementation of the following function
 
 	void SHA256_Transform(SHA256_ctx *ctx, char *data, unsigned int num_blocks);
 

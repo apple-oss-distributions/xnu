@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2006-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -53,5 +53,10 @@ imgboot_get_image_file(const char *path, off_t *fsize, int *errp);
 #define IMAGEBOOT_CONTAINER_ARG         "container-dmg"
 #define IMAGEBOOT_ROOT_ARG              "root-dmg"
 #define IMAGEBOOT_AUTHROOT_ARG          "auth-root-dmg"
+
+//IMAGEBOOT images are capped at 2.5GB
+#define IMAGEBOOT_MAX_FILESIZE          (2684354560ULL)
+//limit certain kalloc calls to 2GB
+#define IMAGEBOOT_MAX_KALLOCSIZE        (2147483648ULL)
 
 #endif

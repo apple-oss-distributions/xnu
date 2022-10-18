@@ -219,9 +219,6 @@
 #define IPPROTO_SCTP            132             /* SCTP */
 /* 253-254: Experimentation and testing; 255: Reserved (RFC3692) */
 /* BSD Private, local use, namespace incursion */
-#ifdef PRIVATE
-#define IPPROTO_QUIC            253             /* QUIC protocol (Over UDP) */
-#endif /* PRIVATE */
 #define IPPROTO_DIVERT          254             /* divert pseudo-protocol */
 #endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 #define IPPROTO_RAW             255             /* raw IP packet */
@@ -374,15 +371,6 @@ struct in_addr {
 	                 (((u_int32_t)(i) & 0xfff00000) == 0xac100000) || \
 	                 (((u_int32_t)(i) & 0xffff0000) == 0xc0a80000))
 
-#ifdef PRIVATE
-#define IN_SHARED_ADDRESS_SPACE(i) ((((u_int32_t)(i)) & (u_int32_t)0xffc00000) \
-	                            == (u_int32_t)0x64400000)
-
-#define IN_DS_LITE(i) ((((u_int32_t)(i)) & (u_int32_t)0xfffffff8) == (u_int32_t)0xc0000000)
-
-#define IN_6TO4_RELAY_ANYCAST(i) ((((u_int32_t)(i)) & (u_int32_t)IN_CLASSC_NET) == (u_int32_t)0xc0586300)
-#endif
-
 #define IN_LOCAL_GROUP(i)       (((u_int32_t)(i) & 0xffffff00) == 0xe0000000)
 
 #define IN_ANY_LOCAL(i)         (IN_LINKLOCAL(i) || IN_LOCAL_GROUP(i))
@@ -405,35 +393,6 @@ struct sockaddr_in {
 #define IN_ARE_ADDR_EQUAL(a, b) \
     (bcmp(&(a)->s_addr, &(b)->s_addr, \
 	sizeof (struct in_addr)) == 0)
-
-#ifdef PRIVATE
-/*
- * sockaddr_in with scope ID field; this is used internally to keep
- * track of scoped route entries in the routing table.  The fact that
- * such a value is embedded in the structure is an artifact of the
- * current implementation which could change in future.
- */
-struct sockaddr_inifscope {
-	__uint8_t       sin_len;
-	sa_family_t     sin_family;
-	in_port_t       sin_port;
-	struct  in_addr sin_addr;
-	/*
-	 * To avoid possible conflict with an overlaid sockaddr_inarp
-	 * having sin_other set to SIN_PROXY, we use the first 4-bytes
-	 * of sin_zero since sin_srcaddr is one of the unused fields
-	 * in sockaddr_inarp.
-	 */
-	union {
-		char    sin_zero[8];
-		struct {
-			__uint32_t      ifscope;
-		} _in_index;
-	} un;
-#define sin_scope_id    un._in_index.ifscope
-};
-
-#endif /* PRIVATE */
 
 #define INET_ADDRSTRLEN                 16
 
@@ -529,9 +488,7 @@ struct ip_opts {
 #define MCAST_UNBLOCK_SOURCE            85   /* unblock a source */
 
 #ifdef PRIVATE
-#define IP_NO_IFT_CELLULAR      6969 /* for internal use only */
-#define IP_NO_IFT_PDP           IP_NO_IFT_CELLULAR /* deprecated */
-#define IP_OUT_IF               9696 /* for internal use only */
+/* See in_private.h for additional options */
 #endif /* PRIVATE */
 
 /*
@@ -556,7 +513,7 @@ struct ip_opts {
 #define IP_MAX_SOCK_SRC_FILTER          128     /* sources per socket/group */
 #define IP_MAX_SOCK_MUTE_FILTER         128     /* XXX no longer used */
 
-#ifndef PLATFORM_DriverKit
+#ifndef XNU_PLATFORM_DriverKit
 /*
  * Argument structure for IP_ADD_MEMBERSHIP and IP_DROP_MEMBERSHIP.
  */
@@ -656,7 +613,7 @@ int     setsourcefilter(int, uint32_t, struct sockaddr *, socklen_t,
 int     getsourcefilter(int, uint32_t, struct sockaddr *, socklen_t,
     uint32_t *, uint32_t *, struct sockaddr_storage *) __OSX_AVAILABLE_STARTING(__MAC_10_7, __IPHONE_4_3);
 #endif
-#endif /* PLATFORM_DriverKit */
+#endif /* XNU_PLATFORM_DriverKit */
 
 /*
  * Filter modes; also used to represent per-socket filter mode internally.
@@ -707,63 +664,6 @@ struct in_pktinfo {
  */
 #define IPPROTO_MAXID   (IPPROTO_AH + 1)        /* don't list to IPPROTO_MAX */
 
-#ifdef BSD_KERNEL_PRIVATE
-#define CTL_IPPROTO_NAMES { \
-	{ "ip", CTLTYPE_NODE }, \
-	{ "icmp", CTLTYPE_NODE }, \
-	{ "igmp", CTLTYPE_NODE }, \
-	{ "ggp", CTLTYPE_NODE }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ "tcp", CTLTYPE_NODE }, \
-	{ 0, 0 }, \
-	{ "egp", CTLTYPE_NODE }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ "pup", CTLTYPE_NODE }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ "udp", CTLTYPE_NODE }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ "idp", CTLTYPE_NODE }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ 0, 0 }, \
-	{ "ipsec", CTLTYPE_NODE }, \
-}
-#endif /* BSD_KERNEL_PRIVATE */
-
 /*
  * Names for IP sysctl objects
  */
@@ -787,28 +687,6 @@ struct in_pktinfo {
 #define IPCTL_GIF_TTL           16      /* default TTL for gif encap packet */
 #define IPCTL_MAXID             17
 
-#ifdef BSD_KERNEL_PRIVATE
-
-#define IPCTL_NAMES { \
-	{ 0, 0 }, \
-	{ "forwarding", CTLTYPE_INT }, \
-	{ "redirect", CTLTYPE_INT }, \
-	{ "ttl", CTLTYPE_INT }, \
-	{ "mtu", CTLTYPE_INT }, \
-	{ "rtexpire", CTLTYPE_INT }, \
-	{ "rtminexpire", CTLTYPE_INT }, \
-	{ "rtmaxcache", CTLTYPE_INT }, \
-	{ "sourceroute", CTLTYPE_INT }, \
-	{ "directed-broadcast", CTLTYPE_INT }, \
-	{ "intr-queue-maxlen", CTLTYPE_INT }, \
-	{ "intr-queue-drops", CTLTYPE_INT }, \
-	{ "stats", CTLTYPE_STRUCT }, \
-	{ "accept_sourceroute", CTLTYPE_INT }, \
-	{ "fastforwarding", CTLTYPE_INT }, \
-	{ "keepfaith", CTLTYPE_INT }, \
-	{ "gifttl", CTLTYPE_INT }, \
-}
-#endif /* BSD_KERNEL_PRIVATE */
 #endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 
 /* INET6 stuff */
@@ -816,134 +694,8 @@ struct in_pktinfo {
 #include <netinet6/in6.h>
 #undef __KAME_NETINET_IN_H_INCLUDED_
 
-#ifdef PRIVATE
-/*
- * Minimal sized structure to hold an IPv4 or IPv6 socket address
- * as sockaddr_storage can waste memory
- */
-union sockaddr_in_4_6 {
-	struct sockaddr         sa;
-	struct sockaddr_in      sin;
-	struct sockaddr_in6     sin6;
-};
-#define CLAT46_HDR_EXPANSION_OVERHD     (sizeof(struct ip6_hdr) - sizeof(struct ip))
-
-/*
- * Recommended DiffServ Code Point values
- */
-
-#define _DSCP_DF        0       /* RFC 2474 */
-
-#define _DSCP_CS0       0       /* RFC 2474 */
-#define _DSCP_CS1       8       /* RFC 2474 */
-#define _DSCP_CS2       16      /* RFC 2474 */
-#define _DSCP_CS3       24      /* RFC 2474 */
-#define _DSCP_CS4       32      /* RFC 2474 */
-#define _DSCP_CS5       40      /* RFC 2474 */
-#define _DSCP_CS6       48      /* RFC 2474 */
-#define _DSCP_CS7       56      /* RFC 2474 */
-
-#define _DSCP_EF        46      /* RFC 2474 */
-#define _DSCP_VA        44      /* RFC 5865 */
-
-#define _DSCP_AF11      10      /* RFC 2597 */
-#define _DSCP_AF12      12      /* RFC 2597 */
-#define _DSCP_AF13      14      /* RFC 2597 */
-#define _DSCP_AF21      18      /* RFC 2597 */
-#define _DSCP_AF22      20      /* RFC 2597 */
-#define _DSCP_AF23      22      /* RFC 2597 */
-#define _DSCP_AF31      26      /* RFC 2597 */
-#define _DSCP_AF32      28      /* RFC 2597 */
-#define _DSCP_AF33      30      /* RFC 2597 */
-#define _DSCP_AF41      34      /* RFC 2597 */
-#define _DSCP_AF42      36      /* RFC 2597 */
-#define _DSCP_AF43      38      /* RFC 2597 */
-
-#define _DSCP_52        52      /* Wi-Fi WMM Certification: Sigma */
-
-#define _MAX_DSCP       63      /* coded on 6 bits */
-
-#endif /* PRIVATE */
-
-#ifndef PLATFORM_DriverKit
+#ifndef XNU_PLATFORM_DriverKit
 #ifdef KERNEL
-#ifdef BSD_KERNEL_PRIVATE
-#include <mach/boolean.h>
-
-struct ip;
-struct ifnet;
-struct mbuf;
-
-extern boolean_t in_broadcast(struct in_addr, struct ifnet *);
-extern boolean_t in_canforward(struct in_addr);
-extern u_int32_t in_netof(struct in_addr);
-
-extern uint32_t os_cpu_in_cksum_mbuf(struct mbuf *m, int len, int off,
-    uint32_t initial_sum);
-
-extern uint16_t inet_cksum(struct mbuf *, uint32_t, uint32_t, uint32_t);
-extern uint16_t inet_cksum_buffer(const void *, uint32_t, uint32_t, uint32_t);
-extern uint16_t in_addword(uint16_t, uint16_t);
-extern uint16_t in_pseudo(uint32_t, uint32_t, uint32_t);
-extern uint16_t in_pseudo64(uint64_t, uint64_t, uint64_t);
-extern uint16_t in_cksum_hdr_opt(const struct ip *);
-extern uint16_t ip_cksum_hdr_dir(struct mbuf *, uint32_t, int);
-extern uint16_t ip_cksum_hdr_dir_buffer(const void *, uint32_t, uint32_t, int);
-extern uint32_t in_finalize_cksum(struct mbuf *, uint32_t, uint32_t);
-extern uint16_t b_sum16(const void *buf, int len);
-#if DEBUG || DEVELOPMENT
-extern uint32_t in_cksum_mbuf_ref(struct mbuf *, int, int, uint32_t);
-#endif /* DEBUG || DEVELOPMENT */
-
-extern int in_getconninfo(struct socket *, sae_connid_t, uint32_t *,
-    uint32_t *, int32_t *, user_addr_t, socklen_t *, user_addr_t, socklen_t *,
-    uint32_t *, user_addr_t, uint32_t *);
-extern struct in_ifaddr * inifa_ifpwithflag(struct ifnet *, uint32_t);
-extern struct in_ifaddr * inifa_ifpclatv4(struct ifnet *);
-
-#define in_cksum(_m, _l)                        \
-	inet_cksum(_m, 0, 0, _l)
-#define in_cksum_buffer(_b, _l)                 \
-	inet_cksum_buffer(_b, 0, 0, _l)
-#define ip_cksum_hdr_in(_m, _l)                 \
-	ip_cksum_hdr_dir(_m, _l, 0)
-#define ip_cksum_hdr_out(_m, _l)                \
-	ip_cksum_hdr_dir(_m, _l, 1)
-
-#define in_cksum_hdr(_ip)                       \
-	(~b_sum16(_ip, sizeof (struct ip)) & 0xffff)
-
-#define in_cksum_offset(_m, _o)         \
-	((void) in_finalize_cksum(_m, _o, CSUM_DELAY_IP))
-#define in_delayed_cksum(_m)            \
-	((void) in_finalize_cksum(_m, 0, CSUM_DELAY_DATA))
-#define in_delayed_cksum_offset(_m, _o) \
-	((void) in_finalize_cksum(_m, _o, CSUM_DELAY_DATA))
-
-#define in_hosteq(s, t) ((s).s_addr == (t).s_addr)
-#define in_nullhost(x)  ((x).s_addr == INADDR_ANY)
-#define in_allhosts(x)  ((x).s_addr == htonl(INADDR_ALLHOSTS_GROUP))
-
-#define SIN(s)          ((struct sockaddr_in *)(void *)s)
-#define satosin(sa)     SIN(sa)
-#define sintosa(sin)    ((struct sockaddr *)(void *)(sin))
-#define SINIFSCOPE(s)   ((struct sockaddr_inifscope *)(void *)(s))
-
-#define IPTOS_UNSPEC                    (-1)    /* TOS byte not set */
-#define IPTOS_MASK                      0xFF    /* TOS byte mask */
-#endif /* BSD_KERNEL_PRIVATE */
-
-#ifdef KERNEL_PRIVATE
-/* exported for ApplicationFirewall */
-extern int in_localaddr(struct in_addr);
-extern int inaddr_local(struct in_addr);
-
-extern char     *inet_ntoa(struct in_addr);
-extern char     *inet_ntoa_r(struct in_addr ina, char *buf,
-    size_t buflen);
-extern int      inet_pton(int af, const char *, void *);
-#endif /* KERNEL_PRIVATE */
-
 #define MAX_IPv4_STR_LEN        16
 #define MAX_IPv6_STR_LEN        64
 
@@ -960,5 +712,10 @@ int        bindresvport_sa(int, struct sockaddr *);
 __END_DECLS
 #endif
 #endif /* !KERNEL */
-#endif /* PLATFORM_DriverKit */
+#endif /* XNU_PLATFORM_DriverKit */
+
+#ifdef PRIVATE
+#include <netinet/in_private.h>
+#endif /* PRIVATE */
+
 #endif /* _NETINET_IN_H_ */

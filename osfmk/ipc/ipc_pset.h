@@ -98,6 +98,8 @@ ips_from_waitq(waitq_t wq)
 #define ips_mq_unlock(pset)         io_unlock(ips_to_object(pset))
 #define ips_reference(pset)         io_reference(ips_to_object(pset))
 #define ips_release(pset)           io_release(ips_to_object(pset))
+#define ips_validate(pset) \
+	zone_id_require(ZONE_ID_IPC_PORT_SET, sizeof(struct ipc_pset), pset)
 
 /* Allocate a port set */
 extern kern_return_t ipc_pset_alloc(

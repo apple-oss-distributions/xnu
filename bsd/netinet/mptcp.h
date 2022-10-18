@@ -79,7 +79,6 @@ struct mptcp_mpcapable_opt_common {
 	    mmco_version:4;
 #endif
 #define MPCAP_PROPOSAL_SBIT     0x01    /* SHA1 (v0) or SHA256 (v1) Algorithm */
-#define MPCAP_HBIT              0x01    /* alias of MPCAP_PROPOSAL_SBIT */
 #define MPCAP_GBIT              0x02    /* must be 0 */
 #define MPCAP_FBIT              0x04    /* must be 0 */
 #define MPCAP_EBIT              0x08    /* must be 0 */
@@ -360,20 +359,6 @@ struct mptcp_add_addr_hmac_msg_v6 {
  * use this option to let the sender know of its path preference.
  */
 
-/* Option to change priority of self */
-struct mptcp_mpprio_opt {
-	uint8_t        mpprio_kind;
-	uint8_t        mpprio_len;
-#define MPTCP_MPPRIO_BKP        0x1
-#if BYTE_ORDER == LITTLE_ENDIAN
-	uint8_t        mpprio_flags:4,
-	    mpprio_subtype:4;
-#else /* BIG_ENDIAN */
-	uint8_t        mpprio_subtype:4,
-	    mpprio_flags:4;
-#endif
-}__attribute__((__packed__));
-
 /* Option to change priority of some other subflow(s) using addr_id */
 struct mptcp_mpprio_addr_opt {
 	uint8_t        mpprio_kind;
@@ -387,17 +372,6 @@ struct mptcp_mpprio_addr_opt {
 	    mpprio_flags:4;
 #endif
 	uint8_t        mpprio_addrid;
-}__attribute__((__packed__));
-
-/*
- * MPTCP Checksum Psuedo Header
- *
- */
-struct mptcp_pseudohdr {
-	uint64_t       mphdr_dsn;      /* Data Sequence Number */
-	uint32_t       mphdr_ssn;      /* Subflow Sequence Number */
-	uint16_t       mphdr_len;      /* Data-Level Length */
-	uint16_t       mphdr_xsum;     /* MPTCP Level Checksum */
 }__attribute__((__packed__));
 
 #endif /* BSD_KERNEL_PRIVATE */

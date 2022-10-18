@@ -50,6 +50,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+#include <pexpert/pexpert.h>    /* for PE_parse_boot_argn */
 #include <skywalk/os_skywalk_private.h>
 #include <skywalk/nexus/flowswitch/nx_flowswitch.h>
 #include <skywalk/nexus/flowswitch/fsw_var.h>
@@ -66,6 +67,17 @@ SYSCTL_UINT(_kern_skywalk_flowswitch, OID_AUTO, chain_enqueue,
     CTLFLAG_RW | CTLFLAG_LOCKED, &fsw_chain_enqueue, 0, "");
 #endif /* !DEVELOPMENT && !DEBUG */
 
+/*
+ * Configures the flowswitch to utilize user packet pool with
+ * dual sized buffers.
+ * A non-zero value enables the support.
+ */
+#if defined(XNU_TARGET_OS_IOS) || defined(XNU_TARGET_OS_OSX)
+uint32_t fsw_use_dual_sized_pool = 1;
+#else
+uint32_t fsw_use_dual_sized_pool = 0;
+#endif
+
 uint32_t fsw_chain_enqueue = 0;
 static int __nx_fsw_inited = 0;
 static eventhandler_tag __nx_fsw_ifnet_eventhandler_tag = NULL;
@@ -78,19 +90,19 @@ static ZONE_DEFINE(nx_fsw_stats_zone, SKMEM_ZONE_PREFIX ".nx.fsw.stats",
     sizeof(struct __nx_stats_fsw), ZC_ZFREE_CLEARMEM);
 
 #define SKMEM_TAG_FSW_PORTS     "com.apple.skywalk.fsw.ports"
-kern_allocation_name_t skmem_tag_fsw_ports;
+SKMEM_TAG_DEFINE(skmem_tag_fsw_ports, SKMEM_TAG_FSW_PORTS);
 
 #define SKMEM_TAG_FSW_FOB_HASH "com.apple.skywalk.fsw.fsw.fob.hash"
-kern_allocation_name_t skmem_tag_fsw_fob_hash;
+SKMEM_TAG_DEFINE(skmem_tag_fsw_fob_hash, SKMEM_TAG_FSW_FOB_HASH);
 
 #define SKMEM_TAG_FSW_FRB_HASH "com.apple.skywalk.fsw.fsw.frb.hash"
-kern_allocation_name_t skmem_tag_fsw_frb_hash;
+SKMEM_TAG_DEFINE(skmem_tag_fsw_frb_hash, SKMEM_TAG_FSW_FRB_HASH);
 
 #define SKMEM_TAG_FSW_FRIB_HASH "com.apple.skywalk.fsw.fsw.frib.hash"
-kern_allocation_name_t skmem_tag_fsw_frib_hash;
+SKMEM_TAG_DEFINE(skmem_tag_fsw_frib_hash, SKMEM_TAG_FSW_FRIB_HASH);
 
 #define SKMEM_TAG_FSW_FRAG_MGR "com.apple.skywalk.fsw.fsw.frag.mgr"
-kern_allocation_name_t skmem_tag_fsw_frag_mgr;
+SKMEM_TAG_DEFINE(skmem_tag_fsw_frag_mgr, SKMEM_TAG_FSW_FRAG_MGR);
 
 /* 64-bit mask with range */
 #define BMASK64(_beg, _end)     \
@@ -211,6 +223,11 @@ fsw_ctl_flow_add(struct nx_flowswitch *fsw, struct proc *p,
 		req->nfr_epid = proc_pid(p);
 	}
 
+	if (req->nfr_flow_demux_count > MAX_FLOW_DEMUX_PATTERN) {
+		SK_ERR("invalid flow demux count %u", req->nfr_flow_demux_count);
+		return EINVAL;
+	}
+
 	fo = fsw_flow_add(fsw, req, &error);
 	ASSERT(fo != NULL || error != 0);
 
@@ -238,6 +255,25 @@ fsw_ctl_flow_del(struct nx_flowswitch *fsw, struct proc *p,
 	nx_flow_req_externalize(req);
 	return err;
 }
+
+#if (DEVELOPMENT || DEBUG)
+static int
+fsw_rps_threads_sysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg2)
+	struct nx_flowswitch *fsw = arg1;
+	uint32_t nthreads;
+	int changed;
+	int error;
+
+	error = sysctl_io_number(req, fsw->fsw_rps_nthreads,
+	    sizeof(fsw->fsw_rps_nthreads), &nthreads, &changed);
+	if (error == 0 && changed != 0) {
+		error = fsw_rps_set_nthreads(fsw, nthreads);
+	}
+	return error;
+}
+#endif /* !DEVELOPMENT && !DEBUG */
 
 static int
 fsw_setup_ifp(struct nx_flowswitch *fsw, struct nexus_adapter *hwna)
@@ -380,6 +416,13 @@ fsw_setup_ifp(struct nx_flowswitch *fsw, struct nexus_adapter *hwna)
 	skoid_create(&fsw->fsw_skoid,
 	    SKOID_SNODE(_kern_skywalk_flowswitch), if_name(ifp),
 	    CTLFLAG_RW);
+
+#if (DEVELOPMENT || DEBUG)
+	if (SKYWALK_NATIVE(fsw->fsw_ifp)) {
+		skoid_add_handler(&fsw->fsw_skoid, "rps_nthreads", CTLFLAG_RW,
+		    fsw_rps_threads_sysctl, fsw, 0);
+	}
+#endif /* !DEVELOPMENT && !DEBUG */
 
 	FSW_WUNLOCK(fsw);
 
@@ -875,7 +918,7 @@ fsw_netem_config(struct nx_flowswitch *fsw, void *data)
 	char netem_name[fsw_INPUT_NETEM_THREADNAME_LEN];
 	(void) snprintf(netem_name, sizeof(netem_name),
 	    fsw_INPUT_NETEM_THREADNAME, if_name(ifp));
-	ret = netem_config(&ifp->if_input_netem, netem_name, params, fsw,
+	ret = netem_config(&ifp->if_input_netem, netem_name, ifp, params, fsw,
 	    fsw_dev_input_netem_dequeue, FSW_VP_DEV_BATCH_MAX);
 
 	return ret;
@@ -2185,32 +2228,10 @@ done:
 }
 
 static void
-fsw_mem_init(void)
+fsw_read_boot_args(void)
 {
-	ASSERT(skmem_tag_fsw_ports == NULL);
-	skmem_tag_fsw_ports =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_PORTS, 0);
-	ASSERT(skmem_tag_fsw_ports != NULL);
-
-	ASSERT(skmem_tag_fsw_fob_hash == NULL);
-	skmem_tag_fsw_fob_hash =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_FOB_HASH, 0);
-	ASSERT(skmem_tag_fsw_fob_hash != NULL);
-
-	ASSERT(skmem_tag_fsw_frb_hash == NULL);
-	skmem_tag_fsw_frb_hash =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_FRB_HASH, 0);
-	ASSERT(skmem_tag_fsw_frb_hash != NULL);
-
-	ASSERT(skmem_tag_fsw_frib_hash == NULL);
-	skmem_tag_fsw_frib_hash =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_FRIB_HASH, 0);
-	ASSERT(skmem_tag_fsw_frib_hash != NULL);
-
-	ASSERT(skmem_tag_fsw_frag_mgr == NULL);
-	skmem_tag_fsw_frag_mgr =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_FRAG_MGR, 0);
-	ASSERT(skmem_tag_fsw_frag_mgr != NULL);
+	(void) PE_parse_boot_argn("fsw_use_dual_sized_pool",
+	    &fsw_use_dual_sized_pool, sizeof(fsw_use_dual_sized_pool));
 }
 
 void
@@ -2220,8 +2241,7 @@ fsw_init(void)
 	_CASSERT(PKT_MAX_PROTO_HEADER_SIZE <= NX_FSW_MINBUFSIZE);
 
 	if (!__nx_fsw_inited) {
-		fsw_mem_init();
-
+		fsw_read_boot_args();
 		/*
 		 * Register callbacks for interface & protocol events
 		 * Use dummy arg for callback cookie.
@@ -2241,32 +2261,6 @@ fsw_init(void)
 	}
 }
 
-static void
-fsw_mem_uninit(void)
-{
-	if (skmem_tag_fsw_ports != NULL) {
-		kern_allocation_name_release(skmem_tag_fsw_ports);
-		skmem_tag_fsw_ports = NULL;
-	}
-	if (skmem_tag_fsw_fob_hash != NULL) {
-		kern_allocation_name_release(skmem_tag_fsw_fob_hash);
-		skmem_tag_fsw_fob_hash = NULL;
-	}
-	if (skmem_tag_fsw_frb_hash != NULL) {
-		kern_allocation_name_release(skmem_tag_fsw_frb_hash);
-		skmem_tag_fsw_frb_hash = NULL;
-	}
-	if (skmem_tag_fsw_frib_hash != NULL) {
-		kern_allocation_name_release(
-			skmem_tag_fsw_frib_hash);
-		skmem_tag_fsw_frib_hash = NULL;
-	}
-	if (skmem_tag_fsw_frag_mgr != NULL) {
-		kern_allocation_name_release(skmem_tag_fsw_frag_mgr);
-		skmem_tag_fsw_frag_mgr = NULL;
-	}
-}
-
 void
 fsw_uninit(void)
 {
@@ -2275,7 +2269,6 @@ fsw_uninit(void)
 		    __nx_fsw_ifnet_eventhandler_tag);
 		EVENTHANDLER_DEREGISTER(&protoctl_evhdlr_ctxt, protoctl_event,
 		    __nx_fsw_protoctl_eventhandler_tag);
-		fsw_mem_uninit();
 
 		__nx_fsw_inited = 0;
 	}

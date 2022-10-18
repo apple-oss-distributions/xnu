@@ -273,10 +273,6 @@ _kernelrpc_mach_port_get_attributes_trap(struct _kernelrpc_mach_port_get_attribu
 	int rv = MACH_SEND_INVALID_DEST;
 	mach_msg_type_number_t count;
 
-	if (!task) {
-		goto done;
-	}
-
 	// MIG does not define the type or size of the mach_port_info_t out array
 	// anywhere, so derive them from the field in the generated reply struct
 #define MACH_PORT_INFO_OUT (((__Reply__mach_port_get_attributes_from_user_t*)NULL)->port_info_out)
@@ -285,6 +281,10 @@ _kernelrpc_mach_port_get_attributes_trap(struct _kernelrpc_mach_port_get_attribu
 	    "mach_port_info_t has grown significantly, reevaluate stack usage");
 	const mach_msg_type_number_t max_count = (sizeof(MACH_PORT_INFO_OUT) / sizeof(MACH_PORT_INFO_OUT[0]));
 	typeof(MACH_PORT_INFO_OUT[0]) info[max_count];
+
+	if (!task) {
+		goto done;
+	}
 
 	/*
 	 * zero out our stack buffer because not all flavors of
@@ -557,7 +557,8 @@ mach_voucher_extract_attr_recipe_trap(struct mach_voucher_extract_attr_recipe_ar
 	if (max_sz > MACH_VOUCHER_TRAP_STACK_LIMIT) {
 		krecipe = kalloc_data(max_sz, Z_WAITOK);
 		if (!krecipe) {
-			return KERN_RESOURCE_SHORTAGE;
+			kr = KERN_RESOURCE_SHORTAGE;
+			goto done;
 		}
 	}
 
@@ -674,7 +675,7 @@ task_dyld_process_info_notify_get_trap(struct task_dyld_process_info_notify_get_
 		if (*portp == IPC_PORT_NULL) {
 			continue;
 		} else {
-			sright = ipc_port_copy_send(*portp);
+			sright = ipc_port_copy_send_mqueue(*portp);
 			if (IP_VALID(sright)) {
 				copyout_ports[active_count++] = sright; /* donates */
 				sright = IPC_PORT_NULL;

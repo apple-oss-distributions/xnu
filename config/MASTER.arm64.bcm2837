@@ -16,12 +16,11 @@
 #  Standard Apple OS Configurations:
 #  -------- ----- -- ---------------
 #
-#  ARM_EXTRAS_BASE = [ nos_arm_pmap nos_arm_asm ]
 #  KERNEL_BASE =    [ arm64 xsmall msgb_small config_embedded config_requires_u32_munging ARM_EXTRAS_BASE ]
 #  KERNEL_RELEASE = [ KERNEL_BASE ]
 #  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug ]
 #  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug ]
-#  BSD_BASE =       [ mach_bsd config_workqueue psynch config_proc_uuid_policy config_personas ]
+#  BSD_BASE =       [ mach_bsd psynch config_proc_uuid_policy config_personas ]
 #  BSD_RELEASE =    [ BSD_BASE no_printf_str no_kprintf_str secure_kernel ]
 #  BSD_DEV =        [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]
 #  BSD_DEBUG =      [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]
@@ -29,9 +28,7 @@
 #  FILESYS_RELEASE= [ FILESYS_BASE ]
 #  FILESYS_DEV =    [ FILESYS_BASE config_union_mounts fdesc ]
 #  FILESYS_DEBUG =  [ FILESYS_BASE config_union_mounts fdesc ]
-#  NFS_DEV =        [ nfsclient nfsserver config_nfs_gss ]
-#  NFS_RELEASE =    [ nfsclient ]
-#  NFS_DEBUG =      [ nfsclient config_nfs_gss ]
+#  NFS_DEV =        [ nfsserver ]
 #  SKYWALK_BASE =   [ skywalk config_nexus_user_pipe config_nexus_kernel_pipe config_nexus_monitor config_nexus_flowswitch config_nexus_netif ]
 #  SKYWALK_RELEASE = [ SKYWALK_BASE ]
 #  SKYWALK_DEV =    [ SKYWALK_BASE ]
@@ -53,29 +50,29 @@
 #  LIBKERN_DEBUG =  [ LIBKERN_BASE iotracking ]
 #  PERF_DBG_BASE =  [ mach_kdp config_serial_kdp kperf kpc ]
 #  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
-#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging alternate_debugger interrupt_masked_debug sched_preemption_disable_debug ]
-#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging alternate_debugger interrupt_masked_debug sched_preemption_disable_debug ]
-#  MACH_BASE =      [ mach slidable config_ecc_logging vc_progress_white mdebug ipc_debug ipc_lockfree_space importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_service_port_info ]
+#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug ]
+#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug ]
+#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_service_port_info ]
 #  MACH_RELEASE =   [ MACH_BASE config_skip_precise_user_kernel_time debugger_for_zone_info ]
-#  MACH_DEV =       [ MACH_BASE task_zone_info config_io_accounting importance_trace ]
-#  MACH_DEBUG =     [ MACH_BASE task_zone_info config_io_accounting importance_trace importance_debug ]
+#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace ]
+#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug ]
 #  SCHED_BASE =     [ config_sched_traditional config_sched_multiq config_sched_deferred_ast config_clutch config_taskwatch ]
 #  SCHED_RELEASE =  [ SCHED_BASE ]
 #  SCHED_DEV =      [ SCHED_BASE ]
 #  SCHED_DEBUG =    [ SCHED_BASE config_sched_grrr config_sched_proto ]
-#  VM_BASE =        [ vm_pressure_events jetsam freeze memorystatus config_code_decryption phantom_cache config_secluded_memory config_background_queue config_cs_validation_bitmap ]
+#  VM_BASE =        [ vm_pressure_events jetsam freeze memorystatus config_code_decryption phantom_cache config_secluded_memory config_cs_validation_bitmap ]
 #  VM_RELEASE =     [ VM_BASE ]
 #  VM_DEV =         [ VM_BASE dynamic_codesigning ubsan_minimal pgzalloc ]
 #  VM_DEBUG =       [ VM_BASE dynamic_codesigning ubsan_minimal pgzalloc ]
-#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov ]
+#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov kernel_tbi]
 #  SECURITY_BASE =     [ config_macf kernel_integrity config_secure_bsd_root ]
 #  SECURITY_RELEASE = [ SECURITY_BASE ]
 #  SECURITY_DEV =     [ SECURITY_BASE config_setuid config_kas_info ]
 #  SECURITY_DEBUG =   [ SECURITY_BASE config_setuid config_kas_info ]
 #  BASE =           [ MULTIPATH PF VPN ]
-#  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE NFS_RELEASE SKYWALK_RELEASE NETWORKING_RELEASE IOKIT_RELEASE LIBKERN_RELEASE PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE SECURITY_RELEASE ]
+#  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE             SKYWALK_RELEASE NETWORKING_RELEASE IOKIT_RELEASE LIBKERN_RELEASE PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE SECURITY_RELEASE ]
 #  DEVELOPMENT =    [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     SECURITY_DEV     ]
-#  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG   NFS_DEBUG   SKYWALK_DEBUG   NETWORKING_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG   PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   SECURITY_DEBUG   ]
+#  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG               SKYWALK_DEBUG   NETWORKING_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG   PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   SECURITY_DEBUG   ]
 #  KASAN =          [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_KASAN   SECURITY_DEV     ]
 #
 ######################################################################
@@ -96,3 +93,4 @@ options	  CONFIG_MACH_APPROXIMATE_TIME
 
 options   CONFIG_KERNEL_INTEGRITY		# <kernel_integrity>
 options   CONFIG_UBSAN_MINIMAL		# <ubsan_minimal>
+options   CONFIG_KERNEL_TBI	# <kernel_tbi>

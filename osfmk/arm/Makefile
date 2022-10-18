@@ -14,7 +14,6 @@ ARM_HEADER_FILES =	\
 		cpu_x86_64_capabilities.h	\
 		cpuid.h \
 		cpuid_internal.h \
-		io_map_entries.h \
 		lock.h \
 		locks.h \
 		machine_cpuid.h \
@@ -48,7 +47,6 @@ INSTALL_KF_MD_LIST = $(ARM_HEADER_FILES)
 INSTALL_KF_MD_LCL_LIST = \
 		dbgwrap.h \
 		machine_kpc.h \
-		monotonic.h \
 		pmap_public.h \
 		proc_reg.h \
 		smp.h \
@@ -61,7 +59,6 @@ EXPORT_MD_LIST = \
 		dbgwrap.h \
 		machine_cpu.h \
 		machine_kpc.h \
-		monotonic.h \
 		pmap_public.h \
 		proc_reg.h \
 		smp.h \

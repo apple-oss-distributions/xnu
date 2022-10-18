@@ -32,7 +32,7 @@
 #include <vm/vm_map.h>
 #include <kern/assert.h>
 #include <machine/machine_routines.h>
-#include <kern/locks.h>
+#include <kern/thread.h>
 #include <kern/simple_lock.h>
 #include <kern/debug.h>
 #include <mach/mach_vm.h>
@@ -59,6 +59,12 @@ _Static_assert((KASAN_TBI_ADDR_SIZE > VM_KERNEL_POINTER_SIGNIFICANT_BITS), "Kern
 #error "No model defined for the shadow table"
 #endif /* KASAN_CLASSIC || KASAN_TBI */
 
+#if KASAN_LIGHT
+extern bool kasan_zone_maps_owned(vm_address_t, vm_size_t);
+#endif /* KASAN_LIGHT */
+
+extern thread_t kasan_lock_holder;
+
 extern uint64_t *cpu_tte;
 extern unsigned long gVirtBase, gPhysBase;
 
@@ -82,6 +88,8 @@ static vm_offset_t bootstrap_pgtable_phys;
 
 extern vm_offset_t intstack, intstack_top;
 extern vm_offset_t excepstack, excepstack_top;
+
+static lck_ticket_t kasan_vm_lock;
 
 void kasan_bootstrap(boot_args *, vm_offset_t pgtable);
 
@@ -187,11 +195,8 @@ kasan_arm64_lookup_l3(uint64_t *base, vm_offset_t address)
 static void
 kasan_arm64_pte_map(vm_offset_t shadow_base, uint64_t *base, uint8_t options)
 {
-	uint64_t *pte;
-
-	bool static_valid = options & KASAN_ARM64_MAP_STATIC_VALID_PAGE;
-	bool preallocate_translation_only = options & KASAN_ARM64_PREALLOCATE_L1L2;
 	bool early = options & KASAN_ARM64_NO_PHYSMAP;
+	uint64_t *pte;
 
 	/* lookup L1 entry */
 	pte = kasan_arm64_lookup_l1(base, shadow_base);
@@ -215,32 +220,38 @@ kasan_arm64_pte_map(vm_offset_t shadow_base, uint64_t *base, uint8_t options)
 
 	base = (uint64_t *)kasan_arm64_phystokv(*pte & ARM_TTE_TABLE_MASK, early);
 
-	if (preallocate_translation_only) {
+	if (options & KASAN_ARM64_PREALLOCATE_L1L2) {
 		return;
 	}
 
+	bool static_valid = options & KASAN_ARM64_MAP_STATIC_VALID_PAGE;
+
 	/* lookup L3 entry */
 	pte = kasan_arm64_lookup_l3(base, shadow_base);
-	if ((*pte & ARM_PTE_TYPE_VALID) &&
-	    ((((*pte) & ARM_PTE_APMASK) != ARM_PTE_AP(AP_RONA)) || static_valid)) {
-		/* nothing to do - page already mapped and we are not upgrading */
-	} else {
-		/* create new L3 entry */
-		uint64_t newpte;
-		if (static_valid) {
-			/* map the zero page RO */
-			newpte = (uint64_t)unmutable_valid_access_page | ARM_PTE_AP(AP_RONA);
-		} else {
-			newpte = (uint64_t)kasan_arm64_alloc_valid_page(early) | ARM_PTE_AP(AP_RWNA);
+
+	if (*pte & ARM_PTE_TYPE_VALID) {
+		bool pte_rona = (*pte & ARM_PTE_APMASK) == ARM_PTE_AP(AP_RONA);
+		if (!pte_rona || static_valid) {
+			return;
 		}
-		newpte |= ARM_PTE_TYPE_VALID
-		    | ARM_PTE_AF
-		    | ARM_PTE_SH(SH_OUTER_MEMORY)
-		    | ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DEFAULT)
-		    | ARM_PTE_NX
-		    | ARM_PTE_PNX;
-		*pte = newpte;
 	}
+
+	/* create new L3 entry */
+	uint64_t newpte;
+	if (static_valid) {
+		/* map the zero page RO */
+		newpte = (uint64_t)unmutable_valid_access_page | ARM_PTE_AP(AP_RONA);
+	} else {
+		newpte = (uint64_t)kasan_arm64_alloc_valid_page(early) | ARM_PTE_AP(AP_RWNA);
+	}
+
+	newpte |= ARM_PTE_TYPE_VALID
+	    | ARM_PTE_AF
+	    | ARM_PTE_SH(SH_OUTER_MEMORY)
+	    | ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DEFAULT)
+	    | ARM_PTE_NX
+	    | ARM_PTE_PNX;
+	*pte = newpte;
 }
 
 static void
@@ -267,6 +278,10 @@ kasan_map_shadow(vm_offset_t address, vm_size_t size, bool static_valid)
 
 	if (static_valid) {
 		options |= KASAN_ARM64_MAP_STATIC_VALID_PAGE;
+#if KASAN_LIGHT
+	} else if (!kasan_zone_maps_owned(address, size)) {
+		options |= KASAN_ARM64_MAP_STATIC_VALID_PAGE;
+#endif /* KASAN_LIGHT */
 	}
 
 	kasan_map_shadow_internal(address, size, options);
@@ -403,4 +418,30 @@ kasan_is_shadow_mapped(uintptr_t shadowp)
 	}
 
 	return true;
+}
+
+void
+kasan_lock_init(void)
+{
+	lck_ticket_init(&kasan_vm_lock, LCK_GRP_NULL);
+}
+
+/*
+ * KASAN may be called from interrupt context, so we disable interrupts to
+ * ensure atomicity manipulating the global objects.
+ */
+void
+kasan_lock(boolean_t *b)
+{
+	*b = ml_set_interrupts_enabled(false);
+	lck_ticket_lock(&kasan_vm_lock, LCK_GRP_NULL);
+	kasan_lock_holder = current_thread();
+}
+
+void
+kasan_unlock(boolean_t b)
+{
+	kasan_lock_holder = THREAD_NULL;
+	lck_ticket_unlock(&kasan_vm_lock);
+	ml_set_interrupts_enabled(b);
 }

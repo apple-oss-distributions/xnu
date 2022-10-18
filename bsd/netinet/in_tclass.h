@@ -51,6 +51,7 @@ struct so_tcdbg {
 	u_int32_t       so_tcdbg_cmd;
 	int32_t         so_tcdbg_tclass;
 	int32_t         so_tcdbg_netsvctype;
+	uint8_t         so_tcdbg_ecn_val;  /* 1 is ECT(1) and 2 is ECT(0) */
 	u_int32_t       so_tcdbg_count;
 	pid_t           so_tcdbg_pid;
 	u_int32_t       so_tcbbg_qos_mode;

@@ -670,15 +670,15 @@ s/\$//g
 			}
 		}
 
-		printf("#if CONFIG_REQUIRES_U32_MUNGING || (__arm__ && (__BIGGEST_ALIGNMENT__ > 4))\n") > sysent
-		printf("\t{ \(sy_call_t *\)%s, %s, %s, %s, %s},", 
+		printf("#if CONFIG_REQUIRES_U32_MUNGING\n") > sysent
+		printf("\t{ \(sy_call_t *\)(void (*)(void))%s, %s, %s, %s, %s},",
 				tempname, munge32, munge_ret, argssize, size32) > sysent
 		linesize = length(tempname) + length(munge32) + \
 			length(munge_ret) + length(argssize) + length(size32) + 28
 		align_comment(linesize, 88, sysent)
 		printf("/* %d = %s%s*/\n", syscall_num, funcname, additional_comments) > sysent
 		printf("#else\n") > sysent
-		printf("\t{ \(sy_call_t *\)%s, %s, %s, %s},\n", 
+		printf("\t{ \(sy_call_t *\)(void (*)(void))%s, %s, %s, %s},\n",
 				tempname, munge_ret, argssize, size32) > sysent
 		printf("#endif\n") > sysent
 		

@@ -131,7 +131,7 @@ timeout(
 	uint64_t                deadline;
 
 	clock_interval_to_deadline(interval, NSEC_PER_SEC / hz, &deadline);
-	thread_call_func_delayed((thread_call_func_t)fcn, param, deadline);
+	thread_call_func_delayed((thread_call_func_t)(void (*)(void))fcn, param, deadline);
 }
 
 /*
@@ -156,7 +156,7 @@ timeout_with_leeway(
 
 	clock_interval_to_absolutetime_interval(leeway_interval, NSEC_PER_SEC / hz, &leeway);
 
-	thread_call_func_delayed_with_leeway((thread_call_func_t)fcn, param, deadline, leeway, THREAD_CALL_DELAY_LEEWAY);
+	thread_call_func_delayed_with_leeway((thread_call_func_t)(void (*)(void))fcn, param, deadline, leeway, THREAD_CALL_DELAY_LEEWAY);
 }
 
 /*
@@ -169,7 +169,7 @@ untimeout(
 	timeout_fcn_t           fcn,
 	void                    *param)
 {
-	thread_call_func_cancel((thread_call_func_t)fcn, param, FALSE);
+	thread_call_func_cancel((thread_call_func_t)(void (*)(void))fcn, param, FALSE);
 }
 
 
@@ -192,7 +192,7 @@ bsd_timeout(
 		nanoseconds_to_absolutetime((uint64_t)ts->tv_sec * NSEC_PER_SEC + ts->tv_nsec, &deadline );
 		clock_absolutetime_interval_to_deadline( deadline, &deadline );
 	}
-	thread_call_func_delayed((thread_call_func_t)fcn, param, deadline);
+	thread_call_func_delayed((thread_call_func_t)(void (*)(void))fcn, param, deadline);
 }
 
 /*
@@ -205,7 +205,7 @@ bsd_untimeout(
 	timeout_fcn_t           fcn,
 	void                    *param)
 {
-	thread_call_func_cancel((thread_call_func_t)fcn, param, FALSE);
+	thread_call_func_cancel((thread_call_func_t)(void (*)(void))fcn, param, FALSE);
 }
 
 

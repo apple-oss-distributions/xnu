@@ -31,6 +31,15 @@
 #include <sys/cdefs.h>
 #include "tsd.h"
 
+
+#pragma mark Utilities
+#define _mach_assert(__op, __kr) \
+	do { \
+	        if (kr != KERN_SUCCESS) { \
+	                __builtin_trap(); \
+	        } \
+	} while (0)
+
 __XNU_PRIVATE_EXTERN mach_port_t _task_reply_port = MACH_PORT_NULL;
 
 static inline mach_port_t
@@ -56,7 +65,13 @@ mig_get_reply_port(void)
 {
 	mach_port_t port = _mig_get_reply_port();
 	if (port == MACH_PORT_NULL) {
-		port = mach_reply_port();
+		kern_return_t kr;
+		mach_port_options_t opts = {
+			.flags = MPO_REPLY_PORT,
+		};
+
+		kr = mach_port_construct(mach_task_self(), &opts, NULL, &port);
+		_mach_assert("mach_port_construct for mig_get_reply_port", kr);
 		_mig_set_reply_port(port);
 	}
 	return port;

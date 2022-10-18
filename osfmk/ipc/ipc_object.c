@@ -79,7 +79,7 @@
 #include <kern/kern_types.h>
 #include <kern/misc_protos.h>
 #include <kern/ipc_kobject.h>
-#include <kern/zalloc_internal.h> // zone_id_for_native_element
+#include <kern/zalloc_internal.h> // zone_id_for_element
 
 #include <ipc/ipc_types.h>
 #include <ipc/ipc_importance.h>
@@ -116,17 +116,13 @@ SECURITY_READ_ONLY_LATE(zone_t) ipc_object_zones[IOT_NUMBER];
  * space, especially for a resource that can be made by userspace at will,
  * so we can't do lockless lookups on ILP32.
  *
- * Note: this scheme is incompatible with gzalloc (because it doesn't sequester)
- *       and kasan quarantines (because it uses elements to store backtraces
- *       in them which lets the waitq lock appear "valid" by accident when
+ * Note: this scheme is incompatible with kasan quarantines
+ *       (because it uses elements to store backtraces in them
+ *       which lets the waitq lock appear "valid" by accident when
  *       elements are freed).
  */
-#if MACH_LOCKFREE_SPACE
 #define IPC_OBJECT_ZC_BASE (ZC_ZFREE_CLEARMEM | ZC_SEQUESTER | \
-	ZC_NOGZALLOC | ZC_KASAN_NOQUARANTINE)
-#else
-#define IPC_OBJECT_ZC_BASE (ZC_ZFREE_CLEARMEM)
-#endif
+	ZC_KASAN_NOQUARANTINE)
 
 ZONE_INIT(&ipc_object_zones[IOT_PORT],
     "ipc ports", sizeof(struct ipc_port),
@@ -414,46 +410,6 @@ ipc_object_alloc_dead(
 }
 
 /*
- *	Routine:	ipc_object_alloc_dead_name
- *	Purpose:
- *		Allocate a dead-name entry, with a specific name.
- *	Conditions:
- *		Nothing locked.
- *	Returns:
- *		KERN_SUCCESS		The dead name is allocated.
- *		KERN_INVALID_TASK	The space is dead.
- *		KERN_NAME_EXISTS	The name already denotes a right.
- */
-
-kern_return_t
-ipc_object_alloc_dead_name(
-	ipc_space_t             space,
-	mach_port_name_t        name)
-{
-	ipc_entry_t entry;
-	kern_return_t kr;
-
-	kr = ipc_entry_alloc_name(space, name, &entry);
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-	/* space is write-locked */
-
-	if (ipc_right_inuse(entry)) {
-		is_write_unlock(space);
-		return KERN_NAME_EXISTS;
-	}
-
-	/* null object, MACH_PORT_TYPE_DEAD_NAME, 1 uref */
-
-	assert(entry->ie_object == IO_NULL);
-	entry->ie_bits |= MACH_PORT_TYPE_DEAD_NAME | 1;
-	ipc_entry_modified(space, name, entry);
-	is_write_unlock(space);
-	return KERN_SUCCESS;
-}
-
-/*
  *	Routine:	ipc_object_alloc
  *	Purpose:
  *		Allocate an object.
@@ -486,7 +442,7 @@ ipc_object_alloc(
 	assert(urefs <= MACH_PORT_UREFS_MAX);
 
 	object = io_alloc(otype, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-	os_atomic_init(&object->io_bits, io_makebits(TRUE, otype, 0));
+	os_atomic_init(&object->io_bits, io_makebits(otype));
 	os_atomic_init(&object->io_references, 1); /* for entry, not caller */
 
 	*namep = CAST_MACH_PORT_TO_NAME(object);
@@ -542,7 +498,7 @@ ipc_object_alloc_name(
 	assert(urefs <= MACH_PORT_UREFS_MAX);
 
 	object = io_alloc(otype, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-	os_atomic_init(&object->io_bits, io_makebits(TRUE, otype, 0));
+	os_atomic_init(&object->io_bits, io_makebits(otype));
 	os_atomic_init(&object->io_references, 1); /* for entry, not caller */
 
 	kr = ipc_entry_alloc_name(space, name, &entry);
@@ -583,11 +539,9 @@ ipc_object_validate(
 	ipc_object_t    object)
 {
 	if (io_otype(object) != IOT_PORT_SET) {
-		zone_id_require(ZONE_ID_IPC_PORT,
-		    sizeof(struct ipc_port), object);
+		ip_validate(object);
 	} else {
-		zone_id_require(ZONE_ID_IPC_PORT_SET,
-		    sizeof(struct ipc_pset), object);
+		ips_validate(object);
 	}
 }
 
@@ -654,8 +608,20 @@ ipc_object_copyin(
 	kern_return_t kr;
 	int assertcnt = 0;
 
-	ipc_object_copyin_flags_t irc_flags = IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND;
-	irc_flags = (copyin_flags & irc_flags) | IPC_OBJECT_COPYIN_FLAGS_DEADOK;
+	ipc_object_copyin_flags_t copyin_mask = IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND
+	    | IPC_OBJECT_COPYIN_FLAGS_ALLOW_CONN_IMMOVABLE_RECEIVE;
+	copyin_mask = (copyin_flags & copyin_mask) | IPC_OBJECT_COPYIN_FLAGS_DEADOK;
+
+	/*
+	 * We allow moving of immovable receive right of a service port when it is from launchd.
+	 */
+	task_t task = current_task_early();
+#ifdef MACH_BSD
+	if (task && proc_isinitproc(get_bsdtask_info(task))) {
+		copyin_mask |= IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_RECEIVE;
+	}
+#endif
+
 	/*
 	 *	Could first try a read lock when doing
 	 *	MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND,
@@ -670,7 +636,7 @@ ipc_object_copyin(
 
 	release_port = IP_NULL;
 	kr = ipc_right_copyin(space, name, entry,
-	    msgt_name, irc_flags,
+	    msgt_name, copyin_mask,
 	    objectp, &soright,
 	    &release_port,
 	    &assertcnt,
@@ -1342,7 +1308,6 @@ ipc_object_lock(ipc_object_t io)
 	waitq_lock(io_waitq(io));
 }
 
-#if MACH_LOCKFREE_SPACE
 __abortlike
 static void
 ipc_object_validate_preflight_panic(ipc_object_t io)
@@ -1380,12 +1345,12 @@ ipc_object_validate_preflight_panic(ipc_object_t io)
  *		false: the object was freed or not initialized.
  */
 bool
-ipc_object_lock_allow_invalid(ipc_object_t io)
+ipc_object_lock_allow_invalid(ipc_object_t orig_io)
 {
-	struct waitq *orig_wq = io_waitq(io);
+	struct waitq *orig_wq = io_waitq(orig_io);
 	struct waitq *wq = pgz_decode_allow_invalid(orig_wq, ZONE_ID_ANY);
 
-	switch (zone_id_for_native_element(wq, sizeof(*wq))) {
+	switch (zone_id_for_element(wq, sizeof(*wq))) {
 	case ZONE_ID_IPC_PORT:
 	case ZONE_ID_IPC_PORT_SET:
 		break;
@@ -1394,7 +1359,8 @@ ipc_object_lock_allow_invalid(ipc_object_t io)
 		if (orig_wq != wq) {
 			/*
 			 * The element was PGZ protected, and the translation
-			 * returned another type than port or port-set.
+			 * returned another type than port or port-set, or
+			 * ZONE_ID_INVALID (wq is NULL).
 			 *
 			 * We have to allow this skew, and assumed the slot
 			 * has held a now freed port/port-set.
@@ -1402,11 +1368,11 @@ ipc_object_lock_allow_invalid(ipc_object_t io)
 			return false;
 		}
 #endif /* CONFIG_PROB_GZALLOC */
-		ipc_object_validate_preflight_panic(io);
+		ipc_object_validate_preflight_panic(orig_io);
 	}
 
 	if (__probable(waitq_lock_allow_invalid(wq))) {
-		ipc_object_validate(io);
+		ipc_object_validate(io_from_waitq(wq));
 #if CONFIG_PROB_GZALLOC
 		if (__improbable(wq != orig_wq &&
 		    wq != pgz_decode_allow_invalid(orig_wq, ZONE_ID_ANY))) {
@@ -1415,7 +1381,7 @@ ipc_object_lock_allow_invalid(ipc_object_t io)
 			 * whatever this object is, it's not the droid
 			 * we're looking for. Pretend we failed the lock.
 			 */
-			waitq_unlock(orig_wq);
+			waitq_unlock(wq);
 			return false;
 		}
 #endif /* CONFIG_PROB_GZALLOC */
@@ -1423,7 +1389,6 @@ ipc_object_lock_allow_invalid(ipc_object_t io)
 	}
 	return false;
 }
-#endif /* MACH_LOCKFREE_SPACE */
 
 /*
  *	Routine:	ipc_object_lock_try

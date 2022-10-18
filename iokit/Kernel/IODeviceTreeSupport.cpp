@@ -1117,7 +1117,7 @@ DefaultCompare( UInt32 cellCount, UInt32 left[], UInt32 right[] )
 
 	return diff;
 }
-#elif defined(__arm__) || defined(__i386__) || defined(__x86_64__)
+#elif defined(__i386__) || defined(__x86_64__)
 static SInt32
 DefaultCompare( UInt32 cellCount, UInt32 left[], UInt32 right[] )
 {
@@ -1134,7 +1134,7 @@ AddLengthToCells( UInt32 numCells, UInt32 *cells, UInt64 offset)
 	if (numCells == 1) {
 		cells[0] += (UInt32)offset;
 	} else {
-#if defined(__arm64__) || defined(__arm__)
+#if defined(__arm64__)
 		UInt64 sum = cells[numCells - 2] + offset;
 		cells[numCells - 2] = (UInt32)sum;
 		if (sum > UINT32_MAX) {

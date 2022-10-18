@@ -53,6 +53,8 @@
 #include <skywalk/core/skywalk_var.h>
 #endif /* SKYWALK */
 
+#define SOCK_SEND_MBUF_MODE_VERBOSE     0x0001
+
 static errno_t sock_send_internal(socket_t, const struct msghdr *,
     mbuf_t, int, size_t *);
 
@@ -180,11 +182,11 @@ check_again:
 
 	/* see comments in sock_setupcall() */
 	if (callback != NULL) {
-#if (defined(__arm__) || defined(__arm64__))
+#if defined(__arm64__)
 		sock_setupcalls_locked(new_so, callback, cookie, callback, cookie, 0);
-#else /* (defined(__arm__) || defined(__arm64__)) */
+#else /* defined(__arm64__) */
 		sock_setupcalls_locked(new_so, callback, cookie, NULL, NULL, 0);
-#endif /* (defined(__arm__) || defined(__arm64__)) */
+#endif /* defined(__arm64__) */
 	}
 
 	if (sa != NULL && from != NULL) {
@@ -844,7 +846,6 @@ sock_send_internal(socket_t sock, const struct msghdr *msg, mbuf_t data,
 	struct mbuf *control = NULL;
 	int error = 0;
 	user_ssize_t datalen = 0;
-	char *uio_bufp = NULL;
 
 	if (sock == NULL) {
 		error = EINVAL;
@@ -854,17 +855,7 @@ sock_send_internal(socket_t sock, const struct msghdr *msg, mbuf_t data,
 	if (data == NULL && msg != NULL) {
 		struct iovec *tempp = msg->msg_iov;
 
-		uio_bufp = kalloc_data(UIO_SIZEOF(msg->msg_iovlen), Z_WAITOK);
-		if (uio_bufp == NULL) {
-#if (DEBUG || DEVELOPMENT)
-			printf("sock_send_internal: so %p kalloc_data(%lu) failed, ENOMEM\n",
-			    sock, UIO_SIZEOF(msg->msg_iovlen));
-#endif /* (DEBUG || DEVELOPMENT) */
-			error = ENOMEM;
-			goto errorout;
-		}
-		auio = uio_createwithbuffer(msg->msg_iovlen, 0,
-		    UIO_SYSSPACE, UIO_WRITE, uio_bufp, UIO_SIZEOF(msg->msg_iovlen));
+		auio = uio_create(msg->msg_iovlen, 0, UIO_SYSSPACE, UIO_WRITE);
 		if (auio == NULL) {
 #if (DEBUG || DEVELOPMENT)
 			printf("sock_send_internal: so %p uio_createwithbuffer(%lu) failed, ENOMEM\n",
@@ -951,8 +942,8 @@ sock_send_internal(socket_t sock, const struct msghdr *msg, mbuf_t data,
 			*sentlen = datalen;
 		}
 	}
-	if (uio_bufp != NULL) {
-		kfree_data(uio_bufp, UIO_SIZEOF(msg->msg_iovlen));
+	if (auio != NULL) {
+		uio_free(auio);
 	}
 
 	return error;
@@ -972,8 +963,8 @@ errorout:
 	if (sentlen) {
 		*sentlen = 0;
 	}
-	if (uio_bufp != NULL) {
-		kfree_data(uio_bufp, UIO_SIZEOF(msg->msg_iovlen));
+	if (auio != NULL) {
+		uio_free(auio);
 	}
 	return error;
 }
@@ -992,14 +983,74 @@ errno_t
 sock_sendmbuf(socket_t sock, const struct msghdr *msg, mbuf_t data,
     int flags, size_t *sentlen)
 {
+	int error;
+
 	if (data == NULL || (msg != NULL && (msg->msg_iov != NULL ||
 	    msg->msg_iovlen != 0))) {
 		if (data != NULL) {
 			m_freem(data);
 		}
-		return EINVAL;
+		error = EINVAL;
+		goto done;
 	}
-	return sock_send_internal(sock, msg, data, flags, sentlen);
+	error = sock_send_internal(sock, msg, data, flags, sentlen);
+done:
+	return error;
+}
+
+errno_t
+sock_sendmbuf_can_wait(socket_t sock, const struct msghdr *msg, mbuf_t data,
+    int flags, size_t *sentlen)
+{
+	int error;
+	int count = 0;
+	int i;
+	mbuf_t m;
+	struct msghdr msg_temp = {};
+
+	if (data == NULL || (msg != NULL && (msg->msg_iov != NULL ||
+	    msg->msg_iovlen != 0))) {
+		error = EINVAL;
+		goto done;
+	}
+
+	/*
+	 * Use the name and control
+	 */
+	msg_temp.msg_name = msg->msg_name;
+	msg_temp.msg_namelen = msg->msg_namelen;
+	msg_temp.msg_control = msg->msg_control;
+	msg_temp.msg_controllen = msg->msg_controllen;
+
+	/*
+	 * Count the number of mbufs in the chain
+	 */
+	for (m = data; m != NULL; m = mbuf_next(m)) {
+		count++;
+	}
+
+	msg_temp.msg_iov = kalloc_type(struct iovec, count, Z_WAITOK | Z_ZERO);
+	if (msg_temp.msg_iov == NULL) {
+		error = ENOMEM;
+		goto done;
+	}
+
+	msg_temp.msg_iovlen = count;
+
+	for (i = 0, m = data; m != NULL; i++, m = mbuf_next(m)) {
+		msg_temp.msg_iov[i].iov_base = mbuf_data(m);
+		msg_temp.msg_iov[i].iov_len = mbuf_len(m);
+	}
+
+	error = sock_send_internal(sock, &msg_temp, NULL, flags, sentlen);
+done:
+	if (data != NULL) {
+		m_freem(data);
+	}
+	if (msg_temp.msg_iov != NULL) {
+		kfree_type(struct iovec, count, msg_temp.msg_iov);
+	}
+	return error;
 }
 
 errno_t
@@ -1342,11 +1393,11 @@ sock_setupcall(socket_t sock, sock_upcall callback, void *context)
 	 * the read and write callbacks and their respective parameters.
 	 */
 	socket_lock(sock, 1);
-#if (defined(__arm__) || defined(__arm64__))
+#if defined(__arm64__)
 	sock_setupcalls_locked(sock, callback, context, callback, context, 0);
-#else /* (defined(__arm__) || defined(__arm64__)) */
+#else /* defined(__arm64__) */
 	sock_setupcalls_locked(sock, callback, context, NULL, NULL, 0);
-#endif /* (defined(__arm__) || defined(__arm64__)) */
+#endif /* defined(__arm64__) */
 	socket_unlock(sock, 1);
 
 	return 0;
@@ -1372,7 +1423,7 @@ sock_setupcalls(socket_t sock, sock_upcall rcallback, void *rcontext,
 
 void
 sock_catchevents_locked(socket_t sock, sock_evupcall ecallback, void *econtext,
-    long emask)
+    uint32_t emask)
 {
 	socket_lock_assert_owned(sock);
 
@@ -1382,7 +1433,7 @@ sock_catchevents_locked(socket_t sock, sock_evupcall ecallback, void *econtext,
 	if (ecallback != NULL) {
 		sock->so_event = ecallback;
 		sock->so_eventarg = econtext;
-		sock->so_eventmask = (uint32_t)emask;
+		sock->so_eventmask = emask;
 	} else {
 		sock->so_event = sonullevent;
 		sock->so_eventarg = NULL;
@@ -1392,7 +1443,7 @@ sock_catchevents_locked(socket_t sock, sock_evupcall ecallback, void *econtext,
 
 errno_t
 sock_catchevents(socket_t sock, sock_evupcall ecallback, void *econtext,
-    long emask)
+    uint32_t emask)
 {
 	if (sock == NULL) {
 		return EINVAL;

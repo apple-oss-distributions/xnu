@@ -85,7 +85,7 @@
 #ifdef MACH_KERNEL_PRIVATE
 #include <kern/macro_help.h>
 #include <kern/kern_types.h>
-#include <kern/hazard.h>
+#include <kern/smr.h>
 #include <kern/locks.h>
 #include <kern/task.h>
 #include <kern/zalloc.h>
@@ -125,8 +125,7 @@ struct ipc_space {
 	os_ref_atomic_t is_bits;        /* holds refs, active, growing */
 	ipc_entry_num_t is_table_hashed;/* count of hashed elements */
 	ipc_entry_num_t is_table_free;  /* count of free elements */
-	HAZARD_POINTER(ipc_entry_t XNU_PTRAUTH_SIGNED_PTR("ipc_space.is_table")) is_table; /* an array of entries */
-	struct ipc_table_size * XNU_PTRAUTH_SIGNED_PTR("ipc_space.is_table_next") is_table_next; /* info for larger table */
+	SMR_POINTER(ipc_entry_table_t XNU_PTRAUTH_SIGNED_PTR("ipc_space.is_table")) is_table; /* an array of entries */
 	task_t XNU_PTRAUTH_SIGNED_PTR("ipc_space.is_task") is_task; /* associated task */
 	thread_t        is_grower;      /* thread growing the space */
 	ipc_label_t     is_label;       /* [private] mandatory access label */
@@ -162,13 +161,15 @@ is_bits_test(ipc_space_t is, uint32_t bit)
 	return os_ref_get_raw_mask(&is->is_bits) & bit;
 }
 
-#define is_active(is)           (hazard_ptr_load(&(is)->is_table) != NULL)
+#define is_active(is)           (smr_unsafe_load(&(is)->is_table) != 0UL)
 #define is_growing(is)          ((is)->is_grower != THREAD_NULL)
 
-static inline ipc_entry_t
+static inline ipc_entry_table_t
 is_active_table(ipc_space_t space)
 {
-	ipc_entry_t table = hazard_ptr_serialized_load(&space->is_table);
+	ipc_entry_table_t table;
+
+	table = smr_serialized_load(&space->is_table);
 	assert(table != NULL);
 	return table;
 }
@@ -239,47 +240,39 @@ extern lck_attr_t  ipc_lck_attr;
 #define current_space()         (current_task()->itk_space)
 
 extern void         ipc_space_lock(
-	ipc_space_t     space);
+	ipc_space_t             space);
 
 extern void         ipc_space_unlock(
-	ipc_space_t     space);
+	ipc_space_t             space);
 
 extern void         ipc_space_lock_sleep(
-	ipc_space_t     space);
+	ipc_space_t             space);
 
-extern void         ipc_space_free_table(
-	ipc_entry_t     table);
-
-#if MACH_LOCKFREE_SPACE
 extern void         ipc_space_retire_table(
-	ipc_entry_t     table);
-#else
-#define ipc_space_retire_table  ipc_space_free_table
-#endif
+	ipc_entry_table_t       table);
 
 /* Create a special IPC space */
 extern kern_return_t ipc_space_create_special(
-	ipc_space_t     *spacep);
+	ipc_space_t            *spacep);
 
 /* Create a new IPC space */
 extern kern_return_t ipc_space_create(
-	ipc_table_size_t        initial,
 	ipc_label_t             label,
-	ipc_space_t             *spacep);
+	ipc_space_t            *spacep);
 
 /* Change the label on an existing space */
 extern kern_return_t ipc_space_label(
-	ipc_space_t space,
-	ipc_label_t label);
+	ipc_space_t             space,
+	ipc_label_t             label);
 
 /* Add a label to an existing space */
 extern kern_return_t ipc_space_add_label(
-	ipc_space_t space,
-	ipc_label_t label);
+	ipc_space_t             space,
+	ipc_label_t             label);
 
 /* Mark a space as dead and cleans up the entries*/
 extern void ipc_space_terminate(
-	ipc_space_t     space);
+	ipc_space_t             space);
 
 /* Permute the order of a range within an IPC space */
 extern void ipc_space_rand_freelist(
@@ -294,22 +287,22 @@ extern ipc_entry_bits_t ipc_space_get_rollpoint(ipc_space_t space);
 #if CONFIG_PROC_RESOURCE_LIMITS
 /* Set limits on a space's size */
 extern kern_return_t ipc_space_set_table_size_limits(
-	ipc_space_t     space,
-	ipc_entry_num_t soft_limit,
-	ipc_entry_num_t hard_limit);
+	ipc_space_t             space,
+	ipc_entry_num_t         soft_limit,
+	ipc_entry_num_t         hard_limit);
 
 extern void ipc_space_check_limit_exceeded(
-	ipc_space_t space);
+	ipc_space_t             space);
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
 extern kern_return_t ipc_space_get_table_size_and_limits(
-	ipc_space_t space,
-	ipc_entry_num_t *current_limit,
-	ipc_entry_num_t *soft_limit,
-	ipc_entry_num_t *hard_limit);
+	ipc_space_t             space,
+	ipc_entry_num_t        *current_limit,
+	ipc_entry_num_t        *soft_limit,
+	ipc_entry_num_t        *hard_limit);
 
 extern void ipc_space_set_at_max_limit(
-	ipc_space_t space);
+	ipc_space_t             space);
 
 #endif /* MACH_KERNEL_PRIVATE */
 #endif /* __APPLE_API_PRIVATE */
@@ -317,17 +310,17 @@ extern void ipc_space_set_at_max_limit(
 #ifdef  __APPLE_API_UNSTABLE
 #ifndef MACH_KERNEL_PRIVATE
 
-extern ipc_space_t              current_space(void);
+extern ipc_space_t current_space(void);
 
 #endif /* !MACH_KERNEL_PRIVATE */
 #endif /* __APPLE_API_UNSTABLE */
 
 /* Take a reference on a space */
 extern void ipc_space_reference(
-	ipc_space_t     space);
+	ipc_space_t             space);
 
 /* Realase a reference on a space */
 extern void ipc_space_release(
-	ipc_space_t     space);
+	ipc_space_t             space);
 
 #endif  /* _IPC_IPC_SPACE_H_ */

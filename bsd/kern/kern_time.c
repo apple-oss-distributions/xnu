@@ -450,9 +450,9 @@ setitimer(struct proc *p, struct setitimer_args *uap, int32_t *retval)
 
 	case ITIMER_VIRTUAL:
 		if (timerisset(&aitv.it_value)) {
-			task_vtimer_set(p->task, TASK_VTIMER_USER);
+			task_vtimer_set(proc_task(p), TASK_VTIMER_USER);
 		} else {
-			task_vtimer_clear(p->task, TASK_VTIMER_USER);
+			task_vtimer_clear(proc_task(p), TASK_VTIMER_USER);
 		}
 
 		proc_spinlock(p);
@@ -462,9 +462,9 @@ setitimer(struct proc *p, struct setitimer_args *uap, int32_t *retval)
 
 	case ITIMER_PROF:
 		if (timerisset(&aitv.it_value)) {
-			task_vtimer_set(p->task, TASK_VTIMER_PROF);
+			task_vtimer_set(proc_task(p), TASK_VTIMER_PROF);
 		} else {
-			task_vtimer_clear(p->task, TASK_VTIMER_PROF);
+			task_vtimer_clear(proc_task(p), TASK_VTIMER_PROF);
 		}
 
 		proc_spinlock(p);
@@ -474,6 +474,52 @@ setitimer(struct proc *p, struct setitimer_args *uap, int32_t *retval)
 	}
 
 	return 0;
+}
+
+void
+proc_inherit_itimers(struct proc *old_proc, struct proc *new_proc)
+{
+	struct itimerval real_itv, vuser_itv, vprof_itv;
+
+	/* Snapshot the old timer values */
+	proc_spinlock(old_proc);
+	real_itv = old_proc->p_realtimer;
+	vuser_itv = old_proc->p_vtimer_user;
+	vprof_itv = old_proc->p_vtimer_prof;
+	proc_spinunlock(old_proc);
+
+	if (timerisset(&vuser_itv.it_value)) {
+		task_vtimer_set(proc_task(new_proc), TASK_VTIMER_USER);
+	} else {
+		task_vtimer_clear(proc_task(new_proc), TASK_VTIMER_USER);
+	}
+
+	if (timerisset(&vprof_itv.it_value)) {
+		task_vtimer_set(proc_task(new_proc), TASK_VTIMER_PROF);
+	} else {
+		task_vtimer_clear(proc_task(new_proc), TASK_VTIMER_PROF);
+	}
+
+	/* Update the timer values on new proc */
+	proc_spinlock(new_proc);
+
+	if (timerisset(&real_itv.it_value)) {
+		microuptime(&new_proc->p_rtime);
+		timevaladd(&new_proc->p_rtime, &real_itv.it_value);
+		new_proc->p_realtimer = real_itv;
+		if (!thread_call_enter_delayed_with_leeway(new_proc->p_rcall, NULL,
+		    tvtoabstime(&new_proc->p_rtime), 0, THREAD_CALL_DELAY_USER_NORMAL)) {
+			new_proc->p_ractive++;
+		}
+	} else {
+		timerclear(&new_proc->p_rtime);
+		new_proc->p_realtimer = real_itv;
+	}
+
+	new_proc->p_vtimer_user = vuser_itv;
+	new_proc->p_vtimer_prof = vprof_itv;
+
+	proc_spinunlock(new_proc);
 }
 
 /*
@@ -486,7 +532,8 @@ setitimer(struct proc *p, struct setitimer_args *uap, int32_t *retval)
  */
 void
 realitexpire(
-	struct proc *p)
+	struct proc *p,
+	__unused void *p2)
 {
 	struct proc *r;
 	struct timeval t;

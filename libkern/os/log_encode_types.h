@@ -120,7 +120,6 @@ typedef struct os_log_context_s {
 	uint16_t                    ctx_content_sz; // size not including the header
 	uint16_t                    ctx_pubdata_sz;
 	uint16_t                    ctx_pubdata_cnt;
-	firehose_tracepoint_flags_t ctx_ft_flags;
 	uint8_t                     ctx_truncated : 1;
 	uint8_t                     ctx_allocated : 1;
 } *os_log_context_t;

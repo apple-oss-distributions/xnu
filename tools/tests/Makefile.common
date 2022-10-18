@@ -31,13 +31,17 @@ ifeq ($(origin SDKVERSION),undefined)
 export SDKVERSION := $(shell $(XCRUN) -sdk $(SDKROOT) -show-sdk-version)
 endif
 
-ifeq ($(origin PLATFORM),undefined)
 export PLATFORMPATH := $(shell $(XCRUN) -sdk $(SDKROOT) -show-sdk-platform-path)
-export PLATFORM := $(shell echo $(PLATFORMPATH) | sed 's,^.*/\([^/]*\)\.platform$$,\1,')
+export SDKPLATFORM := $(shell echo $(PLATFORMPATH) | sed 's,^.*/\([^/]*\)\.platform$$,\1,')
+
+ifeq ($(origin PLATFORM),undefined)
+export PLATFORM := $(SDKPLATFORM)
 
 ifeq ($(PLATFORM),watchOS)
     export PLATFORM := WatchOS
 endif
+
+
 endif
 
 SUPPORTED_EMBEDDED_PLATFORMS := iPhoneOS iPhoneOSNano tvOS AppleTVOS WatchOS BridgeOS
@@ -66,7 +70,7 @@ else
     DEPLOYMENT_TARGET_FLAGS =
 endif
 
-DEPLOYMENT_TARGET_DEFINES = -DPLATFORM_$(PLATFORM)
+DEPLOYMENT_TARGET_DEFINES = -DXNU_PLATFORM_$(PLATFORM)
 
 #
 # Locate common utilities
@@ -108,16 +112,16 @@ ARCH_CONFIGS:=$(RC_ARCHS)
 endif
 
 ifeq ($(ARCH_CONFIGS),)
-PLATFORM_LOWERCASE:=$(shell echo "$(PLATFORM)" | tr A-Z a-z)
+PLATFORM_LOWERCASE:=$(shell echo "$(SDKPLATFORM)" | tr A-Z a-z)
 ARCH_CONFIGS:=$(shell /usr/bin/plutil -extract SupportedTargets.$(PLATFORM_LOWERCASE).Archs json -o - $(SDKROOT)/SDKSettings.plist | tr '",[]' ' ')
 PLATFORM_LOWERCASE:=
 endif
 
-ARCH_CONFIGS_32:=$(call FILTER_OUT_SUBSTRING,64,$(ARCH_CONFIGS))
+ARCH_CONFIGS:=$(call FILTER_OUT_SUBSTRING,armv7,$(ARCH_CONFIGS))
+
 ARCH_CONFIGS_64:=$(call FILTER_SUBSTRING,64,$(ARCH_CONFIGS))
 ARCH_CONFIGS_x86:=$(call FILTER_SUBSTRING,x86_64,$(ARCH_CONFIGS))
 
 ARCH_FLAGS:=$(foreach argarch,$(ARCH_CONFIGS), -arch $(argarch) )
-ARCH_FLAGS_32:=$(foreach argarch,$(ARCH_CONFIGS_32), -arch $(argarch) )
 ARCH_FLAGS_64:=$(foreach argarch,$(ARCH_CONFIGS_64), -arch $(argarch) )
 ARCH_FLAGS_x86:=$(foreach argarch,$(ARCH_CONFIGS_x86), -arch $(argarch) )

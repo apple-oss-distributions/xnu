@@ -1,18 +1,20 @@
-/* Copyright (c) (2010,2011,2012,2015,2016,2017,2018,2019) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2012,2015-2021) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
- * is contained in the License.txt file distributed with corecrypto) and only to 
- * people who accept that license. IMPORTANT:  Any license rights granted to you by 
- * Apple Inc. (if any) are limited to internal use within your organization only on 
- * devices and computers you own or control, for the sole purpose of verifying the 
- * security characteristics and correct functioning of the Apple Software.  You may 
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
 #ifndef _CORECRYPTO_CCMODE_IMPL_H_
 #define _CORECRYPTO_CCMODE_IMPL_H_
-
+#include <stdbool.h>
 #include <corecrypto/cc.h>
+
+#define CCMODE_MAX_BLOCK_SIZE 16
 
 /* ECB mode. */
 cc_aligned_struct(16) ccecb_ctx;
@@ -24,6 +26,7 @@ struct ccmode_ecb {
     int (*CC_SPTR(ccmode_ecb, init))(const struct ccmode_ecb *ecb, ccecb_ctx *ctx, size_t key_nbytes, const void *key);
     int (*CC_SPTR(ccmode_ecb, ecb))(const ccecb_ctx *ctx, size_t nblocks, const void *in, void *out);
     void (*CC_SPTR(ccmode_ecb, roundkey))(const ccecb_ctx *ctx, unsigned r, void *key);
+    cc_impl_t impl;
 };
 
 /*!
@@ -155,6 +158,7 @@ struct ccmode_xts {
 
     const void *custom;
     const void *custom1;
+    cc_impl_t impl;
 };
 
 // 7- GCM mode, statful
@@ -199,6 +203,7 @@ struct ccmode_ccm {
     int (*CC_SPTR(ccmode_ccm, finalize))(ccccm_ctx *key, ccccm_nonce *nonce_ctx, void *mac);
     int (*CC_SPTR(ccmode_ccm, reset))(ccccm_ctx *key, ccccm_nonce *nonce_ctx);
     const void *custom;
+    bool enc_mode;
 };
 
 /* We need to expose this (currently)to keep CommonCrypto happy. */

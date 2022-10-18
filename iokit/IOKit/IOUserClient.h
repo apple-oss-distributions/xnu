@@ -152,14 +152,27 @@ struct IOExternalMethodArguments {
 	uint32_t            __reserved[30];
 };
 
+struct IOExternalMethodArgumentsOpaque;
+
 typedef IOReturn (*IOExternalMethodAction)(OSObject * target, void * reference,
     IOExternalMethodArguments * arguments);
+
 struct IOExternalMethodDispatch {
 	IOExternalMethodAction function;
 	uint32_t               checkScalarInputCount;
 	uint32_t               checkStructureInputSize;
 	uint32_t               checkScalarOutputCount;
 	uint32_t               checkStructureOutputSize;
+};
+
+struct IOExternalMethodDispatch2022 {
+	IOExternalMethodAction function;
+	uint32_t               checkScalarInputCount;
+	uint32_t               checkStructureInputSize;
+	uint32_t               checkScalarOutputCount;
+	uint32_t               checkStructureOutputSize;
+	uint8_t                allowAsync;
+	const char*            checkEntitlement;
 };
 
 enum {
@@ -190,7 +203,6 @@ struct IOUCFilterPolicy;
  *   @class IOUserClient
  *   @abstract   Provides a basis for communication between client applications and I/O Kit objects.
  */
-
 class IOUserClient : public IOService
 {
 	OSDeclareAbstractStructorsWithDispatch(IOUserClient);
@@ -236,8 +248,11 @@ public:
 	UInt8   closed;
 	UInt8   __ipcFinal;
 	UInt8   messageAppSuspended:1,
+	    uc2022:1,
 	    defaultLocking:1,
-	    __reservedA:6;
+	    defaultLockingSingleThreadExternalMethod:1,
+	    defaultLockingSetProperties:1,
+	    __reservedA:3;
 	volatile SInt32 __ipc;
 	queue_head_t owners;
 	IORWLock * lock;
@@ -255,7 +270,7 @@ private:
 
 public:
 	MIG_SERVER_ROUTINE virtual IOReturn
-	externalMethod(uint32_t selector, IOExternalMethodArguments *arguments,
+	externalMethod(uint32_t selector, IOExternalMethodArguments * arguments,
 	    IOExternalMethodDispatch *dispatch = NULL,
 	    OSObject *target = NULL, void *reference = NULL);
 
@@ -263,13 +278,8 @@ public:
 		mach_port_t port, UInt32 type, io_user_reference_t refCon);
 
 private:
-#if __LP64__
 	OSMetaClassDeclareReservedUnused(IOUserClient, 0);
 	OSMetaClassDeclareReservedUnused(IOUserClient, 1);
-#else
-	OSMetaClassDeclareReservedUsedX86(IOUserClient, 0);
-	OSMetaClassDeclareReservedUsedX86(IOUserClient, 1);
-#endif
 	OSMetaClassDeclareReservedUnused(IOUserClient, 2);
 	OSMetaClassDeclareReservedUnused(IOUserClient, 3);
 	OSMetaClassDeclareReservedUnused(IOUserClient, 4);
@@ -299,6 +309,9 @@ public:
 	IOReturn registerOwner(task_t task);
 	void     noMoreSenders(void);
 	io_filter_policy_t filterForTask(task_t task, io_filter_policy_t addFilterPolicy);
+	MIG_SERVER_ROUTINE IOReturn
+	callExternalMethod(uint32_t selector, IOExternalMethodArguments * arguments);
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 #if PRIVATE
@@ -506,6 +519,75 @@ public:
 	getTargetAndTrapForIndex(
 		LIBKERN_RETURNS_NOT_RETAINED IOService **targetP, UInt32 index );
 };
+
+#if KERNEL_PRIVATE
+
+#define IOUSERCLIENT2022_SUPPORTED      1
+
+/*
+ *  IOUserClient2022 is a new superclass for an IOUserClient implementation to opt-in to
+ *  several security related best practices. The changes in behavior are:
+ *  - these properties must be present after ::start completes to control default single
+ *  threading calls to the IOUC from clients. It is recommended to set all values to true.
+ *
+ *  kIOUserClientDefaultLockingKey if kOSBooleanTrue
+ *  IOConnectMapMemory, IOConnectUnmapMemory, IOConnectAddClient, IOServiceClose
+ *  are single threaded and will not allow externalMethod to run concurrently.
+ *  Multiple threads can call externalMethod concurrently however.
+ *
+ *  kIOUserClientDefaultLockingSetPropertiesKey if kOSBooleanTrue
+ *  IORegistrySetProperties is also single threaded as above.
+ *
+ *  kIOUserClientDefaultLockingSingleThreadExternalMethodKey if kOSBooleanTrue
+ *  Only one thread may call externalMethod concurrently.
+ *
+ *  kIOUserClientEntitlementsKey
+ *  Entitlements required for a process to open the IOUC (see the key description).
+ *  It is recommended to require an entitlement if all calling processes are from Apple.
+ *
+ *  - the externalMethod override is required and must call dispatchExternalMethod() to
+ *  do basic argument checking before calling subclass code to implement the method.
+ *  dispatchExternalMethod() is called with an array of IOExternalMethodDispatch2022
+ *  elements and will index into the array for the given selector. The selector should
+ *  be adjusted accordingly, if needed, in the subclass' externalMethod().
+ *  The allowAsync field of IOExternalMethodDispatch2022 must be true to allow the
+ *  IOConnectCallAsyncMethod(etc) APIs to be used with the method.
+ *  If the checkEntitlement field of IOExternalMethodDispatch2022 is non-NULL, then
+ *  the calling process must have the named entitlement key, with a value of boolean true,
+ *  or kIOReturnNotPrivileged is returned. This should be used when per-selector entitlement
+ *  checks are required.  If you only need to check at the time the connection is created,
+ *  use kIOUserClientEntitlementsKey instead.
+ */
+
+class IOUserClient2022 : public IOUserClient
+{
+	OSDeclareDefaultStructors(IOUserClient2022);
+
+private:
+	MIG_SERVER_ROUTINE virtual IOReturn
+	externalMethod(uint32_t selector, IOExternalMethodArguments * arguments,
+	    IOExternalMethodDispatch *dispatch = NULL,
+	    OSObject *target = NULL, void *reference = NULL) APPLE_KEXT_OVERRIDE;
+
+protected:
+	IOReturn
+	dispatchExternalMethod(uint32_t selector, IOExternalMethodArgumentsOpaque * arguments,
+	    const IOExternalMethodDispatch2022 dispatchArray[], size_t dispatchArrayCount,
+	    OSObject * target, void * reference);
+
+public:
+
+	MIG_SERVER_ROUTINE virtual IOReturn
+	externalMethod(uint32_t selector, IOExternalMethodArgumentsOpaque * arguments) = 0;
+
+
+	OSMetaClassDeclareReservedUnused(IOUserClient2022, 0);
+	OSMetaClassDeclareReservedUnused(IOUserClient2022, 1);
+	OSMetaClassDeclareReservedUnused(IOUserClient2022, 2);
+	OSMetaClassDeclareReservedUnused(IOUserClient2022, 3);
+};
+
+#endif /* KERNEL_PRIVATE */
 
 #ifdef XNU_KERNEL_PRIVATE
 extern "C" void IOMachPortDestroyUserReferences(OSObject * obj, natural_t type);

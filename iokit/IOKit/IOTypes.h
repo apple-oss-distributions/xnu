@@ -28,7 +28,7 @@
 #ifndef __IOKIT_IOTYPES_H
 #define __IOKIT_IOTYPES_H
 
-#ifndef PLATFORM_DriverKit
+#ifndef XNU_PLATFORM_DriverKit
 
 #ifndef IOKIT
 #define IOKIT 1
@@ -228,7 +228,7 @@ typedef unsigned int IODeviceNumber;
 }
 #endif
 
-#else /* !PLATFORM_DriverKit */
+#else /* !XNU_PLATFORM_DriverKit */
 
 #include <stdint.h>
 
@@ -252,7 +252,7 @@ typedef IOPhysicalLength64       IOPhysicalLength;
 
 typedef uint64_t       IOVirtualAddress;
 
-#endif /* PLATFORM_DriverKit */
+#endif /* XNU_PLATFORM_DriverKit */
 
 enum {
 	kIOMaxBusStall40usec = 40000,

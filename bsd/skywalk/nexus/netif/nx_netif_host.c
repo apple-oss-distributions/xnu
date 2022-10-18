@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -37,39 +37,22 @@
 #define DBG_FUNC_NX_NETIF_HOST_ENQUEUE  \
 	SKYWALKDBG_CODE(DBG_SKYWALK_NETIF, 2)
 
-static void nx_netif_host_catch_tx(struct nexus_adapter *, boolean_t);
+static void nx_netif_host_catch_tx(struct nexus_adapter *, bool);
 static inline struct __kern_packet*
 nx_netif_mbuf_to_kpkt(struct nexus_adapter *, struct mbuf *);
 
 #define SK_IFCAP_CSUM   (IFCAP_HWCSUM|IFCAP_CSUM_PARTIAL|IFCAP_CSUM_ZERO_INVERT)
 
-int
-nx_netif_host_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
+static void
+nx_netif_host_adjust_if_capabilities(struct nexus_adapter *na, bool activate)
 {
-	struct nexus_netif_adapter *nifna = (struct nexus_netif_adapter *)na;
-	struct nx_netif *nif = nifna->nifna_netif;
+	struct nx_netif *nif = ((struct nexus_netif_adapter *)na)->nifna_netif;
 	struct ifnet *ifp = na->na_ifp;
-	int error = 0;
 
-	ASSERT(na->na_type == NA_NETIF_HOST ||
-	    na->na_type == NA_NETIF_COMPAT_HOST);
-	ASSERT(na->na_flags & NAF_HOST_ONLY);
+	ifnet_lock_exclusive(ifp);
 
-	SK_DF(SK_VERB_NETIF, "na \"%s\" (0x%llx) %s", na->na_name,
-	    SK_KVA(na), na_activate_mode2str(mode));
-
-	switch (mode) {
-	case NA_ACTIVATE_MODE_ON:
-		ASSERT(SKYWALK_CAPABLE(ifp));
-		/*
-		 * Make skywalk control the packet steering
-		 * Don't intercept tx packets if this is a netif compat
-		 * adapter attached to a flowswitch
-		 */
-		nx_netif_host_catch_tx(na, TRUE);
-
+	if (activate) {
 		/* XXX: adi@apple.com - disable TSO and LRO for now */
-		ifnet_lock_exclusive(ifp);
 		nif->nif_hwassist = ifp->if_hwassist;
 		nif->nif_capabilities = ifp->if_capabilities;
 		nif->nif_capenable = ifp->if_capenable;
@@ -113,26 +96,7 @@ nx_netif_host_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 				    (SK_IFCAP_CSUM | IFCAP_TSO));
 			}
 		}
-		ifnet_lock_done(ifp);
-
-		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
-		break;
-
-	case NA_ACTIVATE_MODE_DEFUNCT:
-		ASSERT(SKYWALK_CAPABLE(ifp));
-		break;
-
-	case NA_ACTIVATE_MODE_OFF:
-		/* Release packet steering control. */
-		nx_netif_host_catch_tx(na, FALSE);
-
-		/*
-		 * Note that here we cannot assert SKYWALK_CAPABLE()
-		 * as we're called in the destructor path.
-		 */
-		atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
-
-		ifnet_lock_exclusive(ifp);
+	} else {
 		/* Unset any capabilities previously set by Skywalk */
 		ifp->if_hwassist &= ~(IFNET_CHECKSUMF | IFNET_MULTIPAGES);
 		ifp->if_capabilities &= ~SK_IFCAP_CSUM;
@@ -150,7 +114,87 @@ nx_netif_host_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		    (nif->nif_capabilities & (SK_IFCAP_CSUM | IFCAP_TSO));
 		ifp->if_capenable |=
 		    (nif->nif_capenable & (SK_IFCAP_CSUM | IFCAP_TSO));
-		ifnet_lock_done(ifp);
+	}
+
+	ifnet_lock_done(ifp);
+}
+
+static  bool
+nx_netif_host_is_gso_needed(struct nexus_adapter *na)
+{
+	struct nx_netif *nif = ((struct nexus_netif_adapter *)na)->nifna_netif;
+
+	/*
+	 * Don't enable for Compat netif.
+	 */
+	if (na->na_type != NA_NETIF_HOST) {
+		return false;
+	}
+	/*
+	 * Don't enable if netif is not plumbed under a flowswitch.
+	 */
+	if (!NA_KERNEL_ONLY(na)) {
+		return false;
+	}
+	/*
+	 * Don't enable If HW TSO is enabled.
+	 */
+	if (((nif->nif_hwassist & IFNET_TSO_IPV4) != 0) ||
+	    ((nif->nif_hwassist & IFNET_TSO_IPV6) != 0)) {
+		return false;
+	}
+	/*
+	 * Don't enable if TX aggregation is disabled.
+	 */
+	if (sk_fsw_tx_agg_tcp == 0) {
+		return false;
+	}
+	return true;
+}
+
+int
+nx_netif_host_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
+{
+	struct ifnet *ifp = na->na_ifp;
+	int error = 0;
+
+	ASSERT(na->na_type == NA_NETIF_HOST ||
+	    na->na_type == NA_NETIF_COMPAT_HOST);
+	ASSERT(na->na_flags & NAF_HOST_ONLY);
+
+	SK_DF(SK_VERB_NETIF, "na \"%s\" (0x%llx) %s", na->na_name,
+	    SK_KVA(na), na_activate_mode2str(mode));
+
+	switch (mode) {
+	case NA_ACTIVATE_MODE_ON:
+		VERIFY(SKYWALK_CAPABLE(ifp));
+
+		nx_netif_host_adjust_if_capabilities(na, true);
+		/*
+		 * Make skywalk control the packet steering
+		 * Don't intercept tx packets if this is a netif compat
+		 * adapter attached to a flowswitch
+		 */
+		nx_netif_host_catch_tx(na, true);
+
+		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
+		break;
+
+	case NA_ACTIVATE_MODE_DEFUNCT:
+		VERIFY(SKYWALK_CAPABLE(ifp));
+		break;
+
+	case NA_ACTIVATE_MODE_OFF:
+		/* Release packet steering control. */
+		nx_netif_host_catch_tx(na, false);
+
+		/*
+		 * Note that here we cannot assert SKYWALK_CAPABLE()
+		 * as we're called in the destructor path.
+		 */
+		atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+
+		nx_netif_host_adjust_if_capabilities(na, false);
 		break;
 
 	default:
@@ -273,7 +317,7 @@ nx_netif_host_na_special(struct nexus_adapter *na, struct kern_channel *ch,
  * Second argument is TRUE to intercept, FALSE to restore.
  */
 static void
-nx_netif_host_catch_tx(struct nexus_adapter *na, boolean_t enable)
+nx_netif_host_catch_tx(struct nexus_adapter *na, bool activate)
 {
 	struct ifnet *ifp = na->na_ifp;
 	int err = 0;
@@ -293,7 +337,7 @@ nx_netif_host_catch_tx(struct nexus_adapter *na, boolean_t enable)
 	 * opened directly to the netif.  Here we either intercept
 	 * or restore the DLIL output handler.
 	 */
-	if (enable) {
+	if (activate) {
 		if (__improbable(!NA_KERNEL_ONLY(na))) {
 			return;
 		}
@@ -304,8 +348,8 @@ nx_netif_host_catch_tx(struct nexus_adapter *na, boolean_t enable)
 		 */
 		if (na->na_type == NA_NETIF_HOST) {
 			err = ifnet_set_output_handler(ifp,
-			    sk_fsw_tx_agg_tcp ? netif_gso_dispatch :
-			    nx_netif_host_output);
+			    nx_netif_host_is_gso_needed(na) ?
+			    netif_gso_dispatch : nx_netif_host_output);
 			VERIFY(err == 0);
 		}
 	} else {
@@ -370,6 +414,7 @@ nx_netif_host_output(struct ifnet *ifp, struct mbuf *m)
 	uint32_t sc_idx = MBUF_SCIDX(m_get_service_class(m));
 	struct netif_stats *nifs = &NX_NETIF_PRIVATE(hwna->na_nx)->nif_stats;
 	struct __kern_packet *kpkt;
+	uint64_t qset_id;
 	errno_t error = ENOBUFS;
 	boolean_t pkt_drop = FALSE;
 
@@ -429,8 +474,26 @@ nx_netif_host_output(struct ifnet *ifp, struct mbuf *m)
 				nx_netif_pktap_output(ifp, af, kpkt);
 			}
 		}
-		/* callee consumes packet */
-		error = ifnet_enqueue_pkt(ifp, kpkt, false, &pkt_drop);
+		if (NX_LLINK_PROV(nif->nif_nx) &&
+		    ifp->if_traffic_rule_count > 0 &&
+		    nxctl_inet_traffic_rule_find_qset_id_with_pkt(ifp->if_xname,
+		    kpkt, &qset_id) == 0) {
+			struct netif_qset *qset;
+
+			/*
+			 * This always returns a qset because if the qset id
+			 * is invalid the default qset is returned.
+			 */
+			qset = nx_netif_find_qset(nif, qset_id);
+			ASSERT(qset != NULL);
+			kpkt->pkt_qset_idx = qset->nqs_idx;
+			error = ifnet_enqueue_ifcq_pkt(ifp, qset->nqs_ifcq, kpkt,
+			    false, &pkt_drop);
+			nx_netif_qset_release(&qset);
+		} else {
+			/* callee consumes packet */
+			error = ifnet_enqueue_pkt(ifp, kpkt, false, &pkt_drop);
+		}
 		netif_transmit(ifp, NETIF_XMIT_FLAG_HOST);
 		if (pkt_drop) {
 			STATS_INC(nifs, NETIF_STATS_TX_DROP_ENQ_AQM);
@@ -450,6 +513,33 @@ done:
 	    error);
 
 	return error;
+}
+
+static inline int
+get_l2_hlen(struct mbuf *m, uint8_t *l2len)
+{
+	char *pkt_hdr;
+	struct mbuf *m0;
+	uint64_t len = 0;
+
+	pkt_hdr = m->m_pkthdr.pkt_hdr;
+	for (m0 = m; m0 != NULL; m0 = m0->m_next) {
+		if (pkt_hdr >= m0->m_data && pkt_hdr < m0->m_data + m0->m_len) {
+			break;
+		}
+		len += m0->m_len;
+	}
+	if (m0 == NULL) {
+		DTRACE_SKYWALK2(bad__pkthdr, struct mbuf *, m, char *, pkt_hdr);
+		return EINVAL;
+	}
+	len += (pkt_hdr - m0->m_data);
+	if (len > UINT8_MAX) {
+		DTRACE_SKYWALK2(bad__l2len, struct mbuf *, m, uint64_t, len);
+		return EINVAL;
+	}
+	*l2len = (uint8_t)len;
+	return 0;
 }
 
 #if SK_LOG
@@ -481,6 +571,7 @@ nx_netif_mbuf_to_kpkt(struct nexus_adapter *na, struct mbuf *m)
 	struct __kern_packet *kpkt;
 	kern_packet_t ph;
 	boolean_t copysum;
+	uint8_t l2hlen;
 	int err;
 
 	pp = skmem_arena_nexus(na->na_arena)->arn_tx_pp;
@@ -489,7 +580,7 @@ nx_netif_mbuf_to_kpkt(struct nexus_adapter *na, struct mbuf *m)
 	ASSERT(!PP_HAS_TRUNCATED_BUF(pp));
 
 	len = m_pktlen(m);
-	VERIFY((poff + len) <= (pp->pp_buflet_size * pp->pp_max_frags));
+	VERIFY((poff + len) <= (PP_BUF_SIZE_DEF(pp) * pp->pp_max_frags));
 
 	/* alloc packet */
 	ph = pp_alloc_packet_by_size(pp, poff + len, SKMEM_NOSLEEP);
@@ -517,8 +608,11 @@ nx_netif_mbuf_to_kpkt(struct nexus_adapter *na, struct mbuf *m)
 	    copysum, m->m_pkthdr.csum_tx_start);
 
 	kpkt->pkt_headroom = (uint8_t)poff;
-	kpkt->pkt_l2_len = 0;
-
+	if ((err = get_l2_hlen(m, &l2hlen)) == 0) {
+		kpkt->pkt_l2_len = l2hlen;
+	} else {
+		kpkt->pkt_l2_len = 0;
+	}
 	/* finalize the packet */
 	METADATA_ADJUST_LEN(kpkt, 0, poff);
 	err = __packet_finalize(ph);

@@ -315,7 +315,7 @@ struct nexus_adapter {
 	 * na_channel_event_notify() is used to send events on the user channel.
 	 */
 	int (*na_channel_event_notify)(struct nexus_adapter *,
-	    struct __kern_packet *, struct __kern_channel_event *, uint16_t);
+	    struct __kern_channel_event *, uint16_t);
 	/*
 	 * na_config() is an optional callback for returning nexus-specific
 	 * configuration information.  This is implemented by nexus types
@@ -376,7 +376,7 @@ struct nexus_adapter {
  * Currently used only by the parent nexus adapter of user-pipe nexus
  * to indicate that defuncting is allowed on the channels.
  */
-#define NAF_DEFUNCT_OK          0x80000
+#define NAF_DEFUNCT_OK          0x100000
 #define NAF_KERNEL_ONLY (1U << 31) /* used internally, not usable by userland */
 
 #define NAF_BITS                                                         \
@@ -385,7 +385,7 @@ struct nexus_adapter {
 	"\010TX_MITIGATION\011RX_MITIGATION\012DEFUNCT\013MEM_LOANED"    \
 	"\014REJECT\015EVENT_RING\016EVENT_ATTACH"                       \
 	"\020VIRTUAL\021MODE_FSW\022MODE_LLW\023LOW_LATENCY\024DRAINING" \
-	"\040KERNEL_ONLY"
+	"\025DEFUNCT_OK\040KERNEL_ONLY"
 
 #define NA_FREE(na) do {                                                 \
 	(na)->na_free(na);                                               \
@@ -637,9 +637,9 @@ extern int na_pseudo_create(struct kern_nexus *, struct chreq *,
     struct nexus_adapter **);
 extern void na_kr_drop(struct nexus_adapter *, boolean_t);
 extern void na_flowadv_entry_alloc(const struct nexus_adapter *, uuid_t,
-    const flowadv_idx_t);
+    const flowadv_idx_t, const uint32_t);
 extern void na_flowadv_entry_free(const struct nexus_adapter *, uuid_t,
-    const flowadv_idx_t);
+    const flowadv_idx_t, const uint32_t);
 extern bool na_flowadv_set(const struct nexus_adapter *,
     const flowadv_idx_t, const flowadv_token_t);
 extern boolean_t na_flowadv_clear(const struct kern_channel *,

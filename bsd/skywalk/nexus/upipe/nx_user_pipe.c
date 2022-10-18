@@ -105,7 +105,7 @@ static int nx_upipe_prov_params_adjust(
 	struct nxprov_adjusted_params *);
 static int nx_upipe_prov_params(struct kern_nexus_domain_provider *,
     const uint32_t, const struct nxprov_params *, struct nxprov_params *,
-    struct skmem_region_params[SKMEM_REGIONS]);
+    struct skmem_region_params[SKMEM_REGIONS], uint32_t);
 static int nx_upipe_prov_mem_new(struct kern_nexus_domain_provider *,
     struct kern_nexus *, struct nexus_adapter *);
 static void nx_upipe_prov_fini(struct kern_nexus_domain_provider *);
@@ -163,6 +163,11 @@ struct nxdom nx_upipe_dom_s = {
 		.nb_def = NX_UPIPE_BUFSIZE,
 		.nb_min = NX_UPIPE_MINBUFSIZE,
 		.nb_max = NX_UPIPE_MAXBUFSIZE,
+	},
+	.nxdom_large_buf_size = {
+		.nb_def = 0,
+		.nb_min = 0,
+		.nb_max = 0,
 	},
 	.nxdom_meta_size = {
 		.nb_def = NX_METADATA_OBJ_MIN_SZ,
@@ -247,17 +252,13 @@ static ZONE_DEFINE(nx_upipe_zone, SKMEM_ZONE_PREFIX ".nx.upipe",
     sizeof(struct nx_upipe), ZC_ZFREE_CLEARMEM);
 
 #define SKMEM_TAG_PIPES "com.apple.skywalk.pipes"
-static kern_allocation_name_t skmem_tag_pipes;
+static SKMEM_TAG_DEFINE(skmem_tag_pipes, SKMEM_TAG_PIPES);
 
 static void
 nx_upipe_dom_init(struct nxdom *nxdom)
 {
 	SK_LOCK_ASSERT_HELD();
 	ASSERT(!(nxdom->nxdom_flags & NEXUSDOMF_INITIALIZED));
-
-	ASSERT(skmem_tag_pipes == NULL);
-	skmem_tag_pipes = kern_allocation_name_allocate(SKMEM_TAG_PIPES, 0);
-	ASSERT(skmem_tag_pipes != NULL);
 
 	(void) nxdom_prov_add(nxdom, &nx_upipe_prov_s);
 }
@@ -270,11 +271,6 @@ nx_upipe_dom_terminate(struct nxdom *nxdom)
 	STAILQ_FOREACH_SAFE(nxdom_prov, &nxdom->nxdom_prov_head,
 	    nxdom_prov_link, tnxdp) {
 		(void) nxdom_prov_del(nxdom_prov);
-	}
-
-	if (skmem_tag_pipes != NULL) {
-		kern_allocation_name_release(skmem_tag_pipes);
-		skmem_tag_pipes = NULL;
 	}
 }
 
@@ -306,30 +302,23 @@ nx_upipe_prov_params_adjust(const struct kern_nexus_domain_provider *nxdom_prov,
 		    *(adj->adj_rx_rings));
 		return EINVAL;
 	}
-
 	*(adj->adj_tx_rings) *= 2;
 	*(adj->adj_rx_rings) *= 2;
-
-	if (adj->adj_buf_srp->srp_r_seg_size == 0) {
-		adj->adj_buf_srp->srp_r_seg_size = skmem_usr_buf_seg_size;
-	}
-
-	/* enable magazines layer for metadata */
-	*(adj->adj_md_magazines) = TRUE;
-
 	return 0;
 }
 
 static int
 nx_upipe_prov_params(struct kern_nexus_domain_provider *nxdom_prov,
     const uint32_t req, const struct nxprov_params *nxp0,
-    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS])
+    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS],
+    uint32_t pp_region_config_flags)
 {
 	struct nxdom *nxdom = nxdom_prov->nxdom_prov_dom;
 	int err;
 
 	err = nxprov_params_adjust(nxdom_prov, req, nxp0, nxp, srp,
-	    nxdom, nxdom, nxdom, nx_upipe_prov_params_adjust);
+	    nxdom, nxdom, nxdom, pp_region_config_flags,
+	    nx_upipe_prov_params_adjust);
 #if (DEVELOPMENT || DEBUG)
 	/* sysctl override */
 	if ((err == 0) && (nx_upipe_mhints != 0)) {
@@ -363,8 +352,7 @@ nx_upipe_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	 * user pipe to external kernel clients.
 	 */
 	na->na_arena = skmem_arena_create_for_nexus(na,
-	    NX_PROV(nx)->nxprov_region_params, NULL, NULL, FALSE,
-	    FALSE, NULL, &err);
+	    NX_PROV(nx)->nxprov_region_params, NULL, NULL, 0, NULL, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 
 	return err;
@@ -715,7 +703,6 @@ static int
 nx_upipe_na_alloc(struct nexus_adapter *na, uint32_t npipes)
 {
 	struct nexus_upipe_adapter **npa;
-	size_t len, orig_len;
 
 	if (npipes <= na->na_max_pipes) {
 		/* we already have more entries that requested */
@@ -725,9 +712,8 @@ nx_upipe_na_alloc(struct nexus_adapter *na, uint32_t npipes)
 		return EINVAL;
 	}
 
-	orig_len = sizeof(struct nexus_upipe_adapter *) * na->na_max_pipes;
-	len = sizeof(struct nexus_upipe_adapter *) * npipes;
-	npa = sk_realloc(na->na_pipes, orig_len, len, Z_WAITOK, skmem_tag_pipes);
+	npa = sk_realloc_type_array(struct nexus_upipe_adapter *,
+	    na->na_max_pipes, npipes, na->na_pipes, Z_WAITOK, skmem_tag_pipes);
 	if (npa == NULL) {
 		return ENOMEM;
 	}
@@ -748,8 +734,8 @@ nx_upipe_na_dealloc(struct nexus_adapter *na)
 			    "(%u dangling pipes)!", na->na_name,
 			    na->na_next_pipe);
 		}
-		sk_free(na->na_pipes,
-		    sizeof(struct nexus_upipe_adapter *) * na->na_max_pipes);
+		sk_free_type_array(struct nexus_upipe_adapter *,
+		    na->na_max_pipes, na->na_pipes);
 		na->na_pipes = NULL;
 		na->na_max_pipes = 0;
 		na->na_next_pipe = 0;

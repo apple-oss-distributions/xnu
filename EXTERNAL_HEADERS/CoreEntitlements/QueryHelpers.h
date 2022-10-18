@@ -5,6 +5,14 @@
 
 #pragma once
 
+/*!
+ * @function CEDynamic
+ * Marks an opcode as being dynamic
+ *
+ * @param op
+ * Opcode
+ */
+#define CEDynamic(op) (CEQueryOpOpcode_t)((op) | kCEOpDynamic)
 
 /*!
  * @function CESelectIndex
@@ -46,7 +54,7 @@
  * Using a key that is not found in the container will result in an invalid context
  */
 #define CESelectDictValue(key) (CEQueryOperation_t){.opcode = kCEOpSelectKey, .parameters = {.stringParameter = {.data = key, .length = sizeof(key) - 1}}}
-#define CESelectDictValueDynamic(key, len) (CEQueryOperation_t){.opcode = (CEQueryOpOpcode_t)(kCEOpSelectKey | kCEOpDynamic), .parameters = {.dynamicParameter = {.data = key, .length = len}}}
+#define CESelectDictValueDynamic(key, len) (CEQueryOperation_t){.opcode = CEDynamic(kCEOpSelectKey), .parameters = {.dynamicParameter = {.data = key, .length = len}}}
 
 /*!
  * @function CEMatchString
@@ -59,7 +67,7 @@
  * If a valid context is returned it will be in the same state as the execution context
  */
 #define CEMatchString(string) (CEQueryOperation_t){.opcode = kCEOpMatchString, .parameters = {.stringParameter = {.data = string, .length = sizeof(string) - 1}}}
-#define CEMatchDynamicString(string, len) (CEQueryOperation_t){.opcode = kCEOpMatchString | kCEOpDynamic, .parameters = {.dynamicParameter = {.data = string, .length = len}}}
+#define CEMatchDynamicString(string, len) (CEQueryOperation_t){.opcode = CEDynamic(kCEOpMatchString), .parameters = {.dynamicParameter = {.data = string, .length = len}}}
 
 /*!
  * @function CEMatchPrefix
@@ -72,7 +80,7 @@
  * If a valid context is returned it will be in the same state as the execution context
  */
 #define CEMatchPrefix(prefix) (CEQueryOperation_t){.opcode = kCEOpMatchStringPrefix, .parameters = {.stringParameter = {.data = prefix, .length = sizeof(prefix) - 1}}}
-#define CEMatchDynamicPrefix(prefix, len) (CEQueryOperation_t){.opcode = kCEOpMatchStringPrefix | kCEOpDynamic, .parameters = {.dynamicParameter = {.data = prefix, .length = len}}}
+#define CEMatchDynamicPrefix(prefix, len) (CEQueryOperation_t){.opcode = CEDynamic(kCEOpMatchStringPrefix), .parameters = {.dynamicParameter = {.data = prefix, .length = len}}}
 
 
 /*!
@@ -100,6 +108,18 @@
 #define CEMatchInteger(val) (CEQueryOperation_t){.opcode = kCEOpMatchInteger, .parameters = {.numericParameter = val}}
 
 /*!
+ * @function CEIsIntegerAllowed
+ * Returns an operation that will return a valid context if 1) the current context is an integer and allows the integer, or 2) the context is an array of integers that allows the integer
+ *
+ * @param integer
+ * The integer to match against
+ *
+ * @discussion
+ * If a valid context is returned it will be in the same state as the execution context
+ */
+#define CEIsIntegerAllowed(integer) (CEQueryOperation_t){.opcode = kCEOpIntegerValueAllowed, .parameters = {.numericParameter = integer}}
+
+/*!
  * @function CEIsStringAllowed
  * Returns an operation that will return a valid context if 1) the current context is a string and allows the string via wildcard rules, or 2) the context is an array of strings that allows the string
  *
@@ -110,7 +130,7 @@
  * If a valid context is returned it will be in the same state as the execution context
  */
 #define CEIsStringAllowed(string) (CEQueryOperation_t){.opcode = kCEOpStringValueAllowed, .parameters = {.stringParameter = {.data = string, .length = sizeof(string) - 1}}}
-#define CEIsDynamicStringAllowed(string, len) (CEQueryOperation_t){.opcode = kCEOpStringValueAllowed | kCEOpDynamic, .parameters = {.dynamicParameter = {.data = string, .length = len}}}
+#define CEIsDynamicStringAllowed(string, len) (CEQueryOperation_t){.opcode = CEDynamic(kCEOpStringValueAllowed), .parameters = {.dynamicParameter = {.data = string, .length = len}}}
 
 /*!
  * @function CEIsStringPrefixAllowed
@@ -123,8 +143,7 @@
  * If a valid context is returned it will be in the same state as the execution context
  */
 #define CEIsStringPrefixAllowed(string) (CEQueryOperation_t){.opcode = kCEOpStringPrefixValueAllowed, .parameters = {.stringParameter = {.data = string, .length = sizeof(string) - 1}}}
-#define CEIsDynamicStringPrefixAllowed(string, len) (CEQueryOperation_t){.opcode = kCEOpStringPrefixValueAllowed | kCEOpDynamic, .parameters = {.dynamicParameter = {.data = string, .length = len}}}
-
+#define CEIsDynamicStringPrefixAllowed(string, len) (CEQueryOperation_t){.opcode = CEDynamic(kCEOpStringPrefixValueAllowed), .parameters = {.dynamicParameter = {.data = string, .length = len}}}
 
 #pragma mark Helpers
 /*

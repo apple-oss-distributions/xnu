@@ -47,6 +47,7 @@
 
 #include <net/packet_mangler.h>
 
+#include <netinet/mptcp.h>
 #include <netinet/tcp.h>
 #include <netinet/tcp_var.h>
 #include <netinet/ip.h>
@@ -136,15 +137,6 @@ static void chksm_update(mbuf_t data);
 
 #define TCP_OPT_MULTIPATH_TCP   30
 #define MPTCP_SBT_VER_OFFSET    2
-
-#define MPTCP_SUBTYPE_MPCAPABLE         0x0
-#define MPTCP_SUBTYPE_MPJOIN            0x1
-#define MPTCP_SUBTYPE_DSS               0x2
-#define MPTCP_SUBTYPE_ADD_ADDR          0x3
-#define MPTCP_SUBTYPE_REM_ADDR          0x4
-#define MPTCP_SUBTYPE_MP_PRIO           0x5
-#define MPTCP_SUBTYPE_MP_FAIL           0x6
-#define MPTCP_SUBTYPE_MP_FASTCLOSE      0x7
 
 /*
  * packet filter global read write lock
@@ -976,7 +968,7 @@ pktmnglr_ipfilter_input(void *cookie, mbuf_t *data, int offset, u_int8_t protoco
 
 					PKT_MNGLR_LOG(LOG_INFO, "Got MPTCP option %x\n", tcp_opt_buf[i]);
 					PKT_MNGLR_LOG(LOG_INFO, "Got MPTCP subtype %x\n", subtype);
-					if (subtype == MPTCP_SUBTYPE_DSS) {
+					if (subtype == MPO_DSS) {
 						PKT_MNGLR_LOG(LOG_INFO, "Got DSS option\n");
 						PKT_MNGLR_LOG(LOG_INFO, "Protocol option mask: %d\n", p_pkt_mnglr->proto_action_mask);
 						if (p_pkt_mnglr->proto_action_mask &

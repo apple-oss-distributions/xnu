@@ -1,11 +1,11 @@
-/* Copyright (c) (2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2021) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
- * is contained in the License.txt file distributed with corecrypto) and only to 
- * people who accept that license. IMPORTANT:  Any license rights granted to you by 
- * Apple Inc. (if any) are limited to internal use within your organization only on 
- * devices and computers you own or control, for the sole purpose of verifying the 
- * security characteristics and correct functioning of the Apple Software.  You may 
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
@@ -46,6 +46,14 @@
 
 */
 
+#if !defined(__has_feature)
+    #define __has_feature(FEATURE) 0
+#endif
+
+#if !defined(__has_attribute)
+    #define __has_attribute(ATTR) 0
+#endif
+
 //Do not set this macros to 1, unless you are developing/testing for Linux under macOS
 #define CORECRYPTO_SIMULATE_POSIX_ENVIRONMENT    0
 
@@ -60,10 +68,18 @@
  #define CORECRYPTO_DEBUG 0
 #endif
 
+// Enable specific configurations only relevant in test builds
+#if defined(CORECRYPTO_BUILT_FOR_TESTING) && CORECRYPTO_BUILT_FOR_TESTING
+  #define CC_BUILT_FOR_TESTING 1
+#else
+  #define CC_BUILT_FOR_TESTING 0
+#endif
+
 // This macro can be used to enable prints when a condition in the macro "cc_require"
 // is false. This is especially useful to confirm that negative testing fails
 // at the intended location
 #define CORECRYPTO_DEBUG_ENABLE_CC_REQUIRE_PRINTS 0
+
 
 #if defined(KERNEL) && (KERNEL)
  #define CC_KERNEL 1 // KEXT, XNU repo or kernel components such as AppleKeyStore
@@ -81,12 +97,6 @@
  #define CC_LINUX 1
 #else
  #define CC_LINUX 0
-#endif
-
-#if defined(__ANDROID__) && (__ANDROID__)
- #define CC_ANDROID 1
-#else
- #define CC_ANDROID 0
 #endif
 
 #if defined(USE_L4) && (USE_L4)
@@ -113,12 +123,6 @@
  #define CC_USE_SEPROM 0
 #endif
 
-#if defined(USE_S3) && (USE_S3)
- #define CC_USE_S3 1
-#else
- #define CC_USE_S3 0
-#endif
-
 #if (defined(ICE_FEATURES_ENABLED)) || (defined(MAVERICK) && (MAVERICK))
  #define CC_BASEBAND 1
 #else
@@ -137,71 +141,26 @@
  #define CC_IBOOT 0
 #endif
 
+// Include target conditionals if available.
+#if defined(__has_include)     /* portability */
+#if __has_include(<TargetConditionals.h>)
+#include <TargetConditionals.h>
+#endif /* __has_include(<TargetConditionals.h>) */
+#endif /* defined(__has_include) */
+
+#if defined(TARGET_OS_DRIVERKIT)
+ #define CC_DRIVERKIT TARGET_OS_DRIVERKIT
+#else
+ #define CC_DRIVERKIT 0
+#endif
+
 #if defined(TARGET_OS_BRIDGE)
  #define CC_BRIDGE TARGET_OS_BRIDGE
 #else
  #define CC_BRIDGE 0
 #endif
 
-// Check if we're running on a generic, userspace platform, i.e., not in the kernel, SEP, etc.
-#ifndef CC_GENERIC_PLATFORM
-  #define CC_GENERIC_PLATFORM \
-            (!CC_RTKIT && !CC_KERNEL && !CC_USE_L4 && \
-             !CC_RTKITROM && !CC_EFI && !CC_IBOOT &&  \
-             !CC_USE_SEPROM && !CC_ANDROID && !CC_LINUX && \
-             !CC_BRIDGE)
-#endif
-
-// Check for availability of internal Darwin SPIs.
-#ifndef CC_DARWIN_SPIS_AVAILABLE
-  #if defined(__has_include)
-    #define CC_DARWIN_SPIS_AVAILABLE __has_include(<os/log_private.h>)
-  #else
-    #define CC_DARWIN_SPIS_AVAILABLE 0
-  #endif
-#endif
-
 // Check for open source builds
-
-// ccringbuffer availability
-// Only enable the ccringbuffer data structure in generic, userspace builds where memory allocation is not an issue.
-#ifndef CC_RINGBUFFER_AVAILABLE
-  #define CC_RINGBUFFER_AVAILABLE (CC_GENERIC_PLATFORM && CC_DARWIN_SPIS_AVAILABLE && !CC_OPEN_SOURCE)
-#endif
-
-// os_log integration
-// Only enable logging support in generic, userspace builds with the desired Darwin SPIs.
-#ifndef CC_LOGGING_AVAILABLE
-  #define CC_LOGGING_AVAILABLE (CC_GENERIC_PLATFORM && CC_DARWIN_SPIS_AVAILABLE && !CC_OPEN_SOURCE)
-#endif
-
-// FeatureFlag integration
-// Only enable feature flag support in generic, userspace builds with the desired Darwin SPIs.
-// This requires linking against libsystem_featureflags to function correctly.
-#ifndef CC_FEATURE_FLAGS_AVAILABLE
-  #if defined(__has_include)
-    #define CC_FEATURE_FLAGS_AVAILABLE __has_include(<os/feature_private.h>)
-  #else
-    #define CC_FEATURE_FLAGS_AVAILABLE 0
-  #endif
-#endif
-
-// Macro to determine if a specific feature is available.
-// Turn off all features at compile time if desired and avoid the runtime check by changing this
-// definition to 0. Limit this functionality to the same environments wherein the ringbuffer is available.
-#ifndef CC_FEATURE_ENABLED
-  #if (CC_RINGBUFFER_AVAILABLE && CC_FEATURE_FLAGS_AVAILABLE && !defined(__i386__))
-    #define CC_FEATURE_ENABLED(FEATURE) os_feature_enabled(Cryptography, FEATURE)
-  #else
-    #define CC_FEATURE_ENABLED(FEATURE) 0
-  #endif
-#endif
-
-// Trace usage of deprecated or obscure functions. For now, this is
-// completely disabled.
-#ifndef CC_LOG_TRACE
-  #define CC_LOG_TRACE 0
-#endif
 
 // Defined by the XNU build scripts
 // Applies to code embedded in XNU but NOT to the kext
@@ -227,22 +186,20 @@
  #define AESOPT_ENDIAN_NO_FILE
 #endif
 
+#if !defined(__x86_64__) && !defined(__arm64__)
 // -- Architecture
  #define CCN_UNIT_SIZE  4 // 32 bits
+#endif
 
 // -- External function
  #define assert ASSERT   // sanity
 
 // -- Warnings
 // Ignore irrelevant warnings after verification
-// #1254-D: arithmetic on pointer to void or function type
 // #186-D: pointless comparison of unsigned integer with zero
 // #546-D: transfer of control bypasses initialization of
  #ifdef __arm__
-  #pragma diag_suppress 186, 1254,546
- #elif defined(__GNUC__)
-// warning: pointer of type 'void *' used in arithmetic
-  #pragma GCC diagnostic ignored "-Wpointer-arith"
+  #pragma diag_suppress 186, 546
  #endif // __arm__
 #define CC_SMALL_CODE 1
 
@@ -257,12 +214,14 @@
 #define CC_SMALL_CODE 0
 #endif
 
-//CC_XNU_KERNEL_AVAILABLE indicates the availibity of XNU kernel functions,
-//like what we have on OSX, iOS, tvOS, Watch OS
-#if defined(__APPLE__) && defined(__MACH__)
- #define CC_XNU_KERNEL_AVAILABLE 1
-#else
- #define CC_XNU_KERNEL_AVAILABLE 0
+#ifndef CC_DARWIN
+ //CC_DARWIN indicates the availability of XNU kernel functions,
+ //like what we have on OSX, iOS, tvOS, Watch OS
+ #if (CC_USE_L4 || CC_RTKIT || CC_RTKITROM || CC_USE_SEPROM || CC_EFI || CC_LINUX || defined(_WIN32) || CC_BASEBAND || CC_SGX)
+  #define CC_DARWIN 0
+ #else
+  #define CC_DARWIN 1
+ #endif
 #endif
 
 //arm arch64 definition for gcc
@@ -283,24 +242,22 @@
 
 //this allows corecrypto Windows development using xcode
 #if defined(CORECRYPTO_SIMULATE_WINDOWS_ENVIRONMENT)
- #if CORECRYPTO_SIMULATE_WINDOWS_ENVIRONMENT && CC_XNU_KERNEL_AVAILABLE && CORECRYPTO_DEBUG
+ #if CORECRYPTO_SIMULATE_WINDOWS_ENVIRONMENT && CC_DARWIN && CORECRYPTO_DEBUG
   #define CC_USE_ASM 0
   #define CC_USE_HEAP_FOR_WORKSPACE 1
-   #if (CCN_UNIT_SIZE==8)
-    #define CCN_UINT128_SUPPORT_FOR_64BIT_ARCH 0
+   #if (CCN_UNIT_SIZE == 8)
+    #define CC_DUNIT_SUPPORTED 0
    #else
-    #define CCN_UINT128_SUPPORT_FOR_64BIT_ARCH 1
+    #define CC_DUNIT_SUPPORTED 1
    #endif
  #endif
 #endif
 
-#if !defined(CCN_UINT128_SUPPORT_FOR_64BIT_ARCH)
- #if defined(_WIN64) && defined(_WIN32) && (CCN_UNIT_SIZE==8)
-  #define CCN_UINT128_SUPPORT_FOR_64BIT_ARCH 0
- #elif defined(_WIN32)
-  #define CCN_UINT128_SUPPORT_FOR_64BIT_ARCH 1//should not be a problem
+#if !defined(CC_DUNIT_SUPPORTED)
+ #if defined(_WIN64) && defined(_WIN32) && (CCN_UNIT_SIZE == 8)
+  #define CC_DUNIT_SUPPORTED 0
  #else
-  #define CCN_UINT128_SUPPORT_FOR_64BIT_ARCH 1
+  #define CC_DUNIT_SUPPORTED 1
  #endif
 #endif
 
@@ -311,62 +268,63 @@
         #define CC_ALIGNED(x) __declspec(align(x)) //MS complier
     #endif
 #else
-    #if __clang__ || CCN_UNIT_SIZE==8
+    #if defined(__clang__) || CCN_UNIT_SIZE==8
         #define CC_ALIGNED(x) __attribute__ ((aligned(x)))
     #else
         #define CC_ALIGNED(x) __attribute__ ((aligned((x)>8?8:(x))))
     #endif
 #endif
 
-#if defined(__arm__)
-//this is copied from <arm/arch.h>, because <arm/arch.h> is not available on SEPROM environment
-#if defined (__ARM_ARCH_7A__) || defined (__ARM_ARCH_7S__) || defined (__ARM_ARCH_7F__) || defined (__ARM_ARCH_7K__) || defined(__ARM_ARCH_7EM__)
-  #define _ARM_ARCH_7
- #endif
+#if defined(__arm__) && (defined (__ARM_ARCH_7A__) || defined (__ARM_ARCH_7S__) || defined (__ARM_ARCH_7F__) || defined (__ARM_ARCH_7K__) || defined(__ARM_ARCH_7EM__))
+    #define CC_ARM_ARCH_7 1
+#else
+    #define CC_ARM_ARCH_7 0
+#endif
 
+// DSP is only available on aarch32
+#if CC_ARM_ARCH_7 && defined(__ARM_FEATURE_DSP) && __ARM_FEATURE_DSP
+    #define CC_ARM_ARCH_7_DSP 1
+#else
+    #define CC_ARM_ARCH_7_DSP 0
+#endif
+
+#if defined(__arm__)
+ //This is copied from <arm/arch.h>, because <arm/arch.h> is not available on SEPROM environment
  #if defined(__ARM_ARCH_6M__) || defined(__TARGET_ARCH_6S_M) || defined (__armv6m__)
   #define _ARM_ARCH_6M
  #endif
 #endif
 
-#if defined(__arm64__) || defined(__arm__)
- #define CCN_IOS				   1
- #define CCN_OSX				   0
-#elif defined(__x86_64__) || defined(__i386__)
- #define CCN_IOS				   0
- #define CCN_OSX				   1
-#endif
-
-#if CC_USE_S3
-/* For corecrypto kext, CC_STATIC should be undefined */
- #define CC_STATIC              1
-#endif
-
 #if !defined(CC_USE_HEAP_FOR_WORKSPACE)
- #if CC_USE_S3 || CC_USE_SEPROM || CC_RTKITROM
+ #if CC_USE_SEPROM || CC_RTKITROM
   #define CC_USE_HEAP_FOR_WORKSPACE 0
  #else
   #define CC_USE_HEAP_FOR_WORKSPACE 1
  #endif
 #endif
 
-/* memset_s is only available in few target */
-#if CC_USE_SEPROM || defined(__CC_ARM) \
-    || defined(__hexagon__) || CC_EFI
+// Secure memory zeroization functions
+#if !defined(__APPLE__) || CC_RTKIT || CC_RTKITROM || CC_USE_SEPROM || defined(__CC_ARM) || defined(__hexagon__) || CC_EFI
  #define CC_HAS_MEMSET_S 0
 #else
  #define CC_HAS_MEMSET_S 1
 #endif
 
-// Include target conditionals if available.
-#if defined(__has_include)     /* portability */
-#if __has_include(<TargetConditionals.h>)
-#include <TargetConditionals.h>
-#endif /* __has_include(<TargetConditionals.h>) */
-#endif /* defined(__has_include) */
+#if defined(_WIN32) && !defined(__clang__)
+ // Clang with Microsoft CodeGen doesn't support SecureZeroMemory.
+ #define CC_HAS_SECUREZEROMEMORY 1
+#else
+ #define CC_HAS_SECUREZEROMEMORY 0
+#endif
+
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25))
+ #define CC_HAS_EXPLICIT_BZERO 1
+#else
+ #define CC_HAS_EXPLICIT_BZERO 0
+#endif
 
 // Disable RSA Keygen on iBridge
-#if defined(TARGET_OS_BRIDGE) && TARGET_OS_BRIDGE && CC_KERNEL
+#if CC_BRIDGE && CC_KERNEL
 #define CC_DISABLE_RSAKEYGEN 1 /* for iBridge */
 #else
 #define CC_DISABLE_RSAKEYGEN 0 /* default */
@@ -380,7 +338,7 @@
 
 //- functions implemented in assembly ------------------------------------------
 //this the list of corecrypto clients that use assembly and the clang compiler
-#if !(CC_XNU_KERNEL_AVAILABLE || CC_KERNEL || CC_USE_L4 || CC_IBOOT || CC_RTKIT || CC_RTKITROM || CC_USE_SEPROM || CC_USE_S3) && !defined(_WIN32) && CORECRYPTO_DEBUG
+#if !(CC_DARWIN || CC_KERNEL || CC_USE_L4 || CC_IBOOT || CC_RTKIT || CC_RTKITROM || CC_USE_SEPROM) && !defined(_WIN32) && CORECRYPTO_DEBUG
  #warning "You are using the default corecrypto configuration, assembly optimizations may not be available for your platform"
 #endif
 
@@ -392,18 +350,25 @@
 // Use this macro to strictly disable assembly regardless of cpu/os/compiler/etc.
 // Our assembly code is not gcc compatible. Clang defines the __GNUC__ macro as well.
 #if !defined(CC_USE_ASM)
- #if defined(_WIN32) || CC_EFI || CC_BASEBAND || CC_XNU_KERNEL_PRIVATE || (defined(__GNUC__) && !defined(__clang__)) || defined(__ANDROID_API__) || CC_LINUX
+ #if defined(_WIN32) || CC_EFI || CC_BASEBAND || CC_XNU_KERNEL_PRIVATE || (defined(__GNUC__) && !defined(__clang__)) || CC_LINUX
   #define CC_USE_ASM 0
  #else
   #define CC_USE_ASM 1
  #endif
 #endif
 
+#ifndef CC_LOG
+#define CC_LOG (CC_DARWIN && !CC_KERNEL && !CC_IBOOT && !CC_DRIVERKIT)
+#endif
+
+#ifndef CC_EXTERN_MALLOC
+  #define CC_EXTERN_MALLOC 0
+#endif
+
 #define CC_CACHE_DESCRIPTORS CC_KERNEL
 
 //-(1) ARM V7
-#if defined(_ARM_ARCH_7) && __clang__ && CC_USE_ASM
- #define CCN_DEDICATED_SQR      CC_SMALL_CODE
+#if CC_ARM_ARCH_7 && defined(__clang__) && CC_USE_ASM
  #define CCN_MUL_KARATSUBA      0 // no performance improvement
  #define CCN_ADD_ASM            1
  #define CCN_SUB_ASM            1
@@ -421,16 +386,15 @@
  #else
  #define CCN_SHIFT_LEFT_ASM     0
  #endif
- #define CCN_MULMOD_224_ASM     1
- #define CCN_MULMOD_256_ASM     1
+ #define CCN_MULMOD_224_ASM     CC_ARM_ARCH_7_DSP
+ #define CCN_MULMOD_256_ASM     CC_ARM_ARCH_7_DSP
  #define CCAES_ARM_ASM          1
  #define CCAES_INTEL_ASM        0
- #if CC_KERNEL || CC_USE_L4 || CC_IBOOT || CC_RTKIT || CC_RTKITROM || CC_USE_SEPROM || CC_USE_S3
+ #if CC_KERNEL || CC_USE_L4 || CC_IBOOT || CC_RTKIT || CC_RTKITROM || CC_USE_SEPROM || CC_DRIVERKIT
   #define CCAES_MUX             0
  #else
   #define CCAES_MUX             1
  #endif
- #define CCN_USE_BUILTIN_CLZ    1
  #define CCSHA1_VNG_INTEL       0
  #define CCSHA2_VNG_INTEL       0
 
@@ -441,19 +405,15 @@
   #define CCSHA1_VNG_ARM        0
   #define CCSHA2_VNG_ARM        0
  #endif /* !defined(__ARM_NEON__) */
- #define CCSHA256_ARMV6M_ASM 0
-
- #define CC_ACCELERATECRYPTO    1
 
 //-(2) ARM 64
-#elif defined(__arm64__) && __clang__ && CC_USE_ASM
- #define CCN_DEDICATED_SQR      CC_SMALL_CODE
+#elif defined(__arm64__) && defined(__clang__) && CC_USE_ASM
  #define CCN_MUL_KARATSUBA      0 // 4*n CCN_UNIT extra memory required.
  #define CCN_ADD_ASM            1
  #define CCN_SUB_ASM            1
  #define CCN_MUL_ASM            1
- #define CCN_ADDMUL1_ASM        0
- #define CCN_MUL1_ASM           0
+ #define CCN_ADDMUL1_ASM        1
+ #define CCN_MUL1_ASM           1
  #define CCN_CMP_ASM            1
  #define CCN_ADD1_ASM           0
  #define CCN_SUB1_ASM           0
@@ -466,18 +426,13 @@
  #define CCAES_ARM_ASM          1
  #define CCAES_INTEL_ASM        0
  #define CCAES_MUX              0        // On 64bit SoC, asm is much faster than HW
- #define CCN_USE_BUILTIN_CLZ    1
  #define CCSHA1_VNG_INTEL       0
  #define CCSHA2_VNG_INTEL       0
  #define CCSHA1_VNG_ARM         1
  #define CCSHA2_VNG_ARM         1
- #define CCSHA256_ARMV6M_ASM    0
-
- #define CC_ACCELERATECRYPTO    1
 
 //-(3) Intel 32/64
-#elif (defined(__x86_64__) || defined(__i386__)) && __clang__ && CC_USE_ASM
- #define CCN_DEDICATED_SQR      1
+#elif (defined(__x86_64__) || defined(__i386__)) && defined(__clang__) && CC_USE_ASM
  #define CCN_MUL_KARATSUBA      0 // 4*n CCN_UNIT extra memory required.
  /* These assembly routines only work for a single CCN_UNIT_SIZE. */
  #if (defined(__x86_64__) && CCN_UNIT_SIZE == 8) || (defined(__i386__) && CCN_UNIT_SIZE == 4)
@@ -518,22 +473,13 @@
  #define CCAES_ARM_ASM          0
  #define CCAES_INTEL_ASM        1
  #define CCAES_MUX              0
- #define CCN_USE_BUILTIN_CLZ    0
  #define CCSHA1_VNG_INTEL       1
  #define CCSHA2_VNG_INTEL       1
  #define CCSHA1_VNG_ARM         0
  #define CCSHA2_VNG_ARM         0
- #define CCSHA256_ARMV6M_ASM    0
-
- #define CC_ACCELERATECRYPTO    1
 
 //-(4) disable assembly
 #else
- #if CCN_UINT128_SUPPORT_FOR_64BIT_ARCH
-  #define CCN_DEDICATED_SQR     1
- #else
-  #define CCN_DEDICATED_SQR     0 //when assembly is off and 128-bit integers are not supported, dedicated square is off. This is the case on Windows
- #endif
  #define CCN_MUL_KARATSUBA      0 // 4*n CCN_UNIT extra memory required.
  #define CCN_ADD_ASM            0
  #define CCN_SUB_ASM            0
@@ -552,40 +498,49 @@
  #define CCAES_ARM_ASM          0
  #define CCAES_INTEL_ASM        0
  #define CCAES_MUX              0
- #define CCN_USE_BUILTIN_CLZ    0
  #define CCSHA1_VNG_INTEL       0
  #define CCSHA2_VNG_INTEL       0
  #define CCSHA1_VNG_ARM         0
  #define CCSHA2_VNG_ARM         0
- #define CCSHA256_ARMV6M_ASM    0
-
- #define CC_ACCELERATECRYPTO    0
 
 #endif
 
 #define CC_INLINE static inline
+#define CC_NONNULL4 CC_NONNULL((4))
 
 #ifdef __GNUC__
  #define CC_NORETURN __attribute__((__noreturn__))
  #define CC_NOTHROW __attribute__((__nothrow__))
  #define CC_NONNULL(N) __attribute__((__nonnull__ N))
- #define CC_NONNULL4 CC_NONNULL((4))
  #define CC_NONNULL_ALL __attribute__((__nonnull__))
  #define CC_SENTINEL __attribute__((__sentinel__))
  // Only apply the `CC_CONST` attribute to functions with no side-effects where the output is a strict function of pass by value input vars with no exterior side-effects.
  // Specifically, do not apply CC_CONST if the function has any arguments that are pointers (directly, or indirectly)
  #define CC_CONST __attribute__((__const__))
  #define CC_PURE __attribute__((__pure__))
+ #define CC_NODISCARD __attribute__((warn_unused_result))
  #define CC_WARN_RESULT __attribute__((__warn_unused_result__))
  #define CC_MALLOC_CLEAR __attribute__((__malloc__))
  #define CC_UNUSED __attribute__((unused))
+ #define CC_WEAK __attribute__((weak))
+#elif defined(__KEIL__)
+ #define CC_NORETURN __attribute__((noreturn))
+ #define CC_NOTHROW __attribute__((nothrow))
+ #define CC_NONNULL(N) __attribute__((nonnull N))
+ #define CC_NONNULL_ALL __attribute__((nonnull))
+ #define CC_SENTINEL __attribute__((sentinel))
+ #define CC_CONST __attribute__((const))
+ #define CC_PURE __attribute__((pure))
+ #define CC_NODISCARD __attribute__((warn_unused_result))
+ #define CC_WARN_RESULT __attribute__((warn_unused_result))
+ #define CC_MALLOC_CLEAR __attribute__((malloc))
+ #define CC_UNUSED __attribute__((unused))
+ #define CC_WEAK __attribute__((weak))
 #else /* !__GNUC__ */
 /*! @parseOnly */
  #define CC_UNUSED
 /*! @parseOnly */
  #define CC_NONNULL(N)
-/*! @parseOnly */
- #define CC_NONNULL4
 /*! @parseOnly */
  #define CC_NORETURN
 /*! @parseOnly */
@@ -599,11 +554,23 @@
 /*! @parseOnly */
  #define CC_PURE
 /*! @parseOnly */
+ #define CC_NODISCARD
+/*! @parseOnly */
  #define CC_WARN_RESULT
 /*! @parseOnly */
  #define CC_MALLOC_CLEAR
+/*! @parseOnly */
+ #define CC_WEAK
 #endif /* !__GNUC__ */
 
+// Use CC_WEAK_IF_SMALL_CODE to mark symbols as weak when compiling with
+// CC_SMALL_CODE=1. This allows replacing faster but bigger code with smaller
+// versions at link time.
+#if CC_SMALL_CODE
+ #define CC_WEAK_IF_SMALL_CODE CC_WEAK
+#else
+ #define CC_WEAK_IF_SMALL_CODE
+#endif
 
 // Bridge differences between MachO and ELF compiler/assemblers. */
 #if CC_LINUX || CC_SGX
@@ -640,6 +607,73 @@
 #else
 #define CC_INTERNAL_SDK 0
 #endif
+#endif
+
+// Currently thread sanitizer is only supported in local builds.
+// Please edit your "corecrypto_test" scheme to build with thread
+// sanitizer and then remove *all* variants of corecrypto_static
+// besides "normal"
+
+#if __has_feature(thread_sanitizer)
+    #define CC_TSAN 1
+#else
+    #define CC_TSAN 0
+#endif // __has_feature(thread_sanitizer)
+
+#if __has_feature(bounds_attributes)
+    #define CC_PTRCHECK                  1
+    #define CC_PTRCHECK_CAPABLE_HEADER()   _Pragma("clang abi_ptr_attr set(single)")
+    #define cc_counted_by(x)              __attribute__((counted_by(x)))
+    #define cc_sized_by(x)                __attribute__((sized_by(x)))
+    #define cc_bidi_indexable             __attribute__((bidi_indexable))
+    #define cc_indexable                  __attribute__((indexable))
+    #define cc_single                     __attribute__((single))
+    #define cc_unsafe_indexable           __attribute__((unsafe_indexable))
+    #define cc_unsafe_forge_bidi_indexable(P, S)     __builtin_unsafe_forge_bidi_indexable(P, S)
+    #define cc_unsafe_forge_single(P)     __builtin_unsafe_forge_single(P)
+    #define cc_cstring                    cc_unsafe_indexable
+    #define CC_WIDE_NULL                  ((void *cc_bidi_indexable)NULL)
+    #define cc_ended_by(x)                __attribute__((ended_by(x)))
+#else
+    #define CC_PTRCHECK                  0
+    #define CC_PTRCHECK_CAPABLE_HEADER()
+    #define cc_counted_by(x)
+    #define cc_sized_by(x)
+    #define cc_bidi_indexable
+    #define cc_indexable
+    #define cc_single
+    #define cc_unsafe_indexable
+    #define cc_unsafe_forge_bidi_indexable(P, S) (P)
+    #define cc_unsafe_forge_single(P) (P)
+    #define cc_cstring
+    #define CC_WIDE_NULL NULL
+    #define cc_ended_by(x)
+#endif // __has_feature(bounds_attributes)
+
+// Define endianess for GCC, if needed and applicable.
+#if defined(__GNUC__) && !defined(__LITTLE_ENDIAN__)
+    #if (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        #define __LITTLE_ENDIAN__ 1
+    #endif
+#endif
+
+#if defined(ENABLE_CRYPTOKIT_PRIVATE_DEFINITIONS) && ENABLE_CRYPTOKIT_PRIVATE_DEFINITIONS
+#define CC_PRIVATE_CRYPTOKIT 1
+#else
+#define CC_PRIVATE_CRYPTOKIT 0
+#endif
+
+#if defined(__clang__)
+ #define CC_WORKSPACE_OVERRIDE_PRAGMA(x) _Pragma(#x)
+ #define CC_WORKSPACE_OVERRIDE(f, o) CC_WORKSPACE_OVERRIDE_PRAGMA(workspace-override f o)
+#else
+ #define CC_WORKSPACE_OVERRIDE(f, o)
+#endif
+
+#if defined(__ARM_ARCH_8_4__) && !CC_KERNEL && !CC_USE_L4 && !CC_USE_SEPROM
+ #define CC_DIT_SUPPORTED 1
+#else
+ #define CC_DIT_SUPPORTED 0
 #endif
 
 #endif /* _CORECRYPTO_CC_CONFIG_H_ */

@@ -23,11 +23,15 @@ KERNELFILES = \
 	vm_pageout.h \
 	vm_protos.h \
 	vm_shared_region.h \
+	vm_dyld_pager.h \
 	vm_compressor_algorithms.h \
 	WKdm_new.h
 
 PRIVATE_KERNELFILES = \
 	pmap_cs.h
+
+XNU_ONLY_EXPORTS = \
+	vm_reclaim_internal.h
 
 # /usr/include
 INSTALL_MI_LIST = ${DATAFILES}
@@ -44,7 +48,7 @@ INSTALL_KF_MI_LCL_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
 INSTALL_MI_DIR = vm
 
 # Exported to rest of XNU for compilation
-EXPORT_MI_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
+EXPORT_MI_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES} ${XNU_ONLY_EXPORTS}
 
 EXPORT_MI_DIR = vm
 

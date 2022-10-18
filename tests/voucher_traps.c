@@ -46,6 +46,10 @@ get_user_data_port(mach_msg_type_number_t *size)
 	kern_return_t kr = host_create_mach_voucher(mach_host_self(),
 	    (mach_voucher_attr_raw_recipe_array_t)&buf,
 	    sizeof(buf), &port);
+#if !TARGET_OS_OSX
+	T_ASSERT_NE(kr, KERN_SUCCESS, "User data manager removed on embedded");
+	T_END;
+#endif
 	T_ASSERT_MACH_SUCCESS(kr, "Create USER_DATA voucher: 0x%x",
 	    (unsigned int)port);
 

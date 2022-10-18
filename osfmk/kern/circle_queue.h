@@ -87,7 +87,8 @@ circle_queue_length(circle_queue_t cq)
 	return n;
 }
 
-static inline void
+/* returns if the queue became non empty */
+static inline bool
 circle_enqueue_tail(circle_queue_t cq, queue_entry_t elt)
 {
 	queue_entry_t head = circle_queue_first(cq);
@@ -95,19 +96,26 @@ circle_enqueue_tail(circle_queue_t cq, queue_entry_t elt)
 
 	if (head == NULL) {
 		cq->head = elt->next = elt->prev = elt;
+		return true;
+	} else if (tail->next != head) {
+		__queue_element_linkage_invalid(tail);
 	} else {
 		elt->next = head;
 		elt->prev = tail;
 		tail->next = elt;
 		head->prev = elt;
+		return false;
 	}
 }
 
-static inline void
+/* returns if the queue became non empty */
+static inline bool
 circle_enqueue_head(circle_queue_t cq, queue_entry_t elt)
 {
-	circle_enqueue_tail(cq, elt);
+	bool was_empty = circle_enqueue_tail(cq, elt);
+
 	cq->head = elt;
+	return was_empty;
 }
 
 static inline void
@@ -115,6 +123,8 @@ circle_dequeue(circle_queue_t cq, queue_entry_t elt)
 {
 	queue_entry_t elt_prev = elt->prev;
 	queue_entry_t elt_next = elt->next;
+
+	__QUEUE_ELT_VALIDATE(elt);
 
 	if (elt == elt_next) {
 		assert(cq->head == elt);
@@ -126,6 +136,7 @@ circle_dequeue(circle_queue_t cq, queue_entry_t elt)
 			cq->head = elt_next;
 		}
 	}
+
 	__DEQUEUE_ELT_CLEANUP(elt);
 }
 
@@ -147,6 +158,41 @@ circle_dequeue_tail(circle_queue_t cq)
 		circle_dequeue(cq, elt);
 	}
 	return elt;
+}
+
+/* returns if the destination queue became non empty */
+static inline bool
+circle_queue_concat_tail(circle_queue_t dq, circle_queue_t sq)
+{
+	queue_entry_t d_head, d_tail;
+	queue_entry_t s_head, s_tail;
+
+	s_head = sq->head;
+	if (!s_head) {
+		return false;
+	}
+	s_tail = s_head->prev;
+	if (s_tail->next != s_head) {
+		__queue_element_linkage_invalid(s_head);
+	}
+	sq->head = (queue_entry_t)NULL;
+
+	d_head = dq->head;
+	if (!d_head) {
+		dq->head = s_head;
+		return true;
+	}
+	d_tail = d_head->prev;
+	if (d_tail->next != d_head) {
+		__queue_element_linkage_invalid(d_head);
+	}
+
+	d_tail->next = s_head;
+	s_head->prev = d_tail;
+
+	d_head->prev = s_tail;
+	s_tail->next = d_head;
+	return false;
 }
 
 static inline void

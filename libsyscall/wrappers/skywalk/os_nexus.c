@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -32,6 +32,7 @@
 #include <strings.h>
 #include <unistd.h>
 #include <errno.h>
+#include <net/if_var.h>
 #include <skywalk/os_skywalk_private.h>
 
 #ifndef LIBSYSCALL_INTERFACE
@@ -203,6 +204,155 @@ os_nexus_controller_read_provider_attr(const nexus_controller_t ncd,
 	}
 
 	return ret;
+}
+
+static int
+add_traffic_rule_inet(const nexus_controller_t ncd,
+    const char *ifname, const struct ifnet_traffic_descriptor_inet *td,
+    const struct ifnet_traffic_rule_action_steer *ra, const uint32_t flags,
+    uuid_t *rule_uuid)
+{
+	struct nxctl_add_traffic_rule_inet_iocargs args;
+	int err;
+
+	bzero(&args, sizeof(args));
+	if (ifname != NULL) {
+		(void) strlcpy(args.atri_ifname, ifname, IFNAMSIZ);
+	}
+	bcopy(td, &args.atri_td, sizeof(args.atri_td));
+	bcopy(ra, &args.atri_ra, sizeof(args.atri_ra));
+
+	if ((flags & NXCTL_ADD_TRAFFIC_RULE_FLAG_PERSIST) != 0) {
+		args.atri_flags |= NXIOC_ADD_TRAFFIC_RULE_FLAG_PERSIST;
+	}
+	err = ioctl(ncd->ncd_fd, NXIOC_ADD_TRAFFIC_RULE_INET, &args);
+	if (err < 0) {
+		return errno;
+	}
+	bcopy(&args.atri_uuid, rule_uuid, sizeof(args.atri_uuid));
+	return 0;
+}
+
+int
+os_nexus_controller_add_traffic_rule(const nexus_controller_t ncd,
+    const char *ifname, const struct ifnet_traffic_descriptor_common *td,
+    const struct ifnet_traffic_rule_action *ra, const uint32_t flags,
+    uuid_t *rule_uuid)
+{
+	/* only support the steer action for now */
+	if (ra->ra_type != IFNET_TRAFFIC_RULE_ACTION_STEER) {
+		return ENOTSUP;
+	}
+	if (ra->ra_len != sizeof(struct ifnet_traffic_rule_action_steer)) {
+		return EINVAL;
+	}
+	/* only support the inet descriptor type for now */
+	switch (td->itd_type) {
+	case IFNET_TRAFFIC_DESCRIPTOR_TYPE_INET: {
+		if (td->itd_len !=
+		    sizeof(struct ifnet_traffic_descriptor_inet)) {
+			return EINVAL;
+		}
+		return add_traffic_rule_inet(ncd, ifname,
+		           (const struct ifnet_traffic_descriptor_inet *)td,
+		           (const struct ifnet_traffic_rule_action_steer *)ra,
+		           flags, rule_uuid);
+	}
+	default:
+		return ENOTSUP;
+	}
+}
+
+int
+os_nexus_controller_remove_traffic_rule(const nexus_controller_t ncd,
+    const uuid_t rule_uuid)
+{
+	struct nxctl_remove_traffic_rule_iocargs args;
+	int err;
+
+	bzero(&args, sizeof(args));
+	bcopy(rule_uuid, &args.rtr_uuid, sizeof(args.rtr_uuid));
+
+	err = ioctl(ncd->ncd_fd, NXIOC_REMOVE_TRAFFIC_RULE, &args);
+	if (err < 0) {
+		return errno;
+	}
+	return 0;
+}
+
+static void
+inet_rule_iterate(void *buf, uint32_t count,
+    nexus_traffic_rule_iterator_t itr, void *itr_arg)
+{
+	struct nxctl_traffic_rule_inet_iocinfo *info = buf;
+	struct nxctl_traffic_rule_generic_iocinfo *ginfo;
+	struct nexus_traffic_rule_info itr_info;
+	uint32_t c;
+
+	for (c = 0; c < count; c++) {
+		bzero(&itr_info, sizeof(itr_info));
+		ginfo = &info->tri_common;
+		itr_info.nri_rule_uuid = &ginfo->trg_uuid;
+		itr_info.nri_owner = ginfo->trg_procname;
+		itr_info.nri_ifname = ginfo->trg_ifname;
+		itr_info.nri_td =
+		    (struct ifnet_traffic_descriptor_common *)&info->tri_td;
+		itr_info.nri_ra =
+		    (struct ifnet_traffic_rule_action *)&info->tri_ra;
+
+		if (!itr(itr_arg, &itr_info)) {
+			break;
+		}
+		info++;
+	}
+}
+
+struct traffic_rule_type {
+	uint8_t tr_type;
+	uint32_t tr_size;
+	uint32_t tr_count;
+	void (*tr_iterate)(void *, uint32_t,
+	    nexus_traffic_rule_iterator_t, void *);
+};
+#define NTRDEFAULTCOUNT 512
+static struct traffic_rule_type traffic_rule_types[] = {
+	{IFNET_TRAFFIC_DESCRIPTOR_TYPE_INET,
+	 sizeof(struct nxctl_traffic_rule_inet_iocinfo),
+	 NTRDEFAULTCOUNT, inet_rule_iterate},
+};
+#define NTRTYPES (sizeof(traffic_rule_types)/sizeof(struct traffic_rule_type))
+
+int
+os_nexus_controller_iterate_traffic_rules(const nexus_controller_t ncd,
+    nexus_traffic_rule_iterator_t itr, void *itr_arg)
+{
+	struct nxctl_get_traffic_rules_iocargs args;
+	struct traffic_rule_type *t;
+	int i, err;
+
+	for (i = 0; i < NTRTYPES; i++) {
+		t = &traffic_rule_types[i];
+		bzero(&args, sizeof(args));
+		args.gtr_type = t->tr_type;
+		args.gtr_size = t->tr_size;
+		args.gtr_count = t->tr_count;
+		args.gtr_buf = malloc(args.gtr_size * args.gtr_count);
+		if (args.gtr_buf == NULL) {
+			return ENOMEM;
+		}
+		err = ioctl(ncd->ncd_fd, NXIOC_GET_TRAFFIC_RULES, &args);
+		if (err < 0) {
+			err = errno;
+			free(args.gtr_buf);
+			return err;
+		}
+		if (args.gtr_count > 0) {
+			t->tr_iterate(args.gtr_buf, args.gtr_count,
+			    itr, itr_arg);
+		}
+		free(args.gtr_buf);
+	}
+	return 0;
 }
 
 void

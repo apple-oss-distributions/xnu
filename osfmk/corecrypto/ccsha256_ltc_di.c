@@ -1,11 +1,12 @@
-/*
- *  ccsha256_ltc_di.c
- *  corecrypto
+/* Copyright (c) (2010,2012,2015-2019,2021) Apple Inc. All rights reserved.
  *
- *  Created on 12/07/2010
- *
- *  Copyright (c) 2010,2012,2015 Apple Inc. All rights reserved.
- *
+ * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
+ * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -48,6 +49,7 @@ const struct ccdigest_info ccsha256_ltc_di = {
 	.initial_state = ccsha256_initial_state,
 	.compress = ccsha256_ltc_compress,
 	.final = ccdigest_final_64be,
+	.impl = CC_IMPL_SHA256_LTC,
 };
 
 #endif

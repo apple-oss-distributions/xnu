@@ -122,16 +122,6 @@ main(
 	/* Simple Lock structure */
 	DECLARE("SLOCK_ILK", offsetof(usimple_lock_data_t, interlock));
 
-	/* Mutex structure */
-	DECLARE("MUTEX_OWNER", offsetof(lck_mtx_t, lck_mtx_owner));
-	DECLARE("MUTEX_PTR", offsetof(lck_mtx_t, lck_mtx_ptr));
-	DECLARE("MUTEX_STATE", offsetof(lck_mtx_t, lck_mtx_state));
-	DECLARE("MUTEX_ASSERT_OWNED", LCK_MTX_ASSERT_OWNED);
-	DECLARE("MUTEX_ASSERT_NOTOWNED", LCK_MTX_ASSERT_NOTOWNED);
-
-	/* x86 only */
-	DECLARE("MUTEX_DESTROYED", LCK_MTX_TAG_DESTROYED);
-
 	/* Reader writer lock types */
 	DECLARE("RW_SHARED", LCK_RW_TYPE_SHARED);
 	DECLARE("RW_EXCL", LCK_RW_TYPE_EXCLUSIVE);
@@ -156,7 +146,6 @@ main(
 	DECLARE("TH_PCB_ISS", offsetof(struct thread, machine.iss));
 	DECLARE("TH_PCB_IDS", offsetof(struct thread, machine.ids));
 	DECLARE("TH_PCB_FPS", offsetof(struct thread, machine.ifps));
-	DECLARE("TH_RWLOCK_COUNT", offsetof(struct thread, rwlock_count));
 
 	DECLARE("MAP_PMAP", offsetof(struct _vm_map, pmap));
 
@@ -457,30 +446,9 @@ main(
 	/* values from kern/timer.h */
 #ifdef __LP64__
 	DECLARE("TIMER_ALL", offsetof(struct timer, all_bits));
-#else
-	DECLARE("TIMER_LOW", offsetof(struct timer, low_bits));
-	DECLARE("TIMER_HIGH", offsetof(struct timer, high_bits));
-	DECLARE("TIMER_HIGHCHK", offsetof(struct timer, high_bits_check));
 #endif
 	DECLARE("TIMER_TSTAMP",
 	    offsetof(struct timer, tstamp));
-
-	DECLARE("THREAD_TIMER",
-	    offsetof(struct processor, thread_timer));
-	DECLARE("KERNEL_TIMER",
-	    offsetof(struct processor, kernel_timer));
-	DECLARE("SYSTEM_TIMER",
-	    offsetof(struct thread, system_timer));
-	DECLARE("USER_TIMER",
-	    offsetof(struct thread, user_timer));
-	DECLARE("SYSTEM_STATE",
-	    offsetof(struct processor, system_state));
-	DECLARE("USER_STATE",
-	    offsetof(struct processor, user_state));
-	DECLARE("IDLE_STATE",
-	    offsetof(struct processor, idle_state));
-	DECLARE("CURRENT_STATE",
-	    offsetof(struct processor, current_state));
 
 	DECLARE("OnProc", OnProc);
 

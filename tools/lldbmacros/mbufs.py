@@ -49,10 +49,49 @@ def MBufStat(cmd_args=None):
 def DumpMbufData(mp, count):
     mdata = mp.m_hdr.mh_data
     mlen = mp.m_hdr.mh_len
+    flags = mp.m_hdr.mh_flags
+    if flags & M_EXT:
+        mdata = mp.M_dat.MH.MH_dat.MH_ext.ext_buf
     if (count > mlen):
         count = mlen
     cmd = "memory read -force -size 1 -count {0:d} 0x{1:x}".format(count, mdata)
     print(lldb_run_command(cmd))
+
+def DecodeMbufData(mp):
+    import scapy.all
+    err = lldb.SBError()
+    full_buf = b''
+    while mp:
+        mdata = mp.m_hdr.mh_data
+        mlen = mp.m_hdr.mh_len
+        flags = mp.m_hdr.mh_flags
+        if flags & M_EXT:
+            mdata = mp.M_dat.MH.MH_dat.MH_ext.ext_buf
+        addr = mdata._sbval19k84obscure747.GetValueAsUnsigned()
+        buf = LazyTarget.GetProcess().ReadMemory(addr, unsigned(mlen), err)
+        full_buf += buf
+        if flags & M_PKTHDR:
+            mp = mp.m_hdr.mh_nextpkt
+        else:
+            mp = mp.m_hdr.mh_next
+    try:
+        pkt = scapy.layers.l2.Ether(full_buf)
+        pkt.show()
+    except:
+        pass
+
+# Macro: mbuf_decode
+@lldb_command('mbuf_decode', '')
+def MbufDecode(cmd_args=None, cmd_options={}):
+    """Decode an mbuf using scapy.
+        Usage: mbuf_decode <mbuf address>
+    """
+    if cmd_args == None or len(cmd_args) < 1:
+        print("usage: mbuf_decode <address>")
+        return
+    mp = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
+    DecodeMbufData(mp)
+# EndMacro: mbuf_decode
 
 # Macro: mbuf_dumpdata
 @lldb_command('mbuf_dumpdata', 'C:')
@@ -288,6 +327,71 @@ def MbufSlabsTbl(cmd_args=None):
     print(out_string)
 # EndMacro: mbuf_slabstbl
 
+def MbufDecode(mbuf, decode_pkt):
+    # Ignore free'd mbufs.
+    if mbuf.m_hdr.mh_type == 0:
+        return
+    flags = int(mbuf.m_hdr.mh_flags)
+    length = int(mbuf.m_hdr.mh_len)
+    if length < 20 or length > 8 * 1024:
+        # Likely not a packet.
+        return
+    out_string = "mbuf found @ 0x{0:x}, length {1:d}, {2:s}, {3:s}".format(mbuf, length, GetMbufFlags(mbuf), GetMbufPktCrumbs(mbuf))
+    print(out_string)
+    if flags & M_EXT:
+        ext_buf = mbuf.M_dat.MH.MH_dat.MH_ext.ext_buf
+        ext_size = int(mbuf.M_dat.MH.MH_dat.MH_ext.ext_size)
+    if flags & M_PKTHDR:
+        rcvif = mbuf.M_dat.MH.MH_pkthdr.rcvif
+        if rcvif != 0:
+            try:
+                print("receive interface " + rcvif.if_xname)
+            except ValueError:
+                pass
+    if decode_pkt:
+        DecodeMbufData(mbuf)
+
+
+# Macro: mbuf_walk_slabs
+@lldb_command('mbuf_walk_slabs')
+def MbufWalkSlabs(cmd_args=None):
+    """
+    Walks the mbuf slabs table backwards and tries to detect and decode mbufs.
+    Use 'mbuf_walk_slabs decode' to decode the mbuf using scapy.
+    """
+    decode_pkt = False
+    if len(cmd_args) > 0 and cmd_args[0] == 'decode':
+        decode_pkt = True
+    slabstbl = kern.globals.slabstbl
+    nslabspmb = int(((1 << MBSHIFT) >> unsigned(kern.globals.page_shift)))
+    mbutl = cast(kern.globals.mbutl, 'unsigned char *')
+    x = unsigned(kern.globals.maxslabgrp)
+    while x >= 0:
+        slg = slabstbl[x]
+        if (slg == 0):
+            x -= 1
+            continue
+        j = 0
+        while j < nslabspmb:
+            sl = addressof(slg.slg_slab[j])
+            obj = sl.sl_base
+            # Ignore slabs with a single chunk
+            # since that's unlikely to contain an mbuf
+            # (more likely a cluster).
+            if sl.sl_chunks > 1:
+                z = 0
+                c = sl.sl_len // sl.sl_chunks
+
+                while z < sl.sl_chunks:
+                    obj = kern.GetValueFromAddress(sl.sl_base + c * z)
+                    mbuf = cast(obj, 'struct mbuf *')
+                    MbufDecode(mbuf, decode_pkt)
+                    z += 1
+            j += 1
+        x -= 1
+
+# EndMacro: mbuf_walk_slabs
+
 def GetMbufMcaPtr(m, cl):
     pgshift = int(kern.globals.page_shift)
     ix = int((m - Cast(kern.globals.mbutl, 'char *')) >> pgshift)
@@ -447,7 +551,7 @@ def GetMbufFlagsAsString(mbuf_flags):
             out_string += mbuf_flags_strings[i] + ","
         i += 1
         num = num << 1
-    return rstrip(out_string, ",")
+    return out_string.rstrip(",")
 
 def GetMbufFlags(m):
     out_string = ""
@@ -475,7 +579,7 @@ def GetMbufPktCrumbsAsString(mbuf_crumbs):
             out_string += mbuf_pkt_crumb_strings[i] + ","
         i += 1
         num = num << 1
-    return rstrip(out_string, ",")
+    return out_string.rstrip(",")
 
 def GetMbufPktCrumbs(m):
     out_string = ""

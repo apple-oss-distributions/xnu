@@ -30,14 +30,14 @@
 .Fd #include <unistd.h>
 .Fd #include <nfs/nfs.h>
 .Ft int
-.Fn nfsclnt "int flags" "void *argstructp"
+.Fn nfsclnt "unsigned long request" "void *argstructp"
 .Sh DESCRIPTION
 The
 .Fn nfsclnt
 function is used by the NFS client daemons to pass information into and out
 of the kernel.
 The
-.Fa flags
+.Fa request
 argument consists of several bits that show what action is to be taken
 once in the kernel and the
 .Fa argstructp

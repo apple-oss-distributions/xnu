@@ -549,10 +549,10 @@ enum{
 
 // IOHibernateImageHeader.signature
 enum{
-	kIOHibernateHeaderSignature        = 0x73696d65,
-	kIOHibernateHeaderInvalidSignature = 0x7a7a7a7a,
-	kIOHibernateHeaderOpenSignature    = 0xf1e0be9d,
-	kIOHibernateHeaderDebugDataSignature = 0xfcddfcdd
+	kIOHibernateHeaderSignature        = 0x73696d65U,
+	kIOHibernateHeaderInvalidSignature = 0x7a7a7a7aU,
+	kIOHibernateHeaderOpenSignature    = 0xf1e0be9dU,
+	kIOHibernateHeaderDebugDataSignature = 0xfcddfcddU
 };
 
 // kind for hibernate_set_page_state()

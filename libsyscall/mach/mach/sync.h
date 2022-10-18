@@ -32,4 +32,3 @@
 ** headers here.
 */
 #include <mach/semaphore.h>
-#include <mach/lock_set.h>

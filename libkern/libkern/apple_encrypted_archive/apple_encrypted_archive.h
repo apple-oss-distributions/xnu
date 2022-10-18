@@ -50,7 +50,7 @@ typedef ssize_t (*apple_encrypted_archive_pread_proc)(
 /**
  * @abstract Get state size
  *
- * @return State size (bytes)
+ * @return Positive state size (bytes) on success, and 0 on failure
  */
 typedef size_t (*apple_encrypted_archive_get_state_size)(void);
 

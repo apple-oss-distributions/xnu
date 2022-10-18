@@ -44,10 +44,7 @@
 #include <mach_assert.h>
 
 #include <arm/cpu_data.h>
-#include <arm/proc_reg.h>
-#if defined(__arm64__)
 #include <arm64/proc_reg.h>
-#endif /* defined(__arm64__) */
 
 /**
  * arm/pmap.h and the other /arm/pmap/ internal header files are safe to be
@@ -140,6 +137,7 @@ extern void pmap_tte_deallocate(
 #if defined(PVH_FLAG_EXEC)
 extern void pmap_set_ptov_ap(unsigned int, unsigned int, boolean_t);
 #endif /* defined(PVH_FLAG_EXEC) */
+
 
 extern pmap_t current_pmap(void);
 extern void pmap_tt_ledger_credit(pmap_t, vm_size_t);
@@ -278,6 +276,48 @@ pmap_lock(pmap_t pmap, pmap_lock_mode_t mode)
 	default:
 		panic("%s: Unknown pmap_lock_mode. pmap=%p, mode=%d", __func__, pmap, mode);
 	}
+}
+
+/**
+ * Attempt to acquire the pmap lock in the specified mode. If the lock couldn't
+ * be acquired, then spin until it can be or a preemption is pending.
+ *
+ * @param pmap The pmap whose lock to attempt to acquire.
+ * @param mode Whether to grab the lock as shared (read-only) or exclusive (read/write).
+ *
+ * @return true if the lock was acquired, false otherwise.
+ */
+static inline bool
+pmap_lock_preempt(pmap_t pmap, pmap_lock_mode_t mode)
+{
+	bool ret = false;
+
+#if !XNU_MONITOR
+	mp_disable_preemption();
+#endif
+
+	bool (^check_preemption)(void) = ^{
+		return pmap_pending_preemption();
+	};
+
+	switch (mode) {
+	case PMAP_LOCK_SHARED:
+		ret = lck_rw_lock_shared_b(&pmap->rwlock, check_preemption);
+		break;
+	case PMAP_LOCK_EXCLUSIVE:
+		ret = lck_rw_lock_exclusive_b(&pmap->rwlock, check_preemption);
+		break;
+	default:
+		panic("%s: Unknown pmap_lock_mode. pmap=%p, mode=%d", __func__, pmap, mode);
+	}
+
+	if (!ret) {
+#if !XNU_MONITOR
+		mp_enable_preemption();
+#endif
+	}
+
+	return ret;
 }
 
 /**

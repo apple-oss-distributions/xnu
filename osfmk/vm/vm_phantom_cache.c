@@ -104,7 +104,7 @@ struct phantom_cache_stats {
 
 
 void
-vm_phantom_cache_init()
+vm_phantom_cache_init(void)
 {
 	unsigned int    num_entries;
 	unsigned int    log1;
@@ -134,16 +134,15 @@ vm_phantom_cache_init()
 	vm_phantom_cache_size = sizeof(struct vm_ghost) * vm_phantom_cache_num_entries;
 	vm_phantom_cache_hash_size = sizeof(vm_phantom_hash_entry_t) * vm_phantom_cache_num_entries;
 
-	if (kernel_memory_allocate(kernel_map, (vm_offset_t *)(&vm_phantom_cache), vm_phantom_cache_size, 0, KMA_KOBJECT | KMA_PERMANENT, VM_KERN_MEMORY_PHANTOM_CACHE) != KERN_SUCCESS) {
-		panic("vm_phantom_cache_init: kernel_memory_allocate failed");
-	}
-	bzero(vm_phantom_cache, vm_phantom_cache_size);
+	kmem_alloc(kernel_map, (vm_offset_t *)&vm_phantom_cache,
+	    vm_phantom_cache_size,
+	    KMA_DATA | KMA_NOFAIL | KMA_KOBJECT | KMA_ZERO | KMA_PERMANENT,
+	    VM_KERN_MEMORY_PHANTOM_CACHE);
 
-	if (kernel_memory_allocate(kernel_map, (vm_offset_t *)(&vm_phantom_cache_hash), vm_phantom_cache_hash_size, 0, KMA_KOBJECT | KMA_PERMANENT, VM_KERN_MEMORY_PHANTOM_CACHE) != KERN_SUCCESS) {
-		panic("vm_phantom_cache_init: kernel_memory_allocate failed");
-	}
-	bzero(vm_phantom_cache_hash, vm_phantom_cache_hash_size);
-
+	kmem_alloc(kernel_map, (vm_offset_t *)&vm_phantom_cache_hash,
+	    vm_phantom_cache_hash_size,
+	    KMA_NOFAIL | KMA_KOBJECT | KMA_ZERO | KMA_PERMANENT,
+	    VM_KERN_MEMORY_PHANTOM_CACHE);
 
 	vm_ghost_hash_mask = vm_phantom_cache_num_entries - 1;
 

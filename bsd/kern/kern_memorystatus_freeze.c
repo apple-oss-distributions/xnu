@@ -72,6 +72,7 @@
 #include <vm/vm_map.h>
 #endif /* CONFIG_FREEZE */
 
+#include "kern_memorystatus_internal.h"
 #include <sys/kern_memorystatus.h>
 #include <sys/kern_memorystatus_freeze.h>
 #include <sys/kern_memorystatus_notify.h>
@@ -140,7 +141,6 @@ struct memorystatus_freezer_stats_t memorystatus_freezer_stats = {0};
 
 static inline boolean_t memorystatus_can_freeze_processes(void);
 static boolean_t memorystatus_can_freeze(boolean_t *memorystatus_freeze_swap_low);
-static boolean_t memorystatus_is_process_eligible_for_freeze(proc_t p);
 static void memorystatus_freeze_thread(void *param __unused, wait_result_t wr __unused);
 static uint32_t memorystatus_freeze_calculate_new_budget(
 	unsigned int time_since_last_interval_expired_sec,
@@ -175,11 +175,6 @@ static uint32_t memorystatus_freeze_calculate_new_budget(
 	unsigned int interval_duration_min,
 	uint32_t rollover);
 
-/* An ordered list of freeze or demotion candidates */
-struct memorystatus_freezer_candidate_list {
-	memorystatus_properties_freeze_entry_v1 *mfcl_list;
-	size_t mfcl_length;
-};
 struct memorystatus_freezer_candidate_list memorystatus_global_freeze_list = {NULL, 0};
 struct memorystatus_freezer_candidate_list memorystatus_global_demote_list = {NULL, 0};
 /*
@@ -196,14 +191,13 @@ EXPERIMENT_FACTOR_UINT(_kern, memorystatus_freezer_use_demotion_list, &memorysta
 
 extern uint64_t vm_swap_get_free_space(void);
 extern boolean_t vm_swap_max_budget(uint64_t *);
-extern int i_coal_jetsam_get_taskrole(coalition_t coal, task_t task);
 
 static void memorystatus_freeze_update_throttle(uint64_t *budget_pages_allowed);
 static void memorystatus_demote_frozen_processes(bool urgent_mode);
 
 static void memorystatus_freeze_handle_error(proc_t p, const int freezer_error_code, bool was_refreeze, pid_t pid, const coalition_t coalition, const char* log_prefix);
 static void memorystatus_freeze_out_of_slots(void);
-static uint64_t memorystatus_freezer_thread_next_run_ts = 0;
+uint64_t memorystatus_freezer_thread_next_run_ts = 0;
 
 /* Sysctls needed for aggd stats */
 
@@ -279,12 +273,6 @@ SYSCTL_QUAD(_kern, OID_AUTO, memorystatus_freezer_freeze_pid_mismatches, CTLTYPE
 SYSCTL_QUAD(_kern, OID_AUTO, memorystatus_freezer_demote_pid_mismatches, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED, &memorystatus_freezer_stats.mfs_demote_pid_mismatches, "");
 
 static_assert(_kMemorystatusFreezeSkipReasonMax <= UINT8_MAX);
-
-static inline bool
-proc_is_refreeze_eligible(proc_t p)
-{
-	return (p->p_memstat_state & P_MEMSTAT_REFREEZE_ELIGIBLE) != 0;
-}
 
 /*
  * Calculates the hit rate for the freezer.
@@ -414,10 +402,10 @@ SYSCTL_PROC(_kern, OID_AUTO, memorystatus_freezer_thaw_percentage_fg_non_xpc_ser
 EXPERIMENT_FACTOR_UINT(_kern, memorystatus_freeze_pages_min, &memorystatus_freeze_pages_min, 0, UINT32_MAX, "");
 EXPERIMENT_FACTOR_UINT(_kern, memorystatus_freeze_pages_max, &memorystatus_freeze_pages_max, 0, UINT32_MAX, "");
 EXPERIMENT_FACTOR_UINT(_kern, memorystatus_freeze_processes_max, &memorystatus_frozen_processes_max, 0, UINT32_MAX, "");
-EXPERIMENT_FACTOR_UINT(_kern, memorystatus_freeze_jetsam_band, &memorystatus_freeze_jetsam_band, JETSAM_PRIORITY_IDLE, JETSAM_PRIORITY_MAX - 1, "");
+EXPERIMENT_FACTOR_UINT(_kern, memorystatus_freeze_jetsam_band, &memorystatus_freeze_jetsam_band, JETSAM_PRIORITY_BACKGROUND, JETSAM_PRIORITY_FOREGROUND, "");
 EXPERIMENT_FACTOR_UINT(_kern, memorystatus_freeze_private_shared_pages_ratio, &memorystatus_freeze_private_shared_pages_ratio, 0, UINT32_MAX, "");
 EXPERIMENT_FACTOR_UINT(_kern, memorystatus_freeze_min_processes, &memorystatus_freeze_suspended_threshold, 0, UINT32_MAX, "");
-EXPERIMENT_FACTOR_UINT(_kern, memorystatus_freeze_max_candidate_band, &memorystatus_freeze_max_candidate_band, JETSAM_PRIORITY_IDLE, JETSAM_PRIORITY_MAX - 1, "");
+EXPERIMENT_FACTOR_UINT(_kern, memorystatus_freeze_max_candidate_band, &memorystatus_freeze_max_candidate_band, JETSAM_PRIORITY_IDLE, JETSAM_PRIORITY_FOREGROUND, "");
 static int
 sysctl_memorystatus_freeze_budget_multiplier SYSCTL_HANDLER_ARGS
 {
@@ -583,7 +571,7 @@ again:
 			return EPERM;
 		}
 
-		error = task_freeze(p->task, &purgeable, &wired, &clean, &dirty, max_pages, &shared, &freezer_error_code, FALSE /* eval only */);
+		error = task_freeze(proc_task(p), &purgeable, &wired, &clean, &dirty, max_pages, &shared, &freezer_error_code, FALSE /* eval only */);
 		if (!error || freezer_error_code == FREEZER_ERROR_LOW_PRIVATE_SHARED_RATIO) {
 			memorystatus_freezer_stats.mfs_shared_pages_skipped += shared;
 		}
@@ -739,7 +727,7 @@ sysctl_memorystatus_available_pages_thaw SYSCTL_HANDLER_ARGS
 	} else {
 		p = proc_find(pid);
 		if (p != NULL) {
-			error = task_thaw(p->task);
+			error = task_thaw(proc_task(p));
 
 			if (error) {
 				error = EIO;
@@ -904,7 +892,7 @@ memorystatus_freezer_get_status(user_addr_t buffer, size_t buffer_size, int32_t 
 				goto skip_ineligible_xpc;
 			}
 
-			task_role_in_coalition = i_coal_jetsam_get_taskrole(coal, curr_task);
+			task_role_in_coalition = task_coalition_role_for_type(curr_task, COALITION_TYPE_JETSAM);
 
 			if (task_role_in_coalition == COALITION_TASKROLE_XPC) {
 				xpc_skip_size_probability_check = TRUE;
@@ -954,7 +942,7 @@ continue_eval:
 			list_entry->freeze_leader_eligible = FREEZE_PROC_LEADER_FREEZABLE_SUCCESS; /* Apps are freeze eligible and their own leaders. */
 			list_entry->p_leader_pid = 0; /* Setting this to 0 signifies this isn't a coalition driven freeze. */
 
-			memorystatus_get_task_page_counts(p->task, &pages, NULL, NULL);
+			memorystatus_get_task_page_counts(proc_task(p), &pages, NULL, NULL);
 			if (pages < memorystatus_freeze_pages_min) {
 				try_freeze = list_entry->freeze_has_pages_min = FALSE;
 			} else {
@@ -987,7 +975,7 @@ continue_eval:
 			uint32_t max_pages = 0;
 			int freezer_error_code = 0;
 
-			error = task_freeze(p->task, &purgeable, &wired, &clean, &dirty, max_pages, &shared, &freezer_error_code, TRUE /* eval only */);
+			error = task_freeze(proc_task(p), &purgeable, &wired, &clean, &dirty, max_pages, &shared, &freezer_error_code, TRUE /* eval only */);
 
 			if (error) {
 				list_entry->p_freeze_error_code = freezer_error_code;
@@ -1271,8 +1259,7 @@ kill_all_frozen_processes(uint64_t max_band, bool suspended_only, os_reason_t je
 			continue;
 		}
 
-		footprint = get_task_phys_footprint(p->task);
-		p->p_memstat_state |= P_MEMSTAT_TERMINATED;
+		footprint = get_task_phys_footprint(proc_task(p));
 		pid = proc_getpid(p);
 		proc_list_unlock();
 
@@ -1581,6 +1568,76 @@ memorystatus_freeze_reset_interval(void *arg0, void *arg1)
 	lck_mtx_unlock(&freezer_mutex);
 }
 
+
+proc_t
+memorystatus_get_coalition_leader_and_role(proc_t p, int *role_in_coalition)
+{
+	coalition_t     coal = COALITION_NULL;
+	task_t          leader_task = NULL, curr_task = NULL;
+	proc_t          leader_proc = PROC_NULL;
+
+	curr_task = proc_task(p);
+	coal = task_get_coalition(curr_task, COALITION_TYPE_JETSAM);
+
+	if (coal == NULL || coalition_is_leader(curr_task, coal)) {
+		return p;
+	}
+
+	leader_task = coalition_get_leader(coal);
+	if (leader_task == TASK_NULL) {
+		/*
+		 * This jetsam coalition is currently leader-less.
+		 * This could happen if the app died, but XPC services
+		 * have not yet exited.
+		 */
+		return PROC_NULL;
+	}
+
+	leader_proc = (proc_t)get_bsdtask_info(leader_task);
+	task_deallocate(leader_task);
+
+	if (leader_proc == PROC_NULL) {
+		/* leader task is exiting */
+		return PROC_NULL;
+	}
+
+	*role_in_coalition = task_coalition_role_for_type(curr_task, COALITION_TYPE_JETSAM);
+
+	return leader_proc;
+}
+
+bool
+memorystatus_freeze_process_is_recommended(const proc_t p)
+{
+	assert(!memorystatus_freezer_use_ordered_list);
+	int probability_of_use = 0;
+
+	size_t entry_count = 0, i = 0;
+	entry_count = (memorystatus_global_probabilities_size / sizeof(memorystatus_internal_probabilities_t));
+	if (entry_count == 0) {
+		/*
+		 * If dasd hasn't supplied a table yet, we default to every app being eligible
+		 * for the freezer.
+		 */
+		return true;
+	}
+	for (i = 0; i < entry_count; i++) {
+		/*
+		 * NB: memorystatus_internal_probabilities.proc_name is MAXCOMLEN + 1 bytes
+		 * proc_t.p_name is 2*MAXCOMLEN + 1 bytes. So we only compare the first
+		 * MAXCOMLEN bytes here since the name in the probabilities table could
+		 * be truncated from the proc_t's p_name.
+		 */
+		if (strncmp(memorystatus_global_probabilities_table[i].proc_name,
+		    p->p_name,
+		    MAXCOMLEN) == 0) {
+			probability_of_use = memorystatus_global_probabilities_table[i].use_probability;
+			break;
+		}
+	}
+	return probability_of_use > 0;
+}
+
 __private_extern__ void
 memorystatus_freeze_init(void)
 {
@@ -1620,189 +1677,56 @@ memorystatus_freeze_init(void)
 	}
 }
 
-static boolean_t
-memorystatus_is_process_eligible_for_freeze(proc_t p)
+void
+memorystatus_freeze_configure_for_swap()
 {
-	/*
-	 * Called with proc_list_lock held.
-	 */
-
-	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
-
-	boolean_t should_freeze = FALSE;
-	uint32_t state = 0, pages = 0;
-	int probability_of_use = 0;
-	size_t entry_count = 0, i = 0;
-	bool first_consideration = true;
-
-	state = p->p_memstat_state;
-
-	if (state & (P_MEMSTAT_TERMINATED | P_MEMSTAT_LOCKED | P_MEMSTAT_FREEZE_DISABLED | P_MEMSTAT_FREEZE_IGNORE)) {
-		if (state & P_MEMSTAT_FREEZE_DISABLED) {
-			p->p_memstat_freeze_skip_reason = kMemorystatusFreezeSkipReasonDisabled;
-		}
-		goto out;
+	if (!VM_CONFIG_FREEZER_SWAP_IS_ACTIVE) {
+		return;
 	}
 
-	if (isSysProc(p)) {
-		/*
-		 * Daemon:- We consider freezing it if:
-		 * - it belongs to a coalition and the leader is frozen, and,
-		 * - its role in the coalition is XPC service.
-		 *
-		 * We skip memory size requirements in this case.
-		 */
-
-		coalition_t     coal = COALITION_NULL;
-		task_t          leader_task = NULL, curr_task = NULL;
-		proc_t          leader_proc = NULL;
-		int             task_role_in_coalition = 0;
-
-		curr_task = proc_task(p);
-		coal = task_get_coalition(curr_task, COALITION_TYPE_JETSAM);
-
-		if (coal == NULL || coalition_is_leader(curr_task, coal)) {
-			/*
-			 * By default, XPC services without an app
-			 * will be the leader of their own single-member
-			 * coalition.
-			 */
-			goto out;
-		}
-
-		leader_task = coalition_get_leader(coal);
-		if (leader_task == TASK_NULL) {
-			/*
-			 * This jetsam coalition is currently leader-less.
-			 * This could happen if the app died, but XPC services
-			 * have not yet exited.
-			 */
-			goto out;
-		}
-
-		leader_proc = (proc_t)get_bsdtask_info(leader_task);
-		task_deallocate(leader_task);
-
-		if (leader_proc == PROC_NULL) {
-			/* leader task is exiting */
-			goto out;
-		}
-
-		if (!(leader_proc->p_memstat_state & P_MEMSTAT_FROZEN)) {
-			goto out;
-		}
-
-		task_role_in_coalition = i_coal_jetsam_get_taskrole(coal, curr_task);
-
-		if (task_role_in_coalition == COALITION_TASKROLE_XPC) {
-			should_freeze = TRUE;
-		}
-
-		goto out;
-	} else {
-		/*
-		 * Application. In addition to the above states we need to make
-		 * sure we only consider suspended applications for freezing.
-		 */
-		if (!(state & P_MEMSTAT_SUSPENDED)) {
-			goto out;
-		}
-	}
+	assert(memorystatus_swap_all_apps);
 
 	/*
-	 * This proc is a suspended application.
-	 * We're interested in tracking what percentage of these
-	 * actually get frozen.
-	 * To avoid skewing the metrics towards processes which
-	 * are considered more frequently, we only track failures once
-	 * per process.
+	 * We expect both a larger working set and larger individual apps
+	 * in this mode, so tune up the freezer accordingly.
 	 */
-	first_consideration = !(state & P_MEMSTAT_FREEZE_CONSIDERED);
+	memorystatus_frozen_processes_max = FREEZE_PROCESSES_MAX_SWAP_ENABLED;
+	memorystatus_max_frozen_demotions_daily = MAX_FROZEN_PROCESS_DEMOTIONS_SWAP_ENABLED;
+	memorystatus_freeze_pages_max = FREEZE_PAGES_MAX_SWAP_ENABLED;
 
-	if (first_consideration) {
-		memorystatus_freezer_stats.mfs_process_considered_count++;
-		p->p_memstat_state |= P_MEMSTAT_FREEZE_CONSIDERED;
-	}
-
-	/* Only freeze applications meeting our minimum resident page criteria */
-	memorystatus_get_task_page_counts(p->task, &pages, NULL, NULL);
-	if (pages < memorystatus_freeze_pages_min) {
-		if (first_consideration) {
-			memorystatus_freezer_stats.mfs_error_below_min_pages_count++;
-		}
-		p->p_memstat_freeze_skip_reason = kMemorystatusFreezeSkipReasonBelowMinPages;
-		goto out;
-	}
-
-	/* Don't freeze processes that are already exiting on core. It may have started exiting
-	 * after we chose it for freeze, but before we obtained the proc_list_lock.
-	 * NB: This is only possible if we're coming in from memorystatus_freeze_process_sync.
-	 * memorystatus_freeze_top_process holds the proc_list_lock while it traverses the bands.
+	/*
+	 * We don't have a budget when running with full app swap.
+	 * Force a new interval. memorystatus_freeze_calculate_new_budget should give us an
+	 * unlimited budget.
 	 */
-	if (proc_list_exited(p)) {
-		if (first_consideration) {
-			memorystatus_freezer_stats.mfs_error_other_count++;
-		}
-		p->p_memstat_freeze_skip_reason = kMemorystatusFreezeSkipReasonOther;
-		goto out;
+	lck_mtx_lock(&freezer_mutex);
+	uint32_t budget;
+	budget = memorystatus_freeze_calculate_new_budget(0, normal_throttle_window->burst_multiple, normal_throttle_window->mins, 0);
+	memorystatus_freeze_force_new_interval(budget);
+	lck_mtx_unlock(&freezer_mutex);
+}
+
+void
+memorystatus_freeze_disable_swap()
+{
+	if (!VM_CONFIG_FREEZER_SWAP_IS_ACTIVE) {
+		return;
 	}
 
-	entry_count = (memorystatus_global_probabilities_size / sizeof(memorystatus_internal_probabilities_t));
-	if (entry_count && !memorystatus_freezer_use_ordered_list) {
-		for (i = 0; i < entry_count; i++) {
-			/*
-			 * NB: memorystatus_internal_probabilities.proc_name is MAXCOMLEN + 1 bytes
-			 * proc_t.p_name is 2*MAXCOMLEN + 1 bytes. So we only compare the first
-			 * MAXCOMLEN bytes here since the name in the probabilities table could
-			 * be truncated from the proc_t's p_name.
-			 */
-			if (strncmp(memorystatus_global_probabilities_table[i].proc_name,
-			    p->p_name,
-			    MAXCOMLEN) == 0) {
-				probability_of_use = memorystatus_global_probabilities_table[i].use_probability;
-				break;
-			}
-		}
+	assert(!memorystatus_swap_all_apps);
 
-		if (probability_of_use == 0) {
-			if (first_consideration) {
-				memorystatus_freezer_stats.mfs_error_low_probability_of_use_count++;
-			}
-			p->p_memstat_freeze_skip_reason = kMemorystatusFreezeSkipReasonLowProbOfUse;
-			goto out;
-		}
-	}
+	memorystatus_frozen_processes_max = FREEZE_PROCESSES_MAX;
+	memorystatus_max_frozen_demotions_daily = MAX_FROZEN_PROCESS_DEMOTIONS;
+	memorystatus_freeze_pages_max = FREEZE_PAGES_MAX;
 
-	if (!(state & P_MEMSTAT_FROZEN) && p->p_memstat_effectivepriority > memorystatus_freeze_max_candidate_band) {
-		/*
-		 * Proc has been elevated by something else.
-		 * Don't freeze it.
-		 */
-		if (first_consideration) {
-			memorystatus_freezer_stats.mfs_error_elevated_count++;
-		}
-		p->p_memstat_freeze_skip_reason = kMemorystatusFreezeSkipReasonElevated;
-		goto out;
-	}
-
-	should_freeze = TRUE;
-out:
-	if (should_freeze && !(state & P_MEMSTAT_FROZEN)) {
-		/*
-		 * Reset the skip reason. If it's killed before we manage to actually freeze it
-		 * we failed to consider it early enough.
-		 */
-		p->p_memstat_freeze_skip_reason = kMemorystatusFreezeSkipReasonNone;
-		if (!first_consideration) {
-			/*
-			 * We're freezing this for the first time and we previously considered it ineligible.
-			 * Bump the considered count so that we track this as 1 failure
-			 * and 1 success.
-			 */
-			memorystatus_freezer_stats.mfs_process_considered_count++;
-		}
-	}
-	return should_freeze;
+	/*
+	 * Calculate a new budget now that we're constrained by our daily write budget again.
+	 */
+	lck_mtx_lock(&freezer_mutex);
+	uint32_t budget;
+	budget = memorystatus_freeze_calculate_new_budget(0, normal_throttle_window->burst_multiple, normal_throttle_window->mins, 0);
+	memorystatus_freeze_force_new_interval(budget);
+	lck_mtx_unlock(&freezer_mutex);
 }
 
 /*
@@ -1811,7 +1735,6 @@ out:
 static int
 memorystatus_freeze_process(
 	proc_t p,
-	bool refreeze_processes,
 	coalition_t *coal, /* IN / OUT */
 	pid_t *coalition_list, /* OUT */
 	unsigned int *coalition_list_length /* OUT */)
@@ -1823,24 +1746,19 @@ memorystatus_freeze_process(
 	uint32_t purgeable, wired, clean, dirty, shared;
 	uint64_t max_pages = 0;
 	int    freezer_error_code = 0;
-	bool was_refreeze = false;
+	bool is_refreeze = false;
 	task_t curr_task = TASK_NULL;
 
 	pid_t aPid = proc_getpid(p);
 
+	is_refreeze = (p->p_memstat_state & P_MEMSTAT_FROZEN) != 0;
+
 	/* Ensure the process is eligible for (re-)freezing */
-	if ((p->p_memstat_state & P_MEMSTAT_FROZEN) && !proc_is_refreeze_eligible(p)) {
+	if (is_refreeze && !memorystatus_freeze_proc_is_refreeze_eligible(p)) {
 		/* Process is already frozen & hasn't been thawed. Nothing to do here. */
 		return EINVAL;
 	}
-	if (refreeze_processes) {
-		/*
-		 * Has to have been frozen once before.
-		 */
-		if ((p->p_memstat_state & P_MEMSTAT_FROZEN) == FALSE) {
-			return EINVAL;
-		}
-
+	if (is_refreeze) {
 		/*
 		 * Not currently being looked at for something.
 		 */
@@ -1859,7 +1777,7 @@ memorystatus_freeze_process(
 		p->p_memstat_state &= ~P_MEMSTAT_REFREEZE_ELIGIBLE;
 		memorystatus_refreeze_eligible_count--;
 	} else {
-		if (memorystatus_is_process_eligible_for_freeze(p) == FALSE) {
+		if (!memorystatus_is_process_eligible_for_freeze(p)) {
 			return EINVAL;
 		}
 	}
@@ -1893,7 +1811,7 @@ memorystatus_freeze_process(
 	    memorystatus_available_pages, 0, 0, 0, 0);
 
 	max_pages = MIN(max_pages, UINT32_MAX);
-	kr = task_freeze(p->task, &purgeable, &wired, &clean, &dirty, (uint32_t) max_pages, &shared, &freezer_error_code, FALSE /* eval only */);
+	kr = task_freeze(proc_task(p), &purgeable, &wired, &clean, &dirty, (uint32_t) max_pages, &shared, &freezer_error_code, FALSE /* eval only */);
 	if (kr == KERN_SUCCESS || freezer_error_code == FREEZER_ERROR_LOW_PRIVATE_SHARED_RATIO) {
 		memorystatus_freezer_stats.mfs_shared_pages_skipped += shared;
 	}
@@ -1916,7 +1834,7 @@ memorystatus_freeze_process(
 
 		memorystatus_frozen_shared_mb += shared;
 
-		if ((p->p_memstat_state & P_MEMSTAT_FROZEN) == 0) {
+		if (!is_refreeze) {
 			p->p_memstat_state |= P_MEMSTAT_FROZEN;
 			p->p_memstat_freeze_skip_reason = kMemorystatusFreezeSkipReasonNone;
 			memorystatus_frozen_count++;
@@ -1934,7 +1852,6 @@ memorystatus_freeze_process(
 				memorystatus_freezer_stats.mfs_bytes_refrozen += dirty * PAGE_SIZE;
 				memorystatus_freezer_stats.mfs_refreeze_count++;
 			}
-			was_refreeze = true;
 		}
 
 		p->p_memstat_frozen_count++;
@@ -1964,7 +1881,7 @@ memorystatus_freeze_process(
 		}
 		memorystatus_freeze_update_throttle(&memorystatus_freeze_budget_pages_remaining);
 		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: %sfreezing (%s) pid %d [%s] done, memorystatus_freeze_budget_pages_remaining %llu %sfroze %u pages\n",
-		    was_refreeze ? "re" : "", ((!coal || !*coal) ? "general" : "coalition-driven"), aPid, ((p && *p->p_name) ? p->p_name : "unknown"), memorystatus_freeze_budget_pages_remaining, was_refreeze ? "Re" : "", dirty);
+		    is_refreeze ? "re" : "", ((!coal || !*coal) ? "general" : "coalition-driven"), aPid, ((p && *p->p_name) ? p->p_name : "unknown"), memorystatus_freeze_budget_pages_remaining, is_refreeze ? "Re" : "", dirty);
 
 		proc_list_lock();
 
@@ -2002,7 +1919,7 @@ memorystatus_freeze_process(
 		proc_rele(p);
 		return 0;
 	} else {
-		if (refreeze_processes) {
+		if (is_refreeze) {
 			if ((freezer_error_code == FREEZER_ERROR_EXCESS_SHARED_MEMORY) ||
 			    (freezer_error_code == FREEZER_ERROR_LOW_PRIVATE_SHARED_RATIO)) {
 				/*
@@ -2021,7 +1938,7 @@ memorystatus_freeze_process(
 		} else {
 			p->p_memstat_state |= P_MEMSTAT_FREEZE_IGNORE;
 		}
-		memorystatus_freeze_handle_error(p, freezer_error_code, p->p_memstat_state & P_MEMSTAT_FROZEN, aPid, *coal, "memorystatus_freeze_top_process");
+		memorystatus_freeze_handle_error(p, freezer_error_code, p->p_memstat_state & P_MEMSTAT_FROZEN, aPid, (coal != NULL) ? *coal : NULL, "memorystatus_freeze_top_process");
 
 		p->p_memstat_state &= ~P_MEMSTAT_LOCKED;
 		wakeup(&p->p_memstat_state);
@@ -2082,7 +1999,7 @@ memorystatus_freeze_process_sync(proc_t p)
 
 	proc_list_lock();
 
-	ret = memorystatus_freeze_process(p, false, NULL, NULL, NULL);
+	ret = memorystatus_freeze_process(p, NULL, NULL, NULL);
 
 exit:
 	lck_mtx_unlock(&freezer_mutex);
@@ -2090,7 +2007,7 @@ exit:
 	return ret;
 }
 
-static proc_t
+proc_t
 memorystatus_freezer_candidate_list_get_proc(
 	struct memorystatus_freezer_candidate_list *list,
 	size_t index,
@@ -2140,153 +2057,81 @@ memorystatus_freezer_candidate_list_get_proc(
 	}
 }
 
+static size_t
+memorystatus_freeze_pid_list(pid_t *pid_list, unsigned int num_pids)
+{
+	int ret = 0;
+	size_t num_frozen = 0;
+	while (num_pids > 0) {
+		pid_t pid = pid_list[--num_pids];
+		proc_t p = proc_find_locked(pid);
+		if (p) {
+			proc_rele(p);
+			ret = memorystatus_freeze_process(p, NULL, NULL, NULL);
+			if (ret != 0) {
+				break;
+			}
+			num_frozen++;
+		}
+	}
+	return num_frozen;
+}
+
 /*
- * Caller must hold the freezer_mutex and it will be locked on return.
+ * Attempt to freeze the best candidate process.
+ * Keep trying until we freeze something or run out of candidates.
+ * Returns the number of processes frozen (including coalition members).
  */
-static int
+static size_t
 memorystatus_freeze_top_process(void)
 {
-	pid_t coal_xpc_pid = 0;
-	int ret = -1;
 	int freeze_ret;
-	proc_t p = PROC_NULL, next_p = PROC_NULL;
-	unsigned int band = JETSAM_PRIORITY_IDLE;
-	bool refreeze_processes = false;
+	size_t num_frozen = 0;
 	coalition_t coal = COALITION_NULL;
 	pid_t pid_list[MAX_XPC_SERVICE_PIDS];
-	unsigned int    ntasks = 0;
-	size_t global_freeze_list_index = 0;
+	unsigned int ntasks = 0;
+	struct memorystatus_freeze_list_iterator iterator;
 	LCK_MTX_ASSERT(&freezer_mutex, LCK_MTX_ASSERT_OWNED);
 
+	bzero(&iterator, sizeof(struct memorystatus_freeze_list_iterator));
 	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FREEZE_SCAN) | DBG_FUNC_START, memorystatus_available_pages, 0, 0, 0, 0);
 
 	proc_list_lock();
-
-	if (memorystatus_frozen_count >= memorystatus_frozen_processes_max) {
-		/*
-		 * Freezer is already full but we are here and so let's
-		 * try to refreeze any processes we might have thawed
-		 * in the past and push their compressed state out.
-		 */
-		refreeze_processes = true;
-		band = (unsigned int) memorystatus_freeze_jetsam_band;
-	}
-
-freeze_process:
-
-	next_p = NULL;
-	if (memorystatus_freezer_use_ordered_list && !refreeze_processes) {
-		global_freeze_list_index = 0;
-		next_p = memorystatus_freezer_candidate_list_get_proc(
-			&memorystatus_global_freeze_list,
-			global_freeze_list_index++,
-			&memorystatus_freezer_stats.mfs_freeze_pid_mismatches);
-		if (!next_p) {
-			/*
-			 * No candidate to freeze.
-			 * But we're here. So try to re-freeze.
-			 */
-			refreeze_processes = true;
-			band = (unsigned int) memorystatus_freeze_jetsam_band;
-		}
-	}
-	if (next_p == NULL) {
-		next_p = memorystatus_get_first_proc_locked(&band, FALSE);
-	}
-	while (next_p) {
-		p = next_p;
-		if (!memorystatus_freezer_use_ordered_list && p->p_memstat_effectivepriority != (int32_t) band) {
-			/*
-			 * We shouldn't be freezing processes outside the
-			 * prescribed band (unless we've been given an ordered list).
-			 */
+	while (true) {
+		proc_t p = memorystatus_freeze_pick_process(&iterator);
+		if (p == PROC_NULL) {
+			/* Nothing left to freeze */
 			break;
 		}
-
-		freeze_ret = memorystatus_freeze_process(p, refreeze_processes, &coal, pid_list, &ntasks);
-		if (!freeze_ret) {
-			ret = 0;
+		freeze_ret = memorystatus_freeze_process(p, &coal, pid_list, &ntasks);
+		if (freeze_ret == 0) {
+			num_frozen = 1;
 			/*
-			 * We froze a process successfully. We can stop now
-			 * and see if that helped if this process isn't part
-			 * of a coalition.
+			 * We froze a process successfully.
+			 * If it's a coalition head, freeze the coalition.
+			 * Then we're done for now.
 			 */
-
 			if (coal != NULL) {
-				next_p = NULL;
-
-				if (ntasks > 0) {
-					coal_xpc_pid = pid_list[--ntasks];
-					next_p = proc_find_locked(coal_xpc_pid);
-
-					/*
-					 * We grab a reference when we are about to freeze the process. So drop
-					 * the reference that proc_find_locked() grabbed for us.
-					 * We also have the proc_list_lock and so this process is stable.
-					 */
-					if (next_p) {
-						proc_rele(next_p);
-					}
-				}
+				num_frozen += memorystatus_freeze_pid_list(pid_list, ntasks);
 			}
-
-			if (coal && next_p) {
-				continue;
-			}
-
-			/*
-			 * No coalition leader was frozen. So we don't
-			 * need to evaluate any XPC services.
-			 *
-			 * OR
-			 *
-			 * We have frozen all eligible XPC services for
-			 * the current coalition leader.
-			 *
-			 * Either way, we can break here and see if freezing
-			 * helped.
-			 */
-
 			break;
 		} else {
 			if (vm_compressor_low_on_space() || vm_swap_low_on_space()) {
 				break;
 			}
-			if (memorystatus_freezer_use_ordered_list && !refreeze_processes) {
-				next_p = memorystatus_freezer_candidate_list_get_proc(
-					&memorystatus_global_freeze_list,
-					global_freeze_list_index++,
-					&memorystatus_freezer_stats.mfs_freeze_pid_mismatches);
-			} else {
-				next_p = memorystatus_get_next_proc_locked(&band, p, FALSE);
-			}
+			/*
+			 * Freeze failed but we're not out of space.
+			 * Keep trying to find a good candidate,
+			 * memorystatus_freeze_pick_process will not return this proc again until
+			 * we reset the iterator.
+			 */
 		}
 	}
-
-	if ((ret == -1) &&
-	    (memorystatus_refreeze_eligible_count >= MIN_THAW_REFREEZE_THRESHOLD) &&
-	    (!refreeze_processes)) {
-		/*
-		 * We failed to freeze a process from the IDLE
-		 * band AND we have some thawed processes
-		 * AND haven't tried refreezing as yet.
-		 * Let's try and re-freeze processes in the
-		 * frozen band that have been resumed in the past
-		 * and so have brought in state from disk.
-		 */
-
-		band = (unsigned int) memorystatus_freeze_jetsam_band;
-
-		refreeze_processes = true;
-
-		goto freeze_process;
-	}
-
 	proc_list_unlock();
 
 	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FREEZE_SCAN) | DBG_FUNC_END, memorystatus_available_pages, 0, 0, 0, 0);
 
-	return ret;
+	return num_frozen;
 }
 
 #if DEVELOPMENT || DEBUG
@@ -2295,7 +2140,8 @@ static int
 sysctl_memorystatus_freeze_top_process SYSCTL_HANDLER_ARGS
 {
 #pragma unused(arg1, arg2)
-	int error, val;
+	int error, val, ret = 0;
+	size_t num_frozen;
 	/*
 	 * Only freeze on write to prevent freezing during `sysctl -a`.
 	 * The actual value written doesn't matter.
@@ -2310,10 +2156,10 @@ sysctl_memorystatus_freeze_top_process SYSCTL_HANDLER_ARGS
 	}
 
 	lck_mtx_lock(&freezer_mutex);
-	int ret = memorystatus_freeze_top_process();
+	num_frozen = memorystatus_freeze_top_process();
 	lck_mtx_unlock(&freezer_mutex);
 
-	if (ret == -1) {
+	if (num_frozen == 0) {
 		ret = ESRCH;
 	}
 	return ret;
@@ -2430,7 +2276,7 @@ memorystatus_demote_frozen_process(proc_t p, bool urgent_mode __unused)
 	 * should land in the higher jetsam band. For that it needs to
 	 * remain marked frozen.
 	 */
-	if (proc_is_refreeze_eligible(p)) {
+	if (memorystatus_freeze_proc_is_refreeze_eligible(p)) {
 		p->p_memstat_state &= ~P_MEMSTAT_REFREEZE_ELIGIBLE;
 		memorystatus_refreeze_eligible_count--;
 	}
@@ -2458,7 +2304,7 @@ memorystatus_demote_frozen_processes_using_thaw_count(bool urgent_mode)
 		}
 
 		if (urgent_mode) {
-			if (!proc_is_refreeze_eligible(p)) {
+			if (!memorystatus_freeze_proc_is_refreeze_eligible(p)) {
 				/*
 				 * This process hasn't been thawed recently and so most of
 				 * its state sits on NAND and so we skip it -- jetsamming it
@@ -2501,7 +2347,7 @@ memorystatus_demote_frozen_processes_using_demote_list(bool urgent_mode)
 			&memorystatus_global_demote_list,
 			i,
 			&memorystatus_freezer_stats.mfs_demote_pid_mismatches);
-		if (p != NULL && proc_is_refreeze_eligible(p)) {
+		if (p != NULL && memorystatus_freeze_proc_is_refreeze_eligible(p)) {
 			memorystatus_demote_frozen_process(p, urgent_mode);
 			/* Remove this entry now that it's been demoted. */
 			memorystatus_global_demote_list.mfcl_list[i].pid = NO_PID;
@@ -2601,6 +2447,13 @@ memorystatus_freeze_calculate_new_budget(
 
 	if (!VM_CONFIG_FREEZER_SWAP_IS_ACTIVE) {
 		return 0;
+	}
+	if (memorystatus_swap_all_apps) {
+		/*
+		 * We effectively have an unlimited budget when app swap is enabled.
+		 */
+		memorystatus_freeze_daily_mb_max = UINT32_MAX;
+		return UINT32_MAX;
 	}
 
 	/* Get the daily budget from the storage layer */
@@ -2989,6 +2842,7 @@ static void
 memorystatus_freeze_thread(void *param __unused, wait_result_t wr __unused)
 {
 	static boolean_t memorystatus_freeze_swap_low = FALSE;
+	size_t max_to_freeze = 0, num_frozen = 0, num_frozen_this_iteration = 0;
 
 	if (!memorystatus_freeze_thread_init) {
 #if CONFIG_THREAD_GROUPS
@@ -2997,23 +2851,30 @@ memorystatus_freeze_thread(void *param __unused, wait_result_t wr __unused)
 		memorystatus_freeze_thread_init = true;
 	}
 
-	lck_mtx_lock(&freezer_mutex);
+	max_to_freeze = memorystatus_pick_freeze_count_for_wakeup();
 
+	lck_mtx_lock(&freezer_mutex);
 	if (memorystatus_freeze_enabled) {
 		if (memorystatus_freezer_use_demotion_list && memorystatus_refreeze_eligible_count > 0) {
 			memorystatus_demote_frozen_processes(false); /* Normal mode. Consider demoting thawed processes. */
 		}
-		if ((memorystatus_frozen_count < memorystatus_frozen_processes_max) ||
-		    (memorystatus_refreeze_eligible_count >= MIN_THAW_REFREEZE_THRESHOLD)) {
-			if (memorystatus_can_freeze(&memorystatus_freeze_swap_low)) {
-				/* Only freeze if we've not exceeded our pageout budgets.*/
-				memorystatus_freeze_update_throttle(&memorystatus_freeze_budget_pages_remaining);
+		while (num_frozen < max_to_freeze &&
+		    memorystatus_can_freeze(&memorystatus_freeze_swap_low) &&
+		    ((memorystatus_frozen_count < memorystatus_frozen_processes_max) ||
+		    (memorystatus_refreeze_eligible_count >= MIN_THAW_REFREEZE_THRESHOLD))) {
+			/* Only freeze if we've not exceeded our pageout budgets.*/
+			memorystatus_freeze_update_throttle(&memorystatus_freeze_budget_pages_remaining);
 
-				if (memorystatus_freeze_budget_pages_remaining) {
-					memorystatus_freeze_top_process();
-				} else {
-					memorystatus_demote_frozen_processes(true); /* urgent mode..force one demotion */
+			if (memorystatus_freeze_budget_pages_remaining) {
+				num_frozen_this_iteration = memorystatus_freeze_top_process();
+				if (num_frozen_this_iteration == 0) {
+					/* Nothing left to freeze. */
+					break;
 				}
+				num_frozen += num_frozen_this_iteration;
+			} else {
+				memorystatus_demote_frozen_processes(true); /* urgent mode..force one demotion */
+				break;
 			}
 		}
 	}
@@ -3028,54 +2889,6 @@ memorystatus_freeze_thread(void *param __unused, wait_result_t wr __unused)
 	lck_mtx_unlock(&freezer_mutex);
 
 	thread_block((thread_continue_t) memorystatus_freeze_thread);
-}
-
-boolean_t
-memorystatus_freeze_thread_should_run(void)
-{
-	/*
-	 * No freezer_mutex held here...see why near call-site
-	 * within memorystatus_pages_update().
-	 */
-
-	boolean_t should_run = FALSE;
-
-	if (memorystatus_freeze_enabled == FALSE) {
-		goto out;
-	}
-
-	if (memorystatus_available_pages > memorystatus_freeze_threshold) {
-		goto out;
-	}
-
-	memorystatus_freezer_stats.mfs_below_threshold_count++;
-
-	if ((memorystatus_frozen_count >= memorystatus_frozen_processes_max)) {
-		/*
-		 * Consider this as a skip even if we wake up to refreeze because
-		 * we won't freeze any new procs.
-		 */
-		memorystatus_freezer_stats.mfs_skipped_full_count++;
-		if (memorystatus_refreeze_eligible_count < MIN_THAW_REFREEZE_THRESHOLD) {
-			goto out;
-		}
-	}
-
-	if (memorystatus_frozen_shared_mb_max && (memorystatus_frozen_shared_mb >= memorystatus_frozen_shared_mb_max)) {
-		memorystatus_freezer_stats.mfs_skipped_shared_mb_high_count++;
-		goto out;
-	}
-
-	uint64_t curr_time = mach_absolute_time();
-
-	if (curr_time < memorystatus_freezer_thread_next_run_ts) {
-		goto out;
-	}
-
-	should_run = TRUE;
-
-out:
-	return should_run;
 }
 
 int
@@ -3160,8 +2973,11 @@ memorystatus_set_process_is_freezable(pid_t pid, boolean_t is_freezable)
 	/*
 	 * A process can change its own status. A coalition leader can
 	 * change the status of coalition members.
+	 * An entitled process (or root) can change anyone's status.
 	 */
-	if (p != current_proc()) {
+	if (p != current_proc() &&
+	    !kauth_cred_issuser(kauth_cred_get()) &&
+	    !IOCurrentTaskHasEntitlement(MEMORYSTATUS_ENTITLEMENT)) {
 		coalition_t coal = task_get_coalition(proc_task(p), COALITION_TYPE_JETSAM);
 		if (!coalition_is_leader(proc_task(current_proc()), coal)) {
 			proc_rele(p);

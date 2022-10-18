@@ -49,7 +49,6 @@
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_pset.h>
-#include <ipc/ipc_table.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/flipc.h>
 
@@ -198,9 +197,9 @@ flipc_port_destroy(ipc_port_t lport)
 static mach_msg_size_t
 flipc_msg_size_from_kmsg(ipc_kmsg_t kmsg)
 {
-	mach_msg_size_t fsize = kmsg->ikm_header->msgh_size;
+	mach_msg_size_t fsize = ikm_header(kmsg)->msgh_size;
 
-	if (kmsg->ikm_header->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
+	if (ikm_header(kmsg)->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
 		PE_enter_debugger("flipc_msg_size_from_kmsg(): Complex messages not supported.");
 	}
 
@@ -216,7 +215,7 @@ flipc_msg_size_from_kmsg(ipc_kmsg_t kmsg)
 static kern_return_t
 mnl_msg_from_kmsg(ipc_kmsg_t kmsg, mnl_msg_t *fmsgp)
 {
-	if (kmsg->ikm_header->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
+	if (ikm_header(kmsg)->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
 		printf("mnl_msg_from_kmsg(): Complex messages not supported.");
 		return KERN_FAILURE;
 	}
@@ -235,10 +234,10 @@ mnl_msg_from_kmsg(ipc_kmsg_t kmsg, mnl_msg_t *fmsgp)
 	fmsg->node_id = localnode_id;   // Message is from us
 	fmsg->qos = 0; // not used
 	fmsg->size = fsize; // Payload size (does NOT include mnl_msg header)
-	fmsg->object = kmsg->ikm_header->msgh_remote_port->ip_messages.imq_fport->obj.name;
+	fmsg->object = ikm_header(kmsg)->msgh_remote_port->ip_messages.imq_fport->obj.name;
 
 	/* Copy body of message */
-	bcopy((const void*)kmsg->ikm_header, (void*)MNL_MSG_PAYLOAD(fmsg), fsize);
+	bcopy((const void*)ikm_header(kmsg), (void*)MNL_MSG_PAYLOAD(fmsg), fsize);
 
 	// Convert port fields
 	mach_msg_header_t *mmsg = (mach_msg_header_t*)MNL_MSG_PAYLOAD(fmsg);
@@ -278,7 +277,7 @@ mach_msg_send_from_remote_kernel(mach_msg_header_t      *msg,
 	    MACH_SEND_KERNEL_DEFAULT,
 	    MACH_MSG_TIMEOUT_NONE);
 	if (mr != MACH_MSG_SUCCESS) {
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_ALL);
 	}
 
 	return mr;
@@ -476,7 +475,7 @@ flipc_msg_to_remote_node(mach_node_t  to_node,
 			/* We just pass the kmsg payload as the fmsg.
 			 * flipc_msg_free() will notice and free the kmsg properly.
 			 */
-			mach_msg_header_t *hdr = kmsg->ikm_header;
+			mach_msg_header_t *hdr = ikm_header(kmsg);
 			fmsg = (mnl_msg_t)(&hdr[1]);
 			/* Stash kmsg pointer just before fmsg */
 			*(ipc_kmsg_t*)((vm_offset_t)fmsg - sizeof(vm_offset_t)) = kmsg;
@@ -598,7 +597,7 @@ flipc_msg_ack(mach_node_t   node,
 	/* We have a valid node id & obj name, and a port to send the ack to. */
 	ipc_kmsg_t kmsg = ipc_kmsg_alloc(sizeof(struct flipc_ack_msg), IPC_KMSG_ALLOC_KERNEL);
 	assert((unsigned long long)kmsg >= 4ULL);//!= IKM_NULL);
-	mach_msg_header_t *msg = kmsg->ikm_header;
+	mach_msg_header_t *msg = ikm_header(kmsg);
 
 	/* Fill in the mach_msg_header struct */
 	msg->msgh_bits = MACH_MSGH_BITS_SET(0, 0, 0, 0);

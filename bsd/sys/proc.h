@@ -85,6 +85,7 @@
 
 #ifdef XNU_KERNEL_PRIVATE
 #include <mach/coalition.h>             /* COALITION_NUM_TYPES */
+#include <sys/codesign.h>
 #endif
 
 #ifndef KERNEL
@@ -242,8 +243,19 @@ extern bool proc_is_exotic(proc_t p);
 extern bool proc_is_alien(proc_t p);
 proc_t current_proc_EXTERNAL(void);
 
-extern int      msleep(void *chan, lck_mtx_t *mtx, int pri, const char *wmesg, struct timespec * ts );
-extern int      msleep0(void *chan, lck_mtx_t *mtx, int pri, const char *wmesg, int timo, int (*continuation)(int));
+#if XNU_KERNEL_PRIVATE
+
+extern bool proc_is_driver(proc_t p);
+extern bool proc_is_third_party_debuggable_driver(proc_t p);
+
+#endif /* XNU_KERNEL_PRIVATE */
+
+/*
+ * __unsafe_indexable is a workaround for
+ * rdar://88409003 (PredefinedExpr trips C string detection)
+ */
+extern int      msleep(void *chan, lck_mtx_t *mtx, int pri, const char *__unsafe_indexable wmesg, struct timespec * ts );
+extern int      msleep0(void *chan, lck_mtx_t *mtx, int pri, const char *__unsafe_indexable wmesg, int timo, int (*continuation)(int));
 extern void     wakeup(void *chan);
 extern void wakeup_one(caddr_t chan);
 
@@ -423,6 +435,9 @@ extern int proc_isabortedsignal(proc_t);
 /* return true if the process is translated, false for default */
 extern boolean_t proc_is_translated(proc_t);
 
+/* return true if this is an x86_64 process running under translation */
+extern bool proc_is_x86_64_compat(proc_t);
+
 /* true if the process ignores errors from content protection APIs */
 extern bool proc_ignores_content_protection(proc_t proc);
 
@@ -431,6 +446,18 @@ extern bool proc_skip_mtime_update(proc_t proc);
 
 /* return true if the process is flagged as allow-low-space */
 extern bool proc_allow_low_space_writes(proc_t p);
+
+/* return true if process needs to use alternative extended attribute for symlinks */
+bool proc_use_alternative_symlink_ea(proc_t p);
+
+/* return true if rsr is set for process */
+bool proc_is_rsr(proc_t p);
+
+/*
+ * Return true if the process disallows read or write access for files that
+ * it opens with O_EVTONLY.
+ */
+extern bool proc_disallow_rw_for_o_evtonly(proc_t p);
 
 /*!
  *  @function    proc_exitstatus
@@ -459,9 +486,6 @@ extern bool proc_is_traced(proc_t p);
 
 extern void proc_coalitionids(proc_t, uint64_t[COALITION_NUM_TYPES]);
 
-#ifdef CONFIG_32BIT_TELEMETRY
-extern void proc_log_32bit_telemetry(proc_t p);
-#endif /* CONFIG_32BIT_TELEMETRY */
 extern uint64_t get_current_unique_pid(void);
 #endif /* XNU_KERNEL_PRIVATE*/
 

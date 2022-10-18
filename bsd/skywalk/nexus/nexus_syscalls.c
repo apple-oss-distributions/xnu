@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -36,18 +36,32 @@
 #include <security/audit/audit.h>
 #include <skywalk/os_skywalk_private.h>
 
+static int nxop_ioctl(struct fileproc *, u_long, caddr_t, vfs_context_t);
 static int nxop_close(struct fileglob *, vfs_context_t);
 
 static const struct fileops nexus_ctl_ops = {
 	.fo_type     = DTYPE_NEXUS,
 	.fo_read     = fo_no_read,
 	.fo_write    = fo_no_write,
-	.fo_ioctl    = fo_no_ioctl,
+	.fo_ioctl    = nxop_ioctl,
 	.fo_select   = fo_no_select,
 	.fo_close    = nxop_close,
 	.fo_drain    = fo_no_drain,
 	.fo_kqfilter = fo_no_kqfilter,
 };
+
+static int
+nxop_ioctl(struct fileproc *fp, u_long cmd, caddr_t data, vfs_context_t ctx)
+{
+	struct nxctl *nxctl;
+	proc_t procp = vfs_context_proc(ctx);
+
+	if ((nxctl = (struct nxctl *)fp_get_data(fp)) == NULL) {
+		/* This is not a valid open file descriptor */
+		return EBADF;
+	}
+	return nxioctl(nxctl, cmd, data, procp);
+}
 
 static int
 nxop_close(struct fileglob *fg, vfs_context_t ctx)
@@ -124,7 +138,7 @@ __nexus_open(struct proc *p, struct __nexus_open_args *uap, int *retval)
 	}
 
 	fp->fp_flags |= FP_CLOEXEC | FP_CLOFORK;
-	fp->fp_glob->fg_flag &= ~(FREAD | FWRITE);
+	fp->fp_glob->fg_flag |= (FREAD | FWRITE);
 	fp->fp_glob->fg_ops = &nexus_ctl_ops;
 	fp_set_data(fp, nxctl);   /* ref from nxctl_create */
 

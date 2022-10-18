@@ -61,6 +61,7 @@
  * $FreeBSD: src/sys/netinet/tcp_timer.c,v 1.34.2.11 2001/08/22 00:59:12 silby Exp $
  */
 
+#include "tcp_includes.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -1391,7 +1392,7 @@ retransmit_packet:
 			 * right after Fast Retransmits and ECE
 			 * notification receipts.
 			 */
-			if (TCP_ECN_ENABLED(tp)) {
+			if (!TCP_ACC_ECN_ON(tp) && TCP_ECN_ENABLED(tp)) {
 				tp->ecn_flags |= TE_SENDCWR;
 			}
 		}
@@ -1791,10 +1792,13 @@ fc_output:
 #endif /* DEBUG || DEVELOPMENT */
 
 		/*
-		 * When the connection is not idle, make sure the retransmission timer
-		 * is armed because it was set to zero above
+		 * When there is data (or a SYN) to send, the above call to
+		 * tcp_output() should have armed either the REXMT or the
+		 * PERSIST timer. If it didn't, something is wrong and this
+		 * connection would idle around forever. Let's make sure that
+		 * at least the REXMT timer is set.
 		 */
-		if ((tp->t_timer[TCPT_REXMT] == 0 || tp->t_timer[TCPT_PERSIST] == 0) &&
+		if (tp->t_timer[TCPT_REXMT] == 0 && tp->t_timer[TCPT_PERSIST] == 0 &&
 		    (tp->t_inpcb->inp_socket->so_snd.sb_cc != 0 || tp->t_state == TCPS_SYN_SENT ||
 		    tp->t_state == TCPS_SYN_RECEIVED)) {
 			tp->t_timer[TCPT_REXMT] =
@@ -1837,7 +1841,7 @@ fc_output:
 		tcp_rexmt_save_state(tp);
 		if (CC_ALGO(tp)->pre_fr != NULL) {
 			CC_ALGO(tp)->pre_fr(tp);
-			if (TCP_ECN_ENABLED(tp)) {
+			if (!TCP_ACC_ECN_ON(tp) && TCP_ECN_ENABLED(tp)) {
 				tp->ecn_flags |= TE_SENDCWR;
 			}
 		}

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -535,7 +535,7 @@ nx_netif_mit_s_thread_cont(void *v, wait_result_t wres)
 	struct __kern_channel_ring *kr;
 	struct nx_netif_mit *mit = v;
 	struct netif_stats *nifs;
-	int irq_stat;
+	int irq_stat, error;
 
 	ASSERT(mit->mit_flags & NETIF_MITF_SIMPLE);
 	kr = __DEVOLATILE(struct __kern_channel_ring *, mit->mit_ckr);
@@ -561,7 +561,24 @@ nx_netif_mit_s_thread_cont(void *v, wait_result_t wres)
 		STATS_INC(nifs, irq_stat);
 		MIT_SPIN_UNLOCK(mit);
 
-		(void) nx_netif_common_intr(kr, kernproc, 0, NULL);
+		error = nx_netif_common_intr(kr, kernproc, 0, NULL);
+
+		/*
+		 * We could get EBUSY here due to netif_inject_rx() holding
+		 * the kring lock. EBUSY means the rx notify callback (which
+		 * does the rx syncs..etc) wasn't called. If we don't retry
+		 * nx_netif_common_intr() the driver will eventually stop
+		 * notifying due to its queues being full.
+		 */
+		if (error == EBUSY) {
+			uint32_t ival =
+			    MAX(netif_busy_mit_delay, NETIF_BUSY_MIT_DELAY);
+
+			MIT_SPIN_LOCK(mit);
+			mit->mit_requests++;
+			MIT_SPIN_UNLOCK(mit);
+			delay(ival);
+		}
 
 		MIT_SPIN_LOCK(mit);
 

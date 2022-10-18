@@ -16,6 +16,7 @@ INSTALL_KF_MD_LIST = $(ARM_HEADER_FILES)
 
 # Headers installed into Kernel.framework/PrivateHeaders (internal SDK only).
 INSTALL_KF_MD_LCL_LIST = \
+	hv_hvc.h \
 	lowglobals.h \
 	machine_kpc.h \
 	machine_remote_time.h \
@@ -31,6 +32,7 @@ INSTALL_SF_MD_LCL_LIST = \
 # TODO: Is there a reason that machine_machdep.h is not in this list? If not, these lists can be consolidated.
 # Headers used to compile xnu
 EXPORT_MD_LIST = \
+	hv_hvc.h \
 	lowglobals.h \
 	machine_cpuid.h \
 	machine_kpc.h \

@@ -58,7 +58,7 @@ out:
 }
 
 static inline void
-assert_kdebug_test(enum kdebug_test flavor, const char *msg)
+assert_kdebug_test(kdebug_test_t flavor, const char *msg)
 {
 	size_t size = flavor;
 	int mib[] = { CTL_KERN, KERN_KDEBUG, KERN_KDTEST };

@@ -17,10 +17,10 @@ module Darwin.POSIX.net [system] {
 
 module Darwin.net [system] {
   #ifdef XNU_KERNEL_PRIVATE
-  // The PLATFORM_MacOSX headers are in the public SDK for macOS,
+  // The XNU_PLATFORM_MacOSX headers are in the public SDK for macOS,
   // but mastered out of the public SDK for the other OSes.
   #endif
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module bpf {
     header "net/bpf.h"
     export *
@@ -37,7 +37,7 @@ module Darwin.net [system] {
     export *
   }
 
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
   module if_arp {
     header "net/if_arp.h"
     export *
@@ -69,7 +69,12 @@ module Darwin.net [system] {
     export *
   }
 
-  #ifdef PLATFORM_MacOSX
+  explicit module if_var_status {
+    header "net/if_var_status.h"
+    export *
+  }
+
+  #ifdef XNU_PLATFORM_MacOSX
   module kext_net {
     header "net/kext_net.h"
     export *
@@ -90,7 +95,7 @@ module Darwin.net [system] {
     header "net/pfkeyv2.h"
     export *
   }
-  #ifdef PLATFORM_MacOSX
+  #ifdef XNU_PLATFORM_MacOSX
 
   module route {
     header "net/route.h"

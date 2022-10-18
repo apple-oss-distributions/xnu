@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -179,6 +179,16 @@
 #define O_NOFOLLOW_ANY  0x20000000      /* no symlinks allowed in path */
 #endif
 
+#if __DARWIN_C_LEVEL >= 200809L
+#define O_EXEC          0x40000000               /* open file for execute only */
+#define O_SEARCH        (O_EXEC | O_DIRECTORY)   /* open directory for search only */
+#endif
+
+#ifdef KERNEL
+#define FEXEC           O_EXEC
+#define FSEARCH         FEXEC
+#endif
+
 #ifdef KERNEL
 /* End of File status flags (fileglob::fg_flag) */
 #endif
@@ -206,20 +216,26 @@
 #endif
 #endif
 
-/* Data Protection Flags */
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
+/* Data Protection Flags */
 #define O_DP_GETRAWENCRYPTED    0x0001
 #define O_DP_GETRAWUNENCRYPTED  0x0002
+#define O_DP_AUTHENTICATE       0x0004
+
+/* Descriptor value for openat_authenticated_np() to skip authentication with another fd */
+#define AUTH_OPEN_NOAUTHFD      -1
 #endif
 
 
 #ifdef KERNEL
 /* convert from open() flags to/from fflags; convert O_RD/WR to FREAD/FWRITE */
-#define FFLAGS(oflags)  ((oflags) + 1)
-#define OFLAGS(fflags)  ((fflags) - 1)
+/* O_EXEC turns off FREAD/FWRITE */
+#define FFLAGS(oflags)  (((oflags) & O_EXEC) ? ((oflags) & ~(O_ACCMODE)) : ((oflags) + 1))
+/* There is no way to convey a lack of O_RDONLY but the presence of O_EXEC means that */
+#define OFLAGS(fflags)  (((fflags) & FEXEC) ? ((fflags) & ~(O_ACCMODE)) : ((fflags) - 1))
 
 /* bits to save after open */
-#define FMASK           (FREAD|FWRITE|FAPPEND|FASYNC|FFSYNC|FFDSYNC|FNONBLOCK)
+#define FMASK           (FREAD|FWRITE|FAPPEND|FASYNC|FFSYNC|FFDSYNC|FNONBLOCK|FEXEC)
 /* bits settable by fcntl(F_SETFL, ...) */
 #define FCNTLFLAGS      (FAPPEND|FASYNC|FFSYNC|FFDSYNC|FNONBLOCK)
 #endif
@@ -393,7 +409,18 @@
 #define F_ADDFILESIGS_INFO      103     /* Add signature from same file, return information */
 #define F_ADDFILESUPPL          104     /* Add supplemental signature from same file with fd reference to original */
 #define F_GETSIGSINFO           105     /* Look up code signature information attached to a file or slice */
-#define F_FSRESERVED            106     /* Placeholder for future usage */
+
+#define F_SETLEASE              106      /* Acquire or release lease */
+#define F_GETLEASE              107      /* Retrieve lease information */
+
+#define F_SETLEASE_ARG(t, oc)   ((t) | ((oc) << 2))
+
+#ifdef PRIVATE
+#define F_ASSERT_BG_ACCESS      108      /* Assert background access to a file */
+#define F_RELEASE_BG_ACCESS     109      /* Release background access to a file */
+#endif // PRIVATE
+
+#define F_TRANSFEREXTENTS       110      /* Transfer allocated extents beyond leof to a different file */
 
 // FS-specific fcntl()'s numbers begin at 0x00010000 and go up
 #define FCNTL_FS_SPECIFIC_BASE  0x00010000
@@ -422,6 +449,7 @@
 #define F_WAKE1_SAFE    0x100           /* its safe to only wake one waiter */
 #define F_ABORT         0x200           /* lock attempt aborted (force umount) */
 #define F_OFD_LOCK      0x400           /* Use "OFD" semantics for lock */
+#define F_TRANSFER      0x800           /* Transfer the lock to new proc */
 #endif
 
 #if PRIVATE
@@ -449,6 +477,7 @@
 
 #define F_ALLOCATECONTIG  0x00000002    /* allocate contigious space */
 #define F_ALLOCATEALL     0x00000004    /* allocate all requested space or no space at all */
+#define F_ALLOCATEPERSIST 0x00000008    /* do not free space upon close(2) */
 
 /* Position Modes (fst_posmode) for F_PREALLOCATE */
 
@@ -656,33 +685,14 @@ typedef struct fspecread {
 	off_t fsr_length;        /* IN: size of the region */
 } fspecread_t;
 
-/* fbootstraptransfer_t used by F_READBOOTSTRAP and F_WRITEBOOTSTRAP commands */
-
-typedef struct fbootstraptransfer {
-	off_t fbt_offset;       /* IN: offset to start read/write */
-	size_t fbt_length;    /* IN: number of bytes to transfer */
-	void *fbt_buffer;       /* IN: buffer to be read/written */
-} fbootstraptransfer_t;
-
-#ifdef KERNEL
-/* LP64 version of fbootstraptransfer.  all pointers
- * grow when we're dealing with a 64-bit process.
- * WARNING - keep in sync with fbootstraptransfer
- */
-
-typedef struct user32_fbootstraptransfer {
-	off_t fbt_offset;       /* IN: offset to start read/write */
-	user32_size_t fbt_length;    /* IN: number of bytes to transfer */
-	user32_addr_t fbt_buffer;       /* IN: buffer to be read/written */
-} user32_fbootstraptransfer_t;
-
-typedef struct user_fbootstraptransfer {
-	off_t fbt_offset;       /* IN: offset to start read/write */
-	user_size_t fbt_length;         /* IN: number of bytes to transfer */
-	user_addr_t fbt_buffer;         /* IN: buffer to be read/written */
-} user_fbootstraptransfer_t;
-
-#endif // KERNEL
+#ifdef PRIVATE
+/* fassertbgaccess_t used by F_ASSERT_BG_ACCESS */
+typedef struct fassertbgaccess {
+	unsigned int       fbga_flags;   /* unused */
+	unsigned int       reserved;     /* (to maintain 8-byte alignment) */
+	unsigned long long ttl;          /* IN: time to live for the assertion (nanoseconds; continuous) */
+} fassertbgaccess_t;
+#endif // PRIVATE
 
 /*
  * For F_LOG2PHYS this information is passed back to user
@@ -811,6 +821,8 @@ int     openx_np(const char *, int, filesec_t);
  *  int open_dprotected_np(user_addr_t path, int flags, int class, int dpflags, int mode)
  */
 int open_dprotected_np( const char *, int, int, int, ...);
+int openat_dprotected_np( int, const char *, int, int, int, ...);
+int openat_authenticated_np(int, const char *, int, int);
 int     flock(int, int);
 filesec_t filesec_init(void);
 filesec_t filesec_dup(filesec_t);

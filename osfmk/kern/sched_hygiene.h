@@ -30,8 +30,13 @@
  *
  */
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #ifndef KERN_SCHED_HYGIENE_DEBUG
 #define KERN_SCHED_HYGIENE_DEBUG
+
+#if SCHED_HYGIENE_DEBUG
 
 #include <mach/mach_types.h>
 
@@ -43,7 +48,7 @@ typedef enum sched_hygiene_mode {
 	SCHED_HYGIENE_MODE_PANIC = 2,
 } sched_hygiene_mode_t;
 
-#ifdef SCHED_PREEMPTION_DISABLE_DEBUG
+extern boolean_t sched_hygiene_debug_pmc;
 
 extern sched_hygiene_mode_t sched_preemption_disable_debug_mode;
 
@@ -53,21 +58,20 @@ extern machine_timeout_t sched_preemption_disable_threshold_mt;
 __attribute__((noinline)) void _prepare_preemption_disable_measurement(thread_t thread);
 __attribute__((noinline)) void _collect_preemption_disable_measurement(thread_t thread);
 
-#endif /* SCHED_PREEMPTION_DISABLE_DEBUG */
-
-#ifdef INTERRUPT_MASKED_DEBUG
-
 extern sched_hygiene_mode_t interrupt_masked_debug_mode;
-extern boolean_t interrupt_masked_debug_pmc;
 
 MACHINE_TIMEOUT_SPEC_DECL(interrupt_masked_timeout);
 MACHINE_TIMEOUT_SPEC_DECL(stackshot_interrupt_masked_timeout);
 
-extern machine_timeout32_t interrupt_masked_timeout;
-extern machine_timeout32_t stackshot_interrupt_masked_timeout;
+extern machine_timeout_t interrupt_masked_timeout;
+extern machine_timeout_t stackshot_interrupt_masked_timeout;
 
-#endif /* INTERRUPT_MASKED_DEBUG */
+extern bool sched_hygiene_nonspec_tb;
+
+#define ml_get_sched_hygiene_timebase() (sched_hygiene_nonspec_tb ? ml_get_timebase() : ml_get_speculative_timebase())
 
 extern bool kprintf_spam_mt_pred(struct machine_timeout_spec const *spec);
+
+#endif /* SCHED_HYGIENE_DEBUG */
 
 #endif /* KERN_SCHED_HYGIENE_DEBUG */

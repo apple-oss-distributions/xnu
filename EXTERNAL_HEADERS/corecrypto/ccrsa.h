@@ -1,11 +1,11 @@
-/* Copyright (c) (2010,2011,2012,2014,2015,2016,2017,2018,2019,2020) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2012,2014-2021) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
- * is contained in the License.txt file distributed with corecrypto) and only to 
- * people who accept that license. IMPORTANT:  Any license rights granted to you by 
- * Apple Inc. (if any) are limited to internal use within your organization only on 
- * devices and computers you own or control, for the sole purpose of verifying the 
- * security characteristics and correct functioning of the Apple Software.  You may 
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
@@ -18,6 +18,8 @@
 #include <corecrypto/cczp.h>
 #include <corecrypto/cc_fault_canary.h>
 #include <stdbool.h>
+
+CC_PTRCHECK_CAPABLE_HEADER()
 
 // Apple does not generate keys of greater than 4096 bits
 // This limit is relaxed to accommodate potential third-party consumers
@@ -40,56 +42,81 @@ typedef struct ccrsa_pub_ctx* ccrsa_pub_ctx_t;
 typedef struct ccrsa_priv_ctx* ccrsa_priv_ctx_t;
 
 /*
- public key cczp   d=e^-1 mod lambda(m) priv key cczp             priv key cczq             dp, dq, qinv
- |                              |       |                         |                         |
- |                              |       |                         |                         |
- +-------+------+-------+------++------++-------+------+---------++-------+------+---------++-------+-------+---------+
- | zm_hd | m[n] |mr[n+1]| e[n] || d[n] || zp_hd |p[n/2]|pr[n/2+1]|| zq_hd |q[n/2]|qr[n/2+1]||dp[n/2]|dq[n/2]|qinv[n/2]|
- +-------+------+-------+------++------++-------+------+---------++-------+------+---------++-------+-------+---------+
+ struct ccrsa_pub_ctx {
+     cczp zm;
+     cc_unit m[n];
+     cc_unit m0inv;
+     cc_unit mr2[n];
+     cc_unit e[n];
+ }
+
+ struct ccrsa_priv_ctx {
+     cc_unit d[n];        // e^(-1) mod lcm(p-1, q-1)
+
+     cczp zp;
+     cc_unit p[n/2+1];
+     cc_unit p0inv;
+     cc_unit pr2[n/2+1];
+
+     cczp zq;
+     cc_unit q[n/2+1];
+     cc_unit q0inv;
+     cc_unit qr2[n/2+1];
+
+     cc_unit dp[n/2+1];   // d mod (p-1)
+     cc_unit dq[n/2+1];   // d mod (q-1)
+     cc_unit qinv[n/2+1]; // q^(-1) mod p
+ }
+
+ struct ccrsa_full_ctx {
+     struct ccrsa_pub_ctx;
+     struct ccrsa_prv_ctx;
+ }
  */
 
- /* Return the size of an ccec_full_ctx where each ccn is _size_ bytes. Get _size_ through ccn_sizeof(nbits) */
+// Compute the internal structure size in bytes based on key (i.e. modulus) byte size.
+#define ccrsa_pub_ctx_size(_nbytes_)   (sizeof(struct cczp) + CCN_UNIT_SIZE + 3 * ccn_sizeof_size(_nbytes_))
+#define ccrsa_priv_ctx_size(_nbytes_)  (ccn_sizeof_size(_nbytes_) + (sizeof(struct cczp) + CCN_UNIT_SIZE) * 2 + 7 * ccn_sizeof_n(ccn_nof_size(_nbytes_) / 2 + 1))
+#define ccrsa_full_ctx_size(_nbytes_)  (ccrsa_pub_ctx_size(_nbytes_) + ccrsa_priv_ctx_size(_nbytes_))
 
-/* Return the size of an ccec_full_ctx where each ccn is _size_ bytes. */
+// Declare structure based on key byte size.
+#define ccrsa_full_ctx_decl(_nbytes_, _name_)   cc_ctx_decl_vla(struct ccrsa_full_ctx, ccrsa_full_ctx_size(_nbytes_), _name_)
+#define ccrsa_full_ctx_clear(_nbytes_, _name_)  cc_clear(ccrsa_full_ctx_size(_nbytes_), _name_)
+#define ccrsa_pub_ctx_decl(_nbytes_, _name_)    cc_ctx_decl_vla(struct ccrsa_pub_ctx, ccrsa_pub_ctx_size(_nbytes_), _name_)
+#define ccrsa_pub_ctx_clear(_nbytes_, _name_)   cc_clear(ccrsa_pub_ctx_size(_nbytes_), _name_)
 
-#define ccrsa_pub_ctx_size(_size_)   (sizeof(struct cczp) + CCN_UNIT_SIZE + 3 * (_size_))
-#define ccrsa_priv_ctx_size(_size_)  ((sizeof(struct cczp) + CCN_UNIT_SIZE) * 2 + 7 * ccn_sizeof(ccn_bitsof_size(_size_)/2 + 1))
-#define ccrsa_full_ctx_size(_size_)  (ccrsa_pub_ctx_size(_size_) + _size_ + ccrsa_priv_ctx_size(_size_))
+// Declare structure based on key bit size.
+#define ccrsa_full_ctx_decl_nbits(_nbits_, _name_)   cc_ctx_decl_vla(struct ccrsa_full_ctx, ccrsa_full_ctx_size(ccn_sizeof(_nbits_)), _name_)
+#define ccrsa_full_ctx_clear_nbits(_nbits_, _name_)  cc_clear(ccrsa_full_ctx_size(ccn_sizeof(_nbits_)), _name_)
+#define ccrsa_pub_ctx_decl_nbits(_nbits_, _name_)    cc_ctx_decl_vla(struct ccrsa_pub_ctx, ccrsa_pub_ctx_size(ccn_sizeof(_nbits_)), _name_)
+#define ccrsa_pub_ctx_clear_nbits(_nbits_, _name_)   cc_clear(ccrsa_pub_ctx_size(ccn_sizeof(_nbits_)), _name_)
 
-/* Declare a fully scheduled rsa key.  Size is the size in bytes each ccn in
-   the key.  For example to declare (on the stack or in a struct) a 1021 bit
-   rsa public key named foo use ccrsa_pub_ctx_decl(ccn_sizeof(1021), foo). 
- */
-#define ccrsa_full_ctx_decl(_size_, _name_)   cc_ctx_decl(struct ccrsa_full_ctx, ccrsa_full_ctx_size(_size_), _name_)
-#define ccrsa_full_ctx_clear(_size_, _name_)  cc_clear(ccrsa_full_ctx_size(_size_), _name_)
-#define ccrsa_pub_ctx_decl(_size_, _name_)    cc_ctx_decl(struct ccrsa_pub_ctx, ccrsa_pub_ctx_size(_size_), _name_)
-#define ccrsa_pub_ctx_clear(_size_, _name_)   cc_clear(ccrsa_pub_ctx_size(_size_), _name_)
+// Declare structure based number of cc_units. Not a typical use case. Size depends on processor.
+#define ccrsa_full_ctx_decl_n(_nunits_, _name_)   cc_ctx_decl_vla(struct ccrsa_full_ctx, ccrsa_full_ctx_size(ccn_sizeof_n(_nunits_)), _name_)
+#define ccrsa_full_ctx_clear_n(_nunits_, _name_)  cc_clear(ccrsa_full_ctx_size(ccn_sizeof_n(_nunits_)), _name_)
+#define ccrsa_pub_ctx_decl_n(_nunits_, _name_)    cc_ctx_decl_vla(struct ccrsa_pub_ctx, ccrsa_pub_ctx_size(ccn_sizeof_n(_nunits_)), _name_)
+#define ccrsa_pub_ctx_clear_n(_nunits_, _name_)   cc_clear(ccrsa_pub_ctx_size(ccn_sizeof_n(_nunits_)), _name_)
 
-// accessors to ccrsa full and public key fields. */
+// Accessors to ccrsa full and public key fields. */
 // The offsets are computed using pb_ccn. If any object other than ccrsa_full_ctx_t
 // or ccrsa_pub_ctx_t is passed to the macros, compiler error is generated.
 
-#define ccrsa_ctx_zm(_ctx_)        ((cczp_t)(_ctx_))
+#define ccrsa_ctx_zm(_ctx_)        ((struct cczp* cc_single)(_ctx_))
 #define ccrsa_ctx_n(_ctx_)         (ccrsa_ctx_zm(_ctx_)->n)
 #define ccrsa_ctx_m(_ctx_)         ((_ctx_)->pb_ccn)
 
 #define ccrsa_ctx_e(_ctx_)         (ccrsa_ctx_m(_ctx_) + 2 * ccrsa_ctx_n(_ctx_) + 1)
-#define ccrsa_ctx_d(_ctx_)         (ccrsa_ctx_m(_ctx_) + 3 * ccrsa_ctx_n(_ctx_) + 1)
+#define ccrsa_ctx_d(_ctx_)         (ccrsa_ctx_e(_ctx_) + ccrsa_ctx_n(_ctx_))
 
 // accessors to ccrsa private key fields
-// The offsets are computed using pv_ccn. If any object other than ccrsa_priv_ctx_t
-// is passed to the macros, compiler error is generated.
-#define ccrsa_ctx_private_zp(FK)   ((cczp_t)ccrsa_get_private_ctx_ptr(FK))
-#define ccrsa_ctx_private_zq(FK)   ((cczp_t)((ccrsa_get_private_ctx_ptr(FK))->pv_ccn + 2 * ccrsa_ctx_private_zp(FK)->n + 1))
-#define ccrsa_ctx_private_dp(FK)   ((ccrsa_get_private_ctx_ptr(FK))->pv_ccn + 4 * ccrsa_ctx_private_zp(FK)->n + 2 + ccn_nof_size(sizeof(struct cczp)))
-#define ccrsa_ctx_private_dq(FK)   ((ccrsa_get_private_ctx_ptr(FK))->pv_ccn + 5 * ccrsa_ctx_private_zp(FK)->n + 2 + ccn_nof_size(sizeof(struct cczp)))
-#define ccrsa_ctx_private_qinv(FK) ((ccrsa_get_private_ctx_ptr(FK))->pv_ccn + 6 * ccrsa_ctx_private_zp(FK)->n + 2 + ccn_nof_size(sizeof(struct cczp)))
+#define ccrsa_ctx_private_zq(FK)   ((cczp_t)(ccrsa_ctx_private_zp(FK)->ccn + 2 * ccrsa_ctx_private_zp(FK)->n + 1))
+#define ccrsa_ctx_private_dp(FK)   (ccrsa_ctx_private_zq(FK)->ccn + 2 * ccrsa_ctx_private_zp(FK)->n + 1)
+#define ccrsa_ctx_private_dq(FK)   (ccrsa_ctx_private_dp(FK) + ccrsa_ctx_private_zp(FK)->n)
+#define ccrsa_ctx_private_qinv(FK) (ccrsa_ctx_private_dq(FK) + ccrsa_ctx_private_zp(FK)->n)
 
-/* rvalue accessors to ccec_key fields. */
-CC_INLINE
-ccrsa_priv_ctx_t ccrsa_get_private_ctx_ptr(ccrsa_full_ctx_t fk) {
-    ccrsa_priv_ctx_t priv = (ccrsa_priv_ctx_t)(ccrsa_ctx_d(fk)+ccrsa_ctx_n(fk));
-    return priv;
+CC_INLINE cczp_t ccrsa_ctx_private_zp(ccrsa_full_ctx_t fk)
+{
+    return (cczp_t)(ccrsa_ctx_d(fk) + ccrsa_ctx_n(fk));
 }
 
 /*!
@@ -125,7 +152,7 @@ size_t ccrsa_pubkeylength(ccrsa_pub_ctx_t pubk);
 @result     CCERR_OK if no error
  
 @discussion ccrsa_ctx_n(pubk) must have been initialized based on the modulus size, typically using ccn_nof_size(mod_nbytes).
- The public key structure pubk is typically allocated with ccrsa_pub_ctx_decl(ccn_sizeof_size(mod_nbytes), pubk);
+ The public key structure pubk is typically allocated with ccrsa_pub_ctx_decl(mod_nbytes, pubk);
 */
 CC_NONNULL_ALL
 int ccrsa_init_pub(ccrsa_pub_ctx_t pubk, const cc_unit *modulus,
@@ -151,9 +178,9 @@ int ccrsa_init_pub(ccrsa_pub_ctx_t pubk, const cc_unit *modulus,
   to speed computation.
 */
 int ccrsa_make_priv(ccrsa_full_ctx_t full_ctx,
-                    size_t e_nbytes, const uint8_t *e_bytes,
-                    size_t p_nbytes, const uint8_t *p_bytes,
-                    size_t q_nbytes, const uint8_t *q_bytes);
+                    size_t e_nbytes, const uint8_t *cc_counted_by(e_nbytes) e_bytes,
+                    size_t p_nbytes, const uint8_t *cc_counted_by(p_nbytes) p_bytes,
+                    size_t q_nbytes, const uint8_t *cc_counted_by(q_nbytes) q_bytes);
 
 /*! @function ccrsa_recover_priv
   @abstract   Initializes an RSA public and private key given the modulus m,
@@ -174,9 +201,9 @@ int ccrsa_make_priv(ccrsa_full_ctx_t full_ctx,
   @return     0          iff successful.
 */
 int ccrsa_recover_priv(ccrsa_full_ctx_t full_ctx,
-                       size_t m_nbytes, const uint8_t *m_bytes,
-                       size_t e_nbytes, const uint8_t *e_bytes,
-                       size_t d_nbytes, const uint8_t *d_bytes,
+                       size_t m_nbytes, const uint8_t *cc_counted_by(m_nbytes) m_bytes,
+                       size_t e_nbytes, const uint8_t *cc_counted_by(e_nbytes) e_bytes,
+                       size_t d_nbytes, const uint8_t *cc_counted_by(d_nbytes) d_bytes,
                        struct ccrng_state *rng);
 
 /*!
@@ -191,13 +218,13 @@ int ccrsa_recover_priv(ccrsa_full_ctx_t full_ctx,
 @result     0    iff successful.
 
 @discussion ccrsa_ctx_n(pubk) must have been initialized based on the modulus size, typically using ccn_nof_size(mod_nbytes).
-    The public key structure pubk is typically allocated with ccrsa_pub_ctx_decl(ccn_sizeof_size(mod_nbytes), pubk);
+    The public key structure pubk is typically allocated with ccrsa_pub_ctx_decl(mod_nbytes, pubk);
 */
 
 CC_NONNULL((1, 3, 5))
 int ccrsa_make_pub(ccrsa_pub_ctx_t pubk,
-                   size_t exp_nbytes, const uint8_t *exp,
-                   size_t mod_nbytes, const uint8_t *mod);
+                   size_t exp_nbytes, const uint8_t *cc_counted_by(exp_nbytes) exp,
+                   size_t mod_nbytes, const uint8_t *cc_counted_by(mod_nbytes) mod);
 
 /*!
 @function   ccrsa_pub_crypt
@@ -211,7 +238,7 @@ int ccrsa_make_pub(ccrsa_pub_ctx_t pubk,
         Clients can use ccn_read_uint() to convert bytes to cc_units to use for this API.
 */
 CC_NONNULL((1, 2, 3))
-int ccrsa_pub_crypt(ccrsa_pub_ctx_t key, cc_unit *out, const cc_unit *in);
+int ccrsa_pub_crypt(ccrsa_pub_ctx_t key, cc_unit *cc_unsafe_indexable out, const cc_unit *cc_unsafe_indexable in);
 
 /*!
 @function   ccrsa_generate_key
@@ -225,12 +252,43 @@ int ccrsa_pub_crypt(ccrsa_pub_ctx_t key, cc_unit *out, const cc_unit *in);
 @result     CCERR_OK if no error
 
 @discussion
-    fk should be allocated using ccrsa_full_ctx_decl(ccn_sizeof(nbits), fk).
+    fk should be allocated using ccrsa_full_ctx_decl_nbits(nbits, fk).
     The unsigned big endian byte array exponent e of length e_size is used as the exponent. It's an error to call this function with an exponent larger than nbits
 */
 CC_NONNULL_ALL
 int ccrsa_generate_key(size_t nbits, ccrsa_full_ctx_t fk,
-                       size_t e_nbytes, const void *e_bytes, struct ccrng_state *rng) CC_WARN_RESULT;
+                       size_t e_nbytes, const void *cc_sized_by(e_nbytes) e_bytes, struct ccrng_state *rng) CC_WARN_RESULT;
+
+/*!
+@function   ccrsa_generate_key_deterministic
+@abstract   Generate a deterministic nbit RSA key pair.
+
+@param      nbits          Bit size requested for the key.
+@param      fk             Allocated context where the generated key will be stored.
+@param      e_nbytes       Byte length of public exponent.
+@param      e              Public exponent in big endian. Recommend value is {0x01, 0x00, 0x01}.
+@param      entropy_nbytes Byte length of entropy.
+@param      entropy        Entropy, initial DRBG seed.
+@param      nonce_nbytes   Byte length of nonce.
+@param      nonce          Unique value combined with the entropy/seed.
+@param      flags          Bitmap for options.
+                           (Only CCRSA_GENKEY_DETERMINISTIC_LEGACY currently supported.)
+@param      rng            Random Number generator for primality testing.
+@result     CCERR_OK if no error
+
+@discussion
+    fk should be allocated using ccrsa_full_ctx_decl_nbits(nbits, fk).
+    The unsigned big endian byte array exponent e of length e_size is used as the exponent. It's an error to call this function with an exponent larger than nbits
+*/
+CC_NONNULL((2, 4, 6, 10))
+int ccrsa_generate_key_deterministic(size_t nbits, ccrsa_full_ctx_t fk,
+                                     size_t e_nbytes, const uint8_t *cc_sized_by(e_nbytes) e,
+                                     size_t entropy_nbytes, const uint8_t *cc_sized_by(entropy_nbytes) entropy,
+                                     size_t nonce_nbytes, const uint8_t *cc_sized_by(nonce_nbytes) nonce,
+                                     uint32_t flags,
+                                     struct ccrng_state *rng);
+
+#define CCRSA_GENKEY_DETERMINISTIC_LEGACY 0b1
 
 /*!
 @function   ccrsa_generate_fips186_key
@@ -245,65 +303,13 @@ int ccrsa_generate_key(size_t nbits, ccrsa_full_ctx_t fk,
 @result     CCERR_OK if no error
 
 @discussion
-   fk should be allocated using ccrsa_full_ctx_decl(ccn_sizeof(nbits), fk).
+   fk should be allocated using ccrsa_full_ctx_decl_nbits(nbits, fk).
    rng and rng_mr shoud be set to the same value. The distinction is only relevant for testing
 */
 CC_NONNULL_ALL int
 ccrsa_generate_fips186_key(size_t nbits, ccrsa_full_ctx_t fk,
-                           size_t e_nbytes, const void *e_bytes,
+                           size_t e_nbytes, const void *cc_sized_by(e_nbytes) e_bytes,
                            struct ccrng_state *rng, struct ccrng_state *rng_mr) CC_WARN_RESULT;
-
-
-
-/* Construct RSA key from fix input in conformance with FIPS186-4 standard */
-
-/*!
-@function   ccrsa_make_fips186_key
-@abstract   Initialize an RSA full key from explicit inputs necessary for validating conformance to FIPS186-4
-
-@param      nbits size in bits of the key to construct
-@param      e_n Size in cc_unit of the public exponent
-@param      e      Public exponent  represented in cc_units
-@param      xp1_nbytes   Size in byte of the first seed for the construction of p
-@param      xp1 First seed for the construction of p
-@param      xp2_nbytes   Size in byte of the second seed for the construction of p
-@param      xp2 Second seed for the construction of p
-@param      xp_nbytes   Size in byte of the large seed for the construction of p
-@param      xp large seed for the construction of p
-@param      xq1_nbytes   Size in byte of the first seed for the construction of q
-@param      xq1 First seed for the construction of q
-@param      xq2_nbytes   Size in byte of the second seed for the construction of q
-@param      xq2 Second seed for the construction of q
-@param      xq_nbytes   Size in byte of the large seed for the construction of q
-@param      xq large seed for the construction of q
-@param      fk     Allocated context where the output constructed key is stored
-@param      np     Pointer to the size in cc_unit of the buffer for the output prime factor p. Updated with actual size.
-@param      r_p   Copy of the output prime factor p
-@param      nq     Pointer to the size in cc_unit of the buffer for the output prime factor q. Updated with actual size.
-@param      r_q   Copy of the output prime factor q
-@param      nm     Pointer to the size in cc_unit of the buffer for the output modulus m=p*q. Updated with actual size.
-@param      r_m   Copy of the output modulus m=p*q
-@param      nd     Pointer to the size in cc_unit of the buffer for the output private exponent d. Updated with actual size.
-@param      r_d   Copy of the output private exponent d
-@result     0          iff successful.
- 
- @discussion
-    fk should be allocated using ccrsa_full_ctx_decl(ccn_sizeof(nbits), fk).
-*/
-
-CC_NONNULL((3, 5, 7, 9, 11, 13, 15, 16))
-int
-ccrsa_make_fips186_key(size_t nbits,
-                       const cc_size e_n, const cc_unit *e,
-                       const cc_size xp1_nbytes, const cc_unit *xp1, const cc_size xp2_nbytes, const cc_unit *xp2,
-                       const cc_size xp_nbytes, const cc_unit *xp,
-                       const cc_size xq1_nbytes, const cc_unit *xq1, const cc_size xq2_nbytes, const cc_unit *xq2,
-                       const cc_size xq_nbytes, const cc_unit *xq,
-                       ccrsa_full_ctx_t fk,
-                       cc_size *np, cc_unit *r_p,
-                       cc_size *nq, cc_unit *r_q,
-                       cc_size *nm, cc_unit *r_m,
-                       cc_size *nd, cc_unit *r_d);
 
 /*
  Signing and Verification algorithms
@@ -340,8 +346,8 @@ CC_NONNULL((1, 2, 3, 5, 7, 8, 9))
 int ccrsa_sign_pss(ccrsa_full_ctx_t key,
                    const struct ccdigest_info* hashAlgorithm, const struct ccdigest_info* MgfHashAlgorithm,
                    size_t salt_nbytes, struct ccrng_state *rng,
-                   size_t digest_nbytes, const uint8_t *digest,
-                   size_t *sig_nbytes, uint8_t *sig);
+                   size_t digest_nbytes, const uint8_t *cc_counted_by(digest_nbytes) digest,
+                   size_t *sig_nbytes, uint8_t *cc_unsafe_indexable sig);
 
 /*!
 @function ccrsa_sign_pss_msg
@@ -374,35 +380,8 @@ CC_NONNULL((1, 2, 3, 5, 7, 8, 9))
 int ccrsa_sign_pss_msg(ccrsa_full_ctx_t key,
                    const struct ccdigest_info* hashAlgorithm, const struct ccdigest_info* MgfHashAlgorithm,
                    size_t salt_nbytes, struct ccrng_state *rng,
-                   size_t msg_nbytes, const uint8_t *msg,
-                   size_t *sig_nbytes, uint8_t *sig);
-
-/*!
-@function   ccrsa_verify_pss
- 
-@brief ccrsa_verify_pss() verifies RSASSA-PSS signature in PKCS1-V2 format
-
-@param   key                The RSA public key
-@param   hashAlgorithm      The hash algorithm used to generate mHash from the original message. It is also used inside the PSS encoding function.
-@param   MgfHashAlgorithm   The hash algorithm for the mask generation function
-@param   digest_nbytes      Length of message hash . Must be equal to hashAlgorithm->output_size
-@param   digest             The signed message hash
-@param   sig_nbytes         The length of generated signature in bytes, which equals the size of the RSA modulus.
-@param   sig                The signature to verify
-@param   salt_nbytes        Length of the salt as used during signature generation. Mismatch would result in the signature being considered invalid
-@param   valid              Input boolean used to indicate a valid signature.
-
-@result  0 && valid == True indicates a valid signature. If return != 0 or valid == False, the signature is invalid.
-*/
-
-CC_NONNULL((2, 3, 5, 7, 9))
-int ccrsa_verify_pss(ccrsa_pub_ctx_t key,
-                     const struct ccdigest_info* hashAlgorithm,
-                     const struct ccdigest_info* MgfHashAlgorithm,
-                     size_t digest_nbytes, const uint8_t *digest,
-                     size_t sig_nbytes, const uint8_t *sig,
-                     size_t salt_nbytes, bool *valid)
-cc_deprecate_with_replacement("ccrsa_verify_pss_digest", 13.0, 10.15, 13.0, 6.0, 4.0);
+                   size_t msg_nbytes, const uint8_t *cc_counted_by(msg_nbytes) msg,
+                   size_t *sig_nbytes, uint8_t *cc_unsafe_indexable sig);
 
 /*!
 @function   ccrsa_verify_pss_digest
@@ -419,8 +398,8 @@ cc_deprecate_with_replacement("ccrsa_verify_pss_digest", 13.0, 10.15, 13.0, 6.0,
 @param   salt_nbytes       Length of the salt as used during signature generation.
 @param   fault_canary_out  OPTIONAL cc_fault_canary_t (see discussion)
 
-@result   CCERR_SIGNATURE_VALID on signature success.
-         CCERR_SIGNATURE_INVALID on signature failure.
+@result   CCERR_VALID_SIGNATURE on signature success.
+         CCERR_INVALID_SIGNATURE on signature failure.
          other on some other signature verification issue.
  
 @discussion If the fault_canary_out argument is not NULL, the value `CCRSA_PSS_FAULT_CANARY` will be placed into fault_canary_out
@@ -431,8 +410,8 @@ CC_NONNULL((1, 2, 3, 5, 7))
 int ccrsa_verify_pss_digest(ccrsa_pub_ctx_t key,
                             const struct ccdigest_info* di,
                             const struct ccdigest_info* mgfdi,
-                            size_t digest_nbytes, const uint8_t *digest,
-                            size_t sig_nbytes, const uint8_t *sig,
+                            size_t digest_nbytes, const uint8_t *cc_counted_by(digest_nbytes) digest,
+                            size_t sig_nbytes, const uint8_t *cc_unsafe_indexable sig,
                             size_t salt_nbytes, cc_fault_canary_t fault_canary_out);
 
 /*!
@@ -450,8 +429,8 @@ int ccrsa_verify_pss_digest(ccrsa_pub_ctx_t key,
 @param   salt_nbytes       Length of the salt as used during signature generation.
 @param   fault_canary_out  OPTIONAL cc_fault_canary_t (see discussion)
 
-@result  CCERR_SIGNATURE_VALID on signature success.
-        CCERR_SIGNATURE_INVALID on signature failure.
+@result  CCERR_VALID_SIGNATURE on signature success.
+        CCERR_INVALID_SIGNATURE on signature failure.
         other on some other signature verification issue.
  
 @discussion If the fault_canary_out argument is not NULL, the value `CCRSA_PSS_FAULT_CANARY` will be placed into fault_canary_out
@@ -462,8 +441,8 @@ CC_NONNULL((1, 2, 3, 5, 7))
 int ccrsa_verify_pss_msg(ccrsa_pub_ctx_t key,
                          const struct ccdigest_info* di,
                          const struct ccdigest_info* mgfdi,
-                         size_t msg_nbytes, const uint8_t *msg,
-                         size_t sig_nbytes, const uint8_t *sig,
+                         size_t msg_nbytes, const uint8_t *cc_counted_by(msg_nbytes) msg,
+                         size_t sig_nbytes, const uint8_t *cc_counted_by(sig_nbytes) sig,
                          size_t salt_nbytes, cc_fault_canary_t fault_canary_out);
 
 
@@ -489,8 +468,8 @@ int ccrsa_verify_pss_msg(ccrsa_pub_ctx_t key,
  */
 CC_NONNULL((1, 4, 5, 6))
 int ccrsa_sign_pkcs1v15(ccrsa_full_ctx_t key, const uint8_t *oid,
-                        size_t digest_len, const uint8_t *digest,
-                        size_t *sig_len, uint8_t *sig);
+                        size_t digest_len, const uint8_t *cc_counted_by(digest_len) digest,
+                        size_t *sig_len, uint8_t *cc_unsafe_indexable sig);
 
 /*!
  @function   ccrsa_sign_pkcs1v15_msg
@@ -512,8 +491,8 @@ int ccrsa_sign_pkcs1v15(ccrsa_full_ctx_t key, const uint8_t *oid,
  */
 CC_NONNULL((1, 2, 4, 5, 6))
 int ccrsa_sign_pkcs1v15_msg(ccrsa_full_ctx_t key, const struct ccdigest_info* di,
-                            size_t msg_len, const uint8_t *msg,
-                            size_t *sig_len, uint8_t *sig);
+                            size_t msg_len, const uint8_t *cc_counted_by(msg_len) msg,
+                            size_t *sig_len, uint8_t *cc_unsafe_indexable sig);
 
 
 /*!
@@ -538,8 +517,8 @@ int ccrsa_sign_pkcs1v15_msg(ccrsa_full_ctx_t key, const struct ccdigest_info* di
 */
 CC_NONNULL((1, 4, 6, 7))
 int ccrsa_verify_pkcs1v15(ccrsa_pub_ctx_t key, const uint8_t *oid,
-                          size_t digest_len, const uint8_t *digest,
-                          size_t sig_len, const uint8_t *sig,
+                          size_t digest_len, const uint8_t *cc_counted_by(digest_len) digest,
+                          size_t sig_len, const uint8_t *cc_counted_by(sig_len) sig,
                           bool *valid);
 
 /*!
@@ -563,8 +542,8 @@ int ccrsa_verify_pkcs1v15(ccrsa_pub_ctx_t key, const uint8_t *oid,
 */
 CC_NONNULL((1, 4, 6))
 int ccrsa_verify_pkcs1v15_digest(ccrsa_pub_ctx_t key, const uint8_t *oid,
-                          size_t digest_len, const uint8_t *digest,
-                          size_t sig_len, const uint8_t *sig,
+                          size_t digest_len, const uint8_t *cc_counted_by(digest_len) digest,
+                          size_t sig_len, const uint8_t *cc_counted_by(sig_len) sig,
                           cc_fault_canary_t fault_canary_out);
 
 /*!
@@ -590,8 +569,8 @@ int ccrsa_verify_pkcs1v15_digest(ccrsa_pub_ctx_t key, const uint8_t *oid,
 */
 CC_NONNULL((1, 2, 4, 6))
 int ccrsa_verify_pkcs1v15_msg(ccrsa_pub_ctx_t key, const struct ccdigest_info* di,
-                          size_t msg_len, const uint8_t *msg,
-                          size_t sig_len, const uint8_t *sig,
+                          size_t msg_len, const uint8_t *cc_counted_by(msg_len) msg,
+                          size_t sig_len, const uint8_t *cc_counted_by(sig_len) sig,
                           cc_fault_canary_t fault_canary_out);
 
 /*!
@@ -616,7 +595,7 @@ size_t ccder_encode_rsa_pub_size(const ccrsa_pub_ctx_t key);
  */
 
 CC_NONNULL((1, 2, 3))
-uint8_t *ccder_encode_rsa_pub(const ccrsa_pub_ctx_t key, uint8_t *der, uint8_t *der_end);
+uint8_t *ccder_encode_rsa_pub(const ccrsa_pub_ctx_t key, uint8_t *cc_ended_by(der_end) der, uint8_t *der_end);
 
 
 /*!
@@ -641,7 +620,7 @@ size_t ccder_encode_rsa_priv_size(const ccrsa_full_ctx_t key);
  */
 
 CC_NONNULL((1, 2, 3))
-uint8_t *ccder_encode_rsa_priv(const ccrsa_full_ctx_t key, const uint8_t *der, uint8_t *der_end);
+uint8_t *ccder_encode_rsa_priv(const ccrsa_full_ctx_t key, const uint8_t *cc_ended_by(der_end) der, uint8_t *der_end);
 
 /*!
  @function   ccder_decode_rsa_pub_n
@@ -656,7 +635,7 @@ uint8_t *ccder_encode_rsa_priv(const ccrsa_full_ctx_t key, const uint8_t *der, u
  */
 
 CC_NONNULL((1, 2))
-cc_size ccder_decode_rsa_pub_n(const uint8_t *der, const uint8_t *der_end);
+cc_size ccder_decode_rsa_pub_n(const uint8_t *cc_ended_by(der_end) der, const uint8_t *der_end);
 
 /*!
  @function   ccder_decode_rsa_pub
@@ -671,7 +650,7 @@ cc_size ccder_decode_rsa_pub_n(const uint8_t *der, const uint8_t *der_end);
  */
 
 CC_NONNULL((1, 2, 3))
-const uint8_t *ccder_decode_rsa_pub(const ccrsa_pub_ctx_t key, const uint8_t *der, const uint8_t *der_end);
+const uint8_t *ccder_decode_rsa_pub(const ccrsa_pub_ctx_t key, const uint8_t *cc_ended_by(der_end) der, const uint8_t *der_end);
 
 /*!
  @function   ccder_decode_rsa_pub_x509_n
@@ -685,7 +664,7 @@ const uint8_t *ccder_decode_rsa_pub(const ccrsa_pub_ctx_t key, const uint8_t *de
  */
 
 CC_NONNULL((1, 2))
-cc_size ccder_decode_rsa_pub_x509_n(const uint8_t *der, const uint8_t *der_end);
+cc_size ccder_decode_rsa_pub_x509_n(const uint8_t *cc_ended_by(der_end) der, const uint8_t *der_end);
 
 /*!
  @function   ccder_decode_rsa_pub_x509
@@ -699,7 +678,7 @@ cc_size ccder_decode_rsa_pub_x509_n(const uint8_t *der, const uint8_t *der_end);
  */
 
 CC_NONNULL((1, 2, 3))
-const uint8_t *ccder_decode_rsa_pub_x509(const ccrsa_pub_ctx_t key, const uint8_t *der, const uint8_t *der_end);
+const uint8_t *ccder_decode_rsa_pub_x509(const ccrsa_pub_ctx_t key, const uint8_t *cc_ended_by(der_end) der, const uint8_t *der_end);
 
 
 /*!
@@ -714,7 +693,7 @@ const uint8_t *ccder_decode_rsa_pub_x509(const ccrsa_pub_ctx_t key, const uint8_
  */
 
 CC_NONNULL((1, 2))
-cc_size ccder_decode_rsa_priv_n(const uint8_t *der, const uint8_t *der_end);
+cc_size ccder_decode_rsa_priv_n(const uint8_t *cc_ended_by(der_end) der, const uint8_t *der_end);
 
 /*!
  @function   ccder_decode_rsa_priv
@@ -728,7 +707,7 @@ cc_size ccder_decode_rsa_priv_n(const uint8_t *der, const uint8_t *der_end);
  */
 
 CC_NONNULL((1, 2, 3))
-const uint8_t *ccder_decode_rsa_priv(const ccrsa_full_ctx_t key, const uint8_t *der, const uint8_t *der_end);
+const uint8_t *ccder_decode_rsa_priv(const ccrsa_full_ctx_t key, const uint8_t *cc_ended_by(der_end) der, const uint8_t *der_end);
 
 /*!
  @function   ccrsa_export_pub_size
@@ -754,7 +733,7 @@ size_t ccrsa_export_pub_size(const ccrsa_pub_ctx_t key) {
  */
 
 CC_NONNULL((1, 3))
-int ccrsa_export_pub(const ccrsa_pub_ctx_t key, size_t out_len, uint8_t *out);
+int ccrsa_export_pub(const ccrsa_pub_ctx_t key, size_t out_len, uint8_t *cc_counted_by(out_len) out);
 /*!
  @function   ccrsa_import_pub_n
  @abstract   Calculate "n" for a public key imported from a data package.
@@ -767,10 +746,11 @@ int ccrsa_export_pub(const ccrsa_pub_ctx_t key, size_t out_len, uint8_t *out);
  */
 
 CC_INLINE CC_NONNULL((2))
-cc_size ccrsa_import_pub_n(size_t inlen, const uint8_t *der) {
-    cc_size size = ccder_decode_rsa_pub_x509_n(der, der + inlen);
+cc_size ccrsa_import_pub_n(size_t inlen, const uint8_t *cc_sized_by(inlen) der) {
+    const uint8_t *local_der = der;
+    cc_size size = ccder_decode_rsa_pub_x509_n(local_der, local_der + inlen);
     if(size == 0) {
-        size = ccder_decode_rsa_pub_n(der, der + inlen);
+        size = ccder_decode_rsa_pub_n(local_der, local_der + inlen);
     }
     return size;
 }
@@ -787,7 +767,7 @@ cc_size ccrsa_import_pub_n(size_t inlen, const uint8_t *der) {
  */
 
 CC_NONNULL((1, 3))
-int ccrsa_import_pub(ccrsa_pub_ctx_t key, size_t inlen, const uint8_t *der);
+int ccrsa_import_pub(ccrsa_pub_ctx_t key, size_t inlen, const uint8_t *cc_sized_by(inlen) der);
 
 /*!
  @function   ccrsa_export_priv_size
@@ -813,8 +793,9 @@ size_t ccrsa_export_priv_size(const ccrsa_full_ctx_t key) {
  */
 
 CC_INLINE CC_NONNULL((1, 3))
-int ccrsa_export_priv(const ccrsa_full_ctx_t key, size_t out_len, uint8_t *out) {
-    return (ccder_encode_rsa_priv(key, out, out+out_len) != out);
+int ccrsa_export_priv(const ccrsa_full_ctx_t key, size_t out_len, uint8_t *cc_sized_by(out_len) out) {
+    uint8_t *local_out = out;
+    return (ccder_encode_rsa_priv(key, local_out, local_out+out_len) != out);
 }
 
 /*!
@@ -829,8 +810,9 @@ int ccrsa_export_priv(const ccrsa_full_ctx_t key, size_t out_len, uint8_t *out) 
  */
 
 CC_INLINE CC_NONNULL((2))
-cc_size ccrsa_import_priv_n(size_t inlen, const uint8_t *der) {
-    return ccder_decode_rsa_priv_n(der, der + inlen);
+cc_size ccrsa_import_priv_n(size_t inlen, const uint8_t *cc_sized_by(inlen) der) {
+    const uint8_t *local_der = der;
+    return ccder_decode_rsa_priv_n(local_der, local_der + inlen);
 }
 
 /*!
@@ -845,8 +827,9 @@ cc_size ccrsa_import_priv_n(size_t inlen, const uint8_t *der) {
  */
 
 CC_INLINE CC_NONNULL((1, 3))
-int ccrsa_import_priv(ccrsa_full_ctx_t key, size_t inlen, const uint8_t *der) {
-    return (ccder_decode_rsa_priv(key, der, der+inlen) == NULL);
+int ccrsa_import_priv(ccrsa_full_ctx_t key, size_t inlen, const uint8_t *cc_sized_by(inlen) der) {
+    const uint8_t *local_der = der;
+    return (ccder_decode_rsa_priv(key, local_der, local_der + inlen) == NULL);
 }
 
 /*!
@@ -864,20 +847,20 @@ int ccrsa_import_priv(ccrsa_full_ctx_t key, size_t inlen, const uint8_t *der) {
 @discussion if either allocated buffer length is insufficient, the function returns an error
 */
 CC_NONNULL((1, 2))
-int ccrsa_get_pubkey_components(const ccrsa_pub_ctx_t pubkey, uint8_t *modulus, size_t *modulusLength, uint8_t *exponent, size_t *exponentLength);
+int ccrsa_get_pubkey_components(const ccrsa_pub_ctx_t pubkey, uint8_t *cc_unsafe_indexable modulus, size_t *modulusLength, uint8_t *cc_unsafe_indexable exponent, size_t *exponentLength);
 
 /*!
 @function   ccrsa_get_fullkey_components
 @abstract   Copy each component of the public key to the given buffers
 
 @param      key                              Full key
-@param      modulus                     Buffer to the output buffer for the modulus
+@param      modulus                     Output buffer for the modulus
 @param      modulusLength        Pointer to the byte size allocated for the modulus, updated with actual output size
-@param      exponent                  Buffer to the output buffer for the exponent
-@param      exponentLength     Pointer to the byte size allocated for the exponent, updated with actual output size
-@param      p                                  Buffer to the output buffer for the first prime factor of the modulus
+@param      d                                   Output buffer for the private exponent d.
+@param      dLength                     Pointer to the byte size allocated for the private exponent d, updated with actual output size
+@param      p                                  Output buffer for the first prime factor of the modulus
 @param      pLength                     Pointer to the byte size allocated for the prime factor, updated with actual output size
-@param      q                                  Buffer to the output buffer for the second prime factor of the modulus
+@param      q                                  Output buffer for the second prime factor of the modulus
 @param      qLength                     Pointer to the byte size allocated for the prime factor, updated with actual output size
 
 @return     0 is success, not 0 in case of error
@@ -885,8 +868,10 @@ int ccrsa_get_pubkey_components(const ccrsa_pub_ctx_t pubkey, uint8_t *modulus, 
 @discussion if either allocated buffer length is insufficient, the function returns an error
 */
 CC_NONNULL((1, 2))
-int ccrsa_get_fullkey_components(const ccrsa_full_ctx_t key, uint8_t *modulus, size_t *modulusLength, uint8_t *exponent, size_t *exponentLength,
-                                 uint8_t *p, size_t *pLength, uint8_t *q, size_t *qLength);
+int ccrsa_get_fullkey_components(const ccrsa_full_ctx_t key, uint8_t *cc_unsafe_indexable modulus, size_t *modulusLength,
+                                 uint8_t *cc_unsafe_indexable d, size_t *dLength,
+                                 uint8_t *cc_unsafe_indexable p, size_t *pLength,
+                                 uint8_t *cc_unsafe_indexable q, size_t *qLength);
 
 
 /*!

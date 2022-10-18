@@ -30,7 +30,6 @@
 
 #include <kern/debug.h> /* panic */
 #include <kern/thread.h> /* thread_* */
-#include <kern/timer.h> /* timer_data_t */
 #include <kern/policy_internal.h> /* TASK_POLICY_* */
 #include <mach/mach_types.h>
 #include <sys/errno.h>
@@ -141,15 +140,16 @@ kperf_thread_scheduling_sample(struct kperf_thread_scheduling *thsc,
 
 	BUF_INFO(PERF_TI_SCHEDSAMPLE | DBG_FUNC_START, (uintptr_t)thread_tid(thread));
 
-	thsc->kpthsc_user_time = timer_grab(&thread->user_timer);
-	uint64_t system_time = timer_grab(&thread->system_timer);
-
-	if (thread->precise_user_kernel_time) {
-		thsc->kpthsc_system_time = system_time;
+	struct recount_times_mach times = { 0 };
+	if (thread == current_thread()) {
+		boolean_t interrupt_state = ml_set_interrupts_enabled(FALSE);
+		times = recount_current_thread_times();
+		ml_set_interrupts_enabled(interrupt_state);
 	} else {
-		thsc->kpthsc_user_time += system_time;
-		thsc->kpthsc_system_time = 0;
+		times = recount_thread_times(thread);
 	}
+	thsc->kpthsc_user_time = times.rtm_user;
+	thsc->kpthsc_system_time = times.rtm_system;
 
 	thsc->kpthsc_runnable_time = timer_grab(&thread->runnable_timer);
 	thsc->kpthsc_state = thread->state;
@@ -398,7 +398,7 @@ kperf_thread_dispatch_log(struct kperf_thread_dispatch *thdi)
 void
 kperf_thread_inscyc_log(struct kperf_context *context)
 {
-#if MONOTONIC
+#if CONFIG_PERVASIVE_CPI
 	thread_t cur_thread = current_thread();
 
 	if (context->cur_thread != cur_thread) {
@@ -406,18 +406,12 @@ kperf_thread_inscyc_log(struct kperf_context *context)
 		return;
 	}
 
-	uint64_t counts[MT_CORE_NFIXED] = { 0 };
-	mt_cur_thread_fixed_counts(counts);
-
-#if defined(__LP64__)
-	BUF_DATA(PERF_TI_INSCYCDATA, counts[MT_CORE_INSTRS], counts[MT_CORE_CYCLES]);
-#else /* defined(__LP64__) */
-	/* 32-bit platforms don't count instructions */
-	BUF_DATA(PERF_TI_INSCYCDATA_32, 0, 0, UPPER_32(counts[MT_CORE_CYCLES]),
-	    LOWER_32(counts[MT_CORE_CYCLES]));
-#endif /* !defined(__LP64__) */
-
-#else
+	struct recount_usage usage = { 0 };
+	struct recount_usage perf_only = { 0 };
+	recount_current_thread_usage_perf_only(&usage, &perf_only);
+	BUF_DATA(PERF_TI_INSCYCDATA, usage.ru_instructions, usage.ru_cycles,
+	    perf_only.ru_instructions, perf_only.ru_cycles);
+#else /* CONFIG_PERVASIVE_CPI */
 #pragma unused(context)
-#endif /* MONOTONIC */
+#endif /* !CONFIG_PERVASIVE_CPI */
 }

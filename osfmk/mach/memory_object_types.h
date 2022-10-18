@@ -164,24 +164,33 @@ typedef const struct memory_object_pager_ops {
 		memory_object_t mem_obj,
 		memory_object_offset_t offset,
 		memory_object_cluster_size_t size);
+#if XNU_KERNEL_PRIVATE
+	void *__obsolete_memory_object_data_unlock;
+	void *__obsolete_memory_object_synchronize;
+#else
 	kern_return_t (*memory_object_data_unlock)(
 		memory_object_t mem_obj,
 		memory_object_offset_t offset,
 		memory_object_size_t size,
-		vm_prot_t desired_access);
+		vm_prot_t desired_access); /* obsolete */
 	kern_return_t (*memory_object_synchronize)(
 		memory_object_t mem_obj,
 		memory_object_offset_t offset,
 		memory_object_size_t size,
-		vm_sync_t sync_flags);
+		vm_sync_t sync_flags); /* obsolete */
+#endif /* !XNU_KERNEL_PRIVATE */
 	kern_return_t (*memory_object_map)(
 		memory_object_t mem_obj,
 		vm_prot_t prot);
 	kern_return_t (*memory_object_last_unmap)(
 		memory_object_t mem_obj);
+#if XNU_KERNEL_PRIVATE
+	void *__obsolete_memory_object_data_reclaim;
+#else
 	kern_return_t (*memory_object_data_reclaim)(
 		memory_object_t mem_obj,
-		boolean_t reclaim_backing_store);
+		boolean_t reclaim_backing_store); /* obsolete */
+#endif /* !XNU_KERNEL_PRIVATE */
 	boolean_t (*memory_object_backing_object)(
 		memory_object_t mem_obj,
 		memory_object_offset_t mem_obj_offset,

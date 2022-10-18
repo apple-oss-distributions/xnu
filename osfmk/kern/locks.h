@@ -30,25 +30,26 @@
 #define _KERN_LOCKS_H_
 
 #include <sys/cdefs.h>
+#include <sys/appleapiopts.h>
 
+#include <mach/boolean.h>
+#include <machine/locks.h>
+
+#include <kern/kern_types.h>
+#include <kern/lock_attr.h>
+#include <kern/lock_group.h>
+#include <kern/lock_mtx.h>
+#include <kern/lock_rw.h>
+#include <kern/lock_types.h>
+#ifdef KERNEL_PRIVATE
+#include <kern/ticket_lock.h>
+#endif
 #ifdef  XNU_KERNEL_PRIVATE
 #include <kern/startup.h>
 #include <kern/percpu.h>
 #endif /* XNU_KERNEL_PRIVATE */
 
 __BEGIN_DECLS
-
-#include <sys/appleapiopts.h>
-#include <mach/boolean.h>
-#include <kern/kern_types.h>
-#include <kern/lock_group.h>
-#include <machine/locks.h>
-#ifdef KERNEL_PRIVATE
-#include <kern/ticket_lock.h>
-#endif
-#include <kern/lock_types.h>
-#include <kern/lock_attr.h>
-#include <kern/lock_rw.h>
 
 #define decl_lck_spin_data(class, name)     class lck_spin_t name
 
@@ -128,73 +129,37 @@ extern boolean_t        lck_spin_try_lock_nopreempt_grp(
 extern boolean_t        kdp_lck_spin_is_acquired(
 	lck_spin_t              *lck);
 
-struct _lck_mtx_ext_;
-extern void lck_mtx_init_ext(
-	lck_mtx_t               *lck,
-	struct _lck_mtx_ext_    *lck_ext,
-	lck_grp_t               *grp,
-	lck_attr_t              *attr);
-
-#endif
-
-#define decl_lck_mtx_data(class, name)     class lck_mtx_t name
-
-extern lck_mtx_t        *lck_mtx_alloc_init(
-	lck_grp_t               *grp,
-	lck_attr_t              *attr);
-
-extern void             lck_mtx_init(
-	lck_mtx_t               *lck,
-	lck_grp_t               *grp,
-	lck_attr_t              *attr);
-extern void             lck_mtx_lock(
-	lck_mtx_t               *lck);
-
-extern void             lck_mtx_unlock(
-	lck_mtx_t               *lck);
-
-extern void             lck_mtx_destroy(
-	lck_mtx_t               *lck,
-	lck_grp_t               *grp);
-
-extern void             lck_mtx_free(
-	lck_mtx_t               *lck,
-	lck_grp_t               *grp);
-
-extern wait_result_t    lck_mtx_sleep(
-	lck_mtx_t               *lck,
-	lck_sleep_action_t      lck_sleep_action,
-	event_t                 event,
-	wait_interrupt_t        interruptible);
-
-extern wait_result_t    lck_mtx_sleep_deadline(
-	lck_mtx_t               *lck,
-	lck_sleep_action_t      lck_sleep_action,
-	event_t                 event,
-	wait_interrupt_t        interruptible,
-	uint64_t                deadline);
-
-#ifdef KERNEL_PRIVATE
 /*
  * Name: lck_spin_sleep_with_inheritor
  *
- * Description: deschedule the current thread and wait on the waitq associated with event to be woken up.
- *              While waiting, the sched priority of the waiting thread will contribute to the push of the event that will
- *              be directed to the inheritor specified.
- *              An interruptible mode and deadline can be specified to return earlier from the wait.
+ * Description:
+ *   deschedule the current thread and wait on the waitq associated with event
+ *   to be woken up.
+ *
+ *   While waiting, the sched priority of the waiting thread will contribute to
+ *   the push of the event that will be directed to the inheritor specified.
+ *
+ *   An interruptible mode and deadline can be specified to return earlier from
+ *   the wait.
  *
  * Args:
- *   Arg1: lck_spin_t lock used to protect the sleep. The lock will be dropped while sleeping and reaquired before returning according to the sleep action specified.
+ *   Arg1: lck_spin_t lock used to protect the sleep.
+ *         The lock will be dropped while sleeping and reaquired before
+ *         returning according to the sleep action specified.
  *   Arg2: sleep action. LCK_SLEEP_DEFAULT, LCK_SLEEP_UNLOCK.
  *   Arg3: event to wait on.
  *   Arg4: thread to propagate the event push to.
  *   Arg5: interruptible flag for wait.
  *   Arg6: deadline for wait.
  *
- * Conditions: Lock must be held. Returns with the lock held according to the sleep action specified.
- *             Lock will be dropped while waiting.
- *             The inheritor specified cannot run in user space until another inheritor is specified for the event or a
- *             wakeup for the event is called.
+ * Conditions:
+ *   Lock must be held.
+ *
+ *   Returns with the lock held according to the sleep action specified.
+ *   Lock will be dropped while waiting.
+ *
+ *   The inheritor specified cannot return to user space or exit until another
+ *   inheritor is specified for the event or a wakeup for the event is called.
  *
  * Returns: result of the wait.
  */
@@ -209,13 +174,20 @@ extern wait_result_t lck_spin_sleep_with_inheritor(
 /*
  * Name: lck_ticket_sleep_with_inheritor
  *
- * Description: deschedule the current thread and wait on the waitq associated with event to be woken up.
- *              While waiting, the sched priority of the waiting thread will contribute to the push of the event that will
- *              be directed to the inheritor specified.
- *              An interruptible mode and deadline can be specified to return earlier from the wait.
+ * Description:
+ *   deschedule the current thread and wait on the waitq associated with event
+ *   to be woken up.
+ *
+ *   While waiting, the sched priority of the waiting thread will contribute to
+ *   the push of the event that will be directed to the inheritor specified.
+ *
+ *   An interruptible mode and deadline can be specified to return earlier from
+ *   the wait.
  *
  * Args:
- *   Arg1: lck_ticket_t lock used to protect the sleep.  The lock will be dropped while sleeping and reaquired before returning according to the sleep action specified.
+ *   Arg1: lck_ticket_t lock used to protect the sleep.
+ *         The lock will be dropped while sleeping and reaquired before
+ *         returning according to the sleep action specified.
  *   Arg2: lck_grp_t associated with the lock.
  *   Arg3: sleep action. LCK_SLEEP_DEFAULT, LCK_SLEEP_UNLOCK.
  *   Arg3: event to wait on.
@@ -223,10 +195,15 @@ extern wait_result_t lck_spin_sleep_with_inheritor(
  *   Arg6: interruptible flag for wait.
  *   Arg7: deadline for wait.
  *
- * Conditions: Lock must be held. Returns with the lock held according to the sleep action specified.
- *             Lock will be dropped while waiting.
- *             The inheritor specified cannot run in user space until another inheritor is specified for the event or a
- *             wakeup for the event is called.
+ * Conditions:
+ *   Lock must be held.
+ *
+ *   Returns with the lock held according to the sleep action specified.
+ *
+ *   Lock will be dropped while waiting.
+ *
+ *   The inheritor specified cannot return to user space or exit until another
+ *   inheritor is specified for the event or a wakeup for the event is called.
  *
  * Returns: result of the wait.
  */
@@ -242,23 +219,35 @@ extern wait_result_t lck_ticket_sleep_with_inheritor(
 /*
  * Name: lck_mtx_sleep_with_inheritor
  *
- * Description: deschedule the current thread and wait on the waitq associated with event to be woken up.
- *              While waiting, the sched priority of the waiting thread will contribute to the push of the event that will
- *              be directed to the inheritor specified.
- *              An interruptible mode and deadline can be specified to return earlier from the wait.
+ * Description:
+ *   deschedule the current thread and wait on the waitq associated with event
+ *   to be woken up.
+ *
+ *   While waiting, the sched priority of the waiting thread will contribute to
+ *   the push of the event that will be directed to the inheritor specified.
+ *
+ *   An interruptible mode and deadline can be specified to return earlier from
+ *   the wait.
  *
  * Args:
- *   Arg1: lck_mtx_t lock used to protect the sleep. The lock will be dropped while sleeping and reaquired before returning according to the sleep action specified.
+ *   Arg1: lck_mtx_t lock used to protect the sleep.
+ *         The lock will be dropped while sleeping and reaquired before
+ *         returning according to the sleep action specified.
  *   Arg2: sleep action. LCK_SLEEP_DEFAULT, LCK_SLEEP_UNLOCK, LCK_SLEEP_SPIN, LCK_SLEEP_SPIN_ALWAYS.
  *   Arg3: event to wait on.
  *   Arg4: thread to propagate the event push to.
  *   Arg5: interruptible flag for wait.
  *   Arg6: deadline for wait.
  *
- * Conditions: Lock must be held. Returns with the lock held according to the sleep action specified.
- *             Lock will be dropped while waiting.
- *             The inheritor specified cannot run in user space until another inheritor is specified for the event or a
- *             wakeup for the event is called.
+ * Conditions:
+ *   Lock must be held.
+ *
+ *   Returns with the lock held according to the sleep action specified.
+ *
+ *   Lock will be dropped while waiting.
+ *
+ *   The inheritor specified cannot return to user space or exit until another
+ *   inheritor is specified for the event or a wakeup for the event is called.
  *
  * Returns: result of the wait.
  */
@@ -273,23 +262,35 @@ extern wait_result_t lck_mtx_sleep_with_inheritor(
 /*
  * Name: lck_mtx_sleep_with_inheritor
  *
- * Description: deschedule the current thread and wait on the waitq associated with event to be woken up.
- *              While waiting, the sched priority of the waiting thread will contribute to the push of the event that will
- *              be directed to the inheritor specified.
- *              An interruptible mode and deadline can be specified to return earlier from the wait.
+ * Description:
+ *   deschedule the current thread and wait on the waitq associated with event
+ *   to be woken up.
+ *
+ *   While waiting, the sched priority of the waiting thread will contribute to
+ *   the push of the event that will be directed to the inheritor specified.
+ *
+ *   An interruptible mode and deadline can be specified to return earlier from
+ *   the wait.
  *
  * Args:
- *   Arg1: lck_rw_t lock used to protect the sleep. The lock will be dropped while sleeping and reaquired before returning according to the sleep action specified.
+ *   Arg1: lck_rw_t lock used to protect the sleep.
+ *         The lock will be dropped while sleeping and reaquired before
+ *         returning according to the sleep action specified.
  *   Arg2: sleep action. LCK_SLEEP_DEFAULT, LCK_SLEEP_SHARED, LCK_SLEEP_EXCLUSIVE.
  *   Arg3: event to wait on.
  *   Arg4: thread to propagate the event push to.
  *   Arg5: interruptible flag for wait.
  *   Arg6: deadline for wait.
  *
- * Conditions: Lock must be held. Returns with the lock held according to the sleep action specified.
- *             Lock will be dropped while waiting.
- *             The inheritor specified cannot run in user space until another inheritor is specified for the event or a
- *             wakeup for the event is called.
+ * Conditions:
+ *   Lock must be held.
+ *
+ *   Returns with the lock held according to the sleep action specified.
+ *
+ *   Lock will be dropped while waiting.
+ *
+ *   The inheritor specified cannot return to user space or exit until another
+ *   inheritor is specified for the event or a wakeup for the event is called.
  *
  * Returns: result of the wait.
  */
@@ -304,8 +305,14 @@ extern wait_result_t lck_rw_sleep_with_inheritor(
 /*
  * Name: wakeup_one_with_inheritor
  *
- * Description: wake up one waiter for event if any. The thread woken up will be the one with the higher sched priority waiting on event.
- *              The push for the event will be transferred from the last inheritor to the woken up thread.
+ * Description:
+ *   Wake up one waiter for event if any.
+ *
+ *   The thread woken up will be the one with the higher sched priority waiting
+ *   on event.
+ *
+ *   The push for the event will be transferred from the last inheritor to the
+ *   woken up thread.
  *
  * Args:
  *   Arg1: event to wake from.
@@ -314,10 +321,14 @@ extern wait_result_t lck_rw_sleep_with_inheritor(
  *
  * Returns: KERN_NOT_WAITING if no threads were waiting, KERN_SUCCESS otherwise.
  *
- * Conditions: The new inheritor wokenup cannot run in user space until another inheritor is specified for the event or a
- *             wakeup for the event is called.
- *             A reference for the wokenup thread is acquired.
- *             NOTE: this cannot be called from interrupt context.
+ * Conditions:
+ *   The new woken up inheritor cannot return to user space or exit until
+ *   another inheritor is specified for the event or a new wakeup for the event
+ *   is performed.
+ *
+ *   A reference for the woken thread is acquired.
+ *
+ *   NOTE: this cannot be called from interrupt context.
  */
 extern kern_return_t wakeup_one_with_inheritor(
 	event_t                 event,
@@ -345,7 +356,8 @@ extern kern_return_t wakeup_all_with_inheritor(
 /*
  * Name: change_sleep_inheritor
  *
- * Description: Redirect the push of the waiting threads of event to the new inheritor specified.
+ * Description:
+ *   Redirect the push of the waiting threads of event to the new inheritor specified.
  *
  * Args:
  *   Arg1: event to redirect the push.
@@ -353,18 +365,210 @@ extern kern_return_t wakeup_all_with_inheritor(
  *
  * Returns: KERN_NOT_WAITING if no threads were waiting, KERN_SUCCESS otherwise.
  *
- * Conditions: In case of success, the new inheritor cannot run in user space until another inheritor is specified for the event or a
- *             wakeup for the event is called.
- *             NOTE: this cannot be called from interrupt context.
+ * Conditions:
+ *   In case of success, the new inheritor cannot return to user space or exit
+ *   until another inheritor is specified for the event or a wakeup for the
+ *   event is called.
+ *
+ *   NOTE: this cannot be called from interrupt context.
  */
 extern kern_return_t change_sleep_inheritor(
 	event_t                 event,
 	thread_t                inheritor);
 
+
+#if XNU_KERNEL_PRIVATE
+
+/*
+ * Bits layout of cond_swi_var32/cond_swi_var64.
+ * First SWI_COND_OWNER_BITS are reserved for the owner
+ * the remaining can be used by the caller
+ */
+#define SWI_COND_OWNER_BITS     20
+#define SWI_COND_CALLER_BITS    (32 - SWI_COND_OWNER_BITS)
+
+typedef struct cond_swi_var32 {
+	union {
+		uint32_t cond32_data;
+		struct {
+			uint32_t cond32_owner: SWI_COND_OWNER_BITS,
+			    cond32_caller_bits: SWI_COND_CALLER_BITS;
+		};
+	};
+} cond_swi_var32_s;
+
+typedef struct cond_swi_var64 {
+	union {
+		uint64_t cond64_data;
+		struct {
+			uint32_t cond64_owner: SWI_COND_OWNER_BITS,
+			    cond64_caller_bits: SWI_COND_CALLER_BITS;
+			uint32_t cond64_caller_extra;
+		};
+	};
+} cond_swi_var64_s;
+
+typedef struct cond_swi_var *cond_swi_var_t;
+
+/*
+ * Name: cond_sleep_with_inheritor32
+ *
+ * Description: Conditionally sleeps with inheritor, with condition variable of 32bits.
+ *              Allows a thread to conditionally sleep while indicating which thread should
+ *              inherit the priority push associated with the condition.
+ *              The condition should be expressed through a cond_swi_var32_s pointer.
+ *              The condition needs to be populated by the caller with the ctid of the
+ *              thread that should inherit the push. The remaining bits of the condition
+ *              can be used by the caller to implement its own synchronization logic.
+ *              A copy of the condition value observed by the caller when it decided to call
+ *              this function should be provided to prevent races with matching wakeups.
+ *              This function will atomically check the value stored in the condition against
+ *              the expected/observed one provided. If the check doesn't pass the thread will not
+ *              sleep and the function will return.
+ *              The ctid provided in the condition will be used only after a successful
+ *              check.
+ *
+ * Args:
+ *   Arg1: cond_swi_var32_s pointer that stores the condition to check.
+ *   Arg2: cond_swi_var32_s observed value to check for conditionally sleep.
+ *   Arg3: interruptible flag for wait.
+ *   Arg4: deadline for wait.
+ *
+ * Conditions:
+ *   The inheritor specified cannot return to user space or exit until another
+ *   inheritor is specified for the cond or a wakeup for the cond is called.
+ *
+ * Returns: result of the wait.
+ */
+extern wait_result_t cond_sleep_with_inheritor32(
+	cond_swi_var_t          cond,
+	cond_swi_var32_s        expected_cond,
+	wait_interrupt_t        interruptible,
+	uint64_t                deadline);
+
+/*
+ * Name: cond_sleep_with_inheritor64
+ *
+ * Description: Conditionally sleeps with inheritor, with condition variable of 64bits.
+ *              Allows a thread to conditionally sleep while indicating which thread should
+ *              inherit the priority push associated with the condition.
+ *              The condition should be expressed through a cond_swi_var64_s pointer.
+ *              The condition needs to be populated by the caller with the ctid of the
+ *              thread that should inherit the push. The remaining bits of the condition
+ *              can be used by the caller to implement its own synchronization logic.
+ *              A copy of the condition value observed by the caller when it decided to call
+ *              this function should be provided to prevent races with matching wakeups.
+ *              This function will atomically check the value stored in the condition against
+ *              the expected/observed one provided. If the check doesn't pass the thread will not
+ *              sleep and the function will return.
+ *              The ctid provided in the condition will be used only after a successful
+ *              check.
+ *
+ * Args:
+ *   Arg1: cond_swi_var64_s pointer that stores the condition to check.
+ *   Arg2: cond_swi_var64_s observed value to check for conditionally sleep.
+ *   Arg3: interruptible flag for wait.
+ *   Arg4: deadline for wait.
+ *
+ * Conditions:
+ *   The inheritor specified cannot return to user space or exit until another
+ *   inheritor is specified for the cond or a wakeup for the cond is called.
+ *
+ * Returns: result of the wait.
+ */
+extern wait_result_t cond_sleep_with_inheritor64(
+	cond_swi_var_t          cond,
+	cond_swi_var64_s        expected_cond,
+	wait_interrupt_t        interruptible,
+	uint64_t                deadline);
+
+/*
+ * Name: cond_sleep_with_inheritor64_mask
+ *
+ * Description: Conditionally sleeps with inheritor, with condition variable of 64bits.
+ *              Allows a thread to conditionally sleep while indicating which thread should
+ *              inherit the priority push associated with the condition.
+ *              The condition should be expressed through a cond_swi_var64_s pointer.
+ *              The condition needs to be populated by the caller with the ctid of the
+ *              thread that should inherit the push. The remaining bits of the condition
+ *              can be used by the caller to implement its own synchronization logic.
+ *              A copy of the condition value observed by the caller when it decided to call
+ *              this function should be provided to prevent races with matching wakeups.
+ *              This function will atomically check the value stored in the condition against
+ *              the expected/observed one provided only for the bits that are set in the mask.
+ *              If the check doesn't pass the thread will not sleep and the function will return.
+ *              The ctid provided in the condition will be used only after a successful
+ *              check.
+ *
+ * Args:
+ *   Arg1: cond_swi_var64_s pointer that stores the condition to check.
+ *   Arg2: cond_swi_var64_s observed value to check for conditionally sleep.
+ *   Arg3: mask to apply to the condition to check.
+ *   Arg4: interruptible flag for wait.
+ *   Arg5: deadline for wait.
+ *
+ * Conditions:
+ *   The inheritor specified cannot return to user space or exit until another
+ *   inheritor is specified for the cond or a wakeup for the cond is called.
+ *
+ * Returns: result of the wait.
+ */
+extern wait_result_t cond_sleep_with_inheritor64_mask(
+	cond_swi_var_t          cond,
+	cond_swi_var64_s        expected_cond,
+	uint64_t                check_mask,
+	wait_interrupt_t        interruptible,
+	uint64_t                deadline);
+
+/*
+ * Name: cond_wakeup_one_with_inheritor
+ *
+ * Description: Wake up one waiter waiting on the condition (if any).
+ *              The thread woken up will be the one with the higher sched priority waiting on the condition.
+ *              The push for the condition will be transferred from the last inheritor to the woken up thread.
+ *
+ * Args:
+ *   Arg1: condition to wake from.
+ *   Arg2: wait result to pass to the woken up thread.
+ *   Arg3: pointer for storing the thread wokenup.
+ *
+ * Returns: KERN_NOT_WAITING if no threads were waiting, KERN_SUCCESS otherwise.
+ *
+ * Conditions:
+ *   The new woken up inheritor cannot return to user space or exit until
+ *   another inheritor is specified for the event or a new wakeup for the event
+ *   is performed.
+ *
+ *   A reference for the woken thread is acquired.
+ *
+ *   NOTE: this cannot be called from interrupt context.
+ */
+extern kern_return_t cond_wakeup_one_with_inheritor(
+	cond_swi_var_t          cond,
+	wait_result_t           result,
+	lck_wake_action_t       action,
+	thread_t                *thread_wokenup);
+
+/*
+ * Name: cond_wakeup_all_with_inheritor
+ *
+ * Description: Wake up all waiters waiting on the same condition. The old inheritor will lose the push.
+ *
+ * Args:
+ *   Arg1: condition to wake from.
+ *   Arg2: wait result to pass to the woken up threads.
+ *
+ * Returns: KERN_NOT_WAITING if no threads were waiting, KERN_SUCCESS otherwise.
+ *
+ * Conditions: NOTE: this cannot be called from interrupt context.
+ */
+extern kern_return_t cond_wakeup_all_with_inheritor(
+	cond_swi_var_t          cond,
+	wait_result_t           result);
+
 /*
  * gate structure
  */
-#if XNU_KERNEL_PRIVATE
 typedef struct gate {
 	uintptr_t         gt_data;                // thread holder, interlock bit and waiter bit
 	struct turnstile *gt_turnstile;           // turnstile, protected by the interlock bit
@@ -378,12 +582,15 @@ typedef struct gate {
 		uint32_t  gt_flags;
 	};
 } gate_t;
-#else
+
+#else /* XNU_KERNEL_PRIVATE */
+
 typedef struct gate {
 	uintptr_t         opaque1;
 	uintptr_t         opaque2;
 	uint32_t          opaque3;
 } gate_t;
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 /*
@@ -498,17 +705,25 @@ extern void lck_rw_gate_free(lck_rw_t *lock, gate_t *gate);
  * Conditions: Lock must be held. Returns with the lock held.
  *
  * Returns:
- *          KERN_SUCCESS in case the gate was successfully closed. The current thread is the new holder
- *          of the gate.
- *          A matching lck_rw_gate_open() or lck_rw_gate_handoff() needs to be called later on
- *          to wake up possible waiters on the gate before returning to userspace.
- *          If the intent is to conditionally probe the gate before waiting, the lock must not be dropped
- *          between the calls to lck_rw_gate_try_close() and lck_rw_gate_wait().
+ *   KERN_SUCCESS in case the gate was successfully closed. The current thread
+ *   is the new holder of the gate.
  *
- *          KERN_FAILURE in case the gate was already closed. Will panic if the current thread was already the holder of the gate.
- *          lck_rw_gate_wait() should be called instead if the intent is to unconditionally wait on this gate.
- *          The calls to lck_rw_gate_try_close() and lck_rw_gate_wait() should
- *          be done without dropping the lock that is protecting the gate in between.
+ *   A matching lck_rw_gate_open() or lck_rw_gate_handoff() needs to be called
+ *   later on to wake up possible waiters on the gate before returning to
+ *   userspace.
+ *
+ *   If the intent is to conditionally probe the gate before waiting, the lock
+ *   must not be dropped between the calls to lck_rw_gate_try_close() and
+ *   lck_rw_gate_wait().
+ *
+ *   KERN_FAILURE in case the gate was already closed.
+ *   Will panic if the current thread was already the holder of the gate.
+ *
+ *   lck_rw_gate_wait() should be called instead if the intent is to
+ *   unconditionally wait on this gate.
+ *
+ *   The calls to lck_rw_gate_try_close() and lck_rw_gate_wait() should
+ *   be done without dropping the lock that is protecting the gate in between.
  */
 extern kern_return_t lck_rw_gate_try_close(lck_rw_t *lock, gate_t *gate);
 
@@ -620,7 +835,12 @@ extern void lck_rw_gate_steal(lck_rw_t *lock, gate_t *gate);
  *          GATE_TIMED_OUT - the thread was woken up by a timeout.
  *          GATE_INTERRUPTED - the thread was interrupted while sleeping.
  */
-extern gate_wait_result_t lck_rw_gate_wait(lck_rw_t *lock, gate_t *gate, lck_sleep_action_t lck_sleep_action, wait_interrupt_t interruptible, uint64_t deadline);
+extern gate_wait_result_t lck_rw_gate_wait(
+	lck_rw_t               *lock,
+	gate_t                 *gate,
+	lck_sleep_action_t      lck_sleep_action,
+	wait_interrupt_t        interruptible,
+	uint64_t                deadline);
 
 /*
  * Name: lck_rw_gate_assert
@@ -722,17 +942,25 @@ extern void lck_mtx_gate_free(lck_mtx_t *lock, gate_t *gate);
  * Conditions: Lock must be held. Returns with the lock held.
  *
  * Returns:
- *          KERN_SUCCESS in case the gate was successfully closed. The current thread is the new holder
- *          of the gate.
- *          A matching lck_mtx_gate_open() or lck_mtx_gate_handoff() needs to be called later on
- *          to wake up possible waiters on the gate before returning to userspace.
- *          If the intent is to conditionally probe the gate before waiting, the lock must not be dropped
- *          between the calls to lck_mtx_gate_try_close() and lck_mtx_gate_wait().
+ *   KERN_SUCCESS in case the gate was successfully closed. The current thread
+ *   is the new holder of the gate.
  *
- *          KERN_FAILURE in case the gate was already closed. Will panic if the current thread was already the holder of the gate.
- *          lck_mtx_gate_wait() should be called instead if the intent is to unconditionally wait on this gate.
- *          The calls to lck_mtx_gate_try_close() and lck_mtx_gate_wait() should
- *          be done without dropping the lock that is protecting the gate in between.
+ *   A matching lck_mtx_gate_open() or lck_mtx_gate_handoff() needs to be called
+ *   later on to wake up possible waiters on the gate before returning to
+ *   userspace.
+ *
+ *   If the intent is to conditionally probe the gate before waiting, the lock
+ *   must not be dropped between the calls to lck_mtx_gate_try_close() and
+ *   lck_mtx_gate_wait().
+ *
+ *   KERN_FAILURE in case the gate was already closed. Will panic if the current
+ *   thread was already the holder of the gate.
+ *
+ *   lck_mtx_gate_wait() should be called instead if the intent is to
+ *   unconditionally wait on this gate.
+ *
+ *   The calls to lck_mtx_gate_try_close() and lck_mtx_gate_wait() should
+ *   be done without dropping the lock that is protecting the gate in between.
  */
 extern kern_return_t lck_mtx_gate_try_close(lck_mtx_t *lock, gate_t *gate);
 
@@ -843,7 +1071,12 @@ extern void lck_mtx_gate_steal(lck_mtx_t *lock, gate_t *gate);
  *          GATE_TIMED_OUT - the thread was woken up by a timeout.
  *          GATE_INTERRUPTED - the thread was interrupted while sleeping.
  */
-extern gate_wait_result_t lck_mtx_gate_wait(lck_mtx_t *lock, gate_t *gate, lck_sleep_action_t lck_sleep_action, wait_interrupt_t interruptible, uint64_t deadline);
+extern gate_wait_result_t lck_mtx_gate_wait(
+	lck_mtx_t              *lock,
+	gate_t                 *gate,
+	lck_sleep_action_t      lck_sleep_action,
+	wait_interrupt_t        interruptible,
+	uint64_t                deadline);
 
 /*
  * Name: lck_mtx_gate_assert
@@ -860,109 +1093,62 @@ extern gate_wait_result_t lck_mtx_gate_wait(lck_mtx_t *lock, gate_t *gate, lck_s
  */
 extern void lck_mtx_gate_assert(lck_mtx_t *lock, gate_t *gate, gate_assert_flags_t flags);
 
-extern boolean_t        lck_mtx_try_lock(
-	lck_mtx_t               *lck);
-
-extern void             mutex_pause(uint32_t);
-
-extern void             lck_mtx_yield(
-	lck_mtx_t               *lck);
-
-extern boolean_t        lck_mtx_try_lock_spin(
-	lck_mtx_t               *lck);
-
-extern void             lck_mtx_lock_spin(
-	lck_mtx_t               *lck);
-
-extern boolean_t        kdp_lck_mtx_lock_spin_is_acquired(
-	lck_mtx_t               *lck);
-
-extern void             lck_mtx_convert_spin(
-	lck_mtx_t               *lck);
-
-extern void             lck_mtx_lock_spin_always(
-	lck_mtx_t               *lck);
-
-extern boolean_t        lck_mtx_try_lock_spin_always(
-	lck_mtx_t               *lck);
-
-#define lck_mtx_unlock_always(l)        lck_mtx_unlock(l)
-
 extern void             lck_spin_assert(
 	lck_spin_t              *lck,
 	unsigned                int    type);
 
+#if CONFIG_PV_TICKET
+__startup_func extern void lck_init_pv(void);
+#endif
+
 #endif  /* KERNEL_PRIVATE */
 
-extern void             lck_mtx_assert(
-	lck_mtx_t               *lck,
-	unsigned                int    type);
-
 #if MACH_ASSERT
-#define LCK_MTX_ASSERT(lck, type) lck_mtx_assert((lck),(type))
 #define LCK_SPIN_ASSERT(lck, type) lck_spin_assert((lck),(type))
 #else /* MACH_ASSERT */
-#define LCK_MTX_ASSERT(lck, type)
 #define LCK_SPIN_ASSERT(lck, type)
 #endif /* MACH_ASSERT */
 
 #if DEBUG
-#define LCK_MTX_ASSERT_DEBUG(lck, type) lck_mtx_assert((lck),(type))
 #define LCK_SPIN_ASSERT_DEBUG(lck, type) lck_spin_assert((lck),(type))
 #else /* DEBUG */
-#define LCK_MTX_ASSERT_DEBUG(lck, type)
 #define LCK_SPIN_ASSERT_DEBUG(lck, type)
 #endif /* DEBUG */
 
 #define LCK_ASSERT_OWNED                1
 #define LCK_ASSERT_NOTOWNED             2
 
-#define LCK_MTX_ASSERT_OWNED    LCK_ASSERT_OWNED
-#define LCK_MTX_ASSERT_NOTOWNED LCK_ASSERT_NOTOWNED
-
 #ifdef  MACH_KERNEL_PRIVATE
 
 typedef struct lck_spinlock_to_info {
-	void     *lock;
+	void                   *lock;
 #if DEBUG || DEVELOPMENT
-	uintptr_t owner_thread_orig;
+	uintptr_t               owner_thread_orig;
 #endif /* DEBUG || DEVELOPMENT */
-	uintptr_t owner_thread_cur;
-	int       owner_cpu;
-	uint32_t  extra;
+	uintptr_t               owner_thread_cur;
+	int                     owner_cpu;
+	uint32_t                extra;
 } *lck_spinlock_to_info_t;
 
 extern volatile lck_spinlock_to_info_t lck_spinlock_timeout_in_progress;
 PERCPU_DECL(struct lck_spinlock_to_info, lck_spinlock_to_info);
 
+typedef struct lck_tktlock_pv_info {
+	void                   *ltpi_lck;
+	uint8_t                 ltpi_wt;
+} *lck_tktlock_pv_info_t;
+
+PERCPU_DECL(struct lck_tktlock_pv_info, lck_tktlock_pv_info);
+
 extern void             lck_spinlock_timeout_set_orig_owner(
-	uintptr_t owner);
+	uintptr_t               owner);
+
+extern void             lck_spinlock_timeout_set_orig_ctid(
+	uint32_t                ctid);
 
 extern lck_spinlock_to_info_t lck_spinlock_timeout_hit(
-	void     *lck,
-	uintptr_t owner);
-
-struct turnstile;
-extern void             lck_mtx_lock_wait(
-	lck_mtx_t               *lck,
-	thread_t                holder,
-	struct turnstile        **ts);
-
-extern int              lck_mtx_lock_acquire(
-	lck_mtx_t               *lck,
-	struct turnstile        *ts);
-
-extern  boolean_t       lck_mtx_unlock_wakeup(
-	lck_mtx_t               *lck,
-	thread_t                holder);
-
-extern boolean_t        lck_mtx_ilk_unlock(
-	lck_mtx_t               *lck);
-
-extern boolean_t        lck_mtx_ilk_try_lock(
-	lck_mtx_t               *lck);
-
-extern void lck_mtx_wakeup_adjust_pri(thread_t thread, integer_t priority);
+	void                   *lck,
+	uintptr_t               owner);
 
 #endif /* MACH_KERNEL_PRIVATE */
 #if  XNU_KERNEL_PRIVATE
@@ -981,11 +1167,9 @@ struct lck_spin_startup_spec {
 	lck_attr_t              *lck_attr;
 };
 
-struct lck_mtx_startup_spec {
-	lck_mtx_t               *lck;
-	struct _lck_mtx_ext_    *lck_ext;
+struct lck_ticket_startup_spec {
+	lck_ticket_t            *lck;
 	lck_grp_t               *lck_grp;
-	lck_attr_t              *lck_attr;
 };
 
 extern void             lck_attr_startup_init(
@@ -994,8 +1178,8 @@ extern void             lck_attr_startup_init(
 extern void             lck_spin_startup_init(
 	struct lck_spin_startup_spec *spec);
 
-extern void             lck_mtx_startup_init(
-	struct lck_mtx_startup_spec *spec);
+extern void             lck_ticket_startup_init(
+	struct lck_ticket_startup_spec *spec);
 
 /*
  * Auto-initializing locks declarations
@@ -1006,8 +1190,6 @@ extern void             lck_mtx_startup_init(
  * static locks, these declaration macros can be used:
  *
  * - LCK_SPIN_DECLARE for spinlocks,
- * - LCK_MTX_EARLY_DECLARE for mutexes initialized before memory
- *   allocations are possible,
  * - LCK_MTX_DECLARE for mutexes,
  *
  * For cases when some particular attributes need to be used,
@@ -1018,39 +1200,25 @@ extern void             lck_mtx_startup_init(
 	SECURITY_READ_ONLY_LATE(lck_attr_t) var; \
 	static __startup_data struct lck_attr_startup_spec \
 	__startup_lck_attr_spec_ ## var = { &var, set_flags, clear_flags }; \
-	STARTUP_ARG(LOCKS_EARLY, STARTUP_RANK_SECOND, lck_attr_startup_init, \
+	STARTUP_ARG(LOCKS, STARTUP_RANK_SECOND, lck_attr_startup_init, \
 	    &__startup_lck_attr_spec_ ## var)
 
 #define LCK_SPIN_DECLARE_ATTR(var, grp, attr) \
 	lck_spin_t var; \
 	static __startup_data struct lck_spin_startup_spec \
 	__startup_lck_spin_spec_ ## var = { &var, grp, attr }; \
-	STARTUP_ARG(LOCKS_EARLY, STARTUP_RANK_FOURTH, lck_spin_startup_init, \
+	STARTUP_ARG(LOCKS, STARTUP_RANK_FOURTH, lck_spin_startup_init, \
 	    &__startup_lck_spin_spec_ ## var)
 
 #define LCK_SPIN_DECLARE(var, grp) \
 	LCK_SPIN_DECLARE_ATTR(var, grp, LCK_ATTR_NULL)
 
-#define LCK_MTX_DECLARE_ATTR(var, grp, attr) \
-	lck_mtx_t var; \
-	static __startup_data struct lck_mtx_startup_spec \
-	__startup_lck_mtx_spec_ ## var = { &var, NULL, grp, attr }; \
-	STARTUP_ARG(LOCKS, STARTUP_RANK_FIRST, lck_mtx_startup_init, \
-	    &__startup_lck_mtx_spec_ ## var)
-
-#define LCK_MTX_DECLARE(var, grp) \
-	LCK_MTX_DECLARE_ATTR(var, grp, LCK_ATTR_NULL)
-
-#define LCK_MTX_EARLY_DECLARE_ATTR(var, grp, attr) \
-	lck_mtx_ext_t var ## _ext; \
-	lck_mtx_t var; \
-	static __startup_data struct lck_mtx_startup_spec \
-	__startup_lck_mtx_spec_ ## var = { &var, &var ## _ext, grp, attr }; \
-	STARTUP_ARG(LOCKS_EARLY, STARTUP_RANK_FOURTH, lck_mtx_startup_init, \
-	    &__startup_lck_mtx_spec_ ## var)
-
-#define LCK_MTX_EARLY_DECLARE(var, grp) \
-	LCK_MTX_EARLY_DECLARE_ATTR(var, grp, LCK_ATTR_NULL)
+#define LCK_TICKET_DECLARE(var, grp) \
+	lck_ticket_t var; \
+	static __startup_data struct lck_ticket_startup_spec \
+	__startup_lck_ticket_spec_ ## var = { &var, grp }; \
+	STARTUP_ARG(LOCKS, STARTUP_RANK_FOURTH, lck_ticket_startup_init, \
+	    &__startup_lck_ticket_spec_ ## var)
 
 #endif /* XNU_KERNEL_PRIVATE */
 

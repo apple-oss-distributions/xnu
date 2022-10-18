@@ -59,12 +59,7 @@
 /* version number of the in-kernel shims given to pthread.kext */
 #define PTHREAD_SHIMS_VERSION 1
 
-/* on arm, the callbacks function has two #ifdef arm pointers */
-#if defined(__arm__)
-#define PTHREAD_CALLBACK_MEMBER __unused_was_map_is_1gb
-#else
 #define PTHREAD_CALLBACK_MEMBER kevent_workq_internal
-#endif
 
 /* compile time asserts to check the length of structures in pthread_shims.h */
 static_assert((sizeof(struct pthread_functions_s) - offsetof(struct pthread_functions_s, psynch_rw_yieldwrlock) - sizeof(void*)) == (sizeof(void*) * 100));
@@ -552,9 +547,7 @@ static const struct pthread_callbacks_s pthread_callbacks = {
 	.vm_map_page_info = vm_map_page_info,
 	.ipc_port_copyout_send_pinned = ipc_port_copyout_send_pinned,
 	.thread_set_wq_state32 = thread_set_wq_state32,
-#if !defined(__arm__)
 	.thread_set_wq_state64 = thread_set_wq_state64,
-#endif
 
 	.uthread_get_uukwe = uthread_get_uukwe,
 	.uthread_set_returnval = uthread_set_returnval,

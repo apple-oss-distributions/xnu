@@ -12,7 +12,7 @@
 
 #include <darwintest.h>
 
-#if (defined(__arm__) || defined(__arm64__))
+#if defined(__arm64__)
 #define HAS_KERNEL_TIME_TRAPS
 
 extern uint64_t mach_absolute_time_kernel(void);

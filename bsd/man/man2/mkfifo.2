@@ -37,13 +37,17 @@
 .Dt MKFIFO 2
 .Os
 .Sh NAME
-.Nm mkfifo
+.Nm mkfifo ,
+.Nm mkfifoat
 .Nd make a fifo file
 .Sh SYNOPSIS
 .Fd #include <sys/types.h>
 .Fd #include <sys/stat.h>
 .Ft int
 .Fn mkfifo "const char *path" "mode_t mode"
+.Fc
+.Ft int
+.Fn mkfifoat "int fd" "const char *path" "mode_t mode"
 .Sh DESCRIPTION
 .Fn mkfifo
 creates a new fifo file with name
@@ -58,6 +62,27 @@ of the calling process.
 The fifo's owner ID is set to the process's effective user ID.
 The fifo's group ID is set to that of the parent directory in
 which it is created.
+.Pp
+The
+.Fn mkfifoat
+system call is equivalent to
+.Fn mkfifo
+except in the case where
+.Fa path
+specifies a relative path.
+In this case the newly created fifo file is created relative to the
+directory associated with the file descriptor
+.Fa fd
+instead of the current working directory.
+If
+.Fn mkfifoat
+is passed the special value
+.Dv AT_FDCWD
+in the
+.Fa fd
+parameter, the current working directory is used and the behavior is
+identical to a call to
+.Fn mkfifo .
 .Sh RETURN VALUES
 A 0 return value indicates success.  A -1 return value
 indicates an error, and an error code is stored in
@@ -114,6 +139,30 @@ error occurred while reading from or writing to the file system.
 points outside the process's allocated address space.
 .It Bq Er EILSEQ
 The filename does not match the encoding rules.
+.El
+.Pp
+In addition to the errors returned by the
+.Fn mkfifo ,
+the
+.Fn mkfifoat
+function may fail if:
+.Bl -tag -width Er
+.It Bq Er EBADF
+The
+.Fa path
+argument does not specify an absolute path and the
+.Fa fd
+argument is neither
+.Dv AT_FDCWD
+nor a valid file descriptor open for searching.
+.It Bq Er ENOTDIR
+The
+.Fa path
+argument is not an absolute path and
+.Fa fd
+is neither
+.Dv AT_FDCWD
+nor a file descriptor associated with a directory.
 .El
 .Sh SEE ALSO
 .Xr chmod 2 ,

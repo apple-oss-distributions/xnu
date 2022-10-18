@@ -70,8 +70,6 @@
  *	Exported kernel calls.  See mach/mach_port.defs.
  */
 
-#include <mach_debug.h>
-
 #include <mach/port.h>
 #include <mach/kern_return.h>
 #include <mach/notify.h>
@@ -106,6 +104,8 @@
 #if IMPORTANCE_INHERITANCE
 #include <ipc/ipc_importance.h>
 #endif
+
+static TUNABLE(bool, provisional_reply_port_enforced, "-provisional_reply_port_enforced", false);
 
 extern void qsort(void *a, size_t n, size_t es, int (*cmp)(const void *, const void *));
 extern int proc_isinitproc(struct proc *p);
@@ -228,7 +228,7 @@ mach_port_names(
 	mach_port_type_t        **typesp,
 	mach_msg_type_number_t  *typesCnt)
 {
-	ipc_entry_t table;
+	ipc_entry_table_t table;
 	ipc_entry_num_t tsize;
 	mach_port_index_t index;
 	ipc_entry_num_t actual; /* this many names */
@@ -267,7 +267,7 @@ mach_port_names(
 		}
 
 		/* upper bound on number of names in the space */
-		bound = is_active_table(space)->ie_size;
+		bound = ipc_entry_table_count(is_active_table(space));
 		size_needed = vm_map_round_page(
 			(bound * sizeof(mach_port_name_t)),
 			VM_MAP_PAGE_MASK(ipc_kernel_map));
@@ -284,14 +284,14 @@ mach_port_names(
 		}
 		size = size_needed;
 
-		kr = kernel_memory_allocate(ipc_kernel_map, &addr1, size, 0,
-		    KMA_NONE, VM_KERN_MEMORY_IPC);
+		kr = kmem_alloc(ipc_kernel_map, &addr1, size,
+		    KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
 
-		kr = kernel_memory_allocate(ipc_kernel_map, &addr2, size, 0,
-		    KMA_NONE, VM_KERN_MEMORY_IPC);
+		kr = kmem_alloc(ipc_kernel_map, &addr2, size,
+		    KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			kmem_free(ipc_kernel_map, addr1, size);
 			return KERN_RESOURCE_SHORTAGE;
@@ -306,10 +306,10 @@ mach_port_names(
 	timestamp = ipc_port_timestamp();
 
 	table = is_active_table(space);
-	tsize = table->ie_size;
+	tsize = ipc_entry_table_count(table);
 
 	for (index = 1; index < tsize; index++) {
-		ipc_entry_t entry = &table[index];
+		ipc_entry_t entry = ipc_entry_table_get_nocheck(table, index);
 		ipc_entry_bits_t bits = entry->ie_bits;
 
 		if (IE_BITS_TYPE(bits) != MACH_PORT_TYPE_NONE) {
@@ -440,35 +440,6 @@ mach_port_type(
 #endif
 
 	return kr;
-}
-
-/*
- *	Routine:	mach_port_rename [kernel call]
- *	Purpose:
- *		Changes the name denoting a right,
- *		from oname to nname.
- *	Conditions:
- *		Nothing locked.
- *	Returns:
- *		KERN_SUCCESS		The right is renamed.
- *		KERN_INVALID_TASK	The space is null.
- *		KERN_INVALID_TASK	The space is dead.
- *		KERN_INVALID_NAME	The oname doesn't denote a right.
- *		KERN_INVALID_VALUE	The nname isn't a legal name.
- *		KERN_NAME_EXISTS	The nname already denotes a right.
- *		KERN_RESOURCE_SHORTAGE	Couldn't allocate memory.
- *
- *      This interface is obsolete and always returns
- *      KERN_NOT_SUPPORTED.
- */
-
-kern_return_t
-mach_port_rename(
-	__unused ipc_space_t            space,
-	__unused mach_port_name_t       oname,
-	__unused mach_port_name_t       nname)
-{
-	return KERN_NOT_SUPPORTED;
 }
 
 
@@ -1287,8 +1258,8 @@ mach_port_get_set_status(
 		ipc_object_t psobj;
 		ipc_pset_t pset;
 
-		kr = kernel_memory_allocate(ipc_kernel_map, &addr, size, 0,
-		    KMA_NONE, VM_KERN_MEMORY_IPC);
+		kr = kmem_alloc(ipc_kernel_map, &addr, size,
+		    KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
@@ -1479,6 +1450,48 @@ done:
 }
 
 /*
+ *	Routine:	mach_service_pd_request_notification_check
+ *	Purpose:
+ *		Check if requesting port destroyed notification on a service port is allowed.
+ * Conditions:
+ *              Assumes service_port is locked and active.
+ */
+static bool
+mach_service_pd_request_notification_check(
+	ipc_port_t              service_port,
+	ipc_port_t              notify_port
+	)
+{
+#ifdef MACH_BSD
+
+	uintptr_t task;
+
+	/* Only launchd should be able to register for port destroyed notification on a service port. */
+	(void)ipc_port_get_receiver_task_locked(service_port, &task);
+	if (task && !proc_isinitproc(get_bsdtask_info((task_t)task))) {
+		return false;
+	}
+
+	/* Notify port should indicate immovable receive right owned by launchd. */
+	if (IP_VALID(notify_port)) {
+		ip_mq_lock(notify_port);
+		(void)ipc_port_get_receiver_task_locked(notify_port, &task);
+		if (task && !proc_isinitproc(get_bsdtask_info((task_t)task))) {
+			ip_mq_unlock(notify_port);
+			return false;
+		}
+		if (!notify_port->ip_immovable_receive) {
+			ip_mq_unlock(notify_port);
+			return false;
+		}
+		ip_mq_unlock(notify_port);
+	}
+#endif
+
+	return true;
+}
+
+/*
  *	Routine:	mach_port_request_notification [kernel call]
  *	Purpose:
  *		Requests a notification.  The caller supplies
@@ -1517,7 +1530,10 @@ done:
  *		KERN_INVALID_CAPABILITY	The notify port is dead.
  *	MACH_NOTIFY_PORT_DESTROYED:
  *		KERN_INVALID_VALUE	Sync isn't zero.
- *		KERN_FAILURE		Re-registering for this notification
+ *		KERN_FAILURE		Re-registering for this notification or registering for a reply port.
+ *							If registering for this notification is not allowed on a service port.
+ * MACH_NOTIFY_NO_SENDERS:
+ *              KERN_FAILURE		Registering for a reply port.
  *	MACH_NOTIFY_SERVICE_PORT_DESTROYED
  *		KERN_INVALID_CAPABILITY	Name is not a service port
  *		KERN_DENIED		Only launchd can set this notification or
@@ -1570,13 +1586,20 @@ mach_port_request_notification(
 
 		/*
 		 * you cannot register for port death notifications on a kobject,
-		 * kolabel or special reply port
+		 * kolabel or special reply port.
 		 */
 		if (ip_is_kobject(port) || ip_is_kolabeled(port) ||
-		    port->ip_specialreply) {
+		    port->ip_specialreply || ip_is_reply_port(port)) {
 			ip_mq_unlock(port);
 			mach_port_guard_exception(name, 0, 0, kGUARD_EXC_INVALID_RIGHT);
 			return KERN_INVALID_RIGHT;
+		}
+
+		if (service_port_defense_enabled && port->ip_service_port &&
+		    !mach_service_pd_request_notification_check(port, notify)) {
+			ip_mq_unlock(port);
+			mach_port_guard_exception(name, 0, 0, kGUARD_EXC_KERN_FAILURE);
+			return KERN_FAILURE;
 		}
 
 		/* Allow only one registeration of this notification */
@@ -1609,41 +1632,38 @@ mach_port_request_notification(
 		}
 		/* port is locked and active */
 
+		if (ip_is_reply_port(port)) {
+			ip_mq_unlock(port);
+			mach_port_guard_exception(name, 0, 0, kGUARD_EXC_INVALID_RIGHT);
+			return KERN_INVALID_RIGHT;
+		}
+
 		ipc_port_nsrequest(port, sync, notify, previousp);
 		/* port is unlocked */
 		break;
 	}
 
 	case MACH_NOTIFY_SEND_POSSIBLE:
+	case MACH_NOTIFY_DEAD_NAME: {
+		ipc_port_request_opts_t opts = 0;
 
 		if (!MACH_PORT_VALID(name)) {
 			return KERN_INVALID_ARGUMENT;
 		}
 
-		kr = ipc_right_request_alloc(space, name, sync != 0,
-		    TRUE, notify, previousp);
+		if (id == MACH_NOTIFY_SEND_POSSIBLE) {
+			opts |= IPR_SOR_SPREQ_MASK;
+			if (sync) {
+				opts |= IPR_SOR_SPARM_MASK;
+			}
+		}
+
+		kr = ipc_right_request_alloc(space, name, opts, notify, previousp);
 		if (kr != KERN_SUCCESS) {
 			return kr;
 		}
 		break;
-
-	case MACH_NOTIFY_DEAD_NAME:
-
-		if (!MACH_PORT_VALID(name)) {
-			/*
-			 * Already dead.
-			 * Should do immediate delivery check -
-			 * will do that in the near future.
-			 */
-			return KERN_INVALID_ARGUMENT;
-		}
-
-		kr = ipc_right_request_alloc(space, name, sync != 0,
-		    FALSE, notify, previousp);
-		if (kr != KERN_SUCCESS) {
-			return kr;
-		}
-		break;
+	}
 
 	default:
 		return KERN_INVALID_VALUE;
@@ -1864,7 +1884,7 @@ mach_port_get_attributes(
 	}
 
 	case MACH_PORT_DNREQUESTS_SIZE: {
-		ipc_port_request_t      table;
+		ipc_port_request_table_t table;
 
 		if (*count < MACH_PORT_DNREQUESTS_SIZE_COUNT) {
 			return KERN_FAILURE;
@@ -1882,10 +1902,10 @@ mach_port_get_attributes(
 		/* port is locked and active */
 
 		table = port->ip_requests;
-		if (table == IPR_NULL) {
+		if (table == NULL) {
 			*(int *)info = 0;
 		} else {
-			*(int *)info = table->ipr_size->its_size;
+			*(int *)info = (int)ipc_port_request_table_count(table);
 		}
 		*count = MACH_PORT_DNREQUESTS_SIZE_COUNT;
 		ip_mq_unlock(port);
@@ -1999,11 +2019,7 @@ mach_port_set_attributes(
 			return kr;
 		}
 		/* port is locked and active */
-
-		kr = ipc_port_request_grow(port, *(int *)info);
-		if (kr != KERN_SUCCESS) {
-			return kr;
-		}
+		ip_mq_unlock(port);
 		break;
 	}
 	case MACH_PORT_TEMPOWNER:
@@ -2241,31 +2257,18 @@ mach_port_extract_member(
 /*
  *	task_set_port_space:
  *
- *	Set port name space of task to specified size.
+ *	Obsolete. Set port name space of task to specified size.
  */
 kern_return_t
 task_set_port_space(
 	ipc_space_t     space,
-	int             table_entries)
+	__unused int    table_entries)
 {
-	kern_return_t kr;
-
 	if (space == IS_NULL) {
 		return KERN_INVALID_TASK;
 	}
 
-	is_write_lock(space);
-
-	if (!is_active(space)) {
-		is_write_unlock(space);
-		return KERN_INVALID_TASK;
-	}
-
-	kr = ipc_entry_grow_table(space, table_entries);
-	if (kr == KERN_SUCCESS) {
-		is_write_unlock(space);
-	}
-	return kr;
+	return KERN_SUCCESS;
 }
 
 /*
@@ -2389,7 +2392,7 @@ mach_port_guard_exception_immovable(
 	if (space == current_space()) {
 		assert(ip_is_immovable_send(port));
 
-		boolean_t hard = current_task()->task_control_port_options & TASK_CONTROL_PORT_IMMOVABLE_HARD;
+		boolean_t hard = task_get_control_port_options(current_task()) & TASK_CONTROL_PORT_IMMOVABLE_HARD;
 
 		if (ip_is_control(port)) {
 			assert(task_is_immovable(current_task()));
@@ -2418,7 +2421,7 @@ mach_port_guard_exception_pinned(
 		assert(ip_is_immovable_send(port));
 		assert(ip_is_control(port)); /* only task/thread control ports can be pinned */
 
-		boolean_t hard = current_task()->task_control_port_options & TASK_CONTROL_PORT_PINNED_HARD;
+		boolean_t hard = task_get_control_port_options(current_task()) & TASK_CONTROL_PORT_PINNED_HARD;
 
 		assert(task_is_pinned(current_task()));
 
@@ -2448,19 +2451,9 @@ mach_port_guard_ast(thread_t t,
 	assert(task == current_task());
 	assert(task != kernel_task);
 
-	switch (reason) {
-	/*
-	 * Fatal Mach port guards - always delivered synchronously
-	 */
-	case kGUARD_EXC_DESTROY:
-	case kGUARD_EXC_MOD_REFS:
-	case kGUARD_EXC_SET_CONTEXT:
-	case kGUARD_EXC_UNGUARDED:
-	case kGUARD_EXC_INCORRECT_GUARD:
-	case kGUARD_EXC_IMMOVABLE:
-	case kGUARD_EXC_STRICT_REPLY:
-	case kGUARD_EXC_MSG_FILTERED: {
+	if (reason <= MAX_FATAL_kGUARD_EXC_CODE) {
 		/*
+		 * Fatal Mach port guards - always delivered synchronously.
 		 * Check if anyone has registered for Synchronous EXC_GUARD, if yes then,
 		 * deliver it synchronously and then kill the process, else kill the process
 		 * and deliver the exception via EXC_CORPSE_NOTIFY.
@@ -2468,12 +2461,9 @@ mach_port_guard_ast(thread_t t,
 		if (task_exception_notify(EXC_GUARD, code, subcode) == KERN_SUCCESS) {
 			task_bsdtask_kill(task);
 		} else {
-			exit_with_guard_exception(task->bsd_info, code, subcode);
+			exit_with_guard_exception(get_bsdtask_info(task), code, subcode);
 		}
-		break;
-	}
-
-	default:
+	} else {
 		/*
 		 * Mach port guards controlled by task settings.
 		 */
@@ -2500,10 +2490,10 @@ mach_port_guard_ast(thread_t t,
 		sync_exception_result = task_exception_notify(EXC_GUARD, code, subcode);
 
 		if (task->task_exc_guard & TASK_EXC_GUARD_MP_FATAL) {
-			if (reason >= MAX_OPTIONAL_kGUARD_EXC_CODE) {
+			if (reason > MAX_OPTIONAL_kGUARD_EXC_CODE) {
 				/* generate a simulated crash if not handled synchronously */
 				if (sync_exception_result != KERN_SUCCESS) {
-					task_violated_guard(code, subcode, NULL);
+					task_violated_guard(code, subcode, NULL, TRUE);
 				}
 			} else {
 				/*
@@ -2513,16 +2503,15 @@ mach_port_guard_ast(thread_t t,
 				if (sync_exception_result == KERN_SUCCESS) {
 					task_bsdtask_kill(task);
 				} else {
-					exit_with_guard_exception(task->bsd_info, code, subcode);
+					exit_with_guard_exception(get_bsdtask_info(task), code, subcode);
 				}
 			}
 		} else if (task->task_exc_guard & TASK_EXC_GUARD_MP_CORPSE) {
 			/* Raise exception via corpse fork if not handled synchronously */
 			if (sync_exception_result != KERN_SUCCESS) {
-				task_violated_guard(code, subcode, NULL);
+				task_violated_guard(code, subcode, NULL, TRUE);
 			}
 		}
-		break;
 	}
 }
 
@@ -2575,6 +2564,22 @@ mach_port_construct(
 		init_flags |= IPC_PORT_INIT_FILTER_MESSAGE;
 	}
 
+	if (options->flags & MPO_REPLY_PORT) {
+		init_flags |= IPC_PORT_INIT_REPLY;
+	}
+
+	if (options->flags & MPO_ENFORCE_REPLY_PORT_SEMANTICS) {
+		init_flags |= IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS;
+	}
+
+	if (options->flags & MPO_PROVISIONAL_REPLY_PORT) {
+		if (provisional_reply_port_enforced) {
+			init_flags |= IPC_PORT_INIT_REPLY;
+		} else {
+			init_flags |= IPC_PORT_INIT_PROVISIONAL_REPLY;
+		}
+	}
+
 	if (options->flags & MPO_TG_BLOCK_TRACKING) {
 		/* Check the task role to allow only TASK_GRAPHICS_SERVER to set this option */
 		if (proc_get_effective_task_policy(current_task(),
@@ -2610,7 +2615,7 @@ mach_port_construct(
 		/*
 		 * This flag is not used by launchd on simulators
 		 */
-		if (proc_isinitproc(current_task()->bsd_info)) {
+		if (proc_isinitproc(get_bsdtask_info(current_task()))) {
 			return KERN_DENIED;
 		}
 #endif /* CONFIG_COALITIONS */
@@ -2671,6 +2676,18 @@ mach_port_construct(
 	if (port_splabel != NULL) {
 		port->ip_service_port = (bool)(options->flags & MPO_SERVICE_PORT);
 		port->ip_splabel = port_splabel;
+
+		/* Check if this is a service port */
+		if (service_port_defense_enabled && port->ip_service_port) {
+			port->ip_immovable_receive = true;
+		}
+
+		/* Check if this is a libxpc connection port */
+		if (!port->ip_service_port) {
+			assert(options->flags & MPO_CONNECTION_PORT);
+			port->ip_immovable_send = true;
+			port->ip_immovable_receive = true;
+		}
 	}
 
 	if (options->flags & MPO_CONTEXT_AS_GUARD) {

@@ -313,7 +313,7 @@ KUNCUserNotificationDisplayFromBundle(
 	}
 	reply->inprogress = TRUE;
 	reply->callback = callback;
-	reply_port = ipc_port_make_send(reply->self_port);
+	reply_port = ipc_kobject_make_send(reply->self_port, reply, IKOT_UND_REPLY);
 	UNDReply_unlock(reply);
 
 	UNDServer = UNDServer_reference();

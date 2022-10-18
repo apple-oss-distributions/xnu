@@ -139,7 +139,12 @@ flow_route_buckets_alloc(size_t frb_cnt, size_t *frb_sz, size_t *tot_sz)
 
 	/* total size includes extra for alignment requirements */
 	*tot_sz = frb_tot_sz = (sizeof(void *) + (frb_cnt * (*frb_sz)) + cache_sz);
+	// rdar://88962126
+	/* BEGIN IGNORE CODESTYLE */
+	__typed_allocators_ignore_push
 	frb_buf = sk_alloc(frb_tot_sz, Z_WAITOK, skmem_tag_fsw_frb_hash);
+	__typed_allocators_ignore_pop
+	/* END IGNORE CODESTYLE */
 	if (__improbable(frb_buf == NULL)) {
 		return NULL;
 	}
@@ -176,7 +181,10 @@ flow_route_buckets_free(struct flow_route_bucket *frb, size_t tot_sz)
 	frb_buf = *frb_pbuf;
 	SK_DF(SK_VERB_MEM, "frb 0x%llx (frb_buf 0x%llx) FREE",
 	    SK_KVA(frb), SK_KVA(frb_buf));
+	// rdar://88962126
+	__typed_allocators_ignore_push
 	sk_free(frb_buf, tot_sz);
+	__typed_allocators_ignore_pop
 }
 
 void
@@ -243,7 +251,12 @@ flow_route_id_buckets_alloc(size_t frib_cnt, size_t *frib_sz, size_t *tot_sz)
 
 	/* total size includes extra for alignment requirements */
 	*tot_sz = frib_tot_sz = (sizeof(void *) + (frib_cnt * (*frib_sz)) + cache_sz);
+	// rdar://88962126
+	/* BEGIN IGNORE CODESTYLE */
+	__typed_allocators_ignore_push
 	frib_buf = sk_alloc(frib_tot_sz, Z_WAITOK, skmem_tag_fsw_frib_hash);
+	__typed_allocators_ignore_pop
+	/* END IGNORE CODESTYLE */
 	if (__improbable(frib_buf == NULL)) {
 		return NULL;
 	}
@@ -280,7 +293,10 @@ flow_route_id_buckets_free(struct flow_route_id_bucket *frib, size_t tot_sz)
 	frib_buf = *frib_pbuf;
 	SK_DF(SK_VERB_MEM, "frib 0x%llx (frib_buf 0x%llx) FREE", SK_KVA(frib),
 	    SK_KVA(frib_buf));
+	// rdar://88962126
+	__typed_allocators_ignore_push
 	sk_free(frib_buf, tot_sz);
+	__typed_allocators_ignore_pop
 }
 
 void

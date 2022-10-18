@@ -305,7 +305,7 @@ handle_cpuuse(int action, user_addr_t attrp, proc_t proc, __unused uint64_t targ
 
 	switch (action) {
 	case PROC_POLICY_ACTION_GET:
-		error = proc_get_task_ruse_cpu(proc->task, &cpuattr.ppattr_cpu_attr,
+		error = proc_get_task_ruse_cpu(proc_task(proc), &cpuattr.ppattr_cpu_attr,
 		    &percentage,
 		    &cpuattr.ppattr_cpu_attr_interval,
 		    &cpuattr.ppattr_cpu_attr_deadline);
@@ -334,7 +334,7 @@ handle_cpuuse(int action, user_addr_t attrp, proc_t proc, __unused uint64_t targ
 			interval = -1ULL;
 		}
 
-		error = proc_set_task_ruse_cpu(proc->task, (uint16_t)cpuattr.ppattr_cpu_attr,
+		error = proc_set_task_ruse_cpu(proc_task(proc), (uint16_t)cpuattr.ppattr_cpu_attr,
 		    (uint8_t)MIN(cpuattr.ppattr_cpu_percentage, UINT8_MAX),
 		    interval,
 		    cpuattr.ppattr_cpu_attr_deadline,
@@ -343,12 +343,12 @@ handle_cpuuse(int action, user_addr_t attrp, proc_t proc, __unused uint64_t targ
 
 	/* restore process to prior state */
 	case PROC_POLICY_ACTION_RESTORE:
-		error = proc_clear_task_ruse_cpu(proc->task, privileged);
+		error = proc_clear_task_ruse_cpu(proc_task(proc), privileged);
 		break;
 
 	/* re-enable suspended monitor */
 	case PROC_POLICY_ACTION_ENABLE:
-		error = task_resume_cpumon(proc->task);
+		error = task_resume_cpumon(proc_task(proc));
 		break;
 
 	case PROC_POLICY_ACTION_REMOVE:
@@ -422,7 +422,7 @@ handle_applifecycle(__unused int scope,
 #if CONFIG_TASKWATCH
 		if (action == PROC_POLICY_ACTION_APPLY) {
 			/* bind the thread in target_thread in current process to target_proc */
-			error = proc_lf_pidbind(current_task(), target_threadid, proc->task, state);
+			error = proc_lf_pidbind(current_task(), target_threadid, proc_task(proc), state);
 		} else
 #endif /* CONFIG_TASKWATCH */
 		{
@@ -465,7 +465,7 @@ handle_apptype(         int scope,
 		}
 
 		/* PROCESS ENABLE APPTYPE DONATEIMP */
-		task_importance_mark_donor(target_proc->task, TRUE);
+		task_importance_mark_donor(proc_task(target_proc), TRUE);
 
 		return 0;
 
@@ -523,7 +523,7 @@ handle_boost(int scope,
 
 	switch (policy_subtype) {
 	case PROC_POLICY_IMP_IMPORTANT:
-		if (task_is_importance_receiver_type(target_proc->task) == FALSE) {
+		if (task_is_importance_receiver_type(proc_task(target_proc)) == FALSE) {
 			return EINVAL;
 		}
 
@@ -552,7 +552,7 @@ handle_boost(int scope,
 		switch (action) {
 		case PROC_POLICY_ACTION_SET:
 			/* PROCESS SET BOOST DONATION */
-			task_importance_mark_donor(target_proc->task, TRUE);
+			task_importance_mark_donor(proc_task(target_proc), TRUE);
 			break;
 		default:
 			error = (EINVAL);
@@ -641,7 +641,7 @@ proc_pidbackgrounded(pid_t pid, uint32_t* state)
 		return ESRCH;
 	}
 
-	if (proc_get_effective_task_policy(target_proc->task, TASK_POLICY_DARWIN_BG)) {
+	if (proc_get_effective_task_policy(proc_task(target_proc), TASK_POLICY_DARWIN_BG)) {
 		*state = 1;
 	} else {
 		*state = 0;
@@ -677,7 +677,7 @@ proc_get_originatorbgstate(uint32_t *is_backgrounded)
 	}
 
 	/* Check if current process app type is App, then return foreground */
-	proc_get_darwinbgstate(p->task, &flagsp);
+	proc_get_darwinbgstate(proc_task(p), &flagsp);
 	if ((flagsp & PROC_FLAG_APPLICATION) == PROC_FLAG_APPLICATION) {
 		*is_backgrounded = 0;
 		return 0;
@@ -713,7 +713,7 @@ proc_apply_resource_actions(void * bsdinfo, __unused int type, int action)
 		break;
 
 	case PROC_POLICY_RSRCACT_SUSPEND:
-		task_suspend(p->task);
+		task_suspend(proc_task(p));
 		break;
 
 	case PROC_POLICY_RSRCACT_TERMINATE:
@@ -746,7 +746,7 @@ proc_restore_resource_actions(void * bsdinfo, __unused int type, int action)
 		break;
 
 	case PROC_POLICY_RSRCACT_SUSPEND:
-		task_resume(p->task);
+		task_resume(proc_task(p));
 		break;
 	}
 

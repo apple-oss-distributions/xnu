@@ -34,7 +34,7 @@
 #include <skywalk/mem/skmem_cache_var.h>
 #include <skywalk/mem/skmem_arena_var.h>
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 #define SKMEM_PAGE_SIZE PAGE_MAX_SIZE
 #else /* __i386__, __x86_64__ */
 #define SKMEM_PAGE_SIZE PAGE_SIZE
@@ -70,7 +70,7 @@ extern uint32_t skmem_usr_buf_seg_size;
 SYSCTL_DECL(_kern_skywalk_mem);
 #endif /* (DEVELOPMENT || DEBUG) */
 
-#define SKMEM_MEM_CONSTRAINED_DEVICE    \
+#define SKMEM_MEM_CONSTRAINED_DEVICE()    \
     (max_mem_actual <= (2ULL * 1024ULL * 1024ULL * 1024ULL))
 
 __BEGIN_DECLS

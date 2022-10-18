@@ -72,6 +72,7 @@
 #include <kern/spl.h>
 #include <kern/syscall_subr.h>
 #include <kern/processor.h>
+#include <kern/restartable.h>
 #include <kern/timer.h>
 #include <kern/affinity.h>
 #include <kern/host.h>
@@ -789,23 +790,10 @@ thread_state_initialize(
 
 	if (thread->active) {
 		if (thread != current_thread()) {
-			thread_hold(thread);
-
-			thread_mtx_unlock(thread);
-
-			if (thread_stop(thread, TRUE)) {
-				thread_mtx_lock(thread);
-				machine_thread_state_initialize( thread );
-				thread_unstop(thread);
-			} else {
-				thread_mtx_lock(thread);
-				result = KERN_ABORTED;
-			}
-
-			thread_release(thread);
-		} else {
-			machine_thread_state_initialize( thread );
+			/* Thread created in exec should be blocked in UNINT wait */
+			assert(!(thread->state & TH_RUN));
 		}
+		machine_thread_state_initialize( thread );
 	} else {
 		result = KERN_TERMINATED;
 	}
@@ -956,9 +944,10 @@ thread_getstatus_to_user(
 	thread_t                thread,
 	int                                             flavor,
 	thread_state_t                  tstate,
-	mach_msg_type_number_t  *count)
+	mach_msg_type_number_t  *count,
+	thread_set_status_flags_t flags)
 {
-	return thread_get_state_to_user(thread, flavor, tstate, count);
+	return thread_get_state_internal(thread, flavor, tstate, count, flags | TSSF_TRANSLATE_TO_USER);
 }
 
 /*
@@ -1130,6 +1119,54 @@ thread_apc_ast(thread_t thread)
 	thread_mtx_unlock(thread);
 }
 
+#if CONFIG_ROSETTA
+extern kern_return_t
+exception_deliver(
+	thread_t                thread,
+	exception_type_t        exception,
+	mach_exception_data_t   code,
+	mach_msg_type_number_t  codeCnt,
+	struct exception_action *excp,
+	lck_mtx_t               *mutex);
+
+kern_return_t
+thread_raise_exception(
+	thread_t thread,
+	exception_type_t exception,
+	natural_t code_count,
+	int64_t code,
+	int64_t sub_code)
+{
+	task_t task;
+
+	if (thread == THREAD_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	task = get_threadtask(thread);
+
+	if (task != current_task()) {
+		return KERN_FAILURE;
+	}
+
+	if (!task_is_translated(task)) {
+		return KERN_FAILURE;
+	}
+
+	if (exception == EXC_CRASH) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	int64_t codes[] = { code, sub_code };
+	host_priv_t host_priv = host_priv_self();
+	kern_return_t kr = exception_deliver(thread, exception, codes, code_count, host_priv->exc_actions, &host_priv->lock);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+
+	return thread_resume(thread);
+}
+#endif
 
 void
 thread_debug_return_to_user_ast(
@@ -1225,8 +1262,7 @@ act_get_state_to_user(
 static void
 act_set_ast(
 	thread_t   thread,
-	ast_t      ast,
-	ast_gen_t *gens)
+	ast_t      ast)
 {
 	spl_t s = splsched();
 
@@ -1242,9 +1278,6 @@ act_set_ast(
 		if (processor != PROCESSOR_NULL &&
 		    processor->state == PROCESSOR_RUNNING &&
 		    processor->active_thread == thread) {
-			if (gens) {
-				ast_generation_get(processor, gens);
-			}
 			cause_ast_check(processor);
 		}
 		thread_unlock(thread);
@@ -1291,7 +1324,7 @@ act_set_debug_assert(void)
 void
 act_set_astbsd(thread_t thread)
 {
-	act_set_ast(thread, AST_BSD, NULL);
+	act_set_ast(thread, AST_BSD);
 }
 
 void
@@ -1317,10 +1350,61 @@ act_clear_astkevent(thread_t thread, uint16_t bits)
 	return cur & bits;
 }
 
-void
-act_set_ast_reset_pcs(thread_t thread, ast_gen_t gens[])
+bool
+act_set_ast_reset_pcs(task_t task, thread_t thread)
 {
-	act_set_ast(thread, AST_RESET_PCS, gens);
+	processor_t processor;
+	bool needs_wait = false;
+	spl_t s;
+
+	s = splsched();
+
+	if (thread == current_thread()) {
+		/*
+		 * this is called from the signal code,
+		 * just set the AST and move on
+		 */
+		thread_ast_set(thread, AST_RESET_PCS);
+		ast_propagate(thread);
+	} else {
+		thread_lock(thread);
+
+		assert(thread->t_rr_state.trr_ipi_ack_pending == 0);
+		assert(thread->t_rr_state.trr_sync_waiting == 0);
+
+		processor = thread->last_processor;
+		if (!thread->active) {
+			/*
+			 * ->active is being set before the thread is added
+			 * to the thread list (under the task lock which
+			 * the caller holds), and is reset before the thread
+			 * lock is being taken by thread_terminate_self().
+			 *
+			 * The result is that this will never fail to
+			 * set the AST on an thread that is active,
+			 * but will not set it past thread_terminate_self().
+			 */
+		} else if (processor != PROCESSOR_NULL &&
+		    processor->state == PROCESSOR_RUNNING &&
+		    processor->active_thread == thread) {
+			thread->t_rr_state.trr_ipi_ack_pending = true;
+			needs_wait = true;
+			thread_ast_set(thread, AST_RESET_PCS);
+			cause_ast_check(processor);
+		} else if (thread_reset_pcs_in_range(task, thread)) {
+			if (thread->t_rr_state.trr_fault_state) {
+				thread->t_rr_state.trr_fault_state =
+				    TRR_FAULT_OBSERVED;
+				needs_wait = true;
+			}
+			thread_ast_set(thread, AST_RESET_PCS);
+		}
+		thread_unlock(thread);
+	}
+
+	splx(s);
+
+	return needs_wait;
 }
 
 void
@@ -1333,7 +1417,7 @@ act_set_kperf(thread_t thread)
 		}
 	}
 
-	act_set_ast(thread, AST_KPERF, NULL);
+	act_set_ast(thread, AST_KPERF);
 }
 
 #if CONFIG_MACF
@@ -1341,14 +1425,14 @@ void
 act_set_astmacf(
 	thread_t        thread)
 {
-	act_set_ast( thread, AST_MACF, NULL);
+	act_set_ast( thread, AST_MACF);
 }
 #endif
 
 void
 act_set_astledger(thread_t thread)
 {
-	act_set_ast(thread, AST_LEDGER, NULL);
+	act_set_ast(thread, AST_LEDGER);
 }
 
 /*
@@ -1368,17 +1452,17 @@ act_set_astledger_async(thread_t thread)
 void
 act_set_io_telemetry_ast(thread_t thread)
 {
-	act_set_ast(thread, AST_TELEMETRY_IO, NULL);
+	act_set_ast(thread, AST_TELEMETRY_IO);
 }
 
 void
 act_set_macf_telemetry_ast(thread_t thread)
 {
-	act_set_ast(thread, AST_TELEMETRY_MACF, NULL);
+	act_set_ast(thread, AST_TELEMETRY_MACF);
 }
 
 void
 act_set_astproc_resource(thread_t thread)
 {
-	act_set_ast(thread, AST_PROC_RESOURCE, NULL);
+	act_set_ast(thread, AST_PROC_RESOURCE);
 }

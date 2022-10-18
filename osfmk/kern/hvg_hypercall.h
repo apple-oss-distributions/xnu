@@ -31,6 +31,8 @@
 
 #include <os/base.h>
 #include <stdint.h>
+#include <stdbool.h>
+#include <uuid/uuid.h>
 
 /* Architecture-independent definitions (exported to userland) */
 
@@ -72,6 +74,11 @@ OS_CLOSED_ENUM(hvg_hcall_return, uint32_t,
 OS_CLOSED_ENUM(hvg_hcall_code, uint32_t,
     HVG_HCALL_TRIGGER_DUMP        = 0x0001,       /* Collect guest dump */
     HVG_HCALL_SET_COREDUMP_DATA   = 0x0002,       /* Set necessary info for reliable coredump */
+    HVG_HCALL_GET_MABS_OFFSET     = 0x0003,       /* Determine mach_absolute_time offset */
+    HVG_HCALL_GET_BOOTSESSIONUUID = 0x0004,       /* Read host boot sesssion ID */
+    HVG_HCALL_VCPU_WFK            = 0x0005,       /* Wait-for-kick (or exception) */
+    HVG_HCALL_VCPU_KICK           = 0x0006,       /* Kick a vcpu */
+    HVG_HCALL_COUNT
     );
 
 /*
@@ -86,12 +93,6 @@ typedef struct hvg_hcall_vmcore_file {
 	char tag[57];   /* 7 64-bit registers plus 1 byte for '\0' */
 } hvg_hcall_vmcore_file_t;
 
-extern hvg_hcall_return_t
-hvg_hcall_trigger_dump(hvg_hcall_vmcore_file_t *vmcore,
-    const hvg_hcall_dump_option_t dump_option);
-
-extern void
-hvg_hcall_set_coredump_data(void);
 
 #ifdef XNU_KERNEL_PRIVATE
 
@@ -99,12 +100,16 @@ hvg_hcall_set_coredump_data(void);
  * For XNU kernel use only (omitted from userland headers)
  */
 
-#if defined (__x86_64__)
-#include <i386/cpuid.h>
-#include <i386/x86_hypercall.h>
-#else
-#define hvg_hcall_set_coredump_data() do {} while(0)
-#endif /* defined (__x86_64__) */
+extern bool hvg_is_hcall_available(hvg_hcall_code_t);
+
+extern void hvg_hcall_set_coredump_data(void);
+
+extern hvg_hcall_return_t hvg_hcall_trigger_dump(hvg_hcall_vmcore_file_t *vmcore,
+    const hvg_hcall_dump_option_t dump_option);
+extern hvg_hcall_return_t hvg_hcall_get_bootsessionuuid(uuid_string_t uuid);
+extern hvg_hcall_return_t hvg_hcall_get_mabs_offset(uint64_t *mabs_offset);
+extern void hvg_hc_kick_cpu(unsigned int cpu_id);
+extern void hvg_hc_wait_for_kick(unsigned int ien);
 
 #endif /* XNU_KERNEL_PRIVATE */
 

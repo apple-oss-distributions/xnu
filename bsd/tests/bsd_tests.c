@@ -46,13 +46,11 @@
 #error "Testing is not enabled on RELEASE configurations"
 #endif
 
-#ifdef __arm64__
+#if defined(__arm64__)
 extern kern_return_t arm64_lock_test(void);
-#endif
-#if defined(__arm__) || defined(__arm64__)
 extern kern_return_t arm_cpu_capabilities_legacy_test(void);
 extern kern_return_t pmap_test(void);
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 kern_return_t ipi_test(void);
 #if defined(KERNEL_INTEGRITY_CTRR)
 extern kern_return_t ctrr_test(void);
@@ -61,15 +59,16 @@ extern kern_return_t ctrr_test(void);
 extern kern_return_t arm64_late_pan_test(void);
 #endif
 extern kern_return_t copyio_test(void);
+extern kern_return_t parse_boot_arg_test(void);
 
 struct xnupost_test bsd_post_tests[] = {
 #ifdef __arm64__
 	XNUPOST_TEST_CONFIG_BASIC(arm64_lock_test),
 #endif
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 	XNUPOST_TEST_CONFIG_BASIC(arm_cpu_capabilities_legacy_test),
 	XNUPOST_TEST_CONFIG_BASIC(pmap_test),
-#endif /* defined(__arm__) || defined(__arm64__) */
+#endif /* defined(__arm64__) */
 #if defined(KERNEL_INTEGRITY_CTRR)
 	XNUPOST_TEST_CONFIG_BASIC(ctrr_test),
 #endif
@@ -78,6 +77,7 @@ struct xnupost_test bsd_post_tests[] = {
 #endif
 	XNUPOST_TEST_CONFIG_BASIC(ipi_test),
 	XNUPOST_TEST_CONFIG_BASIC(copyio_test),
+	XNUPOST_TEST_CONFIG_BASIC(parse_boot_arg_test),
 };
 
 uint32_t bsd_post_tests_count = sizeof(bsd_post_tests) / sizeof(xnupost_test_data_t);

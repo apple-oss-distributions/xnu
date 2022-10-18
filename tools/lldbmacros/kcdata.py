@@ -8,8 +8,6 @@ import copy
 import re
 import base64
 import argparse
-import shlex
-import subprocess
 import logging
 import contextlib
 import base64
@@ -120,8 +118,13 @@ kcdata_type_def = {
     'STACKSHOT_KCCONTAINER_PORTLABEL' : 0x934,
     'STACKSHOT_KCTYPE_PORTLABEL' : 0x935,
     'STACKSHOT_KCTYPE_PORTLABEL_NAME' : 0x936,
+    'STACKSHOT_KCTYPE_DYLD_COMPACTINFO' : 0x937,
     'STACKSHOT_KCTYPE_TASK_DELTA_SNAPSHOT': 0x940,
     'STACKSHOT_KCTYPE_THREAD_DELTA_SNAPSHOT': 0x941,
+    'STACKSHOT_KCCONTAINER_SHAREDCACHE' : 0x942,
+    'STACKSHOT_KCTYPE_SHAREDCACHE_INFO' : 0x943,
+    'STACKSHOT_KCTYPE_SHAREDCACHE_AOTINFO' : 0x944,
+    'STACKSHOT_KCTYPE_SHAREDCACHE_ID' : 0x945,
 
     'KCDATA_TYPE_BUFFER_END':      0xF19158ED,
 
@@ -417,6 +420,7 @@ kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_TASK')] = 'task_snapsh
 kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_TRANSITIONING_TASK')] = 'transitioning_task_snapshots'
 kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_THREAD')] = 'thread_snapshots'
 kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_PORTLABEL')] = 'portlabels'
+kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_SHAREDCACHE')] = 'shared_caches'
 kcdata_type_def_rev[GetTypeForName('KCDATA_BUFFER_BEGIN_XNUPOST_CONFIG')] = 'xnupost_testconfig'
 
 class Indent(object):
@@ -991,6 +995,7 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_AOTCACHE_LOADINFO')] = K
 ),
     'dyld_aot_cache_uuid_info'
 )
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_SHAREDCACHE_AOTINFO')] = KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_AOTCACHE_LOADINFO')]
 
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_SHAREDCACHE_LOADINFO')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_SHAREDCACHE_LOADINFO'), (
     KCSubTypeElement('imageLoadAddress', KCSUBTYPE_TYPE.KC_ST_UINT64, 8, 0, 0),
@@ -1002,12 +1007,25 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_SHAREDCACHE_LOADINFO')] 
     legacy_size = 0x18
 )
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_SHAREDCACHE_INFO')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_SHAREDCACHE_INFO'), (
+    KCSubTypeElement('sharedCacheSlide', KCSUBTYPE_TYPE.KC_ST_UINT64, 8, 0, 0),
+    KCSubTypeElement('sharedCacheUUID', KCSUBTYPE_TYPE.KC_ST_UINT8, KCSubTypeElement.GetSizeForArray(16, 1), 8, 1),
+    KCSubTypeElement('sharedCacheUnreliableSlidBaseAd', KCSUBTYPE_TYPE.KC_ST_UINT64, 8, 24, 0),
+    KCSubTypeElement('sharedCacheSlidFirstMapping', KCSUBTYPE_TYPE.KC_ST_UINT64, 8, 32, 0),
+    KCSubTypeElement('sharedCacheID', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 40, 0),
+    KCSubTypeElement('sharedCacheFlags', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 44, 0),
+),
+    'shared_cache_dyld_load_info',
+)
+
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_KERNELCACHE_LOADINFO')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_KERNELCACHE_LOADINFO'), (
     KCSubTypeElement('imageLoadAddress', KCSUBTYPE_TYPE.KC_ST_UINT64, 8, 0, 0),
     KCSubTypeElement('imageUUID', KCSUBTYPE_TYPE.KC_ST_UINT8, KCSubTypeElement.GetSizeForArray(16, 1), 8, 1),
 ),
     'kernelcache_load_info'
 )
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_SHAREDCACHE_ID')] = KCSubTypeElement('sharedCacheID', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 0, 0, KCSubTypeElement._get_naked_element_value)
 
 KNOWN_TYPES_COLLECTION[0x33] = KCSubTypeElement('mach_absolute_time', KCSUBTYPE_TYPE.KC_ST_UINT64, 8, 0, 0, KCSubTypeElement._get_naked_element_value)
 KNOWN_TYPES_COLLECTION[0x907] = KCSubTypeElement.FromBasicCtype('donating_pids', KCSUBTYPE_TYPE.KC_ST_INT32, legacy_size=4)
@@ -1142,8 +1160,6 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_THREAD_GROUP_SNAPSHOT')]
                         KCSubTypeElement('tgs_name', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(16, 1),
                             8, 1),
                         KCSubTypeElement.FromBasicCtype('tgs_flags', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
-                        KCSubTypeElement('tgs_name_cont', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(16, 1),
-                            32, 1),
             ),
             'thread_group_snapshot')
 
@@ -1164,7 +1180,9 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_JETSAM_COALITION')] = KC
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_INSTRS_CYCLES')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_INSTRS_CYCLES'),
             (
                         KCSubTypeElement.FromBasicCtype('ics_instructions', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
-                        KCSubTypeElement.FromBasicCtype('ics_cycles', KCSUBTYPE_TYPE.KC_ST_UINT64, 8)
+                        KCSubTypeElement.FromBasicCtype('ics_cycles', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
+                        KCSubTypeElement.FromBasicCtype('ics_p_instructions', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
+                        KCSubTypeElement.FromBasicCtype('ics_p_cycles', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
             ),
             'instrs_cycles_snapshot')
 
@@ -1808,7 +1826,7 @@ def SaveStackshotReport(j, outfile_name, incomplete):
         for dlinfo in kl_infos_text_exec:
             kern_load_info.append([format_uuid(dlinfo['imageUUID']), dlinfo['imageLoadAddress'], "T"])
 
-    for pid,piddata in list(ssplist.items()):
+    for pid,piddata in sorted(ssplist.items()):
         processByPid[str(pid)] = {}
         tsnap = processByPid[str(pid)]
         pr_lib_dsc = dsc_common
@@ -1875,7 +1893,7 @@ def SaveStackshotReport(j, outfile_name, incomplete):
         tsnap["threadById"] = {}
         threadByID = tsnap["threadById"]
         thlist = piddata.get('thread_snapshots', {})
-        for tid,thdata in list(thlist.items()):
+        for tid,thdata in sorted(thlist.items()):
             threadByID[str(tid)] = {}
             thsnap = threadByID[str(tid)]
             if "thread_snapshot" not in thdata:
@@ -1931,30 +1949,11 @@ def SaveStackshotReport(j, outfile_name, incomplete):
     if timestamp is not None:
         header['timestamp'] = timestamp
     header['os_version'] = os_version
-    fh.write(json.dumps(header))
+    fh.write(json.dumps(header, sort_keys=True))
     fh.write("\n")
 
-    fh.write(json.dumps(obj, sort_keys=False, indent=2, separators=(',', ': ')))
+    fh.write(json.dumps(obj, sort_keys=True, indent=2, separators=(',', ': ')))
     fh.close()
-
-## Base utils for interacting with shell ##
-def RunCommand(bash_cmd_string, get_stderr = True):
-    """
-        returns: (int,str) : exit_code and output_str
-    """
-    print("RUNNING: %s" % bash_cmd_string)
-    cmd_args = shlex.split(bash_cmd_string)
-    output_str = ""
-    exit_code = 0
-    try:
-        if get_stderr:
-            output_str = subprocess.check_output(cmd_args, stderr=subprocess.STDOUT)
-        else:
-            output_str = subprocess.check_output(cmd_args, stderr=None)
-    except subprocess.CalledProcessError as e:
-        exit_code = e.returncode
-    finally:
-        return (exit_code, output_str)
 
 
 @contextlib.contextmanager
@@ -1962,7 +1961,10 @@ def data_from_stream(stream):
     try:
         fmap = mmap.mmap(stream.fileno(), 0, mmap.MAP_SHARED, mmap.PROT_READ)
     except:
-        yield stream.read()
+        if six.PY3:
+            yield stream.buffer.read()
+        else:
+            yield stream.read()
     else:
         try:
             yield fmap
@@ -2036,6 +2038,11 @@ PRETTIFY_FLAGS = {
        'kCoalitionReaped',
        'kCoalitionPrivileged',
     ],
+    'sharedCacheFlags': [
+       'kSharedCacheSystemPrimary',
+       'kSharedCacheDriverkit'
+       'kSharedCacheAOT',
+    ],
     'stackshot_in_flags': [ # STACKSHOT_*, also stackshot_out_flags
         'get_dq',
         'save_loadinfo',
@@ -2068,6 +2075,8 @@ PRETTIFY_FLAGS = {
         'asid',
         'page_tables',
         'disable_latency_info',
+        'save_dyld_compactinfo',
+        'include_driver_threads_in_kernel'
     ],
     'system_state_flags': [
         'kUser64_p',
@@ -2075,7 +2084,15 @@ PRETTIFY_FLAGS = {
     ],
     'tgs_flags': [
         'kThreadGroupEfficient',
-        'kThreadGroupUIApp',
+        'kThreadGroupApplication',
+        'kThreadGroupCritical',
+        'kThreadGroupBestEffort',
+        None,
+        None,
+        None,
+        None,
+        'kThreadGroupUIApplication',
+        None,      # Redacted
     ],
     'ths_ss_flags': [
         'kUser64_p',
@@ -2139,6 +2156,11 @@ PRETTIFY_FLAGS = {
         'kTaskSharedRegionNone',
         'kTaskSharedRegionSystem',
         'kTaskSharedRegionOther',
+        'kTaskDyldCompactInfoNone',
+        'kTaskDyldCompactInfoTooBig',
+        'kTaskDyldCompactInfoFaultedIn',
+        'kTaskDyldCompactInfoMissing',
+        'kTaskDyldCompactInfoTriedFault',
     ],
     'turnstile_flags': [
         'turnstile_status_unknown',
@@ -2231,6 +2253,40 @@ def prettify_core(data, mosthex, key, portlabels):
 def prettify(data, mosthex):
     return prettify_core(data, mosthex, "", None)
 
+# N.B.: This is called directly from `xnu.py` for `panicdata -S XXX.ips`'s implementation.
+def decode_kcdata_file(kcdata_file, stackshot_file, multiple=False, prettyhex=False, pretty=False, output_as_plist=False):
+    for i,kcdata_buffer in enumerate(iterate_kcdatas(kcdata_file)):
+        if i > 0 and not multiple:
+            break
+
+        str_data = "{" + kcdata_buffer.GetJsonRepr() + "}"
+        str_data = str_data.replace("\t", "    ")
+
+        try:
+            json_obj = json.loads(str_data)
+        except:
+            print("JSON reparsing failed!  Printing string data!\n", file=sys.stderr)
+            import textwrap
+            print(textwrap.fill(str_data, 100))
+            raise
+
+        if prettyhex:
+            json_obj = prettify(json_obj, True)
+        elif pretty:
+            json_obj = prettify(json_obj, False)
+
+        if stackshot_file:
+            SaveStackshotReport(json_obj, stackshot_file, G.data_was_incomplete)
+        elif output_as_plist:
+            import Foundation
+            plist = Foundation.NSPropertyListSerialization.dataWithPropertyList_format_options_error_(
+                json_obj, Foundation.NSPropertyListXMLFormat_v1_0, 0, None)[0].bytes().tobytes()
+            #sigh.  on some pythons long integers are getting output with L's in the plist.
+            plist = re.sub(r'^(\s*<integer>\d+)L(</integer>\s*)$', r"\1\2", BytesToString(plist), flags=re.MULTILINE)
+            print(plist,)
+        else:
+            print(json.dumps(json_obj, sort_keys=True, indent=4, separators=(',', ': ')))
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Decode a kcdata binary file.")
     parser.add_argument("-l", "--listtypes", action="store_true", required=False, default=False,
@@ -2270,34 +2326,4 @@ if __name__ == '__main__':
     if args.incomplete or args.stackshot_file:
         G.accept_incomplete_data = True
 
-    for i,kcdata_buffer in enumerate(iterate_kcdatas(args.kcdata_file)):
-        if i > 0 and not args.multiple:
-            break
-
-        str_data = "{" + kcdata_buffer.GetJsonRepr() + "}"
-        str_data = str_data.replace("\t", "    ")
-
-        try:
-            json_obj = json.loads(str_data)
-        except:
-            print("JSON reparsing failed!  Printing string data!\n", file=sys.stderr)
-            import textwrap
-            print(textwrap.fill(str_data, 100))
-            raise
-
-        if args.prettyhex:
-            json_obj = prettify(json_obj, True)
-        elif args.pretty:
-            json_obj = prettify(json_obj, False)
-
-        if args.stackshot_file:
-            SaveStackshotReport(json_obj, args.stackshot_file, G.data_was_incomplete)
-        elif args.plist:
-            import Foundation
-            plist = Foundation.NSPropertyListSerialization.dataWithPropertyList_format_options_error_(
-                json_obj, Foundation.NSPropertyListXMLFormat_v1_0, 0, None)[0].bytes().tobytes()
-            #sigh.  on some pythons long integers are getting output with L's in the plist.
-            plist = re.sub(r'^(\s*<integer>\d+)L(</integer>\s*)$', r"\1\2", BytesToString(plist), flags=re.MULTILINE)
-            print(plist,)
-        else:
-            print(json.dumps(json_obj, sort_keys=True, indent=4, separators=(',', ': ')))
+    decode_kcdata_file(args.kcdata_file, args.stackshot_file, args.multiple, args.prettyhex, args.pretty, args.plist)

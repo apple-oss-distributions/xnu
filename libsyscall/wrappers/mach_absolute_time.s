@@ -259,6 +259,8 @@ _mach_absolute_time:
 	b.eq	_mach_absolute_time_kernel	// If not, go to the kernel
 	cmp	x2, #USER_TIMEBASE_NOSPEC
 	b.eq	L_mach_absolute_time_user_nospec
+	cmp	x2, #USER_TIMEBASE_NOSPEC_APPLE
+	b.eq	L_mach_absolute_time_user_nospec_apple
 	// Fallthrough to USER_TIMEBASE_SPEC case below
 
 	isb					// Prevent speculation on CNTVCT across calls
@@ -270,6 +272,10 @@ L_mach_absolute_time_user_nospec:
 	CALC_MACH_ABSOLUTE_TIME	CNTVCTSS_EL0
 	ret
 
+L_mach_absolute_time_user_nospec_apple:
+#define ACNTVCT_EL0     S3_4_c15_c10_6
+	CALC_MACH_ABSOLUTE_TIME	ACNTVCT_EL0
+	ret
 
 
 	.text

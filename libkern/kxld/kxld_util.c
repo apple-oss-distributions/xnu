@@ -47,6 +47,10 @@
 
 #include "kxld_util.h"
 
+/* swap_ functions are deprecated */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
 #if !KERNEL
 static void unswap_macho_32(u_char *file, enum NXByteOrder host_order,
     enum NXByteOrder target_order);
@@ -905,3 +909,5 @@ isTargetKextName(const char * the_name)
 	return FALSE;
 }
 #endif
+
+#pragma clang diagnostic pop

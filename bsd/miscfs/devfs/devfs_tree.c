@@ -1145,6 +1145,7 @@ retry:
 
 		vid = vnode_vid(vn_p);
 
+		vnode_hold(vn_p);
 		DEVFS_UNLOCK();
 
 		/*
@@ -1158,6 +1159,7 @@ retry:
 		 */
 		error = vnode_getwithvid_drainok(vn_p, vid);
 
+		vnode_drop(vn_p);
 		DEVFS_LOCK();
 
 		if (dnp->dn_lflags & DN_DELETE) {
@@ -1283,7 +1285,8 @@ retry:
 
 	DEVFS_UNLOCK();
 
-	error = vnode_create(VNCREATE_FLAVOR, VCREATESIZE, &vfsp, &vn_p);
+	error = vnode_create_ext(VNCREATE_FLAVOR, VCREATESIZE, &vfsp, &vn_p,
+	    VNODE_CREATE_DEFAULT);
 
 	/* Do this before grabbing the lock */
 	if (error == 0) {
@@ -1410,6 +1413,7 @@ devfs_bulk_notify(devfs_event_log_t delp)
 			vnode_notify(dvep->dve_vp, dvep->dve_events, NULL);
 			vnode_put(dvep->dve_vp);
 		}
+		vnode_drop(dvep->dve_vp);
 	}
 }
 
@@ -1425,6 +1429,7 @@ devfs_record_event(devfs_event_log_t delp, devnode_t *dnp, uint32_t events)
 		devfs_vnode_event_t dvep = &delp->del_entries[delp->del_used];
 		dvep->dve_vp = dnp->dn_vn;
 		dvep->dve_vid = vnode_vid(dnp->dn_vn);
+		vnode_hold(dvep->dve_vp);
 		dvep->dve_events = events;
 		delp->del_used++;
 	}

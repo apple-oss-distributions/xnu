@@ -1773,6 +1773,7 @@ nstat_tcp_copy_descriptor(
 		desc->sndbufused = so->so_snd.sb_cc;
 		desc->rcvbufsize = so->so_rcv.sb_hiwat;
 		desc->rcvbufused = so->so_rcv.sb_cc;
+		desc->fallback_mode = so->so_fallback_mode;
 	}
 
 	tcp_get_connectivity_status(tp, &desc->connstatus);
@@ -2144,6 +2145,7 @@ nstat_udp_copy_descriptor(
 		desc->rcvbufsize = so->so_rcv.sb_hiwat;
 		desc->rcvbufused = so->so_rcv.sb_cc;
 		desc->traffic_class = so->so_traffic_class;
+		desc->fallback_mode = so->so_fallback_mode;
 		inp_get_activity_bitmap(inp, &desc->activity_bitmap);
 		desc->start_timestamp = inp->inp_start_timestamp;
 		desc->timestamp = mach_continuous_time();
@@ -2219,6 +2221,12 @@ static nstat_provider   nstat_userland_quic_provider;
 static nstat_provider   nstat_userland_udp_provider;
 static nstat_provider   nstat_userland_tcp_provider;
 
+enum nstat_rnf_override {
+	nstat_rnf_override_not_set,
+	nstat_rnf_override_enabled,
+	nstat_rnf_override_disabled
+};
+
 struct nstat_tu_shadow {
 	tailq_entry_tu_shadow                   shad_link;
 	userland_stats_request_vals_fn          *shad_getvals_fn;
@@ -2229,6 +2237,7 @@ struct nstat_tu_shadow {
 	nstat_provider_id_t                     shad_provider;
 	struct nstat_procdetails                *shad_procdetails;
 	bool                                    shad_live;  // false if defunct
+	enum nstat_rnf_override                 shad_rnf_override;
 	uint32_t                                shad_magic;
 };
 
@@ -2299,6 +2308,13 @@ nstat_userland_tu_copy_descriptor(
 		desc->upid = procdetails->pdet_upid;
 		uuid_copy(desc->uuid, procdetails->pdet_uuid);
 		strlcpy(desc->pname, procdetails->pdet_procname, sizeof(desc->pname));
+		if (shad->shad_rnf_override == nstat_rnf_override_enabled) {
+			desc->ifnet_properties |= NSTAT_IFNET_VIA_CELLFALLBACK;
+			desc->fallback_mode = SO_FALLBACK_MODE_FAST;
+		} else if (shad->shad_rnf_override == nstat_rnf_override_disabled) {
+			desc->ifnet_properties &= ~NSTAT_IFNET_VIA_CELLFALLBACK;
+			desc->fallback_mode = SO_FALLBACK_MODE_NONE;
+		}
 		desc->start_timestamp = shad->shad_start_timestamp;
 		desc->timestamp = mach_continuous_time();
 	}
@@ -2310,6 +2326,13 @@ nstat_userland_tu_copy_descriptor(
 		desc->upid = procdetails->pdet_upid;
 		uuid_copy(desc->uuid, procdetails->pdet_uuid);
 		strlcpy(desc->pname, procdetails->pdet_procname, sizeof(desc->pname));
+		if (shad->shad_rnf_override == nstat_rnf_override_enabled) {
+			desc->ifnet_properties |= NSTAT_IFNET_VIA_CELLFALLBACK;
+			desc->fallback_mode = SO_FALLBACK_MODE_FAST;
+		} else if (shad->shad_rnf_override == nstat_rnf_override_disabled) {
+			desc->ifnet_properties &= ~NSTAT_IFNET_VIA_CELLFALLBACK;
+			desc->fallback_mode = SO_FALLBACK_MODE_NONE;
+		}
 		desc->start_timestamp = shad->shad_start_timestamp;
 		desc->timestamp = mach_continuous_time();
 	}
@@ -2321,6 +2344,13 @@ nstat_userland_tu_copy_descriptor(
 		desc->upid = procdetails->pdet_upid;
 		uuid_copy(desc->uuid, procdetails->pdet_uuid);
 		strlcpy(desc->pname, procdetails->pdet_procname, sizeof(desc->pname));
+		if (shad->shad_rnf_override == nstat_rnf_override_enabled) {
+			desc->ifnet_properties |= NSTAT_IFNET_VIA_CELLFALLBACK;
+			desc->fallback_mode = SO_FALLBACK_MODE_FAST;
+		} else if (shad->shad_rnf_override == nstat_rnf_override_disabled) {
+			desc->ifnet_properties &= ~NSTAT_IFNET_VIA_CELLFALLBACK;
+			desc->fallback_mode = SO_FALLBACK_MODE_NONE;
+		}
 		desc->start_timestamp = shad->shad_start_timestamp;
 		desc->timestamp = mach_continuous_time();
 	}
@@ -2656,6 +2686,7 @@ ntstat_userland_stats_open(userland_stats_provider_context *ctx,
 	shad->shad_provider           = provider_id;
 	shad->shad_properties         = properties;
 	shad->shad_procdetails        = procdetails;
+	shad->shad_rnf_override       = nstat_rnf_override_not_set;
 	shad->shad_start_timestamp    = mach_continuous_time();
 	shad->shad_live               = true;
 	shad->shad_magic              = TU_SHADOW_MAGIC;
@@ -2763,6 +2794,40 @@ ntstat_userland_stats_close(nstat_userland_context nstat_ctx)
 	kfree_type(struct nstat_tu_shadow, shad);
 }
 
+static void
+ntstat_userland_stats_event_locked(
+	struct nstat_tu_shadow *shad,
+	uint64_t event)
+{
+	nstat_control_state *state;
+	nstat_src *src;
+	errno_t result;
+	nstat_provider_id_t provider_id;
+
+	if (nstat_userland_udp_watchers != 0 || nstat_userland_tcp_watchers != 0 || nstat_userland_quic_watchers != 0) {
+		for (state = nstat_controls; state; state = state->ncs_next) {
+			if (((state->ncs_provider_filters[NSTAT_PROVIDER_TCP_USERLAND].npf_events & event) == 0) &&
+			    ((state->ncs_provider_filters[NSTAT_PROVIDER_UDP_USERLAND].npf_events & event) == 0) &&
+			    ((state->ncs_provider_filters[NSTAT_PROVIDER_QUIC_USERLAND].npf_events & event) == 0)) {
+				continue;
+			}
+			lck_mtx_lock(&state->ncs_mtx);
+			TAILQ_FOREACH(src, &state->ncs_src_queue, ns_control_link) {
+				provider_id = src->provider->nstat_provider_id;
+				if (provider_id == NSTAT_PROVIDER_TCP_USERLAND || provider_id == NSTAT_PROVIDER_UDP_USERLAND ||
+				    provider_id == NSTAT_PROVIDER_QUIC_USERLAND) {
+					if (shad == (struct nstat_tu_shadow *)src->cookie) {
+						break;
+					}
+				}
+			}
+			if (src && ((state->ncs_provider_filters[provider_id].npf_events & event) != 0)) {
+				result = nstat_control_send_event(state, src, event);
+			}
+			lck_mtx_unlock(&state->ncs_mtx);
+		}
+	}
+}
 
 __private_extern__ void
 ntstat_userland_stats_event(
@@ -2886,6 +2951,48 @@ nstats_userland_stats_defunct_for_process(int pid)
 	}
 }
 
+errno_t
+nstat_userland_mark_rnf_override(uuid_t target_fuuid, bool rnf_override)
+{
+	// Note that this can be called multiple times for the same process
+	struct nstat_tu_shadow *shad;
+	uuid_t fuuid;
+	errno_t result;
+
+	lck_mtx_lock(&nstat_mtx);
+	// We set the fallback state regardles of watchers as there may be future ones that need to know
+	TAILQ_FOREACH(shad, &nstat_userprot_shad_head, shad_link) {
+		assert(shad->shad_magic == TU_SHADOW_MAGIC);
+		assert(shad->shad_procdetails->pdet_magic == NSTAT_PROCDETAILS_MAGIC);
+		if (shad->shad_get_extension_fn(shad->shad_provider_context, NSTAT_EXTENDED_UPDATE_TYPE_FUUID, fuuid, sizeof(fuuid))) {
+			if (uuid_compare(fuuid, target_fuuid) == 0) {
+				break;
+			}
+		}
+	}
+	if (shad) {
+		if (shad->shad_procdetails->pdet_pid != proc_selfpid()) {
+			result = EPERM;
+		} else {
+			result = 0;
+			// It would be possible but awkward to check the previous value
+			// for RNF override, and send an event only if changed.
+			// In practice it's fine to send an event regardless,
+			// which "pushes" the last statistics for the previous mode
+			shad->shad_rnf_override = rnf_override ? nstat_rnf_override_enabled
+			    : nstat_rnf_override_disabled;
+			ntstat_userland_stats_event_locked(shad,
+			    rnf_override ? NSTAT_EVENT_SRC_ENTER_CELLFALLBACK
+			    : NSTAT_EVENT_SRC_EXIT_CELLFALLBACK);
+		}
+	} else {
+		result = EEXIST;
+	}
+
+	lck_mtx_unlock(&nstat_mtx);
+
+	return result;
+}
 
 #pragma mark -- Generic Providers --
 
@@ -5207,7 +5314,7 @@ nstat_accumulate_msg(
 	return result;
 }
 
-static void*
+static void
 nstat_idle_check(
 	__unused thread_call_param_t p0,
 	__unused thread_call_param_t p1)
@@ -5260,8 +5367,6 @@ nstat_idle_check(
 	}
 
 	nstat_prune_procdetails();
-
-	return NULL;
 }
 
 static void

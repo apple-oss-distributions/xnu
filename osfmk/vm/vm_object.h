@@ -68,7 +68,6 @@
 
 #include <debug.h>
 #include <mach_assert.h>
-#include <mach_pagemap.h>
 
 #include <mach/kern_return.h>
 #include <mach/boolean.h>
@@ -155,9 +154,6 @@ struct vm_object {
 	vm_page_queue_head_t    memq;           /* Resident memory - must be first */
 	lck_rw_t                Lock;           /* Synchronization */
 
-#if DEVELOPMENT || DEBUG
-	thread_t                Lock_owner;
-#endif
 	union {
 		vm_object_size_t  vou_size;     /* Object size (only valid if internal) */
 		int               vou_cache_pages_to_scan;      /* pages yet to be visited in an
@@ -420,18 +416,11 @@ extern void vm_object_access_tracking(vm_object_t object,
     uint32_t *acess_tracking_writes);
 #endif /* VM_OBJECT_ACCESS_TRACKING */
 
-extern
-vm_object_t     kernel_object;          /* the single kernel object */
+extern const vm_object_t kernel_object;          /* the single kernel object */
 
-extern
-vm_object_t     compressor_object;      /* the single compressor object */
+extern const vm_object_t compressor_object;      /* the single compressor object */
 
-extern
-vm_object_t     retired_pages_object;   /* holds VM pages which should never be used */
-
-extern
-unsigned int    vm_object_absent_max;   /* maximum number of absent pages
-                                         *  at a time for each object */
+extern const vm_object_t retired_pages_object;   /* holds VM pages which should never be used */
 
 # define        VM_MSYNC_INITIALIZED                    0
 # define        VM_MSYNC_SYNCHRONIZING                  1
@@ -559,8 +548,7 @@ extern boolean_t        vm_object_lock_upgrade(vm_object_t);
 
 #define vm_object_lock_init(object)                                     \
 	lck_rw_init(&(object)->Lock, &vm_object_lck_grp,                \
-	            (((object) == kernel_object ||                      \
-	              (object) == vm_submap_object) ?                   \
+	            ((object) == kernel_object ?                        \
 	             &kernel_object_lck_attr :                          \
 	             (((object) == compressor_object) ?                 \
 	             &compressor_object_lck_attr :                      \
@@ -644,10 +632,6 @@ MACRO_END
 __private_extern__ void         vm_object_deallocate(
 	vm_object_t     object);
 
-__private_extern__ kern_return_t vm_object_release_name(
-	vm_object_t     object,
-	int             flags);
-
 __private_extern__ void         vm_object_pmap_protect(
 	vm_object_t             object,
 	vm_object_offset_t      offset,
@@ -715,7 +699,8 @@ __private_extern__ boolean_t    vm_object_coalesce(
 __private_extern__ boolean_t    vm_object_shadow(
 	vm_object_t             *object,
 	vm_object_offset_t      *offset,
-	vm_object_size_t        length);
+	vm_object_size_t        length,
+	boolean_t               always_shadow);
 
 __private_extern__ void         vm_object_collapse(
 	vm_object_t             object,
@@ -949,19 +934,10 @@ thread_sleep_vm_object(
 {
 	wait_result_t wr;
 
-#if DEVELOPMENT || DEBUG
-	if (object->Lock_owner != current_thread()) {
-		panic("thread_sleep_vm_object: now owner - %p\n", object);
-	}
-	object->Lock_owner = 0;
-#endif
 	wr = lck_rw_sleep(&object->Lock,
 	    LCK_SLEEP_PROMOTED_PRI,
 	    event,
 	    interruptible);
-#if DEVELOPMENT || DEBUG
-	object->Lock_owner = current_thread();
-#endif
 	return wr;
 }
 
@@ -1159,8 +1135,10 @@ extern void     vm_object_cache_remove(vm_object_t);
 extern int      vm_object_cache_evict(int, int);
 
 #define VM_OBJECT_OWNER_DISOWNED ((task_t) -1)
+#define VM_OBJECT_OWNER_UNCHANGED ((task_t) -2)
 #define VM_OBJECT_OWNER(object)                                         \
-	((((object)->purgable == VM_PURGABLE_DENY &&                    \
+	((object == VM_OBJECT_NULL ||                                   \
+	  ((object)->purgable == VM_PURGABLE_DENY &&                    \
 	   (object)->vo_ledger_tag == 0) ||                             \
 	  (object)->vo_owner == TASK_NULL)                              \
 	 ? TASK_NULL    /* not owned */                                 \

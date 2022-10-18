@@ -109,6 +109,10 @@
 #include <kern/ux_handler.h>            /* for ux_handler_setup() */
 #include <kern/sched_hygiene.h>
 
+#if (DEVELOPMENT || DEBUG)
+#include <kern/debug.h>
+#endif
+
 #include <mach/vm_param.h>
 
 #include <vm/vm_map.h>
@@ -204,6 +208,8 @@ void IOSleep(unsigned int);             /* XXX */
 void IOSetImageBoot(void);              /* XXX */
 void loopattach(void);                  /* XXX */
 
+void ipc_task_enable(task_t task);
+
 const char *const copyright =
     "Copyright (c) 1982, 1986, 1989, 1991, 1993\n\t"
     "The Regents of the University of California. "
@@ -212,22 +218,9 @@ const char *const copyright =
 /* Components of the first process -- never freed. */
 SECURITY_READ_ONLY_LATE(struct vfs_context) vfs_context0;
 
-struct proc proc0 = {
-	.p_comm    = "kernel_task",
-	.p_name    = "kernel_task",
-	.p_pptr    = &proc0,
-	.p_stat    = SRUN,
-#if defined(__LP64__)
-	.p_flag    = P_SYSTEM | P_LP64,
-#else
-	.p_flag    = P_SYSTEM,
-#endif
-	.p_nice    = NZERO,
-	.p_uthlist = TAILQ_HEAD_INITIALIZER(proc0.p_uthlist),
-};
 static struct plimit limit0;
 static struct pstats pstats0;
-SECURITY_READ_ONLY_LATE(proc_t) kernproc = &proc0;
+SECURITY_READ_ONLY_LATE(proc_t) kernproc;
 proc_t XNU_PTRAUTH_SIGNED_PTR("initproc") initproc;
 
 long tk_cancc;
@@ -304,6 +297,18 @@ __private_extern__ TUNABLE(bool, bootarg_disable_aslr, "-disable_aslr", 0);
 #if DEVELOPMENT || DEBUG
 char dyld_alt_path[MAXPATHLEN];
 int use_alt_dyld = 0;
+
+char panic_on_proc_crash[NAME_MAX];
+int use_panic_on_proc_crash = 0;
+
+char panic_on_proc_exit[NAME_MAX];
+int use_panic_on_proc_exit = 0;
+
+char panic_on_proc_spawn_fail[NAME_MAX];
+int use_panic_on_proc_spawn_fail = 0;
+
+char dyld_suffix[NAME_MAX];
+int use_dyld_suffix = 0;
 #endif
 
 int     cmask = CMASK;
@@ -378,7 +383,6 @@ struct rlimit vm_initial_limit_core = { .rlim_cur = DFLCSIZ, .rlim_max = MAXCSIZ
 
 extern struct os_refgrp rlimit_refgrp;
 
-extern thread_t cloneproc(task_t, coalition_t, proc_t, int, int);
 extern int      (*mountroot)(void);
 
 LCK_ATTR_DECLARE(proc_lck_attr, 0, 0);
@@ -402,6 +406,12 @@ void (*unmountroot_pre_hook)(void);
 void set_rootvnode(vnode_t);
 
 extern lck_rw_t rootvnode_rw_lock;
+
+SECURITY_READ_ONLY_LATE(struct mach_vm_range) bsd_pageable_range = {};
+KMEM_RANGE_REGISTER_DYNAMIC(bsd_pageable, &bsd_pageable_range, ^() {
+	assert(bsd_pageable_map_size != 0);
+	return (vm_map_size_t) bsd_pageable_map_size;
+});
 
 /* called with an iocount and usecount on new_rootvnode */
 void
@@ -463,12 +473,10 @@ bsd_rooted_ramdisk(void)
  * of the tro_ucred field so that the uthread structure can be
  * used like any other.
  */
-
 void
 bsd_init(void)
 {
 	struct uthread *ut;
-	kern_return_t   ret;
 	vnode_t init_rootvnode = NULLVP;
 	struct proc_ro_data kernproc_ro_data = {
 		.p_csflags = CS_VALID,
@@ -476,6 +484,10 @@ bsd_init(void)
 	struct task_ro_data kerntask_ro_data = { };
 #if CONFIG_NETBOOT || CONFIG_IMAGEBOOT
 	boolean_t       netboot = FALSE;
+#endif
+
+#if (DEVELOPMENT || DEBUG)
+	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_BSD_INIT);
 #endif
 
 #define DEBUG_BSDINIT 0
@@ -501,6 +513,22 @@ bsd_init(void)
 
 	/* kernel_task->proc = kernproc; */
 	set_bsdtask_info(kernel_task, (void *)kernproc);
+
+	/* Set the parent of kernproc to itself */
+	kernproc->p_pptr = kernproc;
+
+	/* Set the state to SRUN */
+	kernproc->p_stat = SRUN;
+
+	/* Set the proc flags */
+#if defined(__LP64__)
+	kernproc->p_flag = P_SYSTEM | P_LP64;
+#else
+	kernproc->p_flag = P_SYSTEM;
+#endif
+
+	kernproc->p_nice = NZERO;
+	TAILQ_INIT(&kernproc->p_uthlist);
 
 	/* set the cred */
 	kauth_cred_set(&kernproc_ro_data.p_ucred, vfs_context0.vc_ucred);
@@ -569,6 +597,7 @@ bsd_init(void)
 	proc_list_lock();
 	os_ref_init_mask(&kernproc->p_refcount, P_REF_BITS, &p_refgrp, P_REF_NONE);
 	os_ref_init_raw(&kernproc->p_waitref, &p_refgrp);
+	proc_ref_hold_proc_task_struct(kernproc);
 
 	/*
 	 * Make a group and session, then simulate pinsertchild(),
@@ -577,13 +606,13 @@ bsd_init(void)
 	pghash_insert_locked(0, pgrp0);
 
 	LIST_INSERT_HEAD(&pgrp0->pg_members, kernproc, p_pglist);
-	hazard_ptr_init(&kernproc->p_pgrp, pgrp0);
+	smr_init_store(&kernproc->p_pgrp, pgrp0);
 	LIST_INSERT_HEAD(&allproc, kernproc, p_list);
 
 	LIST_INSERT_HEAD(SESSHASH(0), session0, s_hash);
 	proc_list_unlock();
 
-	kernproc->task = kernel_task;
+	proc_set_task(kernproc, kernel_task);
 
 #if DEVELOPMENT || DEBUG
 	if (bootarg_disable_aslr) {
@@ -619,7 +648,7 @@ bsd_init(void)
 	limit0.pl_rlimit[RLIMIT_CORE] = vm_initial_limit_core;
 	os_ref_init_count(&limit0.pl_refcnt, &rlimit_refgrp, 1);
 
-	hazard_ptr_init(&kernproc->p_limit, &limit0);
+	smr_init_store(&kernproc->p_limit, &limit0);
 	kernproc->p_stats = &pstats0;
 	proc_sigacts_copy(kernproc, NULL);
 	kernproc->p_subsystem_root_path = NULL;
@@ -634,23 +663,14 @@ bsd_init(void)
 	 *	Allocate a kernel submap for pageable memory
 	 *	for temporary copying (execve()).
 	 */
-	{
-		vm_offset_t     minimum;
-
-		bsd_init_kprintf("calling kmem_suballoc\n");
-		assert(bsd_pageable_map_size != 0);
-		ret = kmem_suballoc(kernel_map,
-		    &minimum,
-		    (vm_size_t)bsd_pageable_map_size,
-		    VM_MAP_CREATE_PAGEABLE,
-		    VM_FLAGS_ANYWHERE,
-		    VM_MAP_KERNEL_FLAGS_NONE,
-		    VM_KERN_MEMORY_BSD,
-		    &bsd_pageable_map);
-		if (ret != KERN_SUCCESS) {
-			panic("bsd_init: Failed to allocate bsd pageable map");
-		}
-	}
+	bsd_init_kprintf("calling kmem_suballoc\n");
+	bsd_pageable_map = kmem_suballoc(kernel_map,
+	    &bsd_pageable_range.min_address,
+	    (vm_size_t)bsd_pageable_map_size,
+	    VM_MAP_CREATE_PAGEABLE,
+	    VM_FLAGS_FIXED_RANGE_SUBALLOC,
+	    KMS_PERMANENT | KMS_NOFAIL,
+	    VM_KERN_MEMORY_BSD).kmr_submap;
 
 	/*
 	 * Initialize buffers and hash links for buffers
@@ -747,10 +767,6 @@ bsd_init(void)
 #endif
 	netagent_init();
 #endif /* NETWORKING */
-
-#if defined (__x86_64__)
-	hvg_bsd_init();
-#endif /* DEBUG || DEVELOPMENT */
 
 #if CONFIG_FREEZE
 #ifndef CONFIG_MEMORYSTATUS
@@ -1132,7 +1148,7 @@ bsd_utaskbootstrap(void)
 	 * Clone the bootstrap process from the kernel process, without
 	 * inheriting either task characteristics or memory from the kernel;
 	 */
-	thread = cloneproc(TASK_NULL, COALITION_NULL, kernproc, FALSE, TRUE);
+	thread = cloneproc(TASK_NULL, NULL, kernproc, CLONEPROC_FLAGS_MEMSTAT_INTERNAL);
 
 	/* Hold the reference as it will be dropped during shutdown */
 	initproc = proc_find(1);
@@ -1154,6 +1170,9 @@ bsd_utaskbootstrap(void)
 	ut = (struct uthread *)get_bsdthread_info(thread);
 	ut->uu_sigmask = 0;
 	act_set_astbsd(thread);
+
+	ipc_task_enable(get_threadtask(thread));
+
 	task_clear_return_wait(get_threadtask(thread), TCRW_CLEAR_ALL_WAIT);
 }
 
@@ -1189,9 +1208,33 @@ parse_bsd_args(void)
 #endif
 
 #if DEVELOPMENT || DEBUG
+	if (PE_parse_boot_argn("dyldsuffix", dyld_suffix, sizeof(dyld_suffix))) {
+		if (strlen(dyld_suffix) > 0) {
+			use_dyld_suffix = 1;
+		}
+	}
+
 	if (PE_parse_boot_argn("alt-dyld", dyld_alt_path, sizeof(dyld_alt_path))) {
 		if (strlen(dyld_alt_path) > 0) {
 			use_alt_dyld = 1;
+		}
+	}
+
+	if (PE_parse_boot_arg_str("panic-on-proc-crash", panic_on_proc_crash, sizeof(panic_on_proc_crash))) {
+		if (strlen(panic_on_proc_crash) > 0) {
+			use_panic_on_proc_crash = 1;
+		}
+	}
+
+	if (PE_parse_boot_arg_str("panic-on-proc-exit", panic_on_proc_exit, sizeof(panic_on_proc_exit))) {
+		if (strlen(panic_on_proc_exit) > 0) {
+			use_panic_on_proc_exit = 1;
+		}
+	}
+
+	if (PE_parse_boot_arg_str("panic-on-proc-spawn-fail", panic_on_proc_spawn_fail, sizeof(panic_on_proc_spawn_fail))) {
+		if (strlen(panic_on_proc_spawn_fail) > 0) {
+			use_panic_on_proc_spawn_fail = 1;
 		}
 	}
 #endif /* DEVELOPMENT || DEBUG */

@@ -1810,7 +1810,7 @@ sched_clutch_thread_clutch_update(
 		 * add it to the old clutch bucket. This uses the same CPU usage
 		 * logic as update_priority etc.
 		 */
-		thread_timer_delta(thread, cpu_delta);
+		sched_tick_delta(thread, cpu_delta);
 		if (thread->pri_shift < INT8_MAX) {
 			thread->sched_usage += cpu_delta;
 		}
@@ -3440,7 +3440,7 @@ sched_edge_pset_available(processor_set_t pset)
 	if (pset == NULL) {
 		return false;
 	}
-	return bitmap_test(sched_edge_available_pset_bitmask, pset->pset_cluster_id);
+	return pset_available_cpu_count(pset) > 0;
 }
 
 /*
@@ -4496,10 +4496,12 @@ sched_edge_migrate_candidate(processor_set_t preferred_pset, thread_t thread, pr
 	bool amp_rebalance_eligible = (!shared_rsrc_thread) || (shared_rsrc_thread && (edge_shared_rsrc_policy[shared_rsrc_type] == EDGE_SHARED_RSRC_SCHED_POLICY_NATIVE_FIRST));
 	if (amp_rebalance_eligible) {
 		boolean_t amp_rebalance = (thread->reason & (AST_REBALANCE | AST_QUANTUM)) == (AST_REBALANCE | AST_QUANTUM);
-		boolean_t non_preferred_pset = (thread->last_processor->processor_set->pset_type != preferred_pset->pset_type);
-		if (amp_rebalance && non_preferred_pset) {
-			selected_pset = sched_edge_amp_rebalance_pset(preferred_pset, thread);
-			goto migrate_candidate_available_check;
+		if (amp_rebalance) {
+			boolean_t non_preferred_pset = (thread->last_processor->processor_set->pset_type != preferred_pset->pset_type);
+			if (non_preferred_pset) {
+				selected_pset = sched_edge_amp_rebalance_pset(preferred_pset, thread);
+				goto migrate_candidate_available_check;
+			}
 		}
 	}
 
@@ -4515,14 +4517,8 @@ migrate_candidate_available_check:
 	/* Looks like selected_pset is not available for scheduling; remove it from candidate_cluster_bitmap */
 	bitmap_clear(&candidate_cluster_bitmap, selected_pset->pset_cluster_id);
 	if (__improbable(bitmap_first(&candidate_cluster_bitmap, sched_edge_max_clusters) == -1)) {
-		/*
-		 * None of the clusters are available for scheduling; this situation should be rare but if it happens,
-		 * simply return the boot cluster.
-		 */
-		selected_pset = &pset0;
-		locked_pset = sched_edge_switch_pset_lock(selected_pset, locked_pset, switch_pset_locks);
-		KDBG(MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_EDGE_CLUSTER_OVERLOAD) | DBG_FUNC_NONE, thread_tid(thread), preferred_cluster_id, selected_pset->pset_cluster_id, preferred_cluster_load);
-		return selected_pset;
+		pset_unlock(locked_pset);
+		return NULL;
 	}
 	/* Try and find an alternative for the selected pset */
 	selected_pset = sched_edge_candidate_alternative(selected_pset, candidate_cluster_bitmap);
@@ -4553,7 +4549,9 @@ sched_edge_choose_processor(processor_set_t pset, processor_t processor, thread_
 	 * factor that into the migration decisions.
 	 */
 	chosen_pset = sched_edge_migrate_candidate(preferred_pset, thread, pset, true);
-	chosen_processor = choose_processor(chosen_pset, processor, thread);
+	if (chosen_pset) {
+		chosen_processor = choose_processor(chosen_pset, processor, thread);
+	}
 	/* For RT threads, choose_processor() can return a different cluster than the one passed into it */
 	assert(chosen_processor ? chosen_processor->processor_set->pset_type == chosen_pset->pset_type : true);
 	return chosen_processor;
@@ -4969,21 +4967,10 @@ sched_edge_ipi_policy(processor_t dst, thread_t thread, boolean_t dst_idle, sche
 uint32_t
 sched_edge_qos_max_parallelism(int qos, uint64_t options)
 {
-	uint32_t ecpu_count = 0;
-	uint32_t pcpu_count = 0;
-	uint32_t ecluster_count = 0;
-	uint32_t pcluster_count = 0;
-
-	for (int cluster_id = 0; cluster_id < sched_edge_max_clusters; cluster_id++) {
-		processor_set_t pset = pset_array[cluster_id];
-		if (pset_type_for_id(cluster_id) == CLUSTER_TYPE_P) {
-			pcpu_count += pset->cpu_set_count;
-			pcluster_count++;
-		} else {
-			ecpu_count += pset->cpu_set_count;
-			ecluster_count++;
-		}
-	}
+	uint32_t ecpu_count = ml_get_cpu_number_type(CLUSTER_TYPE_E, false, false);
+	uint32_t pcpu_count = ml_get_cpu_number_type(CLUSTER_TYPE_P, false, false);
+	uint32_t ecluster_count = ml_get_cluster_number_type(CLUSTER_TYPE_E);
+	uint32_t pcluster_count = ml_get_cluster_number_type(CLUSTER_TYPE_P);
 
 	if (options & QOS_PARALLELISM_REALTIME) {
 		/* For realtime threads on AMP, we would want them

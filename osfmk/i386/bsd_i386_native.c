@@ -25,7 +25,6 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-#include <mach_debug.h>
 #include <mach_ldebug.h>
 
 #include <mach/kern_return.h>

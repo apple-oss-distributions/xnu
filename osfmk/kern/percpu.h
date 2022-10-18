@@ -73,6 +73,16 @@ __BEGIN_DECLS
 #define PERCPU_DATA(name) \
 	__percpu __PERCPU_NAME(name) = {0}
 
+/*
+ * Same as before, but as a temporary hack with a 0 initializer
+ * instead of {0}, because clang has a bug where it does not accept
+ * the latter for _Atomic types. (And we want to keep the initializer
+ * to prevent people to think they can initialize it to anything else
+ * but 0.)
+ */
+#define PERCPU_DATA_HACK_78750602(name) \
+	__percpu __PERCPU_NAME(name) = 0
+
 /*!
  * @macro PERCPU_GET
  *
@@ -227,13 +237,13 @@ extern vm_offset_t other_percpu_base(int cpu_number);
  */
 #define percpu_foreach_secondary(it, name) \
 	for (__PERCPU_TYPE(name) it, \
-	    __base_ ## it = (typeof(it))percpu_base.start, \
-	    __end_ ## it = (typeof(it))percpu_base.end; \
+	    __base_ ## it = (typeof(it))__unsafe_forge_bidi_indexable(void *, percpu_base.start, percpu_base.end - percpu_base.start), \
+	    __end_ ## it = (typeof(it))((caddr_t)__base_ ## it  + percpu_base.end - percpu_base.start); \
         \
-	    (it = (typeof(it))(__PERCPU_ADDR(name) + (vm_address_t)__base_ ## it), \
+	    (it = (typeof(it))((caddr_t)__base_ ## it + __PERCPU_ADDR(name)), \
 	    __base_ ## it <= __end_ ## it); \
         \
-	    __base_ ## it = (typeof(it))((vm_address_t)__base_ ## it + percpu_section_size()))
+	    __base_ ## it = (typeof(it))((caddr_t)__base_ ## it + percpu_section_size()))
 
 #pragma mark - implementation details
 
@@ -246,7 +256,7 @@ extern vm_offset_t other_percpu_base(int cpu_number);
 #define __PERCPU_NAME(name)             percpu_slot_ ## name
 #define __PERCPU_ADDR(name)             ((vm_offset_t)&__PERCPU_NAME(name))
 #define __PERCPU_TYPE(name)             typeof(&__PERCPU_NAME(name))
-#define __PERCPU_CAST(name, expr)       ((__PERCPU_TYPE(name))(expr))
+#define __PERCPU_CAST(name, expr)       ((__PERCPU_TYPE(name))__unsafe_forge_bidi_indexable(void *, (expr), sizeof(__PERCPU_NAME(name))))
 
 /*
  * Note for implementors:

@@ -80,9 +80,12 @@
 #include <machine/commpage.h>
 #include <machine/cpu_capabilities.h>
 
+#include <device/device_port.h>
+
 #include <kern/kern_types.h>
 #include <kern/assert.h>
 #include <kern/kalloc.h>
+#include <kern/ecc.h>
 #include <kern/host.h>
 #include <kern/host_statistics.h>
 #include <kern/ipc_host.h>
@@ -512,41 +515,7 @@ host_statistics(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_ty
 		for (unsigned int i = 0; i < pcount; i++) {
 			processor_t processor = processor_array[i];
 			assert(processor != PROCESSOR_NULL);
-
-			timer_t idle_state;
-			uint64_t idle_time_snapshot1, idle_time_snapshot2;
-			uint64_t idle_time_tstamp1, idle_time_tstamp2;
-
-			/* See discussion in processor_info(PROCESSOR_CPU_LOAD_INFO) */
-
-			GET_TICKS_VALUE_FROM_TIMER(processor, CPU_STATE_USER, user_state);
-			if (precise_user_kernel_time) {
-				GET_TICKS_VALUE_FROM_TIMER(processor, CPU_STATE_SYSTEM, system_state);
-			} else {
-				/* system_state may represent either sys or user */
-				GET_TICKS_VALUE_FROM_TIMER(processor, CPU_STATE_USER, system_state);
-			}
-
-			idle_state = &processor->idle_state;
-			idle_time_snapshot1 = timer_grab(idle_state);
-			idle_time_tstamp1 = idle_state->tstamp;
-
-			if (processor->current_state != idle_state) {
-				/* Processor is non-idle, so idle timer should be accurate */
-				GET_TICKS_VALUE_FROM_TIMER(processor, CPU_STATE_IDLE, idle_state);
-			} else if ((idle_time_snapshot1 != (idle_time_snapshot2 = timer_grab(idle_state))) ||
-			    (idle_time_tstamp1 != (idle_time_tstamp2 = idle_state->tstamp))) {
-				/* Idle timer is being updated concurrently, second stamp is good enough */
-				GET_TICKS_VALUE(CPU_STATE_IDLE, idle_time_snapshot2);
-			} else {
-				/*
-				 * Idle timer may be very stale. Fortunately we have established
-				 * that idle_time_snapshot1 and idle_time_tstamp1 are unchanging
-				 */
-				idle_time_snapshot1 += mach_absolute_time() - idle_time_tstamp1;
-
-				GET_TICKS_VALUE(CPU_STATE_IDLE, idle_time_snapshot1);
-			}
+			processor_cpu_load_info(processor, cpu_load_info->cpu_ticks);
 		}
 		simple_unlock(&processor_list_lock);
 
@@ -576,7 +545,7 @@ host_statistics(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_ty
 			*count = TASK_POWER_INFO_COUNT;
 		} else if (*count >= TASK_POWER_INFO_V2_COUNT) {
 			tinfo2->gpu_energy.task_gpu_utilisation = dead_task_statistics.task_gpu_ns;
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 			tinfo2->task_energy = dead_task_statistics.task_energy;
 			tinfo2->task_ptime = dead_task_statistics.total_ptime;
 			tinfo2->task_pset_switches = dead_task_statistics.total_pset_switches;
@@ -659,8 +628,7 @@ cache_host_statistics(int index, host_info64_t info)
 		return;
 	}
 
-	task_t task = current_task();
-	if (task->t_flags & TF_PLATFORM) {
+	if (task_get_platform_binary(current_task())) {
 		return;
 	}
 
@@ -763,7 +731,7 @@ rate_limit_host_statistics(bool is_stat64, host_flavor_t flavor, host_info64_t i
 	*pindex = -1;
 
 	/* Access control only for third party applications */
-	if (task->t_flags & TF_PLATFORM) {
+	if (task_get_platform_binary(task)) {
 		return FALSE;
 	}
 
@@ -1153,7 +1121,7 @@ host_processor_info(host_t host,
 
 	needed = pcount * icount * sizeof(natural_t);
 	size = vm_map_round_page(needed, VM_MAP_PAGE_MASK(ipc_kernel_map));
-	result = kmem_alloc(ipc_kernel_map, &addr, size, VM_KERN_MEMORY_IPC);
+	result = kmem_alloc(ipc_kernel_map, &addr, size, KMA_DATA, VM_KERN_MEMORY_IPC);
 	if (result != KERN_SUCCESS) {
 		return KERN_RESOURCE_SHORTAGE;
 	}
@@ -1233,6 +1201,8 @@ kernel_set_special_port(host_priv_t host_priv, int id, ipc_port_t port)
 	if (IP_VALID(old_port)) {
 		ipc_port_release_send(old_port);
 	}
+
+
 	return KERN_SUCCESS;
 }
 
@@ -1286,7 +1256,7 @@ host_set_special_port(host_priv_t host_priv, int id, ipc_port_t port)
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (current_task() != kernel_task && current_task()->bsd_info != initproc) {
+	if (current_task() != kernel_task && get_bsdtask_info(current_task()) != initproc) {
 		bool allowed = (id == HOST_TELEMETRY_PORT &&
 		    IOTaskHasEntitlement(current_task(), "com.apple.private.xpc.launchd.event-monitor"));
 #if CONFIG_CSR
@@ -1348,25 +1318,38 @@ host_get_special_port(host_priv_t host_priv, __unused int node, int id, ipc_port
 
 	host_lock(host_priv);
 	port = realhost.special[id];
-	*portp = ipc_port_copy_send(port);
+	switch (id) {
+	case HOST_PORT:
+		*portp = ipc_kobject_copy_send(port, &realhost, IKOT_HOST);
+		break;
+	case HOST_PRIV_PORT:
+		*portp = ipc_kobject_copy_send(port, &realhost, IKOT_HOST_PRIV);
+		break;
+	case HOST_IO_MAIN_PORT:
+		*portp = ipc_port_copy_send_any(main_device_port);
+		break;
+	default:
+		*portp = ipc_port_copy_send_mqueue(port);
+		break;
+	}
 	host_unlock(host_priv);
 
 	return KERN_SUCCESS;
 }
 
 /*
- *	host_get_io_master
+ *	host_get_io_main
  *
- *	Return the IO master access port for this host.
+ *	Return the IO main access port for this host.
  */
 kern_return_t
-host_get_io_master(host_t host, io_master_t * io_masterp)
+host_get_io_main(host_t host, io_main_t * io_mainp)
 {
 	if (host == HOST_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	return host_get_io_master_port(host_priv_self(), io_masterp);
+	return host_get_io_main_port(host_priv_self(), io_mainp);
 }
 
 host_t
@@ -1409,10 +1392,11 @@ host_set_multiuser_config_flags(host_priv_t host_priv, uint32_t multiuser_config
 	}
 
 	/*
-	 * Always enforce that the multiuser bit is set
-	 * if a value is written to the commpage word.
+	 * multiuser bit is extensively used for sharedIpad mode.
+	 * Caller sets the sharedIPad or other mutiuser modes.
+	 * Any override during commpage setting is not suitable anymore.
 	 */
-	commpage_update_multiuser_config(multiuser_config | kIsMultiUserDevice);
+	commpage_update_multiuser_config(multiuser_config);
 	return KERN_SUCCESS;
 #else
 	(void)host_priv;

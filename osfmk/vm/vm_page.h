@@ -200,24 +200,27 @@ struct vm_page {
 
 	vm_page_queue_chain_t         vmp_listq;           /* all pages in same object (O) */
 
-#if CONFIG_BACKGROUND_QUEUE
-	vm_page_queue_chain_t         vmp_backgroundq;     /* anonymous pages in the background pool (P) */
-#endif
-
+	vm_page_queue_chain_t         vmp_specialq;     /* anonymous pages in the special queues (P) */
 	vm_object_offset_t            vmp_offset;          /* offset into that object (O,P) */
+
 	vm_page_object_t              vmp_object;          /* which object am I in (O&P) */
 
 	/*
-	 * The following word of flags is always protected by the "page queues" lock.
+	 * The following word of flags used to be protected by the "page queues" lock.
+	 * That's no longer true and what lock, if any, is needed may depend on the
+	 * value of vmp_q_state.
 	 *
 	 * We use 'vmp_wire_count' to store the local queue id if local queues are enabled.
 	 * See the comments at 'vm_page_queues_remove' as to why this is safe to do.
 	 */
+#define VM_PAGE_SPECIAL_Q_EMPTY (0)
+#define VM_PAGE_SPECIAL_Q_BG (1)
+#define VM_PAGE_SPECIAL_Q_DONATE (2)
+#define VM_PAGE_SPECIAL_Q_FG (3)
 #define vmp_local_id vmp_wire_count
 	unsigned int vmp_wire_count:16,      /* how many wired down maps use me? (O&P) */
 	    vmp_q_state:4,                   /* which q is the page on (P) */
-	    vmp_in_background:1,
-	    vmp_on_backgroundq:1,
+	    vmp_on_specialq:2,
 	    vmp_gobbled:1,                   /* page used internally (P) */
 	    vmp_laundry:1,                   /* page is being cleaned now (P)*/
 	    vmp_no_cache:1,                  /* page is not to be cached and should */
@@ -273,7 +276,7 @@ struct vm_page {
 	    vmp_reusable:1,
 	    vmp_written_by_kernel:1;             /* page was written by kernel (i.e. decompressed) */
 
-#if    !defined(__arm__) && !defined(__arm64__)
+#if    !defined(__arm64__)
 	ppnum_t         vmp_phys_page;        /* Physical page number of the page */
 #endif
 };
@@ -402,7 +405,7 @@ VMP_CS_SET_NX(
 }
 
 
-#if defined(__arm__) || defined(__arm64__)
+#if defined(__arm64__)
 
 extern  unsigned int vm_first_phys_ppnum;
 
@@ -433,7 +436,7 @@ VM_PAGE_GET_PHYS_PAGE(vm_page_t m)
 
 #define VM_PAGE_GET_COLOR(m)    (VM_PAGE_GET_PHYS_PAGE(m) & vm_color_mask)
 
-#else   /* defined(__arm__) || defined(__arm64__) */
+#else   /* defined(__arm64__) */
 
 
 struct vm_page_with_ppnum {
@@ -451,7 +454,7 @@ typedef struct vm_page_with_ppnum *vm_page_with_ppnum_t;
 #define VM_PAGE_GET_CLUMP(m)    ((VM_PAGE_GET_PHYS_PAGE(m)) >> vm_clump_shift)
 #define VM_PAGE_GET_COLOR(m)    ((VM_PAGE_GET_CLUMP(m)) & vm_color_mask)
 
-#endif  /* defined(__arm__) || defined(__arm64__) */
+#endif  /* defined(__arm64__) */
 
 
 
@@ -519,8 +522,11 @@ vm_page_unpack_ptr(uintptr_t p)
 #define VM_PAGE_PACK_PTR(p)     vm_page_pack_ptr((uintptr_t)(p))
 #define VM_PAGE_UNPACK_PTR(p)   vm_page_unpack_ptr((uintptr_t)(p))
 
-#define VM_PAGE_OBJECT(p)       ((vm_object_t)(VM_PAGE_UNPACK_PTR(p->vmp_object)))
-#define VM_PAGE_PACK_OBJECT(o)  ((vm_page_object_t)(VM_PAGE_PACK_PTR(o)))
+#define VM_OBJECT_PACK(o)       ((vm_page_object_t)VM_PACK_POINTER((uintptr_t)(o), VM_PAGE_PACKED_PTR))
+#define VM_OBJECT_UNPACK(p)     ((vm_object_t)VM_UNPACK_POINTER(p, VM_PAGE_PACKED_PTR))
+
+#define VM_PAGE_OBJECT(p)       VM_OBJECT_UNPACK((p)->vmp_object)
+#define VM_PAGE_PACK_OBJECT(o)  VM_OBJECT_PACK(o)
 
 
 #define VM_PAGE_ZERO_PAGEQ_ENTRY(p)     \
@@ -1008,8 +1014,11 @@ MACRO_END
 #define VM_PAGE_PACK_PTR(p)     (p)
 #define VM_PAGE_UNPACK_PTR(p)   ((uintptr_t)(p))
 
-#define VM_PAGE_OBJECT(p)       ((vm_object_t)((p)->vmp_object))
-#define VM_PAGE_PACK_OBJECT(o)  ((vm_page_object_t)(VM_PAGE_PACK_PTR(o)))
+#define VM_OBJECT_PACK(o)       ((vm_page_object_t)(o))
+#define VM_OBJECT_UNPACK(p)     ((vm_object_t)(p))
+
+#define VM_PAGE_PACK_OBJECT(o)  VM_OBJECT_PACK(o)
+#define VM_PAGE_OBJECT(p)       VM_OBJECT_UNPACK((p)->vmp_object)
 
 
 #define VM_PAGE_ZERO_PAGEQ_ENTRY(p)     \
@@ -1100,12 +1109,10 @@ typedef struct vm_locks_array {
 } vm_locks_array_t;
 
 
-#if CONFIG_BACKGROUND_QUEUE
-extern  void    vm_page_assign_background_state(vm_page_t mem);
-extern  void    vm_page_update_background_state(vm_page_t mem);
-extern  void    vm_page_add_to_backgroundq(vm_page_t mem, boolean_t first);
-extern  void    vm_page_remove_from_backgroundq(vm_page_t mem);
-#endif
+extern  void    vm_page_assign_special_state(vm_page_t mem, int mode);
+extern  void    vm_page_update_special_state(vm_page_t mem);
+extern  void    vm_page_add_to_specialq(vm_page_t mem, boolean_t first);
+extern  void    vm_page_remove_from_specialq(vm_page_t mem);
 
 #define VM_PAGE_WIRED(m)        ((m)->vmp_q_state == VM_PAGE_IS_WIRED)
 #define NEXT_PAGE(m)            ((m)->vmp_snext)
@@ -1207,12 +1214,7 @@ struct vpl {
 	unsigned int    vpl_count;
 	unsigned int    vpl_internal_count;
 	unsigned int    vpl_external_count;
-#ifdef  VPL_LOCK_SPIN
 	lck_spin_t      vpl_lock;
-#else
-	lck_mtx_t       vpl_lock;
-	lck_mtx_ext_t   vpl_lock_ext;
-#endif
 };
 
 extern
@@ -1246,12 +1248,16 @@ queue_head_t    vm_objects_wired;
 extern
 lck_spin_t      vm_objects_wired_lock;
 
-#if CONFIG_BACKGROUND_QUEUE
+#define VM_PAGE_DONATE_DISABLED     0
+#define VM_PAGE_DONATE_ENABLED      1
+extern
+uint32_t        vm_page_donate_mode;
+extern
+bool        vm_page_donate_queue_ripe;
 
 #define VM_PAGE_BACKGROUND_TARGET_MAX   50000
-
 #define VM_PAGE_BG_DISABLED     0
-#define VM_PAGE_BG_LEVEL_1      1
+#define VM_PAGE_BG_ENABLED     1
 
 extern
 vm_page_queue_head_t    vm_page_queue_background;
@@ -1270,7 +1276,16 @@ uint32_t        vm_page_background_mode;
 extern
 uint32_t        vm_page_background_exclude_external;
 
-#endif
+extern
+vm_page_queue_head_t    vm_page_queue_donate;
+extern
+uint32_t        vm_page_donate_count;
+extern
+uint32_t        vm_page_donate_target_low;
+extern
+uint32_t        vm_page_donate_target_high;
+#define VM_PAGE_DONATE_TARGET_LOWWATER  (100)
+#define VM_PAGE_DONATE_TARGET_HIGHWATER ((unsigned int)(atop_64(max_mem) / 8))
 
 extern
 vm_offset_t     first_phys_addr;        /* physical address for first_page */
@@ -1704,12 +1719,58 @@ extern void memorystatus_pages_update(unsigned int pages_avail);
 #define vm_page_queue_lock (vm_page_locks.vm_page_queue_lock2)
 #define vm_page_queue_free_lock (vm_page_locks.vm_page_queue_free_lock2)
 
-#define vm_page_lock_queues()   lck_mtx_lock(&vm_page_queue_lock)
-#define vm_page_trylock_queues() lck_mtx_try_lock(&vm_page_queue_lock)
-#define vm_page_unlock_queues() lck_mtx_unlock(&vm_page_queue_lock)
+static inline void
+vm_free_page_lock(void)
+{
+	lck_mtx_lock(&vm_page_queue_free_lock);
+}
 
-#define vm_page_lockspin_queues()       lck_mtx_lock_spin(&vm_page_queue_lock)
-#define vm_page_trylockspin_queues()    lck_mtx_try_lock_spin(&vm_page_queue_lock)
+static inline void
+vm_free_page_lock_spin(void)
+{
+	lck_mtx_lock_spin(&vm_page_queue_free_lock);
+}
+
+static inline void
+vm_free_page_unlock(void)
+{
+	lck_mtx_unlock(&vm_page_queue_free_lock);
+}
+
+
+static inline void
+vm_page_lock_queues(void)
+{
+	lck_mtx_lock(&vm_page_queue_lock);
+}
+
+static inline boolean_t
+vm_page_trylock_queues(void)
+{
+	boolean_t ret;
+	ret = lck_mtx_try_lock(&vm_page_queue_lock);
+	return ret;
+}
+
+static inline void
+vm_page_unlock_queues(void)
+{
+	lck_mtx_unlock(&vm_page_queue_lock);
+}
+
+static inline void
+vm_page_lockspin_queues(void)
+{
+	lck_mtx_lock_spin(&vm_page_queue_lock);
+}
+
+static inline boolean_t
+vm_page_trylockspin_queues(void)
+{
+	boolean_t ret;
+	ret = lck_mtx_try_lock_spin(&vm_page_queue_lock);
+	return ret;
+}
 #define vm_page_lockconvert_queues()    lck_mtx_convert_spin(&vm_page_queue_lock)
 
 #ifdef  VPL_LOCK_SPIN
@@ -1719,7 +1780,7 @@ extern lck_grp_t vm_page_lck_grp_local;
 #define VPL_LOCK(vpl) lck_spin_lock_grp(vpl, &vm_page_lck_grp_local)
 #define VPL_UNLOCK(vpl) lck_spin_unlock(vpl)
 #else
-#define VPL_LOCK_INIT(vlq, vpl_grp, vpl_attr) lck_mtx_init_ext(&vlq->vpl_lock, &vlq->vpl_lock_ext, vpl_grp, vpl_attr)
+#define VPL_LOCK_INIT(vlq, vpl_grp, vpl_attr) lck_mtx_init(&vlq->vpl_lock, vpl_grp, vpl_attr)
 #define VPL_LOCK(vpl) lck_mtx_lock_spin(vpl)
 #define VPL_UNLOCK(vpl) lck_mtx_unlock(vpl)
 #endif
@@ -1800,14 +1861,12 @@ struct vm_page_delayed_work {
 
 struct vm_page_delayed_work_ctx {
 	struct vm_page_delayed_work dwp[DEFAULT_DELAYED_WORK_LIMIT];
-	thread_t delayed_owner;
+	thread_t                    delayed_owner;
 };
 
 void vm_page_do_delayed_work(vm_object_t object, vm_tag_t tag, struct vm_page_delayed_work *dwp, int dw_count);
 
 extern unsigned int vm_max_delayed_work_limit;
-
-extern void vm_page_delayed_work_init_ctx(void);
 
 #define DELAYED_WORK_LIMIT(max) ((vm_max_delayed_work_limit >= max ? max : vm_max_delayed_work_limit))
 
@@ -1838,7 +1897,7 @@ extern vm_page_t vm_object_page_grab(vm_object_t);
 extern void vm_page_buckets_check(void);
 #endif /* VM_PAGE_BUCKETS_CHECK */
 
-extern void vm_page_queues_remove(vm_page_t mem, boolean_t remove_from_backgroundq);
+extern void vm_page_queues_remove(vm_page_t mem, boolean_t remove_from_specialq);
 extern void vm_page_remove_internal(vm_page_t page);
 extern void vm_page_enqueue_inactive(vm_page_t mem, boolean_t first);
 extern void vm_page_enqueue_active(vm_page_t mem, boolean_t first);
@@ -1852,6 +1911,9 @@ extern void stop_secluded_suppression(task_t);
 #endif /* CONFIG_SECLUDED_MEMORY */
 
 extern void vm_retire_boot_pages(void);
-extern uint32_t vm_retired_pages_count(void);
+
+
+#define VMP_ERROR_GET(p) ((p)->vmp_error)
+
 
 #endif  /* _VM_VM_PAGE_H_ */

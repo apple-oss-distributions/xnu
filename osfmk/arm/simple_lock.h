@@ -63,18 +63,17 @@
 
 #ifdef  KERNEL_PRIVATE
 #include <mach/boolean.h>
-#include <kern/kern_types.h>
+#include <kern/lock_types.h>
 #include <sys/appleapiopts.h>
 #ifdef  MACH_KERNEL_PRIVATE
-#include <arm/hw_lock_types.h>
 #include <arm/locks.h>
 #include <mach_ldebug.h>
 #endif
 
 #ifdef MACH_KERNEL_PRIVATE
 
-extern machine_timeout32_t LockTimeOut;     /* Number of hardware ticks of a lock timeout */
-extern machine_timeout32_t LockTimeOutUsec; /* Number of microseconds for lock timeout */
+extern machine_timeout_t LockTimeOut;     /* Number of hardware ticks of a lock timeout */
+extern machine_timeout_t LockTimeOutUsec; /* Number of microseconds for lock timeout */
 
 typedef lck_spin_t usimple_lock_data_t, *usimple_lock_t;
 #else /* MACH_KERNEL_PRIVATE */
@@ -119,7 +118,7 @@ extern void     arm_usimple_lock_init(simple_lock_t, __unused unsigned short);
 
 #define simple_lock_init(l, t)   arm_usimple_lock_init(l,t)
 
-#if LOCK_STATS
+#if LCK_GRP_USE_ARG
 #define simple_lock(l, grp)                  lck_spin_lock_grp(l, grp)
 #define simple_lock_nopreempt(l, grp)        lck_spin_lock_nopreempt_grp(l, grp)
 #define simple_lock_try(l, grp)              lck_spin_try_lock_grp(l, grp)
@@ -129,9 +128,8 @@ extern void     arm_usimple_lock_init(simple_lock_t, __unused unsigned short);
 #define simple_lock_nopreempt(l, grp)        lck_spin_lock_nopreempt(l)
 #define simple_lock_try(l, grp)              lck_spin_try_lock(l)
 #define simple_lock_try_nopreempt(l, grp)    lck_spin_try_lock_nopreempt(l)
+#endif /* LCK_GRP_USE_ARG */
 
-
-#endif /* LOCK_STATS */
 #define simple_unlock(l)                lck_spin_unlock(l)
 #define simple_unlock_nopreempt(l)      lck_spin_unlock_nopreempt(l)
 

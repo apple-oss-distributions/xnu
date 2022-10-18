@@ -177,6 +177,7 @@ void kasan_arch_init(void);
 bool kasan_is_shadow_mapped(uintptr_t);
 
 /* Locking */
+void kasan_lock_init(void);
 void kasan_lock(boolean_t *);
 void kasan_unlock(boolean_t);
 bool kasan_lock_held(thread_t);

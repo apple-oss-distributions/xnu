@@ -355,10 +355,15 @@
 	X(TCP_STATS_ECN_LOST_SYN,		"ECNLOSSSYN",	"\t\t%llu time lost ECN negotiating SYN, followed by retransmission\n") \
 	X(TCP_STATS_ECN_SERVER_SETUP,		"ECNSvrSetup",	"\t\t%llu server connection attempted to negotiate ECN\n")      \
 	X(TCP_STATS_ECN_SERVER_SUCCESS,		"ECNSvrSucc",	"\t\t%llu server connection successfully negotiate ECN\n")      \
+	X(TCP_STATS_ECN_ACE_SYN_NOT_ECT,	"ACESynNotECT",	"\t\t%llu received AccECN SYN packet with Not-ECT\n")           \
+	X(TCP_STATS_ECN_ACE_SYN_ECT1,		"ACESynECT1",	"\t\t%llu received AccECN SYN packet with ECT1\n")              \
+	X(TCP_STATS_ECN_ACE_SYN_ECT0,		"ACESynECT0",	"\t\t%llu received AccECN SYN packet with ECT0\n")              \
+	X(TCP_STATS_ECN_ACE_SYN_CE,		"ACESynCE",	"\t\t%llu received AccECN SYN packet with CE\n")                \
 	X(TCP_STATS_ECN_LOST_SYNACK,		"ECNLossSYNACK","\t\t%llu time lost ECN negotiating SYN-ACK, followed by retransmission\n")     \
 	X(TCP_STATS_ECN_RECV_CE,		"ECNRcv",	"\t\t%llu time received congestion experienced (CE) notification\n")    \
 	X(TCP_STATS_ECN_RECV_ECE,		"ECNRcvECE",	"\t\t%llu time CWR was sent in response to ECE\n")      \
 	X(TCP_STATS_ECN_SENT_ECE,		"ECNSndECE",	"\t\t%llu time sent ECE notification\n")        \
+	X(TCP_STATS_ECN_ACE_RECV_CE,            "ACERcvECE",    "\t\t%llu CE count received in ACE field\n")      \
 	X(TCP_STATS_ECN_CONN_RECV_CE,		"ECNConnRcvCE",	"\t\t%llu connection received CE atleast once\n")       \
 	X(TCP_STATS_ECN_CONN_RECV_ECE,		"ECNConnRcvECE","\t\t%llu connection received ECE atleast once\n")      \
 	X(TCP_STATS_ECN_CONN_PLNOCE,		"ECNConnPLNoCE","\t\t%llu connection using ECN have seen packet loss but no CE\n")      \
@@ -656,7 +661,7 @@
 	X(NETIF_STATS_EV_DROP_KRSPACE,		"EvDropKrSpaceDrop",	"\t%llu channel event dropped due to lack of space in user channel ring\n") \
 	X(NETIF_STATS_EV_DROP_DEMUX_ERR,	"EvDropDemuxErr",	"\t%llu channel event dropped due to demux error\n") \
 	X(NETIF_STATS_EV_DROP_EV_VPNA_NOTSUP,	"EvDropVpnaEvNotSup",	"\t%llu channel event dropped due to vpna not having event ring\n") \
-	X(NETIF_STATS_EV_DROP_NO_VPNA,		"EvDropNoVpna",		"\t%llu channel event dropped due to no pna ports\n") \
+	X(NETIF_STATS_EV_DROP_NO_VPNA,		"EvDropNoVpna",		"\t%llu channel event dropped due to no vpna ports\n") \
         \
 	/* Interface advisory update stats */  \
 	X(NETIF_STATS_IF_ADV_UPD_RECV,		"IfAdvUpdRecv",		"\t%llu interface advisory update received\n") \
@@ -752,6 +757,20 @@
         \
 	X(__NETIF_STATS_MAX,			"",			"end of netif stats")
 
+#define FSW_FPD_STATS(X)        \
+	X(FSW_STATS_FPD_0,			"",	"\t%llu")       \
+	X(FSW_STATS_FPD_1,			"",	"\t%llu")       \
+	X(FSW_STATS_FPD_2,			"",	"\t%llu")       \
+	X(FSW_STATS_FPD_3,			"",	"\t%llu")       \
+	X(FSW_STATS_FPD_4,			"",	"\t%llu")       \
+	X(FSW_STATS_FPD_5,			"",	"\t%llu")       \
+	X(FSW_STATS_FPD_6,			"",	"\t%llu")       \
+	X(FSW_STATS_FPD_7,			"",	"\t%llu")       \
+	X(FSW_STATS_FPD_8,			"",	"\t%llu")       \
+	X(FSW_STATS_FPD_9,			"",	"\t%llu")       \
+	X(FSW_STATS_FPD_10,		        "",	"\t%llu")       \
+	X(FSW_STATS_FPD_11,			"",	"\t%llu")
+
 #define FSW_STATS_TABLE(X)                                      \
 	/* Rx stats */  \
 	X(FSW_STATS_RX_PACKETS,			"RxPackets",		"\t%llu total Rx packet\n")     \
@@ -771,6 +790,8 @@
 	X(FSW_STATS_RX_COPY_SUM,		"RxCopySum",		"\t\t%llu copy+checksumed\n")   \
 	X(FSW_STATS_RX_COPY_BAD_LEN,		"RxCopyBadLen",		"\t\t%llu dropped, bad packet length\n")  \
 	X(FSW_STATS_RX_DROP_NOMEM_BUF,		"RxDropNoMemBuf",	"\t\t%llu dropped due to mbuf alloc failure\n") \
+	X(FSW_STATS_RX_DEMUX_SHORT_ERR,		"RxDemuxShortErr",	"\t\t%llu demux failed, classify length short\n") \
+	X(FSW_STATS_RX_WASTED_16KMBUF,		 "RxWasted16KMbuf",	"\t\t%llu wasted an entire pre-allocated 16K mbuf\n") \
 	/* Rx frag stats (fsw doesn't manage fragments on Tx) */        \
 	X(FSW_STATS_RX_FRAG_V4,			"RxFragV4",		"\t\t%llu total received ipv4 fragments\n")     \
 	X(FSW_STATS_RX_FRAG_V6,			"RxFragV6",		"\t\t%llu total received ipv6 fragments\n")     \
@@ -781,7 +802,7 @@
 	X(FSW_STATS_RX_FRAG_DROP_NOMEM,		"RxFragNoMem",		"\t\t\t%llu dropped due to no memory\n")        \
 	X(FSW_STATS_RX_FRAG_DROP_TIMEOUT,	"RxFragTimeOut",	"\t\t\t%llu dropped due to time out\n") \
 	X(FSW_STATS_RX_FRAG_DROP_FRAG_LIMIT,	"RxFragHitFragLimit",	"\t\t\t%llu dropped due to ipf max limit\n")    \
-	X(FSW_STATS_RX_FRAG_DROP_QUEUE_LIMIT,	"RxFragHitQueueLimit",	"\t\t\t%llu dropped due to queue max limit\n")  \
+	X(FSW_STATS_RX_FRAG_DROP_REAPED,	"RxFragDrained",	"\t\t\t%llu dropped due to draining\n") \
 	X(FSW_STATS_RX_FRAG_DROP_PER_QUEUE_LIMIT,"RxFragHitPerQueueLimit","\t\t\t%llu dropped due to ipf max per queue limit\n")        \
 	/* Rx aggregation stats */                                      \
 	X(FSW_STATS_RX_AGG_PKT2PKT,             "RxAggPktToPkt",        "\t\t%llu aggregated pkt  -> super pkt\n")             \
@@ -838,6 +859,17 @@
 	X(FSW_STATS_DROP_NOMEM_PKT,		"DropNoMemPkt",		"\t\t%llu dropped, packet alloc failure\n")       \
 	X(FSW_STATS_DROP_NOMEM_MBUF,		"DropNoMemMbuf",	"\t\t%llu dropped, mbuf alloc failure\n") \
         \
+	/* Channel event stats */  \
+	X(FSW_STATS_EV_SENT,			"EvSent",		"\t%llu channel event delivered\n")     \
+	X(FSW_STATS_EV_DROP,			"EvDrop",		"\t%llu channel event dropped\n")     \
+	X(FSW_STATS_EV_DROP_NOMEM_PKT,	"EvDropNoMemPkt",	"\t%llu channel event dropped due to packet alloc failure\n")     \
+	X(FSW_STATS_EV_DROP_NA_INACTIVE,	"EvDropNaInactive",	"\t%llu channel event dropped due to na inactive\n")     \
+	X(FSW_STATS_EV_DROP_NA_DEFUNCT,	"EvDropNaDefunct",	"\t%llu channel event dropped due to na defunct\n")     \
+	X(FSW_STATS_EV_DROP_KRDROP_MODE,	"EvDropKrDropMode",	"\t%llu channel event dropped due to dst kring in drop mode\n")     \
+	X(FSW_STATS_EV_DROP_KEVENT_INACTIVE,	"EvDropKevInactive",	"\t%llu channel event dropped due to kevent not registered on channel\n")     \
+	X(FSW_STATS_EV_DROP_KRSPACE,		"EvDropKrSpaceDrop",	"\t%llu channel event dropped due to lack of space in user channel ring\n") \
+	X(FSW_STATS_EV_DROP_DEMUX_ERR,	"EvDropDemuxErr",	"\t%llu channel event dropped due to demux error\n") \
+	X(FSW_STATS_EV_DROP_EV_VPNA_NOTSUP,	"EvDropVpnaEvNotSup",	"\t%llu channel event dropped due to vpna not having event ring\n") \
 	/* Misc. stats */ \
 	X(FSW_STATS_FLOWS_ABORTED,		"FlowsAborted",		"\t%llu flow aborted\n")        \
 	X(FSW_STATS_DST_NXPORT_INVALID,		"DestNexusPortInvalid", "\t%llu times dst nexus port invalid\n")        \
@@ -851,6 +883,10 @@
 	X(FSW_STATS_IF_ADV_UPD_SENT,		"IfAdvUpdSent",		"\t%llu interface advisory update event sent\n") \
         \
 	X(FSW_STATS_IF_ADV_UPD_DROP,		"IfAdvUpdDrop",		"\t%llu interface advisory update event dropped\n") \
+        \
+	/* FPD stats */ \
+	FSW_FPD_STATS(X)        \
+        \
 	X(__FSW_STATS_MAX,			"",			"end of flowswitch stats")
 
 /* END CSTYLED */
@@ -988,6 +1024,34 @@ typedef struct {
 	uint64_t        crs_bytes_per_second_ma;
 	uint32_t        __crs_reserved[2];
 } channel_ring_stats, *channel_ring_stats_t;
+
+struct netif_qstats {
+	uint64_t        nq_total_pkts;  /* total pkts transferred */
+	uint64_t        nq_total_bytes; /* total bytes transferred */
+	uint64_t        nq_num_xfers;   /* number of transfers */
+	uint32_t        nq_min_pkts;    /* min pkts transferred */
+	uint32_t        nq_max_pkts;    /* max pkts transferred */
+	uint32_t        nq_pkts_ps;     /* pkts transferred per second */
+	uint32_t        nq_pkts_ps_ma;  /* moving avg of pkts transferred per second */
+	uint64_t        nq_bytes_ps;    /* bytes transferred per second */
+	uint64_t        nq_bytes_ps_ma; /* moving avg of bytes transferred per second */
+};
+
+/*
+ * Netif queue set queue stats
+ * Output: An array of netif_qstats_info struct
+ */
+#define SK_STATS_NETIF_QUEUE_SYSCTL             "kern.skywalk.stats.netif_queue"
+
+/* Valid value for nqi_queue_flag */
+#define NQI_QUEUE_FLAG_IS_RX            0x00000001
+struct netif_qstats_info {
+	uint64_t                            nqi_qset_id;
+	uint16_t                            nqi_queue_flag;
+	uint16_t                            nqi_queue_idx;
+	packet_svc_class_t                  nqi_svc;
+	struct netif_qstats                 nqi_stats;
+};
 
 /*
  * Nexus provider information.
@@ -1292,6 +1356,8 @@ struct sk_stats_flow {
 #define SFLOWF_NONVIABLE        0x02000000      /* disabled; to be torn down */
 #define SFLOWF_WITHDRAWN        0x04000000      /* flow has been withdrawn */
 #define SFLOWF_TORN_DOWN        0x08000000      /* torn down, to be destroyed */
+#define SFLOWF_PARENT           0x10000000      /* parent flow */
+#define SFLOWF_CHILD            0x20000000      /* child flow */
 #define SFLOWF_DESTROYED        0x40000000      /* not in RB trees anymore */
 #define SFLOWF_LINGERING        0x80000000      /* destroyed and lingering */
 
@@ -1520,6 +1586,71 @@ struct sk_stats_protons_token {
 	pid_t                   spt_epid;
 };
 
+/*
+ * struct sk_stats_flowidns_header is used for
+ * sysctl 'kern.skywalk.stats.flowidns' * which returns a buffer containing
+ * the contents of every flowid.
+ * The buffer is formatted as a series headers, each immediately followed by
+ * some number of records:
+ * { struct sk_stats_flowidns_header h,
+ *   struct sk_stats_flowidns_record r[h->sfh_nrecords] } * num_flow_domains
+ */
+#define SK_STATS_FLOWIDNS    "kern.skywalk.stats.flowidns"
+struct sk_stats_flowidns_header {
+	uint64_t sfh_nallocs;
+	uint64_t sfh_nreleases;
+	uint64_t sfh_ncollisions;
+	uint32_t sfh_domain;
+	uint32_t sfh_nrecords;
+	/*
+	 * In a 'kern.skywalk.stats.flowidns' response, followed by
+	 * {sfh_n_records} struct sk_stats_flowidns_record
+	 */
+} __attribute__((aligned(32)));
+
+/* valid values for sfh_domain */
+#define SFH_DOMAIN_IPSEC         0
+#define SFH_DOMAIN_FLOWSWITCH    1
+#define SFH_DOMAIN_INPCB         2
+#define SFH_DOMAIN_PF            3
+
+
+struct sk_stats_flowidns_record {
+	union {
+		uint32_t        _addr[4];
+		struct in_addr  _v4;
+		struct in6_addr _v6;
+	} sfr_laddr;
+	union {
+		uint32_t        _addr[4];
+		struct in_addr  _v4;
+		struct in6_addr _v6;
+	} sfr_raddr;
+	union {
+		struct {
+			uint16_t _lport;
+			uint16_t _rport;
+		} sfr_ports;
+		uint32_t sfr_spi;
+		uint32_t sfr_protoid;
+	};
+	uint32_t sfr_flowid;
+	uint8_t  sfr_ipproto;
+	uint8_t  sfr_af;
+} __attribute__((aligned(32)));
+
+#define sfr_laddr_v4    sfr_laddr._v4
+#define sfr_laddr_v6    sfr_laddr._v6
+#define sfr_raddr_v4    sfr_raddr._v4
+#define sfr_raddr_v6    sfr_raddr._v6
+#define sfr_lport       sfr_ports._lport
+#define sfr_rport       sfr_ports._rport
+
+
+#define FLOWIDNS_BUFFER_SIZE(_records)                       \
+	(sizeof (struct sk_stats_flowidns_header) +          \
+	_records * sizeof (struct sk_stats_flowidns_record))
+
 typedef enum {
 	/*
 	 * The following are user task mappable.
@@ -1527,9 +1658,12 @@ typedef enum {
 	SREG_GUARD_HEAD = 0,    /* leading guard page(s) */
 	SREG_SCHEMA,            /* channel layout */
 	SREG_RING,              /* rings */
-	SREG_BUF,               /* rx/tx buffers */
-	SREG_RXBUF,             /* rx only buffers */
-	SREG_TXBUF,             /* tx only buffers */
+	SREG_BUF_DEF,           /* Default rx/tx buffers */
+	SREG_BUF_LARGE,         /* Large rx/tx buffers */
+	SREG_RXBUF_DEF,         /* Default rx only buffers */
+	SREG_RXBUF_LARGE,       /* Large rx only buffers */
+	SREG_TXBUF_DEF,         /* Default tx only buffers */
+	SREG_TXBUF_LARGE,       /* Large tx only buffers */
 	SREG_UMD,               /* userland metadata */
 	SREG_TXAUSD,            /* tx/alloc user slot descriptors */
 	SREG_RXFUSD,            /* rx/free user slot descriptors */
@@ -1610,6 +1744,7 @@ struct sk_stats_region {
 #define SREG_MODE_GUARD         0x1000  /* guard pages region */
 #define SREG_MODE_PUREDATA      0x2000  /* purely data; no pointers */
 #define SREG_MODE_PSEUDO        0x4000  /* external backing store */
+#define SREG_MODE_THREADSAFE    0x8000  /* external backing store */
 #define SREG_MODE_SLAB          (1U << 30) /* backend for slab layer */
 #define SREG_MODE_MIRRORED      (1U << 31) /* controlled by another region */
 
@@ -1617,7 +1752,8 @@ struct sk_stats_region {
 	"\020\01NOREDIRECT\02MMAPOK\03KREADONLY\04UREADONLY"            \
 	"\05PERSISTENT\06MONOLITHIC\07NOMAGAZINES\10NOCACHE"            \
 	"\11SEGPHYSCONTIG\012SHAREOK\013IODIR_IN\014IODIR_OUT"          \
-	"\015GUARD\016PUREDATA\017PSEUDO\037SLAB\040MIRRORED"
+	"\015GUARD\016PUREDATA\017PSEUDO\020THREADSAFE\037SLAB"         \
+	"\040MIRRORED"
 
 typedef enum {
 	SAR_TYPE_NEXUS,

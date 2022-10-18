@@ -116,7 +116,7 @@
 #define PRIV_NET_QOSMARKING_POLICY_OVERRIDE     10007   /* Privilege verified by Network Extension policies */
 #define PRIV_NET_RESTRICTED_INTCOPROC           10008   /* Access to internal co-processor network interfaces */
 
-#define PRIV_NET_PRIVILEGED_MULTIPATH           10009   /* Multipath usage */
+/* unused 10009 */
 #define PRIV_NET_RESTRICTED_MULTIPATH_EXTENDED  10010   /* Extended multipath (more aggressive on cell) */
 #define PRIV_NET_RESTRICTED_ROUTE_NC_READ       10011   /* Enable route neighbhor cache read operations */
 
@@ -152,20 +152,8 @@
 #define PRIV_VFS_OPEN_BY_ID             14000   /* Allow calling openbyid_np() */
 #define PRIV_VFS_MOVE_DATA_EXTENTS      14001   /* Allow F_MOVEDATAEXTENTS fcntl */
 #define PRIV_VFS_SNAPSHOT               14002   /* Allow create/rename/delete of snapshots */
-#define PRIV_VFS_SNAPSHOT_REVERT        14003   /* Allow reverting filesystem to a previous snapshot */
 #define PRIV_VFS_DATALESS_RESOLVER      14004   /* Allow registration as dataless file resolver */
-#define PRIV_VFS_DATALESS_MANIPULATION  14005   /* Allow process to inspect dataless directories / manipulate dataless objects */
 #define PRIV_VFS_SETSIZE                14006   /* Allow resizing a file without zeroing space */
-
-#define PRIV_APFS_EMBED_DRIVER          14100   /* Allow embedding an EFI driver into the APFS container */
-#define PRIV_APFS_DEBUG                 14101   /* Allow to control a debugging features of the APFS container */
-#define PRIV_APFS_FUSION_DEBUG          14101   /* Old constant name, superceded by PRIV_APFS_DEBUG.
-	                                         * I had to use a numeric value instead of a name because this file is parsed by some
-	                                         * script in the Sandbox project and it may produce a non-compilable output */
-#define PRIV_APFS_FUSION_ALLOW_PIN_FASTPROMOTE  14102   /* Allow changing pinned/fastPromote inode flags in APFS Fusion container */
-// #define PRIV_APFS_UNUSED              14103
-#define PRIV_APFS_SET_FREE_SPACE_CHANGE_THRESHOLD       14104   /* Allow setting the free space change notification threshold */
-#define PRIV_APFS_SET_FIRMLINK       14105   /* Allow setting the SF_FIRM_LINK bsd flag */
 
 #ifdef KERNEL
 /*

@@ -54,6 +54,7 @@
 #include <sys/fsevents.h>
 #include <sys/fcntl.h>
 #include <sys/reboot.h>
+#include <sys/code_signing.h>
 
 #include <mach/mach_types.h>
 #include <mach/memory_object_types.h>
@@ -372,7 +373,8 @@ cs_validate_codedirectory(const CS_CodeDirectory *cd, size_t length)
 	if (ntohl(cd->magic) != CSMAGIC_CODEDIRECTORY) {
 		return EBADEXEC;
 	}
-	if (cd->pageSize < PAGE_SHIFT_4K || cd->pageSize > PAGE_SHIFT) {
+	if ((cd->pageSize != PAGE_SHIFT_4K) && (cd->pageSize != PAGE_SHIFT)) {
+		printf("disallowing unsupported code signature page shift: %u\n", cd->pageSize);
 		return EBADEXEC;
 	}
 	hashtype = cs_find_md(cd->hashType);
@@ -516,6 +518,9 @@ cs_validate_csblob(
 	const CS_GenericBlob *blob;
 	int error;
 	size_t length;
+	const CS_GenericBlob *self_constraint = NULL;
+	const CS_GenericBlob *parent_constraint = NULL;
+	const CS_GenericBlob *responsible_proc_constraint = NULL;
 
 	*rcd = NULL;
 	*rentitlements = NULL;
@@ -535,7 +540,7 @@ cs_validate_csblob(
 		uint32_t n, count;
 		const CS_CodeDirectory *best_cd = NULL;
 		unsigned int best_rank = 0;
-#if PLATFORM_WatchOS
+#if XNU_PLATFORM_WatchOS
 		const CS_CodeDirectory *sha1_cd = NULL;
 #endif
 
@@ -593,7 +598,7 @@ cs_validate_csblob(
 					printf("multiple hash=%d CodeDirectories in signature; rejecting\n", best_cd->hashType);
 					return EBADEXEC;
 				}
-#if PLATFORM_WatchOS
+#if XNU_PLATFORM_WatchOS
 				if (candidate->hashType == CS_HASHTYPE_SHA1) {
 					if (sha1_cd != NULL) {
 						printf("multiple sha1 CodeDirectories in signature; rejecting\n");
@@ -620,10 +625,37 @@ cs_validate_csblob(
 					return EBADEXEC;
 				}
 				*rder_entitlements = subBlob;
+			} else if (type == CSSLOT_LAUNCH_CONSTRAINT_SELF) {
+				if (ntohl(subBlob->magic) != CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT) {
+					return EBADEXEC;
+				}
+				if (self_constraint != NULL) {
+					printf("multiple self constraint blobs\n");
+					return EBADEXEC;
+				}
+				self_constraint = subBlob;
+			} else if (type == CSSLOT_LAUNCH_CONSTRAINT_PARENT) {
+				if (ntohl(subBlob->magic) != CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT) {
+					return EBADEXEC;
+				}
+				if (parent_constraint != NULL) {
+					printf("multiple parent constraint blobs\n");
+					return EBADEXEC;
+				}
+				parent_constraint = subBlob;
+			} else if (type == CSSLOT_LAUNCH_CONSTRAINT_RESPONSIBLE) {
+				if (ntohl(subBlob->magic) != CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT) {
+					return EBADEXEC;
+				}
+				if (responsible_proc_constraint != NULL) {
+					printf("multiple responsible process constraint blobs\n");
+					return EBADEXEC;
+				}
+				responsible_proc_constraint = subBlob;
 			}
 		}
 
-#if PLATFORM_WatchOS
+#if XNU_PLATFORM_WatchOS
 		/* To keep watchOS fast enough, we have to resort to sha1 for
 		 * some code.
 		 *
@@ -755,6 +787,62 @@ find_special_slot(const CS_CodeDirectory *cd, size_t slotsize, uint32_t slot)
 
 static uint8_t cshash_zero[CS_HASH_MAX_SIZE] = { 0 };
 
+static int
+csblob_find_special_slot_blob(struct cs_blob* csblob, uint32_t slot, uint32_t magic, const CS_GenericBlob **out_start, size_t *out_length)
+{
+	uint8_t computed_hash[CS_HASH_MAX_SIZE];
+	const CS_GenericBlob *blob;
+	const CS_CodeDirectory *code_dir;
+	const uint8_t *embedded_hash;
+	union cs_hash_union context;
+
+	if (out_start) {
+		*out_start = NULL;
+	}
+	if (out_length) {
+		*out_length = 0;
+	}
+
+	if (csblob->csb_hashtype == NULL || csblob->csb_hashtype->cs_digest_size > sizeof(computed_hash)) {
+		return EBADEXEC;
+	}
+
+	code_dir = csblob->csb_cd;
+
+	blob = csblob_find_blob_bytes((const uint8_t *)csblob->csb_mem_kaddr, csblob->csb_mem_size, slot, magic);
+
+	embedded_hash = find_special_slot(code_dir, csblob->csb_hashtype->cs_size, slot);
+
+	if (embedded_hash == NULL) {
+		if (blob) {
+			return EBADEXEC;
+		}
+		return 0;
+	} else if (blob == NULL) {
+		if (memcmp(embedded_hash, cshash_zero, csblob->csb_hashtype->cs_size) != 0) {
+			return EBADEXEC;
+		} else {
+			return 0;
+		}
+	}
+
+	csblob->csb_hashtype->cs_init(&context);
+	csblob->csb_hashtype->cs_update(&context, blob, ntohl(blob->length));
+	csblob->csb_hashtype->cs_final(computed_hash, &context);
+
+	if (memcmp(computed_hash, embedded_hash, csblob->csb_hashtype->cs_size) != 0) {
+		return EBADEXEC;
+	}
+	if (out_start) {
+		*out_start = blob;
+	}
+	if (out_length) {
+		*out_length = ntohl(blob->length);
+	}
+
+	return 0;
+}
+
 int
 csblob_get_entitlements(struct cs_blob *csblob, void **out_start, size_t *out_length)
 {
@@ -805,6 +893,16 @@ csblob_get_entitlements(struct cs_blob *csblob, void **out_start, size_t *out_le
 	*out_length = ntohl(entitlements->length);
 
 	return 0;
+}
+
+const CS_GenericBlob*
+csblob_get_der_entitlements_unsafe(struct cs_blob * csblob)
+{
+	if ((csblob->csb_flags & CS_VALID) == 0) {
+		return NULL;
+	}
+
+	return csblob->csb_der_entitlements_blob;
 }
 
 int
@@ -863,9 +961,81 @@ csblob_get_der_entitlements(struct cs_blob *csblob, const CS_GenericBlob **out_s
  * Register a provisioning profile with a cs_blob.
  */
 int
-csblob_register_profile(struct cs_blob __unused *csblob, void __unused *profile_addr, vm_size_t __unused profile_size)
+csblob_register_profile(
+	struct cs_blob __unused *csblob,
+	void __unused *profile_addr,
+	vm_size_t __unused profile_size)
 {
+#if CODE_SIGNING_MONITOR
+	/* Profiles only need to be registered for monitor environments */
+	assert(profile_addr != NULL);
+	assert(profile_size != 0);
+	assert(csblob != NULL);
+
+	/* This is the old registration interface -- create a fake UUID */
+	uuid_t fake_uuid = {0};
+	uuid_generate(fake_uuid);
+
+	kern_return_t kr = register_provisioning_profile(
+		fake_uuid,
+		profile_addr, profile_size);
+
+	if (kr != KERN_SUCCESS) {
+		if (kr == KERN_ALREADY_IN_SET) {
+			panic("CODE SIGNGING: duplicate UUIDs not expected on this interface");
+		}
+		return EPERM;
+	}
+
+	/* Associate the profile with the monitor's signature object */
+	kr = associate_provisioning_profile(
+		csblob->csb_pmap_cs_entry,
+		fake_uuid);
+
+	if (kr != KERN_SUCCESS) {
+		return EPERM;
+	}
+
 	return 0;
+#else
+	return 0;
+#endif /* CODE_SIGNING_MONITOR */
+}
+
+int
+csblob_register_profile_uuid(
+	struct cs_blob __unused *csblob,
+	const uuid_t __unused profile_uuid,
+	void __unused *profile_addr,
+	vm_size_t __unused profile_size)
+{
+#if CODE_SIGNING_MONITOR
+	/* Profiles only need to be registered for monitor environments */
+	assert(profile_addr != NULL);
+	assert(profile_size != 0);
+	assert(csblob != NULL);
+
+	kern_return_t kr = register_provisioning_profile(
+		profile_uuid,
+		profile_addr, profile_size);
+
+	if ((kr != KERN_SUCCESS) && (kr != KERN_ALREADY_IN_SET)) {
+		return EPERM;
+	}
+
+	/* Associate the profile with the monitor's signature object */
+	kr = associate_provisioning_profile(
+		csblob->csb_pmap_cs_entry,
+		profile_uuid);
+
+	if (kr != KERN_SUCCESS) {
+		return EPERM;
+	}
+
+	return 0;
+#else
+	return 0;
+#endif /* CODE_SIGNING_MONITOR */
 }
 
 /*
@@ -2963,7 +3133,7 @@ ubc_cs_blob_allocate(
 	vm_size_t       *blob_size_p)
 {
 	kern_return_t   kr = KERN_FAILURE;
-	vm_size_t               allocation_size = 0;
+	vm_size_t       allocation_size = 0;
 
 	if (!blob_addr_p || !blob_size_p) {
 		return KERN_INVALID_ARGUMENT;
@@ -2971,8 +3141,16 @@ ubc_cs_blob_allocate(
 	allocation_size = *blob_size_p;
 
 	{
+		/*
+		 * This can be cross-freed between AMFI and XNU, so we need to make
+		 * sure that the adoption is coordinated between the two.
+		 *
+		 * rdar://87408704
+		 */
+		__typed_allocators_ignore_push
 		*blob_addr_p = (vm_offset_t) kheap_alloc_tag(KHEAP_DEFAULT,
-		    allocation_size, Z_WAITOK, VM_KERN_MEMORY_SECURITY);
+		    allocation_size, Z_WAITOK | Z_ZERO, VM_KERN_MEMORY_SECURITY);
+		__typed_allocators_ignore_pop
 
 		if (*blob_addr_p == 0) {
 			kr = KERN_NO_SPACE;
@@ -2982,13 +3160,7 @@ ubc_cs_blob_allocate(
 	}
 
 	if (kr == KERN_SUCCESS) {
-		if (*blob_addr_p) {
-			memset((void*)*blob_addr_p, 0, allocation_size);
-			*blob_size_p = allocation_size;
-		} else {
-			printf("CODE SIGNING: cs_blob allocation returned success, but received a NULL pointer\n");
-			kr = KERN_NO_SPACE;
-		}
+		*blob_size_p = allocation_size;
 	}
 
 	return kr;
@@ -3000,7 +3172,13 @@ ubc_cs_blob_deallocate(
 	vm_size_t       blob_size)
 {
 	{
-		kheap_free(KHEAP_DEFAULT, blob_addr, blob_size);
+		/*
+		 * This can be cross-freed between AMFI and XNU, so we need to make
+		 * sure that the adoption is coordinated between the two.
+		 *
+		 * rdar://87408704
+		 */
+		__typed_allocators_ignore(kheap_free(KHEAP_DEFAULT, blob_addr, blob_size));
 	}
 }
 
@@ -3113,6 +3291,9 @@ ubc_cs_reconstitute_code_signature(
 	const CS_GenericBlob *der_entitlements_blob = NULL;
 	const CS_GenericBlob *entitlements_blob = NULL;
 	const CS_GenericBlob *cms_blob = NULL;
+	const CS_GenericBlob *launch_constraint_self = NULL;
+	const CS_GenericBlob *launch_constraint_parent = NULL;
+	const CS_GenericBlob *launch_constraint_responsible = NULL;
 	CS_SuperBlob *superblob = NULL;
 	uint32_t num_blobs = 0;
 	uint32_t blob_index = 0;
@@ -3151,9 +3332,12 @@ ubc_cs_reconstitute_code_signature(
 	 *
 	 * 1. best code directory
 	 * 2. DER encoded entitlements blob (if present)
-	 * 3. entitlements blob (if present)
-	 * 4. cms blob (if present)
-	 * 5. first code directory (if not already the best match, and if cms blob is present)
+	 * 3. launch constraint self (if present)
+	 * 4. launch constraint parent (if present)
+	 * 5. launch constraint responsible (if present)
+	 * 6. entitlements blob (if present)
+	 * 7. cms blob (if present)
+	 * 8. first code directory (if not already the best match, and if cms blob is present)
 	 *
 	 * This order is chosen deliberately, as later on, we expect to get rid of the CMS blob
 	 * and the first code directory once their verification is complete.
@@ -3172,6 +3356,42 @@ ubc_cs_reconstitute_code_signature(
 	if (der_entitlements_blob) {
 		new_blob_size += sizeof(CS_BlobIndex);
 		new_blob_size += ntohl(der_entitlements_blob->length);
+		num_blobs += 1;
+	}
+
+	/* Conditional storage for the launch constraints self blob */
+	launch_constraint_self = csblob_find_blob_bytes(
+		(const uint8_t *)blob->csb_mem_kaddr,
+		blob->csb_mem_size,
+		CSSLOT_LAUNCH_CONSTRAINT_SELF,
+		CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT);
+	if (launch_constraint_self) {
+		new_blob_size += sizeof(CS_BlobIndex);
+		new_blob_size += ntohl(launch_constraint_self->length);
+		num_blobs += 1;
+	}
+
+	/* Conditional storage for the launch constraints parent blob */
+	launch_constraint_parent = csblob_find_blob_bytes(
+		(const uint8_t *)blob->csb_mem_kaddr,
+		blob->csb_mem_size,
+		CSSLOT_LAUNCH_CONSTRAINT_PARENT,
+		CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT);
+	if (launch_constraint_parent) {
+		new_blob_size += sizeof(CS_BlobIndex);
+		new_blob_size += ntohl(launch_constraint_parent->length);
+		num_blobs += 1;
+	}
+
+	/* Conditional storage for the launch constraints responsible blob */
+	launch_constraint_responsible = csblob_find_blob_bytes(
+		(const uint8_t *)blob->csb_mem_kaddr,
+		blob->csb_mem_size,
+		CSSLOT_LAUNCH_CONSTRAINT_RESPONSIBLE,
+		CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT);
+	if (launch_constraint_responsible) {
+		new_blob_size += sizeof(CS_BlobIndex);
+		new_blob_size += ntohl(launch_constraint_responsible->length);
 		num_blobs += 1;
 	}
 
@@ -3264,6 +3484,48 @@ ubc_cs_reconstitute_code_signature(
 		blob_offset += ntohl(der_entitlements_blob->length);
 	}
 
+	/* Launch constraints self blob */
+	if (launch_constraint_self) {
+		blob_index += 1;
+		superblob->index[blob_index].offset = htonl(blob_offset);
+		superblob->index[blob_index].type = htonl(CSSLOT_LAUNCH_CONSTRAINT_SELF);
+
+		memcpy(
+			(void*)(new_blob_addr + blob_offset),
+			launch_constraint_self,
+			ntohl(launch_constraint_self->length));
+
+		blob_offset += ntohl(launch_constraint_self->length);
+	}
+
+	/* Launch constraints parent blob */
+	if (launch_constraint_parent) {
+		blob_index += 1;
+		superblob->index[blob_index].offset = htonl(blob_offset);
+		superblob->index[blob_index].type = htonl(CSSLOT_LAUNCH_CONSTRAINT_PARENT);
+
+		memcpy(
+			(void*)(new_blob_addr + blob_offset),
+			launch_constraint_parent,
+			ntohl(launch_constraint_parent->length));
+
+		blob_offset += ntohl(launch_constraint_parent->length);
+	}
+
+	/* Launch constraints responsible blob */
+	if (launch_constraint_responsible) {
+		blob_index += 1;
+		superblob->index[blob_index].offset = htonl(blob_offset);
+		superblob->index[blob_index].type = htonl(CSSLOT_LAUNCH_CONSTRAINT_RESPONSIBLE);
+
+		memcpy(
+			(void*)(new_blob_addr + blob_offset),
+			launch_constraint_responsible,
+			ntohl(launch_constraint_responsible->length));
+
+		blob_offset += ntohl(launch_constraint_responsible->length);
+	}
+
 	/* Entitlements blob */
 	if (entitlements_blob) {
 		blob_index += 1;
@@ -3340,6 +3602,9 @@ ubc_cs_clear_unneeded_code_signature(
 	struct cs_blob *blob
 	)
 {
+	const CS_GenericBlob *launch_constraint_self = NULL;
+	const CS_GenericBlob *launch_constraint_parent = NULL;
+	const CS_GenericBlob *launch_constraint_responsible = NULL;
 	CS_SuperBlob *superblob = NULL;
 	uint32_t num_blobs = 0;
 	vm_size_t last_needed_blob_offset = 0;
@@ -3347,13 +3612,12 @@ ubc_cs_clear_unneeded_code_signature(
 	bool kmem_allocated = false;
 
 	/*
-	 * The only blobs we need to keep are the code directory and the entitlements
-	 * blob. These should have a certain ordering to them if we know that the
-	 * blob has been reconstituted in the past.
-	 *
-	 * Ordering:
+	 * Ordering of blobs we need to keep:
 	 * 1. Code directory
 	 * 2. DER encoded entitlements (if present)
+	 * 3. Launch constraints self (if present)
+	 * 3. Launch constraints parent (if present)
+	 * 3. Launch constraints responsible (if present)
 	 *
 	 * We need to clear out the remaining page after these blobs end, and fix up
 	 * the superblob for the changes. Things gets a little more complicated for
@@ -3390,6 +3654,39 @@ ubc_cs_clear_unneeded_code_signature(
 	if (blob->csb_der_entitlements_blob) {
 		num_blobs += 1;
 		last_needed_blob_offset += ntohl(blob->csb_der_entitlements_blob->length);
+	}
+
+	/* Check for launch constraints self */
+	launch_constraint_self = csblob_find_blob_bytes(
+		(const uint8_t *)blob->csb_mem_kaddr,
+		blob->csb_mem_size,
+		CSSLOT_LAUNCH_CONSTRAINT_SELF,
+		CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT);
+	if (launch_constraint_self) {
+		num_blobs += 1;
+		last_needed_blob_offset += ntohl(launch_constraint_self->length);
+	}
+
+	/* Check for launch constraints parent */
+	launch_constraint_parent = csblob_find_blob_bytes(
+		(const uint8_t *)blob->csb_mem_kaddr,
+		blob->csb_mem_size,
+		CSSLOT_LAUNCH_CONSTRAINT_PARENT,
+		CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT);
+	if (launch_constraint_parent) {
+		num_blobs += 1;
+		last_needed_blob_offset += ntohl(launch_constraint_parent->length);
+	}
+
+	/* Check for launch constraints responsible */
+	launch_constraint_responsible = csblob_find_blob_bytes(
+		(const uint8_t *)blob->csb_mem_kaddr,
+		blob->csb_mem_size,
+		CSSLOT_LAUNCH_CONSTRAINT_RESPONSIBLE,
+		CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT);
+	if (launch_constraint_responsible) {
+		num_blobs += 1;
+		last_needed_blob_offset += ntohl(launch_constraint_responsible->length);
 	}
 
 	superblob->count = htonl(num_blobs);
@@ -3455,9 +3752,17 @@ ubc_cs_clear_unneeded_code_signature(
 		/* Setup the code signature blob again */
 		blob->csb_mem_kaddr = (void *)new_superblob;
 		blob->csb_mem_size = new_superblob_size;
-		blob->csb_cd = (const CS_CodeDirectory*)csblob_find_blob_bytes((uint8_t*)new_superblob, new_superblob_size, CSSLOT_CODEDIRECTORY, CSMAGIC_CODEDIRECTORY);
+		blob->csb_cd = (const CS_CodeDirectory*)csblob_find_blob_bytes(
+			(uint8_t*)new_superblob,
+			new_superblob_size,
+			CSSLOT_CODEDIRECTORY,
+			CSMAGIC_CODEDIRECTORY);
 
-		blob->csb_der_entitlements_blob = csblob_find_blob_bytes((uint8_t*)new_superblob, new_superblob_size, CSSLOT_DER_ENTITLEMENTS, CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
+		blob->csb_der_entitlements_blob = csblob_find_blob_bytes(
+			(uint8_t*)new_superblob,
+			new_superblob_size,
+			CSSLOT_DER_ENTITLEMENTS,
+			CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
 	}
 
 	blob->csb_entitlements_blob = NULL;
@@ -3465,7 +3770,13 @@ ubc_cs_clear_unneeded_code_signature(
 	const CS_CodeDirectory *validated_code_directory = NULL;
 	const CS_GenericBlob *validated_entitlements_blob = NULL;
 	const CS_GenericBlob *validated_der_entitlements_blob = NULL;
-	ret = cs_validate_csblob((const uint8_t *)blob->csb_mem_kaddr, blob->csb_mem_size, &validated_code_directory, &validated_entitlements_blob, &validated_der_entitlements_blob);
+
+	ret = cs_validate_csblob(
+		(const uint8_t *)blob->csb_mem_kaddr,
+		blob->csb_mem_size,
+		&validated_code_directory,
+		&validated_entitlements_blob,
+		&validated_der_entitlements_blob);
 	if (ret) {
 		printf("CODE SIGNING: Validation of blob after clearing unneeded code signature blobs failed: %d\n", ret);
 		return EINVAL;
@@ -3599,26 +3910,17 @@ ubc_cs_convert_to_multilevel_hash(struct cs_blob *blob)
 static void
 cs_blob_cleanup(struct cs_blob *blob)
 {
-	if (blob->profile_kaddr) {
-		kmem_free(kernel_map, blob->profile_kaddr, blob->profile_allocation_size);
+	if (blob->csb_entitlements != NULL) {
+		amfi->OSEntitlements_invalidate(blob->csb_entitlements);
+		osobject_release(blob->csb_entitlements);
+		blob->csb_entitlements = NULL;
 	}
-	blob->profile_kaddr = 0;
-	blob->profile_allocation_size = 0;
 
 	if (blob->csb_mem_kaddr) {
 		ubc_cs_blob_deallocate((vm_offset_t)blob->csb_mem_kaddr, blob->csb_mem_size);
 	}
 	blob->csb_mem_kaddr = NULL;
 	blob->csb_mem_size = 0;
-
-	if (blob->csb_entitlements != NULL) {
-		if (amfi) {
-			// TODO: PANIC if amfi isn't present
-			amfi->OSEntitlements_invalidate(blob->csb_entitlements);
-		}
-		osobject_release(blob->csb_entitlements);
-		blob->csb_entitlements = NULL;
-	}
 }
 
 static void
@@ -3679,9 +3981,11 @@ cs_blob_init_validated(
 	blob->csb_entitlements_blob = NULL;
 	blob->csb_der_entitlements_blob = NULL;
 	blob->csb_entitlements = NULL;
+#if PMAP_CS_INCLUDE_CODE_SIGNING
+	blob->csb_pmap_cs_entry = NULL;
+#endif
 	blob->csb_reconstituted = false;
-	blob->profile_kaddr = 0;
-	blob->profile_allocation_size = 0;
+	blob->csb_validation_category = CS_VALIDATION_CATEGORY_INVALID;
 
 	/* Transfer ownership. Even on error, this function will deallocate */
 	*addr = 0;
@@ -3994,6 +4298,17 @@ ubc_cs_blob_add(
 
 	tmp_blob.csb_entitlements_blob = NULL;
 
+#if CODE_SIGNING_MONITOR
+	/* Disassociate any associated provisioning profiles from the monitor */
+	kr = disassociate_provisioning_profile(tmp_blob.csb_pmap_cs_entry);
+	if ((kr != KERN_SUCCESS) && (kr != KERN_NOT_FOUND)) {
+		printf("CODE SIGNING: error with disassociating profile[pid: %d]: %d\n",
+		    proc_getpid(current_proc()), kr);
+
+		error = EPERM;
+		goto out;
+	}
+#endif
 
 	if (tmp_blob.csb_flags & CS_PLATFORM_BINARY) {
 		if (cs_debug > 1) {
@@ -4012,6 +4327,28 @@ ubc_cs_blob_add(
 				printf("check_signature[pid: %d]: no team-id\n", proc_getpid(current_proc()));
 			}
 		}
+	}
+
+	/*
+	 * Validate that launch constraints haven't been stripped
+	 */
+	kr = csblob_find_special_slot_blob(&tmp_blob, CSSLOT_LAUNCH_CONSTRAINT_SELF, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT, NULL, NULL);
+	if (kr) {
+		printf("check_signature[pid: %d]: embedded self launch constraint was removed\n", proc_getpid(current_proc()));
+		error = EPERM;
+		goto out;
+	}
+	kr = csblob_find_special_slot_blob(&tmp_blob, CSSLOT_LAUNCH_CONSTRAINT_PARENT, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT, NULL, NULL);
+	if (kr) {
+		printf("check_signature[pid: %d]: embedded parent launch constraint was removed\n", proc_getpid(current_proc()));
+		error = EPERM;
+		goto out;
+	}
+	kr = csblob_find_special_slot_blob(&tmp_blob, CSSLOT_LAUNCH_CONSTRAINT_RESPONSIBLE, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT, NULL, NULL);
+	if (kr) {
+		printf("check_signature[pid: %d]: embedded responsible launch constraint was removed\n", proc_getpid(current_proc()));
+		error = EPERM;
+		goto out;
 	}
 
 	/*
@@ -4147,6 +4484,9 @@ ubc_cs_blob_add(
 
 	/* set the generation count for cs_blobs */
 	uip->cs_add_gen = cs_blob_generation_count;
+	tmp_blob.csb_next = uip->cs_blobs;
+	ubc_cs_blob_adjust_statistics(&tmp_blob);
+	zalloc_ro_update_elem(ZONE_ID_CS_BLOB, blob_ro, &tmp_blob);
 
 	/*
 	 * Add this blob to the list of blobs for this vnode.
@@ -4155,12 +4495,9 @@ ubc_cs_blob_add(
 	 * the top of the list was and that list will remain valid
 	 * while we validate a page, even after we release the vnode's lock.
 	 */
-	tmp_blob.csb_next = uip->cs_blobs;
+	os_atomic_thread_fence(seq_cst); // fence to make sure all of the writes happen before we update the head
 	uip->cs_blobs = blob_ro;
 
-	ubc_cs_blob_adjust_statistics(&tmp_blob);
-
-	zalloc_ro_update_elem(ZONE_ID_CS_BLOB, blob_ro, &tmp_blob);
 
 	if (cs_debug > 1) {
 		proc_t p;
@@ -4279,28 +4616,29 @@ ubc_cs_blob_add_supplement(
 		vnode_unlock(orig_vp);
 		goto out;
 	}
-
+	bool found_but_not_valid = false;
 	for (orig_blob = ubc_get_cs_blobs(orig_vp); orig_blob != NULL;
 	    orig_blob = orig_blob->csb_next) {
 		if (orig_blob->csb_hashtype == tmp_blob.csb_linkage_hashtype &&
 		    memcmp(orig_blob->csb_cdhash, tmp_blob.csb_linkage, CS_CDHASH_LEN) == 0) {
 			// Found match!
+			found_but_not_valid = ((orig_blob->csb_flags & CS_VALID) != CS_VALID);
 			break;
 		}
 	}
 
-	if (orig_blob == NULL) {
+	if (orig_blob == NULL || found_but_not_valid) {
 		// Not found.
 
 		proc_t p;
 		const char *iname = vnode_getname_printable(vp);
 		p = current_proc();
 
-		printf("CODE SIGNING: proc %d(%s) supplemental signature for file (%s) "
-		    "does not match any attached cdhash.\n",
-		    proc_getpid(p), p->p_comm, iname);
+		error = (orig_blob == NULL) ? ESRCH : EPERM;
 
-		error = ESRCH;
+		printf("CODE SIGNING: proc %d(%s) supplemental signature for file (%s) "
+		    "does not match any attached cdhash (error: %d).\n",
+		    proc_getpid(p), p->p_comm, iname, error);
 
 		vnode_putname_printable(iname);
 		vnode_unlock(orig_vp);
@@ -4380,10 +4718,6 @@ ubc_cs_blob_add_supplement(
 		goto out;
 	}
 
-	/* Unlike regular cs_blobs, we only ever support one supplement. */
-	tmp_blob.csb_next = NULL;
-	uip->cs_blob_supplement = blob_ro;
-
 	/* mark this vnode's VM object as having "signed pages" */
 	kr = memory_object_signed(uip->ui_control, TRUE);
 	if (kr != KERN_SUCCESS) {
@@ -4392,13 +4726,19 @@ ubc_cs_blob_add_supplement(
 		goto out;
 	}
 
-	zalloc_ro_update_elem(ZONE_ID_CS_BLOB, blob_ro, &tmp_blob);
-
-	vnode_unlock(vp);
 
 	/* We still adjust statistics even for supplemental blobs, as they
 	 * consume memory just the same. */
 	ubc_cs_blob_adjust_statistics(&tmp_blob);
+	/* Unlike regular cs_blobs, we only ever support one supplement. */
+	tmp_blob.csb_next = NULL;
+	zalloc_ro_update_elem(ZONE_ID_CS_BLOB, blob_ro, &tmp_blob);
+
+	os_atomic_thread_fence(seq_cst); // Fence to prevent reordering here
+	uip->cs_blob_supplement = blob_ro;
+
+	vnode_unlock(vp);
+
 
 	if (cs_debug > 1) {
 		proc_t p;
@@ -4556,6 +4896,52 @@ out:
 	return blob;
 }
 
+void
+ubc_cs_free_and_vnode_unlock(
+	vnode_t vp)
+{
+	struct ubc_info *uip = vp->v_ubcinfo;
+	struct cs_blob  *cs_blobs, *blob, *next_blob;
+
+	if (!(uip->ui_flags & UI_CSBLOBINVALID)) {
+		vnode_unlock(vp);
+		return;
+	}
+
+	uip->ui_flags &= ~UI_CSBLOBINVALID;
+
+	cs_blobs = uip->cs_blobs;
+	uip->cs_blobs = NULL;
+
+#if CHECK_CS_VALIDATION_BITMAP
+	ubc_cs_validation_bitmap_deallocate( uip );
+#endif
+
+#if CONFIG_SUPPLEMENTAL_SIGNATURES
+	struct cs_blob  *cs_blob_supplement = uip->cs_blob_supplement;
+	uip->cs_blob_supplement = NULL;
+#endif
+
+	vnode_unlock(vp);
+
+	for (blob = cs_blobs;
+	    blob != NULL;
+	    blob = next_blob) {
+		next_blob = blob->csb_next;
+		os_atomic_add(&cs_blob_count, -1, relaxed);
+		os_atomic_add(&cs_blob_size, -blob->csb_mem_size, relaxed);
+		cs_blob_ro_free(blob);
+	}
+
+#if CONFIG_SUPPLEMENTAL_SIGNATURES
+	if (cs_blob_supplement != NULL) {
+		os_atomic_add(&cs_blob_count, -1, relaxed);
+		os_atomic_add(&cs_blob_size, -cs_blob_supplement->csb_mem_size, relaxed);
+		cs_blob_supplement_free(cs_blob_supplement);
+	}
+#endif
+}
+
 static void
 ubc_cs_free(
 	struct ubc_info *uip)
@@ -4622,6 +5008,15 @@ ubc_cs_blob_revalidate(
 	size_t size;
 	assert(vp != NULL);
 	assert(blob != NULL);
+
+	if ((blob->csb_flags & CS_VALID) == 0) {
+		// If the blob attached to the vnode was invalidated, don't try to revalidate it
+		// Blob invalidation only occurs when the file that the blob is attached to is
+		// opened for writing, giving us a signal that the file is modified.
+		printf("CODESIGNING: can not re-validate a previously invalidated blob, reboot or create a new file.\n");
+		error = EPERM;
+		goto out;
+	}
 
 	size = blob->csb_mem_size;
 	error = cs_validate_csblob((const uint8_t *)blob->csb_mem_kaddr,

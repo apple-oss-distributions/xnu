@@ -170,7 +170,7 @@ IOCPURunPlatformPanicActions(uint32_t message, uint32_t details)
 	}
 	uint64_t platform_action_flags = 0;
 
-	if (!verbose_panic_flow_logging && (message == kPEPanicDiagnosticsInProgress)) {
+	if (!verbose_panic_flow_logging) {
 		platform_action_flags = PLATFORM_ACTION_FLAGS_NO_LOGGING;
 	}
 	return iocpu_run_platform_actions(&gActionQueues[kQueuePanic], 0, 0U - 1,

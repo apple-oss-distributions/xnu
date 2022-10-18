@@ -95,8 +95,6 @@ int file_drop(int);
 #endif /* KERNEL */
 
 #ifdef KERNEL_PRIVATE
-int fd_rdwr(int fd, enum uio_rw, uint64_t base, int64_t len, enum uio_seg,
-    off_t offset, int io_flg, int64_t *aresid);
 struct fileglob;
 struct fileproc;
 struct vnode;

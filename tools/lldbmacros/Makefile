@@ -80,10 +80,13 @@ LLDBMACROS_PYTHON_FILES = $(LLDBMACROS_USERDEBUG_FILES) \
 	waitq.py \
 	xnutriage.py \
 	zonetriage.py \
+	recount.py \
 	sysreg.py \
 	counter.py \
 	btlog.py \
 	refgrp.py \
+	workload.py \
+	log.py \
 	kext.py
 
 ifneq ($(PLATFORM),MacOSX)

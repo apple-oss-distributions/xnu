@@ -25,7 +25,8 @@ PRIVATE_KERNELFILES = \
 	ptrtools.h \
 	reason_private.h \
 	refcnt.h \
-	refcnt_internal.h
+	refcnt_internal.h \
+	system_event_log.h
 
 DATAFILES = \
 	atomic.h \
@@ -42,7 +43,8 @@ PRIVATE_DATAFILES = \
 	atomic_private_arch.h	\
 	atomic_private_impl.h	\
 	base_private.h \
-	reason_private.h
+	reason_private.h \
+	system_event_log.h
 
 INSTALL_MI_LIST = ${DATAFILES}
 

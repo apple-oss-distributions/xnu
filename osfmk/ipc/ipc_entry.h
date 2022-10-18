@@ -72,7 +72,7 @@
 #include <mach/kern_return.h>
 
 #include <kern/kern_types.h>
-#include <kern/zalloc.h>
+#include <kern/kalloc.h>
 
 #include <ipc/ipc_types.h>
 
@@ -113,10 +113,7 @@ struct ipc_entry {
 		struct ipc_object *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_object") ie_object;
 		struct ipc_object *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_object") volatile ie_volatile_object;
 	};
-	union {
-		ipc_entry_bits_t  ie_bits;
-		ipc_entry_num_t   ie_size;
-	};
+	ipc_entry_bits_t    ie_bits;
 	uint32_t            ie_dist  : IPC_ENTRY_DIST_BITS;
 	mach_port_index_t   ie_index : IPC_ENTRY_INDEX_BITS;
 	union {
@@ -124,6 +121,10 @@ struct ipc_entry {
 		ipc_table_index_t ie_request;      /* dead name request notify */
 	};
 };
+
+#define IPC_ENTRY_TABLE_MIN     32
+#define IPC_ENTRY_TABLE_PERIOD  16
+KALLOC_ARRAY_TYPE_DECL(ipc_entry_table, struct ipc_entry);
 
 #define IE_REQ_NONE             0               /* no request */
 
@@ -221,6 +222,8 @@ ipc_entry_gen_rolled(
 /*
  * Exported interfaces
  */
+
+extern unsigned int ipc_entry_table_count_max(void) __pure2;
 
 /* Search for entry in a space by name */
 extern ipc_entry_t ipc_entry_lookup(

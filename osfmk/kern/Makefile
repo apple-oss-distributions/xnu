@@ -25,6 +25,7 @@ PRIVATE_DATAFILES = \
 	ecc.h \
 	lock_stat.h \
 	monotonic.h \
+	recount.h \
 	remote_time.h \
 	restartable.h \
 	trustcache.h \
@@ -60,11 +61,13 @@ EXPORT_FILES = \
 	kpc.h \
 	ledger.h \
 	lock.h \
-	locks.h \
 	lock_attr.h \
-	lock_types.h \
 	lock_group.h \
+	lock_mtx.h \
+	lock_rw.h \
 	lock_sleep.h \
+	lock_types.h \
+	locks.h \
 	host.h \
 	hvg_hypercall.h \
 	mach_param.h \
@@ -78,7 +81,6 @@ EXPORT_FILES = \
 	mpsc_queue.h \
 	percpu.h \
 	priority_queue.h \
-	lock_rw.h \
 	sched_prim.h \
 	sfi.h \
 	simple_lock.h \
@@ -89,7 +91,6 @@ EXPORT_FILES = \
 	thread.h \
 	thread_call.h \
 	thread_group.h \
-	ticket_lock.h \
 	timer_call.h \
 	waitq.h \
 	work_interval.h \
@@ -101,25 +102,28 @@ EXPORT_FILES = \
 PRIVATE_EXPORT_FILES = \
 	socd_client_kern.h \
 	build_config.h \
+	ticket_lock.h \
 	mach_node_link.h \
 	copyout_shim.h \
 	sched_clutch.h \
 	mach_filter.h \
 	task_ident.h \
-	zalloc_ro_shim.h
+	zalloc_ro_shim.h \
+	kern_apfs_reflock.h
 
 
 XNU_ONLY_EXPORTS = \
 	arcade.h \
 	btlog.h \
 	cpu_quiesce.h \
+	iotrace.h \
 	ipc_kobject.h \
-	hazard.h \
 	perfmon.h \
 	sched_hygiene.h \
 	smr.h \
 	sync_sema.h \
-	ux_handler.h
+	ux_handler.h \
+	workload_config.h
 
 INSTALL_MI_LIST = ${DATAFILES}
 

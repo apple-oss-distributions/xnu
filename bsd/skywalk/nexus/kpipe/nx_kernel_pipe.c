@@ -97,7 +97,7 @@ static int nx_kpipe_prov_params_adjust(
 	const struct nxprov_params *, struct nxprov_adjusted_params *);
 static int nx_kpipe_prov_params(struct kern_nexus_domain_provider *,
     const uint32_t, const struct nxprov_params *, struct nxprov_params *,
-    struct skmem_region_params[SKMEM_REGIONS]);
+    struct skmem_region_params[SKMEM_REGIONS], uint32_t);
 static int nx_kpipe_prov_mem_new(struct kern_nexus_domain_provider *,
     struct kern_nexus *, struct nexus_adapter *);
 static void nx_kpipe_prov_fini(struct kern_nexus_domain_provider *);
@@ -145,6 +145,11 @@ struct nxdom nx_kpipe_dom_s = {
 		.nb_def = NX_KPIPE_BUFSIZE,
 		.nb_min = NX_KPIPE_MINBUFSIZE,
 		.nb_max = NX_KPIPE_MAXBUFSIZE,
+	},
+	.nxdom_large_buf_size = {
+		.nb_def = 0,
+		.nb_min = 0,
+		.nb_max = 0,
 	},
 	.nxdom_meta_size = {
 		.nb_def = NX_METADATA_OBJ_MIN_SZ,
@@ -480,26 +485,21 @@ static int
 nx_kpipe_prov_params_adjust(const struct kern_nexus_domain_provider *nxdom_prov,
     const struct nxprov_params *nxp, struct nxprov_adjusted_params *adj)
 {
-#pragma unused(nxdom_prov, nxp)
-	if (adj->adj_buf_srp->srp_r_seg_size == 0) {
-		adj->adj_buf_srp->srp_r_seg_size = skmem_usr_buf_seg_size;
-	}
-
-	/* enable magazines layer for metadata */
-	*(adj->adj_md_magazines) = TRUE;
-
+#pragma unused(nxdom_prov, nxp, adj)
 	return 0;
 }
 
 static int
 nx_kpipe_prov_params(struct kern_nexus_domain_provider *nxdom_prov,
     const uint32_t req, const struct nxprov_params *nxp0,
-    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS])
+    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS],
+    uint32_t pp_region_config_flags)
 {
 	struct nxdom *nxdom = nxdom_prov->nxdom_prov_dom;
 
 	return nxprov_params_adjust(nxdom_prov, req, nxp0, nxp, srp,
-	           nxdom, nxdom, nxdom, nx_kpipe_prov_params_adjust);
+	           nxdom, nxdom, nxdom, pp_region_config_flags,
+	           nx_kpipe_prov_params_adjust);
 }
 
 static int
@@ -521,7 +521,7 @@ nx_kpipe_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	 */
 	na->na_arena = skmem_arena_create_for_nexus(na,
 	    NX_PROV(nx)->nxprov_region_params, &nx->nx_tx_pp,
-	    &nx->nx_rx_pp, FALSE, FALSE, NULL, &err);
+	    &nx->nx_rx_pp, 0, NULL, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 	ASSERT(nx->nx_tx_pp == NULL || (nx->nx_tx_pp->pp_md_type ==
 	    NX_DOM(nx)->nxdom_md_type && nx->nx_tx_pp->pp_md_subtype ==

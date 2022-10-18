@@ -108,17 +108,15 @@ struct tcp_cache {
 	SLIST_ENTRY(tcp_cache) list;
 
 	uint32_t       tc_last_access;
-	uint32_t       tc_mptcp_version_discovery_refresh; /* Time until when we should do version discovery again */
 
 	struct tcp_cache_key tc_key;
 
 	uint8_t        tc_tfo_cookie[TFO_COOKIE_LEN_MAX];
 	uint8_t        tc_tfo_cookie_len;
 
-	int8_t         tc_mptcp_v0_support; /* -1 unsupported, 0 unknown, 1 supported */
-	int8_t         tc_mptcp_v1_support; /* -1 unsupported, 0 unknown, 1 supported */
-	uint8_t        tc_mptcp_v0_failed_count;
-	uint8_t        tc_mptcp_v1_failed_count;
+	uint8_t        tc_mptcp_version_confirmed:1;
+	uint8_t        tc_mptcp_version; /* version to use right now */
+	uint32_t       tc_mptcp_next_version_try; /* Time, until we try preferred version again */
 };
 
 struct tcp_cache_head {
@@ -168,6 +166,11 @@ SYSCTL_UINT(_net_inet_tcp, OID_AUTO, ecn_timeout, CTLFLAG_RW | CTLFLAG_LOCKED,
 static int disable_tcp_heuristics = 0;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, disable_tcp_heuristics, CTLFLAG_RW | CTLFLAG_LOCKED,
     &disable_tcp_heuristics, 0, "Set to 1, to disable all TCP heuristics (TFO, ECN, MPTCP)");
+
+static uint32_t mptcp_version_timeout = 24 * 60;
+
+SYSCTL_UINT(_net_inet_tcp, OID_AUTO, mptcp_version_timeout, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &mptcp_version_timeout, 24 * 60, "Initial minutes to wait before re-trying MPTCP's preferred version");
 
 
 static uint32_t
@@ -374,6 +377,9 @@ tcp_getcache_with_lock(struct tcp_cache_key_src *tcks,
 				goto out_null;
 			}
 
+			tpcache->tc_mptcp_version = (uint8_t)mptcp_preferred_version;
+			tpcache->tc_mptcp_next_version_try = tcp_now;
+
 			SLIST_INSERT_HEAD(&head->tcp_caches, tpcache, list);
 		}
 
@@ -558,13 +564,13 @@ tcp_cache_get_mptcp_version(struct sockaddr *dst)
 		return version;
 	}
 
-	if (tpcache->tc_mptcp_v1_support == MPTCP_VERSION_UNSUPPORTED &&
-	    tpcache->tc_mptcp_v0_support != MPTCP_VERSION_UNSUPPORTED) {
-		version =  MPTCP_VERSION_0;
-	}
-	if (tpcache->tc_mptcp_v0_support == MPTCP_VERSION_UNSUPPORTED &&
-	    tpcache->tc_mptcp_v1_support != MPTCP_VERSION_UNSUPPORTED) {
-		version =  MPTCP_VERSION_1;
+	version = tpcache->tc_mptcp_version;
+
+	/* Let's see if we should try the preferred version again */
+	if (!tpcache->tc_mptcp_version_confirmed &&
+	    version != mptcp_preferred_version &&
+	    TSTMP_GEQ(tcp_now, tpcache->tc_mptcp_next_version_try)) {
+		version = (uint8_t) mptcp_preferred_version;
 	}
 
 	tcp_cache_unlock(head);
@@ -574,13 +580,12 @@ tcp_cache_get_mptcp_version(struct sockaddr *dst)
 void
 tcp_cache_update_mptcp_version(struct tcpcb *tp, boolean_t succeeded)
 {
-	struct mptcb *mp_tp = tptomptp(tp);
-	uint8_t version = mp_tp->mpt_version;
-	int8_t record = succeeded ? MPTCP_VERSION_SUPPORTED : MPTCP_VERSION_UNSUPPORTED;
-
-	struct tcp_cache_key_src tcks;
-
+	uint8_t version = tptomptp(tp)->mpt_version;
 	struct inpcb *inp = tp->t_inpcb;
+	struct tcp_cache_key_src tcks;
+	struct tcp_cache_head *head;
+	struct tcp_cache *tpcache;
+
 	if (inp->inp_vflag & INP_IPV6) {
 		struct sockaddr_in6 dst = {
 			.sin6_len = sizeof(struct sockaddr_in6),
@@ -597,54 +602,44 @@ tcp_cache_update_mptcp_version(struct tcpcb *tp, boolean_t succeeded)
 		mptcp_version_cache_key_src_init((struct sockaddr *)&dst, &tcks);
 	}
 
-	struct tcp_cache_head *head;
-	struct tcp_cache *tpcache;
 	/* Call lookup/create function */
 	tpcache = tcp_getcache_with_lock(&tcks, 1, &head);
 	if (tpcache == NULL) {
 		return;
 	}
 
-	if (version == MPTCP_VERSION_0) {
-		if (tpcache->tc_mptcp_v0_support == MPTCP_VERSION_SUPPORTED_UNKNOWN) {
-			tpcache->tc_mptcp_v0_support = record;
+	/* We are still in probing phase */
+	if (tpcache->tc_mptcp_version_confirmed) {
+		goto exit;
+	}
+
+	if (succeeded) {
+		if (version == (uint8_t)mptcp_preferred_version) {
+			/* Preferred version succeeded - make it sticky */
+			tpcache->tc_mptcp_version_confirmed = true;
+			tpcache->tc_mptcp_version = version;
 		} else {
-			if (succeeded) {
-				tpcache->tc_mptcp_v0_failed_count = 0;
-				tpcache->tc_mptcp_v0_support = MPTCP_VERSION_SUPPORTED;
-			} else {
-				tpcache->tc_mptcp_v0_failed_count += 1;
-				// flip the record, so the other version is attempted the next time
-				if (tpcache->tc_mptcp_v0_failed_count >= MPTCP_VERSION_MAX_FAIL) {
-					tpcache->tc_mptcp_v0_failed_count = 0;
-					tpcache->tc_mptcp_v1_failed_count = 0;
-					tpcache->tc_mptcp_v0_support = MPTCP_VERSION_UNSUPPORTED;
-					tpcache->tc_mptcp_v1_support = MPTCP_VERSION_SUPPORTED_UNKNOWN;
-				}
+			/* If we are past the next version try, set it
+			 * so that we try preferred again in 24h
+			 */
+			if (TSTMP_GEQ(tcp_now, tpcache->tc_mptcp_next_version_try)) {
+				tpcache->tc_mptcp_next_version_try = tcp_now + tcp_min_to_hz(mptcp_version_timeout);
 			}
+		}
+	} else {
+		if (version == (uint8_t)mptcp_preferred_version) {
+			/* Preferred version failed - try the other version */
+			tpcache->tc_mptcp_version = version == MPTCP_VERSION_0 ? MPTCP_VERSION_1 : MPTCP_VERSION_0;
+		}
+		/* Preferred version failed - make sure we give the preferred another
+		 * shot in 24h.
+		 */
+		if (TSTMP_GEQ(tcp_now, tpcache->tc_mptcp_next_version_try)) {
+			tpcache->tc_mptcp_next_version_try = tcp_now + tcp_min_to_hz(mptcp_version_timeout);
 		}
 	}
 
-	if (version == MPTCP_VERSION_1) {
-		if (tpcache->tc_mptcp_v1_support == MPTCP_VERSION_SUPPORTED_UNKNOWN) {
-			tpcache->tc_mptcp_v1_support = record;
-		} else {
-			if (succeeded) {
-				tpcache->tc_mptcp_v1_failed_count = 0;
-				tpcache->tc_mptcp_v1_support = MPTCP_VERSION_SUPPORTED;
-			} else {
-				tpcache->tc_mptcp_v1_failed_count += 1;
-				// flip the record, so the other version is attempted the next time
-				if (tpcache->tc_mptcp_v1_failed_count >= MPTCP_VERSION_MAX_FAIL) {
-					tpcache->tc_mptcp_v0_failed_count = 0;
-					tpcache->tc_mptcp_v1_failed_count = 0;
-					tpcache->tc_mptcp_v1_support = MPTCP_VERSION_UNSUPPORTED;
-					tpcache->tc_mptcp_v0_support = MPTCP_VERSION_SUPPORTED_UNKNOWN;
-				}
-			}
-		}
-	}
-
+exit:
 	tcp_cache_unlock(head);
 }
 

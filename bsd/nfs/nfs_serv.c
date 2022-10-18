@@ -211,9 +211,7 @@ nfsrv_init(void)
 	nfsrv_fmod_hashtbl = hashinit(NFSRVFMODHASHSZ, M_TEMP, &nfsrv_fmod_hash);
 #endif
 
-#if CONFIG_NFS_GSS
 	nfs_gss_svc_init();                 /* Init RPCSEC_GSS security */
-#endif
 
 	/* initialize NFS server timer callouts */
 #if CONFIG_FSE
@@ -916,7 +914,6 @@ nfsrv_read(
 	struct nfs_export *nx = NULL;
 	struct nfs_export_options *nxo;
 	uio_t auio = NULL;
-	char *uio_bufp = NULL;
 	struct vnode_attr vattr, *vap = &vattr;
 	off_t off;
 	uid_t saved_uid;
@@ -924,6 +921,7 @@ nfsrv_read(
 	struct nfsm_chain *nmreq, nmrep;
 
 	error = 0;
+	count = 0;
 	attrerr = ENOENT;
 	nmreq = &nd->nd_nmreq;
 	nfsm_chain_null(&nmrep);
@@ -1003,12 +1001,9 @@ nfsrv_read(
 		/* get mbuf list to hold read data */
 		error = nfsm_mbuf_get_list(count, &mread, &mreadcnt);
 		nfsmerr_if(error);
-		uio_bufp = kalloc_data(UIO_SIZEOF(mreadcnt), Z_WAITOK);
-		if (uio_bufp) {
-			auio = uio_createwithbuffer(mreadcnt, off, UIO_SYSSPACE,
-			    UIO_READ, uio_bufp, UIO_SIZEOF(mreadcnt));
-		}
-		if (!uio_bufp || !auio) {
+
+		auio = uio_create(mreadcnt, off, UIO_SYSSPACE, UIO_READ);
+		if (!auio) {
 			error = ENOMEM;
 			goto errorexit;
 		}
@@ -1084,8 +1079,8 @@ nfsmout:
 	if (mread) {
 		mbuf_freem(mread);
 	}
-	if (uio_bufp != NULL) {
-		kfree_data(uio_bufp, UIO_SIZEOF(mreadcnt));
+	if (count > 0 && auio != NULL) {
+		uio_free(auio);
 	}
 	if (error) {
 		nfsm_chain_cleanup(&nmrep);
@@ -1309,7 +1304,6 @@ nfsrv_write(
 	struct nfs_export *nx = NULL;
 	struct nfs_export_options *nxo;
 	uio_t auio = NULL;
-	char *uio_bufp = NULL;
 	off_t off;
 	uid_t saved_uid;
 	struct nfsm_chain *nmreq, nmrep;
@@ -1408,11 +1402,8 @@ nfsrv_write(
 				mcount++;
 			}
 		}
-		uio_bufp = kalloc_data(UIO_SIZEOF(mcount), Z_WAITOK);
-		if (uio_bufp) {
-			auio = uio_createwithbuffer(mcount, off, UIO_SYSSPACE, UIO_WRITE, uio_bufp, UIO_SIZEOF(mcount));
-		}
-		if (!uio_bufp || !auio) {
+		auio = uio_create(mcount, off, UIO_SYSSPACE, UIO_WRITE);
+		if (!auio) {
 			error = ENOMEM;
 		}
 		nfsmerr_if(error);
@@ -1488,8 +1479,8 @@ nfsmout:
 	if (vp) {
 		vnode_put(vp);
 	}
-	if (uio_bufp != NULL) {
-		kfree_data(uio_bufp, UIO_SIZEOF(mcount));
+	if (auio) {
+		uio_free(auio);
 	}
 	if (error) {
 		nfsm_chain_cleanup(&nmrep);
@@ -1539,7 +1530,6 @@ nfsrv_writegather(
 	vnode_t vp;
 	mbuf_t m;
 	uio_t auio = NULL;
-	char *uio_bufp = NULL;
 	time_t cur_usec;
 	struct timeval now;
 	struct nfsm_chain *nmreq, nmrep;
@@ -1721,12 +1711,8 @@ loop1:
 				}
 			}
 
-			uio_bufp = kalloc_data(UIO_SIZEOF(i), Z_WAITOK);
-			if (uio_bufp) {
-				auio = uio_createwithbuffer(i, nd->nd_off, UIO_SYSSPACE,
-				    UIO_WRITE, uio_bufp, UIO_SIZEOF(i));
-			}
-			if (!uio_bufp || !auio) {
+			auio = uio_create(i, nd->nd_off, UIO_SYSSPACE, UIO_WRITE);
+			if (!auio) {
 				error = ENOMEM;
 			}
 			if (!error) {
@@ -1749,9 +1735,9 @@ loop1:
 				}
 #endif
 			}
-			if (uio_bufp) {
-				kfree_data(uio_bufp, UIO_SIZEOF(i));
-				uio_bufp = NULL;
+			if (auio) {
+				uio_free(auio);
+				auio = NULL;
 			}
 		}
 		if (vp) {

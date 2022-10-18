@@ -17,9 +17,6 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("VM"));
 
-#define JETSAM_PRIORITY_IDLE 0
-#define JETSAM_PRIORITY_FOREGROUND 10
-
 #define kNumProcsInCoalition 4
 typedef struct {
 	pid_t pids[kNumProcsInCoalition]; // An array of pids in this coalition. Owned by this struct.

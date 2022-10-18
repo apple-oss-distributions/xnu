@@ -27,7 +27,6 @@
  */
 
 #include <i386/machine_routines.h>
-#include <i386/io_map_entries.h>
 #include <i386/cpuid.h>
 #include <i386/fpu.h>
 #include <mach/processor.h>
@@ -106,17 +105,25 @@ ml_io_map(
 	vm_offset_t phys_addr,
 	vm_size_t size)
 {
-	return io_map(phys_addr, size, VM_WIMG_IO);
+	return io_map(phys_addr, size, VM_WIMG_IO, VM_PROT_DEFAULT, false);
 }
 
-/* boot memory allocation */
 vm_offset_t
-ml_static_malloc(
-	__unused vm_size_t size)
+ml_io_map_wcomb(
+	vm_offset_t phys_addr,
+	vm_size_t size)
 {
-	return (vm_offset_t)NULL;
+	return io_map(phys_addr, size, VM_WIMG_WCOMB, VM_PROT_DEFAULT, false);
 }
 
+vm_offset_t
+ml_io_map_unmappable(
+	vm_offset_t             phys_addr,
+	vm_size_t               size,
+	unsigned int            flags)
+{
+	return io_map(phys_addr, size, flags, VM_PROT_DEFAULT, true);
+}
 
 void
 ml_get_bouncepool_info(vm_offset_t *phys_addr, vm_size_t *size)
@@ -708,6 +715,22 @@ ml_get_cpu_number_type(cluster_type_t cluster_type __unused, bool logical, bool 
 	}
 }
 
+void
+ml_get_cluster_type_name(cluster_type_t cluster_type __unused, char *name, size_t name_size)
+{
+	strlcpy(name, "Standard", name_size);
+}
+
+unsigned int
+ml_get_cluster_number_type(cluster_type_t cluster_type __unused)
+{
+	/*
+	 * At present no supported x86 system has more than 1 CPU type and multiple
+	 * clusters.
+	 */
+	return 1;
+}
+
 unsigned int
 ml_get_cpu_types(void)
 {
@@ -978,6 +1001,9 @@ MACRO_END
 		VIRTUAL_TIMEOUT_INFLATE_ABS(TLBTimeOut);
 		VIRTUAL_TIMEOUT_INFLATE_ABS(report_phy_read_delay);
 		VIRTUAL_TIMEOUT_INFLATE_TSC(lock_panic_timeout);
+#if CONFIG_PV_TICKET
+		kprintf("pv locks %sabled\n", has_lock_pv ? "en" : "dis");
+#endif
 	}
 
 	interrupt_latency_tracker_setup();
@@ -1023,6 +1049,12 @@ ml_cpu_up(void)
 	return;
 }
 
+void
+ml_cpu_up_update_counts(__unused int cpu_id)
+{
+	return;
+}
+
 /*
  * This is called from the machine-independent layer
  * to perform machine-dependent info updates.
@@ -1032,6 +1064,12 @@ ml_cpu_down(void)
 {
 	i386_deactivate_cpu();
 
+	return;
+}
+
+void
+ml_cpu_down_update_counts(__unused int cpu_id)
+{
 	return;
 }
 
@@ -1202,12 +1240,6 @@ ml_timer_forced_evaluation(void)
 	return ml_timer_evaluation_in_progress;
 }
 
-uint64_t
-ml_energy_stat(__unused thread_t t)
-{
-	return 0;
-}
-
 void
 ml_gpu_stat_update(uint64_t gpu_ns_delta)
 {
@@ -1267,7 +1299,7 @@ machine_lockdown(void)
 }
 
 bool
-ml_cpu_can_exit(__unused int cpu_id)
+ml_cpu_can_exit(__unused int cpu_id, __unused processor_reason_t reason)
 {
 	return true;
 }
@@ -1300,4 +1332,14 @@ ml_get_vm_reserved_regions(bool vm_is64bit, struct vm_reserved_region **regions)
 
 	*regions = NULL;
 	return 0;
+}
+
+void
+ml_cpu_power_enable(__unused int cpu_id)
+{
+}
+
+void
+ml_cpu_power_disable(__unused int cpu_id)
+{
 }

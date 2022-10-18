@@ -189,7 +189,7 @@ _sleep(
 	ut->uu_wchan = chan;
 	ut->uu_wmesg = wmsg ? wmsg : "unknown";
 
-	if (mtx != NULL && chan != NULL && (thread_continue_t)continuation == THREAD_CONTINUE_NULL) {
+	if (mtx != NULL && chan != NULL && continuation == NULL) {
 		int     flags;
 
 		if (dropmutex) {
@@ -255,7 +255,7 @@ _sleep(
 
 
 block:
-		if ((thread_continue_t)continuation != THREAD_CONTINUE_NULL) {
+		if (continuation != NULL) {
 			ut->uu_continuation = continuation;
 			ut->uu_pri  = (uint16_t)pri;
 			ut->uu_mtx  = mtx;
@@ -449,7 +449,7 @@ wakeup_one(caddr_t chan)
 void
 resetpriority(struct proc *p)
 {
-	(void)task_importance(p->task, -p->p_nice);
+	(void)task_importance(proc_task(p), -p->p_nice);
 }
 
 struct loadavg averunnable =

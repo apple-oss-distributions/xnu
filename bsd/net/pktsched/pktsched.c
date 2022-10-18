@@ -47,6 +47,10 @@
 #include <net/pktsched/pktsched_fq_codel.h>
 #include <net/pktsched/pktsched_netem.h>
 
+#define _IP_VHL
+#include <netinet/ip.h>
+#include <netinet/ip6.h>
+
 #include <pexpert/pexpert.h>
 
 #if SKYWALK
@@ -72,6 +76,7 @@ pktsched_init(void)
 		panic("%s: no CPU clock available!", __func__);
 		/* NOTREACHED */
 	}
+	pktsched_fq_init();
 }
 
 static void
@@ -158,7 +163,7 @@ pktsched_teardown(struct ifclassq *ifq)
 }
 
 int
-pktsched_getqstats(struct ifclassq *ifq, u_int32_t qid,
+pktsched_getqstats(struct ifclassq *ifq, u_int32_t gid, u_int32_t qid,
     struct if_ifclassq_stats *ifqs)
 {
 	int error = 0;
@@ -167,7 +172,7 @@ pktsched_getqstats(struct ifclassq *ifq, u_int32_t qid,
 
 	if (ifq->ifcq_type == PKTSCHEDT_FQ_CODEL) {
 		/* Could be PKTSCHEDT_NONE */
-		error = fq_if_getqstats_ifclassq(ifq, qid, ifqs);
+		error = fq_if_getqstats_ifclassq(ifq, (uint8_t)gid, qid, ifqs);
 	}
 
 	return error;

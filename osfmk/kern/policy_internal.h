@@ -72,7 +72,7 @@ extern kern_return_t task_importance(task_t task, integer_t importance);
 #define TASK_POLICY_TASK                0x4
 #define TASK_POLICY_THREAD              0x8
 
-/* flavors (also DBG_IMPORTANCE subclasses  0x20 - 0x3F) */
+/* flavors (also DBG_IMPORTANCE subclasses  0x20 - 0x40) */
 
 /* internal or external, thread or task */
 #define TASK_POLICY_DARWIN_BG           IMP_TASK_POLICY_DARWIN_BG
@@ -111,8 +111,9 @@ extern kern_return_t task_importance(task_t task, integer_t importance);
 #define TASK_POLICY_QOS_KEVENT_OVERRIDE IMP_TASK_POLICY_QOS_KEVENT_OVERRIDE
 #define TASK_POLICY_QOS_SERVICER_OVERRIDE IMP_TASK_POLICY_QOS_SERVICER_OVERRIDE
 #define TASK_POLICY_IOTIER_KEVENT_OVERRIDE IMP_TASK_POLICY_IOTIER_KEVENT_OVERRIDE
+#define TASK_POLICY_WI_DRIVEN           IMP_TASK_POLICY_WI_DRIVEN
 
-#define TASK_POLICY_MAX                 0x40
+#define TASK_POLICY_MAX                 0x41
 
 /* The main entrance to task policy is this function */
 extern void proc_set_task_policy(task_t task, int category, int flavor, int value);
@@ -298,7 +299,8 @@ typedef struct task_pend_token {
 	    tpt_update_thread_sfi   :1,
 	    tpt_force_recompute_pri :1,
 	    tpt_update_tg_ui_flag   :1,
-	    tpt_update_turnstile    :1;
+	    tpt_update_turnstile    :1,
+	    tpt_update_tg_app_flag  :1;
 } *task_pend_token_t;
 
 extern void task_policy_update_complete_unlocked(task_t task, task_pend_token_t pend_token);
@@ -430,6 +432,12 @@ kern_return_t send_resource_violation_with_fatal_port(typeof(send_port_space_vio
  */
 void trace_resource_violation(uint16_t code,
     struct ledger_entry_info *ledger_info);
+
+/*
+ * Evaluate criteria for RT_RESTRICTED promotions/demotions and apply them as
+ * necessary.
+ */
+extern void thread_rt_evaluate(thread_t thread);
 
 #endif /* MACH_KERNEL_PRIVATE */
 

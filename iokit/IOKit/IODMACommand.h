@@ -42,8 +42,9 @@ enum{
 	kIODMAMapOptionTypeMask     = 0x0000000f,
 
 	kIODMAMapOptionNoCacheStore = 0x00000010, // Memory in descriptor
-	kIODMAMapOptionOnChip       = 0x00000020,// Indicates DMA is on South Bridge
-	kIODMAMapOptionIterateOnly  = 0x00000040// DMACommand will be used as a cursor only
+	kIODMAMapOptionOnChip       = 0x00000020, // Indicates DMA is on South Bridge
+	kIODMAMapOptionIterateOnly  = 0x00000040, // DMACommand will be used as a cursor only
+	kIODMAMapOptionDextOwner    = 0x00000080  // Dext owned
 };
 
 /**************************** class IODMACommand ***************************/

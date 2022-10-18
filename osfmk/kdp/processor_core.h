@@ -235,12 +235,33 @@ kern_return_t kern_register_coredump_helper(int kern_coredump_config_vers, const
 #if PRIVATE
 
 kern_return_t kern_register_xnu_coredump_helper(kern_coredump_callback_config *kc_callbacks);
+kern_return_t kern_register_userspace_coredump(task_t task, const char * name);
+kern_return_t kern_unregister_userspace_coredump(task_t task);
 
-kern_return_t kern_do_coredump(void *core_outvars, boolean_t kernel_only, uint64_t first_file_offset, uint64_t *last_file_offset);
+kern_return_t kern_do_coredump(void *core_outvars, boolean_t kernel_only, uint64_t first_file_offset, uint64_t *last_file_offset, uint64_t details_flags);
 
 #define KERN_COREDUMP_MAXDEBUGLOGSIZE 16384
 #define KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN 4096
 #define KERN_COREDUMP_THREADSIZE_MAX 1024
+
+#if XNU_KERNEL_PRIVATE
+
+struct kern_userspace_coredump_context {
+	/* Task to dump */
+	task_t task;
+};
+
+kern_return_t user_dump_init(void *refcon, void *context);
+kern_return_t user_dump_save_summary(void *refcon, core_save_summary_cb callback, void *context);
+kern_return_t user_dump_save_seg_descriptions(void *refcon, core_save_segment_descriptions_cb callback, void *context);
+kern_return_t user_dump_save_thread_state(void *refcon, void *buf, core_save_thread_state_cb callback, void *context);
+kern_return_t user_dump_save_sw_vers_detail(void *refcon, core_save_sw_vers_detail_cb callback, void *context);
+kern_return_t user_dump_save_segment_data(void *refcon, core_save_segment_data_cb callback, void *context);
+kern_return_t user_dump_save_note_summary(void *refcon, core_save_note_summary_cb callback, void *context);
+kern_return_t user_dump_save_note_descriptions(void *refcon, core_save_note_descriptions_cb callback, void *context);
+kern_return_t user_dump_save_note_data(void *refcon, core_save_note_data_cb callback, void *context);
+
+#endif /* XNU_KERNEL_PRIVATE */
 
 #endif /* PRIVATE */
 

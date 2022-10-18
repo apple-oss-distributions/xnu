@@ -29,7 +29,7 @@
 
 #include <kern/thread.h>
 #include <mach/thread_status.h>
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 #include <arm/caches_internal.h>
 
 #include <mach-o/loader.h>

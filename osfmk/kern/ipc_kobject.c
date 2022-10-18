@@ -70,8 +70,6 @@
  *	Functions for letting a port represent a kernel object.
  */
 
-#include <mach_debug.h>
-#include <mach_ipc_test.h>
 #include <mach/mig.h>
 #include <mach/port.h>
 #include <mach/kern_return.h>
@@ -86,15 +84,11 @@
 #include <mach/mach_host_server.h>
 #include <mach/host_priv_server.h>
 #include <mach/clock_server.h>
-#include <mach/clock_priv_server.h>
 #include <mach/memory_entry_server.h>
-#include <mach/memory_object_control_server.h>
-#include <mach/memory_object_default_server.h>
 #include <mach/processor_server.h>
 #include <mach/processor_set_server.h>
 #include <mach/task_server.h>
 #include <mach/mach_voucher_server.h>
-#include <mach/mach_voucher_attr_control_server.h>
 #ifdef VM32_SUPPORT
 #include <mach/vm32_map_server.h>
 #endif
@@ -120,13 +114,6 @@
 #include <kern/audit_sessionport.h>
 #endif
 
-#if     MACH_MACHINE_ROUTINES
-#include <machine/machine_routines.h>
-#endif  /* MACH_MACHINE_ROUTINES */
-#if     XK_PROXY
-#include <uk_xkern/xk_uproxy_server.h>
-#endif  /* XK_PROXY */
-
 #include <kern/counter.h>
 #include <kern/ipc_tt.h>
 #include <kern/ipc_mig.h>
@@ -150,6 +137,10 @@
 #include <kern/hv_support.h>
 #endif
 
+#if CONFIG_CSR
+#include <sys/csr.h>
+#endif
+
 #include <vm/vm_protos.h>
 
 #include <security/mac_mach_internal.h>
@@ -168,7 +159,6 @@ typedef struct {
 static void ipc_kobject_subst_once_no_senders(ipc_port_t, mach_msg_type_number_t);
 
 IPC_KOBJECT_DEFINE(IKOT_MEMORY_OBJECT);   /* vestigial, no real instance */
-IPC_KOBJECT_DEFINE(IKOT_MEM_OBJ_CONTROL); /* vestigial, no real instance */
 IPC_KOBJECT_DEFINE(IKOT_PORT_SUBST_ONCE,
     .iko_op_no_senders = ipc_kobject_subst_once_no_senders);
 
@@ -176,10 +166,6 @@ IPC_KOBJECT_DEFINE(IKOT_PORT_SUBST_ONCE,
 #define MIG_HASH(x) (x)
 
 #define KOBJ_IDX_NOT_SET (-1)
-
-#ifndef max
-#define max(a, b)        (((a) > (b)) ? (a) : (b))
-#endif /* max */
 
 static SECURITY_READ_ONLY_LATE(mig_hash_t) mig_buckets[MAX_MIG_ENTRIES];
 static SECURITY_READ_ONLY_LATE(int) mig_table_max_displ;
@@ -195,7 +181,6 @@ static const struct mig_subsystem *mig_e[] = {
 	(const struct mig_subsystem *)&mach_host_subsystem,
 	(const struct mig_subsystem *)&host_priv_subsystem,
 	(const struct mig_subsystem *)&clock_subsystem,
-	(const struct mig_subsystem *)&clock_priv_subsystem,
 	(const struct mig_subsystem *)&processor_subsystem,
 	(const struct mig_subsystem *)&processor_set_subsystem,
 	(const struct mig_subsystem *)&is_iokit_subsystem,
@@ -208,19 +193,8 @@ static const struct mig_subsystem *mig_e[] = {
 	(const struct mig_subsystem *)&UNDReply_subsystem,
 #endif
 	(const struct mig_subsystem *)&mach_voucher_subsystem,
-	(const struct mig_subsystem *)&mach_voucher_attr_control_subsystem,
 	(const struct mig_subsystem *)&memory_entry_subsystem,
 	(const struct mig_subsystem *)&task_restartable_subsystem,
-
-#if     XK_PROXY
-	(const struct mig_subsystem *)&do_uproxy_xk_uproxy_subsystem,
-#endif /* XK_PROXY */
-#if     MACH_MACHINE_ROUTINES
-	(const struct mig_subsystem *)&MACHINE_SUBSYSTEM,
-#endif  /* MACH_MACHINE_ROUTINES */
-#if     MCMSG && iPSC860
-	(const struct mig_subsystem *)&mcmsg_info_subsystem,
-#endif  /* MCMSG && iPSC860 */
 	(const struct mig_subsystem *)&catch_exc_subsystem,
 	(const struct mig_subsystem *)&catch_mach_exc_subsystem,
 #if CONFIG_ARCADE
@@ -232,14 +206,12 @@ static const struct mig_subsystem *mig_e[] = {
 static struct ipc_kobject_ops __security_const_late
     ipc_kobject_ops_array[IKOT_MAX_TYPE];
 
+__startup_func
 void
 ipc_kobject_register_startup(ipc_kobject_ops_t ops)
 {
 	if (ipc_kobject_ops_array[ops->iko_op_type].iko_op_type) {
 		panic("trying to register kobject(%d) twice", ops->iko_op_type);
-	}
-	if (ops->iko_op_allow_upgrade && ops->iko_op_no_senders) {
-		panic("Cant receive notifications when upgradable");
 	}
 	ipc_kobject_ops_array[ops->iko_op_type] = *ops;
 }
@@ -253,6 +225,7 @@ ipc_kobject_ops_get(ipc_kobject_type_t ikot)
 	return &ipc_kobject_ops_array[ikot];
 }
 
+__startup_func
 static void
 mig_init(void)
 {
@@ -298,7 +271,9 @@ mig_init(void)
 
 				mig_buckets[pos].kobjidx = KOBJ_IDX_NOT_SET;
 
-				mig_table_max_displ = max(howmany, mig_table_max_displ);
+				if (mig_table_max_displ < howmany) {
+					mig_table_max_displ = howmany;
+				}
 				mach_kobj_count++;
 			}
 		}
@@ -337,11 +312,13 @@ find_mig_hash_entry(int msgh_id)
 static kern_return_t
 ipc_kobject_reply_status(ipc_kmsg_t kmsg)
 {
-	if (kmsg->ikm_header->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
+	mach_msg_header_t *hdr = ikm_header(kmsg);
+
+	if (hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
 		return KERN_SUCCESS;
 	}
 
-	return ((mig_reply_error_t *)kmsg->ikm_header)->RetCode;
+	return ((mig_reply_error_t *)hdr)->RetCode;
 }
 
 /*
@@ -373,8 +350,11 @@ ipc_kobject_init_reply(
 	const ipc_kmsg_t    request,
 	kern_return_t       kr)
 {
-#define InP     ((mach_msg_header_t *) request->ikm_header)
-#define OutP    ((mig_reply_error_t *) reply->ikm_header)
+	mach_msg_header_t *req_hdr = ikm_header(request);
+	mach_msg_header_t *reply_hdr = ikm_header(reply);
+
+#define InP     ((mach_msg_header_t *) req_hdr)
+#define OutP    ((mig_reply_error_t *) reply_hdr)
 
 	OutP->NDR = NDR_record;
 	OutP->Head.msgh_size = sizeof(mig_reply_error_t);
@@ -406,11 +386,15 @@ ipc_kobject_server_internal(
 	ipc_kmsg_t      request,
 	ipc_kmsg_t      *replyp)
 {
-	const int request_msgh_id = request->ikm_header->msgh_id;
+	int request_msgh_id;
 	ipc_kmsg_t reply = IKM_NULL;
 	mach_msg_size_t reply_size;
 	bool exec_token_changed = false;
 	mig_hash_t *ptr;
+	mach_msg_header_t *req_hdr, *reply_hdr, *new_reply_hdr;
+
+	req_hdr = ikm_header(request);
+	request_msgh_id = req_hdr->msgh_id;
 
 	/* Find corresponding mig_hash entry, if any */
 	ptr = find_mig_hash_entry(request_msgh_id);
@@ -427,10 +411,10 @@ ipc_kobject_server_internal(
 	 * but until it does, pessimistically zero the
 	 * whole reply buffer.
 	 */
-	reply = ipc_kmsg_alloc(reply_size, 0,
+	reply = ipc_kmsg_alloc(reply_size, 0, 0,
 	    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
-
 	ipc_kobject_init_reply(reply, request, KERN_SUCCESS);
+	reply_hdr = ikm_header(reply);
 
 	/*
 	 * Find the routine to call, and call it
@@ -464,13 +448,15 @@ ipc_kobject_server_internal(
 			kern_return_t kr = mac_task_kobj_msg_evaluate(curproc,
 			    request_msgh_id, idx);
 			if (kr != KERN_SUCCESS) {
-				((mig_reply_error_t *) reply->ikm_header)->RetCode = kr;
+				((mig_reply_error_t *)reply_hdr)->RetCode = kr;
 				goto skip_kobjcall;
 			}
 		}
 #endif /* CONFIG_MACF */
 
-		(*ptr->routine)(request->ikm_header, reply->ikm_header);
+		__BeforeKobjectServerTrace(idx);
+		(*ptr->routine)(req_hdr, reply_hdr);
+		__AfterKobjectServerTrace(idx);
 
 #if CONFIG_MACF
 skip_kobjcall:
@@ -488,11 +474,11 @@ skip_kobjcall:
 	} else {
 #if DEVELOPMENT || DEBUG
 		printf("ipc_kobject_server: bogus kernel message, id=%d\n",
-		    request->ikm_header->msgh_id);
+		    req_hdr->msgh_id);
 #endif  /* DEVELOPMENT || DEBUG */
-		_MIG_MSGID_INVALID(request->ikm_header->msgh_id);
+		_MIG_MSGID_INVALID(req_hdr->msgh_id);
 
-		((mig_reply_error_t *)reply->ikm_header)->RetCode = MIG_BAD_ID;
+		((mig_reply_error_t *)reply_hdr)->RetCode = MIG_BAD_ID;
 	}
 
 	/* Fail the MIG call if the task exec token changed during the call */
@@ -500,16 +486,17 @@ skip_kobjcall:
 		/*
 		 *	Create a new reply msg with error and destroy the old reply msg.
 		 */
-		ipc_kmsg_t new_reply = ipc_kmsg_alloc(reply_size, 0,
-		    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO |
+		ipc_kmsg_t new_reply = ipc_kmsg_alloc(sizeof(mig_reply_error_t),
+		    0, 0, IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO |
 		    IPC_KMSG_ALLOC_NOFAIL);
+		new_reply_hdr = ikm_header(new_reply);
 
 		/*
 		 *	Initialize the new reply message.
 		 */
 		{
-#define OutP_new        ((mig_reply_error_t *) new_reply->ikm_header)
-#define OutP_old        ((mig_reply_error_t *) reply->ikm_header)
+#define OutP_new        ((mig_reply_error_t *) new_reply_hdr)
+#define OutP_old        ((mig_reply_error_t *) reply_hdr)
 
 			OutP_new->NDR = OutP_old->NDR;
 			OutP_new->Head.msgh_size = sizeof(mig_reply_error_t);
@@ -530,8 +517,7 @@ skip_kobjcall:
 		 *	Destroy everything in reply except the reply port right,
 		 *	which is needed in the new reply message.
 		 */
-		reply->ikm_header->msgh_remote_port = MACH_PORT_NULL;
-		ipc_kmsg_destroy(reply);
+		ipc_kmsg_destroy(reply, IPC_KMSG_DESTROY_SKIP_REMOTE | IPC_KMSG_DESTROY_NOT_SIGNED);
 		reply = new_reply;
 	} else if (ipc_kobject_reply_status(reply) == MIG_NO_REPLY) {
 		/*
@@ -566,11 +552,13 @@ ipc_kobject_server(
 	ipc_kmsg_t          request,
 	mach_msg_option_t   option __unused)
 {
+	mach_msg_header_t *req_hdr = ikm_header(request);
 #if DEVELOPMENT || DEBUG
-	const int request_msgh_id = request->ikm_header->msgh_id;
+	const int request_msgh_id = req_hdr->msgh_id;
 #endif
 	ipc_port_t request_voucher_port;
 	ipc_kmsg_t reply = IKM_NULL;
+	mach_msg_header_t *reply_hdr;
 	kern_return_t kr;
 
 	ipc_kmsg_trace_send(request, option);
@@ -588,8 +576,8 @@ ipc_kobject_server(
 		assert(reply == IKM_NULL);
 
 		/* convert the server error into a MIG error */
-		reply = ipc_kmsg_alloc(sizeof(mig_reply_error_t), 0,
-		    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO);
+		reply = ipc_kmsg_alloc(sizeof(mig_reply_error_t), 0, 0,
+		    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
 		ipc_kobject_init_reply(reply, request, kr);
 	}
 
@@ -601,19 +589,14 @@ ipc_kobject_server(
 	 *	(which would bring us here again, creating a loop).
 	 *	It also differs in that we only expect send or
 	 *	send-once rights, never receive rights.
-	 *
-	 *	We set msgh_remote_port to IP_NULL so that the kmsg
-	 *	destroy routines don't try to destroy the port twice.
 	 */
-	switch (MACH_MSGH_BITS_REMOTE(request->ikm_header->msgh_bits)) {
+	switch (MACH_MSGH_BITS_REMOTE(req_hdr->msgh_bits)) {
 	case MACH_MSG_TYPE_PORT_SEND:
-		ipc_port_release_send(request->ikm_header->msgh_remote_port);
-		request->ikm_header->msgh_remote_port = IP_NULL;
+		ipc_port_release_send(req_hdr->msgh_remote_port);
 		break;
 
 	case MACH_MSG_TYPE_PORT_SEND_ONCE:
-		ipc_port_release_sonce(request->ikm_header->msgh_remote_port);
-		request->ikm_header->msgh_remote_port = IP_NULL;
+		ipc_port_release_sonce(req_hdr->msgh_remote_port);
 		break;
 
 	default:
@@ -627,7 +610,7 @@ ipc_kobject_server(
 	request_voucher_port = ipc_kmsg_get_voucher_port(request);
 	if (IP_VALID(request_voucher_port)) {
 		assert(MACH_MSG_TYPE_PORT_SEND ==
-		    MACH_MSGH_BITS_VOUCHER(request->ikm_header->msgh_bits));
+		    MACH_MSGH_BITS_VOUCHER(req_hdr->msgh_bits));
 		ipc_port_release_send(request_voucher_port);
 		ipc_kmsg_clear_voucher_port(request);
 	}
@@ -645,23 +628,22 @@ ipc_kobject_server(
 	} else {
 		/*
 		 *	The message contents of the request are intact.
-		 *	Destroy everthing except the reply port right,
-		 *	which is needed in the reply message.
+		 *  Remote port has been released above. Do not destroy
+		 *  the reply port right either, which is needed in the reply message.
 		 */
-		request->ikm_header->msgh_local_port = MACH_PORT_NULL;
-		ipc_kmsg_destroy(request);
+		ipc_kmsg_destroy(request, IPC_KMSG_DESTROY_SKIP_LOCAL | IPC_KMSG_DESTROY_SKIP_REMOTE);
 	}
 
 	if (reply != IKM_NULL) {
-		ipc_port_t reply_port = reply->ikm_header->msgh_remote_port;
+		reply_hdr = ikm_header(reply);
+		ipc_port_t reply_port = reply_hdr->msgh_remote_port;
 
 		if (!IP_VALID(reply_port)) {
 			/*
 			 *	Can't queue the reply message if the destination
 			 *	(the reply port) isn't valid.
 			 */
-
-			ipc_kmsg_destroy(reply);
+			ipc_kmsg_destroy(reply, IPC_KMSG_DESTROY_NOT_SIGNED);
 			reply = IKM_NULL;
 		} else if (ip_in_space_noauth(reply_port, ipc_space_kernel)) {
 			/* do not lock reply port, use raw pointer comparison */
@@ -673,7 +655,7 @@ ipc_kobject_server(
 			printf("%s: refusing to send reply to kobject %d port (id:%d)\n",
 			    __func__, ip_kotype(reply_port), request_msgh_id);
 #endif  /* DEVELOPMENT || DEBUG */
-			ipc_kmsg_destroy(reply);
+			ipc_kmsg_destroy(reply, IPC_KMSG_DESTROY_NOT_SIGNED);
 			reply = IKM_NULL;
 		}
 	}
@@ -710,7 +692,7 @@ ipc_kobject_set_internal(
 	ipc_kobject_type_t  type)
 {
 	assert(type != IKOT_NONE);
-	io_bits_or(ip_to_object(port), type | IO_BITS_KOBJECT);
+	io_bits_or(ip_to_object(port), type);
 	ipc_kobject_set_raw(port, kobject, type);
 }
 
@@ -746,6 +728,38 @@ ipc_kobject_get_raw(
 #endif // __has_feature(ptrauth_calls)
 
 	return kobject;
+}
+
+__abortlike
+static void
+ipc_kobject_require_panic(
+	ipc_port_t                  port,
+	ipc_kobject_t               kobject,
+	ipc_kobject_type_t          kotype)
+{
+	if (ip_kotype(port) != kotype) {
+		panic("port %p: invalid kobject type, got %d wanted %d",
+		    port, ip_kotype(port), kotype);
+	}
+	panic("port %p: invalid kobject, got %p wanted %p",
+	    port, ipc_kobject_get_raw(port, kotype), kobject);
+}
+
+__header_always_inline void
+ipc_kobject_require(
+	ipc_port_t                  port,
+	ipc_kobject_t               kobject,
+	ipc_kobject_type_t          kotype)
+{
+	ipc_kobject_t cur;
+
+	if (__improbable(ip_kotype(port) != kotype)) {
+		ipc_kobject_require_panic(port, kobject, kotype);
+	}
+	cur = ipc_kobject_get_raw(port, kotype);
+	if (cur && cur != kobject) {
+		ipc_kobject_require_panic(port, kobject, kotype);
+	}
 }
 
 /*
@@ -816,7 +830,7 @@ ipc_kobject_init_port(
 	ipc_kobject_set_internal(port, kobject, type);
 
 	if (options & IPC_KOBJECT_ALLOC_MAKE_SEND) {
-		ipc_port_make_send_locked(port);
+		ipc_port_make_send_any_locked(port);
 	}
 	if (options & IPC_KOBJECT_ALLOC_NSREQUEST) {
 		port->ip_nsrequest = IP_KOBJECT_NSREQUEST_ARMED;
@@ -958,45 +972,24 @@ ipc_kobject_alloc_subst_once(
  *		Nothing is locked, memory can be allocated.
  *		The caller must be able to donate a kobject reference to the port.
  */
-boolean_t
+bool
 ipc_kobject_make_send_lazy_alloc_port(
 	ipc_port_t              *port_store,
 	ipc_kobject_t           kobject,
 	ipc_kobject_type_t      type,
-	ipc_kobject_alloc_options_t alloc_opts,
-	uint64_t                __ptrauth_only ptrauth_discriminator)
+	ipc_kobject_alloc_options_t alloc_opts)
 {
-	ipc_port_t port, previous, __ptrauth_only port_addr;
+	ipc_port_t port, previous;
 	kern_return_t kr;
 
+	alloc_opts |= IPC_KOBJECT_ALLOC_MAKE_SEND | IPC_KOBJECT_ALLOC_NSREQUEST;
 	port = os_atomic_load(port_store, dependency);
 
-#if __has_feature(ptrauth_calls)
-	/* If we're on a ptrauth system and this port is signed, authenticate and strip the pointer */
-	if ((alloc_opts & IPC_KOBJECT_PTRAUTH_STORE) && IP_VALID(port)) {
-		port = ptrauth_auth_data(port,
-		    ptrauth_key_process_independent_data,
-		    ptrauth_blend_discriminator(port_store, ptrauth_discriminator));
-	}
-#endif // __has_feature(ptrauth_calls)
-
 	if (!IP_VALID(port)) {
-		port = ipc_kobject_alloc_port(kobject, type,
-		    IPC_KOBJECT_ALLOC_MAKE_SEND | IPC_KOBJECT_ALLOC_NSREQUEST | alloc_opts);
+		port = ipc_kobject_alloc_port(kobject, type, alloc_opts);
 
-#if __has_feature(ptrauth_calls)
-		if (alloc_opts & IPC_KOBJECT_PTRAUTH_STORE) {
-			port_addr = ptrauth_sign_unauthenticated(port,
-			    ptrauth_key_process_independent_data,
-			    ptrauth_blend_discriminator(port_store, ptrauth_discriminator));
-		} else {
-			port_addr = port;
-		}
-#else
-		port_addr = port;
-#endif // __has_feature(ptrauth_calls)
-
-		if (os_atomic_cmpxchgv(port_store, IP_NULL, port_addr, &previous, release)) {
+		if (os_atomic_cmpxchgv(port_store,
+		    IP_NULL, port, &previous, release)) {
 			return TRUE;
 		}
 
@@ -1013,7 +1006,7 @@ ipc_kobject_make_send_lazy_alloc_port(
 		port = previous;
 	}
 
-	kr = ipc_kobject_make_send_nsrequest(port);
+	kr = ipc_kobject_make_send_nsrequest(port, kobject, type);
 	assert(kr == KERN_SUCCESS || kr == KERN_ALREADY_WAITING);
 
 	return kr == KERN_SUCCESS;
@@ -1076,7 +1069,7 @@ ipc_kobject_make_send_lazy_alloc_labeled_port(
 		assert(ip_is_kolabeled(port));
 	}
 
-	kr = ipc_kobject_make_send_nsrequest(port);
+	kr = ipc_kobject_make_send_nsrequest(port, kobject, type);
 	assert(kr == KERN_SUCCESS || kr == KERN_ALREADY_WAITING);
 
 	return kr == KERN_SUCCESS;
@@ -1129,9 +1122,9 @@ ipc_kobject_nsrequest_locked(
  */
 kern_return_t
 ipc_kobject_nsrequest(
-	ipc_port_t                  port,
-	mach_port_mscount_t         sync,
-	mach_port_mscount_t        *mscount)
+	ipc_port_t              port,
+	mach_port_mscount_t     sync,
+	mach_port_mscount_t    *mscount)
 {
 	kern_return_t kr = KERN_INVALID_RIGHT;
 
@@ -1153,33 +1146,63 @@ ipc_kobject_nsrequest(
 	return kr;
 }
 
+ipc_port_t
+ipc_kobject_copy_send(
+	ipc_port_t              port,
+	ipc_kobject_t           kobject,
+	ipc_kobject_type_t      kotype)
+{
+	ipc_port_t sright = port;
 
-/*
- *	Routine:	ipc_kobject_make_send_nsrequest
- *	Purpose:
- *		Make a send right for a kobject port.
- *
- *		Then the no-more-senders notification is armed
- *		if it wasn't already.
- *
- *	Conditions:
- *		Nothing is locked.
- *
- *	Returns:
- *		KERN_SUCCESS:           the notification was armed
- *		KERN_ALREADY_WAITING:   the notification was already armed
- *		KERN_INVALID_RIGHT:     the port is dead
- */
+	if (IP_VALID(port)) {
+		ip_mq_lock(port);
+		if (ip_active(port)) {
+			ipc_kobject_require(port, kobject, kotype);
+			ipc_port_copy_send_any_locked(port);
+		} else {
+			sright = IP_DEAD;
+		}
+		ip_mq_unlock(port);
+	}
+
+	return sright;
+}
+
+ipc_port_t
+ipc_kobject_make_send(
+	ipc_port_t              port,
+	ipc_kobject_t           kobject,
+	ipc_kobject_type_t      kotype)
+{
+	ipc_port_t sright = port;
+
+	if (IP_VALID(port)) {
+		ip_mq_lock(port);
+		if (ip_active(port)) {
+			ipc_kobject_require(port, kobject, kotype);
+			ipc_port_make_send_any_locked(port);
+		} else {
+			sright = IP_DEAD;
+		}
+		ip_mq_unlock(port);
+	}
+
+	return sright;
+}
+
 kern_return_t
 ipc_kobject_make_send_nsrequest(
-	ipc_port_t                  port)
+	ipc_port_t              port,
+	ipc_kobject_t           kobject,
+	ipc_kobject_type_t      kotype)
 {
 	kern_return_t kr = KERN_INVALID_RIGHT;
 
 	if (IP_VALID(port)) {
 		ip_mq_lock(port);
 		if (ip_active(port)) {
-			ipc_port_make_send_locked(port);
+			ipc_kobject_require(port, kobject, kotype);
+			ipc_port_make_send_any_locked(port);
 			kr = ipc_kobject_nsrequest_locked(port, 0);
 			assert(kr != KERN_FAILURE);
 		}
@@ -1398,114 +1421,25 @@ ipc_kobject_disable(
 	return kobject;
 }
 
-static inline bool
-ipc_kobject_may_upgrade(ipc_port_t port)
-{
-	if (!ip_active(port) || ip_kotype(port) != IKOT_NONE) {
-		/* needs to be active and have no tag */
-		return false;
-	}
-
-	if (port->ip_tempowner || port->ip_specialreply) {
-		/* union overlays with ip_kobject */
-		return false;
-	}
-
-	if (port->ip_has_watchport || ipc_port_has_prdrequest(port)) {
-		/* outstanding watchport or port-destroyed is also disallowed */
-		return false;
-	}
-
-	return true;
-}
-
 /*
- *	Routine:	ipc_kobject_upgrade_locked
+ *	Routine:	ipc_kobject_upgrade_mktimer_locked
  *	Purpose:
- *		Upgrades a port to kobject status
- *		Only kobjects with iko_op_allow_upgrade can do this.
+ *		Upgrades a port to mktimer kobject status
+ *
+ *		This pattern is rather bad as it leads to various
+ *		confusions that need to be special cased with kobject-ness
+ *		of ports. No new port with dual kobject/message-queue
+ *		semantics should be made ever.
+ *
  *	Conditions:
  *		Port is locked
  */
 void
-ipc_kobject_upgrade_locked(
+ipc_kobject_upgrade_mktimer_locked(
 	ipc_port_t                  port,
-	ipc_kobject_t               kobject,
-	ipc_kobject_type_t          type)
+	ipc_kobject_t               kobject)
 {
-	assert(ipc_kobject_may_upgrade(port));
-	assert(ipc_kobject_ops_get(type)->iko_op_allow_upgrade);
-	ipc_kobject_set_internal(port, kobject, type);
-}
-
-/*
- *	Routine:	ipc_kobject_upgrade
- *	Purpose:
- *		Upgrades a port to kobject status
- *		Only kobjects with iko_op_allow_upgrade can do this.
- *	Returns:
- *		KERN_SUCCESS: the upgrade was possible
- *		KERN_INVALID_CAPABILITY: the upgrade wasn't possible
- *	Conditions:
- *		Nothing is locked
- */
-kern_return_t
-ipc_kobject_upgrade(
-	ipc_port_t              port,
-	ipc_kobject_t           kobject,
-	ipc_kobject_type_t      type)
-{
-	kern_return_t kr = KERN_INVALID_CAPABILITY;
-
-	assert(ipc_kobject_ops_get(type)->iko_op_allow_upgrade);
-
-	ip_mq_lock(port);
-
-	if (ipc_kobject_may_upgrade(port)) {
-		ipc_kobject_set_internal(port, kobject, type);
-		kr = KERN_SUCCESS;
-	}
-
-	ip_mq_unlock(port);
-
-	return kr;
-}
-
-/*
- *	Routine:	ipc_kobject_downgrade_host_notify
- *	Purpose:
- *		Downgrade a kobject port back to receive right status.
- *		Only IKOT_HOST_NOTIFY should use this facility.
- *
- *		/!\ WARNING /!\
- *
- *		This feature is breaking the kobject abstraction
- *		and is grandfathered in. Accessing io_kotype() without a lock
- *		only works because this is the only such kobject doing
- *		this disgusting dance.
- *
- *	Returns:
- *		The kobject pointer previously set on the object.
- *	Conditions:
- *		Nothing is locked
- *		The port doesn't need to be active
- */
-ipc_kobject_t
-ipc_kobject_downgrade_host_notify(
-	ipc_port_t              port)
-{
-	ipc_kobject_t kobject = IKO_NULL;
-
-	ip_mq_lock(port);
-
-	if (ip_kotype(port) == IKOT_HOST_NOTIFY) {
-		kobject = ipc_kobject_disable_locked(port, IKOT_HOST_NOTIFY);
-		io_bits_andnot(ip_to_object(port), IO_BITS_KOTYPE);
-	}
-
-	ip_mq_unlock(port);
-
-	return kobject;
+	ipc_kobject_set_internal(port, kobject, IKOT_TIMER);
 }
 
 /*
@@ -1653,6 +1587,36 @@ ipc_kobject_label_substitute_task(
 }
 
 /*
+ *	Routine:	ipc_kobject_label_substitute_task_read
+ *	Purpose:
+ *		Substitute a task read port for its immovable
+ *		control equivalent when the receiver is that task.
+ *	Conditions:
+ *		Space is write locked and active.
+ *		Port is locked and active.
+ *	Returns:
+ *		- IP_NULL port if no substitution is to be done
+ *		- a valid port if a substitution needs to happen
+ */
+static ipc_port_t
+ipc_kobject_label_substitute_task_read(
+	ipc_space_t             space,
+	ipc_kobject_label_t     kolabel,
+	ipc_port_t              port)
+{
+	ipc_port_t subst = IP_NULL;
+	task_t task = ipc_kobject_get_raw(port, IKOT_TASK_READ);
+
+	if (task != TASK_NULL && task == space->is_task) {
+		if ((subst = kolabel->ikol_alt_port)) {
+			return subst;
+		}
+	}
+
+	return IP_NULL;
+}
+
+/*
  *	Routine:	ipc_kobject_label_substitute_thread
  *	Purpose:
  *		Substitute a thread control port for its immovable
@@ -1672,6 +1636,36 @@ ipc_kobject_label_substitute_thread(
 {
 	ipc_port_t subst = IP_NULL;
 	thread_t thread = ipc_kobject_get_raw(port, IKOT_THREAD_CONTROL);
+
+	if (thread != THREAD_NULL && space->is_task == get_threadtask(thread)) {
+		if ((subst = kolabel->ikol_alt_port) != IP_NULL) {
+			return subst;
+		}
+	}
+
+	return IP_NULL;
+}
+
+/*
+ *	Routine:	ipc_kobject_label_substitute_thread_read
+ *	Purpose:
+ *		Substitute a thread read port for its immovable
+ *		control equivalent when it belongs to the receiver task.
+ *	Conditions:
+ *		Space is write locked and active.
+ *		Port is locked and active.
+ *	Returns:
+ *		- IP_NULL port if no substitution is to be done
+ *		- a valid port if a substitution needs to happen
+ */
+static ipc_port_t
+ipc_kobject_label_substitute_thread_read(
+	ipc_space_t             space,
+	ipc_kobject_label_t     kolabel,
+	ipc_port_t              port)
+{
+	ipc_port_t subst = IP_NULL;
+	thread_t thread = ipc_kobject_get_raw(port, IKOT_THREAD_READ);
 
 	if (thread != THREAD_NULL && space->is_task == get_threadtask(thread)) {
 		if ((subst = kolabel->ikol_alt_port) != IP_NULL) {
@@ -1763,8 +1757,16 @@ ipc_kobject_label_check(
 			subst = ipc_kobject_label_substitute_task(space,
 			    kolabel, port);
 			break;
+		case IPC_LABEL_SUBST_TASK_READ:
+			subst = ipc_kobject_label_substitute_task_read(space,
+			    kolabel, port);
+			break;
 		case IPC_LABEL_SUBST_THREAD:
 			subst = ipc_kobject_label_substitute_thread(space,
+			    kolabel, port);
+			break;
+		case IPC_LABEL_SUBST_THREAD_READ:
+			subst = ipc_kobject_label_substitute_thread_read(space,
 			    kolabel, port);
 			break;
 		default:
@@ -1789,7 +1791,8 @@ ipc_kobject_label_check(
 			 */
 
 			ipc_port_release_send_and_unlock(port);
-			port = ipc_port_make_send(subst);
+			/* no check: dPAC integrity */
+			port = ipc_port_make_send_any(subst);
 			ip_release(subst);
 			*subst_portp = port;
 			return true;

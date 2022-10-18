@@ -40,6 +40,7 @@
 #include <kern/sched_prim.h>
 #include <kern/zalloc.h>
 #include <kern/debug.h>
+#include <kern/compact_id.h>
 #include <machine/limits.h>
 #include <machine/atomic.h>
 
@@ -48,6 +49,9 @@
 #include <libkern/section_keywords.h>
 
 static TUNABLE(int, turnstile_max_hop, "turnstile_max_hop", TURNSTILE_MAX_HOP_DEFAULT);
+COMPACT_ID_TABLE_DEFINE(static, ctsid_table);
+static_assert(CTSID_MAX <= COMPACT_ID_MAX);
+static SECURITY_READ_ONLY_LATE(uint32_t) ctsid_nonce;
 
 ZONE_DEFINE_ID(ZONE_ID_TURNSTILE, "turnstiles", struct turnstile,
     ZC_ZFREE_CLEARMEM);
@@ -84,17 +88,7 @@ static const turnstile_hash_lock_policy_t turnstile_hash_lock_policy[TURNSTILE_T
 os_refgrp_decl(static, turnstile_refgrp, "turnstile", NULL);
 
 #if DEVELOPMENT || DEBUG
-static queue_head_t turnstiles_list;
-
 static LCK_GRP_DECLARE(turnstiles_dev_lock_grp, "turnstile_dev_lock");
-static LCK_SPIN_DECLARE(global_turnstile_lock, &turnstiles_dev_lock_grp);
-
-#define global_turnstiles_lock() \
-	lck_spin_lock_grp(&global_turnstile_lock, &turnstiles_dev_lock_grp)
-#define global_turnstiles_lock_try() \
-	lck_spin_try_lock_grp(&global_turnstile_lock, &turnstiles_dev_lock_grp)
-#define global_turnstiles_unlock() \
-	lck_spin_unlock(&global_turnstile_lock)
 
 /* Array to store stats for multi-hop boosting */
 static struct turnstile_stats turnstile_boost_stats[TURNSTILE_MAX_HOP_DEFAULT] = {};
@@ -117,7 +111,7 @@ turnstile_get_gencount(struct turnstile *turnstile);
 static void
 turnstile_set_type_and_increment_gencount(struct turnstile *turnstile, turnstile_type_t type);
 static void
-turnstile_init(struct turnstile *turnstile);
+turnstile_destroy(struct turnstile *turnstile);
 static void
 turnstile_update_inheritor_workq_priority_chain(struct turnstile *in_turnstile, spl_t s);
 static void
@@ -793,14 +787,13 @@ turnstile_deallocate_queue_invoke(mpsc_queue_chain_t e,
 void
 turnstiles_init(void)
 {
+	ctsid_nonce = (uint32_t)early_random() & CTSID_MASK;
 	turnstiles_hashtable_init();
 
 	thread_deallocate_daemon_register_queue(&turnstile_deallocate_queue,
 	    turnstile_deallocate_queue_invoke);
 
 #if DEVELOPMENT || DEBUG
-	queue_init(&turnstiles_list);
-
 	/* Initialize turnstile test primitive */
 	tstile_test_prim_init(&test_prim_ts_inline);
 	tstile_test_prim_init(&test_prim_global_htable);
@@ -825,53 +818,25 @@ turnstile_alloc(void)
 	struct turnstile *turnstile = TURNSTILE_NULL;
 
 	turnstile = zalloc_id(ZONE_ID_TURNSTILE, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-	turnstile_init(turnstile);
 
-#if DEVELOPMENT || DEBUG
-	/* Add turnstile to global list */
-	global_turnstiles_lock();
-	queue_enter(&turnstiles_list, turnstile,
-	    struct turnstile *, ts_global_elm);
-	global_turnstiles_unlock();
-#endif
-	return turnstile;
-}
-
-/*
- * Name: turnstile_init
- *
- * Description: Initialize the turnstile.
- *
- * Args:
- *   Arg1: turnstile to initialize
- *
- * Returns: None.
- */
-static void
-turnstile_init(struct turnstile *turnstile)
-{
 	/* Initialize the waitq */
 	waitq_init(&turnstile->ts_waitq, WQT_TURNSTILE,
 	    SYNC_POLICY_REVERSED | SYNC_POLICY_INIT_LOCKED);
 
-	turnstile->ts_inheritor = TURNSTILE_INHERITOR_NULL;
 	SLIST_INIT(&turnstile->ts_free_turnstiles);
-	os_atomic_init(&turnstile->ts_type_gencount, 0);
+
 	turnstile_set_type_and_increment_gencount(turnstile, TURNSTILE_NONE);
 	turnstile_state_init(turnstile, TURNSTILE_STATE_THREAD);
 	os_ref_init_raw(&turnstile->ts_refcount, &turnstile_refgrp);
-	turnstile->ts_proprietor = TURNSTILE_PROPRIETOR_NULL;
-	turnstile->ts_priority = 0;
-	turnstile->ts_inheritor_flags = TURNSTILE_UPDATE_FLAGS_NONE;
-	turnstile->ts_port_ref = 0;
 	priority_queue_init(&turnstile->ts_inheritor_queue);
 
 #if DEVELOPMENT || DEBUG
 	turnstile->ts_thread = current_thread();
-	turnstile->ts_prev_thread = NULL;
 #endif
 
 	waitq_unlock(&turnstile->ts_waitq);
+
+	return turnstile;
 }
 
 /*
@@ -914,6 +879,7 @@ turnstile_deallocate(struct turnstile *turnstile)
 
 	if (__improbable(os_ref_release_raw(&turnstile->ts_refcount,
 	    &turnstile_refgrp) == 0)) {
+		assert(SLIST_EMPTY(&turnstile->ts_free_turnstiles));
 		turnstile_destroy(turnstile);
 	}
 }
@@ -936,6 +902,7 @@ turnstile_deallocate_safe(struct turnstile *turnstile)
 
 	if (__improbable(os_ref_release_raw(&turnstile->ts_refcount,
 	    &turnstile_refgrp) == 0)) {
+		assert(SLIST_EMPTY(&turnstile->ts_free_turnstiles));
 		mpsc_daemon_enqueue(&turnstile_deallocate_queue,
 		    &turnstile->ts_deallocate_link, MPSC_QUEUE_DISABLE_PREEMPTION);
 	}
@@ -951,53 +918,84 @@ turnstile_deallocate_safe(struct turnstile *turnstile)
  *
  * Returns: None.
  */
-void
+static void
 turnstile_destroy(struct turnstile *turnstile)
 {
-	/* destroy the waitq */
+	assert3u(turnstile->ts_compact_id, ==, 0);
+	assert3u(turnstile->ts_prim_count, ==, 0);
+	assert3p(turnstile->ts_inheritor, ==, TURNSTILE_INHERITOR_NULL);
+	assert3u(turnstile->ts_state, ==, TURNSTILE_STATE_THREAD);
+
 	waitq_deinit(&turnstile->ts_waitq);
 
-	assert(turnstile->ts_inheritor == TURNSTILE_INHERITOR_NULL);
-	assert(SLIST_EMPTY(&turnstile->ts_free_turnstiles));
-	assert(turnstile->ts_state & TURNSTILE_STATE_THREAD);
-#if DEVELOPMENT || DEBUG
-	/* Remove turnstile from global list */
-	global_turnstiles_lock();
-	queue_remove(&turnstiles_list, turnstile,
-	    struct turnstile *, ts_global_elm);
-	global_turnstiles_unlock();
-#endif
 	zfree_id(ZONE_ID_TURNSTILE, turnstile);
 }
 
+static uint32_t
+ctsid_mangle(compact_id_t cid)
+{
+	return (cid == ctsid_nonce ? CTSID_MASK : cid) ^ ctsid_nonce;
+}
+
+static compact_id_t
+ctsid_unmangle(uint32_t ctsid)
+{
+	ctsid ^= ctsid_nonce;
+	return ctsid == CTSID_MASK ? ctsid_nonce : ctsid;
+}
+
+uint32_t
+turnstile_compact_id_get(void)
+{
+	compact_id_t cid;
+
+	cid = compact_id_get(&ctsid_table, CTSID_MAX, NULL);
+	return ctsid_mangle(cid);
+}
+
+void
+turnstile_compact_id_put(uint32_t ctsid)
+{
+	assert3u(ctsid, !=, 0);
+	compact_id_put(&ctsid_table, ctsid_unmangle(ctsid));
+}
+
 /*
- * Name: turnstile_prepare
+ * Name: turnstile_get_by_id
+ *
+ * Description: Resolve a turnstile by compact ID
+ *
+ * Args:
+ *   Arg1: turnstile compact ID
+ *
+ * Returns: a turnstile
+ */
+struct turnstile *
+turnstile_get_by_id(uint32_t tsid)
+{
+	struct turnstile *ts = TURNSTILE_NULL;
+
+	if (tsid) {
+		ts = *compact_id_resolve(&ctsid_table, ctsid_unmangle(tsid));
+		assert(ts && ts->ts_compact_id == tsid);
+	}
+	return ts;
+}
+
+/*
+ * Name: turnstile_prepare variants
  *
  * Description: Transfer current thread's turnstile to primitive or it's free turnstile list.
  *              Function is called holding the interlock (spinlock) of the primitive.
- *              The turnstile returned by this function is safe to use untill the thread calls turnstile_complete.
- *              When no turnstile is provided explicitly, the calling thread will not have a turnstile attached to
- *              it untill it calls turnstile_complete.
- *
- * Args:
- *   Arg1: proprietor
- *   Arg2: pointer in primitive struct to store turnstile
- *   Arg3: turnstile to use instead of taking it from thread.
- *   Arg4: type of primitive
- *
- * Returns:
- *   turnstile.
  */
-struct turnstile *
-turnstile_prepare(
-	uintptr_t proprietor,
-	struct turnstile **tstore,
-	struct turnstile *turnstile,
-	turnstile_type_t type)
+static struct turnstile *
+turnstile_prepare_common(
+	uintptr_t              proprietor,
+	thread_t               thread,
+	struct turnstile      *incoming,
+	turnstile_type_t       type)
 {
-	thread_t thread = current_thread();
-	struct turnstile *ret_turnstile = TURNSTILE_NULL;
-	struct turnstile *thread_turnstile = turnstile;
+	struct turnstile *thread_turnstile = incoming;
 
 	/* Get the thread's turnstile if no turnstile provided */
 	if (thread_turnstile == TURNSTILE_NULL) {
@@ -1020,92 +1018,129 @@ turnstile_prepare(
 	thread_turnstile->ts_thread = NULL;
 #endif
 
-	if (tstore != NULL) {
-		/*
-		 * If the primitive stores the turnstile,
-		 * If there is already a turnstile, put the thread_turnstile if the primitive currently does not have a
-		 * turnstile.
-		 * Else, add the thread turnstile to freelist of the primitive turnstile.
-		 */
-		ret_turnstile = *tstore;
-		if (*tstore == TURNSTILE_NULL) {
-			turnstile_state_add(thread_turnstile, TURNSTILE_STATE_PROPRIETOR);
-			*tstore = thread_turnstile;
-			KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
-			    (TURNSTILE_CODE(TURNSTILE_FREELIST_OPERATIONS, (TURNSTILE_PREPARE))) | DBG_FUNC_NONE,
-			    VM_KERNEL_UNSLIDE_OR_PERM(thread_turnstile),
-			    VM_KERNEL_UNSLIDE_OR_PERM(proprietor),
-			    turnstile_get_type(thread_turnstile), 0, 0);
-		} else {
-			turnstile_freelist_insert(ret_turnstile, thread_turnstile);
-		}
-		ret_turnstile = *tstore;
+	return thread_turnstile;
+}
+
+struct turnstile *
+turnstile_prepare(
+	uintptr_t             proprietor,
+	struct turnstile    **tstore,
+	struct turnstile     *turnstile,
+	turnstile_type_t      type)
+{
+	thread_t thread = current_thread();
+	struct turnstile *ret_turnstile = TURNSTILE_NULL;
+	struct turnstile *thread_turnstile;
+
+	thread_turnstile = turnstile_prepare_common(proprietor, thread,
+	    turnstile, type);
+
+	/*
+	 * If the primitive stores the turnstile,
+	 * If there is already a turnstile, put the thread_turnstile if the primitive currently does not have a
+	 * turnstile.
+	 * Else, add the thread turnstile to freelist of the primitive turnstile.
+	 */
+	ret_turnstile = *tstore;
+	if (*tstore == TURNSTILE_NULL) {
+		turnstile_state_add(thread_turnstile, TURNSTILE_STATE_PROPRIETOR);
+		*tstore = thread_turnstile;
+		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+		    (TURNSTILE_CODE(TURNSTILE_FREELIST_OPERATIONS, (TURNSTILE_PREPARE))) | DBG_FUNC_NONE,
+		    VM_KERNEL_UNSLIDE_OR_PERM(thread_turnstile),
+		    VM_KERNEL_UNSLIDE_OR_PERM(proprietor),
+		    turnstile_get_type(thread_turnstile), 0, 0);
 	} else {
-		/*
-		 * Lookup the primitive in the turnstile hash table and see if it already has an entry.
-		 */
-		ret_turnstile = turnstile_htable_lookup_add(proprietor, thread_turnstile, type);
-		if (ret_turnstile == NULL) {
-			ret_turnstile = thread_turnstile;
-			KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
-			    (TURNSTILE_CODE(TURNSTILE_FREELIST_OPERATIONS, (TURNSTILE_PREPARE))) | DBG_FUNC_NONE,
-			    VM_KERNEL_UNSLIDE_OR_PERM(thread_turnstile),
-			    VM_KERNEL_UNSLIDE_OR_PERM(proprietor),
-			    turnstile_get_type(thread_turnstile), 0, 0);
-		}
+		turnstile_freelist_insert(ret_turnstile, thread_turnstile);
+	}
+	ret_turnstile = *tstore;
+
+	return ret_turnstile;
+}
+
+struct turnstile *
+turnstile_prepare_compact_id(
+	uintptr_t             proprietor,
+	uint32_t              compact_id,
+	turnstile_type_t      type)
+{
+	thread_t thread = current_thread();
+	struct turnstile *ret_turnstile = TURNSTILE_NULL;
+	struct turnstile *thread_turnstile;
+	uint32_t ctsid = thread->ctsid;
+
+	thread_turnstile = turnstile_prepare_common(proprietor, thread,
+	    TURNSTILE_NULL, type);
+
+	assert3u(ctsid, !=, 0);
+	thread_turnstile->ts_compact_id = ctsid;
+	thread->ctsid = 0;
+
+	/*
+	 * If the primitive stores the turnstile,
+	 * If there is already a turnstile, put the thread_turnstile if the primitive currently does not have a
+	 * turnstile.
+	 * Else, add the thread turnstile to freelist of the primitive turnstile.
+	 */
+	if (compact_id == 0) {
+		turnstile_state_add(thread_turnstile, TURNSTILE_STATE_PROPRIETOR);
+		ret_turnstile = thread_turnstile;
+		*compact_id_resolve(&ctsid_table, ctsid_unmangle(ctsid)) = ret_turnstile;
+		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+		    (TURNSTILE_CODE(TURNSTILE_FREELIST_OPERATIONS, (TURNSTILE_PREPARE))) | DBG_FUNC_NONE,
+		    VM_KERNEL_UNSLIDE_OR_PERM(thread_turnstile),
+		    VM_KERNEL_UNSLIDE_OR_PERM(proprietor),
+		    turnstile_get_type(thread_turnstile), 0, 0);
+	} else {
+		ret_turnstile = turnstile_get_by_id(compact_id);
+		turnstile_freelist_insert(ret_turnstile, thread_turnstile);
+	}
+
+	return ret_turnstile;
+}
+
+struct turnstile *
+turnstile_prepare_hash(
+	uintptr_t             proprietor,
+	turnstile_type_t      type)
+{
+	thread_t thread = current_thread();
+	struct turnstile *ret_turnstile = TURNSTILE_NULL;
+	struct turnstile *thread_turnstile;
+
+	thread_turnstile = turnstile_prepare_common(proprietor, thread,
+	    TURNSTILE_NULL, type);
+
+	/*
+	 * Lookup the primitive in the turnstile hash table and see if it already has an entry.
+	 */
+	ret_turnstile = turnstile_htable_lookup_add(proprietor, thread_turnstile, type);
+	if (ret_turnstile == NULL) {
+		ret_turnstile = thread_turnstile;
+		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+		    (TURNSTILE_CODE(TURNSTILE_FREELIST_OPERATIONS, (TURNSTILE_PREPARE))) | DBG_FUNC_NONE,
+		    VM_KERNEL_UNSLIDE_OR_PERM(thread_turnstile),
+		    VM_KERNEL_UNSLIDE_OR_PERM(proprietor),
+		    turnstile_get_type(thread_turnstile), 0, 0);
 	}
 
 	return ret_turnstile;
 }
 
 /*
- * Name: turnstile_complete
+ * Name: turnstile_complete variants
  *
  * Description: Transfer the primitive's turnstile or from it's freelist to current thread.
  *              Current thread will have a turnstile attached to it after this call.
- *
- * Args:
- *   Arg1: proprietor
- *   Arg2: pointer in primitive struct to update turnstile
- *   Arg3: pointer to store the returned turnstile instead of attaching it to thread
- *   Arg4: type of primitive
- *
- * Returns:
- *   None.
  */
-void
-turnstile_complete(
-	uintptr_t proprietor,
-	struct turnstile **tstore,
-	struct turnstile **out_turnstile,
-	turnstile_type_t type)
+static void
+turnstile_complete_common(
+	uintptr_t             proprietor __kdebug_only,
+	thread_t              thread,
+	struct turnstile     *thread_turnstile,
+	struct turnstile     *primitive_turnstile,
+	struct turnstile    **out_turnstile)
 {
-	thread_t thread = current_thread();
-	struct turnstile *primitive_turnstile = TURNSTILE_NULL;
-	struct turnstile *thread_turnstile = TURNSTILE_NULL;
-
-	assert(thread->inheritor == NULL);
-
-	if (tstore != NULL) {
-		/*
-		 * If the primitive stores the turnstile, check if the primitive turnstile
-		 * has any turnstiles on its freelist.
-		 */
-		assert(*tstore != TURNSTILE_NULL);
-		if (turnstile_freelist_empty(*tstore)) {
-			/* Last turnstile scenario; remove the primitive->turnstile */
-			thread_turnstile = *tstore;
-			*tstore = TURNSTILE_NULL;
-			turnstile_state_remove(thread_turnstile, TURNSTILE_STATE_PROPRIETOR);
-		} else {
-			/* Freelist has turnstiles; remove one from the freelist */
-			thread_turnstile = turnstile_freelist_remove(*tstore);
-		}
-		primitive_turnstile = *tstore;
-	} else {
-		/* Use the global hash to find and remove a turnstile */
-		primitive_turnstile = turnstable_htable_lookup_remove(proprietor, &thread_turnstile, type);
-	}
 	if (primitive_turnstile == NULL) {
 		/*
 		 * Primitive no longer has a turnstile associated with it, thread_turnstile
@@ -1120,6 +1155,7 @@ turnstile_complete(
 			 * will happen in turnstile cleanup call
 			 */
 		}
+		thread_turnstile->ts_proprietor = TURNSTILE_PROPRIETOR_NULL;
 		assert(thread_turnstile->ts_inheritor == TURNSTILE_INHERITOR_NULL);
 
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
@@ -1150,7 +1186,95 @@ turnstile_complete(
 	} else {
 		*out_turnstile = thread_turnstile;
 	}
-	return;
+}
+
+void
+turnstile_complete(
+	uintptr_t             proprietor,
+	struct turnstile    **tstore,
+	struct turnstile    **out_turnstile,
+	turnstile_type_t      type __unused)
+{
+	thread_t thread = current_thread();
+	struct turnstile *primitive_turnstile = TURNSTILE_NULL;
+	struct turnstile *thread_turnstile = TURNSTILE_NULL;
+
+	assert(thread->inheritor == NULL);
+
+	/*
+	 * If the primitive stores the turnstile, check if the primitive turnstile
+	 * has any turnstiles on its freelist.
+	 */
+	assert(*tstore != TURNSTILE_NULL);
+	if (turnstile_freelist_empty(*tstore)) {
+		/* Last turnstile scenario; remove the primitive->turnstile */
+		thread_turnstile = *tstore;
+		*tstore = TURNSTILE_NULL;
+		turnstile_state_remove(thread_turnstile, TURNSTILE_STATE_PROPRIETOR);
+	} else {
+		/* Freelist has turnstiles; remove one from the freelist */
+		thread_turnstile = turnstile_freelist_remove(*tstore);
+	}
+	primitive_turnstile = *tstore;
+
+	turnstile_complete_common(proprietor, thread, thread_turnstile,
+	    primitive_turnstile, out_turnstile);
+}
+
+bool
+turnstile_complete_compact_id(
+	uintptr_t             proprietor,
+	struct turnstile     *primitive_turnstile,
+	turnstile_type_t      type __unused)
+{
+	thread_t thread = current_thread();
+	struct turnstile *thread_turnstile = TURNSTILE_NULL;
+	bool was_last = turnstile_freelist_empty(primitive_turnstile);
+	uint32_t ctsid;
+
+	assert(thread->inheritor == NULL);
+
+	assert(primitive_turnstile != TURNSTILE_NULL);
+	if (was_last) {
+		/* Last turnstile scenario; remove the primitive->turnstile */
+		thread_turnstile = primitive_turnstile;
+		turnstile_state_remove(thread_turnstile, TURNSTILE_STATE_PROPRIETOR);
+		primitive_turnstile = TURNSTILE_NULL;
+	} else {
+		/* Freelist has turnstiles; remove one from the freelist */
+		thread_turnstile = turnstile_freelist_remove(primitive_turnstile);
+	}
+
+	ctsid = thread_turnstile->ts_compact_id;
+	assert3u(ctsid, !=, 0);
+	thread_turnstile->ts_compact_id = 0;
+	thread->ctsid = ctsid;
+	if (was_last) {
+		*compact_id_resolve(&ctsid_table, ctsid_unmangle(ctsid)) = NULL;
+	}
+
+	turnstile_complete_common(proprietor, thread, thread_turnstile,
+	    primitive_turnstile, NULL);
+
+	return was_last;
+}
+
+void
+turnstile_complete_hash(
+	uintptr_t             proprietor,
+	turnstile_type_t      type)
+{
+	thread_t thread = current_thread();
+	struct turnstile *primitive_turnstile = TURNSTILE_NULL;
+	struct turnstile *thread_turnstile = TURNSTILE_NULL;
+
+	assert(thread->inheritor == NULL);
+
+	/* Use the global hash to find and remove a turnstile */
+	primitive_turnstile = turnstable_htable_lookup_remove(proprietor, &thread_turnstile, type);
+
+	turnstile_complete_common(proprietor, thread, thread_turnstile,
+	    primitive_turnstile, NULL);
 }
 
 /*
@@ -3440,9 +3564,12 @@ lock_start:
 	struct turnstile *prim_turnstile = TURNSTILE_NULL;
 
 	/* primitive locked, get a turnstile */
-	prim_turnstile = turnstile_prepare((uintptr_t)test_prim,
-	    use_hashtable ? NULL : &test_prim->ttprim_turnstile,
-	    TURNSTILE_NULL, type);
+	if (use_hashtable) {
+		prim_turnstile = turnstile_prepare_hash((uintptr_t)test_prim, type);
+	} else {
+		prim_turnstile = turnstile_prepare((uintptr_t)test_prim,
+		    &test_prim->ttprim_turnstile, TURNSTILE_NULL, type);
+	}
 
 	assert(prim_turnstile != TURNSTILE_NULL);
 
@@ -3458,8 +3585,12 @@ lock_start:
 
 		turnstile_update_inheritor_complete(prim_turnstile, TURNSTILE_INTERLOCK_HELD);
 
-		turnstile_complete((uintptr_t)test_prim,
-		    use_hashtable ? NULL : &test_prim->ttprim_turnstile, NULL, type);
+		if (use_hashtable) {
+			turnstile_complete_hash((uintptr_t)test_prim, type);
+		} else {
+			turnstile_complete((uintptr_t)test_prim,
+			    &test_prim->ttprim_turnstile, NULL, type);
+		}
 
 		tstile_test_prim_unlock_interlock(test_prim);
 
@@ -3487,8 +3618,13 @@ lock_start:
 	/* re-acquire the interlock to get turnstile back */
 	tstile_test_prim_lock_interlock(test_prim);
 	test_prim->tt_prim_waiters--;
-	turnstile_complete((uintptr_t)test_prim,
-	    use_hashtable ? NULL : &test_prim->ttprim_turnstile, NULL, type);
+
+	if (use_hashtable) {
+		turnstile_complete_hash((uintptr_t)test_prim, type);
+	} else {
+		turnstile_complete((uintptr_t)test_prim,
+		    &test_prim->ttprim_turnstile, NULL, type);
+	}
 
 	tstile_test_prim_unlock_interlock(test_prim);
 
@@ -3559,9 +3695,12 @@ tstile_test_prim_unlock(int val)
 	test_prim->ttprim_owner = NULL;
 
 	/* primitive locked, get a turnstile */
-	prim_turnstile = turnstile_prepare((uintptr_t)test_prim,
-	    use_hashtable ? NULL : &test_prim->ttprim_turnstile,
-	    TURNSTILE_NULL, type);
+	if (use_hashtable) {
+		prim_turnstile = turnstile_prepare_hash((uintptr_t)test_prim, type);
+	} else {
+		prim_turnstile = turnstile_prepare((uintptr_t)test_prim,
+		    &test_prim->ttprim_turnstile, TURNSTILE_NULL, type);
+	}
 
 	assert(prim_turnstile != TURNSTILE_NULL);
 
@@ -3572,12 +3711,16 @@ tstile_test_prim_unlock(int val)
 
 	waitq_wakeup64_one(&prim_turnstile->ts_waitq,
 	    CAST_EVENT64_T(test_prim),
-	    THREAD_AWAKENED, WAITQ_ALL_PRIORITIES);
+	    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
 
 	turnstile_update_inheritor_complete(prim_turnstile, TURNSTILE_INTERLOCK_HELD);
 
-	turnstile_complete((uintptr_t)test_prim,
-	    use_hashtable ? NULL : &test_prim->ttprim_turnstile, NULL, type);
+	if (use_hashtable) {
+		turnstile_complete_hash((uintptr_t)test_prim, type);
+	} else {
+		turnstile_complete((uintptr_t)test_prim,
+		    &test_prim->ttprim_turnstile, NULL, type);
+	}
 
 	tstile_test_prim_unlock_interlock(test_prim);
 

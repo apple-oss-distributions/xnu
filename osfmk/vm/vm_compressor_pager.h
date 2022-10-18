@@ -108,6 +108,7 @@ extern memory_object_offset_t vm_compressor_pager_next_compressed(
 	memory_object_t         mem_obj,
 	memory_object_offset_t  offset);
 
+extern bool osenvironment_is_diagnostics(void);
 extern void vm_compressor_init(void);
 extern int vm_compressor_put(ppnum_t pn, int *slot, void **current_chead, char *scratch_buf);
 extern int vm_compressor_get(ppnum_t pn, int *slot, int flags);

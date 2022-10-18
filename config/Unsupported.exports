@@ -110,7 +110,7 @@ _kev_post_msg
 _kev_post_msg_nowait
 _kfree:_kfree_external
 _kmem_alloc:_kmem_alloc_external
-_kmem_free
+_kmem_free:_kmem_free_external
 _kmputc
 _krealloc_data:_krealloc_data_external
 _lck_mtx_assert
@@ -128,6 +128,7 @@ _mach_gss_unhold_cred
 _mach_make_memory_entry_64
 _mach_memory_entry_page_op
 _mach_memory_entry_range_op
+_mach_memory_entry_ownership
 _mach_msg_destroy_from_kernel_proper
 _mach_msg_rpc_from_kernel_proper
 _mach_vm_region

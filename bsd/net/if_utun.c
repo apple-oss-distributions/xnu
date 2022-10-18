@@ -685,14 +685,14 @@ utun_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		}
 
 		length -= header_offset;
-		if (length > rx_pp->pp_buflet_size) {
+		if (length > PP_BUF_SIZE_DEF(rx_pp)) {
 			// Flush data
 			mbuf_freem(data);
 			kern_pbufpool_free(rx_pp, rx_ph);
 			STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
 			STATS_INC(nifs, NETIF_STATS_DROP);
 			os_log_error(OS_LOG_DEFAULT, "utun_netif_sync_rx %s: legacy packet length %zu > %u\n",
-			    pcb->utun_ifp->if_xname, length, rx_pp->pp_buflet_size);
+			    pcb->utun_ifp->if_xname, length, PP_BUF_SIZE_DEF(rx_pp));
 			continue;
 		}
 
@@ -1084,7 +1084,7 @@ utun_create_fs_provider_and_instance(struct utun_pcb *pcb,
 	 * This allows flowswitch to perform intra-stack packet aggregation.
 	 */
 	err = kern_nexus_attr_set(attr, NEXUS_ATTR_MAX_FRAGS,
-	    sk_fsw_rx_agg_tcp ? NX_PBUF_FRAGS_MAX : 1);
+	    NX_FSW_TCP_RX_AGG_ENABLED() ? NX_PBUF_FRAGS_MAX : 1);
 	VERIFY(err == 0);
 
 	snprintf((char *)provider_name, sizeof(provider_name),
@@ -2994,7 +2994,6 @@ utun_pkt_input(struct utun_pcb *pcb, mbuf_t packet)
 			ifnet_stat_increment_in(pcb->utun_ifp, 0, 0, 1);
 
 			os_log_error(OS_LOG_DEFAULT, "%s - ifnet_input failed: %d\n", __FUNCTION__, result);
-			mbuf_freem(packet);
 		}
 
 		return 0;
@@ -3409,7 +3408,7 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 
 			if (length < UTUN_HEADER_SIZE(pcb) ||
 			    length > pcb->utun_slot_size ||
-			    length > rx_pp->pp_buflet_size ||
+			    length > PP_BUF_SIZE_DEF(rx_pp) ||
 			    (pcb->utun_flags & UTUN_FLAGS_NO_OUTPUT)) {
 				/* flush data */
 				kern_pbufpool_free(rx_pp, rx_ph);

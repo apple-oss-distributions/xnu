@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -69,6 +69,7 @@
 
 #define _IP_VHL
 
+#include "tcp_includes.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -99,7 +100,6 @@
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
 #include <netinet/tcp.h>
-#define TCPOUTFLAGS
 #include <netinet/tcp_cache.h>
 #include <netinet/tcp_fsm.h>
 #include <netinet/tcp_seq.h>
@@ -139,14 +139,18 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, local_slowstart_flightsize,
     CTLFLAG_RW | CTLFLAG_LOCKED, int, ss_fltsz_local, 8,
     "Slow start flight size for local networks");
 
-int     tcp_do_tso = 1;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, tso, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tcp_do_tso, 0, "Enable TCP Segmentation Offload");
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, tso, CTLFLAG_RW | CTLFLAG_LOCKED,
+    int, tcp_do_tso, 1, "Enable TCP Segmentation Offload");
 
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, ecn_setup_percentage,
     CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_ecn_setup_percentage, 100,
     "Max ECN setup percentage");
 
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, accurate_ecn,
+    CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_acc_ecn, 0,
+    "Accurate ECN mode (0: disable, 1: enable ACE feedback");
+
+// TO BE REMOVED
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, do_ack_compression,
     CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_do_ack_compression, 1,
     "Enable TCP ACK compression (on (cell only): 1, off: 0, on (all interfaces): 2)");
@@ -453,7 +457,7 @@ tcp_tfo_write_cookie(struct tcpcb *tp, unsigned int optlen, int32_t len,
 static inline bool
 tcp_send_ecn_flags_on_syn(struct tcpcb *tp)
 {
-	return !(tp->ecn_flags & TE_SETUPSENT);
+	return !(tp->ecn_flags & (TE_SETUPSENT | TE_ACE_SETUPSENT));
 }
 
 void
@@ -502,7 +506,8 @@ tcp_set_ecn(struct tcpcb *tp, struct ifnet *ifp)
 	return;
 
 check_heuristic:
-	if (!tcp_heuristic_do_ecn(tp)) {
+	if (!tcp_heuristic_do_ecn(tp) && !TCP_ACC_ECN_ENABLED()) {
+		/* Allow ECN when Accurate ECN is enabled until heuristics are fixed */
 		tp->ecn_flags &= ~TE_ENABLE_ECN;
 	}
 
@@ -517,7 +522,8 @@ check_heuristic:
 		 * Use the random value in iss for randomizing
 		 * this selection
 		 */
-		if ((tp->iss % 100) >= tcp_ecn_setup_percentage) {
+		if ((tp->iss % 100) >= tcp_ecn_setup_percentage && !TCP_ACC_ECN_ENABLED()) {
+			/* Don't disable Accurate ECN randomly */
 			tp->ecn_flags &= ~TE_ENABLE_ECN;
 		}
 	}
@@ -546,6 +552,86 @@ tcp_flight_size(struct tcpcb *tp)
 	}
 
 	return ret;
+}
+
+/*
+ * Either of ECT0 or ECT1 flag should be set
+ * when this function is called
+ */
+static void
+tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *lp, uint8_t *optlen)
+{
+	uint8_t max_len = TCP_MAXOLEN - *optlen;
+	uint8_t len = TCPOLEN_ACCECN_EMPTY;
+
+	uint32_t e1b = (uint32_t)(tp->t_rcv_ect1_bytes & TCP_ACO_MASK);
+	uint32_t e0b = (uint32_t)(tp->t_rcv_ect0_bytes & TCP_ACO_MASK);
+	uint32_t ceb =  (uint32_t)(tp->t_rcv_ce_bytes & TCP_ACO_MASK);
+
+	if (max_len < TCPOLEN_ACCECN_EMPTY) {
+		TCP_LOG(tp, "not enough space to add any AccECN option");
+		return;
+	}
+
+	if (!(flags & TH_SYN || tp->ecn_flags & (TE_ACO_ECT1 | TE_ACO_ECT0))) {
+		/*
+		 * Since this is neither a SYN-ACK packet nor any of the ECT byte
+		 * counter flags are set, no need to send the option.
+		 */
+		return;
+	}
+
+	if (max_len < (TCPOLEN_ACCECN_EMPTY + 1 * TCPOLEN_ACCECN_COUNTER)) {
+		/* Can carry EMPTY option which can be used to test path in SYN-ACK packet */
+		if (flags & TH_SYN) {
+			*lp++ = htonl((TCPOPT_ACCECN1 << 24) | (len << 16) |
+			    (TCPOPT_NOP << 8) | TCPOPT_NOP);
+			optlen += len + 2; /* 2 NOPs */
+			TCP_LOG(tp, "add empty AccECN option, optlen=%u", *optlen);
+		}
+	} else if (max_len < (TCPOLEN_ACCECN_EMPTY + 2 * TCPOLEN_ACCECN_COUNTER)) {
+		/* Can carry one option */
+		len += 1 * TCPOLEN_ACCECN_COUNTER;
+		if (tp->ecn_flags & TE_ACO_ECT1) {
+			*lp++ = htonl((TCPOPT_ACCECN1 << 24) | (len << 16) | ((e1b >> 8) & 0xffff));
+			*lp++ = htonl(((e1b & 0xff) << 24) | (TCPOPT_NOP << 16) | (TCPOPT_NOP << 8) | TCPOPT_NOP);
+		} else {
+			*lp++ = htonl((TCPOPT_ACCECN0 << 24) | (len << 16) | ((e0b >> 8) & 0xffff));
+			*lp++ = htonl(((e0b & 0xff) << 24) | (TCPOPT_NOP << 16) | (TCPOPT_NOP << 8) | TCPOPT_NOP);
+		}
+		*optlen += len + 3; /* 3 NOPs */
+		TCP_LOG(tp, "add single counter for AccECN option, optlen=%u", *optlen);
+	} else if (max_len < (TCPOLEN_ACCECN_EMPTY + 3 * TCPOLEN_ACCECN_COUNTER)) {
+		/* Can carry two options */
+		len += 2 * TCPOLEN_ACCECN_COUNTER;
+		if (tp->ecn_flags & TE_ACO_ECT1) {
+			*lp++ = htonl((TCPOPT_ACCECN1 << 24) | (len << 16) | ((e1b >> 8) & 0xffff));
+			*lp++ = htonl(((e1b & 0xff) << 24) | (ceb & 0xffffff));
+		} else {
+			*lp++ = htonl((TCPOPT_ACCECN0 << 24) | (len << 16) | ((e0b >> 8) & 0xffff));
+			*lp++ = htonl(((e0b & 0xff) << 24) | (ceb & 0xffffff));
+		}
+		*optlen += len; /* 0 NOPs */
+		TCP_LOG(tp, "add 2 counters for AccECN option, optlen=%u", *optlen);
+	} else {
+		/*
+		 * TCP option sufficient to hold full AccECN option
+		 * but send counter that changed during the entire connection.
+		 */
+		len += 3 * TCPOLEN_ACCECN_COUNTER;
+		/* Can carry all three options */
+		if (tp->ecn_flags & TE_ACO_ECT1) {
+			*lp++ = htonl((TCPOPT_ACCECN1 << 24) | (len << 16) | ((e1b >> 8) & 0xffff));
+			*lp++ = htonl(((e1b & 0xff) << 24) | (ceb & 0xffffff));
+			*lp++ = htonl(((e0b & 0xffffff) << 8) | TCPOPT_NOP);
+		} else {
+			*lp++ = htonl((TCPOPT_ACCECN0 << 24) | (len << 16) | ((e0b >> 8) & 0xffff));
+			*lp++ = htonl(((e0b & 0xff) << 24) | (ceb & 0xffffff));
+			*lp++ = htonl(((e1b & 0xffffff) << 8) | TCPOPT_NOP);
+		}
+		*optlen += len + 1; /* 1 NOP */
+		TCP_LOG(tp, "add all 3 counters for AccECN option, optlen=%u", *optlen);
+	}
 }
 
 /*
@@ -580,7 +666,7 @@ tcp_output(struct tcpcb *tp)
 	struct inpcb *inp = tp->t_inpcb;
 	struct socket *so = inp->inp_socket;
 	int32_t len, recwin, sendwin, off;
-	uint8_t flags;
+	uint16_t flags;
 	int error;
 	struct mbuf *m;
 	struct ip *ip = NULL;
@@ -589,6 +675,7 @@ tcp_output(struct tcpcb *tp)
 	u_char opt[TCP_MAXOLEN];
 	unsigned int ipoptlen, optlen, hdrlen;
 	int idle, sendalot, lost = 0;
+	int sendalot_cnt = 0;
 	int i, sack_rxmit;
 	int tso = 0;
 	int sack_bytes_rxmt;
@@ -671,8 +758,15 @@ tcp_output(struct tcpcb *tp)
 again:
 #if MPTCP
 	mptcp_acknow = FALSE;
+
+	if (so->so_flags & SOF_MP_SUBFLOW && SEQ_LT(tp->snd_nxt, tp->snd_una)) {
+		os_log_error(mptcp_log_handle, "%s - %lx: snd_nxt is %u and snd_una is %u, cnt %d\n",
+		    __func__, (unsigned long)VM_KERNEL_ADDRPERM(tp->t_mpsub->mpts_mpte),
+		    tp->snd_nxt, tp->snd_una, sendalot_cnt);
+	}
 #endif
 	do_not_compress = FALSE;
+	sendalot_cnt++;
 
 	KERNEL_DEBUG(DBG_FNC_TCP_OUTPUT | DBG_FUNC_START, 0, 0, 0, 0, 0);
 
@@ -757,6 +851,7 @@ again:
 				tcp_drop(tp, EADDRNOTAVAIL);
 				return EADDRNOTAVAIL;
 			} else {
+				TCP_LOG_OUTPUT(tp, "no source address silently ignored");
 				tcp_check_timer_state(tp);
 				return 0; /* silently ignore, keep data in socket: address may be back */
 			}
@@ -1783,6 +1878,20 @@ send:
 		}
 	}
 
+	/*
+	 * AccECN option - after SACK
+	 * Don't send on <SYN>,
+	 * send only on <SYN,ACK> before ACCECN is negotiated or
+	 * when doing an AccECN session.
+	 */
+	if (TCP_ACC_ECN_ON(tp) ||
+	    (TCP_ACC_ECN_ENABLED() && (flags & (TH_SYN | TH_ACK)) ==
+	    (TH_SYN | TH_ACK))) {
+		uint32_t *lp = (uint32_t *)(void *)(opt + optlen);
+		/* lp will become outdated after options are added */
+		tcp_add_accecn_option(tp, flags, lp, (uint8_t *)&optlen);
+	}
+
 	/* Pad TCP options to a 4 byte boundary */
 	if (optlen < MAX_TCPOPTLEN && (optlen % sizeof(u_int32_t))) {
 		int pad = sizeof(u_int32_t) - (optlen % sizeof(u_int32_t));
@@ -1792,6 +1901,31 @@ send:
 		while (pad) {
 			*bp++ = TCPOPT_EOL;
 			pad--;
+		}
+	}
+
+	/*
+	 * For Accurate ECN, send ACE flag based on r.cep, if
+	 * We have completed handshake and are in ESTABLISHED state, and
+	 * This is not the final ACK of 3WHS.
+	 */
+	if (TCP_ACC_ECN_ON(tp) && TCPS_HAVEESTABLISHED(tp->t_state) &&
+	    (tp->ecn_flags & TE_ACE_FINAL_ACK_3WHS) == 0) {
+		uint8_t ace = tp->t_rcv_ce_packets & TCP_ACE_MASK;
+		if (ace & 0x01) {
+			flags |= TH_ECE;
+		} else {
+			flags &= ~TH_ECE;
+		}
+		if (ace & 0x02) {
+			flags |= TH_CWR;
+		} else {
+			flags &= ~TH_CWR;
+		}
+		if (ace & 0x04) {
+			flags |= TH_AE;
+		} else {
+			flags &= ~TH_AE;
 		}
 	}
 
@@ -1810,22 +1944,86 @@ send:
 	 * whether or not we should set the IP ECT flag on outbound packet
 	 *
 	 * For a SYN-ACK, send an ECN setup SYN-ACK
+	 *
+	 * Below we send ECN for three different handhshake states:
+	 * 1. Server received SYN and is sending a SYN-ACK (state->TCPS_SYN_RECEIVED)
+	 *    - both classic and Accurate ECN have special encoding
+	 * 2. Client is sending SYN packet (state->SYN_SENT)
+	 *    - both classic and Accurate ECN have special encoding
+	 * 3. Client is sending final ACK of 3WHS (state->ESTABLISHED)
+	 *    - Only Accurate ECN has special encoding
 	 */
 	if ((flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK) &&
 	    (tp->ecn_flags & TE_ENABLE_ECN)) {
-		if (tp->ecn_flags & TE_SETUPRECEIVED) {
+		/* Server received either legacy or Accurate ECN setup SYN */
+		if (tp->ecn_flags & (TE_SETUPRECEIVED | TE_ACE_SETUPRECEIVED)) {
 			if (tcp_send_ecn_flags_on_syn(tp)) {
-				/*
-				 * Setting TH_ECE makes this an ECN-setup
-				 * SYN-ACK
-				 */
-				flags |= TH_ECE;
+				if (TCP_ACC_ECN_ENABLED() && (tp->ecn_flags & TE_ACE_SETUPRECEIVED)) {
+					/*
+					 * Accurate ECN mode is on. Initialize packet and byte counters
+					 * for the server sending SYN-ACK. Although s_cep will be initialized
+					 * during input processing of ACK of SYN-ACK, initialize here as well
+					 * in case ACK gets lost.
+					 *
+					 * Non-zero initial values are used to
+					 * support a stateless handshake (see
+					 * Section 5.1 of AccECN draft) and to be
+					 * distinct from cases where the fields
+					 * are incorrectly zeroed.
+					 */
+					tp->t_rcv_ce_packets = 5;
+					tp->t_snd_ce_packets = 5;
 
-				/*
-				 * Record that we sent the ECN-setup and
-				 * default to setting IP ECT.
-				 */
-				tp->ecn_flags |= (TE_SETUPSENT | TE_SENDIPECT);
+					/* Initialize ECT byte counter to 1 to distinguish zeroing of options */
+					tp->t_rcv_ect1_bytes = tp->t_rcv_ect0_bytes = 1;
+					tp->t_snd_ect1_bytes = tp->t_snd_ect0_bytes = 1;
+
+					/* Initialize CE byte counter to 0 */
+					tp->t_rcv_ce_bytes = tp->t_snd_ce_bytes = 0;
+
+					if (tp->ecn_flags & TE_ACE_SETUP_NON_ECT) {
+						flags |= TH_CWR;
+						/* Remove the setup flag as it is also used for final ACK */
+						tp->ecn_flags &= ~TE_ACE_SETUP_NON_ECT;
+						tcpstat.tcps_ecn_ace_syn_not_ect++;
+					} else if (tp->ecn_flags & TE_ACE_SETUP_ECT1) {
+						flags |= (TH_CWR | TH_ECE);
+						tp->ecn_flags &= ~TE_ACE_SETUP_ECT1;
+						tcpstat.tcps_ecn_ace_syn_ect1++;
+					} else if (tp->ecn_flags & TE_ACE_SETUP_ECT0) {
+						flags |= TH_AE;
+						tp->ecn_flags &= ~TE_ACE_SETUP_ECT0;
+						tcpstat.tcps_ecn_ace_syn_ect0++;
+					} else if (tp->ecn_flags & TE_ACE_SETUP_CE) {
+						flags |= (TH_AE | TH_CWR);
+						tp->ecn_flags &= ~TE_ACE_SETUP_CE;
+						/*
+						 * Receive counter is updated on
+						 * all acceptable packets except
+						 * CE on SYN packets (SYN=1, ACK=0)
+						 */
+						tcpstat.tcps_ecn_ace_syn_ce++;
+					} else {
+						/* We shouldn't come here */
+						panic("ECN flags (0x%x) not set correctly", tp->ecn_flags);
+					}
+					/*
+					 * We are not yet committing to send IP ECT packets when
+					 * Accurate ECN mode is on
+					 */
+					tp->ecn_flags |= (TE_ACE_SETUPSENT);
+				} else if (tp->ecn_flags & TE_SETUPRECEIVED) {
+					/*
+					 * Setting TH_ECE makes this an ECN-setup
+					 * SYN-ACK
+					 */
+					flags |= TH_ECE;
+					/*
+					 * Record that we sent the ECN-setup and
+					 * default to setting IP ECT.
+					 */
+					tp->ecn_flags |= (TE_SETUPSENT | TE_SENDIPECT);
+				}
 				tcpstat.tcps_ecn_server_setup++;
 				tcpstat.tcps_ecn_server_success++;
 			} else {
@@ -1843,7 +2041,7 @@ send:
 				 * succeed. Decrementing here
 				 * tcps_ecn_server_success to correct it.
 				 */
-				if (tp->ecn_flags & TE_SETUPSENT) {
+				if (tp->ecn_flags & (TE_SETUPSENT | TE_ACE_SETUPSENT)) {
 					tcpstat.tcps_ecn_lost_synack++;
 					tcpstat.tcps_ecn_server_success--;
 					tp->ecn_flags |= TE_LOST_SYNACK;
@@ -1851,37 +2049,70 @@ send:
 
 				tp->ecn_flags &=
 				    ~(TE_SETUPRECEIVED | TE_SENDIPECT |
-				    TE_SENDCWR);
+				    TE_SENDCWR | TE_ACE_SETUPRECEIVED);
 			}
 		}
 	} else if ((flags & (TH_SYN | TH_ACK)) == TH_SYN &&
 	    (tp->ecn_flags & TE_ENABLE_ECN)) {
 		if (tcp_send_ecn_flags_on_syn(tp)) {
-			/*
-			 * Setting TH_ECE and TH_CWR makes this an
-			 * ECN-setup SYN
-			 */
-			flags |= (TH_ECE | TH_CWR);
+			if (TCP_ACC_ECN_ENABLED()) {
+				/* We are negotiating AccECN in SYN */
+				flags |= TH_ACE;
+				/*
+				 * For AccECN, we only set the ECN-setup sent
+				 * flag as we are not committing to set ECT yet.
+				 */
+				tp->ecn_flags |= (TE_ACE_SETUPSENT);
+			} else {
+				/*
+				 * Setting TH_ECE and TH_CWR makes this an
+				 * ECN-setup SYN
+				 */
+				flags |= (TH_ECE | TH_CWR);
+				/*
+				 * Record that we sent the ECN-setup and default to
+				 * setting IP ECT.
+				 */
+				tp->ecn_flags |= (TE_SETUPSENT | TE_SENDIPECT);
+			}
 			tcpstat.tcps_ecn_client_setup++;
 			tp->ecn_flags |= TE_CLIENT_SETUP;
-
-			/*
-			 * Record that we sent the ECN-setup and default to
-			 * setting IP ECT.
-			 */
-			tp->ecn_flags |= (TE_SETUPSENT | TE_SENDIPECT);
 		} else {
 			/*
 			 * We sent an ECN-setup SYN but it was dropped.
 			 * Fall back to non-ECN and clear flag indicating
 			 * we should send data with IP ECT set.
 			 */
-			if (tp->ecn_flags & TE_SETUPSENT) {
+			if (tp->ecn_flags & (TE_SETUPSENT | TE_ACE_SETUPSENT)) {
 				tcpstat.tcps_ecn_lost_syn++;
 				tp->ecn_flags |= TE_LOST_SYN;
 			}
 			tp->ecn_flags &= ~TE_SENDIPECT;
 		}
+	} else if (TCP_ACC_ECN_ON(tp) && (tp->ecn_flags & TE_ACE_FINAL_ACK_3WHS) &&
+	    len == 0 && (flags & (TH_FLAGS_ALL)) == TH_ACK) {
+		/*
+		 * Client has processed SYN-ACK and moved to ESTABLISHED.
+		 * This is the final ACK of 3WHS. If ACC_ECN has been negotiated,
+		 * then send the handshake encoding as per Table 3 of Accurate ECN draft.
+		 * We are clearing the ACE flags just in case if they were set before.
+		 * TODO: if client has to carry data in the 3WHS ACK, then we need to send a pure ACK first
+		 */
+		flags &= ~(TH_AE | TH_CWR | TH_ECE);
+		if (tp->ecn_flags & TE_ACE_SETUP_NON_ECT) {
+			flags |= TH_CWR;
+			tp->ecn_flags &= ~TE_ACE_SETUP_NON_ECT;
+		} else if (tp->ecn_flags & TE_ACE_SETUP_ECT1) {
+			flags |= (TH_CWR | TH_ECE);
+			tp->ecn_flags &= ~TE_ACE_SETUP_ECT1;
+		} else if (tp->ecn_flags & TE_ACE_SETUP_ECT0) {
+			flags |= TH_AE;
+			tp->ecn_flags &= ~TE_ACE_SETUP_ECT0;
+		} else if (tp->ecn_flags & TE_ACE_SETUP_CE) {
+			flags |= (TH_AE | TH_CWR);
+			tp->ecn_flags &= ~TE_ACE_SETUP_CE;
+		}
+		tp->ecn_flags &= ~(TE_ACE_FINAL_ACK_3WHS);
 	}
 
 	/*
@@ -1904,7 +2135,6 @@ send:
 		flags |= TH_ECE;
 		tcpstat.tcps_ecn_sent_ece++;
 	}
-
 
 	hdrlen += optlen;
 
@@ -2194,7 +2424,7 @@ send:
 		do_not_compress = TRUE;
 	}
 
-	if (do_not_compress || (tcp_do_ack_compression == 1 && !cell) || __improbable(!tcp_do_ack_compression)) {
+	if (do_not_compress) {
 		m->m_pkthdr.comp_gencnt = 0;
 	} else {
 		if (TSTMP_LT(tp->t_comp_lastinc + tcp_ack_compression_rate, tcp_now)) {
@@ -2271,7 +2501,8 @@ send:
 				m->m_pkthdr.pkt_flags |= PKTF_START_SEQ;
 			}
 			if (SEQ_LT(tp->snd_nxt, tp->snd_max)) {
-				if (SACK_ENABLED(tp) && len > 1) {
+				if (SACK_ENABLED(tp) && len > 1 &&
+				    !(tp->t_flagsext & TF_SENT_TLPROBE)) {
 					tcp_rxtseg_insert(tp, tp->snd_nxt,
 					    (tp->snd_nxt + len - 1));
 				}
@@ -2300,7 +2531,9 @@ send:
 		bcopy(opt, th + 1, optlen);
 		th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
 	}
-	th->th_flags = flags;
+	/* Separate AE from flags */
+	th->th_flags = (flags & (TH_FLAGS_ALL));
+	th->th_x2 = (flags & (TH_AE)) >> 8;
 	th->th_win = htons((u_short) (recwin >> tp->rcv_scale));
 	tp->t_last_recwin = recwin;
 	if (!(so->so_flags & SOF_MP_SUBFLOW)) {
@@ -2560,7 +2793,15 @@ timer:
 		ip6->ip6_hlim = in6_selecthlim(inp, inp->in6p_route.ro_rt ?
 		    inp->in6p_route.ro_rt->rt_ifp : NULL);
 
-		/* TODO: IPv6 IP6TOS_ECT bit on */
+		/* Don't set ECT bit if requested by an app */
+
+		/* Set ECN bits for testing purposes */
+		if (tp->ecn_flags & TE_FORCE_ECT1) {
+			ip6->ip6_flow |= htonl(IPTOS_ECN_ECT1 << 20);
+		} else if (tp->ecn_flags & TE_FORCE_ECT0) {
+			ip6->ip6_flow |= htonl(IPTOS_ECN_ECT0 << 20);
+		}
+
 		KERNEL_DEBUG(DBG_LAYER_BEG,
 		    ((inp->inp_fport << 16) | inp->inp_lport),
 		    (((inp->in6p_laddr.s6_addr16[0] & 0xffff) << 16) |
@@ -2570,7 +2811,17 @@ timer:
 		ASSERT(m->m_pkthdr.len <= IP_MAXPACKET);
 		ip->ip_len = (u_short)m->m_pkthdr.len;
 		ip->ip_ttl = inp->inp_ip_ttl;   /* XXX */
-		ip->ip_tos |= (inp->inp_ip_tos & ~IPTOS_ECN_MASK);/* XXX */
+
+		/* Don't set ECN bit if requested by an app */
+		ip->ip_tos |= (inp->inp_ip_tos & ~IPTOS_ECN_MASK);
+
+		/* Set ECN bits for testing purposes */
+		if (tp->ecn_flags & TE_FORCE_ECT1) {
+			ip->ip_tos |= IPTOS_ECN_ECT1;
+		} else if (tp->ecn_flags & TE_FORCE_ECT0) {
+			ip->ip_tos |= IPTOS_ECN_ECT0;
+		}
+
 		KERNEL_DEBUG(DBG_LAYER_BEG,
 		    ((inp->inp_fport << 16) | inp->inp_lport),
 		    (((inp->inp_laddr.s_addr & 0xffff) << 16) |
@@ -2668,6 +2919,15 @@ timer:
 		(void) m_set_service_class(m, so_tc2msc(sotc));
 	}
 
+	if ((th->th_flags & TH_SYN) && tp->t_syn_sent < UINT8_MAX) {
+		tp->t_syn_sent++;
+	}
+	if ((th->th_flags & TH_FIN) && tp->t_fin_sent < UINT8_MAX) {
+		tp->t_fin_sent++;
+	}
+	if ((th->th_flags & TH_RST) && tp->t_rst_sent < UINT8_MAX) {
+		tp->t_rst_sent++;
+	}
 	TCP_LOG_TH_FLAGS(isipv6 ? (void *)ip6 : (void *)ip, th, tp, true,
 	    inp->inp_last_outifp != NULL ? inp->inp_last_outifp :
 	    inp->inp_boundifp);
@@ -2806,6 +3066,8 @@ out:
 			tcp_check_timer_state(tp);
 			KERNEL_DEBUG(DBG_FNC_TCP_OUTPUT | DBG_FUNC_END, 0, 0, 0, 0, 0);
 
+			TCP_LOG_OUTPUT(tp, "error ENOBUFS silently handled");
+
 			tcp_ccdbg_trace(tp, NULL, TCP_CC_OUTPUT_ERROR);
 			return 0;
 		}
@@ -2829,6 +3091,8 @@ out:
 			tcp_mtudisc(inp, 0);
 			tcp_check_timer_state(tp);
 
+			TCP_LOG_OUTPUT(tp, "error EMSGSIZE silently handled");
+
 			KERNEL_DEBUG(DBG_FNC_TCP_OUTPUT | DBG_FUNC_END, 0, 0, 0, 0, 0);
 			return 0;
 		}
@@ -2840,7 +3104,10 @@ out:
 		    TCPS_HAVERCVDSYN(tp->t_state) &&
 		    !inp_restricted_send(inp, inp->inp_last_outifp)) {
 			tp->t_softerror = error;
+			TCP_LOG_OUTPUT(tp, "soft error %d silently handled", error);
 			error = 0;
+		} else {
+			TCP_LOG_OUTPUT(tp, "error %d", error);
 		}
 		tcp_check_timer_state(tp);
 		KERNEL_DEBUG(DBG_FNC_TCP_OUTPUT | DBG_FUNC_END, 0, 0, 0, 0, 0);
@@ -3095,6 +3362,11 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 			tcp_ccdbg_trace(tp, NULL,
 			    ((adv->code == FADV_FLOW_CONTROLLED) ?
 			    TCP_CC_FLOW_CONTROL : TCP_CC_SUSPEND));
+			if (adv->code == FADV_FLOW_CONTROLLED) {
+				TCP_LOG_OUTPUT(tp, "flow controlled");
+			} else {
+				TCP_LOG_OUTPUT(tp, "flow suspended");
+			}
 		}
 	}
 

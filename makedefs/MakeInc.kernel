@@ -116,6 +116,7 @@ ifeq ($(DO_CTFMERGE),1)
 	$(_v)$(CTFCONVERT) -c -l xnu -u xnu -o $@.ctf $(TARGET)/$(KERNEL_FILE_NAME).dSYM/Contents/Resources/DWARF/$(KERNEL_FILE_NAME)
 	@$(LOG_CTFMERGE) "$(@F)"
 	$(_v)$(CTFMERGE) -l xnu -o $@ -Z $@.ctfdata $@.ctf
+	-$(_v)$(CTFDUMP) -S $@.ctf $(_vstdout) $(_vstderr)
 	$(_v)if [ -s $@.ctfdata ]; then                          \
 		$(LOG_CTFINSERT) "$(@F)";                            \
 		$(CTFINSERT) $@	$(ARCH_FLAGS_$(CURRENT_ARCH_CONFIG)) \

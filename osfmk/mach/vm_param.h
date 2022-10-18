@@ -237,12 +237,13 @@ extern vm_size_t        mem_size;               /* 32-bit size of memory - limit
 extern uint64_t         max_mem;                /* 64-bit size of memory - limited by maxmem */
 
 /*
- * The default pager does not handle 64-bit offsets inside its objects,
- * so this limits the size of anonymous memory objects to 4GB minus 1 page.
+ * The VM compressor pager uses 32-bit page numbers, so this limits the size
+ * of anonymous memory objects to 0xffffffff pages.
  * When we need to allocate a chunk of anonymous memory over that size,
  * we have to allocate more than one chunk.
  */
-#define ANON_MAX_SIZE   ((1ULL << 32) - PAGE_SIZE)
+#define ANON_MAX_PAGES   0xFFFFFFFFULL
+#define ANON_MAX_SIZE (ANON_MAX_PAGES << PAGE_SHIFT)
 /*
  * Work-around for <rdar://problem/6626493>
  * Break large anonymous memory areas into 128MB chunks to alleviate
@@ -335,15 +336,6 @@ extern vm_offset_t              vm_kernel_builtinkmod_text_end;
  * Nesting of these macros should be considered invalid.
  */
 
-__BEGIN_DECLS
-#if XNU_KERNEL_PRIVATE
-extern vm_offset_t vm_kernel_addrhash(vm_offset_t addr)
-__XNU_INTERNAL(vm_kernel_addrhash);
-#else
-extern vm_offset_t vm_kernel_addrhash(vm_offset_t addr);
-#endif
-__END_DECLS
-
 #define __DO_UNSLIDE(_v) ((vm_offset_t)VM_KERNEL_STRIP_PTR(_v) - vm_kernel_slide)
 
 #if DEBUG || DEVELOPMENT
@@ -370,6 +362,22 @@ __END_DECLS
 #undef round_page
 #undef round_page_32
 #undef round_page_64
+
+static inline int
+mach_vm_size_unit(mach_vm_size_t size)
+{
+	uint32_t bits = 64u - (uint32_t)__builtin_clzll((size / 10) | 1);
+
+	return "BKMGTPE"[bits / 10];
+}
+
+static inline uint32_t
+mach_vm_size_pretty(mach_vm_size_t size)
+{
+	uint32_t bits = 64u - (uint32_t)__builtin_clzll((size / 10) | 1);
+
+	return (uint32_t)(size >> (bits - bits % 10));
+}
 
 static inline mach_vm_offset_t
 mach_vm_round_page(mach_vm_offset_t x)

@@ -62,9 +62,9 @@
  */
 
 subsystem
-#if	KERNEL_SERVER
-	  KernelServer
-#endif	/* KERNEL_SERVER */
+#if	KERNEL_SERVER || KOBJECT_SERVER
+	KernelServer
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 	  vm_map 3800;
 
 #include <mach/std_types.defs>
@@ -389,21 +389,7 @@ routine	vm_mapped_pages_info(  /* OBSOLETE */
 		task		: vm_map_read_t;
 	out	pages		: page_address_array_t);
 
-#if 0
-/*
- *    Allow application level processes to create named entries which
- *    are backed by sub-maps which describe regions of address space.
- *    These regions of space can have objects mapped into them and
- *    in turn, can be mapped into target address spaces 
- */
-
-routine	vm_region_object_create(
-		target_task	:vm_map_t;
-	in	size		:vm_size_t;
-	out	region_object	:mach_port_move_send_t);
-#else
 skip; /* was vm_region_object_create */
-#endif
 
 /*
  *	A recursive form of vm_region which probes submaps withint the
@@ -469,32 +455,9 @@ routine KERNEL_SERVER_SUFFIX(vm_map_64)(
 		max_protection	: vm_prot_t;
 		inheritance	: vm_inherit_t);
 
-#if 0
-/*
- * The UPL interfaces are not ready for user-level export.
- */
-routine vm_map_get_upl(
-		target_task	: vm_map_t;
-		address		: vm_map_offset_t;
-	inout	size		: vm_size_t;
-	out	upl		: upl_t;
-	out	page_info	: upl_page_info_array_t, CountInOut;
-	inout	flags		: integer_t;
-		force_data_sync	: integer_t);
-
-routine vm_upl_map(
-		target_task	: vm_map_t;
-		upl		: upl_t;
-	inout	address		: vm_address_t);
-
-routine vm_upl_unmap(
-		target_task	: vm_map_t;
-		upl		: upl_t);
-#else
 skip; /* was vm_map_get_upl */
 skip; /* was vm_upl_map */
 skip; /* was vm_upl_unmap */
-#endif		
 
 /*
  *	Control behavior and investigate state of a "purgable" object in

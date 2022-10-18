@@ -53,6 +53,9 @@ ZONE_DEFINE(sk_fed_zone, SKMEM_ZONE_PREFIX ".flow.entry.dead",
 static int __flow_inited = 0;
 uint32_t flow_seed;
 
+#define SKMEM_TAG_FLOW_DEMUX "com.apple.skywalk.fsw.flow_demux"
+SKMEM_TAG_DEFINE(skmem_tag_flow_demux, SKMEM_TAG_FLOW_DEMUX);
+
 int
 flow_init(void)
 {

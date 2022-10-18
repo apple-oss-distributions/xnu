@@ -20,7 +20,7 @@
 #  KERNEL_RELEASE = [ KERNEL_BASE ]
 #  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug ]
 #  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug ]
-#  BSD_BASE =       [ mach_bsd config_workqueue psynch config_proc_uuid_policy config_imageboot config_imageboot_img4 ]
+#  BSD_BASE =       [ mach_bsd psynch config_proc_uuid_policy config_imageboot config_imageboot_img4 ]
 #  BSD_RELEASE =    [ BSD_BASE no_printf_str no_kprintf_str secure_kernel ]
 #  BSD_DEV =        [ BSD_BASE config_imgsrc_access config_coredump pgo config_vnguard ]
 #  BSD_DEBUG =      [ BSD_BASE config_imgsrc_access config_coredump pgo config_vnguard ]
@@ -28,16 +28,14 @@
 #  FILESYS_RELEASE= [ FILESYS_BASE ]
 #  FILESYS_DEV =    [ FILESYS_BASE config_union_mounts fdesc ]
 #  FILESYS_DEBUG =  [ FILESYS_BASE config_union_mounts fdesc ]
-#  NFS_DEV =        [ nfsclient nfsserver config_nfs_gss ]
-#  NFS_RELEASE =    [ nfsclient ]
-#  NFS_DEBUG =      [ nfsclient config_nfs_gss ]
+#  NFS_DEV =        [ nfsserver ]
 #  SKYWALK_BASE =   [ skywalk config_nexus_user_pipe config_nexus_kernel_pipe config_nexus_monitor config_nexus_flowswitch config_nexus_netif ]
 #  SKYWALK_RELEASE = [ SKYWALK_BASE ]
 #  SKYWALK_DEV =    [ SKYWALK_BASE ]
 #  SKYWALK_DEBUG =  [ SKYWALK_BASE ]
 #  NETWORKING =     [ inet bpfilter if_bridge traffic_mgt dummynet ah_all_crypto if_fake ]
 #  NETWORKING_RELEASE = [ NETWORKING ]
-#  NETWORKING_DEV = [ NETWORKING_RELEASE if_headless sixlowpan ]
+#  NETWORKING_DEV = [ NETWORKING_RELEASE if_headless ]
 #  NETWORKING_DEBUG = [ NETWORKING_DEV ]
 #  VPN =            [ ipsec flow_divert necp content_filter ]
 #  PF_RELEASE =     [ pf ]
@@ -52,14 +50,14 @@
 #  LIBKERN_RELEASE =[ LIBKERN_BASE ]
 #  LIBKERN_DEV =    [ LIBKERN_BASE iotracking ]
 #  LIBKERN_DEBUG =  [ LIBKERN_BASE iotracking ]
-#  PERF_DBG_BASE =  [ mach_kdp config_serial_kdp kperf kpc MONOTONIC_BASE ]
+#  PERF_DBG_BASE =  [ mach_kdp config_serial_kdp kperf kpc ]
 #  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
-#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging interrupt_masked_debug ]
-#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging interrupt_masked_debug ]
-#  MACH_BASE =      [ mach slidable vc_progress_white mdebug ipc_debug importance_inheritance config_atm config_coalitions config_library_validation config_iosched config_telemetry config_sysdiagnose config_quiesce_counter phys_write_acct config_io_compression_stats ]
+#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging sched_hygiene_debug ]
+#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging sched_hygiene_debug ]
+#  MACH_BASE =      [ mach vc_progress_white importance_inheritance config_atm config_coalitions config_library_validation config_iosched config_telemetry config_sysdiagnose config_quiesce_counter phys_write_acct config_io_compression_stats ]
 #  MACH_RELEASE =   [ MACH_BASE config_skip_precise_user_kernel_time debugger_for_zone_info ]
-#  MACH_DEV =       [ MACH_BASE task_zone_info config_io_accounting importance_trace config_ledger_interval_max config_service_port_info ]
-#  MACH_DEBUG =     [ MACH_BASE task_zone_info config_io_accounting importance_trace config_ledger_interval_max importance_debug config_service_port_info ]
+#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace config_ledger_interval_max config_service_port_info ]
+#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace config_ledger_interval_max importance_debug config_service_port_info ]
 #  SCHED_BASE =     [ config_sched_traditional config_sched_multiq config_clutch config_taskwatch ]
 #  SCHED_RELEASE =  [ SCHED_BASE ]
 #  SCHED_DEV =      [ SCHED_BASE ]
@@ -73,9 +71,9 @@
 #  SECURITY_DEV =     [ SECURITY_BASE config_setuid config_kas_info ]
 #  SECURITY_DEBUG =   [ SECURITY_BASE config_setuid config_kas_info ]
 #  BASE =           [ MULTIPATH VPN ]
-#  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE NFS_RELEASE SKYWALK_RELEASE NETWORKING_RELEASE PF_RELEASE IOKIT_RELEASE LIBKERN_RELEASE PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE SECURITY_RELEASE ]
+#  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE             SKYWALK_RELEASE NETWORKING_RELEASE PF_RELEASE IOKIT_RELEASE LIBKERN_RELEASE PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE SECURITY_RELEASE ]
 #  DEVELOPMENT =    [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     PF_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     SECURITY_DEV     ]
-#  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG   NFS_DEBUG   SKYWALK_DEBUG   NETWORKING_DEBUG   PF_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG   PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   SECURITY_DEBUG   ]
+#  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG               SKYWALK_DEBUG   NETWORKING_DEBUG   PF_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG   PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   SECURITY_DEBUG   ]
 #
 ######################################################################
 #
@@ -85,7 +83,6 @@ makeoptions	OSFMK_MACHINE = "arm"				# <mach>
 
 options		COUNT_SYSCALLS		# count bsd system calls 	# <countcalls>
 
-options		SLIDABLE=1	# Use PIE-assembly in *.s	# <slidable>
 options     TRASH_VFP_ON_SAVE   # <debug,trash_vfp>
 
 options   CONFIG_VNODES=1024		# <xsmall>

@@ -282,14 +282,6 @@ configure_coresight_registers(cpu_data_t *cdp)
 					uint64_t addr = cdp->cpu_regmap_paddr + CORESIGHT_OFFSET(i);
 					cdp->coresight_base[i] = (vm_offset_t)ml_io_map(addr, CORESIGHT_SIZE);
 				}
-
-				/*
-				 * At this point, failing to io map the
-				 * registers is considered as an error.
-				 */
-				if (!cdp->coresight_base[i]) {
-					panic("unable to ml_io_map coresight regions");
-				}
 			}
 			/* Unlock EDLAR, CTILAR, PMLAR */
 			if (i != CORESIGHT_UTT) {
@@ -321,7 +313,11 @@ cpu_sleep(void)
 	cpu_data_ptr->cpu_active_thread = current_thread();
 	cpu_data_ptr->cpu_reset_handler = (uintptr_t) start_cpu_paddr;
 	cpu_data_ptr->cpu_flags |= SleepState;
-	cpu_data_ptr->cpu_user_debug = NULL;
+
+	if (cpu_data_ptr->cpu_user_debug != NULL) {
+		arm_debug_set(NULL);
+	}
+
 #if KPC
 	kpc_idle();
 #endif /* KPC */
@@ -513,13 +509,9 @@ cpu_idle(void)
 			/* Poll issuing event-bounded WFEs until an interrupt
 			 * arrives or the WFE recommendation expires
 			 */
-#if DEVELOPMENT || DEBUG
 			KDBG(CPUPM_IDLE_WFE | DBG_FUNC_START, ipending, cpu_data_ptr->wfe_count, wfe_ttd, cid);
-#endif
 			ipending = wfe_to_deadline_or_interrupt(cid, wfe_deadline, cpu_data_ptr, false);
-#if DEVELOPMENT || DEBUG
-			KDBG(CPUPM_IDLE_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, wfe_deadline, 0);
-#endif
+			KDBG(CPUPM_IDLE_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, wfe_deadline);
 			if (ipending == true) {
 				/* Back to machine_idle() */
 				Idle_load_context();
@@ -532,13 +524,9 @@ cpu_idle(void)
 			/* Poll issuing WFEs until the expected
 			 * timer FIQ arrives.
 			 */
-#if DEVELOPMENT || DEBUG
-			KDBG(CPUPM_IDLE_TIMER_WFE | DBG_FUNC_START, ipending, cpu_data_ptr->wfe_count, ~0ULL, 0);
-#endif
+			KDBG(CPUPM_IDLE_TIMER_WFE | DBG_FUNC_START, ipending, cpu_data_ptr->wfe_count, ~0ULL);
 			ipending = wfe_to_deadline_or_interrupt(cid, ~0ULL, cpu_data_ptr, false);
-#if DEVELOPMENT || DEBUG
-			KDBG(CPUPM_IDLE_TIMER_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, ~0ULL, 0);
-#endif
+			KDBG(CPUPM_IDLE_TIMER_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, ~0ULL);
 			assert(ipending == true);
 		}
 		Idle_load_context();
@@ -625,9 +613,6 @@ cpu_idle(void)
 			clock_delay_until(deadline);
 		}
 #endif /* DEVELOPMENT || DEBUG */
-#if !defined(APPLE_ARM64_ARCH_FAMILY)
-		platform_cache_idle_exit();
-#endif
 	}
 
 	ClearIdlePop(TRUE);
@@ -674,6 +659,10 @@ cpu_idle_exit(boolean_t from_reset)
 		}
 		timer_resync_deadlines();
 	}
+
+#if CONFIG_KERNEL_TBI && KASAN
+	kasan_unpoison_curstack(false);
+#endif /* CONFIG_KERNEL_TBI && KASAN */
 
 	Idle_load_context();
 }
@@ -746,29 +735,21 @@ cpu_init(void)
 void
 cpu_stack_alloc(cpu_data_t *cpu_data_ptr)
 {
-	vm_offset_t             irq_stack = 0;
-	vm_offset_t             exc_stack = 0;
+	vm_offset_t irq_stack = 0;
+	vm_offset_t exc_stack = 0;
 
-	kern_return_t kr = kernel_memory_allocate(kernel_map, &irq_stack,
-	    INTSTACK_SIZE + (2 * PAGE_SIZE),
-	    PAGE_MASK,
+	kmem_alloc(kernel_map, &irq_stack,
+	    INTSTACK_SIZE + ptoa(2), KMA_NOFAIL | KMA_PERMANENT | KMA_ZERO |
 	    KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_KSTACK | KMA_KOBJECT,
 	    VM_KERN_MEMORY_STACK);
-	if (kr != KERN_SUCCESS) {
-		panic("Unable to allocate cpu interrupt stack");
-	}
 
 	cpu_data_ptr->intstack_top = irq_stack + PAGE_SIZE + INTSTACK_SIZE;
 	cpu_data_ptr->istackptr = cpu_data_ptr->intstack_top;
 
-	kr = kernel_memory_allocate(kernel_map, &exc_stack,
-	    EXCEPSTACK_SIZE + (2 * PAGE_SIZE),
-	    PAGE_MASK,
+	kmem_alloc(kernel_map, &exc_stack,
+	    EXCEPSTACK_SIZE + ptoa(2), KMA_NOFAIL | KMA_PERMANENT | KMA_ZERO |
 	    KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_KSTACK | KMA_KOBJECT,
 	    VM_KERN_MEMORY_STACK);
-	if (kr != KERN_SUCCESS) {
-		panic("Unable to allocate cpu exception stack");
-	}
 
 	cpu_data_ptr->excepstack_top = exc_stack + PAGE_SIZE + EXCEPSTACK_SIZE;
 	cpu_data_ptr->excepstackptr = cpu_data_ptr->excepstack_top;
@@ -906,15 +887,17 @@ kern_return_t
 cpu_start(int cpu)
 {
 	cpu_data_t *cpu_data_ptr = CpuDataEntries[cpu].cpu_data_vaddr;
+	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, cpu_data_ptr);
 
-	kprintf("cpu_start() cpu: %d\n", cpu);
+	if (processor_should_kprintf(processor, true)) {
+		kprintf("cpu_start() cpu: %d\n", cpu);
+	}
 
 	if (cpu == cpu_number()) {
 		cpu_machine_init();
 		configure_coresight_registers(cpu_data_ptr);
 	} else {
 		thread_t first_thread;
-		processor_t processor;
 
 		cpu_data_ptr->cpu_reset_handler = (vm_offset_t) start_cpu_paddr;
 
@@ -922,7 +905,6 @@ cpu_start(int cpu)
 		cpu_data_ptr->cpu_pmap_cpu_data.cpu_nested_pmap = NULL;
 #endif
 
-		processor = PERCPU_GET_RELATIVE(processor, cpu_data, cpu_data_ptr);
 		if (processor->startup_thread != THREAD_NULL) {
 			first_thread = processor->startup_thread;
 		} else {

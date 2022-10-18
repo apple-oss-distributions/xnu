@@ -16,6 +16,10 @@ fun:ml_stack_remaining
 fun:ml_stack_base
 fun:ml_stack_size
 
+[kernel-hwaddress]
 # TBI specific
 src:./osfmk/arm/model_dep.c
 src:./osfmk/kern/backtrace.c
+src:./osfmk/arm64/cpu.c
+src:./osfmk/kern/ast.c
+src:./osfmk/arm64/pcb.c

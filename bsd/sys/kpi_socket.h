@@ -88,7 +88,7 @@ typedef void (*sock_upcall)(socket_t so, void *cookie, int waitf);
  *       @param cookie The cookie passed in when the socket was created.
  *       @param event Indicates the event as defined by SO_FILT_HINT_*
  */
-typedef void (*sock_evupcall)(socket_t so, void *cookie, long event);
+typedef void (*sock_evupcall)(socket_t so, void *cookie, uint32_t event);
 #endif /* KERNEL_PRIVATE */
 
 /*!
@@ -367,6 +367,27 @@ extern errno_t sock_sendmbuf(socket_t so, const struct msghdr *msg, mbuf_t data,
     int flags, size_t *sentlen)
 __NKE_API_DEPRECATED;
 
+#ifdef KERNEL_PRIVATE
+/*!
+ *       @function sock_sendmbuf_can_wait
+ *       @discussion Variation of sock_sendmbuf that can wait for the send socket
+ *               buffer to drain when it is full instead of returning EMSGSIZE.
+ *       @param so The socket.
+ *       @param msg The msg describing how the data should be sent. The
+ *               msg_iov is ignored. msg may be NULL.
+ *       @param data The mbuf chain of data to send.
+ *       @param flags See 'man 2 sendmsg'.
+ *       @param sentlen The number of bytes sent.
+ *       @result 0 on success, EWOULDBLOCK if non-blocking and operation
+ *               would cause the thread to block, otherwise the errno error.
+ *               Regardless of return value, the mbuf chain 'data' will be freed.
+ */
+extern errno_t sock_sendmbuf_can_wait(socket_t so, const struct msghdr *msg, mbuf_t data,
+    int flags, size_t *sentlen);
+#define HAS_SOCK_SENDMBUF_CAN_WAIT 1
+
+#endif /* KERNEL_PRIVATE */
+
 /*!
  *       @function sock_shutdown
  *       @discussion Shutdown one or both directions of a connection. See
@@ -606,10 +627,10 @@ extern void sock_setupcalls_locked(socket_t sock,
  *               indicating the registered event(s).
  */
 extern errno_t sock_catchevents(socket_t sock, sock_evupcall event_callback,
-    void *event_context, long event_mask);
+    void *event_context, uint32_t event_mask);
 
 extern void sock_catchevents_locked(socket_t sock, sock_evupcall ecallback,
-    void *econtext, long emask);
+    void *econtext, uint32_t emask);
 
 
 /*

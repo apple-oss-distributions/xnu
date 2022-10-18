@@ -12,6 +12,7 @@ from builtins import object
 from xnu import *
 import sys
 import shlex
+import math
 from utils import *
 import xnudefines
 from process import *
@@ -21,12 +22,8 @@ from ctypes import c_int64
 import six
 from btlog import *
 from operator import itemgetter
-
-def get_vme_object(vme):
-    """ Return vm_object associated with vme.. """
-    if int(vme.vme_kernel_object) != 0:
-        return kern.globals.kernel_object
-    return vme.vme_object.vmo_object
+from kext import GetUUIDSummary
+from kext import FindKmodNameForAddr
 
 def vm_unpack_pointer(packed, params, type_str = 'void *'):
     """ Unpack a pointer packed with VM_PACK_POINTER()
@@ -46,6 +43,20 @@ def vm_unpack_pointer(packed, params, type_str = 'void *'):
         addr  = c_int64(unsigned(packed) << (64 - bits)).value
         addr >>= 64 - bits - shift
     return kern.GetValueFromAddress(addr, type_str)
+
+def get_vme_offset(vme):
+    return unsigned(vme.vme_offset) << 12
+
+def get_vme_object(vme):
+    """ Return the vm object or submap associated with the entry """
+    if vme.is_sub_map:
+        return kern.GetValueFromAddress(vme.vme_submap << 2, 'vm_map_t')
+    if vme.vme_kernel_object:
+        return kern.globals.kernel_object
+    if hasattr(vme, 'vme_object'): # LP64
+        params = kern.globals.vm_page_packing_params
+        return vm_unpack_pointer(vme.vme_object, params, 'vm_object_t')
+    return kern.GetValueFromAddress(vme.vme_submap << 2, 'vm_object_t')
 
 def GetZPerCPU(root, cpu, element_type = None):
     """ Iterates over a percpu variable
@@ -70,7 +81,13 @@ def IterateZPerCPU(root, element_type = None):
         returns:
             one slot
     """
-    for i in range(0, kern.globals.zpercpu_early_count):
+    if kern.globals.startup_phase < GetEnumValue('startup_subsystem_id_t', 'STARTUP_SUB_ZALLOC'):
+        n = unsigned(kern.globals.master_cpu)
+        r = range(n, n + 1)
+    else:
+        n = unsigned(kern.globals.zpercpu_early_count)
+        r = range(0, n)
+    for i in r:
         yield GetZPerCPU(root, i, element_type)
 
 @lldb_command('showzpcpu', "S")
@@ -109,7 +126,7 @@ def ZoneName(zone, zone_security):
         returns:
             the formated name for the zone
     """
-    names = [ "", "default.", "data.", "", "kext."]
+    names = [ "", "default.", "data.", "" ]
     return "{:s}{:s}".format(names[int(zone_security.z_kheap_id)], zone.z_name)
 
 def GetZoneByName(name):
@@ -249,7 +266,7 @@ def GetMemoryStatusNode(proc_val):
         return: str - formatted output information for proc object
     """
     out_str = ''
-    task_val = Cast(proc_val.task, 'task *')
+    task_val = GetTaskFromProc(proc_val)
     task_ledgerp = task_val.ledger
     ledger_template = kern.globals.task_ledger_template
 
@@ -318,14 +335,10 @@ class ZoneMeta(object):
         def in_range(x, r):
             return x >= r[0] and x < r[1]
 
-        FOREIGN = GetEnumValue('zone_addr_kind_t', 'ZONE_ADDR_FOREIGN')
-        NATIVE  = GetEnumValue('zone_addr_kind_t', 'ZONE_ADDR_NATIVE')
-
         self.meta_range = load_range(zone_info.zi_meta_range)
-        self.native_range = load_range(zone_info.zi_map_range[NATIVE])
-        self.foreign_range = load_range(zone_info.zi_map_range[FOREIGN])
-        self.pgz_range = load_range(zone_info.zi_pgz_range)
-        self.addr_base = min(self.foreign_range[0], self.native_range[0])
+        self.map_range  = load_range(zone_info.zi_map_range)
+        self.pgz_range  = load_range(zone_info.zi_pgz_range)
+        self.addr_base  = self.map_range[0]
 
         addr = unsigned(addr)
         if isPageIndex:
@@ -344,7 +357,7 @@ class ZoneMeta(object):
             self.meta = kern.GetValueFromAddress(addr, "struct zone_page_metadata *")
 
             self.page_addr = self.addr_base + (((addr - self.meta_range[0]) // sizeof('struct zone_page_metadata')) * pagesize)
-        elif in_range(addr, self.native_range) or in_range(addr, self.foreign_range):
+        elif in_range(addr, self.map_range):
             addr &= ~(pagesize - 1)
             page_idx = (addr - self.addr_base) // pagesize
 
@@ -402,7 +415,7 @@ class ZoneMeta(object):
         if esize == 0:
             return None
 
-        start += int(meta.zone.z_pgz_oob_offs)
+        start += int(meta.zone.z_elem_offs)
         estart = addr - start
         return unsigned(start + estart - (estart % esize))
 
@@ -469,6 +482,22 @@ class ZoneMeta(object):
         # work around issues with lldb & unsigned bitfields
         return unsigned(self.meta.zm_chunk_len) & 0xf;
 
+    def guardedBefore(self):
+        if not self.meta:
+            return None
+        n = 1
+        if self.isSecondaryPage():
+            n += unsigned(self.meta.zm_page_index)
+        m = ZoneMeta(unsigned(self.meta) - sizeof('struct zone_page_metadata') * n)
+        if m.chunkLen() == GetEnumValue('zm_len_t', 'ZM_PGZ_GUARD'):
+            return m.meta.zm_guarded
+        return False
+
+    def guardedAfter(self):
+        if not self.meta:
+            return None
+        return self.meta.zm_guarded
+
     def isElementFree(self, addr):
         meta = self.meta
 
@@ -478,7 +507,7 @@ class ZoneMeta(object):
         if self.is_pgz:
             return self.chunkLen() != GetEnumValue('zm_len_t', 'ZM_PGZ_ALLOCATED')
 
-        start = int(self.page_addr + self.zone.z_pgz_oob_offs)
+        start = int(self.page_addr + self.zone.z_elem_offs)
         esize = int(self.zone.z_elem_size)
         eidx = (addr - start) // esize
 
@@ -497,7 +526,7 @@ class ZoneMeta(object):
         if self.meta is None:
             return
         esize = int(self.zone.z_elem_size)
-        start = int(self.page_addr + self.zone.z_pgz_oob_offs)
+        start = int(self.page_addr + self.zone.z_elem_offs)
 
         for i in range(0, int(self.zone.z_chunk_elems)):
             yield unsigned(start + i * esize)
@@ -615,7 +644,7 @@ def WhatIs(addr):
 
     if meta.meta is None:
         out_str = "Address {:#018x} is outside of any zone map ({:#018x}-{:#018x})\n".format(
-                addr, meta.native_range[0], meta.native_range[-1] + 1)
+                addr, meta.map_range[0], meta.map_range[-1] + 1)
     else:
         if meta.kind[0] == 'E': # element
             page_offset_str = "{:d}/{:d}K".format(
@@ -644,7 +673,7 @@ def WhatIs(addr):
 
         meta   = meta.getReal()
         esize  = int(meta.zone.z_elem_size)
-        start  = int(meta.page_addr + meta.zone.z_pgz_oob_offs)
+        start  = int(meta.page_addr + meta.zone.z_elem_offs)
         marks  = {unsigned(addr): ">"}
 
         if not meta.is_pgz:
@@ -764,6 +793,37 @@ def ZcacheCPUPrint(cmd_args=None, cmd_options={}, O=None):
                     GetZoneCacheCPUSummary(zval, zsval, verbose, O)
 
 # EndMacro: showzcache
+
+def kalloc_array_decode(addr, ptr_type = None):
+    pac_shift = unsigned(kern.globals.kalloc_array_type_shift)
+    page_size = kern.globals.page_size
+    addr      = unsigned(addr)
+
+    size      = None
+    ptr       = None
+
+    if pac_shift:
+        ty = (addr >> pac_shift) & 0x3
+        if ty:
+            size = ty << (addr & 0xf)
+            ptr  = addr & ~0xf
+        else:
+            size = (addr & (page_size - 1)) * page_size
+            ptr  = addr & -page_size
+        ptr |= 0x3 << pac_shift;
+    else:
+        KALLOC_ARRAY_TYPE_BIT = 47
+        size = addr >> (KALLOC_ARRAY_TYPE_BIT + 1)
+        if (addr & (1 << KALLOC_ARRAY_TYPE_BIT)):
+            size *= page_size
+        ptr = addr | (0xffffffffffffffff << KALLOC_ARRAY_TYPE_BIT)
+
+    if ptr_type is None:
+        return (kern.GetValueFromAddress(ptr), size)
+
+    ptr = kern.GetValueFromAddress(ptr, ptr_type + ' *')
+    size //= sizeof(ptr[0])
+    return (ptr, size)
 
 # Macro: zprint
 
@@ -927,20 +987,17 @@ def Zprint(cmd_args=None, cmd_options={}, O=None):
         ! - zone uses VA sequestering
         $ - not encrypted during hibernation
         % - zone is a read-only zone
-        A - currently trying to allocate more backing memory from kernel_memory_allocate without VM priv
+        A - currently trying to allocate more backing memory from kmem_alloc without VM priv
         C - collectable
         D - destructible
         E - Per-cpu caching is enabled for this zone
-        F - allows foreign memory (memory not allocated from any zone map)
         G - currently running GC
         H - exhaustible
         I - zone was destroyed and is no longer valid
         L - zone is being logged
-        M - gzalloc will avoid monitoring this zone
         N - zone requires alignment (avoids padding this zone for debugging)
         O - does not allow refill callout to fill zone on noblock allocation
         R - will be refilled when below low water mark
-        S - currently trying to allocate more backing memory from kernel_memory_allocate with VM priv
         X - expandable
     """
     global kern
@@ -954,13 +1011,10 @@ def Zprint(cmd_args=None, cmd_options={}, O=None):
             ["no_callout",           "O"],
             ["z_btlog",              "L"],
             ["z_expander",           "A"],
-            ["z_expander_vm_priv",   "S"],
             ["z_pcpu_cache",         "E"],
-            ["z_nogzalloc",          "M"],
             ["alignment_required",   "N"],
             ]
     security_marks = [
-            ["z_allows_foreign",     "F"],
             ["z_va_sequester",       "!"],
             ["z_noencrypt",          "$"],
             ]
@@ -1015,10 +1069,28 @@ def TestZprint(kernel_target, config, lldb_obj, isConnected ):
 
 # EndMacro: zprint
 # Macro: showtypes
+def GetBelongingKext(addr):
+    try:
+        kernel_range_start = kern.GetGlobalVariable('segDATACONSTB')
+        kernel_range_end = kernel_range_start + kern.GetGlobalVariable(
+            'segSizeDATACONST')
+    except:
+        kernel_range_start = kern.GetGlobalVariable('sconst')
+        kernel_range_end = kernel_range_start + kern.GetGlobalVariable(
+            'segSizeConst')
+    if addr >= kernel_range_start and addr <= kernel_range_end:
+        kext_name = "__kernel__"
+    else:
+        kext_name = FindKmodNameForAddr(addr)
+    if kext_name is None:
+        kext_name = "<not loaded>"
+    return kext_name
+
 def PrintVarTypesPerHeap(idx):
     print("Heap: %d" % (idx))
-    print('    {0: <24s} {1: <40s} {2: <20s} {3: <20s}'.format(
-        "kalloc_type_var_view", "typename", "signature(hdr)", "signature(type)"))
+    print('    {0: <24s} {1: <40s} {2: <50s} {3: <20s} {4: <20s}'.format(
+        "kalloc_type_var_view", "typename", "kext", "signature(hdr)",
+        "signature(type)"))
     kalloc_type_heap_array = kern.GetGlobalVariable('kalloc_type_heap_array')
     kt_var_heaps = kern.GetGlobalVariable('kt_var_heaps') + 1
     assert(idx < kt_var_heaps)
@@ -1034,8 +1106,9 @@ def PrintVarTypesPerHeap(idx):
             print_sig = [sig_hdr, sig_type]
             if sig_type == "":
                 print_sig = ["data-only", ""]
-            print('    {0: <#24x} {1: <40s} {2: <20s} {3: <20s}'.format(
-                    ktv_cur, typename, print_sig[0], print_sig[1]))
+            print('    {0: <#24x} {1: <40s} {2: <50s} {3: <20s} {4: <20s}'
+                .format(ktv_cur, typename, GetBelongingKext(ktv_cur),
+                print_sig[0], print_sig[1]))
             prev_types[typename] = [sig_hdr, sig_type]
         ktv_cur = cast(ktv_cur.kt_next, "struct kalloc_type_var_view *")
 
@@ -1049,8 +1122,8 @@ def ShowAllVarTypes():
 def PrintTypes(z):
     kt_cur = cast(z.z_views, "struct kalloc_type_view *")
     prev_types = {}
-    print('    {0: <24s} {1: <40s} {2: <10s}'.format(
-        "kalloc_type_view", "typename", "signature"))
+    print('    {0: <24s} {1: <40s} {2: <50s} {3: <10s}'.format(
+        "kalloc_type_view", "typename", "kext", "signature"))
     while kt_cur:
         typename = str(kt_cur.kt_zv.zv_name)
         if "site." in typename:
@@ -1060,8 +1133,8 @@ def PrintTypes(z):
                 print_sig = sig
                 if sig == "":
                     print_sig = "data-only"
-                print('    {0: <#24x} {1: <40s} {2: <10s}'.format(
-                    kt_cur, typename, print_sig))
+                print('    {0: <#24x} {1: <40s} {2: <50s} {3: <10s}'.format(
+                    kt_cur, typename, GetBelongingKext(kt_cur), print_sig))
                 prev_types[typename] = sig
         kt_cur = cast(kt_cur.kt_zv.zv_next, "struct kalloc_type_view *")
 
@@ -1154,17 +1227,28 @@ def GetZoneChunk(meta, queue, O=None):
     format_string += "{kind:<10s} {queue:<8s} {pgs:<1d}/{chunk:<1d}  "
     format_string += "{alloc_count: >4d}/{avail_count: >4d}"
 
-    pgs = int(meta.zone.z_chunk_pages)
-    chunk = pgs
+    alloc_count = avail_count = free_count = 0
+    chunk = int(meta.zone.z_chunk_pages)
     if meta.isSecondaryPage():
         kind = "secondary"
-        pgs -= int(meta.meta.zm_page_index)
+        pgs = int(meta.zone.z_chunk_pages) - int(meta.meta.zm_page_index)
+
+        if meta.guardedAfter():
+            format_string += " {VT.Green}guarded-after{VT.Default}"
     else:
         kind = "primary"
+        pgs = int(meta.meta.zm_chunk_len)
+        if pgs == 0:
+            pgs = chunk
 
-    alloc_count=meta.getAllocCount()
-    avail_count=meta.getAllocAvail()
-    free_count=meta.getFreeCountSlow()
+        if meta.guardedBefore():
+            format_string += " {VT.Green}guarded-before{VT.Default}"
+        if pgs == chunk and meta.guardedAfter():
+            format_string += " {VT.Green}guarded-after{VT.Default}"
+
+        alloc_count = meta.getAllocCount()
+        avail_count = meta.getAllocAvail()
+        free_count  = meta.getFreeCountSlow()
 
     return O.format(format_string, meta=meta,
             alloc_count=alloc_count,
@@ -1527,7 +1611,7 @@ def ShowAllVM(cmd_args=None):
     """
     for task in kern.tasks:
         print(GetTaskSummary.header + ' ' + GetProcSummary.header)
-        print(GetTaskSummary(task) + ' ' + GetProcSummary(Cast(task.bsd_info, 'proc *')))
+        print(GetTaskSummary(task) + ' ' + GetProcSummary(GetProcFromTask(task)))
         print(GetVMMapSummary.header)
         print(GetVMMapSummary(task.map))
 
@@ -1544,7 +1628,7 @@ def ShowTaskVM(cmd_args=None):
         print("Unknown arguments.")
         return False
     print(GetTaskSummary.header + ' ' + GetProcSummary.header)
-    print(GetTaskSummary(task) + ' ' + GetProcSummary(Cast(task.bsd_info, 'proc *')))
+    print(GetTaskSummary(task) + ' ' + GetProcSummary(GetProcFromTask(task)))
     print(GetVMMapSummary.header)
     print(GetVMMapSummary(task.map))
     return True
@@ -1591,7 +1675,7 @@ def ShowAllVMStats(cmd_args=None):
     assert(entry_indices['internal_compressed'] != -1)
 
     for task in kern.tasks:
-        proc = Cast(task.bsd_info, 'proc *')
+        proc = GetProcFromTask(task)
         vmmap = Cast(task.map, '_vm_map *')
         page_size = 1 << int(vmmap.hdr.page_shift)
         task_ledgerp = task.ledger
@@ -1679,10 +1763,26 @@ def ShowMapVME(cmd_args=None):
         print(GetVMEntrySummary(vme))
     return None
 
+@lldb_command("showmapranges")
+def ShowMapRanges(cmd_args=None):
+    """Routine to print out info about the specified vm_map and its vm entries
+        usage: showmapvme <vm_map>
+    """
+    if cmd_args == None or len(cmd_args) < 1:
+        print("Invalid argument.", ShowMapVME.__doc__)
+        return
+    map_val = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
+    print(GetVMMapSummary.header)
+    print(GetVMMapSummary(map_val))
+    print(GetVMRangeSummary.header)
+    for idx in range(2):
+        print(GetVMRangeSummary(map_val.user_range[idx], idx))
+    return None
+
 def GetResidentPageCount(vmmap):
     resident_pages = 0
     ledger_template = kern.globals.task_ledger_template
-    if vmmap.pmap != 0 and vmmap.pmap != kern.globals.kernel_pmap:
+    if vmmap.pmap != 0 and vmmap.pmap != kern.globals.kernel_pmap and vmmap.pmap.ledger != 0:
         idx = GetLedgerEntryIndex(ledger_template, "phys_mem")
         phys_mem = GetLedgerEntryBalance(ledger_template, vmmap.pmap.ledger, idx)
         resident_pages = phys_mem // kern.globals.page_size
@@ -1702,12 +1802,12 @@ def GetVMMapSummary(vmmap):
     return out_string
 
 @lldb_type_summary(['vm_map_entry'])
-@header("{0: <20s} {1: <20s} {2: <5s} {3: >7s} {4: <20s} {5: <20s}".format("entry", "start", "prot", "#page", "object", "offset"))
+@header("{0: <20s} {1: <20s} {2: <5s} {3: >7s} {4: <20s} {5: <20s} {6: <4s}".format("entry", "start", "prot", "#page", "object", "offset", "tag"))
 def GetVMEntrySummary(vme):
     """ Display vm entry specific information. """
     page_size = kern.globals.page_size
     out_string = ""
-    format_string = "{0: <#020x} {1: <#20x} {2: <1x}{3: <1x}{4: <3s} {5: >7d} {6: <#020x} {7: <#020x}"
+    format_string = "{0: <#020x} {1: <#20x} {2: <1x}{3: <1x}{4: <3s} {5: >7d} {6: <#020x} {7: <#020x} {8: >#4x}"
     vme_protection = int(vme.protection)
     vme_max_protection = int(vme.max_protection)
     vme_extra_info_str ="SC-Ds"[int(vme.inheritance)]
@@ -1716,7 +1816,25 @@ def GetVMEntrySummary(vme):
     elif int(vme.needs_copy) != 0 :
         vme_extra_info_str +="n"
     num_pages = (unsigned(vme.links.end) - unsigned(vme.links.start)) // page_size
-    out_string += format_string.format(vme, vme.links.start, vme_protection, vme_max_protection, vme_extra_info_str, num_pages, get_vme_object(vme), vme.vme_offset)
+    out_string += format_string.format(vme, vme.links.start, vme_protection, vme_max_protection,
+            vme_extra_info_str, num_pages, get_vme_object(vme), get_vme_offset(vme), vme.vme_alias)
+    return out_string
+
+@lldb_type_summary(['vm_map_range'])
+@header("{0: <20s} {1: <20s} {2: <20s} {3: <20s}".format("range", "min_address", "max_address", "size"))
+def GetVMRangeSummary(vmrange, idx=0):
+    """ Display vm range specific information. """
+    range_id = [
+        "default",
+        "heap"
+    ]
+    out_string = ""
+    format_string = "{0: <20s} {1: <#020x} {2: <#020x} {3: <#20x}"
+    range_name = range_id[idx]
+    min_address = vmrange.min_address
+    max_address = vmrange.max_address
+    range_size = max_address - min_address
+    out_string += format_string.format(range_name, min_address, max_address, range_size)
     return out_string
 
 # EndMacro: showtaskvme
@@ -1750,39 +1868,6 @@ def ShowAllMounts(cmd_args=None):
     return
 
 lldb_alias('ShowAllVols', 'showallmounts')
-
-@lldb_command('systemlog')
-def ShowSystemLog(cmd_args=None):
-    """ Display the kernel's printf ring buffer """
-    msgbufp = kern.globals.msgbufp
-    msg_size = int(msgbufp.msg_size)
-    msg_bufx = int(msgbufp.msg_bufx)
-    msg_bufr = int(msgbufp.msg_bufr)
-    msg_bufc = msgbufp.msg_bufc
-    msg_bufc_data = msg_bufc.GetSBValue().GetPointeeData(0, msg_size)
-
-    # the buffer is circular; start at the write pointer to end,
-    # then from beginning to write pointer
-    line = bytearray()
-    err = lldb.SBError()
-    for i in list(range(msg_bufx, msg_size)) + list(range(0, msg_bufx)) :
-        err.Clear()
-        cbyte = msg_bufc_data.GetUnsignedInt8(err, i)
-        if not err.Success() :
-            raise ValueError("Failed to read character at offset " + str(i) + ": " + err.GetCString())
-        c = chr(cbyte)
-        if c == '\0' :  
-            continue
-        elif c == '\n' :
-            print(six.ensure_str(line.decode('utf-8')))
-            line = bytearray()
-        else :
-            line.append(cbyte)
-
-    if len(line) > 0 :
-        print(six.ensure_str(line.decode('utf-8')))
-
-    return
 
 @static_var('output','')
 def _GetVnodePathName(vnode, vnodename):
@@ -2042,6 +2127,137 @@ def ShowProcLocks(cmd_args=None):
 
 # EndMacro: showproclocks
 
+@lldb_type_summary(["cs_blob *"])
+@md_header("{:<20s} {:<20s} {:<8s} {:<8s} {:<15s} {:<15s} {:<15s} {:<20s} {:<10s} {:<15s} {:<40s} {:>50s}", ["vnode", "ro_addr", "base", "start", "end", "mem_size", "mem_offset", "mem_kaddr", "profile?", "team_id", "cdhash", "vnode_name"])
+@header("{:<20s} {:<20s} {:<8s} {:<8s} {:<15s} {:<15s} {:<15s} {:<20s} {:<10s} {:<15s} {:<40s} {:>50s}".format("vnode", "ro_addr", "base", "start", "end", "mem_size", "mem_offset", "mem_kaddr", "profile?", "team_id", "cdhash", "vnode_name"))
+def GetCSBlobSummary(cs_blob, markdown=False):
+    """ Get a summary of important information out of csblob
+    """
+    format_defs = ["{:<#20x}", "{:<#20x}", "{:<8d}", "{:<8d}", "{:<15d}", "{:<15d}", "{:<15d}", "{:<#20x}", "{:<10s}", "{:<15s}", "{:<40s}", "{:>50s}"]
+    if not markdown:
+        format_str = " ".join(format_defs)
+    else:
+        format_str = "|" + "|".join(format_defs) + "|"
+    vnode = cs_blob.csb_vnode
+    ro_addr = cs_blob.csb_ro_addr
+    base_offset = cs_blob.csb_base_offset
+    start_offset = cs_blob.csb_start_offset
+    end_offset = cs_blob.csb_end_offset
+    mem_size = cs_blob.csb_mem_size
+    mem_offset = cs_blob.csb_mem_offset
+    mem_kaddr = cs_blob.csb_mem_kaddr
+    hasProfile = int(cs_blob.profile_kaddr) != 0
+    team_id_ptr = int(cs_blob.csb_teamid)
+    team_id = ""
+    if team_id_ptr != 0:
+        team_id = str(cs_blob.csb_teamid)
+    elif cs_blob.csb_platform_binary == 1:
+        team_id = "platform"
+    else:
+        team_id = "<no team>"
+    
+    cdhash = ""
+    for i in range(20):
+        cdhash += "{:02x}".format(cs_blob.csb_cdhash[i])
+
+    name_ptr = int(vnode.v_name)
+    name =""
+    if name_ptr != 0:
+        name = str(vnode.v_name)
+
+    return format_str.format(vnode, ro_addr, base_offset, start_offset, end_offset, mem_size, mem_offset, mem_kaddr, "Y" if hasProfile else "N", team_id, cdhash, name)
+
+def iterate_all_cs_blobs(onlyUmanaged=False):
+    mntlist = kern.globals.mountlist
+    for mntval in IterateTAILQ_HEAD(mntlist, 'mnt_list'):
+        for vnode in IterateTAILQ_HEAD(mntval.mnt_vnodelist, 'v_mntvnodes'):
+            vtype = int(vnode.v_type) 
+            ## We only care about REG files
+            if (vtype == 1) and (vnode.v_un.vu_ubcinfo != 0):
+                cs_blob_ptr = int(vnode.v_un.vu_ubcinfo.cs_blobs)
+                while cs_blob_ptr != 0:
+                    cs_blob = kern.GetValueFromAddress(cs_blob_ptr, "cs_blob *")
+                    cs_blob_ptr = int(cs_blob.csb_next)
+                    if onlyUmanaged:
+                        pmapEntryPtr = int(cs_blob.csb_pmap_cs_entry)
+                        if pmapEntryPtr != 0:
+                            pmapEntry = kern.GetValueFromAddress(pmapEntryPtr, "struct pmap_cs_code_directory *")
+                            if int(pmapEntry.managed) != 0:
+                                continue
+                    yield cs_blob
+
+
+@lldb_command('showallcsblobs')
+def ShowAllCSBlobs(cmd_args=[]):
+    """ Display info about all cs_blobs associated with vnodes
+        Usage: showallcsblobs [unmanaged] [markdown]
+        If you pass in unmanaged, the output will be restricted to those objects
+        that are stored in VM_KERN_MEMORY_SECURITY as kobjects
+
+        If you pass in markdown, the output will be a nicely formatted markdown
+        table that can be pasted around. 
+    """
+    options = {"unmanaged", "markdown"}
+    if len(set(cmd_args).difference(options)) > 0:
+        print("Unknown options: see help showallcsblobs for usage")
+        return
+
+    markdown = "markdown" in cmd_args
+    if not markdown:
+        print(GetCSBlobSummary.header)
+    else:
+        print(GetCSBlobSummary.markdown)
+    sorted_blobs = sorted(iterate_all_cs_blobs(onlyUmanaged="unmanaged" in cmd_args), key=lambda blob: int(blob.csb_mem_size), reverse=True)
+    for csblob in sorted_blobs:
+        print(GetCSBlobSummary(csblob, markdown=markdown))
+
+def meanof(data):
+    return sum(data) / len(data)
+def pstddev(data):
+    mean = meanof(data)
+    ssum = 0
+    for v in data:
+        ssum += (v - mean) ** 2
+    return math.sqrt(ssum / len(data))
+
+@lldb_command("triagecsblobmemory")
+def TriageCSBlobMemoryUsage(cmd_args=[]):
+    """ Display statistics on cs_blob memory usage in the VM_KERN_MEMORY_SECURITY tag
+        Usage: triagecsblobmemory [dump] [all]
+
+        If you pass in all, the statistics will NOT be restricted to the VM_KERN_MEMORY_SECURITY tag.
+        
+        if you pass in dump, after the triage is finished a json blob with vnode names and 
+        the associated memory usage will be generated.
+    """
+
+    options = {"dump", "all"}
+    if len(set(cmd_args).difference(options)) > 0:
+        print("Unknown options: see help triagecsblobmemory for usage")
+        return
+
+    sorted_blobs = sorted(iterate_all_cs_blobs(onlyUmanaged="all" not in cmd_args), key=lambda blob: int(blob.csb_mem_size), reverse=True)
+    blob_usages = [int(csblob.csb_mem_size) for csblob in sorted_blobs]
+
+    print("Total unmanaged blobs: ", len(blob_usages))
+    print("Total unmanaged memory usage {:.0f}K".format(sum(blob_usages)/1024))
+    print("Average blob size: {:.0f} +- {:.0f} bytes".format(meanof(blob_usages), pstddev(blob_usages)))
+    if "dump" in cmd_args:
+        perps = dict()
+        for blob in sorted_blobs:
+            name_ptr = int(blob.csb_vnode.v_name)
+            if name_ptr != 0:
+                name = str(blob.csb_vnode.v_name)
+                if name in perps:
+                    perps[name].append(int(blob.csb_mem_size))
+                else:
+                    perps[name] = [int(blob.csb_mem_size)]
+            else:
+                print("Skipped blob because it has no vnode name:", blob)
+
+        print(json.dumps(perps))
+
+
 @lldb_type_summary(['vnode_t', 'vnode *'])
 @header("{0: <20s} {1: >8s} {2: >9s} {3: >8s} {4: <20s} {5: <6s} {6: <20s} {7: <6s} {8: <6s} {9: <35s}".format('vnode', 'usecount', 'kusecount', 'iocount', 'v_data', 'vtype', 'parent', 'mapped', 'cs_version', 'name'))
 def GetVnodeSummary(vnode):
@@ -2064,8 +2280,13 @@ def GetVnodeSummary(vnode):
     if name_ptr != 0:
         name = str(vnode.v_name)
     elif int(vnode.v_tag) == 16 :
-        cnode = Cast(vnode.v_data, 'cnode *')
-        name = "hfs: %s" % str( Cast(cnode.c_desc.cd_nameptr, 'char *'))
+        try:
+            cnode = Cast(vnode.v_data, 'cnode *')
+            name = "hfs: %s" % str( Cast(cnode.c_desc.cd_nameptr, 'char *'))
+        except:
+            print("Failed to cast 'cnode *' type likely due to missing HFS kext symbols.")
+            print("Please run 'addkext -N com.apple.filesystems.hfs.kext' to load HFS kext symbols.")
+            sys.exit(1)
     mapped = '-'
     csblob_version = '-'
     if (vtype == 1) and (vnode.v_un.vu_ubcinfo != 0):
@@ -2243,70 +2464,6 @@ def TestShowAllVnodes(kernel_target, config, lldb_obj, isConnected ):
     else:
         return False
 
-# Macro: showallmtx
-@lldb_type_summary(['_lck_grp_ *'])
-def GetMutexEntry(mtxg):
-    """ Summarize a mutex group entry  with important information.
-        params:
-        mtxg: value - obj representing a mutex group in kernel
-        returns:
-        out_string - summary of the mutex group
-        """
-    out_string = ""
-
-    if kern.ptrsize == 8:
-        format_string = '{0:#018x} {1:10d} {2:10d} {3:10d} {4:10d} {5: <30s} '
-    else:
-        format_string = '{0:#010x} {1:10d} {2:10d} {3:10d} {4:10d} {5: <30s} '
-
-    if mtxg.lck_grp_mtxcnt:
-        out_string += format_string.format(mtxg, mtxg.lck_grp_mtxcnt,mtxg.lck_grp_stat.lck_grp_mtx_stat.lck_grp_mtx_util_cnt,
-                                           mtxg.lck_grp_stat.lck_grp_mtx_stat.lck_grp_mtx_miss_cnt,
-                                           mtxg.lck_grp_stat.lck_grp_mtx_stat.lck_grp_mtx_wait_cnt, mtxg.lck_grp_name)
-    return out_string
-
-@lldb_command('showallmtx')
-def ShowAllMtx(cmd_args=None):
-    """ Routine to print a summary listing of all mutexes
-    """
-
-    if kern.ptrsize == 8:
-        hdr_format = '{:<18s} {:>10s} {:>10s} {:>10s} {:>10s} {:<30s} '
-    else:
-        hdr_format = '{:<10s} {:>10s} {:>10s} {:>10s} {:>10s} {:<30s} '
-
-    print(hdr_format.format('LCK GROUP', 'CNT', 'UTIL', 'MISS', 'WAIT', 'NAME'))
-
-    mtxgrp_queue_head = kern.globals.lck_grp_queue
-    mtxgrp_ptr_type = GetType('_lck_grp_ *')
-
-    for mtxgrp_ptr in IterateQueue(mtxgrp_queue_head, mtxgrp_ptr_type, "lck_grp_link"):
-       print(GetMutexEntry(mtxgrp_ptr))
-    return
-# EndMacro: showallmtx
-
-# Macro: showallrwlck
-@lldb_type_summary(['_lck_grp_ *'])
-def GetRWLEntry(rwlg):
-    """ Summarize a reader writer lock group with important information.
-        params:
-        rwlg: value - obj representing a reader writer lock group in kernel
-        returns:
-        out_string - summary of the reader writer lock group
-    """
-    out_string = ""
-
-    if kern.ptrsize == 8:
-        format_string = '{0:#018x} {1:10d} {2:10d} {3:10d} {4:10d} {5: <30s} '
-    else:
-        format_string = '{0:#010x} {1:10d} {2:10d} {3:10d} {4:10d} {5: <30s} '
-
-    if rwlg.lck_grp_rwcnt:
-        out_string += format_string.format(rwlg, rwlg.lck_grp_rwcnt,rwlg.lck_grp_stat.lck_grp_rw_stat.lck_grp_rw_util_cnt,
-                                           rwlg.lck_grp_stat.lck_grp_rw_stat.lck_grp_rw_miss_cnt,
-                                           rwlg.lck_grp_stat.lck_grp_rw_stat.lck_grp_rw_wait_cnt, rwlg.lck_grp_name)
-    return out_string
-
 #Macro: showlock
 @lldb_type_summary(['lck_mtx_t *'])
 @header("===== Mutex Lock Summary =====")
@@ -2320,43 +2477,78 @@ def GetMutexLockSummary(mtx):
     if not mtx:
         return "Invalid lock value: 0x0"
 
+    grp = getLockGroupFromCgidInternal(mtx.lck_mtx_grp)
+
     if kern.arch == "x86_64":
         out_str = "Lock Type            : MUTEX\n"
-        if mtx.lck_mtx_tag == 0x07ff1007 :
-            out_str += "Tagged as indirect, printing ext lock at: {:#x}\n".format(mtx.lck_mtx_ptr)
-            mtx = Cast(mtx.lck_mtx_ptr, 'lck_mtx_t *')
+        if mtx.lck_mtx_state == 0x07fe2007 :
+            out_str += "*** Tagged as DESTROYED ({:#x}) ***\n".format(mtx.lck_mtx_state)
+        out_str += "Number of Waiters   : {mtx.lck_mtx_waiters:#d}\n".format(mtx=mtx)
+        out_str += "ILocked             : {mtx.lck_mtx_ilocked:#d}\n".format(mtx=mtx)
+        out_str += "MLocked             : {mtx.lck_mtx_mlocked:#d}\n".format(mtx=mtx)
+        out_str += "Pri                 : {mtx.lck_mtx_pri:#d}\n".format(mtx=mtx)
+        out_str += "Spin                : {mtx.lck_mtx_spin:#d}\n".format(mtx=mtx)
+        out_str += "Profiling           : {mtx.lck_mtx_profile:#d}\n".format(mtx=mtx)
+        out_str += "Group               : {grp.lck_grp_name:s} ({grp:#x})\n".format(grp=grp)
+        out_str += "Owner Thread        : {:#x}\n".format(getThreadFromCtidInternal(mtx.lck_mtx_owner))
+    else:
+        out_str  = "Lock Type           : MUTEX\n"
+        if mtx.lck_mtx_type != GetEnumValue('lck_type_t', 'LCK_TYPE_MUTEX') or mtx.lck_mtx.data == 0xc0fe2007:
+            out_str += "*** Likely DESTROYED ***\n"
+        out_str += "ILocked             : {mtx.lck_mtx.ilocked:#d}\n".format(mtx=mtx)
+        out_str += "Spin                : {mtx.lck_mtx.spin_mode:#d}\n".format(mtx=mtx)
+        out_str += "Needs Wakeup        : {mtx.lck_mtx.needs_wakeup:#d}\n".format(mtx=mtx)
+        out_str += "Profiling           : {mtx.lck_mtx.profile:#d}\n".format(mtx=mtx)
+        out_str += "Group               : {grp.lck_grp_name:s} ({grp:#x})\n".format(grp=grp)
+        out_str += "Owner Thread        : {:#x}\n".format(getThreadFromCtidInternal(mtx.lck_mtx.owner))
+        out_str += "Turnstile           : {:#x}\n".format(getTurnstileFromCtidInternal(mtx.lck_mtx_tsid))
 
-        if mtx.lck_mtx_tag == 0x07fe2007 :
-            out_str += "*** Tagged as DESTROYED ({:#x}) ***\n".format(mtx.lck_mtx_tag)
+        mcs_ilk_next_map = {}
 
-        out_str += "Owner Thread        : {mtx.lck_mtx_owner:#x}\n".format(mtx=mtx)
-        out_str += "Number of Waiters   : {mtx.lck_mtx_waiters:#x}\n".format(mtx=mtx)
-        out_str += "ILocked             : {mtx.lck_mtx_ilocked:#x}\n".format(mtx=mtx)
-        out_str += "MLocked             : {mtx.lck_mtx_mlocked:#x}\n".format(mtx=mtx)
-        out_str += "Promoted            : {mtx.lck_mtx_promoted:#x}\n".format(mtx=mtx)
-        out_str += "Pri                 : {mtx.lck_mtx_pri:#x}\n".format(mtx=mtx)
-        out_str += "Spin                : {mtx.lck_mtx_spin:#x}\n".format(mtx=mtx)
-        out_str += "Ext                 : {mtx.lck_mtx_is_ext:#x}\n".format(mtx=mtx)
-        if mtx.lck_mtx_pad32 == 0xFFFFFFFF :
-            out_str += "Canary (valid)      : {mtx.lck_mtx_pad32:#x}\n".format(mtx=mtx)
-        else:
-            out_str += "Canary (INVALID)    : {mtx.lck_mtx_pad32:#x}\n".format(mtx=mtx)
-        return out_str
+        if mtx.lck_mtx.as_tail or mtx.lck_mtx.ilk_tail:
+            for cpu in range(0, kern.globals.zpercpu_early_count):
+                mcs = kern.PERCPU_GET('lck_mtx_mcs', cpu)
+                try:
+                    if unsigned(mcs.lmm_ilk_current) != unsigned(mtx):
+                        continue
+                except:
+                    continue
+                if mcs.lmm_ilk_next:
+                    mcs_ilk_next_map[unsigned(mcs.lmm_ilk_next)] = cpu + 1
 
-    LCK_MTX_TYPE = 0x22
-    out_str = "Lock Type\t\t: MUTEX\n"
-    if mtx.lck_mtx_type != LCK_MTX_TYPE:
-        out_str += "Mutex Invalid"
-        return out_str
-    out_str += "Owner Thread\t\t: {:#x}".format(mtx.lck_mtx_data & ~0x3)
-    if (mtx.lck_mtx_data & ~0x3) == 0xfffffff0:
-        out_str += " Held as spinlock"
-    out_str += "\nNumber of Waiters\t: {:d}\n".format(mtx.lck_mtx_waiters)
-    out_str += "Flags\t\t\t: "
-    if mtx.lck_mtx_data & 0x1:
-        out_str += "[Interlock Locked] "
-    if mtx.lck_mtx_data & 0x2:
-        out_str += "[Wait Flag]"
+        idx = unsigned(mtx.lck_mtx.as_tail)
+        s   = set()
+        q   = []
+        while idx:
+            mcs = addressof(kern.PERCPU_GET('lck_mtx_mcs', idx - 1))
+            q.append(((idx - 1), mcs))
+            if idx in s: break
+            s.add(idx)
+            idx = unsigned(mcs.lmm_as_prev)
+        q.reverse()
+
+        from misc import GetCpuDataForCpuID
+        out_str += "Adapt. spin tail    : {mtx.lck_mtx.as_tail:d}\n".format(mtx=mtx)
+        for (cpu, mcs) in q:
+            out_str += "    CPU {:2d}, thread {:#x}, node {:d}\n".format(
+                    cpu, GetCpuDataForCpuID(cpu).cpu_active_thread, mcs)
+
+        idx = unsigned(mtx.lck_mtx.ilk_tail)
+        q   = []
+        s   = set()
+        while idx:
+            mcs = addressof(kern.PERCPU_GET('lck_mtx_mcs', idx - 1))
+            q.append(((idx - 1), mcs))
+            if idx in s: break
+            s.add(idx)
+            idx = unsigned(mcs_ilk_next_map.get(unsigned(mcs), 0))
+        q.reverse()
+
+        out_str += "Interlock tail      : {mtx.lck_mtx.ilk_tail:d}\n".format(mtx=mtx)
+        for (cpu, mcs) in q:
+            out_str += "    CPU {:2d}, thread {:#x}, node {:d}\n".format(
+                    cpu, GetCpuDataForCpuID(cpu).cpu_active_thread, mcs)
+
     return out_str
 
 @lldb_type_summary(['lck_spin_t *'])
@@ -2405,7 +2597,9 @@ def GetRWLockSummary(rwlock):
         return "Invalid lock value: 0x0"
 
     out_str = "Lock Type\t\t: RWLOCK\n"
-    lock_word = rwlock.word
+    if rwlock.lck_rw_type != GetEnumValue('lck_type_t', 'LCK_TYPE_RW'):
+        out_str += "*** Likely DESTROYED ***\n"
+    lock_word = rwlock.lck_rw
     out_str += "Blocking\t\t: "
     if lock_word.can_sleep == 0:
         out_str += "FALSE\n"
@@ -2426,7 +2620,7 @@ def GetRWLockSummary(rwlock):
                 out_str += "\n"
         if lock_word.want_excl == 1:
             out_str += "Write ownership requested\n"
-    out_str += "Write owner\t\t: {:#x}\n".format(rwlock.lck_rw_owner)
+    out_str += "Write owner\t\t: {:#x}\n".format(getThreadFromCtidInternal(rwlock.lck_rw_owner))
     out_str += "Reader(s)    \t\t: "
     if lock_word.shared_count > 0:
         out_str += "{:#d}\n".format(lock_word.shared_count)
@@ -2600,23 +2794,124 @@ def tryFindRwlckHolders(cmd_args = None):
     return
 # EndMacro: tryfindrwlckholders
 
-@lldb_command('showallrwlck')
-def ShowAllRWLck(cmd_args=None):
-    """ Routine to print a summary listing of all read/writer locks
+def clz64(var):
+    var = unsigned(var)
+    if var == 0:
+        return 64
+
+    c = 63
+    while (var & (1 << c)) == 0:
+        c -= 1
+    return 63 - c
+
+def getThreadFromCtidInternal(ctid):
+    CTID_BASE_TABLE = 1 << 10
+    CTID_MASK       = (1 << 20) - 1
+    nonce           = unsigned(kern.globals.ctid_nonce)
+
+    if not ctid:
+        return kern.GetValueFromAddress(0, 'struct thread *')
+
+    # unmangle the compact TID
+    ctid = unsigned(ctid ^ nonce)
+    if ctid == CTID_MASK:
+        ctid = nonce
+
+    index = clz64(CTID_BASE_TABLE) - clz64(ctid | (CTID_BASE_TABLE - 1)) + 1
+    table = kern.globals.ctid_table
+    return cast(table.cidt_array[index][ctid], 'struct thread *')
+
+def getLockGroupFromCgidInternal(cgid):
+    CGID_BASE_TABLE = 1 << 10
+    CGID_MASK       = 0xffff
+
+    cgid &= CGID_MASK
+    if not cgid:
+        return kern.GetValueFromAddress(0, 'lck_grp_t *')
+
+    index = clz64(CGID_BASE_TABLE) - clz64(cgid | (CGID_BASE_TABLE - 1)) + 1
+    table = kern.globals.lck_grp_table
+    return cast(table.cidt_array[index][cgid], 'lck_grp_t *')
+
+def getTurnstileFromCtidInternal(ctid):
+    CTSID_BASE_TABLE = 1 << 10
+    CTSID_MASK       = (1 << 20) - 1
+    nonce            = unsigned(kern.globals.ctsid_nonce)
+
+    if not ctid:
+        return kern.GetValueFromAddress(0, 'struct turnstile *')
+
+    # unmangle the compact TID
+    ctid = unsigned(ctid ^ nonce)
+    if ctid == CTSID_MASK:
+        ctid = nonce
+
+    index = clz64(CTSID_BASE_TABLE) - clz64(ctid | (CTSID_BASE_TABLE - 1)) + 1
+    table = kern.globals.ctsid_table
+    return cast(table.cidt_array[index][ctid], 'struct turnstile *')
+
+@lldb_command('getthreadfromctid')
+def getThreadFromCtid(cmd_args = None):
+    """ Get the thread pointer associated with the ctid
+        Usage: getthreadfromctid <ctid>
     """
-    if kern.ptrsize == 8:
-        hdr_format = '{:<18s} {:>10s} {:>10s} {:>10s} {:>10s} {:<30s} '
-    else:
-        hdr_format = '{:<10s} {:>10s} {:>10s} {:>10s} {:>10s} {:<30s} '
+    if not cmd_args:
+        raise ArgumentError("Please specify a ctid")
+        return
 
-    print(hdr_format.format('LCK GROUP', 'CNT', 'UTIL', 'MISS', 'WAIT', 'NAME'))
+    ctid   = unsigned(kern.GetValueFromAddress(cmd_args[0]))
+    thread = getThreadFromCtidInternal(ctid)
+    if thread:
+        print("Thread pointer {:#x}".format(thread))
+    else :
+        print("Thread not found")
 
-    rwlgrp_queue_head = kern.globals.lck_grp_queue
-    rwlgrp_ptr_type = GetType('_lck_grp_ *')
-    for rwlgrp_ptr in IterateQueue(rwlgrp_queue_head, rwlgrp_ptr_type, "lck_grp_link"):
-       print(GetRWLEntry(rwlgrp_ptr))
+@lldb_command('getturnstilefromctsid')
+def getTurnstileFromCtid(cmd_args = None):
+    """ Get the turnstile pointer associated with the ctsid
+        Usage: getthreadfromctid <ctid>
+    """
+    if not cmd_args:
+        raise ArgumentError("Please specify a ctid")
+        return
+
+    ctid = unsigned(kern.GetValueFromAddress(cmd_args[0]))
+    ts   = getTurnstileFromCtidInternal(ctid)
+    if ts:
+        print("Turnstile pointer {:#x}".format(ts))
+    else :
+        print("Turnstile not found")
+
+# EndMacro: showkernapfsreflock
+
+@lldb_command('showkernapfsreflock')
+def showAPFSReflock(cmd_args = None):
+    """ Show info about a show_kern_apfs_reflock_t
+        Usage: show_kern_apfs_reflock <kern_apfs_reflock_t>
+    """
+    if not cmd_args:
+        raise ArgumentError("Please specify a kern_apfs_reflock_t pointer")
+        return
+    raw_addr = cmd_args[0]
+    reflock = kern.GetValueFromAddress(raw_addr, 'kern_apfs_reflock_t')
+    summary = "\n"
+    if reflock.kern_apfs_rl_owner != 0 :
+        summary += "Owner ctid \t: \t{reflock.kern_apfs_rl_owner:#d} ".format(reflock=reflock)
+        ctid = reflock.kern_apfs_rl_owner
+        thread = getThreadFromCtidInternal(ctid)
+        summary += "(thread_t {:#x})\n".format(thread)
+    else :
+        summary += "No Owner\n"
+    summary += "Waiters \t: \t{reflock.kern_apfs_rl_waiters:#d}\n".format(reflock=reflock)
+    summary += "Delayed Free \t: \t{reflock.kern_apfs_rl_delayed_free:#d}\n".format(reflock=reflock)
+    summary += "Wake \t\t: \t{reflock.kern_apfs_rl_wake:#d}\n".format(reflock=reflock)
+    summary += "Allocated \t: \t{reflock.kern_apfs_rl_allocated:#d}\n".format(reflock=reflock)
+    summary += "Allow Force \t: \t{reflock.kern_apfs_rl_allow_force:#d}\n".format(reflock=reflock)
+    summary += "RefCount \t: \t{reflock.kern_apfs_rl_count:#d}\n".format(reflock=reflock)
+
+    print(summary)
     return
-# EndMacro: showallrwlck
+# EndMacro: showkernapfsreflock
 
 #Macro: showbootermemorymap
 @lldb_command('showbootermemorymap')
@@ -3100,22 +3395,18 @@ def showmaphdrvme(maphdr, pmap, start_vaddr, end_vaddr, show_pager_info, show_al
                 object_str = "IPC_KERNEL_MAP"
             elif object == kern.globals.ipc_kernel_copy_map:
                 object_str = "IPC_KERNEL_COPY_MAP"
-            elif object == kern.globals.kalloc_large_map:
-                object_str = "KALLOC:LARGE"
-            elif object == kern.globals.kalloc_large_data_map:
-                object_str = "KALLOC:LARGE_DATA"
-            elif object == kern.globals.kernel_data_map:
-                object_str = "KERNEL_DATA_MAP"
+            elif hasattr(kern.globals, 'io_submap') and object == kern.globals.io_submap:
+                object_str = "IO_SUBMAP"
             elif hasattr(kern.globals, 'pgz_submap') and object == kern.globals.pgz_submap:
                 object_str = "ZALLOC:PGZ"
             elif hasattr(kern.globals, 'compressor_map') and object == kern.globals.compressor_map:
                 object_str = "COMPRESSOR_MAP"
-            elif hasattr(kern.globals, 'gzalloc_map') and object == kern.globals.gzalloc_map:
-                object_str = "GZALLOC_MAP"
             elif hasattr(kern.globals, 'g_kext_map') and object == kern.globals.g_kext_map:
                 object_str = "G_KEXT_MAP"
             elif hasattr(kern.globals, 'vector_upl_submap') and object == kern.globals.vector_upl_submap:
                 object_str = "VECTOR_UPL_SUBMAP"
+            elif object == kern.globals.zone_meta_map:
+                object_str = "ZALLOC:META"
             else:
                 for i in range(0, int(GetEnumValue('zone_submap_idx_t', 'Z_SUBMAP_IDX_COUNT'))):
                     if object == kern.globals.zone_submaps[i]:
@@ -3126,14 +3417,12 @@ def showmaphdrvme(maphdr, pmap, start_vaddr, end_vaddr, show_pager_info, show_al
         else:
             if object == kern.globals.kernel_object:
                 object_str = "KERNEL_OBJECT"
-            elif object == kern.globals.vm_submap_object:
-                object_str = "VM_SUBMAP_OBJECT"
             elif object == compressor_object:
                 object_str = "COMPRESSOR_OBJECT"
             else:
                 object_str = "{: <#018x}".format(object)
-        offset = unsigned(vme.vme_offset) & ~0xFFF
-        tag = unsigned(vme.vme_offset & 0xFFF)
+        offset = get_vme_offset(vme)
+        tag = unsigned(vme.vme_alias)
         protection = ""
         if vme.protection & 0x1:
             protection +="r"
@@ -3171,6 +3460,8 @@ def showmaphdrvme(maphdr, pmap, start_vaddr, end_vaddr, show_pager_info, show_al
             vme_flags += "w"
         if vme.used_for_jit:
             vme_flags += "j"
+        if vme.vme_permanent:
+            vme_flags += "!"
         tagstr = ""
         if pmap == kern.globals.kernel_pmap:
             xsite = Cast(kern.globals.vm_allocation_sites[tag],'OSKextAccount *')
@@ -3197,7 +3488,7 @@ def CountMapTags(map, tagcounts, slow):
     vme_ptr_type = GetType('vm_map_entry *')
     for vme in IterateQueue(vme_list_head, vme_ptr_type, "links"):
         object = get_vme_object(vme)
-        tag = vme.vme_offset & 0xFFF
+        tag = vme.vme_alias
         if object == kern.globals.kernel_object:
             count = 0
             if not slow:
@@ -3266,6 +3557,7 @@ FixedTags = {
     30: "VM_KERN_MEMORY_RETIRED",
     31: "VM_KERN_MEMORY_KALLOC_TYPE",
     32: "VM_KERN_MEMORY_TRIAGE",
+    33: "VM_KERN_MEMORY_RECOUNT",
     255:"VM_KERN_MEMORY_ANY",
 }
 
@@ -3273,7 +3565,7 @@ def GetVMKernName(tag):
     """ returns the formatted name for a vmtag and
         the sub-tag for kmod tags.
     """
-    if ((tag <= 27) or (tag == 255)):
+    if tag in FixedTags:
         return (FixedTags[tag], "")
     site = kern.globals.vm_allocation_sites[tag]
     if site:
@@ -3432,12 +3724,13 @@ def ShowTaskLoadInfo(cmd_args=None, cmd_options={}):
         raise ArgumentError("Insufficient arguments")
     t = kern.GetValueFromAddress(cmd_args[0], 'struct task *')
     print_format = "0x{0:x} - 0x{1:x} {2: <50s} (??? - ???) <{3: <36s}> {4: <50s}"
-    p = Cast(t.bsd_info, 'struct proc *')
-    uuid = ProcGetUUID(p)
-    uuid_out_string = "{a[0]:02X}{a[1]:02X}{a[2]:02X}{a[3]:02X}-{a[4]:02X}{a[5]:02X}-{a[6]:02X}{a[7]:02X}-{a[8]:02X}{a[9]:02X}-{a[10]:02X}{a[11]:02X}{a[12]:02X}{a[13]:02X}{a[14]:02X}{a[15]:02X}".format(a=uuid)
+    p = GetProcFromTask(t)
+    if not p:
+        print("Task has no associated BSD process.")
+        return
+    uuid_out_string = GetUUIDSummary(p.p_uuid)
     filepath = GetVnodePath(p.p_textvp)
     libname = filepath.split('/')[-1]
-    #print "uuid: %s file: %s" % (uuid_out_string, filepath)
     mappings = FindVMEntriesForVnode(t, p.p_textvp)
     load_addr = 0
     end_addr = 0
@@ -3445,9 +3738,8 @@ def ShowTaskLoadInfo(cmd_args=None, cmd_options={}):
         if m[3] == 5:
             load_addr = m[1]
             end_addr = m[2]
-            #print "Load address: %s" % hex(m[1])
-    print(print_format.format(load_addr, end_addr, libname, uuid_out_string, filepath))
-    return None
+    print(print_format.format(load_addr, end_addr,
+                              libname, uuid_out_string, filepath))
 
 @header("{0: <20s} {1: <20s} {2: <20s}".format("vm_page_t", "offset", "object"))
 @lldb_command('vmpagelookup')
@@ -3678,8 +3970,7 @@ def ScanVMPages(cmd_args=None, cmd_options={}):
 
     if "-B" in cmd_options:
         valid_vmp_bitfields = [
-            "vmp_in_background",
-            "vmp_on_backgroundq",
+            "vmp_on_specialq",
             "vmp_gobbled",
             "vmp_laundry",
             "vmp_no_cache",
@@ -3777,7 +4068,7 @@ def ScanVMPages(cmd_args=None, cmd_options={}):
 
 VM_PAGE_IS_WIRED = 1
 
-@header("{0: <10s} of {1: <10s} {2: <20s} {3: <20s} {4: <20s} {5: <10s} {6: <5s}\t {7: <28s}\t{8: <50s}".format("index", "total", "vm_page_t", "offset", "next", "phys_page", "wire#", "first bitfield", "second bitfield"))
+@header("{0: <10s} of {1: <10s} {2: <20s} {3: <20s} {4: <20s} {5: <10s} {6: <5s}\t{7: <28s}\t{8: <50s}".format("index", "total", "vm_page_t", "offset", "next", "phys_page", "wire#", "first bitfield", "second bitfield"))
 @lldb_command('vmobjectwalkpages', 'CSBNQP:O:')
 def VMObjectWalkPages(cmd_args=None, cmd_options={}):
     """ Print the resident pages contained in the provided object. If a vm_page_t is provided as well, we
@@ -3828,7 +4119,7 @@ def VMObjectWalkPages(cmd_args=None, cmd_options={}):
     if not quiet_mode:
         print(VMObjectWalkPages.header)
         format_string = "{0: <#10d} of {1: <#10d} {2: <#020x} {3: <#020x} {4: <#020x} {5: <#010x} {6: <#05d}\t"
-        first_bitfield_format_string = "{0: <#2d}:{1: <#1d}:{2: <#1d}:{3: <#1d}:{4: <#1d}:{5: <#1d}:{6: <#1d}:{7: <#1d}\t"
+        first_bitfield_format_string = "{0: <#2d}:{1: <#1d}:{2: <#1d}:{3: <#1d}:{4: <#1d}:{5: <#1d}:{6: <#1d}\t"
         second_bitfield_format_string = "{0: <#1d}:{1: <#1d}:{2: <#1d}:{3: <#1d}:{4: <#1d}:{5: <#1d}:{6: <#1d}:"
         second_bitfield_format_string += "{7: <#1d}:{8: <#1d}:{9: <#1d}:{10: <#1d}:{11: <#1d}:{12: <#1d}:"
         second_bitfield_format_string += "{13: <#1d}:{14: <#1d}:{15: <#1d}:{16: <#1d}:{17: <#1d}:{18: <#1d}:{19: <#1d}:"
@@ -3864,7 +4155,7 @@ def VMObjectWalkPages(cmd_args=None, cmd_options={}):
                 print("traversed %d pages ...\n" % (page_count))
         else:
                 out_string += format_string.format(page_count, res_page_count, vmp, vmp.vmp_offset, _vm_page_unpack_ptr(vmp.vmp_listq.next), _vm_page_get_phys_page(vmp), vmp.vmp_wire_count)
-                out_string += first_bitfield_format_string.format(vmp.vmp_q_state, vmp.vmp_in_background, vmp.vmp_on_backgroundq, vmp.vmp_gobbled, vmp.vmp_laundry, vmp.vmp_no_cache,
+                out_string += first_bitfield_format_string.format(vmp.vmp_q_state, vmp.vmp_on_specialq, vmp.vmp_gobbled, vmp.vmp_laundry, vmp.vmp_no_cache,
                                                                    vmp.vmp_private, vmp.vmp_reference)
 
                 if hasattr(vmp,'slid'):
@@ -4139,6 +4430,38 @@ def ShowJetsamSnapshot(cmd_args=None, cmd_options={}):
 
 # EndMacro: showjetsamsnapshot
 
+# Macro: showjetsambucket
+@lldb_command('showjetsamband', 'J')
+def ShowJetsamBand(cmd_args=[], cmd_options={}):
+    """ Print the processes in a jetsam band.
+        Usage: showjetsamband band_number [-J]
+            -J      : Output pids as json
+    """
+    if not cmd_args:
+        raise ArgumentError("invalid arguments")
+    if len(cmd_args) != 1:
+        raise ArgumentError("insufficient arguments")
+
+    print_json = "-J" in cmd_options
+
+    bucket_number = int(cmd_args[0])
+    buckets = kern.GetGlobalVariable('memstat_bucket')
+    bucket = value(buckets.GetSBValue().CreateValueFromExpression(None,
+        'memstat_bucket[%d]' %(bucket_number)))
+    l = bucket.list
+
+    pids = []
+    if not print_json:
+        print(GetProcSummary.header)
+    for i in IterateTAILQ_HEAD(l, "p_memstat_list"):
+        pids.append(int(i.p_pid))
+        if not print_json:
+            print(GetProcSummary(i))
+
+    as_json = json.dumps(pids)
+    if print_json:
+        print(as_json)
+
 # Macro: showvnodecleanblk/showvnodedirtyblk
 
 def _GetBufSummary(buf):
@@ -4224,13 +4547,14 @@ def vm_page_lookup_in_map(map, vaddr):
         if unsigned(vme.links.end) <= vaddr:
             continue
         offset_in_vme = vaddr - unsigned(vme.links.start)
-        print("  offset {:#018x} in map entry {: <#018x} [{:#018x}:{:#018x}] object {: <#018x} offset {:#018x}".format(offset_in_vme, vme, unsigned(vme.links.start), unsigned(vme.links.end), get_vme_object(vme), unsigned(vme.vme_offset) & ~0xFFF))
-        offset_in_object = offset_in_vme + (unsigned(vme.vme_offset) & ~0xFFF)
+        print("  offset {:#018x} in map entry {: <#018x} [{:#018x}:{:#018x}] object {: <#018x} offset {:#018x}".format(offset_in_vme, vme, unsigned(vme.links.start), unsigned(vme.links.end), get_vme_object(vme), get_vme_offset(vme)))
+        offset_in_object = offset_in_vme + get_vme_offset(vme)
+        obj_or_submap = get_vme_object(vme)
         if vme.is_sub_map:
-            print("vaddr {:#018x} in map {: <#018x}".format(offset_in_object, vme.vme_object.vmo_submap))
-            vm_page_lookup_in_map(vme.vme_object.vmo_submap, offset_in_object)
+            print("vaddr {:#018x} in map {: <#018x}".format(offset_in_object, obj_or_submap))
+            vm_page_lookup_in_map(obj_or_submap, offset_in_object)
         else:
-            vm_page_lookup_in_object(get_vme_object(vme), offset_in_object)
+            vm_page_lookup_in_object(obj_or_submap, offset_in_object)
 
 @lldb_command("vm_page_lookup_in_object")
 def VmPageLookupInObject(cmd_args=None):
@@ -4529,7 +4853,8 @@ def ShowAllVMNamedEntries(cmd_args=None):
         io_bits = unsigned(port.ip_object.io_bits)
         if (io_bits & 0x3ff) == ikot_named_entry:
             idx += 1
-            showmemoryentry(Cast(port.ip_kobject, 'struct vm_named_entry *'), idx=idx, port=port)
+            ko = Cast(port.ip_kobject, 'void *')
+            showmemoryentry(Cast(ko, 'struct vm_named_entry *'), idx=idx, port=port)
 
 @lldb_command('show_vm_named_entry')
 def ShowVMNamedEntry(cmd_args=None):
@@ -4737,7 +5062,7 @@ def ShowTaskOwnedVmObjects(task, showonlytagged=False):
             if taskobjq_total.objects == 0:
                 print(' \n')
                 print(GetTaskSummary.header + ' ' + GetProcSummary.header)
-                print(GetTaskSummary(task) + ' ' + GetProcSummary(Cast(task.bsd_info, 'proc *')))
+                print(GetTaskSummary(task) + ' ' + GetProcSummary(GetProcFromTask(task)))
                 print('{:>6s} {:<6s} {:18s} {:1s} {:>6s} {:>16s} {:>10s} {:>10s} {:>10s} {:>2s} {:18s} {:>6s} {:<20s}\n'.format("#","#","object","P","refcnt","size (pages)","resid","wired","compressed","tg","owner","pid","process"))
             ShowOwnedVmObject(vmo, idx, 0, taskobjq_total)
     if taskobjq_total.objects != 0:

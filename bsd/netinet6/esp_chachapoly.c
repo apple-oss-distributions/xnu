@@ -288,15 +288,15 @@ esp_chachapoly_encrypt(struct mbuf *m, // head of mbuf chain
 	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched;
 
 	if (ivlen != (esp_ccp_ctx->ccp_implicit_iv ? 0 : ESP_CHACHAPOLY_IV_LEN)) {
-		m_freem(m);
 		esp_log_err("ChaChaPoly Invalid ivlen %u, SPI 0x%08x",
 		    ivlen, ntohl(sav->spi));
+		m_freem(m);
 		return EINVAL;
 	}
 	if (sav->ivlen != ivlen) {
-		m_freem(m);
 		esp_log_err("ChaChaPoly Invalid sav->ivlen %u, SPI 0x%08x",
 		    sav->ivlen, ntohl(sav->spi));
+		m_freem(m);
 		return EINVAL;
 	}
 
@@ -310,9 +310,9 @@ esp_chachapoly_encrypt(struct mbuf *m, // head of mbuf chain
 
 	rc = chacha20poly1305_reset(&esp_ccp_ctx->ccp_ctx);
 	if (rc != 0) {
-		m_freem(m);
 		esp_log_err("ChaChaPoly chacha20poly1305_reset failed %d, SPI 0x%08x",
 		    rc, ntohl(sav->spi));
+		m_freem(m);
 		return rc;
 	}
 
@@ -348,9 +348,9 @@ esp_chachapoly_encrypt(struct mbuf *m, // head of mbuf chain
 	rc = chacha20poly1305_setnonce(&esp_ccp_ctx->ccp_ctx, (uint8_t *)nonce);
 	cc_clear(sizeof(nonce), nonce);
 	if (rc != 0) {
-		m_freem(m);
 		esp_log_err("ChaChaPoly chacha20poly1305_setnonce failed %d, SPI 0x%08x",
 		    rc, ntohl(sav->spi));
+		m_freem(m);
 		return rc;
 	}
 
@@ -359,9 +359,9 @@ esp_chachapoly_encrypt(struct mbuf *m, // head of mbuf chain
 	    sizeof(esp_hdr),
 	    (void *)&esp_hdr);
 	if (rc != 0) {
-		m_freem(m);
 		esp_log_err("ChaChaPoly chacha20poly1305_aad failed %d, SPI 0x%08x",
 		    rc, ntohl(sav->spi));
+		m_freem(m);
 		return rc;
 	}
 
@@ -387,9 +387,9 @@ esp_chachapoly_encrypt(struct mbuf *m, // head of mbuf chain
 		rc = chacha20poly1305_encrypt(&esp_ccp_ctx->ccp_ctx,
 		    len, sp, sp);
 		if (rc != 0) {
-			m_freem(m);
 			esp_log_err("ChaChaPoly chacha20poly1305_encrypt failed %d, SPI 0x%08x",
 			    rc, ntohl(sav->spi));
+			m_freem(m);
 			return rc;
 		}
 
@@ -398,9 +398,9 @@ esp_chachapoly_encrypt(struct mbuf *m, // head of mbuf chain
 		s = s->m_next;
 	}
 	if (s == NULL && soff != m->m_pkthdr.len) {
-		m_freem(m);
 		esp_log_err("ChaChaPoly not enough mbufs %d %d, SPI 0x%08x",
 		    soff, m->m_pkthdr.len, ntohl(sav->spi));
+		m_freem(m);
 		return EFBIG;
 	}
 	return 0;
@@ -433,15 +433,15 @@ esp_chachapoly_decrypt(struct mbuf *m, // head of mbuf chain
 	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched;
 
 	if (ivlen != (esp_ccp_ctx->ccp_implicit_iv ? 0 : ESP_CHACHAPOLY_IV_LEN)) {
-		m_freem(m);
 		esp_log_err("ChaChaPoly Invalid ivlen %u, SPI 0x%08x",
 		    ivlen, ntohl(sav->spi));
+		m_freem(m);
 		return EINVAL;
 	}
 	if (sav->ivlen != ivlen) {
-		m_freem(m);
 		esp_log_err("ChaChaPoly Invalid sav->ivlen %u, SPI 0x%08x",
 		    sav->ivlen, ntohl(sav->spi));
+		m_freem(m);
 		return EINVAL;
 	}
 
@@ -455,9 +455,9 @@ esp_chachapoly_decrypt(struct mbuf *m, // head of mbuf chain
 
 	rc = chacha20poly1305_reset(&esp_ccp_ctx->ccp_ctx);
 	if (rc != 0) {
-		m_freem(m);
 		esp_log_err("ChaChaPoly chacha20poly1305_reset failed %d, SPI 0x%08x",
 		    rc, ntohl(sav->spi));
+		m_freem(m);
 		return rc;
 	}
 
@@ -481,9 +481,9 @@ esp_chachapoly_decrypt(struct mbuf *m, // head of mbuf chain
 
 	rc = chacha20poly1305_setnonce(&esp_ccp_ctx->ccp_ctx, (uint8_t *)nonce);
 	if (rc != 0) {
-		m_freem(m);
 		esp_log_err("ChaChaPoly chacha20poly1305_setnonce failed %d, SPI 0x%08x",
 		    rc, ntohl(sav->spi));
+		m_freem(m);
 		return rc;
 	}
 	cc_clear(sizeof(nonce), nonce);
@@ -493,9 +493,9 @@ esp_chachapoly_decrypt(struct mbuf *m, // head of mbuf chain
 	    sizeof(esp_hdr),
 	    (void *)&esp_hdr);
 	if (rc != 0) {
-		m_freem(m);
 		esp_log_err("ChaChaPoly chacha20poly1305_aad failed %d, SPI 0x%08x",
 		    rc, ntohl(sav->spi));
+		m_freem(m);
 		return rc;
 	}
 
@@ -521,9 +521,9 @@ esp_chachapoly_decrypt(struct mbuf *m, // head of mbuf chain
 		rc = chacha20poly1305_decrypt(&esp_ccp_ctx->ccp_ctx,
 		    len, sp, sp);
 		if (rc != 0) {
-			m_freem(m);
 			esp_packet_log_err("chacha20poly1305_decrypt failed %d, SPI 0x%08x",
 			    rc, ntohl(sav->spi));
+			m_freem(m);
 			return rc;
 		}
 
@@ -532,9 +532,9 @@ esp_chachapoly_decrypt(struct mbuf *m, // head of mbuf chain
 		s = s->m_next;
 	}
 	if (s == NULL && soff != m->m_pkthdr.len) {
-		m_freem(m);
 		esp_packet_log_err("not enough mbufs %d %d, SPI 0x%08x",
 		    soff, m->m_pkthdr.len, ntohl(sav->spi));
+		m_freem(m);
 		return EFBIG;
 	}
 	return 0;

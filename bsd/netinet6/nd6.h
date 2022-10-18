@@ -558,6 +558,7 @@ struct  nd_defrouter {
 	int             err;
 	struct ifnet    *ifp;
 	struct in6_addr rtaddr_mapped;          /* Mapped gateway address for routing */
+	boolean_t       is_reachable;
 	void (*nddr_trace)(struct nd_defrouter *, int); /* trace callback fn */
 };
 
@@ -973,6 +974,7 @@ extern int nd6_prefix_onlink(struct nd_prefix *);
 extern int nd6_prefix_onlink_scoped(struct nd_prefix *, unsigned int);
 extern int nd6_prefix_offlink(struct nd_prefix *);
 extern void pfxlist_onlink_check(void);
+extern void defrouter_set_reachability(struct in6_addr *, struct ifnet *, boolean_t);
 extern struct nd_defrouter *defrouter_lookup(struct nd_drhead *,
     struct in6_addr *, struct ifnet *);
 extern struct nd_prefix *nd6_prefix_lookup(struct nd_prefix *, int);

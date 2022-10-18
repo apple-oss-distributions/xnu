@@ -73,6 +73,9 @@ set SOURCEDIR=.
 set CONFIG_DIR=$OBJROOT/SETUP/config
 set MASTER_CONF_DIR=.
 
+set DEF_SEED=""
+
+
 unset doconfig
 unset beverbose
 unset MACHINE
@@ -102,9 +105,9 @@ while ($#argv >= 1)
 	    endif
 	    set SOC_CONFIG="$argv[2]"
 	    if (`echo $SOC_CONFIG | awk '{print substr($0,0,2)}'` == "vm") then
-	    set DEF_AVP="-DSOC_IS_VIRTUALIZED"
+	        set DEF_AVP="-DSOC_IS_VIRTUALIZED"
 	    else
-	    set DEF_AVP=""
+	        set DEF_AVP="-USOC_IS_VIRTUALIZED"
 	    endif
 	    shift
 	    breaksw
@@ -193,7 +196,7 @@ foreach SYS ($argv)
     cat $MASTER $MASTER_CPU - \
         $MASTER $MASTER_CPU \
     | \
-    unifdef -t -DPLATFORM_${PLATFORM} -DCPU_$cpu -DSOC_CONFIG_${SOC_CONFIG} -DSYS_${SYS} $DEF_AVP - \
+    unifdef -t -DPLATFORM_${PLATFORM} -DCPU_$cpu -DSOC_CONFIG_${SOC_CONFIG} -DSYS_${SYS} $DEF_AVP $DEF_SEED - \
     | \
     sed -n \
 	-e "/^+/{" \

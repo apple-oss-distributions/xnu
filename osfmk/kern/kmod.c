@@ -88,46 +88,6 @@ extern void proc_selfname(char * buf, int size);
 #define KMOD_MIG_UNUSED __unused
 
 
-/*********************************************************************
- * Old MIG routines that are no longer supported.
- **********************************************************************
- * We have to keep these around for ppc, i386, and x86_64. A 32-bit
- * user-space client might call into the 64-bit kernel. Only
- * kmod_get_info() retains a functional implementation (ppc/i386).
- **********************************************************************/
-kern_return_t
-kmod_create(
-	host_priv_t   host_priv __unused,
-	vm_address_t  addr __unused,
-	kmod_t      * id __unused)
-{
-	NOT_SUPPORTED_KERNEL();
-	return KERN_NOT_SUPPORTED;
-}
-
-/********************************************************************/
-kern_return_t
-kmod_destroy(
-	host_priv_t host_priv __unused,
-	kmod_t     id __unused)
-{
-	NOT_SUPPORTED_KERNEL();
-	return KERN_NOT_SUPPORTED;
-}
-
-/********************************************************************/
-kern_return_t
-kmod_control(
-	host_priv_t              host_priv __unused,
-	kmod_t                   id __unused,
-	kmod_control_flavor_t    flavor __unused,
-	kmod_args_t            * data __unused,
-	mach_msg_type_number_t * dataCount __unused)
-{
-	NOT_SUPPORTED_KERNEL();
-	return KERN_NOT_SUPPORTED;
-}
-
 /********************************************************************/
 kern_return_t
 kmod_get_info(

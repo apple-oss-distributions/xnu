@@ -22,7 +22,7 @@ class TaskNode(object):
     def __str__(self):
         out_arr = []
         if unsigned(self.task) != 0: 
-            out_arr.append(GetTaskSummary(self.task) + " " + GetProcSummary(Cast(self.task.bsd_info, 'proc *')) + " {: <#018x}".format(self.task.task_imp_base) )
+            out_arr.append(GetTaskSummary(self.task) + " " + GetProcSummary(GetProcFromTask(self.task)) + " {: <#018x}".format(self.task.task_imp_base) )
         else:
             out_arr.append("Unknown task.")
         #out_arr.append("TASK: {: <#018x} {: <s}".format(self.task, GetProcNameForTask(self.task))

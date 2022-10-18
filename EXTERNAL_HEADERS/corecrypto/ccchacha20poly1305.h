@@ -1,20 +1,23 @@
-/* Copyright (c) (2016,2017,2018,2019) Apple Inc. All rights reserved.
+/* Copyright (c) (2016-2019,2021) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
- * is contained in the License.txt file distributed with corecrypto) and only to 
- * people who accept that license. IMPORTANT:  Any license rights granted to you by 
- * Apple Inc. (if any) are limited to internal use within your organization only on 
- * devices and computers you own or control, for the sole purpose of verifying the 
- * security characteristics and correct functioning of the Apple Software.  You may 
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
 #ifndef _CORECRYPTO_CCCHACHA20POLY1305_H_
 #define _CORECRYPTO_CCCHACHA20POLY1305_H_
 
+#include <corecrypto/cc_config.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+CC_PTRCHECK_CAPABLE_HEADER()
 
 #define CCCHACHA20_KEY_NBYTES 32
 #define CCCHACHA20_BLOCK_NBYTES 64
@@ -28,6 +31,7 @@ typedef struct {
 } ccchacha20_ctx;
 
 #define CCPOLY1305_TAG_NBYTES 16
+#define CCPOLY1305_KEY_NBYTES 32
 
 typedef struct {
 	uint32_t r0, r1, r2, r3, r4;
@@ -127,7 +131,7 @@ const struct ccchacha20poly1305_info *ccchacha20poly1305_info(void);
 
  @warning The key-nonce pair must be unique per encryption.
  */
-int	ccchacha20poly1305_init(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, const uint8_t *key);
+int	ccchacha20poly1305_init(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, const uint8_t *cc_counted_by(CCCHACHA20POLY1305_KEY_NBYTES) key);
 
 /*!
  @function   ccchacha20poly1305_reset
@@ -154,8 +158,8 @@ int ccchacha20poly1305_reset(const struct ccchacha20poly1305_info *info, ccchach
 
  @warning The key-nonce pair must be unique per encryption.
  */
-int ccchacha20poly1305_setnonce(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, const uint8_t *nonce);
-int ccchacha20poly1305_incnonce(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, uint8_t *nonce);
+int ccchacha20poly1305_setnonce(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, const uint8_t *cc_counted_by(CCCHACHA20POLY1305_NONCE_NBYTES) nonce);
+int ccchacha20poly1305_incnonce(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, uint8_t *cc_counted_by(CCCHACHA20POLY1305_NONCE_NBYTES) nonce);
 
 /*!
  @function   ccchacha20poly1305_aad
@@ -172,7 +176,7 @@ int ccchacha20poly1305_incnonce(const struct ccchacha20poly1305_info *info, ccch
 
  This function may be called zero or more times.
  */
-int	ccchacha20poly1305_aad(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, size_t nbytes, const void *aad);
+int	ccchacha20poly1305_aad(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) aad);
 
 /*!
  @function   ccchacha20poly1305_encrypt
@@ -190,7 +194,7 @@ int	ccchacha20poly1305_aad(const struct ccchacha20poly1305_info *info, ccchacha2
 
  This function may be called zero or more times.
  */
-int	ccchacha20poly1305_encrypt(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, size_t nbytes, const void *ptext, void *ctext);
+int	ccchacha20poly1305_encrypt(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) ptext, void *cc_sized_by(nbytes) ctext);
 
 /*!
  @function   ccchacha20poly1305_finalize
@@ -204,7 +208,7 @@ int	ccchacha20poly1305_encrypt(const struct ccchacha20poly1305_info *info, cccha
 
  @discussion The generated tag is 16 bytes in length.
  */
-int	ccchacha20poly1305_finalize(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, uint8_t *tag);
+int	ccchacha20poly1305_finalize(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, uint8_t *cc_counted_by(CCCHACHA20POLY1305_TAG_NBYTES) tag);
 
 /*!
  @function   ccchacha20poly1305_decrypt
@@ -222,7 +226,7 @@ int	ccchacha20poly1305_finalize(const struct ccchacha20poly1305_info *info, ccch
 
  This function may be called zero or more times.
  */
-int	ccchacha20poly1305_decrypt(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, size_t nbytes, const void *ctext, void *ptext);
+int	ccchacha20poly1305_decrypt(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) ctext, void *cc_sized_by(nbytes) ptext);
 
 /*!
  @function   ccchacha20poly1305_verify
@@ -236,7 +240,7 @@ int	ccchacha20poly1305_decrypt(const struct ccchacha20poly1305_info *info, cccha
 
  @discussion The expected tag is 16 bytes in length.
  */
-int	ccchacha20poly1305_verify(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, const uint8_t *tag);
+int	ccchacha20poly1305_verify(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, const uint8_t *cc_counted_by(CCCHACHA20POLY1305_TAG_NBYTES) tag);
 
 /*!
  @function      ccchacha20poly1305_encrypt_oneshot
@@ -266,7 +270,7 @@ int	ccchacha20poly1305_verify(const struct ccchacha20poly1305_info *info, ccchac
 
  @warning A single message can be at most (2^38 - 64) bytes in length.
  */
-int ccchacha20poly1305_encrypt_oneshot(const struct ccchacha20poly1305_info *info, const uint8_t *key, const uint8_t *nonce, size_t aad_nbytes, const void *aad, size_t ptext_nbytes, const void *ptext, void *ctext, uint8_t *tag);
+int ccchacha20poly1305_encrypt_oneshot(const struct ccchacha20poly1305_info *info, const uint8_t *cc_counted_by(CCCHACHA20POLY1305_KEY_NBYTES) key, const uint8_t *cc_counted_by(CCCHACHA20POLY1305_NONCE_NBYTES) nonce, size_t aad_nbytes, const void *cc_sized_by(aad_nbytes) aad, size_t ptext_nbytes, const void *cc_sized_by(ptext_nbytes) ptext, void *cc_sized_by(ptext_nbytes) ctext, uint8_t *cc_counted_by(CCCHACHA20POLY1305_TAG_NBYTES) tag);
 
 /*!
  @function      ccchacha20poly1305_decrypt_oneshot
@@ -292,6 +296,6 @@ int ccchacha20poly1305_encrypt_oneshot(const struct ccchacha20poly1305_info *inf
 
  In-place processing is supported.
  */
-int ccchacha20poly1305_decrypt_oneshot(const struct ccchacha20poly1305_info *info, const uint8_t *key, const uint8_t *nonce, size_t aad_nbytes, const void *aad, size_t ctext_nbytes, const void *ctext, void *ptext, const uint8_t *tag);
+int ccchacha20poly1305_decrypt_oneshot(const struct ccchacha20poly1305_info *info, const uint8_t *cc_counted_by(CCCHACHA20POLY1305_KEY_NBYTES) key, const uint8_t *cc_counted_by(CCCHACHA20POLY1305_NONCE_NBYTES) nonce, size_t aad_nbytes, const void *cc_sized_by(aad_nbytes) aad, size_t ctext_nbytes, const void *cc_sized_by(ctext_nbytes) ctext, void *cc_sized_by(ctext_nbytes) ptext, const uint8_t *cc_counted_by(CCCHACHA20POLY1305_TAG_NBYTES) tag);
 
 #endif

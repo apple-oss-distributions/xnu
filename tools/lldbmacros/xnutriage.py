@@ -29,7 +29,7 @@ def OutputAddress(cmd_args=None):
             if cmd_out2 != 0:
                 cmd_out3 = cmd_out2[1].split(' at')
                 if len(cmd_out3) != 0:
-                    symbol_str = "{:#x} <{:s}>".format(unsigned(a), cmd_out3[0])
+                    symbol_str = "{:#018x} <{:s}>".format(unsigned(a), cmd_out3[0])
                     return symbol_str
     return ""
 
@@ -66,12 +66,12 @@ def NewBt(cmd_args=None):
         cmd_str = "di -s {:#x} -c 1".format(link_register)
         cmd_out = lldb_run_command(cmd_str)
         if len(cmd_out) != 0:
-            cmd_out1 = cmd_out.split('\n')
+            cmd_out1 = list(filter(None, cmd_out.split('\n')))
             if len(cmd_out1) != 0:
                 address = OutputAddress([unsigned(link_register)])
-                if address is None:
-                    address = '0x%x <???>' % unsigned(link_register)
-                print(address + ": " + cmd_out1[1].split(':', 1)[1])
+                if not address:
+                    address = '{:#018x} <???>'.format(unsigned(link_register))
+                print(address + ": " + cmd_out1[-1].split(':', 1)[1])
         a = dereference(kern.GetValueFromAddress(unsigned(a), 'uintptr_t *'))
 
 # EndMacro: newbt

@@ -78,6 +78,8 @@ extern void task_deallocate_grp(task_t, task_grp_t);
 #define task_deallocate(task) task_deallocate_grp(task, TASK_GRP_KERNEL)
 
 #define convert_task_to_port(task) convert_task_to_port_kernel(task)
+#define convert_task_read_to_port(task) convert_task_read_to_port_kernel(task)
+
 #define port_name_to_task(name) port_name_to_task_kernel(name)
 
 #define convert_port_to_task_suspension_token(port) convert_port_to_task_suspension_token_kernel(port)

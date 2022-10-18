@@ -274,8 +274,8 @@ vm32_region_info(
 		size = vm_map_round_page(2 * used * sizeof(vm_info_object_t),
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
-		kr = kernel_memory_allocate(ipc_kernel_map, &addr, size, 0,
-		    KMA_NONE, VM_KERN_MEMORY_IPC);
+		kr = kmem_alloc(ipc_kernel_map, &addr, size,
+		    KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
@@ -485,8 +485,8 @@ vm32_region_info_64(
 		size = vm_map_round_page(2 * used * sizeof(vm_info_object_t),
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
-		kr = kernel_memory_allocate(ipc_kernel_map, &addr, size, 0,
-		    KMA_NONE, VM_KERN_MEMORY_IPC);
+		kr = kmem_alloc(ipc_kernel_map, &addr, size,
+		    KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
@@ -676,8 +676,8 @@ host_virtual_physical_table_info(
 
 		size = vm_map_round_page(actual * sizeof *info,
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
-		kr = kmem_alloc_pageable(ipc_kernel_map, &addr, size,
-		    VM_KERN_MEMORY_IPC);
+		kr = kmem_alloc(ipc_kernel_map, &addr, size,
+		    KMA_PAGEABLE | KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}

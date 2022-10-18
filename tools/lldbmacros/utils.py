@@ -14,6 +14,7 @@ import lldb
 import struct
 import six
 
+from core import PY3
 from core.cvalue import *
 from core.configuration import *
 from core.lazytarget import *
@@ -501,19 +502,36 @@ def loadDSYM(uuid, load_address, sections=[]):
 
 def RunShellCommand(command):
     """ Run a shell command in subprocess.
-        params: command with arguments to run
+        params: command with arguments to run (a list is preferred, but a string is also supported)
         returns: (exit_code, stdout, stderr)
     """
-    import shlex, subprocess
-    cmd_args = shlex.split(command)
-    output_str = ""
-    exit_code = 0
-    try:
-        output_str = subprocess.check_output(cmd_args, stderr=subprocess.STDOUT)
-    except subprocess.CalledProcessError as e:
-        exit_code = e.returncode
-    finally:
-        return (exit_code, output_str, '')
+    import subprocess
+
+    if not isinstance(command, list):
+        import shlex
+        command = shlex.split(command)
+
+    if PY3:
+        result = subprocess.run(command, capture_output=True, encoding="utf-8")
+        returncode =  result.returncode
+        stdout = result.stdout
+        stderr = result.stderr
+    else:
+        try:
+            process = subprocess.Popen(command, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+            stdout, stderr = process.communicate()
+            returncode = process.returncode
+        except OSError as e:
+            # This usually happens if the command cannot be found (e.g. ["derp"]), NOT because the command failed
+            returncode = 255
+            stdout = ""
+            stderr = str(e)
+
+    if returncode != 0:
+        print("Failed to run command. Command: {}, "
+              "exit code: {}, stdout: '{}', stderr: '{}'".format(command, returncode, stdout, stderr))
+
+    return (returncode, stdout, stderr)
 
 def dsymForUUID(uuid):
     """ Get dsym informaiton by calling dsymForUUID 
@@ -522,9 +540,11 @@ def dsymForUUID(uuid):
             {} - a dictionary holding dsym information printed by dsymForUUID. 
             None - if failed to find information
     """
-    import subprocess
     import plistlib
-    output = six.ensure_str(subprocess.check_output(["/usr/local/bin/dsymForUUID", "--copyExecutable", uuid]))
+    rc, output, _ = RunShellCommand(["/usr/local/bin/dsymForUUID", "--copyExecutable", uuid])
+    if rc != 0:
+        return None
+
     if output:
         # because of <rdar://12713712>
         #plist = plistlib.readPlistFromString(output)

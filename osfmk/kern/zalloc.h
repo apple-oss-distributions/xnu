@@ -156,7 +156,7 @@ __options_decl(zone_create_flags_t, uint64_t, {
 	/** Type requires alignment to be preserved */
 	ZC_ALIGNMENT_REQUIRED   = 0x10000000,
 
-	/** Do not track this zone when gzalloc is engaged */
+	/** Obsolete */
 	ZC_NOGZALLOC            = 0x20000000,
 
 	/** Don't asynchronously replenish the zone via callouts */
@@ -178,8 +178,7 @@ __options_decl(zone_create_flags_t, uint64_t, {
 	/** This zone will back a kalloc heap */
 	ZC_KALLOC_HEAP          = 0x0800000000000000,
 
-	/** This zone can be crammed with foreign pages */
-	ZC_ALLOW_FOREIGN        = 0x1000000000000000,
+	/* unused                 0x1000000000000000, */
 
 	/** This zone belongs to the VM submap */
 	ZC_VM                   = 0x2000000000000000,
@@ -245,7 +244,8 @@ __enum_decl(zone_create_ro_id_t, zone_id_t, {
 	ZC_RO_ID_PROFILE,
 	ZC_RO_ID_PROTOBOX,
 	ZC_RO_ID_SB_FILTER,
-	ZC_RO_ID__LAST = ZC_RO_ID_SB_FILTER,
+	ZC_RO_ID_AMFI_OSENTITLEMENTS,
+	ZC_RO_ID__LAST = ZC_RO_ID_AMFI_OSENTITLEMENTS,
 });
 
 /*!
@@ -316,10 +316,6 @@ extern void     zdestroy(
  * The function panics if the check fails as it indicates that the kernel
  * internals have been compromised.
  *
- * Note that zone_require() can only work with:
- * - zones not allowing foreign memory
- * - zones in the general submap.
- *
  * @param zone          the zone the address needs to belong to.
  * @param addr          the element address to check.
  */
@@ -350,21 +346,6 @@ extern void     zone_require(
 extern void     zone_require_ro(
 	zone_id_t       zone_id,
 	vm_size_t       elem_size,
-	void           *addr __unsafe_indexable);
-
-/*!
- * @function zone_require_ro_range_contains
- *
- * @abstract
- * Version of zone require intended for zones created with ZC_READONLY
- * that only checks that the zone is RO and that the address is in
- * the zone's submap
- *
- * @param zone_id       the zone id the address needs to belong to.
- * @param addr          the element address to check.
- */
-extern void     zone_require_ro_range_contains(
-	zone_id_t       zone_id,
 	void           *addr __unsafe_indexable);
 
 /*!
@@ -408,6 +389,22 @@ extern void     zone_require_ro_range_contains(
  * free the incoming memory on failure cases.
  *
  #if XNU_KERNEL_PRIVATE
+ * @const Z_KALLOC_ARRAY
+ * Instead of returning a standard "pointer" return a pointer that encodes
+ * its size-class into the pointer itself (Only for kalloc, might limit
+ * the range of allocations that can be done).
+ *
+ * @const Z_MAY_COPYINMAP
+ * This data allocation might be used with vm_map_copyin().
+ * This allows for those allocations to be associated with a proper VM object.
+ *
+ * @const Z_FULLSIZE
+ * Used to indicate that the caller will use all available space in excess
+ * from the requested allocation size.
+ *
+ * @const Z_SKIP_KASAN
+ * Tell zalloc() not to do any kasan adjustments.
+ *
  * @const Z_PGZ
  * Used by zalloc internally to denote an allocation that we will try
  * to guard with PGZ.
@@ -436,6 +433,14 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	Z_REALLOCF      = 0x0008,
 
 #if XNU_KERNEL_PRIVATE
+	Z_KALLOC_ARRAY  = 0x0080,
+	Z_MAY_COPYINMAP = 0x0100,
+	Z_FULLSIZE      = 0x0200,
+#if KASAN
+	Z_SKIP_KASAN    = 0x0400,
+#else
+	Z_SKIP_KASAN    = 0x0000,
+#endif
 	Z_PGZ           = 0x0800,
 	Z_VM_TAG_BT_BIT = 0x1000,
 	Z_PCPU          = 0x2000,
@@ -450,6 +455,7 @@ __options_decl(zalloc_flags_t, uint32_t, {
 
 	Z_KPI_MASK             = Z_WAITOK | Z_NOWAIT | Z_NOPAGEWAIT | Z_ZERO,
 #if XNU_KERNEL_PRIVATE
+	Z_ZERO_VM_TAG_BT_BIT   = Z_ZERO | Z_VM_TAG_BT_BIT,
 	/** used by kalloc to propagate vm tags for -zt */
 	Z_VM_TAG_MASK   = 0xffff0000,
 
@@ -458,6 +464,16 @@ __options_decl(zalloc_flags_t, uint32_t, {
 #define Z_VM_TAG_BT(fl, tag)  ((zalloc_flags_t)(Z_VM_TAG(fl, tag) | Z_VM_TAG_BT_BIT))
 #endif
 });
+
+/*
+ * This type is used so that kalloc_internal has good calling conventions
+ * for callers who want to cheaply both know the allocated address
+ * and the actual size of the allocation.
+ */
+struct kalloc_result {
+	void         *addr __sized_by(size);
+	vm_size_t     size;
+};
 
 /*!
  * @function zalloc
@@ -510,6 +526,23 @@ extern void *__unsafe_indexable zalloc_flags(
 	zone_or_view_t  zone_or_view,
 	zalloc_flags_t  flags);
 
+__attribute__((malloc))
+static inline void *__unsafe_indexable
+__zalloc_flags(
+	zone_or_view_t  zone_or_view,
+	zalloc_flags_t  flags)
+{
+	void *__unsafe_indexable addr = (zalloc_flags)(zone_or_view, flags);
+	if (flags & Z_NOFAIL) {
+		__builtin_assume(addr != NULL);
+	}
+	return addr;
+}
+
+#ifndef XNU_KERNEL_PRIVATE
+#define zalloc_flags(zov, fl) __zalloc_flags(zov, fl)
+#endif
+
 /*!
  * @macro zalloc_id
  *
@@ -526,6 +559,23 @@ extern void *__unsafe_indexable zalloc_id(
 	zone_id_t       zid,
 	zalloc_flags_t  flags);
 
+__attribute__((malloc))
+static inline void *__unsafe_indexable
+__zalloc_id(
+	zone_id_t       zid,
+	zalloc_flags_t  flags)
+{
+	void *__unsafe_indexable addr = (zalloc_id)(zid, flags);
+	if (flags & Z_NOFAIL) {
+		__builtin_assume(addr != NULL);
+	}
+	return addr;
+}
+
+#ifndef XNU_KERNEL_PRIVATE
+#define zalloc_id(zid, fl) __zalloc_id(zid, fl)
+#endif
+
 /*!
  * @function zalloc_ro
  *
@@ -541,6 +591,23 @@ __attribute__((malloc))
 extern void *__unsafe_indexable zalloc_ro(
 	zone_id_t       zone_id,
 	zalloc_flags_t  flags);
+
+__attribute__((malloc))
+static inline void *__unsafe_indexable
+__zalloc_ro(
+	zone_id_t       zone_id,
+	zalloc_flags_t  flags)
+{
+	void *__unsafe_indexable addr = (zalloc_ro)(zone_id, flags);
+	if (flags & Z_NOFAIL) {
+		__builtin_assume(addr != NULL);
+	}
+	return addr;
+}
+
+#ifndef XNU_KERNEL_PRIVATE
+#define zalloc_ro(zid, fl) __zalloc_ro(zid, fl)
+#endif
 
 /*!
  * @function zalloc_ro_mut
@@ -871,18 +938,14 @@ struct zone_view {
  *
  * @const KHEAP_ID_KT_VAR
  * Indicates zones part of the KHEAP_KT_VAR heap.
- *
- * @const KHEAP_ID_KEXT
- * Indicates zones part of the KHEAP_KEXT heap.
  */
 __enum_decl(zone_kheap_id_t, uint32_t, {
 	KHEAP_ID_NONE,
 	KHEAP_ID_DEFAULT,
 	KHEAP_ID_DATA_BUFFERS,
 	KHEAP_ID_KT_VAR,
-	KHEAP_ID_KEXT,
 
-#define KHEAP_ID_COUNT (KHEAP_ID_KEXT + 1)
+#define KHEAP_ID_COUNT (KHEAP_ID_KT_VAR + 1)
 });
 
 /*!
@@ -966,7 +1029,7 @@ __enum_decl(zone_kheap_id_t, uint32_t, {
  * @returns             the allocated element
  */
 __attribute__((malloc))
-extern void *__unsafe_indexable zalloc_permanent_tag(
+extern void *__sized_by(size) zalloc_permanent_tag(
 	vm_size_t       size,
 	vm_offset_t     align_mask,
 	vm_tag_t        tag);
@@ -1089,6 +1152,20 @@ extern void *__zpercpu zalloc_percpu(
 	zone_or_view_t  zone_or_view,
 	zalloc_flags_t  flags);
 
+static inline void *__zpercpu
+__zalloc_percpu(
+	zone_or_view_t  zone_or_view,
+	zalloc_flags_t  flags)
+{
+	void *__unsafe_indexable addr = (zalloc_percpu)(zone_or_view, flags);
+	if (flags & Z_NOFAIL) {
+		__builtin_assume(addr != NULL);
+	}
+	return addr;
+}
+
+#define zalloc_percpu(zov, fl) __zalloc_percpu(zov, fl)
+
 /*!
  * @function zfree_percpu()
  *
@@ -1177,23 +1254,23 @@ __enum_decl(zone_reserved_id_t, zone_id_t, {
 	ZONE_ID_PROFILE_RO,
 	ZONE_ID_PROTOBOX,
 	ZONE_ID_SB_FILTER,
+	ZONE_ID_AMFI_OSENTITLEMENTS,
 
 	ZONE_ID__FIRST_RO = ZONE_ID_THREAD_RO,
 	ZONE_ID__FIRST_RO_EXT = ZONE_ID_SANDBOX_RO,
-	ZONE_ID__LAST_RO_EXT = ZONE_ID_SB_FILTER,
+	ZONE_ID__LAST_RO_EXT = ZONE_ID_AMFI_OSENTITLEMENTS,
 	ZONE_ID__LAST_RO = ZONE_ID__LAST_RO_EXT,
 
 	ZONE_ID_PMAP,
 	ZONE_ID_VM_MAP,
-	ZONE_ID_VM_MAP_COPY,
 	ZONE_ID_VM_MAP_ENTRY,
 	ZONE_ID_VM_MAP_HOLES,
+	ZONE_ID_VM_MAP_COPY,
 	ZONE_ID_VM_PAGES,
 	ZONE_ID_IPC_PORT,
 	ZONE_ID_IPC_PORT_SET,
 	ZONE_ID_IPC_VOUCHERS,
-	ZONE_ID_TASK,
-	ZONE_ID_PROC,
+	ZONE_ID_PROC_TASK,
 	ZONE_ID_THREAD,
 	ZONE_ID_TURNSTILE,
 	ZONE_ID_SEMAPHORE,
@@ -1309,7 +1386,7 @@ extern zone_t   zone_create_ext(
 	static __startup_data struct zone_create_startup_spec \
 	__startup_zone_spec_ ## var = { &var, name, size, flags, \
 	    ZONE_ID_ANY, NULL }; \
-	STARTUP_ARG(ZALLOC, STARTUP_RANK_MIDDLE, zone_create_startup, \
+	STARTUP_ARG(ZALLOC, STARTUP_RANK_FOURTH, zone_create_startup, \
 	    &__startup_zone_spec_ ## var)
 
 /*!
@@ -1376,28 +1453,11 @@ extern zone_t   zone_create_ext(
  * - isn't sensitive to @c zone_t::elem_size being compromised,
  * - is slightly faster as it saves one load and a multiplication.
  *
- * @warning: zones using foreign memory can't use this interface.
- *
  * @param zone_id       the zone ID the address needs to belong to.
  * @param elem_size     the size of elements for this zone.
  * @param addr          the element address to check.
  */
 extern void     zone_id_require(
-	zone_id_t               zone_id,
-	vm_size_t               elem_size,
-	void                   *addr __unsafe_indexable);
-
-/*!
- * @function zone_id_require_allow_foreign
- *
- * @abstract
- * Requires for a given pointer to belong to the specified zone, by ID and size.
- *
- * @discussion
- * This is a version of @c zone_id_require() that works with zones allowing
- * foreign memory.
- */
-extern void     zone_id_require_allow_foreign(
 	zone_id_t               zone_id,
 	vm_size_t               elem_size,
 	void                   *addr __unsafe_indexable);
@@ -1411,6 +1471,19 @@ extern void     zone_set_noexpand(
 extern void     zone_set_exhaustible(
 	zone_t          zone,
 	vm_size_t       max_elements);
+
+/*!
+ * @function zone_raise_reserve()
+ *
+ * @brief
+ * Used to raise the reserve on a zone.
+ *
+ * @discussion
+ * Can be called from any context (zone_create_ext() setup hook or after).
+ */
+extern void     zone_raise_reserve(
+	zone_or_view_t  zone_or_view,
+	uint16_t        min_elements);
 
 /*!
  * @function zone_fill_initially
@@ -1509,29 +1582,32 @@ struct zone_create_startup_spec {
 extern void     zone_create_startup(
 	struct zone_create_startup_spec *spec);
 
-#define __ZONE_DECLARE_TYPE(var, type_t) \
+#define __ZONE_DECLARE_TYPE(var, type_t) __ZONE_DECLARE_TYPE2(var, type_t)
+#define __ZONE_DECLARE_TYPE2(var, type_t) \
 	__attribute__((visibility("hidden"))) \
-	extern type_t *__zalloc__##var##__type_name
+	extern type_t *__single __zalloc__##var##__type_name
 
 #define __ZONE_INIT1(ns, var, name, size, flags, zid, setup) \
 	static __startup_data struct zone_create_startup_spec \
 	__startup_zone_spec_ ## ns = { var, name, size, flags, zid, setup }; \
-	STARTUP_ARG(ZALLOC, STARTUP_RANK_MIDDLE, zone_create_startup, \
+	STARTUP_ARG(ZALLOC, STARTUP_RANK_FOURTH, zone_create_startup, \
 	    &__startup_zone_spec_ ## ns)
 
 #define __ZONE_INIT(ns, var, name, size, flags, zid, setup) \
 	__ZONE_INIT1(ns, var, name, size, flags, zid, setup) \
 
 #define __zalloc_cast(namespace, expr) \
-	__unsafe_forge_single(typeof(__zalloc__##namespace##__type_name), expr)
+	((typeof(__zalloc__##namespace##__type_name))__unsafe_forge_single(void *, expr))
 
-#define zalloc_id(zid, flags)   __zalloc_cast(zid, (zalloc_id)(zid, flags))
-#define zalloc_ro(zid, flags)   __zalloc_cast(zid, (zalloc_ro)(zid, flags))
+#define zalloc_id(zid, flags)   __zalloc_cast(zid, (__zalloc_id)(zid, flags))
+#define zalloc_ro(zid, flags)   __zalloc_cast(zid, (__zalloc_ro)(zid, flags))
 #if ZALLOC_TYPE_SAFE
 #define zalloc(zov)             __zalloc_cast(zov, (zalloc)(zov))
 #define zalloc_noblock(zov)     __zalloc_cast(zov, (zalloc_noblock)(zov))
-#define zalloc_flags(zov, fl)   __zalloc_cast(zov, (zalloc_flags)(zov, fl))
-#endif
+#define zalloc_flags(zov, fl)   __zalloc_cast(zov, (__zalloc_flags)(zov, fl))
+#else /* ZALLOC_TYPE_SAFE */
+#define zalloc_flags(zov, fl)   __zalloc_flags(zov, fl)
+#endif /* !ZALLOC_TYPE_SAFE */
 
 struct zone_view_startup_spec {
 	zone_view_t         zv_view;
@@ -1548,21 +1624,24 @@ extern void zone_view_startup_init(
 extern void zone_userspace_reboot_checks(void);
 
 #if VM_TAG_SIZECLASSES
-extern zalloc_flags_t __zone_flags_mix_tag(
-	zone_t                  zone,
-	zalloc_flags_t          flags,
-	vm_allocation_site_t   *site) __pure2;
-#else
+extern void __zone_site_register(
+	vm_allocation_site_t   *site);
+
+#define VM_ALLOC_SITE_TAG() ({ \
+	__PLACE_IN_SECTION("__DATA, __data")                                   \
+	static vm_allocation_site_t site = { .refcount = 2, };                 \
+	STARTUP_ARG(ZALLOC, STARTUP_RANK_LAST, __zone_site_register, &site);   \
+	site.tag;                                                              \
+})
+#else /* VM_TAG_SIZECLASSES */
+#define VM_ALLOC_SITE_TAG()                     VM_KERN_MEMORY_NONE
+#endif /* !VM_TAG_SIZECLASSES */
+
 static inline zalloc_flags_t
-__zone_flags_mix_tag(
-	zone_t                  zone,
-	zalloc_flags_t          flags,
-	vm_allocation_site_t   *site)
+__zone_flags_mix_tag(zalloc_flags_t flags, vm_tag_t tag)
 {
-#pragma unused(zone, site)
-	return flags;
+	return (flags & Z_VM_TAG_MASK) ? flags : Z_VM_TAG(flags, (uint32_t)tag);
 }
-#endif
 
 #if DEBUG || DEVELOPMENT
 #  if __LP64__
@@ -1613,6 +1692,10 @@ extern vm_offset_t __pgz_decode_allow_invalid(
 	zone_id_t               zid);
 
 #endif
+#if DEBUG || DEVELOPMENT
+extern size_t zone_pages_wired;
+extern size_t zone_guard_pages;
+#endif /* DEBUG || DEVELOPMENT */
 #if CONFIG_ZLEAKS
 extern uint32_t                 zleak_active;
 extern vm_size_t                zleak_max_zonemap_size;

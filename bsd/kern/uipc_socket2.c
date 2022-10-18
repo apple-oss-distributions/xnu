@@ -104,6 +104,8 @@
 #include <netinet/mptcp_var.h>
 #endif
 
+extern uint32_t net_wake_pkt_debug;
+
 #define DBG_FNC_SBDROP          NETDBG_CODE(DBG_NETSOCK, 4)
 #define DBG_FNC_SBAPPEND        NETDBG_CODE(DBG_NETSOCK, 5)
 
@@ -478,7 +480,7 @@ sonewconn_internal(struct socket *head, int connstatus)
 	sflt_initsock(so);
 
 	if (connstatus) {
-		so->so_state |= connstatus;
+		so->so_state |= (short)connstatus;
 		sorwakeup(head);
 		wakeup((caddr_t)&head->so_timeo);
 	}
@@ -1705,7 +1707,7 @@ sbcompress(struct sockbuf *sb, struct mbuf *m, struct mbuf *n)
 	}
 	if (eor != 0) {
 		if (n != NULL) {
-			n->m_flags |= eor;
+			n->m_flags |= M_EOR;
 		} else {
 			printf("semi-panic: sbcompress\n");
 		}
@@ -2317,7 +2319,47 @@ sowriteable(struct socket *so)
 		return 1;
 	}
 
-	if (sbspace(&(so)->so_snd) >= (so)->so_snd.sb_lowat) {
+	int64_t data = sbspace(&so->so_snd);
+	int64_t lowat = so->so_snd.sb_lowat;
+	/*
+	 * Deal with connected UNIX domain sockets which
+	 * rely on the fact that the sender's socket buffer is
+	 * actually the receiver's socket buffer.
+	 */
+	if (SOCK_DOM(so) == PF_LOCAL) {
+		struct unpcb *unp = sotounpcb(so);
+		if (unp != NULL && unp->unp_conn != NULL &&
+		    unp->unp_conn->unp_socket != NULL) {
+			struct socket *so2 = unp->unp_conn->unp_socket;
+			/*
+			 * At this point we know that `so' is locked
+			 * and that `unp_conn` isn't going to change.
+			 * However, we don't lock `so2` because doing so
+			 * may require unlocking `so'
+			 * (see unp_get_locks_in_order()).
+			 *
+			 * Two cases can happen:
+			 *
+			 * 1) we return 1 and tell the application that
+			 *    it can write.  Meanwhile, another thread
+			 *    fills up the socket buffer.  This will either
+			 *    lead to a blocking send or EWOULDBLOCK
+			 *    which the application should deal with.
+			 * 2) we return 0 and tell the application that
+			 *    the socket is not writable.  Meanwhile,
+			 *    another thread depletes the receive socket
+			 *    buffer. In this case the application will
+			 *    be woken up by sb_notify().
+			 *
+			 * MIN() is required because otherwise sosendcheck()
+			 * may return EWOULDBLOCK since it only considers
+			 * so->so_snd.
+			 */
+			data = MIN(data, sbspace(&so2->so_rcv));
+		}
+	}
+
+	if (data >= lowat) {
 		if (so->so_flags & SOF_NOTSENT_LOWAT) {
 			if ((SOCK_DOM(so) == PF_INET6 ||
 			    SOCK_DOM(so) == PF_INET) &&
@@ -2607,9 +2649,27 @@ sowwakeup(struct socket *so)
 	}
 }
 
-void
-soevent(struct socket *so, long hint)
+static void
+soevupcall(struct socket *so, uint32_t hint)
 {
+	if (so->so_event != NULL) {
+		caddr_t so_eventarg = so->so_eventarg;
+
+		hint &= so->so_eventmask;
+		if (hint != 0) {
+			so->so_event(so, so_eventarg, hint);
+		}
+	}
+}
+
+void
+soevent(struct socket *so, uint32_t hint)
+{
+	if (net_wake_pkt_debug > 0 && (hint & SO_FILT_HINT_WAKE_PKT)) {
+		os_log(OS_LOG_DEFAULT, "%s: SO_FILT_HINT_WAKE_PKT so %p",
+		    __func__, so);
+	}
+
 	if (so->so_flags & SOF_KNOTE) {
 		KNOTE(&so->so_klist, hint);
 	}
@@ -2626,19 +2686,6 @@ soevent(struct socket *so, long hint)
 	    !(so->so_restrictions & SO_RESTRICT_DENY_EXPENSIVE) &&
 	    !(so->so_restrictions & SO_RESTRICT_DENY_CONSTRAINED)) {
 		soevent_ifdenied(so);
-	}
-}
-
-void
-soevupcall(struct socket *so, long hint)
-{
-	if (so->so_event != NULL) {
-		caddr_t so_eventarg = so->so_eventarg;
-
-		hint &= so->so_eventmask;
-		if (hint != 0) {
-			so->so_event(so, so_eventarg, hint);
-		}
 	}
 }
 
@@ -2720,7 +2767,9 @@ alloc_sockaddr(size_t size, zalloc_flags_t flags)
 {
 	VERIFY((size) <= UINT8_MAX);
 
+	__typed_allocators_ignore_push
 	struct sockaddr *sa = kheap_alloc(KHEAP_SONAME, size, flags | Z_ZERO);
+	__typed_allocators_ignore_pop
 	if (sa != NULL) {
 		sa->sa_len = (uint8_t)size;
 	}
@@ -2870,7 +2919,7 @@ soclearfastopen(struct socket *so)
 }
 
 void
-sonullevent(struct socket *so, void *arg, long hint)
+sonullevent(struct socket *so, void *arg, uint32_t hint)
 {
 #pragma unused(so, arg, hint)
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -67,28 +67,62 @@
 
 typedef struct kfs_event {
 	LIST_ENTRY(kfs_event) kevent_list;
-	int16_t        type;       // type code of this event
-	u_int16_t      flags,      // per-event flags
-	    len;                   // the length of the path in "str"
-	int32_t        refcount;   // number of clients referencing this
-	pid_t          pid;        // pid of the process that did the op
-
 	uint64_t       abstime;    // when this event happened (mach_absolute_time())
-	ino64_t        ino;
-	dev_t          dev;
-	int32_t        mode;
-	uid_t          uid;
-	gid_t          gid;
+	int16_t        type;       // type code of this event
+	uint16_t       flags;      // per-event flags
+	int32_t        refcount;   // number of clients referencing this
+	pid_t          pid;
+	int32_t        spare;
 
-	const char    *str;
+	union {
+		struct regular_event {
+			// This must match the layout of fse_info
+			// exactly, except for the "nlink" field is
+			// not included here.  See copy_out_kfse()
+			// for all of the sordid details, and also
+			// the _Static_assert() statements below.
+			ino64_t          ino;
+			dev_t            dev;
+			int32_t          mode;
+			uid_t            uid;
+			gid_t            gid;
+			struct kfs_event *dest; // if this is a two-file op
+			const char       *str;
+			uint16_t         len;
+		} regular_event;
 
-	struct kfs_event *dest; // if this is a two-file op
+		struct {
+			ino64_t          src_ino;
+			ino64_t          dst_ino;
+			uint64_t         docid;
+			dev_t            dev;
+		} docid_event;
+
+		struct {
+			audit_token_t    audit_token;
+			const char       *str;
+			uint16_t         len;
+		} access_granted_event;
+	};
 } kfs_event;
+
+_Static_assert(offsetof(struct regular_event, ino) == offsetof(fse_info, ino),
+    "kfs_event and fse_info out-of-sync");
+_Static_assert(offsetof(struct regular_event, dev) == offsetof(fse_info, dev),
+    "kfs_event and fse_info out-of-sync");
+_Static_assert(offsetof(struct regular_event, mode) == offsetof(fse_info, mode),
+    "kfs_event and fse_info out-of-sync");
+_Static_assert(offsetof(struct regular_event, uid) == offsetof(fse_info, uid),
+    "kfs_event and fse_info out-of-sync");
+_Static_assert(offsetof(struct regular_event, gid) == offsetof(fse_info, gid),
+    "kfs_event and fse_info out-of-sync");
+
+#define KFSE_INFO_COPYSIZE offsetof(fse_info, nlink)
 
 // flags for the flags field
 #define KFSE_COMBINED_EVENTS          0x0001
 #define KFSE_CONTAINS_DROPPED_EVENTS  0x0002
-#define KFSE_RECYCLED_EVENT           0x0004
+#define KFSE_ON_LIST                  0x0004
 #define KFSE_BEING_CREATED            0x0008
 
 LIST_HEAD(kfse_list, kfs_event) kfse_list_head = LIST_HEAD_INITIALIZER(x);
@@ -290,32 +324,7 @@ need_fsevent(int type, vnode_t vp)
 #define is_throw_away(x)  ((x) == FSE_STAT_CHANGED || (x) == FSE_CONTENT_MODIFIED)
 
 
-// Ways that an event can be reused:
-//
-// "combined" events mean that there were two events for
-// the same vnode or path and we're combining both events
-// into a single event.  The primary event gets a bit that
-// marks it as having been combined.  The secondary event
-// is essentially dropped and the kfse structure reused.
-//
-// "collapsed" means that multiple events below a given
-// directory are collapsed into a single event.  in this
-// case, the directory that we collapse into and all of
-// its children must be re-scanned.
-//
-// "recycled" means that we're completely blowing away
-// the event since there are other events that have info
-// about the same vnode or path (and one of those other
-// events will be marked as combined or collapsed as
-// appropriate).
-//
-#define KFSE_COMBINED   0x0001
-#define KFSE_COLLAPSED  0x0002
-#define KFSE_RECYCLED   0x0004
-
 int num_dropped         = 0;
-int num_parent_switch   = 0;
-int num_recycled_rename = 0;
 
 static struct timeval last_print;
 
@@ -341,6 +350,18 @@ static mach_timebase_info_data_t    sTimebaseInfo = { 0, 0 };
 
 #define MAX_HARDLINK_NOTIFICATIONS 128
 
+static inline void
+kfse_init(kfs_event *kfse, int type, uint64_t time, proc_t p)
+{
+	memset(kfse, 0, sizeof(*kfse));
+	kfse->refcount = 1;
+	kfse->type =     (int16_t)type;
+	kfse->abstime =  time;
+	kfse->pid =      proc_getpid(p);
+
+	OSBitOrAtomic16(KFSE_BEING_CREATED, &kfse->flags);
+}
+
 int
 add_fsevent(int type, vfs_context_t ctx, ...)
 {
@@ -354,11 +375,14 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 	dev_t             dev = 0;
 	uint64_t          now, elapsed;
 	uint64_t          orig_linkid = 0, next_linkid = 0;
+	uint64_t          link_parentid = 0;
 	char             *pathbuff = NULL, *path_override = NULL;
+	char              *link_name = NULL;
 	vnode_t           link_vp = NULL;
-	int               pathbuff_len;
+	int               pathbuff_len = 0;
 	uthread_t         ut = get_bsdthread_info(current_thread());
 	bool              do_all_links = true;
+	bool              do_cache_reset = false;
 
 	if (type == FSE_CONTENT_MODIFIED_NO_HLINK) {
 		do_all_links = false;
@@ -393,7 +417,18 @@ restart:
 	// (as long as it's not an event type that can never be the
 	// same as a previous event)
 	//
-	if (path_override == NULL && type != FSE_CREATE_FILE && type != FSE_DELETE && type != FSE_RENAME && type != FSE_EXCHANGE && type != FSE_CHOWN && type != FSE_DOCID_CHANGED && type != FSE_DOCID_CREATED && type != FSE_CLONE) {
+	if (path_override == NULL &&
+	    type != FSE_CREATE_FILE &&
+	    type != FSE_DELETE &&
+	    type != FSE_RENAME &&
+	    type != FSE_EXCHANGE &&
+	    type != FSE_CHOWN &&
+	    type != FSE_DOCID_CHANGED &&
+	    type != FSE_DOCID_CREATED &&
+	    type != FSE_CLONE &&
+	    // don't coalesce FSE_ACCESS_GRANTED because it could
+	    // have been granted to a different process.
+	    type != FSE_ACCESS_GRANTED) {
 		void *ptr = NULL;
 		int   vid = 0, was_str = 0, nlen = 0;
 
@@ -530,23 +565,11 @@ restart:
 		return ENOSPC;
 	}
 
-	memset(kfse, 0, sizeof(kfs_event));
-	kfse->refcount = 1;
-	OSBitOrAtomic16(KFSE_BEING_CREATED, &kfse->flags);
-
+	kfse_init(kfse, type, now, p);
 	last_event_ptr = kfse;
-	kfse->type     = (int16_t)type;
-	kfse->abstime  = now;
-	kfse->pid      = proc_getpid(p);
 	if (type == FSE_RENAME || type == FSE_EXCHANGE || type == FSE_CLONE) {
-		memset(kfse_dest, 0, sizeof(kfs_event));
-		kfse_dest->refcount = 1;
-		OSBitOrAtomic16(KFSE_BEING_CREATED, &kfse_dest->flags);
-		kfse_dest->type     = (int16_t)type;
-		kfse_dest->pid      = proc_getpid(p);
-		kfse_dest->abstime  = now;
-
-		kfse->dest = kfse_dest;
+		kfse_init(kfse_dest, type, now, p);
+		kfse->regular_event.dest = kfse_dest;
 	}
 
 	num_events_outstanding++;
@@ -554,6 +577,7 @@ restart:
 		num_pending_rename++;
 	}
 	LIST_INSERT_HEAD(&kfse_list_head, kfse, kevent_list);
+	OSBitOrAtomic16(KFSE_ON_LIST, &kfse->flags);
 
 	if (kfse->refcount < 1) {
 		panic("add_fsevent: line %d: kfse recount %d but should be at least 1", __LINE__, kfse->refcount);
@@ -569,69 +593,163 @@ restart:
 	cur = kfse;
 
 	if (type == FSE_DOCID_CREATED || type == FSE_DOCID_CHANGED) {
-		uint64_t val;
-
 		//
-		// These events are special and not like the other events.  They only
-		// have a dev_t, src inode #, dest inode #, and a doc-id.  We use the
-		// fields that we can in the kfse but have to overlay the dest inode
-		// number and the doc-id on the other fields.
+		// These events are special and not like the other events.
+		// They only have a dev_t, src inode #, dest inode #, and
+		// a doc-id (va_arg'd to us in that order).  If we don't
+		// get one of them, then the error-check filler will
+		// catch it.
 		//
-
-		// First the dev_t
+		do_all_links = false;
 		arg_type = va_arg(ap, int32_t);
 		if (arg_type == FSE_ARG_DEV) {
-			cur->dev = (dev_t)(va_arg(ap, dev_t));
-		} else {
-			cur->dev = (dev_t)0xbadc0de1;
+			cur->docid_event.dev = (dev_t)(va_arg(ap, dev_t));
 		}
 
-		// next the source inode #
 		arg_type = va_arg(ap, int32_t);
 		if (arg_type == FSE_ARG_INO) {
-			cur->ino = (ino64_t)(va_arg(ap, ino64_t));
-		} else {
-			cur->ino = 0xbadc0de2;
+			cur->docid_event.src_ino =
+			    (ino64_t)(va_arg(ap, ino64_t));
 		}
 
-		// now the dest inode #
 		arg_type = va_arg(ap, int32_t);
 		if (arg_type == FSE_ARG_INO) {
-			val = (ino64_t)(va_arg(ap, ino64_t));
-		} else {
-			val = 0xbadc0de2;
+			cur->docid_event.dst_ino =
+			    (ino64_t)(va_arg(ap, ino64_t));
 		}
-		// overlay the dest inode number on the str/dest pointer fields
-		__nochk_memcpy(&cur->str, &val, sizeof(ino64_t));
 
-
-		// and last the document-id
 		arg_type = va_arg(ap, int32_t);
 		if (arg_type == FSE_ARG_INT32) {
-			val = (uint64_t)va_arg(ap, uint32_t);
+			cur->docid_event.docid =
+			    (uint64_t)va_arg(ap, uint32_t);
 		} else if (arg_type == FSE_ARG_INT64) {
-			val = (uint64_t)va_arg(ap, uint64_t);
-		} else {
-			val = 0xbadc0de3;
+			cur->docid_event.docid =
+			    (uint64_t)va_arg(ap, uint64_t);
 		}
 
-		// the docid is 64-bit and overlays the uid/gid fields
-		static_assert(sizeof(cur->uid) + sizeof(cur->gid) == sizeof(val), "gid/uid size mismatch");
-		static_assert(offsetof(struct kfs_event, gid) - offsetof(struct kfs_event, uid) == sizeof(cur->uid), "unexpected struct kfs_event layout");
-		memcpy(&cur->uid, &val, sizeof(cur->uid));
-		memcpy(&cur->gid, (u_int8_t *)&val + sizeof(cur->uid), sizeof(cur->gid));
+		goto done_with_args;
+	}
+
+	if (type == FSE_ACCESS_GRANTED) {
+		//
+		// This one is also different.  We get a path string
+		// and (maybe) and audit token.  If we don't get the
+		// audit token, we extract is from the vfs_context_t.
+		//
+		audit_token_t *atokenp = NULL;
+		vnode_t vp = NULL;
+		char *path_str = NULL;
+		size_t path_strlen = 0;
+		void *arg;
+		int32_t len32;
+
+		do_all_links = false;
+
+		while ((arg_type = va_arg(ap, int32_t)) != FSE_ARG_DONE) {
+			switch (arg_type) {
+			case FSE_ARG_STRING:
+				len32 = va_arg(ap, int32_t);
+				arg = va_arg(ap, char *);
+				if (path_str == NULL) {
+					path_str = arg;
+					path_strlen = len32;
+				}
+				break;
+
+			case FSE_ARG_PATH:
+				arg = va_arg(ap, char *);
+				if (path_str == NULL) {
+					path_str = arg;
+				}
+				break;
+
+			case FSE_ARG_VNODE:
+				arg = va_arg(ap, vnode_t);
+				if (vp == NULL) {
+					vp = arg;
+				}
+				break;
+
+			case FSE_ARG_AUDIT_TOKEN:
+				arg = va_arg(ap, audit_token_t *);
+				if (atokenp == NULL) {
+					atokenp = arg;
+				}
+				break;
+
+			default:
+				printf("add_fsevent: FSE_ACCESS_GRANTED unknown type %d\n", arg_type);
+				// just skip one 32-bit word and hope we
+				// sync up...
+				(void)va_arg(ap, int32_t);
+			}
+		}
+
+		if (atokenp != NULL) {
+			memcpy(&cur->access_granted_event.audit_token,
+			    atokenp,
+			    sizeof(cur->access_granted_event.audit_token));
+		} else if (vfs_context_copy_audit_token(ctx,
+		    &cur->access_granted_event.audit_token) != 0) {
+			OSBitOrAtomic16(KFSE_CONTAINS_DROPPED_EVENTS,
+			    &cur->flags);
+			goto done_with_args;
+		}
+
+		//
+		// If we got FSE_ARG_STRING, the length includes the
+		// terminating NUL.  If we got FSE_ARG_PATH, all we
+		// got was the string pointer, so get the length and
+		// adjust.  If we didn't get either, then the caller
+		// needs to have provided us with a vnode, and with
+		// that we can get the path.
+		//
+		if (path_str != NULL) {
+			if (path_strlen == 0) {
+				path_strlen = strlen(path_str) + 1;
+			}
+		} else if (vp != NULL) {
+			pathbuff = get_pathbuff();
+			pathbuff_len = MAXPATHLEN;
+			pathbuff[0] = '\0';
+			if (vn_getpath_no_firmlink(vp, pathbuff,
+			    &pathbuff_len) == 0) {
+				path_str = pathbuff;
+				path_strlen = pathbuff_len;
+			}
+		}
+
+		if (path_str != NULL) {
+			assert(path_strlen <= INT16_MAX);
+			cur->access_granted_event.str =
+			    vfs_addname(path_str, (uint32_t)path_strlen, 0, 0);
+			if (path_str == pathbuff) {
+				release_pathbuff(pathbuff);
+				pathbuff = NULL;
+			}
+		}
+		if (cur->access_granted_event.str == NULL) {
+			OSBitOrAtomic16(KFSE_CONTAINS_DROPPED_EVENTS,
+			    &cur->flags);
+		}
 
 		goto done_with_args;
 	}
 
 	if (type == FSE_UNMOUNT_PENDING) {
 		// Just a dev_t
+		// We use the same fields as the regular event, but we
+		// don't have all of the data.
+		do_all_links = false;
+
 		arg_type = va_arg(ap, int32_t);
 		if (arg_type == FSE_ARG_DEV) {
-			cur->dev = (dev_t)(va_arg(ap, dev_t));
-		} else {
-			cur->dev = (dev_t)0xbadc0de1;
+			cur->regular_event.dev = (dev_t)(va_arg(ap, dev_t));
 		}
+
+		cur->regular_event.dest = NULL;
+		cur->regular_event.str = NULL;
+		cur->regular_event.len = 0;
 
 		goto done_with_args;
 	}
@@ -643,7 +761,7 @@ restart:
 			struct vnode *vp;
 			struct vnode_attr va;
 
-			if (kfse->str != NULL) {
+			if (kfse->regular_event.str != NULL) {
 				cur = kfse_dest;
 			}
 
@@ -662,25 +780,42 @@ restart:
 			VATTR_WANTED(&va, va_nlink);
 			if ((ret = vnode_getattr(vp, &va, vfs_context_kernel())) != 0) {
 				// printf("add_fsevent: failed to getattr on vp %p (%d)\n", cur->fref.vp, ret);
-				cur->str = NULL;
+				cur->regular_event.str = NULL;
 				error = EINVAL;
 				goto clean_up;
 			}
 
-			cur->dev  = dev = (dev_t)va.va_fsid;
-			cur->ino  = (ino64_t)va.va_fileid;
-			cur->mode = (int32_t)vnode_vttoif(vnode_vtype(vp)) | va.va_mode;
-			cur->uid  = va.va_uid;
-			cur->gid  = va.va_gid;
+			cur->regular_event.dev  = dev = (dev_t)va.va_fsid;
+			cur->regular_event.ino  = (ino64_t)va.va_fileid;
+			cur->regular_event.mode = (int32_t)vnode_vttoif(vnode_vtype(vp)) | va.va_mode;
+			cur->regular_event.uid  = va.va_uid;
+			cur->regular_event.gid  = va.va_gid;
 			if (vp->v_flag & VISHARDLINK) {
-				cur->mode |= FSE_MODE_HLINK;
+				cur->regular_event.mode |= FSE_MODE_HLINK;
 				if ((vp->v_type == VDIR && va.va_dirlinkcount == 0) || (vp->v_type == VREG && va.va_nlink == 0)) {
-					cur->mode |= FSE_MODE_LAST_HLINK;
+					cur->regular_event.mode |= FSE_MODE_LAST_HLINK;
 				}
 				if (orig_linkid == 0) {
-					orig_linkid = cur->ino;
+					orig_linkid = cur->regular_event.ino;
 					orig_linkcount = MIN(va.va_nlink, MAX_HARDLINK_NOTIFICATIONS);
 					link_vp = vp;
+					if (vp->v_mount->mnt_kern_flag & MNTK_PATH_FROM_ID && !link_name) {
+						VATTR_INIT(&va);
+						VATTR_WANTED(&va, va_parentid);
+						VATTR_WANTED(&va, va_name);
+						link_name = zalloc(ZV_NAMEI);
+						va.va_name = link_name;
+						if ((ret = vnode_getattr(vp, &va, vfs_context_kernel()) != 0) ||
+						    !(VATTR_IS_SUPPORTED(&va, va_name)) ||
+						    !(VATTR_IS_SUPPORTED(&va, va_parentid))) {
+							zfree(ZV_NAMEI, link_name);
+							link_name = NULL;
+						}
+						if (link_name) {
+							link_parentid = va.va_parentid;
+						}
+						va.va_name = NULL;
+					}
 				}
 			}
 
@@ -691,7 +826,8 @@ restart:
 
 				pathbuff[0] = '\0';
 				if ((ret = vn_getpath_no_firmlink(vp, pathbuff, &pathbuff_len)) != 0 || pathbuff[0] == '\0') {
-					cur->flags |= KFSE_CONTAINS_DROPPED_EVENTS;
+					OSBitOrAtomic16(KFSE_CONTAINS_DROPPED_EVENTS,
+					    &cur->flags);
 
 					do {
 						if (vp->v_parent != NULL) {
@@ -725,9 +861,11 @@ restart:
 			}
 
 			// store the path by adding it to the global string table
-			cur->len = (u_int16_t)pathbuff_len;
-			cur->str = vfs_addname(pathbuff, pathbuff_len, 0, 0);
-			if (cur->str == NULL || cur->str[0] == '\0') {
+			cur->regular_event.len = (u_int16_t)pathbuff_len;
+			cur->regular_event.str =
+			    vfs_addname(pathbuff, pathbuff_len, 0, 0);
+			if (cur->regular_event.str == NULL ||
+			    cur->regular_event.str[0] == '\0') {
 				panic("add_fsevent: was not able to add path %s to event %p.", pathbuff, cur);
 			}
 
@@ -744,49 +882,54 @@ restart:
 
 			fse = va_arg(ap, fse_info *);
 
-			cur->dev  = dev = (dev_t)fse->dev;
-			cur->ino  = (ino64_t)fse->ino;
-			cur->mode = (int32_t)fse->mode;
-			cur->uid  = (uid_t)fse->uid;
-			cur->gid  = (uid_t)fse->gid;
+			cur->regular_event.dev  = dev = (dev_t)fse->dev;
+			cur->regular_event.ino  = (ino64_t)fse->ino;
+			cur->regular_event.mode = (int32_t)fse->mode;
+			cur->regular_event.uid  = (uid_t)fse->uid;
+			cur->regular_event.gid  = (uid_t)fse->gid;
 			// if it's a hard-link and this is the last link, flag it
 			if (fse->mode & FSE_MODE_HLINK) {
 				if (fse->nlink == 0) {
-					cur->mode |= FSE_MODE_LAST_HLINK;
+					cur->regular_event.mode |= FSE_MODE_LAST_HLINK;
 				}
 				if (orig_linkid == 0) {
-					orig_linkid = cur->ino;
+					orig_linkid = cur->regular_event.ino;
 					orig_linkcount = MIN(fse->nlink, MAX_HARDLINK_NOTIFICATIONS);
 				}
 			}
-			if (cur->mode & FSE_TRUNCATED_PATH) {
-				cur->flags |= KFSE_CONTAINS_DROPPED_EVENTS;
-				cur->mode &= ~FSE_TRUNCATED_PATH;
+			if (cur->regular_event.mode & FSE_TRUNCATED_PATH) {
+				OSBitOrAtomic16(KFSE_CONTAINS_DROPPED_EVENTS,
+				    &cur->flags);
+				cur->regular_event.mode &= ~FSE_TRUNCATED_PATH;
 			}
 			break;
 		}
 
 		case FSE_ARG_STRING:
-			if (kfse->str != NULL) {
+			if (kfse->regular_event.str != NULL) {
 				cur = kfse_dest;
 			}
 
-			cur->len = (int16_t)(va_arg(ap, int32_t) & 0x7fff);
-			if (cur->len >= 1) {
-				cur->str = vfs_addname(va_arg(ap, char *), cur->len, 0, 0);
+			cur->regular_event.len =
+			    (int16_t)(va_arg(ap, int32_t) & 0x7fff);
+			if (cur->regular_event.len >= 1) {
+				cur->regular_event.str =
+				    vfs_addname(va_arg(ap, char *),
+				    cur->regular_event.len, 0, 0);
 			} else {
-				printf("add_fsevent: funny looking string length: %d\n", (int)cur->len);
-				cur->len = 2;
-				cur->str = vfs_addname("/", cur->len, 0, 0);
+				printf("add_fsevent: funny looking string length: %d\n", (int)cur->regular_event.len);
+				cur->regular_event.len = 2;
+				cur->regular_event.str = vfs_addname("/",
+				    cur->regular_event.len, 0, 0);
 			}
-			if (cur->str[0] == 0) {
-				printf("add_fsevent: bogus looking string (len %d)\n", cur->len);
+			if (cur->regular_event.str[0] == 0) {
+				printf("add_fsevent: bogus looking string (len %d)\n", cur->regular_event.len);
 			}
 			break;
 
 		case FSE_ARG_INT32: {
 			uint32_t ival = (uint32_t)va_arg(ap, int32_t);
-			kfse->uid = ival;
+			kfse->regular_event.uid = ival;
 			break;
 		}
 
@@ -800,10 +943,11 @@ restart:
 done_with_args:
 	va_end(ap);
 
-	OSBitAndAtomic16(~KFSE_BEING_CREATED, &kfse->flags);
+	// XXX Memory barrier here?
 	if (kfse_dest) {
 		OSBitAndAtomic16(~KFSE_BEING_CREATED, &kfse_dest->flags);
 	}
+	OSBitAndAtomic16(~KFSE_BEING_CREATED, &kfse->flags);
 
 	//
 	// now we have to go and let everyone know that
@@ -840,7 +984,13 @@ clean_up:
 		pathbuff = NULL;
 	}
 	// replicate events for sibling hardlinks
-	if (do_all_links && (kfse->mode & FSE_MODE_HLINK) && !(kfse->mode & FSE_MODE_LAST_HLINK) && (type == FSE_STAT_CHANGED || type == FSE_CONTENT_MODIFIED || type == FSE_FINDER_INFO_CHANGED || type == FSE_XATTR_MODIFIED)) {
+	if (do_all_links &&
+	    (kfse->regular_event.mode & FSE_MODE_HLINK) &&
+	    !(kfse->regular_event.mode & FSE_MODE_LAST_HLINK) &&
+	    (type == FSE_STAT_CHANGED ||
+	    type == FSE_CONTENT_MODIFIED ||
+	    type == FSE_FINDER_INFO_CHANGED ||
+	    type == FSE_XATTR_MODIFIED)) {
 		if (orig_linkcount > 0 && orig_linkid != 0) {
 #ifndef APFSIOC_NEXT_LINK
 #define APFSIOC_NEXT_LINK  _IOWR('J', 10, uint64_t)
@@ -875,6 +1025,9 @@ clean_up:
 				if (iret == 0 && next_linkid != 0) {
 					fsid0 = link_vp->v_mount->mnt_vfsstat.f_fsid.val[0];
 					ut->uu_flag |= UT_KERN_RAGE_VNODES;
+					if (!do_cache_reset) {
+						do_cache_reset = true;
+					}
 					if ((iret = fsgetpath_internal(ctx, fsid0, next_linkid, MAXPATHLEN, path_override, FSOPT_NOFIRMLINKPATH, &path_override_len)) == 0) {
 						orig_linkcount--;
 						ut->uu_flag &= ~UT_KERN_RAGE_VNODES;
@@ -898,6 +1051,33 @@ clean_up:
 		}
 	}
 
+	if (link_name) {
+		/*
+		 * If we call fsgetpath on all the links, it will set the link origin cache
+		 * to the last link that the path was obtained for.
+		 * To restore the the original link id cache in APFS we need to issue a
+		 * lookup on the original directory + name for the link.
+		 */
+		if (do_cache_reset) {
+			vnode_t dvp = NULLVP;
+
+			if ((ret = VFS_VGET(link_vp->v_mount, (ino64_t)link_parentid, &dvp, vfs_context_kernel())) == 0) {
+				vnode_t lvp = NULLVP;
+
+				ret = vnode_lookupat(link_name, 0, &lvp, ctx, dvp);
+				if (!ret) {
+					vnode_put(lvp);
+					lvp = NULLVP;
+				}
+				vnode_put(dvp);
+				dvp = NULLVP;
+			}
+			ret = 0;
+		}
+		zfree(ZV_NAMEI, link_name);
+		link_name = NULL;
+	}
+
 	if (path_override) {
 		release_pathbuff(path_override);
 		path_override = NULL;
@@ -908,20 +1088,67 @@ clean_up:
 	return error;
 }
 
+int
+test_fse_access_granted(vnode_t vp, unsigned long type, vfs_context_t ctx)
+{
+	audit_token_t atoken;
+	char *pathbuff;
+	int error, pathbuff_len;
+
+	if (type == 0) {
+		return add_fsevent(FSE_ACCESS_GRANTED, ctx,
+		           FSE_ARG_VNODE, vp, FSE_ARG_DONE);
+	}
+
+	if (type == 1) {
+		error = vfs_context_copy_audit_token(ctx, &atoken);
+		if (error) {
+			return error;
+		}
+		return add_fsevent(FSE_ACCESS_GRANTED, ctx,
+		           FSE_ARG_VNODE, vp, FSE_ARG_AUDIT_TOKEN, &atoken,
+		           FSE_ARG_DONE);
+	}
+
+	if (type == 2 || type == 3) {
+		pathbuff = get_pathbuff();
+		pathbuff_len = MAXPATHLEN;
+		pathbuff[0] = '\0';
+		error = vn_getpath_no_firmlink(vp, pathbuff, &pathbuff_len);
+		if (error) {
+			release_pathbuff(pathbuff);
+			return error;
+		}
+		if (type == 2) {
+			error = add_fsevent(FSE_ACCESS_GRANTED, ctx,
+			    FSE_ARG_STRING, pathbuff_len, pathbuff,
+			    FSE_ARG_DONE);
+		} else {
+			error = add_fsevent(FSE_ACCESS_GRANTED, ctx,
+			    FSE_ARG_PATH, pathbuff, FSE_ARG_DONE);
+		}
+		release_pathbuff(pathbuff);
+		return error;
+	}
+
+	return ENOTSUP;
+}
 
 static void
 release_event_ref(kfs_event *kfse)
 {
 	int old_refcount;
-	kfs_event copy, dest_copy;
+	kfs_event *dest = NULL;
+	const char *path_str = NULL, *dest_path_str = NULL;
 
+	lock_fs_event_list();
 
 	old_refcount = OSAddAtomic(-1, &kfse->refcount);
 	if (old_refcount > 1) {
+		unlock_fs_event_list();
 		return;
 	}
 
-	lock_fs_event_list();
 	if (last_event_ptr == kfse) {
 		last_event_ptr = NULL;
 		last_event_type = -1;
@@ -932,98 +1159,94 @@ release_event_ref(kfs_event *kfse)
 		panic("release_event_ref: bogus kfse refcount %d", kfse->refcount);
 	}
 
-	if (kfse->refcount > 0 || kfse->type == FSE_INVALID) {
-		// This is very subtle.  Either of these conditions can
-		// be true if an event got recycled while we were waiting
-		// on the fs_event_list lock or the event got recycled,
-		// delivered, _and_ free'd by someone else while we were
-		// waiting on the fs event list lock.  In either case
-		// we need to just unlock the list and return without
-		// doing anything because if the refcount is > 0 then
-		// someone else will take care of free'ing it and when
-		// the kfse->type is invalid then someone else already
-		// has handled free'ing the event (while we were blocked
-		// on the event list lock).
-		//
-		unlock_fs_event_list();
-		return;
-	}
+	assert(kfse->refcount == 0);
+	assert(kfse->type != FSE_INVALID);
 
 	//
-	// make a copy of this so we can free things without
-	// holding the fs_event_buf lock
+	// Get pointers to all the things so we can free without
+	// holding any locks.
 	//
-	copy = *kfse;
-	if (kfse->type != FSE_DOCID_CREATED && kfse->type != FSE_DOCID_CHANGED && kfse->dest && OSAddAtomic(-1, &kfse->dest->refcount) == 1) {
-		dest_copy = *kfse->dest;
-	} else {
-		dest_copy.str  = NULL;
-		dest_copy.len  = 0;
-		dest_copy.type = FSE_INVALID;
-	}
+	if (kfse->type != FSE_DOCID_CREATED &&
+	    kfse->type != FSE_DOCID_CHANGED &&
+	    kfse->type != FSE_ACCESS_GRANTED) {
+		path_str = kfse->regular_event.str;
 
-	kfse->pid = kfse->type;         // save this off for debugging...
-	kfse->uid = (uid_t)(long)kfse->str;   // save this off for debugging...
-	kfse->gid = (gid_t)(long)current_thread();
-
-	kfse->str = (char *)0xdeadbeef;         // XXXdbg - catch any cheaters...
-
-	if (dest_copy.type != FSE_INVALID) {
-		kfse->dest->str = (char *)0xbadc0de; // XXXdbg - catch any cheaters...
-		kfse->dest->type = FSE_INVALID;
-
-		if (kfse->dest->kevent_list.le_prev != NULL) {
-			num_events_outstanding--;
-			LIST_REMOVE(kfse->dest, kevent_list);
-			memset(&kfse->dest->kevent_list, 0xa5, sizeof(kfse->dest->kevent_list));
-		}
-
-		zfree(event_zone, kfse->dest);
-	}
-
-	// mark this fsevent as invalid
-	{
-		int otype;
-
-		otype = kfse->type;
-		kfse->type = FSE_INVALID;
-
-		if (kfse->kevent_list.le_prev != NULL) {
-			num_events_outstanding--;
-			if (otype == FSE_RENAME) {
-				num_pending_rename--;
+		dest = kfse->regular_event.dest;
+		if (dest != NULL) {
+			assert(dest->type != FSE_INVALID);
+			if (OSAddAtomic(-1,
+			    &kfse->regular_event.dest->refcount) == 1) {
+				dest_path_str = dest->regular_event.str;
+			} else {
+				dest = NULL;
 			}
-			LIST_REMOVE(kfse, kevent_list);
-			memset(&kfse->kevent_list, 0, sizeof(kfse->kevent_list));
 		}
 	}
 
-	zfree(event_zone, kfse);
+	if (dest != NULL) {
+		if (dest->flags & KFSE_ON_LIST) {
+			num_events_outstanding--;
+			LIST_REMOVE(dest, kevent_list);
+		}
+	}
+
+	if (kfse->flags & KFSE_ON_LIST) {
+		num_events_outstanding--;
+		LIST_REMOVE(kfse, kevent_list);
+		if (kfse->type == FSE_RENAME) {
+			num_pending_rename--;
+		}
+	}
 
 	unlock_fs_event_list();
 
-	// if we have a pointer in the union
-	if (copy.str && copy.type != FSE_DOCID_CREATED && copy.type != FSE_DOCID_CHANGED) {
-		if (copy.len == 0) { // and it's not a string
-			panic("no more fref.vp!");
-			// vnode_rele_ext(copy.fref.vp, O_EVTONLY, 0);
-		} else {        // else it's a string
-			vfs_removename(copy.str);
-		}
+	zfree(event_zone, kfse);
+	if (dest != NULL) {
+		zfree(event_zone, dest);
 	}
 
-	if (dest_copy.type != FSE_INVALID && dest_copy.str) {
-		if (dest_copy.len == 0) {
-			panic("no more fref.vp!");
-			// vnode_rele_ext(dest_copy.fref.vp, O_EVTONLY, 0);
-		} else {
-			vfs_removename(dest_copy.str);
-		}
+	if (path_str != NULL) {
+		vfs_removename(path_str);
+	}
+	if (dest_path_str != NULL) {
+		vfs_removename(dest_path_str);
 	}
 }
 
 #define FSEVENTS_WATCHER_ENTITLEMENT            \
 	"com.apple.private.vfs.fsevents-watcher"
+
+//
+// We restrict this for two reasons:
+//
+// 1- So that naive processes don't get this firehose by default.
+//
+// 2- Because this event, when delivered to watcheres, includes the
+//    audit token of the process granted the access, and we don't
+//    want to leak that to random watchers.
+//
+#define FSEVENTS_ACCESS_GRANTED_WATCHER_ENTITLEMENT \
+	"com.apple.private.vfs.fsevents-access-granted-watcher"
+
+static bool
+watcher_is_entitled(task_t task)
+{
+	//
+	// We consider a process to be entitled to watch /dev/fsevents
+	// if it has either FSEVENTS_WATCHER_ENTITLEMENT or
+	// FSEVENTS_ACCESS_GRANTED_WATCHER_ENTITLEMENT.
+	//
+	return !!(IOTaskHasEntitlement(task, FSEVENTS_WATCHER_ENTITLEMENT) ||
+	       IOTaskHasEntitlement(task,
+	       FSEVENTS_ACCESS_GRANTED_WATCHER_ENTITLEMENT));
+}
+
+static bool
+watcher_is_entitled_for_access_granted(task_t task)
+{
+	return !!IOTaskHasEntitlement(task,
+	           FSEVENTS_ACCESS_GRANTED_WATCHER_ENTITLEMENT);
+}
 
 static int
 add_watcher(int8_t *event_list, int32_t num_events, int32_t eventq_size, fs_event_watcher **watcher_out, void *fseh)
@@ -1033,6 +1256,14 @@ add_watcher(int8_t *event_list, int32_t num_events, int32_t eventq_size, fs_even
 
 	if (eventq_size <= 0 || eventq_size > 100 * max_kfs_events) {
 		eventq_size = max_kfs_events;
+	}
+
+	// If the watcher wants FSE_ACCESS_GRANTED, ensure it has the
+	// correct entitlement.  If not, just silently drop that event.
+	if (num_events > FSE_ACCESS_GRANTED &&
+	    event_list[FSE_ACCESS_GRANTED] != FSE_IGNORE &&
+	    !watcher_is_entitled_for_access_granted(current_task())) {
+		event_list[FSE_ACCESS_GRANTED] = FSE_IGNORE;
 	}
 
 	// Note: the event_queue follows the fs_event_watcher struct
@@ -1060,16 +1291,7 @@ add_watcher(int8_t *event_list, int32_t num_events, int32_t eventq_size, fs_even
 
 	watcher->num_dropped  = 0;  // XXXdbg - debugging
 
-	if (IOTaskHasEntitlement(current_task(),
-	    FSEVENTS_WATCHER_ENTITLEMENT)) {
-		watcher->flags |= WATCHER_APPLE_SYSTEM_SERVICE;
-	} else if (!strncmp(watcher->proc_name, "fseventsd", sizeof(watcher->proc_name)) ||
-	    !strncmp(watcher->proc_name, "coreservicesd", sizeof(watcher->proc_name)) ||
-	    !strncmp(watcher->proc_name, "revisiond", sizeof(watcher->proc_name)) ||
-	    !strncmp(watcher->proc_name, "mds", sizeof(watcher->proc_name))) {
-		printf("fsevents: watcher %s (pid: %d) needs '%s' entitlement\n",
-		    watcher->proc_name, watcher->pid,
-		    FSEVENTS_WATCHER_ENTITLEMENT);
+	if (watcher_is_entitled(current_task())) {
 		watcher->flags |= WATCHER_APPLE_SYSTEM_SERVICE;
 	} else {
 		printf("fsevents: watcher %s (pid: %d) - Using /dev/fsevents directly is unsupported.  Migrate to FSEventsFramework\n",
@@ -1373,21 +1595,22 @@ copy_out_kfse(fs_event_watcher *watcher, kfs_event *kfse, struct uio *uio)
 	int      evbuff_idx = 0;
 
 	if (kfse->type == FSE_INVALID) {
-		panic("fsevents: copy_out_kfse: asked to copy out an invalid event (kfse %p, refcount %d fref ptr %p)", kfse, kfse->refcount, kfse->str);
+		panic("fsevents: copy_out_kfse: asked to copy out an invalid event (kfse %p, refcount %d)", kfse, kfse->refcount);
 	}
 
 	if (kfse->flags & KFSE_BEING_CREATED) {
 		return 0;
 	}
 
-	if (((kfse->type == FSE_RENAME) || (kfse->type == FSE_CLONE)) && kfse->dest == NULL) {
+	if (((kfse->type == FSE_RENAME) || (kfse->type == FSE_CLONE)) &&
+	    kfse->regular_event.dest == NULL) {
 		//
 		// This can happen if an event gets recycled but we had a
 		// pointer to it in our event queue.  The event is the
-		// destination of a rename or clone which we'll process separately
-		// (that is, another kfse points to this one so it's ok
-		// to skip this guy because we'll process it when we process
-		// the other one)
+		// destination of a rename or clone which we'll process
+		// separately (that is, another kfse points to this one
+		// so it's ok to skip this guy because we'll process it
+		// when we process the other one)
 		error = 0;
 		goto get_out;
 	}
@@ -1416,29 +1639,33 @@ copy_out_kfse(fs_event_watcher *watcher, kfs_event *kfse, struct uio *uio)
 
 copy_again:
 
-	if (kfse->type == FSE_DOCID_CHANGED || kfse->type == FSE_DOCID_CREATED) {
-		dev_t    dev  = cur->dev;
-		ino64_t    ino  = cur->ino;
-		uint64_t ival;
+	if (kfse->type == FSE_DOCID_CHANGED ||
+	    kfse->type == FSE_DOCID_CREATED) {
+		dev_t    dev     = cur->docid_event.dev;
+		ino64_t  src_ino = cur->docid_event.src_ino;
+		ino64_t  dst_ino = cur->docid_event.dst_ino;
+		uint64_t docid   = cur->docid_event.docid;
 
-		error = fill_buff(FSE_ARG_DEV, sizeof(dev_t), &dev, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		error = fill_buff(FSE_ARG_DEV, sizeof(dev_t), &dev, evbuff,
+		    &evbuff_idx, sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
 		}
 
-		error = fill_buff(FSE_ARG_INO, sizeof(ino64_t), &ino, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		error = fill_buff(FSE_ARG_INO, sizeof(ino64_t), &src_ino,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
 		}
 
-		memcpy(&ino, &cur->str, sizeof(ino64_t));
-		error = fill_buff(FSE_ARG_INO, sizeof(ino64_t), &ino, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		error = fill_buff(FSE_ARG_INO, sizeof(ino64_t), &dst_ino,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
 		}
 
-		memcpy(&ival, &cur->uid, sizeof(uint64_t)); // the docid gets stuffed into the ino field
-		error = fill_buff(FSE_ARG_INT64, sizeof(uint64_t), &ival, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		error = fill_buff(FSE_ARG_INT64, sizeof(uint64_t), &docid,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
 		}
@@ -1447,9 +1674,10 @@ copy_again:
 	}
 
 	if (kfse->type == FSE_UNMOUNT_PENDING) {
-		dev_t    dev  = cur->dev;
+		dev_t    dev  = cur->regular_event.dev;
 
-		error = fill_buff(FSE_ARG_DEV, sizeof(dev_t), &dev, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		error = fill_buff(FSE_ARG_DEV, sizeof(dev_t), &dev,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
 		}
@@ -1457,17 +1685,49 @@ copy_again:
 		goto done;
 	}
 
-	if (cur->str == NULL || cur->str[0] == '\0') {
-		printf("copy_out_kfse:2: empty/short path (%s)\n", cur->str);
-		error = fill_buff(FSE_ARG_STRING, 2, "/", evbuff, &evbuff_idx, sizeof(evbuff), uio);
+	if (kfse->type == FSE_ACCESS_GRANTED) {
+		//
+		// KFSE_CONTAINS_DROPPED_EVENTS will be set if either
+		// the path or audit token are bogus; don't copy out
+		// either in that case.
+		//
+		if (cur->flags & KFSE_CONTAINS_DROPPED_EVENTS) {
+			goto done;
+		}
+		error = fill_buff(FSE_ARG_STRING,
+		    cur->access_granted_event.len,
+		    cur->access_granted_event.str,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		if (error != 0) {
+			goto get_out;
+		}
+		error = fill_buff(FSE_ARG_AUDIT_TOKEN,
+		    sizeof(cur->access_granted_event.audit_token),
+		    &cur->access_granted_event.audit_token,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		if (error != 0) {
+			goto get_out;
+		}
+
+		goto done;
+	}
+
+	if (cur->regular_event.str == NULL ||
+	    cur->regular_event.str[0] == '\0') {
+		printf("copy_out_kfse:2: empty/short path (%s)\n",
+		    cur->regular_event.str);
+		error = fill_buff(FSE_ARG_STRING, 2, "/", evbuff, &evbuff_idx,
+		    sizeof(evbuff), uio);
 	} else {
-		error = fill_buff(FSE_ARG_STRING, cur->len, cur->str, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		error = fill_buff(FSE_ARG_STRING, cur->regular_event.len,
+		    cur->regular_event.str, evbuff, &evbuff_idx,
+		    sizeof(evbuff), uio);
 	}
 	if (error != 0) {
 		goto get_out;
 	}
 
-	if (cur->dev == 0 && cur->ino == 0) {
+	if (cur->regular_event.dev == 0 && cur->regular_event.ino == 0) {
 		// this happens when a rename event happens and the
 		// destination of the rename did not previously exist.
 		// it thus has no other file info so skip copying out
@@ -1477,49 +1737,62 @@ copy_again:
 
 
 	if (watcher->flags & WATCHER_WANTS_COMPACT_EVENTS) {
-		int32_t finfo_size;
-
-		finfo_size = sizeof(dev_t) + sizeof(ino64_t) + sizeof(int32_t) + sizeof(uid_t) + sizeof(gid_t);
-		error = fill_buff(FSE_ARG_FINFO, finfo_size, &cur->ino, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		// We rely on the layout of the "regular_event"
+		// structure being the same as fse_info in order
+		// to speed up this copy.  The nlink field in
+		// fse_info is not included.
+		error = fill_buff(FSE_ARG_FINFO, KFSE_INFO_COPYSIZE,
+		    &cur->regular_event, evbuff, &evbuff_idx,
+		    sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
 		}
 	} else {
-		error = fill_buff(FSE_ARG_DEV, sizeof(dev_t), &cur->dev, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		error = fill_buff(FSE_ARG_DEV, sizeof(dev_t),
+		    &cur->regular_event.dev, evbuff, &evbuff_idx,
+		    sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
 		}
 
-		error = fill_buff(FSE_ARG_INO, sizeof(ino64_t), &cur->ino, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		error = fill_buff(FSE_ARG_INO, sizeof(ino64_t),
+		    &cur->regular_event.ino, evbuff, &evbuff_idx,
+		    sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
 		}
 
-		error = fill_buff(FSE_ARG_MODE, sizeof(int32_t), &cur->mode, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		error = fill_buff(FSE_ARG_MODE, sizeof(int32_t),
+		    &cur->regular_event.mode, evbuff, &evbuff_idx,
+		    sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
 		}
 
-		error = fill_buff(FSE_ARG_UID, sizeof(uid_t), &cur->uid, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		error = fill_buff(FSE_ARG_UID, sizeof(uid_t),
+		    &cur->regular_event.uid, evbuff, &evbuff_idx,
+		    sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
 		}
 
-		error = fill_buff(FSE_ARG_GID, sizeof(gid_t), &cur->gid, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		error = fill_buff(FSE_ARG_GID, sizeof(gid_t),
+		    &cur->regular_event.gid, evbuff, &evbuff_idx,
+		    sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
 		}
 	}
 
-
-	if (cur->dest) {
-		cur = cur->dest;
+	if (cur->regular_event.dest) {
+		cur = cur->regular_event.dest;
 		goto copy_again;
 	}
 
 done:
 	// very last thing: the time stamp
-	error = fill_buff(FSE_ARG_INT64, sizeof(uint64_t), &cur->abstime, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+	error = fill_buff(FSE_ARG_INT64, sizeof(uint64_t), &cur->abstime,
+	    evbuff, &evbuff_idx, sizeof(evbuff), uio);
 	if (error != 0) {
 		goto get_out;
 	}
@@ -1646,7 +1919,8 @@ restart_watch:
 			if (!(watcher->flags & WATCHER_APPLE_SYSTEM_SERVICE) &&
 			    kfse->type != FSE_DOCID_CREATED &&
 			    kfse->type != FSE_DOCID_CHANGED &&
-			    is_ignored_directory(kfse->str)) {
+			    kfse->type != FSE_ACCESS_GRANTED &&
+			    is_ignored_directory(kfse->regular_event.str)) {
 				// If this is not an Apple System Service, skip specified directories
 				// radar://12034844
 				error = 0;
@@ -2043,7 +2317,7 @@ filt_fsevent_common(struct knote *kn, struct kevent_qos_s *kev, long hint)
 	case EVFILT_VNODE:
 		/* Check events this note matches against the hint */
 		if (kn->kn_sfflags & hint) {
-			kn->kn_fflags |= hint;         /* Set which event occurred */
+			kn->kn_fflags |= (uint32_t)hint;     /* Set which event occurred */
 		}
 		if (kn->kn_fflags != 0) {
 			activate = 1;
@@ -2201,7 +2475,8 @@ parse_buffer_and_add_events(const char *buffer, size_t bufsize, vfs_context_t ct
 	ptr = buffer;
 	while ((ptr + sizeof(int) + sizeof(fse_info) + 1) < buffer + bufsize) {
 		type = *(const int *)ptr;
-		if (type < 0 || type >= FSE_MAX_EVENTS) {
+		if (type < 0 || type == FSE_ACCESS_GRANTED ||
+		    type >= FSE_MAX_EVENTS) {
 			err = EINVAL;
 			break;
 		}
@@ -2296,7 +2571,7 @@ parse_buffer_and_add_events(const char *buffer, size_t bufsize, vfs_context_t ct
 //       smaller is not a good idea.
 //
 #define WRITE_BUFFER_SIZE  4096
-char *write_buffer = NULL;
+static char *write_buffer = NULL;
 
 static int
 fseventswrite(__unused dev_t dev, struct uio *uio, __unused int ioflag)
@@ -2308,10 +2583,7 @@ fseventswrite(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	lck_mtx_lock(&event_writer_lock);
 
 	if (write_buffer == NULL) {
-		if (kmem_alloc(kernel_map, (vm_offset_t *)&write_buffer, WRITE_BUFFER_SIZE, VM_KERN_MEMORY_FILE)) {
-			lck_mtx_unlock(&event_writer_lock);
-			return ENOMEM;
-		}
+		write_buffer = zalloc_permanent(WRITE_BUFFER_SIZE, ZALIGN_64);
 	}
 
 	//
@@ -2522,8 +2794,8 @@ static const struct cdevsw fsevents_cdevsw =
 	.d_read = fseventsread,
 	.d_write = fseventswrite,
 	.d_ioctl = fseventsioctl,
-	.d_stop = (stop_fcn_t *)&nulldev,
-	.d_reset = (reset_fcn_t *)&nulldev,
+	.d_stop = eno_stop,
+	.d_reset = eno_reset,
 	.d_select = eno_select,
 	.d_mmap = eno_mmap,
 	.d_strategy = eno_strat,

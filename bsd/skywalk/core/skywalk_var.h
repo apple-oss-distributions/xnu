@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -85,7 +85,7 @@
 #include <machine/endian.h>
 #include <netinet/ip.h>
 #include <net/dlil.h>
-#include <net/pfvar.h>
+#include <net/necp.h>
 #include <libkern/libkern.h>
 #include <libkern/OSAtomic.h>
 #include <libkern/OSByteOrder.h>
@@ -94,6 +94,7 @@
 #include <skywalk/os_channel_private.h>
 #include <skywalk/namespace/netns.h>
 #include <skywalk/namespace/protons.h>
+#include <skywalk/namespace/flowidns.h>
 #include <vm/vm_kern.h>
 #include <san/kasan.h>
 

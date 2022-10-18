@@ -75,7 +75,7 @@
 #ifndef _SYS_PROC_INTERNAL_H_
 #define _SYS_PROC_INTERNAL_H_
 
-#include <kern/hazard.h>
+#include <kern/smr.h>
 #include <kern/kalloc.h>
 #include <libkern/OSAtomic.h>
 #include <sys/cdefs.h>
@@ -161,7 +161,7 @@ __options_decl(pggrp_ref_bits_t, uint32_t, {
 #define PGRP_REF_BITS  1
 #define PGRP_REF_MASK  ((1u << PGRP_REF_BITS) - 1)
 
-HAZARD_POINTER_DECL(pgrp_hp, struct pgrp *);
+SMR_POINTER_DECL(pgrp_smr, struct pgrp *);
 #define PGRP_NULL ((struct pgrp *)NULL)
 
 /*!
@@ -185,7 +185,7 @@ HAZARD_POINTER_DECL(pgrp_hp, struct pgrp *);
  * the group is orphaned (has no members), which prevents it
  * from being looked up.
  *
- * Process groups are retired through @c hazard_retire().
+ * Process groups are retired through @c smr_global_retire().
  *
  * Process groups are hashed in a global hash table that can be consulted
  * while holding the @c proc_list_lock() with @c pghash_find_locked()
@@ -193,7 +193,7 @@ HAZARD_POINTER_DECL(pgrp_hp, struct pgrp *);
  */
 struct pgrp {
 	lck_mtx_t               pg_mlock;       /* process group lock   (PGL) */
-	struct pgrp_hp          pg_hash;        /* hash chain           (PLL) */
+	struct pgrp_smr         pg_hash;        /* hash chain           (PLL) */
 	LIST_HEAD(, proc)       pg_members;     /* group members        (PGL) */
 	struct session         *pg_session;     /* session           (static) */
 	pid_t                   pg_id;          /* group ID          (static) */
@@ -210,8 +210,11 @@ __options_decl(proc_ref_bits_t, uint32_t, {
 	P_REF_WILL_EXEC  = 0x04u, /* see proc_refdrain_will_exec() */
 	P_REF_IN_EXEC    = 0x08u, /* see proc_refdrain_will_exec() */
 	P_REF_DRAINING   = 0x10u, /* someone is in proc_refdrain() */
+	P_REF_SHADOW     = 0x20u, /* the proc is shadow proc in exec */
+	P_REF_PROC_HOLD  = 0x40u, /* the proc has ref on the proc task combined struct */
+	P_REF_TASK_HOLD  = 0x80u, /* the task has ref on the proc task combined struct */
 });
-#define P_REF_BITS   5
+#define P_REF_BITS   8
 #define P_REF_MASK   ((1u << P_REF_BITS) - 1)
 
 /*
@@ -253,7 +256,7 @@ struct  sigacts {
 	int     ps_addr;                /* for core dump/debugger XXX */
 };
 
-HAZARD_POINTER_DECL(proc_hp, struct proc *);
+SMR_POINTER_DECL(proc_smr, struct proc *);
 #define PROC_NULL ((struct proc *)NULL)
 
 /*
@@ -270,7 +273,6 @@ HAZARD_POINTER_DECL(proc_hp, struct proc *);
 struct proc {
 	LIST_ENTRY(proc) p_list;                /* List of all processes. */
 
-	void *          XNU_PTRAUTH_SIGNED_PTR("proc.task") task;       /* corresponding task (static)*/
 	struct  proc *  XNU_PTRAUTH_SIGNED_PTR("proc.p_pptr") p_pptr;   /* Pointer to parent process.(LL) */
 	proc_ro_t       p_proc_ro;
 	pid_t           p_ppid;                 /* process's parent pid number */
@@ -282,6 +284,7 @@ struct proc {
 	gid_t           p_rgid;
 	uid_t           p_svuid;
 	gid_t           p_svgid;
+	pid_t           p_sessionid;
 	uint64_t        p_puniqueid;            /* parent's unique ID - set on fork/spawn, doesn't change if reparented. */
 
 	lck_mtx_t       p_mlock;                /* mutex lock for proc */
@@ -296,7 +299,7 @@ struct proc {
 	LIST_HEAD(, proc) p_children;           /* Pointer to list of children (LL)*/
 	TAILQ_HEAD(, uthread) p_uthlist;        /* List of uthreads (PL) */
 
-	struct proc_hp  p_hash;                 /* Hash chain (LL)*/
+	struct proc_smr p_hash;                 /* Hash chain (LL)*/
 
 #if CONFIG_PERSONAS
 	struct persona  *p_persona;
@@ -308,8 +311,8 @@ struct proc {
 	/* substructures: */
 	struct  filedesc p_fd;                  /* open files structure */
 	struct  pstats *p_stats;                /* Accounting/statistics (PL) */
-	HAZARD_POINTER(struct plimit *) p_limit;/* Process limits (PL) */
-	HAZARD_POINTER(struct pgrp *XNU_PTRAUTH_SIGNED_PTR("proc.p_pgrp")) p_pgrp; /* Pointer to process group. (LL) */
+	SMR_POINTER(struct plimit *) p_limit;/* Process limits (PL) */
+	SMR_POINTER(struct pgrp *XNU_PTRAUTH_SIGNED_PTR("proc.p_pgrp")) p_pgrp; /* Pointer to process group. (LL) */
 
 	struct sigacts  p_sigacts;
 	lck_spin_t      p_slock;                /* spin lock for itimer/profil protection */
@@ -325,6 +328,7 @@ struct proc {
 	int             p_parentref;            /* children lookup ref on parent (LL) */
 	pid_t           p_oppid;                /* Save parent pid during ptrace. XXX */
 	u_int           p_xstat;                /* Exit status for wait; also stop signal. */
+	int             p_aio_total_count;              /* all allocated AIO requests for this proc */
 
 #ifdef _PROC_HAS_SCHEDINFO_
 	/* may need cleanup, not used */
@@ -350,14 +354,17 @@ struct proc {
 	uid_t   si_uid;                 /* (PL) */
 
 	void * vm_shm;                  /* (SYSV SHM Lock) for sysV shared memory */
+	int             p_ractive;
+	/* cached proc-specific data required for corpse inspection */
+	pid_t             p_responsible_pid;    /* pid resonsible for this process */
 
 #if CONFIG_DTRACE
+	int                             p_dtrace_probes;                /* (PL) are there probes for this proc? */
+	u_int                           p_dtrace_count;                 /* (sprlock) number of DTrace tracepoints */
+	uint8_t                         p_dtrace_stop;                  /* indicates a DTrace-desired stop */
 	user_addr_t                     p_dtrace_argv;                  /* (write once, read only after that) */
 	user_addr_t                     p_dtrace_envp;                  /* (write once, read only after that) */
 	lck_mtx_t                       p_dtrace_sprlock;               /* sun proc lock emulation */
-	uint8_t                         p_dtrace_stop;                  /* indicates a DTrace-desired stop */
-	int                             p_dtrace_probes;                /* (PL) are there probes for this proc? */
-	u_int                           p_dtrace_count;                 /* (sprlock) number of DTrace tracepoints */
 	struct dtrace_ptss_page*        p_dtrace_ptss_pages;            /* (sprlock) list of user ptss pages */
 	struct dtrace_ptss_page_entry*  p_dtrace_ptss_free_list;        /* (atomic) list of individual ptss entries */
 	struct dtrace_helpers*          p_dtrace_helpers;               /* (dtrace_lock) DTrace per-proc private */
@@ -397,7 +404,6 @@ struct proc {
 		cpu_subtype_t   p_cpusubtype;
 	});
 
-	int             p_aio_total_count;              /* all allocated AIO requests for this proc */
 	TAILQ_HEAD(, aio_workq_entry ) p_aio_activeq;   /* active async IO requests */
 	TAILQ_HEAD(, aio_workq_entry ) p_aio_doneq;     /* completed async IO requests */
 
@@ -420,7 +426,6 @@ struct proc {
 
 	struct  timeval p_start;                /* starting time */
 	void *  p_rcall;
-	int             p_ractive;
 	void *  p_pthhash;                      /* pthread waitqueue hash */
 	volatile uint64_t was_throttled __attribute__((aligned(8))); /* Counter for number of throttled I/Os */
 	volatile uint64_t did_throttle __attribute__((aligned(8)));  /* Counter for number of I/Os this proc throttled */
@@ -443,18 +448,21 @@ struct proc {
 #if VM_PRESSURE_EVENTS
 	struct timeval  vm_pressure_last_notify_tstamp;
 #endif
+	uint8_t p_crash_behavior;  /* bit fields to control behavior on crash. See spawn.h POSIX_SPAWN_PANIC* */
+	bool p_posix_spawn_failed; /* indicates that a posix_spawn failed */
+	bool p_disallow_map_with_linking; /* used to prevent dyld's map_with_linking() usage after startup */
 
 #if CONFIG_MEMORYSTATUS
+#if CONFIG_FREEZE
+	uint8_t           p_memstat_freeze_skip_reason; /* memorystaus_freeze_skipped_reason_t. Protected by the freezer mutex. */
+#endif /* CONFIG_FREEZE */
 	/* Fields protected by proc list lock */
-	TAILQ_ENTRY(proc) p_memstat_list;               /* priority bucket link */
 	uint32_t          p_memstat_state;              /* state. Also used as a wakeup channel when the memstat's LOCKED bit changes */
 	int32_t           p_memstat_effectivepriority;  /* priority after transaction state accounted for */
 	int32_t           p_memstat_requestedpriority;  /* active priority */
 	int32_t           p_memstat_assertionpriority;  /* assertion driven priority */
 	uint32_t          p_memstat_dirty;              /* dirty state */
-#if CONFIG_FREEZE
-	uint8_t           p_memstat_freeze_skip_reason; /* memorystaus_freeze_skipped_reason_t. Protected by the freezer mutex. */
-#endif
+	TAILQ_ENTRY(proc) p_memstat_list;               /* priority bucket link */
 	uint64_t          p_memstat_userdata;           /* user state */
 	uint64_t          p_memstat_idledeadline;       /* time at which process became clean */
 	uint64_t          p_memstat_idle_start;         /* abstime process transitions into the idle band */
@@ -471,11 +479,11 @@ struct proc {
 #endif /* CONFIG_FREEZE */
 #endif /* CONFIG_MEMORYSTATUS */
 
-	/* cached proc-specific data required for corpse inspection */
-	pid_t             p_responsible_pid;    /* pid resonsible for this process */
 	_Atomic uint32_t  p_user_faults; /* count the number of user faults generated */
 
 	uint32_t          p_memlimit_increase; /* byte increase for memory limit for dyld SPI rdar://problem/49950264, structure packing 32-bit and 64-bit */
+
+	uint64_t p_crash_behavior_deadline; /* mach_continuous_time deadline. After this timestamp p_crash_behavior is invalid */
 
 	struct os_reason     *p_exit_reason;
 
@@ -484,7 +492,6 @@ struct proc {
 #endif /* CONFIG_PROC_UDATA_STORAGE */
 
 	char * p_subsystem_root_path;
-	pid_t           p_sessionid;
 };
 
 /*
@@ -511,7 +518,7 @@ struct proc_ident {
 
 /* local flags */
 #define P_LDELAYTERM    0x00000001      /* */
-#define P_LNOZOMB       0x00000002      /* */
+#define P_LHASTASK      0x00000002      /* process points to a task */
 #define P_LTERM         0x00000004      /* */
 #define P_LEXIT         0x00000008      /* */
 #define P_LPEXIT        0x00000010
@@ -524,7 +531,7 @@ struct proc_ident {
 #define P_LPPWAIT       0x00002000      /* */
 #define P_LPTHREADJITALLOWLIST  0x00004000      /* process has pthread JIT write function allowlist */
 #define P_LPTHREADJITFREEZELATE 0x00008000      /* process JIT function allowlist is frozen late */
-/* was #define P_LKQWDEAD      0x00010000, free for re-use */
+#define P_LTRACE_WAIT   0x00010000      /* wait for flag to be cleared before starting ptrace */
 #define P_LLIMCHANGE    0x00020000      /* process is changing its plimit (rlim_cur, rlim_max) */
 #define P_LLIMWAIT      0x00040000
 #define P_LWAITED       0x00080000
@@ -566,6 +573,7 @@ struct proc_ident {
 /* additional process flags */
 #define P_LADVLOCK              0x01
 #define P_LXBKIDLEINPROG        0x02
+#define P_RSR                   0x04
 
 /* p_vfs_iopolicy flags */
 #define P_VFS_IOPOLICY_FORCE_HFS_CASE_SENSITIVITY       0x0001
@@ -577,8 +585,20 @@ struct proc_ident {
 #define P_VFS_IOPOLICY_IGNORE_NODE_PERMISSIONS          0x0040
 #define P_VFS_IOPOLICY_SKIP_MTIME_UPDATE                0x0080
 #define P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES           0x0100
-#define P_VFS_IOPOLICY_VALID_MASK                       (P_VFS_IOPOLICY_ATIME_UPDATES | P_VFS_IOPOLICY_FORCE_HFS_CASE_SENSITIVITY | P_VFS_IOPOLICY_MATERIALIZE_DATALESS_FILES | P_VFS_IOPOLICY_STATFS_NO_DATA_VOLUME | \
-	        P_VFS_IOPOLICY_TRIGGER_RESOLVE_DISABLE | P_VFS_IOPOLICY_IGNORE_CONTENT_PROTECTION | P_VFS_IOPOLICY_IGNORE_NODE_PERMISSIONS | P_VFS_IOPOLICY_SKIP_MTIME_UPDATE|P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES)
+#define P_VFS_IOPOLICY_DISALLOW_RW_FOR_O_EVTONLY        0x0200
+#define P_VFS_IOPOLICY_ALTLINK                          0x0400
+#define P_VFS_IOPOLICY_VALID_MASK                       \
+	(P_VFS_IOPOLICY_FORCE_HFS_CASE_SENSITIVITY | \
+	P_VFS_IOPOLICY_ATIME_UPDATES | \
+	P_VFS_IOPOLICY_MATERIALIZE_DATALESS_FILES | \
+	P_VFS_IOPOLICY_STATFS_NO_DATA_VOLUME | \
+	P_VFS_IOPOLICY_TRIGGER_RESOLVE_DISABLE | \
+	P_VFS_IOPOLICY_IGNORE_CONTENT_PROTECTION | \
+	P_VFS_IOPOLICY_IGNORE_NODE_PERMISSIONS | \
+	P_VFS_IOPOLICY_SKIP_MTIME_UPDATE | \
+	P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES | \
+	P_VFS_IOPOLICY_DISALLOW_RW_FOR_O_EVTONLY | \
+	P_VFS_IOPOLICY_ALTLINK)
 
 /* process creation arguments */
 #define PROC_CREATE_FORK        0       /* independent child (running) */
@@ -709,7 +729,6 @@ struct user64_extern_proc {
 
 #pragma GCC visibility push(hidden)
 
-extern struct proc proc0;
 extern struct vfs_context vfs_context0;
 
 /*
@@ -751,6 +770,23 @@ LIST_HEAD(proclist, proc);
 extern struct proclist allproc;         /* List of all processes. */
 extern struct proclist zombproc;        /* List of zombie processes. */
 
+#if CONFIG_COREDUMP
+extern const char * defaultcorefiledir;
+extern const char * defaultdrivercorefiledir;
+extern char corefilename[MAXPATHLEN + 1];
+extern char drivercorefilename[MAXPATHLEN + 1];
+extern int do_coredump;
+extern int sugid_coredump;
+#endif
+
+__options_decl(cloneproc_flags_t, uint32_t, {
+	CLONEPROC_FLAGS_NONE             = 0,
+	CLONEPROC_FLAGS_INHERIT_MEMORY   = 0x0001,
+	CLONEPROC_FLAGS_MEMSTAT_INTERNAL = 0x0002,
+	CLONEPROC_FLAGS_FOR_EXEC         = 0x0004,
+});
+
+extern thread_t cloneproc(task_t, coalition_t *, proc_t, cloneproc_flags_t);
 extern struct proc * XNU_PTRAUTH_SIGNED_PTR("initproc") initproc;
 extern void proc_lock(struct proc *);
 extern void proc_unlock(struct proc *);
@@ -771,15 +807,18 @@ extern void proc_dirs_unlock_exclusive(struct proc *);
 extern void proc_ucred_lock(struct proc *);
 extern void proc_ucred_unlock(struct proc *);
 extern void proc_update_creds_onproc(struct proc *);
-__private_extern__ int proc_core_name(const char *name, uid_t uid, pid_t pid,
+#if CONFIG_COREDUMP
+__private_extern__ int proc_core_name(const char *format, const char *name, uid_t uid, pid_t pid,
     char *cr_name, size_t cr_name_len);
+#endif
 extern int isinferior(struct proc *, struct proc *);
 __private_extern__ struct proc *pzfind(pid_t);  /* Find zombie by id. */
 __private_extern__ struct proc *proc_find_zombref(pid_t);       /* Find zombie by id. */
 __private_extern__ void proc_drop_zombref(struct proc * p);     /* Find zombie by id. */
 
 extern size_t   chgproccnt(uid_t uid, int diff);
-extern void     pinsertchild(struct proc *parent, struct proc *child);
+extern void     pinsertchild(struct proc *parent, struct proc *child, bool in_exec);
+extern void     p_reparentallchildren(proc_t old_proc, proc_t new_proc);
 extern int      setsid_internal(struct proc *p);
 #ifndef __cplusplus
 extern void     setlogin_internal(proc_t p, const char login[static MAXLOGNAME]);
@@ -802,6 +841,7 @@ extern void proc_reparentlocked(struct proc *child, struct proc * newparent, int
 
 extern bool   proc_list_exited(proc_t p);
 extern proc_t proc_find_locked(int pid);
+extern bool proc_is_shadow(proc_t p);
 extern proc_t proc_findthread(thread_t thread);
 extern void proc_refdrain(proc_t);
 extern proc_t proc_refdrain_will_exec(proc_t p);
@@ -813,6 +853,7 @@ extern void  proc_checkdeadrefs(proc_t);
 struct proc *phash_find_locked(pid_t);
 extern void phash_insert_locked(pid_t pid, struct proc *);
 extern void phash_remove_locked(pid_t pid, struct proc *);
+extern void phash_replace_locked(pid_t pid, struct proc *old_proc, struct proc *new_proc);
 struct pgrp *pghash_find_locked(pid_t);
 extern void pghash_insert_locked(pid_t pgid, struct pgrp *);
 extern struct pgrp *pgrp_find(pid_t);
@@ -826,6 +867,7 @@ struct pgrp *pgrp_alloc(pid_t pgid, pggrp_ref_bits_t bits);
 extern void pgrp_lock(struct pgrp * pgrp);
 extern void pgrp_unlock(struct pgrp * pgrp);
 extern struct session *session_find_locked(pid_t sessid);
+extern void session_replace_leader(struct proc *old_proc, struct proc *new_proc);
 extern struct session *session_alloc(struct proc *leader);
 extern void session_lock(struct session * sess);
 extern void session_unlock(struct session * sess);
@@ -839,6 +881,7 @@ extern int proc_parentdropref(proc_t, int);
 int  itimerfix(struct timeval *tv);
 int  itimerdecr(struct proc * p, struct itimerval *itp, int usec);
 void proc_free_realitimer(proc_t proc);
+void proc_inherit_itimers(struct proc *old_proc, struct proc *new_proc);
 int  timespec_is_valid(const struct timespec *);
 void proc_signalstart(struct proc *, int locked);
 void proc_signalend(struct proc *, int locked);
@@ -849,6 +892,7 @@ int  proc_transwait(struct proc *, int locked);
 struct proc *proc_ref(struct proc *p, int locked);
 void proc_wait_release(struct proc *p);
 void proc_knote(struct proc * p, long hint);
+void proc_transfer_knotes(struct proc *old_proc, struct proc *new_proc);
 void proc_knote_drain(struct proc *p);
 void proc_setregister(proc_t p);
 void proc_resetregister(proc_t p);
@@ -871,6 +915,12 @@ extern lck_mtx_t * pthread_list_mlock;
 struct uthread *current_uthread(void) __pure2;
 
 extern void proc_set_task(proc_t, task_t);
+extern task_t proc_get_task_raw(proc_t proc);
+extern proc_t task_get_proc_raw(task_t task);
+extern void proc_ref_hold_proc_task_struct(proc_t proc);
+extern void proc_release_proc_task_struct(proc_t proc);
+extern void task_ref_hold_proc_task_struct(task_t task);
+extern void task_release_proc_task_struct(task_t task);
 extern void proc_setpidversion(proc_t, int);
 extern uint64_t proc_getcsflags(proc_t);
 extern void proc_csflags_update(proc_t, uint64_t);
@@ -973,7 +1023,8 @@ uid_t dtrace_proc_selfruid(void);
 
 os_refgrp_decl_extern(p_refgrp);
 KALLOC_TYPE_DECLARE(proc_stats_zone);
-ZONE_DECLARE_ID(ZONE_ID_PROC, struct proc);
+ZONE_DECLARE_ID(ZONE_ID_PROC_TASK, struct proc);
+extern zone_t proc_task_zone;
 
 extern struct proc_ident proc_ident(proc_t p);
 

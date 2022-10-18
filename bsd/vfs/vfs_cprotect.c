@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -129,7 +129,8 @@ cpx_alloc(size_t key_len, bool needs_ctx)
 		 * unilateral write protection on this page. Note that kmem_alloc
 		 * can block.
 		 */
-		if (kmem_alloc(kernel_map, (vm_offset_t *)&cpx, PAGE_SIZE, VM_KERN_MEMORY_FILE)) {
+		if (kmem_alloc(kernel_map, (vm_offset_t *)&cpx, PAGE_SIZE,
+		    KMA_DATA, VM_KERN_MEMORY_FILE)) {
 			/*
 			 * returning NULL at this point (due to failed
 			 * allocation) would just result in a panic.
@@ -137,7 +138,11 @@ cpx_alloc(size_t key_len, bool needs_ctx)
 			 * fall back to attempting a normal kalloc, and don't
 			 * let the cpx get marked PROTECTABLE.
 			 */
+			/* BEGIN IGNORE CODESTYLE */
+			__typed_allocators_ignore_push
 			cpx = kheap_alloc(KHEAP_DEFAULT, cpx_size(key_len), Z_WAITOK);
+			/* END IGNORE CODESTYLE */
+			__typed_allocators_ignore_pop
 		} else {
 			//mark the page as protectable, since kmem_alloc succeeded.
 			cpx->cpx_flags |= CPX_WRITE_PROTECTABLE;
@@ -431,16 +436,26 @@ cpx_copy(const struct cpx *src, cpx_t dst)
 	}
 }
 
+typedef unsigned char cp_vfs_callback_arg_type_t;
+enum {
+	CP_TYPE_LOCK_STATE   = 0,
+	CP_TYPE_EP_STATE     = 1,
+};
+
 typedef struct {
-	cp_lock_state_t state;
+	cp_vfs_callback_arg_type_t type;
+	union {
+		cp_lock_state_t lock_state;
+		cp_ep_state_t   ep_state;
+	};
 	int             valid_uuid;
 	uuid_t          volume_uuid;
-} cp_lock_vfs_callback_arg;
+} cp_vfs_callback_arg;
 
 static int
-cp_lock_vfs_callback(mount_t mp, void *arg)
+cp_vfs_callback(mount_t mp, void *arg)
 {
-	cp_lock_vfs_callback_arg *callback_arg = (cp_lock_vfs_callback_arg *)arg;
+	cp_vfs_callback_arg *callback_arg = (cp_vfs_callback_arg *)arg;
 
 	if (callback_arg->valid_uuid) {
 		struct vfs_attr va;
@@ -460,22 +475,38 @@ cp_lock_vfs_callback(mount_t mp, void *arg)
 		}
 	}
 
-	VFS_IOCTL(mp, FIODEVICELOCKED, (void *)(uintptr_t)callback_arg->state, 0, vfs_context_kernel());
+	switch (callback_arg->type) {
+	case(CP_TYPE_LOCK_STATE):
+		VFS_IOCTL(mp, FIODEVICELOCKED, (void *)(uintptr_t)callback_arg->lock_state, 0, vfs_context_kernel());
+		break;
+	case(CP_TYPE_EP_STATE):
+		VFS_IOCTL(mp, FIODEVICEEPSTATE, (void *)(uintptr_t)callback_arg->ep_state, 0, vfs_context_kernel());
+		break;
+	default:
+		break;
+	}
 	return 0;
 }
 
 int
 cp_key_store_action(cp_key_store_action_t action)
 {
-	cp_lock_vfs_callback_arg callback_arg;
+	cp_vfs_callback_arg callback_arg;
 
 	switch (action) {
 	case CP_ACTION_LOCKED:
 	case CP_ACTION_UNLOCKED:
-		callback_arg.state = (action == CP_ACTION_LOCKED ? CP_LOCKED_STATE : CP_UNLOCKED_STATE);
+		callback_arg.type = CP_TYPE_LOCK_STATE;
+		callback_arg.lock_state = (action == CP_ACTION_LOCKED ? CP_LOCKED_STATE : CP_UNLOCKED_STATE);
 		memset(callback_arg.volume_uuid, 0, sizeof(uuid_t));
 		callback_arg.valid_uuid = 0;
-		return vfs_iterate(0, cp_lock_vfs_callback, (void *)&callback_arg);
+		return vfs_iterate(0, cp_vfs_callback, (void *)&callback_arg);
+	case CP_ACTION_EP_INVALIDATED:
+		callback_arg.type = CP_TYPE_EP_STATE;
+		callback_arg.ep_state = CP_EP_INVALIDATED;
+		memset(callback_arg.volume_uuid, 0, sizeof(uuid_t));
+		callback_arg.valid_uuid = 0;
+		return vfs_iterate(0, cp_vfs_callback, (void *)&callback_arg);
 	default:
 		return -1;
 	}
@@ -484,15 +515,22 @@ cp_key_store_action(cp_key_store_action_t action)
 int
 cp_key_store_action_for_volume(uuid_t volume_uuid, cp_key_store_action_t action)
 {
-	cp_lock_vfs_callback_arg callback_arg;
+	cp_vfs_callback_arg callback_arg;
 
 	switch (action) {
 	case CP_ACTION_LOCKED:
 	case CP_ACTION_UNLOCKED:
-		callback_arg.state = (action == CP_ACTION_LOCKED ? CP_LOCKED_STATE : CP_UNLOCKED_STATE);
+		callback_arg.type = CP_TYPE_LOCK_STATE;
+		callback_arg.lock_state = (action == CP_ACTION_LOCKED ? CP_LOCKED_STATE : CP_UNLOCKED_STATE);
 		memcpy(callback_arg.volume_uuid, volume_uuid, sizeof(uuid_t));
 		callback_arg.valid_uuid = 1;
-		return vfs_iterate(0, cp_lock_vfs_callback, (void *)&callback_arg);
+		return vfs_iterate(0, cp_vfs_callback, (void *)&callback_arg);
+	case CP_ACTION_EP_INVALIDATED:
+		callback_arg.type = CP_TYPE_EP_STATE;
+		callback_arg.ep_state = CP_EP_INVALIDATED;
+		memcpy(callback_arg.volume_uuid, volume_uuid, sizeof(uuid_t));
+		callback_arg.valid_uuid = 1;
+		return vfs_iterate(0, cp_vfs_callback, (void *)&callback_arg);
 	default:
 		return -1;
 	}

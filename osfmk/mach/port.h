@@ -140,8 +140,8 @@ struct ipc_port;
 
 typedef struct ipc_port         *ipc_port_t;
 
-#define IPC_PORT_NULL           ((ipc_port_t) NULL)
-#define IPC_PORT_DEAD           ((ipc_port_t)~0UL)
+#define IPC_PORT_NULL           __unsafe_forge_single(ipc_port_t, NULL)
+#define IPC_PORT_DEAD           __unsafe_forge_single(ipc_port_t, ~0UL)
 #define IPC_PORT_VALID(port)    ipc_port_valid(port)
 
 static inline boolean_t
@@ -422,18 +422,22 @@ typedef struct mach_service_port_info * mach_service_port_info_t;
  * Indicates attributes to be set for the newly
  * allocated port.
  */
-#define MPO_CONTEXT_AS_GUARD    0x01    /* Add guard to the port */
-#define MPO_QLIMIT              0x02    /* Set qlimit for the port msg queue */
-#define MPO_TEMPOWNER           0x04    /* Set the tempowner bit of the port */
-#define MPO_IMPORTANCE_RECEIVER 0x08    /* Mark the port as importance receiver */
-#define MPO_INSERT_SEND_RIGHT   0x10    /* Insert a send right for the port */
-#define MPO_STRICT              0x20    /* Apply strict guarding for port */
-#define MPO_DENAP_RECEIVER      0x40    /* Mark the port as App de-nap receiver */
-#define MPO_IMMOVABLE_RECEIVE   0x80    /* Mark the port as immovable; protected by the guard context */
-#define MPO_FILTER_MSG          0x100   /* Allow message filtering */
-#define MPO_TG_BLOCK_TRACKING   0x200   /* Track blocking relationship for thread group during sync IPC */
-#define MPO_SERVICE_PORT        0x400   /* Create a service port with the given name; should be used only by launchd */
-#define MPO_CONNECTION_PORT     0x800   /* Derive new peer connection port from a given service port */
+#define MPO_CONTEXT_AS_GUARD               0x01    /* Add guard to the port */
+#define MPO_QLIMIT                         0x02    /* Set qlimit for the port msg queue */
+#define MPO_TEMPOWNER                      0x04    /* Set the tempowner bit of the port */
+#define MPO_IMPORTANCE_RECEIVER            0x08    /* Mark the port as importance receiver */
+#define MPO_INSERT_SEND_RIGHT              0x10    /* Insert a send right for the port */
+#define MPO_STRICT                         0x20    /* Apply strict guarding for port */
+#define MPO_DENAP_RECEIVER                 0x40    /* Mark the port as App de-nap receiver */
+#define MPO_IMMOVABLE_RECEIVE              0x80    /* Mark the port as immovable; protected by the guard context */
+#define MPO_FILTER_MSG                     0x100   /* Allow message filtering */
+#define MPO_TG_BLOCK_TRACKING              0x200   /* Track blocking relationship for thread group during sync IPC */
+#define MPO_SERVICE_PORT                   0x400   /* Create a service port with the given name; should be used only by launchd */
+#define MPO_CONNECTION_PORT                0x800   /* Derive new peer connection port from a given service port */
+#define MPO_REPLY_PORT                     0x1000  /* Designate port as a reply port. */
+#define MPO_ENFORCE_REPLY_PORT_SEMANTICS   0x2000  /* When talking to this port, local port of mach msg needs to follow reply port semantics.*/
+#define MPO_PROVISIONAL_REPLY_PORT         0x4000  /* Designate port as a provisional reply port. */
+
 
 /*
  * Structure to define optional attributes for a newly
@@ -468,9 +472,10 @@ typedef mach_port_options_t *mach_port_options_ptr_t;
 
 /* Reasons for exception for a guarded mach port */
 enum mach_port_guard_exception_codes {
-	kGUARD_EXC_DESTROY                       = 1u << 0,
-	kGUARD_EXC_MOD_REFS                      = 1u << 1,
-	kGUARD_EXC_SET_CONTEXT               = 1u << 2,
+	kGUARD_EXC_DESTROY                   = 1,
+	kGUARD_EXC_MOD_REFS                  = 2,
+	kGUARD_EXC_INVALID_OPTIONS           = 3,
+	kGUARD_EXC_SET_CONTEXT               = 4,
 	kGUARD_EXC_UNGUARDED                 = 1u << 3,
 	kGUARD_EXC_INCORRECT_GUARD           = 1u << 4,
 	kGUARD_EXC_IMMOVABLE                 = 1u << 5,
@@ -490,9 +495,10 @@ enum mach_port_guard_exception_codes {
 	kGUARD_EXC_SEND_INVALID_RIGHT    = 1u << 18,
 	kGUARD_EXC_RCV_INVALID_NAME      = 1u << 19,
 	/* start of always non-fatal guards */
-	kGUARD_EXC_RCV_GUARDED_DESC      = 1u << 20, /* for development only */
-	kGUARD_EXC_MOD_REFS_NON_FATAL    = 1u << 21,
-	kGUARD_EXC_IMMOVABLE_NON_FATAL   = 1u << 22,
+	kGUARD_EXC_RCV_GUARDED_DESC             = 1u << 20, /* for development only */
+	kGUARD_EXC_MOD_REFS_NON_FATAL           = 1u << 21,
+	kGUARD_EXC_IMMOVABLE_NON_FATAL          = 1u << 22,
+	kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS = 1u << 23,
 };
 
 #define MAX_FATAL_kGUARD_EXC_CODE (1u << 7)

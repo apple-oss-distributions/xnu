@@ -49,9 +49,6 @@
 IPC_KOBJECT_DEFINE(IKOT_CLOCK,
     .iko_op_stable    = true,
     .iko_op_permanent = true);
-IPC_KOBJECT_DEFINE(IKOT_CLOCK_CTRL,
-    .iko_op_stable    = true,
-    .iko_op_permanent = true);
 
 /*
  *	Routine:	ipc_clock_init
@@ -62,8 +59,6 @@ void
 ipc_clock_init(clock_t clock)
 {
 	clock->cl_service = ipc_kobject_alloc_port(clock, IKOT_CLOCK,
-	    IPC_KOBJECT_ALLOC_NONE);
-	clock->cl_control = ipc_kobject_alloc_port(clock, IKOT_CLOCK_CTRL,
 	    IPC_KOBJECT_ALLOC_NONE);
 }
 
@@ -80,35 +75,11 @@ clock_t
 convert_port_to_clock(ipc_port_t port)
 {
 	clock_t clock = CLOCK_NULL;
-	ipc_kobject_type_t type;
 
 	if (IP_VALID(port)) {
-		type = ip_kotype(port);
-		if (type == IKOT_CLOCK || type == IKOT_CLOCK_CTRL) {
-			clock = (clock_t)ipc_kobject_get_stable(port, type);
-		}
+		clock = ipc_kobject_get_stable(port, IKOT_CLOCK);
 	}
 
-	return clock;
-}
-
-/*
- *	Routine:	convert_port_to_clock_ctrl
- *	Purpose:
- *		Convert from a port to a clock.
- *		Doesn't consume the port ref
- *		which may be null.
- *	Conditions:
- *		Nothing locked.
- */
-clock_t
-convert_port_to_clock_ctrl(ipc_port_t port)
-{
-	clock_t clock = CLOCK_NULL;
-
-	if (IP_VALID(port)) {
-		clock = (clock_t)ipc_kobject_get_stable(port, IKOT_CLOCK_CTRL);
-	}
 	return clock;
 }
 
@@ -123,21 +94,7 @@ convert_port_to_clock_ctrl(ipc_port_t port)
 ipc_port_t
 convert_clock_to_port(clock_t clock)
 {
-	return ipc_port_make_send(clock->cl_service);
-}
-
-/*
- *	Routine:	convert_clock_ctrl_to_port
- *	Purpose:
- *		Convert from a clock to a port.
- *		Produces a naked send right which may be invalid.
- *	Conditions:
- *		Nothing locked.
- */
-ipc_port_t
-convert_clock_ctrl_to_port(clock_t clock)
-{
-	return ipc_port_make_send(clock->cl_control);
+	return ipc_kobject_make_send(clock->cl_service, clock, IKOT_CLOCK);
 }
 
 /*

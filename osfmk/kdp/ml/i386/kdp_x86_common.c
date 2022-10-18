@@ -327,6 +327,9 @@ exit:
 	return len - resid;
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type"
+
 int
 kdp_machine_ioport_read(kdp_readioport_req_t *rq, caddr_t data, uint16_t lcpu)
 {
@@ -409,8 +412,10 @@ kdp_machine_msr64_write(kdp_writemsr64_req_t *rq, caddr_t data, uint16_t lcpu)
 	return KDPERR_NO_ERROR;
 }
 
+#pragma clang diagnostic pop
+
 pt_entry_t *debugger_ptep;
-vm_map_offset_t debugger_window_kva;
+vm_offset_t debugger_window_kva;
 
 /* Establish a pagetable window that can be remapped on demand.
  * This is utilized by the debugger to address regions outside
@@ -420,21 +425,9 @@ vm_map_offset_t debugger_window_kva;
 void
 kdp_map_debug_pagetable_window(void)
 {
-	vm_map_entry_t e;
-	kern_return_t kr;
-
-	kr = vm_map_find_space(kernel_map,
-	    &debugger_window_kva,
-	    PAGE_SIZE, 0,
-	    VM_MAP_KERNEL_FLAGS_NONE,
-	    VM_KERN_MEMORY_OSFMK,
-	    &e);
-
-	if (kr != KERN_SUCCESS) {
-		panic("%s: vm_map_find_space failed with %d", __FUNCTION__, kr);
-	}
-
-	vm_map_unlock(kernel_map);
+	kmem_alloc(kernel_map, &debugger_window_kva, PAGE_SIZE,
+	    KMA_NOFAIL | KMA_KOBJECT | KMA_PERMANENT | KMA_PAGEABLE,
+	    VM_KERN_MEMORY_OSFMK);
 
 	debugger_ptep = pmap_pte(kernel_pmap, debugger_window_kva);
 
@@ -469,7 +462,9 @@ kdp_machine_init(void)
 	 * If the kernel is running on top of a hypervisor that supports AH#1, it will inform
 	 * the hypervisor of its debugging info.
 	 */
-	hvg_hcall_set_coredump_data();
+	if (hvg_is_hcall_available(HVG_HCALL_SET_COREDUMP_DATA)) {
+		hvg_hcall_set_coredump_data();
+	}
 
 	if (debug_boot_arg == 0) {
 		return;

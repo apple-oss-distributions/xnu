@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 1995-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -337,6 +337,7 @@ vfs_mount_at_path(const char *fstype, const char *path,
 {
 	int syscall_flags = MNT_AUTOMOUNTED | mnt_flags;
 	int error, km_flags = 0;
+	vfs_context_t ctx = (flags & VFS_MOUNT_FLAG_CURRENT_CONTEXT) ? vfs_context_current() : vfs_context_kernel();
 
 	/*
 	 * This call is currently restricted to specific use cases.
@@ -359,7 +360,7 @@ vfs_mount_at_path(const char *fstype, const char *path,
 	}
 
 	error = kernel_mount(fstype, pvp, vp, path, data, datalen,
-	    syscall_flags, km_flags, vfs_context_kernel());
+	    syscall_flags, km_flags, ctx);
 	if (error) {
 		printf("%s: mount on %s failed, error %d\n", __func__, path,
 		    error);
@@ -443,9 +444,14 @@ fmount(__unused proc_t p, struct fmount_args *uap, __unused int32_t *retval)
 
 	pvp = vnode_getparent(vp);
 	if (pvp == NULL) {
+		if (vp->v_mountedhere || (vp->v_flag & VROOT) != 0) {
+			error = EBUSY;
+		} else {
+			error = EINVAL;
+		}
 		vnode_put(vp);
 		file_drop(uap->fd);
-		return EINVAL;
+		return error;
 	}
 
 	memset(&cn, 0, sizeof(struct componentname));
@@ -469,6 +475,322 @@ fmount(__unused proc_t p, struct fmount_args *uap, __unused int32_t *retval)
 
 	return error;
 }
+
+#define MAX_GRAFT_METADATA_SIZE             16384 /* bytes */
+
+/*
+ * Get the size of a graft file (a manifest or payload file).
+ * The vp should be an iocounted vnode.
+ */
+static int
+get_and_verify_graft_metadata_vp_size(vnode_t graft_vp, vfs_context_t vctx, size_t *size)
+{
+	struct stat64 sb = {};
+	int error;
+
+	*size = 0;
+
+	error = vn_stat(graft_vp, &sb, NULL, 1, 0, vctx);
+	if (error) {
+		return error;
+	}
+
+	if (sb.st_size == 0) {
+		error = ENODATA;
+	} else if (sb.st_size > MAX_GRAFT_METADATA_SIZE) {
+		error = EFBIG;
+	} else {
+		*size = (size_t) sb.st_size;
+	}
+
+	return error;
+}
+
+/*
+ * Read in a graft file (a manifest or payload file) of size `size` into `buf`.
+ * `size` must already be validated.
+ */
+static int
+read_graft_metadata_vp(vnode_t graft_vp, vfs_context_t vctx, size_t size, void *buf)
+{
+	return vn_rdwr(UIO_READ, graft_vp,
+	           (caddr_t) buf, (int) size, /* offset */ 0,
+	           UIO_SYSSPACE, IO_NOCACHE | IO_RAOFF | IO_UNIT,
+	           vfs_context_ucred(vctx), /* resid */ NULL,
+	           vfs_context_proc(vctx));
+}
+
+/*
+ * Convert a single graft file descriptor into a vnode, get its size (saving it to `size`),
+ * and read it into `buf`.
+ */
+static int
+graft_secureboot_read_fd(int fd, vfs_context_t vctx, size_t *size, void *buf)
+{
+	vnode_t metadata_vp = NULLVP;
+	int error;
+
+	// Convert this graft fd to a vnode.
+	if ((error = vnode_getfromfd(vctx, fd, &metadata_vp)) != 0) {
+		goto out;
+	}
+
+	// Get (and validate) size information.
+	if ((error = get_and_verify_graft_metadata_vp_size(metadata_vp, vctx, size)) != 0) {
+		goto out;
+	}
+
+	// Read each file into the provided buffer - we must get the expected amount of bytes.
+	if ((error = read_graft_metadata_vp(metadata_vp, vctx, *size, buf)) != 0) {
+		goto out;
+	}
+
+out:
+	if (metadata_vp) {
+		vnode_put(metadata_vp);
+		metadata_vp = NULLVP;
+	}
+
+	return error;
+}
+
+/*
+ * Read graft file descriptors into buffers of size MAX_GRAFT_METADATA_SIZE
+ * provided in `gfs`, saving the size of data read in `gfs`.
+ */
+static int
+graft_secureboot_read_metadata(secure_boot_cryptex_args_t *sbc_args, vfs_context_t vctx,
+    fsioc_graft_fs_t *gfs)
+{
+	int error;
+
+	// Read the authentic manifest.
+	if ((error = graft_secureboot_read_fd(sbc_args->sbc_authentic_manifest_fd, vctx,
+	    &gfs->authentic_manifest_size, gfs->authentic_manifest))) {
+		return error;
+	}
+
+	// The user manifest is currently unused, but set its size.
+	gfs->user_manifest_size = 0;
+
+	// Read the payload.
+	if ((error = graft_secureboot_read_fd(sbc_args->sbc_payload_fd, vctx,
+	    &gfs->payload_size, gfs->payload))) {
+		return error;
+	}
+
+	return 0;
+}
+
+/*
+ * Call into the filesystem to verify and graft a cryptex.
+ */
+static int
+graft_secureboot_cryptex(uint32_t graft_type, secure_boot_cryptex_args_t *sbc_args,
+    vfs_context_t vctx, vnode_t cryptex_vp, vnode_t mounton_vp)
+{
+	fsioc_graft_fs_t gfs = {};
+	uint64_t graft_dir_ino = 0;
+	struct stat64 sb = {};
+	int error;
+
+	// Pre-flight arguments.
+	if (sbc_args->sbc_version != GRAFTDMG_SECURE_BOOT_CRYPTEX_ARGS_VERSION) {
+		// Make sure that this graft version matches what we support.
+		return ENOTSUP;
+	} else if (mounton_vp && cryptex_vp->v_mount != mounton_vp->v_mount) {
+		// For this type, cryptex VP must live on same volume as the target of graft.
+		return EXDEV;
+	} else if (mounton_vp && mounton_vp->v_type != VDIR) {
+		// We cannot graft upon non-directories.
+		return ENOTDIR;
+	} else if (sbc_args->sbc_authentic_manifest_fd < 0 ||
+	    sbc_args->sbc_payload_fd < 0) {
+		// We cannot graft without a manifest and payload.
+		return EINVAL;
+	}
+
+	if (mounton_vp) {
+		// Get the mounton's inode number.
+		error = vn_stat(mounton_vp, &sb, NULL, 1, 0, vctx);
+		if (error) {
+			return error;
+		}
+		graft_dir_ino = (uint64_t) sb.st_ino;
+	}
+
+	// Create buffers (of our maximum-defined size) to store authentication info.
+	gfs.authentic_manifest = kalloc_data(MAX_GRAFT_METADATA_SIZE, Z_WAITOK | Z_ZERO);
+	gfs.payload = kalloc_data(MAX_GRAFT_METADATA_SIZE, Z_WAITOK | Z_ZERO);
+
+	if (!gfs.authentic_manifest || !gfs.payload) {
+		error = ENOMEM;
+		goto out;
+	}
+
+	// Read our fd's into our buffers.
+	// (Note that this will set the buffer size fields in `gfs`.)
+	error = graft_secureboot_read_metadata(sbc_args, vctx, &gfs);
+	if (error) {
+		goto out;
+	}
+
+	gfs.graft_version = FSIOC_GRAFT_VERSION;
+	gfs.graft_type = graft_type;
+	gfs.graft_4cc = sbc_args->sbc_4cc;
+	if (sbc_args->sbc_flags & SBC_PRESERVE_MOUNT) {
+		gfs.graft_flags |= FSCTL_GRAFT_PRESERVE_MOUNT;
+	}
+	if (sbc_args->sbc_flags & SBC_ALTERNATE_SHARED_REGION) {
+		gfs.graft_flags |= FSCTL_GRAFT_ALTERNATE_SHARED_REGION;
+	}
+	if (sbc_args->sbc_flags & SBC_SYSTEM_CONTENT) {
+		gfs.graft_flags |= FSCTL_GRAFT_SYSTEM_CONTENT;
+	}
+	if (sbc_args->sbc_flags & SBC_PANIC_ON_AUTHFAIL) {
+		gfs.graft_flags |= FSCTL_GRAFT_PANIC_ON_AUTHFAIL;
+	}
+	if (sbc_args->sbc_flags & SBC_STRICT_AUTH) {
+		gfs.graft_flags |= FSCTL_GRAFT_STRICT_AUTH;
+	}
+	if (sbc_args->sbc_flags & SBC_PRESERVE_GRAFT) {
+		gfs.graft_flags |= FSCTL_GRAFT_PRESERVE_GRAFT;
+	}
+	gfs.dir_ino = graft_dir_ino; // ino from mounton_vp (if not provided, the parent directory)
+
+	// Call into the FS to perform the graft (and validation).
+	error = VNOP_IOCTL(cryptex_vp, FSIOC_GRAFT_FS, (caddr_t)&gfs, 0, vctx);
+
+out:
+	if (gfs.authentic_manifest) {
+		kfree_data(gfs.authentic_manifest, MAX_GRAFT_METADATA_SIZE);
+		gfs.authentic_manifest = NULL;
+	}
+	if (gfs.payload) {
+		kfree_data(gfs.payload, MAX_GRAFT_METADATA_SIZE);
+		gfs.payload = NULL;
+	}
+
+	return error;
+}
+
+#define GRAFTDMG_ENTITLEMENT  "com.apple.private.vfs.graftdmg"
+
+/*
+ * Graft a cryptex disk image (via FD) onto the appropriate mount-point
+ * { int graftdmg(int dmg_fd, const char *mountdir, uint32_t graft_type, graftdmg_args_un *gda); }
+ */
+int
+graftdmg(__unused proc_t p, struct graftdmg_args *uap, __unused int32_t *retval)
+{
+	int ua_dmgfd = uap->dmg_fd;
+	user_addr_t ua_mountdir = uap->mountdir;
+	uint32_t ua_grafttype = uap->graft_type;
+	user_addr_t ua_graftargs = uap->gda;
+
+	graftdmg_args_un kern_gda = {};
+	int error = 0;
+	secure_boot_cryptex_args_t *sbc_args = NULL;
+
+	vnode_t cryptex_vp = NULLVP;
+	vnode_t mounton_vp = NULLVP;
+	struct nameidata nd = {};
+	vfs_context_t ctx = vfs_context_current();
+
+	if (!IOTaskHasEntitlement(vfs_context_task(ctx), GRAFTDMG_ENTITLEMENT)) {
+		return EPERM;
+	}
+
+	error = copyin(ua_graftargs, &kern_gda, sizeof(graftdmg_args_un));
+	if (error) {
+		return error;
+	}
+
+	// Copy mount dir in, if provided.
+	if (ua_mountdir != USER_ADDR_NULL) {
+		// Acquire vnode for mount-on path
+		NDINIT(&nd, LOOKUP, OP_MOUNT, (FOLLOW | AUDITVNPATH1),
+		    UIO_USERSPACE, ua_mountdir, ctx);
+
+		error = namei(&nd);
+		if (error) {
+			return error;
+		}
+		mounton_vp = nd.ni_vp;
+	}
+
+	// Convert fd to vnode.
+	error = vnode_getfromfd(ctx, ua_dmgfd, &cryptex_vp);
+	if (error) {
+		goto graftout;
+	}
+
+	if (ua_grafttype == 0 || ua_grafttype > GRAFTDMG_CRYPTEX_DOWNLEVEL) {
+		error = EINVAL;
+	} else {
+		sbc_args = &kern_gda.sbc_args;
+		error = graft_secureboot_cryptex(ua_grafttype, sbc_args, ctx, cryptex_vp, mounton_vp);
+	}
+
+graftout:
+	if (cryptex_vp) {
+		vnode_put(cryptex_vp);
+		cryptex_vp = NULLVP;
+	}
+	if (mounton_vp) {
+		vnode_put(mounton_vp);
+		mounton_vp = NULLVP;
+	}
+	if (ua_mountdir != USER_ADDR_NULL) {
+		nameidone(&nd);
+	}
+
+	return error;
+}
+
+/*
+ * Ungraft a cryptex disk image (via mount dir FD)
+ * { int ungraftdmg(const char *mountdir, uint64_t flags); }
+ */
+int
+ungraftdmg(__unused proc_t p, struct ungraftdmg_args *uap, __unused int32_t *retval)
+{
+	int error = 0;
+	user_addr_t ua_mountdir = uap->mountdir;
+	fsioc_ungraft_fs_t ugfs;
+	vnode_t mounton_vp = NULLVP;
+	struct nameidata nd = {};
+	vfs_context_t ctx = vfs_context_current();
+
+	if (!IOTaskHasEntitlement(vfs_context_task(ctx), GRAFTDMG_ENTITLEMENT)) {
+		return EPERM;
+	}
+
+	if (uap->flags != 0 || ua_mountdir == USER_ADDR_NULL) {
+		return EINVAL;
+	}
+
+	ugfs.ungraft_flags = 0;
+
+	// Acquire vnode for mount-on path
+	NDINIT(&nd, LOOKUP, OP_MOUNT, (FOLLOW | AUDITVNPATH1),
+	    UIO_USERSPACE, ua_mountdir, ctx);
+
+	error = namei(&nd);
+	if (error) {
+		return error;
+	}
+	mounton_vp = nd.ni_vp;
+
+	// Call into the FS to perform the ungraft
+	error = VNOP_IOCTL(mounton_vp, FSIOC_UNGRAFT_FS, (caddr_t)&ugfs, 0, ctx);
+
+	vnode_put(mounton_vp);
+	nameidone(&nd);
+
+	return error;
+}
+
 
 void
 vfs_notify_mount(vnode_t pdvp)
@@ -686,7 +1008,7 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 #if CONFIG_MACF
 	struct vnode *rvp;
 #endif
-	struct mount *mp;
+	struct mount *mp = NULL;
 	struct vfstable *vfsp = (struct vfstable *)0;
 	struct proc *p = vfs_context_proc(ctx);
 	int error, flag = 0;
@@ -889,7 +1211,7 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 	mp->mnt_flag |= vfsp->vfc_flags & MNT_VISFLAGMASK;
 	strlcpy(mp->mnt_vfsstat.f_fstypename, vfsp->vfc_name, MFSTYPENAMELEN);
 	do {
-		int pathlen = MAXPATHLEN;
+		size_t pathlen = MAXPATHLEN;
 
 		if (vn_getpath_ext(vp, pvp, mp->mnt_vfsstat.f_mntonname, &pathlen, VN_GETPATH_FSENTER)) {
 			strlcpy(mp->mnt_vfsstat.f_mntonname, cnp->cn_pnbuf, MAXPATHLEN);
@@ -1293,6 +1615,19 @@ update:
 	 */
 	if (error == 0) {
 		struct vfs_attr vfsattr;
+		if (device_vnode) {
+			/*
+			 *   cache the IO attributes for the underlying physical media...
+			 *   an error return indicates the underlying driver doesn't
+			 *   support all the queries necessary... however, reasonable
+			 *   defaults will have been set, so no reason to bail or care
+			 *
+			 *   Need to do this before calling the MAC hook as it needs
+			 *   information from this call.
+			 */
+			vfs_init_io_attributes(device_vnode, mp);
+		}
+
 #if CONFIG_MACF
 		error = mac_mount_check_mount_late(ctx, mp);
 		if (error != 0) {
@@ -1406,14 +1741,6 @@ update:
 
 		if (device_vnode) {
 			device_vnode->v_specflags |= SI_MOUNTEDON;
-
-			/*
-			 *   cache the IO attributes for the underlying physical media...
-			 *   an error return indicates the underlying driver doesn't
-			 *   support all the queries necessary... however, reasonable
-			 *   defaults will have been set, so no reason to bail or care
-			 */
-			vfs_init_io_attributes(device_vnode, mp);
 		}
 
 		/* Now that mount is setup, notify the listeners */
@@ -2216,6 +2543,9 @@ checkdirs(vnode_t olddp, vfs_context_t ctx)
 	return 0;
 }
 
+#define ROLE_ACCOUNT_UNMOUNT_ENTITLEMENT        \
+	"com.apple.private.vfs.role-account-unmount"
+
 /*
  * Unmount a file system.
  *
@@ -2230,7 +2560,15 @@ unmount(__unused proc_t p, struct unmount_args *uap, __unused int32_t *retval)
 	struct mount *mp;
 	int error;
 	struct nameidata nd;
-	vfs_context_t ctx = vfs_context_current();
+	vfs_context_t ctx;
+
+	/*
+	 * If the process has the entitlement, use the kernel's context when
+	 * performing lookup on the mount path as the process might lack proper
+	 * permission to access the directory.
+	 */
+	ctx = IOCurrentTaskHasEntitlement(ROLE_ACCOUNT_UNMOUNT_ENTITLEMENT) ?
+	    vfs_context_kernel() : vfs_context_current();
 
 	NDINIT(&nd, LOOKUP, OP_UNMOUNT, FOLLOW | AUDITVNPATH1,
 	    UIO_USERSPACE, uap->path, ctx);
@@ -2276,9 +2614,6 @@ vfs_unmountbyfsid(fsid_t *fsid, int flags, vfs_context_t ctx)
 	/* safedounmount consumes the mount ref */
 	return safedounmount(mp, flags, ctx);
 }
-
-#define ROLE_ACCOUNT_UNMOUNT_ENTITLEMENT        \
-	"com.apple.private.vfs.role-account-unmount"
 
 /*
  * The mount struct comes with a mount ref which will be consumed.
@@ -2700,6 +3035,7 @@ out:
 void
 mount_dropcrossref(mount_t mp, vnode_t dp, int need_put)
 {
+	vnode_hold(dp);
 	vnode_lock(dp);
 	mp->mnt_crossref--;
 
@@ -2711,7 +3047,7 @@ mount_dropcrossref(mount_t mp, vnode_t dp, int need_put)
 		if (need_put) {
 			vnode_put_locked(dp);
 		}
-		vnode_unlock(dp);
+		vnode_drop_and_unlock(dp);
 
 		mount_lock_destroy(mp);
 #if CONFIG_MACF
@@ -2723,7 +3059,7 @@ mount_dropcrossref(mount_t mp, vnode_t dp, int need_put)
 	if (need_put) {
 		vnode_put_locked(dp);
 	}
-	vnode_unlock(dp);
+	vnode_drop_and_unlock(dp);
 }
 
 
@@ -2889,7 +3225,7 @@ struct timeval sync_timeout_last_print = {.tv_sec = 0, .tv_usec = 0};
 __private_extern__ int
 sync_internal(void)
 {
-	thread_t thd;
+	thread_t thd = NULL;
 	int error;
 	int thread_created = FALSE;
 	struct timespec ts = {.tv_sec = sync_timeout_seconds, .tv_nsec = 0};
@@ -3047,6 +3383,27 @@ quotactl(__unused proc_t p, __unused struct quotactl_args *uap, __unused int32_t
 }
 #endif /* QUOTA */
 
+static int
+statfs_internal(proc_t p, struct mount *mp, user_addr_t bufp)
+{
+	int error;
+	vfs_context_t ctx = vfs_context_current();
+
+#if CONFIG_MACF
+	error = mac_mount_check_stat(ctx, mp);
+	if (error != 0) {
+		return error;
+	}
+#endif
+
+	error = vfs_update_vfsstat(mp, ctx, VFS_USER_EVENT);
+	if (error != 0) {
+		return error;
+	}
+
+	return munge_statfs(mp, &mp->mnt_vfsstat, bufp, NULL, IS_64BIT_PROCESS(p), TRUE);
+}
+
 /*
  * Get filesystem statistics.
  *
@@ -3057,11 +3414,10 @@ quotactl(__unused proc_t p, __unused struct quotactl_args *uap, __unused int32_t
  */
 /* ARGSUSED */
 int
-statfs(__unused proc_t p, struct statfs_args *uap, __unused int32_t *retval)
+statfs(proc_t p, struct statfs_args *uap, __unused int32_t *retval)
 {
-	struct mount *mp;
-	struct vfsstatfs *sp;
 	int error;
+	struct mount *mp;
 	struct nameidata nd;
 	vfs_context_t ctx = vfs_context_current();
 	vnode_t vp;
@@ -3074,25 +3430,11 @@ statfs(__unused proc_t p, struct statfs_args *uap, __unused int32_t *retval)
 	}
 	vp = nd.ni_vp;
 	mp = vp->v_mount;
-	sp = &mp->mnt_vfsstat;
 	nameidone(&nd);
 
-#if CONFIG_MACF
-	error = mac_mount_check_stat(ctx, mp);
-	if (error != 0) {
-		vnode_put(vp);
-		return error;
-	}
-#endif
-
-	error = vfs_update_vfsstat(mp, ctx, VFS_USER_EVENT);
-	if (error != 0) {
-		vnode_put(vp);
-		return error;
-	}
-
-	error = munge_statfs(mp, sp, uap->buf, NULL, IS_64BIT_PROCESS(p), TRUE);
+	error = statfs_internal(p, mp, uap->buf);
 	vnode_put(vp);
+
 	return error;
 }
 
@@ -3101,23 +3443,17 @@ statfs(__unused proc_t p, struct statfs_args *uap, __unused int32_t *retval)
  */
 /* ARGSUSED */
 int
-fstatfs(__unused proc_t p, struct fstatfs_args *uap, __unused int32_t *retval)
+fstatfs(proc_t p, struct fstatfs_args *uap, __unused int32_t *retval)
 {
-	vnode_t vp;
-	struct mount *mp;
-	struct vfsstatfs *sp;
 	int error;
+	vnode_t vp = NULL;
+	struct mount *mp;
 
 	AUDIT_ARG(fd, uap->fd);
 
-	if ((error = file_vnode(uap->fd, &vp))) {
-		return error;
-	}
-
-	error = vnode_getwithref(vp);
-	if (error) {
-		file_drop(uap->fd);
-		return error;
+	if ((error = file_vnode(uap->fd, &vp)) ||
+	    (error = vnode_getwithref(vp))) {
+		goto out;
 	}
 
 	AUDIT_ARG(vnpath_withref, vp, ARG_VNODE1);
@@ -3125,26 +3461,18 @@ fstatfs(__unused proc_t p, struct fstatfs_args *uap, __unused int32_t *retval)
 	mp = vp->v_mount;
 	if (!mp) {
 		error = EBADF;
-		goto out;
+		goto out_vnode;
 	}
 
-#if CONFIG_MACF
-	error = mac_mount_check_stat(vfs_context_current(), mp);
-	if (error != 0) {
-		goto out;
-	}
-#endif
+	error = statfs_internal(p, mp, uap->buf);
 
-	sp = &mp->mnt_vfsstat;
-	if ((error = vfs_update_vfsstat(mp, vfs_context_current(), VFS_USER_EVENT)) != 0) {
-		goto out;
-	}
-
-	error = munge_statfs(mp, sp, uap->buf, NULL, IS_64BIT_PROCESS(p), TRUE);
+out_vnode:
+	vnode_put(vp);
 
 out:
-	file_drop(uap->fd);
-	vnode_put(vp);
+	if (vp != NULL) {
+		file_drop(uap->fd);
+	}
 
 	return error;
 }
@@ -4171,19 +4499,26 @@ fg_vn_data_free(void *fgvndata)
  */
 int
 open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
-    struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg, int32_t *retval)
+    struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg, int32_t *retval, int authfd)
 {
 	proc_t p = vfs_context_proc(ctx);
 	uthread_t uu = get_bsdthread_info(vfs_context_thread(ctx));
 	struct fileproc *fp;
 	vnode_t vp;
-	int flags, oflags;
+	int flags, oflags, amode;
 	int type, indx, error;
 	struct vfs_context context;
+	vnode_t authvp = NULLVP;
 
 	oflags = uflags;
 
-	if ((oflags & O_ACCMODE) == O_ACCMODE) {
+	amode = oflags & O_ACCMODE;
+	/*
+	 * Because O_RDONLY is 0, it is not possible to distinguish between
+	 * O_EXEC | O_RDONLY and O_EXEC, therefore FEXEC/FSEARCH can't be set together
+	 * with FREAD/FWRITE.
+	 */
+	if ((amode == O_ACCMODE) || (amode && (oflags & O_EXEC))) {
 		return EINVAL;
 	}
 
@@ -4207,7 +4542,26 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	/* setup state to recognize when fdesc_open was called */
 	uu->uu_dupfd = -1;
 
-	if ((error = vn_open_auth(ndp, &flags, vap))) {
+	/*
+	 * Disable read/write access if file is opened with O_EVTONLY and
+	 * the process has requested to deny read/write access.
+	 */
+	if ((flags & O_EVTONLY) && proc_disallow_rw_for_o_evtonly(p)) {
+		flags &= ~(FREAD | FWRITE);
+	}
+
+	if (authfd != AUTH_OPEN_NOAUTHFD) {
+		error = vnode_getfromfd(ctx, authfd, &authvp);
+		if (error) {
+			fp_free(p, indx, fp);
+			return error;
+		}
+	}
+
+	if ((error = vn_open_auth(ndp, &flags, vap, authvp))) {
+		if (authvp != NULLVP) {
+			vnode_put(authvp);
+		}
 		if ((error == ENODEV || error == ENXIO) && (uu->uu_dupfd >= 0)) {
 			if ((error = dupfdopen(p, indx, uu->uu_dupfd, flags, error)) == 0) {
 				*retval = indx;
@@ -4220,12 +4574,32 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 		fp_free(p, indx, fp);
 		return error;
 	}
+
+	if (authvp != NULLVP) {
+		vnode_put(authvp);
+	}
+
 	uu->uu_dupfd = 0;
 	vp = ndp->ni_vp;
 
 	fp->fp_glob->fg_flag = flags & (FMASK | O_EVTONLY | FENCRYPTED | FUNENCRYPTED);
 	fp->fp_glob->fg_ops = &vnops;
 	fp_set_data(fp, vp);
+
+#if CONFIG_FILE_LEASES
+	/*
+	 * If we are creating a file or open with truncate, we need to break the
+	 * lease if there is a read lease placed on the parent dir.
+	 */
+	if ((vnode_vtype(vp) == VREG) && (flags & (O_CREAT | O_TRUNC))) {
+		vnode_breakdirlease(vp, true, oflags);
+	}
+	/* Now check if there is a lease placed on the file itself. */
+	error = vnode_breaklease(vp, oflags, ctx);
+	if (error) {
+		goto bad;
+	}
+#endif /* CONFIG_FILE_LEASES */
 
 	if (flags & (O_EXLOCK | O_SHLOCK)) {
 		struct flock lf = {
@@ -4388,7 +4762,7 @@ bad:
 static int
 open1at(vfs_context_t ctx, struct nameidata *ndp, int uflags,
     struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg, int32_t *retval,
-    int dirfd)
+    int dirfd, int authfd)
 {
 	if ((dirfd != AT_FDCWD) && !(ndp->ni_cnd.cn_flags & USEDVP)) {
 		int error;
@@ -4420,13 +4794,13 @@ open1at(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 			ndp->ni_dvp = dvp_at;
 			ndp->ni_cnd.cn_flags |= USEDVP;
 			error = open1(ctx, ndp, uflags, vap, fp_init, initarg,
-			    retval);
+			    retval, authfd);
 			vnode_put(dvp_at);
 			return error;
 		}
 	}
 
-	return open1(ctx, ndp, uflags, vap, fp_init, initarg, retval);
+	return open1(ctx, ndp, uflags, vap, fp_init, initarg, retval, authfd);
 }
 
 /*
@@ -4487,7 +4861,7 @@ open_extended(proc_t p, struct open_extended_args *uap, int32_t *retval)
 	    uap->path, vfs_context_current());
 
 	ciferror = open1(vfs_context_current(), &nd, uap->flags, &va,
-	    NULL, NULL, retval);
+	    NULL, NULL, retval, AUTH_OPEN_NOAUTHFD);
 	if (xsecdst != NULL) {
 		kauth_filesec_free(xsecdst);
 	}
@@ -4500,13 +4874,10 @@ open_extended(proc_t p, struct open_extended_args *uap, int32_t *retval)
  *
  * int open_dprotected_np(user_addr_t path, int flags, int class, int dpflags, int mode)
  */
-int
-open_dprotected_np(__unused proc_t p, struct open_dprotected_np_args *uap, int32_t *retval)
+static int
+openat_dprotected_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
+    int class, int dpflags, int fd, int authfd, enum uio_seg segflg, int *retval)
 {
-	int flags = uap->flags;
-	int class = uap->class;
-	int dpflags = uap->dpflags;
-
 	/*
 	 * Follow the same path as normal open(2)
 	 * Look up the item if it exists, and acquire the vnode.
@@ -4515,14 +4886,15 @@ open_dprotected_np(__unused proc_t p, struct open_dprotected_np_args *uap, int32
 	struct nameidata nd;
 	int cmode;
 	int error;
+	struct filedesc *fdp = &vfs_context_proc(ctx)->p_fd;
 
 	VATTR_INIT(&va);
 	/* Mask off all but regular access permissions */
-	cmode = ((uap->mode & ~p->p_fd.fd_cmask) & ALLPERMS) & ~S_ISTXT;
+	cmode = ((mode & ~fdp->fd_cmask) & ALLPERMS) & ~S_ISTXT;
 	VATTR_SET(&va, va_mode, cmode & ACCESSPERMS);
 
-	NDINIT(&nd, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1, UIO_USERSPACE,
-	    uap->path, vfs_context_current());
+	NDINIT(&nd, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1, segflg,
+	    path, ctx);
 
 	/*
 	 * Initialize the extra fields in vnode_attr to pass down our
@@ -4541,23 +4913,50 @@ open_dprotected_np(__unused proc_t p, struct open_dprotected_np_args *uap, int32
 		}
 	}
 
-	if (dpflags & (O_DP_GETRAWENCRYPTED | O_DP_GETRAWUNENCRYPTED)) {
+	if (dpflags & (O_DP_GETRAWENCRYPTED | O_DP_GETRAWUNENCRYPTED | O_DP_AUTHENTICATE)) {
 		if (flags & (O_RDWR | O_WRONLY)) {
-			/* Not allowed to write raw encrypted bytes */
+			/*
+			 * Not allowed to write raw encrypted bytes or when opening authenticated.
+			 */
 			return EINVAL;
 		}
-		if (uap->dpflags & O_DP_GETRAWENCRYPTED) {
+		if (dpflags & O_DP_GETRAWENCRYPTED) {
 			VATTR_SET(&va, va_dataprotect_flags, VA_DP_RAWENCRYPTED);
 		}
-		if (uap->dpflags & O_DP_GETRAWUNENCRYPTED) {
+		if (dpflags & O_DP_GETRAWUNENCRYPTED) {
 			VATTR_SET(&va, va_dataprotect_flags, VA_DP_RAWUNENCRYPTED);
+		}
+		if (dpflags & O_DP_AUTHENTICATE) {
+			VATTR_SET(&va, va_dataprotect_flags, VA_DP_AUTHENTICATE);
 		}
 	}
 
-	error = open1(vfs_context_current(), &nd, uap->flags, &va,
-	    NULL, NULL, retval);
+	error = open1at(vfs_context_current(), &nd, flags, &va,
+	    NULL, NULL, retval, fd, authfd);
 
 	return error;
+}
+
+int
+openat_dprotected_np(__unused proc_t p, struct openat_dprotected_np_args *uap, int32_t *retval)
+{
+	if ((uap->dpflags & O_DP_AUTHENTICATE) && (uap->flags & O_CREAT)) {
+		return EINVAL;
+	}
+
+	return openat_dprotected_internal(vfs_context_current(), uap->path, uap->flags, uap->mode,
+	           uap->class, uap->dpflags, uap->fd, uap->authfd, UIO_USERSPACE, retval);
+}
+
+int
+open_dprotected_np(__unused proc_t p, struct open_dprotected_np_args *uap, int32_t *retval)
+{
+	if (uap->dpflags & O_DP_AUTHENTICATE) {
+		return EINVAL;
+	}
+
+	return openat_dprotected_internal(vfs_context_current(), uap->path, uap->flags, uap->mode,
+	           uap->class, uap->dpflags, AT_FDCWD, AUTH_OPEN_NOAUTHFD, UIO_USERSPACE, retval);
 }
 
 static int
@@ -4586,7 +4985,7 @@ openat_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
 	NDINIT(ndp, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1,
 	    segflg, path, ctx);
 
-	error = open1at(ctx, ndp, flags, vap, NULL, NULL, retval, fd);
+	error = open1at(ctx, ndp, flags, vap, NULL, NULL, retval, fd, AUTH_OPEN_NOAUTHFD);
 
 	kfree_type(typeof(*__open_data), __open_data);
 
@@ -4623,6 +5022,19 @@ openat(proc_t p, struct openat_args *uap, int32_t *retval)
 	return openat_nocancel(p, (struct openat_nocancel_args *)uap, retval);
 }
 
+#define OPEN_BY_ID_ENTITLEMENT  "com.apple.private.vfs.open-by-id"
+
+static boolean_t
+vfs_context_can_open_by_id(vfs_context_t ctx)
+{
+	if (csproc_get_platform_binary(vfs_context_proc(ctx))) {
+		return TRUE;
+	}
+
+	return IOTaskHasEntitlement(vfs_context_task(ctx),
+	           OPEN_BY_ID_ENTITLEMENT);
+}
+
 /*
  * openbyid_np: open a file given a file system id and a file system object id
  *	the hfs file system object id is an fsobj_id_t {uint32, uint32}
@@ -4657,8 +5069,8 @@ openbyid_np(__unused proc_t p, struct openbyid_np_args *uap, int *retval)
 	int pathlen = 0;
 	vfs_context_t ctx = vfs_context_current();
 
-	if ((error = priv_check_cred(vfs_context_ucred(ctx), PRIV_VFS_OPEN_BY_ID, 0))) {
-		return error;
+	if (!vfs_context_can_open_by_id(ctx)) {
+		return EPERM;
 	}
 
 	if ((error = copyin(uap->fsid, (caddr_t)&fsid, sizeof(fsid)))) {
@@ -4707,35 +5119,32 @@ openbyid_np(__unused proc_t p, struct openbyid_np_args *uap, int *retval)
 /*
  * Create a special file.
  */
-static int mkfifo1(vfs_context_t ctx, user_addr_t upath, struct vnode_attr *vap);
+static int mkfifo1(vfs_context_t ctx, user_addr_t upath, struct vnode_attr *vap,
+    int fd);
 
-int
-mknod(proc_t p, struct mknod_args *uap, __unused int32_t *retval)
+static int
+mknodat_internal(proc_t p, user_addr_t upath, struct vnode_attr *vap,
+    mode_t mode, int fd)
 {
-	struct vnode_attr va;
 	vfs_context_t ctx = vfs_context_current();
-	int error;
 	struct nameidata nd;
 	vnode_t vp, dvp;
-
-	VATTR_INIT(&va);
-	VATTR_SET(&va, va_mode, (uap->mode & ALLPERMS) & ~p->p_fd.fd_cmask);
-	VATTR_SET(&va, va_rdev, uap->dev);
+	int error;
 
 	/* If it's a mknod() of a FIFO, call mkfifo1() instead */
-	if ((uap->mode & S_IFMT) == S_IFIFO) {
-		return mkfifo1(ctx, uap->path, &va);
+	if ((mode & S_IFMT) == S_IFIFO) {
+		return mkfifo1(ctx, upath, vap, fd);
 	}
 
-	AUDIT_ARG(mode, (mode_t)uap->mode);
-	AUDIT_ARG(value32, uap->dev);
+	AUDIT_ARG(mode, mode);
+	AUDIT_ARG(value32, vap->va_rdev);
 
 	if ((error = suser(vfs_context_ucred(ctx), &p->p_acflag))) {
 		return error;
 	}
 	NDINIT(&nd, CREATE, OP_MKNOD, LOCKPARENT | AUDITVNPATH1,
-	    UIO_USERSPACE, uap->path, ctx);
-	error = namei(&nd);
+	    UIO_USERSPACE, upath, ctx);
+	error = nameiat(&nd, fd);
 	if (error) {
 		return error;
 	}
@@ -4747,12 +5156,12 @@ mknod(proc_t p, struct mknod_args *uap, __unused int32_t *retval)
 		goto out;
 	}
 
-	switch (uap->mode & S_IFMT) {
+	switch (mode & S_IFMT) {
 	case S_IFCHR:
-		VATTR_SET(&va, va_type, VCHR);
+		VATTR_SET(vap, va_type, VCHR);
 		break;
 	case S_IFBLK:
-		VATTR_SET(&va, va_type, VBLK);
+		VATTR_SET(vap, va_type, VBLK);
 		break;
 	default:
 		error = EINVAL;
@@ -4761,7 +5170,7 @@ mknod(proc_t p, struct mknod_args *uap, __unused int32_t *retval)
 
 #if CONFIG_MACF
 	error = mac_vnode_check_create(ctx,
-	    nd.ni_dvp, &nd.ni_cnd, &va);
+	    nd.ni_dvp, &nd.ni_cnd, vap);
 	if (error) {
 		goto out;
 	}
@@ -4771,7 +5180,11 @@ mknod(proc_t p, struct mknod_args *uap, __unused int32_t *retval)
 		goto out;
 	}
 
-	if ((error = vn_create(dvp, &vp, &nd, &va, 0, 0, NULL, ctx)) != 0) {
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(dvp, false, O_WRONLY);
+#endif
+
+	if ((error = vn_create(dvp, &vp, &nd, vap, 0, 0, NULL, ctx)) != 0) {
 		goto out;
 	}
 
@@ -4812,6 +5225,30 @@ out:
 	return error;
 }
 
+int
+mknod(proc_t p, struct mknod_args *uap, __unused int32_t *retval)
+{
+	struct vnode_attr va;
+
+	VATTR_INIT(&va);
+	VATTR_SET(&va, va_mode, (uap->mode & ALLPERMS) & ~p->p_fd.fd_cmask);
+	VATTR_SET(&va, va_rdev, uap->dev);
+
+	return mknodat_internal(p, uap->path, &va, (mode_t)uap->mode, AT_FDCWD);
+}
+
+int
+mknodat(proc_t p, struct mknodat_args *uap, __unused int32_t *retval)
+{
+	struct vnode_attr va;
+
+	VATTR_INIT(&va);
+	VATTR_SET(&va, va_mode, (uap->mode & ALLPERMS) & ~p->p_fd.fd_cmask);
+	VATTR_SET(&va, va_rdev, uap->dev);
+
+	return mknodat_internal(p, uap->path, &va, (mode_t)uap->mode, uap->fd);
+}
+
 /*
  * Create a named pipe.
  *
@@ -4822,7 +5259,7 @@ out:
  *	vn_create:???
  */
 static int
-mkfifo1(vfs_context_t ctx, user_addr_t upath, struct vnode_attr *vap)
+mkfifo1(vfs_context_t ctx, user_addr_t upath, struct vnode_attr *vap, int fd)
 {
 	vnode_t vp, dvp;
 	int error;
@@ -4830,7 +5267,7 @@ mkfifo1(vfs_context_t ctx, user_addr_t upath, struct vnode_attr *vap)
 
 	NDINIT(&nd, CREATE, OP_MKFIFO, LOCKPARENT | AUDITVNPATH1,
 	    UIO_USERSPACE, upath, ctx);
-	error = namei(&nd);
+	error = nameiat(&nd, fd);
 	if (error) {
 		return error;
 	}
@@ -4915,7 +5352,7 @@ mkfifo_extended(proc_t p, struct mkfifo_extended_args *uap, __unused int32_t *re
 		va.va_vaflags |= VA_FILESEC_ACL;
 	}
 
-	ciferror = mkfifo1(vfs_context_current(), uap->path, &va);
+	ciferror = mkfifo1(vfs_context_current(), uap->path, &va, AT_FDCWD);
 
 	if (xsecdst != KAUTH_FILESEC_NONE) {
 		kauth_filesec_free(xsecdst);
@@ -4932,7 +5369,18 @@ mkfifo(proc_t p, struct mkfifo_args *uap, __unused int32_t *retval)
 	VATTR_INIT(&va);
 	VATTR_SET(&va, va_mode, (uap->mode & ALLPERMS) & ~p->p_fd.fd_cmask);
 
-	return mkfifo1(vfs_context_current(), uap->path, &va);
+	return mkfifo1(vfs_context_current(), uap->path, &va, AT_FDCWD);
+}
+
+int
+mkfifoat(proc_t p, struct mkfifoat_args *uap, __unused int32_t *retval)
+{
+	struct vnode_attr va;
+
+	VATTR_INIT(&va);
+	VATTR_SET(&va, va_mode, (uap->mode & ALLPERMS) & ~p->p_fd.fd_cmask);
+
+	return mkfifo1(vfs_context_current(), uap->path, &va, uap->fd);
 }
 
 extern int safe_getpath_new(struct vnode *dvp, char *leafname, char *path, int _len, int *truncated_path, int firmlink);
@@ -5128,6 +5576,10 @@ linkat_internal(vfs_context_t ctx, int fd1, user_addr_t path, int fd2,
 	if ((error = vnode_authorize(dvp, NULL, KAUTH_VNODE_ADD_FILE, ctx)) != 0) {
 		goto out2;
 	}
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(dvp, false, O_WRONLY);
+#endif
 
 	/* and finally make the link */
 	error = VNOP_LINK(vp, dvp, &nd.ni_cnd, ctx);
@@ -5329,6 +5781,11 @@ symlinkat_internal(vfs_context_t ctx, user_addr_t path_data, int fd,
 	if (error == 0) {
 		error = vnode_authattr_new(dvp, &va, 0, ctx);
 	}
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(dvp, false, O_WRONLY);
+#endif
+
 	if (error == 0) {
 		error = VNOP_SYMLINK(dvp, &vp, &nd.ni_cnd, &va, path, ctx);
 	}
@@ -5621,6 +6078,10 @@ continue_lookup:
 	} else
 #endif
 	{
+#if CONFIG_FILE_LEASES
+		vnode_breakdirlease(dvp, false, O_WRONLY);
+#endif
+
 		error = vn_remove(dvp, &ndp->ni_vp, ndp, flags, vap, ctx);
 		vp = ndp->ni_vp;
 		if (error == EKEEPLOOKING) {
@@ -5689,6 +6150,10 @@ continue_lookup:
 			    FSE_ARG_FINFO, finfop,
 			    FSE_ARG_DONE);
 		}
+#endif
+
+#if CONFIG_MACF
+		mac_vnode_notify_unlink(ctx, dvp, vp, cnp);
 #endif
 	}
 
@@ -5993,7 +6458,7 @@ access_extended(__unused proc_t p, struct access_extended_args *uap, __unused in
 	errno_t *result = NULL;
 	errno_t error = 0;
 	int wantdelete = 0;
-	size_t desc_max, desc_actual;
+	size_t desc_max, desc_actual = 0;
 	unsigned int i, j;
 	struct vfs_context context;
 	struct nameidata nd;
@@ -6908,15 +7373,26 @@ chflags(__unused proc_t p, struct chflags_args *uap, __unused int32_t *retval)
 	vfs_context_t ctx = vfs_context_current();
 	int error;
 	struct nameidata nd;
+	uint32_t wantparent = 0;
+
+#if CONFIG_FILE_LEASES
+	wantparent = WANTPARENT;
+#endif
 
 	AUDIT_ARG(fflags, uap->flags);
-	NDINIT(&nd, LOOKUP, OP_SETATTR, FOLLOW | AUDITVNPATH1,
+	NDINIT(&nd, LOOKUP, OP_SETATTR, FOLLOW | AUDITVNPATH1 | wantparent,
 	    UIO_USERSPACE, uap->path, ctx);
 	error = namei(&nd);
 	if (error) {
 		return error;
 	}
 	vp = nd.ni_vp;
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(nd.ni_dvp, false, O_WRONLY);
+	vnode_put(nd.ni_dvp);
+#endif
+
 	nameidone(&nd);
 
 	/* we don't vnode_put() here because chflags1 does internally */
@@ -6947,6 +7423,10 @@ fchflags(__unused proc_t p, struct fchflags_args *uap, __unused int32_t *retval)
 	}
 
 	AUDIT_ARG(vnpath, vp, ARG_VNODE1);
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(vp, true, O_WRONLY);
+#endif
 
 	/* we don't vnode_put() here because chflags1 does internally */
 	error = chflags1(vp, uap->flags, vfs_context_current());
@@ -7049,9 +7529,14 @@ chmodat(vfs_context_t ctx, user_addr_t path, struct vnode_attr *vap,
 {
 	struct nameidata nd;
 	int follow, error;
+	uint32_t wantparent = 0;
+
+#if CONFIG_FILE_LEASES
+	wantparent = WANTPARENT;
+#endif
 
 	follow = (flag & (AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY)) ? NOFOLLOW : FOLLOW;
-	NDINIT(&nd, LOOKUP, OP_SETATTR, follow | AUDITVNPATH1,
+	NDINIT(&nd, LOOKUP, OP_SETATTR, follow | AUDITVNPATH1 | wantparent,
 	    segflg, path, ctx);
 	if (flag & AT_SYMLINK_NOFOLLOW_ANY) {
 		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
@@ -7059,10 +7544,61 @@ chmodat(vfs_context_t ctx, user_addr_t path, struct vnode_attr *vap,
 	if ((error = nameiat(&nd, fd))) {
 		return error;
 	}
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(nd.ni_dvp, false, O_WRONLY);
+	vnode_put(nd.ni_dvp);
+#endif
+
 	error = chmod_vnode(ctx, nd.ni_vp, vap);
 	vnode_put(nd.ni_vp);
 	nameidone(&nd);
 	return error;
+}
+
+static int
+chmod_extended_init(struct vnode_attr *pva, kauth_filesec_t *pxsecdst, int mode, uid_t uid,
+    gid_t gid, user_addr_t xsecurity)
+{
+	int error;
+
+	VATTR_INIT(pva);
+
+	if (mode != -1) {
+		VATTR_SET(pva, va_mode, mode & ALLPERMS);
+	} else {
+		pva->va_mode = 0;
+	}
+
+	if (uid != KAUTH_UID_NONE) {
+		VATTR_SET(pva, va_uid, uid);
+	}
+
+	if (gid != KAUTH_GID_NONE) {
+		VATTR_SET(pva, va_gid, gid);
+	}
+
+	*pxsecdst = NULL;
+	switch (xsecurity) {
+	case USER_ADDR_NULL:
+		break;
+
+	case CAST_USER_ADDR_T((void *)1): /* _FILESEC_REMOVE_ACL */
+		VATTR_SET(pva, va_acl, NULL);
+		break;
+
+	default:
+		if ((error = kauth_copyinfilesec(xsecurity, pxsecdst)) != 0) {
+			return error;
+		}
+
+		VATTR_SET(pva, va_acl, &(*pxsecdst)->fsec_acl);
+		pva->va_vaflags |= VA_FILESEC_ACL;
+		KAUTH_DEBUG("CHMOD - setting ACL with %d entries", pva->va_acl->acl_entrycount);
+		break;
+	}
+
+	return 0;
 }
 
 /*
@@ -7092,37 +7628,15 @@ chmod_extended(__unused proc_t p, struct chmod_extended_args *uap, __unused int3
 {
 	int error;
 	struct vnode_attr va;
-	kauth_filesec_t xsecdst;
+	kauth_filesec_t xsecdst = NULL;
 
 	AUDIT_ARG(owner, uap->uid, uap->gid);
 
-	VATTR_INIT(&va);
-	if (uap->mode != -1) {
-		VATTR_SET(&va, va_mode, uap->mode & ALLPERMS);
-	}
-	if (uap->uid != KAUTH_UID_NONE) {
-		VATTR_SET(&va, va_uid, uap->uid);
-	}
-	if (uap->gid != KAUTH_GID_NONE) {
-		VATTR_SET(&va, va_gid, uap->gid);
-	}
+	error = chmod_extended_init(&va, &xsecdst, uap->mode, uap->uid,
+	    uap->gid, uap->xsecurity);
 
-	xsecdst = NULL;
-	switch (uap->xsecurity) {
-	/* explicit remove request */
-	case CAST_USER_ADDR_T((void *)1):       /* _FILESEC_REMOVE_ACL */
-		VATTR_SET(&va, va_acl, NULL);
-		break;
-	/* not being set */
-	case USER_ADDR_NULL:
-		break;
-	default:
-		if ((error = kauth_copyinfilesec(uap->xsecurity, &xsecdst)) != 0) {
-			return error;
-		}
-		VATTR_SET(&va, va_acl, &xsecdst->fsec_acl);
-		va.va_vaflags |= VA_FILESEC_ACL;
-		KAUTH_DEBUG("CHMOD - setting ACL with %d entries", va.va_acl->acl_entrycount);
+	if (error) {
+		return error;
 	}
 
 	error = chmodat(vfs_context_current(), uap->path, &va, AT_FDCWD, 0,
@@ -7188,6 +7702,10 @@ fchmod1(__unused proc_t p, int fd, struct vnode_attr *vap)
 	}
 	AUDIT_ARG(vnpath, vp, ARG_VNODE1);
 
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(vp, true, O_WRONLY);
+#endif
+
 	error = chmod_vnode(vfs_context_current(), vp, vap);
 	(void)vnode_put(vp);
 	file_drop(fd);
@@ -7218,54 +7736,21 @@ fchmod_extended(proc_t p, struct fchmod_extended_args *uap, __unused int32_t *re
 {
 	int error;
 	struct vnode_attr va;
-	kauth_filesec_t xsecdst;
+	kauth_filesec_t xsecdst = NULL;
 
 	AUDIT_ARG(owner, uap->uid, uap->gid);
 
-	VATTR_INIT(&va);
-	if (uap->mode != -1) {
-		VATTR_SET(&va, va_mode, uap->mode & ALLPERMS);
-	} else {
-		va.va_mode = 0;
-	}
+	error = chmod_extended_init(&va, &xsecdst, uap->mode, uap->uid,
+	    uap->gid, uap->xsecurity);
 
-	if (uap->uid != KAUTH_UID_NONE) {
-		VATTR_SET(&va, va_uid, uap->uid);
-	}
-	if (uap->gid != KAUTH_GID_NONE) {
-		VATTR_SET(&va, va_gid, uap->gid);
-	}
-
-	xsecdst = NULL;
-	switch (uap->xsecurity) {
-	case USER_ADDR_NULL:
-		VATTR_SET(&va, va_acl, NULL);
-		break;
-	case CAST_USER_ADDR_T((void *)1):       /* _FILESEC_REMOVE_ACL */
-		VATTR_SET(&va, va_acl, NULL);
-		break;
-	/* not being set */
-	case CAST_USER_ADDR_T(-1):
-		break;
-	default:
-		if ((error = kauth_copyinfilesec(uap->xsecurity, &xsecdst)) != 0) {
-			return error;
-		}
-		VATTR_SET(&va, va_acl, &xsecdst->fsec_acl);
-		va.va_vaflags |= VA_FILESEC_ACL;
+	if (error) {
+		return error;
 	}
 
 	error = fchmod1(p, uap->fd, &va);
 
-
-	switch (uap->xsecurity) {
-	case USER_ADDR_NULL:
-	case CAST_USER_ADDR_T(-1):
-		break;
-	default:
-		if (xsecdst != NULL) {
-			kauth_filesec_free(xsecdst);
-		}
+	if (xsecdst != NULL) {
+		kauth_filesec_free(xsecdst);
 	}
 	return error;
 }
@@ -7296,11 +7781,16 @@ fchownat_internal(vfs_context_t ctx, int fd, user_addr_t path, uid_t uid,
 	struct nameidata nd;
 	int follow;
 	kauth_action_t action;
+	uint32_t wantparent = 0;
+
+#if CONFIG_FILE_LEASES
+	wantparent = WANTPARENT;
+#endif
 
 	AUDIT_ARG(owner, uid, gid);
 
 	follow = (flag & (AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY)) ? NOFOLLOW : FOLLOW;
-	NDINIT(&nd, LOOKUP, OP_SETATTR, follow | AUDITVNPATH1, segflg,
+	NDINIT(&nd, LOOKUP, OP_SETATTR, follow | AUDITVNPATH1 | wantparent, segflg,
 	    path, ctx);
 	if (flag & AT_SYMLINK_NOFOLLOW_ANY) {
 		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
@@ -7310,8 +7800,6 @@ fchownat_internal(vfs_context_t ctx, int fd, user_addr_t path, uid_t uid,
 		return error;
 	}
 	vp = nd.ni_vp;
-
-	nameidone(&nd);
 
 	VATTR_INIT(&va);
 	if (uid != (uid_t)VNOVAL) {
@@ -7335,6 +7823,11 @@ fchownat_internal(vfs_context_t ctx, int fd, user_addr_t path, uid_t uid,
 	if (action && ((error = vnode_authorize(vp, NULL, action, ctx)) != 0)) {
 		goto out;
 	}
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(nd.ni_dvp, false, O_WRONLY);
+#endif
+
 	error = vnode_setattr(vp, &va, ctx);
 
 #if CONFIG_MACF
@@ -7352,6 +7845,10 @@ out:
 		error = EPERM;
 	}
 
+#if CONFIG_FILE_LEASES
+	vnode_put(nd.ni_dvp);
+#endif
+	nameidone(&nd);
 	vnode_put(vp);
 	return error;
 }
@@ -7440,6 +7937,11 @@ fchown(__unused proc_t p, struct fchown_args *uap, __unused int32_t *retval)
 		}
 		goto out;
 	}
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(vp, true, O_WRONLY);
+#endif
+
 	error = vnode_setattr(vp, &va, ctx);
 
 #if CONFIG_MACF
@@ -7556,18 +8058,22 @@ utimes(__unused proc_t p, struct utimes_args *uap, __unused int32_t *retval)
 	int error;
 	struct nameidata nd;
 	vfs_context_t ctx = vfs_context_current();
+	uint32_t wantparent = 0;
+
+#if CONFIG_FILE_LEASES
+	wantparent = WANTPARENT;
+#endif
 
 	/*
 	 * AUDIT: Needed to change the order of operations to do the
 	 * name lookup first because auditing wants the path.
 	 */
-	NDINIT(&nd, LOOKUP, OP_SETATTR, FOLLOW | AUDITVNPATH1,
+	NDINIT(&nd, LOOKUP, OP_SETATTR, FOLLOW | AUDITVNPATH1 | wantparent,
 	    UIO_USERSPACE, uap->path, ctx);
 	error = namei(&nd);
 	if (error) {
 		return error;
 	}
-	nameidone(&nd);
 
 	/*
 	 * Fetch the user-supplied time.  If usrtvp is USER_ADDR_NULL, we fetch
@@ -7578,9 +8084,17 @@ utimes(__unused proc_t p, struct utimes_args *uap, __unused int32_t *retval)
 		goto out;
 	}
 
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(nd.ni_dvp, false, O_WRONLY);
+#endif
+
 	error = setutimes(ctx, nd.ni_vp, ts, usrtvp == USER_ADDR_NULL);
 
 out:
+#if CONFIG_FILE_LEASES
+	vnode_put(nd.ni_dvp);
+#endif
+	nameidone(&nd);
 	vnode_put(nd.ni_vp);
 	return error;
 }
@@ -7610,9 +8124,83 @@ futimes(__unused proc_t p, struct futimes_args *uap, __unused int32_t *retval)
 		return error;
 	}
 
-	error =  setutimes(vfs_context_current(), vp, ts, usrtvp == 0);
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(vp, true, O_WRONLY);
+#endif
+
+	error = setutimes(vfs_context_current(), vp, ts, usrtvp == 0);
+
 	vnode_put(vp);
 	file_drop(uap->fd);
+	return error;
+}
+
+static int
+truncate_validate_common(proc_t p, off_t length)
+{
+	rlim_t fsize_limit;
+
+	if (length < 0) {
+		return EINVAL;
+	}
+
+	fsize_limit = proc_limitgetcur(p, RLIMIT_FSIZE);
+	if ((rlim_t)length > fsize_limit) {
+		psignal(p, SIGXFSZ);
+		return EFBIG;
+	}
+
+	return 0;
+}
+
+static int
+truncate_internal(vnode_t vp, off_t length, kauth_cred_t cred,
+    vfs_context_t ctx, boolean_t need_auth)
+{
+	struct vnode_attr va;
+	kauth_action_t action;
+	int error;
+
+	VATTR_INIT(&va);
+	VATTR_SET(&va, va_data_size, length);
+
+#if CONFIG_MACF
+	error = mac_vnode_check_truncate(ctx, cred, vp);
+	if (error) {
+		return error;
+	}
+#endif
+
+	/*
+	 * If we reached here from `ftruncate` then we already did an effective
+	 * `vnode_authorize` upon open.  We honour the result from then.
+	 */
+	if (need_auth) {
+		if ((error = vnode_authattr(vp, &va, &action, ctx)) != 0) {
+			return error;
+		}
+
+		if ((action != 0) && ((error = vnode_authorize(vp, NULL, action, ctx)) != 0)) {
+			return error;
+		}
+	}
+
+#if CONFIG_FILE_LEASES
+	/* Check if there is a lease placed on the parent directory. */
+	vnode_breakdirlease(vp, true, O_WRONLY);
+
+	/* Now check if there is a lease placed on the file itself. */
+	(void)vnode_breaklease(vp, O_WRONLY, ctx);
+#endif
+
+	error = vnode_setattr(vp, &va, ctx);
+
+#if CONFIG_MACF
+	if (error == 0) {
+		mac_vnode_notify_truncate(ctx, cred, vp);
+	}
+#endif
+
 	return error;
 }
 
@@ -7623,59 +8211,28 @@ futimes(__unused proc_t p, struct futimes_args *uap, __unused int32_t *retval)
 int
 truncate(proc_t p, struct truncate_args *uap, __unused int32_t *retval)
 {
-	vnode_t vp;
-	struct vnode_attr va;
 	vfs_context_t ctx = vfs_context_current();
+	vnode_t vp;
 	int error;
 	struct nameidata nd;
-	kauth_action_t action;
-	rlim_t fsize_limit;
 
-	if (uap->length < 0) {
-		return EINVAL;
-	}
-
-	fsize_limit = proc_limitgetcur(p, RLIMIT_FSIZE);
-	if ((rlim_t)uap->length > fsize_limit) {
-		psignal(p, SIGXFSZ);
-		return EFBIG;
+	if ((error = truncate_validate_common(p, uap->length))) {
+		return error;
 	}
 
 	NDINIT(&nd, LOOKUP, OP_TRUNCATE, FOLLOW | AUDITVNPATH1,
 	    UIO_USERSPACE, uap->path, ctx);
+
 	if ((error = namei(&nd))) {
 		return error;
 	}
-	vp = nd.ni_vp;
 
+	vp = nd.ni_vp;
 	nameidone(&nd);
 
-	VATTR_INIT(&va);
-	VATTR_SET(&va, va_data_size, uap->length);
-
-#if CONFIG_MACF
-	error = mac_vnode_check_truncate(ctx, NOCRED, vp);
-	if (error) {
-		goto out;
-	}
-#endif
-
-	if ((error = vnode_authattr(vp, &va, &action, ctx)) != 0) {
-		goto out;
-	}
-	if ((action != 0) && ((error = vnode_authorize(vp, NULL, action, ctx)) != 0)) {
-		goto out;
-	}
-	error = vnode_setattr(vp, &va, ctx);
-
-#if CONFIG_MACF
-	if (error == 0) {
-		mac_vnode_notify_truncate(ctx, NOCRED, vp);
-	}
-#endif
-
-out:
+	error = truncate_internal(vp, uap->length, NOCRED, ctx, true);
 	vnode_put(vp);
+
 	return error;
 }
 
@@ -7686,26 +8243,17 @@ out:
 int
 ftruncate(proc_t p, struct ftruncate_args *uap, int32_t *retval)
 {
-	vfs_context_t ctx = vfs_context_current();
-	struct vnode_attr va;
 	vnode_t vp;
 	struct fileproc *fp;
 	int error;
-	int fd = uap->fd;
-	rlim_t fsize_limit;
 
 	AUDIT_ARG(fd, uap->fd);
-	if (uap->length < 0) {
-		return EINVAL;
+
+	if ((error = truncate_validate_common(p, uap->length))) {
+		return error;
 	}
 
-	fsize_limit = proc_limitgetcur(p, RLIMIT_FSIZE);
-	if ((rlim_t)uap->length > fsize_limit) {
-		psignal(p, SIGXFSZ);
-		return EFBIG;
-	}
-
-	if ((error = fp_lookup(p, fd, &fp, 0))) {
+	if ((error = fp_lookup(p, uap->fd, &fp, 0))) {
 		return error;
 	}
 
@@ -7734,27 +8282,12 @@ ftruncate(proc_t p, struct ftruncate_args *uap, int32_t *retval)
 
 	AUDIT_ARG(vnpath, vp, ARG_VNODE1);
 
-#if CONFIG_MACF
-	error = mac_vnode_check_truncate(ctx,
-	    fp->fp_glob->fg_cred, vp);
-	if (error) {
-		(void)vnode_put(vp);
-		goto out;
-	}
-#endif
-	VATTR_INIT(&va);
-	VATTR_SET(&va, va_data_size, uap->length);
-	error = vnode_setattr(vp, &va, ctx);
+	error = truncate_internal(vp, uap->length, fp->fp_glob->fg_cred,
+	    vfs_context_current(), false);
+	vnode_put(vp);
 
-#if CONFIG_MACF
-	if (error == 0) {
-		mac_vnode_notify_truncate(ctx, fp->fp_glob->fg_cred, vp);
-	}
-#endif
-
-	(void)vnode_put(vp);
 out:
-	file_drop(fd);
+	file_drop(uap->fd);
 	return error;
 }
 
@@ -7943,6 +8476,11 @@ copyfile(__unused proc_t p, struct copyfile_args *uap, __unused int32_t *retval)
 	if (fvp == tvp) {
 		error = -1;
 	}
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(tdvp, false, O_WRONLY);
+#endif
+
 	if (!error) {
 		error = VNOP_COPYFILE(fvp, tdvp, tvp, &tond.ni_cnd, uap->mode, uap->flags, ctx);
 	}
@@ -7989,7 +8527,7 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 	enum vtype v_type;
 	kauth_action_t action;
 	struct componentname *cnp;
-	uint32_t defaulted;
+	uint32_t defaulted = 0;
 	struct vnode_attr va;
 	struct vnode_attr nva;
 	uint32_t vnop_flags;
@@ -8057,14 +8595,19 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 
 	/*
 	 * certain attributes may need to be changed from the source, we ask for
-	 * those here with the exception of source file's ACL. The clone file
-	 * will inherit the target directory's ACL.
+	 * those here with the exception of source file's ACLs unless the CLONE_ACL
+	 * flag is specified. By default, the clone file will inherit the target
+	 * directory's ACLs unless the the CLONE_ACL flag is specified then it
+	 * will inherit the source file's ACLs instead.
 	 */
 	VATTR_INIT(&va);
 	VATTR_WANTED(&va, va_uid);
 	VATTR_WANTED(&va, va_gid);
 	VATTR_WANTED(&va, va_mode);
 	VATTR_WANTED(&va, va_flags);
+	if (flags & CLONE_ACL) {
+		VATTR_WANTED(&va, va_acl);
+	}
 
 	if ((error = vnode_getattr(fvp, &va, ctx)) != 0) {
 		goto out;
@@ -8115,6 +8658,10 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 		    ((va.va_flags & ~(UF_DATAVAULT | SF_RESTRICTED)) | /* Turn off from source */
 		    (nva.va_flags & (UF_DATAVAULT | SF_RESTRICTED))));
 	}
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(tdvp, false, O_WRONLY);
+#endif
 
 	error = VNOP_CLONEFILE(fvp, tdvp, &tvp, cnp, &nva, vnop_flags, ctx);
 
@@ -8212,7 +8759,7 @@ clonefileat(__unused proc_t p, struct clonefileat_args *uap,
 	vfs_context_t ctx = vfs_context_current();
 
 	/* Check that the flags are valid. */
-	if (uap->flags & ~(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)) {
+	if (uap->flags & ~(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY | CLONE_ACL)) {
 		return EINVAL;
 	}
 
@@ -8245,7 +8792,7 @@ fclonefileat(__unused proc_t p, struct fclonefileat_args *uap,
 	vfs_context_t ctx = vfs_context_current();
 
 	/* Check that the flags are valid. */
-	if (uap->flags & ~(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)) {
+	if (uap->flags & ~(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY | CLONE_ACL)) {
 		return EINVAL;
 	}
 
@@ -8296,7 +8843,7 @@ rename_submounts_callback(mount_t mp, void *arg)
 		return -1;
 	}
 
-	int pathlen = MAXPATHLEN;
+	size_t pathlen = MAXPATHLEN;
 	if ((error = vn_getpath_ext(mp->mnt_vnodecovered, NULL, mp->mnt_vfsstat.f_mntonname, &pathlen, VN_GETPATH_FSENTER))) {
 		printf("vn_getpath_ext failed with %d for mnt_vnodecovered of %s\n", error, mp->mnt_vfsstat.f_mntonname);
 	}
@@ -8319,7 +8866,7 @@ renameat_internal(vfs_context_t ctx, int fromfd, user_addr_t from,
 	vnode_t fvp, fdvp;
 	vnode_t mnt_fvp;
 	struct nameidata *fromnd, *tond;
-	int error;
+	int error = 0;
 	int do_retry;
 	int retry_count;
 	int mntrename;
@@ -8754,6 +9301,14 @@ continue_lookup:
 	oparent = fvp->v_parent;
 
 skipped_lookup:
+#if CONFIG_FILE_LEASES
+	/* Lease break needed for source's parent dir? */
+	vnode_breakdirlease(fdvp, false, O_WRONLY);
+
+	/* Lease break needed for target's parent dir? */
+	vnode_breakdirlease(tdvp, false, O_WRONLY);
+#endif
+
 	error = vn_rename(fdvp, &fvp, &fromnd->ni_cnd, fvap,
 	    tdvp, &tvp, &tond->ni_cnd, tvap,
 	    flags, ctx);
@@ -9160,6 +9715,10 @@ continue_lookup:
 		goto out;
 	}
 
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(dvp, false, O_WRONLY);
+#endif
+
 	/*
 	 * make the directory
 	 */
@@ -9417,6 +9976,10 @@ continue_lookup:
 #endif
 		}
 
+#if CONFIG_FILE_LEASES
+		vnode_breakdirlease(dvp, false, O_WRONLY);
+#endif
+
 		error = vn_rmdir(dvp, &vp, ndp, vap, ctx);
 		ndp->ni_vp = vp;
 		if (vp == NULLVP) {
@@ -9510,6 +10073,10 @@ continue_lookup:
 				    FSE_ARG_FINFO, &finfo,
 				    FSE_ARG_DONE);
 			}
+#endif
+
+#if CONFIG_MACF
+			mac_vnode_notify_unlink(ctx, dvp, vp, &ndp->ni_cnd);
 #endif
 		}
 
@@ -9894,6 +10461,9 @@ umask(proc_t p, struct umask_args *uap, int32_t *retval)
 	return umask1(p, uap->newmask, UMASK_NOXSECURITY, retval);
 }
 
+#define REVOKE_MOUNTED_DEVICE_ENTITLEMENT                               \
+	"com.apple.private.vfs.revoke-mounted-device"
+
 /*
  * Void all references to file by ripping underlying filesystem
  * away from vnode.
@@ -9974,7 +10544,7 @@ getdirentriesattr(proc_t p, struct getdirentriesattr_args *uap, int32_t *retval)
 	int spacetype = proc_is64bit(p) ? UIO_USERSPACE64 : UIO_USERSPACE32;
 	uint32_t count = 0, savecount = 0;
 	uint32_t newstate = 0;
-	int error, eofflag;
+	int error, eofflag = 0;
 	off_t loff = 0;
 	struct attrlist attributelist;
 	vfs_context_t ctx = vfs_context_current();
@@ -10894,6 +11464,8 @@ nspace_resolver_get_proc_state(struct proc *p, int *is_resolver)
 	return 0;
 }
 
+static boolean_t vfs_context_is_dataless_resolver(vfs_context_t);
+
 static int
 nspace_resolver_set_proc_state(struct proc *p, int is_resolver)
 {
@@ -10905,14 +11477,9 @@ nspace_resolver_set_proc_state(struct proc *p, int is_resolver)
 	// has the nice side-effect of filtering out filecoordinationd
 	// running in the simulator.
 	//
-	if (!vfs_context_issuser(ctx)) {
+	if (!vfs_context_issuser(ctx) ||
+	    !vfs_context_is_dataless_resolver(ctx)) {
 		return EPERM;
-	}
-
-	error = priv_check_cred(vfs_context_ucred(ctx),
-	    PRIV_VFS_DATALESS_RESOLVER, 0);
-	if (error) {
-		return error;
 	}
 
 	if (is_resolver) {
@@ -11231,6 +11798,19 @@ resolve_nspace_item(struct vnode *vp, uint64_t op)
 #define DATALESS_MANIPULATION_ENTITLEMENT \
 	"com.apple.private.vfs.dataless-manipulation"
 
+#if CONFIG_DATALESS_FILES
+/*
+ * Return TRUE if the vfs context is associated with the dataless
+ * resolver.
+ */
+static boolean_t
+vfs_context_is_dataless_resolver(vfs_context_t ctx __no_dataless_unused)
+{
+	return IOTaskHasEntitlement(vfs_context_task(ctx),
+	           DATALESS_RESOLVER_ENTITLEMENT);
+}
+#endif /* CONFIG_DATALESS_FILES */
+
 /*
  * Return TRUE if the vfs context is associated with a process entitled
  * for dataless manipulation.
@@ -11239,12 +11819,12 @@ resolve_nspace_item(struct vnode *vp, uint64_t op)
  * complication around CONFIG_DATALESS_FILES.
  */
 boolean_t
-vfs_context_is_dataless_manipulator(vfs_context_t ctx __unused)
+vfs_context_is_dataless_manipulator(vfs_context_t ctx __no_dataless_unused)
 {
 #if CONFIG_DATALESS_FILES
-	assert(ctx->vc_thread == current_thread());
-	return IOCurrentTaskHasEntitlement( DATALESS_MANIPULATION_ENTITLEMENT) ||
-	       IOCurrentTaskHasEntitlement(DATALESS_RESOLVER_ENTITLEMENT);
+	task_t task = vfs_context_task(ctx);
+	return IOTaskHasEntitlement(task, DATALESS_MANIPULATION_ENTITLEMENT) ||
+	       IOTaskHasEntitlement(task, DATALESS_RESOLVER_ENTITLEMENT);
 #else
 	return false;
 #endif /* CONFIG_DATALESS_FILES */
@@ -11294,7 +11874,6 @@ log_materialization_prevented(vnode_t vp, uint64_t op)
 }
 #endif /* CONFIG_DATALESS_FILES */
 
-
 static int
 vfs_materialize_item(
 	struct vnode *vp __no_dataless_unused,
@@ -11312,9 +11891,7 @@ vfs_materialize_item(
 	vfs_context_t context;
 	int path_len;
 	int error;
-#ifdef DATALESS_FILES_USE_AUDIT_TOKEN
 	audit_token_t atoken;
-#endif
 
 	/*
 	 * If this is a snapshot event and the vnode is on a disk image just
@@ -11357,12 +11934,10 @@ vfs_materialize_item(
 		goto out_release_port;
 	}
 
-#ifdef DATALESS_FILES_USE_AUDIT_TOKEN
 	error = vfs_context_copy_audit_token(context, &atoken);
 	if (error) {
 		goto out_release_port;
 	}
-#endif
 
 	req.r_req_id = next_nspace_req_id();
 	req.r_resolver_error = 0;
@@ -11406,15 +11981,9 @@ vfs_materialize_item(
 			}
 		}
 
-#ifdef DATALESS_FILES_USE_AUDIT_TOKEN
 		kern_ret = send_vfs_resolve_dir_with_audit_token(mach_port,
 		    req.r_req_id, (uint32_t)(op & 0xffffffff),
 		    lookup_name == NULL ? "" : lookup_name, path, atoken);
-#else
-		kern_ret = send_vfs_resolve_dir(mach_port, req.r_req_id,
-		    proc_getpid(current_proc()), (uint32_t)(op & 0xffffffff),
-		    lookup_name == NULL ? "" : lookup_name, path);
-#endif /* DATALESS_FILES_USE_AUDIT_TOKEN */
 
 		if (tmpname != NULL) {
 			zfree(ZV_NAMEI, tmpname);
@@ -11426,15 +11995,9 @@ vfs_materialize_item(
 			lookup_name = NULL;
 		}
 	} else {
-#ifdef DATALESS_FILES_USE_AUDIT_TOKEN
 		kern_ret = send_vfs_resolve_file_with_audit_token(mach_port,
 		    req.r_req_id, (uint32_t)(op & 0xffffffff),
 		    offset, size, path, atoken);
-#else
-		kern_ret = send_vfs_resolve_file(mach_port, req.r_req_id,
-		    proc_getpid(current_proc()), (uint32_t)(op & 0xffffffff),
-		    offset, size, path);
-#endif /* DATALESS_FILES_USE_AUDIT_TOKEN */
 	}
 	if (kern_ret != KERN_SUCCESS) {
 		/*
@@ -11759,6 +12322,7 @@ handle_sync_volume(vnode_t vp, vnode_t *arg_vp, caddr_t data, vfs_context_t ctx)
 	if (error) {
 		return error;
 	}
+	vnode_hold(vp);
 	vnode_put(vp);
 
 	arg = MNT_NOWAIT;
@@ -11797,6 +12361,7 @@ handle_sync_volume(vnode_t vp, vnode_t *arg_vp, caddr_t data, vfs_context_t ctx)
 			vnode_put(vp);
 		}
 	}
+	vnode_drop(vp);
 	/* mark the argument VP as having been released */
 	*arg_vp = NULL;
 	return error;
@@ -11834,6 +12399,13 @@ handle_flags(vnode_t vp, caddr_t data, vfs_context_t ctx)
 	VATTR_SET(&va, va_flags, cas->new_flags);
 
 	error = chflags0(vp, &va, cas_bsdflags_setattr, cas, ctx);
+
+#if CONFIG_FSE
+	if (error == 0 && cas->expected_flags == cas->actual_flags && need_fsevent(FSE_STAT_CHANGED, vp)) {
+		add_fsevent(FSE_STAT_CHANGED, ctx, FSE_ARG_VNODE, vp, FSE_ARG_DONE);
+	}
+#endif
+
 	return error;
 }
 
@@ -11854,6 +12426,9 @@ handle_auth(vnode_t vp, u_long cmd, caddr_t data, u_long options, vfs_context_t 
 
 	return rootauth;
 }
+
+#define SET_PACKAGE_EXTENSION_ENTITLEMENT \
+	"com.apple.private.kernel.set-package-extensions"
 
 /*
  * Make a filesystem-specific control call:
@@ -11941,7 +12516,9 @@ fsctl_internal(proc_t p, vnode_t *arg_vp, u_long cmd, user_addr_t udata, u_long 
 		uint32_t    num_entries;
 		uint32_t    max_width;
 
-		if ((error = priv_check_cred(kauth_cred_get(), PRIV_PACKAGE_EXTENSIONS, 0))) {
+		if (!IOTaskHasEntitlement(vfs_context_task(ctx),
+		    SET_PACKAGE_EXTENSION_ENTITLEMENT)) {
+			error = EPERM;
 			break;
 		}
 
@@ -12046,6 +12623,10 @@ unlock:
 		error = handle_auth(vp, cmd, data, options, ctx);
 		break;
 
+	case FSIOC_TEST_FSE_ACCESS_GRANTED:
+		error = test_fse_access_granted(vp, (unsigned long)udata, ctx);
+		break;
+
 	default: {
 		/* other, known commands shouldn't be passed down here */
 		switch (cmd) {
@@ -12073,6 +12654,9 @@ unlock:
 		case F_FREEZE_FS:
 		case F_THAW_FS:
 		case FSIOC_KERNEL_ROOTAUTH:
+		case FSIOC_GRAFT_FS:
+		case FSIOC_UNGRAFT_FS:
+		case FSIOC_AUTH_FS:
 			error = EINVAL;
 			goto outdrop;
 		}
@@ -12205,7 +12789,8 @@ xattr_entitlement_check(const char *attrname, vfs_context_t ctx, bool setting)
 		 * set: only tasks with FILESEC_ACCESS_ENTITLEMENT.
 		 */
 		if ((!setting && vfs_context_issuser(ctx)) ||
-		    IOCurrentTaskHasEntitlement(FILESEC_ACCESS_ENTITLEMENT)) {
+		    IOTaskHasEntitlement(vfs_context_task(ctx),
+		    FILESEC_ACCESS_ENTITLEMENT)) {
 			return 0;
 		}
 	}
@@ -12383,7 +12968,7 @@ setxattr(proc_t p, struct setxattr_args *uap, int *retval)
 		return EINVAL;
 	}
 
-	sactx = (struct setxattr_ctx *)kalloc_data(sizeof(struct setxattr_ctx), Z_WAITOK);
+	sactx = kalloc_type(struct setxattr_ctx, Z_WAITOK);
 	if (sactx == NULL) {
 		return ENOMEM;
 	}
@@ -12411,11 +12996,18 @@ setxattr(proc_t p, struct setxattr_args *uap, int *retval)
 	}
 
 	nameiflags = (uap->options & XATTR_NOFOLLOW) ? 0 : FOLLOW;
+#if CONFIG_FILE_LEASES
+	nameiflags |= WANTPARENT;
+#endif
 	NDINIT(&sactx->nd, LOOKUP, OP_SETXATTR, nameiflags, spacetype, uap->path, ctx);
 	if ((error = namei(&sactx->nd))) {
 		goto out;
 	}
 	vp = sactx->nd.ni_vp;
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(sactx->nd.ni_dvp, false, O_WRONLY);
+	vnode_put(sactx->nd.ni_dvp);
+#endif
 	nameidone(&sactx->nd);
 
 	auio = uio_createwithbuffer(1, uap->position, spacetype, UIO_WRITE,
@@ -12432,7 +13024,7 @@ setxattr(proc_t p, struct setxattr_args *uap, int *retval)
 #endif
 	vnode_put(vp);
 out:
-	kfree_data(sactx, sizeof(struct setxattr_ctx));
+	kfree_type(struct setxattr_ctx, sactx);
 	*retval = 0;
 	return error;
 }
@@ -12482,6 +13074,11 @@ fsetxattr(proc_t p, struct fsetxattr_args *uap, int *retval)
 		file_drop(uap->fd);
 		return error;
 	}
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(vp, true, O_WRONLY);
+#endif
+
 	auio = uio_createwithbuffer(1, uap->position, spacetype, UIO_WRITE,
 	    &uio_buf[0], sizeof(uio_buf));
 	uio_addiov(auio, uap->value, uap->size);
@@ -12528,11 +13125,18 @@ removexattr(proc_t p, struct removexattr_args *uap, int *retval)
 		return EPERM;
 	}
 	nameiflags = (uap->options & XATTR_NOFOLLOW) ? 0 : FOLLOW;
+#if CONFIG_FILE_LEASES
+	nameiflags |= WANTPARENT;
+#endif
 	NDINIT(&nd, LOOKUP, OP_REMOVEXATTR, nameiflags, spacetype, uap->path, ctx);
 	if ((error = namei(&nd))) {
 		return error;
 	}
 	vp = nd.ni_vp;
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(nd.ni_dvp, false, O_WRONLY);
+	vnode_put(nd.ni_dvp);
+#endif
 	nameidone(&nd);
 
 	error = vn_removexattr(vp, attrname, uap->options, ctx);
@@ -12581,6 +13185,10 @@ fremovexattr(__unused proc_t p, struct fremovexattr_args *uap, int *retval)
 		file_drop(uap->fd);
 		return error;
 	}
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(vp, true, O_WRONLY);
+#endif
 
 	error = vn_removexattr(vp, attrname, uap->options, vfs_context_current());
 #if CONFIG_FSE
@@ -13756,6 +14364,27 @@ snapshot_root(int dirfd, user_addr_t name, __unused uint32_t flags,
 	return error;
 }
 
+static boolean_t
+vfs_context_can_snapshot(vfs_context_t ctx)
+{
+	static const char * const snapshot_entitlements[] = {
+		"com.apple.private.vfs.snapshot",
+		"com.apple.developer.vfs.snapshot",
+		"com.apple.private.apfs.arv.limited.snapshot",
+	};
+	static const size_t nentitlements =
+	    sizeof(snapshot_entitlements) / sizeof(snapshot_entitlements[0]);
+	size_t i;
+
+	task_t task = vfs_context_task(ctx);
+	for (i = 0; i < nentitlements; i++) {
+		if (IOTaskHasEntitlement(task, snapshot_entitlements[i])) {
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
 /*
  * FS snapshot operations dispatcher
  */
@@ -13769,9 +14398,8 @@ fs_snapshot(__unused proc_t p, struct fs_snapshot_args *uap,
 	AUDIT_ARG(fd, uap->dirfd);
 	AUDIT_ARG(value32, uap->op);
 
-	error = priv_check_cred(vfs_context_ucred(ctx), PRIV_VFS_SNAPSHOT, 0);
-	if (error) {
-		return error;
+	if (!vfs_context_can_snapshot(ctx)) {
+		return EPERM;
 	}
 
 	/*
@@ -13808,7 +14436,7 @@ fs_snapshot(__unused proc_t p, struct fs_snapshot_args *uap,
 
 		if ((vfs_context_issuser(ctx) == 0) &&
 		    (vnode_authorize(devvp, NULL, KAUTH_VNODE_WRITE_DATA, ctx) != 0) &&
-		    (!IOCurrentTaskHasEntitlement("com.apple.private.vfs.snapshot.user"))) {
+		    (!IOTaskHasEntitlement(vfs_context_task(ctx), "com.apple.private.vfs.snapshot.user"))) {
 			error = EPERM;
 		}
 		vnode_put(dvp);

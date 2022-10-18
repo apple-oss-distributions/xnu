@@ -17,6 +17,9 @@
 #include <dispatch/private.h>
 #include <stdalign.h>
 #import <zlib.h>
+#import <IOKit/IOKitLib.h>
+#import <IOKit/IOKitLibPrivate.h>
+#import <IOKit/IOKitKeysPrivate.h>
 
 T_GLOBAL_META(
 		T_META_NAMESPACE("xnu.stackshot"),
@@ -55,6 +58,8 @@ static uint64_t global_flags = 0;
 #define PARSE_STACKSHOT_EXEC_INPROGRESS      0x400
 #define PARSE_STACKSHOT_TRANSITIONING        0x800
 #define PARSE_STACKSHOT_ASYNCSTACK           0x1000
+#define PARSE_STACKSHOT_COMPACTINFO          0x2000 /* TODO: rdar://88789261 */
+#define PARSE_STACKSHOT_DRIVERKIT            0x4000
 
 /* keys for 'extra' dictionary for parse_stackshot */
 static const NSString* zombie_child_pid_key = @"zombie_child_pid"; // -> @(pid), required for PARSE_STACKSHOT_ZOMBIE
@@ -70,6 +75,7 @@ static const NSString* exec_inprogress_found_key = @"exec_inprogress_found";  //
 static const NSString* transitioning_pid_key = @"transitioning_task_pid"; // -> @(pid), required for PARSE_STACKSHOT_TRANSITIONING
 static const NSString* asyncstack_expected_threadid_key = @"asyncstack_expected_threadid"; // -> @(tid), required for PARSE_STACKSHOT_ASYNCSTACK
 static const NSString* asyncstack_expected_stack_key = @"asyncstack_expected_stack"; // -> @[pc...]), expected PCs for asyncstack
+static const NSString* driverkit_found_key = @"driverkit_found_key"; // callback when driverkit process is found. argument is the process pid.
 
 #define TEST_STACKSHOT_QUEUE_LABEL        "houston.we.had.a.problem"
 #define TEST_STACKSHOT_QUEUE_LABEL_LENGTH sizeof(TEST_STACKSHOT_QUEUE_LABEL)
@@ -118,7 +124,9 @@ struct scenario {
 	bool should_fail;
 	bool maybe_unsupported;
 	bool maybe_enomem;
+	bool no_recordfile;
 	pid_t target_pid;
+	bool target_kernel;
 	uint64_t since_timestamp;
 	uint32_t size_hint;
 	dt_stat_time_t timer;
@@ -158,6 +166,10 @@ start:
 		quiet(scenario);
 		T_ASSERT_POSIX_ZERO(ret, "set target pid %d on stackshot config",
 				scenario->target_pid);
+	} else if (scenario->target_kernel) {
+		ret = stackshot_config_set_pid(config, 0);
+		quiet(scenario);
+		T_ASSERT_POSIX_ZERO(ret, "set kernel target on stackshot config");
 	}
 
 	if (scenario->since_timestamp > 0) {
@@ -207,7 +219,7 @@ retry: ;
 	}
 	void *buf = stackshot_config_get_stackshot_buffer(config);
 	size_t size = stackshot_config_get_stackshot_size(config);
-	if (scenario->name) {
+	if (scenario->name && !scenario->no_recordfile) {
 		char sspath[MAXPATHLEN];
 		strlcpy(sspath, scenario->name, sizeof(sspath));
 		strlcat(sspath, ".kcdata", sizeof(sspath));
@@ -294,6 +306,72 @@ T_DECL(kcdata, "test that kcdata stackshots can be taken and parsed")
 	take_stackshot(&scenario, true, ^(void *ssbuf, size_t sslen) {
 		parse_stackshot(0, ssbuf, sslen, nil);
 	});
+}
+
+static void
+get_stats(stackshot_stats_t *_Nonnull out)
+{
+	size_t oldlen = sizeof (*out);
+	bzero(out, oldlen);
+	int result = sysctlbyname("kern.stackshot_stats", out, &oldlen, NULL, 0);
+	T_WITH_ERRNO; T_ASSERT_POSIX_SUCCESS(result, "reading \"kern.stackshot_stats\" sysctl should succeed");
+	T_EXPECT_EQ(oldlen, sizeof (*out), "kernel should update full stats structure");
+}
+
+static void
+log_stats(mach_timebase_info_data_t timebase, uint64_t now, const char *name, stackshot_stats_t stat)
+{
+	uint64_t last_ago = (now - stat.ss_last_start) * timebase.numer / timebase.denom;
+	uint64_t last_duration = (stat.ss_last_end - stat.ss_last_start) * timebase.numer / timebase.denom;
+	uint64_t total_duration = (stat.ss_duration) * timebase.numer / timebase.denom;
+
+	uint64_t nanosec = 1000000000llu;
+	T_LOG("%s: %8lld stackshots, %10lld.%09lld total nsecs, last %lld.%09lld secs ago, %lld.%09lld secs long",
+		name, stat.ss_count,
+		total_duration / nanosec, total_duration % nanosec,
+		last_ago / nanosec, last_ago % nanosec,
+		last_duration / nanosec, last_duration % nanosec);
+}
+
+T_DECL(stats, "test that stackshot stats can be read out and change when a stackshot occurs")
+{
+	mach_timebase_info_data_t timebase = {0, 0};
+	mach_timebase_info(&timebase);
+	
+	struct scenario scenario = {
+		.name = "kcdata",
+		.flags = (STACKSHOT_SAVE_LOADINFO | STACKSHOT_KCDATA_FORMAT),
+	};
+
+	stackshot_stats_t pre, post;
+
+	get_stats(&pre);
+
+	T_LOG("taking kcdata stackshot");
+	take_stackshot(&scenario, true, ^(__unused void *ssbuf, __unused size_t sslen) {
+		(void)0;
+	});
+
+	get_stats(&post);
+
+	uint64_t now = mach_absolute_time();
+
+	log_stats(timebase, now, "  pre", pre);
+	log_stats(timebase, now, " post", post);
+
+	int64_t delta_stackshots = (int64_t)(post.ss_count - pre.ss_count);
+	int64_t delta_duration = (int64_t)(post.ss_duration - pre.ss_duration) * (int64_t)timebase.numer / (int64_t)timebase.denom;
+	int64_t delta_nsec = delta_duration % 1000000000ll;
+	if (delta_nsec < 0) {
+	    delta_nsec += 1000000000ll;
+	}
+	T_LOG("delta: %+8lld stackshots, %+10lld.%09lld total nsecs", delta_stackshots, delta_duration / 1000000000ll, delta_nsec);
+
+	T_EXPECT_LT(pre.ss_last_start, pre.ss_last_end, "pre: stackshot should take time");
+	T_EXPECT_LT(pre.ss_count, post.ss_count, "stackshot count should increase when a stackshot is taken");
+	T_EXPECT_LT(pre.ss_duration, post.ss_duration, "stackshot duration should increase when a stackshot is taken");
+	T_EXPECT_LT(pre.ss_last_end, post.ss_last_start, "previous end should be less than new start after a stackshot");
+	T_EXPECT_LT(post.ss_last_start, post.ss_last_end, "post: stackshot should take time");
 }
 
 T_DECL(kcdata_faulting, "test that kcdata stackshots while faulting can be taken and parsed")
@@ -406,6 +484,12 @@ T_DECL(stress, "test that taking stackshots for 60 seconds doesn't crash the sys
 			printf(".");
 			fflush(stdout);
 		});
+
+		/*
+		 * After the first stackshot, there's no point in continuing to
+		 * write them to disk, and it wears down the SSDs.
+		 */
+		scenario.no_recordfile = true;
 
 		/* Leave some time for the testing infrastructure to catch up */
 		usleep(10000);
@@ -1234,6 +1318,86 @@ T_DECL(thread_groups, "test getting thread groups in stackshot")
 	});
 }
 
+T_DECL(compactinfo, "test compactinfo inclusion")
+{
+	struct scenario scenario = {
+		.name = "compactinfo",
+		.target_pid = getpid(),
+		.flags = (STACKSHOT_SAVE_LOADINFO | STACKSHOT_SAVE_DYLD_COMPACTINFO
+				| STACKSHOT_KCDATA_FORMAT),
+	};
+
+	T_LOG("attempting to take stackshot with compactinfo flag");
+	take_stackshot(&scenario, false, ^(void *ssbuf, size_t sslen) {
+		parse_stackshot(PARSE_STACKSHOT_COMPACTINFO, ssbuf, sslen, nil);
+	});
+	
+}
+
+static NSMutableSet * find_driverkit_pids(io_registry_entry_t root) {
+	NSMutableSet * driverkit_pids = [NSMutableSet setWithCapacity:3];
+	io_registry_entry_t current = IO_OBJECT_NULL;
+	io_iterator_t iter = IO_OBJECT_NULL;
+
+	T_EXPECT_MACH_SUCCESS(IORegistryEntryGetChildIterator(root, kIOServicePlane, &iter), "get registry iterator");
+
+	while ((current = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
+		if (_IOObjectConformsTo(current, "IOUserServer", kIOClassNameOverrideNone)) {
+			CFMutableDictionaryRef cfProperties = NULL;
+			NSMutableDictionary * properties;
+			NSString * client_creator_info;
+			NSArray<NSString *> *creator_info_array;
+			pid_t pid;
+
+			T_QUIET; T_EXPECT_MACH_SUCCESS(IORegistryEntryCreateCFProperties(current, &cfProperties, kCFAllocatorDefault, kNilOptions), "get properties");
+			properties = CFBridgingRelease(cfProperties);
+			T_QUIET; T_ASSERT_NOTNULL(properties, "properties is not null");
+			client_creator_info = properties[@kIOUserClientCreatorKey];
+			creator_info_array = [client_creator_info componentsSeparatedByString:@","];
+			if ([creator_info_array[0] hasPrefix:@"pid"]) {
+				NSArray<NSString *> *pid_info = [creator_info_array[0] componentsSeparatedByString:@" "];
+				T_QUIET; T_ASSERT_EQ(pid_info.count, 2UL, "Get pid info components from %s", creator_info_array[0].UTF8String);
+				pid = pid_info[1].intValue;
+			} else {
+				T_ASSERT_FAIL("No pid info in client creator info: %s", client_creator_info.UTF8String);
+			}
+			T_LOG("Found driver pid %d", pid);
+			[driverkit_pids addObject:[NSNumber numberWithInt:pid]];
+		} else {
+			[driverkit_pids unionSet:find_driverkit_pids(current)];
+		}
+		IOObjectRelease(current);
+	}
+	
+	IOObjectRelease(iter);
+	return driverkit_pids;
+}
+
+T_DECL(driverkit, "test driverkit inclusion")
+{
+	struct scenario scenario = {
+		.name = "driverkit",
+		.target_kernel = true,
+		.flags = (STACKSHOT_SAVE_LOADINFO | STACKSHOT_KCDATA_FORMAT
+			    | STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL),
+	};
+	
+	io_registry_entry_t root = IORegistryGetRootEntry(kIOMainPortDefault);
+	NSMutableSet * driverkit_pids = find_driverkit_pids(root);
+	IOObjectRelease(root);
+
+	T_LOG("expecting to find %lu driverkit processes", [driverkit_pids count]);
+	T_LOG("attempting to take stackshot with STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL flag");
+	take_stackshot(&scenario, false, ^(void *ssbuf, size_t sslen) {
+		parse_stackshot(PARSE_STACKSHOT_DRIVERKIT, ssbuf, sslen, @{
+			driverkit_found_key: ^(pid_t pid) {
+				[driverkit_pids removeObject:[NSNumber numberWithInt:pid]];
+		}});
+	});
+
+	T_EXPECT_EQ([driverkit_pids count], (NSUInteger)0, "found expected number of driverkit processes");
+}
+
 static void
 parse_page_table_asid_stackshot(void **ssbuf, size_t sslen)
 {
@@ -1979,6 +2143,17 @@ T_DECL(perf_delta_process, "test delta stackshot performance targeted at a proce
 	stackshot_perf(SHOULD_REUSE_SIZE_HINT | SHOULD_USE_DELTA | SHOULD_TARGET_SELF);
 }
 
+T_DECL(stackshot_entitlement_report_test, "test stackshot entitlement report")
+{
+	int sysctlValue = 1;
+	T_ASSERT_POSIX_SUCCESS(
+	    sysctlbyname("debug.stackshot_entitlement_send_batch", NULL, NULL, &sysctlValue, sizeof(sysctlValue)),
+	    "set debug.stackshot_entitlement_send_batch=1");
+	// having a way to verify that the coreanalytics event was received would be even better
+	// See rdar://74197197
+	T_PASS("entitlement test ran");
+}
+
 static uint64_t
 stackshot_timestamp(void *ssbuf, size_t sslen)
 {
@@ -2131,6 +2306,7 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 	bool expect_exec_inprogress = (stackshot_parsing_flags & PARSE_STACKSHOT_EXEC_INPROGRESS);
 	bool expect_transitioning_task = (stackshot_parsing_flags & PARSE_STACKSHOT_TRANSITIONING);
 	bool expect_asyncstack = (stackshot_parsing_flags & PARSE_STACKSHOT_ASYNCSTACK);
+	bool expect_driverkit = (stackshot_parsing_flags & PARSE_STACKSHOT_DRIVERKIT);
 	bool found_zombie_child = false, found_postexec_child = false, found_shared_cache_layout = false, found_shared_cache_uuid = false;
 	bool found_translated_child = false, found_transitioning_task = false;
 	bool found_dispatch_queue_label = false, found_turnstile_lock = false;
@@ -2150,6 +2326,8 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 	void (^exec_inprogress_cb)(uint64_t, uint64_t) = NULL;
 	int exec_inprogress_found = 0;
 	uint64_t exec_inprogress_containerid = 0;
+	void (^driverkit_cb)(pid_t) = NULL;
+	NSMutableDictionary *sharedCaches = [NSMutableDictionary new];
 
 	if (expect_shared_cache_uuid) {
 		uuid_t shared_cache_uuid;
@@ -2241,6 +2419,10 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 
 		exec_inprogress_cb = extra[exec_inprogress_found_key];
 		T_QUIET; T_ASSERT_NOTNULL(exec_inprogress_cb, "exec inprogress found callback provided");
+	}
+	if (expect_driverkit) {
+		driverkit_cb = extra[driverkit_found_key];
+		T_QUIET; T_ASSERT_NOTNULL(driverkit_cb, "driverkit found callback provided");
 	}
 
 	if (expect_asyncstack) {
@@ -2361,7 +2543,16 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 					"checked that container is valid");
 
 			uint64_t containerid = kcdata_iter_container_id(iter);
-			uint32_t container_type = kcdata_iter_container_type(iter) ;
+			uint32_t container_type = kcdata_iter_container_type(iter);
+
+			if (container_type == STACKSHOT_KCCONTAINER_SHAREDCACHE) {
+				NSDictionary *container = parseKCDataContainer(&iter, &error);
+				T_QUIET; T_ASSERT_NOTNULL(container, "parsed sharedcache container from stackshot");
+				T_QUIET; T_ASSERT_NULL(error, "error unset after parsing sharedcache container");
+				T_QUIET; T_EXPECT_EQ(sharedCaches[@(containerid)], nil, "sharedcache containerid %lld should be unique", containerid);
+				sharedCaches[@(containerid)] = container;
+				break;
+			}
 
 			/*
 			 * treat containers other than tasks/transitioning_tasks
@@ -2486,10 +2677,11 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 				uint64_t task_flags = [task_snapshot[@"ts_ss_flags"] unsignedLongLongValue];
 				uint64_t sharedregion_flags = (task_flags & (kTaskSharedRegionNone | kTaskSharedRegionSystem | kTaskSharedRegionOther));
 				id sharedregion_info = container[@"task_snapshots"][@"shared_cache_dyld_load_info"];
+				id sharedcache_id = container[@"task_snapshots"][@"sharedCacheID"];
 				if (!found_sharedcache_badflags) {
-					T_QUIET; T_ASSERT_NE(sharedregion_flags, 0ll, "one of the kTaskSharedRegion flags should be set on all tasks");
+					T_QUIET; T_EXPECT_NE(sharedregion_flags, 0ll, "one of the kTaskSharedRegion flags should be set on all tasks");
 					bool multiple = (sharedregion_flags & (sharedregion_flags - 1)) != 0;
-					T_QUIET; T_ASSERT_FALSE(multiple, "only one kTaskSharedRegion flag should be set on each task");
+					T_QUIET; T_EXPECT_FALSE(multiple, "only one kTaskSharedRegion flag should be set on each task");
 					found_sharedcache_badflags = (sharedregion_flags == 0 || multiple);
 				}
 				if (pid == 0) {
@@ -2502,9 +2694,14 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 					sharedcache_self_flags = sharedregion_flags;
 				}
 				if (sharedregion_flags == kTaskSharedRegionOther && !(task_flags & kTaskSharedRegionInfoUnavailable)) {
-					T_QUIET; T_ASSERT_NOTNULL(sharedregion_info, "kTaskSharedRegionOther should have a shared_cache_dyld_load_info struct");
+					T_QUIET; T_EXPECT_NOTNULL(sharedregion_info, "kTaskSharedRegionOther should have a shared_cache_dyld_load_info struct");
+					T_QUIET; T_EXPECT_NOTNULL(sharedcache_id, "kTaskSharedRegionOther should have a sharedCacheID");
+					if (sharedcache_id != nil) {
+						T_QUIET; T_EXPECT_NOTNULL(sharedCaches[sharedcache_id], "sharedCacheID %d should exist", [sharedcache_id intValue]);
+					}
 				} else {
-					T_QUIET; T_ASSERT_NULL(sharedregion_info, "expect no shared_cache_dyld_load_info struct");
+					T_QUIET; T_EXPECT_NULL(sharedregion_info, "non-kTaskSharedRegionOther should have no shared_cache_dyld_load_info struct");
+					T_QUIET; T_EXPECT_NULL(sharedcache_id, "non-kTaskSharedRegionOther should have no sharedCacheID");
 				}
 			}
 
@@ -2535,6 +2732,9 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 				} else {
 					exec_inprogress_containerid = containerid;
 				}
+			}
+			if (expect_driverkit && driverkit_cb != NULL) {
+				driverkit_cb(pid);
 			}
 			if (expect_cseg_waitinfo) {
 				NSArray *winfos = container[@"task_snapshots"][@"thread_waitinfo"];
@@ -2687,6 +2887,7 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 			break;
 		}
 		case STACKSHOT_KCTYPE_SHAREDCACHE_LOADINFO: {
+			// Legacy shared cache info
 			struct dyld_shared_cache_loadinfo *payload = kcdata_iter_payload(iter);
 			T_ASSERT_EQ((size_t)kcdata_iter_size(iter), sizeof(*payload), "valid dyld_shared_cache_loadinfo struct");
 

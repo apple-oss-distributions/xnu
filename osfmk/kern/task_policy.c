@@ -242,7 +242,6 @@ static void task_set_boost_locked(task_t task, boolean_t boost_active);
 
 int proc_standard_daemon_tier = THROTTLE_LEVEL_TIER1;
 int proc_suppressed_disk_tier = THROTTLE_LEVEL_TIER1;
-int proc_tal_disk_tier        = THROTTLE_LEVEL_TIER1;
 
 int proc_graphics_timer_qos   = (LATENCY_QOS_TIER_0 & 0xFF);
 
@@ -264,7 +263,6 @@ const struct task_effective_policy default_task_effective_policy = {};
 
 uint8_t         proc_max_cpumon_percentage;
 uint64_t        proc_max_cpumon_interval;
-
 
 kern_return_t
 qos_latency_policy_validate(task_latency_qos_t ltier)
@@ -333,6 +331,17 @@ qos_throughput_policy_package(uint32_t qv)
 /* TEMPORARY boot-arg controlling task_policy suppression (App Nap) */
 static boolean_t task_policy_suppression_flags = TASK_POLICY_SUPPRESSION_IOTIER2 |
     TASK_POLICY_SUPPRESSION_NONDONOR;
+
+static void
+task_set_requested_apptype(task_t task, uint64_t apptype, __unused boolean_t update_tg_flag)
+{
+	task->requested_policy.trp_apptype = apptype;
+#if CONFIG_THREAD_GROUPS
+	if (update_tg_flag && task_is_app(task)) {
+		task_coalition_thread_group_application_set(task);
+	}
+#endif /* CONFIG_THREAD_GROUPS */
+}
 
 kern_return_t
 task_policy_set(
@@ -724,7 +733,7 @@ task_policy_get(
 void
 task_policy_create(task_t task, task_t parent_task)
 {
-	task->requested_policy.trp_apptype          = parent_task->requested_policy.trp_apptype;
+	task_set_requested_apptype(task, parent_task->requested_policy.trp_apptype, true);
 
 	task->requested_policy.trp_int_darwinbg     = parent_task->requested_policy.trp_int_darwinbg;
 	task->requested_policy.trp_ext_darwinbg     = parent_task->requested_policy.trp_ext_darwinbg;
@@ -739,10 +748,10 @@ task_policy_create(task_t task, task_t parent_task)
 	if (task->requested_policy.trp_apptype == TASK_APPTYPE_DAEMON_ADAPTIVE && !task_is_exec_copy(task)) {
 		/* Do not update the apptype for exec copy task */
 		if (parent_task->requested_policy.trp_boosted) {
-			task->requested_policy.trp_apptype = TASK_APPTYPE_DAEMON_INTERACTIVE;
+			task_set_requested_apptype(task, TASK_APPTYPE_DAEMON_INTERACTIVE, true);
 			task_importance_mark_donor(task, TRUE);
 		} else {
-			task->requested_policy.trp_apptype = TASK_APPTYPE_DAEMON_BACKGROUND;
+			task_set_requested_apptype(task, TASK_APPTYPE_DAEMON_BACKGROUND, true);
 			task_importance_mark_receiver(task, FALSE);
 		}
 	}
@@ -814,7 +823,8 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 	next.tep_role = requested.trp_role;
 
 	/* Set task qos clamp and ceiling */
-	next.tep_qos_clamp = requested.trp_qos_clamp;
+
+	thread_qos_t role_clamp = THREAD_QOS_UNSPECIFIED;
 
 	if (requested.trp_apptype == TASK_APPTYPE_APP_DEFAULT) {
 		switch (next.tep_role) {
@@ -848,6 +858,7 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 		case TASK_THROTTLE_APPLICATION:
 			/* i.e. 'TAL launch' */
 			next.tep_qos_ceiling = THREAD_QOS_UTILITY;
+			role_clamp = THREAD_QOS_UTILITY;
 			break;
 
 		case TASK_DARWINBG_APPLICATION:
@@ -865,6 +876,16 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 	} else {
 		/* Daemons and dext get USER_INTERACTIVE squashed to USER_INITIATED */
 		next.tep_qos_ceiling = THREAD_QOS_USER_INITIATED;
+	}
+
+	if (role_clamp != THREAD_QOS_UNSPECIFIED) {
+		if (requested.trp_qos_clamp != THREAD_QOS_UNSPECIFIED) {
+			next.tep_qos_clamp = MIN(role_clamp, requested.trp_qos_clamp);
+		} else {
+			next.tep_qos_clamp = role_clamp;
+		}
+	} else {
+		next.tep_qos_clamp = requested.trp_qos_clamp;
 	}
 
 	/* Calculate DARWIN_BG */
@@ -937,10 +958,6 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 		wants_lowpri_cpu = true;
 	}
 
-	if (next.tep_tal_engaged) {
-		wants_lowpri_cpu = true;
-	}
-
 	if (requested.trp_sup_lowpri_cpu && requested.trp_boosted == 0) {
 		wants_lowpri_cpu = true;
 	}
@@ -966,10 +983,6 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 
 	if (requested.trp_sup_disk && requested.trp_boosted == 0) {
 		iopol = MAX(iopol, proc_suppressed_disk_tier);
-	}
-
-	if (next.tep_tal_engaged) {
-		iopol = MAX(iopol, proc_tal_disk_tier);
 	}
 
 	if (next.tep_qos_clamp != THREAD_QOS_UNSPECIFIED) {
@@ -1274,9 +1287,9 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 	 */
 	if (appnap_transition) {
 		if (task->effective_policy.tep_sup_active == 1) {
-			memorystatus_update_priority_for_appnap(((proc_t) task->bsd_info), TRUE);
+			memorystatus_update_priority_for_appnap(((proc_t) get_bsdtask_info(task)), TRUE);
 		} else {
-			memorystatus_update_priority_for_appnap(((proc_t) task->bsd_info), FALSE);
+			memorystatus_update_priority_for_appnap(((proc_t) get_bsdtask_info(task)), FALSE);
 		}
 	}
 }
@@ -1388,6 +1401,9 @@ task_policy_update_complete_unlocked(task_t task, task_pend_token_t pend_token)
 #if CONFIG_THREAD_GROUPS
 	if (pend_token->tpt_update_tg_ui_flag) {
 		task_coalition_thread_group_focal_update(task);
+	}
+	if (pend_token->tpt_update_tg_app_flag) {
+		task_coalition_thread_group_application_set(task);
 	}
 #endif /* CONFIG_THREAD_GROUPS */
 }
@@ -2014,7 +2030,10 @@ proc_set_task_spawnpolicy(task_t task, thread_t thread, int apptype, int qos_cla
 	task_lock(task);
 
 	if (apptype != TASK_APPTYPE_NONE) {
-		task->requested_policy.trp_apptype = apptype;
+		task_set_requested_apptype(task, apptype, false);
+		if (task_is_app(task)) {
+			pend_token.tpt_update_tg_app_flag = 1;
+		}
 	}
 
 #if !defined(XNU_TARGET_OS_OSX)
@@ -2090,7 +2109,7 @@ task_compute_main_thread_qos(task_t task)
 		break;
 	}
 
-	if (task->bsd_info == initproc) {
+	if (get_bsdtask_info(task) == initproc) {
 		/* PID 1 gets a special case */
 		primordial_qos = MAX(primordial_qos, THREAD_QOS_USER_INITIATED);
 	}
@@ -2154,6 +2173,7 @@ task_is_app(task_t task)
 		return FALSE;
 	}
 }
+
 
 /* for telemetry */
 integer_t
@@ -2569,7 +2589,7 @@ proc_clear_task_ruse_cpu(task_t task, int cpumon_entitled)
 		task->applied_ru_cpu_ext = TASK_POLICY_RESOURCE_ATTRIBUTE_NONE;
 	}
 	if (action != TASK_POLICY_RESOURCE_ATTRIBUTE_NONE) {
-		bsdinfo = task->bsd_info;
+		bsdinfo = get_bsdtask_info(task);
 		task_unlock(task);
 		proc_restore_resource_actions(bsdinfo, TASK_POLICY_CPU_RESOURCE_USAGE, action);
 		goto out1;
@@ -2615,7 +2635,7 @@ task_apply_resource_actions(task_t task, int type)
 	}
 
 	if (action != TASK_POLICY_RESOURCE_ATTRIBUTE_NONE) {
-		bsdinfo = task->bsd_info;
+		bsdinfo = get_bsdtask_info(task);
 		task_unlock(task);
 		proc_apply_resource_actions(bsdinfo, TASK_POLICY_CPU_RESOURCE_USAGE, action);
 	} else {
@@ -2838,8 +2858,9 @@ task_set_cpuusage(task_t task, uint8_t percentage, uint64_t interval, uint64_t d
 
 #ifdef MACH_BSD
 				pid = proc_selfpid();
-				if (current_task()->bsd_info != NULL) {
-					procname = proc_name_address(current_task()->bsd_info);
+				void *cur_bsd_info = get_bsdtask_info(current_task());
+				if (cur_bsd_info != NULL) {
+					procname = proc_name_address(cur_bsd_info);
 				}
 #endif
 

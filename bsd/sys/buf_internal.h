@@ -150,6 +150,7 @@ struct buf {
 	void *  b_stackgetblk[6];
 #endif
 	uint32_t b_lblksize;          /* Block size used to set b_lbkno */
+	vnode_t b_vnop_vp;            /* identifies vp on which VNOP has been called */
 };
 
 extern vm_offset_t buf_kernel_addrperm;
@@ -333,6 +334,8 @@ errno_t buf_make_private(buf_t bp);
 #ifdef CONFIG_PROTECT
 void buf_setcpoff(buf_t, uint64_t);
 #endif
+
+vnode_t buf_vnop_vnode(buf_t);
 
 __END_DECLS
 

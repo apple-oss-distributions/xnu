@@ -163,7 +163,13 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		setup_type_definition(retval, type_id, i, "dyld_load_info");
 		break;
 	}
-
+	case STACKSHOT_KCTYPE_LOADINFO64_TEXT_EXEC: {
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct user64_dyld_uuid_info, imageLoadAddress);
+		_SUBTYPE_ARRAY(KC_ST_UINT8, struct user64_dyld_uuid_info, imageUUID, 16);
+		setup_type_definition(retval, type_id, i, "dyld_load_info_text_exec");
+		break;
+	}
 	case STACKSHOT_KCTYPE_SHAREDCACHE_LOADINFO: {
 		i = 0;
 		/*
@@ -174,6 +180,19 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		_SUBTYPE_ARRAY(KC_ST_UINT8, struct dyld_uuid_info_64_v2, imageUUID, 16);
 		_SUBTYPE(KC_ST_UINT64, struct dyld_uuid_info_64_v2, imageSlidBaseAddress);
 		_SUBTYPE(KC_ST_UINT64, struct dyld_shared_cache_loadinfo, sharedCacheSlidFirstMapping);
+		_SUBTYPE(KC_ST_UINT32, struct dyld_shared_cache_loadinfo_v2, sharedCacheID);
+		_SUBTYPE(KC_ST_UINT32, struct dyld_shared_cache_loadinfo_v2, sharedCacheFlags);
+		setup_type_definition(retval, type_id, i, "shared_cache_dyld_load_info");
+		break;
+	}
+	case STACKSHOT_KCTYPE_SHAREDCACHE_INFO: {
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct dyld_shared_cache_loadinfo_v2, sharedCacheSlide);
+		_SUBTYPE_ARRAY(KC_ST_UINT8, struct dyld_shared_cache_loadinfo_v2, sharedCacheUUID, 16);
+		_SUBTYPE_TRUNC(KC_ST_UINT64, struct dyld_shared_cache_loadinfo_v2, sharedCacheUnreliableSlidBaseAddress, "sharedCacheUnreliableSlidBaseAd");
+		_SUBTYPE(KC_ST_UINT64, struct dyld_shared_cache_loadinfo_v2, sharedCacheSlidFirstMapping);
+		_SUBTYPE(KC_ST_UINT32, struct dyld_shared_cache_loadinfo_v2, sharedCacheID);
+		_SUBTYPE(KC_ST_UINT32, struct dyld_shared_cache_loadinfo_v2, sharedCacheFlags);
 		setup_type_definition(retval, type_id, i, "shared_cache_dyld_load_info");
 		break;
 	}
@@ -241,6 +260,15 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		setup_type_definition(retval, type_id, i, "dyld_aot_cache_uuid_info");
 		break;
 	}
+	case STACKSHOT_KCTYPE_SHAREDCACHE_AOTINFO: {
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct dyld_aot_cache_uuid_info, x86SlidBaseAddress);
+		_SUBTYPE_ARRAY(KC_ST_UINT8, struct dyld_aot_cache_uuid_info, x86UUID, 16);
+		_SUBTYPE(KC_ST_UINT64, struct dyld_aot_cache_uuid_info, aotSlidBaseAddress);
+		_SUBTYPE_ARRAY(KC_ST_UINT8, struct dyld_aot_cache_uuid_info, aotUUID, 16);
+		setup_type_definition(retval, type_id, i, "dyld_aot_cache_uuid_info");
+		break;
+	}
 
 	/* stackshot specific types */
 	case STACKSHOT_KCTYPE_IOSTATS: {
@@ -285,6 +313,10 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		setup_type_definition(retval, type_id, i, "mem_and_io_snapshot");
 		break;
 	}
+
+	case STACKSHOT_KCCONTAINER_SHAREDCACHE:
+		setup_type_definition(retval, type_id, 0, "shared_caches");
+		break;
 
 	case STACKSHOT_KCCONTAINER_TASK:
 		setup_type_definition(retval, type_id, 0, "task_snapshots");
@@ -488,6 +520,11 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		setup_subtype_description(&subtypes[0], KC_ST_INT64, 0, "nonrunnable_tasks");
 		break;
 
+	case STACKSHOT_KCTYPE_SHAREDCACHE_ID:
+		setup_type_definition(retval, type_id, 1, "sharedCacheID");
+		setup_subtype_description(&subtypes[0], KC_ST_INT32, 0, "sharedCacheID");
+		break;
+
 	case STACKSHOT_KCTYPE_BOOTARGS: {
 		i = 0;
 		_STRINGTYPE("boot_args");
@@ -678,8 +715,10 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 
 	case STACKSHOT_KCTYPE_INSTRS_CYCLES: {
 		i = 0;
-		_SUBTYPE(KC_ST_UINT64, struct instrs_cycles_snapshot, ics_instructions);
-		_SUBTYPE(KC_ST_UINT64, struct instrs_cycles_snapshot, ics_cycles);
+		_SUBTYPE(KC_ST_UINT64, struct instrs_cycles_snapshot_v2, ics_instructions);
+		_SUBTYPE(KC_ST_UINT64, struct instrs_cycles_snapshot_v2, ics_cycles);
+		_SUBTYPE(KC_ST_UINT64, struct instrs_cycles_snapshot_v2, ics_p_instructions);
+		_SUBTYPE(KC_ST_UINT64, struct instrs_cycles_snapshot_v2, ics_p_cycles);
 		setup_type_definition(retval, type_id, i, "instrs_cycles_snapshot");
 		break;
 	}

@@ -35,7 +35,7 @@
 
 #include <uuid/uuid.h>
 
-#ifdef PLATFORM_BridgeOS
+#ifdef XNU_PLATFORM_BridgeOS
 /* Version 0 trust caches: No defined sorting order (thus only suitable for small trust caches).
  * Used for loadable trust caches only, until phasing out support. */
 typedef uint8_t trust_cache_hash0[CS_CDHASH_LEN];
@@ -91,27 +91,5 @@ struct trust_cache_module1 {
 #define TC_LOOKUP_RESULT_MASK                   0xffL
 
 #define TC_LOOKUP_FOUND         1
-
-#ifdef XNU_KERNEL_PRIVATE
-
-// Serialized Trust Caches
-
-/* This is how iBoot delivers them to us. */
-struct serialized_trust_caches {
-	uint32_t num_caches;
-	uint32_t offsets[0];
-} __attribute__((__packed__));
-
-
-void trust_cache_init(void);
-
-uint32_t lookup_in_static_trust_cache(const uint8_t cdhash[CS_CDHASH_LEN]);
-
-bool lookup_in_trust_cache_module(struct trust_cache_module1 const * const module,
-    uint8_t const cdhash[CS_CDHASH_LEN],
-    uint8_t       * const hash_type,
-    uint8_t       * const flags);
-
-#endif
 
 #endif /* _KERN_TRUSTCACHE_H */

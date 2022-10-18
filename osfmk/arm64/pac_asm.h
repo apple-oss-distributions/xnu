@@ -36,6 +36,7 @@
 #include <pexpert/arm64/board_config.h>
 #include <arm64/proc_reg.h>
 #if HAS_PARAVIRTUALIZED_PAC
+#include <arm64/hv_hvc.h>
 #include "smccc_asm.h"
 #endif
 #include "assym.s"

@@ -23,17 +23,9 @@
 #include <pexpert/pexpert.h>
 #include <pexpert/protos.h>
 #include <pexpert/device_tree.h>
-#if defined __arm__
-#include <arm/caches_internal.h>
-#include <arm/machine_routines.h>
-#include <arm/proc_reg.h>
-#include <pexpert/arm/board_config.h>
-#include <vm/pmap.h>
-#elif defined __arm64__
 #include <pexpert/arm/consistent_debug.h>
 #include <pexpert/arm64/board_config.h>
 #include <arm64/proc_reg.h>
-#endif
 #include <pexpert/arm/protos.h>
 #include <kern/sched_prim.h>
 #if HIBERNATION
@@ -59,10 +51,10 @@ struct pe_serial_functions {
 	/* Enables IRQs from this device. */
 	void (*enable_irq) (void);
 
-	/* Disables IRQs from this device. */
-	void (*disable_irq) (void);
+	/* Disables IRQs from this device and reports whether IRQs were enabled. */
+	bool (*disable_irq) (void);
 
-	/* Clears IRQs from this device. */
+	/* Clears this device's IRQs targeting this agent, returning true if at least one IRQ was cleared. */
 	bool (*acknowledge_irq) (void);
 
 	/**
@@ -225,11 +217,18 @@ apple_uart_enable_irq(void)
 	rUCON0 |= 0x2000;
 }
 
-static void
+static bool
 apple_uart_disable_irq(void)
 {
 	/* Disables Tx interrupts */
-	rUCON0 &= ~(0x2000);
+	const uint32_t ucon0 = rUCON0;
+	const bool irqs_were_enabled = ucon0 & (0x2000);
+
+	if (irqs_were_enabled) {
+		rUCON0 = ucon0 & ~(0x2000);
+	}
+
+	return irqs_were_enabled;
 }
 
 static bool
@@ -309,7 +308,8 @@ static unsigned int
 apple_uart_rr0(void)
 {
 	/* Receive is ready when there are >0 bytes in the receive FIFO */
-	return rUFSTAT0 & 0xF;
+	/* FIFO count is the low 4 bits and the fifo full flag is 1 << 8 */
+	return rUFSTAT0 & ((1 << 8) | 0x0f);
 }
 
 static uint8_t
@@ -333,85 +333,6 @@ static struct pe_serial_functions apple_serial_functions =
 };
 
 #endif /* APPLE_UART */
-
-/*****************************************************************************/
-
-static void
-dcc_uart_init(void)
-{
-}
-
-static uint8_t
-read_dtr(void)
-{
-#ifdef __arm__
-	uint8_t c;
-	__asm__ volatile (
-                 "mrc p14, 0, %0, c0, c5\n"
- :               "=r"(c));
-	return c;
-#else
-	panic_unimplemented();
-	return 0;
-#endif
-}
-static void
-write_dtr(uint8_t c)
-{
-#ifdef __arm__
-	__asm__ volatile (
-                 "mcr p14, 0, %0, c0, c5\n"
-                 :
-                 :"r"(c));
-#else
-	(void)c;
-	panic_unimplemented();
-#endif
-}
-
-static unsigned int
-dcc_tr0(void)
-{
-#ifdef __arm__
-	return !(arm_debug_read_dscr() & ARM_DBGDSCR_TXFULL);
-#else
-	panic_unimplemented();
-	return 0;
-#endif
-}
-
-static void
-dcc_td0(uint8_t c)
-{
-	write_dtr(c);
-}
-
-static unsigned int
-dcc_rr0(void)
-{
-#ifdef __arm__
-	return arm_debug_read_dscr() & ARM_DBGDSCR_RXFULL;
-#else
-	panic_unimplemented();
-	return 0;
-#endif
-}
-
-static uint8_t
-dcc_rd0(void)
-{
-	return read_dtr();
-}
-
-SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) dcc_serial_functions =
-{
-	.init = dcc_uart_init,
-	.transmit_ready = dcc_tr0,
-	.transmit_data = dcc_td0,
-	.receive_ready = dcc_rr0,
-	.receive_data = dcc_rd0,
-	.device = SERIAL_DCC_UART
-};
 
 /*****************************************************************************/
 
@@ -461,10 +382,15 @@ dockchannel_clear_intr(void)
 	rDOCKCHANNELS_AGENT_AP_ERR_INTR_STATUS |= 0x3;
 }
 
-static void
+static bool
 dockchannel_disable_irq(void)
 {
-	rDOCKCHANNELS_AGENT_AP_INTR_CTRL &= ~(0x1);
+	const uint32_t ap_intr_ctrl = rDOCKCHANNELS_AGENT_AP_INTR_CTRL;
+	const bool irqs_were_enabled = ap_intr_ctrl & 0x1;
+	if (irqs_were_enabled) {
+		rDOCKCHANNELS_AGENT_AP_INTR_CTRL = ap_intr_ctrl & ~(0x1);
+	}
+	return irqs_were_enabled;
 }
 
 static void
@@ -801,7 +727,6 @@ serial_init(void)
 	vm_offset_t     soc_base;
 	uintptr_t const *reg_prop;
 	uint32_t const  *prop_value __unused = NULL;
-	uint32_t        dccmode;
 
 	struct pe_serial_functions *fns = gPESF;
 
@@ -823,11 +748,6 @@ serial_init(void)
 		}
 
 		return 1;
-	}
-
-	dccmode = 0;
-	if (PE_parse_boot_argn("dcc", &dccmode, sizeof(dccmode))) {
-		register_serial_functions(&dcc_serial_functions);
 	}
 
 	soc_base = pe_arm_get_soc_base_phys();
@@ -901,6 +821,10 @@ serial_init(void)
 
 #ifdef APPLE_UART
 	char const *serial_compat = 0;
+	uint32_t use_legacy_uart = 0;
+
+	/* Check if we should enable this deprecated serial device. */
+	PE_parse_boot_argn("use-legacy-uart", &use_legacy_uart, sizeof(use_legacy_uart));
 
 	/*
 	 * The boot serial port should have a property named "boot-console".
@@ -942,9 +866,15 @@ serial_init(void)
 		if (prop_value) {
 			apple_serial_functions.has_irq = true;
 		}
+
+		/* Workaround to enable legacy serial for fastsim targets until clients migrate to dockchannels. */
+		SecureDTGetProperty(entryP, "enable-legacy-serial", (void const **)&prop_value, &prop_size);
+		if (prop_value) {
+			use_legacy_uart = 1;
+		}
 	}
 
-	if (serial_compat && !strcmp(serial_compat, "uart-1,samsung")) {
+	if (use_legacy_uart && serial_compat && !strcmp(serial_compat, "uart-1,samsung")) {
 		register_serial_functions(&apple_serial_functions);
 	}
 #endif /* APPLE_UART */
@@ -1092,7 +1022,7 @@ uart_getc(void)
  * @note This function should only be called from the AppleSerialShim kext
  */
 kern_return_t
-serial_enable_irq(serial_device_t device)
+serial_irq_enable(serial_device_t device)
 {
 	struct pe_serial_functions *fns = get_serial_functions(device);
 
@@ -1106,23 +1036,21 @@ serial_enable_irq(serial_device_t device)
 }
 
 /**
- * Acknowledges an irq for a specific serial device and wakes up the thread
- * waiting on the interrupt if one exists.
+ * Performs any actions needed to handle this IRQ. Wakes up the thread waiting
+ * on the interrupt if one exists.
  *
- * @param device Serial device to enable irqs for
- * @note This function should only be called from the AppleSerialShim kext
+ * @param device Serial device that generated the IRQ.
+ * @note Interrupts will have already been cleared and disabled by serial_irq_filter.
+ * @note This function should only be called from the AppleSerialShim kext.
  */
 kern_return_t
-serial_ack_irq(serial_device_t device)
+serial_irq_action(serial_device_t device)
 {
 	struct pe_serial_functions *fns = get_serial_functions(device);
 
 	if (!fns || !fns->has_irq) {
 		return KERN_FAILURE;
 	}
-
-	/* Disable IRQs until next time a thread waits for an interrupt */
-	fns->disable_irq();
 
 	/**
 	 * Because IRQs are enabled only when we know a thread is about to sleep, we
@@ -1137,13 +1065,13 @@ serial_ack_irq(serial_device_t device)
  * Returns true if the pending IRQ for device is one that can be handled by the
  * platform serial driver.
  *
- * @param device Serial device to enable irqs for
+ * @param device Serial device that generated the IRQ.
  * @note This function is called from a primary interrupt context and should be
  *       kept lightweight.
  * @note This function should only be called from the AppleSerialShim kext
  */
 bool
-serial_filter_irq(serial_device_t device)
+serial_irq_filter(serial_device_t device)
 {
 	struct pe_serial_functions *fns = get_serial_functions(device);
 
@@ -1151,7 +1079,18 @@ serial_filter_irq(serial_device_t device)
 		return false;
 	}
 
-	return fns->acknowledge_irq();
+	/**
+	 * Disable IRQs until next time a thread waits for an interrupt to prevent an interrupt storm.
+	 */
+	const bool had_irqs_enabled = fns->disable_irq();
+	const bool was_our_interrupt = fns->acknowledge_irq();
+
+	/* Re-enable IRQs if the interrupt wasn't for us. */
+	if (had_irqs_enabled && !was_our_interrupt) {
+		fns->enable_irq();
+	}
+
+	return was_our_interrupt;
 }
 
 /**

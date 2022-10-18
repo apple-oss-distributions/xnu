@@ -98,7 +98,6 @@ OSDictionary::initWithCapacity(unsigned int inCapacity)
 		return false;
 	}
 
-	os::uninitialized_value_construct(dictionary, dictionary + inCapacity);
 	OSCONTAINER_ACCUMSIZE(inCapacity * sizeof(dictEntry));
 
 	count = 0;
@@ -332,15 +331,10 @@ OSDictionary::ensureCapacity(unsigned int newCapacity)
 		return capacity;
 	}
 
-	newDict = kallocp_type_container(dictEntry, &finalCapacity, Z_WAITOK);
+	newDict = kreallocp_type_container(dictEntry, dictionary,
+	    capacity, &finalCapacity, Z_WAITOK_ZERO);
 	if (newDict) {
-		os::uninitialized_move(dictionary, dictionary + capacity, newDict);
-		os::uninitialized_value_construct(newDict + capacity, newDict + finalCapacity);
-		os::destroy(dictionary, dictionary + capacity);
-
 		OSCONTAINER_ACCUMSIZE(sizeof(dictEntry) * (finalCapacity - capacity));
-
-		kfree_type(dictEntry, capacity, dictionary);
 		dictionary = newDict;
 		capacity = finalCapacity;
 	}
@@ -354,8 +348,8 @@ OSDictionary::flushCollection()
 	haveUpdated();
 
 	for (unsigned int i = 0; i < count; i++) {
-		dictionary[i].key->taggedRelease(OSTypeID(OSCollection));
-		dictionary[i].value->taggedRelease(OSTypeID(OSCollection));
+		dictionary[i].key.reset();
+		dictionary[i].value.reset();
 	}
 	count = 0;
 }

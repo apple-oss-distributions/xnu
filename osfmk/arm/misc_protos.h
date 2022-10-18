@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -52,6 +52,9 @@ extern void arm_vm_prot_finalize(boot_args *args);
 
 #if __arm64__
 extern void arm_set_kernel_tbi(void);
+
+void __attribute__((__noreturn__)) _was_in_userspace(void);
+
 #endif /* __arm64__ */
 
 extern kern_return_t DebuggerXCallEnter(boolean_t, bool);
@@ -102,9 +105,7 @@ extern void bcopy_phys(addr64_t from, addr64_t to, vm_size_t nbytes);
 extern void dcache_incoherent_io_flush64(addr64_t pa, unsigned int count, unsigned int remaining, unsigned int *res);
 extern void dcache_incoherent_io_store64(addr64_t pa, unsigned int count, unsigned int remaining, unsigned int *res);
 
-#if defined(__arm__)
-extern void copy_debug_state(arm_debug_state_t * src, arm_debug_state_t *target, __unused boolean_t all);
-#elif defined(__arm64__)
+#if defined(__arm64__)
 extern void copy_legacy_debug_state(arm_legacy_debug_state_t * src, arm_legacy_debug_state_t *target, __unused boolean_t all);
 extern void copy_debug_state32(arm_debug_state32_t * src, arm_debug_state32_t *target, __unused boolean_t all);
 extern void copy_debug_state64(arm_debug_state64_t * src, arm_debug_state64_t *target, __unused boolean_t all);
@@ -121,8 +122,8 @@ extern int copyio_check_user_addr(user_addr_t user_addr, vm_size_t nbytes);
  */
 extern int apply_func_phys(addr64_t src64, vm_size_t bytes, int (*func)(void * buffer, vm_size_t bytes, void * arg), void * arg);
 
-#else /* !defined(__arm__) && !defined(__arm64__) */
+#else /* !defined(__arm64__) */
 #error Unknown architecture.
-#endif /* defined(__arm__) */
+#endif /* defined(__arm64__) */
 
 #endif /* _ARM_MISC_PROTOS_H_ */

@@ -328,25 +328,15 @@ OSSerialize::binarySerializeInternal(const OSMetaClassBase *o)
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #define setAtIndex(v, idx, o)                                                  \
-	if (idx >= v##Capacity)                                                \
-	{                                                                      \
-	if (v##Capacity >= v##CapacityMax) ok = false;                         \
-	else                                                                   \
-	{                                                                      \
+	ok = idx < v##Capacity;                                                \
+	if (!ok && v##Capacity < v##CapacityMax) {                             \
 	    uint32_t ncap = v##Capacity + 64;                                  \
-	    typeof(v##Array) nbuf = kallocp_type_container(OSObject *, &ncap,  \
-	            Z_WAITOK_ZERO);                                            \
-	    if (!nbuf) ok = false;                                             \
-	    else                                                               \
-	    {                                                                  \
-	        if (v##Array)                                                  \
-	        {                                                              \
-	            bcopy(v##Array, nbuf, v##Capacity * sizeof(o));            \
-	            kfree_type(OSObject *, v##Capacity, v##Array);             \
-	        }                                                              \
+	    typeof(v##Array) nbuf = kreallocp_type_container(OSObject *,       \
+	        v##Array, v##Capacity, &ncap, Z_WAITOK_ZERO);                  \
+	    if (nbuf) {                                                        \
+	        ok = true;                                                     \
 	        v##Array    = nbuf;                                            \
 	        v##Capacity = ncap;                                            \
-	    }                                                                  \
 	    }                                                                  \
 	}                                                                      \
 	if (ok) v##Array[idx] = o

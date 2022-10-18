@@ -195,6 +195,17 @@ extern uint64_t coalition_get_page_count(coalition_t coal, int *ntasks);
 extern int coalition_get_pid_list(coalition_t coal, uint32_t rolemask,
     int sort_order, int *pid_list, int list_sz);
 
+/*
+ * task_coalition_role_for_type;
+ * Get the role of the given task within the given type of coalition.
+ *
+ * Parameters:
+ *      task           : The task to investigate
+ *      coalition_type : The coalition type to check
+ *
+ * Returns: This task's role or COALITION_TASKROLE_NONE.
+ */
+extern int task_coalition_role_for_type(task_t task, int coalition_type);
 #else /* !CONFIG_COALITIONS */
 static inline uint64_t
 coalition_id(__unused coalition_t coal)

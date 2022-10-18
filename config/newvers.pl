@@ -156,6 +156,12 @@ my $VERSION_SHORT = "$VERSION_MAJOR.$VERSION_MINOR.$VERSION_REVISION";
 my $VERSION_LONG = $VERSION_SHORT;
 $VERSION_LONG .= "$stage$VERSION_PRERELEASE_LEVEL" if (($stage ne "r") || ($VERSION_PRERELEASE_LEVEL != 0));
 
+# Allow environment to override some versioning information (allowing for
+# reproducible builds or building with changes that shouldn't affect the
+# build artifacts).
+$BUILD_DATE    = $ENV{'KERNEL_BUILD_DATE'}    ? $ENV{'KERNEL_BUILD_DATE'}    : $BUILD_DATE;
+$BUILD_OBJROOT = $ENV{'KERNEL_BUILD_OBJROOT'} ? $ENV{'KERNEL_BUILD_OBJROOT'} : $BUILD_OBJROOT;
+
 my $file;
 foreach $file (@ARGV) {
   print "newvers.pl: Stamping version \"$VERSION_LONG\" into \"$file\" ...";

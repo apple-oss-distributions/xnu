@@ -103,6 +103,65 @@ caused many programming errors, so it’s recommended to use **bytearray**, **by
 **memoryviews** instead of a string. If a string is really required, encode the raw data explicitly
 using an escape method.
 
+### Accessing large amounts of binary data (or accessing small amounts frequently)
+
+In case you're planning on accessing large contiguous blocks of memory (e.g. reading a whole 10KB of memory),
+or you're accessing small semi-contiguous chunks (e.g. if you're parsing large structured data), then it might
+be hugely beneficial performance-wise to make use of the `io.SBProcessRawIO` class. Furthermore, if you're in
+a hurry and just want to read one specific chunk once, then it might be easier to use `LazyTarget.GetProcess().ReadMemory()`
+directly.
+
+In other words, avoid the following:
+
+```
+data_ptr = kern.GetValueFromAddress(start_addr, 'uint8_t *')
+with open(filepath, 'wb') as f:
+    f.write(data_ptr[:4096])
+```
+
+And instead use:
+
+```
+from core.io import SBProcessRawIO
+import shutil
+
+io_access = SBProcessRawIO(LazyTarget.GetProcess(), start_addr, 4096)
+with open(filepath, 'wb') as f:
+    shutil.copyfileobj(io_access, f)
+```
+
+Or, if you're in a hurry:
+
+```
+err = lldb.SBError()
+my_data = LazyTarget.GetProcess().ReadMemory(start_addr, length, err)
+if err.Success():
+    # Use my precious data
+    pass
+```
+
+For small semi-contiguous chunks, you can map the whole region and access random chunks from it like so:
+
+```
+from core.io import SBProcessRawIO
+
+io_access = SBProcessRawIO(LazyTarget.GetProcess(), start_addr, size)
+io_access.seek(my_struct_offset)
+my_struct_contents = io_access.read(my_struct_size)
+```
+
+Not only that, but you can also tack on a BufferedRandom class on top of the SBProcessRawIO instance, which
+provides you with buffering (aka caching) in case your random small chunk accesses are repeated:
+
+```
+from core.io import SBProcessRawIO
+from io import BufferedRandom
+
+io_access = SBProcessRawIO(LazyTarget.GetProcess(), start_addr, size)
+buffered_io = BufferedRandom(io_access)
+# And then use buffered_io for your accesses
+```
+
 ### Encoding data to strings and back
 
 The simplest solution is to use **six** library and one of the functions like:

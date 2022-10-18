@@ -38,32 +38,26 @@
 #include "mach/host_notify_reply.h"
 
 struct host_notify_entry {
-	queue_chain_t           entries;
-	ipc_port_t              port;
+	queue_chain_t                   entries;
+	ipc_port_t                      port;
+	ipc_port_request_index_t        index;
 };
-typedef struct host_notify_entry        *host_notify_t;
 
 LCK_GRP_DECLARE(host_notify_lock_grp, "host_notify");
-LCK_MTX_EARLY_DECLARE(host_notify_lock, &host_notify_lock_grp);
+LCK_MTX_DECLARE(host_notify_lock, &host_notify_lock_grp);
 
 static KALLOC_TYPE_DEFINE(host_notify_zone,
     struct host_notify_entry, KT_DEFAULT);
 
-static queue_head_t     host_notify_queue[HOST_NOTIFY_TYPE_MAX + 1];
+static queue_head_t     host_notify_queue[HOST_NOTIFY_TYPE_MAX + 1] = {
+	QUEUE_HEAD_INITIALIZER(host_notify_queue[HOST_NOTIFY_CALENDAR_CHANGE]),
+	QUEUE_HEAD_INITIALIZER(host_notify_queue[HOST_NOTIFY_CALENDAR_SET]),
+};
 
-static mach_msg_id_t    host_notify_replyid[HOST_NOTIFY_TYPE_MAX + 1] =
-{ HOST_CALENDAR_CHANGED_REPLYID,
-  HOST_CALENDAR_SET_REPLYID };
-
-__startup_func
-static void
-host_notify_init(void)
-{
-	for (int i = 0; i <= HOST_NOTIFY_TYPE_MAX; i++) {
-		queue_init(&host_notify_queue[i]);
-	}
-}
-STARTUP(MACH_IPC, STARTUP_RANK_FIRST, host_notify_init);
+static mach_msg_id_t    host_notify_replyid[HOST_NOTIFY_TYPE_MAX + 1] = {
+	HOST_CALENDAR_CHANGED_REPLYID,
+	HOST_CALENDAR_SET_REPLYID,
+};
 
 kern_return_t
 host_request_notification(
@@ -89,12 +83,39 @@ host_request_notification(
 	entry = zalloc_flags(host_notify_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	entry->port = port;
 
+again:
 	lck_mtx_lock(&host_notify_lock);
-	kr = ipc_kobject_upgrade(port, entry, IKOT_HOST_NOTIFY);
-	if (kr == KERN_SUCCESS) {
-		enqueue_tail(&host_notify_queue[notify_type], (queue_entry_t)entry);
+
+	ip_mq_lock(port);
+	if (ip_active(port)) {
+		kr = ipc_port_request_hnotify_alloc(port, entry, &entry->index);
+	} else {
+		kr = KERN_INVALID_CAPABILITY;
 	}
+
+	if (kr == KERN_SUCCESS) {
+		/*
+		 * Preserve original ABI of host-notify ports being immovable
+		 * as a side effect of being a kobject.
+		 *
+		 * Unlike the original ABI, multiple registrations
+		 * for the same port are now allowed.
+		 */
+		port->ip_immovable_receive = true;
+		enqueue_tail(&host_notify_queue[notify_type], &entry->entries);
+	}
+
 	lck_mtx_unlock(&host_notify_lock);
+
+	if (kr == KERN_NO_SPACE) {
+		kr = ipc_port_request_grow(port);
+		/* port unlocked */
+		if (kr == KERN_SUCCESS) {
+			goto again;
+		}
+	} else {
+		ip_mq_unlock(port);
+	}
 
 	if (kr != KERN_SUCCESS) {
 		zfree(host_notify_zone, entry);
@@ -103,31 +124,19 @@ host_request_notification(
 	return kr;
 }
 
-static void
-host_notify_port_destroy(
-	ipc_port_t      port)
+void
+host_notify_cancel(host_notify_t entry)
 {
-	host_notify_t entry;
+	ipc_port_t port;
 
 	lck_mtx_lock(&host_notify_lock);
-
-	entry = ipc_kobject_downgrade_host_notify(port);
-	if (entry) {
-		assert(entry->port == port);
-		remqueue((queue_entry_t)entry);
-	}
-
+	remqueue((queue_entry_t)entry);
+	port = entry->port;
 	lck_mtx_unlock(&host_notify_lock);
 
-	if (entry) {
-		zfree(host_notify_zone, entry);
-		ipc_port_release_sonce(port);
-	}
+	zfree(host_notify_zone, entry);
+	ipc_port_release_sonce(port);
 }
-
-IPC_KOBJECT_DEFINE(IKOT_HOST_NOTIFY,
-    .iko_op_allow_upgrade   = true,
-    .iko_op_destroy         = host_notify_port_destroy);
 
 static void
 host_notify_all(
@@ -135,44 +144,54 @@ host_notify_all(
 	mach_msg_header_t       *msg,
 	mach_msg_size_t         msg_size)
 {
-	queue_t notify_queue = &host_notify_queue[notify_type];
+	queue_head_t  send_queue = QUEUE_HEAD_INITIALIZER(send_queue);
+	queue_entry_t e;
+	host_notify_t entry;
+	ipc_port_t    port;
 
 	lck_mtx_lock(&host_notify_lock);
 
-	if (!queue_empty(notify_queue)) {
-		queue_head_t  send_queue;
-		host_notify_t entry;
+	qe_foreach_safe(e, &host_notify_queue[notify_type]) {
+		entry = (host_notify_t)e;
+		port  = entry->port;
 
-		send_queue = *notify_queue;
-		queue_init(notify_queue);
-
-		send_queue.next->prev = &send_queue;
-		send_queue.prev->next = &send_queue;
-
-		msg->msgh_bits =
-		    MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0, 0, 0);
-		msg->msgh_local_port = MACH_PORT_NULL;
-		msg->msgh_voucher_port = MACH_PORT_NULL;
-		msg->msgh_id = host_notify_replyid[notify_type];
-
-		while ((entry = (host_notify_t)dequeue(&send_queue)) != NULL) {
-			ipc_port_t port = entry->port;
-
-			ipc_kobject_downgrade_host_notify(port);
-
-			lck_mtx_unlock(&host_notify_lock);
-
-			zfree(host_notify_zone, entry);
-
-			msg->msgh_remote_port = port;
-
-			(void)mach_msg_send_from_kernel_proper(msg, msg_size);
-
-			lck_mtx_lock(&host_notify_lock);
+		ip_mq_lock(port);
+		if (ip_active(port)) {
+			ipc_port_request_cancel(port, IPR_HOST_NOTIFY,
+			    entry->index);
+			remqueue(e);
+			enqueue_tail(&send_queue, e);
+		} else {
+			/*
+			 * leave the entry in place,
+			 * we're racing with ipc_port_dnnotify()
+			 * which will call host_notify_cancel().
+			 */
 		}
+		ip_mq_unlock(port);
 	}
 
 	lck_mtx_unlock(&host_notify_lock);
+
+	if (queue_empty(&send_queue)) {
+		return;
+	}
+
+	msg->msgh_bits =
+	    MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0, 0, 0);
+	msg->msgh_local_port = MACH_PORT_NULL;
+	msg->msgh_voucher_port = MACH_PORT_NULL;
+	msg->msgh_id = host_notify_replyid[notify_type];
+
+	qe_foreach_safe(e, &send_queue) {
+		entry = (host_notify_t)e;
+		port  = entry->port;
+
+		zfree(host_notify_zone, entry);
+
+		msg->msgh_remote_port = port;
+		(void)mach_msg_send_from_kernel_proper(msg, msg_size);
+	}
 }
 
 void

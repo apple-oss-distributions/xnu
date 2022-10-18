@@ -398,6 +398,9 @@ ledger_template_dereference(ledger_template_t template)
 		kfree_type(struct entry_template, template->lt_table_size, template->lt_entries);
 		kfree_type(uint16_t, ledger_template_entries_lut_size(template->lt_table_size), template->lt_entries_lut);
 		lck_mtx_destroy(&template->lt_lock, &ledger_lck_grp);
+		if (template->lt_zone) {
+			zdestroy(template->lt_zone);
+		}
 		kfree_type(struct ledger_template, template);
 	}
 }
@@ -594,7 +597,7 @@ ledger_template_complete(ledger_template_t template)
 	ledger_size = sizeof(struct ledger) + template->lt_next_offset;
 	assert(ledger_size > sizeof(struct ledger));
 	template->lt_zone = zone_create(template->lt_name, ledger_size,
-	    ZC_PGZ_USE_GUARDS);
+	    ZC_PGZ_USE_GUARDS | ZC_DESTRUCTIBLE);
 	template->lt_initialized = true;
 }
 
@@ -741,8 +744,9 @@ ledger_dereference(ledger_t ledger)
 	}
 
 	if (os_ref_release(&ledger->l_refs) == 0) {
-		if (ledger->l_template->lt_zone) {
-			zfree(ledger->l_template->lt_zone, ledger);
+		ledger_template_t template = ledger->l_template;
+		if (template->lt_zone) {
+			zfree(template->lt_zone, ledger);
 		} else {
 			/**
 			 * If the template doesn't contain a zone to allocate ledger objects
@@ -753,6 +757,7 @@ ledger_dereference(ledger_t ledger)
 			 */
 			pmap_ledger_free(ledger);
 		}
+		ledger_template_dereference(template);
 	}
 }
 

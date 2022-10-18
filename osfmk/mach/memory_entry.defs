@@ -27,9 +27,9 @@
  */
 
 subsystem
-#if KERNEL_SERVER
-    KernelServer
-#endif /* KERNEL_SERVER */
+#if	KERNEL_SERVER || KOBJECT_SERVER
+	KernelServer
+#endif	/* KERNEL_SERVER || KOBJECT_SERVER */
        memory_entry 4900;
 
 #include <mach/std_types.defs>
@@ -47,8 +47,14 @@ routine mach_memory_entry_access_tracking(
 	out	access_tracking_reads	: uint32_t;
 	out	access_tracking_writes	: uint32_t);
 
+#if KERNEL_SERVER && !SANDBOX_COMPILER
+routine mach_memory_entry_ownership_from_user(
+		mem_entry	: mem_entry_name_port_t;
+		owner       : mach_port_t; /* Task identity token or task control */
+#else
 routine mach_memory_entry_ownership(
 		mem_entry	: mem_entry_name_port_t;
 		owner		: task_t;
+#endif
 		ledger_tag	: int;
 		ledger_flags	: int);

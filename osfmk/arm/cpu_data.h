@@ -41,7 +41,7 @@
 #include <kern/processor.h>
 #include <pexpert/pexpert.h>
 #include <arm/thread.h>
-#include <arm/proc_reg.h>
+#include <arm64/proc_reg.h>
 
 #include <mach/mach_types.h>
 #include <machine/thread.h>

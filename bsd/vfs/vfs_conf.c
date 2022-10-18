@@ -91,8 +91,6 @@ int (*mountroot)(void) = NULL;
  */
 extern  struct vfsops mfs_vfsops;
 extern  int mfs_mountroot(mount_t, vnode_t, vfs_context_t);     /* dead */
-extern  struct vfsops nfs_vfsops;
-extern  int nfs_mountroot(void);
 extern  struct vfsops afs_vfsops;
 extern  struct vfsops null_vfsops;
 extern  struct vfsops devfs_vfsops;
@@ -104,12 +102,6 @@ extern struct vfsops bindfs_vfsops;
 extern  struct vfsops mockfs_vfsops;
 extern  int mockfs_mountroot(mount_t, vnode_t, vfs_context_t);
 #endif /* MOCKFS */
-
-/*
- * For nfs_mountroot(void) cast.  nfs_mountroot ignores its parameters, if
- * invoked through this table.
- */
-typedef int (*mountroot_t)(mount_t, vnode_t, vfs_context_t);
 
 enum fs_type_num {
 	FT_NFS = 2,
@@ -126,25 +118,6 @@ int fstypenumstart = FT_BINDFS + 1;
  * Set up the filesystem operations for vnodes.
  */
 static struct vfstable vfstbllist[] = {
-	/* Sun-compatible Network Filesystem */
-#if CONFIG_NFS_CLIENT
-	{
-		.vfc_vfsops = &nfs_vfsops,
-		.vfc_name = "nfs",
-		.vfc_typenum = FT_NFS,
-		.vfc_refcount = 0,
-		.vfc_flags = 0,
-		.vfc_mountroot = NULL,
-		.vfc_next = NULL,
-		.vfc_reserved1 = 0,
-		.vfc_reserved2 = 0,
-		.vfc_vfsflags = VFC_VFSGENERICARGS | VFC_VFSPREFLIGHT | VFC_VFS64BITREADY | VFC_VFSREADDIR_EXTENDED,
-		.vfc_descptr = NULL,
-		.vfc_descsize = 0,
-		.vfc_sysctl = NULL
-	},
-#endif /* CONFIG_NFS_CLIENT */
-
 	/* Device Filesystem */
 #if DEVFS
 #if CONFIG_MACF
@@ -313,14 +286,6 @@ extern const struct vnodeopv_desc dead_vnodeop_opv_desc;
 extern const struct vnodeopv_desc fifo_vnodeop_opv_desc;
 #endif /* SOCKETS */
 extern const struct vnodeopv_desc spec_vnodeop_opv_desc;
-extern const struct vnodeopv_desc nfsv2_vnodeop_opv_desc;
-extern const struct vnodeopv_desc spec_nfsv2nodeop_opv_desc;
-extern const struct vnodeopv_desc fifo_nfsv2nodeop_opv_desc;
-#if CONFIG_NFS4
-extern const struct vnodeopv_desc nfsv4_vnodeop_opv_desc;
-extern const struct vnodeopv_desc spec_nfsv4nodeop_opv_desc;
-extern const struct vnodeopv_desc fifo_nfsv4nodeop_opv_desc;
-#endif
 extern struct vnodeopv_desc null_vnodeop_opv_desc;
 extern struct vnodeopv_desc devfs_vnodeop_opv_desc;
 extern struct vnodeopv_desc devfs_spec_vnodeop_opv_desc;
@@ -345,20 +310,6 @@ const struct vnodeopv_desc *vfs_opv_descs[] = {
 #if MFS
 	&mfs_vnodeop_opv_desc,
 #endif
-#if CONFIG_NFS_CLIENT
-	&nfsv2_vnodeop_opv_desc,
-	&spec_nfsv2nodeop_opv_desc,
-#if CONFIG_NFS4
-	&nfsv4_vnodeop_opv_desc,
-	&spec_nfsv4nodeop_opv_desc,
-#endif
-#if FIFO
-	&fifo_nfsv2nodeop_opv_desc,
-#if CONFIG_NFS4
-	&fifo_nfsv4nodeop_opv_desc,
-#endif /* CONFIG_NFS4 */
-#endif /* FIFO */
-#endif /* CONFIG_NFS_CLIENT */
 #if DEVFS
 	&devfs_vnodeop_opv_desc,
 	&devfs_spec_vnodeop_opv_desc,

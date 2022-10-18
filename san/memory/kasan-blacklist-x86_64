@@ -21,6 +21,7 @@ src:./osfmk/i386/pal_routines.c
 src:./osfmk/i386/panic_hooks.c
 src:./osfmk/i386/rtclock.c
 src:./osfmk/i386/vmx/vmx_cpu.c
+src:./osfmk/kern/lock_mtx.c
 src:./osfmk/kern/locks.c
 src:./osfmk/prng/prng_random.c
 src:./osfmk/x86_64/loose_ends.c
@@ -43,7 +44,6 @@ src:./bsd/kern/subr_xxx.c
 src:./iokit/Kernel/IOHibernateRestoreKernel.c
 src:./iokit/Kernel/IOStringFuncs.c
 src:./osfmk/kdp/kdp_udp.c
-src:./osfmk/kern/gzalloc.c
 src:./osfmk/kern/hibernate.c
 src:./osfmk/kern/startup.c
 src:./osfmk/kern/timer_call.c

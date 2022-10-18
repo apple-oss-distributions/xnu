@@ -43,6 +43,7 @@
 #include <uuid/uuid.h>
 #ifdef BSD_KERNEL_PRIVATE
 #include <netkey/keydb.h>
+#include <netinet/in_var.h>
 #include <netinet/ip_var.h>
 
 #include <os/log.h>

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2002-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -83,6 +83,5 @@ ip_randomid(uint64_t salt)
 		read_random(&new_id, sizeof(new_id));
 	} while (new_id == new_id_salt);
 
-	read_random(&new_id, sizeof(new_id));
 	return new_id ^ new_id_salt;
 }

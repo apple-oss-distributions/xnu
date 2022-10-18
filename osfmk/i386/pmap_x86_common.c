@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -251,7 +251,12 @@ pmap_unnest(pmap_t grand, addr64_t vaddr, uint64_t size)
 
 	/* align everything to PDE boundaries */
 	va_start = vaddr & ~(NBPDE - 1);
-	va_end = (vaddr + size + NBPDE - 1) & ~(NBPDE - 1);
+
+	if (os_add_overflow(vaddr, size + NBPDE - 1, &va_end)) {
+		panic("pmap_unnest: Overflow when calculating range end: s=0x%llx sz=0x%llx\n", vaddr, size);
+	}
+
+	va_end &= ~(NBPDE - 1);
 	size = va_end - va_start;
 
 	PMAP_LOCK_EXCLUSIVE(grand);
@@ -1605,20 +1610,34 @@ pmap_remove_options(
 		pml4_entry_t *pml4e = pmap64_pml4(map, s64);
 		if ((pml4e == NULL) ||
 		    ((*pml4e & PTE_VALID_MASK(is_ept)) == 0)) {
-			s64 = (s64 + NBPML4) & ~(PML4MASK);
+			if (os_add_overflow(s64, NBPML4, &s64)) {
+				/* wrap; clip s64 to e64 */
+				s64 = e64;
+				break;
+			}
+			s64 &= ~(PML4MASK);
 			continue;
 		}
 		pdpt_entry_t *pdpte = pmap64_pdpt(map, s64);
 		if ((pdpte == NULL) ||
 		    ((*pdpte & PTE_VALID_MASK(is_ept)) == 0)) {
-			s64 = (s64 + NBPDPT) & ~(PDPTMASK);
+			if (os_add_overflow(s64, NBPDPT, &s64)) {
+				/* wrap; clip s64 to e64 */
+				s64 = e64;
+				break;
+			}
+			s64 &= ~(PDPTMASK);
 			continue;
 		}
 
-		l64 = (s64 + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE - 1);
-
-		if (l64 > e64) {
+		if (os_add_overflow(s64, PDE_MAPPED_SIZE, &l64)) {
 			l64 = e64;
+		} else {
+			l64 &= ~(PDE_MAPPED_SIZE - 1);
+
+			if (l64 > e64) {
+				l64 = e64;
+			}
 		}
 
 		pde = pmap_pde(map, s64);
@@ -2462,10 +2481,16 @@ pmap_query_resident(
 	uint32_t traverse_count = 0;
 
 	while (s64 < e64) {
-		l64 = (s64 + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE - 1);
-		if (l64 > e64) {
+		if (os_add_overflow(s64, PDE_MAPPED_SIZE, &l64)) {
 			l64 = e64;
+		} else {
+			l64 &= ~(PDE_MAPPED_SIZE - 1);
+
+			if (l64 > e64) {
+				l64 = e64;
+			}
 		}
+
 		pde = pmap_pde(pmap, s64);
 
 		if (pde && (*pde & PTE_VALID_MASK(is_ept))) {
@@ -2513,6 +2538,8 @@ pmap_query_resident(
 	return resident_bytes;
 }
 
+uint64_t pmap_query_page_info_retries;
+
 kern_return_t
 pmap_query_page_info(
 	pmap_t          pmap,
@@ -2523,8 +2550,8 @@ pmap_query_page_info(
 	boolean_t       is_ept;
 	pmap_paddr_t    pa;
 	ppnum_t         pai;
-	pd_entry_t      *pde;
-	pt_entry_t      *pte;
+	pd_entry_t      *pde_p;
+	pt_entry_t      *pte_p, pte;
 
 	pmap_intr_assert();
 	if (pmap == PMAP_NULL || pmap == kernel_pmap) {
@@ -2537,23 +2564,27 @@ pmap_query_page_info(
 
 	PMAP_LOCK_EXCLUSIVE(pmap);
 
-	pde = pmap_pde(pmap, va);
-	if (!pde ||
-	    !(*pde & PTE_VALID_MASK(is_ept)) ||
-	    (*pde & PTE_PS)) {
+	pde_p = pmap_pde(pmap, va);
+	if (!pde_p ||
+	    !(*pde_p & PTE_VALID_MASK(is_ept)) ||
+	    (*pde_p & PTE_PS)) {
 		goto done;
 	}
 
-	pte = pmap_pte(pmap, va);
-	if (pte == PT_ENTRY_NULL) {
+try_again:
+	disp = 0;
+
+	pte_p = pmap_pte(pmap, va);
+	if (pte_p == PT_ENTRY_NULL) {
 		goto done;
 	}
 
-	pa = pte_to_pa(*pte);
+	pte = *pte_p;
+	pa = pte_to_pa(pte);
 	if (pa == 0) {
-		if (PTE_IS_COMPRESSED(*pte, pte, pmap, va)) {
+		if (PTE_IS_COMPRESSED(pte, pte_p, pmap, va)) {
 			disp |= PMAP_QUERY_PAGE_COMPRESSED;
-			if (*pte & PTE_COMPRESSED_ALT) {
+			if (pte & PTE_COMPRESSED_ALT) {
 				disp |= PMAP_QUERY_PAGE_COMPRESSED_ALTACCT;
 			}
 		}
@@ -2571,7 +2602,11 @@ pmap_query_page_info(
 			disp |= PMAP_QUERY_PAGE_INTERNAL;
 		}
 	}
-
+	if (__improbable(pte_p != pmap_pte(pmap, va) || pte != *pte_p)) {
+		/* something changed: try again */
+		pmap_query_page_info_retries++;
+		goto try_again;
+	}
 done:
 	PMAP_UNLOCK_EXCLUSIVE(pmap);
 	*disp_p = disp;

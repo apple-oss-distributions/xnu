@@ -4,19 +4,8 @@
 #include <string.h>
 #include <errno.h>
 
+#include <sys/preoslog.h>
 #include "test_utils.h"
-
-/*
- * Any change to this structure must be reflected in iBoot / MacEFI / PanicDump / XNU Tests and vice versa.
- */
-typedef struct  __attribute__((packed)) {
-	uint32_t magic; /* g_valid_magic if valid */
-	uint32_t size; /* Size of the preoslog buffer including the header */
-	uint32_t offset; /* Write pointer. Indicates where in the buffer new log entry would go */
-	uint8_t source; /* Indicates who filled in the buffer (e.g. iboot vs MacEFI) */
-	uint8_t wrapped; /* If equal to 1, the preoslog ring buffer wrapped at least once */
-	char data[]; /* log buffer */
-} preoslog_header_t;
 
 static const char* g_sysctl_kern_version = "kern.version";
 static const char* g_sysctl_kern_preoslog = "kern.preoslog";

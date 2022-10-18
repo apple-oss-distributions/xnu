@@ -137,23 +137,24 @@ struct image_params {
 /*
  * Image flags
  */
-#define IMGPF_NONE                              0x00000000      /* No flags */
-#define IMGPF_INTERPRET                 0x00000001      /* Interpreter invoked */
-#define IMGPF_RESERVED                  0x00000002
+#define IMGPF_NONE              0x00000000      /* No flags */
+#define IMGPF_INTERPRET         0x00000001      /* Interpreter invoked */
+#define IMGPF_RESERVED          0x00000002
 #define IMGPF_WAS_64BIT_ADDR    0x00000004      /* exec from a 64Bit address space */
-#define IMGPF_IS_64BIT_ADDR             0x00000008      /* exec to a 64Bit address space */
-#define IMGPF_SPAWN                             0x00000010      /* spawn (without setexec) */
-#define IMGPF_DISABLE_ASLR              0x00000020      /* disable ASLR */
+#define IMGPF_IS_64BIT_ADDR     0x00000008      /* exec to a 64Bit address space */
+#define IMGPF_SPAWN             0x00000010      /* spawn (without setexec) */
+#define IMGPF_DISABLE_ASLR      0x00000020      /* disable ASLR */
 #define IMGPF_ALLOW_DATA_EXEC   0x00000040      /* forcibly disallow data execution */
-#define IMGPF_EXEC                              0x00000100      /* exec */
+#define IMGPF_EXEC              0x00000100      /* exec */
 #define IMGPF_HIGH_BITS_ASLR    0x00000200      /* randomize high bits of ASLR slide */
-#define IMGPF_IS_64BIT_DATA             0x00000400      /* exec to a 64Bit register state */
-#define IMGPF_DRIVER             0x00000800      /* exec of a driver binary (no LC_MAIN) */
-#define IMGPF_RESLIDE            0x00001000     /* reslide the shared cache */
+#define IMGPF_IS_64BIT_DATA     0x00000400      /* exec to a 64Bit register state */
+#define IMGPF_DRIVER            0x00000800      /* exec of a driver binary (no LC_MAIN) */
+#define IMGPF_RESLIDE           0x00001000     /* reslide the shared cache */
 #define IMGPF_PLUGIN_HOST_DISABLE_A_KEYS  0x00002000     /* process hosts plugins, disable ptr auth A keys */
-#define IMGPF_ALT_ROSETTA       0x00004000     /* load alternative rosetta runtime */
+#define IMGPF_HW_TPRO           0x00004000      /* HW support for read-only/read-write trusted paths  */
+#define IMGPF_ROSETTA           0x10000000      /* load rosetta runtime */
+#define IMGPF_ALT_ROSETTA       0x20000000      /* load alternative rosetta runtime */
 #define IMGPF_NOJOP             0x80000000
-
 
 /*
  * Simulator binary flags

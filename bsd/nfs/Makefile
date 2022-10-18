@@ -7,8 +7,7 @@ include $(MakeInc_cmd)
 include $(MakeInc_def)
 
 DATAFILES = \
-	nfs.h nfs_lock.h nfs_ioctl.h \
-	nfsproto.h rpcv2.h xdr_subs.h
+	nfs.h nfsproto.h rpcv2.h xdr_subs.h
 
 KERNELFILES = \
 	krpc.h nfs.h nfsproto.h rpcv2.h \

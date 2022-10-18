@@ -78,9 +78,13 @@ struct bounded_array {
 	{
 		return const_iterator(data_ + N, data_, data_ + N);
 	}
-
 	constexpr size_t
-	size() const
+	size() const noexcept
+	{
+		return N;
+	}
+	constexpr size_t
+	length() const noexcept
 	{
 		return N;
 	}

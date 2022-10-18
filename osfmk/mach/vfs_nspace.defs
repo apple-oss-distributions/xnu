@@ -38,7 +38,6 @@ vfs_nspace 867800;     /* 'V''N'00 */
 
 #include <mach/std_types.defs>
 #include <mach/mach_types.defs>
-#include <atm/atm_types.defs>
 
 ServerPrefix receive_;
 UserPrefix   send_;

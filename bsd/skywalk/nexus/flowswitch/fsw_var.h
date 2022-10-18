@@ -125,6 +125,9 @@ extern int fsw_vp_na_create(struct kern_nexus *nx, struct chreq *chr,
     struct nexus_vp_adapter **ret);
 extern void fsw_vp_channel_error_stats_fold(struct fsw_stats *fs,
     struct __nx_stats_channel_errors *es);
+extern errno_t fsw_vp_na_channel_event(struct nx_flowswitch *fsw,
+    uint32_t nx_port_id, struct __kern_channel_event *event,
+    uint16_t event_len);
 
 // classq related
 extern void fsw_classq_setup(struct nx_flowswitch *fsw,
@@ -158,14 +161,20 @@ extern int fsw_dev_input_netem_dequeue(void *handle, pktsched_pkt_t *pkts,
 extern void fsw_snoop(struct nx_flowswitch *fsw, struct flow_entry *fe,
     bool input);
 
+extern void fsw_receive(struct nx_flowswitch *fsw, struct pktq *pktq);
 extern void dp_flow_tx_process(struct nx_flowswitch *fsw,
     struct flow_entry *fe);
 extern void dp_flow_rx_process(struct nx_flowswitch *fsw,
     struct flow_entry *fe);
 
+#if (DEVELOPMENT || DEBUG)
+extern int fsw_rps_set_nthreads(struct nx_flowswitch* fsw, uint32_t n);
+#endif /* !DEVELOPMENT && !DEBUG */
+
 extern uint32_t fsw_tx_batch;
 extern uint32_t fsw_rx_batch;
 extern uint32_t fsw_chain_enqueue;
+extern uint32_t fsw_use_dual_sized_pool;
 
 // flow related
 extern struct flow_owner * fsw_flow_add(struct nx_flowswitch *fsw,
@@ -227,5 +236,9 @@ fsw_snoop_and_dequeue(struct flow_entry *fe, struct pktq *target, bool input)
 	}
 	KPKTQ_CONCAT(target, input ? &fe->fe_rx_pktq : &fe->fe_tx_pktq);
 }
+
+#define FSW_STATS_VAL(x)        STATS_VAL(&fsw->fsw_stats, x)
+#define FSW_STATS_INC(x)        STATS_INC(&fsw->fsw_stats, x)
+#define FSW_STATS_ADD(x, n)     STATS_ADD(&fsw->fsw_stats, x, n)
 
 #endif /* _SKYWALK_NEXUS_FLOWSWITCH_FSWVAR_H_ */

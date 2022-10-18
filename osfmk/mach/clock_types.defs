@@ -49,10 +49,6 @@ type clock_serv_t = mach_port_t
 
 type clock_ctrl_t = mach_port_t
 		cusertype: clock_ctrl_t
-#if	KERNEL_SERVER
-		intran: clock_ctrl_t convert_port_to_clock_ctrl(mach_port_t)
-		outtran: mach_port_t convert_clock_ctrl_to_port(clock_ctrl_t)
-#endif	/* KERNEL_SERVER */
 		;
 
 type clock_reply_t = polymorphic|MACH_MSG_TYPE_MAKE_SEND_ONCE;

@@ -138,6 +138,23 @@ sotoxsocket_n(struct socket *so, struct xsocket_n *xso)
 	xso->so_uid = kauth_cred_getuid(so->so_cred);
 	xso->so_last_pid = so->last_pid;
 	xso->so_e_pid = so->e_pid;
+	xso->so_gencnt = so->so_gencnt;
+	xso->so_flags = so->so_flags;
+	xso->so_flags1 = so->so_flags1;
+	xso->so_usecount = so->so_usecount;
+	xso->so_retaincnt = so->so_retaincnt;
+	if (so->so_filt != NULL) {
+		xso->xso_filter_flags |= XSOFF_SO_FILT;
+	}
+	if (so->so_flow_db != NULL) {
+		xso->xso_filter_flags |= XSOFF_FLOW_DB;
+	}
+	if (so->so_cfil != NULL) {
+		xso->xso_filter_flags |= XSOFF_CFIL;
+	}
+	if (so->so_fd_pcb != NULL) {
+		xso->xso_filter_flags |= XSOFF_FLOW_DIV;
+	}
 }
 
 __private_extern__ void
@@ -786,6 +803,8 @@ shutdown_sockets_on_interface_proc_callout(proc_t p, void *arg)
 	if (ifp == NULL) {
 		return PROC_RETURNED;
 	}
+
+	proc_fdlock(p);
 
 	fdt_foreach(fp, p) {
 		struct fileglob *fg = fp->fp_glob;

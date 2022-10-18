@@ -41,6 +41,7 @@
 #include <vm/vm_pageout.h>
 #include <vm/vm_purgeable_internal.h>
 #include <vm/vm_compressor.h>
+#include <kern/ecc.h>
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -151,5 +152,7 @@ hibernate_teardown(hibernate_page_list_t * page_list,
 		}
 		vm_compressor_delay_trim();
 	}
+
+
 	return KERN_SUCCESS;
 }

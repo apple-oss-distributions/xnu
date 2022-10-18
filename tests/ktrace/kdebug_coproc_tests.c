@@ -135,6 +135,40 @@ T_DECL(iop_events_disable,
 	dispatch_main();
 }
 
+T_DECL(past_coproc_events,
+    "make sure past events from coprocessors log a TRACE_PAST_EVENTS event")
+{
+	start_controlling_ktrace();
+	ktrace_session_t ktsess = future_events_session();
+	T_ASSERT_POSIX_ZERO(ktrace_configure(ktsess), "configure tracing");
+
+	kdebug_trace(frame_eventid | DBG_FUNC_START, 0, 0, 0, 0);
+	assert_kdebug_test(KDTEST_PAST_EVENT, "induce past events");
+	kdebug_trace(frame_eventid | DBG_FUNC_END, 0, 0, 0, 0);
+
+	T_ASSERT_POSIX_ZERO(ktrace_disable_configured(ktsess), "disable tracing");
+	ktrace_session_destroy(ktsess);
+
+	ktsess = future_events_session();
+	T_QUIET;
+	T_ASSERT_POSIX_ZERO(ktrace_set_use_existing(ktsess), "use existing trace");
+	__block bool saw_past_event = false;
+	ktrace_events_single(ktsess, TRACE_PAST_EVENTS,
+			^(__unused ktrace_event_t event) {
+		saw_past_event = true;
+	});
+	ktrace_set_completion_handler(ktsess, ^{
+		ktrace_session_destroy(ktsess);
+		T_EXPECT_TRUE(saw_past_event, "saw past event");
+		T_END;
+	});
+
+	T_ASSERT_POSIX_ZERO(ktrace_start(ktsess, dispatch_get_main_queue()),
+	    "start tracing existing session");
+
+	dispatch_main();
+}
+
 static void
 expect_convert_between_abs_cont(bool abs_to_cont)
 {

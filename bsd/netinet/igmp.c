@@ -111,6 +111,10 @@
 #include <netinet/igmp_var.h>
 #include <netinet/kpi_ipfilter_var.h>
 
+#if SKYWALK
+#include <skywalk/core/skywalk_var.h>
+#endif /* SKYWALK */
+
 SLIST_HEAD(igmp_inm_relhead, in_multi);
 
 static void     igi_initvar(struct igmp_ifinfo *, struct ifnet *, int);
@@ -170,7 +174,7 @@ static int      sysctl_igmp_default_version SYSCTL_HANDLER_ARGS;
 
 static int igmp_timeout_run;            /* IGMP timer is scheduled to run */
 static void igmp_timeout(void *);
-static void igmp_sched_timeout(void);
+static void igmp_sched_timeout(bool);
 
 static struct mbuf *m_raopt;            /* Router Alert option */
 
@@ -499,6 +503,16 @@ igmp_dispatch_queue(struct igmp_ifinfo *igi, struct ifqueue *ifq, int limit,
 		IGI_LOCK_ASSERT_HELD(igi);
 	}
 
+#if SKYWALK
+	/*
+	 * Since this function is called holding the igi lock, we need to ensure we
+	 * don't enter the driver directly because a deadlock can happen if another
+	 * thread holding the workloop lock tries to acquire the igi lock at
+	 * the same time.
+	 */
+	sk_protect_t protect = sk_async_transmit_protect();
+#endif /* SKYWALK */
+
 	for (;;) {
 		IF_DEQUEUE(ifq, m);
 		if (m == NULL) {
@@ -522,6 +536,10 @@ igmp_dispatch_queue(struct igmp_ifinfo *igi, struct ifqueue *ifq, int limit,
 			break;
 		}
 	}
+
+#if SKYWALK
+	sk_async_transmit_unprotect(protect);
+#endif /* SKYWALK */
 
 	if (igi != NULL) {
 		IGI_LOCK_ASSERT_HELD(igi);
@@ -1881,9 +1899,17 @@ igmp_set_timeout(struct igmp_tparams *itp)
 		if (itp->sct != 0) {
 			state_change_timers_running = 1;
 		}
-		igmp_sched_timeout();
+		igmp_sched_timeout(itp->fast);
 		IGMP_UNLOCK();
 	}
+}
+
+void
+igmp_set_fast_timeout(struct igmp_tparams *itp)
+{
+	VERIFY(itp != NULL);
+	itp->fast = true;
+	igmp_set_timeout(itp);
 }
 
 /*
@@ -1892,7 +1918,6 @@ igmp_set_timeout(struct igmp_tparams *itp)
 static void
 igmp_timeout(void *arg)
 {
-#pragma unused(arg)
 	struct ifqueue           scq;   /* State-change packets */
 	struct ifqueue           qrq;   /* Query response packets */
 	struct ifnet            *ifp;
@@ -1900,6 +1925,7 @@ igmp_timeout(void *arg)
 	struct in_multi         *inm;
 	unsigned int             loop = 0, uri_sec = 0;
 	SLIST_HEAD(, in_multi)  inm_dthead;
+	bool                     fast = arg != NULL;
 
 	SLIST_INIT(&inm_dthead);
 
@@ -1912,10 +1938,19 @@ igmp_timeout(void *arg)
 
 	IGMP_LOCK();
 
-	IGMP_PRINTF(("%s: qpt %d, it %d, cst %d, sct %d\n", __func__,
+	IGMP_PRINTF(("%s: qpt %d, it %d, cst %d, sct %d, fast %d\n", __func__,
 	    querier_present_timers_running, interface_timers_running,
-	    current_state_timers_running, state_change_timers_running));
+	    current_state_timers_running, state_change_timers_running,
+	    fast));
 
+	if (fast) {
+		/*
+		 * When running the fast timer, skip processing
+		 * of "querier present" timers since they are
+		 * based on 1-second intervals.
+		 */
+		goto skip_query_timers;
+	}
 	/*
 	 * IGMPv1/v2 querier present timer processing.
 	 */
@@ -1956,6 +1991,7 @@ igmp_timeout(void *arg)
 		}
 	}
 
+skip_query_timers:
 	if (!current_state_timers_running &&
 	    !state_change_timers_running) {
 		goto out_locked;
@@ -2046,7 +2082,7 @@ next:
 out_locked:
 	/* re-arm the timer if there's work to do */
 	igmp_timeout_run = 0;
-	igmp_sched_timeout();
+	igmp_sched_timeout(false);
 	IGMP_UNLOCK();
 
 	/* Now that we're dropped all locks, release detached records */
@@ -2054,7 +2090,7 @@ out_locked:
 }
 
 static void
-igmp_sched_timeout(void)
+igmp_sched_timeout(bool fast)
 {
 	IGMP_LOCK_ASSERT_HELD();
 
@@ -2062,7 +2098,9 @@ igmp_sched_timeout(void)
 	    (querier_present_timers_running || current_state_timers_running ||
 	    interface_timers_running || state_change_timers_running)) {
 		igmp_timeout_run = 1;
-		timeout(igmp_timeout, NULL, hz);
+		int sched_hz = fast ? 0 : hz;
+		void *arg = fast ? (void *)igmp_sched_timeout : NULL;
+		timeout(igmp_timeout, arg, sched_hz);
 	}
 }
 
@@ -2414,7 +2452,7 @@ igmp_v3_cancel_link_timers(struct igmp_ifinfo *igi)
 	IN_FIRST_MULTI(step, inm);
 	while (inm != NULL) {
 		INM_LOCK(inm);
-		if (inm->inm_ifp != ifp) {
+		if (inm->inm_ifp != ifp && inm->inm_igi != igi) {
 			goto next;
 		}
 
@@ -2959,7 +2997,9 @@ igmp_final_leave(struct in_multi *inm, struct igmp_ifinfo *igi,
 			if (inm->inm_state == IGMP_G_QUERY_PENDING_MEMBER ||
 			    inm->inm_state == IGMP_SG_QUERY_PENDING_MEMBER) {
 				panic("%s: IGMPv3 state reached, not IGMPv3 "
-				    "mode\n", __func__);
+				    "mode (inm %s, igi %s)", __func__,
+				    if_name(inm->inm_ifp),
+				    if_name(igi->igi_ifp));
 				/* NOTREACHED */
 			}
 			/* scheduler timer if enqueue is successful */

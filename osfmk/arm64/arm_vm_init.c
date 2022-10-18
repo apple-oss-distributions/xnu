@@ -26,7 +26,6 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include <mach_debug.h>
 #include <mach_kdp.h>
 #include <debug.h>
 
@@ -200,6 +199,10 @@ addr64_t    vm_last_addr = VM_MAX_KERNEL_ADDRESS; /* Highest kernel
 SECURITY_READ_ONLY_LATE(vm_offset_t)              segEXTRADATA;
 SECURITY_READ_ONLY_LATE(unsigned long)            segSizeEXTRADATA;
 
+/* Trust cache portion of EXTRADATA (if within it) */
+SECURITY_READ_ONLY_LATE(vm_offset_t)              segTRUSTCACHE;
+SECURITY_READ_ONLY_LATE(unsigned long)            segSizeTRUSTCACHE;
+
 SECURITY_READ_ONLY_LATE(vm_offset_t)          segLOWESTTEXT;
 SECURITY_READ_ONLY_LATE(vm_offset_t)          segLOWEST;
 SECURITY_READ_ONLY_LATE(vm_offset_t)          segLOWESTRO;
@@ -232,6 +235,10 @@ SECURITY_READ_ONLY_LATE(vm_offset_t)          segPPLDATACONSTB;
 SECURITY_READ_ONLY_LATE(unsigned long)        segSizePPLDATACONST;
 SECURITY_READ_ONLY_LATE(void *)               pmap_stacks_start = NULL;
 SECURITY_READ_ONLY_LATE(void *)               pmap_stacks_end = NULL;
+#if HAS_GUARDED_IO_FILTER
+SECURITY_READ_ONLY_LATE(void *)               iofilter_stacks_start = NULL;
+SECURITY_READ_ONLY_LATE(void *)               iofilter_stacks_end = NULL;
+#endif
 #endif
 
 SECURITY_READ_ONLY_LATE(static vm_offset_t)   segDATACONSTB;
@@ -337,6 +344,12 @@ SECURITY_READ_ONLY_LATE(unsigned long)   real_phys_size;
 SECURITY_READ_ONLY_LATE(vm_map_address_t) physmap_base = (vm_map_address_t)0;
 SECURITY_READ_ONLY_LATE(vm_map_address_t) physmap_end = (vm_map_address_t)0;
 
+/*
+ * Bounds of the kernelcache; used for accounting.
+ */
+SECURITY_READ_ONLY_LATE(vm_offset_t) arm_vm_kernelcache_phys_start;
+SECURITY_READ_ONLY_LATE(vm_offset_t) arm_vm_kernelcache_phys_end;
+
 #if __ARM_KERNEL_PROTECT__
 extern void ExceptionVectorsBase;
 extern void ExceptionVectorsEnd;
@@ -356,6 +369,7 @@ SECURITY_READ_ONLY_LATE(static boolean_t)               kva_active = FALSE;
 vm_map_address_t
 phystokv(pmap_paddr_t pa)
 {
+
 	for (size_t i = 0; (i < PTOV_TABLE_SIZE) && (ptov_table[i].len != 0); i++) {
 		if ((pa >= ptov_table[i].pa) && (pa < (ptov_table[i].pa + ptov_table[i].len))) {
 			return pa - ptov_table[i].pa + ptov_table[i].va;
@@ -371,6 +385,7 @@ phystokv(pmap_paddr_t pa)
 vm_map_address_t
 phystokv_range(pmap_paddr_t pa, vm_size_t *max_len)
 {
+
 	vm_size_t len;
 	for (size_t i = 0; (i < PTOV_TABLE_SIZE) && (ptov_table[i].len != 0); i++) {
 		if ((pa >= ptov_table[i].pa) && (pa < (ptov_table[i].pa + ptov_table[i].len))) {
@@ -1163,12 +1178,6 @@ arm_vm_page_granular_RWNX(vm_offset_t start, unsigned long size, unsigned granul
 	arm_vm_page_granular_prot(start, size, 0, 1, AP_RWNA, 1, granule);
 }
 
-/* used in the chosen/memory-map node, populated by iBoot. */
-typedef struct MemoryMapFileInfo {
-	vm_offset_t paddr;
-	size_t length;
-} MemoryMapFileInfo;
-
 // Populate seg...AuxKC and fixup AuxKC permissions
 static bool
 arm_vm_auxkc_init(void)
@@ -1237,8 +1246,10 @@ arm_vm_prot_init(__unused boot_args * args)
 	}
 	assert(segLOWESTTEXT < UINT64_MAX);
 
-	segEXTRADATA = segLOWESTTEXT;
+	segEXTRADATA = 0;
 	segSizeEXTRADATA = 0;
+	segTRUSTCACHE = 0;
+	segSizeTRUSTCACHE = 0;
 
 	segLOWEST = segLOWESTTEXT;
 	segLOWESTRO = segLOWESTTEXT;
@@ -1259,27 +1270,49 @@ arm_vm_prot_init(__unused boot_args * args)
 	}
 
 	DTEntry memory_map;
-	MemoryMapFileInfo const *trustCacheRange;
-	unsigned int trustCacheRangeSize;
 	int err;
 
+	// Device Tree portion of EXTRADATA
 	if (SecureDTIsLockedDown()) {
 		segEXTRADATA = (vm_offset_t)PE_state.deviceTreeHead;
 		segSizeEXTRADATA = PE_state.deviceTreeSize;
 	}
 
-	err = SecureDTLookupEntry(NULL, "chosen/memory-map", &memory_map);
-	assert(err == kSuccess);
+	// Trust Caches portion of EXTRADATA
+	{
+		DTMemoryMapRange const *trustCacheRange;
+		unsigned int trustCacheRangeSize;
 
-	err = SecureDTGetProperty(memory_map, "TrustCache", (void const **)&trustCacheRange, &trustCacheRangeSize);
-	if (err == kSuccess) {
-		assert(trustCacheRangeSize == sizeof(MemoryMapFileInfo));
+		err = SecureDTLookupEntry(NULL, "chosen/memory-map", &memory_map);
+		assert(err == kSuccess);
 
-		if (segSizeEXTRADATA == 0) {
-			segEXTRADATA = phystokv(trustCacheRange->paddr);
-			segSizeEXTRADATA = trustCacheRange->length;
-		} else {
-			segSizeEXTRADATA += trustCacheRange->length;
+		err = SecureDTGetProperty(memory_map, "TrustCache", (void const **)&trustCacheRange, &trustCacheRangeSize);
+		if (err == kSuccess) {
+			if (trustCacheRangeSize != sizeof(DTMemoryMapRange)) {
+				panic("Unexpected /chosen/memory-map/TrustCache property size %u != %zu", trustCacheRangeSize, sizeof(DTMemoryMapRange));
+			}
+
+			vm_offset_t const trustCacheRegion = phystokv(trustCacheRange->paddr);
+			if (trustCacheRegion < segLOWEST) {
+				if (segEXTRADATA != 0) {
+					if (trustCacheRegion != segEXTRADATA + segSizeEXTRADATA) {
+						panic("Unexpected location of TrustCache region: %#lx != %#lx",
+						    trustCacheRegion, segEXTRADATA + segSizeEXTRADATA);
+					}
+					segSizeEXTRADATA += trustCacheRange->length;
+				} else {
+					// Not all devices support CTRR device trees.
+					segEXTRADATA = trustCacheRegion;
+					segSizeEXTRADATA = trustCacheRange->length;
+				}
+			}
+#if !(DEVELOPMENT || DEBUG)
+			else {
+				panic("TrustCache region is in an unexpected place: %#lx > %#lx", trustCacheRegion, segLOWEST);
+			}
+#endif
+			segTRUSTCACHE = trustCacheRegion;
+			segSizeTRUSTCACHE = trustCacheRange->length;
 		}
 	}
 
@@ -1289,19 +1322,14 @@ arm_vm_prot_init(__unused boot_args * args)
 			if (segEXTRADATA <= segLOWESTRO) {
 				segLOWESTRO = segEXTRADATA;
 			}
-		}
-#if !(DEBUG || DEVELOPMENT)
-
-
-		else {
+		} else {
 			panic("EXTRADATA is in an unexpected place: %#lx > %#lx", segEXTRADATA, segLOWEST);
 		}
-#endif /* !(DEBUG || DEVELOPMENT) */
 
 		arm_vm_page_granular_RNX(segEXTRADATA, segSizeEXTRADATA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
 	}
 
-	const MemoryMapFileInfo *auxKC_range, *auxKC_header_range;
+	const DTMemoryMapRange *auxKC_range, *auxKC_header_range;
 	unsigned int auxKC_range_size, auxKC_header_range_size;
 
 	err = SecureDTGetProperty(memory_map, "AuxKC", (const void**)&auxKC_range,
@@ -1309,13 +1337,13 @@ arm_vm_prot_init(__unused boot_args * args)
 	if (err != kSuccess) {
 		goto noAuxKC;
 	}
-	assert(auxKC_range_size == sizeof(MemoryMapFileInfo));
+	assert(auxKC_range_size == sizeof(DTMemoryMapRange));
 	err = SecureDTGetProperty(memory_map, "AuxKC-mach_header",
 	    (const void**)&auxKC_header_range, &auxKC_header_range_size);
 	if (err != kSuccess) {
 		goto noAuxKC;
 	}
-	assert(auxKC_header_range_size == sizeof(MemoryMapFileInfo));
+	assert(auxKC_header_range_size == sizeof(DTMemoryMapRange));
 
 	if (auxKC_header_range->paddr == 0 || auxKC_range->paddr == 0) {
 		goto noAuxKC;
@@ -1872,6 +1900,12 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	pmap_stacks_start = (void*)dynamic_memory_begin;
 	dynamic_memory_begin += PPL_STACK_REGION_SIZE;
 	pmap_stacks_end = (void*)dynamic_memory_begin;
+
+#if HAS_GUARDED_IO_FILTER
+    iofilter_stacks_start = (void*)dynamic_memory_begin;
+    dynamic_memory_begin += IOFILTER_STACK_REGION_SIZE;
+    iofilter_stacks_end = (void*)dynamic_memory_begin;
+#endif
 #endif
 	if (dynamic_memory_begin > VM_MAX_KERNEL_ADDRESS) {
 		panic("Unsupported memory configuration %lx", mem_size);
@@ -2062,8 +2096,6 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 
 	arm_vm_prot_init(args);
 
-	vm_page_kernelcache_count = (unsigned int) (atop_64(end_kern - segLOWEST));
-
 	/*
 	 * Initialize the page tables for the low globals:
 	 *   cover this address range:
@@ -2132,6 +2164,26 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	 * we can traverse and fix it up.
 	 */
 
+	/* Calculate the physical bounds of the kernelcache; using
+	 * gVirtBase/gPhysBase math to do this directly is generally a bad idea
+	 * as the physmap is no longer physically contiguous.  However, this is
+	 * done here as segLOWEST and end_kern are both virtual addresses the
+	 * bootstrap physmap, and because kvtophys references the page tables
+	 * (at least at the time this comment was written), meaning that at
+	 * least end_kern may not point to a valid mapping on some kernelcache
+	 * configurations, so kvtophys would report a physical address of 0.
+	 *
+	 * Long term, the kernelcache should probably be described in terms of
+	 * multiple physical ranges, as there is no strong guarantee or
+	 * requirement that the kernelcache will always be physically
+	 * contiguous.
+	 */
+	arm_vm_kernelcache_phys_start = segLOWEST - gVirtBase + gPhysBase;
+	arm_vm_kernelcache_phys_end = end_kern - gVirtBase + gPhysBase;;
+
+	/* Calculate the number of pages that belong to the kernelcache. */
+	vm_page_kernelcache_count = (unsigned int) (atop_64(arm_vm_kernelcache_phys_end - arm_vm_kernelcache_phys_start));
+
 	if (arm_vm_auxkc_init()) {
 		if (segLOWESTROAuxKC < segLOWESTRO) {
 			segLOWESTRO = segLOWESTROAuxKC;
@@ -2188,6 +2240,11 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	for (vm_offset_t cur = (vm_offset_t)pmap_stacks_start; cur < (vm_offset_t)pmap_stacks_end; cur += ARM_PGBYTES) {
 		arm_vm_map(cpu_tte, cur, ARM_PTE_EMPTY);
 	}
+#if HAS_GUARDED_IO_FILTER
+    for (vm_offset_t cur = (vm_offset_t)iofilter_stacks_start; cur < (vm_offset_t)iofilter_stacks_end; cur += ARM_PGBYTES) {
+        arm_vm_map(cpu_tte, cur, ARM_PTE_EMPTY);
+    }
+#endif
 #endif
 	pmap_bootstrap(dynamic_memory_begin);
 

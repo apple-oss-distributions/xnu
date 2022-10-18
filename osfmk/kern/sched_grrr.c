@@ -244,7 +244,8 @@ const struct sched_dispatch_table sched_grrr_dispatch = {
 	.thread_eligible_for_pset                       = NULL,
 };
 
-extern int      max_unsafe_quanta;
+extern int      max_unsafe_rt_quanta;
+extern int      max_unsafe_failsafe_quanta;
 
 static uint32_t grrr_quantum_us;
 static uint32_t grrr_quantum;
@@ -279,8 +280,8 @@ sched_grrr_timebase_init(void)
 	default_timeshare_computation = grrr_quantum / 2;
 	default_timeshare_constraint = grrr_quantum;
 
-	max_unsafe_computation = max_unsafe_quanta * grrr_quantum;
-	sched_safe_duration = 2 * max_unsafe_quanta * grrr_quantum;
+	sched_set_max_unsafe_rt_quanta(max_unsafe_rt_quanta);
+	sched_set_max_unsafe_fixed_quanta(max_unsafe_rt_quanta);
 }
 
 static void

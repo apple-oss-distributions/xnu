@@ -133,7 +133,7 @@ T_DECL(pwrite_pipe,
 	int pipe_fds[2];
 	T_ASSERT_POSIX_SUCCESS(pipe(pipe_fds), "Created pipe");
 
-	test_pwrite_should_fail(pipe_fds[0], ESPIPE);
+	test_pwrite_should_fail(pipe_fds[0], EBADF);
 	test_pwrite_should_fail(pipe_fds[1], ESPIPE);
 
 	T_ASSERT_POSIX_SUCCESS(close(pipe_fds[1]), "Close write pipe");

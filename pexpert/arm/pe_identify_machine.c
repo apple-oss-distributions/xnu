@@ -7,11 +7,7 @@
 #include <pexpert/protos.h>
 #include <pexpert/device_tree.h>
 
-#if defined(__arm__)
-#include <pexpert/arm/board_config.h>
-#elif defined(__arm64__)
 #include <pexpert/arm64/board_config.h>
-#endif
 
 #include <kern/clock.h>
 #include <machine/machine_routines.h>
@@ -202,21 +198,14 @@ pe_arm_get_soc_base_phys(void)
 
 extern void     fleh_fiq_generic(void);
 
-#if defined(ARM_BOARD_CLASS_T8002)
-extern void     fleh_fiq_t8002(void);
-extern uint32_t t8002_get_decrementer(void);
-extern void     t8002_set_decrementer(uint32_t);
-static struct tbd_ops    t8002_funcs = {&fleh_fiq_t8002, &t8002_get_decrementer, &t8002_set_decrementer};
-#endif /* defined(ARM_BOARD_CLASS_T8002) */
-
 vm_offset_t     gPicBase;
 vm_offset_t     gTimerBase;
 vm_offset_t     gSocPhys;
 
 #if DEVELOPMENT || DEBUG
 // This block contains the panic trace implementation
-TUNABLE_WRITEABLE(panic_trace_t, panic_trace, "panic_trace", 0);
-TUNABLE_WRITEABLE(boolean_t, panic_trace_debug, "panic_trace_debug", 0);
+TUNABLE_DT_WRITEABLE(panic_trace_t, panic_trace, "/arm-io/cpu-debug-interface", "panic-trace-mode", "panic_trace", panic_trace_disabled, TUNABLE_DT_NONE);
+TUNABLE_WRITEABLE(boolean_t, panic_trace_debug, "panic_trace_debug", 1);
 TUNABLE_WRITEABLE(uint64_t, panic_trace_core_cfg, "panic_trace_core_cfg", 0);
 TUNABLE_WRITEABLE(uint64_t, panic_trace_ctl, "panic_trace_ctl", 0);
 TUNABLE_WRITEABLE(uint64_t, panic_trace_pwr_state_ignore, "panic_trace_pwr_state_ignore", 0);
@@ -409,22 +398,19 @@ pe_run_debug_command(command_buffer_element_t *command_buffer)
 }
 
 void
-PE_arm_debug_enable_trace(void)
+PE_arm_debug_enable_trace(bool should_log)
 {
-	panic_trace_log("%s enter", __FUNCTION__);
-	switch (panic_trace) {
-	case panic_trace_enabled:
-		pe_run_debug_command(enable_trace);
-		break;
-
-	case panic_trace_alt_enabled:
-		pe_run_debug_command(enable_alt_trace);
-		break;
-
-	default:
-		break;
+	if (should_log) {
+		panic_trace_log("%s enter", __FUNCTION__);
 	}
-	panic_trace_log("%s exit", __FUNCTION__);
+	if (panic_trace & panic_trace_enabled) {
+		pe_run_debug_command(enable_trace);
+	} else if (panic_trace & panic_trace_alt_enabled) {
+		pe_run_debug_command(enable_alt_trace);
+	}
+	if (should_log) {
+		panic_trace_log("%s exit", __FUNCTION__);
+	}
 }
 
 static void
@@ -512,7 +498,7 @@ pe_arm_init_debug(void *args)
 				pe_init_debug_command(entryP, &trace_halt, "trace_halt");
 
 				// start tracing now
-				PE_arm_debug_enable_trace();
+				PE_arm_debug_enable_trace(true);
 			}
 			if (bootarg_stop_clocks) {
 				pe_init_debug_command(entryP, &enable_stop_clocks, "enable_stop_clocks");
@@ -598,24 +584,6 @@ pe_arm_init_timer(void *args)
 	timer_base = gTimerBase;
 	soc_phys = gSocPhys;
 
-#if defined(ARM_BOARD_CLASS_T8002)
-	if (!strcmp(gPESoCDeviceType, "t8002-io") ||
-	    !strcmp(gPESoCDeviceType, "t8004-io")) {
-		/* Enable the Decrementer */
-		aic_write32(kAICTmrCnt, 0x7FFFFFFF);
-		aic_write32(kAICTmrCfg, kAICTmrCfgEn);
-		aic_write32(kAICTmrIntStat, kAICTmrIntStatPct);
-
-		// Enable the WFE Timer
-		rPMGR_EVENT_TMR_PERIOD = gPEClockFrequencyInfo.timebase_frequency_hz / USEC_PER_SEC;
-		rPMGR_EVENT_TMR = rPMGR_EVENT_TMR_PERIOD;
-		rPMGR_EVENT_TMR_CTL = PMGR_EVENT_TMR_CTL_EN;
-
-		eoi_addr = pic_base;
-		eoi_value = kAICTmrIntStatPct;
-		tbd_funcs = &t8002_funcs;
-	} else
-#endif /* ARM_BOARD_CLASS_T8002 */
 #if defined(__arm64__)
 	tbd_funcs = &empty_funcs;
 #else

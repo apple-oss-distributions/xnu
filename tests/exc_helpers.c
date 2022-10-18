@@ -36,9 +36,6 @@
 #if __arm64__
 #define EXCEPTION_THREAD_STATE          ARM_THREAD_STATE64
 #define EXCEPTION_THREAD_STATE_COUNT    ARM_THREAD_STATE64_COUNT
-#elif __arm__
-#define EXCEPTION_THREAD_STATE          ARM_THREAD_STATE
-#define EXCEPTION_THREAD_STATE_COUNT    ARM_THREAD_STATE_COUNT
 #elif __x86_64__
 #define EXCEPTION_THREAD_STATE          x86_THREAD_STATE
 #define EXCEPTION_THREAD_STATE_COUNT    x86_THREAD_STATE_COUNT
@@ -63,6 +60,23 @@ catch_mach_exception_raise(
 	exception_type_t type,
 	exception_data_t codes,
 	mach_msg_type_number_t code_count);
+
+extern kern_return_t
+catch_mach_exception_raise_identity_protected(
+	__unused mach_port_t      exception_port,
+	uint64_t                  thread_id,
+	mach_port_t               task_id_token,
+	exception_type_t          exception,
+	mach_exception_data_t     codes,
+	mach_msg_type_number_t    codeCnt);
+
+extern kern_return_t
+catch_mach_exception_raise_backtrace(
+	__unused mach_port_t exception_port,
+	mach_port_t kcdata_object,
+	exception_type_t exception,
+	mach_exception_data_t codes,
+	__unused mach_msg_type_number_t codeCnt);
 
 extern kern_return_t
 catch_mach_exception_raise_state(
@@ -92,6 +106,7 @@ catch_mach_exception_raise_state_identity(
 
 static exc_handler_callback_t exc_handler_callback;
 static exc_handler_protected_callback_t exc_handler_protected_callback;
+static exc_handler_backtrace_callback_t exc_handler_backtrace_callback;
 
 /**
  * This has to be defined for linking purposes, but it's unused.
@@ -220,6 +235,17 @@ catch_mach_exception_raise_state_identity(
 	return KERN_SUCCESS;
 }
 
+kern_return_t
+catch_mach_exception_raise_backtrace(
+	__unused mach_port_t exception_port,
+	mach_port_t kcdata_object,
+	exception_type_t exception,
+	mach_exception_data_t codes,
+	__unused mach_msg_type_number_t codeCnt)
+{
+	return exc_handler_backtrace_callback(kcdata_object, exception, codes);
+}
+
 mach_port_t
 create_exception_port(exception_mask_t exception_mask)
 {
@@ -234,9 +260,12 @@ create_exception_port_behavior64(exception_mask_t exception_mask, exception_beha
 	mach_port_t thread = mach_thread_self();
 	kern_return_t kr = KERN_SUCCESS;
 
-	if (behavior != EXCEPTION_STATE_IDENTITY && behavior != EXCEPTION_IDENTITY_PROTECTED) {
-		T_FAIL("Currently only EXCEPTION_STATE_IDENTITY and EXCEPTION_IDENTITY_PROTECTED are implemented");
+	if (((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_STATE_IDENTITY &&
+	    ((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_IDENTITY_PROTECTED) {
+		T_FAIL("Passed behavior (%d) is not supported by exc_helpers.", behavior);
 	}
+
+	behavior |= MACH_EXCEPTION_CODES;
 
 	/* Create the mach port the exception messages will be sent to. */
 	kr = mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &exc_port);
@@ -254,7 +283,7 @@ create_exception_port_behavior64(exception_mask_t exception_mask, exception_beha
 		thread,
 		exception_mask,
 		exc_port,
-		(exception_behavior_t)(behavior | MACH_EXCEPTION_CODES),
+		(exception_behavior_t)((unsigned int)behavior),
 		EXCEPTION_THREAD_STATE);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "Set the exception port to my custom handler");
 
@@ -299,8 +328,15 @@ exc_server_thread(void *arg)
 }
 
 static void
-_run_exception_handler(mach_port_t exc_port, void *callback, bool run_once, exception_behavior_t behavior)
+_run_exception_handler(mach_port_t exc_port, void *preferred_callback, void *callback, bool run_once, exception_behavior_t behavior)
 {
+	if (behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED) {
+		T_QUIET; T_ASSERT_NE(NULL, preferred_callback, "Require a preferred callback");
+		exc_handler_backtrace_callback = (exc_handler_backtrace_callback_t)preferred_callback;
+	}
+
+	behavior &= ~MACH_EXCEPTION_MASK;
+
 	switch (behavior) {
 	case EXCEPTION_STATE_IDENTITY:
 		exc_handler_callback = (exc_handler_callback_t)callback;
@@ -329,21 +365,23 @@ _run_exception_handler(mach_port_t exc_port, void *callback, bool run_once, exce
 void
 run_exception_handler(mach_port_t exc_port, exc_handler_callback_t callback)
 {
-	run_exception_handler_behavior64(exc_port, callback, EXCEPTION_STATE_IDENTITY);
+	run_exception_handler_behavior64(exc_port, NULL, (void *)callback, EXCEPTION_STATE_IDENTITY);
 }
 
 void
-run_exception_handler_behavior64(mach_port_t exc_port, void *callback, exception_behavior_t behavior)
+run_exception_handler_behavior64(mach_port_t exc_port, void *preferred_callback,
+    void *callback, exception_behavior_t behavior)
 {
-	if (behavior != EXCEPTION_STATE_IDENTITY && behavior != EXCEPTION_IDENTITY_PROTECTED) {
-		T_FAIL("Currently only EXCEPTION_STATE_IDENTITY and EXCEPTION_IDENTITY_PROTECTED are implemented");
+	if (((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_STATE_IDENTITY &&
+	    ((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_IDENTITY_PROTECTED) {
+		T_FAIL("Passed behavior (%d) is not supported by exc_helpers.", behavior);
 	}
 
-	_run_exception_handler(exc_port, callback, true, behavior);
+	_run_exception_handler(exc_port, (void *)preferred_callback, (void *)callback, true, behavior);
 }
 
 void
 repeat_exception_handler(mach_port_t exc_port, exc_handler_callback_t callback)
 {
-	_run_exception_handler(exc_port, callback, false, EXCEPTION_STATE_IDENTITY);
+	_run_exception_handler(exc_port, NULL, (void *)callback, false, EXCEPTION_STATE_IDENTITY);
 }

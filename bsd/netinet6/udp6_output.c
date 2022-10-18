@@ -380,7 +380,8 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	}
 
 	if (in6p->inp_flowhash == 0) {
-		in6p->inp_flowhash = inp_calc_flowhash(in6p);
+		inp_calc_flowhash(in6p);
+		ASSERT(in6p->inp_flowhash != 0);
 	}
 	/* update flowinfo - RFC 6437 */
 	if (in6p->inp_flow == 0 && in6p->in6p_flags & IN6P_AUTOFLOWLABEL) {

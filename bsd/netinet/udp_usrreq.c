@@ -289,6 +289,7 @@ udp_input(struct mbuf *m, int iphlen)
 	boolean_t wifi = (!cell && IFNET_IS_WIFI(ifp));
 	boolean_t wired = (!wifi && IFNET_IS_WIRED(ifp));
 	u_int16_t pf_tag = 0;
+	boolean_t is_wake_pkt = false;
 
 	bzero(&udp_in, sizeof(udp_in));
 	udp_in.sin_len = sizeof(struct sockaddr_in);
@@ -299,6 +300,9 @@ udp_input(struct mbuf *m, int iphlen)
 
 	if (m->m_flags & M_PKTHDR) {
 		pf_tag = m_pftag(m)->pftag_tag;
+		if (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) {
+			is_wake_pkt = true;
+		}
 	}
 
 	udpstat.udps_ipackets++;
@@ -531,7 +535,12 @@ udp_input(struct mbuf *m, int iphlen)
 
 				m = n;
 			}
+			if (is_wake_pkt) {
+				soevent(inp->inp_socket, SO_FILT_HINT_LOCKED | SO_FILT_HINT_WAKE_PKT);
+			}
+
 			udp_unlock(inp->inp_socket, 1, 0);
+
 
 			/*
 			 * Don't look for additional matches if this one does
@@ -678,11 +687,6 @@ udp_input(struct mbuf *m, int iphlen)
 			udpstat.udps_noportbcast++;
 			goto bad;
 		}
-#if ICMP_BANDLIM
-		if (badport_bandlim(BANDLIM_ICMP_UNREACH)) {
-			goto bad;
-		}
-#endif /* ICMP_BANDLIM */
 		if (blackhole) {
 			if (ifp && ifp->if_type != IFT_LOOP) {
 				goto bad;
@@ -718,9 +722,7 @@ udp_input(struct mbuf *m, int iphlen)
 	udp_in.sin_addr = ip->ip_src;
 	if ((inp->inp_flags & INP_CONTROLOPTS) != 0 ||
 	    SOFLOW_ENABLED(inp->inp_socket) ||
-	    (inp->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
-	    (inp->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
-	    (inp->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
+	    SO_RECV_CONTROL_OPTS(inp->inp_socket)) {
 		if (inp->inp_vflag & INP_IPV6 || inp->inp_vflag & INP_V4MAPPEDV6) {
 			int savedflags;
 
@@ -759,6 +761,9 @@ udp_input(struct mbuf *m, int iphlen)
 		udpstat.udps_fullsock++;
 	} else {
 		sorwakeup(inp->inp_socket);
+	}
+	if (is_wake_pkt) {
+		soevent(inp->inp_socket, SO_FILT_HINT_LOCKED | SO_FILT_HINT_WAKE_PKT);
 	}
 	udp_unlock(inp->inp_socket, 1, 0);
 	KERNEL_DEBUG(DBG_FNC_UDP_INPUT | DBG_FUNC_END, 0, 0, 0, 0, 0);
@@ -807,9 +812,7 @@ udp_append(struct inpcb *last, struct ip *ip, struct mbuf *n, int off,
 
 	if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
 	    SOFLOW_ENABLED(last->inp_socket) ||
-	    (last->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
-	    (last->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
-	    (last->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
+	    SO_RECV_CONTROL_OPTS(last->inp_socket)) {
 		if (last->inp_vflag & INP_IPV6 || last->inp_vflag & INP_V4MAPPEDV6) {
 			int savedflags;
 
@@ -936,6 +939,11 @@ udp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet * if
 				uuid_clear(null_uuid);
 				necp_update_flow_protoctl_event(null_uuid, inp->necp_client_uuid,
 				    PRC_MSGSIZE, ntohs(icp->icmp_nextmtu), 0);
+				/*
+				 * Avoid calling udp_notify() to set so_error
+				 * when using Network.framework since the notification
+				 * of PRC_MSGSIZE has been delivered through NECP.
+				 */
 			} else {
 				(*notify)(inp, inetctlerrmap[cmd]);
 			}
@@ -1774,7 +1782,8 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	}
 
 	if (inp->inp_flowhash == 0) {
-		inp->inp_flowhash = inp_calc_flowhash(inp);
+		inp_calc_flowhash(inp);
+		ASSERT(inp->inp_flowhash != 0);
 	}
 
 	if (fport == htons(53) && !(so->so_flags1 & SOF1_DNS_COUNTED)) {
@@ -2292,7 +2301,8 @@ udp_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 
 		soisconnected(so);
 		if (inp->inp_flowhash == 0) {
-			inp->inp_flowhash = inp_calc_flowhash(inp);
+			inp_calc_flowhash(inp);
+			ASSERT(inp->inp_flowhash != 0);
 		}
 	}
 	return error;

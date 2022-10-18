@@ -178,8 +178,7 @@ semaphore_destroy_internal(
 
 	if (old_count < 0) {
 		waitq_wakeup64_all_locked(&semaphore->waitq,
-		    SEMAPHORE_EVENT, THREAD_RESTART,
-		    WAITQ_ALL_PRIORITIES, WAITQ_UNLOCK);
+		    SEMAPHORE_EVENT, THREAD_RESTART, WAITQ_UNLOCK);
 		/* waitq/semaphore is unlocked */
 	} else {
 		assert(circle_queue_empty(&semaphore->waitq.waitq_queue));
@@ -387,8 +386,7 @@ semaphore_signal_internal(
 		if (old_count < 0) {
 			semaphore->count = 0;  /* always reset */
 			kr = waitq_wakeup64_all_locked(&semaphore->waitq,
-			    SEMAPHORE_EVENT, THREAD_AWAKENED,
-			    WAITQ_ALL_PRIORITIES, WAITQ_UNLOCK);
+			    SEMAPHORE_EVENT, THREAD_AWAKENED, WAITQ_UNLOCK);
 			/* waitq / semaphore is unlocked */
 		} else {
 			if (options & SEMAPHORE_SIGNAL_PREPOST) {
@@ -402,11 +400,13 @@ semaphore_signal_internal(
 	}
 
 	if (semaphore->count < 0) {
-		waitq_options_t wq_option = (options & SEMAPHORE_THREAD_HANDOFF) ?
-		    WQ_OPTION_HANDOFF : WQ_OPTION_NONE;
+		waitq_wakeup_flags_t flags = WAITQ_KEEP_LOCKED;
+
+		if (options & SEMAPHORE_THREAD_HANDOFF) {
+			flags |= WAITQ_HANDOFF;
+		}
 		kr = waitq_wakeup64_one_locked(&semaphore->waitq,
-		    SEMAPHORE_EVENT, THREAD_AWAKENED,
-		    WAITQ_ALL_PRIORITIES, WAITQ_KEEP_LOCKED, wq_option);
+		    SEMAPHORE_EVENT, THREAD_AWAKENED, flags);
 		if (kr == KERN_SUCCESS) {
 			semaphore_unlock(semaphore);
 			splx(spl_level);
@@ -1247,7 +1247,7 @@ convert_semaphore_to_port(semaphore_t semaphore)
 	 * semaphore_no_senders if this is the first send right
 	 */
 	if (!ipc_kobject_make_send_lazy_alloc_port(&semaphore->port,
-	    semaphore, IKOT_SEMAPHORE, IPC_KOBJECT_ALLOC_NONE, 0)) {
+	    semaphore, IKOT_SEMAPHORE, IPC_KOBJECT_ALLOC_NONE)) {
 		semaphore_dereference(semaphore);
 	}
 	return semaphore->port;

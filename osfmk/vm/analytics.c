@@ -108,6 +108,91 @@ report_mlock_failures()
 	CA_EVENT_SEND(event);
 }
 
+#if XNU_TARGET_OS_WATCH
+CA_EVENT(compressor_age,
+    CA_INT, hour1,
+    CA_INT, hour6,
+    CA_INT, hour12,
+    CA_INT, hour24,
+    CA_INT, hour36,
+    CA_INT, hour48,
+    CA_INT, hourMax,
+    CA_INT, trial_deployment_id,
+    CA_STATIC_STRING(CA_UUID_LEN), trial_treatment_id,
+    CA_STATIC_STRING(CA_UUID_LEN), trial_experiment_id);
+
+/**
+ * Compressor age bucket descriptor.
+ */
+typedef struct {
+	/* Number of segments in this bucket. */
+	uint64_t count;
+	/* The bucket's lower bound (inclusive) */
+	uint64_t lower;
+	/* The bucket's upper bound (exclusive) */
+	uint64_t upper;
+} c_reporting_bucket_t;
+#define C_REPORTING_BUCKETS_MAX (UINT64_MAX)
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
+#endif
+#define HR_TO_S(x) ((x) * 60 * 60)
+
+/**
+ * Report the age of segments in the compressor.
+ */
+static void
+report_compressor_age()
+{
+	const queue_head_t *c_queues[] = {&c_age_list_head, &c_major_list_head};
+	c_reporting_bucket_t c_buckets[] = {
+		{.count = 0, .lower = HR_TO_S(0), .upper = HR_TO_S(1)},  /* [0, 1) hours */
+		{.count = 0, .lower = HR_TO_S(1), .upper = HR_TO_S(6)},  /* [1, 6) hours */
+		{.count = 0, .lower = HR_TO_S(6), .upper = HR_TO_S(12)},  /* [6, 12) hours */
+		{.count = 0, .lower = HR_TO_S(12), .upper = HR_TO_S(24)}, /* [12, 24) hours */
+		{.count = 0, .lower = HR_TO_S(24), .upper = HR_TO_S(36)}, /* [24, 36) hours */
+		{.count = 0, .lower = HR_TO_S(36), .upper = HR_TO_S(48)}, /* [36, 48) hours */
+		{.count = 0, .lower = HR_TO_S(48), .upper = C_REPORTING_BUCKETS_MAX}, /* [48, MAX) hours */
+	};
+	clock_sec_t now;
+	clock_nsec_t nsec;
+
+	/* Collect the segments and update the bucket counts. */
+	lck_mtx_lock_spin_always(c_list_lock);
+	for (unsigned q = 0; q < ARRAY_SIZE(c_queues); q++) {
+		c_segment_t c_seg = (c_segment_t) queue_first(c_queues[q]);
+		while (!queue_end(c_queues[q], (queue_entry_t) c_seg)) {
+			for (unsigned b = 0; b < ARRAY_SIZE(c_buckets); b++) {
+				uint32_t creation_ts = c_seg->c_creation_ts;
+				clock_get_system_nanotime(&now, &nsec);
+				clock_sec_t age = now - creation_ts;
+				if ((age >= c_buckets[b].lower) &&
+				    (age < c_buckets[b].upper)) {
+					c_buckets[b].count++;
+					break;
+				}
+			}
+			c_seg = (c_segment_t) queue_next(&c_seg->c_age_list);
+		}
+	}
+	lck_mtx_unlock_always(c_list_lock);
+
+	/* Send the ages to CoreAnalytics. */
+	ca_event_t event = CA_EVENT_ALLOCATE(compressor_age);
+	CA_EVENT_TYPE(compressor_age) * e = event->data;
+	e->hour1 = c_buckets[0].count;
+	e->hour6 = c_buckets[1].count;
+	e->hour12 = c_buckets[2].count;
+	e->hour24 = c_buckets[3].count;
+	e->hour36 = c_buckets[4].count;
+	e->hour48 = c_buckets[5].count;
+	e->hourMax = c_buckets[6].count;
+	add_trial_uuids(e->trial_treatment_id, e->trial_experiment_id);
+	e->trial_deployment_id = trial_deployment_id;
+	CA_EVENT_SEND(event);
+}
+#endif /* XNU_TARGET_OS_WATCH */
+
 static void
 schedule_analytics_thread_call()
 {
@@ -128,6 +213,9 @@ vm_analytics_tick(void *arg0, void *arg1)
 #pragma unused(arg0, arg1)
 	report_vm_swapusage();
 	report_mlock_failures();
+#if XNU_TARGET_OS_WATCH
+	report_compressor_age();
+#endif /* XNU_TARGET_OS_WATCH */
 	schedule_analytics_thread_call();
 }
 

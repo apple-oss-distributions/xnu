@@ -61,8 +61,6 @@ T_DECL(posix_spawn_archpref, "verify posix_spawn_setarchpref_np can select slice
 	run_test("any (arm64)", CPU_TYPE_ARM64, CPU_SUBTYPE_ANY);
 #elif defined(__arm64__)
 	run_test("any (arm64_32)", CPU_TYPE_ARM64_32, CPU_SUBTYPE_ANY);
-#elif defined(__arm__)
-	run_test("any (arm)", CPU_TYPE_ARM, CPU_SUBTYPE_ANY);
 #else
 #error unknown architecture
 #endif

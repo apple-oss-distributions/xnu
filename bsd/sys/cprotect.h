@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2009-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -72,8 +72,9 @@ enum {
 
 /* lock events from AppleKeyStore */
 enum {
-	CP_ACTION_LOCKED        = 0,
-	CP_ACTION_UNLOCKED      = 1,
+	CP_ACTION_LOCKED         = 0,
+	CP_ACTION_UNLOCKED       = 1,
+	CP_ACTION_EP_INVALIDATED = 2,
 };
 /*
  * Ideally, cp_key_store_action_t would be an enum, but we cannot fix
@@ -91,6 +92,11 @@ typedef unsigned char cp_lock_state_t;
 enum {
 	CP_LOCKED_STATE         = 0,
 	CP_UNLOCKED_STATE       = 1,
+};
+
+typedef unsigned char cp_ep_state_t;
+enum {
+	CP_EP_INVALIDATED       = 0,
 };
 
 typedef uint32_t cp_key_class_t;

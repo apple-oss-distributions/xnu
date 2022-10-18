@@ -577,18 +577,20 @@ static inline void
 uncmon_update_locked(unsigned int monid, unsigned int curid, unsigned int ctr)
 {
 	struct uncore_monitor *mon = &uncore_monitors[monid];
-	uint64_t snap = 0;
-	if (curid == monid) {
-		snap = uncmon_read_counter_locked_l(monid, ctr);
-	} else {
-#if UNCORE_PER_CLUSTER
-		snap = uncmon_read_counter_locked_r(monid, ctr);
-#endif /* UNCORE_PER_CLUSTER */
+	if (!mon->um_sleeping) {
+		uint64_t snap = 0;
+		if (curid == monid) {
+			snap = uncmon_read_counter_locked_l(monid, ctr);
+		} else {
+	#if UNCORE_PER_CLUSTER
+			snap = uncmon_read_counter_locked_r(monid, ctr);
+	#endif /* UNCORE_PER_CLUSTER */
+		}
+		/* counters should increase monotonically */
+		assert(snap >= mon->um_snaps[ctr]);
+		mon->um_counts[ctr] += snap - mon->um_snaps[ctr];
+		mon->um_snaps[ctr] = snap;
 	}
-	/* counters should increase monotonically */
-	assert(snap >= mon->um_snaps[ctr]);
-	mon->um_counts[ctr] += snap - mon->um_snaps[ctr];
-	mon->um_snaps[ctr] = snap;
 }
 
 static inline void
@@ -757,14 +759,8 @@ uncore_init(__unused mt_device_t dev)
 	} else
 #endif /* DEVELOPMENT || DEBUG */
 	{
-#if UNCORE_PER_CLUSTER
-		for (unsigned int i = 0; i < topology_info->num_clusters; i++) {
-			uncore_pmi_mask |= 1ULL << topology_info->clusters[i].first_cpu_id;
-		}
-#else /* UNCORE_PER_CLUSTER */
-		/* arbitrarily route to core 0 */
+		/* arbitrarily route to core 0 in each cluster */
 		uncore_pmi_mask |= 1;
-#endif /* !UNCORE_PER_CLUSTER */
 	}
 	assert(uncore_pmi_mask != 0);
 
@@ -799,7 +795,9 @@ uncmon_read_all_counters(unsigned int monid, unsigned int curmonid,
 
 	for (unsigned int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
 		if (ctr_mask & (1ULL << ctr)) {
-			uncmon_update_locked(monid, curmonid, ctr);
+			if (!mon->um_sleeping) {
+				uncmon_update_locked(monid, curmonid, ctr);
+			}
 			counts[ctr] = mon->um_counts[ctr];
 		}
 	}
@@ -829,7 +827,6 @@ uncore_read(uint64_t ctr_mask, uint64_t *counts_out)
 		 * Find this monitor's starting offset into the `counts_out` array.
 		 */
 		uint64_t *counts = counts_out + (UNCORE_NCTRS * monid);
-
 		uncmon_read_all_counters(monid, curmonid, ctr_mask, counts);
 	}
 
@@ -867,20 +864,29 @@ uncore_add(struct monotonic_config *config, uint32_t *ctr_out)
 	 */
 	unsigned int curmonid = uncmon_get_curid();
 	if (uncore_active_ctrs == 0) {
+		/*
+		 * Suspend powerdown until the next reset.
+		 */
+		suspend_cluster_powerdown();
+
 		for (unsigned int monid = 0; monid < uncore_nmonitors(); monid++) {
 			struct uncore_monitor *mon = &uncore_monitors[monid];
 			bool remote = monid != curmonid;
 
 			int intrs_en = uncmon_lock(mon);
-			for (unsigned int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
-				if (remote) {
+			if (!mon->um_sleeping) {
+				for (unsigned int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
+					if (remote) {
 	#if UNCORE_PER_CLUSTER
-					uncmon_write_counter_locked_r(monid, ctr, 0);
-	#endif /* UNCORE_PER_CLUSTER */
-				} else {
-					uncmon_write_counter_locked_l(monid, ctr, 0);
+						uncmon_write_counter_locked_r(monid, ctr, 0);
+		#endif /* UNCORE_PER_CLUSTER */
+					} else {
+						uncmon_write_counter_locked_l(monid, ctr, 0);
+					}
 				}
 			}
+			memset(&mon->um_snaps, 0, sizeof(mon->um_snaps));
+			memset(&mon->um_counts, 0, sizeof(mon->um_counts));
 			uncmon_unlock(mon, intrs_en);
 		}
 	}
@@ -922,39 +928,47 @@ uncore_reset(void)
 	unsigned int curmonid = uncmon_get_curid();
 
 	if (mt_owns_counters()) {
+		if (uncore_active_ctrs != 0) {
+			resume_cluster_powerdown();
+		}
+
 		for (unsigned int monid = 0; monid < uncore_nmonitors(); monid++) {
 			struct uncore_monitor *mon = &uncore_monitors[monid];
 			bool remote = monid != curmonid;
 
 			int intrs_en = uncmon_lock(mon);
-			if (remote) {
-	#if UNCORE_PER_CLUSTER
-				uncmon_set_counting_locked_r(monid, 0);
-	#endif /* UNCORE_PER_CLUSTER */
-			} else {
-				uncmon_set_counting_locked_l(monid, 0);
-			}
+			if (!mon->um_sleeping) {
+				if (remote) {
+#if UNCORE_PER_CLUSTER
+					uncmon_set_counting_locked_r(monid, 0);
+#endif /* UNCORE_PER_CLUSTER */
+				} else {
+					uncmon_set_counting_locked_l(monid, 0);
+				}
 
-			for (int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
-				if (uncore_active_ctrs & (1U << ctr)) {
-					if (remote) {
-	#if UNCORE_PER_CLUSTER
-						uncmon_write_counter_locked_r(monid, ctr, 0);
-	#endif /* UNCORE_PER_CLUSTER */
-					} else {
-						uncmon_write_counter_locked_l(monid, ctr, 0);
+				for (int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
+					if (uncore_active_ctrs & (1U << ctr)) {
+						if (remote) {
+#if UNCORE_PER_CLUSTER
+							uncmon_write_counter_locked_r(monid, ctr, 0);
+#endif /* UNCORE_PER_CLUSTER */
+						} else {
+							uncmon_write_counter_locked_l(monid, ctr, 0);
+						}
 					}
 				}
 			}
 
 			memset(&mon->um_snaps, 0, sizeof(mon->um_snaps));
 			memset(&mon->um_counts, 0, sizeof(mon->um_counts));
-			if (remote) {
-	#if UNCORE_PER_CLUSTER
-				uncmon_clear_int_locked_r(monid);
-	#endif /* UNCORE_PER_CLUSTER */
-			} else {
-				uncmon_clear_int_locked_l(monid);
+			if (!mon->um_sleeping) {
+				if (remote) {
+#if UNCORE_PER_CLUSTER
+					uncmon_clear_int_locked_r(monid);
+#endif /* UNCORE_PER_CLUSTER */
+				} else {
+					uncmon_clear_int_locked_l(monid);
+				}
 			}
 
 			uncmon_unlock(mon, intrs_en);
@@ -970,12 +984,14 @@ uncore_reset(void)
 			bool remote = monid != curmonid;
 
 			int intrs_en = uncmon_lock(mon);
-			if (remote) {
-#if UNCORE_PER_CLUSTER
-				uncmon_program_events_locked_r(monid);
-#endif /* UNCORE_PER_CLUSTER */
-			} else {
-				uncmon_program_events_locked_l(monid);
+			if (!mon->um_sleeping) {
+				if (remote) {
+	#if UNCORE_PER_CLUSTER
+					uncmon_program_events_locked_r(monid);
+	#endif /* UNCORE_PER_CLUSTER */
+				} else {
+					uncmon_program_events_locked_l(monid);
+				}
 			}
 			uncmon_unlock(mon, intrs_en);
 		}
@@ -1011,12 +1027,14 @@ uncmon_set_enabled_r(unsigned int monid, bool enable)
 	struct uncore_monitor *mon = &uncore_monitors[monid];
 	int intrs_en = uncmon_lock(mon);
 
-	if (enable) {
-		uncmon_init_locked_r(monid);
-		uncmon_program_events_locked_r(monid);
-		uncmon_set_counting_locked_r(monid, uncore_active_ctrs);
-	} else {
-		uncmon_set_counting_locked_r(monid, 0);
+	if (!mon->um_sleeping) {
+		if (enable) {
+			uncmon_init_locked_r(monid);
+			uncmon_program_events_locked_r(monid);
+			uncmon_set_counting_locked_r(monid, uncore_active_ctrs);
+		} else {
+			uncmon_set_counting_locked_r(monid, 0);
+		}
 	}
 
 	uncmon_unlock(mon, intrs_en);
@@ -1121,6 +1139,8 @@ uncore_save(void)
 		for (unsigned int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
 			if (uncore_active_ctrs & (1U << ctr)) {
 				uncmon_update_locked(monid, curmonid, ctr);
+				mon->um_snaps[ctr] = 0;
+				uncmon_write_counter_locked_l(monid, ctr, 0);
 			}
 		}
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -126,19 +126,38 @@ static int if_fake_multibuflet = 0;
 SYSCTL_INT(_net_link_fake, OID_AUTO, multibuflet, CTLFLAG_RW | CTLFLAG_LOCKED,
     &if_fake_multibuflet, 0, "Fake interface using multi-buflet packets");
 
+static int if_fake_low_latency = 0;
+SYSCTL_INT(_net_link_fake, OID_AUTO, low_latency, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &if_fake_low_latency, 0, "Fake interface with a low latency qset");
+
+static int if_fake_switch_combined_mode = 0;
+SYSCTL_INT(_net_link_fake, OID_AUTO, switch_combined_mode,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &if_fake_switch_combined_mode, 0,
+    "Switch a qset between combined and separate mode during dequeues");
+
+static int if_fake_switch_mode_frequency = 10;
+SYSCTL_INT(_net_link_fake, OID_AUTO, switch_mode_frequency,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &if_fake_switch_mode_frequency, 0,
+    "The number of dequeues before we switch between the combined and separated mode");
+
+static int if_fake_tso_support = 0;
+SYSCTL_INT(_net_link_fake, OID_AUTO, tso_support, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &if_fake_tso_support, 0, "Fake interface with support for TSO offload");
+
 typedef enum {
 	IFF_PP_MODE_GLOBAL = 0,         /* share a global pool */
 	IFF_PP_MODE_PRIVATE = 1,        /* creates its own rx/tx pool */
 	IFF_PP_MODE_PRIVATE_SPLIT = 2,  /* creates its own split rx & tx pool */
 } iff_pktpool_mode_t;
-static iff_pktpool_mode_t if_fake_pktpool_mode = 0;
+static iff_pktpool_mode_t if_fake_pktpool_mode = IFF_PP_MODE_GLOBAL;
 SYSCTL_INT(_net_link_fake, OID_AUTO, pktpool_mode, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &if_fake_pktpool_mode, 0,
+    &if_fake_pktpool_mode, IFF_PP_MODE_GLOBAL,
     "Fake interface packet pool mode (0 global, 1 private, 2 private split");
 
-#define FETH_LINK_LAYER_AGGRETATION_FACTOR_MAX 32
+#define FETH_LINK_LAYER_AGGRETATION_FACTOR_MAX 512
+#define FETH_LINK_LAYER_AGGRETATION_FACTOR_DEF 96
 static int if_fake_link_layer_aggregation_factor =
-    FETH_LINK_LAYER_AGGRETATION_FACTOR_MAX;
+    FETH_LINK_LAYER_AGGRETATION_FACTOR_DEF;
 static int
 feth_link_layer_aggregation_factor_sysctl SYSCTL_HANDLER_ARGS
 {
@@ -229,9 +248,37 @@ static unsigned int if_fake_max_mtu = FETH_MAX_MTU_DEFAULT;
 
 /* sysctl net.link.fake.buflet_size */
 #define FETH_BUFLET_SIZE_MIN            512
-#define FETH_BUFLET_SIZE_MAX            2048
+#define FETH_BUFLET_SIZE_MAX            (32 * 1024)
+#define FETH_TSO_BUFLET_SIZE            (16 * 1024)
 
 static unsigned int if_fake_buflet_size = FETH_BUFLET_SIZE_MIN;
+static unsigned int if_fake_tso_buffer_size = FETH_TSO_BUFLET_SIZE;
+
+static int
+feth_tso_buffer_size_sysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	unsigned int new_value;
+	int changed;
+	int error;
+
+	error = sysctl_io_number(req, if_fake_tso_buffer_size,
+	    sizeof(if_fake_tso_buffer_size), &new_value, &changed);
+	if (error == 0 && changed != 0) {
+		/* must be a power of 2 between min and max */
+		if (new_value > FETH_BUFLET_SIZE_MAX ||
+		    new_value < FETH_BUFLET_SIZE_MIN ||
+		    !is_power_of_two(new_value)) {
+			return EINVAL;
+		}
+		if_fake_tso_buffer_size = new_value;
+	}
+	return 0;
+}
+
+SYSCTL_PROC(_net_link_fake, OID_AUTO, tso_buf_size,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, feth_tso_buffer_size_sysctl, "IU", "Fake interface TSO buffer size");
 
 static int
 feth_max_mtu_sysctl SYSCTL_HANDLER_ARGS
@@ -375,6 +422,36 @@ SYSCTL_PROC(_net_link_fake, OID_AUTO, tx_drops,
     feth_fake_tx_drops_sysctl, "IU",
     "Fake interface will intermittently drop packets on Tx path");
 
+/* sysctl net.link.fake.tx_completion_mode */
+typedef enum {
+	IFF_TX_COMPL_MODE_SYNC = 0,
+	IFF_TX_COMPL_MODE_ASYNC = 1,
+} iff_tx_completion_mode_t;
+static iff_tx_completion_mode_t if_tx_completion_mode = IFF_TX_COMPL_MODE_SYNC;
+static int
+feth_fake_tx_completion_mode_sysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	unsigned int new_value;
+	int changed;
+	int error;
+
+	error = sysctl_io_number(req, if_tx_completion_mode,
+	    sizeof(if_tx_completion_mode), &new_value, &changed);
+	if (error == 0 && changed != 0) {
+		if (new_value > IFF_TX_COMPL_MODE_ASYNC ||
+		    new_value < IFF_TX_COMPL_MODE_SYNC) {
+			return EINVAL;
+		}
+		if_tx_completion_mode = new_value;
+	}
+	return 0;
+}
+SYSCTL_PROC(_net_link_fake, OID_AUTO, tx_completion_mode,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0,
+    feth_fake_tx_completion_mode_sysctl, "IU",
+    "Fake interface tx completion mode (0 synchronous, 1 asynchronous)");
+
 /* sysctl net.link.fake.llink_cnt */
 
 /* The maximum number of logical links (including default link) */
@@ -464,6 +541,7 @@ typedef uint16_t        iff_flags_t;
 #define IFF_FLAGS_DETACHING             0x0004
 #define IFF_FLAGS_WMM_MODE              0x0008
 #define IFF_FLAGS_MULTIBUFLETS          0x0010
+#define IFF_FLAGS_TSO_SUPPORT           0x0020
 
 #if SKYWALK
 
@@ -484,7 +562,9 @@ typedef struct {
 	uint32_t                fqs_tx_queue_cnt;
 	uint32_t                fqs_llink_idx;
 	uint32_t                fqs_idx;
+	uint32_t                fqs_dequeue_cnt;
 	uint64_t                fqs_id;
+	boolean_t               fqs_combined_mode;
 } fake_qset;
 
 typedef struct {
@@ -495,6 +575,14 @@ typedef struct {
 } fake_llink;
 
 static kern_pbufpool_t         S_pp;
+
+#define IFF_TT_OUTPUT   0x01 /* generate trace_tag on output */
+#define IFF_TT_INPUT    0x02 /* generate trace_tag on input */
+static int if_fake_trace_tag_flags = 0;
+SYSCTL_INT(_net_link_fake, OID_AUTO, trace_tag, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &if_fake_trace_tag_flags, 0, "Fake interface generate trace_tag");
+static packet_trace_tag_t if_fake_trace_tag_current = 1;
+
 #endif /* SKYWALK */
 
 struct if_fake {
@@ -532,6 +620,7 @@ struct if_fake {
 	unsigned int            iff_adv_interval;
 	uint32_t                iff_tx_drop_rate;
 	uint32_t                iff_tx_pkts_count;
+	iff_tx_completion_mode_t iff_tx_completion_mode;
 	bool                    iff_intf_adv_enabled;
 	void                    *iff_intf_adv_kern_ctx;
 	kern_nexus_capab_interface_advisory_notify_fn_t iff_intf_adv_notify;
@@ -596,6 +685,12 @@ static inline boolean_t
 feth_has_intf_advisory_configured(if_fake_ref fakeif)
 {
 	return fakeif->iff_adv_interval > 0;
+}
+
+static inline bool
+feth_supports_tso(if_fake_ref fakeif)
+{
+	return (fakeif->iff_flags & IFF_FLAGS_TSO_SUPPORT) != 0;
 }
 #endif /* SKYWALK */
 
@@ -766,19 +861,23 @@ feth_packet_pool_init_prepare(if_fake_ref fakeif,
     struct kern_pbufpool_init *pp_init)
 {
 	uint32_t max_mtu = fakeif->iff_max_mtu;
+	uint32_t buflet_size = if_fake_buflet_size;
 
 	bzero(pp_init, sizeof(*pp_init));
 	pp_init->kbi_version = KERN_PBUFPOOL_CURRENT_VERSION;
 	pp_init->kbi_flags |= KBIF_VIRTUAL_DEVICE;
 	pp_init->kbi_packets = 1024; /* TBD configurable */
+	if (feth_supports_tso(fakeif)) {
+		buflet_size = if_fake_tso_buffer_size;
+	}
 	if (feth_using_multibuflets(fakeif)) {
-		pp_init->kbi_bufsize = if_fake_buflet_size;
-		pp_init->kbi_max_frags = howmany(max_mtu, if_fake_buflet_size);
+		pp_init->kbi_bufsize = buflet_size;
+		pp_init->kbi_max_frags = howmany(max_mtu, buflet_size);
 		pp_init->kbi_buflets = pp_init->kbi_packets *
 		    pp_init->kbi_max_frags;
 		pp_init->kbi_flags |= KBIF_BUFFER_ON_DEMAND;
 	} else {
-		pp_init->kbi_bufsize = max_mtu;
+		pp_init->kbi_bufsize = max(max_mtu, buflet_size);
 		pp_init->kbi_max_frags = 1;
 		pp_init->kbi_buflets = pp_init->kbi_packets;
 	}
@@ -855,6 +954,17 @@ feth_packet_pool_make(if_fake_ref fakeif)
 	return 0;
 }
 
+static void
+feth_packet_set_trace_tag(kern_packet_t ph, int flag)
+{
+	if (if_fake_trace_tag_flags & flag) {
+		if (++if_fake_trace_tag_current == 0) {
+			if_fake_trace_tag_current = 1;
+		}
+		kern_packet_set_trace_tag(ph, if_fake_trace_tag_current);
+	}
+}
+
 static errno_t
 feth_clone_packet(if_fake_ref dif, kern_packet_t sph, kern_packet_t *pdph)
 {
@@ -883,7 +993,7 @@ feth_clone_packet(if_fake_ref dif, kern_packet_t sph, kern_packet_t *pdph)
 	} else {
 		dbuf0 = kern_packet_get_next_buflet(dph0, NULL);
 		ASSERT(kern_buflet_get_object_limit(dbuf0) ==
-		    pp->pp_buflet_size);
+		    PP_BUF_OBJ_SIZE_DEF(pp));
 		ASSERT(kern_buflet_get_data_limit(dbuf0) % 16 == 0);
 		dlim0 = ((uintptr_t)kern_buflet_get_object_address(dbuf0) +
 		    kern_buflet_get_object_limit(dbuf0)) -
@@ -903,7 +1013,7 @@ feth_clone_packet(if_fake_ref dif, kern_packet_t sph, kern_packet_t *pdph)
 		    kern_buflet_get_object_address(dbuf));
 		daddr = kern_buflet_get_data_address(dbuf);
 		dlim = kern_buflet_get_object_limit(dbuf);
-		ASSERT(dlim == pp->pp_buflet_size);
+		ASSERT(dlim == PP_BUF_OBJ_SIZE_DEF(pp));
 	} else {
 		err = kern_packet_clone_nosleep(dph0, &dph, KPKT_COPY_LIGHT);
 		if (err != 0) {
@@ -1069,7 +1179,7 @@ feth_copy_packet(if_fake_ref dif, kern_packet_t sph, kern_packet_t *pdph)
 
 		sbuf = kern_packet_get_next_buflet(sph, sbuf);
 		VERIFY(sbuf != NULL);
-		err = kern_pbufpool_alloc_buflet_nosleep(pp, &dbuf_next);
+		err = kern_pbufpool_alloc_buflet_nosleep(pp, &dbuf_next, true);
 		if (err != 0) {
 			STATS_INC(dif->iff_nifs, NETIF_STATS_DROP);
 			STATS_INC(dif->iff_nifs, NETIF_STATS_DROP_NOMEM_BUF);
@@ -1113,6 +1223,27 @@ done:
 	return err;
 }
 
+static inline void
+feth_update_pkt_tso_metadata_for_rx(kern_packet_t ph)
+{
+	/*
+	 * Nothing to do if not a TSO offloaded packet.
+	 */
+	uint16_t seg_sz = 0;
+	(void) kern_packet_get_protocol_segment_size(ph, &seg_sz);
+	if (seg_sz == 0) {
+		return;
+	}
+	/*
+	 * For RX, make the packet appear as a fully validated LRO packet.
+	 */
+	packet_csum_flags_t csum_flags = PACKET_CSUM_IP_CHECKED |
+	    PACKET_CSUM_IP_VALID | PACKET_CSUM_DATA_VALID |
+	    PACKET_CSUM_PSEUDO_HDR;
+	(void) kern_packet_set_inet_checksum(ph, csum_flags, 0, 0xFFFF, FALSE);
+	return;
+}
+
 static void
 feth_rx_submit(if_fake_ref sif, if_fake_ref dif, kern_packet_t sphs[],
     uint32_t n_pkts)
@@ -1141,6 +1272,7 @@ feth_rx_submit(if_fake_ref sif, if_fake_ref dif, kern_packet_t sphs[],
 		case IFF_PP_MODE_GLOBAL:
 			sphs[i] = 0;
 			dph = sph;
+			feth_update_pkt_tso_metadata_for_rx(dph);
 			err = kern_packet_finalize(dph);
 			VERIFY(err == 0);
 			break;
@@ -1165,7 +1297,7 @@ feth_rx_submit(if_fake_ref sif, if_fake_ref dif, kern_packet_t sphs[],
 		if (sif->iff_fcs != 0) {
 			feth_add_packet_fcs(dph);
 		}
-
+		feth_packet_set_trace_tag(dph, IFF_TT_INPUT);
 		bpf_tap_packet_in(dif->iff_ifp, DLT_EN10MB, dph, NULL, 0);
 		stats.kcrsi_slots_transferred++;
 		stats.kcrsi_bytes_transferred
@@ -1228,6 +1360,7 @@ feth_rx_queue_submit(if_fake_ref sif, if_fake_ref dif, uint32_t llink_idx,
 		case IFF_PP_MODE_GLOBAL:
 			sphs[i] = 0;
 			dph = sph;
+			feth_update_pkt_tso_metadata_for_rx(dph);
 			break;
 		case IFF_PP_MODE_PRIVATE:
 			err = feth_copy_packet(dif, sph, &dph);
@@ -1250,7 +1383,7 @@ feth_rx_queue_submit(if_fake_ref sif, if_fake_ref dif, uint32_t llink_idx,
 		if (sif->iff_fcs != 0) {
 			feth_add_packet_fcs(dph);
 		}
-
+		feth_packet_set_trace_tag(dph, IFF_TT_INPUT);
 		bpf_tap_packet_in(dif->iff_ifp, DLT_EN10MB, dph, NULL, 0);
 
 		flags = (i == n_pkts - 1) ?
@@ -1273,6 +1406,55 @@ feth_tx_complete(if_fake_ref fakeif, kern_packet_t phs[], uint32_t nphs)
 		kern_pbufpool_free(fakeif->iff_tx_pp, phs[i]);
 		phs[i] = 0;
 	}
+}
+
+/* returns true if the packet is selected for TX error & dropped */
+static bool
+feth_tx_complete_error(if_fake_ref fakeif, kern_packet_t *ph,
+    struct netif_stats *nifs)
+{
+	int err;
+
+	if (fakeif->iff_tx_drop_rate == 0 ||
+	    fakeif->iff_tx_pkts_count != fakeif->iff_tx_drop_rate) {
+		return false;
+	}
+	/* simulate TX completion error on the packet */
+	if (fakeif->iff_tx_completion_mode == IFF_TX_COMPL_MODE_SYNC) {
+		err = kern_packet_set_tx_completion_status(*ph,
+		    CHANNEL_EVENT_PKT_TRANSMIT_STATUS_ERR_RETRY_FAILED);
+		VERIFY(err == 0);
+		kern_packet_tx_completion(*ph, fakeif->iff_ifp);
+	} else {
+		uint32_t nx_port_id = 0;
+		os_channel_event_packet_transmit_status_t pkt_tx_status = {0};
+
+		pkt_tx_status.packet_status =
+		    CHANNEL_EVENT_PKT_TRANSMIT_STATUS_ERR_RETRY_FAILED;
+		do {
+			err = kern_packet_get_packetid(*ph,
+			    &pkt_tx_status.packet_id);
+			if (err != 0) {
+				break;
+			}
+			err = kern_packet_get_tx_nexus_port_id(*ph,
+			    &nx_port_id);
+			if (err != 0) {
+				break;
+			}
+			err = kern_channel_event_transmit_status(
+				fakeif->iff_ifp, &pkt_tx_status, nx_port_id);
+		} while (0);
+		if (err != 0) {
+			FETH_DPRINTF("err %d, nx_port_id: 0x%x\n",
+			    err, nx_port_id);
+		}
+	}
+	fakeif->iff_tx_pkts_count = 0;
+	kern_pbufpool_free(fakeif->iff_tx_pp, *ph);
+	*ph = 0;
+	STATS_INC(nifs, NETIF_STATS_DROP);
+	return true;
 }
 
 static void
@@ -1301,21 +1483,24 @@ feth_if_adv(thread_call_param_t arg0, thread_call_param_t arg1)
 		    fakeif->iff_name, error);
 		goto done;
 	}
-	if_adv.version = IF_INTERFACE_ADVISORY_VERSION_CURRENT;
-	if_adv.direction = IF_INTERFACE_ADVISORY_DIRECTION_TX;
-	if_adv.timestamp = mach_absolute_time();
-	if_adv.rate_trend_suggestion =
+	if_adv.header.version = IF_INTERFACE_ADVISORY_VERSION_CURRENT;
+	if_adv.header.direction = IF_INTERFACE_ADVISORY_DIRECTION_TX;
+	if_adv.header.interface_type =
+	    IF_INTERFACE_ADVISORY_INTERFACE_TYPE_WIFI;
+	if_adv.capacity.timestamp = mach_absolute_time();
+	if_adv.capacity.rate_trend_suggestion =
 	    IF_INTERFACE_ADVISORY_RATE_SUGGESTION_RAMP_NEUTRAL;
-	if_adv.max_bandwidth = 1000 * 1000 * 1000; /* 1Gbps */
-	if_adv.total_byte_count = if_stat.packets_out;
-	if_adv.average_throughput = 1000 * 1000 * 1000; /* 1Gbps */
-	if_adv.flushable_queue_size = UINT32_MAX;
-	if_adv.non_flushable_queue_size = UINT32_MAX;
-	if_adv.average_delay = 1; /* ms */
+	if_adv.capacity.max_bandwidth = 1000 * 1000 * 1000; /* 1Gbps */
+	if_adv.capacity.total_byte_count = if_stat.packets_out;
+	if_adv.capacity.average_throughput = 1000 * 1000 * 1000; /* 1Gbps */
+	if_adv.capacity.flushable_queue_size = UINT32_MAX;
+	if_adv.capacity.non_flushable_queue_size = UINT32_MAX;
+	if_adv.capacity.average_delay = 1; /* ms */
 
-	error = fakeif->iff_intf_adv_notify(fakeif->iff_intf_adv_kern_ctx, &if_adv);
+	error = fakeif->iff_intf_adv_notify(fakeif->iff_intf_adv_kern_ctx,
+	    &if_adv);
 	if (error != 0) {
-		FETH_DPRINTF("%s: ifnet_interface_advisory_report() failed %d\n",
+		FETH_DPRINTF("%s: interface advisory report failed %d\n",
 		    fakeif->iff_name, error);
 	}
 
@@ -1697,7 +1882,6 @@ feth_nx_sync_tx(kern_nexus_provider_t nxprov,
 	}
 	tx_slot = kern_channel_get_next_slot(tx_ring, NULL, NULL);
 	while (tx_slot != NULL) {
-		errno_t err;
 		uint16_t off;
 		kern_packet_t sph;
 
@@ -1710,23 +1894,15 @@ feth_nx_sync_tx(kern_nexus_provider_t nxprov,
 		off = kern_packet_get_headroom(sph);
 		VERIFY(off >= fakeif->iff_tx_headroom);
 		kern_packet_set_link_header_length(sph, ETHER_HDR_LEN);
+		feth_packet_set_trace_tag(sph, IFF_TT_OUTPUT);
 		bpf_tap_packet_out(ifp, DLT_EN10MB, sph, NULL, 0);
 
 		/* drop packets, if requested */
 		fakeif->iff_tx_pkts_count++;
-		if (fakeif->iff_tx_drop_rate != 0 &&
-		    fakeif->iff_tx_pkts_count == fakeif->iff_tx_drop_rate) {
-			fakeif->iff_tx_pkts_count = 0;
-			err = kern_packet_set_tx_completion_status(sph,
-			    CHANNEL_EVENT_PKT_TRANSMIT_STATUS_ERR_RETRY_FAILED);
-			VERIFY(err == 0);
-			kern_packet_tx_completion(sph, fakeif->iff_ifp);
-			kern_pbufpool_free(fakeif->iff_tx_pp, sph);
-			sph = 0;
-			STATS_INC(nifs, NETIF_STATS_DROP);
+		if (feth_tx_complete_error(fakeif, &sph, nifs)) {
 			goto next_tx_slot;
 		}
-
+		ASSERT(sph != 0);
 		STATS_INC(nifs, NETIF_STATS_TX_COPY_DIRECT);
 		STATS_INC(nifs, NETIF_STATS_TX_PACKETS);
 
@@ -1935,42 +2111,112 @@ feth_nx_intf_adv_config(void *prov_ctx, bool enable)
 }
 
 static errno_t
+fill_capab_interface_advisory(if_fake_ref fakeif, void *contents, uint32_t *len)
+{
+	struct kern_nexus_capab_interface_advisory *capab = contents;
+
+	if (*len != sizeof(*capab)) {
+		return EINVAL;
+	}
+	if (capab->kncia_version !=
+	    KERN_NEXUS_CAPAB_INTERFACE_ADVISORY_VERSION_1) {
+		return EINVAL;
+	}
+	if (!feth_has_intf_advisory_configured(fakeif)) {
+		return ENOTSUP;
+	}
+	VERIFY(capab->kncia_notify != NULL);
+	fakeif->iff_intf_adv_kern_ctx = capab->kncia_kern_context;
+	fakeif->iff_intf_adv_notify = capab->kncia_notify;
+	capab->kncia_provider_context = fakeif;
+	capab->kncia_config = feth_nx_intf_adv_config;
+	return 0;
+}
+
+static errno_t
+feth_notify_steering_info(void *prov_ctx, void *qset_ctx,
+    struct ifnet_traffic_descriptor_common *td, bool add)
+{
+#pragma unused(td)
+	if_fake_ref fakeif = prov_ctx;
+	fake_qset *qset = qset_ctx;
+
+	FETH_DPRINTF("%s: notify_steering_info: qset_id 0x%llx, %s\n",
+	    fakeif->iff_name, qset->fqs_id, add ? "add" : "remove");
+	return 0;
+}
+
+static errno_t
+fill_capab_qset_extensions(if_fake_ref fakeif, void *contents, uint32_t *len)
+{
+	struct kern_nexus_capab_qset_extensions *capab = contents;
+
+	if (*len != sizeof(*capab)) {
+		return EINVAL;
+	}
+	if (capab->cqe_version !=
+	    KERN_NEXUS_CAPAB_QSET_EXTENSIONS_VERSION_1) {
+		return EINVAL;
+	}
+	capab->cqe_prov_ctx = fakeif;
+	capab->cqe_notify_steering_info = feth_notify_steering_info;
+	return 0;
+}
+
+static errno_t
 feth_nx_capab_config(kern_nexus_provider_t nxprov, kern_nexus_t nx,
     kern_nexus_capab_t capab, void *contents, uint32_t *len)
 {
 #pragma unused(nxprov)
-	errno_t error = 0;
+	errno_t error;
 	if_fake_ref fakeif;
-	struct kern_nexus_capab_interface_advisory *adv_capab;
 
 	fakeif = feth_nexus_context(nx);
 	FETH_DPRINTF("%s\n", fakeif->iff_name);
 
 	switch (capab) {
 	case KERN_NEXUS_CAPAB_INTERFACE_ADVISORY:
-		adv_capab = contents;
-		VERIFY(*len = sizeof(*adv_capab));
-		if (adv_capab->kncia_version !=
-		    KERN_NEXUS_CAPAB_INTERFACE_ADVISORY_VERSION_1) {
-			error = EINVAL;
-			break;
-		}
-		if (!feth_has_intf_advisory_configured(fakeif)) {
-			error = ENOTSUP;
-			break;
-		}
-		VERIFY(adv_capab->kncia_notify != NULL);
-		fakeif->iff_intf_adv_kern_ctx = adv_capab->kncia_kern_context;
-		fakeif->iff_intf_adv_notify = adv_capab->kncia_notify;
-		adv_capab->kncia_provider_context = fakeif;
-		adv_capab->kncia_config = feth_nx_intf_adv_config;
+		error = fill_capab_interface_advisory(fakeif, contents, len);
 		break;
-
+	case KERN_NEXUS_CAPAB_QSET_EXTENSIONS:
+		error = fill_capab_qset_extensions(fakeif, contents, len);
+		break;
 	default:
 		error = ENOTSUP;
 		break;
 	}
 	return error;
+}
+
+static int
+feth_set_tso(ifnet_t ifp)
+{
+	ifnet_offload_t offload;
+	uint32_t tso_v4_mtu, tso_v6_mtu;
+	int error;
+
+	offload = IFNET_TSO_IPV4 | IFNET_TSO_IPV6;
+	tso_v4_mtu = if_fake_tso_buffer_size;
+	tso_v6_mtu = if_fake_tso_buffer_size;
+	error = ifnet_set_offload(ifp, offload);
+	if (error != 0) {
+		printf("%s: set TSO offload failed on %s, err %d\n", __func__,
+		    if_name(ifp), error);
+		return error;
+	}
+	error = ifnet_set_tso_mtu(ifp, AF_INET, tso_v4_mtu);
+	if (error != 0) {
+		printf("%s: set TSO MTU IPv4 failed on %s, err %d\n", __func__,
+		    if_name(ifp), error);
+		return error;
+	}
+	error = ifnet_set_tso_mtu(ifp, AF_INET6, tso_v6_mtu);
+	if (error != 0) {
+		printf("%s: set TSO MTU IPv6 failed on %s, err %d\n", __func__,
+		    if_name(ifp), error);
+		return error;
+	}
+	return 0;
 }
 
 static errno_t
@@ -2057,6 +2303,11 @@ create_netif_provider_and_instance(if_fake_ref fakeif,
 		    *provider);
 		uuid_clear(*provider);
 		goto failed;
+	}
+	if (feth_supports_tso(fakeif)) {
+		if ((err = feth_set_tso(*ifp)) != 0) {
+			goto failed;
+		}
 	}
 
 failed:
@@ -2213,23 +2464,15 @@ feth_nx_tx_queue_deliver_pkt_chain(if_fake_ref fakeif, kern_packet_t sph,
 		off = kern_packet_get_headroom(sph);
 		VERIFY(off >= fakeif->iff_tx_headroom);
 		kern_packet_set_link_header_length(sph, ETHER_HDR_LEN);
+		feth_packet_set_trace_tag(sph, IFF_TT_OUTPUT);
 		bpf_tap_packet_out(fakeif->iff_ifp, DLT_EN10MB, sph, NULL, 0);
 
 		/* drop packets, if requested */
 		fakeif->iff_tx_pkts_count++;
-		if (fakeif->iff_tx_drop_rate != 0 &&
-		    fakeif->iff_tx_pkts_count == fakeif->iff_tx_drop_rate) {
-			fakeif->iff_tx_pkts_count = 0;
-			int err = kern_packet_set_tx_completion_status(sph,
-			    CHANNEL_EVENT_PKT_TRANSMIT_STATUS_ERR_RETRY_FAILED);
-			VERIFY(err == 0);
-			kern_packet_tx_completion(sph, fakeif->iff_ifp);
-			kern_pbufpool_free(fakeif->iff_tx_pp, sph);
-			sph = 0;
-			STATS_INC(nifs, NETIF_STATS_DROP);
+		if (feth_tx_complete_error(fakeif, &sph, nifs)) {
 			goto next_pkt;
 		}
-
+		ASSERT(sph != 0);
 		STATS_INC(nifs, NETIF_STATS_TX_COPY_DIRECT);
 		STATS_INC(nifs, NETIF_STATS_TX_PACKETS);
 
@@ -2308,6 +2551,17 @@ feth_nx_tx_qset_notify(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		goto done;
 	}
 
+	if (if_fake_switch_combined_mode &&
+	    qset->fqs_dequeue_cnt >= if_fake_switch_mode_frequency) {
+		if (qset->fqs_combined_mode) {
+			kern_netif_set_qset_separate(qset->fqs_qset);
+		} else {
+			kern_netif_set_qset_combined(qset->fqs_qset);
+		}
+		qset->fqs_combined_mode = !qset->fqs_combined_mode;
+		qset->fqs_dequeue_cnt = 0;
+	}
+
 	for (i = 0; i < qset->fqs_tx_queue_cnt; i++) {
 		kern_packet_t sph = 0;
 		kern_netif_queue_t queue = qset->fqs_tx_queue[i].fq_queue;
@@ -2331,12 +2585,13 @@ done:
 static void
 fill_qset_info_and_params(if_fake_ref fakeif, fake_llink *llink_info,
     uint32_t qset_idx, struct kern_nexus_netif_llink_qset_init *qset_init,
-    bool is_def)
+    bool is_def, bool is_low_latency)
 {
 	fake_qset *qset_info = &llink_info->fl_qset[qset_idx];
 
 	qset_init->nlqi_flags =
 	    (is_def ? KERN_NEXUS_NET_LLINK_QSET_DEFAULT : 0) |
+	    (is_low_latency ? KERN_NEXUS_NET_LLINK_QSET_LOW_LATENCY : 0) |
 	    KERN_NEXUS_NET_LLINK_QSET_AQM;
 
 	if (feth_in_wmm_mode(fakeif)) {
@@ -2363,10 +2618,11 @@ fill_llink_info_and_params(if_fake_ref fakeif, uint32_t llink_idx,
 {
 	fake_llink *llink_info = &fakeif->iff_llink[llink_idx];
 	uint32_t i;
+	bool create_ll_qset = if_fake_low_latency && (llink_idx != 0);
 
 	for (i = 0; i < qset_cnt; i++) {
 		fill_qset_info_and_params(fakeif, llink_info, i,
-		    &qset_init[i], i == 0);
+		    &qset_init[i], i == 0, create_ll_qset && i == 1);
 	}
 	llink_info->fl_idx = llink_idx;
 
@@ -2526,6 +2782,11 @@ create_netif_llink_provider_and_instance(if_fake_ref fakeif,
 			printf("%s create_non_default_llinks failed, %d\n",
 			    __func__, err);
 			feth_detach_netif_nexus(fakeif);
+			goto failed;
+		}
+	}
+	if (feth_supports_tso(fakeif)) {
+		if ((err = feth_set_tso(*ifp)) != 0) {
 			goto failed;
 		}
 	}
@@ -2748,7 +3009,16 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 			feth_release(fakeif);
 			return EINVAL;
 		}
+
 		fakeif->iff_pp_mode = if_fake_pktpool_mode;
+		if (if_fake_tso_support != 0) {
+			if (fakeif->iff_pp_mode != IFF_PP_MODE_GLOBAL) {
+				printf("%s: TSO mode requires global packet"
+				    " pool mode\n", __func__);
+				return EINVAL;
+			}
+			fakeif->iff_flags |= IFF_FLAGS_TSO_SUPPORT;
+		}
 
 		fakeif->iff_tx_headroom = if_fake_tx_headroom;
 		fakeif->iff_adv_interval = if_fake_if_adv_interval;
@@ -2756,6 +3026,7 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 			feth_init.flags |= IFNET_INIT_IF_ADV;
 		}
 		fakeif->iff_tx_drop_rate = if_fake_tx_drops;
+		fakeif->iff_tx_completion_mode = if_tx_completion_mode;
 	}
 	feth_init.tx_headroom = fakeif->iff_tx_headroom;
 #endif /* SKYWALK */

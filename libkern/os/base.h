@@ -243,6 +243,13 @@
 #define OS_SWIFT_UNAVAILABLE(_msg)
 #endif
 
+#if __has_attribute(__swift_attr__)
+#define OS_SWIFT_UNAVAILABLE_FROM_ASYNC(msg) \
+	__attribute__((__swift_attr__("@_unavailableFromAsync(message: \"" msg "\")")))
+#else
+#define OS_SWIFT_UNAVAILABLE_FROM_ASYNC(msg)
+#endif
+
 #if __has_attribute(swift_private)
 # define OS_REFINED_FOR_SWIFT __attribute__((__swift_private__))
 #else
@@ -361,5 +368,12 @@ typedef void (^os_block_t)(void);
 #define XNU_PTRAUTH_SIGNED_PTR OS_PTRAUTH_SIGNED_PTR
 #define XNU_PTRAUTH_SIGNED_PTR_AUTH_NULL OS_PTRAUTH_SIGNED_PTR_AUTH_NULL
 #endif // KERNEL_PRIVATE
+
+#define OS_ASSUME_PTR_ABI_SINGLE_BEGIN __ASSUME_PTR_ABI_SINGLE_BEGIN
+#define OS_ASSUME_PTR_ABI_SINGLE_END __ASSUME_PTR_ABI_SINGLE_END
+#define OS_UNSAFE_INDEXABLE __unsafe_indexable
+#define OS_HEADER_INDEXABLE __header_indexable
+#define OS_COUNTED_BY(N) __counted_by(N)
+#define OS_SIZED_BY(N) __sized_by(N)
 
 #endif // __OS_BASE__

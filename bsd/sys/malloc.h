@@ -101,7 +101,6 @@ __BEGIN_DECLS
 #define M_SONAME        11      /* socket name */
 #define M_PGRP          17      /* process group header */
 #define M_FHANDLE       21      /* network file handle */
-#define M_NFSNODE       24      /* NFS vnode private part */
 #define M_VNODE         25      /* Dynamically allocated vnodes */
 #define M_CACHE         26      /* Dynamically allocated cache entries */
 #define M_DQUOT         27      /* UFS quota entries */
@@ -113,8 +112,6 @@ __BEGIN_DECLS
 #define M_NFSSVC        50      /* NFS server structure */
 #define M_NFSD          52      /* NFS server daemon structure */
 #define M_IPMOPTS       53      /* internet multicast options */
-#define M_NFSBIO        58      /* NFS client I/O buffers */
-#define M_NFSBIGFH      61      /* NFS version 3 file handle */
 #define M_TTYS          65      /* allocated tty structures */
 #define M_OFILETABL     73      /* Open file descriptor table */
 #define M_TEMP          80      /* misc temporary data buffers */
@@ -149,7 +146,7 @@ ZONE_VIEW_DECLARE(ZV_NAMEI);
 #define M_UDFMNT        85      /* UDF mount structures (udf)*/
 #define M_KAUTH         100     /* kauth subsystem (smb) */
 
-#if PLATFORM_MacOSX
+#if XNU_PLATFORM_MacOSX
 
 #define MALLOC(space, cast, size, type, flags) \
 	(space) = (cast)_MALLOC(size, type, flags)
@@ -194,7 +191,7 @@ extern void     _FREE_ZONE(
 	size_t          size,
 	int             type);
 
-#endif /* PLATFORM_MacOSX */
+#endif /* XNU_PLATFORM_MacOSX */
 #endif /* !XNU_KERNEL_PRIVATE */
 
 __END_DECLS

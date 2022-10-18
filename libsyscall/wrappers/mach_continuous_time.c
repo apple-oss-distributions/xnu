@@ -55,6 +55,7 @@ _mach_continuous_time_base(void)
 }
 
 #define CNTVCTSS_EL0 "S3_3_c14_c0_6"
+#define ACNTVCT_EL0 "S3_4_c15_c10_6"
 
 __attribute__((visibility("hidden")))
 kern_return_t
@@ -72,6 +73,11 @@ _mach_continuous_hwclock(uint64_t *cont_time __unused)
 			return KERN_SUCCESS;
 		}
 
+		boolean_t has_acntvct = *((uint8_t*)_COMM_PAGE_USER_TIMEBASE) == USER_TIMEBASE_NOSPEC_APPLE;
+		if (has_acntvct) {
+			*cont_time = __builtin_arm_rsr64(ACNTVCT_EL0) + *base_ptr;
+			return KERN_SUCCESS;
+		}
 
 		__builtin_arm_isb(ISB_SY);
 		*cont_time = __builtin_arm_rsr64("CNTVCT_EL0") + *base_ptr;

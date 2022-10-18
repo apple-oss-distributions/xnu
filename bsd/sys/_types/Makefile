@@ -36,6 +36,7 @@ DATAFILES = \
 	_fsid_t.h \
 	_fsobj_id_t.h \
 	_gid_t.h \
+	_graftdmg_un.h \
 	_guid_t.h \
 	_id_t.h \
 	_in_addr_t.h \
@@ -109,6 +110,7 @@ DRIVERKIT_DATAFILES = \
 	_int64_t.h \
 	_int8_t.h \
 	_intptr_t.h \
+	_time_t.h \
 	_mbstate_t.h \
 	_null.h \
 	_offsetof.h \

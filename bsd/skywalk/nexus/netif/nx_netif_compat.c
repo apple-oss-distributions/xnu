@@ -150,14 +150,15 @@ struct nexus_ifnet_ops na_netif_compat_ops = {
 	.ni_finalize = na_netif_compat_finalize,
 	.ni_reap = nx_netif_reap,
 	.ni_dequeue = nx_netif_compat_tx_dequeue,
-	.ni_get_len = nx_netif_compat_tx_get_len
+	.ni_get_len = nx_netif_compat_tx_get_len,
+	.ni_detach_notify = NULL
 };
 
 #define SKMEM_TAG_NETIF_COMPAT_MIT      "com.apple.skywalk.netif.compat.mit"
-static kern_allocation_name_t skmem_tag_netif_compat_mit;
+static SKMEM_TAG_DEFINE(skmem_tag_netif_compat_mit, SKMEM_TAG_NETIF_COMPAT_MIT);
 
 #define SKMEM_TAG_NETIF_COMPAT_POOL     "com.apple.skywalk.netif.compat.pool"
-static kern_allocation_name_t skmem_tag_netif_compat_pool;
+static SKMEM_TAG_DEFINE(skmem_tag_netif_compat_pool, SKMEM_TAG_NETIF_COMPAT_POOL);
 
 void
 nx_netif_compat_init(struct nxdom *nxdom)
@@ -170,30 +171,11 @@ nx_netif_compat_init(struct nxdom *nxdom)
 	 * This is verified by the caller.
 	 */
 	(void) nxdom_prov_add(nxdom, &nx_netif_compat_prov_s);
-
-	ASSERT(skmem_tag_netif_compat_mit == NULL);
-	skmem_tag_netif_compat_mit =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_COMPAT_MIT, 0);
-	ASSERT(skmem_tag_netif_compat_mit != NULL);
-
-	ASSERT(skmem_tag_netif_compat_pool == NULL);
-	skmem_tag_netif_compat_pool =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_COMPAT_POOL, 0);
-	ASSERT(skmem_tag_netif_compat_pool != NULL);
 }
 
 void
 nx_netif_compat_fini(void)
 {
-	if (skmem_tag_netif_compat_mit != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_compat_mit);
-		skmem_tag_netif_compat_mit = NULL;
-	}
-	if (skmem_tag_netif_compat_pool != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_compat_pool);
-		skmem_tag_netif_compat_pool = NULL;
-	}
-
 	(void) nxdom_prov_del(&nx_netif_compat_prov_s);
 }
 
@@ -1133,7 +1115,7 @@ nx_netif_compat_receive(struct ifnet *ifp, struct mbuf *m_head,
 		/* END CSTYLED */
 		m_freem_list(m_head);
 		if (!NA_IS_ACTIVE(na)) {
-			STATS_ADD(nifs, NETIF_STATS_EV_DROP_NA_INACTIVE,
+			STATS_ADD(nifs, NETIF_STATS_DROP_NA_INACTIVE,
 			    s->packets_in);
 		} else if (KR_DROP(kring)) {
 			STATS_ADD(nifs, NETIF_STATS_DROP_KRDROP_MODE,
@@ -1459,7 +1441,7 @@ nx_netif_compat_na_rxsync(struct __kern_channel_ring *kring, struct proc *p,
 			STATS_INC(nifs, NETIF_STATS_RX_COPY_ATTACH);
 			err = __packet_initialize_with_mbuf(pkt, m, 0, hlen);
 			VERIFY(err == 0);
-		} else if (__probable(mlen <= (int)pp->pp_buflet_size)) {
+		} else if (__probable(mlen <= (int)PP_BUF_SIZE_DEF(pp))) {
 			STATS_INC(nifs, NETIF_STATS_RX_COPY_DIRECT);
 			/*
 			 * We're sending this up to a user channel opened

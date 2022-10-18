@@ -292,10 +292,15 @@ uint32_t speculative_prefetch_max = (MAX_UPL_SIZE_BYTES * 3);   /* maximum bytes
 uint32_t speculative_prefetch_max_iosize = (512 * 1024);        /* maximum I/O size to use in a specluative read-ahead on SSDs*/
 #endif /* ! XNU_TARGET_OS_OSX */
 
+/* maximum bytes for read-ahead */
+uint32_t prefetch_max = (1024 * 1024 * 1024);
+/* maximum bytes for outstanding reads */
+uint32_t overlapping_read_max = (1024 * 1024 * 1024);
+/* maximum bytes for outstanding writes */
+uint32_t overlapping_write_max = (1024 * 1024 * 1024);
 
 #define IO_SCALE(vp, base)              (vp->v_mount->mnt_ioscale * (base))
 #define MAX_CLUSTER_SIZE(vp)            (cluster_max_io_size(vp->v_mount, CL_WRITE))
-#define MAX_PREFETCH(vp, size, is_ssd)  (size * IO_SCALE(vp, ((is_ssd) ? PREFETCH_SSD : PREFETCH)))
 
 int     speculative_reads_disabled = 0;
 
@@ -365,8 +370,24 @@ cluster_max_io_size(mount_t mp, int type)
 	return max_io_size;
 }
 
+/*
+ * Returns max prefetch value. If the value overflows or exceeds the specified
+ * 'prefetch_limit', it will be capped at 'prefetch_limit' value.
+ */
+static inline uint32_t
+cluster_max_prefetch(vnode_t vp, uint32_t max_io_size, uint32_t prefetch_limit)
+{
+	bool is_ssd = disk_conditioner_mount_is_ssd(vp->v_mount);
+	uint32_t io_scale = IO_SCALE(vp, is_ssd ? PREFETCH_SSD : PREFETCH);
+	uint32_t prefetch = 0;
 
+	if (__improbable(os_mul_overflow(max_io_size, io_scale, &prefetch) ||
+	    (prefetch > prefetch_limit))) {
+		prefetch = prefetch_limit;
+	}
 
+	return prefetch;
+}
 
 #define CLW_ALLOCATE            0x01
 #define CLW_RETURNLOCKED        0x02
@@ -2161,11 +2182,9 @@ cluster_read_ahead(vnode_t vp, struct cl_extent *extent, off_t filesize, struct 
 
 		return;
 	}
-	max_prefetch = MAX_PREFETCH(vp, cluster_max_io_size(vp->v_mount, CL_READ), disk_conditioner_mount_is_ssd(vp->v_mount));
 
-	if (max_prefetch > speculative_prefetch_max) {
-		max_prefetch = speculative_prefetch_max;
-	}
+	max_prefetch = cluster_max_prefetch(vp,
+	    cluster_max_io_size(vp->v_mount, CL_READ), speculative_prefetch_max);
 
 	if (max_prefetch <= PAGE_SIZE) {
 		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 48)) | DBG_FUNC_END,
@@ -2353,7 +2372,7 @@ cluster_pagein_ext(vnode_t vp, upl_t upl, upl_offset_t upl_offset, off_t f_offse
 		}
 
 		if (f_offset >= filesize) {
-			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_CLUSTER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_CL_PGIN_PAST_EOF), 0 /* arg */);
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_CLUSTER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_CL_PGIN_PAST_EOF), 0 /* arg */);
 		}
 
 		return EINVAL;
@@ -2575,7 +2594,7 @@ static int
 cluster_write_direct(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, int *write_type, u_int32_t *write_length,
     int flags, int (*callback)(buf_t, void *), void *callback_arg)
 {
-	upl_t            upl;
+	upl_t            upl = NULL;
 	upl_page_info_t  *pl;
 	vm_offset_t      upl_offset;
 	vm_offset_t      vector_upl_offset = 0;
@@ -2584,7 +2603,7 @@ cluster_write_direct(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, in
 	u_int32_t        offset_in_iovbase;
 	u_int32_t        io_size;
 	int              io_flag = 0;
-	upl_size_t       upl_size, vector_upl_size = 0;
+	upl_size_t       upl_size = 0, vector_upl_size = 0;
 	vm_size_t        upl_needed_size;
 	mach_msg_type_number_t  pages_in_pl;
 	upl_control_flags_t upl_flags;
@@ -2852,7 +2871,11 @@ next_dwrite:
 		if (vp->v_mount->mnt_minsaturationbytecount) {
 			bytes_outstanding_limit = vp->v_mount->mnt_minsaturationbytecount;
 		} else {
-			bytes_outstanding_limit = max_upl_size * IO_SCALE(vp, 2);
+			if (__improbable(os_mul_overflow(max_upl_size, IO_SCALE(vp, 2),
+			    &bytes_outstanding_limit) ||
+			    (bytes_outstanding_limit > overlapping_write_max))) {
+				bytes_outstanding_limit = overlapping_write_max;
+			}
 		}
 
 		cluster_iostate_wait(&iostate, bytes_outstanding_limit, "cluster_write_direct");
@@ -4086,7 +4109,7 @@ cluster_read_copy(vnode_t vp, struct uio *uio, u_int32_t io_req_size, off_t file
 	}
 
 	max_io_size = cluster_max_io_size(vp->v_mount, CL_READ);
-	max_prefetch = MAX_PREFETCH(vp, max_io_size, disk_conditioner_mount_is_ssd(vp->v_mount));
+	max_prefetch = cluster_max_prefetch(vp, max_io_size, prefetch_max);
 	max_rd_size = max_prefetch;
 
 	last_request_offset = uio->uio_offset + io_req_size;
@@ -4690,11 +4713,11 @@ static int
 cluster_read_direct(vnode_t vp, struct uio *uio, off_t filesize, int *read_type, u_int32_t *read_length,
     int flags, int (*callback)(buf_t, void *), void *callback_arg)
 {
-	upl_t            upl;
+	upl_t            upl = NULL;
 	upl_page_info_t  *pl;
 	off_t            max_io_size;
 	vm_offset_t      upl_offset, vector_upl_offset = 0;
-	upl_size_t       upl_size, vector_upl_size = 0;
+	upl_size_t       upl_size = 0, vector_upl_size = 0;
 	vm_size_t        upl_needed_size;
 	unsigned int     pages_in_pl;
 	upl_control_flags_t upl_flags;
@@ -4736,7 +4759,11 @@ cluster_read_direct(vnode_t vp, struct uio *uio, off_t filesize, int *read_type,
 	max_upl_size = cluster_max_io_size(vp->v_mount, CL_READ);
 
 	max_rd_size = max_upl_size;
-	max_rd_ahead = max_rd_size * IO_SCALE(vp, 2);
+
+	if (__improbable(os_mul_overflow(max_rd_size, IO_SCALE(vp, 2),
+	    &max_rd_ahead) || (max_rd_ahead > overlapping_read_max))) {
+		max_rd_ahead = overlapping_read_max;
+	}
 
 	io_flag = CL_COMMIT | CL_READ | CL_ASYNC | CL_NOZERO | CL_DIRECT_IO;
 
@@ -7143,7 +7170,8 @@ vfs_drt_alloc_map(struct vfs_drt_clustermap **cmapp)
 	 * Allocate and initialise the new map.
 	 */
 
-	kret = kmem_alloc(kernel_map, (vm_offset_t *)&cmap, map_size, VM_KERN_MEMORY_FILE);
+	kret = kmem_alloc(kernel_map, (vm_offset_t *)&cmap, map_size,
+	    KMA_DATA, VM_KERN_MEMORY_FILE);
 	if (kret != KERN_SUCCESS) {
 		return kret;
 	}

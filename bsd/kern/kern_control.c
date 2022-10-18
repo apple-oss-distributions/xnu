@@ -810,7 +810,8 @@ ctl_send(struct socket *so, int flags, struct mbuf *m,
 	}
 
 	if (kcb == NULL) {      /* sanity check */
-		error = ENOTCONN;
+		m_freem(m);
+		return ENOTCONN;
 	}
 
 	lck_mtx_t *mtx_held = socket_getlock(so, PR_F_WILLUNLOCK);
@@ -854,7 +855,8 @@ ctl_send_list(struct socket *so, int flags, struct mbuf *m,
 	}
 
 	if (kcb == NULL) {      /* sanity check */
-		error = ENOTCONN;
+		m_freem_list(m);
+		return ENOTCONN;
 	}
 
 	lck_mtx_t *mtx_held = socket_getlock(so, PR_F_WILLUNLOCK);

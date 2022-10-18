@@ -5,7 +5,6 @@ OPTIONS/CONFIG_KSANCOV                 optional config_ksancov
 OPTIONS/CONFIG_STKSZ                   optional config_stksz
 
 san/memory/kasan.c                     optional config_kasan
-san/memory/kasan-fakestack.c           optional config_kasan
 san/memory/kasan-test.c                optional config_kasan
 san/memory/kasan-memintrinsics.c       optional config_kasan
 san/memory/kasan_dynamic_blacklist.c   optional config_kasan

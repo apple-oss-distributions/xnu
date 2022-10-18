@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+<!-- This is necessary to use IOTestServiceFindService. This binary is 'unentitled' in the sense that it does not have com.apple.iokit.test-check-entitlement-open -->
+        <key>com.apple.iokit.test-service-management</key>
+        <true/>
+</dict>
+</plist>

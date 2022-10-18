@@ -83,6 +83,7 @@
 #include <kern/processor.h>
 #include <kern/thread.h>
 #include <kern/task.h>
+#include <kern/restartable.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
 #include <kern/exception.h>
@@ -746,14 +747,6 @@ FALL_THROUGH:
 		}
 
 		/*
-		 * Check thread recovery address also.
-		 */
-		if (thread != THREAD_NULL && thread->recover) {
-			set_recovery_ip(saved_state, thread->recover);
-			thread->recover = 0;
-			goto common_return;
-		}
-		/*
 		 * Unanticipated page-fault errors in kernel
 		 * should not happen.
 		 *
@@ -966,6 +959,10 @@ user_trap(
 		i386_lbr_enable();
 	}
 
+	if (type == T_PAGE_FAULT) {
+		thread_reset_pcs_will_fault(thread);
+	}
+
 	pal_sti();
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
@@ -1112,8 +1109,9 @@ user_trap(
 			prot |= VM_PROT_EXECUTE;
 		}
 #if DEVELOPMENT || DEBUG
+		bool do_simd_hash = thread_fpsimd_hash_enabled();
 		uint32_t fsig = 0;
-		fsig = thread_fpsimd_hash(thread);
+		fsig = do_simd_hash ? thread_fpsimd_hash(thread) : 0;
 #if DEBUG
 		fsigs[0] = fsig;
 #endif
@@ -1123,7 +1121,7 @@ user_trap(
 		    prot, FALSE, VM_KERN_MEMORY_NONE,
 		    THREAD_ABORTSAFE, NULL, 0);
 #if DEVELOPMENT || DEBUG
-		if (fsig) {
+		if (do_simd_hash && fsig) {
 			uint32_t fsig2 = thread_fpsimd_hash(thread);
 #if DEBUG
 			fsigcs++;
@@ -1187,6 +1185,10 @@ user_trap(
 
 	default:
 		panic("Unexpected user trap, type %d", type);
+	}
+
+	if (type == T_PAGE_FAULT) {
+		thread_reset_pcs_done_faulting(thread);
 	}
 
 	if (exc != 0) {
@@ -1386,8 +1388,8 @@ copy_instruction_stream(thread_t thread, uint64_t rip, int __unused trap_code
 				task_t task = get_threadtask(thread);
 				char procnamebuf[65] = {0};
 
-				if (task->bsd_info != NULL) {
-					procname = proc_name_address(task->bsd_info);
+				if (get_bsdtask_info(task) != NULL) {
+					procname = proc_name_address(get_bsdtask_info(task));
 					strlcpy(procnamebuf, procname, sizeof(procnamebuf));
 
 					if (strcasecmp(panic_on_trap_procname, procnamebuf) == 0 &&

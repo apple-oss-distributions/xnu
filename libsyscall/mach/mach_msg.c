@@ -59,30 +59,94 @@
 #include <mach/mig_errors.h>
 #include <mach/vm_statistics.h>
 #include <TargetConditionals.h>
+#include <os/tsd.h>
+#include <machine/cpu_capabilities.h>
+
 
 extern int proc_importance_assertion_begin_with_msg(mach_msg_header_t * msg, mach_msg_trailer_t * trailer, uint64_t * assertion_handlep);
 extern int proc_importance_assertion_complete(uint64_t assertion_handle);
 
-#define MACH_MSG_TRAP(msg, opt, ssize, rsize, rname, to, not) \
-	 mach_msg_trap((msg), (opt), (ssize), (rsize), (rname), (to), (not))
+extern mach_msg_size_t voucher_mach_msg_fill_aux(mach_msg_aux_header_t *aux_hdr, mach_msg_size_t sz);
+extern boolean_t voucher_mach_msg_fill_aux_supported(void);
 
 #define LIBMACH_OPTIONS (MACH_SEND_INTERRUPT|MACH_RCV_INTERRUPT)
+#define LIBMACH_OPTIONS64 (MACH64_SEND_INTERRUPT|MACH64_RCV_INTERRUPT)
 
-static inline mach_msg_options_t
-mach_msg_options_after_interruption(mach_msg_options_t options)
+static inline mach_msg_option64_t
+mach_msg_options_after_interruption(mach_msg_option64_t option64)
 {
-	if ((options & MACH_SEND_MSG) && (options & MACH_RCV_MSG)) {
+	if ((option64 & MACH64_SEND_MSG) && (option64 & MACH64_RCV_MSG)) {
 		/*
 		 * If MACH_RCV_SYNC_WAIT was passed for a combined send-receive it must
 		 * be cleared for receive-only retries, as the kernel has no way to
 		 * discover the destination.
 		 */
-		options &= ~MACH_RCV_SYNC_WAIT;
+		option64 &= ~MACH64_RCV_SYNC_WAIT;
 	}
-	options &= ~(LIBMACH_OPTIONS | MACH_SEND_MSG);
-	return options;
+	option64 &= ~(LIBMACH_OPTIONS64 | MACH64_SEND_MSG);
+	return option64;
 }
 
+
+#if defined(__LP64__) || defined(__arm64__)
+mach_msg_return_t
+mach_msg2_internal(
+	void *data,
+	mach_msg_option64_t option64,
+	uint64_t msgh_bits_and_send_size,
+	uint64_t msgh_remote_and_local_port,
+	uint64_t msgh_voucher_and_id,
+	uint64_t desc_count_and_rcv_name,
+	uint64_t rcv_size_and_priority,
+	uint64_t timeout)
+{
+	mach_msg_return_t mr;
+
+
+	mr = mach_msg2_trap(data,
+	    option64 & ~LIBMACH_OPTIONS64,
+	    msgh_bits_and_send_size,
+	    msgh_remote_and_local_port,
+	    msgh_voucher_and_id,
+	    desc_count_and_rcv_name,
+	    rcv_size_and_priority,
+	    timeout);
+
+
+	if (mr == MACH_MSG_SUCCESS) {
+		return MACH_MSG_SUCCESS;
+	}
+
+	if ((option64 & MACH64_SEND_INTERRUPT) == 0) {
+		while (mr == MACH_SEND_INTERRUPTED) {
+			mr = mach_msg2_trap(data,
+			    option64 & ~LIBMACH_OPTIONS64,
+			    msgh_bits_and_send_size,
+			    msgh_remote_and_local_port,
+			    msgh_voucher_and_id,
+			    desc_count_and_rcv_name,
+			    rcv_size_and_priority,
+			    timeout);
+		}
+	}
+
+	if ((option64 & MACH64_RCV_INTERRUPT) == 0) {
+		while (mr == MACH_RCV_INTERRUPTED) {
+			mr = mach_msg2_trap(data,
+			    mach_msg_options_after_interruption(option64),
+			    msgh_bits_and_send_size & 0xffffffffull, /* zero send size */
+			    msgh_remote_and_local_port,
+			    msgh_voucher_and_id,
+			    desc_count_and_rcv_name,
+			    rcv_size_and_priority,
+			    timeout);
+		}
+	}
+
+	return mr;
+
+}
+#endif
 
 /*
  *	Routine:	mach_msg
@@ -102,46 +166,8 @@ mach_msg(
 	mach_msg_timeout_t timeout,
 	mach_port_t notify)
 {
-	mach_msg_return_t mr;
-
-	/*
-	 * Consider the following cases:
-	 *	1) Errors in pseudo-receive (eg, MACH_SEND_INTERRUPTED
-	 *	plus special bits).
-	 *	2) Use of MACH_SEND_INTERRUPT/MACH_RCV_INTERRUPT options.
-	 *	3) RPC calls with interruptions in one/both halves.
-	 *
-	 * We refrain from passing the option bits that we implement
-	 * to the kernel.  This prevents their presence from inhibiting
-	 * the kernel's fast paths (when it checks the option value).
-	 */
-
-	mr = MACH_MSG_TRAP(msg, option & ~LIBMACH_OPTIONS,
-	    send_size, rcv_size, rcv_name,
-	    timeout, notify);
-	if (mr == MACH_MSG_SUCCESS) {
-		return MACH_MSG_SUCCESS;
-	}
-
-	if ((option & MACH_SEND_INTERRUPT) == 0) {
-		while (mr == MACH_SEND_INTERRUPTED) {
-			mr = MACH_MSG_TRAP(msg,
-			    option & ~LIBMACH_OPTIONS,
-			    send_size, rcv_size, rcv_name,
-			    timeout, notify);
-		}
-	}
-
-	if ((option & MACH_RCV_INTERRUPT) == 0) {
-		while (mr == MACH_RCV_INTERRUPTED) {
-			mr = MACH_MSG_TRAP(msg,
-			    mach_msg_options_after_interruption(option),
-			    0, rcv_size, rcv_name,
-			    timeout, notify);
-		}
-	}
-
-	return mr;
+	return mach_msg_overwrite(msg, option, send_size, rcv_size, rcv_name,
+	           timeout, notify, NULL, 0);
 }
 
 /*
@@ -170,50 +196,120 @@ mach_msg_overwrite(
 	mach_msg_timeout_t timeout,
 	mach_port_t notify,
 	mach_msg_header_t *rcv_msg,
-	mach_msg_size_t rcv_scatter_size)
+	__unused mach_msg_size_t rcv_scatter_size)
 {
 	mach_msg_return_t mr;
 
+#if defined(__LP64__) || defined(__arm64__)
+	mach_msg_aux_header_t *aux;
+	mach_msg_vector_t vecs[2];
+
+	uint8_t inline_aux_buf[LIBSYSCALL_MSGV_AUX_MAX_SIZE];
+
+	mach_msg_priority_t priority = 0;
+	mach_msg_size_t aux_sz = 0;
+	mach_msg_option64_t option64 = (mach_msg_option64_t)option;
+
+	aux = (mach_msg_aux_header_t *)inline_aux_buf;
+
+
 	/*
-	 * Consider the following cases:
-	 *	1) Errors in pseudo-receive (eg, MACH_SEND_INTERRUPTED
-	 *	plus special bits).
-	 *	2) Use of MACH_SEND_INTERRUPT/MACH_RCV_INTERRUPT options.
-	 *	3) RPC calls with interruptions in one/both halves.
+	 * For the following cases, we have to use vector send/receive; otherwise
+	 * we can use scalar mach_msg2() for a slightly better performance due to
+	 * fewer copyio operations.
 	 *
-	 * We refrain from passing the option bits that we implement
-	 * to the kernel.  This prevents their presence from inhibiting
-	 * the kernel's fast paths (when it checks the option value).
+	 *     1. Attempting to receive voucher.
+	 *     2. Caller provides a different receive msg buffer. (scalar mach_msg2()
+	 *     does not support mach_msg_overwrite()).
+	 *     3. Libdispatch has an aux data to send.
 	 */
 
-	mr = mach_msg_overwrite_trap(msg, option & ~LIBMACH_OPTIONS,
-	    send_size, rcv_limit, rcv_name,
-	    timeout, notify, rcv_msg, rcv_scatter_size);
-	if (mr == MACH_MSG_SUCCESS) {
-		return MACH_MSG_SUCCESS;
-	}
-
-	if ((option & MACH_SEND_INTERRUPT) == 0) {
-		while (mr == MACH_SEND_INTERRUPTED) {
-			mr = mach_msg_overwrite_trap(msg,
-			    option & ~LIBMACH_OPTIONS,
-			    send_size, rcv_limit, rcv_name,
-			    timeout, notify, rcv_msg, rcv_scatter_size);
+	/*
+	 * voucher_mach_msg_fill_aux_supported() is FALSE if libsyscall is linked against
+	 * an old libdispatch (e.g. old Simulator on new system), or if we are building
+	 * Libsyscall_static due to weak linking (e.g. dyld).
+	 *
+	 * Hoist this check to guard the malloc().
+	 *
+	 * See: _libc_weak_funcptr.c
+	 */
+	if (voucher_mach_msg_fill_aux_supported() &&
+	    (option64 & MACH64_RCV_MSG) && (option64 & MACH64_RCV_VOUCHER)) {
+		option64 |= MACH64_MSG_VECTOR;
+		if (!(aux = _os_tsd_get_direct(__TSD_MACH_MSG_AUX))) {
+			aux = malloc(LIBSYSCALL_MSGV_AUX_MAX_SIZE);
+			if (aux) {
+				/* will be freed during TSD teardown */
+				_os_tsd_set_direct(__TSD_MACH_MSG_AUX, aux);
+			} else {
+				/* revert to use on stack buffer */
+				aux = (mach_msg_aux_header_t *)inline_aux_buf;
+				option64 &= ~MACH64_MSG_VECTOR;
+			}
 		}
 	}
 
-	if ((option & MACH_RCV_INTERRUPT) == 0) {
-		while (mr == MACH_RCV_INTERRUPTED) {
-			mr = mach_msg_overwrite_trap(msg,
-			    mach_msg_options_after_interruption(option),
-			    0, rcv_limit, rcv_name,
-			    timeout, notify, rcv_msg, rcv_scatter_size);
-		}
+	if ((option64 & MACH64_RCV_MSG) && rcv_msg != NULL) {
+		option64 |= MACH64_MSG_VECTOR;
+	}
+
+	if ((option64 & MACH64_SEND_MSG) &&
+	    /* this returns 0 for Libsyscall_static due to weak linking */
+	    ((aux_sz = voucher_mach_msg_fill_aux(aux, LIBSYSCALL_MSGV_AUX_MAX_SIZE)) != 0)) {
+		option64 |= MACH64_MSG_VECTOR;
+	}
+
+	if (option64 & MACH64_MSG_VECTOR) {
+		vecs[MACH_MSGV_IDX_MSG] = (mach_msg_vector_t){
+			.msgv_data = msg,
+			.msgv_rcv_addr = rcv_msg, /* if 0, just use msg as rcv address */
+			.msgv_send_size = send_size,
+			.msgv_rcv_size = rcv_limit,
+		};
+		vecs[MACH_MSGV_IDX_AUX] = (mach_msg_vector_t){
+			.msgv_data = aux,
+			.msgv_rcv_addr = 0,
+			.msgv_send_size = aux_sz,
+			.msgv_rcv_size = LIBSYSCALL_MSGV_AUX_MAX_SIZE,
+		};
+	}
+
+	if (option64 & MACH64_SEND_MSG) {
+		priority = (mach_msg_priority_t)notify;
+	}
+
+	if ((option64 & MACH64_RCV_MSG) &&
+	    !(option64 & MACH64_SEND_MSG) &&
+	    (option64 & MACH64_RCV_SYNC_WAIT)) {
+		msg->msgh_remote_port = notify;
+	}
+
+#if TARGET_OS_OSX
+	if (voucher_mach_msg_fill_aux_supported()) {
+		option64 |= MACH64_SEND_MQ_CALL;
+	} else {
+		/*
+		 * Special flag for old simulators on new system to skip mach_msg2()
+		 * CFI enforcement.
+		 */
+		option64 |= MACH64_SEND_ANY;
+	}
+#else
+	option64 |= MACH64_SEND_MQ_CALL;
+#endif /* TARGET_OS_OSX */
+
+	if (option64 & MACH64_MSG_VECTOR) {
+		mr = mach_msg2(vecs, option64, *msg, 2, 2,
+		    rcv_name, timeout, priority);
+	} else {
+		mr = mach_msg2(msg, option64, *msg, send_size,
+		    rcv_limit, rcv_name, timeout, priority);
 	}
 
 	return mr;
-}
+#endif /* defined(__LP64__) || defined(__arm64__) */
 
+}
 
 mach_msg_return_t
 mach_msg_send(mach_msg_header_t *msg)

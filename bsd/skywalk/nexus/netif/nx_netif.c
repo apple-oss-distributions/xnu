@@ -92,7 +92,7 @@
 #define NX_NETIF_RXRINGSIZE     1024    /* default RX ring size */
 #define NX_NETIF_BUFSIZE        (2 * 1024)  /* default buffer size */
 #define NX_NETIF_MINBUFSIZE     (128)  /* min buffer size */
-#define NX_NETIF_MAXBUFSIZE     (16 * 1024) /* max buffer size */
+#define NX_NETIF_MAXBUFSIZE     (32 * 1024) /* max buffer size */
 
 /*
  * TODO: adi@apple.com -- minimum buflets for now; we will need to
@@ -151,8 +151,6 @@ static int nx_netif_ctl_detach(struct kern_nexus *, struct nx_spec_req *);
 static int nx_netif_attach(struct kern_nexus *, struct ifnet *);
 static void nx_netif_flags_init(struct nx_netif *);
 static void nx_netif_flags_fini(struct nx_netif *);
-static int nx_netif_na_channel_event_notify(struct nexus_adapter *,
-    struct __kern_packet *, struct __kern_channel_event *, uint16_t);
 static void nx_netif_capabilities_fini(struct nx_netif *);
 static errno_t nx_netif_interface_advisory_notify(void *,
     const struct ifnet_interface_advisory *);
@@ -193,6 +191,11 @@ struct nxdom nx_netif_dom_s = {
 		.nb_def = NX_NETIF_BUFSIZE,
 		.nb_min = NX_NETIF_MINBUFSIZE,
 		.nb_max = NX_NETIF_MAXBUFSIZE,
+	},
+	.nxdom_large_buf_size = {
+		.nb_def = 0,
+		.nb_min = 0,
+		.nb_max = 0,
 	},
 	.nxdom_meta_size = {
 		.nb_def = NX_NETIF_UMD_SIZE,
@@ -274,11 +277,20 @@ struct nexus_ifnet_ops na_netif_ops = {
 	.ni_finalize = na_netif_finalize,
 	.ni_reap = nx_netif_reap,
 	.ni_dequeue = nx_netif_native_tx_dequeue,
-	.ni_get_len = nx_netif_native_tx_get_len
+	.ni_get_len = nx_netif_native_tx_get_len,
+	.ni_detach_notify = nx_netif_detach_notify
 };
 
 #define NX_NETIF_DOORBELL_MAX_DEQUEUE    64
 uint32_t nx_netif_doorbell_max_dequeue = NX_NETIF_DOORBELL_MAX_DEQUEUE;
+
+#define NQ_TRANSFER_DECAY       2               /* ilog2 of EWMA decay rate (4) */
+static uint32_t nq_transfer_decay = NQ_TRANSFER_DECAY;
+
+#define NQ_ACCUMULATE_INTERVAL  2 /* 2 seconds */
+static uint32_t nq_accumulate_interval = NQ_ACCUMULATE_INTERVAL;
+
+static uint32_t nq_stat_enable = 0;
 
 SYSCTL_EXTENSIBLE_NODE(_kern_skywalk, OID_AUTO, netif,
     CTLFLAG_RW | CTLFLAG_LOCKED, 0, "Skywalk network interface");
@@ -294,7 +306,17 @@ SYSCTL_UINT(_kern_skywalk_netif, OID_AUTO, doorbell_max_dequeue,
     CTLFLAG_RW | CTLFLAG_LOCKED, &nx_netif_doorbell_max_dequeue,
     NX_NETIF_DOORBELL_MAX_DEQUEUE,
     "max packets to dequeue in doorbell context");
+SYSCTL_UINT(_kern_skywalk_netif, OID_AUTO, netif_queue_transfer_decay,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &nq_transfer_decay,
+    NQ_TRANSFER_DECAY, "ilog2 of EWMA decay rate of netif queue transfers");
+SYSCTL_UINT(_kern_skywalk_netif, OID_AUTO, netif_queue_stat_accumulate_interval,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &nq_accumulate_interval,
+    NQ_ACCUMULATE_INTERVAL, "accumulation interval for netif queue stats");
 #endif /* !DEVELOPMENT && !DEBUG */
+
+SYSCTL_UINT(_kern_skywalk_netif, OID_AUTO, netif_queue_stat_enable,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &nq_stat_enable,
+    0, "enable/disable stats collection for netif queue");
 
 static ZONE_DEFINE(na_netif_zone, SKMEM_ZONE_PREFIX ".na.netif",
     sizeof(struct nexus_netif_adapter), ZC_ZFREE_CLEARMEM);
@@ -303,25 +325,29 @@ static ZONE_DEFINE(nx_netif_zone, SKMEM_ZONE_PREFIX ".nx.netif",
     sizeof(struct nx_netif), ZC_ZFREE_CLEARMEM);
 
 #define SKMEM_TAG_NETIF_MIT          "com.apple.skywalk.netif.mit"
-static kern_allocation_name_t skmem_tag_netif_mit;
+static SKMEM_TAG_DEFINE(skmem_tag_netif_mit, SKMEM_TAG_NETIF_MIT);
 
 #define SKMEM_TAG_NETIF_FILTER       "com.apple.skywalk.netif.filter"
-kern_allocation_name_t skmem_tag_netif_filter;
+SKMEM_TAG_DEFINE(skmem_tag_netif_filter, SKMEM_TAG_NETIF_FILTER);
 
 #define SKMEM_TAG_NETIF_FLOW         "com.apple.skywalk.netif.flow"
-kern_allocation_name_t skmem_tag_netif_flow;
+SKMEM_TAG_DEFINE(skmem_tag_netif_flow, SKMEM_TAG_NETIF_FLOW);
 
 #define SKMEM_TAG_NETIF_AGENT_FLOW   "com.apple.skywalk.netif.agent_flow"
-kern_allocation_name_t skmem_tag_netif_agent_flow;
+SKMEM_TAG_DEFINE(skmem_tag_netif_agent_flow, SKMEM_TAG_NETIF_AGENT_FLOW);
 
 #define SKMEM_TAG_NETIF_LLINK        "com.apple.skywalk.netif.llink"
-kern_allocation_name_t skmem_tag_netif_llink;
+SKMEM_TAG_DEFINE(skmem_tag_netif_llink, SKMEM_TAG_NETIF_LLINK);
 
 #define SKMEM_TAG_NETIF_QSET         "com.apple.skywalk.netif.qset"
-kern_allocation_name_t skmem_tag_netif_qset;
+SKMEM_TAG_DEFINE(skmem_tag_netif_qset, SKMEM_TAG_NETIF_QSET);
 
 #define SKMEM_TAG_NETIF_LLINK_INFO   "com.apple.skywalk.netif.llink_info"
-kern_allocation_name_t skmem_tag_netif_llink_info;
+SKMEM_TAG_DEFINE(skmem_tag_netif_llink_info, SKMEM_TAG_NETIF_LLINK_INFO);
+
+/* use this for any temporary allocations */
+#define SKMEM_TAG_NETIF_TEMP         "com.apple.skywalk.netif.temp"
+static SKMEM_TAG_DEFINE(skmem_tag_netif_temp, SKMEM_TAG_NETIF_TEMP);
 
 static void
 nx_netif_dom_init(struct nxdom *nxdom)
@@ -339,41 +365,6 @@ nx_netif_dom_init(struct nxdom *nxdom)
 
 	(void) nxdom_prov_add(nxdom, &nx_netif_prov_s);
 
-	ASSERT(skmem_tag_netif_mit == NULL);
-	skmem_tag_netif_mit =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_MIT, 0);
-	ASSERT(skmem_tag_netif_mit != NULL);
-
-	ASSERT(skmem_tag_netif_filter == NULL);
-	skmem_tag_netif_filter =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_FILTER, 0);
-	ASSERT(skmem_tag_netif_filter != NULL);
-
-	ASSERT(skmem_tag_netif_flow == NULL);
-	skmem_tag_netif_flow =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_FLOW, 0);
-	ASSERT(skmem_tag_netif_flow != NULL);
-
-	ASSERT(skmem_tag_netif_agent_flow == NULL);
-	skmem_tag_netif_agent_flow =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_AGENT_FLOW, 0);
-	ASSERT(skmem_tag_netif_agent_flow != NULL);
-
-	ASSERT(skmem_tag_netif_llink == NULL);
-	skmem_tag_netif_llink =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_LLINK, 0);
-	ASSERT(skmem_tag_netif_llink != NULL);
-
-	ASSERT(skmem_tag_netif_qset == NULL);
-	skmem_tag_netif_qset =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_QSET, 0);
-	ASSERT(skmem_tag_netif_qset != NULL);
-
-	ASSERT(skmem_tag_netif_llink_info == NULL);
-	skmem_tag_netif_llink_info =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_LLINK_INFO, 0);
-	ASSERT(skmem_tag_netif_llink_info != NULL);
-
 	nx_netif_compat_init(nxdom);
 
 	ASSERT(nxdom_prov_default[nxdom->nxdom_type] != NULL &&
@@ -381,7 +372,6 @@ nx_netif_dom_init(struct nxdom *nxdom)
 	    NEXUS_PROVIDER_NET_IF_COMPAT) == 0);
 
 	netif_gso_init();
-	nx_netif_llink_module_init();
 }
 
 static void
@@ -391,38 +381,8 @@ nx_netif_dom_terminate(struct nxdom *nxdom)
 
 	SK_LOCK_ASSERT_HELD();
 
-	nx_netif_llink_module_fini();
 	netif_gso_fini();
 	nx_netif_compat_fini();
-
-	if (skmem_tag_netif_llink_info != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_llink_info);
-		skmem_tag_netif_llink_info = NULL;
-	}
-	if (skmem_tag_netif_qset != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_qset);
-		skmem_tag_netif_qset = NULL;
-	}
-	if (skmem_tag_netif_llink != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_llink);
-		skmem_tag_netif_llink = NULL;
-	}
-	if (skmem_tag_netif_agent_flow != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_agent_flow);
-		skmem_tag_netif_agent_flow = NULL;
-	}
-	if (skmem_tag_netif_flow != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_flow);
-		skmem_tag_netif_flow = NULL;
-	}
-	if (skmem_tag_netif_filter != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_filter);
-		skmem_tag_netif_filter = NULL;
-	}
-	if (skmem_tag_netif_mit != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_mit);
-		skmem_tag_netif_mit = NULL;
-	}
 
 	STAILQ_FOREACH_SAFE(nxdom_prov, &nxdom->nxdom_prov_head,
 	    nxdom_prov_link, tnxdp) {
@@ -583,10 +543,6 @@ nx_netif_prov_params_adjust(const struct kern_nexus_domain_provider *nxdom_prov,
 			VERIFY(ifp != NULL);
 			nx_netif_compat_adjust_ring_size(adj, ifp);
 		}
-		if (adj->adj_buf_srp->srp_r_seg_size == 0) {
-			adj->adj_buf_srp->srp_r_seg_size =
-			    skmem_usr_buf_seg_size;
-		}
 	} else { /* netif native */
 		if (nxp->nxp_flags & NXPF_NETIF_LLINK) {
 			*(adj->adj_tx_slots) = NX_NETIF_MINSLOTS;
@@ -611,20 +567,20 @@ nx_netif_prov_params_adjust(const struct kern_nexus_domain_provider *nxdom_prov,
 		*(adj->adj_nexusadv_size) = sizeof(struct netif_nexus_advisory);
 	}
 done:
-	/* enable magazines layer for metadata */
-	*(adj->adj_md_magazines) = TRUE;
 	return 0;
 }
 
 int
 nx_netif_prov_params(struct kern_nexus_domain_provider *nxdom_prov,
     const uint32_t req, const struct nxprov_params *nxp0,
-    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS])
+    struct nxprov_params *nxp, struct skmem_region_params srp[SKMEM_REGIONS],
+    uint32_t pp_region_config_flags)
 {
 	struct nxdom *nxdom = nxdom_prov->nxdom_prov_dom;
 
 	return nxprov_params_adjust(nxdom_prov, req, nxp0, nxp, srp,
-	           nxdom, nxdom, nxdom, nx_netif_prov_params_adjust);
+	           nxdom, nxdom, nxdom, pp_region_config_flags,
+	           nx_netif_prov_params_adjust);
 }
 
 int
@@ -633,9 +589,8 @@ nx_netif_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 {
 #pragma unused(nxdom_prov)
 	int err = 0;
-	boolean_t pp_truncated_buf = FALSE;
 	boolean_t allow_direct;
-	boolean_t kernel_only;
+	uint32_t pp_flags = 0;
 
 	SK_DF(SK_VERB_NETIF,
 	    "nx 0x%llx (\"%s\":\"%s\") na \"%s\" (0x%llx)", SK_KVA(nx),
@@ -645,7 +600,7 @@ nx_netif_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	ASSERT(na->na_arena == NULL);
 	if ((na->na_type == NA_NETIF_COMPAT_DEV) ||
 	    (na->na_type == NA_NETIF_COMPAT_HOST)) {
-		pp_truncated_buf = TRUE;
+		pp_flags |= SKMEM_PP_FLAG_TRUNCATED_BUF;
 	}
 	/*
 	 * We do this check to determine whether to create the extra
@@ -660,10 +615,12 @@ nx_netif_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	 * gets stored in the nexus, which will then be used by any
 	 * subsequent opens.
 	 */
-	kernel_only = !allow_direct || !NX_USER_CHANNEL_PROV(nx);
+	if (!allow_direct || !NX_USER_CHANNEL_PROV(nx)) {
+		pp_flags |= SKMEM_PP_FLAG_KERNEL_ONLY;
+	}
 	na->na_arena = skmem_arena_create_for_nexus(na,
 	    NX_PROV(nx)->nxprov_region_params, &nx->nx_tx_pp,
-	    &nx->nx_rx_pp, pp_truncated_buf, kernel_only, &nx->nx_adv, &err);
+	    &nx->nx_rx_pp, pp_flags, &nx->nx_adv, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 	ASSERT(nx->nx_tx_pp == NULL || (nx->nx_tx_pp->pp_md_type ==
 	    NX_DOM(nx)->nxdom_md_type && nx->nx_tx_pp->pp_md_subtype ==
@@ -1019,6 +976,71 @@ __netif_mib_get_llinks(struct kern_nexus *nx, void *out, size_t len)
 	return actual_space;
 }
 
+static size_t
+__netif_mib_get_queue_stats(struct kern_nexus *nx, void *out, size_t len)
+{
+	struct nx_netif *nif = NX_NETIF_PRIVATE(nx);
+	uint8_t *itr = out;
+	size_t actual_space = 0;
+	if (!NETIF_LLINK_ENABLED(nif)) {
+		return actual_space;
+	}
+
+	lck_rw_lock_shared(&nif->nif_llink_lock);
+	struct netif_llink *llink;
+	struct netif_qset *qset;
+	STAILQ_FOREACH(llink, &nif->nif_llink_list, nll_link) {
+		SLIST_FOREACH(qset, &llink->nll_qset_list, nqs_list) {
+			actual_space += sizeof(struct netif_qstats_info) *
+			    (qset->nqs_num_rx_queues + qset->nqs_num_tx_queues);
+		}
+	}
+	if (out == NULL || actual_space > len) {
+		lck_rw_unlock_shared(&nif->nif_llink_lock);
+		return actual_space;
+	}
+
+	llink = NULL;
+	qset = NULL;
+	uint16_t i = 0, j = 0;
+	STAILQ_FOREACH(llink, &nif->nif_llink_list, nll_link) {
+		uint16_t qset_cnt;
+		j = 0;
+		qset_cnt = llink->nll_qset_cnt;
+		ASSERT(qset_cnt <= NETIF_LLINK_MAX_QSETS);
+		SLIST_FOREACH(qset, &llink->nll_qset_list, nqs_list) {
+			int queue_cnt = qset->nqs_num_rx_queues +
+			    qset->nqs_num_tx_queues;
+			for (uint16_t k = 0; k < queue_cnt; k++) {
+				struct netif_qstats_info *nqi =
+				    (struct netif_qstats_info *)(void *)itr;
+				struct netif_queue *nq = &qset->nqs_driver_queues[k];
+				nqi->nqi_qset_id = qset->nqs_id;
+				nqi->nqi_queue_idx = k;
+				if (KPKT_VALID_SVC(nq->nq_svc)) {
+					nqi->nqi_svc = nq->nq_svc;
+				}
+				if (nq->nq_flags & NETIF_QUEUE_IS_RX) {
+					nqi->nqi_queue_flag = NQI_QUEUE_FLAG_IS_RX;
+				}
+
+				struct netif_qstats *nq_out = &nqi->nqi_stats;
+				struct netif_qstats *nq_src = &nq->nq_stats;
+				memcpy(nq_out, nq_src, sizeof(struct netif_qstats));
+
+				itr += sizeof(struct netif_qstats_info);
+			}
+			j++;
+		}
+		ASSERT(j == qset_cnt);
+		i++;
+	}
+	ASSERT(i == nif->nif_llink_cnt);
+
+	lck_rw_unlock_shared(&nif->nif_llink_lock);
+	return actual_space;
+}
+
 size_t
 nx_netif_prov_nx_mib_get(struct kern_nexus *nx, struct nexus_mib_filter *filter,
     void *out, size_t len, struct proc *p)
@@ -1037,6 +1059,9 @@ nx_netif_prov_nx_mib_get(struct kern_nexus *nx, struct nexus_mib_filter *filter,
 		break;
 	case NXMIB_LLINK_LIST:
 		ret = __netif_mib_get_llinks(nx, out, len);
+		break;
+	case NXMIB_NETIF_QUEUE_STATS:
+		ret = __netif_mib_get_queue_stats(nx, out, len);
 		break;
 	default:
 		ret = 0;
@@ -1065,7 +1090,8 @@ nx_netif_dom_bind_port(struct kern_nexus *nx, nexus_port_t *nx_port,
 	 *                    return back the assigned port.
 	 */
 	first = NEXUS_PORT_NET_IF_CLIENT;
-	last = NXDOM_MAX(NX_DOM(nx), ports);
+	ASSERT(NXDOM_MAX(NX_DOM(nx), ports) <= NEXUS_PORT_MAX);
+	last = (nexus_port_size_t)NXDOM_MAX(NX_DOM(nx), ports);
 	ASSERT(first <= last);
 
 	NETIF_WLOCK(nif);
@@ -1224,7 +1250,8 @@ nx_netif_dom_defunct(struct kern_nexus_domain_provider *nxdom_prov,
 	ASSERT(ch->ch_na->na_type == NA_NETIF_DEV ||
 	    ch->ch_na->na_type == NA_NETIF_HOST ||
 	    ch->ch_na->na_type == NA_NETIF_COMPAT_DEV ||
-	    ch->ch_na->na_type == NA_NETIF_COMPAT_HOST);
+	    ch->ch_na->na_type == NA_NETIF_COMPAT_HOST ||
+	    ch->ch_na->na_type == NA_NETIF_VP);
 
 	na_ch_rings_defunct(ch, p);
 }
@@ -1234,6 +1261,8 @@ nx_netif_dom_defunct_finalize(struct kern_nexus_domain_provider *nxdom_prov,
     struct kern_nexus *nx, struct kern_channel *ch, boolean_t locked)
 {
 #pragma unused(nxdom_prov)
+	struct ifnet *ifp;
+
 	if (!locked) {
 		SK_LOCK_ASSERT_NOTHELD();
 		SK_LOCK();
@@ -1246,10 +1275,22 @@ nx_netif_dom_defunct_finalize(struct kern_nexus_domain_provider *nxdom_prov,
 	ASSERT(ch->ch_na->na_type == NA_NETIF_DEV ||
 	    ch->ch_na->na_type == NA_NETIF_HOST ||
 	    ch->ch_na->na_type == NA_NETIF_COMPAT_DEV ||
-	    ch->ch_na->na_type == NA_NETIF_COMPAT_HOST);
+	    ch->ch_na->na_type == NA_NETIF_COMPAT_HOST ||
+	    ch->ch_na->na_type == NA_NETIF_VP);
 
 	na_defunct(nx, ch, ch->ch_na, locked);
-
+	ifp = ch->ch_na->na_ifp;
+	if (ch->ch_na->na_type == NA_NETIF_VP && ifp != NULL &&
+	    ifnet_is_low_latency(ifp)) {
+		/*
+		 * We release the VPNA's ifp here instead of waiting for the
+		 * application to close the channel to trigger the release.
+		 */
+		DTRACE_SKYWALK2(release__vpna__ifp, struct nexus_adapter *,
+		    ch->ch_na, struct ifnet *, ifp);
+		ifnet_decr_iorefcnt(ifp);
+		ch->ch_na->na_ifp = NULL;
+	}
 	SK_D("%s(%d): ch 0x%llx -/- nx 0x%llx (%s:\"%s\":%u:%d)",
 	    ch->ch_name, ch->ch_pid, SK_KVA(ch), SK_KVA(nx),
 	    nxdom_prov->nxdom_prov_name, ch->ch_na->na_name,
@@ -1380,6 +1421,61 @@ done:
 	return err;
 }
 
+SK_NO_INLINE_ATTRIBUTE
+static int
+nx_netif_clean(struct nx_netif *nif, boolean_t quiesce_needed)
+{
+	struct kern_nexus *nx = nif->nif_nx;
+	struct ifnet *ifp;
+	boolean_t suspended = FALSE;
+
+	ifp = nif->nif_ifp;
+	if (ifp == NULL) {
+		return EALREADY;
+	}
+	/*
+	 * For regular kernel-attached interfaces, quiescing is handled by
+	 * the ifnet detach thread, which calls dlil_quiesce_and_detach_nexuses().
+	 * For interfaces created by skywalk test cases, flowswitch/netif nexuses
+	 * are constructed on the fly and can also be torn down on the fly.
+	 * dlil_quiesce_and_detach_nexuses() won't help here because any nexus
+	 * can be detached while the interface is still attached.
+	 */
+	if (quiesce_needed && ifnet_datamov_suspend_if_needed(ifp)) {
+		SK_UNLOCK();
+		suspended = TRUE;
+		ifnet_datamov_drain(ifp);
+		SK_LOCK();
+	}
+	nx_netif_agent_fini(nif);
+	nx_netif_capabilities_fini(nif);
+	nx_netif_flow_fini(nif);
+	nx_netif_filter_fini(nif);
+	nx_netif_llink_fini(nif);
+	nx_netif_flags_fini(nif);
+
+	uuid_clear(nif->nif_uuid);
+	/* nx_netif_{compat_}attach() held both references */
+	na_release_locked(nx_port_get_na(nx, NEXUS_PORT_NET_IF_DEV));
+	na_release_locked(nx_port_get_na(nx, NEXUS_PORT_NET_IF_HOST));
+	nx_port_free(nx, NEXUS_PORT_NET_IF_DEV);
+	nx_port_free(nx, NEXUS_PORT_NET_IF_HOST);
+
+	ifp->if_na_ops = NULL;
+	ifp->if_na = NULL;
+	nif->nif_ifp = NULL;
+	nif->nif_netif_nxadv = NULL;
+	SKYWALK_CLEAR_CAPABLE(ifp);
+	if (suspended) {
+		ifnet_datamov_resume(ifp);
+	}
+
+#if (DEVELOPMENT || DEBUG)
+	skoid_destroy(&nif->nif_skoid);
+#endif /* !DEVELOPMENT && !DEBUG */
+	return 0;
+}
+
 /* process NXCFG_CMD_DETACH */
 SK_NO_INLINE_ATTRIBUTE
 static int
@@ -1412,56 +1508,9 @@ nx_netif_ctl_detach(struct kern_nexus *nx, struct nx_spec_req *nsr)
 		 */
 		err = EBUSY;
 	} else {
-		struct ifnet *ifp;
-		boolean_t suspended = FALSE;
-
-		ifp = nif->nif_ifp;
-		if (ifp == NULL) {
-			err = EALREADY;
-			goto done;
-		}
-		/*
-		 * For regular kernel-attached interfaces, quiescing is handled by
-		 * the ifnet detach thread, which calls dlil_quiesce_and_detach_nexuses().
-		 * For interfaces created by skywalk test cases, flowswitch/netif nexuses
-		 * are constructed on the fly and can also be torn down on the fly.
-		 * dlil_quiesce_and_detach_nexuses() won't help here because any nexus
-		 * can be detached while the interface is still attached.
-		 */
-		if (ifnet_datamov_suspend_if_needed(ifp)) {
-			SK_UNLOCK();
-			suspended = TRUE;
-			ifnet_datamov_drain(ifp);
-			SK_LOCK();
-		}
-		nx_netif_agent_fini(nif);
-		nx_netif_capabilities_fini(nif);
-		nx_netif_flow_fini(nif);
-		nx_netif_filter_fini(nif);
-		nx_netif_llink_fini(nif);
-		nx_netif_flags_fini(nif);
-
-		uuid_clear(nif->nif_uuid);
-		/* nx_netif_{compat_}attach() held both references */
-		na_release_locked(nx_port_get_na(nx, NEXUS_PORT_NET_IF_DEV));
-		na_release_locked(nx_port_get_na(nx, NEXUS_PORT_NET_IF_HOST));
-		nx_port_free(nx, NEXUS_PORT_NET_IF_DEV);
-		nx_port_free(nx, NEXUS_PORT_NET_IF_HOST);
-
-		ifp->if_na_ops = NULL;
-		ifp->if_na = NULL;
-		nif->nif_ifp = NULL;
-		nif->nif_netif_nxadv = NULL;
-		SKYWALK_CLEAR_CAPABLE(ifp);
-		if (suspended) {
-			ifnet_datamov_resume(ifp);
-		}
-
-#if (DEVELOPMENT || DEBUG)
-		skoid_destroy(&nif->nif_skoid);
-#endif /* !DEVELOPMENT && !DEBUG */
+		err = nx_netif_clean(nif, TRUE);
 	}
-done:
+
 #if SK_LOG
 	if (nsr != NULL) {
 		uuid_string_t ifuuidstr;
@@ -1986,24 +2035,13 @@ nx_netif_mit_config(struct nexus_netif_adapter *nifna,
 		break;
 	case SK_NETIF_MIT_AUTO:
 		*rx_mit_simple = TRUE;
-#if !XNU_TARGET_OS_OSX
 		/*
-		 * On non-macOS platforms, enable RX mitigation
-		 * thread only for BSD-style virtual (and regular)
-		 * interfaces, since otherwise we may run out of
-		 * stack when subjected to IPsec processing, etc.
+		 * Enable RX mitigation thread only for BSD-style virtual (and
+		 * regular) interfaces, since otherwise we may run out of stack
+		 * when subjected to IPsec processing, etc.
 		 */
 		*rx_mit = (NX_PROV(nifna->nifna_up.na_nx)->nxprov_flags &
 		    NXPROVF_VIRTUAL_DEVICE) && !NETIF_IS_LOW_LATENCY(nif);
-#else /* XNU_TARGET_OS_OSX */
-		/*
-		 * On macOS platform, enable RX mitigation on all but
-		 * low-latency interfaces, since we could potentially
-		 * have filter providers, etc.  Ideally this should
-		 * be detected and dealt with dynamically.
-		 */
-		*rx_mit = !NETIF_IS_LOW_LATENCY(nif);
-#endif /* XNU_TARGET_OS_OSX */
 		break;
 	default:
 		VERIFY(0);
@@ -2253,7 +2291,6 @@ __attribute__((optnone))
 		devna->na_ifp = ifp;
 	}
 	devna->na_activate = nx_netif_na_activate;
-	devna->na_channel_event_notify = nx_netif_na_channel_event_notify;
 	devna->na_txsync = nx_netif_na_txsync;
 	devna->na_rxsync = nx_netif_na_rxsync;
 	devna->na_dtor = nx_netif_na_dtor;
@@ -2537,13 +2574,114 @@ nx_netif_flags_fini(struct nx_netif *nif)
 }
 
 static void
-nx_netif_capabilities_init(struct nx_netif *nif)
+configure_capab_interface_advisory(struct nx_netif *nif,
+    nxprov_capab_config_fn_t capab_fn)
 {
-	struct kern_nexus_capab_interface_advisory kncia;
+	struct kern_nexus_capab_interface_advisory capab;
 	struct kern_nexus *nx = nif->nif_nx;
-	nxprov_capab_config_fn_t capab_fn;
 	uint32_t capab_len;
 	int error;
+
+	/* check/configure interface advisory notifications */
+	if ((nif->nif_ifp->if_eflags & IFEF_ADV_REPORT) == 0) {
+		return;
+	}
+	bzero(&capab, sizeof(capab));
+	capab.kncia_version =
+	    KERN_NEXUS_CAPAB_INTERFACE_ADVISORY_VERSION_1;
+	*__DECONST(kern_nexus_capab_interface_advisory_notify_fn_t *,
+	    &(capab.kncia_notify)) = nx_netif_interface_advisory_notify;
+	*__DECONST(void **, &(capab.kncia_kern_context)) = nx;
+	capab_len = sizeof(capab);
+	error = capab_fn(NX_PROV(nx), nx,
+	    KERN_NEXUS_CAPAB_INTERFACE_ADVISORY, &capab, &capab_len);
+	if (error != 0) {
+		DTRACE_SKYWALK2(interface__advisory__capab__error,
+		    struct nx_netif *, nif, int, error);
+		return;
+	}
+	VERIFY(capab.kncia_config != NULL);
+	VERIFY(capab.kncia_provider_context != NULL);
+	nif->nif_intf_adv_config = capab.kncia_config;
+	nif->nif_intf_adv_prov_ctx = capab.kncia_provider_context;
+	nif->nif_extended_capabilities |= NETIF_CAPAB_INTERFACE_ADVISORY;
+}
+
+static void
+unconfigure_capab_interface_advisory(struct nx_netif *nif)
+{
+	if ((nif->nif_extended_capabilities & NETIF_CAPAB_INTERFACE_ADVISORY) == 0) {
+		return;
+	}
+	nif->nif_intf_adv_config = NULL;
+	nif->nif_intf_adv_prov_ctx = NULL;
+	nif->nif_extended_capabilities &= ~NETIF_CAPAB_INTERFACE_ADVISORY;
+}
+
+static void
+configure_capab_qset_extensions(struct nx_netif *nif,
+    nxprov_capab_config_fn_t capab_fn)
+{
+	struct kern_nexus_capab_qset_extensions capab;
+	struct kern_nexus *nx = nif->nif_nx;
+	uint32_t capab_len;
+	int error;
+
+	if (!NX_LLINK_PROV(nx)) {
+		DTRACE_SKYWALK1(not__llink__prov, struct nx_netif *, nif);
+		return;
+	}
+	bzero(&capab, sizeof(capab));
+	capab.cqe_version = KERN_NEXUS_CAPAB_QSET_EXTENSIONS_VERSION_1;
+	capab_len = sizeof(capab);
+	error = capab_fn(NX_PROV(nx), nx,
+	    KERN_NEXUS_CAPAB_QSET_EXTENSIONS, &capab, &capab_len);
+	if (error != 0) {
+		DTRACE_SKYWALK2(qset__extensions__capab__error,
+		    struct nx_netif *, nif, int, error);
+		return;
+	}
+	VERIFY(capab.cqe_notify_steering_info != NULL);
+	VERIFY(capab.cqe_prov_ctx != NULL);
+	nif->nif_qset_extensions.qe_notify_steering_info =
+	    capab.cqe_notify_steering_info;
+	nif->nif_qset_extensions.qe_prov_ctx = capab.cqe_prov_ctx;
+	nif->nif_extended_capabilities |= NETIF_CAPAB_QSET_EXTENSIONS;
+}
+
+static void
+unconfigure_capab_qset_extensions(struct nx_netif *nif)
+{
+	if ((nif->nif_extended_capabilities & NETIF_CAPAB_QSET_EXTENSIONS) == 0) {
+		return;
+	}
+	bzero(&nif->nif_qset_extensions, sizeof(nif->nif_qset_extensions));
+	nif->nif_extended_capabilities &= ~NETIF_CAPAB_QSET_EXTENSIONS;
+}
+
+int
+nx_netif_notify_steering_info(struct nx_netif *nif, struct netif_qset *qset,
+    struct ifnet_traffic_descriptor_common *td, bool add)
+{
+	struct netif_qset_extensions *qset_ext;
+	int err;
+
+	if ((nif->nif_extended_capabilities & NETIF_CAPAB_QSET_EXTENSIONS) == 0) {
+		return ENOTSUP;
+	}
+	qset_ext = &nif->nif_qset_extensions;
+	VERIFY(qset_ext->qe_prov_ctx != NULL);
+	VERIFY(qset_ext->qe_notify_steering_info != NULL);
+	err = qset_ext->qe_notify_steering_info(qset_ext->qe_prov_ctx,
+	    qset->nqs_ctx, td, add);
+	return err;
+}
+
+static void
+nx_netif_capabilities_init(struct nx_netif *nif)
+{
+	struct kern_nexus *nx = nif->nif_nx;
+	nxprov_capab_config_fn_t capab_fn;
 
 	if ((NX_PROV(nx)->nxprov_netif_ext.nxnpi_version) ==
 	    KERN_NEXUS_PROVIDER_VERSION_NETIF) {
@@ -2555,32 +2693,31 @@ nx_netif_capabilities_init(struct nx_netif *nif)
 	if (capab_fn == NULL) {
 		return;
 	}
-	/* check/configure interface advisory notifications */
-	if ((nif->nif_ifp->if_eflags & IFEF_ADV_REPORT) != 0) {
-		bzero(&kncia, sizeof(kncia));
-		kncia.kncia_version =
-		    KERN_NEXUS_CAPAB_INTERFACE_ADVISORY_VERSION_1;
-		*__DECONST(kern_nexus_capab_interface_advisory_notify_fn_t *,
-		    &(kncia.kncia_notify)) = nx_netif_interface_advisory_notify;
-		*__DECONST(void **, &(kncia.kncia_kern_context)) = nx;
-		capab_len = sizeof(kncia);
-		error = capab_fn(NX_PROV(nx), nx,
-		    KERN_NEXUS_CAPAB_INTERFACE_ADVISORY, &kncia, &capab_len);
-		if (error == 0) {
-			VERIFY(kncia.kncia_config != NULL);
-			VERIFY(kncia.kncia_provider_context != NULL);
-			nif->nif_intf_adv_config = kncia.kncia_config;
-			nif->nif_intf_adv_prov_ctx =
-			    kncia.kncia_provider_context;
-		}
-	}
+	configure_capab_interface_advisory(nif, capab_fn);
+	configure_capab_qset_extensions(nif, capab_fn);
 }
 
 static void
 nx_netif_capabilities_fini(struct nx_netif *nif)
 {
-	nif->nif_intf_adv_config = NULL;
-	nif->nif_intf_adv_prov_ctx = NULL;
+	unconfigure_capab_interface_advisory(nif);
+	unconfigure_capab_qset_extensions(nif);
+}
+
+static void
+nx_netif_verify_tso_config(struct nx_netif *nif, struct ifnet *ifp)
+{
+	uint32_t tso_v4_mtu = 0;
+	uint32_t tso_v6_mtu = 0;
+
+	if ((nif->nif_hwassist & IFNET_TSO_IPV4) != 0) {
+		tso_v4_mtu = ifp->if_tso_v4_mtu;
+	}
+	if ((nif->nif_hwassist & IFNET_TSO_IPV6) != 0) {
+		tso_v6_mtu = ifp->if_tso_v6_mtu;
+	}
+	VERIFY(PP_BUF_SIZE_DEF(nif->nif_nx->nx_tx_pp) >=
+	    max(tso_v4_mtu, tso_v6_mtu));
 }
 
 void
@@ -2619,6 +2756,9 @@ na_netif_finalize(struct nexus_netif_adapter *nifna, struct ifnet *ifp)
 	nx_netif_flow_init(nif);
 	nx_netif_capabilities_init(nif);
 	nx_netif_agent_init(nif);
+	(void) nxctl_inet_traffic_rule_get_count(ifp->if_xname,
+	    &ifp->if_traffic_rule_count);
+	nx_netif_verify_tso_config(nif, ifp);
 }
 
 void
@@ -2665,6 +2805,117 @@ nx_netif_reap(struct nexus_netif_adapter *nifna, struct ifnet *ifp,
 	 * Reap any caches configured for classq.
 	 */
 	ifclassq_reap_caches(purge);
+}
+
+/*
+ * The purpose of this callback is to forceably remove resources held by VPNAs
+ * in event of an interface detach. Without this callback an application can
+ * prevent the detach from completing indefinitely. Note that this is only needed
+ * for low latency VPNAs. Userspace do get notified about interface detach events
+ * for other NA types (custom ether and filter) and will do the necessary cleanup.
+ * The cleanup is done in two phases:
+ * 1) VPNAs channels are defuncted. This releases the resources held by VPNAs and
+ *    causes the device channel to be closed. All ifnet references held by VPNAs
+ *    are also released.
+ * 2) This cleans up the netif nexus and releases the two remaining ifnet
+ *    references held by the device and host ports (nx_netif_clean()).
+ */
+void
+nx_netif_detach_notify(struct nexus_netif_adapter *nifna)
+{
+	struct nx_netif *nif = nifna->nifna_netif;
+	struct kern_nexus *nx = nif->nif_nx;
+	struct kern_channel **ch_list = NULL;
+	struct kern_channel *ch;
+	int err, i, all_ch_cnt = 0, vp_ch_cnt = 0;
+	struct proc *p;
+
+	ASSERT(NETIF_IS_LOW_LATENCY(nif));
+	/*
+	 * kern_channel_defunct() requires sk_lock to be not held. We
+	 * will first find the list of channels we want to defunct and
+	 * then call kern_channel_defunct() on each of them. The number
+	 * of channels cannot increase after sk_lock is released since
+	 * this interface is being detached.
+	 */
+	SK_LOCK();
+	all_ch_cnt = nx->nx_ch_count;
+	if (all_ch_cnt == 0) {
+		DTRACE_SKYWALK1(no__channel, struct kern_nexus *, nx);
+		SK_UNLOCK();
+		return;
+	}
+	ch_list = sk_alloc_type_array(struct kern_channel *, all_ch_cnt,
+	    Z_WAITOK | Z_NOFAIL, skmem_tag_netif_temp);
+
+	STAILQ_FOREACH(ch, &nx->nx_ch_head, ch_link) {
+		struct nexus_adapter *na = ch->ch_na;
+
+		if (na != NULL && na->na_type == NA_NETIF_VP) {
+			ASSERT(vp_ch_cnt < all_ch_cnt);
+
+			/* retain channel to prevent it from being freed */
+			ch_retain_locked(ch);
+			ch_list[vp_ch_cnt] = ch;
+			DTRACE_SKYWALK3(vp__ch__found, struct kern_nexus *, nx,
+			    struct kern_channel *, ch, struct nexus_adapter *, na);
+			vp_ch_cnt++;
+		}
+	}
+	if (vp_ch_cnt == 0) {
+		DTRACE_SKYWALK1(vp__ch__not__found, struct kern_nexus *, nx);
+		sk_free_type_array(struct kern_channel *, all_ch_cnt, ch_list);
+		SK_UNLOCK();
+		return;
+	}
+	/* prevents the netif from being freed */
+	nx_netif_retain(nif);
+	SK_UNLOCK();
+
+	for (i = 0; i < vp_ch_cnt; i++) {
+		ch = ch_list[i];
+		p = proc_find(ch->ch_pid);
+		if (p == NULL) {
+			SK_ERR("ch 0x%llx pid %d not found", SK_KVA(ch), ch->ch_pid);
+			DTRACE_SKYWALK3(ch__pid__not__found, struct kern_nexus *, nx,
+			    struct kern_channel *, ch, pid_t, ch->ch_pid);
+			ch_release(ch);
+			continue;
+		}
+		/*
+		 * It is possible for the channel to be closed before defunct gets
+		 * called. We need to get the fd lock here to ensure that the check
+		 * for the closed state and the calling of channel defunct are done
+		 * atomically.
+		 */
+		proc_fdlock(p);
+		if ((ch->ch_flags & CHANF_ATTACHED) != 0) {
+			kern_channel_defunct(p, ch);
+		}
+		proc_fdunlock(p);
+		proc_rele(p);
+		ch_release(ch);
+	}
+	sk_free_type_array(struct kern_channel *, all_ch_cnt, ch_list);
+
+	SK_LOCK();
+	/*
+	 * Quiescing is not needed because:
+	 * The defuncting above ensures that no more tx syncs could enter.
+	 * The driver layer ensures that ifnet_detach() (this path) does not get
+	 * called until RX upcalls have returned.
+	 *
+	 * Before sk_lock is reacquired above, userspace could close its channels
+	 * and cause the nexus's destructor to be called. This is fine because we
+	 * have retained the nif so it can't disappear.
+	 */
+	err = nx_netif_clean(nif, FALSE);
+	if (err != 0) {
+		SK_ERR("netif clean failed: err %d", err);
+		DTRACE_SKYWALK2(nif__clean__failed, struct nx_netif *, nif, int, err);
+	}
+	nx_netif_release(nif);
+	SK_UNLOCK();
 }
 
 void
@@ -3034,65 +3285,7 @@ nx_netif_free(struct nx_netif *n)
 }
 
 static int
-nx_netif_na_channel_event_notify(struct nexus_adapter *na,
-    struct __kern_packet *kpkt, struct __kern_channel_event *ev,
-    uint16_t ev_len)
-{
-	int err;
-	struct netif_flow *nf;
-	struct nexus_adapter *netif_vpna;
-	struct nx_netif *nif = NIFNA(na)->nifna_netif;
-	struct netif_stats *nifs = &NIFNA(na)->nifna_netif->nif_stats;
-
-	NETIF_RLOCK(nif);
-	if (!NETIF_IS_LOW_LATENCY(nif)) {
-		err = ENOTSUP;
-		goto error;
-	}
-	if (__improbable(!NA_IS_ACTIVE(na))) {
-		STATS_INC(nifs, NETIF_STATS_EV_DROP_NA_INACTIVE);
-		err = ENXIO;
-		goto error;
-	}
-	if (__improbable(NA_IS_DEFUNCT(na))) {
-		STATS_INC(nifs, NETIF_STATS_EV_DROP_NA_DEFUNCT);
-		err = ENXIO;
-		goto error;
-	}
-	if (__improbable(nif->nif_vp_cnt == 0)) {
-		STATS_INC(nifs, NETIF_STATS_EV_DROP_NO_VPNA);
-		err = ENXIO;
-		goto error;
-	}
-	/* The returned netif flow is refcounted. */
-	nf = nx_netif_flow_classify(nif, kpkt, NETIF_FLOW_OUTBOUND);
-	if (nf == NULL) {
-		SK_ERR("unclassified event (%d) dropped", ev->ev_type);
-		STATS_INC(nifs, NETIF_STATS_EV_DROP_DEMUX_ERR);
-		err = ENOENT;
-		goto error;
-	}
-	netif_vpna = (struct nexus_adapter *)nf->nf_cb_arg;
-	if (netif_vpna->na_channel_event_notify != NULL) {
-		err = netif_vpna->na_channel_event_notify(netif_vpna, kpkt,
-		    ev, ev_len);
-	} else {
-		STATS_INC(nifs, NETIF_STATS_EV_DROP_EV_VPNA_NOTSUP);
-		err = ENOTSUP;
-	}
-	nx_netif_flow_release(nif, nf);
-	NETIF_RUNLOCK(nif);
-	nf = NULL;
-	return err;
-
-error:
-	STATS_INC(nifs, NETIF_STATS_EV_DROP);
-	NETIF_RUNLOCK(nif);
-	return err;
-}
-
-static int
-nx_netif_interface_advisory_notify_common(struct kern_nexus *nx,
+nx_netif_interface_advisory_report(struct kern_nexus *nx,
     const struct ifnet_interface_advisory *advisory)
 {
 	struct kern_nexus *notify_nx;
@@ -3120,35 +3313,44 @@ nx_netif_interface_advisory_notify_common(struct kern_nexus *nx,
 	return 0;
 }
 
-int
-nx_netif_interface_advisory_report(struct nexus_adapter *devna,
-    const struct ifnet_interface_advisory *advisory)
-{
-	ASSERT(devna->na_type == NA_NETIF_DEV);
-	if (__improbable(!NA_IS_ACTIVE(devna))) {
-		return ENXIO;
-	}
-	if (__improbable(NA_IS_DEFUNCT(devna))) {
-		return ENXIO;
-	}
-	return nx_netif_interface_advisory_notify_common(devna->na_nx,
-	           advisory);
-}
-
 static errno_t
 nx_netif_interface_advisory_notify(void *kern_ctx,
     const struct ifnet_interface_advisory *advisory)
 {
-	if (__improbable(kern_ctx == NULL || advisory == NULL ||
-	    advisory->version != IF_INTERFACE_ADVISORY_VERSION_CURRENT)) {
+	_CASSERT(offsetof(struct ifnet_interface_advisory, version) ==
+	    offsetof(struct ifnet_interface_advisory, header.version));
+	_CASSERT(offsetof(struct ifnet_interface_advisory, direction) ==
+	    offsetof(struct ifnet_interface_advisory, header.direction));
+	_CASSERT(offsetof(struct ifnet_interface_advisory, _reserved) ==
+	    offsetof(struct ifnet_interface_advisory, header.interface_type));
+
+	if (__improbable(kern_ctx == NULL || advisory == NULL)) {
 		return EINVAL;
 	}
-	if (__improbable((advisory->direction !=
+	if (__improbable((advisory->header.version <
+	    IF_INTERFACE_ADVISORY_VERSION_MIN) ||
+	    (advisory->header.version > IF_INTERFACE_ADVISORY_VERSION_MAX))) {
+		SK_ERR("Invalid advisory version %d", advisory->header.version);
+		return EINVAL;
+	}
+	if (__improbable((advisory->header.direction !=
 	    IF_INTERFACE_ADVISORY_DIRECTION_TX) &&
-	    (advisory->direction != IF_INTERFACE_ADVISORY_DIRECTION_RX))) {
+	    (advisory->header.direction !=
+	    IF_INTERFACE_ADVISORY_DIRECTION_RX))) {
+		SK_ERR("Invalid advisory direction %d",
+		    advisory->header.direction);
 		return EINVAL;
 	}
-	return nx_netif_interface_advisory_notify_common(kern_ctx, advisory);
+	if (__improbable(((advisory->header.interface_type <
+	    IF_INTERFACE_ADVISORY_INTERFACE_TYPE_MIN) ||
+	    (advisory->header.interface_type >
+	    IF_INTERFACE_ADVISORY_INTERFACE_TYPE_MAX)) &&
+	    (advisory->header.version >= IF_INTERFACE_ADVISORY_VERSION_2))) {
+		SK_ERR("Invalid advisory interface type %d",
+		    advisory->header.interface_type);
+		return EINVAL;
+	}
+	return nx_netif_interface_advisory_report(kern_ctx, advisory);
 }
 
 void
@@ -3171,6 +3373,28 @@ nx_netif_config_interface_advisory(struct kern_nexus *nx, bool enable)
 	if (nif->nif_intf_adv_config != NULL) {
 		nif->nif_intf_adv_config(nif->nif_intf_adv_prov_ctx, enable);
 	}
+}
+
+void
+nx_netif_get_interface_tso_capabilities(struct ifnet *ifp, uint32_t *tso_v4_mtu,
+    uint32_t *tso_v6_mtu)
+{
+#pragma unused (ifp)
+	*tso_v4_mtu = 0;
+	*tso_v6_mtu = 0;
+
+#ifdef XNU_TARGET_OS_OSX
+	if (SKYWALK_CAPABLE(ifp) && SKYWALK_NATIVE(ifp)) {
+		struct nx_netif *nif = NA(ifp)->nifna_netif;
+
+		if ((nif->nif_hwassist & IFNET_TSO_IPV4) != 0) {
+			*tso_v4_mtu = ifp->if_tso_v4_mtu;
+		}
+		if ((nif->nif_hwassist & IFNET_TSO_IPV6) != 0) {
+			*tso_v6_mtu = ifp->if_tso_v6_mtu;
+		}
+	}
+#endif /* XNU_TARGET_OS_OSX */
 }
 
 /*
@@ -3852,10 +4076,13 @@ netif_get_default_ifcq(struct nexus_adapter *hwna)
 static errno_t
 netif_deq_packets(struct nexus_adapter *hwna, struct ifclassq *ifcq,
     uint32_t pkt_limit, uint32_t byte_limit, struct __kern_packet **head,
-    boolean_t *pkts_pending, kern_packet_svc_class_t sc)
+    boolean_t *pkts_pending, kern_packet_svc_class_t sc,
+    uint32_t *pkt_cnt, uint32_t *bytes, uint8_t qset_idx)
 {
 	classq_pkt_t pkt_head = CLASSQ_PKT_INITIALIZER(pkt_head);
 	struct ifnet *ifp = hwna->na_ifp;
+	uint32_t pkts_cnt;
+	uint32_t bytes_cnt;
 	errno_t rc;
 
 	ASSERT(ifp != NULL);
@@ -3867,19 +4094,17 @@ netif_deq_packets(struct nexus_adapter *hwna, struct ifclassq *ifcq,
 	}
 	if (ifp->if_output_sched_model == IFNET_SCHED_MODEL_DRIVER_MANAGED) {
 		rc = ifclassq_dequeue_sc(ifcq, (mbuf_svc_class_t)sc,
-		    pkt_limit, byte_limit, &pkt_head, NULL, NULL, NULL);
+		    pkt_limit, byte_limit, &pkt_head, NULL, pkt_cnt, bytes, qset_idx);
 	} else {
 		rc = ifclassq_dequeue(ifcq, pkt_limit, byte_limit,
-		    &pkt_head, NULL, NULL, NULL);
+		    &pkt_head, NULL, pkt_cnt, bytes, qset_idx);
 	}
 	ASSERT((rc == 0) || (rc == EAGAIN));
 	ASSERT((pkt_head.cp_ptype == QP_PACKET) || (pkt_head.cp_kpkt == NULL));
 
-	if (IFCQ_LEN(ifcq) != 0) {
-		*pkts_pending = TRUE;
-	} else {
-		*pkts_pending = FALSE;
-	}
+	ifclassq_get_len(ifcq, (mbuf_svc_class_t)sc, qset_idx,
+	    &pkts_cnt, &bytes_cnt);
+	*pkts_pending = pkts_cnt > 0;
 
 	*head = pkt_head.cp_kpkt;
 	return rc;
@@ -4016,7 +4241,7 @@ netif_ring_tx_refill(const kern_channel_ring_t ring, uint32_t pkt_limit,
 	}
 
 	rc = netif_deq_packets(hwna, NULL, pkt_limit, byte_limit,
-	    &head, pkts_pending, ring->ckr_svc);
+	    &head, pkts_pending, ring->ckr_svc, NULL, NULL, 0);
 
 	/*
 	 * There's room in ring; if we haven't dequeued everything,
@@ -4109,6 +4334,92 @@ out:
 	return rc;
 }
 
+#define NQ_EWMA(old, new, decay) do {                               \
+	u_int64_t _avg;                                                 \
+	if (__probable((_avg = (old)) > 0))                             \
+	        _avg = (((_avg << (decay)) - _avg) + (new)) >> (decay); \
+	else                                                            \
+	        _avg = (new);                                           \
+	(old) = _avg;                                                   \
+} while (0)
+
+static void
+kern_netif_increment_queue_stats(kern_netif_queue_t queue,
+    uint32_t pkt_count, uint32_t byte_count)
+{
+	struct netif_llink *llink = queue->nq_qset->nqs_llink;
+	struct ifnet *ifp = llink->nll_nif->nif_ifp;
+	if ((queue->nq_flags & NETIF_QUEUE_IS_RX) == 0) {
+		atomic_add_64(&ifp->if_data.ifi_opackets, pkt_count);
+		atomic_add_64(&ifp->if_data.ifi_obytes, byte_count);
+	} else {
+		atomic_add_64(&ifp->if_data.ifi_ipackets, pkt_count);
+		atomic_add_64(&ifp->if_data.ifi_ibytes, byte_count);
+	}
+
+	if (ifp->if_data_threshold != 0) {
+		ifnet_notify_data_threshold(ifp);
+	}
+
+	uint64_t now;
+	uint64_t diff_secs;
+	struct netif_qstats *stats = &queue->nq_stats;
+
+	if (nq_stat_enable == 0) {
+		return;
+	}
+
+	if (__improbable(pkt_count == 0)) {
+		return;
+	}
+
+	stats->nq_num_xfers++;
+	stats->nq_total_bytes += byte_count;
+	stats->nq_total_pkts += pkt_count;
+	if (pkt_count > stats->nq_max_pkts) {
+		stats->nq_max_pkts = pkt_count;
+	}
+	if (stats->nq_min_pkts == 0 ||
+	    pkt_count < stats->nq_min_pkts) {
+		stats->nq_min_pkts = pkt_count;
+	}
+
+	now = net_uptime();
+	if (__probable(queue->nq_accumulate_start != 0)) {
+		diff_secs = now - queue->nq_accumulate_start;
+		if (diff_secs >= nq_accumulate_interval) {
+			uint64_t        bps;
+			uint64_t        pps;
+			uint64_t        pps_ma;
+
+			/* bytes per second */
+			bps = queue->nq_accumulated_bytes / diff_secs;
+			NQ_EWMA(stats->nq_bytes_ps_ma,
+			    bps, nq_transfer_decay);
+			stats->nq_bytes_ps = bps;
+
+			/* pkts per second */
+			pps = queue->nq_accumulated_pkts / diff_secs;
+			pps_ma = stats->nq_pkts_ps_ma;
+			NQ_EWMA(pps_ma, pps, nq_transfer_decay);
+			stats->nq_pkts_ps_ma = (uint32_t)pps_ma;
+			stats->nq_pkts_ps = (uint32_t)pps;
+
+			/* start over */
+			queue->nq_accumulate_start = now;
+			queue->nq_accumulated_bytes = 0;
+			queue->nq_accumulated_pkts = 0;
+
+			stats->nq_min_pkts = 0;
+			stats->nq_max_pkts = 0;
+		}
+	} else {
+		queue->nq_accumulate_start = now;
+	}
+	queue->nq_accumulated_bytes += byte_count;
+	queue->nq_accumulated_pkts += pkt_count;
+}
+
 void
 kern_netif_queue_rx_enqueue(kern_netif_queue_t queue, kern_packet_t ph_chain,
     uint32_t count, uint32_t flags)
@@ -4139,6 +4450,8 @@ kern_netif_queue_rx_enqueue(kern_netif_queue_t queue, kern_packet_t ph_chain,
 		protect = sk_sync_protect();
 		netif_receive(NA(llink->nll_nif->nif_ifp), pkt_chain, &stats);
 		sk_sync_unprotect(protect);
+		kern_netif_increment_queue_stats(queue, (uint32_t)stats.nps_pkts,
+		    (uint32_t)stats.nps_bytes);
 	}
 }
 
@@ -4151,6 +4464,7 @@ kern_netif_queue_tx_dequeue(kern_netif_queue_t queue, uint32_t pkt_limit,
 	struct netif_stats *nifs = &llink->nll_nif->nif_stats;
 	struct nexus_adapter *hwna;
 	struct __kern_packet *pkt_chain = NULL;
+	uint32_t bytes = 0, pkt_cnt = 0;
 	errno_t rc;
 
 	ASSERT((q->nq_flags & NETIF_QUEUE_IS_RX) == 0);
@@ -4165,12 +4479,46 @@ kern_netif_queue_tx_dequeue(kern_netif_queue_t queue, uint32_t pkt_limit,
 		pkt_limit = MIN(pkt_limit, nx_netif_doorbell_max_dequeue);
 	}
 	rc = netif_deq_packets(hwna, q->nq_qset->nqs_ifcq, pkt_limit,
-	    byte_limit, &pkt_chain, pending, q->nq_svc);
+	    byte_limit, &pkt_chain, pending, q->nq_svc, &pkt_cnt, &bytes,
+	    q->nq_qset->nqs_idx);
 
+	if (pkt_cnt > 0) {
+		kern_netif_increment_queue_stats(queue, pkt_cnt, bytes);
+	}
 	if (pkt_chain != NULL) {
 		*ph_chain = SK_PKT2PH(pkt_chain);
 	}
 	return rc;
+}
+
+errno_t
+kern_netif_qset_tx_queue_len(kern_netif_qset_t qset, uint32_t svc,
+    uint32_t * pkts_cnt, uint32_t * bytes_cnt)
+{
+	VERIFY(qset != NULL);
+	VERIFY(pkts_cnt != NULL);
+	VERIFY(bytes_cnt != NULL);
+
+	return ifclassq_get_len(qset->nqs_ifcq, svc, qset->nqs_idx, pkts_cnt,
+	           bytes_cnt);
+}
+
+void
+kern_netif_set_qset_combined(kern_netif_qset_t qset)
+{
+	VERIFY(qset != NULL);
+	VERIFY(qset->nqs_ifcq != NULL);
+
+	ifclassq_set_grp_combined(qset->nqs_ifcq, qset->nqs_idx);
+}
+
+void
+kern_netif_set_qset_separate(kern_netif_qset_t qset)
+{
+	VERIFY(qset != NULL);
+	VERIFY(qset->nqs_ifcq != NULL);
+
+	ifclassq_set_grp_separated(qset->nqs_ifcq, qset->nqs_idx);
 }
 
 errno_t

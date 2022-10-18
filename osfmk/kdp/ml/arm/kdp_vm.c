@@ -45,6 +45,7 @@
 #include <arm/misc_protos.h>
 #include <arm/caches_internal.h>
 #include <arm/cpu_data_internal.h>
+#include <arm/misc_protos.h>
 
 pmap_t          kdp_pmap = 0;
 boolean_t       kdp_trans_off;
@@ -352,7 +353,7 @@ kern_collectth_state(thread_t thread __unused, void *buffer, uint64_t size, void
 		state->fp   = saved_state->fp;
 		state->lr   = saved_state->lr;
 		state->sp   = saved_state->sp;
-		state->pc   = saved_state->pc;
+		state->pc   = saved_state->pc_was_in_userspace ? (register_t)ptrauth_strip((void *)&_was_in_userspace, ptrauth_key_function_pointer) : 0;
 		state->cpsr = PSR64_KERNEL_DEFAULT;
 	}
 
@@ -367,6 +368,87 @@ kern_collectth_state(thread_t thread __unused, void *buffer, uint64_t size, void
 	bcopy(&saved_state->r[0], &state->r[0], sizeof(state->r));
 
 #endif /* !__arm64__ */
+}
+
+static const arm_state_hdr_t user32_thread_flavor_array[] = {
+	{ ARM_THREAD_STATE, ARM_UNIFIED_THREAD_STATE_COUNT },
+};
+
+#if defined(__arm64__)
+static const arm_state_hdr_t user64_thread_flavor_array[] = {
+	{ ARM_THREAD_STATE64, ARM_THREAD_STATE64_COUNT },
+	{ ARM_VFP_STATE, ARM_VFP_STATE_COUNT },
+	{ ARM_EXCEPTION_STATE64, ARM_EXCEPTION_STATE64_COUNT },
+};
+#endif
+
+void
+kern_collect_userth_state_size(task_t task, uint64_t * tstate_count, uint64_t * tstate_size)
+{
+	uint64_t per_thread_size = 0;
+	uint64_t num_flavors = 0;
+	const arm_state_hdr_t * flavors;
+#if defined(__arm64__)
+	bool is64bit = task_has_64Bit_addr(task);
+
+	if (is64bit) {
+		flavors = user64_thread_flavor_array;
+		num_flavors = sizeof(user64_thread_flavor_array) / sizeof(user64_thread_flavor_array[0]);
+	} else {
+		flavors = user32_thread_flavor_array;
+		num_flavors = sizeof(user32_thread_flavor_array) / sizeof(user32_thread_flavor_array[0]);
+	}
+#else
+	flavors = user32_thread_flavor_array;
+	num_flavors = sizeof(user32_thread_flavor_array) / sizeof(user32_thread_flavor_array[0]);
+#endif
+
+	for (size_t i = 0; i < num_flavors; i++) {
+		per_thread_size += sizeof(arm_state_hdr_t) + (flavors[i].count * sizeof(natural_t));
+	}
+
+	*tstate_count = task->thread_count;
+	*tstate_size  = sizeof(struct thread_command) + per_thread_size;
+}
+
+void
+kern_collect_userth_state(task_t task, thread_t thread, void *buffer, uint64_t size)
+{
+	kern_return_t ret;
+	uint64_t num_flavors = 0;
+	const arm_state_hdr_t * flavors;
+#if defined(__arm64__)
+	bool is64bit = task_has_64Bit_addr(task);
+
+	if (is64bit) {
+		flavors = user64_thread_flavor_array;
+		num_flavors = sizeof(user64_thread_flavor_array) / sizeof(user64_thread_flavor_array[0]);
+	} else {
+		flavors = user32_thread_flavor_array;
+		num_flavors = sizeof(user32_thread_flavor_array) / sizeof(user32_thread_flavor_array[0]);
+	}
+#else
+	(void)task;
+	flavors = user32_thread_flavor_array;
+	num_flavors = sizeof(user32_thread_flavor_array) / sizeof(user32_thread_flavor_array[0]);
+#endif
+
+	struct thread_command *tc = buffer;
+	tc->cmd = LC_THREAD;
+	tc->cmdsize = (uint32_t)size;
+
+	arm_state_hdr_t *hdr = (arm_state_hdr_t *)(tc + 1);
+
+	for (size_t i = 0; i < num_flavors; i++) {
+		hdr->flavor = flavors[i].flavor;
+		hdr->count = flavors[i].count;
+		/* Ensure we can't write past the end of the buffer */
+		assert(hdr->count + sizeof(arm_state_hdr_t) + ((uintptr_t)hdr - (uintptr_t)buffer) <= size);
+		ret = machine_thread_get_state(thread, hdr->flavor, (thread_state_t)(hdr + 1), &hdr->count);
+		assert(ret == KERN_SUCCESS);
+
+		hdr = (arm_state_hdr_t *)((uintptr_t)(hdr + 1) + hdr->count * sizeof(natural_t));
+	}
 }
 
 /*

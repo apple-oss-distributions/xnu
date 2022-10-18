@@ -8,7 +8,7 @@
 
 OSDefineMetaClassAndStructors(TestIODeviceMemoryRosetta, IOService);
 
-OSDefineMetaClassAndStructors(TestIODeviceMemoryRosettaUserClient, IOUserClient);
+OSDefineMetaClassAndStructors(TestIODeviceMemoryRosettaUserClient, IOUserClient2022);
 
 bool
 TestIODeviceMemoryRosetta::start(IOService * provider)
@@ -23,6 +23,20 @@ TestIODeviceMemoryRosetta::start(IOService * provider)
 	return ret;
 }
 
+bool
+TestIODeviceMemoryRosettaUserClient::start(IOService * provider)
+{
+	if (!IOUserClient2022::start(provider)) {
+		return false;
+	}
+	setProperty(kIOUserClientDefaultLockingKey, kOSBooleanTrue);
+	setProperty(kIOUserClientDefaultLockingSetPropertiesKey, kOSBooleanTrue);
+	setProperty(kIOUserClientDefaultLockingSingleThreadExternalMethodKey, kOSBooleanTrue);
+
+	setProperty(kIOUserClientEntitlementsKey, kOSBooleanFalse);
+
+	return true;
+}
 
 IOReturn
 TestIODeviceMemoryRosettaUserClient::clientClose()
@@ -33,35 +47,26 @@ TestIODeviceMemoryRosettaUserClient::clientClose()
 	return kIOReturnSuccess;
 }
 
+struct TestIODeviceMemoryRosettaUserClientArgs {
+	uint64_t size;
+	uint64_t offset;
+	uint64_t deviceMemoryOffset;
+	uint64_t length;
+	uint64_t xorkey;
+};
+
+struct TestIODeviceMemoryRosettaUserClientOutput {
+	mach_vm_address_t address;
+	mach_vm_size_t size;
+};
+
 IOReturn
-TestIODeviceMemoryRosettaUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
-    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
+TestIODeviceMemoryRosettaUserClient::externalMethodDispatched(IOExternalMethodArguments * args)
 {
 	IOReturn ret = kIOReturnError;
 	IOMemoryMap * map = NULL;
 	IODeviceMemory * deviceMemory = NULL;
 	uint64_t * buf;
-
-	struct TestIODeviceMemoryRosettaUserClientArgs {
-		uint64_t size;
-		uint64_t offset;
-		uint64_t deviceMemoryOffset;
-		uint64_t length;
-		uint64_t xorkey;
-	};
-
-	struct TestIODeviceMemoryRosettaUserClientOutput {
-		mach_vm_address_t address;
-		mach_vm_size_t size;
-	};
-
-	if (args->structureInputSize != sizeof(TestIODeviceMemoryRosettaUserClientArgs)) {
-		return kIOReturnBadArgument;
-	}
-
-	if (args->structureOutputSize != sizeof(TestIODeviceMemoryRosettaUserClientOutput)) {
-		return kIOReturnBadArgument;
-	}
 
 	TestIODeviceMemoryRosettaUserClientArgs * userClientArgs = (TestIODeviceMemoryRosettaUserClientArgs *)args->structureInput;
 	TestIODeviceMemoryRosettaUserClientOutput * userClientOutput = (TestIODeviceMemoryRosettaUserClientOutput *)args->structureOutput;
@@ -102,6 +107,32 @@ finish:
 	OSSafeReleaseNULL(map);
 	OSSafeReleaseNULL(deviceMemory);
 	return ret;
+}
+
+static IOReturn
+TestIODeviceMemoryRosettaMethodDispatched(OSObject * target, void * reference, IOExternalMethodArguments * arguments)
+{
+	TestIODeviceMemoryRosettaUserClient *
+	    me = OSRequiredCast(TestIODeviceMemoryRosettaUserClient, target);
+	return me->externalMethodDispatched(arguments);
+}
+
+IOReturn
+TestIODeviceMemoryRosettaUserClient::externalMethod(uint32_t selector, IOExternalMethodArgumentsOpaque * args)
+{
+	static const IOExternalMethodDispatch2022 dispatchArray[] = {
+		[0] {
+			.function                 = &TestIODeviceMemoryRosettaMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = sizeof(TestIODeviceMemoryRosettaUserClientArgs),
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = sizeof(TestIODeviceMemoryRosettaUserClientOutput),
+			.allowAsync               = false,
+			.checkEntitlement         = "com.apple.iokit.test-check-entitlement",
+		},
+	};
+
+	return dispatchExternalMethod(selector, args, dispatchArray, sizeof(dispatchArray) / sizeof(dispatchArray[0]), this, NULL);
 }
 
 #endif /* (DEVELOPMENT || DEBUG) && XNU_TARGET_OS_OSX */

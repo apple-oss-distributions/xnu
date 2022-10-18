@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2020-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -186,14 +186,30 @@ static inline int
 netif_gso_send(struct ifnet *ifp, struct __kern_packet *head,
     struct __kern_packet *tail, uint32_t count, uint32_t bytes)
 {
-	struct netif_stats *nifs = &NA(ifp)->nifna_netif->nif_stats;
+	struct nx_netif *nif = NA(ifp)->nifna_netif;
+	struct netif_stats *nifs = &nif->nif_stats;
+	struct netif_qset *qset = NULL;
+	uint64_t qset_id = 0;
 	int error = 0;
 	boolean_t dropped;
 
+	if (NX_LLINK_PROV(nif->nif_nx) &&
+	    ifp->if_traffic_rule_count > 0 &&
+	    nxctl_inet_traffic_rule_find_qset_id_with_pkt(ifp->if_xname,
+	    head, &qset_id) == 0) {
+		qset = nx_netif_find_qset(nif, qset_id);
+		ASSERT(qset != NULL);
+	}
 	if (netif_chain_enqueue_enabled(ifp)) {
 		dropped = false;
-		error = ifnet_enqueue_pkt_chain(ifp, head, tail, count, bytes,
-		    false, &dropped);
+		if (qset != NULL) {
+			head->pkt_qset_idx = qset->nqs_idx;
+			error = ifnet_enqueue_ifcq_pkt_chain(ifp, qset->nqs_ifcq,
+			    head, tail, count, bytes, false, &dropped);
+		} else {
+			error = ifnet_enqueue_pkt_chain(ifp, head, tail,
+			    count, bytes, false, &dropped);
+		}
 		if (__improbable(dropped)) {
 			STATS_ADD(nifs, NETIF_STATS_TX_DROP_ENQ_AQM, count);
 			STATS_ADD(nifs, NETIF_STATS_DROP, count);
@@ -211,7 +227,13 @@ netif_gso_send(struct ifnet *ifp, struct __kern_packet *head,
 			b += pkt->pkt_length;
 
 			dropped = false;
-			err = ifnet_enqueue_pkt(ifp, pkt, false, &dropped);
+			if (qset != NULL) {
+				pkt->pkt_qset_idx = qset->nqs_idx;
+				err = ifnet_enqueue_ifcq_pkt(ifp, qset->nqs_ifcq,
+				    pkt, false, &dropped);
+			} else {
+				err = ifnet_enqueue_pkt(ifp, pkt, false, &dropped);
+			}
 			if (error == 0 && __improbable(err != 0)) {
 				error = err;
 			}
@@ -223,6 +245,9 @@ netif_gso_send(struct ifnet *ifp, struct __kern_packet *head,
 		}
 		ASSERT(c == count);
 		ASSERT(b == bytes);
+	}
+	if (qset != NULL) {
+		nx_netif_qset_release(&qset);
 	}
 	netif_transmit(ifp, NETIF_XMIT_FLAG_HOST);
 	return error;
@@ -256,7 +281,7 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 
 	VERIFY(total_len > state->hlen);
 	VERIFY(((tx_headroom + state->mac_hlen) & 0x1) == 0);
-	VERIFY((tx_headroom + state->hlen + mss) <= pp->pp_buflet_size);
+	VERIFY((tx_headroom + state->hlen + mss) <= PP_BUF_SIZE_DEF(pp));
 
 	KPKTQ_INIT(&pktq_alloc);
 	KPKTQ_INIT(&pktq_seg);

@@ -51,6 +51,10 @@ typedef size_t (*exc_handler_callback_t)(mach_port_t task, mach_port_t thread,
 
 typedef size_t (*exc_handler_protected_callback_t)(task_id_token_t token, uint64_t thread_d,
     exception_type_t type, mach_exception_data_t codes);
+
+typedef kern_return_t (*exc_handler_backtrace_callback_t)(kcdata_object_t kcdata_object,
+    exception_type_t type, mach_exception_data_t codes);
+
 /**
  * Allocates a Mach port and configures it to receive exception messages.
  *
@@ -75,7 +79,7 @@ void
 run_exception_handler(mach_port_t exc_port, exc_handler_callback_t callback);
 
 void
-run_exception_handler_behavior64(mach_port_t exc_port, void *callback, exception_behavior_t behavior);
+run_exception_handler_behavior64(mach_port_t exc_port, void *preferred_callback, void *callback, exception_behavior_t behavior);
 
 /**
  * Handles every exception received on the provided Mach port, by running the

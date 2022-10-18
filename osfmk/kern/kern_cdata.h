@@ -125,6 +125,19 @@ struct kcdata_descriptor {
 
 typedef struct kcdata_descriptor * kcdata_descriptor_t;
 
+#define MAX_INFLIGHT_KCOBJECT_LW_CORPSE   15
+__options_decl(kcdata_obj_flags_t, uint32_t, {
+	KCDATA_OBJECT_TYPE_LW_CORPSE  = 0x1, /* for lightweight corpse */
+});
+
+struct kcdata_object {
+	kcdata_descriptor_t ko_data;
+	kcdata_obj_flags_t  ko_flags;
+	ipc_port_t          ko_port;
+	uint32_t            ko_alloc_size;
+	os_refcnt_t         ko_refs;
+};
+
 kcdata_descriptor_t kcdata_memory_alloc_init(mach_vm_address_t crash_data_p, unsigned data_type, unsigned size, unsigned flags);
 kern_return_t kcdata_memory_static_init(
 	kcdata_descriptor_t data, mach_vm_address_t buffer_addr_p, unsigned data_type, unsigned size, unsigned flags);
@@ -154,6 +167,14 @@ void kcdata_compression_window_open(kcdata_descriptor_t data);
 kern_return_t kcdata_compression_window_close(kcdata_descriptor_t data);
 void kcd_finalize_compression(kcdata_descriptor_t data);
 
+/* kcdata mach port representation */
+kern_return_t kcdata_object_throttle_get(kcdata_obj_flags_t flags);
+void kcdata_object_throttle_release(kcdata_obj_flags_t flags);
+kern_return_t kcdata_create_object(kcdata_descriptor_t data, kcdata_obj_flags_t flags, uint32_t size, kcdata_object_t *objp);
+void kcdata_object_release(kcdata_object_t obj);
+void kcdata_object_reference(kcdata_object_t obj);
+kcdata_object_t convert_port_to_kcdata_object(ipc_port_t port);
+ipc_port_t convert_kcdata_object_to_port(kcdata_object_t obj);
 #else /* XNU_KERNEL_PRIVATE */
 
 typedef void * kcdata_descriptor_t;

@@ -48,7 +48,6 @@
 #include <i386/machine_routines.h>
 #include <i386/pmap.h>
 #include <i386/misc_protos.h>
-#include <i386/io_map_entries.h>
 #include <architecture/i386/pio.h>
 #include <i386/cpuid.h>
 #include <i386/apic.h>
@@ -194,7 +193,7 @@ map_rcbaArea(void)
 	 */
 	outl(cfgAdr, lpcCfg | (0xF0 & 0xFC));
 	rcbaAreap = inl(cfgDat | (0xF0 & 0x03));
-	rcbaArea = io_map_spec(rcbaAreap & -4096, PAGE_SIZE * 4, VM_WIMG_IO);
+	rcbaArea = ml_io_map(rcbaAreap & -4096, PAGE_SIZE * 4);
 	kprintf("RCBA: vaddr = %lX, paddr = %08X\n", (unsigned long)rcbaArea, rcbaAreap);
 }
 
@@ -225,7 +224,7 @@ hpet_init(void)
 	 * Get physical address of HPET and map it.
 	 */
 	hpetAreap = hpetAddr | ((hptc & 3) << 12);
-	hpetArea = io_map_spec(hpetAreap & -4096, PAGE_SIZE * 4, VM_WIMG_IO);
+	hpetArea = ml_io_map(hpetAreap & -4096, PAGE_SIZE * 4);
 	kprintf("HPET: vaddr = %lX, paddr = %08X\n", (unsigned long)hpetArea, hpetAreap);
 
 	/*
