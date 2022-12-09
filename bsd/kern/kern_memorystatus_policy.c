@@ -78,20 +78,14 @@ memorystatus_health_check(memorystatus_system_health_t *status)
 	status->msh_available_pages_below_critical = memorystatus_avail_pages_below_critical();
 	status->msh_compressor_is_low_on_space = (vm_compressor_low_on_space() == TRUE);
 	status->msh_compressed_pages_nearing_limit = vm_compressor_compressed_pages_nearing_limit();
-	status->msh_swapout_is_ripe = vm_compressor_swapout_is_ripe();
-	if (!status->msh_swapout_is_ripe) {
-		status->msh_compressor_is_thrashing = !memorystatus_swap_all_apps && vm_compressor_is_thrashing();
+	status->msh_compressor_is_thrashing = !memorystatus_swap_all_apps && vm_compressor_is_thrashing();
 #if CONFIG_PHANTOM_CACHE
-		status->msh_phantom_cache_pressure = os_atomic_load(&memorystatus_phantom_cache_pressure, acquire);
+	status->msh_phantom_cache_pressure = os_atomic_load(&memorystatus_phantom_cache_pressure, acquire);
 #else
-		status->msh_phantom_cache_pressure = false;
+	status->msh_phantom_cache_pressure = false;
 #endif /* CONFIG_PHANTOM_CACHE */
-	} else {
-		status->msh_compressor_is_thrashing = false;
-		status->msh_phantom_cache_pressure = false;
-	}
 	if (!memorystatus_swap_all_apps &&
-	    (status->msh_swapout_is_ripe || status->msh_phantom_cache_pressure) &&
+	    status->msh_phantom_cache_pressure &&
 	    !(status->msh_compressor_is_thrashing && status->msh_compressor_is_low_on_space)) {
 		status->msh_filecache_is_thrashing = true;
 	}

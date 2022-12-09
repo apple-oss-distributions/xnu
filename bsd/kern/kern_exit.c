@@ -782,6 +782,14 @@ populate_corpse_crashinfo(proc_t p, task_t corpse_task, struct rusage_superset *
 		kcdata_memcpy(crash_info_ptr, uaddr, &etype, sizeof(etype));
 	}
 
+	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_CRASH_COUNT, sizeof(int), &uaddr)) {
+		kcdata_memcpy(crash_info_ptr, uaddr, &p->p_crash_count, sizeof(int));
+	}
+
+	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_THROTTLE_TIMEOUT, sizeof(int), &uaddr)) {
+		kcdata_memcpy(crash_info_ptr, uaddr, &p->p_throttle_timeout, sizeof(int));
+	}
+
 	if (p->p_exit_reason != OS_REASON_NULL && reason == OS_REASON_NULL) {
 		reason = p->p_exit_reason;
 	}
@@ -1146,6 +1154,14 @@ current_thread_collect_backtrace_info(
 
 	if (KERN_SUCCESS == kcdata_get_memory_addr(kcdata, TASK_BTINFO_EXCEPTION_TYPE, sizeof(etype), &kaddr)) {
 		kcdata_memcpy(kcdata, kaddr, &etype, sizeof(etype));
+	}
+
+	if (KERN_SUCCESS == kcdata_get_memory_addr(kcdata, TASK_BTINFO_CRASH_COUNT, sizeof(int), &kaddr)) {
+		kcdata_memcpy(kcdata, kaddr, &p->p_crash_count, sizeof(int));
+	}
+
+	if (KERN_SUCCESS == kcdata_get_memory_addr(kcdata, TASK_BTINFO_THROTTLE_TIMEOUT, sizeof(int), &kaddr)) {
+		kcdata_memcpy(kcdata, kaddr, &p->p_throttle_timeout, sizeof(int));
 	}
 
 	assert(codeCnt <= EXCEPTION_CODE_MAX);

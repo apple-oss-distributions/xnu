@@ -2398,13 +2398,13 @@ igmp_set_version(struct igmp_ifinfo *igi, const int igmp_version)
 
 	if (igi->igi_v1_timer == 0 && igi->igi_v2_timer > 0) {
 		if (igi->igi_version != IGMP_VERSION_2) {
-			igi->igi_version = IGMP_VERSION_2;
 			igmp_v3_cancel_link_timers(igi);
+			igi->igi_version = IGMP_VERSION_2;
 		}
 	} else if (igi->igi_v1_timer > 0) {
 		if (igi->igi_version != IGMP_VERSION_1) {
-			igi->igi_version = IGMP_VERSION_1;
 			igmp_v3_cancel_link_timers(igi);
+			igi->igi_version = IGMP_VERSION_1;
 		}
 	}
 
@@ -2559,9 +2559,9 @@ igmp_v1v2_process_querier_timers(struct igmp_ifinfo *igi)
 				    igi->igi_version, IGMP_VERSION_2,
 				    (uint64_t)VM_KERNEL_ADDRPERM(igi->igi_ifp),
 				    if_name(igi->igi_ifp)));
-				igi->igi_version = IGMP_VERSION_2;
 				IF_DRAIN(&igi->igi_gq);
 				igmp_v3_cancel_link_timers(igi);
+				igi->igi_version = IGMP_VERSION_2;
 			}
 		}
 	} else if (igi->igi_v1_timer > 0) {

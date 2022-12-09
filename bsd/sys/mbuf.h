@@ -561,6 +561,7 @@ struct pkthdr {
 #define PKTF_HBH_CHKED          0x80000000 /* HBH option is checked */
 
 #define PKTF_EXT_OUTPUT_SCOPE   0x1     /* outgoing packet has ipv6 address scope id */
+#define PKTF_EXT_L4S            0x2     /* pkts is from a L4S connection */
 
 #define PKT_CRUMB_TS_COMP_REQ   0x0001 /* timestamp completion requested */
 #define PKT_CRUMB_TS_COMP_CB    0x0002 /* timestamp callback called */

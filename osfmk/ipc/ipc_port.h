@@ -137,8 +137,8 @@ struct ipc_port {
 		    , ip_sync_link_state:3        /* link the port to destination port/ Workloop */
 		    , ip_sync_bootstrap_checkin:1 /* port part of sync bootstrap checkin, push on thread doing the checkin */
 		    , ip_immovable_receive:1      /* the receive right cannot be moved out of a space, until it is destroyed */
-		    , ip_no_grant:1               /* Port wont accept complex messages containing (ool) port descriptors */
 		    , ip_immovable_send:1         /* No send(once) rights to this port can be moved out of a space, never unset */
+		    , ip_no_grant:1               /* Port wont accept complex messages containing (ool) port descriptors */
 		    , ip_tg_block_tracking:1      /* Track blocking relationship between thread groups during sync IPC */
 		    , ip_pinned:1                 /* Can't deallocate the last send right from a space while the bit is set */
 		    , ip_service_port:1           /* port is a service port */

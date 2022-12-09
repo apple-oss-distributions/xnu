@@ -613,8 +613,7 @@ ntp_update_second(int64_t *adjustment, clock_sec_t secs)
  * is selected by the STA_MODE status bit.
  */
 static void
-hardupdate(offset)
-long offset;
+hardupdate(long offset)
 {
 	long mtemp = 0;
 	long time_monitor;

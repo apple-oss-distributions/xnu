@@ -572,3 +572,209 @@ pktsched_get_pkt_sfb_vars(pktsched_pkt_t *pkt, uint32_t **sfb_flags)
 
 	return hashp;
 }
+
+static int
+pktsched_mbuf_mark_ecn(struct mbuf* m)
+{
+	struct mbuf     *m0;
+	void            *hdr;
+	int             af;
+	uint8_t         ipv;
+
+	hdr = m->m_pkthdr.pkt_hdr;
+	/* verify that hdr is within the mbuf data */
+	for (m0 = m; m0 != NULL; m0 = m0->m_next) {
+		if (((caddr_t)hdr >= m0->m_data) &&
+		    ((caddr_t)hdr < m0->m_data + m0->m_len)) {
+			break;
+		}
+	}
+	if (m0 == NULL) {
+		return EINVAL;
+	}
+	ipv = IP_VHL_V(*(uint8_t *)hdr);
+	if (ipv == 4) {
+		af = AF_INET;
+	} else if (ipv == 6) {
+		af = AF_INET6;
+	} else {
+		af = AF_UNSPEC;
+	}
+
+	switch (af) {
+	case AF_INET: {
+		struct ip *ip = hdr;
+		uint8_t otos;
+		int sum;
+
+		if (((uintptr_t)ip + sizeof(*ip)) >
+		    ((uintptr_t)mbuf_datastart(m0) + mbuf_maxlen(m0))) {
+			return EINVAL;    /* out of bounds */
+		}
+		if ((ip->ip_tos & IPTOS_ECN_MASK) == IPTOS_ECN_NOTECT) {
+			return EINVAL;    /* not-ECT */
+		}
+		if ((ip->ip_tos & IPTOS_ECN_MASK) == IPTOS_ECN_CE) {
+			return 0;    /* already marked */
+		}
+		/*
+		 * ecn-capable but not marked,
+		 * mark CE and update checksum
+		 */
+		otos = ip->ip_tos;
+		ip->ip_tos |= IPTOS_ECN_CE;
+		/*
+		 * update checksum (from RFC1624) only if hw
+		 * checksum is not supported.
+		 *         HC' = ~(~HC + ~m + m')
+		 */
+		if ((m->m_pkthdr.csum_flags & CSUM_DELAY_IP) == 0) {
+			sum = ~ntohs(ip->ip_sum) & 0xffff;
+			sum += (~otos & 0xffff) + ip->ip_tos;
+			sum = (sum >> 16) + (sum & 0xffff);
+			sum += (sum >> 16); /* add carry */
+			ip->ip_sum = htons(~sum & 0xffff);
+		}
+		return 0;
+	}
+	case AF_INET6: {
+		struct ip6_hdr *ip6 = hdr;
+		u_int32_t flowlabel;
+
+		if (((uintptr_t)ip6 + sizeof(*ip6)) >
+		    ((uintptr_t)mbuf_datastart(m0) + mbuf_maxlen(m0))) {
+			return EINVAL;    /* out of bounds */
+		}
+		flowlabel = ntohl(ip6->ip6_flow);
+		if ((flowlabel & (IPTOS_ECN_MASK << 20)) ==
+		    (IPTOS_ECN_NOTECT << 20)) {
+			return EINVAL;    /* not-ECT */
+		}
+		if ((flowlabel & (IPTOS_ECN_MASK << 20)) ==
+		    (IPTOS_ECN_CE << 20)) {
+			return 0;    /* already marked */
+		}
+		/*
+		 * ecn-capable but not marked,  mark CE
+		 */
+		flowlabel |= (IPTOS_ECN_CE << 20);
+		ip6->ip6_flow = htonl(flowlabel);
+		return 0;
+	}
+	default:
+		return EPROTONOSUPPORT;
+	}
+}
+
+static int
+pktsched_kpkt_mark_ecn(struct __kern_packet *kpkt)
+{
+	uint8_t ipv = 0, *l3_hdr;
+
+	if (__improbable((kpkt->pkt_qum_qflags & QUM_F_FLOW_CLASSIFIED) != 0)) {
+		ipv = kpkt->pkt_flow_ip_ver;
+		l3_hdr = (uint8_t *)kpkt->pkt_flow_ip_hdr;
+	} else {
+		uint8_t *pkt_buf;
+		uint16_t bdlen, bdlim, bdoff;
+		MD_BUFLET_ADDR_ABS_DLEN(kpkt, pkt_buf, bdlen, bdlim, bdoff);
+
+		/* takes care of both IPv4 and IPv6 */
+		l3_hdr = pkt_buf + kpkt->pkt_headroom + kpkt->pkt_l2_len;
+		ipv = IP_VHL_V(*(uint8_t *)l3_hdr);
+		if (ipv == 4) {
+			ipv = IPVERSION;
+		} else if (ipv == 6) {
+			ipv = IPV6_VERSION;
+		} else {
+			ipv = 0;
+		}
+	}
+
+	switch (ipv) {
+	case IPVERSION: {
+		uint8_t otos;
+		int sum;
+
+		struct ip *ip = (struct ip *)(void *)l3_hdr;
+		if ((ip->ip_tos & IPTOS_ECN_MASK) == IPTOS_ECN_NOTECT) {
+			return EINVAL;    /* not-ECT */
+		}
+		if ((ip->ip_tos & IPTOS_ECN_MASK) == IPTOS_ECN_CE) {
+			return 0;    /* already marked */
+		}
+		/*
+		 * ecn-capable but not marked,
+		 * mark CE and update checksum
+		 */
+		otos = ip->ip_tos;
+		ip->ip_tos |= IPTOS_ECN_CE;
+
+		sum = ~ntohs(ip->ip_sum) & 0xffff;
+		sum += (~otos & 0xffff) + ip->ip_tos;
+		sum = (sum >> 16) + (sum & 0xffff);
+		sum += (sum >> 16); /* add carry */
+		ip->ip_sum = htons(~sum & 0xffff);
+
+		return 0;
+	}
+	case IPV6_VERSION: {
+		struct ip6_hdr *ip6 = (struct ip6_hdr *)l3_hdr;
+		u_int32_t flowlabel;
+		flowlabel = ntohl(ip6->ip6_flow);
+		if ((flowlabel & (IPTOS_ECN_MASK << 20)) ==
+		    (IPTOS_ECN_NOTECT << 20)) {
+			return EINVAL;    /* not-ECT */
+		}
+		if ((flowlabel & (IPTOS_ECN_MASK << 20)) ==
+		    (IPTOS_ECN_CE << 20)) {
+			return 0;    /* already marked */
+		}
+		/*
+		 * ecn-capable but not marked, mark CE
+		 */
+		flowlabel |= (IPTOS_ECN_CE << 20);
+		ip6->ip6_flow = htonl(flowlabel);
+
+		return 0;
+	}
+	default:
+		return EPROTONOSUPPORT;
+	}
+}
+
+int
+pktsched_mark_ecn(pktsched_pkt_t *pkt)
+{
+	switch (pkt->pktsched_ptype) {
+	case QP_MBUF:
+		return pktsched_mbuf_mark_ecn(pkt->pktsched_pkt_mbuf);
+	case QP_PACKET:
+		return pktsched_kpkt_mark_ecn(pkt->pktsched_pkt_kpkt);
+	default:
+		VERIFY(0);
+		/* NOTREACHED */
+		__builtin_unreachable();
+	}
+}
+
+boolean_t
+pktsched_is_pkt_l4s(pktsched_pkt_t *pkt)
+{
+	switch (pkt->pktsched_ptype) {
+	case QP_MBUF: {
+		struct pkthdr *pkth = &(pkt->pktsched_pkt_mbuf->m_pkthdr);
+		return (pkth->pkt_ext_flags & PKTF_EXT_L4S) != 0;
+	}
+	case QP_PACKET: {
+		struct __kern_packet *kp = pkt->pktsched_pkt_kpkt;
+		return (kp->pkt_pflags & PKT_F_L4S) != 0;
+	}
+
+	default:
+		VERIFY(0);
+		/* NOTREACHED */
+		__builtin_unreachable();
+	}
+	return FALSE;
+}

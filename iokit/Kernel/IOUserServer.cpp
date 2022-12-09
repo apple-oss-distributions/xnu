@@ -3171,11 +3171,11 @@ IOUserServer::server(ipc_kmsg_t requestkmsg, ipc_kmsg_t * pReply)
 		/*
 		 * Same as:
 		 *    ipc_kmsg_alloc(replyAlloc, 0,
-		 *        IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO |
+		 *        IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_LINEAR |
 		 *        IPC_KMSG_ALLOC_NOFAIL);
 		 */
 		replykmsg = ipc_kmsg_alloc_uext_reply(replyAlloc);
-		msgout = replykmsg ? (typeof(msgout))ikm_header(replykmsg) : NULL;
+		msgout = (typeof(msgout))ikm_header(replykmsg);
 	}
 
 	IORPC rpc = { .message = msgin, .reply = msgout, .sendSize = msgin->msgh.msgh_size, .replySize = replyAlloc };

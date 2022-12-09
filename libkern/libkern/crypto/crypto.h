@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2022 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,17 +26,23 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-/* To access the corecrypto functions */
-#ifndef _CRYPTO_CRYPTO_INTERNAL_H_
-#define _CRYPTO_CRYPTO_INTERNAL_H_
+#ifndef _CRYPTO_CRYPTO_H_
+#define _CRYPTO_CRYPTO_H_
 
-#include <libkern/crypto/crypto.h>
-#include <libkern/crypto/register_crypto.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <sys/cdefs.h>
 
 __BEGIN_DECLS
 
-extern crypto_functions_t g_crypto_funcs;
+#if XNU_KERNEL_PRIVATE
+
+// True if the cryptographic provider is initialized; false otherwise.
+extern bool crypto_init;
+
+#endif // XNU_KERNEL_PRIVATE
 
 __END_DECLS
 
-#endif /*_CRYPTO_CRYPTO_INTERNAL_H_*/
+#endif // _CRYPTO_CRYPTO_H_

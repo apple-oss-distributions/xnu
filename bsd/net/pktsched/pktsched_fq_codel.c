@@ -1501,6 +1501,7 @@ fq_if_hash_pkt(fq_if_t *fqs, fq_if_group_t *fq_grp, u_int32_t flowid,
 	SLIST_FOREACH(fq, fq_list, fq_hashlink) {
 		if (fq->fq_flowhash == flowid &&
 		    fq->fq_sc_index == scidx &&
+		    fq->fq_tfc_type == tfc_type &&
 		    fq->fq_group == fq_grp) {
 			break;
 		}
@@ -1774,6 +1775,7 @@ fq_if_add_fcentry(fq_if_t *fqs, pktsched_pkt_t *pkt, uint8_t flowsrc,
 	}
 #endif /* DEBUG || DEVELOPMENT */
 
+	ASSERT(fq->fq_tfc_type != FQ_TFC_L4S);
 	STAILQ_FOREACH(fce, &fqs->fqs_fclist, fce_link) {
 		if ((uint8_t)fce->fce_flowsrc_type == flowsrc &&
 		    fce->fce_flowid == fq->fq_flowhash) {
@@ -1811,6 +1813,10 @@ void
 fq_if_flow_feedback(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl)
 {
 	struct flowadv_fcentry *fce = NULL;
+
+	if (fq->fq_tfc_type == FQ_TFC_L4S) {
+		return;
+	}
 
 	IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
 	STAILQ_FOREACH(fce, &fqs->fqs_fclist, fce_link) {
@@ -1896,10 +1902,18 @@ fq_if_dequeue(fq_if_t *fqs, fq_if_classq_t *fq_cl, uint32_t pktlimit,
 		    pktlimit, head, tail, &bytecnt, &pktcnt, &qempty,
 		    PKTF_NEW_FLOW, now);
 
+		/*
+		 * From RFC 8290:
+		 * if that queue has a negative number of credits (i.e., it has already
+		 * dequeued at least a quantum of bytes), it is given an additional
+		 * quantum of credits, the queue is put onto _the end of_ the list of
+		 * old queues, and the routine selects the next queue and starts again.
+		 */
 		if (fq->fq_deficit <= 0 || qempty) {
+			fq->fq_deficit += fq_cl->fcl_quantum;
 			fq_if_empty_new_flow(fq, fq_cl);
 		}
-		fq->fq_deficit += fq_cl->fcl_quantum;
+
 		if (limit_reached) {
 			goto done;
 		}
@@ -2031,6 +2045,7 @@ fq_if_getqstats_ifclassq(struct ifclassq *ifq, uint8_t gid, u_int32_t qid,
 	fcls->fcls_quantum = fq_cl->fcl_quantum;
 	fcls->fcls_drr_max = fq_cl->fcl_drr_max;
 	fcls->fcls_budget = fq_cl->fcl_budget;
+	fcls->fcls_l4s_target_qdelay = grp->fqg_target_qdelays[FQ_TFC_L4S];
 	fcls->fcls_target_qdelay = grp->fqg_target_qdelays[FQ_TFC_C];
 	fcls->fcls_update_interval = grp->fqg_update_intervals[FQ_TFC_C];
 	fcls->fcls_flow_control = fq_cl->fcl_stat.fcl_flow_control;
@@ -2058,6 +2073,9 @@ fq_if_getqstats_ifclassq(struct ifclassq *ifq, uint8_t gid, u_int32_t qid,
 	fcls->fcls_max_qdelay = fq_cl->fcl_stat.fcl_max_qdelay;
 	fcls->fcls_avg_qdelay = fq_cl->fcl_stat.fcl_avg_qdelay;
 	fcls->fcls_overwhelming = fq_cl->fcl_stat.fcl_overwhelming;
+	fcls->fcls_ce_marked = fq_cl->fcl_stat.fcl_ce_marked;
+	fcls->fcls_ce_mark_failures = fq_cl->fcl_stat.fcl_ce_mark_failures;
+	fcls->fcls_l4s_pkts = fq_cl->fcl_stat.fcl_l4s_pkts;
 
 	/* Gather per flow stats */
 	flowstat_cnt = min((fcls->fcls_newflows_cnt +

@@ -666,6 +666,7 @@ _m_trailingspace:_mbuf_trailingspace
 _mach_gss_init_sec_context_v3
 _mach_gss_log_error
 _mach_msg_filter_register_callback
+_kernel_mach_msg_send_with_builder
 _mach_vm_allocate:_mach_vm_allocate_external
 _mach_vm_behavior_set
 _mach_vm_deallocate

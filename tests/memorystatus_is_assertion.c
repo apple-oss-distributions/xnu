@@ -467,6 +467,14 @@ T_DECL(assertion_test_bad_flags, "verify bad flag returns an error", T_META_TIME
 	T_ASSERT_POSIX_FAILURE(err, EINVAL, "MEMORYSTATUS_CMD_SET_PRIORITY_PROPERTIES should fail with bad flags (err=%d)", err);
 }
 
+#if TARGET_OS_OSX
+/*
+ * Idle band deferral, aka aging band/demotion, has been disabled on macOS till
+ * we do the daemon hygiene work on macOS to make sure that processes don't change
+ * their role after spawn e.g. apps opting into dirty-tracking/idle-exit.
+ * The following set of tests rely on PROC_DIRTY_DEFER, aka aging bands, for the tests.
+ */
+#else /* TARGET_OS_OSX */
 
 T_DECL(assertion_test_repetitive_non_dirty_tracking, "Scenario #1 - repetitive assertion priority on non-dirty-tracking process", T_META_TIMEOUT(60), T_META_ASROOT(true)) {
 	/*
@@ -506,3 +514,4 @@ T_DECL(assertion_test_allow_idle_exit, "set assertion priorities on process supp
 T_DECL(assertion_test_do_not_allow_idle_exit, "set assertion priorities on process no idle exit allowed", T_META_TIMEOUT(360), T_META_ASROOT(true)) {
 	memorystatus_assertion_test_do_not_allow_idle_exit();
 }
+#endif /* TARGET_OS_OSX */

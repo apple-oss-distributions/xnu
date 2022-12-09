@@ -508,17 +508,17 @@ reclaim_chunk(vm_deferred_reclamation_metadata_t metadata)
 	if (busy != head) {
 		// Userspace overwrote one of the pointers
 		os_log_with_startup_serial(OS_LOG_DEFAULT,
-		    "vm_reclaim: Userspace modified head or busy pointer! %llu (0x%llx) != %llu (0x%llx) tail = %llu (0x%llx)\n",
+		    "vm_reclaim: Userspace modified head or busy pointer! head: %llu (0x%llx) != busy: %llu (0x%llx) | tail = %llu (0x%llx)\n",
 		    head, get_head_ptr(indices), busy, get_busy_ptr(indices), tail, get_tail_ptr(indices));
 		reclaim_kill_with_reason(metadata, kGUARD_EXC_RECLAIM_INDEX_FAILURE, busy);
 		goto fail;
 	}
 
 	if (tail < head) {
+		// Userspace is likely in the middle of trying to re-use an entry, bail on this reclamation
 		os_log_with_startup_serial(OS_LOG_DEFAULT,
-		    "vm_reclaim: Userspace modified head or tail pointer! %llu (0x%llx) != %llu (0x%llx) busy = %llu (0x%llx)\n",
+		    "vm_reclaim: Userspace modified head or tail pointer! head: %llu (0x%llx) > tail: %llu (0x%llx) | busy = %llu (0x%llx)\n",
 		    head, get_head_ptr(indices), tail, get_tail_ptr(indices), busy, get_busy_ptr(indices));
-		reclaim_kill_with_reason(metadata, kGUARD_EXC_RECLAIM_INDEX_FAILURE, tail);
 		goto fail;
 	}
 
@@ -545,10 +545,10 @@ reclaim_chunk(vm_deferred_reclamation_metadata_t metadata)
 		}
 		tail = new_tail;
 		if (tail < head) {
+			// Userspace is likely in the middle of trying to re-use an entry, bail on this reclamation
 			os_log_with_startup_serial(OS_LOG_DEFAULT,
-			    "vm_reclaim: Userspace modified head or tail pointer! %llu (0x%llx) != %llu (0x%llx) busy = %llu (0x%llx)\n",
+			    "vm_reclaim: Userspace modified head or tail pointer! head: %llu (0x%llx) > tail: %llu (0x%llx) | busy = %llu (0x%llx)\n",
 			    head, get_head_ptr(indices), tail, get_tail_ptr(indices), busy, get_busy_ptr(indices));
-			reclaim_kill_with_reason(metadata, kGUARD_EXC_RECLAIM_INDEX_FAILURE, tail);
 			goto fail;
 		}
 		/* Can't reclaim these entries. Try again */

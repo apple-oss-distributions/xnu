@@ -1058,5 +1058,40 @@ vm/vm_reclaim: OTHER_LDFLAGS += -ldarwintest_utils
 
 vm/vm_reclaim: INVALID_ARCHS = armv7k arm64_32
 
+EXCLUDED_SOURCES += constrained_ctypes_tests.c
+CUSTOM_TARGETS += constrained_ctypes_tests_enabled constrained_ctypes_tests_enacted constrained_ctypes_tests_disabled
+constrained_ctypes_tests_enabled: OTHER_CFLAGS += -D__CCT_TEST_ENABLED
+constrained_ctypes_tests_enabled: OTHER_LDFLAGS += -ldarwintest_utils
+constrained_ctypes_tests_enabled: constrained_ctypes_tests.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) constrained_ctypes_tests.c -o $(SYMROOT)/constrained_ctypes_tests_enabled
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/constrained_ctypes_tests_enabled;
+
+install-constrained_ctypes_tests_enabled: constrained_ctypes_tests_enabled
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/constrained_ctypes_tests_enabled $(INSTALLDIR)/
+
+constrained_ctypes_tests_enacted: OTHER_CFLAGS += -D__CCT_TEST_ENABLED
+constrained_ctypes_tests_enacted: OTHER_CFLAGS += -D__CCT_TEST_ENACTED
+constrained_ctypes_tests_enacted: OTHER_CFLAGS += -fbounds-attributes
+constrained_ctypes_tests_enacted: OTHER_LDFLAGS += -ldarwintest_utils
+constrained_ctypes_tests_enacted: constrained_ctypes_tests.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) constrained_ctypes_tests.c -o $(SYMROOT)/constrained_ctypes_tests_enacted
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/constrained_ctypes_tests_enacted;
+
+install-constrained_ctypes_tests_enacted: constrained_ctypes_tests_enacted
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/constrained_ctypes_tests_enacted $(INSTALLDIR)/
+
+
+constrained_ctypes_tests_disabled: OTHER_LDFLAGS += -ldarwintest_utils
+constrained_ctypes_tests_disabled: constrained_ctypes_tests.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) constrained_ctypes_tests.c -o $(SYMROOT)/constrained_ctypes_tests_disabled
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/constrained_ctypes_tests_disabled;
+
+install-constrained_ctypes_tests_disabled: constrained_ctypes_tests_disabled
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/constrained_ctypes_tests_disabled $(INSTALLDIR)/
+
+
 include $(DEVELOPER_DIR)/AppleInternal/Makefiles/darwintest/Makefile.targets
 

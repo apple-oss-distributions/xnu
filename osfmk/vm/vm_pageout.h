@@ -163,6 +163,7 @@ extern int      vm_debug_events;
 #define VM_INFO7                        0x111
 #define VM_INFO8                        0x112
 #define VM_INFO9                        0x113
+#define VM_INFO10                       0x114
 
 #define VM_UPL_PAGE_WAIT                0x120
 #define VM_IOPL_PAGE_WAIT               0x121
@@ -744,6 +745,11 @@ struct vm_pageout_vminfo {
 
 	unsigned long vm_phantom_cache_found_ghost;
 	unsigned long vm_phantom_cache_added_ghost;
+
+	unsigned long vm_pageout_protected_sharedcache;
+	unsigned long vm_pageout_forcereclaimed_sharedcache;
+	unsigned long vm_pageout_protected_realtime;
+	unsigned long vm_pageout_forcereclaimed_realtime;
 };
 
 extern struct vm_pageout_vminfo vm_pageout_vminfo;

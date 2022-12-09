@@ -188,6 +188,7 @@ struct in6_ifaddr {
 #define ifatoia6(ifa)   ((struct in6_ifaddr *)(void *)(ifa))
 
 extern TAILQ_HEAD(in6_ifaddrhead, in6_ifaddr) in6_ifaddrhead;
+extern uint32_t in6_ifaddrlist_genid;
 extern TAILQ_HEAD(in6_ifaddrhashhead, in6_ifaddr) * in6_ifaddrhashtbl;
 extern uint32_t in6addr_nhash;                  /* hash table size */
 extern uint32_t in6addr_hashp;                  /* next largest prime */

@@ -83,7 +83,7 @@ uint64_t coalition_id(coalition_t coal);
  *          Otherwise: the number of coalitions whose type matches
  *                     the 'type' parameter (all coalitions if type == -1)
  */
-extern int coalitions_get_list(int type, struct procinfo_coalinfo *coal_list, int list_sz);
+extern size_t coalitions_get_list(int type, struct procinfo_coalinfo *coal_list, size_t list_sz);
 
 
 /*
@@ -213,10 +213,10 @@ coalition_id(__unused coalition_t coal)
 	return 0;
 }
 
-static inline int
+static inline size_t
 coalitions_get_list(__unused int type,
     __unused struct procinfo_coalinfo *coal_list,
-    __unused int list_sz)
+    __unused size_t list_sz)
 {
 	return 0;
 }

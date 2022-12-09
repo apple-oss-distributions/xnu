@@ -1731,6 +1731,27 @@ memory_object_mark_eligible_for_secluded(
 }
 #endif /* CONFIG_SECLUDED_MEMORY */
 
+void
+memory_object_mark_for_realtime(
+	memory_object_control_t control,
+	bool                    for_realtime)
+{
+	vm_object_t             object;
+
+	if (control == NULL) {
+		return;
+	}
+	object = memory_object_control_to_vm_object(control);
+
+	if (object == VM_OBJECT_NULL) {
+		return;
+	}
+
+	vm_object_lock(object);
+	object->for_realtime = for_realtime;
+	vm_object_unlock(object);
+}
+
 kern_return_t
 memory_object_pages_resident(
 	memory_object_control_t control,

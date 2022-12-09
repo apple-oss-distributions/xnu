@@ -368,6 +368,8 @@ static const struct vm_object vm_object_template = {
 	.__object3_unused_bits = 0,
 #endif /* CONFIG_SECLUDED_MEMORY */
 
+	.for_realtime = false,
+
 #if VM_OBJECT_ACCESS_TRACKING
 	.access_tracking = FALSE,
 	.access_tracking_reads = 0,

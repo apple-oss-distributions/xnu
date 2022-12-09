@@ -1512,7 +1512,32 @@ ikm_header_inlined(ipc_kmsg_t kmsg)
 	return kmsg->ikm_type <= IKM_TYPE_UDATA_OOL;
 }
 
+/*
+ * Returns start address of user data for kmsg.
+ *
+ * Condition:
+ *   1. kmsg descriptors must have been validated and expanded, or is a message
+ *      originated from kernel.
+ *   2. ikm_header() content may or may not be populated
+ */
+void *
+ikm_udata(
+	ipc_kmsg_t      kmsg,
+	mach_msg_size_t desc_count,
+	bool            complex)
+{
+	if (!ikm_is_linear(kmsg)) {
+		return kmsg->ikm_udata;
+	} else if (complex) {
+		return (void *)((vm_offset_t)ikm_header(kmsg) + sizeof(mach_msg_base_t) +
+		       desc_count * KERNEL_DESC_SIZE);
+	} else {
+		return (void *)((vm_offset_t)ikm_header(kmsg) + sizeof(mach_msg_header_t));
+	}
+}
+
 #if (DEVELOPMENT || DEBUG)
+/* Returns end of kdata buffer (may contain extra space) */
 static vm_offset_t
 ikm_kdata_end(ipc_kmsg_t kmsg)
 {
@@ -1530,6 +1555,8 @@ ikm_kdata_end(ipc_kmsg_t kmsg)
 		       vec->kmsgv_size * KERNEL_DESC_SIZE;
 	}
 }
+
+/* Returns end of udata buffer (may contain extra space) */
 static vm_offset_t
 ikm_udata_end(ipc_kmsg_t kmsg)
 {
@@ -1642,7 +1669,7 @@ ipc_kmsg_t
 ipc_kmsg_alloc(
 	mach_msg_size_t         kmsg_size,
 	mach_msg_size_t         aux_size,
-	mach_msg_size_t         user_descs,
+	mach_msg_size_t         desc_count,
 	ipc_kmsg_alloc_flags_t  flags)
 {
 	mach_msg_size_t max_kmsg_size, max_delta, max_kdata_size,
@@ -1666,9 +1693,9 @@ ipc_kmsg_alloc(
 	 * while everything after it gets shifted to higher address.
 	 */
 	if (flags & IPC_KMSG_ALLOC_KERNEL) {
-		assert(user_descs == 0);
+		assert(aux_size == 0);
 		max_delta = 0;
-	} else if (os_mul_overflow(user_descs, USER_DESC_MAX_DELTA, &max_delta)) {
+	} else if (os_mul_overflow(desc_count, USER_DESC_MAX_DELTA, &max_delta)) {
 		return IKM_NULL;
 	}
 
@@ -1679,15 +1706,11 @@ ipc_kmsg_alloc(
 		return IKM_NULL;
 	}
 
-
 	if (flags & IPC_KMSG_ALLOC_ZERO) {
 		alloc_flags |= Z_ZERO;
 	}
 	if (flags & IPC_KMSG_ALLOC_NOFAIL) {
 		alloc_flags |= Z_NOFAIL;
-	}
-	if (flags & IPC_KMSG_ALLOC_KERNEL) {
-		flags |= IPC_KMSG_ALLOC_LINEAR;
 	}
 
 	/* First, determine the layout of the kmsg to allocate */
@@ -1722,7 +1745,7 @@ ipc_kmsg_alloc(
 		 * max_kdata_size: Maximum combined size of header plus (optional) descriptors.
 		 * This is _base_ size + descriptor count * kernel descriptor size.
 		 */
-		if (os_mul_and_add_overflow(user_descs, KERNEL_DESC_SIZE,
+		if (os_mul_and_add_overflow(desc_count, KERNEL_DESC_SIZE,
 		    sizeof(mach_msg_base_t), &max_kdata_size)) {
 			return IKM_NULL;
 		}
@@ -1731,7 +1754,9 @@ ipc_kmsg_alloc(
 		 * min_kdata_size: Minimum combined size of header plus (optional) descriptors.
 		 * This is _header_ size + descriptor count * minimal descriptor size.
 		 */
-		if (os_mul_and_add_overflow(user_descs, MACH_MSG_DESC_MIN_SIZE,
+		mach_msg_size_t min_size = (flags & IPC_KMSG_ALLOC_KERNEL) ?
+		    KERNEL_DESC_SIZE : MACH_MSG_DESC_MIN_SIZE;
+		if (os_mul_and_add_overflow(desc_count, min_size,
 		    sizeof(mach_msg_header_t), &min_kdata_size)) {
 			return IKM_NULL;
 		}
@@ -1763,7 +1788,7 @@ ipc_kmsg_alloc(
 
 	if (max_kdata_size > 0) {
 		if (kmsg_type == IKM_TYPE_ALL_OOL) {
-			msg_data = kalloc_type(mach_msg_base_t, mach_msg_descriptor_t, user_descs, alloc_flags);
+			msg_data = kalloc_type(mach_msg_base_t, mach_msg_descriptor_t, desc_count, alloc_flags);
 		} else {
 			assert(kmsg_type == IKM_TYPE_KDATA_OOL);
 			msg_data = kalloc_data(max_kdata_size, alloc_flags);
@@ -1790,7 +1815,7 @@ ipc_kmsg_alloc(
 		vec = (ipc_kmsg_vector_t *)ikm_inline_data(kmsg);
 		vec->kmsgv_data = msg_data;
 		vec->kmsgv_size = (kmsg_type == IKM_TYPE_ALL_OOL) ?
-		    user_descs :     /* save descriptor count on kmsgv_size */
+		    desc_count :     /* save descriptor count on kmsgv_size */
 		    max_kdata_size;  /* buffer size */
 	}
 
@@ -1807,8 +1832,8 @@ ipc_kmsg_t
 ipc_kmsg_alloc_uext_reply(
 	mach_msg_size_t         size)
 {
-	return ipc_kmsg_alloc(size, 0, 0,
-	           IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
+	return ipc_kmsg_alloc(size, 0, 0, IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_LINEAR |
+	           IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
 }
 
 
@@ -2635,14 +2660,19 @@ ipc_kmsg_get_from_kernel(
 	mach_msg_size_t         size, /* can be larger than prealloc space */
 	ipc_kmsg_t              *kmsgp)
 {
-	ipc_kmsg_t      kmsg;
-	ipc_port_t      dest_port;
+	ipc_kmsg_t        kmsg;
 	mach_msg_header_t *hdr;
+	void              *udata;
+
+	ipc_port_t        dest_port;
+	bool              complex;
+	mach_msg_size_t   desc_count, kdata_sz;
 
 	assert(size >= sizeof(mach_msg_header_t));
 	assert((size & 3) == 0);
 
-	dest_port = msg->msgh_remote_port;
+	dest_port = msg->msgh_remote_port; /* Nullable */
+	complex = (msg->msgh_bits & MACH_MSGH_BITS_COMPLEX);
 
 	/*
 	 * See if the port has a pre-allocated kmsg for kernel
@@ -2676,16 +2706,33 @@ ipc_kmsg_get_from_kernel(
 
 		ip_mq_unlock(dest_port);
 	} else {
-		kmsg = ipc_kmsg_alloc(size, 0, 0, IPC_KMSG_ALLOC_KERNEL);
-		if (kmsg == IKM_NULL) {
-			return MACH_SEND_NO_BUFFER;
+		desc_count = 0;
+		kdata_sz = sizeof(mach_msg_header_t);
+
+		if (complex) {
+			desc_count = ((mach_msg_base_t *)msg)->body.msgh_descriptor_count;
+			kdata_sz = sizeof(mach_msg_base_t) + desc_count * KERNEL_DESC_SIZE;
+			assert(size >= kdata_sz);
 		}
+
+		kmsg = ipc_kmsg_alloc(size, 0, desc_count, IPC_KMSG_ALLOC_KERNEL);
+		/* kmsg can be non-linear */
+	}
+
+	if (kmsg == IKM_NULL) {
+		return MACH_SEND_NO_BUFFER;
 	}
 
 	hdr = ikm_header(kmsg);
-	assert(ikm_is_linear(kmsg));
-
-	memcpy(hdr, msg, size);
+	if (ikm_is_linear(kmsg)) {
+		memcpy(hdr, msg, size);
+	} else {
+		/* copy kdata to kernel allocation chunk */
+		memcpy(hdr, msg, kdata_sz);
+		/* copy udata to user allocation chunk */
+		udata = ikm_udata(kmsg, desc_count, complex);
+		memcpy(udata, (char *)msg + kdata_sz, size - kdata_sz);
+	}
 	hdr->msgh_size = size;
 
 	*kmsgp = kmsg;

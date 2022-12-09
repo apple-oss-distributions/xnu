@@ -1199,6 +1199,9 @@ struct kernel_triage_info_v1 {
 #define TASK_CRASHINFO_TASK_IS_CORPSE_FORK                      0x837 /* boolean_t */
 #define TASK_CRASHINFO_EXCEPTION_TYPE                           0x838 /* int */
 
+#define TASK_CRASHINFO_CRASH_COUNT                              0x839 /* int */
+#define TASK_CRASHINFO_THROTTLE_TIMEOUT                         0x83A /* int */
+
 #define TASK_CRASHINFO_END                  KCDATA_TYPE_BUFFER_END
 
 /**************** definitions for backtrace info *********************/
@@ -1237,6 +1240,8 @@ struct btinfo_sc_load_info {
 #define TASK_BTINFO_EXCEPTION_TYPE                              0xA0A
 #define TASK_BTINFO_RUSAGE_INFO                                 0xA0B
 #define TASK_BTINFO_COALITION_ID                                0xA0C
+#define TASK_BTINFO_CRASH_COUNT                                 0xA0D
+#define TASK_BTINFO_THROTTLE_TIMEOUT                            0xA0E
 
 /* Only in BTINFO */
 #define TASK_BTINFO_THREAD_ID                                   0xA20 /* uint64_t */

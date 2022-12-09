@@ -3854,6 +3854,9 @@ do_fork1:
 	p->p_crash_behavior = crash_behavior;
 	p->p_crash_behavior_deadline = crash_behavior_deadline;
 
+	p->p_crash_count = px_sa.psa_crash_count;
+	p->p_throttle_timeout = px_sa.psa_throttle_timeout;
+
 	/* We'll need the subsystem root for setting up Apple strings */
 	imgp->ip_subsystem_root_path = p->p_subsystem_root_path;
 

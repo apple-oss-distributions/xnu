@@ -57,7 +57,7 @@
 /*
  * BSD interface functions
  */
-int coalitions_get_list(int type, struct procinfo_coalinfo *coal_list, int list_sz);
+size_t coalitions_get_list(int type, struct procinfo_coalinfo *coal_list, size_t list_sz);
 coalition_t task_get_coalition(task_t task, int type);
 boolean_t coalition_is_leader(task_t task, coalition_t coal);
 task_t coalition_get_leader(coalition_t coal);
@@ -2105,10 +2105,10 @@ coalition_fill_procinfo(struct coalition *coal,
 }
 
 
-int
-coalitions_get_list(int type, struct procinfo_coalinfo *coal_list, int list_sz)
+size_t
+coalitions_get_list(int type, struct procinfo_coalinfo *coal_list, size_t list_sz)
 {
-	int ncoals = 0;
+	size_t ncoals = 0;
 	struct coalition *coal;
 
 	lck_rw_lock_shared(&coalitions_list_lock);

@@ -723,8 +723,10 @@ class IOServiceUserNotification : public IOUserNotification
 {
 	OSDeclareDefaultStructors(IOServiceUserNotification);
 
-	struct PingMsg {
+	struct PingMsgKdata {
 		mach_msg_header_t               msgHdr;
+	};
+	struct PingMsgUdata {
 		OSNotificationHeader64          notifyHeader;
 	};
 
@@ -758,10 +760,12 @@ class IOServiceMessageUserNotification : public IOUserNotification
 {
 	OSDeclareDefaultStructors(IOServiceMessageUserNotification);
 
-	struct PingMsg {
+	struct PingMsgKdata {
 		mach_msg_header_t               msgHdr;
 		mach_msg_body_t                 msgBody;
 		mach_msg_port_descriptor_t      ports[1];
+	};
+	struct PingMsgUdata {
 		OSNotificationHeader64          notifyHeader __attribute__ ((packed));
 	};
 
@@ -945,7 +949,7 @@ IOServiceUserNotification::handler( void * ref,
 	kern_return_t       kr;
 	ipc_port_t          port = NULL;
 	bool                sendPing = false;
-	mach_msg_size_t     msgSize;
+	mach_msg_size_t     msgSize, payloadSize;
 
 	IOTakeLock( lock );
 
@@ -966,25 +970,31 @@ IOServiceUserNotification::handler( void * ref,
 	if (sendPing) {
 		port = iokit_port_for_object( this, IKOT_IOKIT_OBJECT );
 
-		msgSize = (mach_msg_size_t)(sizeof(PingMsg) - sizeof(OSAsyncReference64) + msgReferenceSize);
-		kr = kernel_mach_msg_send_with_builder(msgSize,
+		payloadSize = sizeof(PingMsgUdata) - sizeof(OSAsyncReference64) + msgReferenceSize;
+		msgSize = (mach_msg_size_t)(sizeof(PingMsgKdata) + payloadSize);
+
+		kr = kernel_mach_msg_send_with_builder_internal(0, payloadSize,
 		    (MACH_SEND_MSG | MACH_SEND_ALWAYS | MACH_SEND_IMPORTANCE),
 		    MACH_MSG_TIMEOUT_NONE, NULL,
-		    ^(mach_msg_header_t *hdr, mach_msg_size_t size){
-			PingMsg *thisMsg = (PingMsg *)hdr;
+		    ^(mach_msg_header_t *hdr, __assert_only mach_msg_descriptor_t *descs, void *payload){
+			PingMsgUdata *udata = (PingMsgUdata *)payload;
 
-			thisMsg->msgHdr.msgh_remote_port    = remotePort;
-			thisMsg->msgHdr.msgh_local_port     = port;
-			thisMsg->msgHdr.msgh_bits           = MACH_MSGH_BITS(
+			hdr->msgh_remote_port    = remotePort;
+			hdr->msgh_local_port     = port;
+			hdr->msgh_bits           = MACH_MSGH_BITS(
 				MACH_MSG_TYPE_COPY_SEND /*remote*/,
 				MACH_MSG_TYPE_MAKE_SEND /*local*/);
-			thisMsg->msgHdr.msgh_size           = msgSize;
-			thisMsg->msgHdr.msgh_id             = kOSNotificationMessageID;
+			hdr->msgh_size           = msgSize;
+			hdr->msgh_id             = kOSNotificationMessageID;
 
-			thisMsg->notifyHeader.size          = 0;
-			thisMsg->notifyHeader.type          = msgType;
+			assert(descs == NULL);
+			/* End of kernel processed data */
 
-			bcopy( msgReference, thisMsg->notifyHeader.reference, msgReferenceSize );
+			udata->notifyHeader.size          = 0;
+			udata->notifyHeader.type          = msgType;
+
+			assert((char *)udata->notifyHeader.reference + msgReferenceSize <= (char *)payload + payloadSize);
+			bcopy( msgReference, udata->notifyHeader.reference, msgReferenceSize );
 		});
 
 		if (port) {
@@ -1131,53 +1141,60 @@ IOServiceMessageUserNotification::handler( void * ref,
 	argSize = (argSize + kIOKitNoticationMsgSizeMask) & ~kIOKitNoticationMsgSizeMask;
 
 	mach_msg_size_t extraSize = kIOUserNotifyMaxMessageSize + sizeof(IOServiceInterestContent64);
-	mach_msg_size_t msgSize = (mach_msg_size_t) (sizeof(PingMsg) - sizeof(OSAsyncReference64) + msgReferenceSize);
+	mach_msg_size_t msgSize = (mach_msg_size_t) (sizeof(PingMsgKdata) +
+	    sizeof(PingMsgUdata) - sizeof(OSAsyncReference64) + msgReferenceSize);
 
 	if (os_add3_overflow(msgSize, offsetof(IOServiceInterestContent64, messageArgument), argSize, &thisMsgSize)) {
 		return kIOReturnBadArgument;
 	}
+	mach_msg_size_t payloadSize = thisMsgSize - sizeof(PingMsgKdata);
 
 	providerPort = iokit_port_for_object( provider, IKOT_IOKIT_OBJECT );
 	thisPort = iokit_port_for_object( this, IKOT_IOKIT_OBJECT );
 
-	kr = kernel_mach_msg_send_with_builder(thisMsgSize,
+	kr = kernel_mach_msg_send_with_builder_internal(1, payloadSize,
 	    (MACH_SEND_MSG | MACH_SEND_ALWAYS | MACH_SEND_IMPORTANCE),
 	    MACH_MSG_TIMEOUT_NONE, NULL,
-	    ^(mach_msg_header_t *hdr, mach_msg_size_t size) {
-		PingMsg *thisMsg = (PingMsg *)hdr;
+	    ^(mach_msg_header_t *hdr, mach_msg_descriptor_t *descs, void *payload){
+		mach_msg_port_descriptor_t *port_desc = (mach_msg_port_descriptor_t *)descs;
+		PingMsgUdata *udata = (PingMsgUdata *)payload;
 		IOServiceInterestContent64 * data;
+		mach_msg_size_t dataOffset;
 
-		thisMsg->msgHdr.msgh_remote_port    = remotePort;
-		thisMsg->msgHdr.msgh_local_port     = thisPort;
-		thisMsg->msgHdr.msgh_bits           = MACH_MSGH_BITS_COMPLEX
+		hdr->msgh_remote_port    = remotePort;
+		hdr->msgh_local_port     = thisPort;
+		hdr->msgh_bits           = MACH_MSGH_BITS_COMPLEX
 		|  MACH_MSGH_BITS(
 			MACH_MSG_TYPE_COPY_SEND /*remote*/,
 			MACH_MSG_TYPE_MAKE_SEND /*local*/);
-		thisMsg->msgHdr.msgh_size           = size;
-		thisMsg->msgHdr.msgh_id             = kOSNotificationMessageID;
+		hdr->msgh_size           = thisMsgSize;
+		hdr->msgh_id             = kOSNotificationMessageID;
 
-		thisMsg->msgBody.msgh_descriptor_count = 1;
+		/* body.msgh_descriptor_count is set automatically after the closure */
 
-		thisMsg->ports[0].name              = providerPort;
-		thisMsg->ports[0].disposition       = MACH_MSG_TYPE_MAKE_SEND;
-		thisMsg->ports[0].type              = MACH_MSG_PORT_DESCRIPTOR;
+		port_desc[0].name              = providerPort;
+		port_desc[0].disposition       = MACH_MSG_TYPE_MAKE_SEND;
+		port_desc[0].type              = MACH_MSG_PORT_DESCRIPTOR;
+		/* End of kernel processed data */
 
-		thisMsg->notifyHeader.size          = extraSize;
-		thisMsg->notifyHeader.type          = type;
-		bcopy( msgReference, thisMsg->notifyHeader.reference, msgReferenceSize );
+		udata->notifyHeader.size          = extraSize;
+		udata->notifyHeader.type          = type;
+		bcopy( msgReference, udata->notifyHeader.reference, msgReferenceSize );
 
-
-		data = (IOServiceInterestContent64 *) (((uint8_t *) thisMsg) + msgSize);
-		// == thisMsg->notifyHeader.content;
+		/* data is after msgReference */
+		dataOffset = sizeof(PingMsgUdata) - sizeof(OSAsyncReference64) + msgReferenceSize;
+		data = (IOServiceInterestContent64 *) (((uint8_t *) udata) + dataOffset);
 		data->messageType = messageType;
 
 		if (callerArgSize == 0) {
+		        assert((char *)data->messageArgument + argSize <= (char *)payload + payloadSize);
 		        data->messageArgument[0] = (io_user_reference_t) messageArgument;
 		        if (!clientIs64) {
 		                data->messageArgument[0] |= (data->messageArgument[0] << 32);
 			}
 		} else {
-		        bcopy( messageArgument, data->messageArgument, callerArgSize );
+		        assert((char *)data->messageArgument + callerArgSize <= (char *)payload + payloadSize);
+		        bcopy(messageArgument, data->messageArgument, callerArgSize);
 		}
 	});
 

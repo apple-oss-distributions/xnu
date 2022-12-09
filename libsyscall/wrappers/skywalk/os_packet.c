@@ -358,6 +358,12 @@ os_packet_get_truncated(const packet_t ph)
 	return __packet_get_truncated(ph);
 }
 
+void
+os_packet_set_l4s_flag(const packet_t ph, const boolean_t is_l4s)
+{
+	__packet_set_l4s_flag(ph, is_l4s);
+}
+
 uint32_t
 os_packet_get_data_length(const packet_t ph)
 {

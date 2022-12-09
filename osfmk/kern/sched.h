@@ -233,14 +233,14 @@ struct run_queue {
 };
 
 inline static void
-rq_bitmap_set(bitmap_t *map, u_int n)
+rq_bitmap_set(bitmap_t *__header_indexable map, u_int n)
 {
 	assert(n < NRQS);
 	bitmap_set(map, n);
 }
 
 inline static void
-rq_bitmap_clear(bitmap_t *map, u_int n)
+rq_bitmap_clear(bitmap_t *__header_indexable map, u_int n)
 {
 	assert(n < NRQS);
 	bitmap_clear(map, n);

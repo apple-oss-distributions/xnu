@@ -497,7 +497,7 @@ get_and_verify_graft_metadata_vp_size(vnode_t graft_vp, vfs_context_t vctx, size
 
 	if (sb.st_size == 0) {
 		error = ENODATA;
-	} else if (sb.st_size > MAX_GRAFT_METADATA_SIZE) {
+	} else if ((size_t) sb.st_size > MAX_GRAFT_METADATA_SIZE) {
 		error = EFBIG;
 	} else {
 		*size = (size_t) sb.st_size;
@@ -4709,7 +4709,6 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 			if (!strncmp(vp->v_name, "dyld", len) ||
 			    !strncmp(vp->v_name, "launchd", len) ||
 			    !strncmp(vp->v_name, "Camera", len) ||
-			    !strncmp(vp->v_name, "mediaserverd", len) ||
 			    !strncmp(vp->v_name, "SpringBoard", len) ||
 			    !strncmp(vp->v_name, "backboardd", len)) {
 				/*
@@ -4719,6 +4718,51 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 				 */
 				memory_object_mark_eligible_for_secluded(moc,
 				    FALSE);
+			} else if (!strncmp(vp->v_name, "mediaserverd", len)) {
+				memory_object_mark_eligible_for_secluded(moc,
+				    FALSE);
+				memory_object_mark_for_realtime(moc,
+				    true);
+			} else if (!strncmp(vp->v_name, "bluetoothd", len)) {
+				/*
+				 * bluetoothd might be needed for realtime audio
+				 * playback.
+				 */
+				memory_object_mark_eligible_for_secluded(moc,
+				    FALSE);
+				memory_object_mark_for_realtime(moc,
+				    true);
+			} else {
+				char pathname[64] = { 0, };
+				size_t copied;
+				if (UIO_SEG_IS_USER_SPACE(ndp->ni_segflg)) {
+					(void)copyinstr(ndp->ni_dirp,
+					    pathname,
+					    sizeof(pathname),
+					    &copied);
+				} else {
+					copystr(CAST_DOWN(void *, ndp->ni_dirp),
+					    pathname,
+					    sizeof(pathname),
+					    &copied);
+				}
+				pathname[sizeof(pathname) - 1] = '\0';
+				if (strncmp(pathname,
+				    "/Library/Audio/Plug-Ins/",
+				    strlen("/Library/Audio/Plug-Ins/")) == 0 ||
+				    strncmp(pathname,
+				    "/System/Library/Audio/Plug-Ins/",
+				    strlen("/System/Library/Audio/Plug-Ins/")) == 0) {
+					/*
+					 * This may be an audio plugin required
+					 * for realtime playback.
+					 * ==> NOT eligible for secluded.
+					 */
+					memory_object_mark_eligible_for_secluded(moc,
+					    FALSE);
+					memory_object_mark_for_realtime(moc,
+					    true);
+				}
 			}
 		}
 	}

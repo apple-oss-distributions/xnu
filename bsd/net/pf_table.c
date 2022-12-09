@@ -1640,7 +1640,7 @@ pfr_ina_begin(struct pfr_table *trs, u_int32_t *ticket, int *ndel, int flags)
 		}
 		rs->topen = 1;
 	} else {
-		pf_remove_if_empty_ruleset(rs);
+		pf_release_ruleset(rs);
 	}
 	if (ndel != NULL) {
 		*ndel = xdel;
@@ -1674,6 +1674,8 @@ pfr_ina_define(struct pfr_table *tbl, user_addr_t addr, int size,
 	if (rs == NULL || !rs->topen || ticket != rs->tticket) {
 		return EBUSY;
 	}
+	pf_release_ruleset(rs);
+	rs = NULL;
 	tbl->pfrt_flags |= PFR_TFLAG_INACTIVE;
 	SLIST_INIT(&tableq);
 	kt = RB_FIND(pfr_ktablehead, &pfr_ktables, (struct pfr_ktable *)(void *)tbl);
@@ -1777,7 +1779,7 @@ pfr_ina_rollback(struct pfr_table *trs, u_int32_t ticket, int *ndel, int flags)
 	ACCEPT_FLAGS(flags, PFR_FLAG_DUMMY);
 	rs = pf_find_ruleset(trs->pfrt_anchor);
 	if (rs == NULL || !rs->topen || ticket != rs->tticket) {
-		return 0;
+		goto done;
 	}
 	SLIST_INIT(&workq);
 	RB_FOREACH(p, pfr_ktablehead, &pfr_ktables) {
@@ -1792,10 +1794,14 @@ pfr_ina_rollback(struct pfr_table *trs, u_int32_t ticket, int *ndel, int flags)
 	if (!(flags & PFR_FLAG_DUMMY)) {
 		pfr_setflags_ktables(&workq);
 		rs->topen = 0;
-		pf_remove_if_empty_ruleset(rs);
 	}
 	if (ndel != NULL) {
 		*ndel = xdel;
+	}
+done:
+	if (rs) {
+		pf_release_ruleset(rs);
+		rs = NULL;
 	}
 	return 0;
 }
@@ -1809,13 +1815,15 @@ pfr_ina_commit(struct pfr_table *trs, u_int32_t ticket, int *nadd,
 	struct pf_ruleset       *rs;
 	int                      xadd = 0, xchange = 0;
 	u_int64_t                tzero = pf_calendar_time_second();
+	int                      err = 0;
 
 	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	ACCEPT_FLAGS(flags, PFR_FLAG_ATOMIC | PFR_FLAG_DUMMY);
 	rs = pf_find_ruleset(trs->pfrt_anchor);
 	if (rs == NULL || !rs->topen || ticket != rs->tticket) {
-		return EBUSY;
+		err = EBUSY;
+		goto done;
 	}
 
 	SLIST_INIT(&workq);
@@ -1838,7 +1846,6 @@ pfr_ina_commit(struct pfr_table *trs, u_int32_t ticket, int *nadd,
 			pfr_commit_ktable(p, tzero);
 		}
 		rs->topen = 0;
-		pf_remove_if_empty_ruleset(rs);
 	}
 	if (nadd != NULL) {
 		*nadd = xadd;
@@ -1847,7 +1854,12 @@ pfr_ina_commit(struct pfr_table *trs, u_int32_t ticket, int *nadd,
 		*nchange = xchange;
 	}
 
-	return 0;
+done:
+	if (rs != NULL) {
+		pf_release_ruleset(rs);
+		rs = NULL;
+	}
+	return err;
 }
 
 static void
@@ -1990,8 +2002,11 @@ pfr_table_count(struct pfr_table *filter, int flags)
 		return pfr_ktable_cnt;
 	}
 	if (filter->pfrt_anchor[0]) {
+		int r = -1;
 		rs = pf_find_ruleset(filter->pfrt_anchor);
-		return (rs != NULL) ? rs->tables : -1;
+		r = (rs != NULL) ? rs->tables : -1;
+		pf_release_ruleset(rs);
+		return r;
 	}
 	return pf_main_ruleset.tables;
 }
@@ -2187,7 +2202,7 @@ pfr_destroy_ktable(struct pfr_ktable *kt, int flushaddr)
 	}
 	if (kt->pfrkt_rs != NULL) {
 		kt->pfrkt_rs->tables--;
-		pf_remove_if_empty_ruleset(kt->pfrkt_rs);
+		pf_release_ruleset(kt->pfrkt_rs);
 	}
 	pool_put(&pfr_ktable_pl, kt);
 }

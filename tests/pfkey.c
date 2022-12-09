@@ -1,7 +1,8 @@
 #include <darwintest.h>
 #include <darwintest_utils.h>
 #include <dispatch/dispatch.h>
-#include <net/pfkeyv2.h>
+#include <net/if_var_private.h>
+#include <System/net/pfkeyv2.h>
 #include <netinet6/ipsec.h>
 #include <arpa/inet.h>
 
@@ -36,6 +37,7 @@ typedef enum {
 	TEST_SADB_EXT_MIGRATE_ADDRESS_IPv6 = 10,
 	TEST_SADB_EXT_MIGRATE_BAD_ADDRESS = 11,
 	TEST_TCP_INPUT_IPSEC_COPY_POLICY = 12,
+	TEST_SADB_X_SPDADD_MEMORY_LEAK_78944570 = 13,
 } test_identifier;
 
 static test_identifier test_id = TEST_INVALID;
@@ -54,6 +56,7 @@ static void pfkey_process_message_test_60822823_1(uint8_t **mhp, int pfkey_socke
 static void pfkey_process_message_test_60687183(uint8_t **mhp, int pfkey_socket);
 static void pfkey_process_message_test_60687183_1(uint8_t **mhp, int pfkey_socket);
 static void pfkey_process_message_test_60687183_2(uint8_t **mhp, int pfkey_socket);
+static void pfkey_process_message_test_78944570(uint8_t **mhp, int pfkey_socket);
 
 static void(*const process_pfkey_message_tests[])(uint8_t * *mhp, int pfkey_socket) =
 {
@@ -69,6 +72,8 @@ static void(*const process_pfkey_message_tests[])(uint8_t * *mhp, int pfkey_sock
 	pfkey_process_message_test_60687183,    // TEST_SADB_EXT_MIGRATE_ADDRESS_IPv4
 	pfkey_process_message_test_60687183_1,  // TEST_SADB_EXT_MIGRATE_ADDRESS_IPv6
 	pfkey_process_message_test_60687183_2,  // TEST_SADB_EXT_MIGRATE_BAD_ADDRESS
+	NULL,                                   // TEST_TCP_INPUT_IPSEC_COPY_POLICY
+	pfkey_process_message_test_78944570,    // TEST_SADB_X_SPDADD_MEMORY_LEAK_78944570
 };
 
 static void
@@ -258,7 +263,11 @@ send_pfkey_spd_add_message(int pfkey_socket, uint8_t proto)
 	policy_payload->sadb_x_policy_len = PFKEY_UNIT64(sizeof(*policy_payload));
 	policy_payload->sadb_x_policy_exttype = SADB_X_EXT_POLICY;
 	policy_payload->sadb_x_policy_type = IPSEC_POLICY_DISCARD;
-	policy_payload->sadb_x_policy_dir = IPSEC_DIR_OUTBOUND;
+	if (test_id == TEST_SADB_X_SPDADD_MEMORY_LEAK_78944570) {
+		policy_payload->sadb_x_policy_dir = IPSEC_DIR_INVALID;
+	} else {
+		policy_payload->sadb_x_policy_dir = IPSEC_DIR_OUTBOUND;
+	}
 	tlen += sizeof(*policy_payload);
 
 	// Update the total length
@@ -1641,6 +1650,38 @@ pfkey_process_message_test_60687183_2(uint8_t **mhp, int pfkey_socket)
 	return;
 }
 
+static void
+pfkey_process_message_test_78944570(uint8_t **mhp, int pfkey_socket)
+{
+	struct sadb_msg *message = (struct sadb_msg *)(void *)mhp[0];
+
+	if (message->sadb_msg_pid != (uint32_t)getpid()) {
+		return;
+	}
+
+	switch (message->sadb_msg_type) {
+	case SADB_X_SPDADD:
+	{
+		if (message->sadb_msg_errno != 0) {
+			T_QUIET; T_ASSERT_EQ(message->sadb_msg_errno, EINVAL, "SADB error for type %u error %d", message->sadb_msg_type, message->sadb_msg_errno);
+			T_PASS("SADB spd add received EINVAL");
+			T_END;
+		} else {
+			T_FAIL("SADB spd add received success");
+			T_END;
+		}
+		break;
+	}
+	case SADB_FLUSH:
+	case SADB_X_SPDFLUSH:
+		break;
+	default:
+		T_FAIL("bad SADB message type %u", message->sadb_msg_type);
+		T_END;
+	}
+	return;
+}
+
 static int
 setup_tcp_server(uint16_t port)
 {
@@ -1869,4 +1910,16 @@ T_DECL(tcp_input_ipsec_copy_policy, "listener policy copied to child")
 	close(server_fd);
 
 	T_PASS("listener policy copied to child");
+}
+
+T_DECL(sadb_x_spd_add_78944570, "security policy add failure")
+{
+	test_id = TEST_SADB_X_SPDADD_MEMORY_LEAK_78944570;
+
+	int pfkey_socket = pfkey_setup_socket();
+	send_pfkey_flush_sa(pfkey_socket);
+	send_pfkey_flush_sp(pfkey_socket);
+	send_pfkey_spd_add_message(pfkey_socket, IPSEC_ULPROTO_ANY);
+
+	dispatch_main();
 }

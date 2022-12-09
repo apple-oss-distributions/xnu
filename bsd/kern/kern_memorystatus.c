@@ -8588,14 +8588,13 @@ memorystatus_log_system_health(const memorystatus_system_health_t *status)
 	os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: System is unhealthy!  memorystatus_available_pages: %llu compressor_size:%u\n",
 	    (uint64_t)MEMORYSTATUS_LOG_AVAILABLE_PAGES, vm_compressor_pool_size());
 	os_log_with_startup_serial(OS_LOG_DEFAULT,
-	    "memorystatus: available_pages_below_critical=%d, compressor_needs_to_swap=%d, compressor_is_low_on_space=%d compressor_is_thrashing=%d compressed_pages_nearing_limit=%d filecache_is_thrashing=%d zone_map_is_exhausted=%d swapout_is_ripe=%d phantom_cache_pressure=%d swappable_compressor_segments_over_limit=%d swapin_queue_over_limit=%d swap_low=%d swap_full=%d\\n",
+	    "memorystatus: available_pages_below_critical=%d, compressor_needs_to_swap=%d, compressor_is_low_on_space=%d compressor_is_thrashing=%d compressed_pages_nearing_limit=%d filecache_is_thrashing=%d zone_map_is_exhausted=%d phantom_cache_pressure=%d swappable_compressor_segments_over_limit=%d swapin_queue_over_limit=%d swap_low=%d swap_full=%d\\n",
 	    status->msh_available_pages_below_critical, status->msh_compressor_needs_to_swap,
 	    status->msh_compressor_is_low_on_space, status->msh_compressor_is_thrashing,
 	    status->msh_compressed_pages_nearing_limit, status->msh_filecache_is_thrashing,
-	    status->msh_zone_map_is_exhausted, status->msh_swapout_is_ripe,
-	    status->msh_phantom_cache_pressure, status->msh_swappable_compressor_segments_over_limit,
-	    status->msh_swapin_queue_over_limit, status->msh_swap_low_on_space,
-	    status->msh_swap_out_of_space);
+	    status->msh_zone_map_is_exhausted, status->msh_phantom_cache_pressure,
+	    status->msh_swappable_compressor_segments_over_limit, status->msh_swapin_queue_over_limit,
+	    status->msh_swap_low_on_space, status->msh_swap_out_of_space);
 #else /* CONFIG_JETSAM */
 	os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: System is %s. memorystatus_available_pages: %llu compressor_size:%u\n",
 	    healthy ? "healthy" : "unhealthy",

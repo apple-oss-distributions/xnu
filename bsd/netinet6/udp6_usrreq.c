@@ -173,6 +173,7 @@ static int udp6_send(struct socket *, int, struct mbuf *, struct sockaddr *,
 static void udp6_append(struct inpcb *, struct ip6_hdr *,
     struct sockaddr_in6 *, struct mbuf *, int, struct ifnet *);
 static int udp6_input_checksum(struct mbuf *, struct udphdr *, int, int);
+static int udp6_defunct(struct socket *);
 
 struct pr_usrreqs udp6_usrreqs = {
 	.pru_abort =            udp6_abort,
@@ -191,6 +192,7 @@ struct pr_usrreqs udp6_usrreqs = {
 	.pru_sosend =           sosend,
 	.pru_soreceive =        soreceive,
 	.pru_soreceive_list =   soreceive_list,
+	.pru_defunct =          udp6_defunct,
 };
 
 /*
@@ -1294,6 +1296,44 @@ badsum:
 		udpstat.udps_badsum++;
 		IF_UDP_STATINC(ifp, badchksum);
 		return -1;
+	}
+
+	return 0;
+}
+
+int
+udp6_defunct(struct socket *so)
+{
+	struct ip_moptions *imo;
+	struct ip6_moptions *im6o;
+	struct inpcb *inp;
+
+	inp = sotoinpcb(so);
+	if (inp == NULL) {
+		return EINVAL;
+	}
+
+	im6o = inp->in6p_moptions;
+	inp->in6p_moptions = NULL;
+	if (im6o != NULL) {
+		struct proc *p = current_proc();
+
+		SODEFUNCTLOG("%s[%d, %s]: defuncting so 0x%llu drop ipv6 multicast memberships",
+		    __func__, proc_pid(p), proc_best_name(p),
+		    so->so_gencnt);
+		IM6O_REMREF(im6o);
+	}
+	imo = inp->inp_moptions;
+	if (imo != NULL) {
+		struct proc *p = current_proc();
+
+		SODEFUNCTLOG("%s[%d, %s]: defuncting so 0x%llu drop ipv4 multicast memberships",
+		    __func__, proc_pid(p), proc_best_name(p),
+		    so->so_gencnt);
+
+		inp->inp_moptions = NULL;
+
+		IMO_REMREF(imo);
 	}
 
 	return 0;

@@ -485,6 +485,9 @@ struct proc {
 
 	uint64_t p_crash_behavior_deadline; /* mach_continuous_time deadline. After this timestamp p_crash_behavior is invalid */
 
+	uint32_t          p_crash_count;      /* Consecutive crash count threshold */
+	uint32_t          p_throttle_timeout; /* Exponential backoff throttle */
+
 	struct os_reason     *p_exit_reason;
 
 #if CONFIG_PROC_UDATA_STORAGE

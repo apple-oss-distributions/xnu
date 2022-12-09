@@ -411,8 +411,8 @@ ipc_kobject_server_internal(
 	 * but until it does, pessimistically zero the
 	 * whole reply buffer.
 	 */
-	reply = ipc_kmsg_alloc(reply_size, 0, 0,
-	    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
+	reply = ipc_kmsg_alloc(reply_size, 0, 0, IPC_KMSG_ALLOC_KERNEL |
+	    IPC_KMSG_ALLOC_LINEAR | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
 	ipc_kobject_init_reply(reply, request, KERN_SUCCESS);
 	reply_hdr = ikm_header(reply);
 
@@ -487,7 +487,7 @@ skip_kobjcall:
 		 *	Create a new reply msg with error and destroy the old reply msg.
 		 */
 		ipc_kmsg_t new_reply = ipc_kmsg_alloc(sizeof(mig_reply_error_t),
-		    0, 0, IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO |
+		    0, 0, IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_SAVED | IPC_KMSG_ALLOC_ZERO |
 		    IPC_KMSG_ALLOC_NOFAIL);
 		new_reply_hdr = ikm_header(new_reply);
 
@@ -577,7 +577,10 @@ ipc_kobject_server(
 
 		/* convert the server error into a MIG error */
 		reply = ipc_kmsg_alloc(sizeof(mig_reply_error_t), 0, 0,
-		    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
+		    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_SAVED |
+		    IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
+		static_assert(sizeof(mig_reply_error_t) < IKM_SAVED_MSG_SIZE);
+
 		ipc_kobject_init_reply(reply, request, kr);
 	}
 
@@ -673,6 +676,8 @@ ipc_kobject_set_raw(
 
 #if __has_feature(ptrauth_calls)
 	if (kobject) {
+		type |= port->ip_immovable_receive << 14;
+		type |= port->ip_immovable_send << 15;
 		type ^= OS_PTRAUTH_DISCRIMINATOR("ipc_port.ip_kobject");
 		kobject = ptrauth_sign_unauthenticated(kobject,
 		    ptrauth_key_process_independent_data,
@@ -718,6 +723,8 @@ ipc_kobject_get_raw(
 
 #if __has_feature(ptrauth_calls)
 	if (kobject) {
+		type |= port->ip_immovable_receive << 14;
+		type |= port->ip_immovable_send << 15;
 		type ^= OS_PTRAUTH_DISCRIMINATOR("ipc_port.ip_kobject");
 		kobject = ptrauth_auth_data(kobject,
 		    ptrauth_key_process_independent_data,
@@ -827,8 +834,6 @@ ipc_kobject_init_port(
 	ipc_kobject_type_t type,
 	ipc_kobject_alloc_options_t options)
 {
-	ipc_kobject_set_internal(port, kobject, type);
-
 	if (options & IPC_KOBJECT_ALLOC_MAKE_SEND) {
 		ipc_port_make_send_any_locked(port);
 	}
@@ -845,6 +850,8 @@ ipc_kobject_init_port(
 	if (options & IPC_KOBJECT_ALLOC_PINNED) {
 		port->ip_pinned = 1;
 	}
+
+	ipc_kobject_set_internal(port, kobject, type);
 }
 
 /*

@@ -570,6 +570,10 @@ loopit:
 	}
 #endif /* DEBUG */
 
+	if ((ip->ip_tos & IPTOS_ECN_MASK) == IPTOS_ECN_ECT1) {
+		m->m_pkthdr.pkt_ext_flags |= PKTF_EXT_L4S;
+	}
+
 	KERNEL_DEBUG(DBG_LAYER_BEG, ip->ip_dst.s_addr, ip->ip_src.s_addr,
 	    ip->ip_p, ip->ip_off, ip->ip_len);
 

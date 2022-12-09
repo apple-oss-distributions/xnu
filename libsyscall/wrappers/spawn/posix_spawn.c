@@ -161,6 +161,9 @@ __posix_spawnattr_init(struct _posix_spawnattr *psattrp)
 	psattrp->psa_no_smt = false;
 	psattrp->psa_tecs = false;
 
+	psattrp->psa_crash_count = 0;
+	psattrp->psa_throttle_timeout = 0;
+
 	/* Default is no subsystem root path */
 	psattrp->psa_subsystem_root_path = NULL;
 
@@ -1212,6 +1215,37 @@ posix_spawnattr_set_crash_behavior_deadline_np(posix_spawnattr_t *attr, uint64_t
 
 	psattr->psa_crash_behavior_deadline = deadline;
 	(void)flags;
+	return 0;
+}
+
+/*
+ * posix_spawnattr_set_crash_count_np
+ *
+ * Description:	Set the process crash count and throttle timeout for
+ * exponential backoff.
+ *
+ * Parameters:	attr			The spawn attributes object for the
+ *                              new process
+ *		        crash_count	    Consecutive crash count
+ *              timeout         Exponential throttling timeout
+ *
+ * Returns:	0			Success
+ *		EINVAL			Invalid Input
+ */
+int
+posix_spawnattr_set_crash_count_np(posix_spawnattr_t * __restrict attr,
+    uint32_t crash_count, uint32_t timeout)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+	psattr->psa_crash_count = crash_count;
+	psattr->psa_throttle_timeout = timeout;
+
 	return 0;
 }
 

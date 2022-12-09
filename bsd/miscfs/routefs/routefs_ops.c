@@ -506,7 +506,7 @@ routefserr_setlabel(__unused struct vnop_setlabel_args * args)
 /* The following ops are used by directories and symlinks */
 int(**routefs_vnodeop_p)(void *);
 static const struct vnodeopv_entry_desc routefs_vnodeop_entries[] = {
-	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)vn_default_error },
+	{ .opve_op = &vnop_default_desc, .opve_impl = (VOPFUNC)(void *)vn_default_error },
 	{ .opve_op = &vnop_lookup_desc, .opve_impl = (VOPFUNC)routefserr_lookup },      /* lookup */
 	{ .opve_op = &vnop_create_desc, .opve_impl = (VOPFUNC)err_create },     /* create */
 	{ .opve_op = &vnop_whiteout_desc, .opve_impl = (VOPFUNC)err_whiteout },         /* whiteout */

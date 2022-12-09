@@ -626,7 +626,7 @@ struct tcpcb {
 #define TMPF_TFO_REQUEST        0x00800000 /* TFO Requested */
 #define TMPF_MPTCP_ECHO_ADDR    0x01000000 /* MPTCP echoes add_addr */
 
-#define TMPF_MPTCP_SIGNALS      (TMPF_SND_MPPRIO | TMPF_SND_REM_ADDR | TMPF_SND_MPFAIL | TMPF_SND_KEYS | TMPF_SND_JACK)
+#define TMPF_MPTCP_SIGNALS      (TMPF_SND_MPPRIO | TMPF_SND_REM_ADDR | TMPF_SND_MPFAIL | TMPF_SND_JACK)
 
 	tcp_seq                 t_mpuna;        /* unacknowledged sequence */
 	struct mptcb            *t_mptcb;       /* pointer to MPTCP TCB */

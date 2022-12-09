@@ -94,7 +94,7 @@
 extern void * XNU_PTRAUTH_SIGNED_PTR("initproc") initproc;
 
 TUNABLE(bool, service_port_defense_enabled, "-service_port_defense_enabled", false);
-static TUNABLE(bool, reply_port_semantics_enabled, "-reply_port_semantics", false);
+static TUNABLE(bool, reply_port_semantics, "reply_port_semantics", true);
 
 /*
  *	Routine:	ipc_right_lookup_read
@@ -2068,8 +2068,9 @@ ipc_right_copyin_check_reply(
 		    && !ip_is_reply_port(reply_port) && !ip_is_provisional_reply_port(reply_port)) {
 			*reply_port_semantics_violation = TRUE;
 
-			if (reply_port_semantics_enabled) {
+			if (reply_port_semantics) {
 				mach_port_guard_exception(reply_name, 0, 0, kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS);
+				return FALSE;
 			}
 		}
 	}

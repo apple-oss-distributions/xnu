@@ -1461,7 +1461,17 @@ addrloop:
 		 */
 		IFA_ADDREF_LOCKED(&ia6->ia_ifa);
 
-		/* check for duplicated secured address */
+		/*
+		 * Check for duplicated secured address
+		 *
+		 * nd6_handle_duplicated_ip6_addr attempts to regenerate
+		 * secure address in the event of a collision.
+		 * On successful generation this returns success
+		 * and we restart the loop.
+		 *
+		 * When we hit the maximum attempts, this returns
+		 * false.
+		 */
 		if (secured_address_is_duplicated(ia6->ia6_flags) &&
 		    nd6_handle_duplicated_ip6_addr(ia6)) {
 			/*

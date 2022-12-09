@@ -6042,13 +6042,17 @@ nstat_set_provider_filter(
 	state->ncs_watching |= (1 << provider_id);
 	state->ncs_provider_filters[provider_id].npf_events = req->events;
 	state->ncs_provider_filters[provider_id].npf_flags  = req->filter;
+	state->ncs_provider_filters[provider_id].npf_pid    = req->target_pid;
+	uuid_copy(state->ncs_provider_filters[provider_id].npf_uuid, req->target_uuid);
 
 	// The extensions should be populated by a more direct mechanism
 	// Using the top 32 bits of the filter flags reduces the namespace of both,
 	// but is a convenient workaround that avoids ntstat.h changes that would require rebuild of all clients
-	state->ncs_provider_filters[provider_id].npf_extensions = (req->filter >> NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT) & NSTAT_EXTENDED_UPDATE_FLAG_MASK;
-	state->ncs_provider_filters[provider_id].npf_pid        = req->target_pid;
-	uuid_copy(state->ncs_provider_filters[provider_id].npf_uuid, req->target_uuid);
+	// Extensions give away additional privacy information and are subject to unconditional privilege check,
+	// unconstrained by the value of nstat_privcheck
+	if (priv_check_cred(kauth_cred_get(), PRIV_NET_PRIVILEGED_NETWORK_STATISTICS, 0) == 0) {
+		state->ncs_provider_filters[provider_id].npf_extensions = (req->filter >> NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT) & NSTAT_EXTENDED_UPDATE_FLAG_MASK;
+	}
 	return 0;
 }
 
@@ -6078,7 +6082,9 @@ nstat_control_handle_add_all(
 		return ENOTSUP;
 	}
 
-	if (nstat_privcheck != 0) {
+	// Traditionally the nstat_privcheck value allowed for easy access to ntstat on the Mac.
+	// Keep backwards compatibility while being more stringent with recent providers
+	if ((nstat_privcheck != 0) || (req->provider == NSTAT_PROVIDER_UDP_SUBFLOW) || (req->provider == NSTAT_PROVIDER_CONN_USERLAND)) {
 		result = priv_check_cred(kauth_cred_get(),
 		    PRIV_NET_PRIVILEGED_NETWORK_STATISTICS, 0);
 		if (result != 0) {

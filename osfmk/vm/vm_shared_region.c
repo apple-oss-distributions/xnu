@@ -1673,6 +1673,12 @@ vm_shared_region_map_file_setup(
 		file_object = memory_object_control_to_vm_object(file_control);
 		assert(file_object);
 
+		if (!file_object->object_is_shared_cache) {
+			vm_object_lock(file_object);
+			file_object->object_is_shared_cache = true;
+			vm_object_unlock(file_object);
+		}
+
 #if CONFIG_SECLUDED_MEMORY
 		/*
 		 * Camera will need the shared cache, so don't put the pages

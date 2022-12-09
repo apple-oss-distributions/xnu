@@ -2170,7 +2170,7 @@ def ShowProcFilesSummary(cmd_args=None):
         proc_filedesc = addressof(proc.p_fd)
         proc_ofiles = proc_filedesc.fd_ofiles
         proc_file_count = 0
-        for fd in range(0, proc_filedesc.fd_first_allfree):
+        for fd in range(0, proc_filedesc.fd_afterlast):
             if unsigned(proc_ofiles[fd]) != 0:
                 proc_file_count += 1
         print("{0: <#020x} {1: <32s} {2: >10d}".format(proc, GetProcName(proc), proc_file_count))

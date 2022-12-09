@@ -164,13 +164,15 @@ RB_GENERATE_PREV(netns_namespaces_tree, ns, ns_link, ns_cmp);
 #define NETNS_N_GLOBAL  4
 static struct ns *netns_global_non_wild[NETNS_N_GLOBAL];
 static struct ns *netns_global_wild[NETNS_N_GLOBAL];
+#define NETNS_ADDRLEN_V4 (sizeof(struct in_addr))
+#define NETNS_ADDRLEN_V6 (sizeof(struct in6_addr))
 #define NETNS_NS_TCP    0
 #define NETNS_NS_UDP    1
 #define NETNS_NS_V4     0
 #define NETNS_NS_V6     2
 #define NETNS_NS_GLOBAL_IDX(proto, addrlen)     \
 	((((proto) == IPPROTO_TCP) ? NETNS_NS_TCP : NETNS_NS_UDP) | \
-	(((addrlen) == sizeof (struct in_addr)) ? NETNS_NS_V4 : NETNS_NS_V6))
+	(((addrlen) == NETNS_ADDRLEN_V4) ? NETNS_NS_V4 : NETNS_NS_V6))
 
 #define NETNS_NS_UDP_EPHEMERAL_RESERVE  4096
 
@@ -533,11 +535,7 @@ _netns_is_port_used(struct ns * gns, struct ns_reservation *curr_res, in_port_t 
 
 	res = ns_reservation_tree_find(&gns->ns_reservations, port);
 	if (res != NULL && res != curr_res) {
-		if (!res->nsr_reuseport &&
-		    (NETNS_REF_COUNT(res, NETNS_BSD) > 0 ||
-		    NETNS_REF_COUNT(res, NETNS_PF) > 0 ||
-		    NETNS_REF_COUNT(res, NETNS_LISTENER) > 0 ||
-		    NETNS_REF_COUNT(res, NETNS_SKYWALK) > 0)) {
+		if (!res->nsr_reuseport) {
 			return TRUE;
 		}
 	}
@@ -615,9 +613,7 @@ _netns_reserve_common(struct ns *namespace, in_port_t port, uint32_t flags)
 				 * listener wildcard entry for this
 				 * protocol/port number means this must fail.
 				 */
-				SK_DF(NS_VERB_IP(addr_len) |
-				    NS_VERB_PROTO(proto),
-				    "ADDRINUSE: Duplicate wildcard");
+				SK_ERR("ADDRINUSE: Duplicate wildcard");
 				err = EADDRINUSE;
 				goto done;
 			}
@@ -627,17 +623,18 @@ _netns_reserve_common(struct ns *namespace, in_port_t port, uint32_t flags)
 					NETNS_NS_GLOBAL_IDX(proto, addr_len)];
 				VERIFY(gns != NULL);
 
-				if (ns_reservation_tree_find(
-					    &gns->ns_reservations, port) != NULL) {
+				if (_netns_is_port_used(netns_global_non_wild[
+					    NETNS_NS_GLOBAL_IDX(proto, NETNS_ADDRLEN_V4)], res, port) ||
+				    _netns_is_port_used(netns_global_non_wild[
+					    NETNS_NS_GLOBAL_IDX(proto, NETNS_ADDRLEN_V6)], res, port)) {
 					/*
 					 * If Skywalk is trying to reserve a
 					 * wildcard, then the mere existance of
-					 * any entry in the non-wild namespace
-					 * for this port means this must fail.
+					 * any entry in either v4/v6 non-wild
+					 * namespace for this port means this
+					 * must fail.
 					 */
-					SK_DF(NS_VERB_IP(addr_len) |
-					    NS_VERB_PROTO(proto), "ADDRINUSE: "
-					    "Wildcard with non-wild.");
+					SK_ERR("ADDRINUSE: Wildcard with non-wild.");
 					err = EADDRINUSE;
 					goto done;
 				}
@@ -657,9 +654,7 @@ _netns_reserve_common(struct ns *namespace, in_port_t port, uint32_t flags)
 				 * which Skywalk already has a wildcard
 				 * reservation.
 				 */
-				SK_DF(NS_VERB_IP(addr_len) |
-				    NS_VERB_PROTO(proto),
-				    "ADDRINUSE: BSD requesting Skywalk port");
+				SK_ERR("ADDRINUSE: BSD requesting Skywalk port");
 				err = EADDRINUSE;
 				goto done;
 			}
@@ -683,9 +678,7 @@ _netns_reserve_common(struct ns *namespace, in_port_t port, uint32_t flags)
 				    (NETNS_REF_COUNT(skres, NETNS_SKYWALK) |
 				    NETNS_REF_COUNT(skres,
 				    NETNS_LISTENER)) != 0) {
-					SK_DF(NS_VERB_IP(addr_len) |
-					    NS_VERB_PROTO(proto), "ADDRINUSE: "
-					    "BSD wildcard with non-wild.");
+					SK_ERR("ADDRINUSE: BSD wildcard with non-wild.");
 					err = EADDRINUSE;
 					goto done;
 				}
@@ -697,9 +690,7 @@ _netns_reserve_common(struct ns *namespace, in_port_t port, uint32_t flags)
 			/* check collision w/ BSD */
 			if (NETNS_REF_COUNT(res, NETNS_BSD) > 0 ||
 			    NETNS_REF_COUNT(res, NETNS_PF) > 0) {
-				SK_DF(NS_VERB_IP(addr_len) |
-				    NS_VERB_PROTO(proto),
-				    "ERROR - Skywalk got ADDRINUSE (w/ BSD)");
+				SK_ERR("ERROR - Skywalk got ADDRINUSE (w/ BSD)");
 				err = EADDRINUSE;
 				goto done;
 			}
@@ -736,7 +727,7 @@ _netns_reserve_common(struct ns *namespace, in_port_t port, uint32_t flags)
 				if (addr_len == sizeof(struct in_addr)) {
 					/* If address is IPv4, also check for wild IPv6 registration */
 					gns = netns_global_wild[
-						NETNS_NS_GLOBAL_IDX(proto, sizeof(struct in6_addr))];
+						NETNS_NS_GLOBAL_IDX(proto, NETNS_ADDRLEN_V6)];
 					if (gns != NULL &&
 					    (skres = ns_reservation_tree_find(
 						    &gns->ns_reservations, port)) != NULL &&
@@ -746,10 +737,7 @@ _netns_reserve_common(struct ns *namespace, in_port_t port, uint32_t flags)
 						goto done;
 					}
 				}
-				SK_DF(NS_VERB_IP(addr_len) |
-				    NS_VERB_PROTO(proto),
-				    "ERROR - Skywalk got ADDRINUSE "
-				    "(w/ SK connected flow)");
+				SK_ERR("ERROR - Skywalk got ADDRINUSE (w/ SK connected flow)");
 				err = EADDRINUSE;
 			}
 			/*
@@ -764,16 +752,14 @@ _netns_reserve_common(struct ns *namespace, in_port_t port, uint32_t flags)
 			    NETNS_REF_COUNT(res, NETNS_PF) > 0 ||
 			    NETNS_REF_COUNT(res, NETNS_LISTENER) > 0 ||
 			    _netns_is_port_used(netns_global_wild[
-				    NETNS_NS_GLOBAL_IDX(proto, sizeof(struct in_addr))], res, port) ||
+				    NETNS_NS_GLOBAL_IDX(proto, NETNS_ADDRLEN_V4)], res, port) ||
 			    _netns_is_port_used(netns_global_wild[
-				    NETNS_NS_GLOBAL_IDX(proto, sizeof(struct in6_addr))], res, port) ||
+				    NETNS_NS_GLOBAL_IDX(proto, NETNS_ADDRLEN_V6)], res, port) ||
 			    _netns_is_port_used(netns_global_non_wild[
-				    NETNS_NS_GLOBAL_IDX(proto, sizeof(struct in_addr))], res, port) ||
+				    NETNS_NS_GLOBAL_IDX(proto, NETNS_ADDRLEN_V4)], res, port) ||
 			    _netns_is_port_used(netns_global_non_wild[
-				    NETNS_NS_GLOBAL_IDX(proto, sizeof(struct in6_addr))], res, port)) {
-				SK_DF(NS_VERB_IP(addr_len) |
-				    NS_VERB_PROTO(proto),
-				    "ERROR - Listener got ADDRINUSE");
+				    NETNS_NS_GLOBAL_IDX(proto, NETNS_ADDRLEN_V6)], res, port)) {
+				SK_ERR("ERROR - Listener got ADDRINUSE");
 				err = EADDRINUSE;
 			}
 			break;
@@ -782,9 +768,7 @@ _netns_reserve_common(struct ns *namespace, in_port_t port, uint32_t flags)
 		case NETNS_PF:
 			if (NETNS_REF_COUNT(res, NETNS_SKYWALK) > 0 ||
 			    NETNS_REF_COUNT(res, NETNS_LISTENER) > 0) {
-				SK_DF(NS_VERB_IP(addr_len) |
-				    NS_VERB_PROTO(proto),
-				    "ERROR - %s got ADDRINUSE",
+				SK_ERR("ERROR - %s got ADDRINUSE",
 				    ((flags & NETNS_OWNER_MASK) == NETNS_PF) ?
 				    "PF" : "BSD");
 				err = EADDRINUSE;
@@ -1147,19 +1131,19 @@ netns_init(void)
 
 	netns_init_global_ns(
 		&netns_global_non_wild[NETNS_NS_GLOBAL_IDX(IPPROTO_TCP,
-		sizeof(struct in_addr))], IPPROTO_TCP, sizeof(struct in_addr));
+		NETNS_ADDRLEN_V4)], IPPROTO_TCP, sizeof(struct in_addr));
 
 	netns_init_global_ns(
 		&netns_global_non_wild[NETNS_NS_GLOBAL_IDX(IPPROTO_UDP,
-		sizeof(struct in_addr))], IPPROTO_UDP, sizeof(struct in_addr));
+		NETNS_ADDRLEN_V4)], IPPROTO_UDP, sizeof(struct in_addr));
 
 	netns_init_global_ns(
 		&netns_global_non_wild[NETNS_NS_GLOBAL_IDX(IPPROTO_TCP,
-		sizeof(struct in6_addr))], IPPROTO_TCP, sizeof(struct in6_addr));
+		NETNS_ADDRLEN_V6)], IPPROTO_TCP, sizeof(struct in6_addr));
 
 	netns_init_global_ns(
 		&netns_global_non_wild[NETNS_NS_GLOBAL_IDX(IPPROTO_UDP,
-		sizeof(struct in6_addr))], IPPROTO_UDP, sizeof(struct in6_addr));
+		NETNS_ADDRLEN_V6)], IPPROTO_UDP, sizeof(struct in6_addr));
 
 	/* Done */
 
@@ -1541,8 +1525,7 @@ netns_change_addr(netns_token *token, uint32_t *addr, uint8_t addr_len)
 	    nt->nt_flags))) {
 		NETNS_LOCK_CONVERT();
 		netns_ns_cleanup(new_namespace);
-		SK_DF(NS_VERB_IP(addr_len) | NS_VERB_PROTO(proto),
-		    "ERROR - reservation collision under new namespace");
+		SK_ERR("ERROR - reservation collision under new namespace");
 		goto done;
 	}
 
@@ -1573,10 +1556,7 @@ netns_change_addr(netns_token *token, uint32_t *addr, uint8_t addr_len)
 
 		if ((err = _netns_reserve_common(global_namespace,
 		    nt->nt_port, nt->nt_flags)) != 0) {
-			SK_DF(NS_VERB_IP(addr_len) |
-			    NS_VERB_PROTO(proto),
-			    "ERROR - reservation collision under new "
-			    "global namespace");
+			SK_ERR("ERROR - reservation collision under new global namespace");
 			/* XXX: Should not fail. Maybe assert instead */
 			goto done;
 		}

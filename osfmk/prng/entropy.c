@@ -27,7 +27,7 @@
  */
 
 #include <libkern/crypto/sha2.h>
-#include <libkern/crypto/crypto_internal.h>
+#include <libkern/crypto/crypto.h>
 #include <os/atomic_private.h>
 #include <kern/assert.h>
 #include <kern/percpu.h>
@@ -488,7 +488,7 @@ entropy_provide(size_t *entropy_size, void *entropy, __unused void *arg)
 	// The first call to this function comes while the corecrypto kext
 	// is being loaded. We require SHA256 to accumulate entropy
 	// samples.
-	if (__improbable(!g_crypto_funcs)) {
+	if (__improbable(!crypto_init)) {
 		return sample_count;
 	}
 

@@ -429,7 +429,7 @@ extern int os_packet_set_app_metadata(const packet_t,
     const packet_app_metadata_type_t, const uint8_t);
 extern int os_packet_set_protocol_segment_size(const packet_t, const uint16_t);
 extern void os_packet_set_tso_flags(const packet_t, packet_tso_flags_t);
-
+extern void os_packet_set_l4s_flag(const packet_t, const boolean_t);
 /*
  * Quantum & Packets.
  */

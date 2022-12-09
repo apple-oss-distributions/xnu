@@ -7827,7 +7827,7 @@ panic_print_types_in_zone(zone_t z, const char* debug_str)
 	if (zsflags.z_kheap_id == KHEAP_ID_KT_VAR) {
 		uint32_t heap_id = KT_VAR_PTR_HEAP + ((zone_index(z) -
 		    kalloc_type_heap_array[KT_VAR_PTR_HEAP].kh_zstart) / KHEAP_NUM_ZONES);
-		kt_cur.ktv_var = kalloc_type_heap_array[heap_id].views;
+		kt_cur.ktv_var = kalloc_type_heap_array[heap_id].kt_views;
 		is_kt_var = true;
 	} else {
 		kt_cur.ktv_fixed = (kalloc_type_view_t) z->z_views;
@@ -9201,7 +9201,7 @@ zone_view_startup_init(struct zone_view_startup_spec *spec)
 	}
 
 	if (heap) {
-		z = kalloc_heap_zone_for_size(heap, spec->zv_size);
+		z = kalloc_zone_for_size(heap->kh_zstart, spec->zv_size);
 	} else {
 		z = *spec->zv_zone;
 		assert(spec->zv_size <= zone_elem_size(z));

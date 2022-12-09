@@ -68,6 +68,9 @@ struct fcl_stat {
 	uint64_t fcl_max_qdelay;
 	uint64_t fcl_avg_qdelay;
 	uint32_t fcl_overwhelming;
+	uint64_t fcl_ce_marked;
+	uint64_t fcl_ce_mark_failures;
+	uint64_t fcl_l4s_pkts;
 };
 
 /*
@@ -282,6 +285,7 @@ struct fq_codel_classstats {
 	u_int32_t       fcls_drr_max;
 	int64_t         fcls_budget;
 	u_int64_t       fcls_target_qdelay;
+	u_int64_t       fcls_l4s_target_qdelay;
 	u_int64_t       fcls_update_interval;
 	u_int32_t       fcls_flow_control;
 	u_int32_t       fcls_flow_feedback;
@@ -309,6 +313,9 @@ struct fq_codel_classstats {
 	uint64_t        fcls_max_qdelay;
 	uint64_t        fcls_avg_qdelay;
 	uint32_t        fcls_overwhelming;
+	uint64_t        fcls_ce_marked;
+	uint64_t        fcls_ce_mark_failures;
+	uint64_t        fcls_l4s_pkts;
 };
 
 #ifdef BSD_KERNEL_PRIVATE

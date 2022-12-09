@@ -195,7 +195,31 @@ pf_find_anchor(const char *path)
 	strlcpy(key->path, path, sizeof(key->path));
 	found = RB_FIND(pf_anchor_global, &pf_anchors, key);
 	rs_free_type(struct pf_anchor, key);
+
+	if (found) {
+		pf_reference_anchor(found);
+	}
 	return found;
+}
+
+int
+pf_reference_anchor(struct pf_anchor *a)
+{
+	ASSERT(a->refcnt >= 0);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
+	return ++a->refcnt;
+}
+
+int
+pf_release_anchor(struct pf_anchor *a)
+{
+	ASSERT(a->refcnt > 0);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
+	int r = --a->refcnt;
+	if (r == 0) {
+		pf_remove_if_empty_ruleset(&a->ruleset);
+	}
+	return r;
 }
 
 struct pf_ruleset *
@@ -238,9 +262,20 @@ pf_find_ruleset_with_owner(const char *path, const char *owner, int is_anchor,
 		    || (is_anchor && !strcmp(anchor->owner, ""))) {
 			return &anchor->ruleset;
 		}
+		pf_release_anchor(anchor);
+		anchor = NULL;
 		*error = EPERM;
 		return NULL;
 	}
+}
+
+int
+pf_release_ruleset(struct pf_ruleset *r)
+{
+	if (r->anchor == NULL) {
+		return 0;
+	}
+	return pf_release_anchor(r->anchor);
 }
 
 struct pf_ruleset *
@@ -312,6 +347,7 @@ pf_find_or_create_ruleset(const char *path)
 			return NULL;
 		}
 		if (parent != NULL) {
+			/* reference to parent was already taken by pf_find_anchor() */
 			anchor->parent = parent;
 			if ((dup = RB_INSERT(pf_anchor_node, &parent->children,
 			    anchor)) != NULL) {
@@ -328,6 +364,7 @@ pf_find_or_create_ruleset(const char *path)
 		}
 		pf_init_ruleset(&anchor->ruleset);
 		anchor->ruleset.anchor = anchor;
+		pf_reference_anchor(anchor);
 		parent = anchor;
 		if (r != NULL) {
 			q = r + 1;
@@ -351,41 +388,58 @@ pf_remove_if_empty_ruleset(struct pf_ruleset *ruleset)
 	struct pf_anchor        *parent;
 	int                      i;
 
-	while (ruleset != NULL) {
-		if (ruleset == &pf_main_ruleset || ruleset->anchor == NULL ||
-		    !RB_EMPTY(&ruleset->anchor->children) ||
-		    ruleset->anchor->refcnt > 0 || ruleset->tables > 0 ||
-		    ruleset->topen) {
-			return;
-		}
-		for (i = 0; i < PF_RULESET_MAX; ++i) {
-			if (!TAILQ_EMPTY(ruleset->rules[i].active.ptr) ||
-			    !TAILQ_EMPTY(ruleset->rules[i].inactive.ptr) ||
-			    ruleset->rules[i].inactive.open) {
-				return;
-			}
-		}
-		RB_REMOVE(pf_anchor_global, &pf_anchors, ruleset->anchor);
-#if DUMMYNET
-		if (strncmp("com.apple.nlc", ruleset->anchor->name,
-		    sizeof("com.apple.nlc")) == 0) {
-			struct dummynet_event dn_event;
-			bzero(&dn_event, sizeof(dn_event));
-			dn_event.dn_event_code = DUMMYNET_NLC_DISABLED;
-			dummynet_event_enqueue_nwk_wq_entry(&dn_event);
-			is_nlc_enabled_glb = FALSE;
-		}
-#endif
-		if ((parent = ruleset->anchor->parent) != NULL) {
-			RB_REMOVE(pf_anchor_node, &parent->children,
-			    ruleset->anchor);
-		}
-		rs_free_type(struct pf_anchor, ruleset->anchor);
-		if (parent == NULL) {
-			return;
-		}
-		ruleset = &parent->ruleset;
+	if (ruleset == NULL) {
+		return;
 	}
+	/* the main ruleset and anchor even if empty */
+	if (ruleset == &pf_main_ruleset) {
+		return;
+	}
+	/* Each rule, child anchor, and table must take a ref count on the anchor */
+	if (ruleset->anchor == NULL || ruleset->anchor->refcnt > 0) {
+		return;
+	}
+	ASSERT(RB_EMPTY(&ruleset->anchor->children) &&
+	    ruleset->tables == 0);
+	/* if we have uncommitted change for tables, bail */
+	if (ruleset->topen > 0) {
+		return;
+	}
+
+
+	if (ruleset == &pf_main_ruleset || ruleset->anchor == NULL ||
+	    !RB_EMPTY(&ruleset->anchor->children) ||
+	    ruleset->anchor->refcnt > 0 || ruleset->tables > 0 ||
+	    ruleset->topen) {
+		return;
+	}
+	for (i = 0; i < PF_RULESET_MAX; ++i) {
+		if (!TAILQ_EMPTY(ruleset->rules[i].active.ptr) ||
+		    !TAILQ_EMPTY(ruleset->rules[i].inactive.ptr) ||
+		    ruleset->rules[i].inactive.open) {
+			return;
+		}
+	}
+	RB_REMOVE(pf_anchor_global, &pf_anchors, ruleset->anchor);
+#if DUMMYNET
+	if (strncmp("com.apple.nlc", ruleset->anchor->name,
+	    sizeof("com.apple.nlc")) == 0) {
+		struct dummynet_event dn_event;
+		bzero(&dn_event, sizeof(dn_event));
+		dn_event.dn_event_code = DUMMYNET_NLC_DISABLED;
+		dummynet_event_enqueue_nwk_wq_entry(&dn_event);
+		is_nlc_enabled_glb = FALSE;
+	}
+#endif
+	if ((parent = ruleset->anchor->parent) != NULL) {
+		RB_REMOVE(pf_anchor_node, &parent->children,
+		    ruleset->anchor);
+	}
+	rs_free_type(struct pf_anchor, ruleset->anchor);
+	if (parent == NULL) {
+		return;
+	}
+	pf_release_anchor(parent);
 }
 
 int
@@ -442,7 +496,6 @@ pf_anchor_setup(struct pf_rule *r, const struct pf_ruleset *s,
 		return 1;
 	}
 	r->anchor = ruleset->anchor;
-	r->anchor->refcnt++;
 	return 0;
 }
 
@@ -506,8 +559,6 @@ pf_anchor_remove(struct pf_rule *r)
 		r->anchor = NULL;
 		return;
 	}
-	if (!--r->anchor->refcnt) {
-		pf_remove_if_empty_ruleset(&r->anchor->ruleset);
-	}
+	pf_release_anchor(r->anchor);
 	r->anchor = NULL;
 }

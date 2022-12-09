@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,17 +26,28 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-/* To access the corecrypto functions */
-#ifndef _CRYPTO_CRYPTO_INTERNAL_H_
-#define _CRYPTO_CRYPTO_INTERNAL_H_
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
-#include <libkern/crypto/crypto.h>
-#include <libkern/crypto/register_crypto.h>
+#include <darwintest.h>
+#include <darwintest_utils.h>
 
-__BEGIN_DECLS
+T_GLOBAL_META(
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_NAMESPACE("xnu.vfs"),
+	T_META_OWNER("chrisjd")
+	);
 
-extern crypto_functions_t g_crypto_funcs;
+T_DECL(read_nullbuf, "read into a NULL buffer should fail")
+{
+	int fd;
+	ssize_t result;
 
-__END_DECLS
+	fd = open("/etc/passwd", O_RDONLY);
+	T_ASSERT_NE(fd, -1, "open /etc/passwd for reading");
 
-#endif /*_CRYPTO_CRYPTO_INTERNAL_H_*/
+	result = read(fd, NULL, 8);
+	T_ASSERT_EQ(result, -1, "expected to fail");
+	T_ASSERT_EQ(errno, EFAULT, "should have errno == EFAULT");
+}

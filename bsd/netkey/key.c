@@ -2501,8 +2501,7 @@ key_spdadd(
 		break;
 	default:
 		ipseclog((LOG_DEBUG, "key_spdadd: Invalid SP direction.\n"));
-		mhp->msg->sadb_msg_errno = EINVAL;
-		return 0;
+		return key_senderror(so, m, EINVAL);
 	}
 
 	/* check policy */
@@ -2523,6 +2522,10 @@ key_spdadd(
 
 	/* Process interfaces */
 	if (ipsecifopts != NULL) {
+		ipsecifopts->sadb_x_ipsecif_internal_if[IFXNAMSIZ - 1] = '\0';
+		ipsecifopts->sadb_x_ipsecif_outgoing_if[IFXNAMSIZ - 1] = '\0';
+		ipsecifopts->sadb_x_ipsecif_ipsec_if[IFXNAMSIZ - 1] = '\0';
+
 		if (ipsecifopts->sadb_x_ipsecif_internal_if[0]) {
 			ifnet_find_by_name(ipsecifopts->sadb_x_ipsecif_internal_if, &internal_if);
 		}
@@ -2875,6 +2878,10 @@ key_spddelete(
 
 	/* Process interfaces */
 	if (ipsecifopts != NULL) {
+		ipsecifopts->sadb_x_ipsecif_internal_if[IFXNAMSIZ - 1] = '\0';
+		ipsecifopts->sadb_x_ipsecif_outgoing_if[IFXNAMSIZ - 1] = '\0';
+		ipsecifopts->sadb_x_ipsecif_ipsec_if[IFXNAMSIZ - 1] = '\0';
+
 		if (ipsecifopts->sadb_x_ipsecif_internal_if[0]) {
 			ifnet_find_by_name(ipsecifopts->sadb_x_ipsecif_internal_if, &internal_if);
 		}

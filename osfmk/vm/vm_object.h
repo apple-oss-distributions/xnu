@@ -309,7 +309,8 @@ struct vm_object {
 	 * primary caching. (for
 	 * I/O)
 	 */
-	/* boolean_t */ _object5_unused_bits:1;
+	/* boolean_t */ for_realtime:1;
+	/* Might be needed for realtime code path */
 
 	queue_chain_t           cached_list;    /* Attachment point for the
 	                                         * list of objects cached as a

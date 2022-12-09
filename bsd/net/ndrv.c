@@ -63,6 +63,7 @@
 #include <sys/proc.h>
 
 #include <kern/queue.h>
+#include <kern/assert.h>
 
 #include <net/ndrv.h>
 #include <net/route.h>
@@ -971,6 +972,32 @@ ndrv_do_add_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 	return result;
 }
 
+static void
+ndrv_cb_remove_multiaddr(struct ndrv_cb *np, struct ndrv_multiaddr *ndrv_entry)
+{
+	struct ndrv_multiaddr   *cur = np->nd_multiaddrs;
+	bool                    removed = false;
+
+	if (cur == ndrv_entry) {
+		/* we were the head */
+		np->nd_multiaddrs = cur->next;
+		removed = true;
+	} else {
+		/* find our entry */
+		struct ndrv_multiaddr  *cur_next = NULL;
+
+		for (; cur != NULL; cur = cur_next) {
+			cur_next = cur->next;
+			if (cur_next == ndrv_entry) {
+				cur->next = cur_next->next;
+				removed = true;
+				break;
+			}
+		}
+	}
+	ASSERT(removed);
+}
+
 static int
 ndrv_do_remove_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 {
@@ -1017,21 +1044,9 @@ ndrv_do_remove_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 
 	if (result == 0) {
 		// Remove from our linked list
-		struct ndrv_multiaddr*  cur = np->nd_multiaddrs;
-
 		ifmaddr_release(ndrv_entry->ifma);
 
-		if (cur == ndrv_entry) {
-			np->nd_multiaddrs = cur->next;
-		} else {
-			for (cur = cur->next; cur != NULL; cur = cur->next) {
-				if (cur->next == ndrv_entry) {
-					cur->next = cur->next->next;
-					break;
-				}
-			}
-		}
-
+		ndrv_cb_remove_multiaddr(np, ndrv_entry);
 		np->nd_dlist_cnt--;
 
 		ndrv_multiaddr_free(ndrv_entry, ndrv_entry->addr->sa_len);

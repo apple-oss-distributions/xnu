@@ -574,6 +574,10 @@ bpf_detachd(struct bpf_d *d)
 	struct bpf_d **p;
 	struct bpf_if *bp;
 	struct ifnet  *ifp;
+	uint32_t dlt;
+	bpf_tap_func disable_tap;
+	uint8_t bd_promisc;
+
 
 	int bpf_closed = d->bd_flags & BPF_CLOSING;
 	/*
@@ -600,6 +604,7 @@ bpf_detachd(struct bpf_d *d)
 	}
 	*p = (*p)->bd_next;
 	bpf_bpfd_cnt--;
+	disable_tap = NULL;
 	if (bp->bif_dlist == 0) {
 		/*
 		 * Let the driver know that there are no more listeners.
@@ -608,8 +613,10 @@ bpf_detachd(struct bpf_d *d)
 		if (bp->bif_ifp->if_bpf == bp) {
 			dlil_set_bpf_tap(ifp, BPF_TAP_DISABLE, NULL);
 		}
-		if (bp->bif_tap) {
-			bp->bif_tap(ifp, bp->bif_dlt, BPF_TAP_DISABLE);
+
+		disable_tap = bp->bif_tap;
+		if (disable_tap) {
+			dlt = bp->bif_dlt;
 		}
 
 		for (bp = bpf_iflist; bp; bp = bp->bif_next) {
@@ -626,9 +633,11 @@ bpf_detachd(struct bpf_d *d)
 	 * Check if this descriptor had requested promiscuous mode.
 	 * If so, turn it off.
 	 */
-	if (d->bd_promisc) {
-		d->bd_promisc = 0;
-		lck_mtx_unlock(bpf_mlock);
+	bd_promisc = d->bd_promisc;
+	d->bd_promisc = 0;
+
+	lck_mtx_unlock(bpf_mlock);
+	if (bd_promisc) {
 		if (ifnet_set_promiscuous(ifp, 0)) {
 			/*
 			 * Something is really wrong if we were able to put
@@ -640,8 +649,12 @@ bpf_detachd(struct bpf_d *d)
 			    "%s: bpf%d ifnet_set_promiscuous %s failed",
 			    __func__, d->bd_dev_minor, if_name(ifp));
 		}
-		lck_mtx_lock(bpf_mlock);
 	}
+
+	if (disable_tap) {
+		disable_tap(ifp, dlt, BPF_TAP_DISABLE);
+	}
+	lck_mtx_lock(bpf_mlock);
 
 	/*
 	 * Wake up other thread that are waiting for this thread to finish

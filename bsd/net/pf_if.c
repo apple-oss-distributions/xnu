@@ -380,7 +380,7 @@ _bad:
 		pfr_detach_table(dyn->pfid_kt);
 	}
 	if (ruleset != NULL) {
-		pf_remove_if_empty_ruleset(ruleset);
+		pf_release_ruleset(ruleset);
 	}
 	if (dyn->pfid_kif != NULL) {
 		pfi_kif_unref(dyn->pfid_kif, PFI_KIF_REF_RULE);

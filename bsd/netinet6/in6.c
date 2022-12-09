@@ -2665,6 +2665,7 @@ in6_update_ifa(struct ifnet *ifp, struct in6_aliasreq *ifra, int ifaupflags,
 		lck_rw_lock_exclusive(&in6_ifaddr_rwlock);
 		TAILQ_INSERT_TAIL(&in6_ifaddrhead, ia, ia6_link);
 		IFA_ADDREF(ifa); /* hold for in6_ifaddrs link */
+		os_atomic_inc(&in6_ifaddrlist_genid, relaxed);
 		lck_rw_done(&in6_ifaddr_rwlock);
 	} else {
 		ifa = &ia->ia_ifa;
@@ -2825,6 +2826,7 @@ in6_unlink_ifa(struct in6_ifaddr *ia, struct ifnet *ifp)
 	TAILQ_FOREACH(nia, &in6_ifaddrhead, ia6_link) {
 		if (ia == nia) {
 			TAILQ_REMOVE(&in6_ifaddrhead, ia, ia6_link);
+			os_atomic_inc(&in6_ifaddrlist_genid, relaxed);
 			IFA_LOCK(ifa);
 			if (IA6_IS_HASHED(ia)) {
 				in6_iahash_remove(ia);

@@ -95,6 +95,11 @@ SYSCTL_QUAD(_net_classq, OID_AUTO, ll_l4s_update_interval,
     CTLFLAG_RW | CTLFLAG_LOCKED, &ifclassq_ll_l4s_update_interval,
     "low latency L4S update interval in nanoseconds");
 
+uint32_t ifclassq_enable_l4s = 0;
+SYSCTL_UINT(_net_classq, OID_AUTO, enable_l4s,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &ifclassq_enable_l4s, 0,
+    "enable/disable L4S");
+
 #if DEBUG || DEVELOPMENT
 uint32_t ifclassq_flow_control_adv = 1; /* flow control advisory */
 SYSCTL_UINT(_net_classq, OID_AUTO, flow_control_adv,

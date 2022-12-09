@@ -105,6 +105,7 @@ int     posix_spawnattr_set_alt_rosetta_np(posix_spawnattr_t *attr, uint32_t fla
 
 int     posix_spawn_file_actions_add_fileportdup2_np(posix_spawn_file_actions_t * __restrict, mach_port_t, int) __API_AVAILABLE(macos(10.15), ios(13.0), tvos(13.0), watchos(6.0));
 
+int     posix_spawnattr_set_crash_count_np(posix_spawnattr_t * __restrict attr, uint32_t crash_count, uint32_t timeout); __SPI_AVAILABLE(macos(13.1), ios(16.2), tvos(16.2), watchos(9.2));
 int     posix_spawnattr_set_crash_behavior_np(posix_spawnattr_t *attr, uint32_t flags); __API_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(9.0));
 int     posix_spawnattr_set_crash_behavior_deadline_np(posix_spawnattr_t *attr, uint64_t deadline, uint32_t flags); __API_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(9.0));
 

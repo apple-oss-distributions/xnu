@@ -208,6 +208,7 @@ int udp_output(struct inpcb *, struct mbuf *, struct sockaddr *,
     struct mbuf *, struct proc *);
 static void ip_2_ip6_hdr(struct ip6_hdr *ip6, struct ip *ip);
 static void udp_gc(struct inpcbinfo *);
+static int udp_defunct(struct socket *);
 
 struct pr_usrreqs udp_usrreqs = {
 	.pru_abort =            udp_abort,
@@ -226,6 +227,7 @@ struct pr_usrreqs udp_usrreqs = {
 	.pru_sosend =           sosend,
 	.pru_soreceive =        soreceive,
 	.pru_soreceive_list =   soreceive_list,
+	.pru_defunct =          udp_defunct,
 };
 
 void
@@ -3072,4 +3074,31 @@ udp_fill_keepalive_offload_frames(ifnet_t ifp,
 	}
 	lck_rw_done(&udbinfo.ipi_lock);
 	*used_frames_count = frame_index;
+}
+
+int
+udp_defunct(struct socket *so)
+{
+	struct ip_moptions *imo;
+	struct inpcb *inp;
+
+	inp = sotoinpcb(so);
+	if (inp == NULL) {
+		return EINVAL;
+	}
+
+	imo = inp->inp_moptions;
+	if (imo != NULL) {
+		struct proc *p = current_proc();
+
+		SODEFUNCTLOG("%s[%d, %s]: defuncting so 0x%llu drop multicast memberships",
+		    __func__, proc_pid(p), proc_best_name(p),
+		    so->so_gencnt);
+
+		inp->inp_moptions = NULL;
+
+		IMO_REMREF(imo);
+	}
+
+	return 0;
 }

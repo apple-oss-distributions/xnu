@@ -1060,7 +1060,7 @@ net_port_info_log_una_wake_event(const char *s, struct net_port_info_una_wake_ev
 	} else if (ev->una_wake_pkt_flags & NPIF_IPV6) {
 		inet_ntop(PF_INET6, &ev->una_wake_pkt_local_addr_._in_a_6.s6_addr,
 		    lbuf, sizeof(lbuf));
-		inet_ntop(PF_INET6, &ev->una_wake_pkt_local_addr_._in_a_6.s6_addr,
+		inet_ntop(PF_INET6, &ev->una_wake_pkt_foreign_addr_._in_a_6.s6_addr,
 		    fbuf, sizeof(fbuf));
 	}
 	os_log(OS_LOG_DEFAULT, "%s if %s (%u) proto %s local %s:%u foreign %s:%u len: %u datalen: %u cflags: 0x%x proto: %u",
@@ -1088,7 +1088,7 @@ net_port_info_log_wake_event(const char *s, struct net_port_info_wake_event *ev)
 	} else if (ev->wake_pkt_flags & NPIF_IPV6) {
 		inet_ntop(PF_INET6, &ev->wake_pkt_local_addr_._in_a_6.s6_addr,
 		    lbuf, sizeof(lbuf));
-		inet_ntop(PF_INET6, &ev->wake_pkt_local_addr_._in_a_6.s6_addr,
+		inet_ntop(PF_INET6, &ev->wake_pkt_foreign_addr_._in_a_6.s6_addr,
 		    fbuf, sizeof(fbuf));
 	}
 	os_log(OS_LOG_DEFAULT, "%s if %s (%u) proto %s local %s:%u foreign %s:%u len: %u datalen: %u cflags: 0x%x proc %s eproc %s",

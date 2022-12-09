@@ -364,7 +364,7 @@ struct  ip6stat {
 
 enum ip6s_sources_rule_index {
 	IP6S_SRCRULE_0, IP6S_SRCRULE_1, IP6S_SRCRULE_2, IP6S_SRCRULE_3, IP6S_SRCRULE_4,
-	IP6S_SRCRULE_5, IP6S_SRCRULE_6, IP6S_SRCRULE_7,
+	IP6S_SRCRULE_5, IP6S_SRCRULE_5_5, IP6S_SRCRULE_6, IP6S_SRCRULE_7,
 	IP6S_SRCRULE_7x, IP6S_SRCRULE_8
 };
 
@@ -594,7 +594,7 @@ extern int dest6_input(struct mbuf **, int *, int);
 extern struct ifaddr * in6_selectsrc_core_ifa(struct sockaddr_in6 *, struct ifnet *, int);
 extern struct in6_addr * in6_selectsrc_core(struct sockaddr_in6 *,
     uint32_t, struct ifnet *, int,
-    struct in6_addr *, struct ifnet **, int *, struct ifaddr **);
+    struct in6_addr *, struct ifnet **, int *, struct ifaddr **, struct route_in6 *);
 extern struct in6_addr *in6_selectsrc(struct sockaddr_in6 *,
     struct ip6_pktopts *, struct inpcb *, struct route_in6 *,
     struct ifnet **, struct in6_addr *, unsigned int, int *);

@@ -770,7 +770,7 @@ kmem_alloc_guard(
 	vm_page_t               guard_right = VM_PAGE_NULL;
 	vm_page_t               wired_page_list = VM_PAGE_NULL;
 	vm_map_kernel_flags_t   vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	bool                    need_guards;
+	bool                    skip_guards;
 	kmem_return_t           kmr = { };
 
 	assert(kernel_map && map->pmap == kernel_pmap);
@@ -825,21 +825,21 @@ kmem_alloc_guard(
 	fill_start = 0;
 	fill_size  = map_size - __kmem_guard_size(ANYF(flags));
 
-	need_guards = flags & (KMA_KOBJECT | KMA_COMPRESSOR) ||
-	    !map->never_faults;
+	skip_guards = (flags & (KMA_KOBJECT | KMA_COMPRESSOR)) ||
+	    map->never_faults;
 
 	if (flags & KMA_GUARD_FIRST) {
 		vmk_flags.vmkf_guard_before = true;
 		fill_start += PAGE_SIZE;
 	}
-	if ((flags & KMA_GUARD_FIRST) && need_guards) {
+	if ((flags & KMA_GUARD_FIRST) && !skip_guards) {
 		guard_left = vm_page_grab_guard((flags & KMA_NOPAGEWAIT) == 0);
 		if (__improbable(guard_left == VM_PAGE_NULL)) {
 			kmr.kmr_return = KERN_RESOURCE_SHORTAGE;
 			goto out_error;
 		}
 	}
-	if ((flags & KMA_GUARD_LAST) && need_guards) {
+	if ((flags & KMA_GUARD_LAST) && !skip_guards) {
 		guard_right = vm_page_grab_guard((flags & KMA_NOPAGEWAIT) == 0);
 		if (__improbable(guard_right == VM_PAGE_NULL)) {
 			kmr.kmr_return = KERN_RESOURCE_SHORTAGE;
@@ -1456,7 +1456,9 @@ kmem_realloc_shrink_guard(
 		vm_offset_t remove_start = newsize;
 
 		if (flags & KMR_GUARD_LAST) {
-			guard_right = vm_page_grab_guard(true);
+			if (!map->never_faults) {
+				guard_right = vm_page_grab_guard(true);
+			}
 			remove_start -= PAGE_SIZE;
 		}
 
@@ -1470,7 +1472,7 @@ kmem_realloc_shrink_guard(
 
 		vm_object_page_remove(object, remove_start, oldsize);
 
-		if (flags & KMR_GUARD_LAST) {
+		if (guard_right) {
 			vm_page_insert(guard_right, object, newsize - PAGE_SIZE);
 			guard_right->vmp_busy = false;
 		}

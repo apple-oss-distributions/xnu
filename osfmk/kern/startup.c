@@ -668,6 +668,19 @@ kernel_bootstrap_thread(void)
 
 	kernel_startup_initialize_upto(STARTUP_SUB_SYSCTL);
 
+	/*
+	 * Initialize the globals used for permuting kernel
+	 * addresses that may be exported to userland as tokens
+	 * using VM_KERNEL_ADDRPERM()/VM_KERNEL_ADDRPERM_EXTERNAL().
+	 * Force the random number to be odd to avoid mapping a non-zero
+	 * word-aligned address to zero via addition.
+	 */
+	vm_kernel_addrperm = (vm_offset_t)(early_random() | 1);
+	buf_kernel_addrperm = (vm_offset_t)(early_random() | 1);
+	vm_kernel_addrperm_ext = (vm_offset_t)(early_random() | 1);
+	vm_kernel_addrhash_salt = early_random();
+	vm_kernel_addrhash_salt_ext = early_random();
+
 #ifdef  IOKIT
 	kernel_bootstrap_log("PE_init_iokit");
 	PE_init_iokit();
@@ -738,24 +751,6 @@ kernel_bootstrap_thread(void)
 	 */
 	kernel_bootstrap_log("OSKextRemoveKextBootstrap");
 	OSKextRemoveKextBootstrap();
-
-	/*
-	 * Initialize the globals used for permuting kernel
-	 * addresses that may be exported to userland as tokens
-	 * using VM_KERNEL_ADDRPERM()/VM_KERNEL_ADDRPERM_EXTERNAL().
-	 * Force the random number to be odd to avoid mapping a non-zero
-	 * word-aligned address to zero via addition.
-	 * Note: at this stage we can use the cryptographically secure PRNG
-	 * rather than early_random().
-	 */
-	read_random(&vm_kernel_addrperm, sizeof(vm_kernel_addrperm));
-	vm_kernel_addrperm |= 1;
-	read_random(&buf_kernel_addrperm, sizeof(buf_kernel_addrperm));
-	buf_kernel_addrperm |= 1;
-	read_random(&vm_kernel_addrperm_ext, sizeof(vm_kernel_addrperm_ext));
-	vm_kernel_addrperm_ext |= 1;
-	read_random(&vm_kernel_addrhash_salt, sizeof(vm_kernel_addrhash_salt));
-	read_random(&vm_kernel_addrhash_salt_ext, sizeof(vm_kernel_addrhash_salt_ext));
 
 	/* No changes to kernel text and rodata beyond this point. */
 	kernel_bootstrap_log("machine_lockdown");

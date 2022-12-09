@@ -86,12 +86,17 @@ static struct mcache *flowq_cache = NULL;       /* mcache for flowq */
 #define DTYPE_EARLY     2       /* an "unforced" (early) drop */
 
 static uint32_t pkt_compressor = 1;
+static uint64_t l4s_ce_threshold = 0;
 #if (DEBUG || DEVELOPMENT)
 SYSCTL_NODE(_net_classq, OID_AUTO, flow_q, CTLFLAG_RW | CTLFLAG_LOCKED,
     0, "FQ-CODEL parameters");
 
 SYSCTL_UINT(_net_classq_flow_q, OID_AUTO, pkt_compressor,
     CTLFLAG_RW | CTLFLAG_LOCKED, &pkt_compressor, 0, "enable pkt compression");
+
+SYSCTL_QUAD(_net_classq, OID_AUTO, l4s_ce_threshold,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &l4s_ce_threshold,
+    "L4S CE threshold");
 #endif /* (DEBUG || DEVELOPMENT) */
 
 void
@@ -352,6 +357,10 @@ fq_addq(fq_if_t *fqs, fq_if_group_t *fq_grp, pktsched_pkt_t *pkt,
 		__builtin_unreachable();
 	}
 
+	if (ifclassq_enable_l4s) {
+		tfc_type = pktsched_is_pkt_l4s(pkt) ? FQ_TFC_L4S : FQ_TFC_C;
+	}
+
 	/*
 	 * Timestamps for every packet must be set prior to entering this path.
 	 */
@@ -375,6 +384,21 @@ fq_addq(fq_if_t *fqs, fq_if_group_t *fq_grp, pktsched_pkt_t *pkt,
 	    fq->fq_bytes, pktsched_get_pkt_len(pkt));
 
 	fq_detect_dequeue_stall(fqs, fq, fq_cl, &now);
+
+	/*
+	 * Skip the dropping part if it's L4S. Flow control or ECN marking decision
+	 * will be made at dequeue time.
+	 */
+	if (ifclassq_enable_l4s && tfc_type == FQ_TFC_L4S) {
+		fq_cl->fcl_stat.fcl_l4s_pkts++;
+		droptype = DTYPE_NODROP;
+		goto no_drop;
+	}
+
+	/*
+	 * If L4S is not enabled, a fq should always be labeled as a classic.
+	 */
+	VERIFY(fq->fq_tfc_type == FQ_TFC_C);
 
 	if (__improbable(FQ_IS_DELAY_HIGH(fq) || FQ_IS_OVERWHELMING(fq))) {
 		if ((fq->fq_flags & FQF_FLOWCTL_CAPABLE) &&
@@ -517,8 +541,10 @@ fq_addq(fq_if_t *fqs, fq_if_group_t *fq_grp, pktsched_pkt_t *pkt,
 		}
 	}
 
+no_drop:
 	if (__probable(droptype == DTYPE_NODROP)) {
 		uint32_t chain_len = pktsched_get_pkt_len(pkt);
+		int ret_compress = 0;
 
 		/*
 		 * We do not compress if we are enqueuing a chain.
@@ -526,10 +552,8 @@ fq_addq(fq_if_t *fqs, fq_if_group_t *fq_grp, pktsched_pkt_t *pkt,
 		 * purpose of batch enqueueing.
 		 */
 		if (cnt == 1) {
-			ret = fq_compressor(fqs, fq, fq_cl, pkt);
-			if (ret != CLASSQEQ_COMPRESSED) {
-				ret = CLASSQEQ_SUCCESS;
-			} else {
+			ret_compress = fq_compressor(fqs, fq, fq_cl, pkt);
+			if (ret_compress == CLASSQEQ_COMPRESSED) {
 				fq_cl->fcl_stat.fcl_pkts_compressed++;
 			}
 		}
@@ -610,6 +634,8 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 	int64_t qdelay = 0;
 	volatile uint32_t *pkt_flags;
 	uint64_t *pkt_timestamp;
+	uint8_t pkt_flowsrc;
+	boolean_t l4s_pkt;
 
 	fq_getq_flow_internal(fqs, fq, pkt);
 	if (pkt->pktsched_ptype == QP_INVALID) {
@@ -617,19 +643,15 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 		return;
 	}
 
-	pktsched_get_pkt_vars(pkt, &pkt_flags, &pkt_timestamp, NULL, NULL,
+	pktsched_get_pkt_vars(pkt, &pkt_flags, &pkt_timestamp, NULL, &pkt_flowsrc,
 	    NULL, NULL);
+	l4s_pkt = pktsched_is_pkt_l4s(pkt);
 
 	/* this will compute qdelay in nanoseconds */
 	if (now > *pkt_timestamp) {
 		qdelay = now - *pkt_timestamp;
 	}
 	fq_cl = &FQ_CLASSQ(fq);
-
-	if (fq->fq_min_qdelay == 0 ||
-	    (qdelay > 0 && (u_int64_t)qdelay < fq->fq_min_qdelay)) {
-		fq->fq_min_qdelay = qdelay;
-	}
 
 	/* Update min/max/avg qdelay for the respective class */
 	if (fq_cl->fcl_stat.fcl_min_qdelay == 0 ||
@@ -668,6 +690,24 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 		}
 	}
 
+	if (ifclassq_enable_l4s && l4s_pkt) {
+		if ((l4s_ce_threshold != 0 && qdelay > l4s_ce_threshold) ||
+		    (l4s_ce_threshold == 0 && qdelay > FQ_TARGET_DELAY(fq))) {
+			if (pktsched_mark_ecn(pkt) == 0) {
+				fq_cl->fcl_stat.fcl_ce_marked++;
+			} else {
+				fq_cl->fcl_stat.fcl_ce_mark_failures++;
+			}
+		}
+		/* skip steps not needed for L4S traffic */
+		goto out;
+	}
+
+	if (fq->fq_min_qdelay == 0 ||
+	    (qdelay > 0 && (u_int64_t)qdelay < fq->fq_min_qdelay)) {
+		fq->fq_min_qdelay = qdelay;
+	}
+
 	if (now >= fq->fq_updatetime) {
 		if (fq->fq_min_qdelay > FQ_TARGET_DELAY(fq)) {
 			if (!FQ_IS_DELAY_HIGH(fq)) {
@@ -685,6 +725,8 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 		fq->fq_updatetime = now + FQ_UPDATE_INTERVAL(fq);
 		fq->fq_min_qdelay = 0;
 	}
+
+out:
 	if (fqs->fqs_large_flow != fq || !fq_if_almost_at_drop_limit(fqs)) {
 		FQ_CLEAR_OVERWHELMING(fq);
 	}

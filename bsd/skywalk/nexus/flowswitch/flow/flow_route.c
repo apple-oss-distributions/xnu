@@ -1272,10 +1272,12 @@ flow_route_select_laddr(union sockaddr_in_4_6 *src, union sockaddr_in_4_6 *dst,
 
 	case AF_INET6: {
 		struct in6_addr src_storage, *in6;
-
+		struct route_in6 ro = {};
 		uint32_t hints = (use_stable_address ? 0 : IPV6_SRCSEL_HINT_PREFER_TMPADDR);
+		ro.ro_rt = rt;
+
 		if ((in6 = in6_selectsrc_core(SIN6(dst), hints,
-		    ifp, 0, &src_storage, &src_ifp, &err, &ifa)) == NULL) {
+		    ifp, 0, &src_storage, &src_ifp, &err, &ifa, &ro)) == NULL) {
 			if (err == 0) {
 				err = EADDRNOTAVAIL;
 			}

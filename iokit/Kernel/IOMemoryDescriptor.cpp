@@ -2777,7 +2777,7 @@ IOMemoryDescriptor::getDescriptorID( void )
 IOReturn
 IOMemoryDescriptor::ktraceEmitPhysicalSegments( void )
 {
-	if (!kdebug_debugid_explicitly_enabled(IODBG_IOMDPA(IOMDPA_MAPPED))) {
+	if (!kdebug_debugid_enabled(IODBG_IOMDPA(IOMDPA_MAPPED))) {
 		return kIOReturnSuccess;
 	}
 

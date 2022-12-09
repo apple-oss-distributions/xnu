@@ -248,6 +248,10 @@ typedef struct _posix_spawnattr {
 	uint64_t        psa_crash_behavior_deadline; /* crash behavior deadline */
 	uint8_t         psa_launch_type;         /* type of launch for launch constraint enforcement */
 
+	/* For exponential backoff */
+	uint32_t        psa_crash_count;
+	uint32_t        psa_throttle_timeout;
+
 	/*
 	 * NOTE: Extensions array pointers must stay at the end so that
 	 * everything above this point stays the same size on different bitnesses

@@ -157,6 +157,7 @@ WARNFLAGS_STD := \
 	-Wno-reserved-id-macro \
 	-Wno-shift-sign-overflow \
 	-Wno-switch-enum \
+	-Wno-unaligned-access \
 	-Wno-undef \
 	-Wno-unused-macros \
 	-Wno-used-but-marked-unused \

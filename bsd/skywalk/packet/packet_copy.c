@@ -875,6 +875,9 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		if ((m->m_pkthdr.pkt_flags & PKTF_START_SEQ) != 0) {
 			pkt->pkt_flow_tcp_seq = htonl(m->m_pkthdr.tx_start_seq);
 		}
+		if ((m->m_pkthdr.pkt_ext_flags & PKTF_EXT_L4S) != 0) {
+			pkt->pkt_pflags |= PKT_F_L4S;
+		}
 		necp_get_app_uuid_from_packet(m, pkt->pkt_policy_euuid);
 		pkt->pkt_policy_id =
 		    (uint32_t)necp_get_policy_id_from_packet(m);
@@ -1247,6 +1250,9 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 		pkt->pkt_pflags |= (m->m_pkthdr.pkt_flags & PKT_F_COMMON_MASK);
 		if ((m->m_pkthdr.pkt_flags & PKTF_START_SEQ) != 0) {
 			pkt->pkt_flow_tcp_seq = htonl(m->m_pkthdr.tx_start_seq);
+		}
+		if ((m->m_pkthdr.pkt_ext_flags & PKTF_EXT_L4S) != 0) {
+			pkt->pkt_pflags |= PKT_F_L4S;
 		}
 		necp_get_app_uuid_from_packet(m, pkt->pkt_policy_euuid);
 		pkt->pkt_policy_id =

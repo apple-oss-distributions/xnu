@@ -1095,7 +1095,7 @@ def PrintVarTypesPerHeap(idx):
     kt_var_heaps = kern.GetGlobalVariable('kt_var_heaps') + 1
     assert(idx < kt_var_heaps)
     heap = kalloc_type_heap_array[idx]
-    ktv_cur = cast(heap.views, "struct kalloc_type_var_view *")
+    ktv_cur = cast(heap.kt_views, "struct kalloc_type_var_view *")
     prev_types = {}
     while ktv_cur:
         typename = str(ktv_cur.kt_name)

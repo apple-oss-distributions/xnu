@@ -751,7 +751,7 @@ struct __user_packet {
  *    value matches the corresponding PKTF_* as defined in <sys/mbuf.h>.
  *
  * c. Add the new flag to PKT_F_USER_MASK depending on whether it's allowed
- *    to be user by userland.  Flags not added to this mask will only be
+ *    to be used by userland.  Flags not added to this mask will only be
  *    used by the kernel.  We only internalize and externalize flags listed
  *    in PKT_F_USER_MASK.
  *
@@ -813,7 +813,7 @@ struct __user_packet {
 #define __PKT_F_TX_PORT_DATA    0x0000100000000000ULL /* (K) */
 #define PKT_F_OPT_EXP_ACTION    0x0000200000000000ULL /* (U+K) */
 #define PKT_F_OPT_APP_METADATA  0x0000400000000000ULL /* (U+K) */
-/*                              0x0000800000000000ULL */
+#define PKT_F_L4S               0x0000800000000000ULL /* (U+K) */
 /*                              0x0001000000000000ULL */
 /*                              0x0002000000000000ULL */
 /*                              0x0004000000000000ULL */
@@ -847,7 +847,7 @@ struct __user_packet {
 #define PKT_F_USER_MASK                                                 \
 	(PKT_F_BACKGROUND | PKT_F_REALTIME | PKT_F_REXMT |              \
 	PKT_F_LAST_PKT | PKT_F_OPT_DATA | PKT_F_PROMISC |               \
-	PKT_F_TRUNCATED | PKT_F_WAKE_PKT)
+	PKT_F_TRUNCATED | PKT_F_WAKE_PKT | PKT_F_L4S)
 
 /*
  * Aliases for kernel-only flags.  See notes above.  The ones marked

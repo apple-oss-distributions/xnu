@@ -144,7 +144,6 @@ typedef struct memorystatus_system_health {
 	bool msh_compressor_is_thrashing;
 	bool msh_compressed_pages_nearing_limit;
 	bool msh_filecache_is_thrashing;
-	bool msh_swapout_is_ripe;
 	bool msh_phantom_cache_pressure;
 	bool msh_swappable_compressor_segments_over_limit;
 	bool msh_swapin_queue_over_limit;

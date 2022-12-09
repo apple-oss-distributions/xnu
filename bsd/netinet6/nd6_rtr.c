@@ -96,8 +96,6 @@ static void defrouter_addreq(struct nd_defrouter *, struct nd_route_info *, bool
 static void defrouter_delreq(struct nd_defrouter *, struct nd_route_info *);
 static struct nd_defrouter *defrtrlist_update_common(struct nd_defrouter *,
     struct nd_drhead *, boolean_t);
-static struct nd_pfxrouter *pfxrtr_lookup(struct nd_prefix *,
-    struct nd_defrouter *);
 static void pfxrtr_add(struct nd_prefix *, struct nd_defrouter *);
 static void pfxrtr_del(struct nd_pfxrouter *, struct nd_prefix *);
 static struct nd_pfxrouter *find_pfxlist_reachable_router(struct nd_prefix *);
@@ -2154,7 +2152,7 @@ defrtrlist_update(struct nd_defrouter *new, struct nd_drhead *nd_router_list)
 	return dr;
 }
 
-static struct nd_pfxrouter *
+struct nd_pfxrouter *
 pfxrtr_lookup(struct nd_prefix *pr, struct nd_defrouter *dr)
 {
 	struct nd_pfxrouter *search;
@@ -2341,9 +2339,12 @@ nd6_prelist_add(struct nd_prefix *pr, struct nd_defrouter *dr,
 void
 prelist_remove(struct nd_prefix *pr)
 {
-	struct nd_pfxrouter *pfr, *next;
+	struct nd_pfxrouter *pfr = NULL, *next = NULL;
 	struct ifnet *ifp = pr->ndpr_ifp;
 	struct nd_ifinfo *ndi = NULL;
+	struct nd_prefix *tmp_pr = NULL;
+	boolean_t pr_scoped;
+	int err;
 
 	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 	NDPR_LOCK_ASSERT_HELD(pr);
@@ -2352,6 +2353,7 @@ prelist_remove(struct nd_prefix *pr)
 		return;
 	}
 
+	pr_scoped = (pr->ndpr_stateflags & NDPRF_IFSCOPE) != 0;
 	/*
 	 * If there are no more addresses, defunct the prefix.  This is needed
 	 * because we don't want multiple threads calling prelist_remove() for
@@ -2387,6 +2389,56 @@ prelist_remove(struct nd_prefix *pr)
 		NDPR_LOCK(pr);
 		if (NDPR_REMREF(pr) == NULL) {
 			return;
+		}
+	}
+
+	/*
+	 * Check if there is a scoped version of this PR, if so
+	 * make it unscoped.
+	 */
+	if (!pr_scoped && IN6_IS_ADDR_UNIQUE_LOCAL(&pr->ndpr_prefix.sin6_addr)) {
+		tmp_pr = nd6_prefix_equal_lookup(pr, FALSE);
+		if (tmp_pr != NULL) {
+			NDPR_ADDREF(pr);
+			NDPR_UNLOCK(pr);
+
+			lck_mtx_unlock(nd6_mutex);
+			err = nd6_prefix_offlink(tmp_pr);
+			lck_mtx_lock(nd6_mutex);
+			if (err != 0) {
+				nd6log(error,
+				    "%s: failed to make %s/%d offlink on %s, "
+				    "errno=%d\n", __func__,
+				    ip6_sprintf(&tmp_pr->ndpr_prefix.sin6_addr),
+				    tmp_pr->ndpr_plen, if_name(tmp_pr->ndpr_ifp), err);
+			}
+
+			err = nd6_prefix_onlink_scoped(tmp_pr, IFSCOPE_NONE);
+			if (err != 0) {
+				nd6log(error,
+				    "%s: failed to make %s/%d onlink on %s, errno=%d\n",
+				    __func__, ip6_sprintf(&tmp_pr->ndpr_prefix.sin6_addr),
+				    tmp_pr->ndpr_plen, if_name(tmp_pr->ndpr_ifp), err);
+			}
+
+			if (err != 0) {
+				nd6log(error,
+				    "%s: error unscoping %s/%d from %s\n",
+				    __func__, ip6_sprintf(&tmp_pr->ndpr_prefix.sin6_addr),
+				    tmp_pr->ndpr_plen, if_name(tmp_pr->ndpr_ifp));
+			} else {
+				nd6log2(info,
+				    "%s: %s/%d unscoped, previously on %s\n",
+				    __func__, ip6_sprintf(&tmp_pr->ndpr_prefix.sin6_addr),
+				    tmp_pr->ndpr_plen, if_name(tmp_pr->ndpr_ifp));
+			}
+
+			NDPR_REMREF(tmp_pr);
+
+			NDPR_LOCK(pr);
+			if (NDPR_REMREF(pr) == NULL) {
+				return;
+			}
 		}
 	}
 
@@ -3068,23 +3120,16 @@ ndpr_getexpire(struct nd_prefix *pr)
  * A supplement function used in the on-link detection below;
  * detect if a given prefix has a (probably) reachable advertising router.
  * XXX: lengthy function name...
- *
- * Callers *must* increase the reference count of nd_prefix.
  */
 static struct nd_pfxrouter *
 find_pfxlist_reachable_router(struct nd_prefix *pr)
 {
-	struct nd_pfxrouter *pfxrtr;
-	struct rtentry *rt;
-	struct llinfo_nd6 *ln;
-	struct ifnet *ifp;
-	struct in6_addr rtaddr;
-	unsigned int genid;
+	struct nd_pfxrouter *pfxrtr = NULL;
+	struct ifnet *ifp = NULL;
 
 	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 	NDPR_LOCK_ASSERT_HELD(pr);
 
-	genid = pr->ndpr_genid;
 	pfxrtr = LIST_FIRST(&pr->ndpr_advrtrs);
 	while (pfxrtr) {
 		/* XXX This should be same as prefixes interface. */
@@ -3102,40 +3147,8 @@ find_pfxlist_reachable_router(struct nd_prefix *pr)
 		if (pfxrtr->router->is_reachable) {
 			break;
 		}
-
-		if (pfxrtr->router->stateflags & NDDRF_MAPPED) {
-			rtaddr = pfxrtr->router->rtaddr_mapped;
-		} else {
-			rtaddr = pfxrtr->router->rtaddr;
-		}
-
-		NDPR_UNLOCK(pr);
-		lck_mtx_unlock(nd6_mutex);
-		/* Callee returns a locked route upon success */
-		if ((rt = nd6_lookup(&rtaddr, 0, ifp, 0)) != NULL) {
-			RT_LOCK_ASSERT_HELD(rt);
-			if ((ln = rt->rt_llinfo) != NULL &&
-			    ND6_IS_LLINFO_PROBREACH(ln)) {
-				RT_REMREF_LOCKED(rt);
-				RT_UNLOCK(rt);
-				lck_mtx_lock(nd6_mutex);
-				NDPR_LOCK(pr);
-				break;  /* found */
-			}
-			RT_REMREF_LOCKED(rt);
-			RT_UNLOCK(rt);
-		}
-		lck_mtx_lock(nd6_mutex);
-		NDPR_LOCK(pr);
-		if (pr->ndpr_genid != genid) {
-			pfxrtr = LIST_FIRST(&pr->ndpr_advrtrs);
-			genid = pr->ndpr_genid;
-		} else {
-			pfxrtr = LIST_NEXT(pfxrtr, pfr_entry);
-		}
+		pfxrtr = LIST_NEXT(pfxrtr, pfr_entry);
 	}
-	NDPR_LOCK_ASSERT_HELD(pr);
-
 	return pfxrtr;
 }
 
@@ -3181,34 +3194,13 @@ pfxlist_onlink_check(void)
 	pr = nd_prefix.lh_first;
 	while (pr) {
 		NDPR_LOCK(pr);
-		if (pr->ndpr_stateflags & NDPRF_PROCESSED_ONLINK) {
-			NDPR_UNLOCK(pr);
-			pr = pr->ndpr_next;
-			continue;
-		}
-		NDPR_ADDREF(pr);
 		if (pr->ndpr_raf_onlink && find_pfxlist_reachable_router(pr) &&
 		    (pr->ndpr_debug & IFD_ATTACHED)) {
 			NDPR_UNLOCK(pr);
-			if (NDPR_REMREF(pr) == NULL) {
-				pr = NULL;
-			}
 			break;
 		}
-		pr->ndpr_stateflags |= NDPRF_PROCESSED_ONLINK;
 		NDPR_UNLOCK(pr);
-		NDPR_REMREF(pr);
-		/*
-		 * Since find_pfxlist_reachable_router() drops the nd6_mutex, we
-		 * have to start over, but the NDPRF_PROCESSED_ONLINK flag will
-		 * stop us from checking the same prefix twice.
-		 */
-		pr = nd_prefix.lh_first;
-	}
-	LIST_FOREACH(prclear, &nd_prefix, ndpr_entry) {
-		NDPR_LOCK(prclear);
-		prclear->ndpr_stateflags &= ~NDPRF_PROCESSED_ONLINK;
-		NDPR_UNLOCK(prclear);
+		pr = pr->ndpr_next;
 	}
 	/*
 	 * If we have no such prefix, check whether we still have a router
@@ -3252,13 +3244,11 @@ pfxlist_onlink_check(void)
 			 * set nor in static prefixes
 			 */
 			if (pr->ndpr_raf_onlink == 0 ||
-			    pr->ndpr_stateflags & NDPRF_PROCESSED_ONLINK ||
 			    pr->ndpr_stateflags & NDPRF_STATIC) {
 				NDPR_UNLOCK(pr);
 				pr = pr->ndpr_next;
 				continue;
 			}
-			NDPR_ADDREF(pr);
 			if ((pr->ndpr_stateflags & NDPRF_DETACHED) == 0 &&
 			    find_pfxlist_reachable_router(pr) == NULL &&
 			    (pr->ndpr_debug & IFD_ATTACHED)) {
@@ -3269,16 +3259,8 @@ pfxlist_onlink_check(void)
 			    (pr->ndpr_debug & IFD_ATTACHED)) {
 				pr->ndpr_stateflags &= ~NDPRF_DETACHED;
 			}
-			pr->ndpr_stateflags |= NDPRF_PROCESSED_ONLINK;
 			NDPR_UNLOCK(pr);
-			NDPR_REMREF(pr);
-			/*
-			 * Since find_pfxlist_reachable_router() drops the
-			 * nd6_mutex, we have to start over, but the
-			 * NDPRF_PROCESSED_ONLINK flag will stop us from
-			 * checking the same prefix twice.
-			 */
-			pr = nd_prefix.lh_first;
+			pr = pr->ndpr_next;
 		}
 	} else {
 		/* there is no prefix that has a reachable router */
@@ -3294,11 +3276,6 @@ pfxlist_onlink_check(void)
 			}
 			NDPR_UNLOCK(pr);
 		}
-	}
-	LIST_FOREACH(prclear, &nd_prefix, ndpr_entry) {
-		NDPR_LOCK(prclear);
-		prclear->ndpr_stateflags &= ~NDPRF_PROCESSED_ONLINK;
-		NDPR_UNLOCK(prclear);
 	}
 	/*
 	 * Instead of removing interface route for detached prefix,
@@ -3422,18 +3399,12 @@ pfxlist_onlink_check(void)
 		IFA_UNLOCK(&ifa->ia_ifa);
 
 		NDPR_LOCK(ndpr);
-		NDPR_ADDREF(ndpr);
 		if (find_pfxlist_reachable_router(ndpr)) {
 			NDPR_UNLOCK(ndpr);
-			if (NDPR_REMREF(ndpr) == NULL) {
-				found = 0;
-			} else {
-				found = 1;
-			}
+			found = 1;
 			break;
 		}
 		NDPR_UNLOCK(ndpr);
-		NDPR_REMREF(ndpr);
 	}
 	if (found) {
 		for (i = 0; ifap[i]; i++) {
@@ -3453,7 +3424,6 @@ pfxlist_onlink_check(void)
 			}
 			IFA_UNLOCK(&ifa->ia_ifa);
 			NDPR_LOCK(ndpr);
-			NDPR_ADDREF(ndpr);
 			if (find_pfxlist_reachable_router(ndpr) == NULL) {
 				/*
 				 * When the prefix of an addr is detached, make the address
@@ -3493,7 +3463,6 @@ pfxlist_onlink_check(void)
 			} else {
 				NDPR_UNLOCK(ndpr);
 			}
-			NDPR_REMREF(ndpr);
 		}
 	}
 	ifnet_free_address_list(ifap);

@@ -369,6 +369,11 @@ pmap_ro_zone_validate_element_dst(
 	vm_offset_t         offset,
 	vm_size_t           new_data_size)
 {
+	if (__improbable((zid < ZONE_ID__FIRST_RO) || (zid > ZONE_ID__LAST_RO))) {
+		panic("%s: ZoneID %u outside RO range %u - %u", __func__, zid,
+		    ZONE_ID__FIRST_RO, ZONE_ID__LAST_RO);
+	}
+
 	vm_size_t elem_size = zone_ro_size_params[zid].z_elem_size;
 
 	/* Check element is from correct zone and properly aligned */

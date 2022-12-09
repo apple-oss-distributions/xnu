@@ -4785,9 +4785,11 @@ kqueue_close(struct fileglob *fg, __unused vfs_context_t ctx)
 /*
  * Max depth of the nested kq path that can be created.
  * Note that this has to be less than the size of kq_level
- * to avoid wrapping around and mislabeling the level.
+ * to avoid wrapping around and mislabeling the level. We also
+ * want to be aggressive about this so that we don't overflow the
+ * kernel stack while posting kevents
  */
-#define MAX_NESTED_KQ 1000
+#define MAX_NESTED_KQ 10
 
 /*
  * The callers has taken a use-count reference on this kqueue and will donate it

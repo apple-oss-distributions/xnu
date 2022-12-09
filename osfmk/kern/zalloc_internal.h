@@ -520,28 +520,17 @@ __enum_decl(zone_submap_idx_t, uint32_t, {
 });
 
 #define KALLOC_MINALIGN     (1 << KALLOC_LOG2_MINALIGN)
-#define KALLOC_DLUT_SIZE    (2048 / KALLOC_MINALIGN)
-
-struct kheap_zones {
-	struct kalloc_zone_cfg         *cfg;
-	struct kalloc_heap             *views;
-	zone_kheap_id_t                 heap_id;
-	uint16_t                        max_k_zone;
-	uint8_t                         dlut[KALLOC_DLUT_SIZE];   /* table of indices into k_zone[] */
-	uint8_t                         k_zindex_start;
-	/* If there's no hit in the DLUT, then start searching from k_zindex_start. */
-	zone_t                         *k_zone;
-};
 
 /*
  * Variable kalloc_type heap config
  */
-struct kt_heap_zones {
-	zone_id_t                       kh_zstart;
-	zone_kheap_id_t                 heap_id;
-	struct kalloc_type_var_view    *views;
+struct kheap_info {
+	zone_id_t             kh_zstart;
+	union {
+		kalloc_heap_t       kh_views;
+		kalloc_type_var_view_t kt_views;
+	};
 };
-
 typedef union kalloc_type_views {
 	struct kalloc_type_view     *ktv_fixed;
 	struct kalloc_type_var_view *ktv_var;
@@ -549,7 +538,7 @@ typedef union kalloc_type_views {
 
 #define KT_VAR_MAX_HEAPS 8
 #define MAX_ZONES       650
-extern struct kt_heap_zones     kalloc_type_heap_array[KT_VAR_MAX_HEAPS];
+extern struct kheap_info        kalloc_type_heap_array[KT_VAR_MAX_HEAPS];
 extern zone_id_t _Atomic        num_zones;
 extern uint32_t                 zone_view_count;
 extern struct zone              zone_array[MAX_ZONES];

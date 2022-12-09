@@ -554,10 +554,10 @@ sbwait(struct sockbuf *sb)
 	if ((so->so_state & SS_DRAINING) || (so->so_flags & SOF_DEFUNCT)) {
 		error = EBADF;
 		if (so->so_flags & SOF_DEFUNCT) {
-			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llx [%d,%d] "
+			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llu [%d,%d] "
 			    "(%d)\n", __func__, proc_selfpid(),
 			    proc_best_name(current_proc()),
-			    (uint64_t)VM_KERNEL_ADDRPERM(so),
+			    so->so_gencnt,
 			    SOCK_DOM(so), SOCK_TYPE(so), error);
 		}
 		return error;
@@ -594,10 +594,10 @@ sbwait(struct sockbuf *sb)
 	if ((so->so_state & SS_DRAINING) || (so->so_flags & SOF_DEFUNCT)) {
 		error = EBADF;
 		if (so->so_flags & SOF_DEFUNCT) {
-			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llx [%d,%d] "
+			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llu [%d,%d] "
 			    "(%d)\n", __func__, proc_selfpid(),
 			    proc_best_name(current_proc()),
-			    (uint64_t)VM_KERNEL_ADDRPERM(so),
+			    so->so_gencnt,
 			    SOCK_DOM(so), SOCK_TYPE(so), error);
 		}
 	}
@@ -622,10 +622,10 @@ void
 sowakeup(struct socket *so, struct sockbuf *sb, struct socket *so2)
 {
 	if (so->so_flags & SOF_DEFUNCT) {
-		SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llx [%d,%d] si 0x%x, "
+		SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llu [%d,%d] si 0x%x, "
 		    "fl 0x%x [%s]\n", __func__, proc_selfpid(),
 		    proc_best_name(current_proc()),
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so),
+		    so->so_gencnt, SOCK_DOM(so),
 		    SOCK_TYPE(so), (uint32_t)sb->sb_sel.si_flags, sb->sb_flags,
 		    (sb->sb_flags & SB_RECV) ? "rcv" : "snd");
 	}
@@ -894,7 +894,7 @@ sbappend_common(struct sockbuf *sb, struct mbuf *m, boolean_t nodrop)
 		ASSERT(nodrop == FALSE);
 
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
-			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m_length(m), false, m->m_pkthdr.rcvif ? m->m_pkthdr.rcvif->if_index : 0);
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m != NULL ? m_length(m) : 0, false, (m != NULL && m->m_pkthdr.rcvif) ? m->m_pkthdr.rcvif->if_index : 0);
 		}
 
 		if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
@@ -973,7 +973,7 @@ sbappendstream(struct sockbuf *sb, struct mbuf *m)
 
 	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
-			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m_length(m), false, m->m_pkthdr.rcvif ? m->m_pkthdr.rcvif->if_index : 0);
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m != NULL ? m_length(m) : 0, false, (m != NULL && m->m_pkthdr.rcvif) ? m->m_pkthdr.rcvif->if_index : 0);
 		}
 
 		if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
@@ -1137,7 +1137,7 @@ sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop)
 		ASSERT(nodrop == FALSE);
 
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
-			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m_length(m0), false, m0->m_pkthdr.rcvif ? m0->m_pkthdr.rcvif->if_index : 0);
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m0 != NULL ? m_length(m0) : 0, false, (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
 		}
 
 		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
@@ -1352,7 +1352,7 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 		/* Call socket data in filters */
 
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
-			dgram_flow_entry = soflow_get_flow(so, NULL, asa, control, m_length(m0), false, m0->m_pkthdr.rcvif ? m0->m_pkthdr.rcvif->if_index : 0);
+			dgram_flow_entry = soflow_get_flow(so, NULL, asa, control, m0 != NULL ? m_length(m0) : 0, false, (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
 		}
 
 		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
@@ -1508,7 +1508,7 @@ sbappendcontrol(struct sockbuf *sb, struct mbuf *m0, struct mbuf *control,
 
 	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
-			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, control, m_length(m0), false, m0->m_pkthdr.rcvif ? m0->m_pkthdr.rcvif->if_index : 0);
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, control, m0 != NULL ? m_length(m0) : 0, false, (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
 		}
 
 		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
@@ -2200,6 +2200,14 @@ pru_preconnect_null(struct socket *so)
 	return 0;
 }
 
+static int
+pru_defunct_null(struct socket *so)
+{
+#pragma unused(so)
+	return 0;
+}
+
+
 void
 pru_sanitize(struct pr_usrreqs *pru)
 {
@@ -2231,6 +2239,7 @@ pru_sanitize(struct pr_usrreqs *pru)
 	DEFAULT(pru->pru_sosend_list, pru_sosend_list_notsupp);
 	DEFAULT(pru->pru_socheckopt, pru_socheckopt_null);
 	DEFAULT(pru->pru_preconnect, pru_preconnect_null);
+	DEFAULT(pru->pru_defunct, pru_defunct_null);
 #undef DEFAULT
 }
 
@@ -2539,10 +2548,10 @@ sblock(struct sockbuf *sb, uint32_t flags)
 		if (error == 0 && (so->so_flags & SOF_DEFUNCT) &&
 		    !(flags & SBL_IGNDEFUNCT)) {
 			error = EBADF;
-			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llx [%d,%d] "
+			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llu [%d,%d] "
 			    "(%d)\n", __func__, proc_selfpid(),
 			    proc_best_name(current_proc()),
-			    (uint64_t)VM_KERNEL_ADDRPERM(so),
+			    so->so_gencnt,
 			    SOCK_DOM(so), SOCK_TYPE(so), error);
 		}
 

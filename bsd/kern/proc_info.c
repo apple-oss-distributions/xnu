@@ -1663,14 +1663,14 @@ proc_listcoalitions(int flavor, int type, user_addr_t buffer,
     uint32_t buffersize, int32_t *retval)
 {
 #if CONFIG_COALITIONS
-	int error = ENOTSUP;
+	int error;
 	int coal_type;
-	uint32_t elem_size;
+	size_t elem_size;
 	void *coalinfo = NULL;
-	uint32_t k_buffersize = 0, copyout_sz = 0;
-	int ncoals = 0, ncoals_ = 0;
-
-	/* struct procinfo_coalinfo; */
+	size_t k_buffersize = 0;
+	size_t copyoutsize = 0;
+	size_t ncoals = 0;
+	size_t ncoals2 = 0;
 
 	switch (flavor) {
 	case LISTCOALITIONS_ALL_COALS:
@@ -1685,68 +1685,31 @@ proc_listcoalitions(int flavor, int type, user_addr_t buffer,
 		return EINVAL;
 	}
 
-	/* find the total number of coalitions */
 	ncoals = coalitions_get_list(coal_type, NULL, 0);
 
 	if (ncoals == 0 || buffer == 0 || buffersize == 0) {
-		/*
-		 * user just wants buffer size
-		 * or there are no coalitions
-		 */
-		error = 0;
-		*retval = (int)(ncoals * elem_size);
-		goto out;
+		*retval = (int32_t)(ncoals * elem_size);
+		return 0;
 	}
 
-	k_buffersize = ncoals * elem_size;
+	if (os_mul_overflow(ncoals, elem_size, &k_buffersize)) {
+		return ENOMEM;
+	}
+
 	coalinfo = kalloc_data(k_buffersize, Z_WAITOK | Z_ZERO);
 	if (!coalinfo) {
-		error = ENOMEM;
-		goto out;
+		return ENOMEM;
 	}
 
-	switch (flavor) {
-	case LISTCOALITIONS_ALL_COALS:
-	case LISTCOALITIONS_SINGLE_TYPE:
-		ncoals_ = coalitions_get_list(coal_type, coalinfo, ncoals);
-		break;
-	default:
-		panic("memory corruption?!");
+	ncoals2 = coalitions_get_list(coal_type, coalinfo, ncoals);
+
+	copyoutsize = MIN(buffersize, MIN(ncoals2, ncoals) * elem_size);
+
+	if (!(error = copyout(coalinfo, buffer, copyoutsize))) {
+		*retval = (int32_t)copyoutsize;
 	}
 
-	if (ncoals_ == 0) {
-		/* all the coalitions disappeared... weird but valid */
-		error = 0;
-		*retval = 0;
-		goto out;
-	}
-
-	/*
-	 * Some coalitions may have disappeared between our initial check,
-	 * and the the actual list acquisition.
-	 * Only copy out what we really need.
-	 */
-	copyout_sz = k_buffersize;
-	if (ncoals_ < ncoals) {
-		copyout_sz = ncoals_ * elem_size;
-	}
-
-	/*
-	 * copy the list up to user space
-	 * (we're guaranteed to have a non-null pointer/size here)
-	 */
-	error = copyout(coalinfo, buffer,
-	    copyout_sz < buffersize ? copyout_sz : buffersize);
-
-	if (error == 0) {
-		*retval = (int)copyout_sz;
-	}
-
-out:
-	if (coalinfo) {
-		kfree_data(coalinfo, k_buffersize);
-	}
-
+	kfree_data(coalinfo, k_buffersize);
 	return error;
 #else
 	/* no coalition support */

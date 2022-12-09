@@ -335,6 +335,8 @@ unsigned int    vm_page_free_wanted_secluded;
 #endif /* CONFIG_SECLUDED_MEMORY */
 unsigned int    vm_page_free_count;
 
+unsigned int    vm_page_realtime_count;
+
 /*
  *	Occasionally, the virtual memory system uses
  *	resident page structures that do not refer to
@@ -2710,7 +2712,7 @@ vm_page_release_fictitious(
 	assert(m->vmp_fictitious);
 	assert(VM_PAGE_GET_PHYS_PAGE(m) == vm_page_fictitious_addr ||
 	    VM_PAGE_GET_PHYS_PAGE(m) == vm_page_guard_addr);
-
+	assert(!m->vmp_realtime);
 
 	if (VM_PAGE_GET_PHYS_PAGE(m) == vm_page_guard_addr) {
 		OSAddAtomic(-1, &vm_guard_count);
@@ -3186,6 +3188,7 @@ restart:
 		assert(!mem->vmp_pmapped);
 		assert(!mem->vmp_wpmapped);
 		assert(!pmap_is_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem)));
+		assert(!mem->vmp_realtime);
 
 		task_t  cur_task = current_task_early();
 		if (cur_task && cur_task != kernel_task) {
@@ -3224,6 +3227,7 @@ restart:
 	if (__improbable(vm_delayed_count > 0 &&
 	    vm_page_free_count <= vm_page_free_target &&
 	    (mem = vm_get_delayed_page(grab_options)) != NULL)) {
+		assert(!mem->vmp_realtime);
 		return mem;
 	}
 
@@ -3258,7 +3262,7 @@ restart:
 				counter_inc(&vm_page_grab_count);
 				VM_DEBUG_EVENT(vm_page_grab, VM_PAGE_GRAB, DBG_FUNC_NONE, grab_options, 0, 0, 0);
 
-
+				assert(!mem->vmp_realtime);
 				return mem;
 			}
 		}
@@ -3371,6 +3375,7 @@ restart:
 			assert(!mem->vmp_pmapped);
 			assert(!mem->vmp_wpmapped);
 			assert(!pmap_is_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem)));
+			assert(!mem->vmp_realtime);
 		}
 #if defined (__x86_64__) && (DEVELOPMENT || DEBUG)
 		vm_clump_update_stats(sub_count);
@@ -3414,6 +3419,7 @@ restart:
 	VM_CHECK_MEMORYSTATUS;
 
 	if (mem) {
+		assert(!mem->vmp_realtime);
 //		dbgLog(VM_PAGE_GET_PHYS_PAGE(mem), vm_page_free_count, vm_page_wire_count, 4);	/* (TEST/DEBUG) */
 
 		task_t  cur_task = current_task_early();
@@ -3515,6 +3521,12 @@ reactivate_secluded_page:
 		/* can't steal page in this state... */
 		vm_object_unlock(object);
 		vm_page_secluded.grab_failure_state++;
+		goto reactivate_secluded_page;
+	}
+	if (mem->vmp_realtime) {
+		/* don't steal pages used by realtime threads... */
+		vm_object_unlock(object);
+		vm_page_secluded.grab_failure_realtime++;
 		goto reactivate_secluded_page;
 	}
 
@@ -3672,6 +3684,19 @@ vm_page_release(
 //	dbgLog(VM_PAGE_GET_PHYS_PAGE(mem), vm_page_free_count, vm_page_wire_count, 5);	/* (TEST/DEBUG) */
 
 	pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
+
+	if (__improbable(mem->vmp_realtime)) {
+		if (!page_queues_locked) {
+			vm_page_lock_queues();
+		}
+		if (mem->vmp_realtime) {
+			mem->vmp_realtime = false;
+			vm_page_realtime_count--;
+		}
+		if (!page_queues_locked) {
+			vm_page_unlock_queues();
+		}
+	}
 
 	vm_free_page_lock_spin();
 
@@ -4083,6 +4108,11 @@ vm_page_free_prepare_queues(
 
 	vm_page_queues_remove(mem, TRUE);
 
+	if (__improbable(mem->vmp_realtime)) {
+		mem->vmp_realtime = false;
+		vm_page_realtime_count--;
+	}
+
 	if (VM_PAGE_WIRED(mem)) {
 		assert(mem->vmp_wire_count > 0);
 
@@ -4159,6 +4189,7 @@ vm_page_free_prepare_object(
 	vm_page_t       mem,
 	boolean_t       remove_from_hash)
 {
+	assert(!mem->vmp_realtime);
 	if (mem->vmp_tabled) {
 		vm_page_remove(mem, remove_from_hash);  /* clears tabled, object, offset */
 	}
@@ -4275,6 +4306,16 @@ vm_page_free_list(
 			if (vm_page_free_verify && !mem->vmp_fictitious && !mem->vmp_private) {
 				ASSERT_PMAP_FREE(mem);
 			}
+
+			if (__improbable(mem->vmp_realtime)) {
+				vm_page_lock_queues();
+				if (mem->vmp_realtime) {
+					mem->vmp_realtime = false;
+					vm_page_realtime_count--;
+				}
+				vm_page_unlock_queues();
+			}
+
 			if (prepare_object == TRUE) {
 				vm_page_free_prepare_object(mem, TRUE);
 			}
@@ -4336,6 +4377,7 @@ vm_page_free_list(
 
 				assert(mem->vmp_q_state == VM_PAGE_NOT_ON_Q);
 				assert(mem->vmp_busy);
+				assert(!mem->vmp_realtime);
 				mem->vmp_lopage = FALSE;
 				mem->vmp_q_state = VM_PAGE_ON_FREE_Q;
 
@@ -4983,7 +5025,8 @@ vm_page_activate(
 			if (secluded_for_filecache &&
 			    vm_page_secluded_target != 0 &&
 			    num_tasks_can_use_secluded_mem == 0 &&
-			    m_object->eligible_for_secluded) {
+			    m_object->eligible_for_secluded &&
+			    !m->vmp_realtime) {
 				vm_page_queue_enter(&vm_page_queue_secluded, m, vmp_pageq);
 				m->vmp_q_state = VM_PAGE_ON_SECLUDED_Q;
 				vm_page_secluded_count++;
@@ -6257,6 +6300,9 @@ did_consider:
 					m2->vmp_cs_validated = m1->vmp_cs_validated;
 					m2->vmp_cs_tainted      = m1->vmp_cs_tainted;
 					m2->vmp_cs_nx   = m1->vmp_cs_nx;
+
+					m2->vmp_realtime = m1->vmp_realtime;
+					m1->vmp_realtime = false;
 
 					/*
 					 * If m1 had really been reusable,
@@ -9596,17 +9642,19 @@ vm_page_diagnose_zone(mach_memory_info_t *info, zone_t z)
 static int
 vm_page_diagnose_heap(mach_memory_info_t *info, kalloc_heap_t kheap)
 {
-	struct kheap_zones *zones = kheap->kh_zones;
+	struct kalloc_heap *kh = kheap->kh_views;
 	int i = 0;
 
-	for (; i < zones->max_k_zone; i++) {
-		vm_page_diagnose_zone(info + i, zones->k_zone[i]);
+	for (; i < KHEAP_NUM_ZONES; i++) {
+		vm_page_diagnose_zone(info + i, zone_by_id(kheap->kh_zstart + i));
 	}
 
-	for (kalloc_heap_t kh = zones->views; kh; kh = kh->kh_next, i++) {
+	while (kh) {
 		vm_page_diagnose_zone_stats(info + i, kh->kh_stats, false);
 		snprintf(info[i].name, sizeof(info[i].name),
 		    "%skalloc[%s]", kheap->kh_name, kh->kh_name);
+		kh = kh->kh_views;
+		i++;
 	}
 
 	return i;
@@ -9622,9 +9670,9 @@ vm_page_diagnose_kt_heaps(mach_memory_info_t *info)
 	idx++;
 
 	for (uint32_t i = 0; i < KT_VAR_MAX_HEAPS; i++) {
-		struct kt_heap_zones heap = kalloc_type_heap_array[i];
+		struct kheap_info heap = kalloc_type_heap_array[i];
 
-		for (kalloc_type_var_view_t ktv = heap.views; ktv;
+		for (kalloc_type_var_view_t ktv = heap.kt_views; ktv;
 		    ktv = (kalloc_type_var_view_t) ktv->kt_next) {
 			if (ktv->kt_stats && ktv->kt_stats != KHEAP_KT_VAR->kh_stats) {
 				vm_page_diagnose_zone_stats(info + idx, ktv->kt_stats, false);

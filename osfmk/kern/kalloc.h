@@ -77,11 +77,7 @@ __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
  * @brief
  * The maximum allocation size that is safe to allocate with Z_NOFAIL in kalloc.
  */
-#if __LP64__
 #define KALLOC_SAFE_ALLOC_SIZE  (16u * 1024u)
-#else
-#define KALLOC_SAFE_ALLOC_SIZE  (8u * 1024u)
-#endif
 
 #if XNU_KERNEL_PRIVATE
 /*!
@@ -92,13 +88,13 @@ __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
  * for a given kalloc heap.
  */
 typedef struct kalloc_heap {
-	struct kheap_zones *kh_zones;
 	zone_stats_t        kh_stats;
 	const char         *__unsafe_indexable kh_name;
-	struct kalloc_heap *kh_next;
 	zone_kheap_id_t     kh_heap_id;
 	vm_tag_t            kh_tag;
 	uint16_t            kh_type_hash;
+	zone_id_t           kh_zstart;
+	struct kalloc_heap *kh_views;
 } *kalloc_heap_t;
 
 /*!
@@ -325,8 +321,8 @@ struct kalloc_type_view {
 typedef struct kalloc_type_view *kalloc_type_view_t;
 
 /*
- * "Heaps" or sets of zones, used for variable size kalloc_type allocations
- * are defined by the constants below.
+ * The set of zones used by all kalloc heaps are defined by the constants
+ * below.
  *
  * KHEAP_START_SIZE: Size of the first sequential zone.
  * KHEAP_MAX_SIZE  : Size of the last sequential zone.
@@ -361,10 +357,7 @@ typedef struct kalloc_type_view *kalloc_type_view_t;
  */
 #define kalloc_log2down(mask)   (31 - __builtin_clz(mask))
 #define KHEAP_START_SIZE        32
-#if !defined(__LP64__)
-#define KHEAP_MAX_SIZE          (8 * 1024)
-#define KHEAP_EXTRA_ZONES       3
-#elif  __x86_64__
+#if  __x86_64__
 #define KHEAP_MAX_SIZE          (16 * 1024)
 #define KHEAP_EXTRA_ZONES       2
 #else
@@ -1441,11 +1434,7 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 #define kt_view_var \
 	KALLOC_CONCAT(kalloc_type_view_, __LINE__)
 
-#if __LP64__
 #define KALLOC_TYPE_SEGMENT "__DATA_CONST"
-#else
-#define KALLOC_TYPE_SEGMENT "__DATA"
-#endif
 
 /*
  * When kalloc_type_impl is called from xnu, it calls zalloc_flags
@@ -1581,14 +1570,59 @@ kfree_type_impl(kalloc_type_view_t kt_view, void *__unsafe_indexable ptr)
 	zfree(kt_view, ptr);
 }
 
-// rdar://87559422
-#define kalloc_type_var_impl(kt_view, size, flags, site) ({ \
-	struct kalloc_result kalloc_type_var_tmp__ = kalloc_ext(kt_mangle_var_view(kt_view), size, flags, site); \
-	kalloc_type_var_tmp__.addr; \
-})
+extern struct kalloc_result
+kalloc_ext(
+	void                   *kheap_or_kt_view __unsafe_indexable,
+	vm_size_t               size,
+	zalloc_flags_t          flags,
+	void                   *site);
 
-#define kfree_type_var_impl(kt_view, ptr, size) \
-	kfree_ext(kt_mangle_var_view(kt_view), ptr, size)
+static inline struct kalloc_result
+__kalloc_ext(
+	void                   *kheap_or_kt_view __unsafe_indexable,
+	vm_size_t               size,
+	zalloc_flags_t          flags,
+	void                   *site)
+{
+	struct kalloc_result kr;
+
+	kr    = (kalloc_ext)(kheap_or_kt_view, size, flags, site);
+	if (flags & Z_NOFAIL) {
+		__builtin_assume(kr.addr != NULL);
+	}
+	return kr;
+}
+
+#define kalloc_ext(hov, size, fl, site) __kalloc_ext(hov, size, fl, site)
+
+extern void
+kfree_ext(
+	void                   *kheap_or_kt_view __unsafe_indexable,
+	void                   *addr __unsafe_indexable,
+	vm_size_t               size);
+
+// rdar://87559422
+static inline void *__unsafe_indexable
+kalloc_type_var_impl(
+	kalloc_type_var_view_t    kt_view,
+	vm_size_t                 size,
+	zalloc_flags_t            flags,
+	void                      *site)
+{
+	struct kalloc_result kr;
+
+	kr = kalloc_ext(kt_mangle_var_view(kt_view), size, flags, site);
+	return kr.addr;
+}
+
+static inline void
+kfree_type_var_impl(
+	kalloc_type_var_view_t      kt_view,
+	void                       *ptr __unsafe_indexable,
+	vm_size_t                   size)
+{
+	kfree_ext(kt_mangle_var_view(kt_view), ptr, size);
+}
 
 #else /* XNU_KERNEL_PRIVATE */
 
@@ -1695,29 +1729,6 @@ extern void
 kheap_startup_init(
 	kalloc_heap_t heap);
 
-extern struct kalloc_result
-kalloc_ext(
-	void                   *kheap_or_kt_view __unsafe_indexable,
-	vm_size_t               size,
-	zalloc_flags_t          flags,
-	void                   *site);
-
-static inline struct kalloc_result
-__kalloc_ext(
-	void                   *kheap_or_kt_view __unsafe_indexable,
-	vm_size_t               size,
-	zalloc_flags_t          flags,
-	void                   *site)
-{
-	struct kalloc_result kr = (kalloc_ext)(kheap_or_kt_view, size, flags, site);
-	if (flags & Z_NOFAIL) {
-		__builtin_assume(kr.addr != NULL);
-	}
-	return kr;
-}
-
-#define kalloc_ext(hov, size, fl, site) __kalloc_ext(hov, size, fl, site)
-
 __attribute__((malloc, alloc_size(2)))
 static inline void *
 __sized_by(size)
@@ -1801,15 +1812,9 @@ kfree_addr_ext(
 	kalloc_heap_t           kheap,
 	void                   *addr __unsafe_indexable);
 
-extern void
-kfree_ext(
-	void                   *kheap_or_kt_view __unsafe_indexable,
-	void                   *addr __unsafe_indexable,
-	vm_size_t               size);
-
 extern zone_t
-kalloc_heap_zone_for_size(
-	kalloc_heap_t         heap,
+kalloc_zone_for_size(
+	zone_id_t             zid,
 	vm_size_t             size);
 
 extern vm_size_t kalloc_large_max;

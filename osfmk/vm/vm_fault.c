@@ -242,6 +242,8 @@ LCK_SPIN_DECLARE_ATTR(vm_rtfr_slock, &vm_page_lck_grp_bucket, &vm_page_lck_attr)
 extern int madvise_free_debug;
 #endif /* DEVELOPMENT || DEBUG */
 
+extern int vm_pageout_protect_realtime;
+
 #if CONFIG_FREEZE
 #endif /* CONFIG_FREEZE */
 
@@ -4724,6 +4726,16 @@ FastPmapEnter:
 					    "0x%llx\n", (uint64_t)fault_phys_offset);
 				}
 
+				if (__improbable(rtfault &&
+				    !m->vmp_realtime &&
+				    vm_pageout_protect_realtime)) {
+					vm_page_lock_queues();
+					if (!m->vmp_realtime) {
+						m->vmp_realtime = true;
+						vm_page_realtime_count++;
+					}
+					vm_page_unlock_queues();
+				}
 				assertf(VM_PAGE_OBJECT(m) == m_object, "m=%p m_object=%p object=%p", m, m_object, object);
 				assert(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL);
 				if (caller_pmap) {
@@ -5431,6 +5443,16 @@ zero_fill_cleanup:
 				}
 				vm_fault_enqueue_page(object, m, wired, change_wiring, wire_tag, fault_info.no_cache, &type_of_fault, kr);
 
+				if (__improbable(rtfault &&
+				    !m->vmp_realtime &&
+				    vm_pageout_protect_realtime)) {
+					vm_page_lock_queues();
+					if (!m->vmp_realtime) {
+						m->vmp_realtime = true;
+						vm_page_realtime_count++;
+					}
+					vm_page_unlock_queues();
+				}
 				vm_fault_complete(
 					map,
 					real_map,
@@ -6142,6 +6164,16 @@ cleanup:
 	}
 
 	if (m != VM_PAGE_NULL) {
+		if (__improbable(rtfault &&
+		    !m->vmp_realtime &&
+		    vm_pageout_protect_realtime)) {
+			vm_page_lock_queues();
+			if (!m->vmp_realtime) {
+				m->vmp_realtime = true;
+				vm_page_realtime_count++;
+			}
+			vm_page_unlock_queues();
+		}
 		assert(VM_PAGE_OBJECT(m) == m_object);
 
 		if (!m_object->internal && (fault_type & VM_PROT_WRITE)) {

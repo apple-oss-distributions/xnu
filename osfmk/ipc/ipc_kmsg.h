@@ -301,7 +301,13 @@ extern void ipc_kmsg_set_prealloc(
 
 /* get the unshifted message header of a kmsg */
 extern mach_msg_header_t *ikm_header(
-	ipc_kmsg_t         kmsg);
+	ipc_kmsg_t              kmsg);
+
+/* get the start address of user data (after the last descriptor) for a kmsg */
+extern void *ikm_udata(
+	ipc_kmsg_t              kmsg,
+	mach_msg_size_t         desc_count,
+	bool                    complex);
 
 /* get the size of auxiliary data for a kmsg */
 extern mach_msg_size_t ipc_kmsg_aux_data_size(

@@ -1781,15 +1781,16 @@ retry:
 	 */
 	clock_get_system_nanotime(&sec, &nsec);
 
-	if (VM_SWAP_SHOULD_CREATE(sec) && !vm_swapfile_create_thread_running) {
-		thread_wakeup((event_t) &vm_swapfile_create_needed);
-	}
-
-	if (hibernate_flushing == FALSE || VM_SWAP_SHOULD_CREATE(sec)) {
+	if (VM_SWAP_SHOULD_CREATE(sec)) {
+		if (!vm_swapfile_create_thread_running) {
+			thread_wakeup((event_t) &vm_swapfile_create_needed);
+		}
 		waiting = TRUE;
 		assert_wait_timeout((event_t) &vm_num_swap_files, THREAD_INTERRUPTIBLE, 1000, 1000 * NSEC_PER_USEC);
 	} else {
-		hibernate_no_swapspace = TRUE;
+		if (hibernate_flushing) {
+			hibernate_no_swapspace = TRUE;
+		}
 	}
 
 	lck_mtx_unlock(&vm_swap_data_lock);

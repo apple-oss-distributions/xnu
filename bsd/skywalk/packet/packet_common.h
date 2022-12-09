@@ -702,7 +702,27 @@ __packet_get_transport_last_packet(const uint64_t ph)
 	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
 	return (PKT_ADDR(ph)->pkt_pflags & PKT_F_LAST_PKT) != 0;
 }
+
+__attribute__((always_inline))
+static inline boolean_t
+__packet_get_l4s_flag(const uint64_t ph)
+{
+	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
+	return (PKT_ADDR(ph)->pkt_pflags & PKT_F_L4S) != 0;
+}
 #endif /* KERNEL */
+
+__attribute__((always_inline))
+static inline void
+__packet_set_l4s_flag(const uint64_t ph, const boolean_t is_l4s)
+{
+	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
+	if (is_l4s) {
+		PKT_ADDR(ph)->pkt_pflags |= PKT_F_L4S;
+	} else {
+		PKT_ADDR(ph)->pkt_pflags &= ~PKT_F_L4S;
+	}
+}
 
 __attribute__((always_inline))
 static inline int

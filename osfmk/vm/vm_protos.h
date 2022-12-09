@@ -690,6 +690,7 @@ struct vm_page_secluded_data {
 	int     grab_success_other;
 	int     grab_failure_locked;
 	int     grab_failure_state;
+	int     grab_failure_realtime;
 	int     grab_failure_dirty;
 	int     grab_for_iokit;
 	int     grab_for_iokit_success;
@@ -712,6 +713,10 @@ extern void             memory_object_mark_eligible_for_secluded(
 	boolean_t                       eligible_for_secluded);
 
 #endif /* CONFIG_SECLUDED_MEMORY */
+
+extern void             memory_object_mark_for_realtime(
+	memory_object_control_t         control,
+	bool                            for_realtime);
 
 #if MACH_ASSERT
 extern void             memory_object_mark_for_fbdp(

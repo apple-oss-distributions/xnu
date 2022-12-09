@@ -29,6 +29,7 @@
 #ifndef __LIBKERNEL_INIT_H
 #define __LIBKERNEL_INIT_H
 
+#include <ptrauth.h>
 #include <stdbool.h>
 #include <sys/types.h>
 #include <mach/mach.h>
@@ -46,14 +47,23 @@ struct voucher_s;
 typedef struct voucher_s *voucher_t;
 #endif
 
+#if __has_feature(ptrauth_function_pointer_type_discrimination)
+#define LIBKERNEL_FUNCTION_PTRAUTH(f) \
+	__ptrauth(ptrauth_key_function_pointer,1, \
+	        __builtin_ptrauth_string_discriminator("libkernel_functions_" # f) \
+	) f
+#else
+#define LIBKERNEL_FUNCTION_PTRAUTH(f) f
+#endif
+
 typedef const struct _libkernel_functions {
 	/* The following functions are included in version 1 of this structure */
 	unsigned long version;
-	void* (*dlsym)(void*, const char*);
-	void* (*malloc)(size_t);
-	void  (*free)(void*);
-	void* (*realloc)(void*, size_t);
-	void  (*_pthread_exit_if_canceled)(int);
+	void* (*LIBKERNEL_FUNCTION_PTRAUTH(dlsym))(void*, const char*);
+	void* (*LIBKERNEL_FUNCTION_PTRAUTH(malloc))(size_t);
+	void(*LIBKERNEL_FUNCTION_PTRAUTH(free))(void*);
+	void* (*LIBKERNEL_FUNCTION_PTRAUTH(realloc))(void*, size_t);
+	void(*LIBKERNEL_FUNCTION_PTRAUTH(_pthread_exit_if_canceled))(int);
 
 	/* The following functions are included in version 2 of this structure */
 	void *reserved1;
@@ -63,10 +73,10 @@ typedef const struct _libkernel_functions {
 	void *reserved5;
 
 	/* The following functions are included in version 3 of this structure */
-	void (*pthread_clear_qos_tsd)(mach_port_t);
+	void(*LIBKERNEL_FUNCTION_PTRAUTH(pthread_clear_qos_tsd))(mach_port_t);
 
 	/* The following functions are included in version 4 of this structure */
-	int (*pthread_current_stack_contains_np)(const void *, size_t);
+	int(*LIBKERNEL_FUNCTION_PTRAUTH(pthread_current_stack_contains_np))(const void *, size_t);
 
 	/* Subsequent versions must only add pointers! */
 } *_libkernel_functions_t;

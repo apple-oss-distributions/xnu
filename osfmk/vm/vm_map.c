@@ -10147,6 +10147,18 @@ vm_map_copy_overwrite_unaligned(
 		/* "start" must be within the current map entry */
 		assert((start >= entry->vme_start) && (start < entry->vme_end));
 
+		/*
+		 *	Check protection again
+		 */
+		if (!(entry->protection & VM_PROT_WRITE)) {
+			vm_map_unlock_read(dst_map);
+			return KERN_PROTECTION_FAILURE;
+		}
+		if (!vm_map_entry_is_overwritable(dst_map, entry)) {
+			vm_map_unlock_read(dst_map);
+			return KERN_PROTECTION_FAILURE;
+		}
+
 		dst_offset = start - entry->vme_start;
 
 		dst_size = entry->vme_end - start;
@@ -10175,8 +10187,7 @@ vm_map_copy_overwrite_unaligned(
  *		Entry needs copy, create a shadow shadow object for
  *		Copy on write region.
  */
-		if (entry->needs_copy &&
-		    ((entry->protection & VM_PROT_WRITE) != 0)) {
+		if (entry->needs_copy) {
 			if (vm_map_lock_read_to_write(dst_map)) {
 				vm_map_lock_read(dst_map);
 				goto RetryLookup;

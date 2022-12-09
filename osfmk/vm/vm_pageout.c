@@ -277,6 +277,8 @@ boolean_t vps_yield_for_pgqlockwaiters = TRUE;
 #endif  /* VM_PAGE_REACTIVATE_LIMIT */
 #define VM_PAGEOUT_INACTIVE_FORCE_RECLAIM       1000
 
+int vm_pageout_protect_realtime = true;
+
 extern boolean_t hibernate_cleaning_in_progress;
 
 struct cq ciq[MAX_COMPRESSOR_THREAD_COUNT];
@@ -900,7 +902,13 @@ struct vm_pageout_stat {
 
 	unsigned int phantom_ghosts_found;
 	unsigned int phantom_ghosts_added;
-} vm_pageout_stats[VM_PAGEOUT_STAT_SIZE] = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, };
+
+	unsigned int vm_page_realtime_count;
+	unsigned int forcereclaimed_sharedcache;
+	unsigned int forcereclaimed_realtime;
+	unsigned int protected_sharedcache;
+	unsigned int protected_realtime;
+} vm_pageout_stats[VM_PAGEOUT_STAT_SIZE];
 
 unsigned int vm_pageout_stat_now = 0;
 
@@ -1625,7 +1633,7 @@ update_vm_info(void)
 	vm_pageout_stats[vm_pageout_stat_now].vm_page_pageable_internal_count = vm_page_pageable_internal_count;
 	vm_pageout_stats[vm_pageout_stat_now].vm_page_pageable_external_count = vm_page_pageable_external_count;
 	vm_pageout_stats[vm_pageout_stat_now].vm_page_xpmapped_external_count = vm_page_xpmapped_external_count;
-
+	vm_pageout_stats[vm_pageout_stat_now].vm_page_realtime_count = vm_page_realtime_count;
 
 	tmp = vm_pageout_vminfo.vm_pageout_considered_page;
 	vm_pageout_stats[vm_pageout_stat_now].considered = (unsigned int)(tmp - last.vm_pageout_considered_page);
@@ -1658,7 +1666,6 @@ update_vm_info(void)
 	tmp = vm_pageout_vminfo.vm_page_pages_freed;
 	vm_pageout_stats[vm_pageout_stat_now].pages_freed = (unsigned int)(tmp - last.vm_page_pages_freed);
 	last.vm_page_pages_freed = tmp;
-
 
 	if (vm_pageout_stats[vm_pageout_stat_now].considered) {
 		tmp = vm_pageout_vminfo.vm_pageout_pages_evicted;
@@ -1736,6 +1743,22 @@ update_vm_info(void)
 		tmp = vm_pageout_vminfo.vm_pageout_inactive_dirty_internal;
 		vm_pageout_stats[vm_pageout_stat_now].cleaned_dirty_internal = (unsigned int)(tmp - last.vm_pageout_inactive_dirty_internal);
 		last.vm_pageout_inactive_dirty_internal = tmp;
+
+		tmp = vm_pageout_vminfo.vm_pageout_forcereclaimed_sharedcache;
+		vm_pageout_stats[vm_pageout_stat_now].forcereclaimed_sharedcache = (unsigned int)(tmp - last.vm_pageout_forcereclaimed_sharedcache);
+		last.vm_pageout_forcereclaimed_sharedcache = tmp;
+
+		tmp = vm_pageout_vminfo.vm_pageout_forcereclaimed_realtime;
+		vm_pageout_stats[vm_pageout_stat_now].forcereclaimed_realtime = (unsigned int)(tmp - last.vm_pageout_forcereclaimed_realtime);
+		last.vm_pageout_forcereclaimed_realtime = tmp;
+
+		tmp = vm_pageout_vminfo.vm_pageout_protected_sharedcache;
+		vm_pageout_stats[vm_pageout_stat_now].protected_sharedcache = (unsigned int)(tmp - last.vm_pageout_protected_sharedcache);
+		last.vm_pageout_protected_sharedcache = tmp;
+
+		tmp = vm_pageout_vminfo.vm_pageout_protected_realtime;
+		vm_pageout_stats[vm_pageout_stat_now].protected_realtime = (unsigned int)(tmp - last.vm_pageout_protected_realtime);
+		last.vm_pageout_protected_realtime = tmp;
 	}
 
 	KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, VM_INFO1)) | DBG_FUNC_NONE,
@@ -1795,6 +1818,13 @@ update_vm_info(void)
 		    vm_pageout_stats[vm_pageout_stat_now].considered_bq_external,
 		    vm_pageout_stats[vm_pageout_stat_now].filecache_min_reactivations,
 		    vm_pageout_stats[vm_pageout_stat_now].cleaned_dirty_internal,
+		    0);
+
+		KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, VM_INFO10)) | DBG_FUNC_NONE,
+		    vm_pageout_stats[vm_pageout_stat_now].forcereclaimed_sharedcache,
+		    vm_pageout_stats[vm_pageout_stat_now].forcereclaimed_realtime,
+		    vm_pageout_stats[vm_pageout_stat_now].protected_sharedcache,
+		    vm_pageout_stats[vm_pageout_stat_now].protected_realtime,
 		    0);
 	}
 	KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, VM_INFO9)) | DBG_FUNC_NONE,
@@ -3502,13 +3532,32 @@ reclaim_page:
 			 * inactive queue, so we limit the number of
 			 * reactivations.
 			 */
-			if (++reactivated_this_call >= reactivate_limit) {
+			if (++reactivated_this_call >= reactivate_limit &&
+			    !object->object_is_shared_cache &&
+			    !((m->vmp_realtime ||
+			    object->for_realtime) &&
+			    vm_pageout_protect_realtime)) {
 				vm_pageout_vminfo.vm_pageout_reactivation_limit_exceeded++;
 			} else if (++inactive_reclaim_run >= VM_PAGEOUT_INACTIVE_FORCE_RECLAIM) {
 				vm_pageout_vminfo.vm_pageout_inactive_force_reclaim++;
+				if (object->object_is_shared_cache) {
+					vm_pageout_vminfo.vm_pageout_forcereclaimed_sharedcache++;
+				} else if (m->vmp_realtime ||
+				    object->for_realtime) {
+					vm_pageout_vminfo.vm_pageout_forcereclaimed_realtime++;
+				}
 			} else {
 				uint32_t isinuse;
 
+				if (reactivated_this_call >= reactivate_limit) {
+					if (object->object_is_shared_cache) {
+						vm_pageout_vminfo.vm_pageout_protected_sharedcache++;
+					} else if ((m->vmp_realtime ||
+					    object->for_realtime) &&
+					    vm_pageout_protect_realtime) {
+						vm_pageout_vminfo.vm_pageout_protected_realtime++;
+					}
+				}
 				if (page_prev_q_state == VM_PAGE_ON_INACTIVE_CLEANED_Q) {
 					VM_PAGEOUT_DEBUG(vm_pageout_cleaned_reference_reactivated, 1);
 				}
@@ -5058,6 +5107,9 @@ vm_pageout(void)
 	}
 #endif /* __AMP__ */
 
+	PE_parse_boot_argn("vmpgo_protect_realtime",
+	    &vm_pageout_protect_realtime,
+	    sizeof(vm_pageout_protect_realtime));
 	splx(s);
 
 	thread_set_thread_name(current_thread(), "VM_pageout_scan");

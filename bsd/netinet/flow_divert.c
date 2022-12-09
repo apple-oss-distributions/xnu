@@ -1546,24 +1546,16 @@ flow_divert_send_close_if_needed(struct flow_divert_pcb *fd_cb)
 }
 
 static errno_t
-flow_divert_send_data_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t data_len, struct sockaddr *toaddr, Boolean force)
+flow_divert_send_data_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t data_len, Boolean force)
 {
-	mbuf_t  packet = NULL;
-	mbuf_t  last = NULL;
-	int             error   = 0;
+	mbuf_t packet = NULL;
+	mbuf_t last = NULL;
+	int error = 0;
 
 	error = flow_divert_packet_init(fd_cb, FLOW_DIVERT_PKT_DATA, &packet);
 	if (error || packet == NULL) {
 		FDLOG(LOG_ERR, fd_cb, "flow_divert_packet_init failed: %d", error);
 		goto done;
-	}
-
-	if (toaddr != NULL) {
-		error = flow_divert_append_target_endpoint_tlv(packet, toaddr);
-		if (error) {
-			FDLOG(LOG_ERR, fd_cb, "flow_divert_append_target_endpoint_tlv() failed: %d", error);
-			goto done;
-		}
 	}
 
 	if (data_len > 0 && data_len <= INT_MAX && data != NULL) {
@@ -1589,6 +1581,108 @@ done:
 		}
 	}
 
+	return error;
+}
+
+static errno_t
+flow_divert_send_datagram_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t data_len, struct sockaddr *toaddr, Boolean force, Boolean is_fragment, size_t datagram_size)
+{
+	mbuf_t packet = NULL;
+	mbuf_t last = NULL;
+	int error = 0;
+
+	error = flow_divert_packet_init(fd_cb, FLOW_DIVERT_PKT_DATA, &packet);
+	if (error || packet == NULL) {
+		FDLOG(LOG_ERR, fd_cb, "flow_divert_packet_init failed: %d", error);
+		goto done;
+	}
+
+	if (toaddr != NULL) {
+		error = flow_divert_append_target_endpoint_tlv(packet, toaddr);
+		if (error) {
+			FDLOG(LOG_ERR, fd_cb, "flow_divert_append_target_endpoint_tlv() failed: %d", error);
+			goto done;
+		}
+	}
+	if (is_fragment) {
+		error = flow_divert_packet_append_tlv(packet, FLOW_DIVERT_TLV_IS_FRAGMENT, sizeof(is_fragment), &is_fragment);
+		if (error) {
+			FDLOG(LOG_ERR, fd_cb, "flow_divert_packet_append_tlv(FLOW_DIVERT_TLV_IS_FRAGMENT) failed: %d", error);
+			goto done;
+		}
+	}
+
+	error = flow_divert_packet_append_tlv(packet, FLOW_DIVERT_TLV_DATAGRAM_SIZE, sizeof(datagram_size), &datagram_size);
+	if (error) {
+		FDLOG(LOG_ERR, fd_cb, "flow_divert_packet_append_tlv(FLOW_DIVERT_TLV_DATAGRAM_SIZE) failed: %d", error);
+		goto done;
+	}
+
+	if (data_len > 0 && data_len <= INT_MAX && data != NULL) {
+		last = m_last(packet);
+		mbuf_setnext(last, data);
+		mbuf_pkthdr_adjustlen(packet, (int)data_len);
+	} else {
+		data_len = 0;
+	}
+	error = flow_divert_send_packet(fd_cb, packet, force);
+	if (error == 0 && data_len > 0) {
+		fd_cb->bytes_sent += data_len;
+		flow_divert_add_data_statistics(fd_cb, data_len, TRUE);
+	}
+
+done:
+	if (error) {
+		if (last != NULL) {
+			mbuf_setnext(last, NULL);
+		}
+		if (packet != NULL) {
+			mbuf_freem(packet);
+		}
+	}
+
+	return error;
+}
+
+static errno_t
+flow_divert_send_fragmented_datagram(struct flow_divert_pcb *fd_cb, mbuf_t datagram, size_t datagram_len, struct sockaddr *toaddr, Boolean force)
+{
+	mbuf_t next_data = datagram;
+	size_t remaining_len = datagram_len;
+	mbuf_t remaining_data = NULL;
+	int error = 0;
+	bool first = true;
+
+	while (remaining_len > 0 && next_data != NULL) {
+		size_t to_send = remaining_len;
+		remaining_data = NULL;
+
+		if (to_send > FLOW_DIVERT_CHUNK_SIZE) {
+			to_send = FLOW_DIVERT_CHUNK_SIZE;
+			error = mbuf_split(next_data, to_send, MBUF_DONTWAIT, &remaining_data);
+			if (error) {
+				break;
+			}
+		}
+
+		error = flow_divert_send_datagram_packet(fd_cb, next_data, to_send, (first ? toaddr : NULL), force, TRUE, (first ? datagram_len : 0));
+		if (error) {
+			break;
+		}
+
+		first = false;
+		remaining_len -= to_send;
+		next_data = remaining_data;
+	}
+
+	if (error) {
+		if (next_data != NULL) {
+			mbuf_freem(next_data);
+		}
+		if (remaining_data != NULL) {
+			mbuf_freem(remaining_data);
+		}
+	}
 	return error;
 }
 
@@ -1629,7 +1723,7 @@ flow_divert_send_buffered_data(struct flow_divert_pcb *fd_cb, Boolean force)
 				break;
 			}
 
-			error = flow_divert_send_data_packet(fd_cb, data, data_len, NULL, force);
+			error = flow_divert_send_data_packet(fd_cb, data, data_len, force);
 			if (error) {
 				if (data != NULL) {
 					mbuf_freem(data);
@@ -1675,7 +1769,12 @@ flow_divert_send_buffered_data(struct flow_divert_pcb *fd_cb, Boolean force)
 			} else {
 				data = NULL;
 			}
-			error = flow_divert_send_data_packet(fd_cb, data, data_len, toaddr, force);
+			if (data_len <= FLOW_DIVERT_CHUNK_SIZE) {
+				error = flow_divert_send_datagram_packet(fd_cb, data, data_len, toaddr, force, FALSE, 0);
+			} else {
+				error = flow_divert_send_fragmented_datagram(fd_cb, data, data_len, toaddr, force);
+				data = NULL;
+			}
 			if (error) {
 				if (data != NULL) {
 					mbuf_freem(data);
@@ -1739,7 +1838,7 @@ flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, struct soc
 				remaining_data = NULL;
 			}
 
-			error = flow_divert_send_data_packet(fd_cb, pkt_data, pkt_data_len, NULL, FALSE);
+			error = flow_divert_send_data_packet(fd_cb, pkt_data, pkt_data_len, FALSE);
 
 			if (error) {
 				break;
@@ -1778,9 +1877,14 @@ flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, struct soc
 		}
 	} else if (SOCK_TYPE(fd_cb->so) == SOCK_DGRAM) {
 		if (to_send || mbuf_pkthdr_len(data) == 0) {
-			error = flow_divert_send_data_packet(fd_cb, data, to_send, toaddr, FALSE);
+			if (to_send <= FLOW_DIVERT_CHUNK_SIZE) {
+				error = flow_divert_send_datagram_packet(fd_cb, data, to_send, toaddr, FALSE, FALSE, 0);
+			} else {
+				error = flow_divert_send_fragmented_datagram(fd_cb, data, to_send, toaddr, FALSE);
+				data = NULL;
+			}
 			if (error) {
-				FDLOG(LOG_ERR, fd_cb, "flow_divert_send_data_packet failed. send data size = %lu", to_send);
+				FDLOG(LOG_ERR, fd_cb, "flow_divert_send_datagram_packet failed. send data size = %lu", to_send);
 				if (data != NULL) {
 					mbuf_freem(data);
 				}

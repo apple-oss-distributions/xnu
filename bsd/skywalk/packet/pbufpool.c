@@ -172,7 +172,7 @@ pp_init(void)
 	 */
 	_CASSERT(PKT_F_USER_MASK == (PKT_F_BACKGROUND | PKT_F_REALTIME |
 	    PKT_F_REXMT | PKT_F_LAST_PKT | PKT_F_OPT_DATA | PKT_F_PROMISC |
-	    PKT_F_TRUNCATED | PKT_F_WAKE_PKT));
+	    PKT_F_TRUNCATED | PKT_F_WAKE_PKT | PKT_F_L4S));
 
 	_CASSERT(offsetof(struct __kern_quantum, qum_len) ==
 	    offsetof(struct __kern_packet, pkt_length));
