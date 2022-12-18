@@ -1,0 +1,70 @@
+#! /bin/bash
+
+umask 022
+set -o errexit -o pipefail
+
+if ! [ -x "$(command -v scan-build)" ]; then echo "Make sure llvm is installed and linked in PATH"; exit 1; fi
+
+SDKPATH="$(xcrun --sdk macosx --show-sdk-path)"
+SDK="$(basename ${SDKPATH})"
+DEVELOPERPATH="$(xcode-select -p)"
+DEVELOPER="$(basename ${DEVELOPERPATH})"
+[ -d "${SDKPATH}" ] && [ -d "${DEVELOPERPATH}" ]
+
+sudo rm -rf .tmp
+mkdir -p .tmp
+cd .tmp
+
+echo -e "\033[0;31mPatching $DEVELOPER with dtrace\033[0m"
+curl -sL https://opensource.apple.com/tarballs/dtrace/dtrace-388.tar.gz | tar -xzf-
+cd dtrace-dtrace-388
+mkdir -p obj dst sym
+xcodebuild install -target ctfconvert -target ctfdump -target ctfmerge -sdk macosx -quiet \
+  SRCROOT="${PWD}" OBJROOT="${PWD}/obj" SYMROOT="${PWD}/sym" DSTROOT="${PWD}/dst" ARCHS="x86_64 arm64" \
+  CODE_SIGN_STYLE="Automatic" CODE_SIGN_IDENTITY="Apple Development" DEVELOPMENT_TEAM="9ELM74XG98"
+sudo ditto "${PWD}/dst" "${DEVELOPERPATH}/Toolchains/XcodeDefault.xctoolchain"
+cd ..
+
+echo -e "\033[0;31mPatching $DEVELOPER with CoreOSMakefiles\033[0m"
+curl -sL https://opensource.apple.com/tarballs/CoreOSMakefiles/CoreOSMakefiles-79.tar.gz | tar -xzf-
+cd CoreOSMakefiles-CoreOSMakefiles-79
+sudo ditto "${PWD}/Xcode" "${DEVELOPERPATH}/Makefiles/CoreOS/Xcode"
+cd ..
+
+echo -e "\033[0;31mPatching $SDK with AvailabilityVersions\033[0m"
+curl -sL https://opensource.apple.com/tarballs/AvailabilityVersions/AvailabilityVersions-111.0.1.tar.gz | tar -xzf-
+cd AvailabilityVersions-AvailabilityVersions-111.0.1
+mkdir -p dst
+make -s install SRCROOT="${PWD}" DSTROOT="${PWD}/dst"
+sudo ditto "${PWD}/dst/usr/local" "${SDKPATH}/usr/local"
+cd ..
+
+echo -e "\033[0;31mPatching $SDK with xnu headers\033[0m"
+cd ..
+mkdir -p .tmp/hdrs/obj .tmp/hdrs/sym .tmp/hdrs/dst
+make -s installhdrs SDKROOT=macosx SRCROOT="${PWD}" OBJROOT="${PWD}/.tmp/hdrs/obj" \
+  SYMROOT="${PWD}/.tmp/hdrs/sym" DSTROOT="${PWD}/.tmp/hdrs/dst" ARCH_CONFIGS="x86_64 arm64"
+xcodebuild installhdrs -project libsyscall/Libsyscall.xcodeproj -sdk macosx -quiet \
+  -UseModernBuildSystem=NO SRCROOT="${PWD}/libsyscall" OBJROOT="${PWD}/.tmp/hdrs/obj" \
+  SYMROOT="${PWD}/.tmp/hdrs/sym" DSTROOT="${PWD}/.tmp/hdrs/dst" ARCHS="x86_64 arm64"
+sudo chown -R root:wheel .tmp/hdrs/dst/
+sudo ditto .tmp/hdrs/dst "${SDKPATH}"
+cd .tmp
+
+echo -e "\033[0;31mPatching $SDK with libplatform\033[0m"
+curl -sL https://opensource.apple.com/tarballs/libplatform/libplatform-288.tar.gz | tar -xzf-
+cd libplatform-libplatform-288
+sudo ditto "${PWD}/include" "${SDKPATH}/usr/local/include"
+sudo ditto "${PWD}/private"  "${SDKPATH}/usr/local/include"
+cd ..
+
+echo -e "\033[0;31mPatching $SDK with libdispatch\033[0m"
+curl -sL https://opensource.apple.com/tarballs/libdispatch/libdispatch-1412.tar.gz | tar -xzf-
+cd libdispatch-libdispatch-1412
+mkdir -p obj sym dst
+xcodebuild install -project libdispatch.xcodeproj -target libfirehose_kernel -sdk macosx -quiet \
+  SRCROOT="${PWD}" OBJROOT="${PWD}/obj" SYMROOT="${PWD}/sym" DSTROOT="${PWD}/dst" ARCHS="x86_64 arm64"
+sudo ditto "${PWD}/dst/usr/local" "${SDKPATH}/usr/local"
+cd ..
+
+echo -e "\033[0;31mDone patching $SDK and $DEVELOPER\033[0m"
