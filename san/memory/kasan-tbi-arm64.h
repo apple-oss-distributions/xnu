@@ -48,7 +48,10 @@
 #if defined(ARM_LARGE_MEMORY)
 #define KASAN_SHADOW_MIN        (VM_MAX_KERNEL_ADDRESS+1)
 #define KASAN_SHADOW_MAX        0xffffffffffffffffULL
-#else
+#elif defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+#define KASAN_SHADOW_MIN        0xfffffffdc0000000ULL
+#define KASAN_SHADOW_MAX        0xffffffffc0000000ULL
+#else /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
 #define KASAN_SHADOW_MIN        0xfffffffe00000000ULL
 #define KASAN_SHADOW_MAX        0xffffffffc0000000ULL
 #endif

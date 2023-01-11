@@ -1003,6 +1003,15 @@ kevent_get_context(thread_t thread);
  *        register command wants to wait.
  *
  *        Currently, EVFILT_WORKLOOP is the only filter using this facility.
+ *
+ * f_sanitized_copyout -
+ *        [OPTIONAL] If this function is non-null, then it should be used so
+ *        that the filter can provide a sanitized copy of the current contents
+ *        of a knote to userspace. This prevents leaking of any sensitive
+ *        information like kernel pointers which might be stashed in filter
+ *        specific data.
+ *
+ *        Currently, EVFILT_MACHPORT uses this facility.
  */
 
 struct _kevent_register;
@@ -1027,6 +1036,7 @@ struct filterops {
 	bool    (*f_allow_drop)(struct knote *kn, struct kevent_qos_s *kev);
 	void    (*f_post_register_wait)(struct uthread *uth, struct knote *kn,
 	    struct _kevent_register *ss_kr);
+	void    (*f_sanitized_copyout)(struct knote *kn, struct kevent_qos_s *kev);
 };
 
 /*

@@ -2005,7 +2005,10 @@ pfr_table_count(struct pfr_table *filter, int flags)
 		int r = -1;
 		rs = pf_find_ruleset(filter->pfrt_anchor);
 		r = (rs != NULL) ? rs->tables : -1;
-		pf_release_ruleset(rs);
+		if (rs) {
+			pf_release_ruleset(rs);
+			rs = NULL;
+		}
 		return r;
 	}
 	return pf_main_ruleset.tables;

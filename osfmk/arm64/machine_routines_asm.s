@@ -718,7 +718,7 @@ Lcopyinframe32:
 	b		Lcopyinframe_done
 
 Lcopyinframe64:
-	mov		x3, VM_MIN_KERNEL_ADDRESS		// Check if kernel address
+	ldr		x3, =VM_MIN_KERNEL_ADDRESS		// Check if kernel address
 	orr		x9, x0, TBI_MASK				// Hide tags in address comparison
 	cmp		x9, x3							// If in kernel address range, skip tag test
 	b.hs	Lcopyinframe_valid

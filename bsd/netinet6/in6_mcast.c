@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -2627,7 +2627,6 @@ out_im6f_rollback:
 	if (is_final) {
 		/* Remove the gap in the membership array. */
 		VERIFY(inm == imo->im6o_membership[idx]);
-		imo->im6o_membership[idx] = NULL;
 		IN6M_REMREF(inm);
 
 		for (++idx; idx < imo->im6o_num_memberships; ++idx) {
@@ -2635,6 +2634,10 @@ out_im6f_rollback:
 			imo->im6o_mfilters[idx - 1] = imo->im6o_mfilters[idx];
 		}
 		imo->im6o_num_memberships--;
+
+		/* Re-initialize the now unused tail of the list */
+		imo->im6o_membership[imo->im6o_num_memberships] = NULL;
+		im6f_init(&imo->im6o_mfilters[imo->im6o_num_memberships], MCAST_UNDEFINED, MCAST_EXCLUDE);
 	}
 
 out_locked:

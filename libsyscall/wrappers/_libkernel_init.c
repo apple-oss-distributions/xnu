@@ -72,7 +72,7 @@ bool _os_xbs_chrooted;
 #endif /* TARGET_OS_OSX */
 
 /* dlsym() funcptr is for legacy support in exc_catcher */
-void* (*_dlsym)(void*, const char*) __attribute__((visibility("hidden")));
+void* (*LIBKERNEL_FUNCTION_PTRAUTH(_dlsym))(void*, const char*) __attribute__((visibility("hidden")));
 
 __attribute__((visibility("hidden")))
 _libkernel_functions_t _libkernel_functions;

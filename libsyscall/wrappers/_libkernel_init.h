@@ -47,7 +47,7 @@ struct voucher_s;
 typedef struct voucher_s *voucher_t;
 #endif
 
-#if __has_feature(ptrauth_function_pointer_type_discrimination)
+#if __PTRAUTH_INTRINSICS__ && __has_builtin(__builtin_ptrauth_string_discriminator)
 #define LIBKERNEL_FUNCTION_PTRAUTH(f) \
 	__ptrauth(ptrauth_key_function_pointer,1, \
 	        __builtin_ptrauth_string_discriminator("libkernel_functions_" # f) \

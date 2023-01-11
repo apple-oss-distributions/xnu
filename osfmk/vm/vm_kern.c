@@ -99,14 +99,18 @@
  */
 
 SECURITY_READ_ONLY_LATE(vm_map_t) kernel_map;
-SECURITY_READ_ONLY_LATE(struct mach_vm_range) kmem_ranges[KMEM_RANGE_COUNT] = {};
-TUNABLE(uint32_t, kmem_ptr_ranges, "kmem_ptr_ranges", 2);
+SECURITY_READ_ONLY_LATE(struct mach_vm_range) kmem_ranges[KMEM_RANGE_COUNT];
 #if ZSECURITY_CONFIG(KERNEL_DATA_SPLIT)
-__startup_data
-vm_map_size_t data_range_size, ptr_range_size;
-SECURITY_READ_ONLY_LATE(struct mach_vm_range)
-kmem_large_ranges[KMEM_RANGE_COUNT] = {};
+SECURITY_READ_ONLY_LATE(struct mach_vm_range) kmem_large_ranges[KMEM_RANGE_COUNT];
 #endif
+TUNABLE(uint32_t, kmem_ptr_ranges, "kmem_ptr_ranges", KMEM_RANGE_ID_NUM_PTR);
+TUNABLE(uint32_t, kmem_sprayqtn_range, "kmem_sprayqtn_range", 1);
+
+#if ZSECURITY_CONFIG(KERNEL_DATA_SPLIT)
+__startup_data static vm_map_size_t data_range_size;
+__startup_data static vm_map_size_t ptr_range_size;
+#endif
+__startup_data static vm_map_size_t sprayqtn_range_size;
 
 #pragma mark helpers
 
@@ -595,6 +599,9 @@ kmem_apply_security_policy(
 		 * As an optimization in KMA_DATA to avoid fragmentation,
 		 * allocate static carveouts at the end of the DATA range.
 		 */
+		direction = (bool)(kma_flags & KMA_PERMANENT);
+	} else if (kma_flags & KMA_SPRAYQTN) {
+		range_id = KMEM_RANGE_ID_SPRAYQTN;
 		direction = (bool)(kma_flags & KMA_PERMANENT);
 	} else if (type_hash) {
 		range_id = type_hash & KMEM_RANGE_MASK;
@@ -1984,6 +1991,7 @@ kmem_shuffle_claims(void)
 		kmem_claims[shuffle_buf[i]] = tmp;
 	}
 }
+
 __startup_func
 static void
 kmem_readjust_ranges(
@@ -2049,30 +2057,36 @@ kmem_add_extra_claims(void)
 	largest_free_size -= total_claims;
 
 	/*
+	 * Use half the total available VA for all pointer allocations (this
+	 * includes the kmem_sprayqtn range). Given that we have 4 total
+	 * ranges divide the available VA by 8.
+	 */
+	ptr_range_size = sprayqtn_range_size = largest_free_size / 8;
+
+	if (sprayqtn_range_size > (sane_size / 2)) {
+		sprayqtn_range_size = sane_size / 2;
+	}
+
+	ptr_range_size = round_page(ptr_range_size);
+	sprayqtn_range_size = round_page(sprayqtn_range_size);
+
+	/*
 	 * kasan and configs w/o *TRR need to have just one ptr range due to
 	 * resource constraints.
 	 */
 #if !ZSECURITY_CONFIG(KERNEL_PTR_SPLIT)
 	kmem_ptr_ranges = 1;
+	kmem_sprayqtn_range = 0;
+	sprayqtn_range_size = 0;
 #endif
 
-	ptr_range_size = round_page(largest_free_size /
-	    (kmem_ptr_ranges * 3));
-	data_range_size = largest_free_size -
-	    (ptr_range_size * kmem_ptr_ranges);
-
+	data_range_size = largest_free_size
+	    - (ptr_range_size * kmem_ptr_ranges)
+	    - sprayqtn_range_size;
 
 	/*
-	 * Add claims for data and pointer
+	 * Add claims for kmem's ranges
 	 */
-	struct kmem_range_startup_spec kmem_spec_data = {
-		.kc_name = "kmem_data_range",
-		.kc_range = &kmem_ranges[KMEM_RANGE_ID_DATA],
-		.kc_size = data_range_size,
-		.kc_flags = KC_NO_ENTRY,
-	};
-	kmem_claims[kmem_claim_count++] = kmem_spec_data;
-
 	for (uint32_t i = 0; i < kmem_ptr_ranges; i++) {
 		struct kmem_range_startup_spec kmem_spec_ptr = {
 			.kc_name = "kmem_ptr_range",
@@ -2082,6 +2096,24 @@ kmem_add_extra_claims(void)
 		};
 		kmem_claims[kmem_claim_count++] = kmem_spec_ptr;
 	}
+
+	if (kmem_sprayqtn_range) {
+		struct kmem_range_startup_spec kmem_spec_sprayqtn = {
+			.kc_name = "kmem_sprayqtn_range",
+			.kc_range = &kmem_ranges[KMEM_RANGE_ID_SPRAYQTN],
+			.kc_size = sprayqtn_range_size,
+			.kc_flags = KC_NO_ENTRY,
+		};
+		kmem_claims[kmem_claim_count++] = kmem_spec_sprayqtn;
+	}
+
+	struct kmem_range_startup_spec kmem_spec_data = {
+		.kc_name = "kmem_data_range",
+		.kc_range = &kmem_ranges[KMEM_RANGE_ID_DATA],
+		.kc_size = data_range_size,
+		.kc_flags = KC_NO_ENTRY,
+	};
+	kmem_claims[kmem_claim_count++] = kmem_spec_data;
 }
 
 __startup_func
@@ -2196,27 +2228,48 @@ __startup_func
 static void
 kmem_range_init(void)
 {
+	vm_size_t range_adjustment;
+
 	kmem_scramble_ranges();
 
-	/* Initialize kmem_large_ranges. Skip 1/16th of range size on either side
-	 * for ptr ranges and 1/8th only from left for data as we a single front
-	 * for data.
+	/* Initialize kmem_large_ranges.
+	 * For pointer ranges  : Skip 1/16th of range size on either side
+	 * For sprayqtn range  : Skip 1/8th only from left as we have a single front.
+	 * For data range      : Skip 1/8th only from left as we have a single front.
+	 * Permanent allocations use the right of the range for data and sprayqtn.
 	 */
-	vm_size_t range_adjustment = ptr_range_size >> 4;
+	range_adjustment = ptr_range_size >> 4;
 	for (kmem_range_id_t i = 0; i < kmem_ptr_ranges; i++) {
 		kmem_large_ranges[KMEM_RANGE_ID_PTR_0 + i].min_address =
 		    kmem_ranges[KMEM_RANGE_ID_PTR_0 + i].min_address + range_adjustment;
 		kmem_large_ranges[KMEM_RANGE_ID_PTR_0 + i].max_address =
 		    kmem_ranges[KMEM_RANGE_ID_PTR_0 + i].max_address - range_adjustment;
 	}
+
+	range_adjustment = sprayqtn_range_size >> 3;
+	kmem_large_ranges[KMEM_RANGE_ID_SPRAYQTN].min_address =
+	    kmem_ranges[KMEM_RANGE_ID_SPRAYQTN].min_address + range_adjustment;
+	kmem_large_ranges[KMEM_RANGE_ID_SPRAYQTN].max_address =
+	    kmem_ranges[KMEM_RANGE_ID_SPRAYQTN].max_address;
+
 	range_adjustment = data_range_size >> 3;
 	kmem_large_ranges[KMEM_RANGE_ID_DATA].min_address =
 	    kmem_ranges[KMEM_RANGE_ID_DATA].min_address + range_adjustment;
 	kmem_large_ranges[KMEM_RANGE_ID_DATA].max_address =
 	    kmem_ranges[KMEM_RANGE_ID_DATA].max_address;
 
+	/*
+	 * Redirect sprayqtn range to pointer range for configs that have
+	 * kmem_sprayqtn_range disabled
+	 */
+	if (!kmem_sprayqtn_range) {
+		kmem_ranges[KMEM_RANGE_ID_SPRAYQTN] = kmem_ranges[KMEM_RANGE_ID_PTR_0];
+		kmem_large_ranges[KMEM_RANGE_ID_SPRAYQTN] =
+		    kmem_large_ranges[KMEM_RANGE_ID_PTR_0];
+	}
+
 #if DEBUG || DEVELOPMENT
-	for (kmem_range_id_t i = 0; i < KMEM_RANGE_COUNT; i++) {
+	for (kmem_range_id_t i = 1; i < KMEM_RANGE_COUNT; i++) {
 		vm_size_t range_size = mach_vm_range_size(&kmem_large_ranges[i]);
 		printf("kmem_large_ranges[%d]    : %p - %p (%u%c)\n", i,
 		    (void *)kmem_large_ranges[i].min_address,

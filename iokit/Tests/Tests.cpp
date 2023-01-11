@@ -200,6 +200,7 @@
 #include <IOKit/IOKitKeysPrivate.h>
 #include <IOKit/IOKitServer.h>
 #include <IOKit/IOBSD.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <kern/ipc_kobject.h>
 #include <libkern/Block.h>
 #include <libkern/Block_private.h>
@@ -1920,6 +1921,26 @@ IOMallocPageableTests(int)
 	return kIOReturnSuccess;
 }
 
+static int
+Test100367284(int)
+{
+	OSSharedPtr<IOService> entry;
+	OSSharedPtr<IOService> replace;
+	OSSharedPtr<IOService> root;
+
+	root = OSDynamicPtrCast<IOService>(IORegistryEntry::fromPath("/", gIODTPlane));
+	entry = OSMakeShared<IOService>();
+	entry->init();
+	entry->attachToParent(root.get(), gIODTPlane);
+	entry->attachToParent(root.get(), gIOServicePlane);
+
+	replace = OSMakeShared<IOService>();
+	replace->init(entry.get(), gIODTPlane);
+	replace->detachFromParent(root.get(), gIODTPlane);
+
+	return kIOReturnSuccess;
+}
+
 
 #endif  /* DEVELOPMENT || DEBUG */
 
@@ -1998,6 +2019,8 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 	}
 #endif /* TEST_ZLIB */
 	if (changed && newValue) {
+		error = Test100367284(newValue);
+		assert(KERN_SUCCESS == error);
 		error = IOWorkLoopTest(newValue);
 		assert(KERN_SUCCESS == error);
 		error = IOServiceTest(newValue);

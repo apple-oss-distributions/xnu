@@ -220,12 +220,19 @@ extern int PAGE_SHIFT_CONST;
  * | 0xffff_fff0_0000_0000 |  -64GB |   64GB | LOW_GLOBALS            |
  * |                       |        |        | PMAP_HEAP_RANGE_START  | <= H8
  * +-----------------------+--------+--------+------------------------+
- * | 0xffff_ffe0_0000_0000 | -128GB |    0GB | VM_MIN_KERNEL_ADDRESS  |
+ * | 0xffff_ffe0_0000_0000 | -128GB |    0GB | VM_MIN_KERNEL_ADDRESS  | <= H8
+ * +-----------------------+--------+--------+------------------------+
+ * | 0xffff_ffdc_0000_0000 | -144GB |    0GB | VM_MIN_KERNEL_ADDRESS  | >= H9
  * |                       |        |        | PMAP_HEAP_RANGE_START  | >= H9
  * +-----------------------+--------+--------+------------------------+
  */
+#if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+#define VM_KERNEL_POINTER_SIGNIFICANT_BITS  38
+#define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) (0ULL - GiB(144)))
+#else /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
 #define VM_KERNEL_POINTER_SIGNIFICANT_BITS  37
 #define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) 0xffffffe000000000ULL)
+#endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
 #define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) 0xfffffffbffffffffULL)
 
 #endif // ARM_LARGE_MEMORY

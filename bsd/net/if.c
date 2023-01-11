@@ -452,6 +452,14 @@ if_next_index(void)
 	static int      if_indexlim = 0;
 	int             new_index;
 
+	/*
+	 * Although we are returning an integer,
+	 * ifnet's if_index is a uint16_t which means
+	 * that's our upper bound.
+	 */
+	if (if_index >= UINT16_MAX) {
+		return -1;
+	}
 	new_index = ++if_index;
 	if (if_index > if_indexlim) {
 		unsigned        n;

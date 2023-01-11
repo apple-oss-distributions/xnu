@@ -2271,7 +2271,8 @@ IOService::registerInterestForNotifier( IONotifier *svcNotify, const OSSymbol * 
 	IOReturn rc = kIOReturnSuccess;
 	_IOServiceInterestNotifier  *notify = NULL;
 
-	if (!svcNotify || !(notify = OSDynamicCast(_IOServiceInterestNotifier, svcNotify))) {
+
+	if (!svcNotify || !(notify = OSDynamicCast(_IOServiceInterestNotifier, svcNotify)) || !handler) {
 		return kIOReturnBadArgument;
 	}
 

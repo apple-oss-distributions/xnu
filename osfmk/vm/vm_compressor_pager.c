@@ -1088,8 +1088,8 @@ vm_compressor_pager_next_compressed(
 		    slot_idx++) {
 			if (chunk[slot_idx] != 0) {
 				/* found a non-NULL slot in this chunk */
-				return (memory_object_offset_t) (slot_idx *
-				       PAGE_SIZE);
+				return (memory_object_offset_t) slot_idx *
+				       PAGE_SIZE;
 			}
 		}
 		return (memory_object_offset_t) -1;
@@ -1122,8 +1122,8 @@ vm_compressor_pager_next_compressed(
 					/* went beyond end of object */
 					return (memory_object_offset_t) -1;
 				}
-				return (memory_object_offset_t) (next_slot *
-				       PAGE_SIZE);
+				return (memory_object_offset_t) next_slot *
+				       PAGE_SIZE;
 			}
 		}
 	}

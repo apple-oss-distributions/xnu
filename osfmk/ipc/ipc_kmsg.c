@@ -1788,7 +1788,8 @@ ipc_kmsg_alloc(
 
 	if (max_kdata_size > 0) {
 		if (kmsg_type == IKM_TYPE_ALL_OOL) {
-			msg_data = kalloc_type(mach_msg_base_t, mach_msg_descriptor_t, desc_count, alloc_flags);
+			msg_data = kalloc_type(mach_msg_base_t, mach_msg_descriptor_t,
+			    desc_count, alloc_flags | Z_SPRAYQTN);
 		} else {
 			assert(kmsg_type == IKM_TYPE_KDATA_OOL);
 			msg_data = kalloc_data(max_kdata_size, alloc_flags);
@@ -4504,7 +4505,7 @@ ipc_kmsg_copyin_ool_ports_descriptor(
 		return user_dsc;
 	}
 
-	data = kalloc_type(mach_port_t, count, Z_WAITOK);
+	data = kalloc_type(mach_port_t, count, Z_WAITOK | Z_SPRAYQTN);
 
 	if (data == NULL) {
 		*mr = MACH_SEND_NO_BUFFER;

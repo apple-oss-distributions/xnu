@@ -307,6 +307,8 @@ kernel_mach_msg_rpc(
 {
 	thread_t self = current_thread();
 	ipc_port_t dest = IPC_PORT_NULL;
+	/* Sync IPC from kernel should pass adopted voucher and importance */
+	mach_msg_option_t option = MACH_SEND_KERNEL_DEFAULT & ~MACH_SEND_NOIMPORTANCE;
 	ipc_port_t reply;
 	ipc_kmsg_t kmsg;
 	mach_msg_header_t *hdr;
@@ -319,6 +321,10 @@ kernel_mach_msg_rpc(
 
 	if (message_moved) {
 		*message_moved = FALSE;
+	}
+
+	if (!IP_VALID(msg->msgh_remote_port)) {
+		return MACH_SEND_INVALID_DEST;
 	}
 
 	mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
@@ -342,26 +348,35 @@ kernel_mach_msg_rpc(
 	/* Get voucher port for the current thread's voucher */
 	ipc_voucher_t voucher = IPC_VOUCHER_NULL;
 	ipc_port_t voucher_port = IP_NULL;
-	if (thread_get_mach_voucher(self, 0, &voucher) == KERN_SUCCESS) {
+
+	/* Kernel server routines do not need voucher */
+	bool has_voucher = !ip_is_kobject(hdr->msgh_remote_port);
+
+	if (has_voucher && thread_get_mach_voucher(self, 0, &voucher) == KERN_SUCCESS) {
 		/* If thread does not have a voucher, get the default voucher of the process */
 		if (voucher == IPC_VOUCHER_NULL) {
 			voucher = ipc_voucher_get_default_voucher();
 		}
 		voucher_port = convert_voucher_to_port(voucher);
+		ipc_kmsg_set_voucher_port(kmsg, voucher_port, MACH_MSG_TYPE_MOVE_SEND);
 	}
 
 	/* insert send-once right for the reply port and send right for the adopted voucher */
 	hdr->msgh_local_port = reply;
-	ipc_kmsg_set_voucher_port(kmsg, voucher_port, MACH_MSG_TYPE_MOVE_SEND);
 	hdr->msgh_bits |=
-	    MACH_MSGH_BITS_SET_PORTS(0, MACH_MSG_TYPE_MAKE_SEND_ONCE, MACH_MSG_TYPE_MOVE_SEND);
+	    MACH_MSGH_BITS_SET_PORTS(
+		0,
+		MACH_MSG_TYPE_MAKE_SEND_ONCE,
+		has_voucher ? MACH_MSG_TYPE_MOVE_SEND : 0);
 
 	mr = ipc_kmsg_copyin_from_kernel(kmsg);
 	if (mr != MACH_MSG_SUCCESS) {
 		/* Remove the voucher from the kmsg */
-		voucher_port = ipc_kmsg_get_voucher_port(kmsg);
-		ipc_kmsg_clear_voucher_port(kmsg);
-		ipc_port_release_send(voucher_port);
+		if (has_voucher) {
+			voucher_port = ipc_kmsg_get_voucher_port(kmsg);
+			ipc_kmsg_clear_voucher_port(kmsg);
+			ipc_port_release_send(voucher_port);
+		}
 
 		ipc_kmsg_free(kmsg);
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
@@ -371,12 +386,6 @@ kernel_mach_msg_rpc(
 	if (message_moved) {
 		*message_moved = TRUE;
 	}
-
-	/*
-	 * Sync IPC from kernel should pass adopted voucher and importance.
-	 */
-	mach_msg_option_t option = MACH_SEND_KERNEL_DEFAULT;
-	option &= ~MACH_SEND_NOIMPORTANCE;
 
 	/*
 	 * Destination port would be needed during receive for creating

@@ -1535,6 +1535,12 @@ task_create_internal(
 		task_ro_data.task_control_port_options = task_get_control_port_options(parent_task);
 
 		task_ro_data.t_flags_ro |= parent_t_flags_ro & TFRO_FILTER_MSG;
+#if CONFIG_MACF
+		if (!(t_flags & TF_CORPSE_FORK)) {
+			task_ro_data.task_filters.mach_trap_filter_mask = task_get_mach_trap_filter_mask(parent_task);
+			task_ro_data.task_filters.mach_kobj_filter_mask = task_get_mach_kobj_filter_mask(parent_task);
+		}
+#endif
 	} else {
 		task_ro_data.task_tokens.sec_token = KERNEL_SECURITY_TOKEN;
 		task_ro_data.task_tokens.audit_token = KERNEL_AUDIT_TOKEN;
@@ -7094,18 +7100,6 @@ task_set_mach_kobj_filter_mask(task_t task, uint8_t *mask)
 	    task_filters.mach_kobj_filter_mask, &mask);
 }
 
-void
-task_copy_filter_masks(task_t new_task, task_t old_task)
-{
-	struct task_filter_ro_data filters;
-
-	filters = task_get_ro(new_task)->task_filters;
-	filters.mach_trap_filter_mask = task_get_mach_trap_filter_mask(old_task);
-	filters.mach_kobj_filter_mask = task_get_mach_kobj_filter_mask(old_task);
-
-	zalloc_ro_update_field(ZONE_ID_PROC_RO, task_get_ro(new_task),
-	    task_filters, &filters);
-}
 #endif /* CONFIG_MACF */
 
 void
@@ -8838,21 +8832,6 @@ mac_task_register_filter_callbacks(
 	return KERN_SUCCESS;
 }
 #endif /* CONFIG_MACF */
-
-void
-task_transfer_mach_filter_bits(
-	task_t new_task,
-	task_t old_task)
-{
-#ifdef CONFIG_MACF
-	/* Copy mach trap and kernel object mask pointers to new task. */
-	task_copy_filter_masks(new_task, old_task);
-#endif
-	/* If filter message flag is set then set it in the new task. */
-	if (task_get_filter_msg_flag(old_task)) {
-		task_ro_flags_set(new_task, TFRO_FILTER_MSG);
-	}
-}
 
 #if CONFIG_ROSETTA
 bool

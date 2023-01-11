@@ -444,6 +444,38 @@ iokit_label_dext_task(task_t task)
 	return ipc_space_add_label(task->itk_space, IPC_LABEL_DEXT);
 }
 
+/*
+ *	Routine:	iokit_clear_registered_ports
+ *	Purpose:
+ *		Clean up a task's registered IOKit kobject ports.
+ *	Conditions:
+ *		Nothing locked.
+ */
+void
+iokit_clear_registered_ports(
+	task_t task)
+{
+	mach_port_t port;
+	ipc_kobject_type_t type;
+
+	itk_lock(task);
+	for (int i = 0; i < TASK_PORT_REGISTER_MAX; i++) {
+		port = task->itk_registered[i];
+		if (!IP_VALID(port)) {
+			continue;
+		}
+		type = ip_kotype( port );
+		if ((IKOT_IOKIT_OBJECT == type)
+		    || (IKOT_IOKIT_CONNECT == type)
+		    || (IKOT_IOKIT_IDENT == type)
+		    || (IKOT_UEXT_OBJECT == type)) {
+			ipc_port_release_send(port);
+			task->itk_registered[i] = IP_NULL;
+		}
+	}
+	itk_unlock(task);
+}
+
 /* need to create a pmap function to generalize */
 unsigned int
 IODefaultCacheBits(addr64_t pa)

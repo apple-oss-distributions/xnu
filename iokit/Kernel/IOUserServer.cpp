@@ -105,6 +105,8 @@ static const OSSymbol * gIOSystemStatePowerSourceDescriptionACAttachedKey;
 
 extern bool gInUserspaceReboot;
 
+extern void iokit_clear_registered_ports(task_t task);
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 struct IOPStrings;
@@ -1017,6 +1019,10 @@ IODMACommand::PrepareForDMA_Impl(
 
 	if (options & ~((uint64_t) kIODMACommandPrepareForDMANoOptions)) {
 		// no other options currently defined
+		return kIOReturnBadArgument;
+	}
+
+	if (memory == NULL) {
 		return kIOReturnBadArgument;
 	}
 
@@ -2523,6 +2529,7 @@ IOUserServer::setCheckInToken(IOUserServerCheckInToken *token)
 	if (token != NULL && fCheckInToken == NULL) {
 		token->retain();
 		fCheckInToken = token;
+		iokit_clear_registered_ports(fOwningTask);
 	} else {
 		printf("%s: failed to set check in token. token=%p, fCheckInToken=%p\n", __FUNCTION__, token, fCheckInToken);
 	}

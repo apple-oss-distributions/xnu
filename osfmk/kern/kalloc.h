@@ -853,9 +853,11 @@ __options_decl(kt_granule_t, uint32_t, {
  * - ~1G on other 16k systems.
  */
 #if __arm64e__
-#define KALLOC_ARRAY_SIZE_MAX   (PAGE_MASK << PAGE_SHIFT)
+#define KALLOC_ARRAY_SIZE_MAX   ((uint32_t)PAGE_MASK << PAGE_SHIFT)
+#define KALLOC_ARRAY_GRANULE    32ul
 #else
-#define KALLOC_ARRAY_SIZE_MAX   (UINT16_MAX << PAGE_SHIFT)
+#define KALLOC_ARRAY_SIZE_MAX   ((uint32_t)UINT16_MAX << PAGE_SHIFT)
+#define KALLOC_ARRAY_GRANULE    16ul
 #endif
 
 /*!
@@ -959,8 +961,6 @@ __options_decl(kt_granule_t, uint32_t, {
 #if XNU_KERNEL_PRIVATE
 
 #define KALLOC_ARRAY_TYPE_DECL_(name, h_type_t, h_sz, e_type_t, e_sz) \
-	static_assert(!KALLOC_TYPE_CHECK(KT_SUMMARY_MASK_DATA,                  \
-	    h_type_t, e_type_t), "data only not supported yet");                \
 	KALLOC_TYPE_VAR_DECLARE(name ## _kt_view);                              \
 	typedef struct name * __unsafe_indexable name ## _t;                    \
                                                                                 \
@@ -995,11 +995,13 @@ __options_decl(kt_granule_t, uint32_t, {
 	        vm_size_t size;                                                 \
                                                                                 \
 	        if (cur_size) {                                                 \
-	                size = cur_size + (e_sz);                               \
+	                size = cur_size + (e_sz) - 1;                           \
 	        } else {                                                        \
 	                size = kt_size(h_sz, e_sz, min_count) - 1;              \
 	        }                                                               \
-	        size = kalloc_next_good_size(size, vm_period);                  \
+	        size &= -KALLOC_ARRAY_GRANULE;                                  \
+	        size += KALLOC_ARRAY_GRANULE - 1;                               \
+	        size  = kalloc_next_good_size(size, vm_period);                 \
 	        if (size <= KALLOC_ARRAY_SIZE_MAX) {                            \
 	               return (uint32_t)size;                                   \
 	        }                                                               \

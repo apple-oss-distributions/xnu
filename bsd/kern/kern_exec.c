@@ -4764,9 +4764,6 @@ proc_exec_switch_task(proc_t old_proc, proc_t new_proc, task_t old_task, task_t 
 
 		task_copy_fields_for_exec(new_task, old_task);
 
-		/* Transfer sandbox filter bits to new_task. */
-		task_transfer_mach_filter_bits(new_task, old_task);
-
 		/*
 		 * Need to transfer pending watch port boosts to the new task
 		 * while still making sure that the old task remains in the

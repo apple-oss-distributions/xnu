@@ -389,6 +389,11 @@ extern void     zone_require_ro(
  * free the incoming memory on failure cases.
  *
  #if XNU_KERNEL_PRIVATE
+ * @const Z_SPRAYQTN
+ * This flag tells the VM to allocate from the "spray quarantine" range when
+ * it services the allocation. For more details on what allocations qualify
+ * to use this flag see @c KMEM_RANGE_ID_SPRAYQTN.
+ *
  * @const Z_KALLOC_ARRAY
  * Instead of returning a standard "pointer" return a pointer that encodes
  * its size-class into the pointer itself (Only for kalloc, might limit
@@ -433,6 +438,7 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	Z_REALLOCF      = 0x0008,
 
 #if XNU_KERNEL_PRIVATE
+	Z_SPRAYQTN      = 0x0040,
 	Z_KALLOC_ARRAY  = 0x0080,
 	Z_MAY_COPYINMAP = 0x0100,
 	Z_FULLSIZE      = 0x0200,
@@ -451,7 +457,10 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	/* convenient c++ spellings */
 	Z_NOWAIT_ZERO          = Z_NOWAIT | Z_ZERO,
 	Z_WAITOK_ZERO          = Z_WAITOK | Z_ZERO,
-	Z_WAITOK_ZERO_NOFAIL   = Z_WAITOK | Z_ZERO | Z_NOFAIL, /* convenient spelling for c++ */
+	Z_WAITOK_ZERO_NOFAIL   = Z_WAITOK | Z_ZERO | Z_NOFAIL,
+#if XNU_KERNEL_PRIVATE
+	Z_WAITOK_ZERO_SPRAYQTN = Z_WAITOK | Z_ZERO | Z_SPRAYQTN,
+#endif
 
 	Z_KPI_MASK             = Z_WAITOK | Z_NOWAIT | Z_NOPAGEWAIT | Z_ZERO,
 #if XNU_KERNEL_PRIVATE

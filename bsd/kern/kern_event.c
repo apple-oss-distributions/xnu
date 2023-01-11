@@ -8669,7 +8669,12 @@ kevent_extinfo_emit(struct kqueue *kq, struct knote *kn, struct kevent_extinfo *
 
 				kqlock(kq);
 
-				info->kqext_kev         = *(struct kevent_qos_s *)&kn->kn_kevent;
+				if (knote_fops(kn)->f_sanitized_copyout) {
+					knote_fops(kn)->f_sanitized_copyout(kn, &info->kqext_kev);
+				} else {
+					info->kqext_kev         = *(struct kevent_qos_s *)&kn->kn_kevent;
+				}
+
 				if (knote_has_qos(kn)) {
 					info->kqext_kev.qos =
 					    _pthread_priority_thread_qos_fast(kn->kn_qos);

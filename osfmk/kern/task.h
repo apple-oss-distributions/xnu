@@ -1006,7 +1006,6 @@ extern uint8_t *task_get_mach_trap_filter_mask(task_t task);
 extern void task_set_mach_trap_filter_mask(task_t task, uint8_t *mask);
 extern uint8_t *task_get_mach_kobj_filter_mask(task_t task);
 extern void task_set_mach_kobj_filter_mask(task_t task, uint8_t *mask);
-extern void task_copy_filter_masks(task_t new_task, task_t old_task);
 extern mach_vm_address_t task_get_all_image_info_addr(task_t task);
 
 /* Jetsam memlimit attributes */
@@ -1197,8 +1196,6 @@ extern void task_store_owned_vmobject_info(task_t to_task, task_t from_task);
 
 extern void task_set_filter_msg_flag(task_t task, boolean_t flag);
 extern boolean_t task_get_filter_msg_flag(task_t task);
-
-extern void task_transfer_mach_filter_bits(task_t new_task, task_t old_mask);
 
 #if __has_feature(ptrauth_calls)
 extern bool task_is_pac_exception_fatal(task_t task);

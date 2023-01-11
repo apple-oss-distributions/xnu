@@ -7197,7 +7197,8 @@ necp_client_claim(struct proc *p, struct necp_fd_data *fd_data, struct necp_clie
 		NECP_FD_LOCK(find_fd);
 		struct necp_client *find_client = necp_client_fd_find_client_and_lock(find_fd, client_id);
 		if (find_client != NULL) {
-			if (find_client->delegated_upid == upid) {
+			if (find_client->delegated_upid == upid &&
+			    RB_EMPTY(&find_client->flow_registrations)) {
 				// Matched the client to claim; remove from the old fd
 				client = find_client;
 				RB_REMOVE(_necp_client_tree, &find_fd->clients, client);

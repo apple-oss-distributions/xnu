@@ -64,6 +64,7 @@
  *	to be used by the kernel to manage dynamic memory fast.
  */
 
+#include "mach/vm_types.h"
 #include <mach/boolean.h>
 #include <mach/sdt.h>
 #include <mach/machine/vm_types.h>
@@ -464,19 +465,29 @@ kalloc_zone_init(
 	zc_flags |= (ZC_KASAN_NOREDZONE | ZC_KASAN_NOQUARANTINE | ZC_PGZ_USE_GUARDS);
 
 	for (uint32_t i = 0; i < KHEAP_NUM_ZONES; i++) {
-		char *z_name = zalloc_permanent(MAX_ZONE_NAME, ZALIGN_NONE);
-		snprintf(z_name, MAX_ZONE_NAME, "%s.%zu", kheap_name, kheap_zsize[i]);
-		zone_t z_ptr = zone_create_ext(z_name, kheap_zsize[i], zc_flags,
-		    ZONE_ID_ANY, ^(zone_t z){
-			uint32_t size  = z->z_elem_size;
-			uint32_t scale = kalloc_log2down(size) - 1;
+		uint32_t size = (uint32_t)kheap_zsize[i];
+		char buf[MAX_ZONE_NAME], *z_name;
+		int len;
 
+		len = scnprintf(buf, MAX_ZONE_NAME, "%s.%u", kheap_name, size);
+		z_name = zalloc_permanent(len + 1, ZALIGN_NONE);
+		strlcpy(z_name, buf, len + 1);
+
+		(void)zone_create_ext(z_name, size, zc_flags, ZONE_ID_ANY, ^(zone_t z){
+#if __arm64e__
+			uint32_t scale = kalloc_log2down(size / 32);
+
+			if (size == 32 << scale) {
+			        z->z_array_size_class = scale;
+			} else {
+			        z->z_array_size_class = scale | 0x10;
+			}
+#endif
 			zone_security_array[zone_index(z)].z_kheap_id = (uint16_t)kheap_id;
-			z->z_array_size_class = 2 * scale | ((size >> scale) & 1);
+			if (i == 0) {
+			        *kheap_zstart = zone_index(z);
+			}
 		});
-		if (i == 0) {
-			*kheap_zstart = zone_index(z_ptr);
-		}
 	}
 }
 
@@ -1693,37 +1704,40 @@ kalloc_guard(vm_tag_t tag, uint16_t type_hash, const void *owner)
 
 #if __arm64e__
 
-#define KALLOC_ARRAY_TYPE_SHIFT (64 - T1SZ_BOOT - 2)
+#define KALLOC_ARRAY_TYPE_SHIFT (64 - T1SZ_BOOT - 1)
 
 SECURITY_READ_ONLY_LATE(uint32_t) kalloc_array_type_shift = KALLOC_ARRAY_TYPE_SHIFT;
 
 /*
  * Zone encoding is:
  *
- *   <PAC SIG><1><2 bits of type><PTR value><4 bits of size class>
+ *   <PAC SIG><1><1><PTR value><5 bits of size class>
  *
  * VM encoding is:
  *
- *   <PAC SIG><1><2 bits of 0><PTR value><14 bits of page count>
+ *   <PAC SIG><1><0><PTR value><14 bits of page count>
+ *
+ * The <1> is precisely placed so that <PAC SIG><1> is T1SZ worth of bits,
+ * so that PAC authentication extends the proper sign bit.
  */
 
-static_assert(T1SZ_BOOT + 2 + VM_KERNEL_POINTER_SIGNIFICANT_BITS <= 64);
+static_assert(T1SZ_BOOT + 1 + VM_KERNEL_POINTER_SIGNIFICANT_BITS <= 64);
 
 __attribute__((always_inline))
 struct kalloc_result
 __kalloc_array_decode(vm_address_t ptr)
 {
 	struct kalloc_result kr;
-	vm_address_t type = (ptr >> KALLOC_ARRAY_TYPE_SHIFT) & 0x3;
+	vm_address_t zone_mask = 1ul << KALLOC_ARRAY_TYPE_SHIFT;
 
-	if (type) {
-		kr.size = type << (ptr & 0xf);
-		ptr &= ~0xfull;
+	if (ptr & zone_mask) {
+		kr.size = (32 + (ptr & 0x10)) << (ptr & 0xf);
+		ptr &= ~0x1full;
 	} else {
 		kr.size = (ptr & PAGE_MASK) << PAGE_SHIFT;
 		ptr &= ~PAGE_MASK;
+		ptr |= zone_mask;
 	}
-	ptr |= 3ull << KALLOC_ARRAY_TYPE_SHIFT;
 
 	kr.addr = (void *)ptr;
 	return kr;
@@ -1732,21 +1746,13 @@ __kalloc_array_decode(vm_address_t ptr)
 static inline void *
 __kalloc_array_encode_zone(zone_t z, void *ptr, vm_size_t size __unused)
 {
-	vm_address_t addr = (vm_address_t)ptr;
-	vm_address_t idx = z->z_array_size_class;
-
-	if ((idx & 1) == 0) {
-		addr &= ~(0x1ull << KALLOC_ARRAY_TYPE_SHIFT);
-	}
-	addr |= (idx >> 1);
-
-	return (void *)addr;
+	return (void *)((vm_address_t)ptr | z->z_array_size_class);
 }
 
 static inline vm_address_t
 __kalloc_array_encode_vm(vm_address_t addr, vm_size_t size)
 {
-	addr &= ~(0x3ull << KALLOC_ARRAY_TYPE_SHIFT);
+	addr &= ~(0x1ull << KALLOC_ARRAY_TYPE_SHIFT);
 
 	return addr | atop(size);
 }
@@ -1910,6 +1916,8 @@ kalloc_large(
 	}
 	if (kheap == KHEAP_DATA_BUFFERS) {
 		kma_flags |= KMA_DATA;
+	} else if (flags & (Z_KALLOC_ARRAY | Z_SPRAYQTN)) {
+		kma_flags |= KMA_SPRAYQTN;
 	}
 
 	tag = zalloc_flags_get_tag(flags);
@@ -2648,6 +2656,8 @@ krealloc_large(
 	}
 	if (kheap == KHEAP_DATA_BUFFERS) {
 		kmr_flags |= KMR_DATA;
+	} else if (flags & (Z_KALLOC_ARRAY | Z_SPRAYQTN)) {
+		kmr_flags |= KMR_SPRAYQTN;
 	}
 	if (flags & Z_REALLOCF) {
 		kmr_flags |= KMR_REALLOCF;

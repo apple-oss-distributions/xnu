@@ -243,7 +243,7 @@ ipc_right_lookup_read(
 
 	ipc_entry_bits_t bits = entry->ie_bits;
 	if (__improbable(IE_BITS_GEN(bits) != MACH_PORT_GEN(name) ||
-	    IE_BITS_TYPE(bits == MACH_PORT_TYPE_NONE))) {
+	    IE_BITS_TYPE(bits) == MACH_PORT_TYPE_NONE)) {
 		kr = KERN_INVALID_NAME;
 		goto out_put_unlock;
 	}

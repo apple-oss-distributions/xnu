@@ -803,14 +803,14 @@ def kalloc_array_decode(addr, ptr_type = None):
     ptr       = None
 
     if pac_shift:
-        ty = (addr >> pac_shift) & 0x3
-        if ty:
-            size = ty << (addr & 0xf)
-            ptr  = addr & ~0xf
+        z_mask = 1 << pac_shift
+        if addr & z_mask:
+            size = ((addr & 0x10) + 32) << (addr & 0xf)
+            ptr  = addr & ~0x1f
         else:
             size = (addr & (page_size - 1)) * page_size
             ptr  = addr & -page_size
-        ptr |= 0x3 << pac_shift;
+            ptr |= z_mask
     else:
         KALLOC_ARRAY_TYPE_BIT = 47
         size = addr >> (KALLOC_ARRAY_TYPE_BIT + 1)
@@ -1761,6 +1761,23 @@ def ShowMapVME(cmd_args=None):
     print(GetVMEntrySummary.header)
     for vme in IterateQueue(vme_list_head, vme_ptr_type, "links"):
         print(GetVMEntrySummary(vme))
+    return None
+
+@lldb_command("showrangevme", "N:")
+def ShowRangeVME(cmd_args=None, cmd_options={}):
+    """Routine to print all vm map entries in the specified kmem range
+       usage: showrangevme -N <kmem_range_id>
+    """
+    if '-N' in cmd_options:
+        range_id = unsigned(cmd_options['-N'])
+    else:
+        raise ArgumentError("Range ID not specified")
+
+    map = kern.globals.kernel_map
+    range = kern.globals.kmem_ranges[range_id]
+    start_vaddr = range.min_address
+    end_vaddr = range.max_address
+    showmapvme(map, start_vaddr, end_vaddr, 0, 0, 0, 0)
     return None
 
 @lldb_command("showmapranges")

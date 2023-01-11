@@ -181,7 +181,7 @@ OSSymbolPool::init()
 {
 	count = 0;
 	nBuckets = INITIAL_POOL_SIZE;
-	buckets = kalloc_type_tag(Bucket, nBuckets, Z_WAITOK_ZERO,
+	buckets = kalloc_type_tag(Bucket, nBuckets, Z_WAITOK_ZERO_SPRAYQTN,
 	    VM_KERN_MEMORY_LIBKERN);
 	if (!buckets) {
 		return false;
@@ -298,7 +298,7 @@ OSSymbolPool::reconstructSymbols(bool grow)
 
 	count = 0;
 	nBuckets = new_nBuckets;
-	buckets = kalloc_type_tag(Bucket, nBuckets, Z_WAITOK_ZERO,
+	buckets = kalloc_type_tag(Bucket, nBuckets, Z_WAITOK_ZERO_SPRAYQTN,
 	    VM_KERN_MEMORY_LIBKERN);
 	OSMETA_ACCUMSIZE(nBuckets * sizeof(Bucket));
 	/* @@@ gvdl: Zero test and panic if can't set up pool */
@@ -406,7 +406,7 @@ OSSymbolPool::insertSymbol(OSSymbol *sym)
 
 	j = thisBucket->count++;
 	count++;
-	list = kalloc_type_tag(OSSymbol *, thisBucket->count, Z_WAITOK_ZERO,
+	list = kalloc_type_tag(OSSymbol *, thisBucket->count, Z_WAITOK_ZERO_SPRAYQTN,
 	    VM_KERN_MEMORY_LIBKERN);
 	/* @@@ gvdl: Zero test and panic if can't set up pool */
 	list[0] = sym;
@@ -484,7 +484,7 @@ OSSymbolPool::removeSymbol(OSSymbol *sym)
 		probeSymbol = *list;
 		if (probeSymbol == sym) {
 			list = kalloc_type_tag(OSSymbol *, thisBucket->count - 1,
-			    Z_WAITOK, VM_KERN_MEMORY_LIBKERN);
+			    Z_WAITOK_ZERO_SPRAYQTN, VM_KERN_MEMORY_LIBKERN);
 			if (thisBucket->count - 1 != j) {
 				bcopy(thisBucket->symbolP, list,
 				    (thisBucket->count - 1 - j) * sizeof(OSSymbol *));

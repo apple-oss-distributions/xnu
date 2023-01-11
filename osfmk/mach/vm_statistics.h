@@ -357,6 +357,16 @@ enum virtual_memory_guard_exception_codes {
  * Range containing general purpose allocations from kalloc, etc that
  * contain pointers.
  *
+ * @const KMEM_RANGE_ID_SPRAYQTN
+ * The spray quarantine range contains allocations that have the following
+ * properties:
+ * - An attacker could control the size, lifetime and number of allocations
+ *   of this type (or from this callsite).
+ * - The pointer to the allocation is zeroed to ensure that it isn't left
+ *   dangling limiting the use of UaFs.
+ * - OOBs on the allocation is carefully considered and sufficiently
+ *   addressed.
+ *
  * @const KMEM_RANGE_ID_DATA
  * Range containing allocations that are bags of bytes and contain no
  * pointers.
@@ -371,8 +381,13 @@ __enum_decl(vm_map_range_id_t, uint32_t, {
 	KMEM_RANGE_ID_NONE,
 	KMEM_RANGE_ID_PTR_0,
 	KMEM_RANGE_ID_PTR_1,
+	KMEM_RANGE_ID_PTR_2,
+	KMEM_RANGE_ID_SPRAYQTN,
 	KMEM_RANGE_ID_DATA,
+
+	KMEM_RANGE_ID_NUM_PTR = KMEM_RANGE_ID_PTR_2,
 	KMEM_RANGE_ID_MAX = KMEM_RANGE_ID_DATA,
+
 	UMEM_RANGE_ID_DEFAULT = 0,
 	UMEM_RANGE_ID_HEAP,
 	UMEM_RANGE_ID_MAX = UMEM_RANGE_ID_HEAP,

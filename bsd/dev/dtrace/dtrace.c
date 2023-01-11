@@ -13068,11 +13068,11 @@ dtrace_dof_copyin(user_addr_t uarg, int *errp)
 
 	dof = kmem_alloc_aligned(hdr.dofh_loadsz, 8, KM_SLEEP);
 
-        if (copyin(uarg, dof, hdr.dofh_loadsz) != 0  ||
-	  dof->dofh_loadsz != hdr.dofh_loadsz) {
-	    kmem_free_aligned(dof, hdr.dofh_loadsz);
-	    *errp = EFAULT;
-	    return (NULL);
+	if (copyin(uarg, dof, hdr.dofh_loadsz) != 0 ||
+	    dof->dofh_loadsz != hdr.dofh_loadsz) {
+		kmem_free_aligned(dof, hdr.dofh_loadsz);
+		*errp = EFAULT;
+		return (NULL);
 	}	    
 
 	return (dof);
@@ -13112,7 +13112,8 @@ dtrace_dof_copyin_from_proc(proc_t* p, user_addr_t uarg, int *errp)
 
 	dof = kmem_alloc_aligned(hdr.dofh_loadsz, 8, KM_SLEEP);
 
-	if (uread(p, dof, hdr.dofh_loadsz, uarg) != KERN_SUCCESS) {
+	if (uread(p, dof, hdr.dofh_loadsz, uarg) != KERN_SUCCESS ||
+	    dof->dofh_loadsz != hdr.dofh_loadsz) {
 		kmem_free_aligned(dof, hdr.dofh_loadsz);
 		*errp = EFAULT;
 		return (NULL);
@@ -18652,8 +18653,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		 * Read the number of symbolsdesc structs being passed in.
 		 */
 		if (copyin(arg + offsetof(dtrace_module_uuids_list_t, dtmul_count),
-			   &dtmul_count,
-			   sizeof(dtmul_count))) {
+		    &dtmul_count, sizeof(dtmul_count)) != 0) {
 			cmn_err(CE_WARN, "failed to copyin dtmul_count");
 			return (EFAULT);
 		}
@@ -18799,8 +18799,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		 * Read the number of module symbols structs being passed in.
 		 */
 		if (copyin(arg + offsetof(dtrace_module_symbols_t, dtmodsyms_count),
-			   &dtmodsyms_count,
-			   sizeof(dtmodsyms_count))) {
+		    &dtmodsyms_count, sizeof(dtmodsyms_count)) != 0) {
 			cmn_err(CE_WARN, "failed to copyin dtmodsyms_count");
 			return (EFAULT);
 		}

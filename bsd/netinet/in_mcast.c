@@ -2628,7 +2628,6 @@ out_imf_rollback:
 	if (is_final) {
 		/* Remove the gap in the membership array and filter array. */
 		VERIFY(inm == imo->imo_membership[idx]);
-		imo->imo_membership[idx] = NULL;
 
 		INM_REMREF(inm);
 
@@ -2637,6 +2636,10 @@ out_imf_rollback:
 			imo->imo_mfilters[idx - 1] = imo->imo_mfilters[idx];
 		}
 		imo->imo_num_memberships--;
+
+		/* Re-initialize the now unused tail of the list */
+		imo->imo_membership[imo->imo_num_memberships] = NULL;
+		imf_init(&imo->imo_mfilters[imo->imo_num_memberships], MCAST_UNDEFINED, MCAST_EXCLUDE);
 	}
 
 out_locked:

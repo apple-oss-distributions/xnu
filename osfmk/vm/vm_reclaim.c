@@ -54,8 +54,8 @@ TUNABLE(bool, panic_on_kill, "vm_reclaim_panic_on_kill", false);
 uint64_t vm_reclaim_max_threshold;
 
 #pragma mark Declarations
-typedef struct proc *   proc_t;
-extern char *           proc_best_name(proc_t proc);
+typedef struct proc *proc_t;
+extern char *proc_best_name(proc_t proc);
 extern int exit_with_guard_exception(void *p, mach_exception_data_type_t code, mach_exception_data_type_t subcode);
 struct proc *proc_ref(struct proc *p, int locked);
 int proc_rele(proc_t p);
@@ -123,49 +123,58 @@ static void reclaim_thread(void *param __unused, wait_result_t wr __unused);
 #pragma mark Implementation
 
 static vm_deferred_reclamation_metadata_t
-metadata_init(
-	task_t task,
-	vm_map_t map,
-	user_addr_t buffer,
-	mach_vm_size_t size,
-	user_addr_t indices)
+vmdr_metadata_alloc(
+	task_t                  task,
+	user_addr_t             buffer,
+	mach_vm_size_t          size,
+	user_addr_t             indices)
 {
-	vm_deferred_reclamation_metadata_t metadata = zalloc_flags(vm_reclaim_metadata_zone, Z_WAITOK | Z_ZERO);
-	lck_mtx_init(&(metadata->vdrm_lock), &vm_reclaim_lock_grp, LCK_ATTR_NULL);
-	assert(!map->is_nested_map);
-	assert(map == task->map);
+	vm_deferred_reclamation_metadata_t metadata;
+	vm_map_t map = task->map;
 
+	assert(!map->is_nested_map);
+
+	metadata = zalloc_flags(vm_reclaim_metadata_zone, Z_WAITOK | Z_ZERO);
+	lck_mtx_init(&metadata->vdrm_lock, &vm_reclaim_lock_grp, LCK_ATTR_NULL);
 	metadata->vdrm_task = task;
 	metadata->vdrm_map = map;
 	metadata->vdrm_reclaim_buffer = buffer;
 	metadata->vdrm_buffer_size = size;
 	metadata->vdrm_reclaim_indices = indices;
+
+	/*
+	 * we do not need to hold a lock on `task` because this is called
+	 * either at fork() time or from the context of current_task().
+	 */
+	vm_map_reference(map);
 	return metadata;
+}
+
+static void
+vmdr_metadata_free(vm_deferred_reclamation_metadata_t metadata)
+{
+	vm_map_deallocate(metadata->vdrm_map);
+	lck_mtx_destroy(&metadata->vdrm_lock, &vm_reclaim_lock_grp);
+	zfree(vm_reclaim_metadata_zone, metadata);
 }
 
 kern_return_t
 vm_deferred_reclamation_buffer_init_internal(
-	task_t task,
-	mach_vm_offset_t address,
-	mach_vm_size_t size,
-	user_addr_t indices)
+	task_t                  task,
+	mach_vm_offset_t        address,
+	mach_vm_size_t          size,
+	user_addr_t             indices)
 {
 	kern_return_t kr = KERN_FAILURE;
 	vm_deferred_reclamation_metadata_t metadata = NULL;
-	vm_map_t map = VM_MAP_NULL;
 	bool success;
 	uint64_t head = 0, tail = 0, busy = 0;
+
 	if (address == 0 || indices == 0 || size < 2 * sizeof(mach_vm_reclaim_entry_v1_t)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	task_lock(task);
-	/* The reclamation buffer will adopt this reference. */
-	map = task->map;
-	vm_map_reference(map);
-	task_unlock(task);
-
-	metadata = metadata_init(task, map, address, size, indices);
+	metadata = vmdr_metadata_alloc(task, address, size, indices);
 
 	/*
 	 * Validate the starting indices
@@ -193,31 +202,24 @@ vm_deferred_reclamation_buffer_init_internal(
 	task_lock(task);
 	if (task->deferred_reclamation_metadata != NULL) {
 		/* Attempt to overwrite existing reclaim buffer. This is not allowed. */
-		os_log_with_startup_serial(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "vm_reclaim: tried to overwrite exisiting reclaim buffer for task %p", task);
 		kr = KERN_INVALID_ARGUMENT;
 		task_unlock(task);
 		goto out;
 	}
 	task->deferred_reclamation_metadata = metadata;
-	map = VM_MAP_NULL;
-	kr = KERN_SUCCESS;
 
 	task_unlock(task);
 	lck_mtx_lock(&reclamation_buffers_lock);
 	TAILQ_INSERT_TAIL(&reclamation_buffers, metadata, vdrm_list);
 	reclamation_buffers_length++;
 	lck_mtx_unlock(&reclamation_buffers_lock);
-	metadata = NULL;
+
+	return KERN_SUCCESS;
 
 out:
-	if (metadata) {
-		zfree(vm_reclaim_metadata_zone, metadata);
-	}
-	if (map) {
-		vm_map_deallocate(map);
-	}
-
+	vmdr_metadata_free(metadata);
 	return kr;
 }
 
@@ -244,14 +246,7 @@ vm_deferred_reclamation_buffer_deallocate(vm_deferred_reclamation_metadata_t met
 	}
 	lck_mtx_unlock(&async_reclamation_buffers_lock);
 
-	/*
-	 * Now take the metadata lock. Once we acquire that it's
-	 * safe to free it.
-	 */
-	lck_mtx_lock(&metadata->vdrm_lock);
-	/* Drop our reference on the map */
-	vm_map_deallocate(metadata->vdrm_map);
-	zfree(vm_reclaim_metadata_zone, metadata);
+	vmdr_metadata_free(metadata);
 }
 
 static user_addr_t
@@ -320,7 +315,7 @@ reclaim_kill_with_reason(
 	}
 
 	if (!fatal) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT,
+		os_log_info(OS_LOG_DEFAULT,
 		    "vm_reclaim: Skipping non fatal guard exception.\n");
 		goto out;
 	}
@@ -331,7 +326,7 @@ reclaim_kill_with_reason(
 	} else {
 		p = proc_find(pid);
 		if (p && proc_task(p) != task) {
-			os_log_with_startup_serial(OS_LOG_DEFAULT,
+			os_log_error(OS_LOG_DEFAULT,
 			    "vm_reclaim: Unable to deliver guard exception because proc is gone & pid rolled over.\n");
 			goto out;
 		}
@@ -341,14 +336,14 @@ reclaim_kill_with_reason(
 	}
 
 	if (!p) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "vm_reclaim: Unable to deliver guard exception because task does not have a proc.\n");
 		goto out;
 	}
 
 	err = exit_with_guard_exception(p, code, subcode);
 	if (err != 0) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "vm_reclaim: Unable to deliver guard exception to %p: %d\n", p, err);
+		os_log_error(OS_LOG_DEFAULT, "vm_reclaim: Unable to deliver guard exception to %p: %d\n", p, err);
 	}
 out:
 	if (!killing_self) {
@@ -387,7 +382,7 @@ reclaim_copyin_head(vm_deferred_reclamation_metadata_t metadata, uint64_t *head)
 	result = copyin_atomic64(head_ptr, head);
 
 	if (result != 0) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "vm_reclaim: Unable to copy head ptr from 0x%llx: err=%d\n", head_ptr, result);
 		reclaim_handle_copyio_error(metadata, result);
 		return false;
@@ -405,7 +400,7 @@ reclaim_copyin_tail(vm_deferred_reclamation_metadata_t metadata, uint64_t *tail)
 	result = copyin_atomic64(tail_ptr, tail);
 
 	if (result != 0) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "vm_reclaim: Unable to copy tail ptr from 0x%llx: err=%d\n", tail_ptr, result);
 		reclaim_handle_copyio_error(metadata, result);
 		return false;
@@ -423,7 +418,7 @@ reclaim_copyin_busy(vm_deferred_reclamation_metadata_t metadata, uint64_t *busy)
 	result = copyin_atomic64(busy_ptr, busy);
 
 	if (result != 0) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "vm_reclaim: Unable to copy busy ptr from 0x%llx: err=%d\n", busy_ptr, result);
 		reclaim_handle_copyio_error(metadata, result);
 		return false;
@@ -441,7 +436,7 @@ reclaim_copyout_busy(vm_deferred_reclamation_metadata_t metadata, uint64_t value
 	result = copyout_atomic64(value, busy_ptr);
 
 	if (result != 0) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "vm_reclaim: Unable to copy %llu to busy ptr at 0x%llx: err=%d\n", value, busy_ptr, result);
 		reclaim_handle_copyio_error(metadata, result);
 		return false;
@@ -459,7 +454,7 @@ reclaim_copyout_head(vm_deferred_reclamation_metadata_t metadata, uint64_t value
 	result = copyout_atomic64(value, head_ptr);
 
 	if (result != 0) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "vm_reclaim: Unable to copy %llu to head ptr at 0x%llx: err=%d\n", value, head_ptr, result);
 		reclaim_handle_copyio_error(metadata, result);
 		return false;
@@ -507,7 +502,7 @@ reclaim_chunk(vm_deferred_reclamation_metadata_t metadata)
 
 	if (busy != head) {
 		// Userspace overwrote one of the pointers
-		os_log_with_startup_serial(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "vm_reclaim: Userspace modified head or busy pointer! head: %llu (0x%llx) != busy: %llu (0x%llx) | tail = %llu (0x%llx)\n",
 		    head, get_head_ptr(indices), busy, get_busy_ptr(indices), tail, get_tail_ptr(indices));
 		reclaim_kill_with_reason(metadata, kGUARD_EXC_RECLAIM_INDEX_FAILURE, busy);
@@ -516,9 +511,10 @@ reclaim_chunk(vm_deferred_reclamation_metadata_t metadata)
 
 	if (tail < head) {
 		// Userspace is likely in the middle of trying to re-use an entry, bail on this reclamation
-		os_log_with_startup_serial(OS_LOG_DEFAULT,
+		os_log_error(OS_LOG_DEFAULT,
 		    "vm_reclaim: Userspace modified head or tail pointer! head: %llu (0x%llx) > tail: %llu (0x%llx) | busy = %llu (0x%llx)\n",
 		    head, get_head_ptr(indices), tail, get_tail_ptr(indices), busy, get_busy_ptr(indices));
+		lck_mtx_unlock(&metadata->vdrm_lock);
 		goto fail;
 	}
 
@@ -546,9 +542,10 @@ reclaim_chunk(vm_deferred_reclamation_metadata_t metadata)
 		tail = new_tail;
 		if (tail < head) {
 			// Userspace is likely in the middle of trying to re-use an entry, bail on this reclamation
-			os_log_with_startup_serial(OS_LOG_DEFAULT,
+			os_log_error(OS_LOG_DEFAULT,
 			    "vm_reclaim: Userspace modified head or tail pointer! head: %llu (0x%llx) > tail: %llu (0x%llx) | busy = %llu (0x%llx)\n",
 			    head, get_head_ptr(indices), tail, get_tail_ptr(indices), busy, get_busy_ptr(indices));
+			lck_mtx_unlock(&metadata->vdrm_lock);
 			goto fail;
 		}
 		/* Can't reclaim these entries. Try again */
@@ -581,7 +578,7 @@ reclaim_chunk(vm_deferred_reclamation_metadata_t metadata)
 		result = copyin(src_ptr, dst_ptr, num_to_copy * sizeof(mach_vm_reclaim_entry_v1_t));
 
 		if (result != 0) {
-			os_log_with_startup_serial(OS_LOG_DEFAULT,
+			os_log_error(OS_LOG_DEFAULT,
 			    "vm_reclaim: Unable to copyin %llu entries in reclaim buffer at 0x%llx to 0x%llx: err=%d\n",
 			    num_to_copy, src_ptr, (uint64_t) dst_ptr, result);
 			reclaim_handle_copyio_error(metadata, result);
@@ -606,7 +603,7 @@ reclaim_chunk(vm_deferred_reclamation_metadata_t metadata)
 				reclaim_kill_with_reason(metadata, kGUARD_EXC_DEALLOC_GAP, entry->address);
 				goto fail;
 			} else if (kr != KERN_SUCCESS) {
-				os_log_with_startup_serial(OS_LOG_DEFAULT,
+				os_log_error(OS_LOG_DEFAULT,
 				    "vm_reclaim: Unable to deallocate 0x%llx (%u) from 0x%llx. Err: %d\n",
 				    entry->address, entry->size, (uint64_t) map, kr);
 				reclaim_kill_with_reason(metadata, kGUARD_EXC_RECLAIM_DEALLOCATE_FAILURE, kr);
@@ -881,13 +878,13 @@ vm_deferred_reclamation_reclaim_from_task_sync(task_t task, size_t max_entries_t
 vm_deferred_reclamation_metadata_t
 vm_deferred_reclamation_buffer_fork(task_t task, vm_deferred_reclamation_metadata_t parent)
 {
-	LCK_MTX_ASSERT(&parent->vdrm_lock, LCK_MTX_ASSERT_OWNED);
-	vm_map_t map = task->map;
 	vm_deferred_reclamation_metadata_t metadata = NULL;
 
-	vm_map_reference(map);
+	LCK_MTX_ASSERT(&parent->vdrm_lock, LCK_MTX_ASSERT_OWNED);
+
 	assert(task->deferred_reclamation_metadata == NULL);
-	metadata = metadata_init(task, map, parent->vdrm_reclaim_buffer, parent->vdrm_buffer_size, parent->vdrm_reclaim_indices);
+	metadata = vmdr_metadata_alloc(task, parent->vdrm_reclaim_buffer,
+	    parent->vdrm_buffer_size, parent->vdrm_reclaim_indices);
 	lck_mtx_unlock(&parent->vdrm_lock);
 
 	lck_mtx_lock(&reclamation_buffers_lock);
@@ -985,14 +982,13 @@ __startup_func
 static void
 vm_deferred_reclamation_init(void)
 {
-	kern_return_t result;
-
 	vm_reclaim_max_threshold = PAGE_SIZE;
-	if (!PE_parse_boot_argn("vm_reclaim_max_threshold", &vm_reclaim_max_threshold, sizeof(vm_reclaim_max_threshold))) {
+	if (!PE_parse_boot_argn("vm_reclaim_max_threshold",
+	    &vm_reclaim_max_threshold, sizeof(vm_reclaim_max_threshold))) {
 		vm_reclaim_max_threshold = PAGE_SIZE;
 	}
 
-	result = kernel_thread_start_priority(reclaim_thread,
+	(void)kernel_thread_start_priority(reclaim_thread,
 	    (void *)RECLAIM_THREAD_INIT, kReclaimThreadPriority,
 	    &vm_reclaim_thread);
 }

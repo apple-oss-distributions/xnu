@@ -2322,6 +2322,9 @@ convert_pkt_to_mbuf(struct __kern_packet *pkt)
 	if ((pkt->pkt_pflags & PKT_F_START_SEQ) != 0) {
 		m->m_pkthdr.tx_start_seq = ntohl(pkt->pkt_flow_tcp_seq);
 	}
+	if ((pkt->pkt_pflags & PKT_F_L4S) != 0) {
+		m->m_pkthdr.pkt_ext_flags |= PKTF_EXT_L4S;
+	}
 	KPKT_CLEAR_MBUF_DATA(pkt);
 
 	/* mbuf has been consumed, release packet as well */

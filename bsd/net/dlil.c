@@ -8731,6 +8731,20 @@ ifnet_attach(ifnet_t ifp, const struct sockaddr_dl *ll_addr)
 	if (ifp->if_index == 0) {
 		int idx = if_next_index();
 
+		/*
+		 * Since we exhausted the list of
+		 * if_index's, try to find an empty slot
+		 * in ifindex2ifnet.
+		 */
+		if (idx == -1 && if_index >= UINT16_MAX) {
+			for (int i = 1; i < if_index; i++) {
+				if (ifindex2ifnet[i] == NULL &&
+				    ifnet_addrs[i - 1] == NULL) {
+					idx = i;
+					break;
+				}
+			}
+		}
 		if (idx == -1) {
 			ifp->if_index = 0;
 			ifnet_lock_done(ifp);

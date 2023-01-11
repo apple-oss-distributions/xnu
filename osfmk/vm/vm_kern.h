@@ -244,6 +244,11 @@ typedef struct {
  * @const KMEM_DATA (alloc, suballoc, realloc)
  *	The memory must be allocated from the "Data" range.
  *
+ * @const KMEM_SPRAYQTN (alloc, realloc)
+ *	The memory must be allocated from the "spray quarantine" range. For more
+ *	details on what allocations qualify to use this flag see
+ *	@c KMEM_RANGE_ID_SPRAYQTN.
+ *
  * @const KMEM_GUESS_SIZE (free)
  *	When freeing an atomic entry (requires a valid kmem guard),
  *	then look up the entry size because the caller didn't
@@ -314,13 +319,14 @@ __options_decl(kmem_flags_t, uint32_t, {
 	KMEM_LAST_FREE      = 0x00002000,
 	KMEM_GUESS_SIZE     = 0x00004000,
 	KMEM_DATA           = 0x00008000,
+	KMEM_SPRAYQTN       = 0x00010000,
 
 	/* Entry properties */
-	KMEM_PERMANENT      = 0x00010000,
-	KMEM_GUARD_FIRST    = 0x00020000,
-	KMEM_GUARD_LAST     = 0x00040000,
-	KMEM_KSTACK         = 0x00080000,
-	KMEM_NOENCRYPT      = 0x00100000,
+	KMEM_PERMANENT      = 0x00100000,
+	KMEM_GUARD_FIRST    = 0x00200000,
+	KMEM_GUARD_LAST     = 0x00400000,
+	KMEM_KSTACK         = 0x00800000,
+	KMEM_NOENCRYPT      = 0x01000000,
 });
 
 
@@ -575,6 +581,7 @@ __options_decl(kma_flags_t, uint32_t, {
 	KMA_LOMEM           = KMEM_LOMEM,
 	KMA_LAST_FREE       = KMEM_LAST_FREE,
 	KMA_DATA            = KMEM_DATA,
+	KMA_SPRAYQTN        = KMEM_SPRAYQTN,
 
 	/* Entry properties */
 	KMA_PERMANENT       = KMEM_PERMANENT,
@@ -748,6 +755,7 @@ __options_decl(kmr_flags_t, uint32_t, {
 	KMR_LOMEM           = KMEM_LOMEM,
 	KMR_LAST_FREE       = KMEM_LAST_FREE,
 	KMR_DATA            = KMEM_DATA,
+	KMR_SPRAYQTN        = KMEM_SPRAYQTN,
 
 	/* Entry properties */
 	KMR_GUARD_FIRST     = KMEM_GUARD_FIRST,
