@@ -355,8 +355,9 @@ rvi_ctl_getopt(kern_ctl_ref kctlref, uint32_t unit, void *unitinfo,
 			err = EINVAL;
 			break;
 		}
-		n = snprintf(data, sizeof(*len), "%s%u", ifnet_name(client->_ifp),
+		n = scnprintf(data, *len, "%s%u", ifnet_name(client->_ifp),
 		    ifnet_unit(client->_ifp));
+
 		*len = n + 1;
 		break;
 

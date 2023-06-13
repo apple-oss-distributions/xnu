@@ -144,7 +144,7 @@ vmc_pop(uintptr_t ins, int sz)
 boolean_t validate_c_segs = TRUE;
 #endif
 /*
- * vm_compressor_mode has a heirarchy of control to set its value.
+ * vm_compressor_mode has a hierarchy of control to set its value.
  * boot-args are checked first, then device-tree, and finally
  * the default value that is defined below. See vm_fault_init() for
  * the boot-arg & device-tree code.
@@ -691,9 +691,6 @@ cslot_copy(c_slot_t cdst, c_slot_t csrc)
 #if defined(__arm64__)
 	cdst->c_codec = csrc->c_codec;
 #endif
-#if __APPLE_WKDM_POPCNT_EXTENSIONS__
-	cdst->c_inline_popcount = csrc->c_inline_popcount;
-#endif
 }
 
 #if XNU_TARGET_OS_OSX
@@ -1095,7 +1092,7 @@ vm_compressor_init(void)
 
 	compressor_map = kmem_suballoc(kernel_map, &compressor_range.min_address,
 	    compressor_size, VM_MAP_CREATE_NEVER_FAULTS,
-	    VM_FLAGS_FIXED_RANGE_SUBALLOC, KMS_NOFAIL | KMS_PERMANENT,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_NOFAIL | KMS_PERMANENT,
 	    VM_KERN_MEMORY_COMPRESSOR).kmr_submap;
 
 	kmem_alloc(compressor_map, (vm_offset_t *)(&c_segments),
@@ -4131,10 +4128,10 @@ c_seg_allocate(c_segment_t *current_chead)
 
 		for (int i = 0; i < vm_pageout_state.vm_compressor_thread_count; i++) {
 #if XNU_TARGET_OS_OSX
-			donate_queue_head = (c_segment_t*) &(ciq[i].current_early_swapout_chead);
+			donate_queue_head = (c_segment_t*) &(pgo_iothread_internal_state[i].current_early_swapout_chead);
 #else /* XNU_TARGET_OS_OSX */
 			if (memorystatus_swap_all_apps) {
-				donate_queue_head = (c_segment_t*) &(ciq[i].current_late_swapout_chead);
+				donate_queue_head = (c_segment_t*) &(pgo_iothread_internal_state[i].current_late_swapout_chead);
 			} else {
 				donate_queue_head = NULL;
 			}
@@ -4273,9 +4270,9 @@ c_current_seg_filled(c_segment_t c_seg, c_segment_t *current_chead)
 		c_segment_t *donate_queue_head;
 		for (int i = 0; i < vm_pageout_state.vm_compressor_thread_count; i++) {
 #if XNU_TARGET_OS_OSX
-			donate_queue_head = (c_segment_t*) &(ciq[i].current_early_swapout_chead);
+			donate_queue_head = (c_segment_t*) &(pgo_iothread_internal_state[i].current_early_swapout_chead);
 #else /* XNU_TARGET_OS_OSX */
-			donate_queue_head = (c_segment_t*) &(ciq[i].current_late_swapout_chead);
+			donate_queue_head = (c_segment_t*) &(pgo_iothread_internal_state[i].current_late_swapout_chead);
 #endif /* XNU_TARGET_OS_OSX */
 
 			if (current_chead == donate_queue_head) {
@@ -4686,11 +4683,7 @@ retry:
 			    (uint8_t *) &c_seg->c_store.c_buffer[cs->c_offset],
 			    max_csize_adj, &ccodec,
 			    scratch_buf, &incomp_copy, &inline_popcount);
-#if __APPLE_WKDM_POPCNT_EXTENSIONS__
-			cs->c_inline_popcount = inline_popcount;
-#else
 			assert(inline_popcount == C_SLOT_NO_POPCOUNT);
-#endif
 
 #if C_SEG_OFFSET_ALIGNMENT_BOUNDARY > 4
 			if (c_size > max_csize_adj) {
@@ -5123,26 +5116,7 @@ bypass_busy_check:
 				    (uint8_t *)dst, c_size, c_codec, (void *)scratch_buf, &inline_popcount)) {
 					retval = -1;
 				} else {
-#if __APPLE_WKDM_POPCNT_EXTENSIONS__
-					if (inline_popcount != cs->c_inline_popcount) {
-						/*
-						 * The codec choice in compression and
-						 * decompression must agree, so there
-						 * should never be a disagreement in
-						 * whether an inline population count
-						 * was performed.
-						 */
-						assert(inline_popcount != C_SLOT_NO_POPCOUNT);
-						assert(cs->c_inline_popcount != C_SLOT_NO_POPCOUNT);
-						printf("decompression failure from physical region %llx+%05x: popcount mismatch (%d != %d)\n",
-						    (unsigned long long)kvtophys((uintptr_t)&c_seg->c_store.c_buffer[cs->c_offset]), c_size,
-						    inline_popcount,
-						    cs->c_inline_popcount);
-						retval = -1;
-					}
-#else
 					assert(inline_popcount == C_SLOT_NO_POPCOUNT);
-#endif /* __APPLE_WKDM_POPCNT_EXTENSIONS__ */
 				}
 #endif
 			} else {

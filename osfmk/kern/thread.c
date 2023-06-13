@@ -679,8 +679,8 @@ thread_terminate_self(void)
 	 *	Cancel wait timer, and wait for
 	 *	concurrent expirations.
 	 */
-	if (thread->wait_timer_is_set) {
-		thread->wait_timer_is_set = FALSE;
+	if (thread->wait_timer_armed) {
+		thread->wait_timer_armed = false;
 
 		if (timer_call_cancel(thread->wait_timer)) {
 			thread->wait_timer_active--;
@@ -697,8 +697,10 @@ thread_terminate_self(void)
 
 		if (delay_us > USEC_PER_SEC) {
 			panic("wait timer failed to inactivate!"
-			    "thread: %p wait_timer_active: %d",
-			    thread, thread->wait_timer_active);
+			    "thread: %p, wait_timer_active: %d, "
+			    "wait_timer_armed: %d",
+			    thread, thread->wait_timer_active,
+			    thread->wait_timer_armed);
 		}
 
 		s = splsched();
@@ -789,6 +791,7 @@ thread_deallocate_complete(
 	}
 
 	assert(thread->runq == PROCESSOR_NULL);
+	assert(!(thread->state & TH_WAKING));
 
 #if KPC
 	kpc_thread_destroy(thread);
@@ -1365,7 +1368,7 @@ thread_create_internal(
 #ifdef MACH_BSD
 	uthread_init(parent_task, get_bsdthread_info(new_thread),
 	    &tro_tpl, (options & TH_OPTION_WORKQ) != 0);
-	if (!is_corpsetask(parent_task)) {
+	if (!task_is_a_corpse(parent_task)) {
 		/*
 		 * uthread_init will set tro_cred (with a +1)
 		 * and tro_proc for live tasks.
@@ -1430,7 +1433,7 @@ thread_create_internal(
 	    thread_limit > 0 &&
 	    parent_task->thread_count >= thread_limit &&
 	    !parent_task->task_has_crossed_thread_limit &&
-	    !(parent_task->t_flags & TF_CORPSE)) {
+	    !(task_is_a_corpse(parent_task))) {
 		int thread_count = parent_task->thread_count;
 		parent_task->task_has_crossed_thread_limit = TRUE;
 		task_unlock(parent_task);
@@ -2319,7 +2322,7 @@ thread_wire(
 boolean_t
 is_external_pageout_thread(void)
 {
-	return current_thread() == vm_pageout_state.vm_pageout_external_iothread;
+	return current_thread() == pgo_iothread_external_state.pgo_iothread;
 }
 
 boolean_t
@@ -2813,6 +2816,63 @@ init_thread_ledgers(void)
 }
 
 /*
+ * Returns the amount of (abs) CPU time that remains before the limit would be
+ * hit or the amount of time left in the current interval, whichever is smaller.
+ * This value changes as CPU time is consumed and the ledgers refilled.
+ * Used to limit the quantum of a thread.
+ */
+uint64_t
+thread_cpulimit_remaining(uint64_t now)
+{
+	thread_t thread = current_thread();
+
+	if ((thread->options &
+	    (TH_OPT_PROC_CPULIMIT | TH_OPT_PRVT_CPULIMIT)) == 0) {
+		return UINT64_MAX;
+	}
+
+	/* Amount of time left in the current interval. */
+	const uint64_t interval_remaining =
+	    ledger_get_interval_remaining(thread->t_threadledger, thread_ledgers.cpu_time, now);
+
+	/* Amount that can be spent until the limit is hit. */
+	const uint64_t remaining =
+	    ledger_get_remaining(thread->t_threadledger, thread_ledgers.cpu_time);
+
+	return MIN(interval_remaining, remaining);
+}
+
+/*
+ * Returns true if a new interval should be started.
+ */
+bool
+thread_cpulimit_interval_has_expired(uint64_t now)
+{
+	thread_t thread = current_thread();
+
+	if ((thread->options &
+	    (TH_OPT_PROC_CPULIMIT | TH_OPT_PRVT_CPULIMIT)) == 0) {
+		return false;
+	}
+
+	return ledger_get_interval_remaining(thread->t_threadledger,
+	           thread_ledgers.cpu_time, now) == 0;
+}
+
+/*
+ * Balances the ledger and sets the last refill time to `now`.
+ */
+void
+thread_cpulimit_restart(uint64_t now)
+{
+	thread_t thread = current_thread();
+
+	assert3u(thread->options & (TH_OPT_PROC_CPULIMIT | TH_OPT_PRVT_CPULIMIT), !=, 0);
+
+	ledger_restart(thread->t_threadledger, thread_ledgers.cpu_time, now);
+}
+
+/*
  * Returns currently applied CPU usage limit, or 0/0 if none is applied.
  */
 int
@@ -2869,8 +2929,6 @@ thread_get_cpulimit(int *action, uint8_t *percentage, uint64_t *interval_ns)
 
 /*
  * Set CPU usage limit on a thread.
- *
- * Calling with percentage of 0 will unset the limit for this thread.
  */
 int
 thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns)
@@ -2881,6 +2939,15 @@ thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns)
 	uint64_t        abstime = 0;
 
 	assert(percentage <= 100);
+	assert(percentage > 0 || action == THREAD_CPULIMIT_DISABLE);
+
+	/*
+	 * Disallow any change to the CPU limit if the TH_OPT_FORCED_LEDGER
+	 * flag is set.
+	 */
+	if ((thread->options & TH_OPT_FORCED_LEDGER) != 0) {
+		return KERN_FAILURE;
+	}
 
 	if (action == THREAD_CPULIMIT_DISABLE) {
 		/*
@@ -3450,20 +3517,23 @@ kern_return_t
 thread_get_current_voucher_origin_pid(
 	int32_t      *pid)
 {
-	uint32_t buf_size;
-	kern_return_t kr;
-	thread_t thread = current_thread();
+	return thread_get_voucher_origin_pid(current_thread(), pid);
+}
 
-	buf_size = sizeof(*pid);
-	kr = mach_voucher_attr_command(thread->ith_voucher,
-	    MACH_VOUCHER_ATTR_KEY_BANK,
-	    BANK_ORIGINATOR_PID,
-	    NULL,
-	    0,
-	    (mach_voucher_attr_content_t)pid,
-	    &buf_size);
-
-	return kr;
+/*
+ *  thread_get_current_voucher_origin_pid - get the pid of the originator of the current voucher.
+ */
+kern_return_t
+thread_get_voucher_origin_pid(thread_t thread, int32_t *pid)
+{
+	uint32_t buf_size = sizeof(*pid);
+	return mach_voucher_attr_command(thread->ith_voucher,
+	           MACH_VOUCHER_ATTR_KEY_BANK,
+	           BANK_ORIGINATOR_PID,
+	           NULL,
+	           0,
+	           (mach_voucher_attr_content_t)pid,
+	           &buf_size);
 }
 
 #if CONFIG_THREAD_GROUPS
@@ -3491,6 +3561,21 @@ thread_get_current_voucher_thread_group(thread_t thread)
 }
 
 #endif /* CONFIG_THREAD_GROUPS */
+
+#if CONFIG_COALITIONS
+
+uint64_t
+thread_get_current_voucher_resource_coalition_id(thread_t thread)
+{
+	uint64_t id = 0;
+	assert(thread == current_thread());
+	if (thread->ith_voucher != NULL) {
+		id = bank_get_bank_ledger_resource_coalition_id(thread->ith_voucher);
+	}
+	return id;
+}
+
+#endif /* CONFIG_COALITIONS */
 
 extern struct workqueue *
 proc_get_wqptr(void *proc);
@@ -3978,6 +4063,7 @@ thread_process_signature(thread_t thread, task_t task)
 {
 	return machine_thread_process_signature(thread, task);
 }
+
 
 #if CONFIG_DTRACE
 uint32_t

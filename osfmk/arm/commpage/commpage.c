@@ -69,10 +69,10 @@ static int commpage_cpus( void );
 static void commpage_init_cpu_capabilities( void );
 
 SECURITY_READ_ONLY_LATE(vm_address_t)   commPagePtr = 0;
-SECURITY_READ_ONLY_LATE(vm_address_t)   sharedpage_rw_addr = 0;
-SECURITY_READ_ONLY_LATE(vm_address_t)   sharedpage_kernel_ro_addr = 0;
+SECURITY_READ_ONLY_LATE(vm_address_t)   commpage_rw_addr = 0;
+SECURITY_READ_ONLY_LATE(vm_address_t)   commpage_kernel_ro_addr = 0;
 SECURITY_READ_ONLY_LATE(uint64_t)       _cpu_capabilities = 0;
-SECURITY_READ_ONLY_LATE(vm_address_t)   sharedpage_rw_text_addr = 0;
+SECURITY_READ_ONLY_LATE(vm_address_t)   commpage_rw_text_addr = 0;
 
 extern user64_addr_t commpage_text64_location;
 extern user32_addr_t commpage_text32_location;
@@ -128,11 +128,11 @@ commpage_populate(void)
 
 	// Create the data and the text commpage
 	vm_map_address_t kernel_data_addr, kernel_text_addr, kernel_ro_data_addr, user_text_addr;
-	pmap_create_sharedpages(&kernel_data_addr, &kernel_text_addr, &kernel_ro_data_addr, &user_text_addr);
+	pmap_create_commpages(&kernel_data_addr, &kernel_text_addr, &kernel_ro_data_addr, &user_text_addr);
 
-	sharedpage_rw_addr = kernel_data_addr;
-	sharedpage_rw_text_addr = kernel_text_addr;
-	sharedpage_kernel_ro_addr = kernel_ro_data_addr;
+	commpage_rw_addr = kernel_data_addr;
+	commpage_rw_text_addr = kernel_text_addr;
+	commpage_kernel_ro_addr = kernel_ro_data_addr;
 	commPagePtr = (vm_address_t) _COMM_PAGE_BASE_ADDRESS;
 
 #if __arm64__
@@ -347,19 +347,19 @@ _get_cpu_capabilities(void)
 vm_address_t
 _get_commpage_priv_address(void)
 {
-	return sharedpage_rw_addr;
+	return commpage_rw_addr;
 }
 
 vm_address_t
 _get_commpage_ro_address(void)
 {
-	return sharedpage_kernel_ro_addr;
+	return commpage_kernel_ro_addr;
 }
 
 vm_address_t
 _get_commpage_text_priv_address(void)
 {
-	return sharedpage_rw_text_addr;
+	return commpage_rw_text_addr;
 }
 
 #if defined(__arm64__)

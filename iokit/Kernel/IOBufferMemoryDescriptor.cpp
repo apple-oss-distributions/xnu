@@ -679,9 +679,12 @@ IOBufferMemoryDescriptor::free()
 	IOAddressRange * range     = _ranges.v64;
 	vm_offset_t      alignment = _alignment;
 	kalloc_heap_t    kheap     = KHEAP_DATA_BUFFERS;
+	vm_size_t        rsize;
 
 	if (alignment >= page_size) {
-		size = round_page(size);
+		if (!round_page_overflow(size, &rsize)) {
+			size = rsize;
+		}
 	}
 
 	if (reserved) {
@@ -694,7 +697,9 @@ IOBufferMemoryDescriptor::free()
 
 	if ((options & kIOMemoryPageable)
 	    || (kInternalFlagPageSized & internalFlags)) {
-		size = round_page(size);
+		if (!round_page_overflow(size, &rsize)) {
+			size = rsize;
+		}
 	}
 
 	if (internalFlags & kInternalFlagHasPointers) {

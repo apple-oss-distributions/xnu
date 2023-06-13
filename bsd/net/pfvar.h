@@ -2372,7 +2372,6 @@ extern int16_t pf_nat64_configured;
 #define PF_IS_ENABLED (pf_is_enabled != 0)
 extern u_int32_t pf_hash_seed;
 
-/* these ruleset functions can be linked into userland programs (pfctl) */
 __private_extern__ int pf_get_ruleset_number(u_int8_t);
 __private_extern__ void pf_init_ruleset(struct pf_ruleset *);
 __private_extern__ int pf_anchor_setup(struct pf_rule *,
@@ -2382,6 +2381,9 @@ __private_extern__ int pf_anchor_copyout(const struct pf_ruleset *,
 __private_extern__ void pf_anchor_remove(struct pf_rule *);
 __private_extern__ void pf_remove_if_empty_ruleset(struct pf_ruleset *);
 __private_extern__ struct pf_anchor *pf_find_anchor(const char *);
+__private_extern__ int pf_reference_anchor(struct pf_anchor *a);
+__private_extern__ int pf_release_anchor(struct pf_anchor *a);
+__private_extern__ int pf_release_ruleset(struct pf_ruleset *r);
 __private_extern__ struct pf_ruleset *pf_find_ruleset(const char *);
 __private_extern__ struct pf_ruleset *pf_find_ruleset_with_owner(const char *,
     const char *, int, int *);
@@ -2407,7 +2409,11 @@ __private_extern__ struct pf_fragment_tag * pf_find_fragment_tag(struct mbuf *);
 __private_extern__ struct pf_fragment_tag * pf_copy_fragment_tag(struct mbuf *,
     struct pf_fragment_tag *, int);
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
-__private_extern__ bool pf_check_compatible_rules(void);
+#define PF_COMPATIBLE_FLAGS_PF_ENABLED 0x00000001
+#define PF_COMPATIBLE_FLAGS_CUSTOM_ANCHORS_PRESENT 0x00000002
+#define PF_COMPATIBLE_FLAGS_CUSTOM_RULES_PRESENT 0x00000004
+
+__private_extern__ uint32_t pf_check_compatible_rules(void);
 #endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 #else /* !KERNEL */
 extern struct pf_anchor_global pf_anchors;

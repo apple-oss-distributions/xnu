@@ -115,6 +115,7 @@
 #include <libkern/OSAtomic.h>
 #include <libkern/section_keywords.h>
 #include <sys/kdebug.h>
+#include <sys/code_signing.h>
 
 #include <san/kasan.h>
 #include <libsa/stdlib.h>
@@ -144,13 +145,13 @@ extern zone_t ipc_service_port_label_zone;
 ZONE_DEFINE_TYPE(percpu_u64_zone, "percpu.64", uint64_t,
     ZC_PERCPU | ZC_ALIGNMENT_REQUIRED | ZC_KASAN_NOREDZONE);
 
-#if CONFIG_KERNEL_TBI && KASAN_TBI
+#if KASAN_TBI
 #define ZONE_MIN_ELEM_SIZE      (sizeof(uint64_t) * 2)
 #define ZONE_ALIGN_SIZE         ZONE_MIN_ELEM_SIZE
-#else /* CONFIG_KERNEL_TBI && KASAN_TBI */
+#else /* KASAN_TBI */
 #define ZONE_MIN_ELEM_SIZE      sizeof(uint64_t)
 #define ZONE_ALIGN_SIZE         ZONE_MIN_ELEM_SIZE
-#endif /* CONFIG_KERNEL_TBI && KASAN_TBI */
+#endif /* KASAN_TBI */
 
 #define ZONE_MAX_ALLOC_SIZE     (32 * 1024)
 #if ZSECURITY_CONFIG(SAD_FENG_SHUI)
@@ -161,10 +162,10 @@ ZONE_DEFINE_TYPE(percpu_u64_zone, "percpu.64", uint64_t,
 
 #if XNU_PLATFORM_MacOSX
 #define ZONE_MAP_MAX            (32ULL << 30)
-#define ZONE_MAP_VA_SIZE_LP64   (128ULL << 30)
+#define ZONE_MAP_VA_SIZE        (128ULL << 30)
 #else /* XNU_PLATFORM_MacOSX */
 #define ZONE_MAP_MAX            (8ULL << 30)
-#define ZONE_MAP_VA_SIZE_LP64   (24ULL << 30)
+#define ZONE_MAP_VA_SIZE        (24ULL << 30)
 #endif /* !XNU_PLATFORM_MacOSX */
 
 __enum_closed_decl(zm_len_t, uint16_t, {
@@ -257,39 +258,19 @@ struct zone_page_metadata {
 static_assert(sizeof(struct zone_page_metadata) == 16, "validate packing");
 
 /*!
- * @typedef zone_element_t
- *
- * @brief
- * Type that represents a "resolved" zone element.
- *
- * @description
- * This type encodes an element pointer as a pair of:
- * { chunk base, element index }.
- *
- * The chunk base is extracted with @c trunc_page()
- * as it is always page aligned, and occupies the bits above @c PAGE_SHIFT.
- *
- * The other bits encode the element index in the chunk rather than its address.
- */
-typedef struct zone_element {
-	vm_offset_t                 ze_value;
-} zone_element_t;
-
-/*!
  * @typedef zone_magazine_t
  *
  * @brief
  * Magazine of cached allocations.
  *
- * @field zm_cur        how many elements this magazine holds (unused while loaded).
- * @field zm_link       linkage used by magazine depots.
+ * @field zm_next       linkage used by magazine depots.
  * @field zm_elems      an array of @c zc_mag_size() elements.
  */
-typedef struct zone_magazine {
-	uint16_t                    zm_cur;
-	STAILQ_ENTRY(zone_magazine) zm_link;
-	zone_element_t              zm_elems[0];
-} *zone_magazine_t;
+struct zone_magazine {
+	zone_magazine_t         zm_next;
+	smr_seq_t               zm_seq;
+	vm_offset_t             zm_elems[0];
+};
 
 /*!
  * @typedef zone_cache_t
@@ -353,28 +334,23 @@ typedef struct zone_magazine {
  * a single element call @c zone_lock_nopreempt_check_contention() which records
  * contention on the lock by doing a trylock and recording its success.
  *
- * This information is stored in the @c z_contention_cur field of the zone,
- * and a windoed moving average is maintained in @c z_contention_wma.
- * Each time a CPU registers any contention, it will also allow its own per-cpu
- * cache to grow, incrementing @c zc_depot_max, which is how the per-cpu layer
- * might grow into using its local depot.
+ * This information is stored in the @c z_recirc_cont_cur field of the zone,
+ * and a windowed moving average is maintained in @c z_contention_wma.
+ * The periodically run function @c compute_zone_working_set_size() will then
+ * take this into account to decide to grow the number of buckets allowed
+ * in the depot or shrink it based on the @c zc_grow_level and @c zc_shrink_level
+ * thresholds.
  *
- * Note that @c zc_depot_max assume that the (a) and (f) pre-loaded magazines
- * on average contain @c zc_mag_size() elements.
+ * The per-cpu layer will attempt to work with its depot, finding both full and
+ * empty magazines cached there. If it can't get what it needs, then it will
+ * mediate with the zone recirculation layer. Such recirculation is done in
+ * batches in order to amortize lock holds.
+ * (See @c {zalloc,zfree}_cached_depot_recirculate()).
  *
- * When a per-cpu layer cannot hold more full magazines in its depot,
- * then it will overflow about 1/3 of its depot into the recirculation depot
- * (see @c zfree_cached_slow().  Conversely, when a depot is empty, then it will
- * refill its per-cpu depot to about 1/3 of its size from the recirculation
- * depot (see @c zalloc_cached_slow()).
- *
- * Lastly, the zone layer keeps track of the high and low watermark of how many
- * elements have been free per period of time (including being part of the
- * recirculation depot) in the @c z_elems_free_min and @c z_elems_free_max
- * fields. A weighted moving average of the amplitude of this is maintained in
- * the @c z_elems_free_wss which informs the zone GC on how to gently trim
- * zones without hurting performance.
- *
+ * The recirculation layer keeps a track of what the minimum amount of magazines
+ * it had over time was for each of the full and empty queues. This allows for
+ * @c compute_zone_working_set_size() to return memory to the system when a zone
+ * stops being used as much.
  *
  * <h2>Security considerations</h2>
  *
@@ -386,36 +362,24 @@ typedef struct zone_magazine {
  * The per-cpu overflow depot or the recirculation depots are similarly used
  * in FIFO order.
  *
- * More importantly, when magazines flow through the recirculation depot,
- * the elements they contain are marked as "free" in the zone layer bitmaps.
- * Because allocations out of per-cpu caches verify the bitmaps at allocation
- * time, this acts as a poor man's double-free quarantine. The magazines
- * allow to avoid the cost of the bit-scanning involved in the zone-level
- * @c zalloc_item() codepath.
- *
- *
+ * @field zc_depot_lock     a lock to access @c zc_depot, @c zc_depot_cur.
  * @field zc_alloc_cur      denormalized number of elements in the (a) magazine
  * @field zc_free_cur       denormalized number of elements in the (f) magazine
  * @field zc_alloc_elems    a pointer to the array of elements in (a)
  * @field zc_free_elems     a pointer to the array of elements in (f)
  *
- * @field zc_depot_lock     a lock to access @c zc_depot, @c zc_depot_cur.
  * @field zc_depot          a list of @c zc_depot_cur full magazines
- * @field zc_depot_cur      number of magazines in @c zc_depot
- * @field zc_depot_max      the maximum number of elements in @c zc_depot,
- *                          protected by the zone lock.
  */
 typedef struct zone_cache {
+	hw_lck_ticket_t            zc_depot_lock;
 	uint16_t                   zc_alloc_cur;
 	uint16_t                   zc_free_cur;
-	uint16_t                   zc_depot_cur;
-	uint16_t                   __zc_padding;
-	zone_element_t            *zc_alloc_elems;
-	zone_element_t            *zc_free_elems;
-	hw_lck_ticket_t            zc_depot_lock;
-	uint32_t                   zc_depot_max;
+	vm_offset_t               *zc_alloc_elems;
+	vm_offset_t               *zc_free_elems;
 	struct zone_depot          zc_depot;
-} *zone_cache_t;
+	smr_t                      zc_smr;
+	zone_smr_free_cb_t XNU_PTRAUTH_SIGNED_FUNCTION_PTR("zc_free") zc_free;
+} __attribute__((aligned(64))) * zone_cache_t;
 
 #if !__x86_64__
 static
@@ -425,6 +389,7 @@ __security_const_late struct {
 	struct mach_vm_range       zi_ro_range;   /* read-only range      */
 	struct mach_vm_range       zi_meta_range; /* debugging only       */
 	struct mach_vm_range       zi_bits_range; /* bits buddy allocator */
+	struct mach_vm_range       zi_xtra_range; /* vm tracking metadata */
 	struct mach_vm_range       zi_pgz_range;
 	struct zone_page_metadata *zi_pgz_meta;
 
@@ -444,14 +409,10 @@ __security_const_late struct {
 	struct zone_page_metadata *zi_meta_base;
 } zone_info;
 
-__startup_data
-static struct mach_vm_range  zone_map_range;
-__startup_data
-vm_map_size_t                zone_map_size;
-__startup_data
-static vm_map_size_t         zone_meta_size;
-__startup_data
-static vm_map_size_t         zone_bits_size;
+__startup_data static struct mach_vm_range  zone_map_range;
+__startup_data static vm_map_size_t         zone_meta_size;
+__startup_data static vm_map_size_t         zone_bits_size;
+__startup_data static vm_map_size_t         zone_xtra_size;
 
 /*
  * Initial array of metadata for stolen memory.
@@ -539,8 +500,6 @@ static SECURITY_READ_ONLY_LATE(zone_t) zc_magazine_zone;
 static int8_t zone_caching_disabled = -1;
 
 __startup_data
-static struct zone_cache zone_cache_startup[MAX_ZONES];
-__startup_data
 static struct zone_stats zone_stats_startup[MAX_ZONES];
 struct zone              zone_array[MAX_ZONES];
 SECURITY_READ_ONLY_LATE(zone_security_flags_t) zone_security_array[MAX_ZONES] = {
@@ -549,10 +508,10 @@ SECURITY_READ_ONLY_LATE(zone_security_flags_t) zone_security_array[MAX_ZONES] = 
 		.z_noencrypt      = false,
 		.z_submap_idx     = Z_SUBMAP_IDX_GENERAL_0,
 		.z_kalloc_type    = false,
-		.z_va_sequester   = ZSECURITY_CONFIG(SEQUESTER),
 	},
 };
 SECURITY_READ_ONLY_LATE(struct zone_size_params) zone_ro_size_params[ZONE_ID__LAST_RO + 1];
+SECURITY_READ_ONLY_LATE(zone_cache_ops_t) zcache_ops[ZONE_ID__FIRST_DYNAMIC];
 
 /* Initialized in zone_bootstrap(), how many "copies" the per-cpu system does */
 static SECURITY_READ_ONLY_LATE(unsigned) zpercpu_early_count;
@@ -569,13 +528,42 @@ size_t zone_guard_pages;
 TUNABLE(int, zone_exhausted_timeout, "zet", 5000);
 
 #if VM_TAG_SIZECLASSES
+/*
+ * Zone tagging allows for per "tag" accounting of allocations for the kalloc
+ * zones only.
+ *
+ * There are 3 kinds of tags that can be used:
+ * - pre-registered VM_KERN_MEMORY_*
+ * - dynamic tags allocated per call sites in core-kernel (using vm_tag_alloc())
+ * - per-kext tags computed by IOKit (using the magic Z_VM_TAG_BT_BIT marker).
+ *
+ * The VM tracks the statistics in lazily allocated structures.
+ * See vm_tag_will_update_zone(), vm_tag_update_zone_size().
+ *
+ * If for some reason the requested tag cannot be accounted for,
+ * the tag is forced to VM_KERN_MEMORY_KALLOC which is pre-allocated.
+ *
+ * Each allocated element also remembers the tag it was assigned,
+ * which lets zalloc/zfree update statistics correctly.
+ */
+
 /* enable tags for zones that ask for it */
 static TUNABLE(bool, zone_tagging_on, "-zt", false);
+
+/*
+ * Array of all sizeclasses used by kalloc variants so that we can
+ * have accounting per size class for each kalloc callsite
+ */
+static uint16_t zone_tags_sizeclasses[VM_TAG_SIZECLASSES];
 #endif /* VM_TAG_SIZECLASSES */
 
 #if DEBUG || DEVELOPMENT
 static int zalloc_simulate_vm_pressure;
 #endif /* DEBUG || DEVELOPMENT */
+
+#define Z_TUNABLE(t, n, d) \
+	TUNABLE(t, _##n, #n, d); \
+	__pure2 static inline t n(void) { return _##n; }
 
 /*
  * Zone caching tunables
@@ -583,51 +571,48 @@ static int zalloc_simulate_vm_pressure;
  * zc_mag_size():
  *   size of magazines, larger to reduce contention at the expense of memory
  *
- * zc_auto_enable_threshold
+ * zc_enable_level
  *   number of contentions per second after which zone caching engages
  *   automatically.
  *
  *   0 to disable.
  *
- * zc_grow_threshold
- *   numer of contentions per second after which the per-cpu depot layer
- *   grows at each newly observed contention without restriction.
+ * zc_grow_level
+ *   number of contentions per second x cpu after which the number of magazines
+ *   allowed in the depot can grow. (in "Z_WMA_UNIT" units).
  *
- *   0 to disable.
+ * zc_shrink_level
+ *   number of contentions per second x cpu below which the number of magazines
+ *   allowed in the depot will shrink. (in "Z_WMA_UNIT" units).
  *
- * zc_recirc_batch
- *   how many magazines to transfer at most from/to the recirculation depot.
- *   Default 4.
+ * zc_pcpu_max
+ *   maximum memory size in bytes that can hang from a CPU,
+ *   which will affect how many magazines are allowed in the depot.
  *
- * zc_defrag_ratio
- *   percentage of the working set to recirc size below which
- *   the zone is defragmented. Default is 66%.
+ *   The alloc/free magazines are assumed to be on average half-empty
+ *   and to count for "1" unit of magazines.
  *
- * zc_defrag_threshold
- *   how much memory needs to be free before the auto-defrag is even considered.
- *   Default is 512k.
+ * zc_autotrim_size
+ *   Size allowed to hang extra from the recirculation depot before
+ *   auto-trim kicks in.
  *
- * zc_autogc_ratio
- *   percentage of the working set to min-free size below which
- *   the zone is auto-GCed to the working set size. Default is 20%.
+ * zc_autotrim_buckets
  *
- * zc_autogc_threshold
- *   how much memory needs to be free before the auto-gc is even considered.
- *   Default is 4M.
+ *   How many buckets in excess of the working-set are allowed
+ *   before auto-trim kicks in for empty buckets.
  *
  * zc_free_batch_size
  *   The size of batches of frees/reclaim that can be done keeping
  *   the zone lock held (and preemption disabled).
  */
-static TUNABLE(uint16_t, zc_magazine_size, "zc_mag_size", 8);
-static TUNABLE(uint32_t, zc_auto_threshold, "zc_auto_enable_threshold", 20);
-static TUNABLE(uint32_t, zc_grow_threshold, "zc_grow_threshold", 8);
-static TUNABLE(uint16_t, zc_recirc_batch, "zc_recirc_batch", 4);
-static TUNABLE(uint32_t, zc_defrag_ratio, "zc_defrag_ratio", 66);
-static TUNABLE(uint32_t, zc_defrag_threshold, "zc_defrag_threshold", 512u << 10);
-static TUNABLE(uint32_t, zc_autogc_ratio, "zc_autogc_ratio", 20);
-static TUNABLE(uint32_t, zc_autogc_threshold, "zc_autogc_threshold", 4u << 20);
-static TUNABLE(uint32_t, zc_free_batch_size, "zc_free_batch_size", 256);
+Z_TUNABLE(uint16_t, zc_mag_size, 8);
+static Z_TUNABLE(uint32_t, zc_enable_level, 10);
+static Z_TUNABLE(uint32_t, zc_grow_level, 5 * Z_WMA_UNIT);
+static Z_TUNABLE(uint32_t, zc_shrink_level, Z_WMA_UNIT / 2);
+static Z_TUNABLE(uint32_t, zc_pcpu_max, 128 << 10);
+static Z_TUNABLE(uint32_t, zc_autotrim_size, 16 << 10);
+static Z_TUNABLE(uint32_t, zc_autotrim_buckets, 8);
+static Z_TUNABLE(uint32_t, zc_free_batch_size, 256);
 
 static SECURITY_READ_ONLY_LATE(size_t)    zone_pages_wired_max;
 static SECURITY_READ_ONLY_LATE(vm_map_t)  zone_submaps[Z_SUBMAP_IDX_COUNT];
@@ -745,32 +730,6 @@ zone_has_index(zone_t z, zone_id_t zid)
 	return zone_array + zid == z;
 }
 
-static zone_element_t
-zone_element_encode(vm_offset_t base, vm_offset_t eidx)
-{
-	return (zone_element_t){ .ze_value = base | eidx };
-}
-
-static vm_offset_t
-zone_element_base(zone_element_t ze)
-{
-	return trunc_page(ze.ze_value);
-}
-
-static vm_offset_t
-zone_element_idx(zone_element_t ze)
-{
-	return ze.ze_value & PAGE_MASK;
-}
-
-static vm_offset_t
-zone_element_addr(zone_t z, zone_element_t ze, vm_offset_t esize)
-{
-	vm_offset_t offs = zone_elem_offs(z);
-
-	return offs + zone_element_base(ze) + esize * zone_element_idx(ze);
-}
-
 __abortlike
 void
 zone_invalid_panic(zone_t zone)
@@ -847,11 +806,10 @@ zone_page_meta_accounting_panic(zone_t zone, struct zone_page_metadata *meta,
 
 __abortlike
 static void
-zone_meta_double_free_panic(zone_t zone, zone_element_t ze, const char *caller)
+zone_meta_double_free_panic(zone_t zone, vm_offset_t addr, const char *caller)
 {
 	panic("%s: double free of %p to zone %s%s", caller,
-	    (void *)zone_element_addr(zone, ze, zone_elem_size(zone)),
-	    zone_heap_name(zone), zone->z_name);
+	    (void *)addr, zone_heap_name(zone), zone->z_name);
 }
 
 __abortlike
@@ -868,25 +826,6 @@ zone_accounting_panic(zone_t zone, const char *kind)
 	} \
 	(z)->stat; \
 })
-
-static inline void
-zone_elems_free_add(zone_t z, uint32_t count)
-{
-	uint32_t n = (z->z_elems_free += count);
-	if (z->z_elems_free_max < n) {
-		z->z_elems_free_max = n;
-	}
-}
-
-static inline void
-zone_elems_free_sub(zone_t z, uint32_t count)
-{
-	uint32_t n = zone_counter_sub(z, z_elems_free, count);
-
-	if (z->z_elems_free_min > n) {
-		z->z_elems_free_min = n;
-	}
-}
 
 static inline uint16_t
 zone_meta_alloc_size_add(zone_t z, struct zone_page_metadata *m,
@@ -992,12 +931,6 @@ zone_pva_from_addr(vm_address_t addr)
 	return (zone_pva_t){ (uint32_t)((intptr_t)addr >> PAGE_SHIFT) };
 }
 
-__header_always_inline zone_pva_t
-zone_pva_from_element(zone_element_t ze)
-{
-	return zone_pva_from_addr(ze.ze_value);
-}
-
 __header_always_inline vm_address_t
 zone_pva_to_addr(zone_pva_t page)
 {
@@ -1023,12 +956,6 @@ zone_meta_from_addr(vm_offset_t addr)
 	return zone_pva_to_meta(zone_pva_from_addr(addr));
 }
 
-__header_always_inline struct zone_page_metadata *
-zone_meta_from_element(zone_element_t ze)
-{
-	return zone_pva_to_meta(zone_pva_from_element(ze));
-}
-
 __header_always_inline zone_id_t
 zone_index_from_ptr(const void *ptr)
 {
@@ -1048,13 +975,6 @@ zone_meta_validate(zone_t z, struct zone_page_metadata *meta, vm_address_t addr)
 	if (!zone_has_index(z, meta->zm_index)) {
 		zone_page_metadata_index_confusion_panic(z, addr, meta);
 	}
-}
-
-__attribute__((overloadable))
-__header_always_inline void
-zone_meta_validate(zone_t z, struct zone_page_metadata *meta, zone_element_t ze)
-{
-	zone_meta_validate(z, meta, zone_element_addr(z, ze, zone_elem_size(z)));
 }
 
 __attribute__((overloadable))
@@ -1222,31 +1142,22 @@ zone_meta_populate(vm_offset_t base, vm_size_t size)
 
 __abortlike
 static void
-zone_invalid_element_panic(zone_t zone, vm_offset_t addr, bool cache)
+zone_invalid_element_panic(zone_t zone, vm_offset_t addr)
 {
 	struct zone_page_metadata *meta;
-	vm_offset_t page, esize = zone_elem_size(zone);
 	const char *from_cache = "";
+	vm_offset_t page;
 
-	if (cache) {
-		zone_element_t ze = { .ze_value = addr };
-		addr = zone_element_addr(zone, ze, esize);
-		from_cache = " (from cache)";
-
-		if (zone_element_idx(ze) >= zone->z_chunk_elems) {
-			panic("eidx %d for addr %p being freed to zone %s%s, is larger "
-			    "than number fo element in chunk (%d)", (int)zone_element_idx(ze),
-			    (void *)addr, zone_heap_name(zone), zone->z_name,
-			    zone->z_chunk_elems);
-		}
-	}
-
-	if (!from_zone_map(addr, esize)) {
+	if (!from_zone_map(addr, zone_elem_inner_size(zone))) {
 		panic("addr %p being freed to zone %s%s%s, isn't from zone map",
 		    (void *)addr, zone_heap_name(zone), zone->z_name, from_cache);
 	}
 	page = trunc_page(addr);
 	meta = zone_meta_from_addr(addr);
+
+	if (!zone_has_index(zone, meta->zm_index)) {
+		zone_page_metadata_index_confusion_panic(zone, addr, meta);
+	}
 
 	if (meta->zm_chunk_len == ZM_SECONDARY_PCPU_PAGE) {
 		panic("metadata %p corresponding to addr %p being freed to "
@@ -1254,6 +1165,11 @@ zone_invalid_element_panic(zone_t zone, vm_offset_t addr, bool cache)
 		    meta, (void *)addr, zone_heap_name(zone), zone->z_name,
 		    from_cache);
 	}
+	if (meta->zm_chunk_len == ZM_SECONDARY_PAGE) {
+		page -= ptoa(meta->zm_page_index);
+		meta -= meta->zm_page_index;
+	}
+
 	if (meta->zm_chunk_len > ZM_CHUNK_LEN_MAX) {
 		panic("metadata %p corresponding to addr %p being freed to "
 		    "zone %s%s%s, has chunk len greater than max",
@@ -1261,11 +1177,7 @@ zone_invalid_element_panic(zone_t zone, vm_offset_t addr, bool cache)
 		    from_cache);
 	}
 
-	if (meta->zm_chunk_len == ZM_SECONDARY_PAGE) {
-		page -= ptoa(meta->zm_page_index);
-	}
-
-	if ((addr - page - zone_elem_offs(zone)) % esize) {
+	if ((addr - zone_elem_inner_offs(zone) - page) % zone_elem_outer_size(zone)) {
 		panic("addr %p being freed to zone %s%s%s, isn't aligned to "
 		    "zone element size", (void *)addr, zone_heap_name(zone),
 		    zone->z_name, from_cache);
@@ -1274,56 +1186,33 @@ zone_invalid_element_panic(zone_t zone, vm_offset_t addr, bool cache)
 	zone_invalid_element_addr_panic(zone, addr);
 }
 
-__header_always_inline
-struct zone_page_metadata *
-zone_element_validate(zone_t zone, zone_element_t ze)
-{
-	struct zone_page_metadata *meta;
-	vm_offset_t page = zone_element_base(ze);
-
-	if (!from_zone_map(page, 1)) {
-		zone_invalid_element_panic(zone, ze.ze_value, true);
-	}
-	meta = zone_meta_from_addr(page);
-
-	if (meta->zm_chunk_len > ZM_CHUNK_LEN_MAX) {
-		zone_invalid_element_panic(zone, ze.ze_value, true);
-	}
-	if (zone_element_idx(ze) >= zone->z_chunk_elems) {
-		zone_invalid_element_panic(zone, ze.ze_value, true);
-	}
-
-	zone_meta_validate(zone, meta, ze);
-
-	return meta;
-}
-
 __attribute__((always_inline))
 static struct zone_page_metadata *
-zone_element_resolve(zone_t zone, vm_offset_t addr, zone_element_t *ze)
+zone_element_resolve(
+	zone_t                  zone,
+	vm_offset_t             addr,
+	vm_offset_t            *idx)
 {
 	struct zone_page_metadata *meta;
-	vm_offset_t offs, page, eidx;
+	vm_offset_t offs, eidx;
 
-	if (!from_zone_map(addr, 1)) {
-		zone_invalid_element_panic(zone, addr, false);
-	}
-	page = trunc_page(addr);
 	meta = zone_meta_from_addr(addr);
-	zone_meta_validate(zone, meta, addr);
+	if (!from_zone_map(addr, 1) || !zone_has_index(zone, meta->zm_index)) {
+		zone_invalid_element_panic(zone, addr);
+	}
 
+	offs = (addr & PAGE_MASK) - zone_elem_inner_offs(zone);
 	if (meta->zm_chunk_len == ZM_SECONDARY_PAGE) {
-		page -= ptoa(meta->zm_page_index);
+		offs += ptoa(meta->zm_page_index);
 		meta -= meta->zm_page_index;
 	}
 
-	offs = addr - page - zone_elem_offs(zone);
 	eidx = Z_FAST_QUO(offs, zone->z_quo_magic);
-	if (eidx * zone_elem_size(zone) != offs) {
-		zone_invalid_element_panic(zone, addr, false);
+	if (eidx * zone_elem_outer_size(zone) != offs) {
+		zone_invalid_element_panic(zone, addr);
 	}
 
-	*ze = zone_element_encode(page, eidx);
+	*idx = eidx;
 	return meta;
 }
 
@@ -1381,20 +1270,20 @@ zone_element_bounds_check_panic(vm_address_t addr, vm_size_t len)
 		meta -= meta->zm_page_index;
 	}
 
-	size = zone_elem_size(zone);
-	offs = Z_FAST_MOD(addr - page + size - zone_elem_offs(zone),
+	size = zone_elem_outer_size(zone);
+	offs = Z_FAST_MOD(addr - zone_elem_inner_offs(zone) - page + size,
 	    zone->z_quo_magic, size);
 	panic("zone bound checks: buffer %p of length %zd overflows "
 	    "object %p of size %zd in zone %p[%s%s]",
-	    (void *)addr, len, (void *)(addr - offs), size,
-	    zone, zone_heap_name(zone), zone_name(zone));
+	    (void *)addr, len, (void *)(addr - offs - zone_elem_redzone(zone)),
+	    zone_elem_inner_size(zone), zone, zone_heap_name(zone), zone_name(zone));
 }
 
 void
 zone_element_bounds_check(vm_address_t addr, vm_size_t len)
 {
 	struct zone_page_metadata *meta;
-	vm_offset_t offs, page, size;
+	vm_offset_t offs, size;
 	zone_t      zone;
 
 	if (!from_zone_map(addr, 1)) {
@@ -1407,11 +1296,7 @@ zone_element_bounds_check(vm_address_t addr, vm_size_t len)
 		addr = trunc_page(meta->zm_pgz_orig_addr) + (addr & PAGE_MASK);
 	}
 #endif /* CONFIG_PROB_GZALLOC */
-	page = trunc_page(addr);
 	meta = zone_meta_from_addr(addr);
-	if (meta->zm_chunk_len == ZM_SECONDARY_PAGE) {
-		page -= ptoa(meta->zm_page_index);
-	}
 	zone = zone_by_id(meta->zm_index);
 
 	if (zone->z_percpu) {
@@ -1423,10 +1308,13 @@ zone_element_bounds_check(vm_address_t addr, vm_size_t len)
 		return;
 	}
 
-	size = zone_elem_size(zone);
-	offs = Z_FAST_MOD(addr - page + size - zone_elem_offs(zone),
-	    zone->z_quo_magic, size);
-	if (len > size - offs) {
+	offs = (addr & PAGE_MASK) - zone_elem_inner_offs(zone);
+	if (meta->zm_chunk_len == ZM_SECONDARY_PAGE) {
+		offs += ptoa(meta->zm_page_index);
+	}
+	size = zone_elem_outer_size(zone);
+	offs = Z_FAST_MOD(offs + size, zone->z_quo_magic, size);
+	if (len + zone_elem_redzone(zone) > size - offs) {
 		zone_element_bounds_check_panic(addr, len);
 	}
 }
@@ -1446,7 +1334,7 @@ zone_element_size(void *elem, zone_t *z, bool clear_oob, vm_offset_t *oob_offs)
 	if (from_zone_map(addr, sizeof(void *))) {
 		meta  = zone_meta_from_addr(addr);
 		zone  = zone_by_id(meta->zm_index);
-		esize = zone_elem_size(zone);
+		esize = zone_elem_inner_size(zone);
 		end   = addr + esize;
 		offs  = 0;
 
@@ -1527,7 +1415,7 @@ zone_require_panic(zone_t zone, void *addr)
 	uint32_t zindex;
 	zone_t other;
 
-	if (!from_zone_map(addr, zone_elem_size(zone))) {
+	if (!from_zone_map(addr, zone_elem_inner_size(zone))) {
 		panic("zone_require failed: address not in a zone (addr: %p)", addr);
 	}
 
@@ -1563,7 +1451,7 @@ zone_id_require_panic(zone_id_t zid, void *addr)
 void
 zone_require(zone_t zone, void *addr)
 {
-	vm_size_t esize = zone_elem_size(zone);
+	vm_size_t esize = zone_elem_inner_size(zone);
 
 	if (from_zone_map(addr, esize) &&
 	    zone_has_index(zone, zone_index_from_ptr(addr))) {
@@ -1584,7 +1472,7 @@ zone_id_require(zone_id_t zid, vm_size_t esize, void *addr)
 bool
 zone_owns(zone_t zone, void *addr)
 {
-	vm_size_t esize = zone_elem_size(zone);
+	vm_size_t esize = zone_elem_inner_size(zone);
 
 	if (from_zone_map(addr, esize)) {
 		return zone_has_index(zone, zone_index_from_ptr(addr));
@@ -1649,6 +1537,11 @@ zone_kmem_suballoc(
 #define ZBA_MAX_ORDER           (PAGE_MAX_SHIFT - 4)
 #define ZBA_MAX_ALLOC_ORDER     7
 #define ZBA_SLOTS               (ZBA_CHUNK_SIZE / ZBA_GRANULE)
+#define ZBA_HEADS_COUNT         (ZBA_MAX_ORDER + 1)
+#define ZBA_PTR_MASK            0x0fffffff
+#define ZBA_ORDER_SHIFT         29
+#define ZBA_HAS_EXTRA_BIT       0x10000000
+
 static_assert(2ul * ZBA_GRANULE << ZBA_MAX_ORDER == ZBA_CHUNK_SIZE, "chunk sizes");
 static_assert(ZBA_MAX_ALLOC_ORDER <= ZBA_MAX_ORDER, "ZBA_MAX_ORDER is enough");
 
@@ -1666,9 +1559,10 @@ static_assert(sizeof(struct zone_bits_chain) == ZBA_GRANULE, "zbc size");
 static_assert(sizeof(struct zone_bits_head) == ZBA_GRANULE, "zbh size");
 
 struct zone_bits_allocator_meta {
-	uint32_t zbam_chunks;
-	uint32_t __zbam_padding;
-	struct zone_bits_head zbam_lists[ZBA_MAX_ORDER + 1];
+	uint32_t  zbam_left;
+	uint32_t  zbam_right;
+	struct zone_bits_head zbam_lists[ZBA_HEADS_COUNT];
+	struct zone_bits_head zbam_lists_with_extra[ZBA_HEADS_COUNT];
 };
 
 struct zone_bits_allocator_header {
@@ -1687,16 +1581,19 @@ zba_base_header(void)
 	return (struct zone_bits_allocator_header *)zba_test_info.zbats_base;
 }
 
-static void
-zba_populate(uint32_t n)
+static kern_return_t
+zba_populate(uint32_t n, bool with_extra __unused)
 {
 	vm_address_t base = zba_test_info.zbats_base;
 	zba_test_info.zbats_populate(base + n * ZBA_CHUNK_SIZE, ZBA_CHUNK_SIZE);
+
+	return KERN_SUCCESS;
 }
 #else
-__startup_data
-static uint8_t zba_chunk_startup[ZBA_CHUNK_SIZE]
-__attribute__((aligned(ZBA_CHUNK_SIZE)));
+__startup_data __attribute__((aligned(ZBA_CHUNK_SIZE)))
+static uint8_t zba_chunk_startup[ZBA_CHUNK_SIZE];
+
+static SECURITY_READ_ONLY_LATE(uint8_t) zba_xtra_shift;
 static LCK_MTX_DECLARE(zba_mtx, &zone_locks_grp);
 
 static struct zone_bits_allocator_header *
@@ -1717,41 +1614,53 @@ zba_unlock(void)
 	lck_mtx_unlock(&zba_mtx);
 }
 
+__abortlike
 static void
-zba_populate(uint32_t n)
+zba_memory_exhausted(void)
 {
-	vm_size_t size = ZBA_CHUNK_SIZE;
-	vm_address_t addr;
+	uint64_t zsize = 0;
+	zone_t z = zone_find_largest(&zsize);
+	panic("zba_populate: out of bitmap space, "
+	    "likely due to memory leak in zone [%s%s] "
+	    "(%u%c, %d elements allocated)",
+	    zone_heap_name(z), zone_name(z),
+	    mach_vm_size_pretty(zsize), mach_vm_size_unit(zsize),
+	    zone_count_allocated(z));
+}
 
-	addr = zone_info.zi_bits_range.min_address + n * size;
-	if (addr >= zone_info.zi_bits_range.max_address) {
-		uint64_t zsize = 0;
-		zone_t z = zone_find_largest(&zsize);
-		panic("zba_populate: out of bitmap space, "
-		    "likely due to memory leak in zone [%s%s] "
-		    "(%u%c, %d elements allocated)",
-		    zone_heap_name(z), zone_name(z),
-		    mach_vm_size_pretty(zsize), mach_vm_size_unit(zsize),
-		    zone_count_allocated(z));
+
+static kern_return_t
+zba_populate(uint32_t n, bool with_extra)
+{
+	vm_size_t bits_size = ZBA_CHUNK_SIZE;
+	vm_size_t xtra_size = bits_size * CHAR_BIT << zba_xtra_shift;
+	vm_address_t bits_addr;
+	vm_address_t xtra_addr;
+	kern_return_t kr;
+
+	bits_addr = zone_info.zi_bits_range.min_address + n * bits_size;
+	xtra_addr = zone_info.zi_xtra_range.min_address + n * xtra_size;
+
+	kr = kernel_memory_populate(bits_addr, bits_size,
+	    KMA_ZERO | KMA_KOBJECT | KMA_NOPAGEWAIT,
+	    VM_KERN_MEMORY_OSFMK);
+	if (kr != KERN_SUCCESS) {
+		return kr;
 	}
 
-	for (;;) {
-		kern_return_t kr = KERN_SUCCESS;
 
-		if (0 == pmap_find_phys(kernel_pmap, addr)) {
-			kr = kernel_memory_populate(addr, size,
-			    KMA_NOPAGEWAIT | KMA_KOBJECT | KMA_ZERO,
+	if (with_extra) {
+		kr = kernel_memory_populate(xtra_addr, xtra_size,
+		    KMA_ZERO | KMA_KOBJECT | KMA_NOPAGEWAIT,
+		    VM_KERN_MEMORY_OSFMK);
+		if (kr != KERN_SUCCESS) {
+			kernel_memory_depopulate(bits_addr, bits_size,
+			    KMA_ZERO | KMA_KOBJECT | KMA_NOPAGEWAIT,
 			    VM_KERN_MEMORY_OSFMK);
 		}
-
-		if (kr == KERN_SUCCESS) {
-			return;
-		}
-
-		zba_unlock();
-		VM_PAGE_WAIT();
-		zba_lock();
 	}
+
+	return kr;
 }
 #endif
 
@@ -1770,26 +1679,21 @@ zba_slot_base(void)
 }
 
 __pure2
-static vm_address_t
-zba_page_addr(uint32_t n)
-{
-	return (vm_address_t)zba_base_header() + n * ZBA_CHUNK_SIZE;
-}
-
-__pure2
 static struct zone_bits_head *
-zba_head(uint32_t order)
+zba_head(uint32_t order, bool with_extra)
 {
-	return &zba_meta()->zbam_lists[order];
+	if (with_extra) {
+		return &zba_meta()->zbam_lists_with_extra[order];
+	} else {
+		return &zba_meta()->zbam_lists[order];
+	}
 }
 
 __pure2
 static uint32_t
-zba_head_index(uint32_t order)
+zba_head_index(struct zone_bits_head *hd)
 {
-	uint32_t hdr_size = sizeof(struct zone_bits_allocator_header) +
-	    offsetof(struct zone_bits_allocator_meta, zbam_lists);
-	return (hdr_size / ZBA_GRANULE) + order;
+	return (uint32_t)((uint64_t *)hd - zba_slot_base());
 }
 
 __pure2
@@ -1808,10 +1712,10 @@ zba_chain_to_index(const struct zone_bits_chain *zbc)
 
 __abortlike
 static void
-zba_head_corruption_panic(uint32_t order)
+zba_head_corruption_panic(uint32_t order, bool with_extra)
 {
-	panic("zone bits allocator head[%d:%p] is corrupt", order,
-	    zba_head(order));
+	panic("zone bits allocator head[%d:%d:%p] is corrupt",
+	    order, with_extra, zba_head(order, with_extra));
 }
 
 __abortlike
@@ -1822,17 +1726,17 @@ zba_chain_corruption_panic(struct zone_bits_chain *a, struct zone_bits_chain *b)
 }
 
 static void
-zba_push_block(struct zone_bits_chain *zbc, uint32_t order)
+zba_push_block(struct zone_bits_chain *zbc, uint32_t order, bool with_extra)
 {
-	struct zone_bits_head *hd = zba_head(order);
-	uint32_t hd_index = zba_head_index(order);
+	struct zone_bits_head *hd = zba_head(order, with_extra);
+	uint32_t hd_index = zba_head_index(hd);
 	uint32_t index = zba_chain_to_index(zbc);
 	struct zone_bits_chain *next;
 
 	if (hd->zbh_next) {
 		next = zba_chain_for_index(hd->zbh_next);
 		if (next->zbc_prev != hd_index) {
-			zba_head_corruption_panic(order);
+			zba_head_corruption_panic(order, with_extra);
 		}
 		next->zbc_prev = index;
 	}
@@ -1860,9 +1764,9 @@ zba_remove_block(struct zone_bits_chain *zbc)
 }
 
 static vm_address_t
-zba_try_pop_block(uint32_t order)
+zba_try_pop_block(uint32_t order, bool with_extra)
 {
-	struct zone_bits_head *hd = zba_head(order);
+	struct zone_bits_head *hd = zba_head(order, with_extra);
 	struct zone_bits_chain *zbc;
 
 	if (hd->zbh_next == 0) {
@@ -1926,7 +1830,7 @@ zba_node_is_split(struct zone_bits_allocator_header *zbah, size_t node)
 }
 
 static void
-zba_free(vm_offset_t addr, uint32_t order)
+zba_free(vm_offset_t addr, uint32_t order, bool with_extra)
 {
 	struct zone_bits_allocator_header *zbah = zba_header(addr);
 	struct zone_bits_chain *zbc;
@@ -1946,7 +1850,7 @@ zba_free(vm_offset_t addr, uint32_t order)
 		node = parent;
 	}
 
-	zba_push_block(zba_chain_for_node(zbah, node, order), order);
+	zba_push_block(zba_chain_for_node(zbah, node, order), order, with_extra);
 }
 
 static vm_size_t
@@ -1960,10 +1864,10 @@ zba_chunk_header_size(uint32_t n)
 }
 
 static void
-zba_init_chunk(uint32_t n)
+zba_init_chunk(uint32_t n, bool with_extra)
 {
 	vm_size_t hdr_size = zba_chunk_header_size(n);
-	vm_offset_t page = zba_page_addr(n);
+	vm_offset_t page = (vm_offset_t)zba_base_header() + n * ZBA_CHUNK_SIZE;
 	struct zone_bits_allocator_header *zbah = zba_header(page);
 	vm_size_t size = ZBA_CHUNK_SIZE;
 	size_t node;
@@ -1975,35 +1879,65 @@ zba_init_chunk(uint32_t n)
 		size -= ZBA_GRANULE << o;
 		node = zba_node(page + size, o);
 		zba_node_flip_split(zbah, zba_node_parent(node));
-		zba_push_block(zba_chain_for_node(zbah, node, o), o);
+		zba_push_block(zba_chain_for_node(zbah, node, o), o, with_extra);
 	}
-
-	zba_meta()->zbam_chunks = n + 1;
 }
 
 __attribute__((noinline))
 static void
-zba_grow(void)
+zba_grow(bool with_extra)
 {
-	uint32_t chunk = zba_meta()->zbam_chunks;
+	struct zone_bits_allocator_meta *meta = zba_meta();
+	kern_return_t kr = KERN_SUCCESS;
+	uint32_t chunk;
 
-	zba_populate(chunk);
-	if (zba_meta()->zbam_chunks == chunk) {
-		zba_init_chunk(chunk);
+#if !ZALLOC_TEST
+	if (meta->zbam_left >= meta->zbam_right) {
+		zba_memory_exhausted();
+	}
+#endif
+
+	if (with_extra) {
+		chunk = meta->zbam_right - 1;
+	} else {
+		chunk = meta->zbam_left;
+	}
+
+	kr = zba_populate(chunk, with_extra);
+	if (kr == KERN_SUCCESS) {
+		if (with_extra) {
+			meta->zbam_right -= 1;
+		} else {
+			meta->zbam_left += 1;
+		}
+
+		zba_init_chunk(chunk, with_extra);
+#if !ZALLOC_TEST
+	} else {
+		/*
+		 * zba_populate() has to be allowed to fail populating,
+		 * as we are under a global lock, we need to do the
+		 * VM_PAGE_WAIT() outside of the lock.
+		 */
+		assert(kr == KERN_RESOURCE_SHORTAGE);
+		zba_unlock();
+		VM_PAGE_WAIT();
+		zba_lock();
+#endif
 	}
 }
 
 static vm_offset_t
-zba_alloc(uint32_t order)
+zba_alloc(uint32_t order, bool with_extra)
 {
 	struct zone_bits_allocator_header *zbah;
 	uint32_t cur = order;
 	vm_address_t addr;
 	size_t node;
 
-	while ((addr = zba_try_pop_block(cur)) == 0) {
-		if (cur++ >= ZBA_MAX_ORDER) {
-			zba_grow();
+	while ((addr = zba_try_pop_block(cur, with_extra)) == 0) {
+		if (__improbable(cur++ >= ZBA_MAX_ORDER)) {
+			zba_grow(with_extra);
 			cur = order;
 		}
 	}
@@ -2015,7 +1949,8 @@ zba_alloc(uint32_t order)
 		cur--;
 		zba_node_flip_split(zbah, node);
 		node = zba_node_left_child(node);
-		zba_push_block(zba_chain_for_node(zbah, node + 1, cur), cur);
+		zba_push_block(zba_chain_for_node(zbah, node + 1, cur),
+		    cur, with_extra);
 	}
 
 	return addr;
@@ -2027,16 +1962,29 @@ zba_alloc(uint32_t order)
 #define zba_map_mask_ge(type, n)  ((type)-zba_map_bit(type, n))
 
 #if !ZALLOC_TEST
+#if VM_TAG_SIZECLASSES
+
+static void *
+zba_extra_ref_ptr(uint32_t bref, vm_offset_t idx)
+{
+	vm_offset_t base = zone_info.zi_xtra_range.min_address;
+	vm_offset_t offs = (bref & ZBA_PTR_MASK) * ZBA_GRANULE * CHAR_BIT;
+
+	return (void *)(base + ((offs + idx) << zba_xtra_shift));
+}
+
+#endif /* VM_TAG_SIZECLASSES */
+
 static uint32_t
 zba_bits_ref_order(uint32_t bref)
 {
-	return bref & 0x7;
+	return bref >> ZBA_ORDER_SHIFT;
 }
 
 static bitmap_t *
 zba_bits_ref_ptr(uint32_t bref)
 {
-	return zba_slot_base() + (bref >> 3);
+	return zba_slot_base() + (bref & ZBA_PTR_MASK);
 }
 
 static vm_offset_t
@@ -2123,10 +2071,12 @@ zba_scan_bitmap_ref(zone_t zone, struct zone_page_metadata *meta,
  * @param flags         the alloc flags (for @c Z_PCPU).
  */
 static vm_offset_t
-zone_meta_find_and_clear_bit(zone_t zone, struct zone_page_metadata *meta,
-    zalloc_flags_t flags)
+zone_meta_find_and_clear_bit(
+	zone_t                  zone,
+	zone_stats_t            zs,
+	struct zone_page_metadata *meta,
+	zalloc_flags_t          flags)
 {
-	zone_stats_t zs = zpercpu_get(zone->z_stats);
 	vm_offset_t eidx = zs->zs_alloc_rr + 1;
 
 	if (meta->zm_inline_bitmap) {
@@ -2139,59 +2089,70 @@ zone_meta_find_and_clear_bit(zone_t zone, struct zone_page_metadata *meta,
 }
 
 /*!
- * @function zone_meta_bits_init
+ * @function zone_meta_bits_init_inline
  *
  * @brief
- * Initializes the zm_bitmap field(s) for a newly assigned chunk.
+ * Initializes the inline zm_bitmap field(s) for a newly assigned chunk.
  *
  * @param meta          The main metadata for the initialized chunk.
  * @param count         The number of elements the chunk can hold
  *                      (which might be partial for partially populated chunks).
- * @param nbits         The maximum nuber of bits that will be used.
  */
 static void
-zone_meta_bits_init(struct zone_page_metadata *meta,
-    uint32_t count, uint32_t nbits)
+zone_meta_bits_init_inline(struct zone_page_metadata *meta, uint32_t count)
+{
+	/*
+	 * We're called with the metadata zm_bitmap fields already zeroed out.
+	 */
+	for (size_t i = 0; i < count / 32; i++) {
+		meta[i].zm_bitmap = ~0u;
+	}
+	if (count % 32) {
+		meta[count / 32].zm_bitmap = zba_map_mask_lt(uint32_t, count);
+	}
+}
+
+/*!
+ * @function zone_meta_bits_alloc_init
+ *
+ * @brief
+ * Allocates a  zm_bitmap field for a newly assigned chunk.
+ *
+ * @param count         The number of elements the chunk can hold
+ *                      (which might be partial for partially populated chunks).
+ * @param nbits         The maximum nuber of bits that will be used.
+ * @param with_extra    Whether "VM Tracking" metadata needs to be allocated.
+ */
+static uint32_t
+zone_meta_bits_alloc_init(uint32_t count, uint32_t nbits, bool with_extra)
 {
 	static_assert(ZONE_MAX_ALLOC_SIZE / ZONE_MIN_ELEM_SIZE <=
 	    ZBA_GRANULE_BITS << ZBA_MAX_ORDER, "bitmaps will be large enough");
 
-	if (meta->zm_inline_bitmap) {
-		/*
-		 * We're called with the metadata zm_bitmap fields already
-		 * zeroed out.
-		 */
-		for (size_t i = 0; 32 * i < count; i++) {
-			if (32 * i + 32 <= count) {
-				meta[i].zm_bitmap = ~0u;
-			} else {
-				meta[i].zm_bitmap = zba_map_mask_lt(uint32_t, count);
-			}
-		}
-	} else {
-		uint32_t order = flsll((nbits - 1) / ZBA_GRANULE_BITS);
-		uint64_t *bits;
+	uint32_t order = flsll((nbits - 1) / ZBA_GRANULE_BITS);
+	uint64_t *bits;
+	size_t   i = 0;
 
-		assert(order <= ZBA_MAX_ALLOC_ORDER);
-		assert(count <= ZBA_GRANULE_BITS << order);
+	assert(order <= ZBA_MAX_ALLOC_ORDER);
+	assert(count <= ZBA_GRANULE_BITS << order);
 
-		zba_lock();
-		bits = (uint64_t *)zba_alloc(order);
-		zba_unlock();
+	zba_lock();
+	bits = (uint64_t *)zba_alloc(order, with_extra);
+	zba_unlock();
 
-		for (size_t i = 0; i < 1u << order; i++) {
-			if (64 * i + 64 <= count) {
-				bits[i] = ~0ull;
-			} else if (64 * i < count) {
-				bits[i] = zba_map_mask_lt(uint64_t, count);
-			} else {
-				bits[i] = 0ull;
-			}
-		}
-
-		meta->zm_bitmap = (uint32_t)((vm_offset_t)bits -
-		    (vm_offset_t)zba_slot_base()) + order;
+	while (i < count / 64) {
+		bits[i++] = ~0ull;
 	}
+	if (count % 64) {
+		bits[i++] = zba_map_mask_lt(uint64_t, count);
+	}
+	while (i < 1u << order) {
+		bits[i++] = 0;
+	}
+
+	return (uint32_t)(bits - zba_slot_base()) +
+	       (order << ZBA_ORDER_SHIFT) +
+	       (with_extra ? ZBA_HAS_EXTRA_BIT : 0);
 }
 
 /*!
@@ -2253,7 +2214,8 @@ static void
 zone_bits_free(uint32_t bref)
 {
 	zba_lock();
-	zba_free((vm_offset_t)zba_bits_ref_ptr(bref), zba_bits_ref_order(bref));
+	zba_free((vm_offset_t)zba_bits_ref_ptr(bref),
+	    zba_bits_ref_order(bref), (bref & ZBA_HAS_EXTRA_BIT));
 	zba_unlock();
 }
 
@@ -2264,9 +2226,8 @@ zone_bits_free(uint32_t bref)
  * Returns whether a given element appears free.
  */
 static bool
-zone_meta_is_free(struct zone_page_metadata *meta, zone_element_t ze)
+zone_meta_is_free(struct zone_page_metadata *meta, vm_offset_t eidx)
 {
-	vm_offset_t eidx = zone_element_idx(ze);
 	if (meta->zm_inline_bitmap) {
 		uint32_t bit = zba_map_bit(uint32_t, eidx);
 		return meta[zba_map_index(uint32_t, eidx)].zm_bitmap & bit;
@@ -2284,10 +2245,8 @@ zone_meta_is_free(struct zone_page_metadata *meta, zone_element_t ze)
  * Marks an element as free and returns whether it was marked as used.
  */
 static bool
-zone_meta_mark_free(struct zone_page_metadata *meta, zone_element_t ze)
+zone_meta_mark_free(struct zone_page_metadata *meta, vm_offset_t eidx)
 {
-	vm_offset_t eidx = zone_element_idx(ze);
-
 	if (meta->zm_inline_bitmap) {
 		uint32_t bit = zba_map_bit(uint32_t, eidx);
 		if (meta[zba_map_index(uint32_t, eidx)].zm_bitmap & bit) {
@@ -2305,108 +2264,7 @@ zone_meta_mark_free(struct zone_page_metadata *meta, zone_element_t ze)
 	return true;
 }
 
-/*!
- * @function zone_meta_mark_used
- *
- * @brief
- * Marks an element as used and returns whether it was marked as free
- */
-static bool
-zone_meta_mark_used(struct zone_page_metadata *meta, zone_element_t ze)
-{
-	vm_offset_t eidx = zone_element_idx(ze);
-
-	if (meta->zm_inline_bitmap) {
-		uint32_t bit = zba_map_bit(uint32_t, eidx);
-		if (meta[zba_map_index(uint32_t, eidx)].zm_bitmap & bit) {
-			meta[zba_map_index(uint32_t, eidx)].zm_bitmap ^= bit;
-			return true;
-		}
-	} else {
-		bitmap_t *bits = zba_bits_ref_ptr(meta->zm_bitmap);
-		uint64_t bit = zba_map_bit(uint64_t, eidx);
-		if (bits[zba_map_index(uint64_t, eidx)] & bit) {
-			bits[zba_map_index(uint64_t, eidx)] ^= bit;
-			return true;
-		}
-	}
-	return false;
-}
-
-#endif /* !ZALLOC_TEST */
-/*! @} */
-#pragma mark ZTAGS
-#if !ZALLOC_TEST
 #if VM_TAG_SIZECLASSES
-/*
- * Zone tagging allows for per "tag" accounting of allocations for the kalloc
- * zones only.
- *
- * There are 3 kinds of tags that can be used:
- * - pre-registered VM_KERN_MEMORY_*
- * - dynamic tags allocated per call sites in core-kernel (using vm_tag_alloc())
- * - per-kext tags computed by IOKit (using the magic Z_VM_TAG_BT_BIT marker).
- *
- * The VM tracks the statistics in lazily allocated structures.
- * See vm_tag_will_update_zone(), vm_tag_update_zone_size().
- *
- * If for some reason the requested tag cannot be accounted for,
- * the tag is forced to VM_KERN_MEMORY_KALLOC which is pre-allocated.
- *
- * Each allocated element also remembers the tag it was assigned,
- * in its ztSlot() which lets zalloc/zfree update statistics correctly.
- */
-
-// for zones with tagging enabled:
-
-// calculate a pointer to the tag base entry,
-// holding either a uint32_t the first tag offset for a page in the zone map,
-// or two uint16_t tags if the page can only hold one or two elements
-
-#define ZTAGBASE(zone, element) \
-	(&((uint32_t *)zone_tagbase_range.min_address)[atop((element) - \
-	    zone_info.zi_map_range.min_address)])
-
-static struct mach_vm_range zone_tagbase_range;
-static vm_map_t             zone_tagbase_map;
-static vm_map_size_t        zone_tagbase_map_size;
-
-static struct mach_vm_range zone_tags_range;
-static vm_map_t             zone_tags_map;
-static vm_map_size_t        zone_tags_map_size;
-
-// simple heap allocator for allocating the tags for new memory
-
-static LCK_MTX_DECLARE(ztLock, &zone_locks_grp); /* heap lock */
-
-/*
- * Array of all sizeclasses used by kalloc variants so that we can
- * have accounting per size class for each kalloc callsite
- */
-uint16_t zone_tags_sizeclasses[VM_TAG_SIZECLASSES];
-
-enum{
-	ztFreeIndexCount = 8,
-	ztFreeIndexMax   = (ztFreeIndexCount - 1),
-	ztTagsPerBlock   = 4
-};
-
-struct ztBlock {
-#if __LITTLE_ENDIAN__
-	uint64_t free:1,
-	    next:21,
-	    prev:21,
-	    size:21;
-#else
-// ztBlock needs free bit least significant
-#error !__LITTLE_ENDIAN__
-#endif
-};
-typedef struct ztBlock ztBlock;
-
-static ztBlock * ztBlocks;
-static uint32_t  ztBlocksCount;
-static uint32_t  ztBlocksFree;
 
 __startup_func
 void
@@ -2417,339 +2275,6 @@ __zone_site_register(vm_allocation_site_t *site)
 	}
 }
 
-static uint32_t
-ztLog2up(uint32_t size)
-{
-	if (1 == size) {
-		size = 0;
-	} else {
-		size = 32 - __builtin_clz(size - 1);
-	}
-	return size;
-}
-
-// pointer to the tag for an element
-static vm_tag_t *
-ztSlot(zone_t zone, vm_offset_t element)
-{
-	vm_tag_t *result;
-	if (zone->z_tags_inline) {
-		result = (vm_tag_t *)ZTAGBASE(zone, element);
-		if ((PAGE_MASK & element) >= zone_elem_size(zone)) {
-			result++;
-		}
-	} else {
-		result = &((vm_tag_t *)zone_tags_range.min_address)[ZTAGBASE(zone,
-		    element)[0] + (element & PAGE_MASK) / zone_elem_size(zone)];
-	}
-	return result;
-}
-
-static uint32_t
-ztLog2down(uint32_t size)
-{
-	size = 31 - __builtin_clz(size);
-	return size;
-}
-
-static void
-ztFault(const void * address, size_t size, uint32_t flags)
-{
-	vm_map_offset_t addr = (vm_map_offset_t) address;
-	vm_map_offset_t page, end;
-
-	page = trunc_page(addr);
-	end  = round_page(addr + size);
-
-	for (; page < end; page += page_size) {
-		if (!pmap_find_phys(kernel_pmap, page)) {
-			kernel_memory_populate(page, PAGE_SIZE,
-			    KMA_NOFAIL | KMA_KOBJECT | flags,
-			    VM_KERN_MEMORY_DIAG);
-		}
-	}
-}
-
-static boolean_t
-ztPresent(const void * address, size_t size)
-{
-	vm_map_offset_t addr = (vm_map_offset_t) address;
-	vm_map_offset_t page, end;
-	boolean_t       result;
-
-	page = trunc_page(addr);
-	end  = round_page(addr + size);
-	for (result = TRUE; (page < end); page += page_size) {
-		result = pmap_find_phys(kernel_pmap, page);
-		if (!result) {
-			break;
-		}
-	}
-	return result;
-}
-
-
-void __unused
-ztDump(boolean_t sanity);
-void __unused
-ztDump(boolean_t sanity)
-{
-	uint32_t q, cq, p;
-
-	for (q = 0; q <= ztFreeIndexMax; q++) {
-		p = q;
-		do{
-			if (sanity) {
-				cq = ztLog2down(ztBlocks[p].size);
-				if (cq > ztFreeIndexMax) {
-					cq = ztFreeIndexMax;
-				}
-				if (!ztBlocks[p].free
-				    || ((p != q) && (q != cq))
-				    || (ztBlocks[ztBlocks[p].next].prev != p)
-				    || (ztBlocks[ztBlocks[p].prev].next != p)) {
-					kprintf("zterror at %d", p);
-					ztDump(FALSE);
-					kprintf("zterror at %d", p);
-					assert(FALSE);
-				}
-				continue;
-			}
-			kprintf("zt[%03d]%c %d, %d, %d\n",
-			    p, ztBlocks[p].free ? 'F' : 'A',
-			    ztBlocks[p].next, ztBlocks[p].prev,
-			    ztBlocks[p].size);
-			p = ztBlocks[p].next;
-			if (p == q) {
-				break;
-			}
-		}while (p != q);
-		if (!sanity) {
-			printf("\n");
-		}
-	}
-	if (!sanity) {
-		printf("-----------------------\n");
-	}
-}
-
-
-
-#define ZTBDEQ(idx)                                                 \
-    ztBlocks[ztBlocks[(idx)].prev].next = ztBlocks[(idx)].next;     \
-    ztBlocks[ztBlocks[(idx)].next].prev = ztBlocks[(idx)].prev;
-
-static void
-ztFree(zone_t zone __unused, uint32_t index, uint32_t count)
-{
-	uint32_t q, w, p, size, merge;
-
-	assert(count);
-	ztBlocksFree += count;
-
-	// merge with preceding
-	merge = (index + count);
-	if ((merge < ztBlocksCount)
-	    && ztPresent(&ztBlocks[merge], sizeof(ztBlocks[merge]))
-	    && ztBlocks[merge].free) {
-		ZTBDEQ(merge);
-		count += ztBlocks[merge].size;
-	}
-
-	// merge with following
-	merge = (index - 1);
-	if ((merge > ztFreeIndexMax)
-	    && ztPresent(&ztBlocks[merge], sizeof(ztBlocks[merge]))
-	    && ztBlocks[merge].free) {
-		size = ztBlocks[merge].size;
-		count += size;
-		index -= size;
-		ZTBDEQ(index);
-	}
-
-	q = ztLog2down(count);
-	if (q > ztFreeIndexMax) {
-		q = ztFreeIndexMax;
-	}
-	w = q;
-	// queue in order of size
-	while (TRUE) {
-		p = ztBlocks[w].next;
-		if (p == q) {
-			break;
-		}
-		if (ztBlocks[p].size >= count) {
-			break;
-		}
-		w = p;
-	}
-	ztBlocks[p].prev = index;
-	ztBlocks[w].next = index;
-
-	// fault in first
-	ztFault(&ztBlocks[index], sizeof(ztBlocks[index]), 0);
-
-	// mark first & last with free flag and size
-	ztBlocks[index].free = TRUE;
-	ztBlocks[index].size = count;
-	ztBlocks[index].prev = w;
-	ztBlocks[index].next = p;
-	if (count > 1) {
-		index += (count - 1);
-		// fault in last
-		ztFault(&ztBlocks[index], sizeof(ztBlocks[index]), 0);
-		ztBlocks[index].free = TRUE;
-		ztBlocks[index].size = count;
-	}
-}
-
-static uint32_t
-ztAlloc(zone_t zone, uint32_t count)
-{
-	uint32_t q, w, p, leftover;
-
-	assert(count);
-
-	q = ztLog2up(count);
-	if (q > ztFreeIndexMax) {
-		q = ztFreeIndexMax;
-	}
-	do{
-		w = q;
-		while (TRUE) {
-			p = ztBlocks[w].next;
-			if (p == q) {
-				break;
-			}
-			if (ztBlocks[p].size >= count) {
-				// dequeue, mark both ends allocated
-				ztBlocks[w].next = ztBlocks[p].next;
-				ztBlocks[ztBlocks[p].next].prev = w;
-				ztBlocks[p].free = FALSE;
-				ztBlocksFree -= ztBlocks[p].size;
-				if (ztBlocks[p].size > 1) {
-					ztBlocks[p + ztBlocks[p].size - 1].free = FALSE;
-				}
-
-				// fault all the allocation
-				ztFault(&ztBlocks[p], count * sizeof(ztBlocks[p]), 0);
-				// mark last as allocated
-				if (count > 1) {
-					ztBlocks[p + count - 1].free = FALSE;
-				}
-				// free remainder
-				leftover = ztBlocks[p].size - count;
-				if (leftover) {
-					ztFree(zone, p + ztBlocks[p].size - leftover, leftover);
-				}
-
-				return p;
-			}
-			w = p;
-		}
-		q++;
-	}while (q <= ztFreeIndexMax);
-
-	return -1U;
-}
-
-__startup_func
-static void
-zone_tagging_init(void)
-{
-	// allocate submaps VM_KERN_MEMORY_DIAG
-	zone_tagbase_range = zone_kmem_suballoc(zone_tagbase_range.min_address,
-	    zone_tagbase_map_size, VM_FLAGS_FIXED_RANGE_SUBALLOC,
-	    VM_KERN_MEMORY_DIAG, &zone_tagbase_map);
-
-	zone_tags_range = zone_kmem_suballoc(zone_tags_range.min_address,
-	    zone_tags_map_size, VM_FLAGS_FIXED_RANGE_SUBALLOC, VM_KERN_MEMORY_DIAG,
-	    &zone_tags_map);
-
-	ztBlocks = (ztBlock *) zone_tags_range.min_address;
-	ztBlocksCount = (uint32_t)(zone_tags_map_size / sizeof(ztBlock));
-
-	// initialize the qheads
-	lck_mtx_lock(&ztLock);
-
-	ztFault(&ztBlocks[0], sizeof(ztBlocks[0]), 0);
-	for (uint32_t idx = 0; idx < ztFreeIndexCount; idx++) {
-		ztBlocks[idx].free = TRUE;
-		ztBlocks[idx].next = idx;
-		ztBlocks[idx].prev = idx;
-		ztBlocks[idx].size = 0;
-	}
-	// free remaining space
-	ztFree(NULL, ztFreeIndexCount, ztBlocksCount - ztFreeIndexCount);
-
-	lck_mtx_unlock(&ztLock);
-}
-
-static void
-ztMemoryAdd(zone_t zone, vm_offset_t mem, vm_size_t size)
-{
-	uint32_t * tagbase;
-	uint32_t   count, block, blocks, idx;
-	size_t     pages;
-
-	pages = atop(size);
-	tagbase = ZTAGBASE(zone, mem);
-
-	lck_mtx_lock(&ztLock);
-
-	// fault tagbase
-	ztFault(tagbase, pages * sizeof(uint32_t), 0);
-
-	if (!zone->z_tags_inline) {
-		// allocate tags
-		count = (uint32_t)(size / zone_elem_size(zone));
-		blocks = ((count + ztTagsPerBlock - 1) / ztTagsPerBlock);
-		block = ztAlloc(zone, blocks);
-		if (-1U == block) {
-			ztDump(false);
-		}
-		assert(-1U != block);
-	}
-
-	lck_mtx_unlock(&ztLock);
-
-	if (!zone->z_tags_inline) {
-		// set tag base for each page
-		block *= ztTagsPerBlock;
-		for (idx = 0; idx < pages; idx++) {
-			vm_offset_t esize = zone_elem_size(zone);
-			tagbase[idx] = block + (uint32_t)((ptoa(idx) + esize - 1) / esize);
-		}
-	}
-}
-
-static void
-ztMemoryRemove(zone_t zone, vm_offset_t mem, vm_size_t size)
-{
-	uint32_t * tagbase;
-	uint32_t   count, block, blocks, idx;
-	size_t     pages;
-
-	// set tag base for each page
-	pages = atop(size);
-	tagbase = ZTAGBASE(zone, mem);
-	block = tagbase[0];
-	for (idx = 0; idx < pages; idx++) {
-		tagbase[idx] = 0xFFFFFFFF;
-	}
-
-	lck_mtx_lock(&ztLock);
-	if (!zone->z_tags_inline) {
-		count = (uint32_t)(size / zone_elem_size(zone));
-		blocks = ((count + ztTagsPerBlock - 1) / ztTagsPerBlock);
-		assert(block != 0xFFFFFFFF);
-		block /= ztTagsPerBlock;
-		ztFree(NULL /* zone is unlocked */, block, blocks);
-	}
-
-	lck_mtx_unlock(&ztLock);
-}
-
 uint16_t
 zone_index_from_tag_index(uint32_t sizeclass_idx)
 {
@@ -2758,82 +2283,164 @@ zone_index_from_tag_index(uint32_t sizeclass_idx)
 
 #endif /* VM_TAG_SIZECLASSES */
 #endif /* !ZALLOC_TEST */
+/*! @} */
 #pragma mark zalloc helpers
 #if !ZALLOC_TEST
 
-__pure2
-static inline uint16_t
-zc_mag_size(void)
+static inline void *
+zstack_tbi_fix(vm_offset_t elem)
 {
-	return zc_magazine_size;
+#if KASAN_TBI
+	elem = kasan_tbi_fix_address_tag(elem);
+#endif
+	return (void *)elem;
 }
 
-__attribute__((noinline, cold))
-static void
-zone_lock_was_contended(zone_t zone, zone_cache_t zc)
+static inline vm_offset_t
+zstack_tbi_fill(void *addr)
 {
-	lck_ticket_lock_nopreempt(&zone->z_lock, &zone_locks_grp);
+	vm_offset_t elem = (vm_offset_t)addr;
+
+#if KASAN_TBI
+	elem = VM_KERNEL_TBI_FILL(elem);
+#endif
+	return elem;
+}
+
+__attribute__((always_inline))
+static inline void
+zstack_push_no_delta(zstack_t *stack, void *addr)
+{
+	vm_offset_t elem = zstack_tbi_fill(addr);
+
+	*(vm_offset_t *)addr = stack->z_head - elem;
+	stack->z_head = elem;
+}
+
+__attribute__((always_inline))
+void
+zstack_push(zstack_t *stack, void *addr)
+{
+	zstack_push_no_delta(stack, addr);
+	stack->z_count++;
+}
+
+__attribute__((always_inline))
+static inline void *
+zstack_pop_no_delta(zstack_t *stack)
+{
+	void *addr = zstack_tbi_fix(stack->z_head);
+
+	stack->z_head += *(vm_offset_t *)addr;
+	*(vm_offset_t *)addr = 0;
+
+	return addr;
+}
+
+__attribute__((always_inline))
+void *
+zstack_pop(zstack_t *stack)
+{
+	stack->z_count--;
+	return zstack_pop_no_delta(stack);
+}
+
+static inline void
+zone_recirc_lock_nopreempt_check_contention(zone_t zone)
+{
+	uint32_t ticket;
+
+	if (__probable(hw_lck_ticket_reserve_nopreempt(&zone->z_recirc_lock,
+	    &ticket, &zone_locks_grp))) {
+		return;
+	}
+
+	hw_lck_ticket_wait(&zone->z_recirc_lock, ticket, NULL, &zone_locks_grp);
 
 	/*
 	 * If zone caching has been disabled due to memory pressure,
 	 * then recording contention is not useful, give the system
 	 * time to recover.
 	 */
-	if (__improbable(zone_caching_disabled)) {
+	if (__probable(!zone_caching_disabled)) {
+		zone->z_recirc_cont_cur++;
+	}
+}
+
+static inline void
+zone_recirc_lock_nopreempt(zone_t zone)
+{
+	hw_lck_ticket_lock_nopreempt(&zone->z_recirc_lock, &zone_locks_grp);
+}
+
+static inline void
+zone_recirc_unlock_nopreempt(zone_t zone)
+{
+	hw_lck_ticket_unlock_nopreempt(&zone->z_recirc_lock);
+}
+
+static inline void
+zone_lock_nopreempt_check_contention(zone_t zone)
+{
+	uint32_t ticket;
+#if KASAN_FAKESTACK
+	spl_t s = 0;
+	if (zone->z_kasan_fakestacks) {
+		s = splsched();
+	}
+#endif /* KASAN_FAKESTACK */
+
+	if (__probable(hw_lck_ticket_reserve_nopreempt(&zone->z_lock, &ticket,
+	    &zone_locks_grp))) {
+#if KASAN_FAKESTACK
+		zone->z_kasan_spl = s;
+#endif /* KASAN_FAKESTACK */
 		return;
 	}
 
-	zone->z_contention_cur++;
-
-	if (zc == NULL || zc->zc_depot_max >= INT16_MAX) {
-		return;
-	}
+	hw_lck_ticket_wait(&zone->z_lock, ticket, NULL, &zone_locks_grp);
+#if KASAN_FAKESTACK
+	zone->z_kasan_spl = s;
+#endif /* KASAN_FAKESTACK */
 
 	/*
-	 * Let the depot grow based on how bad the contention is,
-	 * and how populated the zone is.
+	 * If zone caching has been disabled due to memory pressure,
+	 * then recording contention is not useful, give the system
+	 * time to recover.
 	 */
-	if (zone->z_contention_wma < 2 * Z_CONTENTION_WMA_UNIT) {
-		if (zc->zc_depot_max * zpercpu_count() * 20u >=
-		    zone->z_elems_avail) {
-			return;
-		}
+	if (__probable(!zone_caching_disabled && !zone->z_pcpu_cache)) {
+		zone->z_recirc_cont_cur++;
 	}
-	if (zone->z_contention_wma < 4 * Z_CONTENTION_WMA_UNIT) {
-		if (zc->zc_depot_max * zpercpu_count() * 10u >=
-		    zone->z_elems_avail) {
-			return;
-		}
-	}
-	if (!zc_grow_threshold || zone->z_contention_wma <
-	    zc_grow_threshold * Z_CONTENTION_WMA_UNIT) {
-		return;
-	}
-
-	zc->zc_depot_max++;
 }
 
 static inline void
-zone_lock_nopreempt_check_contention(zone_t zone, zone_cache_t zc)
+zone_lock_nopreempt(zone_t zone)
 {
-	if (lck_ticket_lock_try_nopreempt(&zone->z_lock, &zone_locks_grp)) {
-		return;
+#if KASAN_FAKESTACK
+	spl_t s = 0;
+	if (zone->z_kasan_fakestacks) {
+		s = splsched();
 	}
-
-	zone_lock_was_contended(zone, zc);
-}
-
-static inline void
-zone_lock_check_contention(zone_t zone, zone_cache_t zc)
-{
-	disable_preemption();
-	zone_lock_nopreempt_check_contention(zone, zc);
+#endif /* KASAN_FAKESTACK */
+	hw_lck_ticket_lock_nopreempt(&zone->z_lock, &zone_locks_grp);
+#if KASAN_FAKESTACK
+	zone->z_kasan_spl = s;
+#endif /* KASAN_FAKESTACK */
 }
 
 static inline void
 zone_unlock_nopreempt(zone_t zone)
 {
-	lck_ticket_unlock_nopreempt(&zone->z_lock);
+#if KASAN_FAKESTACK
+	spl_t s = zone->z_kasan_spl;
+	zone->z_kasan_spl = 0;
+#endif /* KASAN_FAKESTACK */
+	hw_lck_ticket_unlock_nopreempt(&zone->z_lock);
+#if KASAN_FAKESTACK
+	if (zone->z_kasan_fakestacks) {
+		splx(s);
+	}
+#endif /* KASAN_FAKESTACK */
 }
 
 static inline void
@@ -2860,6 +2467,24 @@ zone_depot_unlock(zone_cache_t zc)
 	hw_lck_ticket_unlock(&zc->zc_depot_lock);
 }
 
+zone_t
+zone_by_id(size_t zid)
+{
+	return (zone_t)((uintptr_t)zone_array + zid * sizeof(struct zone));
+}
+
+static inline bool
+zone_supports_vm(zone_t z)
+{
+	/*
+	 * VM_MAP_ENTRY and VM_MAP_HOLES zones are allowed
+	 * to overcommit because they're used to reclaim memory
+	 * (VM support).
+	 */
+	return z >= &zone_array[ZONE_ID_VM_MAP_ENTRY] &&
+	       z <= &zone_array[ZONE_ID_VM_MAP_HOLES];
+}
+
 const char *
 zone_name(zone_t z)
 {
@@ -2882,7 +2507,7 @@ zone_alloc_pages_for_nelems(zone_t z, vm_size_t max_elems)
 	vm_size_t elem_count, chunks;
 
 	elem_count = ptoa(z->z_percpu ? 1 : z->z_chunk_pages) /
-	    zone_elem_size(z);
+	    zone_elem_outer_size(z);
 	chunks = (max_elems + elem_count - 1) / elem_count;
 
 	return (uint32_t)MIN(UINT32_MAX, chunks * z->z_chunk_pages);
@@ -2902,13 +2527,155 @@ zone_submaps_approx_size(void)
 	return size;
 }
 
+static inline void
+zone_depot_init(struct zone_depot *zd)
+{
+	*zd = (struct zone_depot){
+		.zd_tail = &zd->zd_head,
+	};
+}
+
+static inline void
+zone_depot_insert_head_full(struct zone_depot *zd, zone_magazine_t mag)
+{
+	if (zd->zd_full++ == 0) {
+		zd->zd_tail = &mag->zm_next;
+	}
+	mag->zm_next = zd->zd_head;
+	zd->zd_head = mag;
+}
+
+static inline void
+zone_depot_insert_tail_full(struct zone_depot *zd, zone_magazine_t mag)
+{
+	zd->zd_full++;
+	mag->zm_next = *zd->zd_tail;
+	*zd->zd_tail = mag;
+	zd->zd_tail = &mag->zm_next;
+}
+
+static inline void
+zone_depot_insert_head_empty(struct zone_depot *zd, zone_magazine_t mag)
+{
+	zd->zd_empty++;
+	mag->zm_next = *zd->zd_tail;
+	*zd->zd_tail = mag;
+}
+
+static inline zone_magazine_t
+zone_depot_pop_head_full(struct zone_depot *zd, zone_t z)
+{
+	zone_magazine_t mag = zd->zd_head;
+
+	assert(zd->zd_full);
+
+	zd->zd_full--;
+	if (z && z->z_recirc_full_min > zd->zd_full) {
+		z->z_recirc_full_min = zd->zd_full;
+	}
+	zd->zd_head = mag->zm_next;
+	if (zd->zd_full == 0) {
+		zd->zd_tail = &zd->zd_head;
+	}
+
+	mag->zm_next = NULL;
+	return mag;
+}
+
+static inline zone_magazine_t
+zone_depot_pop_head_empty(struct zone_depot *zd, zone_t z)
+{
+	zone_magazine_t mag = *zd->zd_tail;
+
+	assert(zd->zd_empty);
+
+	zd->zd_empty--;
+	if (z && z->z_recirc_empty_min > zd->zd_empty) {
+		z->z_recirc_empty_min = zd->zd_empty;
+	}
+	*zd->zd_tail = mag->zm_next;
+
+	mag->zm_next = NULL;
+	return mag;
+}
+
+static inline smr_seq_t
+zone_depot_move_full(
+	struct zone_depot      *dst,
+	struct zone_depot      *src,
+	uint32_t                n,
+	zone_t                  z)
+{
+	zone_magazine_t head, last;
+
+	assert(n);
+	assert(src->zd_full >= n);
+
+	src->zd_full -= n;
+	if (z && z->z_recirc_full_min > src->zd_full) {
+		z->z_recirc_full_min = src->zd_full;
+	}
+	head = last = src->zd_head;
+	for (uint32_t i = n; i-- > 1;) {
+		last = last->zm_next;
+	}
+
+	src->zd_head = last->zm_next;
+	if (src->zd_full == 0) {
+		src->zd_tail = &src->zd_head;
+	}
+
+	if (z && zone_security_array[zone_index(z)].z_lifo) {
+		if (dst->zd_full == 0) {
+			dst->zd_tail = &last->zm_next;
+		}
+		last->zm_next = dst->zd_head;
+		dst->zd_head = head;
+	} else {
+		last->zm_next = *dst->zd_tail;
+		*dst->zd_tail = head;
+		dst->zd_tail = &last->zm_next;
+	}
+	dst->zd_full += n;
+
+	return last->zm_seq;
+}
+
+static inline void
+zone_depot_move_empty(
+	struct zone_depot      *dst,
+	struct zone_depot      *src,
+	uint32_t                n,
+	zone_t                  z)
+{
+	zone_magazine_t head, last;
+
+	assert(n);
+	assert(src->zd_empty >= n);
+
+	src->zd_empty -= n;
+	if (z && z->z_recirc_empty_min > src->zd_empty) {
+		z->z_recirc_empty_min = src->zd_empty;
+	}
+	head = last = *src->zd_tail;
+	for (uint32_t i = n; i-- > 1;) {
+		last = last->zm_next;
+	}
+
+	*src->zd_tail = last->zm_next;
+
+	dst->zd_empty += n;
+	last->zm_next = *dst->zd_tail;
+	*dst->zd_tail = head;
+}
+
 static void
 zone_cache_swap_magazines(zone_cache_t cache)
 {
 	uint16_t count_a = cache->zc_alloc_cur;
 	uint16_t count_f = cache->zc_free_cur;
-	zone_element_t *elems_a = cache->zc_alloc_elems;
-	zone_element_t *elems_f = cache->zc_free_elems;
+	vm_offset_t *elems_a = cache->zc_alloc_elems;
+	vm_offset_t *elems_f = cache->zc_free_elems;
 
 	z_debug_assert(count_a <= zc_mag_size());
 	z_debug_assert(count_f <= zc_mag_size());
@@ -2919,19 +2686,11 @@ zone_cache_swap_magazines(zone_cache_t cache)
 	cache->zc_free_elems = elems_a;
 }
 
-/*!
- * @function zone_magazine_load
- *
- * @brief
- * Cache the value of @c zm_cur on the cache to avoid a dependent load
- * on the allocation fastpath.
- */
-static void
-zone_magazine_load(uint16_t *count, zone_element_t **elems, zone_magazine_t mag)
+__pure2
+static smr_t
+zone_cache_smr(zone_cache_t cache)
 {
-	z_debug_assert(mag->zm_cur <= zc_mag_size());
-	*count = mag->zm_cur;
-	*elems = mag->zm_elems;
+	return cache->zc_smr;
 }
 
 /*!
@@ -2941,16 +2700,23 @@ zone_magazine_load(uint16_t *count, zone_element_t **elems, zone_magazine_t mag)
  * Unlod a magazine and load a new one instead.
  */
 static zone_magazine_t
-zone_magazine_replace(uint16_t *count, zone_element_t **elems,
-    zone_magazine_t mag)
+zone_magazine_replace(zone_cache_t zc, zone_magazine_t mag, bool empty)
 {
 	zone_magazine_t old;
+	vm_offset_t **elems;
 
+	mag->zm_seq = SMR_SEQ_INVALID;
+
+	if (empty) {
+		elems = &zc->zc_free_elems;
+		zc->zc_free_cur = 0;
+	} else {
+		elems = &zc->zc_alloc_elems;
+		zc->zc_alloc_cur = zc_mag_size();
+	}
 	old = (zone_magazine_t)((uintptr_t)*elems -
 	    offsetof(struct zone_magazine, zm_elems));
-	old->zm_cur = *count;
-	z_debug_assert(old->zm_cur <= zc_mag_size());
-	zone_magazine_load(count, elems, mag);
+	*elems = mag->zm_elems;
 
 	return old;
 }
@@ -2968,35 +2734,46 @@ zone_magazine_free(zone_magazine_t mag)
 }
 
 static void
-zone_magazine_free_list(struct zone_depot *mags)
+zone_magazine_free_list(struct zone_depot *zd)
 {
-	zone_magazine_t mag, tmp;
+	zone_magazine_t tmp, mag = *zd->zd_tail;
 
-	STAILQ_FOREACH_SAFE(mag, mags, zm_link, tmp) {
+	while (mag) {
+		tmp = mag->zm_next;
 		zone_magazine_free(mag);
+		mag = tmp;
 	}
 
-	STAILQ_INIT(mags);
+	*zd->zd_tail = NULL;
+	zd->zd_empty = 0;
 }
 
-static void
+void
 zone_enable_caching(zone_t zone)
 {
+	size_t size_per_mag = zone_elem_inner_size(zone) * zc_mag_size();
 	zone_cache_t caches;
+	size_t depot_limit;
+
+	depot_limit = zc_pcpu_max() / size_per_mag;
+	zone->z_depot_limit = (uint16_t)MIN(depot_limit, INT16_MAX);
 
 	caches = zalloc_percpu_permanent_type(struct zone_cache);
 	zpercpu_foreach(zc, caches) {
-		zone_magazine_load(&zc->zc_alloc_cur, &zc->zc_alloc_elems,
-		    zone_magazine_alloc(Z_WAITOK | Z_NOFAIL));
-		zone_magazine_load(&zc->zc_free_cur, &zc->zc_free_elems,
-		    zone_magazine_alloc(Z_WAITOK | Z_NOFAIL));
-		STAILQ_INIT(&zc->zc_depot);
+		zc->zc_alloc_elems = zone_magazine_alloc(Z_WAITOK | Z_NOFAIL)->zm_elems;
+		zc->zc_free_elems = zone_magazine_alloc(Z_WAITOK | Z_NOFAIL)->zm_elems;
+		zone_depot_init(&zc->zc_depot);
 		hw_lck_ticket_init(&zc->zc_depot_lock, &zone_locks_grp);
 	}
 
-	if (os_atomic_xchg(&zone->z_pcpu_cache, caches, release)) {
-		panic("allocating caches for zone %s twice", zone->z_name);
-	}
+	zone_lock(zone);
+	assert(zone->z_pcpu_cache == NULL);
+	zone->z_pcpu_cache = caches;
+	zone->z_recirc_cont_cur = 0;
+	zone->z_recirc_cont_wma = 0;
+	zone->z_elems_free_min = 0; /* becomes z_recirc_empty_min */
+	zone->z_elems_free_wma = 0; /* becomes z_recirc_empty_wma */
+	zone_unlock(zone);
 }
 
 bool
@@ -3104,7 +2881,7 @@ zalloc_random_uniform32(uint32_t bound_min, uint32_t bound_max)
 }
 
 #endif /* ZSECURITY_CONFIG(SAD_FENG_SHUI) || CONFIG_PROB_GZALLOC */
-#if ZONE_ENABLE_LOGGING || CONFIG_PROB_GZALLOC
+#if ZALLOC_ENABLE_LOGGING || CONFIG_PROB_GZALLOC
 /*
  * Track all kalloc zones of specified size for zlog name
  * kalloc.type.<size> or kalloc.type.var.<size> or kalloc.<size>
@@ -3122,7 +2899,7 @@ track_kalloc_zones(zone_t z, const char *logname)
 	    strncmp(logname, prefix, len) == 0) {
 		vm_size_t sizeclass = strtoul(logname + len, NULL, 0);
 
-		return zone_elem_size(z) == sizeclass;
+		return zone_elem_inner_size(z) == sizeclass;
 	}
 
 	prefix = "kalloc.type.";
@@ -3131,7 +2908,7 @@ track_kalloc_zones(zone_t z, const char *logname)
 	    strncmp(logname, prefix, len) == 0) {
 		vm_size_t sizeclass = strtoul(logname + len, NULL, 0);
 
-		return zone_elem_size(z) == sizeclass;
+		return zone_elem_inner_size(z) == sizeclass;
 	}
 
 	prefix = "kalloc.";
@@ -3140,7 +2917,7 @@ track_kalloc_zones(zone_t z, const char *logname)
 	    strncmp(logname, prefix, len) == 0) {
 		vm_size_t sizeclass = strtoul(logname + len, NULL, 0);
 
-		return zone_elem_size(z) == sizeclass;
+		return zone_elem_inner_size(z) == sizeclass;
 	}
 
 	return false;
@@ -3192,20 +2969,39 @@ zone_element_info(void *addr, vm_tag_t * ptag)
 
 	if (from_zone_map(addr, sizeof(void *))) {
 		src_zone = zone_by_id(zone_index_from_ptr(addr));
+		size     = zone_elem_inner_size(src_zone);
 #if VM_TAG_SIZECLASSES
 		if (__improbable(src_zone->z_uses_tags)) {
-			tag = *ztSlot(src_zone, (vm_offset_t)addr) >> 1;
+			struct zone_page_metadata *meta;
+			vm_offset_t eidx;
+			vm_tag_t *slot;
+
+			meta = zone_element_resolve(src_zone,
+			    (vm_offset_t)addr, &eidx);
+			slot = zba_extra_ref_ptr(meta->zm_bitmap, eidx);
+			tag  = *slot;
 		}
 #endif /* VM_TAG_SIZECLASSES */
-		size = zone_elem_size(src_zone);
 	}
+
 	*ptag = tag;
 	return size;
 }
 
 #endif /* DEBUG || DEVELOPMENT */
-#endif /* !ZALLOC_TEST */
+#if KASAN_CLASSIC
 
+vm_size_t
+kasan_quarantine_resolve(vm_address_t addr, zone_t *zonep)
+{
+	zone_t zone = zone_by_id(zone_index_from_ptr((void *)addr));
+
+	*zonep = zone;
+	return zone_elem_inner_size(zone);
+}
+
+#endif /* KASAN_CLASSIC */
+#endif /* !ZALLOC_TEST */
 #pragma mark Zone zeroing and early random
 #if !ZALLOC_TEST
 
@@ -3253,17 +3049,11 @@ __abortlike
 static void
 zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
 {
-	uint32_t esize = (uint32_t)zone_elem_size(z);
+	uint32_t esize = (uint32_t)zone_elem_inner_size(z);
 	uint32_t first_offs = ~0u;
 	uintptr_t first_bits = 0, v;
 	char buf[1024];
 	int pos = 0;
-
-#if __LP64__
-#define ZPF  "0x%016lx"
-#else
-#define ZPF  "0x%08lx"
-#endif
 
 	buf[0] = '\0';
 
@@ -3272,7 +3062,7 @@ zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
 			continue;
 		}
 		pos += scnprintf(buf + pos, sizeof(buf) - pos, "\n"
-		    "%5d: "ZPF, o, v);
+		    "%5d: 0x%016lx", o, v);
 		if (first_offs > o) {
 			first_offs = o;
 			first_bits = v;
@@ -3280,16 +3070,17 @@ zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
 	}
 
 	(panic)("[%s%s]: element modified after free "
-	"(off:%d, val:"ZPF", sz:%d, ptr:%p)%s",
+	"(off:%d, val:0x%016lx, sz:%d, ptr:%p)%s",
 	zone_heap_name(z), zone_name(z),
 	first_offs, first_bits, esize, (void *)elem, buf);
-
-#undef ZPF
 }
 
 static void
-zalloc_validate_element(zone_t zone, vm_offset_t elem, vm_size_t size,
-    zalloc_flags_t flags)
+zalloc_validate_element(
+	zone_t                  zone,
+	vm_offset_t             elem,
+	vm_size_t               size,
+	zalloc_flags_t          flags)
 {
 	if (flags & Z_NOZZC) {
 		return;
@@ -3309,11 +3100,16 @@ zalloc_validate_element(zone_t zone, vm_offset_t elem, vm_size_t size,
 
 #endif /* ZALLOC_ENABLE_ZERO_CHECK */
 
+__attribute__((noinline))
 static void
-zone_early_scramble_rr(zone_t zone, zone_stats_t zstats)
+zone_early_scramble_rr(zone_t zone, int cpu, zone_stats_t zs)
 {
-	int cpu = cpu_number();
-	zone_stats_t zs = zpercpu_get_cpu(zstats, cpu);
+#if KASAN_FAKESTACK
+	/*
+	 * This can cause re-entrancy with kasan fakestacks
+	 */
+#pragma unused(zone, cpu, zs)
+#else
 	uint32_t bits;
 
 	bits = random_bool_gen_bits(&zone_bool_gen[cpu].zbg_bg,
@@ -3321,12 +3117,13 @@ zone_early_scramble_rr(zone_t zone, zone_stats_t zstats)
 
 	zs->zs_alloc_rr += bits;
 	zs->zs_alloc_rr %= zone->z_chunk_elems;
+#endif
 }
 
 #endif /* !ZALLOC_TEST */
 #pragma mark Zone Leak Detection
 #if !ZALLOC_TEST
-#if ZONE_ENABLE_LOGGING || CONFIG_ZLEAKS
+#if ZALLOC_ENABLE_LOGGING || CONFIG_ZLEAKS
 
 /*
  * Zone leak debugging code
@@ -3399,7 +3196,7 @@ STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, zone_leaks_init_zrecs);
 static uint32_t
 zone_leaks_record_count(zone_t z)
 {
-	uint32_t recs = (zlsize << 10) / zone_elem_size(z);
+	uint32_t recs = (zlsize << 10) / zone_elem_inner_size(z);
 
 	return MIN(MAX(recs, ZRECORDS_DEFAULT), ZRECORDS_MAX);
 }
@@ -3407,14 +3204,10 @@ zone_leaks_record_count(zone_t z)
 static uint32_t
 zone_leaks_sample_rate(zone_t z)
 {
-	return (zlfreq << 10) / zone_elem_size(z);
+	return (zlfreq << 10) / zone_elem_inner_size(z);
 }
 
-#if KASAN_TBI
-static TUNABLE(size_t, kasan_zrecs, "kasan_zrecs", 0);
-#endif
-
-#if ZONE_ENABLE_LOGGING
+#if ZALLOC_ENABLE_LOGGING
 /* Log allocations and frees to help debug a zone element corruption */
 static TUNABLE(bool, corruption_debug_flag, "-zc", false);
 
@@ -3510,9 +3303,31 @@ zone_setup_logging(zone_t z)
 	}
 }
 
-#endif /* ZONE_ENABLE_LOGGING */
-
+#endif /* ZALLOC_ENABLE_LOGGING */
 #if KASAN_TBI
+static TUNABLE(uint32_t, kasan_zrecs, "kasan_zrecs", 0);
+
+__startup_func
+static void
+kasan_tbi_init_zrecs(void)
+{
+	/*
+	 * Don't allow more than ZRECORDS_MAX records,
+	 * even if the user asked for more.
+	 *
+	 * This prevents accidentally hogging too much kernel memory
+	 * and making the system unusable.
+	 */
+	if (kasan_zrecs == 0) {
+		kasan_zrecs = ZRECORDS_DEFAULT *
+		    (uint32_t)((max_mem + (1ul << 30)) >> 30);
+	}
+	if (kasan_zrecs > ZRECORDS_MAX) {
+		kasan_zrecs = ZRECORDS_MAX;
+	}
+}
+STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, kasan_tbi_init_zrecs);
+
 static void
 zone_setup_kasan_logging(zone_t z)
 {
@@ -3522,25 +3337,15 @@ zone_setup_kasan_logging(zone_t z)
 		return;
 	}
 
-	z->z_btlog_kasan = btlog_create(BTLOG_LOG, ZRECORDS_DEFAULT, 0);
-	if (!z->z_btlog_kasan) {
+	z->z_log_on = true;
+	z->z_btlog = btlog_create(BTLOG_LOG, kasan_zrecs, 0);
+	if (!z->z_btlog) {
 		printf("zone[%s%s]: failed to enable kasan logging\n",
 		    zone_heap_name(z), z->z_name);
 	}
 }
 
-static void
-kasan_tbi_log_bt(zone_t zone, uint8_t op, vm_offset_t addr, void *fp)
-{
-	assert(op == ZOP_ALLOC || op == ZOP_FREE);
-
-	if (__probable(zone->z_tbi_tag && zone->z_btlog_kasan)) {
-		btref_t ref = btref_get(fp, BTREF_GET_NOWAIT);
-		btlog_record(zone->z_btlog_kasan, (void *)addr, op, ref);
-	}
-}
 #endif /* KASAN_TBI */
-
 #if CONFIG_ZLEAKS
 
 static thread_call_data_t zone_leaks_callout;
@@ -3727,7 +3532,7 @@ panic_display_zleaks(bool has_syms)
 		paniclog_append_noflush("  Zone:    %s%s\n",
 		    zone_heap_name(z), zone_name(z));
 		paniclog_append_noflush("  Count:   %d (%ld bytes)\n", count,
-		    (long)count * zone_scale_for_percpu(z, zone_elem_size(z)));
+		    (long)count * zone_scale_for_percpu(z, zone_elem_inner_size(z)));
 		paniclog_append_noflush("  Size:    %ld\n",
 		    (long)zone_size_wired(z));
 		paniclog_append_noflush("  Top backtrace:\n");
@@ -3747,35 +3552,71 @@ panic_display_zleaks(bool has_syms)
 }
 #endif /* CONFIG_ZLEAKS */
 
+#endif /* ZONE_ENABLE_LOGGING || CONFIG_ZLEAKS */
+#if ZONE_ENABLE_LOGGING || CONFIG_ZLEAKS || KASAN_TBI
+
+#if !KASAN_TBI
+__cold
+#endif
 static void
-zalloc_log(btlog_t log, vm_offset_t addr, zalloc_flags_t flags, void *fp)
+zalloc_log(zone_t zone, vm_offset_t addr, uint32_t count, void *fp)
 {
+	btlog_t log = zone->z_btlog;
+	btref_get_flags_t flags = 0;
 	btref_t ref;
 
-	if (btlog_sample(log)) {
-		ref = btref_get(fp, (flags & Z_NOWAIT) ? BTREF_GET_NOWAIT : 0);
+#if !KASAN_TBI
+	if (!log || !btlog_sample(log)) {
+		return;
+	}
+#endif
+	if (get_preemption_level() || zone_supports_vm(zone)) {
+		/*
+		 * VM zones can be used by btlog, avoid reentrancy issues.
+		 */
+		flags = BTREF_GET_NOWAIT;
+	}
+
+	ref = btref_get(fp, flags);
+	while (count-- > 0) {
+		if (count) {
+			btref_retain(ref);
+		}
 		btlog_record(log, (void *)addr, ZOP_ALLOC, ref);
+		addr += *(vm_offset_t *)addr;
 	}
 }
 
+#define ZALLOC_LOG(zone, addr, count)  ({ \
+	if ((zone)->z_btlog) {                                                 \
+	        zalloc_log(zone, addr, count, __builtin_frame_address(0));     \
+	}                                                                      \
+})
+
+#if !KASAN_TBI
+__cold
+#endif
 static void
-zfree_log(btlog_t log, vm_offset_t addr, void *fp)
+zfree_log(zone_t zone, vm_offset_t addr, uint32_t count, void *fp)
 {
+	btlog_t log = zone->z_btlog;
+	btref_get_flags_t flags = 0;
+	btref_t ref;
+
+#if !KASAN_TBI
+	if (!log) {
+		return;
+	}
+#endif
+
 	/*
 	 * See if we're doing logging on this zone.
 	 *
 	 * There are two styles of logging used depending on
 	 * whether we're trying to catch a leak or corruption.
 	 */
-	if (btlog_get_type(log) == BTLOG_LOG) {
-		/*
-		 * We're logging to catch a corruption.
-		 *
-		 * Add a record of this zfree operation to log.
-		 */
-		btlog_record(log, (void *)addr, ZOP_FREE,
-		    btref_get(fp, BTREF_GET_NOWAIT));
-	} else {
+#if !KASAN_TBI
+	if (btlog_get_type(log) == BTLOG_HASH) {
 		/*
 		 * We're logging to catch a leak.
 		 *
@@ -3786,11 +3627,41 @@ zfree_log(btlog_t log, vm_offset_t addr, void *fp)
 		 * Since the log is of a limited size, old records get
 		 * overwritten if there are more zallocs than zfrees.
 		 */
-		btlog_erase(log, (void *)addr);
+		while (count-- > 0) {
+			btlog_erase(log, (void *)addr);
+			addr += *(vm_offset_t *)addr;
+		}
+		return;
+	}
+#endif /* !KASAN_TBI */
+
+	if (get_preemption_level() || zone_supports_vm(zone)) {
+		/*
+		 * VM zones can be used by btlog, avoid reentrancy issues.
+		 */
+		flags = BTREF_GET_NOWAIT;
+	}
+
+	ref = btref_get(fp, flags);
+	while (count-- > 0) {
+		if (count) {
+			btref_retain(ref);
+		}
+		btlog_record(log, (void *)addr, ZOP_FREE, ref);
+		addr += *(vm_offset_t *)addr;
 	}
 }
 
-#endif /* ZONE_ENABLE_LOGGING || CONFIG_ZLEAKS */
+#define ZFREE_LOG(zone, addr, count)  ({ \
+	if ((zone)->z_btlog) {                                                 \
+	        zfree_log(zone, addr, count, __builtin_frame_address(0));      \
+	}                                                                      \
+})
+
+#else
+#define ZALLOC_LOG(...)         ((void)0)
+#define ZFREE_LOG(...)          ((void)0)
+#endif /* ZALLOC_ENABLE_LOGGING || CONFIG_ZLEAKS || KASAN_TBI */
 #endif /* !ZALLOC_TEST */
 #pragma mark zone (re)fill
 #if !ZALLOC_TEST
@@ -3865,9 +3736,8 @@ zfree_log(btlog_t log, vm_offset_t addr, void *fp)
  * - @c z_pageq_full has chunk heads with populated pages with no free elements
  *   left,
  * - @c z_pageq_va has either chunk heads for sequestered VA space assigned to
- *   the zone forever (if @c z_va_sequester is enabled), or the first secondary
- *   metadata for a chunk whose corresponding page is not populated in the
- *   chunk.
+ *   the zone forever, or the first secondary metadata for a chunk whose
+ *   corresponding page is not populated in the chunk.
  *
  * When new pages need to be wired/populated, chunks from the @c z_pageq_va
  * queues are preferred.
@@ -3902,6 +3772,20 @@ zfree_log(btlog_t log, vm_offset_t addr, void *fp)
 
 static thread_call_data_t zone_expand_callout;
 
+__attribute__((overloadable))
+static inline bool
+zone_submap_is_sequestered(zone_submap_idx_t idx)
+{
+	return idx != Z_SUBMAP_IDX_DATA;
+}
+
+__attribute__((overloadable))
+static inline bool
+zone_submap_is_sequestered(zone_security_flags_t zsflags)
+{
+	return zone_submap_is_sequestered(zsflags.z_submap_idx);
+}
+
 static inline kma_flags_t
 zone_kma_flags(zone_t z, zone_security_flags_t zsflags, zalloc_flags_t flags)
 {
@@ -3913,7 +3797,8 @@ zone_kma_flags(zone_t z, zone_security_flags_t zsflags, zalloc_flags_t flags)
 	if (flags & Z_NOPAGEWAIT) {
 		kmaflags |= KMA_NOPAGEWAIT;
 	}
-	if (z->z_permanent || (!z->z_destructible && zsflags.z_va_sequester)) {
+	if (z->z_permanent || (!z->z_destructible &&
+	    zone_submap_is_sequestered(zsflags))) {
 		kmaflags |= KMA_PERMANENT;
 	}
 	if (zsflags.z_submap_from_end) {
@@ -3986,9 +3871,9 @@ zcram_and_lock(zone_t zone, vm_offset_t addr, uint32_t pg_va_new,
     uint32_t pg_start, uint32_t pg_end, uint16_t lock)
 {
 	zone_id_t zindex = zone_index(zone);
-	vm_offset_t elem_size = zone_elem_size(zone);
+	vm_offset_t elem_size = zone_elem_outer_size(zone);
 	uint32_t free_start = 0, free_end = 0;
-	uint32_t oob_offs = zone_elem_offs(zone);
+	uint32_t oob_offs = zone_elem_outer_offs(zone);
 
 	struct zone_page_metadata *meta = zone_meta_from_addr(addr);
 	uint32_t chunk_pages = zone->z_chunk_pages;
@@ -4006,9 +3891,11 @@ zcram_and_lock(zone_t zone, vm_offset_t addr, uint32_t pg_va_new,
 			secondary_len = ZM_SECONDARY_PCPU_PAGE;
 			assert(pg_end == zpercpu_count());
 		}
-		if (!zone->z_permanent) {
+		if (!zone->z_permanent && !zone->z_uses_tags) {
 			inline_bitmap = zone->z_chunk_elems <= 32 * chunk_pages;
 		}
+
+		free_end = (uint32_t)(ptoa(chunk_len) - oob_offs) / elem_size;
 
 		meta[0] = (struct zone_page_metadata){
 			.zm_index         = zindex,
@@ -4018,6 +3905,11 @@ zcram_and_lock(zone_t zone, vm_offset_t addr, uint32_t pg_va_new,
 			.zm_alloc_size    = lock,
 		};
 
+		if (!zone->z_permanent && !inline_bitmap) {
+			meta[0].zm_bitmap = zone_meta_bits_alloc_init(free_end,
+			    zone->z_chunk_elems, zone->z_uses_tags);
+		}
+
 		for (uint16_t i = 1; i < chunk_pages; i++) {
 			meta[i] = (struct zone_page_metadata){
 				.zm_index          = zindex,
@@ -4025,13 +3917,13 @@ zcram_and_lock(zone_t zone, vm_offset_t addr, uint32_t pg_va_new,
 				.zm_inline_bitmap  = inline_bitmap,
 				.zm_chunk_len      = secondary_len,
 				.zm_page_index     = (uint8_t)i,
+				.zm_bitmap         = meta[0].zm_bitmap,
 				.zm_subchunk_len   = (uint8_t)(chunk_pages - i),
 			};
 		}
 
-		free_end = (uint32_t)(ptoa(chunk_len) - oob_offs) / elem_size;
-		if (!zone->z_permanent) {
-			zone_meta_bits_init(meta, free_end, zone->z_chunk_elems);
+		if (inline_bitmap) {
+			zone_meta_bits_init_inline(meta, free_end);
 		}
 	} else {
 		assert(!zone->z_percpu && !zone->z_permanent);
@@ -4040,13 +3932,24 @@ zcram_and_lock(zone_t zone, vm_offset_t addr, uint32_t pg_va_new,
 		free_start = (uint32_t)(ptoa(pg_start) - oob_offs) / elem_size;
 	}
 
-#if VM_TAG_SIZECLASSES
-	if (__improbable(zone->z_uses_tags)) {
-		assert(!zone->z_percpu);
-		ztMemoryAdd(zone, addr + ptoa(pg_start),
-		    ptoa(pg_end - pg_start));
+#if KASAN_CLASSIC
+	assert(pg_start == 0); /* KASAN_CLASSIC never does partial chunks */
+	if (zone->z_permanent) {
+		kasan_poison_range(addr, ptoa(pg_end), ASAN_VALID);
+	} else if (zone->z_percpu) {
+		for (uint32_t i = 0; i < pg_end; i++) {
+			kasan_zmem_add(addr + ptoa(i), PAGE_SIZE,
+			    zone_elem_outer_size(zone),
+			    zone_elem_outer_offs(zone),
+			    zone_elem_redzone(zone));
+		}
+	} else {
+		kasan_zmem_add(addr, ptoa(pg_end),
+		    zone_elem_outer_size(zone),
+		    zone_elem_outer_offs(zone),
+		    zone_elem_redzone(zone));
 	}
-#endif /* VM_TAG_SIZECLASSES */
+#endif /* KASAN_CLASSIC */
 
 	/*
 	 * Insert the initialized pages / metadatas into the right lists.
@@ -4080,7 +3983,7 @@ zcram_and_lock(zone_t zone, vm_offset_t addr, uint32_t pg_va_new,
 		zone_meta_queue_push(zone, &zone->z_pageq_va, meta + pg_end);
 	}
 
-	zone_elems_free_add(zone, free_end - free_start);
+	zone->z_elems_free  += free_end - free_start;
 	zone->z_elems_avail += free_end - free_start;
 	zone->z_wired_cur   += zone->z_percpu ? 1 : pg_end - pg_start;
 	if (pg_va_new) {
@@ -4130,28 +4033,6 @@ zone_cram_early(zone_t zone, vm_offset_t newmem, vm_size_t size)
 	 */
 	bzero((void *)newmem, size);
 	zcram(zone, newmem, pages, ZM_ALLOC_SIZE_LOCK);
-}
-
-__attribute__((overloadable))
-static inline bool
-zone_submap_is_sequestered(zone_submap_idx_t idx)
-{
-	switch (idx) {
-	case Z_SUBMAP_IDX_READ_ONLY:
-	case Z_SUBMAP_IDX_VM:
-		return true;
-	case Z_SUBMAP_IDX_DATA:
-		return false;
-	default:
-		return ZSECURITY_CONFIG(SEQUESTER);
-	}
-}
-
-__attribute__((overloadable))
-static inline bool
-zone_submap_is_sequestered(zone_security_flags_t zsflags)
-{
-	return zone_submap_is_sequestered(zsflags.z_submap_idx);
 }
 
 /*!
@@ -4625,18 +4506,6 @@ ZONE_TRACE_VM_KERN_REQUEST_END(uint32_t pages)
 #endif
 }
 
-static inline bool
-zone_supports_vm(zone_t z)
-{
-	/*
-	 * VM_MAP_ENTRY and VM_MAP_HOLES zones are allowed
-	 * to overcommit because they're used to reclaim memory
-	 * (VM support).
-	 */
-	return z >= &zone_array[ZONE_ID_VM_MAP_ENTRY] &&
-	       z <= &zone_array[ZONE_ID_VM_MAP_HOLES];
-}
-
 __attribute__((noinline))
 static void
 __ZONE_MAP_EXHAUSTED_AND_WAITING_FOR_GC__(zone_t z, uint32_t pgs)
@@ -4699,6 +4568,27 @@ zone_expand_wait_for_pages(bool waited)
 	return !vm_pool_low();
 }
 
+static inline void
+zone_expand_async_schedule_if_allowed(zone_t zone)
+{
+	if (zone->z_async_refilling || zone->no_callout) {
+		return;
+	}
+
+	if (zone->exhaustible && zone->z_wired_cur >= zone->z_wired_max) {
+		return;
+	}
+
+	if (__improbable(startup_phase < STARTUP_SUB_EARLY_BOOT)) {
+		return;
+	}
+
+	if (!vm_pool_low() || zone_supports_vm(zone)) {
+		zone->z_async_refilling = true;
+		thread_call_enter(&zone_expand_callout);
+	}
+}
+
 static void
 zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
 {
@@ -4752,7 +4642,7 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
 		}
 
 		z->z_expanding_wait = true;
-		lck_ticket_sleep_with_inheritor(&z->z_lock, &zone_locks_grp,
+		hw_lck_ticket_sleep_with_inheritor(&z->z_lock, &zone_locks_grp,
 		    LCK_SLEEP_DEFAULT, &z->z_expander, z->z_expander->ze_thread,
 		    TH_UNINT, TIMEOUT_WAIT_FOREVER);
 	}
@@ -4790,12 +4680,13 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
 		/*
 		 * And now allocate pages to populate our VA.
 		 */
-		if (z->z_percpu) {
-			min_pages = z->z_chunk_pages;
-		} else {
-			min_pages = (uint32_t)atop(round_page(zone_elem_offs(z) +
-			    zone_elem_size(z)));
+		min_pages = z->z_chunk_pages;
+#if !KASAN_CLASSIC
+		if (!z->z_percpu) {
+			min_pages = (uint32_t)atop(round_page(zone_elem_outer_offs(z) +
+			    zone_elem_outer_size(z)));
 		}
+#endif /* !KASAN_CLASSIC */
 
 		/*
 		 * Trigger jetsams via VM_PAGEOUT_GC_EVENT
@@ -4859,6 +4750,8 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
 
 			zone_lock(z);
 
+			zone_expand_async_schedule_if_allowed(z);
+
 			if (cur_pages) {
 				zone_meta_unlock_from_partial(z, meta, cur_pages);
 			}
@@ -4879,6 +4772,12 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
 		ZONE_TRACE_VM_KERN_REQUEST_END(pages);
 
 		zcram_and_lock(z, addr, new_va, cur_pages, cur_pages + pages, 0);
+
+		if (z->z_wired_cur == z->z_wired_max) {
+			zone_unlock(z);
+			EVENT_INVOKE(ZONE_EXHAUSTED, zone_index(z), z);
+			zone_lock(z);
+		}
 	} while (pred(z));
 
 page_shortage:
@@ -4907,19 +4806,7 @@ zalloc_needs_refill(zone_t zone)
 	if (zone->z_wired_cur < zone->z_wired_max) {
 		return true;
 	}
-	if (zone->exhaustible) {
-		return false;
-	}
-	if (zone->expandable) {
-		/*
-		 * If we're expandable, just don't go through this again.
-		 */
-		zone->z_wired_max = ~0u;
-		return true;
-	}
-	zone_unlock(zone);
-
-	panic("zone '%s%s' exhausted", zone_heap_name(zone), zone_name(zone));
+	return !zone->exhaustible;
 }
 
 static void
@@ -4931,38 +4818,28 @@ zone_expand_async(__unused thread_call_param_t p0, __unused thread_call_param_t 
 			continue;
 		}
 
+		if (!z->z_async_refilling) {
+			/*
+			 * avoid locking all zones, because the one(s)
+			 * we're looking for have been set _before_
+			 * thread_call_enter() was called, if we fail
+			 * to observe the bit, it means the thread-call
+			 * has been "dinged" again and we'll notice it then.
+			 */
+			continue;
+		}
+
 		zone_lock(z);
 		if (z->z_self && z->z_async_refilling) {
-			z->z_async_refilling = false;
 			zone_expand_locked(z, Z_WAITOK, zalloc_needs_refill);
+			/*
+			 * clearing _after_ we grow is important,
+			 * so that we avoid waking up the thread call
+			 * while we grow and cause to run a second time.
+			 */
+			z->z_async_refilling = false;
 		}
 		zone_unlock(z);
-	}
-}
-
-static inline void
-zone_expand_async_schedule_if_needed(zone_t zone)
-{
-	if (__improbable(startup_phase < STARTUP_SUB_THREAD_CALL)) {
-		return;
-	}
-
-	if (zone->z_elems_free > zone->z_elems_rsv || zone->z_async_refilling ||
-	    zone->no_callout) {
-		return;
-	}
-
-	if (!zone->expandable && zone->z_wired_cur >= zone->z_wired_max) {
-		return;
-	}
-
-	if (startup_phase < STARTUP_SUB_EARLY_BOOT) {
-		return;
-	}
-
-	if (!vm_pool_low() || zone_supports_vm(zone)) {
-		zone->z_async_refilling = true;
-		thread_call_enter(&zone_expand_callout);
 	}
 }
 
@@ -5164,14 +5041,24 @@ pgz_addr(uint32_t slot)
 }
 
 static bool
-pgz_sample(zalloc_flags_t flags)
+pgz_sample(vm_offset_t addr, vm_size_t esize)
 {
 	int32_t *counterp, cnt;
+
+	if (zone_addr_size_crosses_page(addr, esize)) {
+		return false;
+	}
+
+	/*
+	 * Note: accessing pgz_sample_counter is racy but this is
+	 *       kind of acceptable given that this is not
+	 *       a security load bearing feature.
+	 */
 
 	counterp = PERCPU_GET(pgz_sample_counter);
 	cnt = *counterp;
 	if (__probable(cnt > 0)) {
-		*counterp  = cnt - 1;
+		*counterp = cnt - 1;
 		return false;
 	}
 
@@ -5180,17 +5067,16 @@ pgz_sample(zalloc_flags_t flags)
 	}
 
 	/*
-	 * zalloc_random_uniform() might block, so when the sampled allocation
-	 * requested Z_NOWAIT, set the counter to `-1` which will cause
-	 * the next allocation that can block to generate a new random value.
+	 * zalloc_random_uniform() might block, so when preemption is disabled,
+	 * set the counter to `-1` which will cause the next allocation
+	 * that can block to generate a new random value.
+	 *
 	 * No allocation on this CPU will sample until then.
 	 */
-	if (flags & Z_NOWAIT) {
+	if (get_preemption_level()) {
 		*counterp = -1;
 	} else {
-		enable_preemption();
 		*counterp = zalloc_random_uniform32(0, 2 * pgz_sample_rate);
-		disable_preemption();
 	}
 
 	return cnt == 0;
@@ -5296,13 +5182,12 @@ pgz_slot_free(uint32_t slot)
  *
  * @param zone          The zone the allocation was made against.
  * @param addr          An allocated element address to protect.
- * @param flags         The @c zalloc_flags_t passed to @c zalloc.
  * @param fp            The caller frame pointer (for the backtrace).
  * @returns             The new address for the element, or @c addr.
  */
 __attribute__((noinline))
 static vm_offset_t
-pgz_protect(zone_t zone, vm_offset_t addr, zalloc_flags_t flags, void *fp)
+pgz_protect(zone_t zone, vm_offset_t addr, void *fp)
 {
 	kern_return_t kr;
 	uint32_t slot;
@@ -5320,7 +5205,7 @@ pgz_protect(zone_t zone, vm_offset_t addr, zalloc_flags_t flags, void *fp)
 
 	kr = pmap_enter_options_addr(kernel_pmap, new_addr, pa,
 	    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, 0, TRUE,
-	    (flags & Z_NOWAIT) ? PMAP_OPTIONS_NOWAIT : 0, NULL);
+	    get_preemption_level() ? PMAP_OPTIONS_NOWAIT : 0, NULL);
 
 	if (__improbable(kr != KERN_SUCCESS)) {
 		pgz_slot_free(slot);
@@ -5454,11 +5339,7 @@ pgz_zone_init(zone_t z)
 	char zv[MAX_ZONE_NAME];
 	char key[30];
 
-	if (zone_elem_size(z) > PAGE_SIZE) {
-		return;
-	}
-
-	if (zone_index(z) == ZONE_ID_SELECT_SET) {
+	if (zone_elem_inner_size(z) > PAGE_SIZE) {
 		return;
 	}
 
@@ -5635,7 +5516,7 @@ panic_display_pgz_uaf_info(bool has_syms, vm_offset_t addr)
 		return;
 	}
 
-	esize = zone_elem_size(z);
+	esize = zone_elem_inner_size(z);
 	paniclog_append_noflush("  Zone    : %s%s\n",
 	    zone_heap_name(z), zone_name(z));
 	paniclog_append_noflush("  Address : %p\n", (void *)addr);
@@ -5700,82 +5581,19 @@ panic_display_pgz_uaf_info(bool has_syms, vm_offset_t addr)
  *
  * While permanent zones have their own allocation scheme, all other codepaths
  * will eventually go through the @c zfree_ext() choking point.
- *
- * Ignoring the @c gzalloc_free() codepath, the decision tree looks like this:
- * <code>
- * zfree_ext()
- *      ├────[ cached fast path ]────╮
- *      │                            │
- *      │                            │
- *      ├───> zfree_cached_slow() ───┤
- *      │            │               │
- *      │            v               │
- *      ╰───> zfree_item() ──────────┴───>
- * </code>
- *
- * @c zfree_ext() takes care of all the generic work to perform on an element
- * before it is freed (zeroing, logging, tagging, ...) then will hand it off to:
- * - @c zfree_item() if zone caching is off
- * - @c zfree_cached() if zone caching is on.
- *
- * @c zfree_cached can take a number of decisions:
- * - a fast path if the (f) or (a) magazines have space (preemption disabled),
- * - using the cpu local or recirculation depot calling @c zfree_cached_slow(),
- * - falling back to @c zfree_item() when CPU caching has been disabled.
  */
-
-#if KASAN_ZALLOC
-/*
- * Called from zfree() to add the element being freed to the KASan quarantine.
- *
- * Returns true if the newly-freed element made it into the quarantine without
- * displacing another, false otherwise. In the latter case, addrp points to the
- * address of the displaced element, which will be freed by the zone.
- */
-static bool
-kasan_quarantine_freed_element(
-	zone_t          *zonep,         /* the zone the element is being freed to */
-	void            **addrp)        /* address of the element being freed */
-{
-	zone_t zone = *zonep;
-	void *addr = *addrp;
-
-	/*
-	 * Resize back to the real allocation size and hand off to the KASan
-	 * quarantine. `addr` may then point to a different allocation, if the
-	 * current element replaced another in the quarantine. The zone then
-	 * takes ownership of the swapped out free element.
-	 */
-	vm_size_t usersz = zone_elem_size(zone) - 2 * zone->z_kasan_redzone;
-	vm_size_t sz = usersz;
-
-	if (addr && zone->z_kasan_redzone) {
-		kasan_check_free((vm_address_t)addr, usersz, KASAN_HEAP_ZALLOC);
-		addr = (void *)kasan_dealloc((vm_address_t)addr, &sz);
-		assert(sz == zone_elem_size(zone));
-	}
-	if (addr && !zone->kasan_noquarantine) {
-		kasan_free(&addr, &sz, KASAN_HEAP_ZALLOC, zonep, usersz);
-		if (!addr) {
-			return TRUE;
-		}
-	}
-	if (addr && zone->kasan_noquarantine) {
-		kasan_unpoison(addr, zone_elem_size(zone));
-	}
-	*addrp = addr;
-	return FALSE;
-}
-#endif /* KASAN_ZALLOC */
 
 __header_always_inline void
-zfree_drop(zone_t zone, struct zone_page_metadata *meta, zone_element_t ze,
-    bool recirc)
+zfree_drop(zone_t zone, vm_offset_t addr)
 {
-	vm_offset_t esize = zone_elem_size(zone);
+	vm_offset_t esize = zone_elem_outer_size(zone);
+	struct zone_page_metadata *meta;
+	vm_offset_t eidx;
 
-	if (zone_meta_mark_free(meta, ze) == recirc) {
-		zone_meta_double_free_panic(zone, ze, __func__);
+	meta = zone_element_resolve(zone, addr, &eidx);
+
+	if (!zone_meta_mark_free(meta, eidx)) {
+		zone_meta_double_free_panic(zone, addr, __func__);
 	}
 
 	vm_offset_t old_size = meta->zm_alloc_size;
@@ -5792,132 +5610,233 @@ zfree_drop(zone_t zone, struct zone_page_metadata *meta, zone_element_t ze,
 	}
 }
 
+__attribute__((noinline))
 static void
-zfree_item(zone_t zone, struct zone_page_metadata *meta, zone_element_t ze)
+zfree_item(zone_t zone, vm_offset_t addr)
 {
 	/* transfer preemption count to lock */
-	zone_lock_nopreempt_check_contention(zone, NULL);
+	zone_lock_nopreempt_check_contention(zone);
 
-	zfree_drop(zone, meta, ze, false);
-	zone_elems_free_add(zone, 1);
+	zfree_drop(zone, addr);
+	zone->z_elems_free += 1;
 
 	zone_unlock(zone);
 }
 
-__attribute__((noinline))
 static void
-zfree_cached_slow(zone_t zone, struct zone_page_metadata *meta,
-    zone_element_t ze, zone_cache_t cache)
+zfree_cached_depot_recirculate(
+	zone_t                  zone,
+	uint32_t                depot_max,
+	zone_cache_t            cache)
 {
-	struct zone_depot mags;
-	zone_magazine_t mag = NULL;
-	uint32_t depot_max;
-	uint16_t n_mags = 0;
+	smr_t smr = zone_cache_smr(cache);
+	smr_seq_t seq;
+	uint32_t n;
 
-	if (zone == zc_magazine_zone) {
-		mag = (zone_magazine_t)zone_element_addr(zone, ze,
-		    zone_elem_size(zone));
-#if KASAN_ZALLOC
-		kasan_poison_range((vm_offset_t)mag, zone_elem_size(zone),
-		    ASAN_VALID);
-#endif
-	} else {
-		mag = zone_magazine_alloc(Z_NOWAIT);
-		if (__improbable(mag == NULL)) {
-			return zfree_item(zone, meta, ze);
+	zone_recirc_lock_nopreempt_check_contention(zone);
+
+	n = cache->zc_depot.zd_full;
+	if (n >= depot_max) {
+		n  -= depot_max / 2;
+		seq = zone_depot_move_full(&zone->z_recirc, &cache->zc_depot, n, NULL);
+		if (smr) {
+			smr_deferred_advance_commit(smr, seq);
 		}
-		mag->zm_cur = 1;
-		mag->zm_elems[0] = ze;
 	}
 
-	mag = zone_magazine_replace(&cache->zc_free_cur,
-	    &cache->zc_free_elems, mag);
+	n = depot_max - cache->zc_depot.zd_full;
+	if (n > zone->z_recirc.zd_empty) {
+		n = zone->z_recirc.zd_empty;
+	}
+	if (n) {
+		zone_depot_move_empty(&cache->zc_depot, &zone->z_recirc,
+		    n, zone);
+	}
 
-	z_debug_assert(cache->zc_free_cur <= 1);
-	z_debug_assert(mag->zm_cur == zc_mag_size());
+	zone_recirc_unlock_nopreempt(zone);
+}
 
-	/*
-	 * Depot growth policy:
-	 *
-	 * The zc_alloc and zc_free are on average half empty/full,
-	 * hence count for "1" unit of zc_mag_size().
-	 *
-	 * We use the local depot for each `zc_depot_max` extra `zc_mag_size()`
-	 * worth of element we're allowed.
-	 *
-	 * If pushing the bucket puts us in excess of `zc_depot_max`,
-	 * then we trim (zc_recirc_batch) buckets out, in order
-	 * to amortize taking the zone lock.
-	 *
-	 * Note that `zc_depot_max` can be mutated by the GC concurrently,
-	 * so take a copy that we use throughout.
-	 */
-	depot_max = os_atomic_load(&cache->zc_depot_max, relaxed);
-	if (2 * zc_mag_size() <= depot_max) {
+static zone_cache_t
+zfree_cached_recirculate(zone_t zone, zone_cache_t cache)
+{
+	zone_magazine_t mag = NULL, tmp = NULL;
+	smr_t smr = zone_cache_smr(cache);
+
+	if (zone->z_recirc.zd_empty == 0) {
+		mag = zone_magazine_alloc(Z_NOWAIT);
+	}
+
+	zone_recirc_lock_nopreempt_check_contention(zone);
+
+	if (mag == NULL && zone->z_recirc.zd_empty) {
+		mag = zone_depot_pop_head_empty(&zone->z_recirc, zone);
+		__builtin_assume(mag);
+	}
+	if (mag) {
+		tmp = zone_magazine_replace(cache, mag, true);
+		if (smr) {
+			smr_deferred_advance_commit(smr, tmp->zm_seq);
+		}
+		if (zone_security_array[zone_index(zone)].z_lifo) {
+			zone_depot_insert_head_full(&zone->z_recirc, tmp);
+		} else {
+			zone_depot_insert_tail_full(&zone->z_recirc, tmp);
+		}
+	}
+
+	zone_recirc_unlock_nopreempt(zone);
+
+	return mag ? cache : NULL;
+}
+
+__attribute__((noinline))
+static zone_cache_t
+zfree_cached_trim(zone_t zone, zone_cache_t cache)
+{
+	zone_magazine_t mag = NULL, tmp = NULL;
+	uint32_t depot_max;
+
+	depot_max = os_atomic_load(&zone->z_depot_size, relaxed);
+	if (depot_max) {
 		zone_depot_lock_nopreempt(cache);
 
-		STAILQ_INSERT_TAIL(&cache->zc_depot, mag, zm_link);
-		cache->zc_depot_cur++;
-
-		if (__probable((cache->zc_depot_cur + 1) * zc_mag_size() <=
-		    depot_max)) {
-			return zone_depot_unlock(cache);
+		if (cache->zc_depot.zd_empty == 0) {
+			zfree_cached_depot_recirculate(zone, depot_max, cache);
 		}
 
-		/*
-		 * Never free more than half of the magazines.
-		 */
-		n_mags = MIN(zc_recirc_batch, cache->zc_depot_cur / 2);
-		assert(n_mags && n_mags < cache->zc_depot_cur);
-
-		STAILQ_FIRST(&mags) = mag = STAILQ_FIRST(&cache->zc_depot);
-		for (uint16_t i = n_mags; i-- > 1;) {
-			mag = STAILQ_NEXT(mag, zm_link);
+		if (__probable(cache->zc_depot.zd_empty)) {
+			mag = zone_depot_pop_head_empty(&cache->zc_depot, NULL);
+			__builtin_assume(mag);
+		} else {
+			mag = zone_magazine_alloc(Z_NOWAIT);
 		}
+		if (mag) {
+			tmp = zone_magazine_replace(cache, mag, true);
+			zone_depot_insert_tail_full(&cache->zc_depot, tmp);
+		}
+		zone_depot_unlock_nopreempt(cache);
 
-		cache->zc_depot_cur -= n_mags;
-		STAILQ_FIRST(&cache->zc_depot) = STAILQ_NEXT(mag, zm_link);
-		STAILQ_NEXT(mag, zm_link) = NULL;
+		return mag ? cache : NULL;
+	}
 
-		zone_depot_unlock(cache);
+	return zfree_cached_recirculate(zone, cache);
+}
 
-		mags.stqh_last = &STAILQ_NEXT(mag, zm_link);
-	} else {
-		enable_preemption();
+__attribute__((always_inline))
+static inline zone_cache_t
+zfree_cached_get_pcpu_cache(zone_t zone, int cpu)
+{
+	zone_cache_t cache = zpercpu_get_cpu(zone->z_pcpu_cache, cpu);
 
-		n_mags = 1;
-		STAILQ_FIRST(&mags) = mag;
-		mags.stqh_last = &STAILQ_NEXT(mag, zm_link);
-		STAILQ_NEXT(mag, zm_link) = NULL;
+	if (__probable(cache->zc_free_cur < zc_mag_size())) {
+		return cache;
+	}
+
+	if (__probable(cache->zc_alloc_cur < zc_mag_size())) {
+		zone_cache_swap_magazines(cache);
+		return cache;
+	}
+
+	return zfree_cached_trim(zone, cache);
+}
+
+__attribute__((always_inline))
+static inline zone_cache_t
+zfree_cached_get_pcpu_cache_smr(zone_t zone, int cpu)
+{
+	zone_cache_t cache = zpercpu_get_cpu(zone->z_pcpu_cache, cpu);
+	size_t idx = cache->zc_free_cur;
+
+	if (__probable(idx + 1 < zc_mag_size())) {
+		return cache;
 	}
 
 	/*
-	 * Preflight validity of all the elements before we touch the zone
-	 * metadata, and then insert them into the recirculation depot.
+	 * when SMR is in use, the bucket is tagged early with
+	 * @c smr_deferred_advance(), which costs a full barrier,
+	 * but performs no store.
+	 *
+	 * When zones hit the recirculation layer, the advance is commited,
+	 * under the recirculation lock (see zfree_cached_recirculate()).
+	 *
+	 * When done this way, the zone contention detection mechanism
+	 * will adjust the size of the per-cpu depots gracefully, which
+	 * mechanically reduces the pace of these commits as usage increases.
 	 */
-	STAILQ_FOREACH(mag, &mags, zm_link) {
-		for (uint16_t i = 0; i < zc_mag_size(); i++) {
-			zone_element_validate(zone, mag->zm_elems[i]);
-		}
+
+	if (__probable(idx + 1 == zc_mag_size())) {
+		zone_magazine_t mag;
+
+		mag = (zone_magazine_t)((uintptr_t)cache->zc_free_elems -
+		    offsetof(struct zone_magazine, zm_elems));
+		mag->zm_seq = smr_deferred_advance(zone_cache_smr(cache));
+		return cache;
 	}
 
-	zone_lock_check_contention(zone, cache);
+	return zfree_cached_trim(zone, cache);
+}
 
-	STAILQ_FOREACH(mag, &mags, zm_link) {
-		for (uint16_t i = 0; i < zc_mag_size(); i++) {
-			zone_element_t e = mag->zm_elems[i];
+__attribute__((always_inline))
+static inline vm_offset_t
+__zcache_mark_invalid(zone_t zone, vm_offset_t elem, uint64_t combined_size)
+{
+	struct zone_page_metadata *meta;
+	vm_offset_t offs;
 
-			if (!zone_meta_mark_free(zone_meta_from_element(e), e)) {
-				zone_meta_double_free_panic(zone, e, __func__);
-			}
-		}
+#pragma unused(combined_size)
+#if CONFIG_PROB_GZALLOC
+	if (__improbable(pgz_owned(elem))) {
+		elem = pgz_unprotect(elem, __builtin_frame_address(0));
 	}
-	STAILQ_CONCAT(&zone->z_recirc, &mags);
-	zone->z_recirc_cur += n_mags;
+#endif /* CONFIG_PROB_GZALLOC */
 
-	zone_elems_free_add(zone, n_mags * zc_mag_size());
+	meta = zone_meta_from_addr(elem);
+	if (!from_zone_map(elem, 1) || !zone_has_index(zone, meta->zm_index)) {
+		zone_invalid_element_panic(zone, elem);
+	}
 
-	zone_unlock(zone);
+	offs = (elem & PAGE_MASK) - zone_elem_inner_offs(zone);
+	if (meta->zm_chunk_len == ZM_SECONDARY_PAGE) {
+		offs += ptoa(meta->zm_page_index);
+	}
+
+	if (!Z_FAST_ALIGNED(offs, zone->z_align_magic)) {
+		zone_invalid_element_panic(zone, elem);
+	}
+
+#if VM_TAG_SIZECLASSES
+	if (__improbable(zone->z_uses_tags)) {
+		vm_tag_t *slot;
+
+		slot = zba_extra_ref_ptr(meta->zm_bitmap,
+		    Z_FAST_QUO(offs, zone->z_quo_magic));
+		vm_tag_update_zone_size(*slot, zone->z_tags_sizeclass,
+		    -(long)ZFREE_ELEM_SIZE(combined_size));
+		*slot = VM_KERN_MEMORY_NONE;
+	}
+#endif /* VM_TAG_SIZECLASSES */
+
+#if KASAN_CLASSIC
+	kasan_free(elem, ZFREE_ELEM_SIZE(combined_size),
+	    ZFREE_USER_SIZE(combined_size), zone_elem_redzone(zone),
+	    zone->z_percpu, __builtin_frame_address(0));
+#endif
+#if KASAN_TBI
+	elem = kasan_tbi_tag_zfree(elem, ZFREE_ELEM_SIZE(combined_size),
+	    zone->z_percpu);
+#endif
+
+	return elem;
+}
+
+__attribute__((always_inline))
+vm_offset_t
+(zcache_mark_invalid)(zone_t zone, vm_offset_t elem)
+{
+	vm_size_t esize = zone_elem_inner_offs(zone);
+
+	ZFREE_LOG(zone, elem, 1);
+	return __zcache_mark_invalid(zone, elem, ZFREE_PACK_SIZE(esize, esize));
 }
 
 /*
@@ -5925,120 +5844,198 @@ zfree_cached_slow(zone_t zone, struct zone_page_metadata *meta,
  *     reliably skip the zfree_ext() and zfree_log()
  *     boring frames.
  */
-#if ZONE_ENABLE_LOGGING
+#if ZALLOC_ENABLE_LOGGING
 __attribute__((noinline))
-#endif /* ZONE_ENABLE_LOGGING */
+#endif /* ZALLOC_ENABLE_LOGGING */
 void
-zfree_ext(zone_t zone, zone_stats_t zstats, void *addr, vm_size_t elem_size)
+zfree_ext(zone_t zone, zone_stats_t zstats, void *addr, uint64_t combined_size)
 {
-	struct zone_page_metadata *page_meta;
+	vm_offset_t esize = ZFREE_ELEM_SIZE(combined_size);
 	vm_offset_t elem = (vm_offset_t)addr;
-	zone_element_t  ze;
 	int cpu;
 
-	DTRACE_VM2(zfree, zone_t, zone, void*, addr);
+	DTRACE_VM2(zfree, zone_t, zone, void*, elem);
 
-#if CONFIG_KERNEL_TBI && KASAN_TBI
-	if (zone->z_tbi_tag) {
-		elem = kasan_tbi_tag_zfree(elem, elem_size, zone->z_percpu);
-		/* addr is still consumed in the function: gzalloc_free */
-		addr = (void *)elem;
-	}
-#endif /* CONFIG_KERNEL_TBI && KASAN_TBI */
-#if CONFIG_PROB_GZALLOC
-	if (__improbable(pgz_owned(elem))) {
-		elem = pgz_unprotect(elem, __builtin_frame_address(0));
-		addr = (void *)elem;
-	}
-#endif /* CONFIG_PROB_GZALLOC */
-#if VM_TAG_SIZECLASSES
-	if (__improbable(zone->z_uses_tags)) {
-		vm_tag_t tag = *ztSlot(zone, elem) >> 1;
-		// set the tag with b0 clear so the block remains inuse
-		*ztSlot(zone, elem) = 0xFFFE;
-		vm_tag_update_zone_size(tag, zone->z_tags_sizeclass,
-		    -(long)elem_size);
-	}
-#endif /* VM_TAG_SIZECLASSES */
-
-#if KASAN_ZALLOC
-	/*
-	 * Call zone_element_resolve() and throw away the results in
-	 * order to validate the element and its zone membership.
-	 * Any validation panics need to happen now, while we're
-	 * still close to the caller.
-	 *
-	 * Note that elem has not been adjusted, so we have to remove the
-	 * redzone first.
-	 */
-	zone_element_t            ze_discard;
-	vm_offset_t elem_actual = elem - zone->z_kasan_redzone;
-	(void)zone_element_resolve(zone, elem_actual, &ze_discard);
-
-	if (kasan_quarantine_freed_element(&zone, &addr)) {
-		return;
-	}
-	/*
-	 * kasan_quarantine_freed_element() might return a different
-	 * {zone, addr} than the one being freed for kalloc heaps.
-	 *
-	 * Make sure we reload everything.
-	 */
-	elem = (vm_offset_t)addr;
-	elem_size = zone_elem_size(zone);
-#endif
-#if KASAN_TBI
-	kasan_tbi_log_bt(zone, ZOP_FREE, elem, __builtin_frame_address(0));
-#endif /* KASAN_TBI */
-#if ZONE_ENABLE_LOGGING || CONFIG_ZLEAKS
-	if (__improbable(zone->z_btlog)) {
-		zfree_log(zone->z_btlog, elem, __builtin_frame_address(0));
-	}
-#endif /* ZONE_ENABLE_LOGGING */
-
-#if KASAN_ZALLOC
-	if (zone->z_percpu) {
-		zpercpu_foreach_cpu(i) {
-			kasan_poison_range(elem + ptoa(i), elem_size,
-			    ASAN_HEAP_FREED);
-		}
-	} else {
-		kasan_poison_range(elem, elem_size, ASAN_HEAP_FREED);
-	}
-#endif
-
-	page_meta = zone_element_resolve(zone, elem, &ze);
-	if (zone_meta_is_free(page_meta, ze)) {
-		zone_meta_double_free_panic(zone, ze, __func__);
-	}
+	ZFREE_LOG(zone, elem, 1);
+	elem = __zcache_mark_invalid(zone, elem, combined_size);
 
 	disable_preemption();
 	cpu = cpu_number();
-	zpercpu_get_cpu(zstats, cpu)->zs_mem_freed += elem_size;
+	zpercpu_get_cpu(zstats, cpu)->zs_mem_freed += esize;
+
+#if KASAN_CLASSIC
+	if (zone->z_kasan_quarantine && startup_phase >= STARTUP_SUB_ZALLOC) {
+		struct kasan_quarantine_result kqr;
+
+		kqr  = kasan_quarantine(elem, esize);
+		elem = kqr.addr;
+		zone = kqr.zone;
+		if (elem == 0) {
+			return enable_preemption();
+		}
+	}
+#endif
 
 	if (zone->z_pcpu_cache) {
-		zone_cache_t cache = zpercpu_get_cpu(zone->z_pcpu_cache, cpu);
+		zone_cache_t cache = zfree_cached_get_pcpu_cache(zone, cpu);
 
-		if (cache->zc_free_cur >= zc_mag_size()) {
-			if (cache->zc_alloc_cur >= zc_mag_size()) {
-				return zfree_cached_slow(zone, page_meta, ze, cache);
-			}
-
-			zone_cache_swap_magazines(cache);
-		}
-
-		if (__probable(cache->zc_alloc_elems)) {
-			uint16_t idx = cache->zc_free_cur++;
-			if (idx >= zc_mag_size()) {
-				zone_accounting_panic(zone, "zc_free_cur overflow");
-			}
-			cache->zc_free_elems[idx] = ze;
-
+		if (__probable(cache)) {
+			cache->zc_free_elems[cache->zc_free_cur++] = elem;
 			return enable_preemption();
 		}
 	}
 
-	return zfree_item(zone, page_meta, ze);
+	return zfree_item(zone, elem);
+}
+
+__attribute__((always_inline))
+static inline zstack_t
+zcache_free_stack_to_cpu(
+	zone_id_t               zid,
+	zone_cache_t            cache,
+	zstack_t                stack,
+	vm_size_t               esize,
+	zone_cache_ops_t        ops,
+	bool                    zero)
+{
+	size_t       n = MIN(zc_mag_size() - cache->zc_free_cur, stack.z_count);
+	vm_offset_t *p;
+
+	stack.z_count -= n;
+	cache->zc_free_cur += n;
+	p = cache->zc_free_elems + cache->zc_free_cur;
+
+	do {
+		void *o = zstack_pop_no_delta(&stack);
+
+		if (ops) {
+			o = ops->zc_op_mark_invalid(zid, o);
+		} else {
+			if (zero) {
+				bzero(o, esize);
+			}
+			o = (void *)__zcache_mark_invalid(zone_by_id(zid),
+			    (vm_offset_t)o, ZFREE_PACK_SIZE(esize, esize));
+		}
+		*--p  = (vm_offset_t)o;
+	} while (--n > 0);
+
+	return stack;
+}
+
+__attribute__((always_inline))
+static inline void
+zcache_free_1_ext(zone_id_t zid, void *addr, zone_cache_ops_t ops)
+{
+	vm_offset_t elem = (vm_offset_t)addr;
+	zone_cache_t cache;
+	vm_size_t esize;
+	zone_t zone = zone_by_id(zid);
+	int cpu;
+
+	ZFREE_LOG(zone, elem, 1);
+
+	disable_preemption();
+	cpu = cpu_number();
+	esize = zone_elem_inner_size(zone);
+	zpercpu_get_cpu(zone->z_stats, cpu)->zs_mem_freed += esize;
+	if (!ops) {
+		addr = (void *)__zcache_mark_invalid(zone, elem,
+		    ZFREE_PACK_SIZE(esize, esize));
+	}
+	cache = zfree_cached_get_pcpu_cache(zone, cpu);
+	if (__probable(cache)) {
+		if (ops) {
+			addr = ops->zc_op_mark_invalid(zid, addr);
+		}
+		cache->zc_free_elems[cache->zc_free_cur++] = elem;
+		enable_preemption();
+	} else if (ops) {
+		enable_preemption();
+		os_atomic_dec(&zone_by_id(zid)->z_elems_avail, relaxed);
+		ops->zc_op_free(zid, addr);
+	} else {
+		zfree_item(zone, elem);
+	}
+}
+
+__attribute__((always_inline))
+static inline void
+zcache_free_n_ext(zone_id_t zid, zstack_t stack, zone_cache_ops_t ops, bool zero)
+{
+	zone_t zone = zone_by_id(zid);
+	zone_cache_t cache;
+	vm_size_t esize;
+	int cpu;
+
+	ZFREE_LOG(zone, stack.z_head, stack.z_count);
+
+	disable_preemption();
+	cpu = cpu_number();
+	esize = zone_elem_inner_size(zone);
+	zpercpu_get_cpu(zone->z_stats, cpu)->zs_mem_freed +=
+	    stack.z_count * esize;
+
+	for (;;) {
+		cache = zfree_cached_get_pcpu_cache(zone, cpu);
+		if (__probable(cache)) {
+			stack = zcache_free_stack_to_cpu(zid, cache,
+			    stack, esize, ops, zero);
+			enable_preemption();
+		} else if (ops) {
+			enable_preemption();
+			os_atomic_dec(&zone->z_elems_avail, relaxed);
+			ops->zc_op_free(zid, zstack_pop(&stack));
+		} else {
+			vm_offset_t addr = (vm_offset_t)zstack_pop(&stack);
+
+			if (zero) {
+				bzero((void *)addr, esize);
+			}
+			addr = __zcache_mark_invalid(zone, addr,
+			    ZFREE_PACK_SIZE(esize, esize));
+			zfree_item(zone, addr);
+		}
+
+		if (stack.z_count == 0) {
+			break;
+		}
+
+		disable_preemption();
+		cpu = cpu_number();
+	}
+}
+
+void
+(zcache_free)(zone_id_t zid, void *addr, zone_cache_ops_t ops)
+{
+	__builtin_assume(ops != NULL);
+	zcache_free_1_ext(zid, addr, ops);
+}
+
+void
+(zcache_free_n)(zone_id_t zid, zstack_t stack, zone_cache_ops_t ops)
+{
+	__builtin_assume(ops != NULL);
+	zcache_free_n_ext(zid, stack, ops, false);
+}
+
+void
+(zfree_n)(zone_id_t zid, zstack_t stack)
+{
+	zcache_free_n_ext(zid, stack, NULL, true);
+}
+
+void
+(zfree_nozero)(zone_id_t zid, void *addr)
+{
+	zcache_free_1_ext(zid, addr, NULL);
+}
+
+void
+(zfree_nozero_n)(zone_id_t zid, zstack_t stack)
+{
+	zcache_free_n_ext(zid, stack, NULL, false);
 }
 
 void
@@ -6046,14 +6043,12 @@ void
 {
 	zone_t zone = zov.zov_view->zv_zone;
 	zone_stats_t zstats = zov.zov_view->zv_stats;
-	vm_offset_t esize = zone_elem_size(zone);
+	vm_offset_t esize = zone_elem_inner_size(zone);
 
 	assert(zone > &zone_array[ZONE_ID__LAST_RO]);
-	assert(!zone->z_percpu);
-#if !KASAN_KALLOC
+	assert(!zone->z_percpu && !zone->z_permanent && !zone->z_smr);
 	bzero(addr, esize);
-#endif /* !KASAN_KALLOC */
-	zfree_ext(zone, zstats, addr, esize);
+	zfree_ext(zone, zstats, addr, ZFREE_PACK_SIZE(esize, esize));
 }
 
 __attribute__((noinline))
@@ -6062,17 +6057,15 @@ zfree_percpu(union zone_or_view zov, void *addr)
 {
 	zone_t zone = zov.zov_view->zv_zone;
 	zone_stats_t zstats = zov.zov_view->zv_stats;
-	vm_offset_t esize = zone_elem_size(zone);
+	vm_offset_t esize = zone_elem_inner_size(zone);
 
 	assert(zone > &zone_array[ZONE_ID__LAST_RO]);
 	assert(zone->z_percpu);
 	addr = (void *)__zpcpu_demangle(addr);
-#if !KASAN_KALLOC
 	zpercpu_foreach_cpu(i) {
 		bzero((char *)addr + ptoa(i), esize);
 	}
-#endif /* !KASAN_KALLOC */
-	zfree_ext(zone, zstats, addr, esize);
+	zfree_ext(zone, zstats, addr, ZFREE_PACK_SIZE(esize, esize));
 }
 
 void
@@ -6092,11 +6085,63 @@ void
 #if ZSECURITY_CONFIG(READ_ONLY)
 	assert(zone_security_array[zid].z_submap_idx == Z_SUBMAP_IDX_READ_ONLY);
 	pmap_ro_zone_bzero(zid, (vm_offset_t)addr, 0, esize);
-#elif !KASAN_KALLOC
+#else
 	(void)zid;
 	bzero(addr, esize);
-#endif /* !KASAN_KALLOC */
-	zfree_ext(zone, zstats, addr, esize);
+#endif /* !KASAN_CLASSIC */
+	zfree_ext(zone, zstats, addr, ZFREE_PACK_SIZE(esize, esize));
+}
+
+__attribute__((noinline))
+static void
+zfree_item_smr(zone_t zone, vm_offset_t addr)
+{
+	zone_cache_t cache = zpercpu_get_cpu(zone->z_pcpu_cache, 0);
+	vm_size_t esize = zone_elem_inner_size(zone);
+
+	/*
+	 * This should be taken extremely rarely:
+	 * this happens if we failed allocating an empty bucket.
+	 */
+	smr_synchronize(zone_cache_smr(cache));
+
+	cache->zc_free((void *)addr, esize);
+	addr = __zcache_mark_invalid(zone, addr, ZFREE_PACK_SIZE(esize, esize));
+
+	zfree_item(zone, addr);
+}
+
+void
+(zfree_smr)(zone_t zone, void *addr)
+{
+	vm_offset_t elem = (vm_offset_t)addr;
+	vm_offset_t esize;
+	zone_cache_t cache;
+	int cpu;
+
+	ZFREE_LOG(zone, elem, 1);
+
+	disable_preemption();
+	cpu   = cpu_number();
+#if MACH_ASSERT
+	cache = zpercpu_get_cpu(zone->z_pcpu_cache, cpu);
+	assert(!smr_entered_cpu(cache->zc_smr, cpu));
+#endif
+	esize = zone_elem_inner_size(zone);
+	zpercpu_get_cpu(zone->z_stats, cpu)->zs_mem_freed += esize;
+	cache = zfree_cached_get_pcpu_cache_smr(zone, cpu);
+	if (__probable(cache)) {
+		cache->zc_free_elems[cache->zc_free_cur++] = elem;
+		enable_preemption();
+	} else {
+		zfree_item_smr(zone, elem);
+	}
+}
+
+void
+(zfree_id_smr)(zone_id_t zid, void *addr)
+{
+	(zfree_smr)(&zone_array[zid], addr);
 }
 
 /*! @} */
@@ -6121,62 +6166,6 @@ void
  * While permanent zones have their own allocation scheme, all other codepaths
  * will eventually go through the @c zalloc_ext() choking point.
  *
- * Ignoring the @c zalloc_gz() codepath, the decision tree looks like this:
- * <code>
- * zalloc_ext()
- *      │
- *      ├───> zalloc_cached() ──────> zalloc_cached_fast() ───╮
- *      │         │                             ^             │
- *      │         │                             │             │
- *      │         ╰───> zalloc_cached_slow() ───╯             │
- *      │                         │                           │
- *      │<─────────────────╮      ├─────────────╮             │
- *      │                  │      │             │             │
- *      │                  │      v             │             │
- *      │<───────╮  ╭──> zalloc_item_slow() ────┤             │
- *      │        │  │                           │             │
- *      │        │  │                           v             │
- *      ╰───> zalloc_item() ──────────> zalloc_item_fast() ───┤
- *                                                            │
- *                                                            v
- *                                                     zalloc_return()
- * </code>
- *
- *
- * The @c zalloc_item() track is used when zone caching is off:
- * - @c zalloc_item_fast() is used when there are enough elements available,
- * - @c zalloc_item_slow() is used when a refill is needed, which can cause
- *   the zone to grow. This is the only codepath that refills.
- *
- * This track uses the zone lock for serialization:
- * - taken in @c zalloc_item(),
- * - maintained during @c zalloc_item_slow() (possibly dropped and re-taken),
- * - dropped in @c zalloc_item_fast().
- *
- *
- * The @c zalloc_cached() track is used when zone caching is on:
- * - @c zalloc_cached_fast() is taken when the cache has elements,
- * - @c zalloc_cached_slow() is taken if a cache refill is needed.
- *   It can chose many strategies:
- *    ~ @c zalloc_cached_from_depot() to try to reuse cpu stashed magazines,
- *    ~ @c zalloc_cached_from_recirc() using the global recirculation depot
- *      @c z_recirc,
- *    ~ using zalloc_import() if the zone has enough elements,
- *    ~ falling back to the @c zalloc_item() track if zone caching is disabled
- *      due to VM pressure or the zone has no available elements.
- *
- * This track disables preemption for serialization:
- * - preemption is disabled in @c zalloc_ext(),
- * - kept disabled during @c zalloc_cached_slow(), converted into a zone lock
- *   if switching to @c zalloc_item_slow(),
- * - preemption is reenabled in @c zalloc_cached_fast().
- *
- * @c zalloc_cached_from_depot() also takes depot locks (taken by the caller,
- * released by @c zalloc_cached_from_depot().
- *
- * In general the @c zalloc_*_slow() codepaths deal with refilling and will
- * tail call into the @c zalloc_*_fast() code to perform the actual allocation.
- *
  * @c zalloc_return() is the final function everyone tail calls into,
  * which prepares the element for consumption by the caller and deals with
  * common treatment (zone logging, tags, kasan, validation, ...).
@@ -6196,16 +6185,26 @@ void
 __header_always_inline vm_size_t
 zalloc_import(
 	zone_t                  zone,
-	zone_element_t         *elems,
+	vm_offset_t            *elems,
 	zalloc_flags_t          flags,
 	uint32_t                n)
 {
-	vm_offset_t esize = zone_elem_size(zone);
+	vm_offset_t esize = zone_elem_outer_size(zone);
+	vm_offset_t offs  = zone_elem_inner_offs(zone);
+	zone_stats_t zs;
+	int cpu = cpu_number();
 	uint32_t i = 0;
 
-	assertf(STAILQ_EMPTY(&zone->z_recirc),
-	    "Trying to import from zone %p [%s%s] with non empty recirc",
-	    zone, zone_heap_name(zone), zone_name(zone));
+	zs = zpercpu_get_cpu(zone->z_stats, cpu);
+
+	if (__improbable(zone_caching_disabled < 0)) {
+		/*
+		 * In the first 10s after boot, mess with
+		 * the scan position in order to make early
+		 * allocations patterns less predictable.
+		 */
+		zone_early_scramble_rr(zone, cpu, zs);
+	}
 
 	do {
 		vm_offset_t page, eidx, size = 0;
@@ -6228,8 +6227,8 @@ zalloc_import(
 		vm_offset_t max_size = ptoa(meta->zm_chunk_len) + ZM_ALLOC_SIZE_LOCK;
 
 		do {
-			eidx = zone_meta_find_and_clear_bit(zone, meta, flags);
-			elems[i++] = zone_element_encode(page, eidx);
+			eidx = zone_meta_find_and_clear_bit(zone, zs, meta, flags);
+			elems[i++] = page + offs + eidx * esize;
 			size += esize;
 		} while (i < n && old_size + size + esize <= max_size);
 
@@ -6243,7 +6242,81 @@ zalloc_import(
 		}
 	} while (i < n);
 
-	return esize;
+	n = zone_counter_sub(zone, z_elems_free, n);
+	if (zone->z_pcpu_cache == NULL && zone->z_elems_free_min > n) {
+		zone->z_elems_free_min = n;
+	}
+
+	return zone_elem_inner_size(zone);
+}
+
+__attribute__((always_inline))
+static inline vm_offset_t
+__zcache_mark_valid(zone_t zone, vm_offset_t addr, zalloc_flags_t flags)
+{
+#pragma unused(zone, flags)
+#if KASAN || CONFIG_PROB_GZALLOC || VM_TAG_SIZECLASSES
+	vm_offset_t esize = zone_elem_inner_size(zone);
+#endif
+
+#if VM_TAG_SIZECLASSES
+	if (__improbable(zone->z_uses_tags)) {
+		struct zone_page_metadata *meta;
+		vm_offset_t offs;
+		vm_tag_t *slot;
+		vm_tag_t tag;
+
+		tag  = zalloc_flags_get_tag(flags);
+		meta = zone_meta_from_addr(addr);
+		offs = (addr & PAGE_MASK) - zone_elem_inner_offs(zone);
+		if (meta->zm_chunk_len == ZM_SECONDARY_PAGE) {
+			offs += ptoa(meta->zm_page_index);
+		}
+
+		slot = zba_extra_ref_ptr(meta->zm_bitmap,
+		    Z_FAST_QUO(offs, zone->z_quo_magic));
+		*slot = tag;
+
+		vm_tag_update_zone_size(tag, zone->z_tags_sizeclass,
+		    (long)esize);
+	}
+#endif /* VM_TAG_SIZECLASSES */
+
+#if CONFIG_PROB_GZALLOC
+	if (zone->z_pgz_tracked && pgz_sample(addr, esize)) {
+		addr = pgz_protect(zone, addr, __builtin_frame_address(0));
+	}
+#endif
+
+	/*
+	 * Kasan integration of kalloc heaps are handled by kalloc_ext()
+	 */
+	if ((flags & Z_SKIP_KASAN) == 0) {
+#if KASAN_CLASSIC
+		kasan_alloc(addr, esize, esize, zone_elem_redzone(zone),
+		    (flags & Z_PCPU), __builtin_frame_address(0));
+#endif /* KASAN_CLASSIC */
+#if KASAN_TBI
+		if (__probable(zone->z_tbi_tag)) {
+			addr = kasan_tbi_tag_zalloc(addr, esize, esize,
+			    (flags & Z_PCPU));
+		} else {
+			addr = kasan_tbi_tag_zalloc_default(addr, esize,
+			    (flags & Z_PCPU));
+		}
+#endif /* KASAN_TBI */
+	}
+
+	return addr;
+}
+
+__attribute__((always_inline))
+vm_offset_t
+(zcache_mark_valid)(zone_t zone, vm_offset_t addr)
+{
+	addr = __zcache_mark_valid(zone, addr, 0);
+	ZALLOC_LOG(zone, addr, 1);
+	return addr;
 }
 
 /*!
@@ -6258,7 +6331,7 @@ zalloc_import(
  * and preemption back to the state it had when @c zalloc_ext() was called.
  *
  * @param zone          The zone we're allocating from.
- * @param ze            The encoded element we just allocated.
+ * @param addr          The element we just allocated.
  * @param flags         The flags passed to @c zalloc_ext() (for Z_ZERO).
  * @param elem_size     The element size for this zone.
  */
@@ -6266,83 +6339,15 @@ __attribute__((always_inline))
 static struct kalloc_result
 zalloc_return(
 	zone_t                  zone,
-	zone_element_t          ze,
-	zalloc_flags_t          flags __unused,
+	vm_offset_t             addr,
+	zalloc_flags_t          flags,
 	vm_offset_t             elem_size)
 {
-	vm_offset_t addr = zone_element_addr(zone, ze, elem_size);
-
-#if CONFIG_KERNEL_TBI && KASAN_TBI
-	addr = kasan_tbi_fix_address_tag(addr);
-	kasan_tbi_log_bt(zone, ZOP_ALLOC, addr, __builtin_frame_address(0));
-#endif /* CONFIG_KERNEL_TBI && KASAN_TBI */
+	addr = __zcache_mark_valid(zone, addr, flags);
 #if ZALLOC_ENABLE_ZERO_CHECK
 	zalloc_validate_element(zone, addr, elem_size, flags);
 #endif /* ZALLOC_ENABLE_ZERO_CHECK */
-#if ZONE_ENABLE_LOGGING || CONFIG_ZLEAKS
-	if (__improbable(zone->z_btlog)) {
-		zalloc_log(zone->z_btlog, addr, flags,
-		    __builtin_frame_address(0));
-	}
-#endif /* ZONE_ENABLE_LOGGING || CONFIG_ZLEAKS */
-#if VM_TAG_SIZECLASSES
-	if (__improbable(zone->z_uses_tags)) {
-		vm_tag_t tag = zalloc_flags_get_tag(flags);
-		if (tag == VM_KERN_MEMORY_NONE) {
-			zone_security_flags_t zsflags = zone_security_config(zone);
-			if (zsflags.z_kheap_id == KHEAP_ID_DATA_BUFFERS) {
-				tag = VM_KERN_MEMORY_KALLOC_DATA;
-			} else if (zsflags.z_kheap_id == KHEAP_ID_KT_VAR ||
-			    zsflags.z_kalloc_type) {
-				tag = VM_KERN_MEMORY_KALLOC_TYPE;
-			} else {
-				tag = VM_KERN_MEMORY_KALLOC;
-			}
-		}
-		// set the tag with b0 clear so the block remains inuse
-		*ztSlot(zone, addr) = (vm_tag_t)(tag << 1);
-		vm_tag_update_zone_size(tag, zone->z_tags_sizeclass,
-		    (long)elem_size);
-	}
-#endif /* VM_TAG_SIZECLASSES */
-#if CONFIG_PROB_GZALLOC
-	if ((flags & Z_PGZ) && !zone_addr_size_crosses_page(addr, elem_size)) {
-		addr = pgz_protect(zone, addr, flags,
-		    __builtin_frame_address(0));
-	}
-#endif
-
-	/*
-	 * Kasan integration of kalloc heaps are handled by kalloc_ext()
-	 */
-	if ((flags & Z_SKIP_KASAN) == 0) {
-#if KASAN_ZALLOC
-		if (zone->z_kasan_redzone) {
-			addr = kasan_alloc(addr, elem_size,
-			    elem_size - 2 * zone->z_kasan_redzone,
-			    zone->z_kasan_redzone);
-			elem_size -= 2 * zone->z_kasan_redzone;
-			__nosan_bzero((char *)addr, elem_size);
-		} else if (flags & Z_PCPU) {
-			zpercpu_foreach_cpu(i) {
-				kasan_poison_range(addr + ptoa(i), elem_size, ASAN_VALID);
-				__nosan_bzero((char *)addr + ptoa(i), elem_size);
-			}
-		} else {
-			kasan_poison_range(addr, elem_size, ASAN_VALID);
-			__nosan_bzero((char *)addr, elem_size);
-		}
-#endif /* KASAN_ZALLOC */
-#if CONFIG_KERNEL_TBI && KASAN_TBI
-		if (__probable(zone->z_tbi_tag)) {
-			addr = kasan_tbi_tag_zalloc(addr, elem_size,
-			    elem_size, (flags & Z_PCPU));
-		} else {
-			addr = kasan_tbi_tag_zalloc_default(addr,
-			    elem_size, (flags & Z_PCPU));
-		}
-#endif /* CONFIG_KERNEL_TBI && KASAN_TBI */
-	}
+	ZALLOC_LOG(zone, addr, 1);
 
 	DTRACE_VM2(zalloc, zone_t, zone, void*, addr);
 	return (struct kalloc_result){ (void *)addr, elem_size };
@@ -6350,394 +6355,206 @@ zalloc_return(
 
 __attribute__((noinline))
 static struct kalloc_result
-zalloc_item_fast(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
+zalloc_item(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 {
-	zone_element_t ze;
-	vm_offset_t esize;
+	vm_offset_t esize, addr;
 
-	esize = zalloc_import(zone, &ze, flags, 1);
-	zone_elems_free_sub(zone, 1);
+	zone_lock_nopreempt_check_contention(zone);
+
+	if (__improbable(zone->z_elems_free <= zone->z_elems_rsv / 2)) {
+		if ((flags & Z_NOWAIT) || zone->z_elems_free) {
+			zone_expand_async_schedule_if_allowed(zone);
+		} else {
+			zone_expand_locked(zone, flags, zalloc_needs_refill);
+		}
+		if (__improbable(zone->z_elems_free == 0)) {
+			zpercpu_get(zstats)->zs_alloc_fail++;
+			zone_unlock(zone);
+			if (__improbable(flags & Z_NOFAIL)) {
+				zone_nofail_panic(zone);
+			}
+			DTRACE_VM2(zalloc, zone_t, zone, void*, NULL);
+			return (struct kalloc_result){ };
+		}
+	}
+
+	esize = zalloc_import(zone, &addr, flags, 1);
 	zpercpu_get(zstats)->zs_mem_allocated += esize;
 	zone_unlock(zone);
 
-	return zalloc_return(zone, ze, flags, esize);
+	return zalloc_return(zone, addr, flags, esize);
 }
 
-static inline bool
-zalloc_item_slow_should_schedule_async(zone_t zone, zalloc_flags_t flags)
-{
-	/*
-	 * If we can't wait, then async it is.
-	 */
-	if (flags & Z_NOWAIT) {
-		return true;
-	}
-
-	if (zone->z_elems_free == 0) {
-		return false;
-	}
-
-	/*
-	 * Early boot gets to tap in bootstrap reserves
-	 */
-	if (startup_phase < STARTUP_SUB_EARLY_BOOT) {
-		return true;
-	}
-
-	/*
-	 * Allow threads to tap up to 3/4 of the reserve only doing asyncs.
-	 * Note that reserve-less zones will always say "true" here.
-	 */
-	if (zone->z_elems_free >= zone->z_elems_rsv / 4) {
-		return true;
-	}
-
-	if (zone_supports_vm(zone)) {
-		return true;
-	}
-
-	/*
-	 * After this, only VM and GC threads get to tap in the reserve.
-	 */
-	return current_thread()->options & (TH_OPT_ZONE_PRIV | TH_OPT_VMPRIV);
-}
-
-/*!
- * @function zalloc_item_slow
- *
- * @brief
- * Performs allocations when the zone is out of elements.
- *
- * @discussion
- * This function might drop the lock and reenable preemption,
- * which means the per-CPU caching layer or recirculation depot
- * might have received elements.
- */
-__attribute__((noinline))
-static struct kalloc_result
-zalloc_item_slow(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
-{
-	if (zalloc_item_slow_should_schedule_async(zone, flags)) {
-		zone_expand_async_schedule_if_needed(zone);
-	} else {
-		zone_expand_locked(zone, flags, zalloc_needs_refill);
-	}
-	if (__improbable(zone->z_elems_free == 0)) {
-		zone_unlock(zone);
-		if (__improbable(flags & Z_NOFAIL)) {
-			zone_nofail_panic(zone);
-		}
-		DTRACE_VM2(zalloc, zone_t, zone, void*, NULL);
-		return (struct kalloc_result){ };
-	}
-
-	/*
-	 * We might have changed core or got preempted/blocked while expanding
-	 * the zone. Allocating from the zone when the recirculation depot
-	 * is not empty is not allowed.
-	 *
-	 * It will be rare but possible for the depot to refill while we were
-	 * waiting for pages. If that happens we need to start over.
-	 */
-	if (!STAILQ_EMPTY(&zone->z_recirc)) {
-		zone_unlock(zone);
-		return zalloc_ext(zone, zstats, flags);
-	}
-
-	return zalloc_item_fast(zone, zstats, flags);
-}
-
-/*!
- * @function zalloc_item
- *
- * @brief
- * Performs allocations when zone caching is off.
- *
- * @discussion
- * This function calls @c zalloc_item_slow() when refilling the zone
- * is needed, or @c zalloc_item_fast() if the zone has enough free elements.
- */
-static struct kalloc_result
-zalloc_item(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
-{
-	zone_lock_nopreempt_check_contention(zone, NULL);
-
-	/*
-	 * When we commited to the zalloc_item() path,
-	 * zone caching might have been flipped/enabled.
-	 *
-	 * If we got preempted for long enough, the recirculation layer
-	 * can have been populated, and allocating from the zone would be
-	 * incorrect.
-	 *
-	 * So double check for this extremely rare race here.
-	 */
-	if (__improbable(!STAILQ_EMPTY(&zone->z_recirc))) {
-		zone_unlock(zone);
-		return zalloc_ext(zone, zstats, flags);
-	}
-
-	if (__improbable(zone->z_elems_free <= zone->z_elems_rsv)) {
-		return zalloc_item_slow(zone, zstats, flags);
-	}
-
-	return zalloc_item_fast(zone, zstats, flags);
-}
-
-__attribute__((always_inline))
-static struct kalloc_result
-zalloc_cached_fast(
-	zone_t                  zone,
-	zone_stats_t            zstats,
-	zalloc_flags_t          flags,
-	zone_cache_t            cache,
-	zone_magazine_t         freemag)
-{
-	vm_offset_t esize = zone_elem_size(zone);
-	zone_element_t ze;
-	uint32_t index;
-
-	index = --cache->zc_alloc_cur;
-	if (index >= zc_mag_size()) {
-		zone_accounting_panic(zone, "zc_alloc_cur wrap around");
-	}
-	ze = cache->zc_alloc_elems[index];
-	cache->zc_alloc_elems[index].ze_value = 0;
-
-	zpercpu_get(zstats)->zs_mem_allocated += esize;
-	enable_preemption();
-
-	if (zone_meta_is_free(zone_meta_from_element(ze), ze)) {
-		zone_meta_double_free_panic(zone, ze, __func__);
-	}
-
-	if (freemag) {
-		zone_magazine_free(freemag);
-	}
-	return zalloc_return(zone, ze, flags, esize);
-}
-
-__attribute__((noinline))
-static struct kalloc_result
-zalloc_cached_from_depot(
-	zone_t                  zone,
-	zone_stats_t            zstats,
-	zalloc_flags_t          flags,
-	zone_cache_t            cache)
-{
-	zone_magazine_t mag = STAILQ_FIRST(&cache->zc_depot);
-
-	STAILQ_REMOVE_HEAD(&cache->zc_depot, zm_link);
-	STAILQ_NEXT(mag, zm_link) = NULL;
-
-	if (cache->zc_depot_cur-- == 0) {
-		zone_accounting_panic(zone, "zc_depot_cur wrap-around");
-	}
-	zone_depot_unlock_nopreempt(cache);
-
-	mag = zone_magazine_replace(&cache->zc_alloc_cur,
-	    &cache->zc_alloc_elems, mag);
-
-	z_debug_assert(cache->zc_alloc_cur == zc_mag_size());
-	z_debug_assert(mag->zm_cur == 0);
-
-	if (zone == zc_magazine_zone) {
-		enable_preemption();
-		bzero(mag, zone_elem_size(zone));
-		return (struct kalloc_result){ mag, zone_elem_size(zone) };
-	}
-
-	return zalloc_cached_fast(zone, zstats, flags, cache, mag);
-}
-
-__attribute__((noinline))
-static struct kalloc_result
+static void
 zalloc_cached_import(
 	zone_t                  zone,
-	zone_stats_t            zstats,
 	zalloc_flags_t          flags,
 	zone_cache_t            cache)
 {
 	uint16_t n_elems = zc_mag_size();
 
-	if (zone->z_elems_free < n_elems + zone->z_elems_rsv / 2 &&
-	    os_sub_overflow(zone->z_elems_free,
-	    zone->z_elems_rsv / 2, &n_elems)) {
-		n_elems = 0;
-	}
+	zone_lock_nopreempt(zone);
 
-	z_debug_assert(n_elems <= zc_mag_size());
-
-	if (__improbable(n_elems == 0)) {
-		/*
-		 * If importing elements would deplete the zone,
-		 * call zalloc_item_slow()
-		 */
-		return zalloc_item_slow(zone, zstats, flags);
-	}
-
-	if (__improbable(zone_caching_disabled)) {
-		if (__improbable(zone_caching_disabled < 0)) {
-			/*
-			 * In the first 10s after boot, mess with
-			 * the scan position in order to make early
-			 * allocations patterns less predictible.
-			 */
-			zone_early_scramble_rr(zone, zstats);
+	if (__probable(!zone_caching_disabled &&
+	    zone->z_elems_free > zone->z_elems_rsv / 2)) {
+		if (__improbable(zone->z_elems_free <= zone->z_elems_rsv)) {
+			zone_expand_async_schedule_if_allowed(zone);
 		}
-		return zalloc_item_fast(zone, zstats, flags);
+		if (zone->z_elems_free < n_elems) {
+			n_elems = (uint16_t)zone->z_elems_free;
+		}
+		zalloc_import(zone, cache->zc_alloc_elems, flags, n_elems);
+		cache->zc_alloc_cur = n_elems;
 	}
-
-	zalloc_import(zone, cache->zc_alloc_elems, flags, n_elems);
-
-	cache->zc_alloc_cur = n_elems;
-	zone_elems_free_sub(zone, n_elems);
 
 	zone_unlock_nopreempt(zone);
-
-	return zalloc_cached_fast(zone, zstats, flags, cache, NULL);
 }
 
-static struct kalloc_result
-zalloc_cached_from_recirc(
+static void
+zalloc_cached_depot_recirculate(
 	zone_t                  zone,
-	zone_stats_t            zstats,
-	zalloc_flags_t          flags,
+	uint32_t                depot_max,
 	zone_cache_t            cache)
 {
-	struct zone_depot mags;
-	zone_magazine_t mag;
-	uint16_t n_mags = 1;
+	uint32_t n;
 
-	STAILQ_FIRST(&mags) = mag = STAILQ_FIRST(&zone->z_recirc);
+	zone_recirc_lock_nopreempt_check_contention(zone);
 
-	for (;;) {
-		for (uint16_t i = 0; i < zc_mag_size(); i++) {
-			zone_element_t e = mag->zm_elems[i];
-
-			if (!zone_meta_mark_used(zone_meta_from_element(e), e)) {
-				zone_meta_double_free_panic(zone, e, __func__);
-			}
-		}
-
-		if (n_mags >= zone->z_recirc_cur) {
-			STAILQ_INIT(&zone->z_recirc);
-			assert(STAILQ_NEXT(mag, zm_link) == NULL);
-			break;
-		}
-
-		if (n_mags >= zc_recirc_batch || n_mags * zc_mag_size() >=
-		    cache->zc_depot_max) {
-			STAILQ_FIRST(&zone->z_recirc) = STAILQ_NEXT(mag, zm_link);
-			STAILQ_NEXT(mag, zm_link) = NULL;
-			break;
-		}
-
-		n_mags++;
-		mag = STAILQ_NEXT(mag, zm_link);
+	n = cache->zc_depot.zd_empty;
+	if (n >= depot_max) {
+		zone_depot_move_empty(&zone->z_recirc, &cache->zc_depot,
+		    n - depot_max / 2, NULL);
 	}
 
-	zone_elems_free_sub(zone, n_mags * zc_mag_size());
-	zone_counter_sub(zone, z_recirc_cur, n_mags);
-
-	zone_unlock_nopreempt(zone);
-
-	mags.stqh_last = &STAILQ_NEXT(mag, zm_link);
-
-	/*
-	 * And then incorporate everything into our per-cpu layer.
-	 */
-
-	mag = STAILQ_FIRST(&mags);
-
-	if (n_mags > 1) {
-		STAILQ_FIRST(&mags) = STAILQ_NEXT(mag, zm_link);
-		STAILQ_NEXT(mag, zm_link) = NULL;
-
-		zone_depot_lock_nopreempt(cache);
-
-		cache->zc_depot_cur += n_mags - 1;
-		STAILQ_CONCAT(&cache->zc_depot, &mags);
-
-		zone_depot_unlock_nopreempt(cache);
+	n = depot_max - cache->zc_depot.zd_empty;
+	if (n > zone->z_recirc.zd_full) {
+		n = zone->z_recirc.zd_full;
+	}
+	if (n) {
+		zone_depot_move_full(&cache->zc_depot, &zone->z_recirc,
+		    n, zone);
 	}
 
-	mag = zone_magazine_replace(&cache->zc_alloc_cur,
-	    &cache->zc_alloc_elems, mag);
-	z_debug_assert(cache->zc_alloc_cur == zc_mag_size());
-	z_debug_assert(mag->zm_cur == 0);
+	zone_recirc_unlock_nopreempt(zone);
+}
 
-	return zalloc_cached_fast(zone, zstats, flags, cache, mag);
+static inline bool
+zalloc_cached_depot_poll(struct zone_depot *depot, smr_t smr)
+{
+	if (depot->zd_full == 0) {
+		return false;
+	}
+
+	return smr == NULL || smr_poll(smr, depot->zd_head->zm_seq);
+}
+
+static void
+zalloc_cached_reuse_smr(zone_t z, zone_cache_t cache, zone_magazine_t mag)
+{
+	zone_smr_free_cb_t zc_free = cache->zc_free;
+	vm_size_t esize = zone_elem_inner_size(z);
+
+	for (uint16_t i = 0; i < zc_mag_size(); i++) {
+		vm_offset_t elem = mag->zm_elems[i];
+
+		zc_free((void *)elem, zone_elem_inner_size(z));
+		elem = __zcache_mark_invalid(z, elem,
+		    ZFREE_PACK_SIZE(esize, esize));
+		mag->zm_elems[i] = elem;
+	}
+}
+
+static void
+zalloc_cached_recirculate(
+	zone_t                  zone,
+	zone_cache_t            cache)
+{
+	zone_magazine_t mag = NULL;
+
+	zone_recirc_lock_nopreempt_check_contention(zone);
+
+	if (zalloc_cached_depot_poll(&zone->z_recirc, zone_cache_smr(cache))) {
+		mag = zone_depot_pop_head_full(&zone->z_recirc, zone);
+		if (zone_cache_smr(cache)) {
+			zalloc_cached_reuse_smr(zone, cache, mag);
+		}
+		mag = zone_magazine_replace(cache, mag, false);
+		zone_depot_insert_head_empty(&zone->z_recirc, mag);
+	}
+
+	zone_recirc_unlock_nopreempt(zone);
 }
 
 __attribute__((noinline))
-static struct kalloc_result
-zalloc_cached_slow(
+static zone_cache_t
+zalloc_cached_prime(
 	zone_t                  zone,
-	zone_stats_t            zstats,
+	zone_cache_ops_t        ops,
 	zalloc_flags_t          flags,
 	zone_cache_t            cache)
 {
-	/*
-	 * Try to allocate from our local depot, if there's one.
-	 */
-	if (STAILQ_FIRST(&cache->zc_depot)) {
+	zone_magazine_t mag = NULL;
+	uint32_t depot_max;
+
+	depot_max = os_atomic_load(&zone->z_depot_size, relaxed);
+	if (depot_max) {
 		zone_depot_lock_nopreempt(cache);
 
-		if (STAILQ_FIRST(&cache->zc_depot)) {
-			return zalloc_cached_from_depot(zone, zstats, flags,
-			           cache);
+		if (cache->zc_depot.zd_full == 0) {
+			zalloc_cached_depot_recirculate(zone, depot_max, cache);
+		}
+
+		if (__probable(zalloc_cached_depot_poll(&cache->zc_depot,
+		    zone_cache_smr(cache)))) {
+			mag = zone_depot_pop_head_full(&cache->zc_depot, NULL);
+			if (zone_cache_smr(cache)) {
+				zalloc_cached_reuse_smr(zone, cache, mag);
+			}
+			mag = zone_magazine_replace(cache, mag, false);
+			zone_depot_insert_head_empty(&cache->zc_depot, mag);
 		}
 
 		zone_depot_unlock_nopreempt(cache);
+	} else if (zone->z_recirc.zd_full) {
+		zalloc_cached_recirculate(zone, cache);
 	}
 
-	zone_lock_nopreempt_check_contention(zone, cache);
-
-	/*
-	 * If the recirculation depot is empty, we'll need to import.
-	 * The system is tuned for this to be extremely rare.
-	 */
-	if (__improbable(STAILQ_EMPTY(&zone->z_recirc))) {
-		return zalloc_cached_import(zone, zstats, flags, cache);
+	if (__probable(cache->zc_alloc_cur)) {
+		return cache;
 	}
 
-	/*
-	 * If the recirculation depot has elements, then try to fill from it.
-	 */
-	return zalloc_cached_from_recirc(zone, zstats, flags, cache);
-}
-
-/*!
- * @function zalloc_cached
- *
- * @brief
- * Performs allocations when zone caching is on.
- *
- * @discussion
- * This function calls @c zalloc_cached_fast() when the caches have elements
- * ready.
- *
- * Else it will call @c zalloc_cached_slow() so that the cache is refilled,
- * which might switch to the @c zalloc_item_slow() track when the backing zone
- * needs to be refilled.
- */
-static struct kalloc_result
-zalloc_cached(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
-{
-	zone_cache_t cache;
-
-	cache = zpercpu_get(zone->z_pcpu_cache);
-
-	if (cache->zc_alloc_cur == 0) {
-		if (__improbable(cache->zc_free_cur == 0)) {
-			return zalloc_cached_slow(zone, zstats, flags, cache);
+	if (ops == NULL) {
+		zalloc_cached_import(zone, flags, cache);
+		if (__probable(cache->zc_alloc_cur)) {
+			return cache;
 		}
-		zone_cache_swap_magazines(cache);
 	}
 
-	return zalloc_cached_fast(zone, zstats, flags, cache, NULL);
+	return NULL;
 }
+
+__attribute__((always_inline))
+static inline zone_cache_t
+zalloc_cached_get_pcpu_cache(
+	zone_t                  zone,
+	zone_cache_ops_t        ops,
+	int                     cpu,
+	zalloc_flags_t          flags)
+{
+	zone_cache_t cache = zpercpu_get_cpu(zone->z_pcpu_cache, cpu);
+
+	if (__probable(cache->zc_alloc_cur != 0)) {
+		return cache;
+	}
+
+	if (__probable(cache->zc_free_cur != 0 && !cache->zc_smr)) {
+		zone_cache_swap_magazines(cache);
+		return cache;
+	}
+
+	return zalloc_cached_prime(zone, ops, flags, cache);
+}
+
 
 /*!
  * @function zalloc_ext
@@ -6753,9 +6570,9 @@ zalloc_ext(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 	 * However, we make sure these calls can never block.
 	 */
 	assertf(startup_phase < STARTUP_SUB_EARLY_BOOT ||
-#if KASAN_ZALLOC
-	    zone->kasan_fakestacks ||
-#endif /* KASAN_ZALLOC */
+#if KASAN_FAKESTACK
+	    zone->z_kasan_fakestacks ||
+#endif /* KASAN_FAKESTACK */
 	    ml_get_interrupts_enabled() ||
 	    ml_is_quiescing() ||
 	    debug_mode_active(),
@@ -6768,15 +6585,29 @@ zalloc_ext(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 		assert(!zone->exhaustible &&
 		    (flags & (Z_NOWAIT | Z_NOPAGEWAIT)) == 0);
 	}
+
 #if VM_TAG_SIZECLASSES
 	if (__improbable(zone->z_uses_tags)) {
 		vm_tag_t tag = zalloc_flags_get_tag(flags);
+
 		if (flags & Z_VM_TAG_BT_BIT) {
 			tag = vm_tag_bt() ?: tag;
 		}
 		if (tag != VM_KERN_MEMORY_NONE) {
 			tag = vm_tag_will_update_zone(tag, zone->z_tags_sizeclass,
 			    flags & (Z_WAITOK | Z_NOWAIT | Z_NOPAGEWAIT));
+		}
+		if (tag == VM_KERN_MEMORY_NONE) {
+			zone_security_flags_t zsflags = zone_security_config(zone);
+
+			if (zsflags.z_kheap_id == KHEAP_ID_DATA_BUFFERS) {
+				tag = VM_KERN_MEMORY_KALLOC_DATA;
+			} else if (zsflags.z_kheap_id == KHEAP_ID_KT_VAR ||
+			    zsflags.z_kalloc_type) {
+				tag = VM_KERN_MEMORY_KALLOC_TYPE;
+			} else {
+				tag = VM_KERN_MEMORY_KALLOC;
+			}
 		}
 		flags = Z_VM_TAG(flags & ~Z_VM_TAG_MASK, tag);
 	}
@@ -6789,17 +6620,150 @@ zalloc_ext(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 		flags |= Z_NOZZC;
 	}
 #endif
-#if CONFIG_PROB_GZALLOC
-	if (zone->z_pgz_tracked && pgz_sample(flags)) {
-		flags |= Z_PGZ;
-	}
-#endif /* CONFIG_PROB_GZALLOC */
 
 	if (zone->z_pcpu_cache) {
-		return zalloc_cached(zone, zstats, flags);
+		zone_cache_t cache;
+		vm_offset_t index, addr, esize;
+		int cpu = cpu_number();
+
+		cache = zalloc_cached_get_pcpu_cache(zone, NULL, cpu, flags);
+		if (__probable(cache)) {
+			esize = zone_elem_inner_size(zone);
+			zpercpu_get_cpu(zstats, cpu)->zs_mem_allocated += esize;
+			index = --cache->zc_alloc_cur;
+			addr  = cache->zc_alloc_elems[index];
+			cache->zc_alloc_elems[index] = 0;
+			enable_preemption();
+			return zalloc_return(zone, addr, flags, esize);
+		}
 	}
 
+	__attribute__((musttail))
 	return zalloc_item(zone, zstats, flags);
+}
+
+__attribute__((always_inline))
+static inline zstack_t
+zcache_alloc_stack_from_cpu(
+	zone_id_t               zid,
+	zone_cache_t            cache,
+	zstack_t                stack,
+	uint32_t                n,
+	zone_cache_ops_t        ops)
+{
+	vm_offset_t *p;
+
+	n = MIN(n, cache->zc_alloc_cur);
+	p = cache->zc_alloc_elems + cache->zc_alloc_cur;
+	cache->zc_alloc_cur -= n;
+	stack.z_count += n;
+
+	do {
+		vm_offset_t e = *--p;
+
+		*p = 0;
+		if (ops) {
+			e = (vm_offset_t)ops->zc_op_mark_valid(zid, (void *)e);
+		} else {
+			e = __zcache_mark_valid(zone_by_id(zid), e, 0);
+		}
+		zstack_push_no_delta(&stack, (void *)e);
+	} while (--n > 0);
+
+	return stack;
+}
+
+__attribute__((noinline))
+static zstack_t
+zcache_alloc_fail(zone_id_t zid, zstack_t stack, uint32_t count)
+{
+	zone_t zone = zone_by_id(zid);
+	zone_stats_t zstats = zone->z_stats;
+	int cpu;
+
+	count -= stack.z_count;
+
+	disable_preemption();
+	cpu = cpu_number();
+	zpercpu_get_cpu(zstats, cpu)->zs_mem_allocated -=
+	    count * zone_elem_inner_size(zone);
+	zpercpu_get_cpu(zstats, cpu)->zs_alloc_fail += 1;
+	enable_preemption();
+
+	return stack;
+}
+
+__attribute__((always_inline))
+static zstack_t
+zcache_alloc_n_ext(
+	zone_id_t               zid,
+	uint32_t                count,
+	zalloc_flags_t          flags,
+	zone_cache_ops_t        ops)
+{
+	zstack_t stack = { };
+	zone_cache_t cache;
+	zone_t zone;
+	int cpu;
+
+	disable_preemption();
+	cpu  = cpu_number();
+	zone = zone_by_id(zid);
+	zpercpu_get_cpu(zone->z_stats, cpu)->zs_mem_allocated +=
+	    count * zone_elem_inner_size(zone);
+
+	for (;;) {
+		cache = zalloc_cached_get_pcpu_cache(zone, ops, cpu, flags);
+		if (__probable(cache)) {
+			stack = zcache_alloc_stack_from_cpu(zid, cache, stack,
+			    count - stack.z_count, ops);
+			enable_preemption();
+		} else {
+			void *o;
+
+			if (ops) {
+				enable_preemption();
+				o = ops->zc_op_alloc(zid, flags);
+			} else {
+				o = zalloc_item(zone, zone->z_stats, flags).addr;
+			}
+			if (__improbable(o == NULL)) {
+				return zcache_alloc_fail(zid, stack, count);
+			}
+			if (ops) {
+				os_atomic_inc(&zone->z_elems_avail, relaxed);
+			}
+			zstack_push(&stack, o);
+		}
+
+		if (stack.z_count == count) {
+			break;
+		}
+
+		disable_preemption();
+		cpu = cpu_number();
+	}
+
+	ZALLOC_LOG(zone, stack.z_head, stack.z_count);
+
+	return stack;
+}
+
+zstack_t
+zalloc_n(zone_id_t zid, uint32_t count, zalloc_flags_t flags)
+{
+	return zcache_alloc_n_ext(zid, count, flags, NULL);
+}
+
+zstack_t
+(zcache_alloc_n)(
+	zone_id_t               zid,
+	uint32_t                count,
+	zalloc_flags_t          flags,
+	zone_cache_ops_t        ops)
+{
+	__builtin_assume(ops != NULL);
+	return zcache_alloc_n_ext(zid, count, flags, ops);
 }
 
 __attribute__((always_inline))
@@ -6823,7 +6787,7 @@ void *
 	zone_stats_t zstats = zov.zov_view->zv_stats;
 
 	assert(zone > &zone_array[ZONE_ID__LAST_RO]);
-	assert(!zone->z_percpu);
+	assert(!zone->z_percpu && !zone->z_permanent);
 	return zalloc_ext(zone, zstats, flags).addr;
 }
 
@@ -6831,7 +6795,7 @@ __attribute__((always_inline))
 void *
 (zalloc_id)(zone_id_t zid, zalloc_flags_t flags)
 {
-	return zalloc_flags(zone_by_id(zid), flags);
+	return (zalloc_flags)(zone_by_id(zid), flags);
 }
 
 void *
@@ -6877,7 +6841,7 @@ __attribute__((always_inline))
 static bool
 from_const_memory(const vm_offset_t addr, vm_size_t size)
 {
-	return rorgn_contains(addr, size);
+	return rorgn_contains(addr, size, true);
 }
 #else /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
 __attribute__((always_inline))
@@ -6897,9 +6861,11 @@ zalloc_ro_mut_validation_panic(zone_id_t zid, void *elem,
 	vm_offset_t stack_start = (vm_offset_t)__builtin_frame_address(0);
 	vm_offset_t stack_end = (stack_start + kernel_stack_size - 1) & -kernel_stack_size;
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
-	const struct mach_vm_range rorgn_range = rorgn_get_range();
+	extern vm_offset_t rorgn_begin;
+	extern vm_offset_t rorgn_end;
 #else
-	const struct mach_vm_range rorgn_range = {};
+	vm_offset_t const rorgn_begin = 0;
+	vm_offset_t const rorgn_end = 0;
 #endif
 
 	if (from_ro_map(src, src_size)) {
@@ -6910,12 +6876,13 @@ zalloc_ro_mut_validation_panic(zone_id_t zid, void *elem,
 		    dst_zone->z_name);
 	}
 
-	panic("zalloc_ro_mut failed: source (%p) not from RO zone map (%p - %p), "
-	    "current stack (%p - %p) or const memory (%p - %p)", (void *)src,
+	panic("zalloc_ro_mut failed: source (%p, phys %p) not from RO zone map (%p - %p), "
+	    "current stack (%p - %p) or const memory (phys %p - %p)",
+	    (void *)src, (void*)kvtophys(src),
 	    (void *)zone_info.zi_ro_range.min_address,
 	    (void *)zone_info.zi_ro_range.max_address,
 	    (void *)stack_start, (void *)stack_end,
-	    (void *)rorgn_range.min_address, (void *)rorgn_range.max_address);
+	    (void *)rorgn_begin, (void *)rorgn_end);
 }
 
 __attribute__((always_inline))
@@ -6942,8 +6909,25 @@ zalloc_ro_mut(zone_id_t zid, void *elem, vm_offset_t offset,
 	assert(zid >= ZONE_ID__FIRST_RO && zid <= ZONE_ID__LAST_RO);
 
 #if ZSECURITY_CONFIG(READ_ONLY)
-	zalloc_ro_mut_validate_src(zid, elem, (vm_offset_t)new_data,
-	    new_data_size);
+	bool skip_src_check = false;
+
+	/*
+	 * The OSEntitlements RO-zone is a little differently treated. For more
+	 * information: rdar://100518485.
+	 */
+	if (zid == ZONE_ID_AMFI_OSENTITLEMENTS) {
+		code_signing_config_t cs_config = 0;
+
+		code_signing_configuration(NULL, &cs_config);
+		if (cs_config & CS_CONFIG_CSM_ENABLED) {
+			skip_src_check = true;
+		}
+	}
+
+	if (skip_src_check == false) {
+		zalloc_ro_mut_validate_src(zid, elem, (vm_offset_t)new_data,
+		    new_data_size);
+	}
 	pmap_ro_zone_memcpy(zid, (vm_offset_t) elem, offset,
 	    (vm_offset_t) new_data, new_data_size);
 #else
@@ -7134,18 +7118,21 @@ zalloc_percpu_permanent(vm_size_t size, vm_offset_t mask)
 #pragma mark zone GC / trimming
 #if !ZALLOC_TEST
 
-static thread_call_data_t zone_defrag_callout;
+static thread_call_data_t zone_trim_callout;
+EVENT_DEFINE(ZONE_EXHAUSTED);
 
 static void
-zone_reclaim_chunk(zone_t z, struct zone_page_metadata *meta,
-    uint32_t free_count, struct zone_depot *mags)
+zone_reclaim_chunk(
+	zone_t                  z,
+	struct zone_page_metadata *meta,
+	uint32_t                free_count)
 {
 	vm_address_t page_addr;
 	vm_size_t    size_to_free;
 	uint32_t     bitmap_ref;
 	uint32_t     page_count;
 	zone_security_flags_t zsflags = zone_security_config(z);
-	bool         sequester = zsflags.z_va_sequester && !z->z_destroyed;
+	bool         sequester = !z->z_destroyed;
 	bool         oob_guard = false;
 
 	if (zone_submap_is_sequestered(zsflags)) {
@@ -7187,15 +7174,18 @@ zone_reclaim_chunk(zone_t z, struct zone_page_metadata *meta,
 	zone_counter_sub(z, z_elems_avail, free_count);
 	zone_counter_sub(z, z_wired_empty, page_count);
 	zone_counter_sub(z, z_wired_cur, page_count);
-	if (z->z_elems_free_min < free_count) {
-		z->z_elems_free_min = 0;
-	} else {
-		z->z_elems_free_min -= free_count;
+
+	if (z->z_pcpu_cache == NULL) {
+		if (z->z_elems_free_min < free_count) {
+			z->z_elems_free_min = 0;
+		} else {
+			z->z_elems_free_min -= free_count;
+		}
 	}
-	if (z->z_elems_free_max < free_count) {
-		z->z_elems_free_max = 0;
+	if (z->z_elems_free_wma < free_count) {
+		z->z_elems_free_wma = 0;
 	} else {
-		z->z_elems_free_max -= free_count;
+		z->z_elems_free_wma -= free_count;
 	}
 
 	bitmap_ref = 0;
@@ -7231,14 +7221,21 @@ zone_reclaim_chunk(zone_t z, struct zone_page_metadata *meta,
 	}
 
 	/* Free the pages for metadata and account for them */
-#if KASAN_ZALLOC
-	kasan_poison_range(page_addr, size_to_free, ASAN_VALID);
-#endif
-#if VM_TAG_SIZECLASSES
-	if (z->z_uses_tags) {
-		ztMemoryRemove(z, page_addr, size_to_free);
+#if KASAN_CLASSIC
+	if (z->z_percpu) {
+		for (uint32_t i = 0; i < z->z_chunk_pages; i++) {
+			kasan_zmem_remove(page_addr + ptoa(i), PAGE_SIZE,
+			    zone_elem_outer_size(z),
+			    zone_elem_outer_offs(z),
+			    zone_elem_redzone(z));
+		}
+	} else {
+		kasan_zmem_remove(page_addr, size_to_free,
+		    zone_elem_outer_size(z),
+		    zone_elem_outer_offs(z),
+		    zone_elem_redzone(z));
 	}
-#endif /* VM_TAG_SIZECLASSES */
+#endif /* KASAN_CLASSIC */
 
 	if (sequester) {
 		kernel_memory_depopulate(page_addr, size_to_free,
@@ -7252,7 +7249,6 @@ zone_reclaim_chunk(zone_t z, struct zone_page_metadata *meta,
 		}
 	}
 
-	zone_magazine_free_list(mags);
 	thread_yield_to_preemption();
 
 	zone_lock(z);
@@ -7262,66 +7258,54 @@ zone_reclaim_chunk(zone_t z, struct zone_page_metadata *meta,
 	}
 }
 
-static uint16_t
-zone_reclaim_elements(zone_t z, uint16_t *count, zone_element_t *elems)
+static void
+zone_reclaim_elements(zone_t z, uint16_t n, vm_offset_t *elems)
 {
-	uint16_t n = *count;
-
 	z_debug_assert(n <= zc_mag_size());
 
 	for (uint16_t i = 0; i < n; i++) {
-		zone_element_t ze = elems[i];
-		elems[i].ze_value = 0;
-		zfree_drop(z, zone_element_validate(z, ze), ze, false);
+		vm_offset_t addr = elems[i];
+		elems[i] = 0;
+		zfree_drop(z, addr);
 	}
 
-	*count = 0;
-	return n;
-}
-
-static uint16_t
-zone_reclaim_recirc_magazine(zone_t z, struct zone_depot *mags)
-{
-	zone_magazine_t mag = STAILQ_FIRST(&z->z_recirc);
-
-	STAILQ_REMOVE_HEAD(&z->z_recirc, zm_link);
-	STAILQ_INSERT_TAIL(mags, mag, zm_link);
-	zone_counter_sub(z, z_recirc_cur, 1);
-
-	z_debug_assert(mag->zm_cur == zc_mag_size());
-
-	for (uint16_t i = 0; i < zc_mag_size(); i++) {
-		zone_element_t ze = mag->zm_elems[i];
-		mag->zm_elems[i].ze_value = 0;
-		zfree_drop(z, zone_element_validate(z, ze), ze, true);
-	}
-
-	mag->zm_cur = 0;
-
-	return zc_mag_size();
+	z->z_elems_free += n;
 }
 
 static void
-zone_depot_trim(zone_cache_t zc, struct zone_depot *head)
+zcache_reclaim_elements(zone_id_t zid, uint16_t n, vm_offset_t *elems)
 {
-	zone_magazine_t mag;
+	z_debug_assert(n <= zc_mag_size());
+	zone_cache_ops_t ops = zcache_ops[zid];
 
-	if (zc->zc_depot_cur == 0 ||
-	    2 * (zc->zc_depot_cur + 1) * zc_mag_size() <= zc->zc_depot_max) {
-		return;
+	for (uint16_t i = 0; i < n; i++) {
+		vm_offset_t addr = elems[i];
+		elems[i] = 0;
+		addr = (vm_offset_t)ops->zc_op_mark_valid(zid, (void *)addr);
+		ops->zc_op_free(zid, (void *)addr);
 	}
 
-	zone_depot_lock(zc);
+	os_atomic_sub(&zone_by_id(zid)->z_elems_avail, n, relaxed);
+}
 
-	while (zc->zc_depot_cur &&
-	    2 * (zc->zc_depot_cur + 1) * zc_mag_size() > zc->zc_depot_max) {
-		mag = STAILQ_FIRST(&zc->zc_depot);
-		STAILQ_REMOVE_HEAD(&zc->zc_depot, zm_link);
-		STAILQ_INSERT_TAIL(head, mag, zm_link);
-		zc->zc_depot_cur--;
+static void
+zone_depot_trim(zone_t z, uint32_t target, struct zone_depot *zd)
+{
+	zpercpu_foreach(zc, z->z_pcpu_cache) {
+		zone_depot_lock(zc);
+
+		if (zc->zc_depot.zd_full > (target + 1) / 2) {
+			uint32_t n = zc->zc_depot.zd_full - (target + 1) / 2;
+			zone_depot_move_full(zd, &zc->zc_depot, n, NULL);
+		}
+
+		if (zc->zc_depot.zd_empty > target / 2) {
+			uint32_t n = zc->zc_depot.zd_empty - target / 2;
+			zone_depot_move_empty(zd, &zc->zc_depot, n, NULL);
+		}
+
+		zone_depot_unlock(zc);
 	}
-
-	zone_depot_unlock(zc);
 }
 
 __enum_decl(zone_reclaim_mode_t, uint32_t, {
@@ -7329,6 +7313,83 @@ __enum_decl(zone_reclaim_mode_t, uint32_t, {
 	ZONE_RECLAIM_DRAIN,
 	ZONE_RECLAIM_DESTROY,
 });
+
+static void
+zone_reclaim_pcpu(zone_t z, zone_reclaim_mode_t mode, struct zone_depot *zd)
+{
+	uint32_t depot_max = 0;
+	bool cleanup = mode != ZONE_RECLAIM_TRIM;
+
+	if (z->z_depot_cleanup) {
+		z->z_depot_cleanup = false;
+		depot_max = z->z_depot_size;
+		cleanup = true;
+	}
+
+	if (cleanup) {
+		zone_depot_trim(z, depot_max, zd);
+	}
+
+	if (mode == ZONE_RECLAIM_DESTROY) {
+		zpercpu_foreach(zc, z->z_pcpu_cache) {
+			zone_reclaim_elements(z, zc->zc_alloc_cur,
+			    zc->zc_alloc_elems);
+			zone_reclaim_elements(z, zc->zc_free_cur,
+			    zc->zc_free_elems);
+			zc->zc_alloc_cur = zc->zc_free_cur = 0;
+		}
+
+		z->z_recirc_empty_min = 0;
+		z->z_recirc_empty_wma = 0;
+		z->z_recirc_full_min = 0;
+		z->z_recirc_full_wma = 0;
+		z->z_recirc_cont_cur = 0;
+		z->z_recirc_cont_wma = 0;
+	}
+}
+
+static void
+zone_reclaim_recirc(zone_t z, zone_reclaim_mode_t mode, struct zone_depot *zd)
+{
+	assert(zd->zd_empty == 0);
+	assert(zd->zd_full == 0);
+
+	zone_recirc_lock_nopreempt(z);
+
+	if (mode == ZONE_RECLAIM_TRIM) {
+		uint32_t count;
+
+		count = MIN(z->z_recirc_empty_wma / Z_WMA_UNIT,
+		    z->z_recirc_empty_min);
+		assert(count <= z->z_recirc.zd_empty);
+
+		if (count) {
+			zone_depot_move_empty(zd, &z->z_recirc, count, NULL);
+			z->z_recirc_empty_min -= count;
+			z->z_recirc_empty_wma -= count * Z_WMA_UNIT;
+		}
+
+		count = MIN(z->z_recirc_full_wma / Z_WMA_UNIT, z->z_recirc_full_min);
+		assert(count <= z->z_recirc.zd_full);
+		if (count) {
+			zone_depot_move_full(zd, &z->z_recirc, count, NULL);
+			z->z_recirc_full_min -= count;
+			z->z_recirc_full_wma -= count * Z_WMA_UNIT;
+		}
+	} else {
+		*zd = z->z_recirc;
+		if (zd->zd_full == 0) {
+			zd->zd_tail = &zd->zd_head;
+		}
+		zone_depot_init(&z->z_recirc);
+		z->z_recirc_empty_min = 0;
+		z->z_recirc_empty_wma = 0;
+		z->z_recirc_full_min = 0;
+		z->z_recirc_full_wma = 0;
+	}
+
+	zone_recirc_unlock_nopreempt(z);
+}
 
 /*!
  * @function zone_reclaim
@@ -7348,8 +7409,9 @@ __enum_decl(zone_reclaim_mode_t, uint32_t, {
 static void
 zone_reclaim(zone_t z, zone_reclaim_mode_t mode)
 {
-	struct zone_depot mags = STAILQ_HEAD_INITIALIZER(mags);
-	zone_magazine_t mag;
+	struct zone_depot zd;
+
+	zone_depot_init(&zd);
 
 	zone_lock(z);
 
@@ -7365,7 +7427,7 @@ zone_reclaim(zone_t z, zone_reclaim_mode_t mode)
 			    zone_heap_name(z), z->z_name);
 		}
 
-#if !KASAN_ZALLOC
+#if !KASAN_CLASSIC
 		/*
 		 * Unset the valid bit. We'll hit an assert failure on further
 		 * operations on this zone, until zinit() is called again.
@@ -7378,172 +7440,148 @@ zone_reclaim(zone_t z, zone_reclaim_mode_t mode)
 		z->z_destroyed = true;
 	} else if (z->z_destroyed) {
 		return zone_unlock(z);
-	} else if (z->z_elems_free <= z->z_elems_rsv) {
+	} else if (zone_count_free(z) <= z->z_elems_rsv) {
 		/* If the zone is under its reserve level, leave it alone. */
 		return zone_unlock(z);
 	}
 
 	if (z->z_pcpu_cache) {
-		if (mode != ZONE_RECLAIM_TRIM) {
-			zpercpu_foreach(zc, z->z_pcpu_cache) {
-				zc->zc_depot_max /= 2;
-			}
-		} else {
-			zpercpu_foreach(zc, z->z_pcpu_cache) {
-				if (zc->zc_depot_max > 0) {
-					zc->zc_depot_max--;
-				}
-			}
-		}
-
-		zone_unlock(z);
-
-		if (mode == ZONE_RECLAIM_TRIM) {
-			zpercpu_foreach(zc, z->z_pcpu_cache) {
-				zone_depot_trim(zc, &mags);
-			}
-		} else {
-			zpercpu_foreach(zc, z->z_pcpu_cache) {
-				zone_depot_lock(zc);
-				STAILQ_CONCAT(&mags, &zc->zc_depot);
-				zc->zc_depot_cur = 0;
-				zone_depot_unlock(zc);
-			}
-		}
-
-		zone_lock(z);
-
+		zone_magazine_t mag;
 		uint32_t freed = 0;
 
-		STAILQ_FOREACH(mag, &mags, zm_link) {
-			freed += zone_reclaim_elements(z,
-			    &mag->zm_cur, mag->zm_elems);
+		/*
+		 * This is all done with the zone lock held on purpose.
+		 * The work here is O(ncpu), which should still be short.
+		 *
+		 * We need to keep the lock held until we have reclaimed
+		 * at least a few magazines, otherwise if the zone has no
+		 * free elements outside of the depot, a thread performing
+		 * a concurrent allocatiuon could try to grow the zone
+		 * while we're trying to drain it.
+		 */
+		zone_reclaim_recirc(z, mode, &zd);
+		zone_reclaim_pcpu(z, mode, &zd);
 
-			if (freed >= zc_free_batch_size) {
-				z->z_elems_free_min += freed;
-				z->z_elems_free_max += freed;
-				z->z_elems_free += freed;
-				zone_unlock(z);
-				thread_yield_to_preemption();
-				zone_lock(z);
-				freed = 0;
+		if (z->z_chunk_elems) {
+			zone_cache_t cache = zpercpu_get_cpu(z->z_pcpu_cache, 0);
+			smr_t smr = zone_cache_smr(cache);
+
+			while (zd.zd_full) {
+				mag = zone_depot_pop_head_full(&zd, NULL);
+				if (smr) {
+					smr_wait(smr, mag->zm_seq);
+					zalloc_cached_reuse_smr(z, cache, mag);
+					freed += zc_mag_size();
+				}
+				zone_reclaim_elements(z, zc_mag_size(),
+				    mag->zm_elems);
+				zone_depot_insert_head_empty(&zd, mag);
+
+				freed += zc_mag_size();
+				if (freed >= zc_free_batch_size()) {
+					zone_unlock(z);
+					zone_magazine_free_list(&zd);
+					thread_yield_to_preemption();
+					zone_lock(z);
+					freed = 0;
+				}
 			}
-		}
-
-		if (mode == ZONE_RECLAIM_DESTROY) {
-			zpercpu_foreach(zc, z->z_pcpu_cache) {
-				freed += zone_reclaim_elements(z,
-				    &zc->zc_alloc_cur, zc->zc_alloc_elems);
-				freed += zone_reclaim_elements(z,
-				    &zc->zc_free_cur, zc->zc_free_elems);
-			}
-
-			z->z_elems_free_wss = 0;
-			z->z_elems_free_min = 0;
-			z->z_elems_free_max = 0;
-			z->z_contention_cur = 0;
-			z->z_contention_wma = 0;
 		} else {
-			z->z_elems_free_min += freed;
-			z->z_elems_free_max += freed;
+			zone_id_t zid = zone_index(z);
+
+			zone_unlock(z);
+
+			assert(zid <= ZONE_ID__FIRST_DYNAMIC && zcache_ops[zid]);
+
+			while (zd.zd_full) {
+				mag = zone_depot_pop_head_full(&zd, NULL);
+				zcache_reclaim_elements(zid, zc_mag_size(),
+				    mag->zm_elems);
+				zone_magazine_free(mag);
+			}
+
+			goto cleanup;
 		}
-		z->z_elems_free += freed;
 	}
 
-	for (;;) {
+	while (!zone_pva_is_null(z->z_pageq_empty)) {
 		struct zone_page_metadata *meta;
-		uint32_t count, goal, freed = 0;
+		uint32_t count, limit = z->z_elems_rsv * 5 / 4;
 
-		goal = z->z_elems_rsv;
-		if (mode == ZONE_RECLAIM_TRIM) {
-			/*
-			 * When trimming, only free elements in excess
-			 * of the working set estimate.
-			 *
-			 * However if we are in a situation where the working
-			 * set estimate is clearly growing, ignore the estimate
-			 * as the next working set update will grow it and
-			 * we want to avoid churn.
-			 */
-			goal = MAX(goal, MAX(z->z_elems_free_wss,
-			    z->z_elems_free - z->z_elems_free_min));
-
-			/*
-			 * Add some slop to account for "the last partial chunk in flight"
-			 * so that we do not deplete the recirculation depot too harshly.
-			 */
-			goal += z->z_chunk_elems / 2;
-		}
-
-		if (z->z_elems_free <= goal) {
-			break;
-		}
-
-		/*
-		 * If we're above target, but we have no free page, then drain
-		 * the recirculation depot until we get a free chunk or exhaust
-		 * the depot.
-		 *
-		 * This is rather abrupt but also somehow will reduce
-		 * fragmentation anyway, and the zone code will import
-		 * over time anyway.
-		 */
-		while (z->z_recirc_cur && zone_pva_is_null(z->z_pageq_empty)) {
-			if (freed >= zc_free_batch_size) {
-				zone_unlock(z);
-				zone_magazine_free_list(&mags);
-				thread_yield_to_preemption();
-				zone_lock(z);
-				freed = 0;
-				/* we dropped the lock, needs to reassess */
-				continue;
-			}
-			freed += zone_reclaim_recirc_magazine(z, &mags);
-		}
-
-		if (zone_pva_is_null(z->z_pageq_empty)) {
-			break;
+		if (mode == ZONE_RECLAIM_TRIM && z->z_pcpu_cache == NULL) {
+			limit = MAX(limit, z->z_elems_free -
+			    MIN(z->z_elems_free_min, z->z_elems_free_wma));
 		}
 
 		meta  = zone_pva_to_meta(z->z_pageq_empty);
-		count = (uint32_t)ptoa(meta->zm_chunk_len) / zone_elem_size(z);
+		count = (uint32_t)ptoa(meta->zm_chunk_len) / zone_elem_outer_size(z);
 
-		if (z->z_elems_free - count < goal) {
+		if (zone_count_free(z) - count < limit) {
 			break;
 		}
 
-		zone_reclaim_chunk(z, meta, count, &mags);
+		zone_reclaim_chunk(z, meta, count);
 	}
 
 	zone_unlock(z);
 
-	zone_magazine_free_list(&mags);
+cleanup:
+	zone_magazine_free_list(&zd);
+}
+
+void
+zone_drain(zone_t zone)
+{
+	current_thread()->options |= TH_OPT_ZONE_PRIV;
+	lck_mtx_lock(&zone_gc_lock);
+	zone_reclaim(zone, ZONE_RECLAIM_DRAIN);
+	lck_mtx_unlock(&zone_gc_lock);
+	current_thread()->options &= ~TH_OPT_ZONE_PRIV;
+}
+
+void
+zcache_drain(zone_id_t zid)
+{
+	zone_drain(zone_by_id(zid));
 }
 
 static void
 zone_reclaim_all(zone_reclaim_mode_t mode)
 {
 	/*
-	 * Start with zones with VA sequester since depopulating
+	 * Start with zcaches, so that they flow into the regular zones.
+	 *
+	 * Then the zones with VA sequester since depopulating
 	 * pages will not need to allocate vm map entries for holes,
 	 * which will give memory back to the system faster.
 	 */
+	for (zone_id_t zid = ZONE_ID__LAST_RO + 1; zid < ZONE_ID__FIRST_DYNAMIC; zid++) {
+		zone_t z = zone_by_id(zid);
+
+		if (z->z_self && z->z_chunk_elems == 0) {
+			zone_reclaim(z, mode);
+		}
+	}
 	zone_index_foreach(zid) {
-		zone_t z = &zone_array[zid];
-		if (z == zc_magazine_zone) {
+		zone_t z = zone_by_id(zid);
+
+		if (z == zc_magazine_zone || z->z_chunk_elems == 0) {
 			continue;
 		}
-		if (zone_security_array[zid].z_va_sequester && z->collectable) {
+		if (zone_submap_is_sequestered(zone_security_array[zid]) &&
+		    z->collectable) {
 			zone_reclaim(z, mode);
 		}
 	}
 
 	zone_index_foreach(zid) {
-		zone_t z = &zone_array[zid];
-		if (z == zc_magazine_zone) {
+		zone_t z = zone_by_id(zid);
+
+		if (z == zc_magazine_zone || z->z_chunk_elems == 0) {
 			continue;
 		}
-		if (!zone_security_array[zid].z_va_sequester && z->collectable) {
+		if (!zone_submap_is_sequestered(zone_security_array[zid]) &&
+		    z->collectable) {
 			zone_reclaim(z, mode);
 		}
 	}
@@ -7611,114 +7649,78 @@ zone_gc_drain(void)
 }
 
 static bool
-zone_defrag_needed(zone_t z)
+zone_trim_needed(zone_t z)
 {
-	uint32_t recirc_size = z->z_recirc_cur * zc_mag_size();
-
-	if (recirc_size <= z->z_chunk_elems / 2) {
-		return false;
+	if (z->z_depot_cleanup) {
+		return true;
 	}
-	if (recirc_size * z->z_elem_size <= zc_defrag_threshold) {
-		return false;
-	}
-	return recirc_size * zc_defrag_ratio > z->z_elems_free_wss * 100;
-}
 
-/*!
- * @function zone_defrag
- *
- * @brief
- * Resize the recirculation depot to match the working set size.
- *
- * @discussion
- * When zones grow very large due to a spike in usage, and then some of those
- * elements get freed, the elements in magazines in the recirculation depot
- * are in no particular order.
- *
- * In order to control fragmentation, we need to detect "empty" pages so that
- * they get onto the @c z_pageq_empty freelist, so that allocations re-pack
- * naturally.
- *
- * This is done very gently, never in excess of the working set and some slop.
- */
-static bool
-zone_autogc_needed(zone_t z)
-{
-	uint32_t free_min = z->z_elems_free_min;
-
-	if (free_min * z->z_elem_size <= zc_autogc_threshold) {
+	if (z->z_async_refilling) {
+		/* Don't fight with refill */
 		return false;
 	}
 
-	return free_min * zc_autogc_ratio > z->z_elems_free_wss * 100;
-}
+	if (z->z_pcpu_cache) {
+		uint32_t e_n, f_n;
 
-static void
-zone_defrag(zone_t z)
-{
-	struct zone_depot mags = STAILQ_HEAD_INITIALIZER(mags);
-	zone_magazine_t mag, tmp;
-	uint32_t freed = 0, goal = 0;
+		e_n = MIN(z->z_recirc_empty_wma, z->z_recirc_empty_min * Z_WMA_UNIT);
+		f_n = MIN(z->z_recirc_full_wma, z->z_recirc_full_min * Z_WMA_UNIT);
 
-	zone_lock(z);
-
-	goal = z->z_elems_free_wss + z->z_chunk_elems / 2 +
-	    zc_mag_size() - 1;
-
-	while (z->z_recirc_cur * zc_mag_size() > goal) {
-		if (freed >= zc_free_batch_size) {
-			zone_unlock(z);
-			thread_yield_to_preemption();
-			zone_lock(z);
-			freed = 0;
-			/* we dropped the lock, needs to reassess */
-			continue;
+		if (e_n > zc_autotrim_buckets() * Z_WMA_UNIT) {
+			return true;
 		}
-		freed += zone_reclaim_recirc_magazine(z, &mags);
+
+		if (f_n * zc_mag_size() > z->z_elems_rsv * Z_WMA_UNIT &&
+		    f_n * zc_mag_size() * zone_elem_inner_size(z) >
+		    zc_autotrim_size() * Z_WMA_UNIT) {
+			return true;
+		}
+
+		return false;
 	}
 
-	zone_unlock(z);
+	if (!zone_pva_is_null(z->z_pageq_empty)) {
+		uint32_t n;
 
-	STAILQ_FOREACH_SAFE(mag, &mags, zm_link, tmp) {
-		zone_magazine_free(mag);
+		n = MIN(z->z_elems_free_wma, z->z_elems_free_min);
+
+		return n >= z->z_elems_rsv + z->z_chunk_elems;
 	}
+
+	return false;
 }
 
 static void
-zone_defrag_async(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+zone_trim_async(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
+	current_thread()->options |= TH_OPT_ZONE_PRIV;
+
 	zone_foreach(z) {
 		if (!z->collectable || z == zc_magazine_zone) {
 			continue;
 		}
 
-		if (zone_autogc_needed(z)) {
-			current_thread()->options |= TH_OPT_ZONE_PRIV;
+		if (zone_trim_needed(z)) {
 			lck_mtx_lock(&zone_gc_lock);
 			zone_reclaim(z, ZONE_RECLAIM_TRIM);
 			lck_mtx_unlock(&zone_gc_lock);
-			current_thread()->options &= ~TH_OPT_ZONE_PRIV;
-		} else if (zone_defrag_needed(z)) {
-			zone_defrag(z);
 		}
 	}
 
-	if (zone_autogc_needed(zc_magazine_zone)) {
-		current_thread()->options |= TH_OPT_ZONE_PRIV;
+	if (zone_trim_needed(zc_magazine_zone)) {
 		lck_mtx_lock(&zone_gc_lock);
 		zone_reclaim(zc_magazine_zone, ZONE_RECLAIM_TRIM);
 		lck_mtx_unlock(&zone_gc_lock);
-		current_thread()->options &= ~TH_OPT_ZONE_PRIV;
-	} else if (zone_defrag_needed(zc_magazine_zone)) {
-		zone_defrag(zc_magazine_zone);
 	}
+
+	current_thread()->options &= ~TH_OPT_ZONE_PRIV;
 }
 
 void
 compute_zone_working_set_size(__unused void *param)
 {
-	uint32_t zc_auto = zc_auto_threshold;
-	bool kick_defrag = false;
+	uint32_t zc_auto = zc_enable_level();
+	bool needs_trim = false;
 
 	/*
 	 * Keep zone caching disabled until the first proc is made.
@@ -7729,12 +7731,12 @@ compute_zone_working_set_size(__unused void *param)
 
 	zone_caching_disabled = vm_pool_low();
 
-	if (os_mul_overflow(zc_auto, Z_CONTENTION_WMA_UNIT, &zc_auto)) {
+	if (os_mul_overflow(zc_auto, Z_WMA_UNIT, &zc_auto)) {
 		zc_auto = 0;
 	}
 
 	zone_foreach(z) {
-		uint32_t wma;
+		uint32_t old, wma, cur;
 		bool needs_caching = false;
 
 		if (z->z_self != z) {
@@ -7743,42 +7745,61 @@ compute_zone_working_set_size(__unused void *param)
 
 		zone_lock(z);
 
-		wma = z->z_elems_free_max - z->z_elems_free_min;
-		wma = (3 * wma + z->z_elems_free_wss) / 4;
-		z->z_elems_free_max = z->z_elems_free_min = z->z_elems_free;
-		z->z_elems_free_wss = wma;
+		zone_recirc_lock_nopreempt(z);
 
-		if (!kick_defrag &&
-		    (zone_defrag_needed(z) || zone_autogc_needed(z))) {
-			kick_defrag = true;
+		if (z->z_pcpu_cache) {
+			wma = Z_WMA_MIX(z->z_recirc_empty_wma, z->z_recirc_empty_min);
+			z->z_recirc_empty_min = z->z_recirc.zd_empty;
+			z->z_recirc_empty_wma = wma;
+		} else {
+			wma = Z_WMA_MIX(z->z_elems_free_wma, z->z_elems_free_min);
+			z->z_elems_free_min = z->z_elems_free;
+			z->z_elems_free_wma = wma;
 		}
+
+		wma = Z_WMA_MIX(z->z_recirc_full_wma, z->z_recirc_full_min);
+		z->z_recirc_full_min = z->z_recirc.zd_full;
+		z->z_recirc_full_wma = wma;
 
 		/* fixed point decimal of contentions per second */
-		wma = z->z_contention_cur * Z_CONTENTION_WMA_UNIT /
-		    ZONE_WSS_UPDATE_PERIOD;
-		z->z_contention_cur = 0;
-		z->z_contention_wma = (3 * wma + z->z_contention_wma) / 4;
+		old = z->z_recirc_cont_wma;
+		cur = z->z_recirc_cont_cur * Z_WMA_UNIT /
+		    (zpercpu_count() * ZONE_WSS_UPDATE_PERIOD);
+		cur = (3 * old + cur) / 4;
+		zone_recirc_unlock_nopreempt(z);
 
-		/*
-		 * If the zone seems to be very quiet,
-		 * gently lower its cpu-local depot size.
-		 */
-		if (z->z_pcpu_cache && wma < Z_CONTENTION_WMA_UNIT / 2 &&
-		    z->z_contention_wma < Z_CONTENTION_WMA_UNIT / 2) {
-			zpercpu_foreach(zc, z->z_pcpu_cache) {
-				if (zc->zc_depot_max > zc_mag_size()) {
-					zc->zc_depot_max--;
-				}
+		if (z->z_pcpu_cache) {
+			uint16_t size = z->z_depot_size;
+
+			if (size < z->z_depot_limit && cur > zc_grow_level()) {
+				/*
+				 * lose history on purpose now
+				 * that we just grew, to give
+				 * the sytem time to adjust.
+				 */
+				cur  = (zc_grow_level() + zc_shrink_level()) / 2;
+				size = size ? (3 * size + 2) / 2 : 2;
+				z->z_depot_size = MIN(z->z_depot_limit, size);
+			} else if (size > 0 && cur <= zc_shrink_level()) {
+				/*
+				 * lose history on purpose now
+				 * that we just shrunk, to give
+				 * the sytem time to adjust.
+				 */
+				cur = (zc_grow_level() + zc_shrink_level()) / 2;
+				z->z_depot_size = size - 1;
+				z->z_depot_cleanup = true;
 			}
+		} else if (!z->z_nocaching && !z->exhaustible && zc_auto &&
+		    old >= zc_auto && cur >= zc_auto) {
+			needs_caching = true;
 		}
 
-		/*
-		 * If the zone has been contending like crazy for two periods,
-		 * and is eligible, maybe it's time to enable caching.
-		 */
-		if (!z->z_nocaching && !z->z_pcpu_cache && !z->exhaustible &&
-		    zc_auto && z->z_contention_wma >= zc_auto && wma >= zc_auto) {
-			needs_caching = true;
+		z->z_recirc_cont_wma = cur;
+		z->z_recirc_cont_cur = 0;
+
+		if (!needs_trim && zone_trim_needed(z)) {
+			needs_trim = true;
 		}
 
 		zone_unlock(z);
@@ -7788,8 +7809,8 @@ compute_zone_working_set_size(__unused void *param)
 		}
 	}
 
-	if (kick_defrag) {
-		thread_call_enter(&zone_defrag_callout);
+	if (needs_trim) {
+		thread_call_enter(&zone_trim_callout);
 	}
 }
 
@@ -7827,7 +7848,7 @@ panic_print_types_in_zone(zone_t z, const char* debug_str)
 	if (zsflags.z_kheap_id == KHEAP_ID_KT_VAR) {
 		uint32_t heap_id = KT_VAR_PTR_HEAP + ((zone_index(z) -
 		    kalloc_type_heap_array[KT_VAR_PTR_HEAP].kh_zstart) / KHEAP_NUM_ZONES);
-		kt_cur.ktv_var = kalloc_type_heap_array[heap_id].views;
+		kt_cur.ktv_var = kalloc_type_heap_array[heap_id].kt_views;
 		is_kt_var = true;
 	} else {
 		kt_cur.ktv_fixed = (kalloc_type_view_t) z->z_views;
@@ -7939,13 +7960,13 @@ panic_display_zone_info(void)
 {
 	paniclog_append_noflush("Zone info:\n");
 	paniclog_append_noflush("  Zone map: %p - %p\n",
-	    (void *) zone_info.zi_map_range.min_address,
-	    (void *) zone_info.zi_map_range.max_address);
+	    (void *)zone_info.zi_map_range.min_address,
+	    (void *)zone_info.zi_map_range.max_address);
 #if CONFIG_PROB_GZALLOC
 	if (pgz_submap) {
 		paniclog_append_noflush("  . PGZ   : %p - %p\n",
-		    (void *) pgz_submap->min_offset,
-		    (void *) pgz_submap->max_offset);
+		    (void *)pgz_submap->min_offset,
+		    (void *)pgz_submap->max_offset);
 	}
 #endif /* CONFIG_PROB_GZALLOC */
 	for (int i = 0; i < Z_SUBMAP_IDX_COUNT; i++) {
@@ -7956,16 +7977,19 @@ panic_display_zone_info(void)
 		}
 		paniclog_append_noflush("  . %-6s: %p - %p\n",
 		    zone_submaps_names[i],
-		    (void *) map->min_offset,
-		    (void *) map->max_offset);
+		    (void *)map->min_offset,
+		    (void *)map->max_offset);
 	}
 	paniclog_append_noflush("  Metadata: %p - %p\n"
 	    "  Bitmaps : %p - %p\n"
+	    "  Extra   : %p - %p\n"
 	    "\n",
-	    (void *) zone_info.zi_meta_range.min_address,
-	    (void *) zone_info.zi_meta_range.max_address,
-	    (void *) zone_info.zi_bits_range.min_address,
-	    (void *) zone_info.zi_bits_range.max_address);
+	    (void *)zone_info.zi_meta_range.min_address,
+	    (void *)zone_info.zi_meta_range.max_address,
+	    (void *)zone_info.zi_bits_range.min_address,
+	    (void *)zone_info.zi_bits_range.max_address,
+	    (void *)zone_info.zi_xtra_range.min_address,
+	    (void *)zone_info.zi_xtra_range.max_address);
 }
 
 static void
@@ -8136,7 +8160,7 @@ get_zone_info(
 	if (z->z_pcpu_cache) {
 		zpercpu_foreach(zc, z->z_pcpu_cache) {
 			cached += zc->zc_alloc_cur + zc->zc_free_cur;
-			cached += zc->zc_depot_cur * zc_mag_size();
+			cached += zc->zc_depot.zd_full * zc_mag_size();
 		}
 	}
 	zone_unlock(z);
@@ -8164,6 +8188,10 @@ get_zone_info(
 			.mzi_alloc_size = ptoa_64(zcopy.z_chunk_pages),
 			.mzi_exhaustible = (uint64_t)zcopy.exhaustible,
 		};
+		if (zcopy.z_chunk_pages == 0) {
+			/* this is a zcache */
+			zi->mzi_cur_size = zcopy.z_elems_avail * zcopy.z_elem_size;
+		}
 		zpercpu_foreach(zs, zcopy.z_stats) {
 			zi->mzi_sum_size += zs->zs_mem_allocated;
 		}
@@ -8189,13 +8217,25 @@ extern int kauth_cred_issuser(struct ucred *);
 extern struct ucred *kauth_cred_get(void);
 
 static kern_return_t
-mach_memory_info_security_check(void)
+mach_memory_info_internal(
+	host_t                  host,
+	mach_zone_name_array_t  *namesp,
+	mach_msg_type_number_t  *namesCntp,
+	mach_zone_info_array_t  *infop,
+	mach_msg_type_number_t  *infoCntp,
+	mach_memory_info_array_t *memoryInfop,
+	mach_msg_type_number_t   *memoryInfoCntp,
+	bool                     redact_info);
+
+static kern_return_t
+mach_memory_info_security_check(bool redact_info)
 {
-	/* If not root or does not have the memoryinfo entitlement, fail */
-	if (!kauth_cred_issuser(kauth_cred_get())) {
+	/* If not root, only allow redacted calls. */
+	if (!kauth_cred_issuser(kauth_cred_get()) && !redact_info) {
 		return KERN_NO_ACCESS;
 	}
 
+	/* If does not have the memory entitlement, fail. */
 #if CONFIG_DEBUGGER_FOR_ZONE_INFO
 	if (!IOTaskHasEntitlement(current_task(), MEMORYINFO_ENTITLEMENT)) {
 		return KERN_DENIED;
@@ -8205,20 +8245,24 @@ mach_memory_info_security_check(void)
 	 * On release non-mac arm devices, allow mach_memory_info
 	 * to be called twice per day per boot. memorymaintenanced
 	 * calls it once per day, which leaves room for a sysdiagnose.
+	 * Allow redacted version to be called without rate limit.
 	 */
-	static uint64_t first_call, second_call = 0;
-	uint64_t now = 0;
-	absolutetime_to_nanoseconds(ml_get_timebase(), &now);
 
-	if (!first_call) {
-		first_call = now;
-	} else if (!second_call) {
-		second_call = now;
-	} else if (first_call + NSEC_DAY > now) {
-		return KERN_DENIED;
-	} else if (first_call + NSEC_DAY < now) {
-		first_call = now;
-		second_call = 0;
+	if (!redact_info) {
+		static uint64_t first_call = 0, second_call = 0;
+		uint64_t now = 0;
+		absolutetime_to_nanoseconds(ml_get_timebase(), &now);
+
+		if (!first_call) {
+			first_call = now;
+		} else if (!second_call) {
+			second_call = now;
+		} else if (first_call + NSEC_DAY > now) {
+			return KERN_DENIED;
+		} else if (first_call + NSEC_DAY < now) {
+			first_call = now;
+			second_call = 0;
+		}
 	}
 #endif
 
@@ -8227,25 +8271,95 @@ mach_memory_info_security_check(void)
 
 kern_return_t
 mach_zone_info(
-	host_priv_t             host,
+	mach_port_t             host_port,
 	mach_zone_name_array_t  *namesp,
 	mach_msg_type_number_t  *namesCntp,
 	mach_zone_info_array_t  *infop,
 	mach_msg_type_number_t  *infoCntp)
 {
-	return mach_memory_info(host, namesp, namesCntp, infop, infoCntp, NULL, NULL);
+	return mach_memory_info(host_port, namesp, namesCntp, infop, infoCntp, NULL, NULL);
 }
-
 
 kern_return_t
 mach_memory_info(
-	host_priv_t             host,
+	mach_port_t             host_port,
 	mach_zone_name_array_t  *namesp,
 	mach_msg_type_number_t  *namesCntp,
 	mach_zone_info_array_t  *infop,
 	mach_msg_type_number_t  *infoCntp,
 	mach_memory_info_array_t *memoryInfop,
 	mach_msg_type_number_t   *memoryInfoCntp)
+{
+	bool redact_info = false;
+	host_t host = HOST_NULL;
+
+	host = convert_port_to_host_priv(host_port);
+	if (host == HOST_NULL) {
+		redact_info = true;
+		host = convert_port_to_host(host_port);
+	}
+
+	return mach_memory_info_internal(host, namesp, namesCntp, infop, infoCntp, memoryInfop, memoryInfoCntp, redact_info);
+}
+
+static void
+zone_info_redact(mach_zone_info_t *zi)
+{
+	zi->mzi_cur_size = 0;
+	zi->mzi_max_size = 0;
+	zi->mzi_alloc_size = 0;
+	zi->mzi_sum_size = 0;
+	zi->mzi_collectable = 0;
+}
+
+static bool
+zone_info_needs_to_be_coalesced(int zone_index)
+{
+	zone_security_flags_t zsflags = zone_security_array[zone_index];
+	if (zsflags.z_kalloc_type || zsflags.z_kheap_id == KHEAP_ID_DEFAULT ||
+	    zsflags.z_kheap_id == KHEAP_ID_KT_VAR) {
+		return true;
+	}
+	return false;
+}
+
+static bool
+zone_info_find_coalesce_zone(
+	mach_zone_info_t *zi,
+	mach_zone_info_t *info,
+	int              *coalesce,
+	int              coalesce_count,
+	int              *coalesce_index)
+{
+	for (int i = 0; i < coalesce_count; i++) {
+		if (zi->mzi_elem_size == info[coalesce[i]].mzi_elem_size) {
+			*coalesce_index = coalesce[i];
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void
+zone_info_coalesce(
+	mach_zone_info_t *info,
+	int coalesce_index,
+	mach_zone_info_t *zi)
+{
+	info[coalesce_index].mzi_count += zi->mzi_count;
+}
+
+static kern_return_t
+mach_memory_info_internal(
+	host_t                  host,
+	mach_zone_name_array_t  *namesp,
+	mach_msg_type_number_t  *namesCntp,
+	mach_zone_info_array_t  *infop,
+	mach_msg_type_number_t  *infoCntp,
+	mach_memory_info_array_t *memoryInfop,
+	mach_msg_type_number_t   *memoryInfoCntp,
+	bool                     redact_info)
 {
 	mach_zone_name_t        *names;
 	vm_offset_t             names_addr;
@@ -8254,6 +8368,11 @@ mach_memory_info(
 	mach_zone_info_t        *info;
 	vm_offset_t             info_addr;
 	vm_size_t               info_size;
+
+	int                     *coalesce;
+	vm_offset_t             coalesce_addr;
+	vm_size_t               coalesce_size;
+	int                     coalesce_count = 0;
 
 	mach_memory_info_t      *memory_info;
 	vm_offset_t             memory_info_addr;
@@ -8272,7 +8391,7 @@ mach_memory_info(
 		return KERN_INVALID_HOST;
 	}
 
-	kr = mach_memory_info_security_check();
+	kr = mach_memory_info_security_check(redact_info);
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
@@ -8302,18 +8421,69 @@ mach_memory_info(
 	}
 	info = (mach_zone_info_t *) info_addr;
 
+	if (redact_info) {
+		coalesce_size = round_page(max_zones * sizeof *coalesce);
+		kr = kmem_alloc(ipc_kernel_map, &coalesce_addr, coalesce_size,
+		    KMA_PAGEABLE | KMA_DATA, VM_KERN_MEMORY_IPC);
+		if (kr != KERN_SUCCESS) {
+			kmem_free(ipc_kernel_map,
+			    names_addr, names_size);
+			kmem_free(ipc_kernel_map,
+			    info_addr, info_size);
+			return kr;
+		}
+		coalesce = (int *)coalesce_addr;
+	}
+
 	zn = &names[0];
 	zi = &info[0];
 
-	used_zones = max_zones;
+	used_zones = 0;
 	for (i = 0; i < max_zones; i++) {
 		if (!get_zone_info(&(zone_array[i]), zn, zi)) {
-			used_zones--;
 			continue;
 		}
-		zones_collectable_bytes += GET_MZI_COLLECTABLE_BYTES(zi->mzi_collectable);
-		zn++;
-		zi++;
+
+		if (!redact_info) {
+			zones_collectable_bytes += GET_MZI_COLLECTABLE_BYTES(zi->mzi_collectable);
+			zn++;
+			zi++;
+			used_zones++;
+			continue;
+		}
+
+		zone_info_redact(zi);
+		if (!zone_info_needs_to_be_coalesced(i)) {
+			zn++;
+			zi++;
+			used_zones++;
+			continue;
+		}
+
+		int coalesce_index;
+		bool found_coalesce_zone = zone_info_find_coalesce_zone(zi, info,
+		    coalesce, coalesce_count, &coalesce_index);
+
+		/* Didn't find a zone to coalesce */
+		if (!found_coalesce_zone) {
+			/* Updates the zone name */
+			__nosan_bzero(zn->mzn_name, MAX_ZONE_NAME);
+			snprintf(zn->mzn_name, MAX_ZONE_NAME, "kalloc.%d",
+			    (int)zi->mzi_elem_size);
+
+			coalesce[coalesce_count] = used_zones;
+			coalesce_count++;
+			zn++;
+			zi++;
+			used_zones++;
+			continue;
+		}
+
+		zone_info_coalesce(info, coalesce_index, zi);
+	}
+
+	if (redact_info) {
+		kmem_free(ipc_kernel_map, coalesce_addr, coalesce_size);
 	}
 
 	*namesp = (mach_zone_name_t *) create_vm_map_copy(names_addr, names_size, used_zones * sizeof *names);
@@ -8341,7 +8511,7 @@ mach_memory_info(
 		assert(kr == KERN_SUCCESS);
 
 		memory_info = (mach_memory_info_t *) memory_info_addr;
-		vm_page_diagnose(memory_info, num_info, zones_collectable_bytes);
+		vm_page_diagnose(memory_info, num_info, zones_collectable_bytes, redact_info);
 
 		kr = vm_map_unwire(ipc_kernel_map, memory_info_addr, memory_info_addr + memory_info_vmsize, FALSE);
 		assert(kr == KERN_SUCCESS);
@@ -8454,7 +8624,7 @@ mach_zone_get_zlog_zones(
 	mach_zone_name_array_t  *namesp,
 	mach_msg_type_number_t  *namesCntp)
 {
-#if ZONE_ENABLE_LOGGING
+#if ZALLOC_ENABLE_LOGGING
 	unsigned int max_zones, logged_zones, i;
 	kern_return_t kr;
 	zone_t zone_ptr;
@@ -8498,10 +8668,10 @@ mach_zone_get_zlog_zones(
 
 	return KERN_SUCCESS;
 
-#else /* ZONE_ENABLE_LOGGING */
+#else /* ZALLOC_ENABLE_LOGGING */
 #pragma unused(host, namesp, namesCntp)
 	return KERN_FAILURE;
-#endif /* ZONE_ENABLE_LOGGING */
+#endif /* ZALLOC_ENABLE_LOGGING */
 }
 
 kern_return_t
@@ -8511,7 +8681,7 @@ mach_zone_get_btlog_records(
 	zone_btrecord_array_t  *recsp,
 	mach_msg_type_number_t *numrecs)
 {
-#if ZONE_ENABLE_LOGGING
+#if ZALLOC_ENABLE_LOGGING
 	zone_btrecord_t *recs;
 	kern_return_t    kr;
 	vm_address_t     addr;
@@ -8567,10 +8737,10 @@ mach_zone_get_btlog_records(
 	*recsp = (zone_btrecord_t *)copy;
 	return KERN_SUCCESS;
 
-#else /* !ZONE_ENABLE_LOGGING */
+#else /* !ZALLOC_ENABLE_LOGGING */
 #pragma unused(host, name, recsp, numrecs)
 	return KERN_FAILURE;
-#endif /* !ZONE_ENABLE_LOGGING */
+#endif /* !ZALLOC_ENABLE_LOGGING */
 }
 
 
@@ -8605,6 +8775,40 @@ zone_find_largest(uint64_t *zone_size)
 	return largest_zone;
 }
 
+void
+zone_get_stats(
+	zone_t                  zone,
+	struct zone_basic_stats *stats)
+{
+	stats->zbs_avail = zone->z_elems_avail;
+
+	stats->zbs_alloc_fail = 0;
+	zpercpu_foreach(zs, zone->z_stats) {
+		stats->zbs_alloc_fail += zs->zs_alloc_fail;
+	}
+
+	stats->zbs_cached = 0;
+	if (zone->z_pcpu_cache) {
+		zpercpu_foreach(zc, zone->z_pcpu_cache) {
+			stats->zbs_cached += zc->zc_alloc_cur +
+			    zc->zc_free_cur +
+			    zc->zc_depot.zd_full * zc_mag_size();
+		}
+	}
+
+	stats->zbs_free = zone_count_free(zone) + stats->zbs_cached;
+
+	/*
+	 * Since we don't take any locks, deal with possible inconsistencies
+	 * as the counters may have changed.
+	 */
+	if (os_sub_overflow(stats->zbs_avail, stats->zbs_free,
+	    &stats->zbs_alloc)) {
+		stats->zbs_avail = stats->zbs_free;
+		stats->zbs_alloc = 0;
+	}
+}
+
 #endif /* !ZALLOC_TEST */
 #pragma mark zone creation, configuration, destruction
 #if !ZALLOC_TEST
@@ -8616,38 +8820,20 @@ zone_init_defaults(zone_id_t zid)
 
 	z->z_wired_max = ~0u;
 	z->collectable = true;
-	z->expandable = true;
 
-	lck_ticket_init(&z->z_lock, &zone_locks_grp);
-	STAILQ_INIT(&z->z_recirc);
+	hw_lck_ticket_init(&z->z_lock, &zone_locks_grp);
+	hw_lck_ticket_init(&z->z_recirc_lock, &zone_locks_grp);
+	zone_depot_init(&z->z_recirc);
 	return z;
-}
-
-static bool
-zone_is_initializing(zone_t z)
-{
-	return !z->z_self && !z->z_destroyed;
-}
-
-void
-zone_set_noexpand(zone_t zone, vm_size_t nelems)
-{
-	if (!zone_is_initializing(zone)) {
-		panic("%s: called after zone_create()", __func__);
-	}
-	zone->expandable = false;
-	zone->z_wired_max = zone_alloc_pages_for_nelems(zone, nelems);
 }
 
 void
 zone_set_exhaustible(zone_t zone, vm_size_t nelems)
 {
-	if (!zone_is_initializing(zone)) {
-		panic("%s: called after zone_create()", __func__);
-	}
-	zone->expandable = false;
+	zone_lock(zone);
 	zone->exhaustible = true;
 	zone->z_wired_max = zone_alloc_pages_for_nelems(zone, nelems);
+	zone_unlock(zone);
 }
 
 void
@@ -8731,7 +8917,8 @@ zone_create_find(
 				 * If the zone name and the element size are the
 				 * same, we can just reuse the old zone struct.
 				 */
-				if (strcmp(z->z_name, name) || zone_elem_size(z) != size) {
+				if (strcmp(z->z_name, name) ||
+				    zone_elem_outer_size(z) != size) {
 					continue;
 				}
 				bitmap_clear(zone_destroyed_bitmap, i);
@@ -8782,9 +8969,10 @@ zone_elem_adjust_size(
 	const char             *name __unused,
 	vm_size_t               elem_size,
 	zone_create_flags_t     flags __unused,
-	uint32_t               *redzone __unused)
+	uint16_t               *redzone __unused)
 {
 	vm_size_t size;
+
 	/*
 	 * Adjust element size for minimum size and pointer alignment
 	 */
@@ -8793,15 +8981,15 @@ zone_elem_adjust_size(
 		size = ZONE_MIN_ELEM_SIZE;
 	}
 
-#if KASAN_ZALLOC
+#if KASAN_CLASSIC
 	/*
 	 * Expand the zone allocation size to include the redzones.
 	 *
 	 * For page-multiple zones add a full guard page because they
 	 * likely require alignment.
 	 */
-	uint32_t redzone_tmp;
-	if (flags & (ZC_KASAN_NOREDZONE | ZC_PERCPU)) {
+	uint16_t redzone_tmp;
+	if (flags & (ZC_KASAN_NOREDZONE | ZC_PERCPU | ZC_OBJ_CACHE)) {
 		redzone_tmp = 0;
 	} else if ((size & PAGE_MASK) == 0) {
 		if (size != PAGE_SIZE && (flags & ZC_ALIGNMENT_REQUIRED)) {
@@ -8814,7 +9002,7 @@ zone_elem_adjust_size(
 	} else {
 		redzone_tmp = KASAN_GUARD_SIZE;
 	}
-	size += redzone_tmp * 2;
+	size += redzone_tmp;
 	if (redzone) {
 		*redzone = redzone_tmp;
 	}
@@ -8893,10 +9081,9 @@ zone_create_ext(
 	zone_id_t               zid,
 	void                  (^extra_setup)(zone_t))
 {
-	vm_size_t alloc;
-	uint32_t redzone;
-	zone_t z;
 	zone_security_flags_t *zsflags;
+	uint16_t redzone;
+	zone_t z;
 
 	if (size > ZONE_MAX_ALLOC_SIZE) {
 		panic("zone_create: element size too large: %zd", (size_t)size);
@@ -8908,6 +9095,7 @@ zone_create_ext(
 	}
 
 	size = zone_elem_adjust_size(name, size, flags, &redzone);
+
 	/*
 	 * Allocate the zone slot, return early if we found an older match.
 	 */
@@ -8916,6 +9104,7 @@ zone_create_ext(
 		/* We found a zone to reuse */
 		return z;
 	}
+	zsflags = &zone_security_array[zid];
 
 	/*
 	 * Initialize the zone properly.
@@ -8945,43 +9134,39 @@ zone_create_ext(
 		z->z_stats = __zpcpu_mangle_for_boot(&zone_stats_startup[zone_index(z)]);
 	}
 
-	alloc = zone_get_min_alloc_granule(size, flags);
+	if (flags & ZC_OBJ_CACHE) {
+		zone_create_assert_not_both(name, flags, ZC_OBJ_CACHE, ZC_NOCACHING);
+		zone_create_assert_not_both(name, flags, ZC_OBJ_CACHE, ZC_PERCPU);
+		zone_create_assert_not_both(name, flags, ZC_OBJ_CACHE, ZC_NOGC);
+		zone_create_assert_not_both(name, flags, ZC_OBJ_CACHE, ZC_DESTRUCTIBLE);
 
-	z->z_elem_size   = (uint16_t)size;
-	z->z_chunk_pages = (uint16_t)atop(alloc);
-	z->z_quo_magic   = Z_MAGIC_QUO(size);
-	z->z_align_magic = Z_MAGIC_ALIGNED(size);
-	if (flags & ZC_PERCPU) {
-		z->z_chunk_elems = (uint16_t)(PAGE_SIZE / z->z_elem_size);
-		z->z_elem_offs = (uint16_t)(PAGE_SIZE % z->z_elem_size);
+		z->z_elem_size   = (uint16_t)size;
+		z->z_chunk_pages = 0;
+		z->z_quo_magic   = 0;
+		z->z_align_magic = 0;
+		z->z_chunk_elems = 0;
+		z->z_elem_offs   = 0;
+		z->no_callout    = true;
+		zsflags->z_lifo  = true;
 	} else {
-		z->z_chunk_elems = (uint16_t)(alloc / z->z_elem_size);
-		z->z_elem_offs = (uint16_t)(alloc % z->z_elem_size);
-	}
-	if (zone_element_idx(zone_element_encode(0,
-	    z->z_chunk_elems - 1)) != z->z_chunk_elems - 1) {
-		panic("zone_element_encode doesn't work for zone [%s]", name);
-	}
+		vm_size_t alloc = zone_get_min_alloc_granule(size, flags);
 
-#if KASAN_ZALLOC
-	z->z_kasan_redzone = redzone;
-	if (strncmp(name, "fakestack.", sizeof("fakestack.") - 1) == 0) {
-		z->kasan_fakestacks = true;
+		z->z_elem_size   = (uint16_t)(size - redzone);
+		z->z_chunk_pages = (uint16_t)atop(alloc);
+		z->z_quo_magic   = Z_MAGIC_QUO(size);
+		z->z_align_magic = Z_MAGIC_ALIGNED(size);
+		if (flags & ZC_PERCPU) {
+			z->z_chunk_elems = (uint16_t)(PAGE_SIZE / size);
+			z->z_elem_offs = (uint16_t)(PAGE_SIZE % size) + redzone;
+		} else {
+			z->z_chunk_elems = (uint16_t)(alloc / size);
+			z->z_elem_offs = (uint16_t)(alloc % size) + redzone;
+		}
 	}
-#endif
 
 	/*
 	 * Handle KPI flags
 	 */
-	zsflags = &zone_security_array[zid];
-	/*
-	 * Some zones like ipc ports and procs rely on sequestering for
-	 * correctness, so explicitly turn on sequestering despite the
-	 * configuration.
-	 */
-	if (flags & ZC_SEQUESTER) {
-		zsflags->z_va_sequester = true;
-	}
 
 	/* ZC_CACHING applied after all configuration is done */
 	if (flags & ZC_NOCACHING) {
@@ -8990,10 +9175,10 @@ zone_create_ext(
 
 	if (flags & ZC_READONLY) {
 		zone_create_assert_not_both(name, flags, ZC_READONLY, ZC_VM);
+		zone_create_assert_not_both(name, flags, ZC_READONLY, ZC_DATA);
 		assert(zid <= ZONE_ID__LAST_RO);
 #if ZSECURITY_CONFIG(READ_ONLY)
 		zsflags->z_submap_idx = Z_SUBMAP_IDX_READ_ONLY;
-		zsflags->z_va_sequester = true;
 #endif
 		zone_ro_size_params[zid].z_elem_size = z->z_elem_size;
 		zone_ro_size_params[zid].z_align_magic = z->z_align_magic;
@@ -9017,9 +9202,6 @@ zone_create_ext(
 	 */
 	if (startup_phase < STARTUP_SUB_LOCKDOWN && flags & ZC_NOENCRYPT) {
 		zsflags->z_noencrypt = true;
-	}
-	if (flags & ZC_ALIGNMENT_REQUIRED) {
-		z->alignment_required = true;
 	}
 	if (flags & ZC_NOCALLOUT) {
 		z->no_callout = true;
@@ -9050,13 +9232,23 @@ zone_create_ext(
 		zsflags->z_kalloc_type = true;
 	}
 	if (flags & ZC_VM) {
+		zone_create_assert_not_both(name, flags, ZC_VM, ZC_DATA);
 		zsflags->z_submap_idx = Z_SUBMAP_IDX_VM;
-		zsflags->z_va_sequester = true;
 	}
-	if (flags & ZC_KASAN_NOQUARANTINE) {
-		z->kasan_noquarantine = true;
+	if (flags & ZC_DATA) {
+		zsflags->z_kheap_id = KHEAP_ID_DATA_BUFFERS;
 	}
-	/* ZC_KASAN_NOREDZONE already handled */
+#if KASAN_CLASSIC
+	if (redzone && !(flags & ZC_KASAN_NOQUARANTINE)) {
+		z->z_kasan_quarantine = true;
+	}
+	z->z_kasan_redzone = redzone;
+#endif /* KASAN_CLASSIC */
+#if KASAN_FAKESTACK
+	if (strncmp(name, "fakestack.", sizeof("fakestack.") - 1) == 0) {
+		z->z_kasan_fakestacks = true;
+	}
+#endif /* KASAN_FAKESTACK */
 
 	/*
 	 * Then if there's extra tuning, do it
@@ -9069,33 +9261,29 @@ zone_create_ext(
 	 * Configure debugging features
 	 */
 #if CONFIG_PROB_GZALLOC
-	if ((flags & (ZC_READONLY | ZC_PERCPU)) == 0) {
+	if ((flags & (ZC_READONLY | ZC_PERCPU | ZC_OBJ_CACHE | ZC_NOPGZ)) == 0) {
 		pgz_zone_init(z);
 	}
 #endif
-#if ZONE_ENABLE_LOGGING
-	if (startup_phase >= STARTUP_SUB_ZALLOC) {
+	if (zc_magazine_zone) { /* proxy for "has zone_init run" */
+#if ZALLOC_ENABLE_LOGGING
 		/*
 		 * Check for and set up zone leak detection
 		 * if requested via boot-args.
 		 */
 		zone_setup_logging(z);
-	}
-#endif /* ZONE_ENABLE_LOGGING */
-
+#endif /* ZALLOC_ENABLE_LOGGING */
 #if KASAN_TBI
-	if (startup_phase >= STARTUP_SUB_ZALLOC) {
 		zone_setup_kasan_logging(z);
-	}
 #endif /* KASAN_TBI */
+	}
 
 #if VM_TAG_SIZECLASSES
 	if ((zsflags->z_kheap_id || zsflags->z_kalloc_type) && zone_tagging_on) {
-		assert(startup_phase < STARTUP_SUB_LOCKDOWN);
 		static uint16_t sizeclass_idx;
+
+		assert(startup_phase < STARTUP_SUB_LOCKDOWN);
 		z->z_uses_tags = true;
-		z->z_tags_inline = (((page_size + size - 1) / size) <=
-		    (sizeof(uint32_t) / sizeof(uint16_t)));
 		if (zsflags->z_kheap_id == KHEAP_ID_DEFAULT) {
 			zone_tags_sizeclasses[sizeclass_idx] = (uint16_t)size;
 			z->z_tags_sizeclass = sizeclass_idx++;
@@ -9107,6 +9295,7 @@ zone_create_ext(
 					break;
 				}
 			}
+
 			/*
 			 * Size class wasn't found, add it to zone_tags_sizeclasses
 			 */
@@ -9123,27 +9312,24 @@ zone_create_ext(
 	/*
 	 * Finally, fixup properties based on security policies, boot-args, ...
 	 */
-#if ZSECURITY_CONFIG(SUBMAP_USER_DATA)
 	if (zsflags->z_kheap_id == KHEAP_ID_DATA_BUFFERS) {
-		zsflags->z_submap_idx = Z_SUBMAP_IDX_DATA;
-		zsflags->z_va_sequester = false;
-	}
-#endif
-
-	if ((flags & ZC_CACHING) && !z->z_nocaching) {
 		/*
-		 * If zcache hasn't been initialized yet, remember our decision,
-		 *
-		 * zone_enable_caching() will be called again by
-		 * zcache_bootstrap(), while the system is still single
-		 * threaded, to build the missing caches.
+		 * We use LIFO in the data map, because workloads like network
+		 * usage or similar tend to rotate through allocations very
+		 * quickly with sometimes epxloding working-sets and using
+		 * a FIFO policy might cause massive TLB trashing with rather
+		 * dramatic performance impacts.
 		 */
-		if (__probable(zc_magazine_zone)) {
-			zone_enable_caching(z);
-		} else {
-			z->z_pcpu_cache =
-			    __zpcpu_mangle_for_boot(&zone_cache_startup[zid]);
-		}
+		zsflags->z_submap_idx = Z_SUBMAP_IDX_DATA;
+		zsflags->z_lifo = true;
+	}
+
+	if ((flags & (ZC_CACHING | ZC_OBJ_CACHE)) && !z->z_nocaching) {
+		/*
+		 * No zone made before zone_init() can have ZC_CACHING set.
+		 */
+		assert(zc_magazine_zone);
+		zone_enable_caching(z);
 	}
 
 	zone_lock(z);
@@ -9151,6 +9337,28 @@ zone_create_ext(
 	zone_unlock(z);
 
 	return z;
+}
+
+void
+zone_enable_smr(zone_t zone, struct smr *smr, zone_smr_free_cb_t free_cb)
+{
+	/* moving to SMR must be done before the zone has ever been used */
+	assert(zone->z_va_cur == 0 && !zone->z_smr && !zone->z_nocaching);
+	assert(!zone_security_array[zone_index(zone)].z_lifo);
+
+	if (!zone->z_pcpu_cache) {
+		zone_enable_caching(zone);
+	}
+
+	zone_lock(zone);
+
+	zpercpu_foreach(it, zone->z_pcpu_cache) {
+		it->zc_smr = smr;
+		it->zc_free = free_cb;
+	}
+	zone->z_smr = true;
+
+	zone_unlock(zone);
 }
 
 __startup_func
@@ -9201,10 +9409,10 @@ zone_view_startup_init(struct zone_view_startup_spec *spec)
 	}
 
 	if (heap) {
-		z = kalloc_heap_zone_for_size(heap, spec->zv_size);
+		z = kalloc_zone_for_size(heap->kh_zstart, spec->zv_size);
 	} else {
 		z = *spec->zv_zone;
-		assert(spec->zv_size <= zone_elem_size(z));
+		assert(spec->zv_size <= zone_elem_inner_size(z));
 	}
 
 	assert(z);
@@ -9292,7 +9500,7 @@ zdestroy(zone_t z)
 		}
 	}
 
-#if !KASAN_ZALLOC
+#if !KASAN_CLASSIC
 	/* Assert that all counts are zero */
 	if (z->z_elems_avail || z->z_elems_free || zone_size_wired(z) ||
 	    (z->z_va_cur && !zone_submap_is_sequestered(zsflags))) {
@@ -9354,6 +9562,20 @@ zone_bootstrap(void)
 	}
 
 	zpercpu_early_count = ml_early_cpu_max_number() + 1;
+	if (!PE_parse_boot_argn("zc_mag_size", NULL, 0)) {
+		/*
+		 * Scale zc_mag_size() per machine.
+		 *
+		 * - wide machines get 128B magazines to avoid all false sharing
+		 * - smaller machines but with enough RAM get a bit bigger
+		 *   buckets (empirically affects networking performance)
+		 */
+		if (zpercpu_early_count >= 10) {
+			_zc_mag_size = 14;
+		} else if ((sane_size >> 30) >= 4) {
+			_zc_mag_size = 10;
+		}
+	}
 
 	/*
 	 * Initialize random used to scramble early allocations
@@ -9394,29 +9616,12 @@ zone_bootstrap(void)
 	    zone_expand_async, NULL, THREAD_CALL_PRIORITY_HIGH,
 	    THREAD_CALL_OPTIONS_ONCE);
 
-	thread_call_setup_with_options(&zone_defrag_callout,
-	    zone_defrag_async, NULL, THREAD_CALL_PRIORITY_USER,
+	thread_call_setup_with_options(&zone_trim_callout,
+	    zone_trim_async, NULL, THREAD_CALL_PRIORITY_USER,
 	    THREAD_CALL_OPTIONS_ONCE);
 }
 
 #define ZONE_GUARD_SIZE                 (64UL << 10)
-
-#if __LP64__
-static inline vm_offset_t
-zone_restricted_va_max(void)
-{
-	vm_offset_t compressor_max = VM_PACKING_MAX_PACKABLE(C_SLOT_PACKED_PTR);
-	vm_offset_t vm_page_max    = VM_PACKING_MAX_PACKABLE(VM_PAGE_PACKED_PTR);
-
-	return trunc_page(MIN(compressor_max, vm_page_max));
-}
-#else
-static inline vm_offset_t
-zone_restricted_va_max(void)
-{
-	return 0;
-}
-#endif
 
 __startup_func
 static void
@@ -9438,80 +9643,12 @@ zone_tunables_fixup(void)
 	if (zone_map_jetsam_limit == 0 || zone_map_jetsam_limit > 100) {
 		zone_map_jetsam_limit = ZONE_MAP_JETSAM_LIMIT_DEFAULT;
 	}
-	if (zc_magazine_size > PAGE_SIZE / ZONE_MIN_ELEM_SIZE) {
-		zc_magazine_size = (uint16_t)(PAGE_SIZE / ZONE_MIN_ELEM_SIZE);
-	}
 	if (PE_parse_boot_argn("wdt", &wdt, sizeof(wdt)) && wdt == -1 &&
 	    !PE_parse_boot_argn("zet", NULL, 0)) {
 		zone_exhausted_timeout = -1;
 	}
 }
 STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, zone_tunables_fixup);
-
-__startup_func
-static vm_size_t
-zone_phys_size_max(void)
-{
-	vm_size_t zsize;
-	vm_size_t zsizearg;
-
-	if (PE_parse_boot_argn("zsize", &zsizearg, sizeof(zsizearg))) {
-		zsize = zsizearg * (1024ULL * 1024);
-	} else {
-		/* Set target zone size as 1/4 of physical memory */
-		zsize = (vm_size_t)(sane_size >> 2);
-#if defined(__LP64__)
-		zsize += zsize >> 1;
-#endif /* __LP64__ */
-	}
-
-	if (zsize < CONFIG_ZONE_MAP_MIN) {
-		zsize = CONFIG_ZONE_MAP_MIN;   /* Clamp to min */
-	}
-	if (zsize > sane_size >> 1) {
-		zsize = (vm_size_t)(sane_size >> 1); /* Clamp to half of RAM max */
-	}
-	if (zsizearg == 0 && zsize > ZONE_MAP_MAX) {
-		/* if zsize boot-arg not present and zsize exceeds platform maximum, clip zsize */
-		printf("NOTE: zonemap size reduced from 0x%lx to 0x%lx\n",
-		    (uintptr_t)zsize, (uintptr_t)ZONE_MAP_MAX);
-		zsize = ZONE_MAP_MAX;
-	}
-
-	return (vm_size_t)trunc_page(zsize);
-}
-
-__startup_func
-static struct mach_vm_range
-zone_init_allocate_va(vm_map_address_t addr, vm_size_t size, bool random)
-{
-	int vm_alloc_flags = VM_FLAGS_ANYWHERE;
-	struct mach_vm_range r;
-	kern_return_t kr;
-	vm_map_entry_t entry;
-
-	if (random) {
-		vm_alloc_flags |= VM_FLAGS_RANDOM_ADDR;
-	}
-
-	vm_object_reference(kernel_object);
-
-	kr = vm_map_enter(kernel_map, &addr, size, 0,
-	    vm_alloc_flags, VM_MAP_KERNEL_FLAGS_NONE, VM_KERN_MEMORY_ZONE,
-	    kernel_object, addr, FALSE, VM_PROT_NONE, VM_PROT_NONE,
-	    VM_INHERIT_NONE);
-
-	if (KERN_SUCCESS != kr) {
-		panic("vm_map_enter(0x%zx) failed: %d", (size_t)size, kr);
-	}
-
-	vm_map_lookup_entry(kernel_map, addr, &entry);
-	VME_OFFSET_SET(entry, addr);
-
-	r.min_address = (vm_offset_t)addr;
-	r.max_address = (vm_offset_t)addr + size;
-	return r;
-}
 
 __startup_func
 static void
@@ -9534,16 +9671,23 @@ zone_submap_init(
 	submap_size = trunc_page(zone_sub_map_numer * *remaining_size /
 	    *remaining_denom);
 	submap_start = *submap_min;
-	submap_end = submap_start + submap_size;
 
-#if defined(__LP64__)
+	if (idx == Z_SUBMAP_IDX_READ_ONLY) {
+		vm_offset_t submap_padding = pmap_ro_zone_align(submap_start) - submap_start;
+		submap_start += submap_padding;
+		submap_size = pmap_ro_zone_align(submap_size);
+		assert(*remaining_size >= (submap_padding + submap_size));
+		*remaining_size -= submap_padding;
+		*submap_min = submap_start;
+	}
+
+	submap_end = submap_start + submap_size;
 	if (idx == Z_SUBMAP_IDX_VM) {
 		vm_packing_verify_range("vm_compressor",
 		    submap_start, submap_end, VM_PACKING_PARAMS(C_SLOT_PACKED_PTR));
 		vm_packing_verify_range("vm_page",
 		    submap_start, submap_end, VM_PACKING_PARAMS(VM_PAGE_PACKED_PTR));
 	}
-#endif /* defined(__LP64__) */
 
 	vmco = VM_MAP_CREATE_NEVER_FAULTS;
 	if (!zone_submap_is_sequestered(idx)) {
@@ -9563,8 +9707,7 @@ zone_submap_init(
 
 	addr = submap_start;
 	kr = vm_map_enter(submap, &addr, ZONE_GUARD_SIZE / 2, 0,
-	    VM_FLAGS_FIXED | VM_FLAGS_PERMANENT,
-	    VM_MAP_KERNEL_FLAGS_NONE, VM_KERN_MEMORY_ZONE,
+	    VM_MAP_KERNEL_FLAGS_FIXED_PERMANENT(.vm_tag = VM_KERN_MEMORY_ZONE),
 	    kernel_object, addr, FALSE, prot, prot_max, VM_INHERIT_NONE);
 	if (kr != KERN_SUCCESS) {
 		panic("ksubmap[%s]: failed to make first entry (%d)",
@@ -9573,8 +9716,7 @@ zone_submap_init(
 
 	addr = submap_end - ZONE_GUARD_SIZE / 2;
 	kr = vm_map_enter(submap, &addr, ZONE_GUARD_SIZE / 2, 0,
-	    VM_FLAGS_FIXED | VM_FLAGS_PERMANENT,
-	    VM_MAP_KERNEL_FLAGS_NONE, VM_KERN_MEMORY_ZONE,
+	    VM_MAP_KERNEL_FLAGS_FIXED_PERMANENT(.vm_tag = VM_KERN_MEMORY_ZONE),
 	    kernel_object, addr, FALSE, prot, prot_max, VM_INHERIT_NONE);
 	if (kr != KERN_SUCCESS) {
 		panic("ksubmap[%s]: failed to make last entry (%d)",
@@ -9611,7 +9753,7 @@ zone_metadata_init(void)
 	vm_map_t vm_map = zone_submaps[Z_SUBMAP_IDX_VM];
 	vm_map_entry_t first;
 
-	struct mach_vm_range meta_r, bits_r, early_r;
+	struct mach_vm_range meta_r, bits_r, xtra_r, early_r;
 	vm_size_t early_sz;
 	vm_offset_t reloc_base;
 
@@ -9625,10 +9767,18 @@ zone_metadata_init(void)
 	 */
 	vm_map_will_allocate_early_map(&zone_meta_map);
 	meta_r = zone_kmem_suballoc(zone_info.zi_meta_range.min_address,
-	    zone_meta_size + zone_bits_size, VM_FLAGS_FIXED_RANGE_SUBALLOC,
+	    zone_meta_size + zone_bits_size + zone_xtra_size,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
 	    VM_KERN_MEMORY_ZONE, &zone_meta_map);
 	meta_r.min_address += ZONE_GUARD_SIZE;
 	meta_r.max_address -= ZONE_GUARD_SIZE;
+	if (zone_xtra_size) {
+		xtra_r.max_address  = meta_r.max_address;
+		meta_r.max_address -= zone_xtra_size;
+		xtra_r.min_address  = meta_r.max_address;
+	} else {
+		xtra_r.min_address  = xtra_r.max_address = 0;
+	}
 	bits_r.max_address  = meta_r.max_address;
 	meta_r.max_address -= zone_bits_size;
 	bits_r.min_address  = meta_r.max_address;
@@ -9642,6 +9792,10 @@ zone_metadata_init(void)
 	    (void *)bits_r.min_address, (void *)bits_r.max_address,
 	    mach_vm_size_pretty(mach_vm_range_size(&bits_r)),
 	    mach_vm_size_unit(mach_vm_range_size(&bits_r)));
+	printf("zone_init: extra     %p:%p (%u%c)\n",
+	    (void *)xtra_r.min_address, (void *)xtra_r.max_address,
+	    mach_vm_size_pretty(mach_vm_range_size(&xtra_r)),
+	    mach_vm_size_unit(mach_vm_range_size(&xtra_r)));
 #endif /* DEBUG || DEVELOPMENT */
 
 	bits_r.min_address = (bits_r.min_address + ZBA_CHUNK_SIZE - 1) & -ZBA_CHUNK_SIZE;
@@ -9657,6 +9811,7 @@ zone_metadata_init(void)
 	zone_info.zi_map_range  = zone_map_range;
 	zone_info.zi_meta_range = meta_r;
 	zone_info.zi_bits_range = bits_r;
+	zone_info.zi_xtra_range = xtra_r;
 	zone_info.zi_meta_base  = (struct zone_page_metadata *)meta_r.min_address -
 	    zone_pva_from_addr(zone_map_range.min_address).packed_address;
 
@@ -9689,8 +9844,9 @@ zone_metadata_init(void)
 		zone_pva_relocate(&zone_array[zid].z_pageq_full, pva_delta);
 	}
 
-	zba_populate(0);
+	zba_populate(0, false);
 	memcpy(zba_base_header(), zba_chunk_startup, sizeof(zba_chunk_startup));
+	zba_meta()->zbam_right = (uint32_t)atop(zone_bits_size);
 
 	/*
 	 * Step 3: Relocate the boostrap VM structs
@@ -9717,9 +9873,9 @@ zone_metadata_init(void)
 
 #if KASAN
 	kasan_notify_address(reloc_base, early_sz);
-#if CONFIG_KERNEL_TBI && KASAN_TBI
+#if KASAN_TBI
 	kasan_tbi_copy_tags(reloc_base, early_r.min_address, early_sz);
-#endif /* CONFIG_KERNEL_TBI && KASAN_TBI */
+#endif /* KASAN_TBI */
 #endif /* KASAN */
 
 	vm_map_relocate_early_maps(reloc_delta);
@@ -9727,30 +9883,25 @@ zone_metadata_init(void)
 	for (uint32_t i = 0; i < atop(early_sz); i++) {
 		zone_id_t zid = new_meta[i].zm_index;
 		zone_t z = &zone_array[zid];
-		vm_size_t esize = zone_elem_size(z);
-		vm_address_t base = reloc_base + ptoa(i);
+		vm_size_t esize = zone_elem_outer_size(z);
+		vm_address_t base = reloc_base + ptoa(i) + zone_elem_inner_offs(z);
 		vm_address_t addr;
-		zone_element_t ze;
 
 		if (new_meta[i].zm_chunk_len >= ZM_SECONDARY_PAGE) {
 			continue;
 		}
 
 		for (uint32_t eidx = 0; eidx < z->z_chunk_elems; eidx++) {
-			ze = zone_element_encode(base, eidx);
-			if (zone_meta_is_free(&new_meta[i], ze)) {
+			if (zone_meta_is_free(&new_meta[i], eidx)) {
 				continue;
 			}
 
-			addr = zone_element_addr(z, ze, esize);
-#if KASAN_ZALLOC
-			if (z->z_kasan_redzone) {
-				addr = kasan_alloc(addr, esize,
-				    esize - 2 * z->z_kasan_redzone,
-				    z->z_kasan_redzone);
-			} else {
-				kasan_poison_range(addr, esize, ASAN_VALID);
-			}
+			addr = base + eidx * esize;
+#if KASAN_CLASSIC
+			kasan_alloc(addr,
+			    zone_elem_inner_size(z), zone_elem_inner_size(z),
+			    zone_elem_redzone(z), false,
+			    __builtin_frame_address(0));
 #endif
 			vm_map_relocate_early_elem(zid, addr, reloc_delta);
 		}
@@ -9761,70 +9912,123 @@ zone_metadata_init(void)
 #endif
 }
 
-uint16_t submap_ratios[Z_SUBMAP_IDX_COUNT] = {
+__startup_data
+static uint16_t submap_ratios[Z_SUBMAP_IDX_COUNT] = {
 #if ZSECURITY_CONFIG(READ_ONLY)
 	[Z_SUBMAP_IDX_VM]               = 15,
 	[Z_SUBMAP_IDX_READ_ONLY]        =  5,
 #else
 	[Z_SUBMAP_IDX_VM]               = 20,
 #endif /* !ZSECURITY_CONFIG(READ_ONLY) */
-#if ZSECURITY_CONFIG(SUBMAP_USER_DATA) && ZSECURITY_CONFIG(SAD_FENG_SHUI)
+#if ZSECURITY_CONFIG(SAD_FENG_SHUI)
 	[Z_SUBMAP_IDX_GENERAL_0]        = 15,
 	[Z_SUBMAP_IDX_GENERAL_1]        = 15,
 	[Z_SUBMAP_IDX_GENERAL_2]        = 15,
 	[Z_SUBMAP_IDX_GENERAL_3]        = 15,
 	[Z_SUBMAP_IDX_DATA]             = 20,
-#elif ZSECURITY_CONFIG(SUBMAP_USER_DATA)
-	[Z_SUBMAP_IDX_GENERAL_0]        = 40,
-	[Z_SUBMAP_IDX_DATA]             = 40,
-#elif ZSECURITY_CONFIG(SAD_FENG_SHUI)
-#error invalid configuration: SAD_FENG_SHUI requires SUBMAP_USER_DATA
 #else
-	[Z_SUBMAP_IDX_GENERAL_0]        = 80,
-#endif /* ZSECURITY_CONFIG(SUBMAP_USER_DATA) && ZSECURITY_CONFIG(SAD_FENG_SHUI) */
+	[Z_SUBMAP_IDX_GENERAL_0]        = 60,
+	[Z_SUBMAP_IDX_DATA]             = 20,
+#endif /* ZSECURITY_CONFIG(SAD_FENG_SHUI) */
 };
+
+__startup_func
+static inline uint16_t
+zone_submap_ratios_denom(void)
+{
+	uint16_t denom = 0;
+
+	for (unsigned idx = 0; idx < Z_SUBMAP_IDX_COUNT; idx++) {
+		denom += submap_ratios[idx];
+	}
+
+	assert(denom == 100);
+
+	return denom;
+}
+
+__startup_func
+static inline vm_offset_t
+zone_restricted_va_max(void)
+{
+	vm_offset_t compressor_max = VM_PACKING_MAX_PACKABLE(C_SLOT_PACKED_PTR);
+	vm_offset_t vm_page_max    = VM_PACKING_MAX_PACKABLE(VM_PAGE_PACKED_PTR);
+
+	return trunc_page(MIN(compressor_max, vm_page_max));
+}
 
 __startup_func
 static void
 zone_set_map_sizes(void)
 {
-	uint64_t        denom = 0;
-	zone_pages_wired_max = (uint32_t)atop(zone_phys_size_max());
-	for (unsigned idx = 0; idx < Z_SUBMAP_IDX_COUNT; idx++) {
-		denom += submap_ratios[idx];
-	}
-	assert(denom == 100);
+	vm_size_t zsize;
+	vm_size_t zsizearg;
 
-#if __LP64__
-	zone_map_size = ZONE_MAP_VA_SIZE_LP64;
-#else
-	zone_map_size = ptoa(zone_pages_wired_max *
-	    (denom + submap_ratios[Z_SUBMAP_IDX_VM]) / denom);
-#endif
+	/*
+	 * Compute the physical limits for the zone map
+	 */
+
+	if (PE_parse_boot_argn("zsize", &zsizearg, sizeof(zsizearg))) {
+		zsize = zsizearg * (1024ULL * 1024);
+	} else {
+		/* Set target zone size as 1/4 of physical memory */
+		zsize = (vm_size_t)(sane_size >> 2);
+		zsize += zsize >> 1;
+	}
+
+	if (zsize < CONFIG_ZONE_MAP_MIN) {
+		zsize = CONFIG_ZONE_MAP_MIN;   /* Clamp to min */
+	}
+	if (zsize > sane_size >> 1) {
+		zsize = (vm_size_t)(sane_size >> 1); /* Clamp to half of RAM max */
+	}
+	if (zsizearg == 0 && zsize > ZONE_MAP_MAX) {
+		/* if zsize boot-arg not present and zsize exceeds platform maximum, clip zsize */
+		printf("NOTE: zonemap size reduced from 0x%lx to 0x%lx\n",
+		    (uintptr_t)zsize, (uintptr_t)ZONE_MAP_MAX);
+		zsize = ZONE_MAP_MAX;
+	}
+
+	zone_pages_wired_max = (uint32_t)atop(trunc_page(zsize));
+
 
 	/*
 	 * Declare restrictions on zone max
 	 */
-	vm_offset_t restricted_va_max = zone_restricted_va_max();
 	vm_offset_t vm_submap_size = round_page(
-		(submap_ratios[Z_SUBMAP_IDX_VM] * zone_map_size) / denom);
+		(submap_ratios[Z_SUBMAP_IDX_VM] * ZONE_MAP_VA_SIZE) /
+		zone_submap_ratios_denom());
 
 #if CONFIG_PROB_GZALLOC
 	vm_submap_size += pgz_get_size();
 #endif /* CONFIG_PROB_GZALLOC */
-	if (os_sub_overflow(restricted_va_max, vm_submap_size,
+	if (os_sub_overflow(zone_restricted_va_max(), vm_submap_size,
 	    &zone_map_range.min_address)) {
 		zone_map_range.min_address = 0;
 	}
 
-	zone_meta_size = round_page(atop(zone_map_size) *
+	zone_meta_size = round_page(atop(ZONE_MAP_VA_SIZE) *
 	    sizeof(struct zone_page_metadata)) + ZONE_GUARD_SIZE * 2;
-	zone_bits_size = round_page(16 * (ptoa(zone_pages_wired_max) >> 10));
+
+	static_assert(ZONE_MAP_MAX / (CHAR_BIT * KALLOC_MINSIZE) <=
+	    ZBA_PTR_MASK + 1);
+	zone_bits_size = round_page(ptoa(zone_pages_wired_max) /
+	    (CHAR_BIT * KALLOC_MINSIZE));
 
 #if VM_TAG_SIZECLASSES
 	if (zone_tagging_on) {
-		zone_tagbase_map_size = round_page(atop(zone_map_size) * sizeof(uint32_t));
-		zone_tags_map_size = 2048 * 1024 * sizeof(vm_tag_t);
+		zba_xtra_shift = (uint8_t)fls(sizeof(vm_tag_t) - 1);
+	}
+	if (zba_xtra_shift) {
+		/*
+		 * if we need the extra space range, then limit the size of the
+		 * bitmaps to something reasonable instead of a theoretical
+		 * worst case scenario of all zones being for the smallest
+		 * allocation granule, in order to avoid fake VA pressure on
+		 * other parts of the system.
+		 */
+		zone_bits_size = round_page(zone_bits_size / 8);
+		zone_xtra_size = round_page(zone_bits_size * CHAR_BIT << zba_xtra_shift);
 	}
 #endif /* VM_TAG_SIZECLASSES */
 }
@@ -9835,22 +10039,10 @@ STARTUP(KMEM, STARTUP_RANK_FIRST, zone_set_map_sizes);
  * store the range of early pmap memory that was stolen to bootstrap the
  * necessary VM zones.
  */
-KMEM_RANGE_REGISTER_DYNAMIC(zones, &zone_map_range, ^() {
-	return zone_map_size;
+KMEM_RANGE_REGISTER_STATIC(zones, &zone_map_range, ZONE_MAP_VA_SIZE);
+KMEM_RANGE_REGISTER_DYNAMIC(zone_meta, &zone_info.zi_meta_range, ^{
+	return zone_meta_size + zone_bits_size + zone_xtra_size;
 });
-KMEM_RANGE_REGISTER_DYNAMIC(zone_meta, &zone_info.zi_meta_range, ^() {
-	return zone_meta_size + zone_bits_size;
-});
-
-#if VM_TAG_SIZECLASSES
-KMEM_RANGE_REGISTER_DYNAMIC(zone_tagbase, &zone_tagbase_range, ^() {
-	return zone_tagbase_map_size;
-});
-KMEM_RANGE_REGISTER_DYNAMIC(zone_tags, &zone_tags_range, ^() {
-	return zone_tags_map_size;
-});
-#endif /* VM_TAG_SIZECLASSES */
-
 
 /*
  * Global initialization of Zone Allocator.
@@ -9860,26 +10052,14 @@ __startup_func
 static void
 zone_init(void)
 {
-	vm_size_t           remaining_size;
+	vm_size_t           remaining_size = ZONE_MAP_VA_SIZE;
 	mach_vm_offset_t    submap_min = 0;
-	uint64_t            denom = 100;
+	uint64_t            denom = zone_submap_ratios_denom();
 	/*
 	 * And now allocate the various pieces of VA and submaps.
 	 */
 
-#if !ZSECURITY_CONFIG(KERNEL_DATA_SPLIT)
-	/*
-	 * Make a first allocation of contiguous VA, that we'll deallocate,
-	 * and we'll carve-out memory in that range again linearly.
-	 * The kernel is stil single threaded at this stage. This doesn't need
-	 * to be done on platforms that declare and process kmem_claims as that
-	 * process will create a temporary mapping for the required range.
-	 */
-	zone_map_range  = zone_init_allocate_va(0, zone_map_size, false);
-#endif /* !ZSECURITY_CONFIG(KERNEL_DATA_SPLIT) */
-
 	submap_min = zone_map_range.min_address;
-	remaining_size = zone_map_size;
 
 #if CONFIG_PROB_GZALLOC
 	vm_size_t pgz_size = pgz_get_size();
@@ -9916,12 +10096,12 @@ zone_init(void)
 
 #if VM_TAG_SIZECLASSES
 	if (zone_tagging_on) {
-		zone_tagging_init();
+		vm_allocation_zones_init();
 	}
-#endif
+#endif /* VM_TAG_SIZECLASSES */
 
 	zone_create_flags_t kma_flags = ZC_NOCACHING | ZC_NOGC | ZC_NOCALLOUT |
-	    ZC_KASAN_NOQUARANTINE | ZC_KASAN_NOREDZONE | ZC_VM_LP64;
+	    ZC_KASAN_NOQUARANTINE | ZC_KASAN_NOREDZONE | ZC_VM;
 
 	(void)zone_create_ext("vm.permanent", 1, kma_flags,
 	    ZONE_ID_PERMANENT, ^(zone_t z) {
@@ -9934,8 +10114,14 @@ zone_init(void)
 		z->z_elem_size = 1;
 	});
 
+	zc_magazine_zone = zone_create("zcc_magazine_zone", sizeof(struct zone_magazine) +
+	    zc_mag_size() * sizeof(vm_offset_t),
+	    ZC_VM | ZC_NOCACHING | ZC_ZFREE_CLEARMEM | ZC_PGZ_USE_GUARDS);
+	zone_raise_reserve(zc_magazine_zone, (uint16_t)(2 * zpercpu_count()));
+
 	/*
-	 * Now migrate the startup statistics into their final storage.
+	 * Now migrate the startup statistics into their final storage,
+	 * and enable logging for early zones (that zone_create_ext() skipped).
 	 */
 	int cpu = cpu_number();
 	zone_index_foreach(idx) {
@@ -9947,53 +10133,17 @@ zone_init(void)
 			*zpercpu_get_cpu(zs, cpu) = *zpercpu_get_cpu(tz->z_stats, cpu);
 			tz->z_stats = zs;
 		}
+		if (tz->z_self == tz) {
+#if ZALLOC_ENABLE_LOGGING
+			zone_setup_logging(tz);
+#endif /* ZALLOC_ENABLE_LOGGING */
+#if KASAN_TBI
+			zone_setup_kasan_logging(tz);
+#endif /* KASAN_TBI */
+		}
 	}
-
-#if VM_TAG_SIZECLASSES
-	if (zone_tagging_on) {
-		vm_allocation_zones_init();
-	}
-#endif
 }
 STARTUP(ZALLOC, STARTUP_RANK_FIRST, zone_init);
-
-__startup_func
-static void
-zone_cache_bootstrap(void)
-{
-	zone_t magzone;
-
-	magzone = zone_create("zcc_magazine_zone", sizeof(struct zone_magazine) +
-	    zc_mag_size() * sizeof(zone_element_t),
-	    ZC_VM_LP64 | ZC_KASAN_NOREDZONE | ZC_KASAN_NOQUARANTINE |
-	    ZC_SEQUESTER | ZC_CACHING | ZC_ZFREE_CLEARMEM | ZC_PGZ_USE_GUARDS);
-	magzone->z_elems_rsv = (uint16_t)(2 * zpercpu_count());
-
-	os_atomic_store(&zc_magazine_zone, magzone, compiler_acq_rel);
-
-	/*
-	 * Now that we are initialized, we can enable zone caching for zones that
-	 * were made before zcache_bootstrap() was called.
-	 *
-	 * The system is still single threaded so we don't need to take the lock.
-	 */
-	zone_index_foreach(i) {
-		zone_t z = &zone_array[i];
-		if (z->z_pcpu_cache) {
-			z->z_pcpu_cache = NULL;
-			zone_enable_caching(z);
-		}
-#if ZONE_ENABLE_LOGGING
-		if (z->z_self == z) {
-			zone_setup_logging(z);
-		}
-#endif /* ZONE_ENABLE_LOGGING */
-#if KASAN_TBI
-		zone_setup_kasan_logging(z);
-#endif /* KASAN_TBI */
-	}
-}
-STARTUP(ZALLOC, STARTUP_RANK_MIDDLE, zone_cache_bootstrap);
 
 void
 zalloc_first_proc_made(void)
@@ -10022,7 +10172,7 @@ zone_early_mem_init(vm_size_t size)
 	assert3u(size, <=, sizeof(zone_early_pages_to_cram));
 	mem = (vm_offset_t)zone_early_pages_to_cram;
 #else
-	mem = (vm_offset_t)pmap_steal_memory(size);
+	mem = (vm_offset_t)pmap_steal_memory(size, PAGE_SIZE);
 #endif
 
 	zone_info.zi_meta_base = zone_early_meta_array_startup -
@@ -10035,7 +10185,10 @@ zone_early_mem_init(vm_size_t size)
 		.max_address = (mach_vm_offset_t)zba_chunk_startup +
 	    sizeof(zba_chunk_startup),
 	};
-	zba_init_chunk(0);
+
+	zba_meta()->zbam_left  = 1;
+	zba_meta()->zbam_right = 1;
+	zba_init_chunk(0, false);
 
 	return mem;
 }
@@ -10056,12 +10209,12 @@ static bool any_zone_test_running = FALSE;
 static uintptr_t *
 zone_copy_allocations(zone_t z, uintptr_t *elems, zone_pva_t page_index)
 {
-	vm_offset_t elem_size = zone_elem_size(z);
+	vm_offset_t elem_size = zone_elem_outer_size(z);
 	vm_offset_t base;
 	struct zone_page_metadata *meta;
 
 	while (!zone_pva_is_null(page_index)) {
-		base  = zone_pva_to_addr(page_index) + zone_elem_offs(z);
+		base  = zone_pva_to_addr(page_index) + zone_elem_inner_offs(z);
 		meta  = zone_pva_to_meta(page_index);
 
 		if (meta->zm_inline_bitmap) {
@@ -10115,7 +10268,7 @@ zone_leaks(const char * zoneName, uint32_t nameLen, leak_site_proc proc)
 		return KERN_INVALID_NAME;
 	}
 
-	elemSize = (uint32_t)zone_elem_size(zone);
+	elemSize = (uint32_t)zone_elem_inner_size(zone);
 	maxElems = (zone->z_elems_avail + 1) & ~1ul;
 
 	array = kalloc_type_tag(vm_offset_t, maxElems, VM_KERN_MEMORY_DIAG);
@@ -10132,7 +10285,7 @@ zone_leaks(const char * zoneName, uint32_t nameLen, leak_site_proc proc)
 
 	zone_unlock(zone);
 
-	zone_leaks_scan(array, count, (uint32_t)zone_elem_size(zone), &found);
+	zone_leaks_scan(array, count, (uint32_t)zone_elem_outer_size(zone), &found);
 	assert(found <= count);
 
 	for (idx = 0; idx < count; idx++) {
@@ -10143,14 +10296,14 @@ zone_leaks(const char * zoneName, uint32_t nameLen, leak_site_proc proc)
 		element = INSTANCE_PUT(element) & ~kInstanceFlags;
 	}
 
-#if ZONE_ENABLE_LOGGING
+#if ZALLOC_ENABLE_LOGGING
 	if (zone->z_btlog && !corruption_debug_flag) {
 		// btlog_copy_backtraces_for_elements will set kInstanceFlagReferenced on elements it found
 		static_assert(sizeof(vm_address_t) == sizeof(uintptr_t));
 		btlog_copy_backtraces_for_elements(zone->z_btlog,
 		    (vm_address_t *)array, &count, elemSize, proc);
 	}
-#endif /* ZONE_ENABLE_LOGGING */
+#endif /* ZALLOC_ENABLE_LOGGING */
 
 	for (nobtcount = idx = 0; idx < count; idx++) {
 		element = array[idx];
@@ -10279,7 +10432,7 @@ zone_basic_test_run(__unused int64_t in, int64_t *out)
 		test_zone = zinit(sizeof(uint64_t), 100 * sizeof(uint64_t), sizeof(uint64_t), "test_zone_sysctl");
 		assert(test_zone);
 
-#if KASAN_ZALLOC
+#if KASAN_CLASSIC
 		if (test_zone_ptr == NULL && test_zone->z_elems_free != 0)
 #else
 		if (test_zone->z_elems_free != 0)
@@ -10309,8 +10462,8 @@ zone_basic_test_run(__unused int64_t in, int64_t *out)
 		printf("zone_basic_test: Iteration %d successful\n", i);
 	} while (i < max_iter);
 
+#if !KASAN_CLASSIC /* because of the quarantine and redzones */
 	/* test Z_VA_SEQUESTER */
-#if ZSECURITY_CONFIG(SEQUESTER)
 	{
 		zone_t test_pcpu_zone;
 		kern_return_t kr;
@@ -10323,12 +10476,10 @@ zone_basic_test_run(__unused int64_t in, int64_t *out)
 		test_zone = zone_create("test_zone_sysctl", elem_size,
 		    ZC_DESTRUCTIBLE);
 		assert(test_zone);
-		assert(zone_security_config(test_zone).z_va_sequester);
 
 		test_pcpu_zone = zone_create("test_zone_sysctl.pcpu", sizeof(uint64_t),
 		    ZC_DESTRUCTIBLE | ZC_PERCPU);
 		assert(test_pcpu_zone);
-		assert(zone_security_config(test_pcpu_zone).z_va_sequester);
 
 		for (idx = 0; idx < num_allocs; idx++) {
 			allocs[idx] = zalloc(test_zone);
@@ -10433,9 +10584,7 @@ zone_basic_test_run(__unused int64_t in, int64_t *out)
 		zdestroy(test_zone);
 		zdestroy(test_pcpu_zone);
 	}
-#else
-	printf("zone_basic_test: skipping sequester test (not enabled)\n");
-#endif /* ZSECURITY_CONFIG(SEQUESTER) */
+#endif /* KASAN_CLASSIC */
 
 	printf("zone_basic_test: Test passed\n");
 

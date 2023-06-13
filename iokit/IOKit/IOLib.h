@@ -327,13 +327,13 @@ void IOFreeData(void * address, vm_size_t size);
  * - 32K (embedded 64-bit)
  */
 #define IOMallocType(type) ({                           \
-	static KALLOC_TYPE_DEFINE(kt_view_var, type,        \
+	static _KALLOC_TYPE_DEFINE(kt_view_var, type,       \
 	    KT_SHARED_ACCT);                                \
 	(type *) IOMallocTypeImpl(kt_view_var);             \
 })
 
 #define IOFreeType(elem, type) ({                       \
-	static KALLOC_TYPE_DEFINE(kt_view_var, type,        \
+	static _KALLOC_TYPE_DEFINE(kt_view_var, type,       \
 	   KT_SHARED_ACCT);                                 \
 	IOFREETYPE_ASSERT_COMPATIBLE_POINTER(elem, type);   \
 	IOFreeTypeImpl(kt_view_var,                         \

@@ -147,9 +147,9 @@ semaphore_create(
  *	Conditions:
  *			task is locked
  *			semaphore is owned by the specified task
- *			disabling interrupts (splsched) is the responsibility of the caller.
+ *			if semaphore is locked, interrupts are disabled
  *	Returns:
- *			with semaphore unlocked
+ *			with semaphore unlocked, interrupts enabled
  */
 static void
 semaphore_destroy_internal(
@@ -164,13 +164,19 @@ semaphore_destroy_internal(
 	remqueue(&semaphore->task_link);
 	task->semaphores_owned--;
 
+	spl_t spl_level = 0;
+
+	if (semaphore_locked) {
+		spl_level = 1;
+	} else {
+		spl_level = splsched();
+		semaphore_lock(semaphore);
+	}
+
 	/*
 	 * deactivate semaphore under both locks
 	 * and then wake up all waiters.
 	 */
-	if (!semaphore_locked) {
-		semaphore_lock(semaphore);
-	}
 
 	semaphore->owner = TASK_NULL;
 	old_count = semaphore->count;
@@ -178,11 +184,15 @@ semaphore_destroy_internal(
 
 	if (old_count < 0) {
 		waitq_wakeup64_all_locked(&semaphore->waitq,
-		    SEMAPHORE_EVENT, THREAD_RESTART, WAITQ_UNLOCK);
-		/* waitq/semaphore is unlocked */
+		    SEMAPHORE_EVENT, THREAD_RESTART,
+		    waitq_flags_splx(spl_level) | WAITQ_UNLOCK);
+		/* waitq/semaphore is unlocked, splx handled */
+		assert(ml_get_interrupts_enabled());
 	} else {
 		assert(circle_queue_empty(&semaphore->waitq.waitq_queue));
 		semaphore_unlock(semaphore);
+		splx(spl_level);
+		assert(ml_get_interrupts_enabled());
 	}
 }
 
@@ -226,37 +236,35 @@ semaphore_free(
 	if (semaphore->owner == task) {
 		task_lock(task);
 		if (semaphore->owner == task) {
-			spl_t s = splsched();
 			semaphore_destroy_internal(task, semaphore, false);
-			splx(s);
 		} else {
 			assert(semaphore->owner == TASK_NULL);
 		}
 		task_unlock(task);
 	} else {
-		spl_t s = splsched();
+		spl_t spl = splsched();
+
+		/* semaphore_destroy_internal will always enable, can't nest */
+		assert(spl);
 
 		semaphore_lock(semaphore);
 
 		task = semaphore->owner;
 		if (task == TASK_NULL) {
 			semaphore_unlock(semaphore);
-			splx(s);
+			splx(spl);
 		} else if (task_lock_try(task)) {
 			semaphore_destroy_internal(task, semaphore, true);
-			splx(s);
-			/* semaphore unlocked */
+			/* semaphore unlocked, interrupts enabled */
 			task_unlock(task);
 		} else {
 			task_reference(task);
 			semaphore_unlock(semaphore);
-			splx(s);
+			splx(spl);
 
 			task_lock(task);
 			if (semaphore->owner == task) {
-				s = splsched();
 				semaphore_destroy_internal(task, semaphore, false);
-				splx(s);
 			}
 			task_unlock(task);
 
@@ -291,9 +299,7 @@ semaphore_destroy(
 	if (semaphore->owner == task) {
 		task_lock(task);
 		if (semaphore->owner == task) {
-			spl_t spl_level = splsched();
 			semaphore_destroy_internal(task, semaphore, false);
-			splx(spl_level);
 		}
 		task_unlock(task);
 	}
@@ -307,34 +313,17 @@ semaphore_destroy(
  *
  *	Destroy all the semaphores associated with a given task.
  */
-#define SEMASPERSPL 20  /* max number of semaphores to destroy per spl hold */
 
 void
 semaphore_destroy_all(
 	task_t                  task)
 {
 	semaphore_t semaphore;
-	uint32_t count;
-	spl_t spl_level;
 
-	count = 0;
 	task_lock(task);
 
 	qe_foreach_element_safe(semaphore, &task->semaphore_list, task_link) {
-		if (count == 0) {
-			spl_level = splsched();
-		}
-
 		semaphore_destroy_internal(task, semaphore, false);
-
-		/* throttle number of semaphores per interrupt disablement */
-		if (++count == SEMASPERSPL) {
-			count = 0;
-			splx(spl_level);
-		}
-	}
-	if (count != 0) {
-		splx(spl_level);
 	}
 
 	task_unlock(task);
@@ -354,9 +343,8 @@ semaphore_signal_internal(
 	int                     options)
 {
 	kern_return_t kr;
-	spl_t  spl_level;
 
-	spl_level = splsched();
+	spl_t spl_level = splsched();
 	semaphore_lock(semaphore);
 
 	if (!semaphore_active(semaphore)) {
@@ -371,11 +359,12 @@ semaphore_signal_internal(
 				&semaphore->waitq, SEMAPHORE_EVENT,
 				thread, THREAD_AWAKENED);
 			/* waitq/semaphore is unlocked */
+			splx(spl_level);
 		} else {
 			kr = KERN_NOT_WAITING;
 			semaphore_unlock(semaphore);
+			splx(spl_level);
 		}
-		splx(spl_level);
 		return kr;
 	}
 
@@ -385,17 +374,19 @@ semaphore_signal_internal(
 		kr = KERN_NOT_WAITING;
 		if (old_count < 0) {
 			semaphore->count = 0;  /* always reset */
+
 			kr = waitq_wakeup64_all_locked(&semaphore->waitq,
-			    SEMAPHORE_EVENT, THREAD_AWAKENED, WAITQ_UNLOCK);
-			/* waitq / semaphore is unlocked */
+			    SEMAPHORE_EVENT, THREAD_AWAKENED,
+			    WAITQ_UNLOCK | waitq_flags_splx(spl_level));
+			/* waitq / semaphore is unlocked, splx handled */
 		} else {
 			if (options & SEMAPHORE_SIGNAL_PREPOST) {
 				semaphore->count++;
 			}
 			kr = KERN_SUCCESS;
 			semaphore_unlock(semaphore);
+			splx(spl_level);
 		}
-		splx(spl_level);
 		return kr;
 	}
 

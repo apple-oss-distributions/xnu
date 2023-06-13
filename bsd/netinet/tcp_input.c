@@ -2904,13 +2904,8 @@ findpcb:
 		tcp_dooptions(tp, optp, optlen, th, &to);
 	}
 #if MPTCP
-	if (tp->t_state != TCPS_LISTEN && (so->so_flags & SOF_MP_SUBFLOW) &&
-	    mptcp_input_preproc(tp, m, th, drop_hdrlen) != 0) {
-		tp->t_flags |= TF_ACKNOW;
-		(void) tcp_output(tp);
-		tcp_check_timer_state(tp);
-		socket_unlock(so, 1);
-		return;
+	if (tp->t_state != TCPS_LISTEN && (so->so_flags & SOF_MP_SUBFLOW)) {
+		mptcp_insert_rmap(tp, m, th);
 	}
 #endif /* MPTCP */
 	if (tp->t_state == TCPS_SYN_SENT && (thflags & TH_SYN)) {

@@ -448,8 +448,8 @@ IOBMDOverflowTest(uint32_t options)
 {
 	IOBufferMemoryDescriptor * bmd;
 
-	bmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIOMemoryKernelUserShared | kIODirectionOut,
-	    0xffffffffffffffff, 0xfffffffffffff000);
+	bmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIOMemoryPageable | kIODirectionOut,
+	    0xffffffffffffffff, 0);
 	assert(NULL == bmd);
 
 	return kIOReturnSuccess;

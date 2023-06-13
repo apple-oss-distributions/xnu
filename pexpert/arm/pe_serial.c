@@ -91,6 +91,13 @@ MARK_AS_HIBERNATE_DATA static bool uart_initted = false;
 /* Whether uart should run in simple mode that works during hibernation resume. */
 MARK_AS_HIBERNATE_DATA static bool uart_hibernation = false;
 
+/** Set <=> transmission is authorized.
+ * Always set, unless SERIALMODE_ON_DEMAND is provided at boot,
+ * and no data has yet been received.
+ * Originaly meant to be a per-pe_serial_functions variable,
+ * but the data protection on the structs prevents it. */
+static bool serial_do_transmit = 1;
+
 /**
  * Used to track if all IRQs have been initialized. Each bit of this variable
  * represents whether or not a serial device that reports supporting IRQs has
@@ -169,7 +176,7 @@ serial_poll(void)
  * gracefully fall back to the serial method that is supported.
  */
 #if HIBERNATION || defined(APPLE_UART)
-MARK_AS_HIBERNATE_DATA static vm_offset_t uart_base = 0;
+MARK_AS_HIBERNATE_DATA static volatile apple_uart_registers_t *apple_uart_registers = 0;
 #endif /* HIBERNATION || defined(APPLE_UART) */
 
 #if HIBERNATION || defined(DOCKCHANNEL_UART)
@@ -179,53 +186,62 @@ MARK_AS_HIBERNATE_DATA static vm_offset_t dockchannel_uart_base = 0;
 /*****************************************************************************/
 
 #ifdef APPLE_UART
-
-static int32_t dt_pclk      = -1;
 static int32_t dt_sampling  = -1;
 static int32_t dt_ubrdiv    = -1;
 
 static void apple_uart_set_baud_rate(uint32_t baud_rate);
 
+/**
+ * The Apple UART is configured to use 115200-8-N-1 communication.
+ */
 static void
 apple_uart_init(void)
 {
-	uint32_t ucon0 = 0x405; /* NCLK, No interrupts, No DMA - just polled */
+	ucon_t ucon = { .raw = 0 };
+	// Use NCLK (which is constant) instead of PCLK (which is variable).
+	ucon.clock_selection = UCON_CLOCK_SELECTION_NCLK;
+	ucon.transmit_mode = UCON_TRANSMIT_MODE_INTERRUPT_OR_POLLING;
+	ucon.receive_mode = UCON_RECEIVE_MODE_INTERRUPT_OR_POLLING;
+	apple_uart_registers->ucon = ucon;
 
-	rULCON0 = 0x03;         /* 81N, not IR */
-
-	// Override with pclk dt entry
-	if (dt_pclk != -1) {
-		ucon0 = ucon0 & ~0x400;
-	}
-
-	rUCON0 = ucon0;
-	rUMCON0 = 0x00;         /* Clear Flow Control */
+	// Configure 8-N-1 communication.
+	ulcon_t ulcon = { .raw = 0 };
+	ulcon.word_length = ULCON_WORD_LENGTH_8_BITS;
+	ulcon.parity_mode = ULCON_PARITY_MODE_NONE;
+	ulcon.number_of_stop_bits = ULCON_STOP_BITS_1;
+	apple_uart_registers->ulcon = ulcon;
 
 	apple_uart_set_baud_rate(115200);
 
-	rUFCON0 = 0x07;         /* Clear & Enable FIFOs */
-	rUMCON0 = 0x01;         /* Assert RTS on UART0 */
+	// Enable and reset FIFOs.
+	ufcon_t ufcon = { .raw = 0 };
+	ufcon.fifo_enable = 1;
+	ufcon.tx_fifo_reset = 1;
+	ufcon.rx_fifo_reset = 1;
+	apple_uart_registers->ufcon = ufcon;
 }
 
 static void
 apple_uart_enable_irq(void)
 {
-	/* sets Tx FIFO watermark to 0 bytes so interrupt is sent when FIFO empty */
-	rUFCON0 &= ~(0xC0);
+	// Set the Tx FIFO interrupt trigger level to 0 bytes so interrupts occur when
+	// the Tx FIFO is completely empty; this leads to higher Tx throughput.
+	apple_uart_registers->ufcon.tx_fifo_interrupt_trigger_level_dma_watermark = UFCON_TX_FIFO_ITL_0_BYTES;
 
-	/* Enables Tx interrupt */
-	rUCON0 |= 0x2000;
+	// Enable Tx interrupts.
+	apple_uart_registers->ucon.transmit_interrupt = 1;
 }
 
 static bool
 apple_uart_disable_irq(void)
 {
 	/* Disables Tx interrupts */
-	const uint32_t ucon0 = rUCON0;
-	const bool irqs_were_enabled = ucon0 & (0x2000);
+	ucon_t ucon = apple_uart_registers->ucon;
+	const bool irqs_were_enabled = ucon.transmit_interrupt;
 
 	if (irqs_were_enabled) {
-		rUCON0 = ucon0 & ~(0x2000);
+		ucon.transmit_interrupt = 0;
+		apple_uart_registers->ucon = ucon;
 	}
 
 	return irqs_were_enabled;
@@ -234,15 +250,17 @@ apple_uart_disable_irq(void)
 static bool
 apple_uart_ack_irq(void)
 {
-	rUTRSTAT0 |= 0x20;
+	apple_uart_registers->utrstat.transmit_interrupt_status = 1;
 	return true;
 }
 
 static void
 apple_uart_drain_fifo(void)
 {
-	/* wait while Tx FIFO is full or the FIFO count != 0 */
-	while ((rUFSTAT0 & 0x2F0)) {
+	while (({
+		ufstat_t ufstat = apple_uart_registers->ufstat;
+		ufstat.tx_fifo_full || ufstat.tx_fifo_count;
+	})) {
 		serial_poll();
 	}
 }
@@ -251,19 +269,11 @@ static void
 apple_uart_set_baud_rate(uint32_t baud_rate)
 {
 	uint32_t div = 0;
-	uint32_t uart_clock = 0;
+	const uint32_t uart_clock = (uint32_t)gPEClockFrequencyInfo.fix_frequency_hz;
 	uint32_t sample_rate = 16;
 
 	if (baud_rate < 300) {
 		baud_rate = 9600;
-	}
-
-	if (rUCON0 & 0x400) {
-		// NCLK
-		uart_clock = (uint32_t)gPEClockFrequencyInfo.fix_frequency_hz;
-	} else {
-		// PCLK
-		uart_clock = (uint32_t)gPEClockFrequencyInfo.prf_frequency_hz;
 	}
 
 	if (dt_sampling != -1) {
@@ -287,45 +297,45 @@ apple_uart_set_baud_rate(uint32_t baud_rate)
 		}
 	}
 
-	// Sample Rate [19:16], UBRDIV [15:0]
-	rUBRDIV0 = ((16 - sample_rate) << 16) | div;
+	ubrdiv_t ubrdiv = apple_uart_registers->ubrdiv;
+	ubrdiv.sample_rate = 16 - sample_rate;
+	ubrdiv.ubr_div = div;
+	apple_uart_registers->ubrdiv = ubrdiv;
 }
 
 MARK_AS_HIBERNATE_TEXT static unsigned int
-apple_uart_tr0(void)
+apple_uart_transmit_ready(void)
 {
-	/* UART is ready unless the FIFO is full. */
-	return (rUFSTAT0 & 0x200) == 0;
+	return !apple_uart_registers->ufstat.tx_fifo_full;
 }
 
 MARK_AS_HIBERNATE_TEXT static void
-apple_uart_td0(uint8_t c)
+apple_uart_transmit_data(uint8_t c)
 {
-	rUTXH0 = c;
+	apple_uart_registers->utxh.txdata = c;
 }
 
 static unsigned int
-apple_uart_rr0(void)
+apple_uart_receive_ready(void)
 {
-	/* Receive is ready when there are >0 bytes in the receive FIFO */
-	/* FIFO count is the low 4 bits and the fifo full flag is 1 << 8 */
-	return rUFSTAT0 & ((1 << 8) | 0x0f);
+	const ufstat_t ufstat = apple_uart_registers->ufstat;
+	return ufstat.rx_fifo_full || ufstat.rx_fifo_count;
 }
 
 static uint8_t
-apple_uart_rd0(void)
+apple_uart_receive_data(void)
 {
-	return (uint8_t)rURXH0;
+	return apple_uart_registers->urxh.rxdata;
 }
 
 MARK_AS_HIBERNATE_DATA_CONST_LATE
 static struct pe_serial_functions apple_serial_functions =
 {
 	.init = apple_uart_init,
-	.transmit_ready = apple_uart_tr0,
-	.transmit_data = apple_uart_td0,
-	.receive_ready = apple_uart_rr0,
-	.receive_data = apple_uart_rd0,
+	.transmit_ready = apple_uart_transmit_ready,
+	.transmit_data = apple_uart_transmit_data,
+	.receive_ready = apple_uart_receive_ready,
+	.receive_data = apple_uart_receive_data,
 	.enable_irq = apple_uart_enable_irq,
 	.disable_irq = apple_uart_disable_irq,
 	.acknowledge_irq = apple_uart_ack_irq,
@@ -671,6 +681,15 @@ SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) vmapple_uart_serial_f
 
 /*****************************************************************************/
 
+/**
+ * Output @str onto every registered serial interface by polling.
+ *
+ * @param str The stringto output.
+ */
+static void uart_sends_force_poll(
+	const char *str
+	);
+
 static void
 register_serial_functions(struct pe_serial_functions *fns)
 {
@@ -694,7 +713,7 @@ serial_hibernation_init(void)
 {
 	uart_hibernation = true;
 #if defined(APPLE_UART)
-	uart_base = gHibernateGlobals.hibUartRegPhysBase;
+	apple_uart_registers = (apple_uart_registers_t *)gHibernateGlobals.hibUartRegPhysBase;
 #endif /* defined(APPLE_UART) */
 #if defined(DOCKCHANNEL_UART)
 	dockchannel_uart_base = gHibernateGlobals.dockChannelRegPhysBase;
@@ -711,7 +730,7 @@ serial_hibernation_cleanup(void)
 {
 	uart_hibernation = false;
 #if defined(APPLE_UART)
-	uart_base = gHibernateGlobals.hibUartRegVirtBase;
+	apple_uart_registers = (apple_uart_registers_t *)gHibernateGlobals.hibUartRegVirtBase;
 #endif /* defined(APPLE_UART) */
 #if defined(DOCKCHANNEL_UART)
 	dockchannel_uart_base = gHibernateGlobals.dockChannelRegVirtBase;
@@ -810,6 +829,10 @@ serial_init(void)
 			if (prop_value) {
 				dockchannel_serial_functions.has_irq = true;
 			}
+
+			/* Set sane defaults for dockchannel globals. */
+			prev_dockchannel_spaces = rDOCKCHANNELS_DEV_WSTAT(DOCKCHANNEL_UART_CHANNEL) & dock_wstat_mask;
+			dockchannel_drain_deadline = mach_absolute_time() + dockchannel_stall_grace;
 		} else {
 			dockchannel_clear_intr();
 		}
@@ -832,24 +855,19 @@ serial_init(void)
 	 */
 	if (SecureDTFindEntry("boot-console", NULL, &entryP) == kSuccess) {
 		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
-		uart_base = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
+		apple_uart_registers = (apple_uart_registers_t *)ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
 		SecureDTGetProperty(entryP, "compatible", (void const **)&serial_compat, &prop_size);
 	} else if (SecureDTFindEntry("name", "uart0", &entryP) == kSuccess) {
 		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
-		uart_base = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
+		apple_uart_registers = (apple_uart_registers_t *)ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
 		SecureDTGetProperty(entryP, "compatible", (void const **)&serial_compat, &prop_size);
 	} else if (SecureDTFindEntry("name", "uart1", &entryP) == kSuccess) {
 		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
-		uart_base = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
+		apple_uart_registers = (apple_uart_registers_t *)ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
 		SecureDTGetProperty(entryP, "compatible", (void const **)&serial_compat, &prop_size);
 	}
 
 	if (NULL != entryP) {
-		SecureDTGetProperty(entryP, "pclk", (void const **)&prop_value, &prop_size);
-		if (prop_value) {
-			dt_pclk = *prop_value;
-		}
-
 		prop_value = NULL;
 		SecureDTGetProperty(entryP, "sampling", (void const **)&prop_value, &prop_size);
 		if (prop_value) {
@@ -885,6 +903,7 @@ serial_init(void)
 
 	fns = gPESF;
 	while (fns != NULL) {
+		serial_do_transmit = 1;
 		fns->init();
 		if (fns->has_irq) {
 			serial_irq_status |= fns->device; // serial_device_t is one-hot
@@ -899,15 +918,33 @@ serial_init(void)
 		gHibernateGlobals.dockChannelRegVirtBase = dockchannel_uart_base;
 		gHibernateGlobals.dockChannelWstatMask = dock_wstat_mask;
 	}
-	if (uart_base) {
-		gHibernateGlobals.hibUartRegPhysBase = ml_vtophys(uart_base);
-		gHibernateGlobals.hibUartRegVirtBase = uart_base;
+	if (apple_uart_registers) {
+		gHibernateGlobals.hibUartRegPhysBase = ml_vtophys((vm_offset_t)apple_uart_registers);
+		gHibernateGlobals.hibUartRegVirtBase = (vm_offset_t)apple_uart_registers;
 	}
 #endif /* HIBERNATION */
 
+	/* Complete. */
 	uart_initted = true;
-
 	return 1;
+}
+
+/**
+ * Forbid or allow transmission over each serial until they receive data.
+ */
+void
+serial_set_on_demand(bool on_demand)
+{
+	/* Enable or disable transmission. */
+	serial_do_transmit = !on_demand;
+
+	/* If on-demand is enabled, report it. */
+	if (on_demand) {
+		uart_sends_force_poll(
+			"On-demand serial mode selected.\n"
+			"Waiting for user input to send logs.\n"
+			);
+	}
 }
 
 /**
@@ -960,30 +997,49 @@ serial_wait_for_interrupt(struct pe_serial_functions *fns)
  *
  * @param c The character to output.
  * @param poll Whether the driver should poll to send the character or if it can
- *             wait for an interrupt
+ *             wait for an interrupt.
+ * @param force : send even if transmission is disabled on the serial.
  */
 MARK_AS_HIBERNATE_TEXT void
-uart_putc_options(char c, bool poll)
+static
+uart_putc_options_(char c, bool poll, bool force)
 {
 	struct pe_serial_functions *fns = gPESF;
 
 	while (fns != NULL) {
-		while (!fns->transmit_ready()) {
-			if (!uart_hibernation) {
-				if (!poll && irq_available_and_ready(fns)) {
-					serial_wait_for_interrupt(fns);
-				} else {
-					serial_poll();
+		if (force || serial_do_transmit) {
+			while (!fns->transmit_ready()) {
+				if (!uart_hibernation) {
+					if (!poll && irq_available_and_ready(fns)) {
+						serial_wait_for_interrupt(fns);
+					} else {
+						serial_poll();
+					}
 				}
 			}
+			fns->transmit_data((uint8_t)c);
 		}
-		fns->transmit_data((uint8_t)c);
 		fns = fns->next;
 	}
 }
 
 /**
- * Output a character onto every registered serial interface by polling.
+ * Output a character onto every registered serial interface whose
+ * transmission is enabled..
+ *
+ * @param c The character to output.
+ * @param poll Whether the driver should poll to send the character or if it can
+ *             wait for an interrupt
+ */
+MARK_AS_HIBERNATE_TEXT void
+uart_putc_options(char c, bool poll)
+{
+	uart_putc_options_(c, poll, 0);
+}
+
+/**
+ * Output a character onto every registered serial interface whose
+ * transmission is enabled by polling.
  *
  * @param c The character to output.
  */
@@ -991,6 +1047,21 @@ void
 uart_putc(char c)
 {
 	uart_putc_options(c, true);
+}
+
+/**
+ * Output @str onto every registered serial interface by polling.
+ *
+ * @param str The stringto output.
+ */
+static void
+uart_sends_force_poll(
+	const char *str)
+{
+	char c;
+	while ((c = *(str++))) {
+		uart_putc_options_(c, true, true);
+	}
 }
 
 /**
@@ -1005,6 +1076,7 @@ uart_getc(void)
 	struct pe_serial_functions *fns = gPESF;
 	while (fns != NULL) {
 		if (fns->receive_ready()) {
+			serial_do_transmit = 1;
 			return (int)fns->receive_data();
 		}
 		fns = fns->next;

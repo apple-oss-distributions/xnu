@@ -87,6 +87,7 @@ extern "C" {
 
 #include <san/kasan.h>
 
+
 #if PRAGMA_MARK
 #pragma mark External & Internal Function Protos
 #endif
@@ -358,6 +359,12 @@ static bool                 sUnloadEnabled             = true;
  **********/
 static OSKext          * sKernelKext             = NULL;
 
+/* Load Tag IDs used by statically loaded binaries (e.g, the kernel itself). */
+enum : uint32_t {
+	kOSKextKernelLoadTag = 0,
+	kOSKextLoadTagCount
+};
+
 /* Set up a fake kmod_info struct for the kernel.
  * It's used in OSRuntime.cpp to call OSRuntimeInitializeCPP()
  * before OSKext is initialized; that call only needs the name
@@ -373,7 +380,7 @@ static OSKext          * sKernelKext             = NULL;
 kmod_info_t g_kernel_kmod_info = {
 	.next =            NULL,
 	.info_version =    KMOD_INFO_VERSION,
-	.id =              0,             // loadTag: kernel is always 0
+	.id =              kOSKextKernelLoadTag,   // loadTag: kernel is always 0
 	.name =            kOSKextKernelIdentifier,// bundle identifier
 	.version =         "0",           // filled in in OSKext::initialize()
 	.reference_count = -1,            // never adjusted; kernel never unloads
@@ -384,6 +391,7 @@ kmod_info_t g_kernel_kmod_info = {
 	.start =           NULL,
 	.stop =            NULL
 };
+
 
 /* Set up a fake kmod_info struct for statically linked kexts that don't have one. */
 
@@ -489,7 +497,9 @@ static AbsoluteTime         sLastWakeTime;                       // last time we
  **********/
 static IOLock                 * sKextSummariesLock                = NULL;
 extern "C" lck_ticket_t         vm_allocation_sites_lock;
+extern "C" lck_grp_t            vm_page_lck_grp_bucket;
 static lck_ticket_t           * sKextAccountsLock = &vm_allocation_sites_lock;
+static lck_grp_t              * sKextAccountsLockGrp = &vm_page_lck_grp_bucket;
 
 void(*const sLoadedKextSummariesUpdated)(void) = OSKextLoadedKextSummariesUpdated;
 OSKextLoadedKextSummaryHeader * gLoadedKextSummaries __attribute__((used)) = NULL;
@@ -752,13 +762,127 @@ OSDefineMetaClassAndStructors(OSDextStatistics, OSObject);
 
 /*********************************************************************
 *********************************************************************/
+/**
+ * Allocate and intialize a fake/representative OSKext object for a statically
+ * loaded (by iBoot) binary (e.g., the XNU kernel itself).
+ *
+ * @param kmod_info Pointer to the kmod_info structure for the binary being
+ *                  setup. At least the "name" and "id" fields needs to already
+ *                  be set correctly.
+ *
+ * @return The allocated and initialized OSKext object.
+ */
+/* static */
+OSKext *
+OSKext::allocAndInitFakeKext(kmod_info_t *kmod_info)
+{
+	vm_offset_t load_address = 0;
+	const char *bundle_name = NULL;
+	bool macho_is_unslid = false;
+	bool set_custom_path = false;
+	const char *executable_fallback_name = NULL;
+
+	if (kmod_info->id == kOSKextKernelLoadTag) {
+		load_address = (vm_offset_t)&_mh_execute_header;
+		bundle_name = "mach_kernel";
+
+		/* The kernel Mach-O header is fixed up to slide all of its addresses. */
+		macho_is_unslid = false;
+
+		/**
+		 * No path to the binary is set for the kernel in its OSKext object. The
+		 * kernel binary is located in fixed directories depending on the OS.
+		 */
+		set_custom_path = false;
+		executable_fallback_name = NULL;
+	} else {
+		panic("%s: Unsupported kmod_info->id (%d)", __func__, kmod_info->id);
+	}
+
+	/* Set up an OSKext instance to represent the statically loaded binary. */
+	OSKext *fakeKext = new OSKext;
+	assert(fakeKext);
+	assert(load_address != 0);
+
+	/*
+	 * The start address is always a slid address whereas the last VA returned
+	 * by getlastaddr() might be unslid depending on the Mach-O. If the address
+	 * coming from the Mach-O is unslid, then unslide the start address before
+	 * computing the length of the executable.
+	 */
+	size_t binaryLength = getlastaddr((kernel_mach_header_t*)load_address);
+	binaryLength -= (macho_is_unslid) ? ml_static_unslide(load_address) : load_address;
+	assert(binaryLength <= UINT_MAX);
+
+	/**
+	 * The load address is always slid. That value will be unslid before being
+	 * exposed to userspace.
+	 */
+	OSSharedPtr<OSData> executable = OSData::withBytesNoCopy(
+		(void*)load_address, (unsigned int)binaryLength);
+	assert(executable);
+
+	fakeKext->loadTag = sNextLoadTag++;
+	fakeKext->bundleID = OSSymbol::withCString(kmod_info->name);
+
+	fakeKext->version = OSKextParseVersionString(osrelease);
+	fakeKext->compatibleVersion = fakeKext->version;
+	fakeKext->linkedExecutable = os::move(executable);
+	fakeKext->interfaceUUID = fakeKext->copyUUID();
+
+	fakeKext->flags.hasAllDependencies = 1;
+	fakeKext->flags.kernelComponent = 1;
+	fakeKext->flags.prelinked = 0;
+	fakeKext->flags.loaded = 1;
+	fakeKext->flags.started = 1;
+	fakeKext->flags.CPPInitialized = 0;
+	fakeKext->flags.jettisonLinkeditSeg = 0;
+	fakeKext->flags.unslidMachO = macho_is_unslid;
+
+
+	fakeKext->kmod_info = kmod_info;
+	strlcpy(kmod_info->version, osrelease,
+	    sizeof(kmod_info->version));
+	kmod_info->size = binaryLength;
+	assert(kmod_info->id == fakeKext->loadTag);
+
+	/*
+	 * Con up an info dict, so we don't have to have special-case checking all
+	 * over.
+	 */
+	fakeKext->infoDict = OSDictionary::withCapacity(5);
+	assert(fakeKext->infoDict);
+	bool setResult = fakeKext->infoDict->setObject(kCFBundleIdentifierKey,
+	    fakeKext->bundleID.get());
+	assert(setResult);
+	setResult = fakeKext->infoDict->setObject(kOSKernelResourceKey,
+	    kOSBooleanTrue);
+	assert(setResult);
+
+	{
+		OSSharedPtr<OSString> scratchString(OSString::withCStringNoCopy(osrelease));
+		assert(scratchString);
+		setResult = fakeKext->infoDict->setObject(kCFBundleVersionKey,
+		    scratchString.get());
+		assert(setResult);
+	}
+
+	{
+		OSSharedPtr<OSString> scratchString(OSString::withCStringNoCopy(bundle_name));
+		assert(scratchString);
+		setResult = fakeKext->infoDict->setObject(kCFBundleNameKey,
+		    scratchString.get());
+		assert(setResult);
+	}
+
+	return fakeKext;
+}
+
 /* static */
 void
 OSKext::initialize(void)
 {
 	OSSharedPtr<OSData>     kernelExecutable   = NULL;// do not release
-	u_char          * kernelStart        = NULL;// do not free
-	size_t            kernelLength       = 0;
 	IORegistryEntry * registryRoot       = NULL;// do not release
 	OSSharedPtr<OSNumber> kernelCPUType;
 	OSSharedPtr<OSNumber> kernelCPUSubtype;
@@ -845,76 +969,10 @@ OSKext::initialize(void)
 	sPanicOnKCMismatch = PE_parse_boot_argn("-nokcmismatchpanic", bootArgBuffer,
 	    sizeof(bootArgBuffer)) ? false : true;
 
-	/* Set up an OSKext instance to represent the kernel itself.
-	 */
-	sKernelKext = new OSKext;
+	/* Set up an OSKext instance to represent the kernel itself. */
+	sKernelKext = allocAndInitFakeKext(&g_kernel_kmod_info);
 	assert(sKernelKext);
 
-	kernelStart = (u_char *)&_mh_execute_header;
-	kernelLength = getlastaddr() - (vm_offset_t)kernelStart;
-	assert(kernelLength <= UINT_MAX);
-	kernelExecutable = OSData::withBytesNoCopy(
-		kernelStart, (unsigned int)kernelLength);
-	assert(kernelExecutable);
-
-#if KASLR_KEXT_DEBUG
-	IOLog("kaslr: kernel start 0x%lx end 0x%lx length %lu vm_kernel_slide %lu (0x%016lx) \n",
-	    (unsigned long)kernelStart,
-	    (unsigned long)getlastaddr(),
-	    kernelLength,
-	    (unsigned long)vm_kernel_slide,
-	    (unsigned long)vm_kernel_slide);
-#endif
-
-	sKernelKext->loadTag = sNextLoadTag++; // the kernel is load tag 0
-	sKernelKext->bundleID = OSSymbol::withCString(kOSKextKernelIdentifier);
-
-	sKernelKext->version = OSKextParseVersionString(osrelease);
-	sKernelKext->compatibleVersion = sKernelKext->version;
-	sKernelKext->linkedExecutable = os::move(kernelExecutable);
-	sKernelKext->interfaceUUID = sKernelKext->copyUUID();
-
-	sKernelKext->flags.hasAllDependencies = 1;
-	sKernelKext->flags.kernelComponent = 1;
-	sKernelKext->flags.prelinked = 0;
-	sKernelKext->flags.loaded = 1;
-	sKernelKext->flags.started = 1;
-	sKernelKext->flags.CPPInitialized = 0;
-	sKernelKext->flags.jettisonLinkeditSeg = 0;
-
-	sKernelKext->kmod_info = &g_kernel_kmod_info;
-	strlcpy(g_kernel_kmod_info.version, osrelease,
-	    sizeof(g_kernel_kmod_info.version));
-	g_kernel_kmod_info.size = kernelLength;
-	g_kernel_kmod_info.id = sKernelKext->loadTag;
-
-	/* Cons up an info dict, so we don't have to have special-case
-	 * checking all over.
-	 */
-	sKernelKext->infoDict = OSDictionary::withCapacity(5);
-	assert(sKernelKext->infoDict);
-	setResult = sKernelKext->infoDict->setObject(kCFBundleIdentifierKey,
-	    sKernelKext->bundleID.get());
-	assert(setResult);
-	setResult = sKernelKext->infoDict->setObject(kOSKernelResourceKey,
-	    kOSBooleanTrue);
-	assert(setResult);
-
-	{
-		OSSharedPtr<OSString> scratchString(OSString::withCStringNoCopy(osrelease));
-		assert(scratchString);
-		setResult = sKernelKext->infoDict->setObject(kCFBundleVersionKey,
-		    scratchString.get());
-		assert(setResult);
-	}
-
-	{
-		OSSharedPtr<OSString> scratchString(OSString::withCStringNoCopy("mach_kernel"));
-		assert(scratchString);
-		setResult = sKernelKext->infoDict->setObject(kCFBundleNameKey,
-		    scratchString.get());
-		assert(setResult);
-	}
 
 	/* Add the kernel kext to the bookkeeping dictionaries. Note that
 	 * the kernel kext doesn't have a kmod_info struct. copyInfo()
@@ -924,6 +982,7 @@ OSKext::initialize(void)
 	assert(setResult);
 	setResult = sLoadedKexts->setObject(sKernelKext);
 	assert(setResult);
+
 
 	// XXX: better way with OSSharedPtr?
 	// sKernelKext remains a valid pointer even after the decref
@@ -1161,9 +1220,7 @@ OSKext::removeKextBootstrap(void)
 			kernel_map,
 			&seg_offset,
 			seg_length, /* mask */ 0,
-			VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-			VM_MAP_KERNEL_FLAGS_NONE,
-			VM_KERN_MEMORY_NONE,
+			VM_MAP_KERNEL_FLAGS_FIXED(.vmf_overwrite = true),
 			(ipc_port_t)NULL,
 			(vm_object_offset_t) 0,
 			/* copy */ FALSE,
@@ -4741,6 +4798,15 @@ OSKext::updateExcludeList(OSDictionary *infoDict)
 #if PRAGMA_MARK
 #pragma mark Accessors
 #endif
+
+/*********************************************************************
+*********************************************************************/
+const OSObject *
+OSKext::getBundleExecutable(void)
+{
+	return infoDict->getObject(kCFBundleExecutableKey);
+}
+
 /*********************************************************************
 *********************************************************************/
 const OSSymbol *
@@ -6501,6 +6567,7 @@ OSKext::load(
 	    "task_%s", getIdentifierCString());
 	account->task_refgrp.grp_name = account->task_refgrp_name;
 	account->task_refgrp.grp_parent = &task_external_refgrp;
+	account->task_refgrp.grp_flags = OS_REFGRP_F_ALWAYS_ENABLED;
 	os_ref_log_init(&account->task_refgrp);
 #endif /* DEVELOPMENT || DEBUG */
 
@@ -8560,7 +8627,7 @@ OSKext::unload(void)
 	notifyKextUnloadObservers(this);
 
 	freeAccount = NULL;
-	lck_ticket_lock(sKextAccountsLock, LCK_GRP_NULL);
+	lck_ticket_lock(sKextAccountsLock, sKextAccountsLockGrp);
 	account->kext = NULL;
 	if (account->site.tag) {
 		account->site.flags |= VM_TAG_UNLOAD;
@@ -11822,7 +11889,7 @@ OSKext::copyInfo(OSArray * infoKeys)
 				}
 
 				lcp = (struct load_command *) (temp_kext_mach_hdr + 1);
-				for (i = 0; i < temp_kext_mach_hdr->ncmds; i++) {
+				for (i = 0; (i < temp_kext_mach_hdr->ncmds) && !flags.unslidMachO; i++) {
 					if (lcp->cmd == LC_SEGMENT_KERNEL) {
 						kernel_segment_command_t *  segp;
 						kernel_section_t *          secp;
@@ -11897,10 +11964,21 @@ OSKext::copyInfo(OSArray * infoKeys)
 				bool res;
 
 				os_log_data         = getsectdatafromheader(kext_mach_hdr, "__TEXT", "__os_log", &os_log_size);
-				os_log_offset       = (uintptr_t)os_log_data - (uintptr_t)kext_mach_hdr;
 				cstring_data        = getsectdatafromheader(kext_mach_hdr, "__TEXT", "__cstring", &cstring_size);
-				cstring_offset      = (uintptr_t)cstring_data - (uintptr_t)kext_mach_hdr;
 				asan_cstring_data   = getsectdatafromheader(kext_mach_hdr, "__TEXT", "__asan_cstring", &asan_cstring_size);
+
+				/*
+				 * If the addresses in the Mach-O header are unslid, manually
+				 * slide them to allow for dereferencing.
+				 */
+				if (flags.unslidMachO) {
+					os_log_data = (os_log_data != nullptr) ? (void*)ml_static_slide((vm_offset_t)os_log_data) : nullptr;
+					cstring_data = (cstring_data != nullptr) ? (void*)ml_static_slide((vm_offset_t)cstring_data) : nullptr;
+					asan_cstring_data = (asan_cstring_data != nullptr) ? (void*)ml_static_slide((vm_offset_t)asan_cstring_data) : nullptr;
+				}
+
+				os_log_offset       = (uintptr_t)os_log_data - (uintptr_t)kext_mach_hdr;
+				cstring_offset      = (uintptr_t)cstring_data - (uintptr_t)kext_mach_hdr;
 				asan_cstring_offset = (uintptr_t)asan_cstring_data - (uintptr_t)kext_mach_hdr;
 
 				header             = (osLogDataHeaderRef *) headerBytes;
@@ -12233,7 +12311,7 @@ OSKext::copyInfo(OSArray * infoKeys)
 				 */
 				for (seg = firstsegfromheader(mh); seg != NULL; seg = nextsegfromheader(mh, seg)) {
 					if (seg->initprot & VM_PROT_EXECUTE) {
-						execLoadAddress = ml_static_unslide(seg->vmaddr);
+						execLoadAddress = (flags.unslidMachO) ? seg->vmaddr : ml_static_unslide(seg->vmaddr);
 						execLoadSize = (uint32_t)seg->vmsize;
 						break;
 					}
@@ -13868,10 +13946,12 @@ vm_map_kcfileset_segment(
 	vm_object_offset_t fileoffset,
 	vm_prot_t          max_prot)
 {
-	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vmk_flags.vmkf_no_copy_on_read = 1;
-	vmk_flags.vmkf_cs_enforcement = 0;
-	vmk_flags.vmkf_cs_enforcement_override = 1;
+	vm_map_kernel_flags_t vmk_flags = {
+		.vmf_fixed = true,
+		.vmkf_no_copy_on_read = true,
+		.vmkf_cs_enforcement_override = true,
+		.vm_tag = VM_KERN_MEMORY_OSKEXT,
+	};
 	kern_return_t ret;
 
 	/* Add Write to max prot to allow fixups */
@@ -13887,9 +13967,7 @@ vm_map_kcfileset_segment(
 		start,
 		size,
 		(mach_vm_offset_t)0,
-		VM_FLAGS_FIXED,
 		vmk_flags,
-		VM_KERN_MEMORY_OSKEXT,
 		(memory_object_control_t)control,
 		fileoffset,
 		TRUE,         /* copy */
@@ -15486,7 +15564,6 @@ OSKext::summaryForAddress(uintptr_t addr)
 void *
 OSKext::kextForAddress(const void *address)
 {
-	void                * image = NULL;
 	OSKextActiveAccount * active;
 	OSKext              * kext = NULL;
 	uint32_t              baseIdx;
@@ -15502,14 +15579,15 @@ OSKext::kextForAddress(const void *address)
 #endif /*  __has_feature(ptrauth_calls) */
 
 	if (sKextAccountsCount) {
-		lck_ticket_lock(sKextAccountsLock, LCK_GRP_NULL);
+		lck_ticket_lock(sKextAccountsLock, sKextAccountsLockGrp);
 		// bsearch sKextAccounts list
 		for (baseIdx = 0, lim = sKextAccountsCount; lim; lim >>= 1) {
 			active = &sKextAccounts[baseIdx + (lim >> 1)];
 			if ((addr >= active->address) && (addr < active->address_end)) {
 				kext = active->account->kext;
 				if (kext && kext->kmod_info) {
-					image = (void *) kext->kmod_info->address;
+					lck_ticket_unlock(sKextAccountsLock);
+					return (void *)kext->kmod_info->address;
 				}
 				break;
 			} else if (addr > active->address) {
@@ -15521,21 +15599,23 @@ OSKext::kextForAddress(const void *address)
 		}
 		lck_ticket_unlock(sKextAccountsLock);
 	}
-	if (!image && (addr >= vm_kernel_stext) && (addr < vm_kernel_etext)) {
-		image = (void *) &_mh_execute_header;
+	if (kernel_text_contains(addr)) {
+		return (void *)&_mh_execute_header;
 	}
-	if (!image && gLoadedKextSummaries) {
+	if (gLoadedKextSummaries) {
 		IOLockLock(sKextSummariesLock);
 		for (i = 0; i < gLoadedKextSummaries->numSummaries; i++) {
 			OSKextLoadedKextSummary *summary = gLoadedKextSummaries->summaries + i;
 			if (addr >= summary->address && addr < summary->address + summary->size) {
-				image = (void *)summary->address;
+				void *kextAddress = (void *)summary->address;
+				IOLockUnlock(sKextSummariesLock);
+				return kextAddress;
 			}
 		}
 		IOLockUnlock(sKextSummariesLock);
 	}
 
-	return image;
+	return NULL;
 }
 
 /*
@@ -16170,7 +16250,7 @@ OSKext::updateLoadedKextSummaries(void)
 		(*sLoadedKextSummariesUpdated)();
 	}
 
-	lck_ticket_lock(sKextAccountsLock, LCK_GRP_NULL);
+	lck_ticket_lock(sKextAccountsLock, sKextAccountsLockGrp);
 	prevAccountingList      = sKextAccounts;
 	prevAccountingListCount = sKextAccountsCount;
 	sKextAccounts           = accountingList;
@@ -16411,7 +16491,7 @@ OSKextGetAllocationSiteForCaller(uintptr_t address)
 	address = (uintptr_t)VM_KERNEL_STRIP_PTR(address);
 #endif /*  __has_feature(ptrauth_calls) */
 
-	lck_ticket_lock(sKextAccountsLock, LCK_GRP_NULL);
+	lck_ticket_lock(sKextAccountsLock, sKextAccountsLockGrp);
 	site = releasesite = NULL;
 
 	// bsearch sKextAccounts list
@@ -16450,7 +16530,7 @@ OSKextGetRefGrpForCaller(uintptr_t address, void (^cb)(struct os_refgrp *))
 	address = (uintptr_t)VM_KERNEL_STRIP_PTR(address);
 #endif /*  __has_feature(ptrauth_calls) */
 
-	lck_ticket_lock(sKextAccountsLock, LCK_GRP_NULL);
+	lck_ticket_lock(sKextAccountsLock, sKextAccountsLockGrp);
 
 	// bsearch sKextAccounts list
 	for (baseIdx = 0, lim = sKextAccountsCount; lim; lim >>= 1) {

@@ -1,3 +1,5 @@
+/* xcrun -sdk iphoneos.internal clang -ldarwintest -o freeable_vnodes freeable_vnodes.c -g -Weverything */
+
 #include <darwintest.h>
 #include <darwintest_utils.h>
 
@@ -6,14 +8,62 @@
 #include <stdio.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <string.h>
 #include <sys/sysctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <TargetConditionals.h>
 
 static pid_t vnoder_pid = -1;
 static uint32_t maxvnodes = 0;
 T_GLOBAL_META(T_META_NAMESPACE("xnu.vfs"));
+
+#if TARGET_OS_IOS
+
+static char *dlpaths[] = {
+	"/System/Library/Assistant/FlowDelegatePlugins/HomeAutomationFlowDelegatePlugin.bundle/HomeAutomationFlowDelegatePlugin",
+	"/System/Library/NanoPreferenceBundles/Applications/NanoPassbookBridgeSettings.bundle/NanoPassbookBridgeSettings",
+	"/System/Library/Assistant/FlowDelegatePlugins/MessagesFlowDelegatePlugin.bundle/MessagesFlowDelegatePlugin",
+	"/System/Library/NanoPreferenceBundles/Discover/HealthAndFitnessPlugin.bundle/HealthAndFitnessPlugin",
+	"/System/Library/NanoPreferenceBundles/SetupBundles/DepthCompanionSetup.bundle/DepthCompanionSetup",
+	"/System/Library/PreferenceBundles/DigitalSeparationSettings.bundle/DigitalSeparationSettings",
+	"/System/Library/Assistant/FlowDelegatePlugins/NotebookFlowPlugin.bundle/NotebookFlowPlugin",
+	"/System/Library/NanoPreferenceBundles/Discover/UserGuidePlugin.bundle/UserGuidePlugin",
+	"/System/Library/PreferenceBundles/NotificationsSettings.bundle/NotificationsSettings",
+	"/System/Library/PreferenceBundles/AssistantSettings.bundle/AssistantSettings",
+	"/System/Library/PreferenceBundles/SettingsCellular.bundle/SettingsCellular",
+	"/System/Library/PreferenceBundles/FocusSettings.bundle/FocusSettings",
+	"/private/preboot/Cryptexes/App/System/Library/PreferenceBundles/MobileSafariSettings.bundle/MobileSafariSettings",
+	NULL
+};
+
+#elif TARGET_OS_WATCH
+
+static char *dlpaths[] = {
+	"/System/Library/Assistant/FlowDelegatePlugins/HomeAutomationFlowDelegatePlugin.bundle/HomeAutomationFlowDelegatePlugin",
+	"/System/Library/Assistant/FlowDelegatePlugins/MessagesFlowDelegatePlugin.bundle/MessagesFlowDelegatePlugin",
+	"/System/Library/PreferenceBundles/NanoAccessibilitySettings.bundle/NanoAccessibilitySettings",
+	"/System/Library/Assistant/FlowDelegatePlugins/NotebookFlowPlugin.bundle/NotebookFlowPlugin",
+	NULL
+};
+
+#elif TARGET_OS_OSX
+
+static char *dlpaths[] = {
+	"/System/Library/Assistant/FlowDelegatePlugins/HomeAutomationFlowDelegatePlugin.bundle/Contents/MacOS/HomeAutomationFlowDelegatePlugin",
+	"/System/Library/Assistant/FlowDelegatePlugins/MessagesFlowDelegatePlugin.bundle/Contents/MacOS/MessagesFlowDelegatePlugin",
+	"/System/Library/Assistant/FlowDelegatePlugins/NotebookFlowPlugin.bundle/Contents/MacOS/NotebookFlowPlugin",
+	NULL
+};
+
+#else
+
+static char *dlpaths[] = {
+	NULL
+};
+
+#endif
 
 static uint32_t
 get_sysctl_int(char *sysctl_name)
@@ -181,6 +231,26 @@ T_DECL(vnode_max_increase,
 	/* wait for child to run and run up the vnodes */
 	T_QUIET;
 	T_ASSERT_POSIX_SUCCESS(read(sock_fd[0], buf, sizeof(buf)), NULL);
+
+	int num_getpaths = 0;
+	for (i = 0; i < 5 && dlpaths[0] != NULL; i++) {
+		for (int j = 0; dlpaths[j] != NULL; j++) {
+			int dlpath_fd;
+			char path[256] = {0};
+			struct stat sb;
+
+			if (stat(dlpaths[j], &sb) != -1) {
+				T_QUIET;
+				T_ASSERT_POSIX_SUCCESS(dlpath_fd = open(dlpaths[j], O_RDONLY), NULL);
+				T_QUIET;
+				T_ASSERT_POSIX_SUCCESS(fcntl(dlpath_fd, F_GETPATH, &path), "path is %s, iteration number is %d and path number is %d", dlpaths[j], i + 1, j + 1);
+				T_QUIET;
+				T_ASSERT_POSIX_SUCCESS(close(dlpath_fd), NULL);
+				num_getpaths++;
+			}
+		}
+	}
+	T_LOG("Num getpaths done = %d", num_getpaths);
 
 	current_num = get_sysctl_int("vfs.vnstats.num_vnodes");
 	T_LOG("num vnodes after vnoder: %d", current_num);

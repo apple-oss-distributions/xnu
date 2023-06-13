@@ -4,24 +4,26 @@
 //
 //
 
-#pragma once
+#ifndef CORE_ENTITLEMENTS_ENTITLEMENTS_H
+#define CORE_ENTITLEMENTS_ENTITLEMENTS_H
 
 #ifndef _CE_INDIRECT
 #error "Please include <CoreEntitlements/CoreEntitlements.h> instead of this file"
 #endif
 
-#include "Result.h"
-#include "Runtime.h"
+#include <CoreEntitlements/Result.h>
+#include <CoreEntitlements/Runtime.h>
 
+__ptrcheck_abi_assume_single();
 
 /*!
  * @enum CEVersion_t
  * Represents the various versions supported by CoreEntitlements
  */
-OS_CLOSED_ENUM(CEVersion, int64_t,
-               kCEVersionInvalid = 0,
-               kCEVersionZero = 1,
-               kCEVersionOne = 2);
+OS_ENUM(CEVersion, int64_t,
+        kCEVersionInvalid = 0,
+        kCEVersionZero = 1,
+        kCEVersionOne = 2);
 
 /*!
  * @struct CEValidationResult
@@ -29,9 +31,13 @@ OS_CLOSED_ENUM(CEVersion, int64_t,
  */
 typedef struct {
     CEVersion_t version;
-    const uint8_t* blob;
-    const uint8_t* blob_end;
+    const uint8_t *__ended_by(blob_end) blob;
+    const uint8_t * blob_end;
 } CEValidationResult;
+
+typedef struct {
+    bool allow_data_elements;
+} CEValidationOptions;
 
 /*!
  * @function CEValidate
@@ -47,7 +53,24 @@ typedef struct {
  * @discussion
  * This function will return kCENoError if the entitlements are valid
  */
-CEError_t CEValidate(const CERuntime_t rt, CEValidationResult* result, const uint8_t* blob, const uint8_t* blob_end) __result_use_check;
+CEError_t CEValidate(const CERuntime_t rt, CEValidationResult* result, const uint8_t *__ended_by(blob_end) blob, const uint8_t* blob_end) __result_use_check;
+/*!
+ * @function CEValidateWithOptions
+ * Validates if the provided blob conforms to one of the entitlement specification understood by CoreEntitlements
+ * @param rt
+ * Active runtime
+ * @param options
+ * Options that modify how validation behaves
+ * @param result
+ * The validation result will be stored here
+ * @param blob
+ * Pointer to the start of the entitlements object
+ * @param blob_end
+ * Pointer to one byte past the end of the entitlements object
+ * @discussion
+ * This function will return kCENoError if the entitlements are valid
+ */
+CEError_t CEValidateWithOptions(const CERuntime_t rt, CEValidationOptions* options, CEValidationResult* result, const uint8_t *__ended_by(blob_end) blob, const uint8_t* blob_end) __result_use_check;
 
 /*!
  * @function CEAcquireManagedContext
@@ -73,17 +96,23 @@ CEError_t CEReleaseManagedContext(CEQueryContext_t* ctx);
  * @enum CEQueryOpOpcode_t
  * These are all the supported operations by the CoreEntitlements VM
  */
-OS_CLOSED_ENUM(CEQueryOpOpcode, int64_t,
-               kCEOpNoop = 0,
-               kCEOpSelectKey = 1,
-               kCEOpSelectIndex = 2,
-               kCEOpMatchString = 3,
-               kCEOpMatchStringPrefix = 4,
-               kCEOpMatchBool = 5,
-               kCEOpStringValueAllowed = 6,
-               kCEOpMatchInteger = 7,
-               kCEOpStringPrefixValueAllowed = 8,
-               kCEOpDynamic = 0x1LL << 62);
+OS_ENUM(CEQueryOpOpcode, int64_t,
+        kCEOpNoop = 0,
+        kCEOpSelectKey = 1,
+        kCEOpSelectIndex = 2,
+        kCEOpMatchString = 3,
+        kCEOpMatchStringPrefix = 4,
+        kCEOpMatchBool = 5,
+        kCEOpStringValueAllowed = 6,
+        kCEOpMatchInteger = 7,
+        kCEOpStringPrefixValueAllowed = 8,
+        kCEOpSelectKeyWithPrefix = 9,
+        kCEOpIntegerValueAllowed = 10,
+        kCEOpMatchType = 11,
+        kCEOpMatchData = 12,
+        kCEOpMatchDataValueAllowed = 13,
+        kCEOpMaxOperation = 14, /* Sentinel value */
+        kCEOpDynamic = 0x1LL << 62);
 
 
 
@@ -103,6 +132,9 @@ typedef struct CEQueryOperation {
 } CEQueryOperation_t;
 
 typedef CEQueryOperation_t CEQuery_t[];
+
+extern const CEQueryOperation_t* CESelectKeyOperation;
+extern const CEQueryOperation_t* CESelectValueOperation;
 
 /*!
  * @typedef CEPrepareOptions_t
@@ -140,7 +172,7 @@ typedef struct CEPrepareOptions {
  * leave the VM in the valid state. An invalid state may arise from a variety of situations, like trying to select a value for a key that doesn't exist,
  * or a failing string matching operations.
  */
-CEError_t CEContextQuery(CEQueryContext_t ctx, CEQuery_t query, size_t queryLength) __result_use_check;
+CEError_t CEContextQuery(CEQueryContext_t ctx, const CEQueryOperation_t *__counted_by(queryLength) query, size_t queryLength) __result_use_check;
 
 /*!
  * @function CEPrepareQuery
@@ -155,7 +187,7 @@ CEError_t CEContextQuery(CEQueryContext_t ctx, CEQuery_t query, size_t queryLeng
  * @param queryLength
  * The number of operations in the query
  */
-CEError_t CEPrepareQuery(CEPrepareOptions_t options, CEQuery_t query, size_t queryLength);
+CEError_t CEPrepareQuery(CEPrepareOptions_t options, CEQueryOperation_t *__counted_by(queryLength) query, size_t queryLength);
 
 /*!
  * @function CEContextIsSubset
@@ -173,4 +205,6 @@ CEError_t CEPrepareQuery(CEPrepareOptions_t options, CEQuery_t query, size_t que
  */
 CEError_t CEContextIsSubset(CEQueryContext_t subset, CEQueryContext_t superset);
 
-#include "QueryHelpers.h"
+#include <CoreEntitlements/QueryHelpers.h>
+
+#endif

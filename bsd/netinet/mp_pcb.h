@@ -98,8 +98,9 @@ struct mppcbinfo {
 	TAILQ_HEAD(, mppcb)     mppi_pcbs;      /* list of PCBs */
 	uint32_t                mppi_count;     /* # of PCBs in list */
 	lck_attr_t              mppi_lock_attr; /* lock attr */
-	struct zone             *mppi_zone;     /* zone for this PCB */
-	lck_grp_t               *mppi_lock_grp; /* lock grp */
+	struct mppcb         *(*mppi_alloc)(void);
+	void                  (*mppi_free)(struct mppcb *);
+	lck_grp_t              *mppi_lock_grp;  /* lock grp */
 	decl_lck_mtx_data(, mppi_lock);         /* global PCB lock */
 	uint32_t (*mppi_gc)(struct mppcbinfo *); /* garbage collector func */
 	uint32_t (*mppi_timer)(struct mppcbinfo *); /* timer func */

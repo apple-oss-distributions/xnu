@@ -546,6 +546,7 @@ struct pr_usrreqs {
 	int     (*pru_sosend_list)(struct socket *, struct uio **, u_int, int);
 	int     (*pru_socheckopt)(struct socket *, struct sockopt *);
 	int     (*pru_preconnect)(struct socket *so);
+	int     (*pru_defunct)(struct socket *);
 };
 
 /* Values for pru_flags  */

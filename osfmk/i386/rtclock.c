@@ -307,7 +307,6 @@ rtclock_init(void)
 
 		rtc_timer_init();
 		clock_timebase_init();
-		ml_init_lock_timeout();
 		ml_init_delay_spin_threshold(10);
 	}
 

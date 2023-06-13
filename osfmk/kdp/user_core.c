@@ -28,6 +28,7 @@
 
 #include <kdp/processor_core.h>
 #include <kdp/kdp_core.h>
+#include <kdp/core_notes.h>
 #include <kdp/kdp_common.h>
 #include <vm/vm_map.h>
 
@@ -227,31 +228,35 @@ user_dump_save_segment_data(void *refcon, core_save_segment_data_cb callback, vo
  * Add a LC_NOTE to the core to indicate that it was created during a kernel panic.
  */
 
-#define USER_COREDUMP_DATA_OWNER "panic context"
-
 extern char     kernel_uuid_string[];
-
-struct user_coredump_note {
-	uuid_string_t kernel_uuid_string;
-};
 
 kern_return_t
 user_dump_save_note_summary(void *refcon __unused, core_save_note_summary_cb callback, void *context)
 {
-	return callback(1 /* one LC_NOTE */, sizeof(struct user_coredump_note), context);
+	return callback(2 /* two LC_NOTE */, sizeof(panic_context_note_t) + sizeof(addrable_bits_note_t), context);
 }
 
 kern_return_t
 user_dump_save_note_descriptions(void *refcon __unused, core_save_note_descriptions_cb callback, void *context)
 {
-	return callback(USER_COREDUMP_DATA_OWNER, sizeof(struct user_coredump_note), context);
+	callback(PANIC_CONTEXT_DATA_OWNER, sizeof(panic_context_note_t), context);
+	return callback(ADDRABLE_BITS_DATA_OWNER, sizeof(addrable_bits_note_t), context);
 }
 
 kern_return_t
-user_dump_save_note_data(void *refcon __unused, core_save_note_data_cb callback, void *context)
+user_dump_save_note_data(void *refcon, core_save_note_data_cb callback, void *context)
 {
-	struct user_coredump_note note;
+	panic_context_note_t note;
 	strlcpy(&note.kernel_uuid_string[0], kernel_uuid_string, sizeof(uuid_string_t));
 
-	return callback(&note, sizeof(struct user_coredump_note), context);
+	callback(&note, sizeof(panic_context_note_t), context);
+
+	struct kern_userspace_coredump_context *ucontext = refcon;
+	addrable_bits_note_t note_ab = {
+		.version = ADDRABLE_BITS_VER,
+		.addressing_bits = pmap_user_va_bits(get_task_pmap(ucontext->task)),
+		.unused = 0
+	};
+
+	return callback(&note_ab, sizeof(addrable_bits_note_t), context);
 }

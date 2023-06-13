@@ -66,7 +66,7 @@ typedef uint32_t        reg64_t;
  * addresses (that are page aligned) as 32-bit page numbers.
  * This limits the physical address space to 16TB of RAM.
  */
-typedef uint32_t ppnum_t;               /* Physical page number */
+typedef uint32_t ppnum_t __kernel_ptr_semantics; /* Physical page number */
 #define PPNUM_MAX UINT32_MAX
 
 
@@ -164,17 +164,12 @@ typedef uint16_t                vm_tag_t;
  * has sufficient bits to represent all values (max value exclusive).
  */
 #define VM_TAG_SIZECLASSES      36
-#else
-#define VM_TAG_SIZECLASSES      0
-#endif
-
-#if VM_TAG_SIZECLASSES
 // must be multiple of 64
 #define VM_MAX_TAG_VALUE        1536
 #else
+#define VM_TAG_SIZECLASSES      0
 #define VM_MAX_TAG_VALUE        256
 #endif
-
 
 #define ARRAY_COUNT(a)  (sizeof((a)) / sizeof((a)[0]))
 

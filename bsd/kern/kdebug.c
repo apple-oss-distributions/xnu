@@ -240,7 +240,7 @@ static int kdbg_write_thread_map(vnode_t vp, vfs_context_t ctx);
 static int kdbg_copyout_thread_map(user_addr_t buffer, size_t *buffer_size);
 static void _clear_thread_map(void);
 
-static bool kdbg_wait(uint64_t timeout_ms, bool locked_wait);
+static bool kdbg_wait(uint64_t timeout_ms);
 static void kdbg_wakeup(void);
 
 static int _copy_cpu_map(int version, void **dst, size_t *size);
@@ -396,7 +396,7 @@ _coproc_list_callback(kd_callback_type type, void *arg)
 	}
 }
 
-#define EXTRA_COPROC_COUNT (16)
+#define EXTRA_COPROC_COUNT (32)
 
 static kdebug_emit_filter_t
 _trace_emit_filter(void)
@@ -939,6 +939,7 @@ kernel_debug_disable(void)
 {
 	if (kdebug_enable) {
 		kdbg_set_tracing_enabled(false, 0);
+		kdbg_wakeup();
 	}
 }
 
@@ -964,8 +965,8 @@ kdebug_typefilter(__unused struct proc* p, struct kdebug_typefilter_args* uap,
 	vm_map_t user_map = current_map();
 	const bool copy = false;
 	kern_return_t kr = mach_vm_map_kernel(user_map, &user_addr,
-	    TYPEFILTER_ALLOC_SIZE, 0, VM_FLAGS_ANYWHERE, VM_MAP_KERNEL_FLAGS_NONE,
-	    VM_KERN_MEMORY_NONE, kdbg_typefilter_memory_entry, 0, copy,
+	    TYPEFILTER_ALLOC_SIZE, 0, VM_MAP_KERNEL_FLAGS_ANYWHERE(),
+	    kdbg_typefilter_memory_entry, 0, copy,
 	    VM_PROT_READ, VM_PROT_READ, VM_INHERIT_SHARE);
 	if (kr != KERN_SUCCESS) {
 		return mach_to_bsd_errno(kr);
@@ -2162,7 +2163,7 @@ kdbg_set_nkdbufs_trace(unsigned int req_nkdbufs_trace)
  * Called with `ktrace_lock` locked and interrupts enabled.
  */
 static bool
-kdbg_wait(uint64_t timeout_ms, bool locked_wait)
+kdbg_wait(uint64_t timeout_ms)
 {
 	int wait_result = THREAD_AWAKENED;
 	uint64_t deadline_mach = 0;
@@ -2181,10 +2182,8 @@ kdbg_wait(uint64_t timeout_ms, bool locked_wait)
 	}
 	lck_spin_lock_grp(&kd_wait_lock, &kdebug_lck_grp);
 
-	if (!locked_wait) {
-		/* drop the mutex to allow others to access trace */
-		ktrace_unlock();
-	}
+	/* drop the mutex to allow others to access trace */
+	ktrace_unlock();
 
 	while (wait_result == THREAD_AWAKENED &&
 	    kd_control_trace.kdc_storage_used < kd_buffer_trace.kdb_storage_threshold) {
@@ -2199,18 +2198,13 @@ kdbg_wait(uint64_t timeout_ms, bool locked_wait)
 		}
 	}
 
-	/* check the count under the spinlock */
 	bool threshold_exceeded = (kd_control_trace.kdc_storage_used >= kd_buffer_trace.kdb_storage_threshold);
 
 	lck_spin_unlock(&kd_wait_lock);
 	ml_set_interrupts_enabled(s);
 
-	if (!locked_wait) {
-		/* pick the mutex back up again */
-		ktrace_lock();
-	}
+	ktrace_lock();
 
-	/* write out whether we've exceeded the threshold */
 	return threshold_exceeded;
 }
 
@@ -2431,8 +2425,15 @@ _kd_sysctl_internal(int op, int value, user_addr_t where, size_t *sizep)
 		int ret = 0;
 
 		if (op == KERN_KDWRITETR || op == KERN_KDWRITETR_V3) {
-			(void)kdbg_wait(size, true);
+			(void)kdbg_wait(size);
+			// Re-check whether this process can configure ktrace, since waiting
+			// will drop the ktrace lock.
+			int no_longer_owner_error = ktrace_configure(KTRACE_KDEBUG);
+			if (no_longer_owner_error != 0) {
+				return no_longer_owner_error;
+			}
 		}
+
 		p = current_proc();
 		fd = value;
 
@@ -2467,7 +2468,7 @@ _kd_sysctl_internal(int op, int value, user_addr_t where, size_t *sizep)
 		return ret;
 	}
 	case KERN_KDBUFWAIT:
-		*sizep = kdbg_wait(size, false);
+		*sizep = kdbg_wait(size);
 		return 0;
 	case KERN_KDPIDTR:
 		if (size < sizeof(kd_regtype)) {

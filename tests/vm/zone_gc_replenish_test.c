@@ -19,7 +19,7 @@ run_sysctl_test(const char *t, int64_t value)
 
 	snprintf(name, sizeof(name), "debug.test.%s", t);
 	rc = sysctlbyname(name, &result, &s, &value, s);
-	T_ASSERT_POSIX_SUCCESS(rc, "sysctlbyname(%s)", t);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(rc, "sysctlbyname(%s)", t);
 	return result;
 }
 
@@ -28,12 +28,16 @@ static void *
 gc_thread_func(__unused void *arg)
 {
 	time_t start = time(NULL);
+	size_t n = 0;
 
 	/*
 	 * Keep kicking the test for 15 seconds to see if we can panic() the kernel
 	 */
 	while (time(NULL) < start + 15) {
 		run_sysctl_test("zone_gc_replenish_test", 0);
+		if (++n % 100000 == 0) {
+			T_LOG("%zd zone_gc_replenish_test done", n);
+		}
 	}
 	return NULL;
 }
@@ -42,12 +46,16 @@ static void *
 alloc_thread_func(__unused void *arg)
 {
 	time_t start = time(NULL);
+	size_t n = 0;
 
 	/*
 	 * Keep kicking the test for 15 seconds to see if we can panic() the kernel
 	 */
 	while (time(NULL) < start + 15) {
 		run_sysctl_test("zone_alloc_replenish_test", 0);
+		if (++n % 10000 == 0) {
+			T_LOG("%zd zone_alloc_replenish_test done", n);
+		}
 	}
 	return NULL;
 }

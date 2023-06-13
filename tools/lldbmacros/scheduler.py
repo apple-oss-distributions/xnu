@@ -159,11 +159,14 @@ bucketStr = ["FIXPRI (>UI)", "TIMESHARE_FG", "TIMESHARE_IN", "TIMESHARE_DF", "TI
 
 @header("{:<18s} | {:>20s} | {:>20s} | {:>10s} | {:>10s}".format('Thread Group', 'Pending (us)', 'Interactivity Score', 'TG Boost', 'Highest Thread Pri'))
 def GetSchedClutchBucketSummary(clutch_bucket):
-    tg_boost = kern.globals.sched_clutch_bucket_group_pri_boost[clutch_bucket.scb_group.scbg_clutch.sc_tg_priority]
+    tg_boost = 0
     pending_delta = kern.GetNanotimeFromAbstime(GetRecentTimestamp() - clutch_bucket.scb_group.scbg_pending_data.scct_timestamp) // 1000
     if (int)(clutch_bucket.scb_group.scbg_pending_data.scct_timestamp) == 18446744073709551615:
         pending_delta = 0
-    return "0x{:<16x} | {:>20d} | {:>20d} | {:>10d} | {:>10d}".format(clutch_bucket.scb_group.scbg_clutch.sc_tg, pending_delta, clutch_bucket.scb_group.scbg_interactivity_data.scct_count, tg_boost, SchedPriorityStableQueueRootPri(clutch_bucket.scb_thread_runq, 'struct thread', 'th_clutch_runq_link')) 
+    return "0x{:<16x} | {:>20d} | {:>20d} | {:>10d} | {:>10d}".format(
+        clutch_bucket.scb_group.scbg_clutch.sc_tg, pending_delta,
+        clutch_bucket.scb_group.scbg_interactivity_data.scct_count,
+        tg_boost, clutch_bucket.scb_thread_runq.pq_root.key >> 8)
 
 def ShowSchedClutchForPset(pset):
     root_clutch = pset.pset_clutch_root
@@ -747,7 +750,7 @@ def ShowScheduler(cmd_args=None):
         for task in kern.terminated_tasks:
             task_map[unsigned(task.sched_group)] = task
 
-    print(" \n")
+    print()
 
     while node != 0:
         pset = node.psets
@@ -775,8 +778,8 @@ def ShowScheduler(cmd_args=None):
                         task = task_map.get(unsigned(group), "Unknown task!")
                         print("Group {: <#012x} Task {: <#012x}\n".format(unsigned(group), unsigned(task)))
                         ShowRunQSummary(group.runq)
-            print(" \n")
-            
+            print()
+
             processor_array = kern.globals.processor_array
 
             print("Active Processors:\n")
@@ -793,7 +796,7 @@ def ShowScheduler(cmd_args=None):
                     if show_grrr:
                         grrr_runq = processor.grrr_runq
                         ShowGrrrSummary(grrr_runq)
-            print(" \n")
+            print()
 
 
             print("Idle Processors:\n")
@@ -806,7 +809,7 @@ def ShowScheduler(cmd_args=None):
 
                     if show_priority_runq:
                         ShowRunQSummary(processor.runq)
-            print(" \n")
+            print()
 
 
             print("Idle Secondary Processors:\n")
@@ -819,7 +822,7 @@ def ShowScheduler(cmd_args=None):
 
                     if show_priority_runq:
                         print(ShowRunQSummary(processor.runq))
-            print(" \n")
+            print()
 
 
             print("Other Processors:\n")
@@ -835,7 +838,7 @@ def ShowScheduler(cmd_args=None):
 
                     if show_priority_runq:
                         ShowRunQSummary(processor.runq)
-            print(" \n")
+            print()
 
             if show_clutch or show_edge:
                 cluster_type = "SMP"
@@ -873,9 +876,7 @@ def ShowScheduler(cmd_args=None):
     dump_mpsc_thread_queue("Thread Exception Queue", kern.globals.thread_exception_queue)
     dump_mpsc_thread_queue("Thread Deallocate Queue", kern.globals.thread_deallocate_queue)
 
-    print("\n")
-
-    print("\n")
+    print()
 
 # EndMacro: showallprocessors
 
@@ -928,7 +929,7 @@ def ParanoidIterateLinkageChain(queue_head, element_type, field_name, field_ofst
     else:
         struct_type = element_type
 
-    elem_ofst = getfieldoffset(struct_type, field_name) + field_ofst
+    elem_ofst = struct_type.xGetFieldOffset(field_name) + field_ofst
 
     try:
         link = queue_head.next

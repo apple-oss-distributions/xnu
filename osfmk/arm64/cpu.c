@@ -87,15 +87,19 @@ extern uint64_t         wake_abstime;
 void sleep_token_buffer_init(void);
 #endif
 
-
 extern uintptr_t resume_idle_cpu;
 extern uintptr_t start_cpu;
+vm_address_t   start_cpu_paddr;
 
 #if __ARM_KERNEL_PROTECT__
 extern void exc_vectors_table;
 #endif /* __ARM_KERNEL_PROTECT__ */
 
+#if APPLEVIRTUALPLATFORM
 extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sleep, unsigned int cpu, uint64_t entry_pa);
+#else
+extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sleep);
+#endif
 extern void arm64_force_wfi_clock_gate(void);
 #if defined(APPLETYPHOON)
 // <rdar://problem/15827409>
@@ -106,8 +110,6 @@ extern void typhoon_return_from_wfi(void);
 #if HAS_RETENTION_STATE
 extern void arm64_retention_wfi(void);
 #endif
-
-vm_address_t   start_cpu_paddr;
 
 sysreg_restore_t sysreg_restore __attribute__((section("__DATA, __const"))) = {
 	.tcr_el1 = TCR_EL1_BOOT,
@@ -340,7 +342,11 @@ cpu_sleep(void)
 		cpu_data_ptr->cpu_reset_handler = (uintptr_t)0;
 		__builtin_arm_dsb(DSB_ISH);
 		CleanPoU_Dcache();
+#if APPLEVIRTUALPLATFORM
 		arm64_prepare_for_sleep(deep_sleep, cpu_data_ptr->cpu_number, ml_vtophys((vm_offset_t)&LowResetVectorBase));
+#else
+		arm64_prepare_for_sleep(deep_sleep);
+#endif
 	}
 #else
 	PE_cpu_machine_quiesce(cpu_data_ptr->cpu_id);
@@ -660,9 +666,9 @@ cpu_idle_exit(boolean_t from_reset)
 		timer_resync_deadlines();
 	}
 
-#if CONFIG_KERNEL_TBI && KASAN
+#if KASAN_TBI
 	kasan_unpoison_curstack(false);
-#endif /* CONFIG_KERNEL_TBI && KASAN */
+#endif /* KASAN_TBI */
 
 	Idle_load_context();
 }
@@ -829,14 +835,13 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
 #if !XNU_MONITOR
 	pmap_cpu_data_t * pmap_cpu_data_ptr = &cpu_data_ptr->cpu_pmap_cpu_data;
 
-	pmap_cpu_data_ptr->cpu_nested_pmap = (struct pmap *) NULL;
 	pmap_cpu_data_ptr->cpu_number = PMAP_INVALID_CPU_NUM;
 	pmap_cpu_data_ptr->pv_free.list = NULL;
 	pmap_cpu_data_ptr->pv_free.count = 0;
 	pmap_cpu_data_ptr->pv_free_spill_marker = NULL;
-
+	pmap_cpu_data_ptr->cpu_nested_pmap = (struct pmap *) NULL;
 	bzero(&(pmap_cpu_data_ptr->cpu_sw_asids[0]), sizeof(pmap_cpu_data_ptr->cpu_sw_asids));
-#endif
+#endif /* !XNU_MONITOR */
 	cpu_data_ptr->halt_status = CPU_NOT_HALTED;
 #if __ARM_KERNEL_PROTECT__
 	cpu_data_ptr->cpu_exc_vectors = (vm_offset_t)&exc_vectors_table;
@@ -898,9 +903,7 @@ cpu_start(int cpu)
 		configure_coresight_registers(cpu_data_ptr);
 	} else {
 		thread_t first_thread;
-
 		cpu_data_ptr->cpu_reset_handler = (vm_offset_t) start_cpu_paddr;
-
 #if !XNU_MONITOR
 		cpu_data_ptr->cpu_pmap_cpu_data.cpu_nested_pmap = NULL;
 #endif
@@ -1080,7 +1083,11 @@ ml_arm_sleep(void)
 		mt_sleep();
 #endif /* MONOTONIC */
 		/* ARM64-specific preparation */
+#if APPLEVIRTUALPLATFORM
 		arm64_prepare_for_sleep(true, cpu_data_ptr->cpu_number, ml_vtophys((vm_offset_t)&LowResetVectorBase));
+#else
+		arm64_prepare_for_sleep(true);
+#endif
 	} else {
 #if __ARM_GLOBAL_SLEEP_BIT__
 		/*
@@ -1110,7 +1117,11 @@ ml_arm_sleep(void)
 		}
 
 		/* ARM64-specific preparation */
+#if APPLEVIRTUALPLATFORM
 		arm64_prepare_for_sleep(true, cpu_data_ptr->cpu_number, ml_vtophys((vm_offset_t)&LowResetVectorBase));
+#else
+		arm64_prepare_for_sleep(true);
+#endif
 	}
 }
 
@@ -1170,7 +1181,6 @@ cpu_machine_idle_init(boolean_t from_boot)
 			// do nothing
 			break;
 		}
-
 		ResetHandlerData.assist_reset_handler = 0;
 		ResetHandlerData.cpu_data_entries = ml_static_vtop((vm_offset_t)CpuDataEntries);
 
@@ -1197,7 +1207,6 @@ cpu_machine_idle_init(boolean_t from_boot)
 			coresight_debug_enabled = TRUE;
 #endif
 		}
-
 		start_cpu_paddr = ml_static_vtop((vm_offset_t)&start_cpu);
 		resume_idle_cpu_paddr = ml_static_vtop((vm_offset_t)&resume_idle_cpu);
 	}
@@ -1217,7 +1226,6 @@ cpu_machine_idle_init(boolean_t from_boot)
 	}
 	;
 #endif
-
 	cpu_data_ptr->cpu_reset_handler = resume_idle_cpu_paddr;
 	clean_dcache((vm_offset_t)cpu_data_ptr, sizeof(cpu_data_t), FALSE);
 }

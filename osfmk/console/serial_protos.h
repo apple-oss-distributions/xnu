@@ -45,18 +45,38 @@ void serial_keyboard_init(void);
 void serial_keyboard_start(void) __dead2;
 void serial_keyboard_poll(void) __dead2;
 
+/* Boot serial mode (see bits below). */
 extern uint32_t serialmode;
 
+/* Is output supported ? */
 #define SERIALMODE_OUTPUT    0x01
+
+/* Is input supported ? */
 #define SERIALMODE_INPUT     0x02
+
+/* Force synchronous output ? */
 #define SERIALMODE_SYNCDRAIN 0x04
-#define SERIALMODE_BASE_TTY  0x08 /* Load Base/Recovery/FVUnlock TTY */
-#define SERIALMODE_NO_IOLOG  0x10 /* prevent IOLogs writing to serial */
-#define SERIALMODE_DKLOG     0x20 /* allow DriverKit os_log/IOLogs writing to serial */
+
+/* Load Base/Recovery/FVUnlock TTY */
+#define SERIALMODE_BASE_TTY  0x08
+
+/* Prevent IOLogs writing to serial */
+#define SERIALMODE_NO_IOLOG  0x10
+
+/* Allow DriverKit os_log/IOLogs writing to serial */
+#define SERIALMODE_DKLOG     0x20
+
+/** Start logging on to a serial only once data has been received on this
+ * serial. Requires SERIALMODE_INPUT set, ingored otherwise.  */
+#define SERIALMODE_ON_DEMAND  0x40
 
 extern uint32_t cons_ops_index;
 extern const uint32_t nconsops;
+
+/* disable_serial_output disables kprintf() *and* unbuffered panic output. */
 extern bool disable_serial_output;
+
+/* Shortcuts for serialmode & {SERIALMODE_NOIOLOG, SERIALMODE_DKLOG}. */
 extern bool disable_iolog_serial_output;
 extern bool enable_dklog_serial_output;
 

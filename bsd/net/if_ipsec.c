@@ -278,8 +278,7 @@ ipsec_flag_isset(struct ipsec_pcb *pcb, uint32_t flag)
 
 TAILQ_HEAD(ipsec_list, ipsec_pcb) ipsec_head;
 
-static ZONE_DEFINE(ipsec_pcb_zone, "net.if_ipsec",
-    sizeof(struct ipsec_pcb), ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(ipsec_pcb_zone, struct ipsec_pcb, NET_KT_DEFAULT);
 
 #define IPSECQ_MAXLEN 256
 

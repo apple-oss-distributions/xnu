@@ -140,11 +140,11 @@ struct tracker_db {
 	uint32_t                            max_link_count;
 };
 
-static ZONE_DEFINE(tracker_hash_entry_zone, "tracker_hash_entry",
-    sizeof(struct tracker_hash_entry), ZC_NONE);
+static KALLOC_TYPE_DEFINE(tracker_hash_entry_zone,
+    struct tracker_hash_entry, NET_KT_DEFAULT);
 
-static ZONE_DEFINE(tracker_hash_entry_short_zone, "tracker_hash_entry_short",
-    sizeof(struct tracker_hash_entry_short), ZC_NONE);
+static KALLOC_TYPE_DEFINE(tracker_hash_entry_short_zone,
+    struct tracker_hash_entry_short, NET_KT_DEFAULT);
 
 static struct tracker_db g_tracker_db = { };
 

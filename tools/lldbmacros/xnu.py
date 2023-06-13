@@ -9,7 +9,6 @@ import lldb
 from functools import wraps
 from ctypes import c_ulonglong as uint64_t
 from ctypes import c_void_p as voidptr_t
-import code
 import core
 from core import caching, int, PY3
 from core.standard import *
@@ -78,13 +77,14 @@ def lldb_type_summary(types_list):
             args, _, _, _ = inspect.getargspec(obj)
             if 'O' in args:
                 stream = CommandOutput(summary_function_name, fhandle=sys.stdout)
-                with RedirectStdStreams(stdout=stream):
+                with RedirectStdStreams(stdout=stream), caching.ImplicitContext(lldbval):
                     return '\n' + obj.header + '\n' + obj(core.value(lldbval), O=stream)
 
             out_string = ""
             if internal_dict != None and len(obj.header) > 0 :
                 out_string += "\n" + obj.header +"\n"
-            out_string += obj(core.value(lldbval))
+            with caching.ImplicitContext(lldbval):
+                out_string += obj(core.value(lldbval))
             return out_string
 
         myglobals = globals()
@@ -103,9 +103,166 @@ def lldb_type_summary(types_list):
         return obj
     return _get_summary
 
+#
+# Exception handling from commands
+#
+
+_LLDB_WARNING = (
+    "*********************  LLDB found an exception  *********************\n"
+    "  There has been an uncaught exception.\n"
+    "  It could be because the debugger was disconnected.\n"
+    "\n"
+    "  In order to debug the macro being run, run the macro again\n"
+    "  with the `--debug` flag to get richer information, for example:\n"
+    "\n"
+    "      (lldb) showtask --debug 0x1234\n"
+    "\n"
+    "  In order to file a bug report instead, run the macro again\n"
+    "  with the `--radar` flag which will produce a tarball to\n"
+    "  attach to your report, for example:\n"
+    "\n"
+    "      (lldb) showtask --radar 0x1234\n"
+    "********************************************************************\n"
+)
+
+def _format_exc(exc, vt):
+    import traceback, textwrap
+
+    out_str = ""
+
+    w = textwrap.TextWrapper(width=100, placeholder="...", max_lines=3)
+    tb = traceback.TracebackException.from_exception(exc, limit=None, lookup_lines=True, capture_locals=True)
+
+    for fs in tb.stack:
+        out_str += ("File \"" + vt.DarkBlue + fs.filename + "\" " + vt.Magenta + "@{} ".format(fs.lineno) +
+                    vt.Reset + "in " + vt.Bold + vt.DarkCyan + fs.name + vt.Reset + "\n")
+        out_str += "  Locals:\n"
+        for name, value in fs.locals.items():
+            variable = "    " + vt.Bold + vt.DarkGreen + name + vt.Reset + " = "
+            first = True
+            for wline in w.wrap(str(value)):
+                if first:
+                    out_str += variable + vt.Oblique + wline + "\n"
+                    first = False
+                else:
+                    out_str += " " * (len(name) + 7) + wline + "\n"
+                out_str += vt.EndOblique
+
+        out_str += "  " + "-" * 100 + "\n"
+        with open(fs.filename, "r") as src:
+            lines = src.readlines()
+            startline = fs.lineno - 3 if fs.lineno > 2 else 0
+            for lineno in range(startline, fs.lineno + 2):
+
+                if lineno + 1 == fs.lineno:
+                    fmt = vt.Bold + vt.Default
+                    marker = '>'
+                else:
+                    fmt = vt.Default
+                    marker = ' '
+
+                out_str += (fmt + "  {} ".format(marker) +
+                            "{:5}  {}".format(lineno + 1, lines[lineno].rstrip()) +
+                            vt.Reset + "\n")
+        out_str += "  " + "-" * 100 + "\n"
+        out_str += "\n"
+
+    return out_str
+
+_RADAR_URL = "rdar://new/problem?title=LLDB%20macro%20failed%3A%20{}&attachments={}"
+
+def diagnostic_report(exc, stream, cmd_name, debug_opts, lldb_log_fname=None):
+    """ Collect diagnostic report for radar submission.
+
+        @param exc (Exception type)
+            Exception being reported.
+
+        @param stream (OutputObject)
+            Command's output stream to support formattting.
+
+        @param cmd_name (str)
+            Name of command being executed.
+
+        @param debug_opts ([str])
+            List of active debugging options (--debug, --radar, --pdb)
+
+        @param lldb_log_fname (str)
+            LLDB log file name to collect (optional)
+    """
+
+    # Print prologue common to all exceptions handling modes.
+    print(stream.VT.DarkRed + _LLDB_WARNING)
+    print(stream.VT.Bold + stream.VT.DarkGreen + type(exc).__name__ +
+          stream.VT.Default + ": {}".format(str(exc)) + stream.VT.Reset)
+    print()
+
+    if not debug_opts or not PY3:
+        # No debugging enabled propagates exception to interpretter/caller.
+        # Python 2 does not offer better exception reporting.
+        if not PY3:
+            print("Please use Python 3 for enhanced debugging.\n")
+        raise
+
+    #
+    # Display enhanced diagnostics when requested.
+    #
+    if "--debug" in debug_opts:
+        # Format exception for terminal
+        print(_format_exc(exc, stream.VT))
+
+        print("version:")
+        print(lldb_run_command("version"))
+        print()
+
+    #
+    # Construct tar.gz bundle for radar attachement
+    #
+    if "--radar" in debug_opts:
+        import tarfile, urllib.parse
+        print("Creating radar bundle ...")
+
+        itime = int(time.time())
+        tar_fname = "/tmp/debug.{:d}.tar.gz".format(itime)
+
+        with tarfile.open(tar_fname, "w") as tar:
+            # Collect LLDB log. It can't be unlinked here because it is still used
+            # for the whole duration of xnudebug debug enable.
+            if lldb_log_fname is not None:
+                print("  Adding {}".format(lldb_log_fname))
+                tar.add(lldb_log_fname, "radar/lldb.log")
+                os.unlink(lldb_log_fname)
+
+            # Collect traceback
+            tb_fname = "/tmp/tb.{:d}.log".format(itime)
+            print("  Adding {}".format(tb_fname))
+            with open(tb_fname,"w") as f:
+                f.write("{}: {}\n\n".format(type(exc).__name__, str(exc)))
+                f.write(_format_exc(exc, NOVT()))
+                f.write("version:\n")
+                f.write(lldb_run_command("version"))
+            tar.add(tb_fname, "radar/traceback.log")
+            os.unlink(tb_fname)
+
+        # Radar submission
+        print()
+        print(stream.VT.DarkRed + "Please attach {} to your radar or open the URL below:".format(tar_fname) + stream.VT.Reset)
+        print()
+        print("  " + _RADAR_URL.format(urllib.parse.quote(cmd_name),urllib.parse.quote(tar_fname)))
+        print()
+
+    # Enter pdb when requested.
+    if "--pdb" in debug_opts:
+        print("Starting debugger ...")
+        import pdb
+        pdb.post_mortem(exc.__traceback__)
+
+    return False
+
 #global cache of documentation for lldb commands exported by this module
 #DONOTTOUCHME: Exclusive use of lldb_command only.
 lldb_command_documentation = {}
+
+_DEBUG_OPTS = { "--debug", "--radar", "--pdb" }
 
 def lldb_command(cmd_name, option_string = '', fancy=False):
     """ A function decorator to define a command with namd 'cmd_name' in the lldb scope to call python function.
@@ -118,7 +275,7 @@ def lldb_command(cmd_name, option_string = '', fancy=False):
         raise RuntimeError("Cannot setup command with lowercase option args. %s" % option_string)
 
     def _cmd(obj):
-        def _internal_command_function(debugger, command, result, internal_dict):
+        def _internal_command_function(debugger, command, exe_ctx, result, internal_dict):
             global config, lldb_run_command_state
             stream = CommandOutput(cmd_name, result)
             # need to avoid printing on stdout if called from lldb_run_command.
@@ -131,11 +288,22 @@ def lldb_command(cmd_name, option_string = '', fancy=False):
             lldb.debugger.HandleCommand('type category disable kernel')
             def_verbose_level = config['verbosity']
 
+            # Filter out debugging arguments and enable logging
+            debug_opts = [opt for opt in command_args if opt in _DEBUG_OPTS]
+            command_args = [opt for opt in command_args if opt not in _DEBUG_OPTS]
+            lldb_log_filename = None
+
+            if "--radar" in debug_opts:
+                lldb_log_filename = "/tmp/lldb.{:d}.log".format(int(time.time()))
+                lldb_run_command("log enable --file {:s} lldb api".format(lldb_log_filename))
+                lldb_run_command("log enable --file {:s} gdb-remote packets".format(lldb_log_filename))
+                lldb_run_command("log enable --file {:s} kdp-remote packets".format(lldb_log_filename))
+
             try:
                 stream.setOptions(command_args, option_string)
                 if stream.verbose_level != 0:
                     config['verbosity'] +=  stream.verbose_level
-                with RedirectStdStreams(stdout=stream) :
+                with RedirectStdStreams(stdout=stream), caching.ImplicitContext(exe_ctx):
                     args = { 'cmd_args': stream.target_cmd_args }
                     if option_string:
                         args['cmd_options'] = stream.target_cmd_options
@@ -150,14 +318,8 @@ def lldb_command(cmd_name, option_string = '', fancy=False):
                 print("{0:s}:\n        {1:s}".format(cmd_name, obj.__doc__.strip()))
                 return False
             except Exception as exc:
-                if not config['debug']:
-                    print("""
-************ LLDB found an exception ************
-There has been an uncaught exception. A possible cause could be that remote connection has been disconnected.
-However, it is recommended that you report the exception to lldb/kernel debugging team about it.
-************ Please run 'xnudebug debug enable' to start collecting logs. ************
-                          """)
-                raise
+                if "--radar" in debug_opts: lldb_run_command("log disable")
+                return diagnostic_report(exc, stream, cmd_name, debug_opts, lldb_log_filename)
 
             if config['showTypeSummary']:
                 lldb.debugger.HandleCommand('type category enable kernel' )
@@ -357,14 +519,11 @@ def GetKextSymbolInfo(load_addr):
         return "{:#018x} {:s} + {:#x} \n".format(load_addr, symbol_name, symbol_offset)
 
     # only for arm64 we do lookup for split kexts.
-    cached_kext_info = caching.GetDynamicCacheData("kern.kexts.loadinformation", [])
-    if not cached_kext_info and str(GetConnectionProtocol()) == "core":
-        cached_kext_info = GetKextLoadInformation()
+    if not GetAllKextSummaries.cached():
+        if str(GetConnectionProtocol()) != "core":
+            return "{:#018x} ~ kext info not available. please run 'showallkexts' once ~ \n".format(load_addr)
 
-    if not cached_kext_info:
-        return "{:#018x} ~ kext info not available. please run 'showallkexts' once ~ \n".format(load_addr)
-
-    for kval in cached_kext_info:
+    for kval in GetAllKextSummaries():
         text_seg = text_segment(kval.segments)
         if load_addr >= text_seg.vmaddr and \
             load_addr <= (text_seg.vmaddr + text_seg.vmsize):
@@ -457,17 +616,10 @@ def GetSourceInformationForAddress(addr):
         params: addr - int address in the binary to be symbolicated
         returns: string of format "0xaddress: function + offset"
     """
-    symbols = kern.SymbolicateFromAddress(addr)
-    format_string = "{0:#018x} <{1:s} + {2:#0x}>"
-    offset = 0
-    function_name = ""
-    if len(symbols) > 0:
-        s = symbols[0]
-        function_name = str(s.name)
-        offset = addr - s.GetStartAddress().GetLoadAddress(LazyTarget.GetTarget())
-    if function_name == "":
-        function_name = "???"
-    return format_string.format(addr, function_name, offset)
+    try:
+        return str(kern.SymbolicateFromAddress(addr, fullSymbol=True)[0])
+    except:
+        return '{0:<#x} <unknown: use `addkextaddr {0:#x}` to resolve>'.format(addr)
 
 def GetFrameLocalVariable(variable_name, frame_no=0):
     """ Find a local variable by name
@@ -537,12 +689,14 @@ def XnuDebugCommand(cmd_args=None):
             Go through all registered tests and run them
         debug:
             Toggle state of debug configuration flag.
+        profile <path_to_profile> <cmd...>:
+            Profile an lldb command and write its profile info to a file.
     """
     global config
     command_args = cmd_args
     if len(command_args) == 0:
         raise ArgumentError("No command specified.")
-    supported_subcommands = ['debug', 'reload', 'test', 'testall', 'flushcache']
+    supported_subcommands = ['debug', 'reload', 'test', 'testall', 'flushcache', 'profile']
     subcommand = GetLongestMatchOption(command_args[0], supported_subcommands, True)
 
     if len(subcommand) == 0:
@@ -557,6 +711,7 @@ def XnuDebugCommand(cmd_args=None):
             config['debug'] = True
             EnableLLDBAPILogging()  # provided by utils.py
             print("Enabled debug logging. \nPlease run 'xnudebug debug disable' to disable it again. ")
+
     if subcommand == 'flushcache':
         print("Current size of cache: {}".format(caching.GetSizeOfCache()))
         caching.ClearAllCache()
@@ -568,6 +723,7 @@ def XnuDebugCommand(cmd_args=None):
             print(module_name + " is reloaded from " + sys.modules[module_name].__file__)
         else:
             print("Unable to locate module named ", module_name)
+
     if subcommand == 'testall':
         for test_name in list(lldb_command_tests.keys()):
             print("[BEGIN]", test_name)
@@ -576,6 +732,7 @@ def XnuDebugCommand(cmd_args=None):
                 print("[PASSED] {:s}".format(test_name))
             else:
                 print("[FAILED] {:s}".format(test_name))
+
     if subcommand == 'test':
         test_name = command_args[-1]
         if test_name in lldb_command_tests:
@@ -592,6 +749,35 @@ def XnuDebugCommand(cmd_args=None):
             for i in list(lldb_command_tests.keys()):
                 print(i)
         return None
+
+    if subcommand == 'profile':
+        import cProfile, pstats, io
+
+        pr = cProfile.Profile()
+        pr.enable()
+
+        lldb.debugger.HandleCommand(" ".join(command_args[2:]))
+
+        pr.disable()
+        pr.dump_stats(command_args[1])
+
+        print("")
+        print("=" * 80)
+        print("")
+
+        if PY3:
+            s = io.StringIO()
+        else:
+            s = sys.__stdout__
+        ps = pstats.Stats(pr, stream=s)
+        ps.strip_dirs()
+        ps.sort_stats('cumulative')
+        ps.print_stats(30)
+        if PY3:
+            print(s.getvalue().rstrip())
+            print("")
+
+        print('Profile info saved to "{}"'.format(command_args[1]))
 
     return False
 
@@ -889,28 +1075,6 @@ def ShowBootArgs(cmd_args=None):
     bootargs_cmd = bootargs.CommandLine
     print(str(bootargs_cmd))
 
-@static_var("last_process_uniq_id", 1)
-def GetDebuggerStopIDValue():
-    """ Create a unique session identifier.
-        returns:
-            int - a unique number identified by processid and stopid.
-    """
-    stop_id = 0
-    process_obj = LazyTarget.GetProcess()
-    if hasattr(process_obj, "GetStopID"):
-        stop_id = process_obj.GetStopID()
-    proc_uniq_id = 0
-    if hasattr(process_obj, 'GetUniqueID'):
-        proc_uniq_id = process_obj.GetUniqueID()
-        #FIXME <rdar://problem/13034329> forces us to do this twice
-        proc_uniq_id = process_obj.GetUniqueID()
-    else:
-        GetDebuggerStopIDValue.last_process_uniq_id +=1
-        proc_uniq_id = GetDebuggerStopIDValue.last_process_uniq_id + 1
-
-    stop_id_str = "{:d}:{:d}".format(proc_uniq_id, stop_id)
-    return hash(stop_id_str)
-
 # The initialization code to add your commands
 _xnu_framework_init = False
 def __lldb_init_module(debugger, internal_dict):
@@ -918,7 +1082,6 @@ def __lldb_init_module(debugger, internal_dict):
     if _xnu_framework_init:
         return
     _xnu_framework_init = True
-    caching._GetDebuggerSessionID = GetDebuggerStopIDValue
     debugger.HandleCommand('type summary add --regex --summary-string "${var%s}" -C yes -p -v "char *\[[0-9]*\]"')
     debugger.HandleCommand('type format add --format hex -C yes uintptr_t')
     kern = KernelTarget(debugger)
@@ -1205,7 +1368,7 @@ def TrapTrace_cmd(cmd_args=[], cmd_options={}):
 # Can optionally filter by the given prefix
 def IterateSysctls(root_oid, prefix="", depth = 0, parent = ""):
     headp = root_oid
-    for pp in IterateListEntry(headp, 'struct sysctl_oid *', 'oid_link', 's'):
+    for pp in IterateListEntry(headp, 'oid_link', 's'):
         node_str = ""
         if prefix != "":
             node_str = str(pp.oid_name)
@@ -1328,6 +1491,7 @@ from waitq import *
 from usertaskgdbserver import *
 from ktrace import *
 from xnutriage import *
+from kmtriage import *
 from kevent import *
 from workqueue import *
 from ulock import *
@@ -1335,7 +1499,6 @@ from ntstat import *
 from zonetriage import *
 from sysreg import *
 from counter import *
-from btlog import *
 from refgrp import *
 from workload import *
 from recount import *

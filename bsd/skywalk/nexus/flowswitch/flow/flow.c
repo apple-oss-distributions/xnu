@@ -47,8 +47,7 @@ struct skmem_cache *sk_fe_cache;        /* cache for flow_entry */
 unsigned int sk_fab_size;               /* size of zone element */
 struct skmem_cache *sk_fab_cache;       /* cache for flow advisory bitmap */
 
-ZONE_DEFINE(sk_fed_zone, SKMEM_ZONE_PREFIX ".flow.entry.dead",
-    sizeof(struct flow_entry_dead), ZC_ZFREE_CLEARMEM);
+SKMEM_TYPE_DEFINE(sk_fed_zone, struct flow_entry_dead);
 
 static int __flow_inited = 0;
 uint32_t flow_seed;

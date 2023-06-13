@@ -204,7 +204,7 @@ IOLibInit(void)
 	    &gIOKitPageableFixedRanges[0].min_address,
 	    kIOPageableMapSize,
 	    VM_MAP_CREATE_PAGEABLE,
-	    VM_FLAGS_FIXED_RANGE_SUBALLOC,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
 	    (kms_flags_t)(KMS_PERMANENT | KMS_DATA | KMS_NOFAIL),
 	    VM_KERN_MEMORY_IOKIT).kmr_submap;
 
@@ -988,7 +988,7 @@ IOIteratePageableMaps(vm_size_t size,
 		 */
 		if (index < kIOMaxFixedRanges) {
 			min = gIOKitPageableFixedRanges[index].min_address;
-			flags = VM_FLAGS_FIXED_RANGE_SUBALLOC;
+			flags = VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE;
 		} else {
 			min = 0;
 			flags = VM_FLAGS_ANYWHERE;

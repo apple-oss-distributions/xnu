@@ -335,6 +335,8 @@ unsigned int    vm_page_free_wanted_secluded;
 #endif /* CONFIG_SECLUDED_MEMORY */
 unsigned int    vm_page_free_count;
 
+unsigned int    vm_page_realtime_count;
+
 /*
  *	Occasionally, the virtual memory system uses
  *	resident page structures that do not refer to
@@ -1133,7 +1135,7 @@ vm_page_bootstrap(
 	 */
 	vm_page_fake_buckets = (vm_page_bucket_t *)
 	    pmap_steal_memory(vm_page_bucket_count *
-	    sizeof(vm_page_bucket_t));
+	    sizeof(vm_page_bucket_t), 0);
 	vm_page_fake_buckets_start = (vm_map_offset_t) vm_page_fake_buckets;
 	vm_page_fake_buckets_end =
 	    vm_map_round_page((vm_page_fake_buckets_start +
@@ -1152,12 +1154,12 @@ vm_page_bootstrap(
 	kernel_debug_string_early("vm_page_buckets");
 	vm_page_buckets = (vm_page_bucket_t *)
 	    pmap_steal_memory(vm_page_bucket_count *
-	    sizeof(vm_page_bucket_t));
+	    sizeof(vm_page_bucket_t), 0);
 
 	kernel_debug_string_early("vm_page_bucket_locks");
 	vm_page_bucket_locks = (lck_spin_t *)
 	    pmap_steal_memory(vm_page_bucket_lock_count *
-	    sizeof(lck_spin_t));
+	    sizeof(lck_spin_t), 0);
 
 	for (i = 0; i < vm_page_bucket_count; i++) {
 		vm_page_bucket_t *bucket = &vm_page_buckets[i];
@@ -1228,6 +1230,7 @@ vm_page_bootstrap(
 static void *
 pmap_steal_memory_internal(
 	vm_size_t size,
+	vm_size_t alignment,
 	boolean_t might_free)
 {
 	kern_return_t kr;
@@ -1239,6 +1242,19 @@ pmap_steal_memory_internal(
 	 * Size needs to be aligned to word size.
 	 */
 	size = (size + sizeof(void *) - 1) & ~(sizeof(void *) - 1);
+
+	/*
+	 * Alignment defaults to word size if not specified.
+	 */
+	if (alignment == 0) {
+		alignment = sizeof(void*);
+	}
+
+	/*
+	 * Alignment must be no greater than a page and must be a power of two.
+	 */
+	assert(alignment <= PAGE_SIZE);
+	assert((alignment & (alignment - 1)) == 0);
 
 	/*
 	 * On the first call, get the initial values for virtual address space
@@ -1267,6 +1283,7 @@ pmap_steal_memory_internal(
 		virtual_space_start = ((virtual_space_start + I386_LPGMASK) & ~I386_LPGMASK);
 	}
 #endif
+	virtual_space_start = (virtual_space_start + (alignment - 1)) & ~(alignment - 1);
 	addr = virtual_space_start;
 	virtual_space_start += size;
 
@@ -1343,28 +1360,29 @@ pmap_steal_memory_internal(
 
 void *
 pmap_steal_memory(
-	vm_size_t size)
+	vm_size_t size,
+	vm_size_t alignment)
 {
-	return pmap_steal_memory_internal(size, FALSE);
+	return pmap_steal_memory_internal(size, alignment, FALSE);
 }
 
 void *
 pmap_steal_freeable_memory(
 	vm_size_t size)
 {
-	return pmap_steal_memory_internal(size, TRUE);
+	return pmap_steal_memory_internal(size, 0, TRUE);
 }
 
 
 #if CONFIG_SECLUDED_MEMORY
 /* boot-args to control secluded memory */
-unsigned int secluded_mem_mb = 0;       /* # of MBs of RAM to seclude */
-int secluded_for_iokit = 1;             /* IOKit can use secluded memory */
-int secluded_for_apps = 1;              /* apps can use secluded memory */
-int secluded_for_filecache = 2;         /* filecache can use seclude memory */
-#if 11
-int secluded_for_fbdp = 0;
-#endif
+TUNABLE_DT(unsigned int, secluded_mem_mb, "/defaults", "kern.secluded_mem_mb", "secluded_mem_mb", 0, TUNABLE_DT_NONE);
+/* IOKit can use secluded memory */
+TUNABLE(bool, secluded_for_iokit, "secluded_for_iokit", true);
+/* apps can use secluded memory */
+TUNABLE(bool, secluded_for_apps, "secluded_for_apps", true);
+/* filecache can use seclude memory */
+TUNABLE(secluded_filecache_mode_t, secluded_for_filecache, "secluded_for_filecache", SECLUDED_FILECACHE_RDONLY);
 uint64_t secluded_shutoff_trigger = 0;
 uint64_t secluded_shutoff_headroom = 150 * 1024 * 1024; /* original value from N56 */
 #endif /* CONFIG_SECLUDED_MEMORY */
@@ -1448,35 +1466,7 @@ pmap_startup(
 	 * release pages to free lists.
 	 * The default, if specified nowhere else, is no secluded mem.
 	 */
-	secluded_mem_mb = 0;
-	if (max_mem > 1 * 1024 * 1024 * 1024) {
-		/* default to 90MB for devices with > 1GB of RAM */
-		secluded_mem_mb = 90;
-	}
-	/* override with value from device tree, if provided */
-	PE_get_default("kern.secluded_mem_mb",
-	    &secluded_mem_mb, sizeof(secluded_mem_mb));
-	/* override with value from boot-args, if provided */
-	PE_parse_boot_argn("secluded_mem_mb",
-	    &secluded_mem_mb,
-	    sizeof(secluded_mem_mb));
-
-	vm_page_secluded_target = (unsigned int)
-	    ((secluded_mem_mb * 1024ULL * 1024ULL) / PAGE_SIZE);
-	PE_parse_boot_argn("secluded_for_iokit",
-	    &secluded_for_iokit,
-	    sizeof(secluded_for_iokit));
-	PE_parse_boot_argn("secluded_for_apps",
-	    &secluded_for_apps,
-	    sizeof(secluded_for_apps));
-	PE_parse_boot_argn("secluded_for_filecache",
-	    &secluded_for_filecache,
-	    sizeof(secluded_for_filecache));
-#if 11
-	PE_parse_boot_argn("secluded_for_fbdp",
-	    &secluded_for_fbdp,
-	    sizeof(secluded_for_fbdp));
-#endif
+	vm_page_secluded_target = (unsigned int)atop_64(secluded_mem_mb * 1024ULL * 1024ULL);
 
 	/*
 	 * Allow a really large app to effectively use secluded memory until it exits.
@@ -1629,7 +1619,7 @@ static void
 vm_page_module_init_delayed(void)
 {
 	(void)zone_create_ext("vm pages array", sizeof(struct vm_page),
-	    ZC_NONE, ZONE_ID_VM_PAGES, ^(zone_t z) {
+	    ZC_KASAN_NOREDZONE | ZC_KASAN_NOQUARANTINE, ZONE_ID_VM_PAGES, ^(zone_t z) {
 		uint64_t vm_page_zone_pages, vm_page_array_zone_data_size;
 
 		zone_set_exhaustible(z, 0);
@@ -1672,7 +1662,7 @@ vm_page_module_init(void)
 	    ~(VM_PAGE_PACKED_PTR_ALIGNMENT - 1);
 
 	vm_page_zone = zone_create_ext("vm pages", vm_page_with_ppnum_size,
-	    ZC_ALIGNMENT_REQUIRED | ZC_VM_LP64 | ZC_NOTBITAG,
+	    ZC_ALIGNMENT_REQUIRED | ZC_VM | ZC_NOTBITAG,
 	    ZONE_ID_ANY, ^(zone_t z) {
 		/*
 		 * The number "10" is a small number that is larger than the number
@@ -2710,7 +2700,7 @@ vm_page_release_fictitious(
 	assert(m->vmp_fictitious);
 	assert(VM_PAGE_GET_PHYS_PAGE(m) == vm_page_fictitious_addr ||
 	    VM_PAGE_GET_PHYS_PAGE(m) == vm_page_guard_addr);
-
+	assert(!m->vmp_realtime);
 
 	if (VM_PAGE_GET_PHYS_PAGE(m) == vm_page_guard_addr) {
 		OSAddAtomic(-1, &vm_guard_count);
@@ -3186,6 +3176,7 @@ restart:
 		assert(!mem->vmp_pmapped);
 		assert(!mem->vmp_wpmapped);
 		assert(!pmap_is_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem)));
+		assert(!mem->vmp_realtime);
 
 		task_t  cur_task = current_task_early();
 		if (cur_task && cur_task != kernel_task) {
@@ -3224,6 +3215,7 @@ restart:
 	if (__improbable(vm_delayed_count > 0 &&
 	    vm_page_free_count <= vm_page_free_target &&
 	    (mem = vm_get_delayed_page(grab_options)) != NULL)) {
+		assert(!mem->vmp_realtime);
 		return mem;
 	}
 
@@ -3258,7 +3250,7 @@ restart:
 				counter_inc(&vm_page_grab_count);
 				VM_DEBUG_EVENT(vm_page_grab, VM_PAGE_GRAB, DBG_FUNC_NONE, grab_options, 0, 0, 0);
 
-
+				assert(!mem->vmp_realtime);
 				return mem;
 			}
 		}
@@ -3371,6 +3363,7 @@ restart:
 			assert(!mem->vmp_pmapped);
 			assert(!mem->vmp_wpmapped);
 			assert(!pmap_is_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem)));
+			assert(!mem->vmp_realtime);
 		}
 #if defined (__x86_64__) && (DEVELOPMENT || DEBUG)
 		vm_clump_update_stats(sub_count);
@@ -3414,6 +3407,7 @@ restart:
 	VM_CHECK_MEMORYSTATUS;
 
 	if (mem) {
+		assert(!mem->vmp_realtime);
 //		dbgLog(VM_PAGE_GET_PHYS_PAGE(mem), vm_page_free_count, vm_page_wire_count, 4);	/* (TEST/DEBUG) */
 
 		task_t  cur_task = current_task_early();
@@ -3515,6 +3509,12 @@ reactivate_secluded_page:
 		/* can't steal page in this state... */
 		vm_object_unlock(object);
 		vm_page_secluded.grab_failure_state++;
+		goto reactivate_secluded_page;
+	}
+	if (mem->vmp_realtime) {
+		/* don't steal pages used by realtime threads... */
+		vm_object_unlock(object);
+		vm_page_secluded.grab_failure_realtime++;
 		goto reactivate_secluded_page;
 	}
 
@@ -3672,6 +3672,19 @@ vm_page_release(
 //	dbgLog(VM_PAGE_GET_PHYS_PAGE(mem), vm_page_free_count, vm_page_wire_count, 5);	/* (TEST/DEBUG) */
 
 	pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
+
+	if (__improbable(mem->vmp_realtime)) {
+		if (!page_queues_locked) {
+			vm_page_lock_queues();
+		}
+		if (mem->vmp_realtime) {
+			mem->vmp_realtime = false;
+			vm_page_realtime_count--;
+		}
+		if (!page_queues_locked) {
+			vm_page_unlock_queues();
+		}
+	}
 
 	vm_free_page_lock_spin();
 
@@ -4049,6 +4062,7 @@ static void
 vm_page_free_prepare(
 	vm_page_t       mem)
 {
+
 	vm_page_free_prepare_queues(mem);
 	vm_page_free_prepare_object(mem, TRUE);
 }
@@ -4082,6 +4096,11 @@ vm_page_free_prepare_queues(
 	}
 
 	vm_page_queues_remove(mem, TRUE);
+
+	if (__improbable(mem->vmp_realtime)) {
+		mem->vmp_realtime = false;
+		vm_page_realtime_count--;
+	}
 
 	if (VM_PAGE_WIRED(mem)) {
 		assert(mem->vmp_wire_count > 0);
@@ -4159,6 +4178,7 @@ vm_page_free_prepare_object(
 	vm_page_t       mem,
 	boolean_t       remove_from_hash)
 {
+	assert(!mem->vmp_realtime);
 	if (mem->vmp_tabled) {
 		vm_page_remove(mem, remove_from_hash);  /* clears tabled, object, offset */
 	}
@@ -4275,6 +4295,16 @@ vm_page_free_list(
 			if (vm_page_free_verify && !mem->vmp_fictitious && !mem->vmp_private) {
 				ASSERT_PMAP_FREE(mem);
 			}
+
+			if (__improbable(mem->vmp_realtime)) {
+				vm_page_lock_queues();
+				if (mem->vmp_realtime) {
+					mem->vmp_realtime = false;
+					vm_page_realtime_count--;
+				}
+				vm_page_unlock_queues();
+			}
+
 			if (prepare_object == TRUE) {
 				vm_page_free_prepare_object(mem, TRUE);
 			}
@@ -4336,6 +4366,7 @@ vm_page_free_list(
 
 				assert(mem->vmp_q_state == VM_PAGE_NOT_ON_Q);
 				assert(mem->vmp_busy);
+				assert(!mem->vmp_realtime);
 				mem->vmp_lopage = FALSE;
 				mem->vmp_q_state = VM_PAGE_ON_FREE_Q;
 
@@ -4983,7 +5014,8 @@ vm_page_activate(
 			if (secluded_for_filecache &&
 			    vm_page_secluded_target != 0 &&
 			    num_tasks_can_use_secluded_mem == 0 &&
-			    m_object->eligible_for_secluded) {
+			    m_object->eligible_for_secluded &&
+			    !m->vmp_realtime) {
 				vm_page_queue_enter(&vm_page_queue_secluded, m, vmp_pageq);
 				m->vmp_q_state = VM_PAGE_ON_SECLUDED_Q;
 				vm_page_secluded_count++;
@@ -5814,7 +5846,7 @@ static vm_page_t
 vm_page_find_contiguous(
 	unsigned int    contig_pages,
 	ppnum_t         max_pnum,
-	ppnum_t     pnum_mask,
+	ppnum_t         pnum_mask,
 	boolean_t       wire,
 	int             flags)
 {
@@ -6258,6 +6290,9 @@ did_consider:
 					m2->vmp_cs_tainted      = m1->vmp_cs_tainted;
 					m2->vmp_cs_nx   = m1->vmp_cs_nx;
 
+					m2->vmp_realtime = m1->vmp_realtime;
+					m1->vmp_realtime = false;
+
 					/*
 					 * If m1 had really been reusable,
 					 * we would have just stolen it, so
@@ -6552,6 +6587,12 @@ cpm_allocate(
 	 *	ordered by ascending physical address.
 	 */
 	assert(vm_page_verify_contiguous(pages, npages));
+
+	if (flags & KMA_ZERO) {
+		for (vm_page_t m = pages; m; m = NEXT_PAGE(m)) {
+			vm_page_zero_fill(m);
+		}
+	}
 
 	*list = pages;
 	return KERN_SUCCESS;
@@ -9108,7 +9149,7 @@ vm_tag_alloc(vm_allocation_site_t * site)
 
 	if (!site->tag) {
 		releasesite = NULL;
-		lck_ticket_lock(&vm_allocation_sites_lock, LCK_GRP_NULL);
+		lck_ticket_lock(&vm_allocation_sites_lock, &vm_page_lck_grp_bucket);
 		vm_tag_alloc_locked(site, &releasesite);
 		lck_ticket_unlock(&vm_allocation_sites_lock);
 		if (releasesite) {
@@ -9122,43 +9163,17 @@ vm_tag_alloc(vm_allocation_site_t * site)
 void
 vm_tag_update_size(vm_tag_t tag, int64_t delta)
 {
-	vm_allocation_site_t * allocation;
-	uint64_t value;
+	assert(VM_KERN_MEMORY_NONE != tag && tag < VM_MAX_TAG_VALUE);
 
-	assert(VM_KERN_MEMORY_NONE != tag);
-	assert(tag < VM_MAX_TAG_VALUE);
-
-	allocation = vm_allocation_sites[tag];
-	assert(allocation);
-
-	value = os_atomic_add(&allocation->total, delta, relaxed);
-	if (delta < 0) {
-		assertf(value + (uint64_t)-delta > value,
-		    "tag %d, site %p", tag, allocation);
-	}
-
-#if DEBUG || DEVELOPMENT
-	if (value > allocation->peak) {
-		os_atomic_max(&allocation->peak, value, relaxed);
-	}
-#endif /* DEBUG || DEVELOPMENT */
-
-	if (tag < VM_KERN_MEMORY_FIRST_DYNAMIC) {
-		return;
-	}
-
-	if (value == (uint64_t)delta && !allocation->tag) {
-		vm_tag_alloc(allocation);
-	}
+	kern_allocation_update_size(vm_allocation_sites[tag], delta);
 }
 
 uint64_t
 vm_tag_get_size(vm_tag_t tag)
 {
-	vm_allocation_site_t * allocation;
+	vm_allocation_site_t *allocation;
 
-	assert(VM_KERN_MEMORY_NONE != tag);
-	assert(tag < VM_MAX_TAG_VALUE);
+	assert(VM_KERN_MEMORY_NONE != tag && tag < VM_MAX_TAG_VALUE);
 
 	allocation = vm_allocation_sites[tag];
 	return allocation ? os_atomic_load(&allocation->total, relaxed) : 0;
@@ -9167,27 +9182,21 @@ vm_tag_get_size(vm_tag_t tag)
 void
 kern_allocation_update_size(kern_allocation_name_t allocation, int64_t delta)
 {
-	uint64_t prior;
+	uint64_t value;
 
+	value = os_atomic_add(&allocation->total, delta, relaxed);
 	if (delta < 0) {
-		assertf(allocation->total >= ((uint64_t)-delta), "name %p", allocation);
+		assertf(value + (uint64_t)-delta > value,
+		    "tag %d, site %p", allocation->tag, allocation);
 	}
-	prior = OSAddAtomic64(delta, &allocation->total);
 
 #if DEBUG || DEVELOPMENT
-
-	uint64_t new, peak;
-	new = prior + delta;
-	do{
-		peak = allocation->peak;
-		if (new <= peak) {
-			break;
-		}
-	}while (!OSCompareAndSwap64(peak, new, &allocation->peak));
-
+	if (value > allocation->peak) {
+		os_atomic_max(&allocation->peak, value, relaxed);
+	}
 #endif /* DEBUG || DEVELOPMENT */
 
-	if (!prior && !allocation->tag) {
+	if (value == (uint64_t)delta && !allocation->tag) {
 		vm_tag_alloc(allocation);
 	}
 }
@@ -9299,7 +9308,7 @@ kern_allocation_update_subtotal(kern_allocation_name_t allocation, uint32_t subt
 
 	subidx = 0;
 	assert(VM_KERN_MEMORY_NONE != subtag);
-	lck_ticket_lock(&vm_allocation_sites_lock, LCK_GRP_NULL);
+	lck_ticket_lock(&vm_allocation_sites_lock, &vm_page_lck_grp_bucket);
 	for (; subidx < allocation->subtotalscount; subidx++) {
 		if (VM_KERN_MEMORY_NONE == allocation->subtotals[subidx].tag) {
 			allocation->subtotals[subidx].tag = (vm_tag_t)subtag;
@@ -9417,12 +9426,12 @@ vm_page_iterate_objects(mach_memory_info_t * info, unsigned int num_info,
 
 static uint64_t
 process_account(mach_memory_info_t * info, unsigned int num_info,
-    uint64_t zones_collectable_bytes, boolean_t iterated)
+    uint64_t zones_collectable_bytes, boolean_t iterated, bool redact_info __unused)
 {
 	size_t                 namelen;
 	unsigned int           idx, count, nextinfo;
 	vm_allocation_site_t * site;
-	lck_ticket_lock(&vm_allocation_sites_lock, LCK_GRP_NULL);
+	lck_ticket_lock(&vm_allocation_sites_lock, &vm_page_lck_grp_bucket);
 
 	for (idx = 0; idx <= vm_allocation_tag_highest; idx++) {
 		site = vm_allocation_sites[idx];
@@ -9482,7 +9491,8 @@ process_account(mach_memory_info_t * info, unsigned int num_info,
 		vm_allocation_zone_total_t * zone;
 		unsigned int                 zidx;
 
-		if (vm_allocation_zone_totals
+		if (!redact_info
+		    && vm_allocation_zone_totals
 		    && (zone = vm_allocation_zone_totals[idx])
 		    && (nextinfo < num_info)) {
 			for (zidx = 0; zidx < VM_TAG_SIZECLASSES; zidx++) {
@@ -9490,7 +9500,7 @@ process_account(mach_memory_info_t * info, unsigned int num_info,
 					continue;
 				}
 				info[nextinfo]        = info[idx];
-				info[nextinfo].zone   = (uint16_t)zone_index_from_tag_index(zidx);
+				info[nextinfo].zone   = zone_index_from_tag_index(zidx);
 				info[nextinfo].flags  &= ~VM_KERN_SITE_WIRED;
 				info[nextinfo].flags  |= VM_KERN_SITE_ZONE;
 				info[nextinfo].flags  |= VM_KERN_SITE_KALLOC;
@@ -9543,7 +9553,7 @@ vm_page_diagnose_estimate(void)
 	uint32_t               count = zone_view_count;
 	uint32_t               idx;
 
-	lck_ticket_lock(&vm_allocation_sites_lock, LCK_GRP_NULL);
+	lck_ticket_lock(&vm_allocation_sites_lock, &vm_page_lck_grp_bucket);
 	for (idx = 0; idx < VM_MAX_TAG_VALUE; idx++) {
 		site = vm_allocation_sites[idx];
 		if (!site) {
@@ -9596,17 +9606,19 @@ vm_page_diagnose_zone(mach_memory_info_t *info, zone_t z)
 static int
 vm_page_diagnose_heap(mach_memory_info_t *info, kalloc_heap_t kheap)
 {
-	struct kheap_zones *zones = kheap->kh_zones;
+	struct kalloc_heap *kh = kheap->kh_views;
 	int i = 0;
 
-	for (; i < zones->max_k_zone; i++) {
-		vm_page_diagnose_zone(info + i, zones->k_zone[i]);
+	for (; i < KHEAP_NUM_ZONES; i++) {
+		vm_page_diagnose_zone(info + i, zone_by_id(kheap->kh_zstart + i));
 	}
 
-	for (kalloc_heap_t kh = zones->views; kh; kh = kh->kh_next, i++) {
+	while (kh) {
 		vm_page_diagnose_zone_stats(info + i, kh->kh_stats, false);
 		snprintf(info[i].name, sizeof(info[i].name),
 		    "%skalloc[%s]", kheap->kh_name, kh->kh_name);
+		kh = kh->kh_views;
+		i++;
 	}
 
 	return i;
@@ -9622,9 +9634,9 @@ vm_page_diagnose_kt_heaps(mach_memory_info_t *info)
 	idx++;
 
 	for (uint32_t i = 0; i < KT_VAR_MAX_HEAPS; i++) {
-		struct kt_heap_zones heap = kalloc_type_heap_array[i];
+		struct kheap_info heap = kalloc_type_heap_array[i];
 
-		for (kalloc_type_var_view_t ktv = heap.views; ktv;
+		for (kalloc_type_var_view_t ktv = heap.kt_views; ktv;
 		    ktv = (kalloc_type_var_view_t) ktv->kt_next) {
 			if (ktv->kt_stats && ktv->kt_stats != KHEAP_KT_VAR->kh_stats) {
 				vm_page_diagnose_zone_stats(info + idx, ktv->kt_stats, false);
@@ -9639,7 +9651,7 @@ vm_page_diagnose_kt_heaps(mach_memory_info_t *info)
 }
 
 kern_return_t
-vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zones_collectable_bytes)
+vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zones_collectable_bytes, bool redact_info)
 {
 	uint64_t                 wired_size;
 	uint64_t                 wired_managed_size;
@@ -9707,53 +9719,55 @@ vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zone
 	counts = &info[num_info];
 	i = 0;
 
-	i += vm_page_diagnose_heap(counts + i, KHEAP_DEFAULT);
-	if (KHEAP_DATA_BUFFERS->kh_heap_id == KHEAP_ID_DATA_BUFFERS) {
-		i += vm_page_diagnose_heap(counts + i, KHEAP_DATA_BUFFERS);
-	}
-	if (KHEAP_KT_VAR->kh_heap_id == KHEAP_ID_KT_VAR) {
-		i += vm_page_diagnose_kt_heaps(counts + i);
-	}
-	assert(i <= zone_view_count);
-
-	zone_index_foreach(zidx) {
-		zone_t z = &zone_array[zidx];
-		zone_security_flags_t zsflags = zone_security_array[zidx];
-		zone_view_t zv = z->z_views;
-
-		if (zv == NULL) {
-			continue;
+	if (!redact_info) {
+		i += vm_page_diagnose_heap(counts + i, KHEAP_DEFAULT);
+		if (KHEAP_DATA_BUFFERS->kh_heap_id == KHEAP_ID_DATA_BUFFERS) {
+			i += vm_page_diagnose_heap(counts + i, KHEAP_DATA_BUFFERS);
 		}
+		if (KHEAP_KT_VAR->kh_heap_id == KHEAP_ID_KT_VAR) {
+			i += vm_page_diagnose_kt_heaps(counts + i);
+		}
+		assert(i <= zone_view_count);
 
-		zone_stats_t zv_stats_head = z->z_stats;
-		bool has_raw_view = false;
+		zone_index_foreach(zidx) {
+			zone_t z = &zone_array[zidx];
+			zone_security_flags_t zsflags = zone_security_array[zidx];
+			zone_view_t zv = z->z_views;
 
-		for (; zv; zv = zv->zv_next) {
-			/*
-			 * kalloc_types that allocate from the same zone are linked
-			 * as views. Only print the ones that have their own stats.
-			 */
-			if (zv->zv_stats == zv_stats_head) {
+			if (zv == NULL) {
 				continue;
 			}
-			has_raw_view = true;
-			vm_page_diagnose_zone_stats(counts + i, zv->zv_stats,
-			    z->z_percpu);
-			snprintf(counts[i].name, sizeof(counts[i].name), "%s%s[%s]",
-			    zone_heap_name(z), z->z_name, zv->zv_name);
-			i++;
-			assert(i <= zone_view_count);
-		}
 
-		/*
-		 * Print raw views for non kalloc or kalloc_type zones
-		 */
-		bool kalloc_type = zsflags.z_kalloc_type;
-		if ((zsflags.z_kheap_id == KHEAP_ID_NONE && !kalloc_type) ||
-		    (kalloc_type && has_raw_view)) {
-			vm_page_diagnose_zone(counts + i, z);
-			i++;
-			assert(i <= zone_view_count);
+			zone_stats_t zv_stats_head = z->z_stats;
+			bool has_raw_view = false;
+
+			for (; zv; zv = zv->zv_next) {
+				/*
+				 * kalloc_types that allocate from the same zone are linked
+				 * as views. Only print the ones that have their own stats.
+				 */
+				if (zv->zv_stats == zv_stats_head) {
+					continue;
+				}
+				has_raw_view = true;
+				vm_page_diagnose_zone_stats(counts + i, zv->zv_stats,
+				    z->z_percpu);
+				snprintf(counts[i].name, sizeof(counts[i].name), "%s%s[%s]",
+				    zone_heap_name(z), z->z_name, zv->zv_name);
+				i++;
+				assert(i <= zone_view_count);
+			}
+
+			/*
+			 * Print raw views for non kalloc or kalloc_type zones
+			 */
+			bool kalloc_type = zsflags.z_kalloc_type;
+			if ((zsflags.z_kheap_id == KHEAP_ID_NONE && !kalloc_type) ||
+			    (kalloc_type && has_raw_view)) {
+				vm_page_diagnose_zone(counts + i, z);
+				i++;
+				assert(i <= zone_view_count);
+			}
 		}
 	}
 
@@ -9776,7 +9790,7 @@ vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zone
 		stackIdx = 0;
 		while (map) {
 			vm_map_lock(map);
-			for (entry = map->hdr.links.next; map; entry = entry->links.next) {
+			for (entry = map->hdr.links.next; map; entry = entry->vme_next) {
 				if (entry->is_sub_map) {
 					assert(stackIdx < kMaxKernelDepth);
 					maps[stackIdx] = map;
@@ -9789,7 +9803,7 @@ vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zone
 				if (VME_OBJECT(entry) == kernel_object) {
 					count = 0;
 					vm_object_lock(VME_OBJECT(entry));
-					for (offset = entry->links.start; offset < entry->links.end; offset += page_size) {
+					for (offset = entry->vme_start; offset < entry->vme_end; offset += page_size) {
 						page = vm_page_lookup(VME_OBJECT(entry), offset);
 						if (page && VM_PAGE_WIRED(page)) {
 							count++;
@@ -9817,7 +9831,7 @@ vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zone
 		}
 	}
 
-	process_account(info, num_info, zones_collectable_bytes, iterate);
+	process_account(info, num_info, zones_collectable_bytes, iterate, redact_info);
 
 	return KERN_SUCCESS;
 }
@@ -9877,7 +9891,7 @@ vm_tag_get_kext(vm_tag_t tag, char * name, vm_size_t namelen)
 	uint32_t               kmodId;
 
 	kmodId = 0;
-	lck_ticket_lock(&vm_allocation_sites_lock, LCK_GRP_NULL);
+	lck_ticket_lock(&vm_allocation_sites_lock, &vm_page_lck_grp_bucket);
 	if ((site = vm_allocation_sites[tag])) {
 		if (VM_TAG_KMOD & site->flags) {
 			kmodId = OSKextGetKmodIDForSite(site, name, namelen);

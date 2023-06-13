@@ -254,7 +254,7 @@ host_statistics64(
  *	address space sizes.
  */
 routine mach_zone_info(
-		host		: host_priv_t;
+		host		: mach_port_t;
 	out	names		: mach_zone_name_array_t,
 					Dealloc;
 	out	info		: mach_zone_info_array_t,
@@ -321,7 +321,7 @@ skip;
 #endif
 
 routine mach_memory_info(
-		host		: host_priv_t;
+		host		: mach_port_t;
 	out	names		: mach_zone_name_array_t,
 					Dealloc;
 	out	info		: mach_zone_info_array_t,

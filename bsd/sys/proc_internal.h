@@ -161,7 +161,6 @@ __options_decl(pggrp_ref_bits_t, uint32_t, {
 #define PGRP_REF_BITS  1
 #define PGRP_REF_MASK  ((1u << PGRP_REF_BITS) - 1)
 
-SMR_POINTER_DECL(pgrp_smr, struct pgrp *);
 #define PGRP_NULL ((struct pgrp *)NULL)
 
 /*!
@@ -193,7 +192,7 @@ SMR_POINTER_DECL(pgrp_smr, struct pgrp *);
  */
 struct pgrp {
 	lck_mtx_t               pg_mlock;       /* process group lock   (PGL) */
-	struct pgrp_smr         pg_hash;        /* hash chain           (PLL) */
+	struct smrq_slink       pg_hash;        /* hash chain           (PLL) */
 	LIST_HEAD(, proc)       pg_members;     /* group members        (PGL) */
 	struct session         *pg_session;     /* session           (static) */
 	pid_t                   pg_id;          /* group ID          (static) */
@@ -223,25 +222,13 @@ __options_decl(proc_ref_bits_t, uint32_t, {
  */
 struct sigacts;
 
-struct sigacts_ro {
-	/*
-	 * We don't use element zero, so alias it with the backref pointer.
-	 * This keeps the struct a reasonable size (512) instead of causing
-	 * fragmentation.
-	 */
-	union {
-		struct sigacts *ps_rw;
-		user_addr_t ps_sigact[NSIG];    /* disposition of signals */
-	};
-	user_addr_t ps_trampact[NSIG];  /* disposition of signals */
-};
-
 /*
  * Process signal actions and state, needed only within the process
  * (not necessarily resident).
  */
 struct  sigacts {
-	struct sigacts_ro *ps_ro;
+	user_addr_t ps_sigact[NSIG];    /* disposition of signals */
+	user_addr_t ps_trampact[NSIG];  /* disposition of signals */
 	sigset_t ps_catchmask[NSIG];    /* signals to be blocked */
 	sigset_t ps_sigonstack;         /* signals to take on sigstack */
 	sigset_t ps_sigintr;            /* signals that interrupt syscalls */
@@ -256,7 +243,6 @@ struct  sigacts {
 	int     ps_addr;                /* for core dump/debugger XXX */
 };
 
-SMR_POINTER_DECL(proc_smr, struct proc *);
 #define PROC_NULL ((struct proc *)NULL)
 
 /*
@@ -299,7 +285,7 @@ struct proc {
 	LIST_HEAD(, proc) p_children;           /* Pointer to list of children (LL)*/
 	TAILQ_HEAD(, uthread) p_uthlist;        /* List of uthreads (PL) */
 
-	struct proc_smr p_hash;                 /* Hash chain (LL)*/
+	struct smrq_slink p_hash;               /* Hash chain (LL)*/
 
 #if CONFIG_PERSONAS
 	struct persona  *p_persona;
@@ -484,6 +470,9 @@ struct proc {
 	uint32_t          p_memlimit_increase; /* byte increase for memory limit for dyld SPI rdar://problem/49950264, structure packing 32-bit and 64-bit */
 
 	uint64_t p_crash_behavior_deadline; /* mach_continuous_time deadline. After this timestamp p_crash_behavior is invalid */
+
+	uint32_t          p_crash_count;      /* Consecutive crash count threshold */
+	uint32_t          p_throttle_timeout; /* Exponential backoff throttle */
 
 	struct os_reason     *p_exit_reason;
 
@@ -851,11 +840,11 @@ extern void proc_childdrainstart(proc_t);
 extern void proc_childdrainend(proc_t);
 extern void  proc_checkdeadrefs(proc_t);
 struct proc *phash_find_locked(pid_t);
-extern void phash_insert_locked(pid_t pid, struct proc *);
-extern void phash_remove_locked(pid_t pid, struct proc *);
-extern void phash_replace_locked(pid_t pid, struct proc *old_proc, struct proc *new_proc);
-struct pgrp *pghash_find_locked(pid_t);
-extern void pghash_insert_locked(pid_t pgid, struct pgrp *);
+extern void phash_insert_locked(struct proc *);
+extern void phash_remove_locked(struct proc *);
+extern void phash_replace_locked(struct proc *old_proc, struct proc *new_proc);
+extern bool pghash_exists_locked(pid_t);
+extern void pghash_insert_locked(struct pgrp *);
 extern struct pgrp *pgrp_find(pid_t);
 extern void pgrp_rele(struct pgrp * pgrp);
 extern struct session * session_find_internal(pid_t sessid);
@@ -934,7 +923,6 @@ extern void proc_set_sigact(proc_t, int, user_addr_t);
 extern void proc_set_trampact(proc_t, int, user_addr_t);
 extern void proc_set_sigact_trampact(proc_t, int, user_addr_t, user_addr_t);
 extern void proc_reset_sigact(proc_t, sigset_t);
-extern void proc_sigacts_copy(proc_t dst, proc_t src);
 extern void proc_set_ucred(proc_t, kauth_cred_t);
 extern bool proc_update_label(proc_t p, bool setugid, kauth_cred_t (^update_cred)(kauth_cred_t));
 extern void proc_setexecutableuuid(proc_t, const uuid_t);

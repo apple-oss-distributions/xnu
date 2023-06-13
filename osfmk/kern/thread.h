@@ -231,6 +231,9 @@ __options_decl(thread_set_status_flags_t, uint32_t, {
 
 	/* Stash diversifier from thread */
 	TSSF_THREAD_USER_DIV = 0x100,
+
+	/* Check for entitlement */
+	TSSF_CHECK_ENTITLEMENT = 0x200,
 });
 
 /*
@@ -252,7 +255,6 @@ __options_decl(thread_work_interval_flags_t, uint32_t, {
 #endif /* CONFIG_SCHED_AUTO_JOIN */
 	TH_WORK_INTERVAL_FLAGS_HAS_WORKLOAD_ID = 0x2,
 	TH_WORK_INTERVAL_FLAGS_RT_ALLOWED      = 0x4,
-	TH_WORK_INTERVAL_FLAGS_RT_CRITICAL     = 0x8,
 });
 
 typedef union thread_rr_state {
@@ -367,6 +369,8 @@ struct thread {
 #define TH_OPT_SEND_IMPORTANCE  0x0800          /* Thread will allow importance donation from kernel rpc */
 #define TH_OPT_ZONE_PRIV        0x1000          /* Thread may use the zone replenish reserve */
 #define TH_OPT_IPC_TG_BLOCKED   0x2000          /* Thread blocked in sync IPC and has made the thread group blocked callout */
+#define TH_OPT_FORCED_LEDGER    0x4000          /* Thread has a forced CPU limit  */
+#define TH_IN_MACH_EXCEPTION    0x8000          /* Thread is currently handling a mach exception */
 
 	bool                    wake_active;    /* wake event on stop */
 	bool                    at_safe_point;  /* thread_abort_safely allowed */
@@ -415,6 +419,7 @@ struct thread {
 #define TH_WAIT_REPORT          0x40            /* the wait is using the sched_call,
 	                                        * only set if TH_WAIT is also set */
 #define TH_IDLE                 0x80            /* idling processor */
+#define TH_WAKING              0x100            /* between waitq remove and thread_go */
 
 	/* Scheduling information */
 	sched_mode_t            sched_mode;     /* scheduling mode */
@@ -465,9 +470,8 @@ struct thread {
 /* 'promote reasons' that request a priority floor only, not a custom priority */
 #define TH_SFLAG_PROMOTE_REASON_MASK    (TH_SFLAG_RW_PROMOTED | TH_SFLAG_WAITQ_PROMOTED | TH_SFLAG_EXEC_PROMOTED | TH_SFLAG_FLOOR_PROMOTED)
 
-#define TH_SFLAG_RT_RESTRICTED         0x100000         /* thread wants RT but may not have joined a work interval that allows it */
-#define TH_SFLAG_DEMOTED_MASK      (TH_SFLAG_THROTTLED | TH_SFLAG_FAILSAFE | TH_SFLAG_RT_RESTRICTED)     /* saved_mode contains previous sched_mode */
-
+#define TH_SFLAG_RT_DISALLOWED         0x100000         /* thread wants RT but may not have joined a work interval that allows it */
+#define TH_SFLAG_DEMOTED_MASK      (TH_SFLAG_THROTTLED | TH_SFLAG_FAILSAFE | TH_SFLAG_RT_DISALLOWED)     /* saved_mode contains previous sched_mode */
 
 	int16_t                 sched_pri;              /* scheduled (current) priority */
 	int16_t                 base_pri;               /* effective base priority (equal to req_base_pri unless TH_SFLAG_BASE_PRI_FROZEN) */
@@ -689,8 +693,8 @@ struct thread {
 
 	/* Timed wait expiration */
 	timer_call_t            wait_timer;
-	uint16_t                wait_timer_active;
-	bool                    wait_timer_is_set;
+	uint16_t                wait_timer_active; /* is the call running */
+	bool                    wait_timer_armed; /* should the wait be cleared */
 
 	/* Miscellaneous bits guarded by mutex */
 	uint32_t
@@ -901,10 +905,20 @@ struct thread {
 	int                     thread_region_page_shift; /* Page shift that this thread would like to use when */
 	                                                  /* introspecting a task. This is currently being used */
 	                                                  /* by footprint which uses a thread for each task being inspected. */
+#if CONFIG_SCHED_RT_ALLOW
+	/* Used when a thread is requested to set/clear its own CPU limit */
+	uint32_t
+	    t_ledger_req_action:2,
+	    t_ledger_req_percentage:7,
+	    t_ledger_req_interval_ms:16,
+	:0;
+#endif /* CONFIG_SCHED_RT_ALLOW */
+
 #if CONFIG_IOSCHED
 	void                   *decmp_upl;
 #endif /* CONFIG_IOSCHED */
 	struct knote            *ith_knote;         /* knote fired for rcv */
+
 };
 
 #define ith_state           saved.receive.state
@@ -1018,6 +1032,7 @@ extern lck_grp_t                thread_lck_grp;
 #define thread_lock_init(th)    simple_lock_init(&(th)->sched_lock, 0)
 #define thread_lock(th)                 simple_lock(&(th)->sched_lock, &thread_lck_grp)
 #define thread_unlock(th)               simple_unlock(&(th)->sched_lock)
+#define thread_lock_assert(th, x)       simple_lock_assert(&(th)->sched_lock, (x))
 
 #define wake_lock_init(th)              simple_lock_init(&(th)->wake_lock, 0)
 #define wake_lock(th)                   simple_lock(&(th)->wake_lock, &thread_lck_grp)
@@ -1187,6 +1202,10 @@ extern void thread_set_options(uint32_t thopt);
 struct thread_group *thread_get_current_voucher_thread_group(thread_t thread);
 #endif /* CONFIG_THREAD_GROUPS */
 
+#if CONFIG_COALITIONS
+uint64_t thread_get_current_voucher_resource_coalition_id(thread_t thread);
+#endif /* CONFIG_COALITIONS */
+
 #endif  /* MACH_KERNEL_PRIVATE */
 #if BSD_KERNEL_PRIVATE
 
@@ -1329,6 +1348,10 @@ extern struct _thread_ledger_indices thread_ledgers;
 
 extern int thread_get_cpulimit(int *action, uint8_t *percentage, uint64_t *interval_ns);
 extern int thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns);
+
+extern uint64_t thread_cpulimit_remaining(uint64_t now);
+extern bool thread_cpulimit_interval_has_expired(uint64_t now);
+extern void thread_cpulimit_restart(uint64_t now);
 
 extern void thread_read_times(
 	thread_t         thread,
@@ -1545,6 +1568,7 @@ extern void thread_guard_violation(thread_t,
 extern void thread_update_io_stats(thread_t, int size, int io_flags);
 
 extern kern_return_t    thread_set_voucher_name(mach_port_name_t name);
+extern kern_return_t thread_get_voucher_origin_pid(thread_t thread, int32_t *pid);
 extern kern_return_t thread_get_current_voucher_origin_pid(int32_t *pid);
 
 extern void thread_enable_send_importance(thread_t thread, boolean_t enable);
@@ -1698,6 +1722,7 @@ extern void thread_disarm_workqueue_quantum(thread_t thread);
 
 extern void thread_evaluate_workqueue_quantum_expiry(thread_t thread);
 extern bool thread_has_expired_workqueue_quantum(thread_t thread, bool should_trace);
+
 
 /* Kernel side prototypes for MIG routines */
 extern kern_return_t thread_get_exception_ports(

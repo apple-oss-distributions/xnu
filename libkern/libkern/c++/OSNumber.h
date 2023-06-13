@@ -82,12 +82,27 @@ class OSNumber : public OSObject
 
 protected:
 	unsigned int size;
+
+#if XNU_KERNEL_PRIVATE
+	union {
+		unsigned long long value;
+		double fpValue;
+	};
+#else
 	unsigned long long value;
+#endif /* XNU_KERNEL_PRIVATE */
 
 #else /* APPLE_KEXT_ALIGN_CONTAINERS */
 
 protected:
+#if XNU_KERNEL_PRIVATE
+	union {
+		unsigned long long value;
+		double fpValue;
+	};
+#else
 	unsigned long long value;
+#endif /* XNU_KERNEL_PRIVATE */
 	unsigned int size;
 
 	struct ExpansionData { };
@@ -126,6 +141,24 @@ public:
 		unsigned long long value,
 		unsigned int       numberOfBits);
 
+#if KERNEL_PRIVATE
+/*!
+ * @function withDouble
+ * @abstract
+ * Creates and initializes an instance of OSNumber
+ * with an double value.
+ */
+	static OSPtr<OSNumber> withDouble(
+		double             value);
+/*!
+ * @function withFloat
+ * @abstract
+ * Creates and initializes an instance of OSNumber
+ * with an float value.
+ */
+	static OSPtr<OSNumber> withFloat(
+		float              value);
+#endif /* KERNEL_PRIVATE */
 
 /*!
  * @function withNumber
@@ -341,6 +374,22 @@ public:
  */
 	virtual unsigned long long unsigned64BitValue() const;
 
+#if KERNEL_PRIVATE
+/*!
+ * @function withDouble
+ * @abstract
+ * Returns the OSNumber object's floating point value.
+ */
+	double doubleValue() const;
+/*!
+ * @function withFloat
+ * @abstract
+ * Returns the OSNumber object's floating point value.
+ */
+	float floatValue() const;
+#endif /* KERNEL_PRIVATE */
+
+
 // xx-review: wow, there's no addNumber(OSNumber *)!
 
 /*!
@@ -392,6 +441,10 @@ public:
  * Two OSNumber objects are considered equal
  * if they represent the same C integer value.
  */
+#if KERNEL_PRIVATE
+/* Only compares the integer portion of the two OSNumber values.
+ */
+#endif /* KERNEL_PRIVATE */
 	virtual bool isEqualTo(const OSNumber * aNumber) const;
 
 

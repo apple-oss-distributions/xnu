@@ -46,19 +46,14 @@
 typedef uintptr_t uptr;
 
 #define KASAN_DEBUG  0
-#define KASAN_KALLOC 1
-#define KASAN_ZALLOC 1
 #define KASAN_DYNAMIC_BLACKLIST 1
+#define KASAN_FAKESTACK 1
 /*
  * KASAN features and config
  */
-#define FAKESTACK     1
-/* KASAN_KALLOC defined in kasan.h */
-/* KASAN_ZALLOC defined in kasan.h */
-#define FAKESTACK_QUARANTINE (1 && FAKESTACK)
-
+#define FAKESTACK_QUARANTINE (1 && KASAN_FAKESTACK)
 #define QUARANTINE_ENTRIES 5000
-#define QUARANTINE_MAXSIZE MiB(10)
+#define QUARANTINE_MAXSIZE MiB(4)
 
 /*
  * KASAN-CLASSIC shadow table entry values.
@@ -75,41 +70,90 @@ typedef uintptr_t uptr;
 #define ASAN_PARTIAL5       0x05
 #define ASAN_PARTIAL6       0x06
 #define ASAN_PARTIAL7       0x07
-#define ASAN_ARRAY_COOKIE   0xac
-#define ASAN_STACK_RZ       0xf0
-#define ASAN_STACK_LEFT_RZ  0xf1
-#define ASAN_STACK_MID_RZ   0xf2
-#define ASAN_STACK_RIGHT_RZ 0xf3
-#define ASAN_STACK_FREED    0xf5
-#define ASAN_STACK_OOSCOPE  0xf8
-#define ASAN_GLOBAL_RZ      0xf9
-#define ASAN_HEAP_RZ        0xe9
-#define ASAN_HEAP_LEFT_RZ   0xfa
-#define ASAN_HEAP_RIGHT_RZ  0xfb
-#define ASAN_HEAP_FREED     0xfd
+#define ASAN_ARRAY_COOKIE   0xac // kAsanArrayCookieMagic
+#define ASAN_STACK_RZ       0xf0 // XNU only
+#define ASAN_STACK_LEFT_RZ  0xf1 // kAsanStackLeftRedzoneMagic
+#define ASAN_STACK_MID_RZ   0xf2 // kAsanStackMidRedzoneMagic
+#define ASAN_STACK_RIGHT_RZ 0xf3 // kAsanStackRightRedzoneMagic
+#define ASAN_STACK_FREED    0xf5 // kAsanStackAfterReturnMagic
+//                          0xf6 // kAsanInitializationOrderMagic
+//                          0xf7 // kAsanUserPoisonedMemoryMagic
+#define ASAN_STACK_OOSCOPE  0xf8 // kAsanStackUseAfterScopeMagic
+#define ASAN_GLOBAL_RZ      0xf9 // kAsanGlobalRedzoneMagic
+#define ASAN_HEAP_RZ        0xe9 // XNU only, not used in shadow
+#define ASAN_HEAP_LEFT_RZ   0xfa // kAsanHeapLeftRedzoneMagic
+#define ASAN_HEAP_RIGHT_RZ  0xfb // XNU only
+//                          0xfc // kAsanContiguousContainerOOBMagic
+#define ASAN_HEAP_FREED     0xfd // kAsanHeapFreeMagic
+//                          0xfe // kAsanInternalHeapMagic
 
 #define KASAN_GUARD_SIZE (16)
 #define KASAN_GUARD_PAD  (KASAN_GUARD_SIZE * 2)
 
 #define KASAN_HEAP_ZALLOC    0
-#define KASAN_HEAP_KALLOC    1
-#define KASAN_HEAP_FAKESTACK 2
-#define KASAN_HEAP_TYPES     3
+#define KASAN_HEAP_FAKESTACK 1
+#define KASAN_HEAP_TYPES     2
 
 __BEGIN_DECLS
-/* KASAN-CLASSIC zalloc hooks */
-vm_size_t kasan_alloc_resize(vm_size_t);
-vm_address_t kasan_alloc(vm_offset_t, vm_size_t, vm_size_t, vm_size_t);
-vm_address_t kasan_realloc(vm_offset_t, vm_size_t, vm_size_t, vm_size_t);
-vm_address_t kasan_dealloc(vm_offset_t, vm_size_t *);
-vm_size_t kasan_user_size(vm_offset_t);
-void kasan_check_free(vm_offset_t, vm_size_t, unsigned);
 
-/* KASAN-CLASSIC Quarantine (zalloc) hooks */
-void kasan_free(void **, vm_size_t *, int, zone_t *, vm_size_t);
-void __asan_poison_cxx_array_cookie(uptr);
-uptr __asan_load_cxx_array_cookie(uptr *);
-void kasan_unpoison_cxx_array_cookie(void *);
+/* KASAN-CLASSIC zalloc hooks */
+
+extern void kasan_zmem_add(
+	vm_address_t            addr,
+	vm_size_t               size,
+	vm_offset_t             esize,
+	vm_offset_t             offs,
+	vm_offset_t             rzsize);
+
+extern void kasan_zmem_remove(
+	vm_address_t            addr,
+	vm_size_t               size,
+	vm_offset_t             esize,
+	vm_offset_t             offs,
+	vm_offset_t             rzsize);
+
+extern void kasan_alloc(
+	vm_address_t            addr,
+	vm_size_t               size,
+	vm_size_t               usize,
+	vm_size_t               rzsize,
+	bool                    percpu,
+	void                   *fp);
+
+extern void kasan_free(
+	vm_address_t            addr,
+	vm_size_t               size,
+	vm_size_t               usize,
+	vm_size_t               rzsize,
+	bool                    percpu,
+	void                   *fp);
+
+extern void kasan_alloc_large(
+	vm_address_t            addr,
+	vm_size_t               req_size);
+
+extern vm_size_t kasan_user_size(
+	vm_address_t            addr);
+
+extern void kasan_check_alloc(
+	vm_address_t            addr,
+	vm_size_t               size,
+	vm_size_t               usize);
+
+struct kasan_quarantine_result {
+	vm_address_t            addr;
+	struct zone            *zone;
+};
+
+extern struct kasan_quarantine_result kasan_quarantine(
+	vm_address_t            addr,
+	vm_size_t               size);
+
+/* in zalloc.c */
+extern vm_size_t kasan_quarantine_resolve(
+	vm_address_t            addr,
+	struct zone           **zonep);
 
 __END_DECLS
+
 #endif /* _KASAN_CLASSIC_H_ */

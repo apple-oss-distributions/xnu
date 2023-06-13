@@ -178,25 +178,6 @@ sched_clutch_for_thread_group(struct thread_group *thread_group)
 	return &(thread_group->tg_sched_clutch);
 }
 
-/*
- * Translate the TG flags to a priority boost for the sched_clutch.
- * This priority boost will apply to the entire clutch represented
- * by the thread group.
- */
-static void
-sched_clutch_update_tg_flags(__unused sched_clutch_t clutch, __unused uint32_t flags)
-{
-	sched_clutch_tg_priority_t sc_tg_pri = 0;
-	if (flags & THREAD_GROUP_FLAGS_UI_APP) {
-		sc_tg_pri = SCHED_CLUTCH_TG_PRI_HIGH;
-	} else if (flags & THREAD_GROUP_FLAGS_EFFICIENT) {
-		sc_tg_pri = SCHED_CLUTCH_TG_PRI_LOW;
-	} else {
-		sc_tg_pri = SCHED_CLUTCH_TG_PRI_MED;
-	}
-	os_atomic_store(&clutch->sc_tg_priority, sc_tg_pri, relaxed);
-}
-
 #endif /* CONFIG_SCHED_CLUTCH */
 
 uint64_t
@@ -289,12 +270,6 @@ thread_group_create_and_retain(uint32_t flags)
 	 * of that structure is tied directly to the lifetime of the thread group.
 	 */
 	sched_clutch_init_with_thread_group(&(tg->tg_sched_clutch), tg);
-
-	/*
-	 * Since the thread group flags are used to determine any priority promotions
-	 * for the threads in the thread group, initialize them now.
-	 */
-	sched_clutch_update_tg_flags(&(tg->tg_sched_clutch), tg->tg_flags);
 
 #endif /* CONFIG_SCHED_CLUTCH */
 
@@ -451,9 +426,6 @@ thread_group_set_flags_locked(struct thread_group *tg, uint32_t flags)
 	tg->tg_flags |= flags;
 
 	machine_thread_group_flags_update(tg, tg->tg_flags);
-#if CONFIG_SCHED_CLUTCH
-	sched_clutch_update_tg_flags(&(tg->tg_sched_clutch), tg->tg_flags);
-#endif /* CONFIG_SCHED_CLUTCH */
 	KDBG(MACHDBG_CODE(DBG_MACH_THREAD_GROUP, MACH_THREAD_GROUP_FLAGS),
 	    tg->tg_id, tg->tg_flags, old_flags);
 }
@@ -487,9 +459,6 @@ thread_group_clear_flags_locked(struct thread_group *tg, uint32_t flags)
 
 	__kdebug_only uint64_t old_flags = tg->tg_flags;
 	tg->tg_flags &= ~flags;
-#if CONFIG_SCHED_CLUTCH
-	sched_clutch_update_tg_flags(&(tg->tg_sched_clutch), tg->tg_flags);
-#endif /* CONFIG_SCHED_CLUTCH */
 	machine_thread_group_flags_update(tg, tg->tg_flags);
 	KDBG(MACHDBG_CODE(DBG_MACH_THREAD_GROUP, MACH_THREAD_GROUP_FLAGS),
 	    tg->tg_id, tg->tg_flags, old_flags);

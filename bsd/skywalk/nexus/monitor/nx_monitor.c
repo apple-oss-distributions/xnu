@@ -296,8 +296,7 @@ static struct kern_nexus_domain_provider nx_monitor_prov_s = {
 	},
 };
 
-static ZONE_DEFINE(na_mon_zone, SKMEM_ZONE_PREFIX ".na.mon",
-    sizeof(struct nexus_monitor_adapter), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(na_mon_zone, struct nexus_monitor_adapter);
 
 #define SKMEM_TAG_MONITORS      "com.apple.skywalk.monitors"
 static SKMEM_TAG_DEFINE(skmem_tag_monitors, SKMEM_TAG_MONITORS);
@@ -530,7 +529,7 @@ static int
 nx_mon_na_krings_create(struct nexus_adapter *na, struct kern_channel *ch)
 {
 	ASSERT(na->na_type == NA_MONITOR);
-	return na_rings_mem_setup(na, 0, FALSE, ch);
+	return na_rings_mem_setup(na, FALSE, ch);
 }
 
 /* na_krings_delete callback for monitors */

@@ -372,7 +372,10 @@ OSUnserializeBinary(const char *buffer, size_t bufferSize, OSString **errorStrin
 	const uint32_t * next;
 	uint32_t         key, len, wordLen, length;
 	bool             end, newCollect, isRef;
-	unsigned long long value;
+	union {
+		unsigned long long value;
+		double fpValue;
+	} value;
 	bool ok, indexed, hasLength;
 
 	indexed = false;
@@ -455,13 +458,23 @@ OSUnserializeBinary(const char *buffer, size_t bufferSize, OSString **errorStrin
 			if (bufferPos > bufferSize) {
 				break;
 			}
-			if ((len != 32) && (len != 64) && (len != 16) && (len != 8)) {
+			value.value = next[1];
+			value.value <<= 32;
+			value.value |= next[0];
+			switch (len) {
+			case 63:
+				o = OSNumber::withDouble(value.fpValue);
+				break;
+			case 31:
+				o = OSNumber::withFloat((float) value.fpValue);
+				break;
+			case 64:
+			case 32:
+			case 16:
+			case 8:
+				o = OSNumber::withNumber(value.value, len);
 				break;
 			}
-			value = next[1];
-			value <<= 32;
-			value |= next[0];
-			o = OSNumber::withNumber(value, len);
 			next += 2;
 			break;
 

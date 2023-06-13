@@ -719,6 +719,11 @@ static char *pct_name[] = {
 static void
 sched_amp_cpu_init_completed(void)
 {
+	if (PE_parse_boot_argn("cpus", NULL, 0) || PE_parse_boot_argn("cpumask", NULL, 0)) {
+		/* If number of cpus booted is restricted, these asserts may not be true */
+		return;
+	}
+
 	assert(pset_array[0] != NULL);
 	assert(pset_array[1] != NULL);
 

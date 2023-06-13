@@ -68,7 +68,7 @@ extern thread_t kasan_lock_holder;
 extern uint64_t *cpu_tte;
 extern unsigned long gVirtBase, gPhysBase;
 
-typedef uint64_t pmap_paddr_t;
+typedef uint64_t pmap_paddr_t __kernel_ptr_semantics;
 extern vm_map_address_t phystokv(pmap_paddr_t pa);
 
 vm_offset_t physmap_vbase;
@@ -89,6 +89,7 @@ static vm_offset_t bootstrap_pgtable_phys;
 extern vm_offset_t intstack, intstack_top;
 extern vm_offset_t excepstack, excepstack_top;
 
+static lck_grp_t kasan_vm_lock_grp;
 static lck_ticket_t kasan_vm_lock;
 
 void kasan_bootstrap(boot_args *, vm_offset_t pgtable);
@@ -423,7 +424,8 @@ kasan_is_shadow_mapped(uintptr_t shadowp)
 void
 kasan_lock_init(void)
 {
-	lck_ticket_init(&kasan_vm_lock, LCK_GRP_NULL);
+	lck_grp_init(&kasan_vm_lock_grp, "kasan lock", LCK_GRP_ATTR_NULL);
+	lck_ticket_init(&kasan_vm_lock, &kasan_vm_lock_grp);
 }
 
 /*
@@ -434,7 +436,7 @@ void
 kasan_lock(boolean_t *b)
 {
 	*b = ml_set_interrupts_enabled(false);
-	lck_ticket_lock(&kasan_vm_lock, LCK_GRP_NULL);
+	lck_ticket_lock(&kasan_vm_lock, &kasan_vm_lock_grp);
 	kasan_lock_holder = current_thread();
 }
 

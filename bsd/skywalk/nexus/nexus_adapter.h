@@ -188,11 +188,6 @@ struct nexus_adapter {
 	uint32_t na_total_slots;
 
 	/*
-	 * For tracking ring memory allocated by sk_alloc()
-	 */
-	size_t na_rings_mem_sz;
-
-	/*
 	 * Flow advisory (if applicable).
 	 */
 	const uint32_t na_flowadv_max;  /* max # of flow advisory entries */
@@ -230,7 +225,7 @@ struct nexus_adapter {
 	 */
 	kern_packet_t *na_scratch;
 
-	void *na_tailroom; /* space below the rings array (used for leases) */
+	struct __kern_channel_ring *na_tail; /* pointer past the last ring */
 
 #if CONFIG_NEXUS_FLOWSWITCH || CONFIG_NEXUS_NETIF
 	/*
@@ -601,7 +596,7 @@ extern void na_attach_common(struct nexus_adapter *,
  */
 extern int na_update_config(struct nexus_adapter *na);
 
-extern int na_rings_mem_setup(struct nexus_adapter *, uint32_t, boolean_t,
+extern int na_rings_mem_setup(struct nexus_adapter *, boolean_t,
     struct kern_channel *);
 extern void na_rings_mem_teardown(struct nexus_adapter *,
     struct kern_channel *, boolean_t);

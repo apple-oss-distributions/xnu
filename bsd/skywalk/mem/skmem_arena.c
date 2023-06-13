@@ -137,16 +137,13 @@ static TAILQ_HEAD(, skmem_arena) skmem_arena_head = TAILQ_HEAD_INITIALIZER(skmem
 	lck_mtx_unlock(&skmem_arena_lock)
 
 #define AR_NEXUS_SIZE           sizeof(struct skmem_arena_nexus)
-static ZONE_DEFINE(ar_nexus_zone, SKMEM_ZONE_PREFIX ".mem.arena.nexus",
-    AR_NEXUS_SIZE, ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(ar_nexus_zone, struct skmem_arena_nexus);
 
 #define AR_NECP_SIZE            sizeof(struct skmem_arena_necp)
-static ZONE_DEFINE(ar_necp_zone, SKMEM_ZONE_PREFIX ".mem.arena.necp",
-    AR_NECP_SIZE, ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(ar_necp_zone, struct skmem_arena_necp);
 
 #define AR_SYSTEM_SIZE          sizeof(struct skmem_arena_system)
-static ZONE_DEFINE(ar_system_zone, SKMEM_ZONE_PREFIX ".mem.arena.system",
-    AR_SYSTEM_SIZE, ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(ar_system_zone, struct skmem_arena_system);
 
 #define SKMEM_TAG_ARENA_MIB     "com.apple.skywalk.arena.mib"
 static SKMEM_TAG_DEFINE(skmem_tag_arena_mib, SKMEM_TAG_ARENA_MIB);
@@ -1366,29 +1363,45 @@ failed:
 	return err;
 }
 
+static inline struct kalloc_type_view *
+skmem_arena_zone(skmem_arena_type_t type)
+{
+	switch (type) {
+	case SKMEM_ARENA_TYPE_NEXUS:
+		return ar_nexus_zone;
+
+	case SKMEM_ARENA_TYPE_NECP:
+		return ar_necp_zone;
+
+	case SKMEM_ARENA_TYPE_SYSTEM:
+		return ar_system_zone;
+
+	default:
+		VERIFY(0);
+		/* NOTREACHED */
+		__builtin_unreachable();
+	}
+}
+
 static struct skmem_arena *
 skmem_arena_alloc(skmem_arena_type_t type, const char *name)
 {
 	const char *ar_str = NULL;
-	struct zone *ar_zone = NULL;
 	struct skmem_arena *ar;
 	size_t ar_zsize = 0;
 
 	switch (type) {
 	case SKMEM_ARENA_TYPE_NEXUS:
-		ar_zone = ar_nexus_zone;
 		ar_zsize = AR_NEXUS_SIZE;
 		ar_str = "nexus";
 		break;
 
 	case SKMEM_ARENA_TYPE_NECP:
-		ar_zone = ar_necp_zone;
 		ar_zsize = AR_NECP_SIZE;
 		ar_str = "necp";
 		break;
 
 	case SKMEM_ARENA_TYPE_SYSTEM:
-		ar_zone = ar_system_zone;
 		ar_zsize = AR_SYSTEM_SIZE;
 		ar_str = "system";
 		break;
@@ -1399,10 +1412,9 @@ skmem_arena_alloc(skmem_arena_type_t type, const char *name)
 		__builtin_unreachable();
 	}
 
-	ar = zalloc_flags(ar_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	ar = zalloc_flags(skmem_arena_zone(type), Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	ar->ar_type = type;
 	ar->ar_zsize = ar_zsize;
-	ar->ar_zone = ar_zone;
 
 	lck_mtx_init(&ar->ar_lock, &skmem_arena_lock_grp,
 	    LCK_ATTR_NULL);
@@ -1427,7 +1439,7 @@ skmem_arena_free(struct skmem_arena *ar)
 #endif /* DEBUG || DEVELOPMENT */
 
 	lck_mtx_destroy(&ar->ar_lock, &skmem_arena_lock_grp);
-	zfree(ar->ar_zone, ar);
+	zfree(skmem_arena_zone(ar->ar_type), ar);
 }
 
 /*

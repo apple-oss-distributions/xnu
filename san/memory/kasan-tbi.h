@@ -42,8 +42,6 @@
 
 /* old-style configs. */
 #define KASAN_DEBUG 0
-#define KASAN_KALLOC 0
-#define KASAN_ZALLOC 0
 #define KASAN_DYNAMIC_BLACKLIST 1
 #define KASAN_FAKESTACK 0
 

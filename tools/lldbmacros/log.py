@@ -250,16 +250,18 @@ class MsgBuffer(object):
         self._msgbuf = msgbuf
         size = int(self._msgbuf.msg_size)
         self._buffer = self._msgbuf.msg_bufc.GetSBValue().GetPointeeData(0, size)
-        self._cache_key = "log.msgbuf." + str(unsigned(self._msgbuf))
 
-    @property
-    def values(self):
+    def __eq__(self, other):
+        return unsigned(self._msgbuf) == unsigned(other._msgbuf)
+
+    def __hash__(self):
+        return hash(unsigned(self._msgbuf))
+
+    @dyn_cached_property
+    def values(self, target=None):
         """ Returns a list of all log messages. """
-        values = caching.GetDynamicCacheData(self._cache_key, None)
-        if not values:
-            values = list(self._values())
-            caching.SaveDynamicCacheData(self._cache_key, values)
-        return values
+
+        return list(self._values())
 
     def __len__(self):
         """ Returns a number of log messages in the message buffer. """
@@ -624,7 +626,7 @@ def showMsgBuf(cmd_args=None, cmd_options=None):
         msgbuf = msgbuf[:n] if count > 0 else msgbuf[-n:]
 
     for msg in msgbuf:
-        print(msg)
+        print(msg.rstrip("\n"))
 
 
 @lldb_command('systemlog', 'C:F')

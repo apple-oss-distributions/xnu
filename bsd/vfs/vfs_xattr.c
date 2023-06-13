@@ -2938,8 +2938,15 @@ get_xattrinfo(vnode_t xvp, int setting, attr_info_t *ainfop, vfs_context_t conte
 				    delta, context);
 				writesize = sizeof(attr_header_t);
 			} else {
-				/* Create a new, empty resource fork. */
+				/* We are in case where existing resource fork of length 0, try to create a new, empty resource fork. */
 				rsrcfork_header_t *rsrcforkhdr;
+
+				/* Do we have enough space in the header buffer for empty resource fork */
+				if (filehdr->entries[1].offset + delta + sizeof(rsrcfork_header_t) > ainfop->iosize) {
+					/* we do not have space, bail for now */
+					error = ENOATTR;
+					goto bail;
+				}
 
 				vnode_setsize(xvp, filehdr->entries[1].offset + delta, 0, context);
 

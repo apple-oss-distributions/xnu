@@ -486,9 +486,7 @@ oslogioctl(__unused dev_t dev, u_long com, caddr_t data, __unused int flag, __un
 			    &user_addr,
 			    buffer_size,
 			    0,               /*  mask */
-			    VM_FLAGS_ANYWHERE,
-			    VM_MAP_KERNEL_FLAGS_NONE,
-			    VM_KERN_MEMORY_NONE,
+			    VM_MAP_KERNEL_FLAGS_ANYWHERE(),
 			    mem_entry_ptr,
 			    0,               /* offset */
 			    FALSE,               /* copy */

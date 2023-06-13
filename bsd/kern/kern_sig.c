@@ -108,6 +108,8 @@
 #include <kern/policy_internal.h>
 #include <kern/sync_sema.h>
 
+#include <os/log.h>
+
 #include <mach/exception.h>
 #include <mach/task.h>
 #include <mach/thread_act.h>
@@ -1422,7 +1424,7 @@ build_userspace_exit_reason(uint32_t reason_namespace, uint64_t reason_code, use
 
 	exit_reason = os_reason_create(reason_namespace, reason_code);
 	if (exit_reason == OS_REASON_NULL) {
-		printf("build_userspace_exit_reason: failed to allocate exit reason\n");
+		os_log(OS_LOG_DEFAULT, "build_userspace_exit_reason: failed to allocate exit reason\n");
 		return exit_reason;
 	}
 
@@ -1431,11 +1433,8 @@ build_userspace_exit_reason(uint32_t reason_namespace, uint64_t reason_code, use
 	/*
 	 * Only apply flags that are allowed to be passed from userspace.
 	 */
-	exit_reason->osr_flags |= (reason_flags & OS_REASON_FLAG_MASK_ALLOWED_FROM_USER);
-	if ((reason_flags & OS_REASON_FLAG_MASK_ALLOWED_FROM_USER) != reason_flags) {
-		printf("build_userspace_exit_reason: illegal flags passed from userspace (some masked off) 0x%llx, ns: %u, code 0x%llx\n",
-		    reason_flags, reason_namespace, reason_code);
-	}
+	reason_flags = reason_flags & OS_REASON_FLAG_MASK_ALLOWED_FROM_USER;
+	exit_reason->osr_flags |= reason_flags;
 
 	if (!(exit_reason->osr_flags & OS_REASON_FLAG_NO_CRASH_REPORT)) {
 		exit_reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
@@ -1443,8 +1442,8 @@ build_userspace_exit_reason(uint32_t reason_namespace, uint64_t reason_code, use
 
 	if (payload != USER_ADDR_NULL) {
 		if (payload_size == 0) {
-			printf("build_userspace_exit_reason: exit reason with namespace %u, nonzero payload but zero length\n",
-			    reason_namespace);
+			os_log(OS_LOG_DEFAULT, "build_userspace_exit_reason: exit reason with namespace %u,"
+			    " nonzero payload but zero length\n", reason_namespace);
 			exit_reason->osr_flags |= OS_REASON_FLAG_BAD_PARAMS;
 			payload = USER_ADDR_NULL;
 		} else {
@@ -1490,7 +1489,7 @@ build_userspace_exit_reason(uint32_t reason_namespace, uint64_t reason_code, use
 
 		error = os_reason_alloc_buffer(exit_reason, reason_buffer_size_estimate);
 		if (error != 0) {
-			printf("build_userspace_exit_reason: failed to allocate signal reason buffer\n");
+			os_log(OS_LOG_DEFAULT, "build_userspace_exit_reason: failed to allocate signal reason buffer\n");
 			goto out_failed_copyin;
 		}
 
@@ -1502,7 +1501,7 @@ build_userspace_exit_reason(uint32_t reason_namespace, uint64_t reason_code, use
 				kcdata_memcpy(&exit_reason->osr_kcd_descriptor, (mach_vm_address_t) data_addr,
 				    reason_user_desc, (uint32_t)reason_user_desc_len);
 			} else {
-				printf("build_userspace_exit_reason: failed to allocate space for reason string\n");
+				os_log(OS_LOG_DEFAULT, "build_userspace_exit_reason: failed to allocate space for reason string\n");
 				goto out_failed_copyin;
 			}
 		}
@@ -1515,11 +1514,11 @@ build_userspace_exit_reason(uint32_t reason_namespace, uint64_t reason_code, use
 			    &data_addr)) {
 				error = copyin(payload, (void *) data_addr, payload_size);
 				if (error) {
-					printf("build_userspace_exit_reason: failed to copy in payload data with error %d\n", error);
+					os_log(OS_LOG_DEFAULT, "build_userspace_exit_reason: failed to copy in payload data with error %d\n", error);
 					goto out_failed_copyin;
 				}
 			} else {
-				printf("build_userspace_exit_reason: failed to allocate space for payload data\n");
+				os_log(OS_LOG_DEFAULT, "build_userspace_exit_reason: failed to allocate space for payload data\n");
 				goto out_failed_copyin;
 			}
 		}
@@ -2358,9 +2357,11 @@ psignal_internal(proc_t p, task_t task, thread_t thread, int flavor, int signum,
 				sig_proc->p_stat = SSTOP;
 				OSBitAndAtomic(~((uint32_t)P_CONTINUED), &sig_proc->p_flag);
 				sig_proc->p_lflag &= ~P_LWAITED;
+				proc_signalend(sig_proc, 1);
 				proc_unlock(sig_proc);
 
 				pp = proc_parentholdref(sig_proc);
+				proc_signalstart(sig_proc, 0);
 				stop(sig_proc, pp);
 				if ((pp != PROC_NULL) && ((pp->p_flag & P_NOCLDSTOP) == 0)) {
 					my_cred = kauth_cred_proc_ref(sig_proc);
@@ -2703,20 +2704,6 @@ issignal_locked(proc_t p)
 				r_uid = kauth_cred_getruid(my_cred);
 				kauth_cred_unref(&my_cred);
 
-				pp = proc_parentholdref(p);
-				if (pp != PROC_NULL) {
-					proc_lock(pp);
-
-					pp->si_pid = proc_getpid(p);
-					pp->p_xhighbits = p->p_xhighbits;
-					p->p_xhighbits = 0;
-					pp->si_status = p->p_xstat;
-					pp->si_code = CLD_TRAPPED;
-					pp->si_uid = r_uid;
-
-					proc_unlock(pp);
-				}
-
 				/*
 				 *	XXX Have to really stop for debuggers;
 				 *	XXX stop() doesn't do the right thing.
@@ -2735,7 +2722,17 @@ issignal_locked(proc_t p)
 				proc_signalend(p, 1);
 				proc_unlock(p);
 
+				pp = proc_parentholdref(p);
 				if (pp != PROC_NULL) {
+					proc_lock(pp);
+					pp->si_pid = proc_getpid(p);
+					pp->p_xhighbits = p->p_xhighbits;
+					p->p_xhighbits = 0;
+					pp->si_status = p->p_xstat;
+					pp->si_code = CLD_TRAPPED;
+					pp->si_uid = r_uid;
+					proc_unlock(pp);
+
 					psignal(pp, SIGCHLD);
 					proc_list_lock();
 					wakeup((caddr_t)pp);
@@ -2823,9 +2820,11 @@ issignal_locked(proc_t p)
 					p->p_xstat = signum;
 					p->p_stat = SSTOP;
 					p->p_lflag &= ~P_LWAITED;
+					proc_signalend(p, 1);
 					proc_unlock(p);
 
 					pp = proc_parentholdref(p);
+					proc_signalstart(p, 0);
 					stop(p, pp);
 					if ((pp != PROC_NULL) && ((pp->p_flag & P_NOCLDSTOP) == 0)) {
 						my_cred = kauth_cred_proc_ref(p);

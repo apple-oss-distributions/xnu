@@ -49,8 +49,8 @@
 
 #include <libkern/OSAtomic.h>
 
-static ZONE_DEFINE_TYPE(ipc_eventlink_zone, "ipc_eventlink",
-    struct ipc_eventlink_base, ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(ipc_eventlink_zone,
+    struct ipc_eventlink_base, KT_DEFAULT);
 
 os_refgrp_decl(static, ipc_eventlink_refgrp, "eventlink", NULL);
 

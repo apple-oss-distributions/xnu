@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011 Apple, Inc. All rights reserved.
+ * Copyright (c) 2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,18 +26,28 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include "string.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
-#undef strlcpy
-size_t
-strlcpy(char * dst, const char * src, size_t maxlen)
+#include <darwintest.h>
+#include <darwintest_utils.h>
+
+T_GLOBAL_META(
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_NAMESPACE("xnu.vfs"),
+	T_META_OWNER("chrisjd")
+	);
+
+T_DECL(read_nullbuf, "read into a NULL buffer should fail")
 {
-	const size_t srclen = strlen(src);
-	if (srclen + 1 < maxlen) {
-		memcpy(dst, src, srclen + 1);
-	} else if (maxlen != 0) {
-		memcpy(dst, src, maxlen - 1);
-		dst[maxlen - 1] = '\0';
-	}
-	return srclen;
+	int fd;
+	ssize_t result;
+
+	fd = open("/etc/passwd", O_RDONLY);
+	T_ASSERT_NE(fd, -1, "open /etc/passwd for reading");
+
+	result = read(fd, NULL, 8);
+	T_ASSERT_EQ(result, -1, "expected to fail");
+	T_ASSERT_EQ(errno, EFAULT, "should have errno == EFAULT");
 }

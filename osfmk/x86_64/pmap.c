@@ -369,6 +369,11 @@ pmap_ro_zone_validate_element_dst(
 	vm_offset_t         offset,
 	vm_size_t           new_data_size)
 {
+	if (__improbable((zid < ZONE_ID__FIRST_RO) || (zid > ZONE_ID__LAST_RO))) {
+		panic("%s: ZoneID %u outside RO range %u - %u", __func__, zid,
+		    ZONE_ID__FIRST_RO, ZONE_ID__LAST_RO);
+	}
+
 	vm_size_t elem_size = zone_ro_size_params[zid].z_elem_size;
 
 	/* Check element is from correct zone and properly aligned */
@@ -772,6 +777,23 @@ pmap_pv_fixup(vm_offset_t start_va, vm_offset_t end_va)
 	}
 }
 
+static SECURITY_READ_ONLY_LATE(struct mach_vm_range) pmap_struct_range = {};
+static __startup_data vm_map_t pmap_struct_map;
+static __startup_data long pmap_npages_early;
+static __startup_data vm_map_size_t pmap_struct_size;
+KMEM_RANGE_REGISTER_DYNAMIC(pmap_struct, &pmap_struct_range, ^() {
+	vm_map_size_t s;
+
+	pmap_npages_early = i386_btop(avail_end);
+	s = (vm_map_size_t) (sizeof(struct pv_rooted_entry) * pmap_npages_early +
+	(sizeof(struct pv_hashed_entry_t *) * (npvhashbuckets)) +
+	pv_lock_table_size(pmap_npages_early) +
+	pv_hash_lock_table_size((npvhashbuckets)) +
+	pmap_npages_early);
+	pmap_struct_size = round_page(s);
+	return pmap_struct_size;
+});
+
 /*
  *	Initialize the pmap module.
  *	Called by vm_init, to initialize any structures that the pmap
@@ -782,10 +804,9 @@ pmap_init(void)
 {
 	long                    npages;
 	vm_offset_t             addr;
-	vm_size_t               s, vsize;
+	vm_size_t               vsize;
 	vm_map_offset_t         vaddr;
-	ppnum_t ppn;
-
+	ppnum_t                 ppn;
 
 	kernel_pmap->pm_obj_pml4 = &kpml4obj_object_store;
 	_vm_object_allocate((vm_object_size_t)NPML4PGS * PAGE_SIZE, &kpml4obj_object_store);
@@ -806,23 +827,22 @@ pmap_init(void)
 	 * so we cover all memory
 	 */
 
-	npages = i386_btop(avail_end);
+	npages = pmap_npages_early;
+	assert(npages == i386_btop(avail_end));
 #if HIBERNATION
 	pmap_npages = (uint32_t)npages;
 #endif
-	s = (vm_size_t) (sizeof(struct pv_rooted_entry) * npages
-	    + (sizeof(struct pv_hashed_entry_t *) * (npvhashbuckets))
-	    + pv_lock_table_size(npages)
-	    + pv_hash_lock_table_size((npvhashbuckets))
-	    + npages);
-	s = round_page(s);
-
-	kmem_alloc(kernel_map, &addr, s,
+	vm_map_will_allocate_early_map(&pmap_struct_map);
+	pmap_struct_map = kmem_suballoc(kernel_map, &pmap_struct_range.min_address,
+	    pmap_struct_size, VM_MAP_CREATE_NEVER_FAULTS,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_NOFAIL | KMS_PERMANENT,
+	    VM_KERN_MEMORY_PMAP).kmr_submap;
+	kmem_alloc(pmap_struct_map, &addr, pmap_struct_size,
 	    KMA_NOFAIL | KMA_ZERO | KMA_KOBJECT | KMA_PERMANENT,
 	    VM_KERN_MEMORY_PMAP);
 
 	vaddr = addr;
-	vsize = s;
+	vsize = pmap_struct_size;
 
 #if PV_DEBUG
 	if (0 == npvhashmask) {
@@ -2389,6 +2409,20 @@ pmap_query_pagesize(
 	return size;
 }
 
+uint32_t
+pmap_user_va_bits(pmap_t pmap __unused)
+{
+	/* x86 has constant set of bits based on 4 level paging. */
+	return 48;
+}
+
+uint32_t
+pmap_kernel_va_bits(void)
+{
+	/* x86 has constant set of bits based on 4 level paging. */
+	return 48;
+}
+
 /*
  * Ensure the page table hierarchy is filled in down to
  * the large page level. Additionally returns FAILURE if
@@ -3374,121 +3408,10 @@ pmap_cs_configuration(void)
 	return 0;
 }
 
-SIMPLE_LOCK_DECLARE(pmap_compilation_service_cdhash_lock, 0);
-uint8_t pmap_compilation_service_cdhash[CS_CDHASH_LEN] = { 0 };
-
-void
-pmap_set_compilation_service_cdhash(const uint8_t cdhash[CS_CDHASH_LEN])
-{
-	simple_lock(&pmap_compilation_service_cdhash_lock, LCK_GRP_NULL);
-	memcpy(pmap_compilation_service_cdhash, cdhash, CS_CDHASH_LEN);
-	simple_unlock(&pmap_compilation_service_cdhash_lock);
-
-#if DEVELOPMENT || DEBUG
-	printf("Added Compilation Service CDHash through the PMAP: 0x%02X 0x%02X 0x%02X 0x%02X\n", cdhash[0], cdhash[1], cdhash[2], cdhash[4]);
-#endif
-}
-
-bool
-pmap_match_compilation_service_cdhash(const uint8_t cdhash[CS_CDHASH_LEN])
-{
-	bool match = false;
-
-	simple_lock(&pmap_compilation_service_cdhash_lock, LCK_GRP_NULL);
-	if (bcmp(pmap_compilation_service_cdhash, cdhash, CS_CDHASH_LEN) == 0) {
-		match = true;
-	}
-	simple_unlock(&pmap_compilation_service_cdhash_lock);
-
-#if DEVELOPMENT || DEBUG
-	if (match) {
-		printf("Matched Compilation Service CDHash through the PMAP\n");
-	}
-#endif
-
-	return match;
-}
-
-static bool pmap_local_signing_public_key_set = false;
-static uint8_t pmap_local_signing_public_key[PMAP_ECC_P384_PUBLIC_KEY_SIZE] = { 0 };
-
-static bool
-pmap_local_signing_public_key_is_set(void)
-{
-	return os_atomic_load(&pmap_local_signing_public_key_set, relaxed);
-}
-
-void
-pmap_set_local_signing_public_key(const uint8_t public_key[PMAP_ECC_P384_PUBLIC_KEY_SIZE])
-{
-	bool key_set = false;
-
-	/*
-	 * os_atomic_cmpxchg returns true in case the exchange was successful. For us,
-	 * a successful exchange means that the local signing public key has _not_ been
-	 * set. In case the key has been set, we panic as we would never expect the
-	 * kernel to attempt to set the key more than once.
-	 */
-	key_set = !os_atomic_cmpxchg(&pmap_local_signing_public_key_set, false, true, relaxed);
-
-	if (key_set) {
-		panic("attempted to set the local signing public key multiple times");
-	}
-
-	memcpy(pmap_local_signing_public_key, public_key, PMAP_ECC_P384_PUBLIC_KEY_SIZE);
-
-#if DEVELOPMENT || DEBUG
-	printf("Set local signing public key\n");
-#endif
-}
-
-uint8_t*
-pmap_get_local_signing_public_key(void)
-{
-	if (pmap_local_signing_public_key_is_set()) {
-		return pmap_local_signing_public_key;
-	}
-	return NULL;
-}
-
-void
-pmap_unrestrict_local_signing(
-	__unused const uint8_t cdhash[CS_CDHASH_LEN])
-{
-	// TODO: Once all changes across XNU and AMFI have been submitted, panic.
-}
-
-bool
-pmap_query_entitlements(
-	__unused pmap_t pmap,
-	__unused CEQuery_t query,
-	__unused size_t queryLength,
-	__unused CEQueryContext_t finalContext)
-{
-#if !PMAP_SUPPORTS_ENTITLEMENT_CHECKS
-	panic("PMAP_CS: do not use this API without checking for \'#if PMAP_SUPPORTS_ENTITLEMENT_CHECKS\'");
-#endif
-
-	panic("PMAP_SUPPORTS_ENTITLEMENT_CHECKS should not be defined on this platform");
-}
-
-bool
-pmap_cs_enabled(void)
-{
-	return false;
-}
-
 bool
 pmap_in_ppl(void)
 {
 	// Nonexistent on this architecture.
-	return false;
-}
-
-bool
-pmap_has_ppl(void)
-{
-	// Not supported on this architecture.
 	return false;
 }
 
@@ -3505,63 +3428,6 @@ pmap_iofilter_protected_write(__unused vm_address_t addr, __unused uint64_t valu
 {
 	panic("%s called on an unsupported platform.", __FUNCTION__);
 }
-
-void* __attribute__((noreturn))
-pmap_image4_pmap_data(
-	__unused size_t *allocated_size)
-{
-	panic("PMAP_IMG4: image4 data not available on this architecture");
-}
-
-void __attribute__((noreturn))
-pmap_image4_set_nonce(
-	__unused const img4_nonce_domain_index_t ndi,
-	__unused const img4_nonce_t *nonce)
-{
-	panic("PMAP_IMG4: set nonce API not supported on this architecture");
-}
-
-void __attribute__((noreturn))
-pmap_image4_roll_nonce(
-	__unused const img4_nonce_domain_index_t ndi)
-{
-	panic("PMAP_IMG4: roll nonce API not supported on this architecture");
-}
-
-errno_t __attribute__((noreturn))
-pmap_image4_copy_nonce(
-	__unused const img4_nonce_domain_index_t ndi,
-	__unused img4_nonce_t *nonce_out
-	)
-{
-	panic("PMAP_IMG4: copy nonce API not supported on this architecture");
-}
-
-errno_t __attribute__((noreturn))
-pmap_image4_execute_object(
-	__unused img4_runtime_object_spec_index_t obj_spec_index,
-	__unused const img4_buff_t *payload,
-	__unused const img4_buff_t *_Nullable manifest)
-{
-	panic("PMAP_IMG4: execute object API not supported on this architecture");
-}
-
-errno_t __attribute__((noreturn))
-pmap_image4_copy_object(
-	__unused img4_runtime_object_spec_index_t obj_spec_index,
-	__unused vm_address_t object_out,
-	__unused size_t *object_length)
-{
-	panic("PMAP_IMG4: copy object API not supported on this architecture");
-}
-
-kern_return_t
-pmap_cs_allow_invalid(__unused pmap_t pmap)
-{
-	// Unsupported on this architecture.
-	return KERN_SUCCESS;
-}
-
 void *
 pmap_claim_reserved_ppl_page(void)
 {
@@ -3573,13 +3439,6 @@ void
 pmap_free_reserved_ppl_page(void __unused *kva)
 {
 	// Unsupported on this architecture.
-}
-
-kern_return_t
-pmap_cs_fork_prepare(__unused pmap_t old_pmap, __unused pmap_t new_pmap)
-{
-	// PMAP_CS isn't enabled for x86_64.
-	return KERN_SUCCESS;
 }
 
 #if DEVELOPMENT || DEBUG

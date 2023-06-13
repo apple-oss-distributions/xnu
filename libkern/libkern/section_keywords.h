@@ -74,11 +74,10 @@
 #define MARK_AS_HIBERNATE_DATA_CONST_LATE
 #endif
 
-#define SECURITY_READ_ONLY_SPECIAL_SECTION(_t, __segment__section) \
-	__security_const_early _t __PLACE_IN_SECTION(__segment__section)
-
 #define SECURITY_READ_ONLY_EARLY(_t) _t __security_const_early __attribute__((used))
 #define SECURITY_READ_ONLY_LATE(_t)  _t __security_const_late  __attribute__((used))
 #define SECURITY_READ_WRITE(_t)      _t __security_read_write  __attribute__((used))
+
+#define MARK_AS_FIXUP_TEXT
 
 #endif /* _SECTION_KEYWORDS_H_ */

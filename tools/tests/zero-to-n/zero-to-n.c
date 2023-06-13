@@ -60,6 +60,7 @@
 #include <os/lock.h>
 #include <TargetConditionals.h>
 
+
 typedef enum wake_type { WAKE_BROADCAST_ONESEM, WAKE_BROADCAST_PERTHREAD, WAKE_CHAIN, WAKE_HOP } wake_type_t;
 typedef enum my_policy_type { MY_POLICY_REALTIME, MY_POLICY_TIMESHARE, MY_POLICY_TIMESHARE_NO_SMT, MY_POLICY_FIXEDPRI } my_policy_type_t;
 
@@ -187,6 +188,8 @@ static semaphore_t              g_rt_churn_start_sem;
 /* Global variables (chain) */
 static semaphore_t             *g_semarr;
 
+
+
 typedef struct {
 	__attribute__((aligned(128))) uint32_t current;
 	uint32_t accum;
@@ -218,6 +221,11 @@ yield(void)
 #error Unrecognized architecture
 #endif
 }
+
+#define BIT(b)                          (1ULL << (b))
+#define mask(width)                     (width >= 64 ? -1ULL : (BIT(width) - 1))
+
+
 
 static void *
 churn_thread(__unused void *arg)
@@ -280,7 +288,9 @@ create_churn_threads()
 	for (uint32_t i = 0; i < g_churn_count; i++) {
 		pthread_t new_thread;
 
-		if ((err = pthread_create(&new_thread, &attr, churn_thread, NULL))) {
+		err = pthread_create(&new_thread, &attr, churn_thread, NULL);
+
+		if (err) {
 			errc(EX_OSERR, err, "pthread_create");
 		}
 		g_churn_threads[i] = new_thread;
@@ -407,7 +417,9 @@ create_rt_churn_threads(void)
 	for (uint32_t i = 0; i < g_rt_churn_count; i++) {
 		pthread_t new_thread;
 
-		if ((err = pthread_create(&new_thread, &attr, rt_churn_thread, NULL))) {
+		err = pthread_create(&new_thread, &attr, rt_churn_thread, NULL);
+
+		if (err) {
 			errc(EX_OSERR, err, "pthread_create");
 		}
 		g_rt_churn_threads[i] = new_thread;
@@ -909,6 +921,7 @@ main(int argc, char **argv)
 	}
 #endif /* TARGET_OS_OSX */
 
+
 	size_t maxcpu_size = sizeof(g_maxcpus);
 	ret = sysctlbyname("hw.ncpu", &g_maxcpus, &maxcpu_size, NULL, 0);
 	if (ret) {
@@ -1160,6 +1173,8 @@ main(int argc, char **argv)
 		errc(EX_OSERR, ret, "setpriority");
 	}
 
+	bool recommended_cores_warning = false;
+
 	thread_setup(0);
 
 	g_starttime_abs = mach_absolute_time();
@@ -1215,6 +1230,21 @@ main(int argc, char **argv)
 
 		if (g_rt_churn) {
 			wait_for_rt_churn_threads();
+		}
+
+		uint64_t recommended_cores_map;
+		size_t map_size = sizeof(recommended_cores_map);
+		ret = sysctlbyname("kern.sched_recommended_cores", &recommended_cores_map, &map_size, NULL, 0);
+		if ((ret == 0) && (recommended_cores_map & mask(g_maxcpus)) != mask(g_maxcpus)) {
+			if (g_test_rt) {
+				/* Cores have been derecommended, which invalidates the test */
+				printf("Recommended cores 0x%llx != all cores 0x%llx\n", recommended_cores_map, mask(g_maxcpus));
+				printf("TEST SKIPPED\n");
+				exit(0);
+			} else if (!recommended_cores_warning) {
+				printf("WARNING: Recommended cores 0x%llx != all cores 0x%llx\n", recommended_cores_map, mask(g_maxcpus));
+				recommended_cores_warning = true;
+			}
 		}
 
 		/*
@@ -1396,10 +1426,12 @@ main(int argc, char **argv)
 		}
 	}
 
-	if (test_fail) {
-		printf("TEST FAILED\n");
-	} else {
-		printf("TEST PASSED\n");
+	if (g_test_rt || g_test_rt_smt || g_test_rt_avoid0) {
+		if (test_fail) {
+			printf("TEST FAILED\n");
+		} else {
+			printf("TEST PASSED\n");
+		}
 	}
 
 	free(threads);

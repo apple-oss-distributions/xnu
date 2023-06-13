@@ -250,7 +250,22 @@ ipc_pset_finalize(
 /*
  * Kqueue EVFILT_MACHPORT support
  *
- * - kn_ipc_obj points to the monitored ipc port or pset
+ * - kn_ipc_obj points to the monitored ipc port or pset. If the knote is
+ *   using a kqwl, it is eligible to participate in sync IPC overrides.
+ *
+ *   For the first such sync IPC message in the port, we set up the port's
+ *   turnstile to directly push on the kqwl's turnstile (which is in turn set up
+ *   during filt_machportattach). If userspace responds to the message, the
+ *   turnstile push is severed the point of reply. If userspace returns without
+ *   responding to the message, we sever the turnstile push at the
+ *   point of reenabling the knote to deliver the next message. This is why the
+ *   knote needs to remember the port. For more details, see also
+ *   filt_machport_turnstile_complete.
+ *
+ *   If there are multiple other sync IPC messages in the port, messages 2 to n
+ *   redirect their turnstile push to the kqwl through an intermediatry "knote"
+ *   turnstile which in turn, pushes on the kqwl turnstile. This knote turnstile
+ *   is stored in the kn_hook. See also filt_machport_turnstile_prepare_lazily.
  *
  * - (in/out) ext[0] holds a mach_vm_address_t to a userspace buffer
  *   that can be used to direct-deliver messages when
@@ -263,7 +278,8 @@ ipc_pset_finalize(
  *   about the send queue to userspace.
  *
  * - (abused) ext[3] is used in kernel to hold a reference to the first port
- *   with a turnstile that participate to sync IPC override.
+ *   with a turnstile that participate to sync IPC override. For more details,
+ *   see filt_machport_stash_port
  *
  * - kn_hook is optionally a "knote" turnstile. It is used as the inheritor
  *   of turnstiles for rights copied out as part of direct message delivery
@@ -346,8 +362,8 @@ filt_machport_kqueue_has_turnstile(struct knote *kn)
 }
 
 /*
- * Stashes a port that participate to sync IPC override until the knote
- * is being re-enabled.
+ * Stashes a port that participate to sync IPC override on the knote until the
+ * knote is re-enabled.
  *
  * It returns:
  * - the turnstile to use as an inheritor for the stashed port
@@ -1101,6 +1117,16 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	return result;
 }
 
+static void
+filt_machportsanitizedcopyout(struct knote *kn, struct kevent_qos_s *kev)
+{
+	*kev = *(struct kevent_qos_s *)&kn->kn_kevent;
+
+	// We may have stashed the address to the port that is pushing on the sync
+	// IPC so clear it out.
+	kev->ext[3] = 0;
+}
+
 SECURITY_READ_ONLY_EARLY(struct filterops) machport_filtops = {
 	.f_adjusts_qos = true,
 	.f_extended_codes = true,
@@ -1109,4 +1135,5 @@ SECURITY_READ_ONLY_EARLY(struct filterops) machport_filtops = {
 	.f_event = filt_machportevent,
 	.f_touch = filt_machporttouch,
 	.f_process = filt_machportprocess,
+	.f_sanitized_copyout = filt_machportsanitizedcopyout,
 };

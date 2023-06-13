@@ -541,7 +541,7 @@ port_name_to_work_interval(mach_port_name_t     name,
 		return KERN_INVALID_NAME;
 	}
 
-	ipc_port_t port = IPC_PORT_NULL;
+	ipc_port_t port = IP_NULL;
 	kern_return_t kr = KERN_SUCCESS;
 
 	kr = ipc_port_translate_send(current_space(), name, &port);
@@ -629,20 +629,36 @@ work_interval_port_type(mach_port_name_t port_name)
 
 /*
  * Sparse - not all work interval classes imply a scheduling policy change.
- * Realtime threads are managed elsewhere.
+ * The REALTIME_CRITICAL class *also* requires the thread to have explicitly
+ * adopted the REALTIME sched mode to take effect.
  */
 static const struct {
 	int          priority;
 	sched_mode_t sched_mode;
 } work_interval_class_data[WI_CLASS_COUNT] = {
 	[WI_CLASS_BEST_EFFORT] = {
-		BASEPRI_DEFAULT, // 31
+		BASEPRI_DEFAULT,        // 31
 		TH_MODE_TIMESHARE,
 	},
 
-	[WI_CLASS_SYSTEM_CRITICAL] = {
-		MAXPRI_USER + 1, // 64
+	[WI_CLASS_APP_SUPPORT] = {
+		BASEPRI_DEFAULT,        // 31
+		TH_MODE_TIMESHARE,
+	},
+
+	[WI_CLASS_SYSTEM] = {
+		BASEPRI_FOREGROUND + 1, // 48
 		TH_MODE_FIXED,
+	},
+
+	[WI_CLASS_SYSTEM_CRITICAL] = {
+		MAXPRI_USER + 1,        // 64
+		TH_MODE_FIXED,
+	},
+
+	[WI_CLASS_REALTIME_CRITICAL] = {
+		BASEPRI_RTQUEUES + 1,   // 98
+		TH_MODE_REALTIME,
 	},
 };
 
@@ -656,6 +672,7 @@ work_interval_get_priority(thread_t thread)
 	const struct work_interval *work_interval = thread->th_work_interval;
 	assert(work_interval != NULL);
 
+	assert3u(work_interval->wi_class, !=, WI_CLASS_NONE);
 	assert3u(work_interval->wi_class, <, WI_CLASS_COUNT);
 	int priority = work_interval_class_data[work_interval->wi_class].priority;
 	assert(priority != 0);
@@ -672,6 +689,8 @@ work_interval_get_priority(thread_t thread)
 static void
 work_interval_set_policy(thread_t thread)
 {
+	assert3p(thread, ==, current_thread());
+
 	/*
 	 * Ignore policy changes if the workload context shouldn't affect the
 	 * scheduling policy.
@@ -690,13 +709,16 @@ work_interval_set_policy(thread_t thread)
 	assert3u(work_interval->wi_class, <, WI_CLASS_COUNT);
 	const sched_mode_t mode = work_interval_class_data[work_interval->wi_class].sched_mode;
 
+	/*
+	 * A mode of TH_MODE_NONE implies that this work interval has no
+	 * associated scheduler effects.
+	 */
 	if (mode == TH_MODE_NONE) {
 		return;
 	}
 
-	proc_set_thread_policy(thread, TASK_POLICY_ATTRIBUTE,
-	    TASK_POLICY_WI_DRIVEN, mode);
-
+	proc_set_thread_policy_ext(thread, TASK_POLICY_ATTRIBUTE,
+	    TASK_POLICY_WI_DRIVEN, true, mode);
 	assert(thread->requested_policy.thrp_wi_driven);
 
 	return;
@@ -708,12 +730,21 @@ work_interval_set_policy(thread_t thread)
 static void
 work_interval_clear_policy(thread_t thread)
 {
+	assert3p(thread, ==, current_thread());
+
 	if (!thread->requested_policy.thrp_wi_driven) {
 		return;
 	}
 
-	proc_set_thread_policy(thread, TASK_POLICY_ATTRIBUTE,
-	    TASK_POLICY_WI_DRIVEN, TH_MODE_NONE);
+	const sched_mode_t mode = sched_get_thread_mode_user(thread);
+
+	proc_set_thread_policy_ext(thread, TASK_POLICY_ATTRIBUTE,
+	    TASK_POLICY_WI_DRIVEN, false,
+	    mode == TH_MODE_REALTIME ? mode : TH_MODE_TIMESHARE);
+
+	assert(!thread->requested_policy.thrp_wi_driven);
+
+	return;
 }
 
 /*
@@ -899,15 +930,11 @@ thread_set_work_interval(thread_t thread,
 		thread_work_interval_flags_t th_wi_xor_mask = os_atomic_load(
 			&thread->th_work_interval_flags, relaxed);
 		th_wi_xor_mask &= (TH_WORK_INTERVAL_FLAGS_HAS_WORKLOAD_ID |
-		    TH_WORK_INTERVAL_FLAGS_RT_ALLOWED |
-		    TH_WORK_INTERVAL_FLAGS_RT_CRITICAL);
+		    TH_WORK_INTERVAL_FLAGS_RT_ALLOWED);
 		if (wlid_flags & WORK_INTERVAL_WORKLOAD_ID_HAS_ID) {
 			th_wi_xor_mask ^= TH_WORK_INTERVAL_FLAGS_HAS_WORKLOAD_ID;
 			if (wlid_flags & WORK_INTERVAL_WORKLOAD_ID_RT_ALLOWED) {
 				th_wi_xor_mask ^= TH_WORK_INTERVAL_FLAGS_RT_ALLOWED;
-			}
-			if (wlid_flags & WORK_INTERVAL_WORKLOAD_ID_RT_CRITICAL) {
-				th_wi_xor_mask ^= TH_WORK_INTERVAL_FLAGS_RT_CRITICAL;
 			}
 		}
 		if (th_wi_xor_mask) {
@@ -1284,8 +1311,6 @@ kern_work_interval_set_workload_id(mach_port_name_t port_name,
 			goto out;
 		}
 #endif /* CONFIG_THREAD_GROUPS */
-		work_interval->wi_class = wl_config.wc_class;
-		work_interval->wi_class_offset = wl_config.wc_class_offset;
 
 		from_workload_config = true;
 	} else {
@@ -1328,6 +1353,10 @@ kern_work_interval_set_workload_id(mach_port_name_t port_name,
 	wlida_flags |= WORK_INTERVAL_WORKLOAD_ID_HAS_ID;
 	if (os_atomic_cmpxchgv(&work_interval->wi_wlid_flags, 0, wlida_flags,
 	    &wlid_flags, relaxed)) {
+		if (from_workload_config) {
+			work_interval->wi_class = wl_config.wc_class;
+			work_interval->wi_class_offset = wl_config.wc_class_offset;
+		}
 #if CONFIG_THREAD_GROUPS
 		if (work_interval->wi_create_flags & WORK_INTERVAL_FLAG_GROUP) {
 			/* Perform deferred thread group creation, now that tgflags are known */

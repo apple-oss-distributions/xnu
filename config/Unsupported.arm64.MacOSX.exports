@@ -39,3 +39,5 @@ _KUNCGetNotificationID
 _KUNCUserNotificationDisplayAlert
 _KUNCUserNotificationDisplayFromBundle
 _KUNCUserNotificationDisplayNotice
+_kalloc:_kalloc_external
+_kfree:_kfree_external

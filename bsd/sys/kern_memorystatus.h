@@ -223,6 +223,8 @@ typedef struct jetsam_snapshot_entry {
 	struct timeval64 cpu_time;
 	uint64_t jse_thaw_count;
 	uint64_t jse_frozen_to_swap_pages;
+	uint64_t csflags;
+	uint32_t cs_trust_level;
 } memorystatus_jetsam_snapshot_entry_t;
 
 typedef struct jetsam_snapshot {
@@ -666,18 +668,6 @@ void memorystatus_fast_jetsam_override(boolean_t enable_override);
 bool memorystatus_disable_swap(void);
 
 #endif /* CONFIG_JETSAM */
-
-/* These are very verbose printfs(), enable with
- * MEMORYSTATUS_DEBUG_LOG
- */
-#if MEMORYSTATUS_DEBUG_LOG
-#define MEMORYSTATUS_DEBUG(cond, format, ...)      \
-do {                                              \
-if (cond) { printf(format, ##__VA_ARGS__); } \
-} while(0)
-#else
-#define MEMORYSTATUS_DEBUG(cond, format, ...)
-#endif
 
 boolean_t memorystatus_kill_on_zone_map_exhaustion(pid_t pid);
 boolean_t memorystatus_kill_on_VM_compressor_space_shortage(boolean_t async);

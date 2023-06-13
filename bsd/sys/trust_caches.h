@@ -35,6 +35,7 @@
 
 /* Availability macros to check for support */
 #define XNU_HAS_TRUST_CACHE_LOADING 1
+#define XNU_HAS_TRUST_CACHE_CHECK_RUNTIME_FOR_UUID 1
 
 #ifdef XNU_PLATFORM_BridgeOS
 #define XNU_HAS_LEGACY_TRUST_CACHE_LOADING 1
@@ -86,9 +87,20 @@ load_static_trust_cache(void);
  */
 kern_return_t
 static_trust_cache_capabilities(
-	uint32_t *num_static_trust_caches,
-	TCCapabilities_t *capabilities0,
-	TCCapabilities_t *capabilities1);
+	uint32_t *num_static_trust_caches_ret,
+	TCCapabilities_t *capabilities0_ret,
+	TCCapabilities_t *capabilities1_ret);
+
+/**
+ * Check if a particular trust cache has already been loaded into the system on the basis
+ * of a provided UUID.
+ *
+ * Based on the system environment, this request may trap into the kernel's code signing
+ * monitor environment as the trust cache data structures need to be locked down.
+ */
+kern_return_t
+check_trust_cache_runtime_for_uuid(
+	const uint8_t check_uuid[kUUIDSize]);
 
 /**
  * Load an image4 trust cache. Since the type of trust cache isn't specified, this interface

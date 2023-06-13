@@ -39,6 +39,7 @@
 extern "C" {
 #include <libkern/amfi/amfi.h>
 #include <sys/codesign.h>
+#include <sys/code_signing.h>
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
 #include <pexpert/pexpert.h>
@@ -1451,9 +1452,28 @@ IOBSDLowSpaceUnlinkKernelCore(void)
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-extern "C"
-OS_ALWAYS_INLINE
-boolean_t
+static char*
+copyOSStringAsCString(OSString *string)
+{
+	size_t string_length = 0;
+	char *c_string = NULL;
+
+	if (string == NULL) {
+		return NULL;
+	}
+	string_length = string->getLength() + 1;
+
+	/* Allocate kernel data memory for the string */
+	c_string = (char*)kalloc_data(string_length, (zalloc_flags_t)(Z_ZERO | Z_WAITOK | Z_NOFAIL));
+	assert(c_string != NULL);
+
+	/* Copy in the string */
+	strlcpy(c_string, string->getCStringNoCopy(), string_length);
+
+	return c_string;
+}
+
+extern "C" OS_ALWAYS_INLINE boolean_t
 IOCurrentTaskHasStringEntitlement(const char *entitlement, const char *value)
 {
 	return IOTaskHasStringEntitlement(NULL, entitlement, value);
@@ -1462,162 +1482,100 @@ IOCurrentTaskHasStringEntitlement(const char *entitlement, const char *value)
 extern "C" boolean_t
 IOTaskHasStringEntitlement(task_t task, const char *entitlement, const char *value)
 {
-	if (task == kernel_task) {
-		return false;
-	} else if (!entitlement || !value) {
-		return false;
-	}
-
-	size_t name_length = strnlen(entitlement, CE_MAX_KEY_SIZE);
-	if (name_length >= CE_MAX_KEY_SIZE) {
-		printf("entitlement name length exceeds maximum allowed\n");
-		return false;
-	}
-
-	size_t value_length = strnlen(value, CE_MAX_KEY_SIZE);
-	if (value_length >= CE_MAX_KEY_SIZE) {
-		printf("entitlement value length exceeds maximum allowed\n");
-		return false;
-	}
-
-	CEQuery_t query = {
-		CESelectDictValueDynamic((const uint8_t*)entitlement, name_length),
-		CEIsDynamicStringAllowed((const uint8_t*)value, value_length)
-	};
-
-#if PMAP_CS_ENABLE && !CONFIG_X86_64_COMPAT
-
-	/*
-	 * If we have PMAP_CS available and code signing is enabled, then we perform
-	 * the entitlement check in the PPL.
-	 *
-	 * Note that the security benefits of doing so are questionable. The PPL has
-	 * already locked down the entitlements blob, so we could simply have XNU go
-	 * through the locked entitlements blob instead of switching into the PPL to
-	 * perform the check. Afterall, the entitlement will be enforced by XNU and
-	 * not the PPL, so trapping into the PPL for the check means little.
-	 *
-	 * Nevertheless, this is kept around to be consistent with how some of the
-	 * other interfaces perform their entitlement checks.
-	 */
-
-	if (pmap_cs_enabled()) {
-		if (task == NULL || task == current_task()) {
-			/* NULL task implies current_task */
-			return pmap_query_entitlements(NULL, query, 2, NULL);
-		}
-
-		vm_map_t task_map = get_task_map_reference(task);
-		if (task_map) {
-			pmap_t pmap = vm_map_get_pmap(task_map);
-			if (pmap && pmap_query_entitlements(pmap, query, 2, NULL)) {
-				vm_map_deallocate(task_map);
-				return true;
-			}
-			vm_map_deallocate(task_map);
-		}
-		return false;
-	}
-
-#endif
-
-	/* AMFI interface needs to be available */
-	if (amfi == NULL) {
-		panic("CoreEntitlements: (IOTask): AMFI interface not available");
-	}
-
 	if (task == NULL) {
-		/* NULL task implies current_task */
 		task = current_task();
 	}
 
-	proc_t p = (proc_t)get_bsdtask_info(task);
-	if (p == NULL) {
-		/* Cannot proceed if we don't have a proc structure */
+	/* Validate input arguments */
+	if (task == kernel_task || entitlement == NULL || value == NULL) {
 		return false;
 	}
+	proc_t proc = (proc_t)get_bsdtask_info(task);
 
-	struct cs_blob* csblob = csproc_get_blob(p);
-	if (csblob == NULL) {
-		/* Cannot proceed if process doesn't have a code signature */
-		return false;
+	kern_return_t ret = amfi->OSEntitlements.queryEntitlementStringWithProc(
+		proc,
+		entitlement,
+		value);
+
+	if (ret == KERN_SUCCESS) {
+		return true;
 	}
 
-	void* osents = csblob_os_entitlements_get(csblob);
-	if (osents == NULL) {
-		return false;
-	}
-
-	CEError_t ce_err = amfi->CoreEntitlements.kQueryCannotBeSatisfied;
-	ce_err = amfi->OSEntitlements_query(osents, (uint8_t*)csblob_get_cdhash(csblob), query, 2);
-
-	return ce_err == amfi->CoreEntitlements.kNoError;
+	return false;
 }
 
-extern "C"
-OS_ALWAYS_INLINE
-boolean_t
-IOCurrentTaskHasEntitlement(const char * entitlement)
+extern "C" OS_ALWAYS_INLINE boolean_t
+IOCurrentTaskHasEntitlement(const char *entitlement)
 {
 	return IOTaskHasEntitlement(NULL, entitlement);
 }
 
 extern "C" boolean_t
-IOTaskHasEntitlement(task_t task, const char * entitlement)
+IOTaskHasEntitlement(task_t task, const char *entitlement)
 {
-	// Don't do this
-	if (task == kernel_task || entitlement == NULL) {
-		return false;
-	}
-	size_t entlen = strlen(entitlement);
-	CEQuery_t query = {
-		CESelectDictValueDynamic((const uint8_t*)entitlement, entlen),
-		CEMatchBool(true)
-	};
-
-#if PMAP_CS_ENABLE && !CONFIG_X86_64_COMPAT
-	if (pmap_cs_enabled()) {
-		if (task == NULL || task == current_task()) {
-			// NULL task means current task, which translated to the current pmap
-			return pmap_query_entitlements(NULL, query, 2, NULL);
-		}
-		vm_map_t task_map = get_task_map_reference(task);
-		if (task_map) {
-			pmap_t pmap = vm_map_get_pmap(task_map);
-			if (pmap && pmap_query_entitlements(pmap, query, 2, NULL)) {
-				vm_map_deallocate(task_map);
-				return true;
-			}
-			vm_map_deallocate(task_map);
-		}
-		return false;
-	}
-#endif
 	if (task == NULL) {
 		task = current_task();
 	}
 
-	proc_t p = (proc_t)get_bsdtask_info(task);
-
-	if (p == NULL) {
+	/* Validate input arguments */
+	if (task == kernel_task || entitlement == NULL) {
 		return false;
 	}
+	proc_t proc = (proc_t)get_bsdtask_info(task);
 
-	struct cs_blob* csblob = csproc_get_blob(p);
-	if (csblob == NULL) {
-		return false;
+	kern_return_t ret = amfi->OSEntitlements.queryEntitlementBooleanWithProc(
+		proc,
+		entitlement);
+
+	if (ret == KERN_SUCCESS) {
+		return true;
 	}
 
-	void* osents = csblob_os_entitlements_get(csblob);
-	if (osents == NULL) {
-		return false;
+	return false;
+}
+
+extern "C" OS_ALWAYS_INLINE char*
+IOCurrentTaskGetEntitlement(const char *entitlement)
+{
+	return IOTaskGetEntitlement(NULL, entitlement);
+}
+
+extern "C" char*
+IOTaskGetEntitlement(task_t task, const char *entitlement)
+{
+	void *entitlement_object = NULL;
+	char *return_value = NULL;
+
+	if (task == NULL) {
+		task = current_task();
 	}
 
-	if (!amfi) {
-		panic("CoreEntitlements: (IOTask): No AMFI\n");
+	/* Validate input arguments */
+	if (task == kernel_task || entitlement == NULL) {
+		return NULL;
 	}
+	proc_t proc = (proc_t)get_bsdtask_info(task);
 
-	return amfi->OSEntitlements_query(osents, (uint8_t*)csblob_get_cdhash(csblob), query, 2) == amfi->CoreEntitlements.kNoError;
+	kern_return_t ret = amfi->OSEntitlements.copyEntitlementAsOSObjectWithProc(
+		proc,
+		entitlement,
+		&entitlement_object);
+
+	if (ret != KERN_SUCCESS) {
+		return NULL;
+	}
+	assert(entitlement_object != NULL);
+
+	OSObject *os_object = (OSObject*)entitlement_object;
+	OSString *os_string = OSDynamicCast(OSString, os_object);
+
+	/* Get a C string version of the OSString */
+	return_value = copyOSStringAsCString(os_string);
+
+	/* Free the OSObject which was given to us */
+	OSSafeReleaseNULL(os_object);
+
+	return return_value;
 }
 
 extern "C" boolean_t
@@ -1653,45 +1611,5 @@ IOVnodeGetEntitlement(vnode_t vnode, int64_t off, const char *entitlement)
 		}
 		obj->release();
 	}
-	return value;
-}
-
-extern "C"
-OS_ALWAYS_INLINE
-char *
-IOCurrentTaskGetEntitlement(const char * entitlement)
-{
-	return IOTaskGetEntitlement(current_task(), entitlement);
-}
-
-extern "C" char *
-IOTaskGetEntitlement(task_t task, const char * entitlement)
-{
-	OSObject * obj = NULL;
-	OSDictionary * entitlements = NULL;
-	OSString * str = NULL;
-	size_t len = 0;
-	char * value = NULL;
-
-	if (task == kernel_task || task == NULL || entitlement == NULL) {
-		goto finish;
-	}
-
-	entitlements = IOUserClient::copyClientEntitlements(task);
-	if (entitlements == NULL) {
-		goto finish;
-	}
-
-	obj = entitlements->getObject(entitlement);
-	str = OSDynamicCast(OSString, obj);
-	if (str != NULL) {
-		len = str->getLength() + 1;
-		value = (char *)kalloc_data(len, (zalloc_flags_t)(Z_ZERO | Z_WAITOK | Z_NOFAIL));
-		strlcpy(value, str->getCStringNoCopy(), len);
-	}
-
-finish:
-	OSSafeReleaseNULL(entitlements);
-
 	return value;
 }

@@ -25,25 +25,35 @@ __BEGIN_DECLS
 #include <kern/kalloc.h>
 __END_DECLS
 
-__typed_allocators_ignore_push
+/* void * is a bit of a lie, but that will have to do */
+    KALLOC_TYPE_VAR_DEFINE(KT_BLOCK_LAYOUT, struct Block_layout, void *, KT_DEFAULT);
+KALLOC_TYPE_VAR_DEFINE(KT_BLOCK_BYREF, struct Block_byref, void *, KT_DEFAULT);
 
-static inline void *
-malloc(size_t size)
+static inline struct Block_layout *
+block_layout_alloc(size_t size)
 {
-	if (size == 0) {
-		return NULL;
-	}
-	return kheap_alloc(KHEAP_DEFAULT, size,
-	           Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
+	return (struct Block_layout *)kalloc_type_var_impl(KT_BLOCK_LAYOUT,
+	           size, Z_WAITOK_ZERO_NOFAIL, NULL);
 }
 
 static inline void
-free(void *addr, size_t size)
+block_layout_free(Block_layout *ptr, size_t size)
 {
-	kheap_free(KHEAP_DEFAULT, addr, size);
+	kfree_type_var_impl(KT_BLOCK_LAYOUT, ptr, size);
 }
 
-__typed_allocators_ignore_pop
+static inline struct Block_byref *
+block_byref_alloc(size_t size)
+{
+	return (struct Block_byref *)kalloc_type_var_impl(KT_BLOCK_BYREF,
+	           size, Z_WAITOK_ZERO_NOFAIL, NULL);
+}
+
+static inline void
+block_byref_free(Block_byref *ptr, size_t size)
+{
+	kfree_type_var_impl(KT_BLOCK_BYREF, ptr, size);
+}
 
 #endif /* KERNEL */
 
@@ -288,10 +298,7 @@ _Block_copy(const void *arg)
 	} else {
 		// Its a stack block.  Make a copy.
 		size_t size = Block_size(aBlock);
-		struct Block_layout *result = (struct Block_layout *)malloc(size);
-		if (!result) {
-			return NULL;
-		}
+		struct Block_layout *result = block_layout_alloc(size);
 		memmove(result, aBlock, size); // bitcopy first
 #if __has_feature(ptrauth_calls)
 		// Resign the invoke pointer as it uses address authentication.
@@ -335,7 +342,7 @@ _Block_byref_copy(const void *arg)
 
 	if ((src->forwarding->flags & BLOCK_REFCOUNT_MASK) == 0) {
 		// src points to stack
-		struct Block_byref *copy = (struct Block_byref *)malloc(src->size);
+		struct Block_byref *copy = block_byref_alloc(src->size);
 		copy->isa = NULL;
 		// byref value 4 is logical refcount of 2: one for caller, one for stack
 		copy->flags = src->flags | BLOCK_BYREF_NEEDS_FREE | 4;
@@ -388,7 +395,7 @@ _Block_byref_release(const void *arg)
 				struct Block_byref_2 *byref2 = (struct Block_byref_2 *)(byref + 1);
 				(*byref2->byref_destroy)(byref);
 			}
-			free(byref, byref->size);
+			block_byref_free(byref, byref->size);
 		}
 	}
 }
@@ -424,7 +431,7 @@ _Block_release(const void *arg)
 	if (latching_decr_int_should_deallocate(&aBlock->flags)) {
 		_Block_call_dispose_helper(aBlock);
 		_Block_destructInstance(aBlock);
-		free(aBlock, Block_size(aBlock));
+		block_layout_free(aBlock, Block_size(aBlock));
 	}
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011 Apple, Inc. All rights reserved.
+ * Copyright (c) 2022 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,18 +26,32 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include "string.h"
 
-#undef strncpy
-char *
-strncpy(char * dst, const char * src, size_t maxlen)
+#include <unistd.h>
+#include <darwintest.h>
+#include <mach/mach.h>
+#include <drop_priv.h>
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.ipc"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("IPC"),
+	T_META_RUN_CONCURRENTLY(true));
+
+T_DECL(task_name_for_pid_entitlement, "Test that task_name_for_pid suceeds with entitlement",
+    T_META_ASROOT(false),
+    T_META_CHECK_LEAKS(false))
 {
-	const size_t srclen = strnlen(src, maxlen);
-	if (srclen < maxlen) {
-		memcpy(dst, src, srclen);
-		memset(dst + srclen, 0, maxlen - srclen);
-	} else {
-		memcpy(dst, src, maxlen);
-	}
-	return dst;
+	kern_return_t kr;
+	mach_port_t tname;
+	pid_t pid;
+	T_SETUPBEGIN;
+	T_ASSERT_NE(getuid(), 0, "test should not be root uid");
+	T_SETUPEND;
+	// launchd has root uid/gid so we know that we must be hitting the entitlement check here.
+	kr = task_name_for_pid(mach_task_self(), 1, &tname);
+	T_ASSERT_MACH_SUCCESS(kr, "task_name_for_pid should succeed on launchd (pid 1)");
+	pid_for_task(tname, &pid);
+	T_ASSERT_EQ(pid, 1, "pid_for_task should return pid for launchd (pid 1)");
+
+	mach_port_deallocate(mach_task_self(), tname);
 }

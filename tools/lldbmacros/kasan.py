@@ -9,6 +9,10 @@ import itertools
 from xnu import *
 from utils import *
 from core.configuration import *
+import kmemory
+
+class LookupError(Exception):
+    pass
 
 ShadowMapEntry = namedtuple('ShadowMapEntry', ['addr', 'shaddr', 'value'])
 
@@ -83,7 +87,7 @@ class AbstractShadowMap(object):
         try:
             return unsigned(kern.GetValueFromAddress(shaddr, 'uint8_t *')[0])
         except:
-            raise ValueError("No shadow mapping for 0x{:x}".format(shaddr))
+            raise LookupError("No shadow mapping for {:#x}".format(shaddr))
 
     def iterator(self, addr, count, step=1):
         """ Returns an iterator to walk through a specified area of KASan
@@ -203,13 +207,14 @@ class MemObject(object):
         return None
 
 
-class AllocHeapMemObject(object):
+class HeapMemObject(object):
     """ Represents a memory object allocated on a heap. """
-    alloc_header_sz = 16
 
-    def __init__(self, hdr, ftr):
-        self._hdr = hdr
-        self._ftr = ftr
+    def __init__(self, addr, meta):
+        self._addr = addr
+        self._meta = meta
+        self._base = self._meta.getElementAddress(addr)
+        self._lrz  = unsigned(self._meta.zone.z_kasan_redzone)
 
     @property
     def type(self):
@@ -219,85 +224,119 @@ class AllocHeapMemObject(object):
     @property
     def zone(self):
         """ Returns a zone this memory object is allocated in. """
-        return None
+        return self._meta.zone
 
     def total_alloc(self):
         """ Returns an address and a size of the allocation, including redzones. """
-        return (self._alloc_base(), unsigned(self._hdr.alloc_size))
+        return (self._base - self._lrz, self._meta.getOuterElemSize())
 
     def valid_alloc(self):
-        return (self._valid_base(), unsigned(self._hdr.user_size))
+        """ Returns an address and a size of the allocation, without redzones. """
+        return (self._base, self._valid_size())
 
     def redzones(self):
         """ Returns a tuple of redzone sizes. """
-        left_rz = unsigned(self._hdr.left_rz)
-        right_rz = unsigned(self._hdr.alloc_size) - unsigned(
-            self._hdr.user_size) - left_rz
-        return (left_rz, right_rz)
+        isize = self._valid_size()
+        esize = self._meta.getOuterElemSize()
+        return (self._lrz, esize - isize - self._lrz)
 
-    def backtrace(self):
-        """ Returns the latest known backtrace recorded for a given address. """
-        slide = unsigned(kern.globals.vm_kernel_slid_base)
-        n = unsigned(self._hdr.frames)
-        return (slide + unsigned(self._ftr.backtrace[i]) for i in range(0, n))
+    def btref(self):
+        """ Returns the latest known btref recorded for a given address. """
+        hdr = self._hdr()
+        if not hdr:
+            return 0
+        if hdr.state == GetEnumValue('kasan_alloc_state_t', 'KASAN_STATE_ALLOCATED'):
+            return hdr.alloc_btref
+        else:
+            return hdr.free_btref
 
-    def _valid_base(self):
-        return unsigned(self._hdr) + self.alloc_header_sz
+    def _hdr(self):
+        if self._lrz:
+            return kern.GetValueFromAddress(
+                self._base - sizeof('struct kasan_alloc_header'),
+                'struct kasan_alloc_header *')
+        return None
 
-    def _alloc_base(self):
-        return self._valid_base() - unsigned(self._hdr.left_rz)
+    def _valid_size(self):
+        hdr = self._hdr()
+        if hdr and hdr.state == GetEnumValue('kasan_alloc_state_t', 'KASAN_STATE_ALLOCATED'):
+            return unsigned(hdr.user_size)
+        return self._meta.getInnerElemSize()
 
 
-class FreeHeapMemObject(object):
+class VMMemObject(object):
     """ Represents a memory object allocated on a heap. """
 
-    def __init__(self, hdr):
-        self._hdr = hdr
+    def __init__(self, addr):
+        self._addr = addr
+        self._vme  = self._find_vme(addr)
 
     @property
     def type(self):
         """ Returns a memory object type string. """
-        mo_type = "heap:kalloc"
-        if self.zone:
-            mo_type = "heap:zone"
-            if str(self.zone.z_name).startswith("fakestack"):
-                mo_type = "stack"
-        return mo_type
+        return "kmem"
 
     @property
     def zone(self):
         """ Returns a zone this memory object is allocated in. """
-        return self._hdr.zone
+        return None
 
     def total_alloc(self):
         """ Returns an address and a size of the allocation, including redzones. """
-        return (unsigned(self._hdr), unsigned(self._hdr.size))
+        if self._vme is None:
+            return None
+        start = unsigned(self._vme.links.start)
+        end   = unsigned(self._vme.links.end)
+        return (start, end - start)
 
     def valid_alloc(self):
         """ Returns an address and a size of the allocation, without redzones. """
-        left_rz, _ = self.redzones()
-        return (unsigned(self._hdr) + left_rz, unsigned(self._hdr.user_size))
+        if self._vme is None:
+            return None
+
+        page_size = unsigned(kern.globals.page_size)
+        r = self.total_alloc()
+
+        if self._vme.vme_kernel_object:
+            delta = unsigned(self._vme.vme_object_or_delta)
+        else:
+            delta = unsigned(get_vme_object(self._vme).vo_size_delta)
+
+        if delta < page_size:
+            return (r[0], r[1] - delta)
+        else:
+            return (r[0] + page_size, r[1] - delta)
 
     def redzones(self):
         """ Returns a tuple of redzone sizes. """
-        rzsz = self._hdr.size - self._hdr.user_size
-        left_rz = 16
+        if self._vme is None:
+            return None
 
-        if self._hdr.zone:
-            if str(self._hdr.zone.z_name).startswith("fakestack"):
-                left_rz = unsigned(self._hdr.zone.z_kasan_redzone)
+        page_size = unsigned(kern.globals.page_size)
+        r = self.total_alloc()
+
+        if self._vme.vme_kernel_object:
+            delta = unsigned(self._vme.vme_object_or_delta)
         else:
-            pgsz = unsigned(kern.globals.page_size)
-            if rzsz >= 2 * pgsz:
-                left_rz = pgsz
+            delta = unsigned(get_vme_object(self._vme).vo_size_delta)
 
-        return (left_rz, rzsz - left_rz)
+        if delta < page_size:
+            return (0, delta)
+        else:
+            return (page_size, delta - page_size)
 
-    def backtrace(self):
-        """ Returns the latest known backtrace recorded for a given address. """
-        slide = unsigned(kern.globals.vm_kernel_slid_base)
-        n = unsigned(self._hdr.frames)
-        return (slide + unsigned(self._hdr.backtrace[i]) for i in range(0, n))
+    def btref(self):
+        """ Returns the latest known btref recorded for a given address. """
+        return 0
+
+    def _find_vme(self, addr):
+        vme_ptr_type = GetType('vm_map_entry *')
+        return next((
+            vme
+            for vme
+            in IterateQueue(kern.globals.kernel_map.hdr.links, vme_ptr_type, "links")
+            if addr < unsigned(vme.links.end)
+        ), None)
 
 
 class MTEMemObject(object):
@@ -306,7 +345,6 @@ class MTEMemObject(object):
     def __init__(self, addr, zone):
         self._addr = addr
         self._zone = zone
-        self._btlib = BTLibrary()
 
     @property
     def type(self):
@@ -324,24 +362,22 @@ class MTEMemObject(object):
 
     def total_alloc(self):
         """ Returns an address and a size of the allocation, including redzones. """
-        return (self._addr, unsigned(self._zone.z_elem_size))
+        return (self._addr, unsigned(self._zone.elem_inner_size))
 
     def redzones(self):
         """ Returns a tuple of redzone sizes. """
         return (0, 0)
 
-    def backtrace(self):
+    def btref(self):
         """ Returns the latest known backtrace recorded for a given address. """
-        if not self._zone.z_btlog_kasan:
-            return None
-        btlog = BTLog(unsigned(self._zone.z_btlog_kasan))
+        btlog = self._zone.btlog
+        if not btlog:
+            return 0
         # Addresses are normalized (TBI stripped) in BT logs.
         stripped_addr = MTEShadowMap.clr_tbi(self._addr)
         records = btlog.iter_records(wantElement=stripped_addr, reverse=True)
         record = next(records, None)
-        if not record or record[3] == 0:
-            return None
-        return (f for f in self._btlib.get_stack(record[3]).frames())
+        return record.ref if record else 0
 
 
 class MTEMemObjectProvider(object):
@@ -352,12 +388,15 @@ class MTEMemObjectProvider(object):
 
     def lookup(self, addr):
         """  Finds and creates a memory object around given address. """
-        stripped_addr = MTEShadowMap.clr_tbi(addr)
-        z_meta = ZoneMeta(stripped_addr)
-        if not z_meta or not z_meta.zone:
-            raise ValueError("Address 0x{:x} not found in zones".format(addr))
-        sme = self._sm.resolve(z_meta.getElementAddress(stripped_addr))
-        return MTEMemObject(sme.addr, z_meta.zone)
+
+        try:
+            whatis = kmemory.WhatisProvider.get_shared()
+            waddr  = kmemory.KMem.get_shared().make_address(addr)
+            wmo    = whatis.find_provider(waddr).lookup(waddr)
+            addr  += wmo.elem_addr - waddr
+            return MTEMemObject(addr, wmo.zone)
+        except:
+            raise LookupError("Address {:#x} not found in zones".format(addr))
 
 
 class ClassicMemObjectProvider(object):
@@ -373,15 +412,23 @@ class ClassicMemObjectProvider(object):
         return self._create_mo(addr)
 
     def _create_mo(self, addr):
+        try:
+            whatis = kmemory.WhatisProvider.get_shared()
+            wmo    = whatis.find_provider(addr).lookup(addr)
+            return HeapMemObject(wmo.elem_addr, wmo.zone)
+        except:
+            pass
+
+        ranges = kern.globals.kmem_ranges
+        for i in range(1, GetEnumValue('vm_map_range_id_t', 'KMEM_RANGE_ID_MAX') + 1):
+            if addr < unsigned(ranges[i].min_address):
+                continue
+            if addr >= unsigned(ranges[i].max_address):
+                continue
+            return VMMemObject(addr)
+
         area = 32 * 1024
         sme = self._sm.resolve(addr)
-
-        if sme.value == 0xfa:
-            it = self._sm.dropwhile(lambda a: a.value == 0xfa, addr, area)
-            return self._create_heap_mo(next(it).addr)
-        elif sme.value == 0xfb:
-            it = self._sm.dropwhile(lambda a: a.value != 0xfa, addr, area, -1)
-            return self._create_heap_mo(self._sm.next_addr(next(it).addr))
 
         inner_object_tags = {0, 1, 2, 3, 4, 5, 6, 7, 0xf8}
 
@@ -410,14 +457,11 @@ class ClassicMemObjectProvider(object):
             mo_base, mo_size, left_rz = consume_until(it, sum_and_skip,
                                                       (addr, 0))
         except StopIteration:
-            raise ValueError("Cannot find left redzone")
-
-        if left_rz == 0xfa:
-            return self._create_heap_mo(mo_base)
+            raise LookupError("Left redzone of {:#x} not found".format(addr))
 
         # Next candidates: fakestack and global objects
         if left_rz not in {0xf1, 0xf2, 0xf9}:
-            raise ValueError("Unknown left redzone 0x{:x}".format(left_rz))
+            raise LookupError("Unknown left redzone {:#x}".format(left_rz))
 
         # Find memory object end.
         try:
@@ -425,45 +469,16 @@ class ClassicMemObjectProvider(object):
             _, mo_size, right_rz = consume_until(it, sum_and_skip,
                                                  (addr, mo_size))
         except StopIteration:
-            raise ValueError("Cannot find right redzone")
+            raise LookupError(
+                "Right redzone of {:#x} not found".format(addr))
 
         if right_rz == 0xf9:
             return MemObject("global", mo_base, mo_size, None)
         elif left_rz in {0xf1, 0xf2}:
             return MemObject("stack", mo_base, mo_size, None)
         else:
-            raise ValueError(
-                "Unknown redzone combination: 0x{:x}, 0x{:x}".format(
-                    left_rz, right_rz))
-
-    def _create_heap_mo(self, raw_addr):
-        addr = (raw_addr & ~0x7)
-
-        def magic_for_addr(addr, xor):
-            magic = addr & 0xffff
-            magic ^= (addr >> 16) & 0xffff
-            magic ^= (addr >> 32) & 0xffff
-            magic ^= (addr >> 48) & 0xffff
-            magic ^= xor
-            return magic
-
-        alloc_hdr = kern.GetValueFromAddress(
-            addr - AllocHeapMemObject.alloc_header_sz,
-            'struct kasan_alloc_header *')
-        free_hdr = kern.GetValueFromAddress(addr, 'struct freelist_entry *')
-
-        if magic_for_addr(addr, self.LIVE_XOR) == unsigned(alloc_hdr.magic):
-            base = addr - alloc_hdr.left_rz
-            if base <= addr < (base + alloc_hdr.alloc_size):
-                addr += alloc_hdr.user_size
-                footer = kern.GetValueFromAddress(
-                    addr, 'struct kasan_alloc_footer *')
-                return AllocHeapMemObject(alloc_hdr, footer)
-        elif magic_for_addr(addr, self.FREE_XOR) == unsigned(free_hdr.magic):
-            if addr <= raw_addr < addr + free_hdr.size:
-                return FreeHeapMemObject(free_hdr)
-
-        raise ValueError("No heap allocation found at 0x{:x}".format(raw_addr))
+            raise LookupError(
+                "Unknown redzone combination: {:#x}, {:#x}".format(left_rz, right_rz))
 
 
 @add_metaclass(ABCMeta)
@@ -484,19 +499,19 @@ class AbstractKasan(object):
     def from_shadow(self, saddr):
         """ Prints an address for a given shadow address. """
         sme = self._sm.resolve(saddr, True)
-        print("0x{:016x}".format(sme.addr))
+        print("{:#016x}".format(sme.addr))
 
     @abstractmethod
     def to_shadow(self, addr):
         """ Prints a shadow address for a given address. """
         sme = self._sm.resolve(addr, False)
-        print("0x{:016x}".format(sme.shaddr))
+        print("{:#016x}".format(sme.shaddr))
 
     @abstractmethod
     def shadow(self, addr, line_count):
         """ Prints content of a shadow map respective to a given address. """
         sme = self._sm.resolve(addr, False)
-        print("0x{:02x} @ 0x{:016x} [{}]\n\n".format(sme.value, sme.shaddr,
+        print("{:#02x} @ {:#016x} [{}]\n\n".format(sme.value, sme.shaddr,
                                                      self.tag_name(sme.value)))
         self._print_shadow_map(sme.shaddr, line_count)
 
@@ -511,11 +526,9 @@ class AbstractKasan(object):
         pass
 
     @abstractmethod
-    def quarantine(self, qtype, addrs, n=None, show_bt=False, O=None):
+    def quarantine(self, addrs, n=None, show_bt=False, O=None):
         """ Prints KASan quarantined addresses.
 
-            qtype:
-                Quarantine type
             addrs:
                 List of addresses to look up in quarantine
             n:
@@ -545,10 +558,10 @@ class AbstractKasan(object):
         print("{:<21s}: {:>s}".format("Model", self._kasan_variant))
         print("{:<21s}: {:>d} (1:{})".format("Scale", self._sm.scale,
                                              1 << self._sm.scale))
-        print("{:<21s}: 0x{:016x}".format("Shadow Offset", self._sm.base))
-        print("{:<21s}: 0x{:x}-0x{:x}".format("Shadow Pages", pbase, ptop))
-        print("{:<21s}: 0x{:x}".format("Shadow RO Valid Page", pbase))
-        print("{:<21s}: 0x{:x}".format("Shadow Next Page", pnext))
+        print("{:<21s}: {:#016x}".format("Shadow Offset", self._sm.base))
+        print("{:<21s}: {:#x}-{:#x}".format("Shadow Pages", pbase, ptop))
+        print("{:<21s}: {:#x}".format("Shadow RO Valid Page", pbase))
+        print("{:<21s}: {:#x}".format("Shadow Next Page", pnext))
         print("{:<21s}: {} of {} pages ({:.1f}%)".format("Shadow Utilization",
                                                          pages_used, pages_total, 100.0 * pages_used / pages_total))
 
@@ -586,14 +599,13 @@ class AbstractKasan(object):
                 raise ArgumentError("Missing address argument")
             self.heap(int(args[0], 0))
         elif cmd == "quarantine":
-            qtype = opts.get("-T", "zalloc")
             addrs = set(int(arg, base=16) for arg in args) if args else None
             count = int(opts.get("-C")) if "-C" in opts else None
             if addrs and count:
                 raise ArgumentError(
                     "Address list and -C are mutually exclusive")
             show_bt = "-S" in opts
-            self.quarantine(qtype, addrs, n=count, show_bt=show_bt, O=O)
+            self.quarantine(addrs, n=count, show_bt=show_bt, O=O)
         elif cmd == 'info':
             self.info()
         elif cmd in ('key', 'legend'):
@@ -644,7 +656,7 @@ class AbstractKasan(object):
             if i % line_width == 0:
                 if i > 0:
                     space = "" if base == shadow_addr else " "
-                    print("0x{:x}:{}{}".format(shaddr - line_width, space,
+                    print("{:#x}:{}{}".format(shaddr - line_width, space,
                                                line))
                 line = ""
                 base = shaddr
@@ -658,66 +670,61 @@ class AbstractKasan(object):
     def _print_mo(self, mo, addr):
         print("Object Info:")
 
-        mo_base, mo_size = mo.valid_alloc()
-        print(" Valid range: 0x{:x} -- 0x{:x} ({} bytes)".format(
-            mo_base, mo_base + mo_size - 1, mo_size))
+        vmo_base, vmo_size = mo.valid_alloc()
+        print(" Valid range: {:#x} -- {:#x} ({} bytes)".format(
+            vmo_base, vmo_base + vmo_size - 1, vmo_size))
 
         mo_base, mo_size = mo.total_alloc()
-        print(" Total range: 0x{:x} -- 0x{:x} ({} bytes)".format(
+        print(" Total range: {:#x} -- {:#x} ({} bytes)".format(
             mo_base, mo_base + mo_size - 1, mo_size))
 
-        if mo.redzones():
+        try:
             left_rz, right_rz = mo.redzones()
             print(" Redzones:    {} / {} bytes".format(left_rz, right_rz))
+        except:
+            pass
 
         print(" Type:        {}".format(mo.type.capitalize()))
         if mo.zone:
-            print(" Zone:        0x{:x} ({:s})".format(unsigned(mo.zone),
-                                                       mo.zone.z_name))
+            print(" Zone:        {:#x} ({:s})".format(
+                mo.zone.address, mo.zone.name))
 
-        print(" \n")
+        print()
         sme = self._sm.resolve(addr)
         print("Address Info:")
-        print(" Address:     0x{:x} (Shadow: 0x{:x})".format(
+        print(" Address:     {:#x} (Shadow: {:#x})".format(
             sme.addr, sme.shaddr))
-        print(" Tag:         0x{:X} ({})".format(sme.value,
+        print(" Tag:         {:#X} ({})".format(sme.value,
                                                  self.tag_name(sme.value)))
         print(" Offset:      {:d} (Remains: {:d} bytes)".format(
             addr - mo_base, mo_base + mo_size - addr))
 
-        frames = mo.backtrace()
-        if frames:
-            print(" \n")
+        btlib = kmemory.BTLibrary.get_shared()
+        btref = mo.btref()
+        if btref:
+            print()
             print("(De)Allocation Backtrace:")
-            for frame in frames:
-                print(" {}".format(GetSourceInformationForAddress(frame)))
-            print("", end=' ')
+            print(*self.symbolicated_frames(), sep="\n")
 
-        self._print_mo_content(mo_base, mo_size, 1)
+        self._print_mo_content(vmo_base, vmo_size)
 
-    def _print_mo_content(self, base, size, ctx):
+    def _print_mo_content(self, base, size):
         size = max(size, 16)
-        base -= base % 16
-        start = base - 16 * ctx
-        size += size % 16
-        size = min(size + 16 * 2 * ctx, 256)
+        size = min(size, 256)
 
         try:
-            data_array = kern.GetValueFromAddress(start, "uint8_t *")
-            print(" \n")
-            print_hex_data(data_array[0:size], start, "Object Memory Dump")
+            data_array = kern.GetValueFromAddress(base, "uint8_t *")
+            print()
+            print_hex_data(data_array[0:size], base, "Object Memory Dump")
         except Exception as e:
             print("Object content not available: {}".format(e))
 
 
 class ClassicKasan(AbstractKasan):
     """ Provides KASan Classic specific implementation of kasan commands. """
-    GUARD_SIZE = 16
-    QUARANTINE_TYPES = {
-        "zalloc": 0,
-        "kalloc": 1,
-        "fakestack": 2
-    }
+
+    alloc_header_sz = 16
+
     _shadow_strings = {
         0x00: 'VALID',
         0x01: 'PARTIAL1',
@@ -735,7 +742,6 @@ class ClassicKasan(AbstractKasan):
         0xf5: 'STACK_FREED',
         0xf8: 'STACK_OOSCOPE',
         0xf9: 'GLOBAL_RZ',
-        0xe9: 'HEAP_RZ',
         0xfa: 'HEAP_LEFT_RZ',
         0xfb: 'HEAP_RIGHT_RZ',
         0xfd: 'HEAP_FREED'
@@ -764,8 +770,8 @@ class ClassicKasan(AbstractKasan):
     def whatis(self, addr):
         mo = self._mo_provider.lookup(addr & ~0x7)
         if isinstance(mo, ShadowMapEntry):
-            print("Poisoned memory: shadow address: 0x{:x}, "
-                  "tag: 0x{:X} ({:s})".format(mo.shaddr, mo.value,
+            print("Poisoned memory: shadow address: {:#x}, "
+                  "tag: {:#X} ({:s})".format(mo.shaddr, mo.value,
                                               self.tag_name(mo.value)))
             return
         self._print_mo(mo, addr)
@@ -777,15 +783,15 @@ class ClassicKasan(AbstractKasan):
         else:
             print("Not a heap object")
 
-    def quarantine(self, qtype, addrs=None, n=None, show_bt=False, O=None):
-        qitems = self.quarantined(qtype)
+    def quarantine(self, addrs=None, n=None, show_bt=False, O=None):
+        qitems = self.quarantined()
         if n:
             from_tail = n < 0
             qitems = list(qitems)
             n = min(abs(n), len(qitems))
             qitems = qitems[-n:] if from_tail else qitems[:n]
         elif addrs:
-            qitems = (qi for qi in qitems if unsigned(qi) in addrs)
+            qitems = (qi for qi in qitems if unsigned(qi[1] + 16) in addrs)
         self._print_quarantined(qitems, show_bt, O)
 
     def legend(self):
@@ -796,45 +802,62 @@ class ClassicKasan(AbstractKasan):
         return self._shadow_strings.get(tag, 'Unknown')
 
     @staticmethod
-    def quarantined(qtype):
-        """Returns an iterator of memory addresses from a given quarantine.
-        Possible quarantine types are: `"zalloc"`, `"kalloc"` and `"fakestack"`. """
-        try:
-            q = kern.globals.quarantines[ClassicKasan.QUARANTINE_TYPES[qtype]]
-        except:
-            raise ArgumentError("Unknown quarantine type: {}".format(qtype))
-        return IterateTAILQ_HEAD(addressof(q.freelist), "list", 's')
+    def quarantined():
+        kmem = kmemory.KMem.get_shared()
+
+        for cpu, q in kmem.PERCPUValue('kasan_quarantine').items():
+            h  = q.chkGetChildMemberWithName('head').xDereference()
+            if not h:
+                continue
+            ty = h.GetType()
+            while True:
+                yield (cpu, h)
+                n = h.xGetValueAsInteger()
+                if not n:
+                    break
+                # `next` is a 48 bit bitfield, reconstruct the kernel address
+                n |= 0xffff000000000000
+                h = h.target.xCreateValueFromAddress(None, n, ty)
 
     @staticmethod
     def _print_quarantined(qitems, show_bt, O):
         """ Formats and prints quarantine entries. Includes a backtrace
             if `show_bt` is `True`.
         """
-        qitems_hdr = "{:>16s} {:>5s} {:>4s} {:>9s} {:>8s} {:>16s}".format(
-            "ADDRESS", "MAGIC", "CRC", "USER_SIZE", "SIZE", "ZONE")
-        qitem_hdr = (
-            "{addr:>16x} {e.magic:>05x} {e.crc:>04x} "
-            "{e.user_size:>9d} {e.size:>8d} {e.zone:>16x} ({zname:>s})"
-        )
+        qitems_hdr = "{:<3s}  {:<18s}  {:<18s}".format("CPU", "ADDRESS", "ZONE")
+        qitem_hdr = "{:<3d}  {:<#18x}  {:<#18x} ({:<s})"
+
+        whatis = kmemory.WhatisProvider.get_shared()
 
         if not show_bt:
             with O.table(qitems_hdr):
-                for qitem in qitems:
-                    zname = qitem.zone.z_name if qitem.zone else "not in zone"
-                    print(qitem_hdr.format(addr=unsigned(qitem),
-                                           e=qitem, zname=zname))
-            return
+                for cpu, qitem in qitems:
+                    addr  = qitem.GetLoadAddress() + ClassicKasan.alloc_header_sz
+                    wmo   = whatis.find_provider(addr).lookup(addr)
+                    zaddr = wmo.zone.address
+                    zname = wmo.zone.name
+                    print(qitem_hdr.format(cpu, addr, zaddr, zname))
 
-        for qitem in qitems:
-            print("  ")
-            with O.table(qitems_hdr):
-                zname = qitem.zone.z_name if qitem.zone else "not in zone"
-                print(qitem_hdr.format(addr=unsigned(qitem),
-                                       e=qitem, zname=zname))
-            print("  ")
-            for frame in FreeHeapMemObject(qitem).backtrace():
-                print("\t{}".format(GetSourceInformationForAddress(frame)))
+        else:
+            btlib = kmemory.BTLibrary.get_shared()
 
+            for cpu, qitem in qitems:
+                print()
+                with O.table(qitems_hdr):
+                    addr  = qitem.GetLoadAddress() + self.alloc_header_sz
+                    wmo   = whatis.find_provider(addr).lookup(addr)
+                    zaddr = wmo.zone.address
+                    zname = wmo.zone.name
+                    print(qitem_hdr.format(cpu, addr, zaddr, zname))
+                print()
+
+                print("alloc backtrace:")
+                ref = qitem.xGetValueAsInteger('alloc_btref')
+                print(*btlib.get_stack(ref).symbolicated_frames(), sep="\n")
+
+                print("free backtrace:")
+                ref = qitem.xGetValueAsInteger('free_btref')
+                print(*btlib.get_stack(ref).symbolicated_frames(), sep="\n")
 
 class MTESan(AbstractKasan):
     """ Provides MTESan specific implementation of kasan commands. """
@@ -861,15 +884,16 @@ class MTESan(AbstractKasan):
         sme = self._sm.resolve(addr)
         mo = self._mo_provider.lookup(sme.addr)
         self._print_mo(mo, sme.addr)
-        if mo.zone.z_btlog_kasan:
+        btlog = mo.zone.btlog
+        if btlog:
             print(
-                " \nHistory of object (de)allocations is stored in btlog 0x{:x}."
-                .format(mo.zone.z_btlog_kasan))
+                " \nHistory of object (de)allocations is stored in btlog {:#x}."
+                .format(btlog.address))
 
     def heap(self, addr):
         self.whatis(addr)
 
-    def quarantine(self, qtype, addrs=None, n=None, show_bt=False, O=None):
+    def quarantine(self, addrs=None, n=None, show_bt=False, O=None):
         print("MTESan does not maintain a quarantine.")
 
     def legend(self):
@@ -941,9 +965,8 @@ def Kasan(cmd_args=None, cmd_options=None, O=None):
 
         Show quarantined addresses
 
-            kasan quarantine [-T zalloc|kalloc|fakestack][-S][-C +-<num>][<addr1>...<addrN>]
+            kasan quarantine [-S][-C +-<num>][<addr1>...<addrN>]
 
-            -T zalloc|kalloc|fakestack  Quarantine type
             -S                          Show backtraces
             -C +-<num>                  Show first/last <num> quarantined items
             <addr1>...<addrN>           List of addresses to look up in quarantine
@@ -978,4 +1001,7 @@ def Kasan(cmd_args=None, cmd_options=None, O=None):
         readio = unsigned(kern.globals.kdp_read_io)
         assert readio == 1
 
-    kasan.command(cmd_args[0], cmd_args[1:], cmd_options, O)
+    try:
+        kasan.command(cmd_args[0], cmd_args[1:], cmd_options, O)
+    except LookupError as e:
+        print(e)

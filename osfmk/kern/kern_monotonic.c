@@ -168,8 +168,36 @@ mt_cur_cpu_cycles(void)
 }
 
 void
-mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, __unused uint64_t *instrs)
+mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, uint64_t *instrs)
 {
+#if defined(__arm64__)
+	if (!mt_core_supported) {
+		return;
+	}
+	struct mt_cpu *mtc = mt_cur_cpu();
+
+	/*
+	 * Keep the MSRs back-to-back to improve throughput.
+	 */
+	uint64_t cur_cycles = __builtin_arm_rsr64("PMC0");
+	uint64_t cur_instrs = __builtin_arm_rsr64("PMC1");
+
+	uint64_t cycles_sum = mtc->mtc_counts[MT_CORE_CYCLES];
+	uint64_t instrs_sum = mtc->mtc_counts[MT_CORE_INSTRS];
+	if (__probable(cur_cycles > mtc->mtc_snaps[MT_CORE_CYCLES])) {
+		cycles_sum += cur_cycles - mtc->mtc_snaps[MT_CORE_CYCLES];
+	}
+	if (__probable(cur_instrs > mtc->mtc_snaps[MT_CORE_INSTRS])) {
+		instrs_sum += cur_instrs - mtc->mtc_snaps[MT_CORE_INSTRS];
+	}
+
+	*cycles = cycles_sum;
+	*instrs = instrs_sum;
+	mtc->mtc_counts[MT_CORE_CYCLES] = cycles_sum;
+	mtc->mtc_counts[MT_CORE_INSTRS] = instrs_sum;
+	mtc->mtc_snaps[MT_CORE_CYCLES] = cur_cycles;
+	mtc->mtc_snaps[MT_CORE_INSTRS] = cur_instrs;
+#else // defined(__arm64__)
 	uint64_t counts[MT_CORE_NFIXED] = {0};
 	struct mt_cpu *mtc = mt_cur_cpu();
 
@@ -180,6 +208,7 @@ mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, __unused uint64_t *instrs
 
 	*cycles = counts[MT_CORE_CYCLES];
 	*instrs = counts[MT_CORE_INSTRS];
+#endif // !defined(__arm64__)
 }
 
 void

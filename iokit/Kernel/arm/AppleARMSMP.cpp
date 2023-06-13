@@ -269,8 +269,13 @@ PE_cpu_start(cpu_id_t target,
 	unsigned int cpu_id = target_to_cpu_id(target);
 
 	if (cpu_id != boot_cpu) {
+#if APPLEVIRTUALPLATFORM
+		/* When running virtualized, the reset vector address must be passed to PMGR explicitly */
 		extern unsigned int LowResetVectorBase;
 		gPMGR->enableCPUCore(cpu_id, ml_vtophys((vm_offset_t)&LowResetVectorBase));
+#else
+		gPMGR->enableCPUCore(cpu_id, 0);
+#endif
 	}
 	return KERN_SUCCESS;
 }

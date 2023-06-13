@@ -92,6 +92,7 @@
 #include <sys/priv.h>
 #include <sys/sysctl.h>
 #include <sys/sys_domain.h>
+#include <sys/types.h>
 
 #include <security/audit/audit.h>
 
@@ -139,21 +140,21 @@
 #endif
 
 /* Forward declarations for referenced types */
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(void, void, PTR);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(uint8_t, uint8_t, PTR);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(int32_t, int32, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(int, int, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(user_ssize_t, user_ssize, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(unsigned int, uint, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(sae_connid_t, sae_connid, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(socklen_t, socklen, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct setsockopt_args, setsockopt_args, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct connectx_args, connectx_args, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct disconnectx_args, disconnectx_args, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct cmsghdr, cmsghdr, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct timeval, timeval, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct user64_timeval, user64_timeval, REF);
-__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct user32_timeval, user32_timeval, REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(void, void, __CCT_PTR);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(uint8_t, uint8_t, __CCT_PTR);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(int32_t, int32, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(int, int, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(user_ssize_t, user_ssize, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(unsigned int, uint, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(sae_connid_t, sae_connid, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(socklen_t, socklen, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct setsockopt_args, setsockopt_args, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct connectx_args, connectx_args, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct disconnectx_args, disconnectx_args, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct cmsghdr, cmsghdr, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct timeval, timeval, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct user64_timeval, user64_timeval, __CCT_REF);
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct user32_timeval, user32_timeval, __CCT_REF);
 
 static int sendit(proc_ref_t, socket_ref_t, user_msghdr_ref_t, uio_t,
     int, int32_ref_t );
@@ -935,7 +936,11 @@ connectx_nocancel(proc_ref_t p, connectx_args_ref_t uap, int_ref_t retval)
 	}
 
 	if (uap->len != USER_ADDR_NULL) {
-		error1 = copyout(&bytes_written, uap->len, sizeof(uap->len));
+		if (IS_64BIT_PROCESS(p)) {
+			error1 = copyout(&bytes_written, uap->len, sizeof(user64_size_t));
+		} else {
+			error1 = copyout(&bytes_written, uap->len, sizeof(user32_size_t));
+		}
 		/* give precedence to connectitx errors */
 		if ((error1 != 0) && (error == 0)) {
 			error = error1;

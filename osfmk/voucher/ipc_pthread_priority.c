@@ -27,7 +27,6 @@
  */
 
 #include <voucher/ipc_pthread_priority_types.h>
-#include <voucher/ipc_pthread_priority_internal.h>
 #include <mach/mach_types.h>
 #include <mach/kern_return.h>
 #include <ipc/ipc_port.h>
@@ -43,6 +42,8 @@
 #include <pthread/priority_private.h>
 
 ipc_voucher_attr_control_t  ipc_pthread_priority_voucher_attr_control;    /* communication channel from PTHPRIORITY to voucher system */
+
+#define PTHPRIORITY_ATTR_DEFAULT_VALUE (0)
 
 #define IPC_PTHREAD_PRIORITY_VALUE_TO_HANDLE(x) ((mach_voucher_attr_value_handle_t)(x))
 #define HANDLE_TO_IPC_PTHREAD_PRIORITY_VALUE(x) ((ipc_pthread_priority_value_t)(x))
@@ -105,24 +106,20 @@ const struct ipc_voucher_attr_manager ipc_pthread_priority_manager = {
  * Purpose: Initialize the IPC_PTHREAD_PRIORITY subsystem.
  * Returns: None.
  */
-void
+__startup_func
+static void
 ipc_pthread_priority_init(void)
 {
-	kern_return_t kr = KERN_SUCCESS;
-
 	/* Register the ipc_pthread_priority manager with the Vouchers sub system. */
-	kr = ipc_register_well_known_mach_voucher_attr_manager(
+	ipc_register_well_known_mach_voucher_attr_manager(
 		&ipc_pthread_priority_manager,
 		0,
 		MACH_VOUCHER_ATTR_KEY_PTHPRIORITY,
 		&ipc_pthread_priority_voucher_attr_control);
-	if (kr != KERN_SUCCESS) {
-		panic("IPC_PTHREAD_PRIORITY subsystem initialization failed");
-	}
 
 	kprintf("IPC_PTHREAD_PRIORITY subsystem is initialized\n");
-	return;
 }
+STARTUP(MACH_IPC, STARTUP_RANK_FIRST, ipc_pthread_priority_init);
 
 /*
  * IPC_PTHREAD_PRIORITY Resource Manager Routines.

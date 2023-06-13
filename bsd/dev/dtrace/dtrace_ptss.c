@@ -181,12 +181,34 @@ dtrace_ptss_allocate_page(struct proc* p)
 	 * To ensure correct permissions, we must set the page protections separately.
 	 */
 	vm_prot_t cur_protection = VM_PROT_READ | VM_PROT_EXECUTE;
-	vm_prot_t max_protection = VM_PROT_READ | VM_PROT_EXECUTE | VM_PROT_WRITE;
+	vm_prot_t max_protection = VM_PROT_READ | VM_PROT_EXECUTE;
+	kern_return_t kr;
 
-	kern_return_t kr = mach_vm_map_kernel(map, &addr, size, 0, VM_FLAGS_ANYWHERE, VM_MAP_KERNEL_FLAGS_NONE, VM_KERN_MEMORY_NONE, IPC_PORT_NULL, 0, FALSE, cur_protection, max_protection, VM_INHERIT_DEFAULT);
+	kr = mach_vm_map_kernel(map, &addr, size, 0,
+	    VM_MAP_KERNEL_FLAGS_ANYWHERE(), IPC_PORT_NULL, 0, FALSE,
+	    cur_protection, max_protection, VM_INHERIT_DEFAULT);
 	if (kr != KERN_SUCCESS) {
 		goto err;
 	}
+
+	/*
+	 * To ensure the page is properly marked as user debug, temporarily change
+	 * the permissions to rw and then back again to rx. The VM will keep track
+	 * of this remapping and on fault will pass PMAP_OPTIONS_XNU_USER_DEBUG
+	 * properly to the PMAP layer.
+	 */
+	kr = mach_vm_protect(map, (mach_vm_offset_t)addr, (mach_vm_size_t)size, 0,
+	    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+	if (kr != KERN_SUCCESS) {
+		goto err;
+	}
+
+	kr = mach_vm_protect(map, (mach_vm_offset_t)addr, (mach_vm_size_t)size, 0,
+	    VM_PROT_READ | VM_PROT_EXECUTE);
+	if (kr != KERN_SUCCESS) {
+		goto err;
+	}
+
 	/*
 	 * If on embedded, remap the scratch space as writable at another
 	 * virtual address

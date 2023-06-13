@@ -1115,7 +1115,7 @@ uio_calculateresid( uio_t a_uio )
 		uiovp = uio_uiovp(a_uio);
 		a_uio->uio_resid_64 = 0;
 		for (i = 0; i < a_uio->uio_max_iovs; i++) {
-			if (uiovp[i].iov_len != 0 && uiovp[i].iov_base != 0) {
+			if (uiovp[i].iov_len != 0) {
 				if (uiovp[i].iov_len > LONG_MAX) {
 					return EINVAL;
 				}
@@ -1138,7 +1138,7 @@ uio_calculateresid( uio_t a_uio )
 		kiovp = uio_kiovp(a_uio);
 		a_uio->uio_resid_64 = 0;
 		for (i = 0; i < a_uio->uio_max_iovs; i++) {
-			if (kiovp[i].iov_len != 0 && kiovp_get_base(&kiovp[i]) != 0) {
+			if (kiovp[i].iov_len != 0) {
 				if (kiovp[i].iov_len > LONG_MAX) {
 					return EINVAL;
 				}

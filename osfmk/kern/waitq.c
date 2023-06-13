@@ -200,7 +200,7 @@ static_assert(__alignof(struct waitq) == WQ_OPAQUE_ALIGN, "waitq structure align
 static KALLOC_TYPE_DEFINE(waitq_sellink_zone, struct waitq_sellink, KT_PRIV_ACCT);
 static KALLOC_TYPE_DEFINE(waitq_link_zone, struct waitq_link, KT_PRIV_ACCT);
 ZONE_DEFINE_ID(ZONE_ID_SELECT_SET, "select_set", struct select_set,
-    ZC_SEQUESTER | ZC_KASAN_NOQUARANTINE | ZC_ZFREE_CLEARMEM);
+    ZC_SEQUESTER | ZC_NOPGZ | ZC_ZFREE_CLEARMEM);
 
 static LCK_GRP_DECLARE(waitq_lck_grp, "waitq");
 
@@ -571,17 +571,26 @@ waitq_thread_insert(struct waitq *safeq, thread_t thread,
 }
 
 /**
- * clear the thread-related waitq state
+ * clear the thread-related waitq state, moving the thread from
+ * TH_WAIT to TH_WAIT | TH_WAKING, where it is no longer on a waitq and
+ * can expect to be go'ed in the near future.
+ *
+ * Clearing the waitq prevents further propagation of a turnstile boost
+ * on the thread and stops a clear_wait from succeeding.
  *
  * Conditions:
- *	'thread' is locked
+ *	'thread' is locked, thread is waiting
  */
 static inline void
 thread_clear_waitq_state(thread_t thread)
 {
+	assert(thread->state & TH_WAIT);
+
 	thread->waitq.wq_q = NULL;
 	thread->wait_event = NO_EVENT64;
 	thread->at_safe_point = FALSE;
+	thread->block_hint = kThreadWaitNone;
+	thread->state |= TH_WAKING;
 }
 
 static inline void
@@ -603,6 +612,13 @@ waitq_thread_remove(waitq_t wq, thread_t thread)
 	}
 
 	thread_clear_waitq_state(thread);
+}
+
+bool
+waitq_wait_possible(thread_t thread)
+{
+	return waitq_is_null(thread->waitq) &&
+	       ((thread->state & TH_WAKING) == 0);
 }
 
 __startup_func
@@ -737,13 +753,6 @@ waitq_lock_reserve(waitq_t wq, uint32_t *ticket)
 	return hw_lck_ticket_reserve(&wq.wq_q->waitq_interlock, ticket, &waitq_lck_grp);
 }
 
-static hw_lock_status_t
-waitq_lock_reserve_allow_invalid(waitq_t wq, uint32_t *ticket)
-{
-	return hw_lck_ticket_reserve_allow_invalid(&wq.wq_q->waitq_interlock,
-	           ticket, &waitq_lck_grp);
-}
-
 void
 waitq_lock_wait(waitq_t wq, uint32_t ticket)
 {
@@ -788,11 +797,13 @@ struct waitq_select_args {
 	event64_t               event;
 	wait_result_t           result;
 	waitq_wakeup_flags_t    flags;
+	uint32_t                max_threads;
+	bool                    is_identified;
 
 	/* output parameters */
-	uint32_t                max_threads;
+	/* counts all woken threads, may have more threads than on threadq */
 	uint32_t                nthreads;
-	spl_t                   spl;
+	/* preemption is disabled while threadq is non-empty */
 	circle_queue_head_t     threadq;
 };
 
@@ -808,11 +819,6 @@ maybe_adjust_thread_pri(
 	 * the default WAITQ_BOOST_PRIORITY (if it's not already equal or
 	 * higher priority).  This boost must be removed via a call to
 	 * waitq_clear_promotion_locked before the thread waits again.
-	 *
-	 * WAITQ_PROMOTE_PRIORITY is -2.
-	 * Anything above 0 represents a mutex promotion.
-	 * The default 'no action' value is -1.
-	 * TODO: define this in a header
 	 */
 	if (flags & WAITQ_PROMOTE_PRIORITY) {
 		uintptr_t trace_waitq = 0;
@@ -824,6 +830,60 @@ maybe_adjust_thread_pri(
 	}
 }
 
+static void
+waitq_select_queue_add(waitq_t waitq, thread_t thread, struct waitq_select_args *args)
+{
+	spl_t s = splsched();
+
+	thread_lock(thread);
+	thread_clear_waitq_state(thread);
+
+	if (!args->is_identified && thread->state & TH_RUN) {
+		/*
+		 * A thread that is currently on core may try to clear its own
+		 * wait with clear wait or by waking its own event instead of
+		 * calling thread_block as is normally expected.  After doing
+		 * this, it expects to be able to immediately wait again.
+		 *
+		 * If we are currently on a different CPU and waking that
+		 * thread, as soon as we unlock the waitq and thread, that
+		 * operation could complete, but we would still be holding the
+		 * thread on our flush queue, leaving it in the waking state
+		 * where it can't yet assert another wait.
+		 *
+		 * Since we know that we won't actually need to enqueue the
+		 * thread on the runq due to it being on core, we can just
+		 * immediately unblock it here so that the thread will be in a
+		 * waitable state after we release its thread lock from this
+		 * lock hold.
+		 *
+		 * Wakeups using *_identify can't be allowed to pass
+		 * thread block until they're resumed, so they can't use
+		 * this path.  That means they are not allowed to skip calling
+		 * thread_block.
+		 */
+		maybe_adjust_thread_pri(thread, args->flags, waitq);
+		thread_go(thread, args->result, false);
+	} else {
+		if (circle_queue_empty(&args->threadq)) {
+			/*
+			 * preemption is disabled while threads are
+			 * on threadq - balanced in:
+			 * waitq_resume_identified_thread
+			 * waitq_select_queue_flush
+			 */
+			disable_preemption();
+		}
+
+		circle_enqueue_tail(&args->threadq, &thread->wait_links);
+	}
+
+	thread_unlock(thread);
+
+	splx(s);
+}
+
+
 #if SCHED_HYGIENE_DEBUG
 
 TUNABLE_DEV_WRITEABLE(uint32_t, waitq_flush_excess_threads, "waitq_flush_excess_threads", 20);
@@ -831,26 +891,33 @@ TUNABLE_DEV_WRITEABLE(uint32_t, waitq_flush_excess_time_mt, "waitq_flush_excess_
 
 #endif /* SCHED_HYGIENE_DEBUG */
 
+
 static void
 waitq_select_queue_flush(waitq_t waitq, struct waitq_select_args *args)
 {
 	thread_t thread = THREAD_NULL;
-	__assert_only kern_return_t kr;
+
+	assert(!circle_queue_empty(&args->threadq));
 
 	int flushed_threads = 0;
 
 #if SCHED_HYGIENE_DEBUG
 	uint64_t start_time = ml_get_sched_hygiene_timebase();
-	/* Preemption is enabled on the final unlock */
 	disable_preemption();
 #endif /* SCHED_HYGIENE_DEBUG */
 
 	cqe_foreach_element_safe(thread, &args->threadq, wait_links) {
 		circle_dequeue(&args->threadq, &thread->wait_links);
+		assert_thread_magic(thread);
+
+		spl_t s = splsched();
+
+		thread_lock(thread);
 		maybe_adjust_thread_pri(thread, args->flags, waitq);
-		kr = thread_go(thread, args->result, args->flags & WAITQ_HANDOFF);
-		assert(kr == KERN_SUCCESS);
+		thread_go(thread, args->result, args->flags & WAITQ_HANDOFF);
 		thread_unlock(thread);
+
+		splx(s);
 
 		flushed_threads++;
 	}
@@ -868,13 +935,11 @@ waitq_select_queue_flush(waitq_t waitq, struct waitq_select_args *args)
 		/*
 		 * Hack alert:
 		 *
-		 * The current way that waitq_wakeup_all is structured
-		 * requires all of the threads to be moved from
-		 * the waitq to the runq in one giant interrupts
-		 * disabled region.  With enough threads and lock
-		 * contention, it can take Too Long to get through
-		 * all the threads, leading to the interrupt watchdog
-		 * going off.
+		 * If a wakeup-all is done with interrupts disabled, or if
+		 * there are enough threads / lock contention to pass the
+		 * preemption disable threshold, it can take Too Long to get
+		 * through waking up all the threads, leading to
+		 * the watchdog going off.
 		 *
 		 * While we are working on a change to break up this
 		 * giant glob of work into smaller chunks, remove this
@@ -886,11 +951,16 @@ waitq_select_queue_flush(waitq_t waitq, struct waitq_select_args *args)
 		 * excess threads and long time, so that a single
 		 * thread wakeup that gets stuck is still caught.
 		 *
-		 * This will be removed with
-		 * rdar://90325140 (Break up large waitq_select_queue_flush operations to reduce time spent with interrupts disabled)
+		 * This was improved with
+		 * rdar://90325140
+		 * to enable interrupts during most wakeup-all's
+		 * and will be removed with
+		 * rdar://101110793
 		 */
-		ml_spin_debug_reset(current_thread());
-		ml_irq_debug_abandon();
+		if (ml_get_interrupts_enabled() == false) {
+			ml_spin_debug_reset(current_thread());
+			ml_irq_debug_abandon();
+		}
 		abandon_preemption_disable_measurement();
 
 		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_INT_MASKED_RESET), flushed_threads, end_time - start_time);
@@ -899,6 +969,12 @@ waitq_select_queue_flush(waitq_t waitq, struct waitq_select_args *args)
 	enable_preemption();
 
 #endif /* SCHED_HYGIENE_DEBUG */
+
+	/*
+	 * match the disable when making threadq nonempty from
+	 * waitq_select_queue_add
+	 */
+	enable_preemption();
 }
 
 /**
@@ -908,13 +984,9 @@ waitq_select_queue_flush(waitq_t waitq, struct waitq_select_args *args)
  *	args->waitq (and the posted waitq) is locked
  *
  * Notes:
- *	Uses the optional select callback function to refine the selection
- *	of one or more threads from a waitq. The select callback is invoked
- *	once for every thread that is found to be waiting on the input args->waitq.
- *
- *	If one or more threads are selected, this may disable interrupts.
- *	The previous interrupt state is returned in args->spl and should
- *	be used in a call to splx() if threads are returned to the caller.
+ *	If one or more threads are selected, this may disable preemption,
+ *	which is balanced when the threadq is flushed in
+ *	waitq_resume_identified_thread or waitq_select_queue_flush.
  */
 static waitq_flags_t
 waitq_queue_iterate_locked(struct waitq *safeq, struct waitq *waitq,
@@ -933,13 +1005,11 @@ waitq_queue_iterate_locked(struct waitq *safeq, struct waitq *waitq,
 		 * requested wait event.
 		 */
 		if (waitq_same(thread->waitq, waitq) && thread->wait_event == args->event) {
-			if (args->nthreads == 0 && safeq == waitq) {
-				args->spl = splsched();
-			}
-			thread_lock(thread);
-			thread_clear_waitq_state(thread);
+			/* We found a matching thread! Pull it from the queue. */
+
 			circle_dequeue(&safeq->waitq_queue, &thread->wait_links);
-			circle_enqueue_tail(&args->threadq, &thread->wait_links);
+
+			waitq_select_queue_add(waitq, thread, args);
 
 			if (++args->nthreads >= args->max_threads) {
 				break;
@@ -967,8 +1037,7 @@ waitq_queue_iterate_locked(struct waitq *safeq, struct waitq *waitq,
  *	Also, the implementation makes sure that all threads in a priority ordered
  *	waitq are waiting on the same wait event. This is not necessarily true for
  *	non-priority ordered waitqs. If one or more threads are selected, this may
- *	disable interrupts. The previous interrupt state is returned in args->spl
- *	and should be used in a call to splx() if threads are returned to the caller.
+ *	disable preemption.
  */
 static void
 waitq_prioq_iterate_locked(
@@ -995,6 +1064,8 @@ waitq_prioq_iterate_locked(
 		thread = priority_queue_remove_max(&ts_wq->waitq_prio_queue,
 		    struct thread, wait_prioq_links);
 
+		assert_thread_magic(thread);
+
 		/*
 		 * Ensure the wait event matches since priority ordered waitqs do not
 		 * support multiple events in the same waitq.
@@ -1012,12 +1083,7 @@ waitq_prioq_iterate_locked(
 			update_inheritor = false;
 		}
 
-		if (args->nthreads == 0 && ts_wq == waitq) {
-			args->spl = splsched();
-		}
-		thread_lock(thread);
-		thread_clear_waitq_state(thread);
-		circle_enqueue_tail(&args->threadq, &thread->wait_links);
+		waitq_select_queue_add(waitq, thread, args);
 
 		if (++args->nthreads >= args->max_threads) {
 			break;
@@ -1035,19 +1101,13 @@ waitq_prioq_iterate_locked(
  * @c waitq is locked.
  * If @c waitq is a set, then the wait queue posting to it is locked too.
  *
- * Uses the optional select callback function to refine the selection
- * of one or more threads from a waitq.
- *
- * The select callback is invoked once for every thread that
- * is found to be waiting on the input args->waitq.
- *
- * If one or more threads are selected, this may disable interrupts.
- * The previous interrupt state is returned in args->spl and should
- * be used in a call to splx() if threads are returned to the caller.
+ * If one or more threads are selected, this may disable preemption.
  */
 static void
 do_waitq_select_n_locked_queue(waitq_t waitq, struct waitq_select_args *args)
 {
+	spl_t s = 0;
+
 	struct waitq *safeq;
 	waitq_flags_t eventmask, remaining_eventmask;
 
@@ -1062,9 +1122,7 @@ do_waitq_select_n_locked_queue(waitq_t waitq, struct waitq_select_args *args)
 			return;
 		}
 
-		if (args->nthreads == 0) {
-			args->spl = splsched();
-		}
+		s = splsched();
 		waitq_lock(safeq);
 	}
 
@@ -1100,10 +1158,7 @@ do_waitq_select_n_locked_queue(waitq_t waitq, struct waitq_select_args *args)
 	/* unlock the safe queue if we locked one above */
 	if (!waitq_same(waitq, safeq)) {
 		waitq_unlock(safeq);
-		if (args->nthreads == 0) {
-			splx(args->spl);
-			args->spl = 0;
-		}
+		splx(s);
 	}
 }
 
@@ -1123,8 +1178,6 @@ do_waitq_select_n_locked_sets(waitq_t waitq, struct waitq_select_args *args)
 {
 	waitq_type_t wq_type = waitq_type(waitq);
 	waitq_link_t link;
-	hw_lock_status_t st;
-	uint32_t ticket;
 
 	assert(args->event == NO_EVENT64);
 	assert(waitq_preposts(waitq));
@@ -1169,43 +1222,17 @@ do_waitq_select_n_locked_sets(waitq_t waitq, struct waitq_select_args *args)
 			if (!wqset.wqs_sel) {
 				continue;
 			}
-			st = waitq_lock_reserve_allow_invalid(wqset, &ticket);
-			if (st == HW_LOCK_INVALID) {
+			if (!waitq_lock_allow_invalid(wqset)) {
 				continue;
 			}
-		} else {
-			static_assert(HW_LOCK_CONTENDED == 0);
-			st = waitq_lock_reserve(wqset, &ticket);
-		}
-		if (st == HW_LOCK_CONTENDED) {
-			if (!circle_queue_empty(&args->threadq)) {
-				/*
-				 * We are holding several thread locks.
-				 *
-				 * If we fail to acquire this waitq set lock,
-				 * it is possible that another core is holding
-				 * that (non IRQ-safe) waitq set lock,
-				 * while an interrupt is trying to grab the
-				 * thread lock of ones of those threads.
-				 *
-				 * In order to avoid deadlocks, flush out
-				 * the queue of threads.
-				 *
-				 * Note: this code will never run for `identify`
-				 *       variants (when `max_threads` is 1).
-				 */
-				assert(args->max_threads > 1);
-				waitq_select_queue_flush(waitq, args);
-			}
-			waitq_lock_wait(wqset, ticket);
-		}
-
-		if (wq_type == WQT_SELECT) {
 			if (!wql_sellink_valid(wqset.wqs_sel, link.wqls)) {
 				goto out_unlock;
 			}
-		} else if (!waitq_valid(wqset)) {
-			goto out_unlock;
+		} else {
+			waitq_lock(wqset);
+			if (!waitq_valid(wqset)) {
+				goto out_unlock;
+			}
 		}
 
 		/*
@@ -1359,16 +1386,16 @@ waitq_assert_wait64_locked(waitq_t waitq,
 		waitq_thread_insert(safeq, thread, waitq, wait_event);
 
 		if (deadline != 0) {
-			boolean_t act;
+			bool was_active;
 
-			act = timer_call_enter_with_leeway(thread->wait_timer,
+			was_active = timer_call_enter_with_leeway(thread->wait_timer,
 			    NULL,
 			    deadline, leeway,
 			    urgency, FALSE);
-			if (!act) {
+			if (!was_active) {
 				thread->wait_timer_active++;
 			}
-			thread->wait_timer_is_set = TRUE;
+			thread->wait_timer_armed = true;
 		}
 
 		if (waitq_is_global(safeq)) {
@@ -1479,6 +1506,12 @@ waitq_should_unlock(waitq_wakeup_flags_t flags)
 	return (flags & (WAITQ_UNLOCK | WAITQ_KEEP_LOCKED)) == WAITQ_UNLOCK;
 }
 
+static inline bool
+waitq_should_enable_interrupts(waitq_wakeup_flags_t flags)
+{
+	return (flags & (WAITQ_UNLOCK | WAITQ_KEEP_LOCKED | WAITQ_ENABLE_INTERRUPTS)) == (WAITQ_UNLOCK | WAITQ_ENABLE_INTERRUPTS);
+}
+
 kern_return_t
 waitq_wakeup64_all_locked(
 	waitq_t                 waitq,
@@ -1495,6 +1528,11 @@ waitq_wakeup64_all_locked(
 
 	assert(waitq_held(waitq));
 
+	if (flags & WAITQ_ENABLE_INTERRUPTS) {
+		assert(waitq_should_unlock(flags));
+		assert(ml_get_interrupts_enabled() == false);
+	}
+
 	do_waitq_select_n_locked(waitq, &args);
 	waitq_stats_count_wakeup(waitq, args.nthreads);
 
@@ -1502,10 +1540,15 @@ waitq_wakeup64_all_locked(
 		waitq_unlock(waitq);
 	}
 
-	waitq_select_queue_flush(waitq, &args);
+	if (waitq_should_enable_interrupts(flags)) {
+		ml_set_interrupts_enabled(true);
+	}
+
+	if (!circle_queue_empty(&args.threadq)) {
+		waitq_select_queue_flush(waitq, &args);
+	}
 
 	if (args.nthreads > 0) {
-		splx(args.spl);
 		return KERN_SUCCESS;
 	}
 
@@ -1528,6 +1571,11 @@ waitq_wakeup64_one_locked(
 
 	assert(waitq_held(waitq));
 
+	if (flags & WAITQ_ENABLE_INTERRUPTS) {
+		assert(waitq_should_unlock(flags));
+		assert(ml_get_interrupts_enabled() == false);
+	}
+
 	do_waitq_select_n_locked(waitq, &args);
 	waitq_stats_count_wakeup(waitq, args.nthreads);
 
@@ -1535,10 +1583,15 @@ waitq_wakeup64_one_locked(
 		waitq_unlock(waitq);
 	}
 
-	waitq_select_queue_flush(waitq, &args);
+	if (waitq_should_enable_interrupts(flags)) {
+		ml_set_interrupts_enabled(true);
+	}
+
+	if (!circle_queue_empty(&args.threadq)) {
+		waitq_select_queue_flush(waitq, &args);
+	}
 
 	if (args.nthreads > 0) {
-		splx(args.spl);
 		return KERN_SUCCESS;
 	}
 
@@ -1550,16 +1603,15 @@ waitq_wakeup64_identify_locked(
 	waitq_t                 waitq,
 	event64_t               wake_event,
 	wait_result_t           result,
-	waitq_wakeup_flags_t    flags,
-	spl_t                  *spl)
+	waitq_wakeup_flags_t    flags)
 {
 	struct waitq_select_args args = {
 		.event = wake_event,
 		.result = result,
 		.flags = flags,
 		.max_threads = 1,
+		.is_identified = true,
 	};
-	thread_t thread = THREAD_NULL;
 
 	assert(waitq_held(waitq));
 
@@ -1570,19 +1622,43 @@ waitq_wakeup64_identify_locked(
 		waitq_unlock(waitq);
 	}
 
-	if (args.nthreads > 0) {
-		kern_return_t __assert_only ret;
-
-		thread = cqe_dequeue_head(&args.threadq, struct thread, wait_links);
-		assert(args.nthreads == 1 && circle_queue_empty(&args.threadq));
-
-		maybe_adjust_thread_pri(thread, flags, waitq);
-		ret = thread_go(thread, result, (flags & WAITQ_HANDOFF));
-		assert(ret == KERN_SUCCESS);
-		*spl = args.spl;
+	if (waitq_should_enable_interrupts(flags)) {
+		ml_set_interrupts_enabled(true);
 	}
 
-	return thread; /* locked if not NULL (caller responsible for spl) */
+	if (args.nthreads > 0) {
+		thread_t thread = cqe_dequeue_head(&args.threadq, struct thread, wait_links);
+
+		assert(args.nthreads == 1 && circle_queue_empty(&args.threadq));
+
+		/* Thread is off waitq, not unblocked yet */
+
+		return thread;
+	}
+
+	return THREAD_NULL;
+}
+
+void
+waitq_resume_identified_thread(
+	waitq_t                 waitq,
+	thread_t                thread,
+	wait_result_t           result,
+	waitq_wakeup_flags_t    flags)
+{
+	spl_t spl = splsched();
+
+	thread_lock(thread);
+
+	assert((thread->state & (TH_WAIT | TH_WAKING)) == (TH_WAIT | TH_WAKING));
+
+	maybe_adjust_thread_pri(thread, flags, waitq);
+	thread_go(thread, result, (flags & WAITQ_HANDOFF));
+
+	thread_unlock(thread);
+	splx(spl);
+
+	enable_preemption(); // balance disable upon pulling thread
 }
 
 kern_return_t
@@ -1601,6 +1677,9 @@ waitq_wakeup64_thread_and_unlock(
 	/*
 	 * See if the thread was still waiting there.  If so, it got
 	 * dequeued and returned locked.
+	 *
+	 * By holding the thread locked across the go, a thread on another CPU
+	 * can't see itself in 'waking' state, even if it uses clear_wait.
 	 */
 	thread_lock(thread);
 
@@ -1613,8 +1692,7 @@ waitq_wakeup64_thread_and_unlock(
 	waitq_unlock(waitq);
 
 	if (ret == KERN_SUCCESS) {
-		ret = thread_go(thread, result, /* handoff */ false);
-		assert(ret == KERN_SUCCESS);
+		thread_go(thread, result, /* handoff */ false);
 	}
 
 	thread_unlock(thread);
@@ -1707,7 +1785,7 @@ waitq_deinit(waitq_t waitq)
 	/*
 	 * The waitq must have been invalidated, or hw_lck_ticket_destroy()
 	 * below won't wait for reservations from waitq_lock_reserve(),
-	 * waitq_lock_reserve_allow_invalid() or waitq_lock_allow_invalid().
+	 * or waitq_lock_allow_invalid().
 	 */
 	assert(!waitq_valid(waitq.wqs_set));
 	hw_lck_ticket_destroy(&waitq.wq_q->waitq_interlock, &waitq_lck_grp);
@@ -2258,25 +2336,19 @@ waitq_wakeup64_one(
 	wait_result_t           result,
 	waitq_wakeup_flags_t    flags)
 {
-	kern_return_t kr;
-	spl_t spl = 0;
-
 	__waitq_validate(waitq);
+
+	spl_t spl = 0;
 
 	if (waitq_irq_safe(waitq)) {
 		spl = splsched();
 	}
+
 	waitq_lock(waitq);
 
-	/* waitq is locked upon return */
-	kr = waitq_wakeup64_one_locked(waitq, wake_event, result,
-	    flags | WAITQ_UNLOCK);
-
-	if (waitq_irq_safe(waitq)) {
-		splx(spl);
-	}
-
-	return kr;
+	/* waitq is unlocked upon return, splx is handled */
+	return waitq_wakeup64_one_locked(waitq, wake_event, result,
+	           flags | waitq_flags_splx(spl) | WAITQ_UNLOCK);
 }
 
 kern_return_t
@@ -2286,24 +2358,19 @@ waitq_wakeup64_all(
 	wait_result_t           result,
 	waitq_wakeup_flags_t    flags)
 {
-	kern_return_t ret;
-	spl_t spl = 0;
-
 	__waitq_validate(waitq);
+
+	spl_t spl = 0;
 
 	if (waitq_irq_safe(waitq)) {
 		spl = splsched();
 	}
+
 	waitq_lock(waitq);
 
-	ret = waitq_wakeup64_all_locked(waitq, wake_event, result,
-	    flags | WAITQ_UNLOCK);
-
-	if (waitq_irq_safe(waitq)) {
-		splx(spl);
-	}
-
-	return ret;
+	/* waitq is unlocked upon return, splx is handled */
+	return waitq_wakeup64_all_locked(waitq, wake_event, result,
+	           flags | waitq_flags_splx(spl) | WAITQ_UNLOCK);
 }
 
 kern_return_t
@@ -2334,33 +2401,31 @@ waitq_wakeup64_identify(
 	wait_result_t           result,
 	waitq_wakeup_flags_t    flags)
 {
-	spl_t thread_spl = 0;
-	thread_t thread;
-	spl_t spl = 0;
-
 	__waitq_validate(waitq);
+
+	spl_t spl = 0;
 
 	if (waitq_irq_safe(waitq)) {
 		spl = splsched();
 	}
+
 	waitq_lock(waitq);
 
-	thread = waitq_wakeup64_identify_locked(waitq, wake_event, result,
-	    flags | WAITQ_UNLOCK, &thread_spl);
-	/* waitq is unlocked, thread is locked */
+	thread_t thread = waitq_wakeup64_identify_locked(waitq, wake_event,
+	    result, flags | waitq_flags_splx(spl) | WAITQ_UNLOCK);
+	/* waitq is unlocked, thread is not go-ed yet */
+	/* preemption disabled if thread non-null */
+	/* splx is handled */
 
 	if (thread != THREAD_NULL) {
 		thread_reference(thread);
-		thread_unlock(thread);
-		splx(thread_spl);
+		waitq_resume_identified_thread(waitq, thread, result, flags);
+		/* preemption enabled, thread go-ed */
+		/* returns +1 ref to running thread */
+		return thread;
 	}
 
-	if (waitq_irq_safe(waitq)) {
-		splx(spl);
-	}
-
-	/* returns +1 ref to running thread or THREAD_NULL */
-	return thread;
+	return THREAD_NULL;
 }
 
 

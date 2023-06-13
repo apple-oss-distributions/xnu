@@ -402,7 +402,6 @@ struct pmap {
 #if MACH_ASSERT
 	int pmap_pid;
 	char pmap_procname[17];
-	bool pmap_stats_assert;
 #endif /* MACH_ASSERT */
 
 	bool reserved4;
@@ -549,14 +548,19 @@ extern void pmap_init_pte_page(pmap_t, pt_entry_t *, vm_offset_t, unsigned int t
 extern boolean_t pmap_valid_address(pmap_paddr_t addr);
 extern void pmap_disable_NX(pmap_t pmap);
 extern void pmap_set_nested(pmap_t pmap);
-extern void pmap_create_sharedpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kernel_text_addr,
+extern void pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kernel_text_addr,
     vm_map_address_t *kernel_ro_data_addr, vm_map_address_t *user_text_addr);
-extern void pmap_insert_sharedpage(pmap_t pmap);
-extern void pmap_protect_sharedpage(void);
+extern void pmap_insert_commpage(pmap_t pmap);
 
 extern vm_offset_t pmap_cpu_windows_copy_addr(int cpu_num, unsigned int index);
 extern unsigned int pmap_map_cpu_windows_copy(ppnum_t pn, vm_prot_t prot, unsigned int wimg_bits);
 extern void pmap_unmap_cpu_windows_copy(unsigned int index);
+
+static inline vm_offset_t
+pmap_ro_zone_align(vm_offset_t value)
+{
+	return value;
+}
 
 extern void pmap_ro_zone_memcpy(zone_id_t zid, vm_offset_t va, vm_offset_t offset,
     vm_offset_t new_data, vm_size_t new_data_size);
@@ -614,7 +618,7 @@ void pmap_abandon_measurement(void);
 #define PMAP_ENTER_OPTIONS_INDEX 10
 /* #define PMAP_EXTRACT_INDEX 11 -- Not used*/
 #define PMAP_FIND_PA_INDEX 12
-#define PMAP_INSERT_SHAREDPAGE_INDEX 13
+#define PMAP_INSERT_COMMPAGE_INDEX 13
 #define PMAP_IS_EMPTY_INDEX 14
 #define PMAP_MAP_CPU_WINDOWS_COPY_INDEX 15
 #define PMAP_MARK_PAGE_AS_PMAP_PAGE_INDEX 16
@@ -693,7 +697,12 @@ void pmap_abandon_measurement(void);
 /* HW read-only/read-write trusted path support */
 #define PMAP_SET_TPRO_INDEX 105
 
-#define PMAP_COUNT 106
+#define PMAP_ASSOCIATE_KERNEL_ENTITLEMENTS_INDEX 106
+#define PMAP_RESOLVE_KERNEL_ENTITLEMENTS_INDEX 107
+#define PMAP_ACCELERATE_ENTITLEMENTS_INDEX 108
+#define PMAP_CHECK_TRUST_CACHE_RUNTIME_FOR_UUID_INDEX 109
+
+#define PMAP_COUNT 110
 
 /**
  * Value used when initializing pmap per-cpu data to denote that the structure
@@ -769,12 +778,6 @@ extern boolean_t pmap_is_monitor(ppnum_t pn);
  */
 extern void pmap_static_allocations_done(void);
 
-/*
- * Indicates that we are done mutating sensitive state in the system, and that
- * the PPL may now restict write access to PPL owned mappings.
- */
-extern void pmap_lockdown_ppl(void);
-
 
 #ifdef KASAN
 #define PPL_STACK_SIZE (PAGE_SIZE << 2)
@@ -809,6 +812,12 @@ extern void pmap_lockdown_ppl(void);
 #define MARK_AS_PMAP_RODATA
 
 #endif /* XNU_MONITOR */
+
+/*
+ * Indicates that we are done mutating sensitive state in the system, and that
+ * the pmap may now restrict access as dictated by system security policy.
+ */
+extern void pmap_lockdown_ppl(void);
 
 
 extern void pmap_nop(pmap_t);

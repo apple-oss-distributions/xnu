@@ -74,13 +74,24 @@ os_hash_jenkins_finish(uint32_t hash)
  * @param length
  * The length of the data to hash
  *
+ * @param seed
+ * An optional hash seed (defaults to 0).
+ *
  * @returns
  * The jenkins hash for this data.
  */
+__attribute__((overloadable))
+static inline uint32_t
+os_hash_jenkins(const void *data, size_t length, uint32_t seed)
+{
+	return os_hash_jenkins_finish(os_hash_jenkins_update(data, length, seed));
+}
+
+__attribute__((overloadable))
 static inline uint32_t
 os_hash_jenkins(const void *data, size_t length)
 {
-	return os_hash_jenkins_finish(os_hash_jenkins_update(data, length, 0));
+	return os_hash_jenkins(data, length, 0);
 }
 
 /*!

@@ -42,9 +42,11 @@
  * Currently, it is NOT safe to use a dynamically allocated string with
  * the xnu CoreAnalytics interface.
  */
-#define CA_UUID_LEN 37
-#define CA_PROCNAME_LEN 17
-#define CA_UBSANBUF_LEN 86
+#define CA_UUID_LEN          37
+#define CA_PROCNAME_LEN      17
+#define CA_UBSANBUF_LEN      86
+#define CA_TEAMID_MAX_LEN    32
+#define CA_SIGNINGID_MAX_LEN 128
 #define CA_STATIC_STRING(len) ca_sstr[len]
 
 #define CA_EVENT_TYPE(name) struct _ca_event_ ## name

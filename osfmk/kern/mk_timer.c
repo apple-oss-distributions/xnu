@@ -106,6 +106,7 @@ mk_timer_create_trap(
 	kmsg = ipc_kmsg_alloc(sizeof(mk_timer_expire_msg_t), 0, 0,
 	    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO |
 	    IPC_KMSG_ALLOC_SAVED | IPC_KMSG_ALLOC_NOFAIL);
+	static_assert(sizeof(mk_timer_expire_msg_t) < IKM_SAVED_MSG_SIZE);
 
 	init_flags = IPC_PORT_INIT_MESSAGE_QUEUE;
 	result = ipc_port_alloc(myspace, init_flags, &name, &port);

@@ -3825,19 +3825,21 @@ m_free(struct mbuf *m)
 	}
 
 	if (m->m_flags & M_EXT) {
-		uint16_t refcnt;
-		uint32_t composite;
-		m_ext_free_func_t m_free_func;
-
 		if (MBUF_IS_PAIRED(m) && m_free_paired(m)) {
 			return n;
 		}
+		/*
+		 * Make sure that we don't touch any ext_ref
+		 * member after we decrement the reference count
+		 * since that may lead to use-after-free
+		 * when we do not hold the last reference.
+		 */
+		const bool composite = !!(MEXT_FLAGS(m) & EXTF_COMPOSITE);
+		const m_ext_free_func_t m_free_func = m_get_ext_free(m);
+		const uint16_t minref = MEXT_MINREF(m);
+		const uint16_t refcnt = m_decref(m);
 
-		refcnt = m_decref(m);
-		composite = (MEXT_FLAGS(m) & EXTF_COMPOSITE);
-		m_free_func = m_get_ext_free(m);
-
-		if (refcnt == MEXT_MINREF(m) && !composite) {
+		if (refcnt == minref && !composite) {
 			if (m_free_func == NULL) {
 				mcache_free(m_cache(MC_CL), m->m_ext.ext_buf);
 			} else if (m_free_func == m_bigfree) {
@@ -3852,7 +3854,7 @@ m_free(struct mbuf *m)
 			}
 			mcache_free(ref_cache, m_get_rfa(m));
 			m_set_ext(m, NULL, NULL, NULL);
-		} else if (refcnt == MEXT_MINREF(m) && composite) {
+		} else if (refcnt == minref && composite) {
 			VERIFY(!(MEXT_FLAGS(m) & EXTF_PAIRED));
 			VERIFY(m->m_type != MT_FREE);
 
@@ -3863,7 +3865,11 @@ m_free(struct mbuf *m)
 			m->m_flags = M_EXT;
 			m->m_len = 0;
 			m->m_next = m->m_nextpkt = NULL;
-
+			/*
+			 * MEXT_FLAGS is safe to access here
+			 * since we are now sure that we held
+			 * the last reference to ext_ref.
+			 */
 			MEXT_FLAGS(m) &= ~EXTF_READONLY;
 
 			/* "Free" into the intermediate cache */
@@ -3911,15 +3917,19 @@ m_clattach(struct mbuf *m, int type, caddr_t extbuf,
 	}
 
 	if (m->m_flags & M_EXT) {
-		u_int16_t refcnt;
-		u_int32_t composite;
-		m_ext_free_func_t m_free_func;
-
-		refcnt = m_decref(m);
-		composite = (MEXT_FLAGS(m) & EXTF_COMPOSITE);
+		/*
+		 * Make sure that we don't touch any ext_ref
+		 * member after we decrement the reference count
+		 * since that may lead to use-after-free
+		 * when we do not hold the last reference.
+		 */
+		const bool composite = !!(MEXT_FLAGS(m) & EXTF_COMPOSITE);
 		VERIFY(!(MEXT_FLAGS(m) & EXTF_PAIRED) && MEXT_PMBUF(m) == NULL);
-		m_free_func = m_get_ext_free(m);
-		if (refcnt == MEXT_MINREF(m) && !composite) {
+		const m_ext_free_func_t m_free_func = m_get_ext_free(m);
+		const uint16_t minref = MEXT_MINREF(m);
+		const uint16_t refcnt = m_decref(m);
+
+		if (refcnt == minref && !composite) {
 			if (m_free_func == NULL) {
 				mcache_free(m_cache(MC_CL), m->m_ext.ext_buf);
 			} else if (m_free_func == m_bigfree) {
@@ -3934,7 +3944,7 @@ m_clattach(struct mbuf *m, int type, caddr_t extbuf,
 			}
 			/* Re-use the reference structure */
 			rfa = m_get_rfa(m);
-		} else if (refcnt == MEXT_MINREF(m) && composite) {
+		} else if (refcnt == minref && composite) {
 			VERIFY(m->m_type != MT_FREE);
 
 			mtype_stat_dec(m->m_type);
@@ -3945,6 +3955,11 @@ m_clattach(struct mbuf *m, int type, caddr_t extbuf,
 			m->m_len = 0;
 			m->m_next = m->m_nextpkt = NULL;
 
+			/*
+			 * MEXT_FLAGS is safe to access here
+			 * since we are now sure that we held
+			 * the last reference to ext_ref.
+			 */
 			MEXT_FLAGS(m) &= ~EXTF_READONLY;
 
 			/* "Free" into the intermediate cache */
@@ -4239,6 +4254,7 @@ m_classifier_init(struct mbuf *m, uint32_t pktf_mask)
 	m->m_pkthdr.pkt_proto = 0;
 	m->m_pkthdr.pkt_flowsrc = 0;
 	m->m_pkthdr.pkt_flowid = 0;
+	m->m_pkthdr.pkt_ext_flags = 0;
 	m->m_pkthdr.pkt_flags &= pktf_mask;     /* caller-defined mask */
 	/* preserve service class and interface info for loopback packets */
 	if (!(m->m_pkthdr.pkt_flags & PKTF_LOOP)) {
@@ -4815,9 +4831,6 @@ m_freem_list(struct mbuf *m)
 		while (m != NULL) {
 			struct mbuf *next = m->m_next;
 			mcache_obj_t *o, *rfa;
-			u_int32_t composite;
-			u_int16_t refcnt;
-			m_ext_free_func_t m_free_func;
 
 			if (m->m_type == MT_FREE) {
 				panic("m_free: freeing an already freed mbuf");
@@ -4844,10 +4857,18 @@ m_freem_list(struct mbuf *m)
 			mt_free++;
 
 			o = (mcache_obj_t *)(void *)m->m_ext.ext_buf;
-			refcnt = m_decref(m);
-			composite = (MEXT_FLAGS(m) & EXTF_COMPOSITE);
-			m_free_func = m_get_ext_free(m);
-			if (refcnt == MEXT_MINREF(m) && !composite) {
+			/*
+			 * Make sure that we don't touch any ext_ref
+			 * member after we decrement the reference count
+			 * since that may lead to use-after-free
+			 * when we do not hold the last reference.
+			 */
+			const bool composite = !!(MEXT_FLAGS(m) & EXTF_COMPOSITE);
+			const m_ext_free_func_t m_free_func = m_get_ext_free(m);
+			const uint16_t minref = MEXT_MINREF(m);
+			const uint16_t refcnt = m_decref(m);
+
+			if (refcnt == minref && !composite) {
 				if (m_free_func == NULL) {
 					o->obj_next = mcl_list;
 					mcl_list = o;
@@ -4866,7 +4887,7 @@ m_freem_list(struct mbuf *m)
 				rfa->obj_next = ref_list;
 				ref_list = rfa;
 				m_set_ext(m, NULL, NULL, NULL);
-			} else if (refcnt == MEXT_MINREF(m) && composite) {
+			} else if (refcnt == minref && composite) {
 				VERIFY(!(MEXT_FLAGS(m) & EXTF_PAIRED));
 				VERIFY(m->m_type != MT_FREE);
 				/*
@@ -4890,6 +4911,11 @@ m_freem_list(struct mbuf *m)
 				m->m_len = 0;
 				m->m_next = m->m_nextpkt = NULL;
 
+				/*
+				 * MEXT_FLAGS is safe to access here
+				 * since we are now sure that we held
+				 * the last reference to ext_ref.
+				 */
 				MEXT_FLAGS(m) &= ~EXTF_READONLY;
 
 				/* "Free" into the intermediate cache */

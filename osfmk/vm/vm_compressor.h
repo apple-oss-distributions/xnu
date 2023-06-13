@@ -90,16 +90,6 @@
 #define C_SLOT_C_POPCOUNT_BITS          0
 #define C_SLOT_C_PADDING_BITS           3
 
-#elif __APPLE_WKDM_POPCNT_EXTENSIONS__               /* no packing */
-#define C_SLOT_PACKED_PTR_BITS          47
-#define C_SLOT_PACKED_PTR_SHIFT         0
-#define C_SLOT_PACKED_PTR_BASE          ((uintptr_t)KERNEL_PMAP_HEAP_RANGE_START)
-
-#define C_SLOT_C_SIZE_BITS              14
-#define C_SLOT_C_CODEC_BITS             1
-#define C_SLOT_C_POPCOUNT_BITS          18
-#define C_SLOT_C_PADDING_BITS           0
-
 #elif defined(__arm64__)                /* 32G from the heap start */
 #define C_SLOT_PACKED_PTR_BITS          33
 #define C_SLOT_PACKED_PTR_SHIFT         2
@@ -277,7 +267,6 @@ extern int64_t c_segment_compressed_bytes;
 #define C_SEG_BYTES_TO_OFFSET(bytes)    ((bytes) / (int) sizeof(int32_t))
 
 #define C_SEG_UNUSED_BYTES(cseg)        (cseg->c_bytes_unused + (C_SEG_OFFSET_TO_BYTES(cseg->c_populated_offset - cseg->c_nextoffset)))
-//todo opensource
 
 #ifndef __PLATFORM_WKDM_ALIGNMENT_MASK__
 #define C_SEG_OFFSET_ALIGNMENT_MASK     0x3ULL

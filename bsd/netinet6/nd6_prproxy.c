@@ -177,14 +177,14 @@ RB_PROTOTYPE_SC_PREV(__private_extern__, prproxy_sols_tree, nd6_prproxy_soltgt,
 static u_int32_t nd6_max_tgt_sols = ND6_MAX_TGT_SOLS_DEFAULT;
 static u_int32_t nd6_max_src_sols = ND6_MAX_SRC_SOLS_DEFAULT;
 
-static ZONE_DEFINE(ndprl_zone, "nd6_prproxy_prelist",
-    sizeof(struct nd6_prproxy_prelist), ZC_ZFREE_CLEARMEM);    /* nd6_prproxy_prelist zone */
+static KALLOC_TYPE_DEFINE(ndprl_zone,
+    struct nd6_prproxy_prelist, NET_KT_DEFAULT);    /* nd6_prproxy_prelist zone */
 
-static ZONE_DEFINE(solsrc_zone, "nd6_prproxy_solsrc",
-    sizeof(struct nd6_prproxy_solsrc), ZC_ZFREE_CLEARMEM);     /* nd6_prproxy_solsrc zone */
+static KALLOC_TYPE_DEFINE(solsrc_zone,
+    struct nd6_prproxy_solsrc, NET_KT_DEFAULT);     /* nd6_prproxy_solsrc zone */
 
-static ZONE_DEFINE(soltgt_zone, "nd6_prproxy_soltgt",
-    sizeof(struct nd6_prproxy_soltgt), ZC_ZFREE_CLEARMEM);     /* nd6_prproxy_soltgt zone */
+static KALLOC_TYPE_DEFINE(soltgt_zone,
+    struct nd6_prproxy_soltgt, NET_KT_DEFAULT);     /* nd6_prproxy_soltgt zone */
 
 /* The following is protected by ndpr_lock */
 RB_GENERATE_PREV(prproxy_sols_tree, nd6_prproxy_soltgt,

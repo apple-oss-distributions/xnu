@@ -71,6 +71,7 @@ extern int debug_task;
 ZONE_DEFINE_TYPE(ads_zone, "arm debug state", arm_debug_state_t, ZC_NONE);
 ZONE_DEFINE_TYPE(user_ss_zone, "user save state", arm_context_t, ZC_NONE);
 
+
 /*
  * Routine: consider_machine_collect
  *
@@ -527,9 +528,9 @@ machine_stack_handoff(thread_t old,
 	if (stack == old->reserved_stack) {
 		assert(new->reserved_stack);
 		old->reserved_stack = new->reserved_stack;
-#if KASAN && CONFIG_KERNEL_TBI
+#if KASAN_TBI
 		kasan_unpoison_stack(old->reserved_stack, kernel_stack_size);
-#endif /* KASAN && CONFIG_KERNEL_TBI */
+#endif /* KASAN_TBI */
 		new->reserved_stack = stack;
 	}
 

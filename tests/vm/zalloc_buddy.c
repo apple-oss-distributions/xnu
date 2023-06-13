@@ -65,8 +65,10 @@ zba_test_setup(void)
 	T_LOG("SETUP allocator with base at %p", zba_base_header());
 
 	zba_test_allow_extension();
-	zba_populate(0);
-	zba_init_chunk(0);
+	zba_populate(0, false);
+	zba_meta()->zbam_left  = 1;
+	zba_meta()->zbam_right = 1;
+	zba_init_chunk(0, false);
 }
 
 T_DECL(zone_buddy_allocator_encodings, "test the buddy allocator formulas")
@@ -105,32 +107,32 @@ T_DECL(zone_buddy_allocator, "test the zone bits setup")
 
 	zba_test_disallow_extension();
 
-	base = (vm_address_t)zba_slot_base();
+	base = (vm_address_t)(void *)zba_slot_base();
 	for (pos = zba_chunk_header_size(0); pos < ZBA_CHUNK_SIZE; pos += ZBA_GRANULE) {
-		T_QUIET; T_ASSERT_EQ(base + pos, zba_alloc(0), "alloc");
+		T_QUIET; T_ASSERT_EQ(base + pos, zba_alloc(0, false), "alloc");
 		*(uint64_t *)(base + pos) = ~0ull;
 	}
 	for (pos = zba_chunk_header_size(0); pos < ZBA_CHUNK_SIZE; pos += ZBA_GRANULE) {
-		zba_free(base + pos, 0);
+		zba_free(base + pos, 0, false);
 	}
 
 	for (pos = zba_chunk_header_size(0); pos < ZBA_CHUNK_SIZE; pos += ZBA_GRANULE) {
-		T_QUIET; T_ASSERT_EQ(base + pos, zba_alloc(0), "alloc");
+		T_QUIET; T_ASSERT_EQ(base + pos, zba_alloc(0, false), "alloc");
 		*(uint64_t *)(base + pos) = ~0ull;
 	}
 	zba_test_allow_extension();
 
 	base += ZBA_CHUNK_SIZE;
 	for (pos = zba_chunk_header_size(1); pos < ZBA_CHUNK_SIZE; pos += ZBA_GRANULE) {
-		T_QUIET; T_ASSERT_EQ(base + pos, zba_alloc(0), "alloc");
+		T_QUIET; T_ASSERT_EQ(base + pos, zba_alloc(0, false), "alloc");
 		*(uint64_t *)(base + pos) = ~0ull;
 	}
 
 	for (pos = zba_chunk_header_size(1); pos < ZBA_CHUNK_SIZE; pos += ZBA_GRANULE) {
-		zba_free(base + pos, 0);
+		zba_free(base + pos, 0, false);
 	}
 	base -= ZBA_CHUNK_SIZE;
 	for (pos = zba_chunk_header_size(0); pos < ZBA_CHUNK_SIZE; pos += ZBA_GRANULE) {
-		zba_free(base + pos, 0);
+		zba_free(base + pos, 0, false);
 	}
 }

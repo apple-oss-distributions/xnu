@@ -51,6 +51,7 @@ fun:fbt_perfCallback
 fun:_ZL18IOTrackingLeakScanPv
 
 # Exclude KASAN dependencies
+src:./osfmk/kern/btlog.c
 # XXX: could this be relaxed since fakestack is reentrant?
 src:./osfmk/kern/zalloc.c
 

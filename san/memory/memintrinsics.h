@@ -70,11 +70,27 @@ __nosan_bzero(void *dst __sized_by(sz), size_t sz)
 }
 
 static inline size_t
-__nosan_strlcpy(char *dst, const char *src, size_t sz)
+__nosan_strlcpy(char *__sized_by(sz)dst, const char *__null_terminated src, size_t sz)
 {
 	return strlcpy(dst, src, sz);
 }
-static inline char  *
+static inline size_t
+__nosan_strlcat(char *__sized_by(sz)dst, const char *__null_terminated src, size_t sz)
+{
+	return strlcat(dst, src, sz);
+}
+static inline size_t
+__nosan_strnlen(const char *__null_terminated src, size_t sz)
+{
+	return strnlen(src, sz);
+}
+static inline size_t
+__nosan_strlen(const char *__null_terminated src)
+{
+	return strlen(src);
+}
+#if !__has_ptrcheck
+static inline char *
 __nosan_strncpy(char *dst, const char *src, size_t sz)
 {
 #ifdef __clang__
@@ -86,12 +102,7 @@ __nosan_strncpy(char *dst, const char *src, size_t sz)
 #pragma clang diagnostic pop
 #endif
 }
-static inline size_t
-__nosan_strlcat(char *dst, const char *src, size_t sz)
-{
-	return strlcat(dst, src, sz);
-}
-static inline char  *
+static inline char *
 __nosan_strncat(char *dst, const char *src, size_t sz)
 {
 #ifdef __clang__
@@ -103,16 +114,7 @@ __nosan_strncat(char *dst, const char *src, size_t sz)
 #pragma clang diagnostic pop
 #endif
 }
-static inline size_t
-__nosan_strnlen(const char *src, size_t sz)
-{
-	return strnlen(src, sz);
-}
-static inline size_t
-__nosan_strlen(const char *src)
-{
-	return strlen(src);
-}
+#endif /* !__has_ptrcheck */
 
 #if KASAN
 void *__asan_memcpy(void *src __sized_by(sz), const void *dst __sized_by(sz), size_t sz);
@@ -123,12 +125,12 @@ void  __asan_bzero(void *dst __sized_by(sz), size_t sz);
 int   __asan_bcmp(const void *a __sized_by(sz), const void *b __sized_by(sz), size_t sz);
 int   __asan_memcmp(const void *a __sized_by(sz), const void *b __sized_by(sz), size_t sz);
 
-size_t __asan_strlcpy(char *dst, const char *src, size_t sz);
+size_t __asan_strlcpy(char *__sized_by(sz) dst, const char *__null_terminated src, size_t sz);
 char  *__asan_strncpy(char *dst, const char *src, size_t sz);
-size_t __asan_strlcat(char *dst, const char *src, size_t sz);
 char  *__asan_strncat(char *dst, const char *src, size_t sz);
-size_t __asan_strnlen(const char *src, size_t sz);
-size_t __asan_strlen(const char *src);
+size_t __asan_strlcat(char *__sized_by(sz) dst, const char *__null_terminated src, size_t sz);
+size_t __asan_strnlen(const char *__null_terminated src, size_t sz);
+size_t __asan_strlen(const char *__null_terminated src);
 
 #define memcpy    __asan_memcpy
 #define memmove   __asan_memmove

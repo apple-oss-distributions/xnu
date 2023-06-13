@@ -162,11 +162,6 @@
 
 /* for entitlement check */
 #include <IOKit/IOBSD.h>
-/*
- * If you need accounting for KM_SELECT consider using
- * KALLOC_HEAP_DEFINE to define a view.
- */
-#define KM_SELECT       KHEAP_DEFAULT
 
 /* XXX should be in a header file somewhere */
 extern kern_return_t IOBSDGetPlatformUUID(__darwin_uuid_t uuid, mach_timespec_t timeoutp);
@@ -2994,6 +2989,80 @@ sysctl_kern_sched_thread_set_no_smt(__unused struct sysctl_oid *oidp, __unused v
 SYSCTL_PROC(_kern, OID_AUTO, sched_thread_set_no_smt,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
     0, 0, sysctl_kern_sched_thread_set_no_smt, "I", "");
+
+#if CONFIG_SCHED_RT_ALLOW
+
+#if DEVELOPMENT || DEBUG
+#define RT_ALLOW_CTLFLAGS CTLFLAG_RW
+#else
+#define RT_ALLOW_CTLFLAGS CTLFLAG_RD
+#endif /* DEVELOPMENT || DEBUG */
+
+static int
+sysctl_kern_rt_allow_limit_percent(__unused struct sysctl_oid *oidp,
+    __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	extern uint8_t rt_allow_limit_percent;
+
+	int new_value = 0;
+	int old_value = rt_allow_limit_percent;
+	int changed = 0;
+
+	int error = sysctl_io_number(req, old_value, sizeof(old_value),
+	    &new_value, &changed);
+	if (error != 0) {
+		return error;
+	}
+
+	/* Only accept a percentage between 1 and 99 inclusive. */
+	if (changed) {
+		if (new_value >= 100 || new_value <= 0) {
+			return EINVAL;
+		}
+
+		rt_allow_limit_percent = (uint8_t)new_value;
+	}
+
+	return 0;
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, rt_allow_limit_percent,
+    RT_ALLOW_CTLFLAGS | CTLTYPE_INT | CTLFLAG_LOCKED,
+    0, 0, sysctl_kern_rt_allow_limit_percent, "I", "");
+
+static int
+sysctl_kern_rt_allow_limit_interval_ms(__unused struct sysctl_oid *oidp,
+    __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	extern uint16_t rt_allow_limit_interval_ms;
+
+	uint64_t new_value = 0;
+	uint64_t old_value = rt_allow_limit_interval_ms;
+	int changed = 0;
+
+	int error = sysctl_io_number(req, old_value, sizeof(old_value),
+	    &new_value, &changed);
+	if (error != 0) {
+		return error;
+	}
+
+	/* Value is in ns. Must be at least 1ms. */
+	if (changed) {
+		if (new_value < 1 || new_value > UINT16_MAX) {
+			return EINVAL;
+		}
+
+		rt_allow_limit_interval_ms = (uint16_t)new_value;
+	}
+
+	return 0;
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, rt_allow_limit_interval_ms,
+    RT_ALLOW_CTLFLAGS | CTLTYPE_QUAD | CTLFLAG_LOCKED,
+    0, 0, sysctl_kern_rt_allow_limit_interval_ms, "Q", "");
+
+#endif /* CONFIG_SCHED_RT_ALLOW */
 
 
 static int

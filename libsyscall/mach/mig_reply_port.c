@@ -43,7 +43,7 @@
 __XNU_PRIVATE_EXTERN mach_port_t _task_reply_port = MACH_PORT_NULL;
 
 static inline mach_port_t
-_mig_get_reply_port()
+_mig_get_reply_port(void)
 {
 	return (mach_port_t)(uintptr_t)_os_tsd_get_direct(__TSD_MIG_REPLY);
 }

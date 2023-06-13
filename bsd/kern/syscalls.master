@@ -89,7 +89,7 @@
 35	AUE_FCHFLAGS	ALL	{ int fchflags(int fd, int flags); }
 36	AUE_SYNC	ALL	{ int sync(void); }
 37	AUE_KILL	ALL	{ int kill(int pid, int signum, int posix) NO_SYSCALL_STUB; }
-38	AUE_NULL	ALL	{ int nosys(void); }   { old stat  }
+38	AUE_NULL	ALL	{ int sys_crossarch_trap(uint32_t name) NO_SYSCALL_STUB; }
 39	AUE_GETPPID	ALL	{ int getppid(void); }
 40	AUE_NULL	ALL	{ int nosys(void); }   { old lstat }
 41	AUE_DUP		ALL	{ int sys_dup(u_int fd); }

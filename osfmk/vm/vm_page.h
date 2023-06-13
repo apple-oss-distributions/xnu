@@ -228,7 +228,8 @@ struct vm_page {
 	    vmp_private:1,                   /* Page should not be returned to the free list (P) */
 	    vmp_reference:1,                 /* page has been used (P) */
 	    vmp_lopage:1,
-	    vmp_unused_page_bits:4;
+	    vmp_realtime:1,                  /* page used by realtime thread */
+	    vmp_unused_page_bits:3;
 
 	/*
 	 * MUST keep the 2 32 bit words used as bit fields
@@ -1300,6 +1301,8 @@ extern
 unsigned int    vm_page_inactive_count; /* How many pages are inactive? */
 extern
 unsigned int vm_page_kernelcache_count; /* How many pages are used for the kernelcache? */
+extern
+unsigned int vm_page_realtime_count;    /* How many pages are used by realtime threads? */
 #if CONFIG_SECLUDED_MEMORY
 extern
 unsigned int    vm_page_secluded_count; /* How many pages are secluded? */

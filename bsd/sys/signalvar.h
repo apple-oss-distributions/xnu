@@ -91,8 +91,8 @@
 /*
  * get signal action for process and signal; currently only for current process
  */
-#define SIGACTION(p, sig)       ({ p->p_sigacts.ps_ro->ps_sigact[(sig)]; })
-#define SIGTRAMP(p, sig)        ({ p->p_sigacts.ps_ro->ps_trampact[(sig)]; })
+#define SIGACTION(p, sig)       ({ p->p_sigacts.ps_sigact[(sig)]; })
+#define SIGTRAMP(p, sig)        ({ p->p_sigacts.ps_trampact[(sig)]; })
 
 /*
  *	Check for per-process and per thread signals.

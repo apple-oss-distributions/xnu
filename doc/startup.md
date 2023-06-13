@@ -70,7 +70,7 @@ See the comments for the MACHINE_TIMEOUT macro on how they are used in
 detail.
 
 - Rank 1: `MACHINE_TIMEOUT`
-
+- Middle: global lock timeouts that are derived from machine timeouts.
 
 `STARTUP_SUB_LOCKS`
 -------------------
@@ -156,7 +156,7 @@ Initializes the zone allocator.
 
 - Rank 3: Initialize kalloc.
 
-- Rank 4: Initialize kalloc type and run `ZONE_DEFINE` and `ZONE_INIT`.
+- Rank 4: Handle `ZONE_DEFINE` and `ZONE_INIT`.
 
 - Middle: Enable zone caching & logging
 

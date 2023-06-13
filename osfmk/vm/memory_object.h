@@ -135,4 +135,8 @@ extern void             memory_object_mark_eligible_for_secluded(
 	boolean_t                       eligible_for_secluded);
 #endif /* CONFIG_SECLUDED_MEMORY */
 
+extern void             memory_object_mark_for_realtime(
+	memory_object_control_t         control,
+	bool                            for_realtime);
+
 #endif  /* _VM_MEMORY_OBJECT_H_ */

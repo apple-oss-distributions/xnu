@@ -132,7 +132,7 @@ extern boolean_t        thread_unblock(
 	wait_result_t   wresult);
 
 /* Unblock and dispatch thread */
-extern kern_return_t    thread_go(
+extern void thread_go(
 	thread_t                thread,
 	wait_result_t           wresult,
 	bool                    try_handoff);
@@ -201,11 +201,21 @@ extern void             sched_set_thread_mode(thread_t thread,
 extern void             sched_set_thread_mode_user(thread_t thread,
     sched_mode_t mode);
 
+/*
+ * Get the thread's scheduling mode taking into account that the thread may have
+ * been demoted.
+ * */
+extern sched_mode_t     sched_get_thread_mode_user(thread_t thread);
+
+
 /* Demote the true scheduler mode */
 extern void             sched_thread_mode_demote(thread_t thread,
     uint32_t reason);
 /* Un-demote the true scheduler mode */
 extern void             sched_thread_mode_undemote(thread_t thread,
+    uint32_t reason);
+/* Check for a specific demotion */
+extern bool             sched_thread_mode_has_demotion(thread_t thread,
     uint32_t reason);
 
 extern void sched_thread_promote_reason(thread_t thread, uint32_t reason, uintptr_t trace_obj);
@@ -303,7 +313,9 @@ extern void sched_SMT_balance(
 	processor_set_t pset);
 
 extern void thread_quantum_init(
-	thread_t thread);
+	thread_t thread,
+	uint64_t now);
+
 
 extern void             run_queue_init(
 	run_queue_t             runq);
@@ -501,11 +513,11 @@ MACRO_BEGIN                                                                     
 	}                                                                       \
 MACRO_END
 
-#define SCHED_DEBUG_CHOOSE_PROCESSOR_KERNEL_DEBUG_CONSTANT(...)                 \
+#define SCHED_DEBUG_CHOOSE_PROCESSOR_KERNEL_DEBUG_CONSTANT_IST(...)             \
 MACRO_BEGIN                                                                     \
 	if (__improbable(sched_debug_flags &                                    \
 	    SCHED_DEBUG_FLAG_CHOOSE_PROCESSOR_TRACEPOINTS)) {                   \
-	        KERNEL_DEBUG_CONSTANT(__VA_ARGS__);                             \
+	        KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, __VA_ARGS__);           \
 	}                                                                       \
 MACRO_END
 
@@ -636,6 +648,29 @@ extern void sched_cond_init(
 extern kern_return_t sched_cond_signal(
 	sched_cond_atomic_t *cond,
 	thread_t thread);
+
+/*
+ * sched_cond_wait_parameter:
+ *
+ * Assert wait and block on cond if no wakeup has been issued.
+ * If a wakeup has been issued on cond since the last `sched_cond_ack`, clear_wait and
+ * return `THREAD_AWAKENED`.
+ *
+ * `sched_cond_wait_parameter` must be paired with `sched_cond_ack`.
+ *
+ * NOTE: `continuation` will only be jumped to if a wakeup has not been issued
+ *
+ * parameters:
+ *      cond             atomic condition variable to synchronize on
+ *      interruptible    interruptible value to pass to assert_wait
+ *      continuation     continuation if block succeeds
+ *      parameter
+ */
+extern wait_result_t sched_cond_wait_parameter(
+	sched_cond_atomic_t *cond,
+	wait_interrupt_t interruptible,
+	thread_continue_t continuation,
+	void *parameter);
 
 /*
  * sched_cond_wait:

@@ -2441,11 +2441,6 @@ SYSCTL_INT(_kern, OID_AUTO, sched_backup_cpu_timeout_count,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
     &sched_backup_cpu_timeout_count, 0, "The maximum number of 10us delays before allowing a backup cpu to select a thread");
 #if __arm64__
-extern uint32_t perfcontrol_requested_recommended_cores;
-SYSCTL_UINT(_kern, OID_AUTO, sched_recommended_cores,
-    CTLFLAG_KERN | CTLFLAG_RD | CTLFLAG_LOCKED,
-    &perfcontrol_requested_recommended_cores, 0, "");
-
 /* Scheduler perfcontrol callouts sysctls */
 SYSCTL_DECL(_kern_perfcontrol_callout);
 SYSCTL_NODE(_kern, OID_AUTO, perfcontrol_callout, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
@@ -2604,6 +2599,11 @@ SYSCTL_PROC(_kern, OID_AUTO, sched_powered_cores,
     0, 0, sysctl_kern_sched_powered_cores, "I", "");
 
 #endif /* (DEVELOPMENT || DEBUG) */
+
+extern uint32_t perfcontrol_requested_recommended_cores;
+SYSCTL_UINT(_kern, OID_AUTO, sched_recommended_cores,
+    CTLFLAG_KERN | CTLFLAG_RD | CTLFLAG_LOCKED,
+    &perfcontrol_requested_recommended_cores, 0, "");
 
 static int
 sysctl_kern_suspend_cluster_powerdown(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
@@ -3411,7 +3411,11 @@ sysctl_setthread_cpupercent
 	/*
 	 * If the caller is specifying a percentage of 0, this will unset the CPU limit, if present.
 	 */
-	if ((kret = thread_set_cpulimit(THREAD_CPULIMIT_BLOCK, percent, ms_refill * (int)NSEC_PER_MSEC)) != 0) {
+	kret = percent == 0 ?
+	    thread_set_cpulimit(THREAD_CPULIMIT_DISABLE, 0, 0) :
+	    thread_set_cpulimit(THREAD_CPULIMIT_BLOCK, percent, ms_refill * (int)NSEC_PER_MSEC);
+
+	if (kret != 0) {
 		return EIO;
 	}
 
@@ -3890,6 +3894,9 @@ sysctl_swapusage
 SYSCTL_PROC(_vm, VM_SWAPUSAGE, swapusage,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, sysctl_swapusage, "S,xsw_usage", "");
+
+extern int vm_swap_enabled;
+SYSCTL_INT(_vm, OID_AUTO, swap_enabled, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_swap_enabled, 0, "");
 
 #if DEVELOPMENT || DEBUG
 extern int vm_num_swap_files_config;
@@ -5268,6 +5275,14 @@ SYSCTL_INT(_kern, OID_AUTO, exc_resource_threads_enabled, CTLFLAG_RD | CTLFLAG_L
 
 #endif /* DEVELOPMENT || DEBUG */
 
+#if BUILT_LTO
+static int _built_lto = 1;
+#else // BUILT_LTO
+static int _built_lto = 0;
+#endif // !BUILT_LTO
+
+SYSCTL_INT(_kern, OID_AUTO, link_time_optimized, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &_built_lto, 0, "Whether the kernel was built with Link Time Optimization enabled");
+
 #if CONFIG_THREAD_GROUPS
 #if DEVELOPMENT || DEBUG
 
@@ -5345,10 +5360,10 @@ SYSCTL_INT(_kern, OID_AUTO, direct_handoff,
 
 #if DEVELOPMENT || DEBUG
 
-SYSCTL_LONG(_kern, OID_AUTO, phys_carveout_pa, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
+SYSCTL_QUAD(_kern, OID_AUTO, phys_carveout_pa, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
     &phys_carveout_pa,
     "base physical address of the phys_carveout_mb boot-arg region");
-SYSCTL_LONG(_kern, OID_AUTO, phys_carveout_size, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
+SYSCTL_QUAD(_kern, OID_AUTO, phys_carveout_size, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
     &phys_carveout_size,
     "size in bytes of the phys_carveout_mb boot-arg region");
 
@@ -5760,7 +5775,7 @@ sysctl_get_owned_vmobjects SYSCTL_HANDLER_ARGS
 		goto sysctl_get_vmobject_list_exit;
 	}
 
-	bool corpse = is_corpsetask(task);
+	bool corpse = task_is_a_corpse(task);
 
 	/* get the current size */
 	size_t max_size;
@@ -5879,3 +5894,15 @@ SYSCTL_INT(_debug, OID_AUTO, MMIOtrace,
     (int *)&mmiotrace_enabled, 0, "");
 #pragma clang diagnostic pop
 #endif /* CONFIG_IOTRACE */
+
+static int
+sysctl_page_protection_type SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int value = ml_page_protection_type();
+	return SYSCTL_OUT(req, &value, sizeof(value));
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, page_protection_type,
+    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, sysctl_page_protection_type, "I", "Type of page protection that the system supports");

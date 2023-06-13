@@ -213,10 +213,10 @@ nx_netif_qset_setup_ifclassq(struct netif_llink *llink,
 	ifclassq_retain(llink->nll_ifcq);
 	qset->nqs_ifcq = llink->nll_ifcq;
 
-	if (qset->nqs_flags | NETIF_QSET_FLAG_LOW_LATENCY) {
+	if ((qset->nqs_flags & NETIF_QSET_FLAG_LOW_LATENCY) != 0) {
 		flags |= IF_CLASSQ_LOW_LATENCY;
 	}
-	if (qset->nqs_flags | NETIF_QSET_FLAG_DEFAULT) {
+	if ((qset->nqs_flags & NETIF_QSET_FLAG_DEFAULT) != 0) {
 		flags |= IF_DEFAULT_GRP;
 	}
 

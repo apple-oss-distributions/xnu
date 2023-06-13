@@ -747,7 +747,6 @@ pshm_mmap(
 	vm_object_offset_t file_pos = (vm_object_offset_t)uap->pos;
 	vm_object_offset_t map_pos;
 	vm_map_t           user_map;
-	int                alloc_flags;
 	vm_map_kernel_flags_t vmk_flags;
 	bool               docow;
 	kern_return_t      kret = KERN_SUCCESS;
@@ -832,9 +831,9 @@ pshm_mmap(
 	PSHM_SUBSYS_UNLOCK();
 
 	if (!(flags & MAP_FIXED)) {
-		alloc_flags = VM_FLAGS_ANYWHERE;
 		user_addr = vm_map_round_page(user_addr,
 		    vm_map_page_mask(user_map));
+		vmk_flags = VM_MAP_KERNEL_FLAGS_ANYWHERE();
 	} else {
 		if (user_addr != vm_map_round_page(user_addr,
 		    vm_map_page_mask(user_map))) {
@@ -848,20 +847,17 @@ pshm_mmap(
 		 * Mach VM know that we want it to replace any existing
 		 * mapping with the new one.
 		 */
-		alloc_flags = VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE;
+		vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED(.vmf_overwrite = true);
 	}
 	docow = false;
 
 	mapped_size = 0;
-	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 	/* reserve the entire space first... */
 	kret = vm_map_enter_mem_object(user_map,
 	    &user_addr,
 	    user_size,
 	    0,
-	    alloc_flags,
 	    vmk_flags,
-	    VM_KERN_MEMORY_NONE,
 	    IPC_PORT_NULL,
 	    0,
 	    false,
@@ -888,15 +884,13 @@ pshm_mmap(
 		if (map_size > user_size) {
 			map_size = user_size;
 		}
-		vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+
 		kret = vm_map_enter_mem_object(
 			user_map,
 			&user_addr,
 			map_size,
 			0,
-			VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-			vmk_flags,
-			VM_KERN_MEMORY_NONE,
+			VM_MAP_KERNEL_FLAGS_FIXED(.vmf_overwrite = true),
 			pshmobj->pshmo_memobject,
 			file_pos - map_pos,
 			docow,

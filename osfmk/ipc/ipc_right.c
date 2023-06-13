@@ -94,7 +94,7 @@
 extern void * XNU_PTRAUTH_SIGNED_PTR("initproc") initproc;
 
 TUNABLE(bool, service_port_defense_enabled, "-service_port_defense_enabled", false);
-static TUNABLE(bool, reply_port_semantics_enabled, "-reply_port_semantics", false);
+static TUNABLE(bool, reply_port_semantics, "reply_port_semantics", true);
 
 /*
  *	Routine:	ipc_right_lookup_read
@@ -243,7 +243,7 @@ ipc_right_lookup_read(
 
 	ipc_entry_bits_t bits = entry->ie_bits;
 	if (__improbable(IE_BITS_GEN(bits) != MACH_PORT_GEN(name) ||
-	    IE_BITS_TYPE(bits == MACH_PORT_TYPE_NONE))) {
+	    IE_BITS_TYPE(bits) == MACH_PORT_TYPE_NONE)) {
 		kr = KERN_INVALID_NAME;
 		goto out_put_unlock;
 	}
@@ -690,13 +690,11 @@ ipc_right_check(
 	if (bits & MACH_PORT_TYPE_SEND) {
 		assert(IE_BITS_TYPE(bits) == MACH_PORT_TYPE_SEND);
 		assert(IE_BITS_UREFS(bits) > 0);
-		assert(port->ip_srights > 0);
-		port->ip_srights--;
+		ip_srights_dec(port);
 	} else {
 		assert(IE_BITS_TYPE(bits) == MACH_PORT_TYPE_SEND_ONCE);
 		assert(IE_BITS_UREFS(bits) == 1);
-		assert(port->ip_sorights > 0);
-		port->ip_sorights--;
+		ip_sorights_dec(port);
 	}
 
 	/*
@@ -827,8 +825,8 @@ ipc_right_terminate(
 		}
 
 		if (type & MACH_PORT_TYPE_SEND) {
-			assert(port->ip_srights > 0);
-			if (--port->ip_srights == 0) {
+			ip_srights_dec(port);
+			if (port->ip_srights == 0) {
 				nsrequest = ipc_notify_no_senders_prepare(port);
 			}
 		}
@@ -998,8 +996,8 @@ ipc_right_destroy(
 		is_write_unlock(space);
 
 		if (type & MACH_PORT_TYPE_SEND) {
-			assert(port->ip_srights > 0);
-			if (--port->ip_srights == 0) {
+			ip_srights_dec(port);
+			if (port->ip_srights == 0) {
 				nsrequest = ipc_notify_no_senders_prepare(port);
 			}
 		}
@@ -1176,7 +1174,8 @@ dead_name:
 				mach_port_guard_exception_pinned(space, name, port, MPG_FLAGS_MOD_REFS_PINNED_DEALLOC);
 				return KERN_INVALID_CAPABILITY;
 			}
-			if (--port->ip_srights == 0) {
+			ip_srights_dec(port);
+			if (port->ip_srights == 0) {
 				nsrequest = ipc_notify_no_senders_prepare(port);
 			}
 
@@ -1221,7 +1220,8 @@ dead_name:
 		assert(port->ip_srights > 0);
 
 		if (IE_BITS_UREFS(bits) == 1) {
-			if (--port->ip_srights == 0) {
+			ip_srights_dec(port);
+			if (port->ip_srights == 0) {
 				nsrequest = ipc_notify_no_senders_prepare(port);
 			}
 
@@ -1623,7 +1623,8 @@ ipc_right_delta(
 				return KERN_INVALID_CAPABILITY;
 			}
 
-			if (--port->ip_srights == 0) {
+			ip_srights_dec(port);
+			if (port->ip_srights == 0) {
 				nsrequest = ipc_notify_no_senders_prepare(port);
 			}
 
@@ -1802,7 +1803,8 @@ ipc_right_destruct(
 		}
 
 		if ((urefs + srdelta) == 0) {
-			if (--port->ip_srights == 0) {
+			ip_srights_dec(port);
+			if (port->ip_srights == 0) {
 				nsrequest = ipc_notify_no_senders_prepare(port);
 			}
 			assert(IE_BITS_TYPE(bits) == MACH_PORT_TYPE_SEND_RECEIVE);
@@ -2068,8 +2070,9 @@ ipc_right_copyin_check_reply(
 		    && !ip_is_reply_port(reply_port) && !ip_is_provisional_reply_port(reply_port)) {
 			*reply_port_semantics_violation = TRUE;
 
-			if (reply_port_semantics_enabled) {
+			if (reply_port_semantics) {
 				mach_port_guard_exception(reply_name, 0, 0, kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS);
+				return FALSE;
 			}
 		}
 	}
@@ -2957,14 +2960,14 @@ ipc_right_copyout(
 				 * consume send right and ref
 				 */
 
-				port->ip_srights--;
+				ip_srights_dec(port);
 				ip_mq_unlock(port);
 				ip_release_live(port);
 				return KERN_SUCCESS;
 			}
 
 			/* consume send right and ref */
-			port->ip_srights--;
+			ip_srights_dec(port);
 			ip_mq_unlock(port);
 			ip_release_live(port);
 		} else if (bits & MACH_PORT_TYPE_RECEIVE) {

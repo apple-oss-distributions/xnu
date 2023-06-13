@@ -46,12 +46,18 @@ __BEGIN_DECLS;
 
 #pragma mark - config
 
-// A level of the system's CPU topology, used as the precision when tracking
-// counter values.
+// A domain of the system's CPU topology, used as granularity when tracking counter values.
 __enum_decl(recount_topo_t, unsigned int, {
+	// Attribute counts to the entire system, i.e. only a single counter.
+	// Note that mutual exclusion must be provided to update this kind of counter.
 	RCT_TOPO_SYSTEM,
+	// Attribute counts to the CPU they accumulated on.
+	// Mutual exclusion is not required to update this counter, but preemption must be disabled.
 	RCT_TOPO_CPU,
+	// Attribute counts to the CPU kind (e.g. P or E).
+	// Note that mutual exclusion must be provided to update this kind of counter.
 	RCT_TOPO_CPU_KIND,
+	// The number of different topographies.
 	RCT_TOPO_COUNT,
 });
 
@@ -65,8 +71,7 @@ __enum_decl(recount_cpu_kind_t, unsigned int, {
 	RCT_CPU_KIND_COUNT,
 });
 
-// A `recount_plan` structure controls the granularity of counting for a set of
-// tracks and must be consulted when updating their counters.
+// A `recount_plan` structure controls the granularity of counting for a set of tracks and must be consulted when updating their counters.
 typedef const struct recount_plan {
 	const char *rpl_name;
 	recount_topo_t rpl_topo;
@@ -93,18 +98,23 @@ RECOUNT_PLAN_DECLARE(recount_processor_plan);
 // A track is where counter values can be updated atomically for readers by a
 // single writer.
 struct recount_track {
+	// Used to synchronize updates so multiple values appear to be updated atomically.
 	uint32_t rt_sync;
 	uint32_t rt_pad;
 
 	// The CPU usage metrics currently supported by Recount.
 	struct recount_usage {
+		// Basic time tracking, in units of Mach time.
 		uint64_t ru_user_time_mach;
 		uint64_t ru_system_time_mach;
 #if CONFIG_PERVASIVE_CPI
+		// CPU performance counter metrics, when available.
 		uint64_t ru_cycles;
 		uint64_t ru_instructions;
 #endif // CONFIG_PERVASIVE_CPI
 #if CONFIG_PERVASIVE_ENERGY
+		// CPU energy in nanojoules, when available.
+		// This metric is updated out-of-band from the others because it can only be sampled by ApplePMGR through CLPC.
 		uint64_t ru_energy_nj;
 #endif // CONFIG_PERVASIVE_ENERGY
 	} rt_usage;
@@ -143,6 +153,7 @@ struct thread;
 struct task;
 struct proc;
 
+// A smaller usage structure if only times are needed by a client.
 struct recount_times_mach {
 	uint64_t rtm_user;
 	uint64_t rtm_system;
@@ -156,6 +167,8 @@ uint64_t recount_thread_time_mach(struct thread *thread);
 struct recount_times_mach recount_thread_times(struct thread *thread);
 
 // Read the current thread's usage data, accumulating counts until now.
+//
+// Interrupts must be disabled.
 void recount_current_thread_usage(struct recount_usage *usage);
 struct recount_times_mach recount_current_thread_times(void);
 void recount_current_thread_usage_perf_only(struct recount_usage *usage,
@@ -261,8 +274,18 @@ void recount_coalition_usage_perf_only(struct recount_coalition *coal,
 
 struct processor;
 
+// A snap records counter values at a specific point in time.
+struct recount_snap {
+	uint64_t rsn_time_mach;
+#if CONFIG_PERVASIVE_CPI
+	uint64_t rsn_insns;
+	uint64_t rsn_cycles;
+#endif // CONFIG_PERVASIVE_CPI
+};
+
 // The per-processor resource accounting structure.
 struct recount_processor {
+	struct recount_snap rpr_snap;
 	struct recount_track rpr_active;
 	uint64_t rpr_idle_time_mach;
 	_Atomic uint64_t rpr_state_last_abs_time;
@@ -282,15 +305,6 @@ void recount_processor_usage(struct recount_processor *pr,
 
 // The following interfaces are meant for specific adopters, like the
 // scheduler or platform code responsible for entering and exiting the kernel.
-
-// A snap records counter values at a specific point in time.
-struct recount_snap {
-	uint64_t rsn_time_mach;
-#if CONFIG_PERVASIVE_CPI
-	uint64_t rsn_insns;
-	uint64_t rsn_cycles;
-#endif // CONFIG_PERVASIVE_CPI
-};
 
 // Fill in a snap with the current values from time- and count-keeping hardware.
 void recount_snapshot(struct recount_snap *snap);

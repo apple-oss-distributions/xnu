@@ -101,9 +101,6 @@
 
 #endif
 
-/* prevent infinite recursion when memmove calls bcopy; in string.h, bcopy is defined to call memmove */
-#undef bcopy
-
 /* XXX - should be gone from here */
 extern void             invalidate_icache64(addr64_t addr, unsigned cnt, int phys);
 extern void             flush_dcache64(addr64_t addr, unsigned count, int phys);
@@ -814,120 +811,6 @@ ml_probe_read_64(addr64_t paddr64, unsigned int *val)
 
 	*val = ml_phys_read_64(paddr64);
 	return TRUE;
-}
-
-#undef bcmp
-int
-bcmp(
-	const void      *pa,
-	const void      *pb,
-	size_t  len)
-{
-	const char *a = (const char *)pa;
-	const char *b = (const char *)pb;
-
-	if (len == 0) {
-		return 0;
-	}
-
-	do {
-		if (*a++ != *b++) {
-			break;
-		}
-	} while (--len);
-
-	/*
-	 * Check for the overflow case but continue to handle the non-overflow
-	 * case the same way just in case someone is using the return value
-	 * as more than zero/non-zero
-	 */
-	if (__improbable(!(len & 0x00000000FFFFFFFFULL) && (len & 0xFFFFFFFF00000000ULL))) {
-		return 0xFFFFFFFF;
-	} else {
-		return (int)len;
-	}
-}
-
-#undef memcmp
-int
-memcmp(const void *s1, const void *s2, size_t n)
-{
-	if (n != 0) {
-		const unsigned char *p1 = s1, *p2 = s2;
-
-		do {
-			if (*p1++ != *p2++) {
-				return *--p1 - *--p2;
-			}
-		} while (--n != 0);
-	}
-	return 0;
-}
-
-unsigned long
-memcmp_zero_ptr_aligned(const void *addr, size_t size)
-{
-	const uint64_t *p = (const uint64_t *)addr;
-	uint64_t a = p[0];
-
-	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
-
-	if (size < 4 * sizeof(uint64_t)) {
-		if (size > 1 * sizeof(uint64_t)) {
-			a |= p[1];
-			if (size > 2 * sizeof(uint64_t)) {
-				a |= p[2];
-			}
-		}
-	} else {
-		size_t count = size / sizeof(uint64_t);
-		uint64_t b = p[1];
-		uint64_t c = p[2];
-		uint64_t d = p[3];
-
-		/*
-		 * note: for sizes not a multiple of 32 bytes, this will load
-		 * the bytes [size % 32 .. 32) twice which is ok
-		 */
-		while (count > 4) {
-			count -= 4;
-			a |= p[count + 0];
-			b |= p[count + 1];
-			c |= p[count + 2];
-			d |= p[count + 3];
-		}
-
-		a |= b | c | d;
-	}
-
-	return a;
-}
-
-#undef memmove
-void *
-memmove(void *dst, const void *src, size_t ulen)
-{
-	bcopy(src, dst, ulen);
-	return dst;
-}
-
-/*
- * Abstract:
- * strlen returns the number of characters in "string" preceeding
- * the terminating null character.
- */
-
-#undef strlen
-size_t
-strlen(
-	const char *string)
-{
-	const char *ret = string;
-
-	while (*string++ != '\0') {
-		continue;
-	}
-	return string - 1 - ret;
 }
 
 void

@@ -781,11 +781,7 @@ __BEGIN_DECLS
 extern lck_grp_t kauth_lck_grp;
 
 extern void     kauth_init(void);
-/*
- * If you need accounting for KM_KAUTH consider using
- * KALLOC_HEAP_DEFINE to define a view.
- */
-#define KM_KAUTH     KHEAP_DEFAULT
+
 #if CONFIG_EXT_RESOLVER
 extern void     kauth_resolver_identity_reset(void);
 #endif

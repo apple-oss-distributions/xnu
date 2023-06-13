@@ -35,10 +35,12 @@
  * so it's not included here.
  */
 
-#include <libkern/coreanalytics/coreanalytics.h>
-#include "vm_compressor_backing_store.h"
-#include <vm/vm_page.h>
 #include <kern/thread_call.h>
+#include <libkern/coreanalytics/coreanalytics.h>
+#include <os/log.h>
+#include <vm/vm_page.h>
+
+#include "vm_compressor_backing_store.h"
 
 void vm_analytics_tick(void *arg0, void *arg1);
 
@@ -144,6 +146,12 @@ typedef struct {
 static void
 report_compressor_age()
 {
+	/* If the compressor is not configured, do nothing and return early. */
+	if (vm_compressor_mode == VM_PAGER_NOT_CONFIGURED) {
+		os_log(OS_LOG_DEFAULT, "%s: vm_compressor_mode == VM_PAGER_NOT_CONFIGURED, returning early", __func__);
+		return;
+	}
+
 	const queue_head_t *c_queues[] = {&c_age_list_head, &c_major_list_head};
 	c_reporting_bucket_t c_buckets[] = {
 		{.count = 0, .lower = HR_TO_S(0), .upper = HR_TO_S(1)},  /* [0, 1) hours */

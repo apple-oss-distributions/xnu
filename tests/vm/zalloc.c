@@ -44,6 +44,7 @@ T_DECL(zone_stress_test, "Zone stress test of edge cases",
 #define ZLOG_ZONE "data.kalloc.128"
 
 T_DECL(zlog_smoke_test, "check that zlog functions at all",
+    T_META_REQUIRES_SYSCTL_NE("kern.kasan.available", 1),
     T_META_BOOTARGS_SET("zlog1=" ZLOG_ZONE))
 {
 	char *cmd[] = { "/usr/local/bin/zlog", "-l", "-z", ZLOG_ZONE, NULL };

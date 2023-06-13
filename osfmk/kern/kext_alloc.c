@@ -164,7 +164,10 @@ kext_alloc(vm_offset_t *_addr, vm_size_t size, boolean_t fixed)
 #else
 	mach_vm_offset_t addr = (fixed) ? *_addr : kext_alloc_base;
 #endif
-	int flags = (fixed) ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE;
+	vm_map_kernel_flags_t vmk_flags = {
+		.vmf_fixed = (fixed != 0),
+		.vm_tag    = VM_KERN_MEMORY_KEXT,
+	};
 
 #if CONFIG_KEXT_BASEMENT
 	kc_format_t kcformat;
@@ -173,7 +176,8 @@ kext_alloc(vm_offset_t *_addr, vm_size_t size, boolean_t fixed)
 		 * There is no need for a kext basement when booting with the
 		 * new MH_FILESET format kext collection.
 		 */
-		rval = mach_vm_allocate_kernel(g_kext_map, &addr, size, flags, VM_KERN_MEMORY_KEXT);
+		rval = mach_vm_allocate_kernel(g_kext_map, &addr, size,
+		    vm_map_kernel_flags_vmflags(vmk_flags), vmk_flags.vm_tag);
 		if (rval != KERN_SUCCESS) {
 			printf("vm_allocate failed - %d\n", rval);
 			goto finish;
@@ -192,9 +196,7 @@ kext_alloc(vm_offset_t *_addr, vm_size_t size, boolean_t fixed)
 	    &addr,
 	    size,
 	    0,
-	    flags,
-	    VM_MAP_KERNEL_FLAGS_NONE,
-	    VM_KERN_MEMORY_KEXT,
+	    vmk_flags,
 	    MACH_PORT_NULL,
 	    0,
 	    TRUE,
@@ -207,7 +209,8 @@ kext_alloc(vm_offset_t *_addr, vm_size_t size, boolean_t fixed)
 	}
 check_reachable:
 #else
-	rval = mach_vm_allocate_kernel(g_kext_map, &addr, size, flags, VM_KERN_MEMORY_KEXT);
+	rval = mach_vm_allocate_kernel(g_kext_map, &addr, size,
+	    vm_map_kernel_flags_vmflags(vmk_flags), vmk_flags.vm_tag);
 	if (rval != KERN_SUCCESS) {
 		printf("vm_allocate failed - %d\n", rval);
 		goto finish;

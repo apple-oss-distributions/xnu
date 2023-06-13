@@ -12,6 +12,7 @@ PRIVATE_KERNELFILES = \
 	AIC.h \
 	apple_arm64_common.h \
 	apple_arm64_regs.h \
+	vhe_disable.h \
 	board_config.h \
 	boot.h \
 	H13.h \

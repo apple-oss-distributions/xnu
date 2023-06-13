@@ -967,29 +967,19 @@ struct if_clone {
 	u_int32_t       ifc_maxunit;    /* maximum unit number */
 	unsigned char   *ifc_units;     /* bitmap to handle units */
 	u_int32_t       ifc_bmlen;      /* bitmap length */
-	u_int32_t       ifc_zone_max_elem;      /* Max elements for this zone type */
-	u_int32_t       ifc_softc_size; /* size of softc for the device */
-	struct zone     *ifc_zone;      /* if_clone allocation zone */
 	int             (*ifc_create)(struct if_clone *, u_int32_t, void *);
 	int             (*ifc_destroy)(struct ifnet *);
 	uint8_t         ifc_namelen;    /* length of name */
 	char            ifc_name[IFNAMSIZ + 1]; /* name of device, e.g. `vlan' */
 };
 
-#define IF_CLONE_INITIALIZER(name, create, destroy, minifs, maxunit, zone_max_elem, softc_size) {       \
-    .ifc_list = { NULL, NULL },                                                                     \
-    .ifc_mutex = {},                                                                                \
-    .ifc_name = name,                                                                               \
-    .ifc_namelen =  (sizeof (name) - 1),                                                            \
-    .ifc_minifs = minifs,                                                                           \
-    .ifc_maxunit = maxunit,                                                                         \
-    .ifc_units = NULL,                                                                              \
-    .ifc_bmlen = 0,                                                                                 \
-    .ifc_zone_max_elem = zone_max_elem,                                                             \
-    .ifc_softc_size = softc_size,                                                                   \
-    .ifc_zone = NULL,                                                                               \
-    .ifc_create = create,                                                                           \
-    .ifc_destroy = destroy                                                                          \
+#define IF_CLONE_INITIALIZER(name, create, destroy, minifs, maxunit) {          \
+    .ifc_name = "" name,                                                        \
+    .ifc_namelen = (sizeof(name) - 1),                                          \
+    .ifc_minifs = (minifs),                                                     \
+    .ifc_maxunit = (maxunit),                                                   \
+    .ifc_create = (create),                                                     \
+    .ifc_destroy = (destroy)                                                    \
 }
 
 /*
@@ -1369,8 +1359,6 @@ extern void if_qflush_sc(struct ifnet *, mbuf_svc_class_t, u_int32_t,
 extern struct if_clone *if_clone_lookup(const char *, u_int32_t *);
 extern int if_clone_attach(struct if_clone *);
 extern void if_clone_detach(struct if_clone *);
-extern void *if_clone_softc_allocate(const struct if_clone *);
-extern void if_clone_softc_deallocate(const struct if_clone *, void *);
 extern u_int32_t if_functional_type(struct ifnet *, bool);
 
 extern errno_t if_mcasts_update(struct ifnet *);

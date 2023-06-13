@@ -169,6 +169,45 @@ struct ip_moptions {
 #define IMO_REMREF(_imo)                                                \
 	imo_remref(_imo)
 
+/*
+ * Drop any existing memberships and source
+ * filters on _imo. The order of operations is
+ * 1. imf_leave the in_mfilter
+ * 2. in_leavegroup the meembership group
+ * 3. imf_purge the filter
+ * 4. INM_REMREF the reference on the membership group.
+ *
+ * The above calls assume valid input; consequently those
+ * are predicated by checking that the membership and
+ * the filter pointers (imn and imf, correspondingly)
+ * are valid.
+ */
+#define IMO_PURGE_LOCKED(_imo) do {                                 \
+	IMO_LOCK_ASSERT_HELD((_imo));                                   \
+	for (int i = 0; i < (_imo)->imo_num_memberships; ++i) {         \
+	        struct in_mfilter *imf;                                 \
+	        struct in_multi   *imn;                                 \
+	        imf = (_imo)->imo_mfilters != NULL                      \
+	            ? &(_imo)->imo_mfilters[i]                          \
+	            : NULL;                                             \
+	        if (imf != NULL) {                                      \
+	            imf_leave(imf);                                     \
+	        }                                                       \
+	        imn = (_imo)->imo_membership[i];                        \
+	        (_imo)->imo_membership[i] = NULL;                       \
+	        if (imn != NULL) {                                      \
+	            (void) in_leavegroup(imn, imf);                     \
+	        }                                                       \
+	        if (imf != NULL) {                                      \
+	            imf_purge(imf);                                     \
+	        }                                                       \
+	                if (imn != NULL) {                              \
+	            INM_REMREF(imn);                                    \
+	        }                                                       \
+	}                                                               \
+	(_imo)->imo_num_memberships = 0;                                \
+} while (0)
+
 /* mbuf tag for ip_forwarding info */
 struct ip_fwd_tag {
 	struct sockaddr_in *next_hop;   /* next_hop */

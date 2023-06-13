@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -383,9 +383,7 @@ static struct if_clone vlan_cloner = IF_CLONE_INITIALIZER(VLANNAME,
     vlan_clone_create,
     vlan_clone_destroy,
     0,
-    VLAN_UNITMAX,
-    VLAN_ZONE_MAX_ELEM,
-    sizeof(struct ifvlan));
+    VLAN_UNITMAX);
 static  void interface_link_event(struct ifnet * ifp, u_int32_t event_code);
 static  void vlan_parent_link_event(struct ifnet * p,
     u_int32_t event_code);
@@ -425,7 +423,7 @@ ifvlan_release(ifvlan_ref ifv)
 			printf("ifvlan_release(%s)\n", ifv->ifv_name);
 		}
 		ifv->ifv_signature = 0;
-		if_clone_softc_deallocate(&vlan_cloner, ifv);
+		kfree_type(struct ifvlan, ifv);
 		break;
 	default:
 		break;
@@ -925,31 +923,32 @@ findsubstr(const char * haystack, const char * needle, size_t needle_len)
 }
 
 static inline bool
-my_os_variant_is_darwinos(void)
+my_os_release_type_matches(const char *variant, size_t variant_len)
 {
-	const char darwin_osreleasetype[] = "Darwin";
 	const char *found;
 	extern char osreleasetype[];
 
 	found = findsubstr(osreleasetype,
-	    darwin_osreleasetype,
-	    sizeof(darwin_osreleasetype) - 1);
+	    variant,
+	    variant_len);
 	return found != NULL;
 }
 
 static inline bool
 vlan_is_enabled(void)
 {
-	bool    is_darwinos;
-
+	const char darwin_osreleasetype[] = "Darwin";
+	const char restore_osreleasetype[] = "Restore";
+	const char nonui_osreleasetype[] = "NonUI";
 	if (vlan_enabled != 0) {
 		return true;
 	}
-	is_darwinos = my_os_variant_is_darwinos();
-	if (is_darwinos) {
+	if (my_os_release_type_matches(darwin_osreleasetype, sizeof(darwin_osreleasetype) - 1) ||
+	    my_os_release_type_matches(restore_osreleasetype, sizeof(restore_osreleasetype) - 1) ||
+	    my_os_release_type_matches(nonui_osreleasetype, sizeof(nonui_osreleasetype) - 1)) {
 		vlan_enabled = 1;
 	}
-	return is_darwinos;
+	return vlan_enabled != 0;
 }
 
 #endif /* !XNU_TARGET_OS_OSX */
@@ -972,10 +971,7 @@ vlan_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	if (error != 0) {
 		return error;
 	}
-	ifv = if_clone_softc_allocate(&vlan_cloner);
-	if (ifv == NULL) {
-		return ENOBUFS;
-	}
+	ifv = kalloc_type(struct ifvlan, Z_WAITOK_ZERO_NOFAIL);
 	ifv->ifv_retain_count = 1;
 	ifv->ifv_signature = IFV_SIGNATURE;
 	multicast_list_init(&ifv->ifv_multicast);
@@ -1215,30 +1211,20 @@ vlan_input(ifnet_t p, __unused protocol_family_t protocol,
 		switch (ifnet_type(p)) {
 		case IFT_ETHER:
 		case IFT_IEEE8023ADLAG:
-			if (m->m_len < ETHER_VLAN_ENCAP_LEN) {
-				m_freem(m);
-				return 0;
+			if (m->m_len < sizeof(struct ether_vlan_header)) {
+				goto done;
 			}
 			evl = (struct ether_vlan_header *)(void *)frame_header;
 			if (ntohs(evl->evl_proto) == ETHERTYPE_VLAN) {
 				/* don't allow VLAN within VLAN */
-				m_freem(m);
-				return 0;
+				goto done;
 			}
 			tag = EVL_VLANOFTAG(ntohs(evl->evl_tag));
-
-			/*
-			 * Restore the original ethertype.  We'll remove
-			 * the encapsulation after we've found the vlan
-			 * interface corresponding to the tag.
-			 */
-			evl->evl_encap_proto = evl->evl_proto;
 			break;
 		default:
 			printf("vlan_demux: unsupported if type %u",
 			    ifnet_type(p));
-			m_freem(m);
-			return 0;
+			goto done;
 		}
 	}
 	if (tag != 0) {
@@ -1246,8 +1232,7 @@ vlan_input(ifnet_t p, __unused protocol_family_t protocol,
 
 		if ((ifnet_eflags(p) & IFEF_VLAN) == 0) {
 			/* don't bother looking through the VLAN list */
-			m_freem(m);
-			return 0;
+			goto done;
 		}
 		vlan_lock();
 		ifv = vlan_lookup_parent_and_tag(p, tag);
@@ -1258,34 +1243,47 @@ vlan_input(ifnet_t p, __unused protocol_family_t protocol,
 		    || ifvlan_flags_ready(ifv) == 0
 		    || (ifnet_flags(ifp) & IFF_UP) == 0) {
 			vlan_unlock();
-			m_freem(m);
-			return 0;
+			goto done;
 		}
 		vlan_unlock();
 	}
 	if (soft_vlan) {
 		/*
-		 * Packet had an in-line encapsulation header;
-		 * remove it.  The original header has already
-		 * been fixed up above.
+		 * Remove the VLAN encapsulation header by shifting the
+		 * ethernet destination and source addresses over by the
+		 * encapsulation header length (4 bytes).
 		 */
+		struct {
+			uint8_t dhost[ETHER_ADDR_LEN];
+			uint8_t shost[ETHER_ADDR_LEN];
+		} save_ether;
+
+		assert(((char *)evl) == frame_header);
+		bcopy(evl, &save_ether, sizeof(save_ether));
+		bcopy(&save_ether, ((char *)evl) + ETHER_VLAN_ENCAP_LEN,
+		    sizeof(save_ether));
+		frame_header += ETHER_VLAN_ENCAP_LEN;
 		m->m_len -= ETHER_VLAN_ENCAP_LEN;
 		m->m_data += ETHER_VLAN_ENCAP_LEN;
 		m->m_pkthdr.len -= ETHER_VLAN_ENCAP_LEN;
 		m->m_pkthdr.csum_flags = 0; /* can't trust hardware checksum */
 	}
+	m->m_pkthdr.pkt_hdr = frame_header;
 	if (tag != 0) {
 		m->m_pkthdr.rcvif = ifp;
-		m->m_pkthdr.pkt_hdr = frame_header;
 		(void)ifnet_stat_increment_in(ifp, 1,
 		    m->m_pkthdr.len + ETHER_HDR_LEN, 0);
 		bpf_tap_in(ifp, DLT_EN10MB, m, frame_header, ETHER_HDR_LEN);
 		/* We found a vlan interface, inject on that interface. */
 		dlil_input_packet_list(ifp, m);
 	} else {
-		m->m_pkthdr.pkt_hdr = frame_header;
 		/* Send priority-tagged packet up through the parent */
 		dlil_input_packet_list(p, m);
+	}
+	m = NULL;
+done:
+	if (m != NULL) {
+		m_freem(m);
 	}
 	return 0;
 }

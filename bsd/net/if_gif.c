@@ -156,7 +156,7 @@ static void gif_detach(struct ifnet *);
 
 static struct if_clone gif_cloner =
     IF_CLONE_INITIALIZER(GIFNAME, gif_clone_create, gif_clone_destroy,
-    0, GIF_MAXUNIT, GIF_ZONE_MAX_ELEM, sizeof(struct gif_softc));
+    0, GIF_MAXUNIT);
 /*
  * Theory of operation: initially, one gif interface is created.
  * Any time a gif interface is configured, if there are no other
@@ -297,7 +297,7 @@ gif_detach(struct ifnet *ifp)
 {
 	struct gif_softc *sc = ifp->if_softc;
 	lck_mtx_destroy(&sc->gif_lock, &gif_mtx_grp);
-	if_clone_softc_deallocate(&gif_cloner, sc);
+	kfree_type(struct gif_softc, sc);
 	ifp->if_softc = NULL;
 	(void) ifnet_release(ifp);
 }
@@ -317,13 +317,7 @@ gif_clone_create(struct if_clone *ifc, uint32_t unit, __unused void *params)
 		goto done;
 	}
 
-	sc = if_clone_softc_allocate(&gif_cloner);
-	if (sc == NULL) {
-		log(LOG_ERR, "gif_clone_create: failed to allocate gif%d\n",
-		    unit);
-		error = ENOBUFS;
-		goto done;
-	}
+	sc = kalloc_type(struct gif_softc, Z_WAITOK_ZERO_NOFAIL);
 
 	/* use the interface name as the unique id for ifp recycle */
 	snprintf(sc->gif_ifname, sizeof(sc->gif_ifname), "%s%d",
@@ -353,7 +347,7 @@ gif_clone_create(struct if_clone *ifc, uint32_t unit, __unused void *params)
 	error = ifnet_allocate_extended(&gif_init_params, &sc->gif_if);
 	if (error != 0) {
 		printf("gif_clone_create, ifnet_allocate failed - %d\n", error);
-		if_clone_softc_deallocate(&gif_cloner, sc);
+		kfree_type(struct gif_softc, sc);
 		error = ENOBUFS;
 		goto done;
 	}
@@ -365,7 +359,7 @@ gif_clone_create(struct if_clone *ifc, uint32_t unit, __unused void *params)
 	if (sc->encap_cookie4 == NULL) {
 		printf("%s: unable to attach encap4\n", if_name(sc->gif_if));
 		ifnet_release(sc->gif_if);
-		if_clone_softc_deallocate(&gif_cloner, sc);
+		kfree_type(struct gif_softc, sc);
 		error = ENOBUFS;
 		goto done;
 	}
@@ -379,7 +373,7 @@ gif_clone_create(struct if_clone *ifc, uint32_t unit, __unused void *params)
 		}
 		printf("%s: unable to attach encap6\n", if_name(sc->gif_if));
 		ifnet_release(sc->gif_if);
-		if_clone_softc_deallocate(&gif_cloner, sc);
+		kfree_type(struct gif_softc, sc);
 		error = ENOBUFS;
 		goto done;
 	}
@@ -399,7 +393,7 @@ gif_clone_create(struct if_clone *ifc, uint32_t unit, __unused void *params)
 			encap_detach(sc->encap_cookie6);
 			sc->encap_cookie6 = NULL;
 		}
-		if_clone_softc_deallocate(&gif_cloner, sc);
+		kfree_type(struct gif_softc, sc);
 		goto done;
 	}
 	bpfattach(sc->gif_if, DLT_NULL, sizeof(u_int));

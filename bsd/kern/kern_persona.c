@@ -80,7 +80,7 @@ LCK_MTX_DECLARE(all_personas_lock, &persona_lck_grp);
 
 os_refgrp_decl(static, persona_refgrp, "persona", NULL);
 
-static ZONE_DEFINE_TYPE(persona_zone, "personas", struct persona, ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(persona_zone, struct persona, KT_DEFAULT);
 
 #define lock_personas()    lck_mtx_lock(&all_personas_lock)
 #define unlock_personas()  lck_mtx_unlock(&all_personas_lock)

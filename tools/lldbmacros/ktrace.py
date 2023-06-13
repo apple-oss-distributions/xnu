@@ -401,10 +401,10 @@ class KDEvent(object):
     """
     Wrapper around kevent pointer that handles sorting logic.
     """
-    def __init__(self, timestamp, kevent, k64):
+    def __init__(self, timestamp, kevent, cpu):
         self.kevent = kevent
         self.timestamp = timestamp
-        self.k64 = k64
+        self.cpu = cpu
 
     def get_kevent(self):
         return self.kevent
@@ -431,6 +431,7 @@ class KDCPU(object):
         self.iter_store = None
         self.k64 = k64
         self.verbose = verbose
+        self.disabled = False
         self.timestamp_mask = ((1 << 48) - 1) if not self.k64 else ~0
         self.last_timestamp = 0
 
@@ -482,7 +483,7 @@ class KDCPU(object):
 
     def __next__(self):
         # This CPU is out of events.
-        if self.iter_store is None:
+        if self.iter_store is None or self.disabled:
             raise StopIteration
 
         if self.iter_idx == self.iter_store.kds_bufindx:
@@ -512,12 +513,21 @@ class KDCPU(object):
                 self.iter_store = self.get_kdstore(snext)
                 self.iter_idx = self.iter_store.kds_readlast
 
-        return KDEvent(timestamp, keventp, self.k64)
+        return KDEvent(timestamp, keventp, self)
 
     # Python 2 compatibility
     # pragma pylint: disable=next-method-defined
     def next(self):
         return self.__next__()
+
+
+def GetKdebugCPUName(cpu_id):
+    current_iop = kern.globals.kd_control_trace.kdc_coprocs
+    while current_iop:
+        if current_iop.cpu_id == cpu_id:
+            return '{}({})'.format(cpu_id, str(current_iop.full_name))
+        current_iop = current_iop.next
+    return '{}(unknown)'.format(cpu_id)
 
 
 def IterateKdebugEvents(verbose=False, humanize=False, last=None,
@@ -556,17 +566,26 @@ def IterateKdebugEvents(verbose=False, humanize=False, last=None,
     cpus = [KDCPU(cpuid, k64, verbose, starting_timestamp=start_timestamp)
             for cpuid in range(cpu_count)]
     last_timestamp = 0
+    last_kevent = None
     warned = False
     for event in heapq.merge(*cpus):
         if event.timestamp < last_timestamp and not warned:
             # Human-readable output might have garbage on the rest of the line.
             # Use a CSI escape sequence to clear it out.
             clear_line_csi = '\033[K'
-            print(
-                    'warning: events seem to be out-of-order',
-                    end=((clear_line_csi + '\n') if humanize else '\n'))
+            print((
+                    'warning: events from CPU {} are out-of-order, ' +
+                    'last CPU = {}, last timestamp = {}, ' +
+                    'current timestamp = {}, disabling').format(
+                    GetKdebugCPUName(event.get_kevent().cpuid),
+                    GetKdebugCPUName(last_kevent.cpuid), last_timestamp,
+                    event.timestamp), end=(
+                    (clear_line_csi + '\n') if humanize else '\n'))
             warned = True
+            event.cpu.disabled = True
+            continue
         last_timestamp = event.timestamp
+        last_kevent = event.get_kevent()
         yield event.get_kevent()
 
 

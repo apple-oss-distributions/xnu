@@ -8,16 +8,18 @@ from builtins import filter
 from collections import namedtuple
 import os
 import io
+import core
 from uuid import UUID
 
 from core.cvalue import (
     unsigned,
     signed,
-    addressof,
-    getOSPtr
+    addressof
 )
-from core.lazytarget import LazyTarget
-from core import caching
+from core.caching import (
+    cache_dynamically,
+    LazyTarget,
+)
 from core.io import SBProcessRawIO
 from macho import MachOSegment, MemMachO, VisualMachoMap
 
@@ -42,6 +44,7 @@ from xnu import (
     uuid_regex
 )
 
+import kmemory
 import macho
 import lldb
 
@@ -93,6 +96,23 @@ def seg_contains(segments, addr):
     )
 
 
+def sec_contains(sections, addr):
+    """ Returns generator of all sections that contains given address. """
+
+    return (
+        s for s in sections
+        if s.addr <= addr < (s.addr + s.size)
+    )
+
+def sbsec_contains(target, sbsections, addr):
+    """ Returns generator of all SBSections that contains given address. """
+
+    return (
+        s for s in sbsections
+        if s.GetLoadAddress(target) <= addr < s.GetLoadAddress(target) + s.GetByteSize()
+    )
+
+
 # Summary helpers
 
 def LoadMachO(address, size):
@@ -107,14 +127,14 @@ def LoadMachO(address, size):
     return macho.MemMachO(bufio)
 
 
-def IterateKextSummaries():
+def IterateKextSummaries(target):
     """ Generator walking over all kext summaries. """
 
-    hdr = kern.globals.gLoadedKextSummaries
-    total = unsigned(hdr.numSummaries)
+    hdr   = target.chkFindFirstGlobalVariable('gLoadedKextSummaries').Dereference()
+    arr   = hdr.GetValueForExpressionPath('.summaries[0]')
+    total = hdr.xGetIntegerByName('numSummaries')
 
-    for kext in (hdr.summaries[i] for i in range(total)):
-
+    for kext in (core.value(e.AddressOf()) for e in arr.xIterSiblings(0, total)):
         # Load Mach-O segments/sections.
         mobj = LoadMachO(unsigned(kext.address), unsigned(kext.size))
 
@@ -130,16 +150,11 @@ def IterateKextSummaries():
         )
 
 
-def GetAllKextSummaries():
+@cache_dynamically
+def GetAllKextSummaries(target=None):
     """ Return all kext summaries. (cached) """
 
-    cached_ret = caching.GetDynamicCacheData("kern.kexts.loadinformation", [])
-    if cached_ret:
-        return cached_ret
-
-    ret = list(IterateKextSummaries())
-    caching.SaveDynamicCacheData("kern.kexts.loadinformation", ret)
-    return ret
+    return list(IterateKextSummaries(target))
 
 
 def FindKextSummary(kmod_addr):
@@ -348,7 +363,7 @@ def ShowAllKnownKexts(cmd_args=None):
         This is particularly useful to find if some kext was unloaded
         before this crash'ed state.
     """
-    kext_ptr = getOSPtr(kern.globals.sKextsByID)
+    kext_ptr = kern.globals.sKextsByID
     kext_count = unsigned(kext_ptr.count)
 
     print("%d kexts in sKextsByID:" % kext_count)
@@ -538,6 +553,147 @@ def AddKextAddr(cmd_args=[]):
         for s in segs:
             print(GetKextSummary(kinfo.kmod) + " segment: {} offset = {:#0x}".format(s.name, (addr - s.vmaddr)))
             FetchDSYM(kinfo)
+
+
+class KextMemoryObject(kmemory.MemoryObject):
+    """ Describes an object landing in some kext """
+
+    MO_KIND = "kext mach-o"
+
+    def __init__(self, kmem, address, kinfo):
+        super(KextMemoryObject, self).__init__(kmem, address)
+        self.kinfo = kinfo
+        self.target = kmem.target
+
+    @property
+    def object_range(self):
+        seg = next(seg_contains(self.kinfo.segments, self.address))
+        sec = next(sec_contains(seg.sections, self.address), None)
+        if sec:
+            return kmemory.MemoryRange(sec.addr, sec.addr + sec.size)
+        return kmemory.MemoryRange(seg.vmaddr, seg.vmaddr + seg.vmsize)
+
+    def find_mod_seg_sect(self):
+        target  = self.target
+        address = self.address
+
+        return next((
+            (module, segment, next(sbsec_contains(target, segment, address), None))
+            for module in target.module_iter()
+            for segment in sbsec_contains(target, module.section_iter(), address)
+        ), (None, None, None))
+
+    def describe(self, verbose=False):
+        from lldb.utils.symbolication import Symbolicator
+
+        addr    = self.address
+        kinfo   = self.kinfo
+
+        sbmod, sbseg, sbsec = self.find_mod_seg_sect()
+        if sbmod is None:
+            FetchDSYM(kinfo)
+            print()
+            sbmod, sbseg, sbsec = self.find_mod_seg_sect()
+
+        syms   = Symbolicator.InitWithSBTarget(self.target).symbolicate(addr)
+        sym    = next(iter(syms)) if syms else None
+
+        if not sbseg:
+            # not really an SBSection but we only need to pretty print 'name'
+            # which both have, yay duck typing
+            sbseg = next(seg_contains(kinfo.segments, addr), None)
+
+        fmt  = "Kext Symbol Info\n"
+        fmt += " kext                 : {kinfo.name} ({kinfo.uuid})\n"
+        fmt += " module               : {sbmod.file.basename}\n" if sbmod else ""
+        fmt += " section              : {sbseg.name} {sbsec.name}\n" if sbsec else \
+               " segment              : {sbseg.name}\n" if sbseg else ""
+        fmt += " symbol               : {sym!s}\n" if sym else ""
+
+        print(fmt.format(kinfo=kinfo, sbmod=sbmod, sbseg=sbseg, sbsec=sbsec, sym=sym))
+
+
+class MainBinaryMemoryObject(kmemory.MemoryObject):
+    """ Describes an object landing in the main kernel binary """
+
+    MO_KIND = "kernel mach-o"
+
+    def __init__(self, kmem, address, section):
+        super(MainBinaryMemoryObject, self).__init__(kmem, address)
+        self.section = section
+        self.target = kmem.target
+
+    def _subsection(self):
+        return next(sbsec_contains(self.target, self.section, self.address), None)
+
+    @property
+    def object_range(self):
+        target  = self.target
+        section = self._subsection() or self.section
+        addr    = section.GetLoadAddress(target)
+        size    = section.GetByteSize()
+        return kmemory.MemoryRange(addr, addr + size)
+
+    @property
+    def module(self):
+        return self.target.GetModuleAtIndex(0).GetFileSpec().GetFilename()
+
+    @property
+    def uuid(self):
+        return self.target.GetModuleAtIndex(0).GetUUIDString()
+
+    def describe(self, verbose=False):
+        from lldb.utils.symbolication import Symbolicator
+
+        subsec  = self._subsection()
+        syms    = Symbolicator.InitWithSBTarget(self.target).symbolicate(self.address)
+        sym     = next(iter(syms)) if syms else None
+
+        fmt  = "Symbol Info\n"
+        fmt += " module               : {mo.module}\n"
+        fmt += " uuid                 : {mo.uuid}\n"
+        fmt += " section              : {mo.section.name} {subsec.name}\n" if subsec else ""
+        fmt += " segment              : {mo.section.name}\n" if not subsec else ""
+        fmt += " symbol               : {sym}\n" if sym else ""
+
+        print(fmt.format(mo=self, subsec=subsec, sym=sym))
+
+
+@kmemory.whatis_provider
+class KextWhatisProvider(kmemory.WhatisProvider):
+    """ Kext ranges whatis provider """
+
+    COST = 100
+
+    def claims(self, address):
+        target  = self.target
+        mainmod = target.GetModuleAtIndex(0)
+
+        #
+        # TODO: surely the kexts can provide a better range check
+        #
+
+        return any(
+            sbsec_contains(target, mainmod.section_iter(), address)
+        ) or any(
+            any(seg_contains(kinfo.segments, address))
+            for kinfo in GetAllKextSummaries()
+        )
+
+    def lookup(self, address):
+        target  = self.target
+        mainmod = target.GetModuleAtIndex(0)
+
+        section = next(sbsec_contains(target, mainmod.section_iter(), address), None)
+
+        if section:
+            return MainBinaryMemoryObject(self.kmem, address, section)
+
+        return KextMemoryObject(self.kmem, address, next(
+            kinfo
+            for kinfo in GetAllKextSummaries()
+            if any(seg_contains(kinfo.segments, address))
+        ))
 
 
 # Aliases for backward compatibility.

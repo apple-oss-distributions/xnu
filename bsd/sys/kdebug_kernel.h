@@ -485,7 +485,10 @@ typedef struct ktriage_strings {
 	const char **strings;
 } ktriage_strings_t;
 
-void ktriage_record(uint64_t thread_id, uint64_t debugid, uintptr_t arg1);
+int ktriage_register_subsystem_strings(uint8_t subsystem, ktriage_strings_t *subsystem_strings);
+int ktriage_unregister_subsystem_strings(uint8_t subsystem);
+
+void ktriage_record(uint64_t thread_id, uint64_t debugid, uintptr_t arg);
 
 #define NUMPARMS 23
 void kdebug_lookup_gen_events(long *path_words, int path_len, void *vnp,

@@ -488,13 +488,15 @@ typedef struct vol_attributes_attr {
 #define ATTR_VOL_ENCODINGSUSED                  0x00010000
 #define ATTR_VOL_CAPABILITIES                   0x00020000
 #define ATTR_VOL_UUID                           0x00040000
+#define ATTR_VOL_FSTYPENAME                     0x00100000
+#define ATTR_VOL_FSSUBTYPE                      0x00200000
 #define ATTR_VOL_SPACEUSED                      0x00800000
 #define ATTR_VOL_QUOTA_SIZE                     0x10000000
-#define ATTR_VOL_RESERVED_SIZE          0x20000000
+#define ATTR_VOL_RESERVED_SIZE                  0x20000000
 #define ATTR_VOL_ATTRIBUTES                     0x40000000
 #define ATTR_VOL_INFO                           0x80000000
 
-#define ATTR_VOL_VALIDMASK                      0xF087FFFF
+#define ATTR_VOL_VALIDMASK                      0xF0B7FFFF
 
 /*
  * The list of settable ATTR_VOL_* attributes include the following:

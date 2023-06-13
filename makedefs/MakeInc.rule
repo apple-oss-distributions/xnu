@@ -119,7 +119,7 @@ $(1): $(5)% : $(2) | $(3)_MKDIR
 	fi;								\
 	$$(INSTALL) $$(DATA_INSTALL_FLAGS) \
 		./$(3)/$$*.unifdef.$$$$$$$$$$(suffix $$*) $$@ || exit 1; \
-	$$(PYTHON) $$(LLDBMACROS_SOURCE)/core/syntax_checker.py \
+	$$(LLDBMACROS_SOURCE)/core/syntax_checker.py \
 		./$(3)/$$*.unifdef.$$$$$$$$$$(suffix $$*) $$(_vstdout) || exit 1; \
 	$$(RM) ./$(3)/$$*.unifdef.$$$$$$$$$$(suffix $$*)
 	$$(_v)if [ -n "$(5)" ]; then $$(TOUCH) "$(5)"; fi

@@ -4,9 +4,10 @@
 //
 //
 
-#pragma once
+#ifndef CORE_ENTITLEMENTS_KERNEL_H
+#define CORE_ENTITLEMENTS_KERNEL_H
 
-#include "CoreEntitlements.h"
+#include <CoreEntitlements/CoreEntitlements.h>
 #include <libkern/c++/OSPtr.h>
 #include <libkern/c++/OSDictionary.h>
 
@@ -19,3 +20,11 @@
  * Private API, converts a query context into an OSDictionary that can be handed out to legacy users
  */
 OSPtr<OSDictionary> CEQueryContextToOSDictionary(CEQueryContext_t entitlements);
+
+/*!
+ * @function CEQueryContextToOSObject
+ * Private API, converts a query context into an OSObject that may be returned dynamically
+ */
+OSPtr<OSObject> CEQueryContextToOSObject(CEQueryContext_t context);
+
+#endif

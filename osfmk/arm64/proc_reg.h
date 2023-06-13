@@ -1603,13 +1603,6 @@
 #define ARM_PTE_COMPRESSED_ALT  0x4000000000000000ULL /* ... and was "alt_acct" */
 #define ARM_PTE_COMPRESSED_MASK 0xC000000000000000ULL
 
-#define ARM_PTE_IS_COMPRESSED(x, p) \
-	((((x) & 0x3) == 0) && /* PTE is not valid... */                      \
-	 ((x) & ARM_PTE_COMPRESSED) && /* ...has "compressed" marker" */      \
-	 ((!((x) & ~ARM_PTE_COMPRESSED_MASK)) || /* ...no other bits */       \
-	 (panic("compressed PTE %p 0x%llx has extra bits 0x%llx: corrupted?", \
-	        (p), (x), (x) & ~ARM_PTE_COMPRESSED_MASK), FALSE)))
-
 #define ARM_PTE_TYPE               0x0000000000000003ULL /* valid L3 entry: includes bit #1 (counterintuitively) */
 #define ARM_PTE_TYPE_VALID         0x0000000000000003ULL /* valid L3 entry: includes bit #1 (counterintuitively) */
 #define ARM_PTE_TYPE_FAULT         0x0000000000000000ULL /* invalid L3 entry */
@@ -2015,7 +2008,6 @@ typedef enum {
 #define MIDR_JADE_DIE_ICESTORM          (0x028 << MIDR_EL1_PNUM_SHIFT)
 #define MIDR_JADE_DIE_FIRESTORM         (0x029 << MIDR_EL1_PNUM_SHIFT)
 #endif
-
 
 
 

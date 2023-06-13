@@ -16,8 +16,8 @@ T_GLOBAL_META(
 
 typedef struct knote_context_s knote_context_t;
 struct knote_context_s {
-	int initialized;
-	int start;
+	volatile int initialized;
+	volatile int start;
 };
 
 static void *

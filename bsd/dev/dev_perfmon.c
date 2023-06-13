@@ -81,7 +81,7 @@ perfmon_dev_get_device(dev_t dev)
 	int source_index = perfmon_dev_get_source_index(dev);
 	int dmin = minor(dev);
 	if (dmin >= perfmon_kind_max || dmin < 0) {
-		panic("perfmon: invalid minor dev number: 0x%x", dev);
+		return NULL;
 	}
 
 	return &perfmon_devices[source_index][dmin];
@@ -114,6 +114,9 @@ perfmon_dev_open(dev_t dev, int flags, int __unused devtype, proc_t __unused p)
 	lck_mtx_lock(&perfmon_devices_lock);
 	struct perfmon_device *device = perfmon_dev_get_device(dev);
 	struct perfmon_source *source = perfmon_dev_get_source(dev);
+	if (!device) {
+		return ENXIO;
+	}
 	if (((flags & O_RDWR) == O_RDWR)) {
 		if (!perfmon_acquire(source->ps_kind, "perfmon")) {
 			return ETXTBSY;

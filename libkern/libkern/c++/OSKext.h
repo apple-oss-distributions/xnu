@@ -356,6 +356,9 @@ private:
 		unsigned int resetSegmentsFromImmutableCopy:1;
 		unsigned int unloadUnsupported:1;
 		unsigned int dextToReplace:1;
+
+		/* The Mach-O header contains segment addresses which are unslid. */
+		unsigned int unslidMachO:1;
 	} flags;
 
 	uint32_t matchingRefCount;
@@ -454,6 +457,9 @@ private:
 
 	virtual bool isInExcludeList(void);
 	virtual bool isLoadable(void);
+
+	static OSKext * allocAndInitFakeKext(
+		kmod_info_t *kmod_info);
 
 /* Mkexts.
  */
@@ -851,6 +857,7 @@ public:
 
 	virtual bool    setAutounloadEnabled(bool flag);
 
+	virtual const OSObject   * getBundleExecutable(void);
 	virtual const OSSymbol   * getIdentifier(void);
 	virtual const char       * getIdentifierCString(void);
 	virtual OSKextVersion      getVersion(void);

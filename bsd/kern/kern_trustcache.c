@@ -82,6 +82,13 @@ trust_cache_runtime_init(void)
 		panic("image4 interface not available");
 	}
 
+	/* AMFI interface needs to be available */
+	if (amfi == NULL) {
+		panic("amfi interface not available");
+	} else if (amfi->TrustCache.version < 2) {
+		panic("amfi interface is stale: %u", amfi->TrustCache.version);
+	}
+
 	trustCacheInitializeRuntime(
 		trust_cache_rt,
 		trust_cache_mut_rt,
@@ -196,6 +203,13 @@ ppl_query_trust_cache(
 	return pmap_query_trust_cache(query_type, cdhash, query_token);
 }
 
+static kern_return_t
+ppl_check_trust_cache_runtime_for_uuid(
+	const uint8_t check_uuid[kUUIDSize])
+{
+	return pmap_check_trust_cache_runtime_for_uuid(check_uuid);
+}
+
 #else
 /*
  * We don't have a monitor environment available. This means someone with a kernel
@@ -239,6 +253,13 @@ trust_cache_runtime_init(void)
 		panic("image4 interface not available");
 	}
 
+	/* AMFI interface needs to be available */
+	if (amfi == NULL) {
+		panic("amfi interface not available");
+	} else if (amfi->TrustCache.version < 2) {
+		panic("amfi interface is stale: %u", amfi->TrustCache.version);
+	}
+
 	trustCacheInitializeRuntime(
 		trust_cache_rt,
 		trust_cache_mut_rt,
@@ -264,18 +285,6 @@ xnu_load_trust_cache(
 	(void)img4_aux_manifest;
 	(void)img4_aux_manifest_len;
 
-	/* AMFI interface needs to be available */
-	if (amfi == NULL) {
-		panic("amfi interface not available");
-	}
-
-	const TrustCacheInterface_t *interface = &amfi->TrustCache;
-	if (interface->version < 1) {
-		/* AMFI change hasn't landed in the build */
-		printf("unable to load trust cache (type: %u): interface not supported\n", type);
-		return KERN_NOT_SUPPORTED;
-	}
-
 	/* Allocate the trust cache data structure -- Z_WAITOK_ZERO means this can't fail */
 	TrustCache_t *trust_cache = kalloc_type(TrustCache_t, Z_WAITOK_ZERO);
 	assert(trust_cache != NULL);
@@ -297,7 +306,7 @@ xnu_load_trust_cache(
 	/* Exclusively lock the runtime */
 	lck_rw_lock_exclusive(&trust_cache_rt_lock);
 
-	TCReturn_t tc_ret = interface->load(
+	TCReturn_t tc_ret = amfi->TrustCache.load(
 		trust_cache_rt,
 		type,
 		trust_cache,
@@ -335,18 +344,6 @@ xnu_load_legacy_trust_cache(
 #if XNU_HAS_LEGACY_TRUST_CACHE_LOADING
 	kern_return_t ret = KERN_DENIED;
 
-	/* AMFI interface needs to be available */
-	if (amfi == NULL) {
-		panic("amfi interface not available");
-	}
-
-	const TrustCacheInterface_t *interface = &amfi->TrustCache;
-	if (interface->version < 1) {
-		/* AMFI change hasn't landed in the build */
-		printf("unable to load legacy trust cache: interface not supported\n");
-		return KERN_NOT_SUPPORTED;
-	}
-
 	/* Allocate the trust cache data structure -- Z_WAITOK_ZERO means this can't fail */
 	TrustCache_t *trust_cache = kalloc_type(TrustCache_t, Z_WAITOK_ZERO);
 	assert(trust_cache != NULL);
@@ -361,7 +358,7 @@ xnu_load_legacy_trust_cache(
 	/* Exclusively lock the runtime */
 	lck_rw_lock_exclusive(&trust_cache_rt_lock);
 
-	TCReturn_t tc_ret = interface->loadModule(
+	TCReturn_t tc_ret = amfi->TrustCache.loadModule(
 		trust_cache_rt,
 		kTCTypeLegacy,
 		trust_cache,
@@ -402,18 +399,6 @@ xnu_query_trust_cache(
 {
 	kern_return_t ret = KERN_NOT_FOUND;
 
-	/* AMFI interface needs to be available */
-	if (amfi == NULL) {
-		panic("amfi interface not available");
-	}
-
-	const TrustCacheInterface_t *interface = &amfi->TrustCache;
-	if (interface->version < 1) {
-		/* AMFI change hasn't landed in the build */
-		printf("unable to query trust cache: interface not supported\n");
-		return KERN_NOT_SUPPORTED;
-	}
-
 	/* Validate the query type preemptively */
 	if (query_type >= kTCQueryTypeTotal) {
 		printf("unable to query trust cache: invalid query type: %u\n", query_type);
@@ -423,7 +408,7 @@ xnu_query_trust_cache(
 	/* Lock the runtime as shared */
 	lck_rw_lock_shared(&trust_cache_rt_lock);
 
-	TCReturn_t tc_ret = interface->query(
+	TCReturn_t tc_ret = amfi->TrustCache.query(
 		trust_cache_rt,
 		query_type,
 		cdhash,
@@ -445,7 +430,62 @@ xnu_query_trust_cache(
 	return ret;
 }
 
+static kern_return_t
+xnu_check_trust_cache_runtime_for_uuid(
+	const uint8_t check_uuid[kUUIDSize])
+{
+	kern_return_t ret = KERN_DENIED;
+
+	if (amfi->TrustCache.version < 3) {
+		/* AMFI change hasn't landed in the build */
+		printf("unable to check for loaded trust cache: interface not supported\n");
+		return KERN_NOT_SUPPORTED;
+	}
+
+	/* Lock the runtime as shared */
+	lck_rw_lock_shared(&trust_cache_rt_lock);
+
+	TCReturn_t tc_ret = amfi->TrustCache.checkRuntimeForUUID(
+		trust_cache_rt,
+		check_uuid,
+		NULL);
+
+	/* Unlock the runtime */
+	lck_rw_unlock_shared(&trust_cache_rt_lock);
+
+	if (tc_ret.error == kTCReturnSuccess) {
+		ret = KERN_SUCCESS;
+	} else if (tc_ret.error == kTCReturnNotFound) {
+		ret = KERN_NOT_FOUND;
+	} else {
+		ret = KERN_FAILURE;
+		printf("trust cache UUID check failed (TCReturn: 0x%02X | 0x%02X | %u)\n",
+		    tc_ret.component, tc_ret.error, tc_ret.uniqueError);
+	}
+
+	return ret;
+}
+
 #endif /* */
+
+kern_return_t
+check_trust_cache_runtime_for_uuid(
+	const uint8_t check_uuid[kUUIDSize])
+{
+	kern_return_t ret = KERN_DENIED;
+
+	if (check_uuid == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+#if   PMAP_CS_PPL_MONITOR
+	ret = ppl_check_trust_cache_runtime_for_uuid(check_uuid);
+#else
+	ret = xnu_check_trust_cache_runtime_for_uuid(check_uuid);
+#endif
+
+	return ret;
+}
 
 kern_return_t
 load_trust_cache(
@@ -493,11 +533,6 @@ load_trust_cache_with_type(
 	size_t img4_payload_len = 0;
 	const uint8_t *img4_manifest = NULL;
 	size_t img4_manifest_len = 0;
-
-	/* Image4 interface needs to be available */
-	if (img4if == NULL) {
-		panic("image4 interface not available");
-	}
 
 	/* img4_object is required */
 	if (!img4_object || (img4_object_len == 0)) {
@@ -682,7 +717,7 @@ query_trust_cache(
  */
 
 SECURITY_READ_ONLY_LATE(bool) trust_cache_static_init = false;
-SECURITY_READ_ONLY_LATE(bool) trust_cache_static_loaded = true;
+SECURITY_READ_ONLY_LATE(bool) trust_cache_static_loaded = false;
 SECURITY_READ_ONLY_LATE(TrustCache_t) trust_cache_static0 = {0};
 
 #if CONFIG_SECOND_STATIC_TRUST_CACHE
@@ -691,15 +726,7 @@ SECURITY_READ_ONLY_LATE(TrustCache_t) trust_cache_static1 = {0};
 
 #if defined(__arm64__)
 
-/*
- * On arm platforms, the static and engineering trust caches are part of the EXTRADATA
- * segment. The device tree is also a part of the same segment. When building for this
- * platform, we ensure the format of the EXTRADATA segment is how we expect it to be.
- */
-extern vm_offset_t segEXTRADATA;
-extern unsigned long segSizeEXTRADATA;
-
-typedef uint64_t pmap_paddr_t;
+typedef uint64_t pmap_paddr_t __kernel_ptr_semantics;
 extern vm_map_address_t phystokv(pmap_paddr_t pa);
 
 #else /* x86_64 */
@@ -744,13 +771,7 @@ load_static_trust_cache(void)
 		return;
 	}
 
-	/* AMFI interface needs to be available */
-	if (amfi == NULL) {
-		panic("amfi interface not available");
-	}
-
-	const TrustCacheInterface_t *interface = &amfi->TrustCache;
-	if (interface->version < 1) {
+	if (amfi->TrustCache.version < 1) {
 		/* AMFI change hasn't landed in the build */
 		printf("unable to load static trust cache: interface not supported\n");
 		return;
@@ -843,7 +864,7 @@ load_static_trust_cache(void)
 			assert(trust_cache != NULL);
 		}
 
-		tc_ret = interface->loadModule(
+		tc_ret = amfi->TrustCache.loadModule(
 			trust_cache_rt,
 			tc_type,
 			trust_cache,
@@ -873,23 +894,23 @@ load_static_trust_cache(void)
 
 kern_return_t
 static_trust_cache_capabilities(
-	uint32_t *num_static_trust_caches,
-	TCCapabilities_t *capabilities0,
-	TCCapabilities_t *capabilities1)
+	uint32_t *num_static_trust_caches_ret,
+	TCCapabilities_t *capabilities0_ret,
+	TCCapabilities_t *capabilities1_ret)
 {
 	TCReturn_t tcRet = {.error = kTCReturnError};
 
-	*num_static_trust_caches = 0;
-	*capabilities0 = kTCCapabilityNone;
-	*capabilities1 = kTCCapabilityNone;
+	*num_static_trust_caches_ret = 0;
+	*capabilities0_ret = kTCCapabilityNone;
+	*capabilities1_ret = kTCCapabilityNone;
 
 	/* Ensure static trust caches have been initialized */
 	if (trust_cache_static_init == false) {
 		panic("attempted to query static trust cache capabilities without init");
 	}
 
-	const TrustCacheInterface_t *interface = &amfi->TrustCache;
-	if (interface->version < 2) {
+
+	if (amfi->TrustCache.version < 2) {
 		/* AMFI change hasn't landed in the build */
 		printf("unable to get static trust cache capabilities: interface not supported\n");
 		return KERN_NOT_SUPPORTED;
@@ -898,14 +919,14 @@ static_trust_cache_capabilities(
 		return KERN_SUCCESS;
 	}
 
-	tcRet = interface->getCapabilities(&trust_cache_static0, capabilities0);
+	tcRet = amfi->TrustCache.getCapabilities(&trust_cache_static0, capabilities0_ret);
 	assert(tcRet.error == kTCReturnSuccess);
-	*num_static_trust_caches += 1;
+	*num_static_trust_caches_ret += 1;
 
 #if CONFIG_SECOND_STATIC_TRUST_CACHE
-	tcRet = interface->getCapabilities(&trust_cache_static1, capabilities1);
+	tcRet = amfi->TrustCache.getCapabilities(&trust_cache_static1, capabilities1_ret);
 	assert(tcRet.error == kTCReturnSuccess);
-	*num_static_trust_caches += 1;
+	*num_static_trust_caches_ret += 1;
 #endif
 
 	return KERN_SUCCESS;

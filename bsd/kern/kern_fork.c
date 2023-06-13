@@ -152,6 +152,7 @@ static void (*dtrace_proc_waitfor_hook)(proc_t) = NULL;
 void thread_set_parent(thread_t parent, int pid);
 extern void act_thread_catt(void *ctx);
 void thread_set_child(thread_t child, int pid);
+boolean_t thread_is_active(thread_t thread);
 void *act_thread_csave(void);
 extern boolean_t task_is_exec_copy(task_t);
 int nextpidversion = 0;
@@ -181,9 +182,6 @@ size_t proc_and_task_size;
 
 ZONE_DECLARE_ID(ZONE_ID_PROC_TASK, struct proc);
 SECURITY_READ_ONLY_LATE(zone_t) proc_task_zone;
-
-ZONE_DEFINE_ID(ZONE_ID_PROC_SIGACTS_RO, "sigacts_ro", struct sigacts_ro,
-    ZC_READONLY | ZC_ZFREE_CLEARMEM);
 
 KALLOC_TYPE_DEFINE(proc_stats_zone, struct pstats, KT_DEFAULT);
 
@@ -476,6 +474,7 @@ fork_create_child(task_t parent_task,
 	    is_64bit_addr,
 	    is_64bit_data,
 	    TF_NONE,
+	    TF_NONE,
 	    in_exec ? TPF_EXEC_COPY : TPF_NONE,                        /* Mark the task exec copy if in execve */
 	    (TRW_LRETURNWAIT | TRW_LRETURNWAITER),                     /* All created threads will wait in task_wait_to_return */
 	    child_task);
@@ -609,6 +608,17 @@ fork(proc_t parent_proc, __unused struct fork_args *uap, int32_t *retval)
 		}
 #endif
 
+		/*
+		 * If current process died during the fork, the child would contain
+		 * non consistent vmmap, kill the child and reap it internally.
+		 */
+		if (parent_proc->p_lflag & P_LEXIT || !thread_is_active(current_thread())) {
+			task_terminate_internal(child_task);
+			proc_list_lock();
+			child_proc->p_listflag |= P_LIST_DEADPARENT;
+			proc_list_unlock();
+		}
+
 		/* "Return" to the child */
 		task_clear_return_wait(get_threadtask(child_thread), TCRW_CLEAR_ALL_WAIT);
 
@@ -735,36 +745,12 @@ bad:
 	return child_thread;
 }
 
-__abortlike
-static void
-panic_sigacts_backref_mismatch(struct sigacts *sa)
-{
-	panic("sigacts_ro backref mismatch: sigacts=%p, ro=%p, backref=%p",
-	    sa, sa->ps_ro, sa->ps_ro->ps_rw);
-}
-
-static struct sigacts_ro *
-sigacts_ro(struct sigacts *sa)
-{
-	struct sigacts_ro *ro = sa->ps_ro;
-
-	zone_require_ro(ZONE_ID_PROC_SIGACTS_RO, sizeof(struct sigacts_ro),
-	    ro);
-
-	if (__improbable(ro->ps_rw != sa)) {
-		panic_sigacts_backref_mismatch(sa);
-	}
-
-	return ro;
-}
-
 void
 proc_set_sigact(proc_t p, int sig, user_addr_t sigact)
 {
 	assert((sig > 0) && (sig < NSIG));
 
-	zalloc_ro_update_field(ZONE_ID_PROC_SIGACTS_RO, sigacts_ro(&p->p_sigacts),
-	    ps_sigact[sig], &sigact);
+	p->p_sigacts.ps_sigact[sig] = sigact;
 }
 
 void
@@ -772,70 +758,31 @@ proc_set_trampact(proc_t p, int sig, user_addr_t trampact)
 {
 	assert((sig > 0) && (sig < NSIG));
 
-	zalloc_ro_update_field(ZONE_ID_PROC_SIGACTS_RO, sigacts_ro(&p->p_sigacts),
-	    ps_trampact[sig], &trampact);
+	p->p_sigacts.ps_trampact[sig] = trampact;
 }
 
 void
 proc_set_sigact_trampact(proc_t p, int sig, user_addr_t sigact, user_addr_t trampact)
 {
-	struct sigacts_ro *ps_ro = sigacts_ro(&p->p_sigacts);
-	struct sigacts_ro psro_local = *ps_ro;
-
 	assert((sig > 0) && (sig < NSIG));
 
-	psro_local.ps_sigact[sig] = sigact;
-	psro_local.ps_trampact[sig] = trampact;
-
-	zalloc_ro_update_elem(ZONE_ID_PROC_SIGACTS_RO, ps_ro, &psro_local);
+	p->p_sigacts.ps_sigact[sig] = sigact;
+	p->p_sigacts.ps_trampact[sig] = trampact;
 }
 
 void
 proc_reset_sigact(proc_t p, sigset_t sigs)
 {
+	user_addr_t *sigacts = p->p_sigacts.ps_sigact;
 	int nc;
-	user_addr_t sigacts[NSIG];
-	bool changed = false;
-	struct sigacts_ro *ro = sigacts_ro(&p->p_sigacts);
-
-	memcpy(sigacts, ro->ps_sigact, sizeof(sigacts));
 
 	while (sigs) {
 		nc = ffs((unsigned int)sigs);
 		if (sigacts[nc] != SIG_DFL) {
 			sigacts[nc] = SIG_DFL;
-			changed = true;
 		}
 		sigs &= ~sigmask(nc);
 	}
-
-	if (changed) {
-		zalloc_ro_update_field(ZONE_ID_PROC_SIGACTS_RO, ro, ps_sigact,
-		    (user_addr_t const (*)[NSIG])sigacts);
-	}
-}
-
-void
-proc_sigacts_copy(proc_t dst, proc_t src)
-{
-	struct sigacts_ro ro_local;
-	struct sigacts_ro *ro;
-
-	if (src == NULL) {
-		assert(dst == kernproc);
-		bzero(&dst->p_sigacts, sizeof(struct sigacts));
-		bzero(&ro_local, sizeof(struct sigacts_ro));
-	} else {
-		dst->p_sigacts = src->p_sigacts;
-		ro_local = *sigacts_ro(&src->p_sigacts);
-	}
-
-	ro_local.ps_rw = &dst->p_sigacts;
-
-	ro = zalloc_ro(ZONE_ID_PROC_SIGACTS_RO, Z_WAITOK | Z_NOFAIL | Z_ZERO);
-	zalloc_ro_update_elem(ZONE_ID_PROC_SIGACTS_RO, ro, &ro_local);
-
-	dst->p_sigacts.ps_ro = ro;
 }
 
 /*
@@ -929,7 +876,7 @@ forkproc_free(proc_t p)
 
 	/* Remove from hash if not a shadow proc */
 	if (!proc_is_shadow(p)) {
-		phash_remove_locked(proc_getpid(p), p);
+		phash_remove_locked(p);
 	}
 
 	proc_list_unlock();
@@ -939,7 +886,6 @@ forkproc_free(proc_t p)
 	thread_call_free(p->p_rcall);
 
 	/* Free allocated memory */
-	zfree_ro(ZONE_ID_PROC_SIGACTS_RO, p->p_sigacts.ps_ro);
 	zfree(proc_stats_zone, p->p_stats);
 	p->p_stats = NULL;
 	if (p->p_subsystem_root_path) {
@@ -990,7 +936,7 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 	child_proc = zalloc_flags(proc_task_zone, Z_WAITOK | Z_ZERO);
 
 	child_proc->p_stats = zalloc_flags(proc_stats_zone, Z_WAITOK | Z_ZERO);
-	proc_sigacts_copy(child_proc, parent_proc);
+	child_proc->p_sigacts = parent_proc->p_sigacts;
 	os_ref_init_mask(&child_proc->p_refcount, P_REF_BITS, &p_refgrp, P_REF_NEW);
 	os_ref_init_raw(&child_proc->p_waitref, &p_refgrp);
 	proc_ref_hold_proc_task_struct(child_proc);
@@ -1024,7 +970,7 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 
 			/* if the pid stays in hash both for zombie and runniing state */
 		} while (phash_find_locked(pid) != PROC_NULL ||
-		    pghash_find_locked(pid) != PGRP_NULL ||
+		    pghash_exists_locked(pid) ||
 		    session_find_locked(pid) != SESSION_NULL);
 
 		lastpid = pid;
@@ -1036,7 +982,7 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 		proc_ro_data.p_uniqueid = ++nextuniqueid;
 
 		/* Insert in the hash, and inherit our group (and session) */
-		phash_insert_locked(pid, child_proc);
+		phash_insert_locked(child_proc);
 
 		/* Check if the proc is from App Cryptex */
 		if (parent_proc->p_ladvflag & P_RSR) {
@@ -1368,7 +1314,7 @@ uthread_init(task_t task, uthread_t uth, thread_ro_t tro_tpl, int workq_thread)
 		kauth_cred_set(&tro_tpl->tro_cred, vfs_context0.vc_ucred);
 		tro_tpl->tro_proc = kernproc;
 		tro_tpl->tro_proc_ro = kernproc->p_proc_ro;
-	} else if (!is_corpsetask(task)) {
+	} else if (!task_is_a_corpse(task)) {
 		thread_ro_t curtro = current_thread_ro();
 		proc_t p = get_bsdtask_info(task);
 

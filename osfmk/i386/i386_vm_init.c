@@ -1079,3 +1079,12 @@ pmap_valid_page(
 	}
 	return FALSE;
 }
+
+/*
+ * Returns true if the address lies in the kernel __TEXT segment range.
+ */
+bool
+kernel_text_contains(vm_offset_t addr)
+{
+	return vm_kernel_stext <= addr && addr < vm_kernel_etext;
+}

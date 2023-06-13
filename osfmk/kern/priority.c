@@ -211,7 +211,7 @@ thread_quantum_expire(
 	 */
 	processor->first_timeslice = FALSE;
 
-	thread_quantum_init(thread);
+	thread_quantum_init(thread, ctime);
 
 	timer_update(&thread->runnable_timer, ctime);
 
@@ -987,6 +987,16 @@ sched_set_thread_mode_user(thread_t thread, sched_mode_t new_mode)
 	}
 }
 
+sched_mode_t
+sched_get_thread_mode_user(thread_t thread)
+{
+	if (thread->sched_flags & TH_SFLAG_DEMOTED_MASK) {
+		return thread->saved_mode;
+	} else {
+		return thread->sched_mode;
+	}
+}
+
 /*
  * Demote the true scheduler mode to timeshare (called with the thread locked)
  */
@@ -1009,8 +1019,8 @@ sched_thread_mode_demote(thread_t thread, uint32_t reason)
 		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_DEMOTE_FAILSAFE),
 		    thread_tid(thread), thread->sched_flags);
 		break;
-	case TH_SFLAG_RT_RESTRICTED:
-		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_DEMOTE_RT_RESTRICTED),
+	case TH_SFLAG_RT_DISALLOWED:
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_DEMOTE_RT_DISALLOWED),
 		    thread_tid(thread), thread->sched_flags);
 		break;
 	}
@@ -1039,6 +1049,16 @@ sched_thread_mode_demote(thread_t thread, uint32_t reason)
 }
 
 /*
+ * Return true if the thread is demoted for the specified reason
+ */
+bool
+sched_thread_mode_has_demotion(thread_t thread, uint32_t reason)
+{
+	assert(reason & TH_SFLAG_DEMOTED_MASK);
+	return (thread->sched_flags & reason) != 0;
+}
+
+/*
  * Un-demote the true scheduler mode back to the saved mode (called with the thread locked)
  */
 void
@@ -1059,8 +1079,8 @@ sched_thread_mode_undemote(thread_t thread, uint32_t reason)
 		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_UNDEMOTE_FAILSAFE),
 		    thread_tid(thread), thread->sched_flags);
 		break;
-	case TH_SFLAG_RT_RESTRICTED:
-		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_UNDEMOTE_RT_RESTRICTED),
+	case TH_SFLAG_RT_DISALLOWED:
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_UNDEMOTE_RT_DISALLOWED),
 		    thread_tid(thread), thread->sched_flags);
 		break;
 	}

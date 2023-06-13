@@ -4,11 +4,14 @@
 #include <darwintest.h>
 #include <darwintest_utils.h>
 
+T_GLOBAL_META(
 /*
  * We're going to corrupt shared library text, so don't
  * run with other tests.
  */
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(false));
+	T_META_RUN_CONCURRENTLY(false),
+	T_META_REQUIRES_SYSCTL_NE("kern.page_protection_type", 2)
+	);
 
 /*
  * No system(3c) on watchOS, so provide our own.

@@ -104,7 +104,7 @@ private:
 
 #ifdef XNU_KERNEL_PRIVATE
 public:
-	typedef OSPtr<const OSMetaClassBase> (*Editor)(void                  * reference,
+	typedef const OSMetaClassBase * (*Editor)(void                  * reference,
 	    OSSerialize           * s,
 	    OSCollection          * container,
 	    const OSSymbol        * name,

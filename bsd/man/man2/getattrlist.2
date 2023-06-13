@@ -16,7 +16,7 @@
 .\"
 .\"     @(#)getattrlist.2
 .
-.Dd February 11, 2020
+.Dd July 28, 2022
 .Dt GETATTRLIST 2
 .Os Darwin
 .Sh NAME
@@ -163,9 +163,6 @@ See below for a description of these attributes.
 A bit set that specifies the volume attributes that you require.
 Volume attributes relate to volumes (that is, mounted file systems).
 See below for a description of these attributes.
-If you request volume attributes,
-.Fa path
-must reference the root of a volume.
 You must set ATTR_VOL_INFO in the volattr field if you request any 
 other volume attributes.
 In addition, you can't request volume attributes if you also request
@@ -948,6 +945,25 @@ A
 .Vt vol_attributes_attr_t
 structure describing the attributes supported by this volume.
 This structure is discussed below, along with volume capabilities.
+.
+.It ATTR_VOL_FSTYPENAME
+An
+.Vt attrreference
+structure containing the file system type name as a
+UTF-8 encoded, null terminated C string.
+The attribute data length will not be greater than
+.Dv MFSTYPENAMELEN .
+.
+.It ATTR_VOL_FSSUBTYPE
+A
+.Vt u_int32_t
+containing the file system sub-type.
+Equivalent to the
+.Fa f_fssubtype
+field of the
+.Vt statfs
+structure returned by
+.Xr statfs 2 .
 .
 .El
 .

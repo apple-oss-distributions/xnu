@@ -579,39 +579,38 @@ def IsAppleInternal():
         retval = False
     return retval
 
-def print_hex_data(data, begin_offset=0, desc="", marks={}):
+def print_hex_data(data, start=0, desc="", marks={}, prefix=" "):
     """ print on stdout "hexdump -C < data" like output
         params:
             data - bytearray or array of int where each int < 255
-            begin_offset - int offset that should be printed in left column
+            start - int offset that should be printed in left column
             desc - str optional description to print on the first line to describe data
             mark - dictionary of markers
     """
+
     if desc:
         print("{}:".format(desc))
-    index = 0
-    total_len = len(data)
-    hex_buf = ""
-    char_buf = ""
-    while index < total_len:
-        if begin_offset + index in marks:
-            hex_buf += marks[begin_offset + index]
-            hex_buf += "{:02x}".format(data[index])
-        else:
-            hex_buf += " {:02x}".format(data[index])
-        if data[index] < 0x20 or data[index] > 0x7e:
-            char_buf += "."
-        else:
-            char_buf += "{:c}".format(data[index])
-        index += 1
-        if index and index < total_len and index % 8 == 0:
-            hex_buf += " "
-        if index > 1 and index < total_len and (index % 16) == 0:
-            print("{:08x} {: <50s} |{: <16s}|".format(begin_offset + index - 16, hex_buf, char_buf))
-            hex_buf = ""
-            char_buf = ""
-    print("{:08x} {: <50s} |{: <16s}|".format(begin_offset + index - 16, hex_buf, char_buf))
-    return
+
+    end = start + len(data)
+
+    for row in range(start & -16, end, 16):
+        line  = ""
+        chars = ""
+
+        for col in range(16):
+            addr = row + col
+
+            if col == 8:
+                line += " "
+            if start <= addr < end:
+                b      = data[addr - start]
+                line  += "{}{:02x}".format(marks.get(addr, ' '), b)
+                chars += chr(b) if 0x20 <= b < 0x80 else '.'
+            else:
+                line  += "   "
+                chars += ' '
+
+        print("{}{:#016x} {}  |{}|".format(prefix, row, line, chars))
 
 def Ones(x):
     return (1 << x)-1

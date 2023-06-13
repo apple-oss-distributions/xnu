@@ -30,6 +30,7 @@
 #include <kern/kern_types.h>
 #include <mach/notify.h>
 #include <mach/resource_monitors.h>
+#include <os/log.h>
 
 #include <mach/host_special_ports.h>
 #include <mach/mach_host_server.h>
@@ -147,6 +148,7 @@ arcade_register_new_upcall(
 	arcade_register_t arcade_reg,
 	mach_port_t port)
 {
+	os_log(OS_LOG_DEFAULT, "arcade: received register request");
 	if (arcade_reg == ARCADE_REG_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -172,7 +174,6 @@ arcade_register_new_upcall(
 		thread_wakeup(&arcade_upcall_port);
 		return KERN_SUCCESS;
 	}
-
 	lck_mtx_unlock(&arcade_upcall_mutex);
 	return KERN_FAILURE;
 }
@@ -318,6 +319,7 @@ restart:
 	/* MAKE THE UPCALL */
 	boolean_t should_kill = TRUE;
 	kr = __MAKING_UPCALL_TO_ARCADE_VALIDATION_SERVICE__(port, copy, MAXPATHLEN, offset, &should_kill);
+	os_log(OS_LOG_DEFAULT, "arcade: subscription validation upcall returned %#x", kr);
 	ipc_port_release_send(port);
 
 	switch (kr) {
@@ -343,6 +345,7 @@ fail:
 		 * process didn't launch. We might want this to be an exit_with_reason()
 		 * in the future.
 		 */
+		os_log(OS_LOG_DEFAULT, "arcade: unable to make subscription upcall, error %#x", kr);
 		task_terminate_internal(current_task());
 		break;
 	}

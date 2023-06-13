@@ -127,12 +127,12 @@
 #define CL_RAW_ENCRYPTED        0x20000
 #define CL_NOCACHE      0x40000
 
-#define MAX_VECTOR_UPL_ELEMENTS 8
 #define MAX_VECTOR_UPL_SIZE     (2 * MAX_UPL_SIZE_BYTES)
 
 #define CLUSTER_IO_WAITING              ((buf_t)1)
 
-extern upl_t vector_upl_create(vm_offset_t);
+extern upl_t vector_upl_create(vm_offset_t, uint32_t);
+extern uint32_t vector_upl_max_upls(upl_t);
 extern boolean_t vector_upl_is_valid(upl_t);
 extern boolean_t vector_upl_set_subupl(upl_t, upl_t, u_int32_t);
 extern void vector_upl_set_pagelist(upl_t);
@@ -387,6 +387,24 @@ cluster_max_prefetch(vnode_t vp, uint32_t max_io_size, uint32_t prefetch_limit)
 	}
 
 	return prefetch;
+}
+
+static inline uint32_t
+calculate_max_throttle_size(vnode_t vp)
+{
+	bool is_ssd = disk_conditioner_mount_is_ssd(vp->v_mount);
+	uint32_t io_scale = IO_SCALE(vp, is_ssd ? 2 : 1);
+
+	return MIN(io_scale * THROTTLE_MAX_IOSIZE, MAX_UPL_TRANSFER_BYTES);
+}
+
+static inline uint32_t
+calculate_max_throttle_cnt(vnode_t vp)
+{
+	bool is_ssd = disk_conditioner_mount_is_ssd(vp->v_mount);
+	uint32_t io_scale = IO_SCALE(vp, 1);
+
+	return is_ssd ? MIN(io_scale, 4) : THROTTLE_MAXCNT;
 }
 
 #define CLW_ALLOCATE            0x01
@@ -905,6 +923,8 @@ cluster_iodone(buf_t bp, void *callback_arg)
 			(void)ubc_upl_unmap_range(upl, upl_offset, round_page(transaction_size));
 			verify_buf = NULL;
 		}
+	} else if (cbp_head->b_attr.ba_flags & BA_WILL_VERIFY) {
+		error = EBADMSG;
 	}
 
 	free_io_buf(cbp_head);
@@ -981,7 +1001,7 @@ uint32_t
 cluster_throttle_io_limit(vnode_t vp, uint32_t *limit)
 {
 	if (cluster_is_throttled(vp)) {
-		*limit = THROTTLE_MAX_IOSIZE;
+		*limit = calculate_max_throttle_size(vp);
 		return 1;
 	}
 	return 0;
@@ -1065,23 +1085,6 @@ cluster_EOT(buf_t cbp_head, buf_t cbp_tail, int zero_offset, size_t verify_block
 
 		error = VNOP_VERIFY(vp, start_off, NULL, length,
 		    &verify_block_size, &verify_ctx, VNODE_VERIFY_CONTEXT_ALLOC, NULL);
-
-		if (!verify_ctx) {
-			if (!error && verify_block_size) {
-				/*
-				 * fetch the verify block size again, it is
-				 * possible that the verification was turned off
-				 * in the filesystem between the time it was
-				 * checked last and now.
-				 */
-				error = VNOP_VERIFY(vp, start_off, NULL, 0, &verify_block_size, NULL, VNODE_VERIFY_DEFAULT, NULL);
-			}
-
-			if (error || verify_block_size) {
-				panic("No verify context for vp = %p, start_off = %lld, length = %zu, error = %d",
-				    buf_vnode(cbp_head), start_off, length, error);
-			}
-		}
 
 		cbp_head->b_attr.ba_verify_ctx = verify_ctx;
 	} else {
@@ -1322,10 +1325,12 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 
 	if (flags & CL_THROTTLE) {
 		if (!(flags & CL_PAGEOUT) && cluster_is_throttled(vp)) {
-			if (max_iosize > THROTTLE_MAX_IOSIZE) {
-				max_iosize = THROTTLE_MAX_IOSIZE;
+			uint32_t max_throttle_size = calculate_max_throttle_size(vp);
+
+			if (max_iosize > max_throttle_size) {
+				max_iosize = max_throttle_size;
 			}
-			async_throttle = THROTTLE_MAXCNT;
+			async_throttle = calculate_max_throttle_cnt(vp);
 		} else {
 			if ((flags & CL_DEV_MEMORY)) {
 				async_throttle = IO_SCALE(vp, VNODE_ASYNC_THROTTLE);
@@ -2706,6 +2711,8 @@ next_dwrite:
 		int     throttle_type;
 
 		if ((throttle_type = cluster_is_throttled(vp))) {
+			uint32_t max_throttle_size = calculate_max_throttle_size(vp);
+
 			/*
 			 * we're in the throttle window, at the very least
 			 * we want to limit the size of the I/O we're about
@@ -2724,8 +2731,8 @@ next_dwrite:
 				io_throttled = TRUE;
 				goto wait_for_dwrites;
 			}
-			max_vector_size = THROTTLE_MAX_IOSIZE;
-			max_io_size = THROTTLE_MAX_IOSIZE;
+			max_vector_size = max_throttle_size;
+			max_io_size = max_throttle_size;
 		} else {
 			max_vector_size = MAX_VECTOR_UPL_SIZE;
 			max_io_size = max_upl_size;
@@ -2901,7 +2908,7 @@ next_dwrite:
 			    io_size, io_flag, (buf_t)NULL, &iostate, callback, callback_arg);
 		} else {
 			if (!vector_upl_index) {
-				vector_upl = vector_upl_create(upl_offset);
+				vector_upl = vector_upl_create(upl_offset, uio->uio_iovcnt);
 				v_upl_uio_offset = uio->uio_offset;
 				vector_upl_offset = upl_offset;
 			}
@@ -2912,7 +2919,7 @@ next_dwrite:
 			vector_upl_iosize += io_size;
 			vector_upl_size += upl_size;
 
-			if (issueVectorUPL || vector_upl_index == MAX_VECTOR_UPL_ELEMENTS || vector_upl_size >= max_vector_size) {
+			if (issueVectorUPL || vector_upl_index == vector_upl_max_upls(vector_upl) || vector_upl_size >= max_vector_size) {
 				retval = vector_cluster_io(vp, vector_upl, vector_upl_offset, v_upl_uio_offset, vector_upl_iosize, io_flag, (buf_t)NULL, &iostate, callback, callback_arg);
 				reset_vector_run_state();
 			}
@@ -4131,7 +4138,7 @@ cluster_read_copy(vnode_t vp, struct uio *uio, u_int32_t io_req_size, off_t file
 			rd_ahead_enabled = 0;
 			prefetch_enabled = 0;
 
-			max_rd_size = THROTTLE_MAX_IOSIZE;
+			max_rd_size = calculate_max_throttle_size(vp);
 		}
 		if ((rap = cluster_get_rap(vp)) == NULL) {
 			rd_ahead_enabled = 0;
@@ -4589,6 +4596,8 @@ cluster_read_copy(vnode_t vp, struct uio *uio, u_int32_t io_req_size, off_t file
 		}
 
 		if (io_req_size) {
+			uint32_t max_throttle_size = calculate_max_throttle_size(vp);
+
 			if (cluster_is_throttled(vp)) {
 				/*
 				 * we're in the throttle window, at the very least
@@ -4597,9 +4606,9 @@ cluster_read_copy(vnode_t vp, struct uio *uio, u_int32_t io_req_size, off_t file
 				 */
 				rd_ahead_enabled = 0;
 				prefetch_enabled = 0;
-				max_rd_size = THROTTLE_MAX_IOSIZE;
+				max_rd_size = max_throttle_size;
 			} else {
-				if (max_rd_size == THROTTLE_MAX_IOSIZE) {
+				if (max_rd_size == max_throttle_size) {
 					/*
 					 * coming out of throttled state
 					 */
@@ -4882,14 +4891,16 @@ next_dread:
 		u_int32_t io_start;
 
 		if (cluster_is_throttled(vp)) {
+			uint32_t max_throttle_size = calculate_max_throttle_size(vp);
+
 			/*
 			 * we're in the throttle window, at the very least
 			 * we want to limit the size of the I/O we're about
 			 * to issue
 			 */
-			max_rd_size  = THROTTLE_MAX_IOSIZE;
-			max_rd_ahead = THROTTLE_MAX_IOSIZE - 1;
-			max_vector_size = THROTTLE_MAX_IOSIZE;
+			max_rd_size  = max_throttle_size;
+			max_rd_ahead = max_throttle_size - 1;
+			max_vector_size = max_throttle_size;
 		} else {
 			max_rd_size  = max_upl_size;
 			max_rd_ahead = max_rd_size * IO_SCALE(vp, 2);
@@ -5175,7 +5186,7 @@ next_dread:
 			retval = cluster_io(vp, upl, upl_offset, uio->uio_offset, io_size, io_flag, (buf_t)NULL, &iostate, callback, callback_arg);
 		} else {
 			if (!vector_upl_index) {
-				vector_upl = vector_upl_create(upl_offset);
+				vector_upl = vector_upl_create(upl_offset, uio->uio_iovcnt);
 				v_upl_uio_offset = uio->uio_offset;
 				vector_upl_offset = upl_offset;
 			}
@@ -5186,7 +5197,7 @@ next_dread:
 			vector_upl_size += upl_size;
 			vector_upl_iosize += io_size;
 
-			if (issueVectorUPL || vector_upl_index == MAX_VECTOR_UPL_ELEMENTS || vector_upl_size >= max_vector_size) {
+			if (issueVectorUPL || vector_upl_index == vector_upl_max_upls(vector_upl) || vector_upl_size >= max_vector_size) {
 				retval = vector_cluster_io(vp, vector_upl, vector_upl_offset, v_upl_uio_offset, vector_upl_iosize, io_flag, (buf_t)NULL, &iostate, callback, callback_arg);
 				reset_vector_run_state();
 			}

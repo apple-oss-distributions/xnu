@@ -26,15 +26,27 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#ifndef _ARM64_AMCC_RORGN_H_
+#define _ARM64_AMCC_RORGN_H_
+
+#include <sys/cdefs.h>
+
+__BEGIN_DECLS
+
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+#include <stdbool.h>
+
 #include <libkern/section_keywords.h>
 
 void rorgn_stash_range(void);
 void rorgn_lockdown(void);
-struct mach_vm_range rorgn_get_range(void);
-bool rorgn_contains(vm_offset_t addr, vm_size_t size);
+bool rorgn_contains(vm_offset_t addr, vm_size_t size, bool defval);
 extern vm_offset_t ctrr_begin, ctrr_end;
 #if CONFIG_CSR_FROM_DT
 extern bool csr_unsafe_kernel_text;
 #endif /* CONFIG_CSR_FROM_DT */
 #endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
+
+__END_DECLS
+
+#endif /* _ARM64_AMCC_RORGN_H_ */

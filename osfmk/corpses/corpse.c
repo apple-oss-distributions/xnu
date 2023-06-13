@@ -183,6 +183,8 @@ extern void gather_populate_corpse_crashinfo(void *p, task_t task,
 extern void *proc_find(int pid);
 extern int proc_rele(void *p);
 extern task_t proc_get_task_raw(void *proc);
+extern char *proc_best_name(struct proc *proc);
+
 
 /*
  * Routine: corpses_enabled
@@ -570,6 +572,7 @@ task_enqueue_exception_with_corpse(
 {
 	kern_return_t kr;
 	ipc_port_t exc_ports[BT_EXC_PORTS_COUNT]; /* send rights in thread, task, host order */
+	const char *procname = proc_best_name(get_bsdtask_info(task));
 
 	if (codeCnt < 2) {
 		return KERN_INVALID_ARGUMENT;
@@ -600,7 +603,7 @@ task_enqueue_exception_with_corpse(
 		/* desc ref and throttle slot captured in obj ref */
 
 		thread_backtrace_enqueue(obj, exc_ports, etype);
-		printf("Lightweight corpse enqueued for task %p.\n", task);
+		os_log(OS_LOG_DEFAULT, "Lightweight corpse enqueued for %s\n", procname);
 		/* obj ref and exc_ports send rights consumed */
 		lw_corpse_enqueued = true;
 
@@ -624,7 +627,7 @@ out:
 			assert(corpse != TASK_NULL);
 			assert(etype == EXC_RESOURCE || etype == EXC_GUARD);
 			thread_exception_enqueue(corpse, thread, etype);
-			printf("Full corpse %p enqueued for task %p.\n", corpse, task);
+			os_log(OS_LOG_DEFAULT, "Full corpse enqueued for %s\n", procname);
 		}
 	}
 
@@ -661,7 +664,8 @@ task_generate_corpse_internal(
 	struct proc *p = NULL;
 	int is_64bit_addr;
 	int is_64bit_data;
-	int t_flags;
+	uint32_t t_flags;
+	uint32_t t_flags_ro;
 	uint64_t *udata_buffer = NULL;
 	int size = 0;
 	int num_udata = 0;
@@ -701,9 +705,9 @@ task_generate_corpse_internal(
 	is_64bit_data = (task == TASK_NULL) ? is_64bit_addr : task_get_64bit_data(task);
 	t_flags = TF_CORPSE_FORK |
 	    TF_PENDING_CORPSE |
-	    TF_CORPSE |
 	    (is_64bit_addr ? TF_64B_ADDR : TF_NONE) |
 	    (is_64bit_data ? TF_64B_DATA : TF_NONE);
+	t_flags_ro = TFRO_CORPSE;
 
 #if CONFIG_MACF
 	/* Create the corpse label credentials from the process. */
@@ -721,6 +725,7 @@ task_generate_corpse_internal(
 	    is_64bit_addr,
 	    is_64bit_data,
 	    t_flags,
+	    t_flags_ro,
 	    TPF_NONE,
 	    TWF_NONE,
 	    new_task);
@@ -828,8 +833,6 @@ task_map_kcdata_64(
 {
 	kern_return_t kr;
 	mach_vm_offset_t udata_ptr;
-
-	assert(!task_is_a_corpse(task));
 
 	kr = mach_vm_allocate_kernel(task->map, &udata_ptr, (size_t)kcd_size,
 	    VM_FLAGS_ANYWHERE, tag);

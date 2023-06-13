@@ -646,18 +646,24 @@ extern bool             lck_rw_lock_yield_exclusive(
 #if MACH_KERNEL_PRIVATE
 
 /*!
- * @function lck_rw_clear_promotion
+ * @function lck_rw_lock_count_inc
  *
  * @abstract
- * Undo priority promotions when the last rw_lock
- * is released by a thread (if a promotion was active).
- *
- * @param thread        thread to demote.
- * @param trace_obj     object reason for the demotion.
+ * Increments the number of rwlock held by the (current) thread.
  */
-extern void             lck_rw_clear_promotion(
+extern void lck_rw_lock_count_inc(
 	thread_t                thread,
-	uintptr_t               trace_obj);
+	const void             *lock);
+
+/*!
+ * @function lck_rw_lock_count_inc
+ *
+ * @abstract
+ * Decrements the number of rwlock held by the (current) thread.
+ */
+extern void lck_rw_lock_count_dec(
+	thread_t                thread,
+	const void             *lock);
 
 /*!
  * @function lck_rw_set_promotion_locked

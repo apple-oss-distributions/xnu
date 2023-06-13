@@ -34,6 +34,7 @@
 #include <arm/cpuid_internal.h>
 #include <arm/cpu_data_internal.h>
 #include <arm64/proc_reg.h>
+#include <kern/lock_rw.h>
 #include <vm/vm_page.h>
 
 #include <libkern/section_keywords.h>
@@ -78,6 +79,9 @@ static SECURITY_READ_ONLY_LATE(arm_cpu_info_t) cpuid_cpu_info;
 static SECURITY_READ_ONLY_LATE(cache_info_t *) cpuid_cache_info_boot_cpu;
 static cache_info_t cpuid_cache_info[MAX_CPU_TYPES] = { 0 };
 static _Atomic uint8_t cpuid_cache_info_bitmap = 0;
+
+static LCK_GRP_DECLARE(cpuid_grp, "cpuid");
+static LCK_RW_DECLARE(cpuid_cache_info_lck_rw, &cpuid_grp);
 
 /* Code */
 
@@ -394,6 +398,15 @@ do_cacheid(void)
 		cpuid_cache_info_p->c_isize = (arm_cache_ccsidr_info.bits.NumSets + 1) * c_linesz * c_assoc;
 	}
 
+	if (cpuid_cache_info_p == cpuid_cache_info_boot_cpu) {
+		cpuid_cache_info_p->c_valid = true;
+	} else {
+		lck_rw_lock_exclusive(&cpuid_cache_info_lck_rw);
+		cpuid_cache_info_p->c_valid = true;
+		thread_wakeup((event_t)&cpuid_cache_info_p->c_valid);
+		lck_rw_unlock_exclusive(&cpuid_cache_info_lck_rw);
+	}
+
 	kprintf("%s() - %u bytes %s cache (I:%u D:%u (%s)), %u-way assoc, %u bytes/line\n",
 	    __FUNCTION__,
 	    cpuid_cache_info_p->c_dsize + cpuid_cache_info_p->c_isize,
@@ -416,5 +429,21 @@ cache_info_t   *
 cache_info_type(cluster_type_t cluster_type)
 {
 	assert((cluster_type >= 0) && (cluster_type < MAX_CPU_TYPES));
-	return &cpuid_cache_info[cluster_type];
+	cache_info_t *ret = &cpuid_cache_info[cluster_type];
+
+	/*
+	 * cpuid_cache_info_boot_cpu is always populated by the time
+	 * cache_info_type() is callable.  Other clusters may not have completed
+	 * do_cacheid() yet.
+	 */
+	if (ret != cpuid_cache_info_boot_cpu) {
+		lck_rw_lock_shared(&cpuid_cache_info_lck_rw);
+		while (CC_UNLIKELY(!ret->c_valid)) {
+			lck_rw_sleep(&cpuid_cache_info_lck_rw, LCK_SLEEP_DEFAULT,
+			    (event_t)&ret->c_valid, THREAD_UNINT);
+		}
+		lck_rw_unlock_shared(&cpuid_cache_info_lck_rw);
+	}
+
+	return ret;
 }

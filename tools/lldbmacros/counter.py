@@ -11,7 +11,7 @@ def GetSimpleCounter(counter):
         returns: str - THe value of the counter as a string.
     """
     val = 0
-    for v in IterateZPerCPU(counter, "uint64_t *"):
+    for v in IterateZPerCPU(counter):
         val += dereference(v)
     return str(val)
 

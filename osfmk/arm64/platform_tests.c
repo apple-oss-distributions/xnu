@@ -1542,8 +1542,8 @@ ctrr_test_cpu(void)
 
 	/* ctrr read only region = [rorgn_begin_va, rorgn_end_va) */
 
-	vm_offset_t rorgn_begin_va = phystokv(ctrr_begin);
-	vm_offset_t rorgn_end_va = phystokv(ctrr_end) + 1;
+	vm_offset_t rorgn_begin_va = phystokv(__builtin_arm_rsr64("S3_4_C15_C2_3"));
+	vm_offset_t rorgn_end_va = phystokv(__builtin_arm_rsr64("S3_4_C15_C2_4")) + 1;
 	vm_offset_t ro_test_va = (vm_offset_t)&ctrr_ro_test;
 	vm_offset_t nx_test_va = (vm_offset_t)&ctrr_nx_test;
 

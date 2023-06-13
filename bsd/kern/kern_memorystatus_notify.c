@@ -74,6 +74,7 @@
 #include <vm/vm_map.h>
 #endif /* CONFIG_FREEZE */
 
+#include <kern/kern_memorystatus_internal.h>
 #include <sys/kern_memorystatus.h>
 #include <sys/kern_memorystatus_notify.h>
 
@@ -484,7 +485,7 @@ memorystatus_send_note(int event_code, void *data, uint32_t data_length)
 
 	ret = kev_post_msg(&ev_msg);
 	if (ret) {
-		printf("%s: kev_post_msg() failed, err %d\n", __func__, ret);
+		memorystatus_log_error("%s: kev_post_msg() failed, err %d\n", __func__, ret);
 	}
 
 	return ret;
@@ -704,7 +705,7 @@ memorystatus_low_mem_privileged_listener(uint32_t op_flags)
 int
 memorystatus_send_pressure_note(pid_t pid)
 {
-	MEMORYSTATUS_DEBUG(1, "memorystatus_send_pressure_note(): pid %d\n", pid);
+	memorystatus_log_debug("memorystatus_send_pressure_note(): pid %d\n", pid);
 	return memorystatus_send_note(kMemorystatusPressureNote, &pid, sizeof(pid));
 }
 
@@ -741,7 +742,7 @@ memorystatus_bg_pressure_eligible(proc_t p)
 
 	proc_list_lock();
 
-	MEMORYSTATUS_DEBUG(1, "memorystatus_bg_pressure_eligible: pid %d, state 0x%x\n", proc_getpid(p), p->p_memstat_state);
+	memorystatus_log_debug("memorystatus_bg_pressure_eligible: pid %d, state 0x%x\n", proc_getpid(p), p->p_memstat_state);
 
 	/* Foreground processes have already been dealt with at this point, so just test for eligibility */
 	if (!(p->p_memstat_state & (P_MEMSTAT_TERMINATED | P_MEMSTAT_LOCKED | P_MEMSTAT_SUSPENDED | P_MEMSTAT_FROZEN))) {
@@ -1325,7 +1326,7 @@ sustained_pressure_handler(void* arg0 __unused, void* arg1 __unused)
 	 * consumption in a higher band and this churn is probably doing more harm than good.
 	 */
 	max_kills = memorystatus_get_proccnt_upto_priority(memorystatus_sustained_pressure_maximum_band) * 2;
-	os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Pressure level has been elevated for too long. killing up to %d idle processes", max_kills);
+	memorystatus_log("memorystatus: Pressure level has been elevated for too long. killing up to %d idle processes\n", max_kills);
 	while (memorystatus_vm_pressure_level != kVMPressureNormal && kill_count < max_kills) {
 		boolean_t killed = memorystatus_kill_on_sustained_pressure();
 		if (killed) {
@@ -1343,7 +1344,7 @@ sustained_pressure_handler(void* arg0 __unused, void* arg1 __unused)
 		}
 	}
 	if (memorystatus_vm_pressure_level != kVMPressureNormal) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Killed %d idle processes due to sustained pressure, but device didn't quiesce. Giving up.", kill_count);
+		memorystatus_log("memorystatus: Killed %d idle processes due to sustained pressure, but device didn't quiesce. Giving up.\n", kill_count);
 	}
 }
 
@@ -1486,7 +1487,7 @@ memorystatus_update_vm_pressure(boolean_t target_foreground_process)
 #if CONFIG_JETSAM
 	if (memorystatus_vm_pressure_level == kVMPressureNormal && prev_level_snapshot != kVMPressureNormal) {
 		if (memorystatus_should_kill_on_sustained_pressure) {
-			os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Pressure has returned to level %d. Cancelling scheduled jetsam", memorystatus_vm_pressure_level);
+			memorystatus_log("memorystatus: Pressure has returned to level %d. Cancelling scheduled jetsam\n", memorystatus_vm_pressure_level);
 			thread_call_cancel(sustained_pressure_handler_thread_call);
 		}
 	} else if (memorystatus_should_kill_on_sustained_pressure && memorystatus_vm_pressure_level != kVMPressureNormal && prev_level_snapshot == kVMPressureNormal) {
@@ -1496,7 +1497,7 @@ memorystatus_update_vm_pressure(boolean_t target_foreground_process)
 		 * but as a fail-safe we'll trigger jetsam
 		 * after a configurable amount of time.
 		 */
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Pressure level has increased from %d to %d. Scheduling jetsam.", prev_level_snapshot, memorystatus_vm_pressure_level);
+		memorystatus_log("memorystatus: Pressure level has increased from %d to %d. Scheduling jetsam.\n", prev_level_snapshot, memorystatus_vm_pressure_level);
 		uint64_t kill_time;
 		nanoseconds_to_absolutetime(memorystatus_kill_on_sustained_pressure_window_s * NSEC_PER_SEC, &kill_time);
 		kill_time += mach_absolute_time();
@@ -1979,7 +1980,7 @@ sysctl_memorystatus_vm_pressure_send SYSCTL_HANDLER_ARGS
 	    (fflags == NOTE_MEMORYSTATUS_PROC_LIMIT_CRITICAL) ||
 	    (((fflags & NOTE_MEMORYSTATUS_MSL_STATUS) != 0 &&
 	    ((fflags & ~NOTE_MEMORYSTATUS_MSL_STATUS) == 0))))) {
-		printf("memorystatus_vm_pressure_send: notification [0x%x] not supported \n", fflags);
+		memorystatus_log_error("memorystatus_vm_pressure_send: notification [0x%x] not supported\n", fflags);
 		error = 1;
 		return error;
 	}
@@ -2005,10 +2006,10 @@ sysctl_memorystatus_vm_pressure_send SYSCTL_HANDLER_ARGS
 
 	if (found_knote) {
 		KNOTE(&memorystatus_klist, 0);
-		printf("memorystatus_vm_pressure_send: (value 0x%llx) notification [0x%x] sent to process [%d] \n", value, fflags, pid);
+		memorystatus_log_debug("memorystatus_vm_pressure_send: (value 0x%llx) notification [0x%x] sent to process [%d]\n", value, fflags, pid);
 		error = 0;
 	} else {
-		printf("memorystatus_vm_pressure_send: (value 0x%llx) notification [0x%x] not sent to process [%d] (none registered?)\n", value, fflags, pid);
+		memorystatus_log_error("memorystatus_vm_pressure_send: (value 0x%llx) notification [0x%x] not sent to process [%d] (none registered?)\n", value, fflags, pid);
 		error = 1;
 	}
 

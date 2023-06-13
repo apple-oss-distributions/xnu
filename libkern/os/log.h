@@ -552,7 +552,6 @@ os_log_coprocessor_register(const char *uuid, const char *file_path, bool copy);
 
 typedef enum {
 	os_log_coproc_register_memory,
-	os_log_coproc_register_harvest_fs_img4,
 	os_log_coproc_register_harvest_fs_ftab,
 } os_log_coproc_reg_t;
 
@@ -567,10 +566,20 @@ void
 os_log_coprocessor_register_with_type(const char *uuid, const char *file_path, os_log_coproc_reg_t register_type);
 
 #ifdef XNU_KERNEL_PRIVATE
-#define os_log_with_startup_serial(log, format, ...) __extension__({                                                  \
-    if (startup_serial_logging_active) { printf(format, ##__VA_ARGS__); }                                             \
-    else { os_log(log, format, ##__VA_ARGS__); }                                                                      \
+#define os_log_with_startup_serial_and_type(log, type, format, ...) __extension__({ \
+    if (startup_serial_logging_active) { printf(format, ##__VA_ARGS__); }           \
+    else { os_log_with_type(log, type, format, ##__VA_ARGS__); }                    \
 })
+#define os_log_with_startup_serial(log, format, ...) \
+    os_log_with_startup_serial_and_type(log, OS_LOG_TYPE_DEFAULT, format, ##__VA_ARGS__)
+#define os_log_info_with_startup_serial(log, format, ...) \
+    os_log_with_startup_serial_and_type(log, OS_LOG_TYPE_INFO, format, ##__VA_ARGS__)
+#define os_log_debug_with_startup_serial(log, format, ...) \
+    os_log_with_startup_serial_and_type(log, OS_LOG_TYPE_DEBUG, format, ##__VA_ARGS__)
+#define os_log_error_with_startup_serial(log, format, ...) \
+    os_log_with_startup_serial_and_type(log, OS_LOG_TYPE_ERROR, format, ##__VA_ARGS__)
+#define os_log_fault_with_startup_serial(log, format, ...) \
+    os_log_with_startup_serial_and_type(log, OS_LOG_TYPE_FAULT, format, ##__VA_ARGS__)
 #endif /* XNU_KERNEL_PRIVATE */
 
 /*!

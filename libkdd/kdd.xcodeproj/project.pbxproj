@@ -24,6 +24,8 @@
 /* Begin PBXBuildFile section */
 		045F7F121D2ADE7C00B4808B /* stackshot-with-waitinfo in Resources */ = {isa = PBXBuildFile; fileRef = 04C64AC91D25C43400C6C781 /* stackshot-with-waitinfo */; };
 		045F7F131D2ADE8000B4808B /* stackshot-with-waitinfo.plist.gz in Resources */ = {isa = PBXBuildFile; fileRef = 04C64ACA1D25C43400C6C781 /* stackshot-with-waitinfo.plist.gz */; };
+		071A935D291F16DD008BDA9A /* stackshot-sample-codesigning in Resources */ = {isa = PBXBuildFile; fileRef = 071A935B291F16DD008BDA9A /* stackshot-sample-codesigning */; };
+		071A935E291F16DD008BDA9A /* stackshot-sample-codesigning.plist.gz in Resources */ = {isa = PBXBuildFile; fileRef = 071A935C291F16DD008BDA9A /* stackshot-sample-codesigning.plist.gz */; };
 		081725D51C3F476500371A54 /* stackshot-sample-duration in Resources */ = {isa = PBXBuildFile; fileRef = 081725D31C3F475200371A54 /* stackshot-sample-duration */; };
 		081725D61C3F476500371A54 /* stackshot-sample-duration.plist.gz in Resources */ = {isa = PBXBuildFile; fileRef = 081725D41C3F475200371A54 /* stackshot-sample-duration.plist.gz */; };
 		081EDD381C23855700A1C138 /* stackshot-sample-cputime in Resources */ = {isa = PBXBuildFile; fileRef = 081EDD361C23854500A1C138 /* stackshot-sample-cputime */; };
@@ -178,6 +180,8 @@
 /* Begin PBXFileReference section */
 		04C64AC91D25C43400C6C781 /* stackshot-with-waitinfo */ = {isa = PBXFileReference; lastKnownFileType = file; name = "stackshot-with-waitinfo"; path = "tests/stackshot-with-waitinfo"; sourceTree = SOURCE_ROOT; };
 		04C64ACA1D25C43400C6C781 /* stackshot-with-waitinfo.plist.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; name = "stackshot-with-waitinfo.plist.gz"; path = "tests/stackshot-with-waitinfo.plist.gz"; sourceTree = SOURCE_ROOT; };
+		071A935B291F16DD008BDA9A /* stackshot-sample-codesigning */ = {isa = PBXFileReference; lastKnownFileType = file; path = "stackshot-sample-codesigning"; sourceTree = "<group>"; };
+		071A935C291F16DD008BDA9A /* stackshot-sample-codesigning.plist.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; path = "stackshot-sample-codesigning.plist.gz"; sourceTree = "<group>"; };
 		081725D31C3F475200371A54 /* stackshot-sample-duration */ = {isa = PBXFileReference; lastKnownFileType = file; name = "stackshot-sample-duration"; path = "tests/stackshot-sample-duration"; sourceTree = SOURCE_ROOT; };
 		081725D41C3F475200371A54 /* stackshot-sample-duration.plist.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; name = "stackshot-sample-duration.plist.gz"; path = "tests/stackshot-sample-duration.plist.gz"; sourceTree = SOURCE_ROOT; };
 		081EDD361C23854500A1C138 /* stackshot-sample-cputime */ = {isa = PBXFileReference; lastKnownFileType = file; name = "stackshot-sample-cputime"; path = "tests/stackshot-sample-cputime"; sourceTree = SOURCE_ROOT; };
@@ -323,6 +327,8 @@
 		08603F351BF69EDE007D3784 /* tests */ = {
 			isa = PBXGroup;
 			children = (
+				071A935B291F16DD008BDA9A /* stackshot-sample-codesigning */,
+				071A935C291F16DD008BDA9A /* stackshot-sample-codesigning.plist.gz */,
 				D668937227161F4A00166D02 /* stackshot-sample-multiple-sharedcaches */,
 				D668937127161F4A00166D02 /* stackshot-sample-multiple-sharedcaches.plist.gz */,
 				D6C81F4027161FB400453A41 /* stackshot-sample-portlabels */,
@@ -665,6 +671,7 @@
 				1862B0341E7A083F0005ADF4 /* stackshot-sample-thread-groups in Resources */,
 				08A4C9501C470F1C00D5F010 /* nested-sample.plist in Resources */,
 				13D6C5D21C4DDDBE005E617C /* test-twr-sample in Resources */,
+				071A935D291F16DD008BDA9A /* stackshot-sample-codesigning in Resources */,
 				13D6C5D01C4DDDB6005E617C /* corpse-twr-sample in Resources */,
 				C95E4D1B204F42C500FD2229 /* stackshot-sample-cpu-times in Resources */,
 				C9D7B5401D1B41D700F1019D /* xnupost_testconfig-sample in Resources */,
@@ -685,6 +692,7 @@
 				0860F87B1BFC3857007E1301 /* stackshot-sample-tailspin-2.plist.gz in Resources */,
 				08CF18FF1BF9B7B100D05813 /* stackshot-sample-tailspin in Resources */,
 				1368F0861C87E06C00940FC6 /* exitreason-codesigning in Resources */,
+				071A935E291F16DD008BDA9A /* stackshot-sample-codesigning.plist.gz in Resources */,
 				13739E8520DB18B600D8D9B9 /* stackshot-with-shared-cache-layout.plist.gz in Resources */,
 				13DBA26A1CAB1BA000227EB2 /* stackshot-sample-sharedcachev2 in Resources */,
 				C9D7B53F1D1B41D700F1019D /* xnupost_testconfig-sample.plist.gz in Resources */,

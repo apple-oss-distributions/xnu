@@ -47,7 +47,7 @@ RB_GENERATE_PREV(flow_entry_id_tree, flow_entry, fe_id_link, fe_id_cmp);
 
 os_refgrp_decl(static, flow_entry_refgrp, "flow_entry", NULL);
 
-extern struct zone *sk_fed_zone;
+KALLOC_TYPE_DECLARE(sk_fed_zone);
 
 const struct flow_key fk_mask_2tuple
 __sk_aligned(16) =

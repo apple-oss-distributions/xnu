@@ -90,6 +90,7 @@ static boolean_t bank_task_is_propagate_entitled(task_t t);
 static boolean_t bank_task_is_persona_modify_entitled(task_t t);
 static struct thread_group *bank_get_bank_task_thread_group(bank_task_t bank_task __unused);
 static struct thread_group *bank_get_bank_account_thread_group(bank_account_t bank_account __unused);
+static uint64_t bank_get_bank_account_holder_resource_coalition_id(bank_account_t bank_account __unused);
 static boolean_t bank_verify_persona_id(uint32_t persona_id, struct bank_persona *persona_out);
 static boolean_t bank_task_can_adopt_persona(bank_task_t bank_merchant, struct bank_persona *persona);
 static void bank_task_get_persona(bank_task_t bank_task, struct bank_persona *persona_out);
@@ -195,26 +196,22 @@ queue_head_t bank_accounts_list = QUEUE_HEAD_INITIALIZER(bank_accounts_list);
  * Purpose: Initialize the BANK subsystem.
  * Returns: None.
  */
-void
-bank_init()
+__startup_func
+static void
+bank_init(void)
 {
-	kern_return_t kr = KERN_SUCCESS;
-
 	init_bank_ledgers();
 
 	/* Register the bank manager with the Vouchers sub system. */
-	kr = ipc_register_well_known_mach_voucher_attr_manager(
+	ipc_register_well_known_mach_voucher_attr_manager(
 		&bank_manager,
 		0,
 		MACH_VOUCHER_ATTR_KEY_BANK,
 		&bank_voucher_attr_control);
-	if (kr != KERN_SUCCESS) {
-		panic("BANK subsystem initialization failed");
-	}
-
 
 	kprintf("BANK subsystem is initialized\n");
 }
+STARTUP(MACH_IPC, STARTUP_RANK_FIRST, bank_init);
 
 
 /*
@@ -943,7 +940,11 @@ bank_task_alloc_init(task_t task)
 	new_bank_task->bt_gid = proc_getgid(bsd_info);
 #if CONFIG_THREAD_GROUPS
 	new_bank_task->bt_thread_group = thread_group_retain(task_coalition_get_thread_group(task));
-#endif
+#endif /* CONFIG_THREAD_GROUPS */
+#if CONFIG_COALITIONS
+	coalition_t rsrc_coal = task->coalition[COALITION_TYPE_RESOURCE];
+	new_bank_task->bt_rsrc_coal_id = rsrc_coal != COALITION_NULL ? coalition_id(rsrc_coal) : 0;
+#endif /* CONFIG_COALITIONS */
 	proc_getexecutableuuid(bsd_info, new_bank_task->bt_macho_uuid, sizeof(new_bank_task->bt_macho_uuid));
 
 	persona_put(persona);
@@ -1798,6 +1799,20 @@ bank_get_bank_account_thread_group(bank_account_t bank_account __unused)
 	return banktg;
 }
 
+static uint64_t
+bank_get_bank_account_holder_resource_coalition_id(bank_account_t bank_account __unused)
+{
+#if CONFIG_COALITIONS
+	if (bank_account != BANK_ACCOUNT_NULL) {
+		bank_task_t bank_task = bank_account->ba_holder;
+		if (bank_task != BANK_TASK_NULL) {
+			return bank_task->bt_rsrc_coal_id;
+		}
+	}
+#endif /* CONFIG_COALITIONS */
+	return 0;
+}
+
 /*
  * Routine: bank_get_bank_ledger_thread_group_and_persona
  * Purpose: Get the bankledger (chit), thread group and persona id from the voucher.
@@ -1855,6 +1870,16 @@ bank_get_bank_ledger_thread_group_and_persona(
 		*banktg = thread_group;
 	}
 	return KERN_SUCCESS;
+}
+
+uint64_t
+bank_get_bank_ledger_resource_coalition_id(
+	ipc_voucher_t     voucher)
+{
+	bank_account_t bank_account = bank_get_voucher_bank_account(voucher);
+	return bank_account != NULL ?
+	       bank_get_bank_account_holder_resource_coalition_id(bank_account) :
+	       0;
 }
 
 /*

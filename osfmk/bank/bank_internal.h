@@ -75,8 +75,11 @@ struct bank_task {
 	decl_lck_mtx_data(, bt_acc_to_charge_lock);        /* Lock to protect accounts to charge list */
 	uint32_t                  bt_persona_uid;          /* Persona UID of the process */
 	uint32_t                  bt_hasentitlement:1;     /* If the secure persona entitlement is set on the task */
+#if CONFIG_COALITIONS && CONFIG_TELEMETRY
+	uint64_t                  bt_rsrc_coal_id;         /* Task's resource coalition ID for microstackshot/telemetry */
+#endif /* CONFIG_COALITIONS && CONFIG_TELEMETRY */
 #if CONFIG_THREAD_GROUPS
-	struct thread_group *         bt_thread_group;         /* Task's home thread group pointer */
+	struct thread_group *     bt_thread_group;         /* Task's home thread group pointer */
 #endif
 #if DEVELOPMENT || DEBUG
 	queue_chain_t             bt_global_elt;           /* Element on the global bank task chain */
@@ -180,7 +183,6 @@ struct _bank_ledger_indices {
 
 extern struct _bank_ledger_indices bank_ledgers;
 
-extern void bank_init(void);
 extern void bank_task_destroy(task_t);
 extern void bank_task_initialize(task_t task);
 extern void bank_billed_balance_safe(task_t task, uint64_t *cpu_time, uint64_t *energy);
@@ -189,6 +191,7 @@ extern void bank_serviced_balance_safe(task_t task, uint64_t *cpu_time, uint64_t
 extern void bank_serviced_balance(bank_task_t bank_task, uint64_t *cpu_time, uint64_t *energy);
 extern kern_return_t bank_get_bank_ledger_thread_group_and_persona(ipc_voucher_t voucher,
     ledger_t *bankledger, struct thread_group **banktg, uint32_t *persona_id);
+extern uint64_t bank_get_bank_ledger_resource_coalition_id(ipc_voucher_t voucher);
 extern void bank_swap_thread_bank_ledger(thread_t thread, ledger_t ledger);
 #if CONFIG_PREADOPT_TG
 extern kern_return_t

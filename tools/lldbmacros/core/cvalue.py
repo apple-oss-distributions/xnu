@@ -23,8 +23,11 @@ from .compat import valueint as int
 from past.utils import old_div
 import lldb
 import re
-from .lazytarget import LazyTarget
+from .caching import (
+    cache_statically,
+)
 import six
+from .pointer import PointerPolicy
 
 _CSTRING_REX = re.compile(r"((?:\s*|const\s+)\s*char(?:\s+\*|\s+[A-Za-z_0-9]*\s*\[|)\s*)", re.MULTILINE | re.DOTALL)
 
@@ -45,51 +48,36 @@ class value(object):
     print rectangle_array[12]
     print rectangle_array[5].origin.x
     """
-    _kasan_tbi_build = None
 
-    def __init__(self, sbvalue):
-        # _sbval19k84obscure747 is specifically chosen to be obscure.
-        # This avoids conflicts when attributes could mean any field value in code.
-        self.sbvalue = sbvalue
-        self._sbval19k84obscure747 = self.sbvalue
-        self._sbval19k84obscure747_type = self.sbvalue.GetType()
-        self._sbval19k84obscure747_is_ptr = self.sbvalue.GetType().GetTypeFlags() & lldb.eTypeIsPointer
+    __slots__ = ('__sbval', '__ptr')
 
-        """Pointers need to have their TBI byte stripped if in use. TBI KASan,
-        for instance, tags pointers to detect improper memory accesses. Reading
-        values from such tagged pointers fails.
+    def __init__(self, sbvalue, usePtrPolicy=True):
+        # Using a double `__` means this will be hidden from getattr()
+        # and can't conflict with C/C++ type field names.
+        self.__sbval = sbvalue
+        self.__ptr = PointerPolicy.match(sbvalue) if usePtrPolicy else None
 
-        Stripping the pointers requires to learn whether TBI is in use or not.
-        We do that by checking presence of 'kasan_tbi_enabled' symbol which only
-        exists on the TBI KASan variant. Since KASan is one of more TBI
-        consumers (along with PAC or Sandbox) this is not an ideal approach.
-        Inspecting respective CPU state would be more appropriate.
+    @property
+    def sbvalue(self):
+        """backward compability for the old .sbvalue property"""
+        return self.GetSBValue()
 
-        Missing uniform TBI support in macros led to storing the TBI indication
-        in the 'value' class since it represents memory objects. In reality, it
-        is a property of the target itself where it rather belongs.
-        """
-        if value._IsKASanTBIBuild():
-            self._StripTBI()
+    @property
+    def ptrpolicy(self):
+        return self.__ptr
 
-    @classmethod
-    def _IsKASanTBIBuild(cls):
-        """Returns true on TBI KASan targets, false otherwise."""
-        if cls._kasan_tbi_build is None:
-            if LazyTarget.GetTarget().FindGlobalVariables('kasan_tbi_enabled', 1):
-                cls._kasan_tbi_build = True
-            else:
-                cls._kasan_tbi_build = False
-        return cls._kasan_tbi_build
+    @ptrpolicy.setter
+    def ptrpolicy(self, policy):
+        self.__ptr = policy
 
     def __bool__(self):
-        return self._sbval19k84obscure747.__bool__() and self._GetValueAsUnsigned() != 0
+        return self.__sbval.__bool__() and self._GetValueAsUnsigned() != 0
 
     def __nonzero__(self):
-        return self._sbval19k84obscure747.__nonzero__() and self._GetValueAsUnsigned() != 0
+        return self.__sbval.__nonzero__() and self._GetValueAsUnsigned() != 0
 
     def __repr__(self):
-        return self._sbval19k84obscure747.__str__()
+        return self.__sbval.__str__()
 
     #
     # Compare operators
@@ -127,13 +115,14 @@ class value(object):
 
     def __str__(self):
         global _CSTRING_REX
-        type_name = self._sbval19k84obscure747_type.GetCanonicalType().GetName()
+        sbv = self.__sbval
+        type_name = sbv.GetType().GetCanonicalType().GetName()
         if len(_CSTRING_REX.findall(type_name)) > 0:
             return self._GetValueAsString()
-        summary = self._sbval19k84obscure747.GetSummary()
+        summary = sbv.GetSummary()
         if summary:
             return summary.strip('"')
-        return self._sbval19k84obscure747.__str__()
+        return sbv.__str__()
 
     def __getitem__(self, key):
         # Allow array access if this value has children...
@@ -148,15 +137,24 @@ class value(object):
                 retval.append(self[_start])
                 _start += _step
             return retval
-        if isinstance(key, numbers.Integral):
-            return value(self._sbval19k84obscure747.GetValueForExpressionPath("[%i]" % key))
         if type(key) is value:
-            return value(self._sbval19k84obscure747.GetValueForExpressionPath("[%i]" % int(key)))
-        raise TypeError("Cannot fetch Array item for this type")
+            key = int(key)
+        if isinstance(key, numbers.Integral):
+            sbv = self.__sbval
+            if self.__ptr:
+                sbv = self.__ptr.GetPointerSBValue(sbv)
+            child_sbvalue = sbv.GetValueForExpressionPath("[%i]" % key)
+            if child_sbvalue and child_sbvalue.IsValid():
+                return value(child_sbvalue)
+            raise IndexError("Index '%d' is out of range" % key)
+        raise TypeError("Cannot fetch array item for key of type {}".format(str(type(key))))
 
     def __getattr__(self, name):
-        child_sbvalue = self._sbval19k84obscure747.GetChildMemberWithName(name)
-        if child_sbvalue:
+        sbv = self.__sbval
+        if self.__ptr:
+            sbv = self.__ptr.GetPointerSBValue(sbv)
+        child_sbvalue = sbv.GetChildMemberWithName(name)
+        if child_sbvalue and child_sbvalue.IsValid():
             return value(child_sbvalue)
         raise AttributeError("No field by name: " + name)
 
@@ -231,67 +229,67 @@ class value(object):
 
     def __iadd__(self, other):
         result = self.__add__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __isub__(self, other):
         result = self.__sub__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __imul__(self, other):
         result = self.__mul__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __idiv__(self, other):
         result = self.__div__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __itruediv__(self, other):
         result = self.__truediv__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __ifloordiv__(self, other):
         result = self.__floordiv__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __imod__(self, other):
         result = self.__mod__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __ipow__(self, other):
         result = self.__pow__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __ilshift__(self, other):
         result = self.__lshift__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __irshift__(self, other):
         result = self.__rshift__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __iand__(self, other):
         result = self.__and__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __ixor__(self, other):
         result = self.__xor__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __ior__(self, other):
         result = self.__or__(other)
-        self._sbval19k84obscure747.SetValueFromCString(str(result))
+        self.__sbval.SetValueFromCString(str(result))
         return result
 
     def __neg__(self):
@@ -310,27 +308,37 @@ class value(object):
         return complex(int(self))
 
     def __int__(self):
-        flags = self._sbval19k84obscure747_type.GetTypeFlags()
+        sbv = self.__sbval
+        if self.__ptr:
+            sbv = self.__ptr.GetPointerSBValue(sbv)
+
+        flags = sbv.GetType().GetTypeFlags()
         if flags & lldb.eTypeIsPointer:
-            return self._GetValueAsUnsigned()
+            return sbv.GetValueAsAddress()
         if not flags & lldb.eTypeIsSigned:
             return self._GetValueAsUnsigned()
-        return int(self._sbval19k84obscure747.GetValueAsSigned())
+
+        return sbv.GetValueAsSigned()
 
     # Python 3 conversion to int calls this.
     def __index__(self):
         return self.__int__()
 
     def __long__(self):
-        flags = self._sbval19k84obscure747_type.GetTypeFlags()
+        sbv = self.__sbval
+        if self.__ptr:
+            sbv = self.__ptr.GetPointerSBValue(sbv)
+
+        flags = sbv.GetType().GetTypeFlags()
         if flags & lldb.eTypeIsPointer:
-            return self._GetValueAsUnsigned()
+            return sbv.GetValueAsAddress()
         if not flags & lldb.eTypeIsSigned:
             return self._GetValueAsUnsigned()
-        return int(self._sbval19k84obscure747.GetValueAsSigned())
+
+        return sbv.GetValueAsSigned()
 
     def __float__(self):
-        return float(self._sbval19k84obscure747.GetValueAsSigned())
+        return float(self.__sbval.GetValueAsSigned())
 
     # Python 2 must return native string.
     def __oct__(self):
@@ -341,60 +349,72 @@ class value(object):
         return '0x%x' % self._GetValueAsUnsigned()
 
     def __hash__(self):
-        return hash(self._sbval19k84obscure747)
+        return hash(self.__sbval)
 
     def GetSBValue(self):
-        return self._sbval19k84obscure747
+        sbv = self.__sbval
+        if self.__ptr:
+            sbv = self.__ptr.GetPointerSBValue(sbv)
+
+        return sbv
 
     def __getstate__(self):
         err = lldb.SBError()
-        if self._sbval19k84obscure747_is_ptr:
-            addr = self._sbval19k84obscure747.GetValueAsAddress()
-            size = self._sbval19k84obscure747_type.GetPointeeType().GetByteSize()
+        sbv = self.__sbval
+        if self.__ptr:
+            sbv = self.__ptr.GetPointerSBValue(sbv)
+            addr = sbv.GetValueAsAddress()
+            size = sbv.GetType().GetPointeeType().GetByteSize()
         else:
-            addr = self._sbval19k84obscure747.AddressOf().GetValueAsAddress()
-            size = self._sbval19k84obscure747_type.GetByteSize()
+            addr = sbv.GetLoadAddress()
+            size = sbv.GetType().GetByteSize()
 
-        content = LazyTarget.GetProcess().ReadMemory(addr, size, err)
+        content = sbv.GetProcess().ReadMemory(addr, size, err)
         if err.fail:
             content = ''
         return content
 
     def _GetValueAsSigned(self):
-        if self._sbval19k84obscure747_is_ptr:
-            print("ERROR: You cannot get 'int' from pointer type %s, please use unsigned(obj) for such purposes." % str(self._sbval19k84obscure747_type))
+        sbv = self.__sbval
+        if self.__ptr:
+            print("ERROR: You cannot get 'int' from pointer type %s, please use unsigned(obj) for such purposes." % sbv.GetType().GetDisplayTypeName())
             raise ValueError("Cannot get signed int for pointer data.")
         serr = lldb.SBError()
-        retval = self._sbval19k84obscure747.GetValueAsSigned(serr)
+        retval = sbv.GetValueAsSigned(serr)
         if serr.success:
             return retval
-        raise ValueError("Failed to read signed data. " + str(self._sbval19k84obscure747) + "(type =" + str(self._sbval19k84obscure747_type) + ") Error description: " + serr.GetCString())
+        raise ValueError("Failed to read signed data. {} (type = {}) Error description: {}".format(
+            str(sbv), sbv.GetType().GetDisplayTypeName(), serr.GetCString()))
 
     def _GetValueAsCast(self, dest_type):
-        if type(dest_type) is not lldb.SBType:
+        if not isinstance(dest_type, lldb.SBType):
             raise ValueError("Invalid type for dest_type: {}".format(type(dest_type)))
         addr = self._GetValueAsUnsigned()
-        sbval = self._sbval19k84obscure747.target.CreateValueFromExpression("newname", "(void *)"+str(addr))
+        sbval = self.__sbval.target.CreateValueFromExpression("newname", "(void *)"+str(addr))
         val = value(sbval.Cast(dest_type))
         return val
 
     def _GetValueAsUnsigned(self):
+        sbv = self.__sbval
+        if self.__ptr:
+            sbv = self.__ptr.GetPointerSBValue(sbv)
+            return sbv.GetValueAsAddress()
         serr = lldb.SBError()
-        if self._sbval19k84obscure747_is_ptr:
-            retval = self._sbval19k84obscure747.GetValueAsAddress()
-        else:
-            retval = self._sbval19k84obscure747.GetValueAsUnsigned(serr)
+        retval = sbv.GetValueAsUnsigned(serr)
         if serr.success:
-            return int(retval)
-        raise ValueError("Failed to read unsigned data. " + str(self._sbval19k84obscure747) + "(type =" + str(self._sbval19k84obscure747_type) + ") Error description: " + serr.GetCString())
+            return retval
+        raise ValueError("Failed to read unsigned data. {} (type = {}) Error description: {}".format(
+            str(sbv), sbv.GetType().GetDisplayTypeName(), serr.GetCString()))
 
     def _GetValueAsString(self, offset=0, maxlen=1024):
+        sbv = self.__sbval
         serr = lldb.SBError()
         sbdata = None
-        if self._sbval19k84obscure747_is_ptr:
-            sbdata = self._sbval19k84obscure747.GetPointeeData(offset, maxlen)
+        if self.__ptr:
+            sbv = self.__ptr.GetPointerSBValue(sbv)
+            sbdata = sbv.GetPointeeData(offset, maxlen)
         else:
-            sbdata = self._sbval19k84obscure747.GetData()
+            sbdata = sbv.GetData()
 
         retval = ''
         bytesize = sbdata.GetByteSize()
@@ -412,32 +432,26 @@ class value(object):
         return retval
 
     def __format__(self, format_spec):
-        ret_format = "{0:"+format_spec+"}"
         # typechar is last char. see http://www.python.org/dev/peps/pep-3101/
-        type_spec = format_spec.strip().lower()[-1]
-        if type_spec == 'x':
-            return ret_format.format(int(self))
-        if type_spec == 'd':
-            return ret_format.format(int(self))
-        if type_spec == 's':
-            return ret_format.format(str(self))
-        if type_spec == 'o':
-            return ret_format.format(int(oct(self), 8))
-        if type_spec == 'c':
-            return ret_format.format(int(self))
+        typechar = format_spec[-1] if len(format_spec) else ''
 
-        raise TypeError("Unsupported value format")
+        if typechar in 'bcdoxX': # requires integral conversion
+            return format(int(self), format_spec)
 
-    def _StripTBI(self):
-        """Strips the TBI byte value. Since the value is not a plain value but
-        represents a value of a variable, a register or an expression the
-        conversion is performed by (re-)creating the value through expression.
-        """
-        if not self._sbval19k84obscure747_is_ptr:
-            return
-        addr = self._sbval19k84obscure747.GetValueAsAddress()
-        sbv_new = self._sbval19k84obscure747.CreateValueFromExpression(None,'(void *)' + str(addr))
-        self._sbval19k84obscure747 = sbv_new.Cast(self._sbval19k84obscure747_type)
+        if typechar in 'eEfFgG%': # requires float conversion
+            return format(float(self), format_spec)
+
+        if typechar in 's': # requires string conversion
+            return format(str(self), format_spec)
+
+        # 'n' or '' mean "whatever you got for me"
+        flags = self.__sbval.GetType().GetTypeFlags()
+        if flags & lldb.eTypeIsFloat:
+            return format(float(self), format_spec)
+        elif flags & lldb.eTypeIsScalar:
+            return format(int(self), format_spec)
+        else:
+            return format(str(self), format_spec)
 
 def unsigned(val):
     """ Helper function to get unsigned value from core.value
@@ -457,7 +471,7 @@ def signed(val):
         raises: ValueError if the type cannot be represented as signed int.
     """
     if type(val) is value:
-        return val._sbval19k84obscure747.GetValueAsSigned()
+        return val.GetSBValue().GetValueAsSigned()
     return int(val)
 
 
@@ -483,9 +497,26 @@ def dereference(val):
             obj_ptr = (int *)0x1234  #C
             val = *obj_ptr           #C
     """
-    if type(val) is value and val._sbval19k84obscure747_is_ptr:
-        return value(val.GetSBValue().Dereference())
+    if type(val) is value:
+        sbv = val.GetSBValue()
+        if val.ptrpolicy:
+            sbv = val.ptrpolicy.GetPointerSBValue(sbv)
+            return value(sbv.Dereference())
     raise TypeError('Cannot dereference this type.')
+
+
+def wrapped(val):
+    """ Get original pointer value without aplying pointer policy.
+        param: val - value object representing a pointer
+        returns: value - value
+    """
+    if isinstance(val, value):
+        policy = val.ptrpolicy
+        val.ptrpolicy = None
+        newval = value(val.GetSBValue(), False)
+        val.ptrpolicy = policy
+        return newval
+    raise TypeError("Cannot do wrapped for non-value type objects")
 
 
 def addressof(val):
@@ -530,14 +561,13 @@ def containerof(obj, target_type, field_name):
             field_name - the field name within the target_type obj is a pointer to
     """
     addr = int(obj) - getfieldoffset(target_type, field_name)
-    obj = value(obj.GetSBValue().CreateValueFromExpression(None, '(void *)' + str(addr)))
-    return cast(obj, target_type + " *")
+    sbv  = obj.GetSBValue()
+    sbv  = sbv.chkCreateValueFromAddress(None, addr, gettype(target_type))
+    return value(sbv.AddressOf())
 
 
-_value_types_cache = {}
-
-
-def gettype(target_type):
+@cache_statically
+def gettype(target_type, target=None):
     """ Returns lldb.SBType of the given target_type
         params:
             target_type - str, ex. 'char', 'uint32_t' etc
@@ -546,82 +576,63 @@ def gettype(target_type):
         raises:
             NameError  - Incase the type is not identified
     """
-    global _value_types_cache
-    target_type = str(target_type).strip()
-    if target_type in _value_types_cache:
-        return _value_types_cache[target_type]
 
-    target_type = target_type.strip()
+    #
+    # If the type was qualified with a `struct` or `class`, ...
+    # make sure we pick up the proper definition in case of clashes.
+    #
+    want = 0
+    name = str(target_type).strip()
 
-    requested_type_is_struct = False
-    m = re.match(r'\s*struct\s*(.*)$', target_type)
-    if m:
-        requested_type_is_struct = True
-        target_type = m.group(1)
+    if name.startswith("struct"):
+        want = lldb.eTypeClassStruct
+    elif name.startswith("union"):
+        want = lldb.eTypeClassUnion
+    elif name.startswith("class"):
+        want = lldb.eTypeClassClass
+    elif name.startswith("enum"):
+        want = lldb.eTypeClassEnumeration
+    elif name.startswith("typedef"):
+        want = lldb.eTypeClassTypedef
 
-    tmp_type = None
-    requested_type_is_pointer = False
-    if target_type.endswith('*'):
-        requested_type_is_pointer = True
-
-    # tmp_type = LazyTarget.GetTarget().FindFirstType(target_type.rstrip('*').strip())
-    search_type = target_type.rstrip('*').strip()
-    type_arr = [t for t in LazyTarget.GetTarget().FindTypes(search_type)]
-
-    if requested_type_is_struct:
-        type_arr = [t for t in type_arr if t.type == lldb.eTypeClassStruct]
+    #
+    # Now remove constness and speficiers, and pointers
+    #
+    tmpname  = re.sub(r'\bconst\b', '', name).strip(" ")
+    tmpname  = re.sub(r'^(struct|class|union|enum|typedef) ', '', tmpname)
+    basename = tmpname.rstrip(" *")
+    ptrlevel = tmpname.count('*', len(basename))
 
     # After the sort, the struct type with more fields will be at index [0].
-    # This hueristic helps selecting struct type with more fields compared to ones with "opaque" members
+    # This heuristic helps selecting struct type with more fields
+    # compared to ones with "opaque" members
+    type_lst = target.chkFindTypes(basename)
+    type_arr = [type_lst.GetTypeAtIndex(i) for i in range(len(type_lst))]
     type_arr.sort(reverse=True, key=lambda x: x.GetNumberOfFields())
-    if len(type_arr) > 0:
-        tmp_type = type_arr[0]
-    else:
-        raise NameError('Unable to find type '+target_type)
 
-    if not tmp_type.IsValid():
-        raise NameError('Unable to Cast to type '+target_type)
+    for tyobj in type_arr:
+        if want and tyobj.GetTypeClass() != want:
+            continue
 
-    if requested_type_is_pointer:
-        tmp_type = tmp_type.GetPointerType()
-    _value_types_cache[target_type] = tmp_type
+        for i in range(ptrlevel):
+            tyobj = tyobj.GetPointerType()
 
-    return _value_types_cache[target_type]
+        return tyobj
+
+    raise NameError('Unable to find type {}'.format(target_type))
 
 
-def getfieldoffset(struct_type, field_name):
+@cache_statically
+def getfieldoffset(struct_type, field_name_or_path, target=None):
     """ Returns the byte offset of a field inside a given struct
         Understands anonymous unions and field names in sub-structs
         params:
-            struct_type - str or lldb.SBType, ex. 'struct ipc_port *' or port.gettype()
-            field_name  - str, name of the field inside the struct ex. 'ip_messages'
+            field_name_or_path  - str, name or path to the field inside the struct ex. 'ip_messages'
         returns:
             int - byte offset of the field_name inside the struct_type
-        raises:
-            TypeError  - - In case the struct_type has no field with the name field_name
     """
 
-    if isinstance(struct_type, six.string_types):
-        struct_type = gettype(struct_type)
-
-    if '.' in field_name:
-        # Handle recursive fields in sub-structs
-        components = field_name.split('.', 1)
-        for field in struct_type.get_fields_array():
-            if str(field.GetName()) == components[0]:
-                return getfieldoffset(struct_type, components[0]) + getfieldoffset(field.GetType(), components[1])
-        raise TypeError('Field name "%s" not found in type "%s"' % (components[0], str(struct_type)))
-
-    for field in struct_type.get_fields_array():
-        if str(field.GetName()) == field_name:
-            return field.GetOffsetInBytes()
-
-        # Hack for anonymous unions - the compiler does this, so cvalue should too
-        if field.GetName() is None and field.GetType().GetTypeClass() == lldb.eTypeClassUnion:
-            for union_field in field.GetType().get_fields_array():
-                if str(union_field.GetName()) == field_name:
-                    return union_field.GetOffsetInBytes() + field.GetOffsetInBytes()
-    raise TypeError('Field name "%s" not found in type "%s"' % (field_name, str(struct_type)))
+    return gettype(struct_type).xGetFieldOffset(field_name_or_path)
 
 
 def islong(x):
@@ -653,7 +664,7 @@ def getOSPtr(cpp_obj):
         params: cpp_obj - core.value object representing a C construct in lldb
         return: core.value - newly created core.value or cpp_obj
     """
-    child = cpp_obj._sbval19k84obscure747.GetChildAtIndex(0)
+    child = cpp_obj.GetSBValue().GetChildAtIndex(0)
     if 'intrusive_shared_ptr' in str(child):
         return value(child.GetChildMemberWithName('ptr_'))
     return cpp_obj

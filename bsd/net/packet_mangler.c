@@ -110,8 +110,7 @@ void* pkt_mnglr_rw_lock_history[PKT_MNGLR_RW_LCK_MAX];
 int pkt_mnglr_rw_nxt_unlck = 0;
 void* pkt_mnglr_rw_unlock_history[PKT_MNGLR_RW_LCK_MAX];
 
-static ZONE_DEFINE(packet_mangler_zone, "packet_mangler",
-    sizeof(struct packet_mangler), ZC_NONE);
+static KALLOC_TYPE_DEFINE(packet_mangler_zone, struct packet_mangler, NET_KT_DEFAULT);
 
 /*
  * For troubleshooting

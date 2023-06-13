@@ -29,6 +29,7 @@
 #define _MACHINE_MACHINE_ROUTINES_H
 
 #include <sys/cdefs.h>
+#include <stdint.h>
 
 #if defined (__i386__) || defined(__x86_64__)
 #include "i386/machine_routines.h"
@@ -289,6 +290,19 @@ extern unsigned int report_phy_write_osbt;
 
 void ml_get_cluster_type_name(cluster_type_t cluster_type, char *name,
     size_t name_size);
+
+/**
+ * Depending on the system, it's possible that a kernel backtrace could contain
+ * stack frames from both XNU and non-XNU-owned stacks. This function can be
+ * used to determine whether an address is pointing to one of these non-XNU
+ * stacks.
+ *
+ * @param addr The virtual address to check.
+ *
+ * @return True if the address is within the bounds of a non-XNU stack. False
+ *         otherwise.
+ */
+bool ml_addr_in_non_xnu_stack(uintptr_t addr);
 
 #endif /* XNU_KERNEL_PRIVATE */
 

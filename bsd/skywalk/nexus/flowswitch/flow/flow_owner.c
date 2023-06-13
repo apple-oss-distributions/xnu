@@ -41,47 +41,39 @@ static LCK_ATTR_DECLARE(flow_owner_lock_attr, 0, 0);
 
 RB_GENERATE_PREV(flow_owner_tree, flow_owner, fo_link, fo_cmp);
 
+KALLOC_TYPE_VAR_DEFINE(KT_SK_FOB, struct flow_owner_bucket, KT_DEFAULT);
+
 struct flow_owner_bucket *
 flow_owner_buckets_alloc(size_t fob_cnt, size_t *fob_sz, size_t *tot_sz)
 {
 	size_t cache_sz = skmem_cpu_cache_line_size();
 	struct flow_owner_bucket *fob;
-	void *fob_buf, **fob_pbuf;
 	size_t fob_tot_sz;
 
 	/* each bucket is CPU cache-aligned */
 	*fob_sz = P2ROUNDUP(sizeof(*fob), cache_sz);
-
-	/* total size includes extra for alignment requirements */
-	*tot_sz = fob_tot_sz = (sizeof(void *) + (fob_cnt * (*fob_sz)) + cache_sz);
-	// rdar://88962126
-	/* BEGIN IGNORE CODESTYLE */
-	__typed_allocators_ignore_push
-	fob_buf = sk_alloc(fob_tot_sz, Z_WAITOK, skmem_tag_fsw_fob_hash);
-	__typed_allocators_ignore_pop
-	/* END IGNORE CODESTYLE */
-	if (__improbable(fob_buf == NULL)) {
+	*tot_sz = fob_tot_sz = fob_cnt * (*fob_sz);
+	fob = sk_alloc_type_hash(KT_SK_FOB, fob_tot_sz, Z_WAITOK, skmem_tag_fsw_fob_hash);
+	if (__improbable(fob == NULL)) {
 		return NULL;
 	}
 
+#if !KASAN_CLASSIC
 	/*
-	 * In case we didn't get a cache-aligned memory, round it up
-	 * accordingly.  This is needed in order to get the rest of
-	 * the structure members aligned properly.  It also means that
-	 * the memory span gets shifted due to the round up, but it
-	 * is okay since we've allocated extra space for this.
+	 * except in KASAN_CLASSIC mode, kalloc will always maintain cacheline
+	 * size alignment if the requested size is a multiple of a cacheline
+	 * size (this is true for any size that is a power of two from 16 to
+	 * PAGE_SIZE).
+	 *
+	 * Because this is an optimization only, it is OK to leave KASAN_CLASSIC
+	 * not respect this.
 	 */
-	fob = (struct flow_owner_bucket *)
-	    P2ROUNDUP((intptr_t)fob_buf + sizeof(void *), cache_sz);
-	fob_pbuf = (void **)((intptr_t)fob - sizeof(void *));
-	ASSERT((intptr_t)fob_pbuf >= (intptr_t)fob_buf);
-	ASSERT(((intptr_t)fob + (fob_cnt * (*fob_sz))) <=
-	    ((intptr_t)fob_buf + fob_tot_sz));
-	*fob_pbuf = fob_buf;
+	ASSERT(IS_P2ALIGNED(fob, cache_sz));
+#endif
 
 	SK_DF(SK_VERB_MEM, "fob 0x%llx fob_cnt %zu fob_sz %zu "
-	    "(total %zu bytes, fob_buf 0x%llx) ALLOC", SK_KVA(fob), fob_cnt,
-	    *fob_sz, fob_tot_sz, SK_KVA(fob_buf));
+	    "(total %zu bytes) ALLOC", SK_KVA(fob), fob_cnt,
+	    *fob_sz, fob_tot_sz);
 
 	return fob;
 }
@@ -89,23 +81,16 @@ flow_owner_buckets_alloc(size_t fob_cnt, size_t *fob_sz, size_t *tot_sz)
 void
 flow_owner_buckets_free(struct flow_owner_bucket *fob, size_t tot_sz)
 {
-	void *fob_buf, **fob_pbuf;
-
-	/* get the original address that we stuffed in earlier and free it */
-	fob_pbuf = (void **)((intptr_t)fob - sizeof(void *));
-	fob_buf = *fob_pbuf;
-	SK_DF(SK_VERB_MEM, "fob 0x%llx (fob_buf 0x%llx) FREE", SK_KVA(fob),
-	    SK_KVA(fob_buf));
-	// rdar://88962126
-	__typed_allocators_ignore_push
-	sk_free(fob_buf, tot_sz);
-	__typed_allocators_ignore_pop
+	SK_DF(SK_VERB_MEM, "fob 0x%llx FREE", SK_KVA(fob));
+	sk_free_type_hash(KT_SK_FOB, tot_sz, fob);
 }
 
 void
 flow_owner_bucket_init(struct flow_owner_bucket *fob)
 {
+#if !KASAN_CLASSIC
 	ASSERT(IS_P2ALIGNED(fob, skmem_cpu_cache_line_size()));
+#endif /* !KASAN_CLASSIC */
 	lck_mtx_init(&fob->fob_lock, &flow_owner_lock_group,
 	    &flow_owner_lock_attr);
 	RB_INIT(&fob->fob_owner_head);

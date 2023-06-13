@@ -155,25 +155,6 @@ ZONE_DEFINE_TYPE(fg_zone, "fileglob", struct fileglob, ZC_ZFREE_CLEARMEM);
 ZONE_DEFINE_ID(ZONE_ID_FILEPROC, "fileproc", struct fileproc, ZC_ZFREE_CLEARMEM);
 
 /*
- * If you need accounting for KM_OFILETABL consider using
- * KALLOC_HEAP_DEFINE to define a view.
- */
-#define KM_OFILETABL KHEAP_DEFAULT
-
-/*
- * rdar://88960128
- */
-#define fd_alloc_files(n_files, flags)                       \
-	__typed_allocators_ignore_push                        \
-	kheap_alloc(KM_OFILETABL, n_files * OFILESIZE, flags) \
-	__typed_allocators_ignore_pop
-
-#define fd_free_files(files, n_files)                        \
-	__typed_allocators_ignore_push                        \
-	kheap_free(KM_OFILETABL, ofiles, n_files * OFILESIZE) \
-	__typed_allocators_ignore_pop
-
-/*
  * Descriptor management.
  */
 int nfiles;                     /* actual number of open files */
@@ -923,8 +904,11 @@ fdt_fork(struct filedesc *newfdp, proc_t p, vnode_t uth_cdir, bool in_exec)
 
 	proc_fdunlock(p);
 
-	ofiles = fd_alloc_files(n_files, Z_WAITOK | Z_ZERO);
-	if (ofiles == NULL) {
+	ofiles = kalloc_type(struct fileproc *, n_files, Z_WAITOK | Z_ZERO);
+	ofileflags = kalloc_data(n_files, Z_WAITOK | Z_ZERO);
+	if (ofiles == NULL || ofileflags == NULL) {
+		kfree_type(struct fileproc *, n_files, ofiles);
+		kfree_data(ofileflags, n_files);
 		if (newfdp->fd_cdir) {
 			vnode_rele(newfdp->fd_cdir);
 			newfdp->fd_cdir = NULL;
@@ -935,7 +919,6 @@ fdt_fork(struct filedesc *newfdp, proc_t p, vnode_t uth_cdir, bool in_exec)
 		}
 		return ENOMEM;
 	}
-	ofileflags = (char *)&ofiles[n_files];
 
 	proc_fdlock(p);
 
@@ -1000,6 +983,7 @@ fdt_invalidate(proc_t p)
 {
 	struct filedesc *fdp = &p->p_fd;
 	struct fileproc *fp, **ofiles;
+	char *ofileflags;
 	struct kqworkq *kqwq = NULL;
 	vnode_t vn1 = NULL, vn2 = NULL;
 	struct kqwllist *kqhash = NULL;
@@ -1036,6 +1020,7 @@ fdt_invalidate(proc_t p)
 	}
 
 	n_files = fdp->fd_nfiles;
+	ofileflags = fdp->fd_ofileflags;
 	ofiles = fdp->fd_ofiles;
 	kqwq = fdp->fd_wqkqueue;
 	vn1 = fdp->fd_cdir;
@@ -1060,7 +1045,8 @@ fdt_invalidate(proc_t p)
 
 	lck_mtx_unlock(&fdp->fd_knhashlock);
 
-	fd_free_files(ofiles, n_files);
+	kfree_type(struct fileproc *, n_files, ofiles);
+	kfree_data(ofileflags, n_files);
 
 	if (kqwq) {
 		kqworkq_dealloc(kqwq);
@@ -1161,7 +1147,7 @@ fdalloc(proc_t p, int want, int *result)
 	struct filedesc *fdp = &p->p_fd;
 	int i;
 	int last, numfiles, oldnfiles;
-	struct fileproc **newofiles, **ofiles;
+	struct fileproc **newofiles;
 	char *newofileflags;
 	int lim = proc_limitgetcur_nofile(p);
 
@@ -1213,36 +1199,34 @@ fdalloc(proc_t p, int want, int *result)
 			numfiles = (int)lim;
 		}
 		proc_fdunlock(p);
-		newofiles = fd_alloc_files(numfiles, Z_WAITOK);
+		newofiles = kalloc_type(struct fileproc *, numfiles, Z_WAITOK | Z_ZERO);
+		newofileflags = kalloc_data(numfiles, Z_WAITOK | Z_ZERO);
 		proc_fdlock(p);
-		if (newofiles == NULL) {
+		if (newofileflags == NULL || newofiles == NULL) {
+			kfree_type(struct fileproc *, numfiles, newofiles);
+			kfree_data(newofileflags, numfiles);
 			return ENOMEM;
 		}
 		if (fdp->fd_nfiles >= numfiles) {
-			fd_free_files(newofiles, numfiles);
+			kfree_type(struct fileproc *, numfiles, newofiles);
+			kfree_data(newofileflags, numfiles);
 			continue;
 		}
-		newofileflags = (char *) &newofiles[numfiles];
+
 		/*
 		 * Copy the existing ofile and ofileflags arrays
 		 * and zero the new portion of each array.
 		 */
 		oldnfiles = fdp->fd_nfiles;
-		(void) memcpy(newofiles, fdp->fd_ofiles,
+		memcpy(newofiles, fdp->fd_ofiles,
 		    oldnfiles * sizeof(*fdp->fd_ofiles));
-		(void) memset(&newofiles[oldnfiles], 0,
-		    (numfiles - oldnfiles) * sizeof(*fdp->fd_ofiles));
+		memcpy(newofileflags, fdp->fd_ofileflags, oldnfiles);
 
-		(void) memcpy(newofileflags, fdp->fd_ofileflags,
-		    oldnfiles * sizeof(*fdp->fd_ofileflags));
-		(void) memset(&newofileflags[oldnfiles], 0,
-		    (numfiles - oldnfiles) *
-		    sizeof(*fdp->fd_ofileflags));
-		ofiles = fdp->fd_ofiles;
+		kfree_type(struct fileproc *, oldnfiles, fdp->fd_ofiles);
+		kfree_data(fdp->fd_ofileflags, oldnfiles);
 		fdp->fd_ofiles = newofiles;
 		fdp->fd_ofileflags = newofileflags;
 		fdp->fd_nfiles = numfiles;
-		fd_free_files(ofiles, oldnfiles);
 		fdexpand++;
 	}
 }

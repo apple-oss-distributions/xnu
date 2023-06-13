@@ -282,9 +282,7 @@ static const struct vm_object vm_object_template = {
 	.pager_control = MEMORY_OBJECT_CONTROL_NULL,
 	.copy_strategy = MEMORY_OBJECT_COPY_SYMMETRIC,
 	.paging_in_progress = 0,
-#if __LP64__
-	.__object1_unused_bits = 0,
-#endif /* __LP64__ */
+	.vo_size_delta = 0,
 	.activity_in_progress = 0,
 
 	/* Begin bitfields */
@@ -368,6 +366,8 @@ static const struct vm_object vm_object_template = {
 	.__object3_unused_bits = 0,
 #endif /* CONFIG_SECLUDED_MEMORY */
 
+	.for_realtime = false,
+
 #if VM_OBJECT_ACCESS_TRACKING
 	.access_tracking = FALSE,
 	.access_tracking_reads = 0,
@@ -444,9 +444,8 @@ LCK_SPIN_DECLARE_ATTR(io_reprioritize_list_lock,
 #define IO_REPRIORITIZE_LIST_UNLOCK()   \
 	        lck_spin_unlock(&io_reprioritize_list_lock)
 
-#define MAX_IO_REPRIORITIZE_REQS        8192
 ZONE_DEFINE_TYPE(io_reprioritize_req_zone, "io_reprioritize_req",
-    struct io_reprioritize_req, ZC_NOGC);
+    struct io_reprioritize_req, ZC_NONE);
 
 /* I/O Re-prioritization thread */
 int io_reprioritize_wakeup = 0;
@@ -470,6 +469,22 @@ void vm_decmp_upl_reprioritize(upl_t, int);
 #endif
 
 
+void
+vm_object_set_size(
+	vm_object_t             object,
+	vm_object_size_t        outer_size,
+	vm_object_size_t        inner_size)
+{
+	object->vo_size = vm_object_round_page(outer_size);
+#if KASAN
+	assert(object->vo_size - inner_size <= USHRT_MAX);
+	object->vo_size_delta = (unsigned short)(object->vo_size - inner_size);
+#else
+	(void)inner_size;
+#endif
+}
+
+
 /*
  *	vm_object_allocate:
  *
@@ -487,7 +502,7 @@ _vm_object_allocate(
 	queue_init(&object->uplq);
 #endif
 	vm_object_lock_init(object);
-	object->vo_size = vm_object_round_page(size);
+	vm_object_set_size(object, size, size);
 
 #if VM_OBJECT_TRACKING_OP_CREATED
 	if (vm_object_tracking_btlog) {
@@ -529,7 +544,7 @@ vm_object_bootstrap(void)
 	    ~(VM_PAGE_PACKED_PTR_ALIGNMENT - 1);
 
 	vm_object_zone = zone_create("vm objects", vm_object_size,
-	    ZC_NOENCRYPT | ZC_ALIGNMENT_REQUIRED | ZC_VM_LP64 | ZC_NOTBITAG);
+	    ZC_NOENCRYPT | ZC_ALIGNMENT_REQUIRED | ZC_VM | ZC_NOTBITAG);
 
 	queue_init(&vm_object_cached_list);
 
@@ -2080,16 +2095,20 @@ page_is_paged_out(
  * reclaimed and then re-faulted.
  */
 #if DEVELOPMENT || DEBUG
-int madvise_free_debug = 1;
+int madvise_free_debug = 0;
+int madvise_free_debug_sometimes = 1;
 #else /* DEBUG */
 int madvise_free_debug = 0;
+int madvise_free_debug_sometimes = 0;
 #endif /* DEBUG */
+int madvise_free_counter = 0;
 
 __options_decl(deactivate_flags_t, uint32_t, {
 	DEACTIVATE_KILL         = 0x1,
 	DEACTIVATE_REUSABLE     = 0x2,
 	DEACTIVATE_ALL_REUSABLE = 0x4,
-	DEACTIVATE_CLEAR_REFMOD = 0x8
+	DEACTIVATE_CLEAR_REFMOD = 0x8,
+	DEACTIVATE_REUSABLE_NO_WRITE = 0x10
 });
 
 /*
@@ -2172,11 +2191,15 @@ deactivate_pages_in_object(
 				dwp->dw_mask |= DW_clear_reference;
 
 				if ((flags & DEACTIVATE_KILL) && (object->internal)) {
-					if (madvise_free_debug) {
+					if (!(flags & DEACTIVATE_REUSABLE_NO_WRITE) &&
+					    (madvise_free_debug ||
+					    (madvise_free_debug_sometimes &&
+					    madvise_free_counter++ & 0x1))) {
 						/*
-						 * zero-fill the page now
-						 * to simulate it being
-						 * reclaimed and re-faulted.
+						 * zero-fill the page (or every
+						 * other page) now to simulate
+						 * it being reclaimed and
+						 * re-faulted.
 						 */
 						pmap_zero_page(VM_PAGE_GET_PHYS_PAGE(m));
 					}
@@ -2403,6 +2426,7 @@ vm_object_deactivate_pages(
 	vm_object_size_t        size,
 	boolean_t               kill_page,
 	boolean_t               reusable_page,
+	boolean_t               reusable_no_write,
 	struct pmap             *pmap,
 	vm_map_offset_t         pmap_offset)
 {
@@ -2418,6 +2442,9 @@ vm_object_deactivate_pages(
 	}
 	if (reusable_page) {
 		flags |= DEACTIVATE_REUSABLE;
+	}
+	if (reusable_no_write) {
+		flags |= DEACTIVATE_REUSABLE_NO_WRITE;
 	}
 
 	/*

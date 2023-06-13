@@ -195,6 +195,8 @@ extern void pktsched_pkt_encap_chain(pktsched_pkt_t *, classq_pkt_t *,
 extern mbuf_svc_class_t pktsched_get_pkt_svc(pktsched_pkt_t *);
 extern struct flowadv_fcentry *pktsched_alloc_fcentry(pktsched_pkt_t *,
     struct ifnet *, int);
+extern int pktsched_mark_ecn(pktsched_pkt_t *pkt);
+extern boolean_t pktsched_is_pkt_l4s(pktsched_pkt_t *pkt);
 #endif /* BSD_KERNEL_PRIVATE */
 
 #ifdef __cplusplus

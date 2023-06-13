@@ -121,11 +121,11 @@ static enum {
 } task_refgrp_config = TASK_REF_CONFIG_DEFAULT;
 
 /* Global reference groups. */
-os_refgrp_decl(static, task_primary_refgrp, "task", NULL);
-os_refgrp_decl(static, task_kernel_refgrp, "task_kernel", &task_primary_refgrp);
-os_refgrp_decl(static, task_internal_refgrp, "task_internal", &task_primary_refgrp);
-os_refgrp_decl(static, task_mig_refgrp, "task_mig", &task_primary_refgrp);
-os_refgrp_decl(, task_external_refgrp, "task_external", &task_primary_refgrp);
+os_refgrp_decl_flags(static, task_primary_refgrp, "task", NULL, OS_REFGRP_F_ALWAYS_ENABLED);
+os_refgrp_decl_flags(static, task_kernel_refgrp, "task_kernel", &task_primary_refgrp, OS_REFGRP_F_ALWAYS_ENABLED);
+os_refgrp_decl_flags(static, task_internal_refgrp, "task_internal", &task_primary_refgrp, OS_REFGRP_F_ALWAYS_ENABLED);
+os_refgrp_decl_flags(static, task_mig_refgrp, "task_mig", &task_primary_refgrp, OS_REFGRP_F_ALWAYS_ENABLED);
+os_refgrp_decl_flags(, task_external_refgrp, "task_external", &task_primary_refgrp, OS_REFGRP_F_ALWAYS_ENABLED);
 
 
 /* 'task_refgrp' is used by lldb macros. */
@@ -237,7 +237,8 @@ lookup_dynamic_refgrp(struct os_refgrp *kext,
 	for (int i = 0; i < dynamic_count; i++) {
 		if (dynamic[i].grp_name == NULL) {
 			dynamic[i] = (struct os_refgrp)
-			    os_refgrp_initializer(kext->grp_name, kext);
+			    os_refgrp_initializer(kext->grp_name, kext,
+			    OS_REFGRP_F_ALWAYS_ENABLED);
 			return &dynamic[i];
 		}
 	}
@@ -391,7 +392,7 @@ allocate_refgrp_default(task_t task)
 
 	task->ref_group[TASK_GRP_KERNEL] = (struct os_refgrp)
 	    os_refgrp_initializer(local_name[TASK_GRP_KERNEL],
-	    task_refgrp[TASK_GRP_KERNEL]);
+	    task_refgrp[TASK_GRP_KERNEL], OS_REFGRP_F_ALWAYS_ENABLED);
 	os_ref_log_init(&task->ref_group[TASK_GRP_KERNEL]);
 }
 
@@ -411,7 +412,8 @@ allocate_refgrp_full(task_t task)
 
 	for (int i = 0; i < TASK_GRP_COUNT; i++) {
 		task->ref_group[i] = (struct os_refgrp)
-		    os_refgrp_initializer(local_name[i], task_refgrp[i]);
+		    os_refgrp_initializer(local_name[i], task_refgrp[i],
+		    OS_REFGRP_F_ALWAYS_ENABLED);
 		os_ref_log_init(&task->ref_group[i]);
 	}
 }

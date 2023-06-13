@@ -121,13 +121,11 @@ struct page_table_attr {
 	const unsigned int pta_max_level;
 
 
-#if __ARM_MIXED_PAGE_SIZE__
 	/**
 	 * Value to set the Translation Control Register (TCR) to in order to inform
 	 * the hardware of this page table geometry.
 	 */
 	const uint64_t pta_tcr_value;
-#endif /* __ARM_MIXED_PAGE_SIZE__ */
 
 	/* Page Table/Granule Size. */
 	const uint64_t pta_page_size;
@@ -144,6 +142,7 @@ typedef struct page_table_attr pt_attr_t;
 
 /* The default page table attributes for a system. */
 extern const struct page_table_attr * const native_pt_attr;
+extern const struct page_table_ops native_pt_ops;
 
 /**
  * Macros for getting pmap attributes/operations; not functions for const

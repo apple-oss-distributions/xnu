@@ -329,7 +329,7 @@ kernel_collection_slide(const struct mach_header_64* mh, const void* basePointer
  * of an MH_FILESET kernel collection.
  */
 
-static void
+MARK_AS_FIXUP_TEXT static void
 kernel_collection_adjust_fileset_entry_addrs(struct mach_header_64 *mh, uintptr_t adj)
 {
 	struct load_command *lc;
@@ -348,7 +348,7 @@ kernel_collection_adjust_fileset_entry_addrs(struct mach_header_64 *mh, uintptr_
 		if (lc->cmd != LC_SEGMENT_64) {
 			continue;
 		}
-		if (strcmp(((struct segment_command_64 *)(uintptr_t)lc)->segname, SEG_LINKEDIT) == 0) {
+		if (strings_are_equal(((struct segment_command_64 *)(uintptr_t)lc)->segname, SEG_LINKEDIT)) {
 			linkedit_cmd = ((struct segment_command_64 *)(uintptr_t)lc);
 		}
 
@@ -390,7 +390,7 @@ kernel_collection_adjust_fileset_entry_addrs(struct mach_header_64 *mh, uintptr_
 	}
 }
 
-static void
+MARK_AS_FIXUP_TEXT static void
 kernel_collection_adjust_mh_addrs(struct mach_header_64 *kc_mh, uintptr_t adj,
     bool pageable, uintptr_t *kc_lowest_vmaddr, uintptr_t *kc_highest_vmaddr,
     uintptr_t *kc_lowest_ro_vmaddr, uintptr_t *kc_highest_ro_vmaddr,

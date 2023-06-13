@@ -104,7 +104,7 @@ enum cqrq;
 #if DEBUG || DEVELOPMENT
 extern uint32_t ifclassq_flow_control_adv;
 #endif /* DEBUG || DEVELOPMENT */
-
+extern uint32_t ifclassq_enable_l4s;
 typedef int (*ifclassq_enq_func)(struct ifclassq *, classq_pkt_t *,
     boolean_t *);
 typedef void  (*ifclassq_deq_func)(struct ifclassq *, classq_pkt_t *);
@@ -321,7 +321,6 @@ extern void ifclassq_calc_update_interval(uint64_t *update_interval,
     uint32_t flags);
 extern void ifclassq_set_packet_metadata(struct ifclassq *ifq,
     struct ifnet *ifp, classq_pkt_t *p);
-extern void ifclassq_reap_caches(boolean_t);
 extern struct ifclassq *ifclassq_alloc(void);
 extern void ifclassq_retain(struct ifclassq *);
 extern void ifclassq_release(struct ifclassq **);

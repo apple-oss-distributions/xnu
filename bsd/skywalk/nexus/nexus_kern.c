@@ -65,14 +65,11 @@ static int _kern_nexus_ifattach(struct nxctl *nxctl, const uuid_t nx_uuid,
     struct ifnet *ifp, const uuid_t nx_uuid_attachee, boolean_t host,
     uuid_t *nx_if_uuid);
 
-static ZONE_DEFINE(ncd_zone, SKMEM_ZONE_PREFIX ".nx.kern.ctl.desc",
-    sizeof(struct nexus_controller), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(ncd_zone, struct nexus_controller);
 
-static ZONE_DEFINE(nxdom_prov_zone, SKMEM_ZONE_PREFIX ".nx.kern.dom.prov",
-    sizeof(struct kern_nexus_domain_provider), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(nxdom_prov_zone, struct kern_nexus_domain_provider);
 
-static ZONE_DEFINE(nxa_zone, SKMEM_ZONE_PREFIX ".nx.kern.attr",
-    sizeof(struct nexus_attr), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(nxa_zone, struct nexus_attr);
 
 static int __nxdom_inited = 0;
 static STAILQ_HEAD(, kern_nexus_domain_provider) nxprov_detaching_head =

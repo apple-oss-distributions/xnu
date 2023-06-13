@@ -604,7 +604,11 @@ struct inpcbinfo {
 	/*
 	 * Zone from which inpcbs are allocated for this protocol.
 	 */
+#if BSD_KERNEL_PRIVATE
+	zone_or_view_t           ipi_zone;
+#else
 	struct zone             *ipi_zone;
+#endif
 
 	/*
 	 * Per-protocol hash of pcbs, hashed by local and foreign

@@ -328,15 +328,17 @@ IODMACommand::setSpecification(SegmentFunction        outSegFunc,
 	default:
 		return kIOReturnBadArgument;
 	}
-	;
 
 	if (mapper != fMapper) {
 		fMapper.reset(mapper, OSRetain);
 	}
 
 	fInternalState->fIterateOnly = (0 != (kIterateOnly & mappingOptions));
-	fInternalState->fDextOwned   = (0 != (kIODMAMapOptionDextOwner & mappingOptions));
+	if (0 != (kIODMAMapOptionDextOwner & mappingOptions)) {
+		fInternalState->fDextLock = IOLockAlloc();
+	}
 	fInternalState->fDevice = device;
+
 
 	return kIOReturnSuccess;
 }
@@ -345,8 +347,11 @@ void
 IODMACommand::free()
 {
 	if (reserved) {
-		if (fActive && fInternalState->fDextOwned) {
-			CompleteDMA(kIODMACommandCompleteDMANoOptions);
+		if (fInternalState->fDextLock) {
+			if (fActive) {
+				CompleteDMA(kIODMACommandCompleteDMANoOptions);
+			}
+			IOLockFree(fInternalState->fDextLock);
 		}
 		IOFreeType(reserved, IODMACommandInternal);
 	}

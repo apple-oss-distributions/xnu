@@ -125,6 +125,7 @@ struct vop_setlabel_args;
 #include <sys/kauth.h>
 #include <sys/kernel_types.h>
 #include <sys/reason.h>
+#include <sys/cdefs.h>
 
 #if CONFIG_MACF
 
@@ -138,6 +139,8 @@ struct OSObject;
 typedef struct OSObject *io_object_t;
 #endif
 #endif /* __IOKIT_PORTS_DEFINED__ */
+
+__BEGIN_DECLS
 
 /*@ macros */
 #define VNODE_LABEL_CREATE      1
@@ -579,11 +582,9 @@ int     vnode_label(struct mount *mp, struct vnode *dvp, struct vnode *vp,
 void    vnode_relabel(struct vnode *vp);
 void    mac_pty_notify_grant(proc_t p, struct tty *tp, dev_t dev, struct label *label);
 void    mac_pty_notify_close(proc_t p, struct tty *tp, dev_t dev, struct label *label);
-__BEGIN_DECLS
 int     mac_kext_check_load(kauth_cred_t cred, const char *identifier) __result_use_check;
 int     mac_kext_check_unload(kauth_cred_t cred, const char *identifier) __result_use_check;
 int     mac_kext_check_query(kauth_cred_t cred) __result_use_check;
-__END_DECLS
 int     mac_skywalk_flow_check_connect(proc_t p, void *flow, const struct sockaddr *addr, int type, int protocol) __result_use_check;
 int     mac_skywalk_flow_check_listen(proc_t p, void *flow, const struct sockaddr *addr, int type, int protocol) __result_use_check;
 void    mac_vnode_notify_reclaim(vnode_t vp);
@@ -592,6 +593,8 @@ void    mac_vnode_notify_unlink(vfs_context_t ctx, struct vnode *dvp,
 
 void psem_label_associate(struct fileproc *fp, struct vnode *vp, struct vfs_context *ctx);
 void pshm_label_associate(struct fileproc *fp, struct vnode *vp, struct vfs_context *ctx);
+
+__END_DECLS
 
 #endif  /* CONFIG_MACF */
 

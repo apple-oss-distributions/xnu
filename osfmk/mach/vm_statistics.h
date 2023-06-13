@@ -284,12 +284,36 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
 #define VM_FLAGS_RETURN_4K_DATA_ADDR    0x00800000 /* Return 4K aligned address of target data */
 #define VM_FLAGS_ALIAS_MASK             0xFF000000
 #define VM_GET_FLAGS_ALIAS(flags, alias)                        \
-	        (alias) = ((flags) & VM_FLAGS_ALIAS_MASK) >> 24
+	        (alias) = (((flags) >> 24) & 0xff)
 #if !XNU_KERNEL_PRIVATE
 #define VM_SET_FLAGS_ALIAS(flags, alias)                        \
 	        (flags) = (((flags) & ~VM_FLAGS_ALIAS_MASK) |   \
 	        (((alias) & ~VM_FLAGS_ALIAS_MASK) << 24))
 #endif /* !XNU_KERNEL_PRIVATE */
+
+#if XNU_KERNEL_PRIVATE
+/*
+ * When making a new VM_FLAG_*:
+ * - add it to this mask
+ * - add a vmf_* field to vm_map_kernel_flags_t in the right spot
+ * - add a check in vm_map_kernel_flags_uflags()
+ */
+#define VM_FLAGS_ANY_MASK       (VM_FLAGS_FIXED |               \
+	                         VM_FLAGS_ANYWHERE |            \
+	                         VM_FLAGS_PURGABLE |            \
+	                         VM_FLAGS_4GB_CHUNK |           \
+	                         VM_FLAGS_RANDOM_ADDR |         \
+	                         VM_FLAGS_NO_CACHE |            \
+	                         VM_FLAGS_RESILIENT_CODESIGN |  \
+	                         VM_FLAGS_RESILIENT_MEDIA |     \
+	                         VM_FLAGS_PERMANENT |           \
+	                         VM_FLAGS_TPRO |                \
+	                         VM_FLAGS_OVERWRITE |           \
+	                         VM_FLAGS_SUPERPAGE_MASK |      \
+	                         VM_FLAGS_RETURN_DATA_ADDR |    \
+	                         VM_FLAGS_RETURN_4K_DATA_ADDR | \
+	                         VM_FLAGS_ALIAS_MASK)
+#endif /* XNU_KERNEL_PRIVATE */
 
 /* These are the flags that we accept from user-space */
 #define VM_FLAGS_USER_ALLOCATE  (VM_FLAGS_FIXED |               \
@@ -303,9 +327,11 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
 	                         VM_FLAGS_SUPERPAGE_MASK |      \
 	                         VM_FLAGS_TPRO |                \
 	                         VM_FLAGS_ALIAS_MASK)
+
 #define VM_FLAGS_USER_MAP       (VM_FLAGS_USER_ALLOCATE |       \
 	                         VM_FLAGS_RETURN_4K_DATA_ADDR | \
 	                         VM_FLAGS_RETURN_DATA_ADDR)
+
 #define VM_FLAGS_USER_REMAP     (VM_FLAGS_FIXED |               \
 	                         VM_FLAGS_ANYWHERE |            \
 	                         VM_FLAGS_RANDOM_ADDR |         \
@@ -357,6 +383,16 @@ enum virtual_memory_guard_exception_codes {
  * Range containing general purpose allocations from kalloc, etc that
  * contain pointers.
  *
+ * @const KMEM_RANGE_ID_SPRAYQTN
+ * The spray quarantine range contains allocations that have the following
+ * properties:
+ * - An attacker could control the size, lifetime and number of allocations
+ *   of this type (or from this callsite).
+ * - The pointer to the allocation is zeroed to ensure that it isn't left
+ *   dangling limiting the use of UaFs.
+ * - OOBs on the allocation is carefully considered and sufficiently
+ *   addressed.
+ *
  * @const KMEM_RANGE_ID_DATA
  * Range containing allocations that are bags of bytes and contain no
  * pointers.
@@ -371,87 +407,136 @@ __enum_decl(vm_map_range_id_t, uint32_t, {
 	KMEM_RANGE_ID_NONE,
 	KMEM_RANGE_ID_PTR_0,
 	KMEM_RANGE_ID_PTR_1,
+	KMEM_RANGE_ID_PTR_2,
+	KMEM_RANGE_ID_SPRAYQTN,
 	KMEM_RANGE_ID_DATA,
-	KMEM_RANGE_ID_MAX = KMEM_RANGE_ID_DATA,
+
+	KMEM_RANGE_ID_FIRST   = KMEM_RANGE_ID_PTR_0,
+	KMEM_RANGE_ID_NUM_PTR = KMEM_RANGE_ID_PTR_2,
+	KMEM_RANGE_ID_MAX     = KMEM_RANGE_ID_DATA,
+
 	UMEM_RANGE_ID_DEFAULT = 0,
 	UMEM_RANGE_ID_HEAP,
 	UMEM_RANGE_ID_MAX = UMEM_RANGE_ID_HEAP,
 
-#define KMEM_RANGE_COUNT    (KMEM_RANGE_ID_MAX + 1)
-#define UMEM_RANGE_COUNT    (UMEM_RANGE_ID_MAX + 1)
+#define KMEM_RANGE_COUNT        (KMEM_RANGE_ID_MAX + 1)
+#define UMEM_RANGE_COUNT        (UMEM_RANGE_ID_MAX + 1)
 });
 
-typedef vm_map_range_id_t   kmem_range_id_t;
+typedef vm_map_range_id_t       kmem_range_id_t;
 
-#define kmem_log2down(mask)   (31 - __builtin_clz(mask))
-#define KMEM_RANGE_BITS kmem_log2down(KMEM_RANGE_ID_MAX * 2)
+#define kmem_log2down(mask)     (31 - __builtin_clz(mask))
+#define KMEM_RANGE_MAX          (UMEM_RANGE_ID_MAX < KMEM_RANGE_ID_MAX \
+	                        ? KMEM_RANGE_ID_MAX : UMEM_RANGE_ID_MAX)
+#define KMEM_RANGE_BITS         kmem_log2down(2 * KMEM_RANGE_MAX - 1)
 
-#if CONFIG_MAP_RANGES
-/*
- * These should only be used for the kernel_map in contexts which
- * are known to be allocating/mapping in KMEM_RANGE_ID_DATA. They should not
- * be used when other ranges may be the target.
- */
-#define VM_MAP_RANGE_ID(map, tag) \
-	((map == kernel_map) ? KMEM_RANGE_ID_DATA : \
-	vm_map_get_user_range_id(map, tag))
+typedef union {
+	struct {
+		unsigned long long
+		/*
+		 * VM_FLAG_* flags
+		 */
+		    vmf_fixed:1,
+		    vmf_purgeable:1,
+		    vmf_4gb_chunk:1,
+		    vmf_random_addr:1,
+		    vmf_no_cache:1,
+		    vmf_resilient_codesign:1,
+		    vmf_resilient_media:1,
+		    vmf_permanent:1,
 
-#define VM_MAP_REMAP_RANGE_ID(src_map, dst_map, addr, len) \
-	(dst_map == kernel_map ? KMEM_RANGE_ID_DATA : \
-	vm_map_get_user_range_id(src_map, addr, len))
-#else
-#define VM_MAP_RANGE_ID(map, tag) (KMEM_RANGE_ID_DATA)
-#define VM_MAP_REMAP_RANGE_ID(src_map, dst_map, addr, len) (KMEM_RANGE_ID_DATA)
-#endif /* CONFIG_MAP_RANGES */
+		    __unused_bit_8:1,
+		    __unused_bit_9:1,
+		    __unused_bit_10:1,
+		    __unused_bit_11:1,
+		    vmf_tpro:1,
+		    __unused_bit_13:1,
+		    vmf_overwrite:1,
+		    __unused_bit_15:1,
 
-typedef struct {
-	unsigned int
-	    vmkf_permanent:1,           /* mapping can NEVER be unmapped */
-	    vmkf_already:1,             /* OK if same mapping already exists */
-	    vmkf_beyond_max:1,          /* map beyond the map's max offset */
-	    vmkf_no_pmap_check:1,       /* do not check that pmap is empty */
-	    vmkf_map_jit:1,             /* mark entry as JIT region */
-	    vmkf_iokit_acct:1,          /* IOKit accounting */
-	    vmkf_keep_map_locked:1,     /* keep map locked when returning from vm_map_enter() */
-	    vmkf_fourk:1,               /* use fourk pager */
-	    vmkf_overwrite_immutable:1, /* can overwrite immutable mappings */
-	    vmkf_remap_prot_copy:1,     /* vm_remap for VM_PROT_COPY */
-	    vmkf_cs_enforcement_override:1,     /* override CS_ENFORCEMENT */
-	    vmkf_cs_enforcement:1,      /* new value for CS_ENFORCEMENT */
-	    vmkf_nested_pmap:1,         /* use a nested pmap */
-	    vmkf_no_copy_on_read:1,     /* do not use copy_on_read */
-	    vmkf_copy_single_object:1,  /* vm_map_copy only 1 VM object */
-	    vmkf_copy_pageable:1,       /* vm_map_copy with pageable entries */
-	    vmkf_copy_same_map:1,       /* vm_map_copy to remap in original map */
-	    vmkf_translated_allow_execute:1,    /* allow execute in translated processes */
+		    vmf_superpage_size:3,
+		    __unused_bit_19:1,
+		    vmf_return_data_addr:1,
+		    __unused_bit_21:1,
+		    __unused_bit_22:1,
+		    vmf_return_4k_data_addr:1,
+
+		/*
+		 * VM tag (user or kernel)
+		 *
+		 * User tags are limited to 8 bits,
+		 * kernel tags can use up to 12 bits
+		 * with -zt or similar features.
+		 */
+		    vm_tag : 12, /* same as VME_ALIAS_BITS */
+
+		/*
+		 * General kernel flags
+		 */
+		    vmkf_already:1,             /* OK if same mapping already exists */
+		    vmkf_beyond_max:1,          /* map beyond the map's max offset */
+		    vmkf_no_pmap_check:1,       /* do not check that pmap is empty */
+		    vmkf_map_jit:1,             /* mark entry as JIT region */
+		    vmkf_iokit_acct:1,          /* IOKit accounting */
+		    vmkf_keep_map_locked:1,     /* keep map locked when returning from vm_map_enter() */
+		    vmkf_fourk:1,               /* use fourk pager */
+		    vmkf_overwrite_immutable:1, /* can overwrite immutable mappings */
+		    vmkf_remap_prot_copy:1,     /* vm_remap for VM_PROT_COPY */
+		    vmkf_cs_enforcement_override:1,     /* override CS_ENFORCEMENT */
+		    vmkf_cs_enforcement:1,      /* new value for CS_ENFORCEMENT */
+		    vmkf_nested_pmap:1,         /* use a nested pmap */
+		    vmkf_no_copy_on_read:1,     /* do not use copy_on_read */
+		    vmkf_copy_single_object:1,  /* vm_map_copy only 1 VM object */
+		    vmkf_copy_pageable:1,       /* vm_map_copy with pageable entries */
+		    vmkf_copy_same_map:1,       /* vm_map_copy to remap in original map */
+		    vmkf_translated_allow_execute:1,    /* allow execute in translated processes */
+
+		/*
+		 * Submap creation, altering vm_map_enter() only
+		 */
+		    vmkf_submap:1,              /* mapping a VM submap */
+		    vmkf_submap_atomic:1,       /* keep entry atomic (no splitting/coalescing) */
+		    vmkf_submap_adjust:1,       /* the submap needs to be adjusted */
+
+		/*
+		 * Flags altering the behavior of vm_map_locate_space()
+		 */
+		    vmkf_32bit_map_va:1,        /* allocate in low 32-bits range */
+		    vmkf_guard_before:1,        /* guard page before the mapping */
+		    vmkf_last_free:1,           /* find space from the end */
+		    vmkf_range_id:KMEM_RANGE_BITS,      /* kmem range to allocate in */
+
+		    __vmkf_unused:2;
+	};
 
 	/*
-	 * Submap creation, altering vm_map_enter() only
+	 * do not access these directly,
+	 * use vm_map_kernel_flags_check_vmflags*()
 	 */
-	    vmkf_submap:1,              /* mapping a VM submap */
-	    vmkf_submap_atomic:1,       /* keep entry atomic (no splitting/coalescing) */
-	    vmkf_submap_adjust:1,       /* the submap needs to be adjusted */
-
-	/*
-	 * Flags altering the behavior of vm_map_locate_space()
-	 */
-	    vmkf_32bit_map_va:1,        /* allocate in low 32-bits range */
-	    vmkf_guard_before:1,        /* guard page before the mapping */
-	    vmkf_last_free:1,           /* find space from the end */
-	    vmkf_random_address:1,      /* pick a random address */
-	    vmkf_range_id:KMEM_RANGE_BITS,      /* kmem range to allocate in */
-
-	    __vmkf_unused:5;
+	uint32_t __vm_flags : 24;
 } vm_map_kernel_flags_t;
 
+/*
+ * using this means that vmf_* flags can't be used
+ * until vm_map_kernel_flags_set_vmflags() is set,
+ * or some manual careful init is done.
+ *
+ * Prefer VM_MAP_KERNEL_FLAGS_(FIXED,ANYWHERE) instead.
+ */
 #define VM_MAP_KERNEL_FLAGS_NONE \
 	(vm_map_kernel_flags_t){ }
 
-#define VM_MAP_KERNEL_FLAGS_PERMANENT \
-	(vm_map_kernel_flags_t){ .vmkf_permanent = 1 }
+#define VM_MAP_KERNEL_FLAGS_FIXED(...) \
+	(vm_map_kernel_flags_t){ .vmf_fixed = true, __VA_ARGS__ }
 
-#define VM_MAP_KERNEL_FLAGS_DATA \
-	(vm_map_kernel_flags_t){ .vmkf_range_id = KMEM_RANGE_ID_DATA }
+#define VM_MAP_KERNEL_FLAGS_ANYWHERE(...) \
+	(vm_map_kernel_flags_t){ .vmf_fixed = false, __VA_ARGS__ }
+
+#define VM_MAP_KERNEL_FLAGS_FIXED_PERMANENT(...) \
+	VM_MAP_KERNEL_FLAGS_FIXED(.vmf_permanent = true, __VA_ARGS__)
+
+#define VM_MAP_KERNEL_FLAGS_DATA_ANYWHERE(...) \
+	VM_MAP_KERNEL_FLAGS_ANYWHERE(.vmkf_range_id = KMEM_RANGE_ID_DATA, __VA_ARGS__)
 
 typedef struct {
 	unsigned int

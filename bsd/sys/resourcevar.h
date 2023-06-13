@@ -133,6 +133,8 @@ int proc_limitgetcur_nofile(struct proc *p);
 
 void gather_rusage_info(struct proc *p, rusage_info_current *ru, int flavor);
 int proc_get_rusage(struct proc *proc, int flavor, user_addr_t buffer, int is_zombie);
+int iopolicysys_vfs_materialize_dataless_files(struct proc *p, int cmd, int scope,
+    int policy, struct _iopol_param_t *iop_param);
 
 #pragma GCC visibility pop
 #endif /* XNU_KERNEL_PRIVATE */

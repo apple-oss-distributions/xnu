@@ -613,7 +613,14 @@ pset_init(
 		SCHED(pset_init)(pset);
 		SCHED(rt_init)(pset);
 	}
-	pset_array[pset->pset_id] = pset;
+
+	/*
+	 * Because the pset_node_lock is not taken by every client of the pset_map,
+	 * we need to make sure that the initialized pset contents are visible to any
+	 * client that loads a non-NULL value from pset_array.
+	 */
+	os_atomic_store(&pset_array[pset->pset_id], pset, release);
+
 	lck_spin_lock(&pset_node_lock);
 	bit_set(node->pset_map, pset->pset_id);
 	pset->node = node;

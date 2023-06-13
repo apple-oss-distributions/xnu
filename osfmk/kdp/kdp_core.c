@@ -53,6 +53,7 @@
 #include <mach/vm_types.h>
 #include <kdp/core_exclude.h>
 #include <kdp/kdp_core.h>
+#include <kdp/core_notes.h>
 
 #ifdef CONFIG_KDP_INTERACTIVE_DEBUGGING
 
@@ -79,11 +80,13 @@
 #include <pexpert/pexpert.h>
 #include <os/atomic_private.h>
 
+
 #if defined(__x86_64__)
 #include <i386/pmap_internal.h>
 #include <kdp/ml/i386/kdp_x86_common.h>
 #include <kern/debug.h>
 #endif /* defined(__x86_64__) */
+
 
 kern_return_t kdp_core_polled_io_polled_file_available(IOCoreFileAccessCallback access_data, void *access_context, void *recipient_context);
 kern_return_t kdp_core_polled_io_polled_file_unavailable(void);
@@ -98,6 +101,9 @@ static int kern_dump_save_seg_descriptions(void *refcon, core_save_segment_descr
 static int kern_dump_save_thread_state(void *refcon, void *buf, core_save_thread_state_cb callback, void *context);
 static int kern_dump_save_sw_vers_detail(void *refcon, core_save_sw_vers_detail_cb callback, void *context);
 static int kern_dump_save_segment_data(void *refcon, core_save_segment_data_cb callback, void *context);
+static kern_return_t kern_dump_save_note_summary(void *refcon, core_save_note_summary_cb callback, void *context);
+static kern_return_t kern_dump_save_note_descriptions(void *refcon, core_save_note_descriptions_cb callback, void *context);
+static kern_return_t kern_dump_save_note_data(void *refcon, core_save_note_data_cb callback, void *context);
 
 static int
 kern_dump_pmap_traverse_preflight_callback(vm_map_offset_t start,
@@ -1796,9 +1802,56 @@ kdp_core_init(void)
 	core_config.kcc_coredump_save_thread_state = kern_dump_save_thread_state;
 	core_config.kcc_coredump_save_sw_vers_detail = kern_dump_save_sw_vers_detail;
 	core_config.kcc_coredump_save_segment_data = kern_dump_save_segment_data;
+	core_config.kcc_coredump_save_note_summary = kern_dump_save_note_summary;
+	core_config.kcc_coredump_save_note_descriptions = kern_dump_save_note_descriptions;
+	core_config.kcc_coredump_save_note_data = kern_dump_save_note_data;
 
 	kr = kern_register_xnu_coredump_helper(&core_config);
 	assert(KERN_SUCCESS == kr);
+}
+
+/*
+ * Additional LC_NOTES added to the core.
+ */
+
+static kern_return_t
+kern_dump_save_note_summary(void *refcon __unused, core_save_note_summary_cb callback, void *context)
+{
+	int count = 1;
+	size_t size = sizeof(addrable_bits_note_t);
+
+
+	return callback(count, size, context);
+}
+
+static kern_return_t
+kern_dump_save_note_descriptions(void *refcon __unused, core_save_note_descriptions_cb callback, void *context)
+{
+	int max_ret = KERN_SUCCESS;
+	int ret;
+
+	max_ret = ret = callback(ADDRABLE_BITS_DATA_OWNER, sizeof(addrable_bits_note_t), context);
+
+
+	return max_ret;
+}
+
+static kern_return_t
+kern_dump_save_note_data(void *refcon __unused, core_save_note_data_cb callback, void *context)
+{
+	int max_ret = KERN_SUCCESS;
+	int ret;
+
+	addrable_bits_note_t note = {
+		.version = ADDRABLE_BITS_VER,
+		.addressing_bits = pmap_kernel_va_bits(),
+		.unused = 0
+	};
+
+	max_ret = ret = callback(&note, sizeof(addrable_bits_note_t), context);
+
+
+	return max_ret;
 }
 
 #else

@@ -7818,12 +7818,6 @@ IOPMrootDomain::adjustPowerState( bool sleepASAP )
 		if (AOT_STATE != getPowerState()) {
 			return;
 		}
-		if (kIOPMDriverAssertionLevelOn == getPMAssertionLevel(kIOPMDriverAssertionCPUBit)) {
-			// Don't try to force sleep during AOT while IOMobileFramebuffer is holding a power assertion.
-			// Doing so will result in the sleep being cancelled anyway,
-			// but this check avoids unnecessary thrashing in the power state engine.
-			return;
-		}
 		WAKEEVENT_LOCK();
 		exitNow = aotShouldExit(true, false);
 		if (!exitNow
@@ -7842,6 +7836,12 @@ IOPMrootDomain::adjustPowerState( bool sleepASAP )
 		} else {
 			_aotReadyToFullWake = true;
 			if (!_aotTimerScheduled) {
+				if (kIOPMDriverAssertionLevelOn == getPMAssertionLevel(kIOPMDriverAssertionCPUBit)) {
+					// Don't try to force sleep during AOT while IOMobileFramebuffer is holding a power assertion.
+					// Doing so will result in the sleep being cancelled anyway,
+					// but this check avoids unnecessary thrashing in the power state engine.
+					return;
+				}
 				privateSleepSystem(kIOPMSleepReasonSoftware);
 			}
 		}
@@ -8814,7 +8814,7 @@ IOPMrootDomain::evaluatePolicy( int stimulus, uint32_t arg )
 				changePowerStateWithTagToPriv(getRUN_STATE(), kCPSReasonEvaluatePolicy);
 				if (idleSleepEnabled) {
 #if defined(XNU_TARGET_OS_OSX) && !DISPLAY_WRANGLER_PRESENT
-					if (!extraSleepDelay && !idleSleepTimerPending) {
+					if (!extraSleepDelay && !idleSleepTimerPending && !gNoIdleFlag) {
 						sleepASAP = true;
 					}
 #else
@@ -8822,7 +8822,7 @@ IOPMrootDomain::evaluatePolicy( int stimulus, uint32_t arg )
 					startIdleSleepTimer(idleMilliSeconds);
 #endif
 				}
-			} else if (!extraSleepDelay && !idleSleepTimerPending && !systemDarkWake) {
+			} else if (!extraSleepDelay && !idleSleepTimerPending && !systemDarkWake && !gNoIdleFlag) {
 				sleepASAP = true;
 			}
 		}

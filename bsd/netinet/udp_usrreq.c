@@ -151,6 +151,8 @@ static int blackhole = 0;
 SYSCTL_INT(_net_inet_udp, OID_AUTO, blackhole, CTLFLAG_RW | CTLFLAG_LOCKED,
     &blackhole, 0, "Do not send port unreachables for refused connects");
 
+static KALLOC_TYPE_DEFINE(inpcbzone, struct inpcb, NET_KT_DEFAULT);
+
 struct inpcbhead udb;           /* from udp_var.h */
 #define udb6    udb  /* for KAME src sync over BSD*'s */
 struct inpcbinfo udbinfo;
@@ -208,6 +210,7 @@ int udp_output(struct inpcb *, struct mbuf *, struct sockaddr *,
     struct mbuf *, struct proc *);
 static void ip_2_ip6_hdr(struct ip6_hdr *ip6, struct ip *ip);
 static void udp_gc(struct inpcbinfo *);
+static int udp_defunct(struct socket *);
 
 struct pr_usrreqs udp_usrreqs = {
 	.pru_abort =            udp_abort,
@@ -226,6 +229,7 @@ struct pr_usrreqs udp_usrreqs = {
 	.pru_sosend =           sosend,
 	.pru_soreceive =        soreceive,
 	.pru_soreceive_list =   soreceive_list,
+	.pru_defunct =          udp_defunct,
 };
 
 void
@@ -252,7 +256,7 @@ udp_init(struct protosw *pp, struct domain *dp)
 	    &udbinfo.ipi_hashmask);
 	udbinfo.ipi_porthashbase = hashinit(UDBHASHSIZE, M_PCB,
 	    &udbinfo.ipi_porthashmask);
-	udbinfo.ipi_zone = zone_create("udpcb", sizeof(struct inpcb), ZC_NONE);
+	udbinfo.ipi_zone.zov_kt_heap = inpcbzone;
 
 	pcbinfo = &udbinfo;
 	/*
@@ -3072,4 +3076,31 @@ udp_fill_keepalive_offload_frames(ifnet_t ifp,
 	}
 	lck_rw_done(&udbinfo.ipi_lock);
 	*used_frames_count = frame_index;
+}
+
+int
+udp_defunct(struct socket *so)
+{
+	struct ip_moptions *imo;
+	struct inpcb *inp;
+
+	inp = sotoinpcb(so);
+	if (inp == NULL) {
+		return EINVAL;
+	}
+
+	imo = inp->inp_moptions;
+	if (imo != NULL) {
+		struct proc *p = current_proc();
+
+		SODEFUNCTLOG("%s[%d, %s]: defuncting so 0x%llu drop multicast memberships",
+		    __func__, proc_pid(p), proc_best_name(p),
+		    so->so_gencnt);
+
+		inp->inp_moptions = NULL;
+
+		IMO_REMREF(imo);
+	}
+
+	return 0;
 }

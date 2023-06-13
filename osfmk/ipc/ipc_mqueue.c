@@ -173,11 +173,10 @@ ipc_mqueue_add_locked(
 	while ((kmsg = ipc_kmsg_queue_first(kmsgq)) != IKM_NULL) {
 		thread_t th;
 		mach_msg_size_t msize, asize;
-		spl_t th_spl;
 
 		th = waitq_wakeup64_identify_locked(wqset, IPC_MQUEUE_RECEIVE,
-		    THREAD_AWAKENED, WAITQ_KEEP_LOCKED, &th_spl);
-		/* port and pset still locked, thread locked */
+		    THREAD_AWAKENED, WAITQ_KEEP_LOCKED);
+		/* port and pset still locked, thread not runnable */
 
 		if (th == THREAD_NULL) {
 			/*
@@ -189,6 +188,13 @@ ipc_mqueue_add_locked(
 			waitq_link_prepost_locked(&port->ip_waitq, wqset);
 			break;
 		}
+
+		/*
+		 * Because we hold the thread off the runqueue at this point,
+		 * it's safe to modify ith_ fields on the thread, as
+		 * until it is resumed, it must be off core or in between
+		 * the assert wait and returning from the continuation.
+		 */
 
 		/*
 		 * If the receiver waited with a facility not directly
@@ -208,8 +214,9 @@ ipc_mqueue_add_locked(
 				    th->ith_option,
 				    th);
 			}
-			thread_unlock(th);
-			splx(th_spl);
+
+			waitq_resume_identified_thread(wqset, th,
+			    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
 			continue;
 		}
 
@@ -236,8 +243,10 @@ ipc_mqueue_add_locked(
 				th->ith_receiver_name = port_mqueue->imq_receiver_name;
 				th->ith_kmsg = IKM_NULL;
 				th->ith_seqno = 0;
-				thread_unlock(th);
-				splx(th_spl);
+
+				waitq_resume_identified_thread(wqset, th,
+				    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
+
 				continue; /* find another thread */
 			}
 		} else {
@@ -246,18 +255,22 @@ ipc_mqueue_add_locked(
 
 		/*
 		 * This thread is going to take this message,
-		 * so give it to him.
+		 * so give it the message.
 		 */
 		ipc_kmsg_rmqueue(kmsgq, kmsg);
+
 #if MACH_FLIPC
 		mach_node_t  node = kmsg->ikm_node;
 #endif
+
 		ipc_mqueue_release_msgcount(port_mqueue);
 
 		th->ith_kmsg = kmsg;
 		th->ith_seqno = port_mqueue->imq_seqno++;
-		thread_unlock(th);
-		splx(th_spl);
+
+		waitq_resume_identified_thread(wqset, th,
+		    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
+
 #if MACH_FLIPC
 		if (MACH_NODE_VALID(node) && FPORT_VALID(port_mqueue->imq_fport)) {
 			flipc_msg_ack(node, port_mqueue, TRUE);
@@ -609,14 +622,12 @@ ipc_mqueue_post(
 	}
 
 	for (;;) {
-		spl_t th_spl;
 		thread_t receiver;
 		mach_msg_size_t msize, asize;
 
 		receiver = waitq_wakeup64_identify_locked(waitq,
-		    IPC_MQUEUE_RECEIVE, THREAD_AWAKENED,
-		    WAITQ_KEEP_LOCKED, &th_spl);
-		/* waitq still locked, thread locked */
+		    IPC_MQUEUE_RECEIVE, THREAD_AWAKENED, WAITQ_KEEP_LOCKED);
+		/* waitq still locked, thread not runnable */
 
 		if (receiver == THREAD_NULL) {
 			/*
@@ -672,8 +683,8 @@ ipc_mqueue_post(
 		if (receiver->ith_state == MACH_PEEK_IN_PROGRESS && mqueue->imq_msgcount > 0) {
 			ipc_kmsg_enqueue_qos(&mqueue->imq_messages, kmsg);
 			ipc_mqueue_peek_on_thread_locked(mqueue, receiver->ith_option, receiver);
-			thread_unlock(receiver);
-			splx(th_spl);
+			waitq_resume_identified_thread(waitq, receiver,
+			    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
 			break; /* Message was posted, so break out of loop */
 		}
 
@@ -684,8 +695,9 @@ ipc_mqueue_post(
 		 * another thread that can.
 		 */
 		if (receiver->ith_state != MACH_RCV_IN_PROGRESS) {
-			thread_unlock(receiver);
-			splx(th_spl);
+			waitq_resume_identified_thread(waitq, receiver,
+			    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
+
 			continue;
 		}
 
@@ -719,8 +731,8 @@ ipc_mqueue_post(
 #if MACH_FLIPC
 			mach_node_t node = kmsg->ikm_node;
 #endif
-			thread_unlock(receiver);
-			splx(th_spl);
+			waitq_resume_identified_thread(waitq, receiver,
+			    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
 
 			/* we didn't need our reserved spot in the queue */
 			ipc_mqueue_release_msgcount(mqueue);
@@ -741,8 +753,9 @@ ipc_mqueue_post(
 		receiver->ith_receiver_name = mqueue->imq_receiver_name;
 		receiver->ith_kmsg = IKM_NULL;
 		receiver->ith_seqno = 0;
-		thread_unlock(receiver);
-		splx(th_spl);
+
+		waitq_resume_identified_thread(waitq, receiver,
+		    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
 	}
 
 out_unlock:
@@ -807,11 +820,11 @@ ipc_mqueue_receive_results(wait_result_t saved_wait_result)
 			return;
 
 		default:
-			panic("ipc_mqueue_receive_results: strange ith_state");
+			panic("ipc_mqueue_receive_results: strange ith_state %d", self->ith_state);
 		}
 
 	default:
-		panic("ipc_mqueue_receive_results: strange wait_result");
+		panic("ipc_mqueue_receive_results: strange wait_result %d", saved_wait_result);
 	}
 }
 
@@ -1049,6 +1062,12 @@ ipc_mqueue_receive_on_thread_and_unlock(
 	}
 
 	io_unlock(object);
+
+	/*
+	 * After this point, a waiting thread could be found by the wakeup
+	 * identify path, and the other side now owns the ith_ fields until
+	 * this thread blocks and resumes in the continuation
+	 */
 
 	/* Check if its a port mqueue and if it needs to call turnstile_update_inheritor_complete */
 	if (rcv_turnstile != TURNSTILE_NULL) {

@@ -196,8 +196,6 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	vm_map_size_t           user_size;
 	vm_object_offset_t      pageoff;
 	vm_object_offset_t      file_pos;
-	int                     alloc_flags = 0;
-	vm_tag_t                tag = VM_KERN_MEMORY_NONE;
 	vm_map_kernel_flags_t   vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 	boolean_t               docow;
 	vm_prot_t               maxprot;
@@ -262,6 +260,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	    MAP_HASSEMAPHORE |
 	    MAP_NOCACHE |
 	    MAP_JIT |
+	    MAP_TPRO |
 	    MAP_FILE |
 	    MAP_ANON |
 	    MAP_RESILIENT_CODESIGN |
@@ -335,7 +334,8 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		    (flags & MAP_SHARED) ||
 		    !(flags & MAP_ANON) ||
 		    (flags & MAP_RESILIENT_CODESIGN) ||
-		    (flags & MAP_RESILIENT_MEDIA)) {
+		    (flags & MAP_RESILIENT_MEDIA) ||
+		    (flags & MAP_TPRO)) {
 			return EINVAL;
 		}
 	}
@@ -343,7 +343,8 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	if ((flags & MAP_RESILIENT_CODESIGN) ||
 	    (flags & MAP_RESILIENT_MEDIA)) {
 		if ((flags & MAP_ANON) ||
-		    (flags & MAP_JIT)) {
+		    (flags & MAP_JIT) ||
+		    (flags & MAP_TPRO)) {
 			return EINVAL;
 		}
 	}
@@ -374,6 +375,14 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		if ((flags & MAP_ANON) ||
 		    (flags & MAP_SHARED)) {
 			return EINVAL;
+		}
+	}
+	if (flags & MAP_TPRO) {
+		if ((prot & VM_PROT_EXECUTE) ||
+		    !(prot & VM_PROT_WRITE) ||
+		    (flags & MAP_SHARED) ||
+		    !(flags & MAP_ANON)) {
+			return EPERM;
 		}
 	}
 
@@ -410,8 +419,6 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 
 #endif
 
-	alloc_flags = 0;
-
 #if CONFIG_MAP_RANGES
 	/* default to placing mappings in the heap range. */
 	vmk_flags.vmkf_range_id = UMEM_RANGE_ID_HEAP;
@@ -438,17 +445,38 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 			 * Use "fd" to pass (some) Mach VM allocation flags,
 			 * (see the VM_FLAGS_* definitions).
 			 */
-			alloc_flags = fd & (VM_FLAGS_ALIAS_MASK |
+			int vm_flags = fd & (VM_FLAGS_ALIAS_MASK |
 			    VM_FLAGS_SUPERPAGE_MASK |
 			    VM_FLAGS_PURGABLE |
 			    VM_FLAGS_4GB_CHUNK);
-			if (alloc_flags != fd) {
+
+			if (vm_flags != fd) {
 				/* reject if there are any extra flags */
 				return EINVAL;
 			}
-			VM_GET_FLAGS_ALIAS(alloc_flags, tag);
-			alloc_flags &= ~VM_FLAGS_ALIAS_MASK;
-			vmk_flags.vmkf_range_id = VM_MAP_RANGE_ID(user_map, tag);
+
+			/*
+			 * vm_map_kernel_flags_set_vmflags() will assume that
+			 * the full set of VM flags are passed, which is
+			 * problematic for FIXED/ANYWHERE.
+			 *
+			 * The block handling MAP_FIXED below will do the same
+			 * thing again which is fine because it's idempotent.
+			 */
+			if (flags & MAP_FIXED) {
+				vm_flags |= VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE;
+			} else {
+				vm_flags |= VM_FLAGS_ANYWHERE;
+			}
+			vm_map_kernel_flags_set_vmflags(&vmk_flags, vm_flags);
+			if (vm_flags & VM_FLAGS_ALIAS_MASK) {
+				/*
+				 * if the client specified a tag,
+				 * let the system policy apply.
+				 */
+				vmk_flags.vmkf_range_id = UMEM_RANGE_ID_DEFAULT;
+				vm_map_kernel_flags_update_range_id(&vmk_flags, user_map);
+			}
 		}
 
 		handle = NULL;
@@ -635,7 +663,6 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	}
 
 	if ((flags & MAP_FIXED) == 0) {
-		alloc_flags |= VM_FLAGS_ANYWHERE;
 		user_addr = vm_map_round_page(user_addr,
 		    vm_map_page_mask(user_map));
 	} else {
@@ -658,15 +685,20 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		 * has to deallocate the existing mappings and establish the
 		 * new ones atomically.
 		 */
-		alloc_flags |= VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE;
+		vmk_flags.vmf_fixed = true;
+		vmk_flags.vmf_overwrite = true;
 	}
 
 	if (flags & MAP_NOCACHE) {
-		alloc_flags |= VM_FLAGS_NO_CACHE;
+		vmk_flags.vmf_no_cache = true;
 	}
 
 	if (flags & MAP_JIT) {
 		vmk_flags.vmkf_map_jit = TRUE;
+	}
+
+	if (flags & MAP_TPRO) {
+		vmk_flags.vmf_tpro = true;
 	}
 
 #if CONFIG_ROSETTA
@@ -683,10 +715,10 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 #endif
 
 	if (flags & MAP_RESILIENT_CODESIGN) {
-		alloc_flags |= VM_FLAGS_RESILIENT_CODESIGN;
+		vmk_flags.vmf_resilient_codesign = true;
 	}
 	if (flags & MAP_RESILIENT_MEDIA) {
-		alloc_flags |= VM_FLAGS_RESILIENT_MEDIA;
+		vmk_flags.vmf_resilient_media = true;
 	}
 
 #if XNU_TARGET_OS_OSX
@@ -725,8 +757,7 @@ map_anon_retry:
 
 		result = vm_map_enter_mem_object(user_map,
 		    &user_addr, user_size,
-		    0, alloc_flags, vmk_flags,
-		    tag,
+		    0, vmk_flags,
 		    IPC_PORT_NULL, 0, FALSE,
 		    prot, maxprot,
 		    (flags & MAP_SHARED) ?
@@ -847,8 +878,7 @@ map_file_retry:
 
 		result = vm_map_enter_mem_object_control(user_map,
 		    &user_addr, user_size,
-		    0, alloc_flags, vmk_flags,
-		    tag,
+		    0, vmk_flags,
 		    control, file_pos,
 		    docow, prot, maxprot,
 		    (flags & MAP_SHARED) ?
@@ -1481,7 +1511,7 @@ munlock(__unused proc_t p, struct munlock_args *uap, __unused int32_t *retval)
 		return EINVAL;
 	}
 	/* JMM - need to remove all wirings by spec - this just removes one */
-	result = mach_vm_wire_kernel(host_priv_self(), user_map, addr, size, VM_PROT_NONE, VM_KERN_MEMORY_MLOCK);
+	result = mach_vm_wire_kernel(user_map, addr, size, VM_PROT_NONE, VM_KERN_MEMORY_MLOCK);
 	return result == KERN_SUCCESS ? 0 : ENOMEM;
 }
 
@@ -1596,7 +1626,8 @@ mremap_encrypted(__unused struct proc *p, struct mremap_encrypted_args *uap, __u
 	crypt_file_data_t crypt_data = {
 		.filename = vpath,
 		.cputype = cputype,
-		.cpusubtype = cpusubtype
+		.cpusubtype = cpusubtype,
+		.origin = CRYPT_ORIGIN_LIBRARY_LOAD,
 	};
 	result = text_crypter_create(&crypt_info, cryptname, (void*)&crypt_data);
 #if VM_MAP_DEBUG_APPLE_PROTECT

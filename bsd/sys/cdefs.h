@@ -1085,10 +1085,24 @@
 #define __improbable(x) __builtin_expect(!!(x), 0)
 #endif /* !defined(__probable) && !defined(__improbable) */
 
-#define __container_of(ptr, type, field) __extension__({ \
-	        const __typeof__(((type *)NULL)->field) *__ptr = (ptr); \
-	        (type *)((uintptr_t)__ptr - offsetof(type, field)); \
-	})
+#define __container_of(ptr, type_t, field) __extension__({ \
+	const __typeof__(((type_t *)NULL)->field) *__ptr = (ptr);               \
+	uintptr_t __result = (uintptr_t)__ptr - offsetof(type_t, field);        \
+	if (__ptr) __builtin_assume(__result != 0);                             \
+	__unsafe_forge_single(type_t *, __result);                              \
+})
+
+#define __container_of_safe(ptr, type_t, field) __extension__({ \
+	const __typeof__(((type_t *)NULL)->field) *__ptr_or_null = (ptr);       \
+	__ptr_or_null ? __container_of(__ptr_or_null, type_t, field) : NULL;    \
+})
+
+/*
+ * This forces the optimizer to materialize the specified variable value,
+ * and prevents any reordering of operations done to it.
+ */
+#define __compiler_materialize_and_prevent_reordering_on(var) \
+	__asm__ ("" : "=r"(var) : "0"(var))
 
 #endif /* KERNEL || PRIVATE */
 

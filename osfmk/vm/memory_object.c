@@ -796,7 +796,7 @@ vm_object_update(
 		fault_info.hi_offset = copy_size;
 		fault_info.stealth = TRUE;
 		assert(fault_info.cs_bypass == FALSE);
-		assert(fault_info.pmap_cs_associated == FALSE);
+		assert(fault_info.csm_associated == FALSE);
 
 		vm_object_paging_begin(copy_object);
 
@@ -1730,6 +1730,27 @@ memory_object_mark_eligible_for_secluded(
 	vm_object_unlock(object);
 }
 #endif /* CONFIG_SECLUDED_MEMORY */
+
+void
+memory_object_mark_for_realtime(
+	memory_object_control_t control,
+	bool                    for_realtime)
+{
+	vm_object_t             object;
+
+	if (control == NULL) {
+		return;
+	}
+	object = memory_object_control_to_vm_object(control);
+
+	if (object == VM_OBJECT_NULL) {
+		return;
+	}
+
+	vm_object_lock(object);
+	object->for_realtime = for_realtime;
+	vm_object_unlock(object);
+}
 
 kern_return_t
 memory_object_pages_resident(

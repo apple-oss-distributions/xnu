@@ -387,7 +387,7 @@ shmat(struct proc *p, struct shmat_args *uap, user_addr_t *retval)
 	vm_prot_t               prot;
 	kern_return_t           rv;
 	int                     shmat_ret;
-	int                     vm_flags;
+	vm_map_kernel_flags_t   vmk_flags;
 
 	shmat_ret = 0;
 
@@ -479,9 +479,9 @@ shmat(struct proc *p, struct shmat_args *uap, user_addr_t *retval)
 	}
 
 	if (flags & MAP_FIXED) {
-		vm_flags = VM_FLAGS_FIXED;
+		vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 	} else {
-		vm_flags = VM_FLAGS_ANYWHERE;
+		vmk_flags = VM_MAP_KERNEL_FLAGS_ANYWHERE();
 	}
 
 	mapped_size = 0;
@@ -491,9 +491,7 @@ shmat(struct proc *p, struct shmat_args *uap, user_addr_t *retval)
 	    &attach_va,
 	    map_size,
 	    0,
-	    vm_flags,
-	    VM_MAP_KERNEL_FLAGS_NONE,
-	    VM_KERN_MEMORY_NONE,
+	    vmk_flags,
 	    IPC_PORT_NULL,
 	    0,
 	    FALSE,
@@ -528,9 +526,7 @@ shmat(struct proc *p, struct shmat_args *uap, user_addr_t *retval)
 			&attach_va,             /* attach address */
 			chunk_size,             /* size to map */
 			(mach_vm_offset_t)0,    /* alignment mask */
-			VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-			VM_MAP_KERNEL_FLAGS_NONE,
-			VM_KERN_MEMORY_NONE,
+			VM_MAP_KERNEL_FLAGS_FIXED(.vmf_overwrite = true),
 			shm_handle->shm_object,
 			(mach_vm_offset_t)0,
 			FALSE,

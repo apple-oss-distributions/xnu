@@ -16,6 +16,13 @@ extern void pe_arm_init_debug(void *args);
 extern void console_write_unbuffered(char);
 #endif
 int serial_init(void);
+
+/**
+ * Forbid or allow transmission over each serial until they receive data.
+ */
+void
+serial_set_on_demand(bool);
+
 #if HIBERNATION
 void serial_hibernation_init(void);
 #endif /* HIBERNATION */

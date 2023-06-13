@@ -841,8 +841,11 @@ ppr_find_eligible_pt_page(pt_desc_t **ptdpp)
  *       ppr_find_eligible_pt_page().
  *
  * @param ptdp The page table descriptor whose page table(s) will get freed.
+ *
+ * @return KERN_SUCCESS on success. KERN_RESOURCE_SHORTAGE if the page is not
+ *         removed due to pending preemption.
  */
-MARK_AS_PMAP_TEXT static void
+MARK_AS_PMAP_TEXT static kern_return_t
 ppr_remove_pt_page(pt_desc_t *ptdp)
 {
 	assert(ptdp != NULL);
@@ -892,6 +895,7 @@ ppr_remove_pt_page(pt_desc_t *ptdp)
 		ptep = (pt_entry_t *)ttetokv(*ttep);
 		begin_pte = &ptep[pte_index(pt_attr, va)];
 		end_pte = begin_pte + (hw_page_size / sizeof(pt_entry_t));
+		vm_map_address_t eva = 0;
 
 		/**
 		 * Remove all mappings in the page table being reclaimed.
@@ -903,18 +907,44 @@ ppr_remove_pt_page(pt_desc_t *ptdp)
 		 * decompression, which could cause the counter to drift more and
 		 * more.
 		 */
-		pmap_remove_range_options(
-			pmap, va, begin_pte, end_pte, NULL, &need_strong_sync, PMAP_OPTIONS_REMOVE);
+		int pte_changed = pmap_remove_range_options(
+			pmap, va, begin_pte, end_pte, &eva, &need_strong_sync, PMAP_OPTIONS_REMOVE);
 
-		/**
-		 * Free the page table now that all of its mappings have been removed.
-		 * Once all page tables within a page have been deallocated, then the
-		 * page that contains the table(s) will be freed and made available for
-		 * reuse.
-		 */
-		const vm_offset_t va_end = va + (size_t)pt_attr_leaf_table_size(pt_attr);
-		pmap_tte_deallocate(pmap, va, va_end, need_strong_sync, ttep, pt_attr_twig_level(pt_attr));
-		pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE); /* pmap_tte_deallocate() dropped the lock */
+		const vm_offset_t expected_va_end = va + (size_t)pt_attr_leaf_table_size(pt_attr);
+
+		if (eva == expected_va_end) {
+			/**
+			 * Free the page table now that all of its mappings have been removed.
+			 * Once all page tables within a page have been deallocated, then the
+			 * page that contains the table(s) will be freed and made available for
+			 * reuse.
+			 */
+			pmap_tte_deallocate(pmap, va, expected_va_end, need_strong_sync, ttep, pt_attr_twig_level(pt_attr));
+			pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE); /* pmap_tte_deallocate() dropped the lock */
+		} else {
+			/**
+			 * pmap_remove_range_options() returned earlier than expected,
+			 * indicating there is emergent preemption pending. We should
+			 * bail out, despite some of the mappings were removed in vain.
+			 * They have to take the penalty of page faults to be brought
+			 * back, but we don't want to miss the preemption deadline and
+			 * panic.
+			 */
+			assert(eva < expected_va_end);
+
+			/**
+			 * In the normal path, we expect pmap_tte_deallocate() to flush
+			 * the TLB for us. However, on the abort path here, we need to
+			 * handle it here explicitly. If there is any mapping updated,
+			 * update the TLB. */
+			if (pte_changed > 0) {
+				pmap_get_pt_ops(pmap)->flush_tlb_region_async(va, (size_t) (eva - va), pmap, false);
+				arm64_sync_tlb(need_strong_sync);
+			}
+
+			pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
+			return KERN_ABORTED;
+		}
 	}
 
 	/**
@@ -922,6 +952,7 @@ ppr_remove_pt_page(pt_desc_t *ptdp)
 	 * we found the table(s) to reclaim in ppr_find_eligible_pt_page().
 	 */
 	pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
+	return KERN_SUCCESS;
 }
 
 /**
@@ -987,7 +1018,10 @@ pmap_page_reclaim(void)
 		 * If we found a page table to reclaim, then ptdp should point to the
 		 * descriptor for that table. Go ahead and remove it.
 		 */
-		ppr_remove_pt_page(ptdp);
+		if (ppr_remove_pt_page(ptdp) != KERN_SUCCESS) {
+			/* Take the page not found path to bail out on pending preemption. */
+			return (pmap_paddr_t)0;
+		}
 
 		/**
 		 * Now that a page has hopefully been freed (and added to the reclaim

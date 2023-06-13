@@ -169,7 +169,7 @@ typedef struct compressor_pager {
 
 /* embedded slot pointers in compressor_pager get packed, so VA restricted */
 static ZONE_DEFINE_TYPE(compressor_pager_zone, "compressor_pager",
-    struct compressor_pager, ZC_NOENCRYPT | ZC_VM_LP64 | ZC_NOTBITAG);
+    struct compressor_pager, ZC_NOENCRYPT | ZC_VM | ZC_NOTBITAG);
 
 LCK_GRP_DECLARE(compressor_pager_lck_grp, "compressor_pager");
 
@@ -696,7 +696,7 @@ vm_compressor_slots_init(void)
 		compressor_slots_zones[idx] = zone_create(
 			compressor_slots_zones_names[idx],
 			compressor_slots_zones_sizes[idx],
-			ZC_PGZ_USE_GUARDS | ZC_VM_LP64 | ZC_NOTBITAG);
+			ZC_PGZ_USE_GUARDS | ZC_VM | ZC_NOTBITAG);
 	}
 }
 STARTUP(ZALLOC, STARTUP_RANK_MIDDLE, vm_compressor_slots_init);
@@ -1029,20 +1029,16 @@ vm_compressor_pager_transfer(
 	compressor_pager_stats.transfer++;
 
 	/* find the compressor slot for the destination */
-	assert((uint32_t) dst_offset == dst_offset);
 	compressor_pager_lookup(dst_mem_obj, dst_pager);
 	assert(dst_offset / PAGE_SIZE < dst_pager->cpgr_num_slots);
-	compressor_pager_slot_lookup(dst_pager, TRUE, (uint32_t) dst_offset,
-	    &dst_slot_p);
+	compressor_pager_slot_lookup(dst_pager, TRUE, dst_offset, &dst_slot_p);
 	assert(dst_slot_p != NULL);
 	assert(*dst_slot_p == 0);
 
 	/* find the compressor slot for the source */
-	assert((uint32_t) src_offset == src_offset);
 	compressor_pager_lookup(src_mem_obj, src_pager);
 	assert(src_offset / PAGE_SIZE < src_pager->cpgr_num_slots);
-	compressor_pager_slot_lookup(src_pager, FALSE, (uint32_t) src_offset,
-	    &src_slot_p);
+	compressor_pager_slot_lookup(src_pager, FALSE, src_offset, &src_slot_p);
 	assert(src_slot_p != NULL);
 	assert(*src_slot_p != 0);
 
@@ -1088,8 +1084,8 @@ vm_compressor_pager_next_compressed(
 		    slot_idx++) {
 			if (chunk[slot_idx] != 0) {
 				/* found a non-NULL slot in this chunk */
-				return (memory_object_offset_t) (slot_idx *
-				       PAGE_SIZE);
+				return (memory_object_offset_t) slot_idx *
+				       PAGE_SIZE;
 			}
 		}
 		return (memory_object_offset_t) -1;
@@ -1122,8 +1118,8 @@ vm_compressor_pager_next_compressed(
 					/* went beyond end of object */
 					return (memory_object_offset_t) -1;
 				}
-				return (memory_object_offset_t) (next_slot *
-				       PAGE_SIZE);
+				return (memory_object_offset_t) next_slot *
+				       PAGE_SIZE;
 			}
 		}
 	}

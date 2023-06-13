@@ -249,6 +249,9 @@ static LCK_MTX_DECLARE(sync_mtx_lck, &sync_mtx_lck_grp);
 
 extern lck_rw_t rootvnode_rw_lock;
 
+VFS_SMR_DECLARE;
+extern uint32_t nc_smr_enabled;
+
 /*
  * incremented each time a mount or unmount operation occurs
  * used to invalidate the cached value of the rootvp in the
@@ -266,6 +269,9 @@ extern const struct fileops vnops;
 #if CONFIG_APPLEDOUBLE
 extern errno_t rmdir_remove_orphaned_appleDouble(vnode_t, vfs_context_t, int *);
 #endif /* CONFIG_APPLEDOUBLE */
+
+/* Maximum buffer length supported by fsgetpath(2) */
+#define FSGETPATH_MAXBUFLEN  8192
 
 /*
  * Virtual File System System Calls
@@ -497,7 +503,7 @@ get_and_verify_graft_metadata_vp_size(vnode_t graft_vp, vfs_context_t vctx, size
 
 	if (sb.st_size == 0) {
 		error = ENODATA;
-	} else if (sb.st_size > MAX_GRAFT_METADATA_SIZE) {
+	} else if ((size_t) sb.st_size > MAX_GRAFT_METADATA_SIZE) {
 		error = EFBIG;
 	} else {
 		*size = (size_t) sb.st_size;
@@ -1767,6 +1773,10 @@ update:
 		lck_rw_done(&mp->mnt_rwlock);
 		is_rwlock_locked = FALSE;
 
+		if (nc_smr_enabled) {
+			vfs_smr_synchronize();
+		}
+
 		/*
 		 * if we get here, we have a mount structure that needs to be freed,
 		 * but since the coveredvp hasn't yet been updated to point at it,
@@ -1853,6 +1863,10 @@ out1:
 		if (mp->mnt_crossref) {
 			mount_dropcrossref(mp, vp, 0);
 		} else {
+			if (nc_smr_enabled) {
+				vfs_smr_synchronize();
+			}
+
 			mount_lock_destroy(mp);
 #if CONFIG_MACF
 			mac_mount_label_destroy(mp);
@@ -2959,6 +2973,10 @@ out:
 				vnode_put(pvp);
 			}
 		} else if (mp->mnt_flag & MNT_ROOTFS) {
+			if (nc_smr_enabled) {
+				vfs_smr_synchronize();
+			}
+
 			mount_lock_destroy(mp);
 #if CONFIG_MACF
 			mac_mount_label_destroy(mp);
@@ -3048,6 +3066,10 @@ mount_dropcrossref(mount_t mp, vnode_t dp, int need_put)
 			vnode_put_locked(dp);
 		}
 		vnode_drop_and_unlock(dp);
+
+		if (nc_smr_enabled) {
+			vfs_smr_synchronize();
+		}
 
 		mount_lock_destroy(mp);
 #if CONFIG_MACF
@@ -4642,28 +4664,10 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 		fp->fp_glob->fg_vn_data = NULL;
 	}
 
-	vnode_put(vp);
-
-	/*
-	 * The first terminal open (without a O_NOCTTY) by a session leader
-	 * results in it being set as the controlling terminal.
-	 */
-	if (vnode_istty(vp) && !(p->p_flag & P_CONTROLT) &&
-	    !(flags & O_NOCTTY)) {
-		int tmp = 0;
-
-		(void)(*fp->fp_glob->fg_ops->fo_ioctl)(fp, (int)TIOCSCTTY,
-		    (caddr_t)&tmp, ctx);
-	}
-
-	proc_fdlock(p);
-	procfdtbl_releasefd(p, indx, NULL);
-
 #if CONFIG_SECLUDED_MEMORY
-	if (secluded_for_filecache &&
-	    FILEGLOB_DTYPE(fp->fp_glob) == DTYPE_VNODE &&
-	    vnode_vtype(vp) == VREG) {
+	if (secluded_for_filecache && vnode_vtype(vp) == VREG) {
 		memory_object_control_t moc;
+		const char *v_name;
 
 		moc = ubc_getobject(vp, UBC_FLAGS_NONE);
 
@@ -4673,7 +4677,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 			/* writable -> no longer  eligible for secluded pages */
 			memory_object_mark_eligible_for_secluded(moc,
 			    FALSE);
-		} else if (secluded_for_filecache == 1) {
+		} else if (secluded_for_filecache == SECLUDED_FILECACHE_APPS) {
 			char pathname[32] = { 0, };
 			size_t copied;
 			/* XXX FBDP: better way to detect /Applications/ ? */
@@ -4704,14 +4708,15 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 				memory_object_mark_eligible_for_secluded(moc,
 				    TRUE);
 			}
-		} else if (secluded_for_filecache == 2) {
-			size_t len = strlen(vp->v_name);
-			if (!strncmp(vp->v_name, "dyld", len) ||
-			    !strncmp(vp->v_name, "launchd", len) ||
-			    !strncmp(vp->v_name, "Camera", len) ||
-			    !strncmp(vp->v_name, "mediaserverd", len) ||
-			    !strncmp(vp->v_name, "SpringBoard", len) ||
-			    !strncmp(vp->v_name, "backboardd", len)) {
+		} else if (secluded_for_filecache == SECLUDED_FILECACHE_RDONLY &&
+		    (v_name = vnode_getname(vp))) {
+			size_t len = strlen(v_name);
+
+			if (!strncmp(v_name, "dyld", len) ||
+			    !strncmp(v_name, "launchd", len) ||
+			    !strncmp(v_name, "Camera", len) ||
+			    !strncmp(v_name, "SpringBoard", len) ||
+			    !strncmp(v_name, "backboardd", len)) {
 				/*
 				 * This file matters when launching Camera:
 				 * do not store its contents in the secluded
@@ -4719,10 +4724,73 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 				 */
 				memory_object_mark_eligible_for_secluded(moc,
 				    FALSE);
+			} else if (!strncmp(v_name, "mediaserverd", len)) {
+				memory_object_mark_eligible_for_secluded(moc,
+				    FALSE);
+				memory_object_mark_for_realtime(moc,
+				    true);
+			} else if (!strncmp(v_name, "bluetoothd", len)) {
+				/*
+				 * bluetoothd might be needed for realtime audio
+				 * playback.
+				 */
+				memory_object_mark_eligible_for_secluded(moc,
+				    FALSE);
+				memory_object_mark_for_realtime(moc,
+				    true);
+			} else {
+				char pathname[64] = { 0, };
+				size_t copied;
+				if (UIO_SEG_IS_USER_SPACE(ndp->ni_segflg)) {
+					(void)copyinstr(ndp->ni_dirp,
+					    pathname,
+					    sizeof(pathname),
+					    &copied);
+				} else {
+					copystr(CAST_DOWN(void *, ndp->ni_dirp),
+					    pathname,
+					    sizeof(pathname),
+					    &copied);
+				}
+				pathname[sizeof(pathname) - 1] = '\0';
+				if (strncmp(pathname,
+				    "/Library/Audio/Plug-Ins/",
+				    strlen("/Library/Audio/Plug-Ins/")) == 0 ||
+				    strncmp(pathname,
+				    "/System/Library/Audio/Plug-Ins/",
+				    strlen("/System/Library/Audio/Plug-Ins/")) == 0) {
+					/*
+					 * This may be an audio plugin required
+					 * for realtime playback.
+					 * ==> NOT eligible for secluded.
+					 */
+					memory_object_mark_eligible_for_secluded(moc,
+					    FALSE);
+					memory_object_mark_for_realtime(moc,
+					    true);
+				}
 			}
+			vnode_putname(v_name);
 		}
 	}
 #endif /* CONFIG_SECLUDED_MEMORY */
+
+	vnode_put(vp);
+
+	/*
+	 * The first terminal open (without a O_NOCTTY) by a session leader
+	 * results in it being set as the controlling terminal.
+	 */
+	if (vnode_istty(vp) && !(p->p_flag & P_CONTROLT) &&
+	    !(flags & O_NOCTTY)) {
+		int tmp = 0;
+
+		(void)(*fp->fp_glob->fg_ops->fo_ioctl)(fp, (int)TIOCSCTTY,
+		    (caddr_t)&tmp, ctx);
+	}
+
+	proc_fdlock(p);
+	procfdtbl_releasefd(p, indx, NULL);
 
 	fp_drop(p, indx, fp, 1);
 	proc_fdunlock(p);
@@ -5655,13 +5723,9 @@ linkat_internal(vfs_context_t ctx, int fd1, user_addr_t path, int fd2,
 			}
 
 			pvp = vp->v_parent;
-			// need an iocount on pvp in this case
+			// need an iocount on parent vnode in this case
 			if (pvp && pvp != dvp) {
-				error = vnode_get(pvp);
-				if (error) {
-					pvp = NULLVP;
-					error = 0;
-				}
+				pvp = vnode_getparent_if_different(vp, dvp);
 			}
 			if (pvp) {
 				add_fsevent(FSE_STAT_CHANGED, ctx,
@@ -11926,13 +11990,24 @@ vfs_materialize_item(
 		return ETIMEDOUT;
 	}
 
-	path = zalloc(ZV_NAMEI);
-	path_len = MAXPATHLEN;
+	int path_alloc_len = MAXPATHLEN;
+	do {
+		path = kalloc_data(path_alloc_len, Z_WAITOK | Z_ZERO);
+		if (path == NULL) {
+			return ENOMEM;
+		}
 
-	error = vn_getpath(vp, path, &path_len);
-	if (error) {
-		goto out_release_port;
-	}
+		path_len = path_alloc_len;
+		error = vn_getpath(vp, path, &path_len);
+		if (error == 0) {
+			break;
+		} else if (error == ENOSPC) {
+			kfree_data(path, path_alloc_len);
+			path = NULL;
+		} else {
+			goto out_release_port;
+		}
+	} while (error == ENOSPC && (path_alloc_len += MAXPATHLEN) && path_alloc_len <= FSGETPATH_MAXBUFLEN);
 
 	error = vfs_context_copy_audit_token(context, &atoken);
 	if (error) {
@@ -12018,7 +12093,7 @@ vfs_materialize_item(
 	 * Give back the memory we allocated earlier while we wait; we
 	 * no longer need it.
 	 */
-	zfree(ZV_NAMEI, path);
+	kfree_data(path, path_alloc_len);
 	path = NULL;
 
 	/*
@@ -12030,7 +12105,8 @@ vfs_materialize_item(
 
 out_release_port:
 	if (path != NULL) {
-		zfree(ZV_NAMEI, path);
+		kfree_data(path, path_alloc_len);
+		path = NULL;
 	}
 	ipc_port_release_send(mach_port);
 
@@ -13304,7 +13380,7 @@ fsgetpath_internal(vfs_context_t ctx, int volfs_id, uint64_t objid,
 	/* maximum number of times to retry build_path */
 	unsigned int retries = 0x10;
 
-	if (bufsize > PAGE_SIZE) {
+	if (bufsize > FSGETPATH_MAXBUFLEN) {
 		return EINVAL;
 	}
 
@@ -13448,7 +13524,7 @@ fsgetpath_extended(user_addr_t buf, user_size_t bufsize, user_addr_t user_fsid, 
 	AUDIT_ARG(value64, objid);
 	/* Restrict output buffer size for now. */
 
-	if (bufsize > PAGE_SIZE || bufsize <= 0) {
+	if (bufsize > FSGETPATH_MAXBUFLEN || bufsize <= 0) {
 		return EINVAL;
 	}
 	realpath = kalloc_data(bufsize, Z_WAITOK | Z_ZERO);

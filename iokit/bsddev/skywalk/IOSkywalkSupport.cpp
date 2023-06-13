@@ -439,17 +439,18 @@ kern_return_t
 IOSKRegionMapper::mapOverwrite(
 	vm_map_offset_t addr, vm_map_size_t size, vm_prot_t prot )
 {
-	int flags = VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE;
+	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 	kern_return_t kr;
+
+	vmk_flags.vmf_overwrite = true;
+	vmk_flags.vm_tag = getVMTagForMap(fMapper->fTaskMap);
 
 	kr = vm_map_enter_mem_object(
 		fMapper->fTaskMap,
 		&addr,
 		size,
 		(vm_map_offset_t)0,
-		flags,
-		VM_MAP_KERNEL_FLAGS_NONE,
-		getVMTagForMap(fMapper->fTaskMap),
+		vmk_flags,
 		IPC_PORT_NULL,
 		(vm_object_offset_t)0,
 		FALSE,
@@ -478,7 +479,6 @@ IOSKMapper::initWithTask(
 	vm_map_offset_t     addr;
 	vm_map_size_t       size;
 	kern_return_t       kr;
-	int     flags;
 	bool    ok = false;
 
 	if ((task == TASK_NULL) || (arena == NULL) || !super::init()) {
@@ -534,7 +534,9 @@ IOSKMapper::initWithTask(
 	size = fArena->getArenaSize();
 	assert(regionOffset == size);
 	assert(IOSK_SIZE_OK(size));
-	flags = VM_FLAGS_ANYWHERE;
+
+	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_ANYWHERE();
+	vmk_flags.vm_tag = getVMTagForMap(fTaskMap);
 
 	// reserve address space on given task with PROT_NONE
 	kr = vm_map_enter_mem_object(
@@ -542,9 +544,7 @@ IOSKMapper::initWithTask(
 		&addr,
 		size,
 		(vm_map_offset_t)0,
-		flags,
-		VM_MAP_KERNEL_FLAGS_NONE,
-		getVMTagForMap(fTaskMap),
+		vmk_flags,
 		IPC_PORT_NULL,
 		(vm_object_offset_t)0,
 		FALSE,

@@ -200,6 +200,7 @@
 #include <IOKit/IOKitKeysPrivate.h>
 #include <IOKit/IOKitServer.h>
 #include <IOKit/IOBSD.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <kern/ipc_kobject.h>
 #include <libkern/Block.h>
 #include <libkern/Block_private.h>
@@ -888,13 +889,28 @@ OSCollectionTest(int newValue)
 	OSSharedPtr<OSString> zyxwvut = OSString::withCString("zyxwvut", 7);
 	assert(strcmp(zyxwvut->getCStringNoCopy(), "zyxwvut") == 0);
 
+
+	dict = OSDictionary::withCapacity(4);
+	OSSharedPtr<OSNumber> num = OSNumber::withDouble(1234.5678);
+	dict->setObject("test", num);
+
+	OSSharedPtr<OSSerialize> s = OSSerialize::binaryWithCapacity(4096);
+	dict->serialize(s.get());
+
+	OSSharedPtr<OSObject> o = OSUnserializeXML((const char *) s->text(), s->getLength());
+	assert(dict->isEqualTo(o.get()));
+
+	dict = OSDynamicPtrCast<OSDictionary>(o);
+	OSNumber * nnum = OSDynamicCast(OSNumber, dict->getObject("test"));
+	assert(12345678 == (int)(10000 * nnum->doubleValue()));
+
 	return 0;
 }
 
 static int
 OSAllocationTests(int)
 {
-	OSAllocation<int> ints(100, OSAllocateMemory);
+	OSDataAllocation<int> ints(100, OSAllocateMemory);
 	assert(ints);
 
 	{
@@ -912,17 +928,18 @@ OSAllocationTests(int)
 		}
 	}
 
-	OSAllocation<int> arrayZero(100, OSAllocateMemoryZero);
+	OSDataAllocation<int> arrayZero(100, OSAllocateMemoryZero);
 	assert(arrayZero);
 	for (const auto& i : arrayZero) {
 		assert(i == 0);
 	}
 
+#if XNU_PLATFORM_MacOSX
 	// Make sure we can have two-level OSAllocations
 	{
-		OSAllocation<OSAllocation<int> > testArray(10, OSAllocateMemory);
+		OSAllocation<OSDataAllocation<int> > testArray(10, OSAllocateMemory);
 		for (int i = 0; i < 10; i++) {
-			testArray[i] = OSAllocation<int>(10, OSAllocateMemory);
+			testArray[i] = OSDataAllocation<int>(10, OSAllocateMemory);
 			for (int j = 0; j < 10; ++j) {
 				testArray[i][j] = i + j;
 			}
@@ -934,6 +951,7 @@ OSAllocationTests(int)
 			}
 		}
 	}
+#endif /* XNU_PLATFORM_MacOSX */
 
 	return 0;
 }
@@ -1920,6 +1938,26 @@ IOMallocPageableTests(int)
 	return kIOReturnSuccess;
 }
 
+static int
+Test100367284(int)
+{
+	OSSharedPtr<IOService> entry;
+	OSSharedPtr<IOService> replace;
+	OSSharedPtr<IOService> root;
+
+	root = OSDynamicPtrCast<IOService>(IORegistryEntry::fromPath("/", gIODTPlane));
+	entry = OSMakeShared<IOService>();
+	entry->init();
+	entry->attachToParent(root.get(), gIODTPlane);
+	entry->attachToParent(root.get(), gIOServicePlane);
+
+	replace = OSMakeShared<IOService>();
+	replace->init(entry.get(), gIODTPlane);
+	replace->detachFromParent(root.get(), gIODTPlane);
+
+	return kIOReturnSuccess;
+}
+
 
 #endif  /* DEVELOPMENT || DEBUG */
 
@@ -1998,6 +2036,8 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 	}
 #endif /* TEST_ZLIB */
 	if (changed && newValue) {
+		error = Test100367284(newValue);
+		assert(KERN_SUCCESS == error);
 		error = IOWorkLoopTest(newValue);
 		assert(KERN_SUCCESS == error);
 		error = IOServiceTest(newValue);

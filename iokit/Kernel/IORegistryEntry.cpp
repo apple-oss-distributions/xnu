@@ -370,8 +370,17 @@ IORegistryEntry::init( IORegistryEntry * old,
 
 	fPropertyTable = old->dictionaryWithProperties();
 #ifdef IOREGSPLITTABLES
-	fRegistryTable = old->fRegistryTable;
-	old->fRegistryTable = (OSDictionary *) fRegistryTable->copyCollection();
+	fRegistryTable = OSDictionary::withCapacity( kIORegCapacityIncrement );
+	assertf(fRegistryTable, "Unable to allocate small capacity");
+	fRegistryTable->setCapacityIncrement( kIORegCapacityIncrement );
+
+	fRegistryTable->setObject(gIONameKey, old->fRegistryTable->getObject(gIONameKey));
+	fRegistryTable->setObject(gIOLocationKey, old->fRegistryTable->getObject(gIOLocationKey));
+	fRegistryTable->setObject(plane->nameKey, old->fRegistryTable->getObject(plane->nameKey));
+	fRegistryTable->setObject(plane->pathNameKey, old->fRegistryTable->getObject(plane->pathNameKey));
+	fRegistryTable->setObject(plane->pathLocationKey, old->fRegistryTable->getObject(plane->pathLocationKey));
+	fRegistryTable->setObject(plane->keys[kParentSetIndex], old->fRegistryTable->getObject(plane->keys[kParentSetIndex]));
+	fRegistryTable->setObject(plane->keys[kChildSetIndex], old->fRegistryTable->getObject(plane->keys[kChildSetIndex]));
 #endif /* IOREGSPLITTABLES */
 
 	old->registryTable()->removeObject( plane->keys[kParentSetIndex] );

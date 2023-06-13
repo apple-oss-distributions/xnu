@@ -87,7 +87,6 @@ typedef struct proc_ro *proc_ro_t;
 extern proc_ro_t proc_ro_alloc(struct proc *p, proc_ro_data_t p_data, struct task *t, task_ro_data_t t_data);
 extern void proc_ro_free(proc_ro_t pr);
 extern proc_ro_t proc_ro_ref_task(proc_ro_t pr, struct task *t, task_ro_data_t t_data);
-extern void proc_switch_ro(struct proc *p, proc_ro_t new_ro);
 extern proc_ro_t proc_ro_release_proc(proc_ro_t pr);
 extern proc_ro_t proc_ro_release_task(proc_ro_t pr);
 

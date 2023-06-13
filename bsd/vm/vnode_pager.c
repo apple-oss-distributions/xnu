@@ -809,9 +809,3 @@ out:
 
 	return error;
 }
-
-void *
-upl_get_internal_page_list(upl_t upl)
-{
-	return UPL_GET_INTERNAL_PAGE_LIST(upl);
-}

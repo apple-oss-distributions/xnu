@@ -657,8 +657,12 @@ type task_suspension_token_t = mach_port_move_send_once_t
 		;
 
 type vfs_path_t = c_string[4096];
-type nspace_path_t = c_string[1024];	/* 1024 == PATH_MAX */
-type nspace_name_t = c_string[1024];	/* 1024 == PATH_MAX */
+/*
+ * 8K, c.f. FSGETPATH_MAXBUFLEN in bsd/vfs/vfs_syscalls.c.
+ * These types should NEVER be allocated on the stack.
+ */
+type nspace_path_t = c_string[8192];
+type nspace_name_t = c_string[8192];
 
 /* public voucher types */
 
@@ -679,7 +683,7 @@ type ipc_voucher_t = mach_port_t
 	        ;
 
 /* IPC voucher attribute control internal object */
-type ipc_voucher_attr_control_t = mach_port_t;
+type ipc_voucher_attr_control_t = mach_port_t; /* obsolete */
 
 type mach_voucher_attr_key_t = uint32_t;
 

@@ -42,7 +42,7 @@
 #pragma mark btref & helpers
 
 static LCK_GRP_DECLARE(bt_library_lck_grp, "bt_library");
-static SMR_DEFINE_EARLY(bt_library_smr);
+static SMR_DEFINE(bt_library_smr);
 
 #define BTS_FRAMES_MAX          13
 #define BTS_FRAMES_REF_MASK     0xfffffff0
@@ -861,7 +861,7 @@ __btlib_get(bt_library_t btl, void *fp, btref_get_flags_t flags)
 	 */
 	param = smr_entered_load_acquire(&btl->btl_param);
 	head  = __btlib_head(btl, param, hash);
-	ref   = smr_entered_load_acquire(head);
+	ref   = smr_entered_load(head);
 
 	while (ref) {
 		bt_stack_t bts = __btlib_deref(btl, ref);
@@ -880,7 +880,7 @@ __btlib_get(bt_library_t btl, void *fp, btref_get_flags_t flags)
 			return ref;
 		}
 
-		ref = smr_entered_load_acquire(&bts->bts_next);
+		ref = smr_entered_load(&bts->bts_next);
 	}
 
 	smr_leave(&bt_library_smr);
@@ -943,21 +943,18 @@ btref_put(btref_t btref)
 uint32_t
 btref_decode_unslide(btref_t btref, mach_vm_address_t bt_out[])
 {
-#if __LP64__
-	uintptr_t *bt = (uintptr_t *)bt_out;
-#else
-	uintptr_t  bt_buf[BTLOG_MAX_DEPTH];
-	uintptr_t *bt = bt_buf;
-#endif
+	static_assert(sizeof(mach_vm_address_t) == sizeof(uintptr_t));
 
 	if (__btref_isvalid(btref)) {
 		bt_stack_t bts = __btlib_deref(&bt_library, btref);
 		uint32_t   len = __btstack_len(bts);
-		backtrace_unpack(BTP_KERN_OFFSET_32, bt, BTLOG_MAX_DEPTH,
-		    (uint8_t *)bts->bts_frames, sizeof(uint32_t) * len);
+
+		backtrace_unpack(BTP_KERN_OFFSET_32, (uintptr_t *)bt_out,
+		    BTLOG_MAX_DEPTH, (uint8_t *)bts->bts_frames,
+		    sizeof(uint32_t) * len);
 
 		for (uint32_t i = 0; i < len; i++) {
-			bt_out[i] = VM_KERNEL_UNSLIDE(bt[i]);
+			bt_out[i] = VM_KERNEL_UNSLIDE(bt_out[i]);
 		}
 
 		return len;
@@ -977,12 +974,6 @@ struct btlog {
 	lck_ticket_t            btl_lock;
 	uint32_t     *__zpercpu btl_sample;
 };
-
-#if __LP64__
-#define BTLOG_ENTRY_ADDR_BITS   48
-#else
-#define BTLOG_ENTRY_ADDR_BITS   32
-#endif
 
 struct bt_log_entry {
 	vm_address_t            btle_addr;

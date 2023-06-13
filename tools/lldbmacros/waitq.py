@@ -32,8 +32,7 @@ class Waitq(object):
     """
 
     def __init__(self, addr):
-        global kern
-        self._wq = cast(addr, 'struct waitq *')
+        self._wq = kern.CreateTypedPointerFromAddress(unsigned(addr), 'struct waitq')
         self._ty = unsigned(self._wq.waitq_type) & 0x7
 
     def kind(self):
@@ -158,7 +157,7 @@ class Waitq(object):
 
     def iterateMemberLinks(self):
         if self._ty == GetEnumValue('waitq_type_t', 'WQT_PORT_SET'):
-            wqs = cast(self._wq, 'struct waitq_set *')
+            wqs = kern.CreateTypedPointerFromAddress(unsigned(self._wq), 'struct waitq_set')
             for l in IterateCircleQueue(wqs.wqset_links, 'struct waitq_link', 'wql_slink'):
                 yield l
             for l in IterateCircleQueue(wqs.wqset_preposts, 'struct waitq_link', 'wql_slink'):

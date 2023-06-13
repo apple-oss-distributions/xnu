@@ -664,9 +664,7 @@ static struct if_clone bond_cloner = IF_CLONE_INITIALIZER(BONDNAME,
     bond_clone_create,
     bond_clone_destroy,
     0,
-    BOND_MAXUNIT,
-    BOND_ZONE_MAX_ELEM,
-    sizeof(ifbond));
+    BOND_MAXUNIT);
 
 static int
 siocsifmtu(struct ifnet * ifp, int mtu)
@@ -726,7 +724,7 @@ ifbond_release(ifbond_ref ifb)
 	}
 	kfree_type(bondport_ref, ifb->ifb_distributing_max,
 	    ifb->ifb_distributing_array);
-	if_clone_softc_deallocate(&bond_cloner, ifb);
+	kfree_type(struct ifbond_s, ifb);
 }
 
 /*
@@ -1169,11 +1167,7 @@ bond_clone_create(struct if_clone * ifc, u_int32_t unit, __unused void *params)
 		return error;
 	}
 
-	ifb = if_clone_softc_allocate(&bond_cloner);
-	if (ifb == NULL) {
-		return ENOMEM;
-	}
-
+	ifb = kalloc_type(struct ifbond_s, Z_WAITOK_ZERO_NOFAIL);
 	os_ref_init(&ifb->ifb_retain_count, NULL);
 	TAILQ_INIT(&ifb->ifb_port_list);
 	TAILQ_INIT(&ifb->ifb_lag_list);

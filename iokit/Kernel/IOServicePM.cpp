@@ -120,6 +120,12 @@ static bool                  gIOPMAdvisoryTickleEnabled = true;
 static thread_t              gIOPMWatchDogThread        = NULL;
 TUNABLE_WRITEABLE(uint32_t, gSleepAckTimeout, "pmtimeout", 0);
 
+/*
+ *  While waiting for a driver callout to complete, we log any instances
+ *  that have taken longer than the below period (in milliseconds) to return.
+ */
+TUNABLE_WRITEABLE(uint32_t, gDriverCalloutTimer, "pmcallouttimer", 2000);
+
 static uint32_t
 getPMRequestType( void )
 {
@@ -131,6 +137,7 @@ getPMRequestType( void )
 }
 
 SYSCTL_UINT(_kern, OID_AUTO, pmtimeout, CTLFLAG_RW | CTLFLAG_LOCKED, &gSleepAckTimeout, 0, "Power Management Timeout");
+SYSCTL_UINT(_kern, OID_AUTO, pmcallouttimer, CTLFLAG_RW | CTLFLAG_LOCKED, &gDriverCalloutTimer, 0, "Power Management Driver Callout Log Timer");
 
 //******************************************************************************
 // Macros
@@ -489,6 +496,8 @@ IOService::PMinit( void )
 #endif
 		fIdleTimer = thread_call_allocate(
 			&idle_timer_expired, (thread_call_param_t)this);
+		fDriverCallTimer = thread_call_allocate(
+			&IOService::pmDriverCalloutTimer, (thread_call_param_t)this);
 		fDriverCallEntry = thread_call_allocate(
 			(thread_call_func_t) &IOService::pmDriverCallout, this);
 		assert(fDriverCallEntry);
@@ -573,6 +582,10 @@ IOService::PMfree( void )
 		if (fDriverCallEntry) {
 			thread_call_free(fDriverCallEntry);
 			fDriverCallEntry = NULL;
+		}
+		if (fDriverCallTimer) {
+			thread_call_free(fDriverCallTimer);
+			fDriverCallTimer = NULL;
 		}
 		if (fPMLock) {
 			IOLockFree(fPMLock);
@@ -4133,6 +4146,7 @@ IOService::pmDriverCallout( IOService * from,
     __unused thread_call_param_t p)
 {
 	assert(from);
+	from->startDriverCalloutTimer();
 	switch (from->fDriverCallReason) {
 	case kDriverCallSetPowerState:
 		from->driverSetPowerState();
@@ -4151,6 +4165,7 @@ IOService::pmDriverCallout( IOService * from,
 		panic("IOService::pmDriverCallout bad machine state %x",
 		    from->fDriverCallReason);
 	}
+	from->stopDriverCalloutTimer();
 
 	gIOPMWorkLoop->runAction(actionDriverCalloutDone,
 	    /* target */ from,
@@ -4328,6 +4343,48 @@ IOService::driverInformPowerChange( void )
 		param->Result = result;
 		param++;
 	}
+}
+
+//*********************************************************************************
+// [private, static] pmDriverCalloutTimer
+//
+// Thread call context.
+//*********************************************************************************
+
+void
+IOService::startDriverCalloutTimer( void )
+{
+	AbsoluteTime    deadline;
+	boolean_t       pending;
+
+	clock_interval_to_deadline(gDriverCalloutTimer, kMillisecondScale, &deadline);
+
+	retain();
+	pending = thread_call_enter_delayed(fDriverCallTimer, deadline);
+	if (pending) {
+		release();
+	}
+}
+
+void
+IOService::stopDriverCalloutTimer( void )
+{
+	boolean_t   pending;
+
+	pending = thread_call_cancel(fDriverCallTimer);
+	if (pending) {
+		release();
+	}
+}
+
+void
+IOService::pmDriverCalloutTimer( thread_call_param_t arg0,
+    __unused thread_call_param_t arg1)
+{
+	assert(arg0);
+	IOService *from = (IOService *) arg0;
+	PM_LOG("PM waiting on pmDriverCallout(0x%x) to %s (%u ms)\n", from->fDriverCallReason, from->fName, gDriverCalloutTimer);
+	from->release();
 }
 
 //*********************************************************************************

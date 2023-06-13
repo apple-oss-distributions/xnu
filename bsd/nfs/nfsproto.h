@@ -89,7 +89,7 @@
 #define NFS_V2MAXDATA   8192
 #define NFS_MAXDGRAMDATA 16384
 #define NFS_PREFDGRAMDATA 8192
-#define NFS_MAXDATA     (8 * 64 * PAGE_SIZE) /* Same as NFS_MAXBSIZE from nfsnode.h */
+#define NFS_MAXDATA     (1024 * 1024) /* Max data supported by kext is 2MB for x86 and 8MB for AS (8 * 64 * PAGE_SIZE) */
 #define NFS_MAXPATHLEN  1024
 #define NFS_MAXNAMLEN   255
 #define NFS_MAXPACKET   (16 * 1024 * 1024)

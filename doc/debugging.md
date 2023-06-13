@@ -431,53 +431,46 @@ Some macros can run for a long time. Some code may be costly even if it looks si
 aren’t cached or too many temporary objects are created. Simple profiling is similar to collecting
 code coverage.
 
-Run this in LLDB to get a profile:
+First setup your environment:
 
 ```
-# Python 2 example (Python 3 is slightly different)
-(lldb) script import cProfile, pstats, StringIO
-(lldb) script pr = cProfile.Profile()
-(lldb) script pr.enable()
-# Run the macro here:
-(lldb) showcurrentstacks
-(lldb) script pr.disable()
-(lldb) script s = StringIO.StringIO()
-(lldb) script ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
-(lldb) script ps.print_stats()
-(lldb) script print(s.getvalue())
+# Install gprof2dot
+$ python3 -m pip install gprof2dot
+# Install graphviz
+$ brew install graphviz
 ```
 
-This will use a function call profiler to collect information about which functions took the most
-time during the macro’s execution. For example:
+Then to profile commands, follow this sequence:
 
 ```
+(lldb) xnudebug profile /tmp/macro.prof showcurrentstacks
+[... command outputs ...]
 
-        1292170 function calls (1291646 primitive calls) in 3.425 seconds
+   Ordered by: cumulative time
+   List reduced from 468 to 30 due to restriction <30>
 
-  Ordered by: cumulative time
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+   [... profiling output ...]
 
-  ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-       1    0.000    0.000    3.424    3.424 <src>/tools/lldbmacros/xnu.py:104(_internal_command_function)
-       1    0.000    0.000    3.424    3.424 <src>/tools/lldbmacros/process.py:1389(ShowCurrentStacks)
-       6    0.002    0.000    2.031    0.338 <src>/tools/lldbmacros/xnu.py:358(GetThreadBackTrace)
-     467    0.003    0.000    1.969    0.004 <src>/tools/lldbmacros/core/cvalue.py:464(cast)
-       1    0.000    0.000    1.757    1.757 <src>/tools/lldbmacros/xnu.py:323(GetKextSymbolInfo)
-       1    0.006    0.006    1.756    1.756 <src>/tools/lldbmacros/memory.py:2181(GetKextLoadInformation)
-     256    0.000    0.000    1.711    0.007 <src>/tools/lldbmacros/utils.py:142(Cast)
-     473    0.002    0.000    1.365    0.003 <src>/tools/lldbmacros/core/cvalue.py:500(gettype)
-      30    0.000    0.000    1.342    0.045 .../LLDB.framework/Resources/Python2/lldb/__init__.py:10442(FindTypes)
-      30    1.342    0.045    1.342    0.045 {lldb._lldb.SBTarget_FindTypes}
-       6    0.000    0.000    1.129    0.188 <src>/tools/lldbmacros/process.py:324(GetThreadSummary)
-       6    0.000    0.000    1.106    0.184 <src>/tools/lldbmacros/process.py:312(GetThreadName)
-     210    0.027    0.000    0.634    0.003 <src>/tools/lldbmacros/memory.py:2123(GetKmodWithAddr)
-     467    0.005    0.000    0.600    0.001 <src>/tools/lldbmacros/core/cvalue.py:343(_GetValueAsCast)
+Profile info saved to "/tmp/macro.prof"
+```
+
+Then to visualize callgraphs in context, in a separate shell:
+
+```
+# Now convert the file to a colored SVG call graph
+$ python3 -m gprof2dot -f pstats /tmp/macro.prof -o /tmp/call.dot
+$ dot -O -T svg /tmp/call.dot
+
+# and view it in your favourite viewer
+$ open /tmp/call.dot.svg
 ```
 
 ## Debugging your changes
 
 YES, It is possible to use a debugger to debug your code!
 
-The steps are similar to testing techniques described above (use scrpting interactive mode). There is no point to
+The steps are similar to testing techniques described above (use scripting interactive mode). There is no point to
 document the debugger itself. Lets focus on how to use it on a real life example. The debugger used here is PDB which
 is part of Python installation so works out of the box.
 

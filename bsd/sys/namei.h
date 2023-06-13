@@ -85,6 +85,7 @@
 
 
 #include <sys/queue.h>
+#include <kern/smr.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 #include <sys/mount.h>
@@ -247,13 +248,16 @@ struct  namecache {
 		LIST_ENTRY(namecache)  nc_link; /* chain of ncp's that 'name' a vp */
 		TAILQ_ENTRY(namecache) nc_negentry; /* chain of ncp's that 'name' a vp */
 	} nc_un;
-	LIST_ENTRY(namecache)   nc_hash;        /* hash chain */
+	struct smrq_link        nc_hash;        /* hash chain */
+	uint32_t                nc_vid;         /* vid for nc_vp */
+	uint32_t                nc_counter;     /* flags */
 	vnode_t                 nc_dvp;         /* vnode of parent of name */
 	vnode_t                 nc_vp;          /* vnode the name refers to */
 	unsigned int            nc_hashval;     /* hashval of stringname */
 	const char              *nc_name;       /* pointer to segment name in string cache */
 };
 
+#define NC_VALID 0x01  /* counter value with this bit set (i.e. odd number) represents an valid/in-use namecache struct */
 
 #ifdef KERNEL
 

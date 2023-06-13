@@ -129,6 +129,8 @@ ip_dn_ctl_t *ip_dn_ctl_ptr;
 #define RIPSNDQ         8192
 #define RIPRCVQ         8192
 
+static KALLOC_TYPE_DEFINE(ripzone, struct inpcb, NET_KT_DEFAULT);
+
 /*
  * Raw interface to IP protocol.
  */
@@ -160,8 +162,7 @@ rip_init(struct protosw *pp, struct domain *dp)
 	ripcbinfo.ipi_hashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_hashmask);
 	ripcbinfo.ipi_porthashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_porthashmask);
 
-	ripcbinfo.ipi_zone = zone_create("ripzone", sizeof(struct inpcb),
-	    ZC_NONE);
+	ripcbinfo.ipi_zone.zov_kt_heap = ripzone;
 
 	pcbinfo = &ripcbinfo;
 	/*

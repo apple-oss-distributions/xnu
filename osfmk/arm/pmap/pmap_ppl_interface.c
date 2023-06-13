@@ -171,6 +171,16 @@ pmap_release_ppl_pages_to_kernel(void)
 		vm_object_unlock(pmap_object);
 	}
 
+	/**
+	 * If we have any pages to return to the VM, take the page queues lock and
+	 * decrement the wire count.
+	 */
+	if (pmap_ppl_pages_returned_to_kernel_count) {
+		vm_page_lockspin_queues();
+		vm_page_wire_count -= pmap_ppl_pages_returned_to_kernel_count;
+		vm_page_unlock_queues();
+	}
+
 	return pmap_ppl_pages_returned_to_kernel_count;
 }
 

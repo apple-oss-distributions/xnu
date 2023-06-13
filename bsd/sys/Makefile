@@ -70,6 +70,7 @@ PRIVATE_DATAFILES = $(sort \
 	codesign.h \
 	constrained_ctypes.h \
 	content_protection.h \
+	crossarch.h \
 	csr.h \
 	decmpfs.h \
 	disk.h \
@@ -246,7 +247,9 @@ XNU_ONLY_EXPORTS = \
 	ulock.h \
 	ux_exception.h \
 	vnode_internal.h \
-	vsock_domain.h 
+	vsock_domain.h \
+	code_signing_internal.h
+
 
 # /usr/include
 INSTALL_MI_LIST	= ${DATAFILES}
@@ -271,7 +274,7 @@ EXPORT_MI_DIR = sys
 INSTALL_MI_LCL_LIST = $(sort \
 	codesign.h content_protection.h csr.h decmpfs.h fsevents.h kdebug_private.h \
 	kern_memorystatus.h perfmon_private.h preoslog.h reason.h resource_private.h \
-	stackshot.h work_interval.h event_log.h \
+	stackshot.h work_interval.h event_log.h code_signing.h \
 	${EXTRA_PRIVATE_DATAFILES})
 
 # /System/Library/Frameworks/System.framework/PrivateHeaders

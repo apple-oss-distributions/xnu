@@ -1855,7 +1855,7 @@ map_segment(
 
 	effective_page_mask = vm_map_page_mask(map);
 
-	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+	vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 	if (vm_map_page_aligned(vm_start, effective_page_mask) &&
 	    vm_map_page_aligned(vm_end, effective_page_mask) &&
 	    vm_map_page_aligned(file_start, effective_page_mask) &&
@@ -1893,9 +1893,7 @@ map_segment(
 				&cur_start,
 				cur_end - cur_start,
 				(mach_vm_offset_t)0,
-				VM_FLAGS_FIXED,
 				vmk_flags,
-				VM_KERN_MEMORY_NONE,
 				control,
 				file_start + cur_offset,
 				TRUE, /* copy */
@@ -1907,9 +1905,7 @@ map_segment(
 				&cur_start,
 				cur_end - cur_start,
 				(mach_vm_offset_t)0,
-				VM_FLAGS_FIXED,
 				vmk_flags,
-				VM_KERN_MEMORY_NONE,
 				IPC_PORT_NULL,
 				0, /* offset */
 				TRUE, /* copy */
@@ -1938,7 +1934,7 @@ map_segment(
 			cur_vmk_flags = vmk_flags;
 		} else {
 			/* regular mapping for the middle */
-			cur_vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+			cur_vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 		}
 
 #if !defined(XNU_TARGET_OS_OSX)
@@ -1972,9 +1968,7 @@ map_segment(
 				&cur_start,
 				cur_end - cur_start,
 				(mach_vm_offset_t)0,
-				VM_FLAGS_FIXED,
 				cur_vmk_flags,
-				VM_KERN_MEMORY_NONE,
 				control,
 				file_start + cur_offset,
 				TRUE, /* copy */
@@ -1986,9 +1980,7 @@ map_segment(
 				&cur_start,
 				cur_end - cur_start,
 				(mach_vm_offset_t)0,
-				VM_FLAGS_FIXED,
 				cur_vmk_flags,
-				VM_KERN_MEMORY_NONE,
 				IPC_PORT_NULL,
 				0, /* offset */
 				TRUE, /* copy */
@@ -2018,9 +2010,7 @@ map_segment(
 				&cur_start,
 				cur_end - cur_start,
 				(mach_vm_offset_t)0,
-				VM_FLAGS_FIXED,
 				vmk_flags,
-				VM_KERN_MEMORY_NONE,
 				control,
 				file_start + cur_offset,
 				TRUE, /* copy */
@@ -2032,9 +2022,7 @@ map_segment(
 				&cur_start,
 				cur_end - cur_start,
 				(mach_vm_offset_t)0,
-				VM_FLAGS_FIXED,
 				vmk_flags,
-				VM_KERN_MEMORY_NONE,
 				IPC_PORT_NULL,
 				0, /* offset */
 				TRUE, /* copy */
@@ -2083,7 +2071,6 @@ load_segment(
 	vm_map_size_t           effective_page_size;
 	vm_map_offset_t         effective_page_mask;
 #if __arm64__
-	vm_map_kernel_flags_t   vmk_flags;
 	boolean_t               fourk_align;
 #endif /* __arm64__ */
 
@@ -2282,16 +2269,12 @@ load_segment(
 		    vm_end > vm_end_aligned) {
 			/* use fourk_pager to map the rest of pagezero */
 			assert(fourk_align);
-			vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-			vmk_flags.vmkf_fourk = TRUE;
 			ret = vm_map_enter_mem_object(
 				map,
 				&vm_end_aligned,
 				vm_end - vm_end_aligned,
 				(mach_vm_offset_t) 0,   /* mask */
-				VM_FLAGS_FIXED,
-				vmk_flags,
-				VM_KERN_MEMORY_NONE,
+				VM_MAP_KERNEL_FLAGS_FIXED(.vmkf_fourk = true),
 				IPC_PORT_NULL,
 				0,
 				FALSE,  /* copy */
@@ -3637,7 +3620,8 @@ set_code_unprotect(
 	crypt_file_data_t crypt_data = {
 		.filename = vpath,
 		.cputype = cputype,
-		.cpusubtype = cpusubtype
+		.cpusubtype = cpusubtype,
+		.origin = CRYPT_ORIGIN_APP_LAUNCH,
 	};
 	kr = text_crypter_create(&crypt_info, cryptname, (void*)&crypt_data);
 #if VM_MAP_DEBUG_APPLE_PROTECT

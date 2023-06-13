@@ -1140,43 +1140,6 @@ mptcp_update_rcv_state_meat(struct mptcb *mp_tp, struct tcpcb *tp,
 }
 
 
-static int
-mptcp_validate_dss_map(struct socket *so, struct tcpcb *tp, struct mbuf *m,
-    int hdrlen)
-{
-	u_int32_t datalen;
-
-	if (!(m->m_pkthdr.pkt_flags & PKTF_MPTCP)) {
-		return 0;
-	}
-
-	datalen = m->m_pkthdr.mp_rlen;
-
-	/* unacceptable DSS option, fallback to TCP */
-	if (m->m_pkthdr.len > ((int) datalen + hdrlen)) {
-		os_log_error(mptcp_log_handle, "%s - %lx: mbuf len %d, MPTCP expected %d",
-		    __func__, (unsigned long)VM_KERNEL_ADDRPERM(tptomptp(tp)->mpt_mpte), m->m_pkthdr.len, datalen);
-	} else {
-		return 0;
-	}
-	tp->t_mpflags |= TMPF_SND_MPFAIL;
-	mptcp_notify_mpfail(so);
-	m_freem(m);
-	return -1;
-}
-
-int
-mptcp_input_preproc(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
-    int drop_hdrlen)
-{
-	mptcp_insert_rmap(tp, m, th);
-	if (mptcp_validate_dss_map(tp->t_inpcb->inp_socket, tp, m,
-	    drop_hdrlen) != 0) {
-		return -1;
-	}
-	return 0;
-}
-
 static uint16_t
 mptcp_input_csum(struct tcpcb *tp, struct mbuf *m, uint64_t dsn, uint32_t sseq,
     uint16_t dlen, uint16_t csum, int dfin)

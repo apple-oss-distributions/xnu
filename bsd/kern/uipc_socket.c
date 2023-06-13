@@ -922,9 +922,9 @@ sobindlock(struct socket *so, struct sockaddr *nam, int dolock)
 	 */
 	if (so->so_flags & SOF_DEFUNCT) {
 		error = EINVAL;
-		SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llx [%d,%d] (%d)\n",
+		SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llu [%d,%d] (%d)\n",
 		    __func__, proc_pid(p), proc_best_name(p),
-		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    so->so_gencnt,
 		    SOCK_DOM(so), SOCK_TYPE(so), error);
 		goto out;
 	}
@@ -994,16 +994,22 @@ solisten(struct socket *so, int backlog)
 	so_update_last_owner_locked(so, p);
 	so_update_policy(so);
 
+	if (TAILQ_EMPTY(&so->so_comp)) {
+		so->so_options |= SO_ACCEPTCONN;
+	}
+
 #if NECP
 	so_update_necp_policy(so, NULL, NULL);
 #endif /* NECP */
 
 	if (so->so_proto == NULL) {
 		error = EINVAL;
+		so->so_options &= ~SO_ACCEPTCONN;
 		goto out;
 	}
 	if ((so->so_proto->pr_flags & PR_CONNREQUIRED) == 0) {
 		error = EOPNOTSUPP;
+		so->so_options &= ~SO_ACCEPTCONN;
 		goto out;
 	}
 
@@ -1017,17 +1023,19 @@ solisten(struct socket *so, int backlog)
 	    (so->so_flags & SOF_DEFUNCT)) {
 		error = EINVAL;
 		if (so->so_flags & SOF_DEFUNCT) {
-			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llx [%d,%d] "
+			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llu [%d,%d] "
 			    "(%d)\n", __func__, proc_pid(p),
 			    proc_best_name(p),
-			    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+			    so->so_gencnt,
 			    SOCK_DOM(so), SOCK_TYPE(so), error);
 		}
+		so->so_options &= ~SO_ACCEPTCONN;
 		goto out;
 	}
 
 	if ((so->so_restrictions & SO_RESTRICT_DENY_IN) != 0) {
 		error = EPERM;
+		so->so_options &= ~SO_ACCEPTCONN;
 		goto out;
 	}
 
@@ -1040,12 +1048,10 @@ solisten(struct socket *so, int backlog)
 		if (error == EJUSTRETURN) {
 			error = 0;
 		}
+		so->so_options &= ~SO_ACCEPTCONN;
 		goto out;
 	}
 
-	if (TAILQ_EMPTY(&so->so_comp)) {
-		so->so_options |= SO_ACCEPTCONN;
-	}
 	/*
 	 * POSIX: The implementation may have an upper limit on the length of
 	 * the listen queue-either global or per accepting socket. If backlog
@@ -1666,10 +1672,10 @@ soconnectlock(struct socket *so, struct sockaddr *nam, int dolock)
 	if ((so->so_options & SO_ACCEPTCONN) || (so->so_flags & SOF_DEFUNCT)) {
 		error = EOPNOTSUPP;
 		if (so->so_flags & SOF_DEFUNCT) {
-			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llx [%d,%d] "
+			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llu [%d,%d] "
 			    "(%d)\n", __func__, proc_pid(p),
 			    proc_best_name(p),
-			    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+			    so->so_gencnt,
 			    SOCK_DOM(so), SOCK_TYPE(so), error);
 		}
 		if (dolock) {
@@ -1789,10 +1795,10 @@ soconnectxlocked(struct socket *so, struct sockaddr *src,
 	if ((so->so_options & SO_ACCEPTCONN) || (so->so_flags & SOF_DEFUNCT)) {
 		error = EOPNOTSUPP;
 		if (so->so_flags & SOF_DEFUNCT) {
-			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llx [%d,%d] "
+			SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llu [%d,%d] "
 			    "(%d)\n", __func__, proc_pid(p),
 			    proc_best_name(p),
-			    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+			    so->so_gencnt,
 			    SOCK_DOM(so), SOCK_TYPE(so), error);
 		}
 		return error;
@@ -2014,9 +2020,9 @@ restart:
 	if (so->so_flags & SOF_DEFUNCT) {
 defunct:
 		error = EPIPE;
-		SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llx [%d,%d] (%d)\n",
+		SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llu [%d,%d] (%d)\n",
 		    __func__, proc_selfpid(), proc_best_name(current_proc()),
-		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    so->so_gencnt,
 		    SOCK_DOM(so), SOCK_TYPE(so), error);
 		return error;
 	}
@@ -3409,9 +3415,9 @@ soreceive(struct socket *so, struct sockaddr **psa, struct uio *uio,
 		struct sockbuf *sb = &so->so_rcv;
 
 		error = ENOTCONN;
-		SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llx [%d,%d] (%d)\n",
+		SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llu [%d,%d] (%d)\n",
 		    __func__, proc_pid(p), proc_best_name(p),
-		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    so->so_gencnt,
 		    SOCK_DOM(so), SOCK_TYPE(so), error);
 		/*
 		 * This socket should have been disconnected and flushed
@@ -4261,9 +4267,9 @@ soreceive_list(struct socket *so, struct recv_msg_elem *msgarray, u_int uiocnt,
 		struct sockbuf *sb = &so->so_rcv;
 
 		error = ENOTCONN;
-		SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llx [%d,%d] (%d)\n",
+		SODEFUNCTLOG("%s[%d, %s]: defunct so 0x%llu [%d,%d] (%d)\n",
 		    __func__, proc_pid(p), proc_best_name(p),
-		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    so->so_gencnt,
 		    SOCK_DOM(so), SOCK_TYPE(so), error);
 		/*
 		 * This socket should have been disconnected and flushed
@@ -5539,12 +5545,12 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 				char d[MAX_IPv6_STR_LEN];
 				struct inpcb *inp = sotoinpcb(so);
 
-				SODEFUNCTLOG("%s[%d, %s]: so 0x%llx "
+				SODEFUNCTLOG("%s[%d, %s]: so 0x%llu "
 				    "[%s %s:%d -> %s:%d] is now marked "
 				    "as %seligible for "
 				    "defunct\n", __func__, proc_selfpid(),
 				    proc_best_name(current_proc()),
-				    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+				    so->so_gencnt,
 				    (SOCK_TYPE(so) == SOCK_STREAM) ?
 				    "TCP" : "UDP", inet_ntop(SOCK_DOM(so),
 				    ((SOCK_DOM(so) == PF_INET) ?
@@ -5559,12 +5565,12 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 				    (so->so_flags & SOF_NODEFUNCT) ?
 				    "not " : "");
 			} else {
-				SODEFUNCTLOG("%s[%d, %s]: so 0x%llx [%d,%d] "
+				SODEFUNCTLOG("%s[%d, %s]: so 0x%llu [%d,%d] "
 				    "is now marked as %seligible for "
 				    "defunct\n",
 				    __func__, proc_selfpid(),
 				    proc_best_name(current_proc()),
-				    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+				    so->so_gencnt,
 				    SOCK_DOM(so), SOCK_TYPE(so),
 				    (so->so_flags & SOF_NODEFUNCT) ?
 				    "not " : "");
@@ -7559,12 +7565,12 @@ sosetdefunct(struct proc *p, struct socket *so, int level, boolean_t noforce)
 			err = EOPNOTSUPP;
 			if (p != PROC_NULL) {
 				SODEFUNCTLOG("%s[%d, %s]: (target pid %d "
-				    "name %s level %d) so 0x%llx [%d,%d] "
+				    "name %s level %d) so 0x%llu [%d,%d] "
 				    "is not eligible for defunct "
 				    "(%d)\n", __func__, proc_selfpid(),
 				    proc_best_name(current_proc()), proc_pid(p),
 				    proc_best_name(p), level,
-				    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+				    so->so_gencnt,
 				    SOCK_DOM(so), SOCK_TYPE(so), err);
 			}
 			return err;
@@ -7572,12 +7578,12 @@ sosetdefunct(struct proc *p, struct socket *so, int level, boolean_t noforce)
 		so->so_flags &= ~SOF_NODEFUNCT;
 		if (p != PROC_NULL) {
 			SODEFUNCTLOG("%s[%d, %s]: (target pid %d "
-			    "name %s level %d) so 0x%llx [%d,%d] "
+			    "name %s level %d) so 0x%llu [%d,%d] "
 			    "defunct by force "
 			    "(%d)\n", __func__, proc_selfpid(),
 			    proc_best_name(current_proc()), proc_pid(p),
 			    proc_best_name(p), level,
-			    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+			    so->so_gencnt,
 			    SOCK_DOM(so), SOCK_TYPE(so), err);
 		}
 	} else if (so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) {
@@ -7601,12 +7607,12 @@ sosetdefunct(struct proc *p, struct socket *so, int level, boolean_t noforce)
 
 			err = EOPNOTSUPP;
 			SODEFUNCTLOG("%s[%d, %s]: (target pid %d "
-			    "name %s level %d) so 0x%llx [%d,%d] "
+			    "name %s level %d) so 0x%llu [%d,%d] "
 			    "extend bk idle "
 			    "(%d)\n", __func__, proc_selfpid(),
 			    proc_best_name(current_proc()), proc_pid(p),
 			    proc_best_name(p), level,
-			    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+			    so->so_gencnt,
 			    SOCK_DOM(so), SOCK_TYPE(so), err);
 			return err;
 		} else {
@@ -7635,10 +7641,10 @@ sosetdefunct(struct proc *p, struct socket *so, int level, boolean_t noforce)
 done:
 	if (p != PROC_NULL) {
 		SODEFUNCTLOG("%s[%d, %s]: (target pid %d name %s level %d) "
-		    "so 0x%llx [%d,%d] %s defunct%s\n", __func__,
+		    "so 0x%llu [%d,%d] %s defunct%s\n", __func__,
 		    proc_selfpid(), proc_best_name(current_proc()),
 		    proc_pid(p), proc_best_name(p), level,
-		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so), SOCK_DOM(so),
+		    so->so_gencnt, SOCK_DOM(so),
 		    SOCK_TYPE(so), defunct ? "is already" : "marked as",
 		    (so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) ?
 		    " extbkidle" : "");
@@ -7670,12 +7676,12 @@ sodefunct(struct proc *p, struct socket *so, int level)
 		if (p != PROC_NULL) {
 			SODEFUNCTLOG(
 				"%s[%d, %s]: (target pid %d name %s level %d) "
-				"so 0x%llx [%s %s:%d -> %s:%d] is now defunct "
+				"so 0x%llu [%s %s:%d -> %s:%d] is now defunct "
 				"[rcv_si 0x%x, snd_si 0x%x, rcv_fl 0x%x, "
 				" snd_fl 0x%x]\n", __func__,
 				proc_selfpid(), proc_best_name(current_proc()),
 				proc_pid(p), proc_best_name(p), level,
-				(uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+				so->so_gencnt,
 				(SOCK_TYPE(so) == SOCK_STREAM) ? "TCP" : "UDP",
 				inet_ntop(SOCK_DOM(so), ((SOCK_DOM(so) == PF_INET) ?
 				(void *)&inp->inp_laddr.s_addr :
@@ -7691,16 +7697,21 @@ sodefunct(struct proc *p, struct socket *so, int level)
 		}
 	} else if (p != PROC_NULL) {
 		SODEFUNCTLOG("%s[%d, %s]: (target pid %d name %s level %d) "
-		    "so 0x%llx [%d,%d] is now defunct [rcv_si 0x%x, "
+		    "so 0x%llu [%d,%d] is now defunct [rcv_si 0x%x, "
 		    "snd_si 0x%x, rcv_fl 0x%x, snd_fl 0x%x]\n", __func__,
 		    proc_selfpid(), proc_best_name(current_proc()),
 		    proc_pid(p), proc_best_name(p), level,
-		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    so->so_gencnt,
 		    SOCK_DOM(so), SOCK_TYPE(so),
 		    (uint32_t)rcv->sb_sel.si_flags,
 		    (uint32_t)snd->sb_sel.si_flags, rcv->sb_flags,
 		    snd->sb_flags);
 	}
+
+	/*
+	 * First tell the protocol the flow is defunct
+	 */
+	(void)  (*so->so_proto->pr_usrreqs->pru_defunct)(so);
 
 	/*
 	 * Unwedge threads blocked on sbwait() and sb_lock().
@@ -7762,11 +7773,11 @@ soresume(struct proc *p, struct socket *so, int locked)
 	}
 
 	if (so->so_flags1 & SOF1_EXTEND_BK_IDLE_INPROG) {
-		SODEFUNCTLOG("%s[%d, %s]: (target pid %d name %s) so 0x%llx "
+		SODEFUNCTLOG("%s[%d, %s]: (target pid %d name %s) so 0x%llu "
 		    "[%d,%d] resumed from bk idle\n",
 		    __func__, proc_selfpid(), proc_best_name(current_proc()),
 		    proc_pid(p), proc_best_name(p),
-		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    so->so_gencnt,
 		    SOCK_DOM(so), SOCK_TYPE(so));
 
 		so->so_flags1 &= ~SOF1_EXTEND_BK_IDLE_INPROG;
@@ -7843,10 +7854,10 @@ so_set_extended_bk_idle(struct socket *so, int optval)
 			so->so_flags1 |= SOF1_EXTEND_BK_IDLE_WANTED;
 			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_wantok);
 		}
-		SODEFUNCTLOG("%s[%d, %s]: so 0x%llx [%d,%d] "
+		SODEFUNCTLOG("%s[%d, %s]: so 0x%llu [%d,%d] "
 		    "%s marked for extended bk idle\n",
 		    __func__, proc_selfpid(), proc_best_name(current_proc()),
-		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    so->so_gencnt,
 		    SOCK_DOM(so), SOCK_TYPE(so),
 		    (so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) ?
 		    "is" : "not");
@@ -7898,9 +7909,9 @@ so_check_extended_bk_idle_time(struct socket *so)
 	int ret = 1;
 
 	if ((so->so_flags1 & SOF1_EXTEND_BK_IDLE_INPROG)) {
-		SODEFUNCTLOG("%s[%d, %s]: so 0x%llx [%d,%d]\n",
+		SODEFUNCTLOG("%s[%d, %s]: so 0x%llu [%d,%d]\n",
 		    __func__, proc_selfpid(), proc_best_name(current_proc()),
-		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    so->so_gencnt,
 		    SOCK_DOM(so), SOCK_TYPE(so));
 		if (net_uptime() - so->so_extended_bk_start >
 		    soextbkidlestat.so_xbkidle_time) {

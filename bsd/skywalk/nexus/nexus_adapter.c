@@ -72,7 +72,7 @@ static void na_unset_ringid(struct kern_channel *);
 static void na_teardown(struct nexus_adapter *, struct kern_channel *,
     boolean_t);
 
-static int na_kr_create(struct nexus_adapter *, uint32_t, boolean_t);
+static int na_kr_create(struct nexus_adapter *, boolean_t);
 static void na_kr_delete(struct nexus_adapter *);
 static int na_kr_setup(struct nexus_adapter *, struct kern_channel *);
 static void na_kr_teardown_all(struct nexus_adapter *, struct kern_channel *,
@@ -108,8 +108,7 @@ static int na_packet_pool_free_buf_sync(struct __kern_channel_ring *,
 
 #define NA_KRING_IDLE_TIMEOUT   (NSEC_PER_SEC * 30) /* 30 seconds */
 
-static ZONE_DEFINE(na_pseudo_zone, SKMEM_ZONE_PREFIX ".na.pseudo",
-    sizeof(struct nexus_adapter), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(na_pseudo_zone, struct nexus_adapter);
 
 static int __na_inited = 0;
 
@@ -1342,21 +1341,14 @@ na_kr_get_pp(struct nexus_adapter *na, enum txrx t)
  *                       |          | \
  *                       |          |  } na->na_num_event_rings
  *                       |          | /
- *                       +----------+
- * na->na_tailroom ----->|          | \
- *                       |          |  } tailroom bytes
- *                       |          | /
- *                       +----------+
- *
- * The tailroom space is currently used by flow switch ports for allocating
- * leases.
+ * na->na_tail     ----->+----------+
  */
 /* call with SK_LOCK held */
 static int
-na_kr_create(struct nexus_adapter *na, uint32_t tailroom, boolean_t alloc_ctx)
+na_kr_create(struct nexus_adapter *na, boolean_t alloc_ctx)
 {
 	lck_grp_t *q_lck_grp, *s_lck_grp;
-	uint32_t i, len, ndesc;
+	uint32_t i, count, ndesc;
 	struct kern_pbufpool *pp = NULL;
 	struct __kern_channel_ring *kring;
 	uint32_t n[NR_ALL];
@@ -1371,19 +1363,16 @@ na_kr_create(struct nexus_adapter *na, uint32_t tailroom, boolean_t alloc_ctx)
 	n[NR_F] = na_get_nrings(na, NR_F);
 	n[NR_EV] = na_get_nrings(na, NR_EV);
 
-	len = ((n[NR_TX] + n[NR_RX] + n[NR_A] + n[NR_F] + n[NR_EV]) *
-	    sizeof(struct __kern_channel_ring)) + tailroom;
+	count = n[NR_TX] + n[NR_RX] + n[NR_A] + n[NR_F] + n[NR_EV];
 
-	na->na_rings_mem_sz = (size_t)len;
-	// rdar://88962126
-	__typed_allocators_ignore_push
-	na->na_tx_rings = sk_alloc((size_t)len, Z_WAITOK, skmem_tag_nx_rings);
-	__typed_allocators_ignore_pop
+	na->na_tx_rings = sk_alloc_type_array(struct __kern_channel_ring, count,
+	    Z_WAITOK, skmem_tag_nx_rings);
 	if (__improbable(na->na_tx_rings == NULL)) {
 		SK_ERR("Cannot allocate krings");
 		err = ENOMEM;
 		goto error;
 	}
+
 	na->na_rx_rings = na->na_tx_rings + n[NR_TX];
 	if (n[NR_A] != 0) {
 		na->na_alloc_rings = na->na_rx_rings + n[NR_RX];
@@ -1616,7 +1605,7 @@ na_kr_create(struct nexus_adapter *na, uint32_t tailroom, boolean_t alloc_ctx)
 		    na->na_ch_mit_ival);
 	}
 	ASSERT(c == 0);
-	na->na_tailroom = na->na_rx_rings + n[NR_RX] + n[NR_A] + n[NR_F];
+	na->na_tail = na->na_rx_rings + n[NR_RX] + n[NR_A] + n[NR_F];
 
 	if (na->na_type == NA_NETIF_DEV) {
 		na_kr_setup_netif_svc_map(na);
@@ -1629,11 +1618,8 @@ na_kr_create(struct nexus_adapter *na, uint32_t tailroom, boolean_t alloc_ctx)
 error:
 	ASSERT(err != 0);
 	if (na->na_tx_rings != NULL) {
-		// rdar://88962126
-		__typed_allocators_ignore_push
-		sk_free(na->na_tx_rings, na->na_rings_mem_sz);
-		__typed_allocators_ignore_pop
-		na->na_tx_rings = NULL;
+		sk_free_type_array(struct __kern_channel_ring,
+		    na->na_tail - na->na_tx_rings, na->na_tx_rings);
 	}
 	if (na->na_slot_ctxs != NULL) {
 		ASSERT(na->na_flags & NAF_SLOT_CONTEXT);
@@ -1659,14 +1645,14 @@ na_kr_delete(struct nexus_adapter *na)
 	struct __kern_channel_ring *kring = na->na_tx_rings;
 	enum txrx t;
 
-	ASSERT((kring != NULL) && (na->na_tailroom != NULL));
+	ASSERT((kring != NULL) && (na->na_tail != NULL));
 	SK_LOCK_ASSERT_HELD();
 
 	for_all_rings(t) {
 		csi_destroy(&na->na_si[t]);
 	}
 	/* we rely on the krings layout described above */
-	for (; kring != na->na_tailroom; kring++) {
+	for (; kring != na->na_tail; kring++) {
 		lck_mtx_destroy(&kring->ckr_qlock, kring->ckr_qlock_group);
 		lck_spin_destroy(&kring->ckr_slock, kring->ckr_slock_group);
 		csi_destroy(&kring->ckr_si);
@@ -1691,12 +1677,10 @@ na_kr_delete(struct nexus_adapter *na)
 		na->na_scratch = NULL;
 	}
 	ASSERT(!(na->na_flags & NAF_SLOT_CONTEXT));
-	// rdar://88962126
-	__typed_allocators_ignore_push
-	sk_free(na->na_tx_rings, na->na_rings_mem_sz);
-	__typed_allocators_ignore_pop
+	sk_free_type_array(struct __kern_channel_ring,
+	    na->na_tail - na->na_tx_rings, na->na_tx_rings);
 	na->na_tx_rings = na->na_rx_rings = na->na_alloc_rings =
-	    na->na_free_rings = na->na_event_rings = na->na_tailroom = NULL;
+	    na->na_free_rings = na->na_event_rings = na->na_tail = NULL;
 }
 
 static void
@@ -2339,7 +2323,7 @@ na_kr_depopulate_slots(struct __kern_channel_ring *kring,
 }
 
 int
-na_rings_mem_setup(struct nexus_adapter *na, uint32_t tailroom,
+na_rings_mem_setup(struct nexus_adapter *na,
     boolean_t alloc_ctx, struct kern_channel *ch)
 {
 	boolean_t kronly;
@@ -2357,12 +2341,8 @@ na_rings_mem_setup(struct nexus_adapter *na, uint32_t tailroom,
 	/*
 	 * Create and initialize the common fields of the krings array.
 	 * using the information that must be already available in the na.
-	 * tailroom can be used to request the allocation of additional
-	 * tailroom bytes after the krings array.  This is used by
-	 * nexus_vp_adapter's (i.e., flow switch ports) to make room
-	 * for leasing-related data structures.
 	 */
-	if ((err = na_kr_create(na, tailroom, alloc_ctx)) == 0 && !kronly) {
+	if ((err = na_kr_create(na, alloc_ctx)) == 0 && !kronly) {
 		err = na_kr_setup(na, ch);
 		if (err != 0) {
 			na_kr_delete(na);
@@ -3076,7 +3056,7 @@ na_pseudo_dtor(struct nexus_adapter *na)
 static int
 na_pseudo_krings_create(struct nexus_adapter *na, struct kern_channel *ch)
 {
-	return na_rings_mem_setup(na, 0, FALSE, ch);
+	return na_rings_mem_setup(na, FALSE, ch);
 }
 
 static void

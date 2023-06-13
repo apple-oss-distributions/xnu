@@ -49,6 +49,7 @@ __BEGIN_DECLS
 #include <pexpert/arm64/board_config.h>
 #endif
 
+#include <vm/pmap.h>
 #include <kern/lock_rw.h>
 #include <TrustCache/API.h>
 
@@ -102,6 +103,15 @@ extern bool ppl_developer_mode_set;
 
 /* State of developer mode on the system */
 extern bool ppl_developer_mode_storage;
+
+/**
+ * Check the PPL trust cache runtime if a particular trust cache has already been
+ * loaded based on its UUID. The PPL trust cache runtime is kept locked as shared
+ * during the function.
+ */
+kern_return_t
+pmap_check_trust_cache_runtime_for_uuid(
+	const uint8_t check_uuid[kUUIDSize]);
 
 /**
  * Load an image4 trust cache of a particular type into the PPL. If validation succeeds,
@@ -424,6 +434,13 @@ typedef struct pmap_cs_code_directory {
 			vm_size_t cms_leaf_size;
 
 			/*
+			 * A pointer to the entitlements structure maintained by the kernel. We don't really
+			 * care about this other than maintaing a link to it in memory which isn't writable
+			 * by the kernel.
+			 */
+			const void *kernel_entitlements;
+
+			/*
 			 * The UBC layer may request the PPL to unlock the unneeded part of the code signature.
 			 * We hold this boolean to track whether we have unlocked those unneeded bits already or
 			 * not.
@@ -435,6 +452,54 @@ typedef struct pmap_cs_code_directory {
 		struct pmap_cs_code_directory *pmap_cs_code_directory_next;
 	};
 } pmap_cs_code_directory_t;
+
+typedef struct pmap_cs_lookup_results {
+	/* Start of the code region */
+	vm_map_address_t region_addr;
+
+	/* Size of the code region */
+	vm_map_size_t region_size;
+
+	/* Code signature backing the code region */
+	struct pmap_cs_code_directory *region_sig;
+} pmap_cs_lookup_results_t;
+
+typedef struct _pmap_cs_ce_acceleration_buffer {
+	/* Magic to identify this structure */
+	uint16_t magic;
+
+	/*
+	 * The acceleration buffer can come from one of two places. First, it can come
+	 * from the extra space present within the locked down code signature as not
+	 * all of it is used all the time. In this case, we don't need to free the
+	 * buffer once we're done using it. Second, it can come from the bucket allocator
+	 * within the PPL, in which case we need to deallocate this after we're done with
+	 * it.
+	 */
+	union {
+		uint16_t unused0;
+		bool allocated;
+	};
+
+	/* The length of the acceleration buffer */
+	uint32_t length;
+
+	/* The embedded buffer bytes */
+	uint8_t buffer[0];
+} __attribute__((packed)) pmap_cs_ce_acceleration_buffer_t;
+
+/* Ensure we have a known overhead here */
+_Static_assert(sizeof(pmap_cs_ce_acceleration_buffer_t) == 8,
+    "sizeof(pmap_cs_ce_acceleration_buffer_t) != 8");
+
+#define PMAP_CS_ACCELERATION_BUFFER_MAGIC (0x1337u)
+
+#define PMAP_CS_ASSOCIATE_JIT ((void *) -1)
+#define PMAP_CS_ASSOCIATE_COW ((void *) -2)
+#define PMAP_CS_LOCAL_SIGNING_KEY_SIZE 97
+
+/* Maximum blob sized managed by the PPL on its own */
+extern const size_t pmap_cs_blob_limit;
 
 /**
  * Initialize the red-black tree and the locks for managing provisioning profiles within
@@ -491,6 +556,176 @@ kern_return_t
 pmap_disassociate_provisioning_profile(
 	pmap_cs_code_directory_t *cd_entry);
 
+/**
+ * Store the compilation service CDHash within the PPL storage so that it may not be
+ * modified by an attacker. The CDHash being stored must represent a library and this
+ * is enforced during signature validation when a signature is trusted because it
+ * matched the compilation service CDHash.
+ */
+void
+pmap_set_compilation_service_cdhash(const uint8_t cdhash[CS_CDHASH_LEN]);
+
+/**
+ * Match a specified CDHash against the stored compilation service CDHash. The CDHash
+ * is protected with a lock, and that lock is held when the matching takes place in
+ * order to ensure we don't compare against a CDHash which is in the process of changing.
+ */
+bool
+pmap_match_compilation_service_cdhash(const uint8_t cdhash[CS_CDHASH_LEN]);
+
+/**
+ * Store the local signing public key in secured storage within the PPL. The PPL only
+ * allows setting a key once, and subsequent attempts to do this will panic the system.
+ *
+ * This key is used during CoreTrust validation of signatures during code signature
+ * verification.
+ */
+void
+pmap_set_local_signing_public_key(
+	const uint8_t public_key[PMAP_CS_LOCAL_SIGNING_KEY_SIZE]);
+
+/**
+ * Acquire the local signing public key which was previusly stored within the PPL. If
+ * there is no key stored in the PPL, then this function shall return NULL.
+ */
+uint8_t*
+pmap_get_local_signing_public_key(void);
+
+/**
+ * All locally signed main binaries need to be authorixed explicitly before they are
+ * allowed to run. As part of this, this API allows an application to register a CDHash
+ * for the main binary it is intending to run.
+ *
+ * Use of this API requires the appropriate entitlement.
+ */
+void
+pmap_unrestrict_local_signing(
+	const uint8_t cdhash[CS_CDHASH_LEN]);
+
+/**
+ * Register a code signature blob with the PPL. If the blob size is small enough, the
+ * PPL will copy the entire blob into its own allocated memory. On the other hand, if
+ * the blob is large, the PPL will attempt to lockdown the passed in blob, and doing
+ * so will require that the address and size provided are page aligned.
+ *
+ * After validation, the signature will be added to an internal red-black tree, allowing
+ * the PPL to safely enumerate all registered code signatures.
+ */
+kern_return_t
+pmap_cs_register_code_signature_blob(
+	vm_address_t blob_addr,
+	vm_size_t blob_size,
+	vm_offset_t code_directory_offset,
+	pmap_cs_code_directory_t **cd_entry);
+
+/**
+ * Unregister a code signature blob from the PPL. The signature address is either freed
+ * in case it was owned by the PPL, or it is unlocked in case it was XNU-owned by was PPL
+ * locked.
+ *
+ * If the memory is unlocked, then the kernel is free to do with the memory as it pleases.
+ * Note that this function may not deallocate the cd_entry itself, in case the cd_entry
+ * has any reference counts on it. In that case, the cd_entry is retired, and finally
+ * freed when the final code region which references the cd_entry is freed.
+ */
+kern_return_t
+pmap_cs_unregister_code_signature_blob(
+	pmap_cs_code_directory_t *cd_entry);
+
+/**
+ * Verify a signature within the PPL. Once a signature has been verified, it gets assigned
+ * a trust level, and based on that trust level, the cd_entry is then allowed to be
+ * associated with address spaces.
+ */
+kern_return_t
+pmap_cs_verify_code_signature_blob(
+	pmap_cs_code_directory_t *cd_entry);
+
+/**
+ * Once we've verified a code signature, not all blobs from the signature are required
+ * going forward. This function can be used to unlock parts of the code signature which
+ * can then be freed by the kernel to conserve memory.
+ */
+kern_return_t
+pmap_cs_unlock_unneeded_code_signature(
+	pmap_cs_code_directory_t *cd_entry,
+	vm_address_t *unneeded_addr,
+	vm_size_t *unneeded_size);
+
+/**
+ * Create an association of a cd_entry within a code region in the pmap. If the cd_entry
+ * is a main binary, then it is set as the main region of the pmap, otherwise the cd_entry
+ * is evaluated for a library validation policy against the main binary of the pmap.
+ */
+kern_return_t
+pmap_cs_associate(
+	pmap_t pmap,
+	pmap_cs_code_directory_t *cd_entry,
+	vm_map_address_t vaddr,
+	vm_map_size_t vsize,
+	vm_object_offset_t offset);
+
+/**
+ * Iterate through the code regions present in the SPLAY tree for checking if the specified
+ * address intersects with any code region or not.
+ */
+void
+pmap_cs_lookup(
+	pmap_t pmap,
+	vm_map_address_t vaddr,
+	pmap_cs_lookup_results_t *results);
+
+/**
+ * Let the PPL know that the associated pmap needs to be debugged and therefore it needs
+ * to allow invalid code to be mapped in. PPL shall only allow this when the pmap posseses
+ * the appropriate debuggee entitlement.
+ */
+kern_return_t
+pmap_cs_allow_invalid(pmap_t pmap);
+
+/**
+ * Copy over the main binary association from the old address space to the new address
+ * space. This is required since a fork copies over all associations from one address space
+ * to another, and we need to make sure the main binary association is made before any
+ * libraries are mapped in.
+ */
+kern_return_t
+pmap_cs_fork_prepare(
+	pmap_t old_pmap,
+	pmap_t new_pmap);
+
+/**
+ * Keep a reference to the kernel entitlements data structure within the cd_entry in
+ * order to establish a read-only chain for the kernel to query in order to resolve the
+ * entitlements on an address space.
+ */
+kern_return_t
+pmap_associate_kernel_entitlements(
+	pmap_cs_code_directory_t *cd_entry,
+	const void *kernel_entitlements);
+
+/**
+ * Resolve the kernel entitlements object attached to the main binary of an address space
+ * and return it back to the kernel.
+ */
+kern_return_t
+pmap_resolve_kernel_entitlements(
+	pmap_t pmap,
+	const void **kernel_entitlements);
+
+/**
+ * Accelerate the CoreEntitlements context for a particular cd_entry. This operation can
+ * only be performed on reconstituted code signatures, and accelerates the context using
+ * memory which is locked by the PPL.
+ *
+ * If the code signature pages have enough space left within them, then that extra space
+ * is used for allocating the acceleration buffer, otherwise we tap into the allocator
+ * for it.
+ */
+kern_return_t
+pmap_accelerate_entitlements(
+	pmap_cs_code_directory_t *cd_entry);
+
 #endif /* PMAP_CS_INCLUDE_CODE_SIGNING */
 
 #endif /* XNU_KERNEL_PRIVATE */
@@ -503,6 +738,12 @@ pmap_disassociate_provisioning_profile(
 
 /* Availability macros for developer mode */
 #define PMAP_SUPPORTS_DEVELOPER_MODE 1
+
+/**
+ * Check if the PPL based code signing is enabled on the system or not.
+ */
+bool
+pmap_cs_enabled(void);
 
 /**
  * The PPl allocates some space for AppleImage4 to store some of its data. It needs to

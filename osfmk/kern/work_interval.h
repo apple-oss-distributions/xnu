@@ -114,6 +114,7 @@ __enum_closed_decl(wi_class_t, uint8_t, {
 	WI_CLASS_SYSTEM_CRITICAL   = 5,
 	WI_CLASS_REALTIME          = 6,
 	WI_CLASS_REALTIME_CRITICAL = 7,
+	WI_CLASS_APP_SUPPORT       = 8,
 
 	WI_CLASS_COUNT
 });

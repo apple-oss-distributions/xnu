@@ -977,6 +977,7 @@ extern void pfxlist_onlink_check(void);
 extern void defrouter_set_reachability(struct in6_addr *, struct ifnet *, boolean_t);
 extern struct nd_defrouter *defrouter_lookup(struct nd_drhead *,
     struct in6_addr *, struct ifnet *);
+extern struct nd_pfxrouter *pfxrtr_lookup(struct nd_prefix *, struct nd_defrouter *);
 extern struct nd_prefix *nd6_prefix_lookup(struct nd_prefix *, int);
 extern int in6_init_prefix_ltimes(struct nd_prefix *ndpr);
 extern void rt6_flush(struct in6_addr *, struct ifnet *);

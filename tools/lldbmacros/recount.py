@@ -50,7 +50,7 @@ def Recount(cmd_args=None, cmd_options={}, O=None):  # noqa: E741
     elif cmd_args[0] == 'diagnose':
         RecountDiagnose(cmd_args[1:], cmd_options=cmd_options, O=O)
     elif cmd_args[0] == 'triage':
-        validate_arg(cmd_options, [])
+        validate_args(cmd_options, [])
         RecountTriage(cmd_options=cmd_options, O=O)
     else:
         raise ArgumentError('{}: invalid subcommand'.format(cmd_args[0]))
@@ -316,6 +316,7 @@ def print_task_description(task):
         duration_desc = '-s'
     print('task 0x{:x} {} ({} old)'.format(
             unsigned(task), task_name, duration_desc))
+    return task_name
 
 
 def RecountTask(task_ptrs, cmd_options={}, O=None):  # noqa: E741
@@ -330,7 +331,7 @@ def RecountTask(task_ptrs, cmd_options={}, O=None):  # noqa: E741
     if active_threads:
         thread_plan = RecountPlan('thread', mach_times=mach_times)
     for task in tasks:
-        print_task_description(task)
+        task_name = print_task_description(task)
         with O.table(plan.usage_header()):
             print(plan.format_tracks(task.tk_recount.rtk_lifetime, O=O))
             if active_threads:
@@ -425,7 +426,7 @@ def RecountProcessor(pr_ptrs_or_ids, cmd_options={}, O=None):  # noqa: E741
 @header('{:>4s} {:>20s} {:>20s} {:>20s}'.format(
         'cpu', 'time-mach', 'cycles', 'insns'))
 def GetRecountSnapshot(cpu, snap, O=None):
-    (insns, cycles, energy) = (0, 0, 0)
+    (insns, cycles) = (0, 0)
     if hasattr(snap, 'rsn_cycles'):
         (insns, cycles) = (snap.rsn_insns, snap.rsn_cycles)
     return O.format(
@@ -436,16 +437,18 @@ def GetRecountSnapshot(cpu, snap, O=None):
 def GetRecountProcessorState(pr):
     state_time = pr.pr_recount.rpr_state_last_abs_time
     state = state_time >> 63
-    return ('I' if state == 1 else 'A', state_time & ~(0x1 << 63))
+    return (
+        pr.pr_recount.rpr_snap,
+        'I' if state == 1 else 'A',
+        state_time & ~(0x1 << 63))
 
 
 @header('{:>20s} {:>4s} {:>6s} {:>18s} {:>18s} {:>18s} {:>18s} {:>18s}'.format(
         'processor', 'cpu', 'state', 'last-idle-change', 'last-user-change',
         'last-disp', 'since-idle-change', 'since-user-change'))
 def GetRecountProcessorDiagnostics(pr, cur_time, O=None):
-    (state, time) = GetRecountProcessorState(pr)
+    (snap, state, time) = GetRecountProcessorState(pr)
     cpu_id = unsigned(pr.cpu_id)
-    snap = kern.PERCPU_GET('_snaps_percpu', cpu_id)
     last_usrchg = snap.rsn_time_mach
     since_usrchg = cur_time - last_usrchg
     last_disp = '{}{:>d}'.format(
@@ -517,7 +520,5 @@ def RecountTriage(cmd_options={}, O=None):  # noqa: E741
 
     print('snapshots')
     with O.table(GetRecountSnapshot.header, indent=True):
-        ncpus = unsigned(kern.globals.real_ncpus)
-        for i in range(ncpus):
-            snap = kern.PERCPU_GET('_snaps_percpu', i)
-            print(GetRecountSnapshot(i, snap, O=O))
+        for (i, pr) in enumerate(prs):
+            print(GetRecountSnapshot(i, pr.pr_recount.rpr_snap, O=O))

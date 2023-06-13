@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -452,6 +452,14 @@ if_next_index(void)
 	static int      if_indexlim = 0;
 	int             new_index;
 
+	/*
+	 * Although we are returning an integer,
+	 * ifnet's if_index is a uint16_t which means
+	 * that's our upper bound.
+	 */
+	if (if_index >= UINT16_MAX) {
+		return -1;
+	}
 	new_index = ++if_index;
 	if (if_index > if_indexlim) {
 		unsigned        n;
@@ -688,22 +696,6 @@ found_name:
 	return ifc;
 }
 
-void *
-if_clone_softc_allocate(const struct if_clone *ifc)
-{
-	VERIFY(ifc != NULL);
-
-	return zalloc_flags(ifc->ifc_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-}
-
-void
-if_clone_softc_deallocate(const struct if_clone *ifc, void *p_softc)
-{
-	VERIFY(ifc != NULL && p_softc != NULL);
-	bzero(p_softc, ifc->ifc_softc_size);
-	zfree(ifc->ifc_zone, p_softc);
-}
-
 /*
  * Register a network interface cloner.
  */
@@ -734,11 +726,6 @@ if_clone_attach(struct if_clone *ifc)
 	ifc->ifc_bmlen = len;
 	lck_mtx_init(&ifc->ifc_mutex, &ifnet_lock_group, &ifnet_lock_attr);
 
-	if (ifc->ifc_softc_size != 0) {
-		ifc->ifc_zone = zone_create(ifc->ifc_name, ifc->ifc_softc_size,
-		    ZC_PGZ_USE_GUARDS | ZC_ZFREE_CLEARMEM);
-	}
-
 	LIST_INSERT_HEAD(&if_cloners, ifc, ifc_list);
 	if_cloners_count++;
 
@@ -765,10 +752,6 @@ if_clone_detach(struct if_clone *ifc)
 {
 	LIST_REMOVE(ifc, ifc_list);
 	kfree_data(ifc->ifc_units, ifc->ifc_bmlen);
-	if (ifc->ifc_softc_size != 0) {
-		zdestroy(ifc->ifc_zone);
-	}
-
 	lck_mtx_destroy(&ifc->ifc_mutex, &ifnet_lock_group);
 	if_cloners_count--;
 }
@@ -4453,10 +4436,10 @@ ifnet_set_promiscuous(
 	}
 
 	if (newflags != oldflags) {
-		log(LOG_INFO, "%s: promiscuous mode %s%s\n",
+		log(LOG_INFO, "%s: promiscuous mode %s %s (%d)\n",
 		    if_name(ifp),
 		    (newflags & IFF_PROMISC) != 0 ? "enable" : "disable",
-		    error != 0 ? " failed" : " succeeded");
+		    error != 0 ? "failed" : "succeeded", error);
 	}
 	return error;
 }
@@ -4592,21 +4575,16 @@ ifconf(u_long cmd, user_addr_t ifrp, int *ret_space)
 	return error;
 }
 
-/*
- * Just like if_promisc(), but for all-multicast-reception mode.
- */
-int
-if_allmulti(struct ifnet *ifp, int onswitch)
+static bool
+set_allmulti(struct ifnet * ifp, bool enable)
 {
-	int error = 0;
-	int     modified = 0;
+	bool    changed = false;
 
 	ifnet_lock_exclusive(ifp);
-
-	if (onswitch) {
+	if (enable) {
 		if (ifp->if_amcount++ == 0) {
 			ifp->if_flags |= IFF_ALLMULTI;
-			modified = 1;
+			changed = true;
 		}
 	} else {
 		if (ifp->if_amcount > 1) {
@@ -4614,17 +4592,35 @@ if_allmulti(struct ifnet *ifp, int onswitch)
 		} else {
 			ifp->if_amcount = 0;
 			ifp->if_flags &= ~IFF_ALLMULTI;
-			modified = 1;
+			changed = true;
 		}
 	}
 	ifnet_lock_done(ifp);
+	return changed;
+}
 
-	if (modified) {
+/*
+ * Like ifnet_set_promiscuous(), but for all-multicast-reception mode.
+ */
+int
+if_allmulti(struct ifnet *ifp, int onswitch)
+{
+	bool    enable = onswitch != 0;
+	int     error = 0;
+
+	if (set_allmulti(ifp, enable)) {
+		/* state change, tell the driver */
 		error = ifnet_ioctl(ifp, 0, SIOCSIFFLAGS, NULL);
-	}
-
-	if (error == 0) {
-		rt_ifmsg(ifp);
+		log(LOG_INFO, "%s: %s allmulti %s (%d)\n",
+		    if_name(ifp),
+		    enable ? "enable" : "disable",
+		    error != 0 ? "failed" : "succeeded", error);
+		if (error == 0) {
+			rt_ifmsg(ifp);
+		} else {
+			/* restore the reference count, flags */
+			(void)set_allmulti(ifp, !enable);
+		}
 	}
 	return error;
 }

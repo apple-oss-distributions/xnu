@@ -658,8 +658,7 @@ static LIST_HEAD(_necp_fd_list, necp_fd_data) necp_fd_list;
 static LIST_HEAD(_necp_fd_observer_list, necp_fd_data) necp_fd_observer_list;
 
 #if SKYWALK
-static ZONE_DEFINE(necp_arena_info_zone, "necp.arenainfo",
-    sizeof(struct necp_arena_info), ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(necp_arena_info_zone, struct necp_arena_info, NET_KT_DEFAULT);
 #endif /* !SKYWALK */
 
 static LCK_ATTR_DECLARE(necp_fd_mtx_attr, 0, 0);
@@ -6033,16 +6032,17 @@ necp_find_conn_extension_info(nstat_provider_context ctx,
 		}
 		return necp_find_domain_info_common(client, client->parameters, client->parameters_length, NULL, (nstat_domain_info *)buf);
 
-	case NSTAT_EXTENDED_UPDATE_TYPE_NECP_TLV:
+	case NSTAT_EXTENDED_UPDATE_TYPE_NECP_TLV: {
+		size_t parameters_length = client->parameters_length;
 		if (buf == NULL) {
-			return client->parameters_length;
+			return parameters_length;
 		}
-		if (buf_size < client->parameters_length) {
+		if (buf_size < parameters_length) {
 			return 0;
 		}
-		memcpy(buf, client->parameters, client->parameters_length);
-		return client->parameters_length;
-
+		memcpy(buf, client->parameters, parameters_length);
+		return parameters_length;
+	}
 	case NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_NECP_TLV:
 		if (buf == NULL) {
 			return (client->original_parameters_source != NULL) ? client->original_parameters_source->parameters_length : 0;
@@ -6902,6 +6902,7 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 
 	client = kalloc_type(struct necp_client, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	client->parameters = kalloc_data(buffer_size, Z_WAITOK | Z_NOFAIL);
+	client->parameters_length = buffer_size;
 	lck_mtx_init(&client->lock, &necp_fd_mtx_grp, &necp_fd_mtx_attr);
 	lck_mtx_init(&client->route_lock, &necp_fd_mtx_grp, &necp_fd_mtx_attr);
 
@@ -6913,7 +6914,6 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 
 	os_ref_init(&client->reference_count, &necp_client_refgrp); // Hold our reference until close
 
-	client->parameters_length = buffer_size;
 	client->proc_pid = fd_data->proc_pid; // Save off proc pid in case the client will persist past fd
 	client->agent_handle = (void *)fd_data;
 	client->platform_binary = ((csproc_get_platform_binary(p) == 0) ? 0 : 1);
@@ -6983,6 +6983,7 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 		uint32_t *netns_addr = NULL;
 		uint8_t netns_addr_len = 0;
 		struct ns_flow_info flow_info = {};
+		uint32_t netns_flags = NETNS_LISTENER;
 		uuid_copy(flow_info.nfi_flow_uuid, client->client_id);
 		flow_info.nfi_protocol = parsed_parameters.ip_protocol;
 		flow_info.nfi_owner_pid = client->proc_pid;
@@ -7021,9 +7022,13 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 			goto done;
 		}
 		}
+		if ((parsed_parameters.valid_fields & NECP_PARSED_PARAMETERS_FIELD_FLAGS) &&
+		    (parsed_parameters.flags & NECP_CLIENT_PARAMETER_FLAG_REUSE_LOCAL)) {
+			netns_flags |= NETNS_REUSEPORT;
+		}
 		if (parsed_parameters.local_addr.sin.sin_port == 0) {
 			error = netns_reserve_ephemeral(&client->port_reservation, netns_addr, netns_addr_len, parsed_parameters.ip_protocol,
-			    &parsed_parameters.local_addr.sin.sin_port, NETNS_LISTENER, &flow_info);
+			    &parsed_parameters.local_addr.sin.sin_port, netns_flags, &flow_info);
 			if (error) {
 				NECPLOG(LOG_ERR, "necp_client_add netns_reserve_ephemeral error (%d)", error);
 				goto done;
@@ -7033,7 +7038,7 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 			necp_client_update_local_port_parameters(client->parameters, (u_int32_t)client->parameters_length, parsed_parameters.local_addr.sin.sin_port);
 		} else {
 			error = netns_reserve(&client->port_reservation, netns_addr, netns_addr_len, parsed_parameters.ip_protocol,
-			    parsed_parameters.local_addr.sin.sin_port, NETNS_LISTENER, &flow_info);
+			    parsed_parameters.local_addr.sin.sin_port, netns_flags, &flow_info);
 			if (error) {
 				NECPLOG(LOG_ERR, "necp_client_add netns_reserve error (%d)", error);
 				goto done;
@@ -7177,6 +7182,12 @@ necp_client_claim(struct proc *p, struct necp_fd_data *fd_data, struct necp_clie
 		goto done;
 	}
 
+	if (necp_client_id_is_flow(client_id)) {
+		NECPLOG0(LOG_ERR, "necp_client_claim cannot claim from flow UUID");
+		error = EINVAL;
+		goto done;
+	}
+
 	u_int64_t upid = proc_uniqueid(p);
 
 	NECP_FD_LIST_LOCK_SHARED();
@@ -7186,7 +7197,8 @@ necp_client_claim(struct proc *p, struct necp_fd_data *fd_data, struct necp_clie
 		NECP_FD_LOCK(find_fd);
 		struct necp_client *find_client = necp_client_fd_find_client_and_lock(find_fd, client_id);
 		if (find_client != NULL) {
-			if (find_client->delegated_upid == upid) {
+			if (find_client->delegated_upid == upid &&
+			    RB_EMPTY(&find_client->flow_registrations)) {
 				// Matched the client to claim; remove from the old fd
 				client = find_client;
 				RB_REMOVE(_necp_client_tree, &find_fd->clients, client);
@@ -8245,16 +8257,28 @@ necp_client_add_flow(struct necp_fd_data *fd_data, struct necp_client_action_arg
 
 	NECP_CLIENT_FLOW_LOG(client, new_registration, "adding flow");
 
+	size_t trailer_offset = (sizeof(struct necp_client_add_flow) +
+	    add_request->stats_request_count * sizeof(struct necp_client_flow_stats));
+
 	// Copy override address
 	if (add_request->flags & NECP_CLIENT_FLOW_FLAGS_OVERRIDE_ADDRESS) {
-		size_t offset_of_address = (sizeof(struct necp_client_add_flow) +
-		    add_request->stats_request_count * sizeof(struct necp_client_flow_stats));
+		size_t offset_of_address = trailer_offset;
 		if (buffer_size >= offset_of_address + sizeof(struct sockaddr_in)) {
 			struct sockaddr *override_address = (struct sockaddr *)(((uint8_t *)add_request) + offset_of_address);
 			if (buffer_size >= offset_of_address + override_address->sa_len &&
 			    override_address->sa_len <= sizeof(parameters.remote_addr)) {
 				memcpy(&parameters.remote_addr, override_address, override_address->sa_len);
+				trailer_offset += override_address->sa_len;
 			}
+		}
+	}
+
+	// Copy override IP protocol
+	if (add_request->flags & NECP_CLIENT_FLOW_FLAGS_OVERRIDE_IP_PROTOCOL) {
+		size_t offset_of_ip_protocol = trailer_offset;
+		if (buffer_size >= offset_of_ip_protocol + sizeof(uint8_t)) {
+			uint8_t *ip_protocol_p = (uint8_t *)(((uint8_t *)add_request) + offset_of_ip_protocol);
+			memcpy(&parameters.ip_protocol, ip_protocol_p, sizeof(uint8_t));
 		}
 	}
 

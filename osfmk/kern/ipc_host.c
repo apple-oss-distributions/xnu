@@ -404,9 +404,11 @@ ipc_port_t
 convert_host_to_port(
 	host_t          host)
 {
-	ipc_port_t port;
+	ipc_port_t port = IP_NULL;
+	__assert_only kern_return_t kr;
 
-	host_get_host_port(host, &port);
+	kr = host_get_host_port(host, &port);
+	assert(kr == KERN_SUCCESS);
 	return port;
 }
 

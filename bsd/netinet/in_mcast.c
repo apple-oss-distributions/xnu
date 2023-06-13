@@ -204,10 +204,8 @@ static TUNABLE(bool, inm_debug, "ifa_debug", false); /* debugging (disabled) */
 #define INM_ZONE_NAME           "in_multi"      /* zone name */
 static struct zone *inm_zone;                   /* zone for in_multi */
 
-static ZONE_DEFINE_TYPE(ipms_zone, "ip_msource", struct ip_msource,
-    ZC_ZFREE_CLEARMEM);
-static ZONE_DEFINE_TYPE(inms_zone, "in_msource", struct in_msource,
-    ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(ipms_zone, struct ip_msource, NET_KT_DEFAULT);
+static KALLOC_TYPE_DEFINE(inms_zone, struct in_msource, NET_KT_DEFAULT);
 
 static LCK_RW_DECLARE_ATTR(in_multihead_lock, &in_multihead_lock_grp,
     &in_multihead_lock_attr);
@@ -271,6 +269,7 @@ imo_grow(struct ip_moptions *imo, uint16_t newmax)
 	struct in_multi         **omships;
 	struct in_mfilter        *nmfilters;
 	struct in_mfilter        *omfilters;
+	int                       err;
 	uint16_t                  idx;
 	uint16_t                  oldmax;
 
@@ -278,39 +277,72 @@ imo_grow(struct ip_moptions *imo, uint16_t newmax)
 
 	nmships = NULL;
 	nmfilters = NULL;
+	err = 0;
 	omships = imo->imo_membership;
 	omfilters = imo->imo_mfilters;
 	oldmax = imo->imo_max_memberships;
+
 	if (newmax == 0) {
 		newmax = ((oldmax + 1) * 2) - 1;
+	} else if (newmax <= oldmax) {
+		/* Nothing to do, exit early. */
+		return 0;
 	}
 
 	if (newmax > IP_MAX_MEMBERSHIPS) {
-		return ETOOMANYREFS;
+		err = ETOOMANYREFS;
+		goto cleanup;
 	}
 
-	if ((nmships = krealloc_type(struct in_multi *, oldmax, newmax,
-	    omships, Z_WAITOK | Z_ZERO)) == NULL) {
-		return ENOMEM;
+	if ((nmships = kalloc_type(struct in_multi *, newmax,
+	    Z_WAITOK | Z_ZERO)) == NULL) {
+		err = ENOMEM;
+		goto cleanup;
 	}
 
-	imo->imo_membership = nmships;
-
-	if ((nmfilters = krealloc_type(struct in_mfilter, oldmax, newmax,
-	    omfilters, Z_WAITOK | Z_ZERO)) == NULL) {
-		return ENOMEM;
+	if ((nmfilters = kalloc_type(struct in_mfilter, newmax,
+	    Z_WAITOK | Z_ZERO)) == NULL) {
+		err = ENOMEM;
+		goto cleanup;
 	}
 
-	imo->imo_mfilters = nmfilters;
+	/* Copy the existing memberships and release the memory. */
+	if (omships != NULL) {
+		VERIFY(oldmax <= newmax);
+		memcpy(nmships, omships, oldmax * sizeof(struct in_multi *));
+		kfree_type(struct in_multi *, oldmax, omships);
+	}
 
-	/* Initialize newly allocated source filter heads. */
+	/* Copy the existing filters and release the memory. */
+	if (omfilters != NULL) {
+		VERIFY(oldmax <= newmax);
+		memcpy(nmfilters, omfilters, oldmax * sizeof(struct in_mfilter));
+		kfree_type(struct in_mfilter, oldmax, omfilters);
+	}
+
+	/* Initialize the newly allocated source filter heads. */
 	for (idx = oldmax; idx < newmax; idx++) {
 		imf_init(&nmfilters[idx], MCAST_UNDEFINED, MCAST_EXCLUDE);
 	}
 
+	imo->imo_membership = nmships;
+	nmships = NULL;
+	imo->imo_mfilters = nmfilters;
+	nmfilters = NULL;
 	imo->imo_max_memberships = newmax;
 
 	return 0;
+
+cleanup:
+	if (nmfilters != NULL) {
+		kfree_type(struct in_mfilter, newmax, nmfilters);
+	}
+
+	if (nmships != NULL) {
+		kfree_type(struct in_multi *, newmax, nmships);
+	}
+
+	return err;
 }
 
 /*
@@ -433,7 +465,7 @@ imo_multi_filter(const struct ip_moptions *imo, const struct ifnet *ifp,
 int
 imo_clone(struct inpcb *from_inp, struct inpcb *to_inp)
 {
-	int i, err = 0;
+	int err = 0;
 	struct ip_moptions *from;
 	struct ip_moptions *to;
 
@@ -460,24 +492,7 @@ imo_clone(struct inpcb *from_inp, struct inpcb *to_inp)
 	 * We're cloning, so drop any existing memberships and source
 	 * filters on the destination ip_moptions.
 	 */
-	for (i = 0; i < to->imo_num_memberships; ++i) {
-		struct in_mfilter *imf;
-
-		imf = to->imo_mfilters ? &to->imo_mfilters[i] : NULL;
-		if (imf != NULL) {
-			imf_leave(imf);
-		}
-
-		(void) in_leavegroup(to->imo_membership[i], imf);
-
-		if (imf != NULL) {
-			imf_purge(imf);
-		}
-
-		INM_REMREF(to->imo_membership[i]);
-		to->imo_membership[i] = NULL;
-	}
-	to->imo_num_memberships = 0;
+	IMO_PURGE_LOCKED(to);
 
 	VERIFY(to->imo_max_memberships != 0 && from->imo_max_memberships != 0);
 	if (to->imo_max_memberships < from->imo_max_memberships) {
@@ -496,7 +511,7 @@ imo_clone(struct inpcb *from_inp, struct inpcb *to_inp)
 	 * Source filtering doesn't apply to OpenTransport socket,
 	 * so simply hold additional reference count per membership.
 	 */
-	for (i = 0; i < from->imo_num_memberships; i++) {
+	for (int i = 0; i < from->imo_num_memberships; i++) {
 		to->imo_membership[i] =
 		    in_addmulti(&from->imo_membership[i]->inm_addr,
 		    from->imo_membership[i]->inm_ifp);
@@ -1652,7 +1667,7 @@ out_imo_locked:
 	IMO_REMREF(imo);        /* from inp_findmoptions() */
 
 	/* schedule timer now that we've dropped the lock(s) */
-	igmp_set_timeout(&itp);
+	igmp_set_fast_timeout(&itp);
 
 	return error;
 }
@@ -2396,7 +2411,7 @@ out_imo_locked:
 	IMO_REMREF(imo);        /* from inp_findmoptions() */
 
 	/* schedule timer now that we've dropped the lock(s) */
-	igmp_set_timeout(&itp);
+	igmp_set_fast_timeout(&itp);
 
 	return error;
 }
@@ -2547,6 +2562,10 @@ inp_leave_group(struct inpcb *inp, struct sockopt *sopt)
 		goto out_locked;
 	}
 	inm = imo->imo_membership[idx];
+	if (inm == NULL) {
+		error = EINVAL;
+		goto out_locked;
+	}
 	imf = &imo->imo_mfilters[idx];
 
 	if (ssa->sin_family != AF_UNSPEC) {
@@ -2628,7 +2647,6 @@ out_imf_rollback:
 	if (is_final) {
 		/* Remove the gap in the membership array and filter array. */
 		VERIFY(inm == imo->imo_membership[idx]);
-		imo->imo_membership[idx] = NULL;
 
 		INM_REMREF(inm);
 
@@ -2637,6 +2655,10 @@ out_imf_rollback:
 			imo->imo_mfilters[idx - 1] = imo->imo_mfilters[idx];
 		}
 		imo->imo_num_memberships--;
+
+		/* Re-initialize the now unused tail of the list */
+		imo->imo_membership[imo->imo_num_memberships] = NULL;
+		imf_init(&imo->imo_mfilters[imo->imo_num_memberships], MCAST_UNDEFINED, MCAST_EXCLUDE);
 	}
 
 out_locked:
@@ -2644,7 +2666,7 @@ out_locked:
 	IMO_REMREF(imo);        /* from inp_findmoptions() */
 
 	/* schedule timer now that we've dropped the lock(s) */
-	igmp_set_timeout(&itp);
+	igmp_set_fast_timeout(&itp);
 
 	return error;
 }
@@ -2954,7 +2976,7 @@ out_imo_locked:
 	IMO_REMREF(imo);        /* from inp_findmoptions() */
 
 	/* schedule timer now that we've dropped the lock(s) */
-	igmp_set_timeout(&itp);
+	igmp_set_fast_timeout(&itp);
 
 	return error;
 }

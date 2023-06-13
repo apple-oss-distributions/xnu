@@ -75,7 +75,7 @@ kc_kind2index(kc_kind_t type)
 	__builtin_unreachable();
 }
 
-void
+MARK_AS_FIXUP_TEXT void
 PE_set_kc_header(kc_kind_t type, kernel_mach_header_t *header, uintptr_t slide)
 {
 	kc_index_t i = kc_kind2index(type);

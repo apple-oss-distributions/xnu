@@ -112,6 +112,9 @@
 
 #include <sys/kdebug.h>
 #include <sys/proc_ro.h>
+#include <sys/codesign.h>
+
+#include <libkern/coreanalytics/coreanalytics.h>
 
 #ifndef offsetof
 #define offsetof(type, member)  ((size_t)(&((type *)0)->member))
@@ -553,6 +556,48 @@ mach_msg_copyin_data_vectors(
 static TUNABLE(bool, allow_legacy_mach_msg, "allow_legacy_mach_msg", false);
 #endif /* DEVELOPMENT || DEBUG */
 
+extern char *proc_name_address(struct proc *p);
+
+CA_EVENT(mach_msg_trap_event,
+    CA_INT, msgh_id,
+    CA_INT, sw_platform,
+    CA_INT, sdk,
+    CA_STATIC_STRING(CA_TEAMID_MAX_LEN), team_id,
+    CA_STATIC_STRING(CA_SIGNINGID_MAX_LEN), signing_id,
+    CA_STATIC_STRING(CA_PROCNAME_LEN), proc_name);
+
+static void
+mach_msg_legacy_send_analytics(
+	mach_msg_id_t msgh_id,
+	uint32_t      platform,
+	uint32_t      sdk)
+{
+	char *proc_name = proc_name_address(current_proc());
+	const char *team_id = csproc_get_teamid(current_proc());
+	const char *signing_id = csproc_get_identity(current_proc());
+
+	ca_event_t ca_event = CA_EVENT_ALLOCATE(mach_msg_trap_event);
+	CA_EVENT_TYPE(mach_msg_trap_event) * msg_event = ca_event->data;
+
+	msg_event->msgh_id = msgh_id;
+	msg_event->sw_platform = platform;
+	msg_event->sdk = sdk;
+
+	if (proc_name) {
+		strlcpy(msg_event->proc_name, proc_name, CA_PROCNAME_LEN);
+	}
+
+	if (team_id) {
+		strlcpy(msg_event->team_id, team_id, CA_TEAMID_MAX_LEN);
+	}
+
+	if (signing_id) {
+		strlcpy(msg_event->signing_id, signing_id, CA_SIGNINGID_MAX_LEN);
+	}
+
+	CA_EVENT_SEND(ca_event);
+}
+
 static bool
 mach_msg_legacy_allowed(mach_msg_user_header_t *header)
 {
@@ -560,9 +605,7 @@ mach_msg_legacy_allowed(mach_msg_user_header_t *header)
 	uint32_t platform = pro->p_platform_data.p_platform;
 	uint32_t sdk = pro->p_platform_data.p_sdk;
 	uint32_t sdk_major = sdk >> 16;
-#if __x86_64__ || CONFIG_ROSETTA
 	task_t task = current_task();
-#endif
 
 #if __x86_64__
 	if (!task_has_64Bit_addr(task)) {
@@ -582,7 +625,7 @@ mach_msg_legacy_allowed(mach_msg_user_header_t *header)
 		return true;
 	}
 #endif
-	if (pro->t_flags_ro & TFRO_PLATFORM) {
+	if (task_get_platform_binary(task)) {
 		/* Platform binaries must use mach_msg2_trap() */
 		return false;
 	}
@@ -624,6 +667,7 @@ mach_msg_legacy_allowed(mach_msg_user_header_t *header)
 	case 0xe13: /* thread_get_state */
 	case 0x12c4: /* mach_vm_read */
 	case 0x12c8: /* mach_vm_read_overwrite */
+		mach_msg_legacy_send_analytics(header->msgh_id, platform, sdk);
 		return true;
 	default:
 		return false;
@@ -1255,7 +1299,7 @@ void
 mach_msg_receive_results_complete(ipc_object_t object)
 {
 	thread_t self = current_thread();
-	ipc_port_t port = IPC_PORT_NULL;
+	ipc_port_t port = IP_NULL;
 	boolean_t get_turnstile = (self->turnstile == TURNSTILE_NULL);
 
 	if (io_otype(object) == IOT_PORT) {

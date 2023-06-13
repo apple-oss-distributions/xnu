@@ -102,6 +102,7 @@
 #include <vm/vm_shared_region.h>
 
 #include <sys/codesign.h>
+#include <sys/code_signing.h>
 #include <sys/reason.h>
 #include <sys/signalvar.h>
 
@@ -214,6 +215,11 @@ unsigned long vm_cs_query_modified = 0;
 unsigned long vm_cs_validated_dirtied = 0;
 unsigned long vm_cs_bitmap_validated = 0;
 
+#if CODE_SIGNING_MONITOR
+uint64_t vm_cs_defer_to_csm = 0;
+uint64_t vm_cs_defer_to_csm_not = 0;
+#endif /* CODE_SIGNING_MONITOR */
+
 void vm_pre_fault(vm_map_offset_t, vm_prot_t);
 
 extern char *kdp_compressor_decompressed_page;
@@ -240,7 +246,10 @@ LCK_SPIN_DECLARE_ATTR(vm_rtfr_slock, &vm_page_lck_grp_bucket, &vm_page_lck_attr)
 
 #if DEVELOPMENT || DEBUG
 extern int madvise_free_debug;
+extern int madvise_free_debug_sometimes;
 #endif /* DEVELOPMENT || DEBUG */
+
+extern int vm_pageout_protect_realtime;
 
 #if CONFIG_FREEZE
 #endif /* CONFIG_FREEZE */
@@ -308,6 +317,7 @@ vm_fault_init(void)
 
 	if (kern_feature_override(KF_MADVISE_FREE_DEBUG_OVRD)) {
 		madvise_free_debug = 0;
+		madvise_free_debug_sometimes = 0;
 	}
 
 	PE_parse_boot_argn("panic_object_not_alive", &panic_object_not_alive, sizeof(panic_object_not_alive));
@@ -2620,10 +2630,11 @@ vm_fault_cs_check_violation(
 	bool map_is_switch_protected,
 	bool *cs_violation)
 {
-#if !PMAP_CS
+#if !CODE_SIGNING_MONITOR
 #pragma unused(caller_prot)
 #pragma unused(fault_info)
-#endif /* !PMAP_CS */
+#endif /* !CODE_SIGNING_MONITOR */
+
 	int             cs_enforcement_enabled;
 	if (!cs_bypass &&
 	    vm_fault_cs_need_validation(pmap, m, object,
@@ -2637,7 +2648,27 @@ vm_fault_cs_check_violation(
 		/* VM map is locked, so 1 ref will remain on VM object -
 		 * so no harm if vm_page_validate_cs drops the object lock */
 
+#if CODE_SIGNING_MONITOR
+		if (fault_info->csm_associated &&
+		    csm_enabled() &&
+		    !VMP_CS_VALIDATED(m, fault_page_size, fault_phys_offset) &&
+		    !VMP_CS_TAINTED(m, fault_page_size, fault_phys_offset) &&
+		    !VMP_CS_NX(m, fault_page_size, fault_phys_offset) &&
+		    (prot & VM_PROT_EXECUTE) &&
+		    (caller_prot & VM_PROT_EXECUTE)) {
+			/*
+			 * When we have a code signing monitor, the monitor will evaluate the code signature
+			 * for any executable page mapping. No need for the VM to also validate the page.
+			 * In the code signing monitor we trust :)
+			 */
+			vm_cs_defer_to_csm++;
+		} else {
+			vm_cs_defer_to_csm_not++;
+			vm_page_validate_cs(m, fault_page_size, fault_phys_offset);
+		}
+#else /* CODE_SIGNING_MONITOR */
 		vm_page_validate_cs(m, fault_page_size, fault_phys_offset);
+#endif /* CODE_SIGNING_MONITOR */
 	}
 
 	/* If the map is switched, and is switch-protected, we must protect
@@ -2715,6 +2746,13 @@ vm_fault_cs_check_violation(
 		*cs_violation = TRUE;
 	} else if (!VMP_CS_VALIDATED(m, fault_page_size, fault_phys_offset) &&
 	    (prot & VM_PROT_EXECUTE)
+#if CODE_SIGNING_MONITOR
+	    /*
+	     * Executable pages will be validated by the code signing monitor. If the
+	     * code signing monitor is turned off, then this is a code-signing violation.
+	     */
+	    && !csm_enabled()
+#endif /* CODE_SIGNING_MONITOR */
 	    ) {
 		*cs_violation = TRUE;
 	} else {
@@ -3351,8 +3389,8 @@ vm_fault_enter_set_mapped(
 
 /*
  * Try to enter the given page into the pmap.
- * Will retry without execute permission iff PMAP_CS is enabled and we encounter
- * a codesigning failure on a non-execute fault.
+ * Will retry without execute permission if the code signing monitor is enabled and
+ * we encounter a codesigning failure on a non-execute fault.
  */
 static kern_return_t
 vm_fault_attempt_pmap_enter(
@@ -3367,9 +3405,10 @@ vm_fault_attempt_pmap_enter(
 	bool wired,
 	int pmap_options)
 {
-#if !PMAP_CS
+#if !CODE_SIGNING_MONITOR
 #pragma unused(caller_prot)
-#endif /* !PMAP_CS */
+#endif /* !CODE_SIGNING_MONITOR */
+
 	kern_return_t kr;
 	if (fault_page_size != PAGE_SIZE) {
 		DEBUG4K_FAULT("pmap %p va 0x%llx pa 0x%llx (0x%llx+0x%llx) prot 0x%x fault_type 0x%x\n", pmap, (uint64_t)vaddr, (uint64_t)((((pmap_paddr_t)VM_PAGE_GET_PHYS_PAGE(m)) << PAGE_SHIFT) + fault_phys_offset), (uint64_t)(((pmap_paddr_t)VM_PAGE_GET_PHYS_PAGE(m)) << PAGE_SHIFT), (uint64_t)fault_phys_offset, *prot, fault_type);
@@ -3387,6 +3426,25 @@ vm_fault_attempt_pmap_enter(
 	    wired,
 	    pmap_options,
 	    kr);
+
+#if CODE_SIGNING_MONITOR
+	/*
+	 * Retry without execute permission if we encountered a codesigning
+	 * failure on a non-execute fault.  This allows applications which
+	 * don't actually need to execute code to still map it for read access.
+	 */
+	if ((kr == KERN_CODESIGN_ERROR) && csm_enabled() &&
+	    (*prot & VM_PROT_EXECUTE) && !(caller_prot & VM_PROT_EXECUTE)) {
+		*prot &= ~VM_PROT_EXECUTE;
+		PMAP_ENTER_OPTIONS(pmap, vaddr,
+		    fault_phys_offset,
+		    m, *prot, fault_type, 0,
+		    wired,
+		    pmap_options,
+		    kr);
+	}
+#endif /* CODE_SIGNING_MONITOR */
+
 	return kr;
 }
 
@@ -3582,6 +3640,12 @@ vm_fault_enter_prepare(
 	}
 #endif
 
+#if CODE_SIGNING_MONITOR
+	if (csm_address_space_exempt(pmap) == KERN_SUCCESS) {
+		cs_bypass = TRUE;
+	}
+#endif
+
 	LCK_MTX_ASSERT(&vm_page_queue_lock, LCK_MTX_ASSERT_NOTOWNED);
 
 	if (*type_of_fault == DBG_ZERO_FILL_FAULT) {
@@ -3747,6 +3811,9 @@ vm_fault_enter(
 			pmap_sync_page_data_phys(VM_PAGE_GET_PHYS_PAGE(m));
 		}
 
+		if (fault_info->fi_xnu_user_debug && !object->code_signed) {
+			pmap_options |= PMAP_OPTIONS_XNU_USER_DEBUG;
+		}
 		kr = vm_fault_pmap_enter_with_object_lock(object, pmap, vaddr,
 		    fault_page_size, fault_phys_offset, m,
 		    &prot, caller_prot, fault_type, wired, pmap_options, need_retry);
@@ -4724,6 +4791,16 @@ FastPmapEnter:
 					    "0x%llx\n", (uint64_t)fault_phys_offset);
 				}
 
+				if (__improbable(rtfault &&
+				    !m->vmp_realtime &&
+				    vm_pageout_protect_realtime)) {
+					vm_page_lock_queues();
+					if (!m->vmp_realtime) {
+						m->vmp_realtime = true;
+						vm_page_realtime_count++;
+					}
+					vm_page_unlock_queues();
+				}
 				assertf(VM_PAGE_OBJECT(m) == m_object, "m=%p m_object=%p object=%p", m, m_object, object);
 				assert(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL);
 				if (caller_pmap) {
@@ -5405,6 +5482,10 @@ FastPmapEnter:
 					} else {
 						need_retry_ptr = NULL;
 					}
+					if (fault_info.fi_xnu_user_debug &&
+					    !object->code_signed) {
+						fault_info.pmap_options |= PMAP_OPTIONS_XNU_USER_DEBUG;
+					}
 					if (object_is_contended) {
 						kr = vm_fault_pmap_enter(destination_pmap, destination_pmap_vaddr,
 						    fault_page_size, fault_phys_offset,
@@ -5431,6 +5512,16 @@ zero_fill_cleanup:
 				}
 				vm_fault_enqueue_page(object, m, wired, change_wiring, wire_tag, fault_info.no_cache, &type_of_fault, kr);
 
+				if (__improbable(rtfault &&
+				    !m->vmp_realtime &&
+				    vm_pageout_protect_realtime)) {
+					vm_page_lock_queues();
+					if (!m->vmp_realtime) {
+						m->vmp_realtime = true;
+						vm_page_realtime_count++;
+					}
+					vm_page_unlock_queues();
+				}
 				vm_fault_complete(
 					map,
 					real_map,
@@ -6142,6 +6233,16 @@ cleanup:
 	}
 
 	if (m != VM_PAGE_NULL) {
+		if (__improbable(rtfault &&
+		    !m->vmp_realtime &&
+		    vm_pageout_protect_realtime)) {
+			vm_page_lock_queues();
+			if (!m->vmp_realtime) {
+				m->vmp_realtime = true;
+				vm_page_realtime_count++;
+			}
+			vm_page_unlock_queues();
+		}
 		assert(VM_PAGE_OBJECT(m) == m_object);
 
 		if (!m_object->internal && (fault_type & VM_PROT_WRITE)) {
@@ -6296,8 +6397,8 @@ vm_fault_wire(
 
 			/* unwire wired pages */
 			tmp_entry.vme_end = va;
-			vm_fault_unwire(map,
-			    &tmp_entry, FALSE, pmap, pmap_addr);
+			vm_fault_unwire(map, &tmp_entry, FALSE,
+			    pmap, pmap_addr, tmp_entry.vme_end);
 
 			return rc;
 		}
@@ -6316,11 +6417,11 @@ vm_fault_unwire(
 	vm_map_entry_t  entry,
 	boolean_t       deallocate,
 	pmap_t          pmap,
-	vm_map_offset_t pmap_addr)
+	vm_map_offset_t pmap_addr,
+	vm_map_offset_t end_addr)
 {
 	vm_map_offset_t va;
-	vm_map_offset_t end_addr = entry->vme_end;
-	vm_object_t             object;
+	vm_object_t     object;
 	struct vm_object_fault_info fault_info = {};
 	unsigned int    unwired_pages;
 	vm_map_size_t   effective_page_size;
@@ -6348,6 +6449,14 @@ vm_fault_unwire(
 	fault_info.hi_offset = (entry->vme_end - entry->vme_start) + VME_OFFSET(entry);
 	fault_info.no_cache = entry->no_cache;
 	fault_info.stealth = TRUE;
+	if (entry->vme_xnu_user_debug) {
+		/*
+		 * Modified code-signed executable region: wired pages must
+		 * have been copied, so they should be XNU_USER_DEBUG rather
+		 * than XNU_USER_EXEC.
+		 */
+		fault_info.pmap_options |= PMAP_OPTIONS_XNU_USER_DEBUG;
+	}
 
 	unwired_pages = 0;
 
@@ -6662,6 +6771,14 @@ vm_fault_wire_fast(
 	if (entry->iokit_acct ||
 	    (!entry->is_sub_map && !entry->use_pmap)) {
 		fault_info.pmap_options |= PMAP_OPTIONS_ALT_ACCT;
+	}
+	if (entry->vme_xnu_user_debug) {
+		/*
+		 * Modified code-signed executable region: wiring will
+		 * copy the pages, so they should be XNU_USER_DEBUG rather
+		 * than XNU_USER_EXEC.
+		 */
+		fault_info.pmap_options |= PMAP_OPTIONS_XNU_USER_DEBUG;
 	}
 
 	fault_page_size = MIN(VM_MAP_PAGE_SIZE(map), PAGE_SIZE);

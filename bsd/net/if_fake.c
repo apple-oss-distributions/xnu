@@ -570,8 +570,8 @@ typedef struct {
 typedef struct {
 	uint64_t                fl_id;
 	uint32_t                fl_idx;
-	fake_qset               fl_qset[FETH_MAX_QSETS];
 	uint32_t                fl_qset_cnt;
+	fake_qset               fl_qset[FETH_MAX_QSETS];
 } fake_llink;
 
 static kern_pbufpool_t         S_pp;
@@ -604,10 +604,10 @@ struct if_fake {
 	fake_nx                 iff_nx;
 	struct netif_stats      *iff_nifs;
 	uint32_t                iff_nifs_ref;
+	uint32_t                iff_llink_cnt;
 	kern_channel_ring_t     iff_rx_ring[IFF_MAX_RX_RINGS];
 	kern_channel_ring_t     iff_tx_ring[IFF_MAX_TX_RINGS];
-	fake_llink              iff_llink[FETH_MAX_LLINKS];
-	uint32_t                iff_llink_cnt;
+	fake_llink             *iff_llink __counted_by(FETH_MAX_LLINKS);
 	thread_call_t           iff_doorbell_tcall;
 	thread_call_t           iff_if_adv_tcall;
 	boolean_t               iff_doorbell_tcall_active;
@@ -712,9 +712,7 @@ static struct if_clone
     feth_clone_create,
     feth_clone_destroy,
     0,
-    FETH_MAXUNIT,
-    FETH_ZONE_MAX_ELEM,
-    sizeof(struct if_fake));
+    FETH_MAXUNIT);
 static  void interface_link_event(ifnet_t ifp, u_int32_t event_code);
 
 /* some media words to pretend to be ethernet */
@@ -826,7 +824,8 @@ feth_free(if_fake_ref fakeif)
 #endif /* SKYWALK */
 
 	FETH_DPRINTF("%s\n", fakeif->iff_name);
-	if_clone_softc_deallocate(&feth_cloner, fakeif);
+	kfree_type(fake_llink, FETH_MAX_LLINKS, fakeif->iff_llink);
+	kfree_type(struct if_fake, fakeif);
 }
 
 static void
@@ -2948,11 +2947,14 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	struct ifnet_init_eparams       feth_init;
 	ifnet_t                         ifp;
 	uint8_t                         mac_address[ETHER_ADDR_LEN];
+	fake_llink                     *iff_llink;
 
-	fakeif = if_clone_softc_allocate(&feth_cloner);
-	if (fakeif == NULL) {
+	iff_llink = kalloc_type(fake_llink, FETH_MAX_LLINKS, Z_WAITOK_ZERO);
+	if (iff_llink == NULL) {
 		return ENOBUFS;
 	}
+	fakeif = kalloc_type(struct if_fake, Z_WAITOK_ZERO_NOFAIL);
+	fakeif->iff_llink = iff_llink;
 	fakeif->iff_retain_count = 1;
 #define FAKE_ETHER_NAME_LEN     (sizeof(FAKE_ETHER_NAME) - 1)
 	_CASSERT(FAKE_ETHER_NAME_LEN == 4);

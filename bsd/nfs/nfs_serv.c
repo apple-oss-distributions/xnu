@@ -4960,7 +4960,7 @@ nfsmerr:
 		maxsize = NFS_MAXDGRAMDATA;
 		prefsize = NFS_PREFDGRAMDATA;
 	} else {
-		maxsize = prefsize = slp->ns_sobufsize ? slp->ns_sobufsize / 2 : NFSRV_MAXDATA;
+		maxsize = prefsize = NFSRV_MAXDATA;
 	}
 
 	nfsm_chain_add_32(error, &nmrep, maxsize);

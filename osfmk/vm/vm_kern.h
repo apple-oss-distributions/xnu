@@ -244,6 +244,11 @@ typedef struct {
  * @const KMEM_DATA (alloc, suballoc, realloc)
  *	The memory must be allocated from the "Data" range.
  *
+ * @const KMEM_SPRAYQTN (alloc, realloc)
+ *	The memory must be allocated from the "spray quarantine" range. For more
+ *	details on what allocations qualify to use this flag see
+ *	@c KMEM_RANGE_ID_SPRAYQTN.
+ *
  * @const KMEM_GUESS_SIZE (free)
  *	When freeing an atomic entry (requires a valid kmem guard),
  *	then look up the entry size because the caller didn't
@@ -290,6 +295,16 @@ typedef struct {
  *
  * @const KMEM_NOENCRYPT (alloc)
  *	Obsolete, will be repurposed soon.
+ *
+ * @const KMEM_KASAN_GUARD (alloc, realloc, free)
+ *	Under KASAN_CLASSIC add guards left and right to this allocation
+ *	in order to detect out of bounds.
+ *
+ *	This can't be passed if any of @c KMEM_GUARD_FIRST
+ *	or @c KMEM_GUARD_LAST is used.
+ *
+ * @const KMEM_TAG (alloc, realloc, free)
+ *	Under KASAN_TBI, this allocation is tagged non canonically.
  */
 __options_decl(kmem_flags_t, uint32_t, {
 	KMEM_NONE           = 0x00000000,
@@ -314,13 +329,16 @@ __options_decl(kmem_flags_t, uint32_t, {
 	KMEM_LAST_FREE      = 0x00002000,
 	KMEM_GUESS_SIZE     = 0x00004000,
 	KMEM_DATA           = 0x00008000,
+	KMEM_SPRAYQTN       = 0x00010000,
 
 	/* Entry properties */
-	KMEM_PERMANENT      = 0x00010000,
-	KMEM_GUARD_FIRST    = 0x00020000,
-	KMEM_GUARD_LAST     = 0x00040000,
-	KMEM_KSTACK         = 0x00080000,
-	KMEM_NOENCRYPT      = 0x00100000,
+	KMEM_PERMANENT      = 0x00100000,
+	KMEM_GUARD_FIRST    = 0x00200000,
+	KMEM_GUARD_LAST     = 0x00400000,
+	KMEM_KSTACK         = 0x00800000,
+	KMEM_NOENCRYPT      = 0x01000000,
+	KMEM_KASAN_GUARD    = 0x02000000,
+	KMEM_TAG            = 0x04000000,
 });
 
 
@@ -411,15 +429,6 @@ __options_decl(kmem_claims_flags_t, uint32_t, {
 });
 
 /*
- * Security config that creates the data split in kernel_map
- */
-#if !defined(__LP64__)
-#   define ZSECURITY_CONFIG_KERNEL_DATA_SPLIT       OFF
-#else
-#   define ZSECURITY_CONFIG_KERNEL_DATA_SPLIT       ON
-#endif
-
-/*
  * Security config that creates the additional splits in non data part of
  * kernel_map
  */
@@ -456,7 +465,7 @@ extern void kmem_range_startup_init(
  * Claims are shuffled during startup to randomize the layout of the kernel map.
  * Temporary entries are created in place of the claims, therefore the caller
  * must provide the start of the assigned range as a hint and
- * @c VM_FLAGS_FIXED_RANGE_SUBALLOC to kmem_suballoc to replace the mapping.
+ * @c{VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE} to kmem_suballoc to replace the mapping.
  *
  * Min/max constraints can be provided in the range when the claim is
  * registered.
@@ -484,14 +493,6 @@ extern void kmem_range_startup_init(
 	    KC_NONE};                                                              \
 	STARTUP_ARG(KMEM, STARTUP_RANK_SECOND, kmem_range_startup_init,            \
 	    &__startup_kmem_range_spec_ ## name)
-
-#if XNU_KERNEL_PRIVATE
-#if ZSECURITY_CONFIG(KERNEL_DATA_SPLIT)
-#define VM_FLAGS_FIXED_RANGE_SUBALLOC   (VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)
-#else /* ZSECURITY_CONFIG(KERNEL_DATA_SPLIT) */
-#define VM_FLAGS_FIXED_RANGE_SUBALLOC   (VM_FLAGS_ANYWHERE)
-#endif /* !ZSECURITY_CONFIG(KERNEL_DATA_SPLIT) */
-#endif /* XNU_KERNEL_PRIVATE */
 
 __startup_func
 extern uint16_t kmem_get_random16(
@@ -535,7 +536,7 @@ extern void kmem_entry_validate_guard(
  * @function kmem_size_guard()
  *
  * @brief
- * Returns the size of an atomic allocation made in the specified map,
+ * Returns the size of an atomic kalloc allocation made in the specified map,
  * according to the guard.
  *
  * @param map           a kernel map to lookup the entry into.
@@ -575,6 +576,7 @@ __options_decl(kma_flags_t, uint32_t, {
 	KMA_LOMEM           = KMEM_LOMEM,
 	KMA_LAST_FREE       = KMEM_LAST_FREE,
 	KMA_DATA            = KMEM_DATA,
+	KMA_SPRAYQTN        = KMEM_SPRAYQTN,
 
 	/* Entry properties */
 	KMA_PERMANENT       = KMEM_PERMANENT,
@@ -582,26 +584,9 @@ __options_decl(kma_flags_t, uint32_t, {
 	KMA_GUARD_LAST      = KMEM_GUARD_LAST,
 	KMA_KSTACK          = KMEM_KSTACK,
 	KMA_NOENCRYPT       = KMEM_NOENCRYPT,
+	KMA_KASAN_GUARD     = KMEM_KASAN_GUARD,
+	KMA_TAG             = KMEM_TAG,
 });
-
-#define KMEM_ALLOC_CONTIG_FLAGS ( \
-	/* Call behavior */ \
-	KMA_NOPAGEWAIT | \
-        \
-	/* How the entry is populated */ \
-	KMA_ZERO | \
-        \
-	/* VM object to use for the entry */ \
-	KMA_KOBJECT | \
-        \
-	/* How to look for addresses */ \
-	KMA_LOMEM | \
-	KMA_DATA | \
-        \
-	/* Entry properties */ \
-	KMA_PERMANENT | \
-        \
-	KMA_NONE)
 
 
 /*!
@@ -665,7 +650,40 @@ kmem_alloc(
 	return kernel_memory_allocate(map, addrp, size, 0, flags, tag);
 }
 
-extern kern_return_t kmem_alloc_contig(
+/*!
+ * @function kmem_alloc_contig_guard()
+ *
+ * @brief
+ * Variant of kmem_alloc_guard() that allocates a contiguous range
+ * of physical memory.
+ *
+ * @param map           map to allocate into, must be a kernel map.
+ * @param size          the size of the entry to allocate, must not be 0.
+ * @param mask          an alignment mask that the returned allocation
+ *                      will be aligned to (ignoring guards, see @const
+ *                      KMEM_GUARD_FIRST).
+ * @param max_pnum      The maximum page number to allocate, or 0.
+ * @param pnum_mask     A page number alignment mask for the first allocated
+ *                      page, or 0.
+ * @param flags         a set of @c KMA_* flags, (@see @c kmem_flags_t)
+ * @param guard         how to guard the allocation.
+ *
+ * @returns
+ *     - the non zero address of the allocaation on success in @c kmr_address.
+ *     - @c KERN_NO_SPACE if the target map is out of address space.
+ *     - @c KERN_RESOURCE_SHORTAGE if the kernel is out of pages.
+ */
+extern kmem_return_t kmem_alloc_contig_guard(
+	vm_map_t                map,
+	vm_size_t               size,
+	vm_offset_t             mask,
+	ppnum_t                 max_pnum,
+	ppnum_t                 pnum_mask,
+	kma_flags_t             flags,
+	kmem_guard_t            guard);
+
+static inline kern_return_t
+kmem_alloc_contig(
 	vm_map_t                map,
 	vm_offset_t            *addrp,
 	vm_size_t               size,
@@ -674,8 +692,22 @@ extern kern_return_t kmem_alloc_contig(
 	ppnum_t                 pnum_mask,
 	kma_flags_t             flags,
 	vm_tag_t                tag)
-__attribute__((diagnose_if(flags & ~KMEM_ALLOC_CONTIG_FLAGS,
-    "invalid alloc_contig flags passed", "error")));
+{
+	kmem_guard_t guard = {
+		.kmg_tag = tag,
+	};
+	kmem_return_t kmr;
+
+	kmr = kmem_alloc_contig_guard(map, size, mask,
+	    max_pnum, pnum_mask, flags, guard);
+	if (kmr.kmr_return == KERN_SUCCESS) {
+		__builtin_assume(kmr.kmr_address != 0);
+	} else {
+		__builtin_assume(kmr.kmr_address == 0);
+	}
+	*addrp = kmr.kmr_address;
+	return kmr.kmr_return;
+}
 
 
 /*!
@@ -748,14 +780,17 @@ __options_decl(kmr_flags_t, uint32_t, {
 	KMR_LOMEM           = KMEM_LOMEM,
 	KMR_LAST_FREE       = KMEM_LAST_FREE,
 	KMR_DATA            = KMEM_DATA,
+	KMR_SPRAYQTN        = KMEM_SPRAYQTN,
 
 	/* Entry properties */
 	KMR_GUARD_FIRST     = KMEM_GUARD_FIRST,
 	KMR_GUARD_LAST      = KMEM_GUARD_LAST,
+	KMR_KASAN_GUARD     = KMEM_KASAN_GUARD,
+	KMR_TAG             = KMEM_TAG,
 });
 
 #define KMEM_REALLOC_FLAGS_VALID(flags) \
-	(((flags) & KMR_KOBJECT) == 0 || ((flags) & KMR_FREEOLD))
+	(((flags) & (KMR_KOBJECT | KMEM_GUARD_LAST | KMEM_KASAN_GUARD)) == 0 || ((flags) & KMR_FREEOLD))
 
 /*!
  * @function kmem_realloc_guard()
@@ -769,7 +804,8 @@ __options_decl(kmr_flags_t, uint32_t, {
  * but a security policy).
  *
  * If kmem_realloc_guard() is called for the kernel object
- * (with @c KMR_KOBJECT), then the use of @c KMR_FREEOLD is mandatory.
+ * (with @c KMR_KOBJECT) or with any trailing guard page,
+ * then the use of @c KMR_FREEOLD is mandatory.
  *
  * When @c KMR_FREEOLD isn't used, if the allocation was relocated
  * as opposed to be extended or truncated in place, the caller
@@ -841,6 +877,8 @@ __options_decl(kmf_flags_t, uint32_t, {
 
 	/* How to look for addresses */
 	KMF_GUESS_SIZE      = KMEM_GUESS_SIZE,
+	KMF_KASAN_GUARD     = KMEM_KASAN_GUARD,
+	KMF_TAG             = KMEM_TAG,
 });
 
 
@@ -963,6 +1001,65 @@ vm_kernel_addrhash(vm_offset_t addr)
 
 #pragma mark - kernel variants of the Mach VM interfaces
 
+/*!
+ * @function vm_map_kernel_flags_vmflags()
+ *
+ * @brief
+ * Return the vmflags set in the specified @c vmk_flags.
+ */
+extern int vm_map_kernel_flags_vmflags(
+	vm_map_kernel_flags_t    vmk_flags);
+
+/*!
+ * @function vm_map_kernel_flags_set_vmflags()
+ *
+ * @brief
+ * Populates the @c vmf_* and @c vm_tag fields of the vmk flags,
+ * with the specified vm flags (@c VM_FLAG_* from <mach/vm_statistics.h>).
+ */
+__attribute__((overloadable))
+extern void vm_map_kernel_flags_set_vmflags(
+	vm_map_kernel_flags_t  *vmk_flags,
+	int                     vm_flags,
+	vm_tag_t                vm_tag);
+
+/*!
+ * @function vm_map_kernel_flags_set_vmflags()
+ *
+ * @brief
+ * Populates the @c vmf_* and @c vm_tag fields of the vmk flags,
+ * with the specified vm flags (@c VM_FLAG_* from <mach/vm_statistics.h>).
+ *
+ * @discussion
+ * This variant takes the tag from the top byte of the flags.
+ */
+__attribute__((overloadable))
+extern void vm_map_kernel_flags_set_vmflags(
+	vm_map_kernel_flags_t  *vmk_flags,
+	int                     vm_flags_and_tag);
+
+/*!
+ * @function vm_map_kernel_flags_and_vmflags()
+ *
+ * @brief
+ * Apply a mask to the vmflags.
+ */
+extern void vm_map_kernel_flags_and_vmflags(
+	vm_map_kernel_flags_t   *vmk_flags,
+	int                      vm_flags_mask);
+
+/*!
+ * @function vm_map_kernel_flags_check_vmflags()
+ *
+ * @brief
+ * Returns whether the @c vmk_flags @c vmf_* fields
+ * are limited to the specified mask.
+ */
+extern bool vm_map_kernel_flags_check_vmflags(
+	vm_map_kernel_flags_t   vmk_flags,
+	int                     vm_flags_mask);
+
+
 extern kern_return_t    mach_vm_allocate_kernel(
 	vm_map_t                map,
 	mach_vm_offset_t        *addr,
@@ -975,9 +1072,7 @@ extern kern_return_t mach_vm_map_kernel(
 	mach_vm_offset_t        *address,
 	mach_vm_size_t          initial_size,
 	mach_vm_offset_t        mask,
-	int                     flags,
 	vm_map_kernel_flags_t   vmk_flags,
-	vm_tag_t                tag,
 	ipc_port_t              port,
 	vm_object_offset_t      offset,
 	boolean_t               copy,
@@ -985,21 +1080,6 @@ extern kern_return_t mach_vm_map_kernel(
 	vm_prot_t               max_protection,
 	vm_inherit_t            inheritance);
 
-
-extern kern_return_t vm_map_kernel(
-	vm_map_t                target_map,
-	vm_offset_t             *address,
-	vm_size_t               size,
-	vm_offset_t             mask,
-	int                     flags,
-	vm_map_kernel_flags_t   vmk_flags,
-	vm_tag_t                tag,
-	ipc_port_t              port,
-	vm_offset_t             offset,
-	boolean_t               copy,
-	vm_prot_t               cur_protection,
-	vm_prot_t               max_protection,
-	vm_inherit_t            inheritance);
 
 extern kern_return_t mach_vm_remap_kernel(
 	vm_map_t                target_map,
@@ -1029,37 +1109,7 @@ extern kern_return_t mach_vm_remap_new_kernel(
 	vm_prot_t               *max_protection,
 	vm_inherit_t            inheritance);
 
-extern kern_return_t vm_remap_kernel(
-	vm_map_t                target_map,
-	vm_offset_t             *address,
-	vm_size_t               size,
-	vm_offset_t             mask,
-	int                     flags,
-	vm_tag_t                tag,
-	vm_map_t                src_map,
-	vm_offset_t             memory_address,
-	boolean_t               copy,
-	vm_prot_t               *cur_protection,
-	vm_prot_t               *max_protection,
-	vm_inherit_t            inheritance);
-
-extern kern_return_t vm_map_64_kernel(
-	vm_map_t                target_map,
-	vm_offset_t             *address,
-	vm_size_t               size,
-	vm_offset_t             mask,
-	int                     flags,
-	vm_map_kernel_flags_t   vmk_flags,
-	vm_tag_t                tag,
-	ipc_port_t              port,
-	vm_object_offset_t      offset,
-	boolean_t               copy,
-	vm_prot_t               cur_protection,
-	vm_prot_t               max_protection,
-	vm_inherit_t            inheritance);
-
 extern kern_return_t mach_vm_wire_kernel(
-	host_priv_t             host_priv,
 	vm_map_t                map,
 	mach_vm_offset_t        start,
 	mach_vm_size_t          size,
@@ -1073,14 +1123,6 @@ extern kern_return_t vm_map_wire_kernel(
 	vm_prot_t               caller_prot,
 	vm_tag_t                tag,
 	boolean_t               user_wire);
-
-extern kern_return_t vm_map_wire_and_extract_kernel(
-	vm_map_t                map,
-	vm_map_offset_t         start,
-	vm_prot_t               caller_prot,
-	vm_tag_t                tag,
-	boolean_t               user_wire,
-	ppnum_t                 *physpage_p);
 
 extern kern_return_t memory_object_iopl_request(
 	ipc_port_t              port,
@@ -1146,7 +1188,8 @@ struct mach_memory_info;
 extern kern_return_t    vm_page_diagnose(
 	struct mach_memory_info *info,
 	unsigned int            num_info,
-	uint64_t                zones_collectable_bytes);
+	uint64_t                zones_collectable_bytes,
+	bool                    redact_info);
 
 extern uint32_t         vm_page_diagnose_estimate(void);
 
@@ -1161,8 +1204,15 @@ extern bool             pmap_supported_feature(pmap_t pmap, pmap_feature_flags_t
 #endif
 
 #if DEBUG || DEVELOPMENT
+typedef struct {
+	vm_map_size_t meta_sz;
+	vm_map_size_t pte_sz;
+	vm_map_size_t total_va;
+	vm_map_size_t total_used;
+} kmem_gobj_stats;
 
 extern kern_return_t    vm_kern_allocation_info(uintptr_t addr, vm_size_t * size, vm_tag_t * tag, vm_size_t * zone_size);
+extern kmem_gobj_stats  kmem_get_gobj_stats(void);
 
 #endif /* DEBUG || DEVELOPMENT */
 

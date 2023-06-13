@@ -186,6 +186,7 @@ extern void             proc_name_kdp(struct proc *p, char * buf, int size);
 extern int              proc_threadname_kdp(void * uth, char * buf, size_t size);
 extern void             proc_starttime_kdp(void * p, uint64_t * tv_sec, uint64_t * tv_usec, uint64_t * abstime);
 extern void             proc_archinfo_kdp(void* p, cpu_type_t* cputype, cpu_subtype_t* cpusubtype);
+extern uint64_t         proc_getcsflags_kdp(void * p);
 extern boolean_t        proc_binary_uuid_kdp(task_t task, uuid_t uuid);
 extern int              memorystatus_get_pressure_status_kdp(void);
 extern void             memorystatus_proc_flags_unsafe(void * v, boolean_t *is_dirty, boolean_t *is_dirty_tracked, boolean_t *allow_idle_exit);
@@ -1770,6 +1771,21 @@ kcdata_record_task_cpu_architecture(kcdata_descriptor_t kcd, task_t task)
 }
 
 static kern_return_t
+kcdata_record_task_codesigning_info(kcdata_descriptor_t kcd, task_t task)
+{
+	struct stackshot_task_codesigning_info codesigning_info = {};
+	void * bsdtask_info = NULL;
+	if (task != kernel_task) {
+		bsdtask_info = get_bsdtask_info(task);
+		codesigning_info.csflags = proc_getcsflags_kdp(bsdtask_info);
+		codesigning_info.cs_trust_level = 0; //TODO in rdar://102261763
+	} else {
+		return KERN_SUCCESS;
+	}
+	return kcdata_push_data(kcd, STACKSHOT_KCTYPE_CODESIGNING_INFO, sizeof(struct stackshot_task_codesigning_info), &codesigning_info);
+}
+
+static kern_return_t
 kcdata_record_transitioning_task_snapshot(kcdata_descriptor_t kcd, task_t task, unaligned_u64 task_snap_ss_flags, uint64_t transition_type)
 {
 	kern_return_t error                 = KERN_SUCCESS;
@@ -1900,7 +1916,11 @@ kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace
 
 #if CONFIG_COALITIONS
 	if (task_pid != -1 && bsd_info != NULL &&
-	    ((trace_flags & STACKSHOT_SAVE_JETSAM_COALITIONS) && (task->coalition[COALITION_TYPE_JETSAM] != NULL))) {
+	    (task->coalition[COALITION_TYPE_JETSAM] != NULL)) {
+		/*
+		 * The jetsam coalition ID is always saved, even if
+		 * STACKSHOT_SAVE_JETSAM_COALITIONS is not set.
+		 */
 		uint64_t jetsam_coal_id = coalition_id(task->coalition[COALITION_TYPE_JETSAM]);
 		kcd_exit_on_error(kcdata_push_data(kcd, STACKSHOT_KCTYPE_JETSAM_COALITION, sizeof(jetsam_coal_id), &jetsam_coal_id));
 	}
@@ -1957,6 +1977,7 @@ kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace
 #endif /* CONFIG_PERVASIVE_CPI */
 
 	kcd_exit_on_error(kcdata_record_task_cpu_architecture(kcd, task));
+	kcd_exit_on_error(kcdata_record_task_codesigning_info(kcd, task));
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 	latency_info->end_latency = mach_absolute_time() - latency_info->end_latency;
@@ -2622,7 +2643,6 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 	boolean_t have_map = FALSE, have_pmap = FALSE;
 	boolean_t some_thread_ran = FALSE;
 	unaligned_u64 task_snap_ss_flags = 0;
-
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 	struct stackshot_latency_task latency_info;
 	latency_info.setup_latency = mach_absolute_time();
@@ -3242,7 +3262,7 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
 #if CONFIG_COALITIONS
-	/* Don't collect jetsam coalition data in delta stakshots - these don't change */
+	/* Don't collect jetsam coalition snapshots in delta stackshots - these don't change */
 	if (!collect_delta_stackshot || (last_task_start_time > stack_snapshot_delta_since_timestamp)) {
 		int num_coalitions = 0;
 		struct jetsam_coalition_snapshot *coalitions = NULL;
@@ -3625,12 +3645,13 @@ stackshot_thread_group_snapshot(void *arg, int i, struct thread_group *tg)
 	kdp_memcpy(tgs->tgs_name_cont, name + sizeof(tgs->tgs_name),
 	    sizeof(tgs->tgs_name_cont));
 	tgs->tgs_flags =
-	    ((flags & THREAD_GROUP_FLAGS_EFFICIENT)   ? kThreadGroupEfficient     : 0) |
-	    ((flags & THREAD_GROUP_FLAGS_APPLICATION) ? kThreadGroupApplication   : 0) |
-	    ((flags & THREAD_GROUP_FLAGS_CRITICAL)    ? kThreadGroupCritical      : 0) |
-	    ((flags & THREAD_GROUP_FLAGS_BEST_EFFORT) ? kThreadGroupBestEffort    : 0) |
-	    ((flags & THREAD_GROUP_FLAGS_UI_APP)      ? kThreadGroupUIApplication : 0) |
-	    ((flags & THREAD_GROUP_FLAGS_MANAGED)     ? kThreadGroupManaged       : 0) |
+	    ((flags & THREAD_GROUP_FLAGS_EFFICIENT)     ? kThreadGroupEfficient     : 0) |
+	    ((flags & THREAD_GROUP_FLAGS_APPLICATION)   ? kThreadGroupApplication   : 0) |
+	    ((flags & THREAD_GROUP_FLAGS_CRITICAL)      ? kThreadGroupCritical      : 0) |
+	    ((flags & THREAD_GROUP_FLAGS_BEST_EFFORT)   ? kThreadGroupBestEffort    : 0) |
+	    ((flags & THREAD_GROUP_FLAGS_UI_APP)        ? kThreadGroupUIApplication : 0) |
+	    ((flags & THREAD_GROUP_FLAGS_MANAGED)       ? kThreadGroupManaged       : 0) |
+	    ((flags & THREAD_GROUP_FLAGS_STRICT_TIMERS) ? kThreadGroupStrictTimers  : 0) |
 	    0;
 }
 #endif /* CONFIG_THREAD_GROUPS */

@@ -3,7 +3,11 @@
 //  CoreEntitlements
 //
 
-#pragma once
+#ifndef CORE_ENTITLEMENTS_HELPERS_H
+#define CORE_ENTITLEMENTS_HELPERS_H
+
+#include <sys/cdefs.h>
+__ptrcheck_abi_assume_single();
 
 /*!
  * @function CEDynamic
@@ -41,6 +45,7 @@
  * Selecting a value on a non-dictionary-pair object is undefined behavior (i..e. it is implementation defined)
  */
 #define CESelectValue() CESelectIndex(1)
+
 
 /*!
  * @function CESelectDictValue
@@ -82,6 +87,17 @@
 #define CEMatchPrefix(prefix) (CEQueryOperation_t){.opcode = kCEOpMatchStringPrefix, .parameters = {.stringParameter = {.data = prefix, .length = sizeof(prefix) - 1}}}
 #define CEMatchDynamicPrefix(prefix, len) (CEQueryOperation_t){.opcode = CEDynamic(kCEOpMatchStringPrefix), .parameters = {.dynamicParameter = {.data = prefix, .length = len}}}
 
+/*!
+ * @function CEMatchType
+ * Returns an operation that will return a valid context if and only if the type selected by the context corresponds to the one passed in.
+ *
+ * @param type
+ * The type to match against
+ *
+ * @discussion
+ * If a valid context is returned it will be in the same state as the execution context
+ */
+#define CEMatchType(type) (CEQueryOperation_t){.opcode = kCEOpMatchType, .parameters = {.numericParameter = (int64_t)type}}
 
 /*!
  * @function CEMatchBool
@@ -143,7 +159,31 @@
  * If a valid context is returned it will be in the same state as the execution context
  */
 #define CEIsStringPrefixAllowed(string) (CEQueryOperation_t){.opcode = kCEOpStringPrefixValueAllowed, .parameters = {.stringParameter = {.data = string, .length = sizeof(string) - 1}}}
-#define CEIsDynamicStringPrefixAllowed(string, len) (CEQueryOperation_t){.opcode = CEDynamic(kCEOpStringPrefixValueAllowed), .parameters = {.dynamicParameter = {.data = string, .length = len}}}
+#define CEIsDynamicStringPrefixAllowed(string, len) (CEQueryOperation_t){.opcode = CEDynamic(kCEOpStringPrefixValueAllowed), .parameters = {.dynamicParameter = {.data = (const uint8_t*)(string), .length = len}}}
+
+/*!
+ * @function CEMatchData
+ * Returns an operation that will return a valid context if and only if the context corresponds to valid data and matches the data exactly
+ *
+ * @param string
+ * The data to match against (MUST BE A BYTE ARRAY)
+ *
+ * @discussion
+ * If a valid context is returned it will be in the same state as the execution context
+ */
+#define CEMatchDynamicData(d, len) (CEQueryOperation_t){.opcode = CEDynamic(kCEOpMatchData), .parameters = {.dynamicParameter = {.data = d, .length = len}}}
+
+/*!
+ * @function CEIsDataAllowed
+ * Returns an operation that will return a valid context if 1) the current context is data and allows the data, or 2) the context is an array of data elements that allows the data
+ *
+ * @param string
+ * The data to match against (MUST BE A BYTE ARRAY)
+ *
+ * @discussion
+ * If a valid context is returned it will be in the same state as the execution context
+ */
+#define CEIsDynamicDataAllowed(d, len) (CEQueryOperation_t){.opcode = CEDynamic(kCEOpMatchDataValueAllowed), .parameters = {.dynamicParameter = {.data = d, .length = len}}}
 
 #pragma mark Helpers
 /*
@@ -180,3 +220,5 @@
  A macro that checks if the passed in context grants (via an explicit true boolean) the entitlement at the passed in path.
  */
 #define CE_CONTEXT_GRANTS_ENTITLEMENT(ctx, ...) (CEContextQuery(ctx, (CEQuery_t){CE_SELECT_PATH(__VA_ARGS__) CEMatchBool(true)}, sizeof((CEQuery_t){CE_SELECT_PATH(__VA_ARGS__) CEMatchBool(true)}) / sizeof(CEQueryOperation_t)) == kCENoError)
+
+#endif

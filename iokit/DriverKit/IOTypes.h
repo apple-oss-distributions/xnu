@@ -264,4 +264,8 @@ enum {
 	kIOMaxBusStallNone   = 0,
 };
 
+#if PRIVATE
+#define LIBKERN_OSNUMBER_FLOAT_SUPPORT          1
+#endif /* PRIVATE */
+
 #endif /* ! __IOKIT_IOTYPES_H */

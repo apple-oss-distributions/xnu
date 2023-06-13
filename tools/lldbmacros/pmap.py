@@ -1022,11 +1022,13 @@ def PhysToKV(cmd_args=None):
     print("{:#x}".format(kern.PhysToKernelVirt(int(unsigned(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'))))))
 
 def KVToPhysARM(addr):
-    if kern.arch.startswith('arm64'):
+    try:
         ptov_table = kern.globals.ptov_table
         for i in range(0, kern.globals.ptov_index):
             if (addr >= int(unsigned(ptov_table[i].va))) and (addr < (int(unsigned(ptov_table[i].va)) + int(unsigned(ptov_table[i].len)))):
                 return (addr - int(unsigned(ptov_table[i].va)) + int(unsigned(ptov_table[i].pa)))
+    except Exception as exc:
+        raise ValueError("VA {:#x} not found in physical region lookup table".format(addr))
     return (addr - unsigned(kern.globals.gVirtBase) + unsigned(kern.globals.gPhysBase))
 
 
@@ -1043,26 +1045,41 @@ def GetPtDesc(paddr):
     ptd = kern.GetValueFromAddress(pvh & ~0x3, 'pt_desc_t *')
     return ptd
 
+
 def ShowPTEARM(pte, page_size, stage2 = False):
     """ Display vital information about an ARM page table entry
         pte: kernel virtual address of the PTE.  Should be L3 PTE.  May also work with L2 TTEs for certain devices.
     """
-    ptd = GetPtDesc(KVToPhysARM(pte))
+    def GetPageTableInfo(ptd, pt_index, paddr):
+        try:
+            refcnt =  ptd.ptd_info[pt_index].refcnt
+            if refcnt == 0x4000:
+                level = 2
+            else:
+                level = 3
+            # PTDs used to describe IOMMU pages always have a refcnt of 0x8000/0x8001.
+            is_iommu_pte = (refcnt & 0x8000) == 0x8000
+            if is_iommu_pte:
+                iommu_desc_name = '{:s}'.format(dereference(dereference(ptd.iommu).desc).name)
+                if unsigned(dereference(ptd.iommu).name) != 0:
+                    iommu_desc_name += '/{:s}'.format(dereference(ptd.iommu).name)
+                info_str = "iommu state: {:#x} ({:s})".format(ptd.iommu, iommu_desc_name)
+            else:
+                info_str = None
+            return (int(unsigned(refcnt)), level, info_str)
+        except Exception as exc:
+            raise ValueError("Unable to retrieve PTD refcnt")
+    pte_paddr = KVToPhysARM(pte)
+    ptd = GetPtDesc(pte_paddr)
     pt_index = (pte % kern.globals.page_size) // page_size
-    refcnt = ptd.ptd_info[pt_index].refcnt
+    refcnt, level, info_str = GetPageTableInfo(ptd, pt_index, pte_paddr)
     wiredcnt = ptd.ptd_info[pt_index].wiredcnt
-    print("descriptor: {:#x} (refcnt: {:#x}, wiredcnt: {:#x})".format(ptd, refcnt, wiredcnt))
-
-    # PTDs used to describe IOMMU pages always have a refcnt of 0x8000/0x8001.
-    is_iommu_pte = (refcnt & 0x8000) == 0x8000
+    va = ptd.va[pt_index]
+    print("descriptor: {:#x} (refcnt: {:#x}, wiredcnt: {:#x}, va: {:#x})".format(ptd, refcnt, wiredcnt, va))
 
     # The pmap/iommu field is a union, so only print the correct one.
-    if is_iommu_pte:
-        iommu_desc_name = '{:s}'.format(dereference(dereference(ptd.iommu).desc).name)
-        if unsigned(dereference(ptd.iommu).name) != 0:
-            iommu_desc_name += '/{:s}'.format(dereference(ptd.iommu).name)
-
-        print("iommu state: {:#x} ({:s})".format(ptd.iommu, iommu_desc_name))
+    if info_str is not None:
+        print(info_str)
     else:
         if ptd.pmap == kern.globals.kernel_pmap:
             pmap_str = "(kernel_pmap)"
@@ -1070,29 +1087,15 @@ def ShowPTEARM(pte, page_size, stage2 = False):
             task = TaskForPmapHelper(ptd.pmap)
             pmap_str = "(User Task: {:s})".format("{:#x}".format(task) if task is not None else "<unknown>")
         print("pmap: {:#x} {:s}".format(ptd.pmap, pmap_str))
-
-    pte_pgoff = pte % page_size
-    if kern.arch.startswith('arm64'):
-        pte_pgoff = pte_pgoff // 8
         nttes = page_size // 8
-    else:
-        pte_pgoff = pte_pgoff // 4
-        nttes = page_size // 4
-    if ptd.ptd_info[pt_index].refcnt == 0x4000:
-        level = 2
-        granule = nttes * page_size
-    else:
-        level = 3
-        granule = page_size
-    print("maps {}: {:#x}".format("IPA" if stage2 else "VA", int(unsigned(ptd.va[pt_index])) + (pte_pgoff * granule)))
-    pteval = int(unsigned(dereference(kern.GetValueFromAddress(unsigned(pte), 'pt_entry_t *'))))
-    print("value: {:#x}".format(pteval))
-    if kern.arch.startswith('arm64'):
+        granule = page_size * (nttes ** (4 - level))
+        pte_pgoff = pte % page_size
+        pte_pgoff = pte_pgoff // 8
+        print("maps {}: {:#x}".format("IPA" if stage2 else "VA", int(unsigned(ptd.va[pt_index])) + (pte_pgoff * granule)))
+        pteval = int(unsigned(dereference(kern.GetValueFromAddress(unsigned(pte), 'pt_entry_t *'))))
+        print("value: {:#x}".format(pteval))
         print("level: {:d}".format(level))
-        PmapDecodeTTEARM64(pteval, level, stage2, is_iommu_pte)
-
-    else:
-        raise UnsupportedArchitectureError(kern.arch)
+        PmapDecodeTTEARM64(pteval, level, stage2)
 
 @lldb_command('showpte')
 def ShowPTE(cmd_args=None):

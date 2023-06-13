@@ -192,7 +192,7 @@
  *
  * Feature description: Compression
  * --------------------
- * In order to avoid keeping large amunt of memory reserved for a panic stackshot, kcdata has support
+ * In order to avoid keeping large amounts of memory reserved for a panic stackshot, kcdata has support
  * for compressing the buffer in a streaming fashion. New data pushed to the kcdata buffer will be
  * automatically compressed using an algorithm selected by the API user (currently, we only support
  * pass-through and zlib, in the future we plan to add WKDM support, see: 57913859).
@@ -268,7 +268,7 @@ struct kcdata_item {
 	                * has_padding is needed to disambiguate cases such as
 	                * thread_snapshot_v2 and thread_snapshot_v3.  Their
 	                * respective sizes are 0x68 and 0x70, and thread_snapshot_v2
-	                * was emmitted by old kernels *before* we started recording
+	                * was emitted by old kernels *before* we started recording
 	                * padding.  Since legacy thread_snapsht_v2 and modern
 	                * thread_snapshot_v3 will both record 0 for the padding
 	                * flags, we need some other bit which will be nonzero in the
@@ -549,6 +549,8 @@ struct kcdata_type_definition {
 #define STACKSHOT_KCTYPE_SHAREDCACHE_INFO            0x943u /* dyld_shared_cache_loadinfo_v2 */
 #define STACKSHOT_KCTYPE_SHAREDCACHE_AOTINFO         0x944u /* struct dyld_aot_cache_uuid_info */
 #define STACKSHOT_KCTYPE_SHAREDCACHE_ID              0x945u /* uint32_t in task: if we aren't attached to Primary, which one */
+#define STACKSHOT_KCTYPE_CODESIGNING_INFO            0x946u /* struct stackshot_task_codesigning_info */
+
 
 struct stack_snapshot_frame32 {
 	uint32_t lr;
@@ -829,6 +831,7 @@ enum thread_group_flags {
 	kThreadGroupBestEffort    = 0x8,
 	kThreadGroupUIApplication = 0x100,
 	kThreadGroupManaged       = 0x200,
+	kThreadGroupStrictTimers  = 0x400,
 }; // Note: Add any new flags to kcdata.py (tgs_flags)
 
 struct thread_group_snapshot_v2 {
@@ -965,6 +968,11 @@ struct task_delta_snapshot_v2 {
 	uint32_t  tds_was_throttled;
 	uint32_t  tds_did_throttle;
 	uint32_t  tds_latency_qos;
+} __attribute__ ((packed));
+
+struct stackshot_task_codesigning_info {
+	uint64_t csflags;
+	uint32_t cs_trust_level;
 } __attribute__ ((packed));
 
 struct stackshot_cpu_times {
@@ -1135,6 +1143,9 @@ struct kernel_triage_info_v1 {
 	char triage_string5[MAX_TRIAGE_STRING_LEN];
 } __attribute__((packed));
 
+#define MAX_CRASHINFO_SIGNING_ID_LEN 64
+#define MAX_CRASHINFO_TEAM_ID_LEN 32
+
 #define TASK_CRASHINFO_BEGIN                KCDATA_BUFFER_BEGIN_CRASHINFO
 #define TASK_CRASHINFO_STRING_DESC          KCDATA_TYPE_STRING_DESC
 #define TASK_CRASHINFO_UINT32_DESC          KCDATA_TYPE_UINT32_DESC
@@ -1199,6 +1210,14 @@ struct kernel_triage_info_v1 {
 #define TASK_CRASHINFO_TASK_IS_CORPSE_FORK                      0x837 /* boolean_t */
 #define TASK_CRASHINFO_EXCEPTION_TYPE                           0x838 /* int */
 
+#define TASK_CRASHINFO_CRASH_COUNT                              0x839 /* int */
+#define TASK_CRASHINFO_THROTTLE_TIMEOUT                         0x83A /* int */
+
+#define TASK_CRASHINFO_CS_SIGNING_ID                            0x83B /* string of len MAX_CRASHINFO_SIGNING_ID_LEN */
+#define TASK_CRASHINFO_CS_TEAM_ID                               0x83C /* string of len MAX_CRASHINFO_TEAM_ID_LEN */
+#define TASK_CRASHINFO_CS_VALIDATION_CATEGORY                   0x83D /* uint32_t */
+#define TASK_CRASHINFO_CS_TRUST_LEVEL                           0x83E /* uint32_t */
+
 #define TASK_CRASHINFO_END                  KCDATA_TYPE_BUFFER_END
 
 /**************** definitions for backtrace info *********************/
@@ -1237,6 +1256,8 @@ struct btinfo_sc_load_info {
 #define TASK_BTINFO_EXCEPTION_TYPE                              0xA0A
 #define TASK_BTINFO_RUSAGE_INFO                                 0xA0B
 #define TASK_BTINFO_COALITION_ID                                0xA0C
+#define TASK_BTINFO_CRASH_COUNT                                 0xA0D
+#define TASK_BTINFO_THROTTLE_TIMEOUT                            0xA0E
 
 /* Only in BTINFO */
 #define TASK_BTINFO_THREAD_ID                                   0xA20 /* uint64_t */

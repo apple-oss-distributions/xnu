@@ -37,7 +37,8 @@ enum net_filter_event_subsystems : uint32_t {
 	NET_FILTER_EVENT_INTERFACE = (1 << 2),
 	NET_FILTER_EVENT_IP = (1 << 3),
 	NET_FILTER_EVENT_ALF = (1 << 4),
-	NET_FILTER_EVENT_PARENTAL_CONTROLS = (1 << 5)
+	NET_FILTER_EVENT_PARENTAL_CONTROLS = (1 << 5),
+	NET_FILTER_EVENT_PF_PRIVATE_PROXY = (1 << 6),
 };
 
 /* Marks subsystem filtering state. */

@@ -206,7 +206,7 @@ ipc_task_init(
 	bzero(&task->exc_actions[0], sizeof(task->exc_actions[0]));
 
 	if (parent == TASK_NULL) {
-		ipc_port_t port;
+		ipc_port_t port = IP_NULL;
 		for (i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++) {
 			task->exc_actions[i].port = IP_NULL;
 			task->exc_actions[i].flavor = 0;
@@ -666,12 +666,9 @@ ipc_task_reset(
 		task->itk_settable_self = ipc_port_make_send_any(new_kport);
 	}
 
-	/* Set the old kport to IKOT_NONE and update the exec token while under the port lock */
-	ip_mq_lock(old_kport);
+	/* Set the old kport to IKOT_NONE */
 	/* clears ikol_alt_port */
-	ipc_kobject_disable_locked(old_kport, IKOT_TASK_CONTROL);
-	task->exec_token += 1;
-	ip_mq_unlock(old_kport);
+	ipc_kobject_disable(old_kport, IKOT_TASK_CONTROL);
 
 	/* Reset the read and inspect flavors of task port */
 	task->itk_task_ports[TASK_FLAVOR_READ] = IP_NULL;
@@ -679,10 +676,7 @@ ipc_task_reset(
 
 	if (old_pport != old_kport) {
 		assert(task_is_immovable(task));
-		ip_mq_lock(old_pport);
-		ipc_kobject_disable_locked(old_pport, IKOT_TASK_CONTROL);
-		task->exec_token += 1;
-		ip_mq_unlock(old_pport);
+		ipc_kobject_disable(old_pport, IKOT_TASK_CONTROL);
 	}
 
 	for (int i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++) {
@@ -1488,7 +1482,7 @@ thread_get_special_reply_port(
 kern_return_t
 thread_get_kernel_special_reply_port(void)
 {
-	ipc_port_t port = IPC_PORT_NULL;
+	ipc_port_t port = IP_NULL;
 	thread_t thread = current_thread();
 
 	/* unbind the thread special reply port */
@@ -2641,55 +2635,6 @@ convert_port_to_task_with_flavor_locked(
 
 	if (task != TASK_NULL) {
 		task_reference_grp(task, grp);
-	}
-
-	return task;
-}
-
-/*
- *	Routine:	convert_port_to_task_with_exec_token
- *	Purpose:
- *		Convert from a port to a task and return
- *		the exec token stored in the task.
- *		Doesn't consume the port ref; produces a task ref,
- *		which may be null.
- *	Conditions:
- *		Nothing locked.
- */
-task_t
-convert_port_to_task_with_exec_token(
-	ipc_port_t              port,
-	uint32_t                *exec_token)
-{
-	task_t task = TASK_NULL;
-	task_t self = current_task();
-
-	if (IP_VALID(port)) {
-		if (port == self->itk_self) {
-			if (exec_token) {
-				/*
-				 * This is ok to do without a lock,
-				 * from the perspective of `current_task()`
-				 * this token never changes, except
-				 * for the thread doing the exec.
-				 */
-				*exec_token = self->exec_token;
-			}
-			task_reference_grp(self, TASK_GRP_KERNEL);
-			return self;
-		}
-
-		ip_mq_lock(port);
-		if (ip_active(port)) {
-			task = convert_port_to_task_with_flavor_locked(port,
-			    TASK_FLAVOR_CONTROL, PORT_INTRANS_OPTIONS_NONE,
-			    TASK_GRP_KERNEL);
-		}
-		ip_mq_unlock(port);
-	}
-
-	if (task) {
-		*exec_token = task->exec_token;
 	}
 
 	return task;

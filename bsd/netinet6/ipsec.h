@@ -108,10 +108,10 @@ struct secpolicy {
 	 * "lifetime" is passed by sadb_lifetime.sadb_lifetime_addtime.
 	 * "validtime" is passed by sadb_lifetime.sadb_lifetime_usetime.
 	 */
-	long created;           /* time created the policy */
-	long lastused;          /* updated every when kernel sends a packet */
-	long lifetime;          /* duration of the lifetime of this policy */
-	long validtime;         /* duration this policy is valid without use */
+	u_int64_t created;      /* time created the policy */
+	u_int64_t lastused;     /* updated every when kernel sends a packet */
+	u_int64_t lifetime;     /* duration of the lifetime of this policy */
+	u_int64_t validtime;    /* duration this policy is valid without use */
 };
 
 /* Request for IPsec */
@@ -139,7 +139,7 @@ struct secspacq {
 
 	struct secpolicyindex spidx;
 
-	long created;           /* for lifetime */
+	u_int64_t created;      /* for lifetime */
 	int count;              /* for lifetime */
 	/* XXX: here is mbuf place holder to be sent ? */
 };

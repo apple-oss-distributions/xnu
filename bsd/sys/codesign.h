@@ -130,9 +130,6 @@ int             csblob_set_validation_category(struct cs_blob *, unsigned int);
 unsigned int    csblob_get_validation_category(struct cs_blob *);
 
 #include <uuid/uuid.h>
-
-int csblob_register_profile(struct cs_blob *, void*, vm_size_t);
-
 #define XNU_SUPPORTS_PROVISIONING_PROFILE_UUID 1
 int csblob_register_profile_uuid(struct cs_blob *, const uuid_t, void*, vm_size_t);
 

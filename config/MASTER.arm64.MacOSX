@@ -16,7 +16,7 @@
 #  Standard Apple OS Configurations:
 #  -------- ----- -- ---------------
 #
-#  KERNEL_BASE =    [ arm64 medium msgb_large config_requires_u32_munging config_delay_idle_sleep config_proc_udata_storage config_uexc config_darkboot ARM_EXTRAS_BASE ]
+#  KERNEL_BASE =    [ arm64 config_pmap_ppl medium msgb_large config_requires_u32_munging config_delay_idle_sleep config_proc_udata_storage config_uexc config_darkboot ARM_EXTRAS_BASE ]
 #  KERNEL_RELEASE = [ KERNEL_BASE ]
 #  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug config_proc_resource_limits ]
 #  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug config_proc_resource_limits ]
@@ -62,10 +62,10 @@
 #else
 #  PARAVIRT_BASE =  [ ]
 #endif /*SOC_IS_VIRTUALIZED*/
-#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_arm_pfz config_user_notification phys_write_acct config_service_port_info config_voucher_deprecated PARAVIRT_BASE ]
+#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_arm_pfz config_user_notification phys_write_acct config_service_port_info config_voucher_deprecated PARAVIRT_BASE config_ledger_interval_max ]
 #  MACH_RELEASE =   [ MACH_BASE ]
-#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace config_ledger_interval_max ]
-#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace config_ledger_interval_max importance_debug ]
+#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace ]
+#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug ]
 #  SCHED_BASE =     [ config_sched_traditional config_sched_multiq config_sched_deferred_ast config_clutch config_sched_sfi config_sched_auto_join config_preadopt_tg ]
 #  SCHED_RELEASE =  [ SCHED_BASE ]
 #  SCHED_DEV =      [ SCHED_BASE ]

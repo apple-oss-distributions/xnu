@@ -38,6 +38,10 @@
 
 #if SCHED_HYGIENE_DEBUG
 
+#if !DEVELOPMENT && !DEBUG
+#error SCHED_HYGIENE_DEBUG defined without DEVELOPMENT/DEBUG
+#endif
+
 #include <mach/mach_types.h>
 
 #include <kern/startup.h>
@@ -55,8 +59,8 @@ extern sched_hygiene_mode_t sched_preemption_disable_debug_mode;
 MACHINE_TIMEOUT_SPEC_DECL(sched_preemption_disable_threshold_mt);
 extern machine_timeout_t sched_preemption_disable_threshold_mt;
 
-__attribute__((noinline)) void _prepare_preemption_disable_measurement(thread_t thread);
-__attribute__((noinline)) void _collect_preemption_disable_measurement(thread_t thread);
+__attribute__((noinline)) void _prepare_preemption_disable_measurement(void);
+__attribute__((noinline)) void _collect_preemption_disable_measurement(void);
 
 extern sched_hygiene_mode_t interrupt_masked_debug_mode;
 

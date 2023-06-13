@@ -69,9 +69,10 @@
 
 LCK_GRP_DECLARE(timer_call_lck_grp, "timer_call");
 LCK_GRP_DECLARE(timer_longterm_lck_grp, "timer_longterm");
+LCK_GRP_DECLARE(timer_queue_lck_grp, "timer_queue");
 
 /* Timer queue lock must be acquired with interrupts disabled (under splclock()) */
-#define timer_queue_lock_spin(queue) lck_ticket_lock(&(queue)->lock_data, LCK_GRP_NULL)
+#define timer_queue_lock_spin(queue) lck_ticket_lock(&(queue)->lock_data, &timer_queue_lck_grp)
 #define timer_queue_unlock(queue)    lck_ticket_unlock(&(queue)->lock_data)
 
 /*
@@ -1844,7 +1845,8 @@ timer_compute_leeway(thread_t cthread, int32_t urgency, int32_t *tshift, uint64_
 	if ((urgency & TIMER_CALL_USER_MASK) != 0) {
 		bool tg_critical = false;
 #if CONFIG_THREAD_GROUPS
-		tg_critical = (thread_group_get_flags(thread_group_get(cthread))) & THREAD_GROUP_FLAGS_CRITICAL;
+		uint32_t tg_flags = thread_group_get_flags(thread_group_get(cthread));
+		tg_critical = tg_flags & (THREAD_GROUP_FLAGS_CRITICAL | THREAD_GROUP_FLAGS_STRICT_TIMERS);
 #endif /* CONFIG_THREAD_GROUPS */
 		bool timer_critical = (tpri >= BASEPRI_RTQUEUES) ||
 		    (urgency == TIMER_CALL_USER_CRITICAL) ||

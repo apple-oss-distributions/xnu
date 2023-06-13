@@ -196,8 +196,7 @@ def ShowBufCtl(cmd_args=None) :
         print("\t========================= free =========================")
         format_string = "\t{:<18s} {:18s} {:18s}"
         print(format_string.format("bufctl", "buf_addr", "buf_addrm"))
-        for bc in IterateListEntry(slab.sl_head, 'struct skmem_bufctl *',
-          'bc_link', list_prefix='s') :
+        for bc in IterateListEntry(slab.sl_head, 'bc_link', list_prefix='s') :
             format_string = "\t0x{:<08x} 0x{:<08x} 0x{:<08x}"
             print(format_string.format(bc, bc.bc_addr, bc.bc_addrm))
 
@@ -209,8 +208,7 @@ def ShowBufCtl(cmd_args=None) :
         print("\t========================= free =========================")
         format_string = "\t{:<18s} {:18s} {:18s}"
         print(format_string.format("bufctl", "buf_addr", "buf_addrm"))
-        for bc in IterateListEntry(slab.sl_head, 'struct skmem_bufctl *',
-          'bc_link', list_prefix='s') :
+        for bc in IterateListEntry(slab.sl_head, 'bc_link', list_prefix='s') :
             format_string = "\t0x{:<08x} 0x{:<08x} 0x{:<08x}"
             print(format_string.format(bc, bc.bc_addr, bc.bc_addrm))
 
@@ -223,8 +221,8 @@ def ShowBufCtl(cmd_args=None) :
         print("\t====================== allocated =======================")
         format_string = "\t{:<18s} {:18s} {:18s}"
         print(format_string.format("bufctl", "buf_addr", "buf_addrm"))
-        for bc in IterateListEntry(skm.skm_hash_table[i].bcb_head,
-          'struct skmem_bufctl *', 'bc_link', list_prefix='s') :
+        for bc in IterateListEntry(skm.skm_hash_table[i].bcb_head, 'bc_link',
+          list_prefix='s') :
             format_string = "\t0x{:<08x} 0x{:<08x} 0x{:<08x}"
             print(format_string.format(bc, bc.bc_addr, bc.bc_addrm))
 
@@ -320,8 +318,7 @@ def ShowChannelUppHash(cmd_args=None) :
         bkt = addressof(ch.ch_upp_hash_table[i])
         format_string = "{:>4d} 0x{:<08x}"
         print(format_string.format(i, bkt))
-        for kqum in IterateListEntry(bkt.upp_head, 'struct __kern_quantum *',
-                                      'qum_upp_link', list_prefix='s') :
+        for kqum in IterateListEntry(bkt.upp_head, 'qum_upp_link', list_prefix='s') :
             format_string = "0x{:<08x}"
             print(format_string.format(kqum))
 
@@ -352,13 +349,13 @@ def GetStructNsSummary(ns):
     """ show ports and refs, one per line
     """
     ports_string = "ports & refs\n"
-    for f in IterateRBTreeEntry(ns.ns_reservations, 'struct ns_reservation *', 'nsr_link'):
+    for f in IterateRBTreeEntry(ns.ns_reservations, 'nsr_link'):
         ports_string += "\t%u" % f.nsr_port
         ports_string += "\tlisten %d\tskywalk %d\tbsd %d\tpf %d\n" % (f.nsr_refs[0], f.nsr_refs[1], f.nsr_refs[2], f.nsr_refs[3])
     """ show just the ports, not refs
     offs = 0
     ports_string = "\nports:\t"
-    for f in IterateRBTreeEntry(ns.ns_reservations, 'struct ns_reservation *', 'nsr_link'):
+    for f in IterateRBTreeEntry(ns.ns_reservations, 'nsr_link'):
         if (len(ports_string)-offs > 70):
             ports_string += "\n\t"
             offs = len(ports_string)
@@ -379,7 +376,7 @@ def ShowNetNS(cmd_args=None):
     print(GetStructNsSummary.header)
 
     namespaces = kern.globals.netns_namespaces
-    for ns in IterateRBTreeEntry(namespaces, 'struct ns *', 'ns_link'):
+    for ns in IterateRBTreeEntry(namespaces, 'ns_link'):
         print(GetStructNsSummary(ns))
 
     print("\nwild: (these should be duplicated above)")
@@ -452,7 +449,7 @@ def ShowAllNetNSTokens(cmd_args=None):
 
     tokenhead = kern.globals.netns_all_tokens
     print(GetNsTokenSummary.header)
-    for nt in IterateListEntry(tokenhead, 'struct ns_token *', 'nt_all_link', list_prefix='s'):
+    for nt in IterateListEntry(tokenhead, 'nt_all_link', list_prefix='s'):
         print(GetNsTokenSummary(nt))
 
 @lldb_command("shownetnstokens")
@@ -474,7 +471,7 @@ def ShowNetNSTokens(cmd_args=None):
         return
 
     print(GetNsTokenSummary.header)
-    for nt in IterateListEntry(tokenhead, 'struct ns_token *', 'nt_ifp_link', list_prefix='s'):
+    for nt in IterateListEntry(tokenhead, 'nt_ifp_link', list_prefix='s'):
         print(GetNsTokenSummary(nt))
 
 def IterateSTAILQ_HEAD(headval, element_name):
@@ -586,7 +583,7 @@ def GetNECPSummary(necp):
     format_string = '{o: <#020x} {u:<#08x}'
 
     stats_arenas_string = "\n\n\t%-18s %-39s %-4s %-10s\n" % ("stats_arenas", "mmap", "refs", "flags")
-    for sa in IterateListEntry(necp.stats_arena_list, 'struct necp_arena_info *', 'nai_chain'):
+    for sa in IterateListEntry(necp.stats_arena_list, 'nai_chain'):
         stats_arenas_string += "\t0x%016x " % sa
         stats_arenas_string += "[0x%016x-0x%016x) " % (sa.nai_mmap.ami_mapaddr,(sa.nai_mmap.ami_mapaddr+sa.nai_mmap.ami_mapsize))
         stats_arenas_string += "%4u " % sa.nai_use_count
@@ -594,14 +591,14 @@ def GetNECPSummary(necp):
         stats_arenas_string += "\n"
 
     clients_string = ""
-    for c in IterateRBTreeEntry(necp.clients, 'struct necp_client *', 'link'):
+    for c in IterateRBTreeEntry(necp.clients, 'link'):
         clients_string += "\n\t%-18s %-36s %-4s %-5s\n" % ("necp_clients", "client_id", "refs", "flags")
         clients_string += "\t0x%016x " % c
         clients_string += "%36s " % GetUUIDSummary(c.client_id)
         clients_string += "%4u " % c.reference_count
         clients_string += "%5s " % GetNECPClientBitFields(c)
         count = 0;
-        for f in IterateRBTreeEntry(c.flow_registrations, 'struct necp_client_flow_registration *', 'client_link'):
+        for f in IterateRBTreeEntry(c.flow_registrations, 'client_link'):
             if count == 0:
                 clients_string += "\n\t\t%-18s %-36s %-2s %-18s %-18s %-18s\n" % ("flow_registration", "registraton_id", "flags", "stats_arena", "kstats_obj", "ustats_obj")
             clients_string += "\t\t0x%016x " % f
@@ -667,7 +664,7 @@ def ShowNexuses(cmd_args=None):
     """
     nexus_summaries = []
     nexuses = kern.globals.nx_head
-    for nx in IterateRBTreeEntry(nexuses, 'struct kern_nexus*', 'nx_link'):
+    for nx in IterateRBTreeEntry(nexuses, 'nx_link'):
         nexus_summaries.append(GetStructNexusSummary(nx))
     nexus_summaries.sort()
     for nx_str in nexus_summaries:
@@ -733,7 +730,7 @@ def ShowFlowswitches(cmd_args=None):
         ifname = cmd_args[0]
 
     nexuses = kern.globals.nx_head
-    for nx in IterateRBTreeEntry(nexuses, 'struct kern_nexus*', 'nx_link'):
+    for nx in IterateRBTreeEntry(nexuses, 'nx_link'):
         if not IsNexusAFlowswitch(nx):
             continue
         fsw = GetNexusAsFlowswitch(nx)
@@ -788,7 +785,7 @@ def ShowProtoNS(cmd_args=None):
     """
 
     protons_tokens = kern.globals.protons_tokens
-    for pt in IterateRBTreeEntry(protons_tokens, 'struct protons_token *', 'pt_link'):
+    for pt in IterateRBTreeEntry(protons_tokens, 'pt_link'):
         print("(struct protons_token *){} protocol {:3} pid {:5} epid {:5} ref {:2} flags {}".format(
                 hex(pt), int(pt.pt_protocol), int(pt.pt_pid), int(pt.pt_epid),
                 int(pt.pt_refcnt.ref_count), hex(pt.pt_flags)))

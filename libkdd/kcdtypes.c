@@ -525,6 +525,13 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		setup_subtype_description(&subtypes[0], KC_ST_INT32, 0, "sharedCacheID");
 		break;
 
+	case STACKSHOT_KCTYPE_CODESIGNING_INFO:
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct stackshot_task_codesigning_info, csflags);
+		_SUBTYPE(KC_ST_UINT32, struct stackshot_task_codesigning_info, cs_trust_level);
+		setup_type_definition(retval, type_id, i, "stackshot_task_codesigning_info");
+		break;
+
 	case STACKSHOT_KCTYPE_BOOTARGS: {
 		i = 0;
 		_STRINGTYPE("boot_args");
@@ -865,6 +872,31 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 	case TASK_CRASHINFO_EXCEPTION_TYPE: {
 		setup_subtype_description(&subtypes[0], KC_ST_UINT32, 0, "exception_type");
 		setup_type_definition(retval, type_id, 1, "exception_type");
+		break;
+	}
+
+	case TASK_CRASHINFO_CS_SIGNING_ID: {
+		i = 0;
+		_STRINGTYPE("cs_signing_id");
+		setup_type_definition(retval, type_id, i, "cs_signing_id");
+		break;
+	}
+
+	case TASK_CRASHINFO_CS_TEAM_ID: {
+		i = 0;
+		_STRINGTYPE("cs_team_id");
+		setup_type_definition(retval, type_id, i, "cs_team_id");
+		break;
+	}
+
+	case TASK_CRASHINFO_CS_VALIDATION_CATEGORY: {
+		setup_subtype_description(&subtypes[0], KC_ST_UINT32, 0, "cs_validation_category");
+		setup_type_definition(retval, type_id, 1, "cs_validation_category");
+		break;
+	}
+	case TASK_CRASHINFO_CS_TRUST_LEVEL: {
+		setup_subtype_description(&subtypes[0], KC_ST_UINT32, 0, "cs_trust_level");
+		setup_type_definition(retval, type_id, 1, "cs_trust_level");
 		break;
 	}
 

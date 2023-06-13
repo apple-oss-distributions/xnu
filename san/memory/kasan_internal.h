@@ -105,9 +105,8 @@ enum __attribute__((flag_enum)) kasan_access_types {
 	TYPE_STRW    = BIT(5),  /* string intrinsic (write) */
 
 	/* KASAN-classic specific */
-	TYPE_KFREE   = BIT(6),  /* kfree() */
-	TYPE_ZFREE   = BIT(7),  /* zfree() */
-	TYPE_FSFREE  = BIT(8),  /* fakestack free */
+	TYPE_ZFREE   = BIT(6),  /* zfree() */
+	TYPE_FSFREE  = BIT(7),  /* fakestack free */
 
 	TYPE_UAF           = BIT(12),
 	TYPE_POISON_GLOBAL = BIT(13),
@@ -121,7 +120,7 @@ enum __attribute__((flag_enum)) kasan_access_types {
 	TYPE_READ    = TYPE_LOAD | TYPE_MEMR | TYPE_STRR,  /* all reads */
 	TYPE_WRITE   = TYPE_STORE | TYPE_MEMW | TYPE_STRW, /* all writes */
 	TYPE_RW      = TYPE_READ | TYPE_WRITE,           /* reads and writes */
-	TYPE_FREE    = TYPE_KFREE | TYPE_ZFREE | TYPE_FSFREE,
+	TYPE_FREE    = TYPE_ZFREE | TYPE_FSFREE,
 	TYPE_NORMAL  = TYPE_RW | TYPE_FREE,
 	TYPE_DYNAMIC = TYPE_NORMAL | TYPE_UAF,
 	TYPE_POISON  = TYPE_POISON_GLOBAL | TYPE_POISON_HEAP,
@@ -183,7 +182,6 @@ void kasan_unlock(boolean_t);
 bool kasan_lock_held(thread_t);
 
 /* Subsystem helpers */
-void kasan_free_internal(void **addrp, vm_size_t *sizep, int type, zone_t *, vm_size_t user_size, int locked, bool doquarantine);
 void kasan_init_fakestack(void);
 
 /*

@@ -102,6 +102,7 @@ class UserProcess(target.Process):
     def __init__(self, task):
         self.task = task
         self.proc = GetProcFromTask(task)
+        self.cache = {}
         if not self.proc:
             raise ValueError("Task has no associated BSD process.")
         dataregisters64bit = False
@@ -213,14 +214,14 @@ class UserProcess(target.Process):
 
     def readMemory(self, address, size):
         cache_key = "{}-{}-{}".format(hex(self.task), hex(address), size)
-        cache_data = caching.GetDynamicCacheData(cache_key)
+        cache_data = self.cache.get(cache_key, None)
         if cache_data:
             return self.encodeByteString(cache_data)
         data = GetUserDataAsString(self.task, address, size)
         if not data:
             logging.error("Failed to read memory task:{: <#018x} {: <#018x} {:d}".format(self.task, address, size))
         else:
-            caching.SaveDynamicCacheData(cache_key, data)
+            self.cache[cache_key] = data
         return self.encodeByteString(data)
 
     def getSharedLibInfoAddress(self):

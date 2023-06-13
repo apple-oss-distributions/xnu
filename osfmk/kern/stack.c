@@ -143,7 +143,7 @@ stack_alloc_internal(void)
 	vm_offset_t     stack = 0;
 	spl_t           s;
 	kma_flags_t     flags = KMA_NOFAIL | KMA_GUARD_FIRST | KMA_GUARD_LAST |
-	    KMA_KSTACK | KMA_KOBJECT | KMA_ZERO;
+	    KMA_KSTACK | KMA_KOBJECT | KMA_ZERO | KMA_SPRAYQTN;
 
 	s = splsched();
 	stack_lock();

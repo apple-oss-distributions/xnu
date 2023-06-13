@@ -2099,25 +2099,17 @@ public:
 #ifdef KERNEL_PRIVATE
 #define OSDefineOperatorMethodsWithZone(className)              \
 	void * className :: operator new(size_t size) {             \
-	    if(className ## _zone) {                                \
+	    if (className ## _zone) {                               \
 	        return zalloc_flags(className ## _zone,             \
 	                        (zalloc_flags_t) (Z_WAITOK | Z_ZERO));\
 	    } else {                                                \
-	/*
-	 * kIOTracking is on, disabling zones
-	 * for iokit objects
-	 */                                                         \
 	        return OSObject::operator new(size);                \
 	    }                                                       \
 	}                                                           \
 	void className :: operator delete(void *mem, size_t size) { \
-	    if(className ## _zone) {                                \
+	    if (className ## _zone) {                               \
 	        kern_os_zfree(className ## _zone, mem, size);       \
 	    } else {                                                \
-	/*
-	 * kIOTracking is on, disabling zones
-	 * for iokit objects
-	 */                                                         \
 	        return OSObject::operator delete(mem, size);        \
 	    }                                                       \
 	}

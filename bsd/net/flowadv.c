@@ -82,7 +82,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
-#include <sys/mcache.h>
+#include <sys/mcache.h> /* for VERIFY() */
 #include <sys/mbuf.h>
 #include <sys/proc_internal.h>
 #include <sys/socketvar.h>
@@ -108,9 +108,6 @@ static STAILQ_HEAD(fadv_head, flowadv_fcentry) fadv_list =
 static thread_t fadv_thread = THREAD_NULL;
 static uint32_t fadv_active;
 
-static const unsigned int fadv_size = sizeof(struct flowadv_fcentry);
-static struct mcache *fadv_cache;               /* mcache for flowadv_fcentry */
-
 #define FADV_CACHE_NAME  "flowadv"              /* cache name */
 
 static int flowadv_thread_cont(int);
@@ -119,9 +116,6 @@ static void flowadv_thread_func(void *, wait_result_t);
 void
 flowadv_init(void)
 {
-	fadv_cache = mcache_create(FADV_CACHE_NAME, fadv_size,
-	    sizeof(uint64_t), 0, MCR_SLEEP);
-
 	if (kernel_thread_start(flowadv_thread_func, NULL, &fadv_thread) !=
 	    KERN_SUCCESS) {
 		panic("%s: couldn't create flow event advisory thread",
@@ -134,20 +128,13 @@ flowadv_init(void)
 struct flowadv_fcentry *
 flowadv_alloc_entry(int how)
 {
-	struct flowadv_fcentry *fce;
-
-	if ((fce = mcache_alloc(fadv_cache, (how == M_WAITOK) ?
-	    MCR_SLEEP : MCR_NOSLEEP)) != NULL) {
-		bzero(fce, fadv_size);
-	}
-
-	return fce;
+	return kalloc_type(struct flowadv_fcentry, how | Z_ZERO);
 }
 
 void
 flowadv_free_entry(struct flowadv_fcentry *fce)
 {
-	mcache_free(fadv_cache, fce);
+	kfree_type(struct flowadv_fcentry, fce);
 }
 
 void
@@ -266,10 +253,4 @@ flowadv_thread_func(void *v, wait_result_t w)
 	 */
 	lck_mtx_unlock(&fadv_lock);
 	VERIFY(0);
-}
-
-void
-flowadv_reap_caches(boolean_t purge)
-{
-	mcache_reap_now(fadv_cache, purge);
 }

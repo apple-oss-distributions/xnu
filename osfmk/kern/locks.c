@@ -130,9 +130,11 @@ MACHINE_TIMEOUT(dtrace_spin_threshold, "dtrace-spin-threshold",
 #endif
 #endif
 
+struct lck_mcs PERCPU_DATA(lck_mcs);
+
 __kdebug_only
 uintptr_t
-unslide_for_kdebug(void* object)
+unslide_for_kdebug(const void* object)
 {
 	if (__improbable(kdebug_enable)) {
 		return VM_KERNEL_UNSLIDE_OR_PERM(object);
@@ -825,6 +827,32 @@ void
 	hw_lock_unlock_internal(lock);
 }
 
+void
+hw_lock_assert(__assert_only hw_lock_t lock, __assert_only unsigned int type)
+{
+#if MACH_ASSERT
+	thread_t thread, holder;
+
+	holder = HW_LOCK_STATE_TO_THREAD(lock->lock_data);
+	thread = current_thread();
+
+	if (type == LCK_ASSERT_OWNED) {
+		if (holder == 0) {
+			panic("Lock not owned %p = %p", lock, holder);
+		}
+		if (holder != thread) {
+			panic("Lock not owned by current thread %p = %p", lock, holder);
+		}
+	} else if (type == LCK_ASSERT_NOTOWNED) {
+		if (holder != THREAD_NULL && holder == thread) {
+			panic("Lock owned by current thread %p = %p", lock, holder);
+		}
+	} else {
+		panic("hw_lock_assert(): invalid arg (%u)", type);
+	}
+#endif /* MACH_ASSERT */
+}
+
 /*
  *	Routine hw_lock_held, doesn't change preemption state.
  *	N.B.  Racy, of course.
@@ -1409,29 +1437,6 @@ change_sleep_inheritor(event_t event, thread_t inheritor)
 	return ret;
 }
 
-/*
- * Name: lck_spin_sleep_with_inheritor
- *
- * Description: deschedule the current thread and wait on the waitq associated with event to be woken up.
- *              While waiting, the sched priority of the waiting thread will contribute to the push of the event that will
- *              be directed to the inheritor specified.
- *              An interruptible mode and deadline can be specified to return earlier from the wait.
- *
- * Args:
- *   Arg1: lck_spin_t lock used to protect the sleep. The lock will be dropped while sleeping and reaquired before returning according to the sleep action specified.
- *   Arg2: sleep action. LCK_SLEEP_DEFAULT, LCK_SLEEP_UNLOCK.
- *   Arg3: event to wait on.
- *   Arg4: thread to propagate the event push to.
- *   Arg5: interruptible flag for wait.
- *   Arg6: deadline for wait.
- *
- * Conditions: Lock must be held. Returns with the lock held according to the sleep action specified.
- *             Lock will be dropped while waiting.
- *             The inheritor specified cannot return to user space or exit until another inheritor is specified for the event or a
- *             wakeup for the event is called.
- *
- * Returns: result of the wait.
- */
 wait_result_t
 lck_spin_sleep_with_inheritor(
 	lck_spin_t *lock,
@@ -1452,29 +1457,27 @@ lck_spin_sleep_with_inheritor(
 	}
 }
 
-/*
- * Name: lck_ticket_sleep_with_inheritor
- *
- * Description: deschedule the current thread and wait on the waitq associated with event to be woken up.
- *              While waiting, the sched priority of the waiting thread will contribute to the push of the event that will
- *              be directed to the inheritor specified.
- *              An interruptible mode and deadline can be specified to return earlier from the wait.
- *
- * Args:
- *   Arg1: lck_ticket_t lock used to protect the sleep. The lock will be dropped while sleeping and reaquired before returning according to the sleep action specified.
- *   Arg2: sleep action. LCK_SLEEP_DEFAULT, LCK_SLEEP_UNLOCK.
- *   Arg3: event to wait on.
- *   Arg4: thread to propagate the event push to.
- *   Arg5: interruptible flag for wait.
- *   Arg6: deadline for wait.
- *
- * Conditions: Lock must be held. Returns with the lock held according to the sleep action specified.
- *             Lock will be dropped while waiting.
- *             The inheritor specified cannot return to user space or exit until another inheritor is specified for the event or a
- *             wakeup for the event is called.
- *
- * Returns: result of the wait.
- */
+wait_result_t
+hw_lck_ticket_sleep_with_inheritor(
+	hw_lck_ticket_t *lock,
+	lck_grp_t *grp __unused,
+	lck_sleep_action_t lck_sleep_action,
+	event_t event,
+	thread_t inheritor,
+	wait_interrupt_t interruptible,
+	uint64_t deadline)
+{
+	if (lck_sleep_action & LCK_SLEEP_UNLOCK) {
+		return sleep_with_inheritor_and_turnstile(event, inheritor,
+		           interruptible, deadline,
+		           ^{}, ^{ hw_lck_ticket_unlock(lock); });
+	} else {
+		return sleep_with_inheritor_and_turnstile(event, inheritor,
+		           interruptible, deadline,
+		           ^{ hw_lck_ticket_lock(lock, grp); }, ^{ hw_lck_ticket_unlock(lock); });
+	}
+}
+
 wait_result_t
 lck_ticket_sleep_with_inheritor(
 	lck_ticket_t *lock,
@@ -1496,29 +1499,6 @@ lck_ticket_sleep_with_inheritor(
 	}
 }
 
-/*
- * Name: lck_mtx_sleep_with_inheritor
- *
- * Description: deschedule the current thread and wait on the waitq associated with event to be woken up.
- *              While waiting, the sched priority of the waiting thread will contribute to the push of the event that will
- *              be directed to the inheritor specified.
- *              An interruptible mode and deadline can be specified to return earlier from the wait.
- *
- * Args:
- *   Arg1: lck_mtx_t lock used to protect the sleep. The lock will be dropped while sleeping and reaquired before returning according to the sleep action specified.
- *   Arg2: sleep action. LCK_SLEEP_DEFAULT, LCK_SLEEP_UNLOCK, LCK_SLEEP_SPIN, LCK_SLEEP_SPIN_ALWAYS.
- *   Arg3: event to wait on.
- *   Arg4: thread to propagate the event push to.
- *   Arg5: interruptible flag for wait.
- *   Arg6: deadline for wait.
- *
- * Conditions: Lock must be held. Returns with the lock held according to the sleep action specified.
- *             Lock will be dropped while waiting.
- *             The inheritor specified cannot return to user space or exit until another inheritor is specified for the event or a
- *             wakeup for the event is called.
- *
- * Returns: result of the wait.
- */
 wait_result_t
 lck_mtx_sleep_with_inheritor(
 	lck_mtx_t              *lock,
@@ -1565,29 +1545,6 @@ lck_mtx_sleep_with_inheritor(
  * sleep_with_inheritor functions with lck_rw_t as locking primitive.
  */
 
-/*
- * Name: lck_rw_sleep_with_inheritor
- *
- * Description: deschedule the current thread and wait on the waitq associated with event to be woken up.
- *              While waiting, the sched priority of the waiting thread will contribute to the push of the event that will
- *              be directed to the inheritor specified.
- *              An interruptible mode and deadline can be specified to return earlier from the wait.
- *
- * Args:
- *   Arg1: lck_rw_t lock used to protect the sleep. The lock will be dropped while sleeping and reaquired before returning according to the sleep action specified.
- *   Arg2: sleep action. LCK_SLEEP_DEFAULT, LCK_SLEEP_SHARED, LCK_SLEEP_EXCLUSIVE.
- *   Arg3: event to wait on.
- *   Arg4: thread to propagate the event push to.
- *   Arg5: interruptible flag for wait.
- *   Arg6: deadline for wait.
- *
- * Conditions: Lock must be held. Returns with the lock held according to the sleep action specified.
- *             Lock will be dropped while waiting.
- *             The inheritor specified cannot return to user space or exit until another inheritor is specified for the event or a
- *             wakeup for the event is called.
- *
- * Returns: result of the wait.
- */
 wait_result_t
 lck_rw_sleep_with_inheritor(
 	lck_rw_t               *lock,
@@ -1636,26 +1593,6 @@ lck_rw_sleep_with_inheritor(
  * wakeup_with_inheritor functions are independent from the locking primitive.
  */
 
-/*
- * Name: wakeup_one_with_inheritor
- *
- * Description: wake up one waiter for event if any. The thread woken up will be the one with the higher sched priority waiting on event.
- *              The push for the event will be transferred from the last inheritor to the woken up thread if LCK_WAKE_DEFAULT is specified.
- *              If LCK_WAKE_DO_NOT_TRANSFER_PUSH is specified the push will not be transferred.
- *
- * Args:
- *   Arg1: event to wake from.
- *   Arg2: wait result to pass to the woken up thread.
- *   Arg3: wake flag. LCK_WAKE_DEFAULT or LCK_WAKE_DO_NOT_TRANSFER_PUSH.
- *   Arg4: pointer for storing the thread wokenup.
- *
- * Returns: KERN_NOT_WAITING if no threads were waiting, KERN_SUCCESS otherwise.
- *
- * Conditions: The new inheritor wokenup cannot return to user space or exit until another inheritor is specified for the event or a
- *             wakeup for the event is called.
- *             A reference for the wokenup thread is acquired.
- *             NOTE: this cannot be called from interrupt context.
- */
 kern_return_t
 wakeup_one_with_inheritor(event_t event, wait_result_t result, lck_wake_action_t action, thread_t *thread_wokenup)
 {
@@ -1666,19 +1603,6 @@ wakeup_one_with_inheritor(event_t event, wait_result_t result, lck_wake_action_t
 	           thread_wokenup);
 }
 
-/*
- * Name: wakeup_all_with_inheritor
- *
- * Description: wake up all waiters waiting for event. The old inheritor will lose the push.
- *
- * Args:
- *   Arg1: event to wake from.
- *   Arg2: wait result to pass to the woken up threads.
- *
- * Returns: KERN_NOT_WAITING if no threads were waiting, KERN_SUCCESS otherwise.
- *
- * Conditions: NOTE: this cannot be called from interrupt context.
- */
 kern_return_t
 wakeup_all_with_inheritor(event_t event, wait_result_t result)
 {

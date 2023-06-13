@@ -189,9 +189,6 @@ extern kern_return_t vm_region_object_create
 	ipc_port_t *object_handle
 );
 
-extern mach_vm_offset_t mach_get_vm_start(vm_map_t);
-extern mach_vm_offset_t mach_get_vm_end(vm_map_t);
-
 #if CONFIG_CODE_DECRYPTION
 #define VM_MAP_DEBUG_APPLE_PROTECT      MACH_ASSERT
 #if VM_MAP_DEBUG_APPLE_PROTECT
@@ -283,8 +280,6 @@ extern kern_return_t fourk_pager_populate(
  * bsd
  */
 struct vnode;
-extern void *upl_get_internal_page_list(
-	upl_t upl);
 
 extern void vnode_setswapmount(struct vnode *);
 extern int64_t vnode_getswappin_avail(struct vnode *);
@@ -690,6 +685,7 @@ struct vm_page_secluded_data {
 	int     grab_success_other;
 	int     grab_failure_locked;
 	int     grab_failure_state;
+	int     grab_failure_realtime;
 	int     grab_failure_dirty;
 	int     grab_for_iokit;
 	int     grab_for_iokit_success;
@@ -699,12 +695,34 @@ extern struct vm_page_secluded_data vm_page_secluded;
 extern int num_tasks_can_use_secluded_mem;
 
 /* boot-args */
-extern int secluded_for_apps;
-extern int secluded_for_iokit;
-extern int secluded_for_filecache;
-#if 11
-extern int secluded_for_fbdp;
-#endif
+
+__enum_decl(secluded_filecache_mode_t, uint8_t, {
+	/*
+	 * SECLUDED_FILECACHE_NONE:
+	 * + no file contents in secluded pool
+	 */
+	SECLUDED_FILECACHE_NONE = 0,
+	/*
+	 * SECLUDED_FILECACHE_APPS
+	 * + no files from /
+	 * + files from /Applications/ are OK
+	 * + files from /Applications/Camera are not OK
+	 * + no files that are open for write
+	 */
+	SECLUDED_FILECACHE_APPS = 1,
+	/*
+	 * SECLUDED_FILECACHE_RDONLY
+	 * + all read-only files OK, except:
+	 *      + dyld_shared_cache_arm64*
+	 *      + Camera
+	 *	+ mediaserverd
+	 */
+	SECLUDED_FILECACHE_RDONLY = 2,
+});
+
+extern secluded_filecache_mode_t secluded_for_filecache;
+extern bool secluded_for_apps;
+extern bool secluded_for_iokit;
 
 extern uint64_t vm_page_secluded_drain(void);
 extern void             memory_object_mark_eligible_for_secluded(
@@ -712,6 +730,10 @@ extern void             memory_object_mark_eligible_for_secluded(
 	boolean_t                       eligible_for_secluded);
 
 #endif /* CONFIG_SECLUDED_MEMORY */
+
+extern void             memory_object_mark_for_realtime(
+	memory_object_control_t         control,
+	bool                            for_realtime);
 
 #if MACH_ASSERT
 extern void             memory_object_mark_for_fbdp(

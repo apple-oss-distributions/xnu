@@ -776,22 +776,7 @@ IOService::init( OSDictionary * dictionary )
 	}
 
 	reserved = IOMallocType(ExpansionData);
-
-	/*
-	 * TODO: Improve on this.  Previous efforts to more lazily allocate this
-	 * lock based on the presence of specifiers ran into issues as some
-	 * platforms set up the specifiers after IOService initialization.
-	 *
-	 * We may be able to get away with a global lock, as this should only be
-	 * contended by IOReporting clients and driver start/stop (unless a
-	 * driver wants to remove/add handlers in the course of normal operation,
-	 * which should be unlikely).
-	 */
-	reserved->interruptStatisticsLock = IOLockAlloc();
-	if (!reserved->interruptStatisticsLock) {
-		return false;
-	}
-
+	IOLockInlineInit(&reserved->interruptStatisticsLock);
 	return true;
 }
 
@@ -810,21 +795,7 @@ IOService::init( IORegistryEntry * from,
 	}
 
 	reserved = IOMallocType(ExpansionData);
-
-	/*
-	 * TODO: Improve on this.  Previous efforts to more lazily allocate this
-	 * lock based on the presence of specifiers ran into issues as some
-	 * platforms set up the specifiers after IOService initialization.
-	 *
-	 * We may be able to get away with a global lock, as this should only be
-	 * contended by IOReporting clients and driver start/stop (unless a
-	 * driver wants to remove/add handlers in the course of normal operation,
-	 * which should be unlikely).
-	 */
-	reserved->interruptStatisticsLock = IOLockAlloc();
-	if (!reserved->interruptStatisticsLock) {
-		return false;
-	}
+	IOLockInlineInit(&reserved->interruptStatisticsLock);
 
 	return true;
 }
@@ -854,13 +825,11 @@ IOService::free( void )
 			IODelete(reserved->interruptStatisticsArray, IOInterruptAccountingReporter, reserved->interruptStatisticsArrayCount);
 		}
 
-		if (reserved->interruptStatisticsLock) {
-			IOLockFree(reserved->interruptStatisticsLock);
-		}
 		if (reserved->uvars && reserved->uvars->userServer) {
 			reserved->uvars->userServer->serviceFree(this);
 		}
 		sourcesPrivate = reserved->interruptSourcesPrivate;
+		IOLockInlineDestroy(&reserved->interruptStatisticsLock);
 		IOFreeType(reserved, ExpansionData);
 	}
 
@@ -2271,7 +2240,8 @@ IOService::registerInterestForNotifier( IONotifier *svcNotify, const OSSymbol * 
 	IOReturn rc = kIOReturnSuccess;
 	_IOServiceInterestNotifier  *notify = NULL;
 
-	if (!svcNotify || !(notify = OSDynamicCast(_IOServiceInterestNotifier, svcNotify))) {
+
+	if (!svcNotify || !(notify = OSDynamicCast(_IOServiceInterestNotifier, svcNotify)) || !handler) {
 		return kIOReturnBadArgument;
 	}
 
@@ -8625,7 +8595,7 @@ IOService::addInterruptStatistics(IOInterruptAccountingData * statistics, int so
 	 * to adhere to best practices; it'll make the code more complicated,
 	 * unfortunately.
 	 */
-	IOLockLock(reserved->interruptStatisticsLock);
+	IOLockLock(&reserved->interruptStatisticsLock);
 
 	/*
 	 * Lazily allocate the statistics array.
@@ -8744,7 +8714,7 @@ IOService::addInterruptStatistics(IOInterruptAccountingData * statistics, int so
 	 */
 	interruptAccountingDataInheritChannels(reserved->interruptStatisticsArray[source].statistics, reserved->interruptStatisticsArray[source].reporter);
 
-	IOLockUnlock(reserved->interruptStatisticsLock);
+	IOLockUnlock(&reserved->interruptStatisticsLock);
 
 	return kIOReturnSuccess;
 }
@@ -8758,7 +8728,7 @@ IOService::removeInterruptStatistics(int source)
 		return kIOReturnBadArgument;
 	}
 
-	IOLockLock(reserved->interruptStatisticsLock);
+	IOLockLock(&reserved->interruptStatisticsLock);
 
 	/*
 	 * We dynamically grow the statistics array, so an excessively
@@ -8790,7 +8760,7 @@ IOService::removeInterruptStatistics(int source)
 	 */
 	interruptAccountingDataUpdateChannels(reserved->interruptStatisticsArray[source].statistics, reserved->interruptStatisticsArray[source].reporter);
 	reserved->interruptStatisticsArray[source].statistics = NULL;
-	IOLockUnlock(reserved->interruptStatisticsLock);
+	IOLockUnlock(&reserved->interruptStatisticsLock);
 
 	return kIOReturnSuccess;
 }
@@ -8879,7 +8849,7 @@ IOService::configureReport(IOReportChannelList    *channelList,
 		}
 	}
 
-	IOLockLock(reserved->interruptStatisticsLock);
+	IOLockLock(&reserved->interruptStatisticsLock);
 
 	/* The array count is signed (because the interrupt indices are signed), hence the cast */
 	for (cnt = 0; cnt < (unsigned) reserved->interruptStatisticsArrayCount; cnt++) {
@@ -8896,7 +8866,7 @@ IOService::configureReport(IOReportChannelList    *channelList,
 		}
 	}
 
-	IOLockUnlock(reserved->interruptStatisticsLock);
+	IOLockUnlock(&reserved->interruptStatisticsLock);
 
 	if (hasUserServer()) {
 		return _ConfigureReport(channelList, action, result, destination);
@@ -8929,7 +8899,7 @@ IOService::updateReport(IOReportChannelList      *channelList,
 		}
 	}
 
-	IOLockLock(reserved->interruptStatisticsLock);
+	IOLockLock(&reserved->interruptStatisticsLock);
 
 	/* The array count is signed (because the interrupt indices are signed), hence the cast */
 	for (cnt = 0; cnt < (unsigned) reserved->interruptStatisticsArrayCount; cnt++) {
@@ -8946,7 +8916,7 @@ IOService::updateReport(IOReportChannelList      *channelList,
 		}
 	}
 
-	IOLockUnlock(reserved->interruptStatisticsLock);
+	IOLockUnlock(&reserved->interruptStatisticsLock);
 
 
 	if (hasUserServer()) {

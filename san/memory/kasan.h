@@ -31,7 +31,6 @@
 
 #include <mach/mach_types.h>
 #include <sys/queue.h>
-#include <kern/zalloc.h>
 
 #if KERNEL_PRIVATE
 
@@ -58,6 +57,7 @@ typedef uintptr_t uptr;
 #define KASAN_MAY_POISON                false
 
 __BEGIN_DECLS
+
 void kasan_map_shadow(vm_offset_t, vm_size_t, bool);
 
 /* KASAN enable/disable and general initialization. */

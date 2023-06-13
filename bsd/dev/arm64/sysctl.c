@@ -17,6 +17,7 @@
 
 #if HYPERVISOR
 #include <kern/hv_support.h>
+#include <kern/bits.h>
 #endif
 
 extern uint64_t wake_abstime;
@@ -71,6 +72,7 @@ SYSCTL_QUAD(_machdep, OID_AUTO, wfe_rec_clamp,
     "");
 
 #endif
+
 
 static
 SYSCTL_QUAD(_machdep, OID_AUTO, wake_abstime,
@@ -379,15 +381,24 @@ SYSCTL_PROC_MACHDEP_CPU_SYSREG(AIDR_EL1);
 
 
 #ifdef ML_IO_TIMEOUTS_ENABLED
-/* Timeouts for ml_{io|phys}_{read|write}... */
+/*
+ * Timeouts for ml_{io|phys}_{read|write}...
+ * RO on DEVELOPMENT/DEBUG kernels.
+ */
 
-SYSCTL_QUAD(_machdep, OID_AUTO, report_phy_read_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+#if DEVELOPMENT || DEBUG
+#define MMIO_TIMEOUT_FLAGS (CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED)
+#else
+#define MMIO_TIMEOUT_FLAGS (CTLFLAG_KERN | CTLFLAG_RD | CTLFLAG_LOCKED)
+#endif
+
+SYSCTL_QUAD(_machdep, OID_AUTO, report_phy_read_delay, MMIO_TIMEOUT_FLAGS,
     &report_phy_read_delay_to, "Maximum time before io/phys read gets reported or panics");
-SYSCTL_QUAD(_machdep, OID_AUTO, report_phy_write_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_QUAD(_machdep, OID_AUTO, report_phy_write_delay, MMIO_TIMEOUT_FLAGS,
     &report_phy_write_delay_to, "Maximum time before io/phys write gets reported or panics");
-SYSCTL_QUAD(_machdep, OID_AUTO, trace_phy_read_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_QUAD(_machdep, OID_AUTO, trace_phy_read_delay, MMIO_TIMEOUT_FLAGS,
     &trace_phy_read_delay_to, "Maximum time before io/phys read gets ktraced");
-SYSCTL_QUAD(_machdep, OID_AUTO, trace_phy_write_delay, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_QUAD(_machdep, OID_AUTO, trace_phy_write_delay, MMIO_TIMEOUT_FLAGS,
     &trace_phy_write_delay_to, "Maximum time before io/phys write gets ktraced");
 SYSCTL_UINT(_machdep, OID_AUTO, report_phy_read_osbt, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
     &report_phy_read_osbt, 0, "Whether to report exceeding io/phys read duration via OSReportWithBacktrace");

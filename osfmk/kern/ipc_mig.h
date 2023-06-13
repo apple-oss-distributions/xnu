@@ -116,6 +116,67 @@ extern mach_msg_return_t mach_msg_send_from_kernel_proper(
 
 #define mach_msg_send_from_kernel mach_msg_send_from_kernel_proper
 
+/*
+ * Allocate kernel message buffer(s) large enough to fit the message,
+ * and accept a block that populates the message content.
+ *
+ *     - descriptor_count: Descriptor count in the outgoing message. If non-zero,
+ *       kernel expects a complex message, and vice-versa.
+ *
+ *     - payload_size: Size of data not processed by kernel (i.e. size of data
+ *       following the header, or last descriptor if the message is complex).
+ *       This is NOT the total size of the outgoing message.
+ *
+ * For memory safety the kmsg buffers allocated may occupy non-contiguous memory
+ * and it is the caller's responsibility to correctly set up the message
+ * based on content's offset from the mach message header, as follows:
+ *
+ * void (^builder)(mach_msg_header_t *header, mach_msg_descriptor_t *descs, void *payload))
+ *
+ *            header* ───────► ┌─────────────────────────┐
+ *                             │                         │
+ *                             │    mach_msg_header_t    │
+ *                             │                         │
+ *                             ├─────────────────────────┤
+ *                             │(optional)mach_msg_body_t│
+ *             descs* ───────► ├─────────────────────────┤
+ *                             │                         │
+ *                             │                         │
+ *                             │                         │
+ *                             │  (optional)descriptors  │
+ *                             │                         │
+ *                             │                         │
+ *                             │                         │
+ *                             └─────────────────────────┘
+ *                              ~~~~~~~~void space~~~~~~~
+ *           payload* ───────► ┌─────────────────────────┐
+ *                             │                         │
+ *                             │                         │
+ *                             │    other data in msg    │
+ *                             │                         │
+ *                             │                         │
+ *                             └─────────────────────────┘
+ *
+ *     header: Points to the start of the message, caller should populate this
+ *          with the mach message header.
+ *
+ *     descs: Pointers to the start of kernel descriptors region, if caller requested
+ *          a non-zero descriptor_count. Or NULL if descriptor_count is 0 (meaning
+ *          the messsage is not complex). Caller should populate this with descriptors.
+ *
+ *     payload: Points to the start of data not processed by kernel, which is after
+ *          the last descriptor, if caller requested a non-zero payload_size. Or
+ *          NULL if payload_size is 0.
+ *
+ *     Mach message body (descriptor count) will be set after the builder accordingly.
+ */
+extern mach_msg_return_t kernel_mach_msg_send_with_builder(
+	mach_msg_size_t         descriptor_count,
+	mach_msg_size_t         payload_size,    /* Warning: NOT total send size */
+	void                    (^builder)(mach_msg_header_t *header,
+	mach_msg_descriptor_t * __counted_by(descriptor_count)descs, /* Nullable */
+	void *                  __sized_by(payload_size)payload));   /* Nullable */
+
 extern mach_msg_return_t mach_msg_rpc_from_kernel_proper(
 	mach_msg_header_t       *msg,
 	mach_msg_size_t         send_size,
@@ -144,12 +205,14 @@ extern mach_msg_return_t kernel_mach_msg_send(
 	mach_msg_timeout_t      timeout_val,
 	boolean_t               *message_moved);
 
-extern mach_msg_return_t kernel_mach_msg_send_with_builder(
-	mach_msg_size_t         send_size,
+extern mach_msg_return_t kernel_mach_msg_send_with_builder_internal(
+	mach_msg_size_t         desc_count,
+	mach_msg_size_t         payload_size, /* Not total send size */
 	mach_msg_option_t       option,
 	mach_msg_timeout_t      timeout_val,
 	boolean_t               *message_moved,
-	void                    (^builder)(mach_msg_header_t *, mach_msg_size_t));
+	void                    (^builder)(mach_msg_header_t *,
+	mach_msg_descriptor_t *, void *));
 
 extern mach_msg_return_t mach_msg_send_from_kernel_with_options(
 	mach_msg_header_t       *msg,

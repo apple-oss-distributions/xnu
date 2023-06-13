@@ -94,6 +94,7 @@ else
     DEPLOYMENT_LINKER_FLAGS =
 endif
 
+
 DEPLOYMENT_TARGET_DEFINES = -DXNU_PLATFORM_$(PLATFORM)
 
 
@@ -157,6 +158,7 @@ WARNFLAGS_STD := \
 	-Wno-reserved-id-macro \
 	-Wno-shift-sign-overflow \
 	-Wno-switch-enum \
+	-Wno-unaligned-access \
 	-Wno-undef \
 	-Wno-unused-macros \
 	-Wno-used-but-marked-unused \
@@ -171,6 +173,9 @@ WARNFLAGS_STD := $(WARNFLAGS_STD) \
 	-Wno-error=enum-enum-conversion \
 	-Wno-error=c99-designator \
 	-Wno-error=reorder-init-list
+
+WARNFLAGS_STD := $(WARNFLAGS_STD) \
+	-Wno-error=declaration-after-statement
 
 # Hand-written sign conversion diagnostics are resolved, but the
 # auto-generated ones need mig and iig to be updated to fix.  Disable the
@@ -239,7 +244,7 @@ ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG ?=
 ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),)
 
 ifneq ($(EMBEDDED_DEVICE_MAP),)
-export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := $(shell $(EMBEDDED_DEVICE_MAP) -db $(EDM_DBPATH) -query SELECT DISTINCT KernelMachOArchitecture FROM Targets WHERE KernelPlatform IS \"$(CURRENT_MACHINE_CONFIG_LC)\" LIMIT 1 || echo UNKNOWN )
+export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := $(shell $(EMBEDDED_DEVICE_MAP) -db $(EDM_DBPATH) -list -query SELECT DISTINCT KernelMachOArchitecture FROM Targets WHERE KernelPlatform IS \"$(CURRENT_MACHINE_CONFIG_LC)\" LIMIT 1 || echo UNKNOWN )
 ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),)
 ifeq ($(filter $(EXTRA_TARGET_CONFIGS_$(CURRENT_KERNEL_CONFIG)),$(CURRENT_MACHINE_CONFIG)),)
 $(error Machine config $(CURRENT_MACHINE_CONFIG_LC) not found in EmbeddedDeviceMap)
@@ -442,7 +447,7 @@ CFLAGS_KASAN_INSTRUMENTATION_TBI = -DKASAN_TBI=1 -DKASAN_SCALE=$(KASAN_SCALE_TBI
 	-fsanitize-ignorelist=$(KASAN_BLACKLIST) \
 	-mllvm -hwasan-recover=0 \
 	-mllvm -hwasan-mapping-offset=$(KASAN_OFFSET) \
-	-mllvm -hwasan-instrument-atomics=0 \
+	-mllvm -hwasan-instrument-atomics=1 \
 	-mllvm -hwasan-instrument-stack=$(HWASAN_INSTRUMENT_STACK) \
 	-mllvm -hwasan-uar-retag-to-zero=0 \
 	-mllvm -hwasan-generate-tags-with-calls=1 \
@@ -462,6 +467,11 @@ CFLAGS_KASANARM64 += $(CFLAGS_KASAN_INSTRUMENTATION_TBI)
 CFLAGS_KASANX86_64 += $(CFLAGS_KASAN_INSTRUMENTATION_CLASSIC)
 CFLAGS_KASANX86_64H += $(CFLAGS_KASAN_INSTRUMENTATION_CLASSIC)
 CFLAGS_GEN += -DKASAN=1 -DKASAN_OFFSET=$(KASAN_OFFSET) -DKASAN_LIGHT=$(KASAN_LIGHT)
+
+SFLAGS_KASANARM64 += $(CFLAGS_KASAN_INSTRUMENTATION_TBI)
+SFLAGS_KASANX86_64 += $(CFLAGS_KASAN_INSTRUMENTATION_CLASSIC)
+SFLAGS_KASANX86_64H += $(CFLAGS_KASAN_INSTRUMENTATION_CLASSIC)
+SFLAGS_GEN += -DKASAN=1 -DKASAN_OFFSET=$(KASAN_OFFSET) -DKASAN_LIGHT=$(KASAN_LIGHT)
 
 endif
 
@@ -598,6 +608,7 @@ SFLAGS	= $(SFLAGS_GEN) \
 		  $($(addsuffix $(CURRENT_ARCH_CONFIG),ARCH_FLAGS_)) \
 		  $($(addsuffix $(CURRENT_ARCH_CONFIG),SFLAGS_)) \
 		  $($(addsuffix $(CURRENT_KERNEL_CONFIG),SFLAGS_)) \
+		  $($(addsuffix $(CURRENT_ARCH_CONFIG), $(addsuffix $(CURRENT_KERNEL_CONFIG),SFLAGS_))) \
 		  $(DEPLOYMENT_TARGET_FLAGS) \
 		  $(DEPLOYMENT_TARGET_DEFINES) \
 		  $(DEFINES)
@@ -619,7 +630,6 @@ LDFLAGS_KERNEL_GEN = \
 	-fapple-kext \
 	-Wl,-e,__start \
 	-Wl,-sectalign,__TEXT,__text,0x1000 \
-	-Wl,-sectalign,__DATA,__percpu,0x80 \
 	-Wl,-sectalign,__DATA,__common,0x1000 \
 	-Wl,-sectalign,__DATA,__bss,0x1000 \
 	-Wl,-sectcreate,__PRELINK_TEXT,__text,/dev/null \
@@ -632,10 +642,10 @@ LDFLAGS_KERNEL_GEN = \
 	-Wl,-headerpad,152
 
 # LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -lfirehose_kernel
-LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel
+LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -L$(SDKROOT)/usr/local/lib/kernel/platform
 
 LDFLAGS_KERNEL_RELEASE	=
-LDFLAGS_KERNEL_DEVELOPMENT     =
+LDFLAGS_KERNEL_DEVELOPMENT =
 LDFLAGS_KERNEL_KASAN = $(LDFLAGS_KERNEL_DEVELOPMENT)
 LDFLAGS_KERNEL_DEBUG	=
 LDFLAGS_KERNEL_PROFILE	=
@@ -676,6 +686,7 @@ LDFLAGS_KERNEL_RELEASEX86_64 = \
 	-Wl,-sectalign,__HIB,__llvm_prf_data,0x1000 \
 	-Wl,-sectalign,__HIB,__textcoal_nt,0x1000 \
 	-Wl,-sectalign,__HIB,__cstring,0x1000 \
+	-Wl,-sectalign,__DATA,__percpu,0x1000 \
 	-Wl,-rename_section,__DATA,__const,__DATA_CONST,__const \
 	-Wl,-segprot,__DATA_CONST,r--,r-- \
 	-Wl,-rename_section,__KLD,__const,__KLDDATA,__const \
@@ -760,6 +771,7 @@ LDFLAGS_KERNEL_GENARM64 = \
 	-Wl,-rename_segment,__HIB,__HIBDATA \
 	\
 	-Wl,-sectalign,__DATA,__const,0x4000 \
+	-Wl,-sectalign,__DATA,__percpu,0x4000 \
 	-Wl,-sectalign,__DATA,__data,0x4000 \
 	-Wl,-rename_section,__DATA,__mod_init_func,__DATA_CONST,__mod_init_func \
 	-Wl,-rename_section,__DATA,__mod_term_func,__DATA_CONST,__mod_term_func \
@@ -781,8 +793,15 @@ LDFLAGS_KERNEL_GENARM64 = \
 
 LDFLAGS_KERNEL_SEGARM64 = \
 	-Wl,-rename_section,__PPLDATA,__const,__PPLDATA_CONST,__const \
-	-Wl,-segment_order,__TEXT:__DATA_CONST:__LINKEDIT:__TEXT_EXEC:__KLD:__PPLTEXT:__PPLTRAMP:__PPLDATA_CONST:__LASTDATA_CONST:__LAST:__PPLDATA:__KLDDATA:__DATA:__HIBDATA:__BOOTDATA \
-	-Wl,-segprot,__PPLTEXT,r-x,r-x  -Wl,-segprot,__PPLTRAMP,r-x,r-x -Wl,-segprot,__PPLDATA_CONST,r--,r-- -Wl,-segprot,__LASTDATA_CONST,r--,r-- -Wl,-segprot,__LAST,r-x,r-x \
+	-Wl,-segment_order,__TEXT:__DATA_CONST:__LINKEDIT:__TEXT_EXEC:__TEXT_BOOT_EXEC:__KLD:__PPLTEXT:__PPLTRAMP:__PPLDATA_CONST:__LASTDATA_CONST:__LAST:__PPLDATA:__KLDDATA:__DATA:__HIBDATA:__BOOTDATA \
+	-Wl,-segprot,__TEXT,r--,r-- \
+	-Wl,-segprot,__TEXT_EXEC,r-x,r-x \
+	-Wl,-segprot,__TEXT_BOOT_EXEC,r-x,r-x \
+	-Wl,-segprot,__PPLTEXT,r-x,r-x \
+	-Wl,-segprot,__PPLTRAMP,r-x,r-x \
+	-Wl,-segprot,__PPLDATA_CONST,r--,r-- \
+	-Wl,-segprot,__LASTDATA_CONST,r--,r-- \
+	-Wl,-segprot,__LAST,r-x,r-x \
 
 LDFLAGS_KERNEL_RELEASEARM64     = \
 	$(LDFLAGS_KERNEL_GENARM64) \
@@ -844,6 +863,7 @@ ifneq ($(filter T6000 T8101 VMAPPLE T6000 T8101 VMAPPLE,$(CURRENT_MACHINE_CONFIG
 	LDFLAGS_KERNEL_ONLY += -rdynamic -Wl,-force_load,$(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a
 endif
 
+
 #
 # DTrace support
 #
@@ -865,8 +885,9 @@ INCFLAGS_EXTERN	= -I$(SRCROOT)/EXTERNAL_HEADERS
 INCFLAGS_GEN	= -I$(SRCROOT)/$(COMPONENT) -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)
 INCFLAGS_LOCAL	= -I.
 INCFLAGS_SDK	= -I$(SDKROOT)/usr/local/include/kernel
+INCFLAGS_PLATFORM = -I$(SDKROOT)/$(KPINCDIR)/platform
 
-INCFLAGS	= $(INCFLAGS_LOCAL) $(INCFLAGS_GEN) $(INCFLAGS_IMPORT) $(INCFLAGS_EXTERN) $(INCFLAGS_MAKEFILE) $(INCFLAGS_SDK)
+INCFLAGS	= $(INCFLAGS_LOCAL) $(INCFLAGS_GEN) $(INCFLAGS_IMPORT) $(INCFLAGS_EXTERN) $(INCFLAGS_MAKEFILE) $(INCFLAGS_SDK) $(INCFLAGS_PLATFORM)
 
 #
 # Default MIGFLAGS
@@ -916,8 +937,8 @@ USE_LTO = $(LTO_ENABLED_$(CURRENT_KERNEL_CONFIG))
 endif
 
 ifeq ($(USE_LTO),1)
-CFLAGS_GEN	+= -flto
-CXXFLAGS_GEN	+= -flto
+CFLAGS_GEN	+= -flto -DBUILT_LTO=1
+CXXFLAGS_GEN	+= -flto -DBUILT_LTO=1
 LDFLAGS_KERNEL_LTO	= -Wl,-mllvm,-inline-threshold=100
 LDFLAGS_KERNEL_GEN	+= $(LDFLAGS_KERNEL_LTO) -Wl,-object_path_lto,$(TARGET)/lto.o
 LDFLAGS_NOSTRIP_FLAG = -rdynamic
@@ -932,7 +953,13 @@ CFLAGS_NOLTO_FLAG =
 endif
 
 ifeq ($(BUILD_JSON_COMPILATION_DATABASE),1)
+# To build the json compilation database, kernel compile commands are
+# substituted with JSONCOMPILATIONDB, which appends compile commands to the
+# compilation database (compile_commands.json) rather than executing them.
+# Because kernel compilations do not actually occur in this mode, downstream
+# build steps (dSYM, static link, etc) that depend on *.o outputs must be bypassed.
 BUILD_DSYM	:= 0
+BUILD_STATIC_LINK := 0
 DO_CTFMERGE  	:= 0
 KCC		= $(JSONCOMPILATIONDB) $(OBJPATH)/compile_commands.json $(PWD) $< $(CC)
 KC++		= $(JSONCOMPILATIONDB) $(OBJPATH)/compile_commands.json $(PWD) $< $(CXX)
@@ -1017,7 +1044,7 @@ endif
 DRIVERKIT_DKIT_INCDIR = $(DKIT_INCFRAME)/Headers
 DRIVERKIT_DKIT_PINCDIR = $(DKIT_INCFRAME)/PrivateHeaders
 
-XNU_PRIVATE_UNIFDEF :=
+XNU_PRIVATE_UNIFDEF ?=
 XNU_PRIVATE_UNIFDEF += -UMACH_KERNEL_PRIVATE
 XNU_PRIVATE_UNIFDEF += -UBSD_KERNEL_PRIVATE
 XNU_PRIVATE_UNIFDEF += -UIOKIT_KERNEL_PRIVATE

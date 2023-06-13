@@ -166,6 +166,8 @@ install-port_table_limits_client: port_table_limits_client
 	mkdir -p $(INSTALLDIR)
 	cp $(SYMROOT)/port_table_limits_client $(INSTALLDIR)/
 
+ipc/task_name_for_pid: CODE_SIGN_ENTITLEMENTS = ipc/task_name_for_pid_entitlement.plist
+
 fd_table_limits: rnserver
 fd_table_limits: OTHER_CFLAGS += $(OBJROOT)/rnServer.c -I $(OBJROOT)
 fd_table_limits: OTHER_LDFLAGS += -ldarwintest_utils -lpthread
@@ -352,6 +354,10 @@ perf_exit: CODE_SIGN_ENTITLEMENTS=./stackshot-entitlements.plist
 perf_exit: OTHER_LDFLAGS = -framework ktrace -ldarwintest_utils
 perf_exit: CODE_SIGN_ENTITLEMENTS=./private_entitlement.plist
 
+ipc/mach_exc_port_substitute: excserver
+ipc/mach_exc_port_substitute: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
+ipc/mach_exc_port_substitute: CODE_SIGN_ENTITLEMENTS = ./task_read_for_pid_entitlement.plist
+
 CUSTOM_TARGETS += prioritize_process_launch_helper
 prioritize_process_launch: prioritize_process_launch_helper
 
@@ -381,7 +387,7 @@ bounded_ptr: OTHER_CXXFLAGS += -Werror=implicit-int-conversion -Werror=shorten-6
 bounded_ptr: $(wildcard bounded_ptr_src/*.cpp) bounded_ptr.cpp
 
 EXCLUDED_SOURCES += bounded_ptr_03.cpp
-bounded_ptr_03: OTHER_CXXFLAGS += -Werror=implicit-int-conversion -Werror=shorten-64-to-32 -I$(SRCROOT)/../libkern -std=c++03
+bounded_ptr_03: OTHER_CXXFLAGS += -Werror=implicit-int-conversion -Werror=shorten-64-to-32 -I$(SRCROOT)/../libkern -std=c++03 $(DT_LDFLAGS)
 bounded_ptr_03: bounded_ptr_03.cpp
 
 EXCLUDED_SOURCES += $(wildcard bounded_array_src/*.cpp)
@@ -710,10 +716,13 @@ endif
 
 pmap_bench: INVALID_ARCHS = $(filter-out arm%,$(ARCH_CONFIGS))
 
+pmap_stress: INVALID_ARCHS = $(filter-out arm%,$(ARCH_CONFIGS))
+
 hw_breakpoint_step_arm64: CODE_SIGN_ENTITLEMENTS = task_for_pid_entitlement.plist
 hw_breakpoint_step_arm64: INVALID_ARCHS = $(filter-out arm64%,$(ARCH_CONFIGS))
 hw_breakpoint_step_arm64: excserver
 hw_breakpoint_step_arm64: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
+hw_breakpoint_step_arm64: CODE_SIGN_ENTITLEMENTS = thread_set_state.entitlement
 
 exc_resource_threads: excserver
 exc_resource_threads: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
@@ -727,6 +736,7 @@ fp_exception: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
 ptrauth_failure: excserver exc_helpers.c
 ptrauth_failure: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT) -Wno-language-extension-token
 ptrauth_failure: CODESIGN = $(CODESIGN_HARDENED_RUNTIME)
+ptrauth_failure: CODE_SIGN_ENTITLEMENTS = thread_set_state.entitlement
 
 decompression_failure: excserver exc_helpers.c
 decompression_failure: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
@@ -786,11 +796,6 @@ task_policy_unentitled: task_policy.c
 	$(CODESIGN) --force --sign - --timestamp=none --entitlements $(CODE_SIGN_ENTITLEMENTS) $(SYMROOT)/$@
 
 
-port_object_description_race_77259918: OTHER_CFLAGS += -framework IOKit -framework CoreFoundation
-port_object_description_race_77259918: iokit/port_object_description_race_77259918.c
-	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
-OTHER_TEST_TARGETS += port_object_description_race_77259918
-
 EXCLUDED_SOURCES += get_shared_cache_address.c
 
 
@@ -808,7 +813,7 @@ install-get_shared_cache_address: get_shared_cache_address
 endif
 
 
-OTHER_TEST_TARGETS += io_catalog_send_data vm_memory_share_tests
+OTHER_TEST_TARGETS += vm_memory_share_tests
 
 vm_memory_share_tests: INVALID_ARCHS = i386
 vm_memory_share_tests: CODE_SIGN_ENTITLEMENTS = ./task_for_pid_entitlement.plist
@@ -828,12 +833,6 @@ vm_memory_share_tests_server: vm_memory_tests_src/server.c vm_memory_tests_src/c
 install-vm_memory_share_tests_server: vm_memory_share_tests_server
 	mkdir -p $(INSTALLDIR)
 	cp $(SYMROOT)/vm_memory_share_tests_server $(INSTALLDIR)/
-
-io_catalog_send_data: INVALID_ARCHS = i386
-io_catalog_send_data: OTHER_CFLAGS += -DTEST_UNENTITLED -framework IOKit -framework CoreFoundation -framework Foundation
-
-io_catalog_send_data: iokit/io_catalog_send_data.m
-	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
 
 ifeq ($(PLATFORM),MacOSX)
 EXCLUDED_SOURCES += vm/kern_max_task_pmem.c
@@ -897,6 +896,8 @@ EXCLUDED_SOURCES += manual_wq_cooperative.c workqueue.plist
 CUSTOM_TARGETS += manual_wq_cooperative
 
 # VM madvise(2) benchmark
+
+BATS_PLISTS += $(SRCROOT)/vm/perf_madvise.plist
 
 vm/perf_madvise: OTHER_CFLAGS += benchmark/helpers.c
 
@@ -1033,6 +1034,15 @@ zero_to_n_tests: OTHER_LDFLAGS += -ldarwintest_utils -framework perfdata
 
 debug_enable_syscall_rejection: OTHER_LDFLAGS += -ldarwintest_utils
 
+sched_thread_group_fairness: CODE_SIGN_ENTITLEMENTS = sched_thread_group_fairness.entitlements
+sched_thread_group_fairness: sched_thread_group_fairness_workload_config.h
+sched_thread_group_fairness: OTHER_LDFLAGS += -framework perfdata
+sched_thread_group_fairness: OTHER_CFLAGS += -DENTITLED=1
+sched_thread_group_fairness_workload_config.h: sched_thread_group_fairness_workload_config.plist
+	xxd -i $< > $@
+
+thread_set_state_arm64_cpsr: CODE_SIGN_ENTITLEMENTS = thread_set_state.entitlement
+
 vm/app_swap: OTHER_LDFLAGS += -ldarwintest_utils
 
 CUSTOM_TARGETS += debug_syscall_rejection_helper
@@ -1057,6 +1067,41 @@ vm/vm_reclaim: OTHER_CFLAGS += -Wno-language-extension-token -Wno-c++98-compat m
 vm/vm_reclaim: OTHER_LDFLAGS += -ldarwintest_utils
 
 vm/vm_reclaim: INVALID_ARCHS = armv7k arm64_32
+
+EXCLUDED_SOURCES += constrained_ctypes_tests.c
+CUSTOM_TARGETS += constrained_ctypes_tests_enabled constrained_ctypes_tests_enacted constrained_ctypes_tests_disabled
+constrained_ctypes_tests_enabled: OTHER_CFLAGS += -D__CCT_TEST_ENABLED
+constrained_ctypes_tests_enabled: OTHER_LDFLAGS += -ldarwintest_utils
+constrained_ctypes_tests_enabled: constrained_ctypes_tests.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) constrained_ctypes_tests.c -o $(SYMROOT)/constrained_ctypes_tests_enabled
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/constrained_ctypes_tests_enabled;
+
+install-constrained_ctypes_tests_enabled: constrained_ctypes_tests_enabled
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/constrained_ctypes_tests_enabled $(INSTALLDIR)/
+
+constrained_ctypes_tests_enacted: OTHER_CFLAGS += -D__CCT_TEST_ENABLED
+constrained_ctypes_tests_enacted: OTHER_CFLAGS += -D__CCT_TEST_ENACTED
+constrained_ctypes_tests_enacted: OTHER_CFLAGS += -fbounds-attributes
+constrained_ctypes_tests_enacted: OTHER_LDFLAGS += -ldarwintest_utils
+constrained_ctypes_tests_enacted: constrained_ctypes_tests.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) constrained_ctypes_tests.c -o $(SYMROOT)/constrained_ctypes_tests_enacted
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/constrained_ctypes_tests_enacted;
+
+install-constrained_ctypes_tests_enacted: constrained_ctypes_tests_enacted
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/constrained_ctypes_tests_enacted $(INSTALLDIR)/
+
+
+constrained_ctypes_tests_disabled: OTHER_LDFLAGS += -ldarwintest_utils
+constrained_ctypes_tests_disabled: constrained_ctypes_tests.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) constrained_ctypes_tests.c -o $(SYMROOT)/constrained_ctypes_tests_disabled
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/constrained_ctypes_tests_disabled;
+
+install-constrained_ctypes_tests_disabled: constrained_ctypes_tests_disabled
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/constrained_ctypes_tests_disabled $(INSTALLDIR)/
+
 
 include $(DEVELOPER_DIR)/AppleInternal/Makefiles/darwintest/Makefile.targets
 

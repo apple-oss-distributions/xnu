@@ -61,6 +61,13 @@
 #define SKMEM_REGION_PREFIX     "skr"
 #define SKMEM_CACHE_PREFIX      "skc"
 #define SKMEM_ZONE_PREFIX       "skywalk"
+#if DEBUG || DEVELOPMENT
+#define SMKEM_KT_DEFAULT        KT_PRIV_ACCT
+#else
+#define SMKEM_KT_DEFAULT        KT_DEFAULT
+#endif
+#define SKMEM_TYPE_DEFINE(var, type) \
+	KALLOC_TYPE_DEFINE(var, type, SMKEM_KT_DEFAULT)
 
 extern lck_attr_t skmem_lock_attr;
 extern lck_grp_t skmem_lock_grp;

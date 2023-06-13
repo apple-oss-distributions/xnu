@@ -38,7 +38,7 @@
  * Only include this when building for XNU. CoreTrust will include its local copy
  * of the header.
  */
-#include <coretrust/CTEvaluate.h>
+#include <CoreTrust/CTEvaluate.h>
 #endif
 
 #define XNU_SUPPORTS_CORETRUST_AMFI 1

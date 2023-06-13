@@ -16,7 +16,7 @@
 #  Standard Apple OS Configurations:
 #  -------- ----- -- ---------------
 #
-#  KERNEL_BASE =    [ arm64 xsmall msgb_small config_embedded config_enforce_signed_code config_requires_u32_munging config_darkboot ARM_EXTRAS_BASE ]
+#  KERNEL_BASE =    [ arm64 config_pmap_ppl xsmall msgb_small config_embedded config_enforce_signed_code config_code_signature_reconstitution config_requires_u32_munging config_darkboot ARM_EXTRAS_BASE ]
 #  KERNEL_RELEASE = [ KERNEL_BASE ]
 #  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug ]
 #  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug ]
@@ -48,12 +48,12 @@
 #  LIBKERN_DEBUG =  [ LIBKERN_BASE iotracking ]
 #  PERF_DBG_BASE =  [ mach_kdp config_serial_kdp config_perfmon config_pervasive_cpi MONOTONIC_BASE kperf kpc ]
 #  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
-#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace lock_stats zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug ]
-#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace lock_stats zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug ]
-#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_service_port_info ]
+#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace lock_stats zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_iotrace]
+#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace lock_stats zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_iotrace]
+#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_service_port_info config_ledger_interval_max ]
 #  MACH_RELEASE =   [ MACH_BASE config_skip_precise_user_kernel_time debugger_for_zone_info ]
-#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace config_ledger_interval_max ]
-#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace config_ledger_interval_max importance_debug ]
+#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace ]
+#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug ]
 #  SCHED_BASE =     [ config_sched_traditional config_sched_multiq config_sched_deferred_ast config_clutch config_sched_sfi config_taskwatch ]
 #  SCHED_RELEASE =  [ SCHED_BASE ]
 #  SCHED_DEV =      [ SCHED_BASE ]

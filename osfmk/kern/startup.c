@@ -128,7 +128,6 @@
 
 #include <kern/waitq.h>
 #include <ipc/ipc_voucher.h>
-#include <voucher/ipc_pthread_priority_internal.h>
 #include <mach/host_info.h>
 #include <pthread/workqueue_internal.h>
 
@@ -144,8 +143,6 @@
 #if CONFIG_CSR
 #include <sys/csr.h>
 #endif
-
-#include <bank/bank_internal.h>
 
 #if ALTERNATE_DEBUGGER
 #include <arm64/alternate_debugger.h>
@@ -360,6 +357,7 @@ kernel_startup_log(startup_subsystem_id_t subsystem)
 		[STARTUP_SUB_KMEM] = "kmem",
 		[STARTUP_SUB_ZALLOC] = "zalloc",
 		[STARTUP_SUB_PERCPU] = "percpu",
+		[STARTUP_SUB_EVENT] = "event",
 
 		[STARTUP_SUB_CODESIGNING] = "codesigning",
 		[STARTUP_SUB_KTRACE] = "ktrace",
@@ -381,6 +379,16 @@ kernel_startup_log(startup_subsystem_id_t subsystem)
 		kernel_bootstrap_log(names[subsystem]);
 	}
 	logged = subsystem;
+}
+
+__startup_func
+void
+event_register_handler(struct event_hdr *hdr)
+{
+	struct event_hdr *head = hdr->next;
+
+	hdr->next = head->next;
+	head->next = hdr;
 }
 
 __startup_func
@@ -514,6 +522,10 @@ kernel_bootstrap(void)
 	coalitions_init();
 #endif
 
+	kernel_bootstrap_log("code_signing_init");
+	code_signing_init();
+	code_signing_configuration(NULL, NULL);
+
 	kernel_bootstrap_log("task_init");
 	task_init();
 
@@ -531,15 +543,6 @@ kernel_bootstrap(void)
 
 	kernel_bootstrap_log("mach_init_activity_id");
 	mach_init_activity_id();
-
-	/* Initialize the BANK Manager. */
-	kernel_bootstrap_log("bank_init");
-	bank_init();
-
-#if CONFIG_VOUCHER_DEPRECATED
-	kernel_bootstrap_log("ipc_pthread_priority_init");
-	ipc_pthread_priority_init();
-#endif /* CONFIG_VOUCHER_DEPRECATED */
 
 	/* initialize host_statistics */
 	host_statistics_init();
@@ -668,6 +671,19 @@ kernel_bootstrap_thread(void)
 
 	kernel_startup_initialize_upto(STARTUP_SUB_SYSCTL);
 
+	/*
+	 * Initialize the globals used for permuting kernel
+	 * addresses that may be exported to userland as tokens
+	 * using VM_KERNEL_ADDRPERM()/VM_KERNEL_ADDRPERM_EXTERNAL().
+	 * Force the random number to be odd to avoid mapping a non-zero
+	 * word-aligned address to zero via addition.
+	 */
+	vm_kernel_addrperm = (vm_offset_t)(early_random() | 1);
+	buf_kernel_addrperm = (vm_offset_t)(early_random() | 1);
+	vm_kernel_addrperm_ext = (vm_offset_t)(early_random() | 1);
+	vm_kernel_addrhash_salt = early_random();
+	vm_kernel_addrhash_salt_ext = early_random();
+
 #ifdef  IOKIT
 	kernel_bootstrap_log("PE_init_iokit");
 	PE_init_iokit();
@@ -713,13 +729,13 @@ kernel_bootstrap_thread(void)
 	sdt_early_init();
 #endif
 
-#ifndef BCM2837
-	kernel_bootstrap_log("code_signing_init");
-
 #if CODE_SIGNING_MONITOR
-	/* Intialize the data for managing provisioning profiles */
-	initialize_provisioning_profiles();
+	kernel_bootstrap_log("provisioning_profile_init");
+	csm_initialize_provisioning_profiles();
 #endif
+
+#ifndef BCM2837
+	kernel_bootstrap_log("trust_cache_init");
 
 	/* Initialize the runtime for the trust cache interface */
 	trust_cache_runtime_init();
@@ -738,24 +754,6 @@ kernel_bootstrap_thread(void)
 	 */
 	kernel_bootstrap_log("OSKextRemoveKextBootstrap");
 	OSKextRemoveKextBootstrap();
-
-	/*
-	 * Initialize the globals used for permuting kernel
-	 * addresses that may be exported to userland as tokens
-	 * using VM_KERNEL_ADDRPERM()/VM_KERNEL_ADDRPERM_EXTERNAL().
-	 * Force the random number to be odd to avoid mapping a non-zero
-	 * word-aligned address to zero via addition.
-	 * Note: at this stage we can use the cryptographically secure PRNG
-	 * rather than early_random().
-	 */
-	read_random(&vm_kernel_addrperm, sizeof(vm_kernel_addrperm));
-	vm_kernel_addrperm |= 1;
-	read_random(&buf_kernel_addrperm, sizeof(buf_kernel_addrperm));
-	buf_kernel_addrperm |= 1;
-	read_random(&vm_kernel_addrperm_ext, sizeof(vm_kernel_addrperm_ext));
-	vm_kernel_addrperm_ext |= 1;
-	read_random(&vm_kernel_addrhash_salt, sizeof(vm_kernel_addrhash_salt));
-	read_random(&vm_kernel_addrhash_salt_ext, sizeof(vm_kernel_addrhash_salt_ext));
 
 	/* No changes to kernel text and rodata beyond this point. */
 	kernel_bootstrap_log("machine_lockdown");
@@ -953,9 +951,9 @@ load_context(
 
 	load_context_kprintf("machine_load_context\n");
 
-#if KASAN && CONFIG_KERNEL_TBI
+#if KASAN_TBI
 	__asan_handle_no_return();
-#endif /* KASAN && CONFIG_KERNEL_TBI */
+#endif /* KASAN_TBI */
 
 	machine_load_context(thread);
 	/*NOTREACHED*/

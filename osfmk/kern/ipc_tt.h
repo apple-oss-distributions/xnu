@@ -187,11 +187,6 @@ extern task_t convert_port_to_task_pinned(
 extern task_t convert_port_to_task_mig(
 	ipc_port_t      port);
 
-extern task_t
-convert_port_to_task_with_exec_token(
-	ipc_port_t              port,
-	uint32_t                *exec_token);
-
 /* Doesn't give a +1 on task, returns current_task() or TASK_NULL */
 extern task_t port_name_to_current_task_noref(
 	mach_port_name_t name);

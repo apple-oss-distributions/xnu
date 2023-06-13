@@ -455,7 +455,9 @@ _kernelrpc_mach_port_request_notification_trap(
 	rv = mach_port_request_notification(task->itk_space, args->name,
 	    args->msgid, args->sync, notify, &previous);
 	if (rv != KERN_SUCCESS) {
-		ipc_object_destroy(ip_to_object(notify), disp);
+		if (IP_VALID(notify)) {
+			ipc_object_destroy(ip_to_object(notify), disp);
+		}
 		goto done;
 	}
 

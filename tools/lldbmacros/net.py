@@ -103,14 +103,14 @@ def NetGetAlwaysOnPktap(cmd_args=None):
     err = lldb.SBError()
 
     if bpf_d.bd_hbuf != 0:
-        addr = bpf_d.bd_hbuf[0]._sbval19k84obscure747.AddressOf().GetValueAsUnsigned()
+        addr = bpf_d.bd_hbuf[0].GetSBValue().GetLoadAddress()
         hlen = (unsigned(bpf_d.bd_hlen)+(4-1))&~(4-1)
         buf = LazyTarget.GetProcess().ReadMemory(addr, hlen, err)
         if err.fail:
             print("Error, getting sbuf")
         f.write(buf)
 
-    addr = bpf_d.bd_sbuf[0]._sbval19k84obscure747.AddressOf().GetValueAsUnsigned()
+    addr = bpf_d.bd_sbuf[0].GetSBValue().GetLoadAddress()
     slen = (unsigned(bpf_d.bd_slen)+(4-1))&~(4-1)
     buf = LazyTarget.GetProcess().ReadMemory(addr, slen, err)
     if err.fail:

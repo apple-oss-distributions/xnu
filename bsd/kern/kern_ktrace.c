@@ -60,6 +60,7 @@ char *proc_name_address(void *p);
 #include <sys/sysctl.h>
 #include <sys/vm.h>
 #include <os/log.h>
+#include <IOKit/IOBSD.h>
 
 #include <kern/locks.h>
 #include <kern/assert.h>
@@ -68,6 +69,8 @@ char *proc_name_address(void *p);
 #include <kperf/kperf.h>
 
 #include <kern/host.h>
+
+#define KTRACE_ALLOW_ENTITLEMENT "com.apple.private.ktrace-allow"
 
 kern_return_t ktrace_background_available_notify_user(void);
 
@@ -267,6 +270,20 @@ ktrace_background_active(void)
 	return ktrace_state == KTRACE_STATE_BG;
 }
 
+static bool
+_current_task_can_own_ktrace(void)
+{
+	bool allow_non_superuser = false;
+	bool is_superuser = kauth_cred_issuser(kauth_cred_get());
+
+#if DEVELOPMENT || DEBUG
+	allow_non_superuser = IOTaskHasEntitlement(current_task(),
+	    KTRACE_ALLOW_ENTITLEMENT);
+#endif /* DEVELOPMENT || DEBUG */
+
+	return is_superuser || allow_non_superuser;
+}
+
 int
 ktrace_read_check(void)
 {
@@ -276,7 +293,7 @@ ktrace_read_check(void)
 		return 0;
 	}
 
-	return kauth_cred_issuser(kauth_cred_get()) ? 0 : EPERM;
+	return _current_task_can_own_ktrace() ? 0 : EPERM;
 }
 
 /* If an owning process has exited, reset the ownership. */
@@ -330,7 +347,7 @@ ktrace_configure(uint32_t config_mask)
 
 	/* allow process to gain control when unowned or background */
 	if (ktrace_owning_unique_id == 0 || ktrace_state == KTRACE_STATE_BG) {
-		if (!kauth_cred_issuser(kauth_cred_get())) {
+		if (!_current_task_can_own_ktrace()) {
 			return EPERM;
 		}
 

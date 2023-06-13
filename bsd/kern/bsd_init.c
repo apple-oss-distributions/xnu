@@ -603,7 +603,7 @@ bsd_init(void)
 	 * Make a group and session, then simulate pinsertchild(),
 	 * adjusted for the kernel.
 	 */
-	pghash_insert_locked(0, pgrp0);
+	pghash_insert_locked(pgrp0);
 
 	LIST_INSERT_HEAD(&pgrp0->pg_members, kernproc, p_pglist);
 	smr_init_store(&kernproc->p_pgrp, pgrp0);
@@ -650,7 +650,6 @@ bsd_init(void)
 
 	smr_init_store(&kernproc->p_limit, &limit0);
 	kernproc->p_stats = &pstats0;
-	proc_sigacts_copy(kernproc, NULL);
 	kernproc->p_subsystem_root_path = NULL;
 
 	/*
@@ -668,7 +667,7 @@ bsd_init(void)
 	    &bsd_pageable_range.min_address,
 	    (vm_size_t)bsd_pageable_map_size,
 	    VM_MAP_CREATE_PAGEABLE,
-	    VM_FLAGS_FIXED_RANGE_SUBALLOC,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
 	    KMS_PERMANENT | KMS_NOFAIL,
 	    VM_KERN_MEMORY_BSD).kmr_submap;
 
@@ -1039,11 +1038,13 @@ bsd_init(void)
 	consider_zone_gc(FALSE);
 #endif
 
+#if DEVELOPMENT || DEBUG
 	/*
 	 * At this point, we consider the kernel "booted" enough to apply
-	 * stricter timeouts.
+	 * stricter timeouts. Only used for debug timeouts.
 	 */
 	machine_timeout_bsd_init();
+#endif /* DEVELOPMENT || DEBUG */
 
 	bsd_init_kprintf("done\n");
 }

@@ -674,9 +674,9 @@ pve_init(pv_entry_t *pvep)
 static inline int
 pve_find_ptep_index(pv_entry_t *pvep, pt_entry_t *ptep)
 {
-	for (int i = 0; i < PTE_PER_PVE; i++) {
+	for (unsigned int i = 0; i < PTE_PER_PVE; i++) {
 		if (pve_get_ptep(pvep, i) == ptep) {
-			return i;
+			return (int)i;
 		}
 	}
 
@@ -693,7 +693,7 @@ pve_find_ptep_index(pv_entry_t *pvep, pt_entry_t *ptep)
 static inline bool
 pve_is_empty(pv_entry_t *pvep)
 {
-	for (int i = 0; i < PTE_PER_PVE; i++) {
+	for (unsigned int i = 0; i < PTE_PER_PVE; i++) {
 		if (pve_get_ptep(pvep, i) != PT_ENTRY_NULL) {
 			return false;
 		}
@@ -966,7 +966,7 @@ ptep_get_pmap(const pt_entry_t *ptep)
 static inline pt_desc_t *
 tte_get_ptd(const tt_entry_t tte)
 {
-	const vm_offset_t pt_base_va = (vm_offset_t)(tte & ~PAGE_MASK);
+	const vm_offset_t pt_base_va = (vm_offset_t)(tte & ~((tt_entry_t)PAGE_MASK));
 	pv_entry_t **pvh = pai_to_pvh(pa_index(pt_base_va));
 
 	if (__improbable(!pvh_test_type(pvh, PVH_TYPE_PTDP))) {

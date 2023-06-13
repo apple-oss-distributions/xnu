@@ -4,8 +4,13 @@ from builtins import object
 
 import getopt
 import os
+import string
 import sys
 import re
+
+from lldb import SBValue
+from core import value as cvalue
+from .configuration import config
 
 class ArgumentError(Exception):
     """ Exception class for raising errors in command arguments. The lldb_command framework will catch this
@@ -98,6 +103,210 @@ class NOVT(object):
     def __getattribute__(self, *args):
         return ""
 
+class SBValueFormatter(string.Formatter):
+    """
+    Formatter that treats SBValues specially
+
+    It adds the following magical syntax for fields:
+
+    - {$value->path.to[10].field} will follow a given expression path,
+      and compute the resulting SBValue. This works with cvalues too.
+
+    - {&value->path.to[10].field} will return the load address
+      of the specified value path. This works with cvalue too.
+
+
+    The format spec can now take a multi-char conversion,
+    {field|<multi-char-conversion>!conv:spec},
+    where <multi-char-conversion> is one of:
+
+    - `c_str` which will attempt to read the value as a C string using
+      xGetValueAsCString()
+
+    - `human_size` will convert sizes into a human readable representation.
+
+    - a conversion registered with the SBValueFormatter.converter
+      decorator,
+
+    - a `key.method` specification where the key is one of the positional
+      or named arguments to the format.
+
+
+    When the value of a given field is an SBValue (because &/$ was used,
+    or the field was already an SBValue -- but not a cvalue), in the absence
+    of a explicit conversion, the SBValue will be converted to a scalar
+    using xGetValueAsScalar()
+    """
+
+    _KEY_RE = re.compile(r"[.-\[]")
+
+    _CONVERTERS = {}
+
+    @classmethod
+    def converter(cls, name, raw=False):
+        def register(fn):
+            cls._CONVERTERS[name] = (fn, raw)
+
+        return register
+
+    def format(self, format_string, *args, **kwargs):
+        return self.vformat(self, format_string, args, kwargs)
+
+    def _raise_switch_manual_to_automatic(self):
+        raise ValueError('cannot switch from manual field '
+                         'specification to automatic field '
+                         'numbering')
+
+    def vformat(self, format_string, args, kwargs):
+        result    = []
+        auto_idx  = 0
+
+        #
+        # Python 2.7 doesn't support empty field names in Formatter,
+        # so we need to implement vformat. Because we avoid certain
+        # features such as "unused fields accounting" we actually
+        # are faster than the core library Formatter this way which
+        # adds up quickly for our macros, so it's worth keeping
+        # this implementation even on Python 3.
+        #
+        for text, field_name, format_spec, conv in \
+                self.parse(format_string):
+
+            if text:
+                result.append(text)
+
+            if field_name is None:
+                continue
+
+            field_name, _, transform = field_name.partition('|')
+
+            if field_name == '':
+                #
+                # Handle auto-numbering like python 3
+                #
+                if auto_idx is None:
+                    self._raise_switch_manual_to_automatic()
+                field_name = str(auto_idx)
+                auto_idx  += 1
+
+            elif field_name.isdigit():
+                #
+                # numeric key
+                #
+                if auto_idx:
+                    self._raise_switch_manual_to_automatic()
+                auto_idx = None
+
+            try:
+                if field_name[0] in '&$':
+                    #
+                    # Our magic sigils
+                    #
+                    obj, auto_idx = self.get_value_field(
+                        field_name, args, kwargs, auto_idx)
+
+                else:
+                    #
+                    # Fallback typical case
+                    #
+                    obj, _ = self.get_field(field_name, args, kwargs)
+            except:
+                if config['debug']: raise
+                result.extend((
+                    VT.Red,
+                    "<FAIL {}>".format(field_name),
+                    VT.Reset
+                ))
+                continue
+
+            # do any conv on the resulting object
+            try:
+                obj = self.convert_field(obj, conv, transform, args, kwargs)
+            except:
+                if config['debug']: raise
+                result.extend((
+                    VT.Red,
+                    "<CONV {}>".format(field_name),
+                    VT.Reset
+                ))
+                continue
+
+            result.append(self.format_field(obj, format_spec))
+
+        return ''.join(result)
+
+    def get_value_field(self, name, args, kwargs, auto_idx):
+        match = self._KEY_RE.search(name)
+        index = match.start() if match else len(name)
+        key   = name[1:index]
+        path  = name[index:]
+
+        if key == '':
+            raise ValueError("Key part of '{}' can't be empty".format(name))
+
+        if key.isdigit():
+            key = int(key)
+            if auto_idx:
+                self._raise_switch_manual_to_automatic()
+            auto_idx = None
+
+        obj = self.get_value(key, args, kwargs)
+        if isinstance(obj, cvalue):
+            obj = obj.GetSBValue()
+
+        if name[0] == '&':
+            if len(path):
+                return obj.xGetLoadAddressByPath(path), auto_idx
+            return obj.GetLoadAddress(), auto_idx
+
+        if len(path):
+            obj = obj.GetValueForExpressionPath(path)
+        return obj, auto_idx
+
+    def convert_field(self, obj, conv, transform='', args=None, kwargs=None):
+        is_sbval = isinstance(obj, SBValue)
+
+        if transform != '':
+            fn, raw = self._CONVERTERS.get(transform, (None, False))
+            if not raw and is_sbval:
+                obj = obj.xGetValueAsScalar()
+
+            if fn:
+                obj = fn(obj)
+            else:
+                objname, _, method = transform.partition('.')
+                field, _ = self.get_field(objname, args, kwargs)
+                obj = getattr(field, method)(obj)
+
+            is_sbval = False
+
+        if conv is None:
+            return obj.xGetValueAsScalar() if is_sbval else obj
+
+        return super(SBValueFormatter, self).convert_field(obj, conv)
+
+@SBValueFormatter.converter("c_str", raw=True)
+def __sbval_to_cstr(v):
+    return v.xGetValueAsCString() if isinstance(v, SBValue) else str(v)
+
+@SBValueFormatter.converter("human_size")
+def __human_size(v):
+    n = v.xGetValueAsCString() if isinstance(v, SBValue) else int(v)
+    order = ((n//10) | 1).bit_length() // 10
+    return "{:.1f}{}".format(n / (1024 ** order), "BKMGTPE"[order])
+
+
+_xnu_core_default_formatter = SBValueFormatter()
+
+def xnu_format(fmt, *args, **kwargs):
+    """ Conveniency function to call SBValueFormatter().format """
+    return _xnu_core_default_formatter.vformat(fmt, args, kwargs)
+
+def xnu_vformat(fmt, args, kwargs):
+    """ Conveniency function to call SBValueFormatter().vformat """
+    return _xnu_core_default_formatter.vformat(fmt, args, kwargs)
+
+
 class CommandOutput(object):
     """
     An output handler for all commands. Use Output.print to direct all output of macro via the handler.
@@ -135,8 +344,6 @@ class CommandOutput(object):
         self.verbose_level = 0
         self.target_cmd_args = []
         self.target_cmd_options = {}
-        self.color = None
-        self.isatty = os.isatty(sys.__stdout__.fileno())
         self._indent = ''
         self._buffer = ''
 
@@ -144,12 +351,10 @@ class CommandOutput(object):
         self._lastHeader = None
         self._line = 0
 
-    def _write(self, s):
-        if self.fhandle != None:
-            self.fhandle.write(self._indent + s + "\n")
-        else:
-            self.resultObj.AppendMessage(self._indent + s)
-        self._line += 1
+        self.color = None
+        self.isatty = os.isatty(sys.__stdout__.fileno())
+        self.VT = VT if self._doColor() else NOVT()
+
 
     def _doColor(self):
         if self.color is True:
@@ -172,12 +377,8 @@ class CommandOutput(object):
         return HeaderScope(self, header, indent)
 
     def format(self, s, *args, **kwargs):
-        if self._doColor():
-            kwargs['VT'] = VT
-        else:
-            kwargs['VT'] = NOVT()
-
-        return s.format(*args, **kwargs)
+        kwargs['VT'] = self.VT
+        return xnu_vformat(s, args, kwargs)
 
     def error(self, s, *args, **kwargs):
         print(self.format("{cmd.cmd_name}: {VT.Red}"+s+"{VT.Default}", cmd=self, *args, **kwargs))
@@ -185,24 +386,32 @@ class CommandOutput(object):
     def write(self, s):
         """ Handler for all commands output. By default just print to stdout """
 
-        s = self._buffer + s
+        o = self.fhandle or self.resultObj
 
-        while s.find('\n') != -1:
-            l, s = s.split("\n", 1)
+        for l in (self._buffer + s).splitlines(True):
+            if l[-1] != '\n':
+                self._buffer = l
+                return
+
             if self.FILTER:
                 if not self.reg.search(l):
                     continue
-                if self._doColor():
-                    l = self.reg.sub(VT.Underline + r"\g<0>" + VT.EndUnderline, l);
+                l = self.reg.sub(self.VT.Underline + r"\g<0>" + self.VT.EndUnderline, l);
 
-            if len(l) and self._needsHeader():
-                for hdr in self._header.split("\n"):
-                    self._write(self.format("{VT.Bold}{:s}{VT.EndBold}", hdr))
+            if len(l) == 1:
+                o.write(l)
+                self._line += 1
+                continue
+
+            if len(l) > 1 and self._needsHeader():
+                for h in self._header.splitlines():
+                    o.write(self.format("{}{VT.Bold}{:s}{VT.EndBold}\n", self._indent, h))
                 self._lastHeader = self._line
 
-            self._write(l)
+            o.write(self._indent + l)
+            self._line += 1
 
-        self._buffer = s
+        self._buffer = ''
 
     def flush(self):
         if self.fhandle != None:
@@ -257,6 +466,7 @@ class CommandOutput(object):
                     self.color = False
                 else:
                     self.color = None
+                self.VT = VT if self._doColor() else NOVT()
             else:
                 o = o.strip()
                 self.target_cmd_options[o] = a

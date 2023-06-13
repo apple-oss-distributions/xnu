@@ -83,8 +83,7 @@ struct flowidns_flowid_tree_node {
 static LCK_GRP_DECLARE(flowidns_lock_group, "flowidns_lock");
 static int __flowidns_inited = 0;
 
-static ZONE_DEFINE(flowidns_fftn_zone, SKMEM_ZONE_PREFIX ".flowidns.fftn",
-    sizeof(struct flowidns_flowid_tree_node), ZC_NONE);
+static SKMEM_TYPE_DEFINE(flowidns_fftn_zone, struct flowidns_flowid_tree_node);
 
 __attribute__((always_inline))
 static inline int

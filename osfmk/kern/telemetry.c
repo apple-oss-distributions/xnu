@@ -942,12 +942,22 @@ copytobuffer:
 	 */
 	tsnap->was_throttled = (uint32_t) proc_was_throttled(p);
 	tsnap->did_throttle = (uint32_t) proc_did_throttle(p);
+#if CONFIG_COALITIONS
 	/*
-	 * The  field is overloaded to represent the resource coalition ID of this
-	 * task.
+	 * These fields are overloaded to represent the resource coalition ID of
+	 * this task...
 	 */
 	coalition_t rsrc_coal = task->coalition[COALITION_TYPE_RESOURCE];
 	tsnap->p_start_sec = rsrc_coal ? coalition_id(rsrc_coal) : 0;
+	/*
+	 * ... and the process this thread is doing work on behalf of.
+	 */
+	pid_t origin_pid = -1;
+	if (thread_get_voucher_origin_pid(thread, &origin_pid) != KERN_SUCCESS) {
+		origin_pid = -1;
+	}
+	tsnap->p_start_usec = origin_pid;
+#endif /* CONFIG_COALITIONS */
 
 	if (task->t_flags & TF_TELEMETRY) {
 		tsnap->ss_flags |= kTaskRsrcFlagged;

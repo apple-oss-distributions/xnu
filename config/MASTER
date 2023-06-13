@@ -318,6 +318,9 @@ options   CONFIG_VSPRINTF               # <vsprintf>
 options   CONFIG_EMBEDDED			# <config_embedded>
 
 
+# Compile XNU with PPL support.
+options   CONFIG_PMAP_PPL			# <config_pmap_ppl>
+
 options   NOS_ARM_ASM			# <nos_arm_asm>
 options   NOS_ARM_PMAP			# <nos_arm_pmap>
 
@@ -666,7 +669,7 @@ options		CONFIG_SCHED_MULTIQ		# <config_sched_multiq>
 options		CONFIG_SCHED_TIMESHARE_CORE	# <config_sched_traditional,config_sched_multiq>
 options		CONFIG_CLUTCH			# <config_clutch>
 options 	CONFIG_SCHED_AUTO_JOIN		# <config_sched_auto_join>
-options 	CONFIG_SCHED_RT_RESTRICT		# <config_sched_rt_restrict>
+options 	CONFIG_SCHED_RT_ALLOW		# <config_sched_rt_allow>
 
 options		CONFIG_SCHED_IDLE_IN_PLACE	# <config_sched_idle_in_place>
 options		CONFIG_SCHED_SFI		# <config_sched_sfi>

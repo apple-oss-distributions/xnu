@@ -666,17 +666,6 @@ sk_copy64_64x(uint64_t *src, uint64_t *dst, size_t l)
  * Do not use these directly.
  * Use the skn_ variants if you need custom probe names.
  */
-#define _sk_alloc(probename, size, flags, name)                         \
-({                                                                      \
-	void *ret;                                                      \
-                                                                        \
-	ret = kheap_alloc_tag(KHEAP_DEFAULT, (size), Z_ZERO | (flags),  \
-	    (name)->tag);                                               \
-	DTRACE_SKYWALK3(probename, size_t, (size), int, (flags),        \
-	    void *, ret);                                               \
-	ret;                                                            \
-})
-
 #define _sk_alloc_type(probename, type, flags, name)                    \
 ({                                                                      \
 	void *ret;                                                      \
@@ -688,12 +677,6 @@ sk_copy64_64x(uint64_t *src, uint64_t *dst, size_t l)
 	ret;                                                            \
 })
 
-#define _sk_free(probename, elem, size)                                 \
-{                                                                       \
-	DTRACE_SKYWALK2(probename, void *, (elem), size_t, (size));     \
-	kheap_free(KHEAP_DEFAULT, (elem), (size));                      \
-}
-
 #define _sk_alloc_type_array(probename, type, count, flags, name)       \
 ({                                                                      \
 	void *ret;                                                      \
@@ -702,6 +685,17 @@ sk_copy64_64x(uint64_t *src, uint64_t *dst, size_t l)
 	    (name)->tag);                                               \
 	DTRACE_SKYWALK4(probename, char *, #type, size_t, (count),      \
 	    int, (flags), void *, ret);                                 \
+	ret;                                                            \
+})
+
+#define _sk_alloc_type_hash(probename, heap, size, flags, name)         \
+({                                                                      \
+	void *ret;                                                      \
+                                                                        \
+	ret = kalloc_type_var_impl((heap), (size),                      \
+	    __zone_flags_mix_tag((flags) | Z_ZERO, (name)->tag), NULL); \
+	DTRACE_SKYWALK4(probename, char *, (heap)->kt_name + 5,         \
+	    size_t, (size), int, (flags), void *, ret);                 \
 	ret;                                                            \
 })
 
@@ -740,6 +734,13 @@ sk_copy64_64x(uint64_t *src, uint64_t *dst, size_t l)
 	kfree_type(type, (count), (elem));                              \
 }
 
+#define _sk_free_type_hash(probename, heap, size, elem)                 \
+{                                                                       \
+	DTRACE_SKYWALK3(probename, char *, (heap)->kt_name + 5,         \
+	    size_t, (size), void *, (elem));                            \
+	kfree_type_var_impl((heap), (elem), (size));                    \
+}
+
 #define _sk_free_type_header_array(probename, htype, type, count, elem) \
 {                                                                       \
 	DTRACE_SKYWALK4(probename, char *, #htype, char *, #type,       \
@@ -774,17 +775,14 @@ sk_copy64_64x(uint64_t *src, uint64_t *dst, size_t l)
 	kfree_data((elem), (size));                                     \
 }
 
-#define sk_alloc(size, flags, tag)                                      \
-	_sk_alloc(sk_alloc, size, flags, tag)
-
-#define sk_free(elem, size)                                             \
-	_sk_free(sk_free, elem, size)
-
 #define sk_alloc_type(type, flags, tag)                                 \
 	_sk_alloc_type(sk_alloc_type, type, flags, tag)
 
 #define sk_alloc_type_array(type, count, flags, tag)                    \
 	_sk_alloc_type_array(sk_alloc_type_array, type, count, flags, tag)
+
+#define sk_alloc_type_hash(heap, size, flags, tag)                      \
+	_sk_alloc_type_hash(sk_alloc_type_hash, heap, size, flags, tag)
 
 #define sk_alloc_type_header_array(htype, type, count, flags, tag)      \
 	_sk_alloc_type_header_array(sk_alloc_type_header_array, htype,  \
@@ -799,6 +797,9 @@ sk_copy64_64x(uint64_t *src, uint64_t *dst, size_t l)
 
 #define sk_free_type_array(type, count, elem)                           \
 	_sk_free_type_array(sk_free_type_array, type, count, elem)
+
+#define sk_free_type_hash(heap, size, elem)                             \
+	_sk_free_type_hash(sk_free_type_hash, heap, size, elem)
 
 #define sk_free_type_header_array(htype, type, count, elem)             \
 	_sk_free_type_header_array(sk_free_type_header_array, htype,    \
@@ -819,21 +820,19 @@ sk_copy64_64x(uint64_t *src, uint64_t *dst, size_t l)
  * of the same call within the same function and you want the dtrace
  * probename to be different at each callsite.
  */
-#define skn_alloc(name, size, flags, tag)                               \
-	_sk_alloc(sk_alloc_ ## name, size, flags, tag)
-
 #define skn_realloc(name, elem, oldsize, newsize, flags, tag)           \
 	_sk_realloc(sk_realloc_ ## name, elem, oldsize, newsize, flags, \
 	tag)
-
-#define skn_free(name, elem, size)                                      \
-	_sk_free(sk_free_ ## name, elem, size)
 
 #define skn_alloc_type(name, type, flags, tag)                          \
 	_sk_alloc_type(sk_alloc_type_ ## name, type, flags, tag)
 
 #define skn_alloc_type_array(name, type, count, flags, tag)             \
 	_sk_alloc_type_array(sk_alloc_type_array_ ## name, type, count, \
+	flags, tag)
+
+#define skn_alloc_type_hash(name, heap, size, flags, tag)               \
+	_sk_alloc_type_hash(sk_alloc_type_hash_ ## name, heap, size,    \
 	flags, tag)
 
 #define skn_alloc_type_header_array(name, htype, type, count, flags, tag) \
@@ -846,6 +845,9 @@ sk_copy64_64x(uint64_t *src, uint64_t *dst, size_t l)
 #define skn_free_type_array(name, type, count, elem)                    \
 	_sk_free_type_array(sk_free_type_array_ ## name, type, count,   \
 	elem)
+
+#define skn_free_type_hash(name, heap, size, elem)                      \
+	_sk_free_type_hash(sk_free_type_hash_ ## name, heap, size, elem)
 
 #define skn_free_type_header_array(name, htype, type, count, elem)      \
 	_sk_free_type_header_array(sk_free_type_header_array_ ## name,  \

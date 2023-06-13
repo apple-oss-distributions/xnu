@@ -1302,10 +1302,7 @@ vm_map_with_linking(
 	vm_object_t             object = VM_OBJECT_NULL;
 	memory_object_t         pager = MEMORY_OBJECT_NULL;
 	uint32_t                r;
-	struct mwl_region       *rp;
 	vm_map_address_t        map_addr;
-	int                     vm_flags;
-	vm_map_kernel_flags_t   vmk_flags;
 	kern_return_t           kr = KERN_SUCCESS;
 
 	object = memory_object_control_to_vm_object(file_control);
@@ -1324,20 +1321,20 @@ vm_map_with_linking(
 	}
 
 	for (r = 0; r < region_cnt; ++r) {
-		rp = &regions[r];
+		vm_map_kernel_flags_t vmk_flags = {
+			.vmf_fixed = true,
+			.vmf_overwrite = true,
+			.vmkf_overwrite_immutable = true,
+		};
+		struct mwl_region *rp = &regions[r];
 
 		/* map that pager over the portion of the mapping that needs sliding */
-		vm_flags = VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE;
-		vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-		vmk_flags.vmkf_overwrite_immutable = TRUE;
 		map_addr = (vm_map_address_t)rp->mwlr_address;
 		kr = vm_map_enter_mem_object(map,
 		    &map_addr,
 		    rp->mwlr_size,
 		    (mach_vm_offset_t) 0,
-		    vm_flags,
 		    vmk_flags,
-		    VM_KERN_MEMORY_NONE,
 		    (ipc_port_t)(uintptr_t)pager,
 		    rp->mwlr_file_offset,
 		    TRUE,       /* copy == TRUE, as this is MAP_PRIVATE so COW may happen */

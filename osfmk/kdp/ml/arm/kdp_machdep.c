@@ -468,16 +468,17 @@ machine_trace_thread64(thread_t thread,
 #endif
 			}
 
-#if XNU_MONITOR
-			vm_offset_t cpu_base = (vm_offset_t)pmap_stacks_start;
-			vm_offset_t cpu_top = (vm_offset_t)pmap_stacks_end;
-
-			if (((prevfp >= cpu_base) && (prevfp < cpu_top)) !=
-			    ((fp >= cpu_base) && (fp < cpu_top))) {
+			/**
+			 * The stack could be "growing upwards" because this frame is
+			 * stitching two different stacks together. There can be more than
+			 * one non-XNU stack so if both frames are in non-XNU stacks but it
+			 * looks like the stack is growing upward, then assume that we've
+			 * switched from one non-XNU stack to another.
+			 */
+			if ((ml_addr_in_non_xnu_stack(prevfp) != ml_addr_in_non_xnu_stack(fp)) ||
+			    (ml_addr_in_non_xnu_stack(prevfp) && ml_addr_in_non_xnu_stack(fp))) {
 				switched_stacks = true;
-				break;
 			}
-#endif
 
 			if (!switched_stacks) {
 				/* Corrupt frame pointer? */
@@ -492,6 +493,7 @@ machine_trace_thread64(thread_t thread,
 			if (thread_trace_flags != NULL) {
 				*thread_trace_flags |= kThreadTruncatedBT;
 			}
+
 			break;
 		}
 

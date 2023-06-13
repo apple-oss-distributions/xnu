@@ -647,21 +647,12 @@ _firehose_trace(firehose_stream_t stream, firehose_tracepoint_id_u ftid,
 	return 0;
 }
 
-void
-os_log_coprocessor_register(const char *uuid, const char *file_path, bool copy)
-{
-	// Will be removed after all user code will be updated to use os_log_coprocessor_register_with_type
-	os_log_coprocessor_register_with_type(uuid, file_path, copy ? os_log_coproc_register_memory : os_log_coproc_register_harvest_fs_img4);
-}
-
 static firehose_tracepoint_code_t
 coproc_reg_type_to_firehost_code(os_log_coproc_reg_t reg_type)
 {
 	switch (reg_type) {
 	case os_log_coproc_register_memory:
 		return firehose_tracepoint_code_load_memory;
-	case os_log_coproc_register_harvest_fs_img4:
-		return firehose_tracepoint_code_load_filesystem;
 	case os_log_coproc_register_harvest_fs_ftab:
 		return firehose_tracepoint_code_load_filesystem_ftab;
 	default:

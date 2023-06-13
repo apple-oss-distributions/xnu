@@ -65,9 +65,11 @@ def GetSourcePathSettings(binary_path, symbols_path):
 def CheckMissingLibs(debugger):
     """ Check that required modules are installed. """
 
-    # Collect lldb_host version
+    # Convert LLDB version string to version tuple.
+    # A version string may be of form: lldb_host-1403.2.6.11 (iPhoneOS)
+    # Code below only matches 1403.2.6.11 and ignores rest of the string.
     ver_str = debugger.GetVersionString()
-    lldb_ver = re.search("^lldb.*-(.*)$", ver_str, re.MULTILINE).group(1)
+    lldb_ver = re.search("^lldb.*-([0-9.]+)", ver_str, re.MULTILINE).group(1)
     ver = tuple(map(int, lldb_ver.split('.')))
 
     # Display correct command to install missing packages.

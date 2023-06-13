@@ -124,6 +124,7 @@ exception_stack_pointer(void)
 #define current_cpu_datap()      getCpuDatap()
 
 extern int                       get_preemption_level(void);
+extern unsigned int              get_preemption_level_for_thread(thread_t);
 
 #define mp_disable_preemption()  _disable_preemption()
 #define mp_enable_preemption()   _enable_preemption()

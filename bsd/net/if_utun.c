@@ -278,8 +278,7 @@ static LCK_MTX_DECLARE_ATTR(utun_lock, &utun_lck_grp, &utun_lck_attr);
 
 TAILQ_HEAD(utun_list, utun_pcb) utun_head;
 
-static ZONE_DEFINE(utun_pcb_zone, "net.if_utun",
-    sizeof(struct utun_pcb), ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(utun_pcb_zone, struct utun_pcb, NET_KT_DEFAULT);
 
 #if UTUN_NEXUS
 

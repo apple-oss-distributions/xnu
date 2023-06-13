@@ -25,7 +25,6 @@ PRIVATE_DATAFILES = \
 	ecc.h \
 	lock_stat.h \
 	monotonic.h \
-	recount.h \
 	remote_time.h \
 	restartable.h \
 	trustcache.h \
@@ -84,6 +83,7 @@ EXPORT_FILES = \
 	sched_prim.h \
 	sfi.h \
 	simple_lock.h \
+	smr_types.h \
 	startup.h \
 	task.h \
 	task_ref.h \
@@ -100,16 +100,16 @@ EXPORT_FILES = \
 # Installs header file for Apple internal use for kernel extensions -
 #         $(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders
 PRIVATE_EXPORT_FILES = \
-	socd_client_kern.h \
 	build_config.h \
-	ticket_lock.h \
-	mach_node_link.h \
 	copyout_shim.h \
-	sched_clutch.h \
+	kern_apfs_reflock.h \
 	mach_filter.h \
+	mach_node_link.h \
+	sched_clutch.h \
+	socd_client_kern.h \
 	task_ident.h \
-	zalloc_ro_shim.h \
-	kern_apfs_reflock.h
+	ticket_lock.h \
+	zalloc_ro_shim.h
 
 
 XNU_ONLY_EXPORTS = \
@@ -118,9 +118,12 @@ XNU_ONLY_EXPORTS = \
 	cpu_quiesce.h \
 	iotrace.h \
 	ipc_kobject.h \
+	lock_ptr.h \
 	perfmon.h \
+	recount.h \
 	sched_hygiene.h \
 	smr.h \
+	smr_hash.h \
 	sync_sema.h \
 	ux_handler.h \
 	workload_config.h

@@ -440,6 +440,7 @@ noreplaycheck:
 			IPSEC_STAT_INCREMENT(ipsecstat.in_inval);
 			goto bad;
 		}
+		ip = mtod(m, struct ip *);
 	}
 
 	/*

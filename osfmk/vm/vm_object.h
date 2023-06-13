@@ -121,12 +121,13 @@ struct vm_object_fault_info {
 	/* boolean_t */ stealth:1,
 	/* boolean_t */ io_sync:1,
 	/* boolean_t */ cs_bypass:1,
-	/* boolean_t */ pmap_cs_associated:1,
+	/* boolean_t */ csm_associated:1,
 	/* boolean_t */ mark_zf_absent:1,
 	/* boolean_t */ batch_pmap_op:1,
 	/* boolean_t */ resilient_media:1,
 	/* boolean_t */ no_copy_on_read:1,
-	    __vm_object_fault_info_unused_bits:23;
+	/* boolean_t */ fi_xnu_user_debug:1,
+	    __vm_object_fault_info_unused_bits:22;
 	int             pmap_options;
 };
 
@@ -196,7 +197,6 @@ struct vm_object {
 	memory_object_copy_strategy_t
 	    copy_strategy;                      /* How to handle data copy */
 
-#if __LP64__
 	/*
 	 * Some user processes (mostly VirtualMachine software) take a large
 	 * number of UPLs (via IOMemoryDescriptors) to wire pages in large
@@ -204,19 +204,10 @@ struct vm_object {
 	 * Since we never enforced any limit there, let's give them 32 bits
 	 * for backwards compatibility's sake.
 	 */
-	unsigned int            paging_in_progress:16,
-	    __object1_unused_bits:16;
+	unsigned short          paging_in_progress:16;
+	unsigned short          vo_size_delta;
 	unsigned int            activity_in_progress;
-#else /* __LP64__ */
-	/*
-	 * On 32-bit platforms, enlarging "activity_in_progress" would increase
-	 * the size of "struct vm_object".  Since we don't know of any actual
-	 * overflow of these counters on these platforms, let's keep the
-	 * counters as 16-bit integers.
-	 */
-	unsigned short          paging_in_progress;
-	unsigned short          activity_in_progress;
-#endif /* __LP64__ */
+
 	/* The memory object ports are
 	 * being used (e.g., for pagein
 	 * or pageout) -- don't change
@@ -309,7 +300,8 @@ struct vm_object {
 	 * primary caching. (for
 	 * I/O)
 	 */
-	/* boolean_t */ _object5_unused_bits:1;
+	/* boolean_t */ for_realtime:1;
+	/* Might be needed for realtime code path */
 
 	queue_chain_t           cached_list;    /* Attachment point for the
 	                                         * list of objects cached as a
@@ -592,6 +584,11 @@ __private_extern__ vm_object_t  vm_object_allocate(vm_object_size_t size);
 __private_extern__ void    _vm_object_allocate(vm_object_size_t size,
     vm_object_t object);
 
+__private_extern__ void vm_object_set_size(
+	vm_object_t             object,
+	vm_object_size_t        outer_size,
+	vm_object_size_t        inner_size);
+
 #define vm_object_reference_locked(object)              \
 	MACRO_BEGIN                                     \
 	vm_object_t RLObject = (object);                \
@@ -662,6 +659,7 @@ __private_extern__ void         vm_object_deactivate_pages(
 	vm_object_size_t        size,
 	boolean_t               kill_page,
 	boolean_t               reusable_page,
+	boolean_t               reusable_no_write,
 	struct pmap             *pmap,
 /* XXX TODO4K: need pmap_page_size here too? */
 	vm_map_offset_t         pmap_offset);

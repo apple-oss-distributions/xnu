@@ -375,7 +375,6 @@ struct mptcb {
 	mptcp_state_t   mpt_state;              /* MPTCP state */
 	uint32_t        mpt_flags;              /* see flags below */
 	uint8_t         mpt_version;            /* MPTCP proto version */
-	uint8_t         mpt_peer_version;       /* Version from peer */
 	u_short         mpt_softerror;          /* error not yet reported */
 	/*
 	 * Authentication and metadata invariants

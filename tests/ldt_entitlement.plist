@@ -6,5 +6,7 @@
 	<true/>
 	<key>com.apple.security.mmap-map-32bit</key>
 	<true/>
+	<key>com.apple.private.thread-set-state</key>
+	<true/>
 </dict>
 </plist>

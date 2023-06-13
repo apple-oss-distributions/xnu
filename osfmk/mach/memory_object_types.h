@@ -763,39 +763,17 @@ typedef uint64_t upl_control_flags_t;
 	((upl)->upl_reprio_info[(index)]) = (((uint64_t)(blkno) & UPL_REPRIO_INFO_MASK) | \
 	(((uint64_t)(len) & UPL_REPRIO_INFO_MASK) << UPL_REPRIO_INFO_SHIFT))
 
-/* The call prototyped below is used strictly by UPL_GET_INTERNAL_PAGE_LIST */
-
-__BEGIN_DECLS
-
-extern vm_size_t        upl_offset_to_pagelist;
-extern vm_size_t        upl_get_internal_pagelist_offset(void);
-extern void*            upl_get_internal_vectorupl(upl_t);
-extern upl_page_info_t*         upl_get_internal_vectorupl_pagelist(upl_t);
-
-__END_DECLS
-
-/*Use this variant to get the UPL's page list iff:*/
-/*- the upl being passed in is already part of a vector UPL*/
-/*- the page list you want is that of this "sub-upl" and not that of the entire vector-upl*/
-
-#define UPL_GET_INTERNAL_PAGE_LIST_SIMPLE(upl) \
-	((upl_page_info_t *)((upl_offset_to_pagelist == 0) ?  \
-	(uintptr_t)upl + (unsigned int)(upl_offset_to_pagelist = upl_get_internal_pagelist_offset()): \
-	(uintptr_t)upl + (unsigned int)upl_offset_to_pagelist))
-
 /* UPL_GET_INTERNAL_PAGE_LIST is only valid on internal objects where the */
 /* list request was made with the UPL_INTERNAL flag */
 
-
-#define UPL_GET_INTERNAL_PAGE_LIST(upl) \
-	((upl_get_internal_vectorupl(upl) != NULL ) ? (upl_get_internal_vectorupl_pagelist(upl)) : \
-	((upl_page_info_t *)((upl_offset_to_pagelist == 0) ?  \
-	(uintptr_t)upl + (unsigned int)(upl_offset_to_pagelist = upl_get_internal_pagelist_offset()): \
-	(uintptr_t)upl + (unsigned int)upl_offset_to_pagelist)))
+#define UPL_GET_INTERNAL_PAGE_LIST(upl) upl_get_internal_page_list(upl)
 
 __BEGIN_DECLS
 
-extern ppnum_t  upl_phys_page(upl_page_info_t *upl, int index);
+extern void            *upl_get_internal_vectorupl(upl_t);
+extern upl_page_info_t *upl_get_internal_vectorupl_pagelist(upl_t);
+extern upl_page_info_t *upl_get_internal_page_list(upl_t upl);
+extern ppnum_t          upl_phys_page(upl_page_info_t *upl, int index);
 extern boolean_t        upl_device_page(upl_page_info_t *upl);
 extern boolean_t        upl_speculative_page(upl_page_info_t *upl, int index);
 extern void     upl_clear_dirty(upl_t upl, boolean_t value);

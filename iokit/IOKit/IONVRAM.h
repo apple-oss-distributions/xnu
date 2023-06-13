@@ -95,8 +95,7 @@ private:
 	IODTNVRAMVariables     *_commonService;
 	IODTNVRAMVariables     *_systemService;
 
-	OSPtr<OSDictionary>    _commonDict;
-	OSPtr<OSDictionary>    _systemDict;
+	OSPtr<OSDictionary>    _varDict;
 
 	SInt32                 _lastDeviceSync;
 	bool                   _freshInterval;
@@ -105,10 +104,7 @@ private:
 
 	uint32_t getNVRAMSize(void);
 
-	NVRAMPartitionType getDictionaryType(const OSDictionary *dict) const;
-	IOReturn chooseDictionary(IONVRAMOperation operation, const uuid_t varGuid,
-	    const char *variableName, OSDictionary **dict) const;
-	IOReturn flushDict(const uuid_t guid, IONVRAMOperation op);
+	IOReturn flushGUID(const uuid_t guid, IONVRAMOperation op);
 	bool handleSpecialVariables(const char *name, const uuid_t guid, const OSObject *obj, IOReturn *error);
 
 	IOReturn setPropertyInternal(const OSSymbol *aKey, OSObject *anObject);

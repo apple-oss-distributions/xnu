@@ -2,13 +2,14 @@
 
 #include <darwintest.h>
 #include <darwintest_perf.h>
+#include "test_utils.h"
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.arm"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("arm"),
-	T_META_OWNER("jharmening")
-	);
+	T_META_OWNER("jharmening"),
+	XNU_T_META_SOC_SPECIFIC);
 
 T_DECL(pmap_call_benchmark, "pmap call overhead benchmark")
 {

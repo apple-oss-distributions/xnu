@@ -100,6 +100,8 @@ uint32_t nfsrv_debug_ctl;
 #include <libkern/libkern.h>
 #include <stdarg.h>
 
+static mount_t nfsrv_getvfs_by_mntonname(char *path);
+
 void
 nfs_printf(unsigned int debug_control, unsigned int facility, unsigned int level, const char *fmt, ...)
 {
@@ -1664,7 +1666,28 @@ nfsrv_free_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 
 void enablequotas(struct mount *mp, vfs_context_t ctx); // XXX
 
-#define DATA_VOLUME_MP "/System/Volumes/Data" // PLATFORM_DATA_VOLUME_MOUNT_POINT
+static int
+nfsrv_export_compare(char *path1, char *path2)
+{
+	mount_t mp1 = NULL, mp2 = NULL;
+
+	if (strncmp(path1, path2, MAXPATHLEN) == 0) {
+		return 0;
+	}
+
+	mp1 = nfsrv_getvfs_by_mntonname(path1);
+	if (mp1) {
+		vfs_unbusy(mp1);
+		mp2 = nfsrv_getvfs_by_mntonname(path2);
+		if (mp2) {
+			vfs_unbusy(mp2);
+			if (mp1 == mp2) {
+				return 0;
+			}
+		}
+	}
+	return 1;
+}
 
 int
 nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
@@ -1678,10 +1701,7 @@ nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 	vnode_t mvp = NULL, xvp = NULL;
 	mount_t mp = NULL;
 	char path[MAXPATHLEN], *nxfs_path;
-	char fl_pathbuff[MAXPATHLEN];
-	size_t fl_pathbuff_len = MAXPATHLEN;
 	int expisroot;
-	size_t datavol_len = strlen(DATA_VOLUME_MP);
 
 	if (unxa->nxa_flags == NXA_CHECK) {
 		/* just check if the path is an NFS-exportable file system */
@@ -1784,8 +1804,7 @@ nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 	}
 	if (nxfs) {
 		/* verify exported FS path matches given path */
-		if (strncmp(path, nxfs->nxfs_path, MAXPATHLEN) &&
-		    (strncmp(path, DATA_VOLUME_MP, datavol_len) || strncmp(path + datavol_len, nxfs->nxfs_path, MAXPATHLEN - datavol_len))) {
+		if (nfsrv_export_compare(path, nxfs->nxfs_path)) {
 			error = EEXIST;
 			goto unlock_out;
 		}
@@ -1804,18 +1823,10 @@ nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 				goto out;
 			}
 			/* if adding, verify that the mount is still what we expect */
-			mp = vfs_getvfs_by_mntonname(nxfs->nxfs_path);
-			if (!mp) {
-				/* check for firmlink-free path */
-				if (vn_getpath_ext(mvp, NULLVP, fl_pathbuff, &fl_pathbuff_len, VN_GETPATH_NO_FIRMLINK) == 0 &&
-				    fl_pathbuff_len > 0 &&
-				    !strncmp(nxfs->nxfs_path, fl_pathbuff, MAXPATHLEN)) {
-					mp = vfs_getvfs_by_mntonname(vfs_statfs(vnode_mount(mvp))->f_mntonname);
-				}
-			}
+			mp = nfsrv_getvfs_by_mntonname(nxfs->nxfs_path);
 			if (mp) {
 				mount_ref(mp, 0);
-				mount_iterdrop(mp);
+				vfs_unbusy(mp);
 			}
 			/* sanity check: this should be same mount */
 			if (mp != vnode_mount(mvp)) {

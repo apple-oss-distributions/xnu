@@ -139,6 +139,7 @@ osfmk/kern/ktrace_background_notify.c	standard
 osfmk/kern/ledger.c			standard
 osfmk/kern/lock_group.c			standard
 osfmk/kern/lock_mtx.c			standard
+osfmk/kern/lock_ptr.c			standard
 osfmk/kern/lock_rw.c			standard
 osfmk/kern/lock_ticket.c		standard
 osfmk/kern/locks.c			standard
@@ -193,6 +194,7 @@ osfmk/kern/waitq.c			standard
 osfmk/kern/work_interval.c		standard
 osfmk/kern/workload_config.c	standard
 osfmk/kern/zalloc.c			standard
+osfmk/kern/zalloc_bounds.c	standard bound-checks
 osfmk/kern/bsd_kern.c		optional mach_bsd
 osfmk/kern/hibernate.c		optional hibernation
 osfmk/kern/remote_time.c        standard

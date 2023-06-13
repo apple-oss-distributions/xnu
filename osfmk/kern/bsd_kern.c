@@ -911,12 +911,6 @@ get_vmmap_entries(
 }
 #endif /* CONFIG_COREDUMP */
 
-/*
- *
- */
-/*
- *
- */
 int
 get_task_userstop(
 	task_t task)
@@ -924,9 +918,6 @@ get_task_userstop(
 	return task->user_stop_count;
 }
 
-/*
- *
- */
 int
 get_thread_userstop(
 	thread_t th)
@@ -934,9 +925,6 @@ get_thread_userstop(
 	return th->user_stop_count;
 }
 
-/*
- *
- */
 boolean_t
 get_task_pidsuspended(
 	task_t task)
@@ -944,9 +932,6 @@ get_task_pidsuspended(
 	return task->pidsuspended;
 }
 
-/*
- *
- */
 boolean_t
 get_task_frozen(
 	task_t task)
@@ -954,9 +939,6 @@ get_task_frozen(
 	return task->frozen;
 }
 
-/*
- *
- */
 boolean_t
 thread_should_abort(
 	thread_t th)
@@ -995,9 +977,6 @@ current_thread_aborted(
 	return FALSE;
 }
 
-/*
- *
- */
 void
 task_act_iterate_wth_args(
 	task_t                  task,

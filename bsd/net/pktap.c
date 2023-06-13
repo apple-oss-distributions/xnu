@@ -140,9 +140,7 @@ static struct if_clone pktap_cloner =
     pktap_clone_create,
     pktap_clone_destroy,
     0,
-    PKTAP_MAXUNIT,
-    PKTAP_ZONE_MAX_ELEM,
-    sizeof(struct pktap_softc));
+    PKTAP_MAXUNIT);
 
 errno_t pktap_if_output(ifnet_t, mbuf_t);
 errno_t pktap_demux(ifnet_t, mbuf_t, char *, protocol_family_t *);
@@ -221,7 +219,7 @@ pktap_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 
 	PKTAP_LOG(PKTP_LOG_FUNC, "unit %u\n", unit);
 
-	pktap = if_clone_softc_allocate(&pktap_cloner);
+	pktap = kalloc_type(struct pktap_softc, Z_WAITOK_ZERO_NOFAIL);
 	pktap->pktp_unit = unit;
 
 	/*
@@ -293,7 +291,7 @@ pktap_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	lck_rw_done(&pktap_lck_rw);
 done:
 	if (error != 0 && pktap != NULL) {
-		if_clone_softc_deallocate(&pktap_cloner, pktap);
+		kfree_type(struct pktap_softc, pktap);
 	}
 	return error;
 }
@@ -686,7 +684,7 @@ pktap_detach(ifnet_t ifp)
 	/* Drop reference as it's no more on the global list */
 	ifnet_release(ifp);
 
-	if_clone_softc_deallocate(&pktap_cloner, pktap);
+	kfree_type(struct pktap_softc, pktap);
 	/* This is for the reference taken by ifnet_attach() */
 	(void) ifnet_release(ifp);
 }

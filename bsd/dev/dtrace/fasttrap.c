@@ -1365,6 +1365,7 @@ fasttrap_pid_getargdesc(void *arg, dtrace_id_t id, void *parg,
 	desc->dtargd_xlate[0] = '\0';
 
 	if (probe->ftp_prov->ftp_retired != 0 ||
+		desc->dtargd_ndx < 0 ||
 	    desc->dtargd_ndx >= probe->ftp_nargs) {
 		desc->dtargd_ndx = DTRACE_ARGNONE;
 		return;
@@ -1372,6 +1373,9 @@ fasttrap_pid_getargdesc(void *arg, dtrace_id_t id, void *parg,
 
 	ndx = (probe->ftp_argmap != NULL) ?
 		probe->ftp_argmap[desc->dtargd_ndx] : desc->dtargd_ndx;
+
+	if (probe->ftp_ntypes == NULL)
+		return;
 
 	str = probe->ftp_ntypes;
 	for (i = 0; i < ndx; i++) {

@@ -392,6 +392,18 @@ static struct uncore_monitor {
 	 * Whether this monitor needs its registers restored after wake.
 	 */
 	bool um_sleeping;
+
+#if MACH_ASSERT
+	/*
+	 * Save the last ID that read from this monitor.
+	 */
+	uint8_t um_last_read_id;
+
+	/*
+	 * Save whether this monitor has been read since sleeping.
+	 */
+	bool um_read_since_sleep;
+#endif /* MACH_ASSERT */
 } uncore_monitors[MAX_NMONITORS];
 
 /*
@@ -582,12 +594,34 @@ uncmon_update_locked(unsigned int monid, unsigned int curid, unsigned int ctr)
 		if (curid == monid) {
 			snap = uncmon_read_counter_locked_l(monid, ctr);
 		} else {
-	#if UNCORE_PER_CLUSTER
+#if UNCORE_PER_CLUSTER
 			snap = uncmon_read_counter_locked_r(monid, ctr);
-	#endif /* UNCORE_PER_CLUSTER */
+#endif /* UNCORE_PER_CLUSTER */
 		}
-		/* counters should increase monotonically */
-		assert(snap >= mon->um_snaps[ctr]);
+		if (snap < mon->um_snaps[ctr]) {
+#if MACH_ASSERT
+#if UNCORE_PER_CLUSTER
+			uint64_t remote_value = uncmon_read_counter_locked_r(monid, ctr);
+#endif /* UNCORE_PER_CLUSTER */
+			panic("monotonic: UPMC%d on UPMU %d went backwards from "
+			    "%llx to %llx, read via %s, last was %s from UPMU %hhd%s"
+#if UNCORE_PER_CLUSTER
+			    ", re-read remote value is %llx"
+#endif /* UNCORE_PER_CLUSTER */
+			    , ctr,
+			    monid, mon->um_snaps[ctr], snap,
+			    curid == monid ? "local" : "remote",
+			    mon->um_last_read_id == monid ? "local" : "remote",
+			    mon->um_last_read_id,
+			    mon->um_read_since_sleep ? "" : ", first read since sleep"
+#if UNCORE_PER_CLUSTER
+			    , remote_value
+#endif /* UNCORE_PER_CLUSTER */
+			    );
+#else /* MACH_ASSERT */
+			snap = mon->um_snaps[ctr];
+#endif /* !MACH_ASSERT */
+		}
 		mon->um_counts[ctr] += snap - mon->um_snaps[ctr];
 		mon->um_snaps[ctr] = snap;
 	}
@@ -801,6 +835,9 @@ uncmon_read_all_counters(unsigned int monid, unsigned int curmonid,
 			counts[ctr] = mon->um_counts[ctr];
 		}
 	}
+#if MACH_ASSERT
+	mon->um_read_since_sleep = true;
+#endif /* MACH_ASSERT */
 
 	uncmon_unlock(mon, intrs_en);
 }
@@ -1171,6 +1208,9 @@ uncore_restore(void)
 	uncmon_program_events_locked_l(curmonid);
 	uncmon_init_locked_l(curmonid);
 	mon->um_sleeping = false;
+#if MACH_ASSERT
+	mon->um_read_since_sleep = false;
+#endif /* MACH_ASSERT */
 
 out:
 	uncmon_unlock(mon, intrs_en);

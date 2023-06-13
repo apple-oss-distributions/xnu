@@ -127,13 +127,116 @@
 #include <libkern/OSDebug.h>
 #include <IOKit/IOBSD.h>
 
-vm_size_t        upl_offset_to_pagelist = 0;
-
 #if     VM_CPM
 #include <vm/cpm.h>
 #endif  /* VM_CPM */
 
 static void mach_memory_entry_no_senders(ipc_port_t, mach_port_mscount_t);
+
+__attribute__((always_inline))
+int
+vm_map_kernel_flags_vmflags(vm_map_kernel_flags_t vmk_flags)
+{
+	int flags = vmk_flags.__vm_flags & VM_FLAGS_ANY_MASK;
+
+	/* in vmk flags the meaning of fixed/anywhere is inverted */
+	return flags ^ (VM_FLAGS_FIXED | VM_FLAGS_ANYWHERE);
+}
+
+__attribute__((always_inline, overloadable))
+void
+vm_map_kernel_flags_set_vmflags(
+	vm_map_kernel_flags_t  *vmk_flags,
+	int                     vm_flags,
+	vm_tag_t                vm_tag)
+{
+	vm_flags ^= (VM_FLAGS_FIXED | VM_FLAGS_ANYWHERE);
+	vmk_flags->__vm_flags &= ~VM_FLAGS_ANY_MASK;
+	vmk_flags->__vm_flags |= (vm_flags & VM_FLAGS_ANY_MASK);
+	vmk_flags->vm_tag = vm_tag;
+}
+
+__attribute__((always_inline, overloadable))
+void
+vm_map_kernel_flags_set_vmflags(
+	vm_map_kernel_flags_t  *vmk_flags,
+	int                     vm_flags_and_tag)
+{
+	vm_flags_and_tag ^= (VM_FLAGS_FIXED | VM_FLAGS_ANYWHERE);
+	vmk_flags->__vm_flags &= ~VM_FLAGS_ANY_MASK;
+	vmk_flags->__vm_flags |= (vm_flags_and_tag & VM_FLAGS_ANY_MASK);
+	VM_GET_FLAGS_ALIAS(vm_flags_and_tag, vmk_flags->vm_tag);
+}
+
+__attribute__((always_inline))
+void
+vm_map_kernel_flags_and_vmflags(
+	vm_map_kernel_flags_t  *vmk_flags,
+	int                     vm_flags_mask)
+{
+	/* this function doesn't handle the inverted FIXED/ANYWHERE */
+	assert(vm_flags_mask & VM_FLAGS_ANYWHERE);
+	vmk_flags->__vm_flags &= vm_flags_mask;
+}
+
+bool
+vm_map_kernel_flags_check_vmflags(
+	vm_map_kernel_flags_t   vmk_flags,
+	int                     vm_flags_mask)
+{
+	int vmflags = vmk_flags.__vm_flags & VM_FLAGS_ANY_MASK;
+
+	/* Note: up to 16 still has good calling conventions */
+	static_assert(sizeof(vm_map_kernel_flags_t) == 8);
+
+#if DEBUG || DEVELOPMENT
+	/*
+	 * All of this compiles to nothing if all checks pass.
+	 */
+#define check(field, value)  ({ \
+	vm_map_kernel_flags_t fl = VM_MAP_KERNEL_FLAGS_NONE; \
+	fl.__vm_flags = (value); \
+	fl.field = 0; \
+	assert(fl.__vm_flags == 0); \
+})
+
+	/* bits 0-7 */
+	check(vmf_fixed, VM_FLAGS_ANYWHERE); // kind of a lie this is inverted
+	check(vmf_purgeable, VM_FLAGS_PURGABLE);
+	check(vmf_4gb_chunk, VM_FLAGS_4GB_CHUNK);
+	check(vmf_random_addr, VM_FLAGS_RANDOM_ADDR);
+	check(vmf_no_cache, VM_FLAGS_NO_CACHE);
+	check(vmf_resilient_codesign, VM_FLAGS_RESILIENT_CODESIGN);
+	check(vmf_resilient_media, VM_FLAGS_RESILIENT_MEDIA);
+	check(vmf_permanent, VM_FLAGS_PERMANENT);
+
+	/* bits 8-15 */
+	check(vmf_tpro, VM_FLAGS_TPRO);
+	check(vmf_overwrite, VM_FLAGS_OVERWRITE);
+
+	/* bits 16-23 */
+	check(vmf_superpage_size, VM_FLAGS_SUPERPAGE_MASK);
+	check(vmf_return_data_addr, VM_FLAGS_RETURN_DATA_ADDR);
+	check(vmf_return_4k_data_addr, VM_FLAGS_RETURN_4K_DATA_ADDR);
+
+	{
+		vm_map_kernel_flags_t fl = VM_MAP_KERNEL_FLAGS_NONE;
+
+		/* check user tags will never clip */
+		fl.vm_tag = VM_MEMORY_COUNT - 1;
+		assert(fl.vm_tag == VM_MEMORY_COUNT - 1);
+
+		/* check kernel tags will never clip */
+		fl.vm_tag = VM_MAX_TAG_VALUE - 1;
+		assert(fl.vm_tag == VM_MAX_TAG_VALUE - 1);
+	}
+
+
+#undef check
+#endif /* DEBUG || DEVELOPMENT */
+
+	return (vmflags & ~vm_flags_mask) == 0;
+}
 
 kern_return_t
 vm_purgable_control(
@@ -188,11 +291,11 @@ mach_vm_allocate_kernel(
 	vm_map_offset_t map_addr;
 	vm_map_size_t   map_size;
 	kern_return_t   result;
-	boolean_t       anywhere;
 	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 
-	/* filter out any kernel-only flags */
-	if (flags & ~VM_FLAGS_USER_ALLOCATE) {
+	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags, tag);
+
+	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_ALLOCATE)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -204,12 +307,10 @@ mach_vm_allocate_kernel(
 		return KERN_SUCCESS;
 	}
 
-	anywhere = ((VM_FLAGS_ANYWHERE & flags) != 0);
-	if (anywhere) {
-		map_addr = 0;
+	if (vmk_flags.vmf_fixed) {
+		map_addr = vm_map_trunc_page(*addr, VM_MAP_PAGE_MASK(map));
 	} else {
-		map_addr = vm_map_trunc_page(*addr,
-		    VM_MAP_PAGE_MASK(map));
+		map_addr = 0;
 	}
 	map_size = vm_map_round_page(size,
 	    VM_MAP_PAGE_MASK(map));
@@ -217,19 +318,14 @@ mach_vm_allocate_kernel(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	/*
-	 * Allocate from data range
-	 */
-	vmk_flags.vmkf_range_id = VM_MAP_RANGE_ID(map, tag);
+	vm_map_kernel_flags_update_range_id(&vmk_flags, map);
 
 	result = vm_map_enter(
 		map,
 		&map_addr,
 		map_size,
 		(vm_map_offset_t)0,
-		flags,
 		vmk_flags,
-		tag,
 		VM_OBJECT_NULL,
 		(vm_object_offset_t)0,
 		FALSE,
@@ -263,13 +359,10 @@ vm_allocate_external(
 	vm_map_offset_t map_addr;
 	vm_map_size_t   map_size;
 	kern_return_t   result;
-	boolean_t       anywhere;
-	vm_tag_t        tag;
 
-	VM_GET_FLAGS_ALIAS(flags, tag);
+	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags);
 
-	/* filter out any kernel-only flags */
-	if (flags & ~VM_FLAGS_USER_ALLOCATE) {
+	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_ALLOCATE)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -281,12 +374,10 @@ vm_allocate_external(
 		return KERN_SUCCESS;
 	}
 
-	anywhere = ((VM_FLAGS_ANYWHERE & flags) != 0);
-	if (anywhere) {
-		map_addr = 0;
+	if (vmk_flags.vmf_fixed) {
+		map_addr = vm_map_trunc_page(*addr, VM_MAP_PAGE_MASK(map));
 	} else {
-		map_addr = vm_map_trunc_page(*addr,
-		    VM_MAP_PAGE_MASK(map));
+		map_addr = 0;
 	}
 	map_size = vm_map_round_page(size,
 	    VM_MAP_PAGE_MASK(map));
@@ -294,16 +385,14 @@ vm_allocate_external(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	vmk_flags.vmkf_range_id = VM_MAP_RANGE_ID(map, tag);
+	vm_map_kernel_flags_update_range_id(&vmk_flags, map);
 
 	result = vm_map_enter(
 		map,
 		&map_addr,
 		map_size,
 		(vm_map_offset_t)0,
-		flags,
 		vmk_flags,
-		tag,
 		VM_OBJECT_NULL,
 		(vm_object_offset_t)0,
 		FALSE,
@@ -1021,13 +1110,11 @@ mach_vm_map_external(
 	vm_inherit_t            inheritance)
 {
 	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vm_tag_t tag;
 
-	VM_GET_FLAGS_ALIAS(flags, tag);
-	vmk_flags.vmkf_range_id = VM_MAP_RANGE_ID(target_map, tag);
+	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags);
+	/* range_id is set by mach_vm_map_kernel */
 	return mach_vm_map_kernel(target_map, address, initial_size, mask,
-	           flags, vmk_flags, tag,
-	           port, offset, copy,
+	           vmk_flags, port, offset, copy,
 	           cur_protection, max_protection,
 	           inheritance);
 }
@@ -1036,11 +1123,9 @@ kern_return_t
 mach_vm_map_kernel(
 	vm_map_t                target_map,
 	mach_vm_offset_t        *address,
-	mach_vm_size_t  initial_size,
+	mach_vm_size_t          initial_size,
 	mach_vm_offset_t        mask,
-	int                     flags,
 	vm_map_kernel_flags_t   vmk_flags,
-	vm_tag_t                tag,
 	ipc_port_t              port,
 	vm_object_offset_t      offset,
 	boolean_t               copy,
@@ -1054,22 +1139,16 @@ mach_vm_map_kernel(
 	vmmaddr = (vm_map_offset_t) *address;
 
 	/* filter out any kernel-only flags */
-	if (flags & ~VM_FLAGS_USER_MAP) {
+	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_MAP)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	/*
-	 * Allocate from data range
-	 */
-	vmk_flags.vmkf_range_id = VM_MAP_RANGE_ID(target_map, tag);
-
+	/* range_id is set by vm_map_enter_mem_object */
 	kr = vm_map_enter_mem_object(target_map,
 	    &vmmaddr,
 	    initial_size,
 	    mask,
-	    flags,
 	    vmk_flags,
-	    tag,
 	    port,
 	    offset,
 	    copy,
@@ -1089,6 +1168,7 @@ mach_vm_map_kernel(
 
 
 /* legacy interface */
+__attribute__((always_inline))
 kern_return_t
 vm_map_64_external(
 	vm_map_t                target_map,
@@ -1103,52 +1183,15 @@ vm_map_64_external(
 	vm_prot_t               max_protection,
 	vm_inherit_t            inheritance)
 {
-	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vm_tag_t tag;
+	static_assert(sizeof(vm_offset_t) == sizeof(mach_vm_offset_t));
 
-	VM_GET_FLAGS_ALIAS(flags, tag);
-	vmk_flags.vmkf_range_id = VM_MAP_RANGE_ID(target_map, tag);
-	return vm_map_64_kernel(target_map, address, size, mask,
-	           flags, vmk_flags,
-	           tag, port, offset, copy,
-	           cur_protection, max_protection,
-	           inheritance);
-}
-
-kern_return_t
-vm_map_64_kernel(
-	vm_map_t                target_map,
-	vm_offset_t             *address,
-	vm_size_t               size,
-	vm_offset_t             mask,
-	int                     flags,
-	vm_map_kernel_flags_t   vmk_flags,
-	vm_tag_t                tag,
-	ipc_port_t              port,
-	vm_object_offset_t      offset,
-	boolean_t               copy,
-	vm_prot_t               cur_protection,
-	vm_prot_t               max_protection,
-	vm_inherit_t            inheritance)
-{
-	mach_vm_address_t map_addr;
-	mach_vm_size_t map_size;
-	mach_vm_offset_t map_mask;
-	kern_return_t kr;
-
-	map_addr = (mach_vm_address_t)*address;
-	map_size = (mach_vm_size_t)size;
-	map_mask = (mach_vm_offset_t)mask;
-
-	kr = mach_vm_map_kernel(target_map, &map_addr, map_size, map_mask,
-	    flags, vmk_flags, tag,
-	    port, offset, copy,
-	    cur_protection, max_protection, inheritance);
-	*address = CAST_DOWN(vm_offset_t, map_addr);
-	return kr;
+	return mach_vm_map_external(target_map, (mach_vm_offset_t *)address,
+	           size, mask, flags, port, offset, copy,
+	           cur_protection, max_protection, inheritance);
 }
 
 /* temporary, until world build */
+__attribute__((always_inline))
 kern_return_t
 vm_map_external(
 	vm_map_t                target_map,
@@ -1163,50 +1206,11 @@ vm_map_external(
 	vm_prot_t               max_protection,
 	vm_inherit_t            inheritance)
 {
-	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vm_tag_t tag;
+	static_assert(sizeof(vm_offset_t) == sizeof(mach_vm_offset_t));
 
-	VM_GET_FLAGS_ALIAS(flags, tag);
-	vmk_flags.vmkf_range_id = VM_MAP_RANGE_ID(target_map, tag);
-	return vm_map_kernel(target_map, address, size, mask,
-	           flags, vmk_flags, tag,
-	           port, offset, copy,
+	return mach_vm_map_external(target_map, (mach_vm_offset_t *)address,
+	           size, mask, flags, port, offset, copy,
 	           cur_protection, max_protection, inheritance);
-}
-
-kern_return_t
-vm_map_kernel(
-	vm_map_t                target_map,
-	vm_offset_t             *address,
-	vm_size_t               size,
-	vm_offset_t             mask,
-	int                     flags,
-	vm_map_kernel_flags_t   vmk_flags,
-	vm_tag_t                tag,
-	ipc_port_t              port,
-	vm_offset_t             offset,
-	boolean_t               copy,
-	vm_prot_t               cur_protection,
-	vm_prot_t               max_protection,
-	vm_inherit_t            inheritance)
-{
-	mach_vm_address_t map_addr;
-	mach_vm_size_t map_size;
-	mach_vm_offset_t map_mask;
-	vm_object_offset_t obj_offset;
-	kern_return_t kr;
-
-	map_addr = (mach_vm_address_t)*address;
-	map_size = (mach_vm_size_t)size;
-	map_mask = (mach_vm_offset_t)mask;
-	obj_offset = (vm_object_offset_t)offset;
-
-	kr = mach_vm_map_kernel(target_map, &map_addr, map_size, map_mask,
-	    flags, vmk_flags, tag,
-	    port, obj_offset, copy,
-	    cur_protection, max_protection, inheritance);
-	*address = CAST_DOWN(vm_offset_t, map_addr);
-	return kr;
 }
 
 /*
@@ -1218,7 +1222,7 @@ kern_return_t
 mach_vm_remap_new_external(
 	vm_map_t                target_map,
 	mach_vm_offset_t        *address,
-	mach_vm_size_t  size,
+	mach_vm_size_t          size,
 	mach_vm_offset_t        mask,
 	int                     flags,
 	mach_port_t             src_tport,
@@ -1228,17 +1232,14 @@ mach_vm_remap_new_external(
 	vm_prot_t               *max_protection,   /* IN/OUT */
 	vm_inherit_t            inheritance)
 {
-	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vm_tag_t tag;
-	vm_map_offset_t         map_addr;
+	vm_map_kernel_flags_t   vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+	vm_map_t                src_map;
 	kern_return_t           kr;
-	vm_map_t src_map;
 
-	flags |= VM_FLAGS_RETURN_DATA_ADDR;
-	VM_GET_FLAGS_ALIAS(flags, tag);
+	vm_map_kernel_flags_set_vmflags(&vmk_flags,
+	    flags | VM_FLAGS_RETURN_DATA_ADDR);
 
-	/* filter out any kernel-only flags */
-	if (flags & ~VM_FLAGS_USER_REMAP) {
+	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_REMAP)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -1270,17 +1271,14 @@ mach_vm_remap_new_external(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	map_addr = (vm_map_offset_t)*address;
-	vmk_flags.vmkf_range_id = VM_MAP_REMAP_RANGE_ID(src_map,
-	    target_map, memory_address, size);
+	static_assert(sizeof(mach_vm_offset_t) == sizeof(vm_map_address_t));
 
+	/* range_id is set by vm_map_remap */
 	kr = vm_map_remap(target_map,
-	    &map_addr,
+	    address,
 	    size,
 	    mask,
-	    flags,
 	    vmk_flags,
-	    tag,
 	    src_map,
 	    memory_address,
 	    copy,
@@ -1288,7 +1286,6 @@ mach_vm_remap_new_external(
 	    max_protection,    /* IN/OUT */
 	    inheritance);
 
-	*address = map_addr;
 	vm_map_deallocate(src_map);
 
 	if (kr == KERN_SUCCESS) {
@@ -1329,7 +1326,7 @@ static kern_return_t
 mach_vm_remap_kernel_helper(
 	vm_map_t                target_map,
 	mach_vm_offset_t        *address,
-	mach_vm_size_t  size,
+	mach_vm_size_t          size,
 	mach_vm_offset_t        mask,
 	int                     flags,
 	vm_tag_t                tag,
@@ -1341,40 +1338,37 @@ mach_vm_remap_kernel_helper(
 	vm_inherit_t            inheritance)
 {
 	vm_map_kernel_flags_t   vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vm_map_offset_t         map_addr;
 	kern_return_t           kr;
 
 	if (VM_MAP_NULL == target_map || VM_MAP_NULL == src_map) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	/* filter out any kernel-only flags */
-	if (flags & ~VM_FLAGS_USER_REMAP) {
+	vm_map_kernel_flags_set_vmflags(&vmk_flags,
+	    flags | VM_FLAGS_RETURN_DATA_ADDR, tag);
+
+	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_REMAP)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	map_addr = (vm_map_offset_t)*address;
+	static_assert(sizeof(mach_vm_offset_t) == sizeof(vm_map_address_t));
 
-	vmk_flags.vmkf_range_id = VM_MAP_REMAP_RANGE_ID(src_map,
-	    target_map, memory_address, size);
-
+	/* range_id is set by vm_map_remap */
 	kr = vm_map_remap(target_map,
-	    &map_addr,
+	    address,
 	    size,
 	    mask,
-	    flags,
 	    vmk_flags,
-	    tag,
 	    src_map,
 	    memory_address,
 	    copy,
 	    cur_protection,    /* IN/OUT */
 	    max_protection,    /* IN/OUT */
 	    inheritance);
-	*address = map_addr;
+
 #if KASAN
 	if (kr == KERN_SUCCESS && target_map->pmap == kernel_pmap) {
-		kasan_notify_address(map_addr, size);
+		kasan_notify_address(*address, size);
 	}
 #endif
 	return kr;
@@ -1468,73 +1462,19 @@ vm_remap_new_external(
 	vm_prot_t               *max_protection,       /* IN/OUT */
 	vm_inherit_t            inheritance)
 {
-	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vm_tag_t tag;
-	vm_map_offset_t         map_addr;
-	kern_return_t           kr;
-	vm_map_t src_map;
+	static_assert(sizeof(vm_map_offset_t) == sizeof(vm_offset_t));
 
-	flags |= VM_FLAGS_RETURN_DATA_ADDR;
-	VM_GET_FLAGS_ALIAS(flags, tag);
-
-	/* filter out any kernel-only flags */
-	if (flags & ~VM_FLAGS_USER_REMAP) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (target_map == VM_MAP_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if ((*cur_protection & ~VM_PROT_ALL) ||
-	    (*max_protection & ~VM_PROT_ALL) ||
-	    (*cur_protection & *max_protection) != *cur_protection) {
-		return KERN_INVALID_ARGUMENT;
-	}
-	if ((*max_protection & (VM_PROT_WRITE | VM_PROT_EXECUTE)) ==
-	    (VM_PROT_WRITE | VM_PROT_EXECUTE)) {
-		/*
-		 * XXX FBDP TODO
-		 * enforce target's "wx" policies
-		 */
-		return KERN_PROTECTION_FAILURE;
-	}
-
-	if (copy || *max_protection == VM_PROT_READ || *max_protection == VM_PROT_NONE) {
-		src_map = convert_port_to_map_read(src_tport);
-	} else {
-		src_map = convert_port_to_map(src_tport);
-	}
-
-	if (src_map == VM_MAP_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	map_addr = (vm_map_offset_t)*address;
-	vmk_flags.vmkf_range_id = VM_MAP_REMAP_RANGE_ID(src_map,
-	    target_map, memory_address, size);
-
-	kr = vm_map_remap(target_map,
-	    &map_addr,
-	    size,
-	    mask,
-	    flags,
-	    vmk_flags,
-	    tag,
-	    src_map,
-	    memory_address,
-	    copy,
-	    cur_protection,   /* IN/OUT */
-	    max_protection,   /* IN/OUT */
-	    inheritance);
-
-	*address = CAST_DOWN(vm_offset_t, map_addr);
-	vm_map_deallocate(src_map);
-
-	if (kr == KERN_SUCCESS) {
-		ipc_port_release_send(src_tport); /* consume on success */
-	}
-	return kr;
+	return mach_vm_remap_new_external(target_map,
+	           (vm_map_offset_t *)address,
+	           size,
+	           mask,
+	           flags,
+	           src_tport,
+	           memory_address,
+	           copy,
+	           cur_protection, /* IN/OUT */
+	           max_protection, /* IN/OUT */
+	           inheritance);
 }
 
 /*
@@ -1562,64 +1502,11 @@ vm_remap_external(
 	vm_prot_t               *max_protection,    /* OUT */
 	vm_inherit_t            inheritance)
 {
-	vm_tag_t tag;
-	VM_GET_FLAGS_ALIAS(flags, tag);
+	static_assert(sizeof(vm_offset_t) == sizeof(mach_vm_offset_t));
 
-	return vm_remap_kernel(target_map, address, size, mask, flags, tag, src_map,
-	           memory_address, copy, cur_protection, max_protection, inheritance);
-}
-
-kern_return_t
-vm_remap_kernel(
-	vm_map_t                target_map,
-	vm_offset_t             *address,
-	vm_size_t               size,
-	vm_offset_t             mask,
-	int                     flags,
-	vm_tag_t                tag,
-	vm_map_t                src_map,
-	vm_offset_t             memory_address,
-	boolean_t               copy,
-	vm_prot_t               *cur_protection,    /* OUT */
-	vm_prot_t               *max_protection,    /* OUT */
-	vm_inherit_t            inheritance)
-{
-	vm_map_kernel_flags_t   vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vm_map_offset_t         map_addr;
-	kern_return_t           kr;
-
-	if (VM_MAP_NULL == target_map || VM_MAP_NULL == src_map) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	/* filter out any kernel-only flags */
-	if (flags & ~VM_FLAGS_USER_REMAP) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	map_addr = (vm_map_offset_t)*address;
-
-	*cur_protection = VM_PROT_NONE;
-	*max_protection = VM_PROT_NONE;
-
-	vmk_flags.vmkf_range_id = VM_MAP_REMAP_RANGE_ID(src_map,
-	    target_map, memory_address, size);
-
-	kr = vm_map_remap(target_map,
-	    &map_addr,
-	    size,
-	    mask,
-	    flags,
-	    vmk_flags,
-	    tag,
-	    src_map,
-	    memory_address,
-	    copy,
-	    cur_protection,   /* IN/OUT */
-	    max_protection,   /* IN/OUT */
-	    inheritance);
-	*address = CAST_DOWN(vm_offset_t, map_addr);
-	return kr;
+	return mach_vm_remap_external(target_map, (mach_vm_offset_t *)address,
+	           size, mask, flags, src_map, memory_address, copy,
+	           cur_protection, max_protection, inheritance);
 }
 
 /*
@@ -1643,12 +1530,15 @@ mach_vm_wire_external(
 	mach_vm_size_t  size,
 	vm_prot_t               access)
 {
-	return mach_vm_wire_kernel(host_priv, map, start, size, access, VM_KERN_MEMORY_MLOCK);
+	if (host_priv == HOST_PRIV_NULL) {
+		return KERN_INVALID_HOST;
+	}
+
+	return mach_vm_wire_kernel(map, start, size, access, VM_KERN_MEMORY_MLOCK);
 }
 
 kern_return_t
 mach_vm_wire_kernel(
-	host_priv_t             host_priv,
 	vm_map_t                map,
 	mach_vm_offset_t        start,
 	mach_vm_size_t  size,
@@ -1656,10 +1546,6 @@ mach_vm_wire_kernel(
 	vm_tag_t                tag)
 {
 	kern_return_t           rc;
-
-	if (host_priv == HOST_PRIV_NULL) {
-		return KERN_INVALID_HOST;
-	}
 
 	if (map == VM_MAP_NULL) {
 		return KERN_INVALID_TASK;
@@ -2338,7 +2224,6 @@ vm_allocate_cpm(
 	vm_map_address_t        map_addr;
 	vm_map_size_t           map_size;
 	kern_return_t           kr;
-	vm_tag_t                tag;
 	vm_map_kernel_flags_t   vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 
 	if (vm_allocate_cpm_privileged && HOST_PRIV_NULL == host_priv) {
@@ -2352,13 +2237,10 @@ vm_allocate_cpm(
 	map_addr = (vm_map_address_t)*addr;
 	map_size = (vm_map_size_t)size;
 
-	VM_GET_FLAGS_ALIAS(flags, tag);
-	vmk_flags.vmkf_range_id = VM_MAP_RANGE_ID(map, tag);
-	kr = vm_map_enter_cpm(map,
-	    &map_addr,
-	    map_size,
-	    flags,
-	    vmk_flags);
+	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags);
+	vm_map_kernel_flags_update_range_id(&vmk_flags, map);
+
+	kr = vm_map_enter_cpm(map, &map_addr, map_size, vmk_flags);
 
 	*addr = CAST_DOWN(vm_address_t, map_addr);
 	return kr;
@@ -2785,14 +2667,14 @@ mach_make_memory_entry_internal(
 		} else {
 			wimg_mode = VM_WIMG_USE_DEFAULT;
 		}
-		if ((access != GET_MAP_MEM(parent_entry->protection)) &&
+		if ((access != parent_entry->access) &&
 		    !(parent_entry->protection & VM_PROT_WRITE)) {
 			DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_INVALID_RIGHT);
 			return KERN_INVALID_RIGHT;
 		}
 		vm_prot_to_wimg(access, &wimg_mode);
 		if (access != MAP_MEM_NOOP) {
-			SET_MAP_MEM(access, parent_entry->protection);
+			parent_entry->access = access;
 		}
 		if (parent_is_object && object &&
 		    (access != MAP_MEM_NOOP) &&
@@ -2920,18 +2802,7 @@ mach_make_memory_entry_internal(
 
 #if CONFIG_SECLUDED_MEMORY
 		if (secluded_for_iokit && /* global boot-arg */
-		    ((permission & MAP_MEM_GRAB_SECLUDED)
-#if 11
-		    /* XXX FBDP for my testing only */
-		    || (secluded_for_fbdp && map_size == 97550336)
-#endif
-		    )) {
-#if 11
-			if (!(permission & MAP_MEM_GRAB_SECLUDED) &&
-			    secluded_for_fbdp) {
-				printf("FBDP: object %p size %lld can grab secluded\n", object, (uint64_t) map_size);
-			}
-#endif
+		    ((permission & MAP_MEM_GRAB_SECLUDED))) {
 			object->can_grab_secluded = TRUE;
 			assert(!object->eligible_for_secluded);
 		}
@@ -2962,7 +2833,7 @@ mach_make_memory_entry_internal(
 		user_entry->offset = 0;
 		user_entry->data_offset = 0;
 		user_entry->protection = protections;
-		SET_MAP_MEM(access, user_entry->protection);
+		user_entry->access = access;
 		user_entry->size = map_size;
 		user_entry->is_fully_owned = fully_owned;
 
@@ -3281,7 +3152,7 @@ mach_make_memory_entry_internal(
 			user_entry->is_object = TRUE;
 			user_entry->internal = object->internal;
 			user_entry->offset = VME_OFFSET(vm_map_copy_first_entry(copy));
-			SET_MAP_MEM(GET_MAP_MEM(permission), user_entry->protection);
+			user_entry->access = GET_MAP_MEM(permission);
 			/* is all memory in this named entry "owned"? */
 			if (VM_OBJECT_OWNER(vm_named_entry_to_vm_object(user_entry)) != TASK_NULL) {
 				user_entry->is_fully_owned = TRUE;
@@ -3364,7 +3235,7 @@ mach_make_memory_entry_internal(
 	user_entry->protection = protections;
 
 	if (access != MAP_MEM_NOOP) {
-		SET_MAP_MEM(access, user_entry->protection);
+		user_entry->access = access;
 	}
 
 	if (parent_entry->is_sub_map) {
@@ -3524,7 +3395,6 @@ mach_memory_object_memory_entry_64(
 	memory_object_t         pager,
 	ipc_port_t              *entry_handle)
 {
-	unsigned int            access;
 	vm_named_entry_t        user_entry;
 	ipc_port_t              user_handle;
 	vm_object_t             object;
@@ -3532,6 +3402,8 @@ mach_memory_object_memory_entry_64(
 	if (host == HOST_NULL) {
 		return KERN_INVALID_HOST;
 	}
+
+	size = vm_object_round_page(size);
 
 	if (pager == MEMORY_OBJECT_NULL && internal) {
 		object = vm_object_allocate(size);
@@ -3552,8 +3424,7 @@ mach_memory_object_memory_entry_64(
 	user_entry->size = size;
 	user_entry->offset = 0;
 	user_entry->protection = permission & VM_PROT_ALL;
-	access = GET_MAP_MEM(permission);
-	SET_MAP_MEM(access, user_entry->protection);
+	user_entry->access = GET_MAP_MEM(permission);
 	user_entry->is_sub_map = FALSE;
 
 	vm_named_entry_associate_vm_object(user_entry, object, 0, size,
@@ -4771,14 +4642,10 @@ vm_map(
 	vm_prot_t               max_protection,
 	vm_inherit_t            inheritance)
 {
-	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vm_tag_t tag;
+	static_assert(sizeof(vm_offset_t) == sizeof(mach_vm_offset_t));
 
-	VM_GET_FLAGS_ALIAS(flags, tag);
-	vmk_flags.vmkf_range_id = VM_MAP_RANGE_ID(target_map, tag);
-	return vm_map_kernel(target_map, address, size, mask,
-	           flags, vmk_flags, tag,
-	           port, offset, copy,
+	return mach_vm_map(target_map, (mach_vm_offset_t *)address,
+	           size, mask, flags, port, offset, copy,
 	           cur_protection, max_protection, inheritance);
 }
 

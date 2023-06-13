@@ -67,7 +67,7 @@ def DecodeMbufData(mp):
         flags = mp.m_hdr.mh_flags
         if flags & M_EXT:
             mdata = mp.M_dat.MH.MH_dat.MH_ext.ext_buf
-        addr = mdata._sbval19k84obscure747.GetValueAsUnsigned()
+        addr = mdata.GetSBValue().GetValueAsAddress()
         buf = LazyTarget.GetProcess().ReadMemory(addr, unsigned(mlen), err)
         full_buf += buf
         if flags & M_PKTHDR:

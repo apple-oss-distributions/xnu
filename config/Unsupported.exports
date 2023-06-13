@@ -96,7 +96,6 @@ _ifnet_set_fastlane_capable
 _ipc_kernel_map
 _ipf_addv4_internal
 _ipf_addv6_internal
-_kalloc:_kalloc_external
 _kauth_cred_issuser
 _kauth_cred_label_update
 _kauth_guid_equal
@@ -108,7 +107,6 @@ _kernel_map
 _kernel_pmap
 _kev_post_msg
 _kev_post_msg_nowait
-_kfree:_kfree_external
 _kmem_alloc:_kmem_alloc_external
 _kmem_free:_kmem_free_external
 _kmputc

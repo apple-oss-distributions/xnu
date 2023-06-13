@@ -822,7 +822,7 @@ proc_can_use_foreground_hw(int pid, uint32_t *reason)
 
 /* Donate importance to adaptive processes from this process */
 int
-proc_donate_importance_boost()
+proc_donate_importance_boost(void)
 {
 	int rval;
 

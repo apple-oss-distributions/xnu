@@ -108,8 +108,7 @@ static struct mbuf *nx_netif_rx_split(struct mbuf *, uint32_t);
 #define NMB_GET_INDEX(p)        (((uint32_t)(p) & NMB_INDEX_MASK) >> 16)
 #define NMB_SET_INDEX(p, i)     (((uint32_t)(p) & ~NMB_INDEX_MASK) | (i << 16))
 
-static ZONE_DEFINE(na_netif_compat_zone, SKMEM_ZONE_PREFIX ".na.netif.compat",
-    sizeof(struct nexus_netif_compat_adapter), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(na_netif_compat_zone, struct nexus_netif_compat_adapter);
 
 static int netif_tx_event_mode = 0;
 

@@ -51,3 +51,34 @@ random_buf(void *buf, size_t buflen)
 {
 	return cc_rand_generate(buf, buflen);
 }
+
+void
+crypto_random_generate(
+	crypto_random_ctx_t ctx,
+	void *random,
+	size_t random_size)
+{
+	g_crypto_funcs->random_generate_fn(ctx, random, random_size);
+}
+
+void
+crypto_random_uniform(
+	crypto_random_ctx_t ctx,
+	uint64_t bound,
+	uint64_t *random)
+{
+	g_crypto_funcs->random_uniform_fn(ctx, bound, random);
+}
+
+size_t
+crypto_random_kmem_ctx_size(void)
+{
+	return g_crypto_funcs->random_kmem_ctx_size_fn();
+}
+
+void
+crypto_random_kmem_init(
+	crypto_random_ctx_t ctx)
+{
+	g_crypto_funcs->random_kmem_init_fn(ctx);
+}

@@ -284,6 +284,8 @@ exception_deliver(
 	}
 #endif
 
+	thread->options |= TH_IN_MACH_EXCEPTION;
+
 	switch (behavior) {
 	case EXCEPTION_STATE: {
 		mach_msg_type_number_t old_state_cnt, new_state_cnt;
@@ -467,7 +469,8 @@ exception_deliver(
 			}
 
 			if (kr == KERN_SUCCESS) {
-				if (exception != EXC_CORPSE_NOTIFY) {
+				if (exception != EXC_CORPSE_NOTIFY &&
+				    ip_kotype(thread_port) == IKOT_THREAD_CONTROL) {
 					kr = thread_setstatus_from_user(thread, flavor,
 					    (thread_state_t)new_state, new_state_cnt,
 					    (thread_state_t)old_state, old_state_cnt, set_flags);
@@ -485,6 +488,8 @@ exception_deliver(
 	}/* switch */
 
 out_release_right:
+
+	thread->options &= ~TH_IN_MACH_EXCEPTION;
 
 	if (task_port) {
 		ipc_port_release_send(task_port);

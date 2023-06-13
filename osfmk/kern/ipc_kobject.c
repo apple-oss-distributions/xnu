@@ -382,16 +382,15 @@ ipc_kobject_init_reply(
  */
 static kern_return_t
 ipc_kobject_server_internal(
-	ipc_port_t      port,
+	__unused ipc_port_t port,
 	ipc_kmsg_t      request,
 	ipc_kmsg_t      *replyp)
 {
 	int request_msgh_id;
 	ipc_kmsg_t reply = IKM_NULL;
 	mach_msg_size_t reply_size;
-	bool exec_token_changed = false;
 	mig_hash_t *ptr;
-	mach_msg_header_t *req_hdr, *reply_hdr, *new_reply_hdr;
+	mach_msg_header_t *req_hdr, *reply_hdr;
 
 	req_hdr = ikm_header(request);
 	request_msgh_id = req_hdr->msgh_id;
@@ -411,8 +410,8 @@ ipc_kobject_server_internal(
 	 * but until it does, pessimistically zero the
 	 * whole reply buffer.
 	 */
-	reply = ipc_kmsg_alloc(reply_size, 0, 0,
-	    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
+	reply = ipc_kmsg_alloc(reply_size, 0, 0, IPC_KMSG_ALLOC_KERNEL |
+	    IPC_KMSG_ALLOC_LINEAR | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
 	ipc_kobject_init_reply(reply, request, KERN_SUCCESS);
 	reply_hdr = ikm_header(reply);
 
@@ -424,16 +423,6 @@ ipc_kobject_server_internal(
 		thread_ro_t tro = current_thread_ro();
 		task_t curtask = tro->tro_task;
 		struct proc *curproc = tro->tro_proc;
-		task_t task = TASK_NULL;
-		uint32_t exec_token;
-
-		/*
-		 * Check if the port is a task port, if its a task port then
-		 * snapshot the task exec token before the mig routine call.
-		 */
-		if (ip_kotype(port) == IKOT_TASK_CONTROL && port != curtask->itk_self) {
-			task = convert_port_to_task_with_exec_token(port, &exec_token);
-		}
 
 #if CONFIG_MACF
 		int idx = ptr->kobjidx;
@@ -462,14 +451,6 @@ ipc_kobject_server_internal(
 skip_kobjcall:
 #endif
 
-		/* Check if the exec token changed during the mig routine */
-		if (task != TASK_NULL) {
-			if (exec_token != task->exec_token) {
-				exec_token_changed = true;
-			}
-			task_deallocate(task);
-		}
-
 		counter_inc(&kernel_task->messages_received);
 	} else {
 #if DEVELOPMENT || DEBUG
@@ -481,45 +462,7 @@ skip_kobjcall:
 		((mig_reply_error_t *)reply_hdr)->RetCode = MIG_BAD_ID;
 	}
 
-	/* Fail the MIG call if the task exec token changed during the call */
-	if (exec_token_changed && ipc_kobject_reply_status(reply) == KERN_SUCCESS) {
-		/*
-		 *	Create a new reply msg with error and destroy the old reply msg.
-		 */
-		ipc_kmsg_t new_reply = ipc_kmsg_alloc(sizeof(mig_reply_error_t),
-		    0, 0, IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO |
-		    IPC_KMSG_ALLOC_NOFAIL);
-		new_reply_hdr = ikm_header(new_reply);
-
-		/*
-		 *	Initialize the new reply message.
-		 */
-		{
-#define OutP_new        ((mig_reply_error_t *) new_reply_hdr)
-#define OutP_old        ((mig_reply_error_t *) reply_hdr)
-
-			OutP_new->NDR = OutP_old->NDR;
-			OutP_new->Head.msgh_size = sizeof(mig_reply_error_t);
-			OutP_new->Head.msgh_bits = OutP_old->Head.msgh_bits & ~MACH_MSGH_BITS_COMPLEX;
-			OutP_new->Head.msgh_remote_port = OutP_old->Head.msgh_remote_port;
-			OutP_new->Head.msgh_local_port = MACH_PORT_NULL;
-			OutP_new->Head.msgh_voucher_port = MACH_PORT_NULL;
-			OutP_new->Head.msgh_id = OutP_old->Head.msgh_id;
-
-			/* Set the error as KERN_INVALID_TASK */
-			OutP_new->RetCode = KERN_INVALID_TASK;
-
-#undef  OutP_new
-#undef  OutP_old
-		}
-
-		/*
-		 *	Destroy everything in reply except the reply port right,
-		 *	which is needed in the new reply message.
-		 */
-		ipc_kmsg_destroy(reply, IPC_KMSG_DESTROY_SKIP_REMOTE | IPC_KMSG_DESTROY_NOT_SIGNED);
-		reply = new_reply;
-	} else if (ipc_kobject_reply_status(reply) == MIG_NO_REPLY) {
+	if (ipc_kobject_reply_status(reply) == MIG_NO_REPLY) {
 		/*
 		 *	The server function will send a reply message
 		 *	using the reply port right, which it has saved.
@@ -577,7 +520,10 @@ ipc_kobject_server(
 
 		/* convert the server error into a MIG error */
 		reply = ipc_kmsg_alloc(sizeof(mig_reply_error_t), 0, 0,
-		    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
+		    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_SAVED |
+		    IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
+		static_assert(sizeof(mig_reply_error_t) < IKM_SAVED_MSG_SIZE);
+
 		ipc_kobject_init_reply(reply, request, kr);
 	}
 
@@ -672,12 +618,12 @@ ipc_kobject_set_raw(
 	uintptr_t *store = &port->ip_kobject;
 
 #if __has_feature(ptrauth_calls)
-	if (kobject) {
-		type ^= OS_PTRAUTH_DISCRIMINATOR("ipc_port.ip_kobject");
-		kobject = ptrauth_sign_unauthenticated(kobject,
-		    ptrauth_key_process_independent_data,
-		    ptrauth_blend_discriminator(store, type));
-	}
+	type |= port->ip_immovable_receive << 14;
+	type |= port->ip_immovable_send << 15;
+	type ^= OS_PTRAUTH_DISCRIMINATOR("ipc_port.ip_kobject");
+	kobject = ptrauth_sign_unauthenticated(kobject,
+	    ptrauth_key_process_independent_data,
+	    ptrauth_blend_discriminator(store, type));
 #else
 	(void)type;
 #endif // __has_feature(ptrauth_calls)
@@ -717,12 +663,12 @@ ipc_kobject_get_raw(
 	ipc_kobject_t kobject = (ipc_kobject_t)*store;
 
 #if __has_feature(ptrauth_calls)
-	if (kobject) {
-		type ^= OS_PTRAUTH_DISCRIMINATOR("ipc_port.ip_kobject");
-		kobject = ptrauth_auth_data(kobject,
-		    ptrauth_key_process_independent_data,
-		    ptrauth_blend_discriminator(store, type));
-	}
+	type |= port->ip_immovable_receive << 14;
+	type |= port->ip_immovable_send << 15;
+	type ^= OS_PTRAUTH_DISCRIMINATOR("ipc_port.ip_kobject");
+	kobject = ptrauth_auth_data(kobject,
+	    ptrauth_key_process_independent_data,
+	    ptrauth_blend_discriminator(store, type));
 #else
 	(void)type;
 #endif // __has_feature(ptrauth_calls)
@@ -827,8 +773,6 @@ ipc_kobject_init_port(
 	ipc_kobject_type_t type,
 	ipc_kobject_alloc_options_t options)
 {
-	ipc_kobject_set_internal(port, kobject, type);
-
 	if (options & IPC_KOBJECT_ALLOC_MAKE_SEND) {
 		ipc_port_make_send_any_locked(port);
 	}
@@ -845,6 +789,8 @@ ipc_kobject_init_port(
 	if (options & IPC_KOBJECT_ALLOC_PINNED) {
 		port->ip_pinned = 1;
 	}
+
+	ipc_kobject_set_internal(port, kobject, type);
 }
 
 /*
@@ -1219,7 +1165,7 @@ ipc_kobject_disable_internal(
 {
 	ipc_kobject_t kobject = ipc_kobject_get_raw(port, type);
 
-	port->ip_kobject = 0;
+	ipc_kobject_set_raw(port, IKO_NULL, type);
 	if (ip_is_kolabeled(port)) {
 		port->ip_kolabel->ikol_alt_port = IP_NULL;
 	}
@@ -1492,11 +1438,7 @@ ipc_kobject_notify_send_once_and_unlock(
 	 */
 	assert(!port->ip_specialreply);
 
-	if (port->ip_sorights == 0) {
-		panic("Over-release of port %p send-once right!", port);
-	}
-
-	port->ip_sorights--;
+	ip_sorights_dec(port);
 	ip_mq_unlock(port);
 
 	/*

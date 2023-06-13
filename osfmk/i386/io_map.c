@@ -77,7 +77,7 @@ io_map_init(void)
 	vm_map_will_allocate_early_map(&io_submap);
 	io_submap = kmem_suballoc(kernel_map, &io_range.min_address, IO_MAP_SIZE,
 	    VM_MAP_CREATE_NEVER_FAULTS | VM_MAP_CREATE_DISABLE_HOLELIST,
-	    VM_FLAGS_FIXED_RANGE_SUBALLOC, KMS_PERMANENT | KMS_NOFAIL,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_PERMANENT | KMS_NOFAIL,
 	    VM_KERN_MEMORY_IOKIT).kmr_submap;
 }
 STARTUP(KMEM, STARTUP_RANK_LAST, io_map_init);

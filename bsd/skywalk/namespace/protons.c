@@ -76,8 +76,7 @@ RB_PROTOTYPE_PREV(protons_token_tree, protons_token, pt_link, pt_cmp);
 RB_GENERATE_PREV(protons_token_tree, protons_token, pt_link, pt_cmp);
 static struct protons_token_tree protons_tokens;
 
-static ZONE_DEFINE(protons_token_zone, SKMEM_ZONE_PREFIX ".protons.token",
-    sizeof(struct protons_token), ZC_NONE);
+static SKMEM_TYPE_DEFINE(protons_token_zone, struct protons_token);
 
 static struct protons_token *
 protons_token_alloc(bool can_block)

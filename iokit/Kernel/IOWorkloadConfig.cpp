@@ -105,6 +105,12 @@ static const struct WorkloadClassData {
 		.workIntervalFlags = WORK_INTERVAL_WORKLOAD_ID_HAS_ID,
 		.threadGroupFlags = THREAD_GROUP_FLAGS_BEST_EFFORT,
 	},
+	[WI_CLASS_APP_SUPPORT] =
+	{
+		.name = "APPLICATION_SUPPORT",
+		.workIntervalFlags = WORK_INTERVAL_WORKLOAD_ID_HAS_ID,
+		.threadGroupFlags = 0,
+	},
 	[WI_CLASS_APPLICATION] =
 	{
 		.name = "APPLICATION",
@@ -287,7 +293,9 @@ parseCriticalityOffset(const OSSymbol &id, const wi_class_t wiClass,
 {
 	if (wiClass != WI_CLASS_SYSTEM_CRITICAL &&
 	    wiClass != WI_CLASS_REALTIME_CRITICAL &&
-	    wiClass != WI_CLASS_BEST_EFFORT) {
+	    wiClass != WI_CLASS_BEST_EFFORT &&
+	    wiClass != WI_CLASS_APP_SUPPORT &&
+	    wiClass != WI_CLASS_SYSTEM) {
 		criticalityOffset = 0;
 		return kIOReturnSuccess;
 	}

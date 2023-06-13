@@ -776,10 +776,12 @@ _doprnt_log(
 boolean_t       new_printf_cpu_number = FALSE;
 #endif  /* MP_PRINTF */
 
+LCK_GRP_DECLARE(log_lock_grp, "log_group");
+
 #if defined(__x86_64__)
 SIMPLE_LOCK_DECLARE(log_lock, 0);
 #else
-LCK_TICKET_DECLARE(log_lock, LCK_GRP_NULL);
+LCK_TICKET_DECLARE(log_lock, &log_lock_grp);
 #endif /* __x86_64__ */
 
 bool bsd_log_lock(bool);
@@ -805,15 +807,15 @@ bsd_log_lock(bool safe)
 	if (!safe) {
 		assert(!oslog_is_safe());
 #if defined(__x86_64__)
-		return simple_lock_try(&log_lock, LCK_GRP_NULL);
+		return simple_lock_try(&log_lock, &log_lock_grp);
 #else
-		return lck_ticket_lock_try(&log_lock, LCK_GRP_NULL);
+		return lck_ticket_lock_try(&log_lock, &log_lock_grp);
 #endif /* __x86_64__ */
 	}
 #if defined(__x86_64__)
-	simple_lock(&log_lock, LCK_GRP_NULL);
+	simple_lock(&log_lock, &log_lock_grp);
 #else
-	lck_ticket_lock(&log_lock, LCK_GRP_NULL);
+	lck_ticket_lock(&log_lock, &log_lock_grp);
 #endif /* __x86_64__ */
 	return true;
 }

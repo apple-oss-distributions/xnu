@@ -798,6 +798,7 @@ exception_return_dispatch:
 	b.ne		EXT(return_to_kernel) // return to kernel if M[3:2] > 0
 	b		return_to_user
 
+
 	.text
 	.align 2
 	.global EXT(return_to_kernel)
@@ -823,11 +824,11 @@ LEXT(thread_bootstrap_return)
 #if CONFIG_DTRACE
 	bl		EXT(dtrace_thread_bootstrap)
 #endif
-#if KASAN && CONFIG_KERNEL_TBI
+#if KASAN_TBI
 	PUSH_FRAME
 	bl		EXT(__asan_handle_no_return)
 	POP_FRAME
-#endif
+#endif /* KASAN_TBI */
 	b		EXT(arm64_thread_exception_return)
 
 	.text
@@ -848,11 +849,11 @@ LEXT(arm64_thread_exception_return)
  * x28 is a bit indicating whether or not we should check if pc is in pfz */
 return_to_user:
 check_user_asts:
-#if KASAN && CONFIG_KERNEL_TBI
+#if KASAN_TBI
 	PUSH_FRAME
 	bl		EXT(__asan_handle_no_return)
 	POP_FRAME
-#endif
+#endif /* KASAN_TBI */
 	mrs		x3, TPIDR_EL1					// Load thread pointer
 
 	movn		w2, #0
@@ -1374,27 +1375,25 @@ Lno_preempt_underflow:
 #if SCHED_HYGIENE_DEBUG
 	/* Collect preemption disable measurement if necessary. */
 
-	/* Only collect measurement if this reenabled preemption. */
-	cmp		w12, #0
+	/*
+	 * Only collect measurement if this reenabled preemption,
+	 * and SCHED_HYGIENE_MARKER is set.
+	 */
+	mov		x20, #SCHED_HYGIENE_MARKER
+	cmp		w12, w20
 	b.ne	Lskip_collect_measurement
-
-	/* Only collect measurement if a start time was set. */
-	ldr		x14, [x10, ACT_PREEMPT_MT]
-	cmp		x14, #0
-	b.eq	Lskip_collect_measurement
 
 	/* Stash our return value and return reason. */
 	mov		x20, x0
 	mov		x21, x15
 
 	/* Collect measurement. */
-	mov		x0, x10
 	bl		EXT(_collect_preemption_disable_measurement)
 
 	/* Restore the return value and the return reason. */
 	mov		x0, x20
 	mov		x15, x21
-	/* ... and w12, which was 0. */
+	/* ... and w12, which is now 0. */
 	mov		w12, #0
 
 	/* Restore the thread pointer into x10. */
@@ -1595,6 +1594,7 @@ Lppl_bad_call_panic_str:
 LEXT(ml_panic_trap_to_debugger)
 	ret
 #endif /* XNU_MONITOR */
+
 
 /* ARM64_TODO Is globals_asm.h needed? */
 //#include	"globals_asm.h"

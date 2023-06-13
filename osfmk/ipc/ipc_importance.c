@@ -3778,19 +3778,16 @@ ipc_importance_command(
  *	Conditions:
  *		Zones and Vouchers are already initialized.
  */
-void
+__startup_func
+static void
 ipc_importance_init(void)
 {
-	kern_return_t kr;
-
-	kr = ipc_register_well_known_mach_voucher_attr_manager(&ipc_importance_manager,
+	ipc_register_well_known_mach_voucher_attr_manager(&ipc_importance_manager,
 	    (mach_voucher_attr_value_handle_t)0,
 	    MACH_VOUCHER_ATTR_KEY_IMPORTANCE,
 	    &ipc_importance_control);
-	if (KERN_SUCCESS != kr) {
-		printf("Voucher importance manager register returned %d", kr);
-	}
 }
+STARTUP(MACH_IPC, STARTUP_RANK_LAST, ipc_importance_init);
 
 /*
  *	Routine:	ipc_importance_thread_call_init
@@ -3831,7 +3828,6 @@ task_importance_list_pids(task_t task, int flags, char *pid_list, unsigned int m
 		return 0;
 	}
 	unsigned int pidcount = 0;
-	task_t temp_task;
 	ipc_importance_task_t task_imp = task->task_imp_base;
 	ipc_kmsg_t temp_kmsg;
 	mach_msg_header_t *temp_hdr;
@@ -3866,7 +3862,6 @@ task_importance_list_pids(task_t task, int flags, char *pid_list, unsigned int m
 		previous_pid = target_pid;
 		target_pid = -1;
 		elem = temp_kmsg->ikm_importance;
-		temp_task = TASK_NULL;
 
 		if (elem == IIE_NULL) {
 			continue;

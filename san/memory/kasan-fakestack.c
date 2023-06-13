@@ -41,6 +41,12 @@
 #include "kasan.h"
 #include "kasan_internal.h"
 
+/*
+ * TODO: this should be converted to the kasan_quarantine() + proper RZ model
+ *       with a separate quarantine from regular zones since this can be called
+ *       from interrupt context.
+ */
+
 int __asan_option_detect_stack_use_after_return = 0;
 
 #define FAKESTACK_HEADER_SZ 64
@@ -50,7 +56,7 @@ int __asan_option_detect_stack_use_after_return = 0;
 #define FAKESTACK_ALLOCATED 1
 #define FAKESTACK_FREED     2
 
-#if FAKESTACK
+#if KASAN_FAKESTACK
 
 #define FAKESTACK_NORETURN
 
@@ -147,16 +153,11 @@ kasan_fakestack_gc(thread_t thread)
 
 	/* ... then actually free them */
 	LIST_FOREACH_SAFE(cur, &tofree, list, tmp) {
-		LIST_REMOVE(cur, list);
-
-		zone_t zone = fakestack_zones[cur->sz_class];
-		size_t sz = (fakestack_min << cur->sz_class) + FAKESTACK_HEADER_SZ;
-
-		void *ptr = (void *)cur;
-		kasan_free_internal(&ptr, &sz, KASAN_HEAP_FAKESTACK, &zone, cur->realsz, 0, FAKESTACK_QUARANTINE);
-		if (ptr) {
-			zfree(zone, ptr);
-		}
+		/* see TODO at the top */
+		kasan_poison_range((vm_offset_t)cur,
+		    (fakestack_min << cur->sz_class) + FAKESTACK_HEADER_SZ,
+		    ASAN_VALID);
+		zfree(fakestack_zones[cur->sz_class], cur);
 	}
 }
 
@@ -237,16 +238,14 @@ kasan_fakestack_free(int sz_class, uptr dst, size_t realsz)
 	assert(hdr->sz_class == sz_class);
 
 	boolean_t flags;
+
 	kasan_lock(&flags);
-
 	LIST_REMOVE(hdr, list);
-
-	kasan_free_internal((void **)&dst, &sz, KASAN_HEAP_FAKESTACK, &zone, realsz, 1, FAKESTACK_QUARANTINE);
-	if (dst) {
-		zfree(zone, dst);
-	}
-
 	kasan_unlock(flags);
+
+	/* see TODO at the top */
+	kasan_poison_range((vm_offset_t)dst, sz, ASAN_VALID);
+	zfree(fakestack_zones[sz_class], dst);
 }
 
 void NOINLINE
@@ -315,7 +314,7 @@ SYSCTL_PROC(_kern_kasan, OID_AUTO, fakestack,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, sysctl_fakestack_enable, "I", "");
 
-#else /* FAKESTACK */
+#else /* KASAN_FAKESTACK */
 
 #define FAKESTACK_NORETURN      OS_NORETURN
 

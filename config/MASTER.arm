@@ -16,7 +16,7 @@
 #  Standard Apple OS Configurations:
 #  -------- ----- -- ---------------
 #
-#  KERNEL_BASE =    [ arm xsmall msgb_small config_embedded config_enforce_signed_code config_darkboot ARM_EXTRAS_BASE ]
+#  KERNEL_BASE =    [ arm xsmall msgb_small config_embedded config_enforce_signed_code config_code_signature_reconstitution config_darkboot ARM_EXTRAS_BASE ]
 #  KERNEL_RELEASE = [ KERNEL_BASE ]
 #  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug ]
 #  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug ]
@@ -54,10 +54,10 @@
 #  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
 #  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging sched_hygiene_debug ]
 #  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging sched_hygiene_debug ]
-#  MACH_BASE =      [ mach vc_progress_white importance_inheritance config_atm config_coalitions config_library_validation config_iosched config_telemetry config_sysdiagnose config_quiesce_counter phys_write_acct config_io_compression_stats ]
+#  MACH_BASE =      [ mach vc_progress_white importance_inheritance config_atm config_coalitions config_library_validation config_iosched config_telemetry config_sysdiagnose config_quiesce_counter phys_write_acct config_io_compression_stats config_ledger_interval_max ]
 #  MACH_RELEASE =   [ MACH_BASE config_skip_precise_user_kernel_time debugger_for_zone_info ]
-#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace config_ledger_interval_max config_service_port_info ]
-#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace config_ledger_interval_max importance_debug config_service_port_info ]
+#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace config_service_port_info ]
+#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug config_service_port_info ]
 #  SCHED_BASE =     [ config_sched_traditional config_sched_multiq config_clutch config_taskwatch ]
 #  SCHED_RELEASE =  [ SCHED_BASE ]
 #  SCHED_DEV =      [ SCHED_BASE ]

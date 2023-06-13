@@ -2071,7 +2071,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	etext = (vm_offset_t) segTEXTB + segSizeTEXT;
 	sdata = (vm_offset_t) segDATAB;
 	edata = (vm_offset_t) segDATAB + segSizeDATA;
-	end_kern = round_page(segHIGHESTKC ? segHIGHESTKC : getlastaddr()); /* Force end to next page */
+	end_kern = round_page(segHIGHESTKC ? segHIGHESTKC : getlastkerneladdr()); /* Force end to next page */
 
 	vm_set_page_size();
 
@@ -2207,9 +2207,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	vm_kernel_stext = segTEXTB;
 
 	if (kernel_mach_header_is_in_fileset(&_mh_execute_header)) {
-		// fileset has kext TEXT before kernel DATA_CONST
-		assert(segTEXTEXECB == segTEXTB + segSizeTEXT);
-		vm_kernel_etext = segTEXTB + segSizeTEXT + segSizeTEXTEXEC;
+		vm_kernel_etext = segTEXTEXECB + segSizeTEXTEXEC;
 		vm_kernel_slid_top = vm_slinkedit;
 	} else {
 		assert(segDATACONSTB == segTEXTB + segSizeTEXT);
@@ -2373,4 +2371,22 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	first_avail = avail_start;
 	patch_low_glo_static_region(args->topOfKernelData, avail_start - args->topOfKernelData);
 	enable_preemption();
+}
+
+/*
+ * Returns true if the address is within __TEXT, __TEXT_EXEC or __DATA_CONST
+ * segment range. This is what [vm_kernel_stext, vm_kernel_etext) range used to
+ * cover. The segments together may not be continuous anymore and so individual
+ * intervals are inspected.
+ */
+bool
+kernel_text_contains(vm_offset_t addr)
+{
+	if (segTEXTB <= addr && addr < (segTEXTB + segSizeTEXT)) {
+		return true;
+	}
+	if (segTEXTEXECB <= addr && addr < (segTEXTEXECB + segSizeTEXTEXEC)) {
+		return true;
+	}
+	return segDATACONSTB <= addr && addr < (segDATACONSTB + segSizeDATACONST);
 }

@@ -38,6 +38,7 @@
 #include <kern/debug.h>
 #include <kern/backtrace.h>
 #include <kern/thread.h>
+#include <kern/btlog.h>
 #include <libkern/libkern.h>
 #include <mach/mach_vm.h>
 #include <mach/mach_types.h>
@@ -91,7 +92,6 @@ _Static_assert(!KASAN_LIGHT, "Light mode not supported by KASan Classic.");
 
 /* Configuration options */
 static unsigned quarantine_enabled = 1;               /* Quarantine on/off */
-static unsigned free_yield = 0;                       /* ms yield after each free */
 static bool checks_enabled = false;                   /* Poision checking on/off */
 
 /*
@@ -103,12 +103,6 @@ const uintptr_t __asan_shadow_memory_dynamic_address = KASAN_OFFSET;
 void
 kasan_impl_init(void)
 {
-	unsigned arg;
-
-	if (PE_parse_boot_argn("kasan.free_yield_ms", &arg, sizeof(arg))) {
-		free_yield = arg;
-	}
-
 	/* Quarantine is enabled by default */
 	quarantine_enabled = 1;
 
@@ -263,7 +257,7 @@ kasan_poison(vm_offset_t base, vm_size_t size, vm_size_t leftrz,
 	 */
 	uint8_t partial = (uint8_t)kasan_granule_partial(size);
 	vm_size_t total = leftrz + size + rightrz;
-	vm_size_t i = 0;
+	vm_size_t pos = 0;
 
 	/* ensure base, leftrz and total allocation size are granule-aligned */
 	assert(kasan_granule_partial(base) == 0);
@@ -292,51 +286,18 @@ kasan_poison(vm_offset_t base, vm_size_t size, vm_size_t leftrz,
 	/*
 	 * poison the redzones and unpoison the valid bytes
 	 */
-	for (; i < leftrz; i++) {
-		shadow[i] = l_flags;
-	}
-	for (; i < leftrz + size; i++) {
-		shadow[i] = ASAN_VALID;
-	}
+	__nosan_memset(shadow + pos, l_flags, leftrz);
+	pos += leftrz;
+
+	__nosan_memset(shadow + pos, ASAN_VALID, size);
+	pos += size;
+
 	/* Do we have any leftover valid byte? */
-	if (partial && (i < total)) {
-		shadow[i] = partial;
-		i++;
-	}
-	for (; i < total; i++) {
-		shadow[i] = r_flags;
-	}
-}
-
-/*
- * write junk into the redzones
- */
-static void NOINLINE
-kasan_rz_clobber(vm_offset_t base, vm_size_t size, vm_size_t leftrz, vm_size_t rightrz)
-{
-#if KASAN_DEBUG
-	vm_size_t i;
-	const uint8_t deadbeef[] = { 0xde, 0xad, 0xbe, 0xef };
-	const uint8_t c0ffee[] = { 0xc0, 0xff, 0xee, 0xc0 };
-	uint8_t *buf = (uint8_t *)base;
-
-	assert(kasan_granule_partial(base) == 0);
-	assert(kasan_granule_partial(leftrz) == 0);
-	assert(kasan_granule_partial(size + leftrz + rightrz) == 0);
-
-	for (i = 0; i < leftrz; i++) {
-		buf[i] = deadbeef[i % 4];
+	if (partial && pos < total) {
+		shadow[pos++] = partial;
 	}
 
-	for (i = 0; i < rightrz; i++) {
-		buf[i + size + leftrz] = c0ffee[i % 4];
-	}
-#else
-	(void)base;
-	(void)size;
-	(void)leftrz;
-	(void)rightrz;
-#endif
+	__nosan_memset(shadow + pos, r_flags, total - pos);
 }
 
 /*
@@ -432,9 +393,6 @@ kasan_check_shadow(vm_address_t addr, vm_size_t sz, uint8_t shadow_match_value)
 	return true;
 }
 
-static const size_t BACKTRACE_BITS       = 4;
-static const size_t BACKTRACE_MAXFRAMES  = (1UL << BACKTRACE_BITS) - 1;
-
 /*
  * KASAN zalloc hooks
  *
@@ -447,191 +405,168 @@ static const size_t BACKTRACE_MAXFRAMES  = (1UL << BACKTRACE_BITS) - 1;
  * changes to zalloc to add both red-zoning and quarantines.
  */
 
-struct kasan_alloc_header {
-	uint16_t magic;
-	uint16_t crc;
-	uint32_t alloc_size;
-	uint32_t user_size;
-	struct {
-		uint32_t left_rz : 32 - BACKTRACE_BITS;
-		uint32_t frames  : BACKTRACE_BITS;
+__enum_decl(kasan_alloc_state_t, uint16_t, {
+	KASAN_STATE_FREED,
+	KASAN_STATE_ALLOCATED,
+	KASAN_STATE_QUARANTINED,
+});
+
+typedef struct kasan_alloc_header {
+	union {
+		struct {
+			kasan_alloc_state_t state;
+			uint16_t left_rz;
+			uint32_t user_size;
+		};
+		struct {
+			kasan_alloc_state_t state2;
+			intptr_t next : 48;
+		};
 	};
-};
-_Static_assert(sizeof(struct kasan_alloc_header) <= KASAN_GUARD_SIZE, "kasan alloc header exceeds guard size");
+	btref_t  alloc_btref;
+	btref_t  free_btref;
+} *kasan_alloc_header_t;
+static_assert(sizeof(struct kasan_alloc_header) == KASAN_GUARD_SIZE);
 
-struct kasan_alloc_footer {
-	uint32_t backtrace[0];
-};
-_Static_assert(sizeof(struct kasan_alloc_footer) <= KASAN_GUARD_SIZE, "kasan alloc footer exceeds guard size");
-
-#define LIVE_XOR ((uint16_t)0x3a65)
-#define FREE_XOR ((uint16_t)0xf233)
-
-static uint16_t
-magic_for_addr(vm_offset_t addr, uint16_t magic_xor)
-{
-	uint16_t magic = addr & 0xFFFF;
-	magic ^= (addr >> 16) & 0xFFFF;
-	magic ^= (addr >> 32) & 0xFFFF;
-	magic ^= (addr >> 48) & 0xFFFF;
-	magic ^= magic_xor;
-	return magic;
-}
-
-static struct kasan_alloc_header *
+static kasan_alloc_header_t
 header_for_user_addr(vm_offset_t addr)
 {
 	return (void *)(addr - sizeof(struct kasan_alloc_header));
 }
 
-static struct kasan_alloc_footer *
-footer_for_user_addr(vm_offset_t addr, vm_size_t *size)
+void
+kasan_zmem_add(
+	vm_address_t            addr,
+	vm_size_t               size,
+	vm_offset_t             esize,
+	vm_offset_t             offs,
+	vm_offset_t             rzsize)
 {
-	struct kasan_alloc_header *h = header_for_user_addr(addr);
-	vm_size_t rightrz = h->alloc_size - h->user_size - h->left_rz;
-	*size = rightrz;
-	return (void *)(addr + h->user_size);
-}
+	uint8_t *shadow = SHADOW_FOR_ADDRESS(addr);
 
-/*
- * size: user-requested allocation size
- * ret:  minimum size for the real allocation
- */
-vm_size_t
-kasan_alloc_resize(vm_size_t size)
-{
-	if (size >= 128) {
-		/* Add a little extra right redzone to larger objects. Gives us extra
-		 * overflow protection, and more space for the backtrace. */
-		size += 16;
+	assert(kasan_granule_partial(esize) == 0);
+	assert(kasan_granule_partial(offs) == 0);
+	assert(kasan_granule_partial(rzsize) == 0);
+	assert((size - offs) % esize == 0);
+
+	size   >>= KASAN_SCALE;
+	esize  >>= KASAN_SCALE;
+	offs   >>= KASAN_SCALE;
+	rzsize >>= KASAN_SCALE;
+
+	__nosan_memset(shadow, ASAN_HEAP_FREED, size);
+
+	__nosan_memset(shadow, ASAN_HEAP_LEFT_RZ, offs);
+
+	for (vm_offset_t pos = offs; pos < size; pos += esize) {
+		__nosan_memset(shadow + pos, ASAN_HEAP_LEFT_RZ, rzsize);
 	}
-
-	/* add left and right redzones */
-	size += KASAN_GUARD_PAD;
-
-	/* ensure the final allocation is a multiple of the granule */
-	size = kasan_granule_round(size);
-
-	return size;
 }
 
-extern vm_offset_t vm_kernel_slid_base;
-
-static vm_size_t
-kasan_alloc_bt(uint32_t *ptr, vm_size_t sz, vm_size_t skip)
+void
+kasan_zmem_remove(
+	vm_address_t            addr,
+	vm_size_t               size,
+	vm_offset_t             esize,
+	vm_offset_t             offs,
+	vm_offset_t             rzsize)
 {
-	uintptr_t buf[BACKTRACE_MAXFRAMES];
-	uintptr_t *bt = buf;
+	uint8_t *shadow = SHADOW_FOR_ADDRESS(addr);
 
-	sz /= sizeof(uint32_t);
-	vm_size_t frames = sz;
+	assert(kasan_granule_partial(esize) == 0);
+	assert(kasan_granule_partial(offs) == 0);
+	assert(kasan_granule_partial(rzsize) == 0);
+	assert((size - offs) % esize == 0);
 
-	if (frames > 0) {
-		frames = min((uint32_t)(frames + skip), BACKTRACE_MAXFRAMES);
-		frames = backtrace(bt, (uint32_t)frames, NULL, NULL);
+	if (rzsize) {
+		for (vm_offset_t pos = offs + rzsize; pos < size; pos += esize) {
+			kasan_alloc_header_t h;
 
-		while (frames > sz && skip > 0) {
-			bt++;
-			frames--;
-			skip--;
-		}
+			h = header_for_user_addr(addr + pos);
 
-		/* only store the offset from kernel base, and cram that into 32
-		 * bits */
-		for (vm_size_t i = 0; i < frames; i++) {
-			ptr[i] = (uint32_t)(bt[i] - vm_kernel_slid_base);
+			assert(h->state == KASAN_STATE_FREED);
+			btref_put(h->alloc_btref);
+			btref_put(h->free_btref);
 		}
 	}
-	return frames;
+
+	__nosan_memset(shadow, ASAN_VALID, size >> KASAN_SCALE);
 }
 
-/* addr: user address of allocation */
-static uint16_t
-kasan_alloc_crc(vm_offset_t addr)
+void
+kasan_alloc(
+	vm_address_t            addr,
+	vm_size_t               size,
+	vm_size_t               req,
+	vm_size_t               rzsize,
+	bool                    percpu,
+	void                   *fp)
 {
-	struct kasan_alloc_header *h = header_for_user_addr(addr);
-	vm_size_t rightrz = h->alloc_size - h->user_size - h->left_rz;
-
-	uint16_t crc_orig = h->crc;
-	h->crc = 0;
-
-	uint16_t crc = 0;
-	crc = __nosan_crc16(crc, (void *)(addr - h->left_rz), h->left_rz);
-	crc = __nosan_crc16(crc, (void *)(addr + h->user_size), rightrz);
-
-	h->crc = crc_orig;
-
-	return crc;
-}
-
-/*
- * addr: base address of full allocation (including redzones)
- * size: total size of allocation (include redzones)
- * req:  user-requested allocation size
- * lrz:  size of the left redzone in bytes
- * ret:  address of usable allocation
- */
-vm_address_t
-kasan_alloc(vm_offset_t addr, vm_size_t size, vm_size_t req, vm_size_t leftrz)
-{
-	if (!addr) {
-		return 0;
-	}
-	assert(size > 0);
 	assert(kasan_granule_partial(addr) == 0);
 	assert(kasan_granule_partial(size) == 0);
+	assert(kasan_granule_partial(rzsize) == 0);
 
-	vm_size_t rightrz = size - req - leftrz;
+	if (rzsize) {
+		/* stash the allocation sizes in the left redzone */
+		kasan_alloc_header_t h = header_for_user_addr(addr);
 
-	kasan_poison(addr, req, leftrz, rightrz, ASAN_HEAP_RZ);
-	kasan_rz_clobber(addr, req, leftrz, rightrz);
+		btref_put(h->free_btref);
+		btref_put(h->alloc_btref);
 
-	addr += leftrz;
+		h->state       = KASAN_STATE_ALLOCATED;
+		h->left_rz     = (uint16_t)rzsize;
+		h->user_size   = (uint32_t)req;
+		h->alloc_btref = btref_get(fp, BTREF_GET_NOWAIT);
+		h->free_btref  = 0;
+	}
 
-	/* stash the allocation sizes in the left redzone */
-	struct kasan_alloc_header *h = header_for_user_addr(addr);
-	h->magic = magic_for_addr(addr, LIVE_XOR);
-	h->left_rz = (uint32_t)leftrz;
-	h->alloc_size = (uint32_t)size;
-	h->user_size = (uint32_t)req;
-
-	/* ... and a backtrace in the right redzone */
-	vm_size_t fsize;
-	struct kasan_alloc_footer *f = footer_for_user_addr(addr, &fsize);
-	h->frames = (uint32_t)kasan_alloc_bt(f->backtrace, fsize, 2);
-
-	/* checksum the whole object, minus the user part */
-	h->crc = kasan_alloc_crc(addr);
-
-	return addr;
+	kasan_poison(addr, req, 0, size - req, ASAN_HEAP_RZ);
+	if (percpu) {
+		for (uint32_t i = 1; i < zpercpu_count(); i++) {
+			addr += PAGE_SIZE;
+			kasan_poison(addr, req, 0, size - req, ASAN_HEAP_RZ);
+		}
+	}
 }
 
-/*
- * addr: address of usable allocation (excluding redzones)
- * size: total size of allocation (include redzones)
- * req:  user-requested allocation size
- * lrz:  size of the left redzone in bytes
- * ret:  address of usable allocation
- */
-vm_address_t
-kasan_realloc(vm_offset_t addr, vm_size_t size, vm_size_t req, vm_size_t leftrz)
+void
+kasan_free(
+	vm_address_t            addr,
+	vm_size_t               size,
+	vm_size_t               req,
+	vm_size_t               rzsize,
+	bool                    percpu,
+	void                   *fp)
 {
-	return kasan_alloc(addr - leftrz, size, req, leftrz);
+	uint8_t *shadow = SHADOW_FOR_ADDRESS(addr);
+
+	if (rzsize) {
+		kasan_alloc_header_t h = header_for_user_addr(addr);
+
+		kasan_check_alloc(addr, size, req);
+		assert(h->free_btref == 0);
+		h->state      = KASAN_STATE_FREED;
+		h->next       = 0;
+		h->free_btref = btref_get(fp, BTREF_GET_NOWAIT);
+	}
+
+	__nosan_memset(shadow, ASAN_HEAP_FREED, size >> KASAN_SCALE);
+	if (percpu) {
+		for (uint32_t i = 1; i < zpercpu_count(); i++) {
+			shadow += PAGE_SIZE >> KASAN_SCALE;
+			__nosan_memset(shadow, ASAN_HEAP_FREED,
+			    size >> KASAN_SCALE);
+		}
+	}
 }
 
-/*
- * addr: user pointer
- * size: returns full original allocation size
- * ret:  original allocation ptr
- */
-vm_address_t
-kasan_dealloc(vm_offset_t addr, vm_size_t *size)
+void
+kasan_alloc_large(vm_address_t addr, vm_size_t req_size)
 {
-	assert(size && addr);
-	struct kasan_alloc_header *h = header_for_user_addr(addr);
-	*size = h->alloc_size;
-	h->magic = 0; /* clear the magic so the debugger doesn't find a bogus object */
-	return addr - h->left_rz;
+	vm_size_t l_rz = PAGE_SIZE;
+	vm_size_t r_rz = round_page(req_size) - req_size + PAGE_SIZE;
+
+	kasan_poison(addr - l_rz, req_size, l_rz, r_rz, ASAN_HEAP_RZ);
 }
 
 /*
@@ -641,216 +576,94 @@ kasan_dealloc(vm_offset_t addr, vm_size_t *size)
 vm_size_t
 kasan_user_size(vm_offset_t addr)
 {
-	struct kasan_alloc_header *h = header_for_user_addr(addr);
-	assert(h->magic == magic_for_addr(addr, LIVE_XOR));
+	kasan_alloc_header_t h = header_for_user_addr(addr);
+
+	assert(h->state == KASAN_STATE_ALLOCATED);
 	return h->user_size;
 }
 
 /*
- * Verify that `addr' (user pointer) is a valid allocation of `type'
+ * Verify that `addr' (user pointer) is a valid allocation
  */
 void
-kasan_check_free(vm_offset_t addr, vm_size_t size, unsigned heap_type)
+kasan_check_alloc(vm_offset_t addr, vm_size_t size, vm_size_t req)
 {
-	struct kasan_alloc_header *h = header_for_user_addr(addr);
+	kasan_alloc_header_t h = header_for_user_addr(addr);
 
 	if (!checks_enabled) {
 		return;
 	}
 
-	/* map heap type to an internal access type */
-	access_t type = heap_type == KASAN_HEAP_KALLOC    ? TYPE_KFREE  :
-	    heap_type == KASAN_HEAP_ZALLOC    ? TYPE_ZFREE  :
-	    heap_type == KASAN_HEAP_FAKESTACK ? TYPE_FSFREE : 0;
-
-	/* check the magic and crc match */
-	if (h->magic != magic_for_addr(addr, LIVE_XOR)) {
-		kasan_violation(addr, size, type, REASON_BAD_METADATA);
-	}
-	if (h->crc != kasan_alloc_crc(addr)) {
-		kasan_violation(addr, size, type, REASON_MOD_OOB);
+	if (h->state != KASAN_STATE_ALLOCATED) {
+		kasan_violation(addr, req, TYPE_ZFREE, REASON_BAD_METADATA);
 	}
 
 	/* check the freed size matches what we recorded at alloc time */
-	if (h->user_size != size) {
-		kasan_violation(addr, size, type, REASON_INVALID_SIZE);
+	if (h->user_size != req) {
+		kasan_violation(addr, req, TYPE_ZFREE, REASON_INVALID_SIZE);
 	}
 
-	vm_size_t rightrz_sz = h->alloc_size - h->left_rz - h->user_size;
+	vm_size_t rightrz_sz = size - h->user_size;
 
 	/* Check that the redzones are valid */
 	if (!kasan_check_shadow(addr - h->left_rz, h->left_rz, ASAN_HEAP_LEFT_RZ) ||
 	    !kasan_check_shadow(addr + h->user_size, rightrz_sz, ASAN_HEAP_RIGHT_RZ)) {
-		kasan_violation(addr, size, type, REASON_BAD_METADATA);
+		kasan_violation(addr, req, TYPE_ZFREE, REASON_BAD_METADATA);
 	}
 
 	/* Check the allocated range is not poisoned */
-	kasan_check_range((void *)addr, size, type);
+	kasan_check_range((void *)addr, req, TYPE_ZFREE);
 }
 
 /*
  * KASAN Quarantine
  */
 
-struct freelist_entry {
-	uint16_t magic;
-	uint16_t crc;
-	STAILQ_ENTRY(freelist_entry) list;
-	union {
-		struct {
-			vm_size_t size      : 28;
-			vm_size_t user_size : 28;
-			vm_size_t frames    : BACKTRACE_BITS; /* number of frames in backtrace */
-			vm_size_t __unused  : 8 - BACKTRACE_BITS;
-		};
-		uint64_t bits;
-	};
-	zone_t zone;
-	uint32_t backtrace[];
-};
-_Static_assert(sizeof(struct freelist_entry) <= KASAN_GUARD_PAD, "kasan freelist header exceeds padded size");
+typedef struct kasan_quarantine {
+	kasan_alloc_header_t  head;
+	kasan_alloc_header_t  tail;
+	uint32_t              size;
+	uint32_t              count;
+} *kasan_quarantine_t;
 
-struct quarantine {
-	STAILQ_HEAD(freelist_head, freelist_entry) freelist;
-	unsigned long entries;
-	unsigned long max_entries;
-	vm_size_t size;
-	vm_size_t max_size;
-};
+static struct kasan_quarantine PERCPU_DATA(kasan_quarantine);
 
-struct quarantine quarantines[] = {
-	{ STAILQ_HEAD_INITIALIZER((quarantines[KASAN_HEAP_ZALLOC].freelist)), 0, QUARANTINE_ENTRIES, 0, QUARANTINE_MAXSIZE },
-	{ STAILQ_HEAD_INITIALIZER((quarantines[KASAN_HEAP_KALLOC].freelist)), 0, QUARANTINE_ENTRIES, 0, QUARANTINE_MAXSIZE },
-	{ STAILQ_HEAD_INITIALIZER((quarantines[KASAN_HEAP_FAKESTACK].freelist)), 0, QUARANTINE_ENTRIES, 0, QUARANTINE_MAXSIZE }
-};
+extern int get_preemption_level(void);
 
-static uint16_t
-fle_crc(struct freelist_entry *fle)
+struct kasan_quarantine_result
+kasan_quarantine(vm_address_t addr, vm_size_t size)
 {
-	return __nosan_crc16(0, &fle->bits, fle->size - offsetof(struct freelist_entry, bits));
-}
+	kasan_alloc_header_t h = header_for_user_addr(addr);
+	kasan_quarantine_t   q = PERCPU_GET(kasan_quarantine);
+	struct kasan_quarantine_result kqr = { };
 
-/*
- * addr, sizep: pointer/size of full allocation including redzone
- */
-void NOINLINE
-kasan_free_internal(void **addrp, vm_size_t *sizep, int type,
-    zone_t *zonep, vm_size_t user_size, int locked,
-    bool doquarantine)
-{
-	vm_size_t size = *sizep;
-	vm_offset_t addr = *(vm_offset_t *)addrp;
-	zone_t zone = *zonep;
+	assert(h->state == KASAN_STATE_FREED && h->next == 0);
 
-	assert(type >= 0 && type < KASAN_HEAP_TYPES);
-	if (type == KASAN_HEAP_KALLOC) {
-		/* for kalloc the size can be 0 */
-		assert(zone);
-	} else {
-		assert(zone && user_size);
-	}
+	h->state = KASAN_STATE_QUARANTINED;
 
-	/* clobber the entire freed region */
-	kasan_rz_clobber(addr, 0, size, 0);
-
-	if (!doquarantine || !quarantine_enabled) {
-		goto free_current;
-	}
-
-	/* poison the entire freed region */
-	uint8_t flags = (type == KASAN_HEAP_FAKESTACK) ? ASAN_STACK_FREED : ASAN_HEAP_FREED;
-	kasan_poison(addr, 0, size, 0, flags);
-
-	struct freelist_entry *fle, *tofree = NULL;
-	struct quarantine *q = &quarantines[type];
-	assert(size >= sizeof(struct freelist_entry));
-
-	/* create a new freelist entry */
-	fle = (struct freelist_entry *)addr;
-	fle->magic = magic_for_addr((vm_offset_t)fle, FREE_XOR);
-	fle->size = size;
-	fle->user_size = user_size;
-	fle->frames = 0;
-	fle->zone = zone;
-	if (type != KASAN_HEAP_FAKESTACK) {
-		/* don't do expensive things on the fakestack path */
-		fle->frames = kasan_alloc_bt(fle->backtrace, fle->size - sizeof(struct freelist_entry), 3);
-		fle->crc = fle_crc(fle);
-	}
-
-	boolean_t flg;
-	if (!locked) {
-		kasan_lock(&flg);
-	}
-
-	if (q->size + size > q->max_size) {
-		/*
-		 * Adding this entry would put us over the max quarantine size. Free the
-		 * larger of the current object and the quarantine head object.
-		 */
-		tofree = STAILQ_FIRST(&q->freelist);
-		if (fle->size > tofree->size) {
-			goto free_current_locked;
-		}
-	}
-
-	STAILQ_INSERT_TAIL(&q->freelist, fle, list);
-	q->entries++;
 	q->size += size;
-
-	/* free the oldest entry, if necessary */
-	if (tofree || q->entries > q->max_entries) {
-		tofree = STAILQ_FIRST(&q->freelist);
-		STAILQ_REMOVE_HEAD(&q->freelist, list);
-
-		assert(q->entries > 0 && q->size >= tofree->size);
-		q->entries--;
-		q->size -= tofree->size;
-
-		zone = tofree->zone;
-		size = tofree->size;
-		addr = (vm_offset_t)tofree;
-
-		/* check the magic and crc match */
-		if (tofree->magic != magic_for_addr(addr, FREE_XOR)) {
-			kasan_violation(addr, size, TYPE_UAF, REASON_MOD_AFTER_FREE);
-		}
-		if (type != KASAN_HEAP_FAKESTACK && tofree->crc != fle_crc(tofree)) {
-			kasan_violation(addr, size, TYPE_UAF, REASON_MOD_AFTER_FREE);
-		}
-
-		/* clobber the quarantine header */
-		__nosan_bzero((void *)addr, sizeof(struct freelist_entry));
+	q->count++;
+	if (q->tail == NULL) {
+		q->head = h;
 	} else {
-		/* quarantine is not full - don't really free anything */
-		addr = 0;
-		zone = ZONE_NULL;
-		size = 0;
+		q->tail->next = (intptr_t)h;
+	}
+	q->tail = h;
+
+	if (q->size >= QUARANTINE_MAXSIZE || q->count > QUARANTINE_ENTRIES) {
+		h = q->head;
+		assert(h->state == KASAN_STATE_QUARANTINED);
+
+		q->head  = (kasan_alloc_header_t)(intptr_t)h->next;
+		h->state = KASAN_STATE_FREED;
+		h->next  = 0;
+
+		kqr.addr = (vm_address_t)(h + 1);
+		q->size -= kasan_quarantine_resolve(kqr.addr, &kqr.zone);
+		q->count--;
 	}
 
-free_current_locked:
-	if (!locked) {
-		kasan_unlock(flg);
-	}
-
-free_current:
-	*addrp = (void *)addr;
-	if (addr) {
-		kasan_unpoison((void *)addr, size);
-		*sizep = size;
-		*zonep = zone;
-	}
-}
-
-void NOINLINE
-kasan_free(void **addrp, vm_size_t *sizep, int type, zone_t *zone,
-    vm_size_t user_size)
-{
-	kasan_free_internal(addrp, sizep, type, zone, user_size, 0, true);
-
-	if (free_yield) {
-		thread_yield_internal(free_yield);
-	}
+	return kqr;
 }
 
 /*

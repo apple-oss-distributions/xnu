@@ -41,8 +41,7 @@ extern int maxproc;
  * Lock group attributes for os_reason subsystem
  */
 static LCK_GRP_DECLARE(os_reason_lock_grp, "os_reason_lock");
-static ZONE_DEFINE(os_reason_zone, "os reasons",
-    sizeof(struct os_reason), ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(os_reason_zone, struct os_reason, KT_DEFAULT);
 
 os_refgrp_decl(static, os_reason_refgrp, "os_reason", NULL);
 

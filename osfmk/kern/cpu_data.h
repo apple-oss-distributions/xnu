@@ -56,6 +56,7 @@ extern void             _enable_preemption(void);
 #endif
 
 #if SCHED_HYGIENE_DEBUG
+#define SCHED_HYGIENE_MARKER (1u << 31)
 extern void abandon_preemption_disable_measurement(void);
 #endif
 

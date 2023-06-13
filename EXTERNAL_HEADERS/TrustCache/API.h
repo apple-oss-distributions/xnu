@@ -50,6 +50,25 @@ trustCacheInitializeRuntime(TrustCacheRuntime_t *runtime,
 }
 
 /**
+ * Construct a trust cache object from some module bytes. The module is validated for
+ * correctness before being returned.
+ */
+TCReturn_t
+trustCacheConstructInvalid(TrustCache_t *trustCache,
+                           const uint8_t *moduleAddr,
+                           size_t moduleSize);
+
+/**
+ * Check the runtime for a trust cache which matches a particular UUID. Since we do
+ * not allow trust caches with duplocate UUIDs, there can only ever be a single trust
+ * cache with a particular UUID within the runtime.
+ */
+TCReturn_t
+trustCacheCheckRuntimeForUUID(const TrustCacheRuntime_t *runtime,
+                              const uint8_t checkUUID[kUUIDSize],
+                              const TrustCache_t **trustCacheRet);
+
+/**
  * Add a trust cache module directly to the runtime. This function is used to add modules which
  * don't need to be separately authenticated. Currently, the only trust cache types which can be
  * used with this function are static and engineering trust caches.
@@ -66,7 +85,7 @@ trustCacheLoadModule(TrustCacheRuntime_t *runtime,
                      const size_t dataSize);
 
 /**
- * Load a  trust cache onto the system. This function validates the trust cache for a proper
+ * Load a trust cache onto the system. This function validates the trust cache for a proper
  * signature and adds it to the runtime.
  *
  * Both the payload and the manifest must be provided and they will be validated as image4
@@ -82,6 +101,18 @@ trustCacheLoad(TrustCacheRuntime_t *runtime,
                const size_t manifestSize);
 
 /**
+ * Extract an image4 artifact from an image4 file or an image4 payload and extract the
+ * trust cache module embedded within it. The module is validated for correctness
+ * before being returned, however the image4 signature is not verified.
+ *
+ * The returned trust cache object is marked with an invalid type.
+ */
+TCReturn_t
+trustCacheExtractModule(TrustCache_t *trustCache,
+                        const uint8_t *dataAddr,
+                        size_t dataSize);
+
+/**
  * Query a  trust cache for a particular CDHash. The returned token can then be used to
  * query further attributes from the matched entry.
  */
@@ -90,6 +121,23 @@ trustCacheQuery(const TrustCacheRuntime_t *runtime,
                 TCQueryType_t queryType,
                 const uint8_t CDHash[kTCEntryHashSize],
                 TrustCacheQueryToken_t *queryToken);
+
+/**
+ * Get the module bytes backng a trust cache object. The environment may have chosen
+ * to allocate the module bytes within read-only memory, so the bytes returned may
+ * not be mutable.
+ */
+TCReturn_t
+trustCacheGetModule(const TrustCache_t *trustCache,
+                    const uint8_t **moduleAddrRet,
+                    size_t *moduleSizeRet);
+
+/**
+ * Get the UUID of the trust cache module represented by the wrapped trust cache object.
+ */
+TCReturn_t
+trustCacheGetUUID(const TrustCache_t *trustCache,
+                  uint8_t returnUUID[kUUIDSize]);
 
 /**
  * Get the capabilities of a trust cache. This function can be used to query which fields a given

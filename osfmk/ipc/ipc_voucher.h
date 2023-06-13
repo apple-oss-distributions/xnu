@@ -36,7 +36,7 @@
 
 #ifdef MACH_KERNEL_PRIVATE
 
-#include <kern/queue.h>
+#include <kern/smr_types.h>
 #include <kern/locks.h>
 #include <kern/simple_lock.h>
 #include <voucher/ipc_pthread_priority_types.h>
@@ -71,12 +71,10 @@ typedef iv_index_t              *iv_entry_t;
  * (which themselves are reference counted).
  */
 struct ipc_voucher {
-	iv_index_t              iv_hash;        /* checksum hash */
-	iv_index_t              iv_sum;         /* checksum of values */
-	os_refcnt_t             iv_refs;        /* reference count */
+	os_ref_atomic_t         iv_refs;        /* reference count */
 	iv_index_t              iv_table[MACH_VOUCHER_ATTR_KEY_NUM];
 	ipc_port_t              iv_port;        /* port representing the voucher */
-	queue_chain_t           iv_hash_link;   /* link on hash chain */
+	struct smrq_slink       iv_hash_link;   /* link on hash chain */
 };
 
 #define IV_NULL         IPC_VOUCHER_NULL
@@ -142,20 +140,18 @@ typedef ivac_entry              *ivac_entry_t;
 #define IVAC_ENTRIES_MAX        524288
 
 struct ipc_voucher_attr_control {
-	os_refcnt_t             ivac_refs;
 	boolean_t               ivac_is_growing;        /* is the table being grown */
 	ivac_entry_t            ivac_table;             /* table of voucher attr value entries */
 	iv_index_t              ivac_table_size;        /* size of the attr value table */
 	iv_index_t              ivac_init_table_size;   /* size of the attr value table */
 	iv_index_t              ivac_freelist;          /* index of the first free element */
 	lck_spin_t              ivac_lock_data;
-	iv_index_t              ivac_key_index;         /* key index for this value */
+	iv_index_t              ivac_key_index;
 };
 typedef ipc_voucher_attr_control_t iv_attr_control_t;
 
 #define IVAC_NULL                  IPC_VOUCHER_ATTR_CONTROL_NULL
 
-extern ipc_voucher_attr_control_t  ivac_alloc(iv_index_t);
 extern void ipc_voucher_receive_postprocessing(ipc_kmsg_t kmsg, mach_msg_option_t option);
 extern void ipc_voucher_send_preprocessing(ipc_kmsg_t kmsg);
 extern ipc_voucher_t ipc_voucher_get_default_voucher(void);
@@ -180,47 +176,7 @@ extern kern_return_t ipc_get_pthpriority_from_kmsg_voucher(ipc_kmsg_t kmsg, ipc_
 	                                THREAD_UNINT, &ipc_lck_grp)
 #define ivac_wakeup(ivac) thread_wakeup((event_t)(ivac))
 
-static inline void
-ivac_reference(ipc_voucher_attr_control_t ivac)
-{
-	if (ivac == IVAC_NULL) {
-		return;
-	}
-	os_ref_retain(&ivac->ivac_refs);
-}
-
-static inline void
-ivac_release(ipc_voucher_attr_control_t ivac)
-{
-	if (IVAC_NULL == ivac) {
-		return;
-	}
-
-	if (os_ref_release(&ivac->ivac_refs) == 0) {
-		panic("voucher attribute control %p over-released", ivac);
-	}
-}
-
 #define IVAM_NULL IPC_VOUCHER_ATTR_MANAGER_NULL
-
-/*
- * IPC voucher Resource Manager table element
- *
- * Information Associated with a specific registration of
- * a voucher resource manager.
- *
- * NOTE: For now, this table is indexed directly by the key.  In the future,
- * it will have to be growable and sparse by key.  When that is implemented
- * the index will be independent from the key (but there will be a hash to
- * find the index by key).
- */
-typedef struct ipc_voucher_global_table_element {
-	ipc_voucher_attr_manager_t      ivgte_manager;
-	ipc_voucher_attr_control_t      ivgte_control;
-	mach_voucher_attr_key_t         ivgte_key;
-} ipc_voucher_global_table_element;
-
-typedef ipc_voucher_global_table_element *ipc_voucher_global_table_element_t;
 
 #endif /* MACH_KERNEL_PRIVATE */
 
@@ -350,7 +306,7 @@ ipc_voucher_attr_control_create_mach_voucher(
 	ipc_voucher_attr_raw_recipe_array_size_t        recipe_size,
 	ipc_voucher_t                                   *new_voucher);
 
-extern kern_return_t
+extern void
 ipc_register_well_known_mach_voucher_attr_manager(
 	ipc_voucher_attr_manager_t              manager,
 	mach_voucher_attr_value_handle_t        default_value,

@@ -147,14 +147,14 @@ main(int argc, char **argv)
 	} else if (strcmp(argv[argc - 1], "Xfoo") == 0) {
 		PRINTF("Warm up call to foo()\n");
 		foo();
-		addr = ptrauth_strip(&foo, ptrauth_key_function_pointer);
+		addr = (void *)ptrauth_strip(&foo, ptrauth_key_function_pointer);
 		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &addr, s);
 		foo();
 	} else if (strcmp(argv[argc - 1], "atan") == 0) {
 		PRINTF("atan(0) is %g\n", atan(zero));
 	} else if (strcmp(argv[argc - 1], "Xatan") == 0) {
 		PRINTF("Warmup call to atan(0) is %g\n", atan(zero));
-		addr = ptrauth_strip(&atan, ptrauth_key_function_pointer);
+		addr = (void *)ptrauth_strip(&atan, ptrauth_key_function_pointer);
 		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &addr, s);
 		PRINTF("atan(0) is %g\n", atan(zero));
 	} else if (strcmp(argv[argc - 1], "clean") == 0) {
@@ -162,7 +162,7 @@ main(int argc, char **argv)
 	} else if (strcmp(argv[argc - 1], "Xclean") == 0) {
 		PRINTF("initial read of x.big_data[35] is %d\n", x.big_data[35]);
 
-		addr = &x.big_data[35];
+		addr = (void *)&x.big_data[35];
 		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &addr, s);
 		PRINTF("second read of x.big_data[35] is %d\n", x.big_data[35]);
 	} else if (strcmp(argv[argc - 1], "dirty") == 0) {
@@ -172,14 +172,14 @@ main(int argc, char **argv)
 		x.big_data[35] = (int)random();
 		PRINTF("initial read of dirty x.big_data[35] is %d\n", x.big_data[35]);
 
-		addr = &x.big_data[35];
+		addr = (void *)&x.big_data[35];
 		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &addr, s);
 		PRINTF("second read of x.big_data[35] is %d\n", x.big_data[35]);
 	} else if (strcmp(argv[argc - 1], "Xcopyout") == 0) {
 		x.big_data[35] = (int)random();
 		PRINTF("initial read of dirty x.big_data[35] is %d\n", x.big_data[35]);
 
-		addr = &x.big_data[35];
+		addr = (void *)&x.big_data[35];
 		err = sysctlbyname("vm.inject_ecc_copyout", NULL, NULL, &addr, s);
 		if (err) {
 			PRINTF("copyout return %d\n", err);

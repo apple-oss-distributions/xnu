@@ -52,7 +52,7 @@ set_allocation_size(size_t sz)
 }
 
 static bool
-ranges_enabled()
+ranges_enabled(void)
 {
 	struct mach_vm_range range;
 	size_t range_sz = sizeof(range);
@@ -233,13 +233,63 @@ T_DECL(range_allocate_stack,
 	});
 }
 
-T_DECL(range_allocate_fixed, "ensure fixed target is honored")
+static void
+ensure_fixed_mappings_succeed_cross(int heap)
+{
+	vm_map_address_t addr;
+
+	addr = assert_allocate(0, VM_FLAGS_ANYWHERE | heap);
+	vm_deallocate(mach_task_self(), addr, _allocation_size);
+
+	assert_allocate_eq(addr, VM_FLAGS_FIXED | VM_MEMORY_RANGE_DEFAULT);
+	assert_allocate_eq(addr, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_MEMORY_RANGE_DEFAULT);
+	vm_deallocate(mach_task_self(), addr, _allocation_size);
+
+	assert_allocate_eq(addr, VM_FLAGS_FIXED | VM_MEMORY_RANGE_HEAP);
+	assert_allocate_eq(addr, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_MEMORY_RANGE_HEAP);
+	vm_deallocate(mach_task_self(), addr, _allocation_size);
+}
+
+static void
+ensure_rogue_fixed_fails(void)
+{
+	struct mach_vm_range def = get_range(DEFAULT);
+	struct mach_vm_range heap = get_range(HEAP);
+	mach_vm_address_t addr;
+	kern_return_t kr;
+
+	if (def.max_address + 3 * _allocation_size <= heap.min_address) {
+		addr = heap.min_address - 2 * _allocation_size;
+	} else {
+		/*
+		 * in the unlikely event when there's no space
+		 * between default and heap, then there must be
+		 * a hole after heap.
+		 */
+		addr = heap.max_address + _allocation_size;
+	}
+
+	kr = mach_vm_allocate(mach_task_self(), &addr,
+	    _allocation_size, VM_FLAGS_FIXED);
+	T_EXPECT_MACH_ERROR(kr, KERN_INVALID_ADDRESS, "should fail");
+}
+
+static void
+ensure_fixed_mapping(void)
+{
+	set_allocation_size(PAGE_SIZE);
+
+	ensure_fixed_mappings_succeed_cross(VM_MEMORY_RANGE_DEFAULT);
+	ensure_fixed_mappings_succeed_cross(VM_MEMORY_RANGE_HEAP);
+
+	ensure_rogue_fixed_fails();
+}
+
+T_DECL(range_allocate_fixed, "ensure fixed target is honored (even with an incorrect tag)")
 {
 	do_test(^{
-		struct mach_vm_range range = get_range(HEAP);
-
-		set_allocation_size(PAGE_SIZE);
-		assert_allocate_eq(range.min_address - _allocation_size, VM_FLAGS_FIXED | VM_MEMORY_RANGE_HEAP);
+		ensure_fixed_mapping();
+		fork_child_test(ensure_fixed_mapping);
 	});
 }
 
@@ -402,7 +452,7 @@ T_DECL(range_mach_vm_remap_heap,
 }
 
 static void
-ensure_range()
+ensure_range(void)
 {
 	struct mach_vm_range def = get_range(DEFAULT);
 	struct mach_vm_range heap = get_range(HEAP);
@@ -417,7 +467,7 @@ ensure_range()
 }
 
 static void
-ensure_child_range()
+ensure_child_range(void)
 {
 	struct mach_vm_range def = get_range(DEFAULT);
 	struct mach_vm_range heap = get_range(HEAP);

@@ -38,7 +38,7 @@ GetOSValueObjectKTV()
 {
 	// the choice of template type parameter int here is arbitrary;
 	// it just needs to be something to instantiate a concrete type
-	static KALLOC_TYPE_DEFINE(OSValueObject_ktv, OSValueObject<int>, KT_DEFAULT)
+	static KALLOC_TYPE_DEFINE(OSValueObject_ktv, OSValueObject<int>, KT_DEFAULT);
 	return OSValueObject_ktv;
 }
 }

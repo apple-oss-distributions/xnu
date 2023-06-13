@@ -318,11 +318,9 @@ SYSCTL_UINT(_kern_skywalk_netif, OID_AUTO, netif_queue_stat_enable,
     CTLFLAG_RW | CTLFLAG_LOCKED, &nq_stat_enable,
     0, "enable/disable stats collection for netif queue");
 
-static ZONE_DEFINE(na_netif_zone, SKMEM_ZONE_PREFIX ".na.netif",
-    sizeof(struct nexus_netif_adapter), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(na_netif_zone, struct nexus_netif_adapter);
 
-static ZONE_DEFINE(nx_netif_zone, SKMEM_ZONE_PREFIX ".nx.netif",
-    sizeof(struct nx_netif), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(nx_netif_zone, struct nx_netif);
 
 #define SKMEM_TAG_NETIF_MIT          "com.apple.skywalk.netif.mit"
 static SKMEM_TAG_DEFINE(skmem_tag_netif_mit, SKMEM_TAG_NETIF_MIT);
@@ -2800,11 +2798,6 @@ nx_netif_reap(struct nexus_netif_adapter *nifna, struct ifnet *ifp,
 	 * so just reap the arena belonging to the device instance.
 	 */
 	skmem_arena_reap(devna->na_arena, purge);
-
-	/*
-	 * Reap any caches configured for classq.
-	 */
-	ifclassq_reap_caches(purge);
 }
 
 /*
@@ -3190,7 +3183,7 @@ nx_netif_dev_krings_create(struct nexus_adapter *na, struct kern_channel *ch)
 	 * Allocate context structures for native netif only, for
 	 * IOSkywalkFamily to store its object references.
 	 */
-	ret = na_rings_mem_setup(na, 0, (na->na_flags & NAF_NATIVE), ch);
+	ret = na_rings_mem_setup(na, (na->na_flags & NAF_NATIVE), ch);
 
 	/*
 	 * We mark CKRF_DROP for kernel-only rings (kernel channel

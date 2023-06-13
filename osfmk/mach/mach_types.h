@@ -275,8 +275,12 @@ typedef clock_ctrl_t            clock_ctrl_port_t;
 typedef exception_handler_t     exception_port_t;
 typedef exception_handler_array_t exception_port_arrary_t;
 typedef char vfs_path_t[4096];
-typedef char nspace_path_t[1024]; /* 1024 == PATH_MAX */
-typedef char nspace_name_t[1024]; /* 1024 == PATH_MAX */
+/*
+ * 8K, c.f. FSGETPATH_MAXBUFLEN in bsd/vfs/vfs_syscalls.c.
+ * These types should NEVER be allocated on the stack.
+ */
+typedef char nspace_path_t[8192];
+typedef char nspace_name_t[8192];
 
 #ifdef KERNEL
 #define TASK_NULL               ((task_t) NULL)

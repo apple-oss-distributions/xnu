@@ -308,9 +308,7 @@ ksancov_do_map(uintptr_t base, size_t sz, vm_prot_t prot)
 	    &user_addr,
 	    size,
 	    0,
-	    VM_FLAGS_ANYWHERE,
-	    VM_MAP_KERNEL_FLAGS_NONE,
-	    VM_KERN_MEMORY_NONE,
+	    VM_MAP_KERNEL_FLAGS_ANYWHERE(),
 	    mem_entry,
 	    0,
 	    FALSE,
@@ -399,8 +397,8 @@ ksancov_open(dev_t dev, int flags, int devtype, proc_t p)
 #pragma unused(flags,devtype,p)
 	const int minor_num = minor(dev);
 
-	if (minor_num >= KSANCOV_MAX_DEV) {
-		return EBUSY;
+	if (minor_num < 0 || minor_num >= KSANCOV_MAX_DEV) {
+		return ENXIO;
 	}
 
 	lck_rw_lock_exclusive(&ksancov_devs_lck);
@@ -448,8 +446,8 @@ ksancov_trace_alloc(ksancov_dev_t d, ksancov_mode_t mode, size_t maxpcs)
 	}
 
 	/* allocate the shared memory buffer */
-	kern_return_t kr = kmem_alloc(kernel_map, &buf, sz,
-	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_DIAG);
+	kern_return_t kr = kmem_alloc(kernel_map, &buf, sz, KMA_DATA | KMA_ZERO,
+	    VM_KERN_MEMORY_DIAG);
 	if (kr != KERN_SUCCESS) {
 		return ENOMEM;
 	}
@@ -481,8 +479,8 @@ ksancov_counters_alloc(ksancov_dev_t d)
 	size_t sz = sizeof(struct ksancov_counters) + ksancov_edgemap->ke_nedges * sizeof(uint8_t);
 
 	/* allocate the shared memory buffer */
-	kern_return_t kr = kmem_alloc(kernel_map, &buf, sz,
-	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_DIAG);
+	kern_return_t kr = kmem_alloc(kernel_map, &buf, sz, KMA_DATA | KMA_ZERO,
+	    VM_KERN_MEMORY_DIAG);
 	if (kr != KERN_SUCCESS) {
 		return ENOMEM;
 	}
@@ -577,6 +575,10 @@ ksancov_close(dev_t dev, int flags, int devtype, proc_t p)
 #pragma unused(flags,devtype,p)
 	const int minor_num = minor(dev);
 
+	if (minor_num < 0 || minor_num >= KSANCOV_MAX_DEV) {
+		return ENXIO;
+	}
+
 	lck_rw_lock_exclusive(&ksancov_devs_lck);
 	ksancov_dev_t d = ksancov_devs[minor_num];
 	ksancov_devs[minor_num] = NULL; /* dev no longer discoverable */
@@ -648,11 +650,17 @@ static int
 ksancov_ioctl(dev_t dev, unsigned long cmd, caddr_t _data, int fflag, proc_t p)
 {
 #pragma unused(fflag,p)
+	const int minor_num = minor(dev);
+
+	if (minor_num < 0 || minor_num >= KSANCOV_MAX_DEV) {
+		return ENXIO;
+	}
+
 	struct ksancov_buf_desc *mcmd;
 	void *data = (void *)_data;
 
 	lck_rw_lock_shared(&ksancov_devs_lck);
-	ksancov_dev_t d = ksancov_devs[minor(dev)];
+	ksancov_dev_t d = ksancov_devs[minor_num];
 	if (!d) {
 		lck_rw_unlock_shared(&ksancov_devs_lck);
 		return EINVAL;         /* dev not open */

@@ -99,7 +99,6 @@
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_init.h>
 #include <ipc/ipc_voucher.h>
-#include <ipc/ipc_importance.h>
 #include <ipc/ipc_eventlink.h>
 
 #include <mach/machine/ndr_def.h>   /* NDR_record */
@@ -165,9 +164,6 @@ ipc_init(void)
 
 	/* initialize modules with hidden data structures */
 
-#if IMPORTANCE_INHERITANCE
-	ipc_importance_init();
-#endif
 #if CONFIG_ARCADE
 	arcade_init();
 #endif
@@ -190,13 +186,13 @@ ipc_init(void)
 
 	ipc_kernel_map = kmem_suballoc(kernel_map, &ipc_kernel_range.min_address,
 	    IPC_KERNEL_MAP_SIZE, VM_MAP_CREATE_PAGEABLE,
-	    VM_FLAGS_FIXED_RANGE_SUBALLOC, KMS_PERMANENT | KMS_NOFAIL,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_PERMANENT | KMS_NOFAIL,
 	    VM_KERN_MEMORY_IPC).kmr_submap;
 
 	ipc_kernel_copy_map = kmem_suballoc(kernel_map, &ipc_kernel_copy_range.min_address,
 	    IPC_KERNEL_COPY_MAP_SIZE,
 	    VM_MAP_CREATE_PAGEABLE | VM_MAP_CREATE_DISABLE_HOLELIST,
-	    VM_FLAGS_FIXED_RANGE_SUBALLOC, KMS_PERMANENT | KMS_NOFAIL,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_PERMANENT | KMS_NOFAIL,
 	    VM_KERN_MEMORY_IPC).kmr_submap;
 
 	ipc_kernel_copy_map->no_zero_fill = TRUE;

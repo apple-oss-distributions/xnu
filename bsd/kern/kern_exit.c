@@ -108,6 +108,8 @@
 #include <sys/sdt.h>
 #include <sys/bsdtask_info.h> /* bsd_getthreadname */
 #include <sys/spawn.h>
+#include <sys/ubc.h>
+#include <sys/code_signing.h>
 
 #include <security/audit/audit.h>
 #include <bsm/audit_kevents.h>
@@ -491,7 +493,7 @@ populate_corpse_crashinfo(proc_t p, task_t corpse_task, struct rusage_superset *
 	struct proc_workqueueinfo pwqinfo;
 	int retval = 0;
 	uint64_t crashed_threadid = task_corpse_get_crashed_thread_id(corpse_task);
-	bool is_corpse_fork;
+	boolean_t is_corpse_fork;
 	uint32_t csflags;
 	unsigned int pflags = 0;
 	uint64_t max_footprint_mb;
@@ -781,6 +783,45 @@ populate_corpse_crashinfo(proc_t p, task_t corpse_task, struct rusage_superset *
 	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_EXCEPTION_TYPE, sizeof(etype), &uaddr)) {
 		kcdata_memcpy(crash_info_ptr, uaddr, &etype, sizeof(etype));
 	}
+
+	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_CRASH_COUNT, sizeof(int), &uaddr)) {
+		kcdata_memcpy(crash_info_ptr, uaddr, &p->p_crash_count, sizeof(int));
+	}
+
+	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_THROTTLE_TIMEOUT, sizeof(int), &uaddr)) {
+		kcdata_memcpy(crash_info_ptr, uaddr, &p->p_throttle_timeout, sizeof(int));
+	}
+
+	char signing_id[MAX_CRASHINFO_SIGNING_ID_LEN] = {};
+	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_CS_SIGNING_ID, sizeof(signing_id), &uaddr)) {
+		const char * id = cs_identity_get(p);
+		if (id) {
+			strlcpy(signing_id, id, sizeof(signing_id));
+		}
+		kcdata_memcpy(crash_info_ptr, uaddr, &signing_id, sizeof(signing_id));
+	}
+	char team_id[MAX_CRASHINFO_TEAM_ID_LEN] = {};
+	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_CS_TEAM_ID, sizeof(team_id), &uaddr)) {
+		const char * id = csproc_get_teamid(p);
+		if (id) {
+			strlcpy(team_id, id, sizeof(team_id));
+		}
+		kcdata_memcpy(crash_info_ptr, uaddr, &team_id, sizeof(team_id));
+	}
+
+	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_CS_VALIDATION_CATEGORY, sizeof(uint32_t), &uaddr)) {
+		uint32_t category = 0;
+		if (csproc_get_validation_category(p, &category) != KERN_SUCCESS) {
+			category = CS_VALIDATION_CATEGORY_INVALID;
+		}
+		kcdata_memcpy(crash_info_ptr, uaddr, &category, sizeof(category));
+	}
+
+	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_CS_TRUST_LEVEL, sizeof(uint32_t), &uaddr)) {
+		uint32_t trust = 0; //Filling this in is a future action item: rdar://101973010
+		kcdata_memcpy(crash_info_ptr, uaddr, &trust, sizeof(trust));
+	}
+
 
 	if (p->p_exit_reason != OS_REASON_NULL && reason == OS_REASON_NULL) {
 		reason = p->p_exit_reason;
@@ -1146,6 +1187,14 @@ current_thread_collect_backtrace_info(
 
 	if (KERN_SUCCESS == kcdata_get_memory_addr(kcdata, TASK_BTINFO_EXCEPTION_TYPE, sizeof(etype), &kaddr)) {
 		kcdata_memcpy(kcdata, kaddr, &etype, sizeof(etype));
+	}
+
+	if (KERN_SUCCESS == kcdata_get_memory_addr(kcdata, TASK_BTINFO_CRASH_COUNT, sizeof(int), &kaddr)) {
+		kcdata_memcpy(kcdata, kaddr, &p->p_crash_count, sizeof(int));
+	}
+
+	if (KERN_SUCCESS == kcdata_get_memory_addr(kcdata, TASK_BTINFO_THROTTLE_TIMEOUT, sizeof(int), &kaddr)) {
+		kcdata_memcpy(kcdata, kaddr, &p->p_throttle_timeout, sizeof(int));
 	}
 
 	assert(codeCnt <= EXCEPTION_CODE_MAX);
@@ -1688,11 +1737,7 @@ proc_should_trigger_panic(proc_t p, int rv)
 static void
 proc_crash_coredump(proc_t p)
 {
-	if (p != initproc) {
-		/* Core dumps are only enabled for launchd for now */
-		return;
-	}
-
+	(void)p;
 #if (DEVELOPMENT || DEBUG) && CONFIG_COREDUMP
 	/*
 	 * For debugging purposes, generate a core file of initproc before
@@ -1718,11 +1763,11 @@ proc_crash_coredump(proc_t p)
 	tv_msec = tv_usec / 1000;
 
 	if (err != 0) {
-		printf("Failed to generate initproc core file: error %d, took %d.%03d seconds\n",
-		    err, (uint32_t)tv_sec, tv_msec);
+		printf("Failed to generate core file for pid: %d: error %d, took %d.%03d seconds\n",
+		    proc_getpid(p), err, (uint32_t)tv_sec, tv_msec);
 	} else {
-		printf("Generated initproc core file in %d.%03d seconds\n",
-		    (uint32_t)tv_sec, tv_msec);
+		printf("Generated core file for pid: %d in %d.%03d seconds\n",
+		    proc_getpid(p), (uint32_t)tv_sec, tv_msec);
 	}
 #endif /* (DEVELOPMENT || DEBUG) && CONFIG_COREDUMP */
 }
@@ -2416,8 +2461,6 @@ proc_exit(proc_t p)
 	zfree(proc_stats_zone, p->p_stats);
 	p->p_stats = NULL;
 
-	zfree_ro(ZONE_ID_PROC_SIGACTS_RO, p->p_sigacts.ps_ro);
-
 	proc_limitdrop(p);
 
 #if DEVELOPMENT || DEBUG
@@ -2717,7 +2760,7 @@ reap_child_locked(proc_t parent, proc_t child, reap_flags_t flags)
 
 	/* Take it out of process hash */
 	if (!shadow_proc) {
-		phash_remove_locked(proc_getpid(child), child);
+		phash_remove_locked(child);
 	}
 	proc_checkdeadrefs(child);
 	nprocs--;

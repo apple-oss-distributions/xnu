@@ -765,7 +765,7 @@ static int
 netif_vp_na_krings_create(struct nexus_adapter *na, struct kern_channel *ch)
 {
 	ASSERT(na->na_type == NA_NETIF_VP);
-	return na_rings_mem_setup(na, 0, FALSE, ch);
+	return na_rings_mem_setup(na, FALSE, ch);
 }
 
 

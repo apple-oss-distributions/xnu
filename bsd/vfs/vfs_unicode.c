@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2021 Apple, Inc. All rights reserved.
+ * Copyright (C) 2016-2023 Apple, Inc. All rights reserved.
  * Some portions covered by other copyrights, listed below.
  *---
  * Copyright (C) 2016 and later: Unicode, Inc. and others.
@@ -30,7 +30,7 @@ int32_t normalizeOptCaseFoldU32Char(int32_t u32char, bool case_sens,
     int32_t u32NormFoldBuf[kNFCSingleCharDecompMax],
     uint8_t combClass[kNFCSingleCharDecompMax]);
 /* local prototypes used by exported functions (not exported for separate testing) */
-static int nextBaseAndAnyMarks(const char** strP, const char *strLimit, bool case_sens,
+static int nextBaseAndAnyMarks(const char** strP, const char *strLimit, bool case_sens, bool allow_slashes,
     int32_t* unorm, uint8_t* unormcc, int32_t* unormlenP, int32_t* unormstartP,
     int32_t* buf, uint8_t* bufcc, int32_t* buflenP,
     bool* needReorderP, bool* startP);
@@ -50,7 +50,7 @@ int32_t u32CharToUTF8Bytes(uint32_t u32char, uint8_t utf8Bytes[kMaxUTF8BytesPerC
 void
 utf8_normalizeOptCaseFoldGetUVersion(unsigned char version[4])
 {
-	version[0] = 14;
+	version[0] = 15;
 	version[1] = 0;
 	version[2] = 0;
 	version[3] = 0;
@@ -134,8 +134,8 @@ utf8_normalizeOptCaseFoldAndHash(const char *str,
 		bool needReorder = false;
 		int err;
 
-		err = nextBaseAndAnyMarks(&str, strLimit, case_sens, unorm, unormcc, &unormlen, &unormstart,
-		    buf, bufcc, &buflen, &needReorder, &start);
+		err = nextBaseAndAnyMarks(&str, strLimit, case_sens, false /* allow_slashes */,
+		    unorm, unormcc, &unormlen, &unormstart, buf, bufcc, &buflen, &needReorder, &start);
 		if (err != 0) {
 			return err;
 		}
@@ -218,13 +218,13 @@ utf8_normalizeOptCaseFoldAndCompare(const char *strA,
 		bool needReorderA = false, needReorderB = false;
 		int err;
 
-		err = nextBaseAndAnyMarks(&strA, strALimit, case_sens, unormA, unormAcc, &unormAlen, &unormAstart,
-		    bufA, bufAcc, &bufAlen, &needReorderA, &startA);
+		err = nextBaseAndAnyMarks(&strA, strALimit, case_sens, false /* allow_slashes */,
+		    unormA, unormAcc, &unormAlen, &unormAstart, bufA, bufAcc, &bufAlen, &needReorderA, &startA);
 		if (err != 0) {
 			return err;
 		}
-		err = nextBaseAndAnyMarks(&strB, strBLimit, case_sens, unormB, unormBcc, &unormBlen, &unormBstart,
-		    bufB, bufBcc, &bufBlen, &needReorderB, &startB);
+		err = nextBaseAndAnyMarks(&strB, strBLimit, case_sens, false /* allow_slashes */,
+		    unormB, unormBcc, &unormBlen, &unormBstart, bufB, bufBcc, &bufBlen, &needReorderB, &startB);
 		if (err != 0) {
 			return err;
 		}
@@ -339,8 +339,8 @@ utf8_normalizeOptCaseFold(const char *str,
 		bool needReorder = false;
 		int err;
 
-		err = nextBaseAndAnyMarks(&str, strLimit, case_sens, unorm, unormcc, &unormlen, &unormstart,
-		    buf, bufcc, &buflen, &needReorder, &start);
+		err = nextBaseAndAnyMarks(&str, strLimit, case_sens, false /* allow_slashes */,
+		    unorm, unormcc, &unormlen, &unormstart, buf, bufcc, &buflen, &needReorder, &start);
 		if (err != 0) {
 			return err;
 		}
@@ -361,6 +361,66 @@ utf8_normalizeOptCaseFold(const char *str,
 		/* OK so far, top of loop clears buffers to start refilling again */
 	} while (str < strLimit || unormlen > 0);
 	*ustr_len = (uint32_t)(ustrCur - ustr); // XXXpjr: the explicit (uint32_t) cast wasn't present in the original code drop
+	return 0;
+}
+
+static int
+utf8_normalizeOptCaseFoldToUTF8_internal(const char *str,
+    size_t      str_len,
+    bool        case_sens,
+    bool        allow_slashes,
+    char       *ustr,
+    size_t      ustr_size,
+    size_t     *ustr_len)
+{
+	const char *strLimit = str + str_len;
+	char *ustrCur = ustr;
+	const char *ustrLimit = ustr + ustr_size;
+
+	/* Data for the next pending single-char norm from input;
+	 *  This will always begin with a base char (combining class 0) */
+	int32_t unorm[kNFCSingleCharDecompMax];
+	uint8_t unormcc[kNFCSingleCharDecompMax];
+	int32_t unormlen = 0;
+	int32_t unormstart = 0;
+
+	bool start = true;
+
+	*ustr_len = 0;
+	do {
+		/* Data for the buffers being built up from input */
+		int32_t buf[kNCFStreamSafeBufMax];
+		uint8_t bufcc[kNCFStreamSafeBufMax];
+		int32_t buflen = 0;
+		bool needReorder = false;
+		int err;
+
+		err = nextBaseAndAnyMarks(&str, strLimit, case_sens, allow_slashes,
+		    unorm, unormcc, &unormlen, &unormstart, buf, bufcc, &buflen, &needReorder, &start);
+		if (err != 0) {
+			return err;
+		}
+
+		if (buflen > 0) {
+			uint8_t utf8Bytes[kMaxUTF8BytesPerChar];
+			int32_t *bufPtr = buf;
+			if (needReorder) {
+				doReorder(buf, bufcc, buflen);
+			}
+			/* Now copy to output buffer */
+			while (buflen-- > 0) {
+				int32_t idx, utf8Len = u32CharToUTF8Bytes((uint32_t)*bufPtr++, utf8Bytes);
+				if (ustrCur + utf8Len > ustrLimit) {
+					return ENOMEM;
+				}
+				for (idx = 0; idx < utf8Len; idx++) {
+					*ustrCur++ = (char)utf8Bytes[idx];
+				}
+			}
+		}
+		/* OK so far, top of loop clears buffers to start refilling again */
+	} while (str < strLimit || unormlen > 0);
+	*ustr_len = ustrCur - ustr;
 	return 0;
 }
 
@@ -394,55 +454,41 @@ utf8_normalizeOptCaseFoldToUTF8(const char *str,
     size_t      ustr_size,
     size_t     *ustr_len)
 {
-	const char *strLimit = str + str_len;
-	char *ustrCur = ustr;
-	const char *ustrLimit = ustr + ustr_size;
+	return utf8_normalizeOptCaseFoldToUTF8_internal(str, str_len, case_sens, false /* allow_slashes */,
+	           ustr, ustr_size, ustr_len);
+}
 
-	/* Data for the next pending single-char norm from input;
-	 *  This will always begin with a base char (combining class 0) */
-	int32_t unorm[kNFCSingleCharDecompMax];
-	uint8_t unormcc[kNFCSingleCharDecompMax];
-	int32_t unormlen = 0;
-	int32_t unormstart = 0;
-
-	bool start = true;
-
-	*ustr_len = 0;
-	do {
-		/* Data for the buffers being built up from input */
-		int32_t buf[kNCFStreamSafeBufMax];
-		uint8_t bufcc[kNCFStreamSafeBufMax];
-		int32_t buflen = 0;
-		bool needReorder = false;
-		int err;
-
-		err = nextBaseAndAnyMarks(&str, strLimit, case_sens, unorm, unormcc, &unormlen, &unormstart,
-		    buf, bufcc, &buflen, &needReorder, &start);
-		if (err != 0) {
-			return err;
-		}
-
-		if (buflen > 0) {
-			uint8_t utf8Bytes[kMaxUTF8BytesPerChar];
-			int32_t *bufPtr = buf;
-			if (needReorder) {
-				doReorder(buf, bufcc, buflen);
-			}
-			/* Now copy to output buffer */
-			while (buflen-- > 0) {
-				int32_t idx, utf8Len = u32CharToUTF8Bytes((uint32_t)*bufPtr++, utf8Bytes);
-				if (ustrCur + utf8Len > ustrLimit) {
-					return ENOMEM;
-				}
-				for (idx = 0; idx < utf8Len; idx++) {
-					*ustrCur++ = (char)utf8Bytes[idx];
-				}
-			}
-		}
-		/* OK so far, top of loop clears buffers to start refilling again */
-	} while (str < strLimit || unormlen > 0);
-	*ustr_len = ustrCur - ustr;
-	return 0;
+/*
+ * utf8_normalizeOptCaseFoldToUTF8ForPath
+ * (This is similar to normalizeOptCaseFoldToUTF8 except that this allows '/' character.)
+ *
+ * str:       The input UTF-8 path string
+ * str_len:   The byte length of the input path string (excluding any 0 terminator)
+ * case_sens: False for case-insensitive behavior; generates canonical caseless form.
+ *            True for case-sensitive behavior; generates standard NFD.
+ * ustr:      A pointer to a buffer for the resulting UTF-8 string.
+ * ustr_size: The capacity of ustr, in bytes.
+ * ustr_len:  Pointer to a value that will be filled in with the actual length
+ *            in bytes of the string copied to ustr.
+ *
+ * Returns: 0 on success, or
+ *          EILSEQ: The input string contains illegal ASCII-range characters
+ *                  (0x00), or is not well-formed stream-safe UTF-8, or
+ *                  contains codepoints that are non-characters or unassigned in
+ *                  the version of Unicode currently supported.
+ *          ENOMEM: ustr_size is insufficient for the resulting string. In this
+ *                  case the value returned in *ustr_len is invalid.
+ */
+int
+utf8_normalizeOptCaseFoldToUTF8ForPath(const char *str,
+    size_t      str_len,
+    bool        case_sens,
+    char       *ustr,
+    size_t      ustr_size,
+    size_t     *ustr_len)
+{
+	return utf8_normalizeOptCaseFoldToUTF8_internal(str, str_len, case_sens, true /* allow_slashes */,
+	           ustr, ustr_size, ustr_len);
 }
 
 /*
@@ -541,8 +587,8 @@ utf8_normalizeOptCaseFoldAndMatchSubstring(const char    *strA,
 				bool needReorderA = false;
 				int err;
 
-				err = nextBaseAndAnyMarks(&strA, strALimit, case_sens, unormA, unormAcc, &unormAlen, &unormAstart,
-				    bufA, bufAcc, &bufAlen, &needReorderA, &startA);
+				err = nextBaseAndAnyMarks(&strA, strALimit, case_sens, false /* allow_slashes */,
+				    unormA, unormAcc, &unormAlen, &unormAstart, bufA, bufAcc, &bufAlen, &needReorderA, &startA);
 				if (err != 0) {
 					return err;
 				}
@@ -601,7 +647,7 @@ utf8_normalizeOptCaseFoldAndMatchSubstring(const char    *strA,
  */
 
 static int
-nextBaseAndAnyMarks(const char** strP, const char *strLimit, bool case_sens,
+nextBaseAndAnyMarks(const char** strP, const char *strLimit, bool case_sens, bool allow_slashes,
     int32_t* unorm, uint8_t* unormcc, int32_t* unormlenP, int32_t* unormstartP,
     int32_t* buf, uint8_t* bufcc, int32_t* buflenP,
     bool* needReorderP, bool* startP)
@@ -628,7 +674,7 @@ nextBaseAndAnyMarks(const char** strP, const char *strLimit, bool case_sens,
 			uint32_t bytevalue = (uint8_t)*(*strP)++;
 			/* '/' is not produced by NFD decomposition from another character so we can
 			 * check for it before normalization */
-			if (bytevalue == 0 || bytevalue == 0x2F /*'/'*/) {
+			if (bytevalue == 0 || (bytevalue == 0x2F /*'/'*/ && !allow_slashes)) {
 				return EILSEQ;
 			}
 			if (bytevalue < 0x80) {
@@ -872,7 +918,7 @@ normalizeOptCaseFoldU32Char(int32_t u32char, bool case_sens,
 		return 1;
 	}
 	/*  for trie lookup, shift the range 0xE0000-0xE01FF down to be just after the range */
-	/*  0 - 0x313FF; everything in between in currently invalid. */
+	/*  0 - 0x323FF; everything in between in currently invalid. */
 	int32_t u32charLookup = u32char;
 	if (u32charLookup >= kU32LowRangeLimit) {
 		u32charLookup -= (kU32HiRangeStart - kU32LowRangeLimit);
@@ -880,8 +926,8 @@ normalizeOptCaseFoldU32Char(int32_t u32char, bool case_sens,
 			return -1; /* in the large range of currently-unassigned code points */
 		}
 	}
-	/* Now we have u32charLookup either in 0..0x313FF representing u32char itself,
-	 *  or in 0x31400..0x315FF representing u32char 0xE0000..0xE01FF; look it up in
+	/* Now we have u32charLookup either in 0..0x323FF representing u32char itself,
+	 *  or in 0x32400..0x325FF representing u32char 0xE0000..0xE01FF; look it up in
 	 *  the trie that identifies unassigneds in this range, or maps others to
 	 *  decomps or combining class or just self. */
 	uint16_t trieValue;
@@ -1067,13 +1113,13 @@ getCombClassU32Char(int32_t u32char)
 		return 240;
 	}
 	/*  for trie lookup, shift the range 0xE0000-0xE01FF down to be just after the range */
-	/*  0 - 0x313FF; everything in between in currently invalid. */
+	/*  0 - 0x323FF; everything in between in currently invalid. */
 	int32_t u32charLookup = u32char;
 	if (u32charLookup >= kU32LowRangeLimit) {
 		u32charLookup -= (kU32HiRangeStart - kU32LowRangeLimit);
 	}
-	/* Now we have u32charLookup either in 0..0x313FF representing u32char itself,
-	 *  or in 0x31400..0x315FF representing u32char 0xE0000..0xE01FF; look it up in
+	/* Now we have u32charLookup either in 0..0x323FF representing u32char itself,
+	 *  or in 0x32400..0x325FF representing u32char 0xE0000..0xE01FF; look it up in
 	 *  the trie that identifies unassigneds in this range, or maps others to
 	 *  decomps or combining class or just self. */
 	uint16_t trieValue;

@@ -38,15 +38,13 @@
 #define HAS_IPI                 1 /* Has IPI registers */
 #define HAS_CLUSTER             1 /* Has eCores and pCores in separate clusters */
 #define HAS_RETENTION_STATE     1 /* Supports architectural state retention */
-#define HAS_DPC_ERR             1 /* Has an error register for DPC */
 #define HAS_UCNORMAL_MEM        1 /* Supports completely un-cacheable normal memory type */
-#define HAS_TWO_STAGE_SPR_LOCK  1 /* SPR locks are split into RO_CTL and LOCK registers */
 #define HAS_FAST_CNTVCT         1
 #define HAS_ACNTVCT             1 /* Supports private ISA non speculative MRS reads of timebase registers (ACNTPCT/ACNTVCT) */
+
+#define HAS_ARM_FEAT_SSBS2      1 /* Supports Speculative Store Bypass Safe with MSR controls */
 #define HAS_USAT_BIT            1 /* ACTLR has USAT bit (H12+) */
 #define HAS_E0PD                1 /* Supports E0PD0 and E0PD1 in TCR for Meltdown mitigation (ARMv8.5)*/
-#define HAS_ARM_FEAT_SSBS2      1 /* Supports Speculative Store Bypass Safe with MSR controls */
-#define HAS_ICACHE_FUSION_BUG   1 /* HW bug that causes incorrect reporting of instruction aborts on fused instructions */
 #define HAS_CPU_DPE_COUNTER     1 /* Has a hardware counter for digital power estimation */
 #define HAS_GUARDED_IO_FILTER   1 /* Has a guarded runtime dedicated to the fine-grained IO access filter */
 
@@ -73,9 +71,6 @@
 #define __ARM_16K_PG__                          1
 #define __ARM_GLOBAL_SLEEP_BIT__                1
 #define __ARM_PAN_AVAILABLE__                   1
-#define __APPLE_WKDM_EXTENSIONS__               1
-#define __APPLE_WKDM_POPCNT_EXTENSIONS__        1
-#define __APPLE_WKDM_POPCNT_COMPRESSED_DATA__   0
 #define __ARM_SB_AVAILABLE__                    1
 #define __PLATFORM_WKDM_ALIGNMENT_MASK__        (0x3FULL)
 #define __PLATFORM_WKDM_ALIGNMENT_BOUNDARY__    (64)
@@ -83,8 +78,10 @@
 /* Optional CPU features -- an SoC may #undef these */
 #define ARM_PARAMETERIZED_PMAP               1
 #define __ARM_MIXED_PAGE_SIZE__              1
+
 #define __ARM_RANGE_TLBI__                   1
-#define __ARM_E2H__                          1
+
+#include <pexpert/arm64/vhe_disable.h>
 
 #include <pexpert/arm64/apple_arm64_common.h>
 

@@ -51,6 +51,8 @@
 #include <machine/limits.h>
 
 #include <pexpert/arm/protos.h>
+#include <pexpert/arm64/apple_arm64_regs.h>
+#include <pexpert/arm64/board_config.h>
 
 #include <vm/vm_page.h>
 #include <vm/pmap.h>
@@ -73,13 +75,14 @@
 
 #include <arm64/platform_error_handler.h>
 
-#if CONFIG_KERNEL_TBI && KASAN_TBI
+#if KASAN_TBI
 #include <san/kasan.h>
-#endif /* CONFIG_KERNEL_TBI && KASAN_TBI */
+#endif /* KASAN_TBI */
 
 #if CONFIG_UBSAN_MINIMAL
 #include <san/ubsan_minimal.h>
 #endif /* CONFIG_UBSAN_MINIMAL */
+
 
 #ifndef __arm64__
 #error Should only be compiling for arm64.
@@ -531,9 +534,9 @@ thread_exception_return()
 		thread->machine.exception_trace_code = 0;
 	}
 
-#if KASAN && CONFIG_KERNEL_TBI
+#if KASAN_TBI
 	kasan_unpoison_curstack(true);
-#endif /* KASAN && CONFIG_KERNEL_TBI */
+#endif /* KASAN_TBI */
 	arm64_thread_exception_return();
 	__builtin_unreachable();
 }
@@ -990,14 +993,14 @@ ptrauth_key_to_string(ptrauth_key key)
 }
 #endif /* __has_feature(ptrauth_calls) */
 
-#if CONFIG_KERNEL_TBI && KASAN_TBI
+#if KASAN_TBI
 static inline bool
 brk_comment_is_kasan_failure(uint16_t comment)
 {
 	return comment >= KASAN_TBI_ESR_BASE &&
 	       comment <= KASAN_TBI_ESR_TOP;
 }
-#endif /* CONFIG_KERNEL_TBI && KASAN_TBI */
+#endif /* KASAN_TBI */
 
 #if CONFIG_UBSAN_MINIMAL
 static inline bool
@@ -1031,12 +1034,12 @@ handle_kernel_breakpoint(arm_saved_state_t *state, uint32_t esr)
 	}
 #endif /* __has_feature(ptrauth_calls) */
 
-#if CONFIG_KERNEL_TBI && KASAN_TBI
+#if KASAN_TBI
 	if (brk_comment_is_kasan_failure(comment)) {
 		kasan_handle_brk_failure(saved_state64(state)->x[0], comment);
 		__builtin_unreachable();
 	}
-#endif /* CONFIG_KERNEL_TBI && KASAN_TBI */
+#endif /* KASAN_TBI */
 
 #if CONFIG_UBSAN_MINIMAL
 	if (brk_comment_is_ubsan(comment)) {
@@ -1891,7 +1894,7 @@ sleh_fiq(arm_saved_state_t *state)
 	if (gFastIPI) {
 		MRS(ipi_sr, "S3_5_C15_C1_1");
 
-		if (ipi_sr & 1) {
+		if (ipi_sr & ARM64_IPISR_IPI_PENDING) {
 			is_ipi = TRUE;
 		}
 	}
@@ -1919,7 +1922,7 @@ sleh_fiq(arm_saved_state_t *state)
 #endif
 
 #if defined(HAS_IPI)
-	if (is_ipi) {
+	if (type == DBG_INTR_TYPE_IPI) {
 		/*
 		 * Order is important here: we must ack the IPI by writing IPI_SR
 		 * before we call cpu_signal_handler().  Otherwise, there will be
@@ -1928,7 +1931,7 @@ sleh_fiq(arm_saved_state_t *state)
 		 * IPI to this CPU may be lost.  ISB is required to ensure the msr
 		 * is retired before execution of cpu_signal_handler().
 		 */
-		MSR("S3_5_C15_C1_1", ipi_sr);
+		MSR("S3_5_C15_C1_1", ARM64_IPISR_IPI_PENDING);
 		__builtin_arm_isb(ISB_SY);
 		cpu_signal_handler();
 	} else

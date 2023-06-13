@@ -48,7 +48,8 @@
  *	wired pages.  Caller is responsible for disposal
  *	via cpm_release.
  *
- *	These pages are all in "gobbled" state when .
+ *	These pages are all in "gobbled" state when
+ *	wired is FALSE.
  */
 extern kern_return_t
 cpm_allocate(vm_size_t size, vm_page_t *list, ppnum_t max_pnum, ppnum_t pnum_mask, boolean_t wire, int flags);

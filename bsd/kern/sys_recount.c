@@ -224,10 +224,17 @@ proc_pidthreadcounts(
 	const size_t counts_len = MIN(recount_topo_count(RCT_TOPO_CPU_KIND),
 	    RCT_CPU_KIND_COUNT);
 	counts.counts_len = (uint16_t)counts_len;
+	// The number of perflevels for this boot can be constrained by the `cpus=`
+	// boot-arg, so determine the runtime number to prevent unexpected calls
+	// into the machine-dependent layers from asserting.
+	unsigned int cpu_types = ml_get_cpu_types();
+	unsigned int level_count = __builtin_popcount(cpu_types);
 
 	for (unsigned int i = 0; i < counts_len; i++) {
-		const recount_cpu_kind_t cpu_kind = _perflevel_index_to_cpu_kind(i);
-		counts.counts[i] = _usage_to_proc_threadcounts(&usages[cpu_kind]);
+		if (i < level_count) {
+			const recount_cpu_kind_t cpu_kind = _perflevel_index_to_cpu_kind(i);
+			counts.counts[i] = _usage_to_proc_threadcounts(&usages[cpu_kind]);
+		}
 	}
 	size_t copyout_size = MIN(sizeof(uint64_t) +
 	    counts_len * sizeof(struct proc_threadcounts_data), usize);

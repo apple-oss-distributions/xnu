@@ -38,23 +38,6 @@
 #if CONFIG_SCHED_CLUTCH
 
 /*
- * Clutch ordering based on thread group flags (specified
- * by the thread grouping mechanism). These properties
- * define a thread group specific priority boost.
- *
- * The current implementation gives a slight boost to
- * HIGH & MED thread groups which effectively deprioritizes
- * daemon thread groups which are marked "Efficient" on AMP
- * systems.
- */
-__enum_decl(sched_clutch_tg_priority_t, uint8_t, {
-	SCHED_CLUTCH_TG_PRI_LOW           = 0,
-	SCHED_CLUTCH_TG_PRI_MED           = 1,
-	SCHED_CLUTCH_TG_PRI_HIGH          = 2,
-	SCHED_CLUTCH_TG_PRI_MAX           = 3,
-});
-
-/*
  * For the current implementation, bound threads are not managed
  * in the clutch hierarchy. This helper macro is used to indicate
  * if the thread should be in the hierarchy.
@@ -348,10 +331,6 @@ struct sched_clutch {
 	 * Grouping specific parameters. Currently the implementation only
 	 * supports thread_group based grouping.
 	 */
-	union {
-		/* (A) priority specified by the thread grouping mechanism */
-		sched_clutch_tg_priority_t _Atomic sc_tg_priority;
-	};
 	union {
 		/* (I) Pointer to thread group */
 		struct thread_group     *sc_tg;

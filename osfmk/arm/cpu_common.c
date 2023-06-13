@@ -599,6 +599,12 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 	}
 
 	while (cpu_signal & ~SIGPdisabled) {
+		if (cpu_signal & SIGPdebug) {
+			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPdebug, relaxed);
+			INTERRUPT_MASKED_DEBUG_START(DebuggerXCall, DBG_INTR_TYPE_IPI);
+			DebuggerXCall(cpu_data_ptr->cpu_int_state);
+			INTERRUPT_MASKED_DEBUG_END();
+		}
 		if (cpu_signal & SIGPdec) {
 			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPdec, relaxed);
 			INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_IPI);
@@ -618,15 +624,9 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 			cpu_handle_xcall(cpu_data_ptr);
 		}
 		if (cpu_signal & SIGPast) {
-			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPast, relaxed);
+			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPast, acquire);
 			INTERRUPT_MASKED_DEBUG_START(ast_check, DBG_INTR_TYPE_IPI);
 			ast_check(current_processor());
-			INTERRUPT_MASKED_DEBUG_END();
-		}
-		if (cpu_signal & SIGPdebug) {
-			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPdebug, relaxed);
-			INTERRUPT_MASKED_DEBUG_START(DebuggerXCall, DBG_INTR_TYPE_IPI);
-			DebuggerXCall(cpu_data_ptr->cpu_int_state);
 			INTERRUPT_MASKED_DEBUG_END();
 		}
 
@@ -743,8 +743,8 @@ cpu_data_startup_init(void)
 	 * normally runs, so we instead steal the memory for the PERCPU subsystem
 	 * even earlier.
 	 */
-	percpu_base.start  = (vm_offset_t)pmap_steal_memory(round_page(size));
-	bzero((void *)percpu_base.start, round_page(size));
+	percpu_base.start  = (vm_offset_t)pmap_steal_memory(size, PAGE_SIZE);
+	bzero((void *)percpu_base.start, size);
 
 	percpu_base.start -= percpu_section_start();
 	percpu_base.end    = percpu_base.start + size - 1;

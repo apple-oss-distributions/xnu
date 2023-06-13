@@ -625,11 +625,19 @@ uint32_t phy_write_panic = 0;
 #endif
 
 #if !defined(__x86_64__)
+
+#if DEVELOPMENT || DEBUG
+static const uint64_t TIMEBASE_TICKS_PER_USEC = 24000000ULL / USEC_PER_SEC;
+static const uint64_t DEFAULT_TRACE_PHY_TIMEOUT = 100 * TIMEBASE_TICKS_PER_USEC;
+#else
+static const uint64_t DEFAULT_TRACE_PHY_TIMEOUT = 0;
+#endif
+
 // The MACHINE_TIMEOUT facility only exists on ARM.
-MACHINE_TIMEOUT_WRITEABLE(report_phy_read_delay_to, "report-phy-read-delay", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
-MACHINE_TIMEOUT_WRITEABLE(report_phy_write_delay_to, "report-phy-write-delay", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
-MACHINE_TIMEOUT_WRITEABLE(trace_phy_read_delay_to, "trace-phy-read-delay", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
-MACHINE_TIMEOUT_WRITEABLE(trace_phy_write_delay_to, "trace-phy-write-delay", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT_DEV_WRITEABLE(report_phy_read_delay_to, "report-phy-read-delay", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT_DEV_WRITEABLE(report_phy_write_delay_to, "report-phy-write-delay", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT_DEV_WRITEABLE(trace_phy_read_delay_to, "trace-phy-read-delay", DEFAULT_TRACE_PHY_TIMEOUT, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT_DEV_WRITEABLE(trace_phy_write_delay_to, "trace-phy-write-delay", DEFAULT_TRACE_PHY_TIMEOUT, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
 
 #if SCHED_HYGIENE_DEBUG
 /*
@@ -867,6 +875,13 @@ ml_io_read(uintptr_t vaddr, int size)
 #endif /* ML_IO_SIMULATE_STRETCHED_ENABLED */
 #endif /* ML_IO_TIMEOUTS_ENABLED */
 
+#if DEVELOPMENT || DEBUG
+	boolean_t use_fences = !kern_feature_override(KF_IO_TIMEOUT_OVRD);
+	if (use_fences) {
+		ml_timebase_to_memory_fence();
+	}
+#endif
+
 	switch (size) {
 	case 1:
 		s1 = *(volatile unsigned char *)vaddr;
@@ -886,6 +901,12 @@ ml_io_read(uintptr_t vaddr, int size)
 		panic("Invalid size %d for ml_io_read(%p)", size, (void *)vaddr);
 		break;
 	}
+
+#if DEVELOPMENT || DEBUG
+	if (use_fences) {
+		ml_memory_to_timebase_fence();
+	}
+#endif
 
 #ifdef ML_IO_TIMEOUTS_ENABLED
 	if (__improbable(timeread == TRUE)) {
@@ -1015,6 +1036,13 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 #endif /* DEVELOPMENT || DEBUG */
 #endif /* ML_IO_TIMEOUTS_ENABLED */
 
+#if DEVELOPMENT || DEBUG
+	boolean_t use_fences = !kern_feature_override(KF_IO_TIMEOUT_OVRD);
+	if (use_fences) {
+		ml_timebase_to_memory_fence();
+	}
+#endif
+
 	switch (size) {
 	case 1:
 		*(volatile uint8_t *)vaddr = (uint8_t)val;
@@ -1032,6 +1060,12 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 		panic("Invalid size %d for ml_io_write(%p, 0x%llx)", size, (void *)vaddr, val);
 		break;
 	}
+
+#if DEVELOPMENT || DEBUG
+	if (use_fences) {
+		ml_memory_to_timebase_fence();
+	}
+#endif
 
 #ifdef ML_IO_TIMEOUTS_ENABLED
 	if (__improbable(timewrite == TRUE)) {
@@ -1274,38 +1308,36 @@ machine_timeout_init_with_suffix(const struct machine_timeout_spec *spec, char c
 	 * Determine scale value from DT and boot-args.
 	 */
 
-	uint32_t scale = 1;
+	uint64_t scale = 1;
 	uint32_t const *scale_data;
 	unsigned int scale_size = sizeof(scale_data);
 
-	/* If there is a scale factor /machine-timeouts/<name>-scale,
-	 * apply it. */
+	/* If there is a scale factor /machine-timeouts/<name>-scale, apply it. */
 	if (base != NULL && SecureDTGetProperty(base, scale_name, (const void **)&scale_data, &scale_size) == kSuccess) {
 		if (scale_size != sizeof(*scale_data)) {
 			panic("%s: unexpected machine timeout data_size %u for /machine-timeouts/%s-scale", __func__, scale_size, dt_name);
 		}
 
-		scale *= *scale_data;
+		scale = *scale_data;
 	}
 
-	/* If there is a scale factor /chosen/machine-timeouts/<name>-scale,
-	 * apply it as well. */
+	/* If there is a scale factor /chosen/machine-timeouts/<name>-scale, use that. */
 	if (chosen != NULL && SecureDTGetProperty(chosen, scale_name, (const void **)&scale_data, &scale_size) == kSuccess) {
 		if (scale_size != sizeof(*scale_data)) {
 			panic("%s: unexpected machine timeout data_size %u for /chosen/machine-timeouts/%s-scale", __func__,
 			    scale_size, dt_name);
 		}
 
-		scale *= *scale_data;
+		scale = *scale_data;
 	}
 
-	/* Finally, a boot-arg ml-timeout-<name>-scale applies as well. */
+	/* Finally, a boot-arg ml-timeout-<name>-scale takes precedence. */
 	if (PE_parse_boot_argn(boot_arg_scale_name, &boot_arg, sizeof(boot_arg))) {
-		scale *= boot_arg;
+		scale = boot_arg;
 	}
 
 	static bool global_scale_set;
-	static uint32_t global_scale;
+	static uint64_t global_scale;
 
 	if (!global_scale_set) {
 		/* Apply /machine-timeouts/global-scale if present */
@@ -1315,24 +1347,24 @@ machine_timeout_init_with_suffix(const struct machine_timeout_spec *spec, char c
 				    scale_size);
 			}
 
-			global_scale *= *scale_data;
+			global_scale = *scale_data;
 			global_scale_set = true;
 		}
 
-		/* Apply /chosen/machine-timeouts/global-scale if present */
+		/* Use /chosen/machine-timeouts/global-scale if present */
 		if (SecureDTGetProperty(chosen, "global-scale", (const void **)&scale_data, &scale_size) == kSuccess) {
 			if (scale_size != sizeof(*scale_data)) {
 				panic("%s: unexpected machine timeout data_size %u for /chosen/machine-timeouts/global-scale", __func__,
 				    scale_size);
 			}
 
-			global_scale *= *scale_data;
+			global_scale = *scale_data;
 			global_scale_set = true;
 		}
 
-		/* Finally, the boot-arg ml-timeout-global-scale applies */
+		/* Finally, the boot-arg ml-timeout-global-scale takes precedence. */
 		if (PE_parse_boot_argn("ml-timeout-global-scale", &boot_arg, sizeof(boot_arg))) {
-			global_scale *= boot_arg;
+			global_scale = boot_arg;
 			global_scale_set = true;
 		}
 	}
@@ -1372,6 +1404,7 @@ machine_timeout_init(const struct machine_timeout_spec *spec)
 	machine_timeout_init_with_suffix(spec, "");
 }
 
+#if DEVELOPMENT || DEBUG
 /*
  * Late timeout (re-)initialization, at the end of bsd_init()
  */
@@ -1412,6 +1445,7 @@ machine_timeout_bsd_init(void)
 
 #endif
 }
+#endif /* DEVELOPMENT || DEBUG */
 
 #if ML_IO_TIMEOUTS_ENABLED && CONFIG_XNUPOST
 #include <tests/xnupost.h>

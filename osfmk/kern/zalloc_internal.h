@@ -72,19 +72,22 @@
 #include <kern/spl.h>
 #endif /* !KASAN */
 
-#if KASAN_ZALLOC
 /*
  * Disable zalloc zero validation under kasan as it is
  * double-duty with what kasan already does.
  */
-#define ZALLOC_ENABLE_ZERO_CHECK 0
-#define ZONE_ENABLE_LOGGING 0
-#elif DEBUG || DEVELOPMENT
-#define ZALLOC_ENABLE_ZERO_CHECK 1
-#define ZONE_ENABLE_LOGGING 1
+#if KASAN
+#define ZALLOC_ENABLE_ZERO_CHECK        0
 #else
-#define ZALLOC_ENABLE_ZERO_CHECK 1
-#define ZONE_ENABLE_LOGGING 0
+#define ZALLOC_ENABLE_ZERO_CHECK        1
+#endif
+
+#if KASAN
+#define ZALLOC_ENABLE_LOGGING           0
+#elif DEBUG || DEVELOPMENT
+#define ZALLOC_ENABLE_LOGGING           1
+#else
+#define ZALLOC_ENABLE_LOGGING           0
 #endif
 
 /*!
@@ -136,10 +139,37 @@ typedef struct zone_packed_virtual_address {
 struct zone_stats {
 	uint64_t            zs_mem_allocated;
 	uint64_t            zs_mem_freed;
+	uint64_t            zs_alloc_fail;
 	uint32_t            zs_alloc_rr;     /* allocation rr bias */
 };
 
-STAILQ_HEAD(zone_depot, zone_magazine);
+typedef struct zone_magazine *zone_magazine_t;
+
+/*!
+ * @struct zone_depot
+ *
+ * @abstract
+ * Holds a list of full and empty magazines.
+ *
+ * @discussion
+ * The data structure is a "STAILQ" and an "SLIST" combined with counters
+ * to know their lengths in O(1). Here is a graphical example:
+ *
+ *      zd_full = 3
+ *      zd_empty = 1
+ * ╭─── zd_head
+ * │ ╭─ zd_tail
+ * │ ╰────────────────────────────────────╮
+ * │    ╭───────╮   ╭───────╮   ╭───────╮ v ╭───────╮
+ * ╰───>│███████┼──>│███████┼──>│███████┼──>│       ┼─> X
+ *      ╰───────╯   ╰───────╯   ╰───────╯   ╰───────╯
+ */
+struct zone_depot {
+	uint32_t            zd_full;
+	uint32_t            zd_empty;
+	zone_magazine_t     zd_head;
+	zone_magazine_t    *zd_tail;
+};
 
 /* see https://lemire.me/blog/2019/02/20/more-fun-with-fast-remainders-when-the-divisor-is-a-constant/ */
 #define Z_MAGIC_QUO(s)      (((1ull << 32) - 1) / (uint64_t)(s) + 1)
@@ -190,6 +220,9 @@ struct zone_expand {
 	bool                ze_clear_priv;
 };
 
+#define Z_WMA_UNIT (1u << 8)
+#define Z_WMA_MIX(base, e)  ((3 * (base) + (e) * Z_WMA_UNIT) / 4)
+
 struct zone {
 	/*
 	 * Readonly / rarely written fields
@@ -205,9 +238,7 @@ struct zone {
 	zone_stats_t        z_stats;
 	const char         *z_name;
 	struct zone_view   *z_views;
-
 	struct zone_expand *z_expander;
-	struct zone_cache  *__zpercpu z_pcpu_cache;
 
 	uint64_t            z_quo_magic;
 	uint32_t            z_align_magic;
@@ -222,43 +253,95 @@ struct zone {
 	 */
 	    z_destroyed        :1,  /* zone is (being) destroyed */
 	    z_async_refilling  :1,  /* asynchronous allocation pending? */
+	    z_depot_cleanup    :1,  /* per cpu depots need cleaning */
 	    z_expanding_wait   :1,  /* is thread waiting for expansion? */
 
 	/*
 	 * Behavior configuration bits
 	 */
 	    z_percpu           :1,  /* the zone is percpu */
+	    z_smr              :1,  /* the zone uses SMR */
 	    z_permanent        :1,  /* the zone allocations are permanent */
 	    z_nocaching        :1,  /* disallow zone caching for this zone */
 	    collectable        :1,  /* garbage collect empty pages */
 	    exhaustible        :1,  /* merely return if empty? */
-	    expandable         :1,  /* expand zone (with message)? */
 	    no_callout         :1,
 	    z_destructible     :1,  /* zone can be zdestroy()ed  */
 
-	    _reserved          :6,
+	    _reserved          :7,
 
 	/*
 	 * Debugging features
 	 */
-	    alignment_required :1,  /* element alignment needs to be preserved */
 	    z_pgz_tracked      :1,  /* this zone is tracked by pgzalloc */
 	    z_pgz_use_guards   :1,  /* this zone uses guards with PGZ */
-	    kasan_fakestacks   :1,
-	    kasan_noquarantine :1,  /* whether to use the kasan quarantine */
+	    z_kasan_fakestacks :1,
+	    z_kasan_quarantine :1,  /* whether to use the kasan quarantine */
 	    z_tags_sizeclass   :6,  /* idx into zone_tags_sizeclasses to associate
 	                             * sizeclass for a particualr kalloc tag */
 	    z_uses_tags        :1,
-	    z_tags_inline      :1,
 	    z_log_on           :1,  /* zone logging was enabled by boot-arg */
 	    z_tbi_tag          :1;  /* Zone supports tbi tagging */
+
+	uint8_t             z_cacheline1[0] __attribute__((aligned(64)));
+
+	/*
+	 * Zone caching / recirculation cacheline
+	 *
+	 * z_recirc* fields are protected by the recirculation lock.
+	 *
+	 * z_recirc_cont_wma:
+	 *   weighted moving average of the number of contentions per second,
+	 *   in Z_WMA_UNIT units (fixed point decimal).
+	 *
+	 * z_recirc_cont_cur:
+	 *   count of recorded contentions that will be fused
+	 *   in z_recirc_cont_wma at the next period.
+	 *
+	 *   Note: if caching is disabled,
+	 *   this field is used under the zone lock.
+	 *
+	 * z_elems_free_{min,wma} (overloaded on z_recirc_empty*):
+	 *   tracks the history of the minimum values of z_elems_free over time
+	 *   with "min" being the minimum it hit for the current period,
+	 *   and "wma" the weighted moving average of those value.
+	 *
+	 *   This field is used if z_pcpu_cache is NULL,
+	 *   otherwise it aliases with z_recirc_empty_{min,wma}
+	 *
+	 * z_recirc_{full,empty}_{min,wma}:
+	 *   tracks the history of the the minimum number of full/empty
+	 *   magazines in the depot over time, with "min" being the minimum
+	 *   it hit for the current period, and "wma" the weighted moving
+	 *   average of those value.
+	 */
+	struct zone_cache  *__zpercpu z_pcpu_cache;
+	struct zone_depot   z_recirc;
+
+	hw_lck_ticket_t     z_recirc_lock;
+	uint32_t            z_recirc_full_min;
+	uint32_t            z_recirc_full_wma;
+	union {
+		uint32_t    z_recirc_empty_min;
+		uint32_t    z_elems_free_min;
+	};
+	union {
+		uint32_t    z_recirc_empty_wma;
+		uint32_t    z_elems_free_wma;
+	};
+	uint32_t            z_recirc_cont_cur;
+	uint32_t            z_recirc_cont_wma;
+
+	uint16_t            z_depot_size;
+	uint16_t            z_depot_limit;
+
+	uint8_t             z_cacheline2[0] __attribute__((aligned(64)));
 
 	/*
 	 * often mutated fields
 	 */
 
-	lck_ticket_t        z_lock;
-	struct zone_depot   z_recirc;
+	hw_lck_ticket_t     z_lock;
 
 	/*
 	 * Page accounting (wired / VA)
@@ -283,48 +366,23 @@ struct zone {
 	/*
 	 * Zone statistics
 	 *
-	 * z_contention_wma:
-	 *   weighted moving average of the number of contentions per second,
-	 *   in Z_CONTENTION_WMA_UNIT units (fixed point decimal).
-	 *
-	 * z_contention_cur:
-	 *   count of recorded contentions that will be fused in z_contention_wma
-	 *   at the next period.
-	 *
-	 * z_recirc_cur:
-	 *   number of magazines in the recirculation depot.
-	 *
-	 * z_elems_free:
-	 *   number of free elements in the zone.
-	 *
-	 * z_elems_{min,max}:
-	 *   tracks the low/high watermark of z_elems_free for the current
-	 *   weighted moving average period.
-	 *
-	 * z_elems_free_wss:
-	 *   weighted moving average of the (z_elems_free_max - z_elems_free_min)
-	 *   amplited which is used by the GC for trim operations.
-	 *
 	 * z_elems_avail:
 	 *   number of elements in the zone (at all).
 	 */
-#define Z_CONTENTION_WMA_UNIT (1u << 8)
-	uint32_t            z_contention_wma;
-	uint32_t            z_contention_cur;
-	uint32_t            z_recirc_cur;
-	uint32_t            z_elems_free_max;
-	uint32_t            z_elems_free_wss;
-	uint32_t            z_elems_free_min;
 	uint32_t            z_elems_free;   /* Number of free elements             */
 	uint32_t            z_elems_avail;  /* Number of elements available        */
 	uint32_t            z_elems_rsv;
 	uint32_t            z_array_size_class;
 
-#if KASAN_ZALLOC
-	uint32_t            z_kasan_redzone;
+	struct zone        *z_kt_next;
+
+	uint8_t             z_cacheline3[0] __attribute__((aligned(64)));
+
+#if KASAN_CLASSIC
+	uint16_t            z_kasan_redzone;
 	spl_t               z_kasan_spl;
 #endif
-#if ZONE_ENABLE_LOGGING || CONFIG_ZLEAKS
+#if ZONE_ENABLE_LOGGING || CONFIG_ZLEAKS || KASAN_TBI
 	/*
 	 * the allocation logs are used when:
 	 *
@@ -337,11 +395,7 @@ struct zone {
 	struct btlog       *z_btlog;
 	struct btlog       *z_btlog_disabled;
 #endif
-#if KASAN_TBI
-	struct btlog       *z_btlog_kasan;
-#endif /* KASAN_TBI */
-	struct zone        *z_kt_next;
-};
+} __attribute__((aligned((64))));
 
 /*!
  * @typedef zone_security_flags_t
@@ -359,33 +413,15 @@ typedef struct zone_security_flags {
 	 * Security sensitive configuration bits
 	 */
 	    z_submap_idx       :8,  /* a Z_SUBMAP_IDX_* value */
+	    z_kheap_id         :2,  /* zone_kheap_id_t when part of a kalloc heap */
+	    z_kalloc_type      :1,  /* zones that does types based seggregation */
+	    z_lifo             :1,  /* depot and recirculation layer are LIFO */
 	    z_pgz_use_guards   :1,  /* this zone uses guards with PGZ */
 	    z_submap_from_end  :1,  /* allocate from the left or the right ? */
-	    z_kheap_id         :3,  /* zone_kheap_id_t when part of a kalloc heap */
 	    z_noencrypt        :1,  /* do not encrypt pages when hibernating */
-	    z_va_sequester     :1,  /* page sequester: no VA reuse with other zones */
-	    z_kalloc_type      :1;  /* zones that does types based seggregation */
+	    z_unused           :1;
 } zone_security_flags_t;
 
-
-/*
- * Zsecurity config to enable sequestering VA of zones
- */
-#if KASAN_ZALLOC || !defined(__LP64__)
-#   define ZSECURITY_CONFIG_SEQUESTER                   OFF
-#else
-#   define ZSECURITY_CONFIG_SEQUESTER                   ON
-#endif
-
-/*
- * Zsecurity config to enable creating separate kalloc zones for
- * bags of bytes
- */
-#if KASAN_ZALLOC || !defined(__LP64__)
-#   define ZSECURITY_CONFIG_SUBMAP_USER_DATA            OFF
-#else
-#   define ZSECURITY_CONFIG_SUBMAP_USER_DATA            ON
-#endif
 
 /*
  * Zsecurity config to enable strict free of iokit objects to zone
@@ -404,7 +440,7 @@ typedef struct zone_security_flags {
 /*
  * Zsecurity config to enable the read-only allocator
  */
-#if KASAN_ZALLOC || !defined(__LP64__)
+#if KASAN_CLASSIC
 #   define ZSECURITY_CONFIG_READ_ONLY                   OFF
 #else
 #   define ZSECURITY_CONFIG_READ_ONLY                   ON
@@ -414,7 +450,7 @@ typedef struct zone_security_flags {
  * Zsecurity config to enable making heap feng-shui
  * less reliable.
  */
-#if KASAN_ZALLOC || !defined(__LP64__)
+#if KASAN_CLASSIC
 #   define ZSECURITY_CONFIG_SAD_FENG_SHUI               OFF
 #   define ZSECURITY_CONFIG_GENERAL_SUBMAPS             1
 #else
@@ -426,7 +462,7 @@ typedef struct zone_security_flags {
  * Zsecurity config to enable adjusting of elements
  * with PGZ-OOB to right-align them in their space.
  */
-#if KASAN || defined(__x86_64__) || !defined(__LP64__)
+#if KASAN || defined(__x86_64__)
 #   define ZSECURITY_CONFIG_PGZ_OOB_ADJUST              OFF
 #else
 #   define ZSECURITY_CONFIG_PGZ_OOB_ADJUST              ON
@@ -435,17 +471,11 @@ typedef struct zone_security_flags {
 /*
  * Zsecurity config to enable kalloc type segregation
  */
-#if KASAN_ZALLOC || !defined(__LP64__)
-#   define ZSECURITY_CONFIG_KALLOC_TYPE                 OFF
-#   define ZSECURITY_CONFIG_KT_BUDGET                   0
-#   define ZSECURITY_CONFIG_KT_VAR_BUDGET               0
-#else
-#   define ZSECURITY_CONFIG_KALLOC_TYPE                 ON
-#if XNU_TARGET_OS_WATCH
+#if XNU_TARGET_OS_WATCH || KASAN_CLASSIC
 #   define ZSECURITY_CONFIG_KT_BUDGET                   85
+#   define ZSECURITY_CONFIG_KT_VAR_BUDGET               3
 #else
 #   define ZSECURITY_CONFIG_KT_BUDGET                   200
-#endif
 #   define ZSECURITY_CONFIG_KT_VAR_BUDGET               3
 #endif
 
@@ -520,28 +550,17 @@ __enum_decl(zone_submap_idx_t, uint32_t, {
 });
 
 #define KALLOC_MINALIGN     (1 << KALLOC_LOG2_MINALIGN)
-#define KALLOC_DLUT_SIZE    (2048 / KALLOC_MINALIGN)
-
-struct kheap_zones {
-	struct kalloc_zone_cfg         *cfg;
-	struct kalloc_heap             *views;
-	zone_kheap_id_t                 heap_id;
-	uint16_t                        max_k_zone;
-	uint8_t                         dlut[KALLOC_DLUT_SIZE];   /* table of indices into k_zone[] */
-	uint8_t                         k_zindex_start;
-	/* If there's no hit in the DLUT, then start searching from k_zindex_start. */
-	zone_t                         *k_zone;
-};
 
 /*
  * Variable kalloc_type heap config
  */
-struct kt_heap_zones {
-	zone_id_t                       kh_zstart;
-	zone_kheap_id_t                 heap_id;
-	struct kalloc_type_var_view    *views;
+struct kheap_info {
+	zone_id_t             kh_zstart;
+	union {
+		kalloc_heap_t       kh_views;
+		kalloc_type_var_view_t kt_views;
+	};
 };
-
 typedef union kalloc_type_views {
 	struct kalloc_type_view     *ktv_fixed;
 	struct kalloc_type_var_view *ktv_var;
@@ -549,7 +568,7 @@ typedef union kalloc_type_views {
 
 #define KT_VAR_MAX_HEAPS 8
 #define MAX_ZONES       650
-extern struct kt_heap_zones     kalloc_type_heap_array[KT_VAR_MAX_HEAPS];
+extern struct kheap_info        kalloc_type_heap_array[KT_VAR_MAX_HEAPS];
 extern zone_id_t _Atomic        num_zones;
 extern uint32_t                 zone_view_count;
 extern struct zone              zone_array[MAX_ZONES];
@@ -559,7 +578,7 @@ extern const char * const       kalloc_heap_names[KHEAP_ID_COUNT];
 extern mach_memory_info_t      *panic_kext_memory_info;
 extern vm_size_t                panic_kext_memory_size;
 extern vm_offset_t              panic_fault_address;
-extern vm_map_size_t            zone_map_size;
+extern uint16_t                 _zc_mag_size;
 
 #define zone_index_foreach(i) \
 	for (zone_id_t i = 1, num_zones_##i = os_atomic_load(&num_zones, acquire); \
@@ -572,13 +591,6 @@ extern vm_map_size_t            zone_map_size;
 
 __abortlike
 extern void zone_invalid_panic(zone_t zone);
-
-__pure2
-static inline zone_t
-zone_by_id(size_t zid)
-{
-	return (zone_t)((uintptr_t)zone_array + zid * sizeof(struct zone));
-}
 
 __pure2
 static inline zone_id_t
@@ -612,16 +624,42 @@ zone_addr_size_crosses_page(mach_vm_address_t addr, mach_vm_size_t size)
 
 __pure2
 static inline uint16_t
-zone_elem_offs(zone_t zone)
+zone_elem_redzone(zone_t zone)
+{
+#if KASAN_CLASSIC
+	return zone->z_kasan_redzone;
+#else
+	(void)zone;
+	return 0;
+#endif
+}
+
+__pure2
+static inline uint16_t
+zone_elem_inner_offs(zone_t zone)
 {
 	return zone->z_elem_offs;
 }
 
 __pure2
+static inline uint16_t
+zone_elem_outer_offs(zone_t zone)
+{
+	return zone_elem_inner_offs(zone) - zone_elem_redzone(zone);
+}
+
+__pure2
 static inline vm_offset_t
-zone_elem_size(zone_t zone)
+zone_elem_inner_size(zone_t zone)
 {
 	return zone->z_elem_size;
+}
+
+__pure2
+static inline vm_offset_t
+zone_elem_outer_size(zone_t zone)
+{
+	return zone_elem_inner_size(zone) + zone_elem_redzone(zone);
 }
 
 __pure2
@@ -633,9 +671,15 @@ zone_security_config(zone_t z)
 }
 
 static inline uint32_t
+zone_count_free(zone_t zone)
+{
+	return zone->z_elems_free + zone->z_recirc.zd_full * _zc_mag_size;
+}
+
+static inline uint32_t
 zone_count_allocated(zone_t zone)
 {
-	return zone->z_elems_avail - zone->z_elems_free;
+	return zone->z_elems_avail - zone_count_free(zone);
 }
 
 static inline vm_size_t
@@ -662,7 +706,7 @@ static inline vm_size_t
 zone_size_free(zone_t zone)
 {
 	return zone_scale_for_percpu(zone,
-	           (vm_size_t)zone->z_elem_size * zone->z_elems_free);
+	           zone_elem_inner_size(zone) * zone_count_free(zone));
 }
 
 /* Under KASAN builds, this also accounts for quarantined elements. */
@@ -670,14 +714,14 @@ static inline vm_size_t
 zone_size_allocated(zone_t zone)
 {
 	return zone_scale_for_percpu(zone,
-	           (vm_size_t)zone->z_elem_size * zone_count_allocated(zone));
+	           zone_elem_inner_size(zone) * zone_count_allocated(zone));
 }
 
 static inline vm_size_t
 zone_size_wasted(zone_t zone)
 {
 	return zone_size_wired(zone) - zone_scale_for_percpu(zone,
-	           (vm_size_t)zone->z_elem_size * zone->z_elems_avail);
+	           zone_elem_outer_size(zone) * zone->z_elems_avail);
 }
 
 /*
@@ -729,7 +773,7 @@ extern void     zone_gc(zone_gc_level_t level);
 extern void     zone_gc_trim(void);
 extern void     zone_gc_drain(void);
 
-#define ZONE_WSS_UPDATE_PERIOD  10
+#define ZONE_WSS_UPDATE_PERIOD  15
 /*!
  * @function compute_zone_working_set_size
  *
@@ -749,6 +793,9 @@ extern void     get_largest_zone_info(char *zone_name, size_t zone_name_len, uin
 
 /* Bootstrap zone module (create zone zone) */
 extern void     zone_bootstrap(void);
+
+/* Force-enable caching on a zone, generally unsafe to call directly */
+extern void     zone_enable_caching(zone_t zone);
 
 /*!
  * @function zone_early_mem_init
@@ -813,12 +860,6 @@ extern void     zone_map_sizes(
 extern bool
 zone_map_nearing_exhaustion(void);
 
-#if defined(__LP64__)
-#define ZONE_POISON       0xdeadbeefdeadbeef
-#else
-#define ZONE_POISON       0xdeadbeef
-#endif
-
 static inline vm_tag_t
 zalloc_flags_get_tag(zalloc_flags_t flags)
 {
@@ -830,11 +871,20 @@ extern struct kalloc_result zalloc_ext(
 	zone_stats_t    zstats,
 	zalloc_flags_t  flags);
 
+#if KASAN
+#define ZFREE_PACK_SIZE(esize, usize)   (((uint64_t)(usize) << 32) | (esize))
+#define ZFREE_ELEM_SIZE(combined)       ((uint32_t)(combined))
+#define ZFREE_USER_SIZE(combined)       ((combined) >> 32)
+#else
+#define ZFREE_PACK_SIZE(esize, usize)   (esize)
+#define ZFREE_ELEM_SIZE(combined)       (combined)
+#endif
+
 extern void     zfree_ext(
 	zone_t          zone,
 	zone_stats_t    zstats,
 	void           *addr,
-	vm_size_t       elem_size);
+	uint64_t        combined_size);
 
 extern zone_id_t zone_id_for_element(
 	void           *addr,
@@ -939,19 +989,6 @@ __pure2
 extern vm_map_t zone_submap(
 	zone_security_flags_t   zsflags);
 
-/*
- *  Structure for keeping track of a backtrace, used for leak detection.
- *  This is in the .h file because it is used during panic, see kern/debug.c
- *  A non-zero size indicates that the trace is in use.
- */
-struct ztrace {
-	vm_size_t               zt_size;                        /* How much memory are all the allocations referring to this trace taking up? */
-	uint32_t                zt_depth;                       /* depth of stack (0 to MAX_ZTRACE_DEPTH) */
-	void*                   zt_stack[MAX_ZTRACE_DEPTH];     /* series of return addresses from OSBacktrace */
-	uint32_t                zt_collisions;                  /* How many times did a different stack land here while it was occupied? */
-	uint32_t                zt_hit_count;                   /* for determining effectiveness of hash function */
-};
-
 #ifndef VM_TAG_SIZECLASSES
 #error MAX_TAG_ZONES
 #endif
@@ -967,31 +1004,31 @@ extern lck_grp_t zone_locks_grp;
 static inline void
 zone_lock(zone_t zone)
 {
-#if KASAN_ZALLOC
+#if KASAN_FAKESTACK
 	spl_t s = 0;
-	if (zone->kasan_fakestacks) {
+	if (zone->z_kasan_fakestacks) {
 		s = splsched();
 	}
-#endif /* KASAN_ZALLOC */
-	lck_ticket_lock(&zone->z_lock, &zone_locks_grp);
-#if KASAN_ZALLOC
+#endif /* KASAN_FAKESTACK */
+	hw_lck_ticket_lock(&zone->z_lock, &zone_locks_grp);
+#if KASAN_FAKESTACK
 	zone->z_kasan_spl = s;
-#endif /* KASAN_ZALLOC */
+#endif /* KASAN_FAKESTACK */
 }
 
 static inline void
 zone_unlock(zone_t zone)
 {
-#if KASAN_ZALLOC
+#if KASAN_FAKESTACK
 	spl_t s = zone->z_kasan_spl;
 	zone->z_kasan_spl = 0;
-#endif /* KASAN_ZALLOC */
-	lck_ticket_unlock(&zone->z_lock);
-#if KASAN_ZALLOC
-	if (zone->kasan_fakestacks) {
+#endif /* KASAN_FAKESTACK */
+	hw_lck_ticket_unlock(&zone->z_lock);
+#if KASAN_FAKESTACK
+	if (zone->z_kasan_fakestacks) {
 		splx(s);
 	}
-#endif /* KASAN_ZALLOC */
+#endif /* KASAN_FAKESTACK */
 }
 
 #define MAX_ZONE_NAME   32      /* max length of a zone name we can take from the boot-args */

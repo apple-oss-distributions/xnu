@@ -13,7 +13,7 @@ from utils import *
 from core.lazytarget import *
 import time
 import xnudefines
-import btlog
+import kmemory
 import memory
 import json
 from collections import defaultdict, namedtuple
@@ -161,7 +161,7 @@ def GetProcForPid(search_pid):
         return kern.globals.initproc
     else:
         headp = kern.globals.allproc
-        for proc in IterateListEntry(headp, 'struct proc *', 'p_list'):
+        for proc in IterateListEntry(headp, 'p_list'):
             if GetProcPID(proc) == search_pid:
                 return proc
         return None
@@ -182,7 +182,7 @@ def ZombProc(cmd_args=None):
         params: 
             cmd_args - [] : array of strings passed from lldb command prompt
     """
-    if len(kern.zombprocs) != 0:
+    if any(kern.zombprocs):
         print("\nZombie Processes:")
         for proc in kern.zombprocs:
             print(GetProcInfo(proc) + "\n\n")
@@ -193,7 +193,7 @@ def ZombTasks(cmd_args=None):
         params: None
     """
     out_str = ""
-    if len(kern.zombprocs) != 0:
+    if any(kern.zombprocs):
         header = "\nZombie Tasks:\n"
         header += GetTaskSummary.header + " " + GetProcSummary.header
         for proc in kern.zombprocs:
@@ -297,8 +297,10 @@ def GetTaskSummary(task, showcorpse=False):
         if int(tib.iit_assertcnt) > 0:
             task_flags += 'B'
 
+    proc_ro = Cast(task.bsd_info_ro, 'proc_ro *')
+
     # check if corpse flag is set
-    if unsigned(task.t_flags) & 0x20:
+    if unsigned(proc_ro.t_flags_ro) & 0x20:
         task_flags += 'C'
     if unsigned(task.t_flags) & 0x40:
         task_flags += 'P'
@@ -324,17 +326,21 @@ def GetBSDThread(thread):
 def GetProcFromTask(task):
     """ Converts the passed in value interpreted as a task_t into a proc_t
     """
-    if unsigned(task.t_flags) & TF_HAS_PROC:
-      proc_addr = unsigned(task) - kern.globals.proc_struct_size
-      return kern.GetValueFromAddress(proc_addr, 'proc *')
-    return None
+    if unsigned(task) and unsigned(task.t_flags) & TF_HAS_PROC:
+        addr = unsigned(task) - kern.globals.proc_struct_size
+        return value(task.GetSBValue().xCreateValueFromAddress(
+            'proc', addr, gettype('struct proc')
+        ).AddressOf())
+    return kern.GetValueFromAddress(0, 'proc *')
 
 def GetTaskFromProc(proc):
     """ Converts the passed in value interpreted as a proc_t into a task_t
     """
-    task = kern.GetValueFromAddress((unsigned(proc) + kern.globals.proc_struct_size), 'task *')
-    if unsigned(proc.p_lflag) & P_LHASTASK:
-      return task
+    if unsigned(proc) and unsigned(proc.p_lflag) & P_LHASTASK:
+        addr = unsigned(proc) + kern.globals.proc_struct_size
+        return value(proc.GetSBValue().xCreateValueFromAddress(
+            'task', addr, gettype('struct task')
+        ).AddressOf())
     return kern.GetValueFromAddress(0, 'task *')
 
 def GetThreadName(thread):
@@ -377,6 +383,7 @@ def GetThreadSummary(thread, O=None):
         A - Terminated (on queue)
         I - Idle thread
         C - Crashed thread
+        K - Waking
 
         policy flags:
         B - darwinbg
@@ -427,11 +434,11 @@ def GetThreadSummary(thread, O=None):
     state = int(thread.state)
     thread_state_chars = {
         0x0: '', 0x1: 'W', 0x2: 'S', 0x4: 'R', 0x8: 'U', 0x10: 'H', 0x20: 'A',
-        0x40: 'P', 0x80: 'I'
+        0x40: 'P', 0x80: 'I', 0x100: 'K'
     }
     state_str = ''
     mask = 0x1
-    while mask <= 0x80:
+    while mask <= 0x100:
         state_str += thread_state_chars[int(state & mask)]
         mask <<= 1
     
@@ -517,8 +524,8 @@ def GetCoalitionTasks(queue, coal_type, thread_details=False):
                  0x10 : "SFI_CLASS_MAINTENANCE",
                 }
     tasks = []
-    field_name = 'task_coalition'
-    for task in IterateLinkageChain(queue, 'task *', field_name, coal_type * sizeof('queue_chain_t')):
+    field_path = '.task_coalition[{}]'.format(coal_type)
+    for task in IterateLinkageChain(queue, 'task *', field_path):
         task_str = "({0: <d},{1: #x}, {2: <s}, {3: <s})".format(GetProcPIDForTask(task),task,GetProcNameForTask(task),GetTaskRoleString(task.effective_policy.tep_role))
         if thread_details:
             for thread in IterateQueue(task.threads, "thread_t", "task_threads"):
@@ -762,7 +769,7 @@ def GetProcSummary(proc):
     
     
     try:
-        work_queue = Cast(proc.p_wqptr, 'workqueue *')
+        work_queue = proc.p_wqptr
         if proc.p_wqptr != 0 :
             wq_num_threads = int(work_queue.wq_nthreads)
             wq_idle_threads = int(work_queue.wq_thidlecount)
@@ -1236,6 +1243,8 @@ def ShowTaskStacksCmdHelper(cmd_args=None, cmd_options={}, O=None):
 # EndMacro: showtaskstacks
 
 def CheckTaskProcRefs(task, proc, O=None):
+    btlib = kmemory.BTLibrary.get_shared()
+
     for thread in IterateQueue(task.threads, 'thread *', 'task_threads'):
         uthread = GetBSDThread(thread)
         refcount = int(uthread.uu_proc_refcount)
@@ -1253,9 +1262,8 @@ def CheckTaskProcRefs(task, proc, O=None):
                 with O.table(GetThreadSummary.header, indent=True):
                     print(GetThreadSummary(thread, O=O))
 
-                bts = btlog.BTLibrary().get_stack(unsigned(uu_ref_info.upri_proc_stacks[ref]))
-                for frame in bts.symbolicated_frames():
-                    print(frame)
+                bts = btlib.get_stack(unsigned(uu_ref_info.upri_proc_stacks[ref]))
+                print(*bts.symbolicated_frames(), sep="\n")
 
 @lldb_command('showprocrefs', fancy=True)
 def ShowProcRefs(cmd_args=None, cmd_options={}, O=None):
@@ -1545,7 +1553,7 @@ def ShowInitChild(cmd_args=None):
         which are children of init process
     """
     headp = kern.globals.initproc.p_children
-    for pp in IterateListEntry(headp, 'struct proc *', 'p_sibling'):
+    for pp in IterateListEntry(headp, 'p_sibling'):
         print(GetProcInfo(pp))
     return
 
@@ -1585,7 +1593,7 @@ def ShowProcTreeRecurse(proc, prefix=""):
     if proc.p_childrencnt > 0:
         head_ptr = proc.p_children.lh_first
         
-        for p in IterateListEntry(proc.p_children, 'struct proc *', 'p_sibling'):
+        for p in IterateListEntry(proc.p_children, 'p_sibling'):
             print(prefix + "|--{0: <6d} {1: <32s} [ {2: #019x} ]\n".format(
                     GetProcPID(p), GetProcName(p), unsigned(p)))
             ShowProcTreeRecurse(p, prefix + "|  ")
@@ -1970,7 +1978,7 @@ def ShowProcUUIDPolicyTable(cmd_args=None):
     for i in range(0, hashslots+1):
         headp = addressof(kern.globals.proc_uuid_policy_hashtbl[i])
         entrynum = 0
-        for entry in IterateListEntry(headp, 'struct proc_uuid_policy_entry *', 'entries'):
+        for entry in IterateListEntry(headp, 'entries'):
             print("{0: >2d}.{1: <5d} ".format(i, entrynum) + GetProcUUIDPolicyEntrySummary(entry))
             entrynum += 1
 
@@ -2170,7 +2178,7 @@ def ShowProcFilesSummary(cmd_args=None):
         proc_filedesc = addressof(proc.p_fd)
         proc_ofiles = proc_filedesc.fd_ofiles
         proc_file_count = 0
-        for fd in range(0, proc_filedesc.fd_first_allfree):
+        for fd in range(0, proc_filedesc.fd_afterlast):
             if unsigned(proc_ofiles[fd]) != 0:
                 proc_file_count += 1
         print("{0: <#020x} {1: <32s} {2: >10d}".format(proc, GetProcName(proc), proc_file_count))

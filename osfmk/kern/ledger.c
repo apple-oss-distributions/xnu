@@ -1341,6 +1341,7 @@ kern_return_t
 ledger_get_interval_max(ledger_t ledger, int entry,
     ledger_amount_t *max_interval_balance, int reset)
 {
+	kern_return_t kr = KERN_SUCCESS;
 	struct ledger_entry *le;
 
 	if (!is_entry_valid_and_active(ledger, entry)) {
@@ -1363,10 +1364,10 @@ ledger_get_interval_max(ledger_t ledger, int entry,
 	    (reset) ? " --> 0" : ""));
 
 	if (reset) {
-		le->_le._le_max.le_interval_max = 0;
+		kr = ledger_get_balance(ledger, entry, &le->_le._le_max.le_interval_max);
 	}
 
-	return KERN_SUCCESS;
+	return kr;
 }
 #endif /* CONFIG_LEDGER_INTERVAL_MAX */
 
@@ -1830,6 +1831,44 @@ ledger_ast(thread_t thread)
 
 	ASSERT(task != NULL);
 	ASSERT(thread == current_thread());
+
+#if CONFIG_SCHED_RT_ALLOW
+	/*
+	 * The RT policy may have forced a CPU limit on the thread. Check if
+	 * that's the case and apply the limit as requested.
+	 */
+	spl_t s = splsched();
+	thread_lock(thread);
+
+	int req_action = thread->t_ledger_req_action;
+	uint8_t req_percentage = thread->t_ledger_req_percentage;
+	uint64_t req_interval_ns = thread->t_ledger_req_interval_ms * NSEC_PER_MSEC;
+
+	thread->t_ledger_req_action = 0;
+
+	thread_unlock(thread);
+	splx(s);
+
+	if (req_action != 0) {
+		assert(req_action == THREAD_CPULIMIT_DISABLE ||
+		    req_action == THREAD_CPULIMIT_BLOCK);
+
+		if (req_action == THREAD_CPULIMIT_DISABLE &&
+		    (thread->options & TH_OPT_FORCED_LEDGER) != 0) {
+			thread->options &= ~TH_OPT_FORCED_LEDGER;
+			ret = thread_set_cpulimit(THREAD_CPULIMIT_DISABLE, 0, 0);
+			assert3u(ret, ==, KERN_SUCCESS);
+		}
+
+		if (req_action == THREAD_CPULIMIT_BLOCK) {
+			thread->options &= ~TH_OPT_FORCED_LEDGER;
+			ret = thread_set_cpulimit(THREAD_CPULIMIT_BLOCK,
+			    req_percentage, req_interval_ns);
+			assert3u(ret, ==, KERN_SUCCESS);
+			thread->options |= TH_OPT_FORCED_LEDGER;
+		}
+	}
+#endif /* CONFIG_SCHED_RT_ALLOW */
 
 top:
 	/*
@@ -2333,6 +2372,57 @@ ledger_info(task_t task, struct ledger_info *info)
 	info->li_id = l->l_id;
 	info->li_entries = l->l_template->lt_cnt;
 	return 0;
+}
+
+/*
+ * Returns the amount that would be required to hit the limit.
+ * Must be a valid, active, full-sized ledger.
+ */
+ledger_amount_t
+ledger_get_remaining(ledger_t ledger, int entry)
+{
+	const struct ledger_entry *le =
+	    ledger_entry_identifier_to_entry(ledger, entry);
+	const ledger_amount_t limit = le->le_limit;
+	const ledger_amount_t balance = le->le_credit - le->le_debit;
+
+	/* +1 here as the limit isn't hit until the limit is exceeded. */
+	return limit > balance ? limit - balance + 1 : 0;
+}
+
+/*
+ * Balances the ledger by modifying the debit only and sets the last refill time
+ * to `now`.
+ * WARNING: It is up to the caller to enforce consistency.
+ * Must be a valid, active, full-sized ledger.
+ */
+void
+ledger_restart(ledger_t ledger, int entry, uint64_t now)
+{
+	struct ledger_entry *le = ledger_entry_identifier_to_entry(ledger, entry);
+
+	le->le_debit = le->le_credit;
+	le->_le.le_refill.le_last_refill = now;
+}
+
+/*
+ * Returns the amount of time that would have to pass to expire the current
+ * interval.
+ * Must be a valid, active, full-sized ledger.
+ */
+uint64_t
+ledger_get_interval_remaining(ledger_t ledger, int entry, uint64_t now)
+{
+	const struct ledger_entry *le =
+	    ledger_entry_identifier_to_entry(ledger, entry);
+
+	if ((now - le->_le.le_refill.le_last_refill) >
+	    le->_le.le_refill.le_refill_period) {
+		return 0;
+	} else {
+		return le->_le.le_refill.le_refill_period -
+		       (now - le->_le.le_refill.le_last_refill) + 1;
+	}
 }
 
 #ifdef LEDGER_DEBUG

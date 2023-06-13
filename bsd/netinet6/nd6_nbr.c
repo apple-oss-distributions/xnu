@@ -1656,7 +1656,7 @@ struct dadq {
 	uint32_t dad_nonce[ND_OPT_NONCE_LEN32];
 };
 
-static ZONE_DEFINE_TYPE(dad_zone, "nd6_dad", struct dadq, ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(dad_zone, struct dadq, NET_KT_DEFAULT);
 static struct dadq_head dadq;
 
 void

@@ -64,6 +64,8 @@
 #define ARM64_REG_IPI_RR_TYPE_RETRACT   (1 << 28)
 #define ARM64_REG_IPI_RR_TYPE_DEFERRED  (2 << 28)
 #define ARM64_REG_IPI_RR_TYPE_NOWAKE    (3 << 28)
+
+#define ARM64_IPISR_IPI_PENDING         (1ull << 0)
 #endif /* defined(HAS_IPI) */
 
 

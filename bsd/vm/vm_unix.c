@@ -82,6 +82,7 @@
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/random.h>
+#include <sys/code_signing.h>
 #if NECP
 #include <net/necp.h>
 #endif /* NECP */
@@ -164,6 +165,19 @@ SYSCTL_PROC(_vm, OID_AUTO, kmem_alloc_contig, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG
 extern int vm_region_footprint;
 SYSCTL_INT(_vm, OID_AUTO, region_footprint, CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, &vm_region_footprint, 0, "");
 
+static int
+sysctl_kmem_gobj_stats SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2, oidp)
+	kmem_gobj_stats stats = kmem_get_gobj_stats();
+
+	return SYSCTL_OUT(req, &stats, sizeof(stats));
+}
+
+SYSCTL_PROC(_vm, OID_AUTO, sysctl_kmem_gobj_stats,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_MASKED,
+    0, 0, &sysctl_kmem_gobj_stats, "S,kmem_gobj_stats", "");
+
 #endif /* DEVELOPMENT || DEBUG */
 
 static int
@@ -233,6 +247,9 @@ SYSCTL_PROC(_vm, OID_AUTO, self_region_page_size, CTLTYPE_INT | CTLFLAG_RW | CTL
 #if DEVELOPMENT || DEBUG
 extern int panic_on_unsigned_execute;
 SYSCTL_INT(_vm, OID_AUTO, panic_on_unsigned_execute, CTLFLAG_RW | CTLFLAG_LOCKED, &panic_on_unsigned_execute, 0, "");
+
+extern int vm_log_xnu_user_debug;
+SYSCTL_INT(_vm, OID_AUTO, log_xnu_user_debug, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_log_xnu_user_debug, 0, "");
 #endif /* DEVELOPMENT || DEBUG */
 
 extern int cs_executable_create_upl;
@@ -768,7 +785,7 @@ pid_for_task(
 		if (p) {
 			pid  = proc_pid(p);
 			err = KERN_SUCCESS;
-		} else if (is_corpsetask(t1)) {
+		} else if (task_is_a_corpse(t1)) {
 			pid = task_pid(t1);
 			err = KERN_SUCCESS;
 		} else {
@@ -1019,7 +1036,7 @@ task_for_pid(
 	 * since we don't hold locks and may have grabbed a corpse control port
 	 * above which will prevent no-senders notification delivery.
 	 */
-	if (is_corpsetask(task)) {
+	if (task_is_a_corpse(task)) {
 		ipc_port_release_send(sright);
 		error = KERN_FAILURE;
 		goto tfpout;
@@ -1096,7 +1113,9 @@ task_name_for_pid(
 		    && ((current_proc() == p)
 		    || kauth_cred_issuser(kauth_cred_get())
 		    || ((kauth_cred_getuid(target_cred) == kauth_cred_getuid(kauth_cred_get())) &&
-		    ((kauth_cred_getruid(target_cred) == kauth_getruid()))))) {
+		    ((kauth_cred_getruid(target_cred) == kauth_getruid())))
+		    || IOCurrentTaskHasEntitlement("com.apple.system-task-ports.name.safe")
+		    )) {
 			if (proc_task(p) != TASK_NULL) {
 				struct proc_ident pident = proc_ident(p);
 
@@ -1241,7 +1260,7 @@ task_inspect_for_pid(struct proc *p __unused, struct task_inspect_for_pid_args *
 	}
 
 	/* Check if the task has been corpsified */
-	if (is_corpsetask(task_insp)) {
+	if (task_is_a_corpse(task_insp)) {
 		error = EACCES;
 		goto tifpout;
 	}
@@ -1363,7 +1382,7 @@ task_read_for_pid(struct proc *p __unused, struct task_read_for_pid_args *args, 
 	}
 
 	/* Check if the task has been corpsified */
-	if (is_corpsetask(task_read)) {
+	if (task_is_a_corpse(task_read)) {
 		error = EACCES;
 		goto trfpout;
 	}
@@ -1583,7 +1602,7 @@ debug_control_port_for_pid(struct debug_control_port_for_pid_args *args)
 	}
 
 	/* Check if the task has been corpsified */
-	if (is_corpsetask(task)) {
+	if (task_is_a_corpse(task)) {
 		error = KERN_FAILURE;
 		goto tfpout;
 	}
@@ -3366,6 +3385,9 @@ SYSCTL_UINT(_vm, OID_AUTO, pageout_enqueued_cleaned, CTLFLAG_RD | CTLFLAG_LOCKED
 extern int madvise_free_debug;
 SYSCTL_INT(_vm, OID_AUTO, madvise_free_debug, CTLFLAG_RW | CTLFLAG_LOCKED,
     &madvise_free_debug, 0, "zero-fill on madvise(MADV_FREE*)");
+extern int madvise_free_debug_sometimes;
+SYSCTL_INT(_vm, OID_AUTO, madvise_free_debug_sometimes, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &madvise_free_debug_sometimes, 0, "sometimes zero-fill on madvise(MADV_FREE*)");
 
 SYSCTL_INT(_vm, OID_AUTO, page_reusable_count, CTLFLAG_RD | CTLFLAG_LOCKED,
     &vm_page_stats_reusable.reusable_count, 0, "Reusable page count");
@@ -3423,6 +3445,14 @@ SYSCTL_ULONG(_vm, OID_AUTO, pageout_freed_external, CTLFLAG_RD | CTLFLAG_LOCKED,
 SYSCTL_ULONG(_vm, OID_AUTO, pageout_freed_speculative, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_pageout_vminfo.vm_pageout_freed_speculative, "");
 SYSCTL_ULONG(_vm, OID_AUTO, pageout_freed_cleaned, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_pageout_vminfo.vm_pageout_freed_cleaned, "");
 
+SYSCTL_ULONG(_vm, OID_AUTO, pageout_protected_sharedcache, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_pageout_vminfo.vm_pageout_protected_sharedcache, "");
+SYSCTL_ULONG(_vm, OID_AUTO, pageout_forcereclaimed_sharedcache, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_pageout_vminfo.vm_pageout_forcereclaimed_sharedcache, "");
+SYSCTL_ULONG(_vm, OID_AUTO, pageout_protected_realtime, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_pageout_vminfo.vm_pageout_protected_realtime, "");
+SYSCTL_ULONG(_vm, OID_AUTO, pageout_forcereclaimed_realtime, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_pageout_vminfo.vm_pageout_forcereclaimed_realtime, "");
+extern unsigned int vm_page_realtime_count;
+SYSCTL_UINT(_vm, OID_AUTO, page_realtime_count, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_realtime_count, 0, "");
+extern int vm_pageout_protect_realtime;
+SYSCTL_INT(_vm, OID_AUTO, pageout_protect_realtime, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_pageout_protect_realtime, 0, "");
 
 /* counts of pages prefaulted when entering a memory object */
 extern int64_t vm_prefault_nb_pages, vm_prefault_nb_bailout;
@@ -3478,6 +3508,7 @@ SYSCTL_UINT(_vm, OID_AUTO, page_secluded_grab_success_free, CTLFLAG_RD | CTLFLAG
 SYSCTL_UINT(_vm, OID_AUTO, page_secluded_grab_success_other, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_secluded.grab_success_other, 0, "");
 SYSCTL_UINT(_vm, OID_AUTO, page_secluded_grab_failure_locked, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_secluded.grab_failure_locked, 0, "");
 SYSCTL_UINT(_vm, OID_AUTO, page_secluded_grab_failure_state, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_secluded.grab_failure_state, 0, "");
+SYSCTL_UINT(_vm, OID_AUTO, page_secluded_grab_failure_realtime, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_secluded.grab_failure_realtime, 0, "");
 SYSCTL_UINT(_vm, OID_AUTO, page_secluded_grab_failure_dirty, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_secluded.grab_failure_dirty, 0, "");
 SYSCTL_UINT(_vm, OID_AUTO, page_secluded_grab_for_iokit, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_secluded.grab_for_iokit, 0, "");
 SYSCTL_UINT(_vm, OID_AUTO, page_secluded_grab_for_iokit_success, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_secluded.grab_for_iokit_success, 0, "");
@@ -3754,6 +3785,14 @@ SYSCTL_QUAD(_vm, OID_AUTO, corpse_footprint_full,
 SYSCTL_QUAD(_vm, OID_AUTO, corpse_footprint_no_buf,
     CTLFLAG_RD | CTLFLAG_LOCKED, &vm_map_corpse_footprint_no_buf, "");
 
+#if CODE_SIGNING_MONITOR
+extern uint64_t vm_cs_defer_to_csm;
+extern uint64_t vm_cs_defer_to_csm_not;
+SYSCTL_QUAD(_vm, OID_AUTO, cs_defer_to_csm,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &vm_cs_defer_to_csm, "");
+SYSCTL_QUAD(_vm, OID_AUTO, cs_defer_to_csm_not,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &vm_cs_defer_to_csm_not, "");
+#endif /* CODE_SIGNING_MONITOR */
 
 extern uint64_t shared_region_pager_copied;
 extern uint64_t shared_region_pager_slid;
@@ -4006,6 +4045,9 @@ SYSCTL_PROC(_vm, OID_AUTO, vm_map_user_range_heap, CTLTYPE_STRUCT | CTLFLAG_RD |
     0, 0, &vm_map_user_range_heap, "S,mach_vm_range", "");
 
 #endif /* CONFIG_MAP_RANGES */
+#endif /* DEBUG || DEVELOPMENT */
+
+#if DEBUG || DEVELOPMENT
 #endif /* DEBUG || DEVELOPMENT */
 
 extern uint64_t c_seg_filled_no_contention;

@@ -34,16 +34,16 @@ slide_enabled(void)
 }
 
 static uint64_t
-kernel_slide(void)
+kernel_slide(int selector)
 {
 	uint64_t slide;
 	size_t size = sizeof(slide);
-	int err = kas_info(KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR, &slide, &size);
+	int err = kas_info(selector, &slide, &size);
 	if (err && errno == ENOTSUP) {
 		T_SKIP("Running on kernel without kas_info");
 	}
 
-	T_ASSERT_POSIX_SUCCESS(errno, "kas_info KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR");
+	T_ASSERT_POSIX_SUCCESS(errno, "kas_info with selector %d", selector);
 	T_ASSERT_EQ(size, sizeof(slide), "returned size is valid");
 
 	return slide;
@@ -57,32 +57,39 @@ T_DECL(kernel_text_slide,
 		__builtin_unreachable();
 	}
 
-	uint64_t slide = kernel_slide();
+	uint64_t slide = kernel_slide(KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR);
 
 	T_ASSERT_GT_ULLONG(slide, 0ULL, "kernel slide is non-zero");
 }
 
-T_DECL(kernel_text_slide_invalid,
-    "ensures that kas_info handles invalid input to KERNEL_TEXT_SLIDE_SELECTOR")
+static void
+test_kas_info_invalid_args(int selector)
 {
 	uint64_t slide;
 	size_t size = 0;
 	int err;
 
-	err = kas_info(KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR, &slide, NULL);
+	err = kas_info(selector, &slide, NULL);
 	if (errno == ENOTSUP) {
-		T_SKIP("Running on kernel without kas_info");
+		T_SKIP("Running on kernel without kas_info %d", selector);
 	}
-	T_ASSERT_POSIX_FAILURE(err, EFAULT, "kas_info with NULL size");
+	T_ASSERT_POSIX_FAILURE(err, EFAULT, "kas_info %d with NULL size", selector);
 
 	size = sizeof(uint64_t);
-	err = kas_info(KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR, NULL, &size);
-	T_ASSERT_POSIX_FAILURE(err, EFAULT, "kas_info with NULL slide");
+	err = kas_info(selector, NULL, &size);
+	T_ASSERT_POSIX_FAILURE(err, EFAULT, "kas_info %d with NULL slide", selector);
 
 	size = sizeof(uint32_t);
-	err = kas_info(KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR, &slide, &size);
-	T_ASSERT_POSIX_FAILURE(err, EINVAL, "kas_info with invalid size");
+	err = kas_info(selector, &slide, &size);
+	T_ASSERT_POSIX_FAILURE(err, EINVAL, "kas_info %d with invalid size", selector);
 }
+
+T_DECL(kernel_text_slide_invalid,
+    "ensures that kas_info handles invalid input to KERNEL_TEXT_SLIDE_SELECTOR")
+{
+	test_kas_info_invalid_args(KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR);
+}
+
 
 static char const*
 kernel_path(void)
@@ -241,7 +248,7 @@ T_DECL(kernel_segment_location,
 	if (!is_fileset_kc()) {
 		T_LOG("Kernelcache is not a fileset kernelcache");
 
-		uint64_t slide = kernel_slide();
+		uint64_t slide = kernel_slide(KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR);
 		for (size_t i = 0; i < disk_nsegs; i++) {
 			if (disk_segs[i] == 0 || mem_segs[i] == 0) {
 				continue;

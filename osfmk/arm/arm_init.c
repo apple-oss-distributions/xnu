@@ -127,13 +127,13 @@ TUNABLE_DT_WRITEABLE(sched_hygiene_mode_t, interrupt_masked_debug_mode,
     SCHED_HYGIENE_MODE_PANIC,
     TUNABLE_DT_CHECK_CHOSEN);
 
-MACHINE_TIMEOUT_WRITEABLE(interrupt_masked_timeout, "interrupt-masked",
+MACHINE_TIMEOUT_DEV_WRITEABLE(interrupt_masked_timeout, "interrupt-masked",
     0xd0000, MACHINE_TIMEOUT_UNIT_TIMEBASE,  /* 35.499ms */
     NULL);
 #if __arm64__
 #define SSHOT_INTERRUPT_MASKED_TIMEOUT 0xf9999 /* 64-bit: 42.599ms */
 #endif
-MACHINE_TIMEOUT_WRITEABLE(stackshot_interrupt_masked_timeout, "sshot-interrupt-masked",
+MACHINE_TIMEOUT_DEV_WRITEABLE(stackshot_interrupt_masked_timeout, "sshot-interrupt-masked",
     SSHOT_INTERRUPT_MASKED_TIMEOUT, MACHINE_TIMEOUT_UNIT_TIMEBASE,
     NULL);
 #undef SSHOT_INTERRUPT_MASKED_TIMEOUT
@@ -493,7 +493,7 @@ arm_init(
 			sched_hygiene_debug_pmc = 0;
 		}
 
-		if (wdt_disabled) {
+		if (wdt_disabled || kern_feature_override(KF_PREEMPTION_DISABLED_DEBUG_OVRD)) {
 			sched_preemption_disable_debug_mode = SCHED_HYGIENE_MODE_OFF;
 		}
 	}
@@ -545,6 +545,17 @@ arm_init(
 					"You are advised to avoid using 'drain_uart_sync' boot-arg.\n");
 			}
 		}
+		/* If on-demand is selected, disable serials until reception. */
+		bool on_demand = !!(serialmode & SERIALMODE_ON_DEMAND);
+		if (on_demand && !(serialmode & SERIALMODE_INPUT)) {
+			kprintf(
+				"WARNING: invalid serial boot-args : ON_DEMAND (0x%x) flag "
+				"requires INPUT(0x%x). Ignoring ON_DEMAND.\n",
+				SERIALMODE_ON_DEMAND, SERIALMODE_INPUT
+				);
+			on_demand = 0;
+		}
+		serial_set_on_demand(on_demand);
 	}
 	if (kern_feature_override(KF_SERIAL_OVRD)) {
 		serialmode = 0;
@@ -671,9 +682,10 @@ arm_init_cpu(
 		// during hibernation, we captured the idle thread's state from inside the PPL context, so we have to
 		// fix up its preemption count
 		unsigned int expected_preemption_count = (gEnforcePlatformActionSafety ? 2 : 1);
-		if (cpu_data_ptr->cpu_active_thread->machine.preemption_count != expected_preemption_count) {
+		if (get_preemption_level_for_thread(cpu_data_ptr->cpu_active_thread) !=
+		    expected_preemption_count) {
 			panic("unexpected preemption count %u on boot cpu thread (should be %u)",
-			    cpu_data_ptr->cpu_active_thread->machine.preemption_count,
+			    get_preemption_level_for_thread(cpu_data_ptr->cpu_active_thread),
 			    expected_preemption_count);
 		}
 		cpu_data_ptr->cpu_active_thread->machine.preemption_count--;

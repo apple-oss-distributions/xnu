@@ -161,31 +161,21 @@ enum fourk_pager_subsys_error_codes {
 
 /****** FOURK pager Codes End ******/
 
-/****** APFS Codes Begin ******/
-#define KDBG_TRIAGE_SUBSYS_APFS   (7)
+/****** Kext ktriage Begin ******/
+/*
+ * kexts can define their own strings and augment them with an argument.
+ * ktriage only needs to know the subsystem id, and expects that the first
+ * string will be the subsystem prefix string.
+ *
+ * Right now we don't support dynamically adding or removing subsystems.
+ */
 
-enum apfs_subsys_error_codes {
-	KDBG_TRIAGE_APFS_PREFIX = 0,
-	KDBG_TRIAGE_APFS_PAGEIN_NOT_ALLOWED,
-	KDBG_TRIAGE_APFS_INODE_DEAD,
-	KDBG_TRIAGE_APFS_INODE_RAW_ENCRYPTED,
-	KDBG_TRIAGE_APFS_INODE_OF_RAW_DEVICE,
-	KDBG_TRIAGE_APFS_DISALLOW_READS,
-	KDBG_TRIAGE_APFS_XATTR_GET_FAILED,
-	KDBG_TRIAGE_APFS_NO_NAMEDSTREAM_PARENT_INODE,
-	KDBG_TRIAGE_APFS_INVALID_OFFSET,
-	KDBG_TRIAGE_APFS_COLLECT_HASH_RECORDS,
-	KDBG_TRIAGE_APFS_INVALID_FILE_INFO,
-	KDBG_TRIAGE_APFS_NO_HASH_RECORD,
-	KDBG_TRIAGE_APFS_DATA_HASH_MISMATCH,
-	KDBG_TRIAGE_APFS_COMPRESSED_DATA_HASH_MISMATCH,
-	KDBG_TRIAGE_APFS_MAX
-};
+#define KDBG_TRIAGE_SUBSYS_APFS    (7)
+#define KDBG_TRIAGE_SUBSYS_DECMPFS (8)
+/* please update KDBG_TRIAGE_SUBSYS_MAX when adding a new subsystem */
 
-#define APFS_MAX_TRIAGE_STRINGS (KDBG_TRIAGE_APFS_MAX)
+/****** Kext ktriage End ******/
 
-/****** APFS Codes End ******/
-
-#define KDBG_TRIAGE_SUBSYS_MAX  KDBG_TRIAGE_SUBSYS_APFS
+#define KDBG_TRIAGE_SUBSYS_MAX  KDBG_TRIAGE_SUBSYS_DECMPFS
 
 #endif /* BSD_SYS_KDEBUG_TRIAGE_H */

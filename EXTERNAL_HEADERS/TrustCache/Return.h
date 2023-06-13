@@ -12,6 +12,11 @@ enum {
     kTCComponentLoad = 0x01,
     kTCComponentImage4Validate = 0x02,
     kTCComponentImage4Callback = 0x03,
+    kTCComponentConstructInvalid = 0x04,
+    kTCComponentCheckRuntimeForUUID = 0x05,
+    kTCComponentExtractModule = 0x06,
+    kTCComponentGetUUID = 0x07,
+    kTCComponentGetModule = 0x08,
 
     /* Query Functions */
     kTCComponentQuery = 0x10,
@@ -36,6 +41,7 @@ enum {
     /* Other functions which can return a value */
     kTCComponentLinkedListAddHead = 0x80,
     kTCComponentLinkedListRemove = 0x81,
+    kTCComponentExtractImage4Payload = 0x82,
 
     /* Cannot exceed this value */
     kTCComponentTotal = 0xFF,
@@ -57,6 +63,7 @@ enum {
     kTCReturnInvalidArguments = 0x25,
     kTCReturnInsufficientLength = 0x26,
     kTCReturnNotPermitted = 0x27,
+    kTCReturnLinkedListCorrupted = 0x28,
 
     /* Image 4 return errors */
     kTCReturnImage4Expired = 0xA0,

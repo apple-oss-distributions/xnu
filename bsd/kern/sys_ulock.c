@@ -210,7 +210,7 @@ typedef struct ull_bucket {
 static SECURITY_READ_ONLY_LATE(int) ull_hash_buckets;
 static SECURITY_READ_ONLY_LATE(ull_bucket_t *) ull_bucket;
 static uint32_t ull_nzalloc = 0;
-static ZONE_DEFINE_TYPE(ull_zone, "ulocks", ull_t, ZC_CACHING);
+static KALLOC_TYPE_DEFINE(ull_zone, ull_t, KT_DEFAULT);
 
 #define ull_bucket_lock(i)       lck_spin_lock_grp(&ull_bucket[i].ulb_lock, &ull_lck_grp)
 #define ull_bucket_unlock(i)     lck_spin_unlock(&ull_bucket[i].ulb_lock)
@@ -1051,7 +1051,7 @@ kdp_ulock_find_owner(__unused struct waitq * waitq, event64_t event, thread_wait
 {
 	ull_t *ull = EVENT_TO_ULOCK(event);
 
-	zone_require(ull_zone, ull);
+	zone_require(ull_zone->kt_zv.zv_zone, ull);
 
 	switch (ull->ull_opcode) {
 	case UL_UNFAIR_LOCK:

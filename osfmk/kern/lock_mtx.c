@@ -99,44 +99,6 @@
  *     the inheritor.
  */
 
-/*!
- * @typedef lck_mtx_mcs_t
- *
- * @brief
- * The type of per-cpu MCS-like nodes used for the mutex acquisition slowpath.
- *
- * @discussion
- * There is one such structure per CPU: such nodes are used with preemption
- * disabled, and using kernel mutexes in interrupt context isn't allowed.
- *
- * The nodes are used not as a lock as in traditional MCS, but to order
- * waiters. The head of the queue spins against the lock itself, which allows
- * to release the MCS node once the kernel mutex is acquired.
- *
- * Those nodes provide 2 queues:
- *
- * 1. an adaptive spin queue that is used to order threads who chose to
- *    adaptively spin to wait for the lock to become available,
- *
- *    This queue is doubly linked, threads can add themselves concurrently,
- *    the interlock of the mutex is required to dequeue.
- *
- * 2. an interlock queue which is more typical MCS.
- */
-typedef struct lck_mtx_mcs {
-	struct _lck_mtx_       *lmm_ilk_current;
-
-	struct lck_mtx_mcs     *lmm_ilk_next;
-	unsigned long           lmm_ilk_ready;
-
-	struct lck_mtx_mcs     *lmm_as_next;
-	unsigned long long      lmm_as_prev;
-
-	unsigned long long      lmm_bzero_limit[] __attribute__((aligned(16)));
-} __attribute__((aligned(128))) * lck_mtx_mcs_t;
-
-static struct lck_mtx_mcs       PERCPU_DATA(lck_mtx_mcs);
-
 #define ADAPTIVE_SPIN_ENABLE 0x1
 
 #define NOINLINE                __attribute__((noinline))
@@ -169,24 +131,20 @@ __enum_decl(lck_ilk_mode_t, uint32_t, {
 static inline void
 lck_mtx_mcs_clear(lck_mtx_mcs_t mcs)
 {
-	/*
-	 * Avoid clearing 128 bytes when only 40 are sufficient,
-	 * make that 48 for better CG.
-	 */
-	bzero(mcs, offsetof(struct lck_mtx_mcs, lmm_bzero_limit));
+	*mcs = (struct lck_mtx_mcs){ };
 }
 
-static inline uint16_t
+static inline lck_mcs_id_t
 lck_mtx_get_mcs_id(void)
 {
-	return (uint16_t)cpu_number() + 1;
+	return lck_mcs_id_current(LCK_MCS_SLOT_0);
 }
 
 __pure2
 static inline lck_mtx_mcs_t
-lck_mtx_get_mcs(int idx)
+lck_mtx_get_mcs(lck_mcs_id_t idx)
 {
-	return PERCPU_GET_WITH_BASE(other_percpu_base(idx - 1), lck_mtx_mcs);
+	return &lck_mcs_get_other(idx)->mcs_mtx;
 }
 
 
@@ -371,13 +329,13 @@ static const struct hw_spin_policy lck_mtx_ilk_timeout_policy = {
 static void
 lck_mtx_ilk_lock_cleanup_as_mcs(
 	lck_mtx_t               *lock,
-	uint16_t                 idx,
+	lck_mcs_id_t             idx,
 	lck_mtx_mcs_t            mcs,
 	hw_spin_timeout_t        to,
 	hw_spin_state_t         *ss)
 {
 	lck_mtx_mcs_t nnode = NULL;
-	uint16_t      pidx  = (uint16_t)mcs->lmm_as_prev;
+	lck_mcs_id_t  pidx  = (lck_mcs_id_t)mcs->lmm_as_prev;
 	bool          was_last;
 
 	/*
@@ -451,7 +409,7 @@ lck_mtx_ilk_lock_contended(
 	hw_spin_state_t   ss  = { };
 
 	lck_mtx_mcs_t     mcs, nnode, pnode;
-	uint16_t          idx, pidx;
+	lck_mcs_id_t      idx, pidx;
 	lck_mtx_state_t   nstate;
 	unsigned long     ready;
 	uint64_t          spin_start;
@@ -462,7 +420,7 @@ lck_mtx_ilk_lock_contended(
 	 */
 
 	idx  = lck_mtx_get_mcs_id();
-	mcs  = PERCPU_GET(lck_mtx_mcs);
+	mcs  = &lck_mcs_get_current()->mcs_mtx;
 	if (mode != LCK_MTX_MODE_SPIN) {
 		spin_start = LCK_MTX_ADAPTIVE_SPIN_BEGIN();
 	}
@@ -706,13 +664,13 @@ lck_mtx_lock_adaptive_spin(lck_mtx_t *lock, lck_mtx_state_t state)
 	uint64_t          deadline;
 
 	lck_mtx_mcs_t     mcs, node;
-	uint16_t          idx, pidx, clear_idx;
+	lck_mcs_id_t      idx, pidx, clear_idx;
 	unsigned long     prev;
 	lck_mtx_state_t   nstate;
 	ast_t      *const astp = ast_pending();
 
 	idx  = lck_mtx_get_mcs_id();
-	mcs  = PERCPU_GET(lck_mtx_mcs);
+	mcs  = &lck_mcs_get_current()->mcs_mtx;
 
 	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_LCK_SPIN_CODE) | DBG_FUNC_START,
 	    trace_lck, LCK_MTX_OWNER_FOR_TRACE(lock), lock->lck_mtx_tsid, 0, 0);

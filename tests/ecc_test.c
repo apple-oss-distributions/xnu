@@ -149,6 +149,15 @@ T_DECL(ecc_uncorrected_test, "test detection/recovery from ECC uncorrected error
 	}
 
 	/*
+	 * Set testing mode to acc
+	 */
+	value = 0;
+	err = sysctlbyname("vm.test_ecc_dcs", NULL, NULL, &value, s);
+	if (err) {
+		T_SKIP("Failed to clear dcs mode");
+	}
+
+	/*
 	 * Set testing mode to uncorrected.
 	 */
 	value = 0;
@@ -175,6 +184,91 @@ T_DECL(ecc_corrected_test, "test detection/recovery from ECC corrected errors",
 	err = sysctlbyname("vm.retired_pages_count", &value, &s, NULL, 0);
 	if (err) {
 		T_SKIP("ECC not supported");
+	}
+
+	/*
+	 * Set testing mode to acc
+	 */
+	value = 0;
+	err = sysctlbyname("vm.test_ecc_dcs", NULL, NULL, &value, s);
+	if (err) {
+		T_SKIP("Failed to clear dcs mode");
+	}
+
+	/*
+	 * Set testing mode to corrected.
+	 */
+	value = 1;
+	err = sysctlbyname("vm.test_corrected_ecc", NULL, NULL, &value, s);
+	if (err) {
+		T_SKIP("Failed to set corrected mode");
+	}
+
+	test_body(true);
+}
+
+T_DECL(dcs_uncorrected_test, "test detection/recovery from ECC uncorrected errors via dcs",
+    T_META_IGNORECRASHES(".*ecc_test_helper.*"),
+    T_META_ASROOT(true),
+    T_META_ENABLED(FALSE))  /* once other support lands, change to T_META_ENABLED(TARGET_CPU_ARM64 && TARGET_OS_OSX) */
+{
+	int err;
+	uint value = 0;
+	size_t s = sizeof value;
+
+	/*
+	 * Only run on systems which support retired pages.
+	 */
+	err = sysctlbyname("vm.retired_pages_count", &value, &s, NULL, 0);
+	if (err) {
+		T_SKIP("ECC not supported");
+	}
+
+	/*
+	 * Set testing mode to dcs
+	 */
+	value = 1;
+	err = sysctlbyname("vm.test_ecc_dcs", NULL, NULL, &value, s);
+	if (err) {
+		T_SKIP("Failed to set dcs mode");
+	}
+
+	/*
+	 * Set testing mode to uncorrected.
+	 */
+	value = 0;
+	err = sysctlbyname("vm.test_corrected_ecc", NULL, NULL, &value, s);
+	if (err) {
+		T_SKIP("Failed to set uncorrected mode");
+	}
+
+	test_body(false);
+}
+
+T_DECL(dcs_corrected_test, "test detection/recovery from ECC corrected errors via dcs",
+    T_META_IGNORECRASHES(".*ecc_test_helper.*"),
+    T_META_ASROOT(true),
+    T_META_ENABLED(FALSE))  /* once other support lands, change to T_META_ENABLED(TARGET_CPU_ARM64 && TARGET_OS_OSX) */
+{
+	int err;
+	uint value = 0;
+	size_t s = sizeof value;
+
+	/*
+	 * Only run on systems which support retired pages.
+	 */
+	err = sysctlbyname("vm.retired_pages_count", &value, &s, NULL, 0);
+	if (err) {
+		T_SKIP("ECC not supported");
+	}
+
+	/*
+	 * Set testing mode to dcs
+	 */
+	value = 1;
+	err = sysctlbyname("vm.test_ecc_dcs", NULL, NULL, &value, s);
+	if (err) {
+		T_SKIP("Failed to set dcs mode");
 	}
 
 	/*

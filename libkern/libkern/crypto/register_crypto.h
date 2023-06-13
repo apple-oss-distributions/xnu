@@ -29,9 +29,10 @@
 #ifndef _CRYPTO_REGISTER_CRYPTO_H_
 #define _CRYPTO_REGISTER_CRYPTO_H_
 
-#ifdef  __cplusplus
-extern "C" {
-#endif
+#include <libkern/crypto/crypto.h>
+#include <libkern/crypto/rand.h>
+
+__BEGIN_DECLS
 
 #include <corecrypto/ccdigest.h>
 #include <corecrypto/cchmac.h>
@@ -257,6 +258,12 @@ typedef struct crypto_functions {
 	ccrsa_make_pub_fn_t        ccrsa_make_pub_fn;
 	ccrsa_verify_pkcs1v15_fn_t ccrsa_verify_pkcs1v15_fn;
 
+	// Random functions
+	crypto_random_generate_fn_t random_generate_fn;
+	crypto_random_uniform_fn_t random_uniform_fn;
+	crypto_random_kmem_ctx_size_fn_t random_kmem_ctx_size_fn;
+	crypto_random_kmem_init_fn_t random_kmem_init_fn;
+
 	// Digest functions
 	crypto_digest_ctx_size_fn_t digest_ctx_size_fn;
 	crypto_digest_init_fn_t digest_init_fn;
@@ -276,8 +283,6 @@ typedef struct crypto_functions {
 
 int register_crypto_functions(const crypto_functions_t funcs);
 
-#ifdef  __cplusplus
-}
-#endif
+__END_DECLS
 
 #endif /*_CRYPTO_REGISTER_CRYPTO_H_*/

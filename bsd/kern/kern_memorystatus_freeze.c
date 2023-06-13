@@ -72,7 +72,7 @@
 #include <vm/vm_map.h>
 #endif /* CONFIG_FREEZE */
 
-#include "kern_memorystatus_internal.h"
+#include <kern/kern_memorystatus_internal.h>
 #include <sys/kern_memorystatus.h>
 #include <sys/kern_memorystatus_freeze.h>
 #include <sys/kern_memorystatus_notify.h>
@@ -1050,7 +1050,7 @@ continue_eval:
 	list_size = sizeof(global_freezable_status_t) + (sizeof(proc_freezable_status_t) * MAX_FREEZABLE_PROCESSES);
 	kfree_data(list_head, list_size);
 
-	MEMORYSTATUS_DEBUG(1, "memorystatus_freezer_get_status: returning %d (%lu - size)\n", error, (unsigned long)*list_size);
+	memorystatus_log_debug("memorystatus_freezer_get_status: returning %d (%lu - size)\n", error, (unsigned long)list_size);
 
 	return error;
 }
@@ -1152,7 +1152,7 @@ memorystatus_freezer_reset_state(int32_t *retval)
 
 	os_reason_t jetsam_reason = os_reason_create(OS_REASON_JETSAM, JETSAM_REASON_GENERIC);
 	if (jetsam_reason == OS_REASON_NULL) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus_freezer_reset_state -- sync: failed to allocate jetsam reason\n");
+		memorystatus_log_error("memorystatus_freezer_reset_state -- sync: failed to allocate jetsam reason\n");
 	}
 	lck_mtx_lock(&freezer_mutex);
 	kill_all_frozen_processes(kMaxBand, true, jetsam_reason, NULL);
@@ -1254,7 +1254,7 @@ kill_all_frozen_processes(uint64_t max_band, bool suspended_only, os_reason_t je
 		}
 
 		if (state & (P_MEMSTAT_TERMINATED | P_MEMSTAT_LOCKED)) {
-			os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Skipping kill of frozen process %s (%d) because it's already exiting.\n", p->p_name, proc_getpid(p));
+			memorystatus_log("memorystatus: Skipping kill of frozen process %s (%d) because it's already exiting.\n", p->p_name, proc_getpid(p));
 			skips++;
 			continue;
 		}
@@ -1320,7 +1320,7 @@ memorystatus_disable_freeze(void)
 
 	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FREEZE_DISABLE) | DBG_FUNC_START,
 	    memorystatus_available_pages, 0, 0, 0, 0);
-	os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Disabling freezer. Will kill all frozen processes\n");
+	memorystatus_log("memorystatus: Disabling freezer. Will kill all frozen processes\n");
 
 	/*
 	 * We hold the freezer_mutex (preventing anything from being frozen in parallel)
@@ -1337,13 +1337,13 @@ memorystatus_disable_freeze(void)
 	vm_page_reactivate_all_throttled();
 	os_reason_t jetsam_reason = os_reason_create(OS_REASON_JETSAM, JETSAM_REASON_MEMORY_DISK_SPACE_SHORTAGE);
 	if (jetsam_reason == OS_REASON_NULL) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus_disable_freeze -- sync: failed to allocate jetsam reason\n");
+		memorystatus_log_error("memorystatus_disable_freeze -- sync: failed to allocate jetsam reason\n");
 	}
 
 	killed = kill_all_frozen_processes(JETSAM_PRIORITY_FOREGROUND, false, jetsam_reason, &memory_reclaimed);
 
 	if (killed) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Killed all frozen processes.\n");
+		memorystatus_log_info("memorystatus: Killed all frozen processes.\n");
 		vm_swap_consider_defragmenting(VM_SWAP_FLAGS_FORCE_DEFRAG | VM_SWAP_FLAGS_FORCE_RECLAIM);
 
 		proc_list_lock();
@@ -1363,7 +1363,7 @@ memorystatus_disable_freeze(void)
 		}
 		proc_list_unlock();
 	} else {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: No frozen processes to kill.\n");
+		memorystatus_log_info("memorystatus: No frozen processes to kill.\n");
 	}
 
 	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FREEZE_DISABLE) | DBG_FUNC_END,
@@ -1399,7 +1399,7 @@ sysctl_freeze_enabled SYSCTL_HANDLER_ARGS
 	}
 
 	if (!VM_CONFIG_FREEZER_SWAP_IS_ACTIVE) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Failed attempt to set vm.freeze_enabled sysctl\n");
+		memorystatus_log_error("memorystatus: Failed attempt to set vm.freeze_enabled sysctl\n");
 		return EINVAL;
 	}
 
@@ -1416,7 +1416,7 @@ schedule_interval_reset(thread_call_t reset_thread_call, throttle_interval_t *in
 	uint64_t interval_expiration_ns = interval->ts.tv_sec * NSEC_PER_SEC + interval->ts.tv_nsec;
 	uint64_t interval_expiration_absolutetime;
 	nanoseconds_to_absolutetime(interval_expiration_ns, &interval_expiration_absolutetime);
-	os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: scheduling new freezer interval at %llu absolute time\n", interval_expiration_absolutetime);
+	memorystatus_log_info("memorystatus: scheduling new freezer interval at %llu absolute time\n", interval_expiration_absolutetime);
 
 	thread_call_enter_delayed(reset_thread_call, interval_expiration_absolutetime);
 }
@@ -1819,8 +1819,8 @@ memorystatus_freeze_process(
 	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FREEZE) | DBG_FUNC_END,
 	    memorystatus_available_pages, aPid, 0, 0, 0);
 
-	MEMORYSTATUS_DEBUG(1, "memorystatus_freeze_top_process: task_freeze %s for pid %d [%s] - "
-	    "memorystatus_pages: %d, purgeable: %d, wired: %d, clean: %d, dirty: %d, max_pages %d, shared %d\n",
+	memorystatus_log_debug("memorystatus_freeze_top_process: task_freeze %s for pid %d [%s] - "
+	    "memorystatus_pages: %d, purgeable: %d, wired: %d, clean: %d, dirty: %d, max_pages %llu, shared %d\n",
 	    (kr == KERN_SUCCESS) ? "SUCCEEDED" : "FAILED", aPid, (*p->p_name ? p->p_name : "(unknown)"),
 	    memorystatus_available_pages, purgeable, wired, clean, dirty, max_pages, shared);
 
@@ -1880,8 +1880,9 @@ memorystatus_freeze_process(
 			}
 		}
 		memorystatus_freeze_update_throttle(&memorystatus_freeze_budget_pages_remaining);
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: %sfreezing (%s) pid %d [%s] done, memorystatus_freeze_budget_pages_remaining %llu %sfroze %u pages\n",
-		    is_refreeze ? "re" : "", ((!coal || !*coal) ? "general" : "coalition-driven"), aPid, ((p && *p->p_name) ? p->p_name : "unknown"), memorystatus_freeze_budget_pages_remaining, is_refreeze ? "Re" : "", dirty);
+		memorystatus_log("memorystatus: %sfreezing (%s) pid %d [%s] done, memorystatus_freeze_budget_pages_remaining %llu %sfroze %u pages\n",
+		    is_refreeze ? "re" : "", ((!coal || !*coal) ? "general" : "coalition-driven"), aPid, ((p && *p->p_name) ? p->p_name : "unknown"),
+		    memorystatus_freeze_budget_pages_remaining, is_refreeze ? "Re" : "", dirty);
 
 		proc_list_lock();
 
@@ -2261,7 +2262,7 @@ memorystatus_demote_frozen_process(proc_t p, bool urgent_mode __unused)
 	maxpriority = MAX(p->p_memstat_assertionpriority, maxpriority);
 	memorystatus_update_priority_locked(p, maxpriority, FALSE, FALSE);
 #if DEVELOPMENT || DEBUG
-	os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus_demote_frozen_process(%s) pid %d [%s]\n",
+	memorystatus_log("memorystatus_demote_frozen_process(%s) pid %d [%s]\n",
 	    (urgent_mode ? "urgent" : "normal"), (p ? proc_getpid(p) : -1), ((p && *p->p_name) ? p->p_name : "unknown"));
 #endif /* DEVELOPMENT || DEBUG */
 
@@ -2461,7 +2462,7 @@ memorystatus_freeze_calculate_new_budget(
 		freeze_daily_budget_mb = freeze_daily_budget / (1024 * 1024);
 		assert(freeze_daily_budget_mb <= UINT32_MAX);
 		memorystatus_freeze_daily_mb_max = (unsigned int) freeze_daily_budget_mb;
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: memorystatus_freeze_daily_mb_max set to %dMB\n", memorystatus_freeze_daily_mb_max);
+		memorystatus_log_info("memorystatus: memorystatus_freeze_daily_mb_max set to %dMB\n", memorystatus_freeze_daily_mb_max);
 	}
 	/* Calculate the daily pageout budget */
 	freeze_daily_pageouts_max = memorystatus_freeze_daily_mb_max * (1024 * 1024 / PAGE_SIZE);
@@ -2557,7 +2558,7 @@ memorystatus_freeze_handle_error(
 
 	p->p_memstat_freeze_skip_reason = (uint8_t) skip_reason;
 
-	os_log_with_startup_serial(OS_LOG_DEFAULT, "%s: %sfreezing (%s) pid %d [%s]...skipped (%s)\n",
+	memorystatus_log("%s: %sfreezing (%s) pid %d [%s]...skipped (%s)\n",
 	    log_prefix, was_refreeze ? "re" : "",
 	    (coalition == NULL ? "general" : "coalition-driven"), pid,
 	    ((p && *p->p_name) ? p->p_name : "unknown"), reason);
@@ -2832,9 +2833,9 @@ memorystatus_freeze_update_throttle(uint64_t *budget_pages_allowed)
 		}
 	}
 
-	MEMORYSTATUS_DEBUG(1, "memorystatus_freeze_update_throttle_interval: throttle updated - %d frozen (%d max) within %dm; %dm remaining; throttle %s\n",
-	    interval->pageouts, interval->max_pageouts, interval->mins, (interval->ts.tv_sec - now_ts->tv_sec) / 60,
-	    interval->throttle ? "on" : "off");
+	memorystatus_log_debug(
+		"memorystatus_freeze_update_throttle_interval: throttle updated - %d frozen (%d max) within %dm; %dm remaining\n",
+		interval->pageouts, interval->max_pageouts, interval->mins, (interval->ts.tv_sec - now_ts.tv_sec) / 60);
 }
 
 bool memorystatus_freeze_thread_init = false;
@@ -2989,11 +2990,11 @@ memorystatus_set_process_is_freezable(pid_t pid, boolean_t is_freezable)
 	if (is_freezable == FALSE) {
 		/* Freeze preference set to FALSE. Set the P_MEMSTAT_FREEZE_DISABLED bit. */
 		p->p_memstat_state |= P_MEMSTAT_FREEZE_DISABLED;
-		printf("memorystatus_set_process_is_freezable: disabling freeze for pid %d [%s]\n",
+		os_log(OS_LOG_DEFAULT, "memorystatus_set_process_is_freezable: disabling freeze for pid %d [%s]\n",
 		    proc_getpid(p), (*p->p_name ? p->p_name : "unknown"));
 	} else {
 		p->p_memstat_state &= ~P_MEMSTAT_FREEZE_DISABLED;
-		printf("memorystatus_set_process_is_freezable: enabling freeze for pid %d [%s]\n",
+		os_log(OS_LOG_DEFAULT, "memorystatus_set_process_is_freezable: enabling freeze for pid %d [%s]\n",
 		    proc_getpid(p), (*p->p_name ? p->p_name : "unknown"));
 	}
 	proc_rele(p);
@@ -3064,13 +3065,13 @@ set_freezer_candidate_list(user_addr_t buffer, size_t buffer_size, struct memory
 
 	/* Validate the user provided list. */
 	if ((buffer == USER_ADDR_NULL) || (buffer_size == 0)) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus_cmd_grp_set_freeze_priority: NULL or empty list\n");
+		memorystatus_log_error("memorystatus_cmd_grp_set_freeze_priority: NULL or empty list\n");
 		return EINVAL;
 	}
 
 	if (buffer_size % sizeof(memorystatus_properties_freeze_entry_v1) != 0) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT,
-		    "memorystatus_cmd_grp_set_freeze_priority: Invalid list length (caller might have comiled agsinst invalid headers.)\n");
+		memorystatus_log_error(
+			"memorystatus_cmd_grp_set_freeze_priority: Invalid list length (caller might have comiled agsinst invalid headers.)\n");
 		return EINVAL;
 	}
 

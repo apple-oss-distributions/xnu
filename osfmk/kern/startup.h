@@ -67,13 +67,14 @@ __enum_decl(startup_subsystem_id_t, uint32_t, {
 	STARTUP_SUB_ZALLOC,           /**< initialize zalloc and kalloc        */
 	STARTUP_SUB_KTRACE,           /**< initialize kernel trace             */
 	STARTUP_SUB_PERCPU,           /**< initialize the percpu subsystem     */
+	STARTUP_SUB_EVENT,            /**< initiailze the event subsystem      */
 
 	STARTUP_SUB_CODESIGNING,      /**< codesigning subsystem               */
-	STARTUP_SUB_OSLOG,            /**< oslog and kernel loggging           */
+	STARTUP_SUB_OSLOG,            /**< oslog and kernel logging            */
 	STARTUP_SUB_MACH_IPC,         /**< Mach IPC                            */
 	STARTUP_SUB_THREAD_CALL,      /**< Thread calls                        */
 	STARTUP_SUB_SYSCTL,           /**< registers sysctls                   */
-	STARTUP_SUB_EARLY_BOOT,       /**< interrupts/premption are turned on  */
+	STARTUP_SUB_EARLY_BOOT,       /**< interrupts/preemption are turned on */
 
 	STARTUP_SUB_LOCKDOWN = ~0u,   /**< reserved for the startup subsystem  */
 });
@@ -105,12 +106,12 @@ extern startup_debug_t startup_debug;
  *
  * @description
  * A startup function, declared with @c STARTUP or @c STARTUP_ARG, can specify
- * an rank within the subsystem they initialize.
+ * a rank within the subsystem they initialize.
  *
  * @c STARTUP_RANK_NTH(n) will let callbacks be run at stage @c n (0-based).
  *
  * @c STARTUP_RANK_FIRST, @c STARTUP_RANK_SECOND, @c STARTUP_RANK_THIRD and
- * @c STARTUP_RANK_FOURTH are given as conveniency names for these.
+ * @c STARTUP_RANK_FOURTH are given as convenient names for these.
  *
  * @c STARTUP_RANK_MIDDLE is a reserved value that will let startup functions
  * run after all the @c STARTUP_RANK_NTH(n) ones have.
@@ -462,20 +463,22 @@ machine_timeout_init_with_suffix(const struct machine_timeout_spec *spec, char c
 extern void
 machine_timeout_init(const struct machine_timeout_spec *spec);
 
+#if DEVELOPMENT || DEBUG
 // Late timeout (re-)initialization, at the end of bsd_init()
 extern void
 machine_timeout_bsd_init(void);
+#endif /* DEVELOPMENT || DEBUG */
 
 /*!
- * @macro MACHINE_TIMEOUT and MACHINE_TIMEOUT_WRITEABLE
+ * @macro MACHINE_TIMEOUT and MACHINE_TIMEOUT_DEV_WRITEABLE
  *
  * @abstract
  * Defines a Machine Timeout that can be overridden and
  * scaled through the device tree and boot-args.
  *
- * The variant with the _WRITEABLE suffix does not mark the timeout as
- * SECURITY_READ_ONLY_LATE, so that e.g. machine_timeout_init_with_suffix
- * or sysctls can change it after lockdown.
+ * The variant with the _DEV_WRITEABLE suffix does not mark the timeout as
+ * SECURITY_READ_ONLY_LATE on DEVELOPMENT kernels, so that e.g.
+ * machine_timeout_init_with_suffix or sysctls can change it after lockdown.
  *
  * @param var
  * The name of the C variable to use for storage. If the storage value
@@ -519,9 +522,14 @@ machine_timeout_bsd_init(void);
 	SECURITY_READ_ONLY_LATE(machine_timeout_t) var = 0;                                     \
 	_MACHINE_TIMEOUT(var, name, default, unit, skip_predicate)
 
-#define MACHINE_TIMEOUT_WRITEABLE(var, name, default, unit, skip_predicate)       \
+#if DEVELOPMENT || DEBUG
+#define MACHINE_TIMEOUT_DEV_WRITEABLE(var, name, default, unit, skip_predicate)       \
 	machine_timeout_t var = 0; \
 	_MACHINE_TIMEOUT(var, name, default, unit, skip_predicate)
+#else
+#define MACHINE_TIMEOUT_DEV_WRITEABLE(var, name, default, unit, skip_predicate) \
+	MACHINE_TIMEOUT(var, name, default, unit, skip_predicate)
+#endif /* DEVELOPMENT || DEBUG */
 
 /*!
  * @macro MACHINE_TIMEOUT_SPEC_REF
@@ -554,6 +562,67 @@ machine_timeout_bsd_init(void);
  */
 #define MACHINE_TIMEOUT_SPEC_DECL(var) extern struct machine_timeout_spec __machine_timeout_spec_ ## var
 
+/*
+ * Event subsystem
+ *
+ * This allows to define a few system-wide events that allow for loose coupling
+ * between subsystems interested in those events and the emitter.
+ */
+
+/*!
+ * @macro EVENT_DECLARE()
+ *
+ * @brief
+ * Declares an event namespace with a given callback type.
+ *
+ * @param name          The name for the event (typically in all caps).
+ * @param cb_type_t     A function type for the callbacks.
+ */
+#define EVENT_DECLARE(name, cb_type_t) \
+	struct name##_event {                                                   \
+	        struct event_hdr        evt_link;                               \
+	        cb_type_t              *evt_cb;                                 \
+	};                                                                      \
+	extern struct event_hdr name##_HEAD
+
+/*!
+ * @macro EVENT_DEFINE()
+ *
+ * @brief
+ * Defines the head for the event corresponding to an EVENT_DECLARE()
+ */
+#define EVENT_DEFINE(name) \
+	__security_const_late struct event_hdr name##_HEAD
+
+/*!
+ * @macro EVENT_REGISTER_HANDLER()
+ *
+ * @brief
+ * Registers a handler for a given event.
+ *
+ * @param name          The name for the event as declared in EVENT_DECLARE()
+ * @param handler       The handler to register for this event.
+ */
+#define EVENT_REGISTER_HANDLER(name, handler) \
+	__EVENT_REGISTER(name, __LINE__, handler)
+
+
+/*!
+ * @macro EVENT_INVOKE()
+ *
+ * @brief
+ * Call all the events handlers with the specified arguments.
+ *
+ * @param name          The name for the event as declared in EVENT_DECLARE()
+ * @param handler       The handler to register for this event.
+ */
+#define EVENT_INVOKE(name, ...) \
+	for (struct event_hdr *__e = &name##_HEAD; (__e = __e->next);) {        \
+	        __container_of(__e, struct name##_event,                        \
+	            evt_link)->evt_cb(__VA_ARGS__);                             \
+	}
+
+
 #if DEBUG || DEVELOPMENT
 
 /*!
@@ -563,7 +632,7 @@ machine_timeout_bsd_init(void);
  * Declares a test that will appear under @c debug.test.${name}.
  *
  * @param name
- * An indentifier that will be stringified to form the sysctl test name.
+ * An identifier that will be stringified to form the sysctl test name.
  *
  * @param cb
  * The callback to run, of type:
@@ -724,8 +793,22 @@ extern void slave_main(void *machine_param);
 /* Slave cpu initialization */
 extern void slave_machine_init(void *machine_param);
 
-/* Device subystem initialization */
+/* Device subsystem initialization */
 extern void device_service_create(void);
+
+struct event_hdr {
+	struct event_hdr *next;
+};
+
+extern void event_register_handler(struct event_hdr *event_hdr);
+
+#define __EVENT_REGISTER(name, lno, handler) \
+	static __security_const_late struct name##_event name##_event_##lno = { \
+	        .evt_link.next = &name##_HEAD,                                  \
+	        .evt_cb = (handler),                                            \
+	};                                                                      \
+	__STARTUP_ARG(name, lno, EVENT, STARTUP_RANK_FIRST,                     \
+	    event_register_handler, &name##_event_##lno.evt_link)
 
 #ifdef  MACH_BSD
 

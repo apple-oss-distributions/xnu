@@ -36,8 +36,9 @@
 
 #if CONFIG_IO_COMPRESSION_STATS
 #include <string.h>
+#define lz4_memcpy memcpy
 #else
-#define memcpy __builtin_memcpy
+#define lz4_memcpy __builtin_memcpy
 #endif
 
 #pragma mark - Building blocks
@@ -105,17 +106,17 @@ typedef __attribute__((__ext_vector_type__(4))) uint32_t vector_uint4;
 UTIL_FUNCTION uint16_t
 load2(const void * ptr)
 {
-	uint16_t data; memcpy(&data, ptr, sizeof data); return data;
+	uint16_t data; lz4_memcpy(&data, ptr, sizeof data); return data;
 }
 UTIL_FUNCTION uint32_t
 load4(const void * ptr)
 {
-	uint32_t data; memcpy(&data, ptr, sizeof data); return data;
+	uint32_t data; lz4_memcpy(&data, ptr, sizeof data); return data;
 }
 UTIL_FUNCTION uint64_t
 load8(const void * ptr)
 {
-	uint64_t data; memcpy(&data, ptr, sizeof data); return data;
+	uint64_t data; lz4_memcpy(&data, ptr, sizeof data); return data;
 }
 UTIL_FUNCTION vector_uchar16
 load16(const void * ptr)
@@ -137,17 +138,17 @@ load64(const void * ptr)
 UTIL_FUNCTION void
 store2(void * ptr, uint16_t data)
 {
-	memcpy(ptr, &data, sizeof data);
+	lz4_memcpy(ptr, &data, sizeof data);
 }
 UTIL_FUNCTION void
 store4(void * ptr, uint32_t data)
 {
-	memcpy(ptr, &data, sizeof data);
+	lz4_memcpy(ptr, &data, sizeof data);
 }
 UTIL_FUNCTION void
 store8(void * ptr, uint64_t data)
 {
-	memcpy(ptr, &data, sizeof data);
+	lz4_memcpy(ptr, &data, sizeof data);
 }
 UTIL_FUNCTION void
 store16(void * ptr, vector_uchar16 data)
@@ -182,4 +183,4 @@ copy32(void * dst, const void * src)
 	*(packed_uchar32 *)dst = *(const packed_uchar32 *)src;
 }
 
-#undef memcpy
+#undef lz4_memcpy

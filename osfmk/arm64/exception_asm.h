@@ -30,6 +30,7 @@
 #include <pexpert/arm64/board_config.h>
 #include "assym.s"
 
+
 #if XNU_MONITOR
 /*
  * Exit path defines; for controlling PPL -> kernel transitions.
@@ -39,7 +40,6 @@
 #define PPL_EXIT_PANIC_CALL 1 /* The PPL has called panic. */
 #define PPL_EXIT_BAD_CALL   2 /* The PPL request failed. */
 #define PPL_EXIT_EXCEPTION  3 /* The PPL took an exception. */
-
 
 #define KERNEL_MODE_ELR      ELR_GL11
 #define KERNEL_MODE_FAR      FAR_GL11

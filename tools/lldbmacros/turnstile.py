@@ -2,11 +2,12 @@ from __future__ import absolute_import, print_function
 
 from builtins import range
 
+from core import xnu_format
 from xnu import *
 import sys, shlex
 from utils import *
 from waitq import *
-from memory import GetZoneByName, IterateZoneElements
+import kmemory
 import xnudefines
 
 @lldb_type_summary(['struct turnstile *'])
@@ -18,58 +19,75 @@ def GetTurnstileSummary(turnstile):
         returns: String with summary of the type.
     """
 
-    type_and_gencount = Cast(addressof(turnstile.ts_type_gencount), 'union turnstile_type_gencount *')
-    turnstile_type = ""
+    ts_v     = turnstile.GetSBValue()
+    ts_tg    = ts_v.xGetScalarByName('ts_type_gencount')
+    ts_type  = ts_tg & 0xff
+    ts_gen   = ts_tg >> 8
 
-    if type_and_gencount.ts_type == GetEnumValue('turnstile_type_t::TURNSTILE_NONE'):
-      turnstile_type = "none   "
-    elif type_and_gencount.ts_type == GetEnumValue('turnstile_type_t::TURNSTILE_KERNEL_MUTEX'):
-      turnstile_type = "knl_mtx"
-    elif type_and_gencount.ts_type == GetEnumValue('turnstile_type_t::TURNSTILE_ULOCK'):
-      turnstile_type = "ulock  "
-    elif type_and_gencount.ts_type == GetEnumValue('turnstile_type_t::TURNSTILE_PTHREAD_MUTEX'):
-      turnstile_type = "pth_mtx"
-    elif type_and_gencount.ts_type == GetEnumValue('turnstile_type_t::TURNSTILE_SYNC_IPC'):
-      turnstile_type = "syn_ipc"
-    elif type_and_gencount.ts_type == GetEnumValue('turnstile_type_t::TURNSTILE_WORKLOOPS'):
-      turnstile_type = "kqwl   "
-    elif type_and_gencount.ts_type == GetEnumValue('turnstile_type_t::TURNSTILE_WORKQS'):
-      turnstile_type = "workq  "
-    elif type_and_gencount.ts_type == GetEnumValue('turnstile_type_t::TURNSTILE_KNOTE'):
-      turnstile_type = "knote  "
-    elif type_and_gencount.ts_type == GetEnumValue('turnstile_type_t::TURNSTILE_SLEEP_INHERITOR'):
-      turnstile_type = "slp_inh"
+    if ts_type == GetEnumValue('turnstile_type_t', 'TURNSTILE_NONE'):
+        turnstile_type = "none   "
+    elif ts_type == GetEnumValue('turnstile_type_t', 'TURNSTILE_KERNEL_MUTEX'):
+        turnstile_type = "knl_mtx"
+    elif ts_type == GetEnumValue('turnstile_type_t', 'TURNSTILE_ULOCK'):
+        turnstile_type = "ulock  "
+    elif ts_type == GetEnumValue('turnstile_type_t', 'TURNSTILE_PTHREAD_MUTEX'):
+        turnstile_type = "pth_mtx"
+    elif ts_type == GetEnumValue('turnstile_type_t', 'TURNSTILE_SYNC_IPC'):
+        turnstile_type = "syn_ipc"
+    elif ts_type == GetEnumValue('turnstile_type_t', 'TURNSTILE_WORKLOOPS'):
+        turnstile_type = "kqwl   "
+    elif ts_type == GetEnumValue('turnstile_type_t', 'TURNSTILE_WORKQS'):
+        turnstile_type = "workq  "
+    elif ts_type == GetEnumValue('turnstile_type_t', 'TURNSTILE_KNOTE'):
+        turnstile_type = "knote  "
+    elif ts_type == GetEnumValue('turnstile_type_t', 'TURNSTILE_SLEEP_INHERITOR'):
+        turnstile_type = "slp_inh"
+    else:
+        turnstile_type = "       "
 
-    turnstile_state = ""
-    if turnstile.ts_state & 0x1:
-        turnstile_state += "T"
-    elif turnstile.ts_state & 0x2:
-        turnstile_state += "F"
-    elif turnstile.ts_state & 0x4:
-        turnstile_state += "H"
-    elif turnstile.ts_state & 0x8:
-        turnstile_state += "P"
+    ts_state = ts_v.xGetScalarByName('ts_state')
+    if ts_state & 0x1:
+        turnstile_state = "T"
+    elif ts_state & 0x2:
+        turnstile_state = "F"
+    elif ts_state & 0x4:
+        turnstile_state = "H"
+    elif ts_state & 0x8:
+        turnstile_state = "P"
+    else:
+        turnstile_state = ""
 
-    if turnstile.ts_inheritor_flags & 0x4:
+    ts_inheritor_flags = ts_v.xGetScalarByName('ts_inheritor_flags')
+    if ts_inheritor_flags & 0x4:
         inheritor_type = "th"
-    elif turnstile.ts_inheritor_flags & 0x8:
+    elif ts_inheritor_flags & 0x8:
         inheritor_type = "ts"
-    elif turnstile.ts_inheritor_flags & 0x40:
+    elif ts_inheritor_flags & 0x40:
         inheritor_type = "wq"
     else:
         inheritor_type = "--"
 
-    format_str = "{0: <#020x} {1: <5d} {2: <#020x} {3: <8s} {4: <8s} {6: <2s}:{5: <#020x} {7: <#020x} {8: <10d} {9: <10d}"
-    out_string = format_str.format(turnstile, turnstile.ts_priority, addressof(turnstile.ts_waitq),
-            turnstile_type, turnstile_state, turnstile.ts_waitq.waitq_inheritor, inheritor_type,
-            turnstile.ts_proprietor, type_and_gencount.ts_gencount, turnstile.ts_prim_count)
-
-    #if DEVELOPMENT
-    format_str = " {0: <#020x} {1: <#020x}"
+    format_str = (
+        "{&ts_v: <#020x}"
+        " {$ts_v.ts_priority: <5d}"
+        " {&ts_v.ts_waitq: <#020x}"
+        " {0: <8s}"
+        " {1: <8s}"
+        " {2: <2s}:{$ts_v.ts_waitq.waitq_inheritor: <#020x}"
+        " {$ts_v.ts_proprietor: <#020x}"
+        " {3: <10d}"
+        " {$ts_v.ts_prim_count: <10d}"
+    )
     if hasattr(turnstile, 'ts_thread'):
-      out_string += format_str.format(turnstile.ts_thread, turnstile.ts_prev_thread)
-    #endif
-    return out_string
+        format_str += (
+            " {$ts_v.ts_thread: <#020x}"
+            " {$ts_v.ts_prev_thread: <#020x}"
+        )
+
+    return xnu_format(format_str,
+        turnstile_type, turnstile_state, inheritor_type, ts_gen,
+        ts_v=ts_v)
+
 
 def PrintTurnstile(turnstile):
     """ print turnstile and it's free list.
@@ -80,15 +98,15 @@ def PrintTurnstile(turnstile):
 
     """ print turnstile freelist if its not on a thread or freelist """
     if turnstile.ts_state & 0x3 == 0:
-      needsHeader = True
-      for free_turnstile in IterateListEntry(turnstile.ts_free_turnstiles, 'struct turnstile *', 'ts_free_elm', 's'):
-        if needsHeader:
-          print("    Turnstile free List")
-          header_str = "    " + GetTurnstileSummary.header
-          print(header_str)
-          needsHeader = False
-        print("    " + GetTurnstileSummary(free_turnstile))
-        print("")
+        needsHeader = True
+        for free_turnstile in IterateListEntry(turnstile.ts_free_turnstiles, 'ts_free_elm', 's'):
+            if needsHeader:
+                print("    Turnstile free List")
+                header_str = "    " + GetTurnstileSummary.header
+                print(header_str)
+                needsHeader = False
+            print("    " + GetTurnstileSummary(free_turnstile))
+            print("")
 
 # Macro: showturnstile
 @lldb_command('showturnstile', fancy=True)
@@ -99,7 +117,7 @@ def ShowTurnstile(cmd_args=None, cmd_options={}, O=None):
     if not cmd_args:
       raise ArgumentError("Please provide arguments")
 
-    turnstile = kern.GetValueFromAddress(cmd_args[0], 'struct turnstile *')
+    turnstile = kern.GetValueFromAddress(cmd_args[0], 'struct turnstile')
     with O.table(GetTurnstileSummary.header):
         PrintTurnstile(turnstile)
 # EndMacro: showturnstile
@@ -123,13 +141,14 @@ def ShowAllTurnstiles(cmd_args=None, cmd_options={}, O=None):
         usage: (lldb) showallturnstiles
     """
     with O.table(GetTurnstileSummary.header):
-        for turnstile in IterateZoneElements(GetZoneByName("turnstiles"), 'struct turnstile *'):
-            PrintTurnstile(turnstile)
+        ts_ty = gettype('struct turnstile')
+        for ts in kmemory.Zone("turnstiles").iter_allocated(ts_ty):
+            PrintTurnstile(value(ts))
 # EndMacro showallturnstiles
 
 # Macro: showallbusyturnstiles
 @lldb_command('showallbusyturnstiles', 'V', fancy=True)
-def ShowAllTurnstiles(cmd_args=None, cmd_options={}, O=None):
+def ShowAllBusyTurnstiles(cmd_args=None, cmd_options={}, O=None):
     """ A macro that walks the list of all allocated turnstile objects
         and prints them.
         usage: (lldb) showallbusyturnstiles [-V]
@@ -140,17 +159,19 @@ def ShowAllTurnstiles(cmd_args=None, cmd_options={}, O=None):
     verbose = "-V" in cmd_options
 
     def ts_is_interesting(ts):
-        if not unsigned(ts.ts_proprietor):
+        if not ts.xGetScalarByName('ts_proprietor'):
             # not owned by any primitive
             return False
         if verbose:
             return True
-        return unsigned(turnstile.ts_waitq.waitq_prio_queue.pq_root)
+        return ts.xGetScalarByPath('.ts_waitq.waitq_prio_queue.pq_root')
 
     with O.table(GetTurnstileSummary.header):
-        for turnstile in IterateZoneElements(GetZoneByName("turnstiles"), 'struct turnstile *'):
-            if ts_is_interesting(turnstile):
-                PrintTurnstile(turnstile)
+        ts_ty = gettype('struct turnstile')
+        for ts in kmemory.Zone("turnstiles").iter_allocated(ts_ty):
+            if ts_is_interesting(ts):
+                PrintTurnstile(value(ts))
+
 # EndMacro showallbusyturnstiles
 
 @lldb_command('showthreadbaseturnstiles', fancy=True)

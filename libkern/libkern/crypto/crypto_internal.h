@@ -30,16 +30,13 @@
 #ifndef _CRYPTO_CRYPTO_INTERNAL_H_
 #define _CRYPTO_CRYPTO_INTERNAL_H_
 
-#ifdef  __cplusplus
-extern "C" {
-#endif
-
+#include <libkern/crypto/crypto.h>
 #include <libkern/crypto/register_crypto.h>
+
+__BEGIN_DECLS
 
 extern crypto_functions_t g_crypto_funcs;
 
-#ifdef  __cplusplus
-}
-#endif
+__END_DECLS
 
 #endif /*_CRYPTO_CRYPTO_INTERNAL_H_*/

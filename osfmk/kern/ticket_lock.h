@@ -174,6 +174,8 @@ typedef struct {
 #define hw_lck_ticket_lock_allow_invalid(lck, pol, grp) \
 	hw_lck_ticket_lock_allow_invalid(lck, pol)
 #define hw_lck_ticket_reserve(lck, t, grp)       hw_lck_ticket_reserve(lck, t)
+#define hw_lck_ticket_reserve_nopreempt(lck, t, grp) \
+	hw_lck_ticket_reserve_nopreempt(lck, t)
 #define hw_lck_ticket_reserve_allow_invalid(lck, t, grp) \
 	hw_lck_ticket_reserve_allow_invalid(lck, t)
 #define hw_lck_ticket_wait(lck, ticket, pol, grp) \
@@ -246,6 +248,11 @@ extern void hw_lck_ticket_unlock_nopreempt(
 /* reserve/wait */
 
 extern bool hw_lck_ticket_reserve(
+	hw_lck_ticket_t        *tlock,
+	uint32_t               *ticket,
+	lck_grp_t              *grp) __result_use_check;
+
+extern bool hw_lck_ticket_reserve_nopreempt(
 	hw_lck_ticket_t        *tlock,
 	uint32_t               *ticket,
 	lck_grp_t              *grp) __result_use_check;

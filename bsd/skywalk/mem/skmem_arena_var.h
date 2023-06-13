@@ -58,7 +58,6 @@ struct skmem_arena {
 	skmem_arena_type_t      ar_type;        /* arena type */
 	uint32_t                ar_flags;       /* ARF_* */
 	size_t                  ar_zsize;       /* zone object size */
-	struct zone             *ar_zone;       /* owning zone */
 	IOSKArenaRef            ar_ar;          /* backing IOSKArena */
 
 	/*

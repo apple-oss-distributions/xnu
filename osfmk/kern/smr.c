@@ -26,12 +26,22 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <kern/locks_internal.h>
 #include <kern/cpu_data.h>
 #include <kern/mpsc_queue.h>
 #include <kern/percpu.h>
 #include <kern/smr.h>
+#include <kern/smr_hash.h>
 #include <kern/zalloc.h>
 #include <sys/queue.h>
+#include <os/hash.h>
+
+
+#pragma mark - SMR domains
+
+typedef struct smr_pcpu {
+	smr_seq_t               c_rd_seq;
+} *smr_pcpu_t;
 
 /*
  * This SMR scheme is directly FreeBSD's "Global Unbounded Sequences".
@@ -39,34 +49,9 @@
  * Major differences are:
  *
  * - only eager clocks are implemented (no lazy, no implicit)
- */
-
-typedef long                    smr_delta_t;
-
-typedef struct smr_pcpu {
-	smr_seq_t               c_rd_seq;
-	unsigned long           c_rd_budget;
-} *smr_pcpu_t;
-
-#define SMR_SEQ_DELTA(a, b)     ((smr_delta_t)((a) - (b)))
-#define SMR_SEQ_CMP(a, op, b)   (SMR_SEQ_DELTA(a, b) op 0)
-
-#define SMR_SEQ_INC             2ul
-
-#define SMR_EARLY_COUNT         32
-
-__startup_data
-static struct {
-	struct smr_pcpu array[SMR_EARLY_COUNT];
-	unsigned        used;
-} smr_boot;
-
-
-#pragma mark - manipulating an SMR clock
-
-/*
- * SMR clocks have 3 state machines interacting at any given time:
  *
+ *
+ * SMR clocks have 3 state machines interacting at any given time:
  *
  * 1. reader critical sections
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -234,72 +219,78 @@ static struct {
  *
  */
 
-static inline smr_pcpu_t __zpercpu
-smr_pcpu(smr_t smr)
+#pragma mark SMR domains: init & helpers
+
+__attribute__((always_inline, overloadable))
+static inline smr_pcpu_t
+__smr_pcpu(smr_t smr, int cpu)
 {
-	return (smr_pcpu_t __zpercpu)smr->smr_pcpu;
+	return zpercpu_get_cpu(smr->smr_pcpu, cpu);
+}
+
+__attribute__((always_inline, overloadable))
+static inline smr_pcpu_t
+__smr_pcpu(smr_t smr)
+{
+	return zpercpu_get(smr->smr_pcpu);
+}
+
+static inline void
+__smr_pcpu_associate(smr_t smr, smr_pcpu_t pcpu)
+{
+	os_atomic_store(&smr->smr_pcpu, pcpu, release);
 }
 
 __startup_func
 void
-__smr_init(smr_t smr)
+__smr_domain_init(smr_t smr)
 {
-	if (startup_phase < STARTUP_SUB_TUNABLES) {
-		smr_pcpu_t pcpu = &smr_boot.array[smr_boot.used++];
-		assertf(smr_boot.used <= SMR_EARLY_COUNT,
-		    "too many SMR_DEFINE_EARLY(), adjust SMR_EARLY_COUNT");
-		smr->smr_pcpu = (unsigned long)__zpcpu_mangle_for_boot(pcpu);
-	} else {
-		smr_pcpu_t __zpercpu pcpu;
+	smr_pcpu_t pcpu;
 
+	if (startup_phase < STARTUP_SUB_TUNABLES) {
+		smr_seq_t *rd_seqp = &smr->smr_early;
+
+		pcpu = __container_of(rd_seqp, struct smr_pcpu, c_rd_seq);
+		smr->smr_pcpu = __zpcpu_mangle_for_boot(pcpu);
+	} else {
 		pcpu = zalloc_percpu_permanent_type(struct smr_pcpu);
-		os_atomic_store(&smr->smr_pcpu, (unsigned long)pcpu, release);
+		__smr_pcpu_associate(smr, pcpu);
 	}
 }
 
-static inline void
-__smr_reset(smr_t smr, smr_seq_t seq)
+smr_t
+smr_domain_create(smr_flags_t flags)
 {
-	smr->smr_clock.s_rd_seq = seq;
-	smr->smr_clock.s_wr_seq = seq;
-	smr->smr_pcpu           = 0;
-}
+	smr_pcpu_t pcpu;
+	smr_t smr;
 
-void
-smr_init(smr_t smr)
-{
-	smr_pcpu_t __zpercpu pcpu;
-
+	smr  = kalloc_type(struct smr, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	pcpu = zalloc_percpu(percpu_u64_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-	__smr_reset(smr, SMR_SEQ_INIT);
-	os_atomic_store(&smr->smr_pcpu, (unsigned long)pcpu, release);
+
+	smr->smr_clock.s_rd_seq = SMR_SEQ_INIT;
+	smr->smr_clock.s_wr_seq = SMR_SEQ_INIT;
+	smr->smr_flags = flags;
+
+	__smr_pcpu_associate(smr, pcpu);
+
+	return smr;
 }
 
 void
-smr_set_deferred_budget(smr_t smr, unsigned long budget)
-{
-	/*
-	 * No need to update the per-cpu budget variables,
-	 * calls to smr_deferred_advance() will eventually fix it.
-	 *
-	 * Note: we use `-1` because smr_deferred_advance_nopreempt()
-	 *       checks for overflow rather than hitting 0.
-	 */
-	smr->smr_budget = budget ? budget - 1 : 0;
-}
-
-void
-smr_destroy(smr_t smr)
+smr_domain_free(smr_t smr)
 {
 	smr_synchronize(smr);
-	zfree_percpu(percpu_u64_zone, smr_pcpu(smr));
-	__smr_reset(smr, SMR_SEQ_INVALID);
+
+	zfree_percpu(percpu_u64_zone, smr->smr_pcpu);
+	kfree_type(struct smr, smr);
 }
+
+#pragma mark SMR domains: enter / leave
 
 static inline bool
 smr_entered_nopreempt(smr_t smr)
 {
-	return zpercpu_get(smr_pcpu(smr))->c_rd_seq != SMR_SEQ_INVALID;
+	return __smr_pcpu(smr)->c_rd_seq != SMR_SEQ_INVALID;
 }
 
 __attribute__((always_inline))
@@ -307,6 +298,13 @@ bool
 smr_entered(smr_t smr)
 {
 	return get_preemption_level() != 0 && smr_entered_nopreempt(smr);
+}
+
+__attribute__((always_inline))
+bool
+smr_entered_cpu(smr_t smr, int cpu)
+{
+	return __smr_pcpu(smr, cpu)->c_rd_seq != SMR_SEQ_INVALID;
 }
 
 __attribute__((always_inline))
@@ -334,7 +332,7 @@ __smr_enter(smr_t smr, smr_pcpu_t pcpu)
 	/* [R1] */
 	old_seq = os_atomic_add_orig(&pcpu->c_rd_seq, s_wr_seq, seq_cst);
 #else
-	old_seq = os_atomic_load(&pcpu->c_rd_seq, relaxed);
+	old_seq = pcpu->c_rd_seq;
 	os_atomic_store(&pcpu->c_rd_seq, s_wr_seq, relaxed);
 	os_atomic_thread_fence(seq_cst); /* [R1] */
 #endif
@@ -342,23 +340,31 @@ __smr_enter(smr_t smr, smr_pcpu_t pcpu)
 }
 
 __attribute__((always_inline))
+static void
+__smr_leave(smr_pcpu_t pcpu)
+{
+	/* [R2] */
+	os_atomic_store(&pcpu->c_rd_seq, SMR_SEQ_INVALID, release);
+}
+
+__attribute__((always_inline))
 void
 smr_enter(smr_t smr)
 {
 	disable_preemption();
-	__smr_enter(smr, zpercpu_get(smr_pcpu(smr)));
+	__smr_enter(smr, __smr_pcpu(smr));
 }
 
 __attribute__((always_inline))
 void
 smr_leave(smr_t smr)
 {
-	smr_pcpu_t pcpu = zpercpu_get(smr_pcpu(smr));
-
-	/* [R2] */
-	os_atomic_store(&pcpu->c_rd_seq, SMR_SEQ_INVALID, release);
+	__smr_leave(__smr_pcpu(smr));
 	enable_preemption();
 }
+
+
+#pragma mark SMR domains: advance, wait, poll, synchronize
 
 static inline smr_seq_t
 __smr_wr_advance(smr_t smr)
@@ -367,40 +373,21 @@ __smr_wr_advance(smr_t smr)
 	return os_atomic_add(&smr->smr_clock.s_wr_seq, SMR_SEQ_INC, release);
 }
 
-static inline smr_clock_t
-__smr_wr_advance_combined(smr_t smr)
-{
-	smr_clock_t clk = { .s_wr_seq = SMR_SEQ_INC, };
-
-	/*
-	 * Do a combined increment to get consistent read/write positions.
-	 */
-
-	/* [W] */
-	clk.s_combined = os_atomic_add(&smr->smr_clock.s_combined,
-	    clk.s_combined, release);
-
-	return clk;
-}
-
 static inline bool
 __smr_rd_advance(smr_t smr, smr_seq_t goal, smr_seq_t rd_seq)
 {
-	smr_clock_t oclk, nclk;
+	smr_seq_t o_seq;
 
-	os_atomic_rmw_loop(&smr->smr_clock.s_combined,
-	    oclk.s_combined, nclk.s_combined, relaxed, {
-		nclk = oclk;
+	os_atomic_thread_fence(seq_cst); /* [S3] */
 
-		os_atomic_thread_fence(seq_cst); /* [S3] */
-
-		if (SMR_SEQ_CMP(rd_seq, <=, oclk.s_rd_seq)) {
+	os_atomic_rmw_loop(&smr->smr_clock.s_rd_seq, o_seq, rd_seq, relaxed, {
+		if (SMR_SEQ_CMP(rd_seq, <=, o_seq)) {
+		        rd_seq = o_seq;
 		        os_atomic_rmw_loop_give_up(break);
 		}
-		nclk.s_rd_seq = rd_seq;
 	});
 
-	return SMR_SEQ_CMP(goal, <=, nclk.s_rd_seq);
+	return SMR_SEQ_CMP(goal, <=, rd_seq);
 }
 
 __attribute__((noinline))
@@ -414,18 +401,26 @@ __smr_scan(smr_t smr, smr_seq_t goal, smr_clock_t clk, bool wait)
 	 * Validate that the goal is sane.
 	 */
 	delta = SMR_SEQ_DELTA(goal, clk.s_wr_seq);
-	if (delta == SMR_SEQ_INC && smr->smr_budget) {
+	if (delta == SMR_SEQ_INC) {
 		/*
 		 * This SMR clock uses deferred advance,
 		 * and the goal is one inc in the future.
 		 *
-		 * If we can wait, then force the clock
-		 * to advance, else we can't possibly succeed.
+		 * If we can wait, then commit the sequence number,
+		 * else we can't possibly succeed.
+		 *
+		 * Doing a commit here rather than an advance
+		 * gives the hardware a chance to abort the
+		 * transaction early in case of high contention
+		 * compared to an unconditional advance.
 		 */
 		if (!wait) {
 			return false;
 		}
-		clk = __smr_wr_advance_combined(smr);
+		if (lock_cmpxchgv(&smr->smr_clock.s_wr_seq,
+		    clk.s_wr_seq, goal, &clk.s_wr_seq, relaxed)) {
+			clk.s_wr_seq = goal;
+		}
 	} else if (delta > 0) {
 		/*
 		 * Invalid goal: the caller held on it for too long,
@@ -458,7 +453,7 @@ __smr_scan(smr_t smr, smr_seq_t goal, smr_clock_t clk, bool wait)
 	 */
 	rd_seq = clk.s_wr_seq;
 
-	zpercpu_foreach(it, smr_pcpu(smr)) {
+	zpercpu_foreach(it, smr->smr_pcpu) {
 		smr_seq_t seq = os_atomic_load(&it->c_rd_seq, relaxed);
 
 		while (seq != SMR_SEQ_INVALID) {
@@ -539,39 +534,22 @@ smr_advance(smr_t smr)
 }
 
 smr_seq_t
-smr_deferred_advance_nopreempt(smr_t smr, unsigned long step)
+smr_deferred_advance(smr_t smr)
 {
-	smr_pcpu_t pcpu = smr_pcpu(smr);
-
-	assert(get_preemption_level() && !smr_entered_nopreempt(smr));
-
-	if (os_sub_overflow(pcpu->c_rd_budget, step, &pcpu->c_rd_budget)) {
-		pcpu->c_rd_budget = smr->smr_budget;
-		return __smr_wr_advance(smr);
-	}
-
-	/*
-	 * Deferred updates are about avoiding to touch the global c_wr_seq
-	 * as often, and we return a sequence number in the future.
-	 *
-	 * This full barrier establishes a "happen before" relationship
-	 * with the [W] barrier in the __smr_wr_advance() that will
-	 * actually generate it.
-	 */
 	os_atomic_thread_fence(seq_cst);
 	return SMR_SEQ_INC + os_atomic_load(&smr->smr_clock.s_wr_seq, relaxed);
 }
 
-smr_seq_t
-smr_deferred_advance(smr_t smr, unsigned long step)
+void
+smr_deferred_advance_commit(smr_t smr, smr_seq_t seq)
 {
-	smr_seq_t seq;
-
-	disable_preemption();
-	seq = smr_deferred_advance_nopreempt(smr, step);
-	enable_preemption();
-
-	return seq;
+	/*
+	 * no barrier needed: smr_deferred_advance() had one already.
+	 * no failure handling: it means someone updated the clock already!
+	 * lock_cmpxchg: so that we pre-test for architectures needing it.
+	 */
+	assert(seq != SMR_SEQ_INVALID);
+	lock_cmpxchg(&smr->smr_clock.s_wr_seq, seq - SMR_SEQ_INC, seq, relaxed);
 }
 
 bool
@@ -594,12 +572,21 @@ smr_synchronize(smr_t smr)
 	smr_clock_t clk;
 
 	assert(!smr_entered(smr));
-	clk = __smr_wr_advance_combined(smr);
-	__smr_scan(smr, clk.s_wr_seq, clk, true);
+
+	/*
+	 * Similar to __smr_poll() but also does a deferred advance which
+	 * __smr_scan will commit.
+	 */
+
+	clk.s_rd_seq = os_atomic_load(&smr->smr_clock.s_rd_seq, relaxed);
+	os_atomic_thread_fence(seq_cst);
+	clk.s_wr_seq = os_atomic_load(&smr->smr_clock.s_wr_seq, relaxed);
+
+	(void)__smr_scan(smr, clk.s_wr_seq + SMR_SEQ_INC, clk, true);
 }
 
 
-#pragma mark - system global SMR
+#pragma mark system global SMR
 
 typedef struct smr_record {
 	void                   *smrr_val;
@@ -619,7 +606,7 @@ typedef struct smr_bucket {
 
 STAILQ_HEAD(smr_bucket_list, smr_bucket);
 
-static SMR_DEFINE_EARLY(smr_system);
+SMR_DEFINE(smr_system);
 
 /*! per-cpu state for smr pointers. */
 static smr_bucket_t PERCPU_DATA(smr_bucket);
@@ -645,27 +632,6 @@ static struct smr_bucket_list smr_buckets_pending =
 
 /*! the atomic queue handling deferred deallocations */
 static struct mpsc_daemon_queue smr_deallocate_queue;
-
-__attribute__((always_inline))
-bool
-smr_global_entered(void)
-{
-	return smr_entered(&smr_system);
-}
-
-__attribute__((always_inline))
-void
-smr_global_enter(void)
-{
-	smr_enter(&smr_system);
-}
-
-__attribute__((always_inline))
-void
-smr_global_leave(void)
-{
-	smr_leave(&smr_system);
-}
 
 static smr_bucket_t
 smr_bucket_alloc(zalloc_flags_t flags)
@@ -776,3 +742,987 @@ smr_startup(void)
 	}
 }
 STARTUP(PERCPU, STARTUP_RANK_LAST, smr_startup);
+
+
+#pragma mark - SMR hash tables
+
+static struct smrq_slist_head *
+smr_hash_alloc_array(size_t size)
+{
+	return kalloc_type(struct smrq_slist_head, size,
+	           Z_WAITOK | Z_ZERO | Z_SPRAYQTN);
+}
+
+static void
+smr_hash_free_array(struct smrq_slist_head *array, size_t size)
+{
+	kfree_type(struct smrq_slist_head, size, array);
+}
+
+static inline uintptr_t
+smr_hash_array_encode(struct smrq_slist_head *array, uint16_t order)
+{
+	uintptr_t ptr;
+
+	ptr  = (uintptr_t)array;
+	ptr &= ~SMRH_ARRAY_ORDER_MASK;
+	ptr |= (uintptr_t)order << SMRH_ARRAY_ORDER_SHIFT;
+
+	return ptr;
+}
+
+#pragma mark SMR simple hash tables
+
+void
+smr_hash_init(struct smr_hash *smrh, size_t size)
+{
+	struct smrq_slist_head *array;
+	uint16_t shift;
+
+	assert(size);
+	shift = (uint16_t)flsll(size - 1);
+	size  = 1UL << shift;
+	if (startup_phase >= STARTUP_SUB_LOCKDOWN) {
+		assert(size * sizeof(struct smrq_slist_head) <=
+		    KALLOC_SAFE_ALLOC_SIZE);
+	}
+	array = smr_hash_alloc_array(size);
+
+	*smrh = (struct smr_hash){
+		.smrh_array = smr_hash_array_encode(array, 64 - shift),
+	};
+}
+
+void
+smr_hash_destroy(struct smr_hash *smrh)
+{
+	struct smr_hash_array array = smr_hash_array_decode(smrh);
+
+	smr_hash_free_array(array.smrh_array, smr_hash_size(array));
+	*smrh = (struct smr_hash){ };
+}
+
+void
+__smr_hash_serialized_clear(
+	struct smr_hash        *smrh,
+	smrh_traits_t          smrht,
+	void                 (^free)(void *obj))
+{
+	struct smr_hash_array array = smr_hash_array_decode(smrh);
+
+	for (size_t i = 0; i < smr_hash_size(array); i++) {
+		struct smrq_slink *link;
+		__smrq_slink_t *prev;
+
+		prev = &array.smrh_array[i].first;
+		while ((link = smr_serialized_load(prev))) {
+			prev = &link->next;
+			free(__smrht_link_to_obj(smrht, link));
+		}
+
+		smr_clear_store(&array.smrh_array[i].first);
+	}
+
+	smrh->smrh_count = 0;
+}
+
+kern_return_t
+__smr_hash_shrink_and_unlock(
+	struct smr_hash        *smrh,
+	lck_mtx_t              *lock,
+	smrh_traits_t           smrht)
+{
+	struct smr_hash_array decptr = smr_hash_array_decode(smrh);
+	struct smrq_slist_head *newarray, *oldarray;
+	uint16_t neworder = decptr.smrh_order + 1;
+	size_t   oldsize  = smr_hash_size(decptr);
+	size_t   newsize  = oldsize / 2;
+
+	assert(newsize);
+
+	if (os_atomic_load(&smrh->smrh_resizing, relaxed)) {
+		lck_mtx_unlock(lock);
+		return KERN_FAILURE;
+	}
+
+	os_atomic_store(&smrh->smrh_resizing, true, relaxed);
+	lck_mtx_unlock(lock);
+
+	newarray = smr_hash_alloc_array(newsize);
+	if (newarray == NULL) {
+		os_atomic_store(&smrh->smrh_resizing, false, relaxed);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	lck_mtx_lock(lock);
+
+	/*
+	 * Step 1: collapse all the chains in pairs.
+	 */
+	oldarray = decptr.smrh_array;
+
+	for (size_t i = 0; i < newsize; i++) {
+		newarray[i] = oldarray[i];
+		smrq_serialized_append(&newarray[i], &oldarray[i + newsize]);
+	}
+
+	/*
+	 * Step 2: publish the new array.
+	 */
+	os_atomic_store(&smrh->smrh_array,
+	    smr_hash_array_encode(newarray, neworder), release);
+
+	os_atomic_store(&smrh->smrh_resizing, false, relaxed);
+
+	lck_mtx_unlock(lock);
+
+	/*
+	 * Step 3: free the old array once readers can't observe the old values.
+	 */
+	smr_synchronize(smrht->domain);
+
+	smr_hash_free_array(oldarray, oldsize);
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+__smr_hash_grow_and_unlock(
+	struct smr_hash        *smrh,
+	lck_mtx_t              *lock,
+	smrh_traits_t           smrht)
+{
+	struct smr_hash_array decptr = smr_hash_array_decode(smrh);
+	struct smrq_slist_head *newarray, *oldarray;
+	__smrq_slink_t **prevarray;
+	uint16_t neworder = decptr.smrh_order - 1;
+	size_t   oldsize  = smr_hash_size(decptr);
+	size_t   newsize  = 2 * oldsize;
+	bool     needs_another_round = false;
+
+	if (smrh->smrh_resizing) {
+		lck_mtx_unlock(lock);
+		return KERN_FAILURE;
+	}
+
+	smrh->smrh_resizing = true;
+	lck_mtx_unlock(lock);
+
+	newarray = smr_hash_alloc_array(newsize);
+	if (newarray == NULL) {
+		os_atomic_store(&smrh->smrh_resizing, false, relaxed);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	prevarray = kalloc_type(__smrq_slink_t *, newsize,
+	    Z_WAITOK | Z_ZERO | Z_SPRAYQTN);
+	if (prevarray == NULL) {
+		smr_hash_free_array(newarray, newsize);
+		os_atomic_store(&smrh->smrh_resizing, false, relaxed);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+
+	lck_mtx_lock(lock);
+
+	/*
+	 * Step 1: create a duplicated array with twice as many heads.
+	 */
+	oldarray = decptr.smrh_array;
+
+	memcpy(newarray, oldarray, oldsize * sizeof(newarray[0]));
+	memcpy(newarray + oldsize, oldarray, oldsize * sizeof(newarray[0]));
+
+	/*
+	 * Step 2: Publish the new array, and wait for readers to observe it
+	 *         before we do any change.
+	 */
+	os_atomic_store(&smrh->smrh_array,
+	    smr_hash_array_encode(newarray, neworder), release);
+
+	smr_synchronize(smrht->domain);
+
+
+	/*
+	 * Step 3: split the lists.
+	 */
+
+	/*
+	 * If the list we are trying to split looked like this,
+	 * where L elements will go to the "left" bucket and "R"
+	 * to the right one:
+	 *
+	 *     old_head --> L1 --> L2                -> L5
+	 *                            \             /      \
+	 *                             -> R3 --> R4         -> R6 --> NULL
+	 *
+	 * Then make sure the new heads point to their legitimate first element,
+	 * leading to this state:
+	 *
+	 *     l_head   --> L1 --> L2                -> L5
+	 *                            \             /      \
+	 *     r_head   ----------------> R3 --> R4         -> R6 --> NULL
+	 *
+	 *
+	 *     prevarray[left]  = &L2->next
+	 *     prevarray[right] = &r_head
+	 *     oldarray[old]    = L2
+	 */
+
+	for (size_t i = 0; i < oldsize; i++) {
+		struct smrq_slink *link, *next;
+		uint32_t want_mask;
+
+		link = smr_serialized_load(&oldarray[i].first);
+		if (link == NULL) {
+			continue;
+		}
+
+		want_mask = smrht->obj_hash(link, 0) & oldsize;
+		while ((next = smr_serialized_load(&link->next)) &&
+		    (smrht->obj_hash(next, 0) & oldsize) == want_mask) {
+			link = next;
+		}
+
+		if (want_mask == 0) {
+			/* elements seen go to the "left" bucket */
+			prevarray[i] = &link->next;
+			prevarray[i + oldsize] = &newarray[i + oldsize].first;
+			smr_serialized_store_relaxed(prevarray[i + oldsize], next);
+		} else {
+			/* elements seen go to the "right" bucket */
+			prevarray[i] = &newarray[i].first;
+			prevarray[i + oldsize] = &link->next;
+			smr_serialized_store_relaxed(prevarray[i], next);
+		}
+
+		smr_serialized_store_relaxed(&oldarray[i].first,
+		    next ? link : NULL);
+
+		needs_another_round |= (next != NULL);
+	}
+
+	/*
+	 * At this point, when we split further, we must wait for
+	 * readers to observe the previous state before we split
+	 * further. Indeed, reusing the example above, the next
+	 * round of splitting would end up with this:
+	 *
+	 *     l_head   --> L1 --> L2 ----------------> L5
+	 *                                          /      \
+	 *     r_head   ----------------> R3 --> R4         -> R6 --> NULL
+	 *
+	 *
+	 *     prevarray[left]  = &L2->next
+	 *     prevarray[right] = &R4->next
+	 *     oldarray[old]    = R4
+	 *
+	 * But we must be sure that no readers can observe r_head
+	 * having been L1, otherwise a stale reader might skip over
+	 * R3/R4.
+	 *
+	 * Generally speaking we need to do that each time we do a round
+	 * of splitting that isn't terminating the list with NULL.
+	 */
+
+	while (needs_another_round) {
+		smr_synchronize(smrht->domain);
+
+		needs_another_round = false;
+
+		for (size_t i = 0; i < oldsize; i++) {
+			struct smrq_slink *link, *next;
+			uint32_t want_mask;
+
+			link = smr_serialized_load(&oldarray[i].first);
+			if (link == NULL) {
+				continue;
+			}
+
+			/*
+			 * If `prevarray[i]` (left) points to the linkage
+			 * we stopped at, then it means the next element
+			 * will be "to the right" and vice versa.
+			 *
+			 * We also already know "next" exists, so only probe
+			 * after it.
+			 */
+			if (prevarray[i] == &link->next) {
+				want_mask = (uint32_t)oldsize;
+			} else {
+				want_mask = 0;
+			}
+
+			link = smr_serialized_load(&link->next);
+
+			while ((next = smr_serialized_load(&link->next)) &&
+			    (smrht->obj_hash(next, 0) & oldsize) == want_mask) {
+				link = next;
+			}
+
+			if (want_mask == 0) {
+				/* elements seen go to the "left" bucket */
+				prevarray[i] = &link->next;
+				smr_serialized_store_relaxed(prevarray[i + oldsize], next);
+			} else {
+				/* elements seen go to the "right" bucket */
+				smr_serialized_store_relaxed(prevarray[i], next);
+				prevarray[i + oldsize] = &link->next;
+			}
+
+			smr_serialized_store_relaxed(&oldarray[i].first,
+			    next ? link : NULL);
+
+			needs_another_round |= (next != NULL);
+		}
+	}
+
+	smrh->smrh_resizing = false;
+	lck_mtx_unlock(lock);
+
+	/*
+	 * Step 4: cleanup, no need to wait for readers, this happened already
+	 *         at least once for splitting reasons.
+	 */
+	smr_hash_free_array(oldarray, oldsize);
+	kfree_type(__smrq_slink_t *, newsize, prevarray);
+	return KERN_SUCCESS;
+}
+
+#pragma mark SMR scalable hash tables
+
+#define SMRSH_MIGRATED  ((struct smrq_slink *)SMRSH_BUCKET_STOP_BIT)
+static LCK_GRP_DECLARE(smr_shash_grp, "smr_shash");
+
+static inline size_t
+__smr_shash_min_size(struct smr_shash *smrh)
+{
+	return 1ul << smrh->smrsh_min_shift;
+}
+
+static inline size_t
+__smr_shash_size_for_shift(uint8_t shift)
+{
+	return (~0u >> shift) + 1;
+}
+
+static inline size_t
+__smr_shash_cursize(smrsh_state_t state)
+{
+	return __smr_shash_size_for_shift(state.curshift);
+}
+
+static void
+__smr_shash_bucket_init(hw_lck_ptr_t *head)
+{
+	hw_lck_ptr_init(head, __smr_shash_bucket_stop(head), &smr_shash_grp);
+}
+
+static void
+__smr_shash_bucket_destroy(hw_lck_ptr_t *head)
+{
+	hw_lck_ptr_destroy(head, &smr_shash_grp);
+}
+
+__attribute__((noinline))
+void *
+__smr_shash_entered_find_slow(
+	const struct smr_shash *smrh,
+	smrh_key_t              key,
+	hw_lck_ptr_t           *head,
+	smrh_traits_t           traits)
+{
+	struct smrq_slink *link;
+	smrsh_state_t state;
+	uint32_t hash;
+
+	/* wait for the rehashing to be done into their target buckets */
+	hw_lck_ptr_wait_for_value(head, SMRSH_MIGRATED, &smr_shash_grp);
+
+	state = os_atomic_load(&smrh->smrsh_state, dependency);
+	hash  = __smr_shash_hash(smrh, state.newidx, key, traits);
+	head  = __smr_shash_bucket(smrh, state, SMRSH_NEW, hash);
+
+	link  = hw_lck_ptr_value(head);
+	while (!__smr_shash_is_stop(link)) {
+		if (traits->obj_equ(link, key)) {
+			return __smrht_link_to_obj(traits, link);
+		}
+		link = smr_entered_load(&link->next);
+	}
+
+	assert(link == __smr_shash_bucket_stop(head));
+	return NULL;
+}
+
+static const uint8_t __smr_shash_grow_ratio[] = {
+	[SMRSH_COMPACT]           = 6,
+	[SMRSH_BALANCED]          = 4,
+	[SMRSH_BALANCED_NOSHRINK] = 4,
+	[SMRSH_FASTEST]           = 2,
+};
+
+static inline uint64_t
+__smr_shash_count(struct smr_shash *smrh)
+{
+	int64_t count = (int64_t)counter_load(&smrh->smrsh_count);
+
+	/*
+	 * negative values make no sense and is likely due to some
+	 * stale values being read.
+	 */
+	return count < 0 ? 0ull : (uint64_t)count;
+}
+
+static inline bool
+__smr_shash_should_grow(
+	struct smr_shash       *smrh,
+	smrsh_state_t           state,
+	uint64_t                count)
+{
+	size_t size = __smr_shash_cursize(state);
+
+	/* grow if elem:bucket ratio is worse than grow_ratio:1 */
+	return count > __smr_shash_grow_ratio[smrh->smrsh_policy] * size;
+}
+
+static inline bool
+__smr_shash_should_reseed(
+	struct smr_shash       *smrh,
+	size_t                  observed_depth)
+{
+	return observed_depth > 10 * __smr_shash_grow_ratio[smrh->smrsh_policy];
+}
+
+static inline bool
+__smr_shash_should_shrink(
+	struct smr_shash       *smrh,
+	smrsh_state_t           state,
+	uint64_t                count)
+{
+	size_t size = __smr_shash_cursize(state);
+
+	switch (smrh->smrsh_policy) {
+	case SMRSH_COMPACT:
+		/* shrink if bucket:elem ratio is worse than 1:1 */
+		return size > count && size > __smr_shash_min_size(smrh);
+	case SMRSH_BALANCED:
+		/* shrink if bucket:elem ratio is worse than 2:1 */
+		return size > 2 * count && size > __smr_shash_min_size(smrh);
+	case SMRSH_BALANCED_NOSHRINK:
+	case SMRSH_FASTEST:
+		return false;
+	}
+}
+
+static inline void
+__smr_shash_schedule_rehash(
+	struct smr_shash       *smrh,
+	smrh_traits_t           traits,
+	smrsh_rehash_t          reason)
+{
+	smrsh_rehash_t rehash;
+
+	rehash = os_atomic_load(&smrh->smrsh_rehashing, relaxed);
+	if (rehash & reason) {
+		return;
+	}
+
+	rehash = os_atomic_or_orig(&smrh->smrsh_rehashing, reason, relaxed);
+	if (!rehash) {
+		thread_call_enter1(smrh->smrsh_callout,
+		    __DECONST(void *, traits));
+	}
+}
+
+void *
+__smr_shash_entered_get_or_insert(
+	struct smr_shash       *smrh,
+	smrh_key_t              key,
+	struct smrq_slink      *link,
+	smrh_traits_t           traits)
+{
+	struct smrq_slink *first;
+	struct smrq_slink *other;
+	uint32_t hash, depth;
+	smrsh_state_t state;
+	hw_lck_ptr_t *head;
+	void *obj;
+
+	state = os_atomic_load(&smrh->smrsh_state, dependency);
+	hash  = __smr_shash_hash(smrh, state.curidx, key, traits);
+	head  = __smr_shash_bucket(smrh, state, SMRSH_CUR, hash);
+	first = hw_lck_ptr_lock_nopreempt(head, &smr_shash_grp);
+
+	if (__improbable(first == SMRSH_MIGRATED)) {
+		hw_lck_ptr_unlock_nopreempt(head, first, &smr_shash_grp);
+
+		state = os_atomic_load(&smrh->smrsh_state, dependency);
+		hash  = __smr_shash_hash(smrh, state.newidx, key, traits);
+		head  = __smr_shash_bucket(smrh, state, SMRSH_NEW, hash);
+		first = hw_lck_ptr_lock_nopreempt(head, &smr_shash_grp);
+	}
+
+	depth = 0;
+	other = first;
+	while (!__smr_shash_is_stop(other)) {
+		depth++;
+		if (traits->obj_equ(other, key)) {
+			obj = __smrht_link_to_obj(traits, other);
+			if (traits->obj_try_get(obj)) {
+				hw_lck_ptr_unlock_nopreempt(head, first,
+				    &smr_shash_grp);
+				return obj;
+			}
+			break;
+		}
+		other = smr_serialized_load(&other->next);
+	}
+
+	counter_inc_preemption_disabled(&smrh->smrsh_count);
+	smr_serialized_store_relaxed(&link->next, first);
+	hw_lck_ptr_unlock_nopreempt(head, link, &smr_shash_grp);
+
+	if (__smr_shash_should_reseed(smrh, depth)) {
+		__smr_shash_schedule_rehash(smrh, traits, SMRSH_REHASH_RESEED);
+	} else if (depth * 2 >= __smr_shash_grow_ratio[smrh->smrsh_policy] &&
+	    __smr_shash_should_grow(smrh, state, __smr_shash_count(smrh))) {
+		__smr_shash_schedule_rehash(smrh, traits, SMRSH_REHASH_GROW);
+	}
+	return NULL;
+}
+
+__abortlike
+static void
+__smr_shash_missing_elt_panic(
+	struct smr_shash        *smrh,
+	struct smrq_slink       *link,
+	smrh_traits_t           traits)
+{
+	panic("Unable to find item %p (linkage %p) in %p (traits %p)",
+	    __smrht_link_to_obj(traits, link), link, smrh, traits);
+}
+
+smr_shash_mut_cursor_t
+__smr_shash_entered_mut_begin(
+	struct smr_shash       *smrh,
+	struct smrq_slink      *link,
+	smrh_traits_t           traits)
+{
+	struct smrq_slink *first, *next;
+	__smrq_slink_t *prev;
+	smrsh_state_t state;
+	hw_lck_ptr_t *head;
+	uint32_t hash;
+
+	state = os_atomic_load(&smrh->smrsh_state, dependency);
+	hash  = __smr_shash_hash(smrh, state.curidx, link, traits);
+	head  = __smr_shash_bucket(smrh, state, SMRSH_CUR, hash);
+	first = hw_lck_ptr_lock_nopreempt(head, &smr_shash_grp);
+
+	if (__improbable(first == SMRSH_MIGRATED)) {
+		hw_lck_ptr_unlock_nopreempt(head, first, &smr_shash_grp);
+
+		state = os_atomic_load(&smrh->smrsh_state, dependency);
+		hash  = __smr_shash_hash(smrh, state.newidx, link, traits);
+		head  = __smr_shash_bucket(smrh, state, SMRSH_NEW, hash);
+		first = hw_lck_ptr_lock_nopreempt(head, &smr_shash_grp);
+	}
+
+	next = first;
+	while (next != link) {
+		if (__smr_shash_is_stop(next)) {
+			__smr_shash_missing_elt_panic(smrh, link, traits);
+		}
+		prev  = &next->next;
+		next  = smr_serialized_load(prev);
+	}
+
+	return (smr_shash_mut_cursor_t){ .head = head, .prev = prev };
+}
+
+void
+__smr_shash_entered_mut_erase(
+	struct smr_shash       *smrh,
+	smr_shash_mut_cursor_t  cursor,
+	struct smrq_slink      *link,
+	smrh_traits_t           traits)
+{
+	struct smrq_slink *next, *first;
+	smrsh_state_t state;
+
+	first = hw_lck_ptr_value(cursor.head);
+
+	next  = smr_serialized_load(&link->next);
+	if (first == link) {
+		hw_lck_ptr_unlock_nopreempt(cursor.head, next, &smr_shash_grp);
+	} else {
+		smr_serialized_store_relaxed(cursor.prev, next);
+		hw_lck_ptr_unlock_nopreempt(cursor.head, first, &smr_shash_grp);
+	}
+	counter_dec_preemption_disabled(&smrh->smrsh_count);
+
+	state = atomic_load_explicit(&smrh->smrsh_state, memory_order_relaxed);
+	if (first == link && __smr_shash_is_stop(next) &&
+	    __smr_shash_should_shrink(smrh, state, __smr_shash_count(smrh))) {
+		__smr_shash_schedule_rehash(smrh, traits, SMRSH_REHASH_SHRINK);
+	}
+}
+
+void
+__smr_shash_entered_mut_replace(
+	smr_shash_mut_cursor_t  cursor,
+	struct smrq_slink      *old_link,
+	struct smrq_slink      *new_link)
+{
+	struct smrq_slink *first, *next;
+
+	first = hw_lck_ptr_value(cursor.head);
+
+	next  = smr_serialized_load(&old_link->next);
+	smr_serialized_store_relaxed(&new_link->next, next);
+	if (first == old_link) {
+		hw_lck_ptr_unlock_nopreempt(cursor.head, new_link, &smr_shash_grp);
+	} else {
+		smr_serialized_store_relaxed(cursor.prev, new_link);
+		hw_lck_ptr_unlock_nopreempt(cursor.head, first, &smr_shash_grp);
+	}
+}
+
+void
+__smr_shash_entered_mut_abort(smr_shash_mut_cursor_t cursor)
+{
+	hw_lck_ptr_unlock_nopreempt(cursor.head,
+	    hw_lck_ptr_value(cursor.head), &smr_shash_grp);
+}
+
+static kern_return_t
+__smr_shash_rehash_with_target(
+	struct smr_shash       *smrh,
+	smrsh_state_t           state,
+	uint8_t                 newshift,
+	smrh_traits_t           traits)
+{
+	const size_t FLAT_SIZE = 256;
+	struct smrq_slink *flat_queue[FLAT_SIZE];
+
+	size_t oldsize, newsize;
+	hw_lck_ptr_t *oldarray;
+	hw_lck_ptr_t *newarray;
+	uint32_t newseed;
+	uint8_t oldidx;
+
+	/*
+	 * This function resizes a scalable hash table.
+	 *
+	 * It doesn't require a lock because it is the callout
+	 * of a THREAD_CALL_ONCE thread call.
+	 */
+
+	oldidx         = state.curidx;
+	state.newidx   = 1 - state.curidx;
+	state.newshift = newshift;
+	assert(__smr_shash_load_array(smrh, state.newidx) == NULL);
+
+	oldsize = __smr_shash_cursize(state);
+	newsize = __smr_shash_size_for_shift(newshift);
+
+	oldarray = __smr_shash_load_array(smrh, state.curidx);
+	newarray = (hw_lck_ptr_t *)smr_hash_alloc_array(newsize);
+	newseed  = (uint32_t)early_random();
+
+	if (newarray == NULL) {
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	/*
+	 * Step 1: initialize the new array and seed,
+	 *         and then publish the state referencing it.
+	 *
+	 *         We do not need to synchronize explicitly with SMR,
+	 *         because readers/writers will notice rehashing when
+	 *         the bucket they interact with has a SMRSH_MIGRATED
+	 *         value.
+	 */
+
+	for (size_t i = 0; i < newsize; i++) {
+		__smr_shash_bucket_init(&newarray[i]);
+	}
+	os_atomic_store(&smrh->smrsh_array[state.newidx], newarray, relaxed);
+	os_atomic_store(&smrh->smrsh_seed[state.newidx], newseed, relaxed);
+	os_atomic_store(&smrh->smrsh_state, state, release);
+
+	/*
+	 * Step 2: migrate buckets "atomically" under the old bucket lock.
+	 *
+	 *         This migration is atomic for writers because
+	 *         they take the old bucket lock first, and if
+	 *         they observe SMRSH_MIGRATED as the value,
+	 *         go look in the new bucket instead.
+	 *
+	 *         This migration is atomic for readers, because
+	 *         as we move elements to their new buckets,
+	 *         the hash chains will not circle back to their
+	 *         bucket head (the "stop" value won't match),
+	 *         or the bucket head will be SMRSH_MIGRATED.
+	 *
+	 *         This causes a slowpath which spins waiting
+	 *         for SMRSH_MIGRATED to appear and then looks
+	 *         in the new bucket.
+	 */
+	for (size_t i = 0; i < oldsize; i++) {
+		struct smrq_slink *first, *link, *next;
+		hw_lck_ptr_t *head;
+		uint32_t hash;
+		size_t n = 0;
+
+		link = first = hw_lck_ptr_lock(&oldarray[i], &smr_shash_grp);
+
+		while (!__smr_shash_is_stop(link)) {
+			flat_queue[n++ % FLAT_SIZE] = link;
+			link = smr_serialized_load(&link->next);
+		}
+
+		while (n-- > 0) {
+			for (size_t j = (n % FLAT_SIZE) + 1; j-- > 0;) {
+				link = flat_queue[j];
+				hash = traits->obj_hash(link, newseed);
+				head = &newarray[hash >> newshift];
+				next = hw_lck_ptr_lock_nopreempt(head,
+				    &smr_shash_grp);
+				smr_serialized_store_relaxed(&link->next, next);
+				hw_lck_ptr_unlock_nopreempt(head, link,
+				    &smr_shash_grp);
+			}
+			n &= ~(FLAT_SIZE - 1);
+
+			/*
+			 * If there were more than FLAT_SIZE elements in the
+			 * chain (which is super unlikely and in many ways,
+			 * worrisome), then we need to repopoulate
+			 * the flattened queue array for each run.
+			 *
+			 * This is O(n^2) but we have worse problems anyway
+			 * if we ever hit this path.
+			 */
+			if (__improbable(n > 0)) {
+				link = first;
+				for (size_t j = 0; j < n - FLAT_SIZE; j++) {
+					link = smr_serialized_load(&link->next);
+				}
+
+				flat_queue[0] = link;
+				for (size_t j = 1; j < FLAT_SIZE; j++) {
+					link = smr_serialized_load(&link->next);
+					flat_queue[j] = link;
+				}
+			}
+		}
+
+		hw_lck_ptr_unlock(&oldarray[i], SMRSH_MIGRATED, &smr_shash_grp);
+	}
+
+	/*
+	 * Step 3: deallocate the old array of buckets,
+	 *         making sure to hide it from readers.
+	 */
+
+	state.curshift = state.newshift;
+	state.curidx   = state.newidx;
+	os_atomic_store(&smrh->smrsh_state, state, release);
+
+	smr_synchronize(traits->domain);
+
+	os_atomic_store(&smrh->smrsh_array[oldidx], NULL, relaxed);
+	for (size_t i = 0; i < oldsize; i++) {
+		__smr_shash_bucket_destroy(&oldarray[i]);
+	}
+	smr_hash_free_array((struct smrq_slist_head *)oldarray, oldsize);
+
+	return KERN_SUCCESS;
+}
+
+static void
+__smr_shash_rehash(thread_call_param_t arg0, thread_call_param_t arg1)
+{
+	struct smr_shash *smrh   = arg0;
+	smrh_traits_t     traits = arg1;
+	smrsh_rehash_t    reason;
+	smrsh_state_t     state;
+	uint64_t          count;
+	kern_return_t     kr;
+
+	do {
+		reason = os_atomic_xchg(&smrh->smrsh_rehashing,
+		    SMRSH_REHASH_RUNNING, relaxed);
+
+		state  = os_atomic_load(&smrh->smrsh_state, relaxed);
+		count  = __smr_shash_count(smrh);
+
+		if (__smr_shash_should_grow(smrh, state, count)) {
+			kr = __smr_shash_rehash_with_target(smrh, state,
+			    state.curshift - 1, traits);
+		} else if (__smr_shash_should_shrink(smrh, state, count)) {
+			kr = __smr_shash_rehash_with_target(smrh, state,
+			    state.curshift + 1, traits);
+		} else if (reason & SMRSH_REHASH_RESEED) {
+			kr = __smr_shash_rehash_with_target(smrh, state,
+			    state.curshift, traits);
+		} else {
+			kr = KERN_SUCCESS;
+		}
+
+		if (kr == KERN_RESOURCE_SHORTAGE) {
+			uint64_t deadline;
+
+			os_atomic_or(&smrh->smrsh_rehashing, reason, relaxed);
+			nanoseconds_to_deadline(NSEC_PER_MSEC, &deadline);
+			thread_call_enter1_delayed(smrh->smrsh_callout,
+			    arg1, deadline);
+			break;
+		}
+	} while (!os_atomic_cmpxchg(&smrh->smrsh_rehashing,
+	    SMRSH_REHASH_RUNNING, SMRSH_REHASH_NONE, relaxed));
+}
+
+void
+smr_shash_init(struct smr_shash *smrh, smrsh_policy_t policy, size_t min_size)
+{
+	smrsh_state_t state;
+	hw_lck_ptr_t *array;
+	uint8_t shift;
+	size_t size;
+
+	switch (policy) {
+	case SMRSH_COMPACT:
+		if (min_size < 2) {
+			min_size = 2;
+		}
+		break;
+	default:
+		if (min_size < 16) {
+			min_size = 16;
+		}
+		break;
+	}
+
+	switch (policy) {
+	case SMRSH_COMPACT:
+		size = MIN(2, min_size);
+		break;
+	case SMRSH_BALANCED:
+	case SMRSH_BALANCED_NOSHRINK:
+		size = MIN(16, min_size);
+		break;
+	case SMRSH_FASTEST:
+		size = min_size;
+		break;
+	}
+
+	if (size > KALLOC_SAFE_ALLOC_SIZE / sizeof(*array)) {
+		size = KALLOC_SAFE_ALLOC_SIZE / sizeof(*array);
+	}
+	shift = (uint8_t)__builtin_clz((uint32_t)(size - 1));
+	size  = (~0u >> shift) + 1;
+	array = (hw_lck_ptr_t *)smr_hash_alloc_array(size);
+	for (size_t i = 0; i < size; i++) {
+		__smr_shash_bucket_init(&array[i]);
+	}
+
+	state = (smrsh_state_t){
+		.curshift = shift,
+		.newshift = shift,
+	};
+	*smrh = (struct smr_shash){
+		.smrsh_array[0]  = array,
+		.smrsh_seed[0]   = (uint32_t)early_random(),
+		.smrsh_state     = state,
+		.smrsh_policy    = policy,
+		.smrsh_min_shift = (uint8_t)flsll(min_size - 1),
+	};
+	counter_alloc(&smrh->smrsh_count);
+	smrh->smrsh_callout  = thread_call_allocate_with_options(__smr_shash_rehash,
+	    smrh, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+}
+
+void
+__smr_shash_destroy(
+	struct smr_shash       *smrh,
+	smrh_traits_t           traits,
+	void                  (^free)(void *))
+{
+	smrsh_state_t state;
+	hw_lck_ptr_t *array;
+	size_t size;
+
+	thread_call_cancel_wait(smrh->smrsh_callout);
+
+	state = os_atomic_load(&smrh->smrsh_state, dependency);
+	assert(state.curidx == state.newidx);
+	assert(__smr_shash_load_array(smrh, 1 - state.curidx) == NULL);
+	size  = __smr_shash_cursize(state);
+	array = __smr_shash_load_array(smrh, state.curidx);
+
+	if (free) {
+		for (size_t i = 0; i < size; i++) {
+			struct smrq_slink *link, *next;
+
+			next = hw_lck_ptr_value(&array[i]);
+			while (!__smr_shash_is_stop(next)) {
+				link = next;
+				next = smr_serialized_load(&link->next);
+				free(__smrht_link_to_obj(traits, link));
+			}
+		}
+	}
+	for (size_t i = 0; i < size; i++) {
+		__smr_shash_bucket_destroy(&array[i]);
+	}
+
+	thread_call_free(smrh->smrsh_callout);
+	counter_free(&smrh->smrsh_count);
+	smr_hash_free_array((struct smrq_slist_head *)array, size);
+	bzero(smrh, sizeof(*smrh));
+}
+
+
+#pragma mark misc
+
+void
+__smr_linkage_invalid(__smrq_link_t *link)
+{
+	struct smrq_link *elem = __container_of(link, struct smrq_link, next);
+	struct smrq_link *next = smr_serialized_load(&elem->next);
+
+	panic("Invalid queue linkage: elt:%p next:%p next->prev:%p",
+	    elem, next, __container_of(next->prev, struct smrq_link, next));
+}
+
+void
+__smr_stail_invalid(__smrq_slink_t *link, __smrq_slink_t *last)
+{
+	struct smrq_slink *elem = __container_of(link, struct smrq_slink, next);
+	struct smrq_slink *next = smr_serialized_load(&elem->next);
+
+	if (next) {
+		panic("Invalid queue tail (element past end): elt:%p elt->next:%p",
+		    elem, next);
+	} else {
+		panic("Invalid queue tail (early end): elt:%p tail:%p",
+		    elem, __container_of(last, struct smrq_slink, next));
+	}
+}
+
+void
+__smr_tail_invalid(__smrq_link_t *link, __smrq_link_t *last)
+{
+	struct smrq_link *elem = __container_of(link, struct smrq_link, next);
+	struct smrq_link *next = smr_serialized_load(&elem->next);
+
+	if (next) {
+		panic("Invalid queue tail (element past end): elt:%p elt->next:%p",
+		    elem, next);
+	} else {
+		panic("Invalid queue tail (early end): elt:%p tail:%p",
+		    elem, __container_of(last, struct smrq_link, next));
+	}
+}

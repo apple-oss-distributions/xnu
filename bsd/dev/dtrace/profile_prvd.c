@@ -185,8 +185,10 @@ profile_fire(void *arg)
 		assert(NULL != arm_kern_regs);
 
 		if (saved_state64(arm_kern_regs)->cpsr & 0xF) {
+			const uint64_t pc = ml_get_backtrace_pc(arm_kern_regs);
+
 			/* Kernel was interrupted. */
-			dtrace_probe(prof->prof_id, saved_state64(arm_kern_regs)->pc, 0x0, late, 0, 0);
+			dtrace_probe(prof->prof_id, pc, 0x0, late, 0, 0);
 		} else {
 			/* Possibly a user interrupt */
 			arm_saved_state_t   *arm_user_regs = (arm_saved_state_t *)find_user_regs(current_thread());
@@ -239,8 +241,10 @@ profile_tick(void *arg)
 		arm_saved_state_t *arm_kern_regs = (arm_saved_state_t *) find_kern_regs(current_thread());
 
 		if (NULL != arm_kern_regs) {
+			const uint64_t pc = ml_get_backtrace_pc(arm_kern_regs);
+
 			/* Kernel was interrupted. */
-			dtrace_probe(prof->prof_id, saved_state64(arm_kern_regs)->pc, 0x0, 0, 0, 0);
+			dtrace_probe(prof->prof_id, pc, 0x0, 0, 0, 0);
 		} else {
 			/* Possibly a user interrupt */
 			arm_saved_state_t   *arm_user_regs = (arm_saved_state_t *)find_user_regs(current_thread());

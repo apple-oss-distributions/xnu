@@ -9,13 +9,12 @@ struct os_refcnt {
 };
 
 #if OS_REFCNT_DEBUG
-/*
- * As this structure gets baked-in at compile-time, changes can break the ABI.
- * To allow a little more flexibility for the future a new 'flags' member is
- * added but left unused for the moment. Newly compiled consumers will get the
- * new structure and once every upstream project has been recompiled the new field
- * can be used.
- */
+
+__options_closed_decl(os_refgrp_flags_t, uint64_t, {
+	OS_REFGRP_F_NONE           = 0x0,
+	OS_REFGRP_F_ALWAYS_ENABLED = 0x1,
+});
+
 struct os_refgrp {
 	const char *grp_name;
 	os_ref_atomic_t grp_children;  /* number of refcount objects in group */
@@ -121,7 +120,7 @@ os_ref_release_explicit(struct os_refcnt *rc, memory_order release_order, memory
 }
 
 #if OS_REFCNT_DEBUG
-# define os_refgrp_initializer(name, parent) \
+# define os_refgrp_initializer(name, parent, flags) \
 	 { \
 	        .grp_name =          (name), \
 	        .grp_children =      ATOMIC_VAR_INIT(0u), \
@@ -130,10 +129,16 @@ os_ref_release_explicit(struct os_refcnt *rc, memory_order release_order, memory
 	        .grp_release_total = ATOMIC_VAR_INIT(0u), \
 	        .grp_parent =        (parent), \
 	        .grp_log =           NULL, \
+	        .grp_flags =         flags, \
 	}
-# define os_refgrp_decl(qual, var, name, parent) \
+
+# define os_refgrp_decl_flags(qual, var, name, parent, flags) \
 	qual struct os_refgrp __attribute__((section("__DATA,__refgrps"))) var =  \
-	    os_refgrp_initializer(name, parent)
+	    os_refgrp_initializer(name, parent, flags)
+
+# define os_refgrp_decl(qual, var, name, parent) \
+	os_refgrp_decl_flags(qual, var, name, parent, OS_REFGRP_F_NONE)
+
 # define os_refgrp_decl_extern(var) \
 	extern struct os_refgrp var
 

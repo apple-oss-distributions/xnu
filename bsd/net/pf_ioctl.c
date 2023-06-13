@@ -187,6 +187,9 @@ static int pf_delete_rule_by_ticket(struct pfioc_rule *, u_int32_t);
 static void pf_ruleset_cleanup(struct pf_ruleset *, int);
 static void pf_deleterule_anchor_step_out(struct pf_ruleset **,
     int, struct pf_rule **);
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
+static void pf_process_compatibilities(void);
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 
 #define PF_CDEV_MAJOR   (-1)
 
@@ -635,19 +638,20 @@ pf_get_pool(char *anchor, u_int32_t ticket, u_int8_t rule_action,
 	struct pf_ruleset       *ruleset;
 	struct pf_rule          *rule;
 	int                      rs_num;
+	struct pf_pool          *p = NULL;
 
 	ruleset = pf_find_ruleset(anchor);
 	if (ruleset == NULL) {
-		return NULL;
+		goto done;
 	}
 	rs_num = pf_get_ruleset_number(rule_action);
 	if (rs_num >= PF_RULESET_MAX) {
-		return NULL;
+		goto done;
 	}
 	if (active) {
 		if (check_ticket && ticket !=
 		    ruleset->rules[rs_num].active.ticket) {
-			return NULL;
+			goto done;
 		}
 		if (r_last) {
 			rule = TAILQ_LAST(ruleset->rules[rs_num].active.ptr,
@@ -658,7 +662,7 @@ pf_get_pool(char *anchor, u_int32_t ticket, u_int8_t rule_action,
 	} else {
 		if (check_ticket && ticket !=
 		    ruleset->rules[rs_num].inactive.ticket) {
-			return NULL;
+			goto done;
 		}
 		if (r_last) {
 			rule = TAILQ_LAST(ruleset->rules[rs_num].inactive.ptr,
@@ -673,10 +677,18 @@ pf_get_pool(char *anchor, u_int32_t ticket, u_int8_t rule_action,
 		}
 	}
 	if (rule == NULL) {
-		return NULL;
+		goto done;
 	}
 
-	return &rule->rpool;
+	p = &rule->rpool;
+done:
+
+	if (ruleset) {
+		pf_release_ruleset(ruleset);
+		ruleset = NULL;
+	}
+
+	return p;
 }
 
 static void
@@ -915,29 +927,39 @@ pf_begin_rules(u_int32_t *ticket, int rs_num, const char *anchor)
 	}
 	*ticket = ++rs->rules[rs_num].inactive.ticket;
 	rs->rules[rs_num].inactive.open = 1;
+	pf_release_ruleset(rs);
+	rs = NULL;
 	return 0;
 }
 
 static int
 pf_rollback_rules(u_int32_t ticket, int rs_num, char *anchor)
 {
-	struct pf_ruleset       *rs;
+	struct pf_ruleset       *rs = NULL;
 	struct pf_rule          *rule;
+	int                     err = 0;
 
 	if (rs_num < 0 || rs_num >= PF_RULESET_MAX) {
-		return EINVAL;
+		err = EINVAL;
+		goto done;
 	}
 	rs = pf_find_ruleset(anchor);
 	if (rs == NULL || !rs->rules[rs_num].inactive.open ||
 	    rs->rules[rs_num].inactive.ticket != ticket) {
-		return 0;
+		goto done;
 	}
 	while ((rule = TAILQ_FIRST(rs->rules[rs_num].inactive.ptr)) != NULL) {
 		pf_rm_rule(rs->rules[rs_num].inactive.ptr, rule);
 		rs->rules[rs_num].inactive.rcount--;
 	}
 	rs->rules[rs_num].inactive.open = 0;
-	return 0;
+
+done:
+	if (rs) {
+		pf_release_ruleset(rs);
+		rs = NULL;
+	}
+	return err;
 }
 
 #define PF_MD5_UPD(st, elm)                                             \
@@ -1035,29 +1057,31 @@ pf_hash_rule(MD5_CTX *ctx, struct pf_rule *rule)
 static int
 pf_commit_rules(u_int32_t ticket, int rs_num, char *anchor)
 {
-	struct pf_ruleset       *rs;
+	struct pf_ruleset       *rs = NULL;
 	struct pf_rule          *rule, **old_array, *r;
 	struct pf_rulequeue     *old_rules;
-	int                      error;
+	int                      error = 0;
 	u_int32_t                old_rcount;
 	u_int32_t                old_rsize;
 
 	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (rs_num < 0 || rs_num >= PF_RULESET_MAX) {
-		return EINVAL;
+		error = EINVAL;
+		goto done;
 	}
 	rs = pf_find_ruleset(anchor);
 	if (rs == NULL || !rs->rules[rs_num].inactive.open ||
 	    ticket != rs->rules[rs_num].inactive.ticket) {
-		return EBUSY;
+		error = EBUSY;
+		goto done;
 	}
 
 	/* Calculate checksum for the main ruleset */
 	if (rs == &pf_main_ruleset) {
 		error = pf_setup_pfsync_matching(rs);
 		if (error != 0) {
-			return error;
+			goto done;
 		}
 	}
 
@@ -1106,8 +1130,12 @@ pf_commit_rules(u_int32_t ticket, int rs_num, char *anchor)
 	rs->rules[rs_num].inactive.rcount = 0;
 	rs->rules[rs_num].inactive.rsize = 0;
 	rs->rules[rs_num].inactive.open = 0;
-	pf_remove_if_empty_ruleset(rs);
-	return 0;
+
+done:
+	if (rs) {
+		pf_release_ruleset(rs);
+	}
+	return error;
 }
 
 static void
@@ -1342,8 +1370,7 @@ pf_start(void)
 	}
 	wakeup(pf_purge_thread_fn);
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
-	net_filter_event_mark(NET_FILTER_EVENT_PF,
-	    pf_check_compatible_rules());
+	pf_process_compatibilities();
 #endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 	DPFPRINTF(PF_DEBUG_MISC, ("pf: started\n"));
 }
@@ -1360,8 +1387,7 @@ pf_stop(void)
 	pf_status.since = pf_calendar_time_second();
 	wakeup(pf_purge_thread_fn);
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
-	net_filter_event_mark(NET_FILTER_EVENT_PF,
-	    pf_check_compatible_rules());
+	pf_process_compatibilities();
 #endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 	DPFPRINTF(PF_DEBUG_MISC, ("pf: stopped\n"));
 }
@@ -2455,13 +2481,13 @@ pf_delete_rule_by_ticket(struct pfioc_rule *pr, u_int32_t req_dev)
 	struct pf_ruleset       *ruleset;
 	struct pf_rule          *rule = NULL;
 	int                      is_anchor;
-	int                      error;
+	int                      error = 0;
 	int                      i;
 
 	is_anchor = (pr->anchor_call[0] != '\0');
 	if ((ruleset = pf_find_ruleset_with_owner(pr->anchor,
 	    pr->rule.owner, is_anchor, &error)) == NULL) {
-		return error;
+		goto done;
 	}
 
 	for (i = 0; i < PF_RULESET_MAX && rule == NULL; i++) {
@@ -2471,13 +2497,15 @@ pf_delete_rule_by_ticket(struct pfioc_rule *pr, u_int32_t req_dev)
 		}
 	}
 	if (rule == NULL) {
-		return ENOENT;
+		error = ENOENT;
+		goto done;
 	} else {
 		i--;
 	}
 
 	if (strcmp(rule->owner, pr->rule.owner)) {
-		return EACCES;
+		error = EACCES;
+		goto done;
 	}
 
 delete_rule:
@@ -2511,9 +2539,10 @@ delete_rule:
 		 */
 		if ((rule->rule_flag & PFRULE_PFM) ^ req_dev) {
 			if (rule->ticket != pr->rule.ticket) {
-				return 0;
+				goto done;
 			} else {
-				return EACCES;
+				error = EACCES;
+				goto done;
 			}
 		}
 
@@ -2532,7 +2561,8 @@ delete_rule:
 		 * rule matches device that issued the request
 		 */
 		if ((rule->rule_flag & PFRULE_PFM) ^ req_dev) {
-			return EACCES;
+			error = EACCES;
+			goto done;
 		}
 		if (rule->rule_flag & PFRULE_PFM) {
 			pffwrules--;
@@ -2542,7 +2572,12 @@ delete_rule:
 		pf_ruleset_cleanup(ruleset, i);
 	}
 
-	return 0;
+done:
+	if (ruleset) {
+		pf_release_ruleset(ruleset);
+		ruleset = NULL;
+	}
+	return error;
 }
 
 /*
@@ -2567,9 +2602,7 @@ pf_delete_rule_by_owner(char *owner, u_int32_t req_dev)
 			 */
 			if ((rule->rule_flag & PFRULE_PFM) ^ req_dev) {
 				rule = next;
-				continue;
-			}
-			if (rule->anchor) {
+			} else if (rule->anchor) {
 				if (((strcmp(rule->owner, owner)) == 0) ||
 				    ((strcmp(rule->owner, "")) == 0)) {
 					if (rule->anchor->ruleset.rules[rs].active.rcount > 0) {
@@ -2757,10 +2790,10 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 {
 	int error = 0;
 	u_int32_t req_dev = 0;
+	struct pf_ruleset *ruleset = NULL;
 
 	switch (cmd) {
 	case DIOCADDRULE: {
-		struct pf_ruleset       *ruleset;
 		struct pf_rule          *rule, *tail;
 		int                     rs_num;
 
@@ -2860,7 +2893,6 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 	}
 
 	case DIOCGETRULES: {
-		struct pf_ruleset       *ruleset;
 		struct pf_rule          *tail;
 		int                      rs_num;
 
@@ -2888,7 +2920,6 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 	}
 
 	case DIOCGETRULE: {
-		struct pf_ruleset       *ruleset;
 		struct pf_rule          *rule;
 		int                      rs_num, i;
 
@@ -2946,7 +2977,6 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 
 	case DIOCCHANGERULE: {
 		struct pfioc_rule       *pcr = pr;
-		struct pf_ruleset       *ruleset;
 		struct pf_rule          *oldrule = NULL, *newrule = NULL;
 		struct pf_pooladdr      *pa;
 		u_int32_t                nr = 0;
@@ -3147,16 +3177,13 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 		ruleset->rules[rs_num].active.ticket++;
 
 		pf_calc_skip_steps(ruleset->rules[rs_num].active.ptr);
-		pf_remove_if_empty_ruleset(ruleset);
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
-		net_filter_event_mark(NET_FILTER_EVENT_PF,
-		    pf_check_compatible_rules());
+		pf_process_compatibilities();
 #endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 		break;
 	}
 
 	case DIOCINSERTRULE: {
-		struct pf_ruleset       *ruleset;
 		struct pf_rule          *rule, *tail, *r;
 		int                     rs_num;
 		int                     is_anchor;
@@ -3199,7 +3226,7 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 				r = TAILQ_NEXT(r, entries);
 			}
 			if (error != 0) {
-				return error;
+				break;
 			}
 		}
 
@@ -3276,13 +3303,13 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 			}
 		}
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
-		net_filter_event_mark(NET_FILTER_EVENT_PF,
-		    pf_check_compatible_rules());
+		pf_process_compatibilities();
 #endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 		break;
 	}
 
 	case DIOCDELETERULE: {
+		ASSERT(ruleset == NULL);
 		pr->anchor[sizeof(pr->anchor) - 1] = '\0';
 		pr->anchor_call[sizeof(pr->anchor_call) - 1] = '\0';
 
@@ -3308,8 +3335,7 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 			atomic_add_16(&pf_nat64_configured, -1);
 		}
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
-		net_filter_event_mark(NET_FILTER_EVENT_PF,
-		    pf_check_compatible_rules());
+		pf_process_compatibilities();
 #endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 		break;
 	}
@@ -3317,6 +3343,10 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
+	}
+	if (ruleset != NULL) {
+		pf_release_ruleset(ruleset);
+		ruleset = NULL;
 	}
 
 	return error;
@@ -3776,6 +3806,7 @@ pfioctl_ioc_pooladdr(u_long cmd, struct pfioc_pooladdr *pp, struct proc *p)
 	struct pf_pooladdr *pa = NULL;
 	struct pf_pool *pool = NULL;
 	int error = 0;
+	struct pf_ruleset *ruleset = NULL;
 
 	switch (cmd) {
 	case DIOCBEGINADDRS: {
@@ -3872,7 +3903,6 @@ pfioctl_ioc_pooladdr(u_long cmd, struct pfioc_pooladdr *pp, struct proc *p)
 	case DIOCCHANGEADDR: {
 		struct pfioc_pooladdr   *pca = pp;
 		struct pf_pooladdr      *oldpa = NULL, *newpa = NULL;
-		struct pf_ruleset       *ruleset;
 
 		if (pca->action < PF_CHANGE_ADD_HEAD ||
 		    pca->action > PF_CHANGE_REMOVE) {
@@ -3981,6 +4011,11 @@ pfioctl_ioc_pooladdr(u_long cmd, struct pfioc_pooladdr *pp, struct proc *p)
 		/* NOTREACHED */
 	}
 
+	if (ruleset) {
+		pf_release_ruleset(ruleset);
+		ruleset = NULL;
+	}
+
 	return error;
 }
 
@@ -3989,10 +4024,10 @@ pfioctl_ioc_ruleset(u_long cmd, struct pfioc_ruleset *pr, struct proc *p)
 {
 #pragma unused(p)
 	int error = 0;
+	struct pf_ruleset *ruleset = NULL;
 
 	switch (cmd) {
 	case DIOCGETRULESETS: {
-		struct pf_ruleset       *ruleset;
 		struct pf_anchor        *anchor;
 
 		pr->path[sizeof(pr->path) - 1] = '\0';
@@ -4017,7 +4052,6 @@ pfioctl_ioc_ruleset(u_long cmd, struct pfioc_ruleset *pr, struct proc *p)
 	}
 
 	case DIOCGETRULESET: {
-		struct pf_ruleset       *ruleset;
 		struct pf_anchor        *anchor;
 		u_int32_t                nr = 0;
 
@@ -4055,6 +4089,10 @@ pfioctl_ioc_ruleset(u_long cmd, struct pfioc_ruleset *pr, struct proc *p)
 		/* NOTREACHED */
 	}
 
+	if (ruleset) {
+		pf_release_ruleset(ruleset);
+		ruleset = NULL;
+	}
 	return error;
 }
 
@@ -4064,6 +4102,7 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 {
 	int error = 0, esize, size;
 	user_addr_t buf;
+	struct pf_ruleset *rs = NULL;
 
 #ifdef __LP64__
 	int p64 = proc_is64bit(p);
@@ -4184,7 +4223,6 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 	case DIOCXCOMMIT: {
 		struct pfioc_trans_e    *ioe;
 		struct pfr_table        *table;
-		struct pf_ruleset       *rs;
 		user_addr_t              _buf = buf;
 		int                      i;
 
@@ -4258,7 +4296,7 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 				    NULL, NULL, 0))) {
 					kfree_type(struct pfr_table, table);
 					kfree_type(struct pfioc_trans_e, ioe);
-					goto fail; /* really bad */
+					goto fail;
 				}
 				break;
 			default:
@@ -4266,7 +4304,7 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 				    ioe->rs_num, ioe->anchor))) {
 					kfree_type(struct pfr_table, table);
 					kfree_type(struct pfioc_trans_e, ioe);
-					goto fail; /* really bad */
+					goto fail;
 				}
 				break;
 			}
@@ -4274,8 +4312,7 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 		kfree_type(struct pfr_table, table);
 		kfree_type(struct pfioc_trans_e, ioe);
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
-		net_filter_event_mark(NET_FILTER_EVENT_PF,
-		    pf_check_compatible_rules());
+		pf_process_compatibilities();
 #endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 		break;
 	}
@@ -4285,6 +4322,10 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 		/* NOTREACHED */
 	}
 fail:
+	if (rs) {
+		pf_release_ruleset(rs);
+		rs = NULL;
+	}
 	return error;
 }
 
@@ -4640,7 +4681,7 @@ pf_inet_hook(struct ifnet *ifp, struct mbuf **mp, int input,
 			*mp = NULL;
 			error = EHOSTUNREACH;
 		} else {
-			error = ENOBUFS;
+			error = EJUSTRETURN;
 		}
 	}
 #if BYTE_ORDER != BIG_ENDIAN
@@ -4690,7 +4731,7 @@ pf_inet6_hook(struct ifnet *ifp, struct mbuf **mp, int input,
 			*mp = NULL;
 			error = EHOSTUNREACH;
 		} else {
-			error = ENOBUFS;
+			error = EJUSTRETURN;
 		}
 	}
 	return error;
@@ -4867,3 +4908,20 @@ pfioctl_cassert(void)
 		;
 	}
 }
+
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
+static void
+pf_process_compatibilities(void)
+{
+	uint32_t compat_bitmap = pf_check_compatible_rules();
+
+	net_filter_event_mark(NET_FILTER_EVENT_PF,
+	    (compat_bitmap &
+	    (PF_COMPATIBLE_FLAGS_CUSTOM_ANCHORS_PRESENT |
+	    PF_COMPATIBLE_FLAGS_CUSTOM_RULES_PRESENT)) == 0);
+
+	net_filter_event_mark(NET_FILTER_EVENT_PF_PRIVATE_PROXY,
+	    ((compat_bitmap & PF_COMPATIBLE_FLAGS_PF_ENABLED) == 0) ||
+	    (compat_bitmap & PF_COMPATIBLE_FLAGS_CUSTOM_RULES_PRESENT) == 0);
+}
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)

@@ -26,204 +26,223 @@
 #include <vm/vm_kern.h>
 #include <vm/pmap.h>
 #include <vm/pmap_cs.h>
+#include <vm/vm_map.h>
 #include <kern/zalloc.h>
 #include <kern/kalloc.h>
 #include <kern/assert.h>
+#include <kern/locks.h>
 #include <kern/lock_rw.h>
 #include <libkern/libkern.h>
 #include <libkern/section_keywords.h>
 #include <libkern/coretrust/coretrust.h>
+#include <pexpert/pexpert.h>
 #include <sys/vm.h>
 #include <sys/proc.h>
+#include <sys/proc_require.h>
 #include <sys/codesign.h>
 #include <sys/code_signing.h>
+#include <sys/sysctl.h>
 #include <uuid/uuid.h>
 #include <IOKit/IOBSD.h>
 
-#if CODE_SIGNING_MONITOR
-/*
- * Any set of definitions and functions which are only needed when we have a monitor
- * environment available should go under this if-guard.
- */
+SYSCTL_DECL(_security);
+SYSCTL_DECL(_security_codesigning);
+SYSCTL_NODE(_security, OID_AUTO, codesigning, CTLFLAG_RD, 0, "XNU Code Signing");
+
+static SECURITY_READ_ONLY_LATE(bool) cs_config_set = false;
+static SECURITY_READ_ONLY_LATE(code_signing_monitor_type_t) cs_monitor = CS_MONITOR_TYPE_NONE;
+static SECURITY_READ_ONLY_LATE(code_signing_config_t) cs_config = 0;
+
+SYSCTL_UINT(_security_codesigning, OID_AUTO, monitor, CTLFLAG_RD, &cs_monitor, 0, "code signing monitor type");
+SYSCTL_UINT(_security_codesigning, OID_AUTO, config, CTLFLAG_RD, &cs_config, 0, "code signing configuration");
+
+void
+code_signing_configuration(
+	code_signing_monitor_type_t *monitor_type_out,
+	code_signing_config_t *config_out)
+{
+	code_signing_monitor_type_t monitor_type = CS_MONITOR_TYPE_NONE;
+	code_signing_config_t config = 0;
+
+	if (os_atomic_load(&cs_config_set, acquire) == true) {
+		goto config_set;
+	}
+
+#if DEVELOPMENT || DEBUG
+	int amfi_mask = 0;
+	int amfi_allow_any_signature = 0;
+	int amfi_unrestrict_task_for_pid = 0;
+	int amfi_get_out_of_my_way = 0;
+	int cs_enforcement_disabled = 0;
+
+#define CS_AMFI_MASK_UNRESTRICT_TASK_FOR_PID 0x01
+#define CS_AMFI_MASK_ALLOW_ANY_SIGNATURE 0x02
+#define CS_AMFI_MASK_GET_OUT_OF_MY_WAY 0x80
+
+	/* Parse the AMFI mask */
+	PE_parse_boot_argn("amfi", &amfi_mask, sizeof(amfi_mask));
+
+	/* Parse the AMFI soft-bypass */
+	PE_parse_boot_argn(
+		"amfi_allow_any_signature",
+		&amfi_allow_any_signature,
+		sizeof(amfi_allow_any_signature));
+
+	/* Parse the AMFI debug-bypass */
+	PE_parse_boot_argn(
+		"amfi_unrestrict_task_for_pid",
+		&amfi_unrestrict_task_for_pid,
+		sizeof(amfi_unrestrict_task_for_pid));
+
+	/* Parse the AMFI hard-bypass */
+	PE_parse_boot_argn(
+		"amfi_get_out_of_my_way",
+		&amfi_get_out_of_my_way,
+		sizeof(amfi_get_out_of_my_way));
+
+	/* Parse the system code signing hard-bypass */
+	PE_parse_boot_argn(
+		"cs_enforcement_disable",
+		&cs_enforcement_disabled,
+		sizeof(cs_enforcement_disabled));
+
+	/* CS_CONFIG_UNRESTRICTED_DEBUGGING */
+	if (amfi_mask & CS_AMFI_MASK_UNRESTRICT_TASK_FOR_PID) {
+		config |= CS_CONFIG_UNRESTRICTED_DEBUGGING;
+	} else if (amfi_unrestrict_task_for_pid) {
+		config |= CS_CONFIG_UNRESTRICTED_DEBUGGING;
+	}
+
+	/* CS_CONFIG_ALLOW_ANY_SIGNATURE */
+	if (amfi_mask & CS_AMFI_MASK_ALLOW_ANY_SIGNATURE) {
+		config |= CS_CONFIG_ALLOW_ANY_SIGNATURE;
+	} else if (amfi_mask & CS_AMFI_MASK_GET_OUT_OF_MY_WAY) {
+		config |= CS_CONFIG_ALLOW_ANY_SIGNATURE;
+	} else if (amfi_allow_any_signature) {
+		config |= CS_CONFIG_ALLOW_ANY_SIGNATURE;
+	} else if (amfi_get_out_of_my_way) {
+		config |= CS_CONFIG_ALLOW_ANY_SIGNATURE;
+	} else if (cs_enforcement_disabled) {
+		config |= CS_CONFIG_ALLOW_ANY_SIGNATURE;
+	}
+
+	/* CS_CONFIG_ENFORCEMENT_DISABLED */
+	if (cs_enforcement_disabled) {
+		config |= CS_CONFIG_ENFORCEMENT_DISABLED;
+	}
+
+	/* CS_CONFIG_GET_OUT_OF_MY_WAY */
+	if (amfi_mask & CS_AMFI_MASK_GET_OUT_OF_MY_WAY) {
+		config |= CS_CONFIG_GET_OUT_OF_MY_WAY;
+	} else if (amfi_get_out_of_my_way) {
+		config |= CS_CONFIG_GET_OUT_OF_MY_WAY;
+	} else if (cs_enforcement_disabled) {
+		config |= CS_CONFIG_GET_OUT_OF_MY_WAY;
+	}
 
 #if   PMAP_CS_PPL_MONITOR
-/* All good */
-#else
-#error "CODE_SIGNING_MONITOR defined without an available monitor"
-#endif
 
-typedef uint64_t pmap_paddr_t;
-extern vm_map_address_t phystokv(pmap_paddr_t pa);
-extern pmap_paddr_t kvtophys_nofail(vm_offset_t va);
+	if (csm_enabled() == true) {
+		int pmap_cs_allow_any_signature = 0;
+		bool override = PE_parse_boot_argn(
+			"pmap_cs_allow_any_signature",
+			&pmap_cs_allow_any_signature,
+			sizeof(pmap_cs_allow_any_signature));
 
-#endif /* CODE_SIGNING_MONITOR */
+		if (!pmap_cs_allow_any_signature && override) {
+			config &= ~CS_CONFIG_ALLOW_ANY_SIGNATURE;
+		}
 
-#if   PMAP_CS_PPL_MONITOR
-/*
- * We have the Page Protection Layer environment available. All of our artifacts
- * need to be page-aligned. The PPL will lockdown the artifacts before it begins
- * the validation.
- */
+		int pmap_cs_unrestrict_task_for_pid = 0;
+		override = PE_parse_boot_argn(
+			"pmap_cs_unrestrict_pmap_cs_disable",
+			&pmap_cs_unrestrict_task_for_pid,
+			sizeof(pmap_cs_unrestrict_task_for_pid));
 
-SECURITY_READ_ONLY_EARLY(static bool*) developer_mode_enabled = &ppl_developer_mode_storage;
+		if (!pmap_cs_unrestrict_task_for_pid && override) {
+			config &= ~CS_CONFIG_UNRESTRICTED_DEBUGGING;
+		}
 
-static void
-ppl_toggle_developer_mode(
-	bool state)
-{
-	pmap_toggle_developer_mode(state);
-}
+		int pmap_cs_enforcement_disable = 0;
+		override = PE_parse_boot_argn(
+			"pmap_cs_allow_modified_code_pages",
+			&pmap_cs_enforcement_disable,
+			sizeof(pmap_cs_enforcement_disable));
 
-static kern_return_t
-ppl_register_provisioning_profile(
-	const void *profile_blob,
-	const size_t profile_blob_size,
-	void **profile_obj)
-{
-	pmap_profile_payload_t *pmap_payload = NULL;
-	vm_address_t payload_addr = 0;
-	vm_size_t payload_size = 0;
-	vm_size_t payload_size_aligned = 0;
-	kern_return_t ret = KERN_DENIED;
-
-	if (os_add_overflow(sizeof(*pmap_payload), profile_blob_size, &payload_size)) {
-		panic("attempted to load a too-large profile: %lu bytes", profile_blob_size);
+		if (!pmap_cs_enforcement_disable && override) {
+			config &= ~CS_CONFIG_ENFORCEMENT_DISABLED;
+		}
 	}
-	payload_size_aligned = round_page(payload_size);
-
-	ret = kmem_alloc(kernel_map, &payload_addr, payload_size_aligned,
-	    KMA_KOBJECT | KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_SECURITY);
-	if (ret != KERN_SUCCESS) {
-		printf("unable to allocate memory for pmap profile payload: %d\n", ret);
-		goto exit;
-	}
-
-	/* We need to setup the payload before we send it to the PPL */
-	pmap_payload = (pmap_profile_payload_t*)payload_addr;
-
-	pmap_payload->profile_blob_size = profile_blob_size;
-	memcpy(pmap_payload->profile_blob, profile_blob, profile_blob_size);
-
-	ret = pmap_register_provisioning_profile(payload_addr, payload_size_aligned);
-	if (ret == KERN_SUCCESS) {
-		*profile_obj = &pmap_payload->profile_obj_storage;
-		*profile_obj = (pmap_cs_profile_t*)phystokv(kvtophys_nofail((vm_offset_t)*profile_obj));
-	}
-
-exit:
-	if ((ret != KERN_SUCCESS) && (payload_addr != 0)) {
-		kmem_free(kernel_map, payload_addr, payload_size_aligned);
-		payload_addr = 0;
-		payload_size_aligned = 0;
-	}
-
-	return ret;
-}
-
-static kern_return_t
-ppl_unregister_provisioning_profile(
-	pmap_cs_profile_t *profile_obj)
-{
-	kern_return_t ret = KERN_DENIED;
-
-	ret = pmap_unregister_provisioning_profile(profile_obj);
-	if (ret != KERN_SUCCESS) {
-		return ret;
-	}
-
-	/* Get the original payload address */
-	const pmap_profile_payload_t *pmap_payload = profile_obj->original_payload;
-	const vm_address_t payload_addr = (const vm_address_t)pmap_payload;
-
-	/* Get the original payload size */
-	vm_size_t payload_size = pmap_payload->profile_blob_size + sizeof(*pmap_payload);
-	payload_size = round_page(payload_size);
-
-	/* Free the payload */
-	kmem_free(kernel_map, payload_addr, payload_size);
-	pmap_payload = NULL;
-
-	return KERN_SUCCESS;
-}
-
-static kern_return_t
-ppl_associate_provisioning_profile(
-	pmap_cs_code_directory_t *sig_obj,
-	pmap_cs_profile_t *profile_obj)
-{
-	if (pmap_cs_enabled() == false) {
-		return KERN_SUCCESS;
-	}
-
-	return pmap_associate_provisioning_profile(sig_obj, profile_obj);
-}
-
-static kern_return_t
-ppl_disassociate_provisioning_profile(
-	pmap_cs_code_directory_t *sig_obj)
-{
-	if (pmap_cs_enabled() == false) {
-		return KERN_SUCCESS;
-	}
-
-	return pmap_disassociate_provisioning_profile(sig_obj);
-}
-
-#else
-/*
- * We don't have a monitor environment available. This means someone with a kernel
- * memory exploit will be able to corrupt code signing state. There is not much we
- * can do here, since this is older HW.
- */
-
-static bool developer_mode_storage = true;
-SECURITY_READ_ONLY_EARLY(static bool*) developer_mode_enabled = &developer_mode_storage;
-
-static void
-xnu_toggle_developer_mode(
-	bool state)
-{
-	/* No extra validation needed within XNU */
-	os_atomic_store(developer_mode_enabled, state, release);
-}
 
 #endif /* */
+#endif /* DEVELOPMENT || DEBUG */
+
+#if CODE_SIGNING_MONITOR
+#if   PMAP_CS_PPL_MONITOR
+	monitor_type = CS_MONITOR_TYPE_PPL;
+#endif
+
+	if (csm_enabled() == true) {
+		config |= CS_CONFIG_CSM_ENABLED;
+	}
+#endif
+
+	os_atomic_store(&cs_monitor, monitor_type, relaxed);
+	os_atomic_store(&cs_config, config, relaxed);
+	os_atomic_store(&cs_config_set, true, release);
+
+	/*
+	 * We don't actually ever expect to have concurrent writers in this function
+	 * as the data is warmed up during early boot by the kernel bootstrap code.
+	 * The only thing we need to ensure is that subsequent readers can view all
+	 * all the latest data.
+	 */
+#if defined(__arm64__)
+	__asm__ volatile ("dmb ish" ::: "memory");
+#elif defined(__x86_64__)
+	__asm__ volatile ("mfence" ::: "memory");
+#else
+#error "Unknown platform -- fence instruction unavailable"
+#endif
+
+config_set:
+	/* Ensure configuration has been set */
+	assert(os_atomic_load(&cs_config_set, relaxed) == true);
+
+	/* Set the monitor type */
+	if (monitor_type_out) {
+		*monitor_type_out = os_atomic_load(&cs_monitor, relaxed);
+	}
+
+	/* Set the configuration */
+	if (config_out) {
+		*config_out = os_atomic_load(&cs_config, relaxed);
+	}
+}
 
 #pragma mark Developer Mode
-/*
- * AMFI always depends on XNU to extract the state of developer mode on the system. In
- * cases when we have a monitor, the state is stored within protected monitor memory.
- */
 
 void
 enable_developer_mode(void)
 {
-#if   PMAP_CS_PPL_MONITOR
-	ppl_toggle_developer_mode(true);
-#else
-	xnu_toggle_developer_mode(true);
-#endif
+	CSM_PREFIX(toggle_developer_mode)(true);
 }
 
 void
 disable_developer_mode(void)
 {
-#if   PMAP_CS_PPL_MONITOR
-	ppl_toggle_developer_mode(false);
-#else
-	xnu_toggle_developer_mode(false);
-#endif
+	CSM_PREFIX(toggle_developer_mode)(false);
 }
 
 bool
 developer_mode_state(void)
 {
-	/* Assume true if the pointer isn't setup */
+	/* Assume false if the pointer isn't setup */
 	if (developer_mode_enabled == NULL) {
-		return true;
+		return false;
 	}
 
-	return os_atomic_load(developer_mode_enabled, acquire);
+	return os_atomic_load(developer_mode_enabled, relaxed);
 }
 
 #pragma mark Provisioning Profiles
@@ -237,7 +256,7 @@ void
 garbage_collect_provisioning_profiles(void)
 {
 #if CODE_SIGNING_MONITOR
-	free_provisioning_profiles();
+	csm_free_provisioning_profiles();
 #endif
 }
 
@@ -270,7 +289,7 @@ LCK_GRP_DECLARE(profiles_lck_grp, "profiles_lck_grp");
 decl_lck_rw_data(, profiles_lock);
 
 void
-initialize_provisioning_profiles(void)
+csm_initialize_provisioning_profiles(void)
 {
 	/* Ensure the CoreTrust kernel extension has loaded */
 	if (coretrust == NULL) {
@@ -305,7 +324,7 @@ search_for_profile_uuid(
 }
 
 kern_return_t
-register_provisioning_profile(
+csm_register_provisioning_profile(
 	const uuid_t profile_uuid,
 	const void *profile_blob,
 	const size_t profile_blob_size)
@@ -331,9 +350,10 @@ register_provisioning_profile(
 		goto exit;
 	}
 
-#if   PMAP_CS_PPL_MONITOR
-	ret = ppl_register_provisioning_profile(profile_blob, profile_blob_size, &monitor_profile_obj);
-#endif
+	ret = CSM_PREFIX(register_provisioning_profile)(
+		profile_blob,
+		profile_blob_size,
+		&monitor_profile_obj);
 
 	if (ret == KERN_SUCCESS) {
 		/* Copy in the profile UUID */
@@ -367,12 +387,16 @@ exit:
 }
 
 kern_return_t
-associate_provisioning_profile(
+csm_associate_provisioning_profile(
 	void *monitor_sig_obj,
 	const uuid_t profile_uuid)
 {
 	cs_profile_t *profile = NULL;
 	kern_return_t ret = KERN_DENIED;
+
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
 
 	/* Lock the profile set as shared */
 	lck_rw_lock_shared(&profiles_lock);
@@ -384,9 +408,9 @@ associate_provisioning_profile(
 		goto exit;
 	}
 
-#if   PMAP_CS_PPL_MONITOR
-	ret = ppl_associate_provisioning_profile(monitor_sig_obj, profile->profile_obj);
-#endif
+	ret = CSM_PREFIX(associate_provisioning_profile)(
+		monitor_sig_obj,
+		profile->profile_obj);
 
 	if (ret == KERN_SUCCESS) {
 		/*
@@ -408,14 +432,17 @@ exit:
 }
 
 kern_return_t
-disassociate_provisioning_profile(
+csm_disassociate_provisioning_profile(
 	void *monitor_sig_obj)
 {
 	kern_return_t ret = KERN_DENIED;
 
-#if   PMAP_CS_PPL_MONITOR
-	ret = ppl_disassociate_provisioning_profile(monitor_sig_obj);
-#endif
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	/* Call out to the monitor */
+	ret = CSM_PREFIX(disassociate_provisioning_profile)(monitor_sig_obj);
 
 	if ((ret != KERN_SUCCESS) && (ret != KERN_NOT_FOUND)) {
 		printf("unable to disassociate profile: %d\n", ret);
@@ -429,9 +456,8 @@ unregister_provisioning_profile(
 {
 	kern_return_t ret = KERN_DENIED;
 
-#if   PMAP_CS_PPL_MONITOR
-	ret = ppl_unregister_provisioning_profile(profile->profile_obj);
-#endif
+	/* Call out to the monitor */
+	ret = CSM_PREFIX(unregister_provisioning_profile)(profile->profile_obj);
 
 	/*
 	 * KERN_FAILURE represents the case when the unregistration failed because the
@@ -448,7 +474,7 @@ unregister_provisioning_profile(
 }
 
 void
-free_provisioning_profiles(void)
+csm_free_provisioning_profiles(void)
 {
 	kern_return_t ret = KERN_DENIED;
 	cs_profile_t *profile = NULL;
@@ -480,3 +506,383 @@ free_provisioning_profiles(void)
 }
 
 #endif /* CODE_SIGNING_MONITOR */
+
+#pragma mark Code Signing
+/*
+ * AMFI performs full signature validation by itself. For some things, AMFI uses XNU in
+ * order to abstract away the underlying implementation for data storage, but for most of
+ * these, AMFI doesn't directly interact with them, and they're only required when we have
+ * a code signing monitor on the system.
+ */
+
+void
+set_compilation_service_cdhash(
+	const uint8_t cdhash[CS_CDHASH_LEN])
+{
+	CSM_PREFIX(set_compilation_service_cdhash)(cdhash);
+}
+
+bool
+match_compilation_service_cdhash(
+	const uint8_t cdhash[CS_CDHASH_LEN])
+{
+	return CSM_PREFIX(match_compilation_service_cdhash)(cdhash);
+}
+
+void
+set_local_signing_public_key(
+	const uint8_t public_key[XNU_LOCAL_SIGNING_KEY_SIZE])
+{
+	CSM_PREFIX(set_local_signing_public_key)(public_key);
+}
+
+uint8_t*
+get_local_signing_public_key(void)
+{
+	return CSM_PREFIX(get_local_signing_public_key)();
+}
+
+void
+unrestrict_local_signing_cdhash(
+	__unused const uint8_t cdhash[CS_CDHASH_LEN])
+{
+	/*
+	 * Since AMFI manages code signing on its own, we only need to unrestrict the
+	 * local signing cdhash when we have a monitor environment.
+	 */
+
+#if CODE_SIGNING_MONITOR
+	CSM_PREFIX(unrestrict_local_signing_cdhash)(cdhash);
+#endif
+}
+
+kern_return_t
+csm_resolve_os_entitlements_from_proc(
+	__unused const proc_t process,
+	__unused const void **os_entitlements)
+{
+#if CODE_SIGNING_MONITOR
+	task_t task = NULL;
+	vm_map_t task_map = NULL;
+	pmap_t task_pmap = NULL;
+	kern_return_t ret = KERN_DENIED;
+
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	/* Ensure the process comes from the proc_task zone */
+	proc_require(process, PROC_REQUIRE_ALLOW_ALL);
+
+	/* Acquire the task from the proc */
+	task = proc_task(process);
+	if (task == NULL) {
+		return KERN_NOT_FOUND;
+	}
+
+	/* Acquire the virtual memory map from the task -- takes a reference on it */
+	task_map = get_task_map_reference(task);
+	if (task_map == NULL) {
+		return KERN_NOT_FOUND;
+	}
+
+	/* Acquire the pmap from the virtual memory map */
+	task_pmap = vm_map_get_pmap(task_map);
+	assert(task_pmap != NULL);
+
+	/* Call into the monitor to resolve the entitlements */
+	ret = CSM_PREFIX(resolve_kernel_entitlements)(task_pmap, os_entitlements);
+
+	/* Release the reference on the virtual memory map */
+	vm_map_deallocate(task_map);
+
+	return ret;
+#else
+	return KERN_NOT_SUPPORTED;
+#endif
+}
+
+#if CODE_SIGNING_MONITOR
+
+bool
+csm_enabled(void)
+{
+	return CSM_PREFIX(code_signing_enabled)();
+}
+
+vm_size_t
+csm_signature_size_limit(void)
+{
+	return CSM_PREFIX(managed_code_signature_size)();
+}
+
+kern_return_t
+csm_register_code_signature(
+	const vm_address_t signature_addr,
+	const vm_size_t signature_size,
+	const vm_offset_t code_directory_offset,
+	const char *signature_path,
+	void **monitor_sig_obj,
+	vm_address_t *monitor_signature_addr)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(register_code_signature)(
+		signature_addr,
+		signature_size,
+		code_directory_offset,
+		signature_path,
+		monitor_sig_obj,
+		monitor_signature_addr);
+}
+
+kern_return_t
+csm_unregister_code_signature(
+	void *monitor_sig_obj)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(unregister_code_signature)(monitor_sig_obj);
+}
+
+kern_return_t
+csm_verify_code_signature(
+	void *monitor_sig_obj)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(verify_code_signature)(monitor_sig_obj);
+}
+
+kern_return_t
+csm_reconstitute_code_signature(
+	void *monitor_sig_obj,
+	vm_address_t *unneeded_addr,
+	vm_size_t *unneeded_size)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(reconstitute_code_signature)(
+		monitor_sig_obj,
+		unneeded_addr,
+		unneeded_size);
+}
+
+kern_return_t
+csm_associate_code_signature(
+	pmap_t monitor_pmap,
+	void *monitor_sig_obj,
+	const vm_address_t region_addr,
+	const vm_size_t region_size,
+	const vm_offset_t region_offset)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(associate_code_signature)(
+		monitor_pmap,
+		monitor_sig_obj,
+		region_addr,
+		region_size,
+		region_offset);
+}
+
+kern_return_t
+csm_associate_jit_region(
+	pmap_t monitor_pmap,
+	const vm_address_t region_addr,
+	const vm_size_t region_size)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(associate_jit_region)(
+		monitor_pmap,
+		region_addr,
+		region_size);
+}
+
+kern_return_t
+csm_associate_debug_region(
+	pmap_t monitor_pmap,
+	const vm_address_t region_addr,
+	const vm_size_t region_size)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(associate_debug_region)(
+		monitor_pmap,
+		region_addr,
+		region_size);
+}
+
+kern_return_t
+csm_allow_invalid_code(
+	pmap_t pmap)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(allow_invalid_code)(pmap);
+}
+
+kern_return_t
+csm_address_space_exempt(
+	const pmap_t pmap)
+{
+	/*
+	 * These exemptions are actually orthogonal to the code signing enforcement. As
+	 * a result, we let each monitor explicitly decide how to deal with the exemption
+	 * in case code signing enforcement is disabled.
+	 */
+
+	return CSM_PREFIX(address_space_exempt)(pmap);
+}
+
+kern_return_t
+csm_fork_prepare(
+	pmap_t old_pmap,
+	pmap_t new_pmap)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(fork_prepare)(old_pmap, new_pmap);
+}
+
+kern_return_t
+csm_acquire_signing_identifier(
+	const void *monitor_sig_obj,
+	const char **signing_id)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(acquire_signing_identifier)(monitor_sig_obj, signing_id);
+}
+
+kern_return_t
+csm_associate_os_entitlements(
+	void *monitor_sig_obj,
+	const void *os_entitlements)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	} else if (os_entitlements == NULL) {
+		/* Not every signature has entitlements */
+		return KERN_SUCCESS;
+	}
+
+	return CSM_PREFIX(associate_kernel_entitlements)(monitor_sig_obj, os_entitlements);
+}
+
+kern_return_t
+csm_accelerate_entitlements(
+	void *monitor_sig_obj,
+	CEQueryContext_t *ce_ctx)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(accelerate_entitlements)(monitor_sig_obj, ce_ctx);
+}
+
+#endif /* CODE_SIGNING_MONITOR */
+
+#pragma mark AppleImage4
+/*
+ * AppleImage4 uses the monitor environment to safeguard critical security data.
+ * In order to ease the implementation specific, AppleImage4 always depends on these
+ * abstracted APIs, regardless of whether the system has a monitor environment or
+ * not.
+ */
+
+void*
+kernel_image4_storage_data(
+	size_t *allocated_size)
+{
+	return CSM_PREFIX(image4_storage_data)(allocated_size);
+}
+
+void
+kernel_image4_set_nonce(
+	const img4_nonce_domain_index_t ndi,
+	const img4_nonce_t *nonce)
+{
+	return CSM_PREFIX(image4_set_nonce)(ndi, nonce);
+}
+
+void
+kernel_image4_roll_nonce(
+	const img4_nonce_domain_index_t ndi)
+{
+	return CSM_PREFIX(image4_roll_nonce)(ndi);
+}
+
+errno_t
+kernel_image4_copy_nonce(
+	const img4_nonce_domain_index_t ndi,
+	img4_nonce_t *nonce_out)
+{
+	return CSM_PREFIX(image4_copy_nonce)(ndi, nonce_out);
+}
+
+errno_t
+kernel_image4_execute_object(
+	img4_runtime_object_spec_index_t obj_spec_index,
+	const img4_buff_t *payload,
+	const img4_buff_t *manifest)
+{
+	return CSM_PREFIX(image4_execute_object)(
+		obj_spec_index,
+		payload,
+		manifest);
+}
+
+errno_t
+kernel_image4_copy_object(
+	img4_runtime_object_spec_index_t obj_spec_index,
+	vm_address_t object_out,
+	size_t *object_length)
+{
+	return CSM_PREFIX(image4_copy_object)(
+		obj_spec_index,
+		object_out,
+		object_length);
+}
+
+const void*
+kernel_image4_get_monitor_exports(void)
+{
+	return CSM_PREFIX(image4_get_monitor_exports)();
+}
+
+errno_t
+kernel_image4_set_release_type(
+	const char *release_type)
+{
+	return CSM_PREFIX(image4_set_release_type)(release_type);
+}
+
+errno_t
+kernel_image4_set_bnch_shadow(
+	const img4_nonce_domain_index_t ndi)
+{
+	return CSM_PREFIX(image4_set_bnch_shadow)(ndi);
+}

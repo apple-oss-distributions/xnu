@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>RadarComponents</key>
+	<dict>
+		<key>Name</key>
+		<string>xnu</string>
+		<key>Version</key>
+		<string>performance</string>
+	</dict>
+	<key>Tests</key>
+	<array>
+		<dict>
+			<key>AsRoot</key>
+			<true/>
+			<key>Command</key>
+			<array>
+				<string>recon</string>
+				<string>/AppleInternal/Tests/xnu/darwintests/vm/perf_madvise.lua</string>
+				<string>/AppleInternal/Tests/xnu/darwintests/vm/perf_madvise</string>
+				<string>--tmp</string>
+				<string>--no-subdir</string>
+			</array>
+			<key>Tags</key>
+			<array>
+				<string>perf</string>
+			</array>
+			<key>TestName</key>
+			<string>xnu.vm.perf_madvise</string>
+		</dict>
+	</array>
+	<key>Timeout</key>
+	<integer>1800</integer>
+</dict>
+</plist>
+

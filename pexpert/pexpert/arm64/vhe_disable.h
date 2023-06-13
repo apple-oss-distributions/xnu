@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2019 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,13 +26,5 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#ifndef _VOUCHER_IPC_PTHREAD_PRIORITY_INTERNAL_H_
-#define _VOUCHER_IPC_PTHREAD_PRIORITY_INTERNAL_H_
+#pragma once
 
-#define PTHPRIORITY_ATTR_DEFAULT_VALUE (0)
-
-#if CONFIG_VOUCHER_DEPRECATED
-extern void ipc_pthread_priority_init(void);
-#endif /* CONFIG_VOUCHER_DEPRECATED */
-
-#endif /* _VOUCHER_IPC_PTHREAD_PRIORITY_INTERNAL_H_ */

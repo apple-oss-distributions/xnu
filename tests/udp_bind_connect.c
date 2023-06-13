@@ -109,6 +109,52 @@ has_v4_default_route(void)
 	return result;
 }
 
+static bool
+has_v6_default_route(void)
+{
+	bool result = false;
+	struct rt_msghdr *rtm = NULL;
+	struct sockaddr_in6 sin6 = {};
+
+	sin6.sin6_len = sizeof(struct sockaddr_in6);
+	sin6.sin6_family = AF_INET;
+
+	T_QUIET; T_ASSERT_NOTNULL(rtm = (struct rt_msghdr *)calloc(1, RTM_BUFLEN), NULL);
+
+	rtm->rtm_msglen = sizeof(struct rt_msghdr) + sizeof(struct sockaddr_in);
+	rtm->rtm_version = RTM_VERSION;
+	rtm->rtm_type = RTM_GET;
+	rtm->rtm_flags = RTF_UP | RTF_STATIC | RTF_GATEWAY | RTF_HOST;
+	rtm->rtm_addrs = RTA_DST;
+	rtm->rtm_pid = getpid();
+	rtm->rtm_seq = 1;
+
+	uint8_t *cp = (unsigned char *)(rtm + 1);
+
+	bcopy(&sin6, cp, sin6.sin6_len);
+	cp += ROUNDUP(sin6.sin6_len);
+
+	u_short len = (u_short)(cp - (uint8_t *)rtm);
+
+	rtm->rtm_msglen = len;
+
+	int fd;
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(fd = socket(PF_ROUTE, SOCK_RAW, 0), NULL);
+
+	ssize_t sent = send(fd, rtm, len, 0);
+	if (sent == len) {
+		result = true;
+	} else {
+		result = false;
+	}
+
+	(void) close(fd);
+	free(rtm);
+
+	return result;
+}
+
+
 static void
 init_sin_address(struct sockaddr_in *sin)
 {
@@ -565,8 +611,8 @@ T_DECL(udp_bind_ipv4_multicast_compatible_ipv6, "UDP bind with IPv4 multicast co
 
 T_DECL(udp_connect_ipv4_multicast_compatible_ipv6, "UDP connect with IPv4 multicast compatible IPv6 address")
 {
-	if (!has_v4_default_route()) {
-		T_SKIP("test require IPv4 default route");
+	if (!has_v6_default_route()) {
+		T_SKIP("test require IPv6 default route");
 	}
 
 	int s = -1;
@@ -599,8 +645,8 @@ T_DECL(udp_bind_ipv4_broadcast_compatible_ipv6, "UDP bind with IPv4 broadcast co
 
 T_DECL(udp_connect_ipv4_broadcast_compatible_ipv6, "UDP connect with IPv4 broadcast compatible IPv6 address")
 {
-	if (!has_v4_default_route()) {
-		T_SKIP("test require IPv4 default route");
+	if (!has_v6_default_route()) {
+		T_SKIP("test require IPv6 default route");
 	}
 
 	int s = -1;
@@ -633,8 +679,8 @@ T_DECL(udp_bind_ipv4_null_compatible_ipv6, "UDP bind with IPv4 null compatible I
 
 T_DECL(udp_connect_ipv4_null_compatible_ipv6, "UDP connect with IPv4 null compatible IPv6 address")
 {
-	if (!has_v4_default_route()) {
-		T_SKIP("test require IPv4 default route");
+	if (!has_v6_default_route()) {
+		T_SKIP("test require IPv6 default route");
 	}
 
 	int s = -1;

@@ -203,8 +203,7 @@ mp_pcballoc(struct socket *so, struct mppcbinfo *mppi)
 
 	VERIFY(mpsotomppcb(so) == NULL);
 
-	mpp = zalloc_flags(mppi->mppi_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-
+	mpp = mppi->mppi_alloc();
 	lck_mtx_init(&mpp->mpp_lock, mppi->mppi_lock_grp, &mppi->mppi_lock_attr);
 	mpp->mpp_pcbinfo = mppi;
 	mpp->mpp_state = MPPCB_STATE_INUSE;
@@ -214,7 +213,7 @@ mp_pcballoc(struct socket *so, struct mppcbinfo *mppi)
 	error = mptcp_session_create(mpp);
 	if (error) {
 		lck_mtx_destroy(&mpp->mpp_lock, mppi->mppi_lock_grp);
-		zfree(mppi->mppi_zone, mpp);
+		mppi->mppi_free(mpp);
 		return error;
 	}
 
@@ -289,8 +288,7 @@ mptcp_pcbdispose(struct mppcb *mpp)
 	VERIFY(mpp->mpp_socket->so_usecount == 0);
 	mpp->mpp_socket->so_pcb = NULL;
 	mpp->mpp_socket = NULL;
-
-	zfree(mppi->mppi_zone, mpp);
+	mppi->mppi_free(mpp);
 }
 
 static int

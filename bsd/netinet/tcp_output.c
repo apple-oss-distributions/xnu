@@ -373,8 +373,8 @@ tcp_tfo_write_cookie_rep(struct tcpcb *tp, unsigned int optlen, u_char *opt)
 	unsigned ret = 0;
 	u_char *bp;
 
-	if ((MAX_TCPOPTLEN - optlen) <
-	    (TCPOLEN_FASTOPEN_REQ + TFO_COOKIE_LEN_DEFAULT)) {
+	if (MAX_TCPOPTLEN - optlen <
+	    TCPOLEN_FASTOPEN_REQ + TFO_COOKIE_LEN_DEFAULT) {
 		return ret;
 	}
 
@@ -586,7 +586,7 @@ tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *lp, uint8_t *o
 		if (flags & TH_SYN) {
 			*lp++ = htonl((TCPOPT_ACCECN1 << 24) | (len << 16) |
 			    (TCPOPT_NOP << 8) | TCPOPT_NOP);
-			optlen += len + 2; /* 2 NOPs */
+			*optlen += len + 2; /* 2 NOPs */
 			TCP_LOG(tp, "add empty AccECN option, optlen=%u", *optlen);
 		}
 	} else if (max_len < (TCPOLEN_ACCECN_EMPTY + 2 * TCPOLEN_ACCECN_COUNTER)) {
@@ -682,7 +682,7 @@ tcp_output(struct tcpcb *tp)
 	tcp_seq old_snd_nxt = 0;
 	struct sackhole *p;
 #if IPSEC
-	unsigned int ipsec_optlen = 0;
+	size_t ipsec_optlen = 0;
 #endif /* IPSEC */
 	int    idle_time = 0;
 	struct mbuf *packetlist = NULL;
@@ -692,7 +692,6 @@ tcp_output(struct tcpcb *tp)
 	int so_options = so->so_options;
 	struct rtentry *rt;
 	u_int32_t svc_flags = 0, allocated_len;
-	unsigned int sackoptlen = 0;
 #if MPTCP
 	boolean_t mptcp_acknow;
 #endif /* MPTCP */
@@ -1267,7 +1266,7 @@ after_sack_rexmit:
 	 * of IPsec that way and can actually decide if TSO is ok.
 	 */
 	if (ipsec_bypass == 0) {
-		ipsec_optlen = (unsigned int)ipsec_hdrsiz_tcp(tp);
+		ipsec_optlen = ipsec_hdrsiz_tcp(tp);
 	}
 #endif
 	if (len > tp->t_maxseg) {
@@ -1827,7 +1826,8 @@ send:
 		if (TCPS_HAVEESTABLISHED(tp->t_state) &&
 		    (tp->t_flags & TF_SACK_PERMIT) &&
 		    (tp->rcv_numsacks > 0 || TCP_SEND_DSACK_OPT(tp)) &&
-		    MAX_TCPOPTLEN - optlen - 2 >= TCPOLEN_SACK) {
+		    MAX_TCPOPTLEN - optlen >= TCPOLEN_SACK + 2) {
+			unsigned int sackoptlen = 0;
 			int nsack, padlen;
 			u_char *bp = (u_char *)opt + optlen;
 			u_int32_t *lp;
@@ -1875,6 +1875,9 @@ send:
 				*lp++ = htonl(sack.end);
 			}
 			optlen += sackoptlen;
+
+			/* Make sure we didn't write too much */
+			VERIFY((u_char *)lp - opt <= MAX_TCPOPTLEN);
 		}
 	}
 

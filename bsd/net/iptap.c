@@ -115,9 +115,7 @@ static struct if_clone iptap_cloner =
     iptap_clone_create,
     iptap_clone_destroy,
     0,
-    IPTAP_MAXUNIT,
-    IPTAP_ZONE_MAX_ELEM,
-    sizeof(struct iptap_softc));
+    IPTAP_MAXUNIT);
 
 SYSCTL_DECL(_net_link);
 SYSCTL_NODE(_net_link, OID_AUTO, iptap, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
@@ -175,7 +173,7 @@ iptap_clone_create(struct if_clone *ifc, u_int32_t unit, void *params)
 	struct iptap_softc *iptap = NULL;
 	struct ifnet_init_eparams if_init;
 
-	iptap = if_clone_softc_allocate(&iptap_cloner);
+	iptap = kalloc_type(struct iptap_softc, Z_WAITOK_ZERO_NOFAIL);
 	iptap->iptap_unit = unit;
 
 	/*
@@ -233,10 +231,8 @@ iptap_clone_create(struct if_clone *ifc, u_int32_t unit, void *params)
 	LIST_INSERT_HEAD(&iptap_list, iptap, iptap_link);
 	iptap_lock_done();
 done:
-	if (error != 0) {
-		if (iptap != NULL) {
-			if_clone_softc_deallocate(&iptap_cloner, iptap);
-		}
+	if (error != 0 && iptap != NULL) {
+		kfree_type(struct iptap_softc, iptap);
 	}
 	return error;
 }
@@ -443,7 +439,7 @@ iptap_detach(ifnet_t ifp)
 
 	/* Drop reference as it's no more on the global list */
 	ifnet_release(ifp);
-	if_clone_softc_deallocate(&iptap_cloner, iptap);
+	kfree_type(struct iptap_softc, iptap);
 
 	/* This is for the reference taken by ifnet_attach() */
 	(void) ifnet_release(ifp);

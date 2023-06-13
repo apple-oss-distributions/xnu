@@ -171,6 +171,55 @@ extern wait_result_t lck_spin_sleep_with_inheritor(
 	wait_interrupt_t        interruptible,
 	uint64_t                deadline);
 
+#if MACH_KERNEL_PRIVATE
+
+/*
+ * Name: hw_lck_ticket_sleep_with_inheritor
+ *
+ * Description:
+ *   deschedule the current thread and wait on the waitq associated with event
+ *   to be woken up.
+ *
+ *   While waiting, the sched priority of the waiting thread will contribute to
+ *   the push of the event that will be directed to the inheritor specified.
+ *
+ *   An interruptible mode and deadline can be specified to return earlier from
+ *   the wait.
+ *
+ * Args:
+ *   Arg1: hw_lck_ticket_t lock used to protect the sleep.
+ *         The lock will be dropped while sleeping and reaquired before
+ *         returning according to the sleep action specified.
+ *   Arg2: lck_grp_t associated with the lock.
+ *   Arg3: sleep action. LCK_SLEEP_DEFAULT, LCK_SLEEP_UNLOCK.
+ *   Arg3: event to wait on.
+ *   Arg5: thread to propagate the event push to.
+ *   Arg6: interruptible flag for wait.
+ *   Arg7: deadline for wait.
+ *
+ * Conditions:
+ *   Lock must be held.
+ *
+ *   Returns with the lock held according to the sleep action specified.
+ *
+ *   Lock will be dropped while waiting.
+ *
+ *   The inheritor specified cannot return to user space or exit until another
+ *   inheritor is specified for the event or a wakeup for the event is called.
+ *
+ * Returns: result of the wait.
+ */
+extern wait_result_t hw_lck_ticket_sleep_with_inheritor(
+	hw_lck_ticket_t         *lock,
+	lck_grp_t               *grp,
+	lck_sleep_action_t      lck_sleep_action,
+	event_t                 event,
+	thread_t                inheritor,
+	wait_interrupt_t        interruptible,
+	uint64_t                deadline);
+
+#endif
+
 /*
  * Name: lck_ticket_sleep_with_inheritor
  *
@@ -1153,7 +1202,7 @@ extern lck_spinlock_to_info_t lck_spinlock_timeout_hit(
 #endif /* MACH_KERNEL_PRIVATE */
 #if  XNU_KERNEL_PRIVATE
 
-uintptr_t unslide_for_kdebug(void* object);
+uintptr_t unslide_for_kdebug(const void* object) __pure2;
 
 struct lck_attr_startup_spec {
 	lck_attr_t              *lck_attr;

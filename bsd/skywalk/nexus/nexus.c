@@ -83,20 +83,15 @@ static void nx_fini_slots(struct kern_nexus *, struct __kern_channel_ring *);
 static struct kern_nexus *nx_alloc(zalloc_flags_t);
 static void nx_free(struct kern_nexus *);
 
-static ZONE_DEFINE(nxctl_zone, SKMEM_ZONE_PREFIX ".nx.ctl",
-    sizeof(struct nxctl), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(nxctl_zone, struct nxctl);
 
-static ZONE_DEFINE(nxbind_zone, SKMEM_ZONE_PREFIX ".nx.bind",
-    sizeof(struct nxbind), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(nxbind_zone, struct nxbind);
 
-static ZONE_DEFINE(nxprov_zone, SKMEM_ZONE_PREFIX ".nx.kern.prov",
-    sizeof(struct kern_nexus_provider), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(nxprov_zone, struct kern_nexus_provider);
 
-static ZONE_DEFINE(nxprov_params_zone, SKMEM_ZONE_PREFIX ".nx.kern.prov.params",
-    sizeof(struct nxprov_params), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(nxprov_params_zone, struct nxprov_params);
 
-static ZONE_DEFINE(nx_zone, SKMEM_ZONE_PREFIX ".nx",
-    sizeof(struct kern_nexus), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(nx_zone, struct kern_nexus);
 
 static int __nx_inited = 0;
 

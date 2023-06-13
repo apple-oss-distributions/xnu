@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -181,7 +181,7 @@ extern int udp_ctloutput(struct socket *, struct sockopt *);
 static int ip6_fragment_packet(struct mbuf **m,
     struct ip6_pktopts *opt, struct ip6_out_args * ip6oa,
     struct ip6_exthdrs *exthdrsp, struct ifnet *ifp,
-    uint32_t mtu, uint32_t unfragpartlen, struct route_in6 *ro_pmtu,
+    uint32_t mtu, uint32_t unfragpartlen,
     int nxt0, uint32_t optlen);
 
 SYSCTL_DECL(_net_inet6_ip6);
@@ -1017,6 +1017,10 @@ skip_ipsec:
 		}
 	}
 
+	if (((ntohl(ip6->ip6_flow & IPV6_FLOW_ECN_MASK) >> 20) & IPTOS_ECN_ECT1) == IPTOS_ECN_ECT1) {
+		m->m_pkthdr.pkt_ext_flags |= PKTF_EXT_L4S;
+	}
+
 	/* fill in or override the hop limit field, if necessary. */
 	if (opt && opt->ip6po_hlim != -1) {
 		ip6->ip6_hlim = opt->ip6po_hlim & 0xff;
@@ -1524,7 +1528,7 @@ check_with_pf:
 	 * is unchanged.
 	 */
 	error = ip6_fragment_packet(&m, opt, ip6oa,
-	    &exthdrs, ifp, mtu, unfragpartlen, ro_pmtu, nxt0,
+	    &exthdrs, ifp, mtu, unfragpartlen, nxt0,
 	    optlen);
 
 	if (error) {
@@ -1694,7 +1698,7 @@ static int
 ip6_fragment_packet(struct mbuf **mptr, struct ip6_pktopts *opt,
     struct ip6_out_args *ip6oa, struct ip6_exthdrs *exthdrsp,
     struct ifnet *ifp, uint32_t mtu, uint32_t unfragpartlen,
-    struct route_in6 *ro_pmtu, int nxt0, uint32_t optlen)
+    int nxt0, uint32_t optlen)
 {
 	VERIFY(NULL != mptr);
 	struct mbuf *m = *mptr;
@@ -1720,20 +1724,11 @@ ip6_fragment_packet(struct mbuf **mptr, struct ip6_pktopts *opt,
 	/* Access without acquiring nd_ifinfo lock for performance */
 	if (dontfrag && tlen > IN6_LINKMTU(ifp)) {      /* case 2-b */
 		/*
-		 * Even if the DONTFRAG option is specified, we cannot send the
-		 * packet when the data length is larger than the MTU of the
-		 * outgoing interface.
-		 * Notify the error by sending IPV6_PATHMTU ancillary data as
-		 * well as returning an error code (the latter is not described
-		 * in the API spec.)
+		 * We do not notify the connection in the same outbound path
+		 * to avoid lock ordering issues.
+		 * The returned error should imply that the packet is too big
+		 * and the application should query the PMTU for a given destination.
 		 */
-		u_int32_t mtu32;
-		struct ip6ctlparam ip6cp;
-
-		mtu32 = (u_int32_t)mtu;
-		bzero(&ip6cp, sizeof(ip6cp));
-		ip6cp.ip6c_cmdarg = (void *)&mtu32;
-		pfctlinput2(PRC_MSGSIZE, SA(&ro_pmtu->ro_dst), (void *)&ip6cp);
 		return EMSGSIZE;
 	}
 

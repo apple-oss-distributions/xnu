@@ -285,7 +285,6 @@ struct task {
 #define TF_WAKEMON_WARNING      0x00000008                              /* task is in wakeups monitor warning zone */
 #define TF_TELEMETRY            (TF_CPUMON_WARNING | TF_WAKEMON_WARNING) /* task is a telemetry participant */
 #define TF_GPU_DENIED           0x00000010                              /* task is not allowed to access the GPU */
-#define TF_CORPSE               0x00000020                              /* task is a corpse */
 #define TF_PENDING_CORPSE       0x00000040                              /* task corpse has not been reported yet */
 #define TF_CORPSE_FORK          0x00000080                              /* task is a forked corpse */
 #define TF_CA_CLIENT_WI         0x00000800                              /* task has CA_CLIENT work interval */
@@ -301,10 +300,12 @@ struct task {
 #define TF_USE_PSET_HINT_CLUSTER_TYPE 0x00200000                        /* bind task to task->pset_hint->pset_cluster_type */
 #define TF_DYLD_ALL_IMAGE_FINAL   0x00400000                            /* all_image_info_addr can no longer be changed */
 #define TF_HASPROC              0x00800000                              /* task points to a proc */
+#define TF_HAS_REPLY_PORT_TELEMETRY 0x10000000                          /* Rate limit telemetry for reply port security semantics violations rdar://100244531 */
 
 /*
  * RO-protected flags:
  */
+#define TFRO_CORPSE                     0x00000020                      /* task is a corpse */
 #define TFRO_PLATFORM                   0x00000400                      /* task is a platform binary */
 #define TFRO_FILTER_MSG                 0x00004000                      /* task calls into message filter callback before sending a message */
 #define TFRO_PAC_EXC_FATAL              0x00010000                      /* task is marked a corpse if a PAC exception occurs */
@@ -329,12 +330,6 @@ struct task {
 	((task)->t_flags |= TF_64B_DATA)
 #define task_clear_64Bit_data(task)     \
 	((task)->t_flags &= ~TF_64B_DATA)
-
-#define task_is_a_corpse(task)      \
-	 (((task)->t_flags & TF_CORPSE) != 0)
-
-#define task_set_corpse(task)       \
-	 ((task)->t_flags |= TF_CORPSE)
 
 #define task_corpse_pending_report(task)        \
 	 (((task)->t_flags & TF_PENDING_CORPSE) != 0)
@@ -365,6 +360,12 @@ struct task {
 
 #define task_clear_has_proc(task) \
 	((task)->t_flags &= ~TF_HASPROC)
+
+#define task_has_reply_port_telemetry(task) \
+	(((task)->t_flags & TF_HAS_REPLY_PORT_TELEMETRY) != 0)
+
+#define task_set_reply_port_telemetry(task) \
+	((task)->t_flags |= TF_HAS_REPLY_PORT_TELEMETRY)
 
 	uint32_t t_procflags;                                            /* general-purpose task flags protected by proc_lock (PL) */
 #define TPF_NONE                 0
@@ -486,7 +487,6 @@ struct task {
 	unsigned int    task_region_footprint:1;
 	unsigned int    task_has_crossed_thread_limit:1;
 	unsigned int    task_rr_in_flight:1; /* a t_rr_synchronzie() is in flight */
-	uint32_t        exec_token;
 	/*
 	 * A task's coalition set is "adopted" in task_create_internal
 	 * and unset in task_deallocate_internal, so each array member
@@ -813,7 +813,8 @@ extern kern_return_t    task_create_internal(
 	boolean_t       inherit_memory,
 	boolean_t       is_64bit,
 	boolean_t       is_64bit_data,
-	uint32_t        flags,
+	uint32_t        t_flags,
+	uint32_t        t_flags_ro,
 	uint32_t        procflags,
 	uint8_t         t_returnwaitflags,
 	task_t          child_task);
@@ -899,6 +900,12 @@ extern void     task_set_platform_binary(
 	boolean_t is_platform);
 
 extern boolean_t task_get_platform_binary(
+	task_t task);
+
+extern boolean_t task_is_a_corpse(
+	task_t task);
+
+extern void task_set_corpse(
 	task_t task);
 
 extern void     task_set_exc_guard_ctrl_port_default(
@@ -1006,7 +1013,6 @@ extern uint8_t *task_get_mach_trap_filter_mask(task_t task);
 extern void task_set_mach_trap_filter_mask(task_t task, uint8_t *mask);
 extern uint8_t *task_get_mach_kobj_filter_mask(task_t task);
 extern void task_set_mach_kobj_filter_mask(task_t task, uint8_t *mask);
-extern void task_copy_filter_masks(task_t new_task, task_t old_task);
 extern mach_vm_address_t task_get_all_image_info_addr(task_t task);
 
 /* Jetsam memlimit attributes */
@@ -1032,7 +1038,6 @@ extern void task_set_system_version_compat_enabled(task_t task, boolean_t enable
 #endif
 
 extern boolean_t        is_kerneltask(task_t task);
-extern boolean_t        is_corpsetask(task_t task);
 extern boolean_t        is_corpsefork(task_t task);
 
 extern kern_return_t check_actforsig(task_t task, thread_t thread, int setast);
@@ -1197,8 +1202,6 @@ extern void task_store_owned_vmobject_info(task_t to_task, task_t from_task);
 
 extern void task_set_filter_msg_flag(task_t task, boolean_t flag);
 extern boolean_t task_get_filter_msg_flag(task_t task);
-
-extern void task_transfer_mach_filter_bits(task_t new_task, task_t old_mask);
 
 #if __has_feature(ptrauth_calls)
 extern bool task_is_pac_exception_fatal(task_t task);

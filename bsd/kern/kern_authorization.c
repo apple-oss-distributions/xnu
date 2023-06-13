@@ -1175,43 +1175,25 @@ kauth_filesec_acl_setendian(int kendian, kauth_filesec_t fsec, kauth_acl_t acl)
 }
 
 /*
- * rdar://88962576
- *
- * Before adopting the typed allocators for ACLs, we need to carefully
- * audit their usage outside of core kernel, to make sure there are
- * no paths cross-freeing them across kext boundaries.
- */
-__typed_allocators_ignore_push
-
-/*
  * Allocate an ACL buffer.
  */
 kauth_acl_t
 kauth_acl_alloc(int count)
 {
-	kauth_acl_t     aclp;
-
 	/* if the caller hasn't given us a valid size hint, assume the worst */
 	if ((count < 0) || (count > KAUTH_ACL_MAX_ENTRIES)) {
 		return NULL;
 	}
 
-	aclp = kheap_alloc(KM_KAUTH, KAUTH_ACL_SIZE(count), Z_WAITOK);
-	if (aclp != NULL) {
-		aclp->acl_entrycount = 0;
-		aclp->acl_flags = 0;
-	}
-	return aclp;
+	return kalloc_data(KAUTH_ACL_SIZE(count), Z_WAITOK | Z_ZERO);
 }
 
 void
 kauth_acl_free(kauth_acl_t aclp)
 {
-	kheap_free_addr(KM_KAUTH, aclp);
+	kfree_data_addr(aclp);
 }
 
-
-__typed_allocators_ignore_pop
 
 /*
  * WARNING - caller must hold KAUTH_SCOPELOCK

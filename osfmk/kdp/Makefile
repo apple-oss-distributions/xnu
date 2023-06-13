@@ -12,7 +12,7 @@ DATAFILES = \
 
 PRIVATE_KERNELFILES = processor_core.h core_exclude.h
 
-EXPORT_MI_LIST	= ${DATAFILES} kdp_dyld.h
+EXPORT_MI_LIST	= ${DATAFILES} kdp_dyld.h core_notes.h
 
 INSTALL_KF_MI_LIST = ${DATAFILES}
 

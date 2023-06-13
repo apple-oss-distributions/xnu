@@ -132,7 +132,7 @@ main(int     argc,
 	DECLARE("TH_CTH_SELF", offsetof(struct thread, machine.cthread_self));
 	DECLARE("ACT_PREEMPT_CNT", offsetof(struct thread, machine.preemption_count));
 #if SCHED_HYGIENE_DEBUG
-	DECLARE("ACT_PREEMPT_MT", offsetof(struct thread, machine.preemption_disable_mt));
+	DECLARE("SCHED_HYGIENE_MARKER", SCHED_HYGIENE_MARKER);
 #endif
 	DECLARE("ACT_CPUDATAP", offsetof(struct thread, machine.CpuDatap));
 	DECLARE("ACT_DEBUGDATA", offsetof(struct thread, machine.DebugData));
@@ -282,9 +282,11 @@ main(int     argc,
 	DECLARE("stSize", sizeof(SleepToken));
 #endif /* WITH_CLASSIC_S2R */
 
+	DECLARE("CPU_DATA_SIZE", sizeof(cpu_data_entry_t));
 	DECLARE("CPU_DATA_ENTRIES", offsetof(struct reset_handler_data, cpu_data_entries));
 
 	DECLARE("CPU_DATA_PADDR", offsetof(struct cpu_data_entry, cpu_data_paddr));
+	DECLARE("CPU_DATA_VADDR", offsetof(struct cpu_data_entry, cpu_data_vaddr));
 
 	DECLARE("INTSTACK_SIZE", INTSTACK_SIZE);
 	DECLARE("EXCEPSTACK_SIZE", EXCEPSTACK_SIZE);
@@ -337,6 +339,7 @@ main(int     argc,
 	DECLARE("HIBTRAMP_MEMSLIDE", offsetof(pal_hib_tramp_result_t, memSlide));
 	DECLARE("HIBGLOBALS_KERNELSLIDE", offsetof(pal_hib_globals_t, kernelSlide));
 #endif /* HIBERNATION */
+
 
 	return 0;
 }

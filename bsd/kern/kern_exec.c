@@ -179,7 +179,6 @@
 #endif
 
 #include <IOKit/IOBSD.h>
-#include <IOKit/IOPlatformExpert.h>
 
 #include "kern_exec_internal.h"
 
@@ -1030,10 +1029,21 @@ binary_match(cpu_type_t mask, cpu_type_t req_cpu,
 #define MIN_DRIVERKIT_TPRO_SDK_VERSION  0x00600000
 
 static void
-exec_setup_tpro(struct image_params __unused *imgp, load_result_t *load_result)
+exec_setup_tpro(struct image_params *imgp, load_result_t *load_result)
 {
 	extern boolean_t xprr_tpro_enabled;
+	extern boolean_t enable_user_modifiable_perms;
 	uint32_t min_sdk_version = 0;
+
+	/* x86-64 translated code cannot take advantage of TPRO */
+	if (imgp->ip_flags & IMGPF_ROSETTA) {
+		return;
+	}
+
+	/* Do not enable on 32-bit VA targets */
+	if (!(imgp->ip_flags & IMGPF_IS_64BIT_ADDR)) {
+		return;
+	}
 
 	switch (load_result->ip_platform) {
 	case PLATFORM_IOS:
@@ -1042,7 +1052,7 @@ exec_setup_tpro(struct image_params __unused *imgp, load_result_t *load_result)
 		min_sdk_version = MIN_IOS_TPRO_SDK_VERSION;
 		break;
 	case PLATFORM_MACOS:
-		min_sdk_version = MIN_IOS_TPRO_SDK_VERSION;
+		min_sdk_version = MIN_OSX_TPRO_SDK_VERSION;
 		break;
 	case PLATFORM_TVOS:
 	case PLATFORM_TVOSSIMULATOR:
@@ -3261,52 +3271,58 @@ proc_footprint_entitlement_hacks(proc_t p, task_t task)
 }
 #endif /* __arm64__ */
 
-#if CONFIG_MACF
 /*
  * Processes with certain entitlements are granted a jumbo-size VM map.
  */
 static inline void
-proc_apply_jit_and_jumbo_va_policies(proc_t p, task_t task)
+proc_apply_jit_and_vm_policies(struct image_params *imgp, proc_t p, task_t task)
 {
-	bool jit_entitled;
-	jit_entitled = (mac_proc_check_map_anon(p, 0, 0, 0, MAP_JIT, NULL) == 0);
-	if (jit_entitled || (IOTaskHasEntitlement(task,
-	    "com.apple.developer.kernel.extended-virtual-addressing")) ||
-	    memorystatus_task_has_increased_memory_limit_entitlement(task)) {
-		vm_map_set_jumbo(get_task_map(task));
-		if (jit_entitled) {
-			vm_map_set_jit_entitled(get_task_map(task));
+#if CONFIG_MACF
+	bool jit_entitled = false;
+#endif /* CONFIG_MACF */
+	bool needs_jumbo_va = false;
+	struct _posix_spawnattr *psa = imgp->ip_px_sa;
 
-		}
-	}
-}
+#if CONFIG_MACF
+	jit_entitled = (mac_proc_check_map_anon(p, 0, 0, 0, MAP_JIT, NULL) == 0);
+	needs_jumbo_va = jit_entitled || IOTaskHasEntitlement(task,
+	    "com.apple.developer.kernel.extended-virtual-addressing") ||
+	    memorystatus_task_has_increased_memory_limit_entitlement(task);
+#else
+#pragma unused(p)
 #endif /* CONFIG_MACF */
 
-static inline void
-proc_apply_tpro(struct image_params *imgp, task_t task)
-{
+	if (needs_jumbo_va) {
+		vm_map_set_jumbo(get_task_map(task));
+	}
+
+	if (psa && psa->psa_max_addr) {
+		vm_map_set_max_addr(get_task_map(task), psa->psa_max_addr);
+	}
+
+#if CONFIG_MAP_RANGES
+	if (task_get_platform_binary(task)) {
+		/*
+		 * This must be done last as it needs to observe
+		 * any kind of VA space growth that was requested
+		 */
+		vm_map_range_configure(get_task_map(task));
+	}
+#endif /* CONFIG_MAP_RANGES */
+
+#if CONFIG_MACF
+	if (jit_entitled) {
+		vm_map_set_jit_entitled(get_task_map(task));
+
+	}
+#endif /* CONFIG_MACF */
+
 #if defined(__arm64e__)
 	if (imgp->ip_flags & IMGPF_HW_TPRO) {
 		vm_map_set_tpro(get_task_map(task));
 	}
-#else /* __arm64e__ */
-	(void)imgp;
-	(void)task;
 #endif /* __arm64e__ */
 }
-
-#if CONFIG_MAP_RANGES
-/*
- * First party processes are opted in to the use of VM heap ranges.
- */
-static inline void
-proc_apply_vm_range_policies(proc_t p __unused, task_t t)
-{
-	if (task_get_platform_binary(t)) {
-		vm_map_range_configure(get_task_map(t));
-	}
-}
-#endif /* CONFIG_MAP_RANGES */
 
 static int
 spawn_posix_cred_adopt(proc_t p,
@@ -3398,6 +3414,8 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 	boolean_t proc_transit_set = TRUE;
 	boolean_t proc_signal_set = TRUE;
 	boolean_t exec_done = FALSE;
+	os_reason_t exec_failure_reason = NULL;
+
 	struct exec_port_actions port_actions = { };
 	vm_size_t px_sa_offset = offsetof(struct _posix_spawnattr, psa_ports);
 	task_t old_task = current_task();
@@ -3854,6 +3872,9 @@ do_fork1:
 	p->p_crash_behavior = crash_behavior;
 	p->p_crash_behavior_deadline = crash_behavior_deadline;
 
+	p->p_crash_count = px_sa.psa_crash_count;
+	p->p_throttle_timeout = px_sa.psa_throttle_timeout;
+
 	/* We'll need the subsystem root for setting up Apple strings */
 	imgp->ip_subsystem_root_path = p->p_subsystem_root_path;
 
@@ -4113,14 +4134,14 @@ do_fork1:
 			 * because there are no pointer arguments.
 			 */
 			if ((error = setpgid(p, &spga, ival)) != 0) {
-				goto bad;
+				goto bad_px_sa;
 			}
 		}
 
 		if (px_sa.psa_flags & POSIX_SPAWN_SETSID) {
 			error = setsid_internal(p);
 			if (error != 0) {
-				goto bad;
+				goto bad_px_sa;
 			}
 		}
 
@@ -4188,6 +4209,13 @@ do_fork1:
 			 * setlogin() must happen after setsid()
 			 */
 			setlogin_internal(p, px_pcred_info->pspci_login);
+		}
+
+bad_px_sa:
+		if (error != 0) {
+			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+			    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_BAD_PSATTR, 0, 0);
+			exec_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_BAD_PSATTR);
 		}
 	}
 
@@ -4369,11 +4397,9 @@ bad:
 	}
 #endif /* CONFIG_ARCADE */
 
-#if CONFIG_MACF
 	if (error == 0) {
-		proc_apply_jit_and_jumbo_va_policies(p, new_task);
+		proc_apply_jit_and_vm_policies(imgp, p, new_task);
 	}
-#endif /* CONFIG_MACF */
 
 	/* Clear the initial wait on the thread before handling spawn policy */
 	if (imgp && imgp->ip_new_thread) {
@@ -4401,17 +4427,6 @@ bad:
 		task_transfer_turnstile_watchports(old_task, new_task, imgp->ip_new_thread);
 	}
 
-	/*
-	 * Apply the requested maximum address.
-	 */
-	if (error == 0 && imgp->ip_px_sa != NULL) {
-		struct _posix_spawnattr *psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
-
-		if (psa->psa_max_addr) {
-			vm_map_set_max_addr(get_task_map(new_task), (vm_map_offset_t)psa->psa_max_addr);
-		}
-	}
-
 	if (error == 0 && imgp->ip_px_sa != NULL) {
 		struct _posix_spawnattr *psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
 
@@ -4423,15 +4438,24 @@ bad:
 		}
 	}
 
+	if (error == 0 && imgp->ip_px_sa != NULL) {
+		struct _posix_spawnattr *psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
+
+		if (psa->psa_options & PSA_OPTION_DATALESS_IOPOLICY) {
+			struct _iopol_param_t iop_param = {
+				.iop_scope = IOPOL_SCOPE_PROCESS,
+				.iop_iotype = IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
+				.iop_policy = psa->psa_dataless_iopolicy,
+			};
+			error = iopolicysys_vfs_materialize_dataless_files(p, IOPOL_CMD_SET, iop_param.iop_scope,
+			    iop_param.iop_policy, &iop_param);
+		}
+	}
+
 	if (error == 0) {
 		/* Apply the main thread qos */
 		thread_t main_thread = imgp->ip_new_thread;
 		task_set_main_thread_qos(new_task, main_thread);
-		proc_apply_tpro(imgp, new_task);
-
-#if CONFIG_MAP_RANGES
-		proc_apply_vm_range_policies(p, new_task);
-#endif /* CONFIG_MAP_RANGES */
 	}
 
 	/*
@@ -4583,6 +4607,11 @@ bad:
 		task_terminate_internal(new_task);
 	}
 
+	if (exec_failure_reason && !spawn_no_exec) {
+		psignal_with_reason(p, SIGKILL, exec_failure_reason);
+		exec_failure_reason = NULL;
+	}
+
 	/* Return to both the parent and the child? */
 	if (imgp != NULL && spawn_no_exec) {
 		/*
@@ -4655,6 +4684,7 @@ bad:
 		ipc_importance_release(inherit);
 	}
 
+	assert(exec_failure_reason == NULL);
 	return error;
 }
 
@@ -4761,9 +4791,6 @@ proc_exec_switch_task(proc_t old_proc, proc_t new_proc, task_t old_task, task_t 
 
 		task_copy_fields_for_exec(new_task, old_task);
 
-		/* Transfer sandbox filter bits to new_task. */
-		task_transfer_mach_filter_bits(new_task, old_task);
-
 		/*
 		 * Need to transfer pending watch port boosts to the new task
 		 * while still making sure that the old task remains in the
@@ -4799,7 +4826,7 @@ proc_exec_switch_task(proc_t old_proc, proc_t new_proc, task_t old_task, task_t 
 		p_reparentallchildren(old_proc, new_proc);
 
 		/* Switch proc in pid hash */
-		phash_replace_locked(proc_getpid(old_proc), old_proc, new_proc);
+		phash_replace_locked(old_proc, new_proc);
 
 		/* Transfer the shadow flag to old proc */
 		os_atomic_andnot(&new_proc->p_refcount, P_REF_SHADOW, relaxed);
@@ -5127,14 +5154,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 		arcade_prepare(new_task, imgp->ip_new_thread);
 #endif /* CONFIG_ARCADE */
 
-#if CONFIG_MACF
-		proc_apply_jit_and_jumbo_va_policies(p, new_task);
-#endif /* CONFIG_MACF */
-		proc_apply_tpro(imgp, new_task);
-
-#if CONFIG_MAP_RANGES
-		proc_apply_vm_range_policies(p, new_task);
-#endif /* CONFIG_MAP_RANGES */
+		proc_apply_jit_and_vm_policies(imgp, p, new_task);
 
 		if (vm_darkwake_mode == TRUE) {
 			/*
@@ -7785,4 +7805,3 @@ sysctl_libmalloc_experiments SYSCTL_HANDLER_ARGS
 }
 
 EXPERIMENT_FACTOR_PROC(_kern, libmalloc_experiments, CTLTYPE_QUAD | CTLFLAG_RW, 0, 0, &sysctl_libmalloc_experiments, "A", "");
-

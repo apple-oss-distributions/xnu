@@ -120,6 +120,7 @@
 #include <mach/kern_return.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
+#include <kern/smr.h>
 
 #include <miscfs/specfs/specdev.h>
 
@@ -129,6 +130,7 @@
 
 #include <kern/kalloc.h>        /* kalloc()/kfree() */
 #include <kern/clock.h>         /* delay_for_interval() */
+#include <libkern/coreanalytics/coreanalytics.h>
 #include <libkern/OSAtomic.h>   /* OSAddAtomic() */
 #include <os/atomic_private.h>
 #if defined(XNU_TARGET_OS_OSX)
@@ -158,8 +160,7 @@ static LCK_ATTR_DECLARE(trigger_vnode_lck_attr, 0, 0);
 
 extern lck_mtx_t mnt_list_mtx_lock;
 
-ZONE_DEFINE(specinfo_zone, "specinfo",
-    sizeof(struct specinfo), ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(specinfo_zone, struct specinfo, KT_DEFAULT);
 
 ZONE_DEFINE(vnode_zone, "vnodes",
     sizeof(struct vnode), ZC_NOGC | ZC_ZFREE_CLEARMEM);
@@ -251,7 +252,7 @@ __options_decl(freeable_vnode_level_t, uint32_t, {
 #if XNU_TARGET_OS_OSX
 static TUNABLE(freeable_vnode_level_t, bootarg_vn_dealloc_level, "vn_dealloc_level", DEALLOC_VNODE_NONE);
 #else
-static TUNABLE(freeable_vnode_level_t, bootarg_vn_dealloc_level, "vn_dealloc_level", DEALLOC_VNODE_NONE);
+static TUNABLE(freeable_vnode_level_t, bootarg_vn_dealloc_level, "vn_dealloc_level", DEALLOC_VNODE_ONLY_OVERFLOW);
 #endif /* CONFIG_VNDEALLOC */
 
 static freeable_vnode_level_t vn_dealloc_level = DEALLOC_VNODE_NONE;
@@ -289,6 +290,9 @@ static  uint64_t vfs_shutdown_last_completion_time;
 
 #define RAGE_LIMIT_MIN  100
 #define RAGE_TIME_LIMIT 5
+
+VFS_SMR_DECLARE;
+extern uint32_t nc_smr_enabled;
 
 /*
  * ROSV definitions
@@ -384,6 +388,21 @@ static int print_busy_vnodes = 0;                               /* print out bus
 static void async_work_continue(void);
 static void vn_laundry_continue(void);
 static void wakeup_laundry_thread(void);
+static void vnode_smr_free(void *, size_t);
+
+CA_EVENT(freeable_vnodes,
+    CA_INT, numvnodes_min,
+    CA_INT, numvnodes_max,
+    CA_INT, desiredvnodes,
+    CA_INT, numvnodes,
+    CA_INT, freevnodes,
+    CA_INT, deadvnodes,
+    CA_INT, freeablevnodes,
+    CA_INT, busyvnodes,
+    CA_BOOL, threshold_crossed);
+static CA_EVENT_TYPE(freeable_vnodes) freeable_vnodes_telemetry;
+
+static bool freeablevnodes_threshold_crossed = false;
 
 /*
  * Initialize the vnode management data structures.
@@ -421,6 +440,15 @@ vntblinit(void)
 		numvnodes_max = desiredvnodes * 2;
 		reusablevnodes_max = (desiredvnodes_one_percent * 20) - deadvnodes_low;
 		vn_dealloc_level = bootarg_vn_dealloc_level;
+	}
+
+	bzero(&freeable_vnodes_telemetry, sizeof(CA_EVENT_TYPE(freeable_vnodes)));
+	freeable_vnodes_telemetry.numvnodes_min = numvnodes_min;
+	freeable_vnodes_telemetry.numvnodes_max = numvnodes_max;
+	freeable_vnodes_telemetry.desiredvnodes = desiredvnodes;
+
+	if (nc_smr_enabled) {
+		zone_enable_smr(vnode_zone, VFS_SMR(), &vnode_smr_free);
 	}
 
 	/*
@@ -1073,6 +1101,10 @@ vfs_rootmountfailed(mount_t mp)
 	mount_list_unlock();
 
 	vfs_unbusy(mp);
+
+	if (nc_smr_enabled) {
+		vfs_smr_synchronize();
+	}
 
 	mount_lock_destroy(mp);
 
@@ -5322,6 +5354,63 @@ wakeup_laundry_thread()
 	}
 }
 
+/*
+ * This must be called under vnode_list_lock() to prevent race when accessing
+ * various vnode stats.
+ */
+static void
+send_freeable_vnodes_telemetry(void)
+{
+	bool send_event = false;
+
+	/*
+	 * Log an event when the 'numvnodes' is above the freeable vnodes threshold
+	 * or when it falls back within the threshold.
+	 * When the 'numvnodes' is above the threshold, log an event when it has
+	 * been incrementally growing by 25%.
+	 */
+	if ((numvnodes > desiredvnodes) && (freevnodes + deadvnodes) == 0) {
+		long last_numvnodes = freeable_vnodes_telemetry.numvnodes;
+
+		if (numvnodes > (last_numvnodes + ((last_numvnodes * 25) / 100)) ||
+		    numvnodes >= numvnodes_max) {
+			send_event = true;
+		}
+		freeablevnodes_threshold_crossed = true;
+	} else if (freeablevnodes_threshold_crossed &&
+	    (freevnodes + deadvnodes) > busyvnodes) {
+		freeablevnodes_threshold_crossed = false;
+		send_event = true;
+	}
+
+	if (__improbable(send_event)) {
+		ca_event_t event = CA_EVENT_ALLOCATE_FLAGS(freeable_vnodes, Z_NOWAIT);
+
+		if (event) {
+			/*
+			 * Update the stats except the 'numvnodes_max' and 'desiredvnodes'
+			 * as they are immutable after init.
+			 */
+			freeable_vnodes_telemetry.numvnodes_min = numvnodes_min;
+			freeable_vnodes_telemetry.numvnodes = numvnodes;
+			freeable_vnodes_telemetry.freevnodes = freevnodes;
+			freeable_vnodes_telemetry.deadvnodes = deadvnodes;
+			freeable_vnodes_telemetry.freeablevnodes = freeablevnodes;
+			freeable_vnodes_telemetry.busyvnodes = busyvnodes;
+			freeable_vnodes_telemetry.threshold_crossed =
+			    freeablevnodes_threshold_crossed;
+
+			memcpy(event->data, &freeable_vnodes_telemetry,
+			    sizeof(CA_EVENT_TYPE(freeable_vnodes)));
+
+			if (!freeablevnodes_threshold_crossed) {
+				freeable_vnodes_telemetry.numvnodes = 0;
+			}
+			CA_EVENT_SEND(event);
+		}
+	}
+}
+
 static int
 new_vnode(vnode_t *vpp, bool can_free)
 {
@@ -5416,10 +5505,17 @@ retry:
 			allocedvnodes++;
 			freeablevnodes++;
 			vflag = VCANDEALLOC;
+
+			send_freeable_vnodes_telemetry();
 		}
 		vnode_list_unlock();
 
-		vp = zalloc_flags(vnode_zone, Z_WAITOK | Z_ZERO);
+		if (nc_smr_enabled) {
+			vp = zalloc_smr(vnode_zone, Z_WAITOK_ZERO_NOFAIL);
+		} else {
+			vp = zalloc_flags(vnode_zone, Z_WAITOK_ZERO_NOFAIL);
+		}
+
 		VLISTNONE(vp);          /* avoid double queue removal */
 		lck_mtx_init(&vp->v_lock, &vnode_lck_grp, &vnode_lck_attr);
 
@@ -5755,6 +5851,50 @@ vnode_hold(vnode_t vp)
 	}
 }
 
+#define VNODE_HOLD_NO_SMR    (1<<29) /* Disable vnode_hold_smr */
+
+/*
+ * To be used when smr is the only protection (cache_lookup and cache_lookup_path)
+ */
+bool
+vnode_hold_smr(vnode_t vp)
+{
+	int32_t holdcount;
+
+	/*
+	 * For "high traffic" vnodes like rootvnode, the atomic
+	 * cmpexcg loop below can turn into a infinite loop, no need
+	 * to do it for vnodes that won't be dealloc'ed
+	 */
+	if (!(os_atomic_load(&vp->v_flag, relaxed) & VCANDEALLOC)) {
+		vnode_hold(vp);
+		return true;
+	}
+
+	for (;;) {
+		holdcount = os_atomic_load(&vp->v_holdcount, relaxed);
+
+		if (holdcount & VNODE_HOLD_NO_SMR) {
+			return false;
+		}
+
+		if ((os_atomic_cmpxchg(&vp->v_holdcount, holdcount, holdcount + 1, relaxed) != 0)) {
+			return true;
+		}
+	}
+}
+
+/*
+ * free callback from smr enabled zones
+ */
+static void
+vnode_smr_free(void *_vp, __unused size_t _size)
+{
+	vnode_t vp = _vp;
+
+	bzero(vp, sizeof(*vp));
+}
+
 static vnode_t
 vnode_drop_internal(vnode_t vp, bool locked)
 {
@@ -5797,15 +5937,17 @@ vnode_drop_internal(vnode_t vp, bool locked)
 	/*
 	 * the v_listflag field is protected by the vnode_list_lock
 	 */
-	if ((os_atomic_load(&vp->v_holdcount, relaxed) == 0) && VONLIST(vp) &&
-	    (vp->v_listflag & VLIST_DEAD) &&
+	if (VONLIST(vp) && (vp->v_listflag & VLIST_DEAD) &&
 	    (numvnodes > desiredvnodes || (vp->v_listflag & VLIST_NO_REUSE) ||
-	    vn_dealloc_level != DEALLOC_VNODE_ALL || deadvnodes >= deadvnodes_high)) {
+	    vn_dealloc_level != DEALLOC_VNODE_ALL || deadvnodes >= deadvnodes_high) &&
+	    (os_atomic_cmpxchg(&vp->v_holdcount, 0, VNODE_HOLD_NO_SMR, relaxed) != 0)) {
 		VREMDEAD("vnode_list_remove", vp);
 		numvnodes--;
 		freeablevnodes--;
 		deallocedvnodes++;
 		vp->v_listflag = 0;
+
+		send_freeable_vnodes_telemetry();
 		vnode_list_unlock();
 
 #if CONFIG_MACF
@@ -5821,7 +5963,12 @@ vnode_drop_internal(vnode_t vp, bool locked)
 		}
 #endif /* CONFIG_MACF */
 
-		zfree(vnode_zone, vp);
+		if (nc_smr_enabled) {
+			zfree_smr(vnode_zone, vp);
+		} else {
+			zfree(vnode_zone, vp);
+		}
+
 		vp = NULLVP;
 	} else {
 		vnode_list_unlock();
@@ -5854,6 +6001,12 @@ SYSCTL_COMPAT_INT(_vfs_vnstats, OID_AUTO, desired_vnodes,
 SYSCTL_LONG(_vfs_vnstats, OID_AUTO, num_vnodes,
     CTLFLAG_RD | CTLFLAG_LOCKED,
     &numvnodes, "");
+SYSCTL_COMPAT_INT(_vfs_vnstats, OID_AUTO, num_vnodes_min,
+    CTLFLAG_RD | CTLFLAG_LOCKED,
+    &numvnodes_min, 0, "");
+SYSCTL_COMPAT_INT(_vfs_vnstats, OID_AUTO, num_vnodes_max,
+    CTLFLAG_RD | CTLFLAG_LOCKED,
+    &numvnodes_max, 0, "");
 SYSCTL_COMPAT_INT(_vfs_vnstats, OID_AUTO, num_deallocable_vnodes,
     CTLFLAG_RD | CTLFLAG_LOCKED,
     &freeablevnodes, 0, "");
@@ -6801,13 +6954,13 @@ vnode_create_internal(uint32_t flavor, uint32_t size, void *data, vnode_t *vpp,
 
 #if CONFIG_SECLUDED_MEMORY
 	switch (secluded_for_filecache) {
-	case 0:
+	case SECLUDED_FILECACHE_NONE:
 		/*
 		 * secluded_for_filecache == 0:
 		 * + no file contents in secluded pool
 		 */
 		break;
-	case 1:
+	case SECLUDED_FILECACHE_APPS:
 		/*
 		 * secluded_for_filecache == 1:
 		 * + no files from /
@@ -6824,7 +6977,7 @@ vnode_create_internal(uint32_t flavor, uint32_t size, void *data, vnode_t *vpp,
 				TRUE);
 		}
 		break;
-	case 2:
+	case SECLUDED_FILECACHE_RDONLY:
 		/*
 		 * secluded_for_filecache == 2:
 		 * + all read-only files OK, except:

@@ -30,6 +30,7 @@
 #define _KERN_PERCPU_H_
 
 #include <mach/vm_types.h>
+#include <mach/machine/vm_param.h> /* For PAGE_MASK */
 
 __BEGIN_DECLS
 
@@ -294,7 +295,11 @@ percpu_section_end(void)
 static __pure2 inline vm_size_t
 percpu_section_size(void)
 {
-	return percpu_section_end() - percpu_section_start();
+	/**
+	 * TODO: remove page rounding once we have a linker construct that gives us the correct page-padded size
+	 * See rdar://problem/97665399.
+	 */
+	return ((percpu_section_end() - percpu_section_start()) + PAGE_MASK) & ~((vm_size_t)PAGE_MASK);
 }
 
 #pragma GCC visibility pop

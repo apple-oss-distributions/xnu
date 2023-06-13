@@ -135,7 +135,7 @@ extern bool                has_lock_pv;
 	os_atomic_store(__dpft_countp, __dpft_count + 1, compiler_acq_rel);     \
                                                                                 \
 	if (__dpft_count == 0 && sched_preemption_disable_debug_mode) {         \
-	        _prepare_preemption_disable_measurement(__dpft_thread);         \
+	        _prepare_preemption_disable_measurement();                      \
 	}                                                                       \
 })
 #else /* SCHED_HYGIENE_DEBUG */
@@ -146,8 +146,8 @@ extern bool                has_lock_pv;
 })
 #endif /* SCHED_HYGIENE_DEBUG */
 #define lock_enable_preemption()                enable_preemption()
-#define lock_preemption_level_for_thread(t)     ((t)->machine.preemption_count)
-#define lock_preemption_disabled_for_thread(t)  ((t)->machine.preemption_count > 0)
+#define lock_preemption_level_for_thread(t)     get_preemption_level_for_thread(t)
+#define lock_preemption_disabled_for_thread(t)  (get_preemption_level_for_thread(t) != 0)
 #define current_thread()                        current_thread_fast()
 
 #define __hw_spin_wait_load(ptr, load_var, cond_result, cond_expr) ({ \

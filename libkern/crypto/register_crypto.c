@@ -31,6 +31,7 @@
 #include <libkern/crypto/crypto_internal.h>
 #include <libkern/section_keywords.h>
 
+SECURITY_READ_ONLY_LATE(bool) crypto_init = false;
 SECURITY_READ_ONLY_LATE(crypto_functions_t) g_crypto_funcs = NULL;
 
 int
@@ -41,6 +42,7 @@ register_crypto_functions(const crypto_functions_t funcs)
 	}
 
 	g_crypto_funcs = funcs;
+	crypto_init = true;
 
 	return 0;
 }

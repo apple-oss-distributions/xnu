@@ -2909,22 +2909,14 @@ ttyinfo_locked(struct tty *tp)
 		tp->t_rocount = 0;
 		return;
 	}
-	/* first process in process group */
-	/* XXX is there a need for pgrp lock ? */
-	if ((p = tp->t_pgrp->pg_members.lh_first) == NULL) {
-		ttyprintf(tp, "empty foreground process group\n");
-		tp->t_rocount = 0;
-		return;
-	}
 
-	/*
-	 * Pick the most interesting process and copy some of its
-	 * state for printing later.
-	 */
-	pg = proc_pgrp(p, NULL);
+	/* get a reference on the process group before locking it */
+	pg = tty_pgrp_locked(tp);
+
 	pgrp_lock(pg);
 	/* the proc_compare is non blocking fn, no need to use iterator */
-	for (pick = NULL; p != NULL; p = p->p_pglist.le_next) {
+	pick = NULL;
+	LIST_FOREACH(p, &pg->pg_members, p_pglist) {
 		if (proc_compare(pick, p)) {
 			pick = p;
 			pickpid = proc_getpid(p);

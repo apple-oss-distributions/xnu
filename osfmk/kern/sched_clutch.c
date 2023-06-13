@@ -293,6 +293,54 @@ sched_clutch_thr_count_dec(
 	}
 }
 
+static sched_bucket_t
+sched_convert_pri_to_bucket(uint8_t priority)
+{
+	sched_bucket_t bucket = TH_BUCKET_RUN;
+
+	if (priority > BASEPRI_USER_INITIATED) {
+		bucket = TH_BUCKET_SHARE_FG;
+	} else if (priority > BASEPRI_DEFAULT) {
+		bucket = TH_BUCKET_SHARE_IN;
+	} else if (priority > BASEPRI_UTILITY) {
+		bucket = TH_BUCKET_SHARE_DF;
+	} else if (priority > MAXPRI_THROTTLE) {
+		bucket = TH_BUCKET_SHARE_UT;
+	} else {
+		bucket = TH_BUCKET_SHARE_BG;
+	}
+	return bucket;
+}
+
+/*
+ * sched_clutch_thread_bucket_map()
+ *
+ * Map a thread to a scheduling bucket for the clutch/edge scheduler
+ * based on its scheduling mode and the priority attribute passed in.
+ */
+static sched_bucket_t
+sched_clutch_thread_bucket_map(thread_t thread, int pri)
+{
+	switch (thread->sched_mode) {
+	case TH_MODE_FIXED:
+		if (pri >= BASEPRI_FOREGROUND) {
+			return TH_BUCKET_FIXPRI;
+		} else {
+			return sched_convert_pri_to_bucket(pri);
+		}
+
+	case TH_MODE_REALTIME:
+		return TH_BUCKET_FIXPRI;
+
+	case TH_MODE_TIMESHARE:
+		return sched_convert_pri_to_bucket(pri);
+
+	default:
+		panic("unexpected mode: %d", thread->sched_mode);
+		break;
+	}
+}
+
 /*
  * The clutch scheduler attempts to ageout the CPU usage of clutch bucket groups
  * based on the amount of time they have been pending and the load at that
@@ -847,21 +895,23 @@ sched_clutch_root_bucket_empty(
 	bitmap_t *warp_bitmap = (root_bucket->scrb_bound) ? root_clutch->scr_bound_warp_available : root_clutch->scr_unbound_warp_available;
 	bitmap_clear(warp_bitmap, root_bucket->scrb_bucket);
 
-	if (root_bucket->scrb_warped_deadline > timestamp) {
-		/*
-		 * For root buckets that were using the warp, check if the warp
-		 * deadline is in the future. If yes, remove the wall time the
-		 * warp was active and update the warp remaining. This allows
-		 * the root bucket to use the remaining warp the next time it
-		 * becomes runnable.
-		 */
-		root_bucket->scrb_warp_remaining = root_bucket->scrb_warped_deadline - timestamp;
-	} else if (root_bucket->scrb_warped_deadline != SCHED_CLUTCH_ROOT_BUCKET_WARP_UNUSED) {
-		/*
-		 * If the root bucket's warped deadline is in the past, it has used up
-		 * all the warp it was assigned. Empty out its warp remaining.
-		 */
-		root_bucket->scrb_warp_remaining = 0;
+	if (root_bucket->scrb_warped_deadline != SCHED_CLUTCH_ROOT_BUCKET_WARP_UNUSED) {
+		if (root_bucket->scrb_warped_deadline > timestamp) {
+			/*
+			 * For root buckets that were using the warp, check if the warp
+			 * deadline is in the future. If yes, remove the wall time the
+			 * warp was active and update the warp remaining. This allows
+			 * the root bucket to use the remaining warp the next time it
+			 * becomes runnable.
+			 */
+			root_bucket->scrb_warp_remaining = root_bucket->scrb_warped_deadline - timestamp;
+		} else {
+			/*
+			 * If the root bucket's warped deadline is in the past, it has used up
+			 * all the warp it was assigned. Empty out its warp remaining.
+			 */
+			root_bucket->scrb_warp_remaining = 0;
+		}
 	}
 }
 
@@ -1009,18 +1059,6 @@ uint64_t sched_clutch_bucket_group_adjust_threshold = 0;
 /* The ratio to scale the cpu/blocked time per window */
 #define SCHED_CLUTCH_BUCKET_GROUP_ADJUST_RATIO                (10)
 
-/*
- * In order to allow App thread groups some preference over daemon thread
- * groups, the App clutch_buckets get a priority boost. The boost value should
- * be chosen such that badly behaved apps are still penalized over well
- * behaved interactive daemons.
- */
-static uint8_t sched_clutch_bucket_group_pri_boost[SCHED_CLUTCH_TG_PRI_MAX] = {
-	[SCHED_CLUTCH_TG_PRI_LOW]  = 0,
-	[SCHED_CLUTCH_TG_PRI_MED]  = 2,
-	[SCHED_CLUTCH_TG_PRI_HIGH] = 4,
-};
-
 /* Initial value for voluntary blocking time for the clutch_bucket */
 #define SCHED_CLUTCH_BUCKET_GROUP_BLOCKED_TS_INVALID          (uint64_t)(~0)
 
@@ -1141,7 +1179,6 @@ sched_clutch_init_with_thread_group(
 
 	/* Grouping specific fields */
 	clutch->sc_tg = tg;
-	os_atomic_store(&clutch->sc_tg_priority, 0, relaxed);
 }
 
 /*
@@ -1192,7 +1229,11 @@ sched_edge_thread_preferred_cluster(thread_t thread)
 	}
 
 	sched_clutch_t clutch = sched_clutch_for_thread(thread);
-	sched_clutch_bucket_group_t clutch_bucket_group = &clutch->sc_clutch_groups[thread->th_sched_bucket];
+	sched_bucket_t sched_bucket = thread->th_sched_bucket;
+	if (thread->sched_flags & TH_SFLAG_DEPRESSED_MASK) {
+		sched_bucket = sched_clutch_thread_bucket_map(thread, thread->base_pri);
+	}
+	sched_clutch_bucket_group_t clutch_bucket_group = &clutch->sc_clutch_groups[sched_bucket];
 	return sched_edge_clutch_bucket_group_preferred_cluster(clutch_bucket_group);
 }
 
@@ -1353,21 +1394,14 @@ sched_clutch_bucket_hierarchy_remove(
 /*
  * sched_clutch_bucket_base_pri()
  *
- * Calculates the "base" priority of the clutch bucket. The base
- * priority of the clutch bucket is the sum of the max of highest
- * base_pri and highest sched_pri in the clutch bucket and any
- * grouping specific (App/Daemon...) boosts applicable to the
- * clutch_bucket.
+ * Calculates the "base" priority of the clutch bucket, which is equal to the max of the
+ * highest base_pri and the highest sched_pri in the clutch bucket.
  */
 static uint8_t
 sched_clutch_bucket_base_pri(
 	sched_clutch_bucket_t clutch_bucket)
 {
-	uint8_t clutch_boost = 0;
 	assert(priority_queue_empty(&clutch_bucket->scb_thread_runq) == false);
-
-	sched_clutch_t clutch = clutch_bucket->scb_group->scbg_clutch;
-
 	/*
 	 * Since the clutch bucket can contain threads that are members of the group due
 	 * to the sched_pri being promoted or due to their base pri, the base priority of
@@ -1378,10 +1412,7 @@ sched_clutch_bucket_base_pri(
 	if (!priority_queue_empty(&clutch_bucket->scb_clutchpri_prioq)) {
 		max_pri = priority_queue_max_sched_pri(&clutch_bucket->scb_clutchpri_prioq);
 	}
-
-	sched_clutch_tg_priority_t tg_pri = os_atomic_load(&clutch->sc_tg_priority, relaxed);
-	clutch_boost = sched_clutch_bucket_group_pri_boost[tg_pri];
-	return max_pri + clutch_boost;
+	return max_pri;
 }
 
 /*
@@ -3208,25 +3239,6 @@ sched_clutch_run_decr(thread_t thread)
 	return new_count;
 }
 
-static sched_bucket_t
-sched_convert_pri_to_bucket(uint8_t priority)
-{
-	sched_bucket_t bucket = TH_BUCKET_RUN;
-
-	if (priority > BASEPRI_USER_INITIATED) {
-		bucket = TH_BUCKET_SHARE_FG;
-	} else if (priority > BASEPRI_DEFAULT) {
-		bucket = TH_BUCKET_SHARE_IN;
-	} else if (priority > BASEPRI_UTILITY) {
-		bucket = TH_BUCKET_SHARE_DF;
-	} else if (priority > MAXPRI_THROTTLE) {
-		bucket = TH_BUCKET_SHARE_UT;
-	} else {
-		bucket = TH_BUCKET_SHARE_BG;
-	}
-	return bucket;
-}
-
 /*
  * For threads that have changed sched_pri without changing the
  * base_pri for any reason other than decay, use the sched_pri
@@ -3264,31 +3276,9 @@ void
 sched_clutch_update_thread_bucket(thread_t thread)
 {
 	sched_bucket_t old_bucket = thread->th_sched_bucket;
-	sched_bucket_t new_bucket = TH_BUCKET_RUN;
 	assert(thread->runq == PROCESSOR_NULL);
 	int pri = (sched_thread_sched_pri_promoted(thread)) ? thread->sched_pri : thread->base_pri;
-
-	switch (thread->sched_mode) {
-	case TH_MODE_FIXED:
-		if (pri >= BASEPRI_FOREGROUND) {
-			new_bucket = TH_BUCKET_FIXPRI;
-		} else {
-			new_bucket = sched_convert_pri_to_bucket(pri);
-		}
-		break;
-
-	case TH_MODE_REALTIME:
-		new_bucket = TH_BUCKET_FIXPRI;
-		break;
-
-	case TH_MODE_TIMESHARE:
-		new_bucket = sched_convert_pri_to_bucket(pri);
-		break;
-
-	default:
-		panic("unexpected mode: %d", thread->sched_mode);
-		break;
-	}
+	sched_bucket_t new_bucket = sched_clutch_thread_bucket_map(thread, pri);
 
 	if (old_bucket == new_bucket) {
 		return;
@@ -4233,6 +4223,14 @@ sched_edge_migration_check(uint32_t cluster_id, processor_set_t preferred_pset,
 	return false;
 }
 
+/*
+ * sched_edge_iterate_clusters_ordered()
+ *
+ * Routine to iterate clusters in die local order. For multi-die machines,
+ * the routine ensures that the candidate clusters on the same die as the
+ * passed in pset are returned before the remote die clusters. This should
+ * be used in all places where cluster selection in die order matters.
+ */
 
 static int
 sched_edge_iterate_clusters_ordered(processor_set_t starting_pset, uint64_t candidate_map, int previous_cluster)
@@ -4875,7 +4873,7 @@ sched_edge_cpu_init_completed(void)
 				bitmap_clear(src_pset->native_psets, dst_cluster_id);
 				sched_edge_config_set(src_cluster_id, dst_cluster_id, (sched_clutch_edge){.sce_migration_weight = 0, .sce_migration_allowed = 0, .sce_steal_allowed = 0});
 			}
-			bool clusters_local = true;
+			bool clusters_local = (ml_get_die_id(src_cluster_id) == ml_get_die_id(dst_cluster_id));
 			if (clusters_local) {
 				bitmap_set(src_pset->local_psets, dst_cluster_id);
 				bitmap_clear(src_pset->remote_psets, dst_cluster_id);

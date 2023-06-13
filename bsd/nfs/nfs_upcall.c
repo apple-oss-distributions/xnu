@@ -58,7 +58,9 @@ struct nfsrv_uc_arg {
 	uint32_t nua_flags;
 	uint32_t nua_qi;
 };
+
 #define NFS_UC_QUEUED   0x0001
+#define NFS_UC_RECEIVE  0x0002
 
 #define NFS_UC_HASH_SZ 7
 #define NFS_UC_HASH(x) ((((uint32_t)(uintptr_t)(x)) >> 3) % nfsrv_uc_thread_count)
@@ -122,6 +124,7 @@ nfsrv_uc_thread(void *arg, wait_result_t wr __unused)
 		TAILQ_REMOVE(myqueue->ucq_queue, ep, nua_svcq);
 
 		ep->nua_flags &= ~NFS_UC_QUEUED;
+		ep->nua_flags |= NFS_UC_RECEIVE;
 
 		lck_mtx_unlock(&myqueue->ucq_lock);
 
@@ -131,6 +134,11 @@ nfsrv_uc_thread(void *arg, wait_result_t wr __unused)
 
 		DPRINT("calling nfsrv_rcv for %p\n", (void *)ep->nua_slp);
 		nfsrv_rcv(ep->nua_so, (void *)ep->nua_slp, ep->nua_waitflag);
+
+		lck_mtx_lock(&myqueue->ucq_lock);
+		ep->nua_flags &= ~NFS_UC_RECEIVE;
+		wakeup(&ep->nua_flags);
+		lck_mtx_unlock(&myqueue->ucq_lock);
 	}
 
 	lck_mtx_lock(&nfsrv_uc_shutdown_lock);
@@ -154,13 +162,16 @@ nfsrv_uc_dequeue(struct nfsrv_sock *slp)
 	/*
 	 * We assume that the socket up-calls have been stop and the socket
 	 * is shutting down so no need for acquiring the lock to check that
-	 * the flag is cleared.
+	 * the flags are cleared.
 	 */
-	if (ap == NULL || (ap->nua_flags & NFS_UC_QUEUED) == 0) {
+	if (ap == NULL || (ap->nua_flags & (NFS_UC_QUEUED | NFS_UC_RECEIVE)) == 0) {
 		return;
 	}
 	/* If we're queued we might race with nfsrv_uc_thread */
 	lck_mtx_lock(&myqueue->ucq_lock);
+	while (ap->nua_flags & NFS_UC_RECEIVE) {
+		msleep(&ap->nua_flags, &myqueue->ucq_lock, PSOCK, "nfsrv_uc_dequeue_wait", NULL);
+	}
 	if (ap->nua_flags & NFS_UC_QUEUED) {
 		printf("nfsrv_uc_dequeue remove %p\n", ap);
 		TAILQ_REMOVE(myqueue->ucq_queue, ap, nua_svcq);

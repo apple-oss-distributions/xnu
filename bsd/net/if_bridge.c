@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -404,6 +404,8 @@ bif_has_checksum_offload(struct bridge_iflist * bif)
 #define BIFF_HF_IPSRC           0x40    /* host filter source IP is set */
 #define BIFF_INPUT_BROADCAST    0x80    /* send broadcast packets in */
 #define BIFF_IN_MEMBER_LIST     0x100   /* added to the member list */
+#define BIFF_WIFI_INFRA         0x200   /* interface is Wi-Fi infra */
+#define BIFF_ALL_MULTI          0x400   /* allmulti set */
 #if SKYWALK
 #define BIFF_FLOWSWITCH_ATTACHED 0x1000   /* we attached the flowswitch */
 #define BIFF_NETAGENT_REMOVED    0x2000   /* we removed the netagent */
@@ -590,10 +592,8 @@ static LCK_MTX_DECLARE_ATTR(bridge_list_mtx, &bridge_lock_grp, &bridge_lock_attr
 
 static int      bridge_rtable_prune_period = BRIDGE_RTABLE_PRUNE_PERIOD;
 
-static ZONE_DEFINE(bridge_rtnode_pool, "bridge_rtnode",
-    sizeof(struct bridge_rtnode), ZC_NONE);
-static ZONE_DEFINE(bridge_mne_pool, "bridge_mac_nat_entry",
-    sizeof(struct mac_nat_entry), ZC_NONE);
+static KALLOC_TYPE_DEFINE(bridge_rtnode_pool, struct bridge_rtnode, NET_KT_DEFAULT);
+static KALLOC_TYPE_DEFINE(bridge_mne_pool, struct mac_nat_entry, NET_KT_DEFAULT);
 
 static int      bridge_clone_create(struct if_clone *, uint32_t, void *);
 static int      bridge_clone_destroy(struct ifnet *);
@@ -1086,7 +1086,7 @@ static LIST_HEAD(, bridge_softc) bridge_list =
 
 static struct if_clone bridge_cloner =
     IF_CLONE_INITIALIZER(BRIDGENAME, bridge_clone_create, bridge_clone_destroy,
-    0, BRIDGES_MAX, BRIDGE_ZONE_MAX_ELEM, sizeof(struct bridge_softc));
+    0, BRIDGES_MAX);
 
 static int if_bridge_txstart = 0;
 SYSCTL_INT(_net_link_bridge, OID_AUTO, txstart, CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -1504,12 +1504,7 @@ bridge_clone_create(struct if_clone *ifc, uint32_t unit, void *params)
 	uint8_t eth_hostid[ETHER_ADDR_LEN];
 	int fb, retry, has_hostid;
 
-	sc =  if_clone_softc_allocate(&bridge_cloner);
-	if (sc == NULL) {
-		error = ENOMEM;
-		goto done;
-	}
-
+	sc = kalloc_type(struct bridge_softc, Z_WAITOK_ZERO_NOFAIL);
 	lck_mtx_init(&sc->sc_mtx, &bridge_lock_grp, &bridge_lock_attr);
 	sc->sc_brtmax = BRIDGE_RTABLE_MAX;
 	sc->sc_mne_max = BRIDGE_MAC_NAT_ENTRY_MAX;
@@ -2304,8 +2299,10 @@ bridge_iff_event(void *cookie, ifnet_t ifp, protocol_family_t protocol,
 			break;
 		}
 		case KEV_DL_SIFFLAGS: {
-			if ((bif->bif_flags & BIFF_PROMISC) == 0 &&
-			    (ifp->if_flags & IFF_UP)) {
+			if ((ifp->if_flags & IFF_UP) == 0) {
+				break;
+			}
+			if ((bif->bif_flags & BIFF_PROMISC) == 0) {
 				errno_t error;
 
 				error = ifnet_set_promiscuous(ifp, 1);
@@ -2316,6 +2313,23 @@ bridge_iff_event(void *cookie, ifnet_t ifp, protocol_family_t protocol,
 					    error);
 				} else {
 					bif->bif_flags |= BIFF_PROMISC;
+				}
+			}
+			if ((bif->bif_flags & BIFF_WIFI_INFRA) != 0 &&
+			    (bif->bif_flags & BIFF_ALL_MULTI) == 0) {
+				errno_t error;
+
+				error = if_allmulti(ifp, 1);
+				if (error != 0) {
+					BRIDGE_LOG(LOG_NOTICE, 0,
+					    "if_allmulti (%s)"
+					    " failed %d", ifp->if_xname,
+					    error);
+				} else {
+					bif->bif_flags |= BIFF_ALL_MULTI;
+#ifdef XNU_PLATFORM_AppleTVOS
+					ip6_forwarding = 1;
+#endif /* XNU_PLATFORM_AppleTVOS */
 				}
 			}
 			break;
@@ -2516,6 +2530,10 @@ bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif)
 		if ((bif_flags & BIFF_PROMISC) != 0) {
 			(void) ifnet_set_promiscuous(ifs, 0);
 		}
+		/* disable all multi */
+		if ((bif_flags & BIFF_ALL_MULTI) != 0) {
+			(void)if_allmulti(ifs, 0);
+		}
 #if HAS_IF_CAP
 		/* re-enable any interface capabilities */
 		bridge_set_ifcap(sc, bif, bif->bif_savedcaps);
@@ -2580,8 +2598,8 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 	uint8_t eaddr[ETHER_ADDR_LEN];
 	struct iff_filter iff;
 	u_int32_t event_code = 0;
-	boolean_t mac_nat = FALSE;
 	boolean_t input_broadcast;
+	boolean_t wifi_infra = FALSE;
 
 	ifs = ifunit(req->ifbr_ifsname);
 	if (ifs == NULL) {
@@ -2616,7 +2634,7 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 		    ifs->if_subfamily == IFNET_SUBFAMILY_WIFI &&
 		    (ifs->if_eflags & IFEF_IPV4_ROUTER) == 0) {
 			/* XXX is there a better way to identify Wi-Fi STA? */
-			mac_nat = TRUE;
+			wifi_infra = TRUE;
 		}
 		break;
 	case IFT_L2VLAN:
@@ -2638,7 +2656,7 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 	}
 
 	/* there's already an interface that's doing MAC NAT */
-	if (mac_nat && sc->sc_mac_nat_bif != NULL) {
+	if (wifi_infra && sc->sc_mac_nat_bif != NULL) {
 		return EBUSY;
 	}
 
@@ -2656,7 +2674,7 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 	bif->bif_savedcaps = ifs->if_capenable;
 #endif /* HAS_IF_CAP */
 	bif->bif_sc = sc;
-	if (mac_nat) {
+	if (wifi_infra) {
 		(void)bridge_mac_nat_enable(sc, bif);
 	}
 
@@ -2718,7 +2736,23 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 		BRIDGE_LOCK(sc);
 		goto out;
 	}
+	if (wifi_infra) {
+		int this_error;
 
+		/* Wi-Fi doesn't really support promiscuous, set allmulti */
+		bif->bif_flags |= BIFF_WIFI_INFRA;
+		this_error = if_allmulti(ifs, 1);
+		if (this_error == 0) {
+			bif->bif_flags |= BIFF_ALL_MULTI;
+#ifdef XNU_PLATFORM_AppleTVOS
+			ip6_forwarding = 1;
+#endif /* XNU_PLATFORM_AppleTVOS */
+		} else {
+			BRIDGE_LOG(LOG_NOTICE, 0,
+			    "if_allmulti(%s) failed %d, ignoring",
+			    ifs->if_xname, this_error);
+		}
+	}
 #if SKYWALK
 	/* ensure that the flowswitch is present for native interface */
 	if (SKYWALK_NATIVE(ifs)) {
@@ -7242,7 +7276,7 @@ bridge_detach(ifnet_t ifp)
 	ifnet_release(ifp);
 
 	lck_mtx_destroy(&sc->sc_mtx, &bridge_lock_grp);
-	if_clone_softc_deallocate(&bridge_cloner, sc);
+	kfree_type(struct bridge_softc, sc);
 }
 
 /*
@@ -8242,11 +8276,11 @@ done:
 #define ETHER_IPV6_HEADER_LEN   (sizeof(struct ether_header) +  \
 	                         + sizeof(struct ip6_hdr))
 static struct ether_header *
-get_ether_ipv6_header(mbuf_t *data, boolean_t is_output)
+get_ether_ipv6_header(mbuf_t *data, size_t plen, boolean_t is_output)
 {
 	struct ether_header     *eh = NULL;
 	int             flags = is_output ? BR_DBGF_OUTPUT : BR_DBGF_INPUT;
-	size_t          minlen = ETHER_IPV6_HEADER_LEN;
+	size_t          minlen = ETHER_IPV6_HEADER_LEN + plen;
 
 	if (mbuf_pkthdr_len(*data) < minlen) {
 		BRIDGE_LOG(LOG_DEBUG, flags,
@@ -8274,26 +8308,58 @@ done:
 #define ETHER_ND_LLADDR_LEN     (ETHER_ADDR_LEN + sizeof(struct nd_opt_hdr))
 
 static void
-bridge_mac_nat_icmpv6_output(struct bridge_softc *sc, struct bridge_iflist *bif,
-    mbuf_t *data, struct ether_header *eh,
-    struct ip6_hdr *ip6h, struct in6_addr *saddrp, struct mac_nat_record *mnr)
+bridge_mac_nat_icmpv6_output(struct bridge_softc *sc,
+    struct bridge_iflist *bif,
+    mbuf_t *data, struct ip6_hdr *ip6h,
+    struct in6_addr *saddrp,
+    struct mac_nat_record *mnr)
 {
+	struct ether_header *eh;
 	struct icmp6_hdr *icmp6;
-	unsigned int    icmp6len;
+	uint8_t         icmp6_type;
+	uint32_t        icmp6len;
 	int             lladdrlen = 0;
 	char            *lladdr = NULL;
-	mbuf_t          m = *data;
 	unsigned int    off = sizeof(*ip6h);
 
-	icmp6len = m->m_pkthdr.len - sizeof(*eh) - off;
+	icmp6len = (u_int32_t)ntohs(ip6h->ip6_plen);
 	if (icmp6len < sizeof(*icmp6)) {
 		BRIDGE_LOG(LOG_NOTICE, BR_DBGF_MAC_NAT,
-		    "short packet %d < %lu",
+		    "short IPv6 payload length %d < %lu",
 		    icmp6len, sizeof(*icmp6));
 		return;
 	}
+
+	/* pullup IP6 header + ICMPv6 header */
+	eh = get_ether_ipv6_header(data, sizeof(*icmp6), TRUE);
+	if (eh == NULL) {
+		BRIDGE_LOG(LOG_NOTICE, BR_DBGF_MAC_NAT,
+		    "failed to pullup icmp6 header");
+		return;
+	}
+	ip6h = (struct ip6_hdr *)(void *)(eh + 1);
 	icmp6 = (struct icmp6_hdr *)((caddr_t)ip6h + off);
-	switch (icmp6->icmp6_type) {
+	icmp6_type = icmp6->icmp6_type;
+	switch (icmp6_type) {
+	case ND_NEIGHBOR_SOLICIT:
+	case ND_NEIGHBOR_ADVERT:
+	case ND_ROUTER_ADVERT:
+	case ND_ROUTER_SOLICIT:
+		break;
+	default:
+		return;
+	}
+
+	/* pullup IP6 header + payload */
+	eh = get_ether_ipv6_header(data, icmp6len, TRUE);
+	if (eh == NULL) {
+		BRIDGE_LOG(LOG_NOTICE, BR_DBGF_MAC_NAT,
+		    "failed to pullup icmp6 + payload");
+		return;
+	}
+	ip6h = (struct ip6_hdr *)(void *)(eh + 1);
+	icmp6 = (struct icmp6_hdr *)((caddr_t)ip6h + off);
+	switch (icmp6_type) {
 	case ND_NEIGHBOR_SOLICIT: {
 		struct nd_neighbor_solicit *nd_ns;
 		union nd_opts ndopts;
@@ -8339,14 +8405,9 @@ bridge_mac_nat_icmpv6_output(struct bridge_softc *sc, struct bridge_iflist *bif,
 				    lladdrlen, ETHER_ND_LLADDR_LEN);
 				return;
 			}
-			mnr->mnr_ip6_lladdr_offset = (uint16_t)((uintptr_t)lladdr -
-			    (uintptr_t)eh);
-			mnr->mnr_ip6_icmp6_len = icmp6len;
-			mnr->mnr_ip6_icmp6_type = icmp6->icmp6_type;
-			mnr->mnr_ip6_header_len = off;
 		}
 		if (is_dad_probe) {
-			/* node is trying use taddr, create an mne using taddr */
+			/* node is trying use taddr, create an mne for taddr */
 			*saddrp = taddr;
 		}
 		break;
@@ -8392,76 +8453,82 @@ bridge_mac_nat_icmpv6_output(struct bridge_softc *sc, struct bridge_iflist *bif,
 			    lladdrlen, ETHER_ND_LLADDR_LEN);
 			return;
 		}
-		mnr->mnr_ip6_lladdr_offset = (uint16_t)((uintptr_t)lladdr - (uintptr_t)eh);
-		mnr->mnr_ip6_icmp6_len = icmp6len;
-		mnr->mnr_ip6_header_len = off;
-		mnr->mnr_ip6_icmp6_type = icmp6->icmp6_type;
 		break;
 	}
+	case ND_ROUTER_ADVERT:
 	case ND_ROUTER_SOLICIT: {
-		struct nd_router_solicit *nd_rs;
 		union nd_opts ndopts;
+		uint32_t type_length;
+		const char *description;
 
-		if (icmp6len < sizeof(*nd_rs)) {
+		if (icmp6_type == ND_ROUTER_ADVERT) {
+			type_length = sizeof(struct nd_router_advert);
+			description = "RA";
+		} else {
+			type_length = sizeof(struct nd_router_solicit);
+			description = "RS";
+		}
+		if (icmp6len < type_length) {
 			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_MAC_NAT,
-			    "short nd_rs %d < %lu",
-			    icmp6len, sizeof(*nd_rs));
+			    "short ND6 %s %d < %d",
+			    description, icmp6len, type_length);
 			return;
 		}
-		nd_rs = (struct nd_router_solicit *)(void *)icmp6;
-
 		/* parse options */
-		nd6_option_init(nd_rs + 1, icmp6len - sizeof(*nd_rs), &ndopts);
+		nd6_option_init(((uint8_t *)icmp6) + type_length,
+		    icmp6len - type_length, &ndopts);
 		if (nd6_options(&ndopts) < 0) {
 			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_MAC_NAT,
-			    "invalid ND6 RS option");
+			    "invalid ND6 %s option", description);
 			return;
 		}
 		if (ndopts.nd_opts_src_lladdr != NULL) {
 			lladdr = (char *)(ndopts.nd_opts_src_lladdr + 1);
 			lladdrlen = ndopts.nd_opts_src_lladdr->nd_opt_len << 3;
-		}
-		if (lladdr != NULL) {
 			if (lladdrlen != ETHER_ND_LLADDR_LEN) {
 				BRIDGE_LOG(LOG_DEBUG, BR_DBGF_MAC_NAT,
 				    "source lladdrlen %d != %lu",
 				    lladdrlen, ETHER_ND_LLADDR_LEN);
 				return;
 			}
-			mnr->mnr_ip6_lladdr_offset = (uint16_t)((uintptr_t)lladdr -
-			    (uintptr_t)eh);
-			mnr->mnr_ip6_icmp6_len = icmp6len;
-			mnr->mnr_ip6_icmp6_type = icmp6->icmp6_type;
-			mnr->mnr_ip6_header_len = off;
 		}
 		break;
 	}
 	default:
 		break;
 	}
-	if (mnr->mnr_ip6_lladdr_offset != 0 &&
-	    BRIDGE_DBGF_ENABLED(BR_DBGF_MAC_NAT)) {
-		const char *str;
+	if (lladdr != NULL) {
+		mnr->mnr_ip6_lladdr_offset = (uint16_t)
+		    ((uintptr_t)lladdr - (uintptr_t)eh);
+		mnr->mnr_ip6_icmp6_len = icmp6len;
+		mnr->mnr_ip6_icmp6_type = icmp6_type;
+		mnr->mnr_ip6_header_len = off;
+		if (BRIDGE_DBGF_ENABLED(BR_DBGF_MAC_NAT)) {
+			const char *str;
 
-		switch (mnr->mnr_ip6_icmp6_type) {
-		case ND_ROUTER_SOLICIT:
-			str = "ROUTER SOLICIT";
-			break;
-		case ND_NEIGHBOR_ADVERT:
-			str = "NEIGHBOR ADVERT";
-			break;
-		case ND_NEIGHBOR_SOLICIT:
-			str = "NEIGHBOR SOLICIT";
-			break;
-		default:
-			str = "";
-			break;
+			switch (mnr->mnr_ip6_icmp6_type) {
+			case ND_ROUTER_ADVERT:
+				str = "ROUTER ADVERT";
+				break;
+			case ND_ROUTER_SOLICIT:
+				str = "ROUTER SOLICIT";
+				break;
+			case ND_NEIGHBOR_ADVERT:
+				str = "NEIGHBOR ADVERT";
+				break;
+			case ND_NEIGHBOR_SOLICIT:
+				str = "NEIGHBOR SOLICIT";
+				break;
+			default:
+				str = "";
+				break;
+			}
+			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_MAC_NAT,
+			    "%s %s %s ip6len %d icmp6len %d lladdr offset %d",
+			    sc->sc_if_xname, bif->bif_ifp->if_xname, str,
+			    mnr->mnr_ip6_header_len,
+			    mnr->mnr_ip6_icmp6_len, mnr->mnr_ip6_lladdr_offset);
 		}
-		BRIDGE_LOG(LOG_DEBUG, BR_DBGF_MAC_NAT,
-		    "%s %s %s ip6len %d icmp6len %d lladdr offset %d",
-		    sc->sc_if_xname, bif->bif_ifp->if_xname, str,
-		    mnr->mnr_ip6_header_len,
-		    mnr->mnr_ip6_icmp6_len, mnr->mnr_ip6_lladdr_offset);
 	}
 }
 
@@ -8473,7 +8540,7 @@ bridge_mac_nat_ipv6_input(struct bridge_softc *sc, mbuf_t *data)
 	struct ip6_hdr          *ip6h;
 	struct mac_nat_entry    *mne = NULL;
 
-	eh = get_ether_ipv6_header(data, FALSE);
+	eh = get_ether_ipv6_header(data, 0, FALSE);
 	if (eh == NULL) {
 		goto done;
 	}
@@ -8494,27 +8561,28 @@ bridge_mac_nat_ipv6_output(struct bridge_softc *sc,
     struct bridge_iflist *bif, mbuf_t *data, struct mac_nat_record *mnr)
 {
 	struct ether_header     *eh;
+	ether_addr_t            ether_shost;
 	struct ip6_hdr          *ip6h;
 	struct in6_addr         saddr;
 	boolean_t               translate;
 
 	translate = (bif == sc->sc_mac_nat_bif) ? FALSE : TRUE;
-	eh = get_ether_ipv6_header(data, TRUE);
+	eh = get_ether_ipv6_header(data, 0, TRUE);
 	if (eh == NULL) {
 		translate = FALSE;
 		goto done;
 	}
+	bcopy(eh->ether_shost, &ether_shost, sizeof(ether_shost));
 	ip6h = (struct ip6_hdr *)(void *)(eh + 1);
 	bcopy(&ip6h->ip6_src, &saddr, sizeof(saddr));
 	if (mnr != NULL && ip6h->ip6_nxt == IPPROTO_ICMPV6) {
-		bridge_mac_nat_icmpv6_output(sc, bif, data,
-		    eh, ip6h, &saddr, mnr);
+		bridge_mac_nat_icmpv6_output(sc, bif, data, ip6h, &saddr, mnr);
 	}
 	if (IN6_IS_ADDR_UNSPECIFIED(&saddr)) {
 		goto done;
 	}
 	(void)bridge_update_mac_nat_entry(sc, bif, AF_INET6, &saddr,
-	    eh->ether_shost);
+	    ether_shost.octet);
 
 done:
 	return translate;
@@ -8713,6 +8781,7 @@ bridge_mac_nat_ipv6_translate(mbuf_t *data, struct mac_nat_record *mnr,
 		return;
 	}
 	switch (mnr->mnr_ip6_icmp6_type) {
+	case ND_ROUTER_ADVERT:
 	case ND_ROUTER_SOLICIT:
 	case ND_NEIGHBOR_SOLICIT:
 	case ND_NEIGHBOR_ADVERT:

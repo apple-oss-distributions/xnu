@@ -120,8 +120,8 @@ commpage_allocate(
 	size_t          area_used,              // _COMM_PAGE32_AREA_USED or _COMM_PAGE64_AREA_USED
 	vm_prot_t       uperm)
 {
-	vm_offset_t     kernel_addr = 0;        // address of commpage in kernel map
-	vm_offset_t     zero = 0;
+	mach_vm_offset_t kernel_addr = 0;        // address of commpage in kernel map
+	mach_vm_offset_t zero = 0;
 	vm_size_t       size = area_used;       // size actually populated
 	vm_map_entry_t  entry;
 	ipc_port_t      handle;
@@ -132,13 +132,11 @@ commpage_allocate(
 		panic("commpage submap is null");
 	}
 
-	kr = vm_map_kernel(kernel_map,
+	kr = mach_vm_map_kernel(kernel_map,
 	    &kernel_addr,
 	    area_used,
 	    0,
-	    VM_FLAGS_ANYWHERE,
-	    VM_MAP_KERNEL_FLAGS_NONE,
-	    VM_KERN_MEMORY_OSFMK,
+	    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vm_tag = VM_KERN_MEMORY_OSFMK),
 	    NULL,
 	    0,
 	    FALSE,
@@ -179,7 +177,7 @@ commpage_allocate(
 		panic("cannot make entry for commpage %d", kr);
 	}
 
-	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+	vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 	if (uperm == (VM_PROT_READ | VM_PROT_EXECUTE)) {
 		/*
 		 * Mark this unsigned executable mapping as "jit" to avoid
@@ -189,14 +187,12 @@ commpage_allocate(
 		vmk_flags.vmkf_map_jit = TRUE;
 	}
 
-	kr = vm_map_64_kernel(
+	kr = mach_vm_map_kernel(
 		submap,                 // target map (shared submap)
 		&zero,                  // address (map into 1st page in submap)
 		area_used,              // size
 		0,                      // mask
-		VM_FLAGS_FIXED,         // flags (it must be 1st page in submap)
 		vmk_flags,
-		VM_KERN_MEMORY_NONE,
 		handle,                 // port is the memory entry we just made
 		0,                      // offset (map 1st page in memory entry)
 		FALSE,                  // copy

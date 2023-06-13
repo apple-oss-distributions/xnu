@@ -244,6 +244,10 @@ extern void ledger_ast(thread_t thread);
 extern void ledger_reference(ledger_t ledger);
 extern void ledger_dereference(ledger_t ledger);
 
+extern ledger_amount_t ledger_get_remaining(ledger_t ledger, int entry);
+extern void ledger_restart(ledger_t ledger, int entry, uint64_t now);
+extern uint64_t ledger_get_interval_remaining(ledger_t ledger, int entry, uint64_t now);
+
 /* Support for ledger() syscall */
 #ifdef LEDGER_DEBUG
 extern int ledger_limit(task_t task, struct ledger_limit_args *args);

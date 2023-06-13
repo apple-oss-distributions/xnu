@@ -133,6 +133,7 @@ extern int vsnprintf(char *, size_t, const char *, va_list);
 #include <sys/csr.h>
 #endif
 
+
 extern int IODTGetLoaderInfo( const char *key, void **infoAddr, int *infosize );
 extern void IODTFreeLoaderInfo( const char *key, void *infoAddr, int infoSize );
 
@@ -506,8 +507,6 @@ phys_carveout_init(void)
 		return;
 	}
 
-	kern_return_t kr;
-
 	struct carveout {
 		const char *name;
 		vm_offset_t *va;
@@ -515,13 +514,15 @@ phys_carveout_init(void)
 		uintptr_t *pa;
 		size_t *allocated_size;
 		uint64_t present;
-	} carveouts[] =
-	{{"phys_carveout",
-	  &phys_carveout,
-	  phys_carveout_mb,
-	  &phys_carveout_pa,
-	  &phys_carveout_size,
-	  (phys_carveout_mb != 0)},
+	} carveouts[] = {
+		{
+			"phys_carveout",
+			&phys_carveout,
+			phys_carveout_mb,
+			&phys_carveout_pa,
+			&phys_carveout_size,
+			phys_carveout_mb != 0,
+		}
 	};
 
 	for (int i = 0; i < (sizeof(carveouts) / sizeof(struct carveout)); i++) {
@@ -533,14 +534,10 @@ phys_carveout_init(void)
 				return;
 			}
 
-			kr = kmem_alloc_contig(kernel_map, carveouts[i].va,
+			kmem_alloc_contig(kernel_map, carveouts[i].va,
 			    temp_carveout_size, PAGE_MASK, 0, 0,
-			    KMA_PERMANENT | KMA_NOPAGEWAIT | KMA_DATA, VM_KERN_MEMORY_DIAG);
-			if (kr != KERN_SUCCESS) {
-				panic("failed to allocate %uMB for %s_mb: %u",
-				    carveouts[i].requested_size, carveouts[i].name, (unsigned int)kr);
-				return;
-			}
+			    KMA_NOFAIL | KMA_PERMANENT | KMA_NOPAGEWAIT | KMA_DATA,
+			    VM_KERN_MEMORY_DIAG);
 
 			*carveouts[i].pa = kvtophys(*carveouts[i].va);
 			*carveouts[i].allocated_size = temp_carveout_size;
@@ -1802,9 +1799,11 @@ panic_display_kernel_uuid(void)
 	}
 }
 
+
 void
 panic_display_kernel_aslr(void)
 {
+
 	kc_format_t kc_format;
 
 	PE_get_primary_kc_format(&kc_format);

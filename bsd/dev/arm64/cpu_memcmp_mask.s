@@ -193,20 +193,20 @@ _os_memcmp_mask_80B:
 
 	ld1.16b  {v0, v1, v2, v3}, [src1], #64
 	ld1.16b  {v4}, [src1]
-	ld1.16b  {v5, v6, v7, v8}, [src2], #64
-	ld1.16b  {v9}, [src2]
-	ld1.16b  {v16, v17, v18, v19}, [mask], #64
-	ld1.16b  {v20}, [mask]
-	eor.16b  v0, v0, v5
-	eor.16b  v1, v1, v6
-	eor.16b  v2, v2, v7
-	eor.16b  v3, v3, v8
-	eor.16b  v4, v4, v9
-	and.16b  v0, v0, v16
-	and.16b  v1, v1, v17
-	and.16b  v2, v2, v18
-	and.16b  v3, v3, v19
-	and.16b  v4, v4, v20
+	ld1.16b  {v16, v17, v18, v19}, [src2], #64
+	ld1.16b  {v20}, [src2]
+	ld1.16b  {v21, v22, v23, v24}, [mask], #64
+	ld1.16b  {v25}, [mask]
+	eor.16b  v0, v0, v16
+	eor.16b  v1, v1, v17
+	eor.16b  v2, v2, v18
+	eor.16b  v3, v3, v19
+	eor.16b  v4, v4, v20
+	and.16b  v0, v0, v21
+	and.16b  v1, v1, v22
+	and.16b  v2, v2, v23
+	and.16b  v3, v3, v24
+	and.16b  v4, v4, v25
 	orr.16b  v0, v0, v1
 	orr.16b  v2, v2, v3
 	orr.16b  v0, v0, v2

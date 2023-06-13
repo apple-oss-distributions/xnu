@@ -221,8 +221,7 @@ static struct kern_nexus_domain_provider nx_kpipe_prov_s = {
 	},
 };
 
-static ZONE_DEFINE(na_kpipe_zone, SKMEM_ZONE_PREFIX ".na.kpipe",
-    sizeof(struct nexus_kpipe_adapter), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(na_kpipe_zone, struct nexus_kpipe_adapter);
 
 static void
 nx_kpipe_dom_init(struct nxdom *nxdom)
@@ -680,7 +679,7 @@ nx_kpipe_na_krings_create(struct nexus_adapter *na, struct kern_channel *ch)
 	 * are handled by IOSkywalkFamily, and thus we allocate
 	 * the context area for it to store its object references.
 	 */
-	return na_rings_mem_setup(na, 0, TRUE, ch);
+	return na_rings_mem_setup(na, TRUE, ch);
 }
 
 static void

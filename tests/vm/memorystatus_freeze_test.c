@@ -1575,8 +1575,9 @@ T_DECL(memorystatus_freeze_budget_multiplier, "memorystatus_budget_multiplier mu
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_NE("kern.memorystatus_freeze_daily_mb_max", UINT32_MAX),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
-	/* Disable freeze so that the budget doesn't change out from underneath us. */
+    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+    T_META_ENABLED(false) /* rdar://87165483 */) {
+	/* Disable freezer so that the budget doesn't change out from underneath us. */
 	int freeze_enabled = 0;
 	size_t length = sizeof(freeze_enabled);
 	uint64_t freeze_daily_pages_max;

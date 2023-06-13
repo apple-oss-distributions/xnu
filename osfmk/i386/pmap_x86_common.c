@@ -2647,6 +2647,20 @@ pmap_get_jit_entitled(__unused pmap_t pmap)
 	return false;
 }
 
+void
+pmap_set_tpro(__unused pmap_t pmap)
+{
+	/* The x86 pmap layer does not care if a map is using TPRO */
+	return;
+}
+
+bool
+pmap_get_tpro(__unused pmap_t pmap)
+{
+	/* The x86 pmap layer does not care if a map is using TPRO */
+	return false;
+}
+
 bool
 pmap_has_prot_policy(__unused pmap_t pmap, __unused bool translated_allow_execute, __unused vm_prot_t prot)
 {

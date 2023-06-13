@@ -40,14 +40,14 @@ char iBoot_Stage_2_version[FW_VERS_LEN];
 #endif /* defined(TARGET_OS_OSX) && defined(__arm64__) */
 
 /*
- * This variable is only modified once, when the BSP starts executing. We put it in __TEXT
+ * This variable is only modified once, when the BSP starts executing. We put it in __DATA_CONST
  * as page protections on kernel text early in startup are read-write. The kernel is
  * locked down later in start-up, said mappings become RO and thus this
  * variable becomes immutable.
  *
  * See osfmk/arm/arm_vm_init.c for more information.
  */
-SECURITY_READ_ONLY_SPECIAL_SECTION(volatile uint32_t, "__TEXT,__const") debug_enabled = FALSE;
+SECURITY_READ_ONLY_LATE(volatile uint32_t) debug_enabled = FALSE;
 
 uint8_t         gPlatformECID[8];
 uint32_t        gPlatformMemoryID;
@@ -702,7 +702,8 @@ PE_update_panicheader_nestedpanic()
 		panic_info->eph_panic_log_len = PE_get_offset_into_panic_region(debug_buf_ptr);
 
 		/* indicative of corruption in the panic region, consumer beware */
-		if (panic_info->eph_other_log_offset == panic_info->eph_other_log_len == 0) {
+		if ((panic_info->eph_other_log_offset == 0) &&
+		    (panic_info->eph_other_log_len == 0)) {
 			panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_INCOHERENT_PANICLOG;
 		}
 	}

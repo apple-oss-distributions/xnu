@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -308,14 +308,9 @@ static unsigned int dlif_bufsize;       /* size of dlif_size + headroom */
 static struct zone *dlif_zone;          /* zone for dlil_ifnet */
 #define DLIF_ZONE_NAME          "ifnet"         /* zone name */
 
-static ZONE_DEFINE(dlif_filt_zone, "ifnet_filter",
-    sizeof(struct ifnet_filter), ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(dlif_filt_zone, struct ifnet_filter, NET_KT_DEFAULT);
 
-static ZONE_DEFINE(dlif_phash_zone, "ifnet_proto_hash",
-    sizeof(struct proto_hash_entry) * PROTO_HASH_SLOTS, ZC_ZFREE_CLEARMEM);
-
-static ZONE_DEFINE(dlif_proto_zone, "ifnet_proto",
-    sizeof(struct if_proto), ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(dlif_proto_zone, struct if_proto, NET_KT_DEFAULT);
 
 static unsigned int dlif_tcpstat_size;  /* size of tcpstat_local to allocate */
 static unsigned int dlif_tcpstat_bufsize; /* size of dlif_tcpstat_size + headroom */
@@ -523,8 +518,7 @@ RB_HEAD(ifnet_fc_tree, ifnet_fc_entry) ifnet_fc_tree;
 RB_PROTOTYPE(ifnet_fc_tree, ifnet_fc_entry, ifce_entry, ifce_cmp);
 RB_GENERATE(ifnet_fc_tree, ifnet_fc_entry, ifce_entry, ifce_cmp);
 
-static ZONE_DEFINE(ifnet_fc_zone, "ifnet_fc_zone",
-    sizeof(struct ifnet_fc_entry), ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(ifnet_fc_zone, struct ifnet_fc_entry, NET_KT_DEFAULT);
 
 extern void bpfdetach(struct ifnet *);
 extern void proto_input_run(void);
@@ -2391,12 +2385,17 @@ static void
 dlil_filter_event(struct eventhandler_entry_arg arg __unused,
     enum net_filter_event_subsystems state)
 {
-	if (state == 0) {
+	bool old_if_enable_fsw_transport_netagent = if_enable_fsw_transport_netagent;
+	if ((state & ~NET_FILTER_EVENT_PF_PRIVATE_PROXY) == 0) {
 		if_enable_fsw_transport_netagent = 1;
 	} else {
 		if_enable_fsw_transport_netagent = 0;
 	}
-	kern_nexus_update_netagents();
+	if (old_if_enable_fsw_transport_netagent != if_enable_fsw_transport_netagent) {
+		kern_nexus_update_netagents();
+	} else if (!if_enable_fsw_transport_netagent) {
+		necp_update_all_clients();
+	}
 }
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
@@ -8707,8 +8706,8 @@ ifnet_attach(ifnet_t ifp, const struct sockaddr_dl *ll_addr)
 
 	/* Allocate protocol hash table */
 	VERIFY(ifp->if_proto_hash == NULL);
-	ifp->if_proto_hash = zalloc_flags(dlif_phash_zone,
-	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	ifp->if_proto_hash = kalloc_type(struct proto_hash_entry,
+	    PROTO_HASH_SLOTS, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	lck_mtx_lock_spin(&ifp->if_flt_lock);
 	VERIFY(TAILQ_EMPTY(&ifp->if_flt_head));
@@ -8731,6 +8730,20 @@ ifnet_attach(ifnet_t ifp, const struct sockaddr_dl *ll_addr)
 	if (ifp->if_index == 0) {
 		int idx = if_next_index();
 
+		/*
+		 * Since we exhausted the list of
+		 * if_index's, try to find an empty slot
+		 * in ifindex2ifnet.
+		 */
+		if (idx == -1 && if_index >= UINT16_MAX) {
+			for (int i = 1; i < if_index; i++) {
+				if (ifindex2ifnet[i] == NULL &&
+				    ifnet_addrs[i - 1] == NULL) {
+					idx = i;
+					break;
+				}
+			}
+		}
 		if (idx == -1) {
 			ifp->if_index = 0;
 			ifnet_lock_done(ifp);
@@ -9626,7 +9639,7 @@ ifnet_detach_final(struct ifnet *ifp)
 		/* There should not be any protocols left */
 		VERIFY(SLIST_EMPTY(&ifp->if_proto_hash[i]));
 	}
-	zfree(dlif_phash_zone, ifp->if_proto_hash);
+	kfree_type(struct proto_hash_entry, PROTO_HASH_SLOTS, ifp->if_proto_hash);
 	ifp->if_proto_hash = NULL;
 
 	/* Detach (permanent) link address from if_addrhead */
@@ -9835,9 +9848,10 @@ ifnet_detach_final(struct ifnet *ifp)
 	VERIFY(ifp->if_na == NULL);
 #endif /* SKYWALK */
 
-	/* promiscuous count needs to start at zero again */
+	/* promiscuous/allmulti counts need to start at zero again */
 	ifp->if_pcount = 0;
-	ifp->if_flags &= ~IFF_PROMISC;
+	ifp->if_amcount = 0;
+	ifp->if_flags &= ~(IFF_PROMISC | IFF_ALLMULTI);
 
 	ifnet_lock_done(ifp);
 

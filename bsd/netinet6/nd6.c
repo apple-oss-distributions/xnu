@@ -248,8 +248,7 @@ static int nd6_sysctl_prlist SYSCTL_HANDLER_ARGS;
 	(_ln)->ln_flags |= ND6_LNF_IN_USE;                              \
 } while (0)
 
-static ZONE_DEFINE(llinfo_nd6_zone, "llinfo_nd6",
-    sizeof(struct llinfo_nd6), ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(llinfo_nd6_zone, struct llinfo_nd6, NET_KT_DEFAULT);
 
 extern int tvtohz(struct timeval *);
 
@@ -1461,7 +1460,17 @@ addrloop:
 		 */
 		IFA_ADDREF_LOCKED(&ia6->ia_ifa);
 
-		/* check for duplicated secured address */
+		/*
+		 * Check for duplicated secured address
+		 *
+		 * nd6_handle_duplicated_ip6_addr attempts to regenerate
+		 * secure address in the event of a collision.
+		 * On successful generation this returns success
+		 * and we restart the loop.
+		 *
+		 * When we hit the maximum attempts, this returns
+		 * false.
+		 */
 		if (secured_address_is_duplicated(ia6->ia6_flags) &&
 		    nd6_handle_duplicated_ip6_addr(ia6)) {
 			/*

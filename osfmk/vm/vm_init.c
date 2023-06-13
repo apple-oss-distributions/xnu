@@ -132,9 +132,6 @@ vm_mem_bootstrap(void)
 
 	kernel_startup_initialize_upto(STARTUP_SUB_KMEM);
 
-	vm_mem_bootstrap_log("pmap_init");
-	pmap_init();
-
 	vm_mem_bootstrap_log("vm_fault_init");
 	vm_fault_init();
 

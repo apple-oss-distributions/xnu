@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -184,6 +184,43 @@ int utf8_normalizeOptCaseFold(const char *str,
  *                  case the value returned in *ustr_len is invalid.
  */
 int utf8_normalizeOptCaseFoldToUTF8(const char *str,
+    size_t      str_len,
+    bool        case_sens,
+    char       *ustr,
+    size_t      ustr_size,
+    size_t     *ustr_len);
+
+/*
+ * utf8_normalizeOptCaseFoldToUTF8ForPath
+ *
+ * Convert a given UTF-8 path string to UTF-8 in one of the following normalized forms,
+ * as specified by the case_sens parameter, and copy the result to the ustr
+ * buffer:
+ * - "canonical caseless form" (case-folded NFD, as described by definition D145
+ *    in chapter 3 of The Unicode Standard); for case-insensitive behavior.
+ * - standard NFD; for case-sensitive behavior (if case_sens = true).
+ *
+ * The input string should be valid UTF-8 that meets the criteria for stream safe
+ * text as described in http://unicode.org/reports/tr15/#Stream_Safe_Text_Format.
+ *
+ * str:       The input UTF-8 path string
+ * str_len:   The byte length of the input path string (excluding any 0 terminator)
+ * case_sens: False for case-insensitive behavior; generates canonical caseless form.
+ *            True for case-sensitive behavior; generates standard NFD.
+ * ustr:      A pointer to a buffer for the resulting UTF-8 string.
+ * ustr_size: The capacity of ustr, in bytes.
+ * ustr_len:  Pointer to a value that will be filled in with the actual length
+ *            in bytes of the string copied to ustr.
+ *
+ * Returns: 0 on success, or
+ *          EILSEQ: The input string contains illegal ASCII-range characters
+ *                  (0x00), or is not well-formed stream-safe UTF-8, or
+ *                  contains codepoints that are non-characters or unassigned in
+ *                  the version of Unicode currently supported.
+ *          ENOMEM: ustr_size is insufficient for the resulting string. In this
+ *                  case the value returned in *ustr_len is invalid.
+ */
+int utf8_normalizeOptCaseFoldToUTF8ForPath(const char *str,
     size_t      str_len,
     bool        case_sens,
     char       *ustr,

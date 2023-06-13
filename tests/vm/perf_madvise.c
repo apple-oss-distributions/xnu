@@ -26,9 +26,14 @@ typedef struct test_args {
 	bool ta_verbose;
 } test_args_t;
 
+typedef struct test_result {
+	double tr_madvise_throughput;
+	double tr_faultback_throughput;
+} test_result_t;
+
 static void print_help(char **argv);
 static void parse_arguments(int argc, char** argv, test_args_t *args);
-static double madvise_free_test(const test_args_t* args);
+static test_result_t madvise_free_test(const test_args_t* args);
 /*
  * Allocate a buffer of the given size and fault in all of its pages.
  */
@@ -40,7 +45,7 @@ static void fault_pages(unsigned char *buffer, size_t size, size_t stride);
 /*
  * Output the results of the test in pages / CPU second.
  */
-static void output_throughput(double throughput);
+static void output_throughput(test_result_t tr);
 
 /* Test Variants */
 static const char* kMadviseFreeArgument = "MADV_FREE";
@@ -53,26 +58,28 @@ main(int argc, char** argv)
 {
 	test_args_t args;
 	parse_arguments(argc, argv, &args);
-	double throughput = 0.0;
+	test_result_t tr;
 	if (args.ta_variant == VARIANT_MADVISE_FREE) {
-		throughput = madvise_free_test(&args);
+		tr = madvise_free_test(&args);
 	} else {
 		fprintf(stderr, "Unknown test variant\n");
 		exit(2);
 	}
-	output_throughput(throughput);
+	output_throughput(tr);
 	return 0;
 }
 
-static double
+static test_result_t
 madvise_free_test(const test_args_t* args)
 {
 	int ret, ret_end;
 	assert(args->ta_variant == VARIANT_MADVISE_FREE);
 	benchmark_log(args->ta_verbose, "Running madvise free test\n");
 	size_t time_elapsed_us = 0;
+	size_t time_fault_us = 0;
 	size_t count = 0;
-	double throughput = 0;
+
+	test_result_t tr;
 
 	while (time_elapsed_us < args->ta_duration_seconds * kNumMicrosecondsInSecond) {
 		benchmark_log(args->ta_verbose, "Starting iteration %zu\n", count + 1);
@@ -86,7 +93,17 @@ madvise_free_test(const test_args_t* args)
 		ret_end = clock_gettime(kThreadCPUTimeClock, &end_time);
 		assert(ret == 0);
 		assert(ret_end == 0);
+
 		time_elapsed_us += timespec_difference_us(&end_time, &start_time);
+
+		ret = clock_gettime(kThreadCPUTimeClock, &start_time);
+
+		fault_pages(buffer, args->ta_size, kPageSize);
+
+		ret_end = clock_gettime(kThreadCPUTimeClock, &end_time);
+		assert(ret == 0);
+		assert(ret_end == 0);
+		time_fault_us += timespec_difference_us(&end_time, &start_time);
 
 		ret = munmap(buffer, args->ta_size);
 		assert(ret == 0);
@@ -95,8 +112,10 @@ madvise_free_test(const test_args_t* args)
 		count++;
 	}
 	assert(kPageSize != 0);
-	throughput = (count * args->ta_size) / ((double)time_elapsed_us / kNumMicrosecondsInSecond);
-	return throughput;
+	tr.tr_madvise_throughput = (count * args->ta_size) / ((double)time_elapsed_us / kNumMicrosecondsInSecond);
+	tr.tr_faultback_throughput = (count * args->ta_size) / ((double)time_fault_us / kNumMicrosecondsInSecond);
+
+	return tr;
 }
 
 static void *
@@ -192,9 +211,11 @@ print_help(char** argv)
 }
 
 static void
-output_throughput(double throughput)
+output_throughput(test_result_t tr)
 {
 	printf("-----Results-----\n");
-	printf("Throughput (bytes / CPU second)\n");
-	printf("%f\n", throughput);
+	printf("madvise throughput,bytes / CPU second,");
+	printf("%f\n", tr.tr_madvise_throughput);
+	printf("fault back throughput,bytes / CPU second,");
+	printf("%f\n", tr.tr_faultback_throughput);
 }

@@ -338,6 +338,7 @@ private:
 	IOUserServerCheckInToken::State          fState;
 	size_t                                   fPendingCount;
 	const OSSymbol                         * fServerName;
+	const OSSymbol                         * fExecutableName;
 	OSNumber                               * fServerTag;
 	OSSet                                  * fHandlers;
 	OSString                               * fKextBundleID;

@@ -7,6 +7,7 @@ from builtins import hex
 from builtins import range
 from builtins import memoryview
 
+from core import caching
 from xnu import *
 import xnudefines
 
@@ -522,22 +523,16 @@ def WriteMsr64(cmd_args=None):
         print("writemsr64 FAILED")
 
 
-def GetTimebaseInfo():
-    timebase_key = 'kern.rtc_timebase'
-    numer, denom = caching.GetStaticCacheData(timebase_key, (None, None))
-    if not numer or not denom:
-        if kern.arch == 'x86_64':
-            numer = 1
-            denom = 1
-        else:
-            rtclockdata_addr = kern.GetLoadAddressForSymbol('RTClockData')
-            rtc = kern.GetValueFromAddress(
-                rtclockdata_addr, 'struct _rtclock_data_ *')
-            tb = rtc.rtc_timebase_const
-            numer = tb.numer
-            denom = tb.denom
-        caching.SaveStaticCacheData(timebase_key, (numer, denom))
-    return numer, denom
+@caching.cache_statically
+def GetTimebaseInfo(target=None):
+    if kern.arch == 'x86_64':
+        return 1, 1
+
+    rtclockdata_addr = kern.GetLoadAddressForSymbol('RTClockData')
+    rtc = kern.GetValueFromAddress(
+        rtclockdata_addr, 'struct _rtclock_data_ *')
+    tb = rtc.rtc_timebase_const
+    return int(tb.numer), int(tb.denom)
 
 
 def PrintIteratedElem(i, elem, elem_type, do_summary, summary, regex):

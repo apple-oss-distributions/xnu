@@ -1028,12 +1028,12 @@ dtrace_canstore_remains(uint64_t addr, size_t sz, size_t *remain,
 	dtrace_mstate_t *mstate, dtrace_vstate_t *vstate)
 {
 	/*
-	 * First, check to see if the address is in scratch space...
+	 * First, check to see if the address is in allocated scratch space...
 	 */
 	if (DTRACE_INRANGE(addr, sz, mstate->dtms_scratch_base,
-	    mstate->dtms_scratch_size)) {
+	    mstate->dtms_scratch_ptr - mstate->dtms_scratch_base)) {
 		DTRACE_RANGE_REMAIN(remain, addr, mstate->dtms_scratch_base,
-			mstate->dtms_scratch_size);
+		    mstate->dtms_scratch_ptr - mstate->dtms_scratch_base);
 		return (1);
 	}
 	/*
@@ -3302,19 +3302,25 @@ dtrace_dif_variable(dtrace_mstate_t *mstate, dtrace_state_t *state, uint64_t v,
 			dtrace_vstate_t *vstate = &state->dts_vstate;
 			dtrace_provider_t *pv;
 			uint64_t val;
+			int argndx = ndx;
+
+			if (argndx < 0) {
+				DTRACE_CPUFLAG_SET(CPU_DTRACE_ILLOP);
+				return (0);
+			}
 
 			pv = mstate->dtms_probe->dtpr_provider;
 			if (pv->dtpv_pops.dtps_getargval != NULL)
 				val = pv->dtpv_pops.dtps_getargval(pv->dtpv_arg,
 				    mstate->dtms_probe->dtpr_id,
-				    mstate->dtms_probe->dtpr_arg, ndx, aframes);
+				    mstate->dtms_probe->dtpr_arg, argndx, aframes);
 			/* Special case access of arg5 as passed to dtrace_probe_error() (which see.) */
-			else if (mstate->dtms_probe->dtpr_id == dtrace_probeid_error && ndx == 5) {
+			else if (mstate->dtms_probe->dtpr_id == dtrace_probeid_error && argndx == 5) {
 			        return ((dtrace_state_t *)(uintptr_t)(mstate->dtms_arg[0]))->dts_arg_error_illval;
 			}
 
 			else
-				val = dtrace_getarg(ndx, aframes, mstate, vstate);
+				val = dtrace_getarg(argndx, aframes, mstate, vstate);
 
 			/*
 			 * This is regrettably required to keep the compiler
@@ -13068,11 +13074,11 @@ dtrace_dof_copyin(user_addr_t uarg, int *errp)
 
 	dof = kmem_alloc_aligned(hdr.dofh_loadsz, 8, KM_SLEEP);
 
-        if (copyin(uarg, dof, hdr.dofh_loadsz) != 0  ||
-	  dof->dofh_loadsz != hdr.dofh_loadsz) {
-	    kmem_free_aligned(dof, hdr.dofh_loadsz);
-	    *errp = EFAULT;
-	    return (NULL);
+	if (copyin(uarg, dof, hdr.dofh_loadsz) != 0 ||
+	    dof->dofh_loadsz != hdr.dofh_loadsz) {
+		kmem_free_aligned(dof, hdr.dofh_loadsz);
+		*errp = EFAULT;
+		return (NULL);
 	}	    
 
 	return (dof);
@@ -13112,7 +13118,8 @@ dtrace_dof_copyin_from_proc(proc_t* p, user_addr_t uarg, int *errp)
 
 	dof = kmem_alloc_aligned(hdr.dofh_loadsz, 8, KM_SLEEP);
 
-	if (uread(p, dof, hdr.dofh_loadsz, uarg) != KERN_SUCCESS) {
+	if (uread(p, dof, hdr.dofh_loadsz, uarg) != KERN_SUCCESS ||
+	    dof->dofh_loadsz != hdr.dofh_loadsz) {
 		kmem_free_aligned(dof, hdr.dofh_loadsz);
 		*errp = EFAULT;
 		return (NULL);
@@ -16819,6 +16826,7 @@ dtrace_module_loaded(struct kmod_info *kmod, uint32_t flag)
 	 */
 	if (dtrace_kernel_symbol_mode == DTRACE_KERNEL_SYMBOLS_NEVER)
 		return 0;
+
 	
 	struct modctl *ctl = NULL;
 	if (!kmod || kmod->address == 0 || kmod->size == 0)
@@ -17447,6 +17455,9 @@ dtrace_open(dev_t *devp, int flag, int otyp, cred_t *cred_p)
 	uid_t uid;
 	zoneid_t zoneid;
 	int rv;
+
+	if (minor(*devp) < 0 || minor(*devp) >= DTRACE_NCLIENTS)
+		return (ENXIO);
 
 	/* APPLE: Darwin puts Helper on its own major device. */
 
@@ -18652,8 +18663,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		 * Read the number of symbolsdesc structs being passed in.
 		 */
 		if (copyin(arg + offsetof(dtrace_module_uuids_list_t, dtmul_count),
-			   &dtmul_count,
-			   sizeof(dtmul_count))) {
+		    &dtmul_count, sizeof(dtmul_count)) != 0) {
 			cmn_err(CE_WARN, "failed to copyin dtmul_count");
 			return (EFAULT);
 		}
@@ -18799,8 +18809,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		 * Read the number of module symbols structs being passed in.
 		 */
 		if (copyin(arg + offsetof(dtrace_module_symbols_t, dtmodsyms_count),
-			   &dtmodsyms_count,
-			   sizeof(dtmodsyms_count))) {
+		    &dtmodsyms_count, sizeof(dtmodsyms_count)) != 0) {
 			cmn_err(CE_WARN, "failed to copyin dtmodsyms_count");
 			return (EFAULT);
 		}

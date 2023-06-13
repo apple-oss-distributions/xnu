@@ -512,7 +512,7 @@ extern int num_trailing_0(uint64_t n);
 /* sync lock */
 extern int sync_timeout_seconds;
 
-extern zone_t mount_zone;
+KALLOC_TYPE_DECLARE(mount_zone);
 
 __END_DECLS
 

@@ -57,7 +57,8 @@ __END_DECLS
 	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, ty, KT_SHARED_ACCT);      \
 	__kar = kalloc_ext(kt_mangle_var_view(kt_view_var),                    \
 	    kt_size(0, sizeof(ty), *__countp),                                 \
-	    Z_VM_TAG_BT(flags | Z_FULLSIZE, VM_KERN_MEMORY_LIBKERN), NULL);    \
+	    Z_VM_TAG_BT(flags | Z_FULLSIZE | Z_SPRAYQTN,                       \
+	    VM_KERN_MEMORY_LIBKERN), NULL);                                    \
 	*__countp = (uint32_t)MIN(__kar.size / sizeof(ty), UINT32_MAX);        \
 	(ty *)__kar.addr;                                                      \
 })
@@ -69,7 +70,8 @@ __END_DECLS
 	__kar = krealloc_ext(kt_mangle_var_view(kt_view_var), ptr,             \
 	    kt_size(0, sizeof(ty), old_count),                                 \
 	    kt_size(0, sizeof(ty), *__countp),                                 \
-	    Z_VM_TAG_BT(flags | Z_FULLSIZE, VM_KERN_MEMORY_LIBKERN), NULL);    \
+	    Z_VM_TAG_BT(flags | Z_FULLSIZE | Z_SPRAYQTN,                       \
+	    VM_KERN_MEMORY_LIBKERN), NULL);                                    \
 	*__countp = (uint32_t)MIN(__kar.size / sizeof(ty), UINT32_MAX);        \
 	(ty *)__kar.addr;                                                      \
 })

@@ -83,11 +83,9 @@ static int __nx_fsw_inited = 0;
 static eventhandler_tag __nx_fsw_ifnet_eventhandler_tag = NULL;
 static eventhandler_tag __nx_fsw_protoctl_eventhandler_tag = NULL;
 
-static ZONE_DEFINE(nx_fsw_zone, SKMEM_ZONE_PREFIX ".nx.fsw",
-    sizeof(struct nx_flowswitch), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(nx_fsw_zone, struct nx_flowswitch);
 
-static ZONE_DEFINE(nx_fsw_stats_zone, SKMEM_ZONE_PREFIX ".nx.fsw.stats",
-    sizeof(struct __nx_stats_fsw), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(nx_fsw_stats_zone, struct __nx_stats_fsw);
 
 #define SKMEM_TAG_FSW_PORTS     "com.apple.skywalk.fsw.ports"
 SKMEM_TAG_DEFINE(skmem_tag_fsw_ports, SKMEM_TAG_FSW_PORTS);

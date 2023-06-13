@@ -154,7 +154,7 @@ kern_return_t arm_cpu_capabilities_legacy_test(void);
 extern unsigned int vm_page_wire_count;
 
 static int      cputhreadtype, cpu64bit;
-static uint64_t cacheconfig[10], cachesize[10];
+static uint64_t cacheconfig[10];
 static int      packages;
 
 static char *   osenvironment = NULL;
@@ -255,6 +255,26 @@ cpu_type_for_perflevel(int perflevel)
 	return 0;
 }
 
+static ml_cpu_info_t
+sysctl_hw_generic_cpu_info(int perflevel, int arg2 __unused)
+{
+	bool ignore_perflevel = false;
+#if APPLE_ARM64_ARCH_FAMILY
+	if (arg2 == HW_CACHELINE) {
+		/* Apple SoCs have a uniform cacheline size across all clusters */
+		ignore_perflevel = true;
+	}
+#endif
+
+	ml_cpu_info_t cpu_info;
+	if (ignore_perflevel) {
+		ml_cpu_get_info(&cpu_info);
+	} else {
+		ml_cpu_get_info_type(&cpu_info, cpu_type_for_perflevel(perflevel));
+	}
+	return cpu_info;
+}
+
 /*
  * Supporting some variables requires us to do "real" work.  We
  * gather some of that here.
@@ -265,7 +285,6 @@ sysctl_hw_generic(__unused struct sysctl_oid *oidp, void *arg1,
 {
 	char dummy[65];
 	int  epochTemp;
-	ml_cpu_info_t cpu_info;
 	int val, doquad;
 	long long qval;
 	unsigned int cpu_count;
@@ -294,8 +313,6 @@ sysctl_hw_generic(__unused struct sysctl_oid *oidp, void *arg1,
 	 */
 	doquad = arg2 & CTLHW_RETQUAD;
 	arg2 &= ~CTLHW_RETQUAD;
-
-	ml_cpu_get_info_type(&cpu_info, cpu_type_for_perflevel(perflevel));
 
 #define BSD_HOST 1
 	kret = host_info((host_t)BSD_HOST, HOST_BASIC_INFO, (host_info_t)&hinfo, &count);
@@ -357,34 +374,44 @@ sysctl_hw_generic(__unused struct sysctl_oid *oidp, void *arg1,
 	case HW_PERFLEVEL_LOGICALCPUMAX:
 		cpu_count = ml_get_cpu_number_type(cpu_type_for_perflevel(perflevel), true, false);
 		return SYSCTL_RETURN(req, cpu_count);
-	case HW_PERFLEVEL_L1ICACHESIZE:
+	case HW_PERFLEVEL_L1ICACHESIZE: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		val = (int)cpu_info.l1_icache_size;
 		qval = (long long)cpu_info.l1_icache_size;
 		break;
-	case HW_PERFLEVEL_L1DCACHESIZE:
+	}
+	case HW_PERFLEVEL_L1DCACHESIZE: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		val = (int)cpu_info.l1_dcache_size;
 		qval = (long long)cpu_info.l1_dcache_size;
 		break;
-	case HW_PERFLEVEL_L2CACHESIZE:
+	}
+	case HW_PERFLEVEL_L2CACHESIZE: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		val = (int)cpu_info.l2_cache_size;
 		qval = (long long)cpu_info.l2_cache_size;
 		break;
+	}
 	case HW_PERFLEVEL_CPUSPERL2:
 		cpu_count = ml_cpu_cache_sharing(2, cpu_type_for_perflevel(perflevel), false);
 		return SYSCTL_RETURN(req, cpu_count);
-	case HW_PERFLEVEL_L3CACHESIZE:
+	case HW_PERFLEVEL_L3CACHESIZE: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		if (cpu_info.l3_cache_size == UINT32_MAX) {
 			return EINVAL;
 		}
 		val = (int)cpu_info.l3_cache_size;
 		qval = (long long)cpu_info.l3_cache_size;
 		break;
-	case HW_PERFLEVEL_CPUSPERL3:
+	}
+	case HW_PERFLEVEL_CPUSPERL3: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		if (cpu_info.l3_cache_size == UINT32_MAX) {
 			return EINVAL;
 		}
 		cpu_count = ml_cpu_cache_sharing(3, cpu_type_for_perflevel(perflevel), false);
 		return SYSCTL_RETURN(req, cpu_count);
+	}
 	case HW_PERFLEVEL_NAME:
 		bzero(dummy, sizeof(dummy));
 		ml_get_cluster_type_name(cpu_type_for_perflevel(perflevel), dummy, sizeof(dummy));
@@ -436,32 +463,42 @@ sysctl_hw_generic(__unused struct sysctl_oid *oidp, void *arg1,
 		qval = (long long)val;
 		break;
 	}
-	case HW_CACHELINE:
+	case HW_CACHELINE: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		val = (int)cpu_info.cache_line_size;
 		qval = (long long)val;
 		break;
-	case HW_L1ICACHESIZE:
+	}
+	case HW_L1ICACHESIZE: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		val = (int)cpu_info.l1_icache_size;
 		qval = (long long)cpu_info.l1_icache_size;
 		break;
-	case HW_L1DCACHESIZE:
+	}
+	case HW_L1DCACHESIZE: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		val = (int)cpu_info.l1_dcache_size;
 		qval = (long long)cpu_info.l1_dcache_size;
 		break;
-	case HW_L2CACHESIZE:
+	}
+	case HW_L2CACHESIZE: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		if (cpu_info.l2_cache_size == UINT32_MAX) {
 			return EINVAL;
 		}
 		val = (int)cpu_info.l2_cache_size;
 		qval = (long long)cpu_info.l2_cache_size;
 		break;
-	case HW_L3CACHESIZE:
+	}
+	case HW_L3CACHESIZE: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		if (cpu_info.l3_cache_size == UINT32_MAX) {
 			return EINVAL;
 		}
 		val = (int)cpu_info.l3_cache_size;
 		qval = (long long)cpu_info.l3_cache_size;
 		break;
+	}
 	case HW_TARGET:
 		bzero(dummy, sizeof(dummy));
 		if (!PEGetTargetName(dummy, 64)) {
@@ -542,19 +579,24 @@ sysctl_hw_generic(__unused struct sysctl_oid *oidp, void *arg1,
 		}
 		return SYSCTL_RETURN(req, epochTemp);
 	case HW_VECTORUNIT: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		int vector = cpu_info.vector_unit == 0? 0 : 1;
 		return SYSCTL_RETURN(req, vector);
 	}
-	case HW_L2SETTINGS:
+	case HW_L2SETTINGS: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		if (cpu_info.l2_cache_size == UINT32_MAX) {
 			return EINVAL;
 		}
 		return SYSCTL_RETURN(req, cpu_info.l2_settings);
-	case HW_L3SETTINGS:
+	}
+	case HW_L3SETTINGS: {
+		ml_cpu_info_t cpu_info = sysctl_hw_generic_cpu_info(perflevel, arg2);
 		if (cpu_info.l3_cache_size == UINT32_MAX) {
 			return EINVAL;
 		}
 		return SYSCTL_RETURN(req, cpu_info.l3_settings);
+	}
 	default:
 		return ENOTSUP;
 	}
@@ -565,6 +607,30 @@ sysctl_hw_generic(__unused struct sysctl_oid *oidp, void *arg1,
 		return SYSCTL_RETURN(req, qval);
 	}
 	return SYSCTL_RETURN(req, val);
+}
+
+static int
+sysctl_hw_cachesize(struct sysctl_oid *oidp __unused, void *arg1 __unused,
+    int arg2 __unused, struct sysctl_req *req)
+{
+	uint64_t cachesize[10] = {};
+
+#if __x86_64__
+	cachesize[0] = ml_cpu_cache_size(0);
+	cachesize[1] = ml_cpu_cache_size(1);
+	cachesize[2] = ml_cpu_cache_size(2);
+	cachesize[3] = ml_cpu_cache_size(3);
+#elif __arm64__
+	cluster_type_t min_perflevel_cluster_type = cpu_type_for_perflevel(__builtin_popcount(ml_get_cpu_types()) - 1);
+
+	cachesize[0] = ml_get_machine_mem();
+	cachesize[1] = cache_info_type(min_perflevel_cluster_type)->c_dsize; /* Using the DCache */
+	cachesize[2] = cache_info_type(min_perflevel_cluster_type)->c_l2size;
+#else
+#error unknown architecture
+#endif
+
+	return SYSCTL_RETURN(req, cachesize);
 }
 
 /* hw.pagesize and hw.tbfrequency are expected as 64 bit values */
@@ -819,7 +885,7 @@ SYSCTL_INT(_hw, OID_AUTO, cpu64bit_capable, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_
 SYSCTL_PROC(_hw, OID_AUTO, cpufamily, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, HW_LOCAL_CPUFAMILY, sysctl_hw_generic, "I", "");
 SYSCTL_PROC(_hw, OID_AUTO, cpusubfamily, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, HW_LOCAL_CPUSUBFAMILY, sysctl_hw_generic, "I", "");
 SYSCTL_OPAQUE(_hw, OID_AUTO, cacheconfig, CTLFLAG_RD | CTLFLAG_LOCKED, &cacheconfig, sizeof(cacheconfig), "Q", "");
-SYSCTL_OPAQUE(_hw, OID_AUTO, cachesize, CTLFLAG_RD | CTLFLAG_LOCKED, &cachesize, sizeof(cachesize), "Q", "");
+SYSCTL_PROC(_hw, OID_AUTO, cachesize, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, sysctl_hw_cachesize, "Q", "");
 SYSCTL_PROC(_hw, OID_AUTO, pagesize, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, 0, sysctl_pagesize, "Q", "");
 SYSCTL_PROC(_hw, OID_AUTO, pagesize32, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, 0, sysctl_pagesize32, "Q", "");
 SYSCTL_PROC(_hw, OID_AUTO, busfrequency, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, HW_LOCAL_FREQUENCY, sysctl_bus_frequency, "Q", "");
@@ -1145,11 +1211,7 @@ SYSCTL_INT(_hw_optional, OID_AUTO, ic_inval_filters, CTLFLAG_RD | CTLFLAG_KERN |
 #endif
 
 #if DEBUG || DEVELOPMENT
-#if __APPLE_WKDM_POPCNT_EXTENSIONS__
-static SECURITY_READ_ONLY_LATE(int) wkdm_popcount = 1;
-#else
 static SECURITY_READ_ONLY_LATE(int) wkdm_popcount = 0;
-#endif
 SYSCTL_INT(_hw_optional, OID_AUTO, wkdm_popcount, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &wkdm_popcount, 0, "");
 #endif
 
@@ -1230,13 +1292,6 @@ sysctl_mib_init(void)
 	cacheconfig[3] = ml_cpu_cache_sharing(3, CLUSTER_TYPE_SMP, true);
 	cacheconfig[4] = 0;
 
-	/* hw.cachesize */
-	cachesize[0] = ml_cpu_cache_size(0);
-	cachesize[1] = ml_cpu_cache_size(1);
-	cachesize[2] = ml_cpu_cache_size(2);
-	cachesize[3] = ml_cpu_cache_size(3);
-	cachesize[4] = 0;
-
 	/* hw.packages */
 	packages = (int)(roundup(ml_cpu_cache_sharing(0, CLUSTER_TYPE_SMP, true), cpuid_info()->thread_count)
 	    / cpuid_info()->thread_count);
@@ -1254,12 +1309,6 @@ sysctl_mib_init(void)
 	cacheconfig[4] = 0;
 	cacheconfig[5] = 0;
 	cacheconfig[6] = 0;
-
-	cachesize[0] = ml_get_machine_mem();
-	cachesize[1] = cache_info_type(min_perflevel_cluster_type)->c_dsize; /* Using the DCache */
-	cachesize[2] = cache_info_type(min_perflevel_cluster_type)->c_l2size;
-	cachesize[3] = 0;
-	cachesize[4] = 0;
 
 	packages = 1;
 #else

@@ -64,7 +64,7 @@
 #define FLOW_DIVERT_TLV_CDHASH                  24
 #define FLOW_DIVERT_TLV_SIGNING_ID              25
 #define FLOW_DIVERT_TLV_AGGREGATE_UNIT          26
-
+#define FLOW_DIVERT_TLV_IS_FRAGMENT             27
 #define FLOW_DIVERT_TLV_PREFIX_COUNT            28
 #define FLOW_DIVERT_TLV_FLAGS                   29
 #define FLOW_DIVERT_TLV_FLOW_TYPE               30
@@ -74,6 +74,7 @@
 #define FLOW_DIVERT_TLV_APP_REAL_CDHASH         34
 #define FLOW_DIVERT_TLV_APP_REAL_AUDIT_TOKEN    35
 #define FLOW_DIVERT_TLV_CFIL_ID                 36
+#define FLOW_DIVERT_TLV_DATAGRAM_SIZE           37
 
 #define FLOW_DIVERT_FLOW_TYPE_TCP               1
 #define FLOW_DIVERT_FLOW_TYPE_UDP               3

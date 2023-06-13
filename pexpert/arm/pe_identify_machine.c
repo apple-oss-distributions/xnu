@@ -32,6 +32,7 @@ void pe_identify_machine(boot_args * bootArgs);
 extern void clean_mmu_dcache(void);
 extern void flush_dcache64(addr64_t addr, unsigned count, int phys);
 
+
 static char    *gPESoCDeviceType;
 static char     gPESoCDeviceTypeBuffer[SOC_DEVICE_TYPE_BUFFER_SIZE];
 static vm_offset_t gPESoCBasePhys;
@@ -279,6 +280,11 @@ static command_buffer_element_t *enable_stop_clocks;
 static command_buffer_element_t *stop_clocks;
 
 
+
+/**************
+* Public API *
+**************/
+
 static void
 pe_init_debug_command(DTEntry entryP, command_buffer_element_t **command_buffer, const char* entry_name)
 {
@@ -509,6 +515,7 @@ pe_arm_init_debug(void *args)
 	} else {
 		kprintf("pe_arm_init_debug: failed to find cpu-debug-interface\n");
 	}
+
 }
 
 static uint32_t

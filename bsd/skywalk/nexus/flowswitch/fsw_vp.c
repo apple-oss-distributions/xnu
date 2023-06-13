@@ -64,8 +64,7 @@ static void fsw_vp_na_free(struct nexus_adapter *);
 static int fsw_vp_na_channel_event_notify(struct nexus_adapter *vpna,
     struct __kern_channel_event *ev, uint16_t ev_len);
 
-static ZONE_DEFINE(na_vp_zone, SKMEM_ZONE_PREFIX ".na.fsw.vp",
-    sizeof(struct nexus_vp_adapter), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(na_vp_zone, struct nexus_vp_adapter);
 
 static uint16_t fsw_vpna_gencnt = 0;
 
@@ -168,7 +167,7 @@ fsw_vp_na_krings_create(struct nexus_adapter *na, struct kern_channel *ch)
 {
 	ASSERT(na->na_type == NA_FLOWSWITCH_VP);
 
-	return na_rings_mem_setup(na, 0, FALSE, ch);
+	return na_rings_mem_setup(na, FALSE, ch);
 }
 
 

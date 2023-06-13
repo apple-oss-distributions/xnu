@@ -82,7 +82,7 @@
 #define X86_64_MP_SPIN_TRIES                    1000
 
 #ifdef KERNEL_PRIVATE
-extern vm_address_t x86_64_sharedpage_rw_addr;
+extern vm_address_t x86_64_commpage_rw_addr;
 extern uint64_t _get_x86_64_cpu_capabilities(void);
 #endif
 

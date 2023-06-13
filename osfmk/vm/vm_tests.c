@@ -91,7 +91,7 @@ vm_test_collapse_compressor(void)
 	/* map backing object */
 	backing_offset = 0;
 	kr = vm_map_enter(kernel_map, &backing_offset, backing_size, 0,
-	    VM_FLAGS_ANYWHERE, VM_MAP_KERNEL_FLAGS_DATA,
+	    VM_MAP_KERNEL_FLAGS_DATA_ANYWHERE(),
 	    backing_object, 0, FALSE,
 	    VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_DEFAULT);
 	assert(kr == KERN_SUCCESS);
@@ -141,7 +141,7 @@ vm_test_collapse_compressor(void)
 	/* map top object */
 	top_offset = 0;
 	kr = vm_map_enter(kernel_map, &top_offset, top_size, 0,
-	    VM_FLAGS_ANYWHERE, VM_MAP_KERNEL_FLAGS_DATA,
+	    VM_MAP_KERNEL_FLAGS_DATA_ANYWHERE(),
 	    top_object, 0, FALSE,
 	    VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_DEFAULT);
 	assert(kr == KERN_SUCCESS);
@@ -420,16 +420,14 @@ vm_test_device_pager_transpose(void)
 	 */
 	vm_map_offset_t anon_mapping = 0;
 	kr = vm_map_enter(kernel_map, &anon_mapping, size, 0,
-	    VM_FLAGS_ANYWHERE, VM_MAP_KERNEL_FLAGS_NONE, VM_KERN_MEMORY_NONE,
+	    VM_MAP_KERNEL_FLAGS_ANYWHERE(),
 	    anon_object, 0, FALSE, VM_PROT_DEFAULT, VM_PROT_ALL,
 	    VM_INHERIT_DEFAULT);
 	assert(kr == KERN_SUCCESS);
 #endif
 	device_mapping = 0;
 	kr = vm_map_enter_mem_object(kernel_map, &device_mapping, size, 0,
-	    VM_FLAGS_ANYWHERE,
-	    VM_MAP_KERNEL_FLAGS_DATA,
-	    VM_KERN_MEMORY_NONE,
+	    VM_MAP_KERNEL_FLAGS_DATA_ANYWHERE(),
 	    (void *)device_pager, 0, FALSE,
 	    VM_PROT_DEFAULT, VM_PROT_ALL,
 	    VM_INHERIT_DEFAULT);
@@ -858,8 +856,8 @@ vm_test_map_copy_adjust_to_target(void)
 	vm_object_reference(obj1);
 	addr4k = 0x1000;
 	size4k = 0x3000;
-	kr = vm_map_enter(map4k, &addr4k, size4k, 0, VM_FLAGS_ANYWHERE,
-	    VM_MAP_KERNEL_FLAGS_DATA, 0, obj1, 0,
+	kr = vm_map_enter(map4k, &addr4k, size4k, 0,
+	    VM_MAP_KERNEL_FLAGS_DATA_ANYWHERE(), obj1, 0,
 	    FALSE, VM_PROT_DEFAULT, VM_PROT_DEFAULT,
 	    VM_INHERIT_DEFAULT);
 	assert(kr == KERN_SUCCESS);
@@ -869,8 +867,8 @@ vm_test_map_copy_adjust_to_target(void)
 	vm_object_reference(obj1);
 	addr16k = 0x4000;
 	size16k = 0x8000;
-	kr = vm_map_enter(map16k, &addr16k, size16k, 0, VM_FLAGS_ANYWHERE,
-	    VM_MAP_KERNEL_FLAGS_DATA, 0, obj1, 0,
+	kr = vm_map_enter(map16k, &addr16k, size16k, 0,
+	    VM_MAP_KERNEL_FLAGS_DATA_ANYWHERE(), obj1, 0,
 	    FALSE, VM_PROT_DEFAULT, VM_PROT_DEFAULT,
 	    VM_INHERIT_DEFAULT);
 	assert(kr == KERN_SUCCESS);
@@ -1062,9 +1060,7 @@ vm_test_per_mapping_internal_accounting(void)
 	    &device_addr,
 	    PAGE_SIZE,
 	    0,
-	    VM_FLAGS_ANYWHERE,
-	    VM_MAP_KERNEL_FLAGS_DATA,
-	    0,
+	    VM_MAP_KERNEL_FLAGS_DATA_ANYWHERE(),
 	    device_object,
 	    0,
 	    FALSE,               /* copy */
@@ -1304,6 +1300,7 @@ boolean_t vm_tests_in_progress = FALSE;
 kern_return_t
 vm_tests(void)
 {
+	kern_return_t kr = KERN_SUCCESS;
 	vm_tests_in_progress = TRUE;
 
 	vm_test_collapse_compressor();
@@ -1326,7 +1323,7 @@ vm_tests(void)
 
 	vm_tests_in_progress = FALSE;
 
-	return KERN_SUCCESS;
+	return kr;
 }
 
 /*

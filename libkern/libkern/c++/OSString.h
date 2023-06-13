@@ -53,7 +53,13 @@ typedef OSString const* OSStringConstPtr;
  *
  * For internal use.
  */
-enum { kOSStringNoCopy = 0x00000001 };
+enum {
+	kOSStringNoCopy         = 0x001,
+#if XNU_KERNEL_PRIVATE
+	kOSSSymbolHashed        = 0x002,
+	kOSSSymbolPermanent     = 0x004,
+#endif /* XNU_KERNEL_PRIVATE */
+};
 
 
 /*!

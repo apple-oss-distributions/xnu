@@ -87,11 +87,7 @@
 #include <sys/ioctl.h>
 #include <sys/fsctl.h>
 #include <sys/tty.h>
-/* Temporary workaround for ubc.h until <rdar://4714366 is resolved */
-#define ubc_setcred ubc_setcred_deprecated
 #include <sys/ubc.h>
-#undef ubc_setcred
-int     ubc_setcred(struct vnode *, struct proc *);
 #include <sys/conf.h>
 #include <sys/disk.h>
 #include <sys/fsevents.h>
@@ -1408,19 +1404,7 @@ vn_write(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 	 * Set the credentials on successful writes
 	 */
 	if ((error == 0) && (vp->v_tag == VT_NFS) && (UBCINFOEXISTS(vp))) {
-		/*
-		 * When called from aio subsystem, we only have the proc from
-		 * which to get the credential, at this point, so use that
-		 * instead.  This means aio functions are incompatible with
-		 * per-thread credentials (aio operations are proxied).  We
-		 * can't easily correct the aio vs. settid race in this case
-		 * anyway, so we disallow it.
-		 */
-		if ((flags & FOF_PCRED) == 0) {
-			ubc_setthreadcred(vp, p, current_thread());
-		} else {
-			ubc_setcred(vp, p);
-		}
+		ubc_setcred(vp, vfs_context_ucred(ctx));
 	}
 
 #if CONFIG_FILE_LEASES

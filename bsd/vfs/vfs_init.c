@@ -83,6 +83,7 @@
 #include <sys/ucred.h>
 #include <sys/errno.h>
 #include <kern/kalloc.h>
+#include <kern/smr.h>
 #include <sys/decmpfs.h>
 
 #if CONFIG_MACF
@@ -102,7 +103,10 @@
 #define DODEBUG(A)
 #endif
 
-ZONE_DEFINE_TYPE(mount_zone, "mount", struct mount, ZC_ZFREE_CLEARMEM);
+KALLOC_TYPE_DEFINE(mount_zone, struct mount, KT_DEFAULT);
+
+SMR_DEFINE(_vfs_smr);
+const smr_t vfs_smr = &_vfs_smr;
 
 __private_extern__ void vntblinit(void);
 

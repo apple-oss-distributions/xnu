@@ -85,6 +85,8 @@
 
 #include <libkern/OSAtomic.h>
 
+#define KERNEL_DESC_SIZE             sizeof(mach_msg_descriptor_t)
+
 void
 mach_msg_receive_results_complete(ipc_object_t object);
 
@@ -196,36 +198,79 @@ kernel_mach_msg_send(
 }
 
 mach_msg_return_t
-kernel_mach_msg_send_with_builder(
-	mach_msg_size_t         send_size,
+kernel_mach_msg_send_with_builder_internal(
+	mach_msg_size_t         desc_count,
+	mach_msg_size_t         payload_size, /* Not total send size */
 	mach_msg_option_t       option,
 	mach_msg_timeout_t      timeout_val,
 	boolean_t               *message_moved,
-	void                    (^builder)(mach_msg_header_t *, mach_msg_size_t))
+	void                    (^builder)(mach_msg_header_t *,
+	mach_msg_descriptor_t *, void *))
 {
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
 	mach_msg_header_t *hdr;
+	void *udata;
+	bool complex;
+	mach_msg_size_t send_size;
+	mach_msg_descriptor_t *desc;
 
 	KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
 
+	/*
+	 * If message has descriptors it must be complex and vice versa. We assume
+	 * this for messages originated from kernel. The two are not equivalent for
+	 * user messages for bin-compat reasons.
+	 */
+	complex = (desc_count > 0);
+	send_size = sizeof(mach_msg_header_t) + payload_size;
+
+	if (complex) {
+		send_size += sizeof(mach_msg_body_t) + desc_count * KERNEL_DESC_SIZE;
+	}
 	if (message_moved) {
 		*message_moved = FALSE;
 	}
 
-	kmsg = ipc_kmsg_alloc(send_size, 0, 0,
+	kmsg = ipc_kmsg_alloc(send_size, 0, desc_count,
 	    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO);
+	/* kmsg can be non-linear */
+
 	if (kmsg == IKM_NULL) {
 		mr = MACH_SEND_NO_BUFFER;
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
 	}
+
 	hdr = ikm_header(kmsg);
+	udata = (payload_size > 0) ? ikm_udata(kmsg, desc_count, complex) : NULL;
+	desc = (desc_count > 0) ? (mach_msg_descriptor_t *)((vm_address_t)hdr + sizeof(mach_msg_base_t)) : NULL;
 
-	builder(hdr, send_size);
-	hdr->msgh_size = send_size;
+	/* Allow the caller to build the message, and sanity check it */
+	builder(hdr, desc, udata);
+	assert(hdr->msgh_size == send_size);
+	if (complex) {
+		assert(hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX);
+		hdr->msgh_bits |= MACH_MSGH_BITS_COMPLEX;
+		/* Set the correct descriptor count */
+		((mach_msg_base_t *)hdr)->body.msgh_descriptor_count = desc_count;
+	} else {
+		assert(!(hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX));
+		hdr->msgh_bits &= ~MACH_MSGH_BITS_COMPLEX;
+	}
 
-	return kernel_mach_msg_send_common(kmsg, option, timeout_val, message_moved);
+	return kernel_mach_msg_send_common(kmsg, option, timeout_val, NULL);
+}
+
+mach_msg_return_t
+kernel_mach_msg_send_with_builder(
+	mach_msg_size_t         desc_count,
+	mach_msg_size_t         udata_size,
+	void                    (^builder)(mach_msg_header_t *,
+	mach_msg_descriptor_t *, void *))
+{
+	return kernel_mach_msg_send_with_builder_internal(desc_count, udata_size,
+	           MACH_SEND_KERNEL_DEFAULT, MACH_MSG_TIMEOUT_NONE, NULL, builder);
 }
 
 /*
@@ -262,6 +307,8 @@ kernel_mach_msg_rpc(
 {
 	thread_t self = current_thread();
 	ipc_port_t dest = IPC_PORT_NULL;
+	/* Sync IPC from kernel should pass adopted voucher and importance */
+	mach_msg_option_t option = MACH_SEND_KERNEL_DEFAULT & ~MACH_SEND_NOIMPORTANCE;
 	ipc_port_t reply;
 	ipc_kmsg_t kmsg;
 	mach_msg_header_t *hdr;
@@ -276,7 +323,13 @@ kernel_mach_msg_rpc(
 		*message_moved = FALSE;
 	}
 
+	if (!IP_VALID(msg->msgh_remote_port)) {
+		return MACH_SEND_INVALID_DEST;
+	}
+
 	mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
+	/* kmsg can be non-linear */
+
 	if (mr != MACH_MSG_SUCCESS) {
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
@@ -295,26 +348,35 @@ kernel_mach_msg_rpc(
 	/* Get voucher port for the current thread's voucher */
 	ipc_voucher_t voucher = IPC_VOUCHER_NULL;
 	ipc_port_t voucher_port = IP_NULL;
-	if (thread_get_mach_voucher(self, 0, &voucher) == KERN_SUCCESS) {
+
+	/* Kernel server routines do not need voucher */
+	bool has_voucher = !ip_is_kobject(hdr->msgh_remote_port);
+
+	if (has_voucher && thread_get_mach_voucher(self, 0, &voucher) == KERN_SUCCESS) {
 		/* If thread does not have a voucher, get the default voucher of the process */
 		if (voucher == IPC_VOUCHER_NULL) {
 			voucher = ipc_voucher_get_default_voucher();
 		}
 		voucher_port = convert_voucher_to_port(voucher);
+		ipc_kmsg_set_voucher_port(kmsg, voucher_port, MACH_MSG_TYPE_MOVE_SEND);
 	}
 
 	/* insert send-once right for the reply port and send right for the adopted voucher */
-	ikm_header(kmsg)->msgh_local_port = reply;
-	ipc_kmsg_set_voucher_port(kmsg, voucher_port, MACH_MSG_TYPE_MOVE_SEND);
-	ikm_header(kmsg)->msgh_bits |=
-	    MACH_MSGH_BITS_SET_PORTS(0, MACH_MSG_TYPE_MAKE_SEND_ONCE, MACH_MSG_TYPE_MOVE_SEND);
+	hdr->msgh_local_port = reply;
+	hdr->msgh_bits |=
+	    MACH_MSGH_BITS_SET_PORTS(
+		0,
+		MACH_MSG_TYPE_MAKE_SEND_ONCE,
+		has_voucher ? MACH_MSG_TYPE_MOVE_SEND : 0);
 
 	mr = ipc_kmsg_copyin_from_kernel(kmsg);
 	if (mr != MACH_MSG_SUCCESS) {
 		/* Remove the voucher from the kmsg */
-		voucher_port = ipc_kmsg_get_voucher_port(kmsg);
-		ipc_kmsg_clear_voucher_port(kmsg);
-		ipc_port_release_send(voucher_port);
+		if (has_voucher) {
+			voucher_port = ipc_kmsg_get_voucher_port(kmsg);
+			ipc_kmsg_clear_voucher_port(kmsg);
+			ipc_port_release_send(voucher_port);
+		}
 
 		ipc_kmsg_free(kmsg);
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
@@ -326,17 +388,11 @@ kernel_mach_msg_rpc(
 	}
 
 	/*
-	 * Sync IPC from kernel should pass adopted voucher and importance.
-	 */
-	mach_msg_option_t option = MACH_SEND_KERNEL_DEFAULT;
-	option &= ~MACH_SEND_NOIMPORTANCE;
-
-	/*
 	 * Destination port would be needed during receive for creating
 	 * Sync IPC linkage with kernel special reply port, grab a reference
 	 * of the destination port before it gets donated to mqueue in ipc_kmsg_send.
 	 */
-	dest = ikm_header(kmsg)->msgh_remote_port;
+	dest = hdr->msgh_remote_port;
 	ip_reference(dest);
 
 	mr = ipc_kmsg_send(kmsg, option, MACH_MSG_TIMEOUT_NONE);
@@ -395,7 +451,10 @@ kernel_mach_msg_rpc(
 	ip_release(dest);
 	dest = IPC_PORT_NULL;
 
-	mach_msg_size_t kmsg_size = ikm_header(kmsg)->msgh_size;
+	/* reload hdr from reply kmsg got above */
+	hdr = ikm_header(kmsg);
+
+	mach_msg_size_t kmsg_size = hdr->msgh_size;
 	mach_msg_size_t kmsg_and_max_trailer_size;
 
 	/*

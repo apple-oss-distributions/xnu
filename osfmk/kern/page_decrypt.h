@@ -57,10 +57,18 @@ struct pager_crypt_info {
 };
 typedef struct pager_crypt_info pager_crypt_info_t;
 
+typedef enum {
+	CRYPT_ORIGIN_ANY,
+	CRYPT_ORIGIN_APP_LAUNCH,
+	CRYPT_ORIGIN_LIBRARY_LOAD,
+	CRYPT_ORIGIN_MAX,
+} crypt_origin_t;
+
 struct crypt_file_data {
 	char          *filename;
 	cpu_type_t     cputype;
 	cpu_subtype_t  cpusubtype;
+	crypt_origin_t origin;
 };
 typedef struct crypt_file_data crypt_file_data_t;
 

@@ -28,6 +28,7 @@
 
 #include <kdp/kdp_core.h>
 #include <kdp/processor_core.h>
+#include <kdp/core_notes.h>
 #include <kern/assert.h>
 #if MONOTONIC
 #include <kern/monotonic.h>
@@ -43,23 +44,6 @@
 
 #define roundup(x, y)   ((((x) % (y)) == 0) ? \
 	                (x) : ((x) + ((y) - ((x) % (y)))))
-
-#define DATA_OWNER_MAIN_BIN_SPEC "main bin spec"
-/*
- * Format of the "main bin spec" LC_NOTE payload as expected by LLDB
- */
-typedef struct {
-	uint32_t version;       // currently 1
-	uint32_t type;          // 0 == unspecified, 1 == kernel, 2 == user process, 3 == standalone (ie FW)
-	uint64_t address;       // UINT64_MAX if address not specified
-	uuid_t   uuid;          // all zero's if uuid not specified
-	uint32_t log2_pagesize; // process page size in log base 2, e.g. 4k pages are 12. 0 for unspecified
-	uint32_t unused;        // leave set to 0
-} __attribute__((packed)) main_bin_spec;
-#define MAIN_BIN_SPEC_VERSION 1
-#define MAIN_BIN_SPEC_TYPE_KERNEL 1
-#define MAIN_BIN_SPEC_TYPE_USER 2
-#define MAIN_BIN_SPEC_TYPE_STANDALONE 3
 
 #define DATA_OWNER_LEGACY_BIN_SPEC "kern ver str"
 /*
@@ -430,7 +414,7 @@ coredump_save_summary(uint64_t core_segment_count, uint64_t core_byte_count,
 
 	/* Account for the LC_NOTE needed to store version/load information */
 	core_context->core_note_count = core_context->core_notes_remaining = (core_context->core_note_count + 1);
-	size_t vers_note_length = sizeof(main_bin_spec);
+	size_t vers_note_length = sizeof(main_bin_spec_note_t);
 	if (core_context->core_config->kcc_coredump_save_sw_vers_detail == NULL) {
 		vers_note_length = sizeof(legacy_bin_spec);
 	}
@@ -804,10 +788,12 @@ coredump_save_sw_vers(uint64_t address, uuid_t uuid, uint32_t log2_pagesize, voi
 	int ret;
 
 	uint32_t type = bin_spec_map[core_context->core_type];
-	main_bin_spec spec = { .version = MAIN_BIN_SPEC_VERSION,
-		               .type = type,
-		               .address = address,
-		               .log2_pagesize = log2_pagesize, };
+	main_bin_spec_note_t spec = {
+		.version = MAIN_BIN_SPEC_VERSION,
+		.type = type,
+		.address = address,
+		.log2_pagesize = log2_pagesize,
+	};
 	uuid_copy(*((uuid_t *)&spec.uuid), uuid);
 
 	ret = coredump_save_note_data(&spec, sizeof(spec), context);
@@ -900,7 +886,7 @@ kern_coredump_routine(void *core_outvars, struct kern_coredump_core *current_cor
 
 	/* write out the LC_NOTE with the binary info */
 	if (current_core->kcc_cb.kcc_coredump_save_sw_vers_detail != NULL) {
-		ret = coredump_save_note_description(DATA_OWNER_MAIN_BIN_SPEC, sizeof(main_bin_spec), &context);
+		ret = coredump_save_note_description(MAIN_BIN_SPEC_DATA_OWNER, sizeof(main_bin_spec_note_t), &context);
 	} else {
 		ret = coredump_save_note_description(DATA_OWNER_LEGACY_BIN_SPEC, sizeof(legacy_bin_spec), &context);
 	}

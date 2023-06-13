@@ -196,7 +196,7 @@ mdevopen(dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
 
 	devid = minor(dev);                                                                     /* Get minor device number */
 
-	if (devid >= NB_MAX_MDEVICES) {
+	if (devid >= NB_MAX_MDEVICES || devid < 0) {
 		return ENXIO;                                                                 /* Not valid */
 	}
 	if ((flags & FWRITE) && (mdev[devid].mdFlags & mdRO)) {
@@ -216,7 +216,7 @@ mdevrw(dev_t dev, struct uio *uio, __unused int ioflag)
 
 	devid = minor(dev);                                                                     /* Get minor device number */
 
-	if (devid >= NB_MAX_MDEVICES) {
+	if (devid >= NB_MAX_MDEVICES || devid < 0) {
 		return ENXIO;                                                                 /* Not valid */
 	}
 	if (!(mdev[devid].mdFlags & mdInited)) {
@@ -389,7 +389,7 @@ mdevioctl(dev_t dev, u_long cmd, caddr_t data, __unused int flag,
 
 	devid = minor(dev);                                                                     /* Get minor device number */
 
-	if (devid >= NB_MAX_MDEVICES) {
+	if (devid >= NB_MAX_MDEVICES || devid < 0) {
 		return ENXIO;                                                                 /* Not valid */
 	}
 	error = proc_suser(p);                  /* Are we superman? */
@@ -473,7 +473,7 @@ mdevsize(dev_t dev)
 	int devid;
 
 	devid = minor(dev);                                                                     /* Get minor device number */
-	if (devid >= NB_MAX_MDEVICES) {
+	if (devid >= NB_MAX_MDEVICES || devid < 0) {
 		return ENXIO;                                                                 /* Not valid */
 	}
 	if ((mdev[devid].mdFlags & mdInited) == 0) {

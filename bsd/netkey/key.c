@@ -80,6 +80,7 @@
 #include <sys/syslog.h>
 #include <sys/mcache.h>
 
+#include <kern/clock.h>
 #include <kern/locks.h>
 
 #include <net/if.h>
@@ -144,11 +145,11 @@ static u_int key_spi_trycnt = 1000;
 static u_int32_t key_spi_minval = 0x100;
 static u_int32_t key_spi_maxval = 0x0fffffff;   /* XXX */
 static u_int32_t policy_id = 0;
-static u_int key_int_random = 60;       /*interval to initialize randseed,1(m)*/
-static u_int key_larval_lifetime = 30;  /* interval to expire acquiring, 30(s)*/
-static int key_blockacq_count = 10;     /* counter for blocking SADB_ACQUIRE.*/
-static int key_blockacq_lifetime = 20;  /* lifetime for blocking SADB_ACQUIRE.*/
-static int key_preferred_oldsa = 0;     /* preferred old sa rather than new sa.*/
+static u_int32_t key_int_random = 60;         /*interval to initialize randseed,1(m)*/
+static u_int32_t key_larval_lifetime = 30;    /* interval to expire acquiring, 30(s)*/
+static u_int32_t key_blockacq_count = 10;     /* counter for blocking SADB_ACQUIRE.*/
+static u_int32_t key_blockacq_lifetime = 20;  /* lifetime for blocking SADB_ACQUIRE.*/
+static int key_preferred_oldsa = 0;           /* preferred old sa rather than new sa.*/
 __private_extern__ int natt_keepalive_interval = 20;    /* interval between natt keepalives.*/
 static u_int32_t ipsec_policy_count = 0;
 static u_int32_t ipsec_sav_count = 0;
@@ -337,13 +338,11 @@ LIST_INSERT_AFTER(curelm, elm, field);\
 } while (0)
 
 #define KEY_CHKSASTATE(head, sav, name) \
-do { \
 if ((head) != (sav)) {                                          \
 ipseclog((LOG_DEBUG, "%s: state mismatched (TREE=%d SA=%d)\n", \
 (name), (head), (sav)));                        \
 continue;                                               \
 }                                                               \
-} while (0)
 
 #define KEY_CHKSPDIR(head, sp, name) \
 do { \
@@ -452,6 +451,7 @@ static struct mbuf *key_setsadbipsecif(ifnet_t, ifnet_t, ifnet_t, u_int8_t);
 static struct mbuf *key_setsadbxsa2(u_int8_t, u_int32_t, u_int32_t, u_int16_t);
 static struct mbuf *key_setsadbxpolicy(u_int16_t, u_int8_t,
     u_int32_t);
+static struct mbuf *key_setsalifecurr(struct sadb_lifetime *);
 static void *key_newbuf(const void *, u_int);
 static int key_ismyaddr6(struct sockaddr_in6 *);
 static void key_update_natt_keepalive_timestamp(struct secasvar *, struct secasvar *);
@@ -525,6 +525,45 @@ int ipsec_send_natt_keepalive(struct secasvar *sav);
 bool ipsec_fill_offload_frame(ifnet_t ifp, struct secasvar *sav, struct ifnet_keepalive_offload_frame *frame, size_t frame_data_offset);
 
 void key_init(struct protosw *, struct domain *);
+
+static u_int64_t
+key_get_continuous_time_ns(void)
+{
+	u_int64_t current_time_ns = 0;
+	absolutetime_to_nanoseconds(mach_continuous_time(), &current_time_ns);
+	return current_time_ns;
+}
+
+static u_int64_t
+key_convert_continuous_time_ns(u_int64_t time_value)
+{
+	// Pass through 0 as it indicates value is not set
+	if (time_value == 0) {
+		return 0;
+	}
+
+	// Get current time
+	clock_sec_t  time_sec;
+	clock_usec_t time_usec;
+	clock_get_calendar_microtime(&time_sec, &time_usec);
+
+	// Get time offset
+	const u_int64_t    time_offset_ns = key_get_continuous_time_ns() - time_value;
+	const clock_sec_t  time_offset_sec = time_offset_ns / NSEC_PER_SEC;
+	const clock_usec_t time_offset_usec = (u_int32_t)(time_offset_ns - (time_offset_sec * NSEC_PER_SEC)) / NSEC_PER_USEC;
+
+	// Subtract offset from current time
+	time_sec -= time_offset_sec;
+	if (time_offset_usec > time_usec) {
+		time_sec--;
+		time_usec = USEC_PER_SEC - (time_offset_usec - time_usec);
+	} else {
+		time_usec -= time_offset_usec;
+	}
+
+	// Return result rounded to nearest second
+	return time_sec + ((time_usec >= (USEC_PER_SEC / 2)) ? 1 : 0);
+}
 
 static void
 key_get_flowid(struct secasvar *sav)
@@ -679,7 +718,6 @@ key_allocsp(
 	u_int dir)
 {
 	struct secpolicy *sp;
-	struct timeval tv;
 
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_NOTOWNED);
 	/* sanity check */
@@ -733,8 +771,7 @@ key_allocsp(
 found:
 
 	/* found a SPD entry */
-	microtime(&tv);
-	sp->lastused = tv.tv_sec;
+	sp->lastused = key_get_continuous_time_ns();
 	sp->refcnt++;
 	lck_mtx_unlock(sadb_mutex);
 
@@ -759,7 +796,6 @@ key_gettunnel(
 {
 	struct secpolicy *sp;
 	const int dir = IPSEC_DIR_INBOUND;
-	struct timeval tv;
 	struct ipsecrequest *r1, *r2, *p;
 	struct sockaddr *os, *od, *is, *id;
 	struct secpolicyindex spidx;
@@ -820,8 +856,7 @@ key_gettunnel(
 	return NULL;
 
 found:
-	microtime(&tv);
-	sp->lastused = tv.tv_sec;
+	sp->lastused = key_get_continuous_time_ns();
 	sp->refcnt++;
 	lck_mtx_unlock(sadb_mutex);
 	return sp;
@@ -1589,7 +1624,7 @@ u_int16_t
 key_natt_get_translated_port(
 	struct secasvar *outsav)
 {
-	struct secasindex saidx;
+	struct secasindex saidx = {};
 	struct secashead *sah;
 	u_int stateidx, state;
 	const u_int *saorder_state_valid;
@@ -2402,7 +2437,6 @@ key_spdadd(
 	struct sadb_lifetime *lft = NULL;
 	struct secpolicyindex spidx;
 	struct secpolicy *newsp;
-	struct timeval tv;
 	ifnet_t internal_if = NULL;
 	char *outgoing_if = NULL;
 	char *ipsec_if = NULL;
@@ -2501,8 +2535,7 @@ key_spdadd(
 		break;
 	default:
 		ipseclog((LOG_DEBUG, "key_spdadd: Invalid SP direction.\n"));
-		mhp->msg->sadb_msg_errno = EINVAL;
-		return 0;
+		return key_senderror(so, m, EINVAL);
 	}
 
 	/* check policy */
@@ -2523,6 +2556,10 @@ key_spdadd(
 
 	/* Process interfaces */
 	if (ipsecifopts != NULL) {
+		ipsecifopts->sadb_x_ipsecif_internal_if[IFXNAMSIZ - 1] = '\0';
+		ipsecifopts->sadb_x_ipsecif_outgoing_if[IFXNAMSIZ - 1] = '\0';
+		ipsecifopts->sadb_x_ipsecif_ipsec_if[IFXNAMSIZ - 1] = '\0';
+
 		if (ipsecifopts->sadb_x_ipsecif_internal_if[0]) {
 			ifnet_find_by_name(ipsecifopts->sadb_x_ipsecif_internal_if, &internal_if);
 		}
@@ -2644,11 +2681,32 @@ key_spdadd(
 	}
 #endif
 
-	microtime(&tv);
-	newsp->created = tv.tv_sec;
-	newsp->lastused = tv.tv_sec;
-	newsp->lifetime = (long)(lft ? lft->sadb_lifetime_addtime : 0);
-	newsp->validtime = (long)(lft ? lft->sadb_lifetime_usetime : 0);
+	const u_int64_t current_time_ns = key_get_continuous_time_ns();
+	newsp->created = current_time_ns;
+	newsp->lastused = current_time_ns;
+
+	if (lft != NULL) {
+		// Convert to nanoseconds
+		u_int64_t lifetime_ns;
+		if (__improbable(os_mul_overflow(lft->sadb_lifetime_addtime, NSEC_PER_SEC, &lifetime_ns))) {
+			ipseclog((LOG_DEBUG, "key_spdadd: invalid lifetime value %llu.\n",
+			    lft->sadb_lifetime_addtime));
+			return key_senderror(so, m, EINVAL);
+		}
+		newsp->lifetime = lifetime_ns;
+
+		u_int64_t validtime_ns;
+		if (__improbable(os_mul_overflow(lft->sadb_lifetime_usetime, NSEC_PER_SEC, &validtime_ns))) {
+			ipseclog((LOG_DEBUG, "key_spdadd: invalid use time value %llu.\n",
+			    lft->sadb_lifetime_usetime));
+			return key_senderror(so, m, EINVAL);
+		}
+		newsp->validtime = validtime_ns;
+	} else {
+		newsp->lifetime = 0;
+		newsp->validtime = 0;
+	}
+
 
 	if (outgoing_if != NULL) {
 		ifnet_find_by_name(outgoing_if, &newsp->outgoing_if);
@@ -2696,8 +2754,7 @@ key_spdadd(
 		struct secspacq *spacq;
 		if ((spacq = key_getspacq(&spidx)) != NULL) {
 			/* reset counter in order to deletion by timehandler. */
-			microtime(&tv);
-			spacq->created = tv.tv_sec;
+			spacq->created = key_get_continuous_time_ns();
 			spacq->count = 0;
 		}
 	}
@@ -2875,6 +2932,10 @@ key_spddelete(
 
 	/* Process interfaces */
 	if (ipsecifopts != NULL) {
+		ipsecifopts->sadb_x_ipsecif_internal_if[IFXNAMSIZ - 1] = '\0';
+		ipsecifopts->sadb_x_ipsecif_outgoing_if[IFXNAMSIZ - 1] = '\0';
+		ipsecifopts->sadb_x_ipsecif_ipsec_if[IFXNAMSIZ - 1] = '\0';
+
 		if (ipsecifopts->sadb_x_ipsecif_internal_if[0]) {
 			ifnet_find_by_name(ipsecifopts->sadb_x_ipsecif_internal_if, &internal_if);
 		}
@@ -3669,15 +3730,15 @@ key_spdexpire(
 	lt->sadb_lifetime_exttype = SADB_EXT_LIFETIME_CURRENT;
 	lt->sadb_lifetime_allocations = 0;
 	lt->sadb_lifetime_bytes = 0;
-	lt->sadb_lifetime_addtime = sp->created;
-	lt->sadb_lifetime_usetime = sp->lastused;
+	lt->sadb_lifetime_addtime = key_convert_continuous_time_ns(sp->created);
+	lt->sadb_lifetime_usetime = key_convert_continuous_time_ns(sp->lastused);
 	lt = (struct sadb_lifetime *)(void *)(mtod(m, caddr_t) + len / 2);
 	lt->sadb_lifetime_len = PFKEY_UNIT64(sizeof(struct sadb_lifetime));
 	lt->sadb_lifetime_exttype = SADB_EXT_LIFETIME_HARD;
 	lt->sadb_lifetime_allocations = 0;
 	lt->sadb_lifetime_bytes = 0;
-	lt->sadb_lifetime_addtime = sp->lifetime;
-	lt->sadb_lifetime_usetime = sp->validtime;
+	lt->sadb_lifetime_addtime = sp->lifetime / NSEC_PER_SEC;
+	lt->sadb_lifetime_usetime = sp->validtime / NSEC_PER_SEC;
 	m_cat(result, m);
 
 	/* set sadb_address(es) for source */
@@ -3994,6 +4055,9 @@ key_newsav(
 		}
 	}
 
+	// Get current continuous time
+	const u_int64_t current_time_ns = key_get_continuous_time_ns();
+
 	/* copy sav values */
 	if (mhp->msg->sadb_msg_type != SADB_GETSPI) {
 		*errp = key_setsaval(newsav, m, mhp);
@@ -4004,7 +4068,6 @@ key_newsav(
 	} else {
 		/* For get SPI, if has a hard lifetime, apply */
 		const struct sadb_lifetime *lft0;
-		struct timeval tv;
 
 		lft0 = (struct sadb_lifetime *)(void *)mhp->ext[SADB_EXT_LIFETIME_HARD];
 		if (lft0 != NULL) {
@@ -4017,13 +4080,11 @@ key_newsav(
 				lck_mtx_lock(sadb_mutex);
 			}
 
-			microtime(&tv);
-
 			newsav->lft_c->sadb_lifetime_len = PFKEY_UNIT64(sizeof(struct sadb_lifetime));
 			newsav->lft_c->sadb_lifetime_exttype = SADB_EXT_LIFETIME_CURRENT;
 			newsav->lft_c->sadb_lifetime_allocations = 0;
 			newsav->lft_c->sadb_lifetime_bytes = 0;
-			newsav->lft_c->sadb_lifetime_addtime = tv.tv_sec;
+			newsav->lft_c->sadb_lifetime_addtime = current_time_ns;
 			newsav->lft_c->sadb_lifetime_usetime = 0;
 
 			if (mhp->extlen[SADB_EXT_LIFETIME_HARD] < sizeof(*lft0)) {
@@ -4037,11 +4098,7 @@ key_newsav(
 	}
 
 	/* reset created */
-	{
-		struct timeval tv;
-		microtime(&tv);
-		newsav->created = tv.tv_sec;
-	}
+	newsav->created = current_time_ns;
 
 	newsav->pid = mhp->msg->sadb_msg_pid;
 
@@ -4329,7 +4386,6 @@ key_setsaval(
 	const struct esp_algorithm *algo;
 #endif
 	int error = 0;
-	struct timeval tv;
 
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
 
@@ -4530,8 +4586,8 @@ key_setsaval(
 	}
 
 	/* reset created */
-	microtime(&tv);
-	sav->created = tv.tv_sec;
+	const u_int64_t current_time_ns = key_get_continuous_time_ns();
+	sav->created = current_time_ns;
 
 	/* make lifetime for CURRENT */
 	sav->lft_c = kalloc_type(struct sadb_lifetime, Z_NOWAIT);
@@ -4542,14 +4598,12 @@ key_setsaval(
 		lck_mtx_lock(sadb_mutex);
 	}
 
-	microtime(&tv);
-
 	sav->lft_c->sadb_lifetime_len =
 	    PFKEY_UNIT64(sizeof(struct sadb_lifetime));
 	sav->lft_c->sadb_lifetime_exttype = SADB_EXT_LIFETIME_CURRENT;
 	sav->lft_c->sadb_lifetime_allocations = 0;
 	sav->lft_c->sadb_lifetime_bytes = 0;
-	sav->lft_c->sadb_lifetime_addtime = tv.tv_sec;
+	sav->lft_c->sadb_lifetime_addtime = current_time_ns;
 	sav->lft_c->sadb_lifetime_usetime = 0;
 
 	/* lifetimes for HARD and SOFT */
@@ -4565,7 +4619,15 @@ key_setsaval(
 				goto fail;
 			}
 			sav->lft_h = (struct sadb_lifetime *)key_newbuf(lft0, sizeof(*lft0));
-			/* to be initialize ? */
+
+			// Check that conversion to nanoseconds won't cause an overflow
+			u_int64_t nanotime;
+			if (__improbable(os_mul_overflow(sav->lft_h->sadb_lifetime_addtime, NSEC_PER_SEC, &nanotime))) {
+				ipseclog((LOG_DEBUG, "key_setsaval: invalid hard lifetime value %llu.\n",
+				    sav->lft_h->sadb_lifetime_addtime));
+				error = EINVAL;
+				goto fail;
+			}
 		}
 
 		lft0 = (struct sadb_lifetime *)
@@ -4577,7 +4639,15 @@ key_setsaval(
 				goto fail;
 			}
 			sav->lft_s = (struct sadb_lifetime *)key_newbuf(lft0, sizeof(*lft0));
-			/* to be initialize ? */
+
+			// Check that conversion to nanoseconds won't cause an overflow
+			u_int64_t nanotime;
+			if (__improbable(os_mul_overflow(sav->lft_s->sadb_lifetime_addtime, NSEC_PER_SEC, &nanotime))) {
+				ipseclog((LOG_DEBUG, "key_setsaval: invalid soft lifetime value %llu.\n",
+				    sav->lft_s->sadb_lifetime_addtime));
+				error = EINVAL;
+				goto fail;
+			}
 		}
 	}
 
@@ -4837,8 +4907,10 @@ key_setdumpsa(
 			if (!sav->lft_c) {
 				continue;
 			}
-			l = PFKEY_UNUNIT64(((struct sadb_ext *)sav->lft_c)->sadb_ext_len);
-			p = sav->lft_c;
+			m = key_setsalifecurr(sav->lft_c);
+			if (!m) {
+				goto fail;
+			}
 			break;
 
 		case SADB_EXT_LIFETIME_HARD:
@@ -5251,6 +5323,36 @@ key_setsadbxpolicy(
 	p->sadb_x_policy_type = type;
 	p->sadb_x_policy_dir = dir;
 	p->sadb_x_policy_id = id;
+
+	return m;
+}
+
+/*
+ * Copy current lifetime data, converting timestamps to wall clock time
+ */
+static struct mbuf *
+key_setsalifecurr(
+	struct sadb_lifetime *lft_c)
+{
+	struct mbuf *m;
+	struct sadb_lifetime *p;
+	u_int16_t len;
+
+	len = PFKEY_ALIGN8(sizeof(struct sadb_lifetime));
+	m = key_alloc_mbuf(len);
+	if (!m || m->m_next) {  /*XXX*/
+		if (m) {
+			m_freem(m);
+		}
+		return NULL;
+	}
+
+	p = mtod(m, struct sadb_lifetime *);
+	bcopy(lft_c, p, sizeof(struct sadb_lifetime));
+
+	// Convert timestamps
+	p->sadb_lifetime_addtime = key_convert_continuous_time_ns(lft_c->sadb_lifetime_addtime);
+	p->sadb_lifetime_usetime = key_convert_continuous_time_ns(lft_c->sadb_lifetime_usetime);
 
 	return m;
 }
@@ -5858,14 +5960,12 @@ void
 key_timehandler(void)
 {
 	u_int dir;
-	struct timeval tv;
 	struct secpolicy **spbuf = NULL, **spptr = NULL;
 	struct secasvar **savexbuf = NULL, **savexptr = NULL;
 	struct secasvar **savkabuf = NULL, **savkaptr = NULL;
 	u_int32_t spbufcount = 0, savbufcount = 0, spcount = 0, savexcount = 0, savkacount = 0, cnt;
 	int stop_handler = 1;  /* stop the timehandler */
-
-	microtime(&tv);
+	const u_int64_t current_time_ns = key_get_continuous_time_ns();
 
 	/* pre-allocate buffers before taking the lock */
 	/* if allocation failures occur - portions of the processing will be skipped */
@@ -5921,9 +6021,9 @@ key_timehandler(void)
 				if (spbuf && spcount < spbufcount) {
 					/* the deletion will occur next time */
 					if ((sp->lifetime
-					    && tv.tv_sec - sp->created > sp->lifetime)
+					    && current_time_ns - sp->created > sp->lifetime)
 					    || (sp->validtime
-					    && tv.tv_sec - sp->lastused > sp->validtime)) {
+					    && current_time_ns - sp->lastused > sp->validtime)) {
 						//key_spdexpire(sp);
 						sp->state = IPSEC_SPSTATE_DEAD;
 						sp->refcnt++;
@@ -5969,6 +6069,7 @@ key_timehandler(void)
 			stop_handler = 0;
 
 			/* if LARVAL entry doesn't become MATURE, delete it. */
+			const u_int64_t larval_lifetime = (u_int64_t)key_larval_lifetime * NSEC_PER_SEC;
 			for (sav = LIST_FIRST(&sah->savtree[SADB_SASTATE_LARVAL]);
 			    sav != NULL;
 			    sav = nextsav) {
@@ -5978,19 +6079,21 @@ key_timehandler(void)
 
 				if (sav->lft_h != NULL) {
 					/* If a hard lifetime is defined for the LARVAL SA, use it */
-					if (sav->lft_h->sadb_lifetime_addtime != 0
-					    && tv.tv_sec - sav->created > sav->lft_h->sadb_lifetime_addtime) {
-						if (sav->always_expire) {
-							key_send_delete(sav);
-							sav = NULL;
-						} else {
-							key_sa_chgstate(sav, SADB_SASTATE_DEAD);
-							key_freesav(sav, KEY_SADB_LOCKED);
-							sav = NULL;
+					if (sav->lft_h->sadb_lifetime_addtime != 0) {
+						const u_int64_t lifetime_addtime = sav->lft_h->sadb_lifetime_addtime * NSEC_PER_SEC;
+						if (current_time_ns - sav->created > lifetime_addtime) {
+							if (sav->always_expire) {
+								key_send_delete(sav);
+								sav = NULL;
+							} else {
+								key_sa_chgstate(sav, SADB_SASTATE_DEAD);
+								key_freesav(sav, KEY_SADB_LOCKED);
+								sav = NULL;
+							}
 						}
 					}
 				} else {
-					if (tv.tv_sec - sav->created > key_larval_lifetime) {
+					if (current_time_ns - sav->created > larval_lifetime) {
 						key_freesav(sav, KEY_SADB_LOCKED);
 					}
 				}
@@ -6040,22 +6143,24 @@ key_timehandler(void)
 				}
 
 				/* check SOFT lifetime */
-				if (sav->lft_s->sadb_lifetime_addtime != 0
-				    && tv.tv_sec - sav->created > sav->lft_s->sadb_lifetime_addtime) {
-					/*
-					 * If always_expire is set, expire. Otherwise,
-					 * if the SA has not been used, delete immediately.
-					 */
-					if (sav->lft_c->sadb_lifetime_usetime == 0
-					    && sav->always_expire == 0) {
-						key_sa_chgstate(sav, SADB_SASTATE_DEAD);
-						key_freesav(sav, KEY_SADB_LOCKED);
-						sav = NULL;
-					} else if (savexbuf && savexcount < savbufcount) {
-						key_sa_chgstate(sav, SADB_SASTATE_DYING);
-						sav->refcnt++;
-						*savexptr++ = sav;
-						savexcount++;
+				if (sav->lft_s->sadb_lifetime_addtime != 0) {
+					const u_int64_t lifetime_addtime = sav->lft_s->sadb_lifetime_addtime * NSEC_PER_SEC;
+					if (current_time_ns - sav->created > lifetime_addtime) {
+						/*
+						 * If always_expire is set, expire. Otherwise,
+						 * if the SA has not been used, delete immediately.
+						 */
+						if (sav->lft_c->sadb_lifetime_usetime == 0
+						    && sav->always_expire == 0) {
+							key_sa_chgstate(sav, SADB_SASTATE_DEAD);
+							key_freesav(sav, KEY_SADB_LOCKED);
+							sav = NULL;
+						} else if (savexbuf && savexcount < savbufcount) {
+							key_sa_chgstate(sav, SADB_SASTATE_DYING);
+							sav->refcnt++;
+							*savexptr++ = sav;
+							savexcount++;
+						}
 					}
 				}
 				/* check SOFT lifetime by bytes */
@@ -6100,15 +6205,18 @@ key_timehandler(void)
 					continue;
 				}
 
-				if (sav->lft_h->sadb_lifetime_addtime != 0
-				    && tv.tv_sec - sav->created > sav->lft_h->sadb_lifetime_addtime) {
-					if (sav->always_expire) {
-						key_send_delete(sav);
-						sav = NULL;
-					} else {
-						key_sa_chgstate(sav, SADB_SASTATE_DEAD);
-						key_freesav(sav, KEY_SADB_LOCKED);
-						sav = NULL;
+				/* check HARD lifetime */
+				if (sav->lft_h->sadb_lifetime_addtime != 0) {
+					const u_int64_t lifetime_addtime = sav->lft_h->sadb_lifetime_addtime * NSEC_PER_SEC;
+					if (current_time_ns - sav->created > lifetime_addtime) {
+						if (sav->always_expire) {
+							key_send_delete(sav);
+							sav = NULL;
+						} else {
+							key_sa_chgstate(sav, SADB_SASTATE_DEAD);
+							key_freesav(sav, KEY_SADB_LOCKED);
+							sav = NULL;
+						}
 					}
 				}
 				/* check HARD lifetime by bytes */
@@ -6173,6 +6281,8 @@ key_timehandler(void)
 		sah_search_calls = 0;
 		key_timehandler_debug = 0;
 	}
+
+	const u_int64_t blockacq_lifetime = (u_int64_t)key_blockacq_lifetime * NSEC_PER_SEC;
 #ifndef IPSEC_NONBLOCK_ACQUIRE
 	/* ACQ tree */
 	{
@@ -6184,7 +6294,7 @@ key_timehandler(void)
 			stop_handler = 0;
 			nextacq = LIST_NEXT(acq, chain);
 
-			if (tv.tv_sec - acq->created > key_blockacq_lifetime
+			if (current_time_ns - acq->created > blockacq_lifetime
 			    && __LIST_CHAINED(acq)) {
 				LIST_REMOVE(acq, chain);
 				kfree_type(struct secacq, acq);
@@ -6203,7 +6313,7 @@ key_timehandler(void)
 			stop_handler = 0;
 			nextacq = LIST_NEXT(acq, chain);
 
-			if (tv.tv_sec - acq->created > key_blockacq_lifetime
+			if (current_time_ns - acq->created > blockacq_lifetime
 			    && __LIST_CHAINED(acq)) {
 				LIST_REMOVE(acq, chain);
 				struct secacq *secacq_p = (struct secacq *)acq;
@@ -6608,9 +6718,7 @@ key_getspi(
 		struct secacq *acq;
 		if ((acq = key_getacqbyseq(mhp->msg->sadb_msg_seq)) != NULL) {
 			/* reset counter in order to deletion by timehandler. */
-			struct timeval tv;
-			microtime(&tv);
-			acq->created = tv.tv_sec;
+			acq->created = key_get_continuous_time_ns();
 			acq->count = 0;
 		}
 	}
@@ -7755,9 +7863,14 @@ key_getsastatbyspi_one(u_int32_t      spi,
 		sav = key_getsavbyspi(sah, spi);
 		if (sav) {
 			stat->spi = sav->spi;
-			stat->created = (u_int32_t)sav->created;
+			stat->created = (u_int32_t)key_convert_continuous_time_ns(sav->created);
 			if (sav->lft_c) {
 				bcopy(sav->lft_c, &stat->lft_c, sizeof(stat->lft_c));
+				// Convert timestamps
+				stat->lft_c.sadb_lifetime_addtime =
+				    key_convert_continuous_time_ns(sav->lft_c->sadb_lifetime_addtime);
+				stat->lft_c.sadb_lifetime_usetime =
+				    key_convert_continuous_time_ns(sav->lft_c->sadb_lifetime_usetime);
 			} else {
 				bzero(&stat->lft_c, sizeof(stat->lft_c));
 			}
@@ -8194,7 +8307,6 @@ key_newacq(
 	struct secasindex *saidx)
 {
 	struct secacq *newacq;
-	struct timeval tv;
 
 	/* get new entry */
 	newacq = kalloc_type(struct secacq, Z_NOWAIT_ZERO);
@@ -8207,8 +8319,7 @@ key_newacq(
 	/* copy secindex */
 	bcopy(saidx, &newacq->saidx, sizeof(newacq->saidx));
 	newacq->seq = (acq_seq == ~0 ? 1 : ++acq_seq);
-	microtime(&tv);
-	newacq->created = tv.tv_sec;
+	newacq->created = key_get_continuous_time_ns();
 
 	return newacq;
 }
@@ -8253,7 +8364,6 @@ key_newspacq(
 	struct secpolicyindex *spidx)
 {
 	struct secspacq *acq;
-	struct timeval tv;
 
 	/* get new entry */
 	acq = kalloc_type(struct secspacq, Z_NOWAIT_ZERO);
@@ -8265,8 +8375,7 @@ key_newspacq(
 
 	/* copy secindex */
 	bcopy(spidx, &acq->spidx, sizeof(acq->spidx));
-	microtime(&tv);
-	acq->created = tv.tv_sec;
+	acq->created = key_get_continuous_time_ns();
 
 	return acq;
 }
@@ -8332,7 +8441,6 @@ key_acquire2(
 	if (mhp->msg->sadb_msg_len == PFKEY_UNIT64(sizeof(struct sadb_msg))) {
 #ifndef IPSEC_NONBLOCK_ACQUIRE
 		struct secacq *acq;
-		struct timeval tv;
 
 		/* check sequence number */
 		if (mhp->msg->sadb_msg_seq == 0) {
@@ -8353,8 +8461,7 @@ key_acquire2(
 		}
 
 		/* reset acq counter in order to deletion by timehander. */
-		microtime(&tv);
-		acq->created = tv.tv_sec;
+		acq->created = key_get_continuous_time_ns();
 		acq->count = 0;
 #endif
 		lck_mtx_unlock(sadb_mutex);
@@ -8759,8 +8866,8 @@ key_expire(
 	lt->sadb_lifetime_exttype = SADB_EXT_LIFETIME_CURRENT;
 	lt->sadb_lifetime_allocations = sav->lft_c->sadb_lifetime_allocations;
 	lt->sadb_lifetime_bytes = sav->lft_c->sadb_lifetime_bytes;
-	lt->sadb_lifetime_addtime = sav->lft_c->sadb_lifetime_addtime;
-	lt->sadb_lifetime_usetime = sav->lft_c->sadb_lifetime_usetime;
+	lt->sadb_lifetime_addtime = key_convert_continuous_time_ns(sav->lft_c->sadb_lifetime_addtime);
+	lt->sadb_lifetime_usetime = key_convert_continuous_time_ns(sav->lft_c->sadb_lifetime_usetime);
 	lt = (struct sadb_lifetime *)(void *)(mtod(m, caddr_t) + len / 2);
 	bcopy(sav->lft_s, lt, sizeof(*lt));
 	m_cat(result, m);
@@ -9807,9 +9914,9 @@ key_sa_recordxfer(
 	/* XXX check for expires? */
 
 	/*
-	 * NOTE: We record CURRENT sadb_lifetime_usetime by using wall clock,
-	 * in seconds.  HARD and SOFT lifetime are measured by the time
-	 * difference (again in seconds) from sadb_lifetime_usetime.
+	 * NOTE: We record CURRENT sadb_lifetime_usetime by using mach_continuous_time,
+	 * in nanoseconds.  HARD and SOFT lifetime are measured by the time difference
+	 * from sadb_lifetime_usetime.
 	 *
 	 *	usetime
 	 *	v     expire   expire
@@ -9817,12 +9924,8 @@ key_sa_recordxfer(
 	 *	<--------------> HARD
 	 *	<-----> SOFT
 	 */
-	{
-		struct timeval tv;
-		microtime(&tv);
-		sav->lft_c->sadb_lifetime_usetime = tv.tv_sec;
-		/* XXX check for expires? */
-	}
+	sav->lft_c->sadb_lifetime_usetime = key_get_continuous_time_ns();
+	/* XXX check for expires? */
 	lck_mtx_unlock(sadb_mutex);
 
 	return;

@@ -1669,7 +1669,7 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			STATS_INC(fsws, FSW_STATS_RX_FLOW_TRACK_ERR);
 			/* if need to trigger RST */
 			if (err == ENETRESET) {
-				flow_track_abort_tcp(fe, spkt, NULL);
+				flow_track_abort_tcp(fe, pkt, NULL);
 			}
 			SK_ERR("flow_pkt_track failed (err %d)", err);
 			__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt);

@@ -57,6 +57,18 @@ IOLockAlloc( void )
 }
 
 void
+IOLockInlineInit( IOLock *lock )
+{
+	lck_mtx_init(lock, IOLockGroup, LCK_ATTR_NULL);
+}
+
+void
+IOLockInlineDestroy( IOLock * lock)
+{
+	lck_mtx_destroy( lock, IOLockGroup);
+}
+
+void
 IOLockFree( IOLock * lock)
 {
 	lck_mtx_free( lock, IOLockGroup);
@@ -300,6 +312,18 @@ IORWLock *
 IORWLockAlloc( void )
 {
 	return lck_rw_alloc_init(IOLockGroup, LCK_ATTR_NULL);
+}
+
+void
+IORWLockInlineInit( IORWLock *lock )
+{
+	lck_rw_init(lock, IOLockGroup, LCK_ATTR_NULL);
+}
+
+void
+IORWLockInlineDestroy( IORWLock * lock)
+{
+	lck_rw_destroy( lock, IOLockGroup);
 }
 
 void

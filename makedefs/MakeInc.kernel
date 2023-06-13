@@ -126,9 +126,13 @@ endif
 	$(_v)$(LN) $(call function_convert_build_config_to_objdir,$(CURRENT_BUILD_CONFIG))/$(KERNEL_FILE_NAME) $(OBJROOT)/$(KERNEL_FILE_NAME)
 
 $(TARGET)/$(KERNEL_FILE_NAME).dSYM: $(TARGET)/$(KERNEL_FILE_NAME).unstripped
+ifeq ($(BUILD_DSYM),1)
 	@$(LOG_DSYMUTIL) "$(@F)"
 	$(_v)$(BASH) -c "$(DSYMUTIL) $(DSYMUTIL_FLAGS) $< -o $@ $(_vstdout) 2> >(grep -v '^warning:.*could not find object file symbol for symbol' 1>&2)"
 	$(_v)$(MV) $@/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME).unstripped $@/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME)
+else
+	$(_v)$(MKDIR) $@
+endif
 	$(_v)$(TOUCH) $@
 
 ifeq ($(BUILD_XNU_LIBRARY),1)

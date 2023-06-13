@@ -164,7 +164,7 @@ extern void             pmap_disable_user_jop(
  *	vm_offset_t, etc... types.
  */
 
-extern void *pmap_steal_memory(vm_size_t size); /* Early memory allocation */
+extern void *pmap_steal_memory(vm_size_t size, vm_size_t alignment); /* Early memory allocation */
 extern void *pmap_steal_freeable_memory(vm_size_t size); /* Early memory allocation */
 
 extern uint_t pmap_free_pages(void); /* report remaining unused physical pages */
@@ -350,7 +350,6 @@ extern void             pmap_unmap_compressor_page(
 	void*);
 
 #if defined(__arm__) || defined(__arm64__)
-/* ARM64_TODO */
 extern  bool       pmap_batch_set_cache_attributes(
 	upl_page_info_array_t,
 	unsigned int,
@@ -685,7 +684,8 @@ extern const pmap_t     kernel_pmap;            /* The kernel's map */
 #if __x86_64__
 
 #define PMAP_CREATE_EPT            0x2
-#define PMAP_CREATE_KNOWN_FLAGS (PMAP_CREATE_64BIT | PMAP_CREATE_EPT)
+#define PMAP_CREATE_TEST           0x4 /* pmap will be used for testing purposes only */
+#define PMAP_CREATE_KNOWN_FLAGS (PMAP_CREATE_64BIT | PMAP_CREATE_EPT | PMAP_CREATE_TEST)
 
 #else
 
@@ -707,8 +707,11 @@ extern const pmap_t     kernel_pmap;            /* The kernel's map */
 #define PMAP_CREATE_ROSETTA        0
 #endif /* CONFIG_ROSETTA */
 
+#define PMAP_CREATE_TEST           0x40 /* pmap will be used for testing purposes only */
+
 /* Define PMAP_CREATE_KNOWN_FLAGS in terms of optional flags */
-#define PMAP_CREATE_KNOWN_FLAGS (PMAP_CREATE_64BIT | PMAP_CREATE_STAGE2 | PMAP_CREATE_DISABLE_JOP | PMAP_CREATE_FORCE_4K_PAGES | PMAP_CREATE_X86_64 | PMAP_CREATE_ROSETTA)
+#define PMAP_CREATE_KNOWN_FLAGS (PMAP_CREATE_64BIT | PMAP_CREATE_STAGE2 | PMAP_CREATE_DISABLE_JOP | \
+    PMAP_CREATE_FORCE_4K_PAGES | PMAP_CREATE_X86_64 | PMAP_CREATE_ROSETTA | PMAP_CREATE_TEST)
 
 #endif /* __x86_64__ */
 
@@ -738,8 +741,11 @@ extern const pmap_t     kernel_pmap;            /* The kernel's map */
 #define PMAP_OPTIONS_FF_LOCKED  0x8000
 #define PMAP_OPTIONS_FF_WIRED   0x10000
 #endif
+#define PMAP_OPTIONS_XNU_USER_DEBUG 0x20000
 
 #define PMAP_OPTIONS_MAP_TPRO 0x40000
+
+#define PMAP_OPTIONS_RESERVED_MASK 0xFF000000   /* encoding space reserved for internal pmap use */
 
 #if     !defined(__LP64__)
 extern vm_offset_t      pmap_extract(pmap_t pmap,
@@ -805,6 +811,10 @@ extern void pmap_trim(pmap_t grand, pmap_t subord, addr64_t vstart, uint64_t siz
 
 extern kern_return_t pmap_dump_page_tables(pmap_t pmap, void *bufp, void *buf_end, unsigned int level_mask, size_t *bytes_copied);
 
+/* Asks the pmap layer for number of bits used for VA address. */
+extern uint32_t pmap_user_va_bits(pmap_t pmap);
+extern uint32_t pmap_kernel_va_bits(void);
+
 /*
  * Indicates if any special policy is applied to this protection by the pmap
  * layer.
@@ -828,14 +838,10 @@ extern kern_return_t pmap_query_page_info(
 	vm_map_offset_t va,
 	int             *disp);
 
+extern bool pmap_in_ppl(void);
+
 extern uint32_t pmap_lookup_in_static_trust_cache(const uint8_t cdhash[CS_CDHASH_LEN]);
 extern bool pmap_lookup_in_loaded_trust_caches(const uint8_t cdhash[CS_CDHASH_LEN]);
-
-extern void pmap_set_compilation_service_cdhash(const uint8_t cdhash[CS_CDHASH_LEN]);
-extern bool pmap_match_compilation_service_cdhash(const uint8_t cdhash[CS_CDHASH_LEN]);
-
-extern bool pmap_in_ppl(void);
-extern bool pmap_has_ppl(void);
 
 /**
  * Indicates whether the device supports register-level MMIO access control.
@@ -874,15 +880,12 @@ extern ledger_t pmap_ledger_alloc(void);
 extern void pmap_ledger_free(ledger_t);
 
 extern bool pmap_is_bad_ram(ppnum_t ppn);
-extern kern_return_t pmap_cs_allow_invalid(pmap_t pmap);
 
 #if __arm64__
 extern bool pmap_is_exotic(pmap_t pmap);
 #else /* __arm64__ */
 #define pmap_is_exotic(pmap) false
 #endif /* __arm64__ */
-
-extern bool pmap_cs_enabled(void);
 
 
 /*
@@ -896,55 +899,21 @@ extern bool pmap_cs_enabled(void);
  *
  * Never assume the system is "secure" if this returns 0.
  */
-
 extern int pmap_cs_configuration(void);
 
-extern kern_return_t pmap_cs_fork_prepare(
-	pmap_t old_pmap,
-	pmap_t new_pmap
-	);
+#if XNU_KERNEL_PRIVATE
 
-/*
- * The PMAP layer is responsible for holding on to the local signing key so that
- * we can re-use the code for multiple different layers. By keeping our local
- * signing public key here, we can safeguard it with PMAP_CS, and also use it
- * within PMAP_CS for validation.
- *
- * Moreover, we present an API which can be used by AMFI to query the key when
- * it needs to.
+#if defined(__arm64__)
+
+/**
+ * Check if a particular pmap is used for stage2 translations or not.
  */
-#define PMAP_ECC_P384_PUBLIC_KEY_SIZE 97
-extern void pmap_set_local_signing_public_key(
-	const uint8_t public_key[PMAP_ECC_P384_PUBLIC_KEY_SIZE]
-	);
+extern bool
+pmap_performs_stage2_translations(const pmap_t pmap);
 
-extern uint8_t *pmap_get_local_signing_public_key(void);
+#endif /* defined(__arm64__) */
+#endif /* XNU_KERNEL_PRIVATE */
 
-/*
- * We require AMFI call into the PMAP layer to unrestrict a particular CDHash
- * for local signing. This only needs to happen for arm devices since x86 devices
- * don't have PMAP_CS.
- *
- * For now, we make the configuration available for x86 devices as well. When
- * AMFI stop calling into this API, we'll remove it.
- */
-#define PMAP_SUPPORTS_RESTRICTED_LOCAL_SIGNING 1
-extern void pmap_unrestrict_local_signing(
-	const uint8_t cdhash[CS_CDHASH_LEN]
-	);
-
-#if __has_include(<CoreEntitlements/CoreEntitlements.h>)
-/*
- * The PMAP layer provides an API to query entitlements through the CoreEntitlements
- * layer.
- */
-extern bool pmap_query_entitlements(
-	pmap_t pmap,
-	CEQuery_t query,
-	size_t queryLength,
-	CEQueryContext_t finalContext
-	);
-#endif
 
 #endif  /* KERNEL_PRIVATE */
 

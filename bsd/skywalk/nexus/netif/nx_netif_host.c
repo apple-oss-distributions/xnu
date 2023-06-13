@@ -217,7 +217,7 @@ nx_netif_host_krings_create(struct nexus_adapter *na, struct kern_channel *ch)
 	    na->na_type == NA_NETIF_COMPAT_HOST);
 	ASSERT(na->na_flags & NAF_HOST_ONLY);
 
-	ret = na_rings_mem_setup(na, 0, FALSE, ch);
+	ret = na_rings_mem_setup(na, FALSE, ch);
 	if (ret == 0) {
 		struct __kern_channel_ring *kring;
 		uint32_t i;

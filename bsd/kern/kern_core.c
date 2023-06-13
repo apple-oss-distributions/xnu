@@ -62,6 +62,7 @@
 #include <vm/vm_kern.h>
 #include <vm/vm_protos.h> /* last */
 #include <vm/vm_map.h>          /* current_map() */
+#include <vm/pmap.h>            /* pmap_user_va_bits() */
 #include <mach/mach_vm.h>       /* mach_vm_region_recurse() */
 #include <mach/task.h>          /* task_suspend() */
 #include <kern/task.h>          /* get_task_numacts() */
@@ -71,6 +72,8 @@
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #endif /* CONFIG_MACF */
+
+#include <kdp/core_notes.h>
 
 #define COREDUMP_CUSTOM_LOCATION_ENTITLEMENT "com.apple.private.custom-coredump-location"
 
@@ -211,6 +214,85 @@ collectth_state(thread_t th_act, void *tirp)
 #endif
 
 /*
+ * LC_NOTE support for userspace coredumps.
+ */
+
+typedef int (write_note_cb_t)(struct vnode *vp, off_t foffset);
+
+static int
+note_addrable_bits(struct vnode *vp, off_t foffset)
+{
+	task_t t = current_task();
+	vfs_context_t ctx = vfs_context_current();
+	kauth_cred_t cred = vfs_context_ucred(ctx);
+
+	addrable_bits_note_t note = {
+		.version = ADDRABLE_BITS_VER,
+		.addressing_bits = pmap_user_va_bits(get_task_pmap(t)),
+		.unused = 0
+	};
+
+	return vn_rdwr_64(UIO_WRITE, vp, (vm_offset_t)&note, sizeof(note), foffset, UIO_SYSSPACE,
+	           IO_NODELOCKED | IO_UNIT, cred, 0, current_proc());
+}
+
+/*
+ * note handling
+ */
+
+struct core_note {
+	size_t          cn_size;
+	const char      *cn_owner;
+	write_note_cb_t *cn_write_cb;
+} const core_notes[] = {
+	{
+		.cn_size = sizeof(addrable_bits_note_t),
+		.cn_owner = ADDRABLE_BITS_DATA_OWNER,
+		.cn_write_cb = note_addrable_bits,
+	}
+};
+
+const size_t notes_count = sizeof(core_notes) / sizeof(struct core_note);
+
+/*
+ * LC_NOTE commands are allocated as a part of Mach-O header and are written to
+ * disk at the end of coredump. LC_NOTE's payload has to be written in callbacks here.
+ */
+static int
+dump_notes(proc_t __unused core_proc, vm_offset_t header, size_t hoffset, struct vnode *vp, off_t foffset)
+{
+	for (size_t i = 0; i < notes_count; i++) {
+		int error = 0;
+
+		if (core_notes[i].cn_write_cb == NULL) {
+			continue;
+		}
+
+		/* Generate LC_NOTE command. */
+		struct note_command *nc = (struct note_command *)(header + hoffset);
+
+		nc->cmd = LC_NOTE;
+		nc->cmdsize = sizeof(struct note_command);
+		nc->offset = foffset;
+		nc->size = core_notes[i].cn_size;
+		strlcpy(nc->data_owner, core_notes[i].cn_owner, sizeof(nc->data_owner));
+
+		hoffset += sizeof(struct note_command);
+
+		/* Add note's payload. */
+		error = core_notes[i].cn_write_cb(vp, foffset);
+		if (error != KERN_SUCCESS) {
+			COREDUMPLOG("failed to write LC_NOTE %s: error %d", core_notes[i].cn_owner, error);
+			return error;
+		}
+
+		foffset += core_notes[i].cn_size;
+	}
+
+	return 0;
+}
+
+/*
  * coredump
  *
  * Description:	Create a core image on the file "core" for the process
@@ -267,6 +349,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	int             is_64 = 0;
 	size_t          mach_header_sz = sizeof(struct mach_header);
 	size_t          segment_command_sz = sizeof(struct segment_command);
+	size_t          notes_size = 0;
 	const char     *format = NULL;
 	char           *custom_location_entitlement = NULL;
 	size_t          custom_location_entitlement_len = 0;
@@ -428,6 +511,19 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 			error = ENOMEM;
 			goto out;
 		}
+
+		/* Add notes payload. */
+		if (os_mul_overflow(notes_count, sizeof(struct note_command), &notes_size)) {
+			COREDUMPLOG("error: note command size overflow: note=%lu", i);
+			error = ENOMEM;
+			goto out;
+		}
+
+		if (os_add_overflow(command_size, notes_size, &command_size)) {
+			COREDUMPLOG("error: notes overflow: notes_size=%lu", notes_size);
+			error = ENOMEM;
+			goto out;
+		}
 	}
 
 	if (os_add_overflow(command_size, mach_header_sz, &header_size)) {
@@ -452,7 +548,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		mh64->cputype = process_cpu_type(core_proc);
 		mh64->cpusubtype = process_cpu_subtype(core_proc);
 		mh64->filetype = MH_CORE;
-		mh64->ncmds = (uint32_t)(segment_count + thread_count);
+		mh64->ncmds = (uint32_t)(segment_count + notes_count + thread_count);
 		mh64->sizeofcmds = (uint32_t)command_size;
 	} else {
 		mh = (struct mach_header *)header;
@@ -460,7 +556,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		mh->cputype = process_cpu_type(core_proc);
 		mh->cpusubtype = process_cpu_subtype(core_proc);
 		mh->filetype = MH_CORE;
-		mh->ncmds = (uint32_t)(segment_count + thread_count);
+		mh->ncmds = (uint32_t)(segment_count + notes_count + thread_count);
 		mh->sizeofcmds = (uint32_t)command_size;
 	}
 
@@ -627,8 +723,15 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		mh->sizeofcmds -= segment_count * segment_command_sz;
 	}
 
+	/* Add LC_NOTES */
+	COREDUMPLOG("dumping %zu notes", notes_count);
+	if (dump_notes(core_proc, header, hoffset, vp, foffset) != 0) {
+		error = EFAULT;
+		goto out;
+	}
+
 	tir1.header = header;
-	tir1.hoffset = hoffset;
+	tir1.hoffset = hoffset + notes_size;
 	tir1.flavors = flavors;
 	tir1.tstate_size = tstate_size;
 	COREDUMPLOG("dumping %zu threads", thread_count);

@@ -1940,9 +1940,17 @@ thread_setentrypoint(thread_t         thread,
 {
 	struct arm_saved_state *sv;
 
+#if HAS_APPLE_PAC
+	uint64_t intr = ml_pac_safe_interrupts_disable();
+#endif
+
 	sv = get_user_regs(thread);
 
 	set_saved_state_pc(sv, entry);
+
+#if HAS_APPLE_PAC
+	ml_pac_safe_interrupts_restore(intr);
+#endif
 
 	return;
 }

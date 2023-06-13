@@ -1139,6 +1139,7 @@ in6_ifdetach(struct ifnet *ifp)
 		TAILQ_FOREACH(nia, &in6_ifaddrhead, ia6_link) {
 			if (ia == nia) {
 				TAILQ_REMOVE(&in6_ifaddrhead, ia, ia6_link);
+				os_atomic_inc(&in6_ifaddrlist_genid, relaxed);
 				unlinked = 1;
 				break;
 			}

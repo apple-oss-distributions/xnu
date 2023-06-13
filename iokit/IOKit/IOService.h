@@ -406,6 +406,7 @@ protected:
 /*! @struct ExpansionData
  *   @discussion This structure will be used to expand the capablilties of this class in the future.
  */
+#if XNU_KERNEL_PRIVATE
 	struct ExpansionData {
 		uint64_t authorizationID;
 		/*
@@ -415,7 +416,7 @@ protected:
 		 * is necessary as IOReporting will not update reports in a manner that is
 		 * synchonized with the service (i.e, on a workloop).
 		 */
-		IOLock * interruptStatisticsLock;
+		IOLock interruptStatisticsLock;
 		IOInterruptAccountingReporter * interruptStatisticsArray;
 		int interruptStatisticsArrayCount;
 
@@ -424,6 +425,9 @@ protected:
 
 		IOInterruptSourcePrivate * interruptSourcesPrivate;
 	};
+#else
+	struct ExpansionData;
+#endif
 
 /*! @var reserved
  *   Reserved for future use.  (Internal use only)  */
@@ -2218,6 +2222,8 @@ private:
 	void trackSystemSleepPreventers( IOPMPowerStateIndex, IOPMPowerStateIndex, IOPMPowerChangeFlags );
 	void tellSystemCapabilityChange( uint32_t nextMS );
 	void restartIdleTimer( void );
+	void startDriverCalloutTimer( void );
+	void stopDriverCalloutTimer( void );
 
 	static void ack_timer_expired( thread_call_param_t, thread_call_param_t );
 	static void watchdog_timer_expired( thread_call_param_t arg0, thread_call_param_t arg1 );
@@ -2229,6 +2235,7 @@ private:
 	static IOPMRequest * acquirePMRequest( IOService * target, IOOptionBits type, IOPMRequest * active = NULL );
 	static void releasePMRequest( IOPMRequest * request );
 	static void pmDriverCallout( IOService * from, thread_call_param_t );
+	static void pmDriverCalloutTimer( thread_call_param_t, thread_call_param_t );
 	static void pmTellAppWithResponse( OSObject * object, void * context );
 	static void pmTellClientWithResponse( OSObject * object, void * context );
 	static void pmTellCapabilityAppWithResponse( OSObject * object, void * arg );

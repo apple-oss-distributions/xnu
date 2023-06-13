@@ -166,7 +166,6 @@ struct fileops {
 	int (*fo_write)     (struct fileproc *fp, struct uio *uio,
 	    int flags, vfs_context_t ctx);
 #define FOF_OFFSET      0x00000001      /* offset supplied to vn_write */
-#define FOF_PCRED       0x00000002      /* cred from proc, not current thread */
 	int (*fo_ioctl)(struct fileproc *fp, u_long com,
 	    caddr_t data, vfs_context_t ctx);
 	int (*fo_select)    (struct fileproc *fp, int which,

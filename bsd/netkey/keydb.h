@@ -97,7 +97,7 @@ struct secasvar {
 
 	struct secreplay *replay[MAX_REPLAY_WINDOWS]; /* replay prevention */
 
-	long created;                   /* for lifetime */
+	u_int64_t created;              /* for lifetime */
 
 	struct sadb_lifetime *lft_c;    /* CURRENT lifetime, it's constant. */
 	struct sadb_lifetime *lft_h;    /* HARD lifetime */
@@ -150,7 +150,7 @@ struct secacq {
 	struct secasindex saidx;
 
 	u_int32_t seq;          /* sequence number */
-	long created;           /* for lifetime */
+	u_int64_t created;      /* for lifetime */
 	int count;              /* for lifetime */
 };
 #endif

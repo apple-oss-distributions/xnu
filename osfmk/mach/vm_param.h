@@ -281,6 +281,8 @@ extern vm_offset_t              vm_kernel_etext;
 extern vm_offset_t              vm_kernel_slid_base;
 extern vm_offset_t              vm_kernel_slid_top;
 extern vm_offset_t              vm_kernel_slide;
+
+
 extern vm_offset_t              vm_kernel_addrperm;
 extern vm_offset_t              vm_kext_base;
 extern vm_offset_t              vm_kext_top;
@@ -291,11 +293,39 @@ extern vm_offset_t              vm_hib_base;
 extern vm_offset_t              vm_kernel_builtinkmod_text;
 extern vm_offset_t              vm_kernel_builtinkmod_text_end;
 
-#define VM_KERNEL_IS_SLID(_o)                                             \
-	(((vm_offset_t)VM_KERNEL_STRIP_PTR(_o) >= vm_kernel_slid_base) && \
-	 ((vm_offset_t)VM_KERNEL_STRIP_PTR(_o) <  vm_kernel_slid_top))
+/**
+ * While these function's implementations are machine specific, due to the need
+ * to prevent header file circular dependencies, they need to be externed here
+ * for usage in the sliding/unsliding macros.
+ */
+__BEGIN_DECLS
+vm_offset_t ml_static_slide(vm_offset_t vaddr);
+vm_offset_t ml_static_unslide(vm_offset_t vaddr);
+__END_DECLS
 
-#define VM_KERNEL_SLIDE(_u) ((vm_offset_t)(_u) + vm_kernel_slide)
+/**
+ * Determine whether a given address is an address within a static region (i.e.,
+ * coming from TEXT or DATA) that was slid during boot. Addresses of this type
+ * should have the slide removed before exposing them to userspace so as to not
+ * leak the slide itself to userspace.
+ *
+ * @param addr The virtual address to check.
+ *
+ * @return True if the address is a static/slid kernel address, false otherwise.
+ */
+static inline bool
+vm_is_addr_slid(vm_offset_t addr)
+{
+	const vm_offset_t stripped_addr = (vm_offset_t)VM_KERNEL_STRIP_PTR(addr);
+	const bool is_slid_kern_addr =
+	    (stripped_addr >= vm_kernel_slid_base) && (stripped_addr < vm_kernel_slid_top);
+
+	return is_slid_kern_addr;
+}
+
+#define VM_KERNEL_IS_SLID(_o) (vm_is_addr_slid((vm_offset_t)(_o)))
+
+#define VM_KERNEL_SLIDE(_u) (ml_static_slide((vm_offset_t)(_u)))
 
 /*
  * The following macros are to be used when exposing kernel addresses to
@@ -336,7 +366,7 @@ extern vm_offset_t              vm_kernel_builtinkmod_text_end;
  * Nesting of these macros should be considered invalid.
  */
 
-#define __DO_UNSLIDE(_v) ((vm_offset_t)VM_KERNEL_STRIP_PTR(_v) - vm_kernel_slide)
+#define __DO_UNSLIDE(_v) (ml_static_unslide((vm_offset_t)VM_KERNEL_STRIP_PTR(_v)))
 
 #if DEBUG || DEVELOPMENT
 #define VM_KERNEL_ADDRHIDE(_v) (VM_KERNEL_IS_SLID(_v) ? __DO_UNSLIDE(_v) : (vm_address_t)VM_KERNEL_STRIP_PTR(_v))

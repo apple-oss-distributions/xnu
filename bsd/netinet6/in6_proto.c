@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -142,6 +142,7 @@
 #include <netinet6/ip6protosw.h>
 
 #include <net/net_osdep.h>
+#include <os/log.h>
 
 /*
  * TCP/IP protocol family: IP6, ICMP6, UDP, TCP.
@@ -602,8 +603,6 @@ ip6_getstat SYSCTL_HANDLER_ARGS
 	return SYSCTL_OUT(req, &ip6stat, MIN(sizeof(ip6stat), req->oldlen));
 }
 
-SYSCTL_INT(_net_inet6_ip6, IPV6CTL_FORWARDING,
-    forwarding, CTLFLAG_RW | CTLFLAG_LOCKED, &ip6_forwarding, 0, "");
 SYSCTL_INT(_net_inet6_ip6, IPV6CTL_SENDREDIRECTS,
     redirect, CTLFLAG_RW | CTLFLAG_LOCKED, &ip6_sendredirects, 0, "");
 SYSCTL_INT(_net_inet6_ip6, IPV6CTL_DEFHLIM,
@@ -681,12 +680,52 @@ SYSCTL_PROC(_net_inet6_ip6, OID_AUTO,
     cga_conflict_retries, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     &ip6_cga_conflict_retries, 0, sysctl_ip6_cga_conflict_retries, "IU", "");
 
+
+static int sysctl_ip6_forwarding SYSCTL_HANDLER_ARGS;
+
+SYSCTL_PROC(_net_inet6_ip6, IPV6CTL_FORWARDING, forwarding,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &ip6_forwarding, 0,
+    sysctl_ip6_forwarding, "I", "");
+
+static int
+sysctl_ip6_forwarding SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error, i;
+	char proc_name_string[MAXCOMLEN + 1];
+	proc_name(proc_pid(current_proc()), proc_name_string, sizeof(proc_name_string));
+
+	i = ip6_forwarding;
+	os_log(OS_LOG_DEFAULT, "%s:%s entry: ip6_forwarding is %d",
+	    proc_name_string, __func__, ip6_forwarding);
+
+	error = sysctl_handle_int(oidp, &i, 0, req);
+	if (error || req->newptr == USER_ADDR_NULL) {
+		goto done;
+	}
+	/* impose bounds */
+	if (i < 0) {
+		error = EINVAL;
+		goto done;
+	}
+
+	if (i > 0) {
+		i = 1;
+	}
+
+	ip6_forwarding = i;
+done:
+	os_log(OS_LOG_DEFAULT, "%s:%s return: ip6_forwarding is %d "
+	    "and error is %d", proc_name_string, __func__, ip6_forwarding, error);
+	return error;
+}
+
 /*
  * One single sysctl to set v6 stack profile for IPv6 compliance testing.
  * A lot of compliance test suites are not aware of other enhancements in IPv6
  * protocol and expect some arguably obsolete behavior.
  */
-int v6_compliance_profile = 0;
+static int v6_compliance_profile;
 static int
 sysctl_set_v6_compliance_profile SYSCTL_HANDLER_ARGS
 {

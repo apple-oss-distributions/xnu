@@ -258,7 +258,7 @@ hvg_hcall_get_mabs_offset(uint64_t *mabs_offset)
 	uint64_t x1 = ml_get_abstime_offset();
 
 	if (!hvc_2(&fn, &x1)) {
-		return false;
+		return HVG_HCALL_UNSUPPORTED;
 	}
 	*mabs_offset = x1;
 
@@ -276,7 +276,8 @@ hvg_hc_kick_cpu(unsigned int cpu_id)
 	const uint32_t phys_id = tip->cpus[cpu_id].phys_id;
 	uint64_t x0 = VMAPPLE_VCPU_KICK;
 	uint64_t x1 = phys_id;
-	hvc_2(&x0, &x1);
+	__assert_only const bool success = hvc_2(&x0, &x1);
+	assert(success);
 }
 
 __attribute__((noinline))
@@ -285,7 +286,8 @@ hvg_hc_wait_for_kick(unsigned int ien)
 {
 	uint64_t x0 = VMAPPLE_VCPU_WFK;
 	uint64_t x1 = ien;
-	hvc_2(&x0, &x1);
+	__assert_only const bool success = hvc_2(&x0, &x1);
+	assert(success);
 }
 
 #else /* APPLEVIRTUALPLATFORM */

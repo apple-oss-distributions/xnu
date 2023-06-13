@@ -43,22 +43,24 @@
 #include <libkern/kernel_mach_header.h>
 #include <string.h>             // from libsa
 
-/*
- * return the last address (first avail)
+/**
+ * Get the last virtual address in a Mach-O. It does this by walking
+ * the list of segments and finding the one loaded farthest into memory.
  *
- * This routine operates against the currently executing kernel only
+ * @param header Pointer to the Mach header to parse.
+ *
+ * @return The last virtual address loaded by any LC_SEGMENT_KERNEL load
+ *         commands.
  */
 vm_offset_t
-getlastaddr(void)
+getlastaddr(kernel_mach_header_t *header)
 {
-	kernel_segment_command_t        *sgp;
-	vm_offset_t             last_addr = 0;
-	kernel_mach_header_t *header = &_mh_execute_header;
-	unsigned long i;
+	kernel_segment_command_t *sgp;
+	vm_offset_t last_addr = 0;
 
 	sgp = (kernel_segment_command_t *)
 	    ((uintptr_t)header + sizeof(kernel_mach_header_t));
-	for (i = 0; i < header->ncmds; i++) {
+	for (unsigned long i = 0; i < header->ncmds; i++) {
 		if (sgp->cmd == LC_SEGMENT_KERNEL) {
 			if (sgp->vmaddr + sgp->vmsize > last_addr) {
 				last_addr = sgp->vmaddr + sgp->vmsize;
@@ -67,6 +69,17 @@ getlastaddr(void)
 		sgp = (kernel_segment_command_t *)((uintptr_t)sgp + sgp->cmdsize);
 	}
 	return last_addr;
+}
+
+/*
+ * return the last address (first avail)
+ *
+ * This routine operates against the currently executing kernel only
+ */
+vm_offset_t
+getlastkerneladdr(void)
+{
+	return getlastaddr(&_mh_execute_header);
 }
 
 /*

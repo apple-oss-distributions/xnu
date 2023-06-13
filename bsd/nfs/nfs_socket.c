@@ -76,6 +76,7 @@
 #include <sys/kauth.h>
 #include <sys/mount_internal.h>
 #include <sys/kpi_mbuf.h>
+#include <IOKit/IOLib.h>
 
 #include <netinet/in.h>
 
@@ -94,6 +95,8 @@ int nfsrv_sock_max_rec_queue_length = 128; /* max # RPC records queued on (UDP) 
 int nfsrv_getstream(struct nfsrv_sock *, int);
 int nfsrv_getreq(struct nfsrv_descript *);
 extern int nfsv3_procid[NFS_NPROCS];
+
+#define NFS_TRYLOCK_MSEC_SLEEP 1
 
 /*
  * compare two sockaddr structures
@@ -294,11 +297,17 @@ nfsrv_rcv(socket_t so, void *arg, int waitflag)
 {
 	struct nfsrv_sock *slp = arg;
 
-	if (!nfsd_thread_count || !(slp->ns_flag & SLP_VALID)) {
-		return;
+	while (1) {
+		if (!nfsd_thread_count || !(slp->ns_flag & SLP_VALID)) {
+			return;
+		}
+		if (lck_rw_try_lock_exclusive(&slp->ns_rwlock)) {
+			/* Exclusive lock acquired */
+			break;
+		}
+		IOSleep(NFS_TRYLOCK_MSEC_SLEEP);
 	}
 
-	lck_rw_lock_exclusive(&slp->ns_rwlock);
 	nfsrv_rcv_locked(so, slp, waitflag);
 	/* Note: ns_rwlock gets dropped when called with MBUF_DONTWAIT */
 }
@@ -430,9 +439,18 @@ dorecs:
 		int wake = (slp->ns_flag & SLP_WORKTODO);
 		lck_rw_done(&slp->ns_rwlock);
 		if (wake && nfsd_thread_count) {
-			lck_mtx_lock(&nfsd_mutex);
-			nfsrv_wakenfsd(slp);
-			lck_mtx_unlock(&nfsd_mutex);
+			while (1) {
+				if ((slp->ns_flag & SLP_VALID) == 0) {
+					break;
+				}
+				if (lck_mtx_try_lock(&nfsd_mutex)) {
+					/* Mutex acquired */
+					nfsrv_wakenfsd(slp);
+					lck_mtx_unlock(&nfsd_mutex);
+					break;
+				}
+				IOSleep(NFS_TRYLOCK_MSEC_SLEEP);
+			}
 		}
 	}
 }
@@ -816,11 +834,17 @@ nfsrv_wakenfsd(struct nfsrv_sock *slp)
 {
 	struct nfsd *nd;
 
-	if ((slp->ns_flag & SLP_VALID) == 0) {
-		return;
+	while (1) {
+		if ((slp->ns_flag & SLP_VALID) == 0) {
+			return;
+		}
+		if (lck_rw_try_lock_exclusive(&slp->ns_rwlock)) {
+			/* Exclusive lock acquired */
+			break;
+		}
+		IOSleep(NFS_TRYLOCK_MSEC_SLEEP);
 	}
 
-	lck_rw_lock_exclusive(&slp->ns_rwlock);
 	/* if there's work to do on this socket, make sure it's queued up */
 	if ((slp->ns_flag & SLP_WORKTODO) && !(slp->ns_flag & SLP_QUEUED)) {
 		TAILQ_INSERT_TAIL(&nfsrv_sockwait, slp, ns_svcq);

@@ -10,8 +10,11 @@ from xnu import *
 from utils import *
 from kdp import *
 from core import caching
+from core.pointer import NativePointer
 import sys
 import lldb
+import os
+import sys
 from collections import deque
 
 ######################################
@@ -29,9 +32,13 @@ def CastIOKitClass(obj, target_type):
             target_type - str : ex 'OSString *'
                         - lldb.SBType :
     """
-    v = Cast(obj, target_type)
-    v.GetSBValue().SetPreferDynamicValue(lldb.eNoDynamicValues)
-    return v
+    v = obj.GetSBValue()
+    # We need to do that so that LLDB doesn't try to "helpfully"
+    # Guess which instance type it is...
+    v.SetPreferDynamicValue(lldb.eNoDynamicValues)
+    if isinstance(target_type, six.string_types):
+        target_type = gettype(target_type)
+    return value(v.Cast(target_type))
 
 #####################################
 # Classes.
@@ -48,6 +55,29 @@ class PreoslogHeader(object):
         self.source = 0
         self.wrapped = 0
         self.data = None
+
+
+class IOKitSmartPointer(NativePointer):
+    """ IOKit's smart pointer
+
+        Every smart pointer inherits from libkern::intrusive_shared_ptr.
+        The real pointer is wrapped behind ptr_ member.
+    """
+
+    @classmethod
+    def match(cls, sbvalue):
+
+        # Smart pointers in IOKit are OSSharedPtr and OSTaggedSharedPtr
+        name = sbvalue.GetType().GetCanonicalType().GetName()
+        if name.startswith(("OSSharedPtr", "OSTaggedSharedPtr")):
+            return cls()
+        
+        return None
+
+    def GetPointerSBValue(self, sbvalue):
+        sbv = sbvalue.GetChildMemberWithName('ptr_')
+        return super(IOKitSmartPointer, self).GetPointerSBValue(sbv)
+
 
 ######################################
 # Type Summaries
@@ -1019,7 +1049,8 @@ def GetRegistryEntryLocationInPlane(entry, plane):
         return None
 
 
-def GetMetaClasses():
+@caching.cache_dynamically
+def GetMetaClasses(target=None):
     """
     Enumerate all IOKit metaclasses. Uses dynamic caching.
 
@@ -1027,37 +1058,28 @@ def GetMetaClasses():
         Dict[str, IOKitMetaClass]: A dictionary mapping each metaclass name to
             a IOKitMetaClass object representing the metaclass.
     """
-    METACLASS_CACHE_KEY = "iokit_metaclasses"
-    cached_data = caching.GetDynamicCacheData(METACLASS_CACHE_KEY)
-
-    # If we have cached data, return immediately
-    if cached_data is not None:
-        return cached_data
 
     # This method takes a while, so it prints a progress indicator
     print("Enumerating IOKit metaclasses: ")
-    
+
+    do_progress = os.isatty(sys.__stderr__.fileno())
+
     # Iterate over all classes present in sAllClassesDict
-    idx = 0
     count = unsigned(kern.globals.sAllClassesDict.count)
     metaclasses_by_address = {}
-    while idx < count:
-        # Print progress after every 10 items
-        if idx % 10 == 0:
-            print("  {} metaclass structures parsed...".format(idx))
-        
+    for idx in range(count):
+        if do_progress and idx % 10 == 0:
+            sys.stderr.write("\033[K  {} metaclass found...\r".format(idx))
+
         # Address of metaclass
         address = kern.globals.sAllClassesDict.dictionary[idx].value
 
         # Create IOKitMetaClass and store in dict
         metaclasses_by_address[int(address)] = IOKitMetaClass(CastIOKitClass(kern.globals.sAllClassesDict.dictionary[idx].value, 'OSMetaClass *'))
-        idx += 1
-    
-    print("  Enumerated {} metaclasses.".format(count))
 
     # At this point, each metaclass is independent of each other. We don't have superclass links set up yet.
 
-    for (address, metaclass) in list(metaclasses_by_address.items()):
+    for address, metaclass in metaclasses_by_address.items():
         # Get the address of the superclass using the superClassLink in IOMetaClass
         superclass_address = int(metaclass.data().superClassLink)
 
@@ -1070,15 +1092,16 @@ def GetMetaClasses():
             metaclass.setSuperclass(metaclasses_by_address[superclass_address])
         else:
             print("warning: could not find superclass for {}".format(str(metaclass.data())))
-    
+
     # This method returns a dictionary mapping each class name to the associated metaclass object
     metaclasses_by_name = {}
-    for (_, metaclass) in list(metaclasses_by_address.items()):
+    for idx, (_, metaclass) in enumerate(metaclasses_by_address.items()):
+        if do_progress and idx % 10 == 0:
+            sys.stderr.write("\033[K  {} metaclass indexed...\r".format(idx))
+
         metaclasses_by_name[str(metaclass.className())] = metaclass
 
-    # Save the result in the cache
-    caching.SaveDynamicCacheData(METACLASS_CACHE_KEY, metaclasses_by_name)
-
+    print("  Indexed {} IOKit metaclasses.".format(count))
     return metaclasses_by_name
 
 
@@ -1342,10 +1365,6 @@ def LookupKeyInOSDict(osdict, key, comparer = None):
     result = None
     idx = 0
 
-    if not comparer:
-        # When comparer is specified, "key" argument can be of any type as "comparer" knows how to compare "key" to a key from "osdict".
-        # When comparer is not specified, key is of cpp_obj type.
-        key = getOSPtr(key)
     while idx < count and result is None:
         if comparer is not None:
             if comparer(key, osdict.dictionary[idx].key) == 0:
@@ -1742,7 +1761,7 @@ def GetPreoslogHeader():
         return None
 
     preoslog_data_ptr = kern.GetValueFromAddress(preoslog_vaddr + 14, "char *")
-    preoslog_header.data = preoslog_data_ptr.sbvalue.GetPointeeData(0, preoslog_size)
+    preoslog_header.data = preoslog_data_ptr.GetSBValue().GetPointeeData(0, preoslog_size)
     return preoslog_header
 
 @lldb_command("showpreoslog")

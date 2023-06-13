@@ -164,7 +164,8 @@ extern void vm_fault_unwire(
 	vm_map_entry_t  entry,
 	boolean_t       deallocate,
 	pmap_t          pmap,
-	vm_map_offset_t pmap_addr);
+	vm_map_offset_t pmap_addr,
+	vm_map_offset_t end_addr);
 
 extern kern_return_t    vm_fault_copy(
 	vm_object_t             src_object,

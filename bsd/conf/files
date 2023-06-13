@@ -111,7 +111,6 @@ bsd/dev/unix_startup.c			standard
 bsd/dev/monotonic.c optional monotonic
 bsd/dev/dev_perfmon.c optional config_perfmon
 
-bsd/libkern/crc16.c			standard
 bsd/libkern/crc32.c			standard
 bsd/libkern/random.c			standard
 bsd/libkern/scanc.c			standard
@@ -377,6 +376,7 @@ bsd/kern/kern_backtrace.c		standard
 bsd/kern/kern_clock.c			standard
 bsd/kern/kern_core.c			optional config_coredump
 bsd/kern/kern_credential.c		standard
+bsd/kern/kern_crossarch.c		standard
 bsd/kern/kern_cs.c			standard
 bsd/kern/kern_csr.c			optional config_csr
 bsd/kern/kern_debug.c			standard
@@ -415,6 +415,8 @@ bsd/kern/kern_sfi.c			standard
 bsd/kern/kern_time.c			standard
 bsd/kern/kern_trustcache.c  standard
 bsd/kern/kern_codesigning.c standard
+bsd/kern/code_signing/ppl.c standard
+bsd/kern/code_signing/xnu.c standard
 bsd/kern/kern_xxx.c			standard
 bsd/kern/mach_process.c			standard
 bsd/kern/mcache.c			optional sockets

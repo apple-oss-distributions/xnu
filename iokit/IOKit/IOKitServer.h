@@ -193,6 +193,9 @@ uext_server(ipc_port_t receiver, ipc_kmsg_t request, ipc_kmsg_t * preply);
 extern kern_return_t
 iokit_label_dext_task(task_t task);
 
+extern void
+iokit_clear_registered_ports(task_t task);
+
 /*
  * Functions imported by iokit:IOMemoryDescriptor.cpp
  */

@@ -6,7 +6,6 @@ from __future__ import absolute_import, division, print_function
 from builtins import hex
 from builtins import range
 
-from btlog import *
 from xnu import *
 import sys
 from utils import *
@@ -16,6 +15,7 @@ from waitq import *
 from ioreg import *
 from memory import *
 import xnudefines
+import kmemory
 
 @lldb_type_summary(['struct ipc_entry_table *', 'ipc_entry_table_t'])
 def PrintIpcEntryTable(array):
@@ -23,7 +23,7 @@ def PrintIpcEntryTable(array):
     return "ptr = {:#x}, size = {:d}, elem_type = struct ipc_entry".format(unsigned(t), s)
 
 @lldb_type_summary(['struct ipc_port_requests_table *', 'ipc_port_requests_table_t'])
-def PrintIpcEntryTable(array):
+def PrintIpcPortRequestTable(array):
     t, s = kalloc_array_decode(array, 'struct ipc_port_requests')
     return "ptr = {:#x}, size = {:d}, elem_type = struct ipc_port_requests".format(unsigned(t), s)
 
@@ -34,6 +34,27 @@ def GetSpaceTable(space):
     if table:
         return kalloc_array_decode(table, 'struct ipc_entry')
     return (None, 0)
+
+def GetSpaceEntriesWithBits(is_tableval, num_entries, mask):
+    base = is_tableval.GetSBValue().Dereference()
+    return (
+        (index, iep)
+        for index, iep in enumerate(base.xIterSiblings(1, num_entries), 1)
+        if  iep.xGetIntegerByName('ie_bits') & mask
+    )
+
+def GetSpaceObjectsWithBits(is_tableval, num_entries, mask, ty):
+    base = is_tableval.GetSBValue().Dereference()
+    return (
+        iep.xCreateValueFromAddress(
+            None,
+            iep.xGetIntegerByName('ie_object'),
+            ty,
+        )
+        for iep in base.xIterSiblings(1, num_entries)
+        if  iep.xGetIntegerByName('ie_bits') & mask
+    )
+
 
 @header("{0: <20s} {1: <6s} {2: <6s} {3: <10s} {4: <32s}".format("task", "pid", '#acts', "tablesize", "command"))
 def GetTaskIPCSummary(task, show_busy = False):
@@ -66,15 +87,19 @@ def GetTaskBusyIPCSummary(task):
 
 def GetTaskBusyPortsSummary(task):
     is_tableval, num_entries = GetSpaceTable(task.itk_space)
+    port_ty = gettype('struct ipc_port')
     nbusy = 0
     nmsgs = 0
-    for i in range(1, num_entries):
-        iep = GetObjectAtIndexFromArray(is_tableval, i)
-        if iep.ie_bits & 0x00020000:
-            port = Cast(iep.ie_object, 'ipc_port_t')
-            if port.ip_messages.imq_msgcount > 0:
-                nbusy += 1
-                nmsgs += port.ip_messages.imq_msgcount
+
+    ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
+        gettype('struct ipc_port'))
+
+    for port in ports:
+        count = port.xGetIntegerByPath('.ip_messages.imq_msgcount')
+        if count:
+            nbusy += 1
+            nmsgs += count
+
     return (nbusy, nmsgs)
 
 
@@ -88,43 +113,41 @@ def PrintPortSummary(port, show_kmsg_summary=True, show_sets=False, prefix="", O
             str  : string of ipc info for the given port
     """
 
-    portp = Cast(port, 'struct ipc_port *')
-
     format_string = "{:<#20x} {:<#20x} {:#010x} {:>6d}  {:<#20x}  {:>8d}  {:<20s} {:<s}"
-    receiver_name = portp.ip_messages.imq_receiver_name
+    receiver_name = port.ip_messages.imq_receiver_name
     splabel_name = 'N/A'
     space = 0
     refs = 0
 
-    if portp.ip_object.io_bits & 0x80000000:
+    if port.ip_object.io_bits & 0x80000000:
         if receiver_name:
-            space = unsigned(portp.ip_receiver)
+            space = unsigned(port.ip_receiver)
 
         try:
-            if portp.ip_service_port:
-                splabel = Cast(portp.ip_splabel, 'struct ipc_service_port_label *')
+            if port.ip_service_port:
+                splabel = Cast(port.ip_splabel, 'struct ipc_service_port_label *')
                 splabel_name = str(splabel.ispl_service_name) # Not on RELEASE kernel
         except:
             splabel_name = 'unknown'
 
-        dest_str = GetPortDestProc(portp)[1]
+        dest_str = GetPortDestProc(port)[1]
     else:
         dest_str = "inactive-port"
 
-    print(prefix + format_string.format(unsigned(portp), addressof(portp.ip_waitq),
-        unsigned(receiver_name), portp.ip_object.io_references, space,
+    print(prefix + format_string.format(unsigned(port), addressof(port.ip_waitq),
+        unsigned(receiver_name), port.ip_object.io_references, space,
         port.ip_messages.imq_msgcount, splabel_name, dest_str))
 
     if show_kmsg_summary:
         with O.table(prefix + GetKMsgSummary.header):
-            for kmsgp in IterateCircleQueue(portp.ip_messages.imq_messages, 'ipc_kmsg', 'ikm_link'):
+            for kmsgp in IterateCircleQueue(port.ip_messages.imq_messages, 'ipc_kmsg', 'ikm_link'):
                 print(prefix + GetKMsgSummary(kmsgp, prefix))
 
-    wq = Waitq(addressof(portp.ip_waitq))
+    wq = Waitq(addressof(port.ip_waitq))
     if show_sets and wq.hasSets():
         def doit(wq):
-            for wqs in Waitq(addressof(portp.ip_waitq)).iterateSets():
-                PrintPortSetSummary(wqs.asPset(), space=portp.ip_receiver, verbose=False, O=O)
+            for wqs in Waitq(addressof(port.ip_waitq)).iterateSets():
+                PrintPortSetSummary(wqs.asPset(), space=port.ip_receiver, verbose=False, O=O)
 
         if O is None:
             print(PrintPortSetSummary.header)
@@ -538,21 +561,27 @@ def GetKObjectFromPort(portval):
     if not objtype_index:
         return "not a kobject"
 
-    kobject_val   = Cast(portval.ip_kobject, 'void *')
+    kobject_addr  = kern.StripKernelPAC(unsigned(portval.ip_kobject))
     objtype_str   = GetEnumName('ipc_kotype_t', objtype_index, "IKOT_")
 
-    desc_str = "{:<#20x} {:<16s}".format(kobject_val, objtype_str)
+    desc_str = "{:<#20x} {:<16s}".format(kobject_addr, objtype_str)
 
-    if objtype_str == 'IOKIT_OBJECT':
-        iokit_classnm = GetObjectTypeStr(kobject_val)
+    if not kobject_addr:
+        pass
+
+    elif objtype_str == 'IOKIT_OBJECT':
+        iokit_classnm = GetObjectTypeStr(portval.ip_kobject)
         if not iokit_classnm:
             desc_str += " <unknown class>"
         else:
             desc_str += re.sub(r'vtable for ', r' ', iokit_classnm)
+
     elif objtype_str[:5] == 'TASK_':
-        task = Cast(kobject_val, 'task *')
+        task = value(portval.GetSBValue().xCreateValueFromAddress(
+            None, kobject_addr, gettype('struct task')).AddressOf())
         if GetProcFromTask(task):
             desc_str += " {:s}({:d})".format(GetProcNameForTask(task), GetProcPIDForTask(task))
+
     return desc_str
 
 def GetSpaceProcDesc(space):
@@ -641,7 +670,7 @@ def GetIPCEntrySummary(entry, ipc_name='', rights_filter=0):
         right_str = 'Dead'
     elif ie_bits & 0x00080000:
         right_str = 'Set'
-        psetval = Cast(ie_object, 'ipc_pset *')
+        psetval = kern.CreateTypedPointerFromAddress(unsigned(ie_object), 'struct ipc_pset')
         wqs = Waitq(addressof(psetval.ips_wqset))
         members = 0
         for m in wqs.iterateMembers(): members += 1
@@ -660,7 +689,7 @@ def GetIPCEntrySummary(entry, ipc_name='', rights_filter=0):
         elif ie_bits & 0x00040000 :
             # SEND_ONCE
             right_str = 'O'
-        portval = Cast(ie_object, 'ipc_port_t')
+        portval = kern.CreateTypedPointerFromAddress(unsigned(ie_object), 'struct ipc_port')
         if int(entry.ie_request) != 0:
             requestsval, _ = kalloc_array_decode(portval.ip_requests, 'struct ipc_port_request')
             sorightval = requestsval[int(entry.ie_request)].ipr_soright
@@ -690,7 +719,7 @@ def GetIPCEntrySummary(entry, ipc_name='', rights_filter=0):
             return ''
 
         # now show the port destination part
-        destname_str = GetPortDestinationSummary(Cast(ie_object, 'ipc_port_t'))
+        destname_str = GetPortDestinationSummary(portval)
         # Get the number of sets to which this port belongs
         nsets = len([s for s in Waitq(addressof(portval.ip_waitq)).iterateSets()])
         nmsgs = portval.ip_messages.imq_msgcount
@@ -720,11 +749,10 @@ def GetPortUserStack(port, task):
     pid = port.ip_made_pid;
     proc_val = GetProcFromTask(task)
     if port.ip_made_bt:
-        for s in BTLibrary().get_stack(port.ip_made_bt).symbolicated_frames():
-            out_str += s + "\n"
+        btlib = kmemory.BTLibrary.get_shared()
+        out_str += "\n".join(btlib.get_stack(port.ip_made_bt).symbolicated_frames()) + "\n"
         if pid != GetProcPID(proc_val):
-            out_str += " ({:<10d})".format(pid)
-        out_str += '\n'
+            out_str += " ({:<10d})\n".format(pid)
     return out_str
 
 @lldb_type_summary(['ipc_space *'])
@@ -748,22 +776,26 @@ def PrintIPCInformation(space, show_entries=False, show_userstack=False, rights_
     #should show the each individual entries if asked.
     if show_entries == True:
         print("\t" + GetIPCEntrySummary.header)
-        for index in range(1, num_entries):
-            entryval = GetObjectAtIndexFromArray(is_tableval, index)
+
+        entries = (
+            (index, value(iep.AddressOf()))
+            for index, iep
+            in  GetSpaceEntriesWithBits(is_tableval, num_entries, 0x001f0000)
+        )
+
+        for index, entryval in entries:
             entry_ie_bits = unsigned(entryval.ie_bits)
-            if (int(entry_ie_bits) & 0x001f0000 ) != 0:
-                entry_name = "{0: <#20x}".format( (index <<8 | entry_ie_bits >> 24) )
-                entry_str = GetIPCEntrySummary(entryval, entry_name, rights_filter)
-                if len(entry_str) > 0:
-                    print("                  \r\t" + entry_str)
-                    if show_userstack == True:
-                        entryport = Cast(entryval.ie_object, 'ipc_port *')
-                        if entryval.ie_object and (int(entry_ie_bits) & 0x00070000) and entryport.ip_callstack[0]:
-                            print(GetPortUserStack.header + GetPortUserStack(entryport, space.is_task))
-                else:
-                    # give some progress indication (this is especially
-                    # helpful for tasks with large sets of rights)
-                    sys.stderr.write(' {:d}/{:d}...\r'.format(index, num_entries))
+            entry_name = "{0: <#20x}".format( (index <<8 | entry_ie_bits >> 24) )
+            entry_str = GetIPCEntrySummary(entryval, entry_name, rights_filter)
+            if not len(entry_str):
+                continue
+
+            print("\t" + entry_str)
+            if show_userstack == True:
+                entryport = Cast(entryval.ie_object, 'ipc_port *')
+                if entryval.ie_object and (int(entry_ie_bits) & 0x00070000) and entryport.ip_callstack[0]:
+                    print(GetPortUserStack.header + GetPortUserStack(entryport, space.is_task))
+
     #done with showing entries
     return out_str
 
@@ -845,19 +877,21 @@ def ShowTaskRights(cmd_args=None, cmd_options={}):
     PrintIPCInformation(tval.itk_space, True, False, rights_type)
 
 # Count the vouchers in a given task's ipc space
-@header("{: <20s} {: <6s} {: <12s} {: <8s}".format("task", "pid", "name", "#vouchers"))
+@header("{: <20s} {: <6s} {: <20s} {: <8s}".format("task", "pid", "name", "#vouchers"))
 def GetTaskVoucherCount(t):
     is_tableval, num_entries = GetSpaceTable(t.itk_space)
     count = 0
     voucher_kotype = int(GetEnumValue('ipc_kotype_t', 'IKOT_VOUCHER'))
-    for index in range(1, num_entries):
-        entryval = GetObjectAtIndexFromArray(is_tableval, index)
-        entry_ie_bits = unsigned(entryval.ie_bits)
-        if (int(entry_ie_bits) & 0x00070000 ) != 0:
-            port = Cast(entryval.ie_object, 'ipc_port_t')
-            if unsigned(port.ip_object.io_bits) & 0x3ff == voucher_kotype:
-                count += 1
-    format_str = "{: <#20x} {: <6d} {: <12s} {: <8d}"
+
+    ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00070000,
+        gettype('struct ipc_port'))
+
+    for port in ports:
+        io_bits = port.xGetIntegerByPath('.ip_object.io_bits')
+        if io_bits & 0x3ff == voucher_kotype:
+            count += 1
+
+    format_str = "{: <#20x} {: <6d} {: <20s} {: <8d}"
     pval = GetProcFromTask(t)
     return format_str.format(t, GetProcPID(pval), GetProcNameForTask(t), count)
 
@@ -1178,8 +1212,8 @@ def IterateAllPorts(tasklist, func, ctx, include_psets, follow_busyports, should
         entry_port_type_mask = 0x000f0000
 
     if tasklist is None:
-        tasklist = kern.tasks
-        tasklist += kern.terminated_tasks
+        tasklist = list(kern.tasks)
+        tasklist += list(kern.terminated_tasks)
 
     tidx = 1
 
@@ -1201,8 +1235,13 @@ def IterateAllPorts(tasklist, func, ctx, include_psets, follow_busyports, should
         space = t.itk_space
         is_tableval, num_entries = GetSpaceTable(space)
 
-        for idx in range(1, num_entries):
-            entry_val = GetObjectAtIndexFromArray(is_tableval, idx)
+        base  = is_tableval.GetSBValue().Dereference()
+        entries = (
+            value(iep.AddressOf())
+            for iep in base.xIterSiblings(1, num_entries)
+        )
+
+        for idx, entry_val in enumerate(entries, 1):
             entry_bits= unsigned(entry_val.ie_bits)
             entry_obj = 0
             entry_str = ''
@@ -1213,7 +1252,7 @@ def IterateAllPorts(tasklist, func, ctx, include_psets, follow_busyports, should
             ## If the entry in the table represents a port of some sort,
             ## then make the callback provided
             if int(entry_bits) & entry_port_type_mask:
-                eport = Cast(entry_val.ie_object, 'ipc_port_t')
+                eport = kern.CreateTypedPointerFromAddress(unsigned(entry_val.ie_object), 'struct ipc_port')
                 ## Make the callback
                 func(t, space, ctx, idx, entry_val, eport, entry_disp)
 
@@ -1475,13 +1514,13 @@ def ShowTaskBusyPorts(cmd_args=None, cmd_options={}, O=None):
     task = kern.GetValueFromAddress(cmd_args[0], 'task_t')
     is_tableval, num_entries = GetSpaceTable(task.itk_space)
 
+    ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
+        gettype('struct ipc_port'))
+
     with O.table(PrintPortSummary.header):
-        for i in range(1, num_entries):
-            iep = GetObjectAtIndexFromArray(is_tableval, i)
-            if iep.ie_bits & 0x00020000:
-                port = Cast(iep.ie_object, 'ipc_port_t')
-                if port.ip_messages.imq_msgcount > 0:
-                    PrintPortSummary(port, O=O)
+        for port in ports:
+            if port.xGetIntegerByPath('.ip_messages.imq_msgcount'):
+                PrintPortSummary(value(port.AddressOf()), O=O)
 
 # EndMacro: showtaskbusyports
 # Macro: showallbusyports
@@ -1492,9 +1531,10 @@ def ShowAllBusyPorts(cmd_args=None, cmd_options={}, O=None):
         have enqueued messages.
     """
     with O.table(PrintPortSummary.header):
-        for port in IterateZoneElements(GetZoneByName("ipc ports"), 'ipc_port_t'):
-            if port.ip_messages.imq_msgcount > 0:
-                PrintPortSummary(port, O=O)
+        port_ty = gettype("struct ipc_port")
+        for port in kmemory.Zone("ipc ports").iter_allocated(port_ty):
+            if port.xGetIntegerByPath('.ip_messages.imq_msgcount') > 0:
+                PrintPortSummary(value(port.AddressOf()), O=O)
 
 # EndMacro: showallbusyports
 # Macro: showallports
@@ -1506,8 +1546,9 @@ def ShowAllPorts(cmd_args=None, cmd_options={}, O=None):
         usage: showallports
     """
     with O.table(PrintPortSummary.header):
-        for port in IterateZoneElements(GetZoneByName("ipc ports"), 'ipc_port_t'):
-            PrintPortSummary(port, show_kmsg_summary=False, O=O)
+        port_ty = gettype("struct ipc_port")
+        for port in kmemory.Zone("ipc ports").iter_allocated(port_ty):
+            PrintPortSummary(value(port.AddressOf()), show_kmsg_summary=False, O=O)
 
 # EndMacro: showallports
 # Macro: findkobjectport
@@ -1519,12 +1560,18 @@ def FindKobjectPort(cmd_args=None, cmd_options={}, O=None):
         usage: findkobjectport <kobject-addr>
     """
 
-    kobj = kern.GetValueFromAddress(cmd_args[0])
+    kobj_addr = unsigned(kern.GetValueFromAddress(cmd_args[0]))
+    kmem = kmemory.KMem.get_shared()
+    port_ty = gettype("struct ipc_port")
 
     with O.table(PrintPortSummary.header):
-        for port in IterateZoneElements(GetZoneByName("ipc ports"), 'ipc_port_t'):
-            if port.ip_object.io_bits & 0x3ff and Cast(port.ip_kobject, 'void *') == kobj:
-                PrintPortSummary(port, show_kmsg_summary=False, O=O)
+        for port in kmemory.Zone("ipc ports").iter_allocated(port_ty):
+            if port.xGetIntegerByPath('.ip_object.io_bits') & 0x3ff == 0:
+                continue
+
+            ip_kobject = kmem.make_address(port.xGetScalarByName('ip_kobject'))
+            if ip_kobject == kobj_addr:
+                PrintPortSummary(value(port.AddressOf()), show_kmsg_summary=False, O=O)
 
 # EndMacro: findkobjectport
 # Macro: showtaskbusypsets
@@ -1542,15 +1589,14 @@ def ShowTaskBusyPortSets(cmd_args=None, cmd_options={}, O=None):
     task = kern.GetValueFromAddress(cmd_args[0], 'task_t')
     is_tableval, num_entries = GetSpaceTable(task.itk_space)
 
+    psets = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00080000,
+        gettype('struct ipc_pset'))
+
     with O.table(PrintPortSetSummary.header):
-        for i in range(1, num_entries):
-            iep = GetObjectAtIndexFromArray(is_tableval, i)
-            if iep.ie_bits & 0x00080000:
-                pset = Cast(iep.ie_object, 'ipc_pset_t')
-                for wq in Waitq(addressof(pset.ips_wqset)).iterateMembers():
-                    if wq.asPort().ip_messages.imq_msgcount > 0:
-                        PrintPortSetSummary(pset, space=task.itk_space, O=O)
-                        break
+        for pset in (value(v.AddressOf()) for v in psets):
+            for wq in Waitq(addressof(pset.ips_wqset)).iterateMembers():
+                if wq.asPort().ip_messages.imq_msgcount > 0:
+                    PrintPortSetSummary(pset, space=task.itk_space, O=O)
 
 # EndMacro: showtaskbusyports
 # Macro: showallbusypsets
@@ -1561,7 +1607,9 @@ def ShowAllBusyPortSets(cmd_args=None, cmd_options={}, O=None):
         have enqueued messages.
     """
     with O.table(PrintPortSetSummary.header):
-        for pset in IterateZoneElements(GetZoneByName("ipc port sets"), 'ipc_pset_t'):
+        pset_ty = gettype("struct ipc_pset")
+        for pset in kmemory.Zone("ipc port sets").iter_allocated(pset_ty):
+            pset = value(pset.AddressOf())
             for wq in Waitq(addressof(pset.ips_wqset)).iterateMembers():
                 port = wq.asPort()
                 if port.ip_messages.imq_msgcount > 0:
@@ -1577,8 +1625,9 @@ def ShowAllPortSets(cmd_args=None, cmd_options={}, O=None):
         usage: showallpsets
     """
     with O.table(PrintPortSetSummary.header):
-        for pset in IterateZoneElements(GetZoneByName("ipc port sets"), 'ipc_pset_t'):
-            PrintPortSetSummary(pset, O=O)
+        pset_ty = gettype("struct ipc_pset")
+        for pset in kmemory.Zone("ipc port sets").iter_allocated(pset_ty):
+            PrintPortSetSummary(value(pset.AddressOf()), O=O)
 
 # EndMacro: showallports
 # Macro: showbusyportsummary
@@ -1976,12 +2025,12 @@ def ShowIVACFreeList(cmd_args=[], cmd_options={}):
 
 
 
-@header('{: <18s} {: <8s} {: <18s} {: <18s} {: <18s} {: <18s}'.format("ipc_voucher", "refs", "checksum", "hash", "table", "voucher_port"))
+@header('{: <18s} {: <8s} {: <18s} {: <18s}'.format("ipc_voucher", "refs", "table", "voucher_port"))
 @lldb_type_summary(['ipc_voucher *', 'ipc_voucher_t'])
 def GetIPCVoucherSummary(voucher, show_entries=False):
     """ describe a voucher from its ipc_voucher * object """
     out_str = ""
-    fmt = "{v: <#18x} {v.iv_refs.ref_count: <8d} {v.iv_sum: <#18x} {v.iv_hash: <#18x} {table_addr: <#18x} {v.iv_port: <#18x}"
+    fmt = "{v: <#18x} {v.iv_refs.ref_count: <8d} {table_addr: <#18x} {v.iv_port: <#18x}"
     out_str += fmt.format(v = voucher, table_addr = addressof(voucher.iv_table))
     entries_str = ''
     if show_entries or config['verbosity'] > vHUMAN:
@@ -2089,12 +2138,10 @@ def ShowAllVouchers(cmd_args=[], cmd_options={}):
     """ Display a list of all vouchers in the global voucher hash table
         Usage: (lldb) showallvouchers 
     """
-    iv_hash_table = kern.globals.ivht_bucket
-    num_buckets =  sizeof(kern.globals.ivht_bucket) // sizeof(kern.globals.ivht_bucket[0])
     print(GetIPCVoucherSummary.header)
-    for i in range(num_buckets):
-        for v in IterateQueue(iv_hash_table[i], 'ipc_voucher_t', 'iv_hash_link'):
-            print(GetIPCVoucherSummary(v))
+    voucher_ty = gettype("struct ipc_voucher")
+    for v in kmemory.Zone("ipc vouchers").iter_allocated(voucher_ty):
+        print(GetIPCVoucherSummary(value(v.AddressOf())))
 
 @lldb_command('showvoucher', '')
 def ShowVoucher(cmd_args=[], cmd_options={}):
@@ -2107,25 +2154,6 @@ def ShowVoucher(cmd_args=[], cmd_options={}):
     voucher = kern.GetValueFromAddress(cmd_args[0], 'ipc_voucher_t')
     print(GetIPCVoucherSummary.header)
     print(GetIPCVoucherSummary(voucher, show_entries=True))
-
-def GetSpaceSendRightEntries(space, port):
-    """ Get entry summaries for all send rights to port address in an IPC space.
-        params:
-            space - the IPC space to search for send rights
-            port_addr - the port address to match, or 0 to get all send rights
-        returns: an array of IPC entries
-    """
-    entry_table, num_entries = GetSpaceTable(space)
-    entries = []
-
-    for i in range(1, num_entries):
-        entry = GetObjectAtIndexFromArray(entry_table, i)
-
-        entry_ie_bits = unsigned(entry.ie_bits)
-        if (entry_ie_bits & 0x00010000) != 0 and (not port or entry.ie_object == port):
-            entries.append(entry)
-
-    return entries
 
 @lldb_command('showportsendrights')
 def ShowPortSendRights(cmd_args=[], cmd_options={}):

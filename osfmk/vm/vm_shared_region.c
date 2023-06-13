@@ -1145,7 +1145,6 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
 	vm_map_t                      sr_map;
 	struct vm_map_entry           tmp_entry_store = {0};
 	vm_map_entry_t                tmp_entry = NULL;
-	int                           vm_flags;
 	vm_map_kernel_flags_t         vmk_flags;
 	vm_map_offset_t               map_addr;
 	kern_return_t                 kr = KERN_SUCCESS;
@@ -1223,10 +1222,9 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
 		/*
 		 * map the pager over the portion of the mapping that needs sliding
 		 */
-		vm_flags = VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE;
-		vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-		vmk_flags.vmkf_overwrite_immutable = TRUE;
-		vmk_flags.vmkf_permanent = shared_region_make_permanent(sr,
+		vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED(.vmf_overwrite = true);
+		vmk_flags.vmkf_overwrite_immutable = true;
+		vmk_flags.vmf_permanent = shared_region_make_permanent(sr,
 		    tmp_entry->max_protection);
 
 		map_addr = si->si_slid_address;
@@ -1234,9 +1232,7 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
 		    &map_addr,
 		    si->si_end - si->si_start,
 		    (mach_vm_offset_t) 0,
-		    vm_flags,
 		    vmk_flags,
-		    VM_KERN_MEMORY_NONE,
 		    (ipc_port_t)(uintptr_t) sr_pager,
 		    0,
 		    TRUE,
@@ -1559,16 +1555,15 @@ vm_shared_region_map_file_setup(
 			 * map the object into the kernel
 			 */
 			vm_map_offset_t kaddr = 0;
-			vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+			vmk_flags = VM_MAP_KERNEL_FLAGS_ANYWHERE();
 			vmk_flags.vmkf_no_copy_on_read = 1;
 			vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
+
 			kr = vm_map_enter(kernel_map,
 			    &kaddr,
 			    obj_size,
 			    0,
-			    VM_FLAGS_ANYWHERE,
 			    vmk_flags,
-			    VM_KERN_MEMORY_NONE,
 			    object,
 			    0,
 			    FALSE,
@@ -1623,19 +1618,18 @@ vm_shared_region_map_file_setup(
 			 * Finally map the object into the shared region.
 			 */
 			target_address = (vm_map_offset_t)(mappings[0].sms_address - sr_base_address);
-			vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+			vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 			vmk_flags.vmkf_already = TRUE;
 			vmk_flags.vmkf_no_copy_on_read = 1;
-			vmk_flags.vmkf_permanent = shared_region_make_permanent(shared_region,
+			vmk_flags.vmf_permanent = shared_region_make_permanent(shared_region,
 			    mappings[0].sms_max_prot);
+
 			kr = vm_map_enter(
 				sr_map,
 				&target_address,
 				vm_map_round_page(mappings[0].sms_size, VM_MAP_PAGE_MASK(sr_map)),
 				0,
-				VM_FLAGS_FIXED,
 				vmk_flags,
-				VM_KERN_MEMORY_NONE,
 				object,
 				0,
 				TRUE,
@@ -1672,6 +1666,12 @@ vm_shared_region_map_file_setup(
 		/* get the VM object associated with the file to be mapped */
 		file_object = memory_object_control_to_vm_object(file_control);
 		assert(file_object);
+
+		if (!file_object->object_is_shared_cache) {
+			vm_object_lock(file_object);
+			file_object->object_is_shared_cache = true;
+			vm_object_unlock(file_object);
+		}
 
 #if CONFIG_SECLUDED_MEMORY
 		/*
@@ -1751,11 +1751,11 @@ vm_shared_region_map_file_setup(
 			/* mapping's address is relative to the shared region base */
 			target_address = (vm_map_offset_t)(mappings[i].sms_address - sr_base_address);
 
-			vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+			vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 			vmk_flags.vmkf_already = TRUE;
 			/* no copy-on-read for mapped binaries */
 			vmk_flags.vmkf_no_copy_on_read = 1;
-			vmk_flags.vmkf_permanent = shared_region_make_permanent(
+			vmk_flags.vmf_permanent = shared_region_make_permanent(
 				shared_region,
 				mappings[i].sms_max_prot);
 
@@ -1776,9 +1776,7 @@ vm_shared_region_map_file_setup(
 						&target_address,
 						vm_map_round_page(mappings[i].sms_size, VM_MAP_PAGE_MASK(sr_map)),
 						0,
-						VM_FLAGS_FIXED,
 						vmk_flags,
-						VM_KERN_MEMORY_NONE,
 						object,
 						0,
 						TRUE,
@@ -1793,9 +1791,7 @@ vm_shared_region_map_file_setup(
 					&target_address,
 					vm_map_round_page(mappings[i].sms_size, VM_MAP_PAGE_MASK(sr_map)),
 					0,
-					VM_FLAGS_FIXED,
 					vmk_flags,
-					VM_KERN_MEMORY_NONE,
 					map_port,
 					mappings[i].sms_file_offset,
 					TRUE,
@@ -2101,9 +2097,9 @@ __attribute__((noinline))
 static void
 vm_shared_region_map_file_final(
 	vm_shared_region_t        shared_region,
-	vm_map_t                  sr_map,
-	mach_vm_offset_t          sfm_min_address,
-	mach_vm_offset_t          sfm_max_address)
+	vm_map_t                  sr_map __unused,
+	mach_vm_offset_t          sfm_min_address __unused,
+	mach_vm_offset_t          sfm_max_address __unused)
 {
 	struct _dyld_cache_header sr_cache_header;
 	int                       error;
@@ -2290,7 +2286,7 @@ vm_shared_region_enter(
 	sr_handle = shared_region->sr_mem_entry;
 	sr_pmap_nesting_start = (vm_map_offset_t)shared_region->sr_pmap_nesting_start;
 	sr_pmap_nesting_size = (vm_map_size_t)shared_region->sr_pmap_nesting_size;
-	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+	vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 
 	cur_prot = VM_PROT_READ;
 	if (VM_MAP_POLICY_WRITABLE_SHARED_REGION(map)) {
@@ -2304,7 +2300,7 @@ vm_shared_region_enter(
 	} else {
 		max_prot = VM_PROT_READ;
 		/* make it "permanent" to protect against re-mappings */
-		vmk_flags.vmkf_permanent = true;
+		vmk_flags.vmf_permanent = true;
 	}
 
 	/*
@@ -2321,9 +2317,7 @@ vm_shared_region_enter(
 			&target_address,
 			mapping_size,
 			0,
-			VM_FLAGS_FIXED,
 			vmk_flags,
-			VM_KERN_MEMORY_NONE,
 			sr_handle,
 			sr_offset,
 			TRUE,
@@ -2357,7 +2351,8 @@ vm_shared_region_enter(
 	}
 
 	/* The pmap-nesting is triggered by the "vmkf_nested_pmap" flag. */
-	vmk_flags.vmkf_nested_pmap = TRUE;
+	vmk_flags.vmkf_nested_pmap = true;
+	vmk_flags.vm_tag = VM_MEMORY_SHARED_PMAP;
 
 	/*
 	 * Use pmap-nesting to map the majority of the shared region into the task's
@@ -2373,9 +2368,7 @@ vm_shared_region_enter(
 		&target_address,
 		sr_pmap_nesting_size,
 		0,
-		VM_FLAGS_FIXED,
 		vmk_flags,
-		VM_MEMORY_SHARED_PMAP,
 		sr_handle,
 		sr_offset,
 		TRUE,
@@ -2418,9 +2411,7 @@ vm_shared_region_enter(
 			&target_address,
 			mapping_size,
 			0,
-			VM_FLAGS_FIXED,
-			VM_MAP_KERNEL_FLAGS_NONE,
-			VM_KERN_MEMORY_NONE,
+			VM_MAP_KERNEL_FLAGS_FIXED(),
 			sr_handle,
 			sr_offset,
 			TRUE,
@@ -2482,7 +2473,6 @@ vm_shared_region_remove(
 	vm_map_t map;
 	mach_vm_offset_t start;
 	mach_vm_size_t size;
-	vm_tag_t tag;
 	vm_map_kernel_flags_t vmk_flags;
 	kern_return_t kr;
 
@@ -2493,18 +2483,16 @@ vm_shared_region_remove(
 	start = sr->sr_base_address;
 	size = sr->sr_size;
 
-	tag = VM_MEMORY_DYLD;
-	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+	vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED(.vmf_overwrite = true);
 	vmk_flags.vmkf_overwrite_immutable = true;
-	vmk_flags.vmkf_range_id = VM_MAP_RANGE_ID(map, tag);
+	vmk_flags.vm_tag = VM_MEMORY_DYLD;
 
+	/* range_id is set by mach_vm_map_kernel */
 	kr = mach_vm_map_kernel(map,
 	    &start,
 	    size,
 	    0,                     /* mask */
-	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
 	    vmk_flags,
-	    tag,
 	    MACH_PORT_NULL,
 	    0,
 	    FALSE,                     /* copy */
@@ -2575,7 +2563,6 @@ vm_shared_region_slide_mapping(
 	struct vm_map_entry     tmp_entry_store;
 	memory_object_t         sr_pager = MEMORY_OBJECT_NULL;
 	vm_map_t                sr_map;
-	int                     vm_flags;
 	vm_map_kernel_flags_t   vmk_flags;
 	vm_map_offset_t         map_addr;
 	void                    *slide_info_entry = NULL;
@@ -2711,19 +2698,17 @@ vm_shared_region_slide_mapping(
 #endif /* CONFIG_SECLUDED_MEMORY */
 
 	/* map that pager over the portion of the mapping that needs sliding */
-	vm_flags = VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE;
-	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vmk_flags.vmkf_overwrite_immutable = TRUE;
 	map_addr = tmp_entry->vme_start;
-	vmk_flags.vmkf_permanent = shared_region_make_permanent(sr,
+	vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED(.vmf_overwrite = true);
+	vmk_flags.vmkf_overwrite_immutable = true;
+	vmk_flags.vmf_permanent = shared_region_make_permanent(sr,
 	    tmp_entry->max_protection);
+
 	kr = vm_map_enter_mem_object(sr_map,
 	    &map_addr,
 	    (tmp_entry->vme_end - tmp_entry->vme_start),
 	    (mach_vm_offset_t) 0,
-	    vm_flags,
 	    vmk_flags,
-	    VM_KERN_MEMORY_NONE,
 	    (ipc_port_t)(uintptr_t) sr_pager,
 	    0,
 	    TRUE,
@@ -3224,7 +3209,7 @@ vm_shared_region_slide_page_v3(
 		//	 uint16_t authenticated : 1 = 1;
 		// }
 
-		bool isBind = (value & (1ULL << 62)) == 1;
+		bool isBind = (value & (1ULL << 62)) != 0;
 		if (isBind) {
 			return KERN_FAILURE;
 		}
@@ -3545,13 +3530,12 @@ vm_commpage_enter(
 #pragma unused(is64bit)
 	(void)task;
 	(void)map;
-	pmap_insert_sharedpage(vm_map_pmap(map));
+	pmap_insert_commpage(vm_map_pmap(map));
 	return KERN_SUCCESS;
 #else
 	ipc_port_t              commpage_handle, commpage_text_handle;
 	vm_map_offset_t         commpage_address, objc_address, commpage_text_address;
 	vm_map_size_t           commpage_size, objc_size, commpage_text_size;
-	int                     vm_flags;
 	vm_map_kernel_flags_t   vmk_flags;
 	kern_return_t           kr;
 
@@ -3562,8 +3546,7 @@ vm_commpage_enter(
 
 	commpage_text_size = _COMM_PAGE_TEXT_AREA_LENGTH;
 	/* the comm page is likely to be beyond the actual end of the VM map */
-	vm_flags = VM_FLAGS_FIXED;
-	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+	vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 	vmk_flags.vmkf_beyond_max = TRUE;
 
 	/* select the appropriate comm page for this task */
@@ -3587,13 +3570,13 @@ vm_commpage_enter(
 		commpage_text_address = (vm_map_offset_t) commpage_text32_location;
 	}
 
-	vm_tag_t tag = VM_KERN_MEMORY_NONE;
 	if ((commpage_address & (pmap_commpage_size_min(map->pmap) - 1)) == 0 &&
 	    (commpage_size & (pmap_commpage_size_min(map->pmap) - 1)) == 0) {
 		/* the commpage is properly aligned or sized for pmap-nesting */
-		tag = VM_MEMORY_SHARED_PMAP;
+		vmk_flags.vm_tag = VM_MEMORY_SHARED_PMAP;
 		vmk_flags.vmkf_nested_pmap = TRUE;
 	}
+
 	/* map the comm page in the task's address space */
 	assert(commpage_handle != IPC_PORT_NULL);
 	kr = vm_map_enter_mem_object(
@@ -3601,9 +3584,7 @@ vm_commpage_enter(
 		&commpage_address,
 		commpage_size,
 		0,
-		vm_flags,
 		vmk_flags,
-		tag,
 		commpage_handle,
 		0,
 		FALSE,
@@ -3627,9 +3608,7 @@ vm_commpage_enter(
 		&commpage_text_address,
 		commpage_text_size,
 		0,
-		vm_flags,
 		vmk_flags,
-		tag,
 		commpage_text_handle,
 		0,
 		FALSE,
@@ -3656,9 +3635,7 @@ vm_commpage_enter(
 			&objc_address,
 			objc_size,
 			0,
-			VM_FLAGS_FIXED,
 			vmk_flags,
-			tag,
 			IPC_PORT_NULL,
 			0,
 			FALSE,

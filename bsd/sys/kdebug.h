@@ -194,6 +194,7 @@ __BEGIN_DECLS
 #define DBG_INTR_TYPE_TIMER     0x2     /* timer interrupt */
 #define DBG_INTR_TYPE_OTHER     0x3     /* other (usually external) interrupt */
 #define DBG_INTR_TYPE_PMI       0x4     /* performance monitor interrupt */
+#define DBG_INTR_TYPE_RSVD1     0x5     /* reserved interrupt kind */
 
 /* Codes for Scheduler (DBG_MACH_SCHED) */
 #define MACH_SCHED              0x0     /* Scheduler */
@@ -275,11 +276,12 @@ __BEGIN_DECLS
 #define MACH_UPDATE_POWERED_CORES  0x58 /* CLPC requested cores powerup/powerdown */
 #define MACH_MODE_DEMOTE_THROTTLED       0x59 /* Sched mode demotion - throttled */
 #define MACH_MODE_DEMOTE_FAILSAFE        0x5a /* Sched mode demotion - failsafe */
-#define MACH_MODE_DEMOTE_RT_RESTRICTED   0x5b /* Sched mode demotion - rt restricted */
+#define MACH_MODE_DEMOTE_RT_DISALLOWED   0x5b /* Sched mode demotion - rt not allowed */
 #define MACH_MODE_UNDEMOTE_THROTTLED     0x5c /* Sched mode undemotion - throttling */
 #define MACH_MODE_UNDEMOTE_FAILSAFE      0x5d /* Sched mode undemotion - failsafe */
-#define MACH_MODE_UNDEMOTE_RT_RESTRICTED 0x5e /* Sched mode undemotion - rt restricted */
-#define MACH_INT_MASKED_RESET           0x5f /* interrupt masked threshold reset */
+#define MACH_MODE_UNDEMOTE_RT_DISALLOWED 0x5e /* Sched mode undemotion - rt not allowed */
+#define MACH_INT_MASKED_RESET            0x5f /* interrupt masked threshold reset */
+#define MACH_RT_DISALLOWED_WORK_INTERVAL 0x60 /* RT disallowed due to unmet work interval requirements */
 
 /* Codes for Clutch/Edge Scheduler (DBG_MACH_SCHED_CLUTCH) */
 #define MACH_SCHED_CLUTCH_ROOT_BUCKET_STATE     0x0 /* __unused */
@@ -401,6 +403,7 @@ __BEGIN_DECLS
 #define PMAP__IOMMU_IOCTL       0x1d
 #define PMAP__IOMMU_GRANT_PAGE  0x1e
 #define PMAP__BATCH_UPDATE_CACHING      0x1f
+#define PMAP__COLLECT_CACHE_OPS         0x20
 
 /* Codes for clock (DBG_MACH_CLOCK) */
 #define MACH_EPOCH_CHANGE       0x0     /* wake epoch change */

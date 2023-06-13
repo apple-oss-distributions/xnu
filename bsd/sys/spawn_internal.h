@@ -245,8 +245,13 @@ typedef struct _posix_spawnattr {
 	uint32_t        psa_filedesc_soft_limit; /* file descriptor soft limit */
 	uint32_t        psa_filedesc_hard_limit; /* file descriptor hard limit */
 	uint32_t        psa_crash_behavior;      /* crash behavior flags */
+	int             psa_dataless_iopolicy;   /* materialize dataless iopolicy parameter */
 	uint64_t        psa_crash_behavior_deadline; /* crash behavior deadline */
 	uint8_t         psa_launch_type;         /* type of launch for launch constraint enforcement */
+
+	/* For exponential backoff */
+	uint32_t        psa_crash_count;
+	uint32_t        psa_throttle_timeout;
 
 	/*
 	 * NOTE: Extensions array pointers must stay at the end so that
@@ -354,6 +359,7 @@ __options_decl(posix_spawn_options, uint32_t, {
 	PSA_OPTION_NONE                         = 0,
 	PSA_OPTION_PLUGIN_HOST_DISABLE_A_KEYS   = 0x1,
 	PSA_OPTION_ALT_ROSETTA                  = 0x2,
+	PSA_OPTION_DATALESS_IOPOLICY            = 0x4,
 });
 
 /*

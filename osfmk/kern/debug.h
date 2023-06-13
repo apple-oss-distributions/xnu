@@ -115,9 +115,14 @@ struct task_snapshot {
 	int                     cow_faults;     /* number of copy-on-write faults */
 	uint32_t                ss_flags;
 	/*
-	 * In microstackshots, `p_start_sec` is actually the resource coalition ID.
+	 * In microstackshots, `p_start_sec` is actually the resource coalition ID
+	 * that this thread belongs to.
 	 */
 	uint64_t                p_start_sec;    /* from the bsd proc struct */
+	/*
+	 * In microstackshots, `p_stat_usec` is actually the resource coalition ID
+	 * that this thread is doing work on behalf of.
+	 */
 	uint64_t                p_start_usec;   /* from the bsd proc struct */
 
 	/*
@@ -291,22 +296,26 @@ __options_decl(microstackshot_flags_t, uint32_t, {
 
 #define STACKSHOT_PAGETABLES_MASK_ALL           ~0
 
-#define KF_SERIAL_OVRD (0x2)
-#define KF_PMAPV_OVRD (0x4)
-#define KF_MATV_OVRD (0x8)
-#define KF_STACKSHOT_OVRD (0x10)
-#define KF_COMPRSV_OVRD (0x20)
-#define KF_INTERRUPT_MASKED_DEBUG_OVRD (0x40)
-#define KF_TRAPTRACE_OVRD (0x80)
-#define KF_IOTRACE_OVRD (0x100)
-#define KF_INTERRUPT_MASKED_DEBUG_STACKSHOT_OVRD (0x200)
-#define KF_SCHED_HYGIENE_DEBUG_PMC_OVRD (0x400)
-#define KF_RW_LOCK_DEBUG_OVRD (0x800)
-#define KF_MADVISE_FREE_DEBUG_OVRD (0x1000)
-#define KF_DISABLE_FP_POPC_ON_PGFLT (0x2000)
-#define KF_IO_TIMEOUT_OVRD (0x8000)
+__options_closed_decl(kf_override_flag_t, uint32_t, {
+	KF_SERIAL_OVRD                            = 0x2,
+	KF_PMAPV_OVRD                             = 0x4,
+	KF_MATV_OVRD                              = 0x8,
+	KF_STACKSHOT_OVRD                         = 0x10,
+	KF_COMPRSV_OVRD                           = 0x20,
+	KF_INTERRUPT_MASKED_DEBUG_OVRD            = 0x40,
+	KF_TRAPTRACE_OVRD                         = 0x80,
+	KF_IOTRACE_OVRD                           = 0x100,
+	KF_INTERRUPT_MASKED_DEBUG_STACKSHOT_OVRD  = 0x200,
+	KF_SCHED_HYGIENE_DEBUG_PMC_OVRD           = 0x400,
+	KF_RW_LOCK_DEBUG_OVRD                     = 0x800,
+	KF_MADVISE_FREE_DEBUG_OVRD                = 0x1000,
+	KF_DISABLE_FP_POPC_ON_PGFLT               = 0x2000,
+	KF_DISABLE_PROD_TRC_VALIDATION            = 0x4000,
+	KF_IO_TIMEOUT_OVRD                        = 0x8000,
+	KF_PREEMPTION_DISABLED_DEBUG_OVRD         = 0x10000,
+});
 
-boolean_t kern_feature_override(uint32_t fmask);
+boolean_t kern_feature_override(kf_override_flag_t fmask);
 
 __options_decl(eph_panic_flags_t, uint64_t, {
 	EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_COMPLETE              = 0x01,                               /* INFO: coredump completed */
@@ -358,7 +367,7 @@ struct embedded_panic_header {
 			    eph_x86_unused_bits:40;
 		}; // anonymous struct to group the bitfields together.
 		uint64_t eph_x86_do_not_use; /* Used for offsetof/sizeof when parsing header */
-	};
+	} __attribute__((packed));
 	char eph_os_version[EMBEDDED_PANIC_HEADER_OSVERSION_LEN];
 	char eph_macos_version[EMBEDDED_PANIC_HEADER_OSVERSION_LEN];
 	uuid_string_t eph_bootsessionuuid_string;                      /* boot session UUID */
@@ -530,6 +539,8 @@ enum {
 	                                 */
 #define DB_REBOOT_ALWAYS        0x100000 /* Don't wait for debugger connection */
 #define DB_DISABLE_STACKSHOT_TO_DISK 0x200000 /* Disable writing stackshot to local disk */
+#define DB_DEBUG_IP_INIT        0x400000 /* iBoot specific: Allow globally enabling debug IPs during init */
+#define DB_SOC_HALT_ENABLE      0x800000 /* iBoot specific: Enable SoC Halt during init */
 
 /*
  * Values for a 64-bit mask that's passed to the debugger.

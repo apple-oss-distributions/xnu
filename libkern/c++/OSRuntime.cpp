@@ -55,6 +55,7 @@ __BEGIN_DECLS
 #include <san/kasan.h>
 #endif
 
+
 #if PRAGMA_MARK
 #pragma mark Constants &c.
 #endif /* PRAGMA_MARK */
@@ -133,6 +134,7 @@ OSlibkernInit(void)
 	OSMetaClassBase::initialize();
 
 	g_kernel_kmod_info.address = (vm_address_t) &_mh_execute_header;
+
 	if (kOSReturnSuccess != OSRuntimeInitializeCPP(NULL)) {
 		// &g_kernel_kmod_info, gOSSectionNamesStandard, 0, 0)) {
 		panic("OSRuntime: C++ runtime failed to initialize.");

@@ -117,7 +117,7 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, sack_globalholes, CTLFLAG_RD | CTLFLAG_LOCKE
     &tcp_sack_globalholes, 0,
     "Global number of TCP SACK holes currently allocated");
 
-extern struct zone *sack_hole_zone;
+static KALLOC_TYPE_DEFINE(sack_hole_zone, struct sackhole, NET_KT_DEFAULT);
 
 #define TCP_VALIDATE_SACK_SEQ_NUMBERS(_tp_, _sb_, _ack_) \
     (SEQ_GT((_sb_)->end, (_sb_)->start) && \

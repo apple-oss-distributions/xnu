@@ -357,6 +357,8 @@ static struct getvolattrlist_attrtab getvolattrlist_common_tab[] = {
 
 static struct getvolattrlist_attrtab getvolattrlist_vol_tab[] = {
 	{.attr = ATTR_VOL_FSTYPE, .bits = 0, .size = sizeof(uint32_t)},
+	{.attr = ATTR_VOL_FSTYPENAME, .bits = 0, .size = sizeof(struct attrreference)},
+	{.attr = ATTR_VOL_FSSUBTYPE, .bits = VFSATTR_BIT(f_fssubtype), .size = sizeof(uint32_t)},
 	{.attr = ATTR_VOL_SIGNATURE, .bits = VFSATTR_BIT(f_signature), .size = sizeof(uint32_t)},
 	{.attr = ATTR_VOL_SIZE, .bits = VFSATTR_BIT(f_blocks)  |  VFSATTR_BIT(f_bsize), .size = sizeof(off_t)},
 	{.attr = ATTR_VOL_SPACEFREE, .bits = VFSATTR_BIT(f_bfree) | VFSATTR_BIT(f_bsize), .size = sizeof(off_t)},
@@ -606,7 +608,7 @@ static struct getattrlist_attrtab getattrlistbulk_common_extended_tab[] = {
  *
  * A majority of them are the same attributes that are required for stat(2) and statfs(2).
  */
-#define VFS_DFLT_ATTR_VOL       (ATTR_VOL_FSTYPE | ATTR_VOL_SIGNATURE |  \
+#define VFS_DFLT_ATTR_VOL       (ATTR_VOL_FSTYPE | ATTR_VOL_FSTYPENAME | ATTR_VOL_SIGNATURE |  \
 	                         ATTR_VOL_SIZE | ATTR_VOL_SPACEFREE |  ATTR_VOL_QUOTA_SIZE | ATTR_VOL_RESERVED_SIZE | \
 	                         ATTR_VOL_SPACEAVAIL | ATTR_VOL_MINALLOCATION |  \
 	                         ATTR_VOL_ALLOCATIONCLUMP |  ATTR_VOL_IOBLOCKSIZE |  \
@@ -952,6 +954,7 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 	int             return_valid;
 	int             pack_invalid;
 	vnode_t         root_vp = NULL;
+	const char      *fstypename = NULL;
 
 	_ATTRLIST_BUF_INIT(&ab);
 	VATTR_INIT(&va);
@@ -1180,6 +1183,14 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 	}
 	if (alp->volattr & ATTR_VOL_MOUNTEDDEVICE) {
 		varsize += roundup(strlen(mnt->mnt_vfsstat.f_mntfromname) + 1, 4);
+	}
+	if (alp->volattr & ATTR_VOL_FSTYPENAME) {
+		if (mnt->mnt_kern_flag & MNTK_TYPENAME_OVERRIDE) {
+			fstypename = mnt->fstypename_override;
+		} else {
+			fstypename = mnt->mnt_vfsstat.f_fstypename;
+		}
+		varsize += roundup(strlen(fstypename) + 1, 4);
 	}
 
 	/*
@@ -1551,6 +1562,15 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 		}
 		ATTR_PACK(&ab, vs.f_attributes);
 		ab.actual.volattr |= ATTR_VOL_ATTRIBUTES;
+	}
+	if (alp->volattr & ATTR_VOL_FSTYPENAME) {
+		assert(fstypename != NULL);
+		attrlist_pack_string(&ab, fstypename, 0);
+		ab.actual.volattr |= ATTR_VOL_FSTYPENAME;
+	}
+	if (alp->volattr & ATTR_VOL_FSSUBTYPE) {
+		ATTR_PACK(&ab, vs.f_fssubtype);
+		ab.actual.volattr |= ATTR_VOL_FSSUBTYPE;
 	}
 
 	/* diagnostic */

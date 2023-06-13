@@ -32,6 +32,7 @@ _csr_get_active_config
 _lapic_end_of_interrupt
 _lapic_get_cmci_vector
 _lapic_unmask_perfcnt_interrupt
+_ml_page_protection_type
 _ml_port_io_read
 _ml_port_io_read16
 _ml_port_io_read32

@@ -63,34 +63,11 @@ int
 get_map_nentries(
 	vm_map_t);
 
-vm_offset_t
-get_map_start(
-	vm_map_t);
-
-vm_offset_t
-get_map_end(
-	vm_map_t);
-
-/*
- *
- */
 int
 get_map_nentries(
 	vm_map_t map)
 {
 	return map->hdr.nentries;
-}
-
-mach_vm_offset_t
-mach_get_vm_start(vm_map_t map)
-{
-	return vm_map_first_entry(map)->vme_start;
-}
-
-mach_vm_offset_t
-mach_get_vm_end(vm_map_t map)
-{
-	return vm_map_last_entry(map)->vme_end;
 }
 
 /*

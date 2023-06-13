@@ -183,20 +183,7 @@ int     _consume_printf_args(int, ...);
 #endif
 #endif
 
-uint16_t        crc16(uint16_t crc, const void *bufp, size_t len);
 uint32_t        crc32(uint32_t crc, const void *bufp, size_t len);
-
-#if XNU_KERNEL_PRIVATE
-#if KASAN
-uint16_t __nosan_crc16(uint16_t crc, const void *bufp, size_t len);
-#else
-static inline uint16_t
-__nosan_crc16(uint16_t crc, const void *bufp, size_t len)
-{
-	return crc16(crc, bufp, len);
-}
-#endif
-#endif
 
 int     copystr(const void *kfaddr, void *kdaddr, size_t len, size_t *done);
 int     copyinstr(const user_addr_t uaddr, void *kaddr, size_t len, size_t *done) OS_WARN_RESULT;

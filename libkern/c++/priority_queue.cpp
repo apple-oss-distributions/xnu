@@ -29,9 +29,9 @@
 #if KERNEL
 #include <kern/priority_queue.h>
 #include <mach/vm_param.h>
-#if CONFIG_KERNEL_TBI && KASAN_TBI
+#if KASAN_TBI
 #include <san/kasan.h>
-#endif /* CONFIG_KERNEL_TBI && KASAN_TBI */
+#endif /* KASAN_TBI */
 
 #ifdef __LP64__
 static_assert(PRIORITY_QUEUE_ENTRY_CHILD_BITS >= VM_KERNEL_POINTER_SIGNIFICANT_BITS,
@@ -131,18 +131,18 @@ struct pqueue {
 	static inline void
 	pack_child(entry_t e, const entry_t child)
 	{
-#if CONFIG_KERNEL_TBI && KASAN_TBI
+#if KASAN_TBI
 		e->tag = kasan_tbi_get_tag((long)child);
-#endif /* CONFIG_KERNEL_TBI && KASAN_TBI */
+#endif /* KASAN_TBI */
 		e->child = (long)child;
 	}
 
 	static inline entry_t
 	unpack_child(entry_t e)
 	{
-#if CONFIG_KERNEL_TBI && KASAN_TBI
+#if KASAN_TBI
 		return (entry_t)(kasan_tbi_tag_ptr(e->child, e->tag));
-#endif /* CONFIG_KERNEL_TBI && KASAN_TBI */
+#endif /* KASAN_TBI */
 		return (entry_t)e->child;
 	}
 

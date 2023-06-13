@@ -78,6 +78,14 @@
 #include <sys/eventhandler.h>
 #endif
 
+#if BSD_KERNEL_PRIVATE
+#if DEVELOPMENT || DEBUG
+#define NET_KT_DEFAULT     KT_PRIV_ACCT
+#else
+#define NET_KT_DEFAULT     KT_DEFAULT
+#endif
+#endif /* BSD_KERN_PRIVATE */
+
 #ifdef KERNEL
 #include <net/kpi_interface.h>
 #endif /* KERNEL */

@@ -624,6 +624,12 @@ usimple_lock_try(
 	return success;
 }
 
+void
+usimple_lock_assert(usimple_lock_t l, unsigned int type)
+{
+	hw_lock_assert(&l->interlock, type);
+}
+
 /*
  *	Conditionally acquire a usimple_lock.
  *

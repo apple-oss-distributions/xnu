@@ -80,8 +80,8 @@ int     ubc_page_op(vnode_t, off_t, int, ppnum_t *, int *);
 int     ubc_range_op(vnode_t, off_t, off_t, int, int *);
 
 #ifdef KERNEL_PRIVATE
-/* This API continues to exist only until <rdar://4714366> is resolved */
-int     ubc_setcred(struct vnode *, struct proc *) __deprecated;
+int     ubc_setcred(struct vnode *, struct ucred *);
+
 /* code signing */
 struct cs_blob;
 struct cs_blob *ubc_cs_blob_get(vnode_t, cpu_type_t, cpu_subtype_t, off_t);

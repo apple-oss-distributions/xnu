@@ -107,12 +107,13 @@ static uint64_t has_monotonic_clock = 0;
 #endif /* ENABLE_LEGACY_CLOCK_CODE */
 
 lck_ticket_t clock_lock;
+LCK_GRP_DECLARE(clock_lock_grp, "clock");
 
 static LCK_GRP_DECLARE(settime_lock_grp, "settime");
 static LCK_MTX_DECLARE(settime_lock, &settime_lock_grp);
 
 #define clock_lock()    \
-	lck_ticket_lock(&clock_lock, LCK_GRP_NULL)
+	lck_ticket_lock(&clock_lock, &clock_lock_grp)
 
 #define clock_unlock()  \
 	lck_ticket_unlock(&clock_lock)
@@ -355,7 +356,7 @@ MACRO_END
 void
 clock_config(void)
 {
-	lck_ticket_init(&clock_lock, 0);
+	lck_ticket_init(&clock_lock, &clock_lock_grp);
 
 	clock_oldconfig();
 

@@ -718,7 +718,7 @@ Lcopyinframe32:
 	b		Lcopyinframe_done
 
 Lcopyinframe64:
-	mov		x3, VM_MIN_KERNEL_ADDRESS		// Check if kernel address
+	ldr		x3, =VM_MIN_KERNEL_ADDRESS		// Check if kernel address
 	orr		x9, x0, TBI_MASK				// Hide tags in address comparison
 	cmp		x9, x3							// If in kernel address range, skip tag test
 	b.hs	Lcopyinframe_valid
@@ -739,7 +739,7 @@ Lcopyinframe_done:
 /*
  * hw_lck_ticket_t
  * hw_lck_ticket_reserve_orig_allow_invalid(hw_lck_ticket_t *lck
- * #if (CONFIG_KERNEL_TBI && KASAN)
+ * #if KASAN_TBI
  *     , const uint8_t *tag_addr
  * #endif
  * )
@@ -756,7 +756,7 @@ LEXT(hw_lck_ticket_reserve_orig_allow_invalid)
 	mov		x8, x0
 	mov		w9, #HW_LCK_TICKET_LOCK_INC_WORD
 1:
-#if defined(__ARM_ARCH_8_2__) && !(CONFIG_KERNEL_TBI && KASAN)
+#if defined(__ARM_ARCH_8_2__) && !KASAN_TBI
 	ldr 		w0, [x8]
 #else
 	ldaxr		w0, [x8]
@@ -765,20 +765,20 @@ LEXT(hw_lck_ticket_reserve_orig_allow_invalid)
 	tbz		w0, #HW_LCK_TICKET_LOCK_VALID_BIT, 9f /* lock valid ? */
 
 	add		w11, w0, w9
-#if defined(__ARM_ARCH_8_2__) && !(CONFIG_KERNEL_TBI && KASAN)
+#if defined(__ARM_ARCH_8_2__) && !KASAN_TBI
 	mov		w12, w0
 	casa		w0, w11, [x8]
 	cmp		w12, w0
 	b.ne		2b
-#else /* __ARM_ARCH_8_2__ && !(CONFIG_KERNEL_TBI && KASAN) */
-#if (CONFIG_KERNEL_TBI && KASAN)
+#else /* __ARM_ARCH_8_2__ && !KASAN_TBI */
+#if KASAN_TBI
 	/*
 	 * Memory tagging introduces a further scenario that can lead to an invalid
 	 * acquire, which is the case in which the try address doesn't match the
 	 * allocated tag (because it has cycled to another allocation). With hardware
 	 * memory tagging, this would lead to a fault and get caught by the recovery handler.
 	 *
-	 * With (CONFIG_KERNEL_TBI && KASAN) software emulation of memory tagging, we need to explicitly
+	 * With KASAN_TBI software emulation of memory tagging, we need to explicitly
 	 * emulate a tag check. This is no longer an atomic operation, but we are
 	 * in the middle of a ldaxr / stxr pair, so we'd catch a transition underneath to
 	 * invalid because the store tag would mismatch.
@@ -787,10 +787,10 @@ LEXT(hw_lck_ticket_reserve_orig_allow_invalid)
 	ubfx		x14, x8, #56, #8
 	cmp		w13, w14
 	b.ne		9f
-#endif /* (CONFIG_KERNEL_TBI && KASAN) */
+#endif /* KASAN_TBI */
 	stxr		w12, w11, [x8]
 	cbnz		w12, 1b
-#endif /* __ARM_ARCH_8_2__ && !(CONFIG_KERNEL_TBI && KASAN) */
+#endif /* __ARM_ARCH_8_2__ && !KASAN_TBI */
 
 7:
 	POP_FRAME
@@ -1261,12 +1261,14 @@ LEXT(ptrauth_utils_sign_blob_generic)
 	// x16 is used to accumulate the signature because it is interrupt-safe
 	pacga	x16, x1, x16		// Mix in the data length. This helps distinguish e.g. a signature of 2 zeros from a signature of 3 zeros.
 	pacga	x16, x16, x17		// Mix in the diversifier
-	cbz		x10, Lloop_ntrailing	// Handle the case of < 8 bytes
+	orr		x16, x16, #1
+	cbz		x10, Lsmall_size	// Handle the case of < 8 bytes
 
 	// Handle as many full 64-bit words as possible first.
 Lloop_rounds:
 	ldr		x17, [x0], #0x8		// Load the next full 64-bit value
 	pacga	x16, x17, x16		// Mix in the next 8 bytes of data
+	orr		x16, x16, #1
 	subs	x10, x10, #0x1
 	b.ne	Lloop_rounds
 	cbz		x9, Lepilogue_cookie	// If there are no trailing bytes, skip to the epilogue
@@ -1280,6 +1282,7 @@ Lloop_rounds:
 	 * (just as would be the case if we performed a little-endian 64-bit
 	 * read).
 	 */
+Lsmall_size:
 	lsl		x9, x9, #0x3		// x9 = ntrailing_bits, x10 = current bit index (0 at entry)
 	mov		x17, #0				// x17 = trailing bytes accumulator
 Lloop_ntrailing:
@@ -1290,6 +1293,7 @@ Lloop_ntrailing:
 	cmp		x9, x10				// Check if we're done with all bytes
 	b.ne	Lloop_ntrailing
 	pacga	x16, x17, x16		// Mix in the accumulated trailing bytes
+	orr		x16, x16, #1
 
 Lepilogue_cookie:
 	mov		w17, #0x9a2d		// Epilogue cookie: ptrauth_string_discriminator("ptrauth_utils_sign_blob_generic-epilogue") | 0x01

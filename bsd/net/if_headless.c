@@ -320,18 +320,14 @@ static struct if_clone
     headless_clone_create,
     headless_clone_destroy,
     0,
-    HEADLESS_MAXUNIT,
-    HEADLESS_ZONE_MAX_ELEM,
-    sizeof(struct if_headless));
+    HEADLESS_MAXUNIT);
 
 static struct if_clone
     headless_null_cloner = IF_CLONE_INITIALIZER(HEADLESS_NULL_IFNAME,
     headless_clone_create,
     headless_clone_destroy,
     0,
-    HEADLESS_MAXUNIT,
-    HEADLESS_ZONE_MAX_ELEM,
-    sizeof(struct if_headless));
+    HEADLESS_MAXUNIT);
 
 static  void interface_link_event(ifnet_t ifp, u_int32_t event_code);
 
@@ -395,7 +391,7 @@ headless_free(if_headless_ref headlessif)
 	}
 
 	HEADLESS_DPRINTF("%s\n", headlessif->iff_name);
-	if_clone_softc_deallocate(headlessif->iff_cloner, headlessif);
+	kfree_type(struct if_headless, headlessif);
 }
 
 static void
@@ -1135,10 +1131,7 @@ headless_clone_create(struct if_clone *ifc, u_int32_t unit, void *params)
 	ifnet_t                         ifp;
 	uint8_t                         mac_address[ETHER_ADDR_LEN];
 
-	headlessif = if_clone_softc_allocate(ifc);
-	if (headlessif == NULL) {
-		return ENOBUFS;
-	}
+	headlessif = kalloc_type(struct if_headless, Z_WAITOK_ZERO_NOFAIL);
 	headlessif->iff_retain_count = 1;
 	if (strcmp(ifc->ifc_name, HEADLESS_ZERO_IFNAME) == 0) {
 		headlessif->iff_cloner = &headless_zero_cloner;

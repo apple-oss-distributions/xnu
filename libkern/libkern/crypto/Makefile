@@ -6,7 +6,7 @@ export MakeInc_dir=${SRCROOT}/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
-DATAFILES = md5.h rand.h sha1.h
+DATAFILES = crypto.h md5.h rand.h sha1.h
 
 PRIVATE_DATAFILES = register_crypto.h sha2.h des.h aes.h aesxts.h rsa.h chacha20poly1305.h
 

@@ -73,6 +73,8 @@ UNUSED_SYMBOL(decmpfs_validate_compressed_file)
 #include <libkern/section_keywords.h>
 #include <sys/fsctl.h>
 
+#include <sys/kdebug_triage.h>
+
 #include <ptrauth.h>
 
 #pragma mark --- debugging ---
@@ -125,6 +127,32 @@ vnpath(vnode_t vp, char *path, int len)
 #define VerboseLog(x...) do { } while(0)
 #define VerboseLogWithPath(x...) do { } while(0)
 #endif
+
+#define decmpfs_ktriage_record(code, arg) ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DECMPFS, KDBG_TRIAGE_RESERVED, code), arg);
+
+enum ktriage_decmpfs_error_codes {
+	KTRIAGE_DECMPFS_PREFIX = 0,
+	KTRIAGE_DECMPFS_IVALID_OFFSET,
+	KTRIAGE_DECMPFS_COMPRESSOR_NOT_REGISTERED,
+	KTRIAGE_DECMPFS_FETCH_CALLBACK_FAILED,
+	KTRIAGE_DECMPFS_FETCH_HEADER_FAILED,
+	KTRIAGE_DECMPFS_UBC_UPL_MAP_FAILED,
+	KTRIAGE_DECMPFS_FETCH_UNCOMPRESSED_DATA_FAILED,
+
+	KTRIAGE_DECMPFS_MAX
+};
+
+const char *ktriage_decmpfs_strings[] = {
+	[KTRIAGE_DECMPFS_PREFIX] = "decmpfs - ",
+	[KTRIAGE_DECMPFS_IVALID_OFFSET] = "pagein offset is invalid\n",
+	[KTRIAGE_DECMPFS_COMPRESSOR_NOT_REGISTERED] = "compressor is not registered\n",
+	[KTRIAGE_DECMPFS_FETCH_CALLBACK_FAILED] = "fetch callback failed\n",
+	[KTRIAGE_DECMPFS_FETCH_HEADER_FAILED] = "fetch decmpfs xattr failed\n",
+	[KTRIAGE_DECMPFS_UBC_UPL_MAP_FAILED] = "failed to map a UBC UPL\n",
+	[KTRIAGE_DECMPFS_FETCH_UNCOMPRESSED_DATA_FAILED] = "failed to fetch uncompressed data\n",
+};
+
+ktriage_strings_t ktriage_decmpfs_subsystem_strings = {KTRIAGE_DECMPFS_MAX, ktriage_decmpfs_strings};
 
 #pragma mark --- globals ---
 
@@ -1196,8 +1224,11 @@ decmpfs_fetch_uncompressed_data(vnode_t vp, decmpfs_cnode *cp, decmpfs_header *h
 				}
 #endif
 			}
+		} else {
+			decmpfs_ktriage_record(KTRIAGE_DECMPFS_FETCH_CALLBACK_FAILED, err);
 		}
 	} else {
+		decmpfs_ktriage_record(KTRIAGE_DECMPFS_COMPRESSOR_NOT_REGISTERED, hdr->compression_type);
 		err = ENOTSUP;
 		lck_rw_unlock_shared(&decompressorsLock);
 	}
@@ -1281,6 +1312,7 @@ decmpfs_pagein_compressed(struct vnop_pagein_args *ap, int *is_compressed, decmp
 
 	err = decmpfs_fetch_compressed_header(vp, cp, &hdr, 0, &alloc_size);
 	if (err != 0) {
+		decmpfs_ktriage_record(KTRIAGE_DECMPFS_FETCH_HEADER_FAILED, err);
 		goto out;
 	}
 
@@ -1288,6 +1320,7 @@ decmpfs_pagein_compressed(struct vnop_pagein_args *ap, int *is_compressed, decmp
 
 	if (!compression_type_valid(vp, hdr)) {
 		/* compressor not registered */
+		decmpfs_ktriage_record(KTRIAGE_DECMPFS_COMPRESSOR_NOT_REGISTERED, hdr->compression_type);
 		err = ENOTSUP;
 		goto out;
 	}
@@ -1300,12 +1333,7 @@ decmpfs_pagein_compressed(struct vnop_pagein_args *ap, int *is_compressed, decmp
 	 */
 	if (f_offset < 0 || f_offset >= cachedSize ||
 	    (f_offset & PAGE_MASK_64) || (size & PAGE_MASK) || (pl_offset & PAGE_MASK)) {
-#if 0
-		/* There should be a decmpfs equivalent of this cluster_pagein call */
-		if (f_offset >= cachedSize) {
-			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_CLUSTER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_CL_PGIN_PAST_EOF), 0 /* arg */);
-		}
-#endif
+		decmpfs_ktriage_record(KTRIAGE_DECMPFS_IVALID_OFFSET, 0);
 		err = EINVAL;
 		goto out;
 	}
@@ -1359,6 +1387,7 @@ decmpfs_pagein_compressed(struct vnop_pagein_args *ap, int *is_compressed, decmp
 	/* map the upl so we can fetch into it */
 	kern_return_t kr = ubc_upl_map(pl, (vm_offset_t*)&data);
 	if ((kr != KERN_SUCCESS) || (data == NULL)) {
+		decmpfs_ktriage_record(KTRIAGE_DECMPFS_UBC_UPL_MAP_FAILED, kr);
 		err = ENOSPC;
 		data = NULL;
 #if CONFIG_IOSCHED
@@ -1544,6 +1573,7 @@ decompress:
 		}
 	}
 	if (err) {
+		decmpfs_ktriage_record(KTRIAGE_DECMPFS_FETCH_UNCOMPRESSED_DATA_FAILED, err)
 		DebugLogWithPath("decmpfs_fetch_uncompressed_data err %d\n", err);
 		int cmp_state = decmpfs_fast_get_state(cp);
 		if (cmp_state == FILE_IS_CONVERTING) {
@@ -2330,6 +2360,8 @@ decmpfs_init(void)
 	decmpfs_ctx = vfs_context_create(vfs_context_kernel());
 
 	register_decmpfs_decompressor(CMP_Type1, &Type1Reg);
+
+	ktriage_register_subsystem_strings(KDBG_TRIAGE_SUBSYS_DECMPFS, &ktriage_decmpfs_subsystem_strings);
 
 	done = 1;
 }

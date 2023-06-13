@@ -25,7 +25,8 @@ osfmk/arm64/WKdmCompress_4k.s	standard
 osfmk/arm64/WKdmData.s		standard
 osfmk/arm64/lz4_decode_arm64.s  standard
 osfmk/arm64/lz4_encode_arm64.s  standard
-osfmk/arm64/amcc_rorgn.c optional nos_arm_asm
+osfmk/arm64/amcc_rorgn_ppl.c optional nos_arm_asm config_pmap_ppl
+osfmk/arm64/amcc_rorgn_common.c optional nos_arm_asm
 osfmk/arm64/bcopy.s standard
 osfmk/arm64/bzero.s standard
 osfmk/arm/caches.c		standard
@@ -37,8 +38,8 @@ osfmk/arm/cpuid.c   standard
 osfmk/arm/data.s	standard
 osfmk/arm64/dbgwrap.c		standard
 osfmk/arm/arm_timer.c		standard
-osfmk/arm/arm_init.c	standard
-osfmk/arm64/arm_vm_init.c	standard
+osfmk/arm/arm_init.c	optional config_pmap_ppl
+osfmk/arm64/arm_vm_init.c	optional config_pmap_ppl
 osfmk/arm64/arm64_hypercall.c	standard
 osfmk/arm/io_map.c		standard
 osfmk/arm64/loose_ends.c	standard
@@ -49,7 +50,7 @@ osfmk/arm64/iofilter.c	optional nos_arm_asm
 osfmk/arm64/gxf_exceptions.s	optional nos_arm_asm
 osfmk/arm64/lowmem_vectors.c	standard
 osfmk/arm64/sleh.c			standard
-osfmk/arm64/start.s	optional nos_arm_asm
+osfmk/arm64/start.s	optional nos_arm_asm config_pmap_ppl
 osfmk/arm64/pinst.s	optional nos_arm_asm
 osfmk/arm64/cswitch.s	optional nos_arm_asm
 osfmk/arm/machine_cpuid.c	standard
@@ -64,8 +65,6 @@ osfmk/arm64/mcount.s		optional profile
 osfmk/arm64/memcmp_zero.s	standard
 osfmk/arm64/strnlen.s   standard
 osfmk/arm64/strncmp.s   standard
-osfmk/arm/strncpy.c     standard
-osfmk/arm/strlcpy.c     standard
 
 osfmk/arm/model_dep.c		standard
 osfmk/arm64/pcb.c		optional nos_arm_asm

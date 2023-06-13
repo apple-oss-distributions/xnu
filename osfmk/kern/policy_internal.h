@@ -120,6 +120,7 @@ extern void proc_set_task_policy(task_t task, int category, int flavor, int valu
 extern int  proc_get_task_policy(task_t task, int category, int flavor);
 
 extern void proc_set_thread_policy(thread_t thread, int category, int flavor, int value);
+extern void proc_set_thread_policy_ext(thread_t thread, int category, int flavor, int value, int value2);
 extern int  proc_get_thread_policy(thread_t thread, int category, int flavor);
 
 /* For use when you don't already hold a reference on the target thread */
@@ -434,7 +435,7 @@ void trace_resource_violation(uint16_t code,
     struct ledger_entry_info *ledger_info);
 
 /*
- * Evaluate criteria for RT_RESTRICTED promotions/demotions and apply them as
+ * Evaluate criteria for RT_DISALLOWED promotions/demotions and apply them as
  * necessary.
  */
 extern void thread_rt_evaluate(thread_t thread);

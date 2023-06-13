@@ -776,7 +776,6 @@ _ml_at_interrupt_context
 _ml_get_interrupts_enabled
 _ml_set_interrupts_enabled
 _os_log_coprocessor
-_os_log_coprocessor_register
 _os_log_coprocessor_register_with_type
 _os_log_create
 _os_log_debug_enabled
@@ -807,6 +806,7 @@ _snprintf
 _sscanf
 _strcasecmp
 _strchr
+_strrchr
 _strcmp
 _strlcat
 _strlcpy

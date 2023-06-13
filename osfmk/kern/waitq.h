@@ -76,6 +76,9 @@ __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
  * @const WAITQ_UNLOCK (waitq_wakeup64_*_locked only)
  * Unlock the wait queue before any thread_go() is called for woken up threads.
  *
+ * @const WAITQ_ENABLE_INTERRUPTS (waitq_wakeup64_*_locked only)
+ * Also enable interrupts when unlocking the wait queue.
+ *
  * @const WAITQ_KEEP_LOCKED (waitq_wakeup64_*_locked only)
  * Keep the wait queue locked for this call.
  *
@@ -91,6 +94,7 @@ __options_decl(waitq_wakeup_flags_t, uint32_t, {
 	WAITQ_UNLOCK            = 0x0004,
 	WAITQ_KEEP_LOCKED       = 0x0000,
 	WAITQ_HANDOFF           = 0x0008,
+	WAITQ_ENABLE_INTERRUPTS = 0x0010,
 #endif /* MACH_KERNEL_PRIVATE */
 });
 
@@ -345,7 +349,18 @@ waitq_is_null(waitq_t wq)
 {
 	return wq.wq_q == NULL;
 }
-#define waitq_wait_possible(thread)   waitq_is_null((thread)->waitq)
+
+/*!
+ * @function waitq_wait_possible()
+ *
+ * @brief
+ * Check if the thread is in a state where it could assert wait.
+ *
+ * @discussion
+ * If a thread is between assert_wait and thread block, another
+ * assert wait is not allowed.
+ */
+extern bool waitq_wait_possible(thread_t thread);
 
 static inline bool
 waitq_preposts(waitq_t wq)
@@ -382,6 +397,12 @@ waitq_valid(waitq_t waitq)
  */
 extern struct waitq *_global_eventq(char *event, size_t event_length);
 #define global_eventq(event) _global_eventq((char *)&(event), sizeof(event))
+
+static inline waitq_wakeup_flags_t
+waitq_flags_splx(spl_t spl_level)
+{
+	return spl_level ? WAITQ_ENABLE_INTERRUPTS : WAITQ_WAKEUP_DEFAULT;
+}
 
 #endif  /* MACH_KERNEL_PRIVATE */
 #pragma mark locking
@@ -452,8 +473,8 @@ extern bool waitq_held(waitq_t wq) __result_use_check;
  * to be unmapped.
  *
  * Combining this with the zone allocator @c ZC_SEQUESTER feature
- * (along with @c ZC_ZFREE_CLEARMEM and @c ZC_KASAN_NOQUARANTINE)
- * allows to create clever schemes (See @c ipc_right_lookup_read()).
+ * (along with @c ZC_ZFREE_CLEARMEM) allows to create clever schemes
+ * (See @c ipc_right_lookup_read()).
  */
 extern bool waitq_lock_allow_invalid(waitq_t wq) __result_use_check;
 
@@ -712,16 +733,27 @@ extern kern_return_t waitq_wakeup64_one_locked(
  * Wakeup one thread waiting on 'waitq' for 'wake_event'
  *
  * @returns
- *     A locked, runnable thread.  If return value is non-NULL,
- *     interrupts have also been disabled, and the caller
- *     must call @c splx(*spl).
+ *     Returns a thread that is pulled from waitq but not set runnable yet.
+ *     Must be paired with waitq_resume_identified_thread to set it runnable -
+ *     between these two points preemption is disabled.
  */
 extern thread_t waitq_wakeup64_identify_locked(
 	waitq_t                 waitq,
 	event64_t               wake_event,
 	wait_result_t           result,
-	waitq_wakeup_flags_t    flags,
-	spl_t                  *spl);
+	waitq_wakeup_flags_t    flags);
+
+/**
+ * @function waitq_resume_identified_thread()
+ *
+ * @brief
+ * Set a thread runnable that has been woken with waitq_wakeup64_identify_locked
+ */
+extern void waitq_resume_identified_thread(
+	waitq_t                 waitq,
+	thread_t                thread,
+	wait_result_t           result,
+	waitq_wakeup_flags_t    flags);
 
 /**
  * @function waitq_wakeup64_thread_and_unlock()

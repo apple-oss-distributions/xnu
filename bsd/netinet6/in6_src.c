@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -206,21 +206,21 @@ do { \
  * an entry to the caller for later use.
  */
 #define REPLACE(r) do {\
-	SASEL_LOG("REPLACE r %d ia %s ifp1 %s\n", \
-	    (r), s_src, ifp1->if_xname); \
+	SASEL_LOG("REPLACE r %s ia %s ifp1 %s\n", \
+	    (#r), s_src, ifp1->if_xname); \
 	srcrule = (r); \
 	goto replace; \
 } while (0)
 
 #define NEXTSRC(r) do {\
-	SASEL_LOG("NEXTSRC r %d ia %s ifp1 %s\n", \
-	    (r), s_src, ifp1->if_xname); \
+	SASEL_LOG("NEXTSRC r %s ia %s ifp1 %s\n", \
+	    (#r), s_src, ifp1->if_xname); \
 	goto next;              /* XXX: we can't use 'continue' here */ \
 } while (0)
 
 #define BREAK(r) do { \
-	SASEL_LOG("BREAK r %d ia %s ifp1 %s\n", \
-	    (r), s_src, ifp1->if_xname); \
+	SASEL_LOG("BREAK r %s ia %s ifp1 %s\n", \
+	    (#r), s_src, ifp1->if_xname); \
 	srcrule = (r); \
 	goto out;               /* XXX: we can't use 'break' here */ \
 } while (0)
@@ -237,7 +237,7 @@ in6_selectsrc_core_ifa(struct sockaddr_in6 *addr, struct ifnet *ifp, int srcsel_
 
 	if ((in6 = in6_selectsrc_core(addr,
 	    (ip6_prefer_tempaddr ? IPV6_SRCSEL_HINT_PREFER_TMPADDR : 0),
-	    ifp, 0, &src_storage, &src_ifp, &err, &ifa)) == NULL) {
+	    ifp, 0, &src_storage, &src_ifp, &err, &ifa, NULL)) == NULL) {
 		if (err == 0) {
 			err = EADDRNOTAVAIL;
 		}
@@ -282,7 +282,7 @@ done:
 struct in6_addr *
 in6_selectsrc_core(struct sockaddr_in6 *dstsock, uint32_t hint_mask,
     struct ifnet *ifp, int srcsel_debug, struct in6_addr *src_storage,
-    struct ifnet **sifp, int *errorp, struct ifaddr **ifapp)
+    struct ifnet **sifp, int *errorp, struct ifaddr **ifapp, struct route_in6 *ro)
 {
 	u_int32_t odstzone;
 	int bestrule = IP6S_SRCRULE_0;
@@ -294,6 +294,8 @@ in6_selectsrc_core(struct sockaddr_in6 *dstsock, uint32_t hint_mask,
 	const struct in6_addr *tmp = NULL;
 	int dst_scope = -1, best_scope = -1, best_matchlen = -1;
 	uint64_t secs = net_uptime();
+	struct nd_defrouter *dr = NULL;
+	uint32_t genid = in6_ifaddrlist_genid;
 	VERIFY(dstsock != NULL);
 	VERIFY(src_storage != NULL);
 	VERIFY(ifp != NULL);
@@ -323,7 +325,24 @@ in6_selectsrc_core(struct sockaddr_in6 *dstsock, uint32_t hint_mask,
 		goto done;
 	}
 
+	/*
+	 * Determine if the route is an indirect here
+	 * and if it is get the default router that would be
+	 * used as next hop.
+	 * Later in the function it is used to apply rule 5.5 of RFC 6724.
+	 */
+	if (ro != NULL && ro->ro_rt != NULL &&
+	    (ro->ro_rt->rt_flags & RTF_GATEWAY) &&
+	    ro->ro_rt->rt_gateway != NULL) {
+		struct rtentry *rt = ro->ro_rt;
+		lck_mtx_lock(nd6_mutex);
+		dr = defrouter_lookup(NULL,
+		    &SIN6(rt->rt_gateway)->sin6_addr, rt->rt_ifp);
+		lck_mtx_unlock(nd6_mutex);
+	}
+
 	lck_rw_lock_shared(&in6_ifaddr_rwlock);
+addrloop:
 	TAILQ_FOREACH(ia, &in6_ifaddrhead, ia6_link) {
 		int new_scope = -1, new_matchlen = -1;
 		struct in6_addrpolicy *new_policy = NULL;
@@ -344,7 +363,7 @@ in6_selectsrc_core(struct sockaddr_in6 *dstsock, uint32_t hint_mask,
 		 */
 		if (ia->ia6_flags & IN6_IFF_CLAT46) {
 			SASEL_LOG("NEXT ia %s address on ifp1 %s skipped as it is "
-			    "reserved for CLAT46", s_src, ifp1->if_xname);
+			    "reserved for CLAT46\n", s_src, ifp1->if_xname);
 			goto next;
 		}
 
@@ -468,6 +487,75 @@ in6_selectsrc_core(struct sockaddr_in6 *dstsock, uint32_t hint_mask,
 			}
 			if (ia_best->ia_ifp != ifp && ia->ia_ifp == ifp) {
 				REPLACE(IP6S_SRCRULE_5);
+			}
+		}
+
+		/*
+		 * Rule 5.5: Prefer addresses in a prefix advertised by the next-hop.
+		 * If SA or SA's prefix is assigned by the selected next-hop that will
+		 * be used to send to D and SB or SB's prefix is assigned by a different
+		 * next-hop, then prefer SA.  Similarly, if SB or SB's prefix is
+		 * assigned by the next-hop that will be used to send to D and SA or
+		 * SA's prefix is assigned by a different next-hop, then prefer SB.
+		 */
+		if (dr != NULL && ia_best->ia6_ndpr != ia->ia6_ndpr) {
+			boolean_t ia_best_has_prefix = FALSE;
+			boolean_t ia_has_prefix = FALSE;
+			struct nd_prefix ia_best_prefix = {};
+			struct nd_prefix ia_prefix = {};
+			struct nd_prefix *p_ia_best_prefix = NULL;
+			struct nd_prefix *p_ia_prefix = NULL;
+
+			if (ia_best->ia6_ndpr) {
+				ia_best_prefix = *ia_best->ia6_ndpr;
+			}
+
+			if (ia->ia6_ndpr) {
+				ia_prefix = *ia->ia6_ndpr;
+			}
+
+			IFA_UNLOCK(&ia->ia_ifa);
+			lck_rw_done(&in6_ifaddr_rwlock);
+
+			p_ia_best_prefix = nd6_prefix_lookup(&ia_best_prefix, ND6_PREFIX_EXPIRY_UNSPEC);
+			p_ia_prefix = nd6_prefix_lookup(&ia_prefix, ND6_PREFIX_EXPIRY_UNSPEC);
+
+			lck_mtx_lock(nd6_mutex);
+			if (p_ia_best_prefix != NULL) {
+				NDPR_LOCK(p_ia_best_prefix);
+				ia_best_has_prefix = (pfxrtr_lookup(p_ia_best_prefix, dr) != NULL);
+				NDPR_UNLOCK(p_ia_best_prefix);
+				NDPR_REMREF(p_ia_best_prefix);
+			}
+			if (p_ia_prefix != NULL) {
+				NDPR_LOCK(p_ia_prefix);
+				ia_has_prefix = (pfxrtr_lookup(p_ia_prefix, dr) != NULL);
+				NDPR_UNLOCK(p_ia_prefix);
+				NDPR_REMREF(p_ia_prefix);
+			}
+			lck_mtx_unlock(nd6_mutex);
+
+			lck_rw_lock_shared(&in6_ifaddr_rwlock);
+			if (genid != os_atomic_load(&in6_ifaddrlist_genid, acquire)) {
+				SASEL_LOG("Address list seems to have changed. Restarting source "
+				    "address selection.\n");
+				genid = in6_ifaddrlist_genid;
+				/*
+				 * We are starting from scratch. Free up the reference
+				 * on ia_best and also reset it to NULL.
+				 */
+				IFA_REMREF(&ia_best->ia_ifa);
+				ia_best = NULL;
+				goto addrloop;
+			}
+			IFA_LOCK(&ia->ia_ifa);
+
+			if (ia_best_has_prefix && !ia_has_prefix) {
+				NEXTSRC(IP6S_SRCRULE_5_5);
+			}
+
+			if (!ia_best_has_prefix && ia_has_prefix) {
+				REPLACE(IP6S_SRCRULE_5_5);
 			}
 		}
 
@@ -635,6 +723,10 @@ done:
 		    __func__, s_src, s_dst, dst_scope, best_scope);
 	}
 
+	if (dr != NULL) {
+		NDDR_REMREF(dr);
+	}
+
 	return src_storage;
 }
 
@@ -792,7 +884,7 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 	}
 
 	if (in6_selectsrc_core(dstsock, hint_mask, ifp, inp_debug, src_storage,
-	    &sifp, errorp, NULL) == NULL) {
+	    &sifp, errorp, NULL, ro) == NULL) {
 		src_storage = NULL;
 		goto done;
 	}

@@ -121,8 +121,7 @@ SECURITY_READ_ONLY_LATE(zone_t) ipc_object_zones[IOT_NUMBER];
  *       which lets the waitq lock appear "valid" by accident when
  *       elements are freed).
  */
-#define IPC_OBJECT_ZC_BASE (ZC_ZFREE_CLEARMEM | ZC_SEQUESTER | \
-	ZC_KASAN_NOQUARANTINE)
+#define IPC_OBJECT_ZC_BASE (ZC_ZFREE_CLEARMEM | ZC_SEQUESTER)
 
 ZONE_INIT(&ipc_object_zones[IOT_PORT],
     "ipc ports", sizeof(struct ipc_port),
@@ -724,7 +723,7 @@ ipc_object_copyin_from_kernel(
 		if (ip_active(port)) {
 			assert(port->ip_srights > 0);
 		}
-		port->ip_srights++;
+		ip_srights_inc(port);
 		ip_reference(port);
 		ip_mq_unlock(port);
 		break;
@@ -741,7 +740,7 @@ ipc_object_copyin_from_kernel(
 			port->ip_mscount++;
 		}
 
-		port->ip_srights++;
+		ip_srights_inc(port);
 		ip_reference(port);
 		ip_mq_unlock(port);
 		break;
@@ -909,7 +908,7 @@ ipc_object_insert_send_right(
 			ipc_port_t port = ip_object_to_port(object);
 			port->ip_mscount++;
 			if ((bits & MACH_PORT_TYPE_SEND) == 0) {
-				port->ip_srights++;
+				ip_srights_inc(port);
 				bits |= MACH_PORT_TYPE_SEND;
 			}
 			/* leave urefs pegged to maximum if it overflowed */
@@ -1240,9 +1239,8 @@ ipc_object_copyout_dest(
 		} else {
 			name = MACH_PORT_NULL;
 		}
-
-		assert(port->ip_srights > 0);
-		if (--port->ip_srights == 0) {
+		ip_srights_dec(port);
+		if (port->ip_srights == 0) {
 			nsrequest = ipc_notify_no_senders_prepare(port);
 		}
 		ipc_port_clear_sync_rcv_thread_boost_locked(port);
@@ -1261,7 +1259,7 @@ ipc_object_copyout_dest(
 
 		if (ip_in_space(port, space)) {
 			/* quietly consume the send-once right */
-			port->ip_sorights--;
+			ip_sorights_dec(port);
 			name = ip_get_receiver_name(port);
 			ipc_port_clear_sync_rcv_thread_boost_locked(port);
 			/* port unlocked */

@@ -4,14 +4,18 @@
 //
 //
 
-#pragma once
+#ifndef CORE_ENTITLEMENTS_SERIALIZATION_H
+#define CORE_ENTITLEMENTS_SERIALIZATION_H
 
 #ifndef _CE_INDIRECT
 #error "Please include <CoreEntitlements/CoreEntitlements.h> instead of this file"
 #endif
 
-#include "Result.h"
-#include "Runtime.h"
+#include <CoreEntitlements/Result.h>
+#include <CoreEntitlements/Runtime.h>
+#include <CoreEntitlements/Entitlements.h>
+
+__ptrcheck_abi_assume_single();
 
 /*!
  * @enum CESerializedElementType_t
@@ -38,7 +42,9 @@ OS_CLOSED_ENUM(CESerializedElementType, int64_t,
                /* No restrictions are placed on the contents of the second element*/
                kCESerializedDictionaryBegin = 7,
                /* Marks the end of a dictionary */
-               kCESerializedDictionaryEnd = 8
+               kCESerializedDictionaryEnd = 8,
+               /* A data element with a definite length*/
+               kCESerializedData = 9,
                );
 
 /*!
@@ -49,12 +55,23 @@ OS_CLOSED_ENUM(CESerializedElementType, int64_t,
 typedef struct CESerializedElement {
     CESerializedElementType_t type;
     union {
+#if !__has_ptrcheck
         void* bytes;
+#endif
         int64_t value;
     } data;
     size_t length;
     bool pair;
 } CESerializedElement_t;
+
+static inline void *CE_HEADER_INDEXABLE CESerializedElementGetData(const CESerializedElement_t *element) {
+    return __unsafe_forge_bidi_indexable(void *, element->data.value, element->length);
+}
+
+static inline void CESerializedElementSetData(CESerializedElement_t *element, void *__sized_by(length) bytes, size_t length) {
+    element->data.value = (intptr_t)bytes;
+    element->length = length;
+}
 
 /*!
  * @function CESizeSerialization
@@ -67,7 +84,7 @@ typedef struct CESerializedElement {
  * @returns
  * kCENoError if the requiredSize has been successfully populated and contains a valid value
  */
-CEError_t CESizeSerialization(CESerializedElement_t elements[], size_t elementsCount, size_t* requiredSize) __result_use_check;
+CEError_t CESizeSerialization(CESerializedElement_t elements[__counted_by(elementsCount)], size_t elementsCount, size_t* requiredSize) __result_use_check;
 
 /*!
  * @function CESizeXMLSerialization
@@ -80,11 +97,35 @@ CEError_t CESizeSerialization(CESerializedElement_t elements[], size_t elementsC
  * @returns
  * kCENoError if the requiredSize has been successfully populated and contains a valid value
  */
-CEError_t CESizeXMLSerialization(CESerializedElement_t elements[], size_t elementsCount, size_t* requiredSize) __result_use_check;
+CEError_t CESizeXMLSerialization(CESerializedElement_t elements[__counted_by(elementsCount)], size_t elementsCount, size_t* requiredSize) __result_use_check;
+
+/*!
+ * @function CESerializeWithOptions
+ * Serializes the array of elements that contains the underlying data. The elements must have been sized with CESizeSerialization before calling this function.
+ *
+ * @param runtime
+ * The runtime to use for this operation
+ *
+ * @param options
+ * Options that modify what can be serialized.
+ *
+ * @param elements
+ * The list of elements to serialize
+ *
+ * @param elementsCount
+ * How many elements are in that list
+ *
+ * @param start
+ * A pointer to the first byte into a buffer that will be filled with the serialized representation
+ *
+ * @param end
+ * A pointer 1 byte past the end of the buffer to be used for serialization
+ */
+CEError_t CESerializeWithOptions(const CERuntime_t runtime, CEValidationOptions* options, CESerializedElement_t elements[__counted_by(elementsCount)], size_t elementsCount, uint8_t *__ended_by(end) start, uint8_t* end) __result_use_check;
 
 /*!
  * @function CESerialize
- * Serializes the array of elements that contains the underlying data. The elements must have been sized with CESizeSerialization before this function.
+ * Serializes the array of elements that contains the underlying data. The elements must have been sized with CESizeSerialization before calling this function.
  *
  * @param runtime
  * The runtime to use for this operation
@@ -101,11 +142,11 @@ CEError_t CESizeXMLSerialization(CESerializedElement_t elements[], size_t elemen
  * @param end
  * A pointer 1 byte past the end of the buffer to be used for serialization
  */
-CEError_t CESerialize(const CERuntime_t runtime, CESerializedElement_t elements[], size_t elementsCount, uint8_t* start, uint8_t* end) __result_use_check;
+CEError_t CESerialize(const CERuntime_t runtime, CESerializedElement_t elements[__counted_by(elementsCount)], size_t elementsCount, uint8_t *__ended_by(end) start, uint8_t* end) __result_use_check;
 
 /*!
  * @function CESerializeXML
- * Serializes the array of elements that contains the underlying data. The elements must have been sized with CESizeXMLSerialization before this function.
+ * Serializes the array of elements that contains the underlying data. The elements must have been sized with CESizeXMLSerialization before calling this function.
  *
  * @param runtime
  * The runtime to use for this operation
@@ -122,16 +163,19 @@ CEError_t CESerialize(const CERuntime_t runtime, CESerializedElement_t elements[
  * @param end
  * A pointer 1 byte past the end of the buffer to be used for serialization
  */
-CEError_t CESerializeXML(const CERuntime_t runtime, CESerializedElement_t elements[], size_t elementsCount, uint8_t* start, uint8_t* end) __result_use_check;
+CEError_t CESerializeXML(const CERuntime_t runtime, CESerializedElement_t elements[__counted_by(elementsCount)], size_t elementsCount, uint8_t *__ended_by(end) start, uint8_t* end) __result_use_check;
 
 // Helpers
 // These automatically construct CESerializedElements for you
-#define CESerializeInteger(intv) (CESerializedElement_t){.type = kCESerializedInteger, .data = {.value = intv}}
-#define CESerializeBool(boolVal) (CESerializedElement_t){.type = kCESerializedBool, .data = {.value = !!boolVal}}
-#define CESerializeStaticString(strVal) (CESerializedElement_t){.type = kCESerializedString, .data = {.bytes = (void*)strVal}, .length = sizeof(strVal) - 1}
-#define CESerializeKey(strVal) (CESerializedElement_t){.type = kCESerializedKey, .data = {.bytes = (void*)strVal}, .length = sizeof(strVal) - 1}
-#define CESerializeDynamicKey(strVal, len) (CESerializedElement_t){.type = kCESerializedKey, .data = {.bytes = (void*)strVal}, .length = len}
-#define CESerializeString(strVal, len) (CESerializedElement_t){.type = kCESerializedString, .data = {.bytes = strVal}, .length = len}
+#define CESerializeInteger(intv) (CESerializedElement_t){.type = kCESerializedInteger, .data.value = intv}
+#define CESerializeBool(boolVal) (CESerializedElement_t){.type = kCESerializedBool, .data.value = !!boolVal}
+#define CESerializeStaticString(strVal) (CESerializedElement_t){.type = kCESerializedString, .data.value = (intptr_t)strVal, .length = sizeof(strVal) - 1}
+#define CESerializeKey(strVal) (CESerializedElement_t){.type = kCESerializedKey, .data.value = (intptr_t)strVal, .length = sizeof(strVal) - 1}
+#define CESerializeDynamicKey(strVal, len) (CESerializedElement_t){.type = kCESerializedKey, .data.value = (intptr_t)strVal, .length = len}
+#define CESerializeString(strVal, len) (CESerializedElement_t){.type = kCESerializedString, .data.value = (intptr_t)strVal, .length = len}
+#define CESerializeData(dataVal, len) (CESerializedElement_t){.type = kCESerializedData, .data.value = (intptr_t)dataVal, .length = len}
 #define CESerializeArray(...) (CESerializedElement_t){.type = kCESerializedArrayBegin}, __VA_ARGS__ , (CESerializedElement_t){.type = kCESerializedArrayEnd}
 #define CESerializeDictionary(...) (CESerializedElement_t){.type = kCESerializedDictionaryBegin}, __VA_ARGS__ , (CESerializedElement_t){.type = kCESerializedDictionaryEnd}
 #define CESerializeDictionaryPair(a, b) CESerializeArray(a, b)
+
+#endif

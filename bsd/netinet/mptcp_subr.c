@@ -134,10 +134,10 @@ static void mptcp_do_sha256(mptcp_key_t *, char *);
 
 static void mptcp_init_local_parms(struct mptses *, struct sockaddr *);
 
-static ZONE_DEFINE_TYPE(mptsub_zone, "mptsub", struct mptsub, ZC_ZFREE_CLEARMEM);
-static ZONE_DEFINE_TYPE(mptopt_zone, "mptopt", struct mptopt, ZC_ZFREE_CLEARMEM);
-static ZONE_DEFINE(mpt_subauth_zone, "mptauth",
-    sizeof(struct mptcp_subf_auth_entry), ZC_NONE);
+static KALLOC_TYPE_DEFINE(mptsub_zone, struct mptsub, NET_KT_DEFAULT);
+static KALLOC_TYPE_DEFINE(mptopt_zone, struct mptopt, NET_KT_DEFAULT);
+static KALLOC_TYPE_DEFINE(mpt_subauth_zone, struct mptcp_subf_auth_entry,
+    NET_KT_DEFAULT);
 
 struct mppcbinfo mtcbinfo;
 
@@ -256,6 +256,7 @@ mptcp_flush_sopts(struct mptses *mpte)
 int
 mptcp_session_create(struct mppcb *mpp)
 {
+	struct mpp_mtp *mtp;
 	struct mppcbinfo *mppi;
 	struct mptses *mpte;
 	struct mptcb *mp_tp;
@@ -264,8 +265,9 @@ mptcp_session_create(struct mppcb *mpp)
 	mppi = mpp->mpp_pcbinfo;
 	VERIFY(mppi != NULL);
 
-	__IGNORE_WCASTALIGN(mpte = &((struct mpp_mtp *)mpp)->mpp_ses);
-	__IGNORE_WCASTALIGN(mp_tp = &((struct mpp_mtp *)mpp)->mtcb);
+	mtp = __container_of(mpp, struct mpp_mtp, mpp);
+	mpte = &mtp->mpp_ses;
+	mp_tp = &mtp->mtcb;
 
 	/* MPTCP Multipath PCB Extension */
 	bzero(mpte, sizeof(*mpte));
@@ -2002,6 +2004,7 @@ mptcp_subflow_soreceive(struct socket *so, struct sockaddr **psa,
 	struct mptcb *mp_tp;
 	int flags, error = 0;
 	struct mbuf *m, **mp = mp0;
+	struct tcpcb *tp = sototcpcb(so);
 
 	mpte = tptomptp(sototcpcb(so))->mpt_mpte;
 	mp_so = mptetoso(mpte);
@@ -2243,6 +2246,16 @@ fallback:
 				dfin = 1;
 				dlen--;
 			}
+		}
+
+		/* Now, see if we need to remove previous packets */
+		if (SEQ_GT(sseq + tp->irs, tp->rcv_nxt - so->so_rcv.sb_cc)) {
+			/* Ok, there is data in there that we don't need - let's throw it away! */
+			int totrim = (int)sseq + tp->irs - (tp->rcv_nxt - so->so_rcv.sb_cc);
+
+			sbdrop(&so->so_rcv, totrim);
+
+			m = so->so_rcv.sb_mb;
 		}
 
 		/*
@@ -5390,7 +5403,7 @@ mptcp_insert_dsn(struct mppcb *mpp, struct mbuf *m)
 		return;
 	}
 
-	__IGNORE_WCASTALIGN(mp_tp = &((struct mpp_mtp *)mpp)->mtcb);
+	mp_tp = &__container_of(mpp, struct mpp_mtp, mpp)->mtcb;
 
 	while (m) {
 		VERIFY(m->m_flags & M_PKTHDR);
@@ -6867,6 +6880,20 @@ mptcp_reset_keepalive(struct tcpcb *tp)
 	mpts->mpts_flags &= ~MPTSF_READ_STALL;
 }
 
+static struct mppcb *
+mtcp_alloc(void)
+{
+	return &kalloc_type(struct mpp_mtp, Z_WAITOK | Z_ZERO | Z_NOFAIL)->mpp;
+}
+
+static void
+mtcp_free(struct mppcb *mpp)
+{
+	struct mpp_mtp *mtp = __container_of(mpp, struct mpp_mtp, mpp);
+
+	kfree_type(struct mpp_mtp, mtp);
+}
+
 /*
  * Protocol pr_init callback.
  */
@@ -6937,7 +6964,8 @@ mptcp_init(struct protosw *pp, struct domain *dp)
 
 	bzero(&mtcbinfo, sizeof(mtcbinfo));
 	TAILQ_INIT(&mtcbinfo.mppi_pcbs);
-	mtcbinfo.mppi_zone = zone_create("mptc", sizeof(struct mpp_mtp), ZC_NONE);
+	mtcbinfo.mppi_alloc = mtcp_alloc;
+	mtcbinfo.mppi_free  = mtcp_free;
 
 	mtcbinfo.mppi_lock_grp = lck_grp_alloc_init("mppcb", LCK_GRP_ATTR_NULL);
 	lck_attr_setdefault(&mtcbinfo.mppi_lock_attr);

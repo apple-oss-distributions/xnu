@@ -146,6 +146,10 @@ extern void                     hw_lock_unlock(
 extern void                     hw_lock_unlock_nopreempt(
 	hw_lock_t);
 
+extern void                     hw_lock_assert(
+	hw_lock_t lock,
+	unsigned int type);
+
 extern unsigned int             hw_lock_held(
 	hw_lock_t) __result_use_check;
 
@@ -252,6 +256,10 @@ extern unsigned int             usimple_lock_try(
 	usimple_lock_t
 	LCK_GRP_ARG(lck_grp_t*)) __result_use_check;
 
+extern void            usimple_lock_assert(
+	usimple_lock_t lock,
+	unsigned int type);
+
 extern void             usimple_lock_try_lock_loop(
 	usimple_lock_t
 	LCK_GRP_ARG(lck_grp_t*));
@@ -299,6 +307,7 @@ extern void                     usimple_unlock(
 #define simple_lock_init(l, t)               usimple_lock_init(l,t)
 #define simple_lock(l, grp)                  usimple_lock(l, grp)
 #define simple_unlock(l)                     usimple_unlock(l)
+#define simple_lock_assert(l, x)             usimple_lock_assert((l), (x))
 #define simple_lock_try(l, grp)              usimple_lock_try(l, grp)
 #define simple_lock_try_lock_loop(l, grp)    usimple_lock_try_lock_loop(l, grp)
 #define simple_lock_try_lock_mp_signal_safe_loop_deadline(l, ddl, grp) \

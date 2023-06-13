@@ -86,7 +86,7 @@ extern uint64_t panic_restart_timeout;
 
 boolean_t virtualized = FALSE;
 
-decl_simple_lock_data(static, ml_timer_evaluation_slock);
+static SIMPLE_LOCK_DECLARE(ml_timer_evaluation_slock, 0);
 uint32_t ml_timer_eager_evaluations;
 uint64_t ml_timer_eager_evaluation_max;
 static boolean_t ml_timer_evaluation_in_progress = FALSE;
@@ -148,7 +148,7 @@ vm_offset_t
 ml_static_slide(
 	vm_offset_t vaddr)
 {
-	return VM_KERNEL_SLIDE(vaddr);
+	return vaddr + vm_kernel_slide;
 }
 
 /*
@@ -191,7 +191,7 @@ vm_offset_t
 ml_static_unslide(
 	vm_offset_t vaddr)
 {
-	return VM_KERNEL_UNSLIDE(vaddr);
+	return vaddr - vm_kernel_slide;
 }
 
 /*
@@ -874,7 +874,7 @@ ml_get_timebase_entropy(void)
  *	Routine:        ml_init_lock_timeout
  *	Function:
  */
-void
+static void __startup_func
 ml_init_lock_timeout(void)
 {
 	uint64_t        abstime;
@@ -966,26 +966,19 @@ ml_init_lock_timeout(void)
 		if (!PE_parse_boot_argn("vti", &vti, sizeof(vti))) {
 			vti = 6;
 		}
-		printf("Timeouts adjusted for virtualization (<<%d)\n", vti);
-		kprintf("Timeouts adjusted for virtualization (<<%d):\n", vti);
+
 #define VIRTUAL_TIMEOUT_INFLATE_ABS(_timeout)              \
 MACRO_BEGIN                                                \
-	kprintf("%24s: 0x%016llx ", #_timeout, _timeout);      \
 	_timeout = virtual_timeout_inflate_abs(vti, _timeout); \
-	kprintf("-> 0x%016llx\n",  _timeout);                  \
 MACRO_END
 
 #define VIRTUAL_TIMEOUT_INFLATE_TSC(_timeout)              \
 MACRO_BEGIN                                                \
-	kprintf("%24s: 0x%016llx ", #_timeout, _timeout);      \
 	_timeout = virtual_timeout_inflate_tsc(vti, _timeout); \
-	kprintf("-> 0x%016llx\n",  _timeout);                  \
 MACRO_END
 #define VIRTUAL_TIMEOUT_INFLATE_US(_timeout)               \
 MACRO_BEGIN                                                \
-	kprintf("%24s:         0x%08x ", #_timeout, _timeout); \
 	_timeout = virtual_timeout_inflate_us(vti, _timeout);  \
-	kprintf("-> 0x%08x\n",  _timeout);                     \
 MACRO_END
 		/*
 		 * These timeout values are inflated because they cause
@@ -1001,14 +994,11 @@ MACRO_END
 		VIRTUAL_TIMEOUT_INFLATE_ABS(TLBTimeOut);
 		VIRTUAL_TIMEOUT_INFLATE_ABS(report_phy_read_delay);
 		VIRTUAL_TIMEOUT_INFLATE_TSC(lock_panic_timeout);
-#if CONFIG_PV_TICKET
-		kprintf("pv locks %sabled\n", has_lock_pv ? "en" : "dis");
-#endif
 	}
 
 	interrupt_latency_tracker_setup();
-	simple_lock_init(&ml_timer_evaluation_slock, 0);
 }
+STARTUP(TIMEOUTS, STARTUP_RANK_MIDDLE, ml_init_lock_timeout);
 
 /*
  * Threshold above which we should attempt to block
@@ -1325,7 +1315,7 @@ ml_cpu_end_loop(void)
 }
 
 size_t
-ml_get_vm_reserved_regions(bool vm_is64bit, struct vm_reserved_region **regions)
+ml_get_vm_reserved_regions(bool vm_is64bit, const struct vm_reserved_region **regions)
 {
 #pragma unused(vm_is64bit)
 	assert(regions != NULL);
@@ -1342,4 +1332,17 @@ ml_cpu_power_enable(__unused int cpu_id)
 void
 ml_cpu_power_disable(__unused int cpu_id)
 {
+}
+
+int
+ml_page_protection_type(void)
+{
+	return 0; // not supported on x86
+}
+
+bool
+ml_addr_in_non_xnu_stack(__unused uintptr_t addr)
+{
+	/* There are no non-XNU stacks on x86 systems. */
+	return false;
 }

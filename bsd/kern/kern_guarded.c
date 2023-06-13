@@ -79,9 +79,7 @@ kern_return_t task_exception_notify(exception_type_t exception,
 #define GUARD_ALL      (GUARD_REQUIRED |        \
 	                (GUARD_CLOSE | GUARD_SOCKET_IPC | GUARD_FILEPORT | GUARD_WRITE))
 
-static ZONE_DEFINE(fp_guard_zone, "fileproc_guard",
-    sizeof(struct fileproc_guard),
-    ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(fp_guard_zone, struct fileproc_guard, KT_DEFAULT);
 
 struct gfp_crarg {
 	guardid_t gca_guard;

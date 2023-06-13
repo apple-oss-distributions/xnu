@@ -72,6 +72,7 @@
 #include <sys/kdebug.h>
 
 uint32_t system_inshutdown = 0;
+uint32_t final_shutdown_stage = 0;
 
 #if XNU_TARGET_OS_OSX
 /* XXX should be in a header file somewhere, but isn't */
@@ -140,7 +141,7 @@ zprint_panic_info(void)
 		return;
 	}
 
-	vm_page_diagnose(panic_kext_memory_info, num_sites, 0);
+	vm_page_diagnose(panic_kext_memory_info, num_sites, 0, false);
 }
 
 int
@@ -321,6 +322,12 @@ force_reboot:
 
 	if (howto & RB_PANIC) {
 		panic_kernel(howto, message);
+	}
+
+	// Make sure an RB_QUICK reboot thread and another regular/RB_QUICK thread
+	// do not race.
+	if (!OSCompareAndSwap(0, 1, &final_shutdown_stage)) {
+		return EBUSY;
 	}
 
 	if (howto & RB_HALT) {

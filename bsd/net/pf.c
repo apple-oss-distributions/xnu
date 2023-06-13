@@ -11077,57 +11077,70 @@ hook_runloop(struct hook_desc_head *head, int flags)
 }
 
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
-static bool
-pf_check_compatible_anchor(const char *anchor_path)
+
+static uint32_t
+pf_check_compatible_anchor(struct pf_anchor const * a)
 {
-	// Whitelist reserved anchor
+	const char *anchor_path = a->path;
+	uint32_t result = 0;
+
 	if (strncmp(anchor_path, PF_RESERVED_ANCHOR, MAXPATHLEN) == 0) {
-		return true;
+		goto done;
 	}
 
-	// Whitelist com.apple anchor
 	if (strncmp(anchor_path, "com.apple", MAXPATHLEN) == 0) {
-		return true;
+		goto done;
 	}
 
 	for (int i = 0; i < sizeof(compatible_anchors) / sizeof(compatible_anchors[0]); i++) {
 		const char *ptr = strnstr(anchor_path, compatible_anchors[i], MAXPATHLEN);
 		if (ptr != NULL && ptr == anchor_path) {
-			return true;
+			goto done;
 		}
 	}
 
-	return false;
+	result |= PF_COMPATIBLE_FLAGS_CUSTOM_ANCHORS_PRESENT;
+	for (int i = PF_RULESET_SCRUB; i < PF_RULESET_MAX; ++i) {
+		if (a->ruleset.rules[i].active.rcount != 0) {
+			result |= PF_COMPATIBLE_FLAGS_CUSTOM_RULES_PRESENT;
+		}
+	}
+done:
+	return result;
 }
 
-bool
+uint32_t
 pf_check_compatible_rules(void)
 {
+	LCK_RW_ASSERT(&pf_perim_lock, LCK_RW_ASSERT_HELD);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 	struct pf_anchor *anchor = NULL;
 	struct pf_rule *rule = NULL;
+	uint32_t compat_bitmap = 0;
 
-	// Check whitelisted anchors
-	RB_FOREACH(anchor, pf_anchor_global, &pf_anchors) {
-		if (!pf_check_compatible_anchor(anchor->path)) {
-			if (pf_status.debug >= PF_DEBUG_MISC) {
-				printf("pf anchor %s not compatible\n", anchor->path);
-			}
-			return false;
-		}
+	if (PF_IS_ENABLED) {
+		compat_bitmap |= PF_COMPATIBLE_FLAGS_PF_ENABLED;
 	}
 
-	// Check rules in main ruleset
+	RB_FOREACH(anchor, pf_anchor_global, &pf_anchors) {
+		compat_bitmap |= pf_check_compatible_anchor(anchor);
+#define _CHECK_FLAGS    (PF_COMPATIBLE_FLAGS_CUSTOM_ANCHORS_PRESENT | PF_COMPATIBLE_FLAGS_CUSTOM_RULES_PRESENT)
+		if ((compat_bitmap & _CHECK_FLAGS) == _CHECK_FLAGS) {
+			goto done;
+		}
+#undef _CHECK_FLAGS
+	}
+
 	for (int i = PF_RULESET_SCRUB; i < PF_RULESET_MAX; i++) {
 		TAILQ_FOREACH(rule, pf_main_ruleset.rules[i].active.ptr, entries) {
 			if (rule->anchor == NULL) {
-				if (pf_status.debug >= PF_DEBUG_MISC) {
-					printf("main ruleset contains rules\n");
-				}
-				return false;
+				compat_bitmap |= PF_COMPATIBLE_FLAGS_CUSTOM_RULES_PRESENT;
+				goto done;
 			}
 		}
 	}
 
-	return true;
+done:
+	return compat_bitmap;
 }
 #endif // SKYWALK && defined(XNU_TARGET_OS_OSX)

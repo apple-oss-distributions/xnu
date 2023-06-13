@@ -129,6 +129,18 @@ __ipc_port_translate_receive_panic(ipc_space_t space, ipc_port_t port)
 	    space, port, ip_get_receiver(port));
 }
 
+__abortlike void
+__ipc_right_delta_overflow_panic(ipc_port_t port, natural_t *field, int delta)
+{
+	const char *what;
+	if (field == &port->ip_srights) {
+		what = "send right";
+	} else {
+		what = "send-once right";
+	}
+	panic("port %p %s count overflow (delta: %d)", port, what, delta);
+}
+
 static void
 ipc_port_send_turnstile_recompute_push_locked(
 	ipc_port_t port);
@@ -2718,7 +2730,7 @@ ipc_port_make_send_any_locked(
 {
 	require_ip_active(port);
 	port->ip_mscount++;
-	port->ip_srights++;
+	ip_srights_inc(port);
 	ip_reference(port);
 	return port;
 }
@@ -2774,7 +2786,7 @@ ipc_port_copy_send_any_locked(
 	ipc_port_t      port)
 {
 	assert(port->ip_srights > 0);
-	port->ip_srights++;
+	ip_srights_inc(port);
 	ip_reference(port);
 }
 
@@ -2887,13 +2899,6 @@ ipc_port_copyout_send_pinned(
 	}
 }
 
-__abortlike
-static void
-__ipc_port_send_over_release_panic(ipc_port_t port)
-{
-	panic("Over-release of port %p send right!", port);
-}
-
 /*
  *	Routine:	ipc_port_release_send_and_unlock
  *	Purpose:
@@ -2909,10 +2914,7 @@ ipc_port_release_send_and_unlock(
 {
 	ipc_notify_nsenders_t nsrequest = { };
 
-	if (port->ip_srights == 0) {
-		__ipc_port_send_over_release_panic(port);
-	}
-	port->ip_srights--;
+	ip_srights_dec(port);
 
 	if (ip_active(port) && port->ip_srights == 0) {
 		nsrequest = ipc_notify_no_senders_prepare(port);
@@ -2957,7 +2959,7 @@ ipc_port_make_sonce_locked(
 	ipc_port_t      port)
 {
 	require_ip_active(port);
-	port->ip_sorights++;
+	ip_sorights_inc(port);
 	ip_reference(port);
 	return port;
 }
@@ -2988,13 +2990,6 @@ ipc_port_make_sonce(
 	return IP_DEAD;
 }
 
-__abortlike
-static void
-__ipc_port_send_once_over_release_panic(ipc_port_t port)
-{
-	panic("Over-release of port %p send-once right!", port);
-}
-
 /*
  *	Routine:	ipc_port_release_sonce
  *	Purpose:
@@ -3014,10 +3009,7 @@ ipc_port_release_sonce_and_unlock(
 {
 	ip_mq_lock_held(port);
 
-	if (port->ip_sorights == 0) {
-		__ipc_port_send_once_over_release_panic(port);
-	}
-	port->ip_sorights--;
+	ip_sorights_dec(port);
 
 	if (port->ip_specialreply) {
 		ipc_port_adjust_special_reply_port_locked(port, NULL,

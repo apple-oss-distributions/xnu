@@ -245,11 +245,9 @@ static struct kern_nexus_domain_provider nx_upipe_prov_s = {
 	},
 };
 
-static ZONE_DEFINE(na_upipe_zone, SKMEM_ZONE_PREFIX ".na.upipe",
-    sizeof(struct nexus_upipe_adapter), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(na_upipe_zone, struct nexus_upipe_adapter);
 
-static ZONE_DEFINE(nx_upipe_zone, SKMEM_ZONE_PREFIX ".nx.upipe",
-    sizeof(struct nx_upipe), ZC_ZFREE_CLEARMEM);
+static SKMEM_TYPE_DEFINE(nx_upipe_zone, struct nx_upipe);
 
 #define SKMEM_TAG_PIPES "com.apple.skywalk.pipes"
 static SKMEM_TAG_DEFINE(skmem_tag_pipes, SKMEM_TAG_PIPES);
@@ -1102,7 +1100,7 @@ nx_upipe_na_rings_create(struct nexus_adapter *na, struct kern_channel *ch)
 	 * Create krings and all the rings for this end;
 	 * we'll update ckr_save_ring pointers below.
 	 */
-	error = na_rings_mem_setup(na, 0, FALSE, ch);
+	error = na_rings_mem_setup(na, FALSE, ch);
 	if (error != 0) {
 		goto err;
 	}
@@ -1116,7 +1114,7 @@ nx_upipe_na_rings_create(struct nexus_adapter *na, struct kern_channel *ch)
 	}
 
 	/* now, create krings and rings of the other end */
-	error = na_rings_mem_setup(ona, 0, FALSE, ch);
+	error = na_rings_mem_setup(ona, FALSE, ch);
 	if (error != 0) {
 		na_rings_mem_teardown(na, ch, FALSE);   /* this end */
 		goto err;

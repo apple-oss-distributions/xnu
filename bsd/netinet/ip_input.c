@@ -1074,6 +1074,10 @@ ipfw_tags_done:
 		*modm = m;
 	}
 
+	if ((ip->ip_tos & IPTOS_ECN_MASK) == IPTOS_ECN_ECT1) {
+		m->m_pkthdr.pkt_ext_flags |= PKTF_EXT_L4S;
+	}
+
 	/* 127/8 must not appear on wire - RFC1122 */
 	if ((ntohl(ip->ip_dst.s_addr) >> IN_CLASSA_NSHIFT) == IN_LOOPBACKNET ||
 	    (ntohl(ip->ip_src.s_addr) >> IN_CLASSA_NSHIFT) == IN_LOOPBACKNET) {

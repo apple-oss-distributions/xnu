@@ -32,7 +32,9 @@
 #include <sys/kdebug.h>
 #include <sys/kernel_types.h>
 #include <sys/vnode.h>
+#include <sys/cdefs.h>
 
+__BEGIN_DECLS
 /*
  * Please switch on @DECMPFS_ENABLE_KDEBUG_TRACES to enable tracepoints.
  * Tracepoints are compiled out by default to eliminate any overhead due to
@@ -171,11 +173,15 @@ typedef struct {
 	user_ssize_t size;
 } decmpfs_vector;
 
+__END_DECLS
+
 #ifdef KERNEL
 
 #ifdef XNU_KERNEL_PRIVATE
 
 #include <kern/locks.h>
+
+__BEGIN_DECLS
 
 struct decmpfs_cnode {
 	uint8_t cmp_state;
@@ -190,7 +196,11 @@ struct decmpfs_cnode {
 	lck_rw_t compressed_data_lock;
 };
 
+__END_DECLS
+
 #endif // XNU_KERNEL_PRIVATE
+
+__BEGIN_DECLS
 
 typedef struct decmpfs_cnode decmpfs_cnode;
 
@@ -268,6 +278,7 @@ typedef struct {
 errno_t register_decmpfs_decompressor(uint32_t compression_type, const decmpfs_registration *registration);
 errno_t unregister_decmpfs_decompressor(uint32_t compression_type, decmpfs_registration *registration);
 
+__END_DECLS
 #endif /* KERNEL */
 
 #endif /* _SYS_DECMPFS_H_ */

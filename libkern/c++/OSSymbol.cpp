@@ -32,487 +32,358 @@
 #include <string.h>
 #include <sys/cdefs.h>
 
+#include <kern/bits.h>
 #include <kern/locks.h>
+#include <kern/smr_hash.h>
+#include <kern/thread_call.h>
 
+#if defined(__arm64__)
+#include <arm64/amcc_rorgn.h> /* rorgn_contains */
+#endif
 #include <libkern/c++/OSSymbol.h>
 #include <libkern/c++/OSSharedPtr.h>
 #include <libkern/c++/OSLib.h>
 #include <os/cpp_util.h>
+#include <os/hash.h>
 #include <string.h>
 
-#define super OSString
+static ZONE_DEFINE(OSSymbol_zone, "iokit.OSSymbol", sizeof(OSSymbol), ZC_NONE);
+static SMR_DEFINE(OSSymbol_smr);
+static LCK_GRP_DECLARE(lock_group, "OSSymbolPool");
 
-typedef struct { unsigned int i, j; } OSSymbolPoolState;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
 
-#define INITIAL_POOL_SIZE  ((unsigned int)((exp2ml(1 + log2(kInitBucketCount)))))
-
-#define GROW_FACTOR   (1)
-#define SHRINK_FACTOR (3)
-
-#define GROW_POOL()     do \
-    if (count * GROW_FACTOR > nBuckets) { \
-	reconstructSymbols(true); \
-    } \
-while (0)
-
-#define SHRINK_POOL()     do \
-    if (count * SHRINK_FACTOR < nBuckets && \
-	nBuckets > INITIAL_POOL_SIZE) { \
-	reconstructSymbols(false); \
-    } \
-while (0)
-
+/*
+ * This implements a relativistic hash table, using <kern/smr.h> as underlying
+ * safe memory reclamation scheme.
+ *
+ * (https://www.usenix.org/legacy/event/atc11/tech/final_files/Triplett.pdf)
+ *
+ * One twist is that the OSSymbol_smr_free() callback must be
+ * preemption-disabled safe, which means the `kfree_data()` it calls _MUST_ be
+ * smaller than KALLOC_SAFE_ALLOC_SIZE. To deal with that, if a Symbol is made
+ * with a string that is much larger (should be rare), these go on a lock-based
+ * "huge" queue.
+ */
 class OSSymbolPool
 {
-private:
-	static const unsigned int kInitBucketCount = 16;
+	/* empirically most devices have at least 10+k symbols */
+	static constexpr uint32_t MIN_SIZE = 4096;
 
-	typedef struct { unsigned int count; OSSymbol **symbolP; } Bucket;
-
-	Bucket *buckets;
-	unsigned int nBuckets;
-	unsigned int count;
-	lck_rw_t *poolGate;
-
-	static inline void
-	hashSymbol(const char *s,
-	    unsigned int *hashP,
-	    unsigned int *lenP)
+	static inline smrh_key_t
+	OSSymbol_get_key(const OSSymbol *sym)
 	{
-		unsigned int hash = 0;
-		unsigned int len = 0;
-
-		/* Unroll the loop. */
-		for (;;) {
-			if (!*s) {
-				break;
-			}
-			len++; hash ^= (unsigned int)(unsigned char) *s++;
-			if (!*s) {
-				break;
-			}
-			len++; hash ^= ((unsigned int)(unsigned char) *s++) <<  8;
-			if (!*s) {
-				break;
-			}
-			len++; hash ^= ((unsigned int)(unsigned char) *s++) << 16;
-			if (!*s) {
-				break;
-			}
-			len++; hash ^= ((unsigned int)(unsigned char) *s++) << 24;
-		}
-		*lenP = len;
-		*hashP = hash;
+		return {
+			       .smrk_string = sym->string,
+			       .smrk_len    = (size_t)(sym->length - 1)
+		};
 	}
 
-	static unsigned long log2(unsigned int x);
-	static unsigned long exp2ml(unsigned long x);
+	static uint32_t
+	OSSymbol_obj_hash(const struct smrq_slink *link, uint32_t seed)
+	{
+		OSSymbol *sym = __container_of(link, OSSymbol, hashlink);
 
-	void reconstructSymbols(void);
-	void reconstructSymbols(bool grow);
+		return smrh_key_hash_str(OSSymbol_get_key(sym), seed);
+	}
+
+	static bool
+	OSSymbol_obj_equ(const struct smrq_slink *link, smrh_key_t key)
+	{
+		OSSymbol *sym = __container_of(link, OSSymbol, hashlink);
+
+		return smrh_key_equ_str(OSSymbol_get_key(sym), key);
+	}
+
+	static bool
+	OSSymbol_obj_try_get(void *obj)
+	{
+		OSSymbol *sym = (OSSymbol *)obj;
+
+		return (sym->flags & kOSSSymbolPermanent) ||
+		       sym->taggedTryRetain(nullptr);
+	}
+
+	SMRH_TRAITS_DEFINE_STR(hash_traits, OSSymbol, hashlink,
+	    .domain = &OSSymbol_smr,
+	    .obj_hash = OSSymbol_obj_hash,
+	    .obj_equ  = OSSymbol_obj_equ,
+	    .obj_try_get = OSSymbol_obj_try_get,
+	    );
+
+	mutable lck_mtx_t _mutex;
+	struct smr_hash   _hash;
+	smrq_slist_head   _huge_head;
+	thread_call_t     _tcall;
+	uint32_t          _hugeCount = 0;
+	bool              _tcallScheduled;
+
+private:
+
+	inline void
+	lock() const
+	{
+		lck_mtx_lock(&_mutex);
+	}
+
+	inline void
+	unlock() const
+	{
+		lck_mtx_unlock(&_mutex);
+	}
+
+	inline bool
+	shouldShrink() const
+	{
+		/* shrink if there are more than 2 buckets per 1 symbol */
+		return smr_hash_serialized_should_shrink(&_hash, MIN_SIZE, 2, 1);
+	}
+
+	inline bool
+	shouldGrow() const
+	{
+		/* shrink if there less more than 1 bucket per 4 symbol */
+		return smr_hash_serialized_should_grow(&_hash, 1, 4);
+	}
 
 public:
-	static void *operator new(size_t size);
-	static void operator delete(void *mem, size_t size);
+
+	static void rehash(thread_call_param_t, thread_call_param_t);
+	inline static OSSymbolPool &instance() __pure2;
 
 	OSSymbolPool()
 	{
+		lck_mtx_init(&_mutex, &lock_group, LCK_ATTR_NULL);
+
+		smr_hash_init(&_hash, MIN_SIZE);
+		smrq_init(&_huge_head);
+
+		_tcall = thread_call_allocate_with_options(rehash, this,
+		    THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
 	}
-	OSSymbolPool(const OSSymbolPool *old);
-	virtual
-	~OSSymbolPool();
+	OSSymbolPool(const OSSymbolPool &) = delete;
+	OSSymbolPool(OSSymbolPool &&) = delete;
+	OSSymbolPool &operator=(const OSSymbolPool &) = delete;
+	OSSymbolPool &operator=(OSSymbolPool &&) = delete;
 
-	bool init();
+	~OSSymbolPool() = delete;
 
-	inline void
-	closeReadGate()
-	{
-		lck_rw_lock(poolGate, LCK_RW_TYPE_SHARED);
-	}
+	OSSharedPtr<const OSSymbol> findSymbol(smrh_key_t key) const;
 
-	inline void
-	openReadGate()
-	{
-		lck_rw_unlock(poolGate, LCK_RW_TYPE_SHARED);
-	}
+	void insertSymbol(
+		OSSharedPtr<OSSymbol> &sym,
+		smrh_key_t key,
+		bool makePermanent = false);
 
-
-	inline void
-	closeWriteGate()
-	{
-		lck_rw_lock(poolGate, LCK_RW_TYPE_EXCLUSIVE);
-	}
-
-	inline void
-	openWriteGate()
-	{
-		lck_rw_unlock(poolGate, LCK_RW_TYPE_EXCLUSIVE);
-	}
-
-	OSSharedPtr<OSSymbol> findSymbol(const char *cString) const;
-	OSSharedPtr<OSSymbol> insertSymbol(OSSymbol *sym);
 	void removeSymbol(OSSymbol *sym);
 
-	OSSymbolPoolState initHashState();
-	LIBKERN_RETURNS_NOT_RETAINED OSSymbol * nextHashState(OSSymbolPoolState *stateP);
+	void rehash();
+
+	void checkForPageUnload(void *startAddr, void *endAddr);
 };
 
-void *
-OSSymbolPool::operator new(__assert_only size_t size)
-{
-	OSMETA_ACCUMSIZE(size);
-	assert(size == sizeof(OSSymbolPool));
+static _Alignas(OSSymbolPool) uint8_t OSSymbolPoolStorage[sizeof(OSSymbolPool)];
 
-	return (void *)kalloc_type_tag(OSSymbolPool, Z_WAITOK_ZERO_NOFAIL,
-	           VM_KERN_MEMORY_LIBKERN);
+OSSymbolPool &
+OSSymbolPool::instance()
+{
+	return reinterpret_cast<OSSymbolPool &>(OSSymbolPoolStorage);
 }
 
-void
-OSSymbolPool::operator delete(void *mem, __assert_only size_t size)
+static inline bool
+OSSymbol_is_huge(size_t size)
 {
-	assert(size == sizeof(OSSymbolPool));
-	kfree_type(OSSymbolPool, mem);
+	return size > KALLOC_SAFE_ALLOC_SIZE;
 }
 
-extern lck_grp_t *IOLockGroup;
-
-bool
-OSSymbolPool::init()
+OSSharedPtr<const OSSymbol>
+OSSymbolPool::findSymbol(smrh_key_t key) const
 {
-	count = 0;
-	nBuckets = INITIAL_POOL_SIZE;
-	buckets = kalloc_type_tag(Bucket, nBuckets, Z_WAITOK_ZERO,
-	    VM_KERN_MEMORY_LIBKERN);
-	if (!buckets) {
-		return false;
-	}
-	OSMETA_ACCUMSIZE(nBuckets * sizeof(Bucket));
+	OSSymbol *sym;
+	OSSharedPtr<const OSSymbol> ret;
 
-	poolGate = lck_rw_alloc_init(IOLockGroup, LCK_ATTR_NULL);
+	if (!OSSymbol_is_huge(key.smrk_len)) {
+		char tmp_buf[128]; /* empirically all keys are < 110 bytes */
+		char *copy_s = NULL;
 
-	return poolGate != NULL;
-}
-
-OSSymbolPool::OSSymbolPool(const OSSymbolPool *old)
-{
-	count = old->count;
-	nBuckets = old->nBuckets;
-	buckets = old->buckets;
-
-	poolGate = NULL; // Do not duplicate the poolGate
-}
-
-OSSymbolPool::~OSSymbolPool()
-{
-	if (buckets) {
-		Bucket *thisBucket;
-		for (thisBucket = &buckets[0]; thisBucket < &buckets[nBuckets]; thisBucket++) {
-			if (thisBucket->count > 1) {
-				kfree_type(OSSymbol *, thisBucket->count, thisBucket->symbolP);
-				OSMETA_ACCUMSIZE(-(thisBucket->count * sizeof(OSSymbol *)));
-			}
-		}
-		kfree_type(Bucket, nBuckets, buckets);
-		OSMETA_ACCUMSIZE(-(nBuckets * sizeof(Bucket)));
-	}
-
-	if (poolGate) {
-		lck_rw_free(poolGate, IOLockGroup);
-	}
-}
-
-unsigned long
-OSSymbolPool::log2(unsigned int x)
-{
-	unsigned long i;
-
-	for (i = 0; x > 1; i++) {
-		x >>= 1;
-	}
-	return i;
-}
-
-unsigned long
-OSSymbolPool::exp2ml(unsigned long x)
-{
-	return (1 << x) - 1;
-}
-
-OSSymbolPoolState
-OSSymbolPool::initHashState()
-{
-	OSSymbolPoolState newState = { nBuckets, 0 };
-	return newState;
-}
-
-OSSymbol *
-OSSymbolPool::nextHashState(OSSymbolPoolState *stateP)
-{
-	Bucket *thisBucket = &buckets[stateP->i];
-
-	while (!stateP->j) {
-		if (!stateP->i) {
-			return NULL;
-		}
-		stateP->i--;
-		thisBucket--;
-		stateP->j = thisBucket->count;
-	}
-
-	stateP->j--;
-	if (thisBucket->count == 1) {
-		return (OSSymbol *) thisBucket->symbolP;
-	} else {
-		return thisBucket->symbolP[stateP->j];
-	}
-}
-
-void
-OSSymbolPool::reconstructSymbols(void)
-{
-	this->reconstructSymbols(true);
-}
-
-void
-OSSymbolPool::reconstructSymbols(bool grow)
-{
-	unsigned int new_nBuckets = nBuckets;
-	OSSymbol *insert;
-	OSSymbolPoolState state;
-
-	if (grow) {
-		new_nBuckets += new_nBuckets + 1;
-	} else {
-		/* Don't shrink the pool below the default initial size.
+		/*
+		 * rdar://105075708: the key might be in pageable memory,
+		 * and smr_hash_get() disable preemption which prevents
+		 * faulting the memory.
 		 */
-		if (nBuckets <= INITIAL_POOL_SIZE) {
-			return;
+		if (key.smrk_len <= sizeof(tmp_buf)) {
+			memcpy(tmp_buf, key.smrk_opaque, key.smrk_len);
+			key.smrk_string = tmp_buf;
+		} else {
+			copy_s = (char *)kalloc_data(key.smrk_len,
+			    Z_WAITOK_ZERO_NOFAIL);
+			memcpy(copy_s, key.smrk_opaque, key.smrk_len);
+			key.smrk_string = copy_s;
 		}
-		new_nBuckets = (new_nBuckets - 1) / 2;
+		sym = smr_hash_get(&_hash, key, &hash_traits);
+		if (copy_s) {
+			kfree_data(copy_s, key.smrk_len);
+		}
+	} else {
+		lock();
+		sym = (OSSymbol *)__smr_hash_serialized_find(&_huge_head, key,
+		    &hash_traits.smrht);
+		if (sym && !OSSymbol_obj_try_get(sym)) {
+			sym = NULL;
+		}
+		unlock();
 	}
 
-	/* Create old pool to iterate after doing above check, cause it
-	 * gets finalized at return.
-	 */
-	OSSymbolPool old(this);
-
-	count = 0;
-	nBuckets = new_nBuckets;
-	buckets = kalloc_type_tag(Bucket, nBuckets, Z_WAITOK_ZERO,
-	    VM_KERN_MEMORY_LIBKERN);
-	OSMETA_ACCUMSIZE(nBuckets * sizeof(Bucket));
-	/* @@@ gvdl: Zero test and panic if can't set up pool */
-
-	state = old.initHashState();
-	while ((insert = old.nextHashState(&state))) {
-		insertSymbol(insert);
+	if (sym) {
+		ret.reset(sym, OSNoRetain);
 	}
+
+	return ret;
 }
 
-OSSharedPtr<OSSymbol>
-OSSymbolPool::findSymbol(const char *cString) const
+void
+OSSymbolPool::insertSymbol(
+	OSSharedPtr<OSSymbol>  &symToInsert,
+	smrh_key_t              key,
+	bool                    make_permanent)
 {
-	Bucket *thisBucket;
-	unsigned int j, inLen, hash;
-	OSSymbol *probeSymbol, **list;
-	OSSharedPtr<OSSymbol> ret;
+	OSSymbol *sym;
 
-	hashSymbol(cString, &hash, &inLen); inLen++;
-	thisBucket = &buckets[hash % nBuckets];
-	j = thisBucket->count;
+	/* make sure no one ever subclassed OSSymbols */
+	zone_require(OSSymbol_zone, symToInsert.get());
 
-	if (!j) {
-		return NULL;
+	symToInsert->flags |= kOSSSymbolHashed;
+	if (make_permanent) {
+		symToInsert->flags |= kOSSSymbolPermanent;
 	}
 
-	if (j == 1) {
-		probeSymbol = (OSSymbol *) thisBucket->symbolP;
+	lock();
 
-		if (inLen == probeSymbol->length
-		    && strncmp(probeSymbol->string, cString, probeSymbol->length) == 0
-		    && probeSymbol->taggedTryRetain(nullptr)) {
-			ret.reset(probeSymbol, OSNoRetain);
-			return ret;
+	if (!OSSymbol_is_huge(key.smrk_len)) {
+		sym = smr_hash_serialized_get_or_insert(&_hash, key,
+		    &symToInsert->hashlink, &hash_traits);
+
+		if (shouldGrow() && !_tcallScheduled &&
+		    startup_phase >= STARTUP_SUB_THREAD_CALL) {
+			_tcallScheduled = true;
+			thread_call_enter(_tcall);
 		}
-		return NULL;
-	}
-
-	for (list = thisBucket->symbolP; j--; list++) {
-		probeSymbol = *list;
-		if (inLen == probeSymbol->length
-		    && strncmp(probeSymbol->string, cString, probeSymbol->length) == 0
-		    && probeSymbol->taggedTryRetain(nullptr)) {
-			ret.reset(probeSymbol, OSNoRetain);
-			return ret;
+	} else {
+		sym = (OSSymbol *)__smr_hash_serialized_find(&_huge_head, key,
+		    &hash_traits.smrht);
+		if (!sym || !OSSymbol_obj_try_get(sym)) {
+			smrq_serialized_insert_head(&_huge_head,
+			    &symToInsert->hashlink);
+			_hugeCount++;
+			sym = NULL;
 		}
 	}
 
-	return NULL;
-}
+	unlock();
 
-OSSharedPtr<OSSymbol>
-OSSymbolPool::insertSymbol(OSSymbol *sym)
-{
-	const char *cString = sym->string;
-	Bucket *thisBucket;
-	unsigned int j, inLen, hash;
-	OSSymbol *probeSymbol, **list;
-	OSSharedPtr<OSSymbol> ret;
-
-	hashSymbol(cString, &hash, &inLen); inLen++;
-	thisBucket = &buckets[hash % nBuckets];
-	j = thisBucket->count;
-
-	if (!j) {
-		thisBucket->symbolP = (OSSymbol **) sym;
-		thisBucket->count++;
-		count++;
-		return nullptr;
+	if (sym) {
+		symToInsert->flags &= ~(kOSSSymbolHashed | kOSSSymbolPermanent);
+		symToInsert.reset(sym, OSNoRetain);
 	}
-
-	if (j == 1) {
-		probeSymbol = (OSSymbol *) thisBucket->symbolP;
-
-		if (inLen == probeSymbol->length
-		    && strncmp(probeSymbol->string, cString, probeSymbol->length) == 0
-		    && probeSymbol->taggedTryRetain(nullptr)) {
-			ret.reset(probeSymbol, OSNoRetain);
-			return ret;
-		}
-
-		list = kalloc_type_tag(OSSymbol *, 2, Z_WAITOK_ZERO_NOFAIL,
-		    VM_KERN_MEMORY_LIBKERN);
-		OSMETA_ACCUMSIZE(2 * sizeof(OSSymbol *));
-		/* @@@ gvdl: Zero test and panic if can't set up pool */
-		list[0] = sym;
-		list[1] = probeSymbol;
-		thisBucket->symbolP = list;
-		thisBucket->count++;
-		count++;
-		GROW_POOL();
-
-		return nullptr;
-	}
-
-	for (list = thisBucket->symbolP; j--; list++) {
-		probeSymbol = *list;
-		if (inLen == probeSymbol->length
-		    && strncmp(probeSymbol->string, cString, probeSymbol->length) == 0
-		    && probeSymbol->taggedTryRetain(nullptr)) {
-			ret.reset(probeSymbol, OSNoRetain);
-			return ret;
-		}
-	}
-
-	j = thisBucket->count++;
-	count++;
-	list = kalloc_type_tag(OSSymbol *, thisBucket->count, Z_WAITOK_ZERO,
-	    VM_KERN_MEMORY_LIBKERN);
-	/* @@@ gvdl: Zero test and panic if can't set up pool */
-	list[0] = sym;
-	bcopy(thisBucket->symbolP, list + 1, j * sizeof(OSSymbol *));
-	kfree_type(OSSymbol *, j, thisBucket->symbolP);
-
-	OSMETA_ACCUMSIZE((thisBucket->count - j) * sizeof(OSSymbol *));
-	thisBucket->symbolP = list;
-	GROW_POOL();
-
-	return nullptr;
 }
 
 void
 OSSymbolPool::removeSymbol(OSSymbol *sym)
 {
-	Bucket *thisBucket;
-	unsigned int j, inLen, hash;
-	OSSymbol *probeSymbol, **list;
+	lock();
 
-	hashSymbol(sym->string, &hash, &inLen); inLen++;
-	thisBucket = &buckets[hash % nBuckets];
-	j = thisBucket->count;
-	list = thisBucket->symbolP;
+	assert(sym->flags & kOSSSymbolHashed);
+	sym->flags &= ~kOSSSymbolHashed;
 
-	if (!j) {
-		// couldn't find the symbol; probably means string hash changed
-		panic("removeSymbol %s count %d ", sym->string ? sym->string : "no string", count);
-		return;
+	if (!OSSymbol_is_huge(sym->length)) {
+		smr_hash_serialized_remove(&_hash, &sym->hashlink, &hash_traits);
+
+		if (shouldShrink() && !_tcallScheduled &&
+		    startup_phase >= STARTUP_SUB_THREAD_CALL) {
+			_tcallScheduled = true;
+			thread_call_enter(_tcall);
+		}
+	} else {
+		smrq_serialized_remove(&_huge_head, &sym->hashlink);
+		_hugeCount--;
 	}
 
-	if (j == 1) {
-		probeSymbol = (OSSymbol *) list;
-
-		if (probeSymbol == sym) {
-			thisBucket->symbolP = NULL;
-			count--;
-			thisBucket->count--;
-			SHRINK_POOL();
-			return;
-		}
-		// couldn't find the symbol; probably means string hash changed
-		panic("removeSymbol %s count %d ", sym->string ? sym->string : "no string", count);
-		return;
-	}
-
-	if (j == 2) {
-		probeSymbol = list[0];
-		if (probeSymbol == sym) {
-			thisBucket->symbolP = (OSSymbol **) list[1];
-			kfree_type(OSSymbol *, 2, list);
-			OSMETA_ACCUMSIZE(-(2 * sizeof(OSSymbol *)));
-			count--;
-			thisBucket->count--;
-			SHRINK_POOL();
-			return;
-		}
-
-		probeSymbol = list[1];
-		if (probeSymbol == sym) {
-			thisBucket->symbolP = (OSSymbol **) list[0];
-			kfree_type(OSSymbol *, 2, list);
-			OSMETA_ACCUMSIZE(-(2 * sizeof(OSSymbol *)));
-			count--;
-			thisBucket->count--;
-			SHRINK_POOL();
-			return;
-		}
-		// couldn't find the symbol; probably means string hash changed
-		panic("removeSymbol %s count %d ", sym->string ? sym->string : "no string", count);
-		return;
-	}
-
-	for (; j--; list++) {
-		probeSymbol = *list;
-		if (probeSymbol == sym) {
-			list = kalloc_type_tag(OSSymbol *, thisBucket->count - 1,
-			    Z_WAITOK, VM_KERN_MEMORY_LIBKERN);
-			if (thisBucket->count - 1 != j) {
-				bcopy(thisBucket->symbolP, list,
-				    (thisBucket->count - 1 - j) * sizeof(OSSymbol *));
-			}
-			if (j) {
-				bcopy(thisBucket->symbolP + thisBucket->count - j,
-				    list + thisBucket->count - 1 - j,
-				    j * sizeof(OSSymbol *));
-			}
-			kfree_type(OSSymbol *, thisBucket->count, thisBucket->symbolP);
-			OSMETA_ACCUMSIZE(-sizeof(OSSymbol *));
-			thisBucket->symbolP = list;
-			count--;
-			thisBucket->count--;
-			return;
-		}
-	}
-	// couldn't find the symbol; probably means string hash changed
-	panic("removeSymbol %s count %d ", sym->string ? sym->string : "no string", count);
+	unlock();
 }
+
+void
+OSSymbolPool::rehash(thread_call_param_t arg0, thread_call_param_t arg1 __unused)
+{
+	reinterpret_cast<OSSymbolPool *>(arg0)->rehash();
+}
+
+void
+OSSymbolPool::rehash()
+{
+	lock();
+	_tcallScheduled = false;
+
+	if (shouldShrink()) {
+		smr_hash_shrink_and_unlock(&_hash, &_mutex, &hash_traits);
+	} else if (shouldGrow()) {
+		smr_hash_grow_and_unlock(&_hash, &_mutex, &hash_traits);
+	} else {
+		unlock();
+	}
+}
+
+void
+OSSymbolPool::checkForPageUnload(void *startAddr, void *endAddr)
+{
+	OSSymbol *sym;
+	char *s;
+	bool mustSync = false;
+
+	lock();
+	smr_hash_foreach(sym, &_hash, &hash_traits) {
+		if (sym->string >= startAddr && sym->string < endAddr) {
+			assert(sym->flags & kOSStringNoCopy);
+
+			s = (char *)kalloc_data(sym->length,
+			    Z_WAITOK_ZERO);
+			if (s) {
+				memcpy(s, sym->string, sym->length);
+				/*
+				 * make sure the memcpy is visible for readers
+				 * who dereference `string` below.
+				 *
+				 * We can't use os_atomic_store(&..., release)
+				 * because OSSymbol::string is PACed
+				 */
+				os_atomic_thread_fence(release);
+			}
+			sym->string = s;
+			sym->flags &= ~kOSStringNoCopy;
+			mustSync = true;
+		}
+	}
+
+	unlock();
+
+	/* Make sure no readers can see stale pointers that we rewrote */
+	if (mustSync) {
+		smr_synchronize(&OSSymbol_smr);
+	}
+}
+
+#pragma clang diagnostic pop /* -Winvalid-offsetof */
 
 /*
  *********************************************************************
  * From here on we are actually implementing the OSSymbol class
  *********************************************************************
  */
-OSDefineMetaClassAndStructorsWithInitAndZone(OSSymbol, OSString,
-    OSSymbol::initialize(), ZC_ZFREE_CLEARMEM)
+#define super OSString
+
+OSDefineMetaClassWithInit(OSSymbol, OSString, OSSymbol::initialize());
+OSMetaClassConstructorInit(OSSymbol, OSString, OSSymbol::initialize());
+OSDefineBasicStructors(OSSymbol, OSString)
 OSMetaClassDefineReservedUnused(OSSymbol, 0);
 OSMetaClassDefineReservedUnused(OSSymbol, 1);
 OSMetaClassDefineReservedUnused(OSSymbol, 2);
@@ -522,19 +393,17 @@ OSMetaClassDefineReservedUnused(OSSymbol, 5);
 OSMetaClassDefineReservedUnused(OSSymbol, 6);
 OSMetaClassDefineReservedUnused(OSSymbol, 7);
 
-static OSSymbolPool *pool;
+static void
+OSSymbol_smr_free(void *sym, vm_size_t size __unused)
+{
+	reinterpret_cast<OSSymbol *>(sym)->smr_free();
+}
 
 void
 OSSymbol::initialize()
 {
-	pool = new OSSymbolPool;
-	assert(pool);
-
-	if (pool && !pool->init()) {
-		delete pool;
-		assert(false);
-	}
-	;
+	zone_enable_smr(OSSymbol_zone, &OSSymbol_smr, &OSSymbol_smr_free);
+	new (OSSymbolPoolStorage) OSSymbolPool();
 }
 
 bool
@@ -570,30 +439,56 @@ OSSymbol::withString(const OSString *aString)
 OSSharedPtr<const OSSymbol>
 OSSymbol::withCString(const char *cString)
 {
-	OSSharedPtr<const OSSymbol> symbol;
+	auto &pool = OSSymbolPool::instance();
+	smrh_key_t key = {
+		.smrk_string = cString,
+		.smrk_len    = strnlen(cString, kMaxStringLength),
+	};
+	bool permanent = false;
 
-	// Check if the symbol exists already, we don't need to take a lock here,
-	// since existingSymbolForCString will take the shared lock.
-	symbol = OSSymbol::existingSymbolForCString(cString);
-	if (symbol) {
+	if (key.smrk_len >= kMaxStringLength) {
+		return nullptr;
+	}
+
+	auto symbol = pool.findSymbol(key);
+	if (__probable(symbol)) {
 		return symbol;
 	}
 
-	OSSharedPtr<OSSymbol> newSymb = OSMakeShared<OSSymbol>();
-	if (!newSymb) {
-		return os::move(newSymb);
-	}
+#if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+	/*
+	 * Empirically, symbols which string is from the rorgn part of the
+	 * kernel are asked about all the time.
+	 *
+	 * Making them noCopy + permanent avoids a significant amount of
+	 * useless refcounting traffic.
+	 *
+	 * On embedded, this policy causes about 200 extra symbols to be made
+	 * from baseline (~6k), but avoiding the string copies saves about 60k.
+	 */
+	permanent = rorgn_contains((vm_offset_t)cString, key.smrk_len + 1, false);
+#endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
 
-	if (newSymb->OSString::initWithCString(cString)) {
-		pool->closeWriteGate();
-		symbol = pool->insertSymbol(newSymb.get());
-		pool->openWriteGate();
+	/*
+	 * can't use OSString::initWithCString* because it calls
+	 * OSObject::init() which tries to enroll in IOTracking if it's on.
+	 */
 
-		if (symbol) {
-			// Somebody must have inserted the new symbol so free our copy
-			newSymb.detach()->OSString::free();
-			return symbol;
-		}
+	auto newSymb = OSMakeShared<OSSymbol>();
+
+	if (permanent) {
+		newSymb->flags  = kOSStringNoCopy;
+		newSymb->length = (uint32_t)(key.smrk_len + 1);
+		newSymb->string = const_cast<char *>(cString);
+		pool.insertSymbol(/* inout */ newSymb, key, permanent);
+	} else if (char *s = (char *)kalloc_data(key.smrk_len + 1, Z_WAITOK_ZERO)) {
+		memcpy(s, cString, key.smrk_len);
+		newSymb->flags  = 0;
+		newSymb->length = (uint32_t)(key.smrk_len + 1);
+		newSymb->string = s;
+		pool.insertSymbol(/* inout */ newSymb, key, permanent);
+	} else {
+		newSymb.reset();
 	}
 
 	return os::move(newSymb); // return the newly created & inserted symbol.
@@ -602,32 +497,36 @@ OSSymbol::withCString(const char *cString)
 OSSharedPtr<const OSSymbol>
 OSSymbol::withCStringNoCopy(const char *cString)
 {
-	OSSharedPtr<const OSSymbol> symbol;
-	OSSharedPtr<OSSymbol> newSymb;
+	auto &pool = OSSymbolPool::instance();
+	smrh_key_t key = {
+		.smrk_string = cString,
+		.smrk_len    = strnlen(cString, kMaxStringLength),
+	};
+	bool permanent = false;
 
-	// Check if the symbol exists already, we don't need to take a lock here,
-	// since existingSymbolForCString will take the shared lock.
-	symbol = OSSymbol::existingSymbolForCString(cString);
-	if (symbol) {
+	if (key.smrk_len >= kMaxStringLength) {
+		return nullptr;
+	}
+
+	auto symbol = pool.findSymbol(key);
+	if (__probable(symbol)) {
 		return symbol;
 	}
 
-	newSymb = OSMakeShared<OSSymbol>();
-	if (!newSymb) {
-		return os::move(newSymb);
-	}
+#if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+	permanent = rorgn_contains((vm_offset_t)cString, key.smrk_len + 1, false);
+#endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
 
-	if (newSymb->OSString::initWithCStringNoCopy(cString)) {
-		pool->closeWriteGate();
-		symbol = pool->insertSymbol(newSymb.get());
-		pool->openWriteGate();
+	auto newSymb = OSMakeShared<OSSymbol>();
 
-		if (symbol) {
-			newSymb.detach()->OSString::free();
-			// Somebody must have inserted the new symbol so free our copy
-			return symbol;
-		}
-	}
+	/*
+	 * can't use OSString::initWithCStringNoCopy because it calls
+	 * OSObject::init() which tries to enrol in IOTracking if it's on.
+	 */
+	newSymb->flags  = kOSStringNoCopy;
+	newSymb->length = (uint32_t)(key.smrk_len + 1);
+	newSymb->string = const_cast<char *>(cString);
+	pool.insertSymbol(/* inout */ newSymb, key, permanent);
 
 	return os::move(newSymb); // return the newly created & inserted symbol.
 }
@@ -643,56 +542,138 @@ OSSymbol::existingSymbolForString(const OSString *aString)
 		return aStringNew;
 	}
 
-	return OSSymbol::existingSymbolForCString(aString->getCStringNoCopy());
+	smrh_key_t key = {
+		.smrk_string = aString->getCStringNoCopy(),
+		.smrk_len    = aString->getLength(),
+	};
+	return OSSymbolPool::instance().findSymbol(key);
 }
 
 OSSharedPtr<const OSSymbol>
 OSSymbol::existingSymbolForCString(const char *cString)
 {
-	OSSharedPtr<OSSymbol> symbol;
-
-	pool->closeReadGate();
-	symbol = pool->findSymbol(cString);
-	pool->openReadGate();
-
-	return os::move(symbol);
+	smrh_key_t key = {
+		.smrk_string = cString,
+		.smrk_len    = strlen(cString),
+	};
+	return OSSymbolPool::instance().findSymbol(key);
 }
 
 void
 OSSymbol::checkForPageUnload(void *startAddr, void *endAddr)
 {
-	OSSymbol *probeSymbol;
-	OSSymbolPoolState state;
+	OSSymbolPool::instance().checkForPageUnload(startAddr, endAddr);
+}
 
-	pool->closeWriteGate();
-	state = pool->initHashState();
-	while ((probeSymbol = pool->nextHashState(&state))) {
-		if (probeSymbol->string >= startAddr && probeSymbol->string < endAddr) {
-			probeSymbol->OSString::initWithCString(probeSymbol->string);
-		}
+void
+OSSymbol::taggedRetain(const void *tag) const
+{
+	if ((flags & kOSSSymbolPermanent) == 0) {
+		super::taggedRetain(tag);
 	}
-	pool->openWriteGate();
 }
 
 void
 OSSymbol::taggedRelease(const void *tag) const
 {
-	super::taggedRelease(tag);
+	if ((flags & kOSSSymbolPermanent) == 0) {
+		super::taggedRelease(tag);
+	}
 }
 
 void
 OSSymbol::taggedRelease(const void *tag, const int when) const
 {
-	super::taggedRelease(tag, when);
+	if ((flags & kOSSSymbolPermanent) == 0) {
+		super::taggedRelease(tag, when);
+	}
+}
+
+void *
+OSSymbol::operator new(size_t size __unused)
+{
+	return zalloc_smr(OSSymbol_zone, Z_WAITOK_ZERO_NOFAIL);
+}
+
+void
+OSSymbol::operator delete(void *mem, size_t size)
+{
+	/*
+	 * OSSymbol dying is this sequence:
+	 *
+	 * OSSymbol::taggedRelease() hits 0,
+	 * which calls OSSymbol::free(),
+	 * which calls zfree_smr().
+	 *
+	 * At this stage, the memory of the OSSymbol is on a deferred
+	 * reclamation queue.
+	 *
+	 * When the memory is being recycled by zalloc, OSSymbol::smr_free()
+	 * is called which terminates with a delete call and only needs
+	 * to zero said memory given that the memory has already been
+	 * returned to the allocator.
+	 */
+	bzero(mem, size);
+}
+
+void
+OSSymbol::smr_free()
+{
+	/*
+	 * This is called when the object is getting reused
+	 */
+
+	if (!(flags & kOSStringNoCopy) && string) {
+		kfree_data(string, length);
+	}
+
+	/*
+	 * Note: we do not call super::free() on purpose because
+	 *       it would call OSObject::free() which tries to support
+	 *       iotracking. iotracking is fundamentally incompatible
+	 *       with SMR, so we on purpose do not call into these.
+	 *
+	 *       to debug OSSymbol leaks etc, the zone logging feature
+	 *       can be used instead on the iokit.OSSymbol zone.
+	 */
+	OSSymbol::gMetaClass.instanceDestructed();
+
+	delete this;
 }
 
 void
 OSSymbol::free()
 {
-	pool->closeWriteGate();
-	pool->removeSymbol(this);
-	pool->openWriteGate();
-	super::free();
+	bool freeNow = true;
+
+	if (flags & kOSSSymbolHashed) {
+		OSSymbolPool::instance().removeSymbol(this);
+		freeNow = OSSymbol_is_huge(length);
+	}
+
+	if (freeNow && !(flags & kOSStringNoCopy) && string) {
+		/*
+		 * If the element isn't in the hash, it was a failed insertion
+		 * racing, and no one will every do a hazardous access,
+		 * so we can clean up the string right away.
+		 *
+		 * If it is huge, then it is not looked up via SMR but under
+		 * locks, so we can free right now (actually _must_ because
+		 * this free is not preemption disabled safe and can't be done
+		 * in smr_free())
+		 */
+		kfree_data(string, length);
+		assert(string == nullptr); /* kfree_data nils out */
+	}
+
+	(zfree_smr)(OSSymbol_zone, this);
+}
+
+uint32_t
+OSSymbol::hash() const
+{
+	assert(!OSSymbol_is_huge(length));
+	return os_hash_jenkins(string, length - 1);
 }
 
 bool
@@ -748,3 +729,37 @@ OSSymbol::bsearch(
 	// not found, insertion point here
 	return baseIdx + (lim >> 1);
 }
+
+#if DEBUG || DEVELOPMENT
+static int
+iokit_symbol_basic_test(int64_t size, int64_t *out)
+{
+	OSSharedPtr<const OSSymbol> sym1;
+	OSSharedPtr<const OSSymbol> sym2;
+	char *data;
+
+	data = (char *)kalloc_data(size, Z_WAITOK);
+	if (!data) {
+		return ENOMEM;
+	}
+
+	memset(data, 'A', size - 1);
+	data[size - 1] = '\0';
+
+	sym1 = OSSymbol::withCString(data);
+	if (sym1 == nullptr) {
+		return ENOMEM;
+	}
+	assert(sym1->getLength() == size - 1);
+
+	sym2 = OSSymbol::withCString(data);
+	assert(sym1 == sym2);
+
+	sym2.reset();
+	sym1.reset();
+
+	*out = 1;
+	return 0;
+}
+SYSCTL_TEST_REGISTER(iokit_symbol_basic, iokit_symbol_basic_test);
+#endif /* DEBUG || DEVELOPMENT */

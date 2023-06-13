@@ -14,7 +14,7 @@ ifeq ($$(LOGCOLORS),y)
     # Get a nice list of device code names associated with the build platform
     ifndef CDevs
         #ifdef EMBEDDED_DEVICE_MAP
-        #    export CDevs := $$(shell $$(EMBEDDED_DEVICE_MAP) -db $$(EDM_DBPATH) -query "SELECT DISTINCT TargetType FROM Targets WHERE KernelPlatform = '$$(CURRENT_MACHINE_CONFIG_LC)'" | tr '[\r\n]' ':' | sed 's,:$$$$,,')
+        #    export CDevs := $$(shell $$(EMBEDDED_DEVICE_MAP) -db $$(EDM_DBPATH) -list -query "SELECT DISTINCT TargetType FROM Targets WHERE KernelPlatform = '$$(CURRENT_MACHINE_CONFIG_LC)'" | tr '[\r\n]' ':' | sed 's,:$$$$,,')
         #endif
     endif
     ifndef MACHINE_PFX

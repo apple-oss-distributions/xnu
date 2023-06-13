@@ -2818,6 +2818,15 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 			T_QUIET; T_EXPECT_EQ(cputype, archinfo.p_cputype, "cpu type is correct");
 			T_QUIET; T_EXPECT_EQ(cpusubtype, archinfo.p_cpusubtype, "cpu subtype is correct");
 
+			NSDictionary * codesigning_info = container[@"task_snapshots"][@"stackshot_task_codesigning_info"];
+			T_QUIET; T_ASSERT_NOTNULL(codesigning_info[@"csflags"], "have csflags");
+			uint64_t flags = [codesigning_info[@"csflags"] unsignedLongLongValue];
+			T_QUIET; T_EXPECT_GT(flags, 0, "nonzero csflags");
+
+			T_QUIET; T_ASSERT_NOTNULL(container[@"task_snapshots"][@"jetsam_coalition"], "have jetsam coalition");
+			uint64_t jetsam_coalition = [container[@"task_snapshots"][@"jetsam_coalition"] unsignedLongLongValue];
+			T_QUIET; T_EXPECT_GT(jetsam_coalition, 0, "nonzero jetsam coalition");
+
 			bool found_main_thread = false;
 			uint64_t main_thread_id = -1ULL;
 			bool found_null_kernel_frame = false;

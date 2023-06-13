@@ -772,8 +772,9 @@ panic_display_times()
 	}
 
 	extern lck_ticket_t clock_lock;
+	extern lck_grp_t clock_lock_grp;
 
-	if ((is_clock_configured) && (lck_ticket_lock_try(&clock_lock, LCK_GRP_NULL))) {
+	if ((is_clock_configured) && (lck_ticket_lock_try(&clock_lock, &clock_lock_grp))) {
 		clock_sec_t     secs, boot_secs;
 		clock_usec_t    usecs, boot_usecs;
 

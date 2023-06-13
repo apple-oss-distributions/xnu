@@ -6,7 +6,6 @@
 #include <libkern/c++/safe_allocation.h>
 #include <darwintest.h>
 #include "test_utils.h"
-#include <algorithm>
 
 struct T {
 	int i;
@@ -25,9 +24,9 @@ tests()
 
 		auto const byteArray = reinterpret_cast<uint8_t const*>(array.data());
 		size_t const byteLength = array.size() * sizeof(T);
-		CHECK(std::all_of(byteArray, byteArray + byteLength, [](const auto& elem){
-			return elem == 0;
-		}));
+		for (size_t i = 0; i != byteLength; ++i) {
+			CHECK(byteArray[i] == 0);
+		}
 	}
 }
 

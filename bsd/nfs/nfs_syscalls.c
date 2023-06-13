@@ -236,8 +236,44 @@ nfsrv_find_exportfs(const char *ptr)
 	return nxfs;
 }
 
-#define DATA_VOLUME_MP "/System/Volumes/Data" // PLATFORM_DATA_VOLUME_MOUNT_POINT
+static char *
+nfsrv_export_remainder(char *path, char *nxfs_path)
+{
+	int error;
+	vnode_t vp, rvp;
+	struct nameidata nd;
+	size_t pathbuflen = MAXPATHLEN;
+	char real_mntonname[MAXPATHLEN];
 
+	if (!strncmp(path, nxfs_path, strlen(nxfs_path))) {
+		return path + strlen(nxfs_path);
+	}
+
+	NDINIT(&nd, LOOKUP, OP_LOOKUP, FOLLOW | LOCKLEAF | AUDITVNPATH1,
+	    UIO_SYSSPACE, CAST_USER_ADDR_T(nxfs_path), vfs_context_current());
+	error = namei(&nd);
+	if (error) {
+		return NULL;
+	}
+
+	nameidone(&nd);
+	vp = nd.ni_vp;
+
+	error = VFS_ROOT(vnode_mount(vp), &rvp, vfs_context_current());
+	vnode_put(vp);
+	if (error) {
+		return NULL;
+	}
+
+	error = vn_getpath_ext(rvp, NULLVP, real_mntonname, &pathbuflen, VN_GETPATH_FSENTER | VN_GETPATH_NO_FIRMLINK);
+	vnode_put(rvp);
+
+	if (error || strncmp(path, real_mntonname, strlen(real_mntonname))) {
+		return NULL;
+	}
+
+	return path + strlen(real_mntonname);
+}
 /*
  * Get file handle system call
  */
@@ -252,7 +288,6 @@ getfh(
 	int error, fhlen = 0, fidlen;
 	struct nameidata nd;
 	char path[MAXPATHLEN], real_mntonname[MAXPATHLEN], *ptr;
-	size_t datavol_len = strlen(DATA_VOLUME_MP);
 	size_t pathlen;
 	struct nfs_exportfs *nxfs;
 	struct nfs_export *nx;
@@ -321,11 +356,7 @@ getfh(
 		goto out;
 	}
 	// find export that best matches remainder of path
-	if (!strncmp(path, nxfs->nxfs_path, strlen(nxfs->nxfs_path))) {
-		ptr = path + strlen(nxfs->nxfs_path);
-	} else if (!strncmp(path, DATA_VOLUME_MP, datavol_len) && !strncmp(path + datavol_len, nxfs->nxfs_path, strlen(nxfs->nxfs_path))) {
-		ptr = path + datavol_len + strlen(nxfs->nxfs_path);
-	} else {
+	if ((ptr = nfsrv_export_remainder(path, nxfs->nxfs_path)) == NULL) {
 		error = EINVAL;
 		goto out;
 	}
@@ -565,7 +596,7 @@ nfssvc(proc_t p __no_nfs_server_unused,
 	/*
 	 * Must be super user for NFSSVC_NFSD and NFSSVC_ADDSOCK operations.
 	 */
-	if (((uap->flag == NFSSVC_NFSD) || (uap->flag == NFSSVC_ADDSOCK)) && ((error = proc_suser(p)))) {
+	if ((uap->flag & (NFSSVC_NFSD | NFSSVC_ADDSOCK)) && ((error = proc_suser(p)))) {
 		return error;
 	}
 #if CONFIG_MACF
@@ -648,9 +679,9 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 {
 	struct nfsrv_sock *slp;
 	int error = 0, sodomain, sotype, soprotocol, on = 1;
-	int first, sobufsize;
+	int first;
 	struct timeval timeo;
-	uint32_t sbmaxsize;
+	uint64_t sbmaxsize, sobufsize;
 
 	/* make sure mbuf constants are set up */
 	if (!nfs_mbuf_mhlen) {
@@ -684,16 +715,18 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 	}
 
 	/* Calculate maximum supported socket buffers sizes */
-	sbmaxsize = sb_max * MCLBYTES / (MSIZE + MCLBYTES);
+	sbmaxsize = (uint64_t)sb_max * MCLBYTES / (MSIZE + MCLBYTES);
 
 	/* Set socket buffer sizes for UDP/TCP */
-	sobufsize = min(sbmaxsize, (sotype == SOCK_DGRAM) ? NFS_UDPSOCKBUF : NFSRV_TCPSOCKBUF);
-	error |= sock_setsockopt(so, SOL_SOCKET, SO_SNDBUF, &sobufsize, sizeof(sobufsize));
-	error |= sock_setsockopt(so, SOL_SOCKET, SO_RCVBUF, &sobufsize, sizeof(sobufsize));
-
+	sobufsize = MIN(sbmaxsize, (sotype == SOCK_DGRAM) ? NFS_UDPSOCKBUF : NFSRV_TCPSOCKBUF);
+	error = sock_setsockopt(so, SOL_SOCKET, SO_SNDBUF, &sobufsize, sizeof(sobufsize));
 	if (error) {
-		log(LOG_INFO, "nfssvc_addsock: socket buffer setting error(s) %d\n", error);
-		error = 0;
+		log(LOG_INFO, "nfssvc_addsock: socket buffer setting SO_SNDBUF to %llu error(s) %d\n", sobufsize, error);
+	}
+
+	error = sock_setsockopt(so, SOL_SOCKET, SO_RCVBUF, &sobufsize, sizeof(sobufsize));
+	if (error) {
+		log(LOG_INFO, "nfssvc_addsock: socket buffer setting SO_RCVBUF to %llu error(s) %d\n", sobufsize, error);
 	}
 	sock_nointerrupt(so, 0);
 
@@ -704,12 +737,15 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 	 */
 	timeo.tv_usec = 0;
 	timeo.tv_sec = 1;
-	error |= sock_setsockopt(so, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
-	timeo.tv_sec = 30;
-	error |= sock_setsockopt(so, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
+	error = sock_setsockopt(so, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
 	if (error) {
-		log(LOG_INFO, "nfssvc_addsock: socket timeout setting error(s) %d\n", error);
-		error = 0;
+		log(LOG_INFO, "nfssvc_addsock: socket timeout setting SO_RCVTIMEO error(s) %d\n", error);
+	}
+
+	timeo.tv_sec = 30;
+	error = sock_setsockopt(so, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
+	if (error) {
+		log(LOG_INFO, "nfssvc_addsock: socket timeout setting SO_SNDTIMEO error(s) %d\n", error);
 	}
 
 	slp = kalloc_type(struct nfsrv_sock, Z_WAITOK | Z_ZERO | Z_NOFAIL);
@@ -804,7 +840,6 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 	slp->ns_so = so;
 	slp->ns_sotype = sotype;
 	slp->ns_nam = mynam;
-	slp->ns_sobufsize = sobufsize;
 
 	/* set up the socket up-call */
 	nfsrv_uc_addsock(slp, first);

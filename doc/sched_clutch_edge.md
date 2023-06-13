@@ -69,11 +69,10 @@ The second level is the “thread group” level which decides which thread grou
 
 The thread group level implements a variation of the FreeBSD ULE scheduler to decide which thread group should be selected next for execution. Each thread group with runnable threads within a QoS bucket is represented using by `struct sched_clutch_bucket_group`. For multi-cluster platforms, the `sched_clutch_bucket_group` represents threads enqueued on all clusters on the platform. The clutch bucket group maintains the CPU utilization history, runnable history and some timesharing information for the next level scheduler. 
 
-The clutch bucket group has an entry to represent runnable thread for the thread group per cluster on the platform. This entry is the `sched_clutch_bucket` and this level of the algorithm is trying to find the best clutch bucket to schedule on each root hierarchy. Each clutch bucket with runnable threads is represented as an entry in a runqueue which is ordered by clutch bucket priorities. The clutch bucket selection algorithm simply selects the clutch bucket with the highest priority in the clutch bucket runqueue. The priority calculation for the clutch buckets is based on the following factors:
+The clutch bucket group has an entry to represent runnable threads for the thread group per cluster on the platform. This entry is the `sched_clutch_bucket` and this level of the algorithm is trying to find the best clutch bucket to schedule on each root hierarchy. Each clutch bucket with runnable threads is represented as an entry in a runqueue which is ordered by clutch bucket priorities. The clutch bucket selection algorithm simply selects the clutch bucket with the highest priority in the clutch bucket runqueue. The priority calculation for the clutch buckets is based on the following factors:
 
 * **Highest runnable thread in the clutch bucket**: The clutch bucket maintains a priority queue which contains threads ordered by their promoted or base priority (whichever property made the thread eligible to be part of that clutch bucket). It uses the highest of these threads to calculate the base priority of the clutch bucket. The use of both base and sched priority allows the scheduler to honor priority differences specified from userspace via SPIs, priority boosts due to priority inheritance mechanisms like turnstiles and other priority affecting mechanisms outside the core scheduler.
 * **Interactivity score**: The scheduler calculates an interactivity score based on the ratio of voluntary blocking time and CPU usage time for the clutch bucket group as a whole. This score allows the scheduler to prefer highly interactive thread groups over batch processing compute intensive thread groups.
-* **Thread Group Type**: In order to improve battery life, the OS classifies thread groups (via the associated coalitions) with various properties such as “Efficient”, "UserInterface" etc. These properties represent the type and criticality of work being done as part of the thread group. The scheduler uses these properties to provide small priority boosts to latency critical user workloads.
 
 The clutch bucket group maintains a few metrics to allow calculation of the interactivity score for the thread group:
 
@@ -110,9 +109,9 @@ static uint32_t sched_clutch_thread_quantum_us[TH_BUCKET_SCHED_MAX] = {
 
 The per-bucket thread quantum allows the scheduler to bound the worst case execution latency for a low priority thread which has been starved by higher priority threads.
 
-##Scheduler Priority Calculations
+## Scheduler Priority Calculations
 
-###Root Priority Calculation
+### Root Priority Calculation
 
 The scheduler maintains a root level priority for the hierarchy in order to make decisions regarding pre-emptions and thread selection. The root priority is updated as threads are inserted/removed from the hierarchy. The root level also maintains the urgency bits to help with pre-emption decisions. Since the root level priority/urgency is used for pre-emption decisions, it is based on the threads in the hierarchy and is calculated as follows:
 
@@ -130,7 +129,7 @@ Root Urgency Calculation:
 
 ```
 
-###Root Bucket Priority Calculation
+### Root Bucket Priority Calculation
 
 The root bucket priority is simply the deadline of the root bucket which is calculated by adding the WCEL of the bucket to the timestamp of the root bucket becoming runnable.
 
@@ -138,21 +137,19 @@ The root bucket priority is simply the deadline of the root bucket which is calc
 root-bucket priority = now + WCEL[bucket]
 ```
 
-###Clutch Bucket Priority Calculation
+### Clutch Bucket Priority Calculation
 
-As mentioned earlier, the priority value of a clutch bucket is calculated based on the highest runnable thread, interactivity score and the thread group type. The actual calculation algorithm is as follows:
+As mentioned earlier, the priority value of a clutch bucket is calculated based on the highest runnable thread and interactivity score. The actual calculation algorithm is as follows:
 
 ```
 * Find the highest runnable thread (promoted or basepri) in the clutch bucket (maxpri)
-* Check  the thread group properties for this clutch bucket 
-*      Assign a positive boost value (clutch_boost) based on the properties.
 * Calculate the ratio of CPU blocked and CPU used for the clutch bucket.
 *      If blocked > used, assign a score (interactivity_score) in the higher range.
 *      Else, assign a score (interactivity_score) in the lower range.
-* clutch-bucket priority = maxpri + clutch_boost + interactivity_score
+* clutch-bucket priority = maxpri + interactivity_score
 ```
 
-###Thread Priority Calculation
+### Thread Priority Calculation
 
 The thread priority calculation is based on the Mach timesharing algorithm. It is calculated in the following manner:
 
@@ -162,11 +159,11 @@ The thread priority calculation is based on the Mach timesharing algorithm. It i
 * thread priority = base priority - (thread CPU usage >> priority shift)
 ```
 
-##Edge Scheduler Design
+## Edge Scheduler Design
 
 The Edge scheduler implements all the necessary features needed for scheduling on multi-cluster asymmetric platforms. On each cluster, it uses the clutch scheduler timesharing design described above. In terms of thread placement and load balancing, the Edge scheduler represents the machine as a graph where each node is a compute cluster and the directional edges describe the likelihood of migrating threads from one cluster to another. The Edge scheduler works closely with the performance controller to define 
 
-###Edge Scheduler System Goals
+### Edge Scheduler System Goals
 
 * The system should be **compact**. Limit small-width workload threads to a single cluster as much as possible. A few reasons why this property is essential:
 	* Better LLC usage.
@@ -182,11 +179,11 @@ The Edge scheduler implements all the necessary features needed for scheduling o
 
 When the scheduler and performance controller for Skye (the first AMP platform) were being designed, much of the emphasis was placed on delineating work across E-cores and P-cores. Concepts such as thread groups, asymmetric spill & steal, etc. were invented to efficiently exploit this performance & energy efficiency heterogeneity in the hardware. However the same concepts largely apply to a platform with several homogenous clusters and heterogenous clusters with independent DVFM domains as well.
 
-###Edge Scheduler Thread Placement Strategy
+### Edge Scheduler Thread Placement Strategy
 
 The Edge scheduler uses **per-thread group recommendations** from the performance controller and **per-cluster runqueues** in the scheduler. The design aims to provide the performance controller with the ability to influence the width of the system (in terms of number of clusters), while retaining the scheduler's ability to go wide in the event of a thread storm.
 
-####Thread Group Cluster Recommendations
+#### Thread Group Cluster Recommendations
 
 The scheduler expects the performance controller to specify a cluster recommendation for each thread group. To allow finer grained thread placement, the Edge scheduler allows the performance controller to specify a preferred cluster per QoS within the thread group i.e. per sched\_clutch\_bucket\_group. The ability to prefer specific clusters rather than cluster types allows the performance controller to implement passenger tax reduction policies and co-locate workloads which expect similar performance charecterstics. 
 
@@ -194,7 +191,7 @@ When a thread becomes runnable, the scheduler looks at the preferred cluster rec
 
 When the performance controller changes the preferred cluster for a sched\_clutch\_bucket\_group, the Edge scheduler also provides an option to migrate the running and runnable threads for that group immediately (as opposed to the next scheduling point where the preferred cluster will be re-evaluated). The performance controller can use this feature to change recommendations for latency sensitive workloads from efficient to performance clusters and ensure that the workload threads get placed on the newly preferred cluster immediately.
 
-####Thread Migration Strategy
+#### Thread Migration Strategy
 
 In order to choose a cluster & processor for a runnable thread, the edge scheduler uses the preferred cluster for the thread's sched\_clutch\_bucket_group. If the preferred cluster is idle or running lower QoS workloads, the scheduler simply selects the preferred cluster for enqueing the thread. Otherwise, the scheduler evaluates the outgoing edges from the preferred cluster for migration decisions.
 
@@ -244,7 +241,7 @@ Both metrics are maintained as an exponentially moving weighted average to make 
 
 The order of cluster iteration in the algorithm above specifically picks homogeneous clusters before asymmetric clusters to ensure the threads migrate to idle clusters with similar performance characteristics before asymmetric idle clusters.
 
-####Thread Stealing/Rebalancing Strategy
+#### Thread Stealing/Rebalancing Strategy
 
 The `SCHED(steal_thread)` scheduler callout is invoked when the processor does not find any thread for execution in its runqueue. The aim of the steal operation is to find other threads running/runnable in other clusters which should be executed here. If the steal callout does not return a thread, the `thread_select()` logic calls `SCHED(processor_balance)` callout which is supposed to IPI other CPUs to rebalance threads and idle out the current CPU waiting for the IPI'ed thread to reschedule the thread onto this CPU.
 
@@ -269,7 +266,7 @@ The policy of doing these operations in this specific order is chosen to ensure 
 
 If `SCHED(steal_thread)` did not return a thread for the processor, it indicates that the processor found a thread running on a "foreign" cluster and would like to rebalance it onto itself. The implementation (`sched_edge_balance()`) sends an IPI to the foreign CPU, idles itself and waits for the foreign CPU to rebalance the thread on this idle CPU.
 
-####Cluster Shared Resource Threads Management
+#### Cluster Shared Resource Threads Management
 
 The Edge scheduler attempts to load balance cluster shared resource intensive threads across clusters in order to reduce contention on the shared resources. It achieves that by maintaining the runnable and running shared resource load on each cluster and balancing the load across multiple clusters. The current implementation for cluster shared resource load balancing looks at the per-cluster load at thread runnable time to enqueue the thread in the appropriate cluster.
 
@@ -282,6 +279,6 @@ This policy distributes the threads so that they spread across all available clu
 * EDGE\_SHARED\_RSRC\_SCHED\_POLICY\_NATIVE\_FIRST
 This policy distributes threads so that the threads first fill up all the capacity on the preferred cluster and its homogeneous peers before spilling to different core type. The current implementation defines capacity based on the number of CPUs in the cluster; so a cluster's shared resource is considered full if there are "n" runnable + running shared resource threads on the cluster with n cpus. This policy is different from the default scheduling policy of the edge scheduler since this always tries to fill up the native clusters to capacity even when non-native clusters might be idle.
 
-####Long Running Workload AMP Round Robining
+#### Long Running Workload AMP Round Robining
 
 The Edge scheduler implements a policy to round robining long running workload threads across clusters of various types to ensure that all threads of the workload make equal progress aka "stir-the-pot". This is essential for performance of workloads that statically partition work among ncpu threads. The scheduler invokes this mechanism when a thread expires a quantum on a non-preferred cluster (most likely due to migration/spilling from the preferred cluster). The scheduler recognizes this (via `AST_QUANTUM` and `AST_REBALANCE` being set) and enqueues it on a cluster native to the preferred cluster. On the next scheduling event for that cluster, the CPU will pickup this thread and spill/migrate the thread previously running onto the non-preferred cluster. In order to make sure all clusters native to the preferred cluster are euqally subject to this round-robining, the scheduler maintains a `scbg_amp_rebalance_last_chosen` value per sched_clutch_bucket_group (which represents all threads of a workload at the same QoS level).

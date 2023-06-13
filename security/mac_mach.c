@@ -107,7 +107,7 @@ mac_task_check_task_id_token_get_task(struct task *task, mach_task_flavor_t flav
 
 	assert(flavor <= TASK_FLAVOR_NAME);
 
-	if (!is_corpsetask(task)) {
+	if (!task_is_a_corpse(task)) {
 		/* only live task has proc */
 		target_proc = mac_task_get_proc(task);
 		if (target_proc == NULL) {
@@ -185,7 +185,7 @@ mac_task_check_get_task_special_port(struct task *task, struct task *target, int
 		return ESRCH;
 	}
 
-	if (!is_corpsetask(target)) {
+	if (!task_is_a_corpse(target)) {
 		/* only live task has proc */
 		target_proc = mac_task_get_proc(target);
 		if (target_proc == NULL) {
@@ -220,7 +220,7 @@ mac_task_check_set_task_special_port(struct task *task, struct task *target, int
 	 * task_set_special_port() is a CONTROL level interface, so we are guaranteed
 	 * by MIG intrans that target is not a corpse.
 	 */
-	assert(!is_corpsetask(target));
+	assert(!task_is_a_corpse(target));
 
 	struct proc *targetp = mac_task_get_proc(target);
 	if (targetp == NULL) {

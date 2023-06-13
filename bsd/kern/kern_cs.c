@@ -35,6 +35,7 @@
 #include <sys/signal.h>
 #include <sys/signalvar.h>
 #include <sys/codesign.h>
+#include <sys/code_signing.h>
 
 #include <sys/fcntl.h>
 #include <sys/file.h>
@@ -221,7 +222,7 @@ cs_allow_invalid(struct proc *p)
 		flags |= CS_DEBUGGED;
 	}
 	proc_csflags_update(p, flags);
-#if PMAP_CS
+
 	task_t procTask = proc_task(p);
 	if (procTask) {
 		vm_map_t proc_map = get_task_map_reference(procTask);
@@ -232,7 +233,7 @@ cs_allow_invalid(struct proc *p)
 			vm_map_deallocate(proc_map);
 		}
 	}
-#endif // MAP_CS
+
 	proc_unlock(p);
 
 	/* allow a debugged process to hide some (debug-only!) memory */
@@ -508,6 +509,11 @@ csblob_invalidate_flags(struct cs_blob *csblob)
 	} else {
 		csblob->csb_flags = updated_flags;
 	}
+
+	if (csblob->csb_entitlements != NULL) {
+		amfi->OSEntitlements_invalidate(csblob->csb_entitlements);
+	}
+
 	printf("Invalidated flags, old %x new %x\n", current_flags, csblob->csb_flags);
 }
 

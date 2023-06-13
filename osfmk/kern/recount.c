@@ -133,6 +133,7 @@ recount_timestamp_speculative(void)
 #endif // !__arm__ && !__arm64__
 }
 
+OS_ALWAYS_INLINE
 void
 recount_snapshot_speculative(struct recount_snap *snap)
 {
@@ -151,7 +152,11 @@ recount_snapshot(struct recount_snap *snap)
 	recount_snapshot_speculative(snap);
 }
 
-struct recount_snap PERCPU_DATA(_snaps_percpu);
+static struct recount_snap *
+recount_get_snap(processor_t processor)
+{
+	return &processor->pr_recount.rpr_snap;
+}
 
 // A simple sequence lock implementation.
 
@@ -186,7 +191,7 @@ static void
 _seqlock_excl_lock_relaxed(uint32_t *lck)
 {
 	__assert_only uintptr_t new = os_atomic_inc(lck, relaxed);
-	assertf((new & 1) == 1, "invalid seqlock in exclusive lock");
+	assert3u((new & 1), ==, 1);
 }
 
 static void
@@ -199,7 +204,7 @@ static void
 _seqlock_excl_unlock_relaxed(uint32_t *lck)
 {
 	__assert_only uint32_t new = os_atomic_inc(lck, relaxed);
-	assertf((new & 1) == 0, "invalid seqlock in exclusive unlock");
+	assert3u((new & 1), ==, 0);
 }
 
 static struct recount_track *
@@ -419,7 +424,7 @@ recount_snap_diff(struct recount_snap *result,
 void
 recount_update_snap(struct recount_snap *cur)
 {
-	struct recount_snap *this_snap = PERCPU_GET(_snaps_percpu);
+	struct recount_snap *this_snap = recount_get_snap(current_processor());
 	this_snap->rsn_time_mach = cur->rsn_time_mach;
 #if CONFIG_PERVASIVE_CPI
 	this_snap->rsn_cycles = cur->rsn_cycles;
@@ -449,7 +454,7 @@ recount_current_thread_usage(struct recount_usage *usage)
 	recount_snapshot(&snap);
 	recount_sum_unsafe(&recount_thread_plan, thread->th_recount.rth_lifetime,
 	    usage);
-	struct recount_snap *last = PERCPU_GET(_snaps_percpu);
+	struct recount_snap *last = recount_get_snap(current_processor());
 	struct recount_snap diff = { 0 };
 	recount_snap_diff(&diff, &snap, last);
 	recount_usage_add_snap(usage, &usage->ru_system_time_mach, &diff);
@@ -484,15 +489,16 @@ void
 recount_current_thread_perf_level_usage(struct recount_usage *usage_levels)
 {
 	assert(ml_get_interrupts_enabled() == FALSE);
+	processor_t processor = current_processor();
 	thread_t thread = current_thread();
 	struct recount_snap snap = { 0 };
 	recount_snapshot(&snap);
 	recount_rollup_unsafe(&recount_thread_plan, thread->th_recount.rth_lifetime,
 	    RCT_TOPO_CPU_KIND, usage_levels);
-	struct recount_snap *last = PERCPU_GET(_snaps_percpu);
+	struct recount_snap *last = recount_get_snap(processor);
 	struct recount_snap diff = { 0 };
 	recount_snap_diff(&diff, &snap, last);
-	size_t cur_i = recount_topo_index(RCT_TOPO_CPU_KIND, current_processor());
+	size_t cur_i = recount_topo_index(RCT_TOPO_CPU_KIND, processor);
 	struct recount_usage *cur_usage = &usage_levels[cur_i];
 	recount_usage_add_snap(cur_usage, &cur_usage->ru_system_time_mach, &diff);
 	size_t topo_count = recount_topo_count(RCT_TOPO_CPU_KIND);
@@ -550,7 +556,7 @@ recount_thread_time_mach(struct thread *thread)
 static uint64_t
 _time_since_last_snapshot(void)
 {
-	struct recount_snap *last = PERCPU_GET(_snaps_percpu);
+	struct recount_snap *last = recount_get_snap(current_processor());
 	uint64_t cur_time = mach_absolute_time();
 	return cur_time - last->rsn_time_mach;
 }
@@ -765,7 +771,7 @@ recount_switch_thread(struct recount_snap *cur, struct thread *off_thread,
 
 	processor_t processor = current_processor();
 
-	struct recount_snap *last = PERCPU_GET(_snaps_percpu);
+	struct recount_snap *last = recount_get_snap(processor);
 	struct recount_snap diff = { 0 };
 	recount_snap_diff(&diff, cur, last);
 	recount_absorb_snap(&diff, off_thread, off_task, processor, false);
@@ -823,6 +829,7 @@ recount_log_switch_thread(const struct recount_snap *snap)
 #endif // CONFIG_PERVASIVE_CPI
 }
 
+OS_ALWAYS_INLINE
 PRECISE_TIME_ONLY_FUNC
 static void
 recount_precise_transition_diff(struct recount_snap *diff,
@@ -847,19 +854,24 @@ recount_precise_transition_diff(struct recount_snap *diff,
 #endif // !PRECISE_USER_KERNEL_PMCS
 }
 
-// Must be called with interrupts disabled (no assertion because this is on the
-// kernel-user transition boundary, performance sensitive).
+/// Called when entering or exiting the kernel to maintain system vs. user counts, extremely performance sensitive.
+///
+/// Must be called with interrupts disabled.
+///
+/// - Parameter from_user: Whether the kernel is being entered from user space.
+///
+/// - Returns: The value of Mach time that was sampled inside this function.
 PRECISE_TIME_FATAL_FUNC
 static uint64_t
 recount_kernel_transition(bool from_user)
 {
 #if PRECISE_USER_KERNEL_TIME
-	thread_t thread = current_thread();
-
-	task_t task = get_threadtask(thread);
+	// Omit interrupts-disabled assertion for performance reasons.
 	processor_t processor = current_processor();
+	thread_t thread = processor->active_thread;
+	task_t task = get_thread_ro_unchecked(thread)->tro_task;
 
-	struct recount_snap *last = PERCPU_GET(_snaps_percpu);
+	struct recount_snap *last = recount_get_snap(processor);
 	struct recount_snap diff = { 0 };
 	struct recount_snap cur = { 0 };
 	recount_precise_transition_diff(&diff, last, &cur);

@@ -83,7 +83,30 @@ void ml_install_interrupt_handler(
 uint64_t ml_get_timebase(void);
 uint64_t ml_get_timebase_entropy(void);
 
-void ml_init_lock_timeout(void);
+#if MACH_KERNEL_PRIVATE
+/**
+ * Issue a barrier that guarantees all prior memory accesses will complete
+ * before any subsequent timebase reads.
+ */
+static inline void
+ml_memory_to_timebase_fence(void)
+{
+	/*
+	 * No-op on x86.  mach_absolute_time() & co. have load and lfence
+	 * instructions that already guarantee this ordering.
+	 */
+}
+
+/**
+ * Issue a barrier that guarantees all prior timebase reads will
+ * be ordered before any subsequent memory accesses.
+ */
+static inline void
+ml_timebase_to_memory_fence(void)
+{
+}
+#endif /* MACH_KERNEL_PRIVATE */
+
 void ml_init_delay_spin_threshold(int);
 
 boolean_t ml_delay_should_spin(uint64_t interval);
@@ -104,15 +127,9 @@ ml_static_protect(
 	vm_size_t size,
 	vm_prot_t new_prot);
 
-vm_offset_t ml_static_slide(
-	vm_offset_t vaddr);
-
 kern_return_t
 ml_static_verify_page_protections(
 	uint64_t base, uint64_t size, vm_prot_t prot);
-
-vm_offset_t ml_static_unslide(
-	vm_offset_t vaddr);
 
 /* virtual to physical on wired pages */
 vm_offset_t ml_vtophys(
@@ -429,6 +446,8 @@ extern uint64_t trace_phy_write_delay;
 
 void ml_hibernate_active_pre(void);
 void ml_hibernate_active_post(void);
+
+int ml_page_protection_type(void);
 
 #endif /* XNU_KERNEL_PRIVATE */
 

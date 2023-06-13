@@ -84,6 +84,7 @@
 #include <vm/vm_kern.h>
 #include <sys/vnode.h>
 #include <sys/namei.h>
+#include <kern/smr.h>
 #include <sys/vfs_context.h>
 #include <sys/sysctl.h>
 
@@ -196,8 +197,9 @@ struct vnode {
 	/*
 	 * back to the vnode lock for protection
 	 */
-	int32_t         v_numoutput;                    /* num of writes in progress */
-	int32_t         v_writecount;                   /* reference count of writers */
+	int32_t         v_numoutput;            /* num of writes in progress */
+	int32_t         v_writecount;           /* reference count of writers */
+	uint32_t        v_holdcount;            /* reference to keep vnode from being freed after reclaim */
 	const char *v_name;                     /* name component of the vnode */
 	vnode_t XNU_PTRAUTH_SIGNED_PTR("vnode.v_parent") v_parent;                       /* pointer to parent vnode */
 	struct lockf    *v_lockf;               /* advisory lock list head */
@@ -215,7 +217,6 @@ struct vnode {
 	                                         *  if VFLINKTARGET is set, if  VFLINKTARGET is not
 	                                         *  set, points to target */
 #endif /* CONFIG_FIRMLINKS */
-	uint32_t       v_holdcount;               /* reference to keep vnode from being freed after reclaim */
 #if CONFIG_IO_COMPRESSION_STATS
 	io_compression_stats_t io_compression_stats;            /* IO compression statistics */
 #endif /* CONFIG_IO_COMPRESSION_STATS */
@@ -532,6 +533,7 @@ errno_t  vnode_verifynamedstream(vnode_t vp);
 void    nchinit(void);
 int     resize_namecache(int newsize);
 void    name_cache_lock_shared(void);
+boolean_t    name_cache_lock_shared_to_exclusive(void);
 void    name_cache_lock(void);
 void    name_cache_unlock(void);
 void    cache_enter_with_gen(vnode_t dvp, vnode_t vp, struct componentname *cnp, int gen);
@@ -556,6 +558,7 @@ int     vnode_getalways(vnode_t);
 int     vnode_getalways_from_pager(vnode_t);
 int     vget_internal(vnode_t, int, int);
 errno_t vnode_getiocount(vnode_t, unsigned int, int);
+vnode_t vnode_getparent_if_different(vnode_t, vnode_t);
 #endif /* BSD_KERNEL_PRIVATE */
 int     vnode_get_locked(vnode_t);
 int     vnode_put_locked(vnode_t);
@@ -694,5 +697,15 @@ int vnode_breaklease(vnode_t vp, uint32_t oflags, vfs_context_t ctx);
 void vnode_breakdirlease(vnode_t vp, bool need_parent, uint32_t oflags);
 void vnode_revokelease(vnode_t vp, bool locked);
 #endif /* CONFIG_FILE_LEASES */
+
+#define VFS_SMR_DECLARE                         \
+	extern smr_t vfs_smr
+
+#define VFS_SMR()       vfs_smr
+#define vfs_smr_enter() smr_enter(VFS_SMR())
+#define vfs_smr_leave() smr_leave(VFS_SMR())
+#define vfs_smr_synchronize()   smr_synchronize(VFS_SMR())
+
+bool vnode_hold_smr(vnode_t);
 
 #endif /* !_SYS_VNODE_INTERNAL_H_ */

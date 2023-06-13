@@ -1578,8 +1578,6 @@ iopolicysys_vfs_hfs_case_sensitivity(struct proc *p, int cmd, int scope, int pol
 static int
 iopolicysys_vfs_atime_updates(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
 static int
-iopolicysys_vfs_materialize_dataless_files(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
-static int
 iopolicysys_vfs_statfs_no_data_volume(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
 static int
 iopolicysys_vfs_trigger_resolve(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
@@ -2042,7 +2040,7 @@ get_proc_materialize_policy(struct proc *p)
 	return (p->p_vfs_iopolicy & P_VFS_IOPOLICY_MATERIALIZE_DATALESS_FILES) ? IOPOL_MATERIALIZE_DATALESS_FILES_ON : IOPOL_MATERIALIZE_DATALESS_FILES_OFF;
 }
 
-static int
+int
 iopolicysys_vfs_materialize_dataless_files(struct proc *p __unused, int cmd, int scope, int policy, struct _iopol_param_t *iop_param)
 {
 	int                     error = 0;
@@ -2736,9 +2734,9 @@ proc_rlimit_control(__unused struct proc *p, struct proc_rlimit_control_args *ua
 		uint32_t ms_refill = 0;
 		uint64_t ns_refill;
 
-		percent = (uint8_t)(cpulimits_flags & 0xffU);                                   /* low 8 bits for percent */
+		percent = (uint8_t)(cpulimits_flags & 0xffU);           /* low 8 bits for percent */
 		ms_refill = (cpulimits_flags >> 8) & 0xffffff;          /* next 24 bits represent ms refill value */
-		if (percent >= 100) {
+		if (percent >= 100 || percent == 0) {
 			error = EINVAL;
 			break;
 		}

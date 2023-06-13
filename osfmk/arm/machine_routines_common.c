@@ -1098,6 +1098,18 @@ ml_early_set_interrupts_enabled(boolean_t enable)
 }
 
 /*
+ * Interrupt enable function exported for AppleCLPC without
+ * measurements enabled.
+ *
+ * Only for AppleCLPC!
+ */
+boolean_t
+sched_perfcontrol_ml_set_interrupts_without_measurement(boolean_t enable)
+{
+	return ml_set_interrupts_enabled_with_debug(enable, false);
+}
+
+/*
  *	Routine:        ml_at_interrupt_context
  *	Function:	Check if running at interrupt context
  */

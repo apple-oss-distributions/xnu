@@ -284,7 +284,7 @@ kasan_tbi_do_tag_zone_object(vm_offset_t addr, vm_size_t elem_size, uint8_t tag,
 	 * the adjacent, per cpu, instances.
 	 */
 	if (zxcpu) {
-		zpercpu_foreach_cpu(index) {
+		for (uint32_t index = 1; index < zpercpu_count(); index++) {
 			(void)kasan_tbi_tag_range(addr + ptoa(index), elem_size, tag);
 		}
 	}

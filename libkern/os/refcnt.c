@@ -19,15 +19,9 @@ os_refgrp_decl(, global_ref_group, "all", NULL);
 extern bool ref_debug_enable;
 bool ref_debug_enable = false;
 
-/*
- * XXX
- * A hack to allow task refgrps to be implicitly enabled. Once all upstream has
- * been recompiled grp_flags can be used to indicate whether or not a group is
- * enabled by default.
- */
 #define REFLOG_GRP_DEBUG_ENABLED(grp) \
     __improbable(grp != NULL && (ref_debug_enable || \
-	(grp->grp_name != NULL && strncmp("task", grp->grp_name, 4) == 0)))
+	(grp->grp_flags & OS_REFGRP_F_ALWAYS_ENABLED) != 0))
 
 static const size_t ref_log_nrecords = 1000000;
 

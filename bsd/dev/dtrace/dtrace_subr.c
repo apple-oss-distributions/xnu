@@ -329,7 +329,7 @@ dtrace_is_valid_ptrauth_key(uint64_t key)
 	return (key == ptrauth_key_asia) || (key == ptrauth_key_asib) ||
 	    (key == ptrauth_key_asda) || (key == ptrauth_key_asdb);
 #else
-	return (0);
+	return (1);
 #endif /* __has_feature(ptrauth_calls) */
 }
 

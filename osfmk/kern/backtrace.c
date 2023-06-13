@@ -31,6 +31,7 @@
 #include <kern/backtrace.h>
 #include <kern/cambria_layout.h>
 #include <kern/thread.h>
+#include <machine/machine_routines.h>
 #include <sys/errno.h>
 #include <vm/vm_map.h>
 
@@ -42,12 +43,6 @@
 #if defined(HAS_APPLE_PAC)
 #include <ptrauth.h>
 #endif // defined(HAS_APPLE_PAC)
-
-#if XNU_MONITOR
-#define IN_PPLSTK_BOUNDS(__addr) \
-   (((uintptr_t)(__addr) >= (uintptr_t)pmap_stacks_start) && \
-   ((uintptr_t)(__addr) < (uintptr_t)pmap_stacks_end))
-#endif
 
 #if __x86_64__
 static void
@@ -109,7 +104,6 @@ backtrace_internal(backtrace_pack_t packing, uint8_t *bt,
 	size_t size_used = 0;
 	uintptr_t top, bottom;
 	bool in_valid_stack;
-
 	assert(bt != NULL);
 	assert(btsize > 0);
 
@@ -121,10 +115,7 @@ backtrace_internal(backtrace_pack_t packing, uint8_t *bt,
 	(((uintptr_t)(__addr) >= (uintptr_t)bottom) && \
 	((uintptr_t)(__addr) < (uintptr_t)top))
 
-	in_valid_stack = IN_STK_BOUNDS(fp);
-#if XNU_MONITOR
-	in_valid_stack |= IN_PPLSTK_BOUNDS(fp);
-#endif /* XNU_MONITOR */
+	in_valid_stack = IN_STK_BOUNDS(fp) || ml_addr_in_non_xnu_stack((uintptr_t)fp);
 
 	if (!in_valid_stack) {
 		fp = NULL;
@@ -138,10 +129,7 @@ backtrace_internal(backtrace_pack_t packing, uint8_t *bt,
 		// If the frame pointer is 0, backtracing has reached the top of
 		// the stack and there is no return address.  Some stacks might not
 		// have set this up, so bounds check, as well.
-		in_valid_stack = IN_STK_BOUNDS(next_fp);
-#if XNU_MONITOR
-		in_valid_stack |= IN_PPLSTK_BOUNDS(next_fp);
-#endif /* XNU_MONITOR */
+		in_valid_stack = IN_STK_BOUNDS(next_fp) || ml_addr_in_non_xnu_stack((uintptr_t)next_fp);
 
 		if (next_fp == NULL || !in_valid_stack) {
 			break;
@@ -158,25 +146,20 @@ backtrace_internal(backtrace_pack_t packing, uint8_t *bt,
 		size_used += _backtrace_pack_addr(packing, bt + size_used,
 		    btsize - size_used, pc);
 
-		// Stacks grow down; backtracing should be moving to higher addresses.
+		// Stacks grow down; backtracing should always be moving to higher
+		// addresses except when a frame is stitching between two different
+		// stacks.
 		if (next_fp <= fp) {
-#if XNU_MONITOR
-			bool fp_in_pplstack = IN_PPLSTK_BOUNDS(fp);
-			bool fp_in_kstack = IN_STK_BOUNDS(fp);
-			bool next_fp_in_pplstack = IN_PPLSTK_BOUNDS(fp);
-			bool next_fp_in_kstack = IN_STK_BOUNDS(fp);
-
 			// This check is verbose; it is basically checking whether this
-			// thread is switching between the kernel stack and the CPU stack.
-			// If so, ignore the fact that frame pointer has switched directions
-			// (as it is a symptom of switching stacks).
-			if (((fp_in_pplstack) && (next_fp_in_kstack)) ||
-			    ((fp_in_kstack) && (next_fp_in_pplstack))) {
+			// thread is switching between the kernel stack and a non-XNU stack
+			// (or between one non-XNU stack and another, as there can be more
+			// than one). If not, then stop the backtrace as stack switching
+			// should be the only reason as to why the next FP would be lower
+			// than the current FP.
+			if (!ml_addr_in_non_xnu_stack((uintptr_t)fp) &&
+			    !ml_addr_in_non_xnu_stack((uintptr_t)next_fp)) {
 				break;
 			}
-#else /* XNU_MONITOR */
-			break;
-#endif /* !XNU_MONITOR */
 		}
 		fp = next_fp;
 	}
@@ -232,20 +215,18 @@ interrupted_kernel_pc_fp(uintptr_t *pc, uintptr_t *fp)
 #elif defined(__arm64__)
 
 	struct arm_saved_state *state;
-	bool state_64;
 
 	state = getCpuDatap()->cpu_int_state;
 	if (!state) {
 		return KERN_FAILURE;
 	}
-	state_64 = is_saved_state64(state);
 
 	// Return early if interrupted a thread in user space.
 	if (PSR64_IS_USER(get_saved_state_cpsr(state))) {
 		return KERN_FAILURE;
 	}
 
-	*pc = get_saved_state_pc(state);
+	*pc = ml_get_backtrace_pc(state);
 	*fp = get_saved_state_fp(state);
 
 #else // !defined(__arm64__) && !defined(__x86_64__)

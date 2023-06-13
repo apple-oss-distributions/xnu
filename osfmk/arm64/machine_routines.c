@@ -69,6 +69,7 @@
 #endif
 
 
+
 #include <libkern/section_keywords.h>
 
 /**
@@ -90,12 +91,12 @@
 static uint8_t cluster_initialized = 0;
 #endif
 
-MACHINE_TIMEOUT_WRITEABLE(LockTimeOut, "lock", 6e6 /* 0.25s */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT_DEV_WRITEABLE(LockTimeOut, "lock", 6e6 /* 0.25s */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
 machine_timeout_t LockTimeOutUsec; // computed in ml_init_lock_timeout
 
-MACHINE_TIMEOUT_WRITEABLE(TLockTimeOut, "ticket-lock", 3e6 /* 0.125s */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT_DEV_WRITEABLE(TLockTimeOut, "ticket-lock", 3e6 /* 0.125s */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
 
-MACHINE_TIMEOUT_WRITEABLE(MutexSpin, "mutex-spin", 240 /* 10us */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT_DEV_WRITEABLE(MutexSpin, "mutex-spin", 240 /* 10us */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
 
 uint64_t low_MutexSpin;
 int64_t high_MutexSpin;
@@ -160,7 +161,7 @@ extern uint32_t lockdown_done;
  * Represents regions of virtual address space that should be reserved
  * (pre-mapped) in each user address space.
  */
-SECURITY_READ_ONLY_LATE(static struct vm_reserved_region) vm_reserved_regions[] = {
+static const struct vm_reserved_region vm_reserved_regions[] = {
 	{
 		.vmrr_name = "GPU Carveout",
 		.vmrr_addr = MACH_VM_MIN_GPU_CARVEOUT_ADDRESS,
@@ -576,11 +577,11 @@ machine_processor_shutdown(
  *      Routine:        ml_init_lock_timeout
  *      Function:
  */
-void
+static void __startup_func
 ml_init_lock_timeout(void)
 {
 	/*
-	 * This function is called after STARUP_SUB_TIMEOUTS
+	 * This function is called after STARTUP_SUB_TIMEOUTS
 	 * initialization, so using the "legacy" boot-args here overrides
 	 * the ml-timeout-...  configuration. (Given that these boot-args
 	 * here are usually explicitly specified, this makes sense by
@@ -634,11 +635,9 @@ ml_init_lock_timeout(void)
 	uint64_t maxwfeus = MAX_WFE_HINT_INTERVAL_US;
 	PE_parse_boot_argn("max_wfe_us", &maxwfeus, sizeof(maxwfeus));
 	nanoseconds_to_absolutetime(maxwfeus * NSEC_PER_USEC, &ml_wfe_hint_max_interval);
-
-#if CONFIG_PV_TICKET
-	kprintf("pv locks %sabled\n", has_lock_pv? "en" : "dis");
-#endif
 }
+STARTUP(TIMEOUTS, STARTUP_RANK_MIDDLE, ml_init_lock_timeout);
+
 
 /*
  * This is called when all of the ml_processor_info_t structures have been
@@ -767,7 +766,7 @@ machine_signal_idle(
 	processor_t processor)
 {
 	cpu_signal(processor_to_cpu_datap(processor), SIGPnop, (void *)NULL, (void *)NULL);
-	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_AST), processor->cpu_id, 0 /* nop */, 0, 0, 0);
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_AST), processor->cpu_id, 0 /* nop */, 0, 0, 0);
 }
 
 void
@@ -775,7 +774,7 @@ machine_signal_idle_deferred(
 	processor_t processor)
 {
 	cpu_signal_deferred(processor_to_cpu_datap(processor));
-	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_DEFERRED_AST), processor->cpu_id, 0 /* nop */, 0, 0, 0);
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_DEFERRED_AST), processor->cpu_id, 0 /* nop */, 0, 0, 0);
 }
 
 void
@@ -783,7 +782,7 @@ machine_signal_idle_cancel(
 	processor_t processor)
 {
 	cpu_signal_cancel(processor_to_cpu_datap(processor));
-	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_CANCEL_AST), processor->cpu_id, 0 /* nop */, 0, 0, 0);
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_CANCEL_AST), processor->cpu_id, 0 /* nop */, 0, 0, 0);
 }
 
 /*
@@ -1000,8 +999,8 @@ ml_parse_cpu_topology(void)
 		assert(cpu->cpu_id < MAX_CPUS);
 		topology_info.max_cpu_id = MAX(topology_info.max_cpu_id, cpu->cpu_id);
 
-		cpu->reserved = 0;
-		topology_info.reserved = 0;
+		cpu->die_id = 0;
+		topology_info.max_die_id = 0;
 
 		cpu->phys_id = (uint32_t)ml_readprop(child, "reg", ML_READPROP_MANDATORY);
 
@@ -1081,6 +1080,7 @@ ml_parse_cpu_topology(void)
 			topology_info.boot_cpu = cpu;
 			topology_info.boot_cluster = cluster;
 		}
+
 	}
 
 #if HAS_CLUSTER
@@ -1255,6 +1255,44 @@ ml_get_first_cpu_id(unsigned int cluster_id)
 	return topology_info.clusters[cluster_id].first_cpu_id;
 }
 
+/*
+ * Return the die id of a cluster.
+ */
+unsigned int
+ml_get_die_id(unsigned int cluster_id)
+{
+	/*
+	 * The current implementation gets the die_id from the
+	 * first CPU of the cluster.
+	 * rdar://80917654 (Add the die_id field to the cluster topology info)
+	 */
+	unsigned int first_cpu = ml_get_first_cpu_id(cluster_id);
+	return topology_info.cpus[first_cpu].die_id;
+}
+
+/*
+ * Return the index of a cluster in its die.
+ */
+unsigned int
+ml_get_die_cluster_id(unsigned int cluster_id)
+{
+	/*
+	 * The current implementation gets the die_id from the
+	 * first CPU of the cluster.
+	 * rdar://80917654 (Add the die_id field to the cluster topology info)
+	 */
+	unsigned int first_cpu = ml_get_first_cpu_id(cluster_id);
+	return topology_info.cpus[first_cpu].die_cluster_id;
+}
+
+/*
+ * Return the highest die id of the system.
+ */
+unsigned int
+ml_get_max_die_id(void)
+{
+	return topology_info.max_die_id;
+}
 
 void
 ml_lockdown_init()
@@ -1277,6 +1315,28 @@ ml_lockdown_handler_register(lockdown_handler_t f, void *this)
 	return KERN_SUCCESS;
 }
 
+static mcache_flush_function mcache_flush_func;
+static void* mcache_flush_service;
+kern_return_t
+ml_mcache_flush_callback_register(mcache_flush_function func, void *service)
+{
+	mcache_flush_service = service;
+	mcache_flush_func = func;
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ml_mcache_flush(void)
+{
+	if (!mcache_flush_func) {
+		panic("Cannot flush M$ with no flush callback registered");
+
+		return KERN_FAILURE;
+	} else {
+		return mcache_flush_func(mcache_flush_service);
+	}
+}
 
 
 extern lck_mtx_t pset_create_lock;
@@ -1444,7 +1504,7 @@ cause_ast_check(
 {
 	if (current_processor() != processor) {
 		cpu_signal(processor_to_cpu_datap(processor), SIGPast, (void *)NULL, (void *)NULL);
-		KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_AST), processor->cpu_id, 1 /* ast */, 0, 0, 0);
+		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_AST), processor->cpu_id, 1 /* ast */, 0, 0, 0);
 	}
 }
 
@@ -1529,17 +1589,17 @@ vm_offset_t
 ml_static_slide(
 	vm_offset_t vaddr)
 {
-	vm_offset_t slid_vaddr = vaddr + vm_kernel_slide;
+	vm_offset_t slid_vaddr = 0;
 
-	if ((slid_vaddr < vm_kernelcache_base) || (slid_vaddr >= vm_kernelcache_top)) {
-		/* This is only intended for use on kernelcache addresses. */
+	{
+		slid_vaddr = vaddr + vm_kernel_slide;
+	}
+
+	if (!VM_KERNEL_IS_SLID(slid_vaddr)) {
+		/* This is only intended for use on static kernel addresses. */
 		return 0;
 	}
 
-	/*
-	 * Because the address is in the kernelcache, we can do a simple
-	 * slide calculation.
-	 */
 	return slid_vaddr;
 }
 
@@ -1547,10 +1607,11 @@ vm_offset_t
 ml_static_unslide(
 	vm_offset_t vaddr)
 {
-	if ((vaddr < vm_kernelcache_base) || (vaddr >= vm_kernelcache_top)) {
-		/* This is only intended for use on kernelcache addresses. */
+	if (!VM_KERNEL_IS_SLID(vaddr)) {
+		/* This is only intended for use on static kernel addresses. */
 		return 0;
 	}
+
 
 	return vaddr - vm_kernel_slide;
 }
@@ -1561,7 +1622,7 @@ kern_return_t
 ml_static_protect(
 	vm_offset_t vaddr, /* kernel virtual address */
 	vm_size_t size,
-	vm_prot_t new_prot)
+	vm_prot_t new_prot __unused)
 {
 	pt_entry_t    arm_prot = 0;
 	pt_entry_t    arm_block_prot = 0;
@@ -1682,6 +1743,7 @@ ml_static_protect(
 	return result;
 }
 
+
 /*
  *	Routine:        ml_static_mfree
  *	Function:
@@ -1740,6 +1802,19 @@ ml_static_mfree(
 #endif
 }
 
+/*
+ * Routine: ml_page_protection_type
+ * Function: Returns the type of page protection that the system supports.
+ */
+ml_page_protection_t
+ml_page_protection_type(void)
+{
+#if   XNU_MONITOR
+	return 1;
+#else
+	return 0;
+#endif
+}
 
 /* virtual to physical on wired pages */
 vm_offset_t
@@ -2000,6 +2075,38 @@ ml_get_timebase()
 	} while (getCpuDatap()->cpu_base_timebase != timebase);
 
 	return clock + timebase;
+}
+
+/**
+ * Issue a barrier that guarantees all prior memory accesses will complete
+ * before any subsequent timebase reads.
+ */
+void
+ml_memory_to_timebase_fence(void)
+{
+	__builtin_arm_dmb(DMB_SY);
+	const uint64_t take_backwards_branch = 0;
+	asm volatile (
+        "1:"
+                "ldr	x0, [%[take_backwards_branch]]" "\n"
+                "cbnz	x0, 1b"                         "\n"
+                :
+                : [take_backwards_branch] "r"(&take_backwards_branch)
+                : "x0"
+        );
+
+	/* throwaway read to prevent ml_get_speculative_timebase() reordering */
+	(void)ml_get_hwclock();
+}
+
+/**
+ * Issue a barrier that guarantees all prior timebase reads will
+ * be ordered before any subsequent memory accesses.
+ */
+void
+ml_timebase_to_memory_fence(void)
+{
+	__builtin_arm_isb(ISB_SY);
 }
 
 /*
@@ -2411,6 +2518,17 @@ ml_thread_set_jop_pid(thread_t thread, task_t task)
 }
 #endif /* defined(HAS_APPLE_PAC) */
 
+#if DEVELOPMENT || DEBUG
+static uint64_t minor_badness_suffered = 0;
+#endif
+void
+ml_report_minor_badness(uint32_t __unused badness_id)
+{
+	#if DEVELOPMENT || DEBUG
+	(void)os_atomic_or(&minor_badness_suffered, 1ULL << badness_id, relaxed);
+	#endif
+}
+
 #if defined(HAS_APPLE_PAC)
 #if __ARM_ARCH_8_6__ || APPLEVIRTUALPLATFORM
 /**
@@ -2573,7 +2691,7 @@ ml_hibernate_active_post(void)
  * @return The number of reserved regions returned through `regions`.
  */
 size_t
-ml_get_vm_reserved_regions(bool vm_is64bit, struct vm_reserved_region **regions)
+ml_get_vm_reserved_regions(bool vm_is64bit, const struct vm_reserved_region **regions)
 {
 	assert(regions != NULL);
 
@@ -2592,6 +2710,7 @@ ml_get_vm_reserved_regions(bool vm_is64bit, struct vm_reserved_region **regions)
 		return 0;
 	}
 }
+
 /* These WFE recommendations are expected to be updated on a relatively
  * infrequent cadence, possibly from a different cluster, hence
  * false cacheline sharing isn't expected to be material
@@ -2643,4 +2762,23 @@ ml_cluster_wfe_timeout(uint32_t wfe_cluster_id)
 	}
 #endif
 	return wfet;
+}
+
+__pure2 bool
+ml_addr_in_non_xnu_stack(__unused uintptr_t addr)
+{
+#if   XNU_MONITOR
+	return (addr >= (uintptr_t)pmap_stacks_start) && (addr < (uintptr_t)pmap_stacks_end);
+#else
+	return false;
+#endif /* XNU_MONITOR */
+}
+
+uint64_t
+ml_get_backtrace_pc(struct arm_saved_state *state)
+{
+	assert((state != NULL) && is_saved_state64(state));
+
+
+	return get_saved_state_pc(state);
 }

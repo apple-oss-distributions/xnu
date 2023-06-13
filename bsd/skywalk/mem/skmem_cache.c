@@ -846,6 +846,7 @@ skmem_cache_destroy(struct skmem_cache *skm)
 	/* purge all cached objects for this cache */
 	skmem_cache_magazine_purge(skm);
 
+
 	/*
 	 * Panic if we detect there are unfreed objects; the caller
 	 * destroying this cache is responsible for ensuring that all

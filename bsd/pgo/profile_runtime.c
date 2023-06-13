@@ -309,8 +309,8 @@ grab_pgo_data(struct proc *p,
 		err = EINVAL;
 		goto out;
 	} else {
-		buffer = kalloc_data(size, Z_WAITOK | Z_ZERO)
-		    if (!buffer) {
+		buffer = kalloc_data(size, Z_WAITOK | Z_ZERO);
+		if (!buffer) {
 			err = ENOMEM;
 			goto out;
 		}

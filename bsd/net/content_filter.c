@@ -401,8 +401,7 @@ void* cfil_rw_lock_history[CFIL_RW_LCK_MAX];
 int cfil_rw_nxt_unlck = 0;
 void* cfil_rw_unlock_history[CFIL_RW_LCK_MAX];
 
-static ZONE_DEFINE(content_filter_zone, "content_filter",
-    sizeof(struct content_filter), ZC_NONE);
+static KALLOC_TYPE_DEFINE(content_filter_zone, struct content_filter, NET_KT_DEFAULT);
 
 MBUFQ_HEAD(cfil_mqhead);
 
@@ -543,8 +542,7 @@ struct cfil_info {
 
 #define CFI_ENTRY_KCUNIT(i, e) ((uint32_t)(((e) - &((i)->cfi_entries[0])) + 1))
 
-static ZONE_DEFINE(cfil_info_zone, "cfil_info",
-    sizeof(struct cfil_info), ZC_NONE);
+static KALLOC_TYPE_DEFINE(cfil_info_zone, struct cfil_info, NET_KT_DEFAULT);
 
 TAILQ_HEAD(cfil_sock_head, cfil_info) cfil_sock_head;
 TAILQ_HEAD(cfil_sock_head_stats, cfil_info) cfil_sock_head_stats;

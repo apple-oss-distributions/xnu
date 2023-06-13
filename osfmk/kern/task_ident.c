@@ -153,7 +153,7 @@ task_create_identity_token(
 	task_lock(task);
 
 	bsd_info = get_bsdtask_info(task);
-	if (is_corpsetask(task)) {
+	if (task_is_a_corpse(task)) {
 		token->task_uniqueid = task->task_uniqueid;
 	} else if (task->active && bsd_info != NULL) {
 		token->ident = proc_ident(bsd_info);
@@ -193,7 +193,7 @@ task_identity_token_get_task_grp(
 		if (kr) {
 			return KERN_NOT_FOUND;
 		}
-		assert(is_corpsetask(task));
+		assert(task_is_a_corpse(task));
 	} else {
 		void* p = proc_find_ident(&token->ident);
 		if (p == NULL) {

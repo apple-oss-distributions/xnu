@@ -370,21 +370,17 @@ thread_policy_set_internal(
 		spl_t s = splsched();
 		thread_lock(thread);
 
-		/*
-		 * If the thread has previously requested realtime but is
-		 * demoted with RT_RESTRICTED, undemote the thread before
-		 * applying the new user sched mode. This prevents the thread
-		 * being stuck at TIMESHARE or being made realtime unexpectedly
-		 * (when undemoted).
-		 */
-		if ((thread->sched_flags & TH_SFLAG_RT_RESTRICTED) != 0) {
-			sched_thread_mode_undemote(thread, TH_SFLAG_RT_RESTRICTED);
-		}
-
 		thread_set_user_sched_mode_and_recompute_pri(thread, mode);
 
 		thread_unlock(thread);
 		splx(s);
+
+		/*
+		 * The thread may be demoted with RT_DISALLOWED but has just
+		 * changed its sched mode to TIMESHARE or FIXED. Make sure to
+		 * undemote the thread so the new sched mode takes effect.
+		 */
+		thread_rt_evaluate(thread);
 
 		pend_token.tpt_update_thread_sfi = 1;
 
@@ -437,18 +433,16 @@ thread_policy_set_internal(
 		thread->realtime.constraint      = info->constraint;
 		thread->realtime.preemptible     = info->preemptible;
 
-		thread_work_interval_flags_t th_wi_flags = os_atomic_load(
-			&thread->th_work_interval_flags, relaxed);
-
-		if (flavor == THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY) {
-			thread->realtime.priority_offset = (uint8_t)(info->priority - BASEPRI_RTQUEUES);
-		} else if ((th_wi_flags & TH_WORK_INTERVAL_FLAGS_HAS_WORKLOAD_ID) &&
-		    (th_wi_flags & TH_WORK_INTERVAL_FLAGS_RT_CRITICAL)) {
-			/* N.B. that criticality/realtime priority offset is currently not adjusted when the
-			 * thread leaves the work interval, or only joins it after already having become realtime */
-			thread->realtime.priority_offset = 1;
-		} else {
-			thread->realtime.priority_offset = 0;
+		/*
+		 * If the thread has a work interval driven policy, the priority
+		 * offset has been set by the work interval.
+		 */
+		if (!thread->requested_policy.thrp_wi_driven) {
+			if (flavor == THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY) {
+				thread->realtime.priority_offset = (uint8_t)(info->priority - BASEPRI_RTQUEUES);
+			} else {
+				thread->realtime.priority_offset = 0;
+			}
 		}
 
 		thread_set_user_sched_mode_and_recompute_pri(thread, TH_MODE_REALTIME);
@@ -1065,6 +1059,7 @@ thread_recompute_priority(
 		uint8_t i = thread->realtime.priority_offset;
 		assert((i >= 0) && (i < NRTQS));
 		priority = BASEPRI_RTQUEUES + i;
+
 		sched_set_thread_base_priority(thread, priority);
 		if (thread->realtime.deadline == RT_DEADLINE_NONE) {
 			/* Make sure the thread has a valid deadline */
@@ -1074,7 +1069,15 @@ thread_recompute_priority(
 			    (uintptr_t)thread_tid(thread), thread->realtime.deadline, thread->realtime.computation, 1);
 		}
 		return;
-	} else if (thread->effective_policy.thep_wi_driven) {
+
+		/*
+		 * A thread may have joined a RT work interval but then never
+		 * changed its sched mode or have been demoted. RT work
+		 * intervals will have RT priorities - ignore the priority if
+		 * the thread isn't RT.
+		 */
+	} else if (thread->effective_policy.thep_wi_driven &&
+	    work_interval_get_priority(thread) < BASEPRI_RTQUEUES) {
 		priority = work_interval_get_priority(thread);
 	} else if (thread->effective_policy.thep_qos != THREAD_QOS_UNSPECIFIED) {
 		int qos = thread->effective_policy.thep_qos;
@@ -1108,6 +1111,11 @@ thread_recompute_priority(
 		priority += thread->task_priority;
 	}
 
+	/* Boost the priority of threads which are RT demoted. */
+	if (sched_thread_mode_has_demotion(thread, TH_SFLAG_RT_DISALLOWED)) {
+		priority = MAX(priority, MAXPRI_USER);
+	}
+
 	priority = MAX(priority, thread->user_promotion_basepri);
 
 	/*
@@ -1136,7 +1144,7 @@ thread_recompute_priority(
 	assert3u(priority, <=, MAXPRI);
 
 	if (thread->saved_mode == TH_MODE_REALTIME &&
-	    thread->sched_flags & TH_SFLAG_FAILSAFE) {
+	    sched_thread_mode_has_demotion(thread, TH_SFLAG_FAILSAFE)) {
 		priority = DEPRESSPRI;
 	}
 
@@ -1239,8 +1247,8 @@ thread_policy_reset(
 		sched_thread_mode_undemote(thread, TH_SFLAG_THROTTLED);
 	}
 
-	if (thread->sched_flags & TH_SFLAG_RT_RESTRICTED) {
-		sched_thread_mode_undemote(thread, TH_SFLAG_RT_RESTRICTED);
+	if (thread->sched_flags & TH_SFLAG_RT_DISALLOWED) {
+		sched_thread_mode_undemote(thread, TH_SFLAG_RT_DISALLOWED);
 	}
 
 	/* At this point, the various demotions should be inactive */
@@ -1922,11 +1930,21 @@ proc_set_thread_policy(thread_t   thread,
     int        flavor,
     int        value)
 {
+	proc_set_thread_policy_ext(thread, category, flavor, value, 0);
+}
+
+void
+proc_set_thread_policy_ext(thread_t   thread,
+    int        category,
+    int        flavor,
+    int        value,
+    int        value2)
+{
 	struct task_pend_token pend_token = {};
 
 	thread_mtx_lock(thread);
 
-	proc_set_thread_policy_locked(thread, category, flavor, value, 0, &pend_token);
+	proc_set_thread_policy_locked(thread, category, flavor, value, value2, &pend_token);
 
 	thread_mtx_unlock(thread);
 
@@ -2135,13 +2153,25 @@ thread_set_requested_policy_spinlocked(thread_t     thread,
 		assert(category == TASK_POLICY_ATTRIBUTE);
 		assert(thread == current_thread());
 
-		if (value != TH_MODE_NONE) {
-			thread->static_param = true;
-			sched_set_thread_mode_user(thread, value);
-			requested.thrp_wi_driven = 1;
+		const bool set_policy = value;
+		const sched_mode_t mode = value2;
+
+		requested.thrp_wi_driven = set_policy ? 1 : 0;
+
+		/*
+		 * No sched mode change for REALTIME (threads must explicitly
+		 * opt-in), however the priority_offset needs to be updated.
+		 */
+		if (mode == TH_MODE_REALTIME) {
+			const int pri = work_interval_get_priority(thread);
+			assert3u(pri, >=, BASEPRI_RTQUEUES);
+			thread->realtime.priority_offset = set_policy ?
+			    (uint8_t)(pri - BASEPRI_RTQUEUES) : 0;
 		} else {
-			sched_set_thread_mode_user(thread, TH_MODE_TIMESHARE);
-			requested.thrp_wi_driven = 0;
+			sched_set_thread_mode_user(thread, mode);
+			if (set_policy) {
+				thread->static_param = true;
+			}
 		}
 		break;
 
@@ -3330,64 +3360,129 @@ thread_clear_exec_promotion(thread_t thread)
 	splx(s);
 }
 
-#if CONFIG_SCHED_RT_RESTRICT
+#if CONFIG_SCHED_RT_ALLOW
+
 /*
- * flag set by -time-constraint-policy-restrict boot-arg to restrict use of
+ * flag set by -rt-allow-policy-enable boot-arg to restrict use of
  * THREAD_TIME_CONSTRAINT_POLICY and THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY
  * to threads that have joined a workinterval with WORK_INTERVAL_WORKLOAD_ID_RT_ALLOWED.
  */
 static TUNABLE(
 	bool,
-	restrict_time_constraint_policy,
-	"-time-constraint-policy-restrict",
+	rt_allow_policy_enabled,
+	"-rt-allow_policy-enable",
 	false
 	);
 
+/*
+ * When the RT allow policy is enabled and a thread allowed to become RT,
+ * sometimes (if the processes RT allow policy is restricted) the thread will
+ * have a CPU limit enforced. The following two tunables determine the
+ * parameters for that CPU limit.
+ */
+
+/* % of the interval allowed to run. */
+TUNABLE_DEV_WRITEABLE(uint8_t, rt_allow_limit_percent,
+    "rt_allow_limit_percent", 70);
+
+/* The length of interval in nanoseconds. */
+TUNABLE_DEV_WRITEABLE(uint16_t, rt_allow_limit_interval_ms,
+    "rt_allow_limit_interval", 10);
+
+/*
+ * Set a CPU limit on a thread based on the RT allow policy. This will be picked
+ * up by the target thread via the ledger AST.
+ */
+static void
+thread_rt_set_cpulimit(thread_t thread)
+{
+	/* Force reasonable values for the cpu limit. */
+	const uint8_t percent = MAX(MIN(rt_allow_limit_percent, 99), 1);
+	const uint16_t interval_ms = MAX(rt_allow_limit_interval_ms, 1);
+
+	thread->t_ledger_req_percentage = percent;
+	thread->t_ledger_req_interval_ms = interval_ms;
+	thread->t_ledger_req_action = THREAD_CPULIMIT_BLOCK;
+}
+
+/* Similar to the above but removes any CPU limit. */
+static void
+thread_rt_clear_cpulimit(thread_t thread)
+{
+	thread->t_ledger_req_percentage = 0;
+	thread->t_ledger_req_interval_ms = 0;
+	thread->t_ledger_req_action = THREAD_CPULIMIT_DISABLE;
+}
+
+/*
+ * Evaluate RT policy for a thread, demoting and undemoting as needed.
+ */
 void
 thread_rt_evaluate(thread_t thread)
 {
-	/* If no restrictions are configured - nothing to do. */
-	if (!restrict_time_constraint_policy) {
+	task_t task = get_threadtask(thread);
+	bool platform_binary = false;
+
+	/* If the RT allow policy is not enabled - nothing to do. */
+	if (!rt_allow_policy_enabled) {
 		return;
 	}
 
 	/* User threads only. */
-	if (get_threadtask(thread) == kernel_task) {
+	if (task == kernel_task) {
 		return;
 	}
+
+	/* Check for platform binary. */
+	platform_binary = (task_ro_flags_get(task) & TFRO_PLATFORM) != 0;
 
 	spl_t s = splsched();
 	thread_lock(thread);
 
-	const thread_work_interval_flags_t flags =
+	const thread_work_interval_flags_t wi_flags =
 	    os_atomic_load(&thread->th_work_interval_flags, relaxed);
 
 	/*
-	 * RT threads are demoted if they are no longer joined to a work
-	 * interval which has the RT_ALLOWED flag set (and not already demoted).
+	 * RT threads which are not joined to a work interval which allows RT
+	 * threads are demoted. Once those conditions no longer hold, the thread
+	 * undemoted.
 	 */
-	if (((thread->sched_flags & TH_SFLAG_RT_RESTRICTED) == 0) &&
-	    ((flags & TH_WORK_INTERVAL_FLAGS_RT_ALLOWED) == 0) &&
-	    (thread->sched_mode == TH_MODE_REALTIME || thread->saved_mode == TH_MODE_REALTIME)) {
-		sched_thread_mode_demote(thread, TH_SFLAG_RT_RESTRICTED);
+	if ((thread->sched_mode == TH_MODE_REALTIME || thread->saved_mode == TH_MODE_REALTIME) &&
+	    (wi_flags & TH_WORK_INTERVAL_FLAGS_RT_ALLOWED) == 0) {
+		if (!sched_thread_mode_has_demotion(thread, TH_SFLAG_RT_DISALLOWED)) {
+			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_DISALLOWED_WORK_INTERVAL),
+			    thread_tid(thread));
+			sched_thread_mode_demote(thread, TH_SFLAG_RT_DISALLOWED);
+		}
+	} else {
+		if (sched_thread_mode_has_demotion(thread, TH_SFLAG_RT_DISALLOWED)) {
+			sched_thread_mode_undemote(thread, TH_SFLAG_RT_DISALLOWED);
+		}
 	}
 
 	/*
-	 * If demoted and joined to a work interval which allows RT threads,
-	 * then undemote.
+	 * RT threads get a CPU limit unless they're part of a platform binary
+	 * task.
 	 */
-	if (((thread->sched_flags & TH_SFLAG_RT_RESTRICTED) != 0) &&
-	    ((flags & TH_WORK_INTERVAL_FLAGS_RT_ALLOWED) != 0)) {
-		sched_thread_mode_undemote(thread, TH_SFLAG_RT_RESTRICTED);
+	if ((thread->sched_mode == TH_MODE_REALTIME || thread->saved_mode == TH_MODE_REALTIME) &&
+	    !platform_binary) {
+		thread_rt_set_cpulimit(thread);
+	} else {
+		thread_rt_clear_cpulimit(thread);
 	}
 
 	thread_unlock(thread);
 	splx(s);
+
+	/* Ensure the target thread picks up any CPU limit change. */
+	act_set_astledger(thread);
 }
+
 #else
 
 void
 thread_rt_evaluate(__unused thread_t thread)
 {
 }
-#endif /*  CONFIG_SCHED_RT_RESTRICT */
+
+#endif /*  CONFIG_SCHED_RT_ALLOW */

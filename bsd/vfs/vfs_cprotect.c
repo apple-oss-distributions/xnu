@@ -113,43 +113,18 @@ cpx_alloc(size_t key_len, bool needs_ctx)
 	cpx_t cpx = NULL;
 
 #if CONFIG_KEYPAGE_WP
+#pragma unused(key_len, needs_ctx)
+
 	/*
 	 * Macs only use 1 key per volume, so force it into its own page.
 	 * This way, we can write-protect as needed.
 	 */
-	size_t cpsize = cpx_size(key_len);
 
-	// silence warning for needs_ctx
-	(void) needs_ctx;
-
-	if (cpsize < PAGE_SIZE) {
-		/*
-		 * Don't use MALLOC to allocate the page-sized structure.  Instead,
-		 * use kmem_alloc to bypass KASAN since we are supplying our own
-		 * unilateral write protection on this page. Note that kmem_alloc
-		 * can block.
-		 */
-		if (kmem_alloc(kernel_map, (vm_offset_t *)&cpx, PAGE_SIZE,
-		    KMA_DATA, VM_KERN_MEMORY_FILE)) {
-			/*
-			 * returning NULL at this point (due to failed
-			 * allocation) would just result in a panic.
-			 *
-			 * fall back to attempting a normal kalloc, and don't
-			 * let the cpx get marked PROTECTABLE.
-			 */
-			/* BEGIN IGNORE CODESTYLE */
-			__typed_allocators_ignore_push
-			cpx = kheap_alloc(KHEAP_DEFAULT, cpx_size(key_len), Z_WAITOK);
-			/* END IGNORE CODESTYLE */
-			__typed_allocators_ignore_pop
-		} else {
-			//mark the page as protectable, since kmem_alloc succeeded.
-			cpx->cpx_flags |= CPX_WRITE_PROTECTABLE;
-		}
-	} else {
-		panic("cpx_size too large ! (%lu)", cpsize);
-	}
+	assert(cpx_size(key_len) <= PAGE_SIZE);
+	kmem_alloc(kernel_map, (vm_offset_t *)&cpx, PAGE_SIZE,
+	    KMA_DATA | KMA_NOFAIL, VM_KERN_MEMORY_FILE);
+	//mark the page as protectable, since kmem_alloc succeeded.
+	cpx->cpx_flags |= CPX_WRITE_PROTECTABLE;
 #else
 	/* If key page write protection disabled, just switch to zalloc */
 

@@ -48,6 +48,7 @@ struct kd_buffer kd_buffer_triage = {
 	.kdcopybuf = NULL
 };
 
+
 static LCK_GRP_DECLARE(ktriage_grp, "ktriage");
 static LCK_MTX_DECLARE(ktriage_mtx, &ktriage_grp);
 
@@ -113,49 +114,38 @@ delete_buffers_triage(void)
 	panic("delete_buffers_triage shouldn't be invoked");
 }
 
-const char *ktriage_error_index_invalid_str = "Error descr index invalid\n";
-const char *ktriage_error_subsyscode_invalid_str = "KTriage: Subsystem code invalid\n";
-ktriage_strings_t subsystems_triage_strings[KDBG_TRIAGE_SUBSYS_MAX + 1];
+ktriage_strings_t ktriage_subsystems_strings[KDBG_TRIAGE_SUBSYS_MAX + 1];
 
 static void
-ktriage_convert_to_string(uint64_t debugid, char *buf, uint32_t bufsz)
+ktriage_convert_to_string(uint64_t debugid, uintptr_t arg, char *buf, uint32_t bufsz)
 {
 	if (buf == NULL) {
 		return;
 	}
 
-	int subsystem = KDBG_TRIAGE_EXTRACT_CLASS(debugid);
+	uint8_t subsystem = KDBG_TRIAGE_EXTRACT_CLASS(debugid);
 
 	/* zero subsystem means there is nothing to log */
 	if (subsystem == 0) {
 		return;
 	}
 
-	size_t prefixlen, msglen;
-	if (subsystem <= KDBG_TRIAGE_SUBSYS_MAX) {
-		int subsystem_num_strings = subsystems_triage_strings[subsystem].num_strings;
-		const char **subsystem_strings = subsystems_triage_strings[subsystem].strings;
-
-		prefixlen = strlen(subsystem_strings[0]);
-		strlcpy(buf, (const char*)(subsystem_strings[0]), bufsz);
-
-		int strindx = KDBG_TRIAGE_EXTRACT_CODE(debugid);
-		if (strindx >= 1) { /* 0 is reserved for prefix */
-			if (strindx < subsystem_num_strings) {
-				msglen = MIN(bufsz - prefixlen, strlen(subsystem_strings[strindx]) + 1); /* incl. NULL termination */
-				strlcpy(buf + prefixlen, (subsystem_strings[strindx]), msglen);
-			} else {
-				msglen = MIN(bufsz - prefixlen, strlen(ktriage_error_index_invalid_str) + 1); /* incl. NULL termination */
-				strlcpy(buf + prefixlen, ktriage_error_index_invalid_str, msglen);
-			}
-		} else {
-			msglen = MIN(bufsz - prefixlen, strlen(ktriage_error_index_invalid_str) + 1); /* incl. NULL termination */
-			strlcpy(buf + prefixlen, ktriage_error_index_invalid_str, msglen);
-		}
-	} else {
-		msglen = MIN(bufsz, strlen(ktriage_error_subsyscode_invalid_str) + 1);  /* incl. NULL termination */
-		strlcpy(buf, ktriage_error_subsyscode_invalid_str, msglen);
+	if (subsystem > KDBG_TRIAGE_SUBSYS_MAX) {
+		snprintf(buf, bufsz, "KTriage Error: Subsystem code %u is invalid\n", subsystem);
+		return;
 	}
+
+	int subsystem_num_strings = ktriage_subsystems_strings[subsystem].num_strings;
+	const char **subsystem_strings = ktriage_subsystems_strings[subsystem].strings;
+	uint16_t strindx = KDBG_TRIAGE_EXTRACT_CODE(debugid);
+
+	/* fallback if ktriage doesn't know how to parse the given debugid */
+	if (subsystem_num_strings < 1 || subsystem_strings == NULL || strindx >= subsystem_num_strings) {
+		snprintf(buf, bufsz, "KTriage: Subsystem %d reported %u with argument 0x%lx\n", subsystem, strindx, arg);
+		return;
+	}
+
+	snprintf(buf, bufsz, "%s(arg = 0x%lx) %s", subsystem_strings[0], arg, subsystem_strings[strindx]);
 
 	return;
 }
@@ -242,7 +232,7 @@ ktriage_extract(
 
 	while (i < record_cnt) {
 		if (kd->arg5 == (uintptr_t)thread_id) {
-			ktriage_convert_to_string(kd->arg4, local_buf, KDBG_TRIAGE_MAX_STRLEN);
+			ktriage_convert_to_string(kd->arg4, kd->arg1, local_buf, KDBG_TRIAGE_MAX_STRLEN);
 			local_buf = (void *)((uintptr_t)local_buf + KDBG_TRIAGE_MAX_STRLEN);
 			bufsz -= KDBG_TRIAGE_MAX_STRLEN;
 			if (bufsz < KDBG_TRIAGE_MAX_STRLEN) {
@@ -254,6 +244,47 @@ ktriage_extract(
 	}
 
 	kfree_data(record_buf, record_bufsz);
+}
+
+int
+ktriage_register_subsystem_strings(uint8_t subsystem, ktriage_strings_t *subsystem_strings)
+{
+	if (subsystem == 0 || subsystem > KDBG_TRIAGE_SUBSYS_MAX || subsystem_strings == NULL) {
+		return EINVAL;
+	}
+
+	ktriage_lock();
+
+	ktriage_subsystems_strings[subsystem].num_strings = subsystem_strings->num_strings;
+	ktriage_subsystems_strings[subsystem].strings = subsystem_strings->strings;
+	printf("ktriage_register_subsystem_strings: set subsystem %u strings\n", subsystem);
+
+	ktriage_unlock();
+
+	return 0;
+}
+
+int
+ktriage_unregister_subsystem_strings(uint8_t subsystem)
+{
+	if (subsystem == 0 || subsystem > KDBG_TRIAGE_SUBSYS_MAX) {
+		return EINVAL;
+	}
+
+	ktriage_lock();
+
+	if (ktriage_subsystems_strings[subsystem].num_strings == -1) {
+		// already unregistered - nothing to do
+		ktriage_unlock();
+		return 0;
+	}
+
+	ktriage_subsystems_strings[subsystem].num_strings = -1;
+	ktriage_subsystems_strings[subsystem].strings = NULL;
+
+	ktriage_unlock();
+
+	return 0;
 }
 
 /* KDBG_TRIAGE_CODE_* section */
@@ -348,35 +379,17 @@ const char *fourk_pager_triage_strings[] =
 };
 /* Fourk Pager end */
 
-/* APFS begin */
-
-const char *apfs_triage_strings[] =
-{
-	[KDBG_TRIAGE_APFS_PREFIX] = "APFS - ",
-	[KDBG_TRIAGE_APFS_PAGEIN_NOT_ALLOWED] = "The inode's protection class does not allow page in\n",
-	[KDBG_TRIAGE_APFS_INODE_DEAD] = "The inode has been deleted\n",
-	[KDBG_TRIAGE_APFS_INODE_RAW_ENCRYPTED] = "The inode is raw encrypted, file page in is prohibited\n",
-	[KDBG_TRIAGE_APFS_INODE_OF_RAW_DEVICE] = "The inode backing a raw device, file IO is prohibited\n",
-	[KDBG_TRIAGE_APFS_DISALLOW_READS] = "The APFS_DISALLOW_READS flag is turned on (dataless snapshot mount)\n",
-	[KDBG_TRIAGE_APFS_XATTR_GET_FAILED] = "Could not get namedstream xattr\n",
-	[KDBG_TRIAGE_APFS_NO_NAMEDSTREAM_PARENT_INODE] = "Could not get namedstream parent inode\n",
-	[KDBG_TRIAGE_APFS_INVALID_OFFSET] = "Invalid offset\n",
-	[KDBG_TRIAGE_APFS_COLLECT_HASH_RECORDS] = "Failed collecting all hash records\n",
-	[KDBG_TRIAGE_APFS_INVALID_FILE_INFO] = "Encountered an invalid file info\n",
-	[KDBG_TRIAGE_APFS_NO_HASH_RECORD] = "Verification context for inode is empty\n",
-	[KDBG_TRIAGE_APFS_DATA_HASH_MISMATCH] = "Encountered a data hash mismatch\n",
-	[KDBG_TRIAGE_APFS_COMPRESSED_DATA_HASH_MISMATCH] = "Encountered a compressed data hash mismatch\n",
-};
-/* APFS end */
-
 /* subsystems starts at index 1 */
-ktriage_strings_t subsystems_triage_strings[KDBG_TRIAGE_SUBSYS_MAX + 1] = {
+ktriage_strings_t ktriage_subsystems_strings[KDBG_TRIAGE_SUBSYS_MAX + 1] = {
 	[KDBG_TRIAGE_SUBSYS_VM]            = {VM_MAX_TRIAGE_STRINGS, vm_triage_strings},
 	[KDBG_TRIAGE_SUBSYS_CLUSTER]       = {CLUSTER_MAX_TRIAGE_STRINGS, cluster_triage_strings},
 	[KDBG_TRIAGE_SUBSYS_SHARED_REGION] = {SHARED_REGION_MAX_TRIAGE_STRINGS, shared_region_triage_strings},
 	[KDBG_TRIAGE_SUBSYS_DYLD_PAGER]    = {DYLD_PAGER_MAX_TRIAGE_STRINGS, dyld_pager_triage_strings},
 	[KDBG_TRIAGE_SUBSYS_APPLE_PROTECT_PAGER]    = {APPLE_PROTECT_PAGER_MAX_TRIAGE_STRINGS, apple_protect_pager_triage_strings},
 	[KDBG_TRIAGE_SUBSYS_FOURK_PAGER]    = {FOURK_PAGER_MAX_TRIAGE_STRINGS, fourk_pager_triage_strings},
-	[KDBG_TRIAGE_SUBSYS_APFS]          = {APFS_MAX_TRIAGE_STRINGS, apfs_triage_strings},
+
+	[KDBG_TRIAGE_SUBSYS_APFS]          = {-1, NULL},
+	[KDBG_TRIAGE_SUBSYS_DECMPFS]       = {-1, NULL},
 };
+
 /* KDBG_TRIAGE_CODE_* section */

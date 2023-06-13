@@ -31,9 +31,12 @@ _ml_arm_sleep
 _ml_get_abstime_offset
 _ml_get_conttime_offset
 _ml_get_wake_timebase
+_ml_report_minor_badness
 _ml_set_reset_time
 _ml_thread_is64bit
 _proc_getcdhash
+_sched_perfcontrol_abandon_preemption_disable_measurement
+_sched_perfcontrol_ml_set_interrupts_without_measurement
 _sched_perfcontrol_inherit_recommendation_from_tg
 _sched_perfcontrol_register_callbacks
 _sched_perfcontrol_update_recommended_cores
@@ -63,6 +66,7 @@ _ml_get_cluster_number
 _ml_get_max_cpu_number
 _ml_get_topology_info
 _ml_lockdown_handler_register
+_ml_page_protection_type
 _ml_static_ptovirt
 _ml_static_mfree
 _ml_update_cluster_wfe_recommendation
@@ -88,6 +92,7 @@ _t8110dart_get_desc
 _t8110dart_max_translation_levels
 _t8110dart_vo_tte
 _t8110dart_vo_tt_index
+_ml_mcache_flush_callback_register
 _uat_get_desc
 _set_invalidate_hmac_function
 _PE_panic_debugging_enabled

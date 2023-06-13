@@ -83,6 +83,9 @@ enum {
      * Type: Personalized (against supplemental root)
      * These are special trust caches which validate against a supplemental root beyond
      * Tatsu. These are only meant for special deployments within some data centers.
+     *
+     * NOTE: This type is deprecated in favor of the newer Supplemental Persistent
+     * and Supplemental Ephemeral types.
      */
     kTCTypeEphemeralCryptex = 0x09,
 
@@ -114,6 +117,9 @@ enum {
      * Type: Personalized (against Cryptex 1 Boot/Preboot environments)
      * These trust cache types are used by SPLAT at different stages of the boot pipeline
      * for loading code responsible for system boot up, such as the shared cache.
+     *
+     * The personalization uses a Cryptex1 nonce domain, which is embedded within the
+     * manifest itself.
      */
     kTCTypeCryptex1BootOS = 0x0D,
     kTCTypeCryptex1BootApp = 0x0E,
@@ -135,6 +141,9 @@ enum {
      * The mobile asset brain contains the core logic for mobileassetd, which is a system
      * daemon responsible for downloading and maintaining assets on the device. The brain
      * is meant to be back-deployable, which is what the trust cache helps with.
+     *
+     * The personalization uses a Cryptex1 nonce domain, which is embedded within the
+     * manifest itself.
      */
     kTCTypeMobileAssetBrain = 0x11,
 
@@ -143,6 +152,9 @@ enum {
      * Safari is backported to older builds. Since Safari is now moving to a SPLAT based
      * mount volume, we need to support loading a trust cache which is used to mount and
      * run Safari from the future.
+     *
+     * The personalization uses a Cryptex1 nonce domain, which is embedded within the
+     * manifest itself.
      */
     kTCTypeSafariDownlevel = 0x12,
 
@@ -151,8 +163,47 @@ enum {
      * This trust cache type is used for the semi-SPLAT use-case for loading the new dyld
      * shared cache onto the platform, along with some other system libraries. This is
      * only required for macOS.
+     *
+     * The personalization uses a Cryptex1 nonce domain, which is embedded within the
+     * manifest itself.
      */
     kTCTypeCryptex1PreBootOS = 0x13,
+
+    /*
+     * Type: Personalized (Supplemental Root)
+     * Persistent trust caches which are signed by an authority different from Tatsu.
+     * These are only required for deployment on darwinOS platforms.
+     */
+    kTCTypeSupplementalPersistent = 0x14,
+
+    /*
+     * Type: Personalized (Supplemental Root)
+     * Ephemeral trust caches which are signed by an authority different from Tatsu.
+     * These are only required for deployment on darwinOS platforms.
+     */
+    kTCTypeSupplementalEphemeral = 0x15,
+
+    /*
+     * Type: Personalized (Cryptex1 Generic)
+     * This type can be used by the assortment of PDIs we ship. Each PDI train can opt
+     * into allocating a Cryptex1 sub-type for itself, and then ship on the OS being
+     * signed by the Cryptex1 generic environment. This allows the PDI to adopt Cryptex1
+     * personalization without requiring a new bespoke trust cache type.
+     *
+     * The personalization uses a Cryptex1 nonce domain, which is embedded within the
+     * manifest itself.
+     */
+    kTCTypeCryptex1Generic = 0x16,
+
+    /*
+     * Type: Personalized (Cryptex1 Generic Supplemental)
+     * Similar to the kTCTypeCryptex1Generic type except the manifest is signed by the
+     * supplemental root of trust. Only viable for some data center use-cases.
+     *
+     * The personalization uses a Cryptex1 nonce domain, which is embedded within the
+     * manifest itself.
+     */
+    kTCTypeCryptex1GenericSupplemental = 0x17,
 
     kTCTypeTotal,
 
@@ -167,6 +218,10 @@ enum {
 #define kLibTrustCacheHasMobileAssetBrain 1
 #define kLibTrustCacheHasSafariDownlevel 1
 #define kLibTrustCacheHasCryptex1PreBootOS 1
+#define kLibTrustCacheHasSupplementalPersistent 1
+#define kLibTrustCacheHasSupplementalEphemeral 1
+#define kLibTrustCacheHasCryptex1Generic 1
+#define kLibTrustCacheHasCryptex1GenericSupplemental 1
 
 typedef struct _TrustCache {
     /* Linked list linkage for the trust cache */
@@ -179,8 +234,8 @@ typedef struct _TrustCache {
     /* TODO: Add reference counts when we support unloading */
 
     /* The trust cache module itself */
-    uint64_t moduleSize;
-    TrustCacheModuleBase_t *module;
+    size_t moduleSize;
+    const TrustCacheModuleBase_t *module;
 } TrustCache_t;
 
 typedef uint8_t TCQueryType_t;

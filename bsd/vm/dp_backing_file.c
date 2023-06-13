@@ -121,7 +121,7 @@ extern boolean_t compressor_store_stop_compaction;
  *  This routine assumes macx_lock has been locked by macx_triggers ->
  *      mach_macx_triggers -> macx_backing_store_compaction
  */
-
+extern int vm_swap_enabled;
 int
 macx_backing_store_compaction(int flags)
 {
@@ -145,12 +145,12 @@ macx_backing_store_compaction(int flags)
 		 */
 #else /* (XNU_TARGET_OS_OSX && __arm64__) */
 		compressor_store_stop_compaction = TRUE;
-
+		vm_swap_enabled = 0;
 		kprintf("compressor_store_stop_compaction = TRUE\n");
 #endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 	} else if (flags & SWAP_COMPACT_ENABLE) {
 		compressor_store_stop_compaction = FALSE;
-
+		vm_swap_enabled = 1;
 		kprintf("compressor_store_stop_compaction = FALSE\n");
 	}
 

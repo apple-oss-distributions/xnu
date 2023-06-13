@@ -45,12 +45,12 @@
 #include <sys/ubc.h>
 #include <sys/mman.h>
 #include <sys/codesign.h>
+#include <sys/code_signing.h>
 
 #include <sys/cdefs.h>
 
 #include <kern/locks.h>
 #include <mach/memory_object_types.h>
-#include <vm/pmap_cs.h>
 
 #include <libkern/ptrauth_utils.h>
 
@@ -133,7 +133,14 @@ struct cs_blob {
 #endif
 	const CS_GenericBlob *csb_entitlements_blob;    /* raw blob, subrange of csb_mem_kaddr */
 	const CS_GenericBlob *csb_der_entitlements_blob;    /* raw blob, subrange of csb_mem_kaddr */
-	void *          csb_entitlements;       /* The entitlements as an OSEntitlements object */
+
+	/*
+	 * OSEntitlements pointer setup by AMFI. This is PAC signed in addition to the
+	 * cs_blob being within RO-memory to prevent modifications on the temporary stack
+	 * variable used to setup the blob.
+	 */
+	void *XNU_PTRAUTH_SIGNED_PTR("cs_blob.csb_entitlements") csb_entitlements;
+
 	unsigned int    csb_reconstituted;      /* signature has potentially been modified after validation */
 	__xnu_struct_group(cs_blob_platform_flags, csb_platform_flags, {
 		/* The following two will be replaced by the csb_signer_type. */
@@ -144,8 +151,9 @@ struct cs_blob {
 	/* Validation category used for TLE */
 	unsigned int    csb_validation_category;
 
-#if PMAP_CS_INCLUDE_CODE_SIGNING
-	pmap_cs_code_directory_t *csb_pmap_cs_entry;
+#if CODE_SIGNING_MONITOR
+	void *XNU_PTRAUTH_SIGNED_PTR("cs_blob.csb_csm_obj") csb_csm_obj;
+	bool csb_csm_managed;
 #endif
 };
 
@@ -167,7 +175,7 @@ struct ubc_info {
 
 	struct timespec         cs_mtime;       /* modify time of file when
 	                                         *   first cs_blob was loaded */
-	struct  cs_blob         * cs_blobs; /* for CODE SIGNING */
+	struct  cs_blob         * XNU_PTRAUTH_SIGNED_PTR("ubc_info.cs_blob") cs_blobs; /* for CODE SIGNING */
 #if CONFIG_SUPPLEMENTAL_SIGNATURES
 	struct  cs_blob         * cs_blob_supplement;/* supplemental blob (note that there can only be one supplement) */
 #endif

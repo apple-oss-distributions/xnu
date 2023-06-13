@@ -397,15 +397,27 @@ F. Development and Debugging on lldb kernel debugging platform.
 
 i. Reading a exception backtrace
 --------------------------------
-In case of an error the lldbmacros may print out an exception backtrace and halt immediately. The backtrace is very verbose and may be confusing. The important thing is to isolate possible causes of failure, and eventually filing a bug with kernel team. Following are some common ways where you may see an exception instead of your expected result.
+In case of an error the lldbmacros may print out an exception backtrace and halt immediately. The important thing is to
+isolate possible causes of failure, and eventually filing a bug with kernel team. Following are some common ways where
+you may see an exception instead of your expected result.
 
-  * The lldbmacros cannot divine the type of memory by inspection. If a wrong pointer is passed from commandline then, the command code will try to read and show some results. It may still be junk or plain erronous. Please make sure your command arguments are correct.
-    For example: a common mistake is to pass task address to showactstack. In such a case lldb command may fail and show you a confusing backtrace.
+  * The lldbmacros cannot divine the type of memory by inspection. If a wrong pointer is passed from commandline then,
+    the command code will try to read and show some results. It may still be junk or plain erronous. Please make sure
+	your command arguments are correct. For example: a common mistake is to pass task address to showactstack. In such
+	a case lldb command may fail and show you a confusing backtrace.
 
- * Kernel debugging is particularly tricky. Many parts of memory may not be readable. There could be failure in network, debugging protocol or just plain bad memory. In such a case please try to see if you can examine memory for the object you are trying to access.
+  * Kernel debugging is particularly tricky. Many parts of memory may not be readable. There could be failure in network,
+    debugging protocol or just plain bad memory. In such a case please try to see if you can examine memory for the object
+	you are trying to access.
 
- * In case of memory corruption, the lldbmacros may have followed wrong pointer dereferencing. This might lead to failure and a exception to be thrown.
+  * In case of memory corruption, the lldbmacros may have followed wrong pointer dereferencing. This might lead to failure
+    and a exception to be thrown.
 
+There are few more options that you can use when a macro is raising exceptions:
+
+  * Add --debug to your macro invocation to provide more detailed/verbose exception output.
+  * Add --radar to generate tar.gz archive when filling a new radar for kernel team.
+  * Add --pdb to attach pdb to exception stack for debugging.
 
 ii. Loading custom or local lldbmacros and operating_system plugin
 ------------------------------------------------------------------

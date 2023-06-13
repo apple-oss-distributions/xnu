@@ -43,6 +43,7 @@
 #include <mach/boolean.h>
 #include <stdbool.h>
 #include <os/base.h>
+#include <os/log.h>
 #include <kern/sched_prim.h>
 
 #if CONFIG_FREEZE
@@ -144,7 +145,6 @@ typedef struct memorystatus_system_health {
 	bool msh_compressor_is_thrashing;
 	bool msh_compressed_pages_nearing_limit;
 	bool msh_filecache_is_thrashing;
-	bool msh_swapout_is_ripe;
 	bool msh_phantom_cache_pressure;
 	bool msh_swappable_compressor_segments_over_limit;
 	bool msh_swapin_queue_over_limit;
@@ -221,6 +221,41 @@ memorystatus_action_t memorystatus_pick_action(struct jetsam_thread_state *jetsa
     uint32_t *kill_cause, bool highwater_remaining,
     bool suspended_swappable_apps_remaining,
     bool swappable_apps_remaining, int *jld_idle_kills);
+
+#pragma mark Logging Utilities
+
+__enum_decl(memorystatus_log_level_t, unsigned int, {
+	MEMORYSTATUS_LOG_LEVEL_DEFAULT = 0,
+	MEMORYSTATUS_LOG_LEVEL_INFO = 1,
+	MEMORYSTATUS_LOG_LEVEL_DEBUG = 2,
+});
+
+extern os_log_t memorystatus_log_handle;
+extern memorystatus_log_level_t memorystatus_log_level;
+
+/*
+ * NB: Critical memorystatus logs (e.g. jetsam kills) are load-bearing for OS
+ * performance testing infrastructure. Be careful when modifying the log-level for
+ * important system events.
+ *
+ * Memorystatus logs are interpreted by a wide audience. To avoid logging information
+ * that could lead to false diagnoses, INFO and DEBUG messages are only logged if the
+ * system has been configured to do so via `kern.memorystatus_log_level` (sysctl) or
+ * `memorystatus_log_level` (boot-arg).
+ *
+ * os_log supports a mechanism for configuring these properties dynamically; however,
+ * this mechanism is currently unsupported in XNU.
+ *
+ * TODO (JC) Deprecate sysctl/boot-arg and move to subsystem preferences pending:
+ *  - rdar://27006343 (Custom kernel log handles)
+ *  - rdar://80958044 (Kernel Logging Configuration)
+ */
+#define _memorystatus_log_with_type(type, format, ...) os_log_with_type(memorystatus_log_handle, type, format, ##__VA_ARGS__)
+#define memorystatus_log(format, ...) _memorystatus_log_with_type(OS_LOG_TYPE_DEFAULT, format, ##__VA_ARGS__)
+#define memorystatus_log_info(format, ...) if (memorystatus_log_level >= MEMORYSTATUS_LOG_LEVEL_INFO) { _memorystatus_log_with_type(OS_LOG_TYPE_INFO, format, ##__VA_ARGS__); }
+#define memorystatus_log_debug(format, ...) if (memorystatus_log_level >= MEMORYSTATUS_LOG_LEVEL_DEBUG) { _memorystatus_log_with_type(OS_LOG_TYPE_DEBUG, format, ##__VA_ARGS__); }
+#define memorystatus_log_error(format, ...) _memorystatus_log_with_type(OS_LOG_TYPE_ERROR, format, ##__VA_ARGS__)
+#define memorystatus_log_fault(format, ...) _memorystatus_log_with_type(OS_LOG_TYPE_FAULT, format, ##__VA_ARGS__)
 
 #pragma mark Freezer
 #if CONFIG_FREEZE

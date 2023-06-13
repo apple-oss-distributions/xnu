@@ -48,7 +48,7 @@
 #include <sys/filedesc.h>
 #include <sys/kernel.h>
 #include <sys/vnode_internal.h>
-#include <sys/malloc.h>
+#include <sys/kauth.h>
 #include <sys/mount_internal.h>
 #include <sys/param.h>
 #include <sys/proc_internal.h>
@@ -174,7 +174,7 @@ struct aio_workq_entry {
 	struct proc                    *procp;          /* user proc that queued this request */
 	user_addr_t                     uaiocbp;        /* pointer passed in from user land */
 	struct user_aiocb               aiocb;          /* copy of aiocb from user land */
-	thread_t                        thread;         /* thread that queued this request */
+	struct vfs_context              context;        /* context which enqueued the request */
 
 	/* Initialized, and possibly freed by aio_work_thread() or at free if cancelled */
 	vm_map_t                        aio_map;        /* user land map we have a reference to */
@@ -294,8 +294,7 @@ static LCK_GRP_DECLARE(aio_proc_lock_grp, "aio_proc");
 static LCK_GRP_DECLARE(aio_queue_lock_grp, "aio_queue");
 static LCK_MTX_DECLARE(aio_proc_mtx, &aio_proc_lock_grp);
 
-static ZONE_DEFINE_TYPE(aio_workq_zonep, "aiowq", aio_workq_entry,
-    ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(aio_workq_zonep, aio_workq_entry, KT_DEFAULT);
 
 /* Hash */
 static aio_workq_t
@@ -1712,8 +1711,9 @@ aio_create_queue_entry(proc_t procp, user_addr_t aiocbp, aio_entry_flags_t flags
 	vm_map_reference(entryp->aio_map);
 
 	/* get a reference on the current_thread, which is passed in vfs_context. */
-	entryp->thread = current_thread();
-	thread_reference(entryp->thread);
+	entryp->context = *vfs_context_current();
+	thread_reference(entryp->context.vc_thread);
+	kauth_cred_ref(entryp->context.vc_ucred);
 	return entryp;
 
 error_exit:
@@ -1779,9 +1779,10 @@ aio_free_request(aio_workq_entry *entryp)
 	}
 
 	/* remove our reference to thread which enqueued the request */
-	if (NULL != entryp->thread) {
-		thread_deallocate(entryp->thread);
+	if (entryp->context.vc_thread) {
+		thread_deallocate(entryp->context.vc_thread);
 	}
+	kauth_cred_unref(&entryp->context.vc_ucred);
 
 	zfree(aio_workq_zonep, entryp);
 }
@@ -1970,12 +1971,7 @@ do_aio_read(aio_workq_entry *entryp)
 	}
 
 	if (fp->fp_glob->fg_flag & FREAD) {
-		struct vfs_context context = {
-			.vc_thread = entryp->thread,     /* XXX */
-			.vc_ucred = fp->fp_glob->fg_cred,
-		};
-
-		error = dofileread(&context, fp,
+		error = dofileread(&entryp->context, fp,
 		    entryp->aiocb.aio_buf,
 		    entryp->aiocb.aio_nbytes,
 		    entryp->aiocb.aio_offset, FOF_OFFSET,
@@ -2004,18 +2000,14 @@ do_aio_write(aio_workq_entry *entryp)
 	}
 
 	if (fp->fp_glob->fg_flag & FWRITE) {
-		struct vfs_context context = {
-			.vc_thread = entryp->thread,     /* XXX */
-			.vc_ucred = fp->fp_glob->fg_cred,
-		};
-		int flags = FOF_PCRED;
+		int flags = 0;
 
 		if ((fp->fp_glob->fg_flag & O_APPEND) == 0) {
 			flags |= FOF_OFFSET;
 		}
 
 		/* NB: tell dofilewrite the offset, and to use the proc cred */
-		error = dofilewrite(&context,
+		error = dofilewrite(&entryp->context,
 		    fp,
 		    entryp->aiocb.aio_buf,
 		    entryp->aiocb.aio_nbytes,
@@ -2099,12 +2091,7 @@ do_aio_fsync(aio_workq_entry *entryp)
 	vp = fp_get_data(fp);
 
 	if ((error = vnode_getwithref(vp)) == 0) {
-		struct vfs_context context = {
-			.vc_thread = entryp->thread,     /* XXX */
-			.vc_ucred = fp->fp_glob->fg_cred,
-		};
-
-		error = VNOP_FSYNC(vp, sync_flag, &context);
+		error = VNOP_FSYNC(vp, sync_flag, &entryp->context);
 
 		(void)vnode_put(vp);
 	} else {

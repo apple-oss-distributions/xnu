@@ -76,16 +76,65 @@
 #include <kern/timer.h>
 #include <kern/affinity.h>
 #include <kern/host.h>
+#include <kern/exc_guard.h>
+#include <ipc/port.h>
+#include <mach/arm/thread_status.h>
+
 
 #include <stdatomic.h>
 
 #include <security/mac_mach_internal.h>
+#include <libkern/coreanalytics/coreanalytics.h>
 
 static void act_abort(thread_t thread);
 
 static void thread_suspended(void *arg, wait_result_t result);
 static void thread_set_apc_ast(thread_t thread);
 static void thread_set_apc_ast_locked(thread_t thread);
+
+extern void proc_name(int pid, char * buf, int size);
+extern boolean_t IOCurrentTaskHasEntitlement(const char *);
+
+CA_EVENT(thread_set_state,
+    CA_STATIC_STRING(CA_PROCNAME_LEN), current_proc);
+
+static void
+send_thread_set_state_telemetry(void)
+{
+	ca_event_t ca_event = CA_EVENT_ALLOCATE(thread_set_state);
+	CA_EVENT_TYPE(thread_set_state) * event = ca_event->data;
+
+	proc_name(task_pid(current_task()), (char *) &event->current_proc, CA_PROCNAME_LEN);
+
+	CA_EVENT_SEND(ca_event);
+}
+
+/* bootarg to create lightweight corpse for thread set state lockdown */
+TUNABLE(bool, tss_should_crash, "tss_should_crash", true);
+
+static inline boolean_t
+thread_set_state_allowed(thread_t thread, int flavor)
+{
+	/* platform binaries must have entitlement - all others ok */
+	if ((task_ro_flags_get(current_task()) & TFRO_PLATFORM)
+	    && !(thread->options & TH_IN_MACH_EXCEPTION)        /* Allowed for now - rdar://103085786 */
+	    && FLAVOR_MODIFIES_CORE_CPU_REGISTERS(flavor)       /* only care about locking down PC/LR */
+#if CONFIG_ROSETTA
+	    && !task_is_translated(get_threadtask(thread))      /* Ignore translated tasks */
+#endif /* CONFIG_ROSETTA */
+	    && !IOCurrentTaskHasEntitlement("com.apple.private.thread-set-state")
+	    && !IOCurrentTaskHasEntitlement("com.apple.private.cs.debugger")    /* Temporary hack - rdar://104898327 */
+	    && !IOCurrentTaskHasEntitlement("com.apple.security.cs.debugger")   /* Temporary hack - rdar://104898327 */
+	    && tss_should_crash
+	    ) {
+		/* fatal crash */
+		mach_port_guard_exception(MACH_PORT_NULL, 0, 0, kGUARD_EXC_THREAD_SET_STATE);
+		send_thread_set_state_telemetry();
+		return FALSE;
+	}
+
+	return TRUE;
+}
 
 /*
  * Internal routine to mark a thread as started.
@@ -636,6 +685,11 @@ thread_set_state_internal(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	if ((flags & TSSF_CHECK_ENTITLEMENT) &&
+	    !thread_set_state_allowed(thread, flavor)) {
+		return KERN_NO_ACCESS;
+	}
+
 	thread_mtx_lock(thread);
 
 	if (thread->active) {
@@ -705,7 +759,8 @@ thread_set_state_from_user(
 	thread_state_t                  state,
 	mach_msg_type_number_t  state_count)
 {
-	return thread_set_state_internal(thread, flavor, state, state_count, NULL, 0, TSSF_TRANSLATE_TO_USER);
+	return thread_set_state_internal(thread, flavor, state, state_count, NULL,
+	           0, TSSF_TRANSLATE_TO_USER | TSSF_CHECK_ENTITLEMENT);
 }
 
 kern_return_t

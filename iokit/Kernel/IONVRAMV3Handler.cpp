@@ -201,8 +201,7 @@ private:
 
 	uint8_t                      *_nvramImage;
 
-	OSSharedPtr<OSDictionary>    &_commonDict;
-	OSSharedPtr<OSDictionary>    &_systemDict;
+	OSSharedPtr<OSDictionary>    &_varDict;
 
 	uint32_t                     _commonSize;
 	uint32_t                     _systemSize;
@@ -223,23 +222,25 @@ private:
 	    OSSharedPtr<const OSSymbol>& propSymbol, OSSharedPtr<OSObject>& propObject);
 
 	IOReturn reloadInternal(void);
+	IOReturn setVariableInternal(const uuid_t varGuid, const char *variableName, OSObject *object);
 
 	void setEntryForRemove(struct nvram_v3_var_entry *v3Entry, bool system);
-	void findExistingEntry(const uuid_t *varGuid, const char *varName, struct nvram_v3_var_entry **existing, unsigned int *existingIndex);
+	void findExistingEntry(const uuid_t varGuid, const char *varName, struct nvram_v3_var_entry **existing, unsigned int *existingIndex);
 	IOReturn syncRaw(void);
 	IOReturn syncBlock(void);
 
 public:
 	virtual
 	~IONVRAMV3Handler() APPLE_KEXT_OVERRIDE;
-	IONVRAMV3Handler(OSSharedPtr<OSDictionary> &commonDict, OSSharedPtr<OSDictionary> &systemDict);
+	IONVRAMV3Handler(OSSharedPtr<OSDictionary> &varDict);
 
 	static bool isValidImage(const uint8_t *image, IOByteCount length);
 
 	static  IONVRAMV3Handler *init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length,
-	    OSSharedPtr<OSDictionary> &commonDict, OSSharedPtr<OSDictionary> &systemDict);
+	    OSSharedPtr<OSDictionary> &varDict);
 
 	virtual bool     getNVRAMProperties(void) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn unserializeVariables(void) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn setVariable(const uuid_t varGuid, const char *variableName, OSObject *object) APPLE_KEXT_OVERRIDE;
 	virtual bool     setController(IONVRAMController *controller) APPLE_KEXT_OVERRIDE;
 	virtual bool     sync(void) APPLE_KEXT_OVERRIDE;
@@ -249,15 +250,15 @@ public:
 	virtual uint32_t getVersion(void) const APPLE_KEXT_OVERRIDE;
 	virtual uint32_t getSystemUsed(void) const APPLE_KEXT_OVERRIDE;
 	virtual uint32_t getCommonUsed(void) const APPLE_KEXT_OVERRIDE;
+	virtual bool     getSystemPartitionActive(void) const APPLE_KEXT_OVERRIDE;
 };
 
 IONVRAMV3Handler::~IONVRAMV3Handler()
 {
 }
 
-IONVRAMV3Handler::IONVRAMV3Handler(OSSharedPtr<OSDictionary> &commonDict, OSSharedPtr<OSDictionary> &systemDict) :
-	_commonDict(commonDict),
-	_systemDict(systemDict)
+IONVRAMV3Handler::IONVRAMV3Handler(OSSharedPtr<OSDictionary> &varDict) :
+	_varDict(varDict)
 {
 }
 
@@ -275,13 +276,13 @@ IONVRAMV3Handler::isValidImage(const uint8_t *image, IOByteCount length)
 
 IONVRAMV3Handler*
 IONVRAMV3Handler::init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length,
-    OSSharedPtr<OSDictionary> &commonDict, OSSharedPtr<OSDictionary> &systemDict)
+    OSSharedPtr<OSDictionary> &varDict)
 {
 	OSSharedPtr<IORegistryEntry> entry;
 	OSSharedPtr<OSObject>        prop;
 	bool                         propertiesOk;
 
-	IONVRAMV3Handler *handler = new IONVRAMV3Handler(commonDict, systemDict);
+	IONVRAMV3Handler *handler = new IONVRAMV3Handler(varDict);
 
 	handler->_provider = provider;
 
@@ -337,84 +338,46 @@ IOReturn
 IONVRAMV3Handler::flush(const uuid_t guid, IONVRAMOperation op)
 {
 	IOReturn ret = kIOReturnSuccess;
+	bool     flushSystem;
+	bool     flushCommon;
 
-	if ((_systemDict != nullptr) && (uuid_compare(guid, gAppleSystemVariableGuid) == 0)) {
-		// System dictionary contains keys that are only using the system GUID
-		const OSSymbol                    *key;
-		OSSharedPtr<OSDictionary>         systemCopy;
+	flushSystem = getSystemPartitionActive() && (uuid_compare(guid, gAppleSystemVariableGuid) == 0);
+	flushCommon = uuid_compare(guid, gAppleNVRAMGuid) == 0;
+
+	DEBUG_INFO("flushSystem=%d, flushCommon=%d\n", flushSystem, flushCommon);
+
+	if (flushSystem || flushCommon) {
+		const OSSymbol                    *canonicalKey;
+		OSSharedPtr<OSDictionary>         dictCopy;
 		OSSharedPtr<OSCollectionIterator> iter;
 		uuid_string_t                     uuidString;
 
-		systemCopy = OSDictionary::withDictionary(_systemDict.get());
-		iter = OSCollectionIterator::withCollection(systemCopy.get());
-		if ((systemCopy == nullptr) || (iter == nullptr)) {
-			ret = kIOReturnNoMemory;
-			goto exit;
-		}
+		dictCopy = OSDictionary::withDictionary(_varDict.get());
+		iter = OSCollectionIterator::withCollection(dictCopy.get());
+		require_action(dictCopy && iter, exit, ret = kIOReturnNoMemory);
 
-		DEBUG_INFO("Flushing system region...\n");
+		while ((canonicalKey = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
+			const char *varName;
+			uuid_t     varGuid;
+			bool       clear;
 
-		uuid_unparse(gAppleSystemVariableGuid, uuidString);
-		while ((key = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
-			if (verifyPermission(op, gAppleSystemVariableGuid, key)) {
-				DEBUG_INFO("Clearing entry for %s:%s\n", uuidString, key->getCStringNoCopy());
-				// Using setVariable() instead of setEntryForRemove() to handle any GUID logic
-				// for system region
-				setVariable(guid, key->getCStringNoCopy(), nullptr);
+			parseVariableName(canonicalKey->getCStringNoCopy(), &varGuid, &varName);
+
+			uuid_unparse(varGuid, uuidString);
+
+			clear = ((flushSystem && (uuid_compare(varGuid, gAppleSystemVariableGuid) == 0)) ||
+			    (flushCommon && (uuid_compare(varGuid, gAppleSystemVariableGuid) != 0))) &&
+			    verifyPermission(op, varGuid, varName, getSystemPartitionActive());
+
+			if (clear) {
+				DEBUG_INFO("Clearing entry for %s:%s\n", uuidString, varName);
+				setVariableInternal(varGuid, varName, nullptr);
 			} else {
-				DEBUG_INFO("Keeping entry for %s:%s\n", uuidString, key->getCStringNoCopy());
+				DEBUG_INFO("Keeping entry for %s:%s\n", uuidString, varName);
 			}
 		}
 
-		DEBUG_INFO("system dictionary flushed\n");
-	} else if ((_commonDict != nullptr) && (uuid_compare(guid, gAppleNVRAMGuid) == 0)) {
-		// Common dictionary contains everything that is not system this goes through our entire
-		// store and clears anything that is permitted
-		struct nvram_v3_var_entry *v3Entry = nullptr;
-		OSData                    *entryContainer = nullptr;
-		OSSharedPtr<OSDictionary> newCommonDict;
-		uuid_string_t             uuidString;
-
-		DEBUG_INFO("Flushing common region...\n");
-
-		newCommonDict = OSDictionary::withCapacity(_commonDict->getCapacity());
-
-		if (newCommonDict == nullptr) {
-			ret = kIOReturnNoMemory;
-			goto exit;
-		}
-
-		for (unsigned int index = 0; index < _varEntries->getCount(); index++) {
-			entryContainer = (OSDynamicCast(OSData, _varEntries->getObject(index)));
-			v3Entry = (struct nvram_v3_var_entry *)entryContainer->getBytesNoCopy();
-			const char *entryName = (const char *)v3Entry->header.name_data_buf;
-
-			// Skip system variables if there is a system region
-			if ((_systemSize != 0) && uuid_compare(v3Entry->header.guid, gAppleSystemVariableGuid) == 0) {
-				continue;
-			}
-
-			uuid_unparse(v3Entry->header.guid, uuidString);
-			if (verifyPermission(op, v3Entry->header.guid, entryName)) {
-				DEBUG_INFO("Clearing entry for %s:%s\n", uuidString, entryName);
-				setEntryForRemove(v3Entry, false);
-			} else {
-				DEBUG_INFO("Keeping entry for %s:%s\n", uuidString, entryName);
-				newCommonDict->setObject(entryName, _commonDict->getObject(entryName));
-			}
-		}
-
-		_commonDict = newCommonDict;
-	}
-
-	_newData = true;
-
-	if (_provider->_diags) {
-		OSSharedPtr<OSNumber> val = OSNumber::withNumber(getSystemUsed(), 32);
-		_provider->_diags->setProperty(kNVRAMSystemUsedKey, val.get());
-
-		val = OSNumber::withNumber(getCommonUsed(), 32);
-		_provider->_diags->setProperty(kNVRAMCommonUsedKey, val.get());
+		_newData = true;
 	}
 
 	DEBUG_INFO("_commonUsed %#x, _systemUsed %#x\n", _commonUsed, _systemUsed);
@@ -542,13 +505,15 @@ IONVRAMV3Handler::reload(void)
 void
 IONVRAMV3Handler::setEntryForRemove(struct nvram_v3_var_entry *v3Entry, bool system)
 {
-	const char * variableName;
-	uint32_t variableSize;
+	OSSharedPtr<const OSSymbol> canonicalKey;
+	const char                  *variableName;
+	uint32_t                    variableSize;
 
 	require_action(v3Entry != nullptr, exit, DEBUG_INFO("remove with no entry\n"));
 
 	variableName = (const char *)v3Entry->header.name_data_buf;
 	variableSize = (uint32_t)variable_length(&v3Entry->header);
+	canonicalKey = keyWithGuidAndCString(v3Entry->header.guid, variableName);
 
 	if (v3Entry->new_state == VAR_NEW_STATE_REMOVE) {
 		DEBUG_INFO("entry %s already marked for remove\n", variableName);
@@ -557,17 +522,14 @@ IONVRAMV3Handler::setEntryForRemove(struct nvram_v3_var_entry *v3Entry, bool sys
 
 		v3Entry->new_state = VAR_NEW_STATE_REMOVE;
 
-		if (system) {
-			_provider->_systemDict->removeObject(variableName);
+		_provider->_varDict->removeObject(canonicalKey.get());
 
+		if (system) {
 			if (_systemUsed < variableSize) {
 				panic("Invalid _systemUsed size\n");
 			}
-
 			_systemUsed -= variableSize;
 		} else {
-			_provider->_commonDict->removeObject(variableName);
-
 			if (_commonUsed < variableSize) {
 				panic("Invalid _commonUsed size\n");
 			}
@@ -587,7 +549,7 @@ exit:
 }
 
 void
-IONVRAMV3Handler::findExistingEntry(const uuid_t *varGuid, const char *varName, struct nvram_v3_var_entry **existing, unsigned int *existingIndex)
+IONVRAMV3Handler::findExistingEntry(const uuid_t varGuid, const char *varName, struct nvram_v3_var_entry **existing, unsigned int *existingIndex)
 {
 	struct nvram_v3_var_entry *v3Entry = nullptr;
 	OSData                    *entryContainer = nullptr;
@@ -601,9 +563,9 @@ IONVRAMV3Handler::findExistingEntry(const uuid_t *varGuid, const char *varName, 
 		if ((v3Entry->header.nameSize == nameLen) &&
 		    (memcmp(v3Entry->header.name_data_buf, varName, nameLen) == 0)) {
 			if (varGuid) {
-				if (uuid_compare(*varGuid, v3Entry->header.guid) == 0) {
+				if (uuid_compare(varGuid, v3Entry->header.guid) == 0) {
 					uuid_string_t uuidString;
-					uuid_unparse(*varGuid, uuidString);
+					uuid_unparse(varGuid, uuidString);
 					DEBUG_INFO("found existing entry for %s:%s, e_off=%#lx, len=%#lx, new_state=%#x\n", uuidString, varName,
 					    v3Entry->existing_offset, variable_length(&v3Entry->header), v3Entry->new_state);
 					break;
@@ -631,20 +593,8 @@ IONVRAMV3Handler::findExistingEntry(const uuid_t *varGuid, const char *varName, 
 IOReturn
 IONVRAMV3Handler::unserializeImage(const uint8_t *image, IOByteCount length)
 {
-	OSSharedPtr<const OSSymbol>  propSymbol;
-	OSSharedPtr<OSObject>        propObject;
-	OSSharedPtr<OSData>          entryContainer;
+	IOReturn                     ret = kIOReturnInvalid;
 	const struct v3_store_header *storeHeader;
-	IOReturn                     ret = kIOReturnSuccess;
-	size_t                       existingSize;
-	struct nvram_v3_var_entry    *v3Entry;
-	const struct v3_var_header   *header;
-	size_t                       offset = sizeof(struct v3_store_header);
-	uint32_t                     crc;
-	unsigned int                 i;
-	bool                         system;
-	OSDictionary                 *dict;
-	uuid_string_t                uuidString;
 
 	require(isValidImage(image, length), exit);
 
@@ -670,22 +620,40 @@ IONVRAMV3Handler::unserializeImage(const uint8_t *image, IOByteCount length)
 	_bankSize = (uint32_t)length;
 	bcopy(image, _nvramImage, _bankSize);
 
-	if (_systemSize) {
-		_systemDict = OSDictionary::withCapacity(1);
+	ret = kIOReturnSuccess;
+
+exit:
+	return ret;
+}
+
+IOReturn
+IONVRAMV3Handler::unserializeVariables(void)
+{
+	IOReturn                     ret = kIOReturnSuccess;
+	OSSharedPtr<const OSSymbol>  propSymbol;
+	OSSharedPtr<OSObject>        propObject;
+	OSSharedPtr<OSData>          entryContainer;
+	struct nvram_v3_var_entry    *v3Entry;
+	const struct v3_var_header   *header;
+	size_t                       offset = sizeof(struct v3_store_header);
+	uint32_t                     crc;
+	unsigned int                 i;
+	bool                         system;
+	uuid_string_t                uuidString;
+	size_t                       existingSize;
+
+	if (_systemSize || _commonSize) {
+		_varDict = OSDictionary::withCapacity(1);
 	}
 
-	if (_commonSize) {
-		_commonDict = OSDictionary::withCapacity(1);
-	}
-
-	while ((offset + sizeof(struct v3_var_header)) < length) {
+	while ((offset + sizeof(struct v3_var_header)) < _bankSize) {
 		struct nvram_v3_var_entry *existingEntry = nullptr;
 		unsigned int              existingIndex = 0;
 
-		header = (const struct v3_var_header *)(image + offset);
+		header = (const struct v3_var_header *)(_nvramImage + offset);
 
 		for (i = 0; i < sizeof(struct v3_var_header); i++) {
-			if ((image[offset + i] != 0) && (image[offset + i] != 0xFF)) {
+			if ((_nvramImage[offset + i] != 0) && (_nvramImage[offset + i] != 0xFF)) {
 				break;
 			}
 		}
@@ -695,7 +663,7 @@ IONVRAMV3Handler::unserializeImage(const uint8_t *image, IOByteCount length)
 			break;
 		}
 
-		if (!valid_variable_header(header, length - offset)) {
+		if (!valid_variable_header(header, _bankSize - offset)) {
 			DEBUG_ERROR("invalid header @ %#lx\n", offset);
 			offset += sizeof(struct v3_var_header);
 			continue;
@@ -727,7 +695,7 @@ IONVRAMV3Handler::unserializeImage(const uint8_t *image, IOByteCount length)
 		v3Entry->new_state = VAR_NEW_STATE_NONE;
 
 		// safe guard for any strange duplicate entries in the store
-		findExistingEntry(&v3Entry->header.guid, (const char *)v3Entry->header.name_data_buf, &existingEntry, &existingIndex);
+		findExistingEntry(v3Entry->header.guid, (const char *)v3Entry->header.name_data_buf, &existingEntry, &existingIndex);
 
 		if (existingEntry != nullptr) {
 			existingSize = variable_length(&existingEntry->header);
@@ -745,23 +713,23 @@ IONVRAMV3Handler::unserializeImage(const uint8_t *image, IOByteCount length)
 
 		system = (_systemSize != 0) && (uuid_compare(v3Entry->header.guid, gAppleSystemVariableGuid) == 0);
 		if (system) {
-			dict = _systemDict.get();
 			_systemUsed = _systemUsed + (uint32_t)variable_length(header) - (uint32_t)existingSize;
 		} else {
-			dict = _commonDict.get();
 			_commonUsed = _commonUsed + (uint32_t)variable_length(header) - (uint32_t)existingSize;
 		}
 
 		if (convertPropToObject(v3Entry->header.name_data_buf, v3Entry->header.nameSize,
 		    v3Entry->header.name_data_buf + v3Entry->header.nameSize, v3Entry->header.dataSize,
 		    propSymbol, propObject)) {
-			DEBUG_INFO("adding %s, dataLength=%u, system=%d\n",
-			    propSymbol->getCStringNoCopy(), v3Entry->header.dataSize, system);
+			OSSharedPtr<const OSSymbol> canonicalKey = keyWithGuidAndCString(v3Entry->header.guid, (const char *)v3Entry->header.name_data_buf);
 
-			dict->setObject(propSymbol.get(), propObject.get());
+			DEBUG_INFO("adding %s, dataLength=%u, system=%d\n",
+			    canonicalKey->getCStringNoCopy(), v3Entry->header.dataSize, system);
+
+			_varDict->setObject(canonicalKey.get(), propObject.get());
 
 			if (_provider->_diags) {
-				_provider->_diags->logVariable(_provider->getDictionaryType(dict),
+				_provider->_diags->logVariable(getPartitionTypeForGUID(v3Entry->header.guid),
 				    kIONVRAMOperationInit, propSymbol.get()->getCStringNoCopy(),
 				    (void *)(uintptr_t)(header->name_data_buf + header->nameSize));
 			}
@@ -776,7 +744,6 @@ skip:
 	DEBUG_ALWAYS("_commonSize %#x, _systemSize %#x, _currentOffset %#x\n", _commonSize, _systemSize, _currentOffset);
 	DEBUG_INFO("_commonUsed %#x, _systemUsed %#x\n", _commonUsed, _systemUsed);
 
-exit:
 	_newData = true;
 
 	if (_provider->_diags) {
@@ -793,48 +760,30 @@ exit:
 }
 
 IOReturn
-IONVRAMV3Handler::setVariable(const uuid_t varGuid, const char *variableName, OSObject *object)
+IONVRAMV3Handler::setVariableInternal(const uuid_t varGuid, const char *variableName, OSObject *object)
 {
-	struct nvram_v3_var_entry *v3Entry = nullptr;
-	struct nvram_v3_var_entry *newV3Entry;
-	OSSharedPtr<OSData>       newContainer;
-	bool                      unset = (object == nullptr);
-	bool                      system = false;
-	IOReturn                  ret = kIOReturnSuccess;
-	size_t                    entryNameLen = strlen(variableName) + 1;
-	unsigned int              existingEntryIndex;
-	uint32_t                  dataSize = 0;
-	size_t                    existingVariableSize = 0;
-	size_t                    newVariableSize = 0;
-	size_t                    newEntrySize;
-	uuid_t                    destGuid;
-	uuid_string_t             uuidString;
+	struct nvram_v3_var_entry   *v3Entry = nullptr;
+	struct nvram_v3_var_entry   *newV3Entry;
+	OSSharedPtr<OSData>         newContainer;
+	OSSharedPtr<const OSSymbol> canonicalKey;
+	bool                        unset = (object == nullptr);
+	bool                        system = false;
+	IOReturn                    ret = kIOReturnSuccess;
+	size_t                      entryNameLen = strlen(variableName) + 1;
+	unsigned int                existingEntryIndex;
+	uint32_t                    dataSize = 0;
+	size_t                      existingVariableSize = 0;
+	size_t                      newVariableSize = 0;
+	size_t                      newEntrySize;
+	uuid_string_t               uuidString;
 
-	if (_systemSize != 0) {
-		// System region case, if they're using the GUID directly or it's on the system allow list
-		// force it to use the System GUID
-		if ((uuid_compare(varGuid, gAppleSystemVariableGuid) == 0) || variableInAllowList(variableName)) {
-			system = true;
-			uuid_copy(destGuid, gAppleSystemVariableGuid);
-		} else {
-			uuid_copy(destGuid, varGuid);
-		}
-	} else {
-		// No system region, store System GUID as Common GUID
-		if ((uuid_compare(varGuid, gAppleSystemVariableGuid) == 0) || variableInAllowList(variableName)) {
-			uuid_copy(destGuid, gAppleNVRAMGuid);
-		} else {
-			uuid_copy(destGuid, varGuid);
-		}
-	}
+	system = (uuid_compare(varGuid, gAppleSystemVariableGuid) == 0);
+	canonicalKey = keyWithGuidAndCString(varGuid, variableName);
 
 	uuid_unparse(varGuid, uuidString);
 	DEBUG_INFO("setting %s:%s, system=%d, current var count=%u\n", uuidString, variableName, system, _varEntries->getCount());
 
-	uuid_unparse(destGuid, uuidString);
-	DEBUG_INFO("using %s, _commonUsed %#x, _systemUsed %#x\n", uuidString, _commonUsed, _systemUsed);
-
-	findExistingEntry(&destGuid, variableName, &v3Entry, &existingEntryIndex);
+	findExistingEntry(varGuid, variableName, &v3Entry, &existingEntryIndex);
 
 	if (unset == true) {
 		setEntryForRemove(v3Entry, system);
@@ -871,7 +820,7 @@ IONVRAMV3Handler::setVariable(const uuid_t varGuid, const char *variableName, OS
 		newV3Entry->header.nameSize = (uint32_t)entryNameLen;
 		newV3Entry->header.dataSize = dataSize;
 		newV3Entry->header.crc = crc32(0, newV3Entry->header.name_data_buf + entryNameLen, dataSize);
-		memcpy(newV3Entry->header.guid, &destGuid, sizeof(gAppleNVRAMGuid));
+		memcpy(newV3Entry->header.guid, varGuid, sizeof(gAppleNVRAMGuid));
 		newV3Entry->new_state = VAR_NEW_STATE_APPEND;
 
 		if (v3Entry) {
@@ -888,14 +837,16 @@ IONVRAMV3Handler::setVariable(const uuid_t varGuid, const char *variableName, OS
 
 		if (system) {
 			_systemUsed = _systemUsed + (uint32_t)newVariableSize - (uint32_t)existingVariableSize;
-			_provider->_systemDict->setObject(variableName, object);
 		} else {
 			_commonUsed = _commonUsed + (uint32_t)newVariableSize - (uint32_t)existingVariableSize;
-			_provider->_commonDict->setObject(variableName, object);
 		}
 
+		_varDict->setObject(canonicalKey.get(), object);
+
 		if (_provider->_diags) {
-			_provider->_diags->logVariable(getPartitionTypeForGUID(destGuid), kIONVRAMOperationWrite, variableName, (void *)(uintptr_t)dataSize);
+			_provider->_diags->logVariable(getPartitionTypeForGUID(varGuid),
+			    kIONVRAMOperationWrite, variableName,
+			    (void *)(uintptr_t)dataSize);
 		}
 
 		IOFreeData(newV3Entry, newEntrySize);
@@ -915,6 +866,31 @@ exit:
 	DEBUG_INFO("_commonUsed %#x, _systemUsed %#x\n", _commonUsed, _systemUsed);
 
 	return ret;
+}
+
+IOReturn
+IONVRAMV3Handler::setVariable(const uuid_t varGuid, const char *variableName, OSObject *object)
+{
+	uuid_t destGuid;
+
+	if (getSystemPartitionActive()) {
+		// System region case, if they're using the GUID directly or it's on the system allow list
+		// force it to use the System GUID
+		if ((uuid_compare(varGuid, gAppleSystemVariableGuid) == 0) || variableInAllowList(variableName)) {
+			uuid_copy(destGuid, gAppleSystemVariableGuid);
+		} else {
+			uuid_copy(destGuid, varGuid);
+		}
+	} else {
+		// No system region, store System GUID as Common GUID
+		if ((uuid_compare(varGuid, gAppleSystemVariableGuid) == 0) || variableInAllowList(variableName)) {
+			uuid_copy(destGuid, gAppleNVRAMGuid);
+		} else {
+			uuid_copy(destGuid, varGuid);
+		}
+	}
+
+	return setVariableInternal(destGuid, variableName, object);
 }
 
 uint32_t
@@ -1278,6 +1254,12 @@ uint32_t
 IONVRAMV3Handler::getCommonUsed(void) const
 {
 	return _commonUsed;
+}
+
+bool
+IONVRAMV3Handler::getSystemPartitionActive(void) const
+{
+	return _systemSize != 0;
 }
 
 bool

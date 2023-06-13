@@ -252,10 +252,9 @@ SYSCTL_ULONG(_net_inet_tcp, OID_AUTO, rxt_seg_drop, CTLFLAG_RD | CTLFLAG_LOCKED,
 
 static void     tcp_notify(struct inpcb *, int);
 
-struct zone     *sack_hole_zone;
-struct zone     *tcp_reass_zone;
-struct zone     *tcp_bwmeas_zone;
-struct zone     *tcp_rxt_seg_zone;
+static KALLOC_TYPE_DEFINE(tcp_bwmeas_zone, struct bwmeas, NET_KT_DEFAULT);
+KALLOC_TYPE_DEFINE(tcp_reass_zone, struct tseg_qent, NET_KT_DEFAULT);
+KALLOC_TYPE_DEFINE(tcp_rxt_seg_zone, struct tcp_rxt_seg, NET_KT_DEFAULT);
 
 extern int slowlink_wsize;      /* window correction for slow links */
 extern int path_mtu_discovery;
@@ -295,6 +294,8 @@ struct  inp_tp {
 	struct  tcpcb   tcb __attribute__((aligned(ALIGNMENT)));
 };
 #undef ALIGNMENT
+
+static KALLOC_TYPE_DEFINE(tcpcbzone, struct inp_tp, NET_KT_DEFAULT);
 
 int  get_inpcb_str_size(void);
 int  get_tcp_str_size(void);
@@ -496,7 +497,6 @@ tcp_init(struct protosw *pp, struct domain *dp)
 {
 #pragma unused(dp)
 	static int tcp_initialized = 0;
-	vm_size_t str_size;
 	struct inpcbinfo *pcbinfo;
 	uint32_t logging_config;
 
@@ -571,24 +571,11 @@ tcp_init(struct protosw *pp, struct domain *dp)
 	    &tcbinfo.ipi_hashmask);
 	tcbinfo.ipi_porthashbase = hashinit(tcp_tcbhashsize, M_PCB,
 	    &tcbinfo.ipi_porthashmask);
-	str_size = (vm_size_t)P2ROUNDUP(sizeof(struct inp_tp), sizeof(u_int64_t));
-	tcbinfo.ipi_zone = zone_create("tcpcb", str_size, ZC_NONE);
+	tcbinfo.ipi_zone.zov_kt_heap = tcpcbzone;
 
 	tcbinfo.ipi_gc = tcp_gc;
 	tcbinfo.ipi_timer = tcp_itimer;
 	in_pcbinfo_attach(&tcbinfo);
-
-	str_size = (vm_size_t)P2ROUNDUP(sizeof(struct sackhole), sizeof(u_int64_t));
-	sack_hole_zone = zone_create("sack_hole zone", str_size, ZC_NONE);
-
-	str_size = (vm_size_t)P2ROUNDUP(sizeof(struct tseg_qent), sizeof(u_int64_t));
-	tcp_reass_zone = zone_create("tcp_reass_zone", str_size, ZC_NONE);
-
-	str_size = (vm_size_t)P2ROUNDUP(sizeof(struct bwmeas), sizeof(u_int64_t));
-	tcp_bwmeas_zone = zone_create("tcp_bwmeas_zone", str_size, ZC_ZFREE_CLEARMEM);
-
-	str_size = (vm_size_t)P2ROUNDUP(sizeof(struct tcp_rxt_seg), sizeof(u_int64_t));
-	tcp_rxt_seg_zone = zone_create("tcp_rxt_seg_zone", str_size, ZC_NONE);
 
 #define TCP_MINPROTOHDR (sizeof(struct ip6_hdr) + sizeof(struct tcphdr))
 	if (max_protohdr < TCP_MINPROTOHDR) {

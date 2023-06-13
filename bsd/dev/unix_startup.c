@@ -163,7 +163,7 @@ bsd_startupearly(void)
 	    &bufferhdr_range.min_address,
 	    size,
 	    VM_MAP_CREATE_NEVER_FAULTS,
-	    VM_FLAGS_FIXED_RANGE_SUBALLOC,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
 	    KMS_PERMANENT | KMS_NOFAIL,
 	    VM_KERN_MEMORY_FILE).kmr_submap;
 
@@ -241,7 +241,7 @@ bsd_bufferinit(void)
 	    &mb_range.min_address,
 	    (vm_size_t) (nmbclusters * MCLBYTES),
 	    FALSE,
-	    VM_FLAGS_FIXED_RANGE_SUBALLOC,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
 	    KMS_PERMANENT | KMS_NOFAIL,
 	    VM_KERN_MEMORY_MBUF).kmr_submap;
 	mbutl = (unsigned char *)mb_range.min_address;
@@ -335,7 +335,8 @@ extern int tcp_tcbhashsize;
 extern int max_cached_sock_count;
 #endif
 
-
+#define SERVER_PERF_MODE_VALIDATION_DISABLES 0x5dee
+extern unsigned int kern_feature_overrides;
 void
 bsd_scale_setup(int scale)
 {
@@ -385,5 +386,9 @@ bsd_scale_setup(int scale)
 		hard_maxproc = maxproc;
 	}
 #endif
+	if (serverperfmode) {
+		/* If running in serverperfmode disable some internal only diagnostics. */
+		kern_feature_overrides |= SERVER_PERF_MODE_VALIDATION_DISABLES;
+	}
 	bsd_exec_setup(scale);
 }

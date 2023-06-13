@@ -891,7 +891,7 @@ flow_req_dump(char *desc, struct nx_flow_req *req)
 		dport = ntohs(daddr->sin.sin_port);
 	} else if (daddr->sa.sa_family == AF_INET6) {
 		dipver = IPV6_VERSION;
-		(void) inet_ntop(AF_INET6, &SIN6(saddr)->sin6_addr, dst_s,
+		(void) inet_ntop(AF_INET6, &SIN6(daddr)->sin6_addr, dst_s,
 		    sizeof(dst_s));
 		dport = ntohs(daddr->sin6.sin6_port);
 	} else {

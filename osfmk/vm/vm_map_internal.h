@@ -83,6 +83,8 @@ __BEGIN_DECLS
 #define VM_MAP_USER_RANGE_MAX       (GiB(12))
 #endif
 
+struct kmem_page_meta;
+
 /* Initialize the module */
 extern void vm_map_init(void);
 
@@ -133,6 +135,10 @@ extern boolean_t vm_map_entry_should_cow_for_true_share(
  * Whether the call is interruptible if it needs to wait for a vm map
  * entry to quiesce (interruption leads to KERN_ABORTED).
  *
+ * @const VM_MAP_REMOVE_NOKUNWIRE_LAST
+ * Do not unwire the last page of this entry during remove.
+ * (Used by kmem_realloc()).
+ *
  * @const VM_MAP_REMOVE_IMMUTABLE
  * Allow permanent entries to be removed.
  *
@@ -154,7 +160,7 @@ __options_decl(vmr_flags_t, uint32_t, {
 	VM_MAP_REMOVE_NO_FLAGS          = 0x000,
 	VM_MAP_REMOVE_KUNWIRE           = 0x001,
 	VM_MAP_REMOVE_INTERRUPTIBLE     = 0x002,
-	// unused                       = 0x004,
+	VM_MAP_REMOVE_NOKUNWIRE_LAST    = 0x004,
 	VM_MAP_REMOVE_NO_MAP_ALIGN      = 0x008,
 	VM_MAP_REMOVE_IMMUTABLE         = 0x010,
 	VM_MAP_REMOVE_GAPS_FAIL         = 0x020,
@@ -190,6 +196,45 @@ vm_map_remove(
 
 	(void)vm_map_remove_guard(map, start, end, flags, guard);
 }
+
+extern bool kmem_is_ptr_range(vm_map_range_id_t range_id);
+
+extern mach_vm_range_t kmem_validate_range_for_overwrite(
+	vm_map_offset_t         addr,
+	vm_map_size_t           size);
+
+extern uint32_t kmem_addr_get_slot_idx(
+	vm_map_offset_t         start,
+	vm_map_offset_t         end,
+	vm_map_range_id_t       range_id,
+	struct kmem_page_meta **meta,
+	uint32_t               *size_idx,
+	mach_vm_range_t         slot);
+
+extern void kmem_validate_slot(
+	vm_map_offset_t         addr,
+	struct kmem_page_meta  *meta,
+	uint32_t                size_idx,
+	uint32_t                slot_idx);
+
+/*
+ * Function used to allocate VA from kmem pointer ranges
+ */
+extern kern_return_t kmem_locate_space(
+	vm_map_size_t           size,
+	vm_map_range_id_t       range_id,
+	bool                    direction,
+	vm_map_offset_t        *start_inout,
+	vm_map_entry_t         *entry_out);
+
+/*
+ * Function used to free VA to kmem pointer ranges
+ */
+extern void kmem_free_space(
+	vm_map_offset_t         start,
+	vm_map_offset_t         end,
+	vm_map_range_id_t       range_id,
+	mach_vm_range_t         slot);
 
 #pragma GCC visibility pop
 __END_DECLS

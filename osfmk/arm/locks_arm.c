@@ -206,11 +206,68 @@ atomic_test_and_set32(uint32_t *target, uint32_t test_mask, uint32_t set_mask, e
 #pragma GCC visibility pop
 #pragma mark preemption
 
+/*
+ * This function checks whether an AST_URGENT has been pended.
+ *
+ * It is called once the preemption has been reenabled, which means the thread
+ * may have been preempted right before this was called, and when this function
+ * actually performs the check, we've changed CPU.
+ *
+ * This race is however benign: the point of AST_URGENT is to trigger a context
+ * switch, so if one happened, there's nothing left to check for, and AST_URGENT
+ * was cleared in the process.
+ *
+ * It follows that this check cannot have false negatives, which allows us
+ * to avoid fiddling with interrupt state for the vast majority of cases
+ * when the check will actually be negative.
+ */
+static NOINLINE void
+kernel_preempt_check(void)
+{
+	uint64_t state;
+
+	/* If interrupts are masked, we can't take an AST here */
+	state = __builtin_arm_rsr64("DAIF");
+	if (state & DAIF_IRQF) {
+		return;
+	}
+
+	/* disable interrupts (IRQ FIQ ASYNCF) */
+	__builtin_arm_wsr64("DAIFSet", DAIFSC_STANDARD_DISABLE);
+
+	/*
+	 * Reload cpu_pending_ast: a context switch would cause it to change.
+	 * Now that interrupts are disabled, this will debounce false positives.
+	 */
+	if (current_thread()->machine.CpuDatap->cpu_pending_ast & AST_URGENT) {
+		ast_taken_kernel();
+	}
+
+	/* restore the original interrupt mask */
+	__builtin_arm_wsr64("DAIF", state);
+}
+
+static inline void
+_enable_preemption_write_count(thread_t thread, unsigned int count)
+{
+	os_atomic_store(&thread->machine.preemption_count, count, compiler_acq_rel);
+
+	/*
+	 * This check is racy and could load from another CPU's pending_ast mask,
+	 * but as described above, this can't have false negatives.
+	 */
+	if (count == 0) {
+		if (__improbable(thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT)) {
+			return kernel_preempt_check();
+		}
+	}
+}
+
 #if SCHED_HYGIENE_DEBUG
 
 uint64_t _Atomic PERCPU_DATA_HACK_78750602(preemption_disable_max_mt);
 
-MACHINE_TIMEOUT_WRITEABLE(sched_preemption_disable_threshold_mt, "sched-preemption", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, kprintf_spam_mt_pred);
+MACHINE_TIMEOUT_DEV_WRITEABLE(sched_preemption_disable_threshold_mt, "sched-preemption", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, kprintf_spam_mt_pred);
 
 TUNABLE_DT_WRITEABLE(sched_hygiene_mode_t, sched_preemption_disable_debug_mode,
     "machine-timeouts",
@@ -222,8 +279,10 @@ TUNABLE_DT_WRITEABLE(sched_hygiene_mode_t, sched_preemption_disable_debug_mode,
 static uint32_t const sched_preemption_disable_debug_dbgid = MACHDBG_CODE(DBG_MACH_SCHED, MACH_PREEMPTION_EXPIRED) | DBG_FUNC_NONE;
 
 NOINLINE void
-_prepare_preemption_disable_measurement(thread_t thread)
+_prepare_preemption_disable_measurement(void)
 {
+	thread_t thread = current_thread();
+
 	if (thread->machine.inthandler_timestamp == 0) {
 		/*
 		 * Only prepare a measurement if not currently in an interrupt
@@ -248,6 +307,7 @@ _prepare_preemption_disable_measurement(thread_t thread)
 		thread->machine.preemption_disable_abandon = false;
 		thread->machine.preemption_disable_mt = ml_get_sched_hygiene_timebase();
 		thread->machine.preemption_disable_adjust = 0;
+		thread->machine.preemption_count |= SCHED_HYGIENE_MARKER;
 #if MONOTONIC
 		if (sched_hygiene_debug_pmc) {
 			mt_cur_cpu_cycles_instrs_speculative(&thread->machine.preemption_disable_cycles, &thread->machine.preemption_disable_instr);
@@ -258,7 +318,7 @@ _prepare_preemption_disable_measurement(thread_t thread)
 }
 
 NOINLINE void
-_collect_preemption_disable_measurement(thread_t thread)
+_collect_preemption_disable_measurement(void)
 {
 	bool istate = ml_set_interrupts_enabled_with_debug(false, false); // don't take int masked timestamp
 	/*
@@ -275,11 +335,13 @@ _collect_preemption_disable_measurement(thread_t thread)
 	 * the order.)
 	 */
 
+	thread_t thread = current_thread();
 	uint64_t const mt = thread->machine.preemption_disable_mt;
 	uint64_t const adjust = thread->machine.preemption_disable_adjust;
 	uint64_t const now = ml_get_sched_hygiene_timebase();
 	thread->machine.preemption_disable_mt = 0;
 	thread->machine.preemption_disable_adjust = 0;
+	/* no need to clear SCHED_HYGIENE_MARKER, will be done on exit */
 
 	/*
 	 * Don't need to reset (or even save) preemption_disable_abandon
@@ -300,7 +362,7 @@ _collect_preemption_disable_measurement(thread_t thread)
 	 * until the next collection starts.
 	 */
 	if (thread->machine.preemption_disable_abandon) {
-		return;
+		goto out;
 	}
 
 	int64_t const gross_duration = now - mt;
@@ -355,9 +417,13 @@ _collect_preemption_disable_measurement(thread_t thread)
 			KDBG(sched_preemption_disable_debug_dbgid, net_duration, gross_duration, average_cpi_whole, average_cpi_fractional);
 		}
 	}
-}
 
-#if SCHED_HYGIENE_DEBUG
+out:
+	/*
+	 * the preemption count is SCHED_HYGIENE_MARKER, we need to clear it.
+	 */
+	_enable_preemption_write_count(thread, 0);
+}
 
 /*
  * Abandon a potential preemption disable measurement. Useful for
@@ -377,9 +443,6 @@ abandon_preemption_disable_measurement(void)
 	ml_set_interrupts_enabled_with_debug(istate, false);
 }
 
-#endif
-
-
 /*
  * Skip predicate for sched_preemption_disable, which would trigger
  * spuriously when kprintf spam is enabled.
@@ -391,31 +454,45 @@ kprintf_spam_mt_pred(struct machine_timeout_spec const __unused *spec)
 	return kprintf_spam_enabled;
 }
 
+/*
+ * Abandon function exported for AppleCLPC, as a workaround to rdar://91668370.
+ *
+ * Only for AppleCLPC!
+ */
+void
+sched_perfcontrol_abandon_preemption_disable_measurement(void)
+{
+	abandon_preemption_disable_measurement();
+}
+
+#else /* SCHED_HYGIENE_DEBUG */
+void
+sched_perfcontrol_abandon_preemption_disable_measurement(void)
+{
+	// No-op. Function is exported, so needs to be defined
+}
 #endif /* SCHED_HYGIENE_DEBUG */
 
 /*
- * To help _disable_preemption() inline everywhere with LTO,
- * we keep these nice non inlineable functions as the panic()
- * codegen setup is quite large and for weird reasons causes a frame.
+ * This function is written in a way that the codegen is extremely short.
+ *
+ * LTO isn't smart enough to inline it, yet it is profitable because
+ * the vast majority of callers use current_thread() already.
+ *
+ * TODO: It is unfortunate that we have to load
+ *       sched_preemption_disable_debug_mode
+ *
+ * /!\ Breaking inlining causes zalloc to be roughly 10% slower /!\
  */
-__abortlike
-static void
-_disable_preemption_overflow(void)
-{
-	panic("Preemption count overflow");
-}
-
+__attribute__((always_inline))
 void
 _disable_preemption(void)
 {
-	thread_t     thread = current_thread();
-	unsigned int count  = thread->machine.preemption_count;
+	thread_t thread = current_thread();
+	unsigned int count = thread->machine.preemption_count;
 
-	if (__improbable(++count == 0)) {
-		_disable_preemption_overflow();
-	}
-
-	os_atomic_store(&thread->machine.preemption_count, count, compiler_acq_rel);
+	os_atomic_store(&thread->machine.preemption_count,
+	    count + 1, compiler_acq_rel);
 
 #if SCHED_HYGIENE_DEBUG
 	/*
@@ -426,72 +503,36 @@ _disable_preemption(void)
 	 * that collection here is not desynced otherwise.
 	 */
 
-	if (count == 1 && sched_preemption_disable_debug_mode) {
-		_prepare_preemption_disable_measurement(thread);
+	if (__improbable(count == 0 && sched_preemption_disable_debug_mode)) {
+		__attribute__((musttail))
+		return _prepare_preemption_disable_measurement();
 	}
 #endif /* SCHED_HYGIENE_DEBUG */
 }
 
+
 /*
- * This variant of _disable_preemption() allows disabling preemption
+ * This variant of disable_preemption() allows disabling preemption
  * without taking measurements (and later potentially triggering
  * actions on those).
- *
- * We do this through a separate variant because we do not want to
- * disturb inlinability of _disable_preemption(). However, in order to
- * also avoid code duplication, instead of repeating common code we
- * simply call _disable_preemption() and explicitly abandon any taken
- * measurement.
  */
+__attribute__((always_inline))
 void
 _disable_preemption_without_measurements(void)
 {
-	_disable_preemption();
+	thread_t thread = current_thread();
+	unsigned int count = thread->machine.preemption_count;
 
 #if SCHED_HYGIENE_DEBUG
-	abandon_preemption_disable_measurement();
-#endif /* SCHED_HYGIENE_DEBUG */
-}
-
-/*
- * This function checks whether an AST_URGENT has been pended.
- *
- * It is called once the preemption has been reenabled, which means the thread
- * may have been preempted right before this was called, and when this function
- * actually performs the check, we've changed CPU.
- *
- * This race is however benign: the point of AST_URGENT is to trigger a context
- * switch, so if one happened, there's nothing left to check for, and AST_URGENT
- * was cleared in the process.
- *
- * It follows that this check cannot have false negatives, which allows us
- * to avoid fiddling with interrupt state for the vast majority of cases
- * when the check will actually be negative.
- */
-static NOINLINE void
-kernel_preempt_check(thread_t thread)
-{
-	uint64_t state;
-
-	/* If interrupts are masked, we can't take an AST here */
-	state = __builtin_arm_rsr64("DAIF");
-	if (state & DAIF_IRQF) {
-		return;
-	}
-
-	/* disable interrupts (IRQ FIQ ASYNCF) */
-	__builtin_arm_wsr64("DAIFSet", DAIFSC_STANDARD_DISABLE);
-
 	/*
-	 * Reload cpu_pending_ast: a context switch would cause it to change.
-	 * Now that interrupts are disabled, this will debounce false positives.
+	 * Inform _collect_preemption_disable_measurement()
+	 * that we didn't really care.
 	 */
-	if (thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT) {
-		ast_taken_kernel();
-	}
+	thread->machine.preemption_disable_abandon = true;
+#endif
 
-	/* restore the original interrupt mask */
-	__builtin_arm_wsr64("DAIF", state);
+	os_atomic_store(&thread->machine.preemption_count,
+	    count + 1, compiler_acq_rel);
 }
 
 /*
@@ -506,41 +547,59 @@ _enable_preemption_underflow(void)
 	panic("Preemption count underflow");
 }
 
+/*
+ * This function is written in a way that the codegen is extremely short.
+ *
+ * LTO isn't smart enough to inline it, yet it is profitable because
+ * the vast majority of callers use current_thread() already.
+ *
+ * The SCHED_HYGIENE_MARKER trick is used so that we do not have to load
+ * unrelated fields of current_thread().
+ *
+ * /!\ Breaking inlining causes zalloc to be roughly 10% slower /!\
+ */
+__attribute__((always_inline))
 void
 _enable_preemption(void)
 {
-	thread_t     thread = current_thread();
+	thread_t thread = current_thread();
 	unsigned int count  = thread->machine.preemption_count;
 
 	if (__improbable(count == 0)) {
 		_enable_preemption_underflow();
 	}
-	count -= 1;
 
 #if SCHED_HYGIENE_DEBUG
-	if (count == 0 && thread->machine.preemption_disable_mt != 0) {
-		_collect_preemption_disable_measurement(thread);
+	if (__improbable(count == SCHED_HYGIENE_MARKER + 1)) {
+		return _collect_preemption_disable_measurement();
 	}
 #endif /* SCHED_HYGIENE_DEBUG */
 
-	os_atomic_store(&thread->machine.preemption_count, count, compiler_acq_rel);
-	if (count == 0) {
-		/*
-		 * This check is racy and could load from another CPU's pending_ast mask,
-		 * but as described above, this can't have false negatives.
-		 */
-		if (__improbable(thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT)) {
-			kernel_preempt_check(thread);
-		}
-	}
-
-	os_compiler_barrier();
+	_enable_preemption_write_count(thread, count - 1);
 }
 
+__attribute__((always_inline))
+unsigned int
+get_preemption_level_for_thread(thread_t thread)
+{
+	unsigned int count = thread->machine.preemption_count;
+
+#if SCHED_HYGIENE_DEBUG
+	/*
+	 * hide this "flag" from callers,
+	 * and it would make the count look negative anyway
+	 * which some people dislike
+	 */
+	count &= ~SCHED_HYGIENE_MARKER;
+#endif
+	return (int)count;
+}
+
+__attribute__((always_inline))
 int
 get_preemption_level(void)
 {
-	return current_thread()->machine.preemption_count;
+	return get_preemption_level_for_thread(current_thread());
 }
 
 #if CONFIG_PV_TICKET

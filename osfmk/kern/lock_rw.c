@@ -611,26 +611,6 @@ lck_interlock_unlock(
 	ml_set_interrupts_enabled(istate);
 }
 
-static inline void
-lck_rw_inc_thread_count(
-	thread_t thread)
-{
-	__assert_only uint32_t prev_rwlock_count;
-
-	prev_rwlock_count = thread->rwlock_count++;
-#if MACH_ASSERT
-	/*
-	 * Set the ast to check that the
-	 * rwlock_count is going to be set to zero when
-	 * going back to userspace.
-	 * Set it only once when we increment it for the first time.
-	 */
-	if (prev_rwlock_count == 0) {
-		act_set_debug_assert();
-	}
-#endif
-}
-
 /*
  * compute the deadline to spin against when
  * waiting for a change of state on a lck_rw_t
@@ -1119,7 +1099,7 @@ lck_rw_lock_exclusive_check_contended(
 	bool            contended  = false;
 
 	if (lock->lck_rw_can_sleep) {
-		lck_rw_inc_thread_count(thread);
+		lck_rw_lock_count_inc(thread, lock);
 	} else if (get_preemption_level() == 0) {
 		panic("Taking non-sleepable RW lock with preemption enabled");
 	}
@@ -1153,7 +1133,7 @@ lck_rw_lock_exclusive_internal_inline(
 	thread_t        thread = current_thread();
 
 	if (lock->lck_rw_can_sleep) {
-		lck_rw_inc_thread_count(thread);
+		lck_rw_lock_count_inc(thread, lock);
 	} else if (get_preemption_level() == 0) {
 		panic("Taking non-sleepable RW lock with preemption enabled");
 	}
@@ -1392,7 +1372,7 @@ lck_rw_lock_shared_internal_inline(
 #endif
 
 	if (lock->lck_rw_can_sleep) {
-		lck_rw_inc_thread_count(thread);
+		lck_rw_lock_count_inc(thread, lock);
 	} else if (get_preemption_level() == 0) {
 		panic("Taking non-sleepable RW lock with preemption enabled");
 	}
@@ -1534,7 +1514,6 @@ lck_rw_lock_shared_to_exclusive_failure(
 	uint32_t        prior_lock_state)
 {
 	thread_t        thread = current_thread();
-	uint32_t        rwlock_count;
 
 	if ((prior_lock_state & LCK_RW_W_WAITING) &&
 	    ((prior_lock_state & LCK_RW_SHARED_MASK) == LCK_RW_SHARED_READER)) {
@@ -1548,18 +1527,7 @@ lck_rw_lock_shared_to_exclusive_failure(
 
 	/* Check if dropping the lock means that we need to unpromote */
 	if (lck->lck_rw_can_sleep) {
-		rwlock_count = thread->rwlock_count--;
-	} else {
-		rwlock_count = UINT32_MAX;
-	}
-
-	if (rwlock_count == 0) {
-		panic("rw lock count underflow for thread %p", thread);
-	}
-
-	if ((rwlock_count == 1 /* field now 0 */) && (thread->sched_flags & TH_SFLAG_RW_PROMOTED)) {
-		/* sched_flags checked without lock, but will be rechecked while clearing */
-		lck_rw_clear_promotion(thread, unslide_for_kdebug(lck));
+		lck_rw_lock_count_dec(thread, lck);
 	}
 
 	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_SH_TO_EX_CODE) | DBG_FUNC_NONE,
@@ -1951,7 +1919,7 @@ lck_rw_try_lock_shared_internal_inline(
 	    ordered_load_rw(lock), ctid_get_thread_unsafe(lock->lck_rw_owner));
 
 	if (lock->lck_rw_can_sleep) {
-		lck_rw_inc_thread_count(thread);
+		lck_rw_lock_count_inc(thread, lock);
 	} else if (get_preemption_level() == 0) {
 		panic("Taking non-sleepable RW lock with preemption enabled");
 	}
@@ -2025,7 +1993,7 @@ lck_rw_try_lock_exclusive_internal_inline(
 	thread_t thread = current_thread();
 
 	if (lock->lck_rw_can_sleep) {
-		lck_rw_inc_thread_count(thread);
+		lck_rw_lock_count_inc(thread, lock);
 	} else if (get_preemption_level() == 0) {
 		panic("Taking non-sleepable RW lock with preemption enabled");
 	}
@@ -2146,7 +2114,6 @@ lck_rw_done_gen(
 	lck_rw_word_t   fake_lck;
 	lck_rw_type_t   lock_type;
 	thread_t        thread;
-	uint32_t        rwlock_count;
 
 	/*
 	 * prior_lock state is a snapshot of the 1st word of the
@@ -2174,19 +2141,9 @@ lck_rw_done_gen(
 	/* Check if dropping the lock means that we need to unpromote */
 	thread = current_thread();
 	if (fake_lck.can_sleep) {
-		rwlock_count = thread->rwlock_count--;
-	} else {
-		rwlock_count = UINT32_MAX;
+		lck_rw_lock_count_dec(thread, lck);
 	}
 
-	if (rwlock_count == 0) {
-		panic("rw lock count underflow for thread %p", thread);
-	}
-
-	if ((rwlock_count == 1 /* field now 0 */) && (thread->sched_flags & TH_SFLAG_RW_PROMOTED)) {
-		/* sched_flags checked without lock, but will be rechecked while clearing */
-		lck_rw_clear_promotion(thread, unslide_for_kdebug(lck));
-	}
 #if CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_RW_DONE_RELEASE, lck, lock_type == LCK_RW_TYPE_SHARED ? 0 : 1);
 #endif
@@ -2756,21 +2713,19 @@ lck_rw_sleep_deadline(
  * is released by a thread (if a promotion was active).
  *
  * @param thread        thread to demote.
- * @param trace_obj     object reason for the demotion.
+ * @param lock          object reason for the demotion.
  */
-void
-lck_rw_clear_promotion(
-	thread_t thread,
-	uintptr_t trace_obj)
+__attribute__((noinline))
+static void
+lck_rw_clear_promotion(thread_t thread, const void *lock)
 {
-	assert(thread->rwlock_count == 0);
-
 	/* Cancel any promotions if the thread had actually blocked while holding a RW lock */
 	spl_t s = splsched();
 	thread_lock(thread);
 
 	if (thread->sched_flags & TH_SFLAG_RW_PROMOTED) {
-		sched_thread_unpromote_reason(thread, TH_SFLAG_RW_PROMOTED, trace_obj);
+		sched_thread_unpromote_reason(thread, TH_SFLAG_RW_PROMOTED,
+		    unslide_for_kdebug(lock));
 	}
 
 	thread_unlock(thread);
@@ -2789,6 +2744,7 @@ lck_rw_clear_promotion(
  *
  * @param thread        thread to promote.
  */
+__attribute__((always_inline))
 void
 lck_rw_set_promotion_locked(thread_t thread)
 {
@@ -2800,5 +2756,47 @@ lck_rw_set_promotion_locked(thread_t thread)
 
 	if (!(thread->sched_flags & TH_SFLAG_RW_PROMOTED)) {
 		sched_thread_promote_reason(thread, TH_SFLAG_RW_PROMOTED, 0);
+	}
+}
+
+__attribute__((always_inline))
+void
+lck_rw_lock_count_inc(thread_t thread, const void *lock __unused)
+{
+	if (thread->rwlock_count++ == 0) {
+#if MACH_ASSERT
+		/*
+		 * Set the ast to check that the
+		 * rwlock_count is going to be set to zero when
+		 * going back to userspace.
+		 * Set it only once when we increment it for the first time.
+		 */
+		act_set_debug_assert();
+#endif
+	}
+}
+
+__abortlike
+static void
+__lck_rw_lock_count_dec_panic(thread_t thread)
+{
+	panic("rw lock count underflow for thread %p", thread);
+}
+
+__attribute__((always_inline))
+void
+lck_rw_lock_count_dec(thread_t thread, const void *lock)
+{
+	uint32_t rwlock_count = thread->rwlock_count--;
+
+	if (rwlock_count == 0) {
+		__lck_rw_lock_count_dec_panic(thread);
+	}
+
+	if (__probable(rwlock_count == 1)) {
+		/* sched_flags checked without lock, but will be rechecked while clearing */
+		if (__improbable(thread->sched_flags & TH_SFLAG_RW_PROMOTED)) {
+			lck_rw_clear_promotion(thread, lock);
+		}
 	}
 }

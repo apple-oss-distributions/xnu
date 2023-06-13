@@ -137,8 +137,8 @@ struct ipc_port {
 		    , ip_sync_link_state:3        /* link the port to destination port/ Workloop */
 		    , ip_sync_bootstrap_checkin:1 /* port part of sync bootstrap checkin, push on thread doing the checkin */
 		    , ip_immovable_receive:1      /* the receive right cannot be moved out of a space, until it is destroyed */
-		    , ip_no_grant:1               /* Port wont accept complex messages containing (ool) port descriptors */
 		    , ip_immovable_send:1         /* No send(once) rights to this port can be moved out of a space, never unset */
+		    , ip_no_grant:1               /* Port wont accept complex messages containing (ool) port descriptors */
 		    , ip_tg_block_tracking:1      /* Track blocking relationship between thread groups during sync IPC */
 		    , ip_pinned:1                 /* Can't deallocate the last send right from a space while the bit is set */
 		    , ip_service_port:1           /* port is a service port */
@@ -240,6 +240,22 @@ MACRO_END
 
 #define port_rcv_turnstile_address(port)   (&(port)->ip_waitq.waitq_ts)
 
+extern void __ipc_right_delta_overflow_panic(
+	ipc_port_t          port,
+	natural_t          *field,
+	int                 delta) __abortlike;
+
+#define ip_right_delta(port, field, delta)  ({ \
+    ipc_port_t __port = (port);                                  \
+    if (os_add_overflow(__port->field, delta, &__port->field)) { \
+	__ipc_right_delta_overflow_panic(__port, &__port->field, delta);  \
+    }                                                            \
+})
+
+#define ip_srights_inc(port)  ip_right_delta(port, ip_srights, 1)
+#define ip_srights_dec(port)  ip_right_delta(port, ip_srights, -1)
+#define ip_sorights_inc(port) ip_right_delta(port, ip_sorights, 1)
+#define ip_sorights_dec(port) ip_right_delta(port, ip_sorights, -1)
 
 /*
  * SYNC IPC state flags for special reply port/ rcv right.

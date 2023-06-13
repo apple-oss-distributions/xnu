@@ -456,7 +456,7 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 	if ((tp->t_mpflags & TMPF_MPTCP_TRUE) &&
 	    (tp->t_mpflags & TMPF_SND_REM_ADDR)) {
 		int rem_opt_len = sizeof(struct mptcp_remaddr_opt);
-		if ((optlen + rem_opt_len) <= MAX_TCPOPTLEN) {
+		if (optlen + rem_opt_len <= MAX_TCPOPTLEN) {
 			mptcp_send_remaddr_opt(tp,
 			    (struct mptcp_remaddr_opt *)(opt + optlen));
 			optlen += rem_opt_len;
@@ -485,7 +485,7 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 	}
 
 #define CHECK_OPTLEN    {                                                                   \
-	if ((MAX_TCPOPTLEN - optlen) < dssoptlen) {                                         \
+	if (MAX_TCPOPTLEN - optlen < dssoptlen) {                                         \
 	        os_log_error(mptcp_log_handle, "%s: dssoptlen %d optlen %d \n", __func__,   \
 	            dssoptlen, optlen);                                                     \
 	            goto ret_optlen;                                                        \
@@ -996,7 +996,6 @@ mptcp_do_mpcapable_opt(struct tcpcb *tp, u_char *cp, struct tcphdr *th,
 	rsp = (struct mptcp_mpcapable_opt_rsp *)cp;
 	mp_tp->mpt_remotekey = rsp->mmc_localkey;
 	/* For now just downgrade to the peer's version */
-	mp_tp->mpt_peer_version = rsp->mmc_common.mmco_version;
 	if (rsp->mmc_common.mmco_version < mp_tp->mpt_version) {
 		os_log_error(mptcp_log_handle, "local version: %d > peer version %d", mp_tp->mpt_version, rsp->mmc_common.mmco_version);
 		mp_tp->mpt_version = rsp->mmc_common.mmco_version;

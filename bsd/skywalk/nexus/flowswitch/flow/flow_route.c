@@ -90,6 +90,9 @@ static void flow_route_ev_callback(struct eventhandler_entry_arg,
 RB_GENERATE_PREV(flow_route_tree, flow_route, fr_link, fr_cmp);
 RB_GENERATE_PREV(flow_route_id_tree, flow_route, fr_id_link, fr_id_cmp);
 
+KALLOC_TYPE_VAR_DEFINE(KT_SK_FRB, struct flow_route_bucket, KT_DEFAULT);
+KALLOC_TYPE_VAR_DEFINE(KT_SK_FRIB, struct flow_route_id_bucket, KT_DEFAULT);
+
 #define FR_ZONE_NAME    "flow.route"
 
 static unsigned int flow_route_size;            /* size of flow_route */
@@ -131,42 +134,33 @@ flow_route_buckets_alloc(size_t frb_cnt, size_t *frb_sz, size_t *tot_sz)
 {
 	uint32_t cache_sz = skmem_cpu_cache_line_size();
 	struct flow_route_bucket *frb;
-	void *frb_buf, **frb_pbuf;
 	size_t frb_tot_sz;
 
 	/* each bucket is CPU cache-aligned */
 	*frb_sz = P2ROUNDUP(sizeof(*frb), cache_sz);
-
-	/* total size includes extra for alignment requirements */
-	*tot_sz = frb_tot_sz = (sizeof(void *) + (frb_cnt * (*frb_sz)) + cache_sz);
-	// rdar://88962126
-	/* BEGIN IGNORE CODESTYLE */
-	__typed_allocators_ignore_push
-	frb_buf = sk_alloc(frb_tot_sz, Z_WAITOK, skmem_tag_fsw_frb_hash);
-	__typed_allocators_ignore_pop
-	/* END IGNORE CODESTYLE */
-	if (__improbable(frb_buf == NULL)) {
+	*tot_sz = frb_tot_sz = frb_cnt * (*frb_sz);
+	frb = sk_alloc_type_hash(KT_SK_FRB, frb_tot_sz, Z_WAITOK,
+	    skmem_tag_fsw_frb_hash);
+	if (__improbable(frb == NULL)) {
 		return NULL;
 	}
 
+#if !KASAN_CLASSIC
 	/*
-	 * In case we didn't get a cache-aligned memory, round it up
-	 * accordingly.  This is needed in order to get the rest of
-	 * the structure members aligned properly.  It also means that
-	 * the memory span gets shifted due to the round up, but it
-	 * is okay since we've allocated extra space for this.
+	 * except in KASAN_CLASSIC mode, kalloc will always maintain cacheline
+	 * size alignment if the requested size is a multiple of a cacheline
+	 * size (this is true for any size that is a power of two from 16 to
+	 * PAGE_SIZE).
+	 *
+	 * Because this is an optimization only, it is OK to leave KASAN_CLASSIC
+	 * not respect this.
 	 */
-	frb = (struct flow_route_bucket *)
-	    P2ROUNDUP((intptr_t)frb_buf + sizeof(void *), cache_sz);
-	frb_pbuf = (void **)((intptr_t)frb - sizeof(void *));
-	ASSERT((intptr_t)frb_pbuf >= (intptr_t)frb_buf);
-	ASSERT(((intptr_t)frb + (frb_cnt * (*frb_sz))) <=
-	    ((intptr_t)frb_buf + frb_tot_sz));
-	*frb_pbuf = frb_buf;
+	ASSERT(IS_P2ALIGNED(frb, cache_sz));
+#endif
 
 	SK_DF(SK_VERB_MEM, "frb 0x%llx frb_cnt %zu frb_sz %zu "
-	    "(total %zu bytes, frb_buf 0x%llx) ALLOC", SK_KVA(frb), frb_cnt,
-	    *frb_sz, frb_tot_sz, SK_KVA(frb_buf));
+	    "(total %zu bytes) ALLOC", SK_KVA(frb), frb_cnt,
+	    *frb_sz, frb_tot_sz);
 
 	return frb;
 }
@@ -174,23 +168,16 @@ flow_route_buckets_alloc(size_t frb_cnt, size_t *frb_sz, size_t *tot_sz)
 void
 flow_route_buckets_free(struct flow_route_bucket *frb, size_t tot_sz)
 {
-	void *frb_buf, **frb_pbuf;
-
-	/* get the original address that we stuffed in earlier and free it */
-	frb_pbuf = (void **)((intptr_t)frb - sizeof(void *));
-	frb_buf = *frb_pbuf;
-	SK_DF(SK_VERB_MEM, "frb 0x%llx (frb_buf 0x%llx) FREE",
-	    SK_KVA(frb), SK_KVA(frb_buf));
-	// rdar://88962126
-	__typed_allocators_ignore_push
-	sk_free(frb_buf, tot_sz);
-	__typed_allocators_ignore_pop
+	SK_DF(SK_VERB_MEM, "frb 0x%llx FREE", SK_KVA(frb));
+	sk_free_type_hash(KT_SK_FRB, tot_sz, frb);
 }
 
 void
 flow_route_bucket_init(struct flow_route_bucket *frb)
 {
+#if !KASAN_CLASSIC
 	ASSERT(IS_P2ALIGNED(frb, skmem_cpu_cache_line_size()));
+#endif /* !KASAN_CLASSIC */
 	lck_rw_init(&frb->frb_lock, &flow_route_lock_group,
 	    &flow_route_lock_attr);
 	RB_INIT(&frb->frb_head);
@@ -243,42 +230,34 @@ flow_route_id_buckets_alloc(size_t frib_cnt, size_t *frib_sz, size_t *tot_sz)
 {
 	uint32_t cache_sz = skmem_cpu_cache_line_size();
 	struct flow_route_id_bucket *frib;
-	void *frib_buf, **frib_pbuf;
 	size_t frib_tot_sz;
 
 	/* each bucket is CPU cache-aligned */
 	*frib_sz = P2ROUNDUP(sizeof(*frib), cache_sz);
-
-	/* total size includes extra for alignment requirements */
-	*tot_sz = frib_tot_sz = (sizeof(void *) + (frib_cnt * (*frib_sz)) + cache_sz);
-	// rdar://88962126
-	/* BEGIN IGNORE CODESTYLE */
-	__typed_allocators_ignore_push
-	frib_buf = sk_alloc(frib_tot_sz, Z_WAITOK, skmem_tag_fsw_frib_hash);
-	__typed_allocators_ignore_pop
+	*tot_sz = frib_tot_sz = frib_cnt * (*frib_sz);
+	frib = sk_alloc_type_hash(KT_SK_FRIB, frib_tot_sz, Z_WAITOK,
+	    skmem_tag_fsw_frib_hash);
 	/* END IGNORE CODESTYLE */
-	if (__improbable(frib_buf == NULL)) {
+	if (__improbable(frib == NULL)) {
 		return NULL;
 	}
 
+#if !KASAN_CLASSIC
 	/*
-	 * In case we didn't get a cache-aligned memory, round it up
-	 * accordingly.  This is needed in order to get the rest of
-	 * the structure members aligned properly.  It also means that
-	 * the memory span gets shifted due to the round up, but it
-	 * is okay since we've allocated extra space for this.
+	 * except in KASAN_CLASSIC mode, kalloc will always maintain cacheline
+	 * size alignment if the requested size is a multiple of a cacheline
+	 * size (this is true for any size that is a power of two from 16 to
+	 * PAGE_SIZE).
+	 *
+	 * Because this is an optimization only, it is OK to leave KASAN_CLASSIC
+	 * not respect this.
 	 */
-	frib = (struct flow_route_id_bucket *)
-	    P2ROUNDUP((intptr_t)frib_buf + sizeof(void *), cache_sz);
-	frib_pbuf = (void **)((intptr_t)frib - sizeof(void *));
-	ASSERT((intptr_t)frib_pbuf >= (intptr_t)frib_buf);
-	ASSERT(((intptr_t)frib + (frib_cnt * (*frib_sz))) <=
-	    ((intptr_t)frib_buf + frib_tot_sz));
-	*frib_pbuf = frib_buf;
+	ASSERT(IS_P2ALIGNED(frib, cache_sz));
+#endif /* !KASAN_CLASSIC */
 
 	SK_DF(SK_VERB_MEM, "frib 0x%llx frib_cnt %zu frib_sz %zu "
-	    "(total %zu bytes, frib_buf 0x%llx) ALLOC", SK_KVA(frib), frib_cnt,
-	    *frib_sz, frib_tot_sz, SK_KVA(frib_buf));
+	    "(total %zu bytes) ALLOC", SK_KVA(frib), frib_cnt,
+	    *frib_sz, frib_tot_sz);
 
 	return frib;
 }
@@ -286,23 +265,16 @@ flow_route_id_buckets_alloc(size_t frib_cnt, size_t *frib_sz, size_t *tot_sz)
 void
 flow_route_id_buckets_free(struct flow_route_id_bucket *frib, size_t tot_sz)
 {
-	void *frib_buf, **frib_pbuf;
-
-	/* get the original address that we stuffed in earlier and free it */
-	frib_pbuf = (void **)((intptr_t)frib - sizeof(void *));
-	frib_buf = *frib_pbuf;
-	SK_DF(SK_VERB_MEM, "frib 0x%llx (frib_buf 0x%llx) FREE", SK_KVA(frib),
-	    SK_KVA(frib_buf));
-	// rdar://88962126
-	__typed_allocators_ignore_push
-	sk_free(frib_buf, tot_sz);
-	__typed_allocators_ignore_pop
+	SK_DF(SK_VERB_MEM, "frib 0x%llx FREE", SK_KVA(frib));
+	sk_free_type_hash(KT_SK_FRIB, tot_sz, frib);
 }
 
 void
 flow_route_id_bucket_init(struct flow_route_id_bucket *frib)
 {
+#if !KASAN_CLASSIC
 	ASSERT(IS_P2ALIGNED(frib, skmem_cpu_cache_line_size()));
+#endif
 	lck_rw_init(&frib->frib_lock, &flow_route_lock_group,
 	    &flow_route_lock_attr);
 	RB_INIT(&frib->frib_head);
@@ -1272,10 +1244,12 @@ flow_route_select_laddr(union sockaddr_in_4_6 *src, union sockaddr_in_4_6 *dst,
 
 	case AF_INET6: {
 		struct in6_addr src_storage, *in6;
-
+		struct route_in6 ro = {};
 		uint32_t hints = (use_stable_address ? 0 : IPV6_SRCSEL_HINT_PREFER_TMPADDR);
+		ro.ro_rt = rt;
+
 		if ((in6 = in6_selectsrc_core(SIN6(dst), hints,
-		    ifp, 0, &src_storage, &src_ifp, &err, &ifa)) == NULL) {
+		    ifp, 0, &src_storage, &src_ifp, &err, &ifa, &ro)) == NULL) {
 			if (err == 0) {
 				err = EADDRNOTAVAIL;
 			}

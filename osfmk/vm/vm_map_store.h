@@ -29,11 +29,6 @@
 #ifndef _VM_VM_MAP_STORE_H
 #define _VM_VM_MAP_STORE_H
 
-/*
- #ifndef VM_MAP_STORE_USE_LL
- #define VM_MAP_STORE_USE_LL
- #endif
- */
 #ifndef VM_MAP_STORE_USE_RB
 #define VM_MAP_STORE_USE_RB
 #endif
@@ -53,76 +48,62 @@ struct vm_map_store {
 };
 
 #ifdef VM_MAP_STORE_USE_RB
-RB_HEAD( rb_head, vm_map_store );
+RB_HEAD(rb_head, vm_map_store);
 #endif
 
-#include <vm/vm_map.h>
+/*
+ *	Type:		vm_map_entry_t [internal use only]
+ *
+ *	Description:
+ *		A single mapping within an address map.
+ *
+ *	Implementation:
+ *		Address map entries consist of start and end addresses,
+ *		a VM object (or sub map) and offset into that object,
+ *		and user-exported inheritance and protection information.
+ *		Control information for virtual copy operations is also
+ *		stored in the address map entry.
+ *
+ *	Note:
+ *		vm_map_relocate_early_elem() knows about this layout,
+ *		and needs to be kept in sync.
+ */
+struct vm_map_links {
+	struct vm_map_entry     *prev;          /* previous entry */
+	struct vm_map_entry     *next;          /* next entry */
+	vm_map_offset_t         start;          /* start address */
+	vm_map_offset_t         end;            /* end address */
+};
+
+
+/*
+ *	Type:		struct vm_map_header
+ *
+ *	Description:
+ *		Header for a vm_map and a vm_map_copy.
+ *
+ *	Note:
+ *		vm_map_relocate_early_elem() knows about this layout,
+ *		and needs to be kept in sync.
+ */
+struct vm_map_header {
+	struct vm_map_links     links;          /* first, last, min, max */
+	int                     nentries;       /* Number of entries */
+	uint16_t                page_shift;     /* page shift */
+	uint16_t                entries_pageable : 1;   /* are map entries pageable? */
+	uint16_t                __padding : 15;
+#ifdef VM_MAP_STORE_USE_RB
+	struct rb_head          rb_head_store;
+#endif /* VM_MAP_STORE_USE_RB */
+};
+
+#define VM_MAP_HDR_PAGE_SHIFT(hdr)      ((hdr)->page_shift)
+#define VM_MAP_HDR_PAGE_SIZE(hdr)       (1 << VM_MAP_HDR_PAGE_SHIFT((hdr)))
+#define VM_MAP_HDR_PAGE_MASK(hdr)       (VM_MAP_HDR_PAGE_SIZE((hdr)) - 1)
+
+
 #include <vm/vm_map_store_ll.h>
 #include <vm/vm_map_store_rb.h>
-
-/*
- * GuardMalloc support:-
- * Some of these entries are created with MAP_FIXED.
- * Some are created with a very high hint address.
- * So we use aliases and address ranges to make sure
- * that those special regions (nano, jit etc) don't
- * result in our highest hint being set to near
- * the end of the map and future alloctions getting
- * KERN_NO_SPACE when running with guardmalloc.
- */
-#define UPDATE_HIGHEST_ENTRY_END(map, highest_entry)                    \
-	MACRO_BEGIN                                                     \
-	struct _vm_map*	UHEE_map;                                       \
-	struct vm_map_entry*	UHEE_entry;                             \
-	UHEE_map = (map);                                               \
-	assert(UHEE_map->disable_vmentry_reuse);                        \
-	assert(!UHEE_map->is_nested_map);                               \
-	UHEE_entry = (highest_entry);                                   \
-	int UHEE_alias = VME_ALIAS(UHEE_entry); \
-	if(UHEE_alias != VM_MEMORY_MALLOC_NANO && \
-	   UHEE_alias != VM_MEMORY_MALLOC_TINY && \
-	   UHEE_alias != VM_MEMORY_MALLOC_SMALL && \
-	   UHEE_alias != VM_MEMORY_MALLOC_MEDIUM && \
-	   UHEE_alias != VM_MEMORY_MALLOC_LARGE && \
-	   UHEE_alias != VM_MEMORY_MALLOC_HUGE && \
-	   UHEE_entry->used_for_jit == 0 && \
-	   (UHEE_entry->vme_start < SHARED_REGION_BASE || \
-	   UHEE_entry->vme_start >= (SHARED_REGION_BASE + SHARED_REGION_SIZE)) && \
-	   UHEE_map->highest_entry_end < UHEE_entry->vme_end) {        \
-	        UHEE_map->highest_entry_end = UHEE_entry->vme_end;      \
-	}                                                               \
-	MACRO_END
-
-#define VM_MAP_HIGHEST_ENTRY(map, entry, start)                         \
-	MACRO_BEGIN                                                     \
-	struct _vm_map* VMHE_map;                                       \
-	struct vm_map_entry*	tmp_entry;                              \
-	vm_map_offset_t VMHE_start;                                     \
-	VMHE_map = (map);                                               \
-	assert(VMHE_map->disable_vmentry_reuse);                        \
-	assert(!VMHE_map->is_nested_map);                               \
-	VMHE_start= VMHE_map->highest_entry_end + PAGE_SIZE_64;         \
-	while(vm_map_lookup_entry(VMHE_map, VMHE_start, &tmp_entry)){   \
-	        VMHE_start = tmp_entry->vme_end + PAGE_SIZE_64; \
-	}                                                               \
-	entry = tmp_entry;                                              \
-	start = VMHE_start;                                             \
-	MACRO_END
-
-/*
- *	SAVE_HINT_MAP_READ:
- *
- *	Saves the specified entry as the hint for
- *	future lookups.  only a read lock is held on map,
- *      so make sure the store is atomic... OSCompareAndSwap
- *	guarantees this... also, we don't care if we collide
- *	and someone else wins and stores their 'hint'
- */
-#define SAVE_HINT_MAP_READ(map, value) \
-	MACRO_BEGIN                                                     \
-	OSCompareAndSwapPtr((map)->hint, value, &(map)->hint); \
-	MACRO_END
-
 
 /*
  *	SAVE_HINT_MAP_WRITE:
@@ -130,8 +111,7 @@ RB_HEAD( rb_head, vm_map_store );
  *	Saves the specified entry as the hint for
  *	future lookups.  write lock held on map,
  *      so no one else can be writing or looking
- *      until the lock is dropped, so it's safe
- *      to just do an assignment
+ *      until the lock is dropped.
  */
 #define SAVE_HINT_MAP_WRITE(map, value) \
 	MACRO_BEGIN                    \
@@ -145,29 +125,57 @@ RB_HEAD( rb_head, vm_map_store );
 
 #define SKIP_RB_TREE            0xBAADC0D1
 
-#define VM_MAP_ENTRY_CREATE     1
-#define VM_MAP_ENTRY_DELETE     2
+extern void vm_map_store_init(
+	struct vm_map_header   *header);
 
-void vm_map_store_init( struct vm_map_header*  );
-boolean_t vm_map_store_lookup_entry( struct _vm_map*, vm_map_offset_t, struct vm_map_entry**);
-void    vm_map_store_update( struct _vm_map*, struct vm_map_entry*, int);
-void    _vm_map_store_entry_link( struct vm_map_header *, struct vm_map_entry*, struct vm_map_entry*);
-void    vm_map_store_entry_link( struct _vm_map*, struct vm_map_entry*, struct vm_map_entry*, vm_map_kernel_flags_t);
-void    _vm_map_store_entry_unlink( struct vm_map_header *, struct vm_map_entry*, bool);
-void    vm_map_store_entry_unlink( struct _vm_map*, struct vm_map_entry*, bool);
-void    vm_map_store_update_first_free( struct _vm_map*, struct vm_map_entry*, boolean_t new_entry_creation);
-void    vm_map_store_copy_reset( struct vm_map_copy*, struct vm_map_entry*);
+extern bool vm_map_store_lookup_entry(
+	struct _vm_map         *map,
+	vm_map_offset_t         address,
+	struct vm_map_entry   **entryp);
+
+extern void _vm_map_store_entry_link(
+	struct vm_map_header   *header,
+	struct vm_map_entry    *after_where,
+	struct vm_map_entry    *entry);
+
+extern void vm_map_store_entry_link(
+	struct _vm_map         *map,
+	struct vm_map_entry    *after_where,
+	struct vm_map_entry    *entry,
+	vm_map_kernel_flags_t   vmk_flags);
+
+extern void _vm_map_store_entry_unlink(
+	struct vm_map_header   *header,
+	struct vm_map_entry    *entry,
+	bool                    check_permanent);
+
+extern void vm_map_store_entry_unlink(
+	struct _vm_map         *map,
+	struct vm_map_entry    *entry,
+	bool                    check_permanent);
+
+extern void vm_map_store_update_first_free(
+	struct _vm_map         *map,
+	struct vm_map_entry    *entry,
+	bool                    new_entry_creation);
+
+extern void vm_map_store_copy_reset(
+	struct vm_map_copy     *copy_map,
+	struct vm_map_entry    *entry);
+
 #if MACH_ASSERT
-boolean_t first_free_is_valid_store( struct _vm_map*);
+extern bool first_free_is_valid_store(
+	struct _vm_map         *map);
 #endif
-boolean_t vm_map_store_has_RB_support( struct vm_map_header *hdr );
 
-struct vm_map_entry *
-vm_map_store_find_space(
+extern bool vm_map_store_has_RB_support(
+	struct vm_map_header   *header);
+
+extern struct vm_map_entry *vm_map_store_find_space(
 	vm_map_t                map,
 	vm_map_offset_t         hint,
 	vm_map_offset_t         limit,
-	boolean_t               backwards,
+	bool                    backwards,
 	vm_map_offset_t         guard_offset,
 	vm_map_size_t           size,
 	vm_map_offset_t         mask,

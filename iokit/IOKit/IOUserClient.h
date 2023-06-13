@@ -243,6 +243,8 @@ protected:
 #ifdef XNU_KERNEL_PRIVATE
 
 public:
+	UInt8        __opaque_start[0];
+
 	OSSet * mappings;
 	UInt8   sharedInstance;
 	UInt8   closed;
@@ -252,17 +254,15 @@ public:
 	    defaultLocking:1,
 	    defaultLockingSingleThreadExternalMethod:1,
 	    defaultLockingSetProperties:1,
-	    __reservedA:3;
+	    opened:1,
+	    __reservedA:2;
 	volatile SInt32 __ipc;
 	queue_head_t owners;
-	IORWLock * lock;
-	IOLock   * filterLock;
-#if __LP64__
-	void  * __reserved[3];
-#else
-	void  * __reserved[2];
-#endif
+	IORWLock     lock;
+	IOLock       filterLock;
+	void        *__reserved[1];
 
+	UInt8        __opaque_end[0];
 #else /* XNU_KERNEL_PRIVATE */
 private:
 	void  * __reserved[9];
@@ -597,7 +597,7 @@ class IOUserIterator : public OSIterator
 	OSDeclareDefaultStructors(IOUserIterator);
 public:
 	OSObject    *       userIteratorObject;
-	IOLock      *       lock;
+	IOLock              lock;
 
 	static IOUserIterator * withIterator(LIBKERN_CONSUMED OSIterator * iter);
 	virtual bool init( void ) APPLE_KEXT_OVERRIDE;

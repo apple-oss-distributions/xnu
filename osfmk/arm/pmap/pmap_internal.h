@@ -285,37 +285,48 @@ pmap_lock(pmap_t pmap, pmap_lock_mode_t mode)
  * @param pmap The pmap whose lock to attempt to acquire.
  * @param mode Whether to grab the lock as shared (read-only) or exclusive (read/write).
  *
- * @return true if the lock was acquired, false otherwise.
+ * @return true if the lock was acquired, false if it was not and the caller should
+ *         abort to some preemptible state to allow the preemption.
  */
 static inline bool
 pmap_lock_preempt(pmap_t pmap, pmap_lock_mode_t mode)
 {
 	bool ret = false;
 
+	/**
+	 * When the lock cannot be acquired, we check if we are preemptible.
+	 *
+	 * If we are already preemptible, there's no point of exiting this function and aborting.
+	 *
+	 * Also, if we are very early in boot, we should just spin. This is similar to how
+	 * pmap_verify_preemptible() is used in pmap.
+	 */
+	do {
 #if !XNU_MONITOR
-	mp_disable_preemption();
+		mp_disable_preemption();
 #endif
 
-	bool (^check_preemption)(void) = ^{
-		return pmap_pending_preemption();
-	};
+		bool (^check_preemption)(void) = ^{
+			return pmap_pending_preemption();
+		};
 
-	switch (mode) {
-	case PMAP_LOCK_SHARED:
-		ret = lck_rw_lock_shared_b(&pmap->rwlock, check_preemption);
-		break;
-	case PMAP_LOCK_EXCLUSIVE:
-		ret = lck_rw_lock_exclusive_b(&pmap->rwlock, check_preemption);
-		break;
-	default:
-		panic("%s: Unknown pmap_lock_mode. pmap=%p, mode=%d", __func__, pmap, mode);
-	}
+		switch (mode) {
+		case PMAP_LOCK_SHARED:
+			ret = lck_rw_lock_shared_b(&pmap->rwlock, check_preemption);
+			break;
+		case PMAP_LOCK_EXCLUSIVE:
+			ret = lck_rw_lock_exclusive_b(&pmap->rwlock, check_preemption);
+			break;
+		default:
+			panic("%s: Unknown pmap_lock_mode. pmap=%p, mode=%d", __func__, pmap, mode);
+		}
 
-	if (!ret) {
+		if (!ret) {
 #if !XNU_MONITOR
-		mp_enable_preemption();
+			mp_enable_preemption();
 #endif
-	}
+		}
+	} while (!ret && (preemption_enabled() || (startup_phase < STARTUP_SUB_EARLY_BOOT)));
 
 	return ret;
 }

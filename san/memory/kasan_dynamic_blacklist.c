@@ -504,7 +504,6 @@ static const struct {
 	TS(MEMW),
 	TS(STRR),
 	TS(STRW),
-	TS(KFREE),
 	TS(ZFREE),
 	TS(FSFREE),
 	TS(UAF),

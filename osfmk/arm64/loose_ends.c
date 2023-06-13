@@ -706,55 +706,6 @@ flsll(unsigned long long mask)
 	return (sizeof(mask) << 3) - __builtin_clzll(mask);
 }
 
-#undef bcmp
-int
-bcmp(
-	const void *pa,
-	const void *pb,
-	size_t len)
-{
-	const char     *a = (const char *) pa;
-	const char     *b = (const char *) pb;
-
-	if (len == 0) {
-		return 0;
-	}
-
-	do{
-		if (*a++ != *b++) {
-			break;
-		}
-	} while (--len);
-
-	/*
-	 * Check for the overflow case but continue to handle the non-overflow
-	 * case the same way just in case someone is using the return value
-	 * as more than zero/non-zero
-	 */
-	if ((len & 0xFFFFFFFF00000000ULL) && !(len & 0x00000000FFFFFFFFULL)) {
-		return 0xFFFFFFFFL;
-	} else {
-		return (int)len;
-	}
-}
-
-#undef memcmp
-MARK_AS_HIBERNATE_TEXT
-int
-memcmp(const void *s1, const void *s2, size_t n)
-{
-	if (n != 0) {
-		const unsigned char *p1 = s1, *p2 = s2;
-
-		do {
-			if (*p1++ != *p2++) {
-				return *--p1 - *--p2;
-			}
-		} while (--n != 0);
-	}
-	return 0;
-}
-
 kern_return_t
 copypv(addr64_t source, addr64_t sink, unsigned int size, int which)
 {

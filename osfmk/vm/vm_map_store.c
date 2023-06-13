@@ -28,18 +28,19 @@
 
 #include <kern/backtrace.h>
 #include <mach/sdt.h>
-#include <vm/vm_map_store.h>
+#include <vm/vm_map.h>
 #include <vm/vm_pageout.h> /* for vm_debug_events */
+#include <sys/code_signing.h>
 
 #if MACH_ASSERT
-boolean_t
+bool
 first_free_is_valid_store( vm_map_t map )
 {
 	return first_free_is_valid_ll( map );
 }
 #endif
 
-boolean_t
+bool
 vm_map_store_has_RB_support( struct vm_map_header *hdr )
 {
 	if ((void*)hdr->rb_head_store.rbh_root == (void*)(int)SKIP_RB_TREE) {
@@ -59,15 +60,13 @@ vm_map_store_init( struct vm_map_header *hdr )
 #endif
 }
 
-static inline boolean_t
+static inline bool
 _vm_map_store_lookup_entry(
 	vm_map_t                map,
 	vm_map_offset_t         address,
 	vm_map_entry_t          *entry)         /* OUT */
 {
-#ifdef VM_MAP_STORE_USE_LL
-	return vm_map_store_lookup_entry_ll( map, address, entry );
-#elif defined VM_MAP_STORE_USE_RB
+#ifdef VM_MAP_STORE_USE_RB
 	if (vm_map_store_has_RB_support( &map->hdr )) {
 		return vm_map_store_lookup_entry_rb( map, address, entry );
 	} else {
@@ -78,32 +77,13 @@ _vm_map_store_lookup_entry(
 }
 
 __attribute__((noinline))
-boolean_t
+bool
 vm_map_store_lookup_entry(
 	vm_map_t                map,
 	vm_map_offset_t         address,
 	vm_map_entry_t          *entry)         /* OUT */
 {
 	return _vm_map_store_lookup_entry(map, address, entry);
-}
-
-void
-vm_map_store_update( vm_map_t map, vm_map_entry_t entry, int update_type )
-{
-	switch (update_type) {
-	case VM_MAP_ENTRY_CREATE:
-		break;
-	case VM_MAP_ENTRY_DELETE:
-		if ((map->holelistenabled == FALSE) && ((entry) == (map)->first_free)) {
-			(map)->first_free = vm_map_to_entry(map);
-		}
-		if ((entry) == (map)->hint) {
-			(map)->hint = vm_map_to_entry(map);
-		}
-		break;
-	default:
-		break;
-	}
 }
 
 /*
@@ -120,17 +100,24 @@ vm_map_store_update( vm_map_t map, vm_map_entry_t entry, int update_type )
  */
 
 void
-_vm_map_store_entry_link( struct vm_map_header * mapHdr, vm_map_entry_t after_where, vm_map_entry_t entry)
+_vm_map_store_entry_link(
+	struct vm_map_header   *mapHdr,
+	vm_map_entry_t          after_where,
+	vm_map_entry_t          entry)
 {
 	assert(entry->vme_start < entry->vme_end);
 	if (__improbable(vm_debug_events)) {
-		DTRACE_VM4(map_entry_link, vm_map_t, (char *)mapHdr - sizeof(lck_rw_t), vm_map_entry_t, entry, vm_address_t, entry->links.start, vm_address_t, entry->links.end);
+		DTRACE_VM4(map_entry_link,
+		    vm_map_t, __container_of(mapHdr, struct _vm_map, hdr),
+		    vm_map_entry_t, entry,
+		    vm_address_t, entry->vme_start,
+		    vm_address_t, entry->vme_end);
 	}
 
 	vm_map_store_entry_link_ll(mapHdr, after_where, entry);
 #ifdef VM_MAP_STORE_USE_RB
 	if (vm_map_store_has_RB_support( mapHdr )) {
-		vm_map_store_entry_link_rb(mapHdr, after_where, entry);
+		vm_map_store_entry_link_rb(mapHdr, entry);
 	}
 #endif
 #if MAP_ENTRY_INSERTION_DEBUG
@@ -151,11 +138,6 @@ vm_map_store_entry_link(
 	vm_map_entry_t          entry,
 	vm_map_kernel_flags_t   vmk_flags)
 {
-	vm_map_t VMEL_map;
-	vm_map_entry_t VMEL_entry;
-	VMEL_map = (map);
-	VMEL_entry = (entry);
-
 	if (entry->is_sub_map) {
 		assertf(VM_MAP_PAGE_SHIFT(VME_SUBMAP(entry)) >= VM_MAP_PAGE_SHIFT(map),
 		    "map %p (%d) entry %p submap %p (%d)\n",
@@ -163,18 +145,48 @@ vm_map_store_entry_link(
 		    VME_SUBMAP(entry), VM_MAP_PAGE_SHIFT(VME_SUBMAP(entry)));
 	}
 
-	_vm_map_store_entry_link(&VMEL_map->hdr, after_where, VMEL_entry);
-	if (VMEL_map->disable_vmentry_reuse == TRUE) {
-		UPDATE_HIGHEST_ENTRY_END( VMEL_map, VMEL_entry);
+	_vm_map_store_entry_link(&map->hdr, after_where, entry);
+
+	if (map->disable_vmentry_reuse == TRUE) {
+		/*
+		 * GuardMalloc support:
+		 * Some of these entries are created with MAP_FIXED.
+		 * Some are created with a very high hint address.
+		 * So we use aliases and address ranges to make sure
+		 * that those special regions (nano, jit etc) don't
+		 * result in our highest hint being set to near
+		 * the end of the map and future alloctions getting
+		 * KERN_NO_SPACE when running with guardmalloc.
+		 */
+		int alias = VME_ALIAS(entry);
+
+		assert(!map->is_nested_map);
+		if (alias != VM_MEMORY_MALLOC_NANO &&
+		    alias != VM_MEMORY_MALLOC_TINY &&
+		    alias != VM_MEMORY_MALLOC_SMALL &&
+		    alias != VM_MEMORY_MALLOC_MEDIUM &&
+		    alias != VM_MEMORY_MALLOC_LARGE &&
+		    alias != VM_MEMORY_MALLOC_HUGE &&
+		    entry->used_for_jit == 0 &&
+		    (entry->vme_start < SHARED_REGION_BASE ||
+		    entry->vme_start >= (SHARED_REGION_BASE + SHARED_REGION_SIZE)) &&
+		    map->highest_entry_end < entry->vme_end) {
+			map->highest_entry_end = entry->vme_end;
+		}
 	} else {
-		update_first_free_ll(VMEL_map, VMEL_map->first_free);
+		update_first_free_ll(map, map->first_free);
 #ifdef VM_MAP_STORE_USE_RB
-		if (vm_map_store_has_RB_support( &VMEL_map->hdr )) {
-			update_first_free_rb(VMEL_map, entry, TRUE);
+		if (vm_map_store_has_RB_support(&map->hdr)) {
+			update_first_free_rb(map, entry, TRUE);
 		}
 #endif
 	}
+
+#if CODE_SIGNING_MONITOR
+	(void) vm_map_entry_cs_associate(map, entry, vmk_flags);
+#else
 	(void) vmk_flags;
+#endif
 }
 
 void
@@ -184,7 +196,11 @@ _vm_map_store_entry_unlink(
 	bool check_permanent)
 {
 	if (__improbable(vm_debug_events)) {
-		DTRACE_VM4(map_entry_unlink, vm_map_t, (char *)mapHdr - sizeof(lck_rw_t), vm_map_entry_t, entry, vm_address_t, entry->links.start, vm_address_t, entry->links.end);
+		DTRACE_VM4(map_entry_unlink,
+		    vm_map_t, __container_of(mapHdr, struct _vm_map, hdr),
+		    vm_map_entry_t, entry,
+		    vm_address_t, entry->vme_start,
+		    vm_address_t, entry->vme_end);
 	}
 
 	/*
@@ -192,7 +208,11 @@ _vm_map_store_entry_unlink(
 	 * clear "permanent" first if it wants it to be bypassed.
 	 */
 	if (check_permanent) {
-		assertf(!entry->vme_permanent, "mapHdr %p entry %p [ 0x%llx end 0x%llx ] prot 0x%x/0x%x submap %d\n", mapHdr, entry, (uint64_t)entry->vme_start, (uint64_t)entry->vme_end, entry->protection, entry->max_protection, entry->is_sub_map);
+		assertf(!entry->vme_permanent,
+		    "mapHdr %p entry %p [ 0x%llx end 0x%llx ] prot 0x%x/0x%x submap %d\n",
+		    mapHdr, entry,
+		    (uint64_t)entry->vme_start, (uint64_t)entry->vme_end,
+		    entry->protection, entry->max_protection, entry->is_sub_map);
 	}
 
 	vm_map_store_entry_unlink_ll(mapHdr, entry);
@@ -215,6 +235,9 @@ vm_map_store_entry_unlink(
 	VMEU_map = (map);
 	VMEU_entry = (entry);
 
+	if (entry == map->hint) {
+		map->hint = vm_map_to_entry(map);
+	}
 	if (map->holelistenabled == FALSE) {
 		if (VMEU_entry->vme_start <= VMEU_map->first_free->vme_start) {
 			VMEU_first_free = VMEU_entry->vme_prev;
@@ -223,7 +246,7 @@ vm_map_store_entry_unlink(
 		}
 	}
 	_vm_map_store_entry_unlink(&VMEU_map->hdr, VMEU_entry, check_permanent);
-	vm_map_store_update( map, entry, VM_MAP_ENTRY_DELETE);
+
 	update_first_free_ll(VMEU_map, VMEU_first_free);
 #ifdef VM_MAP_STORE_USE_RB
 	if (vm_map_store_has_RB_support( &VMEU_map->hdr )) {
@@ -245,7 +268,10 @@ vm_map_store_copy_reset( vm_map_copy_t copy, vm_map_entry_t entry)
 }
 
 void
-vm_map_store_update_first_free( vm_map_t map, vm_map_entry_t first_free_entry, boolean_t new_entry_creation)
+vm_map_store_update_first_free(
+	vm_map_t                map,
+	vm_map_entry_t          first_free_entry,
+	bool                    new_entry_creation)
 {
 	update_first_free_ll(map, first_free_entry);
 #ifdef VM_MAP_STORE_USE_RB
@@ -414,7 +440,12 @@ vm_map_store_find_space_forward(
 	 */
 
 	if (__improbable(map->disable_vmentry_reuse)) {
-		VM_MAP_HIGHEST_ENTRY(map, entry, start);
+		assert(!map->is_nested_map);
+
+		start = map->highest_entry_end + PAGE_SIZE_64;
+		while (vm_map_lookup_entry(map, start, &entry)) {
+			start = entry->vme_end + PAGE_SIZE_64;
+		}
 	} else if (use_holes) {
 		entry = CAST_TO_VM_MAP_ENTRY(map->holes_list);
 		if (entry == VM_MAP_ENTRY_NULL) {
@@ -530,7 +561,7 @@ vm_map_store_find_space(
 	vm_map_t                map,
 	vm_map_offset_t         hint,
 	vm_map_offset_t         limit,
-	boolean_t               backwards,
+	bool                    backwards,
 	vm_map_offset_t         guard_offset,
 	vm_map_size_t           size,
 	vm_map_offset_t         mask,

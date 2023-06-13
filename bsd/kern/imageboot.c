@@ -814,11 +814,6 @@ authenticate_root_with_img4(const char *rootpath)
 
 	DBG_TRACE("Check %s\n", rootpath);
 
-	if (img4if == NULL) {
-		AUTHPRNT("AppleImage4 is not ready");
-		return EAGAIN;
-	}
-
 	ticket_path = imgboot_get_apticket_path(rootpath, &ticket_pathsz);
 	if (ticket_path == NULL) {
 		AUTHPRNT("Cannot construct ticket path - out of memory");

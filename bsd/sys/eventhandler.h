@@ -194,7 +194,6 @@ do {                                                                    \
 } while(0)
 
 void eventhandler_init(void);
-extern void eventhandler_reap_caches(boolean_t);
 eventhandler_tag eventhandler_register(struct eventhandler_lists_ctxt *evthdlr_lists_ctxt,
     struct eventhandler_list *list, const char *name, void *func, struct eventhandler_entry_arg arg, int priority);
 void eventhandler_deregister(struct eventhandler_list *list,

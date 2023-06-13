@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -200,14 +200,9 @@ static unsigned int in6m_debug;                 /* debugging (disabled) */
 static struct zone *in6m_zone;                  /* zone for in6_multi */
 #define IN6M_ZONE_NAME          "in6_multi"     /* zone name */
 
-static ZONE_DEFINE(imm_zone, "in6_multi_mship",
-    sizeof(struct in6_multi_mship), ZC_ZFREE_CLEARMEM);
-
-static ZONE_DEFINE(ip6ms_zone, "ip6_msource",
-    sizeof(struct ip6_msource), ZC_ZFREE_CLEARMEM);
-
-static ZONE_DEFINE(in6ms_zone, "in6_msource",
-    sizeof(struct in6_msource), ZC_ZFREE_CLEARMEM);
+static KALLOC_TYPE_DEFINE(imm_zone, struct in6_multi_mship, NET_KT_DEFAULT);
+static KALLOC_TYPE_DEFINE(ip6ms_zone, struct ip6_msource, NET_KT_DEFAULT);
+static KALLOC_TYPE_DEFINE(in6ms_zone, struct in6_msource, NET_KT_DEFAULT);
 
 static LCK_RW_DECLARE_ATTR(in6_multihead_lock, &in6_multihead_lock_grp,
     &in6_multihead_lock_attr);
@@ -1566,7 +1561,7 @@ out_imo_locked:
 	IM6O_REMREF(imo);       /* from in6p_findmoptions() */
 
 	/* schedule timer now that we've dropped the lock(s) */
-	mld_set_timeout(&mtp);
+	mld_set_fast_timeout(&mtp);
 
 	return error;
 }
@@ -2332,7 +2327,7 @@ out_imo_locked:
 	IM6O_REMREF(imo);       /* from in6p_findmoptions() */
 
 	/* schedule timer now that we've dropped the lock(s) */
-	mld_set_timeout(&mtp);
+	mld_set_fast_timeout(&mtp);
 
 	return error;
 }
@@ -2627,7 +2622,6 @@ out_im6f_rollback:
 	if (is_final) {
 		/* Remove the gap in the membership array. */
 		VERIFY(inm == imo->im6o_membership[idx]);
-		imo->im6o_membership[idx] = NULL;
 		IN6M_REMREF(inm);
 
 		for (++idx; idx < imo->im6o_num_memberships; ++idx) {
@@ -2635,6 +2629,10 @@ out_im6f_rollback:
 			imo->im6o_mfilters[idx - 1] = imo->im6o_mfilters[idx];
 		}
 		imo->im6o_num_memberships--;
+
+		/* Re-initialize the now unused tail of the list */
+		imo->im6o_membership[imo->im6o_num_memberships] = NULL;
+		im6f_init(&imo->im6o_mfilters[imo->im6o_num_memberships], MCAST_UNDEFINED, MCAST_EXCLUDE);
 	}
 
 out_locked:
@@ -2642,7 +2640,7 @@ out_locked:
 	IM6O_REMREF(imo);       /* from in6p_findmoptions() */
 
 	/* schedule timer now that we've dropped the lock(s) */
-	mld_set_timeout(&mtp);
+	mld_set_fast_timeout(&mtp);
 
 	return error;
 }
@@ -2923,7 +2921,7 @@ out_imo_locked:
 	IM6O_REMREF(imo);       /* from in6p_findmoptions() */
 
 	/* schedule timer now that we've dropped the lock(s) */
-	mld_set_timeout(&mtp);
+	mld_set_fast_timeout(&mtp);
 
 	return error;
 }

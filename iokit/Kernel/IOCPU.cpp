@@ -183,7 +183,7 @@ PE_cpu_perfmon_interrupt_enable(cpu_id_t target, boolean_t enable)
 	}
 
 	if (enable) {
-		targetCPU->getProvider()->registerInterrupt(1, targetCPU, (IOInterruptAction)pmi_handler, NULL);
+		targetCPU->getProvider()->registerInterrupt(1, targetCPU, (IOInterruptAction)(void (*)(void))pmi_handler, NULL);
 		targetCPU->getProvider()->enableInterrupt(1);
 	} else {
 		targetCPU->getProvider()->disableInterrupt(1);

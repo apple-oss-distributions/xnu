@@ -232,6 +232,18 @@ bitmap_full(bitmap_t *__header_indexable map, uint nbits)
 }
 
 inline static bool
+bitmap_is_empty(bitmap_t *__header_indexable map, uint nbits)
+{
+	for (uint i = 0; i < BITMAP_LEN(nbits); i++) {
+		if (map[i]) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+inline static bool
 bitmap_is_full(bitmap_t *__header_indexable map, uint nbits)
 {
 	uint i;

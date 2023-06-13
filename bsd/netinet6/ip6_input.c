@@ -168,6 +168,7 @@ LCK_RW_DECLARE(in6_ifaddr_rwlock, &in6_ifaddr_rwlock_grp);
 
 /* Protected by in6_ifaddr_rwlock */
 struct in6_ifaddrhead in6_ifaddrhead;
+uint32_t in6_ifaddrlist_genid = 0;
 struct in6_ifaddrhashhead * in6_ifaddrhashtbl;
 uint32_t in6_ifaddrhmask;
 
@@ -984,6 +985,11 @@ ip6_input(struct mbuf *m)
 		in6_ifstat_inc(inifp, ifs6_in_addrerr);
 		goto bad;
 	}
+
+	if (((ntohl(ip6->ip6_flow & IPV6_FLOW_ECN_MASK) >> 20) & IPTOS_ECN_ECT1) == IPTOS_ECN_ECT1) {
+		m->m_pkthdr.pkt_ext_flags |= PKTF_EXT_L4S;
+	}
+
 #if 0
 	/*
 	 * Reject packets with IPv4 compatible addresses (auto tunnel).

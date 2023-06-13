@@ -65,6 +65,7 @@
 #include <libkern/amfi/amfi.h>
 #include <libkern/section_keywords.h>
 #include <sys/errno.h>
+#include <sys/code_signing.h>
 #include <sys/trust_caches.h>
 
 #include <machine/atomic.h>
@@ -128,7 +129,7 @@ static void flush_mmu_tlb_region_asid_async(vm_offset_t va, size_t length, pmap_
 static void flush_mmu_tlb_full_asid_async(pmap_t pmap);
 static pt_entry_t wimg_to_pte(unsigned int wimg, pmap_paddr_t pa);
 
-static const struct page_table_ops native_pt_ops =
+const struct page_table_ops native_pt_ops =
 {
 	.alloc_id = alloc_asid,
 	.free_id = free_asid,
@@ -358,9 +359,6 @@ extern const vm_map_address_t physmap_end;
 
 extern int maxproc, hard_maxproc;
 
-vm_address_t MARK_AS_PMAP_DATA image4_slab = 0;
-vm_address_t MARK_AS_PMAP_DATA image4_late_slab = 0;
-
 /* The number of address bits one TTBR can cover. */
 #define PGTABLE_ADDR_BITS (64ULL - T0SZ_BOOT)
 
@@ -468,6 +466,22 @@ SECURITY_READ_ONLY_LATE(boolean_t)      pmap_initialized = FALSE;       /* Has p
 
 SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm_pmap_max_offset_default  = 0x0;
 #if defined(__arm64__)
+/* end of shared region + 512MB for various purposes */
+#define ARM64_MIN_MAX_ADDRESS (SHARED_REGION_BASE_ARM64 + SHARED_REGION_SIZE_ARM64 + 0x20000000)
+_Static_assert((ARM64_MIN_MAX_ADDRESS > SHARED_REGION_BASE_ARM64) && (ARM64_MIN_MAX_ADDRESS <= MACH_VM_MAX_ADDRESS),
+    "Minimum address space size outside allowable range");
+
+// Max offset is 13.375GB for devices with "large" memory config
+#define ARM64_MAX_OFFSET_DEVICE_LARGE (ARM64_MIN_MAX_ADDRESS + 0x138000000)
+// Max offset is 9.375GB for devices with "small" memory config
+#define ARM64_MAX_OFFSET_DEVICE_SMALL (ARM64_MIN_MAX_ADDRESS + 0x38000000)
+
+
+_Static_assert((ARM64_MAX_OFFSET_DEVICE_LARGE > ARM64_MIN_MAX_ADDRESS) && (ARM64_MAX_OFFSET_DEVICE_LARGE <= MACH_VM_MAX_ADDRESS),
+    "Large device address space size outside allowable range");
+_Static_assert((ARM64_MAX_OFFSET_DEVICE_SMALL > ARM64_MIN_MAX_ADDRESS) && (ARM64_MAX_OFFSET_DEVICE_SMALL <= MACH_VM_MAX_ADDRESS),
+    "Small device address space size outside allowable range");
+
 #  ifdef XNU_TARGET_OS_OSX
 SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = MACH_VM_MAX_ADDRESS;
 #  else
@@ -492,13 +506,20 @@ static uint64_t asid_plru_gencount MARK_AS_PMAP_DATA = 0;
 
 
 #if __ARM_MIXED_PAGE_SIZE__
-SECURITY_READ_ONLY_LATE(pmap_t) sharedpage_pmap_4k;
+SECURITY_READ_ONLY_LATE(pmap_t) commpage_pmap_4k;
 #endif
-SECURITY_READ_ONLY_LATE(pmap_t) sharedpage_pmap_default;
-SECURITY_READ_ONLY_LATE(static vm_address_t) sharedpage_text_kva = 0;
-SECURITY_READ_ONLY_LATE(static vm_address_t) sharedpage_ro_data_kva = 0;
+SECURITY_READ_ONLY_LATE(pmap_t) commpage_pmap_default;
+SECURITY_READ_ONLY_LATE(static vm_address_t) commpage_text_kva = 0;
+SECURITY_READ_ONLY_LATE(static vm_address_t) commpage_ro_data_kva = 0;
 
 /* PTE Define Macros */
+
+#define ARM_PTE_IS_COMPRESSED(x, p) \
+	((((x) & 0x3) == 0) && /* PTE is not valid... */                      \
+	 ((x) & ARM_PTE_COMPRESSED) && /* ...has "compressed" marker" */      \
+	 ((!((x) & ~ARM_PTE_COMPRESSED_MASK)) || /* ...no other bits */       \
+	 (panic("compressed PTE %p 0x%llx has extra bits 0x%llx: corrupted?", \
+	        (p), (x), (x) & ~ARM_PTE_COMPRESSED_MASK), FALSE)))
 
 #define pte_is_wired(pte)                                                               \
 	(((pte) & ARM_PTE_WIRED_MASK) == ARM_PTE_WIRED)
@@ -771,7 +792,7 @@ const unsigned int arm_pt_root_size = PMAP_ROOT_ALLOC_SIZE;
 #define PMAP_TT_DEALLOCATE_NOBLOCK      0x1
 
 
-static void pmap_unmap_sharedpage(
+static void pmap_unmap_commpage(
 	pmap_t pmap);
 
 static boolean_t
@@ -878,7 +899,7 @@ PMAP_SUPPORT_PROTOTYPES(
 		unsigned int cacheattr), PMAP_BATCH_SET_CACHE_ATTRIBUTES_INDEX);
 
 PMAP_SUPPORT_PROTOTYPES(
-	void,
+	kern_return_t,
 	pmap_change_wiring, (pmap_t pmap,
 	vm_map_address_t v,
 	boolean_t wired), PMAP_CHANGE_WIRING_INDEX);
@@ -912,7 +933,7 @@ PMAP_SUPPORT_PROTOTYPES(
 
 PMAP_SUPPORT_PROTOTYPES(
 	kern_return_t,
-	pmap_insert_sharedpage, (pmap_t pmap), PMAP_INSERT_SHAREDPAGE_INDEX);
+	pmap_insert_commpage, (pmap_t pmap), PMAP_INSERT_COMMPAGE_INDEX);
 
 
 PMAP_SUPPORT_PROTOTYPES(
@@ -1123,6 +1144,11 @@ PMAP_SUPPORT_PROTOTYPES(
 
 PMAP_SUPPORT_PROTOTYPES(
 	kern_return_t,
+	pmap_check_trust_cache_runtime_for_uuid, (const uint8_t check_uuid[kUUIDSize]),
+	PMAP_CHECK_TRUST_CACHE_RUNTIME_FOR_UUID_INDEX);
+
+PMAP_SUPPORT_PROTOTYPES(
+	kern_return_t,
 	pmap_load_trust_cache_with_type, (TCType_t type,
 	const vm_address_t pmap_img4_payload,
 	const vm_size_t pmap_img4_payload_len,
@@ -1164,15 +1190,27 @@ PMAP_SUPPORT_PROTOTYPES(
 	pmap_disassociate_provisioning_profile, (pmap_cs_code_directory_t * cd_entry),
 	PMAP_DISASSOCIATE_PROVISIONING_PROFILE_INDEX);
 
-#endif
+PMAP_SUPPORT_PROTOTYPES(
+	kern_return_t,
+	pmap_associate_kernel_entitlements, (pmap_cs_code_directory_t * cd_entry,
+	const void *kernel_entitlements),
+	PMAP_ASSOCIATE_KERNEL_ENTITLEMENTS_INDEX);
 
 PMAP_SUPPORT_PROTOTYPES(
-	uint32_t,
-	pmap_lookup_in_static_trust_cache, (const uint8_t cdhash[CS_CDHASH_LEN]), PMAP_LOOKUP_IN_STATIC_TRUST_CACHE_INDEX);
+	kern_return_t,
+	pmap_resolve_kernel_entitlements, (pmap_t pmap,
+	const void **kernel_entitlements),
+	PMAP_RESOLVE_KERNEL_ENTITLEMENTS_INDEX);
 
 PMAP_SUPPORT_PROTOTYPES(
-	bool,
-	pmap_lookup_in_loaded_trust_caches, (const uint8_t cdhash[CS_CDHASH_LEN]), PMAP_LOOKUP_IN_LOADED_TRUST_CACHES_INDEX);
+	kern_return_t,
+	pmap_accelerate_entitlements, (pmap_cs_code_directory_t * cd_entry),
+	PMAP_ACCELERATE_ENTITLEMENTS_INDEX);
+
+PMAP_SUPPORT_PROTOTYPES(
+	kern_return_t,
+	pmap_cs_allow_invalid, (pmap_t pmap),
+	PMAP_CS_ALLOW_INVALID_INDEX);
 
 PMAP_SUPPORT_PROTOTYPES(
 	void,
@@ -1186,13 +1224,23 @@ PMAP_SUPPORT_PROTOTYPES(
 
 PMAP_SUPPORT_PROTOTYPES(
 	void,
-	pmap_set_local_signing_public_key, (const uint8_t public_key[PMAP_ECC_P384_PUBLIC_KEY_SIZE]),
+	pmap_set_local_signing_public_key, (const uint8_t public_key[PMAP_CS_LOCAL_SIGNING_KEY_SIZE]),
 	PMAP_SET_LOCAL_SIGNING_PUBLIC_KEY_INDEX);
 
 PMAP_SUPPORT_PROTOTYPES(
 	void,
 	pmap_unrestrict_local_signing, (const uint8_t cdhash[CS_CDHASH_LEN]),
 	PMAP_UNRESTRICT_LOCAL_SIGNING_INDEX);
+
+#endif
+
+PMAP_SUPPORT_PROTOTYPES(
+	uint32_t,
+	pmap_lookup_in_static_trust_cache, (const uint8_t cdhash[CS_CDHASH_LEN]), PMAP_LOOKUP_IN_STATIC_TRUST_CACHE_INDEX);
+
+PMAP_SUPPORT_PROTOTYPES(
+	bool,
+	pmap_lookup_in_loaded_trust_caches, (const uint8_t cdhash[CS_CDHASH_LEN]), PMAP_LOOKUP_IN_LOADED_TRUST_CACHES_INDEX);
 
 PMAP_SUPPORT_PROTOTYPES(
 	void,
@@ -1205,7 +1253,6 @@ PMAP_SUPPORT_PROTOTYPES(
 	pmap_footprint_suspend, (vm_map_t map,
 	boolean_t suspend),
 	PMAP_FOOTPRINT_SUSPEND_INDEX);
-
 
 
 
@@ -1258,7 +1305,7 @@ const void * __ptrauth_ppl_handler const ppl_handler_table[PMAP_COUNT] = {
 	[PMAP_DESTROY_INDEX] = pmap_destroy_internal,
 	[PMAP_ENTER_OPTIONS_INDEX] = pmap_enter_options_internal,
 	[PMAP_FIND_PA_INDEX] = pmap_find_pa_internal,
-	[PMAP_INSERT_SHAREDPAGE_INDEX] = pmap_insert_sharedpage_internal,
+	[PMAP_INSERT_COMMPAGE_INDEX] = pmap_insert_commpage_internal,
 	[PMAP_IS_EMPTY_INDEX] = pmap_is_empty_internal,
 	[PMAP_MAP_CPU_WINDOWS_COPY_INDEX] = pmap_map_cpu_windows_copy_internal,
 	[PMAP_RO_ZONE_MEMCPY_INDEX] = pmap_ro_zone_memcpy_internal,
@@ -1288,18 +1335,22 @@ const void * __ptrauth_ppl_handler const ppl_handler_table[PMAP_COUNT] = {
 	[PMAP_SET_TPRO_INDEX] = pmap_set_tpro_internal,
 	[PMAP_LOOKUP_IN_STATIC_TRUST_CACHE_INDEX] = pmap_lookup_in_static_trust_cache_internal,
 	[PMAP_LOOKUP_IN_LOADED_TRUST_CACHES_INDEX] = pmap_lookup_in_loaded_trust_caches_internal,
-	[PMAP_SET_COMPILATION_SERVICE_CDHASH_INDEX] = pmap_set_compilation_service_cdhash_internal,
-	[PMAP_MATCH_COMPILATION_SERVICE_CDHASH_INDEX] = pmap_match_compilation_service_cdhash_internal,
-	[PMAP_SET_LOCAL_SIGNING_PUBLIC_KEY_INDEX] = pmap_set_local_signing_public_key_internal,
-	[PMAP_UNRESTRICT_LOCAL_SIGNING_INDEX] = pmap_unrestrict_local_signing_internal,
+	[PMAP_CHECK_TRUST_CACHE_RUNTIME_FOR_UUID_INDEX] = pmap_check_trust_cache_runtime_for_uuid_internal,
 	[PMAP_LOAD_TRUST_CACHE_WITH_TYPE_INDEX] = pmap_load_trust_cache_with_type_internal,
 	[PMAP_QUERY_TRUST_CACHE_INDEX] = pmap_query_trust_cache_internal,
 	[PMAP_TOGGLE_DEVELOPER_MODE_INDEX] = pmap_toggle_developer_mode_internal,
 #if PMAP_CS_INCLUDE_CODE_SIGNING
+	[PMAP_SET_COMPILATION_SERVICE_CDHASH_INDEX] = pmap_set_compilation_service_cdhash_internal,
+	[PMAP_MATCH_COMPILATION_SERVICE_CDHASH_INDEX] = pmap_match_compilation_service_cdhash_internal,
+	[PMAP_SET_LOCAL_SIGNING_PUBLIC_KEY_INDEX] = pmap_set_local_signing_public_key_internal,
+	[PMAP_UNRESTRICT_LOCAL_SIGNING_INDEX] = pmap_unrestrict_local_signing_internal,
 	[PMAP_REGISTER_PROVISIONING_PROFILE_INDEX] = pmap_register_provisioning_profile_internal,
 	[PMAP_UNREGISTER_PROVISIONING_PROFILE_INDEX] = pmap_unregister_provisioning_profile_internal,
 	[PMAP_ASSOCIATE_PROVISIONING_PROFILE_INDEX] = pmap_associate_provisioning_profile_internal,
 	[PMAP_DISASSOCIATE_PROVISIONING_PROFILE_INDEX] = pmap_disassociate_provisioning_profile_internal,
+	[PMAP_ASSOCIATE_KERNEL_ENTITLEMENTS_INDEX] = pmap_associate_kernel_entitlements_internal,
+	[PMAP_RESOLVE_KERNEL_ENTITLEMENTS_INDEX] = pmap_resolve_kernel_entitlements_internal,
+	[PMAP_ACCELERATE_ENTITLEMENTS_INDEX] = pmap_accelerate_entitlements_internal,
 #endif
 	[PMAP_TRIM_INDEX] = pmap_trim_internal,
 	[PMAP_LEDGER_VERIFY_SIZE_INDEX] = pmap_ledger_verify_size_internal,
@@ -2416,9 +2467,9 @@ pmap_lockdown_ppl(void)
 	/* Mark the PPL as being locked down. */
 
 	mp_disable_preemption(); // for _nopreempt locking operations
-	pmap_ppl_lockdown_page(sharedpage_ro_data_kva, PVH_FLAG_LOCKDOWN_KC, false);
-	if (sharedpage_text_kva != 0) {
-		pmap_ppl_lockdown_page_with_prot(sharedpage_text_kva, PVH_FLAG_LOCKDOWN_KC,
+	pmap_ppl_lockdown_page(commpage_ro_data_kva, PVH_FLAG_LOCKDOWN_KC, false);
+	if (commpage_text_kva != 0) {
+		pmap_ppl_lockdown_page_with_prot(commpage_text_kva, PVH_FLAG_LOCKDOWN_KC,
 		    false, VM_PROT_READ | VM_PROT_EXECUTE);
 	}
 	mp_enable_preemption();
@@ -2474,9 +2525,15 @@ pmap_virtual_region(
 #else /* !(defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)) */
 #if defined(ARM_LARGE_MEMORY)
 	/* For large memory systems with no KTRR/CTRR such as virtual machines */
-	*startp = LOW_GLOBAL_BASE_ADDRESS & ~ARM_TT_L2_OFFMASK;
 	if (region_select == 0) {
+		*startp = LOW_GLOBAL_BASE_ADDRESS & ~ARM_TT_L2_OFFMASK;
 		*size = ((KERNEL_PMAP_HEAP_RANGE_START - *startp) & ~PAGE_MASK);
+		ret = TRUE;
+	}
+
+	if (region_select == 1) {
+		*startp = VREGION1_START;
+		*size = VREGION1_SIZE;
 		ret = TRUE;
 	}
 #else /* !defined(ARM_LARGE_MEMORY) */
@@ -2939,7 +2996,6 @@ pmap_create_options_internal(
 
 
 #if MACH_ASSERT
-	p->pmap_stats_assert = TRUE;
 	p->pmap_pid = 0;
 	strlcpy(p->pmap_procname, "<nil>", sizeof(p->pmap_procname));
 #endif /* MACH_ASSERT */
@@ -2957,6 +3013,22 @@ pmap_create_options_internal(
 	pmap_simple_lock(&pmaps_lock);
 	queue_enter(&map_pmap_list, p, pmap_t, pmaps);
 	pmap_simple_unlock(&pmaps_lock);
+
+	/*
+	 * Certain ledger balances can be adjusted outside the PVH lock in pmap_enter(),
+	 * which can lead to a concurrent disconnect operation making the balance
+	 * transiently negative.  The ledger should still ultimately balance out,
+	 * which we still check upon pmap destruction.
+	 */
+	ledger_disable_panic_on_negative(p->ledger, task_ledgers.phys_footprint);
+	ledger_disable_panic_on_negative(p->ledger, task_ledgers.internal);
+	ledger_disable_panic_on_negative(p->ledger, task_ledgers.internal_compressed);
+	ledger_disable_panic_on_negative(p->ledger, task_ledgers.iokit_mapped);
+	ledger_disable_panic_on_negative(p->ledger, task_ledgers.alternate_accounting);
+	ledger_disable_panic_on_negative(p->ledger, task_ledgers.alternate_accounting_compressed);
+	ledger_disable_panic_on_negative(p->ledger, task_ledgers.external);
+	ledger_disable_panic_on_negative(p->ledger, task_ledgers.reusable);
+	ledger_disable_panic_on_negative(p->ledger, task_ledgers.wired_mem);
 
 	return p;
 
@@ -3041,32 +3113,6 @@ pmap_set_process_internal(
 
 	pmap->pmap_pid = pid;
 	strlcpy(pmap->pmap_procname, procname, sizeof(pmap->pmap_procname));
-	if (pmap_ledgers_panic_leeway) {
-		/*
-		 * XXX FBDP
-		 * Some processes somehow trigger some issues that make
-		 * the pmap stats and ledgers go off track, causing
-		 * some assertion failures and ledger panics.
-		 * Turn off the sanity checks if we allow some ledger leeway
-		 * because of that.  We'll still do a final check in
-		 * pmap_check_ledgers() for discrepancies larger than the
-		 * allowed leeway after the address space has been fully
-		 * cleaned up.
-		 */
-		pmap->pmap_stats_assert = FALSE;
-		ledger_disable_panic_on_negative(pmap->ledger,
-		    task_ledgers.phys_footprint);
-		ledger_disable_panic_on_negative(pmap->ledger,
-		    task_ledgers.internal);
-		ledger_disable_panic_on_negative(pmap->ledger,
-		    task_ledgers.internal_compressed);
-		ledger_disable_panic_on_negative(pmap->ledger,
-		    task_ledgers.iokit_mapped);
-		ledger_disable_panic_on_negative(pmap->ledger,
-		    task_ledgers.alternate_accounting);
-		ledger_disable_panic_on_negative(pmap->ledger,
-		    task_ledgers.alternate_accounting_compressed);
-	}
 #endif /* MACH_ASSERT */
 }
 #endif /* MACH_ASSERT || XNU_MONITOR */
@@ -3195,7 +3241,7 @@ pmap_destroy_internal(
 		}
 	}
 #endif
-	pmap_unmap_sharedpage(pmap);
+	pmap_unmap_commpage(pmap);
 
 	pmap_simple_lock(&pmaps_lock);
 	queue_remove(&map_pmap_list, pmap, pmap_t, pmaps);
@@ -3646,9 +3692,9 @@ pmap_tt_deallocate(
  *       return with pmap unlocked.
  *
  * @param pmap The pmap containing the page table whose TTE is being removed.
- * @param va_start Beginning of the VA range mapped by the table being removed, for TLB maintenance
- * @param va_end Non-inclusive end of the VA range mapped by the table being removed, for TLB maintenance
- * @param need_strong_sync Indicates whether strong DSB should be used to synchronize TLB maintenance
+ * @param va_start Beginning of the VA range mapped by the table being removed, for TLB maintenance.
+ * @param va_end Non-inclusive end of the VA range mapped by the table being removed, for TLB maintenance.
+ * @param need_strong_sync Indicates whether strong DSB should be used to synchronize TLB maintenance.
  * @param ttep Pointer to the TTE that should be cleared out.
  * @param level The level of the page table that contains the TTE to be removed.
  */
@@ -3825,9 +3871,9 @@ pmap_tte_remove(
  *       return with pmap unlocked.
  *
  * @param pmap The pmap that owns the page table to be deallocated.
- * @param va_start Beginning of the VA range mapped by the table being removed, for TLB maintenance
- * @param va_end Non-inclusive end of the VA range mapped by the table being removed, for TLB maintenance
- * @param need_strong_sync Indicates whether strong DSB should be used to synchronize TLB maintenance
+ * @param va_start Beginning of the VA range mapped by the table being removed, for TLB maintenance.
+ * @param va_end Non-inclusive end of the VA range mapped by the table being removed, for TLB maintenance.
+ * @param need_strong_sync Indicates whether strong DSB should be used to synchronize TLB maintenance.
  * @param ttep Pointer to the `level` TTE to remove.
  * @param level The level of the table that contains an entry pointing to the
  *              table to be removed. The deallocated page table will be a
@@ -5769,18 +5815,10 @@ pmap_construct_pte(
 			assert(pmap->type != PMAP_TYPE_NESTED);
 			if (pa_valid(pa) && (!ppattr_pa_test_bits(pa, PP_ATTR_MODIFIED))) {
 				if (fault_type & VM_PROT_WRITE) {
-					if (set_XO) {
-						pte |= pt_attr_leaf_rwna(pt_attr);
-					} else {
-						pte |= pt_attr_leaf_rw(pt_attr);
-					}
+					pte |= pt_attr_leaf_rw(pt_attr);
 					*pp_attr_bits |= PP_ATTR_REFERENCED | PP_ATTR_MODIFIED;
 				} else {
-					if (set_XO) {
-						pte |= pt_attr_leaf_rona(pt_attr);
-					} else {
-						pte |= pt_attr_leaf_ro(pt_attr);
-					}
+					pte |= pt_attr_leaf_ro(pt_attr);
 					/*
 					 * Mark the page as MODFAULT so that a subsequent write
 					 * may be handled through arm_fast_fault().
@@ -5789,11 +5827,7 @@ pmap_construct_pte(
 					pte_set_was_writeable(pte, true);
 				}
 			} else {
-				if (set_XO) {
-					pte |= pt_attr_leaf_rwna(pt_attr);
-				} else {
-					pte |= pt_attr_leaf_rw(pt_attr);
-				}
+				pte |= pt_attr_leaf_rw(pt_attr);
 				*pp_attr_bits |= PP_ATTR_REFERENCED;
 			}
 		} else {
@@ -5850,6 +5884,12 @@ pmap_enter_options_internal(
 	if ((v) & pt_attr_leaf_offmask(pt_attr)) {
 		panic("pmap_enter_options() pmap %p v 0x%llx",
 		    pmap, (uint64_t)v);
+	}
+
+	/* Only check kernel_pmap here as CPUWINDOWS only exists in kernel address space. */
+	if (__improbable((pmap == kernel_pmap) && (v >= CPUWINDOWS_BASE) && (v < CPUWINDOWS_TOP))) {
+		panic("pmap_enter_options() kernel pmap %p v 0x%llx belongs to [CPUWINDOWS_BASE: 0x%llx, CPUWINDOWS_TOP: 0x%llx)",
+		    pmap, (uint64_t)v, (uint64_t)CPUWINDOWS_BASE, (uint64_t)CPUWINDOWS_TOP);
 	}
 
 	if ((pa) & pt_attr_leaf_offmask(pt_attr)) {
@@ -5960,6 +6000,21 @@ pmap_enter_options_internal(
 				drop_refcnt = true;
 			}
 		}
+
+#if XNU_MONITOR
+		/**
+		 * PPL-protected MMIO mappings handed to IOMMUs must be PPL-writable and cannot be removed,
+		 * but in support of hibernation we allow temporary read-only mappings of these pages to be
+		 * created and later removed.  We must therefore prevent an attacker from downgrading a
+		 * a writable mapping in order to allow it to be removed and remapped to something else.
+		 */
+		if (__improbable(had_valid_mapping && !pa_valid(pte_to_pa(spte)) &&
+		    (pte_to_xprr_perm(spte) != XPRR_KERN_RO_PERM) && !(prot & VM_PROT_WRITE) &&
+		    (pmap_cache_attributes((ppnum_t)atop(pte_to_pa(spte))) & PP_ATTR_MONITOR))) {
+			panic("%s: attempt to downgrade mapping of writable PPL-protected I/O address 0x%llx",
+			    __func__, (uint64_t)pte_to_pa(spte));
+		}
+#endif
 
 		if (had_valid_mapping && (pte_to_pa(spte) != pa)) {
 			/*
@@ -6359,7 +6414,7 @@ pmap_enter_options(
  *	In/out conditions:
  *			The mapping must already exist in the pmap.
  */
-MARK_AS_PMAP_TEXT void
+MARK_AS_PMAP_TEXT kern_return_t
 pmap_change_wiring_internal(
 	pmap_t pmap,
 	vm_map_address_t v,
@@ -6370,7 +6425,9 @@ pmap_change_wiring_internal(
 
 	validate_pmap_mutable(pmap);
 
-	pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE);
+	if (!pmap_lock_preempt(pmap, PMAP_LOCK_EXCLUSIVE)) {
+		return KERN_ABORTED;
+	}
 
 	const pt_attr_t * pt_attr = pmap_get_pt_attr(pmap);
 
@@ -6436,6 +6493,8 @@ pmap_change_wiring_cleanup:
 
 pmap_change_wiring_return:
 	pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
+
+	return KERN_SUCCESS;
 }
 
 void
@@ -6444,13 +6503,26 @@ pmap_change_wiring(
 	vm_map_address_t v,
 	boolean_t wired)
 {
+	/* This function is going to lock the pmap lock, so it'd better be preemptible. */
+	pmap_verify_preemptible();
+
+	kern_return_t kr = KERN_FAILURE;
 #if XNU_MONITOR
-	pmap_change_wiring_ppl(pmap, v, wired);
+	/* Attempting to lock the pmap lock can abort when there is pending preemption. Retry in such case. */
+	do {
+		kr = pmap_change_wiring_ppl(pmap, v, wired);
+	} while (kr == KERN_ABORTED);
 
 	pmap_ledger_check_balance(pmap);
 #else
-	pmap_change_wiring_internal(pmap, v, wired);
+	/* Since we verified preemptibility, call the helper only once. */
+	kr = pmap_change_wiring_internal(pmap, v, wired);
 #endif
+
+	if (kr != KERN_SUCCESS) {
+		panic("%s: failed with return code %d; pmap: 0x%016llx, v: 0x%016llx, wired: %s",
+		    __func__, kr, (uint64_t) pmap, (uint64_t) v, wired ? "true" : "false");
+	}
 }
 
 MARK_AS_PMAP_TEXT pmap_paddr_t
@@ -6709,7 +6781,9 @@ pmap_expand(
 	tt_p =  (tt_entry_t *)NULL;
 
 	for (; ttlevel < level; ttlevel++) {
-		pmap_lock(pmap, PMAP_LOCK_SHARED);
+		if (!pmap_lock_preempt(pmap, PMAP_LOCK_SHARED)) {
+			return KERN_ABORTED;
+		}
 
 		if (pmap_ttne(pmap, ttlevel + 1, v) == PT_ENTRY_NULL) {
 			pmap_unlock(pmap, PMAP_LOCK_SHARED);
@@ -6726,7 +6800,12 @@ pmap_expand(
 				VM_PAGE_WAIT();
 #endif
 			}
-			pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE);
+
+			if (!pmap_lock_preempt(pmap, PMAP_LOCK_EXCLUSIVE)) {
+				pmap_tt_deallocate(pmap, tt_p, ttlevel + 1);
+				return KERN_ABORTED;
+			}
+
 			if ((pmap_ttne(pmap, ttlevel + 1, v) == PT_ENTRY_NULL)) {
 				pmap_init_pte_page(pmap, (pt_entry_t *) tt_p, v, ttlevel + 1, FALSE);
 				pa = kvtophys_nofail((vm_offset_t)tt_p);
@@ -7055,7 +7134,6 @@ phys_attribute_clear_range_internal(
 	}
 	pmap_unlock(pmap, PMAP_LOCK_SHARED);
 	if (flush_range.ptfr_flush_needed) {
-		flush_range.ptfr_end = va;
 		pmap_get_pt_ops(pmap)->flush_tlb_region_async(
 			flush_range.ptfr_start,
 			flush_range.ptfr_end - flush_range.ptfr_start,
@@ -9068,10 +9146,16 @@ pmap_trim(
 void *
 pmap_sign_user_ptr_internal(void *value, ptrauth_key key, uint64_t discriminator, uint64_t jop_key)
 {
+	if ((key != ptrauth_key_asia) && (key != ptrauth_key_asda)) {
+		panic("attempt to sign user pointer without process independent key");
+	}
+
 	void *res = NULL;
 	uint64_t current_intr_state = pmap_interrupts_disable();
 
 	uint64_t saved_jop_state = ml_enable_user_jop_key(jop_key);
+
+	__compiler_materialize_and_prevent_reordering_on(value);
 	switch (key) {
 	case ptrauth_key_asia:
 		res = ptrauth_sign_unauthenticated(value, ptrauth_key_asia, discriminator);
@@ -9080,8 +9164,10 @@ pmap_sign_user_ptr_internal(void *value, ptrauth_key key, uint64_t discriminator
 		res = ptrauth_sign_unauthenticated(value, ptrauth_key_asda, discriminator);
 		break;
 	default:
-		panic("attempt to sign user pointer without process independent key");
+		__builtin_unreachable();
 	}
+	__compiler_materialize_and_prevent_reordering_on(res);
+
 	ml_disable_user_jop_key(jop_key, saved_jop_state);
 
 	pmap_interrupts_restore(current_intr_state);
@@ -9106,7 +9192,9 @@ pmap_auth_user_ptr_internal(void *value, ptrauth_key key, uint64_t discriminator
 	uint64_t current_intr_state = pmap_interrupts_disable();
 
 	uint64_t saved_jop_state = ml_enable_user_jop_key(jop_key);
+	__compiler_materialize_and_prevent_reordering_on(value);
 	res = ml_auth_ptr_unchecked(value, key, discriminator);
+	__compiler_materialize_and_prevent_reordering_on(res);
 	ml_disable_user_jop_key(jop_key, saved_jop_state);
 
 	pmap_interrupts_restore(current_intr_state);
@@ -9532,6 +9620,9 @@ pmap_nest(
 		if (kr == KERN_RESOURCE_SHORTAGE) {
 			pmap_alloc_page_for_ppl(0);
 			kr = KERN_SUCCESS;
+		} else if (kr == KERN_ABORTED) {
+			/* Reset kr to KERN_SUCCESS and try again. */
+			kr = KERN_SUCCESS;
 		} else if (kr != KERN_SUCCESS) {
 			break;
 		} else if (vaddr == vlast) {
@@ -9544,6 +9635,11 @@ pmap_nest(
 	pmap_ledger_check_balance(grand);
 	pmap_ledger_check_balance(subord);
 #else
+	/**
+	 * We don't need to check KERN_RESOURCE_SHORTAGE or KERN_ABORTED because
+	 * we have verified preemptibility. Therefore, pmap_nest_internal() will
+	 * wait for a page or a lock instead of bailing out as in the PPL flavor.
+	 */
 	while ((vaddr != (vend | PMAP_NEST_GRAND)) && (kr == KERN_SUCCESS)) {
 		vaddr = pmap_nest_internal(grand, subord, vstart, size, vaddr, &kr);
 	}
@@ -10108,6 +10204,10 @@ pmap_batch_set_cache_attributes(
 {
 	PMAP_TRACE(2, PMAP_CODE(PMAP__BATCH_UPDATE_CACHING) | DBG_FUNC_START, page_cnt, cacheattr, 0xCECC0DE0);
 
+	if (page_cnt == 0) {
+		return true;
+	}
+
 	batch_set_cache_attr_state_t states;
 	states.page_index = 0;
 	states.state = PMAP_BATCH_SET_CACHE_ATTRIBUTES_UPDATE_PASS;
@@ -10130,7 +10230,7 @@ pmap_batch_set_cache_attributes(
 }
 
 /**
- * Flushes TLB entries associated with the page numbered by pn, but do not
+ * Flushes TLB entries associated with the page specified by paddr, but do not
  * issue barriers yet.
  *
  * @param paddr The physical address to be flushed from TLB. Must be a managed address.
@@ -10288,16 +10388,16 @@ pmap_batch_set_cache_attributes_internal(
 				wimg_bits_new = pp_attr_template & PP_ATTR_WIMG_MASK;
 			}
 
-			/* Update the cache attributes in PTE. */
+			/* Update the cache attributes in PTE and PP_ATTR table. */
 			if (wimg_bits_new != wimg_bits_prev) {
 				tlb_flush_pass_needed |= pmap_update_cache_attributes_locked(pn, cacheattr, false);
+				pmap_update_pp_attr_wimg_bits_locked(pai, cacheattr);
 			}
 
 			if (wimg_bits_new == VM_WIMG_RT && wimg_bits_prev != VM_WIMG_RT) {
 				rt_cache_flush_pass_needed = true;
 			}
 
-			pmap_update_pp_attr_wimg_bits_locked(pai, cacheattr);
 			pvh_unlock(pai);
 
 			page_index++;
@@ -10733,7 +10833,7 @@ pmap_update_tt3e(
 	        | ARM_PTE_AP(AP_RORO) | ARM_PTE_AF)
 
 void
-pmap_create_sharedpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kernel_text_addr,
+pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kernel_text_addr,
     vm_map_address_t *kernel_ro_data_addr, vm_map_address_t *user_text_addr)
 {
 	kern_return_t kr;
@@ -10785,18 +10885,18 @@ pmap_create_sharedpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *ke
 	 * Note that we update parameters of the entry for our unique needs (NG
 	 * entry, etc.).
 	 */
-	sharedpage_pmap_default = pmap_create_options(NULL, 0x0, 0);
-	assert(sharedpage_pmap_default != NULL);
-	pmap_set_commpage(sharedpage_pmap_default);
+	commpage_pmap_default = pmap_create_options(NULL, 0x0, 0);
+	assert(commpage_pmap_default != NULL);
+	pmap_set_commpage(commpage_pmap_default);
 
 	/* The user 64-bit mappings... */
-	kr = pmap_enter_addr(sharedpage_pmap_default, _COMM_PAGE64_BASE_ADDRESS, data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
+	kr = pmap_enter_addr(commpage_pmap_default, _COMM_PAGE64_BASE_ADDRESS, data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
 	assert(kr == KERN_SUCCESS);
-	pmap_update_tt3e(sharedpage_pmap_default, _COMM_PAGE64_BASE_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
+	pmap_update_tt3e(commpage_pmap_default, _COMM_PAGE64_BASE_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
 
-	kr = pmap_enter_addr(sharedpage_pmap_default, _COMM_PAGE64_RO_ADDRESS, ro_data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
+	kr = pmap_enter_addr(commpage_pmap_default, _COMM_PAGE64_RO_ADDRESS, ro_data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
 	assert(kr == KERN_SUCCESS);
-	pmap_update_tt3e(sharedpage_pmap_default, _COMM_PAGE64_RO_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
+	pmap_update_tt3e(commpage_pmap_default, _COMM_PAGE64_RO_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
 #if CONFIG_ARM_PFZ
 	/* User mapping of comm page text section for 64 bit mapping only
 	 *
@@ -10809,7 +10909,7 @@ pmap_create_sharedpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *ke
 	 * max of user VA or is pre-reserved in the vm_map_exec(). This means that
 	 * it is reserved and unavailable to mach VM for future mappings.
 	 */
-	const pt_attr_t * const pt_attr = pmap_get_pt_attr(sharedpage_pmap_default);
+	const pt_attr_t * const pt_attr = pmap_get_pt_attr(commpage_pmap_default);
 	int num_ptes = pt_attr_leaf_size(pt_attr) >> PTE_SHIFT;
 
 	vm_map_address_t commpage_text_va = 0;
@@ -10824,27 +10924,27 @@ pmap_create_sharedpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *ke
 	} while ((commpage_text_va == _COMM_PAGE64_BASE_ADDRESS) || (commpage_text_va == _COMM_PAGE64_RO_ADDRESS)); // Try again if we collide (should be unlikely)
 
 	// Assert that this is empty
-	__assert_only pt_entry_t *ptep = pmap_pte(sharedpage_pmap_default, commpage_text_va);
+	__assert_only pt_entry_t *ptep = pmap_pte(commpage_pmap_default, commpage_text_va);
 	assert(ptep != PT_ENTRY_NULL);
 	assert(*ptep == ARM_TTE_EMPTY);
 
 	// At this point, we've found the address we want to insert our comm page at
-	kr = pmap_enter_addr(sharedpage_pmap_default, commpage_text_va, text_pa, VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
+	kr = pmap_enter_addr(commpage_pmap_default, commpage_text_va, text_pa, VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
 	assert(kr == KERN_SUCCESS);
 	// Mark it as global page R/X so that it doesn't get thrown out on tlb flush
-	pmap_update_tt3e(sharedpage_pmap_default, commpage_text_va, PMAP_COMM_PAGE_TEXT_PTE_TEMPLATE);
+	pmap_update_tt3e(commpage_pmap_default, commpage_text_va, PMAP_COMM_PAGE_TEXT_PTE_TEMPLATE);
 
 	*user_text_addr = commpage_text_va;
 #endif
 
 	/* ...and the user 32-bit mappings. */
-	kr = pmap_enter_addr(sharedpage_pmap_default, _COMM_PAGE32_BASE_ADDRESS, data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
+	kr = pmap_enter_addr(commpage_pmap_default, _COMM_PAGE32_BASE_ADDRESS, data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
 	assert(kr == KERN_SUCCESS);
-	pmap_update_tt3e(sharedpage_pmap_default, _COMM_PAGE32_BASE_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
+	pmap_update_tt3e(commpage_pmap_default, _COMM_PAGE32_BASE_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
 
-	kr = pmap_enter_addr(sharedpage_pmap_default, _COMM_PAGE32_RO_ADDRESS, ro_data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
+	kr = pmap_enter_addr(commpage_pmap_default, _COMM_PAGE32_RO_ADDRESS, ro_data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
 	assert(kr == KERN_SUCCESS);
-	pmap_update_tt3e(sharedpage_pmap_default, _COMM_PAGE32_RO_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
+	pmap_update_tt3e(commpage_pmap_default, _COMM_PAGE32_RO_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
 #if __ARM_MIXED_PAGE_SIZE__
 	/**
 	 * To handle 4K tasks a new view/pmap of the shared page is needed. These are a
@@ -10852,35 +10952,35 @@ pmap_create_sharedpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *ke
 	 * before. Only the first 4K of the 16K shared page is mapped since that's
 	 * the only part that contains relevant data.
 	 */
-	sharedpage_pmap_4k = pmap_create_options(NULL, 0x0, PMAP_CREATE_FORCE_4K_PAGES);
-	assert(sharedpage_pmap_4k != NULL);
-	pmap_set_commpage(sharedpage_pmap_4k);
+	commpage_pmap_4k = pmap_create_options(NULL, 0x0, PMAP_CREATE_FORCE_4K_PAGES);
+	assert(commpage_pmap_4k != NULL);
+	pmap_set_commpage(commpage_pmap_4k);
 
 	/* The user 64-bit mappings... */
-	kr = pmap_enter_addr(sharedpage_pmap_4k, _COMM_PAGE64_BASE_ADDRESS, data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
+	kr = pmap_enter_addr(commpage_pmap_4k, _COMM_PAGE64_BASE_ADDRESS, data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
 	assert(kr == KERN_SUCCESS);
-	pmap_update_tt3e(sharedpage_pmap_4k, _COMM_PAGE64_BASE_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
+	pmap_update_tt3e(commpage_pmap_4k, _COMM_PAGE64_BASE_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
 
-	kr = pmap_enter_addr(sharedpage_pmap_4k, _COMM_PAGE64_RO_ADDRESS, ro_data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
+	kr = pmap_enter_addr(commpage_pmap_4k, _COMM_PAGE64_RO_ADDRESS, ro_data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
 	assert(kr == KERN_SUCCESS);
-	pmap_update_tt3e(sharedpage_pmap_4k, _COMM_PAGE64_RO_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
+	pmap_update_tt3e(commpage_pmap_4k, _COMM_PAGE64_RO_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
 
 	/* ...and the user 32-bit mapping. */
-	kr = pmap_enter_addr(sharedpage_pmap_4k, _COMM_PAGE32_BASE_ADDRESS, data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
+	kr = pmap_enter_addr(commpage_pmap_4k, _COMM_PAGE32_BASE_ADDRESS, data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
 	assert(kr == KERN_SUCCESS);
-	pmap_update_tt3e(sharedpage_pmap_4k, _COMM_PAGE32_BASE_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
+	pmap_update_tt3e(commpage_pmap_4k, _COMM_PAGE32_BASE_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
 
-	kr = pmap_enter_addr(sharedpage_pmap_4k, _COMM_PAGE32_RO_ADDRESS, ro_data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
+	kr = pmap_enter_addr(commpage_pmap_4k, _COMM_PAGE32_RO_ADDRESS, ro_data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
 	assert(kr == KERN_SUCCESS);
-	pmap_update_tt3e(sharedpage_pmap_4k, _COMM_PAGE32_RO_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
+	pmap_update_tt3e(commpage_pmap_4k, _COMM_PAGE32_RO_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
 #endif
 
 	/* For manipulation in kernel, go straight to physical page */
 	*kernel_data_addr = phystokv(data_pa);
-	assert(sharedpage_ro_data_kva == 0);
-	*kernel_ro_data_addr = sharedpage_ro_data_kva = phystokv(ro_data_pa);
-	assert(sharedpage_text_kva == 0);
-	*kernel_text_addr = sharedpage_text_kva = (text_pa ? phystokv(text_pa) : 0);
+	assert(commpage_ro_data_kva == 0);
+	*kernel_ro_data_addr = commpage_ro_data_kva = phystokv(ro_data_pa);
+	assert(commpage_text_kva == 0);
+	*kernel_text_addr = commpage_text_kva = (text_pa ? phystokv(text_pa) : 0);
 }
 
 
@@ -10915,33 +11015,33 @@ static_assert((_COMM_PAGE64_BASE_ADDRESS & ~ARM_TT_L1_OFFMASK) >= MACH_VM_MAX_AD
 #endif
 
 MARK_AS_PMAP_TEXT kern_return_t
-pmap_insert_sharedpage_internal(
+pmap_insert_commpage_internal(
 	pmap_t pmap)
 {
 	kern_return_t kr = KERN_SUCCESS;
-	vm_offset_t sharedpage_vaddr;
+	vm_offset_t commpage_vaddr;
 	pt_entry_t *ttep, *src_ttep;
 	int options = 0;
-	pmap_t sharedpage_pmap = sharedpage_pmap_default;
+	pmap_t commpage_pmap = commpage_pmap_default;
 
 	/* Validate the pmap input before accessing its data. */
 	validate_pmap_mutable(pmap);
 
 	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
-	const unsigned int sharedpage_level = pt_attr_commpage_level(pt_attr);
+	const unsigned int commpage_level = pt_attr_commpage_level(pt_attr);
 
 #if __ARM_MIXED_PAGE_SIZE__
 #if !__ARM_16K_PG__
-	/* The following code assumes that sharedpage_pmap_default is a 16KB pmap. */
-	#error "pmap_insert_sharedpage_internal requires a 16KB default kernel page size when __ARM_MIXED_PAGE_SIZE__ is enabled"
+	/* The following code assumes that commpage_pmap_default is a 16KB pmap. */
+	#error "pmap_insert_commpage_internal requires a 16KB default kernel page size when __ARM_MIXED_PAGE_SIZE__ is enabled"
 #endif /* !__ARM_16K_PG__ */
 
 	/* Choose the correct shared page pmap to use. */
 	const uint64_t pmap_page_size = pt_attr_page_size(pt_attr);
 	if (pmap_page_size == 16384) {
-		sharedpage_pmap = sharedpage_pmap_default;
+		commpage_pmap = commpage_pmap_default;
 	} else if (pmap_page_size == 4096) {
-		sharedpage_pmap = sharedpage_pmap_4k;
+		commpage_pmap = commpage_pmap_4k;
 	} else {
 		panic("No shared page pmap exists for the wanted page size: %llu", pmap_page_size);
 	}
@@ -10956,9 +11056,9 @@ pmap_insert_sharedpage_internal(
 #endif
 
 	if (pmap_is_64bit(pmap)) {
-		sharedpage_vaddr = _COMM_PAGE64_BASE_ADDRESS;
+		commpage_vaddr = _COMM_PAGE64_BASE_ADDRESS;
 	} else {
-		sharedpage_vaddr = _COMM_PAGE32_BASE_ADDRESS;
+		commpage_vaddr = _COMM_PAGE32_BASE_ADDRESS;
 	}
 
 
@@ -10982,10 +11082,10 @@ pmap_insert_sharedpage_internal(
 	 * Allocate the twig page tables if needed, and slam a pointer to the shared
 	 * page's tables into place.
 	 */
-	while ((ttep = pmap_ttne(pmap, sharedpage_level, sharedpage_vaddr)) == TT_ENTRY_NULL) {
+	while ((ttep = pmap_ttne(pmap, commpage_level, commpage_vaddr)) == TT_ENTRY_NULL) {
 		pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
 
-		kr = pmap_expand(pmap, sharedpage_vaddr, options, sharedpage_level);
+		kr = pmap_expand(pmap, commpage_vaddr, options, commpage_level);
 
 		if (kr != KERN_SUCCESS) {
 #if XNU_MONITOR
@@ -10993,7 +11093,9 @@ pmap_insert_sharedpage_internal(
 				return kr;
 			} else
 #endif
-			{
+			if (kr == KERN_ABORTED) {
+				return kr;
+			} else {
 				panic("Failed to pmap_expand for commpage, pmap=%p", pmap);
 			}
 		}
@@ -11005,7 +11107,7 @@ pmap_insert_sharedpage_internal(
 		panic("%s: Found something mapped at the commpage address?!", __FUNCTION__);
 	}
 
-	src_ttep = pmap_ttne(sharedpage_pmap, sharedpage_level, sharedpage_vaddr);
+	src_ttep = pmap_ttne(commpage_pmap, commpage_level, commpage_vaddr);
 
 	*ttep = *src_ttep;
 	FLUSH_PTE_STRONG();
@@ -11016,28 +11118,28 @@ pmap_insert_sharedpage_internal(
 }
 
 static void
-pmap_unmap_sharedpage(
+pmap_unmap_commpage(
 	pmap_t pmap)
 {
 	pt_entry_t *ttep;
-	vm_offset_t sharedpage_vaddr;
-	pmap_t sharedpage_pmap = sharedpage_pmap_default;
+	vm_offset_t commpage_vaddr;
+	pmap_t commpage_pmap = commpage_pmap_default;
 
 	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
-	const unsigned int sharedpage_level = pt_attr_commpage_level(pt_attr);
+	const unsigned int commpage_level = pt_attr_commpage_level(pt_attr);
 
 #if __ARM_MIXED_PAGE_SIZE__
 #if !__ARM_16K_PG__
-	/* The following code assumes that sharedpage_pmap_default is a 16KB pmap. */
-	#error "pmap_unmap_sharedpage requires a 16KB default kernel page size when __ARM_MIXED_PAGE_SIZE__ is enabled"
+	/* The following code assumes that commpage_pmap_default is a 16KB pmap. */
+	#error "pmap_unmap_commpage requires a 16KB default kernel page size when __ARM_MIXED_PAGE_SIZE__ is enabled"
 #endif /* !__ARM_16K_PG__ */
 
 	/* Choose the correct shared page pmap to use. */
 	const uint64_t pmap_page_size = pt_attr_page_size(pt_attr);
 	if (pmap_page_size == 16384) {
-		sharedpage_pmap = sharedpage_pmap_default;
+		commpage_pmap = commpage_pmap_default;
 	} else if (pmap_page_size == 4096) {
-		sharedpage_pmap = sharedpage_pmap_4k;
+		commpage_pmap = commpage_pmap_4k;
 	} else {
 		panic("No shared page pmap exists for the wanted page size: %llu", pmap_page_size);
 	}
@@ -11048,42 +11150,50 @@ pmap_unmap_sharedpage(
 #endif
 
 	if (pmap_is_64bit(pmap)) {
-		sharedpage_vaddr = _COMM_PAGE64_BASE_ADDRESS;
+		commpage_vaddr = _COMM_PAGE64_BASE_ADDRESS;
 	} else {
-		sharedpage_vaddr = _COMM_PAGE32_BASE_ADDRESS;
+		commpage_vaddr = _COMM_PAGE32_BASE_ADDRESS;
 	}
 
 
-	ttep = pmap_ttne(pmap, sharedpage_level, sharedpage_vaddr);
+	ttep = pmap_ttne(pmap, commpage_level, commpage_vaddr);
 
 	if (ttep == NULL) {
 		return;
 	}
 
 	/* It had better be mapped to the shared page. */
-	if (*ttep != ARM_TTE_EMPTY && *ttep != *pmap_ttne(sharedpage_pmap, sharedpage_level, sharedpage_vaddr)) {
+	if (*ttep != ARM_TTE_EMPTY && *ttep != *pmap_ttne(commpage_pmap, commpage_level, commpage_vaddr)) {
 		panic("%s: Something other than commpage mapped in shared page slot?", __FUNCTION__);
 	}
 
 	*ttep = ARM_TTE_EMPTY;
 	FLUSH_PTE_STRONG();
 
-	flush_mmu_tlb_region_asid_async(sharedpage_vaddr, PAGE_SIZE, pmap, false);
+	flush_mmu_tlb_region_asid_async(commpage_vaddr, PAGE_SIZE, pmap, false);
 	sync_tlb_flush();
 }
 
 void
-pmap_insert_sharedpage(
+pmap_insert_commpage(
 	pmap_t pmap)
 {
-#if XNU_MONITOR
 	kern_return_t kr = KERN_FAILURE;
+#if XNU_MONITOR
+	do {
+		kr = pmap_insert_commpage_ppl(pmap);
 
-	while ((kr = pmap_insert_sharedpage_ppl(pmap)) == KERN_RESOURCE_SHORTAGE) {
-		pmap_alloc_page_for_ppl(0);
-	}
+		if (kr == KERN_RESOURCE_SHORTAGE) {
+			pmap_alloc_page_for_ppl(0);
+		}
+	} while (kr == KERN_RESOURCE_SHORTAGE || kr == KERN_ABORTED);
 
 	pmap_ledger_check_balance(pmap);
+#else
+	do {
+		kr = pmap_insert_commpage_internal(pmap);
+	} while (kr == KERN_ABORTED);
+#endif
 
 	if (kr != KERN_SUCCESS) {
 		panic("%s: failed to insert the shared page, kr=%d, "
@@ -11091,9 +11201,6 @@ pmap_insert_sharedpage(
 		    __FUNCTION__, kr,
 		    pmap);
 	}
-#else
-	pmap_insert_sharedpage_internal(pmap);
-#endif
 }
 
 static boolean_t
@@ -11223,9 +11330,6 @@ pmap_max_64bit_offset(
 	vm_map_offset_t max_offset_ret = 0;
 
 #if defined(__arm64__)
-	#define ARM64_MIN_MAX_ADDRESS (SHARED_REGION_BASE_ARM64 + SHARED_REGION_SIZE_ARM64 + 0x20000000) // end of shared region + 512MB for various purposes
-	_Static_assert((ARM64_MIN_MAX_ADDRESS > SHARED_REGION_BASE_ARM64) && (ARM64_MIN_MAX_ADDRESS <= MACH_VM_MAX_ADDRESS),
-	    "Minimum address space size outside allowable range");
 	const vm_map_offset_t min_max_offset = ARM64_MIN_MAX_ADDRESS; // end of shared region + 512MB for various purposes
 	if (option == ARM_PMAP_MAX_OFFSET_DEFAULT) {
 		max_offset_ret = arm64_pmap_max_offset_default;
@@ -11237,10 +11341,13 @@ pmap_max_64bit_offset(
 		if (arm64_pmap_max_offset_default) {
 			max_offset_ret = arm64_pmap_max_offset_default;
 		} else if (max_mem > 0xC0000000) {
-			max_offset_ret = min_max_offset + 0x138000000; // Max offset is 13.375GB for devices with > 3GB of memory
+			// devices with > 3GB of memory
+			max_offset_ret = ARM64_MAX_OFFSET_DEVICE_LARGE;
 		} else if (max_mem > 0x40000000) {
-			max_offset_ret = min_max_offset + 0x38000000;  // Max offset is 9.375GB for devices with > 1GB and <= 3GB of memory
+			// devices with > 1GB and <= 3GB of memory
+			max_offset_ret = ARM64_MAX_OFFSET_DEVICE_SMALL;
 		} else {
+			// devices with <= 1 GB of memory
 			max_offset_ret = min_max_offset;
 		}
 	} else if (option == ARM_PMAP_MAX_OFFSET_JUMBO) {
@@ -11579,6 +11686,11 @@ pmap_ro_zone_validate_element_dst(
 	vm_offset_t         offset,
 	vm_size_t           new_data_size)
 {
+	if (__improbable((zid < ZONE_ID__FIRST_RO) || (zid > ZONE_ID__LAST_RO))) {
+		panic("%s: ZoneID %u outside RO range %u - %u", __func__, zid,
+		    ZONE_ID__FIRST_RO, ZONE_ID__LAST_RO);
+	}
+
 	vm_size_t elem_size = zone_ro_size_params[zid].z_elem_size;
 
 	/* Check element is from correct zone and properly aligned */
@@ -12233,28 +12345,33 @@ pmap_query_page_info(
 
 
 
-static vm_map_size_t
-pmap_user_va_size(pmap_t pmap __unused)
+uint32_t
+pmap_user_va_bits(pmap_t pmap __unused)
 {
 #if __ARM_MIXED_PAGE_SIZE__
 	uint64_t tcr_value = pmap_get_pt_attr(pmap)->pta_tcr_value;
-	return 1ULL << (64 - ((tcr_value >> TCR_T0SZ_SHIFT) & TCR_TSZ_MASK));
+	return 64 - ((tcr_value >> TCR_T0SZ_SHIFT) & TCR_TSZ_MASK);
 #else
-	return 1ULL << (64 - T0SZ_BOOT);
+	return 64 - T0SZ_BOOT;
 #endif
+}
+
+uint32_t
+pmap_kernel_va_bits(void)
+{
+	return 64 - T1SZ_BOOT;
+}
+
+static vm_map_size_t
+pmap_user_va_size(pmap_t pmap)
+{
+	return 1ULL << pmap_user_va_bits(pmap);
 }
 
 
 
 bool
 pmap_in_ppl(void)
-{
-	// Unsupported
-	return false;
-}
-
-bool
-pmap_has_ppl(void)
 {
 	// Unsupported
 	return false;
@@ -12293,6 +12410,49 @@ MARK_AS_PMAP_DATA TrustCacheMutableRuntime_t ppl_trust_cache_mut_rt;
 MARK_AS_PMAP_DATA decl_lck_rw_data(, ppl_trust_cache_rt_lock);
 
 MARK_AS_PMAP_TEXT kern_return_t
+pmap_check_trust_cache_runtime_for_uuid_internal(
+	const uint8_t check_uuid[kUUIDSize])
+{
+	kern_return_t ret = KERN_DENIED;
+
+	if (amfi->TrustCache.version < 3) {
+		/* AMFI change hasn't landed in the build */
+		pmap_cs_log_error("unable to check for loaded trust cache: interface not supported");
+		return KERN_NOT_SUPPORTED;
+	}
+
+	/* Lock the runtime as shared */
+	lck_rw_lock_shared(&ppl_trust_cache_rt_lock);
+
+	TCReturn_t tc_ret = amfi->TrustCache.checkRuntimeForUUID(
+		&ppl_trust_cache_rt,
+		check_uuid,
+		NULL);
+
+	/* Unlock the runtime */
+	lck_rw_unlock_shared(&ppl_trust_cache_rt_lock);
+
+	if (tc_ret.error == kTCReturnSuccess) {
+		ret = KERN_SUCCESS;
+	} else if (tc_ret.error == kTCReturnNotFound) {
+		ret = KERN_NOT_FOUND;
+	} else {
+		ret = KERN_FAILURE;
+		pmap_cs_log_error("trust cache UUID check failed (TCReturn: 0x%02X | 0x%02X | %u)",
+		    tc_ret.component, tc_ret.error, tc_ret.uniqueError);
+	}
+
+	return ret;
+}
+
+kern_return_t
+pmap_check_trust_cache_runtime_for_uuid(
+	const uint8_t check_uuid[kUUIDSize])
+{
+	return pmap_check_trust_cache_runtime_for_uuid_ppl(check_uuid);
+}
+
+MARK_AS_PMAP_TEXT kern_return_t
 pmap_load_trust_cache_with_type_internal(
 	TCType_t type,
 	const vm_address_t pmap_img4_payload, const vm_size_t pmap_img4_payload_len,
@@ -12309,23 +12469,6 @@ pmap_load_trust_cache_with_type_internal(
 	(void)img4_aux_manifest;
 	(void)img4_aux_manifest_len;
 
-
-	/* Image4 interface needs to be available */
-	if (img4if == NULL) {
-		panic("image4 interface not available");
-	}
-
-	/* AMFI interface needs to be available */
-	if (amfi == NULL) {
-		panic("amfi interface not available");
-	}
-
-	const TrustCacheInterface_t *interface = &amfi->TrustCache;
-	if (interface->version < 1) {
-		/* AMFI change hasn't landed in the build */
-		pmap_cs_log_error("unable to load trust cache (type: %u): interface not supported", type);
-		return KERN_NOT_SUPPORTED;
-	}
 
 #if PMAP_CS_INCLUDE_CODE_SIGNING
 	if (pmap_cs) {
@@ -12392,7 +12535,7 @@ pmap_load_trust_cache_with_type_internal(
 	lck_rw_lock_exclusive(&ppl_trust_cache_rt_lock);
 
 	/* Load the trust cache */
-	TCReturn_t tc_ret = interface->load(
+	TCReturn_t tc_ret = amfi->TrustCache.load(
 		&ppl_trust_cache_rt,
 		type,
 		trust_cache,
@@ -12467,18 +12610,6 @@ pmap_query_trust_cache_safe(
 {
 	kern_return_t ret = KERN_NOT_FOUND;
 
-	/* AMFI interface needs to be available */
-	if (amfi == NULL) {
-		panic("amfi interface not available");
-	}
-
-	const TrustCacheInterface_t *interface = &amfi->TrustCache;
-	if (interface->version < 1) {
-		/* AMFI change hasn't landed in the build */
-		pmap_cs_log_error("unable to query trust cache: interface not supported");
-		return KERN_NOT_SUPPORTED;
-	}
-
 	/* Validate the query type preemptively */
 	if (query_type >= kTCQueryTypeTotal) {
 		pmap_cs_log_error("unable to query trust cache: invalid query type: %u", query_type);
@@ -12488,7 +12619,7 @@ pmap_query_trust_cache_safe(
 	/* Lock the runtime as shared */
 	lck_rw_lock_shared(&ppl_trust_cache_rt_lock);
 
-	TCReturn_t tc_ret = interface->query(
+	TCReturn_t tc_ret = amfi->TrustCache.query(
 		&ppl_trust_cache_rt,
 		query_type,
 		cdhash,
@@ -12580,7 +12711,7 @@ pmap_toggle_developer_mode_internal(
 	os_atomic_store(&ppl_developer_mode_set, true, relaxed);
 
 	/* Update the developer mode state on the system */
-	os_atomic_store(&ppl_developer_mode_storage, state, release);
+	os_atomic_store(&ppl_developer_mode_storage, state, relaxed);
 }
 
 void
@@ -12986,10 +13117,6 @@ pmap_disassociate_provisioning_profile_internal(
 	/* Acquire the lock on the code directory */
 	pmap_cs_lock_code_directory(cd_entry);
 
-	if (cd_entry->trust == PMAP_CS_UNTRUSTED) {
-		panic("PMAP_CS: profile disassociation not allowed on unverified signatures");
-	}
-
 	if (cd_entry->profile_obj == NULL) {
 		ret = KERN_NOT_FOUND;
 		goto exit;
@@ -13021,6 +13148,279 @@ pmap_disassociate_provisioning_profile(
 	pmap_cs_code_directory_t *cd_entry)
 {
 	return pmap_disassociate_provisioning_profile_ppl(cd_entry);
+}
+
+kern_return_t
+pmap_associate_kernel_entitlements_internal(
+	pmap_cs_code_directory_t *cd_entry,
+	const void *kernel_entitlements)
+{
+	kern_return_t ret = KERN_DENIED;
+
+	if (kernel_entitlements == NULL) {
+		panic("PMAP_CS: attempted to associate NULL kernel entitlements: %p", cd_entry);
+	}
+
+	/* Acquire the lock on the code directory */
+	pmap_cs_lock_code_directory(cd_entry);
+
+	if (cd_entry->trust == PMAP_CS_UNTRUSTED) {
+		ret = KERN_DENIED;
+		goto out;
+	} else if (cd_entry->kernel_entitlements != NULL) {
+		ret = KERN_DENIED;
+		goto out;
+	}
+	cd_entry->kernel_entitlements = kernel_entitlements;
+
+	/* Association was a success */
+	ret = KERN_SUCCESS;
+
+out:
+	lck_rw_unlock_exclusive(&cd_entry->rwlock);
+	return ret;
+}
+
+kern_return_t
+pmap_associate_kernel_entitlements(
+	pmap_cs_code_directory_t *cd_entry,
+	const void *kernel_entitlements)
+{
+	return pmap_associate_kernel_entitlements_ppl(cd_entry, kernel_entitlements);
+}
+
+kern_return_t
+pmap_resolve_kernel_entitlements_internal(
+	pmap_t pmap,
+	const void **kernel_entitlements)
+{
+	const void *entitlements = NULL;
+	pmap_cs_code_directory_t *cd_entry = NULL;
+	kern_return_t ret = KERN_DENIED;
+
+	/* Validate the PMAP object */
+	validate_pmap(pmap);
+
+	/* Take a shared lock on the PMAP */
+	pmap_lock(pmap, PMAP_LOCK_SHARED);
+
+	if (pmap == kernel_pmap) {
+		ret = KERN_NOT_FOUND;
+		goto out;
+	}
+
+	/*
+	 * Acquire the code signature from the PMAP. This function is called when
+	 * performing an entitlement check, and since we've confirmed this isn't
+	 * the kernel_pmap, at this stage, each pmap _should_ have a main region
+	 * with a code signature.
+	 */
+	cd_entry = pmap_cs_code_directory_from_region(pmap->pmap_cs_main);
+	if (cd_entry == NULL) {
+		ret = KERN_NOT_FOUND;
+		goto out;
+	}
+
+	entitlements = cd_entry->kernel_entitlements;
+	if (entitlements == NULL) {
+		ret = KERN_NOT_FOUND;
+		goto out;
+	}
+
+	/* Pin and write out the entitlements object pointer */
+	if (kernel_entitlements != NULL) {
+		pmap_pin_kernel_pages((vm_offset_t)kernel_entitlements, sizeof(*kernel_entitlements));
+		*kernel_entitlements = entitlements;
+		pmap_unpin_kernel_pages((vm_offset_t)kernel_entitlements, sizeof(*kernel_entitlements));
+	}
+
+	/* Successfully resolved the entitlements */
+	ret = KERN_SUCCESS;
+
+out:
+	/* Unlock the code signature object */
+	if (cd_entry != NULL) {
+		lck_rw_unlock_shared(&cd_entry->rwlock);
+		cd_entry = NULL;
+	}
+
+	/* Unlock the PMAP object */
+	pmap_unlock(pmap, PMAP_LOCK_SHARED);
+
+	return ret;
+}
+
+kern_return_t
+pmap_resolve_kernel_entitlements(
+	pmap_t pmap,
+	const void **kernel_entitlements)
+{
+	return pmap_resolve_kernel_entitlements_ppl(pmap, kernel_entitlements);
+}
+
+kern_return_t
+pmap_accelerate_entitlements_internal(
+	pmap_cs_code_directory_t *cd_entry)
+{
+	const coreentitlements_t *CoreEntitlements = NULL;
+	const CS_SuperBlob *superblob = NULL;
+	pmap_cs_ce_acceleration_buffer_t *acceleration_buf = NULL;
+	size_t signature_length = 0;
+	size_t acceleration_length = 0;
+	size_t required_length = 0;
+	kern_return_t ret = KERN_DENIED;
+
+	/* Setup the CoreEntitlements interface */
+	CoreEntitlements = &amfi->CoreEntitlements;
+
+	CEError_t ce_err = CoreEntitlements->kMalformedEntitlements;
+
+	/* Acquire the lock on the code directory */
+	pmap_cs_lock_code_directory(cd_entry);
+
+	/*
+	 * Only reconstituted code signatures can be accelerated. This is only a policy
+	 * decision we make since this allows us to re-use any unused space within the
+	 * locked down code signature region. There is also a decent bit of validation
+	 * within the reconstitution function to ensure blobs are ordered and do not
+	 * contain any padding around them which can cause issues here.
+	 *
+	 * This also serves as a check to ensure the signature is trusted.
+	 */
+	if (cd_entry->unneeded_code_signature_unlocked == false) {
+		ret = KERN_DENIED;
+		goto out;
+	}
+
+	if (cd_entry->ce_ctx == NULL) {
+		ret = KERN_SUCCESS;
+		goto out;
+	} else if (CoreEntitlements->ContextIsAccelerated(cd_entry->ce_ctx) == true) {
+		ret = KERN_SUCCESS;
+		goto out;
+	}
+
+	/* We only support accelerating when size <= PAGE_SIZE */
+	ce_err = CoreEntitlements->IndexSizeForContext(cd_entry->ce_ctx, &acceleration_length);
+	if (ce_err != CoreEntitlements->kNoError) {
+		if (ce_err == CoreEntitlements->kNotEligibleForAcceleration) {
+			/* Small entitlement blobs aren't eligible */
+			ret = KERN_SUCCESS;
+			goto out;
+		}
+		panic("PMAP_CS: unable to gauge index size for entitlements acceleration: %p | %s",
+		    cd_entry, CoreEntitlements->GetErrorString(ce_err));
+	} else if (acceleration_length > PAGE_SIZE) {
+		ret = KERN_ABORTED;
+		goto out;
+	}
+	assert(acceleration_length > 0);
+
+	superblob = cd_entry->superblob;
+	signature_length = ntohl(superblob->length);
+
+	/* Adjust the required length for the overhead structure -- can't overflow */
+	required_length = acceleration_length + sizeof(pmap_cs_ce_acceleration_buffer_t);
+	if (required_length > PAGE_SIZE) {
+		ret = KERN_ABORTED;
+		goto out;
+	}
+
+	/*
+	 * First we'll check if the code signature has enough space within the locked down
+	 * region of memory to hold the buffer. If not, then we'll see if we can bucket
+	 * allocate the buffer, and if not, we'll just allocate an entire page from the
+	 * free list.
+	 *
+	 * When we're storing the buffer within the code signature, we also need to make
+	 * sure we account for alignment of the buffer.
+	 */
+	const vm_address_t align_mask = sizeof(void*) - 1;
+	size_t required_length_within_sig = required_length + align_mask;
+
+	if ((cd_entry->superblob_size - signature_length) >= required_length_within_sig) {
+		vm_address_t aligned_buf = (vm_address_t)cd_entry->superblob + signature_length;
+		aligned_buf = (aligned_buf + align_mask) & ~align_mask;
+
+		/* We need to resolve to the physical aperture */
+		pmap_paddr_t phys_addr = kvtophys(aligned_buf);
+		acceleration_buf = (void*)phystokv(phys_addr);
+
+		/* Ensure the offset within the page wasn't lost */
+		assert((aligned_buf & PAGE_MASK) == ((vm_address_t)acceleration_buf & PAGE_MASK));
+
+		acceleration_buf->allocated = false;
+		pmap_cs_log_debug("[alloc] acceleration buffer thru signature: %p", acceleration_buf);
+	} else {
+		if (required_length <= pmap_cs_blob_limit) {
+			struct pmap_cs_blob *bucket = NULL;
+			size_t bucket_size = 0;
+
+			/* Allocate a buffer from the blob allocator */
+			ret = pmap_cs_blob_alloc(&bucket, required_length, &bucket_size);
+			if (ret != KERN_SUCCESS) {
+				goto out;
+			}
+			acceleration_buf = (void*)bucket->blob;
+			pmap_cs_log_debug("[alloc] acceleration buffer thru bucket: %p", acceleration_buf);
+		} else {
+			pmap_paddr_t phys_addr = 0;
+			ret = pmap_pages_alloc_zeroed(&phys_addr, PAGE_SIZE, PMAP_PAGES_ALLOCATE_NOWAIT);
+			if (ret != KERN_SUCCESS) {
+				goto out;
+			}
+			acceleration_buf = (void*)phystokv(phys_addr);
+			pmap_cs_log_debug("[alloc] acceleration buffer thru page: %p", acceleration_buf);
+		}
+		acceleration_buf->allocated = true;
+	}
+	acceleration_buf->magic = PMAP_CS_ACCELERATION_BUFFER_MAGIC;
+	acceleration_buf->length = acceleration_length;
+
+	/* Take the acceleration buffer lock */
+	pmap_simple_lock(&pmap_cs_acceleration_buf_lock);
+
+	/* Setup the global acceleration buffer state */
+	pmap_cs_acceleration_buf = acceleration_buf;
+
+	/* Accelerate the entitlements */
+	ce_err = CoreEntitlements->BuildIndexForContext(cd_entry->ce_ctx);
+	if (ce_err != CoreEntitlements->kNoError) {
+		panic("PMAP_CS: unable to accelerate entitlements: %p | %s",
+		    cd_entry, CoreEntitlements->GetErrorString(ce_err));
+	} else if (CoreEntitlements->ContextIsAccelerated(cd_entry->ce_ctx) != true) {
+		panic("PMAP_CS: entitlements not marked as accelerated: %p", cd_entry);
+	}
+
+	/*
+	 * The global acceleration buffer lock is unlocked by the allocation function itself
+	 * (pmap_cs_alloc_index) so we don't need to unlock it here. Moreover, we cannot add
+	 * an assert that the lock is unlocked here since another thread could have acquired
+	 * it by now.
+	 */
+	ret = KERN_SUCCESS;
+
+out:
+	lck_rw_unlock_exclusive(&cd_entry->rwlock);
+	return ret;
+}
+
+kern_return_t
+pmap_accelerate_entitlements(
+	pmap_cs_code_directory_t *cd_entry)
+{
+	kern_return_t ret = KERN_DENIED;
+
+	ret = pmap_accelerate_entitlements_ppl(cd_entry);
+	while (ret == KERN_RESOURCE_SHORTAGE) {
+		/* Allocate a page for the PPL */
+		pmap_alloc_page_for_ppl(0);
+
+		/* Try again */
+		ret = pmap_accelerate_entitlements_ppl(cd_entry);
+	}
+
+	return ret;
 }
 
 #endif /* PMAP_CS_INCLUDE_CODE_SIGNING */
@@ -13119,6 +13519,8 @@ pmap_lookup_in_static_trust_cache(const uint8_t cdhash[CS_CDHASH_LEN])
 #endif
 }
 
+#if PMAP_CS_INCLUDE_CODE_SIGNING
+
 MARK_AS_PMAP_DATA SIMPLE_LOCK_DECLARE(pmap_compilation_service_cdhash_lock, 0);
 MARK_AS_PMAP_DATA uint8_t pmap_compilation_service_cdhash[CS_CDHASH_LEN] = { 0 };
 
@@ -13130,7 +13532,8 @@ pmap_set_compilation_service_cdhash_internal(const uint8_t cdhash[CS_CDHASH_LEN]
 	memcpy(pmap_compilation_service_cdhash, cdhash, CS_CDHASH_LEN);
 	pmap_simple_unlock(&pmap_compilation_service_cdhash_lock);
 
-	pmap_cs_log_info("Added Compilation Service CDHash through the PPL: 0x%02X 0x%02X 0x%02X 0x%02X", cdhash[0], cdhash[1], cdhash[2], cdhash[4]);
+	pmap_cs_log_info("Added Compilation Service CDHash through the PPL: 0x%02X 0x%02X 0x%02X 0x%02X",
+	    cdhash[0], cdhash[1], cdhash[2], cdhash[4]);
 }
 
 MARK_AS_PMAP_TEXT bool
@@ -13178,10 +13581,10 @@ pmap_match_compilation_service_cdhash(const uint8_t cdhash[CS_CDHASH_LEN])
  * PMAP_CS should they need it.
  */
 MARK_AS_PMAP_DATA static bool pmap_local_signing_public_key_set = false;
-MARK_AS_PMAP_DATA static uint8_t pmap_local_signing_public_key[PMAP_ECC_P384_PUBLIC_KEY_SIZE] = { 0 };
+MARK_AS_PMAP_DATA static uint8_t pmap_local_signing_public_key[PMAP_CS_LOCAL_SIGNING_KEY_SIZE] = { 0 };
 
 MARK_AS_PMAP_TEXT void
-pmap_set_local_signing_public_key_internal(const uint8_t public_key[PMAP_ECC_P384_PUBLIC_KEY_SIZE])
+pmap_set_local_signing_public_key_internal(const uint8_t public_key[PMAP_CS_LOCAL_SIGNING_KEY_SIZE])
 {
 	bool key_set = false;
 
@@ -13197,12 +13600,12 @@ pmap_set_local_signing_public_key_internal(const uint8_t public_key[PMAP_ECC_P38
 		panic("attempted to set the local signing public key multiple times");
 	}
 
-	memcpy(pmap_local_signing_public_key, public_key, PMAP_ECC_P384_PUBLIC_KEY_SIZE);
+	memcpy(pmap_local_signing_public_key, public_key, PMAP_CS_LOCAL_SIGNING_KEY_SIZE);
 	pmap_cs_log_info("set local signing public key");
 }
 
 void
-pmap_set_local_signing_public_key(const uint8_t public_key[PMAP_ECC_P384_PUBLIC_KEY_SIZE])
+pmap_set_local_signing_public_key(const uint8_t public_key[PMAP_CS_LOCAL_SIGNING_KEY_SIZE])
 {
 #if XNU_MONITOR
 	return pmap_set_local_signing_public_key_ppl(public_key);
@@ -13274,106 +13677,8 @@ pmap_local_signing_restricted(
 	return ret != 0;
 }
 
-MARK_AS_PMAP_TEXT bool
-pmap_cs_query_entitlements_internal(
-	pmap_t pmap,
-	CEQuery_t query,
-	size_t queryLength,
-	CEQueryContext_t finalContext)
-{
-	struct pmap_cs_code_directory *cd_entry = NULL;
-	bool ret = false;
-
-	if (!pmap_cs) {
-		panic("PMAP_CS: cannot query for entitlements as pmap_cs is turned off");
-	}
-
-	/*
-	 * When a pmap has not been passed in, we assume the caller wants to check the
-	 * entitlements on the current user space process.
-	 */
-	if (pmap == NULL) {
-		pmap = current_pmap();
-	}
-
-	if (pmap == kernel_pmap) {
-		/*
-		 * Instead of panicking we will just return false.
-		 */
-		return false;
-	}
-
-	if (query == NULL || queryLength > 64) {
-		panic("PMAP_CS: bogus entitlements query");
-	} else {
-		pmap_cs_assert_addr((vm_address_t)query, sizeof(CEQueryOperation_t) * queryLength, false, true);
-	}
-
-	if (finalContext != NULL) {
-		pmap_cs_assert_addr((vm_address_t)finalContext, sizeof(*finalContext), false, false);
-	}
-
-	validate_pmap(pmap);
-	pmap_lock(pmap, PMAP_LOCK_SHARED);
-
-	cd_entry = pmap_cs_code_directory_from_region(pmap->pmap_cs_main);
-	if (cd_entry == NULL) {
-		pmap_cs_log_error("attempted to query entitlements from an invalid pmap or a retired code directory");
-		goto out;
-	}
-
-	if (cd_entry->ce_ctx == NULL) {
-		pmap_cs_log_debug("%s: code signature doesn't have any entitlements", cd_entry->identifier);
-		goto out;
-	}
-
-	der_vm_context_t executionContext = cd_entry->ce_ctx->der_context;
-
-	for (size_t op = 0; op < queryLength; op++) {
-		executionContext = amfi->CoreEntitlements.der_vm_execute(executionContext, query[op]);
-	}
-
-	if (amfi->CoreEntitlements.der_vm_context_is_valid(executionContext)) {
-		ret = true;
-		if (finalContext != NULL) {
-			pmap_pin_kernel_pages((vm_offset_t)finalContext, sizeof(*finalContext));
-			finalContext->der_context = executionContext;
-			pmap_unpin_kernel_pages((vm_offset_t)finalContext, sizeof(*finalContext));
-		}
-	} else {
-		ret = false;
-	}
-
-out:
-	if (cd_entry) {
-		lck_rw_unlock_shared(&cd_entry->rwlock);
-		cd_entry = NULL;
-	}
-	pmap_unlock(pmap, PMAP_LOCK_SHARED);
-
-	return ret;
-}
+#endif /* PMAP_CS_INCLUDE_CODE_SIGNING */
 #endif
-
-bool
-pmap_query_entitlements(
-	__unused pmap_t pmap,
-	__unused CEQuery_t query,
-	__unused size_t queryLength,
-	__unused CEQueryContext_t finalContext)
-{
-#if !PMAP_SUPPORTS_ENTITLEMENT_CHECKS
-	panic("PMAP_CS: do not use this API without checking for \'#if PMAP_SUPPORTS_ENTITLEMENT_CHECKS\'");
-#else
-
-#if XNU_MONITOR
-	return pmap_cs_query_entitlements_ppl(pmap, query, queryLength, finalContext);
-#else
-	return pmap_cs_query_entitlements_internal(pmap, query, queryLength, finalContext);
-#endif
-
-#endif /* !PMAP_SUPPORTS_ENTITLEMENT_CHECKS */
-}
 
 MARK_AS_PMAP_TEXT void
 pmap_footprint_suspend_internal(

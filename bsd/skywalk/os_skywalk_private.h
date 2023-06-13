@@ -84,7 +84,7 @@ enum {
  */
 #define SKYWALK_NETWORKING_ENABLED                              \
 	(IF_ATTACH_NX_NETIF_COMPAT | IF_ATTACH_NX_FLOWSWITCH |  \
-	IF_ATTACH_NX_FSW_TRANSPORT_NETAGENT)
+	IF_ATTACH_NX_FSW_TRANSPORT_NETAGENT | IF_ATTACH_NX_FSW_IP_NETAGENT)
 
 /*
  * To partially enable Skywalk to only let the host (kernel) stack to work,

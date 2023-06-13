@@ -89,8 +89,6 @@ extern boolean_t        memory_object_is_signed(memory_object_control_t);
 extern void             memory_object_mark_trusted(
 	memory_object_control_t         control);
 
-/* XXX Same for those. */
-
 extern void Debugger(const char *message);
 
 #if DIAGNOSTIC
@@ -957,48 +955,29 @@ csblob_get_der_entitlements(struct cs_blob *csblob, const CS_GenericBlob **out_s
 	return 0;
 }
 
-/*
- * Register a provisioning profile with a cs_blob.
- */
-int
-csblob_register_profile(
-	struct cs_blob __unused *csblob,
-	void __unused *profile_addr,
-	vm_size_t __unused profile_size)
+static bool
+ubc_cs_blob_pagewise_allocate(
+	__unused vm_size_t size)
 {
 #if CODE_SIGNING_MONITOR
-	/* Profiles only need to be registered for monitor environments */
-	assert(profile_addr != NULL);
-	assert(profile_size != 0);
-	assert(csblob != NULL);
-
-	/* This is the old registration interface -- create a fake UUID */
-	uuid_t fake_uuid = {0};
-	uuid_generate(fake_uuid);
-
-	kern_return_t kr = register_provisioning_profile(
-		fake_uuid,
-		profile_addr, profile_size);
-
-	if (kr != KERN_SUCCESS) {
-		if (kr == KERN_ALREADY_IN_SET) {
-			panic("CODE SIGNGING: duplicate UUIDs not expected on this interface");
-		}
-		return EPERM;
+	/* If the monitor isn't enabled, then we don't need to page-align */
+	if (csm_enabled() == false) {
+		return false;
 	}
 
-	/* Associate the profile with the monitor's signature object */
-	kr = associate_provisioning_profile(
-		csblob->csb_pmap_cs_entry,
-		fake_uuid);
-
-	if (kr != KERN_SUCCESS) {
-		return EPERM;
+	/*
+	 * Small allocations can be maanged by the monitor itself. We only need to allocate
+	 * page-wise when it is a sufficiently large allocation and the monitor cannot manage
+	 * it on its own.
+	 */
+	if (size <= csm_signature_size_limit()) {
+		return false;
 	}
 
-	return 0;
+	return true;
 #else
-	return 0;
+	/* Without a monitor, we never need to page align */
+	return false;
 #endif /* CODE_SIGNING_MONITOR */
 }
 
@@ -1015,7 +994,7 @@ csblob_register_profile_uuid(
 	assert(profile_size != 0);
 	assert(csblob != NULL);
 
-	kern_return_t kr = register_provisioning_profile(
+	kern_return_t kr = csm_register_provisioning_profile(
 		profile_uuid,
 		profile_addr, profile_size);
 
@@ -1024,11 +1003,11 @@ csblob_register_profile_uuid(
 	}
 
 	/* Associate the profile with the monitor's signature object */
-	kr = associate_provisioning_profile(
-		csblob->csb_pmap_cs_entry,
+	kr = csm_associate_provisioning_profile(
+		csblob->csb_csm_obj,
 		profile_uuid);
 
-	if (kr != KERN_SUCCESS) {
+	if ((kr != KERN_SUCCESS) && (kr != KERN_NOT_SUPPORTED)) {
 		return EPERM;
 	}
 
@@ -1208,8 +1187,7 @@ ubc_info_init_internal(vnode_t vp, int withfsize, off_t filesize)
  * Returns:	(void)
  *
  * Notes:	If there is a credential that has subsequently been associated
- *		with the ubc_info via a call to ubc_setcred(), the reference
- *		to the credential is dropped.
+ *		with the ubc_info, the reference to the credential is dropped.
  *
  *		It's actually impossible for a ubc_info.ui_control to take the
  *		value MEMORY_OBJECT_CONTROL_NULL.
@@ -1458,8 +1436,7 @@ ubc_umcallback(vnode_t vp, __unused void * args)
  * Returns:	!NOCRED			The credentials
  *		NOCRED			If there is no ubc_info for the vnode,
  *					or if there is one, but it has not had
- *					any credentials associated with it via
- *					a call to ubc_setcred()
+ *					any credentials associated with it.
  */
 kauth_cred_t
 ubc_getcred(struct vnode *vp)
@@ -1490,14 +1467,7 @@ ubc_getcred(struct vnode *vp)
  * Returns:	1			This vnode has no associated ubc_info
  *		0			Success
  *
- * Notes:	This function takes a proc parameter to account for bootstrap
- *		issues where a task or thread may call this routine, either
- *		before credentials have been initialized by bsd_init(), or if
- *		there is no BSD info asscoiate with a mach thread yet.  This
- *		is known to happen in both the initial swap and memory mapping
- *		calls.
- *
- *		This function is generally used only in the following cases:
+ * Notes:	This function is generally used only in the following cases:
  *
  *		o	a memory mapped file via the mmap() system call
  *		o	a swap store backing file
@@ -1530,31 +1500,11 @@ ubc_getcred(struct vnode *vp)
 int
 ubc_setthreadcred(struct vnode *vp, proc_t p, thread_t thread)
 {
-	struct ubc_info *uip;
-	thread_ro_t tro = get_thread_ro(thread);
-
-	if (!UBCINFOEXISTS(vp)) {
-		return 1;
-	}
-
+#pragma unused(p, thread)
+	assert(p == current_proc());
 	assert(thread == current_thread());
 
-	vnode_lock(vp);
-
-	uip = vp->v_ubcinfo;
-
-	if (!IS_VALID_CRED(uip->ui_ucred)) {
-		/* use per-thread cred, if assumed identity, else proc cred */
-		if (tro->tro_flags & TRO_SETUID) {
-			uip->ui_ucred = tro->tro_cred;
-			kauth_cred_ref(uip->ui_ucred);
-		} else {
-			uip->ui_ucred = kauth_cred_proc_ref(p);
-		}
-	}
-	vnode_unlock(vp);
-
-	return 0;
+	return ubc_setcred(vp, kauth_cred_get());
 }
 
 
@@ -1562,13 +1512,12 @@ ubc_setthreadcred(struct vnode *vp, proc_t p, thread_t thread)
  * ubc_setcred
  *
  * If they are not already set, set the credentials of the ubc_info structure
- * associated with the vnode to those of the process; otherwise leave them
+ * associated with the vnode to those specified; otherwise leave them
  * alone.
  *
  * Parameters:	vp			The vnode whose ubc_info creds are to
  *					be set
- *		p			The process whose credentials are to
- *					be used
+ *		ucred			The credentials to use
  *
  * Returns:	0			This vnode has no associated ubc_info
  *		1			Success
@@ -1577,19 +1526,11 @@ ubc_setthreadcred(struct vnode *vp, proc_t p, thread_t thread)
  *		all other uses in the kernel.
  *
  *		See also ubc_setthreadcred(), above.
- *
- *		This function is considered deprecated, and generally should
- *		not be used, as it is incompatible with per-thread credentials;
- *		it exists for legacy KPI reasons.
- *
- * DEPRECATION:	ubc_setcred() is being deprecated. Please use
- *		ubc_setthreadcred() instead.
  */
 int
-ubc_setcred(struct vnode *vp, proc_t p)
+ubc_setcred(struct vnode *vp, kauth_cred_t ucred)
 {
 	struct ubc_info *uip;
-	kauth_cred_t credp;
 
 	/* If there is no ubc_info, deny the operation */
 	if (!UBCINFOEXISTS(vp)) {
@@ -1602,9 +1543,9 @@ ubc_setcred(struct vnode *vp, proc_t p)
 	 */
 	vnode_lock(vp);
 	uip = vp->v_ubcinfo;
-	credp = uip->ui_ucred;
-	if (!IS_VALID_CRED(credp)) {
-		uip->ui_ucred = kauth_cred_proc_ref(p);
+	if (!IS_VALID_CRED(uip->ui_ucred)) {
+		kauth_cred_ref(ucred);
+		uip->ui_ucred = ucred;
 	}
 	vnode_unlock(vp);
 
@@ -3126,7 +3067,6 @@ csblob_parse_teamid(struct cs_blob *csblob)
 	return name;
 }
 
-
 kern_return_t
 ubc_cs_blob_allocate(
 	vm_offset_t     *blob_addr_p,
@@ -3140,23 +3080,25 @@ ubc_cs_blob_allocate(
 	}
 	allocation_size = *blob_size_p;
 
-	{
-		/*
-		 * This can be cross-freed between AMFI and XNU, so we need to make
-		 * sure that the adoption is coordinated between the two.
-		 *
-		 * rdar://87408704
-		 */
-		__typed_allocators_ignore_push
-		*blob_addr_p = (vm_offset_t) kheap_alloc_tag(KHEAP_DEFAULT,
-		    allocation_size, Z_WAITOK | Z_ZERO, VM_KERN_MEMORY_SECURITY);
-		__typed_allocators_ignore_pop
+	if (ubc_cs_blob_pagewise_allocate(allocation_size) == true) {
+		/* Round up to page size */
+		allocation_size = round_page(allocation_size);
 
-		if (*blob_addr_p == 0) {
-			kr = KERN_NO_SPACE;
-		} else {
-			kr = KERN_SUCCESS;
-		}
+		/* Allocate page-wise */
+		kr = kmem_alloc(
+			kernel_map,
+			blob_addr_p,
+			allocation_size,
+			KMA_KOBJECT | KMA_DATA | KMA_ZERO,
+			VM_KERN_MEMORY_SECURITY);
+	} else {
+		*blob_addr_p = (vm_offset_t)kalloc_data_tag(
+			allocation_size,
+			Z_WAITOK | Z_ZERO,
+			VM_KERN_MEMORY_SECURITY);
+
+		assert(*blob_addr_p != 0);
+		kr = KERN_SUCCESS;
 	}
 
 	if (kr == KERN_SUCCESS) {
@@ -3171,14 +3113,10 @@ ubc_cs_blob_deallocate(
 	vm_offset_t     blob_addr,
 	vm_size_t       blob_size)
 {
-	{
-		/*
-		 * This can be cross-freed between AMFI and XNU, so we need to make
-		 * sure that the adoption is coordinated between the two.
-		 *
-		 * rdar://87408704
-		 */
-		__typed_allocators_ignore(kheap_free(KHEAP_DEFAULT, blob_addr, blob_size));
+	if (ubc_cs_blob_pagewise_allocate(blob_size) == true) {
+		kmem_free(kernel_map, blob_addr, blob_size);
+	} else {
+		kfree_data(blob_addr, blob_size);
 	}
 }
 
@@ -3199,6 +3137,12 @@ ubc_cs_supports_multilevel_hash(struct cs_blob *blob __unused)
 {
 	const CS_CodeDirectory *cd;
 
+#if CODE_SIGNING_MONITOR
+	// TODO: <rdar://problem/30954826>
+	if (csm_enabled() == true) {
+		return FALSE;
+	}
+#endif
 
 	/*
 	 * Only applies to binaries that ship as part of the OS,
@@ -3263,6 +3207,46 @@ ubc_cs_supports_multilevel_hash(struct cs_blob *blob __unused)
 }
 
 /*
+ * Reconstruct a cs_blob with the code signature fields. This helper function
+ * is useful because a lot of things often change the base address of the code
+ * signature blob, which requires reconstructing some of the other pointers
+ * within.
+ */
+static errno_t
+ubc_cs_blob_reconstruct(
+	struct cs_blob *cs_blob,
+	const vm_address_t signature_addr,
+	const vm_address_t signature_size,
+	const vm_offset_t code_directory_offset)
+{
+	const CS_CodeDirectory *code_directory = NULL;
+
+	/* Setup the signature blob address */
+	cs_blob->csb_mem_kaddr = (void*)signature_addr;
+	cs_blob->csb_mem_size = signature_size;
+
+	/* Setup the code directory in the blob */
+	code_directory = (const CS_CodeDirectory*)(signature_addr + code_directory_offset);
+	cs_blob->csb_cd = code_directory;
+
+	/* Setup the XML entitlements */
+	cs_blob->csb_entitlements_blob = csblob_find_blob_bytes(
+		(uint8_t*)signature_addr,
+		signature_size,
+		CSSLOT_ENTITLEMENTS,
+		CSMAGIC_EMBEDDED_ENTITLEMENTS);
+
+	/* Setup the DER entitlements */
+	cs_blob->csb_der_entitlements_blob = csblob_find_blob_bytes(
+		(uint8_t*)signature_addr,
+		signature_size,
+		CSSLOT_DER_ENTITLEMENTS,
+		CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
+
+	return 0;
+}
+
+/*
  * Given a validated cs_blob, we reformat the structure to only include
  * the blobs which are required by the kernel for our current platform.
  * This saves significant memory with agile signatures.
@@ -3274,7 +3258,7 @@ ubc_cs_supports_multilevel_hash(struct cs_blob *blob __unused)
  * We don't need to perform a lot of overflow checks as the assumption
  * here is that the cs_blob has already been validated.
  */
-static int
+static errno_t
 ubc_cs_reconstitute_code_signature(
 	const struct cs_blob * const blob,
 	vm_address_t * const ret_mem_kaddr,
@@ -3565,9 +3549,16 @@ ubc_cs_reconstitute_code_signature(
 		const CS_CodeDirectory *validated_code_directory = NULL;
 		const CS_GenericBlob *validated_entitlements_blob = NULL;
 		const CS_GenericBlob *validated_der_entitlements_blob = NULL;
-		ret = cs_validate_csblob((const uint8_t *)superblob, new_blob_size, &validated_code_directory, &validated_entitlements_blob, &validated_der_entitlements_blob);
+
+		ret = cs_validate_csblob(
+			(const uint8_t *)superblob,
+			new_blob_size,
+			&validated_code_directory,
+			&validated_entitlements_blob,
+			&validated_der_entitlements_blob);
+
 		if (ret) {
-			printf("CODE SIGNING: Validation of reconstituted blob failed: %d\n", ret);
+			printf("unable to validate reconstituted cs_blob: %d\n", ret);
 			err = EINVAL;
 			goto fail;
 		}
@@ -3587,7 +3578,6 @@ fail:
 	return err;
 }
 
-#if CONFIG_ENFORCE_SIGNED_CODE
 /*
  * We use this function to clear out unnecessary bits from the code signature
  * blob which are no longer needed. We free these bits and give them back to
@@ -3597,19 +3587,19 @@ fail:
  * This results in significant memory reduction, especially for 3rd party apps
  * since we also get rid of the CMS blob.
  */
-static int
-ubc_cs_clear_unneeded_code_signature(
+static errno_t
+ubc_cs_reconstitute_code_signature_2nd_stage(
 	struct cs_blob *blob
 	)
 {
+	kern_return_t ret = KERN_FAILURE;
 	const CS_GenericBlob *launch_constraint_self = NULL;
 	const CS_GenericBlob *launch_constraint_parent = NULL;
 	const CS_GenericBlob *launch_constraint_responsible = NULL;
 	CS_SuperBlob *superblob = NULL;
 	uint32_t num_blobs = 0;
 	vm_size_t last_needed_blob_offset = 0;
-	kern_return_t ret = KERN_FAILURE;
-	bool kmem_allocated = false;
+	vm_offset_t code_directory_offset = 0;
 
 	/*
 	 * Ordering of blobs we need to keep:
@@ -3625,25 +3615,18 @@ ubc_cs_clear_unneeded_code_signature(
 	 * allocate the new required space and copy into it.
 	 */
 
-	if (!blob) {
-		if (cs_debug > 1) {
-			printf("CODE SIGNING: CS Blob passed in is NULL\n");
-		}
+	if (blob == NULL) {
+		printf("NULL blob passed in for 2nd stage reconstitution\n");
 		return EINVAL;
 	}
+	assert(blob->csb_reconstituted == true);
 
-	if (!blob->csb_reconstituted) {
-		/*
-		 * Nothing for us to do, since we can't make any claims about how this
-		 * blob may have been ordered.
-		 */
-		return 0;
-	}
-
+	/* Ensure we're not page-wise allocated when in this function */
+	assert(ubc_cs_blob_pagewise_allocate(blob->csb_mem_size) == false);
 
 	if (!blob->csb_cd) {
 		/* This case can never happen, and it is a sign of bad things */
-		panic("CODE SIGNING: Validated CS Blob has no code directory");
+		panic("validated cs_blob has no code directory");
 	}
 	superblob = (CS_SuperBlob*)blob->csb_mem_kaddr;
 
@@ -3701,90 +3684,52 @@ ubc_cs_clear_unneeded_code_signature(
 	 */
 	superblob->index[0].type = htonl(CSSLOT_CODEDIRECTORY);
 
-	/*
-	 * If we are kmem_allocated, then we can free all the remaining pages which we no longer
-	 * need. However, this cannot be done if we didn't allocate page-wise, but byte-wise through
-	 * something like kalloc. In the latter case, we just allocate the required space again, and
-	 * copy over only the required portion of the superblob.
-	 */
-	if (kmem_allocated) {
-		vm_size_t last_needed_page_offset = round_page(last_needed_blob_offset);
-		assert(last_needed_page_offset <= blob->csb_mem_size);
+	vm_address_t new_superblob = 0;
+	vm_size_t new_superblob_size = last_needed_blob_offset;
 
-		vm_address_t unneeded_blob_addr = (vm_address_t)blob->csb_mem_kaddr + last_needed_page_offset;
-		vm_size_t unneeded_blob_size = blob->csb_mem_size - last_needed_page_offset;
-
-		/* These both need to be page aligned */
-		assert((unneeded_blob_addr & PAGE_MASK) == 0);
-		assert((unneeded_blob_size & PAGE_MASK) == 0);
-
-		/* Free the unneeded memory */
-		if (unneeded_blob_addr && unneeded_blob_size) {
-			kmem_free(kernel_map, unneeded_blob_addr, unneeded_blob_size);
-		}
-
-		/* Zero out the remaining bytes in the same page */
-		vm_size_t unneeded_bytes_in_page = last_needed_page_offset - last_needed_blob_offset;
-		memset((uint8_t*)superblob + last_needed_blob_offset, 0, unneeded_bytes_in_page);
-		blob->csb_mem_size = last_needed_page_offset;
-	} else {
-		vm_address_t new_superblob = 0;
-		vm_size_t new_superblob_size = last_needed_blob_offset;
-
-		ret = ubc_cs_blob_allocate(&new_superblob, &new_superblob_size);
-		if (ret != KERN_SUCCESS) {
-			printf("CODE SIGNING: Unable to allocate space when trying to clear unneeded code signature blobs: %d\n", ret);
-			return ENOMEM;
-		}
-
-		/*
-		 * As we weren't kmem_allocated before, we will not be kmem_allocated again. This should
-		 * mean the size we passed in is exactly the size we should get back for the allocation.
-		 */
-		assert(new_superblob_size == last_needed_blob_offset);
-
-		/* Copy in the updated superblob into the new memory */
-		memcpy((void*)new_superblob, superblob, new_superblob_size);
-
-		/* Free the old code signature and old memory */
-		ubc_cs_blob_deallocate((vm_offset_t)blob->csb_mem_kaddr, blob->csb_mem_size);
-
-		/* Setup the code signature blob again */
-		blob->csb_mem_kaddr = (void *)new_superblob;
-		blob->csb_mem_size = new_superblob_size;
-		blob->csb_cd = (const CS_CodeDirectory*)csblob_find_blob_bytes(
-			(uint8_t*)new_superblob,
-			new_superblob_size,
-			CSSLOT_CODEDIRECTORY,
-			CSMAGIC_CODEDIRECTORY);
-
-		blob->csb_der_entitlements_blob = csblob_find_blob_bytes(
-			(uint8_t*)new_superblob,
-			new_superblob_size,
-			CSSLOT_DER_ENTITLEMENTS,
-			CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
+	ret = ubc_cs_blob_allocate(&new_superblob, &new_superblob_size);
+	if (ret != KERN_SUCCESS) {
+		printf("unable to allocate memory for 2nd stage reconstitution: %d\n", ret);
+		return ENOMEM;
 	}
+	assert(new_superblob_size == last_needed_blob_offset);
 
-	blob->csb_entitlements_blob = NULL;
+	/* Calculate the code directory offset */
+	code_directory_offset = (vm_offset_t)blob->csb_cd - (vm_offset_t)blob->csb_mem_kaddr;
+
+	/* Copy in the updated superblob into the new memory */
+	memcpy((void*)new_superblob, superblob, new_superblob_size);
+
+	/* Free the old code signature and old memory */
+	ubc_cs_blob_deallocate((vm_offset_t)blob->csb_mem_kaddr, blob->csb_mem_size);
+
+	/* Reconstruct critical fields in the blob object */
+	ubc_cs_blob_reconstruct(
+		blob,
+		new_superblob,
+		new_superblob_size,
+		code_directory_offset);
+
+	/* XML entitlements should've been removed */
+	assert(blob->csb_entitlements_blob == NULL);
 
 	const CS_CodeDirectory *validated_code_directory = NULL;
 	const CS_GenericBlob *validated_entitlements_blob = NULL;
 	const CS_GenericBlob *validated_der_entitlements_blob = NULL;
 
 	ret = cs_validate_csblob(
-		(const uint8_t *)blob->csb_mem_kaddr,
+		(const uint8_t*)blob->csb_mem_kaddr,
 		blob->csb_mem_size,
 		&validated_code_directory,
 		&validated_entitlements_blob,
 		&validated_der_entitlements_blob);
 	if (ret) {
-		printf("CODE SIGNING: Validation of blob after clearing unneeded code signature blobs failed: %d\n", ret);
+		printf("unable to validate code signature after 2nd stage reconstitution: %d\n", ret);
 		return EINVAL;
 	}
 
 	return 0;
 }
-#endif /* CONFIG_ENFORCE_SIGNED_CODE */
 
 static int
 ubc_cs_convert_to_multilevel_hash(struct cs_blob *blob)
@@ -3916,6 +3861,30 @@ cs_blob_cleanup(struct cs_blob *blob)
 		blob->csb_entitlements = NULL;
 	}
 
+#if CODE_SIGNING_MONITOR
+	if (blob->csb_csm_obj != NULL) {
+		/* Unconditionally remove any profiles we may have associated */
+		csm_disassociate_provisioning_profile(blob->csb_csm_obj);
+
+		kern_return_t kr = csm_unregister_code_signature(blob->csb_csm_obj);
+		if (kr == KERN_SUCCESS) {
+			/*
+			 * If the code signature was monitor managed, the monitor will have freed it
+			 * itself in the unregistration call. It means we do not need to free the data
+			 * over here.
+			 */
+			if (blob->csb_csm_managed) {
+				blob->csb_mem_kaddr = NULL;
+				blob->csb_mem_size = 0;
+			}
+		}
+	}
+
+	/* Unconditionally remove references to the monitor */
+	blob->csb_csm_obj = NULL;
+	blob->csb_csm_managed = false;
+#endif
+
 	if (blob->csb_mem_kaddr) {
 		ubc_cs_blob_deallocate((vm_offset_t)blob->csb_mem_kaddr, blob->csb_mem_size);
 	}
@@ -3981,8 +3950,9 @@ cs_blob_init_validated(
 	blob->csb_entitlements_blob = NULL;
 	blob->csb_der_entitlements_blob = NULL;
 	blob->csb_entitlements = NULL;
-#if PMAP_CS_INCLUDE_CODE_SIGNING
-	blob->csb_pmap_cs_entry = NULL;
+#if CODE_SIGNING_MONITOR
+	blob->csb_csm_obj = NULL;
+	blob->csb_csm_managed = false;
 #endif
 	blob->csb_reconstituted = false;
 	blob->csb_validation_category = CS_VALIDATION_CATEGORY_INVALID;
@@ -4174,6 +4144,423 @@ cs_blob_require(struct cs_blob *blob, vnode_t vp)
 	}
 }
 
+#if CODE_SIGNING_MONITOR
+
+/**
+ * Independently verify the authenticity of the code signature through the monitor
+ * environment. This is required as otherwise the monitor won't allow associations
+ * of the code signature with address spaces.
+ *
+ * Once we've verified the code signature, we no longer need to keep around any
+ * provisioning profiles we may have registered with it. AMFI associates profiles
+ * with the monitor during its validation (which happens before the monitor's).
+ */
+static errno_t
+verify_code_signature_monitor(
+	struct cs_blob *cs_blob)
+{
+	kern_return_t ret = KERN_DENIED;
+
+	ret = csm_verify_code_signature(cs_blob->csb_csm_obj);
+	if ((ret != KERN_SUCCESS) && (ret != KERN_NOT_SUPPORTED)) {
+		printf("unable to verify code signature with monitor: %d\n", ret);
+		return EPERM;
+	}
+
+	ret = csm_disassociate_provisioning_profile(cs_blob->csb_csm_obj);
+	if ((ret != KERN_SUCCESS) && (ret != KERN_NOT_FOUND) && (ret != KERN_NOT_SUPPORTED)) {
+		printf("unable to disassociate profile from code signature: %d\n", ret);
+		return EPERM;
+	}
+
+	/* Associate the OSEntitlements kernel object with the monitor */
+	ret = csm_associate_os_entitlements(cs_blob->csb_csm_obj, cs_blob->csb_entitlements);
+	if ((ret != KERN_SUCCESS) && (ret != KERN_NOT_SUPPORTED)) {
+		printf("unable to associate OSEntitlements with monitor: %d\n", ret);
+		return EPERM;
+	}
+
+	return 0;
+}
+
+/**
+ * Register the code signature with the code signing monitor environment. This
+ * will effectively make the blob data immutable, either because the blob memory
+ * will be allocated and managed directory by the monitor, or because the monitor
+ * will lockdown the memory associated with the blob.
+ */
+static errno_t
+register_code_signature_monitor(
+	struct vnode *vnode,
+	struct cs_blob *cs_blob,
+	vm_offset_t code_directory_offset)
+{
+	kern_return_t ret = KERN_DENIED;
+	vm_address_t monitor_signature_addr = 0;
+	void *monitor_sig_object = NULL;
+	const char *vnode_path_ptr = NULL;
+
+	/*
+	 * Attempt to resolve the path for this vnode and pass it in to the code
+	 * signing monitor during registration.
+	 */
+	int vnode_path_len = MAXPATHLEN;
+	char *vnode_path = kalloc_data(vnode_path_len, Z_WAITOK);
+
+	errno_t error = vnode_getwithref(vnode);
+	if (error == 0) {
+		error = vn_getpath(vnode, vnode_path, &vnode_path_len);
+		if (error == 0) {
+			vnode_path_ptr = vnode_path;
+		}
+
+		/* Release reference count on the vnode */
+		(void)vnode_put(vnode);
+	}
+
+	ret = csm_register_code_signature(
+		(vm_address_t)cs_blob->csb_mem_kaddr,
+		cs_blob->csb_mem_size,
+		code_directory_offset,
+		vnode_path_ptr,
+		&monitor_sig_object,
+		&monitor_signature_addr);
+
+	kfree_data(vnode_path, MAXPATHLEN);
+	vnode_path_ptr = NULL;
+
+	if (ret == KERN_SUCCESS) {
+		/* Reconstruct the cs_blob if the monitor used its own allocation */
+		if (monitor_signature_addr != (vm_address_t)cs_blob->csb_mem_kaddr) {
+			vm_address_t monitor_signature_size = cs_blob->csb_mem_size;
+
+			/* Free the old memory for the blob */
+			ubc_cs_blob_deallocate(
+				(vm_address_t)cs_blob->csb_mem_kaddr,
+				cs_blob->csb_mem_size);
+
+			/* Reconstruct critical fields in the blob object */
+			ubc_cs_blob_reconstruct(
+				cs_blob,
+				monitor_signature_addr,
+				monitor_signature_size,
+				code_directory_offset);
+
+			/* Mark the signature as monitor managed */
+			cs_blob->csb_csm_managed = true;
+		}
+	} else if (ret != KERN_NOT_SUPPORTED) {
+		printf("unable to register code signature with monitor: %d\n", ret);
+		return EPERM;
+	}
+
+	/* Save the monitor handle for the signature object -- may be NULL */
+	cs_blob->csb_csm_obj = monitor_sig_object;
+
+	return 0;
+}
+
+#endif /* CODE_SIGNING_MONITOR */
+
+/**
+ * Accelerate entitlements for a code signature object. When we have a code
+ * signing monitor, this acceleration is done within the monitor which then
+ * passes back a CoreEntitlements query context the kernel can use. When we
+ * don't have a code signing monitor, we accelerate the queries within the
+ * kernel memory itself.
+ *
+ * This function must be called when the storage for the code signature can
+ * no longer change.
+ */
+static errno_t
+accelerate_entitlement_queries(
+	struct cs_blob *cs_blob)
+{
+	kern_return_t ret = KERN_NOT_SUPPORTED;
+
+#if CODE_SIGNING_MONITOR
+	CEQueryContext_t ce_ctx = NULL;
+	const char *signing_id = NULL;
+
+	ret = csm_accelerate_entitlements(cs_blob->csb_csm_obj, &ce_ctx);
+	if ((ret != KERN_SUCCESS) && (ret != KERN_NOT_SUPPORTED)) {
+		printf("unable to accelerate entitlements through the monitor: %d\n", ret);
+		return EPERM;
+	}
+
+	if (ret == KERN_SUCCESS) {
+		/* Call cannot not fail at this stage */
+		ret = csm_acquire_signing_identifier(cs_blob->csb_csm_obj, &signing_id);
+		assert(ret == KERN_SUCCESS);
+
+		/* Adjust the OSEntitlements context with AMFI */
+		ret = amfi->OSEntitlements.adjustContextWithMonitor(
+			cs_blob->csb_entitlements,
+			ce_ctx,
+			cs_blob->csb_csm_obj,
+			signing_id,
+			cs_blob->csb_flags);
+		if (ret != KERN_SUCCESS) {
+			printf("unable to adjust OSEntitlements context with monitor: %d\n", ret);
+			return EPERM;
+		}
+
+		return 0;
+	}
+#endif
+
+	/*
+	 * If we reach here, then either we don't have a code signing monitor, or
+	 * the code signing monitor isn't enabled for code signing, in which case,
+	 * AMFI is going to accelerate the entitlements context and adjust its
+	 * context on its own.
+	 */
+	assert(ret == KERN_NOT_SUPPORTED);
+
+	ret = amfi->OSEntitlements.adjustContextWithoutMonitor(
+		cs_blob->csb_entitlements,
+		cs_blob);
+
+	if (ret != KERN_SUCCESS) {
+		printf("unable to adjust OSEntitlements context without monitor: %d\n", ret);
+		return EPERM;
+	}
+
+	return 0;
+}
+
+/**
+ * Ensure and validate that some security critical code signing blobs haven't
+ * been stripped off from the code signature. This can happen if an attacker
+ * chose to load a code signature sans these critical blobs, or if there is a
+ * bug in reconstitution logic which remove these blobs from the code signature.
+ */
+static errno_t
+validate_auxiliary_signed_blobs(
+	struct cs_blob *cs_blob)
+{
+	struct cs_blob_identifier {
+		uint32_t cs_slot;
+		uint32_t cs_magic;
+	};
+
+	const struct cs_blob_identifier identifiers[] = {
+		{CSSLOT_LAUNCH_CONSTRAINT_SELF, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT},
+		{CSSLOT_LAUNCH_CONSTRAINT_PARENT, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT},
+		{CSSLOT_LAUNCH_CONSTRAINT_RESPONSIBLE, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT}
+	};
+	const uint32_t num_identifiers = sizeof(identifiers) / sizeof(identifiers[0]);
+
+	for (uint32_t i = 0; i < num_identifiers; i++) {
+		errno_t err = csblob_find_special_slot_blob(
+			cs_blob,
+			identifiers[i].cs_slot,
+			identifiers[i].cs_magic,
+			NULL,
+			NULL);
+
+		if (err != 0) {
+			printf("unable to validate security-critical blob: %d [%u|%u]\n",
+			    err, identifiers[i].cs_slot, identifiers[i].cs_magic);
+
+			return EPERM;
+		}
+	}
+
+	return 0;
+}
+
+/**
+ * Setup multi-level hashing for the code signature. This isn't supported on most
+ * shipping devices, but on ones where it is, it can result in significant savings
+ * of memory from the code signature standpoint.
+ *
+ * Multi-level hashing is used to condense the code directory hashes in order to
+ * improve memory consumption. We take four 4K page hashes, and condense them into
+ * a single 16K hash, hence reducing the space consumed by the code directory by
+ * about ~75%.
+ */
+static errno_t
+setup_multilevel_hashing(
+	struct cs_blob *cs_blob)
+{
+	code_signing_monitor_type_t monitor_type = CS_MONITOR_TYPE_NONE;
+	errno_t err = -1;
+
+	/*
+	 * When we have a code signing monitor, we do not support multi-level hashing
+	 * since the code signature data is expected to be locked within memory which
+	 * cannot be written to by the kernel.
+	 *
+	 * Even when the code signing monitor isn't explicitly enabled, there are other
+	 * reasons for not performing multi-level hashing. For instance, Rosetta creates
+	 * issues with multi-level hashing on Apple Silicon Macs.
+	 */
+	code_signing_configuration(&monitor_type, NULL);
+	if (monitor_type != CS_MONITOR_TYPE_NONE) {
+		return 0;
+	}
+
+	/* We need to check if multi-level hashing is supported for this blob */
+	if (ubc_cs_supports_multilevel_hash(cs_blob) == false) {
+		return 0;
+	}
+
+	err = ubc_cs_convert_to_multilevel_hash(cs_blob);
+	if (err != 0) {
+		printf("unable to setup multi-level hashing: %d\n", err);
+		return err;
+	}
+
+	assert(cs_blob->csb_reconstituted == true);
+	return 0;
+}
+
+/**
+ * Once code signature validation is complete, we can remove even more blobs from the
+ * code signature as they are no longer needed. This goes on to conserve even more
+ * system memory.
+ */
+static errno_t
+reconstitute_code_signature_2nd_stage(
+	struct cs_blob *cs_blob)
+{
+	kern_return_t ret = KERN_NOT_SUPPORTED;
+	errno_t err = EPERM;
+
+	/* If we never reconstituted before, we won't be reconstituting again */
+	if (cs_blob->csb_reconstituted == false) {
+		return 0;
+	}
+
+#if CODE_SIGNING_MONITOR
+	/*
+	 * When we have a code signing monitor, the code signature is immutable until the
+	 * monitor decides to unlock parts of it. Therefore, 2nd stage reconstitution takes
+	 * place in the monitor when we have a monitor available.
+	 *
+	 * If the monitor isn't enforcing code signing (in which case the code signature is
+	 * NOT immutable), then we perform 2nd stage reconstitution within the kernel itself.
+	 */
+	vm_address_t unneeded_addr = 0;
+	vm_size_t unneeded_size = 0;
+
+	ret = csm_reconstitute_code_signature(
+		cs_blob->csb_csm_obj,
+		&unneeded_addr,
+		&unneeded_size);
+
+	if ((ret == KERN_SUCCESS) && unneeded_addr && unneeded_size) {
+		/* Free the unneded part of the blob */
+		kmem_free(kernel_map, unneeded_addr, unneeded_size);
+
+		/* Adjust the size in the blob object */
+		cs_blob->csb_mem_size -= unneeded_size;
+	}
+#endif
+
+	if (ret == KERN_SUCCESS) {
+		goto success;
+	} else if (ret != KERN_NOT_SUPPORTED) {
+		/*
+		 * A monitor environment is available, and it failed in performing 2nd stage
+		 * reconstitution. This is a fatal issue for code signing validation.
+		 */
+		printf("unable to reconstitute code signature through monitor: %d\n", ret);
+		return EPERM;
+	}
+
+	/* No monitor available if we reached here */
+	err = ubc_cs_reconstitute_code_signature_2nd_stage(cs_blob);
+	if (err != 0) {
+		return err;
+	}
+
+success:
+	/*
+	 * Regardless of whether we are performing 2nd stage reconstitution in the monitor
+	 * or in the kernel, we remove references to XML entitlements from the blob here.
+	 * None of the 2nd stage reconstitution code ever keeps these around, and they have
+	 * been explicitly deprecated and disallowed.
+	 */
+	cs_blob->csb_entitlements_blob = NULL;
+
+	return 0;
+}
+
+/**
+ * A code signature blob often contains blob which aren't needed in the kernel. Since
+ * the code signature is wired into kernel memory for the time it is used, it behooves
+ * us to remove any blobs we have no need for in order to conserve memory.
+ *
+ * Some platforms support copying the entire SuperBlob stored in kernel memory into
+ * userspace memory through the "csops" system call. There is an expectation that when
+ * this happens, all the blobs which were a part of the code signature are copied in
+ * to userspace memory. As a result, these platforms cannot reconstitute the code
+ * signature since, or rather, these platforms cannot remove blobs from the signature,
+ * thereby making reconstitution useless.
+ */
+static errno_t
+reconstitute_code_signature(
+	struct cs_blob *cs_blob)
+{
+	CS_CodeDirectory *code_directory = NULL;
+	vm_address_t signature_addr = 0;
+	vm_size_t signature_size = 0;
+	vm_offset_t code_directory_offset = 0;
+	bool platform_supports_reconstitution = false;
+
+#if CONFIG_CODE_SIGNATURE_RECONSTITUTION
+	platform_supports_reconstitution = true;
+#endif
+
+	/*
+	 * We can skip reconstitution if the code signing monitor isn't available or not
+	 * enabled. But if we do have a monitor, then reconsitution becomes required, as
+	 * there is an expectation of performing 2nd stage reconstitution through the
+	 * monitor itself.
+	 */
+	if (platform_supports_reconstitution == false) {
+#if CODE_SIGNING_MONITOR
+		if (csm_enabled() == true) {
+			printf("reconstitution required when code signing monitor is enabled\n");
+			return EPERM;
+		}
+#endif
+		return 0;
+	}
+
+	errno_t err = ubc_cs_reconstitute_code_signature(
+		cs_blob,
+		&signature_addr,
+		&signature_size,
+		0,
+		&code_directory);
+
+	if (err != 0) {
+		printf("unable to reconstitute code signature: %d\n", err);
+		return err;
+	}
+
+	/* Calculate the code directory offset */
+	code_directory_offset = (vm_offset_t)code_directory - signature_addr;
+
+	/* Reconstitution allocates new memory -- free the old one */
+	ubc_cs_blob_deallocate((vm_address_t)cs_blob->csb_mem_kaddr, cs_blob->csb_mem_size);
+
+	/* Reconstruct critical fields in the blob object */
+	ubc_cs_blob_reconstruct(
+		cs_blob,
+		signature_addr,
+		signature_size,
+		code_directory_offset);
+
+	/* Mark the object as reconstituted */
+	cs_blob->csb_reconstituted = true;
+
+	return 0;
+}
+
 int
 ubc_cs_blob_add(
 	struct vnode    *vp,
@@ -4187,27 +4574,40 @@ ubc_cs_blob_add(
 	__unused int    flags,
 	struct cs_blob  **ret_blob)
 {
-	kern_return_t           kr;
-	struct ubc_info         *uip;
-	struct cs_blob          tmp_blob;
-	struct cs_blob          *blob_ro = NULL;
-	struct cs_blob          *oblob;
-	int                     error;
-	CS_CodeDirectory const *cd;
-	off_t                   blob_start_offset, blob_end_offset;
-	boolean_t               record_mtime;
+	ptrauth_generic_signature_t cs_blob_sig = {0};
+	struct ubc_info *uip = NULL;
+	struct cs_blob tmp_blob = {0};
+	struct cs_blob *blob_ro = NULL;
+	struct cs_blob *oblob = NULL;
+	CS_CodeDirectory const *cd = NULL;
+	off_t blob_start_offset = 0;
+	off_t blob_end_offset = 0;
+	boolean_t record_mtime = false;
+	kern_return_t kr = KERN_DENIED;
+	errno_t error = -1;
 
-	record_mtime = FALSE;
+#if HAS_APPLE_PAC
+	void *signed_entitlements = NULL;
+#if CODE_SIGNING_MONITOR
+	void *signed_monitor_obj = NULL;
+#endif
+#endif
+
 	if (ret_blob) {
 		*ret_blob = NULL;
 	}
 
-	/* Create the struct cs_blob wrapper that will be attached to the vnode.
-	 * Validates the passed in blob in the process. */
+	/*
+	 * Create the struct cs_blob abstract data type which will get attached to
+	 * the vnode object. This function also validates the structural integrity
+	 * of the code signature blob being passed in.
+	 *
+	 * We initialize a temporary blob whose contents are then copied into an RO
+	 * blob which we allocate from the read-only allocator.
+	 */
 	error = cs_blob_init_validated(addr, size, &tmp_blob, &cd);
-
 	if (error != 0) {
-		printf("malform code signature blob: %d\n", error);
+		printf("unable to create a validated cs_blob object: %d\n", error);
 		return error;
 	}
 
@@ -4215,164 +4615,182 @@ ubc_cs_blob_add(
 	tmp_blob.csb_cpu_subtype = cpusubtype & ~CPU_SUBTYPE_MASK;
 	tmp_blob.csb_base_offset = base_offset;
 
-#if CONFIG_ENFORCE_SIGNED_CODE
-	/*
-	 * Reconstitute code signature
-	 */
-	{
-		vm_address_t new_mem_kaddr = 0;
-		vm_size_t new_mem_size = 0;
-
-		CS_CodeDirectory *new_cd = NULL;
-		const CS_GenericBlob *new_entitlements = NULL;
-		const CS_GenericBlob *new_der_entitlements = NULL;
-
-		error = ubc_cs_reconstitute_code_signature(&tmp_blob, &new_mem_kaddr, &new_mem_size, 0, &new_cd);
-		if (error != 0) {
-			printf("failed code signature reconstitution: %d\n", error);
-			goto out;
-		}
-		new_entitlements = csblob_find_blob_bytes((uint8_t*)new_mem_kaddr, new_mem_size, CSSLOT_ENTITLEMENTS, CSMAGIC_EMBEDDED_ENTITLEMENTS);
-		new_der_entitlements = csblob_find_blob_bytes((uint8_t*)new_mem_kaddr, new_mem_size, CSSLOT_DER_ENTITLEMENTS, CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
-
-		ubc_cs_blob_deallocate((vm_offset_t)tmp_blob.csb_mem_kaddr, tmp_blob.csb_mem_size);
-
-		tmp_blob.csb_mem_kaddr = (void *)new_mem_kaddr;
-		tmp_blob.csb_mem_size = new_mem_size;
-		tmp_blob.csb_cd = new_cd;
-		tmp_blob.csb_entitlements_blob = new_entitlements;
-		tmp_blob.csb_der_entitlements_blob = new_der_entitlements;
-		tmp_blob.csb_reconstituted = true;
+	/* Perform 1st stage reconstitution */
+	error = reconstitute_code_signature(&tmp_blob);
+	if (error != 0) {
+		goto out;
 	}
-#endif
 
+	/*
+	 * There is a strong design pattern we have to follow carefully within this
+	 * function. Since we're storing the struct cs_blob within RO-allocated
+	 * memory, it is immutable to modifications from within the kernel itself.
+	 *
+	 * However, before the contents of the blob are transferred to the immutable
+	 * cs_blob, they are kept on the stack. In order to protect against a kernel
+	 * R/W attacker, we must protect this stack variable. Most importantly, any
+	 * code paths which can block for a while must compute a PAC signature over
+	 * the stack variable, then perform the blocking operation, and then ensure
+	 * that the PAC signature over the stack variable is still valid to ensure
+	 * that an attacker did not overwrite contents of the blob by introducing a
+	 * maliciously long blocking operation, giving them the time required to go
+	 * and overwrite the contents of the blob.
+	 *
+	 * The most important fields to protect here are the OSEntitlements and the
+	 * code signing monitor object references. For these ones, we keep around
+	 * extra signed pointers diversified against the read-only blobs' memory
+	 * and then update the stack variable with these before updating the full
+	 * read-only blob.
+	 */
 
 	blob_ro = zalloc_ro(ZONE_ID_CS_BLOB, Z_WAITOK | Z_NOFAIL);
+	assert(blob_ro != NULL);
+
 	tmp_blob.csb_ro_addr = blob_ro;
 	tmp_blob.csb_vnode = vp;
 
-	/* AMFI needs to see the current blob state at the RO address. */
+	/* AMFI needs to see the current blob state at the RO address */
 	zalloc_ro_update_elem(ZONE_ID_CS_BLOB, blob_ro, &tmp_blob);
 
-#if CONFIG_MACF
-	/*
-	 * Let policy module check whether the blob's signature is accepted.
-	 */
+#if CODE_SIGNING_MONITOR
+	error = register_code_signature_monitor(
+		vp,
+		&tmp_blob,
+		(vm_offset_t)tmp_blob.csb_cd - (vm_offset_t)tmp_blob.csb_mem_kaddr);
 
+	if (error != 0) {
+		goto out;
+	}
+
+#if HAS_APPLE_PAC
+	signed_monitor_obj = ptrauth_sign_unauthenticated(
+		tmp_blob.csb_csm_obj,
+		ptrauth_key_process_independent_data,
+		ptrauth_blend_discriminator(&blob_ro->csb_csm_obj,
+		OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_csm_obj")));
+#endif /* HAS_APPLE_PAC */
+
+#endif /* CODE_SIGNING_MONITOR */
+
+#if CONFIG_MACF
 	unsigned int cs_flags = tmp_blob.csb_flags;
 	unsigned int signer_type = tmp_blob.csb_signer_type;
-	error = mac_vnode_check_signature(vp, &tmp_blob, imgp, &cs_flags, &signer_type, flags, platform);
+
+	error = mac_vnode_check_signature(
+		vp,
+		&tmp_blob,
+		imgp,
+		&cs_flags,
+		&signer_type,
+		flags,
+		platform);
+
+	if (error != 0) {
+		printf("validation of code signature failed through MACF policy: %d\n", error);
+		goto out;
+	}
+
+#if HAS_APPLE_PAC
+	signed_entitlements = ptrauth_sign_unauthenticated(
+		tmp_blob.csb_entitlements,
+		ptrauth_key_process_independent_data,
+		ptrauth_blend_discriminator(&blob_ro->csb_entitlements,
+		OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_entitlements")));
+#endif
 
 	tmp_blob.csb_flags = cs_flags;
 	tmp_blob.csb_signer_type = signer_type;
 
-	if (error) {
-		if (cs_debug) {
-			printf("check_signature[pid: %d], error = %d\n", proc_getpid(current_proc()), error);
-		}
-		goto out;
-	}
-	if ((flags & MAC_VNODE_CHECK_DYLD_SIM) && !(tmp_blob.csb_flags & CS_PLATFORM_BINARY)) {
-		if (cs_debug) {
-			printf("check_signature[pid: %d], is not apple signed\n", proc_getpid(current_proc()));
-		}
-		error = EPERM;
-		goto out;
-	}
-#endif
-
-
-#if CONFIG_ENFORCE_SIGNED_CODE
-	/*
-	 * When this flag is turned on, we reconstitue the code signature to only
-	 * include the blobs which are needed. This may include the first code
-	 * directory and the CMS blob. However, now that verification of this blob
-	 * is complete, we don't need all these blobs. Hence, we clear them out.
-	 */
-
-	if (ubc_cs_clear_unneeded_code_signature(&tmp_blob)) {
-		error = EPERM;
-		goto out;
-	}
-#endif /* CONFIG_ENFORCE_SIGNED_CODE */
-
-	tmp_blob.csb_entitlements_blob = NULL;
-
-#if CODE_SIGNING_MONITOR
-	/* Disassociate any associated provisioning profiles from the monitor */
-	kr = disassociate_provisioning_profile(tmp_blob.csb_pmap_cs_entry);
-	if ((kr != KERN_SUCCESS) && (kr != KERN_NOT_FOUND)) {
-		printf("CODE SIGNING: error with disassociating profile[pid: %d]: %d\n",
-		    proc_getpid(current_proc()), kr);
-
-		error = EPERM;
-		goto out;
-	}
-#endif
-
 	if (tmp_blob.csb_flags & CS_PLATFORM_BINARY) {
-		if (cs_debug > 1) {
-			printf("check_signature[pid: %d]: platform binary\n", proc_getpid(current_proc()));
-		}
 		tmp_blob.csb_platform_binary = 1;
 		tmp_blob.csb_platform_path = !!(tmp_blob.csb_flags & CS_PLATFORM_PATH);
+		tmp_blob.csb_teamid = NULL;
 	} else {
 		tmp_blob.csb_platform_binary = 0;
 		tmp_blob.csb_platform_path = 0;
-		tmp_blob.csb_teamid = csblob_parse_teamid(&tmp_blob);
-		if (cs_debug > 1) {
-			if (tmp_blob.csb_teamid) {
-				printf("check_signature[pid: %d]: team-id is %s\n", proc_getpid(current_proc()), tmp_blob.csb_teamid);
-			} else {
-				printf("check_signature[pid: %d]: no team-id\n", proc_getpid(current_proc()));
-			}
-		}
+	}
+
+	if ((flags & MAC_VNODE_CHECK_DYLD_SIM) && !tmp_blob.csb_platform_binary) {
+		printf("dyld simulator runtime is not apple signed: proc: %d\n",
+		    proc_getpid(current_proc()));
+
+		error = EPERM;
+		goto out;
+	}
+#endif /* CONFIG_MACF */
+
+#if CODE_SIGNING_MONITOR
+	error = verify_code_signature_monitor(&tmp_blob);
+	if (error != 0) {
+		goto out;
+	}
+#endif
+
+	/* Perform 2nd stage reconstitution */
+	error = reconstitute_code_signature_2nd_stage(&tmp_blob);
+	if (error != 0) {
+		goto out;
+	}
+
+	/* Setup any multi-level hashing for the code signature */
+	error = setup_multilevel_hashing(&tmp_blob);
+	if (error != 0) {
+		goto out;
+	}
+
+	/* Ensure security critical auxiliary blobs still exist */
+	error = validate_auxiliary_signed_blobs(&tmp_blob);
+	if (error != 0) {
+		goto out;
 	}
 
 	/*
-	 * Validate that launch constraints haven't been stripped
+	 * Accelerate the entitlement queries for this code signature. This must
+	 * be done only after we know that the code signature pointers within the
+	 * struct cs_blob aren't going to be shifted around anymore, which is why
+	 * this acceleration is done after setting up multilevel hashing, since
+	 * that is the last part of signature validation which can shift the code
+	 * signature around.
 	 */
-	kr = csblob_find_special_slot_blob(&tmp_blob, CSSLOT_LAUNCH_CONSTRAINT_SELF, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT, NULL, NULL);
-	if (kr) {
-		printf("check_signature[pid: %d]: embedded self launch constraint was removed\n", proc_getpid(current_proc()));
-		error = EPERM;
-		goto out;
-	}
-	kr = csblob_find_special_slot_blob(&tmp_blob, CSSLOT_LAUNCH_CONSTRAINT_PARENT, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT, NULL, NULL);
-	if (kr) {
-		printf("check_signature[pid: %d]: embedded parent launch constraint was removed\n", proc_getpid(current_proc()));
-		error = EPERM;
-		goto out;
-	}
-	kr = csblob_find_special_slot_blob(&tmp_blob, CSSLOT_LAUNCH_CONSTRAINT_RESPONSIBLE, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT, NULL, NULL);
-	if (kr) {
-		printf("check_signature[pid: %d]: embedded responsible launch constraint was removed\n", proc_getpid(current_proc()));
-		error = EPERM;
+	error = accelerate_entitlement_queries(&tmp_blob);
+	if (error != 0) {
 		goto out;
 	}
 
 	/*
-	 * Validate the blob's coverage
+	 * Parse and set the Team ID for this code signature. This only needs to
+	 * happen when the signature isn't marked as platform. Like above, this
+	 * has to happen after we know the pointers within struct cs_blob aren't
+	 * going to be shifted anymore.
+	 */
+	if ((tmp_blob.csb_flags & CS_PLATFORM_BINARY) == 0) {
+		tmp_blob.csb_teamid = csblob_parse_teamid(&tmp_blob);
+	}
+
+	/*
+	 * Validate the code signing blob's coverage. Ideally, we can just do this
+	 * in the beginning, right after structural validation, however, multilevel
+	 * hashing can change some offets.
 	 */
 	blob_start_offset = tmp_blob.csb_base_offset + tmp_blob.csb_start_offset;
 	blob_end_offset = tmp_blob.csb_base_offset + tmp_blob.csb_end_offset;
-
-	if (blob_start_offset >= blob_end_offset ||
-	    blob_start_offset < 0 ||
-	    blob_end_offset <= 0) {
-		/* reject empty or backwards blob */
+	if (blob_start_offset >= blob_end_offset) {
+		error = EINVAL;
+		goto out;
+	} else if (blob_start_offset < 0 || blob_end_offset <= 0) {
 		error = EINVAL;
 		goto out;
 	}
 
-	if (ubc_cs_supports_multilevel_hash(&tmp_blob)) {
-		error = ubc_cs_convert_to_multilevel_hash(&tmp_blob);
-		if (error != 0) {
-			printf("failed multilevel hash conversion: %d\n", error);
-			goto out;
-		}
-		tmp_blob.csb_reconstituted = true;
-	}
+	/*
+	 * The vnode_lock, linked list traversal, and marking of the memory object as
+	 * signed can all be blocking operations. Compute a PAC over the tmp_blob.
+	 */
+	cs_blob_sig = ptrauth_utils_sign_blob_generic(
+		&tmp_blob,
+		sizeof(tmp_blob),
+		OS_PTRAUTH_DISCRIMINATOR("ubc_cs_blob_add.blocking_op0"),
+		PTRAUTH_ADDR_DIVERSIFY);
 
 	vnode_lock(vp);
 	if (!UBCINFOEXISTS(vp)) {
@@ -4468,7 +4886,6 @@ ubc_cs_blob_add(
 		}
 	}
 
-
 	/* mark this vnode's VM object as having "signed pages" */
 	kr = memory_object_signed(uip->ui_control, TRUE);
 	if (kr != KERN_SUCCESS) {
@@ -4484,20 +4901,52 @@ ubc_cs_blob_add(
 
 	/* set the generation count for cs_blobs */
 	uip->cs_add_gen = cs_blob_generation_count;
-	tmp_blob.csb_next = uip->cs_blobs;
+
+	/* Authenticate the PAC signature after blocking operation */
+	ptrauth_utils_auth_blob_generic(
+		&tmp_blob,
+		sizeof(tmp_blob),
+		OS_PTRAUTH_DISCRIMINATOR("ubc_cs_blob_add.blocking_op0"),
+		PTRAUTH_ADDR_DIVERSIFY,
+		cs_blob_sig);
+
+	/* Update the system statistics for code signatures blobs */
 	ubc_cs_blob_adjust_statistics(&tmp_blob);
+
+	/* Update the list pointer to reference other blobs for this vnode */
+	tmp_blob.csb_next = uip->cs_blobs;
+
+#if HAS_APPLE_PAC
+	/*
+	 * Update all the critical pointers in the blob with the RO diversified
+	 * values before updating the read-only blob with the full contents of
+	 * the struct cs_blob. We need to use memcpy here as otherwise a simple
+	 * assignment will cause the compiler to re-sign using the stack variable
+	 * as the address diversifier.
+	 */
+	memcpy((void*)&tmp_blob.csb_entitlements, &signed_entitlements, sizeof(void*));
+#if CODE_SIGNING_MONITOR
+	memcpy((void*)&tmp_blob.csb_csm_obj, &signed_monitor_obj, sizeof(void*));
+#endif
+#endif
 	zalloc_ro_update_elem(ZONE_ID_CS_BLOB, blob_ro, &tmp_blob);
 
+	/* Add a fence to ensure writes to the blob are visible on all threads */
+	os_atomic_thread_fence(seq_cst);
+
 	/*
-	 * Add this blob to the list of blobs for this vnode.
-	 * We always add at the front of the list and we never remove a
-	 * blob from the list, so ubc_cs_get_blobs() can return whatever
-	 * the top of the list was and that list will remain valid
-	 * while we validate a page, even after we release the vnode's lock.
+	 * Add the cs_blob to the front of the list of blobs for this vnode. We
+	 * add to the front of the list, and we never remove a blob from the list
+	 * which means ubc_cs_get_blobs can return whatever the top of the list
+	 * is, while still keeping the list valid. Useful for if we validate a
+	 * page while adding in a new blob for this vnode.
 	 */
-	os_atomic_thread_fence(seq_cst); // fence to make sure all of the writes happen before we update the head
 	uip->cs_blobs = blob_ro;
 
+	/* Make sure to reload pointer from uip to double check */
+	if (uip->cs_blobs->csb_next) {
+		zone_require_ro(ZONE_ID_CS_BLOB, sizeof(struct cs_blob), uip->cs_blobs->csb_next);
+	}
 
 	if (cs_debug > 1) {
 		proc_t p;
@@ -4529,7 +4978,7 @@ ubc_cs_blob_add(
 
 out:
 	if (error) {
-		if (cs_debug) {
+		if (error != EAGAIN) {
 			printf("check_signature[pid: %d]: error = %d\n", proc_getpid(current_proc()), error);
 		}
 
@@ -4736,6 +5185,11 @@ ubc_cs_blob_add_supplement(
 
 	os_atomic_thread_fence(seq_cst); // Fence to prevent reordering here
 	uip->cs_blob_supplement = blob_ro;
+
+	/* Make sure to reload pointer from uip to double check */
+	if (__improbable(uip->cs_blob_supplement->csb_next)) {
+		panic("csb_next does not match expected NULL value");
+	}
 
 	vnode_unlock(vp);
 
@@ -5706,3 +6160,64 @@ ubc_cs_validation_bitmap_deallocate(__unused struct ubc_info *uip)
 }
 #endif /* CHECK_CS_VALIDATION_BITMAP */
 
+#if CODE_SIGNING_MONITOR
+
+kern_return_t
+cs_associate_blob_with_mapping(
+	void                    *pmap,
+	vm_map_offset_t         start,
+	vm_map_size_t           size,
+	vm_object_offset_t      offset,
+	void                    *blobs_p)
+{
+	off_t                   blob_start_offset, blob_end_offset;
+	kern_return_t           kr;
+	struct cs_blob          *blobs, *blob;
+	vm_offset_t             kaddr;
+	void                    *monitor_sig_obj = NULL;
+
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	blobs = (struct cs_blob *)blobs_p;
+
+	for (blob = blobs;
+	    blob != NULL;
+	    blob = blob->csb_next) {
+		blob_start_offset = (blob->csb_base_offset +
+		    blob->csb_start_offset);
+		blob_end_offset = (blob->csb_base_offset +
+		    blob->csb_end_offset);
+		if ((off_t) offset < blob_start_offset ||
+		    (off_t) offset >= blob_end_offset ||
+		    (off_t) (offset + size) <= blob_start_offset ||
+		    (off_t) (offset + size) > blob_end_offset) {
+			continue;
+		}
+
+		kaddr = (vm_offset_t)blob->csb_mem_kaddr;
+		if (kaddr == 0) {
+			/* blob data has been released */
+			continue;
+		}
+
+		monitor_sig_obj = blob->csb_csm_obj;
+		if (monitor_sig_obj == NULL) {
+			continue;
+		}
+
+		break;
+	}
+
+	if (monitor_sig_obj != NULL) {
+		vm_offset_t segment_offset = offset - blob_start_offset;
+		kr = csm_associate_code_signature(pmap, monitor_sig_obj, start, size, segment_offset);
+	} else {
+		kr = KERN_CODESIGN_ERROR;
+	}
+
+	return kr;
+}
+
+#endif /* CODE_SIGNING_MONITOR */

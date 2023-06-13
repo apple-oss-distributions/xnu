@@ -128,6 +128,12 @@
 #include <stdatomic.h>
 #include <os/atomic_private.h>
 
+#ifdef KDBG_MACOS_RELEASE
+#define KTRC KDBG_MACOS_RELEASE
+#else
+#define KTRC KDBG_RELEASE
+#endif
+
 struct sched_statistics PERCPU_DATA(sched_stats);
 bool sched_stats_active;
 
@@ -241,6 +247,8 @@ rt_runq_is_low_latency(processor_set_t pset)
 	return os_atomic_load(&SCHED(rt_runq)(pset)->constraint, relaxed) <= rt_constraint_threshold;
 }
 
+TUNABLE(bool, cpulimit_affects_quantum, "cpulimit_affects_quantum", true);
+
 #define         DEFAULT_PREEMPTION_RATE         100             /* (1/s) */
 TUNABLE(int, default_preemption_rate, "preempt", DEFAULT_PREEMPTION_RATE);
 
@@ -248,16 +256,16 @@ TUNABLE(int, default_preemption_rate, "preempt", DEFAULT_PREEMPTION_RATE);
 TUNABLE(int, default_bg_preemption_rate, "bg_preempt", DEFAULT_BG_PREEMPTION_RATE);
 
 #define         MAX_UNSAFE_RT_QUANTA               100
+#define         SAFE_RT_MULTIPLIER                 2
 
 #define         MAX_UNSAFE_FIXED_QUANTA               100
+#define         SAFE_FIXED_MULTIPLIER                 2
 
-#if DEVELOPMENT || DEBUG
-TUNABLE_WRITEABLE(int, max_unsafe_rt_quanta, "max_unsafe_rt_quanta", MAX_UNSAFE_RT_QUANTA);
-TUNABLE_WRITEABLE(int, max_unsafe_fixed_quanta, "max_unsafe_fixed_quanta", MAX_UNSAFE_FIXED_QUANTA);
-#else
-TUNABLE(int, max_unsafe_rt_quanta, "max_unsafe_rt_quanta", MAX_UNSAFE_RT_QUANTA);
-TUNABLE(int, max_unsafe_fixed_quanta, "max_unsafe_fixed_quanta", MAX_UNSAFE_FIXED_QUANTA);
-#endif
+TUNABLE_DEV_WRITEABLE(int, max_unsafe_rt_quanta, "max_unsafe_rt_quanta", MAX_UNSAFE_RT_QUANTA);
+TUNABLE_DEV_WRITEABLE(int, max_unsafe_fixed_quanta, "max_unsafe_fixed_quanta", MAX_UNSAFE_FIXED_QUANTA);
+
+TUNABLE_DEV_WRITEABLE(int, safe_rt_multiplier, "safe_rt_multiplier", SAFE_RT_MULTIPLIER);
+TUNABLE_DEV_WRITEABLE(int, safe_fixed_multiplier, "safe_fixed_multiplier", SAFE_RT_MULTIPLIER);
 
 #define         MAX_POLL_QUANTA                 2
 TUNABLE(int, max_poll_quanta, "poll", MAX_POLL_QUANTA);
@@ -516,7 +524,10 @@ sched_set_max_unsafe_rt_quanta(int max)
 	const uint32_t quantum_size = SCHED(initial_quantum_size)(THREAD_NULL);
 
 	max_unsafe_rt_computation = ((uint64_t)max) * quantum_size;
-	sched_safe_rt_duration = 2 * ((uint64_t)max) * quantum_size;
+
+	const int mult = safe_rt_multiplier <= 0 ? 2 : safe_rt_multiplier;
+	sched_safe_rt_duration = mult * ((uint64_t)max) * quantum_size;
+
 
 #if DEVELOPMENT || DEBUG
 	max_unsafe_rt_quanta = max;
@@ -535,7 +546,9 @@ sched_set_max_unsafe_fixed_quanta(int max)
 	const uint32_t quantum_size = SCHED(initial_quantum_size)(THREAD_NULL);
 
 	max_unsafe_fixed_computation = ((uint64_t)max) * quantum_size;
-	sched_safe_fixed_duration = 2 * ((uint64_t)max) * quantum_size;
+
+	const int mult = safe_fixed_multiplier <= 0 ? 2 : safe_fixed_multiplier;
+	sched_safe_fixed_duration = mult * ((uint64_t)max) * quantum_size;
 
 #if DEVELOPMENT || DEBUG
 	max_unsafe_fixed_quanta = max;
@@ -787,27 +800,28 @@ check_monotonic_time(uint64_t ctime)
 
 /*
  *	Thread wait timer expiration.
+ *	Runs in timer interrupt context with interrupts disabled.
  */
 void
-thread_timer_expire(
-	void                    *p0,
-	__unused void   *p1)
+thread_timer_expire(void *p0, __unused void *p1)
 {
-	thread_t                thread = p0;
-	spl_t                   s;
+	thread_t thread = (thread_t)p0;
 
 	assert_thread_magic(thread);
 
-	s = splsched();
+	assert(ml_get_interrupts_enabled() == FALSE);
+
 	thread_lock(thread);
-	if (--thread->wait_timer_active == 0) {
-		if (thread->wait_timer_is_set) {
-			thread->wait_timer_is_set = FALSE;
-			clear_wait_internal(thread, THREAD_TIMED_OUT);
-		}
+
+	if (thread->wait_timer_armed) {
+		thread->wait_timer_armed = false;
+		clear_wait_internal(thread, THREAD_TIMED_OUT);
+		/* clear_wait_internal may have dropped and retaken the thread lock */
 	}
+
+	thread->wait_timer_active--;
+
 	thread_unlock(thread);
-	splx(s);
 }
 
 /*
@@ -839,11 +853,11 @@ thread_unblock(
 	/*
 	 *	Cancel pending wait timer.
 	 */
-	if (thread->wait_timer_is_set) {
+	if (thread->wait_timer_armed) {
 		if (timer_call_cancel(thread->wait_timer)) {
 			thread->wait_timer_active--;
 		}
-		thread->wait_timer_is_set = FALSE;
+		thread->wait_timer_armed = false;
 	}
 
 	boolean_t aticontext, pidle;
@@ -855,7 +869,7 @@ thread_unblock(
 	 */
 	old_thread_state = thread->state;
 	thread->state = (old_thread_state | TH_RUN) &
-	    ~(TH_WAIT | TH_UNINT | TH_WAIT_REPORT);
+	    ~(TH_WAIT | TH_UNINT | TH_WAIT_REPORT | TH_WAKING);
 
 	if ((old_thread_state & TH_RUN) == 0) {
 		uint64_t ctime = mach_approximate_time();
@@ -898,7 +912,7 @@ thread_unblock(
 	if (thread->sched_mode == TH_MODE_REALTIME) {
 		uint64_t ctime = mach_absolute_time();
 		thread->realtime.deadline = thread->realtime.constraint + ctime;
-		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SET_RT_DEADLINE) | DBG_FUNC_NONE,
+		KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SET_RT_DEADLINE) | DBG_FUNC_NONE,
 		    (uintptr_t)thread_tid(thread), thread->realtime.deadline, thread->realtime.computation, 0);
 	}
 
@@ -1005,14 +1019,9 @@ thread_allowed_for_handoff(
  *		Unblock and dispatch thread.
  *	Conditions:
  *		thread lock held, IPC locks may be held.
- *		thread must have been pulled from wait queue under same lock hold.
  *		thread must have been waiting
- *	Returns:
- *		KERN_SUCCESS - Thread was set running
- *
- * TODO: This should return void
  */
-kern_return_t
+void
 thread_go(
 	thread_t                thread,
 	wait_result_t           wresult,
@@ -1024,11 +1033,18 @@ thread_go(
 
 	assert(thread->at_safe_point == FALSE);
 	assert(thread->wait_event == NO_EVENT64);
-	assert(waitq_wait_possible(thread));
+	assert(waitq_is_null(thread->waitq));
 
 	assert(!(thread->state & (TH_TERMINATE | TH_TERMINATE2)));
 	assert(thread->state & TH_WAIT);
 
+	if (thread->started) {
+		assert(thread->state & TH_WAKING);
+	}
+
+	thread_lock_assert(thread, LCK_ASSERT_OWNED);
+
+	assert(ml_get_interrupts_enabled() == false);
 
 	if (thread_unblock(thread, wresult)) {
 #if SCHED_TRACE_THREAD_WAKEUPS
@@ -1044,8 +1060,6 @@ thread_go(
 			thread_setrun(thread, SCHED_PREEMPT | SCHED_TAILQ);
 		}
 	}
-
-	return KERN_SUCCESS;
 }
 
 /*
@@ -1070,7 +1084,7 @@ thread_mark_wait_locked(
 		panic("Invalid attempt to wait while running the idle thread");
 	}
 
-	assert(!(thread->state & (TH_WAIT | TH_IDLE | TH_UNINT | TH_TERMINATE2 | TH_WAIT_REPORT)));
+	assert(!(thread->state & (TH_WAIT | TH_WAKING | TH_IDLE | TH_UNINT | TH_TERMINATE2 | TH_WAIT_REPORT)));
 
 	/*
 	 *	The thread may have certain types of interrupts/aborts masked
@@ -1350,10 +1364,11 @@ sched_cond_init(
 }
 
 wait_result_t
-sched_cond_wait(
+sched_cond_wait_parameter(
 	sched_cond_atomic_t *cond,
 	wait_interrupt_t interruptible,
-	thread_continue_t continuation)
+	thread_continue_t continuation,
+	void *parameter)
 {
 	assert_wait((event_t) cond, interruptible);
 	/* clear active bit to indicate future wakeups will have to unblock this thread */
@@ -1365,7 +1380,16 @@ sched_cond_wait(
 		sched_cond_ack(cond);
 		return THREAD_AWAKENED;
 	}
-	return thread_block(continuation);
+	return thread_block_parameter(continuation, parameter);
+}
+
+wait_result_t
+sched_cond_wait(
+	sched_cond_atomic_t *cond,
+	wait_interrupt_t interruptible,
+	thread_continue_t continuation)
+{
+	return sched_cond_wait_parameter(cond, interruptible, continuation, NULL);
 }
 
 sched_cond_t
@@ -1651,16 +1675,24 @@ clear_wait_internal(
 		return KERN_FAILURE;
 	}
 
+	/*
+	 * Check that the thread is waiting and not waking, as a waking thread
+	 * has already cleared its waitq, and is destined to be go'ed, don't
+	 * need to do it again.
+	 */
+	if ((thread->state & (TH_WAIT | TH_TERMINATE | TH_WAKING)) != TH_WAIT) {
+		assert(waitq_is_null(thread->waitq));
+		return KERN_NOT_WAITING;
+	}
+
+	/* may drop and retake the thread lock */
 	if (!waitq_is_null(waitq) && !waitq_pull_thread_locked(waitq, thread)) {
 		return KERN_NOT_WAITING;
 	}
 
-	/* TODO: Can we instead assert TH_TERMINATE is not set?  */
-	if ((thread->state & (TH_WAIT | TH_TERMINATE)) != TH_WAIT) {
-		return KERN_NOT_WAITING;
-	}
+	thread_go(thread, wresult, /* handoff */ false);
 
-	return thread_go(thread, wresult, /* handoff */ false);
+	return KERN_SUCCESS;
 }
 
 
@@ -1684,7 +1716,17 @@ clear_wait(
 
 	s = splsched();
 	thread_lock(thread);
+
 	ret = clear_wait_internal(thread, result);
+
+	if (thread == current_thread()) {
+		/*
+		 * The thread must be ready to wait again immediately
+		 * after clearing its own wait.
+		 */
+		assert((thread->state & TH_WAKING) == 0);
+	}
+
 	thread_unlock(thread);
 	splx(s);
 	return ret;
@@ -2204,7 +2246,7 @@ clear_pending_AST_bits(processor_set_t pset, processor_t processor, __kdebug_onl
 	/* Acknowledge any pending IPIs here with pset lock held */
 	pset_assert_locked(pset);
 	if (bit_clear_if_set(pset->pending_AST_URGENT_cpu_mask, processor->cpu_id)) {
-		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_END,
+		KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_END,
 		    processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, 0, trace_point_number);
 	}
 	bit_clear(pset->pending_AST_PREEMPT_cpu_mask, processor->cpu_id);
@@ -2345,7 +2387,7 @@ choose_next_rt_processor_for_IPI(processor_set_t starting_pset, processor_t chos
 	if (next_rt_processor) {
 		if (pset != starting_pset) {
 			if (bit_set_if_clear(pset->rt_pending_spill_cpu_mask, next_rt_processor->cpu_id)) {
-				KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_SIGNAL_SPILL) | DBG_FUNC_START,
+				KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_SIGNAL_SPILL) | DBG_FUNC_START,
 				    next_rt_processor->cpu_id, pset->rt_pending_spill_cpu_mask, starting_pset->cpu_set_low, (uintptr_t)spill_tid);
 			}
 		}
@@ -2394,7 +2436,7 @@ thread_select(thread_t          thread,
 	assert(processor == current_processor());
 	assert((thread->state & (TH_RUN | TH_TERMINATE2)) == TH_RUN);
 
-	KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_START,
+	KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_START,
 	    0, pset->pending_AST_URGENT_cpu_mask, 0, 0);
 
 	__kdebug_only int idle_reason = 0;
@@ -2614,12 +2656,12 @@ restart:
 				}
 
 				if (next_rt_processor) {
-					KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_NEXT_PROCESSOR) | DBG_FUNC_NONE,
+					KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_NEXT_PROCESSOR) | DBG_FUNC_NONE,
 					    next_rt_processor->cpu_id, next_rt_processor->state, nptype, 2);
 					sched_ipi_perform(next_rt_processor, next_rt_ipi_type);
 				}
 
-				KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
+				KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
 				    (uintptr_t)thread_tid(thread), pset->pending_AST_URGENT_cpu_mask, delay_count, 1);
 				return thread;
 			}
@@ -2635,7 +2677,7 @@ restart:
 
 				pset_unlock(pset);
 
-				KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
+				KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
 				    (uintptr_t)thread_tid(thread), pset->pending_AST_URGENT_cpu_mask, delay_count, 2);
 				return thread;
 			}
@@ -2676,7 +2718,7 @@ pick_new_rt_thread:
 send_followup_ipi_before_idle:
 		/* This might not have been cleared if we didn't call sched_rt_choose_thread() */
 		if (bit_clear_if_set(pset->rt_pending_spill_cpu_mask, processor->cpu_id)) {
-			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_SIGNAL_SPILL) | DBG_FUNC_END, processor->cpu_id, pset->rt_pending_spill_cpu_mask, 0, 5);
+			KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_SIGNAL_SPILL) | DBG_FUNC_END, processor->cpu_id, pset->rt_pending_spill_cpu_mask, 0, 5);
 		}
 		__kdebug_only next_processor_type_t nptype = none;
 		bool pset_unlocked = false;
@@ -2704,13 +2746,13 @@ send_followup_ipi_before_idle:
 			}
 
 			if (next_rt_processor) {
-				KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_NEXT_PROCESSOR) | DBG_FUNC_NONE,
+				KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_NEXT_PROCESSOR) | DBG_FUNC_NONE,
 				    next_rt_processor->cpu_id, next_rt_processor->state, nptype, 3);
 				sched_ipi_perform(next_rt_processor, next_rt_ipi_type);
 			}
 
 			if (new_thread) {
-				KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
+				KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
 				    (uintptr_t)thread_tid(new_thread), pset->pending_AST_URGENT_cpu_mask, delay_count, 3);
 				return new_thread;
 			}
@@ -2775,7 +2817,7 @@ send_followup_ipi_before_idle:
 			if (ast_processor) {
 				sched_ipi_perform(ast_processor, ipi_type);
 			}
-			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
+			KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
 			    (uintptr_t)thread_tid(new_thread), pset->pending_AST_URGENT_cpu_mask, delay_count, 4);
 			return new_thread;
 		}
@@ -2808,7 +2850,7 @@ send_followup_ipi_before_idle:
 
 				pset_unlock(pset);
 
-				KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
+				KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
 				    (uintptr_t)thread_tid(new_thread), pset->pending_AST_URGENT_cpu_mask, delay_count, 5);
 				return new_thread;
 			}
@@ -2848,7 +2890,7 @@ idle:
 
 			clear_pending_AST_bits(pset, processor, 6);
 
-			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
+			KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
 			    (uintptr_t)thread_tid(thread), pset->pending_AST_URGENT_cpu_mask, delay_count, 6);
 			pset_unlock(pset);
 			return thread;
@@ -2872,7 +2914,7 @@ idle:
 		new_thread = processor->idle_thread;
 	} while (new_thread == THREAD_NULL);
 
-	KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
+	KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
 	    (uintptr_t)thread_tid(new_thread), pset->pending_AST_URGENT_cpu_mask, delay_count, 10 + idle_reason);
 	return new_thread;
 }
@@ -3012,7 +3054,7 @@ thread_invoke(
 			    self->reason, (uintptr_t)thread_tid(thread), self->sched_pri, thread->sched_pri, 0);
 
 			if ((thread->chosen_processor != processor) && (thread->chosen_processor != PROCESSOR_NULL)) {
-				SCHED_DEBUG_CHOOSE_PROCESSOR_KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MOVED) | DBG_FUNC_NONE,
+				SCHED_DEBUG_CHOOSE_PROCESSOR_KERNEL_DEBUG_CONSTANT_IST(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MOVED) | DBG_FUNC_NONE,
 				    (uintptr_t)thread_tid(thread), (uintptr_t)thread->chosen_processor->cpu_id, 0, 0, 0);
 			}
 
@@ -3154,7 +3196,7 @@ need_stack:
 	    self->reason, (uintptr_t)thread_tid(thread), self->sched_pri, thread->sched_pri, 0);
 
 	if ((thread->chosen_processor != processor) && (thread->chosen_processor != NULL)) {
-		SCHED_DEBUG_CHOOSE_PROCESSOR_KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MOVED) | DBG_FUNC_NONE,
+		SCHED_DEBUG_CHOOSE_PROCESSOR_KERNEL_DEBUG_CONSTANT_IST(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MOVED) | DBG_FUNC_NONE,
 		    (uintptr_t)thread_tid(thread), (uintptr_t)thread->chosen_processor->cpu_id, 0, 0, 0);
 	}
 
@@ -3480,7 +3522,7 @@ thread_dispatch(
 				 *	consumed the entire quantum.
 				 */
 				if (thread->quantum_remaining == 0) {
-					KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_CANCEL_RT_DEADLINE) | DBG_FUNC_NONE,
+					KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_CANCEL_RT_DEADLINE) | DBG_FUNC_NONE,
 					    (uintptr_t)thread_tid(thread), thread->realtime.deadline, thread->realtime.computation, 0);
 					thread->realtime.deadline = RT_DEADLINE_QUANTUM_EXPIRED;
 				}
@@ -3680,10 +3722,20 @@ thread_dispatch(
 		thread_tell_urgency(urgency, arg1, arg2, latency, self);
 
 		/*
+		 *	Start a new CPU limit interval if the previous one has
+		 *	expired. This should happen before initializing a new
+		 *	quantum.
+		 */
+		if (cpulimit_affects_quantum &&
+		    thread_cpulimit_interval_has_expired(processor->last_dispatch)) {
+			thread_cpulimit_restart(processor->last_dispatch);
+		}
+
+		/*
 		 *	Get a new quantum if none remaining.
 		 */
 		if (self->quantum_remaining == 0) {
-			thread_quantum_init(self);
+			thread_quantum_init(self, processor->last_dispatch);
 		}
 
 		/*
@@ -3904,9 +3956,9 @@ thread_continue(
 		enable_interrupts = FALSE;
 	}
 
-#if CONFIG_KERNEL_TBI && KASAN
+#if KASAN_TBI
 	kasan_unpoison_stack(self->kernel_stack, kernel_stack_size);
-#endif /* CONFIG_KERNEL_TBI && KASAN */
+#endif /* KASAN_TBI */
 
 
 	call_continuation(continuation, parameter, self->wait_result, enable_interrupts);
@@ -3914,13 +3966,42 @@ thread_continue(
 }
 
 void
-thread_quantum_init(thread_t thread)
+thread_quantum_init(thread_t thread, uint64_t now)
 {
-	if (thread->sched_mode == TH_MODE_REALTIME) {
-		thread->quantum_remaining = thread->realtime.computation;
-	} else {
-		thread->quantum_remaining = SCHED(initial_quantum_size)(thread);
+	uint64_t new_quantum = 0;
+
+	switch (thread->sched_mode) {
+	case TH_MODE_REALTIME:
+		new_quantum = thread->realtime.computation;
+		new_quantum = MIN(new_quantum, max_unsafe_rt_computation);
+		break;
+
+	case TH_MODE_FIXED:
+		new_quantum = SCHED(initial_quantum_size)(thread);
+		new_quantum = MIN(new_quantum, max_unsafe_fixed_computation);
+		break;
+
+	default:
+		new_quantum = SCHED(initial_quantum_size)(thread);
+		break;
 	}
+
+	if (cpulimit_affects_quantum) {
+		const uint64_t cpulimit_remaining = thread_cpulimit_remaining(now);
+
+		/*
+		 * If there's no remaining CPU time, the ledger system will
+		 * notice and put the thread to sleep.
+		 */
+		if (cpulimit_remaining > 0) {
+			new_quantum = MIN(new_quantum, cpulimit_remaining);
+		}
+	}
+
+	assert3u(new_quantum, <, UINT32_MAX);
+	assert3u(new_quantum, >, 0);
+
+	thread->quantum_remaining = (uint32_t)new_quantum;
 }
 
 uint32_t
@@ -4402,7 +4483,13 @@ retry:
 	for (int pset_id = lsb_first(pset_map); pset_id >= 0; pset_id = lsb_next(pset_map, pset_id)) {
 		processor_set_t nset = pset_array[pset_id];
 
-		if (nset->stealable_rt_threads_earliest_deadline < target_deadline) {
+		/*
+		 * During startup, while pset_array[] and node->pset_map are still being initialized,
+		 * the update to pset_map may become visible to this cpu before the update to pset_array[].
+		 * It would be good to avoid inserting a memory barrier here that is only needed during startup,
+		 * so just check nset is not NULL instead.
+		 */
+		if (nset && (nset->stealable_rt_threads_earliest_deadline < target_deadline)) {
 			target_deadline = nset->stealable_rt_threads_earliest_deadline;
 			target_pset = nset;
 		}
@@ -4413,7 +4500,7 @@ retry:
 		if (pset->stealable_rt_threads_earliest_deadline <= target_deadline) {
 			thread_t new_thread = rt_runq_dequeue(&pset->rt_runq);
 			pset_update_rt_stealable_state(pset);
-			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_STEAL) | DBG_FUNC_NONE, (uintptr_t)thread_tid(new_thread), pset->pset_id, pset->cpu_set_low, 0);
+			KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_STEAL) | DBG_FUNC_NONE, (uintptr_t)thread_tid(new_thread), pset->pset_id, pset->cpu_set_low, 0);
 
 			pset = change_locked_pset(pset, stealing_pset);
 			return new_thread;
@@ -4439,12 +4526,12 @@ sched_rt_choose_thread(processor_set_t pset)
 		do {
 			bool spill_pending = bit_clear_if_set(pset->rt_pending_spill_cpu_mask, processor->cpu_id);
 			if (spill_pending) {
-				KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_SIGNAL_SPILL) | DBG_FUNC_END, processor->cpu_id, pset->rt_pending_spill_cpu_mask, 0, 2);
+				KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_SIGNAL_SPILL) | DBG_FUNC_END, processor->cpu_id, pset->rt_pending_spill_cpu_mask, 0, 2);
 			}
 			thread_t new_thread = SCHED(rt_steal_thread)(pset, rt_runq_earliest_deadline(pset));
 			if (new_thread != THREAD_NULL) {
 				if (bit_clear_if_set(pset->rt_pending_spill_cpu_mask, processor->cpu_id)) {
-					KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_SIGNAL_SPILL) | DBG_FUNC_END, processor->cpu_id, pset->rt_pending_spill_cpu_mask, 0, 3);
+					KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_SIGNAL_SPILL) | DBG_FUNC_END, processor->cpu_id, pset->rt_pending_spill_cpu_mask, 0, 3);
 				}
 				return new_thread;
 			}
@@ -4452,7 +4539,7 @@ sched_rt_choose_thread(processor_set_t pset)
 	}
 
 	if (bit_clear_if_set(pset->rt_pending_spill_cpu_mask, processor->cpu_id)) {
-		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_SIGNAL_SPILL) | DBG_FUNC_END, processor->cpu_id, pset->rt_pending_spill_cpu_mask, 0, 4);
+		KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_SIGNAL_SPILL) | DBG_FUNC_END, processor->cpu_id, pset->rt_pending_spill_cpu_mask, 0, 4);
 	}
 
 	if (rt_runq_count(pset) > 0) {
@@ -4549,7 +4636,7 @@ realtime_setrun(
 
 						if ((preempt & AST_URGENT) == AST_URGENT) {
 							if (bit_set_if_clear(pset->pending_AST_URGENT_cpu_mask, processor->cpu_id)) {
-								KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
+								KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
 								    processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, (uintptr_t)thread_tid(thread), 1);
 							}
 						}
@@ -4562,7 +4649,7 @@ realtime_setrun(
 					}
 				} else if (processor->state == PROCESSOR_DISPATCHING) {
 					if (bit_set_if_clear(pset->pending_AST_URGENT_cpu_mask, processor->cpu_id)) {
-						KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
+						KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
 						    processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, (uintptr_t)thread_tid(thread), 2);
 					}
 				} else {
@@ -4571,7 +4658,7 @@ realtime_setrun(
 
 						if ((preempt & AST_URGENT) == AST_URGENT) {
 							if (bit_set_if_clear(pset->pending_AST_URGENT_cpu_mask, processor->cpu_id)) {
-								KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
+								KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
 								    processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, (uintptr_t)thread_tid(thread), 3);
 							}
 						}
@@ -4598,7 +4685,7 @@ realtime_setrun(
 			}
 			count++;
 
-			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_NEXT_PROCESSOR) | DBG_FUNC_NONE,
+			KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_NEXT_PROCESSOR) | DBG_FUNC_NONE,
 			    ipi_processor[i]->cpu_id, ipi_processor[i]->state, backup, 1);
 #if defined(__x86_64__)
 #define p_is_good(p) (((p)->processor_primary == (p)) && ((sched_avoid_cpu0 != 1) || ((p)->cpu_id != 0)))
@@ -4680,7 +4767,7 @@ sched_ipi_action(processor_t dst, thread_t thread, sched_ipi_event_t event)
 #endif /* CONFIG_SCHED_DEFERRED_AST */
 	default:
 		if (bit_set_if_clear(pset->pending_AST_URGENT_cpu_mask, dst->cpu_id)) {
-			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
+			KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
 			    dst->cpu_id, pset->pending_AST_URGENT_cpu_mask, (uintptr_t)thread_tid(thread), 4);
 		}
 		bit_set(pset->pending_AST_PREEMPT_cpu_mask, dst->cpu_id);
@@ -4828,7 +4915,7 @@ processor_setrun(
 			ipi_action = eExitIdle;
 		} else if (processor->state == PROCESSOR_DISPATCHING) {
 			if (bit_set_if_clear(pset->pending_AST_URGENT_cpu_mask, processor->cpu_id)) {
-				KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
+				KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
 				    processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, (uintptr_t)thread_tid(thread), 5);
 			}
 		} else if ((processor->state == PROCESSOR_RUNNING ||
@@ -4848,7 +4935,7 @@ processor_setrun(
 			ipi_action = eExitIdle;
 		} else if (processor->state == PROCESSOR_DISPATCHING) {
 			if (bit_set_if_clear(pset->pending_AST_URGENT_cpu_mask, processor->cpu_id)) {
-				KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
+				KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
 				    processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, (uintptr_t)thread_tid(thread), 6);
 			}
 		}
@@ -4865,12 +4952,12 @@ processor_setrun(
 
 			if ((preempt & AST_URGENT) == AST_URGENT) {
 				if (bit_set_if_clear(pset->pending_AST_URGENT_cpu_mask, processor->cpu_id)) {
-					KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
+					KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
 					    processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, (uintptr_t)thread_tid(thread), 7);
 				}
 			} else {
 				if (bit_clear_if_set(pset->pending_AST_URGENT_cpu_mask, processor->cpu_id)) {
-					KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_END, processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, 0, 7);
+					KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_END, processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, 0, 7);
 				}
 			}
 
@@ -4905,6 +4992,18 @@ choose_next_pset(
 
 	do {
 		nset = next_pset(nset);
+
+		/*
+		 * Sometimes during startup the pset_map can contain a bit
+		 * for a pset that isn't fully published in pset_array because
+		 * the pset_map read isn't an acquire load.
+		 *
+		 * In order to avoid needing an acquire barrier here, just bail
+		 * out.
+		 */
+		if (nset == PROCESSOR_SET_NULL) {
+			return pset;
+		}
 	} while (nset->online_processor_count < 1 && nset != pset);
 
 	return nset;
@@ -5586,7 +5685,7 @@ thread_setrun(
 		if (!(task->t_flags & TF_USE_PSET_HINT_CLUSTER_TYPE)) {
 			task->pset_hint = pset; /* NRG this is done without holding the task lock */
 		}
-		SCHED_DEBUG_CHOOSE_PROCESSOR_KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_CHOOSE_PROCESSOR) | DBG_FUNC_NONE,
+		SCHED_DEBUG_CHOOSE_PROCESSOR_KERNEL_DEBUG_CONSTANT_IST(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_CHOOSE_PROCESSOR) | DBG_FUNC_NONE,
 		    (uintptr_t)thread_tid(thread), (uintptr_t)-1, processor->cpu_id, processor->state, 0);
 		assert((pset_available_cpu_count(pset) > 0) || (processor->state != PROCESSOR_OFF_LINE && processor->is_recommended));
 	} else {
@@ -5599,7 +5698,7 @@ thread_setrun(
 		pset = processor->processor_set;
 		pset_lock(pset);
 
-		SCHED_DEBUG_CHOOSE_PROCESSOR_KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_CHOOSE_PROCESSOR) | DBG_FUNC_NONE,
+		SCHED_DEBUG_CHOOSE_PROCESSOR_KERNEL_DEBUG_CONSTANT_IST(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_CHOOSE_PROCESSOR) | DBG_FUNC_NONE,
 		    (uintptr_t)thread_tid(thread), (uintptr_t)-2, processor->cpu_id, processor->state, 0);
 	}
 
@@ -5657,7 +5756,7 @@ csw_check(
 
 	if ((preempt & AST_URGENT) == 0) {
 		if (bit_clear_if_set(pset->pending_AST_URGENT_cpu_mask, processor->cpu_id)) {
-			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_END, processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, 0, 8);
+			KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_END, processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, 0, 8);
 		}
 	}
 
@@ -7625,7 +7724,7 @@ sched_update_recommended_cores(uint64_t recommended_cores, processor_reason_t re
 {
 	uint64_t        needs_exit_idle_mask = 0x0;
 
-	KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_UPDATE_REC_CORES) | DBG_FUNC_START,
+	KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_UPDATE_REC_CORES) | DBG_FUNC_START,
 	    recommended_cores,
 #if __arm64__
 	    perfcontrol_failsafe_active, 0, 0);
@@ -7740,14 +7839,14 @@ sched_update_recommended_cores(uint64_t recommended_cores, processor_reason_t re
 		machine_signal_idle(processor);
 	}
 
-	KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_UPDATE_REC_CORES) | DBG_FUNC_END,
+	KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_UPDATE_REC_CORES) | DBG_FUNC_END,
 	    needs_exit_idle_mask, 0, 0, 0);
 }
 
 static void
 sched_update_powered_cores(uint64_t requested_powered_cores, processor_reason_t reason, uint32_t flags)
 {
-	KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_UPDATE_POWERED_CORES) | DBG_FUNC_START,
+	KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_UPDATE_POWERED_CORES) | DBG_FUNC_START,
 	    requested_powered_cores, reason, flags, 0);
 
 	assert((flags & (LOCK_STATE | UNLOCK_STATE)) ? (reason == REASON_SYSTEM) && (requested_powered_cores == ALL_CORES_POWERED) : 1);
@@ -7834,7 +7933,7 @@ sched_update_powered_cores(uint64_t requested_powered_cores, processor_reason_t 
 		}
 	}
 
-	KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_UPDATE_POWERED_CORES) | DBG_FUNC_END, 0, 0, 0, 0);
+	KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_UPDATE_POWERED_CORES) | DBG_FUNC_END, 0, 0, 0, 0);
 }
 
 void
@@ -8051,7 +8150,7 @@ sched_update_pset_load_average(processor_set_t pset, uint64_t curtime)
 		uint64_t new_shared_load = shared_rsrc_runnable_load + shared_rsrc_running_load;
 		uint64_t old_shared_load = os_atomic_xchg(&pset->pset_cluster_shared_rsrc_load[shared_rsrc_type], new_shared_load, relaxed);
 		if (old_shared_load != new_shared_load) {
-			KDBG(MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_EDGE_CLUSTER_SHARED_LOAD) | DBG_FUNC_NONE, pset->pset_cluster_id, shared_rsrc_type, new_shared_load, shared_rsrc_running_load);
+			KTRC(MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_EDGE_CLUSTER_SHARED_LOAD) | DBG_FUNC_NONE, pset->pset_cluster_id, shared_rsrc_type, new_shared_load, shared_rsrc_running_load);
 		}
 	}
 #endif /* CONFIG_SCHED_EDGE */
@@ -8088,7 +8187,7 @@ sched_update_pset_load_average(processor_set_t pset, uint64_t curtime)
 		}
 		os_atomic_store(&pset->pset_load_average[sched_bucket], load_average, relaxed);
 		if (load_average != old_load_average) {
-			KDBG(MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_EDGE_LOAD_AVG) | DBG_FUNC_NONE, pset->pset_cluster_id, (load_average >> SCHED_PSET_LOAD_EWMA_FRACTION_BITS), load_average & SCHED_PSET_LOAD_EWMA_FRACTION_MASK, sched_bucket);
+			KTRC(MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_EDGE_LOAD_AVG) | DBG_FUNC_NONE, pset->pset_cluster_id, (load_average >> SCHED_PSET_LOAD_EWMA_FRACTION_BITS), load_average & SCHED_PSET_LOAD_EWMA_FRACTION_MASK, sched_bucket);
 		}
 	}
 	os_atomic_store(&pset->pset_load_last_update, curtime, relaxed);
@@ -8128,7 +8227,7 @@ sched_update_pset_avg_execution_time(processor_set_t pset, uint64_t execution_ti
 		new_execution_time_packed.pset_execution_time_last_update = curtime;
 	});
 	if (new_execution_time_packed.pset_avg_thread_execution_time != old_execution_time_packed.pset_execution_time_packed) {
-		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PSET_AVG_EXEC_TIME) | DBG_FUNC_NONE, pset->pset_cluster_id, avg_thread_execution_time, sched_bucket);
+		KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PSET_AVG_EXEC_TIME) | DBG_FUNC_NONE, pset->pset_cluster_id, avg_thread_execution_time, sched_bucket);
 	}
 }
 
@@ -8151,7 +8250,7 @@ sched_update_pset_load_average(processor_set_t pset, __unused uint64_t curtime)
 #if (DEVELOPMENT || DEBUG)
 #if __AMP__
 	if (pset->pset_cluster_type == PSET_AMP_P) {
-		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PSET_LOAD_AVERAGE) | DBG_FUNC_NONE, sched_get_pset_load_average(pset, 0), (bit_count(pset->cpu_state_map[PROCESSOR_RUNNING]) + pset->pset_runq.count + rt_runq_count(pset)));
+		KTRC(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PSET_LOAD_AVERAGE) | DBG_FUNC_NONE, sched_get_pset_load_average(pset, 0), (bit_count(pset->cpu_state_map[PROCESSOR_RUNNING]) + pset->pset_runq.count + rt_runq_count(pset)));
 	}
 #endif
 #endif

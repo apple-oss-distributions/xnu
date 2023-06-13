@@ -125,6 +125,7 @@ kcdata_type_def = {
     'STACKSHOT_KCTYPE_SHAREDCACHE_INFO' : 0x943,
     'STACKSHOT_KCTYPE_SHAREDCACHE_AOTINFO' : 0x944,
     'STACKSHOT_KCTYPE_SHAREDCACHE_ID' : 0x945,
+    'STACKSHOT_KCTYPE_CODESIGNING_INFO' : 0x946,
 
     'KCDATA_TYPE_BUFFER_END':      0xF19158ED,
 
@@ -885,6 +886,13 @@ KNOWN_TYPES_COLLECTION[0x905] = KCTypeDescription(0x905, (
     'task_snapshot'
 )
 
+
+KNOWN_TYPES_COLLECTION[0x946] = KCTypeDescription(0x946, (
+     KCSubTypeElement.FromBasicCtype('csflags', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+     KCSubTypeElement.FromBasicCtype('cs_trust_level', KCSUBTYPE_TYPE.KC_ST_UINT32, 4),
+     ),
+     'stackshot_task_codesigning_info'
+)
 KNOWN_TYPES_COLLECTION[0x906] = KCTypeDescription(0x906, (
     KCSubTypeElement.FromBasicCtype('ths_thread_id', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
     KCSubTypeElement.FromBasicCtype('ths_wait_event', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
@@ -1320,6 +1328,17 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_RUSAGE_INFO')] = KCTypeDes
             KCSubTypeElement.FromBasicCtype('ri_serviced_system_time', KCSUBTYPE_TYPE.KC_ST_UINT64, 224)
     ),
     'rusage_info')
+
+#The sizes for these need to be kept in sync with
+#MAX_CRASHINFO_SIGNING_ID_LEN, MAX_CRASHINFO_TEAM_ID_LEN
+KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_CS_SIGNING_ID')] = KCSubTypeElement('cs_signing_id', KCSUBTYPE_TYPE.KC_ST_CHAR,
+                           KCSubTypeElement.GetSizeForArray(64, 1), 0, 1)
+KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_CS_TEAM_ID')] = KCSubTypeElement('cs_team_id', KCSUBTYPE_TYPE.KC_ST_CHAR,
+                           KCSubTypeElement.GetSizeForArray(32, 1), 0, 1)
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_CS_VALIDATION_CATEGORY')] = KCSubTypeElement('cs_validation_category', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 0, 0)
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_CS_TRUST_LEVEL')] = KCSubTypeElement('cs_trust_level', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 0, 0)
 
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_CPU_TIMES')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_CPU_TIMES'),
     (
@@ -1938,6 +1957,10 @@ def SaveStackshotReport(j, outfile_name, incomplete):
         elif 'thread_waitinfo' in piddata:
             portlabels = ss.get('portlabels', None)
             tsnap['waitInfo'] = [formatWaitInfo(x, False, portlabels) for x in piddata['thread_waitinfo']]
+        if 'stackshot_task_codesigning_info' in piddata:
+            csinfo = piddata.get('stackshot_task_codesigning_info', {})
+            tsnap['csflags'] = csinfo['csflags']
+            tsnap['cs_trust_level'] = csinfo['cs_trust_level']
     obj['binaryImages'] = AllImageCatalog
     if outfile_name == '-':
         fh = sys.stdout
@@ -2092,7 +2115,8 @@ PRETTIFY_FLAGS = {
         None,
         None,
         'kThreadGroupUIApplication',
-        None,      # Redacted
+        'kThreadGroupManaged',
+        'kThreadGroupStrictTimers',
     ],
     'ths_ss_flags': [
         'kUser64_p',

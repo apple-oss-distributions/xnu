@@ -75,6 +75,8 @@
 
 #include <kern/kern_types.h>
 #include <kern/locks.h>
+#include <kern/sched_prim.h>
+#include <kern/bits.h>
 
 #include <libkern/OSAtomic.h>
 
@@ -163,6 +165,7 @@ extern int      vm_debug_events;
 #define VM_INFO7                        0x111
 #define VM_INFO8                        0x112
 #define VM_INFO9                        0x113
+#define VM_INFO10                       0x114
 
 #define VM_UPL_PAGE_WAIT                0x120
 #define VM_IOPL_PAGE_WAIT               0x121
@@ -301,12 +304,10 @@ extern void vm_pageout_garbage_collect(void *, wait_result_t);
  */
 struct vm_pageout_queue {
 	vm_page_queue_head_t pgo_pending;  /* laundry pages to be processed by pager's iothread */
-	uint64_t        pgo_tid;           /* thread ID of I/O thread that services this queue */
 	unsigned int    pgo_laundry;       /* current count of laundry pages on queue or in flight */
 	unsigned int    pgo_maxlaundry;
 
 	uint32_t
-	    pgo_idle:1,        /* iothread is blocked waiting for work to do */
 	    pgo_busy:1,        /* iothread is currently processing request from pgo_pending */
 	    pgo_throttled:1,   /* vm_pageout_scan thread needs a wakeup when pgo_laundry drops */
 	    pgo_lowpriority:1, /* iothread is set to use low priority I/O */
@@ -348,8 +349,6 @@ extern void             vm_pageout_initialize_page(
 #define upl_unlock(object)      lck_mtx_unlock(&(object)->Lock)
 #define upl_try_lock(object)    lck_mtx_try_lock(&(object)->Lock)
 
-#define MAX_VECTOR_UPL_ELEMENTS 8
-
 struct _vector_upl_iostates {
 	upl_offset_t offset;
 	upl_size_t   size;
@@ -361,28 +360,31 @@ struct _vector_upl {
 	upl_size_t              size;
 	uint32_t                num_upls;
 	uint32_t                invalid_upls;
-	uint32_t                _reserved;
+	uint32_t                max_upls;
 	vm_map_t                submap;
 	vm_offset_t             submap_dst_addr;
 	vm_object_offset_t      offset;
-	upl_t                   upl_elems[MAX_VECTOR_UPL_ELEMENTS];
 	upl_page_info_array_t   pagelist;
-	vector_upl_iostates_t   upl_iostates[MAX_VECTOR_UPL_ELEMENTS];
+	struct {
+		upl_t                   elem;
+		vector_upl_iostates_t   iostate;
+	} upls[];
 };
 
 typedef struct _vector_upl* vector_upl_t;
 
+uint32_t vector_upl_max_upls(const upl_t upl);
+
 /* universal page list structure */
 
 #if UPL_DEBUG
-#define UPL_DEBUG_STACK_FRAMES  16
 #define UPL_DEBUG_COMMIT_RECORDS 4
 
 struct ucd {
 	upl_offset_t    c_beg;
 	upl_offset_t    c_end;
 	int             c_aborted;
-	void *          c_retaddr[UPL_DEBUG_STACK_FRAMES];
+	uint32_t        c_btref; /* btref_t */
 };
 #endif
 
@@ -409,10 +411,10 @@ struct upl {
 	upl_size_t      u_mapped_size;       /* size in bytes of the UPL that is mapped */
 	vm_offset_t     kaddr;      /* secondary mapping in kernel */
 	vm_object_t     map_object;
-	ppnum_t         highest_page;
-	void*           vector_upl;
+	vector_upl_t    vector_upl;
 	upl_t           associated_upl;
 	struct upl_io_completion *upl_iodone;
+	ppnum_t         highest_page;
 #if CONFIG_IOSCHED
 	int             upl_priority;
 	uint64_t        *upl_reprio_info;
@@ -428,10 +430,13 @@ struct upl {
 
 	uint32_t        upl_state;
 	uint32_t        upl_commit_index;
-	void    *upl_create_retaddr[UPL_DEBUG_STACK_FRAMES];
+	uint32_t        upl_create_btref; /* btref_t */
 
 	struct  ucd     upl_commit_records[UPL_DEBUG_COMMIT_RECORDS];
 #endif  /* UPL_DEBUG */
+
+	bitmap_t       *lite_list;
+	struct upl_page_info page_list[];
 };
 
 /* upl struct flags */
@@ -463,7 +468,7 @@ struct upl {
 #define UPL_CREATE_IO_TRACKING  0x4
 #define UPL_CREATE_EXPEDITE_SUP 0x8
 
-extern upl_t vector_upl_create(vm_offset_t);
+extern upl_t vector_upl_create(vm_offset_t, uint32_t);
 extern void vector_upl_deallocate(upl_t);
 extern boolean_t vector_upl_is_valid(upl_t);
 extern boolean_t vector_upl_set_subupl(upl_t, upl_t, u_int32_t);
@@ -527,9 +532,6 @@ extern kern_return_t vm_map_remove_upl_range(
 	upl_t                   upl,
 	vm_object_offset_t             offset,
 	upl_size_t               size);
-
-/* wired  page list structure */
-typedef uint32_t *wpl_array_t;
 
 extern struct vm_page_delayed_work*
 vm_page_delayed_work_get_ctx(void);
@@ -703,8 +705,6 @@ struct vm_pageout_state {
 	int memorystatus_purge_on_warning;
 	int memorystatus_purge_on_urgent;
 
-	thread_t vm_pageout_external_iothread;
-	thread_t vm_pageout_internal_iothread;
 	thread_t vm_pageout_early_swapout_iothread;
 };
 
@@ -744,6 +744,11 @@ struct vm_pageout_vminfo {
 
 	unsigned long vm_phantom_cache_found_ghost;
 	unsigned long vm_phantom_cache_added_ghost;
+
+	unsigned long vm_pageout_protected_sharedcache;
+	unsigned long vm_pageout_forcereclaimed_sharedcache;
+	unsigned long vm_pageout_protected_realtime;
+	unsigned long vm_pageout_forcereclaimed_realtime;
 };
 
 extern struct vm_pageout_vminfo vm_pageout_vminfo;
@@ -830,19 +835,30 @@ extern struct vm_pageout_debug vm_pageout_debug;
 /*
  * Forward declarations for internal routines.
  */
-struct cq {
+
+/*
+ * Contains relevant state for pageout iothreads. Some state is unused by
+ * external (file-backed) thread.
+ */
+struct pgo_iothread_state {
 	struct vm_pageout_queue *q;
+	// cheads unused by external thread
 	void                    *current_early_swapout_chead;
 	void                    *current_regular_swapout_chead;
 	void                    *current_late_swapout_chead;
 	char                    *scratch_buf;
 	int                     id;
+	thread_t                pgo_iothread; // holds a +1 ref
+	sched_cond_atomic_t     pgo_wakeup;
 #if DEVELOPMENT || DEBUG
+	// for perf_compressor benchmark
 	struct vm_pageout_queue *benchmark_q;
 #endif /* DEVELOPMENT || DEBUG */
 };
 
-extern struct cq ciq[MAX_COMPRESSOR_THREAD_COUNT];
+extern struct pgo_iothread_state pgo_iothread_internal_state[MAX_COMPRESSOR_THREAD_COUNT];
+
+extern struct pgo_iothread_state pgo_iothread_external_state;
 
 struct vm_compressor_swapper_stats {
 	uint64_t unripe_under_30s;

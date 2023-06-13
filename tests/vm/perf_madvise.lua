@@ -3,15 +3,14 @@
 local benchrun = require 'benchrun'
 local perfdata = require 'perfdata'
 local csv = require 'csv'
-
 require 'strict'
 
-local kDefaultDuration = 15 
+local kDefaultDuration = 5
 local kDefaultSizeMb = 16
 
 local benchmark = benchrun.new {
     name = 'xnu.madvise',
-    version = 1,
+    version = 2,
     arg = arg,
     modify_argparser = function(parser)
         parser:argument {
@@ -41,7 +40,6 @@ local benchmark = benchrun.new {
     end
 }
 
-local unit = perfdata.unit.custom('pages/sec')
 local tests = {
     path = benchmark.opt.path,
 }
@@ -54,16 +52,14 @@ args.echo = true
 for out in benchmark:run(args) do
     local result = out:match("-----Results-----\n(.*)")
     benchmark:assert(result, "Unable to find result data in output")
-    local data = csv.openstring(result, {header = true})
+    local data = csv.openstring(result, {header = false})
     for field in data:lines() do
-        for k, v in pairs(field) do
-            benchmark.writer:add_value(k, unit, tonumber(v), {
-              [perfdata.larger_better] = true,
-              variant = benchmark.opt.variant
-            })
-        end
+        benchmark.writer:add_value(field[1], perfdata.unit.custom(field[2]), tonumber(field[3]), {
+          [perfdata.larger_better] = true,
+          variant = benchmark.opt.variant
+        })
     end
 end
-benchmark.writer:set_primary_metric("Throughput (bytes / CPU second)")
+benchmark.writer:set_primary_metric("madvise throughput")
 
 benchmark:finish()

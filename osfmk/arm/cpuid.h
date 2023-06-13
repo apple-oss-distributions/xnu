@@ -206,6 +206,7 @@ typedef enum {
 } cache_type_t;
 
 typedef struct {
+	boolean_t    c_valid;            /* has this cache info been populated? */
 	boolean_t    c_unified;          /* unified I & D cache? */
 	uint32_t     c_isize;            /* in Bytes (ARM caches can be 0.5 KB) */
 	boolean_t    c_i_ppage;          /* protected page restriction for I cache

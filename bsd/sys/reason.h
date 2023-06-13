@@ -146,7 +146,7 @@ void os_reason_set_description_data(os_reason_t cur_reason, uint32_t type, void 
 /*
  * Set of flags that are allowed to be passed from userspace
  */
-#define OS_REASON_FLAG_MASK_ALLOWED_FROM_USER (OS_REASON_FLAG_CONSISTENT_FAILURE | OS_REASON_FLAG_ONE_TIME_FAILURE | OS_REASON_FLAG_NO_CRASH_REPORT | OS_REASON_FLAG_ABORT | OS_REASON_FLAG_CAPTURE_LOGS)
+#define OS_REASON_FLAG_MASK_ALLOWED_FROM_USER (OS_REASON_FLAG_CONSISTENT_FAILURE | OS_REASON_FLAG_ONE_TIME_FAILURE | OS_REASON_FLAG_NO_CRASH_REPORT | OS_REASON_FLAG_ABORT | OS_REASON_FLAG_CAPTURE_LOGS | OS_REASON_FLAG_SECURITY_SENSITIVE)
 
 /*
  * Macros to encode the exit reason namespace and first 32 bits of code in exception code
@@ -259,6 +259,7 @@ int terminate_with_payload(int pid, uint32_t reason_namespace, uint64_t reason_c
 #define EXEC_EXIT_REASON_COPYOUT_ROSETTA    16
 #define EXEC_EXIT_REASON_SET_DYLD_INFO      17
 #define EXEC_EXIT_REASON_MACHINE_THREAD     18
+#define EXEC_EXIT_REASON_BAD_PSATTR         19
 /*
  * guard reasons
  */

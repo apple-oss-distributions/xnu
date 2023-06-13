@@ -161,7 +161,7 @@ typedef uint64_t        pt_entry_t;
 #define PTMASK          (NBPT-1)
 #define PT_ENTRY_NULL   ((pt_entry_t *) 0)
 
-typedef uint64_t  pmap_paddr_t;
+typedef uint64_t  pmap_paddr_t __kernel_ptr_semantics;
 
 #if     DEVELOPMENT || DEBUG
 #define PMAP_ASSERT 1
@@ -780,6 +780,12 @@ extern void pmap_pagetable_corruption_msg_log(int (*)(const char * fmt, ...)__pr
 extern void x86_64_protect_data_const(void);
 
 extern uint64_t pmap_commpage_size_min(pmap_t pmap);
+
+static inline vm_offset_t
+pmap_ro_zone_align(vm_offset_t value)
+{
+	return value;
+}
 
 extern void pmap_ro_zone_memcpy(zone_id_t zid, vm_offset_t va, vm_offset_t offset,
     vm_offset_t new_data, vm_size_t new_data_size);

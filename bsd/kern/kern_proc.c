@@ -98,6 +98,7 @@
 #include <sys/kernel_types.h>
 #include <sys/ubc.h>
 #include <kern/kalloc.h>
+#include <kern/smr_hash.h>
 #include <kern/task.h>
 #include <kern/coalition.h>
 #include <sys/coalition.h>
@@ -152,12 +153,9 @@ static u_long uihash;          /* size of hash table - 1 */
 /*
  * Other process lists
  */
-#define PIDHASH(pid)    (&pidhashtbl[(pid) & pidhash])
-static SECURITY_READ_ONLY_LATE(struct proc_smr *) pidhashtbl;
-static SECURITY_READ_ONLY_LATE(u_long) pidhash;
-#define PGRPHASH(pgid)  (&pgrphashtbl[(pgid) & pgrphash])
-static SECURITY_READ_ONLY_LATE(struct pgrp_smr *) pgrphashtbl;
-static SECURITY_READ_ONLY_LATE(u_long) pgrphash;
+static struct smr_hash pid_hash;
+static struct smr_hash pgrp_hash;
+
 SECURITY_READ_ONLY_LATE(struct sesshashhead *) sesshashtbl;
 SECURITY_READ_ONLY_LATE(u_long) sesshash;
 
@@ -223,6 +221,7 @@ boolean_t current_thread_aborted(void);
 int proc_threadname_kdp(void * uth, char * buf, size_t size);
 void proc_starttime_kdp(void * p, unaligned_u64 *tv_sec, unaligned_u64 *tv_usec, unaligned_u64 *abstime);
 void proc_archinfo_kdp(void* p, cpu_type_t* cputype, cpu_subtype_t* cpusubtype);
+uint64_t proc_getcsflags_kdp(void * p);
 char * proc_name_address(void * p);
 char * proc_longname_address(void *);
 
@@ -259,8 +258,8 @@ get_current_unique_pid(void)
 static void
 procinit(void)
 {
-	pidhashtbl = hashinit(maxproc / 4, M_PROC, &pidhash);
-	pgrphashtbl = hashinit(maxproc / 4, M_PROC, &pgrphash);
+	smr_hash_init(&pid_hash, maxproc / 4);
+	smr_hash_init(&pgrp_hash, maxproc / 4);
 	sesshashtbl = hashinit(maxproc / 4, M_PROC, &sesshash);
 	uihashtbl = hashinit(maxproc / 16, M_PROC, &uihash);
 }
@@ -1727,6 +1726,17 @@ proc_getcsflags(proc_t p)
 	return proc_get_ro(p)->p_csflags;
 }
 
+/* This variant runs in stackshot context and must not take locks. */
+uint64_t
+proc_getcsflags_kdp(void * p)
+{
+	proc_t proc = (proc_t)p;
+	if (p == PROC_NULL) {
+		return 0;
+	}
+	return proc_getcsflags(proc);
+}
+
 void
 proc_csflags_update(proc_t p, uint64_t flags)
 {
@@ -1975,12 +1985,17 @@ IS_64BIT_PROCESS(proc_t p)
 }
 #endif
 
+SMRH_TRAITS_DEFINE_SCALAR(pid_hash_traits, struct proc, p_pid, p_hash,
+    .domain = &smr_system,
+    );
+
 /*
  * Locate a process by number
  */
 proc_t
 phash_find_locked(pid_t pid)
 {
+	smrh_key_t key = SMRH_SCALAR_KEY(pid);
 	proc_t p;
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
@@ -1989,66 +2004,39 @@ phash_find_locked(pid_t pid)
 		return kernproc;
 	}
 
-	for (p = smr_serialized_load(PIDHASH(pid)); p;
-	    p = smr_serialized_load(&p->p_hash)) {
-		if (p->p_proc_ro && p->p_pid == pid) {
-			break;
-		}
-	}
-
-	return p;
+	p = smr_hash_serialized_find(&pid_hash, key, &pid_hash_traits);
+	return p && p->p_proc_ro ? p : PROC_NULL;
 }
 
 void
-phash_replace_locked(pid_t pid, struct proc *old_proc, struct proc *new_proc)
+phash_replace_locked(struct proc *old_proc, struct proc *new_proc)
 {
-	struct proc_smr *prev = PIDHASH(pid);
-	struct proc *pn;
-
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	smr_serialized_store_relaxed(&new_proc->p_hash,
-	    smr_serialized_load(&old_proc->p_hash));
-
-	while ((pn = smr_serialized_load(prev)) != old_proc) {
-		prev = &pn->p_hash;
-	}
-
-	smr_serialized_store(prev, new_proc);
+	smr_hash_serialized_replace(&pid_hash,
+	    &old_proc->p_hash, &new_proc->p_hash, &pid_hash_traits);
 }
 
 void
-phash_insert_locked(pid_t pid, struct proc *p)
+phash_insert_locked(struct proc *p)
 {
-	struct proc_smr *head = PIDHASH(pid);
-
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	smr_serialized_store_relaxed(&p->p_hash,
-	    smr_serialized_load(head));
-	smr_serialized_store(head, p);
+	smr_hash_serialized_insert(&pid_hash, &p->p_hash, &pid_hash_traits);
 }
 
 void
-phash_remove_locked(pid_t pid, struct proc *p)
+phash_remove_locked(struct proc *p)
 {
-	struct proc_smr *prev = PIDHASH(pid);
-	struct proc *pn;
-
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	while ((pn = smr_serialized_load(prev)) != p) {
-		prev = &pn->p_hash;
-	}
-
-	pn = smr_serialized_load(&p->p_hash);
-	smr_serialized_store_relaxed(prev, pn);
+	smr_hash_serialized_remove(&pid_hash, &p->p_hash, &pid_hash_traits);
 }
 
 proc_t
 proc_find(int pid)
 {
-	struct proc_smr *hp;
+	smrh_key_t key = SMRH_SCALAR_KEY(pid);
 	proc_t p;
 	uint32_t bits;
 	bool shadow_proc = false;
@@ -2060,27 +2048,16 @@ proc_find(int pid)
 	}
 
 retry:
-	hp = PIDHASH(pid);
 	p = PROC_NULL;
 	bits = 0;
 	shadow_proc = false;
 
 	smr_global_enter();
-
-	for (;;) {
-		p = smr_entered_load(hp);
-		if (p == PROC_NULL ||
-		    (p->p_pid == pid && p->p_proc_ro != NULL)) {
-			break;
-		}
-		hp = &p->p_hash;
-	}
-
-	if (p) {
+	p = smr_hash_entered_find(&pid_hash, key, &pid_hash_traits);
+	if (p && p->p_proc_ro) {
 		bits = proc_ref_try_fast(p);
 		shadow_proc = !!proc_is_shadow(p);
 	}
-
 	smr_global_leave();
 
 	/* Retry if the proc is a shadow proc */
@@ -2196,6 +2173,11 @@ pg_ref_try(struct pgrp *pgrp)
 	           PGRP_REF_EMPTY, &p_refgrp);
 }
 
+static bool
+pgrp_hash_obj_try_get(void *pgrp)
+{
+	return pg_ref_try(pgrp);
+}
 /*
  * Unconditionally acquire a pgrp ref,
  * regardless of whether the pgrp is empty or not.
@@ -2207,79 +2189,50 @@ pg_ref(struct pgrp *pgrp)
 	return pgrp;
 }
 
+SMRH_TRAITS_DEFINE_SCALAR(pgrp_hash_traits, struct pgrp, pg_id, pg_hash,
+    .domain = &smr_system,
+    .obj_try_get = pgrp_hash_obj_try_get,
+    );
+
 /*
  * Locate a process group by number
  */
-struct pgrp *
-pghash_find_locked(pid_t pgid)
+bool
+pghash_exists_locked(pid_t pgid)
 {
-	struct pgrp *pgrp;
+	smrh_key_t key = SMRH_SCALAR_KEY(pgid);
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	for (pgrp = smr_serialized_load(PGRPHASH(pgid)); pgrp;
-	    pgrp = smr_serialized_load(&pgrp->pg_hash)) {
-		if (pgrp->pg_id == pgid) {
-			break;
-		}
-	}
-
-	return pgrp;
+	return smr_hash_serialized_find(&pgrp_hash, key, &pgrp_hash_traits);
 }
 
 void
-pghash_insert_locked(pid_t pgid, struct pgrp *pgrp)
+pghash_insert_locked(struct pgrp *pgrp)
 {
-	struct pgrp_smr *head = PGRPHASH(pgid);
-
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	smr_serialized_store_relaxed(&pgrp->pg_hash,
-	    smr_serialized_load(head));
-	smr_serialized_store(head, pgrp);
+	smr_hash_serialized_insert(&pgrp_hash, &pgrp->pg_hash,
+	    &pgrp_hash_traits);
 }
 
 static void
-pghash_remove_locked(pid_t pgid, struct pgrp *pgrp)
+pghash_remove_locked(struct pgrp *pgrp)
 {
-	struct pgrp_smr *prev = PGRPHASH(pgid);
-	struct pgrp *pgn;
-
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
-	while ((pgn = smr_serialized_load(prev)) != pgrp) {
-		prev = &pgn->pg_hash;
-	}
-
-	pgn = smr_serialized_load(&pgrp->pg_hash);
-	smr_serialized_store_relaxed(prev, pgn);
+	smr_hash_serialized_remove(&pgrp_hash, &pgrp->pg_hash,
+	    &pgrp_hash_traits);
 }
 
 struct pgrp *
 pgrp_find(pid_t pgid)
 {
-	struct pgrp_smr *hp = PGRPHASH(pgid);
-	struct pgrp *pgrp = PGRP_NULL;
+	smrh_key_t key = SMRH_SCALAR_KEY(pgid);
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_NOTOWNED);
 
-	smr_global_enter();
-
-	for (;;) {
-		pgrp = smr_entered_load(hp);
-		if (pgrp == PGRP_NULL || pgrp->pg_id == pgid) {
-			break;
-		}
-		hp = &pgrp->pg_hash;
-	}
-
-	if (pgrp && !pg_ref_try(pgrp)) {
-		pgrp = PGRP_NULL;
-	}
-
-	smr_global_leave();
-
-	return pgrp;
+	return smr_hash_get(&pgrp_hash, key, &pgrp_hash_traits);
 }
 
 /* consumes one ref from pgrp */
@@ -2570,7 +2523,7 @@ enterpgrp(proc_t p, pid_t pgid, int mksess)
 		proc_list_lock();
 		pgrp->pg_session = sess;
 		p->p_sessionid = sess->s_sid;
-		pghash_insert_locked(pgid, pgrp);
+		pghash_insert_locked(pgrp);
 		if (mksess) {
 			LIST_INSERT_HEAD(SESSHASH(sess->s_sid), sess, s_hash);
 		}
@@ -2644,7 +2597,7 @@ pgrp_destroy(struct pgrp *pgrp)
 	assert(os_ref_get_raw_mask(&pgrp->pg_refcount) & PGRP_REF_EMPTY);
 
 	proc_list_lock();
-	pghash_remove_locked(pgrp->pg_id, pgrp);
+	pghash_remove_locked(pgrp);
 	proc_list_unlock();
 
 	sess = pgrp->pg_session;
@@ -3505,9 +3458,13 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		 */
 		if (forself == 1 && IOTaskHasEntitlement(proc_task(pt), CLEAR_LV_ENTITLEMENT)) {
 			proc_lock(pt);
-			proc_csflags_clear(pt, CS_REQUIRE_LV | CS_FORCED_LV);
+			if (!(proc_getcsflags(pt) & CS_INSTALLER)) {
+				proc_csflags_clear(pt, CS_REQUIRE_LV | CS_FORCED_LV);
+				error = 0;
+			} else {
+				error = EPERM;
+			}
 			proc_unlock(pt);
-			error = 0;
 		} else {
 			error = EPERM;
 		}
@@ -4953,26 +4910,6 @@ proc_ro_free(proc_ro_t pr)
 	zfree_ro(ZONE_ID_PROC_RO, pr);
 }
 
-static proc_ro_t
-proc_ro_ref_proc(proc_ro_t pr, proc_t p, proc_ro_data_t p_data)
-{
-	struct proc_ro pr_local;
-
-	if (pr->pr_proc != PROC_NULL) {
-		panic("%s: proc_ro already has an owning proc", __func__);
-	}
-
-	pr_local = *pr;
-	pr_local.pr_proc = p;
-	pr_local.proc_data = *p_data;
-
-	/* make sure readers of the proc_ro always see initialized data */
-	os_atomic_thread_fence(release);
-	zalloc_ro_update_elem(ZONE_ID_PROC_RO, pr, &pr_local);
-
-	return pr;
-}
-
 proc_ro_t
 proc_ro_ref_task(proc_ro_t pr, task_t t, task_ro_data_t t_data)
 {
@@ -4989,25 +4926,6 @@ proc_ro_ref_task(proc_ro_t pr, task_t t, task_ro_data_t t_data)
 	zalloc_ro_update_elem(ZONE_ID_PROC_RO, pr, &pr_local);
 
 	return pr;
-}
-
-void
-proc_switch_ro(proc_t p, proc_ro_t new_ro)
-{
-	proc_ro_t old_ro;
-
-	proc_list_lock();
-
-	old_ro = p->p_proc_ro;
-
-	p->p_proc_ro = proc_ro_ref_proc(new_ro, p, &old_ro->proc_data);
-	old_ro = proc_ro_release_proc(old_ro);
-
-	if (old_ro != NULL) {
-		proc_ro_free(old_ro);
-	}
-
-	proc_list_unlock();
 }
 
 proc_ro_t

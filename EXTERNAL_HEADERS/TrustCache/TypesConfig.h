@@ -91,6 +91,29 @@ chipEnvironmentSafariDownlevel(void) {
 #endif
 }
 
+static const img4_chip_t*
+chipEnvironmentSupplemental(void) {
+    return IMG4_CHIP_AP_SUPPLEMENTAL;
+}
+
+static const img4_chip_t*
+chipEnvironmentCryptex1Generic(void) {
+#if IMG4_API_VERSION >= 20221202
+    return IMG4_CHIP_CRYPTEX1_GENERIC;
+#else
+    return NULL;
+#endif
+}
+
+static const img4_chip_t*
+chipEnvironmentCryptex1GenericSupplemental(void) {
+#if IMG4_API_VERSION >= 20221202
+    return IMG4_CHIP_CRYPTEX1_GENERIC_SUPPLEMENTAL;
+#else
+    return NULL;
+#endif
+}
+
 #pragma mark Nonce Domains
 
 static const img4_nonce_domain_t*
@@ -159,6 +182,9 @@ typedef struct _TrustCacheTypeConfig {
      */
     const char *entitlementValue;
 } TrustCacheTypeConfig_t;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfour-char-constants"
 
 static const TrustCacheTypeConfig_t TCTypeConfig[kTCTypeTotal] = {
     /* Static trust caches are loaded as raw modules */
@@ -322,8 +348,42 @@ static const TrustCacheTypeConfig_t TCTypeConfig[kTCTypeTotal] = {
         .fourCC = 'trcs',
         .firmwareFlags = firmwareFlagsSplat,
         .entitlementValue = "cryptex1.preboot.os"
+    },
+
+    [kTCTypeSupplementalPersistent] = {
+        .chipEnvironment = chipEnvironmentSupplemental,
+        .nonceDomain = nonceDomainDDI,
+        .fourCC = 'ltrs',
+        .firmwareFlags = NULL,
+        .entitlementValue = "personalized.supplemental-persistent"
+    },
+
+    [kTCTypeSupplementalEphemeral] = {
+        .chipEnvironment = chipEnvironmentSupplemental,
+        .nonceDomain = nonceDomainPDI,
+        .fourCC = 'ltrs',
+        .firmwareFlags = NULL,
+        .entitlementValue = "personalized.supplemental-ephemeral"
+    },
+
+    [kTCTypeCryptex1Generic] = {
+        .chipEnvironment = chipEnvironmentCryptex1Generic,
+        .nonceDomain = NULL,
+        .fourCC = 'gtcd',
+        .firmwareFlags = NULL,
+        .entitlementValue = "cryptex1.generic"
+    },
+
+    [kTCTypeCryptex1GenericSupplemental] = {
+        .chipEnvironment = chipEnvironmentCryptex1GenericSupplemental,
+        .nonceDomain = NULL,
+        .fourCC = 'gtcd',
+        .firmwareFlags = NULL,
+        .entitlementValue = "cryptex1.generic.supplemental"
     }
 };
+
+#pragma GCC diagnostic pop
 
 __END_DECLS
 #endif /* libTrustCache_TypesConfig_h */

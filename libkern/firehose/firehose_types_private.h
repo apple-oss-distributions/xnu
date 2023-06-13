@@ -106,8 +106,6 @@ OS_ENUM(firehose_tracepoint_code, uint32_t,
     firehose_tracepoint_code_invalid              = 0x00,
     firehose_tracepoint_code_load                 = 0x01,
     firehose_tracepoint_code_unload               = 0x02,
-    firehose_tracepoint_code_load_filesystem      = 0x04,
-    firehose_tracepoint_code_load_filesystem_img4 = firehose_tracepoint_code_load_filesystem,
     firehose_tracepoint_code_load_memory          = 0x08,
     firehose_tracepoint_code_load_filesystem_ftab = 0x10,
     );

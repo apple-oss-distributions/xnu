@@ -203,7 +203,7 @@ struct necp_packet_header {
 #define NECP_POLICY_RESULT_ALLOW_UNENTITLED             17      // N/A
 #define NECP_POLICY_RESULT_REMOVE_NETAGENT              18      // netagent uuid_t
 
-#define NECP_POLICY_RESULT_MAX                          NECP_POLICY_RESULT_ALLOW_UNENTITLED
+#define NECP_POLICY_RESULT_MAX                          NECP_POLICY_RESULT_REMOVE_NETAGENT
 
 /*
  * PASS Result Flags
@@ -234,6 +234,7 @@ struct necp_packet_header {
 #define NECP_ROUTE_RULE_FLAG_WIRED                      0x04
 #define NECP_ROUTE_RULE_FLAG_EXPENSIVE                  0x08
 #define NECP_ROUTE_RULE_FLAG_CONSTRAINED                0x10
+#define NECP_ROUTE_RULE_FLAG_COMPANION                  0x20
 
 #define NECP_ROUTE_RULE_FLAG_NETAGENT                   0x80 // Last bit, reserved to mark that this applies only when an agent UUID is present
 
@@ -269,7 +270,7 @@ struct necp_policy_condition_addr {
 		struct __sockaddr_header        sah;
 		struct sockaddr_in              sin;
 		struct sockaddr_in6             sin6;
-	} address;
+	} address __attribute__((__packed__));
 } __attribute__((__packed__));
 
 struct necp_policy_condition_addr_range {
@@ -280,7 +281,7 @@ struct necp_policy_condition_addr_range {
 		struct __sockaddr_header        sah;
 		struct sockaddr_in              sin;
 		struct sockaddr_in6             sin6;
-	} start_address;
+	} start_address __attribute__((__packed__));
 	union {
 #if !__has_ptrcheck
 		struct sockaddr                 sa;
@@ -288,7 +289,7 @@ struct necp_policy_condition_addr_range {
 		struct __sockaddr_header        sah;
 		struct sockaddr_in              sin;
 		struct sockaddr_in6             sin6;
-	} end_address;
+	} end_address __attribute__((__packed__));
 } __attribute__((__packed__));
 
 struct necp_policy_condition_agent_type {
@@ -862,6 +863,7 @@ struct kev_necp_policies_changed_data {
 #define NECP_CLIENT_FLOW_FLAGS_BROWSE                      0x04    // Create request with a browse agent
 #define NECP_CLIENT_FLOW_FLAGS_RESOLVE                      0x08    // Create request with a resolution agent
 #define NECP_CLIENT_FLOW_FLAGS_OVERRIDE_ADDRESS                      0x10    // Flow has a different remote address than the parent flow
+#define NECP_CLIENT_FLOW_FLAGS_OVERRIDE_IP_PROTOCOL           0x20    // Flow has a different IP protocol than the parent flow
 
 struct necp_client_flow_stats {
 	u_int32_t stats_type; // NECP_CLIENT_STATISTICS_TYPE_*
@@ -877,6 +879,7 @@ struct necp_client_add_flow {
 	u_int16_t stats_request_count;
 	struct necp_client_flow_stats stats_requests[0];
 	// sockaddr for override endpoint
+	// uint8 for override ip protocol
 } __attribute__((__packed__));
 
 struct necp_agent_use_parameters {

@@ -27,7 +27,7 @@
  */
 
 #include <kern/backtrace.h>
-#include <vm/vm_map_store_rb.h>
+#include <vm/vm_map.h>
 
 RB_GENERATE(rb_head, vm_map_store, entry, rb_node_compare);
 
@@ -56,24 +56,7 @@ rb_node_compare(struct vm_map_store *node, struct vm_map_store *parent)
 	return 0;
 }
 
-__dead2
-void
-vm_map_store_walk_rb(vm_map_t map, vm_map_entry_t *wrong_vme, vm_map_entry_t *vm_entry)
-{
-	struct vm_map_header *hdr = &map->hdr;
-	struct vm_map_store  *rb_entry = RB_ROOT(&hdr->rb_head_store);
-	vm_map_entry_t       cur = *vm_entry;
-
-	rb_entry = RB_FIND(rb_head, &hdr->rb_head_store, &(cur->store));
-	if (rb_entry == NULL) {
-		panic("NO SUCH ENTRY %p. Gave back %p", *vm_entry, *wrong_vme);
-	} else {
-		panic("Cur: %p, L: %p, R: %p", VME_FOR_STORE(rb_entry), VME_FOR_STORE(RB_LEFT(rb_entry, entry)), VME_FOR_STORE(RB_RIGHT(rb_entry, entry)));
-	}
-}
-
-
-boolean_t
+bool
 vm_map_store_lookup_entry_rb(vm_map_t map, vm_map_offset_t address, vm_map_entry_t *vm_entry)
 {
 	struct vm_map_header *hdr = &map->hdr;
@@ -102,14 +85,18 @@ vm_map_store_lookup_entry_rb(vm_map_t map, vm_map_offset_t address, vm_map_entry
 }
 
 void
-vm_map_store_entry_link_rb( struct vm_map_header *mapHdr, __unused vm_map_entry_t after_where, vm_map_entry_t entry)
+vm_map_store_entry_link_rb(struct vm_map_header *mapHdr, vm_map_entry_t entry)
 {
 	struct rb_head *rbh = &(mapHdr->rb_head_store);
 	struct vm_map_store *store = &(entry->store);
 	struct vm_map_store *tmp_store;
+
 	if ((tmp_store = RB_INSERT( rb_head, rbh, store )) != NULL) {
-		panic("VMSEL: INSERT FAILED: 0x%lx, 0x%lx, 0x%lx, 0x%lx", (uintptr_t)entry->vme_start, (uintptr_t)entry->vme_end,
-		    (uintptr_t)(VME_FOR_STORE(tmp_store))->vme_start, (uintptr_t)(VME_FOR_STORE(tmp_store))->vme_end);
+		panic("VMSEL: INSERT FAILED: 0x%lx, 0x%lx, 0x%lx, 0x%lx",
+		    (uintptr_t)entry->vme_start,
+		    (uintptr_t)entry->vme_end,
+		    (uintptr_t)(VME_FOR_STORE(tmp_store))->vme_start,
+		    (uintptr_t)(VME_FOR_STORE(tmp_store))->vme_end);
 	}
 }
 
@@ -642,7 +629,7 @@ update_holes_on_entry_creation(vm_map_t map, vm_map_entry_t new_entry)
 }
 
 void
-update_first_free_rb(vm_map_t map, vm_map_entry_t entry, boolean_t new_entry_creation)
+update_first_free_rb(vm_map_t map, vm_map_entry_t entry, bool new_entry_creation)
 {
 	if (map->holelistenabled) {
 		/*

@@ -4,7 +4,8 @@ from builtins import range
 
 from xnu import *
 from workqueue import GetWorkqueueThreadRequestSummary
-from memory import vm_unpack_pointer
+
+import kmemory
 
 def IterateProcKqueues(proc):
     """ Iterate through all kqueues in the given process
@@ -61,7 +62,7 @@ def IterateProcKqworkloops(proc):
 
     hash_mask = proc_filedesc.fd_kqhashmask
     for i in range(hash_mask + 1):
-        for kqwl in IterateListEntry(proc_filedesc.fd_kqhash[i], 'struct kqworkloop *', 'kqwl_hashlink'):
+        for kqwl in IterateListEntry(proc_filedesc.fd_kqhash[i], 'kqwl_hashlink'):
             yield kqwl
 
 def IterateAllKqueues():
@@ -90,11 +91,11 @@ def IterateProcKnotes(proc):
 
     if int(proc.p_fd.fd_knlist) != 0:
         for i in range(proc.p_fd.fd_knlistsize):
-            for kn in IterateListEntry(proc.p_fd.fd_knlist[i], 'struct knote *', 'kn_link', list_prefix='s'):
+            for kn in IterateListEntry(proc.p_fd.fd_knlist[i], 'kn_link', list_prefix='s'):
                 yield kn
     if int(proc.p_fd.fd_knhash) != 0:
         for i in range(proc.p_fd.fd_knhashmask + 1):
-            for kn in IterateListEntry(proc.p_fd.fd_knhash[i], 'struct knote *', 'kn_link', list_prefix='s'):
+            for kn in IterateListEntry(proc.p_fd.fd_knhash[i], 'kn_link', list_prefix='s'):
                 yield kn
 
 def GetKnoteKqueue(kn):
@@ -105,7 +106,9 @@ def GetKnoteKqueue(kn):
         returns: kq - the kqueue corresponding to the knote
     """
 
-    return vm_unpack_pointer(kn.kn_kq_packed, kern.globals.kn_kq_packing_params, 'struct kqueue *')
+    kmem = kmemory.KMem.get_shared()
+    addr = kmem.kn_kq_packing.unpack(unsigned(kn.kn_kq_packed))
+    return kern.CreateTypedPointerFromAddress(addr, 'struct kqueue')
 
 
 @lldb_type_summary(['knote *'])

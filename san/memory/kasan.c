@@ -435,6 +435,11 @@ SYSCTL_UINT(_kern_kasan, OID_AUTO, kexts, CTLFLAG_RD, &kexts_loaded, 0, "");
 /* Old-style configuration options, maintained for compatibility */
 SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, light, CTLFLAG_RD, NULL, KASAN_LIGHT, "");
 SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, debug, CTLFLAG_RD, NULL, KASAN_DEBUG, "");
-SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, zalloc, CTLFLAG_RD, NULL, KASAN_ZALLOC, "");
-SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, kalloc, CTLFLAG_RD, NULL, KASAN_KALLOC, "");
+#if KASAN_CLASSIC
+SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, zalloc, CTLFLAG_RD, NULL, 1, "");
+SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, kalloc, CTLFLAG_RD, NULL, 1, "");
+#else
+SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, zalloc, CTLFLAG_RD, NULL, 0, "");
+SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, kalloc, CTLFLAG_RD, NULL, 0, "");
+#endif
 SYSCTL_COMPAT_UINT(_kern_kasan, OID_AUTO, dynamicbl, CTLFLAG_RD, NULL, KASAN_DYNAMIC_BLACKLIST, "");

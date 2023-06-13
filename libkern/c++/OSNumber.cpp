@@ -106,6 +106,54 @@ OSNumber::withNumber(const char *value, unsigned int newNumberOfBits)
 	return me;
 }
 
+OSSharedPtr<OSNumber>
+OSNumber::withDouble(
+	double             value)
+{
+	OSSharedPtr<OSNumber> me = OSMakeShared<OSNumber>();
+
+	if (me && !me->OSObject::init()) {
+		return nullptr;
+	}
+	me->size = 63;
+	me->fpValue = value;
+
+	return me;
+}
+
+OSSharedPtr<OSNumber>
+OSNumber::withFloat(
+	float             value)
+{
+	OSSharedPtr<OSNumber> me = OSMakeShared<OSNumber>();
+
+	if (me && !me->OSObject::init()) {
+		return nullptr;
+	}
+	me->size = 31;
+	me->fpValue = (double) value;
+
+	return me;
+}
+
+double
+OSNumber::doubleValue() const
+{
+	if ((size != 63) && (size != 31)) {
+		return (double) value;
+	}
+	return fpValue;
+}
+
+float
+OSNumber::floatValue() const
+{
+	if ((size != 63) && (size != 31)) {
+		return (float) value;
+	}
+	return (float) fpValue;
+}
+
 unsigned int
 OSNumber::numberOfBits() const
 {
@@ -122,43 +170,63 @@ OSNumber::numberOfBytes() const
 unsigned char
 OSNumber::unsigned8BitValue() const
 {
+	if ((size == 63) || (size == 31)) {
+		return (unsigned char) fpValue;
+	}
 	return (unsigned char) value;
 }
 
 unsigned short
 OSNumber::unsigned16BitValue() const
 {
+	if ((size == 63) || (size == 31)) {
+		return (unsigned short) fpValue;
+	}
 	return (unsigned short) value;
 }
 
 unsigned int
 OSNumber::unsigned32BitValue() const
 {
+	if ((size == 63) || (size == 31)) {
+		return (unsigned int) fpValue;
+	}
 	return (unsigned int) value;
 }
 
 unsigned long long
 OSNumber::unsigned64BitValue() const
 {
+	if ((size == 63) || (size == 31)) {
+		return (unsigned long long) fpValue;
+	}
 	return value;
 }
 
 void
 OSNumber::addValue(signed long long inValue)
 {
-	value = ((value + inValue) & sizeMask);
+	if ((size == 63) || (size == 31)) {
+		fpValue += inValue;
+	} else {
+		value = ((value + inValue) & sizeMask);
+	}
 }
 
 void
 OSNumber::setValue(unsigned long long inValue)
 {
-	value = (inValue & sizeMask);
+	if ((size == 63) || (size == 31)) {
+		fpValue = (double) inValue;
+	} else {
+		value = (inValue & sizeMask);
+	}
 }
 
 bool
 OSNumber::isEqualTo(const OSNumber *integer) const
 {
-	return value == integer->value;
+	return unsigned64BitValue() == integer->unsigned64BitValue();
 }
 
 bool

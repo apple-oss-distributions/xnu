@@ -39,7 +39,7 @@ def ShowAllWorkloadConfig(cmd_args=None, cmd_options={}):
 
     if table != 0:
         for i in range(mask + 1):
-            for entry in IterateListEntry(table[i], 'workload_config_entry_t *', 'wce_link'):
+            for entry in IterateListEntry(table[i], 'wce_link'):
                 print(GetWorkloadConfigSummary(entry))
 
 # EndMacro: showallworkloadconfig
@@ -61,7 +61,7 @@ def ShowWorkloadConfig(cmd_args=None, cmd_options={}):
 
         if table != 0:
             for i in range(mask + 1):
-                for entry in IterateListEntry(table[i], 'workload_config_entry_t *', 'wce_link'):
+                for entry in IterateListEntry(table[i], 'wce_link'):
                     if cmd_options['-F'] == str(entry.wce_id):
                         print(GetWorkloadConfigSummary(entry))
                         return
@@ -89,7 +89,7 @@ def ShowWorkloadConfigPhases(cmd_args=None, cmd_options={}):
     print(GetWorkloadPhaseSummary.header)
 
     entry = kern.GetValueFromAddress(cmd_args[0], 'workload_config_entry_t *')
-    for phase in IterateListEntry(entry.wce_phases, 'workload_phase_entry_t *', 'wpe_link'):
+    for phase in IterateListEntry(entry.wce_phases, 'wpe_link'):
             print(GetWorkloadPhaseSummary(phase))
 
 # EndMacro: showworkloadconfigphases
