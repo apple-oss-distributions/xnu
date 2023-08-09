@@ -581,29 +581,30 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
 	do {                                                                    \
 	        uint64_t _intr = ml_pac_safe_interrupts_disable();              \
 	        asm volatile (                                                  \
-	                "mov	x8, lr"				"\n"            \
+	                "mov	x9, lr"				"\n"            \
 	                "mov	x0, %[iss]"			"\n"            \
 	                "msr	SPSel, #1"			"\n"            \
 	                "ldp	x4, x5, [x0, %[SS64_X16]]"	"\n"            \
-	                "ldr	x6, [x0, %[SS64_PC]]"		"\n"            \
-	                "ldr	w7, [x0, %[SS64_CPSR]]"		"\n"            \
+	                "ldr	x7, [x0, %[SS64_PC]]"		"\n"            \
+	                "ldr	w8, [x0, %[SS64_CPSR]]"		"\n"            \
 	                "ldr	x3, [x0, %[SS64_LR]]"		"\n"            \
-	                "mov	x1, x6"				"\n"            \
-	                "mov	w2, w7"				"\n"            \
+	                "mov	x1, x7"				"\n"            \
+	                "mov	w2, w8"				"\n"            \
 	                "bl	_ml_check_signed_state"		"\n"            \
-	                "mov	x1, x6"				"\n"            \
-	                "mov	w2, w7"				"\n"            \
+	                "mov	x1, x7"				"\n"            \
+	                "mov	w2, w8"				"\n"            \
 	                _instr					"\n"            \
 	                "bl	_ml_sign_thread_state"		"\n"            \
 	                "msr	SPSel, #0"			"\n"            \
-	                "mov	lr, x8"				"\n"            \
+	                "mov	lr, x9"				"\n"            \
 	                :                                                       \
 	                : [iss]         "r"(_iss),                              \
 	                  [SS64_X16]	"i"(ss64_offsetof(x[16])),              \
 	                  [SS64_PC]	"i"(ss64_offsetof(pc)),                 \
 	                  [SS64_CPSR]	"i"(ss64_offsetof(cpsr)),               \
 	                  [SS64_LR]	"i"(ss64_offsetof(lr)),##__VA_ARGS__    \
-	                : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8"  \
+	                : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", \
+	                  "x9"                                                  \
 	        );                                                              \
 	        ml_pac_safe_interrupts_restore(_intr);                          \
 	} while (0)

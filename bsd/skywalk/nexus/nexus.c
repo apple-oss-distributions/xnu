@@ -3326,6 +3326,15 @@ nexus_mib_get_sysctl SYSCTL_HANDLER_ARGS
 	}
 
 	if (req->newptr == USER_ADDR_NULL) {
+		/*
+		 * For flow stats requests, non-root users need to provide a
+		 * 5-tuple. Otherwise, we do not grant access.
+		 */
+		if (oidp->oid_arg2 == NXMIB_FLOW &&
+		    !kauth_cred_issuser(kauth_cred_get())) {
+			SK_ERR("mib request rejected: tuple not provided");
+			return EPERM;
+		}
 		/* use subcommand for multiple nodes */
 		filter.nmf_type = oidp->oid_arg2;
 		filter.nmf_bitmap = 0x0;
@@ -3341,6 +3350,18 @@ nexus_mib_get_sysctl SYSCTL_HANDLER_ARGS
 		if (filter.nmf_type != oidp->oid_arg2) {
 			SK_ERR("mis-matching nmf_type");
 			return EINVAL;
+		}
+		/*
+		 * For flow stats requests, non-root users need to set the nexus
+		 * mib filter to NXMIB_FILTER_INFO_TUPLE. Otherwise, we do not
+		 * grant access. This ensures that fsw_mib_get_flow looks for a
+		 * flow entry that matches the given tuple of the non-root user.
+		 */
+		if (filter.nmf_type == NXMIB_FLOW &&
+		    (filter.nmf_bitmap & NXMIB_FILTER_INFO_TUPLE) == 0 &&
+		    !kauth_cred_issuser(kauth_cred_get())) {
+			SK_ERR("mib request rejected: tuple filter not set");
+			return EPERM;
 		}
 	}
 

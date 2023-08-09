@@ -890,6 +890,7 @@ forkproc_free(proc_t p)
 	p->p_stats = NULL;
 	if (p->p_subsystem_root_path) {
 		zfree(ZV_NAMEI, p->p_subsystem_root_path);
+		p->p_subsystem_root_path = NULL;
 	}
 
 	p->p_proc_ro = proc_ro_release_proc(p->p_proc_ro);

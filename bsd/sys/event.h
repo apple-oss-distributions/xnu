@@ -735,6 +735,8 @@ struct knote {
 	TAILQ_ENTRY(knote)       kn_tqe;            /* linkage for tail queue */
 	SLIST_ENTRY(knote)       kn_link;           /* linkage for search list */
 	SLIST_ENTRY(knote)       kn_selnext;        /* klist element chain */
+#define KNOTE_AUTODETACHED ((struct knote *) -1)
+#define KNOTE_IS_AUTODETACHED(kn) ((kn)->kn_selnext.sle_next == KNOTE_AUTODETACHED)
 
 	kn_status_t              kn_status : 12;
 	uintptr_t
@@ -1132,11 +1134,11 @@ SLIST_HEAD(klist, knote);
 extern void     knote_init(void);
 extern void     klist_init(struct klist *list);
 
-#define KNOTE(list, hint)       knote(list, hint)
+#define KNOTE(list, hint)       knote(list, hint, false)
 #define KNOTE_ATTACH(list, kn)  knote_attach(list, kn)
 #define KNOTE_DETACH(list, kn)  knote_detach(list, kn)
 
-extern void knote(struct klist *list, long hint);
+extern void knote(struct klist *list, long hint, bool autodetach);
 extern int knote_attach(struct klist *list, struct knote *kn);
 extern int knote_detach(struct klist *list, struct knote *kn);
 extern void knote_vanish(struct klist *list, bool make_active);

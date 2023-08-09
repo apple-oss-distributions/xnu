@@ -2461,6 +2461,11 @@ proc_exit(proc_t p)
 	zfree(proc_stats_zone, p->p_stats);
 	p->p_stats = NULL;
 
+	if (p->p_subsystem_root_path) {
+		zfree(ZV_NAMEI, p->p_subsystem_root_path);
+		p->p_subsystem_root_path = NULL;
+	}
+
 	proc_limitdrop(p);
 
 #if DEVELOPMENT || DEBUG

@@ -73,7 +73,6 @@ SYSCTL_QUAD(_machdep, OID_AUTO, wfe_rec_clamp,
 
 #endif
 
-
 static
 SYSCTL_QUAD(_machdep, OID_AUTO, wake_abstime,
     CTLFLAG_RD, &wake_abstime,

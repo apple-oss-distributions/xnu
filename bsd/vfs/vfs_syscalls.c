@@ -12245,10 +12245,25 @@ resolve_nspace_item_ext(
 		return ETIMEDOUT;
 	}
 
-	path = zalloc(ZV_NAMEI);
-	path_len = MAXPATHLEN;
+	int path_alloc_len = MAXPATHLEN;
+	do {
+		path = kalloc_data(path_alloc_len, Z_WAITOK | Z_ZERO);
+		if (path == NULL) {
+			return ENOMEM;
+		}
 
-	error = vn_getpath(vp, path, &path_len);
+		path_len = path_alloc_len;
+		error = vn_getpath(vp, path, &path_len);
+		if (error == 0) {
+			break;
+		} else if (error == ENOSPC) {
+			kfree_data(path, path_alloc_len);
+			path = NULL;
+		} else {
+			goto out_release_port;
+		}
+	} while (error == ENOSPC && (path_alloc_len += MAXPATHLEN) && path_alloc_len <= FSGETPATH_MAXBUFLEN);
+
 	if (error == 0) {
 		int xxx_rdar44371223;   /* XXX Mig bug */
 		req.r_req_id = next_nspace_req_id();
@@ -12289,7 +12304,7 @@ resolve_nspace_item_ext(
 
 		// Give back the memory we allocated earlier while
 		// we wait; we no longer need it.
-		zfree(ZV_NAMEI, path);
+		kfree_data(path, path_alloc_len);
 		path = NULL;
 
 		// Request has been submitted to the resolver.
@@ -12303,7 +12318,8 @@ resolve_nspace_item_ext(
 
 out_release_port:
 	if (path != NULL) {
-		zfree(ZV_NAMEI, path);
+		kfree_data(path, path_alloc_len);
+		path = NULL;
 	}
 	ipc_port_release_send(mp);
 

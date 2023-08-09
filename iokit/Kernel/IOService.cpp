@@ -1075,6 +1075,15 @@ IOService::startMatching( IOOptionBits options )
 	bool        needWake = false;
 	bool        sync;
 	bool        waitAgain;
+	bool        releaseAssertion = false;
+
+	if (options & kIOServiceDextRequirePowerForMatching) {
+		bool ok = gIOPMRootDomain->acquireDriverKitMatchingAssertion() == kIOReturnSuccess;
+		if (!ok) {
+			panic("%s: Failed to acquire power assertion for matching", getName());
+		}
+		releaseAssertion = true;
+	}
 
 	lockForArbitration();
 
@@ -1118,6 +1127,8 @@ IOService::startMatching( IOOptionBits options )
 			thread_wakeup((event_t) this /*&__state[1]*/ );
 			IOLockUnlock( gIOServiceBusyLock );
 		} else if (!sync || (kIOServiceAsynchronous & options)) {
+			// assertion will be released when matching job is complete
+			releaseAssertion = false;
 			_IOServiceJob::startJob( this, kMatchNubJob, options );
 		} else {
 			do {
@@ -1149,6 +1160,10 @@ IOService::startMatching( IOOptionBits options )
 				}
 			} while (waitAgain);
 		}
+	}
+
+	if (releaseAssertion) {
+		gIOPMRootDomain->releaseDriverKitMatchingAssertion();
 	}
 }
 
@@ -4404,7 +4419,10 @@ bool
 IOServicePH::matchingStart(IOService * service)
 {
 	uint32_t idx;
-	bool ok;
+	bool ok = gIOPMRootDomain->acquireDriverKitMatchingAssertion() == kIOReturnSuccess;
+	if (!ok) {
+		return ok;
+	}
 
 	lock();
 	ok = !fSystemOff;
@@ -4424,6 +4442,9 @@ IOServicePH::matchingStart(IOService * service)
 		}
 	}
 	unlock();
+	if (!ok) {
+		gIOPMRootDomain->releaseDriverKitMatchingAssertion();
+	}
 
 	return ok;
 }
@@ -4437,6 +4458,10 @@ IOServicePH::matchingEnd(IOService * service)
 
 	notifyServers   = NULL;
 	deferredMatches = NULL;
+
+	if (service) {
+		gIOPMRootDomain->releaseDriverKitMatchingAssertion();
+	}
 
 	lock();
 
@@ -5739,8 +5764,12 @@ _IOConfigThread::main(void * arg, wait_result_t result)
 				break;
 			}
 
-			nub->release();
-			job->release();
+			if (job->options & kIOServiceDextRequirePowerForMatching) {
+				gIOPMRootDomain->releaseDriverKitMatchingAssertion();
+			}
+
+			OSSafeReleaseNULL(nub);
+			OSSafeReleaseNULL(job);
 
 			IOTakeLock( gJobsLock );
 			alive = (gOutstandingJobs > gNumWaitingThreads);

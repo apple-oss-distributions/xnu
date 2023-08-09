@@ -534,14 +534,16 @@ static void
 ptsd_kqops_detach(struct knote *kn)
 {
 	struct tty *tp = kn->kn_hook;
-
 	tty_lock(tp);
 
-	/*
-	 * Only detach knotes from open ttys -- ttyclose detaches all knotes
-	 * under the lock and unsets TS_ISOPEN.
-	 */
-	if (tp->t_state & TS_ISOPEN) {
+	if (!KNOTE_IS_AUTODETACHED(kn)) {
+		/*
+		 * If we got here, it must be due to the fact that we are referencing an open
+		 * tty - ttyclose always autodetaches knotes under the tty lock and marks
+		 * the state as closed
+		 */
+		assert(tp->t_state & TS_ISOPEN);
+
 		switch (kn->kn_filter) {
 		case EVFILT_READ:
 			KNOTE_DETACH(&tp->t_rsel.si_note, kn);
@@ -554,6 +556,8 @@ ptsd_kqops_detach(struct knote *kn)
 			break;
 		}
 	}
+
+	kn->kn_hook = NULL;
 
 	tty_unlock(tp);
 	ttyfree(tp);
@@ -713,11 +717,11 @@ ptsd_revoke_knotes(__unused int minor, struct tty *tp)
 
 	ttwakeup(tp);
 	assert((tp->t_rsel.si_flags & SI_KNPOSTING) == 0);
-	KNOTE(&tp->t_rsel.si_note, NOTE_REVOKE);
+	knote(&tp->t_rsel.si_note, NOTE_REVOKE, true);
 
 	ttwwakeup(tp);
 	assert((tp->t_wsel.si_flags & SI_KNPOSTING) == 0);
-	KNOTE(&tp->t_wsel.si_note, NOTE_REVOKE);
+	knote(&tp->t_wsel.si_note, NOTE_REVOKE, true);
 
 	tty_unlock(tp);
 }
@@ -818,17 +822,21 @@ ptmx_kqops_detach(struct knote *kn)
 
 	tty_lock(tp);
 
-	switch (kn->kn_filter) {
-	case EVFILT_READ:
-		KNOTE_DETACH(&pti->pt_selr.si_note, kn);
-		break;
-	case EVFILT_WRITE:
-		KNOTE_DETACH(&pti->pt_selw.si_note, kn);
-		break;
-	default:
-		panic("invalid knote %p detach, filter: %d", kn, kn->kn_filter);
-		break;
+	if (!KNOTE_IS_AUTODETACHED(kn)) {
+		switch (kn->kn_filter) {
+		case EVFILT_READ:
+			KNOTE_DETACH(&pti->pt_selr.si_note, kn);
+			break;
+		case EVFILT_WRITE:
+			KNOTE_DETACH(&pti->pt_selw.si_note, kn);
+			break;
+		default:
+			panic("invalid knote %p detach, filter: %d", kn, kn->kn_filter);
+			break;
+		}
 	}
+
+	kn->kn_hook = NULL;
 
 	tty_unlock(tp);
 	ttyfree(tp);

@@ -1098,26 +1098,24 @@ selspec_attach(struct knote *kn, struct selinfo *si)
 
 /*
  * The "primitive" lock is _not_ held.
- * The knote lock is held.
+ *
+ * knote "lock" is held
  */
 void
 selspec_detach(struct knote *kn)
 {
-	/*
-	 * kn_hook always becomes non NULL under the knote lock.
-	 * Seeing "NULL" can't be a false positive.
-	 */
-	if (kn->kn_hook == NULL) {
-		return;
-	}
-
 	lck_spin_lock(&selspec_lock);
-	if (kn->kn_hook) {
-		struct selinfo *sip = kn->kn_hook;
 
-		kn->kn_hook = NULL;
-		KNOTE_DETACH(&sip->si_note, kn);
+	if (!KNOTE_IS_AUTODETACHED(kn)) {
+		if (kn->kn_hook) {
+			struct selinfo *sip = kn->kn_hook;
+
+			KNOTE_DETACH(&sip->si_note, kn);
+		}
 	}
+
+	kn->kn_hook = NULL;
+
 	lck_spin_unlock(&selspec_lock);
 }
 
@@ -2140,11 +2138,11 @@ selwakeup_internal(struct selinfo *sip, long hint, wait_result_t wr)
 		 * The "primitive" lock is held.
 		 * The knote lock is not held.
 		 *
-		 * All knotes will transition their kn_hook to NULL.
+		 * All knotes will transition their kn_hook to NULL and we will
+		 * reeinitialize the primitive's klist
 		 */
 		lck_spin_lock(&selspec_lock);
-		KNOTE(&sip->si_note, hint);
-		klist_init(&sip->si_note);
+		knote(&sip->si_note, hint, /*autodetach=*/ true);
 		lck_spin_unlock(&selspec_lock);
 		sip->si_flags &= ~SI_SELSPEC;
 	}

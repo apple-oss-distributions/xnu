@@ -3492,6 +3492,7 @@ cfil_dispatch_closed_event(struct socket *so, struct cfil_info *cfil_info, int k
 	struct cfil_msg_sock_closed msg_closed;
 	errno_t error = 0;
 	struct content_filter *cfc;
+	struct inpcb *inp = NULL;
 
 	socket_lock_assert_owned(so);
 
@@ -3537,6 +3538,25 @@ cfil_dispatch_closed_event(struct socket *so, struct cfil_info *cfil_info, int k
 	msg_closed.cfc_op_list_ctr = cfil_info->cfi_op_list_ctr;
 	msg_closed.cfc_byte_inbound_count = cfil_info->cfi_byte_inbound_count;
 	msg_closed.cfc_byte_outbound_count = cfil_info->cfi_byte_outbound_count;
+
+	if (entry->cfe_laddr_sent == false) {
+		/* cache it if necessary */
+		if (cfil_info->cfi_so_attach_laddr.sa.sa_len == 0) {
+			inp = cfil_info->cfi_so ? sotoinpcb(cfil_info->cfi_so) : NULL;
+			if (inp != NULL) {
+				boolean_t outgoing = (cfil_info->cfi_dir == CFS_CONNECTION_DIR_OUT);
+				union sockaddr_in_4_6 *src = outgoing ? &cfil_info->cfi_so_attach_laddr : NULL;
+				union sockaddr_in_4_6 *dst = outgoing ? NULL : &cfil_info->cfi_so_attach_laddr;
+				cfil_fill_event_msg_addresses(cfil_info->cfi_hash_entry, inp,
+				    src, dst, !IS_INP_V6(inp), outgoing);
+			}
+		}
+
+		if (cfil_info->cfi_so_attach_laddr.sa.sa_len != 0) {
+			msg_closed.cfc_laddr.sin6 = cfil_info->cfi_so_attach_laddr.sin6;
+			entry->cfe_laddr_sent = true;
+		}
+	}
 
 	cfil_dispatch_closed_event_sign(entry->cfe_filter->cf_crypto_state, so, cfil_info, &msg_closed);
 

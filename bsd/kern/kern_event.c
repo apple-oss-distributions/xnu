@@ -775,6 +775,7 @@ knote_unlock_cancel(struct kqueue *kq, struct knote *kn,
  * Call the f_event hook of a given filter.
  *
  * Takes a use count to protect against concurrent drops.
+ * Called with the object lock held.
  */
 static void
 knote_post(struct knote *kn, long hint)
@@ -783,18 +784,6 @@ knote_post(struct knote *kn, long hint)
 	int dropping, result;
 
 	kqlock(kq);
-
-	/*
-	 * The select fallback is special, if KNOTE() is called,
-	 * the contract is that kn->kn_hook _HAS_ to become NULL.
-	 *
-	 * the f_event() hook might not be called if we're dropping,
-	 * so we hardcode it here, which is a little distasteful,
-	 * but the select fallback is kinda magical in the first place.
-	 */
-	if (kn->kn_filtid == EVFILTID_SPEC) {
-		kn->kn_hook = NULL;
-	}
 
 	if (__improbable(kn->kn_status & (KN_DROPPING | KN_VANISHED))) {
 		return kqunlock(kq);
@@ -6011,23 +6000,44 @@ klist_init(struct klist *list)
 
 
 /*
- * Query/Post each knote in the object's list
+ *	Query/Post each knote in the object's list
  *
- *	The object lock protects the list. It is assumed
- *	that the filter/event routine for the object can
- *	determine that the object is already locked (via
+ *	The object lock protects the list. It is assumed that the filter/event
+ *	routine for the object can determine that the object is already locked (via
  *	the hint) and not deadlock itself.
  *
- *	The object lock should also hold off pending
- *	detach/drop operations.
+ *	Autodetach is a specific contract which will detach all knotes from the
+ *	object prior to posting the final event for that knote. This is done while
+ *	under the object lock. A breadcrumb is left in the knote's next pointer to
+ *	indicate to future calls to f_detach routines that they need not reattempt
+ *	to knote_detach from the object's klist again. This is currently used by
+ *	EVFILTID_SPEC, EVFILTID_TTY, EVFILTID_PTMX
+ *
  */
 void
-knote(struct klist *list, long hint)
+knote(struct klist *list, long hint, bool autodetach)
 {
 	struct knote *kn;
-
-	SLIST_FOREACH(kn, list, kn_selnext) {
+	struct knote *tmp_kn;
+	SLIST_FOREACH_SAFE(kn, list, kn_selnext, tmp_kn) {
+		/*
+		 * We can modify the knote's next pointer since since we are holding the
+		 * object lock and the list can't be concurrently modified. Anyone
+		 * determining auto-detached-ness of a knote should take the primitive lock
+		 * to synchronize.
+		 *
+		 * Note that we do this here instead of the filter's f_event since we may
+		 * not even post the event if the knote is being dropped.
+		 */
+		if (autodetach) {
+			kn->kn_selnext.sle_next = KNOTE_AUTODETACHED;
+		}
 		knote_post(kn, hint);
+	}
+
+	/* Blast away the entire klist */
+	if (autodetach) {
+		klist_init(list);
 	}
 }
 
@@ -6044,12 +6054,15 @@ knote_attach(struct klist *list, struct knote *kn)
 }
 
 /*
- * detach a knote from the specified list.  Return true if that was the last entry.
- * The list is protected by whatever lock the object it is associated with uses.
+ * detach a knote from the specified list.  Return true if that was the last
+ * entry.  The list is protected by whatever lock the object it is associated
+ * with uses.
  */
 int
 knote_detach(struct klist *list, struct knote *kn)
 {
+	assert(!KNOTE_IS_AUTODETACHED(kn));
+
 	SLIST_REMOVE(list, kn, knote, kn_selnext);
 	return SLIST_EMPTY(list);
 }
@@ -6684,6 +6697,9 @@ knote_drop(struct kqueue *kq, struct knote *kn, struct knote_lock_ctx *knlc)
 	}
 	knote_wait_for_post(kq, kn);
 
+	/* Even if we are autodetached, the filter may need to do cleanups of any
+	 * stuff stashed on the knote so always make the call and let each filter
+	 * handle the possibility of autodetached-ness */
 	knote_fops(kn)->f_detach(kn);
 
 	/* kq may be freed when kq_remove_knote() returns */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -698,14 +698,16 @@ flow_divert_check_no_constrained(struct flow_divert_pcb *fd_cb)
 }
 
 static void
-flow_divert_update_closed_state(struct flow_divert_pcb *fd_cb, int how, Boolean tunnel)
+flow_divert_update_closed_state(struct flow_divert_pcb *fd_cb, int how, bool tunnel, bool flush_snd)
 {
 	if (how != SHUT_RD) {
 		fd_cb->flags |= FLOW_DIVERT_WRITE_CLOSED;
 		if (tunnel || !(fd_cb->flags & FLOW_DIVERT_CONNECT_STARTED)) {
 			fd_cb->flags |= FLOW_DIVERT_TUNNEL_WR_CLOSED;
-			/* If the tunnel is not accepting writes any more, then flush the send buffer */
-			sbflush(&fd_cb->so->so_snd);
+			if (flush_snd) {
+				/* If the tunnel is not accepting writes any more, then flush the send buffer */
+				sbflush(&fd_cb->so->so_snd);
+			}
 		}
 	}
 	if (how != SHUT_WR) {
@@ -1160,13 +1162,13 @@ done:
 }
 
 static int
-flow_divert_send_packet(struct flow_divert_pcb *fd_cb, mbuf_t packet, Boolean enqueue)
+flow_divert_send_packet(struct flow_divert_pcb *fd_cb, mbuf_t packet)
 {
 	int             error;
 
 	if (fd_cb->group == NULL) {
 		FDLOG0(LOG_INFO, fd_cb, "no provider, cannot send packet");
-		flow_divert_update_closed_state(fd_cb, SHUT_RDWR, TRUE);
+		flow_divert_update_closed_state(fd_cb, SHUT_RDWR, true, false);
 		flow_divert_disconnect_socket(fd_cb->so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 		if (SOCK_TYPE(fd_cb->so) == SOCK_STREAM) {
 			error = ECONNABORTED;
@@ -1181,18 +1183,19 @@ flow_divert_send_packet(struct flow_divert_pcb *fd_cb, mbuf_t packet, Boolean en
 
 	if (MBUFQ_EMPTY(&fd_cb->group->send_queue)) {
 		error = ctl_enqueuembuf(g_flow_divert_kctl_ref, fd_cb->group->ctl_unit, packet, CTL_DATA_EOR);
+		if (error) {
+			FDLOG(LOG_NOTICE, &nil_pcb, "flow_divert_send_packet: ctl_enqueuembuf returned an error: %d", error);
+		}
 	} else {
 		error = ENOBUFS;
 	}
 
 	if (error == ENOBUFS) {
-		if (enqueue) {
-			if (!lck_rw_lock_shared_to_exclusive(&fd_cb->group->lck)) {
-				lck_rw_lock_exclusive(&fd_cb->group->lck);
-			}
-			MBUFQ_ENQUEUE(&fd_cb->group->send_queue, packet);
-			error = 0;
+		if (!lck_rw_lock_shared_to_exclusive(&fd_cb->group->lck)) {
+			lck_rw_lock_exclusive(&fd_cb->group->lck);
 		}
+		MBUFQ_ENQUEUE(&fd_cb->group->send_queue, packet);
+		error = 0;
 		OSTestAndSet(GROUP_BIT_CTL_ENQUEUE_BLOCKED, &fd_cb->group->atomic_bits);
 	}
 
@@ -1384,7 +1387,7 @@ flow_divert_send_connect_packet(struct flow_divert_pcb *fd_cb)
 			goto done;
 		}
 
-		error = flow_divert_send_packet(fd_cb, connect_packet, TRUE);
+		error = flow_divert_send_packet(fd_cb, connect_packet);
 		if (error) {
 			goto done;
 		}
@@ -1435,7 +1438,7 @@ flow_divert_send_connect_result(struct flow_divert_pcb *fd_cb)
 		}
 	}
 
-	error = flow_divert_send_packet(fd_cb, packet, TRUE);
+	error = flow_divert_send_packet(fd_cb, packet);
 	if (error) {
 		goto done;
 	}
@@ -1474,7 +1477,7 @@ flow_divert_send_close(struct flow_divert_pcb *fd_cb, int how)
 		goto done;
 	}
 
-	error = flow_divert_send_packet(fd_cb, packet, TRUE);
+	error = flow_divert_send_packet(fd_cb, packet);
 	if (error) {
 		goto done;
 	}
@@ -1546,7 +1549,7 @@ flow_divert_send_close_if_needed(struct flow_divert_pcb *fd_cb)
 }
 
 static errno_t
-flow_divert_send_data_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t data_len, Boolean force)
+flow_divert_send_data_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t data_len)
 {
 	mbuf_t packet = NULL;
 	mbuf_t last = NULL;
@@ -1565,7 +1568,7 @@ flow_divert_send_data_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t 
 	} else {
 		data_len = 0;
 	}
-	error = flow_divert_send_packet(fd_cb, packet, force);
+	error = flow_divert_send_packet(fd_cb, packet);
 	if (error == 0 && data_len > 0) {
 		fd_cb->bytes_sent += data_len;
 		flow_divert_add_data_statistics(fd_cb, data_len, TRUE);
@@ -1585,7 +1588,7 @@ done:
 }
 
 static errno_t
-flow_divert_send_datagram_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t data_len, struct sockaddr *toaddr, Boolean force, Boolean is_fragment, size_t datagram_size)
+flow_divert_send_datagram_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t data_len, struct sockaddr *toaddr, Boolean is_fragment, size_t datagram_size)
 {
 	mbuf_t packet = NULL;
 	mbuf_t last = NULL;
@@ -1625,7 +1628,7 @@ flow_divert_send_datagram_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, siz
 	} else {
 		data_len = 0;
 	}
-	error = flow_divert_send_packet(fd_cb, packet, force);
+	error = flow_divert_send_packet(fd_cb, packet);
 	if (error == 0 && data_len > 0) {
 		fd_cb->bytes_sent += data_len;
 		flow_divert_add_data_statistics(fd_cb, data_len, TRUE);
@@ -1645,7 +1648,7 @@ done:
 }
 
 static errno_t
-flow_divert_send_fragmented_datagram(struct flow_divert_pcb *fd_cb, mbuf_t datagram, size_t datagram_len, struct sockaddr *toaddr, Boolean force)
+flow_divert_send_fragmented_datagram(struct flow_divert_pcb *fd_cb, mbuf_t datagram, size_t datagram_len, struct sockaddr *toaddr)
 {
 	mbuf_t next_data = datagram;
 	size_t remaining_len = datagram_len;
@@ -1665,7 +1668,7 @@ flow_divert_send_fragmented_datagram(struct flow_divert_pcb *fd_cb, mbuf_t datag
 			}
 		}
 
-		error = flow_divert_send_datagram_packet(fd_cb, next_data, to_send, (first ? toaddr : NULL), force, TRUE, (first ? datagram_len : 0));
+		error = flow_divert_send_datagram_packet(fd_cb, next_data, to_send, (first ? toaddr : NULL), TRUE, (first ? datagram_len : 0));
 		if (error) {
 			break;
 		}
@@ -1723,7 +1726,7 @@ flow_divert_send_buffered_data(struct flow_divert_pcb *fd_cb, Boolean force)
 				break;
 			}
 
-			error = flow_divert_send_data_packet(fd_cb, data, data_len, force);
+			error = flow_divert_send_data_packet(fd_cb, data, data_len);
 			if (error) {
 				if (data != NULL) {
 					mbuf_freem(data);
@@ -1770,9 +1773,9 @@ flow_divert_send_buffered_data(struct flow_divert_pcb *fd_cb, Boolean force)
 				data = NULL;
 			}
 			if (data_len <= FLOW_DIVERT_CHUNK_SIZE) {
-				error = flow_divert_send_datagram_packet(fd_cb, data, data_len, toaddr, force, FALSE, 0);
+				error = flow_divert_send_datagram_packet(fd_cb, data, data_len, toaddr, FALSE, 0);
 			} else {
-				error = flow_divert_send_fragmented_datagram(fd_cb, data, data_len, toaddr, force);
+				error = flow_divert_send_fragmented_datagram(fd_cb, data, data_len, toaddr);
 				data = NULL;
 			}
 			if (error) {
@@ -1838,8 +1841,7 @@ flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, struct soc
 				remaining_data = NULL;
 			}
 
-			error = flow_divert_send_data_packet(fd_cb, pkt_data, pkt_data_len, FALSE);
-
+			error = flow_divert_send_data_packet(fd_cb, pkt_data, pkt_data_len);
 			if (error) {
 				break;
 			}
@@ -1876,43 +1878,47 @@ flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, struct soc
 			}
 		}
 	} else if (SOCK_TYPE(fd_cb->so) == SOCK_DGRAM) {
-		if (to_send || mbuf_pkthdr_len(data) == 0) {
-			if (to_send <= FLOW_DIVERT_CHUNK_SIZE) {
-				error = flow_divert_send_datagram_packet(fd_cb, data, to_send, toaddr, FALSE, FALSE, 0);
+		int send_dgram_error = 0;
+		size_t data_size = mbuf_pkthdr_len(data);
+		if (to_send || data_size == 0) {
+			if (data_size <= FLOW_DIVERT_CHUNK_SIZE) {
+				send_dgram_error = flow_divert_send_datagram_packet(fd_cb, data, data_size, toaddr, FALSE, 0);
 			} else {
-				error = flow_divert_send_fragmented_datagram(fd_cb, data, to_send, toaddr, FALSE);
+				send_dgram_error = flow_divert_send_fragmented_datagram(fd_cb, data, data_size, toaddr);
 				data = NULL;
 			}
-			if (error) {
-				FDLOG(LOG_ERR, fd_cb, "flow_divert_send_datagram_packet failed. send data size = %lu", to_send);
-				if (data != NULL) {
-					mbuf_freem(data);
-				}
+			if (send_dgram_error) {
+				FDLOG(LOG_NOTICE, fd_cb, "flow_divert_send_datagram_packet failed with error %d, send data size = %lu", send_dgram_error, data_size);
 			} else {
-				fd_cb->send_window -= to_send;
+				if (data_size >= fd_cb->send_window) {
+					fd_cb->send_window = 0;
+				} else {
+					fd_cb->send_window -= data_size;
+				}
+				data = NULL;
 			}
-		} else {
+		}
+
+		if (data != NULL) {
 			/* buffer it */
-			if (sbspace(&fd_cb->so->so_snd) >= (int)mbuf_pkthdr_len(data)) {
+			if (sbspace(&fd_cb->so->so_snd) > 0) {
 				if (toaddr != NULL) {
-					if (!sbappendaddr(&fd_cb->so->so_snd, toaddr, data, NULL, &error)) {
+					int append_error = 0;
+					if (!sbappendaddr(&fd_cb->so->so_snd, toaddr, data, NULL, &append_error)) {
 						FDLOG(LOG_ERR, fd_cb,
-						    "sbappendaddr failed. send buffer size = %u, send_window = %u, error = %d\n",
-						    fd_cb->so->so_snd.sb_cc, fd_cb->send_window, error);
+						    "sbappendaddr failed. send buffer size = %u, send_window = %u, error = %d",
+						    fd_cb->so->so_snd.sb_cc, fd_cb->send_window, append_error);
 					}
-					error = 0;
 				} else {
 					if (!sbappendrecord(&fd_cb->so->so_snd, data)) {
 						FDLOG(LOG_ERR, fd_cb,
-						    "sbappendrecord failed. send buffer size = %u, send_window = %u, error = %d\n",
-						    fd_cb->so->so_snd.sb_cc, fd_cb->send_window, error);
+						    "sbappendrecord failed. send buffer size = %u, send_window = %u",
+						    fd_cb->so->so_snd.sb_cc, fd_cb->send_window);
 					}
 				}
 			} else {
-				if (data != NULL) {
-					mbuf_freem(data);
-				}
-				error = ENOBUFS;
+				FDLOG(LOG_ERR, fd_cb, "flow_divert_send_datagram_packet failed with error %d, send data size = %lu, dropping the datagram", error, data_size);
+				mbuf_freem(data);
 			}
 		}
 	}
@@ -1932,7 +1938,7 @@ flow_divert_send_read_notification(struct flow_divert_pcb *fd_cb)
 		goto done;
 	}
 
-	error = flow_divert_send_packet(fd_cb, packet, TRUE);
+	error = flow_divert_send_packet(fd_cb, packet);
 	if (error) {
 		goto done;
 	}
@@ -1963,7 +1969,7 @@ flow_divert_send_traffic_class_update(struct flow_divert_pcb *fd_cb, int traffic
 		goto done;
 	}
 
-	error = flow_divert_send_packet(fd_cb, packet, TRUE);
+	error = flow_divert_send_packet(fd_cb, packet);
 	if (error) {
 		goto done;
 	}
@@ -2574,11 +2580,11 @@ set_socket_state:
 			}
 
 			if (!connect_error) {
-				flow_divert_update_closed_state(fd_cb, SHUT_RDWR, FALSE);
+				flow_divert_update_closed_state(fd_cb, SHUT_RDWR, false, true);
 				so->so_error = (uint16_t)error;
 				flow_divert_send_close_if_needed(fd_cb);
 			} else {
-				flow_divert_update_closed_state(fd_cb, SHUT_RDWR, TRUE);
+				flow_divert_update_closed_state(fd_cb, SHUT_RDWR, true, true);
 				so->so_error = (uint16_t)connect_error;
 			}
 			flow_divert_disconnect_socket(so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
@@ -2649,7 +2655,7 @@ flow_divert_handle_close(struct flow_divert_pcb *fd_cb, mbuf_t packet, int offse
 
 		fd_cb->so->so_error = (uint16_t)ntohl(close_error);
 
-		flow_divert_update_closed_state(fd_cb, how, TRUE);
+		flow_divert_update_closed_state(fd_cb, how, true, true);
 
 		/* Only do this for stream flows because "shutdown by peer" doesn't make sense for datagram flows */
 		how = flow_divert_tunnel_how_closed(fd_cb);
@@ -3221,7 +3227,7 @@ flow_divert_close_all(struct flow_divert_group *group)
 		if (fd_cb->so != NULL) {
 			socket_lock(fd_cb->so, 0);
 			flow_divert_pcb_remove(fd_cb);
-			flow_divert_update_closed_state(fd_cb, SHUT_RDWR, TRUE);
+			flow_divert_update_closed_state(fd_cb, SHUT_RDWR, true, true);
 			fd_cb->so->so_error = ECONNABORTED;
 			flow_divert_disconnect_socket(fd_cb->so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 			socket_unlock(fd_cb->so, 0);
@@ -3249,7 +3255,7 @@ flow_divert_detach(struct socket *so)
 		/* Last-ditch effort to send any buffered data */
 		flow_divert_send_buffered_data(fd_cb, TRUE);
 
-		flow_divert_update_closed_state(fd_cb, SHUT_RDWR, FALSE);
+		flow_divert_update_closed_state(fd_cb, SHUT_RDWR, false, true);
 		flow_divert_send_close_if_needed(fd_cb);
 		/* Remove from the group */
 		flow_divert_pcb_remove(fd_cb);
@@ -3281,7 +3287,7 @@ flow_divert_close(struct socket *so)
 	}
 
 	flow_divert_send_buffered_data(fd_cb, TRUE);
-	flow_divert_update_closed_state(fd_cb, SHUT_RDWR, FALSE);
+	flow_divert_update_closed_state(fd_cb, SHUT_RDWR, false, true);
 	flow_divert_send_close_if_needed(fd_cb);
 
 	/* Remove from the group */
@@ -3314,7 +3320,7 @@ flow_divert_shutdown(struct socket *so)
 
 	socantsendmore(so);
 
-	flow_divert_update_closed_state(fd_cb, SHUT_WR, FALSE);
+	flow_divert_update_closed_state(fd_cb, SHUT_WR, false, true);
 	flow_divert_send_close_if_needed(fd_cb);
 
 	return 0;
@@ -3807,16 +3813,6 @@ flow_divert_data_out(struct socket *so, int flags, mbuf_t data, struct sockaddr 
 	if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD) {
 		error = ECONNRESET;
 		goto done;
-	}
-
-	if (control && mbuf_len(control) > 0) {
-		error = EINVAL;
-		goto done;
-	}
-
-	if (flags & MSG_OOB) {
-		error = EINVAL;
-		goto done; /* We don't support OOB data */
 	}
 
 	if ((fd_cb->flags & FLOW_DIVERT_TUNNEL_WR_CLOSED) && SOCK_TYPE(so) == SOCK_DGRAM) {
@@ -4395,7 +4391,7 @@ flow_divert_kctl_rcvd(__unused kern_ctl_ref kctlref, uint32_t unit, __unused voi
 			next_packet = MBUFQ_FIRST(&group->send_queue);
 			int error = ctl_enqueuembuf(g_flow_divert_kctl_ref, group->ctl_unit, next_packet, CTL_DATA_EOR);
 			if (error) {
-				FDLOG(LOG_DEBUG, &nil_pcb, "ctl_enqueuembuf returned an error: %d", error);
+				FDLOG(LOG_NOTICE, &nil_pcb, "flow_divert_kctl_rcvd: ctl_enqueuembuf returned an error: %d", error);
 				OSTestAndSet(GROUP_BIT_CTL_ENQUEUE_BLOCKED, &group->atomic_bits);
 				lck_rw_done(&group->lck);
 				return;

@@ -140,7 +140,7 @@ extern void IODTFreeLoaderInfo( const char *key, void *infoAddr, int infoSize );
 unsigned int    halt_in_debugger = 0;
 unsigned int    current_debugger = 0;
 unsigned int    active_debugger = 0;
-unsigned int    panicDebugging = FALSE;
+SECURITY_READ_ONLY_LATE(unsigned int)    panicDebugging = FALSE;
 unsigned int    kernel_debugger_entry_count = 0;
 
 #if DEVELOPMENT || DEBUG
@@ -248,7 +248,8 @@ extern kern_return_t do_stackshot(void);
 extern void PE_panic_hook(const char*);
 
 #define NESTEDDEBUGGERENTRYMAX 5
-static unsigned int max_debugger_entry_count = NESTEDDEBUGGERENTRYMAX;
+static TUNABLE(unsigned int, max_debugger_entry_count, "nested_panic_max",
+    NESTEDDEBUGGERENTRYMAX);
 
 SECURITY_READ_ONLY_LATE(bool) awl_scratch_reg_supported = false;
 static bool PERCPU_DATA(hv_entry_detected); // = false
@@ -402,10 +403,6 @@ panic_init(void)
 #else
 		panicDebugging = TRUE;
 #endif /* defined(__arm64__) */
-	}
-
-	if (!PE_parse_boot_argn("nested_panic_max", &max_debugger_entry_count, sizeof(max_debugger_entry_count))) {
-		max_debugger_entry_count = NESTEDDEBUGGERENTRYMAX;
 	}
 
 #if defined(__arm64__)

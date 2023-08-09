@@ -4079,35 +4079,35 @@ OSKext::serializeLogInfo(
 		    "Failed to create serializer on log info for request from user space.");
 		/* Incidental error; we're going to (try to) allow the request
 		 * itself to succeed. */
-	}
-
-	if (!logInfoArray->serialize(serializer.get())) {
-		OSKextLog(/* kext */ NULL,
-		    kOSKextLogErrorLevel |
-		    kOSKextLogIPCFlag,
-		    "Failed to serialize log info for request from user space.");
-		/* Incidental error; we're going to (try to) allow the request
-		 * itself to succeed. */
 	} else {
-		logInfo = serializer->text();
-		logInfoLength = serializer->getLength();
-
-		kmem_result = kmem_alloc(kernel_map, (vm_offset_t *)&buffer, round_page(logInfoLength),
-		    KMA_DATA, VM_KERN_MEMORY_OSKEXT);
-		if (kmem_result != KERN_SUCCESS) {
+		if (!logInfoArray->serialize(serializer.get())) {
 			OSKextLog(/* kext */ NULL,
 			    kOSKextLogErrorLevel |
 			    kOSKextLogIPCFlag,
-			    "Failed to copy log info for request from user space.");
+			    "Failed to serialize log info for request from user space.");
 			/* Incidental error; we're going to (try to) allow the request
-			 * to succeed. */
+			 * itself to succeed. */
 		} else {
-			/* 11981737 - clear uninitialized data in last page */
-			bzero((void *)(buffer + logInfoLength),
-			    (round_page(logInfoLength) - logInfoLength));
-			memcpy(buffer, logInfo, logInfoLength);
-			*logInfoOut = buffer;
-			*logInfoLengthOut = logInfoLength;
+			logInfo = serializer->text();
+			logInfoLength = serializer->getLength();
+
+			kmem_result = kmem_alloc(kernel_map, (vm_offset_t *)&buffer, round_page(logInfoLength),
+			    KMA_DATA, VM_KERN_MEMORY_OSKEXT);
+			if (kmem_result != KERN_SUCCESS) {
+				OSKextLog(/* kext */ NULL,
+				    kOSKextLogErrorLevel |
+				    kOSKextLogIPCFlag,
+				    "Failed to copy log info for request from user space.");
+				/* Incidental error; we're going to (try to) allow the request
+				 * to succeed. */
+			} else {
+				/* 11981737 - clear uninitialized data in last page */
+				bzero((void *)(buffer + logInfoLength),
+				    (round_page(logInfoLength) - logInfoLength));
+				memcpy(buffer, logInfo, logInfoLength);
+				*logInfoOut = buffer;
+				*logInfoLengthOut = logInfoLength;
+			}
 		}
 	}
 

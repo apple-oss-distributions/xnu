@@ -32,7 +32,6 @@ void pe_identify_machine(boot_args * bootArgs);
 extern void clean_mmu_dcache(void);
 extern void flush_dcache64(addr64_t addr, unsigned count, int phys);
 
-
 static char    *gPESoCDeviceType;
 static char     gPESoCDeviceTypeBuffer[SOC_DEVICE_TYPE_BUFFER_SIZE];
 static vm_offset_t gPESoCBasePhys;

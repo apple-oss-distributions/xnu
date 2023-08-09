@@ -145,10 +145,9 @@ static int dad_maxtry = 15;     /* max # of *tries* to transmit DAD packet */
 
 static LCK_MTX_DECLARE_ATTR(dad6_mutex, &ip6_mutex_grp, &ip6_mutex_attr);
 
-static int nd6_llreach_base = 30;        /* seconds */
-
 static struct sockaddr_in6 hostrtmask;
 
+static int nd6_llreach_base = 30;        /* seconds */
 SYSCTL_DECL(_net_inet6_icmp6);
 SYSCTL_INT(_net_inet6_icmp6, OID_AUTO, nd6_llreach_base,
     CTLFLAG_RW | CTLFLAG_LOCKED, &nd6_llreach_base, 0,
@@ -159,6 +158,10 @@ SYSCTL_DECL(_net_inet6_ip6);
 SYSCTL_INT(_net_inet6_ip6, OID_AUTO, dad_enhanced, CTLFLAG_RW | CTLFLAG_LOCKED,
     &dad_enhanced, 0,
     "Enable Enhanced DAD, which adds a random nonce to NS messages for DAD.");
+
+static uint32_t nd6_dad_nonce_max_count = 3;
+SYSCTL_UINT(_net_inet6_ip6, OID_AUTO, nd6_dad_nonce_max_count,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &nd6_dad_nonce_max_count, 0, "Number of times to ignore same nonce for DAD");
 
 #if DEBUG || DEVELOPMENT
 static int  ip6_p2p_debug = 0;
@@ -1654,6 +1657,7 @@ struct dadq {
 #define ND_OPT_NONCE_LEN32 \
     ((ND_OPT_NONCE_LEN + sizeof(uint32_t) - 1)/sizeof(uint32_t))
 	uint32_t dad_nonce[ND_OPT_NONCE_LEN32];
+	uint32_t dad_same_nonce_count; /* # of consecutive times we've ignored DAD failure because of optimistic DAD  */
 };
 
 static KALLOC_TYPE_DEFINE(dad_zone, struct dadq, NET_KT_DEFAULT);
@@ -1678,6 +1682,7 @@ static struct dadq *
 nd6_dad_find(struct ifaddr *ifa, struct nd_opt_nonce *nonce)
 {
 	struct dadq *dp;
+	boolean_t same_nonce = false;
 
 	lck_mtx_lock(&dad6_mutex);
 	for (dp = dadq.tqh_first; dp; dp = dp->dad_list.tqe_next) {
@@ -1692,18 +1697,26 @@ nd6_dad_find(struct ifaddr *ifa, struct nd_opt_nonce *nonce)
 		 * +2 in the length is required because of type and
 		 * length fields are included in a header.
 		 */
-		if (nonce != NULL &&
+		same_nonce = nonce != NULL &&
 		    nonce->nd_opt_nonce_len == (ND_OPT_NONCE_LEN + 2) / 8 &&
 		    memcmp(&nonce->nd_opt_nonce[0], &dp->dad_nonce[0],
-		    ND_OPT_NONCE_LEN) == 0) {
+		    ND_OPT_NONCE_LEN) == 0;
+
+		if (same_nonce &&
+		    dp->dad_same_nonce_count <= nd6_dad_nonce_max_count) {
 			nd6log(error, "%s: a looped back NS message is "
-			    "detected during DAD for %s. Ignoring.\n",
+			    "detected during DAD for if=%s %s. Ignoring.\n",
+			    __func__,
 			    if_name(ifa->ifa_ifp),
 			    ip6_sprintf(IFA_IN6(ifa)));
+			dp->dad_same_nonce_count++;
 			dp->dad_ns_lcount++;
 			++ip6stat.ip6s_dad_loopcount;
 			DAD_UNLOCK(dp);
 			continue;
+		} else if (!same_nonce) {
+			// Not the same nonce, reset counter
+			dp->dad_same_nonce_count = 1;
 		}
 
 		DAD_ADDREF_LOCKED(dp);
@@ -1832,6 +1845,7 @@ nd6_dad_attach(struct dadq *dp, struct ifaddr *ifa)
 	dp->dad_ns_ocount = dp->dad_ns_tcount = 0;
 	dp->dad_ns_lcount = dp->dad_loopbackprobe = 0;
 	VERIFY(!dp->dad_attached);
+	dp->dad_same_nonce_count = 1;
 	dp->dad_attached = 1;
 	dp->dad_lladdrlen = 0;
 	DAD_ADDREF_LOCKED(dp);  /* for caller */
@@ -2001,7 +2015,9 @@ nd6_dad_timer(struct ifaddr *ifa)
 #endif /* SKYWALK */
 		} else if (dad_enhanced != 0 &&
 		    dp->dad_ns_lcount > 0 &&
-		    dp->dad_ns_lcount > dp->dad_loopbackprobe) {
+		    dp->dad_ns_lcount > dp->dad_loopbackprobe &&
+		    dp->dad_same_nonce_count > 0 &&
+		    dp->dad_same_nonce_count > nd6_dad_nonce_max_count) {
 			dp->dad_loopbackprobe = dp->dad_ns_lcount;
 			dp->dad_count =
 			    dp->dad_ns_ocount + dad_maxtry - 1;
@@ -2236,6 +2252,7 @@ nd6_dad_ns_output(struct dadq *dp, struct ifaddr *ifa)
 		for (i = 0; i < ND_OPT_NONCE_LEN32; i++) {
 			dp->dad_nonce[i] = RandomULong();
 		}
+
 		/*
 		 * XXXHRS: Note that in the case that
 		 * DupAddrDetectTransmits > 1, multiple NS messages with

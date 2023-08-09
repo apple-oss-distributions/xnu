@@ -2314,13 +2314,13 @@ __zone_flags_mix_tag(zalloc_flags_t flags, vm_tag_t tag)
 }
 
 #if DEBUG || DEVELOPMENT
-#    define ZPCPU_MANGLE_BIT    (1ul << 63)
+#  define ZPCPU_MANGLE_MASK     0xc0c0000000000000ul
 #else /* !(DEBUG || DEVELOPMENT) */
-#  define ZPCPU_MANGLE_BIT      0ul
+#  define ZPCPU_MANGLE_MASK     0ul
 #endif /* !(DEBUG || DEVELOPMENT) */
 
-#define __zpcpu_mangle(ptr)     (__zpcpu_addr(ptr) & ~ZPCPU_MANGLE_BIT)
-#define __zpcpu_demangle(ptr)   (__zpcpu_addr(ptr) | ZPCPU_MANGLE_BIT)
+#define __zpcpu_mangle(ptr)     (__zpcpu_addr(ptr) & ~ZPCPU_MANGLE_MASK)
+#define __zpcpu_demangle(ptr)   (__zpcpu_addr(ptr) | ZPCPU_MANGLE_MASK)
 #define __zpcpu_addr(e)         ((vm_address_t)(e))
 #define __zpcpu_cast(ptr, e)    __unsafe_forge_single(typeof(ptr), e)
 #define __zpcpu_next(ptr)       __zpcpu_cast(ptr, __zpcpu_addr(ptr) + PAGE_SIZE)

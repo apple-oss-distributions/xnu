@@ -293,11 +293,12 @@ mach_vm_allocate_kernel(
 	kern_return_t   result;
 	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 
-	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags, tag);
-
-	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_ALLOCATE)) {
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_ALLOCATE) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags, tag);
 
 	if (map == VM_MAP_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -360,11 +361,12 @@ vm_allocate_external(
 	vm_map_size_t   map_size;
 	kern_return_t   result;
 
-	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags);
-
-	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_ALLOCATE)) {
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_ALLOCATE) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags);
 
 	if (map == VM_MAP_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -1111,6 +1113,11 @@ mach_vm_map_external(
 {
 	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_MAP) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
 	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags);
 	/* range_id is set by mach_vm_map_kernel */
 	return mach_vm_map_kernel(target_map, address, initial_size, mask,
@@ -1236,12 +1243,13 @@ mach_vm_remap_new_external(
 	vm_map_t                src_map;
 	kern_return_t           kr;
 
-	vm_map_kernel_flags_set_vmflags(&vmk_flags,
-	    flags | VM_FLAGS_RETURN_DATA_ADDR);
-
-	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_REMAP)) {
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_REMAP) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	vm_map_kernel_flags_set_vmflags(&vmk_flags,
+	    flags | VM_FLAGS_RETURN_DATA_ADDR);
 
 	if (target_map == VM_MAP_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -1344,12 +1352,13 @@ mach_vm_remap_kernel_helper(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	vm_map_kernel_flags_set_vmflags(&vmk_flags,
-	    flags | VM_FLAGS_RETURN_DATA_ADDR, tag);
-
-	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_REMAP)) {
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_REMAP) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	vm_map_kernel_flags_set_vmflags(&vmk_flags,
+	    flags | VM_FLAGS_RETURN_DATA_ADDR, tag);
 
 	static_assert(sizeof(mach_vm_offset_t) == sizeof(vm_map_address_t));
 

@@ -408,6 +408,11 @@ public:
 
 	IOReturn    setWakeTime(uint64_t wakeContinuousTime);
 
+#if XNU_KERNEL_PRIVATE
+	IOReturn acquireDriverKitMatchingAssertion();
+	void releaseDriverKitMatchingAssertion();
+#endif
+
 private:
 	unsigned long getRUN_STATE(void);
 
@@ -852,6 +857,9 @@ private:
 	uint64_t             _aotWakePreWindow;
 	uint64_t             _aotWakePostWindow;
 	uint64_t             _aotLingerTime;
+
+	size_t               _driverKitMatchingAssertionCount;
+	IOPMDriverAssertionID _driverKitMatchingAssertion;
 
 	bool        aotShouldExit(bool checkTimeSet, bool software);
 	void        aotExit(bool cps);

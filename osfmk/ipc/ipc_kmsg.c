@@ -192,6 +192,7 @@ mach_validate_desc_type(mach_msg_guarded_port_descriptor32_t);
 mach_validate_desc_type(mach_msg_guarded_port_descriptor64_t);
 
 extern char *proc_name_address(struct proc *p);
+static mach_msg_return_t ipc_kmsg_option_check(ipc_port_t port, mach_msg_option64_t option64);
 
 /*
  * As CA framework replies on successfully allocating zalloc memory,
@@ -1663,6 +1664,23 @@ ipc_kmsg_set_aux_data_header(
 	*cur_hdr = *new_hdr;
 }
 
+KALLOC_TYPE_VAR_DEFINE(KT_IPC_KMSG_KDATA_OOL,
+    mach_msg_base_t, mach_msg_descriptor_t, KT_DEFAULT);
+
+static inline void *
+ikm_alloc_kdata_ool(size_t size, zalloc_flags_t flags)
+{
+	return kalloc_type_var_impl(KT_IPC_KMSG_KDATA_OOL,
+	           size, flags, NULL);
+}
+
+static inline void
+ikm_free_kdata_ool(void *ptr, size_t size)
+{
+	kfree_type_var_impl(KT_IPC_KMSG_KDATA_OOL, ptr, size);
+}
+
+
 /*
  *	Routine:	ipc_kmsg_alloc
  *	Purpose:
@@ -1805,7 +1823,7 @@ ipc_kmsg_alloc(
 			    desc_count, alloc_flags | Z_SPRAYQTN);
 		} else {
 			assert(kmsg_type == IKM_TYPE_KDATA_OOL);
-			msg_data = kalloc_data(max_kdata_size, alloc_flags);
+			msg_data = ikm_alloc_kdata_ool(max_kdata_size, alloc_flags);
 		}
 
 		if (__improbable(msg_data == NULL)) {
@@ -1934,7 +1952,7 @@ ipc_kmsg_free(
 		/* kdata is inlined, udata freed */
 		break;
 	case IKM_TYPE_KDATA_OOL:
-		kfree_data(msg_buf, msg_buf_size);
+		ikm_free_kdata_ool(msg_buf, msg_buf_size);
 		assert(udata_buf == NULL);
 		assert(udata_buf_size == 0);
 		/* kdata freed, no udata */
@@ -2754,6 +2772,85 @@ ipc_kmsg_get_from_kernel(
 }
 
 /*
+ *	Routine:	ipc_kmsg_option_check
+ *	Purpose:
+ *		Check the option passed by mach_msg2 that works with
+ *		the passed destination port.
+ *	Conditions:
+ *		Space locked.
+ *	Returns:
+ *		MACH_MSG_SUCCESS		On Success.
+ *		MACH_SEND_INVALID_OPTIONS	On Failure.
+ */
+static mach_msg_return_t
+ipc_kmsg_option_check(
+	ipc_port_t              port,
+	mach_msg_option64_t     option64)
+{
+	if (option64 & MACH64_MACH_MSG2) {
+		/*
+		 * This is a _user_ message via mach_msg2_trap()。
+		 *
+		 * To curb kobject port/message queue confusion and improve control flow
+		 * integrity, mach_msg2_trap() invocations mandate the use of either
+		 * MACH64_SEND_KOBJECT_CALL or MACH64_SEND_MQ_CALL and that the flag
+		 * matches the underlying port type. (unless the call is from a simulator,
+		 * since old simulators keep using mach_msg() in all cases indiscriminatingly.)
+		 *
+		 * Since:
+		 *     (1) We make sure to always pass either MACH64_SEND_MQ_CALL or
+		 *         MACH64_SEND_KOBJECT_CALL bit at all sites outside simulators
+		 *         (checked by mach_msg2_trap());
+		 *     (2) We checked in mach_msg2_trap() that _exactly_ one of the three bits is set.
+		 *
+		 * CFI check cannot be bypassed by simply setting MACH64_SEND_ANY.
+		 */
+#if XNU_TARGET_OS_OSX
+		if (option64 & MACH64_SEND_ANY) {
+			return MACH_MSG_SUCCESS;
+		}
+#endif /* XNU_TARGET_OS_OSX */
+
+		if (ip_is_kobject(port)) {
+			natural_t kotype = ip_kotype(port);
+
+			if (__improbable(kotype == IKOT_TIMER)) {
+				/*
+				 * For bincompat, let's still allow user messages to timer port, but
+				 * force MACH64_SEND_MQ_CALL flag for memory segregation.
+				 */
+				if (__improbable(!(option64 & MACH64_SEND_MQ_CALL))) {
+					return MACH_SEND_INVALID_OPTIONS;
+				}
+			} else {
+				/* Otherwise, caller must set MACH64_SEND_KOBJECT_CALL. */
+				if (__improbable(!(option64 & MACH64_SEND_KOBJECT_CALL))) {
+					return MACH_SEND_INVALID_OPTIONS;
+				}
+			}
+		}
+
+#if CONFIG_CSR
+		if (csr_check(CSR_ALLOW_KERNEL_DEBUGGER) == 0) {
+			/*
+			 * Allow MACH64_SEND_KOBJECT_CALL flag to message queues when SIP
+			 * is off (for Mach-on-Mach emulation). The other direction is still
+			 * not allowed (MIG KernelServer assumes a linear kmsg).
+			 */
+			return MACH_MSG_SUCCESS;
+		}
+#endif /* CONFIG_CSR */
+
+		/* If destination is a message queue, caller must set MACH64_SEND_MQ_CALL */
+		if (__improbable((!ip_is_kobject(port) &&
+		    !(option64 & MACH64_SEND_MQ_CALL)))) {
+			return MACH_SEND_INVALID_OPTIONS;
+		}
+	}
+	return MACH_MSG_SUCCESS;
+}
+
+/*
  *	Routine:	ipc_kmsg_send
  *	Purpose:
  *		Send a message.  The message holds a reference
@@ -2814,77 +2911,6 @@ ipc_kmsg_send(
 	port = hdr->msgh_remote_port;
 	assert(IP_VALID(port));
 	ip_mq_lock(port);
-
-	if (option64 & MACH64_MACH_MSG2) {
-		/*
-		 * This is a _user_ message via mach_msg2_trap()。
-		 *
-		 * To curb kobject port/message queue confusion and improve control flow
-		 * integrity, mach_msg2_trap() invocations mandate the use of either
-		 * MACH64_SEND_KOBJECT_CALL or MACH64_SEND_MQ_CALL and that the flag
-		 * matches the underlying port type. (unless the call is from a simulator,
-		 * since old simulators keep using mach_msg() in all cases indiscriminatingly.)
-		 *
-		 * Since:
-		 *     (1) We make sure to always pass either MACH64_SEND_MQ_CALL or
-		 *         MACH64_SEND_KOBJECT_CALL bit at all sites outside simulators
-		 *         (checked by mach_msg2_trap());
-		 *     (2) We checked in mach_msg2_trap() that _exactly_ one of the three bits is set.
-		 *
-		 * CFI check cannot be bypassed by simply setting MACH64_SEND_ANY.
-		 */
-#if XNU_TARGET_OS_OSX
-		if (option64 & MACH64_SEND_ANY) {
-			goto cfi_passed;
-		}
-#endif /* XNU_TARGET_OS_OSX */
-
-		if (ip_is_kobject(port)) {
-			natural_t kotype = ip_kotype(port);
-
-			if (__improbable(kotype == IKOT_TIMER)) {
-				/*
-				 * For bincompat, let's still allow user messages to timer port, but
-				 * force MACH64_SEND_MQ_CALL flag for memory segregation.
-				 */
-				if (__improbable(!(option64 & MACH64_SEND_MQ_CALL))) {
-					ip_mq_unlock(port);
-					mach_port_guard_exception(0, 0, 0, kGUARD_EXC_INVALID_OPTIONS);
-					return MACH_SEND_INVALID_OPTIONS;
-				}
-			} else {
-				/* Otherwise, caller must set MACH64_SEND_KOBJECT_CALL. */
-				if (__improbable(!(option64 & MACH64_SEND_KOBJECT_CALL))) {
-					ip_mq_unlock(port);
-					mach_port_guard_exception(0, 0, 0, kGUARD_EXC_INVALID_OPTIONS);
-					return MACH_SEND_INVALID_OPTIONS;
-				}
-			}
-		}
-
-#if CONFIG_CSR
-		if (csr_check(CSR_ALLOW_KERNEL_DEBUGGER) == 0) {
-			/*
-			 * Allow MACH64_SEND_KOBJECT_CALL flag to message queues when SIP
-			 * is off (for Mach-on-Mach emulation). The other direction is still
-			 * not allowed (MIG KernelServer assumes a linear kmsg).
-			 */
-			goto cfi_passed;
-		}
-#endif /* CONFIG_CSR */
-
-		/* If destination is a message queue, caller must set MACH64_SEND_MQ_CALL */
-		if (__improbable((!ip_is_kobject(port) &&
-		    !(option64 & MACH64_SEND_MQ_CALL)))) {
-			ip_mq_unlock(port);
-			mach_port_guard_exception(0, 0, 0, kGUARD_EXC_INVALID_OPTIONS);
-			return MACH_SEND_INVALID_OPTIONS;
-		}
-	}
-
-#if (XNU_TARGET_OS_OSX || CONFIG_CSR)
-cfi_passed:
-#endif /* XNU_TARGET_OS_OSX || CONFIG_CSR */
 
 	/*
 	 * If the destination has been guarded with a reply context, and the
@@ -4228,6 +4254,17 @@ ipc_kmsg_copyin_header(
 
 	if (voucher_release_port != IP_NULL) {
 		ip_release(voucher_release_port);
+	}
+
+	if (ipc_kmsg_option_check(ip_object_to_port(dest_port), *option64p) !=
+	    MACH_MSG_SUCCESS) {
+		/*
+		 * no descriptors have been copied in yet, but the
+		 * full header has been copied in: clean it up
+		 */
+		ipc_kmsg_clean_partial(kmsg, 0, NULL, 0, 0);
+		mach_port_guard_exception(0, 0, 0, kGUARD_EXC_INVALID_OPTIONS);
+		return MACH_SEND_INVALID_OPTIONS;
 	}
 
 	if (enforce_strict_reply && MACH_SEND_WITH_STRICT_REPLY(option32) &&

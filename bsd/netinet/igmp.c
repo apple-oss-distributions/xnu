@@ -172,9 +172,13 @@ static int      sysctl_igmp_ifinfo SYSCTL_HANDLER_ARGS;
 static int      sysctl_igmp_gsr SYSCTL_HANDLER_ARGS;
 static int      sysctl_igmp_default_version SYSCTL_HANDLER_ARGS;
 
-static int igmp_timeout_run;            /* IGMP timer is scheduled to run */
-static void igmp_timeout(void *);
-static void igmp_sched_timeout(bool);
+static const uint32_t igmp_timeout_delay = 1000; /* in milliseconds */
+static const uint32_t igmp_timeout_leeway = 500; /* in millseconds  */
+static bool igmp_timeout_run;            /* IGMP timer is scheduled to run */
+static bool igmp_fast_timeout_run;       /* IGMP fast timer is scheduled to run */
+static void igmp_timeout(thread_call_param_t, thread_call_param_t);
+static void igmp_sched_timeout(void);
+static void igmp_sched_fast_timeout(void);
 
 static struct mbuf *m_raopt;            /* Router Alert option */
 
@@ -1898,7 +1902,11 @@ igmp_set_timeout(struct igmp_tparams *itp)
 		if (itp->sct != 0) {
 			state_change_timers_running = 1;
 		}
-		igmp_sched_timeout(itp->fast);
+		if (itp->fast) {
+			igmp_sched_fast_timeout();
+		} else {
+			igmp_sched_timeout();
+		}
 		IGMP_UNLOCK();
 	}
 }
@@ -1915,7 +1923,7 @@ igmp_set_fast_timeout(struct igmp_tparams *itp)
  * IGMP timer handler (per 1 second).
  */
 static void
-igmp_timeout(void *arg)
+igmp_timeout(thread_call_param_t arg0, thread_call_param_t arg1 __unused)
 {
 	struct ifqueue           scq;   /* State-change packets */
 	struct ifqueue           qrq;   /* Query response packets */
@@ -1924,7 +1932,7 @@ igmp_timeout(void *arg)
 	struct in_multi         *inm;
 	unsigned int             loop = 0, uri_sec = 0;
 	SLIST_HEAD(, in_multi)  inm_dthead;
-	bool                     fast = arg != NULL;
+	bool                     fast = arg0 != NULL;
 
 	SLIST_INIT(&inm_dthead);
 
@@ -2080,8 +2088,12 @@ next:
 
 out_locked:
 	/* re-arm the timer if there's work to do */
-	igmp_timeout_run = 0;
-	igmp_sched_timeout(false);
+	if (fast) {
+		igmp_fast_timeout_run = false;
+	} else {
+		igmp_timeout_run = false;
+	}
+	igmp_sched_timeout();
 	IGMP_UNLOCK();
 
 	/* Now that we're dropped all locks, release detached records */
@@ -2089,17 +2101,50 @@ out_locked:
 }
 
 static void
-igmp_sched_timeout(bool fast)
+igmp_sched_timeout(void)
 {
-	IGMP_LOCK_ASSERT_HELD();
+	static thread_call_t igmp_timeout_tcall;
+	uint64_t deadline = 0, leeway = 0;
 
+	IGMP_LOCK_ASSERT_HELD();
+	if (igmp_timeout_tcall == NULL) {
+		igmp_timeout_tcall =
+		    thread_call_allocate_with_options(igmp_timeout,
+		    NULL,
+		    THREAD_CALL_PRIORITY_KERNEL,
+		    THREAD_CALL_OPTIONS_ONCE);
+	}
 	if (!igmp_timeout_run &&
 	    (querier_present_timers_running || current_state_timers_running ||
 	    interface_timers_running || state_change_timers_running)) {
-		igmp_timeout_run = 1;
-		int sched_hz = fast ? 0 : hz;
-		void *arg = fast ? (void *)igmp_sched_timeout : NULL;
-		timeout(igmp_timeout, arg, sched_hz);
+		igmp_timeout_run = true;
+		clock_interval_to_deadline(igmp_timeout_delay, NSEC_PER_MSEC,
+		    &deadline);
+		clock_interval_to_absolutetime_interval(igmp_timeout_leeway,
+		    NSEC_PER_MSEC, &leeway);
+		thread_call_enter_delayed_with_leeway(igmp_timeout_tcall, NULL,
+		    deadline, leeway,
+		    THREAD_CALL_DELAY_LEEWAY);
+	}
+}
+
+static void
+igmp_sched_fast_timeout(void)
+{
+	static thread_call_t igmp_fast_timeout_tcall;
+
+	IGMP_LOCK_ASSERT_HELD();
+	if (igmp_fast_timeout_tcall == NULL) {
+		igmp_fast_timeout_tcall =
+		    thread_call_allocate_with_options(igmp_timeout,
+		    igmp_sched_fast_timeout,
+		    THREAD_CALL_PRIORITY_KERNEL,
+		    THREAD_CALL_OPTIONS_ONCE);
+	}
+	if (!igmp_fast_timeout_run &&
+	    (current_state_timers_running || state_change_timers_running)) {
+		igmp_fast_timeout_run = true;
+		thread_call_enter(igmp_fast_timeout_tcall);
 	}
 }
 

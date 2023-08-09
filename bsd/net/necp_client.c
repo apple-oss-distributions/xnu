@@ -3208,15 +3208,6 @@ necp_client_parse_parameters(struct necp_client *client, u_int8_t *parameters,
 		}
 	}
 
-	// Log if it is a known tracker
-	if (parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_KNOWN_TRACKER && client) {
-		NECP_CLIENT_TRACKER_LOG(client->proc_pid, "Parsing tracker flags - known-tracker %X non-app-initiated %X silent %X approved-app-domain %X",
-		    parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_KNOWN_TRACKER,
-		    parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_NON_APP_INITIATED,
-		    parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_SILENT,
-		    parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_APPROVED_APP_DOMAIN);
-	}
-
 	if (NECP_ENABLE_CLIENT_TRACE(NECP_CLIENT_TRACE_LEVEL_PARAMS)) {
 		necp_client_trace_parsed_parameters(client, parsed_parameters);
 	}
@@ -5979,20 +5970,6 @@ necp_find_domain_info_common(struct necp_client *client,
 	} else if (domain != NULL && domain_length > 0) {
 		size_t length_to_copy = MIN(domain_length, sizeof(domain_info->domain_name));
 		strlcpy(domain_info->domain_name, (const char *)domain, length_to_copy);
-	}
-
-	// Log if it is a known tracker
-	if (domain_info->is_tracker && client) {
-		NECP_CLIENT_TRACKER_LOG(client->proc_pid,
-		    "Collected stats - domain <%s> owner <%s> ctxt <%s> bundle id <%s> "
-		    "is_tracker %d is_non_app_initiated %d is_silent %d",
-		    domain_info->domain_name[0] ? "present" : "not set",
-		    domain_info->domain_owner[0] ? "present" : "not set",
-		    domain_info->domain_tracker_ctxt[0] ? "present" : "not set",
-		    domain_info->domain_attributed_bundle_id[0] ? "present" : "not set",
-		    domain_info->is_tracker,
-		    domain_info->is_non_app_initiated,
-		    domain_info->is_silent);
 	}
 
 	NECP_CLIENT_FLOW_LOG(client, flow_registration,
@@ -10744,21 +10721,6 @@ necp_set_socket_domain_attributes(struct socket *so, const char *domain, const c
 	}
 
 done:
-	// Log if it is a known tracker
-	if (so->so_flags1 & SOF1_KNOWN_TRACKER) {
-		NECP_CLIENT_TRACKER_LOG(NECP_SOCKET_PID(so),
-		    "NECP ATTRIBUTES SOCKET - domain <%s> owner <%s> context <%s> tracker domain <%s> account <%s> "
-		    "<so flags - is_tracker %X non-app-initiated %X app-approved-domain %X",
-		    inp->inp_necp_attributes.inp_domain ? "present" : "not set",
-		    inp->inp_necp_attributes.inp_domain_owner ? "present" : "not set",
-		    inp->inp_necp_attributes.inp_domain_context ? "present" : "not set",
-		    inp->inp_necp_attributes.inp_tracker_domain ? "present" : "not set",
-		    inp->inp_necp_attributes.inp_account ? "present" : "not set",
-		    so->so_flags1 & SOF1_KNOWN_TRACKER,
-		    so->so_flags1 & SOF1_TRACKER_NON_APP_INITIATED,
-		    so->so_flags1 & SOF1_APPROVED_APP_DOMAIN);
-	}
-
 	NECP_SOCKET_PARAMS_LOG(so, "NECP ATTRIBUTES SOCKET - domain <%s> owner <%s> context <%s> tracker domain <%s> account <%s> "
 	    "<so flags - is_tracker %X non-app-initiated %X app-approved-domain %X",
 	    inp->inp_necp_attributes.inp_domain,

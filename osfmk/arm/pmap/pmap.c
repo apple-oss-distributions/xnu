@@ -287,8 +287,6 @@ extern int pmap_ledgers_panic_leeway;
 #endif /* DEVELOPMENT || DEBUG */
 
 
-SECURITY_READ_ONLY_LATE(int) srd_fused = 0;
-
 /*
  * Represents a tlb range that will be flushed before exiting
  * the ppl.
@@ -2071,30 +2069,6 @@ pmap_get_arm64_prot(
 }
 #endif /* __arm64__ */
 
-static void
-pmap_set_srd_fusing()
-{
-	DTEntry entry;
-	uint32_t const *prop = NULL;
-	int err;
-	unsigned int prop_size = 0;
-
-	err = SecureDTLookupEntry(NULL, "/chosen", &entry);
-	if (err != kSuccess) {
-		panic("PMAP: no chosen DT node");
-	}
-
-	if (kSuccess == SecureDTGetProperty(entry, "research-enabled", (const void**)&prop, &prop_size)) {
-		if (prop_size == sizeof(uint32_t)) {
-			srd_fused = *prop;
-		}
-	}
-
-#if DEVELOPMENT || DEBUG
-	PE_parse_boot_argn("srd_fusing", &srd_fused, sizeof(srd_fused));
-#endif
-}
-
 /*
  *	Bootstrap the system enough to run with virtual memory.
  *
@@ -2124,8 +2098,6 @@ pmap_bootstrap(
 	vm_map_offset_t maxoffset;
 
 	lck_grp_init(&pmap_lck_grp, "pmap", LCK_GRP_ATTR_NULL);
-
-	pmap_set_srd_fusing();
 
 #if XNU_MONITOR
 

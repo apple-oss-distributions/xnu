@@ -83,6 +83,7 @@
 #include <miscfs/devfs/devfs.h>
 #include <miscfs/devfs/devfsdefs.h>     /* DEVFS_LOCK()/DEVFS_UNLOCK() */
 #include <dev/kmreg_com.h>
+#include <machine/cons.h>
 
 #if CONFIG_MACF
 #include <security/mac_framework.h>
@@ -522,7 +523,6 @@ ptcclose(dev_t dev, __unused int flags, __unused int fmt, __unused proc_t p)
 	struct tty_dev_t *driver;
 	struct ptmx_ioctl *pti = pty_get_ioctl(dev, 0, &driver);
 	struct tty *tp;
-	struct knote *kn;
 
 	if (!pti) {
 		return ENXIO;
@@ -530,6 +530,18 @@ ptcclose(dev_t dev, __unused int flags, __unused int fmt, __unused proc_t p)
 
 	tp = pti->pt_tty;
 	tty_lock(tp);
+
+	if (constty == tp) {
+		constty = NULL;
+
+
+		/*
+		 * Closing current console tty; disable printing of console
+		 * messages at bottom-level driver.
+		 */
+		(*cdevsw[major(tp->t_dev)].d_ioctl)
+		(tp->t_dev, KMIOCDISABLCONS, NULL, 0, current_proc());
+	}
 
 	/*
 	 * XXX MDMBUF makes no sense for PTYs, but would inhibit an `l_modem`.
@@ -554,13 +566,9 @@ ptcclose(dev_t dev, __unused int flags, __unused int fmt, __unused proc_t p)
 	/*
 	 * Clear any select or kevent waiters under the lock.
 	 */
-	SLIST_FOREACH(kn, &pti->pt_selr.si_note, kn_selnext) {
-		KNOTE_DETACH(&pti->pt_selr.si_note, kn);
-	}
+	knote(&pti->pt_selr.si_note, NOTE_REVOKE, true);
 	selthreadclear(&pti->pt_selr);
-	SLIST_FOREACH(kn, &pti->pt_selw.si_note, kn_selnext) {
-		KNOTE_DETACH(&pti->pt_selw.si_note, kn);
-	}
+	knote(&pti->pt_selw.si_note, NOTE_REVOKE, true);
 	selthreadclear(&pti->pt_selw);
 
 	tty_unlock(tp);

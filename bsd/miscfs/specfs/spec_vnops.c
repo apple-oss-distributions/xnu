@@ -3038,8 +3038,9 @@ filt_specdetach(struct knote *kn)
 static int
 filt_specevent(struct knote *kn, long hint)
 {
-	/* knote_post() will have cleared it for us */
-	assert(kn->kn_hook == NULL);
+	/* Due to selwakeup_internal() on SI_SELSPEC */
+	assert(KNOTE_IS_AUTODETACHED(kn));
+	kn->kn_hook = NULL;
 
 	/* called by selwakeup with the selspec_lock lock held */
 	if (hint & NOTE_REVOKE) {

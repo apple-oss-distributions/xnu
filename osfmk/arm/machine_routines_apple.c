@@ -44,6 +44,7 @@
 void configure_misc_apple_boot_args(void);
 void configure_misc_apple_regs(void);
 void configure_timer_apple_regs(void);
+void configure_late_apple_regs(void);
 
 void
 configure_misc_apple_boot_args(void)
@@ -54,6 +55,54 @@ void
 configure_misc_apple_regs(void)
 {
 }
+
+// machine_routines_apple.c gets built on non-Apple platforms but it won't
+// #include apple_arm64_regs.h so some of the constants referenced below
+// won't exist in those builds
+#if APPLE_ARM64_ARCH_FAMILY
+
+static bool
+cpu_needs_throttle_tunable(uint32_t midr_pnum)
+{
+	switch (midr_pnum) {
+
+	default:
+		return false;
+	}
+}
+
+/*
+ * configure_late_apple_regs()
+ *
+ * Normal tunables (HID bits) are applied early on, in the APPLY_TUNABLES
+ * asm macro.  This C function is intended to handle special cases where that
+ * isn't possible, e.g.
+ *  - Tunables that require PIO mappings
+ *  - Tunables that need access to the parsed CPU topology info
+ *
+ * Unlike configure_misc_apple_regs(), it is guaranteed to execute after
+ * ml_parse_cpu_topology() / ml_map_cpu_pio() are done,
+ * and after cpu_number() is valid.
+ */
+void
+configure_late_apple_regs(void)
+{
+	const ml_topology_info_t *tinfo = ml_get_topology_info();
+	uint32_t midr_pnum = machine_read_midr() & MIDR_EL1_PNUM_MASK;
+	uint64_t reg_val;
+
+	if (cpu_needs_throttle_tunable(midr_pnum)) {
+		vm_offset_t cpu_impl = tinfo->cpus[cpu_number()].cpu_IMPL_regs;
+		const uint64_t c1pptThrtlRate = 0xb2;
+
+		reg_val = ml_io_read64(cpu_impl + CORE_THRTL_CFG2_OFFSET);
+		reg_val &= ~(0xffULL << 56);
+		reg_val |= c1pptThrtlRate << 56;
+		ml_io_write64(cpu_impl + CORE_THRTL_CFG2_OFFSET, reg_val);
+	}
+
+}
+#endif /* APPLE_ARM64_ARCH_FAMILY */
 
 void
 configure_timer_apple_regs(void)

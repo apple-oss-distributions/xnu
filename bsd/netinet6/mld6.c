@@ -212,9 +212,13 @@ static int      sysctl_mld_gsr SYSCTL_HANDLER_ARGS;
 static int      sysctl_mld_ifinfo SYSCTL_HANDLER_ARGS;
 static int      sysctl_mld_v2enable SYSCTL_HANDLER_ARGS;
 
-static int mld_timeout_run;             /* MLD timer is scheduled to run */
-static void mld_timeout(void *);
-static void mld_sched_timeout(bool);
+static const uint32_t mld_timeout_delay = 1000; /* in milliseconds */
+static const uint32_t mld_timeout_leeway = 500; /* in millseconds  */
+static bool mld_timeout_run;             /* MLD timer is scheduled to run */
+static bool mld_fast_timeout_run;        /* MLD fast timer is scheduled to run */
+static void mld_timeout(thread_call_param_t, thread_call_param_t);
+static void mld_sched_timeout(void);
+static void mld_sched_fast_timeout(void);
 
 /*
  * Normative references: RFC 2710, RFC 3590, RFC 3810.
@@ -1594,7 +1598,11 @@ mld_set_timeout(struct mld_tparams *mtp)
 		if (mtp->sct != 0) {
 			state_change_timers_running6 = 1;
 		}
-		mld_sched_timeout(mtp->fast);
+		if (mtp->fast) {
+			mld_sched_fast_timeout();
+		} else {
+			mld_sched_timeout();
+		}
 		MLD_UNLOCK();
 	}
 }
@@ -1611,7 +1619,7 @@ mld_set_fast_timeout(struct mld_tparams *mtp)
  * MLD6 timer handler (per 1 second).
  */
 static void
-mld_timeout(void *arg)
+mld_timeout(thread_call_param_t arg0, thread_call_param_t arg1 __unused)
 {
 	struct ifqueue           scq;   /* State-change packets */
 	struct ifqueue           qrq;   /* Query response packets */
@@ -1620,7 +1628,7 @@ mld_timeout(void *arg)
 	struct in6_multi        *inm;
 	int                      uri_sec = 0;
 	unsigned int genid = mld_mli_list_genid;
-	bool                     fast = arg != NULL;
+	bool                     fast = arg0 != NULL;
 
 	SLIST_HEAD(, in6_multi) in6m_dthead;
 
@@ -1838,8 +1846,12 @@ next:
 
 out_locked:
 	/* re-arm the timer if there's work to do */
-	mld_timeout_run = 0;
-	mld_sched_timeout(false);
+	if (fast) {
+		mld_fast_timeout_run = false;
+	} else {
+		mld_timeout_run = false;
+	}
+	mld_sched_timeout();
 	MLD_UNLOCK();
 
 	/* Now that we're dropped all locks, release detached records */
@@ -1847,17 +1859,51 @@ out_locked:
 }
 
 static void
-mld_sched_timeout(bool fast)
+mld_sched_timeout(void)
 {
+	static thread_call_t mld_timeout_tcall;
+	uint64_t deadline = 0, leeway = 0;
+
 	MLD_LOCK_ASSERT_HELD();
+	if (mld_timeout_tcall == NULL) {
+		mld_timeout_tcall =
+		    thread_call_allocate_with_options(mld_timeout,
+		    NULL,
+		    THREAD_CALL_PRIORITY_KERNEL,
+		    THREAD_CALL_OPTIONS_ONCE);
+	}
 
 	if (!mld_timeout_run &&
 	    (querier_present_timers_running6 || current_state_timers_running6 ||
 	    interface_timers_running6 || state_change_timers_running6)) {
-		mld_timeout_run = 1;
-		int sched_hz = fast ? 0 : hz;
-		void *arg = fast ? (void *)mld_sched_timeout : NULL;
-		timeout(mld_timeout, arg, sched_hz);
+		mld_timeout_run = true;
+		clock_interval_to_deadline(mld_timeout_delay, NSEC_PER_MSEC,
+		    &deadline);
+		clock_interval_to_absolutetime_interval(mld_timeout_leeway,
+		    NSEC_PER_MSEC, &leeway);
+		thread_call_enter_delayed_with_leeway(mld_timeout_tcall, NULL,
+		    deadline, leeway,
+		    THREAD_CALL_DELAY_LEEWAY);
+	}
+}
+
+static void
+mld_sched_fast_timeout(void)
+{
+	static thread_call_t mld_fast_timeout_tcall;
+
+	MLD_LOCK_ASSERT_HELD();
+	if (mld_fast_timeout_tcall == NULL) {
+		mld_fast_timeout_tcall =
+		    thread_call_allocate_with_options(mld_timeout,
+		    mld_sched_fast_timeout,
+		    THREAD_CALL_PRIORITY_KERNEL,
+		    THREAD_CALL_OPTIONS_ONCE);
+	}
+	if (!mld_fast_timeout_run &&
+	    (current_state_timers_running6 || state_change_timers_running6)) {
+		mld_fast_timeout_run = true;
+		thread_call_enter(mld_fast_timeout_tcall);
 	}
 }
 

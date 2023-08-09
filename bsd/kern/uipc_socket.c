@@ -225,6 +225,16 @@ int socket_debug = 0;
 SYSCTL_INT(_kern_ipc, OID_AUTO, socket_debug,
     CTLFLAG_RW | CTLFLAG_LOCKED, &socket_debug, 0, "");
 
+#if (DEBUG || DEVELOPMENT)
+#define DEFAULT_SOSEND_ASSERT_PANIC 1
+#else
+#define DEFAULT_SOSEND_ASSERT_PANIC 0
+#endif /* (DEBUG || DEVELOPMENT) */
+
+int sosend_assert_panic = 0;
+SYSCTL_INT(_kern_ipc, OID_AUTO, sosend_assert_panic,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &sosend_assert_panic, DEFAULT_SOSEND_ASSERT_PANIC, "");
+
 static unsigned long sodefunct_calls = 0;
 SYSCTL_LONG(_kern_ipc, OID_AUTO, sodefunct_calls, CTLFLAG_LOCKED,
     &sodefunct_calls, "");
@@ -408,6 +418,9 @@ socketinit(void)
 
 	PE_parse_boot_argn("socket_debug", &socket_debug,
 	    sizeof(socket_debug));
+
+	PE_parse_boot_argn("sosend_assert_panic", &sosend_assert_panic,
+	    sizeof(sosend_assert_panic));
 
 	STAILQ_INIT(&so_cache_head);
 
@@ -2182,6 +2195,7 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 	} else {
 		resid = top->m_pkthdr.len;
 	}
+	orig_resid = resid;
 
 	KERNEL_DEBUG((DBG_FNC_SOSEND | DBG_FUNC_START), so, resid,
 	    so->so_snd.sb_cc, so->so_snd.sb_lowat, so->so_snd.sb_hiwat);
@@ -2206,7 +2220,6 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 			    VM_KERNEL_ADDRPERM(so),
 			    ((so->so_state & SS_NBIO) ? kEnTrFlagNonBlocking : 0),
 			    (int64_t)resid);
-			orig_resid = resid;
 		}
 	}
 
@@ -2582,7 +2595,22 @@ packet_consumed:
 		} while (resid && space > 0);
 	} while (resid);
 
+
 out_locked:
+	if (resid > orig_resid) {
+		char pname[MAXCOMLEN] = {};
+		pid_t current_pid = proc_pid(current_proc());
+		proc_name(current_pid, pname, sizeof(pname));
+
+		if (sosend_assert_panic != 0) {
+			panic("sosend so %p resid %lld > orig_resid %lld proc %s:%d",
+			    so, resid, orig_resid, pname, current_pid);
+		} else {
+			os_log_error(OS_LOG_DEFAULT, "sosend: so_gencnt %llu resid %lld > orig_resid %lld proc %s:%d",
+			    so->so_gencnt, resid, orig_resid, pname, current_pid);
+		}
+	}
+
 	if (sblocked) {
 		sbunlock(&so->so_snd, FALSE);   /* will unlock socket */
 	} else {

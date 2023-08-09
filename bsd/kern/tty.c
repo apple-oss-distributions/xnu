@@ -339,7 +339,6 @@ ttyclose(struct tty *tp)
 {
 	struct pgrp * oldpg;
 	struct session *oldsessp;
-	struct knote *kn;
 	struct tty *freetp = TTY_NULL;
 
 	TTY_LOCK_OWNED(tp);     /* debug assert */
@@ -385,14 +384,16 @@ ttyclose(struct tty *tp)
 
 	/* SAFE: All callers drop the lock on return */
 	tty_lock(tp);
+
 	tp->t_state = 0;
-	SLIST_FOREACH(kn, &tp->t_wsel.si_note, kn_selnext) {
-		KNOTE_DETACH(&tp->t_wsel.si_note, kn);
-	}
+
+	/*
+	 * The tty is closed - mark knote as being revoked and autodetach it from the
+	 * tty
+	 */
+	knote(&tp->t_wsel.si_note, NOTE_REVOKE, true);
 	selthreadclear(&tp->t_wsel);
-	SLIST_FOREACH(kn, &tp->t_rsel.si_note, kn_selnext) {
-		KNOTE_DETACH(&tp->t_rsel.si_note, kn);
-	}
+	knote(&tp->t_rsel.si_note, NOTE_REVOKE, true);
 	selthreadclear(&tp->t_rsel);
 
 	return 0;
@@ -3428,17 +3429,22 @@ filt_ttydetach(struct knote *kn)
 
 	tty_lock(tp);
 
-	switch (kn->kn_filter) {
-	case EVFILT_READ:
-		KNOTE_DETACH(&tp->t_rsel.si_note, kn);
-		break;
-	case EVFILT_WRITE:
-		KNOTE_DETACH(&tp->t_wsel.si_note, kn);
-		break;
-	default:
-		panic("invalid knote %p detach, filter: %d", kn, kn->kn_filter);
-		break;
+	if (!KNOTE_IS_AUTODETACHED(kn)) {
+		switch (kn->kn_filter) {
+		case EVFILT_READ:
+			KNOTE_DETACH(&tp->t_rsel.si_note, kn);
+			break;
+		case EVFILT_WRITE:
+			KNOTE_DETACH(&tp->t_wsel.si_note, kn);
+			break;
+		default:
+			panic("invalid knote %p detach, filter: %d", kn, kn->kn_filter);
+			break;
+		}
 	}
+
+	// Remove dangling reference
+	kn->kn_hook = NULL;
 
 	tty_unlock(tp);
 	ttyfree(tp);

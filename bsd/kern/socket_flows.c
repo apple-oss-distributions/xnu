@@ -77,6 +77,8 @@ static int soflow_log_pid = 0;
 static int soflow_log_proto = 0;
 static int soflow_nstat_disable = 0;
 static int soflow_disable = 0;
+static long soflow_attached_count = 0;
+static long soflow_attached_high_water_mark = 0;
 static os_log_t soflow_log_handle = NULL;
 
 /*
@@ -101,6 +103,9 @@ SYSCTL_INT(_net_soflow, OID_AUTO, nstat_disable, CTLFLAG_RW | CTLFLAG_LOCKED,
 
 SYSCTL_INT(_net_soflow, OID_AUTO, disable, CTLFLAG_RW | CTLFLAG_LOCKED,
     &soflow_disable, 0, "");
+
+SYSCTL_LONG(_net_soflow, OID_AUTO, count, CTLFLAG_LOCKED | CTLFLAG_RD, &soflow_attached_count, "");
+SYSCTL_LONG(_net_soflow, OID_AUTO, high_water_mark, CTLFLAG_LOCKED | CTLFLAG_RD, &soflow_attached_high_water_mark, "");
 
 #define SOFLOW_LOG(level, so, debug, fmt, ...)                                                                      \
 do {                                                                                                                \
@@ -150,7 +155,6 @@ os_refgrp_decl(static, soflow_refgrp, "soflow_ref_group", NULL);
 LIST_HEAD(soflow_hash_head, soflow_hash_entry);
 
 static int soflow_initialized = 0;
-static int soflow_attached_count = 0;
 
 TAILQ_HEAD(soflow_entry_head, soflow_hash_entry) soflow_entry_head;
 static LCK_GRP_DECLARE(soflow_lck_grp, "Socket Flow");
@@ -1229,6 +1233,9 @@ soflow_get_flow(struct socket *so, struct sockaddr *local, struct sockaddr *remo
 		thread_wakeup((caddr_t)&soflow_attached_count);
 	}
 	soflow_attached_count++;
+	if (soflow_attached_high_water_mark < soflow_attached_count) {
+		soflow_attached_high_water_mark = soflow_attached_count;
+	}
 	SOFLOW_UNLOCK_EXCLUSIVE;
 
 	SOFLOW_ENTRY_LOG(LOG_INFO, so, hash_entry, hash_entry->soflow_debug, "Added entry");

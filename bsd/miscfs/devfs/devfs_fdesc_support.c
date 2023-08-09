@@ -499,6 +499,8 @@ fdesc_setattr(struct vnop_setattr_args *ap)
 {
 	struct fileproc *fp;
 	unsigned fd;
+	kauth_action_t action;
+	vnode_t vp;
 	int error;
 	struct proc * p = vfs_context_proc(ap->a_context);
 
@@ -524,11 +526,24 @@ fdesc_setattr(struct vnop_setattr_args *ap)
 	switch (FILEGLOB_DTYPE(fp->fp_glob)) {
 	case DTYPE_VNODE:
 	{
-		if ((error = vnode_getwithref((struct vnode *)fp_get_data(fp))) != 0) {
+		vp = (struct vnode *)fp_get_data(fp);
+
+		if ((error = vnode_getwithref(vp)) != 0) {
 			break;
 		}
-		error = vnode_setattr((struct vnode *)fp_get_data(fp), ap->a_vap, ap->a_context);
-		(void)vnode_put((struct vnode *)fp_get_data(fp));
+
+		if (((error = vnode_authattr(vp, ap->a_vap, &action, ap->a_context)) != 0) ||
+		    ((error = vnode_authorize(vp, NULL, action, ap->a_context)) != 0)) {
+			if (error == EACCES) {
+				error = EPERM;
+			}
+
+			(void)vnode_put(vp);
+			break;
+		}
+
+		error = vnode_setattr(vp, ap->a_vap, ap->a_context);
+		(void)vnode_put(vp);
 		break;
 	}
 

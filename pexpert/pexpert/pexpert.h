@@ -459,6 +459,8 @@ void PE_reset_kc_header(kc_kind_t type);
 extern void PE_set_kc_header_and_base(kc_kind_t type, kernel_mach_header_t *header, void *base, uintptr_t slide);
 /* The highest non-LINKEDIT virtual address */
 extern vm_offset_t kc_highest_nonlinkedit_vmaddr;
+/* whether this is an srd enabled device */
+extern uint32_t PE_srd_fused;
 #endif
 /* returns a pointer to the mach-o header for a give KC type, returns NULL if nothing's been set */
 extern void *PE_get_kc_header(kc_kind_t type);

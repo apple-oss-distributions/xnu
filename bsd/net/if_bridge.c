@@ -2444,6 +2444,9 @@ bridge_detach_protocol(struct ifnet *ifp)
 static void
 bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif)
 {
+#if SKYWALK
+	boolean_t add_netagent = FALSE;
+#endif /* SKYWALK */
 	uint32_t    bif_flags;
 	struct ifnet *ifs = bif->bif_ifp, *bifp = sc->sc_ifp;
 	int lladdr_changed = 0, error;
@@ -2519,9 +2522,8 @@ bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif)
 	/* only perform these steps if the interface is still attached */
 	if (ifnet_is_attached(ifs, 1)) {
 #if SKYWALK
-		if ((bif_flags & BIFF_NETAGENT_REMOVED) != 0) {
-			ifnet_add_netagent(ifs);
-		}
+		add_netagent = (bif_flags & BIFF_NETAGENT_REMOVED) != 0;
+
 		if ((bif_flags & BIFF_FLOWSWITCH_ATTACHED) != 0) {
 			ifnet_detach_flowswitch_nexus(ifs);
 		}
@@ -2564,6 +2566,13 @@ bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif)
 
 	kfree_type(struct bridge_iflist, bif);
 	ifs->if_bridge = NULL;
+#if SKYWALK
+	if (add_netagent && ifnet_is_attached(ifs, 1)) {
+		(void)ifnet_add_netagent(ifs);
+		ifnet_decr_iorefcnt(ifs);
+	}
+#endif /* SKYWALK */
+
 	ifnet_release(ifs);
 
 	BRIDGE_LOCK(sc);
@@ -2761,7 +2770,8 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 		}
 	}
 	/* remove the netagent on the flowswitch (rdar://75050182) */
-	if (ifnet_remove_netagent(ifs)) {
+	if (if_is_fsw_netagent_enabled()) {
+		(void)ifnet_remove_netagent(ifs);
 		bif->bif_flags |= BIFF_NETAGENT_REMOVED;
 	}
 #endif /* SKYWALK */

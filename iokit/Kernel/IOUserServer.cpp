@@ -409,6 +409,11 @@ IOService::CopyDispatchQueue_Impl(
 		return kIOReturnError;
 	}
 
+	if (!reserved->uvars->queueArray) {
+		// CopyDispatchQueue should not be called after the service has stopped
+		return kIOReturnError;
+	}
+
 	ret = kIOReturnNotFound;
 	index = -1U;
 	if (!strcmp("Default", name)) {
@@ -5486,7 +5491,7 @@ IOUserServer::serviceStarted(IOService * service, IOService * provider, bool res
 	service->reserved->uvars->started = true;
 
 	if (service->reserved->uvars->deferredRegisterService) {
-		service->registerService(kIOServiceAsynchronous);
+		service->registerService(kIOServiceAsynchronous | kIOServiceDextRequirePowerForMatching);
 		service->reserved->uvars->deferredRegisterService = false;
 	}
 

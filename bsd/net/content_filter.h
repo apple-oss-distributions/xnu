@@ -276,6 +276,8 @@ struct cfil_msg_sock_closed {
 	unsigned char           cfc_op_list[CFI_MAX_TIME_LOG_ENTRY];
 	uint64_t                cfc_byte_inbound_count;
 	uint64_t                cfc_byte_outbound_count;
+#define CFC_CLOSED_EVENT_LADDR 1
+	union sockaddr_in_4_6   cfc_laddr;
 	cfil_crypto_signature   cfc_signature;
 	uint32_t                cfc_signature_length;
 } __attribute__((aligned(8)));

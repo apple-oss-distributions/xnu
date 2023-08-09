@@ -866,7 +866,7 @@ LEXT(arm64_prepare_for_sleep)
 
 
 #if HAS_CLUSTER
-	cbnz		x0, 1f                                      // Skip if deep_sleep == true
+	cbnz		x0, is_deep_sleep                           // Skip if deep_sleep == true
 
 
 	// Mask FIQ and IRQ to avoid spurious wakeups
@@ -876,10 +876,10 @@ LEXT(arm64_prepare_for_sleep)
 	orr		x9, x9, x10
 	msr		CPU_OVRD, x9
 	isb
-1:
+is_deep_sleep:
 #endif
 
-	cbz		x0, 1f                                          // Skip if deep_sleep == false
+	cbz		x0, not_deep_sleep                              // Skip if deep_sleep == false
 #if   __ARM_GLOBAL_SLEEP_BIT__
 	// Enable deep sleep
 	mrs		x1, ACC_OVRD
@@ -921,7 +921,7 @@ LEXT(arm64_prepare_for_sleep)
 #endif
 #endif
 
-1:
+not_deep_sleep:
 	// Set "OK to power down" (<rdar://problem/12390433>)
 	mrs		x9, CPU_OVRD
 	orr		x9, x9, #(ARM64_REG_CYC_OVRD_ok2pwrdn_force_down)
@@ -1090,6 +1090,9 @@ LEXT(monitor_call)
  * void ml_sign_thread_state(arm_saved_state_t *ss, uint64_t pc,
  *							 uint32_t cpsr, uint64_t lr, uint64_t x16,
  *							 uint64_t x17)
+ *
+ * ml_sign_thread_state uses a custom calling convention that
+ * preserves all registers except x1 and x2.
  */
 	.text
 	.align 2
@@ -1104,14 +1107,17 @@ LEXT(ml_sign_thread_state)
  * void ml_check_signed_state(arm_saved_state_t *ss, uint64_t pc,
  *							  uint32_t cpsr, uint64_t lr, uint64_t x16,
  *							  uint64_t x17)
+ *
+ * ml_check_signed_state uses a custom calling convention that
+ * preserves all registers except x1, x2, and x6.
  */
 	.text
 	.align 2
 	.globl EXT(ml_check_signed_state)
 LEXT(ml_check_signed_state)
+	ldr		x6, [x0, SS64_JOPHASH]
 	COMPUTE_THREAD_STATE_HASH
-	ldr		x2, [x0, SS64_JOPHASH]
-	cmp		x1, x2
+	cmp		x1, x6
 	b.ne	Lcheck_hash_panic
 	CHECK_THREAD_STATE_INTERRUPTS
 	ret
@@ -1123,10 +1129,10 @@ Lcheck_hash_panic:
 	 * *only* using the stack frame for unwinding purposes, and without one
 	 * we'd be missing information about the caller.
 	 */
-	ARM64_STACK_PROLOG
-	PUSH_FRAME
 	mov		x1, x0
 	adr		x0, Lcheck_hash_str
+	ARM64_STACK_PROLOG
+	PUSH_FRAME
 	CALL_EXTERN panic_with_thread_kernel_state
 
 Lcheck_hash_str:

@@ -7208,6 +7208,10 @@ memorystatus_cmd_grp_set_probabilities(user_addr_t buffer, size_t buffer_size)
 	}
 
 	entry_count = (buffer_size / sizeof(memorystatus_properties_entry_v1_t));
+	if (entry_count == 0) {
+		error = EINVAL;
+		goto out;
+	}
 
 	if ((entries = kalloc_data(buffer_size, Z_WAITOK)) == NULL) {
 		error = ENOMEM;

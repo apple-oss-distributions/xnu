@@ -43,12 +43,12 @@
 #include <kern/ecc.h>
 #include <machine/machine_routines.h>
 #include <machine/commpage.h>
+#include <machine/config.h>
 #if HIBERNATION
 #include <machine/pal_hibernate.h>
 #endif /* HIBERNATION */
 /* ARM64_TODO unify boot.h */
 #if __arm64__
-#include <pexpert/arm64/apple_arm64_common.h>
 #include <pexpert/arm64/boot.h>
 #else
 #error Unsupported arch
@@ -186,6 +186,7 @@ unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
 extern void configure_misc_apple_boot_args(void);
 extern void configure_misc_apple_regs(void);
 extern void configure_timer_apple_regs(void);
+extern void configure_late_apple_regs(void);
 #endif /* __arm64__ */
 
 
@@ -589,6 +590,11 @@ arm_init(
 	}
 
 	ml_map_cpu_pio();
+
+#if APPLE_ARM64_ARCH_FAMILY
+	configure_late_apple_regs();
+#endif
+
 #endif
 
 	cpu_timebase_init(TRUE);
@@ -667,6 +673,10 @@ arm_init_cpu(
 
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
+
+#if APPLE_ARM64_ARCH_FAMILY
+	configure_late_apple_regs();
+#endif
 
 #if HIBERNATION
 	if ((cpu_data_ptr == &BootCpuData) && (gIOHibernateState == kIOHibernateStateWakingFromHibernate)) {

@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import operator
 
 # From the defines in bsd/sys/kdebug.h:
 
@@ -397,123 +398,144 @@ def ShowKtrace(cmd_args=None):
     print(GetKperfStatus())
 
 
-class KDEvent(object):
+# This is what a kd_event looks like
+#
+# 0000,[  64] (struct kd_buf)) {
+#     0000,[   8] (uint64_t) timestamp
+#     0008,[   8] (kd_buf_argtype) arg1
+#     0016,[   8] (kd_buf_argtype) arg2
+#     0024,[   8] (kd_buf_argtype) arg3
+#     0032,[   8] (kd_buf_argtype) arg4
+#     0040,[   8] (kd_buf_argtype) arg5
+#     0048,[   4] (uint32_t) debugid
+#     0052,[   4] (uint32_t) cpuid
+#     0056,[   8] (kd_buf_argtype) unused
+# }
+
+U64_STRUCT = struct.Struct('Q')
+KDE_STRUCT = struct.Struct('QQQQQQIIQ')
+KDE_SIZE   = 64 # we no longer support k32
+
+class KDEvent64(object):
     """
     Wrapper around kevent pointer that handles sorting logic.
     """
-    def __init__(self, timestamp, kevent, cpu):
-        self.kevent = kevent
-        self.timestamp = timestamp
-        self.cpu = cpu
 
-    def get_kevent(self):
-        return self.kevent
+    __slots__ = ('timestamp', 'data')
 
-    def __eq__(self, other):
-        return self.timestamp == other.timestamp
-
-    def __lt__(self, other):
-        return self.timestamp < other.timestamp
-
-    def __gt__(self, other):
-        return self.timestamp > other.timestamp
-
-    def __hash__(self):
-        return hash(self.timestamp)
-
+    def __init__(self, buf, offs):
+        self.timestamp = int(U64_STRUCT.unpack_from(buf, offs)[0])
+        self.data      = buf[offs:offs + KDE_SIZE]
 
 class KDCPU(object):
     """
     Represents all events from a single CPU.
     """
-    def __init__(self, cpuid, k64, verbose, starting_timestamp=None):
+
+    def __init__(self, cpuid, verbose, starting_timestamp=None, humanize=False):
         self.cpuid = cpuid
         self.iter_store = None
-        self.k64 = k64
         self.verbose = verbose
+        self.humanize = humanize
         self.disabled = False
-        self.timestamp_mask = ((1 << 48) - 1) if not self.k64 else ~0
         self.last_timestamp = 0
+        self.err = lldb.SBError() # avoid making it all the time, it's slow
+        self.kd_bufs = kern.globals.kd_buffer_trace.kd_bufs.GetSBValue()
 
-        kdstoreinfo = kern.globals.kd_buffer_trace.kdb_info[cpuid]
-        self.kdstorep = kdstoreinfo.kd_list_head
+        kdstorep = kern.globals.kd_buffer_trace.kdb_info[cpuid].kd_list_head
+        self.load_kdstore(kdstorep.GetSBValue())
 
-        if self.kdstorep.raw == xnudefines.KDS_PTR_NULL:
-            # Return no events and stop at first call to __next__.
-            return
-
-        self.iter_store = self.get_kdstore(self.kdstorep)
         skipped_storage_count = 0
-        if starting_timestamp:
-            while True:
-                newest_event = addressof(self.iter_store.kds_records[xnudefines.EVENTS_PER_STORAGE_UNIT - 1])
-                timestamp = unsigned(newest_event.timestamp) & self.timestamp_mask
-                if timestamp >= starting_timestamp:
-                    if verbose:
-                        print('done skipping events at time {}'.format(timestamp))
+        while self.iter_store is not None and starting_timestamp:
+            offs = self.iter_offs_max - KDE_SIZE
+            if offs >= self.iter_offs:
+                event = KDEvent64(self.iter_buf, offs)
+                if event.timestamp >= starting_timestamp:
                     break
-                next_store = self.iter_store.kds_next
-                if next_store.raw == xnudefines.KDS_PTR_NULL:
-                    if verbose:
-                        print('found no valid events from CPU {}'.format(cpuid))
-                    self.iter_store = None
-                    return
-                self.iter_store = self.get_kdstore(next_store)
-                skipped_storage_count += 1
-        if verbose and skipped_storage_count > 0:
-            print('CPU {} skipped {} storage units'.format(
-                    cpuid, skipped_storage_count))
 
-        # XXX Doesn't have the same logic to avoid un-mergeable events
-        #     (respecting barrier_min and bufindx) as the C code.
+            skipped_storage_count += 1
+            self.load_kdstore(self.iter_store.GetChildMemberWithName('kds_next'))
 
-        self.iter_idx = self.iter_store.kds_readlast
+        if verbose:
+            if skipped_storage_count > 0:
+                print('CPU {} skipped {} storage units'.format(
+                        cpuid, skipped_storage_count))
 
-    def get_kdstore(self, kdstorep):
+            if self.iter_store is None:
+                print('found no valid events from CPU {}'.format(cpuid))
+
+    def load_kdstore(self, kds_next):
         """
         See POINTER_FROM_KDSPTR.
         """
-        buf = kern.globals.kd_buffer_trace.kd_bufs[kdstorep.buffer_index]
-        return addressof(buf.kdr_addr[kdstorep.offset])
+        if kds_next.xGetScalarByName('raw') == xnudefines.KDS_PTR_NULL:
+            self.iter_store     = None
+            self.iter_buf       = None
+            self.iter_offs      = 0
+            self.iter_offs_max  = 0
+            self.iter_stamp_max = 0
+            return
 
-    # Event iterator implementation returns KDEvent instance
+        idx   = kds_next.xGetScalarByName('buffer_index')
+        offs  = kds_next.xGetScalarByName('offset')
+
+        store = self.kd_bufs.GetValueForExpressionPath('[{}].kdr_addr[{}]'.format(idx, offs))
+        base  = store.chkGetChildMemberWithName('kds_records')
+        start = store.xGetScalarByName('kds_readlast')
+        end   = store.xGetScalarByName('kds_bufindx')
+        addr  = base.GetLoadAddress() + start * KDE_SIZE
+        proc  = LazyTarget.GetProcess()
+        delta = end - start
+
+        self.iter_store     = store
+        self.iter_buf       = proc.ReadMemory(addr, delta * KDE_SIZE, self.err) if delta > 0 else None
+        self.iter_offs      = 0
+        self.iter_offs_max  = delta * KDE_SIZE
+        self.iter_stamp_max = store.xGetScalarByName('kds_timestamp')
+
+    # Event iterator implementation returns KDEvent64 instance
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        # This CPU is out of events.
-        if self.iter_store is None or self.disabled:
+        offs = self.iter_offs
+        while offs >= self.iter_offs_max:
+            # This CPU is out of events.
+            if self.iter_store is None or self.disabled:
+                raise StopIteration
+
+            self.load_kdstore(self.iter_store.GetChildMemberWithName('kds_next'))
+            offs = self.iter_offs
+
+        self.iter_offs = offs + KDE_SIZE
+        kdevent = KDEvent64(self.iter_buf, offs)
+
+        if self.verbose and self.last_timestamp == 0:
+            print('first event from CPU {} is at time {}'.format(
+                    self.cpuid, kdevent.timestamp))
+
+        if kdevent.timestamp < self.last_timestamp:
+            # Human-readable output might have garbage on the rest of the line.
+            # Use a CSI escape sequence to clear it out.
+            clear_line_csi = '\033[K\n' if self.humanize else '\n'
+            sys.stderr.write((
+                'warning: events from CPU {} are out-of-order, ' +
+                'last timestamp = {}, ' +
+                'current timestamp = {}, disabling{}').format(
+                GetKdebugCPUName(self.cpuid),
+                self.last_timestamp, kdevent.timestamp, clear_line_csi))
+            self.iter_store = None
+            self.disabled = True
             raise StopIteration
 
-        if self.iter_idx == self.iter_store.kds_bufindx:
+        # Check for writer overrun.
+        if kdevent.timestamp < self.iter_stamp_max:
             self.iter_store = None
             raise StopIteration
 
-        keventp = addressof(self.iter_store.kds_records[self.iter_idx])
-        timestamp = unsigned(keventp.timestamp) & self.timestamp_mask
-        if self.last_timestamp == 0 and self.verbose:
-            print('first event from CPU {} is at time {}'.format(
-                    self.cpuid, timestamp))
-        self.last_timestamp = timestamp
-
-        # Check for writer overrun.
-        if timestamp < self.iter_store.kds_timestamp:
-            raise StopIteration
-
-        self.iter_idx += 1
-
-        if self.iter_idx == xnudefines.EVENTS_PER_STORAGE_UNIT:
-            snext = self.iter_store.kds_next
-            if snext.raw == xnudefines.KDS_PTR_NULL:
-                # Terminate iteration in next loop. Current element is the
-                # last one in this CPU buffer.
-                self.iter_store = None
-            else:
-                self.iter_store = self.get_kdstore(snext)
-                self.iter_idx = self.iter_store.kds_readlast
-
-        return KDEvent(timestamp, keventp, self)
+        self.last_timestamp = kdevent.timestamp
+        return kdevent
 
     # Python 2 compatibility
     # pragma pylint: disable=next-method-defined
@@ -546,8 +568,6 @@ def IterateKdebugEvents(verbose=False, humanize=False, last=None,
         # TODO Yield a wrap event with the barrier_min timestamp.
         pass
 
-    k64 = kern.ptrsize == 8
-
     cpu_count = kern.globals.machine_info.logical_cpu_max
     if include_coprocessors:
         cpu_count = ctrl.kdebug_cpus
@@ -563,59 +583,33 @@ def IterateKdebugEvents(verbose=False, humanize=False, last=None,
                     start_timestamp, now, duration))
 
     # Merge sort all events from all CPUs.
-    cpus = [KDCPU(cpuid, k64, verbose, starting_timestamp=start_timestamp)
+    cpus = [KDCPU(cpuid, verbose,
+               starting_timestamp=start_timestamp, humanize=humanize)
             for cpuid in range(cpu_count)]
-    last_timestamp = 0
-    last_kevent = None
-    warned = False
-    for event in heapq.merge(*cpus):
-        if event.timestamp < last_timestamp and not warned:
-            # Human-readable output might have garbage on the rest of the line.
-            # Use a CSI escape sequence to clear it out.
-            clear_line_csi = '\033[K'
-            print((
-                    'warning: events from CPU {} are out-of-order, ' +
-                    'last CPU = {}, last timestamp = {}, ' +
-                    'current timestamp = {}, disabling').format(
-                    GetKdebugCPUName(event.get_kevent().cpuid),
-                    GetKdebugCPUName(last_kevent.cpuid), last_timestamp,
-                    event.timestamp), end=(
-                    (clear_line_csi + '\n') if humanize else '\n'))
-            warned = True
-            event.cpu.disabled = True
-            continue
-        last_timestamp = event.timestamp
-        last_kevent = event.get_kevent()
-        yield event.get_kevent()
-
+    return heapq.merge(*cpus, key=operator.attrgetter('timestamp'))
 
 @header('{:>12s} {:>10s} {:>18s} {:>18s} {:>18s} {:>18s} {:>5s} {:>8s}'.format(
         'timestamp', 'debugid', 'arg1', 'arg2', 'arg3', 'arg4', 'cpuid',
         'tid'))
-def GetKdebugEvent(event, k64, symbolicate=False, O=None):
+def GetKdebugEvent(event, symbolicate=False, O=None):
     """
     Return a string representing a kdebug trace event.
     """
-    if k64:
-        timestamp = event.timestamp & ((1 << 48) - 1)
-        cpuid = event.timestamp >> 48
-    else:
-        timestamp = event.timestamp
-        cpuid = event.cpuid
+
     def fmt_arg(a):
-        return '0x{:016x}'.format(unsigned(a))
+        return '0x{:016x}'.format(a)
     def sym_arg(a):
-        slid_addr = kern.globals.vm_kernel_slide + unsigned(a)
+        slid_addr = kern.globals.vm_kernel_slide + a
         syms = kern.SymbolicateFromAddress(slid_addr)
         return syms[0].GetName() if syms else fmt_arg(a)
-    args = list(map(
-            sym_arg if symbolicate else fmt_arg,
-            [event.arg1, event.arg2, event.arg3, event.arg4]))
+
+    fn = sym_arg if symbolicate else fmt_arg
+
+    ts, arg1, arg2, arg3, arg4, arg5, debugid, cpuid, _ = KDE_STRUCT.unpack(event.data)
+
     return O.format(
             '{:12d} 0x{:08x} {:18s} {:18s} {:18s} {:18s} {:5d} {:8d}',
-            unsigned(timestamp), unsigned(event.debugid),
-            args[0], args[1], args[2], args[3], unsigned(cpuid),
-            unsigned(event.arg5))
+            ts, debugid, fn(arg1), fn(arg2), fn(arg3), fn(arg4), cpuid, arg5)
 
 
 @lldb_command('showkdebugtrace', 'L:S', fancy=True)
@@ -632,7 +626,6 @@ def ShowKdebugTrace(cmd_args=None, cmd_options={}, O=None):
         * Events from IOPs may be missing or cut-off -- they weren't informed
           of this kind of buffer collection.
     """
-    k64 = kern.ptrsize == 8
     last = cmd_options.get('-L', None)
     if last:
         try:
@@ -644,7 +637,7 @@ def ShowKdebugTrace(cmd_args=None, cmd_options={}, O=None):
         for event in IterateKdebugEvents(
                 config['verbosity'] > vHUMAN, humanize=True, last=last):
             print(GetKdebugEvent(
-                    event, k64, symbolicate='-S' in cmd_options, O=O))
+                    event, symbolicate='-S' in cmd_options, O=O))
 
 
 def binary_plist(o):
@@ -693,8 +686,7 @@ def GetKtraceMachine():
     else:
         cpu_family = 0 # XXX
 
-    k64 = kern.ptrsize == 8
-    page_size = 4 * 4096 if k64 else 4096
+    page_size = 4 * 4096
 
     return {
         'kern_version': str(kern.globals.version),
@@ -752,8 +744,6 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
           catalog will need to be added manually.
     """
 
-    k64 = kern.ptrsize == 8
-
     if len(cmd_args) != 1:
         raise ArgumentError('error: path to trace file is required')
 
@@ -799,12 +789,10 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
         wall_secs = 0
         wall_usecs = 0
 
-        event_size = 64 if k64 else 32
-
         file_hdr = struct.pack(
                 FILEHDR_PACK, FILE_MAGIC, 0, 0, FILEHDR_SIZE,
                 numer, denom, wall_abstime, wall_secs, wall_usecs, 0, 0,
-                0x1 if k64 else 0)
+                0x1)
         f.write(file_hdr)
         header_size_offset = file_offset + 8
         file_offset += 16 + FILEHDR_SIZE # chunk header plus file header
@@ -835,9 +823,6 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
         if verbose:
             print('events start at offset 0x{:x}'.format(file_offset))
 
-        process = LazyTarget().GetProcess()
-        error = lldb.SBError()
-
         skip_nevents = nevents - limit_nevents if limit_nevents else 0
         if skip_nevents > 0:
             print('omitting {} events from the beginning'.format(skip_nevents))
@@ -845,7 +830,7 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
         written_nevents = 0
         seen_nevents = 0
         start_time = time.time()
-        update_every = 1000 if humanize else 25000
+        update_every = 100000
         for event in IterateKdebugEvents(
                 verbose, include_coprocessors='-I' not in cmd_options,
                 humanize=humanize, last=last):
@@ -859,10 +844,9 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
 
                 continue
 
-            event = process.ReadMemory(
-                    unsigned(event), event_size, error)
-            file_offset += event_size
-            f.write(event)
+            file_offset += KDE_SIZE
+            f.write(event.data)
+
             written_nevents += 1
             # Periodically update the CLI with progress.
             if written_nevents % update_every == 0:
@@ -877,7 +861,7 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
         sys.stderr.write('\n')
         elapsed = time.time() - start_time
         print('wrote {} ({}MB) events in {:.3f}s'.format(
-                written_nevents, written_nevents * event_size >> 20, elapsed))
+                written_nevents, written_nevents * KDE_SIZE >> 20, elapsed))
         if verbose:
             print('events end at offset 0x{:x}'.format(file_offset))
 
@@ -892,7 +876,9 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
             if verbose:
                 print('stackshot is 0x{:x} bytes at offset 0x{:x}'.format(
                         kcdata_length, file_offset))
-            ssdata = process.ReadMemory(kcdata_addr, kcdata_length, error)
+
+            process = LazyTarget().GetProcess()
+            ssdata = process.ReadMemory(kcdata_addr, kcdata_length, lldb.SBError())
             magic = struct.unpack('I', ssdata[:4])
             if magic[0] == GetTypeForName('KCDATA_BUFFER_BEGIN_COMPRESSED'):
                 if verbose:
@@ -918,7 +904,7 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
             print('warning: no stackshot; trace file may not be usable')
 
         # After the number of events is known, fix up the events chunk size.
-        events_data_size = unsigned(written_nevents * event_size) + FUTURE_SIZE
+        events_data_size = unsigned(written_nevents * KDE_SIZE) + FUTURE_SIZE
         f.seek(event_size_offset)
         f.write(struct.pack('Q', events_data_size))
         if verbose:

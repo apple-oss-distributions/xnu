@@ -31,6 +31,8 @@ static void     pe_prepare_images(void);
 
 /* private globals */
 SECURITY_READ_ONLY_LATE(PE_state_t) PE_state;
+TUNABLE_DT(uint32_t, PE_srd_fused, "/chosen", "research-enabled",
+    "srd_fusing", 0, TUNABLE_DT_NONE);
 
 #define FW_VERS_LEN 128
 

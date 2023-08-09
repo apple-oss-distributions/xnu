@@ -641,11 +641,13 @@ IOBufferMemoryDescriptor::withBytes(const void * inBytes,
     bool         inContiguous)
 {
 	OSSharedPtr<IOBufferMemoryDescriptor> me = OSMakeShared<IOBufferMemoryDescriptor>();
+	mach_vm_address_t alignment;
 
+	alignment = (inLength <= page_size) ? inLength : page_size;
 	if (me && !me->initWithPhysicalMask(
 		    kernel_task, inDirection | kIOMemoryUnshared
 		    | (inContiguous ? kIOMemoryPhysicallyContiguous : 0),
-		    inLength, inLength, 0 )) {
+		    inLength, alignment, 0 )) {
 		me.reset();
 	}
 

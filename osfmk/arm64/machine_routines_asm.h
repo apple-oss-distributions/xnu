@@ -50,9 +50,10 @@
  * tmp3 - scratch register 3
  * tmp4 - scratch register 4
  * tmp5 - scratch register 5
+ * tmp6 - scratch register 6
  */
 /* BEGIN IGNORE CODESTYLE */
-.macro AUTH_THREAD_STATE_IN_X0 tmp1, tmp2, tmp3, tmp4, tmp5, el0_state_allowed=0
+.macro AUTH_THREAD_STATE_IN_X0 tmp1, tmp2, tmp3, tmp4, tmp5, tmp6, el0_state_allowed=0
 #if __has_feature(ptrauth_calls)
 	msr		SPSel, #1
 #endif
@@ -67,10 +68,11 @@
 	ldp		x16, x17, [x0, SS64_X16]
 
 #if defined(HAS_APPLE_PAC)
-	// Save x3-x5 to preserve across call
+	// Save x3-x6 to preserve across call
 	mov		\tmp3, x3
 	mov		\tmp4, x4
 	mov		\tmp5, x5
+	mov		\tmp6, x6
 
 	/*
 	* Arg0: The ARM context pointer (already in x0)
@@ -103,6 +105,7 @@
 	mov		x3, \tmp3
 	mov		x4, \tmp4
 	mov		x5, \tmp5
+	mov		x6, \tmp6
 #else
 	ldr		lr, [x0, SS64_LR]
 #endif /* defined(HAS_APPLE_PAC) */

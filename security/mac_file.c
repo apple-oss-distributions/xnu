@@ -218,7 +218,13 @@ mac_file_setxattr(struct fileglob *fg, const char *name, char *buf, size_t len)
 	}
 
 	vp = (struct vnode *)fg_get_data(fg);
-	return mac_vnop_setxattr(vp, name, buf, len);
+	int error = vnode_getwithref(vp);
+	if (error) {
+		return error;
+	}
+	error = mac_vnop_setxattr(vp, name, buf, len);
+	vnode_put(vp);
+	return error;
 }
 
 int
@@ -232,7 +238,13 @@ mac_file_getxattr(struct fileglob *fg, const char *name, char *buf, size_t len,
 	}
 
 	vp = (struct vnode *)fg_get_data(fg);
-	return mac_vnop_getxattr(vp, name, buf, len, attrlen);
+	int error = vnode_getwithref(vp);
+	if (error) {
+		return error;
+	}
+	error = mac_vnop_getxattr(vp, name, buf, len, attrlen);
+	vnode_put(vp);
+	return error;
 }
 
 int
@@ -245,5 +257,11 @@ mac_file_removexattr(struct fileglob *fg, const char *name)
 	}
 
 	vp = (struct vnode *)fg_get_data(fg);
-	return mac_vnop_removexattr(vp, name);
+	int error = vnode_getwithref(vp);
+	if (error) {
+		return error;
+	}
+	error = mac_vnop_removexattr(vp, name);
+	vnode_put(vp);
+	return error;
 }

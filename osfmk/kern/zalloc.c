@@ -2669,6 +2669,16 @@ zone_depot_move_empty(
 	*dst->zd_tail = head;
 }
 
+static inline bool
+zone_depot_poll(struct zone_depot *depot, smr_t smr)
+{
+	if (depot->zd_full == 0) {
+		return false;
+	}
+
+	return smr == NULL || smr_poll(smr, depot->zd_head->zm_seq);
+}
+
 static void
 zone_cache_swap_magazines(zone_cache_t cache)
 {
@@ -5637,10 +5647,21 @@ zfree_cached_depot_recirculate(
 
 	n = cache->zc_depot.zd_full;
 	if (n >= depot_max) {
-		n  -= depot_max / 2;
-		seq = zone_depot_move_full(&zone->z_recirc, &cache->zc_depot, n, NULL);
+		/*
+		 * If SMR is in use, rotate the entire chunk of magazines.
+		 *
+		 * If the head of the recirculation layer is ready to be
+		 * reused, pull them back to refill a little.
+		 */
+		seq = zone_depot_move_full(&zone->z_recirc,
+		    &cache->zc_depot, smr ? n : n - depot_max / 2, NULL);
+
 		if (smr) {
 			smr_deferred_advance_commit(smr, seq);
+			if (depot_max > 1 && zone_depot_poll(&zone->z_recirc, smr)) {
+				zone_depot_move_full(&cache->zc_depot,
+				    &zone->z_recirc, depot_max / 2, NULL);
+			}
 		}
 	}
 
@@ -6414,8 +6435,10 @@ static void
 zalloc_cached_depot_recirculate(
 	zone_t                  zone,
 	uint32_t                depot_max,
-	zone_cache_t            cache)
+	zone_cache_t            cache,
+	smr_t                   smr)
 {
+	smr_seq_t seq;
 	uint32_t n;
 
 	zone_recirc_lock_nopreempt_check_contention(zone);
@@ -6426,26 +6449,29 @@ zalloc_cached_depot_recirculate(
 		    n - depot_max / 2, NULL);
 	}
 
+	n = cache->zc_depot.zd_full;
+	if (smr && n) {
+		/*
+		 * if SMR is in use, it means smr_poll() failed,
+		 * so rotate the entire chunk of magazines in order
+		 * to let the sequence numbers age.
+		 */
+		seq = zone_depot_move_full(&zone->z_recirc, &cache->zc_depot,
+		    n, NULL);
+		smr_deferred_advance_commit(smr, seq);
+	}
+
 	n = depot_max - cache->zc_depot.zd_empty;
 	if (n > zone->z_recirc.zd_full) {
 		n = zone->z_recirc.zd_full;
 	}
-	if (n) {
+
+	if (n && zone_depot_poll(&zone->z_recirc, smr)) {
 		zone_depot_move_full(&cache->zc_depot, &zone->z_recirc,
 		    n, zone);
 	}
 
 	zone_recirc_unlock_nopreempt(zone);
-}
-
-static inline bool
-zalloc_cached_depot_poll(struct zone_depot *depot, smr_t smr)
-{
-	if (depot->zd_full == 0) {
-		return false;
-	}
-
-	return smr == NULL || smr_poll(smr, depot->zd_head->zm_seq);
 }
 
 static void
@@ -6473,7 +6499,7 @@ zalloc_cached_recirculate(
 
 	zone_recirc_lock_nopreempt_check_contention(zone);
 
-	if (zalloc_cached_depot_poll(&zone->z_recirc, zone_cache_smr(cache))) {
+	if (zone_depot_poll(&zone->z_recirc, zone_cache_smr(cache))) {
 		mag = zone_depot_pop_head_full(&zone->z_recirc, zone);
 		if (zone_cache_smr(cache)) {
 			zalloc_cached_reuse_smr(zone, cache, mag);
@@ -6495,17 +6521,20 @@ zalloc_cached_prime(
 {
 	zone_magazine_t mag = NULL;
 	uint32_t depot_max;
+	smr_t smr;
 
 	depot_max = os_atomic_load(&zone->z_depot_size, relaxed);
 	if (depot_max) {
+		smr = zone_cache_smr(cache);
+
 		zone_depot_lock_nopreempt(cache);
 
-		if (cache->zc_depot.zd_full == 0) {
-			zalloc_cached_depot_recirculate(zone, depot_max, cache);
+		if (!zone_depot_poll(&cache->zc_depot, smr)) {
+			zalloc_cached_depot_recirculate(zone, depot_max, cache,
+			    smr);
 		}
 
-		if (__probable(zalloc_cached_depot_poll(&cache->zc_depot,
-		    zone_cache_smr(cache)))) {
+		if (__probable(cache->zc_depot.zd_full)) {
 			mag = zone_depot_pop_head_full(&cache->zc_depot, NULL);
 			if (zone_cache_smr(cache)) {
 				zalloc_cached_reuse_smr(zone, cache, mag);
@@ -8233,6 +8262,10 @@ mach_memory_info_security_check(bool redact_info)
 	/* If not root, only allow redacted calls. */
 	if (!kauth_cred_issuser(kauth_cred_get()) && !redact_info) {
 		return KERN_NO_ACCESS;
+	}
+
+	if (PE_srd_fused) {
+		return KERN_SUCCESS;
 	}
 
 	/* If does not have the memory entitlement, fail. */

@@ -102,7 +102,8 @@ enum {
 	// options for registerService() & terminate()
 	kIOServiceSynchronous   = 0x00000002,
 	// options for registerService()
-	kIOServiceAsynchronous  = 0x00000008
+	kIOServiceAsynchronous  = 0x00000008,
+	kIOServiceDextRequirePowerForMatching = 0x00000010,
 };
 
 // options for open()

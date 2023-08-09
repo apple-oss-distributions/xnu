@@ -89,6 +89,11 @@
 #define CPU_PIO_CPU_STS_OFFSET               (0x100ULL)
 #define CPU_PIO_CPU_STS_cpuRunSt_mask        (0xff)
 
+/*
+ * CORE_THRTL_CFG2 non-sysreg tunable
+ */
+#define CORE_THRTL_CFG2_OFFSET               (0x218)
+
 
 
 #ifdef ASSEMBLER

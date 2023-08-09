@@ -730,6 +730,7 @@ task_generate_corpse_internal(
 	    TWF_NONE,
 	    new_task);
 	if (kr != KERN_SUCCESS) {
+		new_task = TASK_NULL;
 		goto error_task_generate_corpse;
 	}
 

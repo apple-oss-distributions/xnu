@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -372,6 +372,12 @@ fsw_netagent_register(struct nx_flowswitch *fsw, struct ifnet *ifp)
 		goto fail_netagent_register;
 	}
 
+	if (ifp->if_bridge != NULL) {
+		/* see rdar://107076453 */
+		SK_ERR("%s is bridged, not adding netagent",
+		    if_name(ifp));
+		goto done;
+	}
 	error = if_add_netagent(ifp, fsw->fsw_agent_uuid);
 	if (error != 0) {
 		goto fail_netagent_add;
@@ -380,7 +386,7 @@ fsw_netagent_register(struct nx_flowswitch *fsw, struct ifnet *ifp)
 	if (if_is_fsw_netagent_enabled()) {
 		fsw->fsw_state_flags |= FSW_STATEF_NETAGENT_ENABLED;
 	}
-
+done:
 	return 0;
 
 fail_netagent_add:

@@ -7421,6 +7421,11 @@ IOPMrootDomain::checkSystemSleepAllowed( IOOptionBits options,
 			break;
 		}
 
+		if (_driverKitMatchingAssertionCount != 0) {
+			err = kPMCPUAssertion;
+			break;
+		}
+
 		if (getPMAssertionLevel( kIOPMDriverAssertionCPUBit ) ==
 		    kIOPMDriverAssertionLevelOn) {
 			err = kPMCPUAssertion; // 5. CPU assertion
@@ -10471,6 +10476,50 @@ IOPMrootDomain::setPMAssertionUserLevels(IOPMDriverAssertionType inLevels)
 	}
 
 	return pmAssertions->setUserAssertionLevels(inLevels);
+}
+
+IOReturn
+IOPMrootDomain::acquireDriverKitMatchingAssertion()
+{
+	return gIOPMWorkLoop->runActionBlock(^{
+		if (_driverKitMatchingAssertionCount != 0) {
+		        _driverKitMatchingAssertionCount++;
+		        return kIOReturnSuccess;
+		} else {
+		        if (kSystemTransitionSleep == _systemTransitionType) {
+		                // system going to sleep
+		                return kIOReturnBusy;
+			} else {
+		                // createPMAssertion is asynchronous.
+		                // we must also set _driverKitMatchingAssertionCount under the PM workloop lock so that we can cancel sleep immediately
+		                // The assertion is used so that on release, we reevaluate all assertions
+		                _driverKitMatchingAssertion = createPMAssertion(kIOPMDriverAssertionCPUBit, kIOPMDriverAssertionLevelOn, this, "DK matching");
+		                if (_driverKitMatchingAssertion != kIOPMUndefinedDriverAssertionID) {
+		                        _driverKitMatchingAssertionCount = 1;
+		                        return kIOReturnSuccess;
+				} else {
+		                        return kIOReturnBusy;
+				}
+			}
+		}
+	});
+}
+
+void
+IOPMrootDomain::releaseDriverKitMatchingAssertion()
+{
+	gIOPMWorkLoop->runActionBlock(^{
+		if (_driverKitMatchingAssertionCount != 0) {
+		        _driverKitMatchingAssertionCount--;
+		        if (_driverKitMatchingAssertionCount == 0) {
+		                releasePMAssertion(_driverKitMatchingAssertion);
+		                _driverKitMatchingAssertion = kIOPMUndefinedDriverAssertionID;
+			}
+		} else {
+		        panic("Over-release of driverkit matching assertion");
+		}
+		return kIOReturnSuccess;
+	});
 }
 
 bool

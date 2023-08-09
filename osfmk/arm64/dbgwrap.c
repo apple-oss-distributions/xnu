@@ -126,8 +126,10 @@ ml_dbgwrap_halt_cpu(int cpu_index, uint64_t timeout_ns)
 		return DBGWRAP_WARN_ALREADY_HALTED;
 	}
 
+
 	/* Clear all other writable bits besides dbgHalt; none of the power-down or reset bits must be set. */
 	*dbgWrapReg = DBGWRAP_DBGHALT;
+
 
 	if (timeout_ns != 0) {
 		dbgwrap_status_t stat = ml_dbgwrap_wait_cpu_halted(cpu_index, timeout_ns);

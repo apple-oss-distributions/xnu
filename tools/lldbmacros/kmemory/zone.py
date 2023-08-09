@@ -515,7 +515,7 @@ class ZPercpuValue(object):
     def __iter__(self):
         sbv  = self.sbv
         kmem = KMem.get_shared()
-        addr = sbv.GetValueAsAddress() | 0x8000000000000000
+        addr = sbv.GetValueAsAddress() | 0xc0c0000000000000
         name = sbv.GetName()
         ty   = sbv.GetType().GetPointeeType()
 

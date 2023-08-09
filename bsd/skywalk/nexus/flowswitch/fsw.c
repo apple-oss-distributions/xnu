@@ -1211,6 +1211,11 @@ fsw_netagent_add_remove(struct kern_nexus *nx, boolean_t add)
 		if (FSW_NETAGENT_ADDED(fsw)) {
 			/* agent already added */
 			error = EEXIST;
+		} else if (fsw->fsw_ifp->if_bridge != NULL) {
+			/* see rdar://107076453 */
+			SK_ERR("%s is bridged, not adding netagent",
+			    if_name(fsw->fsw_ifp));
+			error = EBUSY;
 		} else {
 			fsw->fsw_state_flags |= FSW_STATEF_NETAGENT_ADDED;
 			if (if_is_fsw_netagent_enabled()) {

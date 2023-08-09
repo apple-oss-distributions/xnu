@@ -91,8 +91,9 @@ def GetTaskBusyPortsSummary(task):
     nbusy = 0
     nmsgs = 0
 
-    ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
-        gettype('struct ipc_port'))
+    if is_tableval:
+        ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
+            gettype('struct ipc_port'))
 
     for port in ports:
         count = port.xGetIntegerByPath('.ip_messages.imq_msgcount')
@@ -774,7 +775,7 @@ def PrintIPCInformation(space, show_entries=False, show_userstack=False, rights_
             num_entries, space.is_low_mod, space.is_high_mod))
 
     #should show the each individual entries if asked.
-    if show_entries == True:
+    if show_entries == True and is_tableval:
         print("\t" + GetIPCEntrySummary.header)
 
         entries = (
@@ -883,8 +884,9 @@ def GetTaskVoucherCount(t):
     count = 0
     voucher_kotype = int(GetEnumValue('ipc_kotype_t', 'IKOT_VOUCHER'))
 
-    ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00070000,
-        gettype('struct ipc_port'))
+    if is_tableval:
+        ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00070000,
+            gettype('struct ipc_port'))
 
     for port in ports:
         io_bits = port.xGetIntegerByPath('.ip_object.io_bits')
@@ -1235,11 +1237,12 @@ def IterateAllPorts(tasklist, func, ctx, include_psets, follow_busyports, should
         space = t.itk_space
         is_tableval, num_entries = GetSpaceTable(space)
 
-        base  = is_tableval.GetSBValue().Dereference()
-        entries = (
-            value(iep.AddressOf())
-            for iep in base.xIterSiblings(1, num_entries)
-        )
+        if is_tableval:
+            base  = is_tableval.GetSBValue().Dereference()
+            entries = (
+                value(iep.AddressOf())
+                for iep in base.xIterSiblings(1, num_entries)
+            )
 
         for idx, entry_val in enumerate(entries, 1):
             entry_bits= unsigned(entry_val.ie_bits)
@@ -1514,8 +1517,9 @@ def ShowTaskBusyPorts(cmd_args=None, cmd_options={}, O=None):
     task = kern.GetValueFromAddress(cmd_args[0], 'task_t')
     is_tableval, num_entries = GetSpaceTable(task.itk_space)
 
-    ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
-        gettype('struct ipc_port'))
+    if is_tableval:
+        ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
+            gettype('struct ipc_port'))
 
     with O.table(PrintPortSummary.header):
         for port in ports:
@@ -1589,8 +1593,9 @@ def ShowTaskBusyPortSets(cmd_args=None, cmd_options={}, O=None):
     task = kern.GetValueFromAddress(cmd_args[0], 'task_t')
     is_tableval, num_entries = GetSpaceTable(task.itk_space)
 
-    psets = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00080000,
-        gettype('struct ipc_pset'))
+    if is_tableval:
+        psets = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00080000,
+            gettype('struct ipc_pset'))
 
     with O.table(PrintPortSetSummary.header):
         for pset in (value(v.AddressOf()) for v in psets):

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -506,11 +506,18 @@ rbtrace_bt(uint64_t *__counted_by(maxframes)rets, int maxframes,
 			int rbbtf;
 
 			for (rbbtf = btidx; rbbtf < maxframes; rbbtf++) {
-				if (((uint64_t)cfp == 0) || (((uint64_t)cfp < kstackb) || ((uint64_t)cfp > kstackt))) {
+				uint64_t cur_retp;
+				/*
+				 * cfp == 0 is covered by the first comparison, and we're guaranteed
+				 * that kstackb is non-zero from the containing if block.  The os_add_overflow is
+				 * necessary because it's not uncommon for backtraces to terminate with bogus
+				 * frame pointers.
+				 */
+				if (((uint64_t)cfp < kstackb) || os_add_overflow((uint64_t)cfp, sizeof(uint64_t), &cur_retp) || cur_retp >= kstackt) {
 					rets[rbbtf] = 0;
 					continue;
 				}
-				rets[rbbtf] = *(cfp + 1);
+				rets[rbbtf] = *(uint64_t *)cur_retp;
 				cfp = __unsafe_forge_single(uint64_t *, *cfp);
 			}
 		}
