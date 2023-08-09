@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -296,6 +296,8 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 	struct fq6_head diq6 = {};
 	int locked = 0;
 	boolean_t drop_fragq = FALSE;
+	int local_ip6q_unfrglen;
+	u_int8_t local_ip6q_nxt;
 
 	VERIFY(m->m_flags & M_PKTHDR);
 
@@ -515,15 +517,23 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 		goto dropfrag;
 	}
 
+	local_ip6q_unfrglen = q6->ip6q_unfrglen;
+	local_ip6q_nxt = q6->ip6q_nxt;
+
 	/*
 	 * If it's the 1st fragment, record the length of the
 	 * unfragmentable part and the next header of the fragment header.
+	 * Assume the first fragement to arrive will be correct.
+	 * We do not have any duplicate checks here yet so another packet
+	 * with fragoff == 0 could come and overwrite the ip6q_unfrglen
+	 * and worse, the next header, at any time.
 	 */
 	fragoff = ntohs(ip6f->ip6f_offlg & IP6F_OFF_MASK);
-	if (fragoff == 0) {
-		q6->ip6q_unfrglen = offset - sizeof(struct ip6_hdr) -
+	if (fragoff == 0 && local_ip6q_unfrglen == -1) {
+		local_ip6q_unfrglen = offset - sizeof(struct ip6_hdr) -
 		    sizeof(struct ip6_frag);
-		q6->ip6q_nxt = ip6f->ip6f_nxt;
+		local_ip6q_nxt = ip6f->ip6f_nxt;
+		/* XXX ECN? */
 	}
 
 	/*
@@ -532,9 +542,9 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 	 * If it would exceed, discard the fragment and return an ICMP error.
 	 */
 	frgpartlen = sizeof(struct ip6_hdr) + ntohs(ip6->ip6_plen) - offset;
-	if (q6->ip6q_unfrglen >= 0) {
+	if (local_ip6q_unfrglen >= 0) {
 		/* The 1st fragment has already arrived. */
-		if (q6->ip6q_unfrglen + fragoff + frgpartlen > IPV6_MAXPACKET) {
+		if (local_ip6q_unfrglen + fragoff + frgpartlen > IPV6_MAXPACKET) {
 			lck_mtx_unlock(&ip6qlock);
 			locked = 0;
 			icmp6_error(m, ICMP6_PARAM_PROB, ICMP6_PARAMPROB_HEADER,
@@ -576,7 +586,7 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 		    af6 = af6dwn) {
 			af6dwn = af6->ip6af_down;
 
-			if (q6->ip6q_unfrglen + af6->ip6af_off + af6->ip6af_frglen >
+			if (local_ip6q_unfrglen + af6->ip6af_off + af6->ip6af_frglen >
 			    IPV6_MAXPACKET) {
 				struct mbuf *merr = IP6_REASS_MBUF(af6);
 				struct ip6_hdr *ip6err;
@@ -765,6 +775,13 @@ insert:
 		lck_mtx_unlock(&ip6qlock);
 		return IPPROTO_DONE;
 	}
+
+	/*
+	 * We're keeping the fragment.
+	 */
+	q6->ip6q_unfrglen = local_ip6q_unfrglen;
+	q6->ip6q_nxt = local_ip6q_nxt;
+
 	next = 0;
 	for (af6 = q6->ip6q_down; af6 != (struct ip6asfrag *)q6;
 	    af6 = af6->ip6af_down) {

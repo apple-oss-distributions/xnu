@@ -2059,7 +2059,7 @@ bond_add_interface(struct ifnet * ifp, struct ifnet * port_ifp)
 	int                         old_max = 0;
 	int                         new_max = 0;
 
-	if (IFNET_IS_INTCOPROC(port_ifp)) {
+	if (IFNET_IS_INTCOPROC(port_ifp) || IFNET_IS_MANAGEMENT(port_ifp)) {
 		return EINVAL;
 	}
 

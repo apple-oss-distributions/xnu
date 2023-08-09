@@ -596,20 +596,22 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 		icmp6_error(m, ICMP6_DST_UNREACH, ICMP6_DST_UNREACH_NOPORT, 0);
 		return IPPROTO_DONE;
 	}
-#if NECP
-	if (!necp_socket_is_allowed_to_send_recv_v6(in6p, uh->uh_dport,
-	    uh->uh_sport, &ip6->ip6_dst, &ip6->ip6_src, ifp, pf_tag, NULL, NULL, NULL, NULL)) {
-		in_pcb_checkstate(in6p, WNT_RELEASE, 0);
-		IF_UDP_STATINC(ifp, badipsec);
-		goto bad;
-	}
-#endif /* NECP */
 
 	/*
 	 * Construct sockaddr format source address.
 	 * Stuff source address and datagram in user buffer.
 	 */
 	udp_lock(in6p->in6p_socket, 1, 0);
+
+#if NECP
+	if (!necp_socket_is_allowed_to_send_recv_v6(in6p, uh->uh_dport,
+	    uh->uh_sport, &ip6->ip6_dst, &ip6->ip6_src, ifp, pf_tag, NULL, NULL, NULL, NULL)) {
+		in_pcb_checkstate(in6p, WNT_RELEASE, 1);
+		udp_unlock(in6p->in6p_socket, 1, 0);
+		IF_UDP_STATINC(ifp, badipsec);
+		goto bad;
+	}
+#endif /* NECP */
 
 	if (in_pcb_checkstate(in6p, WNT_RELEASE, 1) == WNT_STOPUSING) {
 		udp_unlock(in6p->in6p_socket, 1, 0);

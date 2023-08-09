@@ -380,7 +380,15 @@ static const TrustCacheTypeConfig_t TCTypeConfig[kTCTypeTotal] = {
         .fourCC = 'gtcd',
         .firmwareFlags = NULL,
         .entitlementValue = "cryptex1.generic.supplemental"
-    }
+    },
+
+    [kTCTypeMobileAssetBrainEphemeral] = {
+        .chipEnvironment = chipEnvironmentCryptex1MobileAsset,
+        .nonceDomain = nonceDomainPDI,
+        .fourCC = 'trab',
+        .firmwareFlags = NULL,
+        .entitlementValue = "personalized.mobile-asset-brain"
+    },
 };
 
 #pragma GCC diagnostic pop

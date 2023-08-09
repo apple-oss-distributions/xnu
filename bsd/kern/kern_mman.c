@@ -223,7 +223,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	AUDIT_ARG(len, user_size);
 	AUDIT_ARG(fd, uap->fd);
 
-	if (vm_map_range_overflows(user_addr, user_size)) {
+	if (vm_map_range_overflows(user_map, user_addr, user_size)) {
 		return EINVAL;
 	}
 	prot = (uap->prot & VM_PROT_ALL);
@@ -960,7 +960,7 @@ msync_nocancel(__unused proc_t p, struct msync_nocancel_args *uap, __unused int3
 #if XNU_TARGET_OS_OSX
 	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_msync) | DBG_FUNC_NONE), (uint32_t)(addr >> 32), (uint32_t)(size >> 32), 0, 0, 0);
 #endif /* XNU_TARGET_OS_OSX */
-	if (mach_vm_range_overflows(addr, size)) {
+	if (vm_map_range_overflows(user_map, addr, size)) {
 		return EINVAL;
 	}
 	if (addr & vm_map_page_mask(user_map)) {
@@ -1040,7 +1040,7 @@ munmap(__unused proc_t p, struct munmap_args *uap, __unused int32_t *retval)
 		return EINVAL;
 	}
 
-	if (mach_vm_range_overflows(user_addr, user_size)) {
+	if (vm_map_range_overflows(user_map, user_addr, user_size)) {
 		return EINVAL;
 	}
 
@@ -1077,7 +1077,7 @@ mprotect(__unused proc_t p, struct mprotect_args *uap, __unused int32_t *retval)
 	user_size = (mach_vm_size_t) uap->len;
 	prot = (vm_prot_t)(uap->prot & (VM_PROT_ALL | VM_PROT_TRUSTED | VM_PROT_STRIP_READ));
 
-	if (mach_vm_range_overflows(user_addr, user_size)) {
+	if (vm_map_range_overflows(user_map, user_addr, user_size)) {
 		return EINVAL;
 	}
 	if (user_addr & vm_map_page_mask(user_map)) {
@@ -1176,13 +1176,13 @@ minherit(__unused proc_t p, struct minherit_args *uap, __unused int32_t *retval)
 	AUDIT_ARG(len, uap->len);
 	AUDIT_ARG(value32, uap->inherit);
 
+	user_map = current_map();
 	addr = (mach_vm_offset_t)uap->addr;
 	size = (mach_vm_size_t)uap->len;
 	inherit = uap->inherit;
-	if (mach_vm_range_overflows(addr, size)) {
+	if (vm_map_range_overflows(user_map, addr, size)) {
 		return EINVAL;
 	}
-	user_map = current_map();
 	result = mach_vm_inherit(user_map, addr, size,
 	    inherit);
 	switch (result) {
@@ -1249,9 +1249,10 @@ madvise(__unused proc_t p, struct madvise_args *uap, __unused int32_t *retval)
 		return EINVAL;
 	}
 
+	user_map = current_map();
 	start = (mach_vm_offset_t) uap->addr;
 	size = (mach_vm_size_t) uap->len;
-	if (mach_vm_range_overflows(start, size)) {
+	if (vm_map_range_overflows(user_map, start, size)) {
 		return EINVAL;
 	}
 #if __arm64__
@@ -1272,8 +1273,6 @@ madvise(__unused proc_t p, struct madvise_args *uap, __unused int32_t *retval)
 		return EINVAL;
 	}
 #endif /* __arm64__ */
-
-	user_map = current_map();
 
 	result = mach_vm_behavior_set(user_map, start, size, new_behavior);
 	switch (result) {
@@ -1463,10 +1462,11 @@ mlock(__unused proc_t p, struct mlock_args *uap, __unused int32_t *retvalval)
 	AUDIT_ARG(addr, uap->addr);
 	AUDIT_ARG(len, uap->len);
 
+	user_map = current_map();
 	addr = (vm_map_offset_t) uap->addr;
 	size = (vm_map_size_t)uap->len;
 
-	if (vm_map_range_overflows(addr, size)) {
+	if (vm_map_range_overflows(user_map, addr, size)) {
 		return EINVAL;
 	}
 
@@ -1474,7 +1474,6 @@ mlock(__unused proc_t p, struct mlock_args *uap, __unused int32_t *retvalval)
 		return 0;
 	}
 
-	user_map = current_map();
 	pageoff = (addr & vm_map_page_mask(user_map));
 	addr -= pageoff;
 	size = vm_map_round_page(size + pageoff, vm_map_page_mask(user_map));
@@ -1507,7 +1506,7 @@ munlock(__unused proc_t p, struct munlock_args *uap, __unused int32_t *retval)
 	addr = (mach_vm_offset_t) uap->addr;
 	size = (mach_vm_size_t)uap->len;
 	user_map = current_map();
-	if (mach_vm_range_overflows(addr, size)) {
+	if (vm_map_range_overflows(user_map, addr, size)) {
 		return EINVAL;
 	}
 	/* JMM - need to remove all wirings by spec - this just removes one */
@@ -1559,7 +1558,7 @@ mremap_encrypted(__unused struct proc *p, struct mremap_encrypted_args *uap, __u
 	cputype = uap->cputype;
 	cpusubtype = uap->cpusubtype;
 
-	if (mach_vm_range_overflows(user_addr, user_size)) {
+	if (vm_map_range_overflows(user_map, user_addr, user_size)) {
 		return EINVAL;
 	}
 	if (user_addr & vm_map_page_mask(user_map)) {

@@ -731,7 +731,7 @@ graftdmg(__unused proc_t p, struct graftdmg_args *uap, __unused int32_t *retval)
 		goto graftout;
 	}
 
-	if (ua_grafttype == 0 || ua_grafttype > GRAFTDMG_CRYPTEX_DOWNLEVEL) {
+	if (ua_grafttype == 0 || ua_grafttype > GRAFTDMG_CRYPTEX_MAX) {
 		error = EINVAL;
 	} else {
 		sbc_args = &kern_gda.sbc_args;
@@ -1661,6 +1661,7 @@ update:
 		vnode_lock_spin(vp);
 		CLR(vp->v_flag, VMOUNT);
 		vp->v_mountedhere = mp;
+		SET(vp->v_flag, VMOUNTEDHERE);
 		vnode_unlock(vp);
 
 		/*
@@ -1829,6 +1830,7 @@ out4:
 	vnode_lock_spin(vp);
 
 	mp->mnt_crossref++;
+	CLR(vp->v_flag, VMOUNTEDHERE);
 	vp->v_mountedhere = (mount_t) 0;
 
 	vnode_unlock(vp);
@@ -2058,6 +2060,7 @@ place_mount_and_checkdirs(mount_t mp, vnode_t vp, vfs_context_t ctx)
 	vnode_lock_spin(vp);
 	CLR(vp->v_flag, VMOUNT);
 	vp->v_mountedhere = mp;
+	SET(vp->v_flag, VMOUNTEDHERE);
 	vnode_unlock(vp);
 
 	/*
@@ -2096,6 +2099,7 @@ undo_place_on_covered_vp(mount_t mp, vnode_t vp)
 {
 	vnode_rele(vp);
 	vnode_lock_spin(vp);
+	CLR(vp->v_flag, (VMOUNT | VMOUNTEDHERE));
 	vp->v_mountedhere = (mount_t)NULL;
 	vnode_unlock(vp);
 
@@ -2863,8 +2867,7 @@ dounmount(struct mount *mp, int flags, int withref, vfs_context_t ctx)
 
 		mp->mnt_crossref++;
 		coveredvp->v_mountedhere = (struct mount *)0;
-		CLR(coveredvp->v_flag, VMOUNT);
-
+		CLR(coveredvp->v_flag, VMOUNT | VMOUNTEDHERE);
 		vnode_unlock(coveredvp);
 		vnode_put(coveredvp);
 	}
@@ -13887,6 +13890,9 @@ vfs_purge_callback(mount_t mp, __unused void * arg)
 	return VFS_RETURNED;
 }
 
+static TUNABLE_WRITEABLE(boolean_t, vfs_purge_vm_pagers, "vfs_purge_vm_pagers", TRUE);
+SYSCTL_INT(_vfs, OID_AUTO, purge_vm_pagers, CTLFLAG_RW | CTLFLAG_LOCKED, &vfs_purge_vm_pagers, 0, "VFS purge also purges file-backed VM pagers");
+
 int
 vfs_purge(__unused struct proc *p, __unused struct vfs_purge_args *uap, __unused int32_t *retval)
 {
@@ -13895,6 +13901,11 @@ vfs_purge(__unused struct proc *p, __unused struct vfs_purge_args *uap, __unused
 	}
 
 	vfs_iterate(0 /* flags */, vfs_purge_callback, NULL);
+
+	/* also flush any VM pagers backed by files */
+	if (vfs_purge_vm_pagers) {
+		vm_purge_filebacked_pagers();
+	}
 
 	return 0;
 }

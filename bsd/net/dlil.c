@@ -1161,7 +1161,7 @@ static boolean_t
 dlil_attach_netif_compat_nexus(ifnet_t ifp, if_nexus_netif_t netif_nx)
 {
 	if (ifnet_nx_noauto(ifp) || IFNET_IS_INTCOPROC(ifp) ||
-	    IFNET_IS_VMNET(ifp)) {
+	    IFNET_IS_MANAGEMENT(ifp) || IFNET_IS_VMNET(ifp)) {
 		goto failed;
 	}
 	switch (ifp->if_type) {
@@ -2514,7 +2514,9 @@ dlil_init(void)
 	_CASSERT(IFRTYPE_SUBFAMILY_RESERVED == IFNET_SUBFAMILY_RESERVED);
 	_CASSERT(IFRTYPE_SUBFAMILY_INTCOPROC == IFNET_SUBFAMILY_INTCOPROC);
 	_CASSERT(IFRTYPE_SUBFAMILY_QUICKRELAY == IFNET_SUBFAMILY_QUICKRELAY);
-	_CASSERT(IFRTYPE_SUBFAMILY_DEFAULT == IFNET_SUBFAMILY_DEFAULT);
+	_CASSERT(IFRTYPE_SUBFAMILY_VMNET == IFNET_SUBFAMILY_VMNET);
+	_CASSERT(IFRTYPE_SUBFAMILY_SIMCELL == IFNET_SUBFAMILY_SIMCELL);
+	_CASSERT(IFRTYPE_SUBFAMILY_MANAGEMENT == IFNET_SUBFAMILY_MANAGEMENT);
 
 	_CASSERT(DLIL_MODIDLEN == IFNET_MODIDLEN);
 	_CASSERT(DLIL_MODARGLEN == IFNET_MODARGLEN);
@@ -2785,8 +2787,9 @@ dlil_attach_filter(struct ifnet *ifp, const struct iff_filter *if_filter,
 	filter->filt_protocol = if_filter->iff_protocol;
 	/*
 	 * Do not install filter callbacks for internal coproc interface
+	 * and for management interfaces
 	 */
-	if (!IFNET_IS_INTCOPROC(ifp)) {
+	if (!IFNET_IS_INTCOPROC(ifp) && !IFNET_IS_MANAGEMENT(ifp)) {
 		filter->filt_input = if_filter->iff_input;
 		filter->filt_output = if_filter->iff_output;
 		filter->filt_event = if_filter->iff_event;

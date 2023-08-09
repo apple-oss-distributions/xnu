@@ -77,7 +77,7 @@
 #include <libkern/libkern.h>
 
 ZONE_VIEW_DEFINE(ZV_NAMEI, "vfs.namei", KHEAP_ID_DATA_BUFFERS, MAXPATHLEN);
-KALLOC_HEAP_DEFINE(KERN_OS_MALLOC, "kern_os_malloc", KHEAP_ID_DEFAULT);
+KALLOC_HEAP_DEFINE(KERN_OS_MALLOC, "kern_os_malloc", KHEAP_ID_KT_VAR);
 
 /*
  * macOS Only deprecated interfaces, here only for legacy reasons.

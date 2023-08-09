@@ -4204,7 +4204,12 @@ is_io_service_get_authorization_id(
 		return kr;
 	}
 
+#if defined(XNU_TARGET_OS_OSX)
 	*authorization_id = service->getAuthorizationID();
+#else /* defined(XNU_TARGET_OS_OSX) */
+	*authorization_id = 0;
+	kr = kIOReturnUnsupported;
+#endif /* defined(XNU_TARGET_OS_OSX) */
 
 	return kr;
 }
@@ -4217,7 +4222,11 @@ is_io_service_set_authorization_id(
 {
 	CHECK( IOService, _service, service );
 
+#if defined(XNU_TARGET_OS_OSX)
 	return service->setAuthorizationID( authorization_id );
+#else /* defined(XNU_TARGET_OS_OSX) */
+	return kIOReturnUnsupported;
+#endif /* defined(XNU_TARGET_OS_OSX) */
 }
 
 /* Routine io_service_open_ndr */

@@ -78,6 +78,7 @@
 #include <kern/kern_types.h>
 #include <kern/assert.h>
 #include <kern/macro_help.h>
+#include <kern/kalloc.h>
 #include <kern/circle_queue.h>
 #include <ipc/ipc_types.h>
 #include <ipc/ipc_object.h>
@@ -180,6 +181,8 @@ typedef struct {
 extern zone_t ipc_kmsg_zone;
 #define IKM_SAVED_KMSG_SIZE     256
 #define IKM_SAVED_MSG_SIZE      (IKM_SAVED_KMSG_SIZE - sizeof(struct ipc_kmsg))
+
+KALLOC_TYPE_VAR_DECLARE(KT_IPC_KMSG_KDATA_OOL);
 
 #define ikm_prealloc_inuse_port(kmsg)                                   \
 	((kmsg)->ikm_prealloc)

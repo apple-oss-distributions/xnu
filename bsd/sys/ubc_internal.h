@@ -189,16 +189,17 @@ struct ubc_info {
 };
 
 /* Defines for ui_flags */
-#define UI_NONE         0x00000000      /* none */
-#define UI_HASPAGER     0x00000001      /* has a pager associated */
-#define UI_INITED       0x00000002      /* newly initialized vnode */
-#define UI_HASOBJREF    0x00000004      /* hold a reference on object */
-#define UI_WASMAPPED    0x00000008      /* vnode was mapped */
-#define UI_ISMAPPED     0x00000010      /* vnode is currently mapped */
-#define UI_MAPBUSY      0x00000020      /* vnode is being mapped or unmapped */
-#define UI_MAPWAITING   0x00000040      /* someone waiting for UI_MAPBUSY */
-#define UI_MAPPEDWRITE  0x00000080      /* it's mapped with PROT_WRITE */
-#define UI_CSBLOBINVALID  0x00000100    /* Exisitng csblobs are invalid */
+#define UI_NONE           0x00000000    /* none */
+#define UI_HASPAGER       0x00000001    /* has a pager associated */
+#define UI_INITED         0x00000002    /* newly initialized vnode */
+#define UI_HASOBJREF      0x00000004    /* hold a reference on object */
+#define UI_WASMAPPED      0x00000008    /* vnode was mapped */
+#define UI_ISMAPPED       0x00000010    /* vnode is currently mapped */
+#define UI_MAPBUSY        0x00000020    /* vnode is being mapped or unmapped */
+#define UI_MAPWAITING     0x00000040    /* someone waiting for UI_MAPBUSY */
+#define UI_MAPPEDWRITE    0x00000080    /* it's mapped with PROT_WRITE */
+#define UI_CSBLOBINVALID  0x00000100    /* existing csblobs are invalid */
+#define UI_WASMAPPEDWRITE 0x00000200    /* was mapped writable at some point */
 
 /*
  * exported primitives for loadable file systems.

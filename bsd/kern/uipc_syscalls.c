@@ -1624,7 +1624,7 @@ sendmsg_x(proc_ref_t p, struct sendmsg_x_args *uap, user_ssize_t *retval)
 		uap->cnt = somaxsendmsgx;
 	}
 
-	user_msg_x = kalloc_data(uap->cnt * sizeof(struct user_msghdr_x),
+	user_msg_x = kalloc_type(struct user_msghdr_x, uap->cnt,
 	    Z_WAITOK | Z_ZERO);
 	if (user_msg_x == NULL) {
 		DBG_PRINTF("%s user_msg_x alloc failed\n", __func__);
@@ -1776,7 +1776,7 @@ out:
 		free_uio_array(uiop, uap->cnt);
 		kfree_type(uio_ref_t, uap->cnt, uiop);
 	}
-	kfree_data(user_msg_x, uap->cnt * sizeof(struct user_msghdr_x));
+	kfree_type(struct user_msghdr_x, uap->cnt, user_msg_x);
 
 	KERNEL_DEBUG(DBG_FNC_SENDMSG_X | DBG_FUNC_END, error, 0, 0, 0, 0);
 
@@ -2307,7 +2307,7 @@ recvmsg_x(proc_ref_t p, struct recvmsg_x_args *uap, user_ssize_t *retval)
 		uap->cnt = somaxrecvmsgx;
 	}
 
-	user_msg_x = kalloc_data(uap->cnt * sizeof(struct user_msghdr_x),
+	user_msg_x = kalloc_type(struct user_msghdr_x, uap->cnt,
 	    Z_WAITOK | Z_ZERO);
 	if (user_msg_x == NULL) {
 		DBG_PRINTF("%s user_msg_x alloc failed\n", __func__);
@@ -2456,7 +2456,7 @@ out:
 	}
 	kfree_data(umsgp, uap->cnt * size_of_msghdr);
 	free_recv_msg_array(recv_msg_array, uap->cnt);
-	kfree_data(user_msg_x, uap->cnt * sizeof(struct user_msghdr_x));
+	kfree_type(struct user_msghdr_x, uap->cnt, user_msg_x);
 
 	KERNEL_DEBUG(DBG_FNC_RECVMSG_X | DBG_FUNC_END, error, 0, 0, 0, 0);
 

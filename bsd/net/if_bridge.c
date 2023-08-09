@@ -2609,6 +2609,7 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 	u_int32_t event_code = 0;
 	boolean_t input_broadcast;
 	boolean_t wifi_infra = FALSE;
+	int media_active;
 
 	ifs = ifunit(req->ifbr_ifsname);
 	if (ifs == NULL) {
@@ -2618,7 +2619,7 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 		return EINVAL;
 	}
 
-	if (IFNET_IS_INTCOPROC(ifs)) {
+	if (IFNET_IS_INTCOPROC(ifs) || IFNET_IS_MANAGEMENT(ifs)) {
 		return EINVAL;
 	}
 
@@ -2813,6 +2814,8 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 		BRIDGE_LOG(LOG_NOTICE, 0, "ifnet_set_lladdr failed %d", error);
 	}
 
+	media_active = interface_media_active(ifs);
+
 	/*
 	 * No failures past this point. Add the member to the list.
 	 */
@@ -2823,7 +2826,7 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 	BRIDGE_XDROP(sc);
 
 	/* cache the member link status */
-	if (interface_media_active(ifs)) {
+	if (media_active != 0) {
 		bif->bif_flags |= BIFF_MEDIA_ACTIVE;
 	} else {
 		bif->bif_flags &= ~BIFF_MEDIA_ACTIVE;
@@ -3454,7 +3457,7 @@ bridge_ioctl_addspan(struct bridge_softc *sc, void *arg)
 		return ENOENT;
 	}
 
-	if (IFNET_IS_INTCOPROC(ifs)) {
+	if (IFNET_IS_INTCOPROC(ifs) || IFNET_IS_MANAGEMENT(ifs)) {
 		return EINVAL;
 	}
 

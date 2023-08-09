@@ -2472,12 +2472,21 @@ psignal_internal(proc_t p, task_t task, thread_t thread, int flavor, int signum,
 			goto sigout_locked;
 
 		default:
+		{
 			/*
 			 * A signal which has a default action of killing
 			 * the process, and for which there is no handler,
 			 * needs to act like SIGKILL
+			 *
+			 * The thread_sstop condition is a remnant of a fix
+			 * where PSIG_THREAD exit reasons were not set
+			 * correctly (93593933). We keep the behavior with
+			 * SSTOP the same as before.
 			 */
-			if (((flavor & (PSIG_VFORK | PSIG_THREAD)) == 0) && (action == SIG_DFL) && (prop & SA_KILL)) {
+			const bool default_kill = (action == SIG_DFL) && (prop & SA_KILL);
+			const bool thread_sstop = (flavor & PSIG_THREAD) && (sig_proc->p_stat == SSTOP);
+
+			if (default_kill && !thread_sstop) {
 				sig_proc->p_stat = SRUN;
 				kret = thread_abort(sig_thread);
 				update_thread_policy = (kret == KERN_SUCCESS);
@@ -2505,6 +2514,7 @@ psignal_internal(proc_t p, task_t task, thread_t thread, int flavor, int signum,
 				goto sigout_locked;
 			}
 			goto runlocked;
+		}
 		}
 	}
 	/*NOTREACHED*/

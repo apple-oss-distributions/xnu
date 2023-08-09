@@ -2451,7 +2451,7 @@ flow_divert_handle_connect_result(struct flow_divert_pcb *fd_cb, mbuf_t packet, 
 		struct socket *so = fd_cb->so;
 		bool local_address_is_valid = false;
 
-		socket_lock(so, 0);
+		socket_lock(so, 1);
 
 		if (!(so->so_flags & SOF_FLOW_DIVERT)) {
 			FDLOG0(LOG_NOTICE, fd_cb, "socket is not attached any more, ignoring connect result");
@@ -2615,7 +2615,7 @@ set_socket_state:
 		/* We don't need the original remote endpoint any more */
 		free_sockaddr(fd_cb->original_remote_endpoint);
 done:
-		socket_unlock(so, 0);
+		socket_unlock(so, 1);
 	}
 	FDUNLOCK(fd_cb);
 }

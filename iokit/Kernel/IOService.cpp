@@ -5515,7 +5515,7 @@ IOReturn
 IOService::waitQuietWithOptions( uint64_t timeout, IOOptionBits options )
 {
 	IOReturn ret;
-	uint32_t loops;
+	uint32_t loops, timeoutExtensions;
 	char *   busyEntriesString = NULL;
 	char *   panicString = NULL;
 	size_t   busyEntriesStringLen;
@@ -5527,6 +5527,7 @@ IOService::waitQuietWithOptions( uint64_t timeout, IOOptionBits options )
 	bool     multipleEntries;
 	bool     dopanic = false;
 
+	enum { kIOServiceBusyTimeoutExtensionsMax = 8 };
 #if KASAN
 	/*
 	 * On kasan kernels, everything takes longer, so double the number of
@@ -5542,14 +5543,18 @@ IOService::waitQuietWithOptions( uint64_t timeout, IOOptionBits options )
 #elif defined(__x86_64__)
 	enum { kTimeoutExtensions = 4 };
 #define WITH_IOWAITQUIET_EXTENSIONS 1
+#elif  defined(XNU_TARGET_OS_OSX)
+	enum { kTimeoutExtensions = 1 };
+#define WITH_IOWAITQUIET_EXTENSIONS 1
 #else
 	enum { kTimeoutExtensions = 1 };
 #define WITH_IOWAITQUIET_EXTENSIONS 0
 #endif
 
+	timeoutExtensions = kTimeoutExtensions;
 	time = mach_absolute_time();
 	pendingRequests = false;
-	for (loops = 0; loops < kTimeoutExtensions; loops++) {
+	for (loops = 0; loops < timeoutExtensions; loops++) {
 		ret = waitForState( kIOServiceBusyStateMask, 0, timeout );
 
 		if (loops && (kIOReturnSuccess == ret)) {
@@ -5600,6 +5605,22 @@ IOService::waitQuietWithOptions( uint64_t timeout, IOOptionBits options )
 						if (kIOServiceModuleStallState & next->__state[1]) {
 							pendingRequests = true;
 						}
+#if defined(XNU_TARGET_OS_OSX)
+						OSObject * prop;
+						if ((prop = next->copyProperty(kIOServiceBusyTimeoutExtensionsKey))) {
+							OSNumber * num;
+							uint32_t   value;
+							if ((num = OSDynamicCast(OSNumber, prop))) {
+								value = num->unsigned32BitValue();
+								if (value
+								    && (value <= kIOServiceBusyTimeoutExtensionsMax)
+								    && (value > timeoutExtensions)) {
+									timeoutExtensions = value;
+								}
+							}
+							OSSafeReleaseNULL(prop);
+						}
+#endif /* defined(XNU_TARGET_OS_OSX) */
 						leaves->setObject(next);
 						nextParent = next;
 						while ((nextParent = nextParent->getProvider())) {
@@ -5635,7 +5656,7 @@ IOService::waitQuietWithOptions( uint64_t timeout, IOOptionBits options )
 
 		dopanic = (kIOWaitQuietPanics & gIOKitDebug) && (options & kIOWaitQuietPanicOnFailure);
 #if WITH_IOWAITQUIET_EXTENSIONS
-		dopanic = (dopanic && (loops >= (kTimeoutExtensions - 1)));
+		dopanic = (dopanic && (loops >= (timeoutExtensions - 1)));
 #endif
 		assert(panicString != NULL);
 		if (multipleEntries) {

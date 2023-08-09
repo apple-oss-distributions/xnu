@@ -190,6 +190,7 @@ PE_init_iokit(void)
 	 * with the ACPI stack.  Therefore, we start the IOKit matching process immediately on x86.
 	 */
 	InitIOKit(PE_state.deviceTreeHead);
+	zalloc_iokit_lockdown();
 	StartIOKitMatching();
 }
 

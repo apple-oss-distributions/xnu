@@ -111,22 +111,6 @@ typedef struct kalloc_heap {
 	extern struct kalloc_heap var[1]
 
 /**
- * @const KHEAP_ANY
- *
- * @brief
- * A value that represents either the default or kext heap for codepaths that
- * need to allow @c kheap_free() to either one.
- *
- * @discussion
- * When the memory provenance is not known, this value can be used to free
- * memory indiscriminately.
- *
- * Note: code using this constant can likely be used as a gadget to free
- * arbitrary memory and its use is strongly discouraged.
- */
-#define KHEAP_ANY  ((struct kalloc_heap *)NULL)
-
-/**
  * @const KHEAP_DATA_BUFFERS
  *
  * @brief
@@ -260,6 +244,12 @@ KALLOC_HEAP_DECLARE(KHEAP_KT_VAR);
  * changes to kalloc_type_view defintion should toggle this flag.
  *
  #if XNU_KERNEL_PRIVATE
+ * @const KT_NOSHARED
+ * This flags will force the callsite to bypass the shared zone and
+ * directly allocate from the assigned zone. This can only be used
+ * with KT_PRIV_ACCT right now. If you still require this behavior
+ * but don't want private stats use Z_SET_NOTSHARED at the allocation
+ * callsite instead.
  *
  * @const KT_SLID
  * To indicate that strings in the view were slid during early boot.
@@ -285,6 +275,7 @@ __options_decl(kalloc_type_flags_t, uint32_t, {
 	KT_CHANGED2       = 0x0040,
 	KT_PTR_ARRAY      = 0x0080,
 #if XNU_KERNEL_PRIVATE
+	KT_NOSHARED       = 0x2000,
 	KT_SLID           = 0x4000,
 	KT_PROCESSED      = 0x8000,
 	KT_HASH           = 0xffff0000,
@@ -309,6 +300,16 @@ __options_decl(kalloc_type_flags_t, uint32_t, {
  * @c kalloc_type or @c kfree_type.
  *
  */
+#if XNU_KERNEL_PRIVATE
+struct kalloc_type_view {
+	struct zone_view        kt_zv;
+	const char             *kt_signature __unsafe_indexable;
+	kalloc_type_flags_t     kt_flags;
+	uint32_t                kt_size;
+	zone_t                  kt_zshared;
+	zone_t                  kt_zsig;
+};
+#else /* XNU_KERNEL_PRIVATE */
 struct kalloc_type_view {
 	struct zone_view        kt_zv;
 	const char             *kt_signature __unsafe_indexable;
@@ -317,8 +318,7 @@ struct kalloc_type_view {
 	void                   *unused1;
 	void                   *unused2;
 };
-
-typedef struct kalloc_type_view *kalloc_type_view_t;
+#endif /* XNU_KERNEL_PRIVATE */
 
 /*
  * The set of zones used by all kalloc heaps are defined by the constants
@@ -1546,18 +1546,6 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 
 #ifdef XNU_KERNEL_PRIVATE
 
-#define kalloc_type_impl(kt_view, flags) \
-	__zalloc_flags(kt_view, flags)
-
-static inline void
-kfree_type_impl(kalloc_type_view_t kt_view, void *__unsafe_indexable ptr)
-{
-	if (NULL == ptr) {
-		return;
-	}
-	zfree(kt_view, ptr);
-}
-
 extern struct kalloc_result kalloc_ext(
 	void                   *kheap_or_kt_view __unsafe_indexable,
 	vm_size_t               size,
@@ -1611,28 +1599,6 @@ kfree_type_var_impl(
 }
 
 #else /* XNU_KERNEL_PRIVATE */
-
-extern void *__unsafe_indexable kalloc_type_impl(
-	kalloc_type_view_t  kt_view,
-	zalloc_flags_t      flags);
-
-static inline void *__unsafe_indexable
-__kalloc_type_impl(
-	kalloc_type_view_t  kt_view,
-	zalloc_flags_t      flags)
-{
-	void *addr = (kalloc_type_impl)(kt_view, flags);
-	if (flags & Z_NOFAIL) {
-		__builtin_assume(addr != NULL);
-	}
-	return addr;
-}
-
-#define kalloc_type_impl(ktv, fl) __kalloc_type_impl(ktv, fl)
-
-extern void kfree_type_impl(
-	kalloc_type_view_t  kt_view,
-	void                *ptr __unsafe_indexable);
 
 extern void *__unsafe_indexable kalloc_type_var_impl(
 	kalloc_type_var_view_t  kt_view,
@@ -1704,8 +1670,8 @@ extern bool IOMallocType_from_vm(
 /* Used by kern_os_* and operator new */
 KALLOC_HEAP_DECLARE(KERN_OS_MALLOC);
 
-extern void kheap_startup_init(
-	kalloc_heap_t heap);
+extern void kheap_startup_init(kalloc_heap_t heap);
+extern void kheap_var_startup_init(kalloc_heap_t heap);
 
 __attribute__((malloc, alloc_size(2)))
 static inline void *

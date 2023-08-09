@@ -846,7 +846,8 @@ skip_ipsec:
 
 	if (!TAILQ_EMPTY(&ipv6_filters) &&
 	    !((flags & IPV6_OUTARGS) &&
-	    (ip6oa->ip6oa_flags & IP6OAF_INTCOPROC_ALLOWED)
+	    (ip6oa->ip6oa_flags & IP6OAF_INTCOPROC_ALLOWED) &&
+	    (ip6oa->ip6oa_flags & IP6OAF_MANAGEMENT_ALLOWED)
 #if NECP
 	    && !necp_packet_should_skip_filters(m)
 #endif // NECP

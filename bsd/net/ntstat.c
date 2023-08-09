@@ -207,7 +207,10 @@ typedef struct nstat_provider_filter {
 
 typedef struct nstat_control_state {
 	struct nstat_control_state      *ncs_next;
+	/* A bitmask to indicate whether a provider ever done NSTAT_MSG_TYPE_ADD_ALL_SRCS */
 	u_int32_t               ncs_watching;
+	/* A bitmask to indicate whether a provider ever done NSTAT_MSG_TYPE_ADD_SRC */
+	u_int32_t               ncs_added_src;
 	decl_lck_mtx_data(, ncs_mtx);
 	kern_ctl_ref            ncs_kctl;
 	u_int32_t               ncs_unit;
@@ -235,6 +238,7 @@ typedef struct nstat_provider {
 	errno_t                 (*nstat_copy_descriptor)(nstat_provider_cookie_t cookie, void *data, size_t len);
 	void                    (*nstat_release)(nstat_provider_cookie_t cookie, boolean_t locked);
 	bool                    (*nstat_reporting_allowed)(nstat_provider_cookie_t cookie, nstat_provider_filter *filter, u_int64_t suppression_flags);
+	bool                    (*nstat_cookie_equal)(nstat_provider_cookie_t cookie1, nstat_provider_cookie_t cookie2);
 	size_t                  (*nstat_copy_extension)(nstat_provider_cookie_t cookie, u_int32_t extension_id, void *buf, size_t len);
 } nstat_provider;
 
@@ -276,8 +280,6 @@ static void nstat_control_register(void);
  *     nstat_mtx
  *         state->ncs_mtx
  */
-static KALLOC_HEAP_DEFINE(KHEAP_NET_STAT, NET_STAT_CONTROL_NAME,
-    KHEAP_ID_DEFAULT);
 static nstat_control_state      *nstat_controls = NULL;
 static uint64_t                  nstat_idle_time = 0;
 static LCK_GRP_DECLARE(nstat_lck_grp, "network statistics kctl");
@@ -349,6 +351,7 @@ nstat_ifnet_to_flags(
 		break;
 	case IFRTYPE_FUNCTIONAL_WIRED:
 	case IFRTYPE_FUNCTIONAL_INTCOPROC:
+	case IFRTYPE_FUNCTIONAL_MANAGEMENT:
 		flags |= NSTAT_IFNET_IS_WIRED;
 		break;
 	case IFRTYPE_FUNCTIONAL_WIFI_INFRA:
@@ -465,6 +468,36 @@ nstat_lookup_entry(
 	}
 
 	return (*out_provider)->nstat_lookup(data, length, out_cookie);
+}
+
+static void
+nstat_control_sanitize_cookie(
+	nstat_control_state     *state,
+	nstat_provider_id_t     id,
+	nstat_provider_cookie_t cookie)
+{
+	nstat_src *src = NULL;
+
+	// Scan the source list to find any duplicate entry and remove it.
+	lck_mtx_lock(&state->ncs_mtx);
+	TAILQ_FOREACH(src, &state->ncs_src_queue, ns_control_link)
+	{
+		nstat_provider *sp = src->provider;
+		if (sp->nstat_provider_id == id &&
+		    sp->nstat_cookie_equal != NULL &&
+		    sp->nstat_cookie_equal(src->cookie, cookie)) {
+			break;
+		}
+	}
+	if (src) {
+		nstat_control_send_goodbye(state, src);
+		TAILQ_REMOVE(&state->ncs_src_queue, src, ns_control_link);
+	}
+	lck_mtx_unlock(&state->ncs_mtx);
+
+	if (src) {
+		nstat_control_cleanup_source(NULL, src, TRUE);
+	}
 }
 
 static void nstat_init_route_provider(void);
@@ -907,6 +940,17 @@ nstat_route_reporting_allowed(
 	return retval;
 }
 
+static bool
+nstat_route_cookie_equal(
+	nstat_provider_cookie_t cookie1,
+	nstat_provider_cookie_t cookie2)
+{
+	struct rtentry *rt1 = (struct rtentry *)cookie1;
+	struct rtentry *rt2 = (struct rtentry *)cookie2;
+
+	return (rt1 == rt2) ? true : false;
+}
+
 static void
 nstat_init_route_provider(void)
 {
@@ -921,6 +965,7 @@ nstat_init_route_provider(void)
 	nstat_route_provider.nstat_watcher_remove = nstat_route_remove_watcher;
 	nstat_route_provider.nstat_copy_descriptor = nstat_route_copy_descriptor;
 	nstat_route_provider.nstat_reporting_allowed = nstat_route_reporting_allowed;
+	nstat_route_provider.nstat_cookie_equal = nstat_route_cookie_equal;
 	nstat_route_provider.next = nstat_providers;
 	nstat_providers = &nstat_route_provider;
 }
@@ -1187,7 +1232,7 @@ nstat_tucookie_alloc_internal(
 	return cookie;
 }
 
-static struct nstat_tucookie *
+__unused static struct nstat_tucookie *
 nstat_tucookie_alloc(
 	struct inpcb *inp)
 {
@@ -1275,86 +1320,13 @@ nstat_inp_domain_info(struct inpcb *inp, nstat_domain_info *domain_info, size_t 
 static nstat_provider   nstat_tcp_provider;
 
 static errno_t
-nstat_tcpudp_lookup(
-	struct inpcbinfo        *inpinfo,
-	const void              *data,
-	u_int32_t               length,
-	nstat_provider_cookie_t *out_cookie)
-{
-	struct inpcb *inp = NULL;
-
-	// parameter validation
-	const nstat_tcp_add_param       *param = (const nstat_tcp_add_param*)data;
-	if (length < sizeof(*param)) {
-		return EINVAL;
-	}
-
-	// src and dst must match
-	if (param->remote.v4.sin_family != 0 &&
-	    param->remote.v4.sin_family != param->local.v4.sin_family) {
-		return EINVAL;
-	}
-
-
-	switch (param->local.v4.sin_family) {
-	case AF_INET:
-	{
-		if (param->local.v4.sin_len != sizeof(param->local.v4) ||
-		    (param->remote.v4.sin_family != 0 &&
-		    param->remote.v4.sin_len != sizeof(param->remote.v4))) {
-			return EINVAL;
-		}
-
-		inp = in_pcblookup_hash(inpinfo, param->remote.v4.sin_addr, param->remote.v4.sin_port,
-		    param->local.v4.sin_addr, param->local.v4.sin_port, 1, NULL);
-	}
-	break;
-
-	case AF_INET6:
-	{
-		union{
-			const struct in6_addr   *in6c;
-			struct in6_addr                 *in6;
-		} local, remote;
-
-		if (param->local.v6.sin6_len != sizeof(param->local.v6) ||
-		    (param->remote.v6.sin6_family != 0 &&
-		    param->remote.v6.sin6_len != sizeof(param->remote.v6))) {
-			return EINVAL;
-		}
-
-		local.in6c = &param->local.v6.sin6_addr;
-		remote.in6c = &param->remote.v6.sin6_addr;
-
-		inp = in6_pcblookup_hash(inpinfo, remote.in6, param->remote.v6.sin6_port, param->remote.v6.sin6_scope_id,
-		    local.in6, param->local.v6.sin6_port, param->local.v6.sin6_scope_id, 1, NULL);
-	}
-	break;
-
-	default:
-		return EINVAL;
-	}
-
-	if (inp == NULL) {
-		return ENOENT;
-	}
-
-	// At this point we have a ref to the inpcb
-	*out_cookie = nstat_tucookie_alloc(inp);
-	if (*out_cookie == NULL) {
-		in_pcb_checkstate(inp, WNT_RELEASE, 0);
-	}
-
-	return 0;
-}
-
-static errno_t
 nstat_tcp_lookup(
-	const void              *data,
-	u_int32_t               length,
-	nstat_provider_cookie_t *out_cookie)
+	__unused const void              *data,
+	__unused u_int32_t               length,
+	__unused nstat_provider_cookie_t *out_cookie)
 {
-	return nstat_tcpudp_lookup(&tcbinfo, data, length, out_cookie);
+	// Looking up a specific connection is not supported.
+	return ENOTSUP;
 }
 
 static int
@@ -1904,11 +1876,12 @@ static nstat_provider   nstat_udp_provider;
 
 static errno_t
 nstat_udp_lookup(
-	const void              *data,
-	u_int32_t               length,
-	nstat_provider_cookie_t *out_cookie)
+	__unused const void              *data,
+	__unused u_int32_t               length,
+	__unused nstat_provider_cookie_t *out_cookie)
 {
-	return nstat_tcpudp_lookup(&udbinfo, data, length, out_cookie);
+	// Looking up a specific connection is not supported.
+	return ENOTSUP;
 }
 
 static int
@@ -4247,6 +4220,17 @@ nstat_ifnet_copy_descriptor(
 	return 0;
 }
 
+static bool
+nstat_ifnet_cookie_equal(
+	nstat_provider_cookie_t cookie1,
+	nstat_provider_cookie_t cookie2)
+{
+	struct nstat_ifnet_cookie *c1 = (struct nstat_ifnet_cookie *)cookie1;
+	struct nstat_ifnet_cookie *c2 = (struct nstat_ifnet_cookie *)cookie2;
+
+	return (c1->ifp->if_index == c2->ifp->if_index) ? true : false;
+}
+
 static void
 nstat_init_ifnet_provider(void)
 {
@@ -4259,6 +4243,7 @@ nstat_init_ifnet_provider(void)
 	nstat_ifnet_provider.nstat_watcher_add = NULL;
 	nstat_ifnet_provider.nstat_watcher_remove = NULL;
 	nstat_ifnet_provider.nstat_copy_descriptor = nstat_ifnet_copy_descriptor;
+	nstat_ifnet_provider.nstat_cookie_equal = nstat_ifnet_cookie_equal;
 	nstat_ifnet_provider.nstat_release = nstat_ifnet_release;
 	nstat_ifnet_provider.next = nstat_providers;
 	nstat_providers = &nstat_ifnet_provider;
@@ -6018,10 +6003,16 @@ nstat_control_handle_add_request(
 		return result;
 	}
 
+	// sanitize cookie
+	nstat_control_sanitize_cookie(state, provider->nstat_provider_id, cookie);
+
 	result = nstat_control_source_add(req->hdr.context, state, provider, cookie);
 	if (result != 0) {
 		provider->nstat_release(cookie, 0);
 	}
+
+	// Set the flag if a provider added a single source
+	os_atomic_or(&state->ncs_added_src, (1 << provider->nstat_provider_id), relaxed);
 
 	return result;
 }
@@ -6035,7 +6026,14 @@ nstat_set_provider_filter(
 
 	u_int32_t prev_ncs_watching = atomic_or_32_ov(&state->ncs_watching, (1 << provider_id));
 
+	// Reject it if the client is already watching all the sources.
 	if ((prev_ncs_watching & (1 << provider_id)) != 0) {
+		return EALREADY;
+	}
+
+	// Reject it if any single source has already been added.
+	u_int32_t ncs_added_src = os_atomic_load(&state->ncs_added_src, relaxed);
+	if ((ncs_added_src & (1 << provider_id)) != 0) {
 		return EALREADY;
 	}
 

@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <os/overflow.h>
 #include <mach/mach_types.h>
 #include <mach/mach_traps.h>
 #include <mach/notify.h>
@@ -1824,7 +1825,9 @@ mach_voucher_extract_all_attr_recipes(
 		}
 
 		recipe = (mach_voucher_attr_recipe_t)(void *)&recipes[recipe_used];
-		content_size = recipe_size - recipe_used - sizeof(*recipe);
+		if (os_sub3_overflow(recipe_size, recipe_used, sizeof(*recipe), &content_size)) {
+			panic("voucher recipe underfow");
+		}
 
 		/*
 		 * Get the value(s) to pass to the manager

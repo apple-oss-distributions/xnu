@@ -1134,6 +1134,7 @@ extern int necp_buffer_find_tlv(u_int8_t *buffer, u_int32_t buffer_length, int o
 #define NECPCTL_DEDUP_POLICIES                          21      /* Dedup overlapping policies */
 #define NECPCTL_CLIENT_TRACING_LEVEL                    22      /* Client tracing level */
 #define NECPCTL_CLIENT_TRACING_PID                      23      /* Apply client tracing only to specified pid */
+#define NECPCTL_DROP_MANAGEMENT_LEVEL                   24      /* Drop management traffic at this level */
 
 #define NECP_LOOPBACK_PASS_ALL         1  // Pass all loopback traffic
 #define NECP_LOOPBACK_PASS_WITH_FILTER 2  // Pass all loopback traffic, but activate content filter and/or flow divert if applicable

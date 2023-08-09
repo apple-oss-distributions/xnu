@@ -734,7 +734,8 @@ void *
 mig_user_allocate(
 	vm_size_t       size)
 {
-	return kalloc_data(size, Z_WAITOK);
+	return kalloc_type_var_impl(KT_IPC_KMSG_KDATA_OOL,
+	           size, Z_WAITOK, NULL);
 }
 
 void
@@ -742,5 +743,5 @@ mig_user_deallocate(
 	char            *data,
 	vm_size_t       size)
 {
-	kfree_data(data, size);
+	kfree_type_var_impl(KT_IPC_KMSG_KDATA_OOL, data, size);
 }

@@ -119,7 +119,7 @@ ptrace(struct proc *p, struct ptrace_args *uap, int32_t *retval)
 {
 	struct proc     *t; /* target process */
 	task_t          task;
-	thread_t        th_act;
+	thread_t        th_act = THREAD_NULL;
 	struct uthread  *ut;
 	int tr_sigexc = 0;
 	int error = 0;
@@ -496,7 +496,6 @@ resume:
 		t->p_xstat = uap->data;
 		t->p_stat = SRUN;
 		proc_unlock(t);
-		thread_deallocate(th_act);
 		error = 0;
 	}
 	break;
@@ -509,6 +508,9 @@ resume:
 	error = 0;
 out:
 	proc_rele(t);
+	if (th_act) {
+		thread_deallocate(th_act);
+	}
 	return error;
 }
 

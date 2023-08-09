@@ -346,7 +346,8 @@ struct  ifreq {
 #define IFRTYPE_FUNCTIONAL_CELLULAR             5
 #define IFRTYPE_FUNCTIONAL_INTCOPROC            6
 #define IFRTYPE_FUNCTIONAL_COMPANIONLINK        7
-#define IFRTYPE_FUNCTIONAL_LAST                 7
+#define IFRTYPE_FUNCTIONAL_MANAGEMENT           8
+#define IFRTYPE_FUNCTIONAL_LAST                 8
 	} ifr_ifru;
 #define ifr_addr        ifr_ifru.ifru_addr      /* address */
 #define ifr_dstaddr     ifr_ifru.ifru_dstaddr   /* other end of p-to-p link */

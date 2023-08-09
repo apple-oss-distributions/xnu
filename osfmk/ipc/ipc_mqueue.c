@@ -352,8 +352,11 @@ ipc_mqueue_changed(
 	}
 
 	if (io_otype(object) == IOT_PORT) {
-		ipc_port_adjust_sync_link_state_locked(ip_object_to_port(object),
-		    PORT_SYNC_LINK_ANY, NULL);
+		ipc_port_t port = ip_object_to_port(object);
+		if (!port->ip_specialreply) {
+			ipc_port_adjust_sync_link_state_locked(port,
+			    PORT_SYNC_LINK_ANY, NULL);
+		}
 	} else {
 		klist_init(klist);
 	}

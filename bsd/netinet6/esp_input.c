@@ -1138,7 +1138,7 @@ noreplaycheck:
 	}
 
 #ifndef PULLDOWN_TEST
-	IP6_EXTHDR_CHECK(m, off, (int)(esplen + ivlen), return IPPROTO_DONE);  /*XXX*/
+	IP6_EXTHDR_CHECK(m, off, (int)(esplen + ivlen), goto bad);  /*XXX*/
 #else
 	IP6_EXTHDR_GET(esp, struct esp *, m, off, esplen + ivlen);
 	if (esp == NULL) {

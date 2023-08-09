@@ -779,11 +779,14 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 		if (INP_INTCOPROC_ALLOWED(inp)) {
 			ip6oa.ip6oa_flags |= IP6OAF_INTCOPROC_ALLOWED;
 		}
+		if (INP_MANAGEMENT_ALLOWED(inp)) {
+			ip6oa.ip6oa_flags |= IP6OAF_MANAGEMENT_ALLOWED;
+		}
 	} else {
 		mopts = NULL;
 		/* Allow the kernel to retransmit packets. */
 		ip6oa.ip6oa_flags |= IP6OAF_INTCOPROC_ALLOWED |
-		    IP6OAF_AWDL_UNRESTRICTED;
+		    IP6OAF_AWDL_UNRESTRICTED | IP6OAF_MANAGEMENT_ALLOWED;
 	}
 
 	if (ip6oa.ip6oa_boundif != IFSCOPE_NONE) {
@@ -1434,7 +1437,9 @@ done:
 	(!((_ip6oa)->ip6oa_flags & IP6OAF_INTCOPROC_ALLOWED) && \
 	    IFNET_IS_INTCOPROC(_ifp)) ||                        \
 	(!((_ip6oa)->ip6oa_flags & IP6OAF_AWDL_UNRESTRICTED) && \
-	    IFNET_IS_AWDL_RESTRICTED(_ifp)))
+	    IFNET_IS_AWDL_RESTRICTED(_ifp)) &&                  \
+	(!((_ip6oa)->ip6oa_flags & IP6OAF_MANAGEMENT_ALLOWED) && \
+	    IFNET_IS_MANAGEMENT(_ifp)))
 
 	if (error == 0 && ip6oa != NULL &&
 	    ((ifp && CHECK_RESTRICTIONS(ip6oa, ifp)) ||

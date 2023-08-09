@@ -140,6 +140,7 @@ struct dyld_pager {
 #else
 	os_ref_atomic_t         dyld_ref_count;      /* active uses */
 #endif
+	queue_chain_t           dyld_pager_queue;    /* next & prev pagers */
 	bool                    dyld_is_mapped;      /* has active mappings */
 	bool                    dyld_is_ready;       /* is this pager ready? */
 	vm_object_t             dyld_backing_object; /* VM object for shared cache */
@@ -154,6 +155,7 @@ struct dyld_pager {
 #endif /* defined(HAS_APPLE_PAC) */
 };
 
+queue_head_t dyld_pager_queue = QUEUE_HEAD_INITIALIZER(dyld_pager_queue);
 
 /*
  * "dyld_pager_lock" for counters, ref counting, etc.
@@ -166,6 +168,26 @@ LCK_MTX_DECLARE(dyld_pager_lock, &dyld_pager_lck_grp);
  */
 uint32_t dyld_pager_count = 0;
 uint32_t dyld_pager_count_max = 0;
+
+/*
+ * dyld_pager_dequeue()
+ *
+ * Removes a pager from the list of pagers.
+ *
+ * The caller must hold "dyld_pager".
+ */
+static void
+dyld_pager_dequeue(
+	__unused dyld_pager_t pager)
+{
+	queue_remove(&dyld_pager_queue,
+	    pager,
+	    dyld_pager_t,
+	    dyld_pager_queue);
+	pager->dyld_pager_queue.next = NULL;
+	pager->dyld_pager_queue.prev = NULL;
+	dyld_pager_count--;
+}
 
 /*
  * dyld_pager_init()
@@ -1015,7 +1037,7 @@ dyld_pager_deallocate_internal(
 		 * no one is really holding on to this pager anymore.
 		 * Terminate it.
 		 */
-		dyld_pager_count--;
+		dyld_pager_dequeue(pager);
 		/* the pager is all ours: no need for the lock now */
 		lck_mtx_unlock(&dyld_pager_lock);
 		dyld_pager_terminate_internal(pager);
@@ -1224,6 +1246,10 @@ dyld_pager_create(
 	vm_object_reference(backing_object);
 
 	lck_mtx_lock(&dyld_pager_lock);
+	queue_enter_first(&dyld_pager_queue,
+	    pager,
+	    dyld_pager_t,
+	    dyld_pager_queue);
 	dyld_pager_count++;
 	if (dyld_pager_count > dyld_pager_count_max) {
 		dyld_pager_count_max = dyld_pager_count;
@@ -1361,4 +1387,41 @@ done:
 		pager = MEMORY_OBJECT_NULL;
 	}
 	return kr;
+}
+
+static uint64_t
+dyld_pager_purge(
+	dyld_pager_t pager)
+{
+	uint64_t pages_purged;
+	vm_object_t object;
+
+	pages_purged = 0;
+	object = memory_object_to_vm_object((memory_object_t) pager);
+	assert(object != VM_OBJECT_NULL);
+	vm_object_lock(object);
+	pages_purged = object->resident_page_count;
+	vm_object_reap_pages(object, REAP_DATA_FLUSH);
+	pages_purged -= object->resident_page_count;
+//	printf("     %s:%d pager %p object %p purged %llu left %d\n", __FUNCTION__, __LINE__, pager, object, pages_purged, object->resident_page_count);
+	vm_object_unlock(object);
+	return pages_purged;
+}
+
+uint64_t
+dyld_pager_purge_all(void)
+{
+	uint64_t pages_purged;
+	dyld_pager_t pager;
+
+	pages_purged = 0;
+	lck_mtx_lock(&dyld_pager_lock);
+	queue_iterate(&dyld_pager_queue, pager, dyld_pager_t, dyld_pager_queue) {
+		pages_purged += dyld_pager_purge(pager);
+	}
+	lck_mtx_unlock(&dyld_pager_lock);
+#if DEVELOPMENT || DEBUG
+	printf("   %s:%d pages purged: %llu\n", __FUNCTION__, __LINE__, pages_purged);
+#endif /* DEVELOPMENT || DEBUG */
+	return pages_purged;
 }

@@ -42,6 +42,7 @@
 #include <kern/restartable.h>
 #include <kern/socd_client.h>
 #include <kern/thread.h>
+#include <kern/zalloc_internal.h>
 #include <mach/exception.h>
 #include <mach/arm/traps.h>
 #include <mach/vm_types.h>
@@ -1610,6 +1611,8 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
 			handle_kernel_abort_recover(state, esr, fault_addr, thread);
 			return;
 		}
+
+		panic_fault_address = fault_addr;
 	} else if (is_alignment_fault(fault_code)) {
 		if (recover) {
 			handle_kernel_abort_recover(state, esr, fault_addr, thread);

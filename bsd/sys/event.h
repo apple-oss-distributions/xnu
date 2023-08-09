@@ -838,11 +838,14 @@ knote_get_seltype(struct knote *kn)
 
 struct kevent_ctx_s {
 	uint64_t         kec_data_avail;    /* address of remaining data size */
-	user_addr_t      kec_data_out;      /* extra data pointer */
+	union {
+		user_addr_t      kec_data_out;      /* extra data pointer */
+		struct pollfd   *kec_poll_fds;      /* Poll fds */
+	};
 	user_size_t      kec_data_size;     /* total extra data size */
 	user_size_t      kec_data_resid;    /* residual extra data size */
 	uint64_t         kec_deadline;      /* wait deadline unless KEVENT_FLAG_IMMEDIATE */
-	struct fileproc *kec_fp;            /* fileproc to pass to fp_drop or NULL */
+	struct fileproc *kec_fp;          /* fileproc to pass to fp_drop or NULL */
 	int              kec_fd;            /* fd to pass to fp_drop or -1 */
 
 	/* the fields below are only set during process / scan */

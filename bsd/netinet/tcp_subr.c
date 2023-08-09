@@ -571,7 +571,7 @@ tcp_init(struct protosw *pp, struct domain *dp)
 	    &tcbinfo.ipi_hashmask);
 	tcbinfo.ipi_porthashbase = hashinit(tcp_tcbhashsize, M_PCB,
 	    &tcbinfo.ipi_porthashmask);
-	tcbinfo.ipi_zone.zov_kt_heap = tcpcbzone;
+	tcbinfo.ipi_zone = tcpcbzone;
 
 	tcbinfo.ipi_gc = tcp_gc;
 	tcbinfo.ipi_timer = tcp_itimer;
@@ -959,6 +959,9 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		if (tra->intcoproc_allowed) {
 			ip6oa.ip6oa_flags |= IP6OAF_INTCOPROC_ALLOWED;
 		}
+		if (tra->management_allowed) {
+			ip6oa.ip6oa_flags |= IP6OAF_MANAGEMENT_ALLOWED;
+		}
 		ip6oa.ip6oa_sotc = sotc;
 		if (tp != NULL) {
 			if ((tp->t_inpcb->inp_socket->so_flags1 & SOF1_QOSMARKING_ALLOWED)) {
@@ -1020,6 +1023,9 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		}
 		if (tra->awdl_unrestricted) {
 			ipoa.ipoa_flags |= IPOAF_AWDL_UNRESTRICTED;
+		}
+		if (tra->management_allowed) {
+			ipoa.ipoa_flags |= IPOAF_MANAGEMENT_ALLOWED;
 		}
 		ipoa.ipoa_sotc = sotc;
 		if (tp != NULL) {

@@ -205,6 +205,17 @@ enum {
      */
     kTCTypeCryptex1GenericSupplemental = 0x17,
 
+    /*
+     * Type: Personalized (Cryptex1 mobile asset brain)
+     * This is exactly the same as the kTCTypeMobileAssetBrain type, except this using
+     * the PDI nonce. The PDI nonce rolls every boot, and having a trust cache type
+     * here helps create an asset brain personalization which works on the current
+     * boot, but becomes invalid after a reboot, thus ensuring the brain which was
+     * personalized will only remain valid for the current OS (this type is used by
+     * the update brain which performs an OTA).
+     */
+    kTCTypeMobileAssetBrainEphemeral = 0x18,
+
     kTCTypeTotal,
 
     /* Invalid type */
@@ -222,6 +233,7 @@ enum {
 #define kLibTrustCacheHasSupplementalEphemeral 1
 #define kLibTrustCacheHasCryptex1Generic 1
 #define kLibTrustCacheHasCryptex1GenericSupplemental 1
+#define kLibTrustCacheHasMobileAssetBrainEphemeral 1
 
 typedef struct _TrustCache {
     /* Linked list linkage for the trust cache */

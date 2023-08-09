@@ -127,7 +127,7 @@ static_assert((C_SEG_OFFSET_BITS + C_SLOT_C_SIZE_BITS +
     C_SLOT_C_PADDING_BITS + C_SLOT_PACKED_PTR_BITS) % 32 == 0);
 
 struct c_slot {
-	uint64_t        c_offset:C_SEG_OFFSET_BITS;
+	uint64_t        c_offset:C_SEG_OFFSET_BITS __kernel_ptr_semantics;
 	uint64_t        c_size:C_SLOT_C_SIZE_BITS;
 #if C_SLOT_C_CODEC_BITS
 	uint64_t        c_codec:C_SLOT_C_CODEC_BITS;
@@ -145,7 +145,7 @@ struct c_slot {
 #if C_SLOT_C_PADDING_BITS
 	uint64_t        c_padding:C_SLOT_C_PADDING_BITS;
 #endif
-	uint64_t        c_packed_ptr:C_SLOT_PACKED_PTR_BITS;
+	uint64_t        c_packed_ptr:C_SLOT_PACKED_PTR_BITS __kernel_ptr_semantics;
 
 	/* debugging fields, typically not present on release kernels */
 #if CHECKSUM_THE_DATA

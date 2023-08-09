@@ -2394,10 +2394,10 @@ findpcb:
 			struct sockaddr_storage to2;
 			struct inpcb *oinp = sotoinpcb(so);
 			struct ifnet *head_ifscope;
-			unsigned int head_nocell, head_recvanyif,
+			bool head_nocell, head_recvanyif,
 			    head_noexpensive, head_awdl_unrestricted,
 			    head_intcoproc_allowed, head_external_port,
-			    head_noconstrained;
+			    head_noconstrained, head_management_allowed;
 
 			/* Get listener's bound-to-interface, if any */
 			head_ifscope = (inp->inp_flags & INP_BOUND_IF) ?
@@ -2412,6 +2412,7 @@ findpcb:
 			head_awdl_unrestricted = INP_AWDL_UNRESTRICTED(inp);
 			head_intcoproc_allowed = INP_INTCOPROC_ALLOWED(inp);
 			head_external_port = (inp->inp_flags2 & INP2_EXTERNAL_PORT);
+			head_management_allowed = INP_MANAGEMENT_ALLOWED(inp);
 
 			/*
 			 * If the state is LISTEN then ignore segment if it contains an RST.
@@ -2613,6 +2614,9 @@ findpcb:
 			}
 			if (head_intcoproc_allowed) {
 				inp_set_intcoproc_allowed(inp);
+			}
+			if (head_management_allowed) {
+				inp_set_management_allowed(inp);
 			}
 			/*
 			 * Inherit {IN,IN6}_RECV_ANYIF from listener.
@@ -5723,6 +5727,7 @@ dropwithreset:
 	tra.ifscope = ifscope;
 	tra.awdl_unrestricted = 1;
 	tra.intcoproc_allowed = 1;
+	tra.management_allowed = 1;
 	if (thflags & TH_ACK) {
 		/* mtod() below is safe as long as hdr dropping is delayed */
 		tcp_respond(tp, mtod(m, void *), th, m, (tcp_seq)0, th->th_ack,

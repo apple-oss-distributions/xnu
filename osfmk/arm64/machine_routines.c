@@ -73,6 +73,14 @@
 #include <libkern/section_keywords.h>
 
 /**
+ * Release builds apply second stage locks, but astris needs to access
+ * DBG_WRAP* and ACC_OVRD in order to properly halt cores.
+ * This boot-arg will cause second stage lock to be skipped when running
+ * a release kernel on a PROD-fused SoC.
+ */
+TUNABLE_WRITEABLE(boolean_t, skip_second_stage_lock_on_dev_fused, "skip_second_stage_lock", 0);
+
+/**
  * On supported hardware, debuggable builds make the HID bits read-only
  * without locking them.  This lets people manually modify HID bits while
  * debugging, since they can use a debugging tool to first reset the HID

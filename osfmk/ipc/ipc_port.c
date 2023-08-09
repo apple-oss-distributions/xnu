@@ -93,6 +93,7 @@
 #include <ipc/ipc_notify.h>
 #include <ipc/ipc_importance.h>
 #include <machine/limits.h>
+#include <kern/task.h>
 #include <kern/turnstile.h>
 #include <kern/machine.h>
 
@@ -100,6 +101,10 @@
 #include <ipc/ipc_service_port.h>
 
 #include <string.h>
+
+typedef struct proc *proc_t;
+extern boolean_t proc_is_simulated(const proc_t p);
+extern struct proc *current_proc(void);
 
 static TUNABLE(bool, prioritize_launch, "prioritize_launch", true);
 TUNABLE_WRITEABLE(int, ipc_portbt, "ipc_portbt", false);
@@ -770,6 +775,9 @@ ipc_port_init(
 	}
 	if (flags & IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS) {
 		ip_enforce_reply_port_semantics(port);
+	}
+	if (flags & IPC_PORT_ENFORCE_STRICT_REPLY_PORT_SEMANTICS) {
+		ip_enforce_strict_reply_port_semantics(port);
 	}
 	if (flags & IPC_PORT_INIT_PROVISIONAL_REPLY) {
 		ip_mark_provisional_reply_port(port);
@@ -3425,6 +3433,16 @@ ipc_port_update_qos_n_iotier(
 
 	ip_mq_unlock(port);
 	return KERN_SUCCESS;
+}
+
+boolean_t
+__ip_strict_reply_port_semantics_violation(void)
+{
+	return task_get_platform_binary(current_task())
+#if CONFIG_ROSETTA
+	       && !task_is_translated(current_task()) /* ignore rosetta violators */
+#endif
+	       && !proc_is_simulated(current_proc());
 }
 
 #if MACH_ASSERT

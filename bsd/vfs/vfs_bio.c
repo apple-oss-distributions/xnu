@@ -1156,7 +1156,8 @@ buf_proc(buf_t bp)
 
 
 static errno_t
-buf_map_range_internal(buf_t bp, caddr_t *io_addr, boolean_t legacymode)
+buf_map_range_internal(buf_t bp, caddr_t *io_addr, boolean_t legacymode,
+    vm_prot_t prot)
 {
 	buf_t           real_bp;
 	vm_offset_t     vaddr;
@@ -1186,7 +1187,7 @@ buf_map_range_internal(buf_t bp, caddr_t *io_addr, boolean_t legacymode)
 			vaddr += bp->b_uploffset;
 		}
 	} else {
-		kret = ubc_upl_map_range(bp->b_upl, bp->b_uploffset, bp->b_bcount, VM_PROT_DEFAULT, &vaddr);    /* Map it in */
+		kret = ubc_upl_map_range(bp->b_upl, bp->b_uploffset, bp->b_bcount, prot, &vaddr);    /* Map it in */
 	}
 
 	if (kret != KERN_SUCCESS) {
@@ -1203,13 +1204,26 @@ buf_map_range_internal(buf_t bp, caddr_t *io_addr, boolean_t legacymode)
 errno_t
 buf_map_range(buf_t bp, caddr_t *io_addr)
 {
-	return buf_map_range_internal(bp, io_addr, false);
+	return buf_map_range_internal(bp, io_addr, false, VM_PROT_DEFAULT);
+}
+
+errno_t
+buf_map_range_with_prot(buf_t bp, caddr_t *io_addr, vm_prot_t prot)
+{
+	/* Only VM_PROT_READ and/or VM_PROT_WRITE is allowed. */
+	prot &= (VM_PROT_READ | VM_PROT_WRITE);
+	if (prot == VM_PROT_NONE) {
+		*io_addr = NULL;
+		return EINVAL;
+	}
+
+	return buf_map_range_internal(bp, io_addr, false, prot);
 }
 
 errno_t
 buf_map(buf_t bp, caddr_t *io_addr)
 {
-	return buf_map_range_internal(bp, io_addr, true);
+	return buf_map_range_internal(bp, io_addr, true, VM_PROT_DEFAULT);
 }
 
 static errno_t

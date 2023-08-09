@@ -1427,20 +1427,10 @@ extern boolean_t        vm_map_page_aligned(
 	vm_map_offset_t         offset,
 	vm_map_offset_t         mask);
 
-static inline int
-vm_map_range_overflows(vm_map_offset_t addr, vm_map_size_t size)
-{
-	vm_map_offset_t sum;
-	return os_add_overflow(addr, size, &sum);
-}
-
-static inline int
-mach_vm_range_overflows(mach_vm_offset_t addr, mach_vm_size_t size)
-{
-	mach_vm_offset_t sum;
-	return os_add_overflow(addr, size, &sum);
-}
-
+extern bool vm_map_range_overflows(
+	vm_map_t                map,
+	vm_map_offset_t         addr,
+	vm_map_size_t           size);
 #ifdef XNU_KERNEL_PRIVATE
 
 /* Support for vm_map ranges */

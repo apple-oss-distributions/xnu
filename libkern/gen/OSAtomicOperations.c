@@ -29,11 +29,7 @@
 #include <libkern/OSAtomic.h>
 #include <kern/debug.h>
 #include <machine/atomic.h>
-
-enum {
-	false   = 0,
-	true    = 1
-};
+#include <stdbool.h>
 
 #ifndef NULL
 #define NULL ((void *)0)

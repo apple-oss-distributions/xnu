@@ -378,6 +378,7 @@ PE_lockdown_iokit(void)
 	 * against a kernel which has not yet enabled the full set of available
 	 * hardware protections.
 	 */
+	zalloc_iokit_lockdown();
 	StartIOKitMatching();
 }
 

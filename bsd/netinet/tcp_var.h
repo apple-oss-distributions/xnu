@@ -1643,7 +1643,8 @@ struct tcp_respond_args {
 	    awdl_unrestricted:1,
 	    intcoproc_allowed:1,
 	    keep_alive:1,
-	    noconstrained:1;
+	    noconstrained:1,
+	    management_allowed:1;
 };
 
 void     tcp_canceltimers(struct tcpcb *);

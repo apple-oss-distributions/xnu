@@ -278,6 +278,9 @@ extern ppnum_t            vm_page_get_phys_page(vm_page_t page);
 extern vm_page_t          vm_page_get_next(vm_page_t page);
 
 extern kern_return_t    mach_vm_pressure_level_monitor(boolean_t wait_for_pressure, unsigned int *pressure_level);
+#if KERNEL_PRIVATE
+extern kern_return_t    mach_vm_wire_level_monitor(int64_t requested_pages);
+#endif /* KERNEL_PRIVATE */
 
 #if XNU_TARGET_OS_OSX
 extern kern_return_t    vm_pageout_wait(uint64_t deadline);

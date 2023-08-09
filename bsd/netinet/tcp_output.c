@@ -3215,6 +3215,13 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 	if (INP_INTCOPROC_ALLOWED(inp) && isipv6) {
 		ip6oa.ip6oa_flags |=  IP6OAF_INTCOPROC_ALLOWED;
 	}
+	if (INP_MANAGEMENT_ALLOWED(inp)) {
+		if (isipv6) {
+			ip6oa.ip6oa_flags |=  IP6OAF_MANAGEMENT_ALLOWED;
+		} else {
+			ipoa.ipoa_flags |=  IPOAF_MANAGEMENT_ALLOWED;
+		}
+	}
 	if (isipv6) {
 		ip6oa.ip6oa_sotc = so->so_traffic_class;
 		ip6oa.ip6oa_netsvctype = so->so_netsvctype;

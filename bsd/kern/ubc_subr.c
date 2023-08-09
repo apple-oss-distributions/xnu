@@ -2008,7 +2008,7 @@ ubc_map(vnode_t vp, int flags)
 			}
 			SET(uip->ui_flags, (UI_WASMAPPED | UI_ISMAPPED));
 			if (flags & PROT_WRITE) {
-				SET(uip->ui_flags, UI_MAPPEDWRITE);
+				SET(uip->ui_flags, (UI_WASMAPPEDWRITE | UI_MAPPEDWRITE));
 			}
 		}
 		CLR(uip->ui_flags, UI_MAPBUSY);
@@ -3014,6 +3014,25 @@ ubc_is_mapped_writable(const struct vnode *vp)
 {
 	boolean_t writable;
 	return ubc_is_mapped(vp, &writable) && writable;
+}
+
+boolean_t
+ubc_was_mapped(const struct vnode *vp, boolean_t *writable)
+{
+	if (!UBCINFOEXISTS(vp) || !ISSET(vp->v_ubcinfo->ui_flags, UI_WASMAPPED)) {
+		return FALSE;
+	}
+	if (writable) {
+		*writable = ISSET(vp->v_ubcinfo->ui_flags, UI_WASMAPPEDWRITE);
+	}
+	return TRUE;
+}
+
+boolean_t
+ubc_was_mapped_writable(const struct vnode *vp)
+{
+	boolean_t writable;
+	return ubc_was_mapped(vp, &writable) && writable;
 }
 
 

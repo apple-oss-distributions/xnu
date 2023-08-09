@@ -229,24 +229,28 @@ get_thread_lock_count(thread_t th)
 }
 
 /*
- * XXX: wait for BSD to  fix signal code
- * Until then, we cannot block here.  We know the task
- * can't go away, so we make sure it is still active after
- * retrieving the first thread for extra safety.
+ * Returns a thread reference.
  */
 thread_t
 get_firstthread(task_t task)
 {
-	thread_t        thread = (thread_t)(void *)queue_first(&task->threads);
-
-	if (queue_end(&task->threads, (queue_entry_t)thread)) {
-		thread = THREAD_NULL;
-	}
+	thread_t thread = THREAD_NULL;
+	task_lock(task);
 
 	if (!task->active) {
+		task_unlock(task);
 		return THREAD_NULL;
 	}
 
+	thread = (thread_t)(void *)queue_first(&task->threads);
+
+	if (queue_end(&task->threads, (queue_entry_t)thread)) {
+		task_unlock(task);
+		return THREAD_NULL;
+	}
+
+	thread_reference(thread);
+	task_unlock(task);
 	return thread;
 }
 

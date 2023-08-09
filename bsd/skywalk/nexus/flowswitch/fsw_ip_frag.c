@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -133,7 +133,7 @@ struct ipfq {
 	uint64_t        ipfq_timestamp; /* time of creation */
 	struct ipf_key  ipfq_key;       /* ipfq search key */
 	uint16_t        ipfq_nfrag;     /* # of fragments in queue */
-	uint16_t        ipfq_unfraglen; /* len of unfragmentable part */
+	int             ipfq_unfraglen; /* len of unfragmentable part */
 	bool            ipfq_is_dirty;  /* q is dirty, don't use */
 };
 
@@ -516,6 +516,7 @@ ipf_process(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt_ptr,
 	int next;
 	int first_frag = 0;
 	int err = 0;
+	int local_ipfq_unfraglen;
 
 	*nfrags = 0;
 
@@ -565,7 +566,7 @@ ipf_process(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt_ptr,
 
 		bcopy(key, &q->ipfq_key, sizeof(struct ipf_key));
 		q->ipfq_down = q->ipfq_up = (struct ipf *)q;
-		q->ipfq_unfraglen = 0;
+		q->ipfq_unfraglen = -1;  /* The 1st fragment has not arrived. */
 		q->ipfq_nfrag = 0;
 		q->ipfq_timestamp = _net_uptime;
 	}
@@ -581,16 +582,22 @@ ipf_process(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt_ptr,
 		goto done;
 	}
 
+	local_ipfq_unfraglen = q->ipfq_unfraglen;
+
 	/*
 	 * If it's the 1st fragment, record the length of the
 	 * unfragmentable part and the next header of the fragment header.
+	 * Assume the first fragement to arrive will be correct.
+	 * We do not have any duplicate checks here yet so another packet
+	 * with fragoff == 0 could come and overwrite the ipfq_unfraglen
+	 * and worse, the next header, at any time.
 	 */
-	if (fragoff == 0) {
-		q->ipfq_unfraglen = unfraglen;
+	if (fragoff == 0 && local_ipfq_unfraglen == -1) {
+		local_ipfq_unfraglen = unfraglen;
 	}
 
 	/* Check that the reassembled packet would not exceed 65535 bytes. */
-	if (q->ipfq_unfraglen + fragoff + fragpartlen > IP_MAXPACKET) {
+	if (local_ipfq_unfraglen + fragoff + fragpartlen > IP_MAXPACKET) {
 		SK_DF(SK_VERB_IP_FRAG, "frag too big");
 		STATS_INC(mgr->ipfm_stats, FSW_STATS_RX_FRAG_BAD);
 		ipf_icmp_param_err(mgr, pkt, sizeof(struct ip6_hdr) +
@@ -608,7 +615,7 @@ ipf_process(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt_ptr,
 	if (fragoff == 0) {
 		for (f = q->ipfq_down; f != (struct ipf *)q; f = f_down) {
 			f_down = f->ipf_down;
-			if (q->ipfq_unfraglen + f->ipf_off + f->ipf_len >
+			if (local_ipfq_unfraglen + f->ipf_off + f->ipf_len >
 			    IP_MAXPACKET) {
 				SK_DF(SK_VERB_IP_FRAG, "frag too big");
 				STATS_INC(mgr->ipfm_stats,
@@ -688,6 +695,8 @@ ipf_process(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt_ptr,
 	}
 
 insert:
+	q->ipfq_unfraglen = local_ipfq_unfraglen;
+
 	/*
 	 * Stick new segment in its place;
 	 * check for complete reassembly.

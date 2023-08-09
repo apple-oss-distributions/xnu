@@ -88,6 +88,8 @@
 #include <netinet/ip6.h>
 #include <netinet6/nd6.h>
 
+#include <IOKit/IOBSD.h>
+
 extern struct rtstat rtstat;
 extern struct domain routedomain_s;
 static struct domain *routedomain = NULL;
@@ -445,7 +447,7 @@ route_output(struct mbuf *m, struct socket *so)
 	/*
 	 * Block changes on INTCOPROC interfaces.
 	 */
-	if (ifscope) {
+	if (ifscope != IFSCOPE_NONE) {
 		unsigned int intcoproc_scope = 0;
 		ifnet_head_lock_shared();
 		TAILQ_FOREACH(ifp, &ifnet_head, if_link) {
@@ -456,6 +458,25 @@ route_output(struct mbuf *m, struct socket *so)
 		}
 		ifnet_head_done();
 		if (intcoproc_scope == ifscope && proc_getpid(current_proc()) != 0) {
+			senderr(EINVAL);
+		}
+	}
+	/*
+	 * Require entitlement to change management interfaces
+	 */
+	if (management_control_unrestricted == false && if_management_interface_check_needed == true &&
+	    ifscope != IFSCOPE_NONE && proc_getpid(current_proc()) != 0) {
+		bool is_management = false;
+
+		ifnet_head_lock_shared();
+		if (IF_INDEX_IN_RANGE(ifscope)) {
+			if (IFNET_IS_MANAGEMENT(ifindex2ifnet[ifscope])) {
+				is_management = true;
+			}
+		}
+		ifnet_head_done();
+
+		if (is_management && !IOCurrentTaskHasEntitlement(MANAGEMENT_CONTROL_ENTITLEMENT)) {
 			senderr(EINVAL);
 		}
 	}

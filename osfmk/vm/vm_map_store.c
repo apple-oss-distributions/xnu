@@ -105,6 +105,10 @@ _vm_map_store_entry_link(
 	vm_map_entry_t          after_where,
 	vm_map_entry_t          entry)
 {
+	if (__improbable(entry->vme_end <= entry->vme_start)) {
+		panic("maphdr %p entry %p start 0x%llx end 0x%llx\n", mapHdr, entry, (uint64_t)entry->vme_start, (uint64_t)entry->vme_end);
+	}
+
 	assert(entry->vme_start < entry->vme_end);
 	if (__improbable(vm_debug_events)) {
 		DTRACE_VM4(map_entry_link,

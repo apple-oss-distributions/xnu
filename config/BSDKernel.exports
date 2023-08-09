@@ -55,6 +55,7 @@ _buf_lblkno
 _buf_lblksize
 _buf_map
 _buf_map_range
+_buf_map_range_with_prot
 _buf_markaged
 _buf_markclean
 _buf_markdelayed

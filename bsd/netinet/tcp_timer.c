@@ -994,6 +994,7 @@ tcp_send_keep_alive(struct tcpcb *tp)
 		tra.noconstrained = INP_NO_CONSTRAINED(inp) ? 1 : 0;
 		tra.awdl_unrestricted = INP_AWDL_UNRESTRICTED(inp) ? 1 : 0;
 		tra.intcoproc_allowed = INP_INTCOPROC_ALLOWED(inp) ? 1 : 0;
+		tra.management_allowed = INP_MANAGEMENT_ALLOWED(inp) ? 1 : 0;
 		tra.keep_alive = 1;
 		if (tp->t_inpcb->inp_flags & INP_BOUND_IF) {
 			tra.ifscope = tp->t_inpcb->inp_boundifp->if_index;

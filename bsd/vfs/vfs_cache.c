@@ -1687,6 +1687,20 @@ restore_ndp_state(struct nameidata *ndp, struct componentname *cnp, struct namei
 	cnp->cn_hash = saved_statep->cn_hash;
 }
 
+static inline bool
+vid_is_same(vnode_t vp, uint32_t vid)
+{
+	return !(os_atomic_load(&vp->v_lflag, relaxed) & (VL_DRAIN | VL_TERMINATE | VL_DEAD)) && (vnode_vid(vp) == vid);
+}
+
+static inline bool
+can_check_v_mountedhere(vnode_t vp)
+{
+	return (os_atomic_load(&vp->v_usecount, relaxed) > 0) &&
+	       (os_atomic_load(&vp->v_flag, relaxed) & VMOUNTEDHERE) &&
+	       !(os_atomic_load(&vp->v_lflag, relaxed) & (VL_TERMINATE | VL_DEAD) &&
+	       (vp->v_type == VDIR));
+}
 
 /*
  * Returns:	0			Success
@@ -1944,6 +1958,7 @@ skiprsrcfork:
 			 * check once already and don't need to do it again.
 			 */
 			if (!locked && (ndp->ni_rootdir != rootvnode)) {
+				vfs_smr_leave();
 				needs_lock = true;
 				goto prep_lock_retry;
 			} else if (locked && !dotdotchecked && (ndp->ni_rootdir != rootvnode)) {
@@ -1983,9 +1998,16 @@ skiprsrcfork:
 		} else {
 			if (!locked) {
 				vp = cache_lookup_smr(dp, cnp, &vvid);
+				if (!vid_is_same(dp, vid)) {
+					vp = NULLVP;
+					needs_lock = true;
+					vfs_smr_leave();
+					goto prep_lock_retry;
+				}
 			} else {
 				vp = cache_lookup_locked(dp, cnp, &vvid);
 			}
+
 
 			if (!vp) {
 				break;
@@ -2041,10 +2063,30 @@ skiprsrcfork:
 			break;
 		}
 
-		if ((mp = vp->v_mountedhere) && ((cnp->cn_flags & NOCROSSMOUNT) == 0)) {
-			vnode_t tmp_vp = mp->mnt_realrootvp;
-			int tmp_vid = mp->mnt_realrootvp_vid;
+		/*
+		 * v_mountedhere is PAC protected which means vp has to be a VDIR
+		 * to access that pointer as v_mountedhere. However, if we don't
+		 * have the name cache lock or an iocount (which we won't in the
+		 * !locked case) we can't guarantee that. So we try to detect it
+		 * via other fields to avoid having to dereference v_mountedhere
+		 * when we don't need to. Note that in theory if entire reclaim
+		 * happens between the time we check can_check_v_mountedhere()
+		 * and the subsequent access this will still fail but the fields
+		 * we check make that exceedingly unlikely and will result in
+		 * the chances of that happening being practically zero (but not
+		 * zero).
+		 */
+		if ((locked || can_check_v_mountedhere(vp)) &&
+		    (mp = vp->v_mountedhere) && ((cnp->cn_flags & NOCROSSMOUNT) == 0)) {
+			vnode_t tmp_vp;
+			int tmp_vid;
 
+			if (!(locked || vid_is_same(vp, vvid))) {
+				vp = NULL;
+				break;
+			}
+			tmp_vp = mp->mnt_realrootvp;
+			tmp_vid = mp->mnt_realrootvp_vid;
 			if (tmp_vp == NULLVP || mp->mnt_generation != mount_generation ||
 			    tmp_vid != tmp_vp->v_id) {
 				break;
@@ -2076,6 +2118,10 @@ skiprsrcfork:
 		}
 #endif /* CONFIG_TRIGGERS */
 
+		if (!(locked || vid_is_same(vp, vvid))) {
+			vp = NULL;
+			break;
+		}
 
 		dp = vp;
 		vid = vvid;
@@ -2095,6 +2141,7 @@ skiprsrcfork:
 			vvid = 0;
 		}
 		if (!vnode_hold_smr(dp)) {
+			vfs_smr_leave();
 			if (vp) {
 				vnode_drop(vp);
 				vp = NULLVP;
@@ -2280,7 +2327,6 @@ errorout:
 	return error;
 
 prep_lock_retry:
-	vfs_smr_leave();
 	restore_ndp_state(ndp, cnp, &saved_state);
 	dp = start_dp;
 	goto retry;

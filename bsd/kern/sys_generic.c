@@ -1747,7 +1747,7 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 		struct kevent_qos_s kev = {
 			.ident = fds[i].fd,
 			.flags = EV_ADD | EV_ONESHOT | EV_POLL,
-			.udata = CAST_USER_ADDR_T(&fds[i])
+			.udata = i, /* Index into pollfd array */
 		};
 
 		/* Handle input events */
@@ -1815,6 +1815,7 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 		.kec_process_noutputs = rfds,
 		.kec_process_flags    = KEVENT_FLAG_POLL,
 		.kec_deadline         = 0, /* wait forever */
+		.kec_poll_fds         = fds,
 	};
 
 	/*
@@ -1852,7 +1853,9 @@ out:
 static int
 poll_callback(struct kevent_qos_s *kevp, kevent_ctx_t kectx)
 {
-	struct pollfd *fds = CAST_DOWN(struct pollfd *, kevp->udata);
+	assert(kectx->kec_process_flags & KEVENT_FLAG_POLL);
+	struct pollfd *fds = &kectx->kec_poll_fds[kevp->udata];
+
 	short prev_revents = fds->revents;
 	short mask = 0;
 

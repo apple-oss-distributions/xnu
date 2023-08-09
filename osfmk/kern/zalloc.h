@@ -388,6 +388,15 @@ extern void     zone_require_ro(
  * free the incoming memory on failure cases.
  *
  #if XNU_KERNEL_PRIVATE
+ * @const Z_SET_NOTSHARED
+ * Using this flag from external allocations APIs (kalloc_type/zalloc)
+ * allows the callsite to skip the shared zone for that sizeclass and
+ * directly allocated from the requested zone.
+ * Using this flag from internal APIs (zalloc_ext) will skip the shared
+ * zone only when a given threshold is exceeded. It will also set a flag
+ * to indicate that future allocations to the zone should directly go to
+ * the zone instead of the shared zone.
+ *
  * @const Z_SPRAYQTN
  * This flag tells the VM to allocate from the "spray quarantine" range when
  * it services the allocation. For more details on what allocations qualify
@@ -433,6 +442,7 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	Z_REALLOCF      = 0x0008,
 
 #if XNU_KERNEL_PRIVATE
+	Z_SET_NOTSHARED = 0x0040,
 	Z_SPRAYQTN      = 0x0080,
 	Z_KALLOC_ARRAY  = 0x0100,
 #if KASAN_CLASSIC
@@ -483,6 +493,102 @@ struct kalloc_result {
 };
 
 /*!
+ * @typedef zone_stats_t
+ *
+ * @abstract
+ * The opaque type for per-cpu zone stats that are accumulated per zone
+ * or per zone-view.
+ */
+typedef struct zone_stats *__zpercpu zone_stats_t;
+
+/*!
+ * @typedef zone_view_t
+ *
+ * @abstract
+ * A view on a zone for accounting purposes.
+ *
+ * @discussion
+ * A zone view uses the zone it references for the allocations backing store,
+ * but does the allocation accounting at the view level.
+ *
+ * These accounting are surfaced by @b zprint(1) and similar tools,
+ * which allow for cheap but finer grained understanding of allocations
+ * without any fragmentation cost.
+ *
+ * Zone views are protected by the kernel lockdown and can't be initialized
+ * dynamically. They must be created using @c ZONE_VIEW_DEFINE().
+ */
+typedef struct zone_view *zone_view_t;
+struct zone_view {
+	zone_t          zv_zone;
+	zone_stats_t    zv_stats;
+	const char     *zv_name __unsafe_indexable;
+	zone_view_t     zv_next;
+};
+
+/*!
+ * @typedef kalloc_type_view_t
+ *
+ * @abstract
+ * The opaque type created at kalloc_type callsites to redirect calls to
+ * the right zone.
+ */
+typedef struct kalloc_type_view *kalloc_type_view_t;
+
+#if XNU_KERNEL_PRIVATE
+/*
+ * kalloc_type/kfree_type implementation functions
+ */
+extern void *__unsafe_indexable kalloc_type_impl_internal(
+	kalloc_type_view_t  kt_view,
+	zalloc_flags_t      flags);
+
+extern void kfree_type_impl_internal(
+	kalloc_type_view_t kt_view,
+	void               *ptr __unsafe_indexable);
+
+static inline void *__unsafe_indexable
+kalloc_type_impl(
+	kalloc_type_view_t      kt_view,
+	zalloc_flags_t          flags)
+{
+	void *__unsafe_indexable addr = kalloc_type_impl_internal(kt_view, flags);
+	if (flags & Z_NOFAIL) {
+		__builtin_assume(addr != NULL);
+	}
+	return addr;
+}
+
+#define kfree_type_impl(kt_view, ptr) \
+	kfree_type_impl_internal(kt_view, (ptr))
+
+#else /* XNU_KERNEL_PRIVATE */
+
+extern void *__unsafe_indexable kalloc_type_impl(
+	kalloc_type_view_t  kt_view,
+	zalloc_flags_t      flags);
+
+static inline void *__unsafe_indexable
+__kalloc_type_impl(
+	kalloc_type_view_t  kt_view,
+	zalloc_flags_t      flags)
+{
+	void *addr = (kalloc_type_impl)(kt_view, flags);
+	if (flags & Z_NOFAIL) {
+		__builtin_assume(addr != NULL);
+	}
+	return addr;
+}
+
+#define kalloc_type_impl(ktv, fl) __kalloc_type_impl(ktv, fl)
+
+extern void kfree_type_impl(
+	kalloc_type_view_t  kt_view,
+	void                *ptr __unsafe_indexable);
+
+#endif /* XNU_KERNEL_PRIVATE */
+
+/*!
  * @function zalloc
  *
  * @abstract
@@ -491,13 +597,29 @@ struct kalloc_result {
  * @discussion
  * If the zone isn't exhaustible and is expandable, this call never fails.
  *
- * @param zone_or_view  the zone or zone view to allocate from
+ * @param zone          the zone or zone view to allocate from
  *
  * @returns             NULL or the allocated element
  */
 __attribute__((malloc))
 extern void *__unsafe_indexable zalloc(
-	zone_or_view_t  zone_or_view);
+	zone_t          zone);
+
+__attribute__((malloc))
+__attribute__((overloadable))
+static inline void *__unsafe_indexable
+zalloc(zone_view_t view)
+{
+	return zalloc((zone_t)view);
+}
+
+__attribute__((malloc))
+__attribute__((overloadable))
+static inline void *__unsafe_indexable
+zalloc(kalloc_type_view_t kt_view)
+{
+	return (kalloc_type_impl)(kt_view, Z_WAITOK);
+}
 
 /*!
  * @function zalloc_noblock
@@ -509,13 +631,29 @@ extern void *__unsafe_indexable zalloc(
  * This call is suitable for preemptible code, however allocation
  * isn't allowed from interrupt context.
  *
- * @param zone_or_view  the zone or zone view to allocate from
+ * @param zone          the zone or zone view to allocate from
  *
  * @returns             NULL or the allocated element
  */
 __attribute__((malloc))
 extern void *__unsafe_indexable zalloc_noblock(
-	zone_or_view_t  zone_or_view);
+	zone_t          zone);
+
+__attribute__((malloc))
+__attribute__((overloadable))
+static inline void *__unsafe_indexable
+zalloc_noblock(zone_view_t view)
+{
+	return zalloc_noblock((zone_t)view);
+}
+
+__attribute__((malloc))
+__attribute__((overloadable))
+static inline void *__unsafe_indexable
+zalloc_noblock(kalloc_type_view_t kt_view)
+{
+	return (kalloc_type_impl)(kt_view, Z_NOWAIT);
+}
 
 /*!
  * @function zalloc_flags()
@@ -523,23 +661,48 @@ extern void *__unsafe_indexable zalloc_noblock(
  * @abstract
  * Allocates an element from a specified zone, with flags.
  *
- * @param zone_or_view  the zone or zone view to allocate from
+ * @param zone          the zone or zone view to allocate from
  * @param flags         a collection of @c zalloc_flags_t.
  *
  * @returns             NULL or the allocated element
  */
 __attribute__((malloc))
 extern void *__unsafe_indexable zalloc_flags(
-	zone_or_view_t  zone_or_view,
+	zone_t          zone,
 	zalloc_flags_t  flags);
 
 __attribute__((malloc))
+__attribute__((overloadable))
 static inline void *__unsafe_indexable
 __zalloc_flags(
-	zone_or_view_t  zone_or_view,
+	zone_t          zone,
 	zalloc_flags_t  flags)
 {
-	void *__unsafe_indexable addr = (zalloc_flags)(zone_or_view, flags);
+	void *__unsafe_indexable addr = (zalloc_flags)(zone, flags);
+	if (flags & Z_NOFAIL) {
+		__builtin_assume(addr != NULL);
+	}
+	return addr;
+}
+
+__attribute__((malloc))
+__attribute__((overloadable))
+static inline void *__unsafe_indexable
+__zalloc_flags(
+	zone_view_t     view,
+	zalloc_flags_t  flags)
+{
+	return __zalloc_flags((zone_t)view, flags);
+}
+
+__attribute__((malloc))
+__attribute__((overloadable))
+static inline void *__unsafe_indexable
+__zalloc_flags(
+	kalloc_type_view_t  kt_view,
+	zalloc_flags_t      flags)
+{
+	void *__unsafe_indexable addr = (kalloc_type_impl)(kt_view, flags);
 	if (flags & Z_NOFAIL) {
 		__builtin_assume(addr != NULL);
 	}
@@ -863,12 +1026,31 @@ extern void     zfree_ro(
  * If the element being freed doesn't belong to the specified zone,
  * then this call will panic.
  *
- * @param zone_or_view  the zone or zone view to free the element to.
+ * @param zone          the zone or zone view to free the element to.
  * @param elem          the element to free
  */
 extern void     zfree(
-	zone_or_view_t  zone_or_view,
-	void            *elem __unsafe_indexable);
+	zone_t          zone,
+	void           *elem __unsafe_indexable);
+
+__attribute__((overloadable))
+static inline void
+zfree(
+	zone_view_t     view,
+	void           *elem __unsafe_indexable)
+{
+	zfree((zone_t)view, elem);
+}
+
+__attribute__((overloadable))
+static inline void
+zfree(
+	kalloc_type_view_t   kt_view,
+	void                *elem __unsafe_indexable)
+{
+	return kfree_type_impl(kt_view, elem);
+}
+
 #define zfree(zone, elem) ({ \
 	__auto_type __zfree_zone = (zone); \
 	(zfree)(__zfree_zone, (void *)os_ptr_load_and_erase(elem)); \
@@ -883,44 +1065,6 @@ extern zone_t   zinit(
 	vm_size_t       maxmem,         /* maximum memory to use */
 	vm_size_t       alloc,          /* allocation size */
 	const char      *name __unsafe_indexable);
-
-
-#pragma mark: zone views
-
-/*!
- * @typedef zone_stats_t
- *
- * @abstract
- * The opaque type for per-cpu zone stats that are accumulated per zone
- * or per zone-view.
- */
-typedef struct zone_stats *__zpercpu zone_stats_t;
-
-/*!
- * @typedef zone_view_t
- *
- * @abstract
- * A view on a zone for accounting purposes.
- *
- * @discussion
- * A zone view uses the zone it references for the allocations backing store,
- * but does the allocation accounting at the view level.
- *
- * These accounting are surfaced by @b zprint(1) and similar tools,
- * which allow for cheap but finer grained understanding of allocations
- * without any fragmentation cost.
- *
- * Zone views are protected by the kernel lockdown and can't be initialized
- * dynamically. They must be created using @c ZONE_VIEW_DEFINE().
- */
-typedef struct zone_view *zone_view_t;
-struct zone_view {
-	zone_t          zv_zone;
-	zone_stats_t    zv_stats;
-	const char     *zv_name __unsafe_indexable;
-	zone_view_t     zv_next;
-};
-
 
 #pragma mark: implementation details
 
@@ -1012,6 +1156,13 @@ extern void *__sized_by(size) zalloc_permanent_tag(
  * Declare that the "early" allocation phase is done.
  */
 extern void zalloc_first_proc_made(void);
+/*!
+ * @function zalloc_iokit_lockdown()
+ *
+ * @abstract
+ * Declare that iokit matching has started.
+ */
+extern void zalloc_iokit_lockdown(void);
 
 #pragma mark XNU only: per-cpu allocations
 
@@ -1768,8 +1919,8 @@ EVENT_DECLARE(ZONE_EXHAUSTED, zone_exhausted_cb_t);
  * @const KHEAP_ID_NONE
  * This value denotes regular zones, not used by kalloc.
  *
- * @const KHEAP_ID_DEFAULT
- * Indicates zones part of the KHEAP_DEFAULT heap.
+ * @const KHEAP_ID_SHARED
+ * Indicates zones part of the KHEAP_SHARED heap.
  *
  * @const KHEAP_ID_DATA_BUFFERS
  * Indicates zones part of the KHEAP_DATA_BUFFERS heap.
@@ -1779,7 +1930,7 @@ EVENT_DECLARE(ZONE_EXHAUSTED, zone_exhausted_cb_t);
  */
 __enum_decl(zone_kheap_id_t, uint8_t, {
 	KHEAP_ID_NONE,
-	KHEAP_ID_DEFAULT,
+	KHEAP_ID_SHARED,
 	KHEAP_ID_DATA_BUFFERS,
 	KHEAP_ID_KT_VAR,
 

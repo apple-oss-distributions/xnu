@@ -141,6 +141,7 @@ struct zone_stats {
 	uint64_t            zs_mem_freed;
 	uint64_t            zs_alloc_fail;
 	uint32_t            zs_alloc_rr;     /* allocation rr bias */
+	uint32_t _Atomic    zs_alloc_not_shared;
 };
 
 typedef struct zone_magazine *zone_magazine_t;
@@ -420,6 +421,10 @@ typedef struct zone_security_flags {
 	    z_submap_from_end  :1,  /* allocate from the left or the right ? */
 	    z_noencrypt        :1,  /* do not encrypt pages when hibernating */
 	    z_unused           :1;
+	/*
+	 * Signature equivalance zone
+	 */
+	zone_id_t           z_sig_eq;
 } zone_security_flags_t;
 
 
@@ -472,11 +477,11 @@ typedef struct zone_security_flags {
  * Zsecurity config to enable kalloc type segregation
  */
 #if XNU_TARGET_OS_WATCH || KASAN_CLASSIC
-#   define ZSECURITY_CONFIG_KT_BUDGET                   85
-#   define ZSECURITY_CONFIG_KT_VAR_BUDGET               3
+#   define ZSECURITY_CONFIG_KT_BUDGET                   120
+#   define ZSECURITY_CONFIG_KT_VAR_BUDGET               6
 #else
-#   define ZSECURITY_CONFIG_KT_BUDGET                   200
-#   define ZSECURITY_CONFIG_KT_VAR_BUDGET               3
+#   define ZSECURITY_CONFIG_KT_BUDGET                   260
+#   define ZSECURITY_CONFIG_KT_VAR_BUDGET               6
 #endif
 
 
@@ -503,9 +508,10 @@ __enum_decl(kt_var_heap_id_t, uint32_t, {
 	 */
 	KT_VAR_DATA_HEAP,
 	/*
-	 * Heap for pointer arrays
+	 * Heaps for pointer arrays
 	 */
-	KT_VAR_PTR_HEAP,
+	KT_VAR_PTR_HEAP0,
+	KT_VAR_PTR_HEAP1,
 	/*
 	 * Indicating first additional heap added
 	 */
@@ -555,11 +561,9 @@ __enum_decl(zone_submap_idx_t, uint32_t, {
  * Variable kalloc_type heap config
  */
 struct kheap_info {
-	zone_id_t             kh_zstart;
-	union {
-		kalloc_heap_t       kh_views;
-		kalloc_type_var_view_t kt_views;
-	};
+	zone_id_t               kh_zstart;
+	kalloc_heap_t           kh_views;
+	kalloc_type_var_view_t  kt_views;
 };
 typedef union kalloc_type_views {
 	struct kalloc_type_view     *ktv_fixed;
@@ -567,7 +571,7 @@ typedef union kalloc_type_views {
 } kalloc_type_views_t;
 
 #define KT_VAR_MAX_HEAPS 8
-#define MAX_ZONES       650
+#define MAX_ZONES       690
 extern struct kheap_info        kalloc_type_heap_array[KT_VAR_MAX_HEAPS];
 extern zone_id_t _Atomic        num_zones;
 extern uint32_t                 zone_view_count;
@@ -722,6 +726,20 @@ zone_size_wasted(zone_t zone)
 {
 	return zone_size_wired(zone) - zone_scale_for_percpu(zone,
 	           zone_elem_outer_size(zone) * zone->z_elems_avail);
+}
+
+/*
+ * Set and get the signature equivalance for the given zone
+ */
+extern void zone_set_sig_eq(zone_t zone, zone_id_t sig_eq);
+extern zone_id_t zone_get_sig_eq(zone_t zone);
+/*
+ * Return the accumulated allocated memory on the given zone stats
+ */
+static inline vm_size_t
+zone_stats_get_mem_allocated(zone_stats_t stats)
+{
+	return stats->zs_mem_allocated;
 }
 
 /*

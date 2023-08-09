@@ -192,7 +192,7 @@ __END_DECLS
 #ifndef __clang_analyzer__
 
 #define malloc(size)         malloc_impl(size)
-#define malloc_type(type)    kalloc_type(type, Z_WAITOK)
+#define malloc_type(type)    kalloc_type(type, Z_SET_NOTSHARED)
 static inline void *
 malloc_impl(size_t size)
 {
@@ -257,7 +257,7 @@ typedef int YYSTYPE;
 
 
 /* Line 216 of yacc.c.  */
-#line 229 "OSUnserialize.tab.c"
+#line 212 "OSUnserialize.tab.c"
 
 #ifdef short
 # undef short
@@ -545,11 +545,11 @@ static const yytype_int8 yyrhs[] =
 };
 
 /* YYRLINE[YYN] -- source line where rule number YYN was defined.  */
-static const yytype_uint16 yyrline[] =
+static const yytype_uint8 yyrline[] =
 {
-	0, 168, 168, 169, 170, 173, 174, 175, 176, 177,
-	178, 179, 180, 189, 197, 198, 201, 202, 205, 215,
-	216, 219, 220, 223, 228, 239, 247, 252, 257
+	0, 151, 151, 152, 153, 156, 157, 158, 159, 160,
+	161, 162, 163, 172, 180, 181, 184, 185, 188, 198,
+	199, 202, 203, 206, 211, 222, 230, 235, 240
 };
 #endif
 
@@ -1488,57 +1488,57 @@ yyreduce:
 	YY_REDUCE_PRINT(yyn);
 	switch (yyn) {
 	case 2:
-#line 168 "OSUnserialize.y"
+#line 151 "OSUnserialize.y"
 		{ parsedObject = (OSObject *)NULL; YYACCEPT;;}
 		break;
 
 	case 3:
-#line 169 "OSUnserialize.y"
+#line 152 "OSUnserialize.y"
 		{ parsedObject = (OSObject *)(yyvsp[(1) - (1)]); YYACCEPT;;}
 		break;
 
 	case 4:
-#line 170 "OSUnserialize.y"
+#line 153 "OSUnserialize.y"
 		{ yyerror("syntax error"); YYERROR;;}
 		break;
 
 	case 5:
-#line 173 "OSUnserialize.y"
+#line 156 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSDictionary((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 6:
-#line 174 "OSUnserialize.y"
+#line 157 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSArray((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 7:
-#line 175 "OSUnserialize.y"
+#line 158 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSSet((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 8:
-#line 176 "OSUnserialize.y"
+#line 159 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSString((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 9:
-#line 177 "OSUnserialize.y"
+#line 160 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSData((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 10:
-#line 178 "OSUnserialize.y"
+#line 161 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSOffset((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 11:
-#line 179 "OSUnserialize.y"
+#line 162 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSBoolean((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 12:
-#line 180 "OSUnserialize.y"
+#line 163 "OSUnserialize.y"
 		{ (yyval) = (object_t *)retrieveObject((yyvsp[(2) - (2)])->u.offset);
 		  if ((yyval)) {
 			  ((OSObject *)(yyval))->retain();
@@ -1551,7 +1551,7 @@ yyreduce:
 		break;
 
 	case 13:
-#line 189 "OSUnserialize.y"
+#line 172 "OSUnserialize.y"
 		{ (yyval) = (yyvsp[(1) - (3)]);
 		  rememberObject((yyvsp[(3) - (3)])->u.offset, (yyvsp[(1) - (3)]));
 		  freeObject((yyvsp[(3) - (3)]));
@@ -1559,22 +1559,22 @@ yyreduce:
 		break;
 
 	case 14:
-#line 197 "OSUnserialize.y"
+#line 180 "OSUnserialize.y"
 		{ (yyval) = NULL;;}
 		break;
 
 	case 15:
-#line 198 "OSUnserialize.y"
+#line 181 "OSUnserialize.y"
 		{ (yyval) = (yyvsp[(2) - (3)]);;}
 		break;
 
 	case 17:
-#line 202 "OSUnserialize.y"
+#line 185 "OSUnserialize.y"
 		{ (yyvsp[(2) - (2)])->next = (yyvsp[(1) - (2)]); (yyvsp[(1) - (2)])->prev = (yyvsp[(2) - (2)]); (yyval) = (yyvsp[(2) - (2)]);;}
 		break;
 
 	case 18:
-#line 205 "OSUnserialize.y"
+#line 188 "OSUnserialize.y"
 		{ (yyval) = newObject();
 		  (yyval)->next = NULL;
 		  (yyval)->prev = NULL;
@@ -1584,27 +1584,27 @@ yyreduce:
 		break;
 
 	case 19:
-#line 215 "OSUnserialize.y"
+#line 198 "OSUnserialize.y"
 		{ (yyval) = NULL;;}
 		break;
 
 	case 20:
-#line 216 "OSUnserialize.y"
+#line 199 "OSUnserialize.y"
 		{ (yyval) = (yyvsp[(2) - (3)]);;}
 		break;
 
 	case 21:
-#line 219 "OSUnserialize.y"
+#line 202 "OSUnserialize.y"
 		{ (yyval) = NULL;;}
 		break;
 
 	case 22:
-#line 220 "OSUnserialize.y"
+#line 203 "OSUnserialize.y"
 		{ (yyval) = (yyvsp[(2) - (3)]);;}
 		break;
 
 	case 23:
-#line 223 "OSUnserialize.y"
+#line 206 "OSUnserialize.y"
 		{ (yyval) = newObject();
 		  (yyval)->object = (yyvsp[(1) - (1)]);
 		  (yyval)->next = NULL;
@@ -1613,7 +1613,7 @@ yyreduce:
 		break;
 
 	case 24:
-#line 228 "OSUnserialize.y"
+#line 211 "OSUnserialize.y"
 		{ oo = newObject();
 		  oo->object = (yyvsp[(3) - (3)]);
 		  oo->next = (yyvsp[(1) - (3)]);
@@ -1624,7 +1624,7 @@ yyreduce:
 		break;
 
 	case 25:
-#line 239 "OSUnserialize.y"
+#line 222 "OSUnserialize.y"
 		{ (yyval) = (yyvsp[(1) - (3)]);
 		  (yyval)->size = (yyvsp[(3) - (3)])->u.offset;
 		  freeObject((yyvsp[(3) - (3)]));
@@ -1633,7 +1633,7 @@ yyreduce:
 
 
 /* Line 1267 of yacc.c.  */
-#line 1602 "OSUnserialize.tab.c"
+#line 1585 "OSUnserialize.tab.c"
 	default: break;
 	}
 	YY_SYMBOL_PRINT("-> $$ =", yyr1[yyn], &yyval, &yyloc);
@@ -1845,7 +1845,7 @@ yyreturn:
 }
 
 
-#line 260 "OSUnserialize.y"
+#line 243 "OSUnserialize.y"
 
 
 static int              lineNumber = 0;

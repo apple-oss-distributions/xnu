@@ -4754,6 +4754,30 @@ vm_pressure_response(void)
 }
 #endif /* VM_PRESSURE_EVENTS */
 
+
+/**
+ * Called by a kernel thread to ask if a number of pages may be wired.
+ */
+kern_return_t
+mach_vm_wire_level_monitor(int64_t requested_pages)
+{
+	if (requested_pages <= 0) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	const int64_t max_wire_pages = atop_64(vm_global_user_wire_limit);
+	/**
+	 * Available pages can be negative in the case where more system memory is
+	 * wired than the threshold, so we must use a signed integer.
+	 */
+	const int64_t available_pages = max_wire_pages - vm_page_wire_count;
+
+	if (requested_pages > available_pages) {
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	return KERN_SUCCESS;
+}
+
 /*
  * Function called by a kernel thread to either get the current pressure level or
  * wait until memory pressure changes from a given level.

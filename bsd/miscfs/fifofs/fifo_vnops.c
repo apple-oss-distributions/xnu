@@ -156,6 +156,10 @@ fifo_open(struct vnop_open_args *ap)
 	struct socket *rso, *wso;
 	int error;
 
+	if ((ap->a_mode & (FREAD | FWRITE)) == 0) {
+		ap->a_mode |= FREAD;
+	}
+
 	vnode_lock(vp);
 
 retry:
@@ -475,6 +479,10 @@ fifo_close_internal(vnode_t vp, int fflag, __unused vfs_context_t context, int l
 	int error1, error2;
 	struct socket *rso;
 	struct socket *wso;
+
+	if ((fflag & (FREAD | FWRITE)) == 0) {
+		fflag |= FREAD;
+	}
 
 	if (!locked) {
 		vnode_lock(vp);

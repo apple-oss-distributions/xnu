@@ -351,6 +351,9 @@ class value(object):
     def __hash__(self):
         return hash(self.__sbval)
 
+    def GetRawSBValue(self):
+        return self.__sbval
+
     def GetSBValue(self):
         sbv = self.__sbval
         if self.__ptr:

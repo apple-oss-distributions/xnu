@@ -605,7 +605,7 @@ struct inpcbinfo {
 	 * Zone from which inpcbs are allocated for this protocol.
 	 */
 #if BSD_KERNEL_PRIVATE
-	zone_or_view_t           ipi_zone;
+	kalloc_type_view_t       ipi_zone;
 #else
 	struct zone             *ipi_zone;
 #endif
@@ -639,24 +639,30 @@ struct inpcbinfo {
 #define INP_PCBPORTHASH(lport, mask) \
 	(ntohs((lport)) & (mask))
 
+/*
+ * The following macro need to return a bool value
+ */
 #define INP_IS_FLOW_CONTROLLED(_inp_) \
-	((_inp_)->inp_flags & INP_FLOW_CONTROLLED)
+	(((_inp_)->inp_flags & INP_FLOW_CONTROLLED) ? true : false)
 #define INP_IS_FLOW_SUSPENDED(_inp_) \
-	(((_inp_)->inp_flags & INP_FLOW_SUSPENDED) ||   \
-	((_inp_)->inp_socket->so_flags & SOF_SUSPENDED))
+	((((_inp_)->inp_flags & INP_FLOW_SUSPENDED) ||   \
+	((_inp_)->inp_socket->so_flags & SOF_SUSPENDED)) ? true : false)
 #define INP_WAIT_FOR_IF_FEEDBACK(_inp_) \
 	(((_inp_)->inp_flags & (INP_FLOW_CONTROLLED | INP_FLOW_SUSPENDED)) != 0)
 
 #define INP_NO_CELLULAR(_inp) \
-	((_inp)->inp_flags & INP_NO_IFT_CELLULAR)
+	(((_inp)->inp_flags & INP_NO_IFT_CELLULAR) ? true : false)
 #define INP_NO_EXPENSIVE(_inp) \
-	((_inp)->inp_flags2 & INP2_NO_IFF_EXPENSIVE)
+	(((_inp)->inp_flags2 & INP2_NO_IFF_EXPENSIVE) ? true : false)
 #define INP_NO_CONSTRAINED(_inp) \
-	((_inp)->inp_flags2 & INP2_NO_IFF_CONSTRAINED)
+	(((_inp)->inp_flags2 & INP2_NO_IFF_CONSTRAINED) ? true : false)
 #define INP_AWDL_UNRESTRICTED(_inp) \
-	((_inp)->inp_flags2 & INP2_AWDL_UNRESTRICTED)
+	(((_inp)->inp_flags2 & INP2_AWDL_UNRESTRICTED) ? true : false)
 #define INP_INTCOPROC_ALLOWED(_inp) \
-	((_inp)->inp_flags2 & INP2_INTCOPROC_ALLOWED)
+	(((_inp)->inp_flags2 & INP2_INTCOPROC_ALLOWED) ? true : false)
+/* A process that can access the INTCOPROC interface can also access the MANAGEMENT interface */
+#define INP_MANAGEMENT_ALLOWED(_inp) \
+	(((_inp)->inp_flags2 & (INP2_MANAGEMENT_ALLOWED | INP2_INTCOPROC_ALLOWED)) ? true : false)
 
 #endif /* BSD_KERNEL_PRIVATE */
 
@@ -742,6 +748,10 @@ struct inpcbinfo {
 #define INP2_NO_IFF_CONSTRAINED 0x00000800 /* do not use constrained interface */
 #define INP2_DONTFRAG           0x00001000 /* mark the DF bit in the IP header to avoid fragmentation */
 #define INP2_SCOPED_BY_NECP     0x00002000 /* NECP scoped the pcb */
+#define INP2_LOGGING_ENABLED    0x00004000 /* logging enabled for the socket */
+#define INP2_LOGGED_SUMMARY     0x00008000 /* logged: the final summary */
+#define INP2_MANAGEMENT_ALLOWED 0x00010000 /* Allow communication over a management interface */
+#define INP2_MANAGEMENT_CHECKED 0x00020000 /* Checked entitlements for a management interface */
 
 /*
  * Flags passed to in_pcblookup*() functions.
@@ -844,6 +854,9 @@ extern void inp_clear_awdl_unrestricted(struct inpcb *);
 extern void inp_set_intcoproc_allowed(struct inpcb *);
 extern boolean_t inp_get_intcoproc_allowed(struct inpcb *);
 extern void inp_clear_intcoproc_allowed(struct inpcb *);
+extern void inp_set_management_allowed(struct inpcb *);
+extern boolean_t inp_get_management_allowed(struct inpcb *);
+extern void inp_clear_management_allowed(struct inpcb *);
 #if NECP
 extern void inp_update_necp_policy(struct inpcb *, struct sockaddr *, struct sockaddr *, u_int);
 extern void inp_set_want_app_policy(struct inpcb *);
@@ -881,5 +894,8 @@ extern void inp_update_netns_flags(struct socket *so);
 extern void inp_clear_INP_INADDR_ANY(struct socket *);
 extern int inp_limit_companion_link(struct inpcbinfo *pcbinfo, u_int32_t limit);
 extern int inp_recover_companion_link(struct inpcbinfo *pcbinfo);
+extern void in_management_interface_check(void);
+extern void in_pcb_check_management_entitled(struct inpcb *inp);
+extern char *inp_snprintf_tuple(struct inpcb *, char *, size_t);
 #endif /* KERNEL_PRIVATE */
 #endif /* !_NETINET_IN_PCB_H_ */

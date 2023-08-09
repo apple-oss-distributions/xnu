@@ -502,6 +502,10 @@ TAILQ_HEAD(ifnet_filter_head, ifnet_filter);
 TAILQ_HEAD(ddesc_head_name, dlil_demux_desc);
 
 extern bool intcoproc_unrestricted;
+extern bool management_data_unrestricted;
+extern bool management_control_unrestricted;
+extern bool if_management_interface_check_needed;
+extern int if_management_verbose;
 #endif /* BSD_KERNEL_PRIVATE */
 
 /*
@@ -1312,6 +1316,10 @@ struct ifmultiaddr {
 #define IFNET_IS_VMNET(_ifp)                                            \
     ((_ifp)->if_family == IFNET_FAMILY_ETHERNET &&                  \
      (_ifp)->if_subfamily == IFNET_SUBFAMILY_VMNET)
+
+#define IFNET_IS_MANAGEMENT(_ifp)                                        \
+     (((_ifp)->if_xflags & IFXF_MANAGEMENT) != 0)
+
 /*
  * Indicate whether or not the immediate interface is IP over Thunderbolt.
  */

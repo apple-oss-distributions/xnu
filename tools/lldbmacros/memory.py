@@ -47,7 +47,7 @@ def get_vme_object(vme):
 
 def IterateZPerCPU(root):
     """ obsolete """
-    return (value(v) for v in kmemory.ZPercpuValue(root.GetSBValue()))
+    return (value(v) for v in kmemory.ZPercpuValue(root.GetRawSBValue()))
 
 @lldb_command('showzpcpu', "S")
 def ShowZPerCPU(cmd_args=None, cmd_options={}):
@@ -79,7 +79,7 @@ def ZoneName(zone, zone_security):
         returns:
             the formated name for the zone
     """
-    names = [ "", "default.", "data.", "" ]
+    names = [ "", "shared.", "data.", "" ]
     return "{:s}{:s}".format(names[int(zone_security.z_kheap_id)], zone.z_name)
 
 def GetZoneByName(name):

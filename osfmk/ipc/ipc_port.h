@@ -145,7 +145,7 @@ struct ipc_port {
 		    , ip_has_watchport:1          /* port has an exec watchport */
 		    , ip_kernel_iotier_override:2 /* kernel iotier override */
 		    , ip_kernel_qos_override:3    /* kernel qos override */
-		    , ip_reply_port_semantics:2   /* reply port defense in depth type */
+		    , ip_reply_port_semantics:3   /* reply port defense in depth type */
 		    );
 		struct waitq            ip_waitq;
 	};
@@ -327,6 +327,9 @@ extern void __ipc_right_delta_overflow_panic(
 #define ip_full_kernel(port)            imq_full_kernel(&(port)->ip_messages)
 #define ip_full(port)                   imq_full(&(port)->ip_messages)
 
+boolean_t
+__ip_strict_reply_port_semantics_violation(void);
+
 /*
  * IPC Port flags for reply port defense in depth
  *
@@ -340,25 +343,37 @@ extern void __ipc_right_delta_overflow_panic(
  * PORT_MARK_PROVISIONAL_REPLY_PORT
  *   Port is marked as a provisional reply port with an eventual goal of making it port as PORT_MARK_REPLY_PORT.
  *
+ * PORT_ENFORCE_STRICT_REPLY_PORT_SEMANTICS
+ *   Same as PORT_ENFORCE_REPLY_PORT_SEMANTICS above, but does not allow for provisional reply ports.
+ *   Once provisional reply ports no longer exist, this will be removed as "strictness" will be irrelavant.
  */
 #define PORT_MARK_REPLY_PORT              0x01
 #define PORT_ENFORCE_REPLY_PORT_SEMANTICS 0x02
 #define PORT_MARK_PROVISIONAL_REPLY_PORT  0x03
+#define PORT_ENFORCE_STRICT_REPLY_PORT_SEMANTICS  0x04
 
 /* ip_reply_port_semantics can be read without a lock as it is never unset after port creation. */
-#define ip_is_reply_port(port)                 (((port)->ip_reply_port_semantics) == PORT_MARK_REPLY_PORT)
-#define ip_require_reply_port_semantics(port)  (((port)->ip_reply_port_semantics) == PORT_ENFORCE_REPLY_PORT_SEMANTICS)
-#define ip_is_provisional_reply_port(port)     (((port)->ip_reply_port_semantics) == PORT_MARK_PROVISIONAL_REPLY_PORT)
+#define ip_is_reply_port(port)                          (((port)->ip_reply_port_semantics) == PORT_MARK_REPLY_PORT)
+#define ip_require_reply_port_semantics(port)           (((port)->ip_reply_port_semantics) == PORT_ENFORCE_REPLY_PORT_SEMANTICS)
+#define ip_is_provisional_reply_port(port)              (((port)->ip_reply_port_semantics) == PORT_MARK_PROVISIONAL_REPLY_PORT)
+#define ip_require_strict_reply_port_semantics(port)    (((port)->ip_reply_port_semantics) == PORT_ENFORCE_STRICT_REPLY_PORT_SEMANTICS)
 
-#define ip_mark_reply_port(port)               ((port)->ip_reply_port_semantics = PORT_MARK_REPLY_PORT)
-#define ip_enforce_reply_port_semantics(port)  ((port)->ip_reply_port_semantics = PORT_ENFORCE_REPLY_PORT_SEMANTICS)
-#define ip_mark_provisional_reply_port(port)   ((port)->ip_reply_port_semantics = PORT_MARK_PROVISIONAL_REPLY_PORT)
+#define ip_mark_reply_port(port)                        ((port)->ip_reply_port_semantics = PORT_MARK_REPLY_PORT)
+#define ip_enforce_reply_port_semantics(port)           ((port)->ip_reply_port_semantics = PORT_ENFORCE_REPLY_PORT_SEMANTICS)
+#define ip_mark_provisional_reply_port(port)            ((port)->ip_reply_port_semantics = PORT_MARK_PROVISIONAL_REPLY_PORT)
+#define ip_enforce_strict_reply_port_semantics(port)    ((port)->ip_reply_port_semantics = PORT_ENFORCE_STRICT_REPLY_PORT_SEMANTICS)
 
 #define ip_is_immovable_send(port)      ((port)->ip_immovable_send)
 #define ip_is_pinned(port)              ((port)->ip_pinned)
 
 #define ip_is_libxpc_connection_port(port) \
 	(!ip_is_kolabeled(port) && (!(port)->ip_service_port) && ((port)->ip_splabel != NULL))
+
+#define ip_violates_strict_reply_port_semantics(dest_port, reply_port) \
+	(ip_require_strict_reply_port_semantics(dest_port) && !ip_is_reply_port(reply_port) && __ip_strict_reply_port_semantics_violation())
+
+#define ip_violates_reply_port_semantics(dest_port, reply_port) \
+	(ip_require_reply_port_semantics(dest_port) && !ip_is_reply_port(reply_port) && !ip_is_provisional_reply_port(reply_port))
 
 /* Bits reserved in IO_BITS_PORT_INFO are defined here */
 
@@ -618,16 +633,17 @@ extern boolean_t ipc_port_clear_receiver(
 	waitq_link_list_t      *free_l);
 
 __options_decl(ipc_port_init_flags_t, uint32_t, {
-	IPC_PORT_INIT_NONE                    = 0x00000000,
-	IPC_PORT_INIT_MAKE_SEND_RIGHT         = 0x00000001,
-	IPC_PORT_INIT_MESSAGE_QUEUE           = 0x00000002,
-	IPC_PORT_INIT_SPECIAL_REPLY           = 0x00000004,
-	IPC_PORT_INIT_FILTER_MESSAGE          = 0x00000008,
-	IPC_PORT_INIT_TG_BLOCK_TRACKING       = 0x00000010,
-	IPC_PORT_INIT_LOCKED                  = 0x00000020,
-	IPC_PORT_INIT_REPLY                   = 0x00000040,
-	IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS = 0x00000080,
-	IPC_PORT_INIT_PROVISIONAL_REPLY       = 0x00000100,
+	IPC_PORT_INIT_NONE                              = 0x00000000,
+	IPC_PORT_INIT_MAKE_SEND_RIGHT                   = 0x00000001,
+	IPC_PORT_INIT_MESSAGE_QUEUE                     = 0x00000002,
+	IPC_PORT_INIT_SPECIAL_REPLY                     = 0x00000004,
+	IPC_PORT_INIT_FILTER_MESSAGE                    = 0x00000008,
+	IPC_PORT_INIT_TG_BLOCK_TRACKING                 = 0x00000010,
+	IPC_PORT_INIT_LOCKED                            = 0x00000020,
+	IPC_PORT_INIT_REPLY                             = 0x00000040,
+	IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS           = 0x00000080,
+	IPC_PORT_INIT_PROVISIONAL_REPLY                 = 0x00000100,
+	IPC_PORT_ENFORCE_STRICT_REPLY_PORT_SEMANTICS    = 0x00000200,
 });
 
 /* Initialize a newly-allocated port */

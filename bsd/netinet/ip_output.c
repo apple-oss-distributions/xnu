@@ -341,6 +341,7 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 			boolean_t noexpensive : 1;      /* set once */
 			boolean_t noconstrained : 1;      /* set once */
 			boolean_t awdl_unrestricted : 1;        /* set once */
+			boolean_t management_allowed : 1;        /* set once */
 		};
 		uint32_t raw;
 	} ipobf = { .raw = 0 };
@@ -351,11 +352,12 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
  * Here we check for restrictions when sending frames.
  * N.B.: IPv4 over internal co-processor interfaces is not allowed.
  */
-#define IP_CHECK_RESTRICTIONS(_ifp, _ipobf)                             \
-	(((_ipobf).nocell && IFNET_IS_CELLULAR(_ifp)) ||                \
-	 ((_ipobf).noexpensive && IFNET_IS_EXPENSIVE(_ifp)) ||          \
-	 ((_ipobf).noconstrained && IFNET_IS_CONSTRAINED(_ifp)) ||      \
-	  (IFNET_IS_INTCOPROC(_ifp)) ||                                 \
+#define IP_CHECK_RESTRICTIONS(_ifp, _ipobf)                                 \
+	(((_ipobf).nocell && IFNET_IS_CELLULAR(_ifp)) ||                    \
+	 ((_ipobf).noexpensive && IFNET_IS_EXPENSIVE(_ifp)) ||              \
+	 ((_ipobf).noconstrained && IFNET_IS_CONSTRAINED(_ifp)) ||          \
+	  (IFNET_IS_INTCOPROC(_ifp)) ||                                     \
+	 (!(_ipobf).management_allowed && IFNET_IS_MANAGEMENT(_ifp)) ||     \
 	 (!(_ipobf).awdl_unrestricted && IFNET_IS_AWDL_RESTRICTED(_ifp)))
 
 	if (ip_output_measure) {
@@ -468,6 +470,9 @@ ipfw_tags_done:
 		}
 		if (ipoa->ipoa_flags & IPOAF_AWDL_UNRESTRICTED) {
 			ipobf.awdl_unrestricted = TRUE;
+		}
+		if (ipoa->ipoa_flags & IPOAF_MANAGEMENT_ALLOWED) {
+			ipobf.management_allowed = true;
 		}
 		adv = &ipoa->ipoa_flowadv;
 		adv->code = FADV_SUCCESS;

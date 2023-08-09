@@ -129,6 +129,8 @@
 #define PRIV_NET_PRIVILEGED_NECP_DROP_ALL_BYPASS 10016  /* Privilege to bypass NECP drop-all */
 #define PRIV_NET_PRIVILEGED_IPSEC_WAKE_PACKET   10017   /* Privilege to get IPsec wake packet */
 
+#define PRIV_NET_RESTRICTED_MANAGEMENT_DATA     10018   /* Privilege to send/receive data over a management interface */
+
 /*
  * IPv4 and IPv6 privileges.
  */

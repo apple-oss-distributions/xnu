@@ -377,7 +377,7 @@ IOMalloc_external(
 void
 IOFree(void * inAddress, vm_size_t size)
 {
-	IOFree_internal(KHEAP_ANY, inAddress, size);
+	IOFree_internal(KHEAP_DEFAULT, inAddress, size);
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */

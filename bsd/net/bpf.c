@@ -135,6 +135,8 @@
 
 #include <os/log.h>
 
+#include <IOKit/IOBSD.h>
+
 extern int tvtohz(struct timeval *);
 extern char *proc_name_address(void *p);
 
@@ -1414,6 +1416,14 @@ bpfwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 	}
 
 	ifp = d->bd_bif->bif_ifp;
+
+	if (IFNET_IS_MANAGEMENT(ifp) &&
+	    IOCurrentTaskHasEntitlement(MANAGEMENT_DATA_ENTITLEMENT) == false) {
+		++d->bd_wdcount;
+		bpf_release_d(d);
+		lck_mtx_unlock(bpf_mlock);
+		return ENETDOWN;
+	}
 
 	if ((ifp->if_flags & IFF_UP) == 0) {
 		++d->bd_wdcount;

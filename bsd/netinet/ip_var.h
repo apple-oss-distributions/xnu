@@ -322,17 +322,18 @@ struct ip_out_args {
 	unsigned int    ipoa_boundif;   /* boundif interface index */
 	struct flowadv  ipoa_flowadv;   /* flow advisory code */
 	u_int32_t       ipoa_flags;     /* IPOAF output flags (see below) */
-#define IPOAF_SELECT_SRCIF      0x00000001      /* src interface selection */
-#define IPOAF_BOUND_IF          0x00000002      /* boundif value is valid */
-#define IPOAF_BOUND_SRCADDR     0x00000004      /* bound to src address */
-#define IPOAF_NO_CELLULAR       0x00000010      /* skip IFT_CELLULAR */
-#define IPOAF_NO_EXPENSIVE      0x00000020      /* skip IFT_EXPENSIVE */
-#define IPOAF_AWDL_UNRESTRICTED 0x00000040      /* can send over
-	                                         *  AWDL_RESTRICTED */
+#define IPOAF_SELECT_SRCIF              0x00000001      /* src interface selection */
+#define IPOAF_BOUND_IF                  0x00000002      /* boundif value is valid */
+#define IPOAF_BOUND_SRCADDR             0x00000004      /* bound to src address */
+#define IPOAF_NO_CELLULAR               0x00000010      /* skip IFT_CELLULAR */
+#define IPOAF_NO_EXPENSIVE              0x00000020      /* skip IFT_EXPENSIVE */
+#define IPOAF_AWDL_UNRESTRICTED         0x00000040      /* can send over
+	                                                 *  AWDL_RESTRICTED */
 #define IPOAF_QOSMARKING_ALLOWED        0x00000080      /* policy allows Fastlane DSCP marking */
-#define IPOAF_NO_CONSTRAINED    0x00000400      /* skip IFXF_CONSTRAINED */
+#define IPOAF_NO_CONSTRAINED            0x00000400      /* skip IFXF_CONSTRAINED */
 #define IPOAF_REDO_QOSMARKING_POLICY    0x00002000      /* Re-evaluate QOS marking policy */
-#define IPOAF_R_IFDENIED 0x00004000      /* denied access to interface */
+#define IPOAF_R_IFDENIED                0x00004000      /* denied access to interface */
+#define IPOAF_MANAGEMENT_ALLOWED        0x00008000      /* access to management interfaces */
 	int             ipoa_sotc;      /* traffic class for Fastlane DSCP mapping */
 	int             ipoa_netsvctype; /* network service type */
 	int32_t         qos_marking_gencount;

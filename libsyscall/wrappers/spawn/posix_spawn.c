@@ -2166,18 +2166,10 @@ posix_spawnattr_set_registered_ports_np(posix_spawnattr_t * __restrict attr,
 }
 
 int
-posix_spawnattr_set_ptrauth_task_port_np(posix_spawnattr_t * __restrict attr,
-    mach_port_t port)
+posix_spawnattr_set_ptrauth_task_port_np(posix_spawnattr_t * __restrict attr __unused,
+    mach_port_t port __unused)
 {
-	int err = 0;
-
-	_ps_port_action_t action = {
-		.port_type = PSPA_PTRAUTH_TASK_PORT,
-		.new_port = port,
-	};
-
-	err = posix_spawn_appendportaction_np(attr, &action);
-	return err;
+	return 0;
 }
 
 static

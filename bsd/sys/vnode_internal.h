@@ -312,8 +312,8 @@ struct vnode {
 #define VFASTDEVCANDIDATE  0x8000000        /* vnode is a candidate to store on a fast device */
 #define VAUTOCANDIDATE 0x10000000       /* vnode was automatically marked as a fast-dev candidate */
 #define VFMLINKTARGET  0x20000000       /* vnode is firmlink target */
+#define VMOUNTEDHERE   0x40000000       /* vnode is a mountpoint */
 /*
- *  0x40000000 not used
  *  0x80000000 not used.
  */
 

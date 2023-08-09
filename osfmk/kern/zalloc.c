@@ -508,6 +508,7 @@ SECURITY_READ_ONLY_LATE(zone_security_flags_t) zone_security_array[MAX_ZONES] = 
 		.z_noencrypt      = false,
 		.z_submap_idx     = Z_SUBMAP_IDX_GENERAL_0,
 		.z_kalloc_type    = false,
+		.z_sig_eq         = 0
 	},
 };
 SECURITY_READ_ONLY_LATE(struct zone_size_params) zone_ro_size_params[ZONE_ID__LAST_RO + 1];
@@ -526,6 +527,8 @@ size_t zone_guard_pages;
 
 /* Time in (ms) after which we panic for zone exhaustions */
 TUNABLE(int, zone_exhausted_timeout, "zet", 5000);
+static bool zone_share_always = true;
+static TUNABLE_WRITEABLE(uint32_t, zone_early_thres_mul, "zone_early_thres_mul", 5);
 
 #if VM_TAG_SIZECLASSES
 /*
@@ -2895,6 +2898,8 @@ zalloc_random_uniform32(uint32_t bound_min, uint32_t bound_max)
 /*
  * Track all kalloc zones of specified size for zlog name
  * kalloc.type.<size> or kalloc.type.var.<size> or kalloc.<size>
+ *
+ * Additionally track all shared kalloc zones with shared.kalloc
  */
 static bool
 track_kalloc_zones(zone_t z, const char *logname)
@@ -2928,6 +2933,12 @@ track_kalloc_zones(zone_t z, const char *logname)
 		vm_size_t sizeclass = strtoul(logname + len, NULL, 0);
 
 		return zone_elem_inner_size(z) == sizeclass;
+	}
+
+	prefix = "shared.kalloc";
+	if ((zsflags.z_kheap_id == KHEAP_ID_SHARED) &&
+	    (strcmp(logname, prefix) == 0)) {
+		return true;
 	}
 
 	return false;
@@ -6060,10 +6071,10 @@ void
 }
 
 void
-(zfree)(union zone_or_view zov, void *addr)
+(zfree)(zone_t zov, void *addr)
 {
-	zone_t zone = zov.zov_view->zv_zone;
-	zone_stats_t zstats = zov.zov_view->zv_stats;
+	zone_t zone = zov->z_self;
+	zone_stats_t zstats = zov->z_stats;
 	vm_offset_t esize = zone_elem_inner_size(zone);
 
 	assert(zone > &zone_array[ZONE_ID__LAST_RO]);
@@ -6163,6 +6174,36 @@ void
 (zfree_id_smr)(zone_id_t zid, void *addr)
 {
 	(zfree_smr)(&zone_array[zid], addr);
+}
+
+void
+kfree_type_impl_internal(
+	kalloc_type_view_t  kt_view,
+	void               *ptr __unsafe_indexable)
+{
+	zone_t zsig = kt_view->kt_zsig;
+	zone_t z = kt_view->kt_zv.zv_zone;
+	struct zone_page_metadata *meta = zone_meta_from_addr((vm_offset_t) ptr);
+	zone_id_t zidx_meta = meta->zm_index;
+	zone_security_flags_t zsflags_meta = zone_security_array[zidx_meta];
+	zone_security_flags_t zsflags_z = zone_security_config(z);
+	zone_security_flags_t zsflags_zsig;
+
+	if (NULL == ptr) {
+		return;
+	}
+
+	if ((zsflags_z.z_kheap_id == KHEAP_ID_DATA_BUFFERS) ||
+	    zone_has_index(z, zidx_meta)) {
+		return (zfree)(&kt_view->kt_zv, ptr);
+	}
+	zsflags_zsig = zone_security_config(zsig);
+	if (zsflags_meta.z_sig_eq == zsflags_zsig.z_sig_eq) {
+		z = zone_array + zidx_meta;
+		return (zfree)(z, ptr);
+	}
+
+	return (zfree)(kt_view->kt_zshared, ptr);
 }
 
 /*! @} */
@@ -6374,14 +6415,27 @@ zalloc_return(
 	return (struct kalloc_result){ (void *)addr, elem_size };
 }
 
+static vm_size_t
+zalloc_get_shared_threshold(zone_t zone, vm_size_t esize)
+{
+	if (esize <= 512) {
+		return zone_early_thres_mul * page_size / 4;
+	} else if (esize < 2048) {
+		return zone_early_thres_mul * esize * 8;
+	}
+	return zone_early_thres_mul * zone->z_chunk_elems * esize;
+}
+
 __attribute__((noinline))
 static struct kalloc_result
 zalloc_item(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 {
 	vm_offset_t esize, addr;
+	zone_stats_t zs;
 
 	zone_lock_nopreempt_check_contention(zone);
 
+	zs = zpercpu_get(zstats);
 	if (__improbable(zone->z_elems_free <= zone->z_elems_rsv / 2)) {
 		if ((flags & Z_NOWAIT) || zone->z_elems_free) {
 			zone_expand_async_schedule_if_allowed(zone);
@@ -6389,7 +6443,7 @@ zalloc_item(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 			zone_expand_locked(zone, flags, zalloc_needs_refill);
 		}
 		if (__improbable(zone->z_elems_free == 0)) {
-			zpercpu_get(zstats)->zs_alloc_fail++;
+			zs->zs_alloc_fail++;
 			zone_unlock(zone);
 			if (__improbable(flags & Z_NOFAIL)) {
 				zone_nofail_panic(zone);
@@ -6400,7 +6454,20 @@ zalloc_item(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 	}
 
 	esize = zalloc_import(zone, &addr, flags, 1);
-	zpercpu_get(zstats)->zs_mem_allocated += esize;
+	zs->zs_mem_allocated += esize;
+
+	if (__improbable(!zone_share_always &&
+	    !os_atomic_load(&zs->zs_alloc_not_shared, relaxed))) {
+		if (flags & Z_SET_NOTSHARED) {
+			vm_size_t shared_threshold = zalloc_get_shared_threshold(zone, esize);
+
+			if (zs->zs_mem_allocated >= shared_threshold) {
+				zpercpu_foreach(zs_cpu, zstats) {
+					os_atomic_store(&zs_cpu->zs_alloc_not_shared, 1, relaxed);
+				}
+			}
+		}
+	}
 	zone_unlock(zone);
 
 	return zalloc_return(zone, addr, flags, esize);
@@ -6797,23 +6864,23 @@ zstack_t
 
 __attribute__((always_inline))
 void *
-zalloc(union zone_or_view zov)
+zalloc(zone_t zov)
 {
 	return zalloc_flags(zov, Z_WAITOK);
 }
 
 __attribute__((always_inline))
 void *
-zalloc_noblock(union zone_or_view zov)
+zalloc_noblock(zone_t zov)
 {
 	return zalloc_flags(zov, Z_NOWAIT);
 }
 
 void *
-(zalloc_flags)(union zone_or_view zov, zalloc_flags_t flags)
+(zalloc_flags)(zone_t zov, zalloc_flags_t flags)
 {
-	zone_t zone = zov.zov_view->zv_zone;
-	zone_stats_t zstats = zov.zov_view->zv_stats;
+	zone_t zone = zov->z_self;
+	zone_stats_t zstats = zov->z_stats;
 
 	assert(zone > &zone_array[ZONE_ID__LAST_RO]);
 	assert(!zone->z_percpu && !zone->z_permanent);
@@ -7875,8 +7942,8 @@ panic_print_types_in_zone(zone_t z, const char* debug_str)
 	bool is_kt_var = false;
 
 	if (zsflags.z_kheap_id == KHEAP_ID_KT_VAR) {
-		uint32_t heap_id = KT_VAR_PTR_HEAP + ((zone_index(z) -
-		    kalloc_type_heap_array[KT_VAR_PTR_HEAP].kh_zstart) / KHEAP_NUM_ZONES);
+		uint32_t heap_id = KT_VAR_PTR_HEAP0 + ((zone_index(z) -
+		    kalloc_type_heap_array[KT_VAR_PTR_HEAP0].kh_zstart) / KHEAP_NUM_ZONES);
 		kt_cur.ktv_var = kalloc_type_heap_array[heap_id].kt_views;
 		is_kt_var = true;
 	} else {
@@ -8349,8 +8416,7 @@ static bool
 zone_info_needs_to_be_coalesced(int zone_index)
 {
 	zone_security_flags_t zsflags = zone_security_array[zone_index];
-	if (zsflags.z_kalloc_type || zsflags.z_kheap_id == KHEAP_ID_DEFAULT ||
-	    zsflags.z_kheap_id == KHEAP_ID_KT_VAR) {
+	if (zsflags.z_kalloc_type || zsflags.z_kheap_id == KHEAP_ID_KT_VAR) {
 		return true;
 	}
 	return false;
@@ -9317,7 +9383,7 @@ zone_create_ext(
 
 		assert(startup_phase < STARTUP_SUB_LOCKDOWN);
 		z->z_uses_tags = true;
-		if (zsflags->z_kheap_id == KHEAP_ID_DEFAULT) {
+		if (zsflags->z_kheap_id == KHEAP_ID_DATA_BUFFERS) {
 			zone_tags_sizeclasses[sizeclass_idx] = (uint16_t)size;
 			z->z_tags_sizeclass = sizeclass_idx++;
 		} else {
@@ -9370,6 +9436,18 @@ zone_create_ext(
 	zone_unlock(z);
 
 	return z;
+}
+
+void
+zone_set_sig_eq(zone_t zone, zone_id_t sig_eq)
+{
+	zone_security_array[zone_index(zone)].z_sig_eq = sig_eq;
+}
+
+zone_id_t
+zone_get_sig_eq(zone_t zone)
+{
+	return zone_security_array[zone_index(zone)].z_sig_eq;
 }
 
 void
@@ -9429,11 +9507,6 @@ zone_view_startup_init(struct zone_view_startup_spec *spec)
 	zone_security_flags_t zsflags;
 
 	switch (spec->zv_heapid) {
-	case KHEAP_ID_DEFAULT:
-		panic("%s: Use KALLOC_TYPE_DEFINE for zone view %s instead"
-		    "of ZONE_VIEW_DEFINE as it is from default kalloc heap",
-		    __func__, zv->zv_name);
-		__builtin_unreachable();
 	case KHEAP_ID_DATA_BUFFERS:
 		heap = KHEAP_DATA_BUFFERS;
 		break;
@@ -10179,9 +10252,16 @@ zone_init(void)
 STARTUP(ZALLOC, STARTUP_RANK_FIRST, zone_init);
 
 void
+zalloc_iokit_lockdown(void)
+{
+	zone_share_always = false;
+}
+
+void
 zalloc_first_proc_made(void)
 {
 	zone_caching_disabled = 0;
+	zone_early_thres_mul = 1;
 }
 
 __startup_func
@@ -10292,6 +10372,9 @@ zone_leaks(const char * zoneName, uint32_t nameLen, leak_site_proc proc)
 	size_t        maxElems;
 
 	zone_foreach(z) {
+		if (!z->z_name) {
+			continue;
+		}
 		if (!strncmp(zoneName, z->z_name, nameLen)) {
 			zone = z;
 			break;

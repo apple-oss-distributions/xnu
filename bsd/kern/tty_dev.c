@@ -259,12 +259,14 @@ ptsopen(dev_t dev, int flag, __unused int devtype, __unused struct proc *p)
 {
 	int error;
 	struct tty_dev_t *driver;
+	bool free_ptmx_ioctl = true;
 	struct ptmx_ioctl *pti = pty_get_ioctl(dev, PF_OPEN_S, &driver);
 	if (pti == NULL) {
 		return ENXIO;
 	}
 	if (!(pti->pt_flags & PF_UNLOCKED)) {
-		return EAGAIN;
+		error = EAGAIN;
+		goto out_free;
 	}
 
 	struct tty *tp = pti->pt_tty;
@@ -280,7 +282,7 @@ ptsopen(dev_t dev, int flag, __unused int devtype, __unused struct proc *p)
 		ttsetwater(tp);         /* would be done in xxparam() */
 	} else if ((tp->t_state & TS_XCLUDE) && kauth_cred_issuser(kauth_cred_get())) {
 		error = EBUSY;
-		goto out;
+		goto out_unlock;
 	}
 	if (tp->t_oproc) {                      /* Ctrlr still around. */
 		(void)(*linesw[tp->t_line].l_modem)(tp, 1);
@@ -291,20 +293,26 @@ ptsopen(dev_t dev, int flag, __unused int devtype, __unused struct proc *p)
 		}
 		error = ttysleep(tp, TSA_CARR_ON(tp), TTIPRI | PCATCH, __FUNCTION__, 0);
 		if (error) {
-			goto out;
+			goto out_unlock;
 		}
 	}
 	error = (*linesw[tp->t_line].l_open)(dev, tp);
 	/* Successful open; mark as open by the replica */
 
-	pti->pt_flags |= PF_OPEN_S;
+	free_ptmx_ioctl = false;
 	CLR(tp->t_state, TS_IOCTL_NOT_OK);
 	if (error == 0) {
 		ptcwakeup(tp, FREAD | FWRITE);
 	}
 
-out:
+out_unlock:
 	tty_unlock(tp);
+
+out_free:
+	if (free_ptmx_ioctl) {
+		pty_free_ioctl(dev, PF_OPEN_S);
+	}
+
 	return error;
 }
 

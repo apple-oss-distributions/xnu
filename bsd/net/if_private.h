@@ -154,6 +154,7 @@ struct if_clonereq32 {
 #define IFXF_MARK_WAKE_PKT              0x00000800 /* Mark next input packet as wake packet */
 #define IFXF_FAST_PKT_DELIVERY          0x00001000 /* Fast Packet Delivery */
 #define IFXF_NO_TRAFFIC_SHAPING         0x00002000 /* Skip dummynet and netem traffic shaping */
+#define IFXF_MANAGEMENT                 0x00004000 /* Management interface */
 
 /*
  * Current requirements for an AWDL interface.  Setting/clearing IFEF_AWDL
@@ -267,6 +268,10 @@ struct  ifreq {
 #define IFRTYPE_SUBFAMILY_INTCOPROC     6
 #define IFRTYPE_SUBFAMILY_QUICKRELAY    7
 #define IFRTYPE_SUBFAMILY_DEFAULT       8
+#define IFRTYPE_SUBFAMILY_VMNET         9
+#define IFRTYPE_SUBFAMILY_SIMCELL       10
+#define IFRTYPE_SUBFAMILY_REDIRECT      11
+#define IFRTYPE_SUBFAMILY_MANAGEMENT    12
 		} ifru_type;
 		u_int32_t ifru_functional_type;
 #define IFRTYPE_FUNCTIONAL_UNKNOWN              0
@@ -277,7 +282,8 @@ struct  ifreq {
 #define IFRTYPE_FUNCTIONAL_CELLULAR             5
 #define IFRTYPE_FUNCTIONAL_INTCOPROC            6
 #define IFRTYPE_FUNCTIONAL_COMPANIONLINK        7
-#define IFRTYPE_FUNCTIONAL_LAST                 7
+#define IFRTYPE_FUNCTIONAL_MANAGEMENT           8
+#define IFRTYPE_FUNCTIONAL_LAST                 8
 		u_int32_t ifru_expensive;
 		u_int32_t ifru_constrained;
 		u_int32_t ifru_2kcl;
@@ -789,6 +795,24 @@ struct if_protolistreq64 {
 	user64_addr_t           ifpl_list;
 };
 #endif /* BSD_KERNEL_PRIVATE */
+
+
+/*
+ * Entitlement to send/receive data on an INTCOPROC interface
+ */
+#define INTCOPROC_RESTRICTED_ENTITLEMENT "com.apple.private.network.intcoproc.restricted"
+#define INTCOPROC_RESTRICTED_ENTITLEMENT_DEVELOPMENT "com.apple.private.network.intcoproc.restricted.development"
+
+/*
+ * Entitlement to send/receive data on a management interface
+ */
+#define MANAGEMENT_DATA_ENTITLEMENT "com.apple.private.network.management.data"
+#define MANAGEMENT_DATA_ENTITLEMENT_DEVELOPMENT "com.apple.private.network.management.data.development"
+
+/*
+ * Entitlement to make change to a management interface
+ */
+#define MANAGEMENT_CONTROL_ENTITLEMENT "com.apple.private.network.management.control"
 
 #endif /* DRIVERKIT */
 #endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */

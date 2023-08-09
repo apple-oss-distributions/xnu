@@ -231,7 +231,7 @@ __BEGIN_DECLS
 __END_DECLS
 
 #define malloc(size)         malloc_impl(size)
-#define malloc_type(type)    kalloc_type(type, Z_WAITOK)
+#define malloc_type(type)    kalloc_type(type, Z_SET_NOTSHARED)
 static inline void *
 malloc_impl(size_t size)
 {
@@ -329,7 +329,7 @@ typedef int YYSTYPE;
 
 
 /* Line 216 of yacc.c.  */
-#line 300 "OSUnserializeXML.tab.c"
+#line 283 "OSUnserializeXML.tab.c"
 
 #ifdef short
 # undef short
@@ -620,10 +620,10 @@ static const yytype_int8 yyrhs[] =
 /* YYRLINE[YYN] -- source line where rule number YYN was defined.  */
 static const yytype_uint16 yyrline[] =
 {
-	0, 234, 234, 237, 242, 247, 259, 271, 283, 295,
-	307, 319, 331, 355, 358, 361, 364, 365, 380, 389,
-	401, 404, 407, 410, 413, 416, 419, 422, 429, 432,
-	435, 438, 441
+	0, 217, 217, 220, 225, 230, 242, 254, 266, 278,
+	290, 302, 314, 338, 341, 344, 347, 348, 363, 372,
+	384, 387, 390, 393, 396, 399, 402, 405, 412, 415,
+	418, 421, 424
 };
 #endif
 
@@ -1566,14 +1566,14 @@ yyreduce:
 	YY_REDUCE_PRINT(yyn);
 	switch (yyn) {
 	case 2:
-#line 234 "OSUnserializeXML.y"
+#line 217 "OSUnserializeXML.y"
 		{ yyerror("unexpected end of buffer");
 		  YYERROR;
 		  ;}
 		break;
 
 	case 3:
-#line 237 "OSUnserializeXML.y"
+#line 220 "OSUnserializeXML.y"
 		{ STATE->parsedObject = (yyvsp[(1) - (1)])->object;
 		  (yyvsp[(1) - (1)])->object = 0;
 		  freeObject(STATE, (yyvsp[(1) - (1)]));
@@ -1582,14 +1582,14 @@ yyreduce:
 		break;
 
 	case 4:
-#line 242 "OSUnserializeXML.y"
+#line 225 "OSUnserializeXML.y"
 		{ yyerror("syntax error");
 		  YYERROR;
 		  ;}
 		break;
 
 	case 5:
-#line 247 "OSUnserializeXML.y"
+#line 230 "OSUnserializeXML.y"
 		{ (yyval) = buildDictionary(STATE, (yyvsp[(1) - (1)]));
 
 		  if (!yyval->object) {
@@ -1605,7 +1605,7 @@ yyreduce:
 		break;
 
 	case 6:
-#line 259 "OSUnserializeXML.y"
+#line 242 "OSUnserializeXML.y"
 		{ (yyval) = buildArray(STATE, (yyvsp[(1) - (1)]));
 
 		  if (!yyval->object) {
@@ -1621,7 +1621,7 @@ yyreduce:
 		break;
 
 	case 7:
-#line 271 "OSUnserializeXML.y"
+#line 254 "OSUnserializeXML.y"
 		{ (yyval) = buildSet(STATE, (yyvsp[(1) - (1)]));
 
 		  if (!yyval->object) {
@@ -1637,7 +1637,7 @@ yyreduce:
 		break;
 
 	case 8:
-#line 283 "OSUnserializeXML.y"
+#line 266 "OSUnserializeXML.y"
 		{ (yyval) = buildString(STATE, (yyvsp[(1) - (1)]));
 
 		  if (!yyval->object) {
@@ -1653,7 +1653,7 @@ yyreduce:
 		break;
 
 	case 9:
-#line 295 "OSUnserializeXML.y"
+#line 278 "OSUnserializeXML.y"
 		{ (yyval) = buildData(STATE, (yyvsp[(1) - (1)]));
 
 		  if (!yyval->object) {
@@ -1669,7 +1669,7 @@ yyreduce:
 		break;
 
 	case 10:
-#line 307 "OSUnserializeXML.y"
+#line 290 "OSUnserializeXML.y"
 		{ (yyval) = buildNumber(STATE, (yyvsp[(1) - (1)]));
 
 		  if (!yyval->object) {
@@ -1685,7 +1685,7 @@ yyreduce:
 		break;
 
 	case 11:
-#line 319 "OSUnserializeXML.y"
+#line 302 "OSUnserializeXML.y"
 		{ (yyval) = buildBoolean(STATE, (yyvsp[(1) - (1)]));
 
 		  if (!yyval->object) {
@@ -1701,7 +1701,7 @@ yyreduce:
 		break;
 
 	case 12:
-#line 331 "OSUnserializeXML.y"
+#line 314 "OSUnserializeXML.y"
 		{ (yyval) = retrieveObject(STATE, (yyvsp[(1) - (1)])->idref);
 		  if ((yyval)) {
 			  STATE->retrievedObjectCount++;
@@ -1725,21 +1725,21 @@ yyreduce:
 		break;
 
 	case 13:
-#line 355 "OSUnserializeXML.y"
+#line 338 "OSUnserializeXML.y"
 		{ (yyval) = (yyvsp[(1) - (2)]);
 		  (yyval)->elements = NULL;
 		  ;}
 		break;
 
 	case 14:
-#line 358 "OSUnserializeXML.y"
+#line 341 "OSUnserializeXML.y"
 		{ (yyval) = (yyvsp[(1) - (3)]);
 		  (yyval)->elements = (yyvsp[(2) - (3)]);
 		  ;}
 		break;
 
 	case 17:
-#line 365 "OSUnserializeXML.y"
+#line 348 "OSUnserializeXML.y"
 		{ (yyval) = (yyvsp[(2) - (2)]);
 		  (yyval)->next = (yyvsp[(1) - (2)]);
 
@@ -1756,7 +1756,7 @@ yyreduce:
 		break;
 
 	case 18:
-#line 380 "OSUnserializeXML.y"
+#line 363 "OSUnserializeXML.y"
 		{ (yyval) = (yyvsp[(1) - (2)]);
 		  (yyval)->key = (OSSymbol *)(yyval)->object;
 		  (yyval)->object = (yyvsp[(2) - (2)])->object;
@@ -1767,7 +1767,7 @@ yyreduce:
 		break;
 
 	case 19:
-#line 389 "OSUnserializeXML.y"
+#line 372 "OSUnserializeXML.y"
 		{ (yyval) = buildSymbol(STATE, (yyvsp[(1) - (1)]));
 
 //				  STATE->parsedObjectCount++;
@@ -1779,42 +1779,42 @@ yyreduce:
 		break;
 
 	case 20:
-#line 401 "OSUnserializeXML.y"
+#line 384 "OSUnserializeXML.y"
 		{ (yyval) = (yyvsp[(1) - (2)]);
 		  (yyval)->elements = NULL;
 		  ;}
 		break;
 
 	case 21:
-#line 404 "OSUnserializeXML.y"
+#line 387 "OSUnserializeXML.y"
 		{ (yyval) = (yyvsp[(1) - (3)]);
 		  (yyval)->elements = (yyvsp[(2) - (3)]);
 		  ;}
 		break;
 
 	case 23:
-#line 410 "OSUnserializeXML.y"
+#line 393 "OSUnserializeXML.y"
 		{ (yyval) = (yyvsp[(1) - (2)]);
 		  (yyval)->elements = NULL;
 		  ;}
 		break;
 
 	case 24:
-#line 413 "OSUnserializeXML.y"
+#line 396 "OSUnserializeXML.y"
 		{ (yyval) = (yyvsp[(1) - (3)]);
 		  (yyval)->elements = (yyvsp[(2) - (3)]);
 		  ;}
 		break;
 
 	case 26:
-#line 419 "OSUnserializeXML.y"
+#line 402 "OSUnserializeXML.y"
 		{ (yyval) = (yyvsp[(1) - (1)]);
 		  (yyval)->next = NULL;
 		  ;}
 		break;
 
 	case 27:
-#line 422 "OSUnserializeXML.y"
+#line 405 "OSUnserializeXML.y"
 		{ (yyval) = (yyvsp[(2) - (2)]);
 		  (yyval)->next = (yyvsp[(1) - (2)]);
 		  ;}
@@ -1822,7 +1822,7 @@ yyreduce:
 
 
 /* Line 1267 of yacc.c.  */
-#line 1789 "OSUnserializeXML.tab.c"
+#line 1772 "OSUnserializeXML.tab.c"
 	default: break;
 	}
 	YY_SYMBOL_PRINT("-> $$ =", yyr1[yyn], &yyval, &yyloc);
@@ -2034,7 +2034,7 @@ yyreturn:
 }
 
 
-#line 444 "OSUnserializeXML.y"
+#line 427 "OSUnserializeXML.y"
 
 
 int

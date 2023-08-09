@@ -133,13 +133,14 @@ sflt_permission_check(struct inpcb *inp)
 	    !(inp->inp_vflag & INP_IPV6)) {
 		return 0;
 	}
-	/* Sockets that have this entitlement bypass socket filters. */
-	if (INP_INTCOPROC_ALLOWED(inp)) {
+	/* Sockets that have incoproc or management entitlements bypass socket filters. */
+	if (INP_INTCOPROC_ALLOWED(inp) || INP_MANAGEMENT_ALLOWED(inp)) {
 		return 1;
 	}
-	/* Sockets bound to an intcoproc interface bypass socket filters. */
+	/* Sockets bound to an intcoproc or management interface bypass socket filters. */
 	if ((inp->inp_flags & INP_BOUND_IF) &&
-	    IFNET_IS_INTCOPROC(inp->inp_boundifp)) {
+	    (IFNET_IS_INTCOPROC(inp->inp_boundifp) ||
+	    IFNET_IS_MANAGEMENT(inp->inp_boundifp))) {
 		return 1;
 	}
 #if NECP

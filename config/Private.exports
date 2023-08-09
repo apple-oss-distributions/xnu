@@ -400,6 +400,7 @@ _ifnet_set_delegate
 _ifnet_set_idle_flags
 _ifnet_set_latencies
 _ifnet_set_link_quality
+_ifnet_set_management
 _ifnet_set_output_sched_model
 _ifnet_set_poll_params
 _ifnet_set_rcvq_maxlen
@@ -674,6 +675,7 @@ _mach_vm_allocate:_mach_vm_allocate_external
 _mach_vm_behavior_set
 _mach_vm_deallocate
 _mach_vm_protect
+_mach_vm_wire_level_monitor
 _mbuf_add_drvaux
 _mbuf_del_drvaux
 _mbuf_find_drvaux
@@ -1060,6 +1062,7 @@ _throttle_io_will_be_throttled
 _ubc_is_mapped_writable
 _ubc_setsize_ex
 _ubc_upl_range_needed
+_ubc_was_mapped_writable
 _upl_get_size
 _vfs_context_current
 _vfs_context_issuser

@@ -810,8 +810,8 @@ ipc_kobject_alloc_port(
 	ipc_kobject_alloc_options_t     options)
 {
 	ipc_port_t port;
+	port = ipc_port_alloc_special(ipc_space_kernel, IPC_PORT_ENFORCE_STRICT_REPLY_PORT_SEMANTICS);
 
-	port = ipc_port_alloc_special(ipc_space_kernel, IPC_PORT_INIT_NONE);
 	if (port == IP_NULL) {
 		panic("ipc_kobject_alloc_port(): failed to allocate port");
 	}

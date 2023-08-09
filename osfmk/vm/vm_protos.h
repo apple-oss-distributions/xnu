@@ -225,6 +225,11 @@ extern memory_object_t shared_region_pager_setup(
 	vm_object_offset_t      backing_offset,
 	struct vm_shared_region_slide_info *slide_info,
 	uint64_t                jop_key);
+
+extern uint64_t apple_protect_pager_purge_all(void);
+extern uint64_t shared_region_pager_purge_all(void);
+extern uint64_t dyld_pager_purge_all(void);
+
 #if __has_feature(ptrauth_calls)
 extern memory_object_t shared_region_pager_match(
 	vm_object_t             backing_object,
@@ -757,6 +762,8 @@ memory_entry_check_for_adjustment(
 	ipc_port_t                      port,
 	vm_map_offset_t         *overmap_start,
 	vm_map_offset_t         *overmap_end);
+
+extern uint64_t vm_purge_filebacked_pagers(void);
 
 #define roundup(x, y)   ((((x) % (y)) == 0) ? \
 	                (x) : ((x) + ((y) - ((x) % (y)))))

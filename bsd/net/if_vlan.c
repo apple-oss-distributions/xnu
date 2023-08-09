@@ -1397,6 +1397,11 @@ vlan_config(struct ifnet * ifp, struct ifnet * p, int tag)
 		}
 	}
 
+	/* inherit management restriction from parent by default */
+	if (IFNET_IS_MANAGEMENT(p)) {
+		ifnet_set_management(ifp, true);
+	}
+
 	/* configure parent to receive our multicast addresses */
 	error = multicast_list_program(&ifv->ifv_multicast, ifp, p);
 	if (error != 0) {

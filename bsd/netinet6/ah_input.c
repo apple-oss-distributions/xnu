@@ -680,7 +680,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		}
 		VERIFY((sizeof(struct ah) + sizoff + siz1) <= INT_MAX);
 		IP6_EXTHDR_CHECK(m, off, (int)(sizeof(struct ah) + sizoff + siz1),
-		    {return IPPROTO_DONE;});
+		    {goto fail;});
 		ip6 = mtod(m, struct ip6_hdr *);
 		ah = (struct ah *)(void *)(mtod(m, caddr_t) + off);
 	}

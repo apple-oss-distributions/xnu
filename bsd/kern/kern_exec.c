@@ -2600,25 +2600,7 @@ exec_handle_port_actions(struct image_params *imgp,
 			break;
 
 		case PSPA_PTRAUTH_TASK_PORT:
-#if defined(HAS_APPLE_PAC)
-			{
-				task_t ptr_auth_task = convert_port_to_task(port);
-
-				if (ptr_auth_task == TASK_NULL) {
-					ret = EINVAL;
-					break;
-				}
-
-				imgp->ip_inherited_shared_region_id =
-				    task_get_vm_shared_region_id_and_jop_pid(ptr_auth_task,
-				    &imgp->ip_inherited_jop_pid);
-
-				/* Deallocate task ref returned by convert_port_to_task */
-				task_deallocate(ptr_auth_task);
-			}
-#endif /* HAS_APPLE_PAC */
-
-			/* consume the port right in case of success */
+			/* No one uses this, this is no longer supported, just a no-op */
 			ipc_port_release_send(port);
 			break;
 		default:

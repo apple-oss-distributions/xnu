@@ -501,6 +501,21 @@ log_unnest_badness(
 	printf("%s[%d] triggered unnest of range 0x%qx->0x%qx of DYLD shared region in VM map %p. While not abnormal for debuggers, this increases system memory footprint until the target exits.\n", current_proc()->p_comm, proc_getpid(current_proc()), (uint64_t)s, (uint64_t)e, (void *) VM_KERNEL_ADDRPERM(m));
 }
 
+uint64_t
+vm_purge_filebacked_pagers(void)
+{
+	uint64_t pages_purged;
+
+	pages_purged = 0;
+	pages_purged += apple_protect_pager_purge_all();
+	pages_purged += shared_region_pager_purge_all();
+	pages_purged += dyld_pager_purge_all();
+#if DEVELOPMENT || DEBUG
+	printf("%s:%d pages purged: %llu\n", __FUNCTION__, __LINE__, pages_purged);
+#endif /* DEVELOPMENT || DEBUG */
+	return pages_purged;
+}
+
 int
 useracc(
 	user_addr_t     addr,
@@ -4049,6 +4064,11 @@ SYSCTL_PROC(_vm, OID_AUTO, vm_map_user_range_heap, CTLTYPE_STRUCT | CTLFLAG_RD |
 
 #if DEBUG || DEVELOPMENT
 #endif /* DEBUG || DEVELOPMENT */
+
+extern uint64_t vm_map_range_overflows_count;
+SYSCTL_QUAD(_vm, OID_AUTO, map_range_overflows_count, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_map_range_overflows_count, "");
+extern boolean_t vm_map_range_overflows_log;
+SYSCTL_INT(_vm, OID_AUTO, map_range_oveflows_log, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_map_range_overflows_log, 0, "");
 
 extern uint64_t c_seg_filled_no_contention;
 extern uint64_t c_seg_filled_contention;

@@ -133,6 +133,8 @@
 
 #include <os/log.h>
 
+#include <IOKit/IOBSD.h>
+
 /*
  * System initialization
  */
@@ -287,7 +289,85 @@ SYSCTL_PROC(_net_link_generic_system, OID_AUTO, companion_sndbuf_limit,
     &companion_link_sock_buffer_limit, 0, sysctl_set_companion_link_sock_buf_limit,
     "I", "set sock send buffer limit of connections using companion links");
 
+
 TUNABLE(bool, intcoproc_unrestricted, "intcoproc_unrestricted", false);
+
+SYSCTL_NODE(_net_link_generic_system, OID_AUTO, management,
+    CTLFLAG_RW | CTLFLAG_LOCKED, 0, "management interface");
+
+TUNABLE_WRITEABLE(int, if_management_verbose, "management_data_unrestricted", 0);
+
+SYSCTL_INT(_net_link_generic_system_management, OID_AUTO, verbose,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &if_management_verbose, 0, "");
+
+/*
+ * boot-args to disable entitlement check for data transfer on management interface
+ */
+TUNABLE_DEV_WRITEABLE(bool, management_data_unrestricted, "management_data_unrestricted", false);
+
+#if DEBUG || DEVELOPMENT
+#define MANAGEMENT_CTLFLAG_ACCESS CTLFLAG_RW
+#else
+#define MANAGEMENT_CTLFLAG_ACCESS CTLFLAG_RD
+#endif
+
+static int
+sysctl_management_data_unrestricted SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int val = management_data_unrestricted;
+
+	int error = sysctl_handle_int(oidp, &val, 0, req);
+#if DEBUG || DEVELOPMENT
+	if (error == 0 && req->newptr != USER_ADDR_NULL) {
+		management_data_unrestricted = (val == 0) ? false : true;
+		if (if_management_verbose > 0) {
+			os_log(OS_LOG_DEFAULT,
+			    "sysctl_management_data_unrestricted val %d -> management_data_unrestricted %d",
+			    val, management_data_unrestricted);
+		}
+	}
+#endif /* DEBUG || DEVELOPMENT */
+	return error;
+}
+
+SYSCTL_PROC(_net_link_generic_system_management, OID_AUTO, data_unrestricted,
+    CTLTYPE_INT | MANAGEMENT_CTLFLAG_ACCESS | CTLFLAG_LOCKED, 0, 0,
+    sysctl_management_data_unrestricted, "I", "");
+
+/*
+ * boot-args to disable entitlement restrictions to control management interfaces
+ */
+TUNABLE_DEV_WRITEABLE(bool, management_control_unrestricted, "management_control_unrestricted", false);
+
+static int
+sysctl_management_control_unrestricted SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int val = management_control_unrestricted;
+
+	int error = sysctl_handle_int(oidp, &val, 0, req);
+#if DEBUG || DEVELOPMENT
+	if (error == 0 && req->newptr != USER_ADDR_NULL) {
+		management_control_unrestricted = (val == 0) ? false : true;
+		if (if_management_verbose > 0) {
+			os_log(OS_LOG_DEFAULT,
+			    "sysctl_management_control_unrestricted val %d -> management_control_unrestricted %d",
+			    val, management_control_unrestricted);
+		}
+	}
+#endif /* DEBUG || DEVELOPMENT */
+	return error;
+}
+
+SYSCTL_PROC(_net_link_generic_system_management, OID_AUTO, control_unrestricted,
+    CTLTYPE_INT | MANAGEMENT_CTLFLAG_ACCESS | CTLFLAG_LOCKED, 0, 0,
+    sysctl_management_control_unrestricted, "I", "");
+
+#undef MANAGEMENT_CTLFLAG_ACCESS
+
+/* The following is set as soon as IFNET_SUBFAMILY_MANAGEMENT is used */
+bool if_management_interface_check_needed = false;
 
 /* Eventhandler context for interface events */
 struct eventhandler_lists_ctxt ifnet_evhdlr_ctxt;
@@ -818,6 +898,8 @@ if_functional_type(struct ifnet *ifp, bool exclude_delegate)
 			ret = IFRTYPE_FUNCTIONAL_CELLULAR;
 		} else if (IFNET_IS_INTCOPROC(ifp)) {
 			ret = IFRTYPE_FUNCTIONAL_INTCOPROC;
+		} else if (IFNET_IS_MANAGEMENT(ifp)) {
+			ret = IFRTYPE_FUNCTIONAL_MANAGEMENT;
 		} else if ((exclude_delegate &&
 		    (ifp->if_family == IFNET_FAMILY_ETHERNET ||
 		    ifp->if_family == IFNET_FAMILY_BOND ||
@@ -2877,6 +2959,98 @@ ifioctl_restrict_intcoproc(unsigned long cmd, const char *ifname,
 	return false;
 }
 
+static bool
+ifioctl_restrict_management(unsigned long cmd, const char *ifname,
+    struct ifnet *ifp, struct proc *p)
+{
+	if (if_management_interface_check_needed == false) {
+		return false;
+	}
+	if (management_control_unrestricted) {
+		return false;
+	}
+	if (proc_pid(p) == 0) {
+		return false;
+	}
+	if (ifname) {
+		ifp = ifunit(ifname);
+	}
+	if (ifp == NULL) {
+		return false;
+	}
+	if (!IFNET_IS_MANAGEMENT(ifp)) {
+		return false;
+	}
+	switch (cmd) {
+	case SIOCGIFBRDADDR:
+	case SIOCGIFCONF32:
+	case SIOCGIFCONF64:
+	case SIOCGIFFLAGS:
+	case SIOCGIFEFLAGS:
+	case SIOCGIFCAP:
+	case SIOCGIFMETRIC:
+	case SIOCGIFMTU:
+	case SIOCGIFPHYS:
+	case SIOCGIFTYPE:
+	case SIOCGIFFUNCTIONALTYPE:
+	case SIOCGIFPSRCADDR:
+	case SIOCGIFPDSTADDR:
+	case SIOCGIFGENERIC:
+	case SIOCGIFDEVMTU:
+	case SIOCGIFVLAN:
+	case SIOCGIFBOND:
+	case SIOCGIFWAKEFLAGS:
+	case SIOCGIFGETRTREFCNT:
+	case SIOCGIFOPPORTUNISTIC:
+	case SIOCGIFLINKQUALITYMETRIC:
+	case SIOCGIFLOG:
+	case SIOCGIFDELEGATE:
+	case SIOCGIFEXPENSIVE:
+	case SIOCGIFINTERFACESTATE:
+	case SIOCGIFPROBECONNECTIVITY:
+	case SIOCGIFTIMESTAMPENABLED:
+	case SIOCGECNMODE:
+	case SIOCGQOSMARKINGMODE:
+	case SIOCGQOSMARKINGENABLED:
+	case SIOCGIFLOWINTERNET:
+	case SIOCGIFSTATUS:
+	case SIOCGIFMEDIA32:
+	case SIOCGIFMEDIA64:
+	case SIOCGIFXMEDIA32:
+	case SIOCGIFXMEDIA64:
+	case SIOCGIFDESC:
+	case SIOCGIFLINKPARAMS:
+	case SIOCGIFQUEUESTATS:
+	case SIOCGIFTHROTTLE:
+	case SIOCGIFAGENTIDS32:
+	case SIOCGIFAGENTIDS64:
+	case SIOCGIFNETSIGNATURE:
+	case SIOCGIFINFO_IN6:
+	case SIOCGIFAFLAG_IN6:
+	case SIOCGNBRINFO_IN6:
+	case SIOCGIFALIFETIME_IN6:
+	case SIOCGIFNETMASK_IN6:
+#if SKYWALK
+	case SIOCGIFNEXUS:
+#endif /* SKYWALK */
+	case SIOCGIFPROTOLIST32:
+	case SIOCGIFPROTOLIST64:
+	case SIOCGIFXFLAGS:
+	case SIOCGIFNOTRAFFICSHAPING:
+		return false;
+	default:
+		if (!IOCurrentTaskHasEntitlement(MANAGEMENT_CONTROL_ENTITLEMENT)) {
+#if (DEBUG || DEVELOPMENT)
+			printf("ifioctl_restrict_management: cmd 0x%lx on %s not allowed for %s:%u\n",
+			    cmd, ifname, proc_name_address(p), proc_pid(p));
+#endif
+			return true;
+		}
+		return false;
+	}
+	return false;
+}
+
 /*
  * Given a media word, return one suitable for an application
  * using the original encoding.
@@ -3069,6 +3243,7 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 	case SIOCGIFPHYS:                       /* struct ifreq */
 	case SIOCSIFFLAGS:                      /* struct ifreq */
 	case SIOCSIFCAP:                        /* struct ifreq */
+	case SIOCSIFMANAGEMENT:                 /* struct ifreq */
 	case SIOCSIFMETRIC:                     /* struct ifreq */
 	case SIOCSIFPHYS:                       /* struct ifreq */
 	case SIOCSIFMTU:                        /* struct ifreq */
@@ -3114,6 +3289,7 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 #if (DEBUG || DEVELOPMENT)
 	case SIOCSIFDISABLEOUTPUT:              /* struct ifreq */
 #endif /* (DEBUG || DEVELOPMENT) */
+	case SIOCSIFSUBFAMILY:                  /* struct ifreq */
 	case SIOCGECNMODE:                      /* struct ifreq */
 	case SIOCSECNMODE:
 	case SIOCSQOSMARKINGMODE:               /* struct ifreq */
@@ -3142,6 +3318,10 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 		ifr.ifr_name[IFNAMSIZ - 1] = '\0';
 		bcopy(&ifr.ifr_name, ifname, IFNAMSIZ);
 		if (ifioctl_restrict_intcoproc(cmd, ifname, NULL, p) == true) {
+			error = EPERM;
+			goto done;
+		}
+		if (ifioctl_restrict_management(cmd, ifname, NULL, p) == true) {
 			error = EPERM;
 			goto done;
 		}
@@ -4254,9 +4434,44 @@ ifioctl_ifreq(struct socket *so, u_long cmd, struct ifreq *ifr, struct proc *p)
 		    PRIV_NET_INTERFACE_CONTROL, 0)) != 0) {
 			return error;
 		}
+#if (DEBUG || DEVELOPMENT)
+		if (management_control_unrestricted) {
+			uint32_t subfamily = ifr->ifr_type.ift_subfamily;
+
+			if (subfamily == ifp->if_subfamily) {
+				break;
+			} else if (subfamily == IFRTYPE_SUBFAMILY_MANAGEMENT && ifp->if_subfamily == 0) {
+				ifp->if_subfamily = IFNET_SUBFAMILY_MANAGEMENT;
+				ifnet_set_management(ifp, true);
+				break;
+			} else if (subfamily == 0 && ifp->if_subfamily == IFNET_SUBFAMILY_MANAGEMENT) {
+				ifnet_set_management(ifp, false);
+				break;
+			}
+		}
+#endif /* (DEBUG || DEVELOPMENT) */
 		error = ifnet_ioctl(ifp, SOCK_DOM(so), cmd, (caddr_t)ifr);
 		break;
 
+	case SIOCSIFMANAGEMENT: {
+		if (management_control_unrestricted == false &&
+		    !IOCurrentTaskHasEntitlement(MANAGEMENT_CONTROL_ENTITLEMENT)) {
+			os_log(OS_LOG_DEFAULT, "ifioctl_req: cmd SIOCSIFMANAGEMENT on %s not allowed for %s:%u\n",
+			    ifp->if_xname, proc_name_address(p), proc_pid(p));
+			return EPERM;
+		}
+		if (ifr->ifr_intval != 0) {
+			ifnet_set_management(ifp, true);
+		} else {
+			if (ifp->if_subfamily == IFNET_SUBFAMILY_MANAGEMENT) {
+				os_log(OS_LOG_DEFAULT, "ifioctl_req: cmd SIOCSIFMANAGEMENT 0 not allowed on %s with subfamily management",
+				    ifp->if_xname);
+				return EPERM;
+			}
+			ifnet_set_management(ifp, false);
+		}
+		break;
+	}
 	case SIOCSIFLOWINTERNET:
 		if ((error = priv_check_cred(kauth_cred_get(),
 		    PRIV_NET_INTERFACE_CONTROL, 0)) != 0) {
@@ -5947,6 +6162,8 @@ ifioctl_cassert(void)
 	case SIOCSIFCAP:
 	case SIOCGIFCAP:
 
+	case SIOCSIFMANAGEMENT:
+
 	case SIOCIFCREATE:
 	case SIOCIFDESTROY:
 	case SIOCIFCREATE2:
@@ -6164,4 +6381,26 @@ if_get_tcp_kao_max(struct ifnet *ifp)
 		ifnet_lock_done(ifp);
 	}
 	return error;
+}
+
+int
+ifnet_set_management(struct ifnet *ifp, boolean_t on)
+{
+	if (ifp == NULL) {
+		return EINVAL;
+	}
+	if (if_management_verbose > 0) {
+		os_log(OS_LOG_DEFAULT,
+		    "interface %s management set %s by %s:%d",
+		    ifp->if_xname, on ? "true" : "false",
+		    proc_best_name(current_proc()), proc_selfpid());
+	}
+	if (on) {
+		if_set_xflags(ifp, IFXF_MANAGEMENT);
+		if_management_interface_check_needed = true;
+		in_management_interface_check();
+	} else {
+		if_clear_xflags(ifp, IFXF_MANAGEMENT);
+	}
+	return 0;
 }

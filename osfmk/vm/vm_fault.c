@@ -4142,7 +4142,6 @@ vm_fault_internal(
 	 */
 	if (map->never_faults || (pgz_owned(vaddr) && map->pmap == kernel_pmap)) {
 		assert(map->pmap == kernel_pmap);
-		panic_fault_address = vaddr;
 		return KERN_INVALID_ADDRESS;
 	}
 

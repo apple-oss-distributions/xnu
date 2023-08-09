@@ -160,6 +160,9 @@ u_int32_t necp_drop_unentitled_level = NECP_SESSION_PRIORITY_CONTROL + 1; // Blo
 u_int32_t necp_drop_unentitled_level = 0;
 #endif // XNU_TARGET_OS_WATCH
 
+u_int32_t necp_drop_management_order = 0;
+u_int32_t necp_drop_management_level = NECP_SESSION_PRIORITY_PRIVILEGED_TUNNEL;
+
 u_int32_t necp_debug = 0; // 0=None, 1=Basic, 2=EveryMatch
 
 os_log_t necp_log_handle = NULL;
@@ -524,6 +527,7 @@ struct necp_route_rule {
 static LIST_HEAD(necp_route_rule_list, necp_route_rule) necp_route_rules;
 static u_int32_t necp_create_route_rule(struct necp_route_rule_list *list, u_int8_t *route_rules_array, u_int32_t route_rules_array_size);
 static bool necp_remove_route_rule(struct necp_route_rule_list *list, u_int32_t route_rule_id);
+static bool necp_route_is_interface_type_allowed(struct rtentry *route, struct ifnet *ifp, proc_t proc, struct inpcb *inp);
 static bool necp_route_is_allowed(struct rtentry *route, ifnet_t interface, u_int32_t *netagent_array, size_t netagent_array_count,
     u_int32_t route_rule_id, u_int32_t *interface_type_denied);
 static uint32_t necp_route_get_netagent(struct rtentry *route, u_int32_t *netagent_array, size_t netagent_array_count, u_int32_t route_rule_id, bool *remove);
@@ -544,6 +548,7 @@ static u_int32_t necp_create_aggregate_route_rule(u_int32_t *rule_ids);
 // Sysctl definitions
 static int sysctl_handle_necp_level SYSCTL_HANDLER_ARGS;
 static int sysctl_handle_necp_unentitled_level SYSCTL_HANDLER_ARGS;
+static int sysctl_handle_necp_management_level SYSCTL_HANDLER_ARGS;
 
 SYSCTL_NODE(_net, OID_AUTO, necp, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "NECP");
 SYSCTL_INT(_net_necp, NECPCTL_DEDUP_POLICIES, dedup_policies, CTLFLAG_LOCKED | CTLFLAG_RW, &necp_dedup_policies, 0, "");
@@ -553,6 +558,7 @@ SYSCTL_INT(_net_necp, NECPCTL_PASS_KEEPALIVES, pass_keepalives, CTLFLAG_LOCKED |
 SYSCTL_INT(_net_necp, NECPCTL_PASS_INTERPOSE, pass_interpose, CTLFLAG_LOCKED | CTLFLAG_RW, &necp_pass_interpose, 0, "");
 SYSCTL_INT(_net_necp, NECPCTL_DEBUG, debug, CTLFLAG_LOCKED | CTLFLAG_RW, &necp_debug, 0, "");
 SYSCTL_PROC(_net_necp, NECPCTL_DROP_UNENTITLED_LEVEL, drop_unentitled_level, CTLTYPE_INT | CTLFLAG_LOCKED | CTLFLAG_RW, &necp_drop_unentitled_level, 0, &sysctl_handle_necp_unentitled_level, "IU", "");
+SYSCTL_PROC(_net_necp, NECPCTL_DROP_MANAGEMENT_LEVEL, drop_management_level, CTLTYPE_INT | CTLFLAG_LOCKED | CTLFLAG_RW, &necp_drop_management_level, 0, &sysctl_handle_necp_management_level, "IU", "");
 SYSCTL_PROC(_net_necp, NECPCTL_DROP_ALL_LEVEL, drop_all_level, CTLTYPE_INT | CTLFLAG_LOCKED | CTLFLAG_RW, &necp_drop_all_level, 0, &sysctl_handle_necp_level, "IU", "");
 SYSCTL_LONG(_net_necp, NECPCTL_SOCKET_POLICY_COUNT, socket_policy_count, CTLFLAG_LOCKED | CTLFLAG_RD, &necp_kernel_socket_policies_count, "");
 SYSCTL_LONG(_net_necp, NECPCTL_SOCKET_NON_APP_POLICY_COUNT, socket_non_app_policy_count, CTLFLAG_LOCKED | CTLFLAG_RD, &necp_kernel_socket_policies_non_app_count, "");
@@ -761,6 +767,15 @@ _necp_process_drop_order_inner(kauth_cred_t cred)
 
 #define necp_process_drop_order(_cred) (necp_drop_unentitled_order != 0 ? _necp_process_drop_order_inner(_cred) : necp_drop_unentitled_order)
 #pragma GCC poison _necp_process_drop_order_inner
+
+static int
+sysctl_handle_necp_management_level SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error = sysctl_handle_int(oidp, oidp->oid_arg1, oidp->oid_arg2, req);
+	necp_drop_management_order = necp_get_first_order_for_priority(necp_drop_management_level);
+	return error;
+}
 
 // Session fd
 
@@ -1662,6 +1677,7 @@ necp_init(void)
 	necp_kernel_socket_policies_app_layer_map = NULL;
 
 	necp_drop_unentitled_order = necp_get_first_order_for_priority(necp_drop_unentitled_level);
+	necp_drop_management_order = necp_get_first_order_for_priority(necp_drop_management_level);
 }
 
 static void
@@ -6975,7 +6991,7 @@ necp_application_find_policy_match_internal(proc_t proc,
 	necp_kernel_policy_result drop_dest_policy_result = NECP_KERNEL_POLICY_RESULT_NONE;
 
 	lck_rw_lock_shared(&necp_kernel_policy_lock);
-	if (necp_kernel_application_policies_count == 0) {
+	if (necp_kernel_application_policies_count == 0 && necp_drop_management_order == 0) {
 		if (necp_drop_all_order > 0 || drop_order > 0) {
 			returned_result->routing_result = NECP_KERNEL_POLICY_RESULT_DROP;
 			lck_rw_done(&necp_kernel_policy_lock);
@@ -7831,6 +7847,7 @@ necp_application_find_policy_match_internal(proc_t proc,
 		    IFNET_IS_EXPENSIVE(rt->rt_ifp));
 		const bool constrained_prohibited = ((client_flags & NECP_CLIENT_PARAMETER_FLAG_PROHIBIT_CONSTRAINED) &&
 		    IFNET_IS_CONSTRAINED(rt->rt_ifp));
+		const bool interface_type_blocked = !necp_route_is_interface_type_allowed(rt, NULL, proc, NULL);
 		if (reason != NULL) {
 			if (expensive_prohibited) {
 				*reason = NECP_CLIENT_RESULT_REASON_EXPENSIVE_PROHIBITED;
@@ -7838,8 +7855,8 @@ necp_application_find_policy_match_internal(proc_t proc,
 				*reason = NECP_CLIENT_RESULT_REASON_CONSTRAINED_PROHIBITED;
 			}
 		}
-		if (expensive_prohibited || constrained_prohibited) {
-			// If the client flags prohibited a property of the interface, treat it as a drop
+		if (expensive_prohibited || constrained_prohibited || interface_type_blocked) {
+			// If a property of the interface was not allowed, treat it as a drop
 			returned_result->routing_result = NECP_KERNEL_POLICY_RESULT_DROP;
 			memset(&returned_result->routing_result_parameter, 0, sizeof(returned_result->routing_result_parameter));
 		}
@@ -9101,8 +9118,9 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 	u_int32_t drop_order = necp_process_drop_order(so->so_cred);
 
 	// Don't lock. Possible race condition, but we don't want the performance hit.
-	if (necp_kernel_socket_policies_count == 0 ||
-	    (!(inp->inp_flags2 & INP2_WANT_APP_POLICY) && necp_kernel_socket_policies_non_app_count == 0)) {
+	if (necp_drop_management_order == 0 &&
+	    (necp_kernel_socket_policies_count == 0 ||
+	    (!(inp->inp_flags2 & INP2_WANT_APP_POLICY) && necp_kernel_socket_policies_non_app_count == 0))) {
 		if (necp_drop_all_order > 0 || drop_order > 0) {
 			inp->inp_policyresult.policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
 			inp->inp_policyresult.skip_policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
@@ -9734,8 +9752,9 @@ necp_ip_output_find_policy_match(struct mbuf *packet, int flags, struct ip_out_a
 
 	// Exit early for an empty list
 	// Don't lock. Possible race condition, but we don't want the performance hit.
-	if (necp_kernel_ip_output_policies_count == 0 ||
-	    (socket_policy_id == NECP_KERNEL_POLICY_ID_NONE && necp_kernel_ip_output_policies_non_id_count == 0 && necp_drop_dest_policy.entry_count == 0)) {
+	if (necp_drop_management_order == 0 &&
+	    (necp_kernel_ip_output_policies_count == 0 ||
+	    (socket_policy_id == NECP_KERNEL_POLICY_ID_NONE && necp_kernel_ip_output_policies_non_id_count == 0 && necp_drop_dest_policy.entry_count == 0))) {
 		if (necp_drop_all_order > 0) {
 			matched_policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
 			if (result) {
@@ -9906,8 +9925,9 @@ necp_ip6_output_find_policy_match(struct mbuf *packet, int flags, struct ip6_out
 
 	// Exit early for an empty list
 	// Don't lock. Possible race condition, but we don't want the performance hit.
-	if (necp_kernel_ip_output_policies_count == 0 ||
-	    (socket_policy_id == NECP_KERNEL_POLICY_ID_NONE && necp_kernel_ip_output_policies_non_id_count == 0 && necp_drop_dest_policy.entry_count == 0)) {
+	if (necp_drop_management_order == 0 &&
+	    (necp_kernel_ip_output_policies_count == 0 ||
+	    (socket_policy_id == NECP_KERNEL_POLICY_ID_NONE && necp_kernel_ip_output_policies_non_id_count == 0 && necp_drop_dest_policy.entry_count == 0))) {
 		if (necp_drop_all_order > 0) {
 			matched_policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
 			if (result) {
@@ -10661,6 +10681,80 @@ necp_route_is_allowed_inner(struct rtentry *route, struct ifnet *ifp, u_int32_t 
 }
 
 static bool
+necp_proc_is_allowed_on_management_interface(proc_t proc)
+{
+	bool allowed = false;
+	const task_t task = proc_task(proc);
+
+	if (task != NULL) {
+		if (IOTaskHasEntitlement(task, INTCOPROC_RESTRICTED_ENTITLEMENT) == true
+		    || IOTaskHasEntitlement(task, MANAGEMENT_DATA_ENTITLEMENT) == true
+#if DEBUG || DEVELOPMENT
+		    || IOTaskHasEntitlement(task, INTCOPROC_RESTRICTED_ENTITLEMENT_DEVELOPMENT) == true
+		    || IOTaskHasEntitlement(task, MANAGEMENT_DATA_ENTITLEMENT_DEVELOPMENT) == true
+#endif /* DEBUG || DEVELOPMENT */
+		    ) {
+			allowed = true;
+		}
+	}
+	return allowed;
+}
+
+__attribute__((noinline))
+static void
+necp_log_interface_not_allowed(struct ifnet *ifp, proc_t proc, struct inpcb *inp)
+{
+	char buf[128];
+
+	if (inp != NULL) {
+		inp_snprintf_tuple(inp, buf, sizeof(buf));
+	} else {
+		*buf = 0;
+	}
+	os_log(OS_LOG_DEFAULT,
+	    "necp_route_is_interface_type_allowed %s:%d %s not allowed on management interface %s",
+	    proc != NULL ? proc_best_name(proc) : proc_best_name(current_proc()),
+	    proc != NULL ? proc_getpid(proc) : proc_selfpid(),
+	    inp != NULL ? buf : "",
+	    ifp->if_xname);
+}
+
+static bool
+necp_route_is_interface_type_allowed(struct rtentry *route, struct ifnet *ifp, proc_t proc, struct inpcb *inp)
+{
+	if (if_management_interface_check_needed == false) {
+		return true;
+	}
+	if (necp_drop_management_order == 0) {
+		return true;
+	}
+	if (ifp == NULL && route != NULL) {
+		ifp = route->rt_ifp;
+	}
+	if (ifp == NULL) {
+		return true;
+	}
+
+	if (IFNET_IS_MANAGEMENT(ifp)) {
+		bool allowed = true;
+
+		if (inp != NULL) {
+			/*
+			 * The entitlement check is already performed for socket flows
+			 */
+			allowed = INP_MANAGEMENT_ALLOWED(inp);
+		} else if (proc != NULL) {
+			allowed = necp_proc_is_allowed_on_management_interface(proc);
+		}
+		if (__improbable(if_management_verbose > 1 && allowed == false)) {
+			necp_log_interface_not_allowed(ifp, proc, inp);
+		}
+		return allowed;
+	}
+	return true;
+}
+
+static bool
 necp_route_is_allowed(struct rtentry *route, struct ifnet *interface, u_int32_t *netagent_array, size_t netagent_array_count,
     u_int32_t route_rule_id, u_int32_t *interface_type_denied)
 {
@@ -10974,7 +11068,7 @@ necp_route_get_flow_divert(struct rtentry *route, u_int32_t *netagent_array, siz
 bool
 necp_packet_is_allowed_over_interface(struct mbuf *packet, struct ifnet *interface)
 {
-	bool is_allowed = TRUE;
+	bool is_allowed = true;
 	u_int32_t route_rule_id = necp_get_route_rule_id_from_packet(packet);
 	if (route_rule_id != 0 &&
 	    interface != NULL) {
@@ -11071,8 +11165,9 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 	u_int32_t drop_order = necp_process_drop_order(so->so_cred);
 
 	// Don't lock. Possible race condition, but we don't want the performance hit.
-	if (necp_kernel_socket_policies_count == 0 ||
-	    (!(inp->inp_flags2 & INP2_WANT_APP_POLICY) && necp_kernel_socket_policies_non_app_count == 0)) {
+	if (necp_drop_management_order == 0 &&
+	    (necp_kernel_socket_policies_count == 0 ||
+	    (!(inp->inp_flags2 & INP2_WANT_APP_POLICY) && necp_kernel_socket_policies_non_app_count == 0))) {
 		if (necp_drop_all_order > 0 || drop_order > 0) {
 			if (necp_socket_bypass(override_local_addr, override_remote_addr, inp) != NECP_BYPASS_TYPE_NONE) {
 				allowed_to_receive = TRUE;
@@ -11086,8 +11181,7 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 	// If this socket is connected, or we are not taking addresses into account, try to reuse last result
 	if ((necp_socket_is_connected(inp) || (override_local_addr == NULL && override_remote_addr == NULL)) && inp->inp_policyresult.policy_id != NECP_KERNEL_POLICY_ID_NONE) {
 		bool policies_have_changed = FALSE;
-		bool route_allowed = TRUE;
-
+		bool route_allowed = necp_route_is_interface_type_allowed(route, input_interface, NULL, inp);
 		if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount) {
 			policies_have_changed = TRUE;
 		} else {
@@ -11147,6 +11241,7 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 		    inp->inp_policyresult.results.result == NECP_KERNEL_POLICY_RESULT_SOCKET_DIVERT ||
 		    (inp->inp_policyresult.results.result == NECP_KERNEL_POLICY_RESULT_IP_TUNNEL && input_interface &&
 		    inp->inp_policyresult.results.result_parameter.tunnel_interface_index != verifyifindex) ||
+		    !necp_route_is_interface_type_allowed(route, input_interface, NULL, inp) ||
 		    (inp->inp_policyresult.results.route_rule_id != 0 &&
 		    !necp_route_is_allowed(route, input_interface, NULL, 0, inp->inp_policyresult.results.route_rule_id, &interface_type_denied))) {
 			allowed_to_receive = FALSE;
@@ -11220,6 +11315,7 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 		    matched_policy->result == NECP_KERNEL_POLICY_RESULT_SOCKET_DIVERT ||
 		    (matched_policy->result == NECP_KERNEL_POLICY_RESULT_IP_TUNNEL && input_interface &&
 		    matched_policy->result_parameter.tunnel_interface_index != verifyifindex) ||
+		    !necp_route_is_interface_type_allowed(route, input_interface, NULL, inp) ||
 		    (route_rule_id != 0 &&
 		    !necp_route_is_allowed(route, input_interface, netagent_ids, NECP_MAX_NETAGENTS, route_rule_id, &interface_type_denied)) ||
 		    !necp_netagents_allow_traffic(netagent_ids, NECP_MAX_NETAGENTS)) {

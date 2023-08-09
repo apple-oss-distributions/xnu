@@ -4559,8 +4559,10 @@ pf_af_hook(struct ifnet *ifp, struct mbuf **mppn, struct mbuf **mp,
 	net_thread_marks_t marks;
 	struct ifnet * pf_ifp = ifp;
 
-	/* Always allow traffic on co-processor interfaces. */
-	if (!intcoproc_unrestricted && ifp && IFNET_IS_INTCOPROC(ifp)) {
+	/* Always allow traffic on co-processor and management interfaces. */
+	if (ifp != NULL &&
+	    ((!intcoproc_unrestricted && IFNET_IS_INTCOPROC(ifp)) ||
+	    (!management_data_unrestricted && IFNET_IS_MANAGEMENT(ifp)))) {
 		return 0;
 	}
 

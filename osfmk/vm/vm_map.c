@@ -162,6 +162,7 @@ extern const int fourk_binary_compatibility_allow_wx;
 #endif /* __arm64__ */
 extern int proc_selfpid(void);
 extern char *proc_name_address(void *p);
+extern char *proc_best_name(struct proc *p);
 
 #if VM_MAP_DEBUG_APPLE_PROTECT
 int vm_map_debug_apple_protect = 0;
@@ -867,6 +868,9 @@ vm_map_apple_protected(
 	map_locked = FALSE;
 	unprotected_mem_obj = MEMORY_OBJECT_NULL;
 
+	if (__improbable(vm_map_range_overflows(map, start, end - start))) {
+		return KERN_INVALID_ADDRESS;
+	}
 	start_aligned = vm_map_trunc_page(start, PAGE_MASK_64);
 	end_aligned = vm_map_round_page(end, PAGE_MASK_64);
 	start_aligned = vm_map_trunc_page(start_aligned, VM_MAP_PAGE_MASK(map));
@@ -5559,6 +5563,9 @@ _vm_map_clip_start(
 	new_entry->vme_end = start;
 	assert(new_entry->vme_start < new_entry->vme_end);
 	VME_OFFSET_SET(entry, VME_OFFSET(entry) + (start - entry->vme_start));
+	if (__improbable(start >= entry->vme_end)) {
+		panic("mapHdr %p entry %p start 0x%llx end 0x%llx new start 0x%llx", map_header, entry, entry->vme_start, entry->vme_end, start);
+	}
 	assert(start < entry->vme_end);
 	entry->vme_start = start;
 
@@ -5670,6 +5677,9 @@ _vm_map_clip_end(
 	new_entry = _vm_map_entry_create(map_header);
 	vm_map_entry_copy_full(new_entry, entry);
 
+	if (__improbable(end <= entry->vme_start)) {
+		panic("mapHdr %p entry %p start 0x%llx end 0x%llx new end 0x%llx", map_header, entry, entry->vme_start, entry->vme_end, end);
+	}
 	assert(entry->vme_start < end);
 	new_entry->vme_start = entry->vme_end = end;
 	VME_OFFSET_SET(new_entry,
@@ -5790,6 +5800,10 @@ vm_map_protect(
 	vm_prot_t                       new_max;
 	int                             pmap_options = 0;
 	kern_return_t                   kr;
+
+	if (vm_map_range_overflows(map, start, end - start)) {
+		return KERN_INVALID_ARGUMENT;
+	}
 
 	if (new_prot & VM_PROT_COPY) {
 		vm_map_offset_t         new_start;
@@ -6238,6 +6252,10 @@ vm_map_inherit(
 
 	VM_MAP_RANGE_CHECK(map, start, end);
 
+	if (__improbable(vm_map_range_overflows(map, start, end - start))) {
+		return KERN_INVALID_ADDRESS;
+	}
+
 	if (vm_map_lookup_entry(map, start, &temp_entry)) {
 		entry = temp_entry;
 	} else {
@@ -6489,6 +6507,10 @@ vm_map_wire_nested(
 		/* We wired what the caller asked for, zero pages */
 		vm_map_unlock(map);
 		return KERN_SUCCESS;
+	}
+
+	if (__improbable(vm_map_range_overflows(map, start, end - start))) {
+		return KERN_INVALID_ADDRESS;
 	}
 
 	need_wakeup = FALSE;
@@ -7269,6 +7291,10 @@ vm_map_unwire_nested(
 		/* We unwired what the caller asked for: zero pages */
 		vm_map_unlock(map);
 		return KERN_SUCCESS;
+	}
+
+	if (__improbable(vm_map_range_overflows(map, start, end - start))) {
+		return KERN_INVALID_ADDRESS;
 	}
 
 	if (vm_map_lookup_entry(map, start, &first_entry)) {
@@ -9903,6 +9929,10 @@ vm_map_copy_overwrite(
 		return KERN_SUCCESS;
 	}
 
+	if (__improbable(vm_map_range_overflows(dst_map, dst_addr, copy_size))) {
+		return KERN_INVALID_ADDRESS;
+	}
+
 	/*
 	 * Assert that the vm_map_copy is coming from the right
 	 * zone and hasn't been forged
@@ -11707,6 +11737,9 @@ vm_map_copyin_internal(
 	/*
 	 *	Check that the end address doesn't overflow
 	 */
+	if (__improbable(vm_map_range_overflows(src_map, src_addr, len))) {
+		return KERN_INVALID_ADDRESS;
+	}
 	src_end = src_addr + len;
 	if (src_end < src_addr) {
 		return KERN_INVALID_ADDRESS;
@@ -11719,6 +11752,9 @@ vm_map_copyin_internal(
 	    VM_MAP_PAGE_MASK(src_map));
 	src_end = vm_map_round_page(src_end,
 	    VM_MAP_PAGE_MASK(src_map));
+	if (src_end < src_addr) {
+		return KERN_INVALID_ADDRESS;
+	}
 
 	/*
 	 * If the copy is sufficiently small, use a kernel buffer instead
@@ -12597,6 +12633,9 @@ vm_map_copy_extract(
 	 *	Check that the end address doesn't overflow
 	 */
 	if (src_addr + len < src_addr) {
+		return KERN_INVALID_ADDRESS;
+	}
+	if (__improbable(vm_map_range_overflows(src_map, src_addr, len))) {
 		return KERN_INVALID_ADDRESS;
 	}
 
@@ -15789,6 +15828,9 @@ vm_map_machine_attribute(
 	if (start < vm_map_min(map) || end > vm_map_max(map)) {
 		return KERN_INVALID_ADDRESS;
 	}
+	if (__improbable(vm_map_range_overflows(map, start, end - start))) {
+		return KERN_INVALID_ADDRESS;
+	}
 
 	/* Figure how much memory we need to flush (in page increments) */
 	sync_size = end - start;
@@ -15916,6 +15958,9 @@ vm_map_behavior_set(
 	    start < vm_map_min(map) ||
 	    end > vm_map_max(map)) {
 		return KERN_NO_SPACE;
+	}
+	if (__improbable(vm_map_range_overflows(map, start, end - start))) {
+		return KERN_INVALID_ADDRESS;
 	}
 
 	switch (new_behavior) {
@@ -18294,6 +18339,10 @@ vm_map_range_physical_size(
 		*phys_size = 0;
 		return KERN_INVALID_ARGUMENT;
 	}
+	if (__improbable(vm_map_range_overflows(map, start, size))) {
+		*phys_size = 0;
+		return KERN_INVALID_ADDRESS;
+	}
 	assert(adjusted_end > adjusted_start);
 	adjusted_size = adjusted_end - adjusted_start;
 	*phys_size = adjusted_size;
@@ -18444,6 +18493,10 @@ vm_map_remap(
 	VM_MAP_ZAP_DECLARE(zap_list);
 
 	if (target_map == VM_MAP_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (__improbable(vm_map_range_overflows(src_map, memory_address, size))) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -18921,6 +18974,10 @@ vm_map_write_user(
 {
 	kern_return_t   kr = KERN_SUCCESS;
 
+	if (__improbable(vm_map_range_overflows(map, dst_addr, size))) {
+		return KERN_INVALID_ADDRESS;
+	}
+
 	if (current_map() == map) {
 		if (copyout(src_p, dst_addr, size)) {
 			kr = KERN_INVALID_ADDRESS;
@@ -18963,6 +19020,10 @@ vm_map_read_user(
 {
 	kern_return_t   kr = KERN_SUCCESS;
 
+	if (__improbable(vm_map_range_overflows(map, src_addr, size))) {
+		return KERN_INVALID_ADDRESS;
+	}
+
 	if (current_map() == map) {
 		if (copyin(src_addr, dst_p, size)) {
 			kr = KERN_INVALID_ADDRESS;
@@ -18998,6 +19059,10 @@ vm_map_check_protection(vm_map_t map, vm_map_offset_t start,
 {
 	vm_map_entry_t entry;
 	vm_map_entry_t tmp_entry;
+
+	if (__improbable(vm_map_range_overflows(map, start, end - start))) {
+		return FALSE;
+	}
 
 	vm_map_lock(map);
 
@@ -19411,6 +19476,10 @@ vm_map_page_range_info_internal(
 	depth = 0;
 	info_idx = 0; /* Tracks the next index within the info structure to be filled.*/
 	retval = KERN_SUCCESS;
+
+	if (__improbable(vm_map_range_overflows(map, start_offset, end_offset - start_offset))) {
+		return KERN_INVALID_ADDRESS;
+	}
 
 	offset_in_page = start_offset & effective_page_mask;
 	start = vm_map_trunc_page(start_offset, effective_page_mask);
@@ -19872,6 +19941,10 @@ vm_map_msync(
 	if ((sync_flags & VM_SYNC_ASYNCHRONOUS) &&
 	    (sync_flags & VM_SYNC_SYNCHRONOUS)) {
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (__improbable(vm_map_range_overflows(map, address, size))) {
+		return KERN_INVALID_ADDRESS;
 	}
 
 	if (VM_MAP_PAGE_MASK(map) < PAGE_MASK) {
@@ -20790,6 +20863,10 @@ vm_map_sign(vm_map_t map,
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	if (__improbable(vm_map_range_overflows(map, start, end - start))) {
+		return KERN_INVALID_ADDRESS;
+	}
+
 	vm_map_lock_read(map);
 
 	if (!vm_map_lookup_entry(map, start, &entry) || entry->is_sub_map) {
@@ -21316,6 +21393,44 @@ vm_map_entry_should_cow_for_true_share(
 	 * targeted range and setting it up for copy-on-write.
 	 */
 	return TRUE;
+}
+
+uint64_t vm_map_range_overflows_count = 0;
+TUNABLE_WRITEABLE(boolean_t, vm_map_range_overflows_log, "vm_map_range_overflows_log", FALSE);
+bool
+vm_map_range_overflows(
+	vm_map_t map,
+	vm_map_offset_t addr,
+	vm_map_size_t size)
+{
+	vm_map_offset_t start, end, sum;
+	vm_map_offset_t pgmask;
+
+	if (size == 0) {
+		/* empty range -> no overflow */
+		return false;
+	}
+	pgmask = vm_map_page_mask(map);
+	start = vm_map_trunc_page_mask(addr, pgmask);
+	end = vm_map_round_page_mask(addr + size, pgmask);
+	if (__improbable(os_add_overflow(addr, size, &sum) || end <= start)) {
+		vm_map_range_overflows_count++;
+		if (vm_map_range_overflows_log) {
+			printf("%d[%s] vm_map_range_overflows addr 0x%llx size 0x%llx pgmask 0x%llx\n",
+			    proc_selfpid(),
+			    proc_best_name(current_proc()),
+			    (uint64_t)addr,
+			    (uint64_t)size,
+			    (uint64_t)pgmask);
+		}
+		DTRACE_VM4(vm_map_range_overflows,
+		    vm_map_t, map,
+		    uint32_t, pgmask,
+		    uint64_t, (uint64_t)addr,
+		    uint64_t, (uint64_t)size);
+		return true;
+	}
+	return false;
 }
 
 vm_map_offset_t

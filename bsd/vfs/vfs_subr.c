@@ -1724,13 +1724,13 @@ vfs_switch_root(const char *incoming_vol_old_path,
 
 		/* The new_covered_vp is a mountpoint from now on. */
 		vnode_lock_spin(pmi->pm_new_covered_vp);
-		pmi->pm_new_covered_vp->v_flag |= VMOUNT;
+		pmi->pm_new_covered_vp->v_flag |= VMOUNTEDHERE;
 		vnode_unlock(pmi->pm_new_covered_vp);
 	}
 
 	/* The outgoing_vol_new_covered_vp is a mountpoint from now on. */
 	vnode_lock_spin(outgoing_vol_new_covered_vp);
-	outgoing_vol_new_covered_vp->v_flag |= VMOUNT;
+	outgoing_vol_new_covered_vp->v_flag |= VMOUNTEDHERE;
 	vnode_unlock(outgoing_vol_new_covered_vp);
 
 
@@ -1777,6 +1777,7 @@ vfs_switch_root(const char *incoming_vol_old_path,
 		pmi->pm_mount->mnt_vnodecovered = pmi->pm_new_covered_vp;
 		vnode_lock_spin(pmi->pm_new_covered_vp);
 		pmi->pm_new_covered_vp->v_mountedhere = pmi->pm_mount;
+		SET(pmi->pm_new_covered_vp->v_flag, VMOUNTEDHERE);
 		vnode_unlock(pmi->pm_new_covered_vp);
 		lck_rw_done(&pmi->pm_mount->mnt_rwlock);
 	}
@@ -1819,7 +1820,7 @@ vfs_switch_root(const char *incoming_vol_old_path,
 		}
 
 		vnode_lock_spin(pmi->pm_old_covered_vp);
-		pmi->pm_old_covered_vp->v_flag &= ~VMOUNT;
+		CLR(pmi->pm_old_covered_vp->v_flag, VMOUNTEDHERE);
 		pmi->pm_old_covered_vp->v_mountedhere = NULL;
 		vnode_unlock(pmi->pm_old_covered_vp);
 	}
@@ -6685,6 +6686,7 @@ vnode_create_internal(uint32_t flavor, uint32_t size, void *data, vnode_t *vpp,
 #endif
 	bool existing_vnode;
 	bool init_vnode = !(vc_options & VNODE_CREATE_EMPTY);
+	bool is_bdevvp = false;
 
 	if (*vpp) {
 		vp = *vpp;
@@ -6818,8 +6820,6 @@ vnode_create_internal(uint32_t flavor, uint32_t size, void *data, vnode_t *vpp,
 		vp->v_tag = VT_DEVFS;           /* callers will reset if needed (bdevvp) */
 
 		if ((nvp = checkalias(vp, param->vnfs_rdev))) {
-			bool is_bdevvp;
-
 			/*
 			 * if checkalias returns a vnode, it will be locked
 			 *
@@ -6995,6 +6995,32 @@ vnode_create_internal(uint32_t flavor, uint32_t size, void *data, vnode_t *vpp,
 		break;
 	}
 #endif /* CONFIG_SECLUDED_MEMORY */
+
+	if (is_bdevvp) {
+		/*
+		 * The v_flags and v_lflags felds for the vndoe above are
+		 * manipulated without the vnode lock. This is fine for
+		 * everything because no other use  of this vnode is occurring.
+		 * However the case of the bdevvp alias vnode reuse is different
+		 * and the flags end up being modified while a thread may be in
+		 * vnode_waitforwrites which sets VTHROTTLED and any one of the
+		 * non atomic modifications of v_flag in this function can race
+		 * with the setting of that flag and cause VTHROTTLED on vflag
+		 * to get "lost".
+		 *
+		 * This should ideally be fixed by making sure all modifications
+		 * in this function to the vnode flags are done under the
+		 * vnode lock but at this time, a much smaller workaround is
+		 * being  employed and a the more correct (and potentially
+		 * much bigger) change will follow later.
+		 *
+		 * The effect of "losing" the VTHROTTLED flags would be a lost
+		 * wakeup so we just issue that wakeup here since this happens
+		 * only once per bdevvp vnode which are only one or two for a
+		 * given boot.
+		 */
+		wakeup(&vp->v_numoutput);
+	}
 
 	return 0;
 

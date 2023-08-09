@@ -148,6 +148,8 @@ enum {
 	IFNET_SUBFAMILY_DEFAULT         = 8,
 	IFNET_SUBFAMILY_VMNET           = 9,
 	IFNET_SUBFAMILY_SIMCELL         = 10,
+	IFNET_SUBFAMILY_REDIRECT        = 11,
+	IFNET_SUBFAMILY_MANAGEMENT      = 12,
 };
 
 /*
@@ -3779,6 +3781,14 @@ extern errno_t ifnet_touch_lastupdown(ifnet_t interface);
  *  to.
  */
 extern errno_t ifnet_updown_delta(ifnet_t interface, struct timeval *updown_delta);
+
+/*!
+ *       @function ifnet_set_management
+ *       @param interface The interface.
+ *       @param on Set the truth value that the interface is management restricted.
+ *       @result Returns 0 on success, error number otherwise.
+ */
+extern errno_t ifnet_set_management(ifnet_t interface, boolean_t on);
 
 #endif /* KERNEL_PRIVATE */
 

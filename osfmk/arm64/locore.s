@@ -503,6 +503,10 @@ check_ktrr_sctlr_trap:
 	.text
 	.align 2
 fleh_dispatch64:
+#if HAS_APPLE_PAC
+	pacib	x1, sp
+#endif
+
 	/* Save arm_saved_state64 */
 	SPILL_REGISTERS KERNEL_MODE
 
@@ -547,9 +551,6 @@ fleh_dispatch64:
 
 	mov		x21, x0								// Copy arm_context_t pointer to x21
 	mov		x22, x1								// Copy handler routine to x22
-#if HAS_APPLE_PAC
-	pacia	x22, sp
-#endif
 
 #if XNU_MONITOR
 	/* Zero x26 to indicate that this should not return to the PPL. */
@@ -569,7 +570,7 @@ fleh_dispatch64:
 	/* Dispatch to FLEH */
 
 #if HAS_APPLE_PAC
-	braa	x22,sp
+	brab	x22,sp
 #else
 	br		x22
 #endif
@@ -1003,12 +1004,13 @@ Lexception_return_restore_registers:
 	// Loads authed $x0->ss_64.pc into x1 and $x0->ss_64.cpsr into w2
 	AUTH_THREAD_STATE_IN_X0	x20, x21, x22, x23, x24, x25, el0_state_allowed=1
 
+	msr		ELR_EL1, x1							// Load the return address into ELR
+	msr		SPSR_EL1, x2						// Load the return CPSR into SPSR
+
 /* Restore special register state */
 	ldr		w3, [sp, NS64_FPSR]
 	ldr		w4, [sp, NS64_FPCR]
 
-	msr		ELR_EL1, x1							// Load the return address into ELR
-	msr		SPSR_EL1, x2						// Load the return CPSR into SPSR
 	msr		FPSR, x3
 	mrs		x5, FPCR
 	CMSR FPCR, x5, x4, 1

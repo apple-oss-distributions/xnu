@@ -93,6 +93,7 @@
 #if CONFIG_TELEMETRY
 #include <kern/telemetry.h>
 #endif
+#include <kern/zalloc_internal.h>
 #include <sys/kdebug.h>
 #include <kperf/kperf.h>
 #include <prng/random.h>
@@ -774,6 +775,9 @@ debugger_entry:
 			goto common_return;
 		}
 #endif
+	}
+	if (type == T_PAGE_FAULT) {
+		panic_fault_address = vaddr;
 	}
 	pal_cli();
 	panic_trap(saved_state, trap_pl, fault_result);

@@ -204,6 +204,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		wild = 1;
 	}
 
+	in_pcb_check_management_entitled(inp);
+
 	socket_unlock(so, 0); /* keep reference */
 	lck_rw_lock_exclusive(&pcbinfo->ipi_lock);
 	if (inp->inp_lport || !IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr)) {
@@ -614,6 +616,8 @@ in6_pcbladdr(struct inpcb *inp, struct sockaddr *nam,
 	if (in6_embedscope(&SIN6(nam)->sin6_addr, SIN6(nam), inp, NULL, NULL, IN6_NULL_IF_EMBEDDED_SCOPE(&SIN6(nam)->sin6_scope_id)) != 0) {
 		return EINVAL;
 	}
+
+	in_pcb_check_management_entitled(inp);
 
 	if (!TAILQ_EMPTY(&in6_ifaddrhead)) {
 		/*

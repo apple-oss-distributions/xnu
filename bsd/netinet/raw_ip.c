@@ -162,7 +162,7 @@ rip_init(struct protosw *pp, struct domain *dp)
 	ripcbinfo.ipi_hashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_hashmask);
 	ripcbinfo.ipi_porthashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_porthashmask);
 
-	ripcbinfo.ipi_zone.zov_kt_heap = ripzone;
+	ripcbinfo.ipi_zone = ripzone;
 
 	pcbinfo = &ripcbinfo;
 	/*
@@ -483,6 +483,9 @@ rip_output(
 	}
 	if (INP_AWDL_UNRESTRICTED(inp)) {
 		ipoa.ipoa_flags |=  IPOAF_AWDL_UNRESTRICTED;
+	}
+	if (INP_MANAGEMENT_ALLOWED(inp)) {
+		ipoa.ipoa_flags |=  IPOAF_MANAGEMENT_ALLOWED;
 	}
 	ipoa.ipoa_sotc = sotc;
 	ipoa.ipoa_netsvctype = netsvctype;

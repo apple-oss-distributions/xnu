@@ -59,6 +59,7 @@ __BEGIN_DECLS
 void ipc_port_release_send(ipc_port_t port);
 #include <vm/pmap.h>
 
+KALLOC_HEAP_DEFINE(KHEAP_IOBMD_CONTROL, "IOBMD_control", KHEAP_ID_KT_VAR);
 __END_DECLS
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -218,10 +219,10 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 	}
 
 	/*
-	 * Set kalloc_heap to default if allocation contains pointers
+	 * Set kalloc_heap to KHEAP_IOBMD_CONTROL if allocation contains pointers
 	 */
 	if (kInternalFlagHasPointers & _internalFlags) {
-		kheap = KHEAP_DEFAULT;
+		kheap = KHEAP_IOBMD_CONTROL;
 	}
 
 	//  make sure super::free doesn't dealloc _ranges before super::init
@@ -705,7 +706,7 @@ IOBufferMemoryDescriptor::free()
 	}
 
 	if (internalFlags & kInternalFlagHasPointers) {
-		kheap = KHEAP_DEFAULT;
+		kheap = KHEAP_IOBMD_CONTROL;
 	}
 
 #if IOTRACKING

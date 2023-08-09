@@ -256,7 +256,7 @@ udp_init(struct protosw *pp, struct domain *dp)
 	    &udbinfo.ipi_hashmask);
 	udbinfo.ipi_porthashbase = hashinit(UDBHASHSIZE, M_PCB,
 	    &udbinfo.ipi_porthashmask);
-	udbinfo.ipi_zone.zov_kt_heap = inpcbzone;
+	udbinfo.ipi_zone = inpcbzone;
 
 	pcbinfo = &udbinfo;
 	/*
@@ -1569,8 +1569,8 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 		if (error) {
 			goto release;
 		}
-		pktinfo++;
 		if (outif != NULL) {
+			pktinfo++;
 			ipoa.ipoa_boundif = outif->if_index;
 		}
 	}
@@ -1622,6 +1622,9 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	}
 	if (INP_AWDL_UNRESTRICTED(inp)) {
 		ipoa.ipoa_flags |=  IPOAF_AWDL_UNRESTRICTED;
+	}
+	if (INP_MANAGEMENT_ALLOWED(inp)) {
+		ipoa.ipoa_flags |= IPOAF_MANAGEMENT_ALLOWED;
 	}
 	ipoa.ipoa_sotc = sotc;
 	ipoa.ipoa_netsvctype = netsvctype;

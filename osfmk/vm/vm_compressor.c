@@ -2024,8 +2024,8 @@ c_seg_free_locked(c_segment_t c_seg)
 	lck_mtx_destroy(&c_seg->c_lock, &vm_compressor_lck_grp);
 
 	if (c_seg->c_slot_var_array_len) {
-		kfree_data(c_seg->c_slot_var_array,
-		    sizeof(struct c_slot) * c_seg->c_slot_var_array_len);
+		kfree_type(struct c_slot, c_seg->c_slot_var_array_len,
+		    c_seg->c_slot_var_array);
 	}
 
 	zfree(compressor_segment_zone, c_seg);
@@ -2206,8 +2206,7 @@ c_seg_alloc_nextslot(c_segment_t c_seg)
 			newlen = oldlen * 2;
 		}
 
-		new_slot_array = kalloc_data(sizeof(struct c_slot) * newlen,
-		    Z_WAITOK);
+		new_slot_array = kalloc_type(struct c_slot, newlen, Z_WAITOK);
 
 		lck_mtx_lock_spin_always(&c_seg->c_lock);
 
@@ -2221,7 +2220,7 @@ c_seg_alloc_nextslot(c_segment_t c_seg)
 
 		lck_mtx_unlock_always(&c_seg->c_lock);
 
-		kfree_data(old_slot_array, sizeof(struct c_slot) * oldlen);
+		kfree_type(struct c_slot, oldlen, old_slot_array);
 	}
 }
 

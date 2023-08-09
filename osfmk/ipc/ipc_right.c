@@ -2064,13 +2064,12 @@ ipc_right_copyin_check_reply(
 			return FALSE;
 		}
 
+		*reply_port_semantics_violation = FALSE;
 		/* When sending a msg to remote port that requires reply port semantics enforced the local port of that msg needs to be a reply port. */
 		dest_port = ip_object_to_port(dest_entry->ie_object);
-		if (IP_VALID(dest_port) && ip_active(dest_port) && ip_require_reply_port_semantics(dest_port)
-		    && !ip_is_reply_port(reply_port) && !ip_is_provisional_reply_port(reply_port)) {
-			*reply_port_semantics_violation = TRUE;
-
-			if (reply_port_semantics) {
+		if (IP_VALID(dest_port) && ip_active(dest_port) && reply_port_semantics) {
+			if (ip_violates_strict_reply_port_semantics(dest_port, reply_port) ||
+			    ip_violates_reply_port_semantics(dest_port, reply_port)) {
 				mach_port_guard_exception(reply_name, 0, 0, kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS);
 				return FALSE;
 			}
@@ -2262,7 +2261,9 @@ ipc_right_copyin(
 			allow_imm_recv = !!(flags & IPC_OBJECT_COPYIN_FLAGS_ALLOW_CONN_IMMOVABLE_RECEIVE);
 		}
 
-		if ((!allow_imm_recv && port->ip_immovable_receive) || port->ip_specialreply) {
+		if ((!allow_imm_recv && port->ip_immovable_receive) ||
+		    ip_is_reply_port(port) ||     /* never move reply port rcv right */
+		    port->ip_specialreply) {
 			assert(!ip_in_space(port, ipc_space_kernel));
 			ip_mq_unlock(port);
 			assert(current_task() != kernel_task);

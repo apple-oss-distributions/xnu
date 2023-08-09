@@ -128,6 +128,7 @@ enum {
 enum {
 	kIOWaitQuietPanicOnFailure = 0x00000001,
 };
+#define kIOServiceBusyTimeoutExtensionsKey      "IOServiceBusyTimeoutExtensions"
 
 #define kIOServiceLegacyMatchingRegistryIDKey "IOServiceLegacyMatchingRegistryID"
 

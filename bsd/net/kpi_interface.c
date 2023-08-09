@@ -559,6 +559,11 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 				net_api_stats.nas_ifnet_alloc_os_total);
 		}
 
+		if (ifp->if_subfamily == IFNET_SUBFAMILY_MANAGEMENT) {
+			if_set_xflags(ifp, IFXF_MANAGEMENT);
+			if_management_interface_check_needed = true;
+		}
+
 		*interface = ifp;
 	}
 	return error;

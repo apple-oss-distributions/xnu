@@ -1388,3 +1388,40 @@ shared_region_pager_trim(void)
 		shared_region_pager_terminate_internal(pager);
 	}
 }
+
+static uint64_t
+shared_region_pager_purge(
+	shared_region_pager_t pager)
+{
+	uint64_t pages_purged;
+	vm_object_t object;
+
+	pages_purged = 0;
+	object = memory_object_to_vm_object((memory_object_t) pager);
+	assert(object != VM_OBJECT_NULL);
+	vm_object_lock(object);
+	pages_purged = object->resident_page_count;
+	vm_object_reap_pages(object, REAP_DATA_FLUSH);
+	pages_purged -= object->resident_page_count;
+//	printf("     %s:%d pager %p object %p purged %llu left %d\n", __FUNCTION__, __LINE__, pager, object, pages_purged, object->resident_page_count);
+	vm_object_unlock(object);
+	return pages_purged;
+}
+
+uint64_t
+shared_region_pager_purge_all(void)
+{
+	uint64_t pages_purged;
+	shared_region_pager_t pager;
+
+	pages_purged = 0;
+	lck_mtx_lock(&shared_region_pager_lock);
+	queue_iterate(&shared_region_pager_queue, pager, shared_region_pager_t, srp_queue) {
+		pages_purged += shared_region_pager_purge(pager);
+	}
+	lck_mtx_unlock(&shared_region_pager_lock);
+#if DEVELOPMENT || DEBUG
+	printf("   %s:%d pages purged: %llu\n", __FUNCTION__, __LINE__, pages_purged);
+#endif /* DEVELOPMENT || DEBUG */
+	return pages_purged;
+}

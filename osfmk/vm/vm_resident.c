@@ -9596,31 +9596,67 @@ vm_page_diagnose_zone_stats(mach_memory_info_t *info, zone_stats_t zstats,
 }
 
 static void
-vm_page_diagnose_zone(mach_memory_info_t *info, zone_t z)
+vm_page_add_info(
+	mach_memory_info_t     *info,
+	zone_stats_t            stats,
+	bool                    per_cpu,
+	const char             *parent_heap_name,
+	const char             *parent_zone_name,
+	const char             *view_name)
 {
-	vm_page_diagnose_zone_stats(info, z->z_stats, z->z_percpu);
+	vm_page_diagnose_zone_stats(info, stats, per_cpu);
 	snprintf(info->name, sizeof(info->name),
-	    "%s%s[raw]", zone_heap_name(z), z->z_name);
+	    "%s%s[%s]", parent_heap_name, parent_zone_name, view_name);
 }
 
-static int
+static void
+vm_page_diagnose_zone(mach_memory_info_t *info, zone_t z)
+{
+	vm_page_add_info(info, z->z_stats, z->z_percpu, zone_heap_name(z),
+	    z->z_name, "raw");
+}
+
+static void
+vm_page_add_view(
+	mach_memory_info_t     *info,
+	zone_stats_t            stats,
+	const char             *parent_heap_name,
+	const char             *parent_zone_name,
+	const char             *view_name)
+{
+	vm_page_add_info(info, stats, false, parent_heap_name, parent_zone_name,
+	    view_name);
+}
+
+static uint32_t
+vm_page_diagnose_heap_views(
+	mach_memory_info_t     *info,
+	kalloc_heap_t           kh,
+	const char             *parent_heap_name,
+	const char             *parent_zone_name)
+{
+	uint32_t i = 0;
+
+	while (kh) {
+		vm_page_add_view(info + i, kh->kh_stats, parent_heap_name,
+		    parent_zone_name, kh->kh_name);
+		kh = kh->kh_views;
+		i++;
+	}
+	return i;
+}
+
+static uint32_t
 vm_page_diagnose_heap(mach_memory_info_t *info, kalloc_heap_t kheap)
 {
-	struct kalloc_heap *kh = kheap->kh_views;
-	int i = 0;
+	uint32_t i = 0;
 
 	for (; i < KHEAP_NUM_ZONES; i++) {
 		vm_page_diagnose_zone(info + i, zone_by_id(kheap->kh_zstart + i));
 	}
 
-	while (kh) {
-		vm_page_diagnose_zone_stats(info + i, kh->kh_stats, false);
-		snprintf(info[i].name, sizeof(info[i].name),
-		    "%skalloc[%s]", kheap->kh_name, kh->kh_name);
-		kh = kh->kh_views;
-		i++;
-	}
-
+	i += vm_page_diagnose_heap_views(info + i, kheap->kh_views, kheap->kh_name,
+	    NULL);
 	return i;
 }
 
@@ -9628,23 +9664,29 @@ static int
 vm_page_diagnose_kt_heaps(mach_memory_info_t *info)
 {
 	uint32_t idx = 0;
-	vm_page_diagnose_zone_stats(info + idx, KHEAP_KT_VAR->kh_stats, false);
-	snprintf(info[idx].name, sizeof(info[idx].name),
-	    "%s[raw]", KHEAP_KT_VAR->kh_name);
+	vm_page_add_view(info + idx, KHEAP_KT_VAR->kh_stats, KHEAP_KT_VAR->kh_name,
+	    "", "raw");
 	idx++;
 
 	for (uint32_t i = 0; i < KT_VAR_MAX_HEAPS; i++) {
 		struct kheap_info heap = kalloc_type_heap_array[i];
+		char heap_num_tmp[MAX_ZONE_NAME] = "";
+		const char *heap_num;
+
+		snprintf(&heap_num_tmp[0], MAX_ZONE_NAME, "%u", i);
+		heap_num = &heap_num_tmp[0];
 
 		for (kalloc_type_var_view_t ktv = heap.kt_views; ktv;
 		    ktv = (kalloc_type_var_view_t) ktv->kt_next) {
 			if (ktv->kt_stats && ktv->kt_stats != KHEAP_KT_VAR->kh_stats) {
-				vm_page_diagnose_zone_stats(info + idx, ktv->kt_stats, false);
-				snprintf(info[idx].name, sizeof(info[idx].name),
-				    "%s[%s]", KHEAP_KT_VAR->kh_name, ktv->kt_name);
+				vm_page_add_view(info + idx, ktv->kt_stats, KHEAP_KT_VAR->kh_name,
+				    heap_num, ktv->kt_name);
 				idx++;
 			}
 		}
+
+		idx += vm_page_diagnose_heap_views(info + idx, heap.kh_views,
+		    KHEAP_KT_VAR->kh_name, heap_num);
 	}
 
 	return idx;
@@ -9720,7 +9762,6 @@ vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zone
 	i = 0;
 
 	if (!redact_info) {
-		i += vm_page_diagnose_heap(counts + i, KHEAP_DEFAULT);
 		if (KHEAP_DATA_BUFFERS->kh_heap_id == KHEAP_ID_DATA_BUFFERS) {
 			i += vm_page_diagnose_heap(counts + i, KHEAP_DATA_BUFFERS);
 		}

@@ -434,20 +434,21 @@ struct ip6_out_args {
 	unsigned int    ip6oa_boundif;  /* bound outgoing interface */
 	struct flowadv  ip6oa_flowadv;  /* flow advisory code */
 	u_int32_t       ip6oa_flags;    /* IP6OAF flags (see below) */
-#define IP6OAF_SELECT_SRCIF     0x00000001      /* src interface selection */
-#define IP6OAF_BOUND_IF         0x00000002      /* boundif value is valid */
-#define IP6OAF_BOUND_SRCADDR    0x00000004      /* bound to src address */
-#define IP6OAF_NO_CELLULAR      0x00000010      /* skip IFT_CELLULAR */
-#define IP6OAF_NO_EXPENSIVE     0x00000020      /* skip IFEF_EXPENSIVE */
-#define IP6OAF_AWDL_UNRESTRICTED 0x00000040     /* privileged AWDL */
-#define IP6OAF_QOSMARKING_ALLOWED 0x00000080    /* policy allows Fastlane DSCP marking */
-#define IP6OAF_INTCOPROC_ALLOWED 0x00000100     /* access to internal coproc interfaces */
-#define IP6OAF_NO_LOW_POWER     0x00000200      /* skip low power */
-#define IP6OAF_NO_CONSTRAINED   0x00000400      /* skip IFXF_CONSTRAINED */
-#define IP6OAF_SKIP_PF          0x00000800      /* skip PF */
-#define IP6OAF_DONT_FRAG        0x00001000      /* Don't fragment */
+#define IP6OAF_SELECT_SRCIF             0x00000001      /* src interface selection */
+#define IP6OAF_BOUND_IF                 0x00000002      /* boundif value is valid */
+#define IP6OAF_BOUND_SRCADDR            0x00000004      /* bound to src address */
+#define IP6OAF_NO_CELLULAR              0x00000010      /* skip IFT_CELLULAR */
+#define IP6OAF_NO_EXPENSIVE             0x00000020      /* skip IFEF_EXPENSIVE */
+#define IP6OAF_AWDL_UNRESTRICTED        0x00000040      /* privileged AWDL */
+#define IP6OAF_QOSMARKING_ALLOWED       0x00000080      /* policy allows Fastlane DSCP marking */
+#define IP6OAF_INTCOPROC_ALLOWED        0x00000100      /* access to internal coproc interfaces */
+#define IP6OAF_NO_LOW_POWER             0x00000200      /* skip low power */
+#define IP6OAF_NO_CONSTRAINED           0x00000400      /* skip IFXF_CONSTRAINED */
+#define IP6OAF_SKIP_PF                  0x00000800      /* skip PF */
+#define IP6OAF_DONT_FRAG                0x00001000      /* Don't fragment */
 #define IP6OAF_REDO_QOSMARKING_POLICY   0x00002000      /* Re-evaluate QOS marking policy */
-#define IP6OAF_R_IFDENIED        0x00004000      /* return flag: denied access to interface */
+#define IP6OAF_R_IFDENIED               0x00004000      /* return flag: denied access to interface */
+#define IP6OAF_MANAGEMENT_ALLOWED       0x00004000      /* access to management to interface */
 	int             ip6oa_sotc;             /* traffic class for Fastlane DSCP mapping */
 	int             ip6oa_netsvctype;
 	int32_t         qos_marking_gencount;

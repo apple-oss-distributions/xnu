@@ -902,7 +902,7 @@ struct msghdr_x {
 struct user_msghdr {
 	user_addr_t     msg_name;               /* optional address */
 	socklen_t       msg_namelen;            /* size of address */
-	user_addr_t     msg_iov;                /* scatter/gather array */
+	vm_address_t    msg_iov;                /* scatter/gather array */
 	int             msg_iovlen;             /* # elements in msg_iov */
 	user_addr_t     msg_control;            /* ancillary data, see below */
 	socklen_t       msg_controllen;         /* ancillary data buffer len */
@@ -951,7 +951,7 @@ __CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user32_msghdr, user32_msghdr);
 struct user_msghdr_x {
 	user_addr_t     msg_name;       /* optional address */
 	socklen_t       msg_namelen;    /* size of address */
-	user_addr_t     msg_iov;        /* scatter/gather array */
+	vm_address_t    msg_iov;        /* scatter/gather array */
 	int             msg_iovlen;     /* # elements in msg_iov */
 	user_addr_t     msg_control;    /* ancillary data, see below */
 	socklen_t       msg_controllen; /* ancillary data buffer len */

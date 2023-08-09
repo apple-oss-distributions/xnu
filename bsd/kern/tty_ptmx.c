@@ -388,6 +388,9 @@ ptmx_get_ioctl(int minor, int open_flag)
 	DEVFS_LOCK();
 	if (minor >= 0 && minor < _state.pis_total) {
 		ptmx_ioctl = _state.pis_ioctl_list[minor];
+		if (ptmx_ioctl && (open_flag & PF_OPEN_S)) {
+			ptmx_ioctl->pt_flags |= PF_OPEN_S;
+		}
 	}
 	DEVFS_UNLOCK();
 
