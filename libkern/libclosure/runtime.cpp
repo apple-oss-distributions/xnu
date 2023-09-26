@@ -26,7 +26,7 @@ __BEGIN_DECLS
 __END_DECLS
 
 /* void * is a bit of a lie, but that will have to do */
-    KALLOC_TYPE_VAR_DEFINE(KT_BLOCK_LAYOUT, struct Block_layout, void *, KT_DEFAULT);
+KALLOC_TYPE_VAR_DEFINE(KT_BLOCK_LAYOUT, struct Block_layout, void *, KT_DEFAULT);
 KALLOC_TYPE_VAR_DEFINE(KT_BLOCK_BYREF, struct Block_byref, void *, KT_DEFAULT);
 
 static inline struct Block_layout *

@@ -140,6 +140,7 @@ struct dyld_pager {
 #else
 	os_ref_atomic_t         dyld_ref_count;      /* active uses */
 #endif
+	queue_chain_t           dyld_pager_queue;    /* next & prev pagers */
 	bool                    dyld_is_mapped;      /* has active mappings */
 	bool                    dyld_is_ready;       /* is this pager ready? */
 	vm_object_t             dyld_backing_object; /* VM object for shared cache */
@@ -154,6 +155,7 @@ struct dyld_pager {
 #endif /* defined(HAS_APPLE_PAC) */
 };
 
+queue_head_t dyld_pager_queue = QUEUE_HEAD_INITIALIZER(dyld_pager_queue);
 
 /*
  * "dyld_pager_lock" for counters, ref counting, etc.
@@ -166,6 +168,26 @@ LCK_MTX_DECLARE(dyld_pager_lock, &dyld_pager_lck_grp);
  */
 uint32_t dyld_pager_count = 0;
 uint32_t dyld_pager_count_max = 0;
+
+/*
+ * dyld_pager_dequeue()
+ *
+ * Removes a pager from the list of pagers.
+ *
+ * The caller must hold "dyld_pager".
+ */
+static void
+dyld_pager_dequeue(
+	__unused dyld_pager_t pager)
+{
+	queue_remove(&dyld_pager_queue,
+	    pager,
+	    dyld_pager_t,
+	    dyld_pager_queue);
+	pager->dyld_pager_queue.next = NULL;
+	pager->dyld_pager_queue.prev = NULL;
+	dyld_pager_count--;
+}
 
 /*
  * dyld_pager_init()
@@ -247,6 +269,7 @@ dyld_pager_data_initialize(
  */
 static kern_return_t
 fixupPage64(
+	uint64_t                              userVA,
 	vm_offset_t                           contents,
 	vm_offset_t                           end_contents,
 	void                                  *link_info,
@@ -273,6 +296,7 @@ fixupPage64(
 	uint64_t delta = 0;
 	do {
 		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_CHAIN_OUT_OF_RANGE), (uintptr_t)userVA);
 			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
 			    (long long)chain, (long long)contents, (long long)end_contents);
 			return KERN_FAILURE;
@@ -283,6 +307,7 @@ fixupPage64(
 		if (isBind) {
 			uint32_t bindOrdinal = value & 0x00FFFFFF;
 			if (bindOrdinal >= hdr->mwli_binds_count) {
+				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BIND_ORDINAL), (uintptr_t)userVA);
 				printf("%s out of range bind ordinal %u (max %u)\n", __func__,
 				    bindOrdinal, hdr->mwli_binds_count);
 				return KERN_FAILURE;
@@ -296,6 +321,7 @@ fixupPage64(
 			*chain = target + targetAdjust + (high8 << 56);
 		}
 		if (delta * 4 >= PAGE_SIZE) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_DELTA_TOO_LARGE), (uintptr_t)userVA);
 			printf("%s(): delta offset > page size %lld\n", __func__, delta * 4);
 			return KERN_FAILURE;
 		}
@@ -310,6 +336,7 @@ fixupPage64(
  */
 static kern_return_t
 fixupChain32(
+	uint64_t                              userVA,
 	uint32_t                              *chain,
 	vm_offset_t                           contents,
 	vm_offset_t                           end_contents,
@@ -322,6 +349,7 @@ fixupChain32(
 
 	do {
 		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_CHAIN_OUT_OF_RANGE), (uintptr_t)userVA);
 			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
 			    (long long)chain, (long long)contents, (long long)end_contents);
 			return KERN_FAILURE;
@@ -332,6 +360,7 @@ fixupChain32(
 			// is bind
 			uint32_t bindOrdinal = value & 0x000FFFFF;
 			if (bindOrdinal >= hdr->mwli_binds_count) {
+				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BIND_ORDINAL), (uintptr_t)userVA);
 				printf("%s(): out of range bind ordinal %u (max %u)",
 				    __func__, bindOrdinal, hdr->mwli_binds_count);
 				return KERN_FAILURE;
@@ -360,6 +389,7 @@ fixupChain32(
  */
 static kern_return_t
 fixupPage32(
+	uint64_t                              userVA,
 	vm_offset_t                           contents,
 	vm_offset_t                           end_contents,
 	void                                  *link_info,
@@ -387,18 +417,19 @@ fixupPage32(
 			 * range check against link_info, note +1 to include data we'll dereference
 			 */
 			if ((uintptr_t)&segInfo->page_start[overflowIndex + 1] > (uintptr_t)link_info + link_info_size) {
+				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_PAGE_START_OUT_OF_RANGE), (uintptr_t)userVA);
 				printf("%s(): out of range segInfo->page_start[overflowIndex]", __func__);
 				return KERN_FAILURE;
 			}
 			chainEnd    = (segInfo->page_start[overflowIndex] & DYLD_CHAINED_PTR_START_LAST);
 			startOffset = (segInfo->page_start[overflowIndex] & ~DYLD_CHAINED_PTR_START_LAST);
 			uint32_t *chain = (uint32_t *)(contents + startOffset);
-			fixupChain32(chain, contents, end_contents, link_info, segInfo, bindsArray);
+			fixupChain32(userVA, chain, contents, end_contents, link_info, segInfo, bindsArray);
 			++overflowIndex;
 		}
 	} else {
 		uint32_t *chain = (uint32_t *)(contents + startOffset);
-		fixupChain32(chain, contents, end_contents, link_info, segInfo, bindsArray);
+		fixupChain32(userVA, chain, contents, end_contents, link_info, segInfo, bindsArray);
 	}
 	return KERN_SUCCESS;
 }
@@ -439,6 +470,7 @@ signPointer(
 		break;
 
 	default:
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_INVALID_AUTH_KEY), (uintptr_t)unsignedAddr);
 		printf("%s(): Invalid ptr auth key %d\n", __func__, key);
 		return KERN_FAILURE;
 	}
@@ -467,6 +499,7 @@ fixupPageAuth64(
 	 * range check against link_info, note +1 to include data we'll dereference
 	 */
 	if ((uintptr_t)&segInfo->page_start[pageIndex + 1] > (uintptr_t)link_info + link_info_size) {
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_PAGE_START_OUT_OF_RANGE), (uintptr_t)userVA);
 		printf("%s(): out of range segInfo->page_start[pageIndex]", __func__);
 		return KERN_FAILURE;
 	}
@@ -487,6 +520,7 @@ fixupPageAuth64(
 	uint64_t delta = 0;
 	do {
 		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_CHAIN_OUT_OF_RANGE), (uintptr_t)userVA);
 			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
 			    (long long)chain, (long long)contents, (long long)end_contents);
 			return KERN_FAILURE;
@@ -503,6 +537,7 @@ fixupPageAuth64(
 			if (isBind) {
 				uint32_t bindOrdinal = value & 0x00FFFFFF;
 				if (bindOrdinal >= hdr->mwli_binds_count) {
+					ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BIND_ORDINAL), (uintptr_t)userVA);
 					printf("%s(): out of range bind ordinal %u (max %u)",
 					    __func__, bindOrdinal, hdr->mwli_binds_count);
 					return KERN_FAILURE;
@@ -521,6 +556,7 @@ fixupPageAuth64(
 			if (isBind) {
 				uint32_t bindOrdinal = value & 0x00FFFFFF;
 				if (bindOrdinal >= hdr->mwli_binds_count) {
+					ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BIND_ORDINAL), (uintptr_t)userVA);
 					printf("%s(): out of range bind ordinal %u (max %u)",
 					    __func__, bindOrdinal, hdr->mwli_binds_count);
 					return KERN_FAILURE;
@@ -582,6 +618,7 @@ fixup_page(
 		 * ensure we don't go out of bounds of the link_info
 		 */
 		if ((uintptr_t)seg + sizeof(*seg) > (uintptr_t)link_info + link_info_size) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SEG_INFO_OUT_OF_RANGE), (uintptr_t)userVA);
 			printf("%s(): seg_info out of bounds\n", __func__);
 			return KERN_FAILURE;
 		}
@@ -594,19 +631,23 @@ fixup_page(
 
 			/* ensure seg->size fits in link_info_size */
 			if ((uintptr_t)seg + seg->size > (uintptr_t)link_info + link_info_size) {
+				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SEG_SIZE_OUT_OF_RANGE), (uintptr_t)userVA);
 				printf("%s(): seg->size out of bounds\n", __func__);
 				return KERN_FAILURE;
 			}
 			if (seg->size < sizeof(struct dyld_chained_starts_in_segment)) {
+				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SEG_SIZE_OUT_OF_RANGE), (uintptr_t)userVA);
 				printf("%s(): seg->size too small\n", __func__);
 				return KERN_FAILURE;
 			}
 			/* ensure page_count and pageIndex are valid too */
 			if ((uintptr_t)&seg->page_start[seg->page_count] > (uintptr_t)link_info + link_info_size) {
+				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SEG_PAGE_CNT_OUT_OF_RANGE), (uintptr_t)userVA);
 				printf("%s(): seg->page_count out of bounds\n", __func__);
 				return KERN_FAILURE;
 			}
 			if (pageIndex >= seg->page_count) {
+				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SEG_PAGE_CNT_OUT_OF_RANGE), (uintptr_t)userVA);
 				printf("%s(): seg->page_count too small\n", __func__);
 				return KERN_FAILURE;
 			}
@@ -619,6 +660,7 @@ fixup_page(
 	 * Question for Nick.. or can we make this OK and just return KERN_SUCCESS, nothing to do?
 	 */
 	if (segInfo == NULL) {
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_NO_SEG_FOR_VA), (uintptr_t)userVA);
 		printf("%s(): No segment for user VA 0x%llx\n", __func__, (long long)userVA);
 		return KERN_FAILURE;
 	}
@@ -637,15 +679,16 @@ fixup_page(
 		break;
 #endif /* defined(HAS_APPLE_PAC) */
 	case DYLD_CHAINED_PTR_64:
-		fixupPage64(contents, end_contents, link_info, segInfo, pageIndex, false);
+		fixupPage64(userVA, contents, end_contents, link_info, segInfo, pageIndex, false);
 		break;
 	case DYLD_CHAINED_PTR_64_OFFSET:
-		fixupPage64(contents, end_contents, link_info, segInfo, pageIndex, true);
+		fixupPage64(userVA, contents, end_contents, link_info, segInfo, pageIndex, true);
 		break;
 	case DYLD_CHAINED_PTR_32:
-		fixupPage32(contents, end_contents, link_info, link_info_size, segInfo, pageIndex);
+		fixupPage32(userVA, contents, end_contents, link_info, link_info_size, segInfo, pageIndex);
 		break;
 	default:
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BAD_POINTER_FMT), (uintptr_t)userVA);
 		printf("%s(): unknown pointer_format %d\n", __func__, hdr->mwli_pointer_format);
 		return KERN_FAILURE;
 	}
@@ -871,14 +914,15 @@ retry_src_fault:
 		 * If we have a valid range fixup the page.
 		 */
 		if (r == pager->dyld_num_range) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_RANGE_NOT_FOUND), (uintptr_t)userVA);
 			printf("%s(): Range not found for offset 0x%llx\n", __func__, (long long)cur_offset);
 			retval = KERN_FAILURE;
 		} else if (fixup_page(dst_vaddr, dst_vaddr + PAGE_SIZE, userVA, pager) != KERN_SUCCESS) {
-			/* printf was done under fixup_page() */
+			/* KDBG / printf was done under fixup_page() */
 			retval = KERN_FAILURE;
 		}
 		if (retval != KERN_SUCCESS) {
-			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SLIDE_ERROR), 0 /* arg */);
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SLIDE_ERROR), userVA);
 		}
 
 		assert(VM_PAGE_OBJECT(src_page) == src_page_object);
@@ -1015,7 +1059,7 @@ dyld_pager_deallocate_internal(
 		 * no one is really holding on to this pager anymore.
 		 * Terminate it.
 		 */
-		dyld_pager_count--;
+		dyld_pager_dequeue(pager);
 		/* the pager is all ours: no need for the lock now */
 		lck_mtx_unlock(&dyld_pager_lock);
 		dyld_pager_terminate_internal(pager);
@@ -1222,8 +1266,11 @@ dyld_pager_create(
 	}
 
 	vm_object_reference(backing_object);
-
 	lck_mtx_lock(&dyld_pager_lock);
+	queue_enter_first(&dyld_pager_queue,
+	    pager,
+	    dyld_pager_t,
+	    dyld_pager_queue);
 	dyld_pager_count++;
 	if (dyld_pager_count > dyld_pager_count_max) {
 		dyld_pager_count_max = dyld_pager_count;
@@ -1330,6 +1377,11 @@ vm_map_with_linking(
 
 		/* map that pager over the portion of the mapping that needs sliding */
 		map_addr = (vm_map_address_t)rp->mwlr_address;
+
+		if (rp->mwlr_protections & VM_PROT_TPRO) {
+			vmk_flags.vmf_tpro = TRUE;
+		}
+
 		kr = vm_map_enter_mem_object(map,
 		    &map_addr,
 		    rp->mwlr_size,
@@ -1338,8 +1390,8 @@ vm_map_with_linking(
 		    (ipc_port_t)(uintptr_t)pager,
 		    rp->mwlr_file_offset,
 		    TRUE,       /* copy == TRUE, as this is MAP_PRIVATE so COW may happen */
-		    rp->mwlr_protections,
-		    rp->mwlr_protections,
+		    rp->mwlr_protections & VM_PROT_DEFAULT,
+		    rp->mwlr_protections & VM_PROT_DEFAULT,
 		    VM_INHERIT_DEFAULT);
 		if (kr != KERN_SUCCESS) {
 			/* no need to clean up earlier regions, this will be process fatal */
@@ -1361,4 +1413,41 @@ done:
 		pager = MEMORY_OBJECT_NULL;
 	}
 	return kr;
+}
+
+static uint64_t
+dyld_pager_purge(
+	dyld_pager_t pager)
+{
+	uint64_t pages_purged;
+	vm_object_t object;
+
+	pages_purged = 0;
+	object = memory_object_to_vm_object((memory_object_t) pager);
+	assert(object != VM_OBJECT_NULL);
+	vm_object_lock(object);
+	pages_purged = object->resident_page_count;
+	vm_object_reap_pages(object, REAP_DATA_FLUSH);
+	pages_purged -= object->resident_page_count;
+//	printf("     %s:%d pager %p object %p purged %llu left %d\n", __FUNCTION__, __LINE__, pager, object, pages_purged, object->resident_page_count);
+	vm_object_unlock(object);
+	return pages_purged;
+}
+
+uint64_t
+dyld_pager_purge_all(void)
+{
+	uint64_t pages_purged;
+	dyld_pager_t pager;
+
+	pages_purged = 0;
+	lck_mtx_lock(&dyld_pager_lock);
+	queue_iterate(&dyld_pager_queue, pager, dyld_pager_t, dyld_pager_queue) {
+		pages_purged += dyld_pager_purge(pager);
+	}
+	lck_mtx_unlock(&dyld_pager_lock);
+#if DEVELOPMENT || DEBUG
+	printf("   %s:%d pages purged: %llu\n", __FUNCTION__, __LINE__, pages_purged);
+#endif /* DEVELOPMENT || DEBUG */
+	return pages_purged;
 }

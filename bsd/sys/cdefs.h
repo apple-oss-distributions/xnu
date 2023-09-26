@@ -471,6 +471,18 @@
 #endif
 
 /*
+ * __alloc_align can be used to label function arguments that represent the
+ * alignment of the returned pointer.
+ */
+#ifndef __alloc_align
+#if __has_attribute(alloc_align)
+#define __alloc_align(n) __attribute__((alloc_align(n)))
+#else
+#define __alloc_align(n)
+#endif
+#endif // __alloc_align
+
+/*
  * __alloc_size can be used to label function arguments that represent the
  * size of memory that the function allocates and returns. The one-argument
  * form labels a single argument that gives the allocation size (where the

@@ -112,6 +112,50 @@
 #define T_PF_RSVD               0x8             /* reserved bit set to 1 */
 #define T_PF_EXECUTE            0x10            /* instruction fetch when NX */
 
+#if !defined(ASSEMBLER)
+__attribute__((cold, always_inline))
+static inline void
+ml_recoverable_trap(unsigned int code)
+__attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant", "error")))
+{
+	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"((void *)((unsigned long long)code)));
+}
+
+__attribute__((cold, noreturn, always_inline))
+static inline void
+ml_fatal_trap(unsigned int code)
+__attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant", "error")))
+{
+	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"((void *)((unsigned long long)code)));
+	__builtin_unreachable();
+}
+
+#if defined(XNU_KERNEL_PRIVATE)
+__attribute__((cold, always_inline))
+static inline void
+ml_trap(unsigned int code)
+{
+	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"((void *)((unsigned long long)code)));
+}
+
+/* For use by clang option -ftrap-function only */
+__attribute__((cold, always_inline))
+static inline void
+ml_bound_chk_soft_trap(unsigned char code)
+{
+	/* clang mandates arg to be unsigned char */
+	unsigned int code32 = code;
+	if (code32 == 0x19) {
+		/* if we see a bound check trap, implicitly make it soft */
+		code32 += 0xFF00; /* code defined in kern/telemetry.h */
+	}
+
+	/* let other codes fall through */
+	ml_trap(code32);
+}
+#endif /* XNU_KERNEL_PRIVATE */
+#endif /* !ASSEMBLER */
+
 #if defined(MACH_KERNEL_PRIVATE)
 
 #if !defined(ASSEMBLER) && defined(MACH_KERNEL)

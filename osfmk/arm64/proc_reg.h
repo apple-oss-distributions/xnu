@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -91,6 +91,7 @@
 #define CONFIG_SCHED_CLUTCH 1
 #define CONFIG_SCHED_EDGE   1
 #endif /* XNU_TARGET_OS_OSX */
+
 
 #else /* __ARM_AMP__ */
 #define CONFIG_SCHED_CLUTCH 1
@@ -531,7 +532,13 @@
  * System Control Register (SCTLR)
  */
 
+#define SCTLR_OTHER               (0)
+
 #define SCTLR_DSSBS               (1ULL << 44)
+
+
+#define SCTLR_EXTRA                               (0)
+
 
 #define SCTLR_RESERVED     ((3ULL << 28) | (1ULL << 20))
 #if defined(HAS_APPLE_PAC)
@@ -647,8 +654,8 @@
 	(SCTLR_RESERVED | SCTLR_UCI_ENABLED | SCTLR_nTWE_WFE_ENABLED | SCTLR_DZE_ENABLED | \
 	 SCTLR_I_ENABLED | SCTLR_SED_DISABLED | SCTLR_CP15BEN_ENABLED |                    \
 	 SCTLR_SA0_ENABLED | SCTLR_SA_ENABLED | SCTLR_C_ENABLED | SCTLR_M_ENABLED |        \
-	 SCTLR_CSEH_DEFAULT | SCTLR_DSSBS_DEFAULT |                                        \
-	 SCTLR_ROP_KEYS_DEFAULT | SCTLR_JOP_KEYS_DEFAULT)
+	 SCTLR_CSEH_DEFAULT | SCTLR_DSSBS_DEFAULT |	SCTLR_ROP_KEYS_DEFAULT |               \
+	 SCTLR_JOP_KEYS_DEFAULT | SCTLR_OTHER | SCTLR_EXTRA )
 
 /*
  * Coprocessor Access Control Register (CPACR)
@@ -665,9 +672,11 @@
 #define CPACR_TTA_SHIFT     28
 #define CPACR_TTA           (1 << CPACR_TTA_SHIFT)
 
+
 #define CPACR_FPEN_SHIFT    20
 #define CPACR_FPEN_EL0_TRAP (0x1 << CPACR_FPEN_SHIFT)
 #define CPACR_FPEN_ENABLE   (0x3 << CPACR_FPEN_SHIFT)
+
 
 /*
  *  FPSR: Floating Point Status Register
@@ -893,6 +902,9 @@
 #endif
 
 
+#define TCR_EL1_EXTRA                    0
+
+
 /*
  * Multiprocessor Affinity Register (MPIDR_EL1)
  *
@@ -980,13 +992,19 @@
 #define TCR_EL1_DTBI    0
 #endif /* CONFIG_KERNEL_TBI */
 
+#if HAS_16BIT_ASID
+#define TCR_EL1_ASID TCR_AS_16BIT_ASID
+#else /* HAS_16BIT_ASID */
+#define TCR_EL1_ASID 0
+#endif /* HAS_16BIT_ASID */
+
 #define TCR_EL1_BASE \
 	(TCR_IPS_VALUE | TCR_SH0_OUTER | TCR_ORGN0_WRITEBACK |         \
 	 TCR_IRGN0_WRITEBACK | (T0SZ_BOOT << TCR_T0SZ_SHIFT) |          \
 	 TCR_SH1_OUTER | TCR_ORGN1_WRITEBACK | \
 	 TCR_IRGN1_WRITEBACK | (TCR_TG1_GRANULE_SIZE) |                 \
 	 TCR_TBI0_TOPBYTE_IGNORED | (TCR_TBID0_ENABLE) | TCR_E0PD_VALUE | \
-	 TCR_EL1_DTBI)
+	 TCR_EL1_DTBI | TCR_EL1_ASID | TCR_EL1_EXTRA)
 
 #if __ARM_KERNEL_PROTECT__
 #define TCR_EL1_BOOT (TCR_EL1_BASE | (T1SZ_BOOT << TCR_T1SZ_SHIFT) | (TCR_TG0_GRANULE_SIZE))
@@ -1092,6 +1110,36 @@
  * R (reordering): reads or writes may reach device out of program order
  * E (early-acknowledge): writes may return immediately (e.g. PCIe posted writes)
  */
+#if HAS_FEAT_XS
+
+#define MAIR_DISABLE                      0x01 /* Device Memory, nGnRnE (strongly ordered), XS=0 */
+#define MAIR_POSTED_XS                    0x04 /* Device Memory, nGnRE (strongly ordered, posted writes), XS=1 */
+#define MAIR_POSTED_COMBINED_REORDERED_XS 0x0C /* Device Memory, GRE (reorderable, gathered writes, posted writes), XS=1 */
+#define MAIR_POSTED_COMBINED_REORDERED    0x0D /* Device Memory, GRE (reorderable, gathered writes, posted writes), XS=0 */
+#define MAIR_WRITECOMB                    0x40 /* Normal Memory, Non-Cacheable, XS=0 */
+#define MAIR_WRITETHRU                    0xA0 /* Normal Memory, Write-through, XS=0 */
+#define MAIR_WRITEBACK                    0xFF /* Normal Memory, Write-back, XS=0 */
+
+/*
+ * Memory Attribute Index. If these values change, please also update the pmap
+ * LLDB macros that rely on this value (e.g., PmapDecodeTTEARM64).
+ */
+#define CACHE_ATTRINDX_WRITEBACK                    0x0 /* cache enabled, buffer enabled  (normal memory) */
+#define CACHE_ATTRINDX_INNERWRITEBACK               CACHE_ATTRINDX_WRITEBACK /* legacy compatibility only */
+#define CACHE_ATTRINDX_WRITECOMB                    0x1 /* no cache, buffered writes (normal memory) */
+#define CACHE_ATTRINDX_WRITETHRU                    0x2 /* cache enabled, buffer disabled (normal memory) */
+#define CACHE_ATTRINDX_DISABLE                      0x3 /* no cache, no buffer (device memory) */
+#define CACHE_ATTRINDX_RESERVED                     0x4 /* reserved for internal use */
+#define CACHE_ATTRINDX_POSTED_XS                    0x5 /* no cache, no buffer, posted writes (device memory), XS=1 */
+#define CACHE_ATTRINDX_POSTED                       CACHE_ATTRINDX_POSTED_XS /* posted mappings use XS by default */
+#define CACHE_ATTRINDX_POSTED_REORDERED             CACHE_ATTRINDX_DISABLE /* no need for device-nGRE on newer SoCs, fallback to nGnRnE */
+#define CACHE_ATTRINDX_POSTED_COMBINED_REORDERED    0x6 /* no cache, write gathering, reorderable access, posted writes (device memory), XS=0 */
+#define CACHE_ATTRINDX_POSTED_COMBINED_REORDERED_XS 0x7 /* no cache, write gathering, reorderable access, posted writes (device memory), XS=1 */
+#define CACHE_ATTRINDX_DEFAULT                      CACHE_ATTRINDX_WRITEBACK
+#define CACHE_ATTRINDX_N_INDICES                    (8ULL)
+
+#else
+
 #define MAIR_DISABLE                   0x00 /* Device Memory, nGnRnE (strongly ordered) */
 #define MAIR_POSTED                    0x04 /* Device Memory, nGnRE (strongly ordered, posted writes) */
 #define MAIR_POSTED_REORDERED          0x08 /* Device Memory, nGRE (reorderable, posted writes) */
@@ -1099,27 +1147,31 @@
 #define MAIR_WRITECOMB                 0x44 /* Normal Memory, Outer Non-Cacheable, Inner Non-Cacheable */
 #define MAIR_WRITETHRU                 0xBB /* Normal Memory, Outer Write-through, Inner Write-through */
 #define MAIR_WRITEBACK                 0xFF /* Normal Memory, Outer Write-back, Inner Write-back */
-#define MAIR_INNERWRITEBACK            0x4F /* Normal Memory, Outer Non-Cacheable, Inner Write-back */
-
-
-/*
- * ARM 4-level Page Table support - 2*1024TB (2^48) of address space
- */
-
 
 /*
  * Memory Attribute Index. If these values change, please also update the pmap
  * LLDB macros that rely on this value (e.g., PmapDecodeTTEARM64).
  */
 #define CACHE_ATTRINDX_WRITEBACK                 0x0 /* cache enabled, buffer enabled  (normal memory) */
+#define CACHE_ATTRINDX_INNERWRITEBACK            CACHE_ATTRINDX_WRITEBACK /* legacy compatibility only */
 #define CACHE_ATTRINDX_WRITECOMB                 0x1 /* no cache, buffered writes (normal memory) */
 #define CACHE_ATTRINDX_WRITETHRU                 0x2 /* cache enabled, buffer disabled (normal memory) */
 #define CACHE_ATTRINDX_DISABLE                   0x3 /* no cache, no buffer (device memory) */
-#define CACHE_ATTRINDX_INNERWRITEBACK            0x4 /* inner cache enabled, buffer enabled, write allocate (normal memory) */
+#define CACHE_ATTRINDX_RESERVED                  0x4 /* reserved for internal use */
 #define CACHE_ATTRINDX_POSTED                    0x5 /* no cache, no buffer, posted writes (device memory) */
 #define CACHE_ATTRINDX_POSTED_REORDERED          0x6 /* no cache, reorderable access, posted writes (device memory) */
 #define CACHE_ATTRINDX_POSTED_COMBINED_REORDERED 0x7 /* no cache, write gathering, reorderable access, posted writes (device memory) */
 #define CACHE_ATTRINDX_DEFAULT                   CACHE_ATTRINDX_WRITEBACK
+#define CACHE_ATTRINDX_N_INDICES                 (8ULL)
+
+#endif /* HAS_FEAT_XS */
+
+#if HAS_UCNORMAL_MEM
+#define CACHE_ATTRINDX_RT CACHE_ATTRINDX_WRITECOMB
+#else
+#define CACHE_ATTRINDX_RT CACHE_ATTRINDX_DISABLE
+#endif /* HAS_UCNORMAL_MEM */
+
 
 
 /*
@@ -1618,6 +1670,7 @@
 
 #define ARM_PTE_ATTRINDX(x)        ((x) << 2)            /* memory attributes index */
 #define ARM_PTE_ATTRINDXMASK       (0x7ULL << 2)         /* mask memory attributes index */
+#define ARM_PTE_EXTRACT_ATTRINDX(x) (((x) >> 2) & 0x7ULL) /* extract memory attributes index */
 
 #define ARM_PTE_SH(x)              ((x) << 8)            /* access shared */
 #define ARM_PTE_SHMASK             (0x3ULL << 8)         /* mask access shared */
@@ -1773,7 +1826,6 @@ typedef enum {
 	FSC_PERMISSION_FAULT_L2    = 0x0E,
 	FSC_PERMISSION_FAULT_L3    = 0x0F,
 	FSC_SYNC_EXT_ABORT         = 0x10,
-	FSC_ASYNC_EXT_ABORT        = 0x11,
 	FSC_SYNC_EXT_ABORT_TT_L1   = 0x15,
 	FSC_SYNC_EXT_ABORT_TT_L2   = 0x16,
 	FSC_SYNC_EXT_ABORT_TT_L3   = 0x17,
@@ -1930,6 +1982,7 @@ typedef enum {
 
 
 
+
 /*
  * Physical Address Register (EL1)
  */
@@ -2011,12 +2064,15 @@ typedef enum {
 
 
 
+
+
 /*
  * Apple-ISA-Extensions ID Register.
  */
 #define AIDR_MUL53            (1 << 0)
 #define AIDR_WKDM             (1 << 1)
 #define AIDR_ARCHRETENTION    (1 << 2)
+
 
 
 /*
@@ -2184,8 +2240,8 @@ typedef enum {
  */
 
 #define ID_AA64MMFR0_EL1_ECV_OFFSET      60
-#define ID_AA64MMFR0_EL1_ECV_MASK        (0xfull << ID_AA64MMFR2_EL1_AT_OFFSET)
-#define ID_AA64MMFR0_EL1_ECV_EN          (1ull << ID_AA64MMFR2_EL1_AT_OFFSET)
+#define ID_AA64MMFR0_EL1_ECV_MASK        (0xfull << ID_AA64MMFR0_EL1_ECV_OFFSET)
+#define ID_AA64MMFR0_EL1_ECV_EN          (1ull << ID_AA64MMFR0_EL1_ECV_OFFSET)
 
 /*
  * ID_AA64MMFR2_EL1 - AArch64 Memory Model Feature Register 2
@@ -2232,6 +2288,7 @@ typedef enum {
  * |               RES0               | MPAM_frac | RAS_frac |  MTE  | SSBS |  BT  |
  * +----------------------------------+-----------+----------+-------+------+------+
  */
+
 
 #define ID_AA64PFR1_EL1_SSBS_OFFSET     4
 #define ID_AA64PFR1_EL1_SSBS_MASK       (0xfull << ID_AA64PFR1_EL1_SSBS_OFFSET)
@@ -2585,7 +2642,8 @@ msr $0, $2
 .endmacro
 
 /*
- * Clears bits in an SPR register.
+ * Combines the functionality of HID_CLEAR_BITS followed by HID_SET_BITS into
+ * a single read-modify-write sequence.
  * arg0: Name of the register to be accessed.
  * arg1: Mask of bits to be cleared.
  * arg2: Value to insert

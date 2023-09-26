@@ -266,6 +266,7 @@ i386_lbr_init(i386_cpu_info_t *info_p, bool is_master)
 		case CPUFAMILY_INTEL_SKYLAKE:
 		case CPUFAMILY_INTEL_KABYLAKE:
 		case CPUFAMILY_INTEL_ICELAKE:
+		case CPUFAMILY_INTEL_COMETLAKE:
 			cpu_lbr_setp = &skl_cpu_lbrs;
 			break;
 

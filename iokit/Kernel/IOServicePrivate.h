@@ -243,6 +243,14 @@ public:
 	virtual OSObject * getNextObject() APPLE_KEXT_OVERRIDE;
 };
 
+class IOExclaveProxy : public IOService
+{
+	OSDeclareDefaultStructors(IOExclaveProxy);
+
+	IOExclaveProxyState * exclaveState;
+
+	bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
+};
 
 class _IOServiceStateNotification : public IOService
 {

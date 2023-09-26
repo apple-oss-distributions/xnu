@@ -237,8 +237,6 @@ struct mptopt {
 
 /*
  * MPTCP subflow
- *
- * Note that mpts_flags and mpts_evctl are modified via atomic operations.
  */
 struct mptsub {
 	TAILQ_ENTRY(mptsub)   mpts_entry;     /* glue to peer subflows */
@@ -297,7 +295,6 @@ struct mptsub {
  *
  * Keep in sync with bsd/dev/dtrace/scripts/mptcp.d.
  */
-#define MPTSF_ATTACHED          0x00000001      /* attached to MPTCP PCB */
 #define MPTSF_CONNECTING        0x00000002      /* connection was attempted */
 #define MPTSF_CONNECT_PENDING   0x00000004      /* will connect when MPTCP is ready */
 #define MPTSF_CONNECTED         0x00000008      /* connection is established */

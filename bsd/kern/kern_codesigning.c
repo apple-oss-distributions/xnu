@@ -45,6 +45,7 @@
 #include <uuid/uuid.h>
 #include <IOKit/IOBSD.h>
 
+
 SYSCTL_DECL(_security);
 SYSCTL_DECL(_security_codesigning);
 SYSCTL_NODE(_security, OID_AUTO, codesigning, CTLFLAG_RD, 0, "XNU Code Signing");
@@ -64,20 +65,56 @@ code_signing_configuration(
 	code_signing_monitor_type_t monitor_type = CS_MONITOR_TYPE_NONE;
 	code_signing_config_t config = 0;
 
+	/*
+	 * Since we read this variable with load-acquire semantics, if we observe a value
+	 * of true, it means we should be able to observe writes to cs_monitor and also
+	 * cs_config.
+	 */
 	if (os_atomic_load(&cs_config_set, acquire) == true) {
 		goto config_set;
 	}
 
+	/*
+	 * Add support for all the code signing features. This function is called very
+	 * early in the system boot, much before kernel extensions such as Apple Mobile
+	 * File Integrity come online. As a result, this function assumes that all the
+	 * code signing features are enabled, and later on, different components can
+	 * disable support for different features using disable_code_signing_feature().
+	 */
+	config |= CS_CONFIG_MAP_JIT;
+	config |= CS_CONFIG_DEVELOPER_MODE_SUPPORTED;
+	config |= CS_CONFIG_COMPILATION_SERVICE;
+	config |= CS_CONFIG_LOCAL_SIGNING;
+	config |= CS_CONFIG_OOP_JIT;
+
+#if CODE_SIGNING_MONITOR
+	/* Mark the code signing monitor as enabled if required */
+	if (csm_enabled() == true) {
+		config |= CS_CONFIG_CSM_ENABLED;
+	}
+
+#if   PMAP_CS_PPL_MONITOR
+	monitor_type = CS_MONITOR_TYPE_PPL;
+#endif /* */
+#endif /* CODE_SIGNING_MONITOR */
+
 #if DEVELOPMENT || DEBUG
+	/*
+	 * We only ever need to parse for boot-args based exemption state on DEVELOPMENT
+	 * or DEBUG builds as this state is not respected by any code signing component
+	 * on RELEASE builds.
+	 */
+
+#define CS_AMFI_MASK_UNRESTRICT_TASK_FOR_PID 0x01
+#define CS_AMFI_MASK_ALLOW_ANY_SIGNATURE 0x02
+#define CS_AMFI_MASK_GET_OUT_OF_MY_WAY 0x80
+
 	int amfi_mask = 0;
 	int amfi_allow_any_signature = 0;
 	int amfi_unrestrict_task_for_pid = 0;
 	int amfi_get_out_of_my_way = 0;
 	int cs_enforcement_disabled = 0;
-
-#define CS_AMFI_MASK_UNRESTRICT_TASK_FOR_PID 0x01
-#define CS_AMFI_MASK_ALLOW_ANY_SIGNATURE 0x02
-#define CS_AMFI_MASK_GET_OUT_OF_MY_WAY 0x80
+	int cs_integrity_skip = 0;
 
 	/* Parse the AMFI mask */
 	PE_parse_boot_argn("amfi", &amfi_mask, sizeof(amfi_mask));
@@ -105,6 +142,12 @@ code_signing_configuration(
 		"cs_enforcement_disable",
 		&cs_enforcement_disabled,
 		sizeof(cs_enforcement_disabled));
+
+	/* Parse the system code signing integrity-check bypass */
+	PE_parse_boot_argn(
+		"cs_integrity_skip",
+		&cs_integrity_skip,
+		sizeof(cs_integrity_skip));
 
 	/* CS_CONFIG_UNRESTRICTED_DEBUGGING */
 	if (amfi_mask & CS_AMFI_MASK_UNRESTRICT_TASK_FOR_PID) {
@@ -138,6 +181,11 @@ code_signing_configuration(
 		config |= CS_CONFIG_GET_OUT_OF_MY_WAY;
 	} else if (cs_enforcement_disabled) {
 		config |= CS_CONFIG_GET_OUT_OF_MY_WAY;
+	}
+
+	/* CS_CONFIG_INTEGRITY_SKIP */
+	if (cs_integrity_skip) {
+		config |= CS_CONFIG_INTEGRITY_SKIP;
 	}
 
 #if   PMAP_CS_PPL_MONITOR
@@ -177,33 +225,17 @@ code_signing_configuration(
 #endif /* */
 #endif /* DEVELOPMENT || DEBUG */
 
-#if CODE_SIGNING_MONITOR
-#if   PMAP_CS_PPL_MONITOR
-	monitor_type = CS_MONITOR_TYPE_PPL;
-#endif
-
-	if (csm_enabled() == true) {
-		config |= CS_CONFIG_CSM_ENABLED;
-	}
-#endif
-
 	os_atomic_store(&cs_monitor, monitor_type, relaxed);
 	os_atomic_store(&cs_config, config, relaxed);
-	os_atomic_store(&cs_config_set, true, release);
 
 	/*
-	 * We don't actually ever expect to have concurrent writers in this function
-	 * as the data is warmed up during early boot by the kernel bootstrap code.
-	 * The only thing we need to ensure is that subsequent readers can view all
-	 * all the latest data.
+	 * We write the cs_config_set variable with store-release semantics which means
+	 * no writes before this call will be re-ordered to after this call. Hence, if
+	 * someone reads this variable with load-acquire semantics, and they observe a
+	 * value of true, then they will be able to observe the correct values of the
+	 * cs_monitor and the cs_config variables as well.
 	 */
-#if defined(__arm64__)
-	__asm__ volatile ("dmb ish" ::: "memory");
-#elif defined(__x86_64__)
-	__asm__ volatile ("mfence" ::: "memory");
-#else
-#error "Unknown platform -- fence instruction unavailable"
-#endif
+	os_atomic_store(&cs_config_set, true, release);
 
 config_set:
 	/* Ensure configuration has been set */
@@ -218,6 +250,53 @@ config_set:
 	if (config_out) {
 		*config_out = os_atomic_load(&cs_config, relaxed);
 	}
+}
+
+void
+disable_code_signing_feature(
+	code_signing_config_t feature)
+{
+	/*
+	 * We require that this function be called only after the code signing config
+	 * has been setup initially with a call to code_signing_configuration.
+	 */
+	if (os_atomic_load(&cs_config_set, acquire) == false) {
+		panic("attempted to disable code signing feature without init: %u", feature);
+	}
+
+	/*
+	 * We require that only a single feature be disabled through a single call to this
+	 * function. Moreover, we ensure that only valid features are being disabled.
+	 */
+	switch (feature) {
+	case CS_CONFIG_DEVELOPER_MODE_SUPPORTED:
+		cs_config &= ~CS_CONFIG_DEVELOPER_MODE_SUPPORTED;
+		break;
+
+	case CS_CONFIG_COMPILATION_SERVICE:
+		cs_config &= ~CS_CONFIG_COMPILATION_SERVICE;
+		break;
+
+	case CS_CONFIG_LOCAL_SIGNING:
+		cs_config &= ~CS_CONFIG_LOCAL_SIGNING;
+		break;
+
+	case CS_CONFIG_OOP_JIT:
+		cs_config &= ~CS_CONFIG_OOP_JIT;
+		break;
+
+	default:
+		panic("attempted to disable a code signing feature invalidly: %u", feature);
+	}
+
+	/* Ensure all readers can observe the latest data */
+#if defined(__arm64__)
+	__asm__ volatile ("dmb ish" ::: "memory");
+#elif defined(__x86_64__)
+	__asm__ volatile ("mfence" ::: "memory");
+#else
+#error "Unknown platform -- fence instruction unavailable"
+#endif
 }
 
 #pragma mark Developer Mode
@@ -557,6 +636,18 @@ unrestrict_local_signing_cdhash(
 }
 
 kern_return_t
+get_trust_level_kdp(
+	__unused pmap_t pmap,
+	__unused uint32_t *trust_level)
+{
+#if CODE_SIGNING_MONITOR
+	return csm_get_trust_level_kdp(pmap, trust_level);
+#else
+	return KERN_NOT_SUPPORTED;
+#endif
+}
+
+kern_return_t
 csm_resolve_os_entitlements_from_proc(
 	__unused const proc_t process,
 	__unused const void **os_entitlements)
@@ -600,6 +691,62 @@ csm_resolve_os_entitlements_from_proc(
 #else
 	return KERN_NOT_SUPPORTED;
 #endif
+}
+
+kern_return_t
+address_space_debugged(
+	const proc_t process)
+{
+	/* Must pass in a valid proc_t */
+	if (process == NULL) {
+		printf("%s: provided a NULL process\n", __FUNCTION__);
+		return KERN_DENIED;
+	}
+	proc_require(process, PROC_REQUIRE_ALLOW_ALL);
+
+	/* Developer mode must always be enabled for this to return successfully */
+	if (developer_mode_state() == false) {
+		return KERN_DENIED;
+	}
+
+#if CODE_SIGNING_MONITOR
+	task_t task = NULL;
+	vm_map_t task_map = NULL;
+	pmap_t task_pmap = NULL;
+
+	if (csm_enabled() == true) {
+		/* Acquire the task from the proc */
+		task = proc_task(process);
+		if (task == NULL) {
+			return KERN_NOT_FOUND;
+		}
+
+		/* Acquire the virtual memory map from the task -- takes a reference on it */
+		task_map = get_task_map_reference(task);
+		if (task_map == NULL) {
+			return KERN_NOT_FOUND;
+		}
+
+		/* Acquire the pmap from the virtual memory map */
+		task_pmap = vm_map_get_pmap(task_map);
+		assert(task_pmap != NULL);
+
+		/* Acquire the state from the monitor */
+		kern_return_t ret = CSM_PREFIX(address_space_debugged)(task_pmap);
+
+		/* Release the reference on the virtual memory map */
+		vm_map_deallocate(task_map);
+
+		return ret;
+	}
+#endif /* CODE_SIGNING_MONITOR */
+
+	/* Check read-only process flags for state */
+	if (proc_getcsflags(process) & CS_DEBUGGED) {
+		return KERN_SUCCESS;
+	}
+
+	return KERN_DENIED;
 }
 
 #if CODE_SIGNING_MONITOR
@@ -697,6 +844,29 @@ csm_associate_code_signature(
 }
 
 kern_return_t
+csm_allow_jit_region(
+	pmap_t monitor_pmap)
+{
+	if (csm_enabled() == false) {
+		return KERN_SUCCESS;
+	} else if (monitor_pmap == NULL) {
+		return KERN_DENIED;
+	}
+
+	kern_return_t ret = CSM_PREFIX(allow_jit_region)(monitor_pmap);
+	if (ret == KERN_NOT_SUPPORTED) {
+		/*
+		 * Some monitor environments do not support this API and as a result will
+		 * return KERN_NOT_SUPPORTED. The caller here should not interpret that as
+		 * a failure.
+		 */
+		ret = KERN_SUCCESS;
+	}
+
+	return ret;
+}
+
+kern_return_t
 csm_associate_jit_region(
 	pmap_t monitor_pmap,
 	const vm_address_t region_addr,
@@ -737,6 +907,18 @@ csm_allow_invalid_code(
 	}
 
 	return CSM_PREFIX(allow_invalid_code)(pmap);
+}
+
+kern_return_t
+csm_get_trust_level_kdp(
+	pmap_t pmap,
+	uint32_t *trust_level)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(get_trust_level_kdp)(pmap, trust_level);
 }
 
 kern_return_t

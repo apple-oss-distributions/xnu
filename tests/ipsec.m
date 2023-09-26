@@ -9,6 +9,9 @@
 #import <System/netinet/ip.h>
 #import <System/netinet/ip6.h>
 
+#import <sys/mbuf.h>
+
+
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.ipsec"),
 	T_META_ASROOT(true),
@@ -397,13 +400,19 @@ static int
 pfkey_setup_socket(void)
 {
 	int pfkey_socket = -1;
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(pfkey_socket = socket(PF_KEY, SOCK_RAW, PF_KEY_V2), NULL);
+
+	struct mbstat mbstat;
+	size_t len_mbstat = sizeof(struct mbstat);
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.ipc.mbstat", &mbstat, &len_mbstat, NULL, 0), "kern.ipc.mbstat");
+
 	int bufsiz = 0;
 	const unsigned long newbufk = 1536;
 	unsigned long oldmax;
 	size_t  oldmaxsize = sizeof(oldmax);
-	unsigned long newmax = newbufk * (1024 + 128);
-
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(pfkey_socket = socket(PF_KEY, SOCK_RAW, PF_KEY_V2), NULL);
+	unsigned long newmax = newbufk * (1024 + mbstat.m_msize / 2);
 
 	if (sysctlbyname("kern.ipc.maxsockbuf", &oldmax, &oldmaxsize, &newmax, sizeof(newmax)) != 0) {
 		bufsiz = 233016;        /* Max allowed by default */

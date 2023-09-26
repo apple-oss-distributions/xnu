@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -42,6 +42,7 @@
 #include <kern/restartable.h>
 #include <kern/socd_client.h>
 #include <kern/thread.h>
+#include <kern/zalloc_internal.h>
 #include <mach/exception.h>
 #include <mach/arm/traps.h>
 #include <mach/vm_types.h>
@@ -81,7 +82,7 @@
 
 #if CONFIG_UBSAN_MINIMAL
 #include <san/ubsan_minimal.h>
-#endif /* CONFIG_UBSAN_MINIMAL */
+#endif
 
 
 #ifndef __arm64__
@@ -149,13 +150,6 @@ extern kern_return_t arm_fast_fault(pmap_t, vm_map_address_t, vm_prot_t, bool, b
 
 static void handle_uncategorized(arm_saved_state_t *);
 
-/*
- * For UBSan trap and continue handling, we must be able to recover
- * from handle_kernel_breakpoint().
- */
-#if !CONFIG_UBSAN_MINIMAL
-__dead2
-#endif /* CONFIG_UBSAN_MINIMAL */
 static void handle_kernel_breakpoint(arm_saved_state_t *, uint32_t);
 
 static void handle_breakpoint(arm_saved_state_t *, uint32_t) __dead2;
@@ -257,6 +251,7 @@ extern unsigned int gFastIPI;
 #endif /* defined(HAS_IPI) */
 
 static arm_saved_state64_t *original_faulting_state = NULL;
+
 
 TUNABLE(bool, fp_exceptions_enabled, "-fp_exceptions", false);
 
@@ -388,6 +383,7 @@ is_parity_error(fault_status_t status)
 }
 
 
+
 __dead2 __unused
 static void
 arm64_implementation_specific_error(arm_saved_state_t *state, uint32_t esr, vm_offset_t far)
@@ -479,6 +475,7 @@ panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss)
 		    PACK_2X32(VALUE(state->esr), VALUE(state->cpsr)),
 		    VALUE(state->far));
 	}
+
 
 	panic_plain("%s at pc 0x%016llx, lr 0x%016llx (saved state: %p%s)\n"
 	    "\t  x0:  0x%016llx x1:  0x%016llx  x2:  0x%016llx  x3:  0x%016llx\n"
@@ -721,6 +718,7 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 
 #endif /* __has_feature(ptrauth_calls) */
 
+
 	case ESR_EC_IABORT_EL0:
 		handle_abort(state, esr, far, inspect_instruction_abort, handle_user_abort, expected_fault_handler);
 		break;
@@ -759,10 +757,7 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 	case ESR_EC_BRK_AARCH64:
 		if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
 			handle_kernel_breakpoint(state, esr);
-#if CONFIG_UBSAN_MINIMAL
-			/* UBSan breakpoints are recoverable */
 			break;
-#endif /* CONFIG_UBSAN_MINIMAL */
 		} else {
 			handle_breakpoint(state, esr);
 			__builtin_unreachable();
@@ -966,13 +961,12 @@ handle_uncategorized(arm_saved_state_t *state)
 }
 
 #if __has_feature(ptrauth_calls)
-static const uint16_t ptrauth_brk_comment_base = 0xc470;
-
+static const uint16_t PTRAUTH_TRAPS_START = 0xC470;
 static inline bool
 brk_comment_is_ptrauth(uint16_t comment)
 {
-	return comment >= ptrauth_brk_comment_base &&
-	       comment <= ptrauth_brk_comment_base + ptrauth_key_asdb;
+	return comment >= PTRAUTH_TRAPS_START &&
+	       comment <= PTRAUTH_TRAPS_START + ptrauth_key_asdb;
 }
 
 static inline const char *
@@ -991,72 +985,112 @@ ptrauth_key_to_string(ptrauth_key key)
 		__builtin_unreachable();
 	}
 }
+
+static void __attribute__((noreturn))
+ptrauth_handle_brk_trap(void *tstate, uint16_t comment)
+{
+	arm_saved_state_t *state = (arm_saved_state_t *)tstate;
+#define MSG_FMT "Break 0x%04X instruction exception from kernel. Ptrauth failure with %s key resulted in 0x%016llx"
+	char msg[strlen(MSG_FMT)
+	- strlen("0x%04X") + strlen("0xFFFF")
+	- strlen("%s") + strlen("IA")
+	- strlen("0x%016llx") + strlen("0xFFFFFFFFFFFFFFFF")
+	+ 1];
+	ptrauth_key key = (ptrauth_key)(comment - PTRAUTH_TRAPS_START);
+	const char *key_str = ptrauth_key_to_string(key);
+	snprintf(msg, sizeof(msg), MSG_FMT, comment, key_str, saved_state64(state)->x[16]);
+#undef MSG_FMT
+
+	panic_with_thread_kernel_state(msg, state);
+	__builtin_unreachable();
+}
 #endif /* __has_feature(ptrauth_calls) */
 
-#if KASAN_TBI
-static inline bool
-brk_comment_is_kasan_failure(uint16_t comment)
-{
-	return comment >= KASAN_TBI_ESR_BASE &&
-	       comment <= KASAN_TBI_ESR_TOP;
-}
-#endif /* KASAN_TBI */
+static uint32_t bound_chk_violations_event;
 
-#if CONFIG_UBSAN_MINIMAL
-static inline bool
-brk_comment_is_ubsan(uint16_t comment)
+static void
+telemetry_handle_brk_trap(
+	void              *tstate,
+	uint16_t          comment)
 {
-	return comment >= UBSAN_MINIMAL_TRAPS_START &&
-	       comment < UBSAN_MINIMAL_TRAPS_END;
+#if CONFIG_UBSAN_MINIMAL
+	if (comment == UBSAN_SIGNED_OVERFLOW_TRAP) {
+		ubsan_handle_brk_trap(tstate, comment);
+	}
+#else
+	(void)tstate;
+#endif
+
+	if (comment == CLANG_BOUND_CHK_SOFT_TRAP) {
+		os_atomic_inc(&bound_chk_violations_event, relaxed);
+	}
 }
-#endif /* CONFIG_UBSAN_MINIMAL */
+
+#if __has_feature(ptrauth_calls)
+KERNEL_BRK_DESCRIPTOR_DEFINE(ptrauth_desc,
+    .type                = KERNEL_BRK_TYPE_PTRAUTH,
+    .base                = PTRAUTH_TRAPS_START,
+    .max                 = PTRAUTH_TRAPS_START + ptrauth_key_asdb,
+    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .handle_breakpoint   = ptrauth_handle_brk_trap);
+#endif
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(clang_desc,
+    .type                = KERNEL_BRK_TYPE_CLANG,
+    .base                = CLANG_TRAPS_ARM_START,
+    .max                 = CLANG_TRAPS_ARM_END,
+    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .handle_breakpoint   = NULL);
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(libcxx_desc,
+    .type                = KERNEL_BRK_TYPE_LIBCXX,
+    .base                = LIBCXX_TRAPS_START,
+    .max                 = LIBCXX_TRAPS_END,
+    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .handle_breakpoint   = NULL);
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(telemetry_desc,
+    .type                = KERNEL_BRK_TYPE_TELEMETRY,
+    .base                = TELEMETRY_TRAPS_START,
+    .max                 = TELEMETRY_TRAPS_END,
+    .options             = KERNEL_BRK_RECOVERABLE | KERNEL_BRK_CORE_ANALYTICS,
+    .handle_breakpoint   = telemetry_handle_brk_trap);
 
 static void
 handle_kernel_breakpoint(arm_saved_state_t *state, uint32_t esr)
 {
 	uint16_t comment = ISS_BRK_COMMENT(esr);
-
-#if __has_feature(ptrauth_calls)
-	if (brk_comment_is_ptrauth(comment)) {
-#define MSG_FMT "Break 0x%04X instruction exception from kernel. Ptrauth failure with %s key resulted in 0x%016llx"
-		char msg[strlen(MSG_FMT)
-		- strlen("0x%04X") + strlen("0xFFFF")
-		- strlen("%s") + strlen("IA")
-		- strlen("0x%016llx") + strlen("0xFFFFFFFFFFFFFFFF")
-		+ 1];
-		ptrauth_key key = (ptrauth_key)(comment - ptrauth_brk_comment_base);
-		const char *key_str = ptrauth_key_to_string(key);
-		snprintf(msg, sizeof(msg), MSG_FMT, comment, key_str, saved_state64(state)->x[16]);
-
-		panic_with_thread_kernel_state(msg, state);
-		__builtin_unreachable();
-#undef MSG_FMT
-	}
-#endif /* __has_feature(ptrauth_calls) */
-
-#if KASAN_TBI
-	if (brk_comment_is_kasan_failure(comment)) {
-		kasan_handle_brk_failure(saved_state64(state)->x[0], comment);
-		__builtin_unreachable();
-	}
-#endif /* KASAN_TBI */
-
-#if CONFIG_UBSAN_MINIMAL
-	if (brk_comment_is_ubsan(comment)) {
-		ubsan_handle_brk_trap(comment, get_saved_state_pc(state),
-		    get_saved_state_fp(state));
-		add_saved_state_pc(state, 4);
-		return;
-	}
-#endif /* CONFIG_UBSAN_MINIMAL */
+	const struct kernel_brk_descriptor *desc;
 
 #define MSG_FMT "Break 0x%04X instruction exception from kernel. Panic (by design)"
 	char msg[strlen(MSG_FMT) - strlen("0x%04X") + strlen("0xFFFF") + 1];
+
+	desc = find_brk_descriptor_by_comment(comment);
+
+	if (!desc) {
+		goto brk_out;
+	}
+
+	if (desc->options & KERNEL_BRK_TELEMETRY_OPTIONS) {
+		telemetry_kernel_brk(desc->type, desc->options, (void *)state, comment);
+	}
+
+	if (desc->handle_breakpoint) {
+		desc->handle_breakpoint(state, comment); /* May trigger panic */
+	}
+
+	/* Still alive? Check if we should recover. */
+	if (desc->options & KERNEL_BRK_RECOVERABLE) {
+		add_saved_state_pc(state, 4);
+		return;
+	}
+
+brk_out:
 	snprintf(msg, sizeof(msg), MSG_FMT, comment);
-#undef MSG_FMT
 
 	panic_with_thread_kernel_state(msg, state);
 	__builtin_unreachable();
+#undef MSG_FMT
 }
 
 static void
@@ -1321,6 +1355,8 @@ handle_alignment_fault_from_user(arm_saved_state_t *state, kern_return_t *vmfr)
 }
 
 
+
+
 static void
 handle_sw_step_debug(arm_saved_state_t *state)
 {
@@ -1382,7 +1418,7 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 		assert(map != kernel_map);
 
 		if (!(fault_type & VM_PROT_EXECUTE)) {
-			vm_fault_addr = tbi_clear(fault_addr);
+			vm_fault_addr = VM_USER_STRIP_TBI(fault_addr);
 		}
 
 		/* check to see if it is just a pmap ref/modify fault */
@@ -1511,6 +1547,17 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
 	thread_t thread = current_thread();
 	bool recover = find_copyio_recovery_entry(state) != 0;
 
+#ifdef CONFIG_KERNEL_TAGGING
+	/*
+	 * If a read/write  access to a tagged address faults over pageable kernel memory
+	 * vm_fault() will need to find the right vm entry and offset. Canonicalize the
+	 * address here so that the correct comparisons can happen later in the VM code.
+	 */
+	if (!(fault_type & VM_PROT_EXECUTE) && VM_KERNEL_ADDRESS(fault_addr)) {
+		fault_addr = vm_memtag_canonicalize_address(fault_addr);
+	}
+#endif /* CONFIG_KERNEL_TAGGING */
+
 #ifndef CONFIG_XNUPOST
 	(void)expected_fault_handler;
 #endif /* CONFIG_XNUPOST */
@@ -1610,6 +1657,8 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
 			handle_kernel_abort_recover(state, esr, fault_addr, thread);
 			return;
 		}
+
+		panic_fault_address = fault_addr;
 	} else if (is_alignment_fault(fault_code)) {
 		if (recover) {
 			handle_kernel_abort_recover(state, esr, fault_addr, thread);
@@ -1721,10 +1770,9 @@ handle_msr_trap(arm_saved_state_t *state, uint32_t esr)
 
 #if __has_feature(ptrauth_calls)
 static void
-autxx_instruction_extract_reg(uint32_t instr, char reg[4])
+stringify_gpr(unsigned int r, char reg[4])
 {
-	unsigned int rd = ARM64_INSTR_AUTxx_RD_GET(instr);
-	switch (rd) {
+	switch (r) {
 	case 29:
 		strncpy(reg, "fp", 4);
 		return;
@@ -1738,9 +1786,16 @@ autxx_instruction_extract_reg(uint32_t instr, char reg[4])
 		return;
 
 	default:
-		snprintf(reg, 4, "x%u", rd);
+		snprintf(reg, 4, "x%u", r);
 		return;
 	}
+}
+
+static void
+autxx_instruction_extract_reg(uint32_t instr, char reg[4])
+{
+	unsigned int rd = ARM64_INSTR_AUTxx_RD_GET(instr);
+	stringify_gpr(rd, reg);
 }
 
 static const char *
@@ -1754,6 +1809,7 @@ autix_system_instruction_extract_reg(uint32_t instr)
 		return "lr";
 	}
 }
+
 
 static void
 handle_pac_fail(arm_saved_state_t *state, uint32_t esr)
@@ -1773,8 +1829,9 @@ handle_pac_fail(arm_saved_state_t *state, uint32_t esr)
 #define GENERIC_PAC_FAILURE_MSG_FMT "PAC failure from kernel with %s key"
 #define AUTXX_MSG_FMT GENERIC_PAC_FAILURE_MSG_FMT " while authing %s"
 #define GENERIC_MSG_FMT GENERIC_PAC_FAILURE_MSG_FMT
+#define MAX_PAC_MSG_FMT AUTXX_MSG_FMT
 
-		char msg[strlen(AUTXX_MSG_FMT)
+		char msg[strlen(MAX_PAC_MSG_FMT)
 		- strlen("%s") + strlen("IA")
 		- strlen("%s") + strlen("xzr")
 		+ 1];
@@ -2081,7 +2138,8 @@ sleh_invalid_stack(arm_context_t *context, uint32_t esr __unused, vm_offset_t fa
 	vm_offset_t kernel_stack_bottom, sp;
 
 	sp = get_saved_state_sp(&context->ss);
-	kernel_stack_bottom = round_page(thread->machine.kstackptr) - KERNEL_STACK_SIZE;
+	vm_offset_t kstackptr = (vm_offset_t)thread->machine.kstackptr;
+	kernel_stack_bottom = round_page(kstackptr) - KERNEL_STACK_SIZE;
 
 	if ((sp < kernel_stack_bottom) && (sp >= (kernel_stack_bottom - PAGE_SIZE))) {
 		panic_with_thread_kernel_state("Invalid kernel stack pointer (probable overflow).", &context->ss);
@@ -2090,3 +2148,36 @@ sleh_invalid_stack(arm_context_t *context, uint32_t esr __unused, vm_offset_t fa
 	panic_with_thread_kernel_state("Invalid kernel stack pointer (probable corruption).", &context->ss);
 }
 
+
+#if DEVELOPMENT || DEBUG
+static int trap_handled;
+static void
+handle_recoverable_kernel_trap(
+	__unused void     *tstate,
+	uint16_t          comment)
+{
+	assert(comment == TEST_RECOVERABLE_SOFT_TRAP);
+
+	printf("Recoverable trap handled.\n");
+	trap_handled = 1;
+}
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(test_desc,
+    .type                = KERNEL_BRK_TYPE_TEST,
+    .base                = TEST_RECOVERABLE_SOFT_TRAP,
+    .max                 = TEST_RECOVERABLE_SOFT_TRAP,
+    .options             = KERNEL_BRK_RECOVERABLE,
+    .handle_breakpoint   = handle_recoverable_kernel_trap);
+
+static int
+recoverable_kernel_trap_test(__unused int64_t in, int64_t *out)
+{
+	ml_recoverable_trap(TEST_RECOVERABLE_SOFT_TRAP);
+
+	*out = trap_handled;
+	return 0;
+}
+
+SYSCTL_TEST_REGISTER(recoverable_kernel_trap, recoverable_kernel_trap_test);
+
+#endif

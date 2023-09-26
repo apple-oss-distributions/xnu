@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -119,6 +119,9 @@ uint32_t sk_netif_native_txmodel = NETIF_NATIVE_TXMODEL_DEFAULT;
  * Configures the RX aggregation logic for TCP in flowswitch.
  * A non-zero value enables the aggregation logic, with the maximum
  * aggregation length (in bytes) limited to this value.
+ *
+ * DO NOT increase beyond 16KB. If you do, we end up corrupting the data-stream
+ * as we create aggregate-mbufs with a pktlen > 16KB but only a single element.
  */
 uint32_t sk_fsw_rx_agg_tcp = 16384;
 
@@ -137,6 +140,12 @@ uint32_t sk_fsw_tx_agg_tcp = 1;
  * Configuration to limit the number of buffers for flowswitch VP channel.
  */
 uint32_t sk_fsw_max_bufs = 0;
+/*
+ * GSO MTU for the channel path:
+ *   > 0: enable GSO and use value as the largest supported segment size
+ *  == 0: disable GSO
+ */
+uint32_t sk_fsw_gso_mtu = 16 * 1024;
 
 /* list of interfaces that allow direct open from userspace */
 #define SK_NETIF_DIRECT_MAX     8
@@ -406,6 +415,8 @@ skywalk_init(void)
 	    sizeof(sk_fsw_rx_agg_tcp));
 	(void) PE_parse_boot_argn("sk_fsw_tx_agg_tcp", &sk_fsw_tx_agg_tcp,
 	    sizeof(sk_fsw_tx_agg_tcp));
+	(void) PE_parse_boot_argn("sk_fsw_gso_mtu", &sk_fsw_gso_mtu,
+	    sizeof(sk_fsw_gso_mtu));
 	(void) PE_parse_boot_argn("sk_fsw_max_bufs", &sk_fsw_max_bufs,
 	    sizeof(sk_fsw_max_bufs));
 	(void) PE_parse_boot_argn("sk_rx_sync_packets", &sk_rx_sync_packets,
@@ -518,8 +529,11 @@ static int
 sk_priv_chk(proc_t p, kauth_cred_t cred, int priv)
 {
 #pragma unused(p)
-	int ret = priv_check_cred(cred, priv, 0);
+	int ret = EPERM;
 
+	if (cred != NULL) {
+		ret = priv_check_cred(cred, priv, 0);
+	}
 #if (DEVELOPMENT || DEBUG)
 	if (ret != 0) {
 		const char *pstr;

@@ -52,6 +52,9 @@
 #include <sys/sysctl.h>
 #include <libkern/OSDebug.h>
 #include <kern/thread.h>
+#if DEVELOPMENT || DEBUG
+#include <os/system_event_log.h>
+#endif /* DEVELOPMENT || DEBUG */
 
 // Required for notification instrumentation
 #include "IOServicePrivate.h"
@@ -7086,6 +7089,11 @@ IOService::cancelPowerChange( unsigned long refcon )
 
 	name[0] = '\0';
 	proc_name(pid, name, sizeof(name));
+	if (pid == 0) {
+		const char *serviceName = this->getName();
+		size_t len = strlen(name);
+		snprintf(name + len, sizeof(name) - len, " (%s)", serviceName ? serviceName : "");
+	}
 	PM_ERROR("PM notification cancel (pid %d, %s)\n", pid, name);
 
 	request = acquirePMRequest( this, kIOPMRequestTypeCancelPowerChange );
@@ -7845,6 +7853,12 @@ IOService::actionPMWorkQueueInvoke( IOPMRequest * request, IOPMWorkQueue * queue
 			} else {
 				OUR_PMLog(kPMLogIdleCancel, (uintptr_t) this, fMachineState);
 				PM_ERROR("%s: idle cancel, state %u\n", fName, fMachineState);
+#if DEVELOPMENT || DEBUG
+				record_system_event(SYSTEM_EVENT_TYPE_INFO,
+				    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+				    "Idle Sleep", "%s idle cancel, state %u", fName, fMachineState
+				    );
+#endif /* DEVELOPMENT || DEBUG */
 				if (IS_ROOT_DOMAIN) {
 					// RootDomain already sent "WillSleep" to its clients
 					tellChangeUp(fCurrentPowerState);
@@ -7863,6 +7877,12 @@ IOService::actionPMWorkQueueInvoke( IOPMRequest * request, IOPMWorkQueue * queue
 			if (fDoNotPowerDown) {
 				OUR_PMLog(kPMLogIdleCancel, (uintptr_t) this, fMachineState);
 				PM_ERROR("%s: idle cancel, state %u\n", fName, fMachineState);
+#if DEVELOPMENT || DEBUG
+				record_system_event(SYSTEM_EVENT_TYPE_INFO,
+				    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+				    "Idle Sleep", "%s idle cancel, state %u", fName, fMachineState
+				    );
+#endif /* DEVELOPMENT || DEBUG */
 				if (IS_ROOT_DOMAIN) {
 					// RootDomain already sent "WillSleep" to its clients
 					tellChangeUp(fCurrentPowerState);
@@ -7997,6 +8017,12 @@ IOService::actionPMWorkQueueInvoke( IOPMRequest * request, IOPMWorkQueue * queue
 				// askChangeDown/kNotifyApps
 				OUR_PMLog(kPMLogIdleCancel, (uintptr_t) this, fMachineState);
 				PM_ERROR("%s: idle cancel, state %u\n", fName, fMachineState);
+#if DEVELOPMENT || DEBUG
+				record_system_event(SYSTEM_EVENT_TYPE_INFO,
+				    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+				    "Idle Sleep", "%s idle cancel, state %u", fName, fMachineState
+				    );
+#endif /* DEVELOPMENT || DEBUG */
 				tellNoChangeDown(fHeadNotePowerState);
 				fHeadNoteChangeFlags |= kIOPMNotDone;
 				OurChangeFinish();

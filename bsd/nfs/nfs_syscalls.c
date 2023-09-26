@@ -143,6 +143,8 @@ SYSCTL_INT(_vfs_generic_nfs_server, OID_AUTO, request_queue_length, CTLFLAG_RW |
 SYSCTL_INT(_vfs_generic_nfs_server, OID_AUTO, user_stats, CTLFLAG_RW | CTLFLAG_LOCKED, &nfsrv_user_stat_enabled, 0, "");
 SYSCTL_UINT(_vfs_generic_nfs_server, OID_AUTO, gss_context_ttl, CTLFLAG_RW | CTLFLAG_LOCKED, &nfsrv_gss_context_ttl, 0, "");
 SYSCTL_UINT(_vfs_generic_nfs_server, OID_AUTO, debug_ctl, CTLFLAG_RW | CTLFLAG_LOCKED, &nfsrv_debug_ctl, 0, "");
+SYSCTL_UINT(_vfs_generic_nfs_server, OID_AUTO, unprocessed_rpc_current, CTLFLAG_RD | CTLFLAG_LOCKED, &nfsrv_unprocessed_rpc_current, 0, "");
+SYSCTL_UINT(_vfs_generic_nfs_server, OID_AUTO, unprocessed_rpc_max, CTLFLAG_RW | CTLFLAG_LOCKED, &nfsrv_unprocessed_rpc_max, 0, "");
 #if CONFIG_FSE
 SYSCTL_INT(_vfs_generic_nfs_server, OID_AUTO, fsevents, CTLFLAG_RW | CTLFLAG_LOCKED, &nfsrv_fsevents_enabled, 0, "");
 #endif
@@ -681,7 +683,7 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 	int error = 0, sodomain, sotype, soprotocol, on = 1;
 	int first;
 	struct timeval timeo;
-	uint64_t sbmaxsize, sobufsize;
+	uint64_t sobufsize;
 
 	/* make sure mbuf constants are set up */
 	if (!nfs_mbuf_mhlen) {
@@ -714,11 +716,8 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 		sock_setsockopt(so, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 	}
 
-	/* Calculate maximum supported socket buffers sizes */
-	sbmaxsize = (uint64_t)sb_max * MCLBYTES / (MSIZE + MCLBYTES);
-
 	/* Set socket buffer sizes for UDP/TCP */
-	sobufsize = MIN(sbmaxsize, (sotype == SOCK_DGRAM) ? NFS_UDPSOCKBUF : NFSRV_TCPSOCKBUF);
+	sobufsize = MIN(sb_max_adj, (sotype == SOCK_DGRAM) ? NFS_UDPSOCKBUF : NFSRV_TCPSOCKBUF);
 	error = sock_setsockopt(so, SOL_SOCKET, SO_SNDBUF, &sobufsize, sizeof(sobufsize));
 	if (error) {
 		log(LOG_INFO, "nfssvc_addsock: socket buffer setting SO_SNDBUF to %llu error(s) %d\n", sobufsize, error);
@@ -1743,6 +1742,9 @@ nfsrv_slpfree(struct nfsrv_sock *slp)
 	if (slp->ns_so) {
 		sock_release(slp->ns_so);
 		slp->ns_so = NULL;
+	}
+	if (slp->ns_recslen) {
+		OSAddAtomic(-slp->ns_recslen, &nfsrv_unprocessed_rpc_current);
 	}
 	if (slp->ns_nam) {
 		mbuf_free(slp->ns_nam);

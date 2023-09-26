@@ -135,6 +135,11 @@ static uint64_t wfi_delay = 0;
 #define CPUPM_IDLE_WFE 0x5310300
 #define CPUPM_IDLE_TIMER_WFE 0x5310304
 
+#define DEFAULT_EXPECTING_IPI_WFE_TIMEOUT_USEC (60ULL)
+TUNABLE(uint32_t, expecting_ipi_wfe_timeout_usec,
+    "expecting_ipi_wfe_timeout_usec", DEFAULT_EXPECTING_IPI_WFE_TIMEOUT_USEC);
+uint64_t expecting_ipi_wfe_timeout_mt = 0x0ULL; /* initialized to a non-zero value in sched_init */
+
 /* When recommended, issue WFE with [FI]IRQ unmasked in the idle
  * loop. The default.
  */
@@ -390,7 +395,7 @@ int wfe_allowed = 1;
 #endif /* DEVELOPMENT || DEBUG */
 
 bool
-wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cdp, bool unmask)
+wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cdp, bool unmask, bool check_cluster_recommendation)
 {
 	bool ipending = false;
 	uint64_t irqc = 0, nirqc = 0;
@@ -452,7 +457,7 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
 			/* Check if the WFE recommendation has expired.
 			 * We do not recompute the deadline here.
 			 */
-			if ((ml_cluster_wfe_timeout(cid) == 0) ||
+			if ((check_cluster_recommendation && ml_cluster_wfe_timeout(cid) == 0) ||
 			    mach_absolute_time() >= wfe_deadline) {
 				WFE_STAT(cdp->wfe_terminations++);
 				break;
@@ -485,8 +490,12 @@ void __attribute__((noreturn))
 cpu_idle(void)
 {
 	cpu_data_t     *cpu_data_ptr = getCpuDatap();
+	processor_t     processor = current_processor();
 	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
 	bool idle_disallowed = false;
+	/* Read and reset the next_idle_short flag */
+	bool next_idle_short = processor->next_idle_short;
+	processor->next_idle_short = false;
 
 	if (__improbable((!idle_enable))) {
 		idle_disallowed = true;
@@ -500,28 +509,35 @@ cpu_idle(void)
 
 	bool ipending = false;
 	uint32_t cid = cpu_data_ptr->cpu_cluster_id;
+	bool check_cluster_recommendation = true;
+	uint64_t wfe_timeout = 0;
 
 	if (idle_proximate_io_wfe_masked == 1) {
-		uint64_t wfe_deadline = 0;
 		/* Check for an active perf. controller generated
 		 * WFE recommendation for this cluster.
 		 */
-		uint64_t wfe_ttd = 0;
-		if ((wfe_ttd = ml_cluster_wfe_timeout(cid)) != 0) {
-			wfe_deadline = mach_absolute_time() + wfe_ttd;
-		}
+		wfe_timeout = ml_cluster_wfe_timeout(cid);
+	}
 
-		if (wfe_deadline != 0) {
-			/* Poll issuing event-bounded WFEs until an interrupt
-			 * arrives or the WFE recommendation expires
-			 */
-			KDBG(CPUPM_IDLE_WFE | DBG_FUNC_START, ipending, cpu_data_ptr->wfe_count, wfe_ttd, cid);
-			ipending = wfe_to_deadline_or_interrupt(cid, wfe_deadline, cpu_data_ptr, false);
-			KDBG(CPUPM_IDLE_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, wfe_deadline);
-			if (ipending == true) {
-				/* Back to machine_idle() */
-				Idle_load_context();
-			}
+	if (next_idle_short && expecting_ipi_wfe_timeout_mt > wfe_timeout) {
+		/* In this case we should WFE because a response IPI
+		 * is expected soon.
+		 */
+		wfe_timeout = expecting_ipi_wfe_timeout_mt;
+		check_cluster_recommendation = false;
+	}
+
+	if (wfe_timeout != 0) {
+		uint64_t wfe_deadline = mach_absolute_time() + wfe_timeout;
+		/* Poll issuing event-bounded WFEs until an interrupt
+		 * arrives or the WFE recommendation expires
+		 */
+		KDBG(CPUPM_IDLE_WFE | DBG_FUNC_START, ipending, cpu_data_ptr->wfe_count, wfe_timeout, !check_cluster_recommendation);
+		ipending = wfe_to_deadline_or_interrupt(cid, wfe_deadline, cpu_data_ptr, false, check_cluster_recommendation);
+		KDBG(CPUPM_IDLE_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, wfe_deadline);
+		if (ipending == true) {
+			/* Back to machine_idle() */
+			Idle_load_context();
 		}
 	}
 
@@ -531,7 +547,7 @@ cpu_idle(void)
 			 * timer FIQ arrives.
 			 */
 			KDBG(CPUPM_IDLE_TIMER_WFE | DBG_FUNC_START, ipending, cpu_data_ptr->wfe_count, ~0ULL);
-			ipending = wfe_to_deadline_or_interrupt(cid, ~0ULL, cpu_data_ptr, false);
+			ipending = wfe_to_deadline_or_interrupt(cid, ~0ULL, cpu_data_ptr, false, false);
 			KDBG(CPUPM_IDLE_TIMER_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, ~0ULL);
 			assert(ipending == true);
 		}
@@ -750,7 +766,7 @@ cpu_stack_alloc(cpu_data_t *cpu_data_ptr)
 	    VM_KERN_MEMORY_STACK);
 
 	cpu_data_ptr->intstack_top = irq_stack + PAGE_SIZE + INTSTACK_SIZE;
-	cpu_data_ptr->istackptr = cpu_data_ptr->intstack_top;
+	cpu_data_ptr->istackptr = (void *)cpu_data_ptr->intstack_top;
 
 	kmem_alloc(kernel_map, &exc_stack,
 	    EXCEPSTACK_SIZE + ptoa(2), KMA_NOFAIL | KMA_PERMANENT | KMA_ZERO |
@@ -758,7 +774,6 @@ cpu_stack_alloc(cpu_data_t *cpu_data_ptr)
 	    VM_KERN_MEMORY_STACK);
 
 	cpu_data_ptr->excepstack_top = exc_stack + PAGE_SIZE + EXCEPSTACK_SIZE;
-	cpu_data_ptr->excepstackptr = cpu_data_ptr->excepstack_top;
 }
 
 void
@@ -954,6 +969,7 @@ void
 cpu_timebase_init(boolean_t from_boot)
 {
 	cpu_data_t *cdp = getCpuDatap();
+	uint64_t timebase_offset = 0;
 
 	if (cdp->cpu_get_fiq_handler == NULL) {
 		cdp->cpu_get_fiq_handler = rtclock_timebase_func.tbd_fiq_handler;
@@ -977,12 +993,17 @@ cpu_timebase_init(boolean_t from_boot)
 		 */
 		rtclock_base_abstime = wake_abstime - ml_get_hwclock();
 	} else if (from_boot) {
+#if DEBUG || DEVELOPMENT
+		if (PE_parse_boot_argn("timebase_offset", &timebase_offset, sizeof(timebase_offset))) {
+			rtclock_base_abstime += timebase_offset;
+		}
+#endif
 		/* On initial boot, initialize time_since_reset to CNTPCT_EL0. */
 		ml_set_reset_time(ml_get_hwclock());
 	}
 
 	cdp->cpu_decrementer = 0x7FFFFFFFUL;
-	cdp->cpu_timebase = 0x0UL;
+	cdp->cpu_timebase = timebase_offset;
 	cdp->cpu_base_timebase = rtclock_base_abstime;
 }
 

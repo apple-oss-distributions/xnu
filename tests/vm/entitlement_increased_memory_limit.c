@@ -262,10 +262,10 @@ T_DECL(entitlement_increased_memory_limit_with_swap, "entitled memory limit equa
 	// Get the entitled limit
 	ret = sysctlbyname(MAX_TASK_MEM_ENTITLED, &entitled_max_task_pmem, &size_entitled_max_task_pmem, NULL, 0);
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "call sysctlbyname to get max task physical memory.");
-	// Get the dram size
+	// Get the dram size. Convert it to MB since entitled_max_task_pmem is in MB too and slight discrepancies can occur.
 	ret = sysctlbyname("hw.memsize_physical", &memsize_physical, &size_memsize_physical, NULL, 0);
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "call sysctlbyname to get max task physical memory.");
-	uint64_t entitled_max_task_pmem_bytes = (uint64_t) entitled_max_task_pmem * (1ULL << 20);
-	T_QUIET; T_ASSERT_EQ(entitled_max_task_pmem_bytes, memsize_physical, "entitled limit == dram size");
+	uint64_t memsize_physical_mb = (uint64_t) memsize_physical / (1ULL << 20);
+	T_QUIET; T_ASSERT_EQ(entitled_max_task_pmem, memsize_physical_mb, "entitled limit == dram size");
 }
 #endif /* ENTITLED */

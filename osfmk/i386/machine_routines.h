@@ -378,6 +378,9 @@ boolean_t ml_early_set_interrupts_enabled(boolean_t enable);
 boolean_t ml_at_interrupt_context(void);
 
 #ifdef XNU_KERNEL_PRIVATE
+
+bool ml_did_interrupt_userspace(void);
+
 extern boolean_t ml_is_quiescing(void);
 extern void ml_set_is_quiescing(boolean_t);
 extern uint64_t ml_get_booter_memory_size(void);
@@ -437,8 +440,6 @@ extern lbr_modes_t last_branch_enabled_modes;
 
 extern uint64_t report_phy_read_delay;
 extern uint64_t report_phy_write_delay;
-extern uint32_t report_phy_read_osbt;
-extern uint32_t report_phy_write_osbt;
 extern uint32_t phy_read_panic;
 extern uint32_t phy_write_panic;
 extern uint64_t trace_phy_read_delay;

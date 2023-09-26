@@ -247,6 +247,13 @@ pai_to_pvh(unsigned int pai)
 
 
 /**
+ * Marking a pv_head_table entry with this flag denotes that this page has
+ * been mapped into a non-coherent coprocessor address space and requires a
+ * cache flush operation once all mappings have been removed.
+ */
+#define PVH_FLAG_FLUSH_NEEDED (1ULL << 54)
+
+/**
  * Marking a pv_head_table entry with any bit in this mask denotes that this page
  * has been locked down by the PPL.  Locked down pages can't have new mappings
  * created or existing mappings removed, and all existing mappings will have been
@@ -261,7 +268,8 @@ pai_to_pvh(unsigned int pai)
  * Any change to this #define should also update the copy located in the pmap.py
  * LLDB macros file.
  */
-#define PVH_HIGH_FLAGS (PVH_FLAG_CPU | PVH_FLAG_LOCK | PVH_FLAG_EXEC | PVH_FLAG_LOCKDOWN_MASK | PVH_FLAG_HASHED)
+#define PVH_HIGH_FLAGS (PVH_FLAG_CPU | PVH_FLAG_LOCK | PVH_FLAG_EXEC | PVH_FLAG_LOCKDOWN_MASK | \
+    PVH_FLAG_HASHED | PVH_FLAG_FLUSH_NEEDED)
 
 #endif /* defined(__arm64__) */
 
@@ -1964,5 +1972,22 @@ _Static_assert(sizeof(pmap_io_filter_entry_t) == 8, "unexpected size for pmap_io
 extern pmap_io_filter_entry_t *pmap_find_io_filter_entry(pmap_paddr_t, uint64_t, const pmap_io_range_t **);
 
 extern void pmap_cpu_data_init_internal(unsigned int);
+
+/**
+ * Flush a single 16K page from noncoherent coprocessor caches.
+ *
+ * @note Nonocoherent cache flushes are only guaranteed to work if the participating coprocessor(s)
+ *       do not have any active VA translations for the page being flushed.  Since coprocessor
+ *       mappings should always be controlled by some PPL IOMMU extension, they should always
+ *       have PV list entries.  This flush should therefore be performed at a point when the PV
+ *       list is known to be either empty or at least to not contain any IOMMU entries.  For
+ *       the purposes of our security model, it is sufficient to wait for the PV list to become
+ *       empty, as we really want to protect PPL-sensitive pages from malicious/accidental
+ *       coprocessor cacheline evictions, and the PV list must be empty before a page can be
+ *       handed to the PPL.
+ *
+ * @param paddr The base physical address of the page to flush.
+ */
+extern void pmap_flush_noncoherent_page(pmap_paddr_t paddr);
 
 #endif /* _ARM_PMAP_PMAP_DATA_H_ */

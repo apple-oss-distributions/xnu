@@ -113,6 +113,7 @@
 
 #include <kern/assert.h>
 #include <sys/resource.h>
+#include <sys/resource_private.h>
 #include <sys/priv.h>
 #include <IOKit/IOBSD.h>
 
@@ -133,6 +134,8 @@ static int do_background_proc(struct proc *curp, struct proc *targetp, int prior
 static int set_gpudeny_proc(struct proc *curp, struct proc *targetp, int priority);
 static int proc_set_darwin_role(proc_t curp, proc_t targetp, int priority);
 static int proc_get_darwin_role(proc_t curp, proc_t targetp, int *priority);
+static int proc_set_game_mode(proc_t targetp, int priority);
+static int proc_get_game_mode(proc_t targetp, int *priority);
 static int get_background_proc(struct proc *curp, struct proc *targetp, int *priority);
 
 int fill_task_rusage(task_t task, rusage_info_current *ri);
@@ -299,6 +302,28 @@ getpriority(struct proc *curp, struct getpriority_args *uap, int32_t *retval)
 		}
 
 		error = proc_get_darwin_role(curp, p, &low);
+
+		if (refheld) {
+			proc_rele(p);
+		}
+		if (error) {
+			return error;
+		}
+		break;
+
+	case PRIO_DARWIN_GAME_MODE:
+		if (uap->who == 0) {
+			p = curp;
+		} else {
+			p = proc_find(uap->who);
+			if (p == PROC_NULL) {
+				break;
+			}
+			refheld = 1;
+		}
+
+
+		error = proc_get_game_mode(p, &low);
 
 		if (refheld) {
 			proc_rele(p);
@@ -511,6 +536,27 @@ setpriority(struct proc *curp, struct setpriority_args *uap, int32_t *retval)
 		break;
 	}
 
+	case PRIO_DARWIN_GAME_MODE: {
+		if (uap->who == 0) {
+			p = curp;
+		} else {
+			p = proc_find(uap->who);
+			if (p == PROC_NULL) {
+				break;
+			}
+			refheld = 1;
+		}
+
+
+		error = proc_set_game_mode(p, uap->prio);
+
+		found++;
+		if (refheld != 0) {
+			proc_rele(p);
+		}
+		break;
+	}
+
 	default:
 		return EINVAL;
 	}
@@ -709,6 +755,87 @@ out:
 	kauth_cred_unref(&target_cred);
 	return error;
 }
+
+#define SET_GAME_MODE_ENTITLEMENT "com.apple.private.set-game-mode"
+
+static int
+proc_set_game_mode(proc_t targetp, int priority)
+{
+	int error = 0;
+
+	kauth_cred_t ucred, target_cred;
+
+	ucred = kauth_cred_get();
+	target_cred = kauth_cred_proc_ref(targetp);
+
+	boolean_t entitled = FALSE;
+	entitled = IOCurrentTaskHasEntitlement(SET_GAME_MODE_ENTITLEMENT);
+	if (!entitled) {
+		error = EPERM;
+		goto out;
+	}
+
+	/* Even with entitlement, non-root is only alllowed to set same-user */
+	if (!kauth_cred_issuser(ucred) &&
+	    kauth_cred_getuid(ucred) != kauth_cred_getuid(target_cred)) {
+		error = EPERM;
+		goto out;
+	}
+
+	switch (priority) {
+	case PRIO_DARWIN_GAME_MODE_OFF:
+		task_set_game_mode(proc_task(targetp), false);
+		break;
+	case PRIO_DARWIN_GAME_MODE_ON:
+		task_set_game_mode(proc_task(targetp), true);
+		break;
+	default:
+		error = EINVAL;
+		goto out;
+	}
+
+out:
+	kauth_cred_unref(&target_cred);
+	return error;
+}
+
+static int
+proc_get_game_mode(proc_t targetp, int *priority)
+{
+	int error = 0;
+
+	kauth_cred_t ucred, target_cred;
+
+	ucred = kauth_cred_get();
+	target_cred = kauth_cred_proc_ref(targetp);
+
+	boolean_t entitled = FALSE;
+	entitled = IOCurrentTaskHasEntitlement(SET_GAME_MODE_ENTITLEMENT);
+
+	/* Root is allowed to get without entitlement */
+	if (!kauth_cred_issuser(ucred) && !entitled) {
+		error = EPERM;
+		goto out;
+	}
+
+	/* Even with entitlement, non-root is only alllowed to see same-user */
+	if (!kauth_cred_issuser(ucred) &&
+	    kauth_cred_getuid(ucred) != kauth_cred_getuid(target_cred)) {
+		error = EPERM;
+		goto out;
+	}
+
+	if (task_get_game_mode(proc_task(targetp))) {
+		*priority = PRIO_DARWIN_GAME_MODE_ON;
+	} else {
+		*priority = PRIO_DARWIN_GAME_MODE_OFF;
+	}
+
+out:
+	kauth_cred_unref(&target_cred);
+	return error;
+}
+
 
 
 static int
@@ -1407,8 +1534,10 @@ update_rusage_info_child(struct rusage_info_child *ri, rusage_info_current *ri_c
 }
 
 static void
-proc_limit_free(void *plimit)
+proc_limit_free(smr_node_t node)
 {
+	struct plimit *plimit = __container_of(node, struct plimit, pl_node);
+
 	zfree(plimit_zone, plimit);
 }
 
@@ -1416,7 +1545,7 @@ static void
 proc_limit_release(struct plimit *plimit)
 {
 	if (os_ref_release(&plimit->pl_refcnt) == 0) {
-		smr_global_retire(plimit, sizeof(*plimit), proc_limit_free);
+		smr_proc_task_call(&plimit->pl_node, sizeof(*plimit), proc_limit_free);
 	}
 }
 
@@ -1431,9 +1560,9 @@ proc_limitgetcur(proc_t p, int which)
 	assert(p);
 	assert(which < RLIM_NLIMITS);
 
-	smr_global_enter();
+	smr_proc_task_enter();
 	rlim_cur = smr_entered_load(&p->p_limit)->pl_rlimit[which].rlim_cur;
-	smr_global_leave();
+	smr_proc_task_leave();
 
 	return rlim_cur;
 }
@@ -1469,9 +1598,9 @@ proc_limitget(proc_t p, int which)
 
 	assert(which < RLIM_NLIMITS);
 
-	smr_global_enter();
+	smr_proc_task_enter();
 	lim = smr_entered_load(&p->p_limit)->pl_rlimit[which];
-	smr_global_leave();
+	smr_proc_task_leave();
 
 	return lim;
 }
@@ -1481,10 +1610,10 @@ proc_limitfork(proc_t parent, proc_t child)
 {
 	struct plimit *plim;
 
-	smr_global_enter();
+	smr_proc_task_enter();
 	plim = smr_entered_load(&parent->p_limit);
 	os_ref_retain(&plim->pl_refcnt);
-	smr_global_leave();
+	smr_proc_task_leave();
 
 	smr_init_store(&child->p_limit, plim);
 }
@@ -1592,6 +1721,7 @@ iopolicysys_vfs_allow_lowspace_writes(struct proc *p, int cmd, int scope, int po
 static int
 iopolicysys_vfs_disallow_rw_for_o_evtonly(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
 static int iopolicysys_vfs_altlink(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
+static int iopolicysys_vfs_nocache_write_fs_blksize(struct proc *p, int cmd, int scope, int policy, struct _iopol_param_t *iop_param);
 
 /*
  * iopolicysys
@@ -1688,6 +1818,12 @@ iopolicysys(struct proc *p, struct iopolicysys_args *uap, int32_t *retval)
 		break;
 	case IOPOL_TYPE_VFS_ALTLINK:
 		error = iopolicysys_vfs_altlink(p, uap->cmd, iop_param.iop_scope, iop_param.iop_policy, &iop_param);
+		if (error) {
+			goto out;
+		}
+		break;
+	case IOPOL_TYPE_VFS_NOCACHE_WRITE_FS_BLKSIZE:
+		error = iopolicysys_vfs_nocache_write_fs_blksize(p, uap->cmd, iop_param.iop_scope, iop_param.iop_policy, &iop_param);
 		if (error) {
 			goto out;
 		}
@@ -2507,6 +2643,50 @@ iopolicysys_vfs_altlink(struct proc *p, int cmd, int scope, int policy,
 	/* Once set, we don't allow the process to clear it. */
 	if (policy == IOPOL_VFS_ALTLINK_ENABLED) {
 		os_atomic_or(&p->p_vfs_iopolicy, P_VFS_IOPOLICY_ALTLINK, relaxed);
+		return 0;
+	}
+
+	return EINVAL;
+}
+
+static int
+iopolicysys_vfs_nocache_write_fs_blksize(struct proc *p, int cmd, int scope, int policy,
+    struct _iopol_param_t *iop_param)
+{
+	thread_t thread;
+
+	switch (scope) {
+	case IOPOL_SCOPE_THREAD:
+		thread = current_thread();
+		break;
+	case IOPOL_SCOPE_PROCESS:
+		thread = THREAD_NULL;
+		break;
+	default:
+		return EINVAL;
+	}
+
+	if (cmd == IOPOL_CMD_GET) {
+		if (thread != THREAD_NULL) {
+			struct uthread *ut = get_bsdthread_info(thread);
+			policy = ut->uu_flag & UT_FS_BLKSIZE_NOCACHE_WRITES ?
+			    IOPOL_VFS_NOCACHE_WRITE_FS_BLKSIZE_ON : IOPOL_VFS_NOCACHE_WRITE_FS_BLKSIZE_DEFAULT;
+		} else {
+			policy = (os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE) ?
+			    IOPOL_VFS_NOCACHE_WRITE_FS_BLKSIZE_ON : IOPOL_VFS_NOCACHE_WRITE_FS_BLKSIZE_DEFAULT;
+		}
+		iop_param->iop_policy = policy;
+		return 0;
+	}
+
+	/* Once set, we don't allow the process or thread to clear it. */
+	if ((cmd == IOPOL_CMD_SET) && (policy == IOPOL_VFS_NOCACHE_WRITE_FS_BLKSIZE_ON)) {
+		if (thread != THREAD_NULL) {
+			struct uthread *ut = get_bsdthread_info(thread);
+			ut->uu_flag |= UT_FS_BLKSIZE_NOCACHE_WRITES;
+		} else {
+			os_atomic_or(&p->p_vfs_iopolicy, P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE, relaxed);
+		}
 		return 0;
 	}
 

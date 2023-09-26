@@ -174,6 +174,7 @@
 
 #include <pthread/workqueue_trace.h>
 
+
 LCK_GRP_DECLARE(thread_lck_grp, "thread");
 
 static SECURITY_READ_ONLY_LATE(zone_t) thread_zone;
@@ -277,7 +278,8 @@ extern void kdebug_proc_name_args(struct proc *proc, long args[static 4]);
 #endif /* MACH_BSD */
 
 extern bool bsdthread_part_of_cooperative_workqueue(struct uthread *uth);
-extern int disable_exc_resource;
+extern bool disable_exc_resource;
+extern bool disable_exc_resource_during_audio;
 extern int audio_active;
 extern int debug_task;
 int thread_max = CONFIG_THREAD_MAX;     /* Max number of threads */
@@ -295,9 +297,6 @@ void jetsam_on_ledger_cpulimit_exceeded(void);
 
 extern int task_thread_soft_limit;
 
-#if DEVELOPMENT || DEBUG
-extern int exc_resource_threads_enabled;
-#endif /* DEVELOPMENT || DEBUG */
 
 /*
  * Level (in terms of percentage of the limit) at which the CPU usage monitor triggers telemetry.
@@ -311,7 +310,10 @@ extern int exc_resource_threads_enabled;
 static TUNABLE(uint8_t, cpumon_ustackshots_trigger_pct,
     "cpumon_ustackshots_trigger_pct", CPUMON_USTACKSHOTS_TRIGGER_DEFAULT_PCT);
 void __attribute__((noinline)) SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU(void);
+
 #if DEVELOPMENT || DEBUG
+TUNABLE_WRITEABLE(int, exc_resource_threads_enabled, "exc_resource_threads_enabled", 1);
+
 void __attribute__((noinline)) SENDING_NOTIFICATION__TASK_HAS_TOO_MANY_THREADS(task_t, int);
 #endif /* DEVELOPMENT || DEBUG */
 
@@ -644,6 +646,7 @@ thread_terminate_self(void)
 		}
 		task_unlock(task);
 	}
+
 
 	s = splsched();
 	thread_lock(thread);
@@ -1251,8 +1254,6 @@ thread_daemon_init(void)
 	thread_deallocate_daemon_register_queue(&thread_deallocate_queue,
 	    thread_deallocate_queue_invoke);
 
-	smr_register_mpsc_queue();
-
 	ipc_object_deallocate_register_queue();
 
 	simple_lock_init(&crashed_threads_lock, 0);
@@ -1744,7 +1745,9 @@ thread_create_waiting_internal(
 	} else if (options & TH_OPTION_MAINTHREAD) {
 		wait_interrupt = THREAD_UNINT;
 	}
-	thread_start_in_assert_wait(thread, event, wait_interrupt);
+	thread_start_in_assert_wait(thread,
+	    assert_wait_queue(event), CAST_EVENT64_T(event),
+	    wait_interrupt);
 	thread_mtx_unlock(thread);
 
 	task_unlock(task);
@@ -2655,14 +2658,14 @@ SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU(void)
 	if (send_exc_resource) {
 		if (disable_exc_resource) {
 			printf("process %s[%d] thread %llu caught burning CPU! "
-			    "EXC_RESOURCE%s supressed by a boot-arg\n",
+			    "EXC_RESOURCE%s suppressed by a boot-arg\n",
 			    procname, pid, tid, fatal ? " (and termination)" : "");
 			return;
 		}
 
-		if (audio_active) {
+		if (disable_exc_resource_during_audio && audio_active) {
 			printf("process %s[%d] thread %llu caught burning CPU! "
-			    "EXC_RESOURCE & termination supressed due to audio playback\n",
+			    "EXC_RESOURCE & termination suppressed due to audio playback\n",
 			    procname, pid, tid);
 			return;
 		}
@@ -2696,6 +2699,7 @@ SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU(void)
 bool os_variant_has_internal_diagnostics(const char *subsystem);
 
 #if DEVELOPMENT || DEBUG
+
 void __attribute__((noinline))
 SENDING_NOTIFICATION__TASK_HAS_TOO_MANY_THREADS(task_t task, int thread_count)
 {
@@ -2712,31 +2716,39 @@ SENDING_NOTIFICATION__TASK_HAS_TOO_MANY_THREADS(task_t task, int thread_count)
 
 	proc_name(pid, procname, sizeof(procname));
 
+	/*
+	 * Skip all checks for testing when exc_resource_threads_enabled is overriden
+	 */
+	if (exc_resource_threads_enabled == 2) {
+		goto skip_checks;
+	}
+
 	if (disable_exc_resource) {
 		printf("process %s[%d] crossed thread count high watermark (%d), EXC_RESOURCE "
-		    "supressed by a boot-arg.\n", procname, pid, thread_count);
+		    "suppressed by a boot-arg.\n", procname, pid, thread_count);
 		return;
 	}
 
 	if (!os_variant_has_internal_diagnostics("com.apple.xnu")) {
 		printf("process %s[%d] crossed thread count high watermark (%d), EXC_RESOURCE "
-		    "supressed, internal diagnostics disabled.\n", procname, pid, thread_count);
+		    "suppressed, internal diagnostics disabled.\n", procname, pid, thread_count);
 		return;
 	}
 
-	if (audio_active) {
+	if (disable_exc_resource_during_audio && audio_active) {
 		printf("process %s[%d] crossed thread count high watermark (%d), EXC_RESOURCE "
-		    "supressed due to audio playback.\n", procname, pid, thread_count);
+		    "suppressed due to audio playback.\n", procname, pid, thread_count);
 		return;
 	}
 
 	if (!exc_via_corpse_forking) {
 		printf("process %s[%d] crossed thread count high watermark (%d), EXC_RESOURCE "
-		    "supressed due to corpse forking being disabled.\n", procname, pid,
+		    "suppressed due to corpse forking being disabled.\n", procname, pid,
 		    thread_count);
 		return;
 	}
 
+skip_checks:
 	printf("process %s[%d] crossed thread count high watermark (%d), sending "
 	    "EXC_RESOURCE\n", procname, pid, thread_count);
 
@@ -3748,7 +3760,7 @@ void
 thread_set_thread_name(thread_t th, const char* name)
 {
 	if (th && name) {
-		bsd_setthreadname(get_bsdthread_info(th), name);
+		bsd_setthreadname(get_bsdthread_info(th), thread_tid(th), name);
 	}
 }
 
@@ -3802,6 +3814,10 @@ thread_get_ipc_propagate_attr(thread_t thread, struct thread_attr_for_ipc_propag
 
 	iotier = proc_get_effective_thread_policy(thread, TASK_POLICY_IO);
 	qos = proc_get_effective_thread_policy(thread, TASK_POLICY_QOS);
+
+	if (!qos) {
+		qos = thread_user_promotion_qos_for_pri(thread->base_pri);
+	}
 
 	attr->tafip_iotier = iotier;
 	attr->tafip_qos = qos;

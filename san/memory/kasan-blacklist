@@ -20,6 +20,8 @@ type:linker_set_entry
 type:struct startup_entry
 type:startup_entry
 type:struct kalloc_type_view
+type:struct kernel_brk_descriptor
+type:kernel_brk_descriptor
 
 # Exclude per-cpu data structures the assembly accesses
 type:vm_statistics64
@@ -54,4 +56,3 @@ fun:_ZL18IOTrackingLeakScanPv
 src:./osfmk/kern/btlog.c
 # XXX: could this be relaxed since fakestack is reentrant?
 src:./osfmk/kern/zalloc.c
-

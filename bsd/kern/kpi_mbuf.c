@@ -39,6 +39,8 @@
 #include <netinet/in.h>
 #include <netinet/ip_var.h>
 
+#include <os/log.h>
+
 #include "net/net_str_id.h"
 
 /* mbuf flags visible to KPI clients; do not add private flags here */
@@ -1036,7 +1038,7 @@ mbuf_tag_allocate(
 	}
 
 	/* Make sure this mtag hasn't already been allocated */
-	tag = m_tag_locate(mbuf, id, type, NULL);
+	tag = m_tag_locate(mbuf, id, type);
 	if (tag != NULL) {
 		return EEXIST;
 	}
@@ -1049,7 +1051,7 @@ mbuf_tag_allocate(
 
 	/* Attach the mtag and set *data_p */
 	m_tag_prepend(mbuf, tag);
-	*data_p = tag + 1;
+	*data_p = tag->m_tag_data;
 
 	return 0;
 }
@@ -1082,14 +1084,14 @@ mbuf_tag_find(
 	}
 
 	/* Locate an mtag */
-	tag = m_tag_locate(mbuf, id, type, NULL);
+	tag = m_tag_locate(mbuf, id, type);
 	if (tag == NULL) {
 		return ENOENT;
 	}
 
 	/* Copy out the pointer to the data and the lenght value */
 	*length = tag->m_tag_len;
-	*data_p = tag + 1;
+	*data_p = tag->m_tag_data;
 
 	return 0;
 }
@@ -1111,7 +1113,7 @@ mbuf_tag_free(
 		return;
 	}
 
-	tag = m_tag_locate(mbuf, id, type, NULL);
+	tag = m_tag_locate(mbuf, id, type);
 	if (tag == NULL) {
 		return;
 	}
@@ -1126,7 +1128,7 @@ mbuf_tag_free(
  * tag-related (m_taghdr + m_tag) as well m_drvaux_tag structs.
  */
 #define MBUF_DRVAUX_MAXLEN                                              \
-	P2ROUNDDOWN(MLEN - sizeof (struct m_taghdr) -                   \
+	P2ROUNDDOWN(MLEN -                                              \
 	M_TAG_ALIGN(sizeof (struct m_drvaux_tag)), sizeof (uint64_t))
 
 errno_t
@@ -1147,7 +1149,7 @@ mbuf_add_drvaux(mbuf_t mbuf, mbuf_how_t how, u_int32_t family,
 
 	/* Check if one is already associated */
 	if ((tag = m_tag_locate(mbuf, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_DRVAUX, NULL)) != NULL) {
+	    KERNEL_TAG_TYPE_DRVAUX)) != NULL) {
 		return EEXIST;
 	}
 
@@ -1157,7 +1159,7 @@ mbuf_add_drvaux(mbuf_t mbuf, mbuf_how_t how, u_int32_t family,
 		return (how == MBUF_WAITOK) ? ENOMEM : EWOULDBLOCK;
 	}
 
-	p = (struct m_drvaux_tag *)(tag + 1);
+	p = (struct m_drvaux_tag *)(tag->m_tag_data);
 	p->da_family = family;
 	p->da_subfamily = subfamily;
 	p->da_length = (int)length;
@@ -1186,14 +1188,14 @@ mbuf_find_drvaux(mbuf_t mbuf, u_int32_t *family_p, u_int32_t *subfamily_p,
 	*data_p = NULL;
 
 	if ((tag = m_tag_locate(mbuf, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_DRVAUX, NULL)) == NULL) {
+	    KERNEL_TAG_TYPE_DRVAUX)) == NULL) {
 		return ENOENT;
 	}
 
 	/* Must be at least size of m_drvaux_tag */
 	VERIFY(tag->m_tag_len >= sizeof(*p));
 
-	p = (struct m_drvaux_tag *)(tag + 1);
+	p = (struct m_drvaux_tag *)(tag->m_tag_data);
 	VERIFY(p->da_length > 0 && p->da_length <= MBUF_DRVAUX_MAXLEN);
 
 	if (family_p != NULL) {
@@ -1221,7 +1223,7 @@ mbuf_del_drvaux(mbuf_t mbuf)
 	}
 
 	if ((tag = m_tag_locate(mbuf, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_DRVAUX, NULL)) != NULL) {
+	    KERNEL_TAG_TYPE_DRVAUX)) != NULL) {
 		m_tag_delete(mbuf, tag);
 	}
 }
@@ -1253,25 +1255,28 @@ errno_t
 mbuf_allocpacket(mbuf_how_t how, size_t packetlen, unsigned int *maxchunks,
     mbuf_t *mbuf)
 {
-	errno_t error;
+	errno_t error = 0;
 	struct mbuf *m;
 	unsigned int numpkts = 1;
-	unsigned int numchunks = maxchunks ? *maxchunks : 0;
+	unsigned int numchunks = maxchunks != NULL ? *maxchunks : 0;
 
 	if (packetlen == 0) {
 		error = EINVAL;
+		os_log(OS_LOG_DEFAULT, "mbuf_allocpacket %d", __LINE__);
 		goto out;
 	}
 	m = m_allocpacket_internal(&numpkts, packetlen,
-	    maxchunks ? &numchunks : NULL, how, 1, 0);
-	if (m == 0) {
-		if (maxchunks && *maxchunks && numchunks > *maxchunks) {
+	    maxchunks != NULL ? &numchunks : NULL, how, 1, 0);
+	if (m == NULL) {
+		if (maxchunks != NULL && *maxchunks && numchunks > *maxchunks) {
 			error = ENOBUFS;
+			os_log(OS_LOG_DEFAULT, "mbuf_allocpacket %d", __LINE__);
 		} else {
 			error = ENOMEM;
+			os_log(OS_LOG_DEFAULT, "mbuf_allocpacket %d", __LINE__);
 		}
 	} else {
-		if (maxchunks) {
+		if (maxchunks != NULL) {
 			*maxchunks = numchunks;
 		}
 		error = 0;
@@ -1285,7 +1290,7 @@ errno_t
 mbuf_allocpacket_list(unsigned int numpkts, mbuf_how_t how, size_t packetlen,
     unsigned int *maxchunks, mbuf_t *mbuf)
 {
-	errno_t error;
+	errno_t error = 0;
 	struct mbuf *m;
 	unsigned int numchunks = maxchunks ? *maxchunks : 0;
 
@@ -1298,15 +1303,15 @@ mbuf_allocpacket_list(unsigned int numpkts, mbuf_how_t how, size_t packetlen,
 		goto out;
 	}
 	m = m_allocpacket_internal(&numpkts, packetlen,
-	    maxchunks ? &numchunks : NULL, how, 1, 0);
-	if (m == 0) {
-		if (maxchunks && *maxchunks && numchunks > *maxchunks) {
+	    maxchunks != NULL ? &numchunks : NULL, how, 1, 0);
+	if (m == NULL) {
+		if (maxchunks != NULL && *maxchunks && numchunks > *maxchunks) {
 			error = ENOBUFS;
 		} else {
 			error = ENOMEM;
 		}
 	} else {
-		if (maxchunks) {
+		if (maxchunks != NULL) {
 			*maxchunks = numchunks;
 		}
 		error = 0;
@@ -1443,6 +1448,12 @@ u_int32_t
 mbuf_get_minclsize(void)
 {
 	return MHLEN + MLEN;
+}
+
+u_int32_t
+mbuf_get_msize(void)
+{
+	return _MSIZE;
 }
 
 u_int32_t
@@ -1910,10 +1921,10 @@ mbuf_set_timestamp_requested(mbuf_t m, uintptr_t *pktid,
 		m->m_pkthdr.pkt_compl_callbacks = 0;
 		m->m_pkthdr.pkt_flags |= PKTF_TX_COMPL_TS_REQ;
 		m->m_pkthdr.pkt_compl_context =
-		    atomic_add_32_ov(&mbuf_tx_compl_index, 1);
+		    os_atomic_inc_orig(&mbuf_tx_compl_index, relaxed);
 
 #if (DEBUG || DEVELOPMENT)
-		atomic_add_64(&mbuf_tx_compl_requested, 1);
+		os_atomic_inc(&mbuf_tx_compl_requested, relaxed);
 #endif /* (DEBUG || DEVELOPMENT) */
 	}
 	m->m_pkthdr.pkt_compl_callbacks |= (1 << i);
@@ -1971,9 +1982,9 @@ m_do_tx_compl_callback(struct mbuf *m, struct ifnet *ifp)
 	}
 #if (DEBUG || DEVELOPMENT)
 	if (m->m_pkthdr.pkt_compl_callbacks != 0) {
-		atomic_add_64(&mbuf_tx_compl_callbacks, 1);
+		os_atomic_inc(&mbuf_tx_compl_callbacks, relaxed);
 		if (ifp == NULL) {
-			atomic_add_64(&mbuf_tx_compl_aborted, 1);
+			os_atomic_inc(&mbuf_tx_compl_aborted, relaxed);
 		}
 	}
 #endif /* (DEBUG || DEVELOPMENT) */

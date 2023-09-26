@@ -760,7 +760,7 @@ nx_netif_mit_stats(struct __kern_channel_ring *kr, uint64_t pkts,
 
 	ASSERT(mit != NULL && !(mit->mit_flags & NETIF_MITF_SIMPLE));
 
-	if ((atomic_bitset_32_ov(&mit->mit_flags, NETIF_MITF_SAMPLING) &
+	if ((os_atomic_or_orig(&mit->mit_flags, NETIF_MITF_SAMPLING, relaxed) &
 	    NETIF_MITF_SAMPLING) != 0) {
 		return;
 	}
@@ -870,7 +870,7 @@ nx_netif_mit_stats(struct __kern_channel_ring *kr, uint64_t pkts,
 	}
 
 done:
-	atomic_bitclear_32(&mit->mit_flags, NETIF_MITF_SAMPLING);
+	os_atomic_andnot(&mit->mit_flags, NETIF_MITF_SAMPLING, relaxed);
 }
 
 #if (DEVELOPMENT || DEBUG)

@@ -12,6 +12,15 @@ from utils import *
 
 from mbufdefines import *
 import xnudefines
+import kmemory
+
+def MbufZoneByName(name):
+    for i in range(1, int(kern.GetGlobalVariable('num_zones'))):
+        z = addressof(kern.globals.zone_array[i])
+        zs = addressof(kern.globals.zone_security_array[i])
+        if ZoneName(z, zs) == name:
+            return (z, zs)
+    return None
 
 # Macro: mbuf_stat
 @lldb_command('mbuf_stat')
@@ -25,60 +34,127 @@ def MBufStat(cmd_args=None):
     entry_format = "{0: <16s} {1: >8d} {2: >8d} {3:>7d} / {4:<6d} {5: >8d} {6: >12d} {7: >8d} {8: >8d} {9: >8d} {10: >8d}"
     num_items = sizeof(kern.globals.mbuf_table) // sizeof(kern.globals.mbuf_table[0])
     ncpus = int(kern.globals.ncpu)
+    mb_uses_mcache = int(kern.globals.mb_uses_mcache)
     for i in range(num_items):
         mbuf = kern.globals.mbuf_table[i]
         mcs = Cast(mbuf.mtbl_stats, 'mb_class_stat_t *')
-        mc = mbuf.mtbl_cache
-        total = 0
-        total += int(mc.mc_full.bl_total) * int(mc.mc_cpu[0].cc_bktsize)
-        ccp_arr = mc.mc_cpu
-        for i in range(ncpus):
-            ccp = ccp_arr[i]
-            if int(ccp.cc_objs) > 0:
-                total += int(ccp.cc_objs)
-            if int(ccp.cc_pobjs) > 0:
-                total += int(ccp.cc_pobjs)
-        print(entry_format.format(mcs.mbcl_cname, mcs.mbcl_total,  total,
-                                  mcs.mbcl_infree, mcs.mbcl_slab_cnt,
-                                  (mcs.mbcl_total - total - mcs.mbcl_infree),
-                                  mcs.mbcl_fail_cnt, mbuf.mtbl_cache.mc_waiter_cnt,
-                                  mcs.mbcl_notified, mcs.mbcl_purge_cnt,
-                                  mbuf.mtbl_maxlimit))
+        if mb_uses_mcache == 0:
+            cname = str(mcs.mbcl_cname)
+            if cname == "mbuf":
+                zone = MbufZoneByName("mbuf")
+            elif cname == "cl":
+                zone = MbufZoneByName("data.mbuf.cluster.2k")
+            elif cname == "bigcl":
+                zone = MbufZoneByName("data.mbuf.cluster.4k")
+            elif cname == "16kcl":
+                zone = MbufZoneByName("data.mbuf.cluster.16k")
+            elif cname == "mbuf_cl":
+                zone = MbufZoneByName("mbuf.composite.2k")
+            elif cname == "mbuf_bigcl":
+                zone = MbufZoneByName("mbuf.composite.4k")
+            elif cname == "mbuf_16kcl":
+                zone = MbufZoneByName("mbuf.composite.16k")
+            zone_stats = GetZone(zone[0], zone[1], [], [])
+            print(entry_format.format(cname,
+                                      int(zone_stats['size'] / mcs.mbcl_size),
+                                      zone_stats['cache_element_count'],
+                                      zone_stats['free_element_count'],
+                                      0,
+                                      int(zone_stats['used_size'] / mcs.mbcl_size),
+                                      zone_stats['alloc_fail_count'],
+                                      0, 0, 0,
+                                      mbuf.mtbl_maxlimit))
+
+        else:
+            mc = mbuf.mtbl_cache
+            total = 0
+            total += int(mc.mc_full.bl_total) * int(mc.mc_cpu[0].cc_bktsize)
+            ccp_arr = mc.mc_cpu
+            for i in range(ncpus):
+                ccp = ccp_arr[i]
+                if int(ccp.cc_objs) > 0:
+                    total += int(ccp.cc_objs)
+                if int(ccp.cc_pobjs) > 0:
+                    total += int(ccp.cc_pobjs)
+            print(entry_format.format(mcs.mbcl_cname, mcs.mbcl_total,  total,
+                                      mcs.mbcl_infree, mcs.mbcl_slab_cnt,
+                                      (mcs.mbcl_total - total - mcs.mbcl_infree),
+                                      mcs.mbcl_fail_cnt, mbuf.mtbl_cache.mc_waiter_cnt,
+                                      mcs.mbcl_notified, mcs.mbcl_purge_cnt,
+                                      mbuf.mtbl_maxlimit))
 # EndMacro: mbuf_stat
 
 def DumpMbufData(mp, count):
-    mdata = mp.m_hdr.mh_data
-    mlen = mp.m_hdr.mh_len
-    flags = mp.m_hdr.mh_flags
-    if flags & M_EXT:
-        mdata = mp.M_dat.MH.MH_dat.MH_ext.ext_buf
-    if (count > mlen):
-        count = mlen
-    cmd = "memory read -force -size 1 -count {0:d} 0x{1:x}".format(count, mdata)
-    print(lldb_run_command(cmd))
-
-def DecodeMbufData(mp):
-    import scapy.all
-    err = lldb.SBError()
-    full_buf = b''
-    while mp:
+    if kern.globals.mb_uses_mcache == 1:
         mdata = mp.m_hdr.mh_data
         mlen = mp.m_hdr.mh_len
         flags = mp.m_hdr.mh_flags
         if flags & M_EXT:
             mdata = mp.M_dat.MH.MH_dat.MH_ext.ext_buf
-        addr = mdata.GetSBValue().GetValueAsAddress()
-        buf = LazyTarget.GetProcess().ReadMemory(addr, unsigned(mlen), err)
-        full_buf += buf
-        if flags & M_PKTHDR:
+    else:
+        mdata = mp.M_hdr_common.M_hdr.mh_data
+        mlen = mp.M_hdr_common.M_hdr.mh_len
+        flags = mp.M_hdr_common.M_hdr.mh_flags
+        if flags & M_EXT:
+            mdata = mp.M_hdr_common.M_ext.ext_buf
+    if (count > mlen):
+        count = mlen
+    cmd = "memory read -force -size 1 -count {0:d} 0x{1:x}".format(count, mdata)
+    print(lldb_run_command(cmd))
+
+def DecodeMbufData(mp, decode_as="ether"):
+    import scapy.all
+    err = lldb.SBError()
+    while True:
+        full_buf = b''
+        while True:
+            if kern.globals.mb_uses_mcache == 1:
+                mdata = mp.m_hdr.mh_data
+                mlen = mp.m_hdr.mh_len
+                flags = mp.m_hdr.mh_flags
+                if flags & M_EXT:
+                    mdata = mp.M_dat.MH.MH_dat.MH_ext.ext_buf
+                mnext = mp.m_hdr.mh_next
+            else:
+                mdata = mp.M_hdr_common.M_hdr.mh_data
+                mlen = mp.M_hdr_common.M_hdr.mh_len
+                flags = mp.M_hdr_common.M_hdr.mh_flags
+                if flags & M_EXT:
+                    mdata = mp.M_hdr_common.M_ext.ext_buf
+                mnext = mp.M_hdr_common.M_hdr.mh_next
+
+            addr = mdata.GetSBValue().GetValueAsAddress()
+            buf = LazyTarget.GetProcess().ReadMemory(addr, mlen, err)
+            full_buf += buf
+            if mnext == 0:
+                try:
+                    if decode_as == "ether":
+                        pkt = scapy.layers.l2.Ether(full_buf)
+                    elif decode_as == "ip":
+                        pkt = scapy.layers.inet.IP(full_buf)
+                    elif decode_as == "ip6":
+                        pkt = scapy.layers.inet6.IPv6(full_buf)
+                    elif decode_as == "tcp":
+                        pkt = scapy.layers.inet.TCP(full_buf)
+                    elif decode_as == "udp":
+                        pkt = scapy.layers.inet.UDP(full_buf)
+                    else:
+                        print("invalid decoder" + decode_as)
+                        return
+                    pkt.show()
+                    break
+                except KeyboardInterrupt:
+                    raise KeyboardInterrupt
+                except:
+                    break
+            mp = mnext
+        if kern.globals.mb_uses_mcache == 1:
             mp = mp.m_hdr.mh_nextpkt
         else:
-            mp = mp.m_hdr.mh_next
-    try:
-        pkt = scapy.layers.l2.Ether(full_buf)
-        pkt.show()
-    except:
-        pass
+            mp = mp.M_hdr_common.M_hdr.mh_nextpkt
+        if mp is None:
+            break
+
 
 # Macro: mbuf_decode
 @lldb_command('mbuf_decode', '')
@@ -87,10 +163,14 @@ def MbufDecode(cmd_args=None, cmd_options={}):
         Usage: mbuf_decode <mbuf address>
     """
     if cmd_args == None or len(cmd_args) < 1:
-        print("usage: mbuf_decode <address>")
+        print("usage: mbuf_decode <address> [decode_as]")
         return
     mp = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
-    DecodeMbufData(mp)
+    if len(cmd_args) > 1:
+        decode_as = cmd_args[1]
+        DecodeMbufData(mp, decode_as)
+    else:
+        DecodeMbufData(mp)
 # EndMacro: mbuf_decode
 
 # Macro: mbuf_dumpdata
@@ -103,27 +183,43 @@ def MbufDumpData(cmd_args=None, cmd_options={}):
         print(MbufDumpData.__doc__)
         return
     mp = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
-    mdata = mp.m_hdr.mh_data
+    if kern.globals.mb_uses_mcache == 1:
+        mdata = mp.m_hdr.mh_data
+        mhlen = mp.m_hdr.mh_len
+    else:
+        mdata = mp.M_hdr_common.M_hdr.mh_data
+        mhlen = mp.M_hdr_common.M_hdr.mh_len
     mlen = 0
     if "-C" in cmd_options:
         mlen = ArgumentStringToInt(cmd_options["-C"])
-        if (mlen > mp.m_hdr.mh_len):
-            mlen = mp.m_hdr.mh_len
+        if (mlen > mhlen):
+            mlen = mhlen
     else:
-        mlen = mp.m_hdr.mh_len
+        mlen = mhlen
     DumpMbufData(mp, mlen)
 # EndMacro: mbuf_dumpdata
 
 def ShowMbuf(prefix, mp, count, total, dump_data_len):
     out_string = ""
+    mca = ""
+    if kern.globals.mb_uses_mcache == 1:
+        mhlen = mp.m_hdr.mh_len
+        mhtype = mp.m_hdr.mh_type
+        mhflags = mp.m_hdr.mh_flags
+        if kern.globals.mclaudit != 0:
+            mca += GetMbufBuf2Mca(mp) + ", "
+    else:
+        mhlen = mp.M_hdr_common.M_hdr.mh_len
+        mhtype = mp.M_hdr_common.M_hdr.mh_type
+        mhflags = mp.M_hdr_common.M_hdr.mh_flags
     mbuf_walk_format = "{0:s}{1:d} 0x{2:x} [len {3:d}, type {4:d}, "
-    out_string += mbuf_walk_format.format(prefix, count[0], mp, mp.m_hdr.mh_len, mp.m_hdr.mh_type)
-    out_string += "flags " + GetMbufFlagsAsString(mp.m_hdr.mh_flags) + ", "
-    if (mp.m_hdr.mh_flags & M_PKTHDR):
+    out_string += mbuf_walk_format.format(prefix, count[0], mp, mhlen, mhtype)
+    out_string += "flags " + GetMbufFlagsAsString(mhflags) + ", "
+    if (mhflags & M_PKTHDR):
         out_string += GetMbufPktCrumbs(mp) + ", "
-    if (kern.globals.mclaudit != 0):
-        out_string += GetMbufBuf2Mca(mp) + ", "
-    total[0] = total[0] + mp.m_hdr.mh_len
+    if (mca != ""):
+        out_string += mca + ", "
+    total[0] = total[0] + mhlen
     out_string += "total " + str(total[0]) + "]"
     print(out_string)
     if (dump_data_len > 0):
@@ -132,13 +228,19 @@ def ShowMbuf(prefix, mp, count, total, dump_data_len):
 def WalkMufNext(prefix, mp, count, total, dump_data_len):
     remaining_len = dump_data_len
     while (mp):
+        if kern.globals.mb_uses_mcache == 1:
+            mhlen = mp.m_hdr.mh_len
+            mhnext = mp.m_hdr.mh_next
+        else:
+            mhlen = mp.M_hdr_common.M_hdr.mh_len
+            mhnext = mp.M_hdr_common.M_hdr.mh_next
         count[0] += 1
         ShowMbuf(prefix, mp, count, total, remaining_len)
-        if (remaining_len > mp.m_hdr.mh_len):
-            remaining_len -= mp.m_hdr.mh_len
+        if (remaining_len > mhlen):
+            remaining_len -= mhlen
         else:
             remaining_len = 0
-        mp = mp.m_hdr.mh_next
+        mp = mhnext
 
 # Macro: mbuf_walkpkt
 @lldb_command('mbuf_walkpkt', 'C:')
@@ -166,7 +268,10 @@ def MbufWalkPacket(cmd_args=None, cmd_options={}):
         WalkMufNext(prefix, mp, count, total, dump_data_len)
         count_mbuf += count[0]
         total_len += total[0]
-        mp = mp.m_hdr.mh_nextpkt
+        if kern.globals.mb_uses_mcache == 1:
+            mp = mp.m_hdr.mh_nextpkt
+        else:
+            mp = mp.M_hdr_common.M_hdr.mh_next
     out_string = "Total packets: {0:d} mbufs: {1:d} length: {2:d} ".format(count_packet, count_mbuf, total_len)
     print(out_string)
 # EndMacro: mbuf_walkpkt
@@ -199,6 +304,10 @@ def MbufBuf2Slab(cmd_args=None):
     if not cmd_args:
         raise ArgumentError("Missing argument 0 in user function.")
 
+    if int(kern.globals.mb_uses_mcache) == 0:
+        print("mcache is disabled, use kasan whatis")
+        return
+
     m = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
     slab = GetMbufSlab(m)
     if (kern.ptrsize == 8):
@@ -214,6 +323,10 @@ def MbufBuf2Slab(cmd_args=None):
 def MbufBuf2Mca(cmd_args=None):
     """ Find the mcache audit structure of the corresponding mbuf
     """
+    if int(kern.globals.mb_uses_mcache) == 0:
+        print("mcache is disabled, use kasan whatis")
+        return
+
     m = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
     print(GetMbufBuf2Mca(m))
     return
@@ -224,6 +337,10 @@ def MbufBuf2Mca(cmd_args=None):
 def MbufSlabs(cmd_args=None):
     """ Print all slabs in the group
     """
+
+    if int(kern.globals.mb_uses_mcache) == 0:
+        print("mcache is disabled, use kasan whatis or zprint")
+        return
 
     out_string = ""
     if not cmd_args:
@@ -301,6 +418,10 @@ def MbufSlabsTbl(cmd_args=None):
     out_string = ""
     x = 0
 
+    if int(kern.globals.mb_uses_mcache) == 0:
+        print("mcache is disabled, use kasan whatis or zprint")
+        return
+
     if (kern.ptrsize == 8):
         out_string += "slot slabg              slabs range\n"
         out_string += "---- ------------------ -------------------------------------------\n"
@@ -329,20 +450,28 @@ def MbufSlabsTbl(cmd_args=None):
 
 def MbufDecode(mbuf, decode_pkt):
     # Ignore free'd mbufs.
-    if mbuf.m_hdr.mh_type == 0:
+    if kern.globals.mb_uses_mcache == 1:
+        mhlen = mbuf.m_hdr.mh_len
+        mhtype = mbuf.m_hdr.mh_type
+        mhflags = mbuf.m_hdr.mh_flags
+    else:
+        mhlen = mbuf.M_hdr_common.M_hdr.mh_len
+        mhtype = mbuf.M_hdr_common.M_hdr.mh_type
+        mhflags = mbuf.M_hdr_common.M_hdr.mh_flags
+    if mhtype == 0:
         return
-    flags = int(mbuf.m_hdr.mh_flags)
-    length = int(mbuf.m_hdr.mh_len)
+    flags = int(mhflags)
+    length = int(mhlen)
     if length < 20 or length > 8 * 1024:
         # Likely not a packet.
         return
     out_string = "mbuf found @ 0x{0:x}, length {1:d}, {2:s}, {3:s}".format(mbuf, length, GetMbufFlags(mbuf), GetMbufPktCrumbs(mbuf))
     print(out_string)
-    if flags & M_EXT:
-        ext_buf = mbuf.M_dat.MH.MH_dat.MH_ext.ext_buf
-        ext_size = int(mbuf.M_dat.MH.MH_dat.MH_ext.ext_size)
     if flags & M_PKTHDR:
-        rcvif = mbuf.M_dat.MH.MH_pkthdr.rcvif
+        if kern.globals.mb_uses_mcache == 1:
+            rcvif = mbuf.M_dat.MH.MH_pkthdr.rcvif
+        else:
+            rcvif = mbuf.M_hdr_common.M_pkthdr.rcvif
         if rcvif != 0:
             try:
                 print("receive interface " + rcvif.if_xname)
@@ -362,6 +491,12 @@ def MbufWalkSlabs(cmd_args=None):
     decode_pkt = False
     if len(cmd_args) > 0 and cmd_args[0] == 'decode':
         decode_pkt = True
+
+    if int(kern.globals.mb_uses_mcache) == 0:
+        for mbuf in kmemory.Zone("mbuf").iter_allocated(gettype("mbuf")):
+            MbufDecode(value(mbuf.AddressOf()), decode_pkt)
+        return
+
     slabstbl = kern.globals.slabstbl
     nslabspmb = int(((1 << MBSHIFT) >> unsigned(kern.globals.page_shift)))
     mbutl = cast(kern.globals.mbutl, 'unsigned char *')
@@ -556,9 +691,42 @@ def GetMbufFlagsAsString(mbuf_flags):
 def GetMbufFlags(m):
     out_string = ""
     if (m != 0):
-        out_string += "m_flags: " + hex(m.m_hdr.mh_flags)
-        if (m.m_hdr.mh_flags != 0):
-             out_string += " " + GetMbufFlagsAsString(m.m_hdr.mh_flags)
+        if kern.globals.mb_uses_mcache == 1:
+            mhflags = m.m_hdr.mh_flags
+        else:
+            mhflags = m.M_hdr_common.M_hdr.mh_flags
+        out_string += "m_flags: " + hex(mhflags)
+        if (mhflags != 0):
+             out_string += " " + GetMbufFlagsAsString(mhflags)
+    return out_string
+
+MBUF_TYPES = [None] * 32
+MBUF_TYPES[0] = "MT_FREE"
+MBUF_TYPES[1] = "MT_DATA"
+MBUF_TYPES[2] = "MT_HEADER"
+MBUF_TYPES[3] = "MT_SOCKET"
+MBUF_TYPES[4] = "MT_PCB"
+MBUF_TYPES[5] = "MT_RTABLE"
+MBUF_TYPES[6] = "MT_HTABLE"
+MBUF_TYPES[7] = "MT_ATABLE"
+MBUF_TYPES[8] = "MT_SONAME"
+# 9 not used
+MBUF_TYPES[10] = "MT_SOOPTS"
+MBUF_TYPES[11] = "MT_FTABLE"
+MBUF_TYPES[12] = "MT_RIGHTS"
+MBUF_TYPES[13] = "MT_IFADDR"
+MBUF_TYPES[14] = "MT_CONTROL"
+MBUF_TYPES[15] = "MT_OOBDATA"
+MBUF_TYPES[16] = "MT_TAG"
+
+def GetMbufType(m):
+    out_string = ""
+    if (m != 0):
+        if kern.globals.mb_uses_mcache == 1:
+            mhtype = m.m_hdr.mh_type
+        else:
+            mhtype = m.M_hdr_common.M_hdr.mh_type
+        out_string += "type: " + MBUF_TYPES[mhtype]
     return out_string
 
 # Macro: mbuf_show_m_flags
@@ -584,11 +752,18 @@ def GetMbufPktCrumbsAsString(mbuf_crumbs):
 def GetMbufPktCrumbs(m):
     out_string = ""
     if (m != 0):
-        if (m.m_hdr.mh_flags & M_PKTHDR) != 0:
-            flags = m.M_dat.MH.MH_pkthdr.pkt_crumbs
-            out_string += "pkt_crumbs: 0x{0:x}".format(flags)
-            if (flags != 0):
-                out_string += " " + GetMbufPktCrumbsAsString(flags)
+        if kern.globals.mb_uses_mcache == 1:
+            mhflags = m.m_hdr.mh_flags
+        else:
+            mhflags = m.M_hdr_common.M_hdr.mh_flags
+        if (mhflags & M_PKTHDR) != 0:
+            if kern.globals.mb_uses_mcache == 1:
+                pktcrumbs = m.m_hdr.pkt_crumbs
+            else:
+                pktcrumbs = m.M_hdr_common.M_pkthdr.pkt_crumbs
+            out_string += "pkt_crumbs: 0x{0:x}".format(pktcrumbs)
+            if (pktcrumbs != 0):
+                out_string += " " + GetMbufPktCrumbsAsString(pktcrumbs)
     return out_string
 
 # Macro: mbuf_showpktcrumbs
@@ -709,18 +884,72 @@ def GetPc(kgm_pc):
     return out_string
 
 
+def GetMbufWalkZone(show_a, show_f, show_tr):
+    out_string = ""
+    total = 0
+    total_a = 0
+    total_f = 0
+    if (show_a and not(show_f)):
+        out_string += "Searching only for active... \n"
+    if (not(show_a) and show_f):
+        out_string += "Searching only for inactive... \n"
+    if (show_a and show_f):
+        out_string += "Displaying all... \n"
+    f = "{0:>18s} {1:s}\n"
+    out_string += f.format("address", "type flags and crumbs")
+    print(out_string)
+    if show_a:
+        for mbuf_sbv in kmemory.Zone("mbuf").iter_allocated(gettype("mbuf")):
+            mbuf = value(mbuf_sbv.AddressOf())
+            total_a += 1
+            total += 1
+            mbuf_string = GetMbufFlags(mbuf)
+            mbuf_string += " " + GetMbufType(mbuf)
+            mbuf_string += " " + GetMbufPktCrumbs(mbuf)
+            if mbuf_string != "":
+                out_string = f.format(hex(mbuf), mbuf_string)
+            print(out_string)
+            if show_tr:
+                print(lldb_run_command('kasan whatis {addr}'.format(addr=hex(mbuf))))
+    if show_f:
+        for mbuf_sbv in kmemory.Zone("mbuf").iter_free(gettype("mbuf")):
+            mbuf = value(mbuf_sbv.AddressOf())
+            total_f += 1
+            total += 1
+            mbuf_string = GetMbufFlags(mbuf)
+            mbuf_string += " " + GetMbufType(mbuf)
+            mbuf_string += " " + GetMbufPktCrumbs(mbuf)
+            if mbuf_string != "":
+                out_string = f.format(hex(mbuf), mbuf_string)
+            print(out_string)
+            if show_tr:
+                print(lldb_run_command('kasan whatis {addr}'.format(addr=hex(mbuf))))
+
+    if total and show_a and show_f:
+        out_string += "total objects = " + str(int(total)) + "\n"
+        out_string += "active/unfreed objects = " + str(int(total_a)) + "\n"
+        out_string += "freed/in_cache objects = " + str(int(total_f)) + "\n"
+        print(out_string)
+
+
 # Macro: mbuf_showactive
 @lldb_command('mbuf_showactive')
 def MbufShowActive(cmd_args=None):
     """ Print all active/in-use mbuf objects
         Pass 1 to show the most recent transaction stack trace
         Pass 2 to also display the mbuf flags and packet crumbs
-        Pass 3 to limit display to mbuf and skip cluaters
+        Pass 3 to limit display to mbuf and skip clusters
     """
-    if cmd_args:
-        print(GetMbufWalkAllSlabs(1, 0, ArgumentStringToInt(cmd_args[0])))
+    if int(kern.globals.mb_uses_mcache) == 0:
+        if cmd_args:
+            GetMbufWalkZone(1, 0, ArgumentStringToInt(cmd_args[0]))
+        else:
+            GetMbufWalkZone(1, 0, 0)
     else:
-        print(GetMbufWalkAllSlabs(1, 0, 0))
+        if cmd_args:
+            print(GetMbufWalkAllSlabs(1, 0, ArgumentStringToInt(cmd_args[0])))
+        else:
+            print(GetMbufWalkAllSlabs(1, 0, 0))
 # EndMacro: mbuf_showactive
 
 
@@ -729,8 +958,35 @@ def MbufShowActive(cmd_args=None):
 def MbufShowInactive(cmd_args=None):
     """ Print all freed/in-cache mbuf objects
     """
-    print(GetMbufWalkAllSlabs(0, 1, 0))
+    if int(kern.globals.mb_uses_mcache) == 0:
+        GetMbufWalkZone(0, 1, 0)
+    else:
+        print(GetMbufWalkAllSlabs(0, 1, 0))
 # EndMacro: mbuf_showinactive
+
+# Macro: mbuf_show_type_summary
+@lldb_command('mbuf_show_type_summary')
+def MbufShowTypeSummary(cmd_args=None):
+    """
+    Print types of all allocated mbufs.
+    Only supported on Apple Silicon.
+    """
+    types = [0] * 32
+    for mbuf_sbv in kmemory.Zone("mbuf").iter_allocated(gettype("mbuf")):
+        mbuf = value(mbuf_sbv.AddressOf())
+        mhtype = mbuf.M_hdr_common.M_hdr.mh_type
+        types[mhtype] += 1
+    for mbuf_sbv in kmemory.Zone("mbuf").iter_free(gettype("mbuf")):
+        mbuf = value(mbuf_sbv.AddressOf())
+        mhtype = mbuf.M_hdr_common.M_hdr.mh_type
+        types[mhtype] += 1
+
+    print("mbuf types allocated and in the caches:")
+    for t in range(len(MBUF_TYPES)):
+        if types[t] != 0:
+            print(MBUF_TYPES[t], types[t])
+
+# EndMacro: mbuf_show_type_summary
 
 
 # Macro: mbuf_showmca
@@ -738,6 +994,9 @@ def MbufShowInactive(cmd_args=None):
 def MbufShowMca(cmd_args=None):
     """ Print the contents of an mbuf mcache audit structure
     """
+    if int(kern.globals.mb_uses_mcache) == 0:
+        print("mcache is disabled, use kasan whatis or zstack_findelem")
+        return
     out_string = ""
     pgshift = unsigned(kern.globals.page_shift)
     if cmd_args:
@@ -813,7 +1072,10 @@ def MbufShowMca(cmd_args=None):
 def MbufShowAll(cmd_args=None):
     """ Print all mbuf objects
     """
-    print(GetMbufWalkAllSlabs(1, 1, 1))
+    if int(kern.globals.mb_uses_mcache) == 0:
+        GetMbufWalkZone(1, 1, 1)
+    else:
+        print(GetMbufWalkAllSlabs(1, 1, 1))
 # EndMacro: mbuf_showall
 
 # Macro: mbuf_countchain
@@ -831,12 +1093,22 @@ def MbufCountChain(cmd_args=None):
 
     while (mp):
         pkt = pkt + 1
-        mn = mp.m_hdr.mh_next
+        if kern.globals.mb_uses_mcache == 1:
+            mn = mp.m_hdr.mh_next
+        else:
+            mn = mp.M_hdr_common.M_hdr.mh_next
         while (mn):
             nxt = nxt + 1
-            mn = mn.m_hdr.mh_next
+            if kern.globals.mb_uses_mcache == 1:
+                mn = mn.m_hdr.mh_next
+            else:
+                mn = mn.M_hdr_common.M_hdr.mh_next
+            print1("mp 0x{:x} mn 0x{:x}".format(mp, mn))
 
-        mp = mp.m_hdr.mh_nextpkt
+        if kern.globals.mb_uses_mcache == 1:
+            mp = mp.m_hdr.mh_nextpkt
+        else:
+            mp = mp.M_hdr_common.M_hdr.mh_nextpkt
 
         if (((pkt + nxt) % 50) == 0):
             print(" ..." + str(pkt_nxt))
@@ -849,6 +1121,9 @@ def MbufCountChain(cmd_args=None):
 def MbufTopLeak(cmd_args=None):
     """ Print the top suspected mbuf leakers
     """
+    if int(kern.globals.mb_uses_mcache) == 0:
+        print("mcache is disabled, use zleak")
+        return
     topcnt = 0
     if (int(len(cmd_args)) > 0 and int(cmd_args[0]) < 5):
         maxcnt = cmd_args[0]
@@ -878,6 +1153,9 @@ def GetMbufTraceLeak(trace):
 def MbufLargeFailures(cmd_args=None):
     """ Print the largest allocation failures
     """
+    if int(kern.globals.mb_uses_mcache) == 0:
+        print("mcache is disabled, this macro is not available. use zleak to detect leaks")
+        return
     topcnt = 0
     if (int(len(cmd_args)) > 0 and int(cmd_args[0]) < 5):
         maxcnt = cmd_args[0]
@@ -907,6 +1185,9 @@ def MbufTraceLeak(cmd_args=None):
     """
     if not cmd_args:
         raise ArgumentError("Missing argument 0 in user function.")
+    if int(kern.globals.mb_uses_mcache) == 0:
+        print("mcache is disabled, use kasan whatis")
+        return
 
     trace = kern.GetValueFromAddress(cmd_args[0], 'mtrace *')
     print(GetMbufTraceLeak(trace))
@@ -920,6 +1201,9 @@ def McacheWalkObject(cmd_args=None):
     """
     if not cmd_args:
         raise ArgumentError("Missing argument 0 in user function.")
+    if int(kern.globals.mb_uses_mcache) == 0:
+        print("mcache is disabled, use kasan whatis")
+        return
 
     out_string = ""
     p = kern.GetValueFromAddress(cmd_args[0], 'mcache_obj_t *')
@@ -938,6 +1222,10 @@ def McacheWalkObject(cmd_args=None):
 def McacheStat(cmd_args=None):
     """ Print all mcaches in the system.
     """
+    if int(kern.globals.mb_uses_mcache) == 0:
+        print("mcache is disabled, use kasan whatis")
+        return
+
     head = kern.globals.mcache_head
     out_string = ""
     mc = cast(head.lh_first, 'mcache *')
@@ -995,6 +1283,9 @@ def McacheStat(cmd_args=None):
 def McacheShowCache(cmd_args=None):
     """Display the number of objects in cache.
     """
+    if int(kern.globals.mb_uses_mcache) == 0:
+        print("mcache is disabled, use kasan whatis")
+        return
     out_string = ""
     cp = kern.GetValueFromAddress(cmd_args[0], 'mcache_t *')
     bktsize = cp.mc_cpu[0].cc_bktsize

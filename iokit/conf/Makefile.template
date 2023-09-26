@@ -29,7 +29,8 @@ CFLAGS_DEBUG += -DIOASSERT=1
 # Directories for generated files
 #
 COMP_SUBDIRS = \
-	DriverKit
+	DriverKit \
+	Exclaves
 
 #
 #  Make sure we don't remove this by accident if interrupted at the wrong

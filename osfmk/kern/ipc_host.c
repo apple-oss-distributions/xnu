@@ -483,6 +483,7 @@ convert_pset_name_to_port(
  *		KERN_INVALID_ARGUMENT	The host_priv is not valid,
  *					Illegal mask bit set.
  *					Illegal exception behavior
+ *		KERN_NO_ACCESS		Restricted access to set port
  */
 kern_return_t
 host_set_exception_ports(
@@ -533,6 +534,10 @@ host_set_exception_ports(
 	    (new_behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED))
 	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (!set_exception_behavior_allowed(new_port, new_behavior, NULL, exception_mask, "host")) {
+		return KERN_NO_ACCESS;
 	}
 
 #if CONFIG_MACF
@@ -728,6 +733,10 @@ host_swap_exception_ports(
 	    (new_behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED))
 	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (!set_exception_behavior_allowed(new_port, new_behavior, NULL, exception_mask, "host")) {
+		return KERN_NO_ACCESS;
 	}
 
 #if CONFIG_MACF

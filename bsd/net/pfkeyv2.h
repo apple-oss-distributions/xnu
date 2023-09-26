@@ -432,6 +432,7 @@ struct sadb_sastat {
 #define SADB_X_EALG_AES         12
 #define SADB_X_EALG_AES_GCM     13
 #define SADB_X_EALG_CHACHA20POLY1305 14
+#define SADB_X_EALG_AES_GMAC    15
 /* private allocations should use 249-255 (RFC2407) */
 
 #if 1   /*nonstandard */

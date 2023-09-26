@@ -189,10 +189,10 @@ extern int igmp_debug;
 #define IGMP_PRINTF(x)
 #endif
 
-#define OIGMPSTAT_ADD(name, val)        atomic_add_32(&igmpstat.name , (val))
+#define OIGMPSTAT_ADD(name, val)        os_atomic_add(&igmpstat.name, (val), relaxed)
 #define OIGMPSTAT_INC(name)             OIGMPSTAT_ADD(name, 1)
 
-#define IGMPSTAT_ADD(name, val)         atomic_add_64(&igmpstat_v3.name , (val))
+#define IGMPSTAT_ADD(name, val)         os_atomic_add(&igmpstat_v3.name, (val), relaxed)
 #define IGMPSTAT_INC(name)              IGMPSTAT_ADD(name, 1)
 
 #define IGMP_RANDOM_DELAY(X) (random() % (X) + 1)

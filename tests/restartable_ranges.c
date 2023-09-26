@@ -23,64 +23,64 @@ extern void restartable_function(int *);
 
 #if defined(__x86_64__)
 __asm__("    .align 4\n"
-	"    .text\n"
-	"    .private_extern _restartable_function\n"
-	"_restartable_function:\n"
-	"    incl   (%rdi)\n"
-	"1:\n"
-	"    pause\n"
-	"    jmp 1b\n"
-	"LExit_restartable_function:\n"
-	"    ret\n");
+        "    .text\n"
+        "    .private_extern _restartable_function\n"
+        "_restartable_function:\n"
+        "    incl   (%rdi)\n"
+        "1:\n"
+        "    pause\n"
+        "    jmp 1b\n"
+        "LExit_restartable_function:\n"
+        "    ret\n");
 #elif defined(__arm64__)
 __asm__("    .align 4\n"
-	"    .text\n"
-	"    .private_extern _restartable_function\n"
-	"_restartable_function:\n"
-	"    ldr    x11, [x0]\n"
-	"    add    x11, x11, #1\n"
-	"    str    x11, [x0]\n"
-	"1:\n"
-	"    b 1b\n"
-	"LExit_restartable_function:\n"
-	"    ret\n");
+        "    .text\n"
+        "    .private_extern _restartable_function\n"
+        "_restartable_function:\n"
+        "    ldr    x11, [x0]\n"
+        "    add    x11, x11, #1\n"
+        "    str    x11, [x0]\n"
+        "1:\n"
+        "    b 1b\n"
+        "LExit_restartable_function:\n"
+        "    ret\n");
 #else
 #define SKIP_TEST 1
 #endif
 
 extern uint64_t __thread_selfid(void);
-extern void *fake_msgSend(void *);
+extern void fake_msgSend(void * _Nullable);
 
 #if defined(__x86_64__)
 __asm__("    .align 4\n"
-	"    .text\n"
-	"    .private_extern _fake_msgSend\n"
-	"_fake_msgSend:\n"
-	"    movq   (%rdi), %rax\n"             /* load isa */
-	"1:\n"
-	"    movq   16(%rax), %rcx\n"           /* load buckets */
-	"    movq   (%rcx), %rcx\n"             /* load selector */
-	"LRecover_fake_msgSend:\n"
-	"    jmp    1b\n"
-	"LExit_fake_msgSend:\n"
-	"    ret\n");
+        "    .text\n"
+        "    .private_extern _fake_msgSend\n"
+        "_fake_msgSend:\n"
+        "    movq   (%rdi), %rax\n"             /* load isa */
+        "1:\n"
+        "    movq   16(%rax), %rcx\n"           /* load buckets */
+        "    movq   (%rcx), %rcx\n"             /* load selector */
+        "LRecover_fake_msgSend:\n"
+        "    jmp    1b\n"
+        "LExit_fake_msgSend:\n"
+        "    ret\n");
 #elif defined(__arm64__)
 __asm__("    .align 4\n"
-	"    .text\n"
-	"    .private_extern _fake_msgSend\n"
-	"_fake_msgSend:\n"
-	"    ldr    x16, [x0]\n"                /* load isa */
-	"1:\n"
+        "    .text\n"
+        "    .private_extern _fake_msgSend\n"
+        "_fake_msgSend:\n"
+        "    ldr    x16, [x0]\n"                /* load isa */
+        "1:\n"
 #if __LP64__
-	"    ldr    x11, [x16, #16]\n"          /* load buckets */
+        "    ldr    x11, [x16, #16]\n"          /* load buckets */
 #else
-	"    ldr    x11, [x16, #8]\n"           /* load buckets */
+        "    ldr    x11, [x16, #8]\n"           /* load buckets */
 #endif
-	"    ldr    x17, [x11]\n"               /* load selector */
-	"LRecover_fake_msgSend:\n"
-	"    b      1b\n"
-	"LExit_fake_msgSend:\n"
-	"    ret\n");
+        "    ldr    x17, [x11]\n"               /* load selector */
+        "LRecover_fake_msgSend:\n"
+        "    b      1b\n"
+        "LExit_fake_msgSend:\n"
+        "    ret\n");
 #else
 #define SKIP_TEST 1
 #endif
@@ -88,28 +88,28 @@ __asm__("    .align 4\n"
 #ifndef SKIP_TEST
 
 __asm__("    .align 4\n"
-	"    .data\n"
-	"    .private_extern _ranges\n"
-	"_ranges:\n"
+        "    .data\n"
+        "    .private_extern _ranges\n"
+        "_ranges:\n"
 #if __LP64__
-	"    .quad _restartable_function\n"
+        "    .quad _restartable_function\n"
 #else
-	"    .long _restartable_function\n"
-	"    .long 0\n"
+        "    .long _restartable_function\n"
+        "    .long 0\n"
 #endif
-	"    .short LExit_restartable_function - _restartable_function\n"
-	"    .short LExit_restartable_function - _restartable_function\n"
-	"    .long 0\n"
-	"\n"
+        "    .short LExit_restartable_function - _restartable_function\n"
+        "    .short LExit_restartable_function - _restartable_function\n"
+        "    .long 0\n"
+        "\n"
 #if __LP64__
-	"    .quad _fake_msgSend\n"
+        "    .quad _fake_msgSend\n"
 #else
-	"    .long _fake_msgSend\n"
-	"    .long 0\n"
+        "    .long _fake_msgSend\n"
+        "    .long 0\n"
 #endif
-	"    .short LExit_fake_msgSend - _fake_msgSend\n"
-	"    .short LRecover_fake_msgSend - _fake_msgSend\n"
-	"    .long 0\n");
+        "    .short LExit_fake_msgSend - _fake_msgSend\n"
+        "    .short LRecover_fake_msgSend - _fake_msgSend\n"
+        "    .long 0\n");
 
 static void
 noop_signal(int signo __unused)

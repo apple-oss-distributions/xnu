@@ -132,7 +132,7 @@ kern_return_t CSM_PREFIX(register_code_signature)(
 	const vm_offset_t code_directory_offset,
 	const char *signature_path,
 	void **sig_obj,
-	vm_address_t *monitor_signature_addr);
+	vm_address_t *txm_signature_addr);
 
 kern_return_t CSM_PREFIX(unregister_code_signature)(
 	void *sig_obj);
@@ -152,6 +152,9 @@ kern_return_t CSM_PREFIX(associate_code_signature)(
 	const vm_size_t region_size,
 	const vm_offset_t region_offset);
 
+kern_return_t CSM_PREFIX(allow_jit_region)(
+	pmap_t pmap);
+
 kern_return_t CSM_PREFIX(associate_jit_region)(
 	pmap_t pmap,
 	const vm_address_t region_addr,
@@ -162,8 +165,15 @@ kern_return_t CSM_PREFIX(associate_debug_region)(
 	const vm_address_t region_addr,
 	const vm_size_t region_size);
 
+kern_return_t CSM_PREFIX(address_space_debugged)(
+	pmap_t pmap);
+
 kern_return_t CSM_PREFIX(allow_invalid_code)(
 	pmap_t pmap);
+
+kern_return_t CSM_PREFIX(get_trust_level_kdp)(
+	pmap_t pmap,
+	uint32_t *trust_level);
 
 kern_return_t CSM_PREFIX(address_space_exempt)(
 	const pmap_t pmap);

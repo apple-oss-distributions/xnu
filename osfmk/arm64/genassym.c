@@ -91,6 +91,9 @@
 #include <machine/pal_hibernate.h>
 #endif /* HIBERNATION */
 #include <arm/pmap/pmap_data.h>
+#if defined(KERNEL_INTEGRITY_CTRR) && KERNEL_CTRR_VERSION >= 3
+#include <arm64/amcc_rorgn.h>
+#endif /* defined(KERNEL_INTEGRITY_CTRR) && KERNEL_CTRR_VERSION >= 3 */
 /*
  * genassym.c is used to produce an
  * assembly file which, intermingled with unuseful assembly code,
@@ -119,6 +122,9 @@ main(int     argc,
 
 	DECLARE("TH_RECOVER", offsetof(struct thread, recover));
 	DECLARE("TH_KSTACKPTR", offsetof(struct thread, machine.kstackptr));
+#if __has_feature(ptrauth_calls)
+	DECLARE("TH_KSTACKPTR_DIVERSIFIER", ptrauth_string_discriminator("machine_thread.kstackptr"));
+#endif
 	DECLARE("TH_THREAD_ID", offsetof(struct thread, thread_id));
 #if defined(HAS_APPLE_PAC)
 	DECLARE("TH_ROP_PID", offsetof(struct thread, machine.rop_pid));
@@ -128,7 +134,10 @@ main(int     argc,
 	DECLARE("TH_ARM_MACHINE_FLAGS", offsetof(struct thread, machine.arm_machine_flags));
 
 	/* These fields are being added on demand */
-	DECLARE("ACT_CONTEXT", offsetof(struct thread, machine.contextData));
+	DECLARE("TH_UPCB", offsetof(struct thread, machine.upcb));
+#if __has_feature(ptrauth_calls)
+	DECLARE("TH_UPCB_DIVERSIFIER", ptrauth_string_discriminator("machine_thread.upcb"));
+#endif
 	DECLARE("TH_CTH_SELF", offsetof(struct thread, machine.cthread_self));
 	DECLARE("ACT_PREEMPT_CNT", offsetof(struct thread, machine.preemption_count));
 #if SCHED_HYGIENE_DEBUG
@@ -248,12 +257,13 @@ main(int     argc,
 
 
 
+
 	DECLARE("PGBYTES", ARM_PGBYTES);
 	DECLARE("PGSHIFT", ARM_PGSHIFT);
 
 	DECLARE("VM_MIN_KERNEL_ADDRESS", VM_MIN_KERNEL_ADDRESS);
 	DECLARE("KERNEL_STACK_SIZE", KERNEL_STACK_SIZE);
-	DECLARE("TBI_MASK", TBI_MASK);
+	DECLARE("ARM_TBI_USER_MASK", ARM_TBI_USER_MASK);
 
 	DECLARE("cdeSize", sizeof(struct cpu_data_entry));
 
@@ -261,6 +271,9 @@ main(int     argc,
 
 	DECLARE("CPU_ACTIVE_THREAD", offsetof(cpu_data_t, cpu_active_thread));
 	DECLARE("CPU_ISTACKPTR", offsetof(cpu_data_t, istackptr));
+#if __has_feature(ptrauth_calls)
+	DECLARE("CPU_ISTACKPTR_DIVERSIFIER", ptrauth_string_discriminator("cpu_data.istackptr"));
+#endif
 	DECLARE("CPU_INTSTACK_TOP", offsetof(cpu_data_t, intstack_top));
 	DECLARE("CPU_EXCEPSTACK_TOP", offsetof(cpu_data_t, excepstack_top));
 #if __ARM_KERNEL_PROTECT__
@@ -274,6 +287,7 @@ main(int     argc,
 	DECLARE("CPU_STAT_IRQ_WAKE", offsetof(cpu_data_t, cpu_stat.irq_ex_cnt_wake));
 	DECLARE("CPU_RESET_HANDLER", offsetof(cpu_data_t, cpu_reset_handler));
 	DECLARE("CPU_PHYS_ID", offsetof(cpu_data_t, cpu_phys_id));
+	DECLARE("CPU_TPIDR_EL0", offsetof(cpu_data_t, cpu_tpidr_el0));
 
 	DECLARE("RTCLOCKDataSize", sizeof(rtclock_data_t));
 
@@ -340,6 +354,11 @@ main(int     argc,
 	DECLARE("HIBGLOBALS_KERNELSLIDE", offsetof(pal_hib_globals_t, kernelSlide));
 #endif /* HIBERNATION */
 
+
+#if defined(KERNEL_INTEGRITY_CTRR) && KERNEL_CTRR_VERSION >= 3
+	DECLARE("CTXR_XN_DISALLOW_ALL", CTXR_XN_DISALLOW_ALL);
+	DECLARE("CTXR_XN_KERNEL", CTXR_XN_KERNEL);
+#endif /* defined(KERNEL_INTEGRITY_CTRR) && KERNEL_CTRR_VERSION >= 3 */
 
 	return 0;
 }

@@ -100,28 +100,11 @@
 #include <kern/task.h>
 #include <kern/locks.h>
 
-extern void logwakeup(struct msgbuf *);
-extern void oslogwakeup(void);
-extern bool os_log_disabled(void);
-
-SECURITY_READ_ONLY_LATE(vm_offset_t) kernel_firehose_addr = 0;
-SECURITY_READ_ONLY_LATE(uint8_t) __firehose_buffer_kernel_chunk_count =
-    FIREHOSE_BUFFER_KERNEL_DEFAULT_CHUNK_COUNT;
-SECURITY_READ_ONLY_LATE(uint8_t) __firehose_num_kernel_io_pages =
-    FIREHOSE_BUFFER_KERNEL_DEFAULT_IO_PAGES;
-
-uint32_t oslog_msgbuf_dropped_charcount = 0;
-
-#define LOG_RDPRI       (PZERO + 1)
 #define LOG_NBIO        0x02
 #define LOG_ASYNC       0x04
 #define LOG_RDWAIT      0x08
 
 /* All globals should be accessed under bsd_log_lock() or bsd_log_lock_safe() */
-
-static char amsg_bufc[1024];
-static struct msgbuf aslbuf = {.msg_magic = MSG_MAGIC, .msg_size = sizeof(amsg_bufc), .msg_bufx = 0, .msg_bufr = 0, .msg_bufc = amsg_bufc};
-struct msgbuf *aslbufp __attribute__((used)) = &aslbuf;
 
 /* logsoftc only valid while log_open=1 */
 struct logsoftc {
@@ -131,7 +114,6 @@ struct logsoftc {
 	struct msgbuf *sc_mbp;
 } logsoftc;
 
-static int log_open;
 char smsg_bufc[CONFIG_MSG_BSIZE]; /* static buffer */
 struct firehose_chunk_s oslog_boot_buf = {
 	.fc_pos = {
@@ -146,20 +128,33 @@ firehose_chunk_t firehose_boot_chunk = &oslog_boot_buf;
 struct msgbuf msgbuf = {.msg_magic  = MSG_MAGIC, .msg_size = sizeof(smsg_bufc), .msg_bufx = 0, .msg_bufr = 0, .msg_bufc = smsg_bufc};
 struct msgbuf *msgbufp __attribute__((used)) = &msgbuf;
 
-int     oslog_open = 0;
-bool    os_log_wakeup = false;
-
-/* oslogsoftc only valid while oslog_open=1 */
+/* oslogsoftc only valid while oslog_open=true */
 struct oslogsoftc {
 	int     sc_state;               /* see above for possibilities */
 	struct  selinfo sc_selp;        /* thread waiting for select */
 	int     sc_pgid;                /* process/group for async I/O */
 } oslogsoftc;
 
+static bool log_open = false;
+static bool oslog_open = false;
+static bool os_log_wakeup = false;
+
+uint32_t oslog_msgbuf_dropped_charcount = 0;
+
+SECURITY_READ_ONLY_LATE(vm_offset_t) kernel_firehose_addr = 0;
+SECURITY_READ_ONLY_LATE(uint8_t) __firehose_buffer_kernel_chunk_count =
+    FIREHOSE_BUFFER_KERNEL_DEFAULT_CHUNK_COUNT;
+SECURITY_READ_ONLY_LATE(uint8_t) __firehose_num_kernel_io_pages =
+    FIREHOSE_BUFFER_KERNEL_DEFAULT_IO_PAGES;
+
 /* defined in osfmk/kern/printf.c  */
 extern bool bsd_log_lock(bool);
 extern void bsd_log_lock_safe(void);
 extern void bsd_log_unlock(void);
+
+extern void logwakeup(void);
+extern void oslogwakeup(void);
+extern bool os_log_disabled(void);
 
 /* XXX wants a linker set so these can be static */
 extern d_open_t         logopen;
@@ -188,26 +183,25 @@ int
 logopen(__unused dev_t dev, __unused int flags, __unused int mode, struct proc *p)
 {
 	bsd_log_lock_safe();
+
 	if (log_open) {
 		bsd_log_unlock();
 		return EBUSY;
 	}
-	if (atm_get_diagnostic_config() & ATM_ENABLE_LEGACY_LOGGING) {
+
+	/*
+	 * Legacy logging has to be supported as long as userspace supports it.
+	 */
+	if ((atm_get_diagnostic_config() & ATM_ENABLE_LEGACY_LOGGING)) {
 		logsoftc.sc_mbp = msgbufp;
-	} else {
-		/*
-		 * Support for messagetracer (kern_asl_msg())
-		 * In this mode, /dev/klog exports only ASL-formatted messages
-		 * written into aslbufp via vaddlog().
-		 */
-		logsoftc.sc_mbp = aslbufp;
+		logsoftc.sc_pgid = proc_getpid(p); /* signal process only */
+		log_open = true;
+		bsd_log_unlock();
+		return 0;
 	}
-	logsoftc.sc_pgid = proc_getpid(p);            /* signal process only */
-	log_open = 1;
 
 	bsd_log_unlock();
-
-	return 0;
+	return ENOTSUP;
 }
 
 /*ARGSUSED*/
@@ -215,13 +209,14 @@ int
 logclose(__unused dev_t dev, __unused int flag, __unused int devtype, __unused struct proc *p)
 {
 	bsd_log_lock_safe();
+
 	logsoftc.sc_state &= ~(LOG_NBIO | LOG_ASYNC);
 	selthreadclear(&logsoftc.sc_selp);
-	log_open = 0;
+	log_open = false;
+
 	bsd_log_unlock();
 	return 0;
 }
-
 
 int
 oslogopen(__unused dev_t dev, __unused int flags, __unused int mode, struct proc *p)
@@ -232,7 +227,7 @@ oslogopen(__unused dev_t dev, __unused int flags, __unused int mode, struct proc
 		return EBUSY;
 	}
 	oslogsoftc.sc_pgid = proc_getpid(p);          /* signal process only */
-	oslog_open = 1;
+	oslog_open = true;
 
 	bsd_log_unlock();
 	return 0;
@@ -244,7 +239,7 @@ oslogclose(__unused dev_t dev, __unused int flag, __unused int devtype, __unused
 	bsd_log_lock_safe();
 	oslogsoftc.sc_state &= ~(LOG_NBIO | LOG_ASYNC);
 	selthreadclear(&oslogsoftc.sc_selp);
-	oslog_open = 0;
+	oslog_open = false;
 	bsd_log_unlock();
 	return 0;
 }
@@ -253,32 +248,27 @@ oslogclose(__unused dev_t dev, __unused int flag, __unused int devtype, __unused
 int
 logread(__unused dev_t dev, struct uio *uio, int flag)
 {
-	int error = 0;
-	struct msgbuf *mbp = logsoftc.sc_mbp;
+	int error;
 	ssize_t resid;
 
 	bsd_log_lock_safe();
+
+	struct msgbuf *mbp = logsoftc.sc_mbp;
+
 	while (mbp->msg_bufr == mbp->msg_bufx) {
-		if (flag & IO_NDELAY) {
-			error = EWOULDBLOCK;
-			goto out;
-		}
-		if (logsoftc.sc_state & LOG_NBIO) {
-			error = EWOULDBLOCK;
-			goto out;
+		if ((flag & IO_NDELAY) || (logsoftc.sc_state & LOG_NBIO)) {
+			bsd_log_unlock();
+			return EWOULDBLOCK;
 		}
 		logsoftc.sc_state |= LOG_RDWAIT;
 		bsd_log_unlock();
 		/*
-		 * If the wakeup is missed
-		 * then wait for 5 sec and reevaluate
+		 * If the wakeup is missed then wait for 5 sec and reevaluate.
+		 * If it times out, carry on.
 		 */
-		if ((error = tsleep((caddr_t)mbp, LOG_RDPRI | PCATCH,
-		    "klog", 5 * hz)) != 0) {
-			/* if it times out; ignore */
-			if (error != EWOULDBLOCK) {
-				return error;
-			}
+		error = tsleep((caddr_t)mbp, (PZERO + 1) | PCATCH, "klog", 5 * hz);
+		if (error && error != EWOULDBLOCK) {
+			return error;
 		}
 		bsd_log_lock_safe();
 	}
@@ -300,77 +290,76 @@ logread(__unused dev_t dev, struct uio *uio, int flag)
 
 		bsd_log_unlock();
 		error = uiomove((caddr_t)&mbp->msg_bufc[readpos], (int)l, uio);
-		bsd_log_lock_safe();
 		if (error) {
-			break;
+			return error;
 		}
+		bsd_log_lock_safe();
 
 		mbp->msg_bufr = (int)(readpos + l);
 		if (mbp->msg_bufr >= mbp->msg_size) {
 			mbp->msg_bufr = 0;
 		}
 	}
-out:
+
 	bsd_log_unlock();
-	return error;
+	return 0;
 }
 
 /*ARGSUSED*/
 int
 logselect(__unused dev_t dev, int rw, void * wql, struct proc *p)
 {
-	const struct msgbuf *mbp = logsoftc.sc_mbp;
+	if (rw != FREAD) {
+		return 0;
+	}
 
-	switch (rw) {
-	case FREAD:
-		bsd_log_lock_safe();
-		if (mbp->msg_bufr != mbp->msg_bufx) {
-			bsd_log_unlock();
-			return 1;
-		}
+	bsd_log_lock_safe();
+	if (logsoftc.sc_mbp->msg_bufr == logsoftc.sc_mbp->msg_bufx) {
 		selrecord(p, &logsoftc.sc_selp, wql);
 		bsd_log_unlock();
-		break;
+		return 0;
 	}
-	return 0;
+	bsd_log_unlock();
+
+	return 1;
 }
 
 int
 oslogselect(__unused dev_t dev, int rw, void * wql, struct proc *p)
 {
-	switch (rw) {
-	case FREAD:
-		bsd_log_lock_safe();
-		if (os_log_wakeup) {
-			bsd_log_unlock();
-			return 1;
-		}
-		selrecord(p, &oslogsoftc.sc_selp, wql);
-		bsd_log_unlock();
-		break;
+	if (rw != FREAD) {
+		return 0;
 	}
+
+	bsd_log_lock_safe();
+	if (os_log_wakeup) {
+		bsd_log_unlock();
+		return 1;
+	}
+	selrecord(p, &oslogsoftc.sc_selp, wql);
+	bsd_log_unlock();
+
 	return 0;
 }
 
 void
-logwakeup(struct msgbuf *mbp)
+logwakeup(void)
 {
-	/* cf. r24974766 & r25201228*/
-	if (oslog_is_safe() == FALSE) {
+	/*
+	 * Legacy logging is rarely enabled during a typical system run. Check
+	 * log_open without taking a lock as a shortcut.
+	 */
+	if (!log_open || !oslog_is_safe()) {
 		return;
 	}
 
 	bsd_log_lock_safe();
+
 	if (!log_open) {
 		bsd_log_unlock();
 		return;
 	}
-	if (NULL == mbp) {
-		mbp = logsoftc.sc_mbp;
-	}
-	if (mbp != logsoftc.sc_mbp) {
-		goto out;
-	}
+
 	selwakeup(&logsoftc.sc_selp);
 	if (logsoftc.sc_state & LOG_ASYNC) {
 		int pgid = logsoftc.sc_pgid;
@@ -382,11 +371,12 @@ logwakeup(struct msgbuf *mbp)
 		}
 		bsd_log_lock_safe();
 	}
-	if (logsoftc.sc_state & LOG_RDWAIT) {
-		wakeup((caddr_t)mbp);
+
+	if (log_open && (logsoftc.sc_state & LOG_RDWAIT)) {
+		wakeup((caddr_t)logsoftc.sc_mbp);
 		logsoftc.sc_state &= ~LOG_RDWAIT;
 	}
-out:
+
 	bsd_log_unlock();
 }
 
@@ -411,10 +401,11 @@ oslogwakeup(void)
 int
 logioctl(__unused dev_t dev, u_long com, caddr_t data, __unused int flag, __unused struct proc *p)
 {
-	int l;
-	const struct msgbuf *mbp = logsoftc.sc_mbp;
-
 	bsd_log_lock_safe();
+
+	const struct msgbuf *mbp = logsoftc.sc_mbp;
+	int l;
+
 	switch (com) {
 	/* return number of characters immediately available */
 	case FIONREAD:
@@ -453,6 +444,7 @@ logioctl(__unused dev_t dev, u_long com, caddr_t data, __unused int flag, __unus
 		bsd_log_unlock();
 		return -1;
 	}
+
 	bsd_log_unlock();
 	return 0;
 }
@@ -605,7 +597,7 @@ log_putc(char c)
 		unread_count = 0 - unread_count;
 	}
 	if (c == '\n' || unread_count >= (msgbufp->msg_size / 2)) {
-		logwakeup(msgbufp);
+		logwakeup();
 	}
 }
 

@@ -500,45 +500,6 @@ nfsm_chain_add_opaque_nopad_f(struct nfsm_chain *nmc, const u_char *buf, size_t 
 }
 
 /*
- * nfsm_chain_add_uio()
- *
- * Add "len" bytes of data from "uio" to the given chain.
- */
-int
-nfsm_chain_add_uio(struct nfsm_chain *nmc, uio_t uio, size_t len)
-{
-	size_t paddedlen, tlen;
-	int error;
-
-	paddedlen = nfsm_rndup(len);
-
-	while (paddedlen) {
-		if (!nmc->nmc_left) {
-			error = nfsm_chain_new_mbuf(nmc, paddedlen);
-			if (error) {
-				return error;
-			}
-		}
-		tlen = MIN(nmc->nmc_left, paddedlen);
-		if (tlen) {
-			if (len) {
-				tlen = MIN(INT32_MAX, MIN(tlen, len));
-				uiomove(nmc->nmc_ptr, (int)tlen, uio);
-			} else {
-				bzero(nmc->nmc_ptr, tlen);
-			}
-			nmc->nmc_ptr += tlen;
-			nmc->nmc_left -= tlen;
-			paddedlen -= tlen;
-			if (len) {
-				len -= tlen;
-			}
-		}
-	}
-	return 0;
-}
-
-/*
  * Find the length of the NFS mbuf chain
  * up to the current encoding/decoding offset.
  */
@@ -586,6 +547,8 @@ nfsm_chain_advance(struct nfsm_chain *nmc, size_t len)
 	return 0;
 }
 
+#if 0
+
 /*
  * nfsm_chain_reverse()
  *
@@ -612,6 +575,8 @@ nfsm_chain_reverse(struct nfsm_chain *nmc, size_t len)
 
 	return nfsm_chain_advance(nmc, new_offset);
 }
+
+#endif
 
 /*
  * nfsm_chain_get_opaque_pointer_f()
@@ -2980,6 +2945,7 @@ static short nfsv3err_remove[] = {
 	NFSERR_IO,
 	NFSERR_ACCES,
 	NFSERR_NOTDIR,
+	NFSERR_ISDIR,
 	NFSERR_ROFS,
 	NFSERR_NAMETOL,
 	NFSERR_STALE,
@@ -3039,6 +3005,7 @@ static short nfsv3err_link[] = {
 	NFSERR_EXIST,
 	NFSERR_XDEV,
 	NFSERR_NOTDIR,
+	NFSERR_ISDIR,
 	NFSERR_INVAL,
 	NFSERR_NOSPC,
 	NFSERR_ROFS,
@@ -3116,6 +3083,7 @@ static short nfsv3err_commit[] = {
 	NFSERR_STALE,
 	NFSERR_BADHANDLE,
 	NFSERR_SERVERFAULT,
+	NFSERR_BADTYPE,
 	NFSERR_TRYLATER,
 	0,
 };

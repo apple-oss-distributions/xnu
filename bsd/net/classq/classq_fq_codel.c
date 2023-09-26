@@ -83,7 +83,11 @@
 #define DTYPE_EARLY     2       /* an "unforced" (early) drop */
 
 static uint32_t pkt_compressor = 1;
-static uint64_t l4s_ce_threshold = 0;
+static uint64_t l4s_ce_threshold = 0; /* in usec */
+static uint32_t l4s_local_ce_report = 0;
+static uint64_t pkt_pacing_leeway = 0; /* in usec */
+static uint64_t max_pkt_pacing_interval = 3 * NSEC_PER_SEC;
+static uint64_t l4s_min_delay_threshold = 20 * NSEC_PER_MSEC; /* 20 ms */
 #if (DEBUG || DEVELOPMENT)
 SYSCTL_NODE(_net_classq, OID_AUTO, flow_q, CTLFLAG_RW | CTLFLAG_LOCKED,
     0, "FQ-CODEL parameters");
@@ -94,6 +98,19 @@ SYSCTL_UINT(_net_classq_flow_q, OID_AUTO, pkt_compressor,
 SYSCTL_QUAD(_net_classq, OID_AUTO, l4s_ce_threshold,
     CTLFLAG_RW | CTLFLAG_LOCKED, &l4s_ce_threshold,
     "L4S CE threshold");
+
+SYSCTL_UINT(_net_classq_flow_q, OID_AUTO, l4s_local_ce_report,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &l4s_local_ce_report, 0,
+    "enable L4S local CE report");
+
+SYSCTL_QUAD(_net_classq_flow_q, OID_AUTO, pkt_pacing_leeway,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &pkt_pacing_leeway, "packet pacing leeway");
+
+SYSCTL_QUAD(_net_classq_flow_q, OID_AUTO, max_pkt_pacing_interval,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &max_pkt_pacing_interval, "max packet pacing interval");
+
+SYSCTL_QUAD(_net_classq_flow_q, OID_AUTO, l4s_min_delay_threshold,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &l4s_min_delay_threshold, "l4s min delay threshold");
 #endif /* (DEBUG || DEVELOPMENT) */
 
 void
@@ -109,6 +126,8 @@ fq_codel_init(void)
 	_CASSERT(AQM_KTRACE_STATS_FLOW_CTL == 0x831000c);
 	_CASSERT(AQM_KTRACE_STATS_FLOW_ALLOC == 0x8310010);
 	_CASSERT(AQM_KTRACE_STATS_FLOW_DESTROY == 0x8310014);
+	_CASSERT(AQM_KTRACE_STATS_FLOW_REPORT_CE == 0x8310018);
+	_CASSERT(AQM_KTRACE_STATS_GET_QLEN == 0x831001c);
 }
 
 fq_t *
@@ -164,10 +183,11 @@ fq_detect_dequeue_stall(fq_if_t *fqs, fq_t *flowq, fq_if_classq_t *fq_cl,
 		 */
 		FQ_SET_DELAY_HIGH(flowq);
 		fq_cl->fcl_stat.fcl_dequeue_stall++;
-		os_log_error(OS_LOG_DEFAULT, "%s: dequeue stall num: %d, "
-		    "scidx: %d, flow: 0x%x, iface: %s", __func__,
+		os_log_error(OS_LOG_DEFAULT, "%s:num: %d, "
+		    "scidx: %d, flow: 0x%x, iface: %s grp: %hhu", __func__,
 		    fq_cl->fcl_stat.fcl_dequeue_stall, flowq->fq_sc_index,
-		    flowq->fq_flowhash, if_name(fqs->fqs_ifq->ifcq_ifp));
+		    flowq->fq_flowhash, if_name(fqs->fqs_ifq->ifcq_ifp),
+		    FQ_GROUP(flowq)->fqg_index);
 		KDBG(AQM_KTRACE_AON_FLOW_DQ_STALL, flowq->fq_flowhash,
 		    AQM_KTRACE_FQ_GRP_SC_IDX(flowq), flowq->fq_bytes,
 		    (*now) - flowq->fq_getqtime);
@@ -189,7 +209,7 @@ fq_head_drop(fq_if_t *fqs, fq_t *fq)
 	}
 
 	pktsched_get_pkt_vars(&pkt, &pkt_flags, &pkt_timestamp, NULL, NULL,
-	    NULL, NULL);
+	    NULL, NULL, NULL);
 
 	*pkt_timestamp = 0;
 	switch (pkt.pktsched_ptype) {
@@ -230,7 +250,7 @@ fq_compressor(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl,
 	}
 
 	pktsched_get_pkt_vars(pkt, NULL, &pkt_timestamp, NULL, NULL, NULL,
-	    &comp_gencnt);
+	    &comp_gencnt, NULL);
 
 	if (comp_gencnt == 0) {
 		return 0;
@@ -306,7 +326,7 @@ fq_addq(fq_if_t *fqs, fq_if_group_t *fq_grp, pktsched_pkt_t *pkt,
 
 	cnt = pkt->pktsched_pcnt;
 	pktsched_get_pkt_vars(pkt, &pkt_flags, &pkt_timestamp, &pkt_flowid,
-	    &pkt_flowsrc, &pkt_proto, NULL);
+	    &pkt_flowsrc, &pkt_proto, NULL, NULL);
 
 	/*
 	 * XXX Not walking the chain to set this flag on every packet.
@@ -366,13 +386,7 @@ fq_addq(fq_if_t *fqs, fq_if_group_t *fq_grp, pktsched_pkt_t *pkt,
 	if (ifclassq_enable_l4s && tfc_type == FQ_TFC_L4S) {
 		fq_cl->fcl_stat.fcl_l4s_pkts++;
 		droptype = DTYPE_NODROP;
-		goto no_drop;
 	}
-
-	/*
-	 * If L4S is not enabled, a fq should always be labeled as a classic.
-	 */
-	VERIFY(fq->fq_tfc_type == FQ_TFC_C);
 
 	if (__improbable(FQ_IS_DELAY_HIGH(fq) || FQ_IS_OVERWHELMING(fq))) {
 		if ((fq->fq_flags & FQF_FLOWCTL_CAPABLE) &&
@@ -515,7 +529,8 @@ fq_addq(fq_if_t *fqs, fq_if_group_t *fq_grp, pktsched_pkt_t *pkt,
 		}
 	}
 
-no_drop:
+	fq_cl->fcl_flags &= ~FCL_PACED;
+
 	if (__probable(droptype == DTYPE_NODROP)) {
 		uint32_t chain_len = pktsched_get_pkt_len(pkt);
 		int ret_compress = 0;
@@ -580,6 +595,8 @@ fq_getq_flow_internal(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt)
 		return;
 	}
 
+	fq->fq_next_tx_time = FQ_INVALID_TX_TS;
+
 	pktsched_pkt_encap(pkt, &p);
 	plen = pktsched_get_pkt_len(pkt);
 
@@ -589,6 +606,8 @@ fq_getq_flow_internal(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt)
 	fq_cl = &FQ_CLASSQ(fq);
 	fq_cl->fcl_stat.fcl_byte_cnt -= plen;
 	fq_cl->fcl_stat.fcl_pkt_cnt--;
+	fq_cl->fcl_flags &= ~FCL_PACED;
+
 	IFCQ_DEC_LEN(ifq);
 	IFCQ_DEC_BYTES(ifq, plen);
 
@@ -601,13 +620,100 @@ fq_getq_flow_internal(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt)
 	}
 }
 
+/*
+ * fq_get_next_tx_time returns FQ_INVALID_TX_TS when there is no tx time in fq
+ */
+static uint64_t
+fq_get_next_tx_time(fq_if_t *fqs, fq_t *fq)
+{
+	uint64_t tx_time = FQ_INVALID_TX_TS;
+
+	/*
+	 * Check the cached value in fq
+	 */
+	if (fq->fq_next_tx_time != FQ_INVALID_TX_TS) {
+		return fq->fq_next_tx_time;
+	}
+
+	switch (fqs->fqs_ptype) {
+	case QP_MBUF: {
+		struct mbuf *m;
+		if ((m = MBUFQ_FIRST(&fq->fq_mbufq)) != NULL) {
+			struct m_tag *tag;
+			tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID,
+			    KERNEL_TAG_TYPE_AQM);
+			if (tag != NULL) {
+				tx_time = *(uint64_t *)tag->m_tag_data;
+			}
+		}
+		break;
+	}
+	case QP_PACKET: {
+		struct __kern_packet *p = KPKTQ_FIRST(&fq->fq_kpktq);
+		if (__probable(p != NULL && (p->pkt_pflags & PKT_F_OPT_TX_TIMESTAMP) != 0)) {
+			tx_time = p->pkt_com_opt->__po_pkt_tx_time;
+		}
+		break;
+	}
+	default:
+		VERIFY(0);
+		/* NOTREACHED */
+		__builtin_unreachable();
+	}
+
+	/*
+	 * Cache the tx time in fq. The cache will be clear after dequeue or drop
+	 * from the fq.
+	 */
+	fq->fq_next_tx_time = tx_time;
+
+	return tx_time;
+}
+
+/*
+ * fq_tx_time_ready returns true if the fq is empty so that it doesn't
+ * affect caller logics that handles empty flow.
+ */
+boolean_t
+fq_tx_time_ready(fq_if_t *fqs, fq_t *fq, uint64_t now, uint64_t *ready_time)
+{
+	uint64_t pkt_tx_time;
+	fq_if_classq_t *fq_cl = &FQ_CLASSQ(fq);
+
+	if (!ifclassq_enable_pacing || !ifclassq_enable_l4s || fq->fq_tfc_type != FQ_TFC_L4S) {
+		return TRUE;
+	}
+
+	pkt_tx_time = fq_get_next_tx_time(fqs, fq);
+	if (ready_time != NULL) {
+		*ready_time = pkt_tx_time;
+	}
+
+	if (pkt_tx_time <= now + pkt_pacing_leeway ||
+	    pkt_tx_time == FQ_INVALID_TX_TS) {
+		return TRUE;
+	}
+
+	/*
+	 * Ignore the tx time if it's scheduled too far in the future
+	 */
+	if (pkt_tx_time > max_pkt_pacing_interval + now) {
+		fq_cl->fcl_stat.fcl_ignore_tx_time++;
+		return TRUE;
+	}
+
+	ASSERT(pkt_tx_time != FQ_INVALID_TX_TS);
+	return FALSE;
+}
+
 void
 fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 {
-	fq_if_classq_t *fq_cl;
+	fq_if_classq_t *fq_cl = &FQ_CLASSQ(fq);
 	int64_t qdelay = 0;
 	volatile uint32_t *pkt_flags;
-	uint64_t *pkt_timestamp;
+	uint64_t *pkt_timestamp, pkt_tx_time = 0, pacing_delay = 0;
+	uint64_t fq_min_delay_threshold = FQ_TARGET_DELAY(fq);
 	uint8_t pkt_flowsrc;
 	boolean_t l4s_pkt;
 
@@ -618,14 +724,28 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 	}
 
 	pktsched_get_pkt_vars(pkt, &pkt_flags, &pkt_timestamp, NULL, &pkt_flowsrc,
-	    NULL, NULL);
+	    NULL, NULL, &pkt_tx_time);
 	l4s_pkt = pktsched_is_pkt_l4s(pkt);
+	if (ifclassq_enable_pacing && ifclassq_enable_l4s) {
+		if (pkt_tx_time > *pkt_timestamp) {
+			pacing_delay = pkt_tx_time - *pkt_timestamp;
+			fq_cl->fcl_stat.fcl_paced_pkts++;
+			DTRACE_SKYWALK3(aqm__pacing__delta, uint64_t, now - pkt_tx_time,
+			    fq_if_t *, fqs, fq_t *, fq);
+		}
+#if (DEVELOPMENT || DEBUG)
+		else {
+			DTRACE_SKYWALK5(aqm__miss__pacing__delay, uint64_t, *pkt_timestamp,
+			    uint64_t, pkt_tx_time, uint64_t, now, fq_if_t *,
+			    fqs, fq_t *, fq);
+		}
+#endif // (DEVELOPMENT || DEBUG)
+	}
 
 	/* this will compute qdelay in nanoseconds */
 	if (now > *pkt_timestamp) {
 		qdelay = now - *pkt_timestamp;
 	}
-	fq_cl = &FQ_CLASSQ(fq);
 
 	/* Update min/max/avg qdelay for the respective class */
 	if (fq_cl->fcl_stat.fcl_min_qdelay == 0 ||
@@ -664,33 +784,57 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 		}
 	}
 
+	fq->fq_pkts_since_last_report++;
 	if (ifclassq_enable_l4s && l4s_pkt) {
-		if ((l4s_ce_threshold != 0 && qdelay > l4s_ce_threshold) ||
-		    (l4s_ce_threshold == 0 && qdelay > FQ_TARGET_DELAY(fq))) {
-			if (pktsched_mark_ecn(pkt) == 0) {
+		/*
+		 * A safe guard to make sure that L4S is not going to build a huge
+		 * queue if we encounter unexpected problems (for eg., if ACKs don't
+		 * arrive in timely manner due to congestion in reverse path).
+		 */
+		fq_min_delay_threshold = l4s_min_delay_threshold;
+
+		if ((l4s_ce_threshold != 0 && qdelay > l4s_ce_threshold + pacing_delay) ||
+		    (l4s_ce_threshold == 0 && qdelay > FQ_TARGET_DELAY(fq) + pacing_delay)) {
+			DTRACE_SKYWALK4(aqm__mark__ce, uint64_t, qdelay, uint64_t, pacing_delay,
+			    fq_if_t *, fqs, fq_t *, fq);
+			KDBG(AQM_KTRACE_STATS_FLOW_REPORT_CE, fq->fq_flowhash,
+			    AQM_KTRACE_FQ_GRP_SC_IDX(fq), qdelay, pacing_delay);
+			/*
+			 * The packet buffer that pktsched_mark_ecn writes to can be pageable.
+			 * Since it is not safe to write to pageable memory while preemption
+			 * is disabled, convert the spin lock into mutex.
+			 */
+			IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
+			if (__improbable(l4s_local_ce_report != 0) &&
+			    (*pkt_flags & PKTF_FLOW_ADV) != 0 &&
+			    fq_if_report_ce(fqs, pkt, 1, fq->fq_pkts_since_last_report)) {
+				fq->fq_pkts_since_last_report = 0;
+				fq_cl->fcl_stat.fcl_ce_reported++;
+			} else if (pktsched_mark_ecn(pkt) == 0) {
 				fq_cl->fcl_stat.fcl_ce_marked++;
 			} else {
 				fq_cl->fcl_stat.fcl_ce_mark_failures++;
 			}
 		}
-		/* skip steps not needed for L4S traffic */
-		goto out;
 	}
 
+	ASSERT(pacing_delay <= INT64_MAX);
+	qdelay = MAX(0, qdelay - (int64_t)pacing_delay);
 	if (fq->fq_min_qdelay == 0 ||
-	    (qdelay > 0 && (u_int64_t)qdelay < fq->fq_min_qdelay)) {
+	    (u_int64_t)qdelay < fq->fq_min_qdelay) {
 		fq->fq_min_qdelay = qdelay;
 	}
 
 	if (now >= fq->fq_updatetime) {
-		if (fq->fq_min_qdelay > FQ_TARGET_DELAY(fq)) {
+		if (fq->fq_min_qdelay > fq_min_delay_threshold) {
 			if (!FQ_IS_DELAY_HIGH(fq)) {
 				FQ_SET_DELAY_HIGH(fq);
 				os_log_error(OS_LOG_DEFAULT,
-				    "%s: high delay idx: %d, %llu, flow: 0x%x, "
-				    "iface: %s", __func__, fq->fq_sc_index,
+				    "%s: scidx: %d, %llu, flow: 0x%x, "
+				    "iface: %s, grp: %hhu\n", __func__, fq->fq_sc_index,
 				    fq->fq_min_qdelay, fq->fq_flowhash,
-				    if_name(fqs->fqs_ifq->ifcq_ifp));
+				    if_name(fqs->fqs_ifq->ifcq_ifp),
+				    FQ_GROUP(fq)->fqg_index);
 			}
 		} else {
 			FQ_CLEAR_DELAY_HIGH(fq);
@@ -700,7 +844,6 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 		fq->fq_min_qdelay = 0;
 	}
 
-out:
 	if (fqs->fqs_large_flow != fq || !fq_if_almost_at_drop_limit(fqs)) {
 		FQ_CLEAR_OVERWHELMING(fq);
 	}

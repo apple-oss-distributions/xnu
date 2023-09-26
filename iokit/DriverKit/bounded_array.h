@@ -58,12 +58,12 @@ struct bounded_array {
 	using iterator = bounded_ptr<T, TrappingPolicy>;
 	using const_iterator = bounded_ptr<T const, TrappingPolicy>;
 
-	iterator
+	OS_ALWAYS_INLINE iterator
 	begin() noexcept
 	{
 		return iterator(data_, data_, data_ + N);
 	}
-	const_iterator
+	OS_ALWAYS_INLINE const_iterator
 	begin() const noexcept
 	{
 		return const_iterator(data_, data_, data_ + N);

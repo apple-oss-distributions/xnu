@@ -222,6 +222,8 @@ memorystatus_action_t memorystatus_pick_action(struct jetsam_thread_state *jetsa
     bool suspended_swappable_apps_remaining,
     bool swappable_apps_remaining, int *jld_idle_kills);
 
+#define MEMSTAT_PERCENT_TOTAL_PAGES(p) (p * atop_64(max_mem) / 100)
+
 #pragma mark Logging Utilities
 
 __enum_decl(memorystatus_log_level_t, unsigned int, {

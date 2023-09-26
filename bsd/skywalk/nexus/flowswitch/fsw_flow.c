@@ -447,6 +447,52 @@ done:
 	return error;
 }
 
+int
+fsw_flow_config(struct nx_flowswitch *fsw, struct nx_flow_req *req)
+{
+	struct flow_mgr *fm = fsw->fsw_flow_mgr;
+	struct flow_entry *fe = NULL;
+	struct ns_token *nt = NULL;
+	int error = 0;
+
+	FSW_RLOCK(fsw);
+	fe = flow_mgr_get_fe_by_uuid_rlock(fm, req->nfr_flow_uuid);
+	if (fe == NULL) {
+		SK_ERR("can't find flow");
+		error = ENOENT;
+		goto done;
+	}
+
+	if (fe->fe_pid != req->nfr_pid) {
+		SK_ERR("flow ownership error");
+		error = EPERM;
+		goto done;
+	}
+
+	/* right now only support NXFLOWREQF_NOWAKEFROMSLEEP config */
+	nt = fe->fe_port_reservation;
+	if (req->nfr_flags & NXFLOWREQF_NOWAKEFROMSLEEP) {
+		os_atomic_or(&fe->fe_flags, FLOWENTF_NOWAKEFROMSLEEP, relaxed);
+		netns_change_flags(&nt, NETNS_NOWAKEFROMSLEEP, 0);
+	} else {
+		os_atomic_andnot(&fe->fe_flags, FLOWENTF_NOWAKEFROMSLEEP, relaxed);
+		netns_change_flags(&nt, 0, NETNS_NOWAKEFROMSLEEP);
+	}
+#if SK_LOG
+	char dbgbuf[FLOWENTRY_DBGBUF_SIZE];
+	SK_DF(SK_VERB_FLOW, "%s: NOWAKEFROMSLEEP %d",
+	    fe_as_string(fe, dbgbuf, sizeof(dbgbuf)),
+	    req->nfr_flags & NXFLOWREQF_NOWAKEFROMSLEEP ? 1 : 0);
+#endif /* SK_LOG */
+
+done:
+	if (fe != NULL) {
+		flow_entry_release(&fe);
+	}
+	FSW_RUNLOCK(fsw);
+	return error;
+}
+
 static void
 fsw_flow_route_ctor(void *arg, struct flow_route *fr)
 {

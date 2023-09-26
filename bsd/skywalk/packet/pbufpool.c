@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -49,7 +49,7 @@ static struct __kern_quantum *pp_metadata_init(struct __metadata_preamble *,
     struct kern_pbufpool *, uint16_t, uint32_t, struct skmem_obj **);
 static struct __metadata_preamble *pp_metadata_fini(struct __kern_quantum *,
     struct kern_pbufpool *, struct mbuf **, struct __kern_packet **,
-    struct skmem_obj **, struct skmem_obj **, struct skmem_obj **);
+    struct skmem_obj **, struct skmem_obj **);
 static void pp_purge_upp_locked(struct kern_pbufpool *pp, pid_t pid);
 static void pp_buf_seg_ctor(struct sksegment *, IOSKMemoryBufferRef, void *);
 static void pp_buf_seg_dtor(struct sksegment *, IOSKMemoryBufferRef, void *);
@@ -61,10 +61,9 @@ static mach_vm_address_t pp_alloc_buffer_common(const kern_pbufpool_t pp,
     struct skmem_obj_info *oi, uint32_t skmflag, bool large);
 static inline uint32_t
 pp_alloc_buflet_common(struct kern_pbufpool *pp, uint64_t *array,
-    uint32_t num, uint32_t skmflag, uint32_t flags);
+    uint32_t num, uint32_t skmflag, bool large);
 
 #define KERN_PBUFPOOL_U_HASH_SIZE       64      /* hash table size */
-#define KERN_BUF_CNT_MULTIPLIER          2
 
 /*
  * Since the inputs are small (indices to the metadata region), we can use
@@ -334,7 +333,6 @@ pp_regions_params_adjust(struct skmem_region_params *srp_array,
 	bool config_buflet = ((flags & PP_REGION_CONFIG_BUFLET) != 0);
 	bool md_magazine_enable = ((flags &
 	    PP_REGION_CONFIG_MD_MAGAZINE_ENABLE) != 0);
-	bool config_raw_buflet = (flags & PP_REGION_CONFIG_RAW_BUFLET) != 0;
 
 	ASSERT(max_frags != 0);
 
@@ -468,14 +466,17 @@ pp_regions_params_adjust(struct skmem_region_params *srp_array,
 	if (config_buflet) {
 		ASSERT(md_type == NEXUS_META_TYPE_PACKET);
 		/*
-		 * We want to have enough buflets when multi-buflet and
+		 * Ideally we want the number of buflets to be
+		 * "kmd_srp->srp_c_obj_cnt * (kmd_srp->srp_max_frags - 1)",
+		 * so that we have enough buflets when multi-buflet and
 		 * shared buffer object is used.
+		 * Currently multi-buflet is being used only by user pool
+		 * which doesn't support shared buffer object, hence to reduce
+		 * the number of objects we are restricting the number of
+		 * buflets to the number of buffers.
 		 */
-		uint32_t r_obj_cnt_multiplier = config_raw_buflet ?
-		    KERN_BUF_CNT_MULTIPLIER : 1;
-		kbft_srp->srp_r_obj_cnt =
-		    (buf_srp->srp_c_obj_cnt + lbuf_srp->srp_c_obj_cnt) *
-		    r_obj_cnt_multiplier;
+		kbft_srp->srp_r_obj_cnt = buf_srp->srp_c_obj_cnt +
+		    lbuf_srp->srp_c_obj_cnt;
 		kbft_srp->srp_r_obj_size = MAX(sizeof(struct __kern_buflet_ext),
 		    sizeof(struct __user_buflet));
 		kbft_srp->srp_cflags = kmd_srp->srp_cflags;
@@ -599,6 +600,13 @@ pp_metadata_construct(struct __kern_quantum *kqum, struct __user_quantum *uqum,
 				    " pp 0x%llx", SK_KVA(pp));
 				goto fail;
 			}
+
+#if CONFIG_KERNEL_TAGGING
+			/* Checking to ensure the object address is tagged */
+			ASSERT((vm_offset_t)kbuf !=
+			    vm_memtag_canonicalize_address((vm_offset_t)kbuf));
+#endif /* CONFIG_KERNEL_TAGGING */
+
 			blistn = (*blist)->mo_next;
 			(*blist)->mo_next = NULL;
 
@@ -728,14 +736,12 @@ __attribute__((always_inline))
 static void
 pp_metadata_destruct_common(struct __kern_quantum *kqum,
     struct kern_pbufpool *pp, bool raw, struct skmem_obj **blist_def,
-    struct skmem_obj **blist_large, struct skmem_obj **blist_raw)
+    struct skmem_obj **blist_large)
 {
 	struct __kern_buflet *kbuf, *nbuf;
-	struct skmem_obj *p_blist_def = NULL, *p_blist_large = NULL, *p_blist_raw = NULL;
+	struct skmem_obj *p_blist_def = NULL, *p_blist_large = NULL;
 	struct skmem_obj **pp_blist_def = &p_blist_def;
 	struct skmem_obj **pp_blist_large = &p_blist_large;
-	struct skmem_obj **pp_blist_raw = &p_blist_raw;
-
 	uint16_t bufcnt, i = 0;
 	bool first_buflet_empty;
 
@@ -793,34 +799,14 @@ pp_metadata_destruct_common(struct __kern_quantum *kqum,
 	}
 
 	while (nbuf != NULL) {
-		if (BUFLET_FROM_RAW_BFLT_CACHE(nbuf)) {
-			/*
-			 * Separate the raw buflet and its attached buffer to
-			 * reduce usecnt.
-			 */
-			uint32_t usecnt = 0;
-			void *objaddr = nbuf->buf_objaddr;
-			KBUF_DTOR(nbuf, usecnt);
-			SK_DF(SK_VERB_MEM, "pp 0x%llx buf 0x%llx usecnt %u",
-			    SK_KVA(pp), SK_KVA(objaddr), usecnt);
-			if (__improbable(usecnt == 0)) {
-				skmem_cache_free(BUFLET_HAS_LARGE_BUF(nbuf) ?
-				    PP_BUF_CACHE_LARGE(pp) : PP_BUF_CACHE_DEF(pp),
-				    objaddr);
-			}
-
-			*pp_blist_raw = (struct skmem_obj *)(void *)nbuf;
-			pp_blist_raw = &((struct skmem_obj *)(void *)nbuf)->mo_next;
+		if (BUFLET_HAS_LARGE_BUF(nbuf)) {
+			*pp_blist_large = (struct skmem_obj *)(void *)nbuf;
+			pp_blist_large =
+			    &((struct skmem_obj *)(void *)nbuf)->mo_next;
 		} else {
-			if (BUFLET_HAS_LARGE_BUF(nbuf)) {
-				*pp_blist_large = (struct skmem_obj *)(void *)nbuf;
-				pp_blist_large =
-				    &((struct skmem_obj *)(void *)nbuf)->mo_next;
-			} else {
-				*pp_blist_def = (struct skmem_obj *)(void *)nbuf;
-				pp_blist_def =
-				    &((struct skmem_obj *)(void *)nbuf)->mo_next;
-			}
+			*pp_blist_def = (struct skmem_obj *)(void *)nbuf;
+			pp_blist_def =
+			    &((struct skmem_obj *)(void *)nbuf)->mo_next;
 		}
 		BUF_NBFT_IDX(nbuf, OBJ_IDX_NONE);
 		nbuf = __DECONST(struct __kern_buflet *, nbuf->buf_nbft_addr);
@@ -836,10 +822,6 @@ pp_metadata_destruct_common(struct __kern_quantum *kqum,
 	if (p_blist_large != NULL) {
 		*pp_blist_large = *blist_large;
 		*blist_large = p_blist_large;
-	}
-	if (p_blist_raw != NULL) {
-		*pp_blist_raw = *blist_raw;
-		*blist_raw = p_blist_raw;
 	}
 
 	/* if we're about to return this object to the slab, clean it up */
@@ -887,18 +869,14 @@ static void
 pp_metadata_destruct(struct __kern_quantum *kqum, struct kern_pbufpool *pp,
     bool raw)
 {
-	struct skmem_obj *blist_def = NULL, *blist_large = NULL, *blist_raw = NULL;
+	struct skmem_obj *blist_def = NULL, *blist_large = NULL;
 
-	pp_metadata_destruct_common(kqum, pp, raw, &blist_def, &blist_large,
-	    &blist_raw);
+	pp_metadata_destruct_common(kqum, pp, raw, &blist_def, &blist_large);
 	if (blist_def != NULL) {
 		skmem_cache_batch_free(PP_KBFT_CACHE_DEF(pp), blist_def);
 	}
 	if (blist_large != NULL) {
 		skmem_cache_batch_free(PP_KBFT_CACHE_LARGE(pp), blist_large);
-	}
-	if (blist_raw != NULL) {
-		skmem_cache_batch_free(pp->pp_raw_kbft_cache, blist_raw);
 	}
 }
 
@@ -931,25 +909,19 @@ pp_buf_seg_dtor(struct sksegment *sg, IOSKMemoryBufferRef md, void *arg)
 
 static int
 pp_buflet_metadata_ctor_common(struct skmem_obj_info *oi0,
-    struct skmem_obj_info *oim0, void *arg, uint32_t skmflag, bool large,
-    bool attach_buf)
+    struct skmem_obj_info *oim0, void *arg, uint32_t skmflag, bool large)
 {
 #pragma unused (skmflag)
 	struct kern_pbufpool *pp = (struct kern_pbufpool *)arg;
 	struct __kern_buflet *kbft;
 	struct __user_buflet *ubft;
 	struct skmem_obj_info oib;
-	mach_vm_address_t baddr = 0;
-	obj_idx_t oi_idx_reg, oib_idx_reg = OBJ_IDX_NONE;
-	struct skmem_bufctl* oib_bc = NULL;
+	mach_vm_address_t baddr;
+	obj_idx_t oi_idx_reg;
 
-	if (attach_buf) {
-		baddr = pp_alloc_buffer_common(pp, &oib, skmflag, large);
-		if (__improbable(baddr == 0)) {
-			return ENOMEM;
-		}
-		oib_idx_reg = SKMEM_OBJ_IDX_REG(&oib);
-		oib_bc = SKMEM_OBJ_BUFCTL(&oib);
+	baddr = pp_alloc_buffer_common(pp, &oib, skmflag, large);
+	if (__improbable(baddr == 0)) {
+		return ENOMEM;
 	}
 	/*
 	 * Note that oi0 and oim0 may be stored inside the object itself;
@@ -968,8 +940,8 @@ pp_buflet_metadata_ctor_common(struct skmem_obj_info *oi0,
 		ASSERT(oim0 == NULL);
 		ubft = NULL;
 	}
-	KBUF_EXT_CTOR(kbft, ubft, baddr, oib_idx_reg, oib_bc,
-	    oi_idx_reg, pp, large, attach_buf);
+	KBUF_EXT_CTOR(kbft, ubft, baddr, SKMEM_OBJ_IDX_REG(&oib),
+	    SKMEM_OBJ_BUFCTL(&oib), oi_idx_reg, pp, large);
 	return 0;
 }
 
@@ -977,28 +949,21 @@ static int
 pp_buflet_default_buffer_metadata_ctor(struct skmem_obj_info *oi0,
     struct skmem_obj_info *oim0, void *arg, uint32_t skmflag)
 {
-	return pp_buflet_metadata_ctor_common(oi0, oim0, arg, skmflag, false, true);
+	return pp_buflet_metadata_ctor_common(oi0, oim0, arg, skmflag, false);
 }
 
 static int
 pp_buflet_large_buffer_metadata_ctor(struct skmem_obj_info *oi0,
     struct skmem_obj_info *oim0, void *arg, uint32_t skmflag)
 {
-	return pp_buflet_metadata_ctor_common(oi0, oim0, arg, skmflag, true, true);
-}
-
-static int
-pp_buflet_no_buffer_metadata_ctor(struct skmem_obj_info *oi0,
-    struct skmem_obj_info *oim0, void *arg, uint32_t skmflag)
-{
-	return pp_buflet_metadata_ctor_common(oi0, oim0, arg, skmflag, false, false);
+	return pp_buflet_metadata_ctor_common(oi0, oim0, arg, skmflag, true);
 }
 
 static void
 pp_buflet_metadata_dtor(void *addr, void *arg)
 {
 	struct __kern_buflet *kbft = addr;
-	void *objaddr;
+	void *objaddr = kbft->buf_objaddr;
 	struct kern_pbufpool *pp = arg;
 	uint32_t usecnt = 0;
 	bool large = BUFLET_HAS_LARGE_BUF(kbft);
@@ -1015,20 +980,10 @@ pp_buflet_metadata_dtor(void *addr, void *arg)
 	ASSERT(kbft->buf_nbft_idx == OBJ_IDX_NONE);
 	ASSERT(((struct __kern_buflet_ext *)kbft)->kbe_buf_upp_link.sle_next ==
 	    NULL);
-
-	/*
-	 * The raw buflet has never been attached with a buffer or already
-	 * cleaned up.
-	 */
-	if ((kbft->buf_flag & BUFLET_FLAG_RAW) != 0 && kbft->buf_ctl == NULL) {
-		return;
-	}
-
 	ASSERT(kbft->buf_addr != 0);
 	ASSERT(kbft->buf_idx != OBJ_IDX_NONE);
 	ASSERT(kbft->buf_ctl != NULL);
 
-	objaddr = kbft->buf_objaddr;
 	KBUF_DTOR(kbft, usecnt);
 	SK_DF(SK_VERB_MEM, "pp 0x%llx buf 0x%llx usecnt %u", SK_KVA(pp),
 	    SK_KVA(objaddr), usecnt);
@@ -1046,7 +1001,7 @@ pp_create(const char *name, struct skmem_region_params *srp_array,
 {
 	struct kern_pbufpool *pp = NULL;
 	uint32_t md_size, def_buf_obj_size;
-	uint16_t def_buf_size, large_buf_size;
+	uint32_t def_buf_size, large_buf_size;
 	nexus_meta_type_t md_type;
 	nexus_meta_subtype_t md_subtype;
 	uint32_t md_cflags;
@@ -1124,18 +1079,8 @@ pp_create(const char *name, struct skmem_region_params *srp_array,
 	md_subtype = kmd_srp->srp_md_subtype;
 	max_frags = kmd_srp->srp_max_frags;
 	def_buf_obj_size = buf_srp->srp_c_obj_size;
-
-	if (def_buf_obj_size > UINT16_MAX) {
-		def_buf_size = UINT16_MAX;
-	} else {
-		def_buf_size = (uint16_t)def_buf_obj_size;
-	}
-
-	if (lbuf_srp->srp_c_obj_size > UINT16_MAX) {
-		large_buf_size = UINT16_MAX;
-	} else {
-		large_buf_size = (uint16_t)lbuf_srp->srp_c_obj_size;
-	}
+	def_buf_size = def_buf_obj_size;
+	large_buf_size = lbuf_srp->srp_c_obj_size;
 
 #if (DEBUG || DEVELOPMENT)
 	ASSERT(def_buf_obj_size != 0);
@@ -1194,10 +1139,6 @@ pp_create(const char *name, struct skmem_region_params *srp_array,
 	if (lbuf_srp->srp_c_obj_cnt > 0) {
 		ASSERT(lbuf_srp->srp_c_obj_size != 0);
 		pp->pp_flags |= PPF_LARGE_BUF;
-	}
-	if (ppcreatef & PPCREATEF_RAW_BFLT) {
-		ASSERT((ppcreatef & PPCREATEF_ONDEMAND_BUF) != 0);
-		pp->pp_flags |= PPF_RAW_BUFLT;
 	}
 
 	pp_retain(pp);
@@ -1307,6 +1248,8 @@ pp_create(const char *name, struct skmem_region_params *srp_array,
 		}
 
 		if (PP_HAS_LARGE_BUF(pp)) {
+			/* Aggressive memory reclaim flag set to kbft_large for now */
+			md_cflags |= SKMEM_CR_RECLAIM;
 			(void) snprintf(cname, sizeof(cname), "kbft_large.%s",
 			    name);
 			PP_KBFT_CACHE_LARGE(pp) = skmem_cache_create(cname,
@@ -1319,21 +1262,6 @@ pp_create(const char *name, struct skmem_region_params *srp_array,
 				SK_ERR("\"%s\" (0x%llx) failed to "
 				    "create \"%s\" cache", pp->pp_name,
 				    SK_KVA(pp), cname);
-				goto failed;
-			}
-		}
-
-		if (PP_HAS_RAW_BFLT(pp)) {
-			(void) snprintf(cname, sizeof(cname), "kbft_raw.%s", name);
-			pp->pp_raw_kbft_cache = skmem_cache_create(cname,
-			    kbft_srp->srp_c_obj_size, 0,
-			    pp_buflet_no_buffer_metadata_ctor,
-			    pp_buflet_metadata_dtor, NULL, pp, pp->pp_kbft_region,
-			    md_cflags);
-
-			if (pp->pp_raw_kbft_cache == NULL) {
-				SK_ERR("\"%s\" (0x%llx) failed to create \"%s\" cache",
-				    pp->pp_name, SK_KVA(pp), cname);
 				goto failed;
 			}
 		}
@@ -1429,11 +1357,6 @@ pp_destroy(struct kern_pbufpool *pp)
 	if (PP_KBFT_CACHE_LARGE(pp) != NULL) {
 		skmem_cache_destroy(PP_KBFT_CACHE_LARGE(pp));
 		PP_KBFT_CACHE_LARGE(pp) = NULL;
-	}
-
-	if (pp->pp_raw_kbft_cache != NULL) {
-		skmem_cache_destroy(pp->pp_raw_kbft_cache);
-		pp->pp_raw_kbft_cache = NULL;
 	}
 
 	if (pp->pp_ubft_region != NULL) {
@@ -2053,6 +1976,12 @@ pp_alloc_packet_common(struct kern_pbufpool *pp, uint16_t bufcnt,
 			break;
 		}
 
+#if CONFIG_KERNEL_TAGGING
+		/* Checking to ensure the object address is tagged */
+		ASSERT((vm_offset_t)kqum !=
+		    vm_memtag_canonicalize_address((vm_offset_t)kqum));
+#endif /* CONFIG_KERNEL_TAGGING */
+
 		if (tagged) {
 			*array = SK_PTR_ENCODE(kqum, METADATA_TYPE(kqum),
 			    METADATA_SUBTYPE(kqum));
@@ -2162,6 +2091,12 @@ pp_alloc_pktq(struct kern_pbufpool *pp, uint16_t bufcnt,
 			break;
 		}
 
+#if CONFIG_KERNEL_TAGGING
+		/* Checking to ensure the object address is tagged */
+		ASSERT((vm_offset_t)kpkt !=
+		    vm_memtag_canonicalize_address((vm_offset_t)kpkt));
+#endif /* CONFIG_KERNEL_TAGGING */
+
 		KPKTQ_ENQUEUE(pktq, kpkt);
 
 		if (cb != NULL) {
@@ -2210,7 +2145,7 @@ __attribute__((always_inline))
 static inline struct __metadata_preamble *
 pp_metadata_fini(struct __kern_quantum *kqum, struct kern_pbufpool *pp,
     struct mbuf **mp, struct __kern_packet **kpp, struct skmem_obj **blist_def,
-    struct skmem_obj **blist_large, struct skmem_obj **blist_raw)
+    struct skmem_obj **blist_large)
 {
 	struct __metadata_preamble *mdp = METADATA_PREAMBLE(kqum);
 
@@ -2249,6 +2184,7 @@ pp_metadata_fini(struct __kern_quantum *kqum, struct kern_pbufpool *pp,
 			}
 			KPKT_CLEAR_PKT_DATA(kpkt);
 		}
+		kpkt->pkt_pflags &= ~PKT_F_TRUNCATED;
 		ASSERT(kpkt->pkt_nextpkt == NULL);
 		ASSERT(kpkt->pkt_qum.qum_ksd == NULL);
 		ASSERT((kpkt->pkt_pflags & PKT_F_MBUF_MASK) == 0);
@@ -2261,7 +2197,7 @@ pp_metadata_fini(struct __kern_quantum *kqum, struct kern_pbufpool *pp,
 
 	if (__improbable(PP_HAS_BUFFER_ON_DEMAND(pp))) {
 		pp_metadata_destruct_common(kqum, pp, FALSE, blist_def,
-		    blist_large, blist_raw);
+		    blist_large);
 	}
 	return mdp;
 }
@@ -2273,7 +2209,6 @@ pp_free_packet_chain(struct __kern_packet *pkt_chain, int *npkt)
 	struct skmem_obj *top = NULL;
 	struct skmem_obj *blist_def = NULL;
 	struct skmem_obj *blist_large = NULL;
-	struct skmem_obj *blist_raw = NULL;
 	struct skmem_obj **list = &top;
 	struct mbuf *mtop = NULL;
 	struct mbuf **mp = &mtop;
@@ -2292,7 +2227,7 @@ pp_free_packet_chain(struct __kern_packet *pkt_chain, int *npkt)
 
 		ASSERT(SK_PTR_ADDR_KQUM(pkt)->qum_pp == pp);
 		mdp = pp_metadata_fini(SK_PTR_ADDR_KQUM(pkt), pp,
-		    mp, kpp, &blist_def, &blist_large, &blist_raw);
+		    mp, kpp, &blist_def, &blist_large);
 
 		*list = (struct skmem_obj *)mdp;
 		list = &(*list)->mo_next;
@@ -2317,10 +2252,6 @@ pp_free_packet_chain(struct __kern_packet *pkt_chain, int *npkt)
 	if (blist_large != NULL) {
 		skmem_cache_batch_free(PP_KBFT_CACHE_LARGE(pp), blist_large);
 		blist_large = NULL;
-	}
-	if (blist_raw != NULL) {
-		skmem_cache_batch_free(pp->pp_raw_kbft_cache, blist_raw);
-		blist_raw = NULL;
 	}
 	if (mtop != NULL) {
 		DTRACE_SKYWALK(free__attached__mbuf);
@@ -2359,7 +2290,6 @@ pp_free_packet_array(struct kern_pbufpool *pp, uint64_t *array, uint32_t num)
 	struct skmem_obj *top = NULL;
 	struct skmem_obj *blist_def = NULL;
 	struct skmem_obj *blist_large = NULL;
-	struct skmem_obj *blist_raw = NULL;
 	struct skmem_obj **list = &top;
 	struct mbuf *mtop = NULL;
 	struct mbuf **mp = &mtop;
@@ -2374,7 +2304,7 @@ pp_free_packet_array(struct kern_pbufpool *pp, uint64_t *array, uint32_t num)
 	for (i = 0; i < num; i++) {
 		ASSERT(SK_PTR_ADDR_KQUM(array[i])->qum_pp == pp);
 		mdp = pp_metadata_fini(SK_PTR_ADDR_KQUM(array[i]), pp,
-		    mp, kpp, &blist_def, &blist_large, &blist_raw);
+		    mp, kpp, &blist_def, &blist_large);
 
 		*list = (struct skmem_obj *)mdp;
 		list = &(*list)->mo_next;
@@ -2399,10 +2329,6 @@ pp_free_packet_array(struct kern_pbufpool *pp, uint64_t *array, uint32_t num)
 	if (blist_large != NULL) {
 		skmem_cache_batch_free(PP_KBFT_CACHE_LARGE(pp), blist_large);
 		blist_large = NULL;
-	}
-	if (blist_raw != NULL) {
-		skmem_cache_batch_free(pp->pp_raw_kbft_cache, blist_raw);
-		blist_raw = NULL;
 	}
 	if (mtop != NULL) {
 		DTRACE_SKYWALK(free__attached__mbuf);
@@ -2514,28 +2440,19 @@ pp_free_buffer(const kern_pbufpool_t pp, mach_vm_address_t addr)
 __attribute__((always_inline))
 static inline uint32_t
 pp_alloc_buflet_common(struct kern_pbufpool *pp, uint64_t *array,
-    uint32_t num, uint32_t skmflag, uint32_t flags)
+    uint32_t num, uint32_t skmflag, bool large)
 {
 	struct __kern_buflet *kbft = NULL;
 	uint32_t allocd, need = num;
 	struct skmem_obj *list;
-	struct skmem_cache *skm = NULL;
-	boolean_t attach_buffer = (flags & PP_ALLOC_BFT_ATTACH_BUFFER) != 0;
-	boolean_t large = (flags & PP_ALLOC_BFT_LARGE) != 0;
 
 	ASSERT(array != NULL && num > 0);
 	ASSERT(PP_BATCH_CAPABLE(pp));
 	ASSERT(PP_KBFT_CACHE_DEF(pp) != NULL);
 	ASSERT(PP_BUF_SIZE_LARGE(pp) != 0 || !large);
-	ASSERT(pp->pp_raw_kbft_cache != NULL || attach_buffer);
 
-	if (!attach_buffer) {
-		skm = pp->pp_raw_kbft_cache;
-	} else {
-		skm = large ? PP_KBFT_CACHE_LARGE(pp) :
-		    PP_KBFT_CACHE_DEF(pp);
-	}
-	allocd = skmem_cache_batch_alloc(skm, &list, num, skmflag);
+	allocd = skmem_cache_batch_alloc(large ? PP_KBFT_CACHE_LARGE(pp) :
+	    PP_KBFT_CACHE_DEF(pp), &list, num, skmflag);
 
 	while (list != NULL) {
 		struct skmem_obj *listn;
@@ -2543,11 +2460,14 @@ pp_alloc_buflet_common(struct kern_pbufpool *pp, uint64_t *array,
 		listn = list->mo_next;
 		list->mo_next = NULL;
 		kbft = (kern_buflet_t)(void *)list;
-		if (attach_buffer) {
-			KBUF_EXT_INIT(kbft, pp);
-		} else {
-			RAW_KBUF_EXT_INIT(kbft);
-		}
+
+#if CONFIG_KERNEL_TAGGING
+		/* Checking to ensure the object address is tagged */
+		ASSERT((vm_offset_t)kbft !=
+		    vm_memtag_canonicalize_address((vm_offset_t)kbft));
+#endif /* CONFIG_KERNEL_TAGGING */
+
+		KBUF_EXT_INIT(kbft, pp);
 		*array = (uint64_t)kbft;
 		++array;
 		list = listn;
@@ -2560,11 +2480,11 @@ pp_alloc_buflet_common(struct kern_pbufpool *pp, uint64_t *array,
 
 errno_t
 pp_alloc_buflet(struct kern_pbufpool *pp, kern_buflet_t *kbft, uint32_t skmflag,
-    uint32_t flags)
+    bool large)
 {
 	uint64_t bft;
 
-	if (__improbable(!pp_alloc_buflet_common(pp, &bft, 1, skmflag, flags))) {
+	if (__improbable(!pp_alloc_buflet_common(pp, &bft, 1, skmflag, large))) {
 		return ENOMEM;
 	}
 	*kbft = (kern_buflet_t)bft;
@@ -2573,7 +2493,7 @@ pp_alloc_buflet(struct kern_pbufpool *pp, kern_buflet_t *kbft, uint32_t skmflag,
 
 errno_t
 pp_alloc_buflet_batch(struct kern_pbufpool *pp, uint64_t *array,
-    uint32_t *size, uint32_t skmflag, uint32_t flags)
+    uint32_t *size, uint32_t skmflag, bool large)
 {
 	uint32_t i, n;
 	int err;
@@ -2583,7 +2503,7 @@ pp_alloc_buflet_batch(struct kern_pbufpool *pp, uint64_t *array,
 	n = *size;
 	*size = 0;
 
-	i = pp_alloc_buflet_common(pp, array, n, skmflag, flags);
+	i = pp_alloc_buflet_common(pp, array, n, skmflag, large);
 	*size = i;
 
 	if (__probable(i == n)) {
@@ -2611,23 +2531,8 @@ pp_free_buflet_common(const kern_pbufpool_t pp, kern_buflet_t kbft)
 		ASSERT(kbft->buf_ctl != NULL);
 		ASSERT(((struct __kern_buflet_ext *)kbft)->
 		    kbe_buf_upp_link.sle_next == NULL);
-
-		/* raw buflet has a buffer attached after construction */
-		if (BUFLET_FROM_RAW_BFLT_CACHE(kbft)) {
-			uint32_t usecnt = 0;
-			void *objaddr = kbft->buf_objaddr;
-			KBUF_DTOR(kbft, usecnt);
-			SK_DF(SK_VERB_MEM, "pp 0x%llx buf 0x%llx usecnt %u",
-			    SK_KVA(pp), SK_KVA(objaddr), usecnt);
-			if (__improbable(usecnt == 0)) {
-				skmem_cache_free(BUFLET_HAS_LARGE_BUF(kbft) ?
-				    PP_BUF_CACHE_LARGE(pp) : PP_BUF_CACHE_DEF(pp),
-				    objaddr);
-			}
-		}
-
 		/*
-		 * non-raw external buflet has buffer attached at construction,
+		 * external buflet has buffer attached at construction,
 		 * so we don't free the buffer here.
 		 */
 		skmem_cache_free(BUFLET_HAS_LARGE_BUF(kbft) ?

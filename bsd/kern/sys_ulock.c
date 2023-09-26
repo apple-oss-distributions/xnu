@@ -92,6 +92,16 @@
 
 static LCK_GRP_DECLARE(ull_lck_grp, "ulocks");
 
+
+#if ULL_TICKET_LOCK
+typedef lck_ticket_t ull_lock_t;
+#define ull_lock_init(ull)      lck_ticket_init(&ull->ull_lock, &ull_lck_grp)
+#define ull_lock_destroy(ull)   lck_ticket_destroy(&ull->ull_lock, &ull_lck_grp)
+#define ull_lock(ull)           lck_ticket_lock(&ull->ull_lock, &ull_lck_grp)
+#define ull_unlock(ull)         lck_ticket_unlock(&ull->ull_lock)
+#define ull_assert_owned(ull)   lck_ticket_assert_owned(&ull->ull_lock)
+#define ull_assert_notwned(ull) lck_ticket_assert_not_owned(&ull->ull_lock)
+#else
 typedef lck_spin_t ull_lock_t;
 #define ull_lock_init(ull)      lck_spin_init(&ull->ull_lock, &ull_lck_grp, NULL)
 #define ull_lock_destroy(ull)   lck_spin_destroy(&ull->ull_lock, &ull_lck_grp)
@@ -99,6 +109,7 @@ typedef lck_spin_t ull_lock_t;
 #define ull_unlock(ull)         lck_spin_unlock(&ull->ull_lock)
 #define ull_assert_owned(ull)   LCK_SPIN_ASSERT(&ull->ull_lock, LCK_ASSERT_OWNED)
 #define ull_assert_notwned(ull) LCK_SPIN_ASSERT(&ull->ull_lock, LCK_ASSERT_NOTOWNED)
+#endif /* ULL_TICKET_LOCK */
 
 #define ULOCK_TO_EVENT(ull)   ((event_t)ull)
 #define EVENT_TO_ULOCK(event) ((ull_t *)event)
@@ -204,7 +215,11 @@ ull_dump(ull_t *ull)
 
 typedef struct ull_bucket {
 	queue_head_t ulb_head;
+#if ULL_TICKET_LOCK
+	lck_ticket_t ulb_lock;
+#else
 	lck_spin_t   ulb_lock;
+#endif /* ULL_TICKET_LOCK */
 } ull_bucket_t;
 
 static SECURITY_READ_ONLY_LATE(int) ull_hash_buckets;
@@ -212,9 +227,13 @@ static SECURITY_READ_ONLY_LATE(ull_bucket_t *) ull_bucket;
 static uint32_t ull_nzalloc = 0;
 static KALLOC_TYPE_DEFINE(ull_zone, ull_t, KT_DEFAULT);
 
+#if ULL_TICKET_LOCK
+#define ull_bucket_lock(i)       lck_ticket_lock(&ull_bucket[i].ulb_lock, &ull_lck_grp)
+#define ull_bucket_unlock(i)     lck_ticket_unlock(&ull_bucket[i].ulb_lock)
+#else
 #define ull_bucket_lock(i)       lck_spin_lock_grp(&ull_bucket[i].ulb_lock, &ull_lck_grp)
 #define ull_bucket_unlock(i)     lck_spin_unlock(&ull_bucket[i].ulb_lock)
-
+#endif /* ULL_TICKET_LOCK */
 static __inline__ uint32_t
 ull_hash_index(const void *key, size_t length)
 {
@@ -245,7 +264,11 @@ ulock_initialize(void)
 
 	for (int i = 0; i < ull_hash_buckets; i++) {
 		queue_init(&ull_bucket[i].ulb_head);
+#if ULL_TICKET_LOCK
+		lck_ticket_init(&ull_bucket[i].ulb_lock, &ull_lck_grp);
+#else
 		lck_spin_init(&ull_bucket[i].ulb_lock, &ull_lck_grp, NULL);
+#endif /* ULL_TICKET_LOCK */
 	}
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, ulock_initialize);
@@ -290,7 +313,7 @@ ull_hash_dump(task_t task)
 static ull_t *
 ull_alloc(ulk_t *key)
 {
-	ull_t *ull = (ull_t *)zalloc(ull_zone);
+	ull_t *ull = (ull_t *)zalloc_flags(ull_zone, Z_SET_NOTSHARED);
 	assert(ull != NULL);
 
 	ull->ull_refcount = 1;

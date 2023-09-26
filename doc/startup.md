@@ -158,9 +158,7 @@ Initializes the zone allocator.
 
 - Rank 4: Handle `ZONE_DEFINE` and `ZONE_INIT`.
 
-- Middle: Enable zone caching & logging
-
-- Last:   zone and kalloc heaps (`ZONE_VIEW_DEFINE`, `KALLOC_HEAP_DEFINE`).
+- Middle:   zone and kalloc heaps (`ZONE_VIEW_DEFINE`, `KALLOC_HEAP_DEFINE`).
 
 `STARTUP_SUB_KTRACE`
 --------------------

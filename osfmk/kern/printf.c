@@ -368,6 +368,16 @@ __doprnt(
 			if (sizeof(size_t) == sizeof(unsigned long long)) {
 				long_long = 1;
 			}
+		} else if (c == 't') {
+			c = *++fmt;
+			if (sizeof(ptrdiff_t) == sizeof(unsigned long long)) {
+				long_long = 1;
+			}
+		} else if (c == 'j') {
+			c = *++fmt;
+			if (sizeof(intmax_t) == sizeof(unsigned long long)) {
+				long_long = 1;
+			}
 		}
 
 		truncate = FALSE;
@@ -637,16 +647,16 @@ print_num:
 					const char str[] = "<ptr>";
 					const char* strp = str;
 					int strl = sizeof(str) - 1;
-
+					unsigned long long u_stripped = u;
 #ifdef HAS_APPLE_PAC
 					/**
 					 * Strip out the pointer authentication code before
 					 * checking whether the pointer is a kernel address.
 					 */
-					u = (unsigned long long)VM_KERNEL_STRIP_PTR(u);
+					u_stripped = (unsigned long long)VM_KERNEL_STRIP_PTR(u);
 #endif /* HAS_APPLE_PAC */
 
-					if (u >= VM_MIN_KERNEL_AND_KEXT_ADDRESS && u <= VM_MAX_KERNEL_ADDRESS) {
+					if (u_stripped >= VM_MIN_KERNEL_AND_KEXT_ADDRESS && u_stripped <= VM_MAX_KERNEL_ADDRESS) {
 						while (*strp != '\0') {
 							(*putc)(*strp, arg);
 							strp++;
@@ -840,14 +850,10 @@ bsd_log_unlock(void)
 #endif /* __x86_64__ */
 }
 
-extern int disableConsoleOutput;
-
 void
 conslog_putc(char c)
 {
-	if (!disableConsoleOutput) {
-		console_write_char(c);
-	}
+	console_write_char(c);
 
 #ifdef MACH_BSD
 	if (!kernel_debugger_entry_count) {
@@ -859,9 +865,7 @@ conslog_putc(char c)
 void
 cons_putc_locked(char c)
 {
-	if (!disableConsoleOutput) {
-		console_write_char(c);
-	}
+	console_write_char(c);
 }
 
 __printflike(1, 0)
@@ -873,16 +877,17 @@ vprintf_internal(const char *fmt, va_list ap_in, void *caller)
 
 		va_list ap;
 		va_copy(ap, ap_in);
-		console_printbuf_state_init(&info_data, TRUE, TRUE);
-		__doprnt(fmt, ap, console_printbuf_putc, &info_data, 16, TRUE);
-		console_printbuf_clear(&info_data);
-
-		va_end(ap);
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
 		os_log_with_args(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, fmt, ap_in, caller);
 #pragma clang diagnostic pop
+
+		console_printbuf_state_init(&info_data, TRUE, TRUE);
+		__doprnt(fmt, ap, console_printbuf_putc, &info_data, 16, TRUE);
+		console_printbuf_clear(&info_data);
+
+		va_end(ap);
 	}
 	return 0;
 }
@@ -911,9 +916,7 @@ vprintf(const char *fmt, va_list ap)
 void
 consdebug_putc(char c)
 {
-	if (!disableConsoleOutput) {
-		console_write_char(c);
-	}
+	console_write_char(c);
 
 	debug_putc(c);
 
@@ -925,9 +928,7 @@ consdebug_putc(char c)
 void
 consdebug_putc_unbuffered(char c)
 {
-	if (!disableConsoleOutput) {
-		console_write_unbuffered(c);
-	}
+	console_write_unbuffered(c);
 
 	debug_putc(c);
 

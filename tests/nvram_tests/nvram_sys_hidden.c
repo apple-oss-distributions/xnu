@@ -13,14 +13,15 @@ static io_registry_entry_t optionsRef = IO_OBJECT_NULL;
 T_DECL(TestSysReadHidEntitled, "Test SystemReadHidden bit set variable with entitlement")
 {
 #if ((TARGET_OS_OSX) && !(__x86_64__))
-	const char * varToTest = "40A0DDD2-77F8-4392-B4A3-1E7304206516:testSysReadHidden";
+	const char * varToTest = SystemNVRAMGuidString ":" "testSysReadHidden";
 
-	optionsRef = GetOptions();
+	optionsRef = CreateOptionsRef();
 
-	T_ASSERT_EQ(SetVariable(varToTest, "1234", optionsRef), KERN_SUCCESS, "Set variable %s successfully\n", varToTest);
-	T_ASSERT_EQ(GetVariable(varToTest, optionsRef), KERN_SUCCESS, "Read variable %s successfully\n", varToTest);
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_GET, varToTest, NULL, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_DEL, varToTest, NULL, KERN_SUCCESS, optionsRef);
 
-	ReleaseOptions(optionsRef);
+	ReleaseOptionsRef(optionsRef);
 #else
 	T_PASS("Test not supported");
 #endif /* ((TARGET_OS_OSX) && !(__x86_64__)) */

@@ -38,6 +38,7 @@
 #include <kern/startup.h>
 #include <kern/task.h>
 #include <kern/thread.h>
+#include <kern/work_interval.h>
 #include <mach/mach_time.h>
 #include <mach/mach_types.h>
 #include <machine/config.h>
@@ -117,6 +118,7 @@ STARTUP(PERCPU, STARTUP_RANK_LAST, recount_startup);
 #pragma mark - tracks
 
 RECOUNT_PLAN_DEFINE(recount_thread_plan, RCT_TOPO_CPU_KIND);
+RECOUNT_PLAN_DEFINE(recount_work_interval_plan, RCT_TOPO_CPU);
 RECOUNT_PLAN_DEFINE(recount_task_plan, RCT_TOPO_CPU);
 RECOUNT_PLAN_DEFINE(recount_task_terminated_plan, RCT_TOPO_CPU_KIND);
 RECOUNT_PLAN_DEFINE(recount_coalition_plan, RCT_TOPO_CPU_KIND);
@@ -576,9 +578,11 @@ recount_current_thread_times(void)
 	struct recount_times_mach times = recount_thread_times(
 		current_thread());
 #if PRECISE_USER_KERNEL_TIME
-	times.rtm_user += _time_since_last_snapshot();
-#else // PRECISE_USER_KERNEL_TIME
+	// This code is executing in the kernel, so the time since the last snapshot
+	// (with precise user/kernel time) is since entering the kernel.
 	times.rtm_system += _time_since_last_snapshot();
+#else // PRECISE_USER_KERNEL_TIME
+	times.rtm_user += _time_since_last_snapshot();
 #endif // !PRECISE_USER_KERNEL_TIME
 	return times;
 }
@@ -588,6 +592,40 @@ recount_thread_usage(thread_t thread, struct recount_usage *usage)
 {
 	recount_sum(&recount_thread_plan, thread->th_recount.rth_lifetime, usage);
 	_fix_time_precision(usage);
+}
+
+void
+recount_work_interval_usage(struct work_interval *work_interval, struct recount_usage *usage)
+{
+	recount_sum(&recount_work_interval_plan, work_interval_get_recount_tracks(work_interval), usage);
+	_fix_time_precision(usage);
+}
+
+struct recount_times_mach
+recount_work_interval_times(struct work_interval *work_interval)
+{
+	size_t topo_count = recount_topo_count(recount_work_interval_plan.rpl_topo);
+	struct recount_times_mach times = { 0 };
+	for (size_t i = 0; i < topo_count; i++) {
+		_times_add_usage(&times, &work_interval_get_recount_tracks(work_interval)[i].rt_usage);
+	}
+	return times;
+}
+
+uint64_t
+recount_work_interval_energy_nj(struct work_interval *work_interval)
+{
+#if RECOUNT_ENERGY
+	size_t topo_count = recount_topo_count(recount_work_interval_plan.rpl_topo);
+	uint64_t energy = 0;
+	for (size_t i = 0; i < topo_count; i++) {
+		energy += work_interval_get_recount_tracks(work_interval)[i].rt_usage.ru_energy_nj;
+	}
+	return energy;
+#else // RECOUNT_ENERGY
+#pragma unused(work_interval)
+	return 0;
+#endif // !RECOUNT_ENERGY
 }
 
 void
@@ -722,9 +760,16 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 	// needs to be read as up-to-date from `recount_processor_usage`.
 
 	bool was_idle = (thread->options & TH_OPT_IDLE_THREAD) != 0;
+	struct recount_track *wi_tracks_array = work_interval_get_recount_tracks(thread->th_work_interval);
+	bool collect_work_interval_telemetry = wi_tracks_array != NULL;
 
 	struct recount_track *th_track = recount_update_start(
 		thread->th_recount.rth_lifetime, recount_thread_plan.rpl_topo,
+		processor);
+	struct recount_track *wi_track =
+	    (was_idle || !collect_work_interval_telemetry) ? NULL : recount_update_start(
+		wi_tracks_array,
+		recount_work_interval_plan.rpl_topo,
 		processor);
 	struct recount_track *tk_track = was_idle ? NULL : recount_update_start(
 		task->tk_recount.rtk_lifetime, recount_task_plan.rpl_topo,
@@ -734,19 +779,24 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 		processor);
 	recount_update_commit();
 
-	uint64_t *th_time = NULL, *tk_time = NULL, *pr_time = NULL;
+	uint64_t *th_time = NULL, *wi_time = NULL, *tk_time = NULL, *pr_time = NULL;
 	if (from_user) {
 		th_time = &th_track->rt_usage.ru_user_time_mach;
+		wi_time = &wi_track->rt_usage.ru_user_time_mach;
 		tk_time = &tk_track->rt_usage.ru_user_time_mach;
 		pr_time = &pr_track->rt_usage.ru_user_time_mach;
 	} else {
 		th_time = &th_track->rt_usage.ru_system_time_mach;
+		wi_time = &wi_track->rt_usage.ru_system_time_mach;
 		tk_time = &tk_track->rt_usage.ru_system_time_mach;
 		pr_time = &pr_track->rt_usage.ru_system_time_mach;
 	}
 
 	recount_usage_add_snap(&th_track->rt_usage, th_time, to_add);
 	if (!was_idle) {
+		if (collect_work_interval_telemetry) {
+			recount_usage_add_snap(&wi_track->rt_usage, wi_time, to_add);
+		}
 		recount_usage_add_snap(&tk_track->rt_usage, tk_time, to_add);
 		recount_usage_add_snap(&pr_track->rt_usage, pr_time, to_add);
 	}
@@ -754,6 +804,9 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 	recount_update_commit();
 	recount_update_end(th_track);
 	if (!was_idle) {
+		if (collect_work_interval_telemetry) {
+			recount_update_end(wi_track);
+		}
 		recount_update_end(tk_track);
 		recount_update_end(pr_track);
 	}
@@ -789,11 +842,16 @@ recount_add_energy(struct thread *off_thread, struct task *off_task,
 	}
 
 	bool was_idle = (off_thread->options & TH_OPT_IDLE_THREAD) != 0;
+	struct recount_track *wi_tracks_array = work_interval_get_recount_tracks(off_thread->th_work_interval);
+	bool collect_work_interval_telemetry = wi_tracks_array != NULL;
 	processor_t processor = current_processor();
 
 	struct recount_track *th_track = recount_update_single_start(
 		off_thread->th_recount.rth_lifetime, recount_thread_plan.rpl_topo,
 		processor);
+	struct recount_track *wi_track = (was_idle || !collect_work_interval_telemetry) ? NULL :
+	    recount_update_single_start(wi_tracks_array,
+	    recount_work_interval_plan.rpl_topo, processor);
 	struct recount_track *tk_track = was_idle ? NULL :
 	    recount_update_single_start(off_task->tk_recount.rtk_lifetime,
 	    recount_task_plan.rpl_topo, processor);
@@ -802,8 +860,10 @@ recount_add_energy(struct thread *off_thread, struct task *off_task,
 	    recount_processor_plan.rpl_topo, processor);
 
 	th_track->rt_usage.ru_energy_nj += energy_nj;
-
 	if (!was_idle) {
+		if (collect_work_interval_telemetry) {
+			wi_track->rt_usage.ru_energy_nj += energy_nj;
+		}
 		tk_track->rt_usage.ru_energy_nj += energy_nj;
 		pr_track->rt_usage.ru_energy_nj += energy_nj;
 	}
@@ -812,9 +872,11 @@ recount_add_energy(struct thread *off_thread, struct task *off_task,
 #endif // !RECOUNT_ENERGY
 }
 
-
 #define MT_KDBG_IC_CPU_CSWITCH \
 	KDBG_EVENTID(DBG_MONOTONIC, DBG_MT_INSTRS_CYCLES, 1)
+
+#define MT_KDBG_IC_CPU_CSWITCH_ON \
+    KDBG_EVENTID(DBG_MONOTONIC, DBG_MT_INSTRS_CYCLES_ON_CPU, 1)
 
 void
 recount_log_switch_thread(const struct recount_snap *snap)
@@ -823,6 +885,22 @@ recount_log_switch_thread(const struct recount_snap *snap)
 	if (kdebug_debugid_explicitly_enabled(MT_KDBG_IC_CPU_CSWITCH)) {
 		// In Monotonic's event hierarchy for backwards-compatibility.
 		KDBG_RELEASE(MT_KDBG_IC_CPU_CSWITCH, snap->rsn_insns, snap->rsn_cycles);
+	}
+#else // CONFIG_PERVASIVE_CPI
+#pragma unused(snap)
+#endif // CONFIG_PERVASIVE_CPI
+}
+
+void
+recount_log_switch_thread_on(const struct recount_snap *snap)
+{
+#if CONFIG_PERVASIVE_CPI
+	if (kdebug_debugid_explicitly_enabled(MT_KDBG_IC_CPU_CSWITCH_ON)) {
+		if (!snap) {
+			snap = recount_get_snap(current_processor());
+		}
+		// In Monotonic's event hierarchy for backwards-compatibility.
+		KDBG_RELEASE(MT_KDBG_IC_CPU_CSWITCH_ON, snap->rsn_insns, snap->rsn_cycles);
 	}
 #else // CONFIG_PERVASIVE_CPI
 #pragma unused(snap)
@@ -1181,6 +1259,18 @@ void
 recount_coalition_deinit(struct recount_coalition *co)
 {
 	recount_usage_free(recount_coalition_plan.rpl_topo, co->rco_exited);
+}
+
+void
+recount_work_interval_init(struct recount_work_interval *wi)
+{
+	wi->rwi_current_instance = recount_tracks_create(&recount_work_interval_plan);
+}
+
+void
+recount_work_interval_deinit(struct recount_work_interval *wi)
+{
+	recount_tracks_destroy(&recount_work_interval_plan, wi->rwi_current_instance);
 }
 
 struct recount_usage *

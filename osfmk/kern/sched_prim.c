@@ -108,7 +108,6 @@
 #include <kern/timer_queue.h>
 #include <kern/waitq.h>
 #include <kern/policy_internal.h>
-#include <kern/cpu_quiesce.h>
 
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
@@ -248,6 +247,10 @@ rt_runq_is_low_latency(processor_set_t pset)
 }
 
 TUNABLE(bool, cpulimit_affects_quantum, "cpulimit_affects_quantum", true);
+
+/* TODO: enable this, to 50us (less than the deferred IPI latency, to beat a spill) */
+TUNABLE(uint32_t, nonurgent_preemption_timer_us, "nonurgent_preemption_timer", 0); /* microseconds */
+static uint64_t nonurgent_preemption_timer_abs = 0;
 
 #define         DEFAULT_PREEMPTION_RATE         100             /* (1/s) */
 TUNABLE(int, default_preemption_rate, "preempt", DEFAULT_PREEMPTION_RATE);
@@ -456,7 +459,9 @@ sched_init(void)
 	}
 	strlcpy(sched_string, SCHED(sched_name), sizeof(sched_string));
 
-	cpu_quiescent_counter_init();
+#if __arm64__
+	clock_interval_to_absolutetime_interval(expecting_ipi_wfe_timeout_usec, NSEC_PER_USEC, &expecting_ipi_wfe_timeout_mt);
+#endif /* __arm64__ */
 
 	SCHED(init)();
 	SCHED(rt_init)(&pset0);
@@ -619,6 +624,11 @@ sched_timeshare_timebase_init(void)
 #if __arm64__
 	perfcontrol_failsafe_starvation_threshold = (2 * sched_tick_interval);
 #endif /* __arm64__ */
+
+	if (nonurgent_preemption_timer_us) {
+		clock_interval_to_absolutetime_interval(nonurgent_preemption_timer_us, NSEC_PER_USEC, &abstime);
+		nonurgent_preemption_timer_abs = abstime;
+	}
 }
 
 #endif /* CONFIG_SCHED_TIMESHARE_CORE */
@@ -893,6 +903,7 @@ thread_unblock(
 			work_interval_auto_join_propagate(cthread, thread);
 		}
 #endif /*CONFIG_SCHED_AUTO_JOIN */
+
 	} else {
 		/*
 		 * Either the thread is idling in place on another processor,
@@ -1849,6 +1860,48 @@ thread_bind(
 	return prev;
 }
 
+void
+thread_bind_during_wakeup(thread_t thread, processor_t processor)
+{
+	assert(!ml_get_interrupts_enabled());
+	assert((thread->state & (TH_WAIT | TH_WAKING)) == (TH_WAIT | TH_WAKING));
+#if MACH_ASSERT
+	thread_lock_assert(thread, LCK_ASSERT_OWNED);
+#endif
+
+	if (thread->bound_processor != processor) {
+		thread_bind_internal(thread, processor);
+	}
+}
+
+void
+thread_unbind_after_queue_shutdown(
+	thread_t                thread,
+	processor_t             processor __assert_only)
+{
+	assert(!ml_get_interrupts_enabled());
+
+	thread_lock(thread);
+
+	if (thread->bound_processor) {
+		bool removed;
+
+		assert(thread->bound_processor == processor);
+
+		removed = thread_run_queue_remove(thread);
+		/*
+		 * we can always unbind even if we didn't really remove the
+		 * thread from the runqueue
+		 */
+		thread_bind_internal(thread, PROCESSOR_NULL);
+		if (removed) {
+			thread_run_queue_reinsert(thread, SCHED_TAILQ);
+		}
+	}
+
+	thread_unlock(thread);
+}
+
 /*
  * thread_bind_internal:
  *
@@ -1876,7 +1929,8 @@ thread_bind_internal(
 	/* A thread can't be bound if it's sitting on a (potentially incorrect) runqueue */
 	assert(thread->runq == PROCESSOR_NULL);
 
-	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_THREAD_BIND), thread_tid(thread), processor ? (uintptr_t)processor->cpu_id : (uintptr_t)-1, 0, 0, 0);
+	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_THREAD_BIND),
+	    thread_tid(thread), processor ? processor->cpu_id : ~0ul, 0, 0, 0);
 
 	prev = thread->bound_processor;
 	thread->bound_processor = processor;
@@ -2093,7 +2147,7 @@ int sched_smt_balance = 1;
 #endif
 
 /* Invoked with pset locked, returns with pset unlocked */
-void
+bool
 sched_SMT_balance(processor_t cprocessor, processor_set_t cpset)
 {
 	processor_t ast_processor = NULL;
@@ -2143,6 +2197,7 @@ smt_balance_exit:
 		KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_SMT_BALANCE), ast_processor->cpu_id, ast_processor->state, ast_processor->processor_primary->state, 0, 0);
 		sched_ipi_perform(ast_processor, ipi_type);
 	}
+	return false;
 }
 
 static cpumap_t
@@ -2586,7 +2641,7 @@ restart:
 
 		bool bound_elsewhere     = thread->bound_processor != PROCESSOR_NULL && thread->bound_processor != processor;
 
-		bool avoid_processor     = !is_yielding && SCHED(avoid_processor_enabled) && SCHED(thread_avoid_processor)(processor, thread);
+		bool avoid_processor     = !is_yielding && SCHED(avoid_processor_enabled) && SCHED(thread_avoid_processor)(processor, thread, *reason);
 
 		bool ok_to_run_realtime_thread = sched_ok_to_run_realtime_thread(pset, processor, true);
 
@@ -2909,7 +2964,7 @@ idle:
 		clear_pending_AST_bits(pset, processor, 7);
 
 		/* Invoked with pset locked, returns with pset unlocked */
-		SCHED(processor_balance)(processor, pset);
+		processor->next_idle_short = SCHED(processor_balance)(processor, pset);
 
 		new_thread = processor->idle_thread;
 	} while (new_thread == THREAD_NULL);
@@ -2967,7 +3022,7 @@ thread_invoke(
 #if defined(CONFIG_SCHED_TIMESHARE_CORE)
 	if (!((thread->state & TH_IDLE) != 0 ||
 	    ((reason & AST_HANDOFF) && self->sched_mode == TH_MODE_REALTIME))) {
-		sched_timeshare_consider_maintenance(ctime);
+		sched_timeshare_consider_maintenance(ctime, true);
 	}
 #endif
 
@@ -3084,6 +3139,8 @@ thread_invoke(
 			kperf_on_cpu(thread, continuation, NULL);
 #endif /* KPERF */
 
+			recount_log_switch_thread_on(&snap);
+
 			thread_dispatch(self, thread);
 
 #if KASAN
@@ -3114,6 +3171,8 @@ thread_invoke(
 #if KPERF
 			kperf_on_cpu(thread, continuation, NULL);
 #endif /* KPERF */
+
+			recount_log_switch_thread_on(&snap);
 
 			KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
 			    MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED) | DBG_FUNC_NONE,
@@ -3246,6 +3305,9 @@ need_stack:
 #if KPERF
 	kperf_on_cpu(self, NULL, __builtin_frame_address(0));
 #endif /* KPERF */
+
+	/* Previous snap on the old stack is gone. */
+	recount_log_switch_thread_on(NULL);
 
 	/* We have been resumed and are set to run. */
 	thread_dispatch(thread, self);
@@ -3472,6 +3534,10 @@ thread_dispatch(
 			 */
 			if (thread_get_tag(thread) & THREAD_TAG_WORKQUEUE) {
 				thread_evaluate_workqueue_quantum_expiry(thread);
+			}
+
+			if (__improbable(thread->rwlock_count != 0)) {
+				smr_mark_active_trackers_stalled(thread);
 			}
 
 			/*
@@ -3815,6 +3881,8 @@ thread_block_reason(
 
 	/* We're handling all scheduling AST's */
 	ast_off(AST_SCHEDULING);
+
+	clear_pending_nonurgent_preemption(processor);
 
 #if PROC_REF_DEBUG
 	if ((continuation != NULL) && (get_threadtask(self) != kernel_task)) {
@@ -4870,7 +4938,7 @@ processor_setrun(
 {
 	processor_set_t pset = processor->processor_set;
 	pset_assert_locked(pset);
-	ast_t preempt;
+	ast_t preempt = AST_NONE;
 	enum { eExitIdle, eInterruptRunning, eDoNothing } ipi_action = eDoNothing;
 
 	sched_ipi_type_t ipi_type = SCHED_IPI_NONE;
@@ -4971,8 +5039,14 @@ processor_setrun(
 			ipi_type = sched_ipi_action(processor, thread, event);
 		}
 	}
+
 	pset_unlock(pset);
 	sched_ipi_perform(processor, ipi_type);
+
+	if (ipi_action != eDoNothing && processor == current_processor()) {
+		ast_t new_preempt = update_pending_nonurgent_preemption(processor, preempt);
+		ast_on(new_preempt);
+	}
 }
 
 /*
@@ -5084,7 +5158,22 @@ choose_processor(
 				 * the "least cost idle" processor above.
 				 */
 				if ((thread->sched_pri < BASEPRI_RTQUEUES) || processor_is_fast_track_candidate_for_realtime_thread(pset, processor)) {
-					return processor;
+					uint64_t idle_primary_map = (pset->cpu_state_map[PROCESSOR_IDLE] & pset->primary_map & pset->recommended_bitmask);
+					uint64_t preferred_idle_primary_map = idle_primary_map & pset->perfcontrol_cpu_preferred_bitmask;
+					/*
+					 * Only 1 idle core, choose it.
+					 */
+					if (bit_count(idle_primary_map) == 1) {
+						return processor;
+					}
+
+					/*
+					 * If the rotation bitmask to force a migration is set for this core and one of the preferred cores
+					 * is idle, don't continue running on the same core.
+					 */
+					if (!(bit_test(processor->processor_set->perfcontrol_cpu_migration_bitmask, processor->cpu_id) && preferred_idle_primary_map != 0)) {
+						return processor;
+					}
 				}
 				processor = PROCESSOR_NULL;
 				break;
@@ -5238,15 +5327,29 @@ no_available_cpus:
 		/*
 		 * Choose an idle processor, in pset traversal order
 		 */
-
-		uint64_t idle_primary_map = (pset->cpu_state_map[PROCESSOR_IDLE] &
-		    pset->primary_map &
-		    pset->recommended_bitmask);
+		uint64_t idle_primary_map = (pset->cpu_state_map[PROCESSOR_IDLE] & pset->primary_map & pset->recommended_bitmask);
+		uint64_t preferred_idle_primary_map = idle_primary_map & pset->perfcontrol_cpu_preferred_bitmask;
 
 		/* there shouldn't be a pending AST if the processor is idle */
 		assert((idle_primary_map & pset->pending_AST_URGENT_cpu_mask) == 0);
 
-		int cpuid = lsb_first(idle_primary_map);
+		/*
+		 * Look at the preferred cores first.
+		 */
+		int cpuid = lsb_next(preferred_idle_primary_map, pset->cpu_preferred_last_chosen);
+		if (cpuid < 0) {
+			cpuid = lsb_first(preferred_idle_primary_map);
+		}
+		if (cpuid >= 0) {
+			processor = processor_array[cpuid];
+			pset->cpu_preferred_last_chosen = cpuid;
+			return processor;
+		}
+
+		/*
+		 * Fall back to all idle cores if none of the preferred ones are available.
+		 */
+		cpuid = lsb_first(idle_primary_map);
 		if (cpuid >= 0) {
 			processor = processor_array[cpuid];
 			return processor;
@@ -5766,7 +5869,80 @@ csw_check(
 
 	pset_unlock(pset);
 
-	return preempt;
+	return update_pending_nonurgent_preemption(processor, preempt);
+}
+
+void
+clear_pending_nonurgent_preemption(processor_t processor)
+{
+	if (!processor->pending_nonurgent_preemption) {
+		return;
+	}
+
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_PREEMPT_TIMER_ACTIVE) | DBG_FUNC_END);
+
+	processor->pending_nonurgent_preemption = false;
+	running_timer_clear(processor, RUNNING_TIMER_PREEMPT);
+}
+
+ast_t
+update_pending_nonurgent_preemption(processor_t processor, ast_t reason)
+{
+	if ((reason & (AST_URGENT | AST_PREEMPT)) != (AST_PREEMPT)) {
+		clear_pending_nonurgent_preemption(processor);
+		return reason;
+	}
+
+	if (nonurgent_preemption_timer_abs == 0) {
+		/* Preemption timer not enabled */
+		return reason;
+	}
+
+	if (current_thread()->state & TH_IDLE) {
+		/* idle threads don't need nonurgent preemption */
+		return reason;
+	}
+
+	if (processor->pending_nonurgent_preemption) {
+		/* Timer is already armed, no need to do it again */
+		return reason;
+	}
+
+	if (ml_did_interrupt_userspace()) {
+		/*
+		 * We're preempting userspace here, so we don't need
+		 * to defer the preemption.  Force AST_URGENT
+		 * so that we can avoid arming this timer without risking
+		 * ast_taken_user deciding to spend too long in kernel
+		 * space to handle other ASTs.
+		 */
+
+		return reason | AST_URGENT;
+	}
+
+	/*
+	 * We've decided to do a nonurgent preemption when running in
+	 * kernelspace. We defer the preemption until reaching userspace boundary
+	 * to give a grace period for locks etc to be dropped and to reach
+	 * a clean preemption point, so that the preempting thread doesn't
+	 * always immediately hit the lock that the waking thread still holds.
+	 *
+	 * Arm a timer to enforce that the preemption executes within a bounded
+	 * time if the thread doesn't block or return to userspace quickly.
+	 */
+
+	processor->pending_nonurgent_preemption = true;
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_PREEMPT_TIMER_ACTIVE) | DBG_FUNC_START,
+	    reason);
+
+	uint64_t now = mach_absolute_time();
+
+	uint64_t deadline = now + nonurgent_preemption_timer_abs;
+
+	running_timer_enter(processor, RUNNING_TIMER_PREEMPT, NULL,
+	    now, deadline);
+
+	return reason;
 }
 
 /*
@@ -5813,7 +5989,7 @@ csw_check_locked(
 	 *
 	 * TODO: Should these set AST_REBALANCE?
 	 */
-	if (SCHED(avoid_processor_enabled) && SCHED(thread_avoid_processor)(processor, thread)) {
+	if (SCHED(avoid_processor_enabled) && SCHED(thread_avoid_processor)(processor, thread, check_reason)) {
 		return check_reason | AST_PREEMPT;
 	}
 
@@ -5842,7 +6018,7 @@ csw_check_locked(
 	 */
 	result = sfi_thread_needs_ast(thread, NULL);
 	if (result != AST_NONE) {
-		return check_reason | result;
+		return result;
 	}
 #endif
 
@@ -5857,10 +6033,15 @@ csw_check_locked(
 void
 ast_check(processor_t processor)
 {
+	smr_ack_ipi();
+
 	if (processor->state != PROCESSOR_RUNNING &&
 	    processor->state != PROCESSOR_SHUTDOWN) {
 		return;
 	}
+
+	SCHED_DEBUG_AST_CHECK_KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SCHED,
+	    MACH_SCHED_AST_CHECK) | DBG_FUNC_START);
 
 	thread_t thread = processor->active_thread;
 
@@ -5915,6 +6096,48 @@ ast_check(processor_t processor)
 		machine_switch_perfcontrol_state_update(PERFCONTROL_ATTR_UPDATE,
 		    mach_approximate_time(), 0, thread);
 	}
+
+	SCHED_DEBUG_AST_CHECK_KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SCHED,
+	    MACH_SCHED_AST_CHECK) | DBG_FUNC_END, preempt);
+}
+
+
+void
+thread_preempt_expire(
+	timer_call_param_t      p0,
+	__unused timer_call_param_t      p1)
+{
+	processor_t processor = p0;
+
+	assert(processor == current_processor());
+	assert(p1 == NULL);
+
+	thread_t thread = current_thread();
+
+	/*
+	 * This is set and cleared by the current core, so we will
+	 * never see a race with running timer expiration
+	 */
+	assert(processor->pending_nonurgent_preemption);
+
+	clear_pending_nonurgent_preemption(processor);
+
+	thread_lock(thread);
+
+	/*
+	 * Check again to see if it's still worth a
+	 * context switch, but this time force enable kernel preemption
+	 */
+
+	ast_t preempt = csw_check(thread, processor, AST_URGENT);
+
+	if (preempt) {
+		ast_on(preempt);
+	}
+
+	thread_unlock(thread);
+
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_PREEMPT_TIMER_ACTIVE), preempt);
 }
 
 
@@ -6311,6 +6534,8 @@ thread_get_perfcontrol_class(thread_t thread)
 		return PERFCONTROL_CLASS_UTILITY;
 	} else if (thread->base_pri <= BASEPRI_DEFAULT) {
 		return PERFCONTROL_CLASS_NONUI;
+	} else if (thread->base_pri <= BASEPRI_USER_INITIATED) {
+		return PERFCONTROL_CLASS_USER_INITIATED;
 	} else if (thread->base_pri <= BASEPRI_FOREGROUND) {
 		return PERFCONTROL_CLASS_UI;
 	} else {
@@ -6363,7 +6588,6 @@ processor_idle(
 
 	recount_snapshot(&snap);
 	recount_processor_idle(&processor->pr_recount, &snap);
-	cpu_quiescent_counter_leave(snap.rsn_time_mach);
 
 	while (1) {
 		/*
@@ -6430,7 +6654,7 @@ processor_idle(
 		 * context swithing.
 		 */
 		if (processor->state == PROCESSOR_IDLE) {
-			sched_timeshare_consider_maintenance(mach_absolute_time());
+			sched_timeshare_consider_maintenance(mach_absolute_time(), true);
 		}
 
 		if (!SCHED(processor_queue_empty)(processor)) {
@@ -6445,7 +6669,7 @@ processor_idle(
 
 	recount_snapshot(&snap);
 	recount_processor_run(&processor->pr_recount, &snap);
-	cpu_quiescent_counter_join(snap.rsn_time_mach);
+	smr_cpu_join(processor, snap.rsn_time_mach);
 
 	ast_t reason = AST_NONE;
 
@@ -6486,6 +6710,8 @@ idle_thread(__assert_only void* parameter,
 	assert(parameter == NULL);
 
 	processor_t processor = current_processor();
+
+	smr_cpu_leave(processor, processor->last_dispatch);
 
 	/*
 	 * Ensure that anything running in idle context triggers
@@ -6733,10 +6959,8 @@ static uint64_t sched_maintenance_wakeups;
  * no more than a comparison against the deadline in the common case.
  */
 void
-sched_timeshare_consider_maintenance(uint64_t ctime)
+sched_timeshare_consider_maintenance(uint64_t ctime, bool safe_point)
 {
-	cpu_quiescent_counter_checkin(ctime);
-
 	uint64_t deadline = sched_maintenance_deadline;
 
 	if (__improbable(ctime >= deadline)) {
@@ -6750,8 +6974,11 @@ sched_timeshare_consider_maintenance(uint64_t ctime)
 		if (__probable(os_atomic_cmpxchg(&sched_maintenance_deadline, deadline, ndeadline, seq_cst))) {
 			thread_wakeup((event_t)sched_timeshare_maintenance_continue);
 			sched_maintenance_wakeups++;
+			smr_maintenance(ctime);
 		}
 	}
+
+	smr_cpu_tick(ctime, safe_point);
 
 #if !CONFIG_SCHED_CLUTCH
 	/*
@@ -7773,6 +8000,12 @@ sched_update_recommended_cores(uint64_t recommended_cores, processor_reason_t re
 			pset_update_rt_stealable_state(pset);
 
 			pset_unlock(pset);
+
+			for (int cpu_id = lsb_first(newly_recommended); cpu_id >= 0;
+			    cpu_id = lsb_next(newly_recommended, cpu_id)) {
+				smr_cpu_up(processor_array[cpu_id],
+				    SMR_CPU_REASON_IGNORED);
+			}
 		}
 	}
 
@@ -7816,12 +8049,21 @@ sched_update_recommended_cores(uint64_t recommended_cores, processor_reason_t re
 
 				SCHED(rt_queue_shutdown)(processor);
 
-				if (ipi_type != SCHED_IPI_NONE) {
-					if (processor == current_processor()) {
-						ast_on(AST_PREEMPT);
-					} else {
-						sched_ipi_perform(processor, ipi_type);
-					}
+				if (ipi_type == SCHED_IPI_NONE) {
+					/*
+					 * If the core is idle,
+					 * we can directly mark the processor
+					 * as "Ignored"
+					 *
+					 * Otherwise, smr will detect this
+					 * during smr_cpu_leave() when the
+					 * processor actually idles.
+					 */
+					smr_cpu_down(processor, SMR_CPU_REASON_IGNORED);
+				} else if (processor == current_processor()) {
+					ast_on(AST_PREEMPT);
+				} else {
+					sched_ipi_perform(processor, ipi_type);
 				}
 
 				pset_lock(pset);

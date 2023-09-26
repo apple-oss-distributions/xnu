@@ -36,6 +36,7 @@
 #include <mach/message.h>
 #include <kern/mach_filter.h>
 #include <ipc/ipc_service_port.h>
+#include <security/mac_mach_internal.h>
 
 #define XPC_DOMAIN_PORT 7 /* This value should match what is in <xpc/launch_private.h> */
 
@@ -65,6 +66,9 @@ kdp_ipc_fill_splabel(struct ipc_service_port_label *ispl,
 #if CONFIG_SERVICE_PORT_INFO
 	*namep = ispl->ispl_service_name;
 	spl->portlabel_domain = ispl->ispl_domain;
+	if (ipc_service_port_label_is_throttled(ispl)) {
+		spl->portlabel_flags |= STACKSHOT_PORTLABEL_THROTTLED;
+	}
 #endif
 }
 
@@ -170,6 +174,9 @@ ipc_service_port_derive_sblabel(mach_port_name_t service_port_name, void **sblab
 	ipc_port_t port;
 	kern_return_t kr;
 	boolean_t send_side_filtering = FALSE;
+#if CONFIG_MACF && XNU_TARGET_OS_OSX
+	struct mach_service_port_info sp_info = {};
+#endif
 
 	if (!MACH_PORT_VALID(service_port_name)) {
 		return KERN_INVALID_NAME;
@@ -193,6 +200,10 @@ ipc_service_port_derive_sblabel(mach_port_name_t service_port_name, void **sblab
 			return KERN_SUCCESS;
 		}
 
+#if CONFIG_MACF && XNU_TARGET_OS_OSX
+		ipc_service_port_label_get_info(port_label, &sp_info);
+#endif
+
 		sblabel = port_label->ispl_sblabel;
 		if (sblabel) {
 			mach_msg_filter_retain_sblabel_callback(sblabel);
@@ -203,6 +214,12 @@ ipc_service_port_derive_sblabel(mach_port_name_t service_port_name, void **sblab
 			/* This callback will release the reference on sblabel */
 			derived_sblabel = mach_msg_filter_derive_sblabel_from_service_port_callback(sblabel, &send_side_filtering);
 		}
+
+#if CONFIG_MACF && XNU_TARGET_OS_OSX
+		if (sp_info.mspi_string_name[0] != '\0') {
+			mac_proc_notify_service_port_derive(&sp_info);
+		}
+#endif
 	}
 
 	*sblabel_ptr = derived_sblabel;

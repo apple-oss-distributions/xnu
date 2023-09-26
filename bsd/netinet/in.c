@@ -2173,7 +2173,7 @@ in_ifaddr_trace(struct ifaddr *ifa, int refhold)
 		tr = inifa_dbg->inifa_refrele;
 	}
 
-	idx = atomic_add_16_ov(cnt, 1) % INIFA_TRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(cnt, relaxed) % INIFA_TRACE_HIST_SIZE;
 	ctrace_record(&tr[idx]);
 }
 

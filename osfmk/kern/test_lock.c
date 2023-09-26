@@ -176,8 +176,7 @@ smrh_elem_try_get(void *arg __unused)
 
 SMRH_TRAITS_DEFINE_SCALAR(smrh_test_traits, struct smrh_elem, val, link,
     .domain      = &smr_system,
-    .obj_try_get = smrh_elem_try_get,
-    );
+    .obj_try_get = smrh_elem_try_get);
 
 LCK_GRP_DECLARE(smrh_test_grp, "foo");
 LCK_MTX_DECLARE(smrh_test_lck, &smrh_test_grp);
@@ -355,3 +354,199 @@ smr_shash_basic_test(__unused int64_t in, int64_t *out)
 	return 0;
 }
 SYSCTL_TEST_REGISTER(smr_shash_basic, smr_shash_basic_test);
+
+struct smr_ctx {
+	thread_t        driver;
+	smr_t           smr;
+	uint32_t        active;
+	uint32_t        idx;
+	uint64_t        deadline;
+	uint32_t        calls_sent;
+	uint32_t        calls_done;
+	uint32_t        syncs_done;
+	uint32_t        barriers_done;
+};
+
+struct smr_call_ctx {
+	struct smr_node node;
+	struct smr_ctx *ctx;
+};
+
+static void
+smr_sleepable_stress_cb(smr_node_t node)
+{
+	struct smr_call_ctx *cctx;
+
+	cctx = __container_of(node, struct smr_call_ctx, node);
+	os_atomic_inc(&cctx->ctx->calls_done, relaxed);
+
+	kfree_type(struct smr_call_ctx, cctx);
+}
+
+static void
+smr_sleepable_stress_make_call(struct smr_ctx *ctx)
+{
+	struct smr_call_ctx *cctx;
+
+	cctx = kalloc_type(struct smr_call_ctx, Z_WAITOK);
+	cctx->ctx = ctx;
+	os_atomic_inc(&ctx->calls_sent, relaxed);
+	smr_call(ctx->smr, &cctx->node, sizeof(*cctx), smr_sleepable_stress_cb);
+}
+
+static void
+smr_sleepable_stress_log(struct smr_ctx *ctx, uint64_t n)
+{
+	printf("%s[%lld]: "
+	    "%d/%d calls, %d syncs, %d barriers, "
+	    "rd-seq: %ld, wr-seq: %ld\n",
+	    __func__, n,
+	    ctx->calls_done, ctx->calls_sent,
+	    ctx->syncs_done,
+	    ctx->barriers_done,
+	    ctx->smr->smr_clock.s_rd_seq / SMR_SEQ_INC,
+	    ctx->smr->smr_clock.s_wr_seq / SMR_SEQ_INC);
+}
+
+static uint32_t
+smr_sleepable_stress_idx(struct smr_ctx *ctx, thread_t self)
+{
+	if (ctx->driver == self) {
+		return 0;
+	}
+	return os_atomic_inc(&ctx->idx, relaxed);
+}
+
+
+static void
+smr_sleepable_stress_worker(void *arg, wait_result_t wr __unused)
+{
+	thread_t self = current_thread();
+	struct smr_ctx *ctx = arg;
+	smr_t smr = ctx->smr;
+
+	const uint64_t step = NSEC_PER_SEC / 4;
+	const uint64_t start = mach_absolute_time();
+	const uint32_t idx = smr_sleepable_stress_idx(ctx, self);
+
+	uint64_t now, delta, last = 0;
+
+	printf("%s: thread %p starting\n", __func__, self);
+
+	while ((now = mach_absolute_time()) < ctx->deadline) {
+		struct smr_tracker smrt;
+		uint64_t what;
+
+		if (idx == 0) {
+			absolutetime_to_nanoseconds(now - start, &delta);
+			if (delta >= (last + 1) * step) {
+				last = delta / step;
+				smr_sleepable_stress_log(ctx, last);
+			}
+		}
+
+		smr_enter_sleepable(smr, &smrt);
+		assert(smr_entered(smr));
+
+		what = early_random() % 100;
+		if (what == 0 && idx == 1) {
+			/* 1% of the time, sleep for a long time */
+			delay_for_interval(1, NSEC_PER_MSEC);
+		} else if (what < 10) {
+			/* 9% of the time, just yield */
+			thread_block_reason(THREAD_CONTINUE_NULL, NULL, AST_YIELD);
+		} else if (what < 30) {
+			/* 20% of the time, do some longer work on core */
+			uint64_t busy_start = mach_absolute_time();
+
+			do {
+				now = mach_absolute_time();
+				absolutetime_to_nanoseconds(now - busy_start, &delta);
+			} while (delta < (what + 50) * NSEC_PER_USEC);
+		}
+
+		assert(smr_entered(smr));
+		smr_leave_sleepable(smr, &smrt);
+
+		what = early_random() % 100;
+		if (what < 20) {
+			/* smr_call 20% of the time */
+			smr_sleepable_stress_make_call(ctx);
+		} else if (what < 22 && (idx & 1)) {
+			/* smr_synchronize 2% of the time for half the threads */
+			smr_synchronize(smr);
+			os_atomic_inc(&ctx->syncs_done, relaxed);
+		} else if (what < 23 && (idx & 1)) {
+			/* smr_barrier 1% of the time for half the threads */
+			smr_barrier(smr);
+			os_atomic_inc(&ctx->barriers_done, relaxed);
+		}
+	}
+
+	printf("%s: thread %p done\n", __func__, self);
+
+	if (idx != 0) {
+		if (os_atomic_dec(&ctx->active, relaxed) == 0) {
+			thread_wakeup(ctx);
+		}
+
+		thread_terminate_self();
+		__builtin_unreachable();
+	}
+}
+
+static int
+smr_sleepable_stress_test(int64_t seconds, int64_t *out)
+{
+	thread_pri_floor_t token;
+	struct smr_ctx ctx = { };
+	thread_t th;
+
+	if (seconds > 60) {
+		return EINVAL;
+	}
+
+	printf("%s: STARTING\n", __func__);
+
+	ctx.active = zpercpu_count() * 2; /* overcommit the system on purpose */
+	ctx.driver = current_thread();
+	ctx.smr    = smr_domain_create(SMR_SLEEPABLE, "test (sleepable)");
+	assert3p(ctx.smr, !=, NULL);
+
+	clock_interval_to_deadline((uint32_t)seconds, NSEC_PER_SEC, &ctx.deadline);
+
+	/*
+	 * We will relatively massively hammer the system,
+	 * stay above that crowd.
+	 */
+	token = thread_priority_floor_start();
+
+	for (uint32_t i = 1; i < ctx.active; i++) {
+		kernel_thread_start_priority(smr_sleepable_stress_worker,
+		    &ctx, BASEPRI_DEFAULT, &th);
+		thread_deallocate(th);
+	}
+
+	smr_sleepable_stress_worker(&ctx, THREAD_AWAKENED);
+
+	thread_priority_floor_end(&token);
+
+	assert_wait(&ctx, THREAD_UNINT);
+	if (os_atomic_dec(&ctx.active, relaxed) == 0) {
+		clear_wait(ctx.driver, THREAD_AWAKENED);
+	} else {
+		thread_block(THREAD_CONTINUE_NULL);
+	}
+
+	smr_barrier(ctx.smr); /* to get accurate stats */
+	smr_sleepable_stress_log(&ctx, seconds * 4);
+	smr_domain_free(ctx.smr);
+
+	assert3u(ctx.calls_done, ==, ctx.calls_sent);
+
+	printf("%s: SUCCESS\n", __func__);
+
+	*out = 1;
+	return 0;
+}
+SYSCTL_TEST_REGISTER(smr_sleepable_stress, smr_sleepable_stress_test);

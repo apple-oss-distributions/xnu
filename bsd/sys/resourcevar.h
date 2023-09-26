@@ -68,6 +68,7 @@
 #include <sys/resource.h>
 #include <sys/_types/_caddr_t.h>
 #ifdef XNU_KERNEL_PRIVATE
+#include <kern/smr_types.h>
 #include <os/refcnt.h>
 #endif
 
@@ -116,7 +117,8 @@ struct pstats {
  * in proc_limitdrop/proc_limitupdate.
  */
 struct plimit {
-	struct  rlimit   pl_rlimit[RLIM_NLIMITS];
+	struct smr_node  pl_node;
+	struct rlimit    pl_rlimit[RLIM_NLIMITS];
 	os_refcnt_t      pl_refcnt;
 };
 struct proc;

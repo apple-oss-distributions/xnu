@@ -68,9 +68,6 @@
 #include <sys/sysctl.h>
 #include <sys/mbuf.h>
 #include <sys/domain.h>
-#if XNU_TARGET_OS_OSX
-#include <sys/kasl.h>
-#endif /* XNU_TARGET_OS_OSX */
 #include <sys/priv.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
@@ -282,7 +279,6 @@ tcp_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 		error = EAFNOSUPPORT;
 		goto out;
 	}
-
 	/*
 	 * Must check for multicast and broadcast addresses and disallow binding
 	 * to them.
@@ -294,6 +290,7 @@ tcp_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 		error = EAFNOSUPPORT;
 		goto out;
 	}
+
 	error = in_pcbbind(inp, nam, p);
 	if (error) {
 		goto out;
@@ -327,7 +324,6 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 		error = EAFNOSUPPORT;
 		goto out;
 	}
-
 	/*
 	 * Must check for multicast and broadcast addresses and disallow binding
 	 * to them.
@@ -342,6 +338,15 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 		error = EAFNOSUPPORT;
 		goto out;
 	}
+
+	/*
+	 * Another thread won the binding race so do not change inp_vflag
+	 */
+	if (inp->inp_flags2 & INP2_BIND_IN_PROGRESS) {
+		error = EINVAL;
+		goto out;
+	}
+
 	inp->inp_vflag &= ~INP_IPV4;
 	inp->inp_vflag |= INP_IPV6;
 	if ((inp->inp_flags & IN6P_IPV6_V6ONLY) == 0) {
@@ -368,6 +373,7 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 		route_clear(&inp->inp_route);
 		goto out;
 	}
+
 	COMMON_END(PRU_BIND);
 }
 
@@ -398,6 +404,9 @@ tcp_usr_listen(struct socket *so, struct proc *p)
 	if (error == 0) {
 		TCP_LOG_STATE(tp, TCPS_LISTEN);
 		tp->t_state = TCPS_LISTEN;
+		if (nstat_collect) {
+			nstat_pcb_event(inp, NSTAT_EVENT_SRC_FLOW_STATE_LISTEN);
+		}
 	}
 	TCP_LOG_LISTEN(tp, error);
 	COMMON_END(PRU_LISTEN);
@@ -421,6 +430,9 @@ tcp6_usr_listen(struct socket *so, struct proc *p)
 	if (error == 0) {
 		TCP_LOG_STATE(tp, TCPS_LISTEN);
 		tp->t_state = TCPS_LISTEN;
+		if (nstat_collect) {
+			nstat_pcb_event(inp, NSTAT_EVENT_SRC_FLOW_STATE_LISTEN);
+		}
 	}
 	TCP_LOG_LISTEN(tp, error);
 	COMMON_END(PRU_LISTEN);
@@ -1568,6 +1580,7 @@ skip_oinp:
 	tcp_sendseqinit(tp);
 	tp->t_connect_time = tcp_now;
 	if (nstat_collect) {
+		nstat_pcb_event(inp, NSTAT_EVENT_SRC_FLOW_STATE_OUTBOUND);
 		nstat_route_connect_attempt(inp->inp_route.ro_rt);
 	}
 
@@ -1702,6 +1715,7 @@ tcp6_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p)
 	tcp_sendseqinit(tp);
 	tp->t_connect_time = tcp_now;
 	if (nstat_collect) {
+		nstat_pcb_event(inp, NSTAT_EVENT_SRC_FLOW_STATE_OUTBOUND);
 		nstat_route_connect_attempt(inp->inp_route.ro_rt);
 	}
 
@@ -1874,6 +1888,13 @@ tcp_fill_info(struct tcpcb *tp, struct tcp_info *ti)
 	ti->tcpi_reordered_pkts = tp->t_reordered_pkts;
 	ti->tcpi_dsack_sent = tp->t_dsack_sent;
 	ti->tcpi_dsack_recvd = tp->t_dsack_recvd;
+
+	ti->tcpi_client_accecn_state = tp->t_client_accecn_state;
+	ti->tcpi_server_accecn_state = tp->t_server_accecn_state;
+	ti->tcpi_ecn_capable_packets_sent = tp->t_ecn_capable_packets_sent;
+	ti->tcpi_ecn_capable_packets_acked = tp->t_ecn_capable_packets_acked;
+	ti->tcpi_ecn_capable_packets_marked = tp->t_ecn_capable_packets_marked;
+	ti->tcpi_ecn_capable_packets_lost = tp->t_ecn_capable_packets_lost;
 }
 
 __private_extern__ errno_t
@@ -2383,9 +2404,11 @@ tcp_ctloutput(struct socket *so, struct sockopt *sopt)
 			} else {
 				tp->t_keepidle = optval * TCP_RETRANSHZ;
 				/* reset the timer to new value */
-				tp->t_timer[TCPT_KEEP] = OFFSET_FROM_START(tp,
-				    TCP_CONN_KEEPIDLE(tp));
-				tcp_check_timer_state(tp);
+				if (TCPS_HAVEESTABLISHED(tp->t_state)) {
+					tp->t_timer[TCPT_KEEP] = OFFSET_FROM_START(tp,
+					    TCP_CONN_KEEPIDLE(tp));
+					tcp_check_timer_state(tp);
+				}
 			}
 			break;
 
@@ -2662,6 +2685,28 @@ tcp_ctloutput(struct socket *so, struct sockopt *sopt)
 				error = EINVAL;
 			}
 			break;
+		case TCP_ENABLE_L4S:
+			error = sooptcopyin(sopt, &optval, sizeof optval,
+			    sizeof optval);
+			if (error) {
+				break;
+			}
+			if (optval < 0 || optval > 1) {
+				error = EINVAL;
+				break;
+			}
+			if (tp->t_state != TCPS_CLOSED) {
+				error =  EINVAL;
+				break;
+			}
+			if (optval == 1) {
+				tp->t_flagsext |= TF_L4S_ENABLED;
+				tp->t_flagsext &= ~TF_L4S_DISABLED;
+			} else {
+				tp->t_flagsext &= ~TF_L4S_ENABLED;
+				tp->t_flagsext |= TF_L4S_DISABLED;
+			}
+			break;
 		case TCP_NOTIFY_ACKNOWLEDGEMENT:
 			error = sooptcopyin(sopt, &optval,
 			    sizeof(optval), sizeof(optval));
@@ -2784,6 +2829,9 @@ tcp_ctloutput(struct socket *so, struct sockopt *sopt)
 			} else {
 				optval = ECN_MODE_DEFAULT;
 			}
+			break;
+		case TCP_ENABLE_L4S:
+			optval = (tp->t_flagsext & TF_L4S_ENABLED) ? 1 : 0;
 			break;
 		case TCP_CONNECTIONTIMEOUT:
 			optval = tp->t_keepinit / TCP_RETRANSHZ;
@@ -2935,7 +2983,7 @@ sysctl_tcp_sospace(struct sysctl_oid *oidp, __unused void *arg1,
 #pragma unused(arg2)
 	u_int32_t new_value = 0, *space_p = NULL;
 	int changed = 0, error = 0;
-	u_quad_t sb_effective_max = (sb_max / (MSIZE + MCLBYTES)) * MCLBYTES;
+	u_quad_t sb_effective_max = (sb_max / (SB_MSIZE_ADJ + MCLBYTES)) * MCLBYTES;
 
 	switch (oidp->oid_number) {
 	case TCPCTL_SENDSPACE:
@@ -2962,17 +3010,19 @@ sysctl_tcp_sospace(struct sysctl_oid *oidp, __unused void *arg1,
 
 #if SYSCTL_SKMEM
 SYSCTL_PROC(_net_inet_tcp, TCPCTL_SENDSPACE, sendspace,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_sendspace,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &tcp_sendspace,
     offsetof(skmem_sysctl, tcp.sendspace), sysctl_tcp_sospace,
     "IU", "Maximum outgoing TCP datagram size");
 SYSCTL_PROC(_net_inet_tcp, TCPCTL_RECVSPACE, recvspace,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_recvspace,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &tcp_recvspace,
     offsetof(skmem_sysctl, tcp.recvspace), sysctl_tcp_sospace,
     "IU", "Maximum incoming TCP datagram size");
 #else /* SYSCTL_SKMEM */
-SYSCTL_PROC(_net_inet_tcp, TCPCTL_SENDSPACE, sendspace, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_PROC(_net_inet_tcp, TCPCTL_SENDSPACE, sendspace,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
     &tcp_sendspace, 0, &sysctl_tcp_sospace, "IU", "Maximum outgoing TCP datagram size");
-SYSCTL_PROC(_net_inet_tcp, TCPCTL_RECVSPACE, recvspace, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_PROC(_net_inet_tcp, TCPCTL_RECVSPACE, recvspace,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
     &tcp_recvspace, 0, &sysctl_tcp_sospace, "IU", "Maximum incoming TCP datagram size");
 #endif /* SYSCTL_SKMEM */
 
@@ -3060,7 +3110,8 @@ tcp_disconnect(struct tcpcb *tp)
 {
 	struct socket *so = tp->t_inpcb->inp_socket;
 
-	if (so->so_rcv.sb_cc != 0 || tp->t_reassqlen != 0) {
+	if (so->so_rcv.sb_cc != 0 || tp->t_reassqlen != 0 ||
+	    so->so_flags1 & SOF1_DEFUNCTINPROG) {
 		return tcp_drop(tp, 0);
 	}
 

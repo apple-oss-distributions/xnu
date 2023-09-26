@@ -233,7 +233,9 @@
 #define KEXT_ALLOC_BASE(x)              ((x) - KEXT_ALLOC_MAX_OFFSET)
 #define KEXT_ALLOC_SIZE(x)              (KEXT_ALLOC_MAX_OFFSET - (x))
 
+#define VM_USER_STRIP_PTR(_v) (_v)
 #define VM_KERNEL_STRIP_PTR(_v) (_v)
+#define VM_KERNEL_STRIP_UPTR(_v) (_v)
 
 #define VM_KERNEL_ADDRESS(va) \
 	(((vm_address_t)(va) >= VM_MIN_KERNEL_AND_KEXT_ADDRESS) && \

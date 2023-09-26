@@ -68,6 +68,7 @@
 #endif
 
 #define SYSTRACE_NARGS (int)(sizeof(((uthread_t)NULL)->uu_arg) / sizeof(((uthread_t)NULL)->uu_arg[0]))
+#define MACHTRACE_NARGS (int)(sizeof(struct mach_call_args) / sizeof(syscall_arg_t))
 
 #include <sys/sysent.h>
 #define sy_callc sy_call /* Map Solaris slot name to Darwin's */
@@ -1042,6 +1043,10 @@ machtrace_getarg(void *arg, dtrace_id_t id, void *parg, int argno, int aframes)
 	}
 
 	if (!stack) {
+		return 0;
+	}
+
+	if (argno < 0 || argno >= MACHTRACE_NARGS) {
 		return 0;
 	}
 

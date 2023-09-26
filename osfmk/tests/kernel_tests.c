@@ -82,6 +82,7 @@ kern_return_t pmap_coredump_test(void);
 
 extern kern_return_t console_serial_test(void);
 extern kern_return_t console_serial_parallel_log_tests(void);
+extern kern_return_t test_printf(void);
 extern kern_return_t test_os_log(void);
 extern kern_return_t test_os_log_parallel(void);
 extern kern_return_t bitmap_post_test(void);
@@ -111,6 +112,7 @@ struct xnupost_panic_widget xt_panic_widgets = {.xtp_context_p = NULL,
 
 struct xnupost_test kernel_post_tests[] = {XNUPOST_TEST_CONFIG_BASIC(zalloc_test),
 	                                   XNUPOST_TEST_CONFIG_BASIC(RandomULong_test),
+	                                   XNUPOST_TEST_CONFIG_BASIC(test_printf),
 	                                   XNUPOST_TEST_CONFIG_BASIC(test_os_log),
 	                                   XNUPOST_TEST_CONFIG_BASIC(test_os_log_parallel),
 #ifdef __arm64__

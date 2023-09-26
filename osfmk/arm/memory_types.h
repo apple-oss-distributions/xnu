@@ -30,9 +30,6 @@
 
 #include <machine/config.h>
 
-/*
- * WIMG control
- */
 #define VM_MEM_INNER                      0x10
 #define VM_MEM_RT                         0x10 // intentionally alias VM_MEM_INNER; will be used with mutually exclusive caching policies
 #define VM_MEM_EARLY_ACK                  0x20
@@ -51,5 +48,7 @@
 #endif
 #define VM_WIMG_POSTED_REORDERED          (VM_MEM_NOT_CACHEABLE | VM_MEM_COHERENT | VM_MEM_WRITE_THROUGH | VM_MEM_EARLY_ACK) // 0x2e
 #define VM_WIMG_POSTED_COMBINED_REORDERED (VM_MEM_NOT_CACHEABLE | VM_MEM_COHERENT | VM_MEM_EARLY_ACK) // 0x26
+
+
 
 #endif /* _ARM_MEMORY_TYPES_H_ */

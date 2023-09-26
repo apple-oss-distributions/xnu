@@ -11,6 +11,7 @@
 #include <sys/kernel.h>
 #include <sys/sysproto.h>
 #include <sys/systm.h>
+#include <sys/ubc.h> /* mach_to_bsd_errno */
 
 /* Coalitions syscalls */
 
@@ -237,6 +238,23 @@ coalition_info_resource_usage(coalition_t coal, user_addr_t buffer, user_size_t 
 	return copyout(&cru, buffer, MIN(bufsize, sizeof(cru)));
 }
 
+#if DEVELOPMENT || DEBUG
+static int __attribute__ ((noinline))
+coalition_info_get_debug_info(coalition_t coal, user_addr_t buffer, user_size_t bufsize)
+{
+	kern_return_t kr;
+	struct coalinfo_debuginfo c_debuginfo = {};
+
+	kr = coalition_debug_info_internal(coal, &c_debuginfo);
+
+	if (kr != KERN_SUCCESS) {
+		return mach_to_bsd_errno(kr);
+	}
+
+	return copyout(&c_debuginfo, buffer, MIN(bufsize, sizeof(c_debuginfo)));
+}
+#endif /* DEVELOPMENT || DEBUG */
+
 #if CONFIG_THREAD_GROUPS
 static int
 coalition_info_set_name_internal(coalition_t coal, user_addr_t buffer, user_size_t bufsize)
@@ -254,7 +272,6 @@ coalition_info_set_name_internal(coalition_t coal, user_addr_t buffer, user_size
 	}
 	struct thread_group *tg = coalition_get_thread_group(coal);
 	thread_group_set_name(tg, name);
-	thread_group_release(tg);
 	return error;
 }
 
@@ -351,6 +368,11 @@ coalition_info(proc_t p, struct coalition_info_args *uap, __unused int32_t *retv
 	case COALITION_INFO_SET_EFFICIENCY:
 		error = coalition_info_efficiency(coal, buffer, bufsize);
 		break;
+#if DEVELOPMENT || DEBUG
+	case COALITION_INFO_GET_DEBUG_INFO:
+		error = coalition_info_get_debug_info(coal, buffer, bufsize);
+		break;
+#endif /* DEVELOPMENT || DEBUG */
 	default:
 		error = EINVAL;
 	}

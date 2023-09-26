@@ -34,6 +34,7 @@
     #include <libkern/libkern.h>
     #include <mach/machine.h>
 #else
+    #define __SPI_AVAILABLE(...)
     #include <stdlib.h>
     #include <libkern/OSByteOrder.h>
 
@@ -567,7 +568,7 @@ finish:
 /*******************************************************************************
 *******************************************************************************/
 u_long
-kxld_reloc_get_macho_header_size()
+kxld_reloc_get_macho_header_size(void)
 {
 	return sizeof(struct dysymtab_command);
 }

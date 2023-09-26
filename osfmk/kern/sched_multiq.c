@@ -286,7 +286,7 @@ static sched_mode_t
 sched_multiq_initial_thread_sched_mode(task_t parent_task);
 
 static bool
-sched_multiq_thread_avoid_processor(processor_t processor, thread_t thread);
+sched_multiq_thread_avoid_processor(processor_t processor, thread_t thread, __unused ast_t reason);
 
 const struct sched_dispatch_table sched_multiq_dispatch = {
 	.sched_name                                     = "multiq",
@@ -1206,7 +1206,7 @@ sched_multiq_processor_csw_check(processor_t processor)
 	boolean_t       has_higher;
 	int             pri;
 
-	if (sched_multiq_thread_avoid_processor(processor, current_thread())) {
+	if (sched_multiq_thread_avoid_processor(processor, current_thread(), AST_NONE)) {
 		return AST_PREEMPT | AST_URGENT;
 	}
 
@@ -1491,7 +1491,7 @@ extern int sched_allow_rt_smt;
 
 /* Return true if this thread should not continue running on this processor */
 static bool
-sched_multiq_thread_avoid_processor(processor_t processor, thread_t thread)
+sched_multiq_thread_avoid_processor(processor_t processor, thread_t thread, __unused ast_t reason)
 {
 	if (processor->processor_primary != processor) {
 		/*

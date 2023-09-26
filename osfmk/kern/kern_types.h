@@ -328,12 +328,14 @@ typedef enum perfcontrol_class {
 	PERFCONTROL_CLASS_UTILITY        = 5,
 	/* Non-UI Thread (Default/Legacy) */
 	PERFCONTROL_CLASS_NONUI          = 6,
-	/* UI Thread (UI/IN) */
+	/* UI Thread (UI QoS / Per-Frame work) */
 	PERFCONTROL_CLASS_UI             = 7,
 	/* Above UI Thread */
 	PERFCONTROL_CLASS_ABOVEUI        = 8,
+	/* Frame-async UI Thread */
+	PERFCONTROL_CLASS_USER_INITIATED = 9,
 	/* Maximum class */
-	PERFCONTROL_CLASS_MAX            = 9,
+	PERFCONTROL_CLASS_MAX            = 10,
 } perfcontrol_class_t;
 
 typedef enum {

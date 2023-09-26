@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -502,6 +502,10 @@ TAILQ_HEAD(ifnet_filter_head, ifnet_filter);
 TAILQ_HEAD(ddesc_head_name, dlil_demux_desc);
 
 extern bool intcoproc_unrestricted;
+extern bool management_data_unrestricted;
+extern bool management_control_unrestricted;
+extern bool if_management_interface_check_needed;
+extern int if_management_verbose;
 #endif /* BSD_KERNEL_PRIVATE */
 
 /*
@@ -562,7 +566,6 @@ struct nexus_ifnet_ops {
 	    uint32_t *, boolean_t, errno_t);
 	errno_t (*ni_get_len)(struct nexus_netif_adapter *, uint32_t,
 	    uint32_t *, uint32_t *, errno_t);
-	void (*ni_detach_notify)(struct nexus_netif_adapter *);
 };
 typedef struct {
 	uuid_t          if_nif_provider;
@@ -576,6 +579,9 @@ typedef struct {
 	uuid_t          if_fsw_device;
 	uint32_t        if_fsw_ipaddr_gencnt;
 } if_nexus_flowswitch, *if_nexus_flowswitch_t;
+
+typedef void (*ifnet_fsw_rx_cb_t)(void *, struct pktq *);
+typedef void (*ifnet_detach_notify_cb_t)(void *);
 #endif /* SKYWALK */
 
 typedef errno_t (*dlil_input_func)(ifnet_t ifp, mbuf_t m_head,
@@ -673,6 +679,7 @@ struct ifnet {
 	u_int64_t               if_start_delay_swin;
 	u_int32_t               if_start_delay_cnt;
 	u_int32_t               if_start_delay_timeout; /* nanoseconds */
+	uint64_t                if_start_pacemaker_time; /* nanoseconds */
 	struct timespec         if_start_cycle;  /* restart interval */
 	struct thread           *if_start_thread;
 
@@ -797,14 +804,31 @@ struct ifnet {
 	 */
 	uint32_t                if_rx_mit_ival;
 
-	ifnet_start_func        if_save_start;
-	ifnet_output_func       if_save_output;
-
 	/*
 	 * Number of threads waiting for the start callback to be finished;
 	 * access is protected by if_start_lock; also serves as wait channel.
 	 */
 	uint32_t                if_start_waiters;
+
+	ifnet_start_func        if_save_start;
+	ifnet_output_func       if_save_output;
+
+	/*
+	 * Used for intercepting packets meant for the host stack.
+	 */
+	ifnet_fsw_rx_cb_t       if_fsw_rx_cb;
+	void                    *if_fsw_rx_cb_arg;
+	uint32_t                if_fsw_rx_cb_ref;
+
+	uint32_t                if_delegate_parent_ref;
+	struct ifnet            *if_delegate_parent;
+	decl_lck_mtx_data(, if_delegate_lock);
+
+	/*
+	 * Detach notify callback. Used by llw and redirect interfaces.
+	 */
+	ifnet_detach_notify_cb_t if_detach_notify;
+	void                     *if_detach_notify_arg;
 #endif /* SKYWALK */
 
 	decl_lck_mtx_data(, if_cached_route_lock);
@@ -866,12 +890,13 @@ struct ifnet {
 	/* count of times, when there was data to send when sleep is impending */
 	uint32_t                if_unsent_data_cnt;
 
+	boolean_t   if_inet6_ioctl_busy;
+	decl_lck_mtx_data(, if_inet6_ioctl_lock);
+
 #if INET
 	decl_lck_rw_data(, if_inetdata_lock);
 	struct in_ifextra       *if_inetdata;
 #endif /* INET */
-	decl_lck_mtx_data(, if_inet6_ioctl_lock);
-	boolean_t   if_inet6_ioctl_busy;
 	decl_lck_rw_data(, if_inet6data_lock);
 	struct in6_ifextra      *if_inet6data;
 	decl_lck_rw_data(, if_link_status_lock);
@@ -904,8 +929,21 @@ struct ifnet {
 
 	uint8_t         network_id[IFNET_NETWORK_ID_LEN];
 	uint8_t         network_id_len;
+
+	atomic_bool     if_mcast_add_signaled;
+	atomic_bool     if_mcast_del_signaled;
+
 	uint32_t        if_traffic_rule_count;
 	uint32_t        if_traffic_rule_genid;
+
+	/*
+	 * if_creation_generation_id is assigned the value of a global counter that
+	 * is incremented when the interface is allocated and when it is freed.
+	 *
+	 * This allows to discriminate between different instances of an interface
+	 * that has the same name or same index
+	 */
+	uint64_t        if_creation_generation_id;
 };
 
 /* Interface event handling declarations */
@@ -925,14 +963,14 @@ typedef enum {
 typedef void (*ifnet_event_fn)(struct eventhandler_entry_arg, struct ifnet *, struct sockaddr *, intf_event_code_t);
 EVENTHANDLER_DECLARE(ifnet_event, ifnet_event_fn);
 
-#define IF_TCP_STATINC(_ifp, _s) do {                                   \
+#define IF_TCP_STATINC(_ifp, _s) do {                               \
     if ((_ifp)->if_tcp_stat != NULL)                                \
-	    atomic_add_64(&(_ifp)->if_tcp_stat->_s, 1);             \
+	    os_atomic_inc(&(_ifp)->if_tcp_stat->_s, relaxed);       \
 } while (0);
 
-#define IF_UDP_STATINC(_ifp, _s) do {                                   \
+#define IF_UDP_STATINC(_ifp, _s) do {                               \
     if ((_ifp)->if_udp_stat != NULL)                                \
-	    atomic_add_64(&(_ifp)->if_udp_stat->_s, 1);             \
+	    os_atomic_inc(&(_ifp)->if_udp_stat->_s, relaxed);       \
 } while (0);
 
 /*
@@ -956,6 +994,7 @@ EVENTHANDLER_DECLARE(ifnet_event, ifnet_event_fn);
  */
 #define IFSF_FLOW_CONTROLLED    0x1     /* flow controlled */
 #define IFSF_TERMINATING        0x2     /* terminating */
+#define IFSF_NO_DELAY           0x4     /* no delay */
 
 /*
  * Structure describing a `cloning' interface.
@@ -1041,7 +1080,7 @@ struct if_clone {
     (m)->m_nextpkt = NULL;                                          \
 } while (0)
 
-#define IF_DRAIN(ifq) do {                                              \
+#define IF_DRAIN(ifq) do {                                          \
     struct mbuf *_m;                                                \
     for (;;) {                                                      \
 	    IF_DEQUEUE(ifq, _m);                                    \
@@ -1110,8 +1149,8 @@ struct ifaddr {
     lck_mtx_lock_spin(&(_ifa)->ifa_lock)
 
 #define IFA_CONVERT_LOCK(_ifa) do {                                     \
-    IFA_LOCK_ASSERT_HELD(_ifa);                                     \
-    lck_mtx_convert_spin(&(_ifa)->ifa_lock);                        \
+    IFA_LOCK_ASSERT_HELD(_ifa);                                         \
+    lck_mtx_convert_spin(&(_ifa)->ifa_lock);                            \
 } while (0)
 
 #define IFA_UNLOCK(_ifa)                                                \
@@ -1124,7 +1163,7 @@ struct ifaddr {
     ifa_addref(_ifa, 1)
 
 #define IFA_REMREF(_ifa) do {                                           \
-    (void) ifa_remref(_ifa, 0);                                     \
+    (void) ifa_remref(_ifa, 0);                                         \
 } while (0)
 
 #define IFA_REMREF_LOCKED(_ifa)                                         \
@@ -1171,8 +1210,8 @@ struct ifmultiaddr {
     lck_mtx_lock_spin(&(_ifma)->ifma_lock)
 
 #define IFMA_CONVERT_LOCK(_ifma) do {                                   \
-    IFMA_LOCK_ASSERT_HELD(_ifma);                                   \
-    lck_mtx_convert_spin(&(_ifma)->ifma_lock);                      \
+    IFMA_LOCK_ASSERT_HELD(_ifma);                                       \
+    lck_mtx_convert_spin(&(_ifma)->ifma_lock);                          \
 } while (0)
 
 #define IFMA_UNLOCK(_ifma)                                              \
@@ -1205,7 +1244,7 @@ struct ifmultiaddr {
  * for testing purposes. The underlying interface is Ethernet but we treat
  * it as cellular for accounting and policy purposes.
  */
-#define IFNET_IS_CELLULAR(_ifp)                                         \
+#define IFNET_IS_CELLULAR(_ifp)                                     \
     ((_ifp)->if_type == IFT_CELLULAR ||                             \
     (_ifp)->if_delegated.type == IFT_CELLULAR ||                    \
     (((_ifp)->if_family == IFNET_FAMILY_ETHERNET  &&                \
@@ -1217,7 +1256,7 @@ struct ifmultiaddr {
  * Indicate whether or not the immediate interface, or the interface delegated
  * by it, is an ETHERNET interface.
  */
-#define IFNET_IS_ETHERNET(_ifp)                                         \
+#define IFNET_IS_ETHERNET(_ifp)                                     \
     ((_ifp)->if_family == IFNET_FAMILY_ETHERNET ||                  \
     (_ifp)->if_delegated.family == IFNET_FAMILY_ETHERNET)
 /*
@@ -1233,7 +1272,7 @@ struct ifmultiaddr {
  * The test is done against IFNET_SUBFAMILY_WIFI as the family may be set to
  * IFNET_FAMILY_ETHERNET (as well as type to IFT_ETHER) which is too generic.
  */
-#define IFNET_IS_WIFI(_ifp)                                             \
+#define IFNET_IS_WIFI(_ifp)                                         \
     (((_ifp)->if_family == IFNET_FAMILY_ETHERNET  &&                \
     (_ifp)->if_subfamily == IFNET_SUBFAMILY_WIFI) ||                \
     ((_ifp)->if_delegated.family == IFNET_FAMILY_ETHERNET &&        \
@@ -1249,7 +1288,7 @@ struct ifmultiaddr {
  * certain places need to explicitly know the immediate interface type, and
  * this macro should not be used there.
  */
-#define IFNET_IS_WIRED(_ifp)                                            \
+#define IFNET_IS_WIRED(_ifp)                                        \
     ((_ifp)->if_family == IFNET_FAMILY_ETHERNET ||                  \
     (_ifp)->if_delegated.family == IFNET_FAMILY_ETHERNET ||         \
     (_ifp)->if_family == IFNET_FAMILY_FIREWIRE ||                   \
@@ -1259,7 +1298,7 @@ struct ifmultiaddr {
  * Indicate whether or not the immediate WiFi interface is on an infrastructure
  * network
  */
-#define IFNET_IS_WIFI_INFRA(_ifp)                               \
+#define IFNET_IS_WIFI_INFRA(_ifp)                           \
     ((_ifp)->if_family == IFNET_FAMILY_ETHERNET &&          \
     (_ifp)->if_subfamily == IFNET_SUBFAMILY_WIFI &&         \
     !((_ifp)->if_eflags & IFEF_AWDL) &&                     \
@@ -1269,7 +1308,7 @@ struct ifmultiaddr {
  * Indicate whether or not the immediate interface is a companion link
  * interface.
  */
-#define IFNET_IS_COMPANION_LINK(_ifp)                           \
+#define IFNET_IS_COMPANION_LINK(_ifp)                       \
     ((_ifp)->if_family == IFNET_FAMILY_IPSEC &&             \
     ((_ifp)->if_subfamily == IFNET_SUBFAMILY_BLUETOOTH ||   \
     (_ifp)->if_subfamily == IFNET_SUBFAMILY_WIFI ||         \
@@ -1288,7 +1327,7 @@ struct ifmultiaddr {
     ((_ifp)->if_eflags & IFEF_EXPENSIVE ||                              \
     (_ifp)->if_delegated.expensive)
 
-#define IFNET_IS_LOW_POWER(_ifp)                                        \
+#define IFNET_IS_LOW_POWER(_ifp)                                    \
     (if_low_power_restricted != 0 &&                                \
     ((_ifp)->if_xflags & IFXF_LOW_POWER) ||                         \
     ((_ifp)->if_delegated.ifp != NULL &&                            \
@@ -1301,23 +1340,32 @@ struct ifmultiaddr {
 /*
  * We don't support AWDL interface delegation.
  */
-#define IFNET_IS_AWDL_RESTRICTED(_ifp)                                  \
+#define IFNET_IS_AWDL_RESTRICTED(_ifp)                              \
     (((_ifp)->if_eflags & (IFEF_AWDL|IFEF_AWDL_RESTRICTED)) ==      \
     (IFEF_AWDL|IFEF_AWDL_RESTRICTED))
 
-#define IFNET_IS_INTCOPROC(_ifp)                                        \
+#define IFNET_IS_INTCOPROC(_ifp)                                    \
     ((_ifp)->if_family == IFNET_FAMILY_ETHERNET &&                  \
      (_ifp)->if_subfamily == IFNET_SUBFAMILY_INTCOPROC)
 
-#define IFNET_IS_VMNET(_ifp)                                            \
+#define IFNET_IS_VMNET(_ifp)                                        \
     ((_ifp)->if_family == IFNET_FAMILY_ETHERNET &&                  \
      (_ifp)->if_subfamily == IFNET_SUBFAMILY_VMNET)
+
+#define IFNET_IS_MANAGEMENT(_ifp)                                        \
+     (((_ifp)->if_xflags & IFXF_MANAGEMENT) != 0)
+
 /*
  * Indicate whether or not the immediate interface is IP over Thunderbolt.
  */
-#define IFNET_IS_THUNDERBOLT_IP(_ifp)                                \
+#define IFNET_IS_THUNDERBOLT_IP(_ifp)                            \
     ((_ifp)->if_family == IFNET_FAMILY_ETHERNET &&               \
      (_ifp)->if_subfamily == IFNET_SUBFAMILY_THUNDERBOLT)
+
+#define IFNET_IS_REDIRECT(_ifp)                       \
+    (((_ifp)->if_family == IFNET_FAMILY_ETHERNET ||   \
+    (_ifp)->if_family == IFNET_FAMILY_CELLULAR) &&    \
+    (_ifp)->if_subfamily == IFNET_SUBFAMILY_REDIRECT)
 
 extern int if_index;
 extern struct ifnethead ifnet_head;
@@ -1431,6 +1479,8 @@ extern struct ifaddr *ifa_ifwithaddr_scoped(const struct sockaddr *,
 extern struct ifaddr *ifa_ifwithaddr_scoped_locked(const struct sockaddr *,
     unsigned int);
 extern struct ifaddr *ifa_ifwithdstaddr(const struct sockaddr *);
+extern struct ifaddr *ifa_ifwithdstaddr_scoped(const struct sockaddr *,
+    unsigned int);
 extern struct ifaddr *ifa_ifwithnet(const struct sockaddr *);
 extern struct ifaddr *ifa_ifwithnet_scoped(const struct sockaddr *,
     unsigned int);
@@ -1754,7 +1804,7 @@ extern errno_t ifnet_set_start_handler(struct ifnet *, ifnet_start_func);
 extern void ifnet_reset_start_handler(struct ifnet *);
 
 #define SK_NXS_MS_IF_ADDR_GENCNT_INC(ifp)        \
-    atomic_add_32(&(ifp)->if_nx_flowswitch.if_fsw_ipaddr_gencnt, 1);
+    os_atomic_inc(&(ifp)->if_nx_flowswitch.if_fsw_ipaddr_gencnt, relaxed);
 #endif /* SKYWALK */
 
 extern int if_low_power_verbose;

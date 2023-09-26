@@ -251,24 +251,23 @@ extern int PAGE_SHIFT_CONST;
 
 #if defined (__arm64__)
 /* Top-Byte-Ignore */
-#define TBI_MASK           0xff00000000000000ULL
-#define tbi_clear(addr)    ((typeof (addr))(((uintptr_t)(addr)) &~ (TBI_MASK)))
-#define tbi_fill(addr)     ((typeof (addr))(((uintptr_t)(addr)) | (TBI_MASK)))
+#define ARM_TBI_USER_MASK        (0xFF00000000000000ULL)
+#define VM_USER_STRIP_TBI(_v)    ((typeof (_v))(((uintptr_t)(_v)) &~ (ARM_TBI_USER_MASK)))
+#else /* __arm64__ */
+#define VM_USER_STRIP_TBI(_v)    (_v)
 #endif /* __arm64__ */
 
-#if CONFIG_KERNEL_TBI
+#if CONFIG_KERNEL_TAGGING
+#include <vm/vm_memtag.h>
 /*
  * 'strip' in PAC sense, therefore replacing the stripped bits sign extending
- * the sign bit.
+ * the sign bit. In kernel space the sign bit is 1, so 0xFF is a valid mask
+ * here.
  */
-#define VM_KERNEL_TBI_FILL(_v)  (tbi_fill(_v))
-#define VM_KERNEL_TBI_CLEAR(_v) (tbi_clear(_v))
-#define VM_KERNEL_STRIP_TBI(_v) (VM_KERNEL_TBI_FILL(_v))
-#else /* CONFIG_KERNEL_TBI */
-#define VM_KERNEL_TBI_FILL(_v)  (_v)
-#define VM_KERNEL_TBI_CLEAR(_v) (_v)
-#define VM_KERNEL_STRIP_TBI(_v) (_v)
-#endif /* CONFIG_KERNE_TBI */
+#define VM_KERNEL_STRIP_TAG(_v)         (vm_memtag_canonicalize_address((vm_offset_t)_v))
+#else /* CONFIG_KERNEL_TAGGING */
+#define VM_KERNEL_STRIP_TAG(_v)         (_v)
+#endif /* CONFIG_KERNEL_TAGGING */
 
 #if __has_feature(ptrauth_calls)
 #include <ptrauth.h>
@@ -277,11 +276,13 @@ extern int PAGE_SHIFT_CONST;
 #define VM_KERNEL_STRIP_PAC(_v) (_v)
 #endif /* ptrauth_calls */
 
-#define VM_KERNEL_STRIP_PTR(_va)        ((VM_KERNEL_STRIP_TBI(VM_KERNEL_STRIP_PAC(_va))))
+#define VM_KERNEL_STRIP_PTR(_va)        ((VM_KERNEL_STRIP_TAG(VM_KERNEL_STRIP_PAC((_va)))))
 #define VM_KERNEL_STRIP_UPTR(_va)       ((vm_address_t)VM_KERNEL_STRIP_PTR((uintptr_t)(_va)))
 #define VM_KERNEL_ADDRESS(_va)  \
 	((VM_KERNEL_STRIP_UPTR(_va) >= VM_MIN_KERNEL_ADDRESS) && \
 	 (VM_KERNEL_STRIP_UPTR(_va) <= VM_MAX_KERNEL_ADDRESS))
+
+#define VM_USER_STRIP_PTR(_v)           (VM_USER_STRIP_TBI(_v))
 
 #ifdef  MACH_KERNEL_PRIVATE
 /*

@@ -35,6 +35,7 @@
 #define _KERN_STARTUP_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include <libkern/section_keywords.h>
@@ -380,6 +381,14 @@ __options_decl(tunable_dt_flags_t, uint32_t, {
 #define TUNABLE_DT_WRITEABLE(type_t, var, dt_base, dt_name, boot_arg, default_value, flags) \
 	type_t var = default_value; \
 	__TUNABLE_DT(type_t, var, dt_base, dt_name, boot_arg, flags)
+
+#if DEBUG || DEVELOPMENT
+#define TUNABLE_DT_DEV_WRITEABLE(type_t, var, dt_base, dt_name, boot_arg, default_value, flags) \
+	TUNABLE_DT_WRITEABLE(type_t, var, dt_base, dt_name, boot_arg, default_value, flags)
+#else
+#define TUNABLE_DT_DEV_WRITEABLE(type_t, var, dt_base, dt_name, boot_arg, default_value, flags) \
+	TUNABLE_DT(type_t, var, dt_base, dt_name, boot_arg, default_value, flags)
+#endif
 
 /*
  * Machine Timeouts

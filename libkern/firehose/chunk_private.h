@@ -81,7 +81,6 @@ firehose_chunk_pos_fits(firehose_chunk_pos_u *pos, uint16_t size)
 #define FIREHOSE_CHUNK_TRY_RESERVE_FAIL_ENQUEUE  (-1)
 #define FIREHOSE_CHUNK_TRY_RESERVE_FAIL          ( 0)
 
-#if OS_ATOMIC_HAS_STARVATION_FREE_RMW || !OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
 OS_ALWAYS_INLINE
 static inline long
 firehose_chunk_tracepoint_try_reserve(firehose_chunk_t fc, uint64_t stamp,
@@ -183,7 +182,6 @@ firehose_chunk_tracepoint_end(firehose_chunk_t fc,
 	    FIREHOSE_CHUNK_POS_REFCNT_INC, os_atomic_std(memory_order_relaxed));
 	return pos.fcp_refcnt == 1 && pos.fcp_flag_full;
 }
-#endif // OS_ATOMIC_HAS_STARVATION_FREE_RMW || !OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
 
 #endif // defined(KERNEL) || defined(OS_FIREHOSE_SPI)
 #endif // __has_include(<os/atomic_private.h>)

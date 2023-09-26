@@ -183,24 +183,10 @@ struct sched_clutch;
  * Used for maintaining clutch bucket used and blocked time. The
  * values are used for calculating the interactivity score for the
  * clutch bucket.
- *
- * Since the CPU used/blocked calculation uses wide atomics, the data
- * types used are different based on the platform.
  */
-
-#if __LP64__
-
 #define CLUTCH_CPU_DATA_MAX             (UINT64_MAX)
 typedef uint64_t                        clutch_cpu_data_t;
 typedef unsigned __int128               clutch_cpu_data_wide_t;
-
-#else /* __LP64__ */
-
-#define CLUTCH_CPU_DATA_MAX             (UINT32_MAX)
-typedef uint32_t                        clutch_cpu_data_t;
-typedef uint64_t                        clutch_cpu_data_wide_t;
-
-#endif /* __LP64__ */
 
 typedef union sched_clutch_bucket_cpu_data {
 	struct {
@@ -270,9 +256,7 @@ typedef union sched_clutch_counter_time {
 		uint64_t                scct_count;
 		uint64_t                scct_timestamp;
 	};
-#if __LP64__
 	unsigned __int128               scct_packed;
-#endif /* __LP64__ */
 } __attribute__((aligned(16))) sched_clutch_counter_time_t;
 
 /*
@@ -296,11 +280,7 @@ struct sched_clutch_bucket_group {
 	uint32_t                        scbg_amp_rebalance_last_chosen;
 	/* (I) clutch to which this clutch bucket_group belongs */
 	struct sched_clutch             *scbg_clutch;
-#if !__LP64__
-	/* Lock for synchronizing updates to blocked data (only on platforms without 128-atomics) */
-	lck_spin_t                      scbg_stats_lock;
-#endif /* !__LP64__ */
-	/* (A/L depending on arch) holds blcked timestamp and runnable/running count */
+	/* (A) holds blocked timestamp and runnable/running count */
 	sched_clutch_counter_time_t     scbg_blocked_data;
 	/* (P/A depending on scheduler) holds pending timestamp and thread count */
 	sched_clutch_counter_time_t     scbg_pending_data;

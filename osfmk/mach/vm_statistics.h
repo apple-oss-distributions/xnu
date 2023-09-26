@@ -68,10 +68,10 @@
 
 #include <sys/cdefs.h>
 
-__BEGIN_DECLS
-
 #include <mach/machine/vm_types.h>
 #include <mach/machine/kern_return.h>
+
+__BEGIN_DECLS
 
 /*
  * vm_statistics
@@ -296,7 +296,7 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
  * When making a new VM_FLAG_*:
  * - add it to this mask
  * - add a vmf_* field to vm_map_kernel_flags_t in the right spot
- * - add a check in vm_map_kernel_flags_uflags()
+ * - add a check in vm_map_kernel_flags_check_vmflags()
  */
 #define VM_FLAGS_ANY_MASK       (VM_FLAGS_FIXED |               \
 	                         VM_FLAGS_ANYWHERE |            \
@@ -314,6 +314,7 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
 	                         VM_FLAGS_RETURN_4K_DATA_ADDR | \
 	                         VM_FLAGS_ALIAS_MASK)
 #endif /* XNU_KERNEL_PRIVATE */
+#define VM_FLAGS_HW     (VM_FLAGS_TPRO)
 
 /* These are the flags that we accept from user-space */
 #define VM_FLAGS_USER_ALLOCATE  (VM_FLAGS_FIXED |               \
@@ -325,7 +326,7 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
 	                         VM_FLAGS_PERMANENT |           \
 	                         VM_FLAGS_OVERWRITE |           \
 	                         VM_FLAGS_SUPERPAGE_MASK |      \
-	                         VM_FLAGS_TPRO |                \
+	                         VM_FLAGS_HW |                  \
 	                         VM_FLAGS_ALIAS_MASK)
 
 #define VM_FLAGS_USER_MAP       (VM_FLAGS_USER_ALLOCATE |       \
@@ -396,14 +397,8 @@ enum virtual_memory_guard_exception_codes {
  * @const KMEM_RANGE_ID_DATA
  * Range containing allocations that are bags of bytes and contain no
  * pointers.
- *
- * @const UMEM_RANGE_ID_DEFAULT
- * Range containing default allocation calls
- *
- * @const UMEM_RANGE_ID_HEAP
- * Range containing heap allocation calls
  */
-__enum_decl(vm_map_range_id_t, uint32_t, {
+__enum_decl(vm_map_range_id_t, uint8_t, {
 	KMEM_RANGE_ID_NONE,
 	KMEM_RANGE_ID_PTR_0,
 	KMEM_RANGE_ID_PTR_1,
@@ -415,12 +410,15 @@ __enum_decl(vm_map_range_id_t, uint32_t, {
 	KMEM_RANGE_ID_NUM_PTR = KMEM_RANGE_ID_PTR_2,
 	KMEM_RANGE_ID_MAX     = KMEM_RANGE_ID_DATA,
 
-	UMEM_RANGE_ID_DEFAULT = 0,
-	UMEM_RANGE_ID_HEAP,
-	UMEM_RANGE_ID_MAX = UMEM_RANGE_ID_HEAP,
+	/* these UMEM_* correspond to the MACH_VM_RANGE_* tags and are ABI */
+	UMEM_RANGE_ID_DEFAULT = 0, /* same as MACH_VM_RANGE_DEFAULT */
+	UMEM_RANGE_ID_HEAP,        /* same as MACH_VM_RANGE_DATA    */
+	UMEM_RANGE_ID_FIXED,       /* same as MACH_VM_RANGE_FIXED   */
+
+	/* these UMEM_* are XNU internal only range IDs, and aren't ABI */
+	UMEM_RANGE_ID_MAX     = UMEM_RANGE_ID_FIXED,
 
 #define KMEM_RANGE_COUNT        (KMEM_RANGE_ID_MAX + 1)
-#define UMEM_RANGE_COUNT        (UMEM_RANGE_ID_MAX + 1)
 });
 
 typedef vm_map_range_id_t       kmem_range_id_t;
@@ -450,8 +448,8 @@ typedef union {
 		    __unused_bit_10:1,
 		    __unused_bit_11:1,
 		    vmf_tpro:1,
-		    __unused_bit_13:1,
-		    vmf_overwrite:1,
+		__unused_bit_13:1,
+		vmf_overwrite:1,
 		    __unused_bit_15:1,
 
 		    vmf_superpage_size:3,
@@ -490,6 +488,7 @@ typedef union {
 		    vmkf_copy_pageable:1,       /* vm_map_copy with pageable entries */
 		    vmkf_copy_same_map:1,       /* vm_map_copy to remap in original map */
 		    vmkf_translated_allow_execute:1,    /* allow execute in translated processes */
+		    vmkf_tpro_enforcement_override:1,   /* override TPRO propagation */
 
 		/*
 		 * Submap creation, altering vm_map_enter() only
@@ -506,7 +505,7 @@ typedef union {
 		    vmkf_last_free:1,           /* find space from the end */
 		    vmkf_range_id:KMEM_RANGE_BITS,      /* kmem range to allocate in */
 
-		    __vmkf_unused:2;
+		    __vmkf_unused:1;
 	};
 
 	/*
@@ -585,7 +584,6 @@ typedef struct {
 
 #define VM_MEMORY_MALLOC_NANO 11
 #define VM_MEMORY_MALLOC_MEDIUM 12
-#define VM_MEMORY_MALLOC_PGUARD 13  // Will be removed
 #define VM_MEMORY_MALLOC_PROB_GUARD 13
 
 #define VM_MEMORY_MACH_MSG 20
@@ -758,6 +756,9 @@ typedef struct {
 
 /* backtrace info for simulated crashes */
 #define VM_MEMORY_BTINFO 105
+
+/* memory allocated by CoreMedia */
+#define VM_MEMORY_CM_HLS 106
 
 /* Reserve 230-239 for Rosetta */
 #define VM_MEMORY_ROSETTA 230

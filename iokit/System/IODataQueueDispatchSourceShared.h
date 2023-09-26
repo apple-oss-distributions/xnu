@@ -9,7 +9,7 @@ typedef struct _IODataQueueMemory {
 	volatile uint32_t   head;
 	volatile uint32_t   tail;
 	volatile uint8_t    needServicedCallback;
-	volatile uint8_t    _resv[31];
+	volatile uint8_t    _resv[119];
 	IODataQueueEntry  queue[0];
 } IODataQueueMemory;
 

@@ -3418,7 +3418,7 @@ in6m_trace(struct in6_multi *in6m, int refhold)
 		tr = in6m_dbg->in6m_refrele;
 	}
 
-	idx = atomic_add_16_ov(cnt, 1) % IN6M_TRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(cnt, relaxed) % IN6M_TRACE_HIST_SIZE;
 	ctrace_record(&tr[idx]);
 }
 

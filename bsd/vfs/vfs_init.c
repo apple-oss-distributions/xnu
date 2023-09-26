@@ -94,6 +94,7 @@
 #include <sys/quota.h>
 #endif
 
+
 /*
  * Sigh, such primitive tools are these...
  */
@@ -105,7 +106,7 @@
 
 KALLOC_TYPE_DEFINE(mount_zone, struct mount, KT_DEFAULT);
 
-SMR_DEFINE(_vfs_smr);
+SMR_DEFINE(_vfs_smr, "VFS");
 const smr_t vfs_smr = &_vfs_smr;
 
 __private_extern__ void vntblinit(void);
@@ -418,6 +419,7 @@ vfsinit(void)
 #endif
 
 	nspace_resolver_init();
+
 }
 
 void
@@ -635,6 +637,12 @@ vfstable_del(struct vfstable  * vtbl)
 #endif /* DEBUG */
 
 	return 0;
+}
+
+lck_mtx_t *
+SPECHASH_LOCK_ADDR(void)
+{
+	return &spechash_mtx_lock;
 }
 
 void

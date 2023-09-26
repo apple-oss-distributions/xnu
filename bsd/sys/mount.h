@@ -88,6 +88,8 @@
 
 #include <sys/_types/_fsid_t.h> /* file system id type */
 #include <sys/_types/_graftdmg_un.h>
+#include <sys/_types/_mount_t.h>
+#include <sys/_types/_vnode_t.h>
 
 /*
  * file system statistics
@@ -103,6 +105,7 @@
 #endif /* __DARWIN_64_BIT_INO_T */
 
 #define MNT_EXT_ROOT_DATA_VOL      0x00000001      /* Data volume of root volume group */
+#define MNT_EXT_FSKIT              0x00000002      /* this is an FSKit mount */
 
 #define __DARWIN_STRUCT_STATFS64 { \
 	uint32_t	f_bsize;        /* fundamental file system block size */ \
@@ -400,13 +403,6 @@ struct vfs_attr {
 #define MNT_VOLUME      8       /* sync on a single mounted filesystem  */
 #endif
 
-
-#if !defined(KERNEL) && !defined(_KERN_SYS_KERNELTYPES_H_) /* also defined in kernel_types.h */
-struct mount;
-typedef struct mount * mount_t;
-struct vnode;
-typedef struct vnode * vnode_t;
-#endif
 
 /* Reserved fields preserve binary compatibility */
 struct vfsconf {
@@ -1281,6 +1277,14 @@ void    vfs_getnewfsid(struct mount *mp);
 mount_t vfs_getvfs(fsid_t *fsid);
 
 /*!
+ *  @function vfs_getvfs_with_vfsops
+ *  @abstract Given a filesystem ID, look up a mount structure, verify the vfsops
+ *  @param fsid Filesystem ID to look up.
+ *  @return Mountpoint if found and the vfsops matches the expected value, else NULL.  Note unmounting mountpoints can be returned.
+ */
+mount_t vfs_getvfs_with_vfsops(fsid_t *fsid, const struct vfsops *ops);
+
+/*!
  *  @function vfs_mountedon
  *  @abstract Check whether a given block device has a filesystem mounted on it.
  *  @discussion Note that this is NOT a check for a covered vnode (the directory upon which
@@ -1335,12 +1339,18 @@ vnode_t vfs_devvp(mount_t mp); /* Please see block comment with implementation *
 int vfs_nativexattrs(mount_t mp);  /* whether or not the FS supports EAs natively */
 void *  vfs_mntlabel(mount_t mp); /* Safe to cast to "struct label*"; returns "void*" to limit dependence of mount.h on security headers.  */
 void    vfs_setcompoundopen(mount_t mp);
+void    vfs_setfskit(mount_t mp);
+char *  vfs_getfstypenameref_locked(mount_t mp, size_t *lenp);
+void    vfs_getfstypename(mount_t mp, char *buf, size_t buflen);
+void    vfs_setfstypename_locked(mount_t mp, const char *name);
+void    vfs_setfstypename(mount_t mp, const char *name);
 uint64_t vfs_throttle_mask(mount_t mp);
 int vfs_isswapmount(mount_t mp);
 int     vfs_context_dataless_materialization_is_prevented(vfs_context_t);
 boolean_t vfs_context_is_dataless_manipulator(vfs_context_t);
 boolean_t vfs_context_can_resolve_triggers(vfs_context_t);
 boolean_t vfs_context_can_break_leases(vfs_context_t);
+boolean_t vfs_context_allow_fs_blksize_nocache_write(vfs_context_t);
 void    vfs_setmntsystem(mount_t mp);
 void    vfs_setmntsystemdata(mount_t mp);
 void    vfs_setmntswap(mount_t mp);
@@ -1454,14 +1464,6 @@ int vfs_mount_at_path(const char *fstype, const char *path,
     vnode_t pvp, vnode_t vp, void *data, size_t datalen, int mnt_flags,
     int flags);
 
-/*!
- * @function vfs_mount_override_type_name
- * @abstract override the fstypename for statfs.
- * @param mp Mountpint for which to override the type name.
- * @param name Name to override.
- */
-int vfs_mount_override_type_name(mount_t mp, const char *name);
-
 #define VFS_MOUNT_FLAG_NOAUTH           0x01 /* Don't check the UID of the directory we are mounting on */
 #define VFS_MOUNT_FLAG_PERMIT_UNMOUNT   0x02 /* Allow (non-forced) unmounts by users other the one who mounted the volume */
 #define VFS_MOUNT_FLAG_CURRENT_CONTEXT  0x04 /* Mount using the current VFS context */
@@ -1490,21 +1492,29 @@ typedef struct fhandle  fhandle_t;
  * cryptexes and cryptex_auth_type is currently used for authentication while mounting generic
  * cryptexes. We need to make sure we do not use the reserved values in each for a new authentication type.
  */
-
+// bump up the version for any change that has kext dependency
+#define CRYPTEX_AUTH_STRUCT_VERSION 1
 OS_ENUM(graftdmg_type, uint32_t,
     GRAFTDMG_CRYPTEX_BOOT = 1,
     GRAFTDMG_CRYPTEX_PREBOOT = 2,
-    GRAFTDMG_CRYPTEX_DOWNLEVEL = 3
+    GRAFTDMG_CRYPTEX_DOWNLEVEL = 3,
     // Reserved: CRYPTEX1_AUTH_ENV_GENERIC = 4,
-    // Reserved: CRYPTEX1_AUTH_ENV_GENERIC_SUPPLEMENTAL = 5
-    );
+    // Reserved: CRYPTEX1_AUTH_ENV_GENERIC_SUPPLEMENTAL = 5,
+    GRAFTDMG_CRYPTEX_PDI_NONCE = 6,
+    GRAFTDMG_CRYPTEX_EFFECTIVE_AP = 7,
+    // Update this when a new type is added
+    GRAFTDMG_CRYPTEX_MAX = 7);
 
 OS_ENUM(cryptex_auth_type, uint32_t,
     // Reserved: GRAFTDMG_CRYPTEX_BOOT = 1,
     // Reserved: GRAFTDMG_CRYPTEX_PREBOOT = 2,
     // Reserved: GRAFTDMG_CRYPTEX_DOWNLEVEL = 3,
     CRYPTEX1_AUTH_ENV_GENERIC = 4,
-    CRYPTEX1_AUTH_ENV_GENERIC_SUPPLEMENTAL = 5);
+    CRYPTEX1_AUTH_ENV_GENERIC_SUPPLEMENTAL = 5,
+    CRYPTEX_AUTH_PDI_NONCE = 6,
+    // Reserved: GRAFTDMG_CRYPTEX_EFFECTIVE_AP = 7
+    // Update this when a new type is added
+    CRYPTEX_AUTH_MAX = 7);
 
 #ifndef KERNEL
 

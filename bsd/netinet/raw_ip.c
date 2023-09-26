@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -162,7 +162,7 @@ rip_init(struct protosw *pp, struct domain *dp)
 	ripcbinfo.ipi_hashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_hashmask);
 	ripcbinfo.ipi_porthashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_porthashmask);
 
-	ripcbinfo.ipi_zone.zov_kt_heap = ripzone;
+	ripcbinfo.ipi_zone = ripzone;
 
 	pcbinfo = &ripcbinfo;
 	/*
@@ -180,42 +180,97 @@ rip_init(struct protosw *pp, struct domain *dp)
 	in_pcbinfo_attach(&ripcbinfo);
 }
 
-static struct   sockaddr_in ripsrc = {
-	.sin_len = sizeof(ripsrc),
-	.sin_family = AF_INET,
-	.sin_port = 0,
-	.sin_addr = { .s_addr = 0 },
-	.sin_zero = {0, 0, 0, 0, 0, 0, 0, 0, }
-};
-
-/*
- * Setup generic address and protocol structures
- * for raw_input routine, then pass them along with
- * mbuf chain.
- */
-void
-rip_input(struct mbuf *m, int iphlen)
+static uint32_t
+rip_inp_input(struct inpcb *inp, struct mbuf *m, int iphlen)
 {
 	struct ip *ip = mtod(m, struct ip *);
-	struct inpcb *inp;
-	struct inpcb *last = 0;
-	struct mbuf *opts = 0;
-	int skipit = 0, ret = 0;
 	struct ifnet *ifp = m->m_pkthdr.rcvif;
+	struct sockaddr_in ripsrc = {
+		.sin_len = sizeof(ripsrc),
+		.sin_family = AF_INET,
+		.sin_port = 0,
+		.sin_addr = { .s_addr = 0 },
+		.sin_zero = {0, 0, 0, 0, 0, 0, 0, 0, }
+	};
+	struct mbuf *opts = NULL;
 	boolean_t is_wake_pkt = false;
+	uint32_t num_delivered = 0;
 
-	/* Expect 32-bit aligned data pointer on strict-align platforms */
-	MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
+#if NECP
+	if (!necp_socket_is_allowed_to_send_recv_v4(inp, 0, 0,
+	    &ip->ip_dst, &ip->ip_src, ifp, 0, NULL, NULL, NULL, NULL)) {
+		/* do not inject data to pcb */
+		goto done;
+	}
+#endif /* NECP */
+
+	ripsrc.sin_addr = ip->ip_src;
 
 	if ((m->m_flags & M_PKTHDR) && (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
 		is_wake_pkt = true;
 	}
 
-	ripsrc.sin_addr = ip->ip_src;
+	if ((inp->inp_flags & INP_CONTROLOPTS) != 0 ||
+	    SOFLOW_ENABLED(inp->inp_socket) ||
+	    SO_RECV_CONTROL_OPTS(inp->inp_socket)) {
+		if (ip_savecontrol(inp, &opts, ip, m) != 0) {
+			m_freem(opts);
+			goto done;
+		}
+	}
+	if (inp->inp_flags & INP_STRIPHDR
+#if CONTENT_FILTER
+	    /*
+	     * If socket is subject to Content Filter, delay stripping until reinject
+	     */
+	    && (!CFIL_DGRAM_FILTERED(inp->inp_socket))
+#endif
+	    ) {
+		m->m_len -= iphlen;
+		m->m_pkthdr.len -= iphlen;
+		m->m_data += iphlen;
+	}
+	so_recv_data_stat(inp->inp_socket, m, 0);
+	if (sbappendaddr(&inp->inp_socket->so_rcv,
+	    (struct sockaddr *)&ripsrc, m, opts, NULL) != 0) {
+		num_delivered = 1;
+		sorwakeup(inp->inp_socket);
+		if (is_wake_pkt) {
+			soevent(inp->in6p_socket,
+			    SO_FILT_HINT_LOCKED | SO_FILT_HINT_WAKE_PKT);
+		}
+	} else {
+		ipstat.ips_raw_sappend_fail++;
+	}
+done:
+	return num_delivered;
+}
+
+/*
+ * The first pass is for IPv4 socket and the second pass for IPv6
+ */
+static bool
+rip_input_inner(struct mbuf *m, int iphlen, bool is_ipv4_pass, uint32_t *total_delivered)
+{
+	struct inpcb *inp;
+	struct inpcb *last = NULL;
+	struct ip *ip = mtod(m, struct ip *);
+	struct ifnet *ifp = m->m_pkthdr.rcvif;
+	bool need_ipv6_pass = false;
+	uint32_t num_delivered = 0;
+
 	lck_rw_lock_shared(&ripcbinfo.ipi_lock);
 	LIST_FOREACH(inp, &ripcb, inp_list) {
-		if ((inp->inp_vflag & INP_IPV4) == 0) {
-			continue;
+		if (is_ipv4_pass) {
+			if ((inp->inp_vflag & (INP_IPV4 | INP_IPV6)) != INP_IPV4) {
+				/* Tell if we need to an IPv6 pass */
+				need_ipv6_pass = true;
+				continue;
+			}
+		} else {
+			if ((inp->inp_vflag & (INP_IPV4 | INP_IPV6)) != (INP_IPV4 | INP_IPV6)) {
+				continue;
+			}
 		}
 		if (inp->inp_ip_p && (inp->inp_ip_p != ip->ip_p)) {
 			continue;
@@ -231,122 +286,87 @@ rip_input(struct mbuf *m, int iphlen)
 		if (inp_restricted_recv(inp, ifp)) {
 			continue;
 		}
-		if (last) {
-			struct mbuf *n = m_copy(m, 0, (int)M_COPYALL);
+		if (last != NULL) {
+			struct mbuf *n = m_copym_mode(m, 0, (int)M_COPYALL, M_DONTWAIT, M_COPYM_MUST_COPY_HDR);
 
-			skipit = 0;
-
-#if NECP
-			if (n && !necp_socket_is_allowed_to_send_recv_v4(last, 0, 0,
-			    &ip->ip_dst, &ip->ip_src, ifp, 0, NULL, NULL, NULL, NULL)) {
-				m_freem(n);
-				/* do not inject data to pcb */
-				skipit = 1;
+			if (n == NULL) {
+				continue;
 			}
-#endif /* NECP */
-			if (n && skipit == 0) {
-				int error = 0;
-				if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
-				    SOFLOW_ENABLED(last->inp_socket) ||
-				    SO_RECV_CONTROL_OPTS(last->inp_socket)) {
-					ret = ip_savecontrol(last, &opts, ip, n);
-					if (ret != 0) {
-						m_freem(n);
-						m_freem(opts);
-						last = inp;
-						continue;
-					}
-				}
-				if (last->inp_flags & INP_STRIPHDR
-#if CONTENT_FILTER
-				    /*
-				     * If socket is subject to Content Filter, delay stripping until reinject
-				     */
-				    && (!CFIL_DGRAM_FILTERED(last->inp_socket))
-#endif
-				    ) {
-					n->m_len -= iphlen;
-					n->m_pkthdr.len -= iphlen;
-					n->m_data += iphlen;
-				}
-				so_recv_data_stat(last->inp_socket, m, 0);
-				if (sbappendaddr(&last->inp_socket->so_rcv,
-				    (struct sockaddr *)&ripsrc, n,
-				    opts, &error) != 0) {
-					sorwakeup(last->inp_socket);
-				} else {
-					if (error) {
-						/* should notify about lost packet */
-						ipstat.ips_raw_sappend_fail++;
-					}
-				}
-				if (is_wake_pkt) {
-					soevent(last->in6p_socket,
-					    SO_FILT_HINT_LOCKED | SO_FILT_HINT_WAKE_PKT);
-				}
-				opts = 0;
-			}
+			num_delivered += rip_inp_input(last, n, iphlen);
 		}
 		last = inp;
 	}
 
-	skipit = 0;
-#if NECP
-	if (last && !necp_socket_is_allowed_to_send_recv_v4(last, 0, 0,
-	    &ip->ip_dst, &ip->ip_src, ifp, 0, NULL, NULL, NULL, NULL)) {
-		m_freem(m);
-		OSAddAtomic(1, &ipstat.ips_delivered);
-		/* do not inject data to pcb */
-		skipit = 1;
-	}
-#endif /* NECP */
-	if (skipit == 0) {
-		if (last) {
-			if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
-			    SOFLOW_ENABLED(last->inp_socket) ||
-			    SO_RECV_CONTROL_OPTS(last->inp_socket)) {
-				ret = ip_savecontrol(last, &opts, ip, m);
-				if (ret != 0) {
-					m_freem(m);
-					m_freem(opts);
-					goto unlock;
-				}
-			}
-			if (last->inp_flags & INP_STRIPHDR
-#if CONTENT_FILTER
-			    /*
-			     * If socket is subject to Content Filter, delay stripping until reinject
-			     */
-			    && (!CFIL_DGRAM_FILTERED(last->inp_socket))
-#endif
-			    ) {
-				m->m_len -= iphlen;
-				m->m_pkthdr.len -= iphlen;
-				m->m_data += iphlen;
-			}
-			so_recv_data_stat(last->inp_socket, m, 0);
-			if (sbappendaddr(&last->inp_socket->so_rcv,
-			    (struct sockaddr *)&ripsrc, m, opts, NULL) != 0) {
-				sorwakeup(last->inp_socket);
-			} else {
-				ipstat.ips_raw_sappend_fail++;
-			}
-			if (is_wake_pkt) {
-				soevent(last->in6p_socket,
-				    SO_FILT_HINT_LOCKED | SO_FILT_HINT_WAKE_PKT);
-			}
+	/*
+	 * Consume the orignal mbuf 'm' if:
+	 * - it is the first pass and there is no IPv6 raw socket
+	 * - it is the second pass for IPv6
+	 */
+	if (need_ipv6_pass == false || is_ipv4_pass == false) {
+		if (last != NULL) {
+			num_delivered += rip_inp_input(last, m, iphlen);
 		} else {
 			m_freem(m);
-			OSAddAtomic(1, &ipstat.ips_noproto);
-			OSAddAtomic(-1, &ipstat.ips_delivered);
+		}
+	} else {
+		if (last != NULL) {
+			struct mbuf *n = m_copym_mode(m, 0, (int)M_COPYALL, M_DONTWAIT, M_COPYM_MUST_COPY_HDR);
+
+			if (n != NULL) {
+				num_delivered += rip_inp_input(last, n, iphlen);
+			}
 		}
 	}
-unlock:
 	/*
 	 * Keep the list locked because socket filter may force the socket lock
 	 * to be released when calling sbappendaddr() -- see rdar://7627704
 	 */
 	lck_rw_done(&ripcbinfo.ipi_lock);
+
+	*total_delivered += num_delivered;
+
+	return need_ipv6_pass;
+}
+
+
+/*
+ * Setup generic address and protocol structures
+ * for raw_input routine, then pass them along with
+ * mbuf chain.
+ */
+void
+rip_input(struct mbuf *m, int iphlen)
+{
+	uint32_t num_delivered = 0;
+	bool need_v6_pass = false;
+
+	/* Expect 32-bit aligned data pointer on strict-align platforms */
+	MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
+
+	/*
+	 * First pass for raw IPv4 sockets that are protected by the inet_domain_mutex lock
+	 */
+	need_v6_pass = rip_input_inner(m, iphlen, true, &num_delivered);
+
+	/*
+	 * For the IPv6 pass we need to switch to the inet6_domain_mutex lock
+	 * to protect the raw IPv6 sockets
+	 */
+	if (need_v6_pass) {
+		lck_mtx_unlock(inet_domain_mutex);
+
+		lck_mtx_lock(inet6_domain_mutex);
+		rip_input_inner(m, iphlen, false, &num_delivered);
+		lck_mtx_unlock(inet6_domain_mutex);
+
+		lck_mtx_lock(inet_domain_mutex);
+	}
+
+	if (num_delivered > 0) {
+		OSAddAtomic(1, &ipstat.ips_delivered);
+	} else {
+		OSAddAtomic(1, &ipstat.ips_noproto);
+	}
 }
 
 /*
@@ -483,6 +503,9 @@ rip_output(
 	}
 	if (INP_AWDL_UNRESTRICTED(inp)) {
 		ipoa.ipoa_flags |=  IPOAF_AWDL_UNRESTRICTED;
+	}
+	if (INP_MANAGEMENT_ALLOWED(inp)) {
+		ipoa.ipoa_flags |=  IPOAF_MANAGEMENT_ALLOWED;
 	}
 	ipoa.ipoa_sotc = sotc;
 	ipoa.ipoa_netsvctype = netsvctype;

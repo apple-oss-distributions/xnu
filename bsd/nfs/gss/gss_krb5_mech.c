@@ -114,7 +114,6 @@ int krb5_mic(crypto_ctx_t, gss_buffer_t, gss_buffer_t, gss_buffer_t, uint8_t *, 
 int krb5_mic_mbuf(crypto_ctx_t, gss_buffer_t, mbuf_t, size_t, size_t, gss_buffer_t, uint8_t *, int *, int, int);
 
 uint32_t gss_krb5_cfx_get_mic(uint32_t *, gss_ctx_id_t, gss_qop_t, gss_buffer_t, gss_buffer_t);
-uint32_t gss_krb5_cfx_verify_mic(uint32_t *, gss_ctx_id_t, gss_buffer_t, gss_buffer_t, gss_qop_t *);
 uint32_t gss_krb5_cfx_get_mic_mbuf(uint32_t *, gss_ctx_id_t, gss_qop_t, mbuf_t, size_t, size_t, gss_buffer_t);
 uint32_t gss_krb5_cfx_verify_mic_mbuf(uint32_t *, gss_ctx_id_t, mbuf_t, size_t, size_t, gss_buffer_t, gss_qop_t *);
 errno_t krb5_cfx_crypt_mbuf(crypto_ctx_t, mbuf_t *, size_t *, int, int);
@@ -1261,53 +1260,6 @@ gss_krb5_cfx_get_mic(uint32_t *minor,           /* minor_status */
 }
 
 uint32_t
-gss_krb5_cfx_verify_mic(uint32_t *minor,        /* minor_status */
-    gss_ctx_id_t ctx,                           /* context_handle */
-    gss_buffer_t mbp,                           /* message_buffer */
-    gss_buffer_t mic,                           /* message_token */
-    gss_qop_t *qop /* qop_state */)
-{
-	gss_cfx_mic_token token = mic->value;
-	lucid_context_t lctx = &ctx->gss_lucid_ctx;
-	crypto_ctx_t cctx = &ctx->gss_cryptor;
-	uint8_t *digest = (uint8_t *)mic->value + sizeof(gss_cfx_mic_token_desc);
-	int verified = 0;
-	uint64_t seq;
-	uint32_t rv;
-	gss_buffer_desc header;
-
-	if (qop) {
-		*qop = GSS_C_QOP_DEFAULT;
-	}
-	if (minor == NULL) {
-		minor = &rv;
-	}
-
-	if (mic->length != sizeof(gss_cfx_mic_token_desc) + cctx->digest_size) {
-		printf("mic token wrong length\n");
-		*minor = EBADRPC;
-		goto out;
-	}
-	*minor = gss_krb5_cfx_verify_mic_token(ctx, token);
-	if (*minor) {
-		return GSS_S_FAILURE;
-	}
-	header.value = token;
-	header.length = sizeof(gss_cfx_mic_token_desc);
-	*minor = krb5_mic(cctx, NULL, mbp, &header, digest, &verified, 0, 0);
-
-	if (verified) {
-		//XXX  errors and such? Sequencing and replay? Not supported in RPCSEC_GSS
-		memcpy(&seq, token->SND_SEQ, sizeof(uint64_t));
-		seq = ntohll(seq);
-		lctx->recv_seq = seq;
-	}
-
-out:
-	return verified ? GSS_S_COMPLETE : GSS_S_BAD_SIG;
-}
-
-uint32_t
 gss_krb5_cfx_get_mic_mbuf(uint32_t *minor,      /* minor_status */
     gss_ctx_id_t ctx,                           /* context_handle */
     gss_qop_t qop __unused,                       /* qop_req (ignored) */
@@ -1798,7 +1750,6 @@ gss_1964_token_body_desc body_1964_token = {
 #define GSS_KRB5_3DES_MAXTOKSZ (sizeof(gss_1964_header_desc) + 5 /* max der length supported */ + sizeof(gss_1964_token_body_desc))
 
 uint32_t gss_krb5_3des_get_mic(uint32_t *, gss_ctx_id_t, gss_qop_t, gss_buffer_t, gss_buffer_t);
-uint32_t gss_krb5_3des_verify_mic(uint32_t *, gss_ctx_id_t, gss_buffer_t, gss_buffer_t, gss_qop_t *);
 uint32_t gss_krb5_3des_get_mic_mbuf(uint32_t *, gss_ctx_id_t, gss_qop_t, mbuf_t, size_t, size_t, gss_buffer_t);
 uint32_t gss_krb5_3des_verify_mic_mbuf(uint32_t *, gss_ctx_id_t, mbuf_t, size_t, size_t, gss_buffer_t, gss_qop_t *);
 uint32_t gss_krb5_3des_wrap_mbuf(uint32_t *, gss_ctx_id_t, int, gss_qop_t, mbuf_t *, size_t, int *);
@@ -2020,44 +1971,6 @@ gss_krb5_3des_get_mic(uint32_t *minor,          /* minor status */
 	gss_krb5_3des_token_put(ctx, tokbody, &hash, 0, mic);
 
 	return GSS_S_COMPLETE;
-}
-
-uint32_t
-gss_krb5_3des_verify_mic(uint32_t *minor,
-    gss_ctx_id_t ctx,
-    gss_buffer_t mbp,
-    gss_buffer_t mic,
-    gss_qop_t *qop)
-{
-	crypto_ctx_t cctx = &ctx->gss_cryptor;
-	uint8_t hashval[CRYPTO_MAX_DIGSET_SIZE];
-	gss_buffer_desc hash;
-	gss_1964_mic_token_desc mtok = mic_1964_token;
-	gss_buffer_desc header;
-	int verf;
-
-	mtok.Sign_Alg[0] = 0x04; /* lctx->key_data.lucid_protocol_u.data_1964.sign_alg */
-	mtok.Sign_Alg[1] = 0x00;
-	hash.length = cctx->digest_size;
-	hash.value = hashval;
-	header.length = sizeof(gss_1964_mic_token_desc);
-	header.value = &mtok;
-
-	if (qop) {
-		*qop = GSS_C_QOP_DEFAULT;
-	}
-
-	*minor = gss_krb5_3des_token_get(ctx, mic, mtok, &hash, NULL, NULL, 0);
-	if (*minor) {
-		return GSS_S_FAILURE;
-	}
-
-	*minor = krb5_mic(cctx, &header, mbp, NULL, hashval, &verf, 0, 0);
-	if (*minor) {
-		return GSS_S_FAILURE;
-	}
-
-	return verf ? GSS_S_COMPLETE : GSS_S_BAD_SIG;
 }
 
 uint32_t
@@ -2413,46 +2326,6 @@ gss_krb5_get_mic(uint32_t *minor,       /* minor_status */
 		return gss_krb5_cfx_get_mic(minor, ctx, qop, mbp, mic);
 	}
 
-	return GSS_S_COMPLETE;
-}
-
-uint32_t
-gss_krb5_verify_mic(uint32_t *minor,            /* minor_status */
-    gss_ctx_id_t ctx,                           /* context_handle */
-    gss_buffer_t mbp,                           /* message_buffer */
-    gss_buffer_t mic,                           /* message_token */
-    gss_qop_t *qop /* qop_state */)
-{
-	uint32_t minor_stat = 0;
-	gss_qop_t qop_val = GSS_C_QOP_DEFAULT;
-
-	if (minor == NULL) {
-		minor = &minor_stat;
-	}
-	if (qop == NULL) {
-		qop = &qop_val;
-	}
-
-	*minor = 0;
-
-	/* Validate context */
-	if (ctx == NULL || ((lucid_context_version_t)ctx)->version != 1) {
-		return GSS_S_NO_CONTEXT;
-	}
-
-	if (!supported_etype(ctx->gss_lucid_ctx.key_data.proto, ctx->gss_cryptor.etype)) {
-		*minor = ENOTSUP;
-		return GSS_S_FAILURE;
-	}
-
-	switch (ctx->gss_lucid_ctx.key_data.proto) {
-	case 0:
-		/* RFC 1964 DES3 case */
-		return gss_krb5_3des_verify_mic(minor, ctx, mbp, mic, qop);
-	case 1:
-		/* RFC 4121 CFX case */
-		return gss_krb5_cfx_verify_mic(minor, ctx, mbp, mic, qop);
-	}
 	return GSS_S_COMPLETE;
 }
 

@@ -335,6 +335,17 @@ errno_t buf_map(buf_t bp, caddr_t *io_addr);
 errno_t buf_map_range(buf_t bp, caddr_t *io_addr);
 
 /*!
+ *  @function buf_map_range_with_prot
+ *  @abstract Get virtual mappings for buffer data.
+ *  @discussion Similar to buf_map_range but also takes protection so that part of the UPL
+ *  will be mapped with the requested protection.
+ *  @param bp Buffer whose mapping to find or create.
+ *  @param io_addr Destination for mapping address.
+ *  @return 0 for success, ENOMEM if unable to map the buffer.
+ */
+errno_t buf_map_range_with_prot(buf_t bp, caddr_t *io_addr, vm_prot_t prot);
+
+/*!
  *  @function buf_unmap
  *  @abstract Release mappings for buffer data.
  *  @discussion For buffers created through buf_getblk() (i.e. traditional buffer cache usage),

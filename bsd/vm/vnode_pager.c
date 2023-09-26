@@ -92,6 +92,19 @@ vnode_pager_isSSD(vnode_t vp)
 	return disk_conditioner_mount_is_ssd(vp->v_mount);
 }
 
+#if FBDP_DEBUG_OBJECT_NO_PAGER
+bool
+vnode_pager_forced_unmount(vnode_t vp)
+{
+	mount_t mnt;
+	mnt = vnode_mount(vp);
+	if (!mnt) {
+		return false;
+	}
+	return vfs_isforce(mnt);
+}
+#endif /* FBDP_DEBUG_OBJECT_NO_PAGER */
+
 #if CONFIG_IOSCHED
 void
 vnode_pager_issue_reprioritize_io(struct vnode *devvp, uint64_t blkno, uint32_t len, int priority)

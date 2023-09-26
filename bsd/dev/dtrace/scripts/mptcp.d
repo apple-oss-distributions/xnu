@@ -161,8 +161,6 @@ translator mptsesinfo_t < struct mptses *T > {
 /*
  * MPTCP Subflow.
  */
-inline int MPTSF_ATTACHED       = 0x00001;
-#pragma D binding "1.0" MPTSF_ATTACHED
 inline int MPTSF_CONNECTING     = 0x00002;
 #pragma D binding "1.0" MPTSF_CONNECTING
 inline int MPTSF_CONNECT_PENDING= 0x00004;

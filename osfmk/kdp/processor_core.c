@@ -200,8 +200,8 @@ kern_register_coredump_helper_internal(int kern_coredump_config_vers, const kern
 		snprintf((char *)&core_helper->kcc_corename, MACH_CORE_FILEHEADER_NAMELEN, "%s", core_description);
 	} else {
 		assert(type == COPROCESSOR_COREDUMP);
-		/* Make sure there's room for the -coproc suffix (16 - NULL char - strlen(-coproc)) */
-		snprintf((char *)&core_helper->kcc_corename, MACH_CORE_FILEHEADER_NAMELEN, "%.8s-coproc", core_description);
+		/* Make sure there's room for the -cp suffix (16 - NULL char - strlen(-cp)) */
+		snprintf((char *)&core_helper->kcc_corename, MACH_CORE_FILEHEADER_NAMELEN, "%.12s-cp", core_description);
 	}
 	core_helper->kcc_is64bit = is64bit;
 	core_helper->kcc_mh_magic = mh_magic;

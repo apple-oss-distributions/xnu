@@ -581,6 +581,9 @@ type vm_read_entry_t = array[512] of vm_offset_t;
 type vm32_read_entry_t = array[512] of vm32_offset_t;
 #endif
 
+type mach_vm_range_flavor_t = uint32_t;
+type mach_vm_range_recipes_raw_t = array[*:1024] of uint8_t;
+
 type exception_mask_t		= int;
 type exception_behavior_t	= int;
 

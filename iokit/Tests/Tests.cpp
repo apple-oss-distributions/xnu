@@ -1302,28 +1302,12 @@ struct TrivialAggregateTestType {
 	bool b;
 	float c;
 };
-class NonTrivialConstructorAggregateTestType
-{
-public:
-	NonTrivialConstructorAggregateTestType() = default;
-	int a = 3;
-	bool b = true;
-	float c = 999.f;
-};
 OSDefineValueObjectForDependentType(int)
 OSDefineValueObjectForDependentType(TrivialAggregateTestType)
-OSDefineValueObjectForDependentType(NonTrivialConstructorAggregateTestType)
 
 static int
 OSValueObjectTests(int)
 {
-	constexpr auto nearlyEqual = [](float a, float b)
-	    {
-		    constexpr float epsilon = 0.000001f;
-		    const auto diff = a - b;
-		    return (diff >= -epsilon) && (diff <= epsilon);
-	    };
-
 	// test simple built-in type
 	{
 		using T = int;
@@ -1350,53 +1334,6 @@ OSValueObjectTests(int)
 				bytesAreZero &= bytes[byteIndex] == 0;
 			}
 			assert(bytesAreZero);
-		}
-	}
-
-	// test aggregate type with non-trivial constructor
-	{
-		using T = NonTrivialConstructorAggregateTestType;
-		OSSharedPtr<OSValueObject<T> > test = OSValueObject<T>::create();
-		assert(test);
-		if (test) {
-			const T other;
-			assert(test->isEqualTo(other));
-			assert(test->getRef().a == other.a);
-			assert(test->getRef().b == other.b);
-			assert(nearlyEqual(test->getRef().c, other.c));
-		}
-	}
-
-	// test copying of OSValueObject
-	{
-		using T = NonTrivialConstructorAggregateTestType;
-		OSSharedPtr<OSValueObject<T> > test1;
-		T valueCopy;
-		{
-			T value; // declared in sub-scope to ensure instance-independence when it falls out of scope
-			value.a = 1;
-			value.b = true;
-			value.c = 3.f;
-			valueCopy = value;
-			test1 = OSValueObject<T>::withValue(value);
-			assert(test1);
-			if (test1) {
-				assert(test1->isEqualTo(value));
-				assert(test1->getRef().a == value.a);
-				assert(test1->getRef().b == value.b);
-				assert(nearlyEqual(test1->getRef().c, value.c));
-			}
-			valueCopy.a = 100;
-			test1->getMutableRef().a = valueCopy.a;
-		}
-		if (test1) {
-			OSSharedPtr<OSValueObject<T> > test2 = OSValueObject<T>::withValueObject(test1.get());
-			if (test2) {
-				assert(test2->isEqualTo(test1.get()));
-				assert(test2->getRef().a == valueCopy.a);
-				assert(test2->getRef().b == valueCopy.b);
-				assert(nearlyEqual(test2->getRef().c, valueCopy.c));
-			}
 		}
 	}
 

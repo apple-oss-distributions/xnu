@@ -135,6 +135,7 @@ int mac_exc_action_check_exception_send(struct task *victim_task, struct excepti
 
 void mac_proc_notify_exec_complete(struct proc *proc);
 int mac_proc_check_remote_thread_create(struct task *task, int flavor, thread_state_t new_state, mach_msg_type_number_t new_state_count);
+void mac_proc_notify_service_port_derive(struct mach_service_port_info *sp_info);
 
 struct label *mac_exc_create_label_for_proc(struct proc *proc);
 struct label *mac_exc_create_label_for_current_proc(void);

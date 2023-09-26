@@ -441,6 +441,29 @@ __os_nexus_flow_del(const nexus_controller_t ncd, const uuid_t nx_uuid,
 	           &ncr, sizeof(ncr));
 }
 
+static int
+__os_nexus_config_flow(const uuid_t nx_uuid, struct nx_flow_req *nfr)
+{
+	struct nx_cfg_req ncr;
+
+	__nexus_config_req_prepare(&ncr, nx_uuid, NXCFG_CMD_FLOW_CONFIG,
+	    nfr, sizeof(*nfr));
+
+	return __nexus_set_opt(__OS_NEXUS_SHARED_USER_CONTROLLER_FD,
+	           NXOPT_NEXUS_CONFIG, &ncr, sizeof(ncr));
+}
+
+int
+os_nexus_flow_set_wake_from_sleep(const uuid_t nx_uuid, const uuid_t flow_uuid,
+    bool enable)
+{
+	struct nx_flow_req nfr = {0};
+	memcpy(nfr.nfr_flow_uuid, flow_uuid, sizeof(uuid_t));
+	nfr.nfr_flags = enable ? 0 : NXFLOWREQF_NOWAKEFROMSLEEP;
+
+	return __os_nexus_config_flow(nx_uuid, &nfr);
+}
+
 int
 __os_nexus_get_llink_info(const nexus_controller_t ncd, const uuid_t nx_uuid,
     const struct nx_llink_info_req *nlir, size_t len)

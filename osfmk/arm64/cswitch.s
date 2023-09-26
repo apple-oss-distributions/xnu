@@ -179,7 +179,7 @@
 	ldr		$1, [$0, ACT_CPUDATAP]
 	str		$0, [$1, CPU_ACTIVE_THREAD]
 
-	ldrsh	$2, [$1, CPU_NUMBER_GS]
+	ldr	    $2, [$1, CPU_TPIDR_EL0]             // Write encoded CPU info to TPIDR_EL0
 	msr		TPIDR_EL0, $2
 
 	ldr		$1, [$0, TH_CTH_SELF]				// Get cthread pointer
@@ -270,7 +270,7 @@ Lskip_jop_keys_\@:
 
 LEXT(machine_load_context)
 	set_thread_registers 	x0, x1, x2
-	ldr		x1, [x0, TH_KSTACKPTR]				// Get top of kernel stack
+	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get top of kernel stack
 	load_general_registers 	x1, 2
 	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
 	mov		x0, #0								// Clear argument to thread_continue
@@ -292,7 +292,7 @@ LEXT(Call_continuation)
 	mrs		x4, TPIDR_EL1						// Get the current thread pointer
 
 	/* ARM64_TODO arm loads the kstack top instead of arg4. What should we use? */
-	ldr		x5, [x4, TH_KSTACKPTR]				// Get the top of the kernel stack
+	LOAD_KERN_STACK_TOP	dst=x5, src=x4, tmp=x6
 	mov		sp, x5								// Set stack pointer
 	mov		fp, #0								// Clear the frame pointer
 
@@ -330,11 +330,11 @@ LEXT(Call_continuation)
 
 LEXT(Switch_context)
 	cbnz	x1, Lswitch_threads					// Skip saving old state if blocking on continuation
-	ldr		x3, [x0, TH_KSTACKPTR]				// Get the old kernel stack top
+	LOAD_KERN_STACK_TOP	dst=x3, src=x0, tmp=x4	// Get the old kernel stack top
 	save_general_registers	x3, 4
 Lswitch_threads:
 	set_thread_registers	x2, x3, x4
-	ldr		x3, [x2, TH_KSTACKPTR]
+	LOAD_KERN_STACK_TOP	dst=x3, src=x2, tmp=x4
 	load_general_registers	x3, 4
 	set_process_dependent_keys_and_sync_context	x2, x3, x4, x5, w6
 	cswitch_epilogue
@@ -349,11 +349,10 @@ Lswitch_threads:
 
 LEXT(Shutdown_context)
 	mrs		x10, TPIDR_EL1							// Get thread pointer
-	ldr		x11, [x10, TH_KSTACKPTR]				// Get the top of the kernel stack
+	LOAD_KERN_STACK_TOP	dst=x11, src=x10, tmp=x12	// Get the top of the kernel stack
 	save_general_registers	x11, 12
 	msr		DAIFSet, #(DAIFSC_FIQF | DAIFSC_IRQF)	// Disable interrupts
-	ldr		x11, [x10, ACT_CPUDATAP]				// Get current cpu
-	ldr		x12, [x11, CPU_ISTACKPTR]				// Switch to interrupt stack
+	LOAD_INT_STACK	dst=x12, src=x10, tmp=x11
 	mov		sp, x12
 	b		EXT(cpu_doshutdown)
 
@@ -367,10 +366,9 @@ LEXT(Shutdown_context)
 
 LEXT(Idle_context)
 	mrs		x0, TPIDR_EL1						// Get thread pointer
-	ldr		x1, [x0, TH_KSTACKPTR]				// Get the top of the kernel stack
+	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
 	save_general_registers	x1, 2
-	ldr		x1, [x0, ACT_CPUDATAP]				// Get current cpu
-	ldr		x2, [x1, CPU_ISTACKPTR]				// Switch to interrupt stack
+	LOAD_INT_STACK	dst=x2, src=x0, tmp=x1
 	mov		sp, x2
 	b		EXT(cpu_idle)
 
@@ -384,7 +382,7 @@ LEXT(Idle_context)
 
 LEXT(Idle_load_context)
 	mrs		x0, TPIDR_EL1						// Get thread pointer
-	ldr		x1, [x0, TH_KSTACKPTR]				// Get the top of the kernel stack
+	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
 	load_general_registers	x1, 2
 	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
 	cswitch_epilogue

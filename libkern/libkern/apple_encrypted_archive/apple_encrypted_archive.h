@@ -135,7 +135,7 @@ __BEGIN_DECLS
 /**
  * @abstract The AppleEncryptedArchive interface that was registered.
  */
-extern const apple_encrypted_archive_t *apple_encrypted_archive;
+extern const apple_encrypted_archive_t * apple_encrypted_archive;
 
 /**
  * @abstract Registers the AppleEncryptedArchive kext interface for use within the kernel proper.

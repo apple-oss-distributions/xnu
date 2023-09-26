@@ -10,11 +10,16 @@
 #include <pexpert/arm64/board_config.h>
 
 #include <kern/clock.h>
+#include <kern/locks.h>
 #include <machine/machine_routines.h>
 #if DEVELOPMENT || DEBUG
 #include <kern/simple_lock.h>
 #include <kern/cpu_number.h>
-#endif
+#include <os/hash.h>
+#ifndef MIN
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#endif /* MIN */
+#endif /* DEVELOPMENT || DEBUG */
 
 #define PANIC_TRACE_LOG 1
 #define panic_trace_error(msg, args...) { if (panic_trace_debug == 1) kprintf("panic_trace: " msg "\n", ##args); else if (panic_trace_debug == 2) printf("panic_trace: " msg "\n", ##args); }
@@ -25,13 +30,17 @@
 #endif /* PANIC_TRACE_LOG */
 
 
+/* Disable logs by default. */
+#ifndef CT_DFT_LOGS_ON
+#define CT_DFT_LOGS_ON 0
+#endif /* CT_DFT_LOGS_ON */
+
 /* Local declarations */
 void pe_identify_machine(boot_args * bootArgs);
 
 /* External declarations */
 extern void clean_mmu_dcache(void);
 extern void flush_dcache64(addr64_t addr, unsigned count, int phys);
-
 
 static char    *gPESoCDeviceType;
 static char     gPESoCDeviceTypeBuffer[SOC_DEVICE_TYPE_BUFFER_SIZE];
@@ -42,6 +51,15 @@ static uint32_t pe_arm_init_timer(void *args);
 #if DEVELOPMENT || DEBUG
 decl_simple_lock_data(, panic_hook_lock);
 #endif
+
+static boolean_t debug_and_trace_initialized = false;
+
+boolean_t
+PE_arm_debug_and_trace_initialized(void)
+{
+	return debug_and_trace_initialized;
+}
+
 /*
  * pe_identify_machine:
  *
@@ -205,12 +223,17 @@ vm_offset_t     gSocPhys;
 
 #if DEVELOPMENT || DEBUG
 // This block contains the panic trace implementation
-TUNABLE_DT_WRITEABLE(panic_trace_t, panic_trace, "/arm-io/cpu-debug-interface", "panic-trace-mode", "panic_trace", panic_trace_disabled, TUNABLE_DT_NONE);
-TUNABLE_WRITEABLE(boolean_t, panic_trace_debug, "panic_trace_debug", 1);
+
+#define DEFAULT_PANIC_TRACE_MODE panic_trace_disabled
+
+TUNABLE_DT_WRITEABLE(panic_trace_t, panic_trace, "/arm-io/cpu-debug-interface",
+    "panic-trace-mode", "panic_trace", DEFAULT_PANIC_TRACE_MODE, TUNABLE_DT_NONE);
+LCK_GRP_DECLARE(panic_trace_grp, "Panic Trace");
+LCK_TICKET_DECLARE(panic_trace_lock, &panic_trace_grp);
+TUNABLE_WRITEABLE(boolean_t, panic_trace_debug, "panic_trace_debug", CT_DFT_LOGS_ON);
 TUNABLE_WRITEABLE(uint64_t, panic_trace_core_cfg, "panic_trace_core_cfg", 0);
 TUNABLE_WRITEABLE(uint64_t, panic_trace_ctl, "panic_trace_ctl", 0);
 TUNABLE_WRITEABLE(uint64_t, panic_trace_pwr_state_ignore, "panic_trace_pwr_state_ignore", 0);
-TUNABLE_WRITEABLE(boolean_t, panic_trace_experimental_hid, "panic_trace_experimental_hid", 0);
 TUNABLE(unsigned int, bootarg_stop_clocks, "stop_clocks", 0);
 extern unsigned int wfi;
 
@@ -372,6 +395,18 @@ pe_init_debug_command(DTEntry entryP, command_buffer_element_t **command_buffer,
 static void
 pe_run_debug_command(command_buffer_element_t *command_buffer)
 {
+	if (!PE_arm_debug_and_trace_initialized()) {
+		/*
+		 * In practice this can only happen if we panicked very early,
+		 * when only the boot CPU is online and before it has finished
+		 * initializing the debug and trace infrastructure. Avoid an
+		 * unhelpful nested panic() here and instead resume execution
+		 * to handle_debugger_trap(), which logs a user friendly error
+		 * message before spinning forever.
+		 */
+		return;
+	}
+
 	// When both the CPUs panic, one will get stuck on the lock and the other CPU will be halted when the first executes the debug command
 	simple_lock(&panic_hook_lock, LCK_GRP_NULL);
 
@@ -423,10 +458,21 @@ static void
 PE_arm_panic_hook(const char *str __unused)
 {
 	(void)str; // not used
+#if defined(__arm64__) && !APPLEVIRTUALPLATFORM
+	/*
+	 * For Fastsim support--inform the simulator that it can dump a
+	 * panic trace now (so we don't capture all the panic handling).
+	 * This constant is randomly chosen by agreement between xnu and
+	 * Fastsim.
+	 */
+	__asm__ volatile ("hint #0x4f");
+#endif /* defined(__arm64__) && !APPLEVIRTUALPLATFORM */
 	if (bootarg_stop_clocks) {
 		pe_run_debug_command(stop_clocks);
 	}
-	// if panic trace is enabled
+	// disable panic trace to snapshot its ringbuffer
+	// note: Not taking panic_trace_lock to avoid delaying cpu halt.
+	//       This is known to be racy.
 	if (panic_trace) {
 		if (running_debug_command_on_cpu_number == cpu_number()) {
 			// This is going to end badly if we don't trap, since we'd be panic-ing during our own code
@@ -464,12 +510,72 @@ PE_init_cpu(void)
 #endif  // DEVELOPMENT || DEBUG
 
 void
+PE_singlestep_hook(void)
+{
+}
+
+void
 PE_panic_hook(const char *str __unused)
 {
 	if (PE_arm_debug_panic_hook != NULL) {
 		PE_arm_debug_panic_hook(str);
 	}
 }
+
+#if DEVELOPMENT || DEBUG
+/*
+ * The % of devices which will have panic_trace enabled when using a partial
+ * enablement policy.
+ */
+static TUNABLE_DT(uint32_t, panic_trace_partial_percent,
+    "/arm-io/cpu-debug-interface", "panic-trace-partial-percent",
+    "panic_trace_partial_percent", 50, TUNABLE_DT_NONE);
+
+/*
+ * When the `panic_trace_partial_policy` flag is set, not all devices will have
+ * the panic_trace settings applied. The actual % is determined by
+ * `panic_trace_partial_percent`.
+ * By using the ECID instead of a random number the process is made
+ * deterministic for any given device.
+ * This function disables panic trace if the device falls into the disabled %
+ * range. It otherwise leaves the panic_trace value unmodified.
+ * Called on the boot path, thus does not lock panic_trace_lock.
+ */
+static void
+panic_trace_apply_partial_policy(void)
+{
+	assert3u((panic_trace & panic_trace_partial_policy), !=, 0);
+
+	DTEntry ent = NULL;
+	unsigned int size = 0;
+	const void *ecid = NULL;
+
+	/* Grab the ECID. */
+	if (SecureDTLookupEntry(NULL, "/chosen", &ent) != kSuccess ||
+	    SecureDTGetProperty(ent, "unique-chip-id", &ecid, &size) != kSuccess) {
+		panic_trace = panic_trace_disabled;
+		return;
+	}
+
+	/*
+	 * Use os_hash_jenkins to convert the decidedly non-random ECID into
+	 * something resembling a random number. Better (cryptographic) hash
+	 * functions are not available at this point in boot.
+	 */
+	const uint32_t rand = os_hash_jenkins(ecid, size);
+
+	/* Sanitize the percent value. */
+	const uint32_t percent = MIN(100, panic_trace_partial_percent);
+
+	/*
+	 * Apply the ECID percent value. The bias here should be so tiny as to not
+	 * matter for this purpose.
+	 */
+	if ((rand % 100) >= percent) {
+		panic_trace = panic_trace_disabled;
+	}
+}
+#endif /* DEVELOPMENT || DEBUG */
 
 void
 pe_arm_init_debug(void *args)
@@ -478,20 +584,30 @@ pe_arm_init_debug(void *args)
 	uintptr_t const *reg_prop;
 	uint32_t        prop_size;
 
+	/*
+	 * When args != NULL, this means we're being called from arm_init() on the
+	 * boot CPU; this controls one-time init of the panic trace infrastructure.
+	 * During one-time init, panic_trace_lock does not need to be held.
+	 */
+	const bool is_boot_cpu = (args != NULL);
+
 	if (gSocPhys == 0) {
 		kprintf("pe_arm_init_debug: failed to initialize gSocPhys == 0\n");
 		return;
 	}
 
+#if DEVELOPMENT || DEBUG
+	if (is_boot_cpu && (panic_trace & panic_trace_partial_policy) != 0) {
+		panic_trace_apply_partial_policy();
+	}
+#endif /* DEVELOPMENT || DEBUG */
+
 	if (SecureDTFindEntry("device_type", "cpu-debug-interface", &entryP) == kSuccess) {
-		if (args != NULL) {
+		if (is_boot_cpu) {
 			if (SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size) == kSuccess) {
 				ml_init_arm_debug_interface(args, ml_io_map(gSocPhys + *reg_prop, *(reg_prop + 1)));
 			}
 #if DEVELOPMENT || DEBUG
-			// When args != NULL, this means we're being called from arm_init on the boot CPU.
-			// This controls one-time initialization of the Panic Trace infrastructure
-
 			simple_lock_init(&panic_hook_lock, 0); //assuming single threaded mode
 
 			if (panic_trace) {
@@ -513,9 +629,20 @@ pe_arm_init_debug(void *args)
 #endif
 		}
 	} else {
-		kprintf("pe_arm_init_debug: failed to find cpu-debug-interface\n");
+#if DEVELOPMENT || DEBUG
+		const uint32_t dependent_modes = (panic_trace_enabled | panic_trace_alt_enabled);
+		if (is_boot_cpu && (bootarg_stop_clocks || (panic_trace & dependent_modes))) {
+			panic("failed to find cpu-debug-interface node in the EDT! "
+			    "(required by `panic_trace={0x01, 0x10}` or `stop_clocks=1`)");
+		} else
+#endif
+		{
+			kprintf("pe_arm_init_debug: failed to find cpu-debug-interface\n");
+		}
 	}
 
+
+	debug_and_trace_initialized = true;
 }
 
 static uint32_t

@@ -4079,35 +4079,35 @@ OSKext::serializeLogInfo(
 		    "Failed to create serializer on log info for request from user space.");
 		/* Incidental error; we're going to (try to) allow the request
 		 * itself to succeed. */
-	}
-
-	if (!logInfoArray->serialize(serializer.get())) {
-		OSKextLog(/* kext */ NULL,
-		    kOSKextLogErrorLevel |
-		    kOSKextLogIPCFlag,
-		    "Failed to serialize log info for request from user space.");
-		/* Incidental error; we're going to (try to) allow the request
-		 * itself to succeed. */
 	} else {
-		logInfo = serializer->text();
-		logInfoLength = serializer->getLength();
-
-		kmem_result = kmem_alloc(kernel_map, (vm_offset_t *)&buffer, round_page(logInfoLength),
-		    KMA_DATA, VM_KERN_MEMORY_OSKEXT);
-		if (kmem_result != KERN_SUCCESS) {
+		if (!logInfoArray->serialize(serializer.get())) {
 			OSKextLog(/* kext */ NULL,
 			    kOSKextLogErrorLevel |
 			    kOSKextLogIPCFlag,
-			    "Failed to copy log info for request from user space.");
+			    "Failed to serialize log info for request from user space.");
 			/* Incidental error; we're going to (try to) allow the request
-			 * to succeed. */
+			 * itself to succeed. */
 		} else {
-			/* 11981737 - clear uninitialized data in last page */
-			bzero((void *)(buffer + logInfoLength),
-			    (round_page(logInfoLength) - logInfoLength));
-			memcpy(buffer, logInfo, logInfoLength);
-			*logInfoOut = buffer;
-			*logInfoLengthOut = logInfoLength;
+			logInfo = serializer->text();
+			logInfoLength = serializer->getLength();
+
+			kmem_result = kmem_alloc(kernel_map, (vm_offset_t *)&buffer, round_page(logInfoLength),
+			    KMA_DATA, VM_KERN_MEMORY_OSKEXT);
+			if (kmem_result != KERN_SUCCESS) {
+				OSKextLog(/* kext */ NULL,
+				    kOSKextLogErrorLevel |
+				    kOSKextLogIPCFlag,
+				    "Failed to copy log info for request from user space.");
+				/* Incidental error; we're going to (try to) allow the request
+				 * to succeed. */
+			} else {
+				/* 11981737 - clear uninitialized data in last page */
+				bzero((void *)(buffer + logInfoLength),
+				    (round_page(logInfoLength) - logInfoLength));
+				memcpy(buffer, logInfo, logInfoLength);
+				*logInfoOut = buffer;
+				*logInfoLengthOut = logInfoLength;
+			}
 		}
 	}
 
@@ -4226,6 +4226,15 @@ OSKext::lookupKextWithAddress(vm_address_t address)
 			}
 #if defined(__arm64__)
 			textExecBase = (uintptr_t) getsegdatafromheader((kernel_mach_header_t *)kmod_info->address, "__TEXT_EXEC", &textExecSize);
+
+			/**
+			 * If the addresses within the Mach-O are unslid, then manually
+			 * slide any addresses coming from the Mach-O before usage.
+			 */
+			if (thisKext->flags.unslidMachO) {
+				textExecBase = (uintptr_t) ml_static_slide((vm_offset_t) textExecBase);
+			}
+
 			if ((textExecBase <= address) && (address < textExecBase + textExecSize)) {
 				foundKext.reset(thisKext, OSRetain);
 				goto finish;
@@ -4968,6 +4977,14 @@ OSKext::isExecutable(void)
 }
 
 /*********************************************************************
+*********************************************************************/
+bool
+OSKext::isSpecialKernelBinary(void)
+{
+	return false;
+}
+
+/*********************************************************************
 * We might want to check this recursively for all dependencies,
 * since a subtree of dependencies could get loaded before we hit
 * a dependency that isn't safe-boot-loadable.
@@ -5238,6 +5255,7 @@ OSKext::replaceDextInternal(OSKext *olddext, OSKext *newdext)
 {
 	OSReturn result;
 	const OSSymbol * dextID = olddext->getIdentifier();
+	OSData * oldDextUniqueIdentifier = olddext->getDextUniqueID();
 	OSSharedPtr<OSArray> new_personalities;
 	OSSharedPtr<OSString> kextIdentifier;
 	__assert_only bool lock_held = IORecursiveLockHaveLock(sKextLock);
@@ -5257,6 +5275,10 @@ OSKext::replaceDextInternal(OSKext *olddext, OSKext *newdext)
 		 */
 		new_personalities = newdext->copyPersonalitiesArray();
 		olddext->updatePersonalitiesInCatalog(new_personalities.get());
+	}
+
+	if (NULL != oldDextUniqueIdentifier) {
+		oldDextUniqueIdentifier->retain();
 	}
 
 	/*
@@ -5296,10 +5318,12 @@ OSKext::replaceDextInternal(OSKext *olddext, OSKext *newdext)
 		}
 	} else {
 		// notify dext removal
-		queueKextNotification(kKextRequestPredicateUnloadNotification, OSDynamicCast(OSString, dextID));
+		queueKextNotification(kKextRequestPredicateUnloadNotification,
+		    OSDynamicCast(OSString, dextID), oldDextUniqueIdentifier);
 	}
 
 	OSSafeReleaseNULL(dextID);
+	OSSafeReleaseNULL(oldDextUniqueIdentifier);
 }
 
 /*
@@ -6671,7 +6695,7 @@ finish:
 		    getIdentifierCString());
 
 		queueKextNotification(kKextRequestPredicateLoadNotification,
-		    OSDynamicCast(OSString, bundleID.get()));
+		    OSDynamicCast(OSString, bundleID.get()), getDextUniqueID());
 	}
 	return result;
 }
@@ -8755,7 +8779,7 @@ OSKext::unload(void)
 	    "Kext %s unloaded.", getIdentifierCString());
 
 	queueKextNotification(kKextRequestPredicateUnloadNotification,
-	    OSDynamicCast(OSString, bundleID.get()));
+	    OSDynamicCast(OSString, bundleID.get()), getDextUniqueID());
 
 finish:
 	OSKext::saveLoadedKextPanicList();
@@ -8772,7 +8796,8 @@ finish:
 OSReturn
 OSKext::queueKextNotification(
 	const char * notificationName,
-	OSString   * kextIdentifier)
+	OSString   * kextIdentifier,
+	OSData     * dextUniqueIdentifier)
 {
 	OSReturn          result               = kOSReturnError;
 	OSSharedPtr<OSDictionary>    loadRequest;
@@ -8793,6 +8818,13 @@ OSKext::queueKextNotification(
 	    kKextRequestArgumentBundleIdentifierKey, kextIdentifier)) {
 		result = kOSKextReturnNoMemory;
 		goto finish;
+	}
+	if (NULL != dextUniqueIdentifier) {
+		if (!_OSKextSetRequestArgument(loadRequest.get(),
+		    kKextRequestArgumentDriverUniqueIdentifier, dextUniqueIdentifier)) {
+			result = kOSKextReturnNoMemory;
+			goto finish;
+		}
 	}
 	if (!sKernelRequests->setObject(loadRequest.get())) {
 		result = kOSKextReturnNoMemory;
@@ -15148,8 +15180,6 @@ OSKextVLog(
 	const char     * format,
 	va_list          srcArgList)
 {
-	extern int       disableConsoleOutput;
-
 	bool             logForKernel       = false;
 	bool             logForUser         = false;
 	va_list          argList;
@@ -15218,7 +15248,7 @@ OSKextVLog(
 		/* If we are in console mode and have a custom log filter,
 		 * colorize the log message.
 		 */
-		if (!disableConsoleOutput && sBootArgLogFilterFound) {
+		if (sBootArgLogFilterFound) {
 			const char * color = "";         // do not free
 			color = colorForFlags(msgLogSpec);
 			printf("%s%s%s\n", colorForFlags(msgLogSpec),
@@ -15616,6 +15646,39 @@ OSKext::kextForAddress(const void *address)
 	}
 
 	return NULL;
+}
+
+/* static */
+kern_return_t
+OSKext::summaryForAddressExt(
+	const void              * address,
+	OSKextLoadedKextSummary * summary)
+{
+	kern_return_t                   result = KERN_FAILURE;
+	const OSKextLoadedKextSummary * foundSummary = NULL;
+
+	/*
+	 * This needs to be safe to call even before the lock has been initialized
+	 * in OSKext::initialize(), as we might get here from the ksancov runtime
+	 * when instrumenting XNU itself with sanitizer coverage.
+	 */
+	if (!sKextSummariesLock) {
+		return result;
+	}
+
+	IOLockLock(sKextSummariesLock);
+	if (gLoadedKextSummaries) {
+		foundSummary = summaryForAddress((uintptr_t)address);
+		if (foundSummary) {
+			memcpy(summary, foundSummary, sizeof(*summary));
+			result = KERN_SUCCESS;
+		} else {
+			result = KERN_NOT_FOUND;
+		}
+	}
+	IOLockUnlock(sKextSummariesLock);
+
+	return result;
 }
 
 /*
@@ -16136,7 +16199,7 @@ OSKext::updateLoadedKextSummaries(void)
 	count = sLoadedKexts->getCount();
 	for (i = 0, maxKexts = 0; i < count; ++i) {
 		aKext = OSDynamicCast(OSKext, sLoadedKexts->getObject(i));
-		maxKexts += (aKext && aKext->isExecutable());
+		maxKexts += (aKext && (aKext->isExecutable() || aKext->isSpecialKernelBinary()));
 	}
 
 	if (!maxKexts) {
@@ -16197,7 +16260,7 @@ OSKext::updateLoadedKextSummaries(void)
 	accountingListAlloc = 0;
 	for (i = 0, j = 0; i < count && j < maxKexts; ++i) {
 		aKext = OSDynamicCast(OSKext, sLoadedKexts->getObject(i));
-		if (!aKext || !aKext->isExecutable()) {
+		if (!aKext || (!aKext->isExecutable() && !aKext->isSpecialKernelBinary())) {
 			continue;
 		}
 
@@ -16210,7 +16273,7 @@ OSKext::updateLoadedKextSummaries(void)
 	accountingListCount = 0;
 	for (i = 0, j = 0; i < count && j < maxKexts; ++i) {
 		aKext = OSDynamicCast(OSKext, sLoadedKexts->getObject(i));
-		if (!aKext || !aKext->isExecutable()) {
+		if (!aKext || (!aKext->isExecutable() && !aKext->isSpecialKernelBinary())) {
 			continue;
 		}
 
@@ -16308,6 +16371,16 @@ OSKext::updateLoadedKextSummary(OSKextLoadedKextSummary *summary)
 		// Fallback to __TEXT
 		summary->text_exec_address = (uint64_t) getsegdatafromheader((kernel_mach_header_t *)summary->address, "__TEXT", &summary->text_exec_size);
 	}
+
+	/**
+	 * If the addresses within the Mach-O are unslid, then manually slide any
+	 * addresses coming from the Mach-O as higher layer software using these
+	 * summaries expects a slid address here.
+	 */
+	if (flags.unslidMachO) {
+		summary->text_exec_address = (uint64_t) ml_static_slide((vm_offset_t) summary->text_exec_address);
+	}
+
 	return;
 }
 

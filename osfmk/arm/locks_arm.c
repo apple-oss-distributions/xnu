@@ -267,13 +267,21 @@ _enable_preemption_write_count(thread_t thread, unsigned int count)
 
 uint64_t _Atomic PERCPU_DATA_HACK_78750602(preemption_disable_max_mt);
 
-MACHINE_TIMEOUT_DEV_WRITEABLE(sched_preemption_disable_threshold_mt, "sched-preemption", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, kprintf_spam_mt_pred);
+#if XNU_PLATFORM_iPhoneOS
+#define DEFAULT_PREEMPTION_TIMEOUT 120000 /* 5ms */
+#define DEFAULT_PREEMPTION_MODE SCHED_HYGIENE_MODE_PANIC
+#else
+#define DEFAULT_PREEMPTION_TIMEOUT 0      /* Disabled */
+#define DEFAULT_PREEMPTION_MODE SCHED_HYGIENE_MODE_OFF
+#endif /* XNU_PLATFORM_iPhoneOS */
 
+MACHINE_TIMEOUT_DEV_WRITEABLE(sched_preemption_disable_threshold_mt, "sched-preemption",
+    DEFAULT_PREEMPTION_TIMEOUT, MACHINE_TIMEOUT_UNIT_TIMEBASE, kprintf_spam_mt_pred);
 TUNABLE_DT_WRITEABLE(sched_hygiene_mode_t, sched_preemption_disable_debug_mode,
     "machine-timeouts",
     "sched-preemption-disable-mode", /* DT property names have to be 31 chars max */
     "sched_preemption_disable_debug_mode",
-    SCHED_HYGIENE_MODE_OFF,
+    DEFAULT_PREEMPTION_MODE,
     TUNABLE_DT_CHECK_CHOSEN);
 
 static uint32_t const sched_preemption_disable_debug_dbgid = MACHDBG_CODE(DBG_MACH_SCHED, MACH_PREEMPTION_EXPIRED) | DBG_FUNC_NONE;
@@ -655,7 +663,7 @@ arm_usimple_lock_init(simple_lock_t lck, __unused unsigned short initial_value)
 }
 
 void
-lck_spin_assert(lck_spin_t *lock, unsigned int type)
+lck_spin_assert(const lck_spin_t *lock, unsigned int type)
 {
 	if (type == LCK_ASSERT_OWNED) {
 		lck_ticket_assert_owned(lock);
@@ -790,7 +798,7 @@ arm_usimple_lock_init(simple_lock_t lck, __unused unsigned short initial_value)
 }
 
 void
-lck_spin_assert(lck_spin_t *lock, unsigned int type)
+lck_spin_assert(const lck_spin_t *lock, unsigned int type)
 {
 	thread_t thread, holder;
 

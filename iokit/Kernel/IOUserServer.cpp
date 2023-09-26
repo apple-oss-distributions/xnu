@@ -409,6 +409,11 @@ IOService::CopyDispatchQueue_Impl(
 		return kIOReturnError;
 	}
 
+	if (!reserved->uvars->queueArray) {
+		// CopyDispatchQueue should not be called after the service has stopped
+		return kIOReturnError;
+	}
+
 	ret = kIOReturnNotFound;
 	index = -1U;
 	if (!strcmp("Default", name)) {
@@ -1802,7 +1807,30 @@ IOServiceNotificationDispatchSource::Create_Impl(
 		okToUse = (serverName && inst->ivars->serverName->isEqualTo(serverName));
 		OSSafeReleaseNULL(serverName);
 		if (!okToUse) {
-		        return false;
+		        OSObject * prop;
+		        OSObject * str;
+
+		        if (!newService->reserved->uvars || !newService->reserved->uvars->userServer) {
+		                return false;
+			}
+		        str = OSString::withCStringNoCopy(kIODriverKitAllowsPublishEntitlementsKey);
+		        if (!str) {
+		                return false;
+			}
+		        okToUse = newService->reserved->uvars->userServer->checkEntitlements(str, NULL, NULL);
+		        if (!okToUse) {
+		                DKLOG(DKS ": publisher entitlements check failed\n", DKN(newService));
+		                return false;
+			}
+		        prop = newService->copyProperty(kIODriverKitPublishEntitlementsKey);
+		        if (!prop) {
+		                return false;
+			}
+		        okToUse = us->checkEntitlements(prop, NULL, NULL);
+		        if (!okToUse) {
+		                DKLOG(DKS ": subscriber entitlements check failed\n", DKN(newService));
+		                return false;
+			}
 		}
 
 		IOLockLock(inst->ivars->lock);
@@ -2599,7 +2627,7 @@ IOUserServer::checkEntitlements(
 		}
 	}
 
-	bool allPresent __block;
+	bool allPresent __block = false;
 	prop->iterateObjects(^bool (OSObject * object) {
 		allPresent = false;
 		object->iterateObjects(^bool (OSObject * object) {
@@ -2626,6 +2654,12 @@ IOUserServer::checkEntitlements(
 	OSSafeReleaseNULL(prop);
 
 	return allPresent;
+}
+
+bool
+IOUserServer::checkEntitlements(OSObject * prop, IOService * provider, IOService * dext)
+{
+	return checkEntitlements(fEntitlements, prop, provider, dext);
 }
 
 bool
@@ -3590,10 +3624,11 @@ IOUserServer::copySendRightForObject(OSObject * object, ipc_kobject_type_t type)
 {
 	ipc_port_t port;
 	ipc_port_t sendPort = NULL;
+	ipc_kobject_t kobj;
 
-	port = iokit_port_for_object(object, type);
+	port = iokit_port_for_object(object, type, &kobj);
 	if (port) {
-		sendPort = ipc_kobject_make_send(port, (ipc_kobject_t)object, type);
+		sendPort = ipc_kobject_make_send(port, kobj, type);
 		iokit_release_port(port);
 	}
 
@@ -3895,19 +3930,6 @@ IOUserServer::consumeObjects(IORPCMessage * message, size_t messageSize)
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-static void
-reboot_kernel_async_helper(thread_call_param_t p0 __unused, thread_call_param_t p1 __unused)
-{
-	reboot_kernel(RB_AUTOBOOT, NULL);
-}
-
-static void
-reboot_kernel_async()
-{
-	thread_call_t reboot_call = thread_call_allocate(reboot_kernel_async_helper, NULL);
-	thread_call_enter(reboot_call);
-}
-
 bool
 IOUserServer::finalize(IOOptionBits options)
 {
@@ -4183,16 +4205,15 @@ IOUserServer::clientClose(void)
 	    (fTaskCrashReason == OS_REASON_NULL || (fTaskCrashReason->osr_namespace != OS_REASON_JETSAM && fTaskCrashReason->osr_namespace != OS_REASON_RUNNINGBOARD)) &&
 	    fStatistics != NULL) {
 		OSDextCrashPolicy policy = fStatistics->recordCrash();
-		bool allowReboot;
+		bool allowPanic;
 #if DEVELOPMENT || DEBUG
-		allowReboot = fPlatformDriver && fEntitlements->getObject(gIODriverKitTestDriverEntitlementKey) != kOSBooleanTrue && !disable_dext_crash_reboot;
+		allowPanic = fPlatformDriver && fEntitlements->getObject(gIODriverKitTestDriverEntitlementKey) != kOSBooleanTrue && !disable_dext_crash_reboot;
 #else
-		allowReboot = fPlatformDriver;
+		allowPanic = fPlatformDriver;
 #endif /* DEVELOPMENT || DEBUG */
 
-		if (policy == kOSDextCrashPolicyReboot && allowReboot) {
-			IOLog("Driver %s has crashed too many times. Rebooting.\n", getName());
-			reboot_kernel_async();
+		if (policy == kOSDextCrashPolicyReboot && allowPanic) {
+			panic("Driver %s has crashed too many times\n", getName());
 		}
 	}
 
@@ -5486,7 +5507,7 @@ IOUserServer::serviceStarted(IOService * service, IOService * provider, bool res
 	service->reserved->uvars->started = true;
 
 	if (service->reserved->uvars->deferredRegisterService) {
-		service->registerService(kIOServiceAsynchronous);
+		service->registerService(kIOServiceAsynchronous | kIOServiceDextRequirePowerForMatching);
 		service->reserved->uvars->deferredRegisterService = false;
 	}
 

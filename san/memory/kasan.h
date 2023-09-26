@@ -29,10 +29,10 @@
 #ifndef _KASAN_H_
 #define _KASAN_H_
 
+#if KERNEL_PRIVATE
+
 #include <mach/mach_types.h>
 #include <sys/queue.h>
-
-#if KERNEL_PRIVATE
 
 typedef uintptr_t uptr;
 

@@ -40,7 +40,7 @@ __BEGIN_DECLS;
 // For instance, while threads only differentiate on the broad CPU kinds due to memory constraints,
 // the fewer number of tasks are free to use more memory and accumulate counters per-CPU.
 //
-// At context-switch, the scheduler calls `recount_context_switch` to update the counters.
+// At context-switch, the scheduler calls `recount_switch_thread` to update the counters.
 // The difference between the current counter values and per-CPU snapshots are added to each thread.
 // On modern systems with fast timebase reads, the counters are also updated on entering and exiting the kernel.
 
@@ -150,6 +150,7 @@ void recount_sum_perf_levels(recount_plan_t plan,
 #if XNU_KERNEL_PRIVATE
 
 struct thread;
+struct work_interval;
 struct task;
 struct proc;
 
@@ -181,6 +182,11 @@ uint64_t recount_current_thread_energy_nj(void);
 void recount_current_task_usage(struct recount_usage *usage);
 void recount_current_task_usage_perf_only(struct recount_usage *usage,
     struct recount_usage *usage_perf_only);
+
+// Access a work interval's usage data.
+void recount_work_interval_usage(struct work_interval *work_interval, struct recount_usage *usage);
+struct recount_times_mach recount_work_interval_times(struct work_interval *work_interval);
+uint64_t recount_work_interval_energy_nj(struct work_interval *work_interval);
 
 // Access another task's usage data.
 void recount_task_usage(struct task *task, struct recount_usage *usage);
@@ -228,6 +234,17 @@ void recount_thread_init(struct recount_thread *th);
 void recount_thread_copy(struct recount_thread *dst,
     struct recount_thread *src);
 void recount_thread_deinit(struct recount_thread *th);
+
+#pragma mark work_intervals
+
+// The per-work-interval resource accounting structure.
+struct recount_work_interval {
+	// Resources consumed during the currently active work interval instance by
+	// threads participating in the work interval, according to `recount_work_interval_plan`.
+	struct recount_track *rwi_current_instance;
+};
+void recount_work_interval_init(struct recount_work_interval *wi);
+void recount_work_interval_deinit(struct recount_work_interval *wi);
 
 #pragma mark tasks
 
@@ -319,8 +336,10 @@ void recount_switch_thread(struct recount_snap *snap, struct thread *off_thread,
 // Called by the machine-dependent code to accumulate energy.
 void recount_add_energy(struct thread *off_thread, struct task *off_task,
     uint64_t energy_nj);
-// Log a kdebug event on switching threads.
+// Log a kdebug event when a thread switches off-CPU.
 void recount_log_switch_thread(const struct recount_snap *snap);
+// Log a kdebug event when a thread switches on-CPU.
+void recount_log_switch_thread_on(const struct recount_snap *snap);
 
 // Called by the startup threads on each CPU to initialize Recount.
 void recount_update_snap(struct recount_snap *cur);

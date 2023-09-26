@@ -52,6 +52,12 @@ enum {
 	kIODispatchQueueWakeupAll              = 0x00000001,
 };
 
+// options for SleepWithDeadline()
+enum {
+	// Sleep on an event which other threads are still waiting on, but has already been signaled
+	kIODispatchQueueSleepReuseEvent        = 0x00000100,
+};
+
 /*!
  * @class IODispatchQueue
  *

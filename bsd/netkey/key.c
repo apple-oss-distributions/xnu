@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -4446,26 +4446,16 @@ key_setsaval(
 		if ((sa0->sadb_sa_flags & SADB_X_EXT_OLD) == 0) {
 			if ((sav->flags2 & SADB_X_EXT_SA2_SEQ_PER_TRAFFIC_CLASS) ==
 			    SADB_X_EXT_SA2_SEQ_PER_TRAFFIC_CLASS) {
-				const uint32_t range =
-				    (1ULL << (sizeof(((struct secreplay *)0)->seq) * 8)) / MAX_REPLAY_WINDOWS;
-				for (int i = 0; i < MAX_REPLAY_WINDOWS; i++) {
+				const uint32_t range = PER_TC_REPLAY_WINDOW_RANGE;
+				for (uint32_t i = 0; i < MAX_REPLAY_WINDOWS; i++) {
 					sav->replay[i] = keydb_newsecreplay(sa0->sadb_sa_replay);
-					if (sav->replay[i] == NULL) {
-						ipseclog((LOG_DEBUG, "key_setsaval: No more memory.\n"));
-						error = ENOBUFS;
-						goto fail;
-					}
 					/* Allowed range for sequence per traffic class */
-					sav->replay[i]->seq = i * range;
-					sav->replay[i]->lastseq = ((i + 1) * range) - 1;
+					const uint32_t seq = i << PER_TC_REPLAY_WINDOW_SN_SHIFT;
+					sav->replay[i]->seq = seq;
+					sav->replay[i]->lastseq = seq + range - 1;
 				}
 			} else {
 				sav->replay[0] = keydb_newsecreplay(sa0->sadb_sa_replay);
-				if (sav->replay[0] == NULL) {
-					ipseclog((LOG_DEBUG, "key_setsaval: No more memory.\n"));
-					error = ENOBUFS;
-					goto fail;
-				}
 				sav->replay[0]->lastseq = ~0;
 			}
 		}
@@ -9885,13 +9875,10 @@ key_checktunnelsanity(
 void
 key_sa_recordxfer(
 	struct secasvar *sav,
-	struct mbuf *m)
+	size_t byte_count)
 {
 	if (!sav) {
 		panic("key_sa_recordxfer called with sav == NULL");
-	}
-	if (!m) {
-		panic("key_sa_recordxfer called with m == NULL");
 	}
 	if (!sav->lft_c) {
 		return;
@@ -9902,7 +9889,7 @@ key_sa_recordxfer(
 	 * XXX Currently, there is a difference of bytes size
 	 * between inbound and outbound processing.
 	 */
-	sav->lft_c->sadb_lifetime_bytes += m->m_pkthdr.len;
+	sav->lft_c->sadb_lifetime_bytes += byte_count;
 	/* to check bytes lifetime is done in key_timehandler(). */
 
 	/*

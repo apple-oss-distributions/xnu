@@ -791,6 +791,9 @@ tracker_dump(struct proc *p, struct tracker_action_args *uap, int *retval, bool 
 
 	if (by_app) {
 		// Expect a UUID TLV
+		if (uap->buffer_size < sizeof(app_uuid_tlv)) {
+			return EINVAL;
+		}
 		sopt.sopt_val = uap->buffer;
 		sopt.sopt_valsize = sizeof(app_uuid_tlv);
 		sopt.sopt_p = p;
@@ -836,7 +839,13 @@ tracker_dump(struct proc *p, struct tracker_action_args *uap, int *retval, bool 
 	}
 
 	// pre-append 4-bytes size to start of buffer.
-	if (total_size_needed + sizeof(uint32_t) > uap->buffer_size) {
+	if (os_add_overflow(total_size_needed, sizeof(uint32_t), &total_size_needed)) {
+		TRACKER_LOG(LOG_ERR, "Could not dump entries, failed to add 4-bytes size to start of buffer");
+		error = EINVAL;
+		goto done;
+	}
+
+	if (total_size_needed > uap->buffer_size) {
 		TRACKER_LOG(LOG_ERR, "Could not dump entries, output buffer too small %lu (needed %lu)",
 		    (unsigned long)uap->buffer_size, total_size_needed + sizeof(uint32_t));
 		error = EINVAL;
@@ -844,19 +853,19 @@ tracker_dump(struct proc *p, struct tracker_action_args *uap, int *retval, bool 
 	}
 
 	// total tlv length + 4-bytes total size.
-	if (total_size_needed + sizeof(uint32_t) > sizeof(scratch_pad_all)) {
-		if (total_size_needed + sizeof(uint32_t) > TRACKER_BUFFER_ALLOC_MAX) {
+	if (total_size_needed > sizeof(scratch_pad_all)) {
+		if (total_size_needed > TRACKER_BUFFER_ALLOC_MAX) {
 			TRACKER_LOG(LOG_ERR, "Failed to allocate buffer, size exceeded max allowed");
 			error = ENOMEM;
 			goto done;
 		}
-		buffer = (u_int8_t *)kalloc_data(total_size_needed + sizeof(uint32_t), Z_ZERO);
+		buffer = (u_int8_t *)kalloc_data(total_size_needed, Z_ZERO);
 		if (buffer == NULL) {
 			TRACKER_LOG(LOG_ERR, "Could not dump entries, failed to allocate buffer");
 			error = ENOMEM;
 			goto done;
 		}
-		buffer_size = total_size_needed + sizeof(uint32_t);
+		buffer_size = total_size_needed;
 	}
 
 	data_start = buffer + sizeof(uint32_t);

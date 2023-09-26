@@ -727,7 +727,7 @@ sock_receive_internal(socket_t sock, struct msghdr *msg, mbuf_t *data,
 	int error = 0;
 	user_ssize_t length = 0;
 	struct sockaddr *fromsa = NULL;
-	uio_stackbuf_t uio_buf[UIO_SIZEOF((msg != NULL) ? msg->msg_iovlen : 0)];
+	UIO_STACKBUF(uio_buf, (msg != NULL) ? msg->msg_iovlen : 0);
 
 	if (sock == NULL) {
 		return EINVAL;

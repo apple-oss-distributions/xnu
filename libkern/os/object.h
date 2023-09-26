@@ -165,7 +165,7 @@ __BEGIN_DECLS
  * @result
  * The retained object.
  */
-    __OSX_AVAILABLE_STARTING(__MAC_10_12, __IPHONE_10_0)
+__OSX_AVAILABLE_STARTING(__MAC_10_12, __IPHONE_10_0)
 OS_EXPORT
 void*
 os_retain(void *object);

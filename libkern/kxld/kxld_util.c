@@ -37,6 +37,7 @@
     #include <vm/vm_kern.h>
 #else
     #include <stdio.h>
+    #define __SPI_AVAILABLE(...)
     #include <stdlib.h>
     #include <mach/mach_init.h>
     #include <mach-o/swap.h>

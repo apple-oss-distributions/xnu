@@ -2,6 +2,15 @@
  * Copyright (c) 2000-2010 Apple Inc.
  * All rights reserved.
  */
+#if (defined(__has_include) && __has_include(<__xnu_libcxx_sentinel.h>) && !defined(XNU_LIBCXX_SDKROOT))
+
+#if !__has_include_next(<stdint.h>)
+#error Do not build with -nostdinc (use GCC_USE_STANDARD_INCLUDE_SEARCHING=NO)
+#endif /* __has_include_next */
+
+#include_next <stdint.h>
+
+#else /* (defined(__has_include) && __has_include(<__xnu_libcxx_sentinel.h>) && !defined(XNU_LIBCXX_SDKROOT)) */
 
 #ifndef _KERNEL_STDINT_H_
 #define _KERNEL_STDINT_H_
@@ -22,10 +31,10 @@
 /* from ISO/IEC 988:1999 spec */
 
 /* 7.18.1.1 Exact-width integer types */
-                                         /* int8_t is defined in <machine/types.h> */
-                                         /* int16_t is defined in <machine/types.h> */
-                                         /* int32_t is defined in <machine/types.h> */
-                                         /* int64_t is defined in <machine/types.h> */
+/* int8_t is defined in <machine/types.h> */
+/* int16_t is defined in <machine/types.h> */
+/* int32_t is defined in <machine/types.h> */
+/* int64_t is defined in <machine/types.h> */
 typedef u_int8_t              uint8_t;   /* u_int8_t is defined in <machine/types.h> */
 typedef u_int16_t            uint16_t;   /* u_int16_t is defined in <machine/types.h> */
 typedef u_int32_t            uint32_t;   /* u_int32_t is defined in <machine/types.h> */
@@ -55,8 +64,8 @@ typedef uint64_t        uint_fast64_t;
 
 
 /* 7.18.1.4 Integer types capable of holding object pointers */
-                                        /* intptr_t is defined in <machine/types.h> */
-                                        /* uintptr_t is defined in <machine/types.h> */
+/* intptr_t is defined in <machine/types.h> */
+/* uintptr_t is defined in <machine/types.h> */
 
 
 /* 7.18.1.5 Greatest-width integer types */
@@ -116,12 +125,12 @@ typedef long long unsigned int uintmax_t;
 
 #define INT8_MIN          -128
 #define INT16_MIN         -32768
-   /*
-      Note:  the literal "most negative int" cannot be written in C --
-      the rules in the standard (section 6.4.4.1 in C99) will give it
-      an unsigned type, so INT32_MIN (and the most negative member of
-      any larger signed type) must be written via a constant expression.
-   */
+/*
+ *  Note:  the literal "most negative int" cannot be written in C --
+ *  the rules in the standard (section 6.4.4.1 in C99) will give it
+ *  an unsigned type, so INT32_MIN (and the most negative member of
+ *  any larger signed type) must be written via a constant expression.
+ */
 #define INT32_MIN        (-INT32_MAX-1)
 #define INT64_MIN        (-INT64_MAX-1)
 
@@ -184,8 +193,8 @@ typedef long long unsigned int uintmax_t;
 
 /* 7.18.3 "Other" */
 #if __WORDSIZE == 64
-#define PTRDIFF_MIN	  INTMAX_MIN
-#define PTRDIFF_MAX	  INTMAX_MAX
+#define PTRDIFF_MIN       INTMAX_MIN
+#define PTRDIFF_MAX       INTMAX_MAX
 #else
 #define PTRDIFF_MIN       INT32_MIN
 #define PTRDIFF_MAX       INT32_MAX
@@ -206,9 +215,9 @@ typedef long long unsigned int uintmax_t;
 #endif
 
 /* WCHAR_MIN should be 0 if wchar_t is an unsigned type and
-   (-WCHAR_MAX-1) if wchar_t is a signed type.  Unfortunately,
-   it turns out that -fshort-wchar changes the signedness of
-   the type. */
+ *  (-WCHAR_MAX-1) if wchar_t is a signed type.  Unfortunately,
+ *  it turns out that -fshort-wchar changes the signedness of
+ *  the type. */
 #ifndef WCHAR_MIN
 #  if WCHAR_MAX == 0xffff
 #    define WCHAR_MIN       0
@@ -217,12 +226,14 @@ typedef long long unsigned int uintmax_t;
 #  endif
 #endif
 
-#define WINT_MIN	  INT32_MIN
-#define WINT_MAX	  INT32_MAX
+#define WINT_MIN          INT32_MIN
+#define WINT_MAX          INT32_MAX
 
-#define SIG_ATOMIC_MIN	  INT32_MIN
-#define SIG_ATOMIC_MAX	  INT32_MAX
+#define SIG_ATOMIC_MIN    INT32_MIN
+#define SIG_ATOMIC_MAX    INT32_MAX
 
 #endif /* KERNEL */
 
 #endif /* _KERNEL_STDINT_H_ */
+
+#endif

@@ -775,6 +775,7 @@ knote_unlock_cancel(struct kqueue *kq, struct knote *kn,
  * Call the f_event hook of a given filter.
  *
  * Takes a use count to protect against concurrent drops.
+ * Called with the object lock held.
  */
 static void
 knote_post(struct knote *kn, long hint)
@@ -783,18 +784,6 @@ knote_post(struct knote *kn, long hint)
 	int dropping, result;
 
 	kqlock(kq);
-
-	/*
-	 * The select fallback is special, if KNOTE() is called,
-	 * the contract is that kn->kn_hook _HAS_ to become NULL.
-	 *
-	 * the f_event() hook might not be called if we're dropping,
-	 * so we hardcode it here, which is a little distasteful,
-	 * but the select fallback is kinda magical in the first place.
-	 */
-	if (kn->kn_filtid == EVFILTID_SPEC) {
-		kn->kn_hook = NULL;
-	}
 
 	if (__improbable(kn->kn_status & (KN_DROPPING | KN_VANISHED))) {
 		return kqunlock(kq);
@@ -864,6 +853,45 @@ knote_wait_for_post(struct kqueue *kq, struct knote *kn)
 }
 
 #pragma mark knote helpers for filters
+
+OS_ALWAYS_INLINE
+void *
+knote_kn_hook_get_raw(struct knote *kn)
+{
+	uintptr_t *addr = &kn->kn_hook;
+
+	void *hook = (void *) *addr;
+#if __has_feature(ptrauth_calls)
+	if (hook) {
+		uint16_t blend = kn->kn_filter;
+		blend |= (kn->kn_filtid << 8);
+		blend ^= OS_PTRAUTH_DISCRIMINATOR("kn.kn_hook");
+
+		hook = ptrauth_auth_data(hook, ptrauth_key_process_independent_data,
+		    ptrauth_blend_discriminator(addr, blend));
+	}
+#endif
+
+	return hook;
+}
+
+OS_ALWAYS_INLINE void
+knote_kn_hook_set_raw(struct knote *kn, void *kn_hook)
+{
+	uintptr_t *addr = &kn->kn_hook;
+#if __has_feature(ptrauth_calls)
+	if (kn_hook) {
+		uint16_t blend = kn->kn_filter;
+		blend |= (kn->kn_filtid << 8);
+		blend ^= OS_PTRAUTH_DISCRIMINATOR("kn.kn_hook");
+
+		kn_hook = ptrauth_sign_unauthenticated(kn_hook,
+		    ptrauth_key_process_independent_data,
+		    ptrauth_blend_discriminator(addr, blend));
+	}
+#endif
+	*addr = (uintptr_t) kn_hook;
+}
 
 OS_ALWAYS_INLINE
 void
@@ -6011,23 +6039,44 @@ klist_init(struct klist *list)
 
 
 /*
- * Query/Post each knote in the object's list
+ *	Query/Post each knote in the object's list
  *
- *	The object lock protects the list. It is assumed
- *	that the filter/event routine for the object can
- *	determine that the object is already locked (via
+ *	The object lock protects the list. It is assumed that the filter/event
+ *	routine for the object can determine that the object is already locked (via
  *	the hint) and not deadlock itself.
  *
- *	The object lock should also hold off pending
- *	detach/drop operations.
+ *	Autodetach is a specific contract which will detach all knotes from the
+ *	object prior to posting the final event for that knote. This is done while
+ *	under the object lock. A breadcrumb is left in the knote's next pointer to
+ *	indicate to future calls to f_detach routines that they need not reattempt
+ *	to knote_detach from the object's klist again. This is currently used by
+ *	EVFILTID_SPEC, EVFILTID_TTY, EVFILTID_PTMX
+ *
  */
 void
-knote(struct klist *list, long hint)
+knote(struct klist *list, long hint, bool autodetach)
 {
 	struct knote *kn;
-
-	SLIST_FOREACH(kn, list, kn_selnext) {
+	struct knote *tmp_kn;
+	SLIST_FOREACH_SAFE(kn, list, kn_selnext, tmp_kn) {
+		/*
+		 * We can modify the knote's next pointer since since we are holding the
+		 * object lock and the list can't be concurrently modified. Anyone
+		 * determining auto-detached-ness of a knote should take the primitive lock
+		 * to synchronize.
+		 *
+		 * Note that we do this here instead of the filter's f_event since we may
+		 * not even post the event if the knote is being dropped.
+		 */
+		if (autodetach) {
+			kn->kn_selnext.sle_next = KNOTE_AUTODETACHED;
+		}
 		knote_post(kn, hint);
+	}
+
+	/* Blast away the entire klist */
+	if (autodetach) {
+		klist_init(list);
 	}
 }
 
@@ -6044,12 +6093,15 @@ knote_attach(struct klist *list, struct knote *kn)
 }
 
 /*
- * detach a knote from the specified list.  Return true if that was the last entry.
- * The list is protected by whatever lock the object it is associated with uses.
+ * detach a knote from the specified list.  Return true if that was the last
+ * entry.  The list is protected by whatever lock the object it is associated
+ * with uses.
  */
 int
 knote_detach(struct klist *list, struct knote *kn)
 {
+	assert(!KNOTE_IS_AUTODETACHED(kn));
+
 	SLIST_REMOVE(list, kn, knote, kn_selnext);
 	return SLIST_EMPTY(list);
 }
@@ -6684,6 +6736,9 @@ knote_drop(struct kqueue *kq, struct knote *kn, struct knote_lock_ctx *knlc)
 	}
 	knote_wait_for_post(kq, kn);
 
+	/* Even if we are autodetached, the filter may need to do cleanups of any
+	 * stuff stashed on the knote so always make the call and let each filter
+	 * handle the possibility of autodetached-ness */
 	knote_fops(kn)->f_detach(kn);
 
 	/* kq may be freed when kq_remove_knote() returns */
@@ -8753,8 +8808,9 @@ kevent_copyout_proc_dynkqids(void *proc, user_addr_t ubuf, uint32_t ubufsize,
 
 	kqhash_lock(fdp);
 
-	if (fdp->fd_kqhashmask > 0) {
-		for (uint32_t i = 0; i < fdp->fd_kqhashmask + 1; i++) {
+	u_long kqhashmask = fdp->fd_kqhashmask;
+	if (kqhashmask > 0) {
+		for (uint32_t i = 0; i < kqhashmask + 1; i++) {
 			struct kqworkloop *kqwl;
 
 			LIST_FOREACH(kqwl, &fdp->fd_kqhash[i], kqwl_hashlink) {
@@ -8763,6 +8819,20 @@ kevent_copyout_proc_dynkqids(void *proc, user_addr_t ubuf, uint32_t ubufsize,
 					kq_ids[nkqueues] = kqwl->kqwl_dynamicid;
 				}
 				nkqueues++;
+			}
+
+			/*
+			 * Drop the kqhash lock and take it again to give some breathing room
+			 */
+			kqhash_unlock(fdp);
+			kqhash_lock(fdp);
+
+			/*
+			 * Reevaluate to see if we have raced with someone who changed this -
+			 * if we have, we should bail out with the set of info captured so far
+			 */
+			if (fdp->fd_kqhashmask != kqhashmask) {
+				break;
 			}
 		}
 	}
@@ -8875,14 +8945,27 @@ pid_kqueue_extinfo(proc_t p, struct kqueue *kq, user_addr_t ubuf,
 	}
 	proc_fdunlock(p);
 
-	if (fdp->fd_knhashmask != 0) {
-		for (i = 0; i < (int)fdp->fd_knhashmask + 1; i++) {
-			knhash_lock(fdp);
+	knhash_lock(fdp);
+	u_long knhashmask = fdp->fd_knhashmask;
+
+	if (knhashmask != 0) {
+		for (i = 0; i < (int)knhashmask + 1; i++) {
 			kn = SLIST_FIRST(&fdp->fd_knhash[i]);
 			nknotes = kevent_extinfo_emit(kq, kn, kqext, buflen, nknotes);
+
 			knhash_unlock(fdp);
+			knhash_lock(fdp);
+
+			/*
+			 * Reevaluate to see if we have raced with someone who changed this -
+			 * if we have, we should bail out with the set of info captured so far
+			 */
+			if (fdp->fd_knhashmask != knhashmask) {
+				break;
+			}
 		}
 	}
+	knhash_unlock(fdp);
 
 	assert(bufsize >= sizeof(struct kevent_extinfo) * MIN(buflen, nknotes));
 	err = copyout(kqext, ubuf, sizeof(struct kevent_extinfo) * MIN(buflen, nknotes));

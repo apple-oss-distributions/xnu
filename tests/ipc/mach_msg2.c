@@ -152,8 +152,8 @@ static const rcv_configs_t rcv_configs[MACH_MSG2_TEST_COUNT] = {
 	 .expected_aux = ""},
 };
 
-static void
-do_msg_rcv(void *arg)
+static void* _Nullable
+do_msg_rcv(void * _Nullable arg)
 {
 	mach_port_t msg_rcv_port = ((struct msg_rcv_args *)arg)->rcv_port;
 	mach_msg_vector_t data_vec[2];
@@ -489,7 +489,7 @@ T_DECL(mach_msg2_combined_send_rcv, "Test mach_msg2() combined send/rcv")
 
 	/* Test 3 1+2 extra aux space, and via a different rcv buffer */
 	msg_rcv_buffer_t rcv_buffer;
-	data_vec[0].msgv_rcv_addr = &rcv_buffer.msg;
+	data_vec[0].msgv_rcv_addr = (mach_vm_address_t)&rcv_buffer.msg;
 
 	aux.header.msgdh_size = sizeof(aux_buffer_t) + 0x10; /* set it to wrong size, ignored */
 	kr = mach_msg2(data_vec, MACH64_SEND_MSG | MACH64_SEND_MQ_CALL | MACH64_RCV_MSG | MACH64_MSG_VECTOR,

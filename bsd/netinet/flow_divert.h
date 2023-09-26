@@ -31,6 +31,8 @@
 
 #include <sys/mbuf.h>
 
+#define FLOW_DIVERT_ORDER_LAST    INT_MAX
+
 struct flow_divert_group;
 struct flow_divert_trie_node;
 
@@ -81,6 +83,7 @@ struct flow_divert_trie {
 
 struct flow_divert_group {
 	decl_lck_rw_data(, lck);
+	TAILQ_ENTRY(flow_divert_group) chain;
 	struct fd_pcb_tree                          pcb_tree;
 	uint32_t                                            ctl_unit;
 	uint8_t                                                     atomic_bits;
@@ -90,6 +93,8 @@ struct flow_divert_group {
 	uint32_t                                            flags;
 	struct flow_divert_trie                     signing_id_trie;
 	int32_t ref_count;
+	pid_t in_process_pid;
+	int32_t order;
 };
 
 void            flow_divert_init(void);

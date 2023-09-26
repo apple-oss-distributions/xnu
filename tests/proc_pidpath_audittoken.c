@@ -71,7 +71,7 @@ show_pidpaths(void)
 
 		memset(buffer, 0, sizeof(buffer));
 
-		audit_token_t token = { 0 };
+		audit_token_t token = INVALID_AUDIT_TOKEN_VALUE;
 #ifdef USE_AUDIT_TOKEN_FOR_PID
 		if (!audit_token_for_pid(pid, &token)) {
 			T_ASSERT_FAIL("audit_token_for_pid(%d) failed", pid);

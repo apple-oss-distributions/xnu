@@ -58,7 +58,7 @@ struct kern_pbufpool {
 	uint32_t                pp_refcnt;
 	uint32_t                pp_flags;
 	uint32_t                pp_buf_obj_size[PBUFPOOL_MAX_BUF_REGIONS];
-	uint16_t                pp_buf_size[PBUFPOOL_MAX_BUF_REGIONS];
+	uint32_t                pp_buf_size[PBUFPOOL_MAX_BUF_REGIONS];
 	uint16_t                pp_max_frags;
 
 	/*
@@ -67,7 +67,6 @@ struct kern_pbufpool {
 	struct skmem_cache      *pp_buf_cache[PBUFPOOL_MAX_BUF_REGIONS];
 	struct skmem_cache      *pp_kmd_cache;
 	struct skmem_cache      *pp_kbft_cache[PBUFPOOL_MAX_BUF_REGIONS];
-	struct skmem_cache      *pp_raw_kbft_cache;
 
 	/*
 	 * Regions
@@ -113,7 +112,6 @@ struct kern_pbufpool {
 #define PPF_BATCH               0x40    /* capable of batch alloc/free */
 #define PPF_DYNAMIC             0x80    /* capable of magazine resizing */
 #define PPF_LARGE_BUF           0x100   /* configured with large buffers */
-#define PPF_RAW_BUFLT           0x200   /* configured with raw buflet */
 
 #define PP_KERNEL_ONLY(_pp)             \
 	(((_pp)->pp_flags & PPF_KERNEL) != 0)
@@ -132,9 +130,6 @@ struct kern_pbufpool {
 
 #define PP_HAS_LARGE_BUF(_pp)                 \
 	(((_pp)->pp_flags & PPF_LARGE_BUF) != 0)
-
-#define PP_HAS_RAW_BFLT(_pp)                 \
-	(((_pp)->pp_flags & PPF_RAW_BUFLT) != 0)
 
 #define PP_LOCK(_pp)                    \
 	lck_mtx_lock(&_pp->pp_lock)
@@ -173,7 +168,6 @@ extern void pp_close(struct kern_pbufpool *);
 #define PPCREATEF_TRUNCATED_BUF 0x4     /* compat-only (buf is short) */
 #define PPCREATEF_ONDEMAND_BUF  0x8     /* buf alloc/free is decoupled */
 #define PPCREATEF_DYNAMIC       0x10    /* dynamic per-CPU magazines */
-#define PPCREATEF_RAW_BFLT      0x20    /* buflet can be alloced w/o buf */
 
 extern struct kern_pbufpool *pp_create(const char *name,
     struct skmem_region_params *srp_array, pbuf_seg_ctor_fn_t buf_seg_ctor,
@@ -234,8 +228,6 @@ extern boolean_t pp_release(struct kern_pbufpool *);
 #define PP_REGION_CONFIG_BUF_SEGPHYSCONTIG     0x00000400
 /* configure packet pool buffer region as cache-inhibiting */
 #define PP_REGION_CONFIG_BUF_NOCACHE           0x00000800
-/* configure buflet without buffer attached at construction */
-#define PP_REGION_CONFIG_RAW_BUFLET            0x00001000
 /* configure packet pool buffer region (backing IOMD) as thread safe */
 #define PP_REGION_CONFIG_BUF_THREADSAFE        0x00002000
 
@@ -258,18 +250,10 @@ extern void pp_free_pktq(struct pktq *);
 extern errno_t pp_alloc_buffer(const kern_pbufpool_t, mach_vm_address_t *,
     kern_segment_t *, kern_obj_idx_seg_t *, uint32_t);
 extern void pp_free_buffer(const kern_pbufpool_t, mach_vm_address_t);
-
-/* flags for pp_alloc_buflet */
-/* alloc a buflet with an attached large-sized buffer */
-#define PP_ALLOC_BFT_LARGE                        0x01
-/* alloc a buflet with an attached buffer */
-#define PP_ALLOC_BFT_ATTACH_BUFFER                0x02
-
 extern errno_t pp_alloc_buflet(struct kern_pbufpool *pp, kern_buflet_t *kbft,
-    uint32_t skmflag, uint32_t flags);
+    uint32_t skmflag, bool large);
 extern errno_t pp_alloc_buflet_batch(struct kern_pbufpool *pp, uint64_t *array,
-    uint32_t *size, uint32_t skmflag, uint32_t flags);
-
+    uint32_t *size, uint32_t skmflag, bool large);
 extern void pp_free_buflet(const kern_pbufpool_t, kern_buflet_t);
 extern void pp_reap_caches(boolean_t);
 __END_DECLS

@@ -11,7 +11,7 @@
 #include "test_utils.h"
 
 bool
-is_development_kernel()
+is_development_kernel(void)
 {
 	static dispatch_once_t is_development_once;
 	static bool is_development;

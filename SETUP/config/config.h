@@ -81,10 +81,11 @@ struct file_list {
 /*
  * Attributes (flags).
  */
-#define CONFIGDEP       0x01    /* obsolete? */
-#define OPTIONSDEF      0x02    /* options definition entry */
-#define LIBRARYDEP      0x04    /* include file in library build */
-#define BOUND_CHECKS    0x08    /* bound-checked source */
+#define CONFIGDEP            0x01    /* obsolete? */
+#define OPTIONSDEF           0x02    /* options definition entry */
+#define LIBRARYDEP           0x04    /* include file in library build */
+#define BOUND_CHECKS         0x08    /* bound-checked source */
+#define BOUND_CHECKS_SOFT    0x10    /* emit soft traps for bound-checked source */
 
 struct device {
 	int     d_type;                 /* CONTROLLER, DEVICE, bus adaptor */

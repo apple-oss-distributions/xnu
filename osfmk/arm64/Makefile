@@ -32,6 +32,7 @@ INSTALL_SF_MD_LCL_LIST = \
 # TODO: Is there a reason that machine_machdep.h is not in this list? If not, these lists can be consolidated.
 # Headers used to compile xnu
 EXPORT_MD_LIST = \
+	cpc_arm64.h \
 	hv_hvc.h \
 	lowglobals.h \
 	machine_cpuid.h \

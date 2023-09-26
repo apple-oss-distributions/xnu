@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -146,8 +146,7 @@ static int ctl_ioctl(struct socket *so, u_long cmd, caddr_t data,
     struct ifnet *ifp, struct proc *p);
 static int ctl_send(struct socket *, int, struct mbuf *,
     struct sockaddr *, struct mbuf *, struct proc *);
-static int ctl_send_list(struct socket *, int, struct mbuf *,
-    struct sockaddr *, struct mbuf *, struct proc *);
+static int ctl_send_list(struct socket *, struct mbuf *, u_int *, int);
 static int ctl_ctloutput(struct socket *, struct sockopt *);
 static int ctl_peeraddr(struct socket *so, struct sockaddr **nam);
 static int ctl_usr_rcvd(struct socket *so, int flags);
@@ -178,7 +177,6 @@ static struct pr_usrreqs ctl_usrreqs = {
 	.pru_sosend =           sosend,
 	.pru_sosend_list =      sosend_list,
 	.pru_soreceive =        soreceive,
-	.pru_soreceive_list =   soreceive_list,
 };
 
 static struct protosw kctlsw[] = {
@@ -243,6 +241,10 @@ SYSCTL_INT(_net_systm_kctl, OID_AUTO, panicdebug,
     CTLFLAG_RW | CTLFLAG_LOCKED, &ctl_panic_debug, 0, "");
 #endif /* DEVELOPMENT || DEBUG */
 
+u_int32_t ctl_send_list_mode = 1;
+SYSCTL_INT(_net_systm_kctl, OID_AUTO, send_list_mode,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &ctl_send_list_mode, 0, "");
+
 #define KCTL_TBL_INC 16
 
 static uintptr_t kctl_tbl_size = 0;
@@ -302,6 +304,15 @@ ctl_attach(struct socket *so, int proto, struct proc *p)
 	kcb->so = so;
 	so->so_pcb = (caddr_t)kcb;
 
+	/*
+	 * For datagram, use character count for sbspace as its value
+	 * may be use for packetization and we do not want to
+	 * drop packets based on the sbspace hint that was just provided
+	 */
+	if (so->so_proto->pr_type == SOCK_DGRAM) {
+		so->so_rcv.sb_flags |= SB_KCTL;
+		so->so_snd.sb_flags |= SB_KCTL;
+	}
 	return 0;
 }
 
@@ -412,7 +423,6 @@ ctl_setup_kctl(struct socket *so, struct sockaddr *nam, struct proc *p)
 	struct sockaddr_ctl     sa;
 	struct ctl_cb *kcb = (struct ctl_cb *)so->so_pcb;
 	struct ctl_cb *kcb_next = NULL;
-	u_quad_t sbmaxsize;
 	u_int32_t recvbufsize, sendbufsize;
 
 	if (kcb == 0) {
@@ -456,16 +466,16 @@ ctl_setup_kctl(struct socket *so, struct sockaddr *nam, struct proc *p)
 		}
 	}
 
-	if ((kctl->flags & CTL_FLAG_REG_ID_UNIT) || sa.sc_unit != 0) {
-		if (kcb_find(kctl, sa.sc_unit) != NULL) {
-			lck_mtx_unlock(&ctl_mtx);
-			return EBUSY;
-		}
-	} else if (kctl->setup != NULL) {
+	if (kctl->setup != NULL) {
 		error = (*kctl->setup)(&sa.sc_unit, &kcb->userdata);
 		if (error != 0) {
 			lck_mtx_unlock(&ctl_mtx);
 			return error;
+		}
+	} else if ((kctl->flags & CTL_FLAG_REG_ID_UNIT) || sa.sc_unit != 0) {
+		if (kcb_find(kctl, sa.sc_unit) != NULL) {
+			lck_mtx_unlock(&ctl_mtx);
+			return EBUSY;
 		}
 	} else {
 		/* Find an unused ID, assumes control IDs are in order */
@@ -506,16 +516,14 @@ ctl_setup_kctl(struct socket *so, struct sockaddr *nam, struct proc *p)
 	 * rdar://15526688: Limit the send and receive sizes to sb_max
 	 * by using the same scaling as sbreserve()
 	 */
-	sbmaxsize = (u_quad_t)sb_max * MCLBYTES / (MSIZE + MCLBYTES);
-
-	if (kctl->sendbufsize > sbmaxsize) {
-		sendbufsize = (u_int32_t)sbmaxsize;
+	if (kctl->sendbufsize > sb_max_adj) {
+		sendbufsize = (u_int32_t)sb_max_adj;
 	} else {
 		sendbufsize = kctl->sendbufsize;
 	}
 
-	if (kctl->recvbufsize > sbmaxsize) {
-		recvbufsize = (u_int32_t)sbmaxsize;
+	if (kctl->recvbufsize > sb_max_adj) {
+		recvbufsize = (u_int32_t)sb_max_adj;
 	} else {
 		recvbufsize = kctl->recvbufsize;
 	}
@@ -842,17 +850,12 @@ ctl_send(struct socket *so, int flags, struct mbuf *m,
 }
 
 static int
-ctl_send_list(struct socket *so, int flags, struct mbuf *m,
-    __unused struct sockaddr *addr, struct mbuf *control,
-    __unused struct proc *p)
+ctl_send_list(struct socket *so, struct mbuf *m, u_int *pktcnt, int flags)
 {
 	int             error = 0;
 	struct ctl_cb   *kcb = (struct ctl_cb *)so->so_pcb;
 	struct kctl     *kctl;
-
-	if (control) {
-		m_freem_list(control);
-	}
+	const bool      update_tc = SOCK_DOM(so) == PF_INET || SOCK_DOM(so) == PF_INET6;
 
 	if (kcb == NULL) {      /* sanity check */
 		m_freem_list(m);
@@ -862,14 +865,15 @@ ctl_send_list(struct socket *so, int flags, struct mbuf *m,
 	lck_mtx_t *mtx_held = socket_getlock(so, PR_F_WILLUNLOCK);
 	ctl_kcb_increment_use_count(kcb, mtx_held);
 
-	if (error == 0 && (kctl = kcb->kctl) == NULL) {
+	if ((kctl = kcb->kctl) == NULL) {
 		error = EINVAL;
+		goto done;
 	}
 
-	if (error == 0 && kctl->send_list) {
+	if (kctl->send_list != NULL && ctl_send_list_mode == 0) {
 		struct mbuf *nxt;
 
-		for (nxt = m; nxt != NULL; nxt = nxt->m_nextpkt) {
+		for (nxt = m; update_tc && nxt != NULL; nxt = nxt->m_nextpkt) {
 			so_tc_update_stats(nxt, so, m_get_service_class(nxt));
 		}
 
@@ -877,27 +881,30 @@ ctl_send_list(struct socket *so, int flags, struct mbuf *m,
 		error = (*kctl->send_list)(kctl->kctlref, kcb->sac.sc_unit,
 		    kcb->userdata, m, flags);
 		socket_lock(so, 0);
-	} else if (error == 0 && kctl->send) {
+	} else {
+		*pktcnt = 0;
 		while (m != NULL && error == 0) {
 			struct mbuf *nextpkt = m->m_nextpkt;
 
 			m->m_nextpkt = NULL;
-			so_tc_update_stats(m, so, m_get_service_class(m));
+
+			if (update_tc) {
+				so_tc_update_stats(m, so, m_get_service_class(m));
+			}
 			socket_unlock(so, 0);
 			error = (*kctl->send)(kctl->kctlref, kcb->sac.sc_unit,
 			    kcb->userdata, m, flags);
 			socket_lock(so, 0);
 			m = nextpkt;
+			if (error == 0) {
+				*pktcnt += 1;
+			}
 		}
 		if (m != NULL) {
 			m_freem_list(m);
 		}
-	} else {
-		m_freem_list(m);
-		if (error == 0) {
-			error = ENOTSUP;
-		}
 	}
+done:
 	if (error != 0) {
 		OSIncrementAtomic64((SInt64 *)&kctlstat.kcs_send_list_fail);
 	}
@@ -946,7 +953,7 @@ ctl_rcvbspace(struct socket *so, size_t datasize,
 			/*
 			 * Grow with a little bit of leeway
 			 */
-			size_t grow = datasize - space + MSIZE;
+			size_t grow = datasize - space + _MSIZE;
 			u_int32_t cc = (u_int32_t)MIN(MIN((sb->sb_hiwat + grow), autorcvbuf_max), UINT32_MAX);
 
 			if (sbreserve(sb, cc) == 1) {

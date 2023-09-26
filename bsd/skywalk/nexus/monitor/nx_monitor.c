@@ -438,7 +438,8 @@ nx_mon_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	 * monitor to external kernel clients.
 	 */
 	na->na_arena = skmem_arena_create_for_nexus(na,
-	    NX_PROV(nx)->nxprov_region_params, NULL, NULL, 0, NULL, &err);
+	    NX_PROV(nx)->nxprov_region_params, NULL, NULL, FALSE,
+	    FALSE, NULL, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 
 	return err;
@@ -516,7 +517,7 @@ nx_mon_na_rxsync(struct __kern_channel_ring *kring, struct proc *p,
 	    SK_KVA(kring), kring->ckr_flags, CKRF_BITS, kring->ckr_ring_id,
 	    flags);
 	kring->ckr_khead = kring->ckr_rhead;
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 	return 0;
 }
 
@@ -711,7 +712,7 @@ nx_mon_enable(struct nexus_adapter *na, boolean_t zcopy)
 	}
 
 	if (err == 0) {
-		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_or(&na->na_flags, NAF_ACTIVE, relaxed);
 		goto unlock;
 	}
 
@@ -774,7 +775,7 @@ nx_mon_disable(struct nexus_adapter *na)
 			nx_mon_del(mkring, kring, FALSE);
 		}
 	}
-	atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+	os_atomic_andnot(&na->na_flags, NAF_ACTIVE, relaxed);
 
 	nx_mon_na_krings_unlock(na, qfirst, qlast);
 }
@@ -1107,7 +1108,7 @@ nx_mon_zcopy_parent_sync(struct __kern_channel_ring *kring, struct proc *p,
 		beg = SLOT_NEXT(beg, lim);
 		i = SLOT_NEXT(i, mlim);
 	}
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 	mkring->ckr_ktail = i;
 
 out:
@@ -1289,7 +1290,7 @@ nx_mon_parent_sync(struct __kern_channel_ring *kring, struct proc *p,
 skip:
 			beg = SLOT_NEXT(beg, lim);
 		}
-		membar_sync();
+		os_atomic_thread_fence(seq_cst);
 		mkring->ckr_ktail = i;
 out:
 		KR_UNLOCK(mkring);
@@ -1566,7 +1567,7 @@ nx_monitor_na_find(struct kern_nexus *nx, struct kern_channel *ch,
 		 */
 		mna->mna_up.na_arena = pna->na_arena;
 		skmem_arena_retain((&mna->mna_up)->na_arena);
-		atomic_bitset_32(&mna->mna_up.na_flags, NAF_MEM_LOANED);
+		os_atomic_or(&mna->mna_up.na_flags, NAF_MEM_LOANED, relaxed);
 	} else {
 		/* normal monitors are incompatible with zero copy ones */
 		for_rx_tx(t) {

@@ -257,6 +257,7 @@ __options_decl(thread_work_interval_flags_t, uint32_t, {
 	TH_WORK_INTERVAL_FLAGS_RT_ALLOWED      = 0x4,
 });
 
+
 typedef union thread_rr_state {
 	uint32_t trr_value;
 	struct {
@@ -472,6 +473,7 @@ struct thread {
 
 #define TH_SFLAG_RT_DISALLOWED         0x100000         /* thread wants RT but may not have joined a work interval that allows it */
 #define TH_SFLAG_DEMOTED_MASK      (TH_SFLAG_THROTTLED | TH_SFLAG_FAILSAFE | TH_SFLAG_RT_DISALLOWED)     /* saved_mode contains previous sched_mode */
+#define TH_SFLAG_RT_CPULIMIT         0x200000           /* thread should have a CPU limit applied. */
 
 	int16_t                 sched_pri;              /* scheduled (current) priority */
 	int16_t                 base_pri;               /* effective base priority (equal to req_base_pri unless TH_SFLAG_BASE_PRI_FROZEN) */
@@ -486,6 +488,7 @@ struct thread {
 	os_ref_atomic_t         ref_count;              /* number of references to me */
 
 	uint32_t                rwlock_count;           /* Number of lck_rw_t locks held by thread */
+	struct smrq_slist_head  smr_stack;
 #ifdef DEBUG_RW
 	rw_lock_debug_t         rw_lock_held;           /* rw_locks currently held by the thread */
 #endif /* DEBUG_RW */
@@ -590,7 +593,6 @@ struct thread {
 	uint32_t                p_switch;               /* total processor switches */
 	uint32_t                ps_switch;              /* total pset switches */
 
-	integer_t mutex_count;  /* total count of locks held */
 	/* Timing data structures */
 	uint64_t                sched_time_save;        /* saved time for scheduler tick */
 	uint64_t                vtimer_user_save;       /* saved values for vtimers */
@@ -672,9 +674,6 @@ struct thread {
 	circle_queue_head_t     ith_messages;           /* messages to reap */
 	mach_port_t             ith_kernel_reply_port;  /* reply port for kernel RPCs */
 
-	/* Pending thread ast(s) */
-	os_atomic(ast_t)        ast;
-
 	/* Ast/Halt data structures */
 	vm_offset_t             recover;                /* page fault recover(copyin/out) */
 
@@ -708,6 +707,9 @@ struct thread {
 	    corpse_dup:1,       /* TRUE when thread is an inactive duplicate in a corpse */
 	:0;
 
+	/* Pending thread ast(s) */
+	os_atomic(ast_t)        ast;
+
 	decl_lck_mtx_data(, mutex);
 
 	struct ipc_port         *ith_special_reply_port;   /* ref to special reply port */
@@ -729,6 +731,9 @@ struct thread {
 	uint64_t                t_page_creation_throttled_soft;
 #endif /* DEVELOPMENT || DEBUG */
 	int                     t_pagein_error;         /* for vm_fault(), holds error from vnop_pagein() */
+
+	mach_port_name_t        ith_voucher_name;
+	ipc_voucher_t           ith_voucher;
 
 #ifdef KPERF
 /* The high 8 bits are the number of frames to sample of a user callstack. */
@@ -816,8 +821,8 @@ struct thread {
 	    guard_exc_fatal:1,
 	    thread_bitfield_unused:12;
 
-	mach_port_name_t        ith_voucher_name;
-	ipc_voucher_t           ith_voucher;
+#define THREAD_BOUND_CLUSTER_NONE       (UINT32_MAX)
+	uint32_t                 th_bound_cluster_id;
 
 #if CONFIG_THREAD_GROUPS
 #if CONFIG_PREADOPT_TG
@@ -892,9 +897,6 @@ struct thread {
 	struct work_interval            *th_work_interval;
 	thread_work_interval_flags_t    th_work_interval_flags;
 
-#define THREAD_BOUND_CLUSTER_NONE       (UINT32_MAX)
-	uint32_t                 th_bound_cluster_id;
-
 #if SCHED_TRACE_THREAD_WAKEUPS
 	uintptr_t               thread_wakeup_bt[64];
 #endif
@@ -918,6 +920,7 @@ struct thread {
 	void                   *decmp_upl;
 #endif /* CONFIG_IOSCHED */
 	struct knote            *ith_knote;         /* knote fired for rcv */
+
 
 };
 
@@ -961,51 +964,52 @@ struct thread {
 #define assert_thread_magic(thread) do { (void)(thread); } while (0)
 #endif
 
-extern thread_t                 thread_bootstrap(void);
+extern thread_t         thread_bootstrap(void);
 
-extern void                     thread_machine_init_template(void);
+extern void             thread_machine_init_template(void);
 
-extern void                     thread_init(void);
+extern void             thread_init(void);
 
-extern void                     thread_daemon_init(void);
+extern void             thread_daemon_init(void);
 
-extern void                     thread_reference(
+extern void             thread_reference(
 	thread_t                thread);
 
-extern void                     thread_deallocate(
+extern void             thread_deallocate(
 	thread_t                thread);
 
-extern void                     thread_inspect_deallocate(
+extern void             thread_inspect_deallocate(
 	thread_inspect_t        thread);
 
-extern void                     thread_read_deallocate(
+extern void             thread_read_deallocate(
 	thread_read_t           thread);
 
-extern void                     thread_terminate_self(void);
+extern void             thread_terminate_self(void);
 
 extern kern_return_t    thread_terminate_internal(
-	thread_t                    thread);
-
-extern void                     thread_start(
-	thread_t                        thread) __attribute__ ((noinline));
-
-extern void                     thread_start_in_assert_wait(
-	thread_t                        thread,
-	event_t             event,
-	wait_interrupt_t    interruptible) __attribute__ ((noinline));
-
-extern void                     thread_terminate_enqueue(
 	thread_t                thread);
 
-extern void                     thread_exception_enqueue(
-	task_t          task,
-	thread_t        thread,
-	exception_type_t etype);
+extern void             thread_start(
+	thread_t                thread) __attribute__ ((noinline));
 
-extern void thread_backtrace_enqueue(
-	kcdata_object_t obj,
-	exception_port_t     ports[static BT_EXC_PORTS_COUNT],
-	exception_type_t etype);
+extern void             thread_start_in_assert_wait(
+	thread_t                thread,
+	struct waitq           *waitq,
+	event64_t               event,
+	wait_interrupt_t        interruptible) __attribute__ ((noinline));
+
+extern void             thread_terminate_enqueue(
+	thread_t                thread);
+
+extern void             thread_exception_enqueue(
+	task_t                  task,
+	thread_t                thread,
+	exception_type_t        etype);
+
+extern void             thread_backtrace_enqueue(
+	kcdata_object_t         obj,
+	exception_port_t        ports[static BT_EXC_PORTS_COUNT],
+	exception_type_t        etype);
 
 extern void                     thread_copy_resource_info(
 	thread_t dst_thread,
@@ -1147,6 +1151,10 @@ extern kern_return_t    machine_thread_dup(
 extern void             machine_thread_init(void);
 
 extern void             machine_thread_template_init(thread_t thr_template);
+
+#if __has_feature(ptrauth_calls)
+extern bool             machine_thread_state_is_debug_flavor(int flavor);
+#endif /* __has_feature(ptrauth_calls) */
 
 
 extern void             machine_thread_create(

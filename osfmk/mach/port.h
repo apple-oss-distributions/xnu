@@ -379,6 +379,7 @@ typedef int     mach_port_flavor_t;
 #define MACH_PORT_DENAP_RECEIVER        6       /* indicates receive right accepts de-nap donation */
 #define MACH_PORT_INFO_EXT              7       /* uses mach_port_info_ext_t */
 #define MACH_PORT_GUARD_INFO            8       /* asserts if the strict guard value is correct */
+#define MACH_PORT_SERVICE_THROTTLED     9       /* info is an integer that indicates if service port is throttled or not */
 
 #define MACH_PORT_LIMITS_INFO_COUNT     ((natural_t) \
 	(sizeof(mach_port_limits_t)/sizeof(natural_t)))
@@ -389,6 +390,7 @@ typedef int     mach_port_flavor_t;
 	(sizeof(mach_port_info_ext_t)/sizeof(natural_t)))
 #define MACH_PORT_GUARD_INFO_COUNT      ((natural_t) \
 	(sizeof(mach_port_guard_info_t)/sizeof(natural_t)))
+#define MACH_PORT_SERVICE_THROTTLED_COUNT 1
 
 /*
  * Structure used to pass information about port allocation requests.
@@ -437,6 +439,7 @@ typedef struct mach_service_port_info * mach_service_port_info_t;
 #define MPO_REPLY_PORT                     0x1000  /* Designate port as a reply port. */
 #define MPO_ENFORCE_REPLY_PORT_SEMANTICS   0x2000  /* When talking to this port, local port of mach msg needs to follow reply port semantics.*/
 #define MPO_PROVISIONAL_REPLY_PORT         0x4000  /* Designate port as a provisional reply port. */
+#define MPO_PROVISIONAL_ID_PROT_OPTOUT     0x8000  /* Opted out of EXCEPTION_IDENTITY_PROTECTED violation for now */
 
 
 /*
@@ -500,6 +503,7 @@ enum mach_port_guard_exception_codes {
 	kGUARD_EXC_MOD_REFS_NON_FATAL           = 1u << 21,
 	kGUARD_EXC_IMMOVABLE_NON_FATAL          = 1u << 22,
 	kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS = 1u << 23,
+	kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE   = 1u << 24,
 };
 
 #define MAX_FATAL_kGUARD_EXC_CODE (1u << 7)

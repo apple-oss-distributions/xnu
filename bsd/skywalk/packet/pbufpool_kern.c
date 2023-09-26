@@ -125,9 +125,6 @@ kern_pbufpool_create(const struct kern_pbufpool_init *init,
 
 	if (init->kbi_flags & KBIF_BUFFER_ON_DEMAND) {
 		pp_region_flags |= PP_REGION_CONFIG_BUFLET;
-		if (init->kbi_flags & KBIF_RAW_BFLT) {
-			pp_region_flags |= PP_REGION_CONFIG_RAW_BUFLET;
-		}
 	}
 	if (kernel_only) {
 		pp_region_flags |= PP_REGION_CONFIG_KERNEL_ONLY;
@@ -206,9 +203,6 @@ kern_pbufpool_create(const struct kern_pbufpool_init *init,
 	}
 	if (init->kbi_flags & KBIF_BUFFER_ON_DEMAND) {
 		ppcreatef |= PPCREATEF_ONDEMAND_BUF;
-		if (init->kbi_flags & KBIF_RAW_BFLT) {
-			ppcreatef |= PPCREATEF_RAW_BFLT;
-		}
 	}
 	/*
 	 * Enable CPU-layer magazine resizing if this is a long-lived
@@ -429,39 +423,14 @@ kern_pbufpool_destroy(kern_pbufpool_t pp)
 }
 
 errno_t
-kern_pbufpool_alloc_buflet(const kern_pbufpool_t pp, kern_buflet_t *pbuf,
-    bool attach_buffer)
+kern_pbufpool_alloc_buflet(const kern_pbufpool_t pp, kern_buflet_t *pbuf)
 {
-	return pp_alloc_buflet(pp, pbuf, SKMEM_SLEEP,
-	           attach_buffer ? PP_ALLOC_BFT_ATTACH_BUFFER : 0);
+	return pp_alloc_buflet(pp, pbuf, SKMEM_SLEEP, false);
 }
 
 errno_t
 kern_pbufpool_alloc_buflet_nosleep(const kern_pbufpool_t pp,
-    kern_buflet_t *pbuf, bool attach_buffer)
+    kern_buflet_t *pbuf)
 {
-	return pp_alloc_buflet(pp, pbuf, SKMEM_NOSLEEP,
-	           attach_buffer ? PP_ALLOC_BFT_ATTACH_BUFFER : 0);
-}
-
-errno_t
-kern_pbufpool_alloc_batch_buflet(const kern_pbufpool_t pp,
-    kern_buflet_t *pbuf_array, uint32_t *size, bool attach_buffer)
-{
-	return pp_alloc_buflet_batch(pp, (uint64_t *)pbuf_array, size, SKMEM_SLEEP,
-	           attach_buffer ? PP_ALLOC_BFT_ATTACH_BUFFER : 0);
-}
-
-errno_t
-kern_pbufpool_alloc_batch_buflet_nosleep(const kern_pbufpool_t pp,
-    kern_buflet_t *pbuf_array, uint32_t *size, bool attach_buffer)
-{
-	return pp_alloc_buflet_batch(pp, (uint64_t *)pbuf_array, size, SKMEM_NOSLEEP,
-	           attach_buffer ? PP_ALLOC_BFT_ATTACH_BUFFER : 0);
-}
-
-void
-kern_pbufpool_free_buflet(const kern_pbufpool_t pp, kern_buflet_t pbuf)
-{
-	return pp_free_buflet(pp, pbuf);
+	return pp_alloc_buflet(pp, pbuf, SKMEM_NOSLEEP, false);
 }

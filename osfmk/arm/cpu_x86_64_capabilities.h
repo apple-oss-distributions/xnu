@@ -100,7 +100,7 @@ typedef struct {
 /* 34 */ volatile uint8_t active_cpus;
 /* 35 */ uint8_t physical_cpus;
 /* 36 */ uint8_t logical_cpus;
-/* 37 */ uint8_t _unused1[1];
+/* 37 */ uint8_t cpu_clusters;
 /* 38 */ uint64_t memory_size;
 /* 40 */ uint32_t cpufamily;
 /* 44 */ volatile uint32_t kdebug_enable;
@@ -139,8 +139,9 @@ typedef struct {
 
 /* f8 */ uint64_t unused;
 /* 100 */ uint64_t dyld_system_flags;
+/* 108 */ uint8_t cpu_to_cluster[256];
 
-/* 108 */ uint8_t unused2[3792];
+/* 0x208 */ uint8_t unused2[3536];
 /* 0xFD8 */ uint64_t arm_cpu_capabilities;
 /* 0xFE0 */ uint8_t cp_aprr_shadow_supported;
 /* 0xFE1 */ uint8_t user_timebase_type;

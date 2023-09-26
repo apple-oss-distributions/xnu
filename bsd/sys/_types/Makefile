@@ -53,6 +53,7 @@ DATAFILES = \
 	_mach_port_t.h \
 	_mbstate_t.h \
 	_mode_t.h \
+	_mount_t.h \
 	_nlink_t.h \
 	_null.h \
 	_o_dsync.h \
@@ -93,6 +94,7 @@ DATAFILES = \
 	_useconds_t.h \
 	_uuid_t.h \
 	_va_list.h \
+	_vnode_t.h \
 	_wchar_t.h \
 	_wint_t.h \
 	_user32_timex.h \

@@ -89,7 +89,10 @@ typedef unsigned long           u_long;
 #define _U_LONG
 #endif
 typedef unsigned short          ushort;         /* Sys V compatibility */
+#ifndef __DARWIN_UINT
 typedef unsigned int            uint;           /* Sys V compatibility */
+#define __DARWIN_UINT
+#endif
 #endif
 
 typedef u_int64_t               u_quad_t;       /* quads */

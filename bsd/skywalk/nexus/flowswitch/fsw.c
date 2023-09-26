@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -78,7 +78,7 @@ uint32_t fsw_use_dual_sized_pool = 1;
 uint32_t fsw_use_dual_sized_pool = 0;
 #endif
 
-uint32_t fsw_chain_enqueue = 0;
+uint32_t fsw_chain_enqueue = 1;
 static int __nx_fsw_inited = 0;
 static eventhandler_tag __nx_fsw_ifnet_eventhandler_tag = NULL;
 static eventhandler_tag __nx_fsw_protoctl_eventhandler_tag = NULL;
@@ -254,6 +254,20 @@ fsw_ctl_flow_del(struct nx_flowswitch *fsw, struct proc *p,
 	return err;
 }
 
+static int
+fsw_ctl_flow_config(struct nx_flowswitch *fsw, struct proc *p,
+    struct nx_flow_req *req)
+{
+	int err;
+
+	nx_flow_req_internalize(req);
+	req->nfr_pid = proc_pid(p);
+	err = fsw_flow_config(fsw, req);
+
+	nx_flow_req_externalize(req);
+	return err;
+}
+
 #if (DEVELOPMENT || DEBUG)
 static int
 fsw_rps_threads_sysctl SYSCTL_HANDLER_ARGS
@@ -272,6 +286,79 @@ fsw_rps_threads_sysctl SYSCTL_HANDLER_ARGS
 	return error;
 }
 #endif /* !DEVELOPMENT && !DEBUG */
+
+void
+fsw_get_tso_capabilities(struct ifnet *ifp, uint32_t *tso_v4_mtu, uint32_t *tso_v6_mtu)
+{
+#pragma unused(ifp)
+	*tso_v4_mtu = 0;
+	*tso_v6_mtu = 0;
+
+#ifdef XNU_TARGET_OS_OSX
+	struct nx_flowswitch *fsw;
+
+	fsw = fsw_ifp_to_fsw(ifp);
+	if (fsw == NULL) {
+		return;
+	}
+	switch (fsw->fsw_tso_mode) {
+	case FSW_TSO_MODE_HW: {
+		ASSERT(ifp->if_tso_v4_mtu != 0 || ifp->if_tso_v6_mtu != 0);
+		*tso_v4_mtu = ifp->if_tso_v4_mtu;
+		*tso_v6_mtu = ifp->if_tso_v6_mtu;
+		break;
+	}
+	case FSW_TSO_MODE_SW: {
+		ASSERT(fsw->fsw_tso_sw_mtu != 0);
+		*tso_v4_mtu = fsw->fsw_tso_sw_mtu;
+		*tso_v6_mtu = fsw->fsw_tso_sw_mtu;
+		break;
+	}
+	default:
+		break;
+	}
+#endif /* XNU_TARGET_OS_OSX */
+}
+
+static void
+fsw_tso_setup(struct nx_flowswitch *fsw)
+{
+	fsw->fsw_tso_mode = FSW_TSO_MODE_NONE;
+#ifdef XNU_TARGET_OS_OSX
+	struct ifnet *ifp = fsw->fsw_ifp;
+	if (!SKYWALK_CAPABLE(ifp) || !SKYWALK_NATIVE(ifp)) {
+		DTRACE_SKYWALK2(tso__no__support, struct nx_flowswitch *, fsw,
+		    ifnet_t, ifp);
+		return;
+	}
+	struct nx_netif *nif = NA(ifp)->nifna_netif;
+	uint32_t large_buf_size = NX_PROV_PARAMS(fsw->fsw_nx)->nxp_large_buf_size;
+
+	if (large_buf_size == 0) {
+		DTRACE_SKYWALK2(no__large__buf, struct nx_flowswitch *, fsw,
+		    ifnet_t, ifp);
+		return;
+	}
+	/*
+	 * Unlike _dlil_adjust_large_buf_size_for_tso(), we check the nif_hwassist
+	 * flags here for the original flags because nx_netif_host_adjust_if_capabilities()
+	 * has already been called.
+	 */
+	if (((nif->nif_hwassist & IFNET_TSO_IPV4) != 0 && ifp->if_tso_v4_mtu != 0) ||
+	    ((nif->nif_hwassist & IFNET_TSO_IPV6) != 0 && ifp->if_tso_v6_mtu != 0)) {
+		ASSERT(large_buf_size <= ifp->if_tso_v4_mtu ||
+		    large_buf_size <= ifp->if_tso_v6_mtu);
+		fsw->fsw_tso_mode = FSW_TSO_MODE_HW;
+	} else {
+		if (sk_fsw_gso_mtu != 0 && large_buf_size >= sk_fsw_gso_mtu) {
+			fsw->fsw_tso_mode = FSW_TSO_MODE_SW;
+			fsw->fsw_tso_sw_mtu = sk_fsw_gso_mtu;
+		}
+	}
+	DTRACE_SKYWALK3(tso__mode, struct nx_flowswitch *, fsw,
+	    fsw_tso_mode_t, fsw->fsw_tso_mode, uint32_t, large_buf_size);
+#endif /* XNU_TARGET_OS_OSX */
+}
 
 static int
 fsw_setup_ifp(struct nx_flowswitch *fsw, struct nexus_adapter *hwna)
@@ -381,6 +468,7 @@ fsw_setup_ifp(struct nx_flowswitch *fsw, struct nexus_adapter *hwna)
 	fsw_classq_setup(fsw, hwna);
 	fsw->fsw_classq_enabled = TRUE;
 	fsw->fsw_src_lla_gencnt = 0;
+	fsw_tso_setup(fsw);
 
 	ASSERT(fsw->fsw_reap_thread != THREAD_NULL);
 	(void) snprintf(fsw->fsw_reap_name, sizeof(fsw->fsw_reap_name),
@@ -398,7 +486,7 @@ fsw_setup_ifp(struct nx_flowswitch *fsw, struct nexus_adapter *hwna)
 	 * Otherwise this flag should already be cleared.
 	 */
 	if (error == 0) {
-		atomic_bitclear_32(&fsw->fsw_nx->nx_flags, NXF_REJECT);
+		os_atomic_andnot(&fsw->fsw_nx->nx_flags, NXF_REJECT, relaxed);
 	}
 
 	lck_mtx_unlock(&fsw->fsw_detach_barrier_lock);
@@ -460,13 +548,13 @@ fsw_teardown_ifp(struct nx_flowswitch *fsw, struct nexus_adapter *hwna)
 	 * to be marked similarly; channels associated with them would then
 	 * cease to function.
 	 */
-	atomic_bitset_32(&fsw->fsw_nx->nx_flags, NXF_REJECT);
+	os_atomic_or(&fsw->fsw_nx->nx_flags, NXF_REJECT, relaxed);
 
 	/* see notes on fsw_na_attach() about I/O refcnt */
 	if (ifp->if_na != NULL) {
 		ifp->if_na->nifna_netif->nif_fsw = NULL;
 		ifp->if_na->nifna_netif->nif_fsw_nxadv = NULL;
-		membar_sync();
+		os_atomic_thread_fence(seq_cst);
 	}
 
 	fsw->fsw_ifp = NULL;
@@ -998,6 +1086,11 @@ fsw_ctl(struct kern_nexus *nx, nxcfg_cmd_t nc_cmd, struct proc *p,
 	case NXCFG_CMD_FLOW_DEL:     /* struct nx_flow_req */
 		error = fsw_ctl_flow_del(fsw, p, data);
 		break;
+
+	case NXCFG_CMD_FLOW_CONFIG:
+		error = fsw_ctl_flow_config(fsw, p, data);
+		break;
+
 	case NXCFG_CMD_NETEM:           /* struct if_netem_params */
 		error = fsw_netem_config(fsw, data);
 		break;
@@ -1049,7 +1142,7 @@ fsw_ifnet_event_callback(struct eventhandler_entry_arg ee_arg __unused,
 			    if_name(fsw->fsw_ifp));
 			(void) ifnet_lladdr_copy_bytes(ifp, fsw->fsw_ether_shost,
 			    ETHER_ADDR_LEN);
-			atomic_add_32(&fsw->fsw_src_lla_gencnt, 1);
+			os_atomic_inc(&fsw->fsw_src_lla_gencnt, relaxed);
 			break;
 
 		case INTF_EVENT_CODE_LOW_POWER_UPDATE:
@@ -1121,7 +1214,19 @@ fsw_protoctl_event_callback(struct eventhandler_entry_arg ee_arg,
 	} else {
 		fk.fk_ipver = IPV6_VERSION;
 		fk.fk_src6 = SIN6(p_laddr)->sin6_addr;
+		/*
+		 * rdar://107435899 The scope ID for destination address needs
+		 * to be cleared out before looking up the flow entry for this
+		 * 5-tuple, because addresses in flow entries do not contain the
+		 * scope ID.
+		 */
+		struct in6_addr *in6;
+
 		fk.fk_dst6 = SIN6(p_raddr)->sin6_addr;
+		in6 = &fk.fk_dst6;
+		if (in6_embedded_scope && IN6_IS_SCOPE_EMBED(in6)) {
+			in6->s6_addr16[1] = 0;
+		}
 	}
 	fk.fk_sport = lport;
 	fk.fk_dport = rport;
@@ -1211,6 +1316,11 @@ fsw_netagent_add_remove(struct kern_nexus *nx, boolean_t add)
 		if (FSW_NETAGENT_ADDED(fsw)) {
 			/* agent already added */
 			error = EEXIST;
+		} else if (fsw->fsw_ifp->if_bridge != NULL) {
+			/* see rdar://107076453 */
+			SK_ERR("%s is bridged, not adding netagent",
+			    if_name(fsw->fsw_ifp));
+			error = EBUSY;
 		} else {
 			fsw->fsw_state_flags |= FSW_STATEF_NETAGENT_ADDED;
 			if (if_is_fsw_netagent_enabled()) {
@@ -2180,7 +2290,7 @@ fsw_generic_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 	if (tgt_rt == NULL || !(tgt_rt->rt_flags & RTF_UP) ||
 	    fr->fr_want_configure) {
 		if (fr->fr_want_configure == 0) {
-			atomic_add_32(&fr->fr_want_configure, 1);
+			os_atomic_inc(&fr->fr_want_configure, relaxed);
 		}
 		err = flow_route_configure(fr, ifp, NULL);
 		if (err != 0) {
@@ -2214,10 +2324,10 @@ done:
 		 * There's no actual resolution taking place here, so just
 		 * mark it with FLOWRTF_RESOLVED for consistency.
 		 */
-		atomic_bitset_32(&fr->fr_flags, FLOWRTF_RESOLVED);
-		atomic_set_32(&fr->fr_want_probe, 0);
+		os_atomic_or(&fr->fr_flags, FLOWRTF_RESOLVED, relaxed);
+		os_atomic_store(&fr->fr_want_probe, 0, release);
 	} else {
-		atomic_bitclear_32(&fr->fr_flags, FLOWRTF_RESOLVED);
+		os_atomic_andnot(&fr->fr_flags, FLOWRTF_RESOLVED, relaxed);
 		flow_route_cleanup(fr);
 	}
 	FR_UNLOCK(fr);

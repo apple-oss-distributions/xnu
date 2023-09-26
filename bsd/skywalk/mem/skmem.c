@@ -290,7 +290,8 @@ static const struct skmem_region_params skmem_regions[SKMEM_REGIONS] = {
 	[SKMEM_REGION_KMD] = {
 		.srp_name       = "kmd",
 		.srp_id         = SKMEM_REGION_KMD,
-		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES,
+		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES |
+    SKMEM_REGION_CR_MEMTAG,
 		.srp_md_type    = NEXUS_META_TYPE_QUANTUM,
 		.srp_md_subtype = NEXUS_META_SUBTYPE_PAYLOAD,
 		.srp_max_frags  = 1,
@@ -298,7 +299,8 @@ static const struct skmem_region_params skmem_regions[SKMEM_REGIONS] = {
 	[SKMEM_REGION_RXKMD] = {
 		.srp_name       = "rxkmd",
 		.srp_id         = SKMEM_REGION_RXKMD,
-		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES,
+		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES |
+    SKMEM_REGION_CR_MEMTAG,
 		.srp_r_obj_cnt  = 0,
 		.srp_md_type    = NEXUS_META_TYPE_QUANTUM,
 		.srp_md_subtype = NEXUS_META_SUBTYPE_PAYLOAD,
@@ -307,7 +309,8 @@ static const struct skmem_region_params skmem_regions[SKMEM_REGIONS] = {
 	[SKMEM_REGION_TXKMD] = {
 		.srp_name       = "txkmd",
 		.srp_id         = SKMEM_REGION_TXKMD,
-		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES,
+		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES |
+    SKMEM_REGION_CR_MEMTAG,
 		.srp_r_obj_cnt  = 0,
 		.srp_md_type    = NEXUS_META_TYPE_QUANTUM,
 		.srp_md_subtype = NEXUS_META_SUBTYPE_PAYLOAD,
@@ -320,7 +323,8 @@ static const struct skmem_region_params skmem_regions[SKMEM_REGIONS] = {
 	[SKMEM_REGION_KBFT] = {
 		.srp_name       = "kbft",
 		.srp_id         = SKMEM_REGION_KBFT,
-		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES,
+		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES |
+    SKMEM_REGION_CR_MEMTAG,
 		.srp_r_obj_cnt  = 0,
 		.srp_md_type    = NEXUS_META_TYPE_INVALID,
 		.srp_md_subtype = NEXUS_META_SUBTYPE_INVALID,
@@ -328,7 +332,8 @@ static const struct skmem_region_params skmem_regions[SKMEM_REGIONS] = {
 	[SKMEM_REGION_RXKBFT] = {
 		.srp_name       = "rxkbft",
 		.srp_id         = SKMEM_REGION_RXKBFT,
-		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES,
+		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES |
+    SKMEM_REGION_CR_MEMTAG,
 		.srp_r_obj_cnt  = 0,
 		.srp_md_type    = NEXUS_META_TYPE_INVALID,
 		.srp_md_subtype = NEXUS_META_SUBTYPE_INVALID,
@@ -336,7 +341,8 @@ static const struct skmem_region_params skmem_regions[SKMEM_REGIONS] = {
 	[SKMEM_REGION_TXKBFT] = {
 		.srp_name       = "txkbft",
 		.srp_id         = SKMEM_REGION_TXKBFT,
-		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES,
+		.srp_cflags     = SKMEM_REGION_CR_NOMAGAZINES |
+    SKMEM_REGION_CR_MEMTAG,
 		.srp_r_obj_cnt  = 0,
 		.srp_md_type    = NEXUS_META_TYPE_INVALID,
 		.srp_md_subtype = NEXUS_META_SUBTYPE_INVALID,

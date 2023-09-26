@@ -47,8 +47,10 @@
 #define __TSD_MACH_MSG_AUX 123
 
 
-#define __TPIDR_CPU_NUM_MASK 0x0000000000000fff
 #define __TPIDR_CPU_NUM_SHIFT 0
+#define __TPIDR_CPU_NUM_MASK 0x0000000000000fff
+#define __TPIDR_CPU_CLUSTER_ID_SHIFT 12
+#define __TPIDR_CPU_CLUSTER_ID_MASK 0x00000000000ff000
 
 #ifndef __ASSEMBLER__
 
@@ -83,6 +85,25 @@ _os_cpu_number(void)
 	return (unsigned int)(p.p1 & 0xfff);
 #else
 #error _os_cpu_number not implemented on this architecture
+#endif
+}
+
+/*
+ * The implementation details of this function are not ABI and are subject to change,
+ * do not copy them in another project
+ */
+__attribute__((always_inline))
+static __inline__ unsigned int
+_os_cpu_cluster_number(void)
+{
+#if defined(__arm64__)
+	uint64_t p;
+	__asm__ __volatile__ ("mrs %0, TPIDR_EL0" : "=r" (p));
+	return (p & __TPIDR_CPU_CLUSTER_ID_MASK) >> __TPIDR_CPU_CLUSTER_ID_SHIFT;
+#elif defined(__arm__) || defined(__x86_64__) || defined(__i386__)
+	return 0;
+#else
+#error _os_cpu_cluster_number not implemented on this architecture
 #endif
 }
 

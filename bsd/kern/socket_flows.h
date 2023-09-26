@@ -91,7 +91,13 @@ struct soflow_db {
 
 	uint8_t                             soflow_db_debug:1;
 	uint8_t                             soflow_db_reserved:7;
+	uint64_t                            soflow_db_flags;
 };
+
+/*
+ * Flags describing the owner socket or the soflow_db
+ */
+#define SOFLOWF_SO_DELAYED_DEAD         0x0001  /* Delayed socket DEAD marking */
 
 bool soflow_fill_hash_entry_from_address(struct soflow_hash_entry *, bool, struct sockaddr *, bool);
 bool soflow_fill_hash_entry_from_inp(struct soflow_hash_entry *, bool, struct inpcb *, bool);

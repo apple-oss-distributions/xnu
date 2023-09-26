@@ -89,6 +89,7 @@ struct specinfo {
 	u_int16_t       si_isssd;
 	u_int32_t       si_devbsdunit;
 	u_int64_t       si_throttle_mask;
+	thread_t        si_mountingowner;
 };
 /*
  * Exported shorthand
@@ -106,6 +107,7 @@ struct specinfo {
  */
 #define SI_MOUNTEDON    0x0001  /* block special device is mounted on */
 #define SI_ALIASED      0x0002  /* multiple active vnodes refer to this device */
+#define SI_MOUNTING     0x0004  /* block special device is getting mounted on */
 
 /*
  * Special device management

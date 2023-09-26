@@ -125,9 +125,20 @@ enum {
 #define kIOWaitQuietPanicsEntitlement "com.apple.private.security.waitquiet-panics"
 #define kIOSystemStateEntitlement "com.apple.private.iokit.systemstate"
 
+// Entitlement allows a DK driver to publish services to other dexts, using the
+// standard IOKit registerService() or DriverKit RegisterService() api.
+// Those client dexts must have an entitlement specified by the
+// kIODriverKitPublishEntitlementsKey property in the IOService being published,
+// and subscribed in the client dext with IOServiceNotificationDispatchSource.
+#define kIODriverKitAllowsPublishEntitlementsKey "com.apple.private.driverkit.allows-publish"
+// Property is an array of strings containing entitlements, one of which needs to be present
+// in the dext looking up the service with this property
+#define kIODriverKitPublishEntitlementsKey      "IODriverKitPublishEntitlementsKey"
+
 enum {
 	kIOWaitQuietPanicOnFailure = 0x00000001,
 };
+#define kIOServiceBusyTimeoutExtensionsKey      "IOServiceBusyTimeoutExtensions"
 
 #define kIOServiceLegacyMatchingRegistryIDKey "IOServiceLegacyMatchingRegistryID"
 
@@ -138,6 +149,10 @@ enum {
 #define kIOPrimaryDriverTerminateOptionsKey "IOPrimaryDriverTerminateOptions"
 
 #define kIOServiceNotificationUserKey   "IOServiceNotificationUser"
+
+#define kIOExclaveAssignedKey    "exclave-assigned"
+#define kIOExclaveProxyKey       "IOExclaveProxy"
+
 
 // IONVRAMSystemVariableList:
 // "one-time-boot-command" - Needed for diags customer install flows

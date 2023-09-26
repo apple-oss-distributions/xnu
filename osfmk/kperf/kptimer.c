@@ -115,13 +115,13 @@ const uint64_t kptimer_minperiods_ns[KTPL_MAX] = {
 #if defined(__x86_64__)
 	[KTPL_FG] = 20 * NSEC_PER_USEC, /* The minimum timer period in xnu, period. */
 	[KTPL_BG] = 1 * NSEC_PER_MSEC,
-	[KTPL_FG_PET] = 2 * NSEC_PER_MSEC,
-	[KTPL_BG_PET] = 5 * NSEC_PER_MSEC,
+	[KTPL_FG_PET] = 1 * NSEC_PER_MSEC,
+	[KTPL_BG_PET] = 1 * NSEC_PER_MSEC,
 #elif defined(__arm64__)
 	[KTPL_FG] = 50 * NSEC_PER_USEC,
 	[KTPL_BG] = 1 * NSEC_PER_MSEC,
-	[KTPL_FG_PET] = 2 * NSEC_PER_MSEC,
-	[KTPL_BG_PET] = 10 * NSEC_PER_MSEC,
+	[KTPL_FG_PET] = 1 * NSEC_PER_MSEC,
+	[KTPL_BG_PET] = 1 * NSEC_PER_MSEC,
 #else
 #error unexpected architecture
 #endif

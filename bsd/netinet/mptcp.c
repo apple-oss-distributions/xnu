@@ -396,7 +396,9 @@ mptcp_input(struct mptses *mpte, struct mbuf *m)
 	struct mbuf *save = NULL, *prev = NULL;
 	struct mbuf *freelist = NULL, *tail = NULL;
 
-	VERIFY(m->m_flags & M_PKTHDR);
+	if (__improbable((m->m_flags & M_PKTHDR) == 0)) {
+		panic("mbuf invalid: %p", m);
+	}
 
 	mp_so = mptetoso(mpte);
 	mp_tp = mpte->mpte_mptcb;

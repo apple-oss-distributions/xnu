@@ -123,8 +123,6 @@ thread_set_state_allowed(thread_t thread, int flavor)
 	    && !task_is_translated(get_threadtask(thread))      /* Ignore translated tasks */
 #endif /* CONFIG_ROSETTA */
 	    && !IOCurrentTaskHasEntitlement("com.apple.private.thread-set-state")
-	    && !IOCurrentTaskHasEntitlement("com.apple.private.cs.debugger")    /* Temporary hack - rdar://104898327 */
-	    && !IOCurrentTaskHasEntitlement("com.apple.security.cs.debugger")   /* Temporary hack - rdar://104898327 */
 	    && tss_should_crash
 	    ) {
 		/* fatal crash */
@@ -132,6 +130,21 @@ thread_set_state_allowed(thread_t thread, int flavor)
 		send_thread_set_state_telemetry();
 		return FALSE;
 	}
+
+#if __has_feature(ptrauth_calls)
+	/* Do not allow Fatal PAC exception binaries to set Debug state */
+	if (task_is_pac_exception_fatal(get_threadtask(thread))
+	    && machine_thread_state_is_debug_flavor(flavor)
+#if CONFIG_ROSETTA
+	    && !task_is_translated(get_threadtask(thread))      /* Ignore translated tasks */
+#endif /* CONFIG_ROSETTA */
+	    && !IOCurrentTaskHasEntitlement("com.apple.private.thread-set-state")) {
+		/* fatal crash */
+		mach_port_guard_exception(MACH_PORT_NULL, 0, 0, kGUARD_EXC_THREAD_SET_STATE);
+		send_thread_set_state_telemetry();
+		return FALSE;
+	}
+#endif /* __has_feature(ptrauth_calls) */
 
 	return TRUE;
 }
@@ -165,11 +178,11 @@ thread_start(
  */
 void
 thread_start_in_assert_wait(
-	thread_t                        thread,
-	event_t             event,
+	thread_t            thread,
+	struct waitq       *waitq,
+	event64_t           event,
 	wait_interrupt_t    interruptible)
 {
-	struct waitq *waitq = assert_wait_queue(event);
 	wait_result_t wait_result;
 	spl_t spl;
 
@@ -184,7 +197,7 @@ thread_start_in_assert_wait(
 	thread_unlock(thread);
 
 	/* assert wait interruptibly forever */
-	wait_result = waitq_assert_wait64_locked(waitq, CAST_EVENT64_T(event),
+	wait_result = waitq_assert_wait64_locked(waitq, event,
 	    interruptible,
 	    TIMEOUT_URGENCY_SYS_NORMAL,
 	    TIMEOUT_WAIT_FOREVER,

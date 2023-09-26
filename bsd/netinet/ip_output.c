@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -159,10 +159,15 @@ extern struct ip_linklocal_stat ip_linklocal_stat;
 extern int ipsec_bypass;
 #endif
 
+static int force_ipsum = 0;
 static int ip_maxchainsent = 0;
 SYSCTL_INT(_net_inet_ip, OID_AUTO, maxchainsent,
     CTLFLAG_RW | CTLFLAG_LOCKED, &ip_maxchainsent, 0,
     "use dlil_output_list");
+
+SYSCTL_INT(_net_inet_ip, OID_AUTO, force_ipsum,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &force_ipsum, 0,
+    "force IP checksum");
 #if DEBUG
 static int forge_ce = 0;
 SYSCTL_INT(_net_inet_ip, OID_AUTO, forge_ce,
@@ -341,6 +346,7 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 			boolean_t noexpensive : 1;      /* set once */
 			boolean_t noconstrained : 1;      /* set once */
 			boolean_t awdl_unrestricted : 1;        /* set once */
+			boolean_t management_allowed : 1;        /* set once */
 		};
 		uint32_t raw;
 	} ipobf = { .raw = 0 };
@@ -351,11 +357,12 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
  * Here we check for restrictions when sending frames.
  * N.B.: IPv4 over internal co-processor interfaces is not allowed.
  */
-#define IP_CHECK_RESTRICTIONS(_ifp, _ipobf)                             \
-	(((_ipobf).nocell && IFNET_IS_CELLULAR(_ifp)) ||                \
-	 ((_ipobf).noexpensive && IFNET_IS_EXPENSIVE(_ifp)) ||          \
-	 ((_ipobf).noconstrained && IFNET_IS_CONSTRAINED(_ifp)) ||      \
-	  (IFNET_IS_INTCOPROC(_ifp)) ||                                 \
+#define IP_CHECK_RESTRICTIONS(_ifp, _ipobf)                                 \
+	(((_ipobf).nocell && IFNET_IS_CELLULAR(_ifp)) ||                    \
+	 ((_ipobf).noexpensive && IFNET_IS_EXPENSIVE(_ifp)) ||              \
+	 ((_ipobf).noconstrained && IFNET_IS_CONSTRAINED(_ifp)) ||          \
+	  (IFNET_IS_INTCOPROC(_ifp)) ||                                     \
+	 (!(_ipobf).management_allowed && IFNET_IS_MANAGEMENT(_ifp)) ||     \
 	 (!(_ipobf).awdl_unrestricted && IFNET_IS_AWDL_RESTRICTED(_ifp)))
 
 	if (ip_output_measure) {
@@ -377,10 +384,10 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 
 	/* Grab info from mtags prepended to the chain */
 	if ((tag = m_tag_locate(m0, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_DUMMYNET, NULL)) != NULL) {
+	    KERNEL_TAG_TYPE_DUMMYNET)) != NULL) {
 		struct dn_pkt_tag       *dn_tag;
 
-		dn_tag = (struct dn_pkt_tag *)(tag + 1);
+		dn_tag = (struct dn_pkt_tag *)(tag->m_tag_data);
 		dn_pf_rule = dn_tag->dn_pf_rule;
 		opt = NULL;
 		saved_route = dn_tag->dn_ro;
@@ -455,19 +462,22 @@ ipfw_tags_done:
 
 	if (flags & IP_OUTARGS) {
 		if (ipoa->ipoa_flags & IPOAF_NO_CELLULAR) {
-			ipobf.nocell = TRUE;
+			ipobf.nocell = true;
 			ipf_pktopts.ippo_flags |= IPPOF_NO_IFT_CELLULAR;
 		}
 		if (ipoa->ipoa_flags & IPOAF_NO_EXPENSIVE) {
-			ipobf.noexpensive = TRUE;
+			ipobf.noexpensive = true;
 			ipf_pktopts.ippo_flags |= IPPOF_NO_IFF_EXPENSIVE;
 		}
 		if (ipoa->ipoa_flags & IPOAF_NO_CONSTRAINED) {
-			ipobf.noconstrained = TRUE;
+			ipobf.noconstrained = true;
 			ipf_pktopts.ippo_flags |= IPPOF_NO_IFF_CONSTRAINED;
 		}
 		if (ipoa->ipoa_flags & IPOAF_AWDL_UNRESTRICTED) {
-			ipobf.awdl_unrestricted = TRUE;
+			ipobf.awdl_unrestricted = true;
+		}
+		if (ipoa->ipoa_flags & IPOAF_MANAGEMENT_ALLOWED) {
+			ipobf.management_allowed = true;
 		}
 		adv = &ipoa->ipoa_flowadv;
 		adv->code = FADV_SUCCESS;
@@ -1015,7 +1025,7 @@ loopit:
 				NTOHS(ip->ip_off);
 #endif
 				ipf_unref();
-				ipobf.didfilter = TRUE;
+				ipobf.didfilter = true;
 			}
 			ip_mloopback(srcifp, ifp, m, dst, hlen);
 		}
@@ -1574,7 +1584,7 @@ skip_ipsec:
 #endif
 
 		ip->ip_sum = 0;
-		if (sw_csum & CSUM_DELAY_IP) {
+		if ((sw_csum & CSUM_DELAY_IP) || __improbable(force_ipsum != 0)) {
 			ip->ip_sum = ip_cksum_hdr_out(m, hlen);
 			sw_csum &= ~CSUM_DELAY_IP;
 			m->m_pkthdr.csum_flags &= ~CSUM_DELAY_IP;
@@ -2884,7 +2894,7 @@ imo_trace(struct ip_moptions *imo, int refhold)
 		tr = imo_dbg->imo_refrele;
 	}
 
-	idx = atomic_add_16_ov(cnt, 1) % IMO_TRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(cnt, relaxed) % IMO_TRACE_HIST_SIZE;
 	ctrace_record(&tr[idx]);
 }
 
@@ -3310,7 +3320,6 @@ void
 ip_output_checksum(struct ifnet *ifp, struct mbuf *m, int hlen, int ip_len,
     uint32_t *sw_csum)
 {
-	int tso = TSO_IPV4_OK(ifp, m);
 	uint32_t hwcap = ifp->if_hwassist;
 
 	m->m_pkthdr.csum_flags |= CSUM_IP;
@@ -3321,14 +3330,18 @@ ip_output_checksum(struct ifnet *ifp, struct mbuf *m, int hlen, int ip_len,
 		    m->m_pkthdr.csum_flags;
 	} else {
 		/* do in software what the hardware cannot */
-		*sw_csum = m->m_pkthdr.csum_flags &
-		    ~IF_HWASSIST_CSUM_FLAGS(hwcap);
+		*sw_csum = m->m_pkthdr.csum_flags & ~IF_HWASSIST_CSUM_FLAGS(hwcap);
 	}
 
 	if (hlen != sizeof(struct ip)) {
 		*sw_csum |= ((CSUM_DELAY_DATA | CSUM_DELAY_IP) &
 		    m->m_pkthdr.csum_flags);
-	} else if (!(*sw_csum & CSUM_DELAY_DATA) && (hwcap & CSUM_PARTIAL)) {
+	} else if ((*sw_csum & CSUM_DELAY_DATA) && (hwcap & CSUM_PARTIAL)) {
+		/*
+		 * If the explicitly required data csum offload is not supported by hardware,
+		 * do it by partial checksum. Here we assume TSO implies support for IP
+		 * and data sum.
+		 */
 		int interface_mtu = ifp->if_mtu;
 
 		if (INTF_ADJUST_MTU_FOR_CLAT46(ifp)) {
@@ -3343,7 +3356,7 @@ ip_output_checksum(struct ifnet *ifp, struct mbuf *m, int hlen, int ip_len,
 		 * +0 to -0 (0xffff) per RFC1122 4.1.3.4. unless the interface
 		 * supports "invert zero" capability.)
 		 */
-		if (hwcksum_tx && !tso &&
+		if (hwcksum_tx &&
 		    ((m->m_pkthdr.csum_flags & CSUM_TCP) ||
 		    ((hwcap & CSUM_ZERO_INVERT) &&
 		    (m->m_pkthdr.csum_flags & CSUM_ZERO_INVERT))) &&
@@ -3367,14 +3380,25 @@ ip_output_checksum(struct ifnet *ifp, struct mbuf *m, int hlen, int ip_len,
 	}
 
 	if (hwcksum_tx) {
+		uint32_t delay_data = m->m_pkthdr.csum_flags & CSUM_DELAY_DATA;
+		uint32_t hw_csum = IF_HWASSIST_CSUM_FLAGS(hwcap);
+
 		/*
 		 * Drop off bits that aren't supported by hardware;
 		 * also make sure to preserve non-checksum related bits.
 		 */
 		m->m_pkthdr.csum_flags =
-		    ((m->m_pkthdr.csum_flags &
-		    (IF_HWASSIST_CSUM_FLAGS(hwcap) | CSUM_DATA_VALID)) |
+		    ((m->m_pkthdr.csum_flags & (hw_csum | CSUM_DATA_VALID)) |
 		    (m->m_pkthdr.csum_flags & ~IF_HWASSIST_CSUM_MASK));
+
+		/*
+		 * If hardware supports partial checksum but not delay_data,
+		 * add back delay_data.
+		 */
+		if ((hw_csum & CSUM_PARTIAL) != 0 &&
+		    (hw_csum & delay_data) == 0) {
+			m->m_pkthdr.csum_flags |= delay_data;
+		}
 	} else {
 		/* drop all bits; hardware checksum offload is disabled */
 		m->m_pkthdr.csum_flags = 0;

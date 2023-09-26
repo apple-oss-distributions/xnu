@@ -60,6 +60,8 @@ static uint64_t global_flags = 0;
 #define PARSE_STACKSHOT_ASYNCSTACK           0x1000
 #define PARSE_STACKSHOT_COMPACTINFO          0x2000 /* TODO: rdar://88789261 */
 #define PARSE_STACKSHOT_DRIVERKIT            0x4000
+#define PARSE_STACKSHOT_THROTTLED_SP         0x8000
+#define PARSE_STACKSHOT_SUSPENDINFO          0x10000
 
 /* keys for 'extra' dictionary for parse_stackshot */
 static const NSString* zombie_child_pid_key = @"zombie_child_pid"; // -> @(pid), required for PARSE_STACKSHOT_ZOMBIE
@@ -76,9 +78,14 @@ static const NSString* transitioning_pid_key = @"transitioning_task_pid"; // -> 
 static const NSString* asyncstack_expected_threadid_key = @"asyncstack_expected_threadid"; // -> @(tid), required for PARSE_STACKSHOT_ASYNCSTACK
 static const NSString* asyncstack_expected_stack_key = @"asyncstack_expected_stack"; // -> @[pc...]), expected PCs for asyncstack
 static const NSString* driverkit_found_key = @"driverkit_found_key"; // callback when driverkit process is found. argument is the process pid.
+static const NSString* sp_throttled_expected_ctxt_key = @"sp_throttled_expected_ctxt_key"; // -> @(ctxt), required for PARSE_STACKSHOT_THROTTLED_SP
+static const NSString* sp_throttled_expect_flag = @"sp_throttled_expect_flag"; // -> @(is_throttled), required for PARSE_STACKSHOT_THROTTLED_SP
+
 
 #define TEST_STACKSHOT_QUEUE_LABEL        "houston.we.had.a.problem"
 #define TEST_STACKSHOT_QUEUE_LABEL_LENGTH sizeof(TEST_STACKSHOT_QUEUE_LABEL)
+
+#define THROTTLED_SERVICE_NAME "com.apple.xnu.test.stackshot.throttled_service"
 
 T_DECL(microstackshots, "test the microstackshot syscall")
 {
@@ -1331,7 +1338,20 @@ T_DECL(compactinfo, "test compactinfo inclusion")
 	take_stackshot(&scenario, false, ^(void *ssbuf, size_t sslen) {
 		parse_stackshot(PARSE_STACKSHOT_COMPACTINFO, ssbuf, sslen, nil);
 	});
-	
+}
+
+T_DECL(suspendinfo, "test task suspend info inclusion")
+{
+	struct scenario scenario = {
+		.name = "suspendinfo",
+		.target_pid = getpid(),
+		.flags = (STACKSHOT_SAVE_LOADINFO | STACKSHOT_KCDATA_FORMAT),
+	};
+
+	T_LOG("attempting to take stackshot with suspendinfo flag");
+	take_stackshot(&scenario, false, ^(void *ssbuf, size_t sslen) {
+		parse_stackshot(PARSE_STACKSHOT_SUSPENDINFO, ssbuf, sslen, nil);
+	});
 }
 
 static NSMutableSet * find_driverkit_pids(io_registry_entry_t root) {
@@ -1979,6 +1999,205 @@ T_DECL(special_reply_port, "test that tasks using special reply ports have corre
 	T_ASSERT_POSIX_SUCCESS(waitpid(client_pid, NULL, 0), "waiting for the client to exit");
 }
 
+T_HELPER_DECL(throtlled_sp_client,
+	"client that uses a connection port to send a message to a server")
+{
+	mach_port_t conn_port, service_port, reply_port, *stash;
+	mach_msg_type_number_t stash_cnt = 0;
+
+	kern_return_t kr = mach_ports_lookup(mach_task_self(), &stash, &stash_cnt);
+	T_ASSERT_MACH_SUCCESS(kr, "mach_ports_lookup");
+
+	service_port = stash[0];
+	T_ASSERT_TRUE(MACH_PORT_VALID(service_port), "valid service port");
+	mig_deallocate((vm_address_t)stash, stash_cnt * sizeof(stash[0]));
+
+	mach_port_options_t opts = {
+		.flags = MPO_INSERT_SEND_RIGHT
+			| MPO_CONNECTION_PORT,
+		.service_port_name = service_port,
+	};
+
+	kr = mach_port_construct(mach_task_self(), &opts, 0ull, &conn_port);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_port_construct");
+
+	mach_port_options_t opts2 = {
+		.flags = MPO_REPLY_PORT
+	};
+	kr = mach_port_construct(mach_task_self(), &opts2, 0ull, &reply_port);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_port_construct");
+
+	/* XPC-like check-in message */
+	struct {
+		mach_msg_header_t header;
+		mach_msg_port_descriptor_t recvp;
+		mach_msg_port_descriptor_t sendp;
+	} checkin_message = {
+		.header =
+		{
+			.msgh_remote_port = service_port,
+			.msgh_local_port = MACH_PORT_NULL,
+			.msgh_size = sizeof(checkin_message),
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+		},
+		.recvp =
+		{
+			.type = MACH_MSG_PORT_DESCRIPTOR,
+			.name = conn_port,
+			.disposition = MACH_MSG_TYPE_MOVE_RECEIVE,
+		},
+		.sendp =
+		{
+			.type = MACH_MSG_PORT_DESCRIPTOR,
+			.name = reply_port,
+			.disposition = MACH_MSG_TYPE_MAKE_SEND,
+		}
+	};
+	dispatch_mach_msg_t dmsg = dispatch_mach_msg_create((mach_msg_header_t *)&checkin_message, sizeof(checkin_message),
+		DISPATCH_MACH_MSG_DESTRUCTOR_DEFAULT, NULL);
+
+	dispatch_queue_t machdq = dispatch_queue_create("machqueue", NULL);
+	dispatch_mach_t dchannel = dispatch_mach_create(THROTTLED_SERVICE_NAME, machdq,
+		^(dispatch_mach_reason_t reason,
+	      dispatch_mach_msg_t message __unused,
+	      mach_error_t error __unused) {
+		switch (reason) {
+			case DISPATCH_MACH_CONNECTED:
+				T_LOG("mach channel connected");
+				break;
+			case DISPATCH_MACH_MESSAGE_SENT:
+				T_LOG("sent mach message");
+				break;
+			default:
+				T_ASSERT_FAIL("Unexpected reply to channel reason %lu", reason);
+		}
+	});
+	dispatch_mach_connect(dchannel, reply_port, service_port, dmsg);
+	dispatch_release(dmsg);
+
+	struct {
+		mach_msg_header_t header;
+		uint64_t request_id;
+	} request = {
+		.header =
+		{
+			.msgh_size = sizeof(request),
+			.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE),
+		},
+		.request_id = 1,
+	};
+	dispatch_mach_msg_t dmsg2 = dispatch_mach_msg_create((mach_msg_header_t *)&request, sizeof(request),
+		DISPATCH_MACH_MSG_DESTRUCTOR_DEFAULT, NULL);
+
+	dispatch_mach_reason_t reason;
+	mach_error_t error;
+
+	/* send the check-in message and the request message */
+	dispatch_mach_msg_t dreply = dispatch_mach_send_with_result_and_wait_for_reply(dchannel,
+			dmsg2, 0, DISPATCH_MACH_SEND_DEFAULT, &reason, &error);
+	dispatch_release(dmsg2);
+
+	/* not expected to execute as parent will SIGKILL client */
+	T_ASSERT_FAIL("client process exiting after receiving %s reply", dreply ? "non-null" : "null");
+}
+
+static void
+check_throttled_sp(const char *test_name, uint64_t context, bool is_throttled)
+{
+	struct scenario scenario = {
+		.name = test_name,
+		.quiet = false,
+		.flags = (STACKSHOT_THREAD_WAITINFO | STACKSHOT_KCDATA_FORMAT),
+	};
+
+	T_LOG("taking stackshot %s", test_name);
+	take_stackshot(&scenario, false, ^(void *ssbuf, size_t sslen) {
+		parse_stackshot(PARSE_STACKSHOT_THROTTLED_SP, ssbuf, sslen,
+					@{sp_throttled_expected_ctxt_key: @(context),
+					sp_throttled_expect_flag: @(is_throttled)});
+	});
+}
+
+/* Take stackshot when a client is blocked on the service port of a process, in the scenario when
+ * the process with the receive right for the service port is:
+ *     (a) Monitoring the service port using kevents
+ *     (b) Not monitoring the service port
+ */
+T_DECL(throttled_sp,
+	"test that service port throttled flag is propagated to the stackshot correctly")
+{
+	mach_port_t service_port;
+	__block dispatch_semaphore_t can_continue  = dispatch_semaphore_create(0);
+
+	char path[PATH_MAX];
+	uint32_t path_size = sizeof(path);
+	T_ASSERT_POSIX_ZERO(_NSGetExecutablePath(path, &path_size), "_NSGetExecutablePath");
+	char *client_args[] = { path, "-n", "throtlled_sp_client", NULL };
+
+	__block	uint64_t thread_id = 0;
+	pid_t client_pid;
+	int mark_throttled;
+
+	struct mach_service_port_info sp_info = {};
+	strcpy(sp_info.mspi_string_name, THROTTLED_SERVICE_NAME);
+	sp_info.mspi_domain_type = (uint8_t)1;
+	kern_return_t kr;
+
+	mach_port_options_t opts = {
+		.flags = MPO_SERVICE_PORT | MPO_INSERT_SEND_RIGHT | MPO_CONTEXT_AS_GUARD | MPO_STRICT | MPO_TEMPOWNER,
+		.service_port_info = &sp_info,
+	};
+
+	kr = mach_port_construct(mach_task_self(), &opts, 0ull, &service_port);
+	T_ASSERT_MACH_SUCCESS(kr, "mach_port_construct %u", service_port);
+
+	/* Setup a dispatch source to monitor the service port similar to how launchd does. */
+	dispatch_queue_t machdq = dispatch_queue_create("machqueue", NULL);
+	dispatch_source_t mach_src = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, service_port,
+		DISPATCH_MACH_RECV_SYNC_PEEK, machdq);
+	dispatch_source_set_event_handler(mach_src, ^{
+		pthread_threadid_np(NULL, &thread_id);
+		dispatch_semaphore_signal(can_continue);
+	});
+	dispatch_activate(mach_src);
+
+	/* Stash the port in task to make sure child also gets it */
+	kr = mach_ports_register(mach_task_self(), &service_port, 1);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_ports_register service port");
+
+	mark_throttled = 1;
+	kr = mach_port_set_attributes(mach_task_self(), service_port, MACH_PORT_SERVICE_THROTTLED, (mach_port_info_t)(&mark_throttled),
+	           MACH_PORT_SERVICE_THROTTLED_COUNT);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mark service port as throttled");
+
+	int rc = posix_spawn(&client_pid, client_args[0], NULL, NULL, client_args, NULL);
+	T_QUIET; T_ASSERT_POSIX_ZERO(rc, "spawned process '%s' with PID %d", client_args[0], client_pid);
+	T_LOG("Spawned client as PID %d", client_pid);
+
+	dispatch_semaphore_wait(can_continue, DISPATCH_TIME_FOREVER);
+
+	/* The service port has received the check-in message. Take stackshot for scenario (a). */
+	check_throttled_sp("throttled_service_port_monitored", thread_id, true);
+
+	/* This simulates a throttled spawn when the service port is no longer monitored. */
+	dispatch_source_cancel(mach_src);
+
+	/* Take stackshot for scenario (b) */
+	check_throttled_sp("throttled_service_port_unmonitored", (uint64_t)getpid(), true);
+
+	mark_throttled = 0;
+	kr = mach_port_set_attributes(mach_task_self(), service_port, MACH_PORT_SERVICE_THROTTLED, (mach_port_info_t)(&mark_throttled),
+	           MACH_PORT_SERVICE_THROTTLED_COUNT);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "unmark service port as throttled");
+
+	/* Throttled flag should not be set when the port is not throttled. */
+	check_throttled_sp("unthrottled_service_port_unmonitored", (uint64_t)getpid(), false);
+
+	/* cleanup - kill the client */
+	T_ASSERT_POSIX_SUCCESS(kill(client_pid, SIGKILL), "killing client");
+	T_ASSERT_POSIX_SUCCESS(waitpid(client_pid, NULL, 0), "waiting for the client to exit");
+}
+
 #pragma mark performance tests
 
 #define SHOULD_REUSE_SIZE_HINT 0x01
@@ -2303,20 +2522,23 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 	bool expect_dispatch_queue_label = (stackshot_parsing_flags & PARSE_STACKSHOT_DISPATCH_QUEUE_LABEL);
 	bool expect_turnstile_lock = (stackshot_parsing_flags & PARSE_STACKSHOT_TURNSTILEINFO);
 	bool expect_srp_waitinfo = (stackshot_parsing_flags & PARSE_STACKSHOT_WAITINFO_SRP);
+	bool expect_sp_throttled = (stackshot_parsing_flags & PARSE_STACKSHOT_THROTTLED_SP);
 	bool expect_exec_inprogress = (stackshot_parsing_flags & PARSE_STACKSHOT_EXEC_INPROGRESS);
 	bool expect_transitioning_task = (stackshot_parsing_flags & PARSE_STACKSHOT_TRANSITIONING);
 	bool expect_asyncstack = (stackshot_parsing_flags & PARSE_STACKSHOT_ASYNCSTACK);
 	bool expect_driverkit = (stackshot_parsing_flags & PARSE_STACKSHOT_DRIVERKIT);
+	bool expect_suspendinfo = (stackshot_parsing_flags & PARSE_STACKSHOT_SUSPENDINFO);
 	bool found_zombie_child = false, found_postexec_child = false, found_shared_cache_layout = false, found_shared_cache_uuid = false;
 	bool found_translated_child = false, found_transitioning_task = false;
 	bool found_dispatch_queue_label = false, found_turnstile_lock = false;
 	bool found_cseg_waitinfo = false, found_srp_waitinfo = false;
 	bool found_sharedcache_child = false, found_sharedcache_badflags = false, found_sharedcache_self = false;
 	bool found_asyncstack = false;
+	bool found_throttled_service = false;
 	uint64_t srp_expected_threadid = 0;
-	pid_t zombie_child_pid = -1, srp_expected_pid = -1, sharedcache_child_pid = -1;
+	pid_t zombie_child_pid = -1, srp_expected_pid = -1, sharedcache_child_pid = -1, throttled_service_ctx = -1;
 	pid_t translated_child_pid = -1, transistioning_task_pid = -1;
-	bool sharedcache_child_sameaddr = false;
+	bool sharedcache_child_sameaddr = false, is_throttled = false;
 	uint64_t postexec_child_unique_pid = 0, cseg_expected_threadid = 0;
 	uint64_t sharedcache_child_flags = 0, sharedcache_self_flags = 0;
 	uint64_t asyncstack_threadid = 0;
@@ -2403,6 +2625,19 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 			T_QUIET; T_ASSERT_GT(srp_expected_pid, 0, "srp_expected_pid greater than zero");
 		}
 		T_LOG("looking for SRP pid: %d threadid: %llu", srp_expected_pid, srp_expected_threadid);
+	}
+
+	if (expect_sp_throttled) {
+		NSNumber* ctx = extra[sp_throttled_expected_ctxt_key];
+		T_QUIET; T_ASSERT_TRUE(ctx != nil, "expected pid");
+		throttled_service_ctx = [ctx intValue];
+		T_QUIET; T_ASSERT_GT(throttled_service_ctx, 0, "expected pid greater than zero");
+
+		NSNumber *throttled = extra[sp_throttled_expect_flag];
+		T_QUIET; T_ASSERT_TRUE(throttled != nil, "expected flag value");
+		is_throttled = ([throttled intValue] != 0);
+
+		T_LOG("Looking for service with ctxt: %d, thottled:%d", throttled_service_ctx, is_throttled);
 	}
 
 	if (expect_translated_child) {
@@ -2560,6 +2795,7 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 			 */
 			if (container_type != STACKSHOT_KCCONTAINER_TASK &&
 			    container_type != STACKSHOT_KCCONTAINER_TRANSITIONING_TASK) {
+				T_LOG("container skipped: %d", container_type);
 				break;
 			}
 			NSDictionary *container = parseKCDataContainer(&iter, &error);
@@ -2789,10 +3025,45 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 				}
 			}
 
+			if (expect_sp_throttled) {
+				NSArray *tinfos = container[@"task_snapshots"][@"thread_turnstileinfo"];
+				for (id i in tinfos) {
+					if (([i[@"turnstile_flags"] intValue] & STACKSHOT_TURNSTILE_STATUS_PORTFLAGS)
+						&& [i[@"turnstile_context"] intValue] == throttled_service_ctx) {
+						int portlabel_id = [i[@"portlabel_id"] intValue];
+						T_LOG("[pid:%d] Turnstile (flags = 0x%x, ctx = %d, portlabel_id = %d)", pid,
+							[i[@"turnstile_flags"] intValue], [i[@"turnstile_context"] intValue], portlabel_id);
+						for (id portid in container[@"task_snapshots"][@"portlabels"]) {
+							if (portlabel_id != [portid intValue]) {
+								continue;
+							}
+
+							NSMutableDictionary *portlabel = container[@"task_snapshots"][@"portlabels"][portid];
+							T_ASSERT_TRUE(portlabel != nil, "Found portlabel id: %d", [portid intValue]);
+							NSString *portlabel_name = portlabel[@"portlabel_name"];
+							T_EXPECT_TRUE(portlabel_name != nil, "Found portlabel %s", portlabel_name.UTF8String);
+							T_EXPECT_EQ_STR(portlabel_name.UTF8String, THROTTLED_SERVICE_NAME, "throttled service port name matches");
+							T_EXPECT_EQ(([portlabel[@"portlabel_flags"] intValue] & STACKSHOT_PORTLABEL_THROTTLED) != 0,
+								is_throttled, "Port %s throttled", is_throttled ? "is" : "isn't");
+							found_throttled_service = true;
+							break;
+						}
+					}
+
+					if (found_throttled_service) {
+						break;
+					}
+				}
+			}
+
+			if (expect_suspendinfo) {
+				// TODO: rdar://112563110
+			}
+
 			if (pid != getpid()) {
 				break;
 			}
-			
+
 			T_EXPECT_EQ_STR(current_process_name(),
 					[task_snapshot[@"ts_p_comm"] UTF8String],
 					"current process name matches in stackshot");
@@ -2980,6 +3251,10 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 
 	if (expect_srp_waitinfo) {
 		T_QUIET; T_ASSERT_TRUE(found_srp_waitinfo, "found special reply port waitinfo");
+	}
+
+	if (expect_sp_throttled) {
+		T_QUIET; T_ASSERT_TRUE(found_throttled_service, "found the throttled service");
 	}
 
 	if (expect_asyncstack) {

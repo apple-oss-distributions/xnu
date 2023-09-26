@@ -51,8 +51,9 @@
 
 __options_decl(ipc_service_port_label_flags_t, uint16_t, {
 	ISPL_FLAGS_SPECIAL_PDREQUEST      = 1,/* Special port destroyed notification for service ports */
-	ISPL_FLAGS_SEND_PD_NOTIFICATION   = 1 << 1,/* Port destroyed notification is being sent */
-	        ISPL_FLAGS_BOOTSTRAP_PORT         = 1 << 2,
+	ISPL_FLAGS_SEND_PD_NOTIFICATION   = (1 << 1),/* Port destroyed notification is being sent */
+	ISPL_FLAGS_BOOTSTRAP_PORT         = (1 << 2),
+	ISPL_FLAGS_THROTTLED              = (1 << 3),/* Service throttled by launchd */
 });
 
 struct ipc_service_port_label {
@@ -81,6 +82,9 @@ typedef struct ipc_service_port_label* ipc_service_port_label_t;
 
 #define ipc_service_port_label_is_bootstrap_port(port_splabel) \
     (((port_splabel)->ispl_flags & ISPL_FLAGS_BOOTSTRAP_PORT) == ISPL_FLAGS_BOOTSTRAP_PORT)
+
+#define ipc_service_port_label_is_throttled(port_splabel) \
+	(((port_splabel)->ispl_flags & ISPL_FLAGS_THROTTLED) == ISPL_FLAGS_THROTTLED)
 
 static inline void
 ipc_service_port_label_set_flag(ipc_service_port_label_t port_splabel, ipc_service_port_label_flags_t flag)

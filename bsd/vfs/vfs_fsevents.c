@@ -85,7 +85,7 @@ typedef struct kfs_event {
 			dev_t            dev;
 			int32_t          mode;
 			uid_t            uid;
-			gid_t            gid;
+			uint32_t         document_id;
 			struct kfs_event *dest; // if this is a two-file op
 			const char       *str;
 			uint16_t         len;
@@ -114,7 +114,7 @@ _Static_assert(offsetof(struct regular_event, mode) == offsetof(fse_info, mode),
     "kfs_event and fse_info out-of-sync");
 _Static_assert(offsetof(struct regular_event, uid) == offsetof(fse_info, uid),
     "kfs_event and fse_info out-of-sync");
-_Static_assert(offsetof(struct regular_event, gid) == offsetof(fse_info, gid),
+_Static_assert(offsetof(struct regular_event, document_id) == offsetof(fse_info, document_id),
     "kfs_event and fse_info out-of-sync");
 
 #define KFSE_INFO_COPYSIZE offsetof(fse_info, nlink)
@@ -776,7 +776,7 @@ restart:
 			VATTR_WANTED(&va, va_fileid);
 			VATTR_WANTED(&va, va_mode);
 			VATTR_WANTED(&va, va_uid);
-			VATTR_WANTED(&va, va_gid);
+			VATTR_WANTED(&va, va_document_id);
 			VATTR_WANTED(&va, va_nlink);
 			if ((ret = vnode_getattr(vp, &va, vfs_context_kernel())) != 0) {
 				// printf("add_fsevent: failed to getattr on vp %p (%d)\n", cur->fref.vp, ret);
@@ -789,7 +789,7 @@ restart:
 			cur->regular_event.ino  = (ino64_t)va.va_fileid;
 			cur->regular_event.mode = (int32_t)vnode_vttoif(vnode_vtype(vp)) | va.va_mode;
 			cur->regular_event.uid  = va.va_uid;
-			cur->regular_event.gid  = va.va_gid;
+			cur->regular_event.document_id  = va.va_document_id;
 			if (vp->v_flag & VISHARDLINK) {
 				cur->regular_event.mode |= FSE_MODE_HLINK;
 				if ((vp->v_type == VDIR && va.va_dirlinkcount == 0) || (vp->v_type == VREG && va.va_nlink == 0)) {
@@ -886,7 +886,7 @@ restart:
 			cur->regular_event.ino  = (ino64_t)fse->ino;
 			cur->regular_event.mode = (int32_t)fse->mode;
 			cur->regular_event.uid  = (uid_t)fse->uid;
-			cur->regular_event.gid  = (uid_t)fse->gid;
+			cur->regular_event.document_id  = (uint32_t)fse->document_id;
 			// if it's a hard-link and this is the last link, flag it
 			if (fse->mode & FSE_MODE_HLINK) {
 				if (fse->nlink == 0) {
@@ -1777,7 +1777,7 @@ copy_again:
 		}
 
 		error = fill_buff(FSE_ARG_GID, sizeof(gid_t),
-		    &cur->regular_event.gid, evbuff, &evbuff_idx,
+		    &cur->regular_event.document_id, evbuff, &evbuff_idx,
 		    sizeof(evbuff), uio);
 		if (error != 0) {
 			goto get_out;
@@ -2270,7 +2270,7 @@ fseventsf_close(struct fileglob *fg, __unused vfs_context_t ctx)
 static void
 filt_fsevent_detach(struct knote *kn)
 {
-	fsevent_handle *fseh = (struct fsevent_handle *)kn->kn_hook;
+	fsevent_handle *fseh = (struct fsevent_handle *)knote_kn_hook_get_raw(kn);
 
 	lock_watch_table();
 
@@ -2291,7 +2291,7 @@ filt_fsevent_detach(struct knote *kn)
 static int
 filt_fsevent_common(struct knote *kn, struct kevent_qos_s *kev, long hint)
 {
-	fsevent_handle *fseh = (struct fsevent_handle *)kn->kn_hook;
+	fsevent_handle *fseh = (struct fsevent_handle *)knote_kn_hook_get_raw(kn);
 	int activate = 0;
 	int32_t rd, wr, amt;
 	int64_t data = 0;
@@ -2396,8 +2396,8 @@ fseventsf_kqfilter(struct fileproc *fp, struct knote *kn,
 	fsevent_handle *fseh = (struct fsevent_handle *)fp_get_data(fp);
 	int res;
 
-	kn->kn_hook = (void*)fseh;
 	kn->kn_filtid = EVFILTID_FSEVENT;
+	knote_kn_hook_set_raw(kn, (void *) fseh);
 
 	lock_watch_table();
 
@@ -2859,7 +2859,7 @@ get_fse_info(struct vnode *vp, fse_info *fse, __unused vfs_context_t ctx)
 	VATTR_WANTED(&va, va_fileid);
 	VATTR_WANTED(&va, va_mode);
 	VATTR_WANTED(&va, va_uid);
-	VATTR_WANTED(&va, va_gid);
+	VATTR_WANTED(&va, va_document_id);
 	if (vp->v_flag & VISHARDLINK) {
 		if (vp->v_type == VDIR) {
 			VATTR_WANTED(&va, va_dirlinkcount);
@@ -2883,7 +2883,7 @@ vnode_get_fse_info_from_vap(vnode_t vp, fse_info *fse, struct vnode_attr *vap)
 	fse->dev  = (dev_t)vap->va_fsid;
 	fse->mode = (int32_t)vnode_vttoif(vnode_vtype(vp)) | vap->va_mode;
 	fse->uid  = (uid_t)vap->va_uid;
-	fse->gid  = (gid_t)vap->va_gid;
+	fse->document_id  = (uint32_t)vap->va_document_id;
 	if (vp->v_flag & VISHARDLINK) {
 		fse->mode |= FSE_MODE_HLINK;
 		if (vp->v_type == VDIR) {
@@ -2938,7 +2938,7 @@ create_fsevent_from_kevent(vnode_t vp, uint32_t kevents, struct vnode_attr *vap)
 
 
 	fse.uid = vap->va_uid;
-	fse.gid = vap->va_gid;
+	fse.document_id = vap->va_document_id;
 
 	len = sizeof(pathbuf);
 	if (vn_getpath_no_firmlink(vp, pathbuf, &len) == 0) {

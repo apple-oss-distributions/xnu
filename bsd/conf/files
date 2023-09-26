@@ -37,6 +37,7 @@ OPTIONS/vlan				optional vlan
 OPTIONS/bond				optional bond
 OPTIONS/if_fake				optional if_fake
 OPTIONS/if_headless			optional if_headless
+OPTIONS/if_redirect			optional if_redirect
 OPTIONS/bpfilter			optional bpfilter
 OPTIONS/multipath			optional multipath
 OPTIONS/mptcp				optional mptcp
@@ -44,12 +45,13 @@ OPTIONS/dummynet			optional dummynet
 OPTIONS/tcpdebug			optional tcpdebug
 OPTIONS/if_bridge			optional if_bridge
 OPTIONS/bridgestp			optional bridgestp if_bridge
-OPTIONS/gif					optional gif
+OPTIONS/gif				optional gif
 OPTIONS/sendfile			optional sendfile
 OPTIONS/pf				optional pf
 OPTIONS/pflog				optional pflog pf
 OPTIONS/zlib				optional zlib
 OPTIONS/remote_vif			optional remote_vif
+OPTIONS/kctl_test			optional kctl_test
 
 #
 # Skywalk options
@@ -176,6 +178,7 @@ bsd/net/if_mib.c			optional networking
 bsd/net/if_vlan.c			optional vlan
 bsd/net/if_fake.c			optional if_fake
 bsd/net/if_headless.c			optional if_headless
+bsd/net/if_redirect.c			optional if_redirect
 bsd/net/multicast_list.c		optional networking
 bsd/net/if_bond.c			optional bond
 bsd/net/devtimer.c			optional bond
@@ -222,9 +225,10 @@ bsd/net/content_filter_crypto.c         optional content_filter
 bsd/net/packet_mangler.c		optional packet_mangler
 bsd/net/if_llatbl.c			optional networking
 bsd/net/nwk_wq.c			optional networking
-bsd/net/skmem_sysctl.c		optional skywalk
+bsd/net/skmem_sysctl.c			optional skywalk
 bsd/net/restricted_in_port.c		optional networking
 bsd/net/remote_vif.c			optional remote_vif
+bsd/net/kctl_test.c			optional kctl_test
 
 bsd/net/classq/classq.c			optional networking
 bsd/net/classq/classq_subr.c		optional networking
@@ -253,6 +257,7 @@ bsd/netinet/ip_icmp.c			optional inet
 bsd/netinet/ip_id.c			optional inet
 bsd/netinet/ip_input.c			optional inet
 bsd/netinet/ip_output.c			optional inet
+bsd/netinet/inp_log.c			optional inet
 bsd/netinet/raw_ip.c			optional inet
 bsd/netinet/tcp_cache.c			optional inet
 bsd/netinet/tcp_debug.c			optional tcpdebug
@@ -271,6 +276,7 @@ bsd/netinet/tcp_rledbat.c		optional inet
 bsd/netinet/tcp_log.c			optional inet
 bsd/netinet/tcp_sysctls.c		optional inet
 bsd/netinet/tcp_ccdbg.c			optional inet
+bsd/netinet/udp_log.c			optional inet
 bsd/netinet/udp_usrreq.c		optional inet
 bsd/netinet/in_gif.c      		optional gif inet
 bsd/netinet/ip_ecn.c          		optional inet
@@ -390,7 +396,6 @@ bsd/kern/kern_exit.c			standard
 bsd/kern/kern_ktrace.c			standard
 bsd/kern/kern_lockf.c			standard
 bsd/kern/kern_fork.c			standard
-bsd/kern/kern_asl.c			standard
 bsd/kern/kern_malloc.c			standard
 bsd/kern/kern_mman.c			standard
 bsd/kern/kern_persona.c			standard
@@ -415,11 +420,13 @@ bsd/kern/kern_sfi.c			standard
 bsd/kern/kern_time.c			standard
 bsd/kern/kern_trustcache.c  standard
 bsd/kern/kern_codesigning.c standard
+bsd/kern/code_signing/txm.c standard
 bsd/kern/code_signing/ppl.c standard
 bsd/kern/code_signing/xnu.c standard
 bsd/kern/kern_xxx.c			standard
+bsd/kern/lockdown_mode.c	standard
 bsd/kern/mach_process.c			standard
-bsd/kern/mcache.c			optional sockets
+bsd/kern/mcache.c			optional sockets config_mbuf_mcache
 bsd/kern/stackshot.c			standard
 bsd/kern/subr_log.c			standard
 bsd/kern/subr_log_stream.c		standard
@@ -448,15 +455,21 @@ bsd/kern/tty_pty.c			optional pty
 bsd/kern/tty_subr.c			standard
 bsd/kern/tty_tty.c			standard
 bsd/kern/ubc_subr.c			standard
+# Temporarily opting out
+#bsd/kern/uipc_domain.c			optional sockets bound-checks-soft
 bsd/kern/uipc_domain.c			optional sockets
 bsd/kern/uipc_mbuf.c			optional sockets
 bsd/kern/uipc_mbuf2.c		 	optional sockets
+# Temporarily opting out
+#bsd/kern/uipc_proto.c			optional sockets bound-checks-soft
 bsd/kern/uipc_proto.c			optional sockets
 bsd/kern/uipc_socket.c			optional sockets
 bsd/kern/uipc_socket2.c			optional sockets
 # Temporarily opting out 
 #bsd/kern/uipc_syscalls.c		optional sockets bound-checks
 bsd/kern/uipc_syscalls.c		optional sockets
+# Temporarily opting out
+#bsd/kern/uipc_usrreq.c			optional sockets bound-checks-soft
 bsd/kern/uipc_usrreq.c			optional sockets
 bsd/kern/vsock_domain.c			optional sockets
 bsd/kern/sysv_ipc.c			standard
@@ -499,6 +512,7 @@ bsd/kern/chunklist.c			optional config_imageboot_chunklist
 
 osfmk/kperf/kperfbsd.c			optional kperf
 bsd/kern/kern_kpc.c			optional kpc
+bsd/kern/kern_cpc.c			optional kpc
 
 bsd/kern/proc_uuid_policy.c		optional config_proc_uuid_policy
 

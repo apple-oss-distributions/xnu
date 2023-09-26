@@ -128,6 +128,38 @@ typedef struct mig_subsystem {
 	    routine[1];                                         /* Routine descriptor array */
 } *mig_subsystem_t;
 
+#ifdef XNU_KERNEL_PRIVATE
+/* KernelServer MIG routine/subsystem types */
+typedef void    (*mig_stub_kern_routine_t) (mach_msg_header_t *InHeadP, void *InDataP,
+    mach_msg_max_trailer_t *InTrailerP, mach_msg_header_t *OutHeadP, void *OutDataP);
+
+typedef mig_stub_kern_routine_t mig_kern_routine_t;
+
+typedef mig_kern_routine_t (*mig_kern_server_routine_t) (mach_msg_header_t *InHeadP);
+
+struct kern_routine_descriptor {
+	mig_impl_routine_t      impl_routine;      /* Server work func pointer   */
+	mig_stub_kern_routine_t kstub_routine;     /* Unmarshalling func pointer */
+	unsigned int            argc;              /* Number of argument words   */
+	unsigned int            descr_count;       /* Number complex descriptors */
+	unsigned int            reply_descr_count; /* Number descriptors in reply */
+	unsigned int            max_reply_msg;     /* Max size for reply msg */
+};
+
+typedef struct kern_routine_descriptor mig_kern_routine_descriptor;
+typedef struct kern_routine_descriptor *kern_routine_descriptor_t;
+
+typedef struct mig_kern_subsystem {
+	mig_kern_server_routine_t     kserver;     /* pointer to kernel demux routine */
+	mach_msg_id_t            start;            /* Min routine number */
+	mach_msg_id_t            end;              /* Max routine number + 1 */
+	mach_msg_size_t          maxsize;          /* Max reply message size */
+	vm_address_t             reserved;         /* reserved for MIG use */
+	mig_kern_routine_descriptor
+	    kroutine[1];                           /* Kernel routine descriptor array */
+} *mig_kern_subsystem_t;
+#endif /* XNU_KERNEL_PRIVATE */
+
 #define MIG_SUBSYSTEM_NULL              ((mig_subsystem_t)0)
 
 typedef struct mig_symtab {

@@ -29,6 +29,9 @@ protect_thread(__unused void *arg)
 	while (!ctx->done) {
 		/* wait for main thread to be done setting things up */
 		pthread_mutex_lock(&ctx->mtx);
+		if (ctx->done) {
+			break;
+		}
 		/* make 2nd target mapping (e0) read-only */
 		kr = vm_protect(mach_task_self(),
 		    ctx->e0,
@@ -178,6 +181,7 @@ T_DECL(unaligned_write_to_cow_bypass,
 	}
 
 	ctx->done = true;
+	pthread_mutex_unlock(&ctx->mtx);
 	pthread_join(th, NULL);
 
 	T_LOG("vm_read_overwrite: KERN_SUCCESS:%d KERN_PROTECTION_FAILURE:%d other:%d",

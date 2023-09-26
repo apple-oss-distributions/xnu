@@ -880,7 +880,7 @@ class OperatingSystemPlugIn(object):
                     regs.ReadRegisterDataFromKernelStack(saved_state_addr, self.version)
                     return regs.GetPackedRegisterState()
                 elif self.target_arch.startswith(archARMv8) and int(PluginValue(thobj).GetChildMemberWithName('machine').GetChildMemberWithName('kstackptr').GetValueAsUnsigned()) != 0:
-                    saved_state_addr = PluginValue(thobj).GetChildMemberWithName('machine').GetChildMemberWithName('kstackptr').GetValueAsUnsigned()
+                    saved_state_addr = PluginValue(thobj).GetChildMemberWithName('machine').GetChildMemberWithName('kstackptr').GetValueAsAddress()
                     arm_ctx = PluginValue(self.version.CreateValueFromExpression(None, '(struct arm_kernel_context *) ' + str(saved_state_addr)))
                     arm_ss_addr = arm_ctx.GetChildMemberWithName('ss').GetLoadAddress()
                     regs.ReadRegisterDataFromKernelStack(arm_ss_addr, self.version)

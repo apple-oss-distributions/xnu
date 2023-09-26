@@ -176,6 +176,8 @@ int csfg_get_prod_signed(struct fileglob *);
 int csfg_get_supplement_prod_signed(struct fileglob *fg);
 unsigned int csfg_get_signer_type(struct fileglob *);
 unsigned int csfg_get_supplement_signer_type(struct fileglob *);
+unsigned int csfg_get_validation_category(struct fileglob *fg, uint64_t offset);
+unsigned int csfg_get_supplement_validation_category(struct fileglob *fg, uint64_t offset);
 const char *csfg_get_identity(struct fileglob *fg, off_t offset);
 unsigned int csproc_get_signer_type(struct proc *);
 

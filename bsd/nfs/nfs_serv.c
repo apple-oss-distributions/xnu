@@ -569,6 +569,16 @@ nfsrv_setattr(
 
 	/* Authorize the attribute changes.  */
 	error = vnode_authattr(vp, vap, &action, ctx);
+	if ((error == EACCES) && (nxo->nxo_flags & NX_READONLY)) {
+		switch (vnode_vtype(vp)) {
+		case VREG: case VDIR: case VLNK: case VCPLX:
+			error = EROFS;
+			break;
+		default:
+			break;
+		}
+	}
+
 	if (!error) {
 		error = nfsrv_authorize(vp, NULL, action, ctx, nxo, 0);
 	}
@@ -769,9 +779,9 @@ nfsrv_readlink(
 	struct nfsm_chain *nmreq, nmrep;
 	mbuf_t mpath, mp;
 	uio_t auio = NULL;
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(4)];
-	char *uio_bufp = &uio_buf[0];
-	int uio_buflen = UIO_SIZEOF(4);
+	UIO_STACKBUF(uio_buf, 4);
+	void *uio_bufp = &uio_buf[0];
+	int uio_buflen = sizeof(uio_buf);
 
 	error = 0;
 	attrerr = ENOENT;
@@ -917,7 +927,7 @@ nfsrv_read(
 	struct vnode_attr vattr, *vap = &vattr;
 	off_t off;
 	uid_t saved_uid;
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(0)];
+	UIO_STACKBUF(uio_buf, 0);
 	struct nfsm_chain *nmreq, nmrep;
 
 	error = 0;
@@ -1055,7 +1065,7 @@ nfsmerr:
 	}
 	if (nd->nd_vers == NFS_VER3) {
 		nfsm_chain_add_32(error, &nmrep, len);
-		nfsm_chain_add_32(error, &nmrep, (len < reqlen) ? TRUE : FALSE);
+		nfsm_chain_add_32(error, &nmrep, (off + len >= vap->va_data_size) ? TRUE : FALSE);
 	} else {
 		error = nfsm_chain_add_fattr(nd, &nmrep, vap);
 	}
@@ -2651,7 +2661,7 @@ nfsrv_remove(
 		vp = ni.ni_vp;
 
 		if (vnode_vtype(vp) == VDIR) {
-			error = EPERM;          /* POSIX */
+			error = NFSERR_ISDIR;
 		} else if (vnode_isvroot(vp)) {
 			/*
 			 * The root of a mounted filesystem cannot be deleted.
@@ -3414,7 +3424,7 @@ nfsrv_link(
 
 	/* we're not allowed to link to directories... */
 	if (vnode_vtype(vp) == VDIR) {
-		error = EPERM;          /* POSIX */
+		error = NFSERR_ISDIR;
 		goto out;
 	}
 
@@ -3559,7 +3569,7 @@ nfsrv_symlink(
 	struct nfs_export *nx = NULL;
 	struct nfs_export_options *nxo = NULL;
 	uio_t auio = NULL;
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	struct nfsm_chain *nmreq, nmrep;
 	__unused const int nfs_vers = nd->nd_vers;
 	assert(nd->nd_vers == NFS_VER2 || nd->nd_vers == NFS_VER3);
@@ -4086,6 +4096,13 @@ nfsrv_rmdir(
 		goto out;
 	}
 	/*
+	 * No rmdir ".." please.
+	 */
+	if (vnode_parent(dvp) == vp) {
+		error = EINVAL;
+		goto out;
+	}
+	/*
 	 * The root of a mounted filesystem cannot be deleted.
 	 */
 	if (vnode_isvroot(vp)) {
@@ -4215,7 +4232,7 @@ nfsrv_readdir(
 	struct nfs_export *nx;
 	struct nfs_export_options *nxo;
 	uio_t auio = NULL;
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	int len, nlen, rem, xfer, error, attrerr;
 	int siz, count, fullsiz, eofflag, nentries;
 	u_quad_t off, toff, verf = 0;
@@ -4251,6 +4268,11 @@ nfsrv_readdir(
 	}
 	fullsiz = siz;
 
+	if (fullsiz == 0) {
+		error = NFSERR_TOOSMALL;
+		goto nfsmerr;
+	}
+
 	error = nfsrv_fhtovp(&nfh, nd, &vp, &nx, &nxo);
 	nfsmerr_if(error);
 
@@ -4274,7 +4296,7 @@ nfsrv_readdir(
 	if (nd->nd_vers == NFS_VER3) {
 		nfsm_srv_vattr_init(&attr, NFS_VER3);
 		error = attrerr = vnode_getattr(vp, &attr, ctx);
-		if (!error && toff && verf && (verf != attr.va_filerev)) {
+		if (!error && verf && (verf != attr.va_filerev)) {
 			error = NFSERR_BAD_COOKIE;
 		}
 	}
@@ -4462,7 +4484,7 @@ nfsrv_readdirplus(
 	struct nfs_export *nx;
 	struct nfs_export_options *nxo;
 	uio_t auio = NULL;
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	struct vnode_attr attr, va, *vap = &va;
 	int len, nlen, rem, xfer, error, attrerr, gotfh, gotattr;
 	int siz, dircount, maxcount, fullsiz, eofflag, dirlen, nentries, isdotdot;
@@ -4501,6 +4523,11 @@ nfsrv_readdirplus(
 		maxcount = xfer;
 	}
 
+	if (maxcount == 0) {
+		error = NFSERR_TOOSMALL;
+		goto nfsmerr;
+	}
+
 	error = nfsrv_fhtovp(&dnfh, nd, &vp, &nx, &nxo);
 	nfsmerr_if(error);
 
@@ -4523,7 +4550,7 @@ nfsrv_readdirplus(
 
 	nfsm_srv_vattr_init(&attr, NFS_VER3);
 	error = attrerr = vnode_getattr(vp, &attr, ctx);
-	if (!error && toff && verf && (verf != attr.va_filerev)) {
+	if (!error && verf && (verf != attr.va_filerev)) {
 		error = NFSERR_BAD_COOKIE;
 	}
 	if (!error) {
@@ -4606,10 +4633,9 @@ again:
 	}
 
 	/*
-	 * Probe one of the directory entries to see if the filesystem
-	 * supports VGET.
+	 * Probe the directory to see if the filesystem supports VGET.
 	 */
-	if ((error = VFS_VGET(vnode_mount(vp), (ino64_t)dp->d_fileno, &nvp, ctx))) {
+	if ((error = VFS_VGET(vnode_mount(vp), (ino64_t)attr.va_fileid, &nvp, ctx))) {
 		if (error == ENOTSUP) { /* let others get passed back */
 			error = NFSERR_NOTSUPP;
 		}
@@ -4767,6 +4793,12 @@ nfsrv_commit(
 
 	error = nfsrv_credcheck(nd, ctx, nx, nxo);
 	nfsmerr_if(error);
+
+	/* This must identify a file system object of type, NF3REG */
+	if (vnode_vtype(vp) != VREG) {
+		error = NFSERR_BADTYPE;
+		goto nfsmerr;
+	}
 
 	nfsm_srv_pre_vattr_init(&preattr);
 	preattrerr = vnode_getattr(vp, &preattr, ctx);

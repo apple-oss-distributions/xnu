@@ -336,7 +336,7 @@ memory_object_lock_request(
 	vm_object_paging_begin(object);
 
 	if (flags & MEMORY_OBJECT_DATA_FLUSH_ALL) {
-		if ((should_return != MEMORY_OBJECT_RETURN_NONE) || offset || object->copy) {
+		if ((should_return != MEMORY_OBJECT_RETURN_NONE) || offset || object->vo_copy) {
 			flags &= ~MEMORY_OBJECT_DATA_FLUSH_ALL;
 			flags |= MEMORY_OBJECT_DATA_FLUSH;
 		}
@@ -715,7 +715,7 @@ vm_object_update(
 	if (update_cow || (flags & (MEMORY_OBJECT_DATA_PURGE | MEMORY_OBJECT_DATA_SYNC))) {
 		int collisions = 0;
 
-		while ((copy_object = object->copy) != VM_OBJECT_NULL) {
+		while ((copy_object = object->vo_copy) != VM_OBJECT_NULL) {
 			/*
 			 * need to do a try here since we're swimming upstream
 			 * against the normal lock ordering... however, we need
@@ -1046,6 +1046,7 @@ vm_object_set_attributes_common(
 	switch (copy_strategy) {
 	case MEMORY_OBJECT_COPY_NONE:
 	case MEMORY_OBJECT_COPY_DELAY:
+	case MEMORY_OBJECT_COPY_DELAY_FORK:
 		break;
 	default:
 		return KERN_INVALID_ARGUMENT;
@@ -1674,26 +1675,32 @@ memory_object_mark_trusted(
 	}
 }
 
-#if MACH_ASSERT
-memory_object_control_t fbdp_moc = NULL;
-vm_object_t fbdp_object = NULL;
-void
-memory_object_mark_for_fbdp(
-	memory_object_control_t control)
+#if FBDP_DEBUG_OBJECT_NO_PAGER
+kern_return_t
+memory_object_mark_as_tracked(
+	memory_object_control_t control,
+	bool                    new_value,
+	bool                    *old_value)
 {
 	vm_object_t             object;
 
 	if (control == NULL) {
-		return;
+		return KERN_INVALID_ARGUMENT;
 	}
 	object = memory_object_control_to_vm_object(control);
 
-	if (object != VM_OBJECT_NULL) {
-		fbdp_moc = control;
-		fbdp_object = object;
+	if (object == VM_OBJECT_NULL) {
+		return KERN_FAILURE;
 	}
+
+	vm_object_lock(object);
+	*old_value = object->fbdp_tracked;
+	object->fbdp_tracked = new_value;
+	vm_object_unlock(object);
+
+	return KERN_SUCCESS;
 }
-#endif /* MACH_ASSERT */
+#endif /* FBDP_DEBUG_OBJECT_NO_PAGER */
 
 #if CONFIG_SECLUDED_MEMORY
 void

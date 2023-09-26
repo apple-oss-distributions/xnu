@@ -69,9 +69,6 @@
 #define EXTERN
 #define MIGEXTERN
 
-LCK_GRP_DECLARE(dev_lck_grp, "device");
-LCK_MTX_DECLARE(iokit_obj_to_port_binding_lock, &dev_lck_grp);
-
 static void
 iokit_no_senders( ipc_port_t port, mach_port_mscount_t mscount );
 
@@ -97,22 +94,24 @@ IPC_KOBJECT_DEFINE(IKOT_UEXT_OBJECT,
 io_object_t
 iokit_lookup_io_object(ipc_port_t port, ipc_kobject_type_t type)
 {
-	io_object_t     obj = NULL;
+	io_object_t  obj = NULL;
+	io_kobject_t kobj = NULL;
 
 	if (!IP_VALID(port)) {
 		return NULL;
 	}
 
-	iokit_lock_port(port);
-	/*
-	 * iokit uses the iokit_lock_port to serialize all its updates
-	 * so we do not need to actually hold the port lock.
-	 */
-	obj = ipc_kobject_get_locked(port, type);
-	if (obj) {
-		iokit_add_reference( obj, type );
+	ip_mq_lock(port);
+	if (ip_active(port)) {
+		kobj = ipc_kobject_get_locked(port, type);
+		if (kobj) {
+			iokit_kobject_retain(kobj);
+		}
 	}
-	iokit_unlock_port(port);
+	ip_mq_unlock(port);
+	if (kobj) {
+		obj = iokit_copy_object_for_consumed_kobject(kobj, type);
+	}
 
 	return obj;
 }
@@ -149,6 +148,7 @@ static io_object_t
 iokit_lookup_object_in_space_with_port_name(mach_port_name_t name, ipc_kobject_type_t type, ipc_space_t space)
 {
 	io_object_t obj = NULL;
+	io_kobject_t kobj;
 
 	if (name && MACH_PORT_VALID(name)) {
 		ipc_port_t port;
@@ -159,21 +159,14 @@ iokit_lookup_object_in_space_with_port_name(mach_port_name_t name, ipc_kobject_t
 		if (kr == KERN_SUCCESS) {
 			assert(IP_VALID(port));
 			assert(ip_active(port));
-			ip_reference(port);
-			ip_mq_unlock(port);
-
-			iokit_lock_port(port);
-			/*
-			 * iokit uses the iokit_lock_port to serialize all its updates
-			 * so we do not need to actually hold the port lock.
-			 */
-			obj = ipc_kobject_get_locked(port, type);
-			if (obj) {
-				iokit_add_reference(obj, type);
+			kobj = ipc_kobject_get_locked(port, type);
+			if (kobj) {
+				iokit_kobject_retain(kobj);
 			}
-			iokit_unlock_port(port);
-
-			ip_release(port);
+			ip_mq_unlock(port);
+			if (kobj) {
+				obj = iokit_copy_object_for_consumed_kobject(kobj, type);
+			}
 		}
 	}
 
@@ -239,18 +232,6 @@ iokit_release_port_send( ipc_port_t port )
 	ipc_port_release_send( port );
 }
 
-EXTERN void
-iokit_lock_port( __unused ipc_port_t port )
-{
-	lck_mtx_lock(&iokit_obj_to_port_binding_lock);
-}
-
-EXTERN void
-iokit_unlock_port( __unused ipc_port_t port )
-{
-	lck_mtx_unlock(&iokit_obj_to_port_binding_lock);
-}
-
 /*
  * Get the port for a device.
  * Consumes a device reference; produces a naked send right.
@@ -261,14 +242,15 @@ iokit_make_port_of_type(io_object_t obj, ipc_kobject_type_t type)
 {
 	ipc_port_t  port;
 	ipc_port_t  sendPort;
+	ipc_kobject_t kobj;
 
 	if (obj == NULL) {
 		return IP_NULL;
 	}
 
-	port = iokit_port_for_object( obj, type );
+	port = iokit_port_for_object(obj, type, &kobj);
 	if (port) {
-		sendPort = ipc_kobject_make_send( port, obj, type );
+		sendPort = ipc_kobject_make_send( port, kobj, type );
 		iokit_release_port( port );
 	} else {
 		sendPort = IP_NULL;
@@ -300,13 +282,10 @@ iokit_make_ident_port(
 	return iokit_make_port_of_type(obj, IKOT_IOKIT_IDENT);
 }
 
-int gIOKitPortCount;
-
 EXTERN ipc_port_t
-iokit_alloc_object_port( io_object_t obj, ipc_kobject_type_t type )
+iokit_alloc_object_port( io_kobject_t obj, ipc_kobject_type_t type )
 {
 	/* Allocate port, keeping a reference for it. */
-	gIOKitPortCount++;
 	ipc_kobject_alloc_options_t options = IPC_KOBJECT_ALLOC_NSREQUEST;
 	if (type == IKOT_IOKIT_CONNECT) {
 		options |= IPC_KOBJECT_ALLOC_IMMOVABLE_SEND;
@@ -319,27 +298,23 @@ iokit_alloc_object_port( io_object_t obj, ipc_kobject_type_t type )
 	}
 }
 
+EXTERN void
+iokit_remove_object_port( ipc_port_t port, ipc_kobject_type_t type )
+{
+	ipc_kobject_disable(port, type);
+}
+
 EXTERN kern_return_t
 iokit_destroy_object_port( ipc_port_t port, ipc_kobject_type_t type )
 {
-	iokit_lock_port(port);
-	ipc_kobject_disable(port, type);
-//    iokit_remove_reference( obj );
-	iokit_unlock_port(port);
-	gIOKitPortCount--;
-
 	ipc_kobject_dealloc_port(port, 0, type);
 	return KERN_SUCCESS;
 }
 
-EXTERN kern_return_t
-iokit_switch_object_port( ipc_port_t port, io_object_t obj, ipc_kobject_type_t type )
+EXTERN ipc_kobject_type_t
+iokit_port_type(ipc_port_t port)
 {
-	iokit_lock_port(port);
-	ipc_kobject_enable( port, (ipc_kobject_t) obj, type);
-	iokit_unlock_port(port);
-
-	return KERN_SUCCESS;
+	return ip_kotype(port);
 }
 
 EXTERN mach_port_name_t
@@ -348,14 +323,15 @@ iokit_make_send_right( task_t task, io_object_t obj, ipc_kobject_type_t type )
 	ipc_port_t          port;
 	ipc_port_t          sendPort;
 	mach_port_name_t    name = 0;
+	ipc_kobject_t       kobj;
 
 	if (obj == NULL) {
 		return MACH_PORT_NULL;
 	}
 
-	port = iokit_port_for_object( obj, type );
+	port = iokit_port_for_object( obj, type, &kobj );
 	if (port) {
-		sendPort = ipc_kobject_make_send( port, obj, type );
+		sendPort = ipc_kobject_make_send( port, kobj, type );
 		iokit_release_port( port );
 	} else {
 		sendPort = IP_NULL;
@@ -397,25 +373,28 @@ static void
 iokit_no_senders( ipc_port_t port, mach_port_mscount_t mscount )
 {
 	io_object_t         obj = NULL;
+	io_kobject_t        kobj = NULL;
 	ipc_kobject_type_t  type = IKOT_NONE;
 
 	// convert a port to io_object_t.
 	if (IP_VALID(port)) {
-		iokit_lock_port(port);
+		ip_mq_lock(port);
 		if (ip_active(port)) {
 			type = ip_kotype( port );
 			assert((IKOT_IOKIT_OBJECT == type)
 			    || (IKOT_IOKIT_CONNECT == type)
 			    || (IKOT_IOKIT_IDENT == type)
 			    || (IKOT_UEXT_OBJECT == type));
-			/*
-			 * iokit uses the iokit_lock_port to serialize all its updates
-			 * so we do not need to actually hold the port lock.
-			 */
-			obj = ipc_kobject_get_locked(port, type);
-			iokit_add_reference( obj, IKOT_IOKIT_OBJECT );
+			kobj = ipc_kobject_get_locked(port, type);
+			if (kobj) {
+				iokit_kobject_retain(kobj);
+			}
 		}
-		iokit_unlock_port(port);
+		ip_mq_unlock(port);
+		if (kobj) {
+			// IKOT_IOKIT_OBJECT since iokit_remove_reference() follows
+			obj = iokit_copy_object_for_consumed_kobject(kobj, IKOT_IOKIT_OBJECT);
+		}
 	}
 
 	if (obj) {

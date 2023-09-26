@@ -48,6 +48,7 @@ EXPORT_FILES = \
 	cpu_number.h \
 	cpu_data.h \
 	energy_perf.h \
+	ext_paniclog.h \
 	extmod_statistics.h \
 	hv_io_notifier.h \
 	hv_support.h \
@@ -115,7 +116,7 @@ PRIVATE_EXPORT_FILES = \
 XNU_ONLY_EXPORTS = \
 	arcade.h \
 	btlog.h \
-	cpu_quiesce.h \
+	cpc.h \
 	iotrace.h \
 	ipc_kobject.h \
 	lock_ptr.h \
@@ -132,7 +133,7 @@ INSTALL_MI_LIST = ${DATAFILES}
 
 INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
 
-INSTALL_MI_LCL_LIST = cs_blobs.h debug.h
+INSTALL_MI_LCL_LIST = cs_blobs.h debug.h ext_paniclog.h
 
 INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 
@@ -147,6 +148,25 @@ INSTALL_MI_DIR = kern
 EXPORT_MI_LIST = $(sort ${INSTALL_KF_MI_LIST} ${INSTALL_KF_MI_LCL_LIST} ${XNU_ONLY_EXPORTS})
 
 EXPORT_MI_DIR = kern
+
+# build support for tightbeamc-generated files
+
+ifeq ($(XNU_CONFIG_TIGHTBEAM),1)
+TIGHTBEAM_FILES := exclaves_upcalls.tightbeam conclave_launcher.tightbeam
+endif
+
+GENERATED_HEADERS := $(patsubst %.tightbeam,%.tightbeam.h,$(TIGHTBEAM_FILES))
+GENERATED_IMPL := $(patsubst %.tightbeam,%.tightbeam.c,$(TIGHTBEAM_FILES))
+COMP_FILES := $(GENERATED_HEADERS) $(GENERATED_IMPL)
+
+$(GENERATED_HEADERS) : \
+	%.tightbeam.h : %.tightbeam
+	@$(LOG_TIGHTBEAMC) "$@"
+	$(_v)$(TIGHTBEAMC) --pass c --output-base $*.tightbeam.c $<
+
+$(GENERATED_IMPL) : $(GENERATED_HEADERS)
+
+do_build_all:: $(COMP_FILES)
 
 include $(MakeInc_rule)
 include $(MakeInc_dir)

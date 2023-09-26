@@ -1661,6 +1661,30 @@ waitq_resume_identified_thread(
 	enable_preemption(); // balance disable upon pulling thread
 }
 
+void
+waitq_resume_and_bind_identified_thread(
+	waitq_t                 waitq,
+	thread_t                thread,
+	processor_t             processor,
+	wait_result_t           result,
+	waitq_wakeup_flags_t    flags)
+{
+	spl_t spl = splsched();
+
+	thread_lock(thread);
+
+	assert((thread->state & (TH_WAIT | TH_WAKING)) == (TH_WAIT | TH_WAKING));
+
+	maybe_adjust_thread_pri(thread, flags, waitq);
+	thread_bind_during_wakeup(thread, processor);
+	thread_go(thread, result, (flags & WAITQ_HANDOFF));
+
+	thread_unlock(thread);
+	splx(spl);
+
+	enable_preemption(); // balance disable upon pulling thread
+}
+
 kern_return_t
 waitq_wakeup64_thread_and_unlock(
 	struct waitq           *waitq,

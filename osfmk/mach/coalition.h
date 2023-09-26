@@ -29,6 +29,8 @@
 #ifndef _MACH_COALITION_H_
 #define _MACH_COALITION_H_
 
+#include <stdint.h>
+
 /* code shared by userspace and xnu */
 
 #define COALITION_SPAWN_ENTITLEMENT "com.apple.private.coalition-spawn"
@@ -156,6 +158,16 @@ struct coalition_resource_usage {
 #define COALITION_INFO_RESOURCE_USAGE 1
 #define COALITION_INFO_SET_NAME 2
 #define COALITION_INFO_SET_EFFICIENCY 3
+#define COALITION_INFO_GET_DEBUG_INFO 4
+
+struct coalinfo_debuginfo {
+	uint64_t thread_group_id;
+	uint32_t thread_group_recommendation;
+	uint32_t thread_group_flags;
+	uint32_t focal_task_count;
+	uint32_t nonfocal_task_count;
+	uint32_t game_task_count;
+};
 
 /* coalition_ledger_set operations */
 #define COALITION_LEDGER_SET_LOGICAL_WRITES_LIMIT 1

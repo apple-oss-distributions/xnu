@@ -95,6 +95,7 @@ kcov_init(void)
 {
 	/* Master CPU is fully setup at this point so just enable coverage tracking. */
 	printf("KCOV: Enabling coverage tracking on cpu %d\n", cpu_number());
+	ksancov_init();
 	current_kcov_data()->kcd_enabled = 1;
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, kcov_init);

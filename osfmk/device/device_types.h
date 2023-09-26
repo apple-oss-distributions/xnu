@@ -124,6 +124,7 @@ typedef uint64_t                io_async_ref64_t[8];
 #ifdef MACH_KERNEL_PRIVATE
 
 typedef struct IOObject * io_object_t;
+typedef struct IOMachPort * io_kobject_t;
 typedef io_object_t io_connect_t;
 typedef io_object_t io_ident_t;
 typedef io_object_t uext_object_t;
@@ -141,6 +142,9 @@ extern uext_object_t iokit_lookup_uext_object_port( ipc_port_t port );
 extern ipc_port_t iokit_make_object_port( io_object_t obj );
 extern ipc_port_t iokit_make_connect_port( io_connect_t obj );
 extern ipc_port_t iokit_make_ident_port( io_ident_t obj );
+
+extern void iokit_kobject_retain(io_kobject_t machPort);
+extern io_object_t iokit_copy_object_for_consumed_kobject(io_kobject_t machPort, natural_t type);
 
 #else
 

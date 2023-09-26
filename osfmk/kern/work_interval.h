@@ -35,6 +35,7 @@
 #include <kern/kern_types.h>
 
 #include <kern/thread_group.h>
+#include <kern/recount.h>
 
 __BEGIN_DECLS
 
@@ -74,6 +75,7 @@ kern_work_interval_create(thread_t thread, struct kern_work_interval_create_args
 extern kern_return_t
 kern_work_interval_get_flags_from_port(mach_port_name_t port_name, uint32_t*flags);
 
+
 extern kern_return_t
 kern_work_interval_destroy(thread_t thread, uint64_t work_interval_id);
 extern kern_return_t
@@ -97,6 +99,9 @@ void work_interval_auto_join_propagate(thread_t from, thread_t to);
 void work_interval_auto_join_unwind(thread_t thread);
 void work_interval_auto_join_demote(thread_t thread);
 #endif /* CONFIG_SCHED_AUTO_JOIN */
+
+
+struct recount_track *work_interval_get_recount_tracks(struct work_interval *work_interval);
 
 extern kern_return_t work_interval_thread_terminate(thread_t thread);
 extern int work_interval_get_priority(thread_t thread);

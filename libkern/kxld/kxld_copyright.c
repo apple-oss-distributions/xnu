@@ -32,6 +32,7 @@
 
 #if !KERNEL
     #include <stdio.h>
+    #define __SPI_AVAILABLE(...)
     #include <stdlib.h>
     #include "kxld.h"
     #include "kxld_types.h"

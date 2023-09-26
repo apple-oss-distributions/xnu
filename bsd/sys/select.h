@@ -189,9 +189,9 @@ __DARWIN_ALIAS_C(pselect)
 ;
 #endif /* __MWERKS__ */
 
-#include <sys/_select.h>        /* select() prototype */
-
 __END_DECLS
+
+#include <sys/_select.h>        /* select() prototype */
 
 #endif /* ! KERNEL */
 

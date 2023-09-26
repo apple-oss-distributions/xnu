@@ -230,7 +230,7 @@ csi_init(struct ch_selinfo *csi, boolean_t mitigation, uint64_t mit_ival)
 	if (mitigation) {
 		csi->csi_interval = mit_ival;
 		csi->csi_eff_interval = ch_mit_ival;    /* global override */
-		atomic_bitset_32(&csi->csi_flags, CSI_MITIGATION);
+		os_atomic_or(&csi->csi_flags, CSI_MITIGATION, relaxed);
 		csi->csi_tcall = thread_call_allocate_with_options(csi_tcall,
 		    csi, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
 		/* this must not fail */
@@ -248,7 +248,7 @@ void
 csi_destroy(struct ch_selinfo *csi)
 {
 	/* check if not already destroyed, else do it now */
-	if ((atomic_bitset_32_ov(&csi->csi_flags, CSI_DESTROYED) &
+	if ((os_atomic_or_orig(&csi->csi_flags, CSI_DESTROYED, relaxed) &
 	    CSI_DESTROYED) == 0) {
 		CSI_LOCK(csi);
 		/* must have been set by above atomic op */
@@ -268,7 +268,8 @@ csi_destroy(struct ch_selinfo *csi)
 
 			CSI_LOCK(csi);
 			csi->csi_tcall = NULL;
-			atomic_bitclear_32(&csi->csi_flags, CSI_MITIGATION);
+			os_atomic_andnot(&csi->csi_flags, CSI_MITIGATION,
+			    relaxed);
 		}
 		csi->csi_pending = 0;
 		CSI_UNLOCK(csi);
@@ -498,7 +499,7 @@ ch_filt_check_defunct(struct kern_channel *ch, struct knote *kn)
 static void
 filt_chrwdetach(struct knote *kn, boolean_t write)
 {
-	struct kern_channel *ch = (struct kern_channel *)kn->kn_hook;
+	struct kern_channel *ch = (struct kern_channel *)knote_kn_hook_get_raw(kn);
 	struct ch_selinfo *csi;
 	struct selinfo *si;
 
@@ -513,7 +514,7 @@ filt_chrwdetach(struct knote *kn, boolean_t write)
 	    write ? "write" : "read", si->si_flags);
 
 	if (KNOTE_DETACH(&si->si_note, kn)) {
-		atomic_bitclear_32(&csi->csi_flags, CSI_KNOTE);
+		os_atomic_andnot(&csi->csi_flags, CSI_KNOTE, relaxed);
 	}
 
 	CSI_UNLOCK(csi);
@@ -543,7 +544,7 @@ static int
 filt_chrw(struct knote *kn, long hint, int events)
 {
 #if SK_LOG
-	struct kern_channel *ch = kn->kn_hook;
+	struct kern_channel *ch = knote_kn_hook_get_raw(kn);
 #else
 #pragma unused(kn)
 #pragma unused(hint)
@@ -586,7 +587,7 @@ static int
 filt_chtouch(struct knote *kn, struct kevent_qos_s *kev, int events)
 {
 #pragma unused(kev)
-	struct kern_channel *ch = kn->kn_hook;
+	struct kern_channel *ch = knote_kn_hook_get_raw(kn);
 	int ev = kn->kn_filter;
 	enum txrx dir = (ev == EVFILT_WRITE) ? NR_TX : NR_RX;
 	int event_error = 0;
@@ -647,7 +648,7 @@ filt_chrtouch(struct knote *kn, struct kevent_qos_s *kev)
 		KDBG_DEBUG(KEV_EVTID(BSD_KEVENT_KNOTE_ENABLE),
 		    kn->kn_udata, kn->kn_status | (kn->kn_id << 32),
 		    kn->kn_filtid, VM_KERNEL_UNSLIDE_OR_PERM(
-			    ((struct kern_channel *)kn->kn_hook)->ch_na));
+			    ((struct kern_channel *)knote_kn_hook_get_raw(kn))->ch_na));
 	}
 
 	return filt_chtouch(kn, kev, POLLIN);
@@ -668,7 +669,7 @@ filt_chwtouch(struct knote *kn, struct kevent_qos_s *kev)
 static int
 filt_chprocess(struct knote *kn, struct kevent_qos_s *kev, int events)
 {
-	struct kern_channel *ch = kn->kn_hook;
+	struct kern_channel *ch = knote_kn_hook_get_raw(kn);
 	struct ch_event_result result;
 	uint32_t lowat;
 	int trigger_event = 1;
@@ -752,7 +753,7 @@ filt_chwprocess(struct knote *kn, struct kevent_qos_s *kev)
 static int
 filt_chrwattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 {
-	struct kern_channel *ch = (struct kern_channel *)kn->kn_hook;
+	struct kern_channel *ch = (struct kern_channel *)knote_kn_hook_get_raw(kn);
 	struct nexus_adapter *na;
 	struct ch_selinfo *csi;
 	int ev = kn->kn_filter;
@@ -790,7 +791,7 @@ filt_chrwattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 	CSI_LOCK(csi);
 
 	if (KNOTE_ATTACH(&csi->csi_si.si_note, kn)) {
-		atomic_bitset_32(&csi->csi_flags, CSI_KNOTE);
+		os_atomic_or(&csi->csi_flags, CSI_KNOTE, relaxed);
 	}
 
 	CSI_UNLOCK(csi);
@@ -893,7 +894,7 @@ che_process_channel_event(struct kern_channel *ch, struct knote *kn,
 static int
 filt_che_attach(struct knote *kn, __unused struct kevent_qos_s *kev)
 {
-	struct kern_channel *ch = (struct kern_channel *)kn->kn_hook;
+	struct kern_channel *ch = (struct kern_channel *)knote_kn_hook_get_raw(kn);
 	struct ch_selinfo *csi;
 	long hint = 0;
 
@@ -909,7 +910,7 @@ filt_che_attach(struct knote *kn, __unused struct kevent_qos_s *kev)
 	csi = ch->ch_si[NR_TX];
 	CSI_LOCK(csi);
 	if (KNOTE_ATTACH(&csi->csi_si.si_note, kn)) {
-		atomic_bitset_32(&csi->csi_flags, CSI_KNOTE);
+		os_atomic_or(&csi->csi_flags, CSI_KNOTE, relaxed);
 	}
 	CSI_UNLOCK(csi);
 
@@ -917,8 +918,7 @@ filt_che_attach(struct knote *kn, __unused struct kevent_qos_s *kev)
 		return 1;
 	}
 	if ((kn->kn_sfflags & NOTE_CHANNEL_EVENT) != 0) {
-		atomic_bitset_32(&ch->ch_na->na_flags,
-		    NAF_CHANNEL_EVENT_ATTACHED);
+		os_atomic_or(&ch->ch_na->na_flags, NAF_CHANNEL_EVENT_ATTACHED, relaxed);
 	}
 	che_process_channel_event(ch, kn, kn->kn_sfflags, &hint);
 	if ((kn->kn_sfflags & NOTE_FLOW_ADV_UPDATE) != 0) {
@@ -934,20 +934,20 @@ filt_che_attach(struct knote *kn, __unused struct kevent_qos_s *kev)
 static void
 filt_che_detach(struct knote *kn)
 {
-	struct kern_channel *ch = (struct kern_channel *)kn->kn_hook;
+	struct kern_channel *ch = (struct kern_channel *)knote_kn_hook_get_raw(kn);
 	struct ch_selinfo *csi;
 
 	ASSERT(kn->kn_filter == EVFILT_NW_CHANNEL);
 
 	lck_mtx_lock(&ch->ch_lock);
 	if ((kn->kn_sfflags & NOTE_CHANNEL_EVENT) != 0) {
-		atomic_bitclear_32(&ch->ch_na->na_flags,
-		    NAF_CHANNEL_EVENT_ATTACHED);
+		os_atomic_andnot(&ch->ch_na->na_flags,
+		    NAF_CHANNEL_EVENT_ATTACHED, relaxed);
 	}
 	csi = ch->ch_si[NR_TX];
 	CSI_LOCK(csi);
 	if (KNOTE_DETACH(&csi->csi_si.si_note, kn)) {
-		atomic_bitclear_32(&csi->csi_flags, CSI_KNOTE);
+		os_atomic_andnot(&csi->csi_flags, CSI_KNOTE, relaxed);
 	}
 	CSI_UNLOCK(csi);
 	lck_mtx_unlock(&ch->ch_lock);
@@ -960,7 +960,7 @@ filt_che_detach(struct knote *kn)
 static int
 filt_che_event(struct knote *kn, long hint)
 {
-	struct kern_channel *ch = (struct kern_channel *)kn->kn_hook;
+	struct kern_channel *ch = (struct kern_channel *)knote_kn_hook_get_raw(kn);
 
 	ASSERT(kn->kn_filter == EVFILT_NW_CHANNEL);
 	if (hint == 0) {
@@ -983,7 +983,7 @@ filt_che_touch(struct knote *kn, struct kevent_qos_s *kev)
 {
 	int ret;
 	long hint = 0;
-	struct kern_channel *ch = (struct kern_channel *)kn->kn_hook;
+	struct kern_channel *ch = (struct kern_channel *)knote_kn_hook_get_raw(kn);
 
 	ASSERT(kn->kn_filter == EVFILT_NW_CHANNEL);
 	/* save off the new input fflags and data */
@@ -997,11 +997,11 @@ filt_che_touch(struct knote *kn, struct kevent_qos_s *kev)
 	}
 	if ((kn->kn_sfflags & NOTE_CHANNEL_EVENT) != 0) {
 		if (kev->flags & EV_ENABLE) {
-			atomic_bitset_32(&ch->ch_na->na_flags,
-			    NAF_CHANNEL_EVENT_ATTACHED);
+			os_atomic_or(&ch->ch_na->na_flags,
+			    NAF_CHANNEL_EVENT_ATTACHED, relaxed);
 		} else if (kev->flags & EV_DISABLE) {
-			atomic_bitclear_32(&ch->ch_na->na_flags,
-			    NAF_CHANNEL_EVENT_ATTACHED);
+			os_atomic_andnot(&ch->ch_na->na_flags,
+			    NAF_CHANNEL_EVENT_ATTACHED, relaxed);
 		}
 	}
 	che_process_channel_event(ch, kn, kn->kn_sfflags, &hint);
@@ -1016,7 +1016,7 @@ filt_che_process(struct knote *kn, struct kevent_qos_s *kev)
 {
 	int ret;
 	long hint = 0;
-	struct kern_channel *ch = kn->kn_hook;
+	struct kern_channel *ch = knote_kn_hook_get_raw(kn);
 
 	ASSERT(kn->kn_filter == EVFILT_NW_CHANNEL);
 	lck_mtx_lock(&ch->ch_lock);
@@ -1078,7 +1078,7 @@ ch_kqfilter(struct kern_channel *ch, struct knote *kn,
 		return 0;
 	}
 
-	kn->kn_hook = ch;
+	knote_kn_hook_set_raw(kn, ch);
 	/* call the appropriate sub-filter attach with the channel lock held */
 	result = knote_fops(kn)->f_attach(kn, kev);
 	lck_mtx_unlock(&ch->ch_lock);
@@ -1171,7 +1171,7 @@ ch_event(struct kern_channel *ch, int events, void *wql,
 
 	/* clear CHANF_DEFUNCT_SKIP if it was set during defunct last time */
 	if (__improbable(ch->ch_flags & CHANF_DEFUNCT_SKIP)) {
-		atomic_bitclear_32(&ch->ch_flags, CHANF_DEFUNCT_SKIP);
+		os_atomic_andnot(&ch->ch_flags, CHANF_DEFUNCT_SKIP, relaxed);
 	}
 
 	na = ch->ch_na;
@@ -1192,7 +1192,7 @@ ch_event(struct kern_channel *ch, int events, void *wql,
 
 	/* and make this channel eligible for draining again */
 	if (na->na_flags & NAF_DRAINING) {
-		atomic_bitclear_32(&na->na_flags, NAF_DRAINING);
+		os_atomic_andnot(&na->na_flags, NAF_DRAINING, relaxed);
 	}
 
 #if SK_LOG
@@ -1786,7 +1786,7 @@ ch_close_common(struct kern_channel *ch, boolean_t locked, boolean_t special)
 	if ((ch->ch_flags & CHANF_IF_ADV) != 0) {
 		STAILQ_REMOVE(&nx->nx_ch_if_adv_head, ch,
 		    kern_channel, ch_link_if_adv);
-		atomic_bitclear_32(&ch->ch_flags, CHANF_IF_ADV);
+		os_atomic_andnot(&ch->ch_flags, CHANF_IF_ADV, relaxed);
 		if (STAILQ_EMPTY(&nx->nx_ch_if_adv_head)) {
 			nx_netif_config_interface_advisory(nx, false);
 		}
@@ -1803,7 +1803,7 @@ ch_close_common(struct kern_channel *ch, boolean_t locked, boolean_t special)
 	 * this flag is set once here and never gets cleared.
 	 */
 	ASSERT(!(ch->ch_flags & CHANF_CLOSING));
-	atomic_bitset_32(&ch->ch_flags, CHANF_CLOSING);
+	os_atomic_or(&ch->ch_flags, CHANF_CLOSING, relaxed);
 
 	if (special) {
 		VERIFY(ch->ch_flags & CHANF_KERNEL);
@@ -1845,7 +1845,7 @@ ch_close_common(struct kern_channel *ch, boolean_t locked, boolean_t special)
 			    kern_channel, ch_link);
 		}
 
-		atomic_bitclear_32(&ch->ch_flags, CHANF_ATTACHED);
+		os_atomic_andnot(&ch->ch_flags, CHANF_ATTACHED, relaxed);
 		ch->ch_nexus = NULL;
 
 		(void) ch_release_locked(ch);   /* for the list */
@@ -2055,9 +2055,9 @@ ch_connect(struct kern_nexus *nx, struct chreq *chr, struct kern_channel *ch0,
 		 */
 		ASSERT(p == kernproc);
 		ASSERT(ch_mode & CHMODE_KERNEL);
-		atomic_bitset_32(&ch->ch_flags, CHANF_KERNEL);
+		os_atomic_or(&ch->ch_flags, CHANF_KERNEL, relaxed);
 		if (ch_mode & CHMODE_NO_NXREF) {
-			atomic_bitset_32(&ch->ch_flags, CHANF_NONXREF);
+			os_atomic_or(&ch->ch_flags, CHANF_NONXREF, relaxed);
 		}
 
 		config = (ch_mode & CHMODE_CONFIG) != 0;
@@ -2080,7 +2080,7 @@ ch_connect(struct kern_nexus *nx, struct chreq *chr, struct kern_channel *ch0,
 	}
 
 	if (skywalk_check_platform_binary(p)) {
-		atomic_bitset_32(&ch->ch_flags, CHANF_PLATFORM);
+		os_atomic_or(&ch->ch_flags, CHANF_PLATFORM, relaxed);
 	}
 
 	ASSERT(chr->cr_port != NEXUS_PORT_ANY);
@@ -2136,7 +2136,7 @@ ch_connect(struct kern_nexus *nx, struct chreq *chr, struct kern_channel *ch0,
 		STAILQ_INSERT_TAIL(&nx->nx_ch_head, ch, ch_link);
 		nx->nx_ch_count++;
 	}
-	atomic_bitset_32(&ch->ch_flags, CHANF_ATTACHED);
+	os_atomic_or(&ch->ch_flags, CHANF_ATTACHED, relaxed);
 	ch->ch_nexus = nx;
 	nx_retain_locked(nx);   /* hold a ref on the nexus */
 
@@ -2221,10 +2221,10 @@ ch_deactivate(struct kern_channel *ch)
 	 */
 	if (ch->ch_schema != NULL &&
 	    (ch->ch_schema->csm_flags & CSM_ACTIVE)) {
-		atomic_bitclear_32(__DECONST(uint32_t *,
-		    &ch->ch_schema->csm_flags), CSM_ACTIVE);
+		os_atomic_andnot(__DECONST(uint32_t *, &ch->ch_schema->csm_flags),
+		    CSM_ACTIVE, relaxed);
 		/* make this globally visible */
-		membar_sync();
+		os_atomic_thread_fence(seq_cst);
 	}
 }
 
@@ -2333,7 +2333,7 @@ ch_configure_interface_advisory_event(struct kern_channel *ch,
 			goto done;
 		}
 		bool enable_adv = STAILQ_EMPTY(&nx->nx_ch_if_adv_head);
-		atomic_bitset_32(&ch->ch_flags, CHANF_IF_ADV);
+		os_atomic_or(&ch->ch_flags, CHANF_IF_ADV, relaxed);
 		STAILQ_INSERT_TAIL(&nx->nx_ch_if_adv_head, ch, ch_link_if_adv);
 		if (enable_adv) {
 			nx_netif_config_interface_advisory(nx, true);
@@ -2346,7 +2346,7 @@ ch_configure_interface_advisory_event(struct kern_channel *ch,
 		}
 		STAILQ_REMOVE(&nx->nx_ch_if_adv_head, ch, kern_channel,
 		    ch_link_if_adv);
-		atomic_bitclear_32(&ch->ch_flags, CHANF_IF_ADV);
+		os_atomic_andnot(&ch->ch_flags, CHANF_IF_ADV, relaxed);
 		if (STAILQ_EMPTY(&nx->nx_ch_if_adv_head)) {
 			nx_netif_config_interface_advisory(nx, false);
 		}

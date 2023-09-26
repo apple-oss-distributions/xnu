@@ -27,7 +27,7 @@
  */
 
 /*
- * sysctl system call.
+ * proc_info system call.
  */
 
 #include <sys/param.h>
@@ -60,6 +60,7 @@
 #include <kern/kalloc.h>
 #include <kern/assert.h>
 #include <kern/policy_internal.h>
+#include <kern/exc_guard.h>
 
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
@@ -76,6 +77,7 @@
 #include <sys/sysproto.h>
 #include <sys/msgbuf.h>
 #include <sys/priv.h>
+#include <sys/syscall.h>
 #include <IOKit/IOBSD.h>
 
 #include <sys/guarded.h>
@@ -85,6 +87,8 @@
 #include <kern/ipc_misc.h>
 
 #include <vm/vm_protos.h>
+
+#include <corpses/task_corpse.h>
 
 /* Needed by proc_pidnoteexit(), proc_pidlistuptrs() */
 #include <sys/event.h>
@@ -176,7 +180,6 @@ static void __attribute__ ((noinline)) proc_archinfo(proc_t p, struct proc_archi
 static void __attribute__ ((noinline)) proc_pidcoalitioninfo(proc_t p, struct proc_pidcoalitioninfo *pci);
 static int __attribute__ ((noinline)) proc_pidnoteexit(proc_t p, uint64_t arg, uint32_t *data);
 static int __attribute__ ((noinline)) proc_pidexitreasoninfo(proc_t p, struct proc_exitreasoninfo *peri, struct proc_exitreasonbasicinfo *pberi);
-static int __attribute__ ((noinline)) proc_pidoriginatorpid_uuid(uuid_t uuid, uint32_t buffersize, pid_t *pid);
 static int __attribute__ ((noinline)) proc_pidlistuptrs(proc_t p, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
 static int __attribute__ ((noinline)) proc_piddynkqueueinfo(pid_t pid, int flavor, kqueue_id_t id, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
 static int __attribute__ ((noinline)) proc_pidregionpath(proc_t p, uint64_t arg, user_addr_t buffer, __unused uint32_t buffersize, int32_t *retval);
@@ -350,6 +353,7 @@ proc_listpids(uint32_t type, uint32_t typeinfo, user_addr_t buffer, uint32_t  bu
 	struct proc * p;
 	int error = 0;
 	struct proclist *current_list;
+	kauth_cred_t cred;
 
 	/* Do we have permission to look into this? */
 	if ((error = proc_security_policy(PROC_NULL, PROC_INFO_CALL_LISTPIDS, type, NO_CHECK_SAME_USER))) {
@@ -414,34 +418,18 @@ proc_loop:
 			}
 			break;
 		case PROC_UID_ONLY:
-			if (proc_ucred(p) == NULL) {
-				skip = 1;
-			} else {
-				kauth_cred_t my_cred;
-				uid_t uid;
-
-				my_cred = kauth_cred_proc_ref(p);
-				uid = kauth_cred_getuid(my_cred);
-				kauth_cred_unref(&my_cred);
-				if (uid != (uid_t)typeinfo) {
-					skip = 1;
-				}
-			}
+			smr_proc_task_enter();
+			cred = proc_ucred_smr(p);
+			skip = cred == NOCRED ||
+			    kauth_cred_getuid(cred) != (uid_t)typeinfo;
+			smr_proc_task_leave();
 			break;
 		case PROC_RUID_ONLY:
-			if (proc_ucred(p) == NULL) {
-				skip = 1;
-			} else {
-				kauth_cred_t my_cred;
-				uid_t uid;
-
-				my_cred = kauth_cred_proc_ref(p);
-				uid = kauth_cred_getruid(my_cred);
-				kauth_cred_unref(&my_cred);
-				if (uid != (uid_t)typeinfo) {
-					skip = 1;
-				}
-			}
+			smr_proc_task_enter();
+			cred = proc_ucred_smr(p);
+			skip = cred == NOCRED ||
+			    kauth_cred_getruid(cred) != (uid_t)typeinfo;
+			smr_proc_task_leave();
 			break;
 		case PROC_KDBG_ONLY:
 			if (p->p_kdebug == 0) {
@@ -939,10 +927,11 @@ bsd_getthreadname(void *uth, char *buffer)
  * callers may result in a garbled name.
  */
 void
-bsd_setthreadname(void *uth, const char *name)
+bsd_setthreadname(void *uth, uint64_t tid, const char *name)
 {
 	struct uthread *ut = (struct uthread *)uth;
 	char * name_buf = NULL;
+	uint64_t current_tid = thread_tid(current_thread());
 
 	if (!ut->pth_name) {
 		/* If there is no existing thread name, allocate a buffer for one. */
@@ -954,11 +943,19 @@ bsd_setthreadname(void *uth, const char *name)
 			kfree_data(name_buf, MAXTHREADNAMESIZE);
 		}
 	} else {
-		kernel_debug_string_simple(TRACE_STRING_THREADNAME_PREV, ut->pth_name);
+		/*
+		 * Simple strings lack a way to identify the thread being named,
+		 * so only emit this if the current thread is renaming itself.
+		 */
+		if (tid == current_tid) {
+			kernel_debug_string_simple(TRACE_STRING_THREADNAME_PREV, ut->pth_name);
+		}
 	}
 
 	strncpy(ut->pth_name, name, MAXTHREADNAMESIZE - 1);
-	kernel_debug_string_simple(TRACE_STRING_THREADNAME, ut->pth_name);
+	if (tid == current_tid) {
+		kernel_debug_string_simple(TRACE_STRING_THREADNAME, ut->pth_name);
+	}
 }
 
 void
@@ -1894,6 +1891,46 @@ out:
 	return error;
 }
 
+#ifndef MIN_TO_SEC
+#define MIN_TO_SEC(x) ((x) * 60)
+#endif
+/**
+ * Send a crash report for unpermitted proc_pidinfo calls on the kernel pid.
+ * Throttles to one report every 10 minutes.
+ */
+static void __attribute__((noinline))
+PROC_UNPERMITTED_PIDINFO_FLAVOR(void)
+{
+	static clock_sec_t before = 0;
+	clock_sec_t     now;
+	clock_nsec_t    nsec;
+	mach_exception_data_type_t code[EXCEPTION_CODE_MAX] = {0};
+
+	clock_get_system_nanotime(&now, &nsec);
+
+	/**
+	 * This can race, and if it does, it means a crash report was very recently
+	 * sent in another thread, so return early.
+	 */
+	if (now < before) {
+		return;
+	}
+
+	/**
+	 * If 10 minutes have not passed since the last time we sent a crash report,
+	 * do nothing.
+	 */
+	if ((now - before) < MIN_TO_SEC(10)) {
+		return;
+	}
+
+	before = now;
+
+	/* We're rejecting the proc_info syscall */
+	EXC_GUARD_ENCODE_TYPE(code[0], GUARD_TYPE_REJECTED_SC);
+	code[1] = SYS_proc_info;
+	task_enqueue_exception_with_corpse(current_task(), EXC_GUARD, code, EXCEPTION_CODE_MAX, NULL, TRUE);
+}
 
 /********************************** proc_pidinfo ********************************/
 
@@ -1911,6 +1948,30 @@ proc_pidinfo(int pid, uint32_t flags, uint64_t ext_id, int flavor, uint64_t arg,
 	bool thuniqueid = false;
 	int uniqidversion = 0;
 	bool check_same_user;
+	pid_t current_pid = proc_pid(current_proc());
+
+	/**
+	 * Before we move forward, we should check if an unpermitted operation is
+	 * attempted on the kernel task.
+	 */
+	if (pid == 0) {
+		switch (flavor) {
+		case PROC_PIDWORKQUEUEINFO:
+			/* kernel does not have workq info */
+			return EINVAL;
+		case PROC_PIDREGIONPATH:
+		case PROC_PIDREGIONINFO:
+		case PROC_PIDREGIONPATHINFO:
+		case PROC_PIDREGIONPATHINFO2:
+		case PROC_PIDREGIONPATHINFO3:
+			/* This operation is not permitted on the kernel */
+			if (current_pid != pid) {
+				PROC_UNPERMITTED_PIDINFO_FLAVOR();
+				return EPERM;
+			}
+			break;
+		}
+	}
 
 	switch (flavor) {
 	case PROC_PIDLISTFDS:
@@ -1956,12 +2017,7 @@ proc_pidinfo(int pid, uint32_t flags, uint64_t ext_id, int flavor, uint64_t arg,
 		size = MAXPATHLEN;
 		break;
 	case PROC_PIDWORKQUEUEINFO:
-		/* kernel does not have workq info */
-		if (pid == 0) {
-			return EINVAL;
-		} else {
-			size = PROC_PIDWORKQUEUEINFO_SIZE;
-		}
+		size = PROC_PIDWORKQUEUEINFO_SIZE;
 		break;
 	case PROC_PIDT_SHORTBSDINFO:
 		size = PROC_PIDT_SHORTBSDINFO_SIZE;
@@ -3155,7 +3211,7 @@ proc_setcontrol(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t 
 		error = copyin(buffer, name_buf, buffersize);
 
 		if (!error) {
-			bsd_setthreadname(ut, name_buf);
+			bsd_setthreadname(ut, thread_tid(current_thread()), name_buf);
 		}
 	}
 	break;

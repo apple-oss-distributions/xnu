@@ -48,7 +48,6 @@
 #include <string.h>
 
 static ZONE_DEFINE(OSSymbol_zone, "iokit.OSSymbol", sizeof(OSSymbol), ZC_NONE);
-static SMR_DEFINE(OSSymbol_smr);
 static LCK_GRP_DECLARE(lock_group, "OSSymbolPool");
 
 #pragma clang diagnostic push
@@ -106,11 +105,10 @@ class OSSymbolPool
 	}
 
 	SMRH_TRAITS_DEFINE_STR(hash_traits, OSSymbol, hashlink,
-	    .domain = &OSSymbol_smr,
-	    .obj_hash = OSSymbol_obj_hash,
-	    .obj_equ  = OSSymbol_obj_equ,
-	    .obj_try_get = OSSymbol_obj_try_get,
-	    );
+	    .domain      = &smr_iokit,
+	    .obj_hash    = OSSymbol_obj_hash,
+	    .obj_equ     = OSSymbol_obj_equ,
+	    .obj_try_get = OSSymbol_obj_try_get);
 
 	mutable lck_mtx_t _mutex;
 	struct smr_hash   _hash;
@@ -368,7 +366,7 @@ OSSymbolPool::checkForPageUnload(void *startAddr, void *endAddr)
 
 	/* Make sure no readers can see stale pointers that we rewrote */
 	if (mustSync) {
-		smr_synchronize(&OSSymbol_smr);
+		smr_iokit_synchronize();
 	}
 }
 
@@ -402,7 +400,7 @@ OSSymbol_smr_free(void *sym, vm_size_t size __unused)
 void
 OSSymbol::initialize()
 {
-	zone_enable_smr(OSSymbol_zone, &OSSymbol_smr, &OSSymbol_smr_free);
+	zone_enable_smr(OSSymbol_zone, &smr_iokit, &OSSymbol_smr_free);
 	new (OSSymbolPoolStorage) OSSymbolPool();
 }
 

@@ -2571,8 +2571,10 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 		}
 
 		if (message_type == NETAGENT_MESSAGE_TYPE_CLIENT_ERROR) {
-			const int32_t client_error = parameters->u.error;
+			const int32_t client_error = parameters->u.error.error;
+			const bool force_report = parameters->u.error.force_report;
 			if (wrapper->last_client_error != client_error || // Always notify for an error change
+			    force_report || // Always notify if force reporting was requested
 			    (client_error == 0 && wrapper->client_error_count == 0) || // Only notify once for no-error
 			    (client_error != 0 && wrapper->client_error_count < NETAGENT_MAX_CLIENT_ERROR_COUNT)) {
 				if (NETAGENT_LOCK_SHARED_TO_EXCLUSIVE(wrapper)) {

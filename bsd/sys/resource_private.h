@@ -102,6 +102,7 @@ struct thsc_time_energy_cpi {
 #ifndef KERNEL
 
 #include <stddef.h>
+#include <Availability.h>
 #include <AvailabilityInternalPrivate.h>
 
 __BEGIN_DECLS
@@ -110,11 +111,18 @@ __BEGIN_DECLS
  * Get the current thread's counters according to a `kind` and store them into
  * `dst`.
  */
-    __SPI_AVAILABLE(macos(12.4), ios(15.4), watchos(8.5), tvos(15.4))
+__SPI_AVAILABLE(macos(12.4), ios(15.4), watchos(8.5), tvos(15.4))
 int thread_selfcounts(thread_selfcounts_kind_t kind, void *dst, size_t size);
 
 __END_DECLS
 
 #endif /* !defined(KERNEL) */
+
+/* Additional private parameters to getpriority()/setpriority( */
+
+#define PRIO_DARWIN_GAME_MODE   7               /* Second argument is a PID */
+
+#define PRIO_DARWIN_GAME_MODE_OFF   0x0
+#define PRIO_DARWIN_GAME_MODE_ON    0x1
 
 #endif  /* !defined(_SYS_RESOURCE_PRIVATE_H_) */

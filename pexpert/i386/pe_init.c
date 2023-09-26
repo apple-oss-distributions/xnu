@@ -53,6 +53,7 @@ extern void pe_identify_machine(void * args);
 extern int kdb_printf(const char *format, ...) __printflike(1, 2);
 /* private globals */
 PE_state_t  PE_state;
+SECURITY_READ_ONLY_LATE(uint32_t) PE_srd_fused = 0;
 
 /* Clock Frequency Info */
 clock_frequency_info_t gPEClockFrequencyInfo;
@@ -189,6 +190,7 @@ PE_init_iokit(void)
 	 * with the ACPI stack.  Therefore, we start the IOKit matching process immediately on x86.
 	 */
 	InitIOKit(PE_state.deviceTreeHead);
+	zalloc_iokit_lockdown();
 	StartIOKitMatching();
 }
 

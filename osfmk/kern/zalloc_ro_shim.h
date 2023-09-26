@@ -30,7 +30,6 @@
 #ifndef _KERN_ZALLOC_RO_SHIM_
 #define _KERN_ZALLOC_RO_SHIM_
 
-#define OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY 0
 #include <os/atomic_private.h>
 #include <kern/zalloc.h>
 

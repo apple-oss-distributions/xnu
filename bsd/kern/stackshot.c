@@ -429,7 +429,8 @@ sysctl_stackshot_stats SYSCTL_HANDLER_ARGS
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, stackshot_stats,
-    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_MASKED,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_MASKED |
+    CTLFLAG_KERN,
     NULL, 0, sysctl_stackshot_stats, "S,stackshot_stats",
     "Get stackshot statistics");
 

@@ -72,6 +72,15 @@ __os_warn_unused(__const bool x)
 	_s | _t; \
 }))
 
+/* os_sub3_overflow(a, b, c) -> ((a - b) - c) */
+#define os_sub3_overflow(a, b, c, res) __os_warn_unused(__extension__({ \
+	__typeof(*(res)) _tmp; \
+	bool _s, _t; \
+	_s = os_sub_overflow((a), (b), &_tmp); \
+	_t = os_sub_overflow(_tmp, (c), (res)); \
+	_s | _t; \
+}))
+
 /* os_mul3_overflow(a, b, c) -> (a * b * c) */
 #define os_mul3_overflow(a, b, c, res) __os_warn_unused(__extension__({ \
 	__typeof(*(res)) _tmp; \

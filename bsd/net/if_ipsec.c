@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -134,11 +134,13 @@ SYSCTL_INT(_net_ipsec, OID_AUTO, verify_interface_creation, CTLFLAG_RW | CTLFLAG
 #define IPSEC_IF_MAX_RING_SIZE 1024
 
 #define IPSEC_IF_MIN_SLOT_SIZE 1024
-#define IPSEC_IF_MAX_SLOT_SIZE 4096
+#define IPSEC_IF_MAX_SLOT_SIZE (16 * 1024)
 
 #define IPSEC_DEFAULT_MAX_PENDING_INPUT_COUNT 512
 
 #define IPSEC_KPIPE_FLAG_WAKE_PKT 0x01
+
+static uint32_t ipsec_kpipe_mbuf;
 
 static int if_ipsec_max_pending_input = IPSEC_DEFAULT_MAX_PENDING_INPUT_COUNT;
 
@@ -360,6 +362,11 @@ ipsec_register_control(void)
 {
 	struct kern_ctl_reg     kern_ctl;
 	errno_t                 result = 0;
+
+#if (DEVELOPMENT || DEBUG)
+	(void)PE_parse_boot_argn("ipsec_kpipe_mbuf", &ipsec_kpipe_mbuf,
+	    sizeof(ipsec_kpipe_mbuf));
+#endif /* DEVELOPMENT || DEBUG */
 
 #if IPSEC_NEXUS
 	ipsec_register_nexus();
@@ -778,7 +785,7 @@ ipsec_output_err:
 }
 
 static errno_t
-ipsec_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
+ipsec_kpipe_sync_rx_mbuf(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
     kern_channel_ring_t rx_ring, uint32_t flags)
 {
 #pragma unused(nxprov)
@@ -1025,6 +1032,284 @@ ipsec_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 
 	ipsec_data_move_end(pcb);
 	return 0;
+}
+
+static errno_t
+ipsec_encrypt_kpipe_pkt(ifnet_t interface, kern_packet_t sph,
+    kern_packet_t dph)
+{
+	uint8_t *sbaddr = NULL;
+	int err = 0;
+	uint32_t slen = 0;
+
+	VERIFY(interface != NULL);
+	VERIFY(sph != 0);
+	VERIFY(dph != 0);
+
+	kern_buflet_t sbuf = __packet_get_next_buflet(sph, NULL);
+	VERIFY(sbuf != NULL);
+	slen = __buflet_get_data_length(sbuf);
+
+	if (__improbable(slen < sizeof(struct ip))) {
+		os_log_error(OS_LOG_DEFAULT, "ipsec encrypt kpipe pkt: source "
+		    "buffer shorter than ip header, %u\n", slen);
+		return EINVAL;
+	}
+
+	MD_BUFLET_ADDR(SK_PTR_ADDR_KPKT(sph), sbaddr);
+	struct ip *ip = (struct ip *)(void *)sbaddr;
+	ASSERT(IP_HDR_ALIGNED_P(ip));
+
+	u_int ip_vers = ip->ip_v;
+	switch (ip_vers) {
+	case IPVERSION: {
+		err = ipsec4_interface_kpipe_output(interface, sph, dph);
+		if (__improbable(err != 0)) {
+			os_log_error(OS_LOG_DEFAULT, "ipsec4 interface kpipe "
+			    "output error %d\n", err);
+			return err;
+		}
+		break;
+	}
+	case 6: {
+		err = ipsec6_interface_kpipe_output(interface, sph, dph);
+		if (__improbable(err != 0)) {
+			os_log_error(OS_LOG_DEFAULT, "ipsec6 interface kpipe "
+			    "output error %d\n", err);
+			return err;
+		}
+		break;
+	}
+	default: {
+		os_log_error(OS_LOG_DEFAULT, "received unknown packet version: %d\n",
+		    ip_vers);
+		return EINVAL;
+	}
+	}
+
+	return err;
+}
+
+static errno_t
+ipsec_kpipe_sync_rx_packet(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
+    kern_channel_ring_t rx_ring, uint32_t flags)
+{
+#pragma unused(nxprov)
+#pragma unused(flags)
+	struct ipsec_pcb *pcb = kern_nexus_get_context(nexus);
+	struct kern_channel_ring_stat_increment rx_ring_stats;
+	uint8_t ring_idx = (uint8_t)(uintptr_t)kern_channel_ring_get_context(rx_ring);
+
+	if (!ipsec_data_move_begin(pcb)) {
+		os_log_error(OS_LOG_DEFAULT, "%s: data path stopped for %s\n", __func__, if_name(pcb->ipsec_ifp));
+		return 0;
+	}
+
+	lck_rw_lock_shared(&pcb->ipsec_pcb_lock);
+
+	if (!ipsec_flag_isset(pcb, IPSEC_FLAGS_KPIPE_ALLOCATED)) {
+		lck_rw_unlock_shared(&pcb->ipsec_pcb_lock);
+		ipsec_data_move_end(pcb);
+		return 0;
+	}
+
+	VERIFY(pcb->ipsec_kpipe_count);
+	VERIFY(ring_idx <= pcb->ipsec_kpipe_count);
+
+	// Reclaim user-released slots
+	(void) kern_channel_reclaim(rx_ring);
+
+	uint32_t avail = kern_channel_available_slot_count(rx_ring);
+	if (avail == 0) {
+		lck_rw_unlock_shared(&pcb->ipsec_pcb_lock);
+		os_log_error(OS_LOG_DEFAULT, "%s: %s ring %s index %d no room in rx_ring\n", __func__,
+		    pcb->ipsec_if_xname, rx_ring->ckr_name, ring_idx);
+		ipsec_data_move_end(pcb);
+		return 0;
+	}
+
+	kern_channel_ring_t tx_ring = pcb->ipsec_netif_txring[ring_idx];
+	if (tx_ring == NULL) {
+		// Net-If TX ring not set up yet, nothing to read
+		lck_rw_unlock_shared(&pcb->ipsec_pcb_lock);
+		os_log_error(OS_LOG_DEFAULT, "%s: %s ring %s index %d bad netif_txring 1\n", __func__,
+		    pcb->ipsec_if_xname, rx_ring->ckr_name, ring_idx);
+		ipsec_data_move_end(pcb);
+		return 0;
+	}
+
+	struct netif_stats *nifs = &NX_NETIF_PRIVATE(pcb->ipsec_netif_nexus)->nif_stats;
+
+	// Unlock ipsec before entering ring
+	lck_rw_unlock_shared(&pcb->ipsec_pcb_lock);
+
+	(void)kr_enter(tx_ring, TRUE);
+
+	// Lock again after entering and validate
+	lck_rw_lock_shared(&pcb->ipsec_pcb_lock);
+	if (tx_ring != pcb->ipsec_netif_txring[ring_idx]) {
+		// Ring no longer valid
+		// Unlock first, then exit ring
+		lck_rw_unlock_shared(&pcb->ipsec_pcb_lock);
+		kr_exit(tx_ring);
+		os_log_error(OS_LOG_DEFAULT, "%s: %s ring %s index %d bad netif_txring 2\n", __func__,
+		    pcb->ipsec_if_xname, rx_ring->ckr_name, ring_idx);
+		ipsec_data_move_end(pcb);
+		return 0;
+	}
+
+	struct kern_channel_ring_stat_increment tx_ring_stats;
+	bzero(&tx_ring_stats, sizeof(tx_ring_stats));
+	kern_channel_slot_t tx_pslot = NULL;
+	kern_channel_slot_t tx_slot = kern_channel_get_next_slot(tx_ring, NULL, NULL);
+	if (tx_slot == NULL) {
+		// Nothing to read, don't bother signalling
+		// Unlock first, then exit ring
+		lck_rw_unlock_shared(&pcb->ipsec_pcb_lock);
+		kr_exit(tx_ring);
+		ipsec_data_move_end(pcb);
+		return 0;
+	}
+
+	struct kern_pbufpool *rx_pp = rx_ring->ckr_pp;
+	VERIFY(rx_pp != NULL);
+	struct kern_pbufpool *tx_pp = tx_ring->ckr_pp;
+	VERIFY(tx_pp != NULL);
+	bzero(&rx_ring_stats, sizeof(rx_ring_stats));
+	kern_channel_slot_t rx_pslot = NULL;
+	kern_channel_slot_t rx_slot = kern_channel_get_next_slot(rx_ring, NULL, NULL);
+	kern_packet_t tx_chain_ph = 0;
+
+	while (rx_slot != NULL && tx_slot != NULL) {
+		size_t tx_pkt_length = 0;
+		errno_t error = 0;
+
+		// Allocate rx packet
+		kern_packet_t rx_ph = 0;
+		error = kern_pbufpool_alloc_nosleep(rx_pp, 1, &rx_ph);
+		if (__improbable(error != 0)) {
+			os_log_info(OS_LOG_DEFAULT, "ipsec_kpipe_sync_rx %s: "
+			    "failed to allocate packet\n", pcb->ipsec_ifp->if_xname);
+			STATS_INC(nifs, NETIF_STATS_DROP_NOMEM_MBUF);
+			STATS_INC(nifs, NETIF_STATS_DROP);
+			break;
+		}
+
+		kern_packet_t tx_ph = kern_channel_slot_get_packet(tx_ring, tx_slot);
+		if (__improbable(tx_ph == 0)) {
+			// Advance TX ring
+			tx_pslot = tx_slot;
+			tx_slot = kern_channel_get_next_slot(tx_ring, tx_slot, NULL);
+			kern_pbufpool_free(rx_pp, rx_ph);
+			continue;
+		}
+
+		(void) kern_channel_slot_detach_packet(tx_ring, tx_slot, tx_ph);
+		if (tx_chain_ph != 0) {
+			kern_packet_append(tx_ph, tx_chain_ph);
+		}
+		tx_chain_ph = tx_ph;
+
+		// Advance TX ring
+		tx_pslot = tx_slot;
+		tx_slot = kern_channel_get_next_slot(tx_ring, tx_slot, NULL);
+
+		bpf_tap_packet_out(pcb->ipsec_ifp, DLT_RAW, tx_ph, NULL, 0);
+
+		tx_pkt_length = kern_packet_get_data_length(tx_ph);
+		if (tx_pkt_length == 0 || tx_pkt_length > pcb->ipsec_slot_size) {
+			os_log_info(OS_LOG_DEFAULT, "ipsec_kpipe_sync_rx %s: "
+			    "packet length %zu", pcb->ipsec_ifp->if_xname,
+			    tx_pkt_length);
+			kern_pbufpool_free(rx_pp, rx_ph);
+			STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
+			STATS_INC(nifs, NETIF_STATS_DROP);
+			continue;
+		}
+
+		// Increment TX stats
+		tx_ring_stats.kcrsi_slots_transferred++;
+		tx_ring_stats.kcrsi_bytes_transferred += tx_pkt_length;
+
+		// Encrypt packet
+		lck_mtx_lock(&pcb->ipsec_kpipe_encrypt_lock);
+		error = ipsec_encrypt_kpipe_pkt(pcb->ipsec_ifp, tx_ph, rx_ph);
+		lck_mtx_unlock(&pcb->ipsec_kpipe_encrypt_lock);
+		if (__improbable(error != 0)) {
+			os_log_info(OS_LOG_DEFAULT, "ipsec_kpipe_sync_rx %s: "
+			    "failed to encrypt packet", pcb->ipsec_ifp->if_xname);
+			kern_pbufpool_free(rx_pp, rx_ph);
+			STATS_INC(nifs, NETIF_STATS_DROP);
+			continue;
+		}
+
+		kern_packet_clear_flow_uuid(rx_ph);         // Zero flow id
+		// Finalize and attach the packet
+		kern_buflet_t rx_buf = __packet_get_next_buflet(rx_ph, NULL);
+		error = kern_buflet_set_data_offset(rx_buf, 0);
+		VERIFY(error == 0);
+		error = kern_packet_finalize(rx_ph);
+		VERIFY(error == 0);
+		error = kern_channel_slot_attach_packet(rx_ring, rx_slot, rx_ph);
+		VERIFY(error == 0);
+
+		STATS_INC(nifs, NETIF_STATS_TX_PACKETS);
+		STATS_INC(nifs, NETIF_STATS_TX_COPY_DIRECT);
+
+		rx_ring_stats.kcrsi_slots_transferred++;
+		rx_ring_stats.kcrsi_bytes_transferred += kern_packet_get_data_length(rx_ph);
+
+		if (!pcb->ipsec_ext_ifdata_stats) {
+			ifnet_stat_increment_out(pcb->ipsec_ifp, 1,
+			    kern_packet_get_data_length(rx_ph), 0);
+		}
+
+		rx_pslot = rx_slot;
+		rx_slot = kern_channel_get_next_slot(rx_ring, rx_slot, NULL);
+	}
+
+	if (rx_pslot) {
+		kern_channel_advance_slot(rx_ring, rx_pslot);
+		kern_channel_increment_ring_net_stats(rx_ring, pcb->ipsec_ifp, &rx_ring_stats);
+	}
+
+	if (tx_chain_ph != 0) {
+		kern_pbufpool_free_chain(tx_pp, tx_chain_ph);
+	}
+
+	if (tx_pslot) {
+		kern_channel_advance_slot(tx_ring, tx_pslot);
+		kern_channel_increment_ring_net_stats(tx_ring, pcb->ipsec_ifp, &tx_ring_stats);
+		(void)kern_channel_reclaim(tx_ring);
+	}
+
+	/* always reenable output */
+	errno_t error = ifnet_enable_output(pcb->ipsec_ifp);
+	if (error != 0) {
+		os_log_error(OS_LOG_DEFAULT, "ipsec_kpipe_sync_rx: ifnet_enable_output returned error %d\n", error);
+	}
+
+	// Unlock first, then exit ring
+	lck_rw_unlock_shared(&pcb->ipsec_pcb_lock);
+
+	if (tx_pslot != NULL) {
+		kern_channel_notify(tx_ring, 0);
+	}
+	kr_exit(tx_ring);
+
+	ipsec_data_move_end(pcb);
+	return 0;
+}
+
+static errno_t
+ipsec_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
+    kern_channel_ring_t rx_ring, uint32_t flags)
+{
+	if (__improbable(ipsec_kpipe_mbuf == 1)) {
+		return ipsec_kpipe_sync_rx_mbuf(nxprov, nexus, rx_ring, flags);
+	} else {
+		return ipsec_kpipe_sync_rx_packet(nxprov, nexus, rx_ring, flags);
+	}
 }
 
 static uint8_t
@@ -1406,7 +1691,7 @@ ipsec_netif_tx_doorbell(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 }
 
 static errno_t
-ipsec_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
+ipsec_netif_sync_rx_mbuf(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
     kern_channel_ring_t rx_ring, uint32_t flags)
 {
 #pragma unused(nxprov)
@@ -1880,6 +2165,484 @@ done:
 
 	ipsec_data_move_end(pcb);
 	return 0;
+}
+
+static errno_t
+ipsec_transform_kpipe_pkt_to_netif_pkt(struct ipsec_pcb *pcb,
+    struct kern_channel_ring_stat_increment *tx_ring_stats,
+    struct netif_stats *nifs, kern_packet_t kpipe_ph, kern_packet_t netif_ph)
+{
+	kern_buflet_t kpipe_buf = NULL, netif_buf = NULL;
+	uint8_t *kpipe_baddr = NULL, *netif_baddr = NULL;
+	uuid_t flow_uuid;
+	size_t iphlen = 0;
+	uint32_t kpipe_buf_len = 0, netif_buf_lim = 0;
+	int err = 0;
+
+	VERIFY(kpipe_ph != 0);
+	VERIFY(netif_ph != 0);
+	VERIFY(pcb != NULL);
+	VERIFY(tx_ring_stats != NULL);
+	VERIFY(nifs != NULL);
+
+	kpipe_buf = kern_packet_get_next_buflet(kpipe_ph, NULL);
+	VERIFY(kpipe_buf != NULL);
+	kpipe_baddr = kern_buflet_get_data_address(kpipe_buf);
+	VERIFY(kpipe_baddr != NULL);
+	kpipe_baddr += kern_buflet_get_data_offset(kpipe_buf);
+	kpipe_buf_len = kern_buflet_get_data_length(kpipe_buf);
+
+	netif_buf = kern_packet_get_next_buflet(netif_ph, NULL);
+	VERIFY(netif_buf != NULL);
+	netif_baddr = kern_buflet_get_data_address(netif_buf);
+	VERIFY(netif_baddr != NULL);
+	netif_baddr += kern_buflet_get_data_offset(netif_buf);
+	netif_buf_lim = __buflet_get_data_limit(netif_buf);
+	netif_buf_lim -= __buflet_get_data_offset(netif_buf);
+
+	if (kpipe_buf_len > pcb->ipsec_slot_size) {
+		os_log_info(OS_LOG_DEFAULT,
+		    "ipsec_transform_kpipe_pkt_to_netif_pkt %s: kpipe buffer length "
+		    "%u > pcb ipsec slot size %u", pcb->ipsec_ifp->if_xname,
+		    kpipe_buf_len, pcb->ipsec_slot_size);
+		STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
+		err = EMSGSIZE;
+		goto bad;
+	}
+
+	tx_ring_stats->kcrsi_slots_transferred++;
+	tx_ring_stats->kcrsi_bytes_transferred += kpipe_buf_len;
+
+	if (__improbable(kpipe_buf_len < sizeof(struct ip))) {
+		os_log_info(OS_LOG_DEFAULT, "ipsec_transform_kpipe_pkt_to_netif_pkt %s - bad "
+		    "packet length %u\n", pcb->ipsec_ifp->if_xname, kpipe_buf_len);
+		STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
+		err = EBADMSG;
+		goto bad;
+	}
+
+	struct ip *ip = (struct ip *)(void *)kpipe_baddr;
+	ASSERT(IP_HDR_ALIGNED_P(ip));
+
+	u_int ip_vers = ip->ip_v;
+	switch (ip_vers) {
+	case IPVERSION: {
+#ifdef _IP_VHL
+		iphlen = IP_VHL_HL(ip->ip_vhl) << 2;
+#else /* _IP_VHL */
+		iphlen = ip->ip_hl << 2;
+#endif /* _IP_VHL */
+		break;
+	}
+	case 6: {
+		iphlen = sizeof(struct ip6_hdr);
+		break;
+	}
+	default: {
+		os_log_info(OS_LOG_DEFAULT, "ipsec_transform_kpipe_pkt_to_netif_pkt %s - bad "
+		    "ip version %u\n", pcb->ipsec_ifp->if_xname, ip_vers);
+		err = EBADMSG;
+		goto bad;
+	}
+	}
+
+	if (__improbable(kpipe_buf_len < iphlen)) {
+		os_log_info(OS_LOG_DEFAULT, "ipsec_transform_kpipe_pkt_to_netif_pkt %s - bad "
+		    "packet length %u\n", pcb->ipsec_ifp->if_xname, kpipe_buf_len);
+		STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
+		err = EBADMSG;
+		goto bad;
+	}
+
+	if (__improbable(netif_buf_lim < iphlen)) {
+		os_log_info(OS_LOG_DEFAULT, "ipsec_transform_kpipe_pkt_to_netif_pkt %s - netif "
+		    "buffer length %u too short\n", pcb->ipsec_ifp->if_xname, netif_buf_lim);
+		STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
+		err = EBADMSG;
+		goto bad;
+	}
+
+	memcpy(netif_baddr, kpipe_baddr, iphlen);
+	__buflet_set_data_length(netif_buf, (uint16_t)iphlen);
+
+	lck_mtx_lock(&pcb->ipsec_kpipe_decrypt_lock);
+	err = esp_kpipe_input(pcb->ipsec_ifp, kpipe_ph, netif_ph);
+	lck_mtx_unlock(&pcb->ipsec_kpipe_decrypt_lock);
+
+	if (__improbable((err != 0))) {
+		goto bad;
+	}
+
+	kern_packet_get_flow_uuid(kpipe_ph, &flow_uuid);
+	uint8_t *id_8 = (uint8_t *)(uintptr_t)flow_uuid;
+	if (__improbable((id_8[0] & IPSEC_KPIPE_FLAG_WAKE_PKT) == IPSEC_KPIPE_FLAG_WAKE_PKT)) {
+		os_log_info(OS_LOG_DEFAULT, "ipsec_transform_kpipe_pkt_to_netif_pkt %s: wake packet "
+		    "flag is set\n", pcb->ipsec_ifp->if_xname);
+		__packet_set_wake_flag(netif_ph);
+	}
+
+	kern_packet_clear_flow_uuid(netif_ph);
+	err = kern_buflet_set_data_offset(netif_buf, 0);
+	VERIFY(err == 0);
+	err = kern_packet_set_link_header_offset(netif_ph, 0);
+	VERIFY(err == 0);
+	err = kern_packet_set_network_header_offset(netif_ph, 0);
+	VERIFY(err == 0);
+	err = kern_packet_finalize(netif_ph);
+	VERIFY(err == 0);
+
+	return 0;
+bad:
+	STATS_INC(nifs, NETIF_STATS_DROP);
+	return err;
+}
+
+
+static errno_t
+ipsec_netif_sync_rx_packet(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
+    kern_channel_ring_t rx_ring, uint32_t flags)
+{
+#pragma unused(nxprov)
+#pragma unused(flags)
+	struct ipsec_pcb *pcb = kern_nexus_get_context(nexus);
+	struct kern_channel_ring_stat_increment rx_ring_stats;
+
+	struct netif_stats *nifs = &NX_NETIF_PRIVATE(nexus)->nif_stats;
+
+	if (!ipsec_data_move_begin(pcb)) {
+		os_log_error(OS_LOG_DEFAULT, "%s: data path stopped for %s\n", __func__, if_name(pcb->ipsec_ifp));
+		return 0;
+	}
+
+	lck_rw_lock_shared(&pcb->ipsec_pcb_lock);
+
+	// Reclaim user-released slots
+	(void) kern_channel_reclaim(rx_ring);
+
+	STATS_INC(nifs, NETIF_STATS_RX_SYNC);
+
+	uint32_t avail = kern_channel_available_slot_count(rx_ring);
+	if (avail == 0) {
+		lck_rw_unlock_shared(&pcb->ipsec_pcb_lock);
+		ipsec_data_move_end(pcb);
+		return 0;
+	}
+
+	struct kern_pbufpool *rx_pp = rx_ring->ckr_pp;
+	VERIFY(rx_pp != NULL);
+	bzero(&rx_ring_stats, sizeof(rx_ring_stats));
+	kern_channel_slot_t rx_pslot = NULL;
+	kern_channel_slot_t rx_slot = kern_channel_get_next_slot(rx_ring, NULL, NULL);
+
+	while (rx_slot != NULL) {
+		// Check for a waiting packet
+		lck_mtx_lock(&pcb->ipsec_input_chain_lock);
+		mbuf_t data = pcb->ipsec_input_chain;
+		if (data == NULL) {
+			lck_mtx_unlock(&pcb->ipsec_input_chain_lock);
+			break;
+		}
+
+		// Allocate rx packet
+		kern_packet_t rx_ph = 0;
+		errno_t error = kern_pbufpool_alloc_nosleep(rx_pp, 1, &rx_ph);
+		if (__improbable(error != 0)) {
+			STATS_INC(nifs, NETIF_STATS_DROP_NOMEM_PKT);
+			STATS_INC(nifs, NETIF_STATS_DROP);
+			lck_mtx_unlock(&pcb->ipsec_input_chain_lock);
+			break;
+		}
+
+		// Advance waiting packets
+		if (pcb->ipsec_input_chain_count > 0) {
+			pcb->ipsec_input_chain_count--;
+		}
+		pcb->ipsec_input_chain = data->m_nextpkt;
+		data->m_nextpkt = NULL;
+		if (pcb->ipsec_input_chain == NULL) {
+			pcb->ipsec_input_chain_last = NULL;
+		}
+		lck_mtx_unlock(&pcb->ipsec_input_chain_lock);
+
+		size_t length = mbuf_pkthdr_len(data);
+
+		if (length < sizeof(struct ip)) {
+			// Flush data
+			mbuf_freem(data);
+			kern_pbufpool_free(rx_pp, rx_ph);
+			STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
+			STATS_INC(nifs, NETIF_STATS_DROP);
+			os_log_error(OS_LOG_DEFAULT, "ipsec_netif_sync_rx %s: legacy decrypted packet length cannot hold IP %zu < %zu\n",
+			    pcb->ipsec_ifp->if_xname, length, sizeof(struct ip));
+			continue;
+		}
+
+		uint32_t af = 0;
+		struct ip *ip = mtod(data, struct ip *);
+		u_int ip_version = ip->ip_v;
+		switch (ip_version) {
+		case 4: {
+			af = AF_INET;
+			break;
+		}
+		case 6: {
+			af = AF_INET6;
+			break;
+		}
+		default: {
+			os_log_error(OS_LOG_DEFAULT, "ipsec_netif_sync_rx %s: legacy unknown ip version %u\n",
+			    pcb->ipsec_ifp->if_xname, ip_version);
+			break;
+		}
+		}
+
+		if (length > PP_BUF_SIZE_DEF(rx_pp) ||
+		    (pcb->ipsec_frag_size_set && length > pcb->ipsec_input_frag_size)) {
+			// We need to fragment to send up into the netif
+
+			u_int32_t fragment_mtu = PP_BUF_SIZE_DEF(rx_pp);
+			if (pcb->ipsec_frag_size_set &&
+			    pcb->ipsec_input_frag_size < PP_BUF_SIZE_DEF(rx_pp)) {
+				fragment_mtu = pcb->ipsec_input_frag_size;
+			}
+
+			mbuf_t fragment_chain = NULL;
+			switch (af) {
+			case AF_INET: {
+				// ip_fragment expects the length in host order
+				ip->ip_len = ntohs(ip->ip_len);
+
+				// ip_fragment will modify the original data, don't free
+				int fragment_error = ip_fragment(data, pcb->ipsec_ifp, fragment_mtu, TRUE);
+				if (fragment_error == 0 && data != NULL) {
+					fragment_chain = data;
+				} else {
+					STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
+					STATS_INC(nifs, NETIF_STATS_DROP);
+					os_log_error(OS_LOG_DEFAULT, "ipsec_netif_sync_rx %s: failed to fragment IPv4 packet of length %zu (%d)\n",
+					    pcb->ipsec_ifp->if_xname, length, fragment_error);
+				}
+				break;
+			}
+			case AF_INET6: {
+				if (length < sizeof(struct ip6_hdr)) {
+					mbuf_freem(data);
+					STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
+					STATS_INC(nifs, NETIF_STATS_DROP);
+					os_log_error(OS_LOG_DEFAULT, "ipsec_netif_sync_rx %s: failed to fragment IPv6 packet of length %zu < %zu\n",
+					    pcb->ipsec_ifp->if_xname, length, sizeof(struct ip6_hdr));
+				} else {
+					// ip6_do_fragmentation will free the original data on success only
+					struct ip6_hdr *ip6 = mtod(data, struct ip6_hdr *);
+
+					int fragment_error = ip6_do_fragmentation(&data, 0, pcb->ipsec_ifp, sizeof(struct ip6_hdr),
+					    ip6, NULL, fragment_mtu, ip6->ip6_nxt, htonl(ip6_randomid()));
+					if (fragment_error == 0 && data != NULL) {
+						fragment_chain = data;
+					} else {
+						mbuf_freem(data);
+						STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
+						STATS_INC(nifs, NETIF_STATS_DROP);
+						os_log_error(OS_LOG_DEFAULT, "ipsec_netif_sync_rx %s: failed to fragment IPv6 packet of length %zu (%d)\n",
+						    pcb->ipsec_ifp->if_xname, length, fragment_error);
+					}
+				}
+				break;
+			}
+			default: {
+				// Cannot fragment unknown families
+				mbuf_freem(data);
+				STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
+				STATS_INC(nifs, NETIF_STATS_DROP);
+				os_log_error(OS_LOG_DEFAULT, "ipsec_netif_sync_rx %s: uknown legacy decrypted packet length %zu > %u\n",
+				    pcb->ipsec_ifp->if_xname, length, PP_BUF_SIZE_DEF(rx_pp));
+				break;
+			}
+			}
+
+			if (fragment_chain != NULL) {
+				// Add fragments to chain before continuing
+				lck_mtx_lock(&pcb->ipsec_input_chain_lock);
+				if (pcb->ipsec_input_chain != NULL) {
+					pcb->ipsec_input_chain_last->m_nextpkt = fragment_chain;
+				} else {
+					pcb->ipsec_input_chain = fragment_chain;
+				}
+				pcb->ipsec_input_chain_count++;
+				while (fragment_chain->m_nextpkt) {
+					VERIFY(fragment_chain != fragment_chain->m_nextpkt);
+					fragment_chain = fragment_chain->m_nextpkt;
+					pcb->ipsec_input_chain_count++;
+				}
+				pcb->ipsec_input_chain_last = fragment_chain;
+				lck_mtx_unlock(&pcb->ipsec_input_chain_lock);
+			}
+
+			// Make sure to free unused rx packet
+			kern_pbufpool_free(rx_pp, rx_ph);
+
+			continue;
+		}
+
+		mbuf_pkthdr_setrcvif(data, pcb->ipsec_ifp);
+
+		// Fillout rx packet
+		kern_buflet_t rx_buf = kern_packet_get_next_buflet(rx_ph, NULL);
+		VERIFY(rx_buf != NULL);
+		void *rx_baddr = kern_buflet_get_data_address(rx_buf);
+		VERIFY(rx_baddr != NULL);
+
+		// Copy-in data from mbuf to buflet
+		mbuf_copydata(data, 0, length, (void *)rx_baddr);
+		kern_packet_clear_flow_uuid(rx_ph);         // Zero flow id
+
+		// Finalize and attach the packet
+		error = kern_buflet_set_data_offset(rx_buf, 0);
+		VERIFY(error == 0);
+		error = kern_buflet_set_data_length(rx_buf, (uint16_t)length);
+		VERIFY(error == 0);
+		error = kern_packet_set_headroom(rx_ph, 0);
+		VERIFY(error == 0);
+		error = kern_packet_finalize(rx_ph);
+		VERIFY(error == 0);
+		error = kern_channel_slot_attach_packet(rx_ring, rx_slot, rx_ph);
+		VERIFY(error == 0);
+
+		STATS_INC(nifs, NETIF_STATS_RX_PACKETS);
+		STATS_INC(nifs, NETIF_STATS_RX_COPY_MBUF);
+		bpf_tap_packet_in(pcb->ipsec_ifp, DLT_RAW, rx_ph, NULL, 0);
+
+		rx_ring_stats.kcrsi_slots_transferred++;
+		rx_ring_stats.kcrsi_bytes_transferred += length;
+
+		if (!pcb->ipsec_ext_ifdata_stats) {
+			ifnet_stat_increment_in(pcb->ipsec_ifp, 1, (uint16_t)length, 0);
+		}
+
+		mbuf_freem(data);
+
+		// Advance ring
+		rx_pslot = rx_slot;
+		rx_slot = kern_channel_get_next_slot(rx_ring, rx_slot, NULL);
+	}
+
+	for (uint8_t ring_idx = 0; ring_idx < pcb->ipsec_kpipe_count; ring_idx++) {
+		struct kern_channel_ring_stat_increment tx_ring_stats = {};
+		kern_channel_slot_t tx_pslot = NULL;
+		kern_channel_slot_t tx_slot = NULL;
+
+		kern_channel_ring_t tx_ring = pcb->ipsec_kpipe_txring[ring_idx];
+		if (tx_ring == NULL) {
+			// Net-If TX ring not set up yet, nothing to read
+			goto done;
+		}
+
+		// Unlock ipsec before entering ring
+		lck_rw_unlock_shared(&pcb->ipsec_pcb_lock);
+
+		(void)kr_enter(tx_ring, TRUE);
+
+		// Lock again after entering and validate
+		lck_rw_lock_shared(&pcb->ipsec_pcb_lock);
+
+		if (tx_ring != pcb->ipsec_kpipe_txring[ring_idx]) {
+			goto done;
+		}
+
+		tx_slot = kern_channel_get_next_slot(tx_ring, NULL, NULL);
+		if (tx_slot == NULL) {
+			// Nothing to read, don't bother signalling
+			goto done;
+		}
+
+		while (rx_slot != NULL && tx_slot != NULL) {
+			errno_t error = 0;
+
+			// Allocate rx packet
+			kern_packet_t rx_ph = 0;
+			error = kern_pbufpool_alloc_nosleep(rx_pp, 1, &rx_ph);
+			if (__improbable(error != 0)) {
+				STATS_INC(nifs, NETIF_STATS_DROP_NOMEM_PKT);
+				STATS_INC(nifs, NETIF_STATS_DROP);
+				break;
+			}
+
+			kern_packet_t tx_ph = kern_channel_slot_get_packet(tx_ring, tx_slot);
+			tx_pslot = tx_slot;
+			tx_slot = kern_channel_get_next_slot(tx_ring, tx_slot, NULL);
+			if (tx_ph == 0) {
+				kern_pbufpool_free(rx_pp, rx_ph);
+				continue;
+			}
+
+			error = ipsec_transform_kpipe_pkt_to_netif_pkt(pcb,
+			    &tx_ring_stats, nifs, tx_ph, rx_ph);
+			if (error != 0) {
+				// Failed to get decrypted packet
+				kern_pbufpool_free(rx_pp, rx_ph);
+				continue;
+			}
+
+			error = kern_channel_slot_attach_packet(rx_ring, rx_slot, rx_ph);
+			VERIFY(error == 0);
+
+			STATS_INC(nifs, NETIF_STATS_RX_PACKETS);
+			STATS_INC(nifs, NETIF_STATS_RX_COPY_DIRECT);
+
+			bpf_tap_packet_in(pcb->ipsec_ifp, DLT_RAW, rx_ph, NULL, 0);
+
+			rx_ring_stats.kcrsi_slots_transferred++;
+			rx_ring_stats.kcrsi_bytes_transferred += kern_packet_get_data_length(rx_ph);
+
+			if (!pcb->ipsec_ext_ifdata_stats) {
+				ifnet_stat_increment_in(pcb->ipsec_ifp, 1,
+				    kern_packet_get_data_length(rx_ph), 0);
+			}
+
+			rx_pslot = rx_slot;
+			rx_slot = kern_channel_get_next_slot(rx_ring, rx_slot, NULL);
+		}
+
+done:
+		if (tx_pslot) {
+			kern_channel_advance_slot(tx_ring, tx_pslot);
+			kern_channel_increment_ring_net_stats(tx_ring, pcb->ipsec_ifp, &tx_ring_stats);
+			(void)kern_channel_reclaim(tx_ring);
+		}
+
+		// Unlock first, then exit ring
+		lck_rw_unlock_shared(&pcb->ipsec_pcb_lock);
+		if (tx_ring != NULL) {
+			if (tx_pslot != NULL) {
+				kern_channel_notify(tx_ring, 0);
+			}
+			kr_exit(tx_ring);
+		}
+
+		lck_rw_lock_shared(&pcb->ipsec_pcb_lock);
+	}
+
+	if (rx_pslot) {
+		kern_channel_advance_slot(rx_ring, rx_pslot);
+		kern_channel_increment_ring_net_stats(rx_ring, pcb->ipsec_ifp, &rx_ring_stats);
+	}
+
+
+	lck_rw_unlock_shared(&pcb->ipsec_pcb_lock);
+
+	ipsec_data_move_end(pcb);
+	return 0;
+}
+
+static errno_t
+ipsec_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
+    kern_channel_ring_t rx_ring, uint32_t flags)
+{
+	if (__improbable(ipsec_kpipe_mbuf == 1)) {
+		return ipsec_netif_sync_rx_mbuf(nxprov, nexus, rx_ring, flags);
+	} else {
+		return ipsec_netif_sync_rx_packet(nxprov, nexus, rx_ring, flags);
+	}
 }
 
 static errno_t

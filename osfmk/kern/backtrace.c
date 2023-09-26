@@ -108,6 +108,9 @@ backtrace_internal(backtrace_pack_t packing, uint8_t *bt,
 	assert(btsize > 0);
 
 	fp = start_frame;
+#if defined(HAS_APPLE_PAC)
+	fp = ptrauth_strip(fp, ptrauth_key_frame_pointer);
+#endif
 	bottom = thread->kernel_stack;
 	top = bottom + kernel_stack_size;
 
@@ -123,6 +126,9 @@ backtrace_internal(backtrace_pack_t packing, uint8_t *bt,
 
 	while (fp != NULL && size_used < btsize) {
 		uintptr_t *next_fp = (uintptr_t *)*fp;
+#if defined(HAS_APPLE_PAC)
+		next_fp = ptrauth_strip(next_fp, ptrauth_key_frame_pointer);
+#endif
 		// Return address is one word higher than frame pointer.
 		uintptr_t ret_addr = *(fp + 1);
 
@@ -548,7 +554,7 @@ backtrace_user(uintptr_t *bt, unsigned int max_frames,
 		next_fp = SWIFT_ASYNC_FP_CLEAR(next_fp);
 #if defined(HAS_APPLE_PAC)
 		next_fp = (uintptr_t)ptrauth_strip((void *)next_fp,
-		    ptrauth_key_process_dependent_data);
+		    ptrauth_key_frame_pointer);
 #endif // defined(HAS_APPLE_PAC)
 		if (INVALID_USER_FP(next_fp)) {
 			break;

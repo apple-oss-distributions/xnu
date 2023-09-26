@@ -32,6 +32,41 @@
 #include <machine/pal_hibernate.h>
 #endif /* HIBERNATION */
 
+/**
+ * Fun and helpful icon to use for announcements regarding serial deprecation,
+ * disablement. This helps catch people's eye to get them to realize the message
+ * is something other than normal serial spew. Please don't remove. :)
+ */
+const char hexley[] =
+    "                                                             \n"
+    "           %(                                                \n"
+    "      #%  /(((   %(&                #(((                     \n"
+    "   *((((  #((((  &(((&      %((((((((((&((((((((%            \n"
+    "    %(.     (%     *((     %((((((((((%((((((((((((#         \n"
+    "   *(%      ((      #((     (((@(%((((((((%((#((((((((.      \n"
+    "   &(&      ((#      ((&     (( ((((((((((@(%((((((((((%     \n"
+    "   &((,     ((%     &((#     &  (((((/   %(%(((((((((((((((( \n"
+    "    &((((&#,%((#&%((((/   @((& &(((       (&(((((((#(((((((  \n"
+    "       %#((((((((%#  *## (((((((((@    %@@((&((((((((&((&    \n"
+    "             ((/       &##&######%(    @&((((((((((((((%     \n"
+    "             ((&          ###########&#((((&(((((((((&       \n"
+    "             #(%            /##########%%%(((((((&/          \n"
+    "             &((            &%///&@,##&((((((((              \n"
+    "            ((((((          .#&/##@(((     ((((%             \n"
+    "            #(((%(((,   ((((*.....*(((((&  (((((%            \n"
+    "             %(&&(((((((((#.......((((((((( &#%%             \n"
+    "              ((# (((((((@......../(%((((((((                \n"
+    "              %((  (((((@..........((((@((((((               \n"
+    "              &((       ............(((((((((,               \n"
+    "              #((#     /............(((((#                   \n"
+    "               ((&      .............((((((                  \n"
+    "               ((#     ((...........#((((((%                 \n"
+    "               (((   @(((((.......#((((((((      .@&&@/      \n"
+    "               %((.   @(((((((#.@((((((((#(@((((((((((#(@    \n"
+    "               &((&@##@@((((((((&((((((((@#(((((((((&.       \n"
+    "               *((& ##&(       /##(&#((#(&                   \n"
+    "                                %##@&###                     \n\n";
+
 struct pe_serial_functions {
 	/* Initialize the underlying serial hardware. */
 	void (*init) (void);
@@ -162,12 +197,14 @@ get_serial_functions(serial_device_t device)
  * for output. On ARM64, takes a WFE because the WFE timeout will wake us up in
  * the worst case. On ARMv7 devices, we need to hot poll.
  */
-static void
+static inline void
 serial_poll(void)
 {
-	#if __arm64__
-	__builtin_arm_wfe();
-	#endif
+#if __arm64__
+	if (!uart_hibernation) {
+		__builtin_arm_wfe();
+	}
+#endif
 }
 
 /**
@@ -254,13 +291,17 @@ apple_uart_ack_irq(void)
 	return true;
 }
 
+static inline bool
+apple_uart_fifo_is_empty(void)
+{
+	const ufstat_t ufstat = apple_uart_registers->ufstat;
+	return !(ufstat.tx_fifo_full || ufstat.tx_fifo_count);
+}
+
 static void
 apple_uart_drain_fifo(void)
 {
-	while (({
-		ufstat_t ufstat = apple_uart_registers->ufstat;
-		ufstat.tx_fifo_full || ufstat.tx_fifo_count;
-	})) {
+	while (!apple_uart_fifo_is_empty()) {
 		serial_poll();
 	}
 }
@@ -684,11 +725,20 @@ SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) vmapple_uart_serial_f
 /**
  * Output @str onto every registered serial interface by polling.
  *
- * @param str The stringto output.
+ * @param str The string to output.
  */
-static void uart_sends_force_poll(
-	const char *str
-	);
+static void uart_puts_force_poll(
+	const char *str);
+
+/**
+ * Output @str onto a specific serial interface by polling.
+ *
+ * @param str The string to output.
+ * @param fns The functions to use to output the message.
+ */
+static void uart_puts_force_poll_device(
+	const char *str,
+	struct pe_serial_functions *fns);
 
 static void
 register_serial_functions(struct pe_serial_functions *fns)
@@ -766,12 +816,13 @@ serial_init(void)
 			fns = fns->next;
 		}
 
-		return 1;
+		return gPESF != NULL;
 	}
 
 	soc_base = pe_arm_get_soc_base_phys();
 
 	if (soc_base == 0) {
+		uart_initted = true;
 		return 0;
 	}
 
@@ -844,10 +895,7 @@ serial_init(void)
 
 #ifdef APPLE_UART
 	char const *serial_compat = 0;
-	uint32_t use_legacy_uart = 0;
-
-	/* Check if we should enable this deprecated serial device. */
-	PE_parse_boot_argn("use-legacy-uart", &use_legacy_uart, sizeof(use_legacy_uart));
+	uint32_t use_legacy_uart = 1;
 
 	/*
 	 * The boot serial port should have a property named "boot-console".
@@ -880,26 +928,37 @@ serial_init(void)
 			dt_ubrdiv = *prop_value;
 		}
 
+		prop_value = NULL;
 		SecureDTGetProperty(entryP, "interrupts", (void const **)&prop_value, &prop_size);
 		if (prop_value) {
 			apple_serial_functions.has_irq = true;
 		}
 
-		/* Workaround to enable legacy serial for fastsim targets until clients migrate to dockchannels. */
-		SecureDTGetProperty(entryP, "enable-legacy-serial", (void const **)&prop_value, &prop_size);
+		prop_value = NULL;
+		SecureDTGetProperty(entryP, "disable-legacy-uart", (void const **)&prop_value, &prop_size);
 		if (prop_value) {
-			use_legacy_uart = 1;
+			use_legacy_uart = 0;
 		}
 	}
 
-	if (use_legacy_uart && serial_compat && !strcmp(serial_compat, "uart-1,samsung")) {
-		register_serial_functions(&apple_serial_functions);
+	/* Check if we should enable this deprecated serial device. */
+	PE_parse_boot_argn("use-legacy-uart", &use_legacy_uart, sizeof(use_legacy_uart));
+
+	if (serial_compat && !strcmp(serial_compat, "uart-1,samsung")) {
+		if (use_legacy_uart) {
+			register_serial_functions(&apple_serial_functions);
+		} else {
+			char legacy_serial_msg[] =
+			    "Expecting more output? Wondering why Clippy turned into a platypus?\n\n"
+			    "UART was manually disabled either via the 'use-legacy-uart=0' boot-arg or via\n"
+			    "the disable-legacy-uart property in the boot-console uart device tree node.\n"
+			    "Serial output over dockchannels is still enabled on devices with support.\n";
+			apple_serial_functions.init();
+			uart_puts_force_poll_device(hexley, &apple_serial_functions);
+			uart_puts_force_poll_device(legacy_serial_msg, &apple_serial_functions);
+		}
 	}
 #endif /* APPLE_UART */
-
-	if (gPESF == NULL) {
-		return 0;
-	}
 
 	fns = gPESF;
 	while (fns != NULL) {
@@ -926,7 +985,7 @@ serial_init(void)
 
 	/* Complete. */
 	uart_initted = true;
-	return 1;
+	return gPESF != NULL;
 }
 
 /**
@@ -940,7 +999,7 @@ serial_set_on_demand(bool on_demand)
 
 	/* If on-demand is enabled, report it. */
 	if (on_demand) {
-		uart_sends_force_poll(
+		uart_puts_force_poll(
 			"On-demand serial mode selected.\n"
 			"Waiting for user input to send logs.\n"
 			);
@@ -983,6 +1042,20 @@ serial_interrupt_deadline(__unused struct pe_serial_functions *fns)
 static void
 serial_wait_for_interrupt(struct pe_serial_functions *fns)
 {
+	/**
+	 * This block of code is set up to avoid a race condition in which the IRQ
+	 * is transmitted and processed by IOKit in between the time we check if the
+	 * device is ready to transmit and when we call thread_block. If the IRQ
+	 * fires in that time, thread_wakeup may have already been called in which
+	 * case we would be blocking and have nothing to wake us up.
+	 *
+	 * To avoid this issue, we first call assert_wait_deadline, which prepares
+	 * the thread to be blocked, but does not actually block the thread. After
+	 * this point, any call to thread_wakeup from IRQ handler will prevent
+	 * thread_block from actually blocking. As a performance optimization, we
+	 * then double check if the device is ready to transmit and if it is, then
+	 * we cancel the wait and just continue normally.
+	 */
 	assert_wait_deadline(fns, THREAD_UNINT, serial_interrupt_deadline(fns));
 	if (!fns->transmit_ready()) {
 		fns->enable_irq();
@@ -993,34 +1066,28 @@ serial_wait_for_interrupt(struct pe_serial_functions *fns)
 }
 
 /**
- * Output a character onto every registered serial interface.
+ * Transmit a character over the specified serial output device.
  *
- * @param c The character to output.
- * @param poll Whether the driver should poll to send the character or if it can
- *             wait for an interrupt.
- * @param force : send even if transmission is disabled on the serial.
+ * @param c Character to send
+ * @param poll Whether we should poll or wait for an interrupt.
+ * @param force Whether we should force this over the device if output has not been enabled yet.
+ * @param fns Functions for the device to output over.
  */
-MARK_AS_HIBERNATE_TEXT void
-static
-uart_putc_options_(char c, bool poll, bool force)
+static inline void
+uart_putc_device(char c, bool poll, bool force, struct pe_serial_functions *fns)
 {
-	struct pe_serial_functions *fns = gPESF;
-
-	while (fns != NULL) {
-		if (force || serial_do_transmit) {
-			while (!fns->transmit_ready()) {
-				if (!uart_hibernation) {
-					if (!poll && irq_available_and_ready(fns)) {
-						serial_wait_for_interrupt(fns);
-					} else {
-						serial_poll();
-					}
-				}
-			}
-			fns->transmit_data((uint8_t)c);
-		}
-		fns = fns->next;
+	if (!(serial_do_transmit || force)) {
+		return;
 	}
+
+	while (!fns->transmit_ready()) {
+		if (irq_available_and_ready(fns) && !poll) {
+			serial_wait_for_interrupt(fns);
+		} else {
+			serial_poll();
+		}
+	}
+	fns->transmit_data((uint8_t)c);
 }
 
 /**
@@ -1034,7 +1101,12 @@ uart_putc_options_(char c, bool poll, bool force)
 MARK_AS_HIBERNATE_TEXT void
 uart_putc_options(char c, bool poll)
 {
-	uart_putc_options_(c, poll, 0);
+	struct pe_serial_functions *fns = gPESF;
+
+	while (fns != NULL) {
+		uart_putc_device(c, poll, false, fns);
+		fns = fns->next;
+	}
 }
 
 /**
@@ -1052,15 +1124,33 @@ uart_putc(char c)
 /**
  * Output @str onto every registered serial interface by polling.
  *
- * @param str The stringto output.
+ * @param str The string to output.
  */
 static void
-uart_sends_force_poll(
+uart_puts_force_poll(
 	const char *str)
+{
+	struct pe_serial_functions *fns = gPESF;
+	while (fns != NULL) {
+		uart_puts_force_poll_device(str, fns);
+		fns = fns->next;
+	}
+}
+
+/**
+ * Output @str onto a specific serial interface by polling.
+ *
+ * @param str The string to output.
+ * @param fns The functions to use to output the message.
+ */
+static void
+uart_puts_force_poll_device(
+	const char *str,
+	struct pe_serial_functions *fns)
 {
 	char c;
 	while ((c = *(str++))) {
-		uart_putc_options_(c, true, true);
+		uart_putc_device(c, true, true, fns);
 	}
 }
 

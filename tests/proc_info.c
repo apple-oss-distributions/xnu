@@ -2157,3 +2157,17 @@ T_DECL(proc_regionpath, "PROC_PIDREGIONPATH should return addr, length and path"
 	T_ASSERT_EQ((unsigned long) path.prpo_regionlength, rounded_length, "regionlength must match, even when 20 bytes past the base address");
 	T_ASSERT_EQ_PTR((void *) path.prpo_addr, addr, "addr must match, even when 20 bytes past the base address");
 }
+
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
+#endif
+T_DECL(proc_pidinfo_kernel_task_fail, "calling proc_pidinfo for certain flavors on the kernel task should fail",
+    T_META_ASROOT(YES))
+{
+	int flavors[] = {PROC_PIDREGIONPATH, PROC_PIDREGIONINFO, PROC_PIDREGIONPATHINFO, PROC_PIDREGIONPATHINFO2, PROC_PIDREGIONPATHINFO3};
+	for (int f = 0; f < ARRAY_SIZE(flavors); f++) {
+		int rc = proc_pidinfo(0, flavors[f], 0, 0, 0);
+		T_ASSERT_EQ(rc, 0, "proc_pidinfo returned %d for flavor %d", rc, flavors[f]);
+		T_EXPECT_EQ_INT(errno, EPERM, "proc_pidinfo errno expected=%d actual=%d", EPERM, errno);
+	}
+}

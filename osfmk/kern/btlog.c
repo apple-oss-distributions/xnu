@@ -37,12 +37,13 @@
 #include <mach/vm_param.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
+#include <vm/vm_memtag.h>
 #include <vm/pmap.h>
 
 #pragma mark btref & helpers
 
 static LCK_GRP_DECLARE(bt_library_lck_grp, "bt_library");
-static SMR_DEFINE(bt_library_smr);
+static SMR_DEFINE(bt_library_smr, "bt library");
 
 #define BTS_FRAMES_MAX          13
 #define BTS_FRAMES_REF_MASK     0xfffffff0
@@ -1033,9 +1034,7 @@ __btlog_unlock(btlogu_t btlu)
 static void *
 __btlog_elem_normalize(void *addr)
 {
-#if CONFIG_KERNEL_TBI
-	addr = (void *)VM_KERNEL_TBI_FILL((vm_offset_t)addr);
-#endif /* CONFIG_KERNEL_TBI */
+	addr = (void *)vm_memtag_canonicalize_address((vm_offset_t)addr);
 	return addr;
 }
 

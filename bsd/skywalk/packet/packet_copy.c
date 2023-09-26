@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -30,12 +30,17 @@
 #include <machine/endian.h>
 #include <net/necp.h>
 
+uint32_t copy_pkt_tx_time = 1;
 #if (DEVELOPMENT || DEBUG)
 SYSCTL_NODE(_kern_skywalk, OID_AUTO, packet,
     CTLFLAG_RW | CTLFLAG_LOCKED, 0, "Skywalk packet");
 int pkt_trailers = 0; /* for testing trailing bytes */
 SYSCTL_INT(_kern_skywalk_packet, OID_AUTO, trailers,
     CTLFLAG_RW | CTLFLAG_LOCKED, &pkt_trailers, 0, "");
+
+SYSCTL_UINT(_kern_skywalk_packet, OID_AUTO, copy_pkt_tx_time,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &copy_pkt_tx_time, 0,
+    "copy tx time from pkt to mbuf");
 #endif /* !DEVELOPMENT && !DEBUG */
 
 
@@ -145,7 +150,7 @@ pkt_copy_from_pkt(const enum txrx t, kern_packet_t dph, const uint16_t doff,
 		break;
 
 	case NR_TX:
-		if (__probable(copysum)) {
+		if (copysum) {
 			/*
 			 * Use pkt_copy() to copy the portion up to the
 			 * point where we need to start the checksum, and
@@ -174,15 +179,16 @@ pkt_copy_from_pkt(const enum txrx t, kern_packet_t dph, const uint16_t doff,
 		} else {
 			_pkt_copy(sbaddr, dbaddr, len);
 		}
-		dpkt->pkt_csum_flags = spkt->pkt_csum_flags & (PACKET_CSUM_TSO_FLAGS);
+		dpkt->pkt_csum_flags = spkt->pkt_csum_flags &
+		    (PACKET_CSUM_TSO_FLAGS | PACKET_TX_CSUM_OFFLOAD_FLAGS);
 		dpkt->pkt_csum_tx_start_off = 0;
 		dpkt->pkt_csum_tx_stuff_off = 0;
 
 		SK_DF(SK_VERB_COPY | SK_VERB_TX,
-		    "%s(%d) TX len %u, copy+sum %u (csum 0x%04x), start %u",
+		    "%s(%d) TX len %u, copy+sum %u (csum 0x%04x), start %u, flags %u",
 		    sk_proc_name_address(current_proc()),
 		    sk_proc_pid(current_proc()), len,
-		    (copysum ? (len - start) : 0), csum, start);
+		    (copysum ? (len - start) : 0), csum, start, dpkt->pkt_csum_flags);
 		break;
 
 	default:
@@ -213,7 +219,8 @@ _pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *dbaddr,
 	uint32_t sum = initial_sum, partial;
 	uint32_t len0 = len;
 	boolean_t needs_swap, started_on_odd = FALSE;
-	uint16_t clen, sboff, sblen, sbcnt, off0 = soff;
+	uint16_t sbcnt, off0 = soff;
+	uint32_t clen, sboff, sblen;
 	struct __kern_packet *spkt = SK_PTR_ADDR_KPKT(sph);
 	kern_buflet_t sbuf = NULL, sbufp = NULL;
 
@@ -362,7 +369,8 @@ _pkt_copypkt_sum(kern_packet_t sph, uint16_t soff, kern_packet_t dph,
 	uint32_t sum = 0, partial;
 	boolean_t needs_swap, started_on_odd = FALSE;
 	uint8_t *sbaddr = NULL, *dbaddr = NULL;
-	uint16_t clen, sblen, dlen0, dlim, sbcnt, dbcnt, sboff;
+	uint16_t sbcnt, dbcnt;
+	uint32_t clen, dlen0, sboff, sblen, dlim;
 	struct __kern_packet *spkt = SK_PTR_ADDR_KPKT(sph);
 	struct __kern_packet *dpkt = SK_PTR_ADDR_KPKT(dph);
 	kern_buflet_t sbuf = NULL, sbufp = NULL, dbuf = NULL, dbufp = NULL;
@@ -409,7 +417,7 @@ _pkt_copypkt_sum(kern_packet_t sph, uint16_t soff, kern_packet_t dph,
 			doff = 0;
 		}
 
-		clen = (uint16_t)MIN(len, sblen);
+		clen = MIN(len, sblen);
 		clen = MIN(clen, dlim);
 
 		if (__probable(do_csum)) {
@@ -506,7 +514,8 @@ pkt_sum(kern_packet_t sph, uint16_t soff, uint16_t len)
 	uint32_t sum = 0, partial;
 	boolean_t needs_swap, started_on_odd = FALSE;
 	uint8_t *sbaddr = NULL;
-	uint16_t clen, sblen, sbcnt, sboff;
+	uint16_t sbcnt;
+	uint32_t clen, sblen, sboff;
 	struct __kern_packet *spkt = SK_PTR_ADDR_KPKT(sph);
 	kern_buflet_t sbuf = NULL, sbufp = NULL;
 
@@ -674,7 +683,7 @@ pkt_copy_multi_buflet_from_pkt(const enum txrx t, kern_packet_t dph,
 		break;
 
 	case NR_TX:
-		if (__probable(copysum)) {
+		if (copysum) {
 			uint8_t *baddr;
 			/*
 			 * copy the portion up to the point where we need to
@@ -721,9 +730,16 @@ pkt_copy_multi_buflet_from_pkt(const enum txrx t, kern_packet_t dph,
 			    FALSE);
 			ASSERT(rc);
 		}
-		dpkt->pkt_csum_flags = spkt->pkt_csum_flags & (PACKET_CSUM_TSO_FLAGS);
+		dpkt->pkt_csum_flags = spkt->pkt_csum_flags &
+		    (PACKET_CSUM_TSO_FLAGS | PACKET_TX_CSUM_OFFLOAD_FLAGS);
 		dpkt->pkt_csum_tx_start_off = 0;
 		dpkt->pkt_csum_tx_stuff_off = 0;
+
+		SK_DF(SK_VERB_COPY | SK_VERB_TX,
+		    "%s(%d) TX len %u, copy+sum %u (csum 0x%04x), start %u, flags %u",
+		    sk_proc_name_address(current_proc()),
+		    sk_proc_pid(current_proc()), len,
+		    (copysum ? (len - start) : 0), csum, start, dpkt->pkt_csum_flags);
 		break;
 
 	default:
@@ -731,6 +747,33 @@ pkt_copy_multi_buflet_from_pkt(const enum txrx t, kern_packet_t dph,
 		/* NOTREACHED */
 		__builtin_unreachable();
 	}
+}
+
+static inline uint32_t
+_convert_mbuf_csum_flags(uint32_t mbuf_flags)
+{
+	uint32_t pkt_flags = 0;
+
+	if (mbuf_flags & CSUM_TCP) {
+		pkt_flags |= PACKET_CSUM_TCP;
+	}
+	if (mbuf_flags & CSUM_TCPIPV6) {
+		pkt_flags |= PACKET_CSUM_TCPIPV6;
+	}
+	if (mbuf_flags & CSUM_UDP) {
+		pkt_flags |= PACKET_CSUM_UDP;
+	}
+	if (mbuf_flags & CSUM_UDPIPV6) {
+		pkt_flags |= PACKET_CSUM_UDPIPV6;
+	}
+	if (mbuf_flags & CSUM_IP) {
+		pkt_flags |= PACKET_CSUM_IP;
+	}
+	if (mbuf_flags & CSUM_ZERO_INVERT) {
+		pkt_flags |= PACKET_CSUM_ZERO_INVERT;
+	}
+
+	return pkt_flags;
 }
 
 /*
@@ -802,7 +845,7 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		break;
 
 	case NR_TX:
-		if (__probable(copysum)) {
+		if (copysum) {
 			uint16_t stuff = m->m_pkthdr.csum_tx_stuff;
 			/*
 			 * Use m_copydata() to copy the portion up to the
@@ -843,12 +886,17 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		pkt->pkt_csum_tx_stuff_off = 0;
 
 		if (m->m_pkthdr.csum_flags & CSUM_TSO_IPV4) {
-			pkt->pkt_csum_flags |= PACKET_TSO_IPV4;
+			pkt->pkt_csum_flags |= PACKET_CSUM_TSO_IPV4;
+			pkt->pkt_proto_seg_sz = (uint16_t)m->m_pkthdr.tso_segsz;
 			ASSERT((pkt->pkt_csum_flags & PACKET_TSO_IPV6) == 0);
 		}
 		if (m->m_pkthdr.csum_flags & CSUM_TSO_IPV6) {
-			pkt->pkt_csum_flags |= PACKET_TSO_IPV6;
+			pkt->pkt_csum_flags |= PACKET_CSUM_TSO_IPV6;
+			pkt->pkt_proto_seg_sz = (uint16_t)m->m_pkthdr.tso_segsz;
 			ASSERT((pkt->pkt_csum_flags & PACKET_TSO_IPV4) == 0);
+		}
+		if (!copysum) {
+			pkt->pkt_csum_flags |= _convert_mbuf_csum_flags(m->m_pkthdr.csum_flags);
 		}
 
 		/* translate mbuf metadata */
@@ -856,7 +904,6 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		pkt->pkt_flowsrc_token = m->m_pkthdr.pkt_mpriv_srcid;
 		pkt->pkt_flow_token = m->m_pkthdr.pkt_flowid;
 		pkt->pkt_comp_gencnt = m->m_pkthdr.comp_gencnt;
-		pkt->pkt_proto_seg_sz = (uint16_t)m->m_pkthdr.tso_segsz;
 		switch (m->m_pkthdr.pkt_proto) {
 		case IPPROTO_QUIC:
 			pkt->pkt_flow_ip_proto = IPPROTO_UDP;
@@ -948,7 +995,8 @@ m_copypkt_sum(mbuf_t m, int soff, kern_packet_t dph, uint16_t doff,
 	uint32_t sum = 0, partial;
 	unsigned count0, count, odd, mlen_copied;
 	uint8_t *sbaddr = NULL, *dbaddr = NULL;
-	uint16_t dlen0, dlim, dbcnt = __packet_get_buflet_count(dph);
+	uint16_t dbcnt = __packet_get_buflet_count(dph);
+	uint32_t dlim, dlen0;
 	struct __kern_packet *dpkt = SK_PTR_ADDR_KPKT(dph);
 	kern_buflet_t dbuf = NULL, dbufp = NULL;
 
@@ -1177,7 +1225,7 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 		break;
 
 	case NR_TX:
-		if (__probable(copysum)) {
+		if (copysum) {
 			uint16_t stuff = m->m_pkthdr.csum_tx_stuff;
 			/*
 			 * Use m_copydata() to copy the portion up to the
@@ -1219,12 +1267,17 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 		pkt->pkt_csum_tx_stuff_off = 0;
 
 		if (m->m_pkthdr.csum_flags & CSUM_TSO_IPV4) {
-			pkt->pkt_csum_flags |= PACKET_TSO_IPV4;
+			pkt->pkt_csum_flags |= PACKET_CSUM_TSO_IPV4;
+			pkt->pkt_proto_seg_sz = (uint16_t)m->m_pkthdr.tso_segsz;
 			ASSERT((pkt->pkt_csum_flags & PACKET_TSO_IPV6) == 0);
 		}
 		if (m->m_pkthdr.csum_flags & CSUM_TSO_IPV6) {
-			pkt->pkt_csum_flags |= PACKET_TSO_IPV6;
+			pkt->pkt_csum_flags |= PACKET_CSUM_TSO_IPV6;
+			pkt->pkt_proto_seg_sz = (uint16_t)m->m_pkthdr.tso_segsz;
 			ASSERT((pkt->pkt_csum_flags & PACKET_TSO_IPV4) == 0);
+		}
+		if (!copysum) {
+			pkt->pkt_csum_flags |= _convert_mbuf_csum_flags(m->m_pkthdr.csum_flags);
 		}
 
 		/* translate mbuf metadata */
@@ -1232,7 +1285,6 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 		pkt->pkt_flowsrc_token = m->m_pkthdr.pkt_mpriv_srcid;
 		pkt->pkt_flow_token = m->m_pkthdr.pkt_flowid;
 		pkt->pkt_comp_gencnt = m->m_pkthdr.comp_gencnt;
-		pkt->pkt_proto_seg_sz = (uint16_t)m->m_pkthdr.tso_segsz;
 		switch (m->m_pkthdr.pkt_proto) {
 		case IPPROTO_QUIC:
 			pkt->pkt_flow_ip_proto = IPPROTO_UDP;
@@ -1309,14 +1361,38 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 	    sk_dump("buf", baddr, len, 128, NULL, 0));
 }
 
+static inline uint32_t
+_convert_pkt_csum_flags(uint32_t pkt_flags)
+{
+	uint32_t mbuf_flags = 0;
+	if (pkt_flags & PACKET_CSUM_TCP) {
+		mbuf_flags |= CSUM_TCP;
+	}
+	if (pkt_flags & PACKET_CSUM_TCPIPV6) {
+		mbuf_flags |= CSUM_TCPIPV6;
+	}
+	if (pkt_flags & PACKET_CSUM_UDP) {
+		mbuf_flags |= CSUM_UDP;
+	}
+	if (pkt_flags & PACKET_CSUM_UDPIPV6) {
+		mbuf_flags |= CSUM_UDPIPV6;
+	}
+	if (pkt_flags & PACKET_CSUM_IP) {
+		mbuf_flags |= CSUM_IP;
+	}
+	if (pkt_flags & PACKET_CSUM_ZERO_INVERT) {
+		mbuf_flags |= CSUM_ZERO_INVERT;
+	}
+
+	return mbuf_flags;
+}
+
 /*
  * This routine is used for copying from a packet originating from a native
  * skywalk interface to an mbuf destined for the host legacy stack (NR_RX),
  * as well as for mbufs destined for the compat network interfaces (NR_TX).
  *
- * Note that this routine does not alter m_data pointer of the mbuf, as the
- * caller may want to use the original value upon return.  We do, however,
- * adjust the length to reflect the total data span.
+ * We do adjust the length to reflect the total data span.
  *
  * This routine supports copying into an mbuf chain for RX but not TX.
  *
@@ -1437,7 +1513,7 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		VERIFY(m->m_len == m->m_pkthdr.len &&
 		    (uint32_t)m->m_len <= (uint32_t)mbuf_maxlen(m));
 
-		if (__probable(copysum)) {
+		if (copysum) {
 			uint16_t stuff = pkt->pkt_csum_tx_stuff_off;
 			/*
 			 * Use pkt_copy() to copy the portion up to the
@@ -1470,6 +1546,7 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		m->m_pkthdr.csum_flags &= ~CSUM_TX_FLAGS;
 		m->m_pkthdr.csum_tx_start = 0;
 		m->m_pkthdr.csum_tx_stuff = 0;
+		m->m_pkthdr.csum_flags |= _convert_pkt_csum_flags(pkt->pkt_csum_flags);
 
 		/* translate packet metadata */
 		m->m_pkthdr.pkt_flowsrc = pkt->pkt_flowsrc_type;
@@ -1488,6 +1565,16 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		}
 		if ((pkt->pkt_pflags & PKT_F_L4S) != 0) {
 			m->m_pkthdr.pkt_ext_flags |= PKTF_EXT_L4S;
+		}
+		if (__improbable(copy_pkt_tx_time != 0 &&
+		    (pkt->pkt_pflags & PKT_F_OPT_TX_TIMESTAMP) != 0)) {
+			struct m_tag *tag = NULL;
+			tag = m_tag_create(KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_AQM,
+			    sizeof(uint64_t), M_WAITOK, m);
+			if (tag != NULL) {
+				m_tag_prepend(m, tag);
+				*(uint64_t *)tag->m_tag_data = pkt->pkt_com_opt->__po_pkt_tx_time;
+			}
 		}
 
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_TX,
@@ -1637,7 +1724,7 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 		m->m_pkthdr.len += len;
 		VERIFY(m->m_len == m->m_pkthdr.len &&
 		    (uint32_t)m->m_len <= (uint32_t)mbuf_maxlen(m));
-		if (__probable(copysum)) {
+		if (copysum) {
 			uint16_t stuff = pkt->pkt_csum_tx_stuff_off;
 			/*
 			 * Use pkt_copy() to copy the portion up to the
@@ -1670,6 +1757,7 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 		m->m_pkthdr.csum_flags &= ~CSUM_TX_FLAGS;
 		m->m_pkthdr.csum_tx_start = 0;
 		m->m_pkthdr.csum_tx_stuff = 0;
+		m->m_pkthdr.csum_flags |= _convert_pkt_csum_flags(pkt->pkt_csum_flags);
 
 		/* translate packet metadata */
 		m->m_pkthdr.pkt_flowsrc = pkt->pkt_flowsrc_type;
@@ -1688,6 +1776,16 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 		}
 		if ((pkt->pkt_pflags & PKT_F_L4S) != 0) {
 			m->m_pkthdr.pkt_ext_flags |= PKTF_EXT_L4S;
+		}
+		if (__improbable(copy_pkt_tx_time != 0 &&
+		    (pkt->pkt_pflags & PKT_F_OPT_TX_TIMESTAMP) != 0)) {
+			struct m_tag *tag = NULL;
+			tag = m_tag_create(KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_AQM,
+			    sizeof(uint64_t), M_WAITOK, m);
+			if (tag != NULL) {
+				m_tag_prepend(m, tag);
+				*(uint64_t *)tag->m_tag_data = pkt->pkt_com_opt->__po_pkt_tx_time;
+			}
 		}
 
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_TX,

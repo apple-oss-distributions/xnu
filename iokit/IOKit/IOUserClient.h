@@ -590,7 +590,6 @@ public:
 #endif /* KERNEL_PRIVATE */
 
 #ifdef XNU_KERNEL_PRIVATE
-extern "C" void IOMachPortDestroyUserReferences(OSObject * obj, natural_t type);
 
 class IOUserIterator : public OSIterator
 {

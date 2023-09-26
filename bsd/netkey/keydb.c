@@ -191,26 +191,19 @@ keydb_newsecreplay(u_int8_t wsize)
 	p = kalloc_type(struct secreplay, Z_NOWAIT | Z_ZERO);
 	if (!p) {
 		lck_mtx_unlock(sadb_mutex);
-		p = kalloc_type(struct secreplay, Z_WAITOK | Z_ZERO);
+		p = kalloc_type(struct secreplay, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 		lck_mtx_lock(sadb_mutex);
-	}
-	if (!p) {
-		return p;
 	}
 
 	if (wsize != 0) {
+		p->wsize = wsize;
 		p->bitmap = (caddr_t)kalloc_data(wsize, Z_NOWAIT | Z_ZERO);
 		if (!p->bitmap) {
 			lck_mtx_unlock(sadb_mutex);
-			p->bitmap = (caddr_t)kalloc_data(wsize, Z_WAITOK | Z_ZERO);
+			p->bitmap = (caddr_t)kalloc_data(wsize, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 			lck_mtx_lock(sadb_mutex);
-			if (!p->bitmap) {
-				kfree_type(struct secreplay, p);
-				return NULL;
-			}
 		}
 	}
-	p->wsize = wsize;
 	return p;
 }
 

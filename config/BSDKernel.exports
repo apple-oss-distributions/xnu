@@ -55,6 +55,7 @@ _buf_lblkno
 _buf_lblksize
 _buf_map
 _buf_map_range
+_buf_map_range_with_prot
 _buf_markaged
 _buf_markclean
 _buf_markdelayed
@@ -279,6 +280,7 @@ _ifnet_set_lladdr
 _ifnet_set_metric
 _ifnet_set_mtu
 _ifnet_set_offload
+_ifnet_set_offload_enabled
 _ifnet_set_tso_mtu
 _ifnet_get_tso_mtu
 _ifnet_get_wake_flags
@@ -311,7 +313,6 @@ _kauth_acl_free
 _kauth_authorize_action
 _kauth_authorize_process
 _kauth_cred_create
-_kauth_cred_find
 _kauth_cred_get
 _kauth_cred_get_with_ref
 _kauth_cred_getgid
@@ -341,6 +342,7 @@ _kauth_deregister_scope
 _kauth_filesec_alloc
 _kauth_filesec_free
 _kauth_getgid
+_kauth_getrgid
 _kauth_getruid
 _kauth_getuid
 _kauth_listen_scope
@@ -672,6 +674,7 @@ _vfs_fsremove
 _vfs_get_notify_attributes
 _vfs_getnewfsid
 _vfs_getvfs
+_vfs_getvfs_with_vfsops
 _vfs_init_io_attributes
 _vfs_ioattr
 _vfs_isforce

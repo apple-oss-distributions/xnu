@@ -303,7 +303,7 @@ dofileread(vfs_context_t ctx, struct fileproc *fp,
     user_addr_t bufp, user_size_t nbyte, off_t offset, int flags,
     user_ssize_t *retval)
 {
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	uio_t uio;
 	int spacetype;
 
@@ -350,7 +350,7 @@ static int
 read_internal(struct proc *p, int fd, user_addr_t buf, user_size_t nbyte,
     off_t offset, int flags, user_ssize_t *retval)
 {
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	uio_t uio;
 	int spacetype = IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32;
 
@@ -631,7 +631,7 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
     user_addr_t bufp, user_size_t nbyte, off_t offset, int flags,
     user_ssize_t *retval)
 {
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	uio_t uio;
 	int spacetype;
 
@@ -678,7 +678,7 @@ int
 write_internal(struct proc *p, int fd, user_addr_t buf, user_size_t nbyte,
     off_t offset, int flags, guardid_t *puguard, user_ssize_t *retval)
 {
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	uio_t uio;
 	int spacetype = IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32;
 
@@ -1072,12 +1072,12 @@ static LCK_SPIN_DECLARE(selspec_lock, &selspec_grp);
 void
 selspec_attach(struct knote *kn, struct selinfo *si)
 {
-	struct selinfo *cur = os_atomic_load(&kn->kn_hook, relaxed);
+	struct selinfo *cur = knote_kn_hook_get_raw(kn);
 
 	if (cur == NULL) {
 		si->si_flags |= SI_SELSPEC;
 		lck_spin_lock(&selspec_lock);
-		kn->kn_hook = si;
+		knote_kn_hook_set_raw(kn, (void *) si);
 		KNOTE_ATTACH(&si->si_note, kn);
 		lck_spin_unlock(&selspec_lock);
 	} else {
@@ -1098,26 +1098,23 @@ selspec_attach(struct knote *kn, struct selinfo *si)
 
 /*
  * The "primitive" lock is _not_ held.
- * The knote lock is held.
+ *
+ * knote "lock" is held
  */
 void
 selspec_detach(struct knote *kn)
 {
-	/*
-	 * kn_hook always becomes non NULL under the knote lock.
-	 * Seeing "NULL" can't be a false positive.
-	 */
-	if (kn->kn_hook == NULL) {
-		return;
-	}
-
 	lck_spin_lock(&selspec_lock);
-	if (kn->kn_hook) {
-		struct selinfo *sip = kn->kn_hook;
 
-		kn->kn_hook = NULL;
-		KNOTE_DETACH(&sip->si_note, kn);
+	if (!KNOTE_IS_AUTODETACHED(kn)) {
+		struct selinfo *sip = knote_kn_hook_get_raw(kn);
+		if (sip) {
+			KNOTE_DETACH(&sip->si_note, kn);
+		}
 	}
+
+	knote_kn_hook_set_raw(kn, NULL);
+
 	lck_spin_unlock(&selspec_lock);
 }
 
@@ -1749,7 +1746,7 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 		struct kevent_qos_s kev = {
 			.ident = fds[i].fd,
 			.flags = EV_ADD | EV_ONESHOT | EV_POLL,
-			.udata = CAST_USER_ADDR_T(&fds[i])
+			.udata = i, /* Index into pollfd array */
 		};
 
 		/* Handle input events */
@@ -1817,6 +1814,7 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 		.kec_process_noutputs = rfds,
 		.kec_process_flags    = KEVENT_FLAG_POLL,
 		.kec_deadline         = 0, /* wait forever */
+		.kec_poll_fds         = fds,
 	};
 
 	/*
@@ -1854,7 +1852,9 @@ out:
 static int
 poll_callback(struct kevent_qos_s *kevp, kevent_ctx_t kectx)
 {
-	struct pollfd *fds = CAST_DOWN(struct pollfd *, kevp->udata);
+	assert(kectx->kec_process_flags & KEVENT_FLAG_POLL);
+	struct pollfd *fds = &kectx->kec_poll_fds[kevp->udata];
+
 	short prev_revents = fds->revents;
 	short mask = 0;
 
@@ -2140,11 +2140,11 @@ selwakeup_internal(struct selinfo *sip, long hint, wait_result_t wr)
 		 * The "primitive" lock is held.
 		 * The knote lock is not held.
 		 *
-		 * All knotes will transition their kn_hook to NULL.
+		 * All knotes will transition their kn_hook to NULL and we will
+		 * reeinitialize the primitive's klist
 		 */
 		lck_spin_lock(&selspec_lock);
-		KNOTE(&sip->si_note, hint);
-		klist_init(&sip->si_note);
+		knote(&sip->si_note, hint, /*autodetach=*/ true);
 		lck_spin_unlock(&selspec_lock);
 		sip->si_flags &= ~SI_SELSPEC;
 	}

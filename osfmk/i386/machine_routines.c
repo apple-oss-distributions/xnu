@@ -428,6 +428,37 @@ ml_at_interrupt_context(void)
 	return get_interrupt_level() != 0;
 }
 
+/*
+ * This answers the question
+ * "after returning from this interrupt handler with the AST_URGENT bit set,
+ * will I end up in ast_taken_user or ast_taken_kernel?"
+ *
+ * If it's called in non-interrupt context (e.g. regular syscall), it should
+ * return false.
+ *
+ * Must be called with interrupts disabled.
+ */
+bool
+ml_did_interrupt_userspace(void)
+{
+	assert(ml_get_interrupts_enabled() == false);
+
+	x86_saved_state_t *state = current_cpu_datap()->cpu_int_state;
+	if (!state) {
+		return false;
+	}
+
+	uint64_t cs;
+
+	if (is_saved_state64(state)) {
+		cs = saved_state64(state)->isf.cs;
+	} else {
+		cs = saved_state32(state)->cs;
+	}
+
+	return (cs & SEL_PL) == SEL_PL_U;
+}
+
 void
 ml_get_power_state(boolean_t *icp, boolean_t *pidlep)
 {
@@ -735,6 +766,27 @@ unsigned int
 ml_get_cpu_types(void)
 {
 	return 1 << CLUSTER_TYPE_SMP;
+}
+
+unsigned int
+ml_get_cluster_count(void)
+{
+	/*
+	 * At present no supported x86 system has more than 1 CPU type and multiple
+	 * clusters.
+	 */
+	return 1;
+}
+
+static_assert(MAX_CPUS <= 256, "MAX_CPUS must fit in _COMM_PAGE_CPU_TO_CLUSTER; Increase table size if needed");
+
+void
+ml_map_cpus_to_clusters(uint8_t *table)
+{
+	for (uint16_t cpu_id = 0; cpu_id < machine_info.logical_cpu_max; cpu_id++) {
+		// Supported x86 systems have 1 cluster
+		*(table + cpu_id) = (uint8_t)0;
+	}
 }
 
 int

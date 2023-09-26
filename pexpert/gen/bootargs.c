@@ -197,6 +197,17 @@ PE_parse_boot_argn(
 }
 
 boolean_t
+PE_boot_arg_uint64_eq(const char *arg_string, uint64_t value)
+{
+	uint64_t tmp;
+	if (!PE_parse_boot_argn(arg_string, &tmp, sizeof(tmp))) {
+		return false;
+	}
+
+	return tmp == value;
+}
+
+boolean_t
 PE_parse_boot_arg_str(
 	const char      *arg_string,
 	char            *arg_ptr,

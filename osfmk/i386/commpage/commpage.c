@@ -507,6 +507,7 @@ commpage_populate_one(
 	uint8_t         c1;
 	uint16_t        c2;
 	uint64_t        c8;
+	uint8_t         c256[256] = {0};
 	uint32_t        cfamily;
 	short   version = _COMM_PAGE_THIS_VERSION;
 
@@ -541,6 +542,8 @@ commpage_populate_one(
 	commpage_stuff(_COMM_PAGE_PHYSICAL_CPUS, &c1, 1);
 	c1 = machine_info.logical_cpu_max;
 	commpage_stuff(_COMM_PAGE_LOGICAL_CPUS, &c1, 1);
+	c1 = ml_get_cluster_count();
+	commpage_stuff(_COMM_PAGE_CPU_CLUSTERS, &c1, 1);
 
 	c8 = ml_cpu_cache_size(0);
 	commpage_stuff(_COMM_PAGE_MEMORY_SIZE, &c8, 8);
@@ -550,6 +553,9 @@ commpage_populate_one(
 	c1 = PAGE_SHIFT;
 	commpage_stuff(_COMM_PAGE_KERNEL_PAGE_SHIFT, &c1, 1);
 	commpage_stuff(_COMM_PAGE_USER_PAGE_SHIFT_64, &c1, 1);
+
+	ml_map_cpus_to_clusters(c256);
+	commpage_stuff(_COMM_PAGE_CPU_TO_CLUSTER, c256, 256);
 
 	if (next > _COMM_PAGE_END) {
 		panic("commpage overflow: next = 0x%08x, commPagePtr = 0x%p", next, commPagePtr);

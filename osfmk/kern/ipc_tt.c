@@ -68,6 +68,7 @@
  *	Task and thread related IPC functions.
  */
 
+#include <ipc/port.h>
 #include <mach/mach_types.h>
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
@@ -84,18 +85,21 @@
 #include <mach/host_priv_server.h>
 #include <mach/vm_map_server.h>
 
+#include <kern/exc_guard.h>
 #include <kern/kern_types.h>
 #include <kern/host.h>
 #include <kern/ipc_kobject.h>
 #include <kern/ipc_tt.h>
 #include <kern/kalloc.h>
 #include <kern/thread.h>
+#include <kern/ux_handler.h>
 #include <kern/misc_protos.h>
 #include <kdp/kdp_dyld.h>
 
 #include <vm/vm_map.h>
 #include <vm/vm_pageout.h>
 #include <vm/vm_protos.h>
+#include <libkern/coreanalytics/coreanalytics.h>
 
 #include <security/mac_mach_internal.h>
 
@@ -110,6 +114,19 @@ extern int cs_relax_platform_task_ports;
 #endif
 
 extern boolean_t IOCurrentTaskHasEntitlement(const char *);
+extern boolean_t proc_is_simulated(const proc_t);
+extern struct proc* current_proc(void);
+
+/* bootarg to create lightweight corpse for thread identity lockdown */
+TUNABLE(bool, thid_should_crash, "thid_should_crash", false);
+
+#define SET_EXCEPTION_ENTITLEMENT "com.apple.private.set-exception-port"
+
+CA_EVENT(set_exception,
+    CA_STATIC_STRING(CA_PROCNAME_LEN), current_proc,
+    CA_STATIC_STRING(CA_PROCNAME_LEN), thread_proc,
+    CA_INT, mask,
+    CA_STATIC_STRING(6), level);
 
 __options_decl(ipc_reply_port_type_t, uint32_t, {
 	IRPT_NONE        = 0x00,
@@ -666,7 +683,6 @@ ipc_task_reset(
 		task->itk_settable_self = ipc_port_make_send_any(new_kport);
 	}
 
-	/* Set the old kport to IKOT_NONE */
 	/* clears ikol_alt_port */
 	ipc_kobject_disable(old_kport, IKOT_TASK_CONTROL);
 
@@ -3966,6 +3982,100 @@ space_inspect_deallocate(
 }
 
 
+static boolean_t
+behavior_is_identity_protected(int new_behavior)
+{
+	return (new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED;
+}
+
+static boolean_t
+identity_protection_opted_out(const ipc_port_t new_port)
+{
+	if (IP_VALID(new_port)) {
+		return ip_is_id_prot_opted_out(new_port);
+	}
+	return false;
+}
+
+static void
+send_set_exception_telemetry(const task_t excepting_task, const exception_mask_t mask, const char* level)
+{
+	ca_event_t ca_event = CA_EVENT_ALLOCATE(set_exception);
+	CA_EVENT_TYPE(set_exception) * event = ca_event->data;
+
+	task_procname(current_task(), (char *) &event->current_proc, sizeof(event->current_proc));
+	task_procname(excepting_task, (char *) &event->thread_proc, sizeof(event->thread_proc));
+	event->mask = mask;
+	strlcpy(event->level, level, sizeof(event->level));
+
+	CA_EVENT_SEND(ca_event);
+}
+
+static boolean_t
+set_exception_behavior_violation(const ipc_port_t new_port, const task_t excepting_task,
+    const exception_mask_t mask, const char *level)
+{
+	mach_port_name_t new_name = CAST_MACH_PORT_TO_NAME(new_port);
+	boolean_t rate_limited;
+
+	task_lock(current_task());
+	rate_limited = task_has_exception_telemetry(current_task());
+	if (!rate_limited) {
+		task_set_exception_telemetry(current_task());
+	}
+	task_unlock(current_task());
+
+	if (thid_should_crash && !rate_limited) {
+		/* create lightweight corpse */
+		mach_port_guard_exception(new_name, 0, 0, 0);
+	}
+
+	/* always report the proc name to CA */
+	send_set_exception_telemetry(excepting_task, mask, level);
+	return TRUE;
+}
+
+/*
+ * Protect platform binary task/thread ports.
+ * excepting_task is NULL if we are setting a host exception port.
+ */
+static boolean_t
+exception_exposes_protected_ports(const ipc_port_t new_port, const task_t excepting_task)
+{
+	if (!IP_VALID(new_port) || is_ux_handler_port(new_port)) {
+		/*
+		 * sending exceptions to invalid port does not pose risk
+		 * ux_handler port is an immovable, read-only kobject port; doesn't need protection.
+		 */
+		return FALSE;
+	} else if (excepting_task) {
+		/*  setting task/thread exception port - protect platform binaries */
+		return task_ro_flags_get(excepting_task) & TFRO_PLATFORM;
+	}
+
+	/* setting host port exposes all processes - always protect. */
+	return TRUE;
+}
+
+boolean_t
+set_exception_behavior_allowed(const ipc_port_t new_port, int new_behavior,
+    const task_t excepting_task, const exception_mask_t mask, const char *level)
+{
+	if (exception_exposes_protected_ports(new_port, excepting_task)
+	    && !behavior_is_identity_protected(new_behavior)
+	    && !identity_protection_opted_out(new_port) /* Ignore opted out */
+#if CONFIG_ROSETTA
+	    && !task_is_translated(current_task())
+#endif /* CONFIG_ROSETTA */
+	    && !proc_is_simulated(current_proc())
+	    && !IOCurrentTaskHasEntitlement("com.apple.private.thread-set-state") /* rdar://109119238 */
+	    && !IOCurrentTaskHasEntitlement(SET_EXCEPTION_ENTITLEMENT)) {
+		return set_exception_behavior_violation(new_port, excepting_task, mask, level);
+	}
+
+	return TRUE;
+}
+
 /*
  *	Routine:	thread/task_set_exception_ports [kernel call]
  *	Purpose:
@@ -3982,6 +4092,7 @@ space_inspect_deallocate(
  *					Illegal mask bit set.
  *					Illegal exception behavior
  *		KERN_FAILURE		The thread is dead.
+ *		KERN_NO_ACCESS		Restricted access to set port
  */
 
 kern_return_t
@@ -4039,6 +4150,10 @@ thread_set_exception_ports(
 	    (new_behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED))
 	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (!set_exception_behavior_allowed(new_port, new_behavior, get_threadtask(thread), exception_mask, "thread")) {
+		return KERN_NO_ACCESS;
 	}
 
 #if CONFIG_MACF
@@ -4153,6 +4268,10 @@ task_set_exception_ports(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	if (!set_exception_behavior_allowed(new_port, new_behavior, task, exception_mask, "task")) {
+		return KERN_NO_ACCESS;
+	}
+
 #if CONFIG_MACF
 	new_label = mac_exc_create_label_for_current_proc();
 #endif
@@ -4233,6 +4352,7 @@ task_set_exception_ports(
  *					Illegal mask bit set.
  *					Illegal exception behavior
  *		KERN_FAILURE		The thread is dead.
+ *		KERN_NO_ACCESS		Restricted access to set port
  */
 
 kern_return_t
@@ -4291,6 +4411,10 @@ thread_swap_exception_ports(
 	    (new_behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED))
 	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (!set_exception_behavior_allowed(new_port, new_behavior, get_threadtask(thread), exception_mask, "thread")) {
+		return KERN_NO_ACCESS;
 	}
 
 #if CONFIG_MACF
@@ -4429,6 +4553,10 @@ task_swap_exception_ports(
 	    (new_behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED))
 	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (!set_exception_behavior_allowed(new_port, new_behavior, task, exception_mask, "task")) {
+		return KERN_NO_ACCESS;
 	}
 
 #if CONFIG_MACF

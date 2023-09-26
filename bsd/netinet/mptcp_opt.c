@@ -78,7 +78,7 @@ mptcp_setup_first_subflow_syn_opts(struct socket *so, u_char *opt, unsigned optl
 
 	ret = tcp_heuristic_do_mptcp(tp);
 	if (ret > 0) {
-		os_log_info(mptcp_log_handle, "%s - %lx: Not doing MPTCP due to heuristics",
+		os_log(mptcp_log_handle, "%s - %lx: Not doing MPTCP due to heuristics",
 		    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mp_tp->mpt_mpte));
 		mp_tp->mpt_flags |= MPTCPF_FALLBACK_HEURISTIC;
 		return optlen;
@@ -1572,7 +1572,7 @@ mptcp_do_add_addr_opt_v1(struct tcpcb *tp, u_char *cp)
 	    addr_opt->maddr_len != MPTCP_V1_ADD_ADDR_OPT_LEN_V4 + 2 &&
 	    addr_opt->maddr_len != MPTCP_V1_ADD_ADDR_OPT_LEN_V6 &&
 	    addr_opt->maddr_len != MPTCP_V1_ADD_ADDR_OPT_LEN_V6 + 2) {
-		os_log_info(mptcp_log_handle, "%s - %lx: Wrong ADD_ADDR length %u\n",
+		os_log_error(mptcp_log_handle, "%s - %lx: Wrong ADD_ADDR length %u\n",
 		    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 		    addr_opt->maddr_len);
 
@@ -1580,7 +1580,7 @@ mptcp_do_add_addr_opt_v1(struct tcpcb *tp, u_char *cp)
 	}
 
 	if ((addr_opt->maddr_flags & MPTCP_V1_ADD_ADDR_ECHO) != 0) {
-		os_log_info(mptcp_log_handle, "%s - %lx: Received ADD_ADDR with echo bit\n",
+		os_log(mptcp_log_handle, "%s - %lx: Received ADD_ADDR with echo bit\n",
 		    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte));
 
 		return;
@@ -1600,7 +1600,7 @@ mptcp_do_add_addr_opt_v1(struct tcpcb *tp, u_char *cp)
 		    INADDR_BROADCAST == haddr ||
 		    IN_PRIVATE(haddr) ||
 		    IN_SHARED_ADDRESS_SPACE(haddr)) {
-			os_log_info(mptcp_log_handle, "%s - %lx: ADD_ADDR invalid addr: %x\n",
+			os_log_error(mptcp_log_handle, "%s - %lx: ADD_ADDR invalid addr: %x\n",
 			    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 			    addr->s_addr);
 
@@ -1616,7 +1616,7 @@ mptcp_do_add_addr_opt_v1(struct tcpcb *tp, u_char *cp)
 			msg.maddr_port = *(uint16_t *)(void *)(cp + addr_opt->maddr_len - HMAC_TRUNCATED_ADD_ADDR - 2);
 		}
 		if (!mptcp_validate_add_addr_hmac(tp, hmac, (u_char *)&msg, msg_len, HMAC_TRUNCATED_ADD_ADDR)) {
-			os_log_info(mptcp_log_handle, "%s - %lx: ADD_ADDR addr: %x invalid HMAC\n",
+			os_log_error(mptcp_log_handle, "%s - %lx: ADD_ADDR addr: %x invalid HMAC\n",
 			    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 			    addr->s_addr);
 			return;
@@ -1645,7 +1645,7 @@ mptcp_do_add_addr_opt_v1(struct tcpcb *tp, u_char *cp)
 			char dbuf[MAX_IPv6_STR_LEN];
 
 			inet_ntop(AF_INET6, addr, dbuf, sizeof(dbuf));
-			os_log_info(mptcp_log_handle, "%s - %lx: ADD_ADDRv6 invalid addr: %s\n",
+			os_log_error(mptcp_log_handle, "%s - %lx: ADD_ADDRv6 invalid addr: %s\n",
 			    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 			    dbuf);
 
@@ -1664,7 +1664,7 @@ mptcp_do_add_addr_opt_v1(struct tcpcb *tp, u_char *cp)
 			char dbuf[MAX_IPv6_STR_LEN];
 
 			inet_ntop(AF_INET6, addr, dbuf, sizeof(dbuf));
-			os_log_info(mptcp_log_handle, "%s - %lx: ADD_ADDR addr: %s invalid HMAC\n",
+			os_log_error(mptcp_log_handle, "%s - %lx: ADD_ADDR addr: %s invalid HMAC\n",
 			    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 			    dbuf);
 			return;
@@ -1682,7 +1682,7 @@ mptcp_do_add_addr_opt_v1(struct tcpcb *tp, u_char *cp)
 		mpte->mpte_last_added_addr_is_v4 = FALSE;
 	}
 
-	os_log_info(mptcp_log_handle, "%s - %lx: Received ADD_ADDRv%u\n",
+	os_log(mptcp_log_handle, "%s - %lx: Received ADD_ADDRv%u\n",
 	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 	    addr_opt->maddr_flags);
 
@@ -1697,7 +1697,7 @@ mptcp_do_add_addr_opt_v0(struct mptses *mpte, u_char *cp)
 
 	if (addr_opt->maddr_len != MPTCP_V0_ADD_ADDR_OPT_LEN_V4 &&
 	    addr_opt->maddr_len != MPTCP_V0_ADD_ADDR_OPT_LEN_V6) {
-		os_log_info(mptcp_log_handle, "%s - %lx: Wrong ADD_ADDR length %u\n",
+		os_log_error(mptcp_log_handle, "%s - %lx: Wrong ADD_ADDR length %u\n",
 		    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 		    addr_opt->maddr_len);
 
@@ -1706,7 +1706,7 @@ mptcp_do_add_addr_opt_v0(struct mptses *mpte, u_char *cp)
 
 	if (addr_opt->maddr_len == MPTCP_V0_ADD_ADDR_OPT_LEN_V4 &&
 	    addr_opt->maddr_flags != MPTCP_V0_ADD_ADDR_IPV4) {
-		os_log_info(mptcp_log_handle, "%s - %lx: ADD_ADDR length for v4 but version is %u\n",
+		os_log_error(mptcp_log_handle, "%s - %lx: ADD_ADDR length for v4 but version is %u\n",
 		    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 		    addr_opt->maddr_flags);
 
@@ -1715,7 +1715,7 @@ mptcp_do_add_addr_opt_v0(struct mptses *mpte, u_char *cp)
 
 	if (addr_opt->maddr_len == MPTCP_V0_ADD_ADDR_OPT_LEN_V6 &&
 	    addr_opt->maddr_flags != MPTCP_V0_ADD_ADDR_IPV6) {
-		os_log_info(mptcp_log_handle, "%s - %lx: ADD_ADDR length for v6 but version is %u\n",
+		os_log_error(mptcp_log_handle, "%s - %lx: ADD_ADDR length for v6 but version is %u\n",
 		    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 		    addr_opt->maddr_flags);
 
@@ -1736,7 +1736,7 @@ mptcp_do_add_addr_opt_v0(struct mptses *mpte, u_char *cp)
 		    INADDR_BROADCAST == haddr ||
 		    IN_PRIVATE(haddr) ||
 		    IN_SHARED_ADDRESS_SPACE(haddr)) {
-			os_log_info(mptcp_log_handle, "%s - %lx: ADD_ADDR invalid addr: %x\n",
+			os_log_error(mptcp_log_handle, "%s - %lx: ADD_ADDR invalid addr: %x\n",
 			    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 			    addr->s_addr);
 
@@ -1761,7 +1761,7 @@ mptcp_do_add_addr_opt_v0(struct mptses *mpte, u_char *cp)
 			char dbuf[MAX_IPv6_STR_LEN];
 
 			inet_ntop(AF_INET6, addr, dbuf, sizeof(dbuf));
-			os_log_info(mptcp_log_handle, "%s - %lx: ADD_ADDRv6 invalid addr: %s\n",
+			os_log_error(mptcp_log_handle, "%s - %lx: ADD_ADDRv6 invalid addr: %s\n",
 			    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 			    dbuf);
 
@@ -1775,7 +1775,7 @@ mptcp_do_add_addr_opt_v0(struct mptses *mpte, u_char *cp)
 		mpte->mpte_last_added_addr_is_v4 = FALSE;
 	}
 
-	os_log_info(mptcp_log_handle, "%s - %lx: Received ADD_ADDRv%u\n",
+	os_log(mptcp_log_handle, "%s - %lx: Received ADD_ADDRv%u\n",
 	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 	    addr_opt->maddr_flags);
 

@@ -41,7 +41,6 @@ ifeq ($(PLATFORM),watchOS)
     export PLATFORM := WatchOS
 endif
 
-
 endif
 
 SUPPORTED_EMBEDDED_PLATFORMS := iPhoneOS iPhoneOSNano tvOS AppleTVOS WatchOS BridgeOS

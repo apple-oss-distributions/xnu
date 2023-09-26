@@ -383,6 +383,10 @@ nextopt:
 		f_flags |= BOUND_CHECKS;
 		goto nextopt;
 	}
+	if (eq(wd, "bound-checks-soft")) {
+		f_flags |= BOUND_CHECKS_SOFT;
+		goto nextopt;
+	}
 	nreqs++;
 	if (needs == 0 && nreqs == 1) {
 		needs = ns(wd);
@@ -489,6 +493,11 @@ checkdev:
 			}
 			if (eq(wd, "bound-checks")) {
 				f_flags |= BOUND_CHECKS;
+				next_word(fp, wd);
+				continue;
+			}
+			if (eq(wd, "bound-checks-soft")) {
+				f_flags |= BOUND_CHECKS_SOFT;
 				next_word(fp, wd);
 				continue;
 			}
@@ -730,6 +739,10 @@ do_rules(FILE *f)
 		fprintf(f, "-include %sd\n", tp);
 		if (ftp->f_flags & BOUND_CHECKS) {
 			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
+		}
+
+		if (ftp->f_flags & BOUND_CHECKS_SOFT) {
+			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_SOFT}\n", tp);
 		}
 		fprintf(f, "%so: %s%s%c\n", tp, source_dir, np, och);
 		if (och == 's') {

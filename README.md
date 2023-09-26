@@ -98,6 +98,16 @@ Other makefile options
 The XNU build system can optionally output color-formatted build output. To enable this, you can either
 set the `XNU_LOGCOLORS` environment variable to `y`, or you can pass `LOGCOLORS=y` to the make command.
 
+Customize xnu version
+---------------------
+
+The xnu version is derived from the SDK or KDK by reading the `CFBundleVersion`
+of their `System/Library/Extensions/System.kext/Info.plist` file.
+This can be customized by setting the `RC_DARWIN_KERNEL_VERSION` variable in
+the environment or on the `make` command line.
+
+
+See doc/xnu_version.md for more details.
 
 Debug information formats
 =========================
@@ -216,20 +226,31 @@ from each file list are -
        `$(DSTROOT)/usr/include` (`EXTRA_DATAFILES`)
        `$(DSTROOT)/usr/local/include` (`EXTRA_PRIVATE_DATAFILES`)
 
-    d. `KERNELFILES` : To make header file available in kernel level -
+    e. `KERNELFILES` : To make header file available in kernel level -
        `$(DSTROOT)/System/Library/Frameworks/Kernel.framework/Headers`
        `$(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders`
 
-    e. `PRIVATE_KERNELFILES` : To make header file available to Apple internal
+    f. `PRIVATE_KERNELFILES` : To make header file available to Apple internal
        for kernel extensions -
        `$(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders`
 
-    f. `MODULEMAPFILES` : To make module map file available in user level -
+    g. `MODULEMAPFILES` : To make module map file available in user level -
        `$(DSTROOT)/usr/include`
 
-    g. `PRIVATE_MODULEMAPFILES` : To make module map file available to Apple
+    h. `PRIVATE_MODULEMAPFILES` : To make module map file available to Apple
        internal in user level -
        `$(DSTROOT)/usr/local/include`
+
+    i. `LIBCXX_DATAFILES` : To make header file available to in-kernel libcxx clients:
+       `$(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders/kernel_sdkroot`
+
+    j. `EXCLAVEKIT_DATAFILES` : To make header file available to Apple internal
+       ExclaveKit SDK -
+       `$(DSTROOT)/System/ExclaveKit/usr/include`
+
+    k. `EXCLAVECORE_DATAFILES` : To make header file available to Apple internal
+       ExclaveCore SDK -
+       `$(DSTROOT)/System/ExclaveCore/usr/include`
 
 The Makefile combines the file lists mentioned above into different
 install lists which are used by build system to install the header files. There
@@ -306,6 +327,26 @@ member file lists and their default location are described below -
        for compilation only. Does not install anything into the SDK.
        Definition -
             EXPORT_MI_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
+    
+    j. `INSTALL_KF_LIBCXX_MI_LIST` : Installs header file for in-kernel libc++ support.
+       Locations -
+            $(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders/kernel_sdkroot
+       Definition -
+            INSTALL_KF_LIBCXX_MI_LIST = ${LIBCXX_DATAFILES}
+
+    k. `INSTALL_EXCLAVEKIT_MI_LIST` : Installs header file to location that is
+       available for Apple internal for ExclaveKit.
+       Locations -
+            $(DSTROOT)/System/ExclaveKit/usr/include
+       Definition -
+            INSTALL_EXCLAVEKIT_MI_LIST = ${EXCLAVEKIT_DATAFILES}
+
+    l. `INSTALL_EXCLAVECORE_MI_LIST` : Installs header file to location that is
+       available for Apple internal for ExclaveCore.
+       Locations -
+            $(DSTROOT)/System/ExclaveCore/usr/include
+       Definition -
+            INSTALL_EXCLAVECORE_MI_LIST = ${EXCLAVECORE_DATAFILES}
 
 If you want to install the header file in a sub-directory of the paths
 described in (1), specify the directory name using two variables
@@ -352,6 +393,10 @@ want to export a function only to kernel level but not user level.
             $(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders
     g. `DRIVERKIT`: If defined, enclosed code is visible exclusively in the
     DriverKit SDK headers used by userspace drivers.
+    h. `EXCLAVEKIT`: If defined, enclosed code is visible exclusively in the
+    ExclaveKit SDK headers.
+    i. `EXCLAVECORE`: If defined, enclosed code is visible exclusively in the
+    ExclaveCore SDK headers.
 
 Module map file name convention
 ===============================

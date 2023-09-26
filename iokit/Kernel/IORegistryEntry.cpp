@@ -366,7 +366,7 @@ IORegistryEntry::init( IORegistryEntry * old,
 
 	WLOCK;
 
-	reserved->fRegistryEntryID = old->reserved->fRegistryEntryID;
+	reserved->fRegistryEntryID = ++gIORegistryLastID;
 
 	fPropertyTable = old->dictionaryWithProperties();
 #ifdef IOREGSPLITTABLES

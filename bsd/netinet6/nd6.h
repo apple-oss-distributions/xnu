@@ -177,7 +177,7 @@ struct nd_ifinfo_compat {
 	u_int8_t chlim;                 /* CurHopLimit */
 	u_int8_t receivedra;
 	/* the following 3 members are for privacy extension for addrconf */
-	u_int8_t randomseed0[8]; /* upper 64 bits of SHA1 digest */
+	u_int8_t randomseed0[8]; /* upper 64 bits of SHA256 digest */
 	u_int8_t randomseed1[8]; /* lower 64 bits (usually the EUI64 IFID) */
 	u_int8_t randomid[8];   /* current random ID */
 };

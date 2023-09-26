@@ -37,7 +37,8 @@ NOT_KF_MI_HEADERS  = $(NOT_EXPORT_HEADERS)			\
 		     IOKernelReporters.h			\
 		     IOInterruptAccounting.h			\
 		     IOPlatformIO.h				\
-		     IOPMGR.h IOPlatformActions.h
+		     IOPMGR.h IOPlatformActions.h 	\
+		     IOExtensiblePaniclog.h
 
 
 # These should be additionally installed in IOKit.framework's public Headers

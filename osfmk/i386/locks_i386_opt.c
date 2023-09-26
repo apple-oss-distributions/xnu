@@ -150,12 +150,6 @@ lck_mtx_lock(
 	/* record owner of mutex */
 	ordered_store_mtx_owner(lock, current_thread()->ctid);
 
-#if MACH_LDEBUG
-	if (thread) {
-		thread->mutex_count++;          /* lock statistic */
-	}
-#endif
-
 	/* release interlock and re-enable preemption */
 	lck_mtx_lock_finish_inline(lock, state);
 }
@@ -204,12 +198,6 @@ lck_mtx_try_lock(
 
 	/* record owner of mutex */
 	ordered_store_mtx_owner(lock, current_thread()->ctid);
-
-#if MACH_LDEBUG
-	if (thread) {
-		thread->mutex_count++;          /* lock statistic */
-	}
-#endif
 
 	/* release interlock and re-enable preemption */
 	lck_mtx_try_lock_finish_inline(lock, state);
@@ -271,12 +259,6 @@ lck_mtx_lock_spin_always(
 
 	/* record owner of mutex */
 	ordered_store_mtx_owner(lock, current_thread()->ctid);
-
-#if MACH_LDEBUG
-	if (thread) {
-		thread->mutex_count++;          /* lock statistic */
-	}
-#endif
 
 	LCK_MTX_ACQUIRED(lock, lock->lck_mtx_grp, true, false);
 	/* return with the interlock held and preemption disabled */
@@ -357,12 +339,6 @@ lck_mtx_try_lock_spin_always(
 
 	/* record owner of mutex */
 	ordered_store_mtx_owner(lock, current_thread()->ctid);
-
-#if MACH_LDEBUG
-	if (thread) {
-		thread->mutex_count++;          /* lock statistic */
-	}
-#endif
 
 #if     CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_LOCK_SPIN_ACQUIRE, lock, 0);
@@ -460,13 +436,6 @@ lck_mtx_unlock(
 	/* release interlock */
 	state &= ~LCK_MTX_ILOCKED_MSK;
 	ordered_store_mtx_state_release(lock, state);
-
-#if     MACH_LDEBUG
-	thread_t thread = current_thread();
-	if (thread) {
-		thread->mutex_count--;
-	}
-#endif  /* MACH_LDEBUG */
 
 	/* re-enable preemption */
 	lck_mtx_unlock_finish_inline(lock, state);

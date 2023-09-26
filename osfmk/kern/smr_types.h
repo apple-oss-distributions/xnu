@@ -32,6 +32,7 @@
 #include <sys/cdefs.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <os/base.h>
 
 __BEGIN_DECLS
 
@@ -51,6 +52,28 @@ typedef unsigned long           smr_seq_t;
  */
 typedef struct smr             *smr_t;
 
+
+/*!
+ * @typedef smr_node_t
+ *
+ * @brief
+ * Intrusive data structure used with @c ssmr_call() to defer callbacks
+ * to a safe time.
+ */
+typedef struct smr_node        *smr_node_t;
+
+/*!
+ * @typedef smr_cb_t
+ *
+ * @brief
+ * A callback acting on an @c smr_node_t to destroy it.
+ */
+typedef void (*smr_cb_t)(smr_node_t);
+
+struct smr_node {
+	struct smr_node        *smrn_next;
+	smr_cb_t XNU_PTRAUTH_SIGNED_FUNCTION_PTR("ssmr_cb_t") smrn_cb;
+};
 
 /*!
  * @macro SMR_POINTER_DECL

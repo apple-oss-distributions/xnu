@@ -6,7 +6,13 @@ export MakeInc_dir=${SRCROOT}/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
+#
+# Keep INSTALLHDRS_SKIP_HOST set to YES for exclave builds,
+# otherwise firehose headers will install into exclave SDKs.
+# 
+ifeq ($(filter 1,$(EXCLAVECORE) $(EXCLAVEKIT)),)
 INSTALLHDRS_SKIP_HOST = NO
+endif
 
 KERNELFILES =
 

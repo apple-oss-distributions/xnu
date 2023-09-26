@@ -29,21 +29,18 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <vm/vm_map.h>
-#include <vm/pmap.h>
+#include <vm/vm_memtag.h>
 #include <kern/assert.h>
-#include <kern/cpu_data.h>
-#include <kern/backtrace.h>
 #include <machine/machine_routines.h>
 #include <kern/locks.h>
 #include <kern/debug.h>
+#include <kern/telemetry.h>
 #include <kern/thread.h>
-#include <kern/zalloc.h>
 #include <libkern/libkern.h>
 #include <mach/mach_vm.h>
 #include <mach/mach_types.h>
 #include <mach/vm_param.h>
 #include <mach/machine/vm_param.h>
-#include <mach/sdt.h>
 #include <machine/atomic.h>
 
 #include "kasan.h"
@@ -61,7 +58,7 @@ bool kasan_tbi_enabled = false;
 
 /* Reserved tags */
 #define KASAN_TBI_DEFAULT_TAG       0xFF
-#define KASAN_TBI_ZALLOC_FREE_TAG   0xF0
+#define KASAN_TBI_DEFAULT_FREE_TAG  0xF0
 #define KASAN_TBI_REDZONE_POISON    0x80
 
 #if defined(ARM_LARGE_MEMORY)
@@ -72,9 +69,16 @@ bool kasan_tbi_enabled = false;
 #define KASAN_TBI_SHADOW_MAX        0xffffffffc0000000ULL
 #endif
 
-#if !CONFIG_KERNEL_TBI
-#error "KASAN-TBI requires KERNEL DATA TBI enabled"
-#endif /* CONFIG_KERNEL_TBI */
+#if !CONFIG_KERNEL_TAGGING
+#error "KASAN-TBI requires KERNEL TAGGING"
+#endif /* CONFIG_KERNEL_TAGGING */
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(kasan_desc,
+    .type                = KERNEL_BRK_TYPE_KASAN,
+    .base                = KASAN_TBI_ESR_BASE,
+    .max                 = KASAN_TBI_ESR_TOP,
+    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .handle_breakpoint   = kasan_handle_brk_failure);
 
 #if KASAN_LIGHT
 extern bool kasan_zone_maps_owned(vm_address_t, vm_size_t);
@@ -83,9 +87,8 @@ extern uint64_t ml_get_speculative_timebase(void);
 
 /* Stack and large allocations use the whole set of tags. Tags 0 and 15 are reserved. */
 static uint8_t kasan_tbi_full_tags[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
-static uint8_t kasan_tbi_odd_tags[] = {1, 3, 5, 7, 9, 11, 13};
-static uint8_t kasan_tbi_even_tags[] = {2, 4, 6, 8, 10, 12, 14};
 
+/* Randomize tag allocation through a simple LFSR */
 static uint32_t kasan_tbi_lfsr;
 
 /*
@@ -177,9 +180,12 @@ kasan_impl_decode_issue(char *logbuf, size_t bufsize, uptr p, uptr width, access
 }
 
 void OS_NORETURN
-kasan_handle_brk_failure(vm_offset_t addr, uint16_t esr)
+kasan_handle_brk_failure(void* tstate, uint16_t esr)
 {
+	arm_saved_state_t* state = (arm_saved_state_t *)tstate;
+	vm_offset_t addr = saved_state64(state)->x[0];
 	uptr width = KASAN_TBI_GET_SIZE(esr);
+
 	access_t access;
 
 	if (esr & KASAN_TBI_ESR_WRITE) {
@@ -239,21 +245,6 @@ kasan_tbi_full_tag(void)
 	       sizeof(kasan_tbi_full_tags)] | 0xF0;
 }
 
-static inline uint8_t
-kasan_tbi_odd_even_tag(vm_offset_t addr, size_t size)
-{
-	uint32_t i = kasan_tbi_lfsr_next();
-	uint8_t tag = 0xF0;
-
-	if ((addr / size) % 2) {
-		tag |= kasan_tbi_odd_tags[i % sizeof(kasan_tbi_odd_tags)];
-	} else {
-		tag |= kasan_tbi_even_tags[i % sizeof(kasan_tbi_even_tags)];
-	}
-
-	return tag;
-}
-
 uintptr_t
 kasan_tbi_tag_range(uintptr_t addr, size_t sz, uint8_t tag)
 {
@@ -261,35 +252,22 @@ kasan_tbi_tag_range(uintptr_t addr, size_t sz, uint8_t tag)
 		return addr;
 	}
 
+	if (tag == 0) {
+		tag = KASAN_TBI_DEFAULT_TAG;
+	}
+
 #if KASAN_LIGHT
 	if (!kasan_zone_maps_owned(addr, sz)) {
 		tag = KASAN_TBI_DEFAULT_TAG;
-		return (uintptr_t)kasan_tbi_tag_ptr((long)addr, tag);
+		return (uintptr_t)vm_memtag_add_ptr_tag((long)addr, tag);
 	}
 #endif /* KASAN_LIGHT */
 
 	uint8_t *shadow_first = SHADOW_FOR_ADDRESS(addr);
 	uint8_t *shadow_last = SHADOW_FOR_ADDRESS(addr + P2ROUNDUP(sz, 16));
 
-	__nosan_memset((void *)shadow_first, tag, shadow_last - shadow_first);
-	return (uintptr_t)kasan_tbi_tag_ptr((long)addr, tag);
-}
-
-static vm_offset_t
-kasan_tbi_do_tag_zone_object(vm_offset_t addr, vm_size_t elem_size, uint8_t tag, boolean_t zxcpu)
-{
-	vm_offset_t retaddr = kasan_tbi_tag_range(addr, elem_size, tag);
-	/*
-	 * If the allocation comes from the per-cpu zones, extend the tag to all
-	 * the adjacent, per cpu, instances.
-	 */
-	if (zxcpu) {
-		for (uint32_t index = 1; index < zpercpu_count(); index++) {
-			(void)kasan_tbi_tag_range(addr + ptoa(index), elem_size, tag);
-		}
-	}
-
-	return retaddr;
+	__nosan_memset((void *)shadow_first, tag | 0xF0, shadow_last - shadow_first);
+	return (uintptr_t)vm_memtag_add_ptr_tag((long)addr, tag);
 }
 
 void
@@ -304,29 +282,6 @@ kasan_tbi_copy_tags(vm_offset_t new_addr, vm_offset_t old_addr, vm_size_t size)
 	uint8_t *old_end    = SHADOW_FOR_ADDRESS(old_addr + size);
 
 	__nosan_memcpy(new_shadow, old_shadow, old_end - old_shadow);
-}
-
-vm_offset_t
-kasan_tbi_tag_zalloc(vm_offset_t addr, vm_size_t size, vm_size_t used, boolean_t zxcpu)
-{
-	used = kasan_granule_round(used);
-	if (used < size) {
-		kasan_tbi_tag_zfree(addr + used, size - used, zxcpu);
-	}
-	uint8_t tag = kasan_tbi_odd_even_tag(addr, size);
-	return kasan_tbi_do_tag_zone_object(addr, used, tag, zxcpu);
-}
-
-vm_offset_t
-kasan_tbi_tag_zalloc_default(vm_offset_t addr, vm_size_t size, boolean_t zxcpu)
-{
-	return kasan_tbi_do_tag_zone_object(addr, size, KASAN_TBI_DEFAULT_TAG, zxcpu);
-}
-
-vm_offset_t
-kasan_tbi_tag_zfree(vm_offset_t addr, vm_size_t elem_size, boolean_t zxcpu)
-{
-	return kasan_tbi_do_tag_zone_object(addr, elem_size, KASAN_TBI_ZALLOC_FREE_TAG, zxcpu);
 }
 
 void
@@ -357,50 +312,24 @@ __hwasan_generate_tag(void)
 	return tag;
 }
 
-vm_offset_t
-kasan_tbi_tag_large_alloc(vm_offset_t addr, vm_size_t size, vm_size_t used)
-{
-	used = kasan_granule_round(used);
-	if (used < size) {
-		kasan_tbi_tag_large_free(addr + used, size - used);
-	}
-	return kasan_tbi_tag_range(addr, used, kasan_tbi_full_tag());
-}
-
-vm_offset_t
-kasan_tbi_tag_large_free(vm_offset_t addr, vm_size_t size)
-{
-	return kasan_tbi_tag_range(addr, size, KASAN_TBI_DEFAULT_TAG);
-}
-
-/* Return the shadow table tag location */
-__attribute__((always_inline))
+/* Get the tag location inside the shadow tag table */
 uint8_t *
-kasan_tbi_get_tag_address(vm_offset_t addr)
+kasan_tbi_get_tag_address(vm_offset_t address)
 {
-	return SHADOW_FOR_ADDRESS(addr);
+	return SHADOW_FOR_ADDRESS(address);
 }
 
-/* Query the shadow table and return the memory tag */
-__attribute__((always_inline))
-uint8_t
-kasan_tbi_get_memory_tag(vm_offset_t addr)
+static inline uint8_t
+kasan_tbi_get_tag(vm_offset_t address)
 {
-	return *kasan_tbi_get_tag_address(addr);
-}
-
-/* Query the shadow table and tag the address accordingly */
-vm_offset_t
-kasan_tbi_fix_address_tag(vm_offset_t addr)
-{
-	return (uintptr_t)kasan_tbi_tag_ptr((long)addr, kasan_tbi_get_memory_tag(addr));
+	return *kasan_tbi_get_tag_address(address);
 }
 
 /* Single out accesses to the reserve free tag */
 static violation_t
 kasan_tbi_estimate_reason(uint8_t __unused access_tag, uint8_t stored_tag)
 {
-	if (stored_tag == KASAN_TBI_ZALLOC_FREE_TAG) {
+	if (stored_tag == KASAN_TBI_DEFAULT_FREE_TAG) {
 		return REASON_MOD_AFTER_FREE;
 	}
 
@@ -426,11 +355,16 @@ kasan_check_range(const void *a, size_t sz, access_t access)
 		return;
 	}
 
+	/* No point in checking a NULL pointer tag */
+	if (a == NULL) {
+		return;
+	}
+
 	/*
 	 * Inlining code expects to match the topmost 8 bits, while we only use
 	 * four. Unconditionally set to one the others.
 	 */
-	uint8_t tag = kasan_tbi_get_tag(addr) | 0xF0;
+	uint8_t tag = vm_memtag_extract_tag(addr) | 0xF0;
 
 	/*
 	 * Stay on par with inlining instrumentation, that considers untagged
@@ -454,7 +388,95 @@ kasan_check_range(const void *a, size_t sz, access_t access)
 
 		/* Tag mismatch, prepare the reporting */
 		violation_t reason = kasan_tbi_estimate_reason(tag, *p);
-		uintptr_t fault_addr = kasan_tbi_tag_ptr(ADDRESS_FOR_SHADOW((uintptr_t)p), tag);
+		uintptr_t fault_addr = vm_memtag_add_ptr_tag(ADDRESS_FOR_SHADOW((uintptr_t)p), tag);
 		kasan_violation(fault_addr, sz, access, reason);
 	}
+}
+
+/*
+ * Whenever more than the required space is allocated in a bucket,
+ * kasan_tbi_retag_unused_space() can be called to fill-up the remaining
+ * chunks (if present) with a newly randomly generated tag value, to catch
+ * off-by-small accesses.
+ */
+void
+kasan_tbi_retag_unused_space(vm_offset_t addr, vm_size_t size, vm_size_t used)
+{
+	used = kasan_granule_round(used);
+	if (used < size) {
+		vm_offset_t unused_tag_addr = vm_memtag_assign_tag(addr + used, size - used);
+		vm_memtag_set_tag(unused_tag_addr, size - used);
+	}
+}
+
+/*
+ * KASAN-TBI tagging is based on virtual address ranges. Whenever we unwire
+ * pages from a portion of the VA space in a page based allocator, we reset
+ * that VA range to the default free tag value, to catch use-after-free
+ * accesses.
+ */
+void
+kasan_tbi_mark_free_space(vm_offset_t addr, vm_size_t size)
+{
+	addr = vm_memtag_add_ptr_tag(addr, KASAN_TBI_DEFAULT_TAG);
+	vm_memtag_set_tag(addr, size);
+}
+
+/*
+ * KASAN-TBI sanitizer is an implementation of vm_memtag.
+ */
+__attribute__((always_inline))
+void
+vm_memtag_bzero(void *buf, vm_size_t n)
+{
+	bzero(buf, n);
+}
+
+/* Query the shadow table and return the associated tag. */
+__attribute__((always_inline))
+uint8_t
+vm_memtag_get_tag(vm_offset_t address)
+{
+	return kasan_tbi_get_tag(address);
+}
+
+__attribute__((always_inline))
+vm_offset_t
+vm_memtag_fixup_ptr(vm_offset_t address)
+{
+	return vm_memtag_add_ptr_tag(address, vm_memtag_get_tag(address));
+}
+
+__attribute__((always_inline))
+void
+vm_memtag_set_tag(vm_offset_t address, vm_offset_t size)
+{
+	uint8_t tag = vm_memtag_extract_tag(address);
+	kasan_tbi_tag_range(address, kasan_granule_round(size), tag);
+}
+
+__attribute__((always_inline))
+vm_offset_t
+vm_memtag_assign_tag(vm_offset_t address, __unused vm_size_t size)
+{
+	uint8_t tag = kasan_tbi_full_tag();
+	return vm_memtag_add_ptr_tag((long)address, tag);
+}
+
+__attribute__((always_inline)) void
+vm_memtag_verify_tag(vm_offset_t tagged_address)
+{
+	__asan_load1(tagged_address);
+}
+
+__attribute__((always_inline)) void
+vm_memtag_disable_checking()
+{
+	/* Nothing to do with KASAN-TBI */
+}
+
+__attribute__((always_inline)) void
+vm_memtag_enable_checking()
+{
+	/* Nothing to do with KASAN-TBI */
 }

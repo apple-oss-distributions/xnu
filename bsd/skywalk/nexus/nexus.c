@@ -114,7 +114,9 @@ SKMEM_TAG_DEFINE(skmem_tag_nx_port_info, SKMEM_TAG_NX_PORT_INFO);
  * the global nxctl_head list.
  */
 static struct nxctl _kernnxctl;
+static struct nxctl _usernxctl;
 struct nexus_controller kernnxctl = { .ncd_nxctl = &_kernnxctl };
+struct nexus_controller usernxctl = { .ncd_nxctl = &_usernxctl };
 
 int
 nexus_init(void)
@@ -130,12 +132,22 @@ nexus_init(void)
 	nxdom_attach_all();
 
 	/*
-	 * Initialize private kernel nexus controller handle; this is used
-	 * internally for creating nexus providers and nexus instances from
-	 * within the Skywalk code (e.g. netif_compat).
+	 * Initialize private kernel and shared user nexus controller handle;
+	 *
+	 * Shared Kernel controller is used internally for creating nexus providers
+	 * and nexus instances from within the Skywalk code (e.g. netif_compat).
+	 *
+	 * Shared User controller is used userspace by clients(e.g. libnetcore)
+	 * that would like to call nexus instances for use cases like
+	 * configuring flow entry that they own indirectly (e.g. via NECP), so
+	 * that the nexus would perform permission check based on other info
+	 * (e.g. PID, UUID) and bypass nxctl check (this nxctl has no
+	 * credentials).
 	 */
 	nxctl_init(&_kernnxctl, kernproc, NULL);
 	nxctl_retain_locked(&_kernnxctl);       /* one for us */
+	nxctl_init(&_usernxctl, kernproc, NULL);
+	nxctl_retain_locked(&_usernxctl);       /* one for us */
 	nxctl_traffic_rule_init();
 
 	__nx_inited = 1;
@@ -151,6 +163,7 @@ nexus_fini(void)
 	if (__nx_inited) {
 		nxctl_traffic_rule_fini();
 		nxctl_release_locked(&_kernnxctl);
+		nxctl_release_locked(&_usernxctl);
 
 		/* tell all domains they're going away */
 		nxdom_detach_all();
@@ -886,7 +899,8 @@ nxctl_nexus_config(struct nxctl *nxctl, struct sockopt *sopt)
 	nx = nx_find(ncr.nc_nx_uuid, TRUE);
 	if (nx == NULL || (disable_nxctl_check == 0 &&
 	    nx->nx_prov->nxprov_ctl != nxctl &&
-	    nxctl != &_kernnxctl)) {    /* make exception for kernnxctl */
+	    nxctl != &_kernnxctl &&    /* allow kernel/shared user nxctl */
+	    nxctl != &_usernxctl)) {
 		err = ENOENT;
 		goto done;
 	}
@@ -1116,6 +1130,10 @@ nxctl_init(struct nxctl *nxctl, struct proc *p, struct fileproc *fp)
 		ASSERT(p == kernproc);
 		nxctl->nxctl_flags |= NEXUSCTLF_KERNEL;
 	}
+	if (nxctl == &_usernxctl) {
+		ASSERT(p == kernproc);
+		nxctl->nxctl_cred = NULL;
+	}
 	if (fp == NULL) {
 		nxctl->nxctl_flags |= NEXUSCTLF_NOFDREF;
 	}
@@ -1239,7 +1257,7 @@ nxprov_advise_connect(struct kern_nexus *nx, struct kern_channel *ch,
 	 * Upon ring/slot init failure, this is cleared
 	 * by nxprov_advise_disconnect() below.
 	 */
-	atomic_bitset_32(&ch->ch_flags, CHANF_EXT_PRECONNECT);
+	os_atomic_or(&ch->ch_flags, CHANF_EXT_PRECONNECT, relaxed);
 	if (NXPROV_LLINK(nxprov)) {
 		err = nx_netif_llink_ext_init_default_queues(nx);
 	} else {
@@ -1258,7 +1276,7 @@ nxprov_advise_connect(struct kern_nexus *nx, struct kern_channel *ch,
 		    SK_KVA(ch), ch->ch_flags, CHANF_BITS, SK_KVA(nx), err);
 		goto done;
 	}
-	atomic_bitset_32(&ch->ch_flags, CHANF_EXT_CONNECTED);
+	os_atomic_or(&ch->ch_flags, CHANF_EXT_CONNECTED, relaxed);
 	SK_D("ch 0x%llx flags %b nx 0x%llx connected",
 	    SK_KVA(ch), ch->ch_flags, CHANF_BITS, SK_KVA(nx));
 
@@ -1296,7 +1314,7 @@ nxprov_advise_disconnect(struct kern_nexus *nx, struct kern_channel *ch)
 		ASSERT(!(ch->ch_flags & CHANF_EXT_SKIP));
 		if (ch->ch_flags & CHANF_EXT_CONNECTED) {
 			nxprov->nxprov_ext.nxpi_pre_disconnect(nxprov, nx, ch);
-			atomic_bitclear_32(&ch->ch_flags, CHANF_EXT_CONNECTED);
+			os_atomic_andnot(&ch->ch_flags, CHANF_EXT_CONNECTED, relaxed);
 		}
 
 		/*
@@ -1311,7 +1329,7 @@ nxprov_advise_disconnect(struct kern_nexus *nx, struct kern_channel *ch)
 
 		ASSERT(ch->ch_flags & CHANF_EXT_PRECONNECT);
 		nxprov->nxprov_ext.nxpi_disconnected(nxprov, nx, ch);
-		atomic_bitclear_32(&ch->ch_flags, CHANF_EXT_PRECONNECT);
+		os_atomic_andnot(&ch->ch_flags, CHANF_EXT_PRECONNECT, relaxed);
 
 		SK_D("ch 0x%llx flags %b nx 0x%llx disconnected",
 		    SK_KVA(ch), ch->ch_flags, CHANF_BITS, SK_KVA(nx));
@@ -1450,7 +1468,7 @@ nxprov_create(struct proc *p, struct nxctl *nxctl, struct nxprov_reg *reg,
 
 	NXCTL_LOCK_ASSERT_HELD(nxctl);
 
-	ASSERT(nxctl->nxctl_cred != proc_ucred(kernproc));
+	ASSERT(nxctl->nxctl_cred != proc_ucred_unsafe(kernproc));
 	*err = 0;
 
 	switch (nxp->nxp_type) {
@@ -1512,7 +1530,7 @@ nxprov_create_kern(struct nxctl *nxctl,
 	NXCTL_LOCK_ASSERT_HELD(nxctl);
 	SK_LOCK_ASSERT_HELD();
 
-	ASSERT(nxctl->nxctl_cred == proc_ucred(kernproc));
+	ASSERT(nxctl->nxctl_cred == proc_ucred_unsafe(kernproc));
 	ASSERT(nxp->nxp_type == nxdom_prov->nxdom_prov_dom->nxdom_type);
 	ASSERT(init == NULL ||
 	    init->nxpi_version == KERN_NEXUS_PROVIDER_CURRENT_VERSION ||
@@ -1907,7 +1925,7 @@ nx_create(struct nxctl *nxctl, const uuid_t nxprov_uuid,
 	STAILQ_INSERT_TAIL(&nxprov->nxprov_nx_head, nx, nx_prov_link);
 	nxprov->nxprov_nx_count++;
 	RB_INSERT(kern_nexus_tree, &nx_head, nx);
-	atomic_bitset_32(&nx->nx_flags, NXF_ATTACHED);
+	os_atomic_or(&nx->nx_flags, NXF_ATTACHED, relaxed);
 
 	nx_retain_locked(nx);   /* one for the provider list */
 	nx_retain_locked(nx);   /* one for the global list */
@@ -2028,7 +2046,7 @@ nx_close(struct kern_nexus *nx, boolean_t locked)
 		} else {
 			/* detach when the last channel closes */
 			ASSERT(nx->nx_refcnt > 3);
-			atomic_bitset_32(&nx->nx_flags, NXF_CLOSED);
+			os_atomic_or(&nx->nx_flags, NXF_CLOSED, relaxed);
 		}
 	}
 
@@ -2080,7 +2098,7 @@ nx_detach(struct kern_nexus *nx)
 	STAILQ_REMOVE(&nxprov->nxprov_nx_head, nx, kern_nexus, nx_prov_link);
 	nxprov->nxprov_nx_count--;
 	RB_REMOVE(kern_nexus_tree, &nx_head, nx);
-	atomic_bitclear_32(&nx->nx_flags, NXF_ATTACHED);
+	os_atomic_andnot(&nx->nx_flags, NXF_ATTACHED, relaxed);
 	nx->nx_prov = NULL;
 	if (nx->nx_ctx_release != NULL) {
 		nx->nx_ctx_release(nx->nx_ctx);
@@ -3326,6 +3344,15 @@ nexus_mib_get_sysctl SYSCTL_HANDLER_ARGS
 	}
 
 	if (req->newptr == USER_ADDR_NULL) {
+		/*
+		 * For flow stats requests, non-root users need to provide a
+		 * 5-tuple. Otherwise, we do not grant access.
+		 */
+		if (oidp->oid_arg2 == NXMIB_FLOW &&
+		    !kauth_cred_issuser(kauth_cred_get())) {
+			SK_ERR("mib request rejected: tuple not provided");
+			return EPERM;
+		}
 		/* use subcommand for multiple nodes */
 		filter.nmf_type = oidp->oid_arg2;
 		filter.nmf_bitmap = 0x0;
@@ -3341,6 +3368,18 @@ nexus_mib_get_sysctl SYSCTL_HANDLER_ARGS
 		if (filter.nmf_type != oidp->oid_arg2) {
 			SK_ERR("mis-matching nmf_type");
 			return EINVAL;
+		}
+		/*
+		 * For flow stats requests, non-root users need to set the nexus
+		 * mib filter to NXMIB_FILTER_INFO_TUPLE. Otherwise, we do not
+		 * grant access. This ensures that fsw_mib_get_flow looks for a
+		 * flow entry that matches the given tuple of the non-root user.
+		 */
+		if (filter.nmf_type == NXMIB_FLOW &&
+		    (filter.nmf_bitmap & NXMIB_FILTER_INFO_TUPLE) == 0 &&
+		    !kauth_cred_issuser(kauth_cred_get())) {
+			SK_ERR("mib request rejected: tuple filter not set");
+			return EPERM;
 		}
 	}
 

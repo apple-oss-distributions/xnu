@@ -157,7 +157,7 @@ typedef struct fse_info {
 	dev_t      dev;
 	int32_t    mode;// note: this is not a mode_t (it's 32-bits, not 16)
 	uid_t      uid;
-	gid_t      gid;
+	uint32_t   document_id;
 	uint64_t   nlink;// only filled in if the vnode is marked as a hardlink
 } fse_info;
 

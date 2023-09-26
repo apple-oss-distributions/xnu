@@ -478,6 +478,19 @@ __packet_opt_set_token(struct __packet_opt *po, const void *token,
 	return 0;
 }
 
+#ifndef KERNEL
+__attribute__((always_inline))
+static inline void
+__packet_set_tx_timestamp(const uint64_t ph, const uint64_t ts)
+{
+	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
+	struct __packet_opt *po = &PKT_ADDR(ph)->pkt_com_opt;
+
+	po->__po_pkt_tx_time = ts;
+	PKT_ADDR(ph)->pkt_pflags |= PKT_F_OPT_TX_TIMESTAMP;
+}
+#endif /* !KERNEL */
+
 __attribute__((always_inline))
 static inline errno_t
 __packet_set_token(const uint64_t ph, const void *token, const uint16_t len)
@@ -714,14 +727,10 @@ __packet_get_l4s_flag(const uint64_t ph)
 
 __attribute__((always_inline))
 static inline void
-__packet_set_l4s_flag(const uint64_t ph, const boolean_t is_l4s)
+__packet_set_l4s_flag(const uint64_t ph)
 {
 	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
-	if (is_l4s) {
-		PKT_ADDR(ph)->pkt_pflags |= PKT_F_L4S;
-	} else {
-		PKT_ADDR(ph)->pkt_pflags &= ~PKT_F_L4S;
-	}
+	PKT_ADDR(ph)->pkt_pflags |= PKT_F_L4S;
 }
 
 __attribute__((always_inline))
@@ -880,7 +889,7 @@ __packet_set_inet_checksum(const uint64_t ph, const packet_csum_flags_t flags,
 {
 	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
 
-	PKT_ADDR(ph)->pkt_csum_flags = flags & (~PACKET_CSUM_TSO_FLAGS);
+	PKT_ADDR(ph)->pkt_csum_flags = flags & PACKET_CSUM_FLAGS;
 
 	if (tx) {
 		PKT_ADDR(ph)->pkt_csum_tx_start_off = start;
@@ -890,6 +899,15 @@ __packet_set_inet_checksum(const uint64_t ph, const packet_csum_flags_t flags,
 		PKT_ADDR(ph)->pkt_csum_rx_value = stuff_val;
 	}
 	return 0;
+}
+
+__attribute__((always_inline))
+static inline void
+__packet_add_inet_csum_flags(const uint64_t ph, const packet_csum_flags_t flags)
+{
+	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
+
+	PKT_ADDR(ph)->pkt_csum_flags |= flags & PACKET_CSUM_FLAGS;
 }
 
 __attribute__((always_inline))
@@ -914,7 +932,7 @@ __packet_get_inet_checksum(const uint64_t ph, uint16_t *start,
 			*stuff_val = PKT_ADDR(ph)->pkt_csum_rx_value;
 		}
 	}
-	return PKT_ADDR(ph)->pkt_csum_flags & (~PACKET_CSUM_TSO_FLAGS);
+	return PKT_ADDR(ph)->pkt_csum_flags & PACKET_CSUM_FLAGS;
 }
 
 __attribute__((always_inline))
@@ -1043,7 +1061,6 @@ __packet_add_buflet(const uint64_t ph, const void *bprev0, const void *bnew0)
 
 	VERIFY(PKT_ADDR(ph) && bnew && (bnew != bprev));
 	VERIFY(PP_HAS_BUFFER_ON_DEMAND(PKT_ADDR(ph)->pkt_qum.qum_pp));
-	VERIFY(bnew->buf_ctl != NULL);
 #else /* !KERNEL */
 	buflet_t bprev = __DECONST(buflet_t, bprev0);
 	buflet_t bnew = __DECONST(buflet_t, bnew0);
@@ -1164,13 +1181,11 @@ __packet_set_segment_count(const uint64_t ph, uint8_t segcount)
 }
 
 __attribute__((always_inline))
-static inline errno_t
-__packet_get_protocol_segment_size(const uint64_t ph, uint16_t *proto_seg_sz)
+static inline uint16_t
+__packet_get_protocol_segment_size(const uint64_t ph)
 {
-	_CASSERT(sizeof(PKT_ADDR(ph)->pkt_proto_seg_sz == sizeof(uint16_t)));
 	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
-	*proto_seg_sz =  PKT_ADDR(ph)->pkt_proto_seg_sz;
-	return 0;
+	return PKT_ADDR(ph)->pkt_proto_seg_sz;
 }
 
 __attribute__((always_inline))
@@ -1202,7 +1217,7 @@ __packet_set_tso_flags(const uint64_t ph, packet_tso_flags_t flags)
 }
 
 __attribute__((always_inline))
-static inline uint16_t
+static inline uint32_t
 __buflet_get_data_limit(const void *buf)
 {
 	return BLT_ADDR(buf)->buf_dlim;
@@ -1211,17 +1226,16 @@ __buflet_get_data_limit(const void *buf)
 #ifdef KERNEL
 __attribute__((always_inline))
 static inline errno_t
-__buflet_set_data_limit(const void *buf, const uint16_t dlim)
+__buflet_set_data_limit(const void *buf, const uint32_t dlim)
 {
 	/* buffer region is always marked as shareable */
 	ASSERT(BLT_ADDR(buf)->buf_ctl->bc_flags & SKMEM_BUFCTL_SHAREOK);
 
 	/* full bounds checking will be performed during finalize */
-	if (__probable((uint32_t)dlim + BLT_ADDR(buf)->buf_boff <=
-	    BLT_ADDR(buf)->buf_objlim)) {
-		_CASSERT(sizeof(BLT_ADDR(buf)->buf_dlim) == sizeof(uint16_t));
+	if (__probable((uint32_t)dlim <= BLT_ADDR(buf)->buf_objlim)) {
+		_CASSERT(sizeof(BLT_ADDR(buf)->buf_dlim) == sizeof(uint32_t));
 		/* deconst */
-		*(uint16_t *)(uintptr_t)&BLT_ADDR(buf)->buf_dlim = dlim;
+		*(uint32_t *)(uintptr_t)&BLT_ADDR(buf)->buf_dlim = dlim;
 		return 0;
 	}
 	return ERANGE;
@@ -1229,7 +1243,7 @@ __buflet_set_data_limit(const void *buf, const uint16_t dlim)
 #endif /* KERNEL */
 
 __attribute__((always_inline))
-static inline uint16_t
+static inline uint32_t
 __buflet_get_data_offset(const void *buf)
 {
 	return BLT_ADDR(buf)->buf_doff;
@@ -1255,7 +1269,6 @@ __buflet_get_data_offset(const void *buf)
  *  |         NEXUS_META_SUBTYPE_RAW    | NEXUS_META_SUBTYPE_PAYLOAD|
  *  |-------+---------------------------+---------------------------+
  *  |buflet | (bdoff + len) <= dlim     | (bdoff + len) <= dlim     |
- *  |buflet | (boff + objaddr) == addr  | (boff + objaddr) <= addr  |
  *  |l2_off | l2 == bdoff && l2 < bdlim | l2 = l3 = 0 && doff == 0  |
  *  |l3_off | l3 >= l2 && l3 <bdlim     | l3 == 0                   |
  *  |l4_off | l4 = l3                   | l4 = l3 = 0               |
@@ -1285,7 +1298,7 @@ __packet_finalize(const uint64_t ph)
 		ASSERT(bcur != NULL);
 		ASSERT(BLT_ADDR(bcur)->buf_addr != 0);
 #else  /* !KERNEL */
-		if (__improbable(bcur == NULL || BLT_ADDR(bcur)->buf_grolen != 0)) {
+		if (__improbable(bcur == NULL)) {
 			err = ERANGE;
 			break;
 		}
@@ -1459,7 +1472,7 @@ __attribute__((always_inline))
 static inline int
 __packet_finalize_with_mbuf(struct __kern_packet *pkt)
 {
-	uint16_t bdoff, bdlim, bdlen;
+	uint32_t bdlen, bdoff, bdlim;
 	struct __kern_buflet *buf;
 	int err = 0;
 
@@ -1781,11 +1794,6 @@ __attribute__((always_inline))
 static inline void *
 __buflet_get_data_address(const void *buf)
 {
-#if (defined(KERNEL) && (DEBUG || DEVELOPMENT))
-	ASSERT(BLT_ADDR(buf)->buf_addr ==
-	    (mach_vm_address_t)BLT_ADDR(buf)->buf_objaddr +
-	    BLT_ADDR(buf)->buf_boff);
-#endif /* KERNEL && (DEBUG || DEVELOPMENT) */
 	return (void *)(BLT_ADDR(buf)->buf_addr);
 }
 
@@ -1805,13 +1813,25 @@ __buflet_set_data_address(const void *buf, const void *addr)
 		/* deconst */
 		*(mach_vm_address_t *)(uintptr_t)&BLT_ADDR(buf)->buf_addr =
 		    (mach_vm_address_t)addr;
+		return 0;
+	}
+	return ERANGE;
+}
 
-		/* compute the offset from objaddr for the case of shared buffer */
-		_CASSERT(sizeof(BLT_ADDR(buf)->buf_boff) == sizeof(uint16_t));
-		*(uint16_t *)(uintptr_t)&BLT_ADDR(buf)->buf_boff =
-		    (uint16_t)((mach_vm_address_t)addr -
-		    (mach_vm_address_t)BLT_ADDR(buf)->buf_objaddr);
+/*
+ * Equivalent to __buflet_set_data_address but based on offset, packets/buflets
+ * set with this should not be directly passed to userspace, since shared buffer
+ * is not yet supported by user facing pool.
+ */
+__attribute__((always_inline))
+static inline int
+__buflet_set_buffer_offset(const void *buf, const uint32_t off)
+{
+	ASSERT(BLT_ADDR(buf)->buf_objlim != 0);
 
+	if (__probable(off <= BLT_ADDR(buf)->buf_objlim)) {
+		*(mach_vm_address_t *)(uintptr_t)&BLT_ADDR(buf)->buf_addr =
+		    (mach_vm_address_t)BLT_ADDR(buf)->buf_objaddr + off;
 		return 0;
 	}
 	return ERANGE;
@@ -1820,7 +1840,7 @@ __buflet_set_data_address(const void *buf, const void *addr)
 
 __attribute__((always_inline))
 static inline int
-__buflet_set_data_offset(const void *buf, const uint16_t doff)
+__buflet_set_data_offset(const void *buf, const uint32_t doff)
 {
 #ifdef KERNEL
 	/*
@@ -1830,8 +1850,7 @@ __buflet_set_data_offset(const void *buf, const uint16_t doff)
 	 */
 	ASSERT(BLT_ADDR(buf)->buf_dlim != 0);
 
-	if (__probable(doff + BLT_ADDR(buf)->buf_boff <=
-	    BLT_ADDR(buf)->buf_objlim)) {
+	if (__probable((uint32_t)doff <= BLT_ADDR(buf)->buf_objlim)) {
 		BLT_ADDR(buf)->buf_doff = doff;
 		return 0;
 	}
@@ -1844,7 +1863,7 @@ __buflet_set_data_offset(const void *buf, const uint16_t doff)
 
 __attribute__((always_inline))
 static inline int
-__buflet_set_data_length(const void *buf, const uint16_t dlen)
+__buflet_set_data_length(const void *buf, const uint32_t dlen)
 {
 #ifdef KERNEL
 	/*
@@ -1866,99 +1885,10 @@ __buflet_set_data_length(const void *buf, const uint16_t dlen)
 }
 
 __attribute__((always_inline))
-static inline uint16_t
+static inline uint32_t
 __buflet_get_data_length(const void *buf)
 {
 	return BLT_ADDR(buf)->buf_dlen;
-}
-
-#ifdef KERNEL
-__attribute__((always_inline))
-static inline int
-__buflet_set_buffer_offset(const void *buf, const uint16_t off)
-{
-	ASSERT(BLT_ADDR(buf)->buf_objlim != 0);
-
-	if (__probable(off <= BLT_ADDR(buf)->buf_objlim)) {
-		_CASSERT(sizeof(BLT_ADDR(buf)->buf_boff) == sizeof(uint16_t));
-		*(uint16_t *)(uintptr_t)&BLT_ADDR(buf)->buf_boff = off;
-
-		/* adjust dlim and buf_addr */
-		if (BLT_ADDR(buf)->buf_dlim + off >= BLT_ADDR(buf)->buf_objlim) {
-			_CASSERT(sizeof(BLT_ADDR(buf)->buf_dlim) == sizeof(uint16_t));
-			*(uint16_t *)(uintptr_t)&BLT_ADDR(buf)->buf_dlim =
-			    (uint16_t)BLT_ADDR(buf)->buf_objlim - off;
-		}
-		*(mach_vm_address_t *)(uintptr_t)&BLT_ADDR(buf)->buf_addr =
-		    (mach_vm_address_t)BLT_ADDR(buf)->buf_objaddr + off;
-		return 0;
-	}
-	return ERANGE;
-}
-#endif /* KERNEL */
-
-__attribute__((always_inline))
-static inline uint16_t
-__buflet_get_buffer_offset(const void *buf)
-{
-#if (defined(KERNEL) && (DEBUG || DEVELOPMENT))
-	ASSERT(BLT_ADDR(buf)->buf_addr ==
-	    (mach_vm_address_t)BLT_ADDR(buf)->buf_objaddr +
-	    BLT_ADDR(buf)->buf_boff);
-#endif /* KERNEL && (DEBUG || DEVELOPMENT) */
-	return BLT_ADDR(buf)->buf_boff;
-}
-
-#ifdef KERNEL
-__attribute__((always_inline))
-static inline int
-__buflet_set_gro_len(const void *buf, const uint16_t len)
-{
-	ASSERT(BLT_ADDR(buf)->buf_dlim != 0);
-
-	if (__probable(len <= BLT_ADDR(buf)->buf_dlim)) {
-		/* deconst */
-		_CASSERT(sizeof(BLT_ADDR(buf)->buf_grolen) == sizeof(uint16_t));
-		*(uint16_t *)(uintptr_t)&BLT_ADDR(buf)->buf_grolen = len;
-		return 0;
-	}
-	return ERANGE;
-}
-#endif /* KERNEL */
-
-__attribute__((always_inline))
-static inline uint16_t
-__buflet_get_gro_len(const void *buf)
-{
-	return BLT_ADDR(buf)->buf_grolen;
-}
-
-__attribute__((always_inline))
-static inline void *
-__buflet_get_next_buf(const void *buflet, const void *prev_buf)
-{
-	uint16_t gro_len, dlen;
-	mach_vm_address_t next_buf, baddr;
-
-	ASSERT(BLT_ADDR(buflet)->buf_dlen != 0);
-	ASSERT(BLT_ADDR(buflet)->buf_grolen != 0);
-
-	gro_len = BLT_ADDR(buflet)->buf_grolen;
-	dlen = BLT_ADDR(buflet)->buf_dlen;
-	baddr = BLT_ADDR(buflet)->buf_addr;
-	if (prev_buf != NULL) {
-		ASSERT((mach_vm_address_t)prev_buf >= BLT_ADDR(buflet)->buf_addr);
-		next_buf = (mach_vm_address_t)prev_buf + gro_len;
-	} else {
-		next_buf = BLT_ADDR(buflet)->buf_addr;
-	}
-
-	if (__probable(next_buf < baddr + dlen)) {
-		ASSERT(next_buf + gro_len <= baddr + dlen);
-		return (void *)next_buf;
-	}
-
-	return NULL;
 }
 
 #ifdef KERNEL

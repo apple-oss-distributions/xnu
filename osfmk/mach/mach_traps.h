@@ -630,6 +630,16 @@ struct thread_switch_args {
 extern kern_return_t thread_switch(
 	struct thread_switch_args *args);
 
+struct exclaves_ctl_trap_args {
+	PAD_ARG_(mach_port_name_t, name);
+	PAD_ARG_(uint32_t, operation_and_flags);
+	PAD_ARG_(uint64_t, identifier);
+	PAD_ARG_(mach_vm_address_t, buffer);
+	PAD_ARG_(mach_vm_size_t, size);
+};
+extern kern_return_t _exclaves_ctl_trap(
+	struct exclaves_ctl_trap_args *args);
+
 struct mach_timebase_info_trap_args {
 	PAD_ARG_(user_addr_t, info);
 };

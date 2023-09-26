@@ -82,7 +82,7 @@ struct __kern_buflet_ext {
 	/* kernel variant (deconst) */                                  \
 	BUF_CTOR(_kbuf, _baddr, _bidxreg, (_large) ? PP_BUF_SIZE_LARGE(_pp) :\
 	    PP_BUF_SIZE_DEF(_pp), 0, 0, (_kbuf)->buf_nbft_addr,         \
-	    (_kbuf)->buf_nbft_idx, (_kbuf)->buf_flag, 0, 0);            \
+	    (_kbuf)->buf_nbft_idx, (_kbuf)->buf_flag);                  \
 	*(struct skmem_bufctl **)(uintptr_t)&(_kbuf)->buf_ctl = (_bc);  \
 	/* this may be called to initialize unused buflets */           \
 	if (__probable((_bc) != NULL)) {                                \
@@ -92,7 +92,7 @@ struct __kern_buflet_ext {
 } while (0)
 
 #define KBUF_EXT_CTOR(_kbuf, _ubuf, _baddr, _bidxreg, _bc,              \
-	    _bft_idx_reg, _pp, _large, _attch_buf) do {                     \
+	    _bft_idx_reg, _pp, _large) do {                             \
 	ASSERT(_bft_idx_reg != OBJ_IDX_NONE);                           \
 	_CASSERT(sizeof((_kbuf)->buf_flag) == sizeof(uint16_t));        \
 	/* we don't set buf_nbft_addr here as during construction it */ \
@@ -101,10 +101,6 @@ struct __kern_buflet_ext {
 	if (_large) {                                                   \
 	        *__DECONST(uint16_t *, &(_kbuf)->buf_flag) |=           \
 	            BUFLET_FLAG_LARGE_BUF;                              \
-	}                                                               \
-	if (!_attch_buf) {                                              \
-	        *__DECONST(uint16_t *, &(_kbuf)->buf_flag) |=           \
-	            BUFLET_FLAG_RAW;                                    \
 	}                                                               \
 	BUF_NBFT_IDX(_kbuf, OBJ_IDX_NONE);                              \
 	BUF_BFT_IDX_REG(_kbuf, _bft_idx_reg);                           \
@@ -122,46 +118,17 @@ struct __kern_buflet_ext {
 } while (0)
 
 #define KBUF_EXT_INIT(_kbuf, _pp) do {                                  \
-	_CASSERT(sizeof((_kbuf)->buf_boff) == sizeof(uint16_t));        \
-	_CASSERT(sizeof((_kbuf)->buf_grolen) == sizeof(uint16_t));      \
-	_CASSERT(sizeof((_kbuf)->buf_dlim) == sizeof(uint16_t));        \
 	ASSERT((_kbuf)->buf_ctl != NULL);                               \
 	ASSERT((_kbuf)->buf_flag & BUFLET_FLAG_EXTERNAL);               \
-	ASSERT(((_kbuf)->buf_flag & BUFLET_FLAG_RAW) == 0);             \
 	ASSERT((_kbuf)->buf_bft_idx_reg != OBJ_IDX_NONE);               \
 	BUF_BADDR(_kbuf, (_kbuf)->buf_ctl->bc_addr);                    \
 	BUF_NBFT_ADDR(_kbuf, 0);                                        \
 	BUF_NBFT_IDX(_kbuf, OBJ_IDX_NONE);                              \
-	*__DECONST(uint16_t *, &(_kbuf)->buf_dlim) =                    \
+	*__DECONST(uint32_t *, &(_kbuf)->buf_dlim) =                    \
 	BUFLET_HAS_LARGE_BUF(_kbuf) ? PP_BUF_SIZE_LARGE((_pp)) :        \
 	PP_BUF_SIZE_DEF((_pp));                                         \
 	(_kbuf)->buf_dlen = 0;                                          \
 	(_kbuf)->buf_doff = 0;                                          \
-	*__DECONST(uint16_t *, &(_kbuf)->buf_boff) = 0;                 \
-	*__DECONST(uint16_t *, &(_kbuf)->buf_grolen) = 0;               \
-	((struct __kern_buflet_ext *)(_kbuf))->kbe_buf_pid = (pid_t)-1; \
-	((struct __kern_buflet_ext *)(_kbuf))->kbe_buf_upp_link.sle_next = NULL;\
-} while (0)
-
-#define RAW_KBUF_EXT_INIT(_kbuf) do {                                   \
-	_CASSERT(sizeof((_kbuf)->buf_dlim) == sizeof(uint16_t));        \
-	_CASSERT(sizeof((_kbuf)->buf_grolen) == sizeof(uint16_t));      \
-	_CASSERT(sizeof((_kbuf)->buf_boff) == sizeof(uint16_t));        \
-	_CASSERT(sizeof((_kbuf)->buf_flag) == sizeof(uint16_t));        \
-	ASSERT((_kbuf)->buf_flag & BUFLET_FLAG_EXTERNAL);               \
-	ASSERT((_kbuf)->buf_flag & BUFLET_FLAG_RAW);                    \
-	ASSERT((_kbuf)->buf_bft_idx_reg != OBJ_IDX_NONE);               \
-	BUF_BADDR(_kbuf, 0);                                            \
-	BUF_BIDX(_kbuf, OBJ_IDX_NONE);                                  \
-	BUF_NBFT_ADDR(_kbuf, 0);                                        \
-	BUF_NBFT_IDX(_kbuf, OBJ_IDX_NONE);                              \
-	*__DECONST(uint16_t *, &(_kbuf)->buf_dlim) = 0;                 \
-	*__DECONST(uint16_t *, &(_kbuf)->buf_grolen) = 0;               \
-	*__DECONST(uint16_t *, &(_kbuf)->buf_boff) = 0;                 \
-	*__DECONST(uint16_t *, &(_kbuf)->buf_flag) &= ~BUFLET_FLAG_LARGE_BUF;\
-	(_kbuf)->buf_dlen = 0;                                          \
-	(_kbuf)->buf_doff = 0;                                          \
-	(_kbuf)->buf_ctl = NULL;                                        \
 	((struct __kern_buflet_ext *)(_kbuf))->kbe_buf_pid = (pid_t)-1; \
 	((struct __kern_buflet_ext *)(_kbuf))->kbe_buf_upp_link.sle_next = NULL;\
 } while (0)
@@ -170,21 +137,18 @@ struct __kern_buflet_ext {
 #define UBUF_INIT(_kbuf, _ubuf) do {                                    \
 	BUF_CTOR(_ubuf, 0, (_kbuf)->buf_idx, (_kbuf)->buf_dlim,         \
 	    (_kbuf)->buf_dlen, (_kbuf)->buf_doff, (_kbuf)->buf_nbft_addr,\
-	    (_kbuf)->buf_nbft_idx, (_kbuf)->buf_flag,                  \
-	        (_kbuf)->buf_boff, (_kbuf)->buf_grolen);                   \
+	    (_kbuf)->buf_nbft_idx, (_kbuf)->buf_flag);                  \
 	BUF_BFT_IDX_REG(_ubuf, (_kbuf)->buf_bft_idx_reg);              \
 } while (0)
 
 #define KBUF_EXTERNALIZE(_kbuf, _ubuf, _pp) do {                       \
-	ASSERT(BUFLET_FROM_RAW_BFLT_CACHE(_kbuf) ||                    \
-	        (_kbuf)->buf_dlim == BUFLET_HAS_LARGE_BUF(_kbuf) ?         \
+	ASSERT((_kbuf)->buf_dlim == BUFLET_HAS_LARGE_BUF(_kbuf) ?      \
 	    PP_BUF_SIZE_LARGE((_pp)) : PP_BUF_SIZE_DEF((_pp)));        \
 	ASSERT((_kbuf)->buf_addr != 0);                                \
 	/* For now, user-facing pool does not support shared */        \
 	/* buffer, since otherwise the ubuf and kbuf buffer  */        \
 	/* indices would not match.  Assert this is the case.*/        \
-	ASSERT((mach_vm_address_t)(_kbuf)->buf_objaddr +               \
-	        (_kbuf)->buf_boff == (_kbuf)->buf_addr);                   \
+	ASSERT((_kbuf)->buf_addr == (mach_vm_address_t)(_kbuf)->buf_objaddr);\
 	/* Initialize user buflet metadata from kernel buflet */       \
 	UBUF_INIT(_kbuf, _ubuf);                                       \
 } while (0)
@@ -215,13 +179,15 @@ struct __kern_buflet_ext {
 #define _KBUF_COPY(_skb, _dkb) do {                                     \
 	ASSERT((_skb)->buf_nbft_addr == 0);                             \
 	ASSERT((_skb)->buf_nbft_idx == OBJ_IDX_NONE);                   \
-	ASSERT(!((_dkb)->buf_flag & BUFLET_FLAG_EXTERNAL) ||            \
-	        ((_dkb)->buf_flag & BUFLET_FLAG_RAW));                      \
-	_CASSERT(sizeof(struct __kern_buflet) == 48);                   \
+	ASSERT(!((_dkb)->buf_flag & BUFLET_FLAG_EXTERNAL));             \
+	_CASSERT(sizeof(struct __kern_buflet) == 50);                   \
 	/* copy everything in the kernel buflet */                      \
 	sk_copy64_40((uint64_t *)(void *)(_skb), (uint64_t *)(void *)(_dkb));\
-	((uint64_t *)(void *)(_dkb))[5] = ((uint64_t *)(void *)(_skb))[5];\
+	((uint64_t *)(void *)(_dkb))[5] = ((uint64_t *)(void *)(_skb))[5];   \
+	((uint16_t *)(void *)(_dkb))[24] = ((uint16_t *)(void *)(_skb))[24]; \
 	ASSERT((_dkb)->buf_ctl == (_skb)->buf_ctl);                     \
+	_CASSERT(sizeof((_dkb)->buf_flag) == sizeof(uint16_t));         \
+	*__DECONST(uint16_t *, &(_dkb)->buf_flag) &= ~BUFLET_FLAG_EXTERNAL;\
 	if (__probable((_dkb)->buf_ctl != NULL)) {                      \
 	        skmem_bufctl_use(__DECONST(struct skmem_bufctl *,       \
 	            (_dkb)->buf_ctl));                                  \
@@ -616,9 +582,9 @@ struct __kern_packet {
  */
 #define _PKT_COPY_OPT_DATA(_skp, _dkp) do {                             \
 	if (__improbable(((_skp)->pkt_pflags & PKT_F_OPT_DATA) != 0)) { \
-	        _CASSERT(sizeof(struct __packet_opt) == 32);            \
+	        _CASSERT(sizeof(struct __packet_opt) == 40);            \
 	        ASSERT((_skp)->pkt_pflags & PKT_F_OPT_ALLOC);           \
-	        sk_copy64_32((uint64_t *)(void *)(_skp)->pkt_com_opt,   \
+	        sk_copy64_40((uint64_t *)(void *)(_skp)->pkt_com_opt,   \
 	            (uint64_t *)(void *)(_dkp)->pkt_com_opt);           \
 	}                                                               \
 } while (0)
@@ -675,9 +641,9 @@ struct __kern_packet {
 	(_kp)->pkt_pflags = ((_up)->pkt_pflags & PKT_F_USER_MASK) | _kf;\
 	/* copy (internalize) __packet_opt if applicable */             \
 	if (__improbable(((_kp)->pkt_pflags & PKT_F_OPT_DATA) != 0)) {  \
-	        _CASSERT(sizeof(struct __packet_opt) == 32);            \
+	        _CASSERT(sizeof(struct __packet_opt) == 40);            \
 	        ASSERT((_kp)->pkt_pflags & PKT_F_OPT_ALLOC);            \
-	        sk_copy64_32((uint64_t *)(void *)&(_up)->pkt_com_opt,   \
+	        sk_copy64_40((uint64_t *)(void *)&(_up)->pkt_com_opt,   \
 	            (uint64_t *)(void *)(_kp)->pkt_com_opt);            \
 	}                                                               \
 } while (0)
@@ -702,9 +668,9 @@ struct __kern_packet {
 	(_up)->pkt_pflags = ((_kp)->pkt_pflags & PKT_F_USER_MASK);      \
 	/* copy (externalize) __packet_opt if applicable */             \
 	if (__improbable(((_kp)->pkt_pflags & PKT_F_OPT_DATA) != 0)) {  \
-	        _CASSERT(sizeof(struct __packet_opt) == 32);            \
+	        _CASSERT(sizeof(struct __packet_opt) == 40);            \
 	        ASSERT((_kp)->pkt_pflags & PKT_F_OPT_ALLOC);            \
-	        sk_copy64_32((uint64_t *)(void *)(_kp)->pkt_com_opt,    \
+	        sk_copy64_40((uint64_t *)(void *)(_kp)->pkt_com_opt,    \
 	            (uint64_t *)(void *)&(_up)->pkt_com_opt);           \
 	}                                                               \
 } while (0)

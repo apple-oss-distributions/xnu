@@ -28,7 +28,7 @@
 
 #include <skywalk/os_skywalk_private.h>
 #include <skywalk/nexus/netif/nx_netif.h>
-#include <libkern/crypto/sha1.h>
+#include <sys/random.h>
 #include <sys/sdt.h>
 
 #define NETIF_AGENT_FLOW_MAX            16
@@ -65,51 +65,24 @@ static uint64_t ipv6_ula_interface_id = 1;
  * Generating an IPV6 ULA based on RFC4193
  */
 SK_NO_INLINE_ATTRIBUTE
-static int
-get_ipv6_ula(struct nx_netif *nif, struct in6_addr *addr)
+static void
+get_ipv6_ula(struct in6_addr *addr)
 {
-	int err;
-	ether_addr_t ether_addr;
-	uint8_t buf[16], *octet;
-	uint8_t *eui64 = &buf[8];
-	uint8_t digest[SHA1_RESULTLEN];
-	uint64_t timestamp, interface_id;
-	SHA1_CTX ctx;
+	uint8_t buf[16];
+	uint64_t interface_id;
 
-	err = get_mac_addr(nif, &ether_addr);
-	if (err != 0) {
-		SK_ERR("cannot get mac addr: %d", err);
-		return err;
-	}
-	/* Concatenate a timestamp with a EUI64 */
-	timestamp = mach_absolute_time();
-	bcopy(&timestamp, buf, sizeof(timestamp));
-
-	_CASSERT(ETHER_ADDR_LEN == 6);
-	octet = ether_addr.octet;
-	eui64[0] = octet[0];
-	eui64[1] = octet[1];
-	eui64[2] = octet[2];
-	eui64[3] = 0xff;
-	eui64[4] = 0xfe;
-	eui64[5] = octet[3];
-	eui64[6] = octet[4];
-	eui64[7] = octet[5];
-
-	/* Generate SHA1 digest */
-	SHA1Init(&ctx);
-	SHA1Update(&ctx, buf, 16);
-	SHA1Final(digest, &ctx);
-
-	/* Reuse buf for generating the address */
 	bzero(buf, sizeof(buf));
 
 	/* Start with the 0xfc prefix with local bit set */
 	buf[0] = 0xfd;
 
-	/* Copy least significant 40bits, digest[15..19] */
-	_CASSERT(SHA1_RESULTLEN == 20);
-	bcopy(&digest[15], &buf[1], 5);
+	/*
+	 * RFC4193 describes a sample method to generate 40bit pseudo-random
+	 * Global ID based on current time and EUI-64.
+	 * Simplify it by just generating random bytes since after all the
+	 * uniqueness matters, not the way it's achieved.
+	 */
+	read_frandom(&buf[1], 5);
 
 	/* Hardcode subnet number to 0 */
 	buf[6] = 0;
@@ -131,23 +104,15 @@ get_ipv6_ula(struct nx_netif *nif, struct in6_addr *addr)
 	SK_DF(SK_VERB_NETIF, "generated IPv6 address: %s",
 	    inet_ntop(AF_INET6, addr, addrbuf, sizeof(addrbuf)));
 #endif /* SK_LOG */
-	return 0;
 }
 
 SK_NO_INLINE_ATTRIBUTE
-static int
-get_ipv6_sockaddr(struct nx_netif *nif, struct sockaddr_in6 *sin6)
+static void
+get_ipv6_sockaddr(struct sockaddr_in6 *sin6)
 {
-	int err;
-
 	sin6->sin6_len = sizeof(struct sockaddr_in6);
 	sin6->sin6_family = AF_INET6;
-	err = get_ipv6_ula(nif, &sin6->sin6_addr);
-	if (err != 0) {
-		SK_ERR("get_ipv6_ula failed: %d", err);
-		return err;
-	}
-	return 0;
+	get_ipv6_ula(&sin6->sin6_addr);
 }
 
 SK_NO_INLINE_ATTRIBUTE
@@ -448,11 +413,7 @@ nx_netif_netagent_listener_flow_add(struct nx_netif *nif,
 		SK_ERR("get mac addr failed; %d", err);
 		return err;
 	}
-	err = get_ipv6_sockaddr(nif, &nfr->nfr_saddr.sin6);
-	if (err != 0) {
-		SK_ERR("get ipv6 laddr failed; %d", err);
-		return err;
-	}
+	get_ipv6_sockaddr(&nfr->nfr_saddr.sin6);
 	return 0;
 }
 

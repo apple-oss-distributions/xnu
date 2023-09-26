@@ -4,7 +4,7 @@ export MakeInc_rule=${SRCROOT}/makedefs/MakeInc.rule
 export MakeInc_dir=${SRCROOT}/makedefs/MakeInc.dir
 
 IIG_INCFLAGS = -I$(SRCROOT)/iokit -I$(SRCROOT)/osfmk -I$(SRCROOT)/bsd -I$(OBJROOT)/bsd $(INCFLAGS_EXTERN)
-OTHER_IIG_CFLAGS = $(IIG_INCFLAGS) -isysroot $(SDKROOT) -x c++ -std=gnu++1z -D__IIG=1 -DDRIVERKIT_PRIVATE=1 -DPRIVATE_WIFI_ONLY=1 $(DEPLOYMENT_TARGET_DEFINES)
+OTHER_IIG_CFLAGS = $(IIG_INCFLAGS) -isysroot $(SDKROOT) -x c++ -std=gnu++2b -D__IIG=1 -DDRIVERKIT_PRIVATE=1 -DPRIVATE_WIFI_ONLY=1 $(DEPLOYMENT_TARGET_DEFINES)
 
 INCDIR = $(FRAMEDIR)/$(DKIT_INCDIR)
 DRIVERKITINCDIR = $(DRIVERKITFRAMEDIR)/$(DRIVERKIT_DKIT_INCDIR)
@@ -16,7 +16,7 @@ include $(MakeInc_def)
 
 INSTINC_SUBDIRS = crypto
 
-PRIVATE_DEFS = IOEventLink.iig IOWorkGroup.iig
+PRIVATE_DEFS = IOEventLink.iig IOWorkGroup.iig IOExtensiblePaniclog.iig
 
 ALL_DEFS = $(notdir $(wildcard $(SOURCE)*.iig))
 PUBLIC_DEFS = $(filter-out $(PRIVATE_DEFS), $(ALL_DEFS))
@@ -55,6 +55,7 @@ INSTALL_KF_MI_GEN_LIST = $(GENERATED_HEADERS)  $(OTHER_HEADERS)
 
 COMP_FILES = ${GENERATED_HEADERS} $(GENERATED_IMPL)
 
+ifeq ($(filter 1,$(EXCLAVEKIT) $(EXCLAVECORE)),)
 $(GENERATED_HEADERS) : \
 	%.h : %.iig
 	@$(LOG_IIG) "$@"
@@ -63,6 +64,7 @@ $(GENERATED_HEADERS) : \
 $(GENERATED_IMPL) : $(GENERATED_HEADERS)
 
 do_build_all:: $(COMP_FILES)
+endif
 
 include $(MakeInc_rule)
 include $(MakeInc_dir)

@@ -125,7 +125,7 @@ extern u_int32_t random(void); /* from <libkern/libkern.h> */
 
 static bool alloc_asid(pmap_t pmap);
 static void free_asid(pmap_t pmap);
-static void flush_mmu_tlb_region_asid_async(vm_offset_t va, size_t length, pmap_t pmap, bool last_level_only);
+static void flush_mmu_tlb_region_asid_async(vm_offset_t va, size_t length, pmap_t pmap, bool last_level_only, bool strong);
 static void flush_mmu_tlb_full_asid_async(pmap_t pmap);
 static pt_entry_t wimg_to_pte(unsigned int wimg, pmap_paddr_t pa);
 
@@ -286,8 +286,6 @@ extern int pmap_ledgers_panic_leeway;
 #define PMAP_FOOTPRINT_SUSPENDED(pmap) (FALSE)
 #endif /* DEVELOPMENT || DEBUG */
 
-
-SECURITY_READ_ONLY_LATE(int) srd_fused = 0;
 
 /*
  * Represents a tlb range that will be flushed before exiting
@@ -471,9 +469,9 @@ SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm_pmap_max_offset_default  = 0x0;
 _Static_assert((ARM64_MIN_MAX_ADDRESS > SHARED_REGION_BASE_ARM64) && (ARM64_MIN_MAX_ADDRESS <= MACH_VM_MAX_ADDRESS),
     "Minimum address space size outside allowable range");
 
-// Max offset is 13.375GB for devices with "large" memory config
+// Max offset is 15.375GB for devices with "large" memory config
 #define ARM64_MAX_OFFSET_DEVICE_LARGE (ARM64_MIN_MAX_ADDRESS + 0x138000000)
-// Max offset is 9.375GB for devices with "small" memory config
+// Max offset is 11.375GB for devices with "small" memory config
 #define ARM64_MAX_OFFSET_DEVICE_SMALL (ARM64_MIN_MAX_ADDRESS + 0x38000000)
 
 
@@ -497,12 +495,16 @@ SECURITY_READ_ONLY_LATE(boolean_t)   pmap_panic_dev_wimg_on_managed = FALSE;
 
 MARK_AS_PMAP_DATA SIMPLE_LOCK_DECLARE(asid_lock, 0);
 SECURITY_READ_ONLY_LATE(uint32_t) pmap_max_asids = 0;
-SECURITY_READ_ONLY_LATE(int) pmap_asid_plru = 1;
 SECURITY_READ_ONLY_LATE(uint16_t) asid_chunk_size = 0;
 SECURITY_READ_ONLY_LATE(static bitmap_t*) asid_bitmap;
+#if !HAS_16BIT_ASID
+SECURITY_READ_ONLY_LATE(int) pmap_asid_plru = 1;
 static bitmap_t asid_plru_bitmap[BITMAP_LEN(MAX_HW_ASIDS)] MARK_AS_PMAP_DATA;
 static uint64_t asid_plru_generation[BITMAP_LEN(MAX_HW_ASIDS)] MARK_AS_PMAP_DATA = {0};
 static uint64_t asid_plru_gencount MARK_AS_PMAP_DATA = 0;
+#else
+static uint16_t last_allocated_asid = 0;
+#endif /* !HAS_16BIT_ASID */
 
 
 #if __ARM_MIXED_PAGE_SIZE__
@@ -564,9 +566,28 @@ pte_set_wired(pmap_t pmap, pt_entry_t *ptep, boolean_t wired)
 	}
 }
 
-#define PMAP_UPDATE_TLBS(pmap, s, e, strong, last_level_only) {                                       \
-	pmap_get_pt_ops(pmap)->flush_tlb_region_async(s, (size_t)((e) - (s)), pmap, last_level_only); \
-	arm64_sync_tlb(strong);                                                                        \
+#if HAS_FEAT_XS
+
+static inline bool
+pte_is_xs(const pt_attr_t *pt_attr, pt_entry_t pte)
+{
+	if (__improbable(pt_attr->stage2)) {
+		return false;
+	}
+	switch (ARM_PTE_EXTRACT_ATTRINDX(pte)) {
+	case CACHE_ATTRINDX_POSTED_XS:
+	case CACHE_ATTRINDX_POSTED_COMBINED_REORDERED_XS:
+		return true;
+	default:
+		return false;
+	}
+}
+
+#endif /* HAS_FEAT_XS */
+
+#define PMAP_UPDATE_TLBS(pmap, s, e, strong, last_level_only) {                                               \
+	pmap_get_pt_ops(pmap)->flush_tlb_region_async(s, (size_t)((e) - (s)), pmap, last_level_only, strong); \
+	arm64_sync_tlb(strong);                                                                               \
 }
 
 /*
@@ -1099,11 +1120,11 @@ PMAP_SUPPORT_PROTOTYPES(
 	void,
 	pmap_set_jit_entitled, (pmap_t pmap), PMAP_SET_JIT_ENTITLED_INDEX);
 
-#if __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX)
+#if __has_feature(ptrauth_calls) && (defined(XNU_TARGET_OS_OSX) || (DEVELOPMENT || DEBUG))
 PMAP_SUPPORT_PROTOTYPES(
 	void,
 	pmap_disable_user_jop, (pmap_t pmap), PMAP_DISABLE_USER_JOP_INDEX);
-#endif /* __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX) */
+#endif /* __has_feature(ptrauth_calls) && (defined(XNU_TARGET_OS_OSX) || (DEVELOPMENT || DEBUG)) */
 
 /* Definition of the states used by pmap_trim(). */
 typedef enum {
@@ -1363,9 +1384,9 @@ const void * __ptrauth_ppl_handler const ppl_handler_table[PMAP_COUNT] = {
 #if __ARM_RANGE_TLBI__
 	[PHYS_ATTRIBUTE_CLEAR_RANGE_INDEX] = phys_attribute_clear_range_internal,
 #endif /* __ARM_RANGE_TLBI__ */
-#if __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX)
+#if __has_feature(ptrauth_calls) && (defined(XNU_TARGET_OS_OSX) || (DEVELOPMENT || DEBUG))
 	[PMAP_DISABLE_USER_JOP_INDEX] = pmap_disable_user_jop_internal,
-#endif /* __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX) */
+#endif /* __has_feature(ptrauth_calls) && (defined(XNU_TARGET_OS_OSX) || (DEVELOPMENT || DEBUG)) */
 	[PMAP_NOP_INDEX] = pmap_nop_internal,
 
 #if DEVELOPMENT || DEBUG
@@ -1474,7 +1495,7 @@ pmap_set_xprr_perm(
 
 	pmap_set_pte_xprr_perm(ptep, expected_perm, new_perm);
 
-	native_pt_ops.flush_tlb_region_async(kva, PAGE_SIZE, kernel_pmap, true);
+	native_pt_ops.flush_tlb_region_async(kva, PAGE_SIZE, kernel_pmap, true, false);
 	sync_tlb_flush();
 }
 
@@ -1630,8 +1651,9 @@ pmap_tt_ledger_debit(
 }
 
 static inline void
-pmap_update_plru(uint16_t asid_index)
+pmap_update_plru(uint16_t asid_index __unused)
 {
+#if !HAS_16BIT_ASID
 	if (__probable(pmap_asid_plru)) {
 		unsigned plru_index = asid_index >> 6;
 		if (__improbable(os_atomic_andnot(&asid_plru_bitmap[plru_index], (1ULL << (asid_index & 63)), relaxed) == 0)) {
@@ -1639,6 +1661,7 @@ pmap_update_plru(uint16_t asid_index)
 			asid_plru_bitmap[plru_index] = ((plru_index == (MAX_HW_ASIDS >> 6)) ? ~(1ULL << 63) : UINT64_MAX);
 		}
 	}
+#endif /* !HAS_16BIT_ASID */
 }
 
 static bool
@@ -1649,6 +1672,7 @@ alloc_asid(pmap_t pmap)
 
 	pmap_simple_lock(&asid_lock);
 
+#if !HAS_16BIT_ASID
 	if (__probable(pmap_asid_plru)) {
 		unsigned plru_index = 0;
 		uint64_t lowest_gen = asid_plru_generation[0];
@@ -1672,6 +1696,19 @@ alloc_asid(pmap_t pmap)
 			}
 		}
 	}
+#else
+	/**
+	 * For 16-bit ASID targets, we assume a 1:1 correspondence between ASIDs and active tasks and
+	 * therefore allocate directly from the ASID bitmap instead of using the pLRU allocator.
+	 * However, we first try to allocate starting from the position of the most-recently allocated
+	 * ASID.  This is done both as an allocator performance optimization (as it avoids crowding the
+	 * lower bit positions and then re-checking those same lower positions every time we allocate
+	 * an ASID) as well as a security mitigation to increase the temporal distance between ASID
+	 * reuse.  This increases the difficulty of leveraging ASID reuse to train branch predictor
+	 * logic, without requiring prohibitively expensive RCTX instructions.
+	 */
+	vasid = bitmap_lsb_next(&asid_bitmap[0], pmap_max_asids, last_allocated_asid);
+#endif /* !HAS_16BIT_ASID */
 	if (__improbable(vasid < 0)) {
 		// bitmap_first() returns highest-order bits first, but a 0-based scheme works
 		// slightly better with the collision detection scheme used by pmap_switch_internal().
@@ -1687,6 +1724,9 @@ alloc_asid(pmap_t pmap)
 	assert((uint32_t)vasid < pmap_max_asids);
 	assert(bitmap_test(&asid_bitmap[0], (unsigned int)vasid));
 	bitmap_clear(&asid_bitmap[0], (unsigned int)vasid);
+#if HAS_16BIT_ASID
+	last_allocated_asid = (uint16_t)vasid;
+#endif /* HAS_16BIT_ASID */
 	pmap_simple_unlock(&asid_lock);
 	hw_asid = (uint16_t)(vasid % asid_chunk_size);
 	pmap->sw_asid = (uint8_t)(vasid / asid_chunk_size);
@@ -1723,6 +1763,9 @@ free_asid(pmap_t pmap)
 #endif
 	hw_asid -= 1;
 
+#if HAS_16BIT_ASID
+	vasid = hw_asid;
+#else
 	if (__improbable(pmap->sw_asid == UINT8_MAX)) {
 		vasid = ((MAX_HW_ASIDS - 1 - hw_asid) * asid_chunk_size) + MAX_HW_ASIDS;
 	} else {
@@ -1732,6 +1775,7 @@ free_asid(pmap_t pmap)
 	if (__probable(pmap_asid_plru)) {
 		os_atomic_or(&asid_plru_bitmap[hw_asid >> 6], (1ULL << (hw_asid & 63)), relaxed);
 	}
+#endif /* HAS_16BIT_ASID */
 	pmap_simple_lock(&asid_lock);
 	assert(!bitmap_test(&asid_bitmap[0], vasid));
 	bitmap_set(&asid_bitmap[0], vasid);
@@ -1852,6 +1896,43 @@ pmap_map_bd_with_options(
 	return vaddr;
 }
 
+#if XNU_MONITOR
+/**
+ * Remove kernel writeablity from an IO PTE value if the page is owned by
+ * guarded mode software.
+ *
+ * @param paddr The physical address of the page which has to be non-DRAM.
+ * @param tmplate The PTE value to be evaluated.
+ *
+ * @return A new PTE value with permission bits modified.
+ */
+static inline
+pt_entry_t
+pmap_construct_io_pte(pmap_paddr_t paddr, pt_entry_t tmplate)
+{
+	assert(!pa_valid(paddr));
+
+	const unsigned int wimg_bits = pmap_cache_attributes((ppnum_t)atop(paddr));
+
+	if ((wimg_bits & PP_ATTR_MONITOR) && !pmap_ppl_disable) {
+		/* PPL to own the page by converting KERN_RW to PPL_RW. */
+		const uint64_t xprr_perm = pte_to_xprr_perm(tmplate);
+		switch (xprr_perm) {
+		case XPRR_KERN_RO_PERM:
+			break;
+		case XPRR_KERN_RW_PERM:
+			tmplate &= ~ARM_PTE_XPRR_MASK;
+			tmplate |= xprr_perm_to_pte(XPRR_PPL_RW_PERM);
+			break;
+		default:
+			panic("%s: Unsupported xPRR perm %llu for pte 0x%llx", __func__, xprr_perm, (uint64_t)tmplate);
+		}
+	}
+
+	return tmplate;
+}
+#endif /* XNU_MONITOR */
+
 /*
  *      Back-door routine for mapping kernel VM at initialization.
  *      Useful for mapping memory outside the range
@@ -1886,6 +1967,13 @@ pmap_map_bd(
 		if (ptep == PT_ENTRY_NULL) {
 			panic("pmap_map_bd");
 		}
+
+#if XNU_MONITOR
+		if (!pa_valid(paddr)) {
+			tmplate = pmap_construct_io_pte(paddr, tmplate);
+		}
+#endif
+
 		assert(!ARM_PTE_IS_COMPRESSED(*ptep, ptep));
 		write_pte_strong(ptep, tmplate);
 
@@ -1999,13 +2087,19 @@ pmap_compute_max_asids(void)
 	}
 
 	max_asids = *((uint32_t const *)prop);
+#if HAS_16BIT_ASID
+	if (max_asids > MAX_HW_ASIDS) {
+		panic("pmap-max-asids 0x%x too large", max_asids);
+	}
+#else
 	/* Round up to the nearest 64 to make things a bit easier for the Pseudo-LRU allocator. */
 	max_asids = (max_asids + 63) & ~63UL;
 
 	if (((max_asids + MAX_HW_ASIDS) / (MAX_HW_ASIDS + 1)) > MIN(MAX_HW_ASIDS, UINT8_MAX)) {
 		/* currently capped by size of pmap->sw_asid */
-		panic("pmap-max-asids too large");
+		panic("pmap-max-asids 0x%x too large", max_asids);
 	}
+#endif /* HAS_16BIT_ASID */
 	if (max_asids == 0) {
 		panic("pmap-max-asids cannot be zero");
 	}
@@ -2071,30 +2165,6 @@ pmap_get_arm64_prot(
 }
 #endif /* __arm64__ */
 
-static void
-pmap_set_srd_fusing()
-{
-	DTEntry entry;
-	uint32_t const *prop = NULL;
-	int err;
-	unsigned int prop_size = 0;
-
-	err = SecureDTLookupEntry(NULL, "/chosen", &entry);
-	if (err != kSuccess) {
-		panic("PMAP: no chosen DT node");
-	}
-
-	if (kSuccess == SecureDTGetProperty(entry, "research-enabled", (const void**)&prop, &prop_size)) {
-		if (prop_size == sizeof(uint32_t)) {
-			srd_fused = *prop;
-		}
-	}
-
-#if DEVELOPMENT || DEBUG
-	PE_parse_boot_argn("srd_fusing", &srd_fused, sizeof(srd_fused));
-#endif
-}
-
 /*
  *	Bootstrap the system enough to run with virtual memory.
  *
@@ -2124,8 +2194,6 @@ pmap_bootstrap(
 	vm_map_offset_t maxoffset;
 
 	lck_grp_init(&pmap_lck_grp, "pmap", LCK_GRP_ATTR_NULL);
-
-	pmap_set_srd_fusing();
 
 #if XNU_MONITOR
 
@@ -2190,6 +2258,9 @@ pmap_bootstrap(
 	pmap_lock_init(kernel_pmap);
 
 	pmap_max_asids = pmap_compute_max_asids();
+#if HAS_16BIT_ASID
+	asid_chunk_size = MAX_HW_ASIDS;
+#else
 	pmap_asid_plru = (pmap_max_asids > MAX_HW_ASIDS);
 	PE_parse_boot_argn("pmap_asid_plru", &pmap_asid_plru, sizeof(pmap_asid_plru));
 	/* Align the range of available hardware ASIDs to a multiple of 64 to enable the
@@ -2198,6 +2269,7 @@ pmap_bootstrap(
 	_Static_assert(sizeof(asid_plru_bitmap[0] == sizeof(uint64_t)), "bitmap_t is not a 64-bit integer");
 	_Static_assert(((MAX_HW_ASIDS + 1) % 64) == 0, "MAX_HW_ASIDS + 1 is not divisible by 64");
 	asid_chunk_size = (pmap_asid_plru ? (MAX_HW_ASIDS + 1) : MAX_HW_ASIDS);
+#endif /* HAS_16BIT_ASIDS */
 
 	const vm_size_t asid_table_size = sizeof(*asid_bitmap) * BITMAP_LEN(pmap_max_asids);
 
@@ -2251,9 +2323,11 @@ pmap_bootstrap(
 	virtual_space_end = VM_MAX_KERNEL_ADDRESS;
 
 	bitmap_full(&asid_bitmap[0], pmap_max_asids);
+#if !HAS_16BIT_ASID
 	bitmap_full(&asid_plru_bitmap[0], MAX_HW_ASIDS);
 	// Clear the highest-order bit, which corresponds to MAX_HW_ASIDS + 1
 	asid_plru_bitmap[MAX_HW_ASIDS >> 6] = ~(1ULL << 63);
+#endif /* !HAS_16BIT_ASID */
 
 
 
@@ -2397,7 +2471,7 @@ pmap_static_allocations_done(void)
 	 * been reserved for bootstrap, so we know which pages to give to the
 	 * virtual memory layer.
 	 */
-	monitor_start_pa = BootArgs->topOfKernelData;
+	monitor_start_pa = first_avail_phys;
 	monitor_end_pa = avail_start;
 
 	/* The other bootstrap allocations are mapped RW at bootstrap. */
@@ -2990,7 +3064,7 @@ pmap_create_options_internal(
 	p->nested_region_asid_bitmap = NULL;
 	p->nested_region_asid_bitmap_size = 0x0UL;
 
-	p->nested_has_no_bounds_ref = false;
+	p->nested_no_bounds_ref_state = NESTED_NO_BOUNDS_REF_NONE;
 	p->nested_no_bounds_refcnt = 0;
 	p->nested_bounds_set = false;
 
@@ -3266,7 +3340,7 @@ pmap_destroy_internal(
 	assert((tt_free_entry_t*)pmap->tt_entry_free == NULL);
 
 	if (__improbable(pmap->type == PMAP_TYPE_NESTED)) {
-		pmap_get_pt_ops(pmap)->flush_tlb_region_async(pmap->nested_region_addr, pmap->nested_region_size, pmap, false);
+		pmap_get_pt_ops(pmap)->flush_tlb_region_async(pmap->nested_region_addr, pmap->nested_region_size, pmap, false, false);
 		sync_tlb_flush();
 	} else {
 		pmap_get_pt_ops(pmap)->flush_tlb_async(pmap);
@@ -3520,7 +3594,11 @@ pmap_tt_allocate(
 	pmap_paddr_t pa;
 	*ttp = NULL;
 
-	pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE);
+	/* Traverse the tt_entry_free list to find a free tt_entry */
+	if (!pmap_lock_preempt(pmap, PMAP_LOCK_EXCLUSIVE)) {
+		return KERN_ABORTED;
+	}
+
 	if ((tt_free_entry_t *)pmap->tt_entry_free != NULL) {
 		tt_free_entry_t *tt_free_cur, *tt_free_next;
 
@@ -3532,6 +3610,7 @@ pmap_tt_allocate(
 	}
 	pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
 
+	/* Only do the heavylifting here when we don't have a free tt_entry. */
 	if (*ttp == NULL) {
 		pt_desc_t       *ptdp;
 
@@ -3545,8 +3624,10 @@ pmap_tt_allocate(
 			VM_PAGE_WAIT();
 		}
 
+		/* Allocate a new Page Table Descriptor for the newly allocated page table. */
 		while ((ptdp = ptd_alloc(pmap)) == NULL) {
 			if (options & PMAP_OPTIONS_NOWAIT) {
+				/* Deallocate all allocated resources so far. */
 				pmap_pages_free(pa, PAGE_SIZE);
 				return KERN_RESOURCE_SHORTAGE;
 			}
@@ -3574,7 +3655,16 @@ pmap_tt_allocate(
 			vm_address_t    va;
 			vm_address_t    va_end;
 
-			pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE);
+			if (!pmap_lock_preempt(pmap, PMAP_LOCK_EXCLUSIVE)) {
+				/* Deallocate all allocated resources so far. */
+				pvh_update_head_unlocked(pai_to_pvh(pa_index(pa)), PV_ENTRY_NULL, PVH_TYPE_NULL);
+				PMAP_ZINFO_PFREE(pmap, PAGE_SIZE);
+				pmap_tt_ledger_debit(pmap, PAGE_SIZE);
+				pmap_pages_free(pa, PAGE_SIZE);
+				ptd_deallocate(ptdp);
+
+				return KERN_ABORTED;
+			}
 
 			for (va_end = phystokv(pa) + PAGE_SIZE, va = phystokv(pa) + pmap_page_size; va < va_end; va = va + pmap_page_size) {
 				((tt_free_entry_t *)va)->next = (tt_free_entry_t *)pmap->tt_entry_free;
@@ -3827,16 +3917,31 @@ pmap_tte_remove(
 
 		pt_entry_t *ptep = bpte;
 		unsigned short non_empty = 0, valid = 0, comp = 0;
+
 		for (unsigned int i = 0; i < (pmap_page_size / sizeof(*ptep)); i++, ptep++) {
+			/**
+			 * Note that, for older 4K devices that emulate 16K pages, we ignore the
+			 * compressed marker on PTEs that aren't at an index that's a multiple of 4.
+			 * That's because it's possible for the 4-tuple PTE clear operation in
+			 * pmap_remove() and the 4-tuple PTE 'compressed' marker write operation in
+			 * pmap_disconnect() to race each other in such a way that the compressed marker
+			 * may be left in the 2nd, 3rd, and/or 4th PTEs.
+			 * This should be harmless as only the 1st PTE is used for accounting purposes,
+			 * but we don't want it to trip our internal checks here.
+			 */
+			if (__improbable(ARM_PTE_IS_COMPRESSED(*ptep, ptep))) {
+				if ((i % PAGE_RATIO) == 0) {
+					comp++;
+				} else {
+					continue;
+				}
+			} else if (__improbable((*ptep & ARM_PTE_TYPE_VALID) == ARM_PTE_TYPE)) {
+				valid++;
+			}
+
 			/* Keep track of all non-empty entries to detect memory corruption. */
 			if (__improbable(*ptep != ARM_PTE_EMPTY)) {
 				non_empty++;
-			}
-
-			if (__improbable(ARM_PTE_IS_COMPRESSED(*ptep, ptep))) {
-				comp++;
-			} else if (__improbable((*ptep & ARM_PTE_TYPE_VALID) == ARM_PTE_TYPE)) {
-				valid++;
 			}
 		}
 
@@ -3968,7 +4073,7 @@ pmap_set_ptov_ap(unsigned int pai __unused, unsigned int ap __unused, boolean_t 
 		    __func__, pte_p, (void *)kva, tmplate);
 	}
 	write_pte_strong(pte_p, tmplate);
-	flush_mmu_tlb_region_asid_async(kva, PAGE_SIZE, kernel_pmap, true);
+	flush_mmu_tlb_region_asid_async(kva, PAGE_SIZE, kernel_pmap, true, false);
 	if (!flush_tlb_async) {
 		sync_tlb_flush();
 	}
@@ -4091,6 +4196,11 @@ pmap_remove_range_options(
 #endif
 				break;
 			}
+#if HAS_FEAT_XS
+			if (pte_is_xs(pt_attr, spte)) {
+				*need_strong_sync = true;
+			}
+#endif /* HAS_FEAT_XS */
 			pai = pa_index(pa);
 			pvh_lock(pai);
 			spte = *((volatile pt_entry_t*)cpte);
@@ -4445,6 +4555,7 @@ pmap_switch_internal(
 	bool do_shared_region_flush = ((pmap != kernel_pmap) && (last_nested_pmap != NULL) && (pmap->nested_pmap != last_nested_pmap));
 	bool break_before_make = do_shared_region_flush;
 
+#if !HAS_16BIT_ASID
 	if ((pmap_max_asids > MAX_HW_ASIDS) && (asid_index > 0)) {
 		asid_index -= 1;
 		pmap_update_plru(asid_index);
@@ -4468,6 +4579,7 @@ pmap_switch_internal(
 			break_before_make = true;
 		}
 	}
+#endif /* !HAS_16BIT_ASID */
 
 #if __ARM_MIXED_PAGE_SIZE__
 	if (pt_attr->pta_tcr_value != get_tcr()) {
@@ -4511,9 +4623,15 @@ pmap_switch_internal(
 		 * with the incoming pmap's nested region.  However, the ARMv8 ARM is not crystal clear
 		 * on whether such a global/inactive-nonglobal overlap is acceptable, so we may need
 		 * to consider additional invalidation here in the future. */
-		if (npages_prev <= ARM64_TLB_RANGE_PAGES) {
+		if ((npages_prev >= ARM64_TLB_RANGE_MIN_PAGES) && (npages_prev <= ARM64_TLB_RANGE_MAX_PAGES)) {
 			flush_core_tlb_allrange_async(generate_rtlbi_param((ppnum_t)npages_prev, 0, last_nested_region_addr, page_shift_prev));
 		} else {
+			/*
+			 * Note that we also do a full flush if npages_prev is 1 (i.e. at or below
+			 * ARM64_RANGE_TLB_FLUSH_THRESHOLD), but a properly configured system will never
+			 * have a single-page shared region anyway, not least because pmap_nest()
+			 * requires L2 block alignment of the address and size.
+			 */
 			do_asid_flush = false;
 			flush_core_tlb_async();
 		}
@@ -4749,6 +4867,14 @@ pmap_page_protect_options_with_flush_range(
 			set_NX = true;
 		}
 
+#if HAS_FEAT_XS
+		/**
+		 * TODO: we don't currently allow XS MAIR types on managed memory (see wimg_to_pte()),
+		 * but if we change that we'll need to allow for "strong" TLBIs and DSBs in this function.
+		 */
+		assert(!pte_is_xs(pmap_get_pt_attr(pmap), *pte_p));
+#endif /* HAS_FEAT_XS */
+
 		/* Remove the mapping if new protection is NONE */
 		if (remove) {
 			const bool is_internal = ppattr_pve_is_internal(pai, pve_p, pve_ptep_idx);
@@ -4978,7 +5104,7 @@ protect_skip_pve_pass1:
 		if (remove || !flush_range || (flush_range->ptfr_pmap != pmap) ||
 		    (va >= flush_range->ptfr_end) || (va < flush_range->ptfr_start)) {
 			pmap_get_pt_ops(pmap)->flush_tlb_region_async(va,
-			    pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO, pmap, true);
+			    pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO, pmap, true, false);
 		}
 
 protect_skip_pve_pass2:
@@ -5034,6 +5160,9 @@ protect_finish:
 			pvh_update_head(pv_h, new_pte_p, PVH_TYPE_PTEP);
 			pvh_set_flags(pv_h, pvh_flags);
 		} else {
+			if (__improbable(pvh_flags & PVH_FLAG_FLUSH_NEEDED)) {
+				pmap_flush_noncoherent_page(phys);
+			}
 			pvh_update_head(pv_h, PV_ENTRY_NULL, PVH_TYPE_NULL);
 		}
 	}
@@ -5054,6 +5183,7 @@ protect_finish:
 	if (remove && tlb_flush_needed) {
 		sync_tlb_flush();
 	}
+
 
 	pvh_unlock(pai);
 
@@ -5128,7 +5258,7 @@ pmap_page_protect_options(
 }
 
 
-#if __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX)
+#if __has_feature(ptrauth_calls) && (defined(XNU_TARGET_OS_OSX) || (DEVELOPMENT || DEBUG))
 MARK_AS_PMAP_TEXT void
 pmap_disable_user_jop_internal(pmap_t pmap)
 {
@@ -5148,7 +5278,7 @@ pmap_disable_user_jop(pmap_t pmap)
 	pmap_disable_user_jop_internal(pmap);
 #endif
 }
-#endif /* __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX) */
+#endif /* __has_feature(ptrauth_calls) && (defined(XNU_TARGET_OS_OSX) || (DEVELOPMENT || DEBUG)) */
 
 /*
  * Indicates if the pmap layer enforces some additional restrictions on the
@@ -5401,6 +5531,11 @@ pmap_protect_options_internal(
 
 			/* We do not expect to write fast fault the entry. */
 			pte_set_was_writeable(tmplate, false);
+#if HAS_FEAT_XS
+			if (pte_is_xs(pt_attr, spte)) {
+				need_strong_sync = true;
+			}
+#endif /* HAS_FEAT_XS */
 
 			write_pte_fast(pte_p, tmplate);
 
@@ -5643,8 +5778,14 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
 
 	if (success && *old_pte != new_pte) {
 		if ((*old_pte & ARM_PTE_TYPE_VALID) == ARM_PTE_TYPE) {
+			bool need_strong_sync = false;
 			FLUSH_PTE_STRONG();
-			PMAP_UPDATE_TLBS(pmap, v, v + (pt_attr_page_size(pt_attr) * PAGE_RATIO), false, true);
+#if HAS_FEAT_XS
+			if (pte_is_xs(pt_attr, *old_pte)) {
+				need_strong_sync = true;
+			}
+#endif /* HAS_FEAT_XS */
+			PMAP_UPDATE_TLBS(pmap, v, v + (pt_attr_page_size(pt_attr) * PAGE_RATIO), need_strong_sync, true);
 		} else {
 			FLUSH_PTE();
 			__builtin_arm_isb(ISB_SY);
@@ -5690,23 +5831,32 @@ wimg_to_pte(unsigned int wimg, __unused pmap_paddr_t pa)
 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
 		break;
 	case VM_WIMG_RT:
-#if HAS_UCNORMAL_MEM
-		pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
-#else
-		pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DISABLE);
-#endif
+		pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_RT);
 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
 		break;
 	case VM_WIMG_POSTED:
-		pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED);
+		if (is_dram_addr(pa)) {
+			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED);
+		} else {
+			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED);
+		}
 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
 		break;
 	case VM_WIMG_POSTED_REORDERED:
-		pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED_REORDERED);
+		if (is_dram_addr(pa)) {
+			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED);
+		} else {
+			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED_REORDERED);
+		}
 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
 		break;
 	case VM_WIMG_POSTED_COMBINED_REORDERED:
 		pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED);
+#if HAS_FEAT_XS
+		if (!is_dram_addr(pa)) {
+			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED_XS);
+		}
+#endif /* HAS_FEAT_XS */
 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
 		break;
 	case VM_WIMG_WCOMB:
@@ -6001,21 +6151,6 @@ pmap_enter_options_internal(
 			}
 		}
 
-#if XNU_MONITOR
-		/**
-		 * PPL-protected MMIO mappings handed to IOMMUs must be PPL-writable and cannot be removed,
-		 * but in support of hibernation we allow temporary read-only mappings of these pages to be
-		 * created and later removed.  We must therefore prevent an attacker from downgrading a
-		 * a writable mapping in order to allow it to be removed and remapped to something else.
-		 */
-		if (__improbable(had_valid_mapping && !pa_valid(pte_to_pa(spte)) &&
-		    (pte_to_xprr_perm(spte) != XPRR_KERN_RO_PERM) && !(prot & VM_PROT_WRITE) &&
-		    (pmap_cache_attributes((ppnum_t)atop(pte_to_pa(spte))) & PP_ATTR_MONITOR))) {
-			panic("%s: attempt to downgrade mapping of writable PPL-protected I/O address 0x%llx",
-			    __func__, (uint64_t)pte_to_pa(spte));
-		}
-#endif
-
 		if (had_valid_mapping && (pte_to_pa(spte) != pa)) {
 			/*
 			 * There is already a mapping here & it's for a different physical page.
@@ -6052,6 +6187,10 @@ pmap_enter_options_internal(
 		 * here thanks to PMAP_OPTIONS_MAP_TPRO.
 		 */
 		if (options & PMAP_OPTIONS_MAP_TPRO) {
+			if (__improbable(pmap == kernel_pmap)) {
+				panic("%s: attempt to create kernel TPRO mapping, will produce kernel RX mapping instead.",
+				    __func__);
+			}
 			pte = pmap_construct_pte(pmap, v, pa, VM_PROT_RORW_TP, fault_type, wired, pt_attr, &pp_attr_bits);
 		} else {
 			pte = pmap_construct_pte(pmap, v, pa, prot, fault_type, wired, pt_attr, &pp_attr_bits);
@@ -6280,20 +6419,23 @@ pmap_enter_options_internal(
 			pte |= pmap_get_pt_ops(pmap)->wimg_to_pte(wimg_bits, pa);
 
 #if XNU_MONITOR
-			if ((wimg_bits & PP_ATTR_MONITOR) && !pmap_ppl_disable) {
-				uint64_t xprr_perm = pte_to_xprr_perm(pte);
-				switch (xprr_perm) {
-				case XPRR_KERN_RO_PERM:
-					break;
-				case XPRR_KERN_RW_PERM:
-					pte &= ~ARM_PTE_XPRR_MASK;
-					pte |= xprr_perm_to_pte(XPRR_PPL_RW_PERM);
-					break;
-				default:
-					panic("Unsupported xPRR perm %llu for pte 0x%llx", xprr_perm, (uint64_t)pte);
-				}
+			pte = pmap_construct_io_pte(pa, pte);
+
+			/**
+			 * PPL-protected MMIO mappings handed to IOMMUs must be PPL-writable and cannot be removed,
+			 * but in support of hibernation we allow temporary read-only mappings of these pages to be
+			 * created and later removed.  We must therefore prevent an attacker from downgrading a
+			 * a writable mapping in order to allow it to be removed and remapped to something else.
+			 */
+			if (__improbable((wimg_bits & PP_ATTR_MONITOR) &&
+			    ((spte & ARM_PTE_TYPE_VALID) == ARM_PTE_TYPE) &&
+			    (pte_to_xprr_perm(spte) != XPRR_KERN_RO_PERM) &&
+			    (pte_to_xprr_perm(pte) == XPRR_KERN_RO_PERM))) {
+				panic("%s: attempt to downgrade mapping of writable PPL-protected I/O address 0x%llx",
+				    __func__, (uint64_t)pte_to_pa(spte));
 			}
 #endif
+
 			committed = pmap_enter_pte(pmap, pte_p, &spte, pte, v);
 			if (committed) {
 				had_valid_mapping = (spte & ARM_PTE_TYPE_VALID) == ARM_PTE_TYPE;
@@ -6787,9 +6929,11 @@ pmap_expand(
 
 		if (pmap_ttne(pmap, ttlevel + 1, v) == PT_ENTRY_NULL) {
 			pmap_unlock(pmap, PMAP_LOCK_SHARED);
-			while (pmap_tt_allocate(pmap, &tt_p, ttlevel + 1, ((options & PMAP_TT_ALLOCATE_NOWAIT)? PMAP_PAGES_ALLOCATE_NOWAIT : 0)) != KERN_SUCCESS) {
+			kern_return_t ret;
+			while ((ret = pmap_tt_allocate(pmap, &tt_p, ttlevel + 1, ((options & PMAP_TT_ALLOCATE_NOWAIT)? PMAP_PAGES_ALLOCATE_NOWAIT : 0))) != KERN_SUCCESS) {
 				if (options & PMAP_OPTIONS_NOWAIT) {
-					return KERN_RESOURCE_SHORTAGE;
+					/* Can be KERN_RESOURCE_SHORTAGE or KERN_ABORTED. */
+					return ret;
 				}
 #if XNU_MONITOR
 				panic("%s: failed to allocate tt, "
@@ -6995,10 +7139,16 @@ phys_attribute_clear_with_flush_range(
 		options = options & ~PMAP_OPTIONS_NOFLUSH;
 	}
 
+	if (__improbable((options & (PMAP_OPTIONS_FF_WIRED | PMAP_OPTIONS_FF_LOCKED)) != 0)) {
+		panic("phys_attribute_clear(%#010x,%#010x,%#010x,%p,%p): "
+		    "invalid options",
+		    pn, bits, options, arg, flush_range);
+	}
+
 	if (__improbable((bits & PP_ATTR_MODIFIED) &&
 	    (options & PMAP_OPTIONS_NOFLUSH))) {
-		panic("phys_attribute_clear(0x%x,0x%x,0x%x,%p,%p): "
-		    "should not clear 'modified' without flushing TLBs\n",
+		panic("phys_attribute_clear(%#010x,%#010x,%#010x,%p,%p): "
+		    "should not clear 'modified' without flushing TLBs",
 		    pn, bits, options, arg, flush_range);
 	}
 
@@ -7116,7 +7266,10 @@ phys_attribute_clear_range_internal(
 		.ptfr_flush_needed = false
 	};
 
-	pmap_lock(pmap, PMAP_LOCK_SHARED);
+	if (!pmap_lock_preempt(pmap, PMAP_LOCK_SHARED)) {
+		return va;
+	}
+
 	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
 
 	while (va < end) {
@@ -7138,7 +7291,8 @@ phys_attribute_clear_range_internal(
 			flush_range.ptfr_start,
 			flush_range.ptfr_end - flush_range.ptfr_start,
 			flush_range.ptfr_pmap,
-			true);
+			true,
+			false);
 		sync_tlb_flush();
 	}
 	return va;
@@ -7787,6 +7941,13 @@ arm_force_fast_fault_with_flush_range(
 		spte = *pte_p;
 		tmplate = spte;
 
+#if HAS_FEAT_XS
+		/**
+		 * TODO: we don't currently allow XS MAIR types on managed memory (see wimg_to_pte()),
+		 * but if we change that we'll need to allow for "strong" TLBIs and DSBs in this function.
+		 */
+		assert(!pte_is_xs(pt_attr, spte));
+#endif /* HAS_FEAT_XS */
 		if ((allow_mode & VM_PROT_READ) != VM_PROT_READ) {
 			/* read protection sets the pte to fault */
 			tmplate =  tmplate & ~ARM_PTE_AF;
@@ -7891,7 +8052,7 @@ fff_skip_pve_pass1:
 		if (!flush_range || (flush_range->ptfr_pmap != pmap) ||
 		    (va >= flush_range->ptfr_end) || (va < flush_range->ptfr_start)) {
 			pmap_get_pt_ops(pmap)->flush_tlb_region_async(va,
-			    pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO, pmap, true);
+			    pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO, pmap, true, false);
 		}
 
 fff_skip_pve_pass2:
@@ -7952,7 +8113,7 @@ arm_force_fast_fault_internal(
 	vm_prot_t       allow_mode,
 	int             options)
 {
-	if (__improbable((options & (PMAP_OPTIONS_FF_LOCKED | PMAP_OPTIONS_NOFLUSH)) != 0)) {
+	if (__improbable((options & (PMAP_OPTIONS_FF_LOCKED | PMAP_OPTIONS_FF_WIRED | PMAP_OPTIONS_NOFLUSH)) != 0)) {
 		panic("arm_force_fast_fault(0x%x, 0x%x, 0x%x): invalid options", ppnum, allow_mode, options);
 	}
 	return arm_force_fast_fault_with_flush_range(ppnum, allow_mode, options, NULL);
@@ -8172,7 +8333,8 @@ cff_skip_pve_pass1:
 		const pmap_t pmap = ptdp->pmap;
 		const vm_map_address_t va = ptd_get_va(ptdp, pte_p);
 
-		pmap_get_pt_ops(pmap)->flush_tlb_region_async(va, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO, pmap, true);
+		pmap_get_pt_ops(pmap)->flush_tlb_region_async(va, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO,
+		    pmap, true, false);
 
 cff_skip_pve_pass2:
 		pte_p = PT_ENTRY_NULL;
@@ -8534,7 +8696,9 @@ pmap_map_cpu_windows_copy_internal(
 	} else {
 		pte |= ARM_PTE_AP(AP_RONA);
 	}
-
+#if HAS_FEAT_XS
+	need_strong_sync = pte_is_xs(native_pt_attr, pte);
+#endif
 	write_pte_fast(ptep, pte);
 	/*
 	 * Invalidate tlb. Cover nested cpu_copywindow_vaddr usage with the interrupted context
@@ -8739,6 +8903,13 @@ pmap_set_nested(
 #endif
 }
 
+bool
+pmap_is_nested(
+	pmap_t pmap)
+{
+	return pmap->type == PMAP_TYPE_NESTED;
+}
+
 /*
  * pmap_trim_range(pmap, start, end)
  *
@@ -8932,13 +9103,14 @@ pmap_trim_internal(
 		pmap_lock(subord, PMAP_LOCK_EXCLUSIVE);
 
 		/**
-		 * The "nested_has_no_bounds_ref" flag is set by `pmap_nest()` if the subord is nested into
-		 * the grand when the bounds are not known yet. Therefore, if it is not set, either any nesting
-		 * has not happened, or trimming has been done, or nesting has been done with bounds known so
-		 * the "extra" region was not nested in the first place. Anyway, trimming is not needed so
-		 * we exit early with PMAP_TRIM_STATE_DONE.
+		 * The "nested_no_bounds_ref_state" enum is set to NESTED_NO_BOUNDS_REF_BEFORE_AND_AFTER by
+		 * `pmap_nest()` if the subord is nested into the grand when the bounds are not known yet.
+		 * Therefore, if it is NESTED_NO_BOUNDS_REF_NONE, either any nesting has not happened, or
+		 * trimming has been done, or nesting has been done with bounds known so the "extra" region
+		 * was not nested in the first place. Anyway, trimming is not needed so we exit early with
+		 * PMAP_TRIM_STATE_DONE.
 		 */
-		if (!grand->nested_has_no_bounds_ref) {
+		if (grand->nested_no_bounds_ref_state == NESTED_NO_BOUNDS_REF_NONE) {
 			assert(subord->nested_bounds_set);
 
 			/* Nothing to do if the grand already has bounds set, otherwise inherit from the subord. */
@@ -8982,7 +9154,6 @@ pmap_trim_internal(
 			grand->nested_bounds_set = true;
 
 			/* If we know the bounds, we can trim the pmap. */
-			grand->nested_has_no_bounds_ref = false;
 			pmap_unlock(subord, PMAP_LOCK_EXCLUSIVE);
 
 			state = PMAP_TRIM_STATE_GRAND_BEFORE;
@@ -9003,6 +9174,11 @@ pmap_trim_internal(
 
 	if (state == PMAP_TRIM_STATE_GRAND_BEFORE) {
 		pmap_trim_range(grand, grand->nested_region_addr, grand->nested_region_true_start);
+		if (__improbable(!os_atomic_cmpxchg(&grand->nested_no_bounds_ref_state,
+		    NESTED_NO_BOUNDS_REF_BEFORE_AND_AFTER, NESTED_NO_BOUNDS_REF_AFTER, release))) {
+			panic("%s: grand %p has unexpected no-bounds state %u", __func__, grand,
+			    (unsigned int)grand->nested_no_bounds_ref_state);
+		}
 
 #if XNU_MONITOR
 		if (pmap_pending_preemption()) {
@@ -9015,6 +9191,11 @@ pmap_trim_internal(
 
 	if (state == PMAP_TRIM_STATE_GRAND_AFTER) {
 		pmap_trim_range(grand, grand->nested_region_true_end, (grand->nested_region_addr + grand->nested_region_size));
+		if (__improbable(!os_atomic_cmpxchg(&grand->nested_no_bounds_ref_state,
+		    NESTED_NO_BOUNDS_REF_AFTER, NESTED_NO_BOUNDS_REF_SUBORD, release))) {
+			panic("%s: grand %p has unexpected no-bounds state %u", __func__, grand,
+			    (unsigned int)grand->nested_no_bounds_ref_state);
+		}
 
 #if XNU_MONITOR
 		if (pmap_pending_preemption()) {
@@ -9033,6 +9214,23 @@ pmap_trim_internal(
 	}
 
 	if (state == PMAP_TRIM_STATE_SUBORD) {
+		/**
+		 * Since 'state' may be an attacker-controlled variable, we use nested_no_bounds_ref_state
+		 * to ensure that pmap_trim_subord (which may free page tables from subord) can only be
+		 * called once grand's nested tables have been fully trimmed, and can only be called once
+		 * for each 'grand' pmap.  We use release ordering for the atomics above to ensure that
+		 * the state update is visible only once the preceding trim operation is complete.  An
+		 * attacker may be able to trigger multiple concurrent trims on the same 'grand' region,
+		 * but locking within pmap_trim_range() should make that harmless (and all but one will
+		 * ultimately panic due to a failed atomic state CAS).  We use acquire ordering here to
+		 * ensure that modifications performed by pmap_trim_subord() can't be reordered ahead
+		 * of the state CAS.
+		 */
+		if (__improbable(!os_atomic_cmpxchg(&grand->nested_no_bounds_ref_state,
+		    NESTED_NO_BOUNDS_REF_SUBORD, NESTED_NO_BOUNDS_REF_NONE, acquire))) {
+			panic("%s: grand %p has unexpected no-bounds state %u", __func__, grand,
+			    (unsigned int)grand->nested_no_bounds_ref_state);
+		}
 		pmap_trim_subord(subord);
 	}
 
@@ -9042,10 +9240,10 @@ pmap_trim_internal(
 MARK_AS_PMAP_TEXT static void
 pmap_trim_self(pmap_t pmap)
 {
-	if (pmap->nested_has_no_bounds_ref && pmap->nested_pmap) {
+	if ((pmap->nested_no_bounds_ref_state != NESTED_NO_BOUNDS_REF_NONE) && pmap->nested_pmap) {
 		/* If we have a no bounds ref, we need to drop it. */
 		pmap_lock(pmap->nested_pmap, PMAP_LOCK_SHARED);
-		pmap->nested_has_no_bounds_ref = false;
+		pmap->nested_no_bounds_ref_state = NESTED_NO_BOUNDS_REF_NONE;
 		boolean_t nested_bounds_set = pmap->nested_pmap->nested_bounds_set;
 		vm_map_offset_t nested_region_true_start = pmap->nested_pmap->nested_region_true_start;
 		vm_map_offset_t nested_region_true_end = pmap->nested_pmap->nested_region_true_end;
@@ -9272,9 +9470,12 @@ pmap_nest_internal(
 	tt_entry_t     *stte_p;
 	tt_entry_t     *gtte_p;
 	unsigned int    nested_region_asid_bitmap_size;
-	unsigned int*   nested_region_asid_bitmap;
+	unsigned int*   nested_region_asid_bitmap = NULL;
+	unsigned int    new_nested_region_asid_bitmap_size;
+	unsigned int*   new_nested_region_asid_bitmap = NULL;
 	int             expand_options = 0;
 	bool            deref_subord = true;
+	bool            grand_locked = false;
 
 	addr64_t vend;
 	if (__improbable(os_add_overflow(vstart, size, &vend))) {
@@ -9356,7 +9557,11 @@ pmap_nest_internal(
 			Z_WAITOK | Z_ZERO);
 #endif
 
-		pmap_lock(subord, PMAP_LOCK_EXCLUSIVE);
+		if (!pmap_lock_preempt(subord, PMAP_LOCK_EXCLUSIVE)) {
+			kr = KERN_ABORTED;
+			goto nest_cleanup;
+		}
+
 		if (subord->nested_region_asid_bitmap == NULL) {
 			subord->nested_region_asid_bitmap_size = nested_region_asid_bitmap_size;
 			subord->nested_region_addr = vstart;
@@ -9379,6 +9584,7 @@ pmap_nest_internal(
 			kfree_data(nested_region_asid_bitmap,
 			    nested_region_asid_bitmap_size * sizeof(unsigned int));
 #endif
+			nested_region_asid_bitmap = NULL;
 		}
 	}
 
@@ -9390,8 +9596,6 @@ pmap_nest_internal(
 
 	if ((subord->nested_region_addr + subord->nested_region_size) < vend) {
 		uint64_t        new_size;
-		unsigned int    new_nested_region_asid_bitmap_size;
-		unsigned int*   new_nested_region_asid_bitmap;
 
 		nested_region_asid_bitmap = NULL;
 		nested_region_asid_bitmap_size = 0;
@@ -9424,7 +9628,11 @@ pmap_nest_internal(
 			new_nested_region_asid_bitmap_size * sizeof(unsigned int),
 			Z_WAITOK | Z_ZERO);
 #endif
-		pmap_lock(subord, PMAP_LOCK_EXCLUSIVE);
+		if (!pmap_lock_preempt(subord, PMAP_LOCK_EXCLUSIVE)) {
+			kr = KERN_ABORTED;
+			goto nest_cleanup;
+		}
+
 		if (subord->nested_region_size < new_size) {
 			bcopy(subord->nested_region_asid_bitmap,
 			    new_nested_region_asid_bitmap, subord->nested_region_asid_bitmap_size);
@@ -9443,6 +9651,7 @@ pmap_nest_internal(
 			kfree_data(nested_region_asid_bitmap,
 			    nested_region_asid_bitmap_size * sizeof(unsigned int));
 #endif
+			nested_region_asid_bitmap = NULL;
 		}
 		if (new_nested_region_asid_bitmap != NULL) {
 #if XNU_MONITOR
@@ -9451,10 +9660,14 @@ pmap_nest_internal(
 			kfree_data(new_nested_region_asid_bitmap,
 			    new_nested_region_asid_bitmap_size * sizeof(unsigned int));
 #endif
+			new_nested_region_asid_bitmap = NULL;
 		}
 	}
 
-	pmap_lock(subord, PMAP_LOCK_EXCLUSIVE);
+	if (!pmap_lock_preempt(subord, PMAP_LOCK_EXCLUSIVE)) {
+		kr = KERN_ABORTED;
+		goto nest_cleanup;
+	}
 
 	if (os_atomic_cmpxchg(&grand->nested_pmap, PMAP_NULL, subord, relaxed)) {
 		/*
@@ -9468,7 +9681,10 @@ pmap_nest_internal(
 			 * We are nesting without the shared regions bounds
 			 * being known.  We'll have to trim the pmap later.
 			 */
-			grand->nested_has_no_bounds_ref = true;
+			if (__improbable(!os_atomic_cmpxchg(&grand->nested_no_bounds_ref_state,
+			    NESTED_NO_BOUNDS_REF_NONE, NESTED_NO_BOUNDS_REF_BEFORE_AND_AFTER, relaxed))) {
+				panic("%s: grand %p already nested", __func__, grand);
+			}
 			subord->nested_no_bounds_refcnt++;
 		}
 
@@ -9506,7 +9722,6 @@ pmap_nest_internal(
 			kr = pmap_expand(subord, vaddr, expand_options, pt_attr_leaf_level(pt_attr));
 
 			if (kr != KERN_SUCCESS) {
-				pmap_lock(grand, PMAP_LOCK_EXCLUSIVE);
 				goto done;
 			}
 
@@ -9519,7 +9734,6 @@ pmap_nest_internal(
 		    pmap_pending_preemption())) {
 			pmap_unlock(subord, PMAP_LOCK_EXCLUSIVE);
 			kr = KERN_SUCCESS;
-			pmap_lock(grand, PMAP_LOCK_EXCLUSIVE);
 			goto done;
 		}
 	}
@@ -9535,14 +9749,22 @@ pmap_nest_internal(
 
 nest_grand:
 	pmap_unlock(subord, PMAP_LOCK_EXCLUSIVE);
-	pmap_lock(grand, PMAP_LOCK_EXCLUSIVE);
+
+	if (!(grand_locked = pmap_lock_preempt(grand, PMAP_LOCK_EXCLUSIVE))) {
+		kr = KERN_ABORTED;
+		goto done;
+	}
 	while (vaddr < true_end) {
 		stte_p = pmap_tte(subord, vaddr);
 		gtte_p = pmap_tte(grand, vaddr);
 		if (gtte_p == PT_ENTRY_NULL) {
 			pmap_unlock(grand, PMAP_LOCK_EXCLUSIVE);
 			kr = pmap_expand(grand, vaddr, expand_options, pt_attr_twig_level(pt_attr));
-			pmap_lock(grand, PMAP_LOCK_EXCLUSIVE);
+			if (!(grand_locked = pmap_lock_preempt(grand, PMAP_LOCK_EXCLUSIVE))) {
+				if (kr == KERN_SUCCESS) {
+					kr = KERN_ABORTED;
+				}
+			}
 
 			if (kr != KERN_SUCCESS) {
 				goto done;
@@ -9575,9 +9797,12 @@ done:
 	FLUSH_PTE();
 	__builtin_arm_isb(ISB_SY);
 
-	pmap_unlock(grand, PMAP_LOCK_EXCLUSIVE);
-#if XNU_MONITOR
+	if (grand_locked) {
+		pmap_unlock(grand, PMAP_LOCK_EXCLUSIVE);
+	}
+
 nest_cleanup:
+#if XNU_MONITOR
 	if (kr != KERN_SUCCESS) {
 		pmap_pin_kernel_pages((vm_offset_t)krp, sizeof(*krp));
 		*krp = kr;
@@ -9588,6 +9813,22 @@ nest_cleanup:
 		*krp = kr;
 	}
 #endif
+	if (nested_region_asid_bitmap != NULL) {
+#if XNU_MONITOR
+		pmap_pages_free(kvtophys_nofail((vm_offset_t)nested_region_asid_bitmap), PAGE_SIZE);
+#else
+		kfree_data(nested_region_asid_bitmap,
+		    nested_region_asid_bitmap_size * sizeof(unsigned int));
+#endif
+	}
+	if (new_nested_region_asid_bitmap != NULL) {
+#if XNU_MONITOR
+		pmap_pages_free(kvtophys_nofail((vm_offset_t)new_nested_region_asid_bitmap), PAGE_SIZE);
+#else
+		kfree_data(new_nested_region_asid_bitmap,
+		    new_nested_region_asid_bitmap_size * sizeof(unsigned int));
+#endif
+	}
 	if (deref_subord) {
 #if XNU_MONITOR
 		os_atomic_dec(&subord->nested_count, relaxed);
@@ -9621,8 +9862,14 @@ pmap_nest(
 			pmap_alloc_page_for_ppl(0);
 			kr = KERN_SUCCESS;
 		} else if (kr == KERN_ABORTED) {
-			/* Reset kr to KERN_SUCCESS and try again. */
+			/**
+			 * pmap_nest_internal() assumes passed-in kr is KERN_SUCCESS in
+			 * that it won't update kr when KERN_SUCCESS is to be returned.
+			 * Therefore, the KERN_ABORTED needs to be manually cleared here,
+			 * like how it is done in the KERN_RESOURCE_SHORTAGE case.
+			 */
 			kr = KERN_SUCCESS;
+			continue;
 		} else if (kr != KERN_SUCCESS) {
 			break;
 		} else if (vaddr == vlast) {
@@ -9745,7 +9992,9 @@ pmap_unnest_options_internal(
 			panic("%s: %p: unnest request to not-fully-nested region [%p, %p)", __func__, grand, (void*)vaddr, (void*)vend);
 		}
 
-		pmap_lock(grand->nested_pmap, PMAP_LOCK_EXCLUSIVE);
+		if (!pmap_lock_preempt(grand->nested_pmap, PMAP_LOCK_EXCLUSIVE)) {
+			return vrestart;
+		}
 
 		start = vrestart;
 		if (start < grand->nested_pmap->nested_region_true_start) {
@@ -9846,8 +10095,6 @@ unnest_subord_done:
 		}
 	}
 
-	pmap_lock(grand, PMAP_LOCK_EXCLUSIVE);
-
 	/*
 	 * invalidate all pdes for segment at vaddr in pmap grand
 	 */
@@ -9859,6 +10106,15 @@ unnest_subord_done:
 	} else {
 		addr = vaddr;
 		vrestart = vaddr | PMAP_NEST_GRAND;
+	}
+
+	/**
+	 * If we exit here due to a busy grand pmap lock, vrestart will be marked
+	 * PMAP_NEST_GRAND so that this function jumps straightly into step two
+	 * upon reentry.
+	 */
+	if (!pmap_lock_preempt(grand, PMAP_LOCK_EXCLUSIVE)) {
+		return vrestart;
 	}
 
 	if (addr < grand->nested_pmap->nested_region_true_start) {
@@ -9904,7 +10160,6 @@ pmap_unnest_options(
 {
 	vm_map_offset_t vrestart = (vm_map_offset_t)vaddr;
 	vm_map_offset_t vend = vaddr + size;
-	__unused vm_map_offset_t vlast = vrestart;
 
 	PMAP_TRACE(2, PMAP_CODE(PMAP__UNNEST) | DBG_FUNC_START,
 	    VM_KERNEL_ADDRHIDE(grand), VM_KERNEL_ADDRHIDE(vaddr));
@@ -9913,11 +10168,6 @@ pmap_unnest_options(
 	while (vrestart != (vend | PMAP_NEST_GRAND)) {
 #if XNU_MONITOR
 		vrestart = pmap_unnest_options_ppl(grand, vaddr, size, vrestart, option);
-		if (vrestart == vlast) {
-			panic("%s: failed to make forward progress from 0x%llx to 0x%llx at 0x%llx",
-			    __func__, (unsigned long long)vaddr, (unsigned long long)vend, (unsigned long long)vrestart);
-		}
-		vlast = vrestart;
 #else
 		vrestart = pmap_unnest_options_internal(grand, vaddr, size, vrestart, option);
 #endif
@@ -10012,11 +10262,9 @@ pmap_disable_NX(
  * an ARM small page (4K).
  */
 
-#define ARM_FULL_TLB_FLUSH_THRESHOLD 64
-
 #if __ARM_RANGE_TLBI__
-#define ARM64_RANGE_TLB_FLUSH_THRESHOLD 1
-#define ARM64_FULL_TLB_FLUSH_THRESHOLD  ARM64_TLB_RANGE_PAGES
+#define ARM64_RANGE_TLB_FLUSH_THRESHOLD (ARM64_TLB_RANGE_MIN_PAGES - 1)
+#define ARM64_FULL_TLB_FLUSH_THRESHOLD  ARM64_TLB_RANGE_MAX_PAGES
 #else
 #define ARM64_FULL_TLB_FLUSH_THRESHOLD  256
 #endif // __ARM_RANGE_TLBI__
@@ -10026,7 +10274,8 @@ flush_mmu_tlb_region_asid_async(
 	vm_offset_t va,
 	size_t length,
 	pmap_t pmap,
-	bool last_level_only __unused)
+	bool last_level_only __unused,
+	bool strong __unused)
 {
 	unsigned long pmap_page_shift = pt_attr_leaf_shift(pmap_get_pt_attr(pmap));
 	const uint64_t pmap_page_size = 1ULL << pmap_page_shift;
@@ -10044,7 +10293,7 @@ flush_mmu_tlb_region_asid_async(
 		if (flush_all) {
 			flush_mmu_tlb_async();
 		} else {
-			flush_mmu_tlb_asid_async((uint64_t)asid << TLBI_ASID_SHIFT);
+			flush_mmu_tlb_asid_async((uint64_t)asid << TLBI_ASID_SHIFT, strong);
 		}
 		return;
 	}
@@ -10052,9 +10301,9 @@ flush_mmu_tlb_region_asid_async(
 	if (npages > ARM64_RANGE_TLB_FLUSH_THRESHOLD) {
 		va = generate_rtlbi_param(npages, asid, va, pmap_page_shift);
 		if (pmap->type == PMAP_TYPE_NESTED) {
-			flush_mmu_tlb_allrange_async(va, last_level_only);
+			flush_mmu_tlb_allrange_async(va, last_level_only, strong);
 		} else {
-			flush_mmu_tlb_range_async(va, last_level_only);
+			flush_mmu_tlb_range_async(va, last_level_only, strong);
 		}
 		return;
 	}
@@ -10063,16 +10312,16 @@ flush_mmu_tlb_region_asid_async(
 	va = tlbi_asid(asid) | tlbi_addr(va);
 
 	if (pmap->type == PMAP_TYPE_NESTED) {
-		flush_mmu_tlb_allentries_async(va, end, pmap_page_size, last_level_only);
+		flush_mmu_tlb_allentries_async(va, end, pmap_page_size, last_level_only, strong);
 	} else {
-		flush_mmu_tlb_entries_async(va, end, pmap_page_size, last_level_only);
+		flush_mmu_tlb_entries_async(va, end, pmap_page_size, last_level_only, strong);
 	}
 }
 
 MARK_AS_PMAP_TEXT static void
 flush_mmu_tlb_full_asid_async(pmap_t pmap)
 {
-	flush_mmu_tlb_asid_async((uint64_t)(pmap->hw_asid) << TLBI_ASID_SHIFT);
+	flush_mmu_tlb_asid_async((uint64_t)(pmap->hw_asid) << TLBI_ASID_SHIFT, false);
 }
 
 void
@@ -10080,7 +10329,7 @@ flush_mmu_tlb_region(
 	vm_offset_t va,
 	unsigned length)
 {
-	flush_mmu_tlb_region_asid_async(va, length, kernel_pmap, true);
+	flush_mmu_tlb_region_asid_async(va, length, kernel_pmap, true, false);
 	sync_tlb_flush();
 }
 
@@ -10241,7 +10490,7 @@ pmap_flush_tlb_for_paddr_locked_async(pmap_paddr_t paddr)
 #if __ARM_PTE_PHYSMAP__
 	/* Flush the physical aperture mappings. */
 	const vm_offset_t kva = phystokv(paddr);
-	flush_mmu_tlb_region_asid_async(kva, PAGE_SIZE, kernel_pmap, true);
+	flush_mmu_tlb_region_asid_async(kva, PAGE_SIZE, kernel_pmap, true, false);
 #endif /* __ARM_PTE_PHYSMAP__ */
 
 	/* Flush the mappings tracked in the ptes. */
@@ -10277,7 +10526,8 @@ pmap_flush_tlb_for_paddr_locked_async(pmap_paddr_t paddr)
 		pmap_t pmap = ptep_get_pmap(pte_p);
 		vm_map_address_t va = ptep_get_va(pte_p);
 
-		pmap_get_pt_ops(pmap)->flush_tlb_region_async(va, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO, pmap, true);
+		pmap_get_pt_ops(pmap)->flush_tlb_region_async(va, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO,
+		    pmap, true, false);
 
 flush_tlb_skip_pte:
 		pte_p = PT_ENTRY_NULL;
@@ -10466,7 +10716,18 @@ pmap_batch_set_cache_attributes_internal(
 #endif /* XNU_MONITOR */
 		}
 
+#if HAS_FEAT_XS
+		/* With FEAT_XS, ordinary DSBs drain the prefetcher. */
+		arm64_sync_tlb(false);
+#else
+		/**
+		 * For targets that distinguish between mild and strong DSB, mild DSB
+		 * will not drain the prefetcher.  This can lead to prefetch-driven
+		 * cache fills that defeat the uncacheable requirement of the RT memory type.
+		 * In those cases, strong DSB must instead be employed to drain the prefetcher.
+		 */
 		arm64_sync_tlb((cacheattr & VM_WIMG_MASK) == VM_WIMG_RT);
+#endif
 
 		if (rt_cache_flush_pass_needed) {
 			state = PMAP_BATCH_SET_CACHE_ATTRIBUTES_CACHEFLUSH_PASS;
@@ -10707,7 +10968,7 @@ pmap_update_cache_attributes_locked(
 
 	if (perform_tlbi) {
 		write_pte_strong(pte_p, tmplate);
-		flush_mmu_tlb_region_asid_async(kva, PAGE_SIZE, kernel_pmap, true);
+		flush_mmu_tlb_region_asid_async(kva, PAGE_SIZE, kernel_pmap, true, false);
 	} else {
 		write_pte_fast(pte_p, tmplate);
 	}
@@ -10745,6 +11006,13 @@ pmap_update_cache_attributes_locked(
 		}
 #endif
 		pmap = ptep_get_pmap(pte_p);
+#if HAS_FEAT_XS
+		/**
+		 * TODO: we don't currently allow XS MAIR types on managed memory (see wimg_to_pte()),
+		 * but if we change that we'll need to allow for "strong" TLBIs and DSBs in this function.
+		 */
+		assert(!pte_is_xs(pmap_get_pt_attr(pmap), *pte_p));
+#endif /* HAS_FEAT_XS */
 		va = ptep_get_va(pte_p);
 
 		tmplate = *pte_p;
@@ -10753,7 +11021,8 @@ pmap_update_cache_attributes_locked(
 
 		if (perform_tlbi) {
 			write_pte_strong(pte_p, tmplate);
-			pmap_get_pt_ops(pmap)->flush_tlb_region_async(va, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO, pmap, true);
+			pmap_get_pt_ops(pmap)->flush_tlb_region_async(va, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO,
+			    pmap, true, false);
 		} else {
 			write_pte_fast(pte_p, tmplate);
 		}
@@ -10767,7 +11036,18 @@ cache_skip_pve:
 		}
 	}
 	if (perform_tlbi && tlb_flush_needed) {
+#if HAS_FEAT_XS
+		/* With FEAT_XS, ordinary DSBs drain the prefetcher. */
+		arm64_sync_tlb(false);
+#else
+		/**
+		 * For targets that distinguish between mild and strong DSB, mild DSB
+		 * will not drain the prefetcher.  This can lead to prefetch-driven
+		 * cache fills that defeat the uncacheable requirement of the RT memory type.
+		 * In those cases, strong DSB must instead be employed to drain the prefetcher.
+		 */
 		arm64_sync_tlb((attributes & VM_WIMG_MASK) == VM_WIMG_RT);
+#endif
 	}
 
 	PMAP_TRACE(2, PMAP_CODE(PMAP__UPDATE_CACHING) | DBG_FUNC_END, ppnum, attributes);
@@ -11170,7 +11450,7 @@ pmap_unmap_commpage(
 	*ttep = ARM_TTE_EMPTY;
 	FLUSH_PTE_STRONG();
 
-	flush_mmu_tlb_region_asid_async(commpage_vaddr, PAGE_SIZE, pmap, false);
+	flush_mmu_tlb_region_asid_async(commpage_vaddr, PAGE_SIZE, pmap, false, false);
 	sync_tlb_flush();
 }
 
@@ -11362,7 +11642,9 @@ pmap_max_64bit_offset(
 	}
 
 	assert(max_offset_ret <= MACH_VM_MAX_ADDRESS);
-	assert(max_offset_ret >= min_max_offset);
+	if (option != ARM_PMAP_MAX_OFFSET_DEFAULT) {
+		assert(max_offset_ret >= min_max_offset);
+	}
 #else
 	panic("Can't run pmap_max_64bit_offset on non-64bit architectures");
 #endif
@@ -13201,12 +13483,14 @@ pmap_resolve_kernel_entitlements_internal(
 	/* Validate the PMAP object */
 	validate_pmap(pmap);
 
-	/* Take a shared lock on the PMAP */
-	pmap_lock(pmap, PMAP_LOCK_SHARED);
-
+	/* Ensure no kernel PMAP */
 	if (pmap == kernel_pmap) {
-		ret = KERN_NOT_FOUND;
-		goto out;
+		return KERN_NOT_FOUND;
+	}
+
+	/* Attempt a shared lock on the PMAP */
+	if (pmap_lock_preempt(pmap, PMAP_LOCK_SHARED) != true) {
+		return KERN_ABORTED;
 	}
 
 	/*
@@ -13255,7 +13539,13 @@ pmap_resolve_kernel_entitlements(
 	pmap_t pmap,
 	const void **kernel_entitlements)
 {
-	return pmap_resolve_kernel_entitlements_ppl(pmap, kernel_entitlements);
+	kern_return_t ret = KERN_DENIED;
+
+	do {
+		ret = pmap_resolve_kernel_entitlements_ppl(pmap, kernel_entitlements);
+	} while (ret == KERN_ABORTED);
+
+	return ret;
 }
 
 kern_return_t

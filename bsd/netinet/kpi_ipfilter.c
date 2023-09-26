@@ -393,7 +393,7 @@ ipf_inject_input(
 			error = ENOMEM;
 			goto done;
 		}
-		*(ipfilter_t *)(mtag + 1) = filter_ref;
+		*(ipfilter_t *)(mtag->m_tag_data) = filter_ref;
 		m_tag_prepend(m, mtag);
 	}
 
@@ -435,7 +435,7 @@ ipf_injectv4_out(mbuf_t data, ipfilter_t filter_ref, ipf_pktopts_t options)
 			m_freem(m);
 			return ENOMEM;
 		}
-		*(ipfilter_t *)(mtag + 1) = filter_ref;
+		*(ipfilter_t *)(mtag->m_tag_data) = filter_ref;
 		m_tag_prepend(m, mtag);
 	}
 
@@ -524,7 +524,7 @@ ipf_injectv6_out(mbuf_t data, ipfilter_t filter_ref, ipf_pktopts_t options)
 			m_freem(m);
 			return ENOMEM;
 		}
-		*(ipfilter_t *)(mtag + 1) = filter_ref;
+		*(ipfilter_t *)(mtag->m_tag_data) = filter_ref;
 		m_tag_prepend(m, mtag);
 	}
 
@@ -629,13 +629,65 @@ ipf_get_inject_filter(struct mbuf *m)
 	ipfilter_t filter_ref = 0;
 	struct m_tag *mtag;
 
-	mtag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_IPFILT, NULL);
+	mtag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_IPFILT);
 	if (mtag) {
-		filter_ref = *(ipfilter_t *)(mtag + 1);
+		filter_ref = *(ipfilter_t *)(mtag->m_tag_data);;
 
 		m_tag_delete(m, mtag);
 	}
 	return filter_ref;
+}
+
+struct ipfilt_tag_container {
+	struct m_tag    ipft_m_tag;
+	ipfilter_t      ipft_filter_ref;
+};
+
+static struct m_tag *
+m_tag_kalloc_ipfilt(u_int32_t id, u_int16_t type, uint16_t len, int wait)
+{
+	struct ipfilt_tag_container *tag_container;
+	struct m_tag *tag = NULL;
+
+	assert3u(id, ==, KERNEL_MODULE_TAG_ID);
+	assert3u(type, ==, KERNEL_TAG_TYPE_IPFILT);
+	assert3u(len, ==, sizeof(ipfilter_t));
+
+	if (len != sizeof(ipfilter_t)) {
+		return NULL;
+	}
+
+	tag_container = kalloc_type(struct ipfilt_tag_container, wait | M_ZERO);
+	if (tag_container != NULL) {
+		tag =  &tag_container->ipft_m_tag;
+
+		assert3p(tag, ==, tag_container);
+
+		M_TAG_INIT(tag, id, type, len, &tag_container->ipft_filter_ref, NULL);
+	}
+
+	return tag;
+}
+
+static void
+m_tag_kfree_ipfilt(struct m_tag *tag)
+{
+	struct ipfilt_tag_container *tag_container = (struct ipfilt_tag_container *)tag;
+
+	assert3u(tag->m_tag_len, ==, sizeof(ipfilter_t));
+
+	kfree_type(struct ipfilt_tag_container, tag_container);
+}
+
+void
+ipfilter_register_m_tag(void)
+{
+	int error;
+
+	error = m_register_internal_tag_type(KERNEL_TAG_TYPE_IPFILT, sizeof(ipfilter_t),
+	    m_tag_kalloc_ipfilt, m_tag_kfree_ipfilt);
+
+	assert3u(error, ==, 0);
 }
 
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)

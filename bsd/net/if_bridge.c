@@ -406,6 +406,7 @@ bif_has_checksum_offload(struct bridge_iflist * bif)
 #define BIFF_IN_MEMBER_LIST     0x100   /* added to the member list */
 #define BIFF_WIFI_INFRA         0x200   /* interface is Wi-Fi infra */
 #define BIFF_ALL_MULTI          0x400   /* allmulti set */
+#define BIFF_LRO_DISABLED       0x800   /* LRO was disabled */
 #if SKYWALK
 #define BIFF_FLOWSWITCH_ATTACHED 0x1000   /* we attached the flowswitch */
 #define BIFF_NETAGENT_REMOVED    0x2000   /* we removed the netagent */
@@ -2016,6 +2017,68 @@ bridge_set_ifcap(struct bridge_softc *sc, struct bridge_iflist *bif, int set)
 #endif /* HAS_IF_CAP */
 
 static errno_t
+siocsifcap(struct ifnet * ifp, uint32_t cap_enable)
+{
+	struct ifreq    ifr;
+
+	bzero(&ifr, sizeof(ifr));
+	ifr.ifr_reqcap = cap_enable;
+	return ifnet_ioctl(ifp, 0, SIOCSIFCAP, &ifr);
+}
+
+static const char *
+enable_disable_str(boolean_t enable)
+{
+	return enable ? "enable" : "disable";
+}
+
+static boolean_t
+bridge_set_lro(struct ifnet * ifp, boolean_t enable)
+{
+	uint32_t        cap_enable;
+	uint32_t        cap_supported;
+	boolean_t       changed = FALSE;
+	boolean_t       lro_enabled;
+
+	cap_supported = ifnet_capabilities_supported(ifp);
+	if ((cap_supported & IFCAP_LRO) == 0) {
+		BRIDGE_LOG(LOG_NOTICE, BR_DBGF_LIFECYCLE,
+		    "%s doesn't support LRO",
+		    ifp->if_xname);
+		goto done;
+	}
+	cap_enable = ifnet_capabilities_enabled(ifp);
+	lro_enabled = (cap_enable & IFCAP_LRO) != 0;
+	if (lro_enabled != enable) {
+		errno_t         error;
+
+		if (enable) {
+			cap_enable |= IFCAP_LRO;
+		} else {
+			cap_enable &= ~IFCAP_LRO;
+		}
+		error = siocsifcap(ifp, cap_enable);
+		if (error != 0) {
+			BRIDGE_LOG(LOG_NOTICE, 0,
+			    "%s %s failed (cap 0x%x) %d",
+			    ifp->if_xname,
+			    enable_disable_str(enable),
+			    cap_enable,
+			    error);
+		} else {
+			changed = TRUE;
+			BRIDGE_LOG(LOG_NOTICE, BR_DBGF_LIFECYCLE,
+			    "%s %s success (cap 0x%x)",
+			    ifp->if_xname,
+			    enable_disable_str(enable),
+			    cap_enable);
+		}
+	}
+done:
+	return changed;
+}
+
+static errno_t
 bridge_set_tso(struct bridge_softc *sc)
 {
 	struct bridge_iflist *bif;
@@ -2444,6 +2507,9 @@ bridge_detach_protocol(struct ifnet *ifp)
 static void
 bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif)
 {
+#if SKYWALK
+	boolean_t add_netagent = FALSE;
+#endif /* SKYWALK */
 	uint32_t    bif_flags;
 	struct ifnet *ifs = bif->bif_ifp, *bifp = sc->sc_ifp;
 	int lladdr_changed = 0, error;
@@ -2519,9 +2585,8 @@ bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif)
 	/* only perform these steps if the interface is still attached */
 	if (ifnet_is_attached(ifs, 1)) {
 #if SKYWALK
-		if ((bif_flags & BIFF_NETAGENT_REMOVED) != 0) {
-			ifnet_add_netagent(ifs);
-		}
+		add_netagent = (bif_flags & BIFF_NETAGENT_REMOVED) != 0;
+
 		if ((bif_flags & BIFF_FLOWSWITCH_ATTACHED) != 0) {
 			ifnet_detach_flowswitch_nexus(ifs);
 		}
@@ -2546,6 +2611,10 @@ bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif)
 		if ((bif_flags & BIFF_FILTER_ATTACHED) != 0) {
 			iflt_detach(bif->bif_iff_ref);
 		}
+		/* re-enable LRO */
+		if ((bif_flags & BIFF_LRO_DISABLED) != 0) {
+			(void)bridge_set_lro(ifs, TRUE);
+		}
 		ifnet_decr_iorefcnt(ifs);
 	}
 
@@ -2564,6 +2633,13 @@ bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif)
 
 	kfree_type(struct bridge_iflist, bif);
 	ifs->if_bridge = NULL;
+#if SKYWALK
+	if (add_netagent && ifnet_is_attached(ifs, 1)) {
+		(void)ifnet_add_netagent(ifs);
+		ifnet_decr_iorefcnt(ifs);
+	}
+#endif /* SKYWALK */
+
 	ifnet_release(ifs);
 
 	BRIDGE_LOCK(sc);
@@ -2599,6 +2675,7 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 	struct iff_filter iff;
 	u_int32_t event_code = 0;
 	boolean_t input_broadcast;
+	int media_active;
 	boolean_t wifi_infra = FALSE;
 
 	ifs = ifunit(req->ifbr_ifsname);
@@ -2609,7 +2686,7 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 		return EINVAL;
 	}
 
-	if (IFNET_IS_INTCOPROC(ifs)) {
+	if (IFNET_IS_INTCOPROC(ifs) || IFNET_IS_MANAGEMENT(ifs)) {
 		return EINVAL;
 	}
 
@@ -2761,7 +2838,8 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 		}
 	}
 	/* remove the netagent on the flowswitch (rdar://75050182) */
-	if (ifnet_remove_netagent(ifs)) {
+	if (if_is_fsw_netagent_enabled()) {
+		(void)ifnet_remove_netagent(ifs);
 		bif->bif_flags |= BIFF_NETAGENT_REMOVED;
 	}
 #endif /* SKYWALK */
@@ -2803,6 +2881,13 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 		BRIDGE_LOG(LOG_NOTICE, 0, "ifnet_set_lladdr failed %d", error);
 	}
 
+	media_active = interface_media_active(ifs);
+
+	/* disable LRO */
+	if (bridge_set_lro(ifs, FALSE)) {
+		bif->bif_flags |= BIFF_LRO_DISABLED;
+	}
+
 	/*
 	 * No failures past this point. Add the member to the list.
 	 */
@@ -2813,7 +2898,7 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 	BRIDGE_XDROP(sc);
 
 	/* cache the member link status */
-	if (interface_media_active(ifs)) {
+	if (media_active != 0) {
 		bif->bif_flags |= BIFF_MEDIA_ACTIVE;
 	} else {
 		bif->bif_flags &= ~BIFF_MEDIA_ACTIVE;
@@ -3444,7 +3529,7 @@ bridge_ioctl_addspan(struct bridge_softc *sc, void *arg)
 		return ENOENT;
 	}
 
-	if (IFNET_IS_INTCOPROC(ifs)) {
+	if (IFNET_IS_INTCOPROC(ifs) || IFNET_IS_MANAGEMENT(ifs)) {
 		return EINVAL;
 	}
 
@@ -5545,7 +5630,7 @@ bridge_forward(struct bridge_softc *sc, struct bridge_iflist *sbif,
 
 
 		/* ...forward it to all interfaces. */
-		atomic_add_64(&bridge_ifp->if_imcasts, 1);
+		os_atomic_inc(&bridge_ifp->if_imcasts, relaxed);
 		dst_if = NULL;
 	}
 
@@ -7421,7 +7506,7 @@ bridge_host_filter(struct bridge_iflist *bif, mbuf_t *data)
 	/*
 	 * Restrict the source hardware address
 	 */
-	if ((bif->bif_flags & BIFF_HF_HWSRC) == 0 ||
+	if ((bif->bif_flags & BIFF_HF_HWSRC) != 0 &&
 	    bcmp(eh->ether_shost, bif->bif_hf_hwsrc,
 	    ETHER_ADDR_LEN) != 0) {
 		BRIDGE_HF_DROP(brhf_bad_ether_srchw_addr, __func__, __LINE__);
@@ -7429,7 +7514,7 @@ bridge_host_filter(struct bridge_iflist *bif, mbuf_t *data)
 	}
 
 	/*
-	 * Restrict Ethernet protocols to ARP and IP
+	 * Restrict Ethernet protocols to ARP and IP/IPv6
 	 */
 	if (eh->ether_type == htons(ETHERTYPE_ARP)) {
 		struct ether_arp *ea;
@@ -7477,7 +7562,6 @@ bridge_host_filter(struct bridge_iflist *bif, mbuf_t *data)
 			    __func__, __LINE__);
 			goto done;
 		}
-
 		/*
 		 * Allow only ARP request or ARP reply
 		 */
@@ -7486,24 +7570,28 @@ bridge_host_filter(struct bridge_iflist *bif, mbuf_t *data)
 			BRIDGE_HF_DROP(brhf_arp_bad_op, __func__, __LINE__);
 			goto done;
 		}
-		/*
-		 * Verify source hardware address matches
-		 */
-		if (bcmp(ea->arp_sha, bif->bif_hf_hwsrc,
-		    ETHER_ADDR_LEN) != 0) {
-			BRIDGE_HF_DROP(brhf_arp_bad_sha, __func__, __LINE__);
-			goto done;
+		if ((bif->bif_flags & BIFF_HF_HWSRC) != 0) {
+			/*
+			 * Verify source hardware address matches
+			 */
+			if (bcmp(ea->arp_sha, bif->bif_hf_hwsrc,
+			    ETHER_ADDR_LEN) != 0) {
+				BRIDGE_HF_DROP(brhf_arp_bad_sha, __func__, __LINE__);
+				goto done;
+			}
 		}
-		/*
-		 * Verify source protocol address:
-		 * May be null for an ARP probe
-		 */
-		if (bcmp(ea->arp_spa, &bif->bif_hf_ipsrc.s_addr,
-		    sizeof(struct in_addr)) != 0 &&
-		    bcmp(ea->arp_spa, &inaddr_any,
-		    sizeof(struct in_addr)) != 0) {
-			BRIDGE_HF_DROP(brhf_arp_bad_spa, __func__, __LINE__);
-			goto done;
+		if ((bif->bif_flags & BIFF_HF_IPSRC) != 0) {
+			/*
+			 * Verify source protocol address:
+			 * May be null for an ARP probe
+			 */
+			if (bcmp(ea->arp_spa, &bif->bif_hf_ipsrc.s_addr,
+			    sizeof(struct in_addr)) != 0 &&
+			    bcmp(ea->arp_spa, &inaddr_any,
+			    sizeof(struct in_addr)) != 0) {
+				BRIDGE_HF_DROP(brhf_arp_bad_spa, __func__, __LINE__);
+				goto done;
+			}
 		}
 		bridge_hostfilter_stats.brhf_arp_ok += 1;
 		error = 0;
@@ -7525,63 +7613,65 @@ bridge_host_filter(struct bridge_iflist *bif, mbuf_t *data)
 			BRIDGE_HF_DROP(brhf_ip_too_small, __func__, __LINE__);
 			goto done;
 		}
-		/*
-		 * Verify the source IP address
-		 */
-		if (iphdr.ip_p == IPPROTO_UDP) {
-			struct udphdr udp;
-
-			minlen += sizeof(struct udphdr);
-			if (mbuf_pkthdr_len(m) < minlen) {
-				BRIDGE_HF_DROP(brhf_ip_too_small,
-				    __func__, __LINE__);
-				goto done;
-			}
-
+		if ((bif->bif_flags & BIFF_HF_IPSRC) != 0) {
 			/*
-			 * Allow all zero addresses for DHCP requests
+			 * Verify the source IP address
 			 */
-			if (iphdr.ip_src.s_addr != bif->bif_hf_ipsrc.s_addr &&
-			    iphdr.ip_src.s_addr != INADDR_ANY) {
-				BRIDGE_HF_DROP(brhf_ip_bad_srcaddr,
-				    __func__, __LINE__);
-				goto done;
-			}
-			offset = sizeof(struct ether_header) +
-			    (IP_VHL_HL(iphdr.ip_vhl) << 2);
-			error = mbuf_copydata(m, offset,
-			    sizeof(struct udphdr), &udp);
-			if (error != 0) {
-				BRIDGE_HF_DROP(brhf_ip_too_small,
-				    __func__, __LINE__);
-				goto done;
-			}
-			/*
-			 * Either it's a Bootp/DHCP packet that we like or
-			 * it's a UDP packet from the host IP as source address
-			 */
-			if (udp.uh_sport == htons(IPPORT_BOOTPC) &&
-			    udp.uh_dport == htons(IPPORT_BOOTPS)) {
-				minlen += sizeof(struct dhcp);
+			if (iphdr.ip_p == IPPROTO_UDP) {
+				struct udphdr udp;
+
+				minlen += sizeof(struct udphdr);
 				if (mbuf_pkthdr_len(m) < minlen) {
 					BRIDGE_HF_DROP(brhf_ip_too_small,
 					    __func__, __LINE__);
 					goto done;
 				}
-				offset += sizeof(struct udphdr);
-				error = bridge_dhcp_filter(bif, m, offset);
-				if (error != 0) {
+
+				/*
+				 * Allow all zero addresses for DHCP requests
+				 */
+				if (iphdr.ip_src.s_addr != bif->bif_hf_ipsrc.s_addr &&
+				    iphdr.ip_src.s_addr != INADDR_ANY) {
+					BRIDGE_HF_DROP(brhf_ip_bad_srcaddr,
+					    __func__, __LINE__);
 					goto done;
 				}
-			} else if (iphdr.ip_src.s_addr == INADDR_ANY) {
-				BRIDGE_HF_DROP(brhf_ip_bad_srcaddr,
-				    __func__, __LINE__);
+				offset = sizeof(struct ether_header) +
+				    (IP_VHL_HL(iphdr.ip_vhl) << 2);
+				error = mbuf_copydata(m, offset,
+				    sizeof(struct udphdr), &udp);
+				if (error != 0) {
+					BRIDGE_HF_DROP(brhf_ip_too_small,
+					    __func__, __LINE__);
+					goto done;
+				}
+				/*
+				 * Either it's a Bootp/DHCP packet that we like or
+				 * it's a UDP packet from the host IP as source address
+				 */
+				if (udp.uh_sport == htons(IPPORT_BOOTPC) &&
+				    udp.uh_dport == htons(IPPORT_BOOTPS)) {
+					minlen += sizeof(struct dhcp);
+					if (mbuf_pkthdr_len(m) < minlen) {
+						BRIDGE_HF_DROP(brhf_ip_too_small,
+						    __func__, __LINE__);
+						goto done;
+					}
+					offset += sizeof(struct udphdr);
+					error = bridge_dhcp_filter(bif, m, offset);
+					if (error != 0) {
+						goto done;
+					}
+				} else if (iphdr.ip_src.s_addr == INADDR_ANY) {
+					BRIDGE_HF_DROP(brhf_ip_bad_srcaddr,
+					    __func__, __LINE__);
+					goto done;
+				}
+			} else if (iphdr.ip_src.s_addr != bif->bif_hf_ipsrc.s_addr) {
+				assert(bif->bif_hf_ipsrc.s_addr != INADDR_ANY);
+				BRIDGE_HF_DROP(brhf_ip_bad_srcaddr, __func__, __LINE__);
 				goto done;
 			}
-		} else if (iphdr.ip_src.s_addr != bif->bif_hf_ipsrc.s_addr ||
-		    bif->bif_hf_ipsrc.s_addr == INADDR_ANY) {
-			BRIDGE_HF_DROP(brhf_ip_bad_srcaddr, __func__, __LINE__);
-			goto done;
 		}
 		/*
 		 * Allow only boring IP protocols
@@ -7589,9 +7679,36 @@ bridge_host_filter(struct bridge_iflist *bif, mbuf_t *data)
 		if (iphdr.ip_p != IPPROTO_TCP &&
 		    iphdr.ip_p != IPPROTO_UDP &&
 		    iphdr.ip_p != IPPROTO_ICMP &&
-		    iphdr.ip_p != IPPROTO_ESP &&
-		    iphdr.ip_p != IPPROTO_AH &&
-		    iphdr.ip_p != IPPROTO_GRE) {
+		    iphdr.ip_p != IPPROTO_IGMP) {
+			BRIDGE_HF_DROP(brhf_ip_bad_proto, __func__, __LINE__);
+			goto done;
+		}
+		bridge_hostfilter_stats.brhf_ip_ok += 1;
+		error = 0;
+	} else if (eh->ether_type == htons(ETHERTYPE_IPV6)) {
+		size_t minlen = sizeof(struct ether_header) + sizeof(struct ip6_hdr);
+		struct ip6_hdr ip6hdr;
+		size_t offset;
+
+		/*
+		 * Make the Ethernet and IP headers contiguous
+		 */
+		if (mbuf_pkthdr_len(m) < minlen) {
+			BRIDGE_HF_DROP(brhf_ip_too_small, __func__, __LINE__);
+			goto done;
+		}
+		offset = sizeof(struct ether_header);
+		error = mbuf_copydata(m, offset, sizeof(struct ip6_hdr), &ip6hdr);
+		if (error != 0) {
+			BRIDGE_HF_DROP(brhf_ip_too_small, __func__, __LINE__);
+			goto done;
+		}
+		/*
+		 * Allow only boring IPv6 protocols
+		 */
+		if (ip6hdr.ip6_nxt != IPPROTO_TCP &&
+		    ip6hdr.ip6_nxt != IPPROTO_UDP &&
+		    ip6hdr.ip6_nxt != IPPROTO_ICMPV6) {
 			BRIDGE_HF_DROP(brhf_ip_bad_proto, __func__, __LINE__);
 			goto done;
 		}

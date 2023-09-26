@@ -156,6 +156,10 @@ fifo_open(struct vnop_open_args *ap)
 	struct socket *rso, *wso;
 	int error;
 
+	if ((ap->a_mode & (FREAD | FWRITE)) == 0) {
+		ap->a_mode |= FREAD;
+	}
+
 	vnode_lock(vp);
 
 retry:
@@ -371,15 +375,19 @@ fifo_write(struct vnop_write_args *ap)
 {
 	struct socket *wso = ap->a_vp->v_fifoinfo->fi_writesock;
 	int error;
+	user_ssize_t len;
 
 #if DIAGNOSTIC
 	if (ap->a_uio->uio_rw != UIO_WRITE) {
 		panic("fifo_write mode");
 	}
 #endif
+
+	len = uio_resid(ap->a_uio);
 	error = sosend(wso, (struct sockaddr *)0, ap->a_uio, NULL,
 	    (struct mbuf *)0, (ap->a_ioflag & IO_NDELAY) ? MSG_NBIO : 0);
-	if (error == 0) {
+	/* Also post kevent in the case of partial write due to full fifo buffer. */
+	if (error == 0 || (uio_resid(ap->a_uio) != len && error == EWOULDBLOCK)) {
 		lock_vnode_and_post(ap->a_vp, 0);
 	}
 
@@ -475,6 +483,10 @@ fifo_close_internal(vnode_t vp, int fflag, __unused vfs_context_t context, int l
 	int error1, error2;
 	struct socket *rso;
 	struct socket *wso;
+
+	if ((fflag & (FREAD | FWRITE)) == 0) {
+		fflag |= FREAD;
+	}
 
 	if (!locked) {
 		vnode_lock(vp);

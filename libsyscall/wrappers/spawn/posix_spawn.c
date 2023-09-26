@@ -185,6 +185,8 @@ __posix_spawnattr_init(struct _posix_spawnattr *psattrp)
 	psattrp->psa_crash_behavior_deadline = 0;
 	psattrp->psa_launch_type = 0;
 	psattrp->psa_dataless_iopolicy = 0;
+
+	psattrp->psa_conclave_id = NULL;
 }
 
 /*
@@ -254,6 +256,7 @@ static int posix_spawn_destroypersona_info_np(posix_spawnattr_t *);
 static int posix_spawn_destroyposix_cred_info_np(posix_spawnattr_t *);
 static int posix_spawn_destroymacpolicy_info_np(posix_spawnattr_t *);
 static int posix_spawn_destroysubsystem_root_path_np(posix_spawnattr_t *);
+static int posix_spawn_destroyconclave_id_np(posix_spawnattr_t *);
 
 int
 posix_spawnattr_destroy(posix_spawnattr_t *attr)
@@ -271,6 +274,7 @@ posix_spawnattr_destroy(posix_spawnattr_t *attr)
 	posix_spawn_destroyposix_cred_info_np(attr);
 	posix_spawn_destroymacpolicy_info_np(attr);
 	posix_spawn_destroysubsystem_root_path_np(attr);
+	posix_spawn_destroyconclave_id_np(attr);
 
 	free(psattr);
 	*attr = NULL;
@@ -1143,6 +1147,32 @@ posix_spawn_destroysubsystem_root_path_np(posix_spawnattr_t *attr)
 
 	psattr->psa_subsystem_root_path = NULL;
 	free(subsystem_root_path);
+	return 0;
+}
+
+/*
+ * posix_spawn_destroyconclave_id_np
+ * Description: clean up conclave_id string in posix_spawnattr_t attr
+ */
+static int
+posix_spawn_destroyconclave_id_np(posix_spawnattr_t *attr)
+{
+	_posix_spawnattr_t psattr;
+	char *conclave_id;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+	conclave_id = psattr->psa_conclave_id;
+
+	if (conclave_id == NULL) {
+		return EINVAL;
+	}
+
+	psattr->psa_conclave_id = NULL;
+	free(conclave_id);
 	return 0;
 }
 
@@ -2166,18 +2196,10 @@ posix_spawnattr_set_registered_ports_np(posix_spawnattr_t * __restrict attr,
 }
 
 int
-posix_spawnattr_set_ptrauth_task_port_np(posix_spawnattr_t * __restrict attr,
-    mach_port_t port)
+posix_spawnattr_set_ptrauth_task_port_np(posix_spawnattr_t * __restrict attr __unused,
+    mach_port_t port __unused)
 {
-	int err = 0;
-
-	_ps_port_action_t action = {
-		.port_type = PSPA_PTRAUTH_TASK_PORT,
-		.new_port = port,
-	};
-
-	err = posix_spawn_appendportaction_np(attr, &action);
-	return err;
+	return 0;
 }
 
 static
@@ -2693,6 +2715,31 @@ posix_spawnattr_set_login_np(const posix_spawnattr_t *attr, const char *login)
 }
 
 int
+posix_spawnattr_set_conclave_id_np(const posix_spawnattr_t *attr, const char *conclave_id)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	if (strlen(conclave_id) > MAXCONCLAVENAME - 1) {
+		return ERANGE;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+	if (psattr->psa_conclave_id == NULL) {
+		void *buf = malloc(MAXCONCLAVENAME);
+		if (buf == NULL) {
+			return ENOMEM;
+		}
+		psattr->psa_conclave_id = buf;
+	}
+	strlcpy(psattr->psa_conclave_id, conclave_id, MAXCONCLAVENAME);
+	return 0;
+}
+
+int
 posix_spawnattr_set_portlimits_ext(posix_spawnattr_t * __restrict attr,
     uint32_t port_soft_limit, uint32_t port_hard_limit)
 {
@@ -2912,6 +2959,10 @@ posix_spawn(pid_t * __restrict pid, const char * __restrict path,
 			if (psattr->psa_subsystem_root_path != NULL) {
 				ad.subsystem_root_path_size = MAXPATHLEN;
 				ad.subsystem_root_path = psattr->psa_subsystem_root_path;
+			}
+			if (psattr->psa_conclave_id != NULL) {
+				ad.conclave_id_size = MAXCONCLAVENAME;
+				ad.conclave_id = psattr->psa_conclave_id;
 			}
 		}
 		if (file_actions != NULL && *file_actions != NULL) {

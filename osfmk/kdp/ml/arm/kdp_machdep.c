@@ -517,6 +517,10 @@ machine_trace_thread64(thread_t thread,
 		}
 
 		fp = *(uint64_t *)kern_virt_addr;
+#if defined(HAS_APPLE_PAC)
+		/* frame pointers on stack signed by arm64e ABI */
+		fp = (uint64_t) ptrauth_strip((void *)fp, ptrauth_key_frame_pointer);
+#endif
 	}
 	return (int)(((char *)tracebuf) - tracepos);
 #else

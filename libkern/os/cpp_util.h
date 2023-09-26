@@ -12,7 +12,11 @@
 # define OS_HAS_RVALUE_REFERENCES 1
 #endif
 
-void* operator new(size_t, void*) noexcept;
+#if (defined(__has_include) && __has_include(<__xnu_libcxx_sentinel.h>) && __has_include(<new>))
+#include <new>
+#else
+void* operator new(size_t, void*) noexcept; // forward declaration needed for placement-new
+#endif
 
 namespace os {
 #if OS_HAS_NULLPTR

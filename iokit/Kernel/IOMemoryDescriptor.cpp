@@ -4515,7 +4515,7 @@ IOMemoryDescriptor::dmaMapRecord(
 	int16_t                prior;
 
 	if ((alloc = mapper->fAllocName) /* && mapper != IOMapper::gSystem */) {
-		kern_allocation_update_size(mapper->fAllocName, mapLength);
+		kern_allocation_update_size(mapper->fAllocName, mapLength, NULL);
 	}
 
 	if (!command) {
@@ -4566,7 +4566,7 @@ IOMemoryDescriptor::dmaUnmap(
 	ret = mapper->iovmUnmapMemory(this, command, mapAddress, mapLength);
 
 	if ((alloc = mapper->fAllocName)) {
-		kern_allocation_update_size(alloc, -mapLength);
+		kern_allocation_update_size(alloc, -mapLength, NULL);
 		if ((1 == prior) && mapName && (VM_KERN_MEMORY_NONE != _kernelTag)) {
 			mapLength = _length;
 			kern_allocation_update_subtotal(mapName, _kernelTag, -mapLength);

@@ -79,7 +79,7 @@ net_filter_event_description(uint32_t state)
 
 static void
 net_filter_event_callback(struct eventhandler_entry_arg arg0 __unused,
-    uint32_t state)
+    enum net_filter_event_subsystems state)
 {
 	struct sbuf *sbuf = net_filter_event_description(state);
 
@@ -124,9 +124,9 @@ net_filter_event_mark(enum net_filter_event_subsystems subsystem, bool compatibl
 
 	net_filter_event_init();
 	if (!compatible) {
-		atomic_bitset_32(&net_filter_event_state, subsystem);
+		os_atomic_or(&net_filter_event_state, subsystem, relaxed);
 	} else {
-		atomic_bitclear_32(&net_filter_event_state, subsystem);
+		os_atomic_andnot(&net_filter_event_state, subsystem, relaxed);
 	}
 	if (old_state != net_filter_event_state) {
 		net_filter_event_enqueue();

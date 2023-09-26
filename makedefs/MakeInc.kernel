@@ -26,6 +26,9 @@ ifeq ($(filter $(PLATFORM),$(SUPPORTED_PLATFORMS)),)
 $(error Unsupported PLATFORM $(PLATFORM))
 endif
 
+# Generate xnu version file early (from build environment or SDK/KDK)
+do_build_setup:: $(XNU_VERSION)
+
 ifeq ($(BUILD_JSON_COMPILATION_DATABASE),1)
 do_build_setup::
 	$(_v)$(CAT) > $(OBJPATH)/compile_commands.json < /dev/null
@@ -106,52 +109,89 @@ endif
 .CFLAGS: ALWAYS
 	$(_v)$(REPLACECONTENTS) $@ $(KCC) $(CFLAGS) $(INCFLAGS)
 
-$(TARGET)/$(KERNEL_FILE_NAME): $(TARGET)/$(KERNEL_FILE_NAME).unstripped $(TARGET)/$(KERNEL_FILE_NAME).dSYM
+
+#
+# CTF generation requires the following files:
+
+#     kernel.unstripped.noctf  Unstripped kernel with no CTF
+#     kernel.ctf               CTF from the dSYM associated with kernel.unstripped.noctf
+#     kernel.unstripped        kernel.unstripped.noctf merged with kernel.ctf (Debug Rich Executable)
+#     kernel                   Stripped kernel.unstripped.noctf merged with kernel.ctf (Final Kernel)
+
+# Note: "kernel" here is a placeholder for the actual name of the kernel which
+# varies.
+#
+
+
+# Convert DWARF to CTF
+$(TARGET)/$(KERNEL_FILE_NAME).ctf: $(TARGET)/$(KERNEL_FILE_NAME).dSYM $(TARGET)/$(KERNEL_FILE_NAME).unstripped.noctf
+ifeq ($(DO_CTFMERGE),1)
+	@$(LOG_CTFCONVERT) "$(@F)"
+	$(_v)$(CTFCONVERT) -c -l xnu -u xnu -o $@ $(TARGET)/$(KERNEL_FILE_NAME).dSYM/Contents/Resources/DWARF/$(KERNEL_FILE_NAME)
+endif
+
+# Strip the kernel and merge in the CTF
+$(TARGET)/$(KERNEL_FILE_NAME): $(TARGET)/$(KERNEL_FILE_NAME).unstripped.noctf $(TARGET)/$(KERNEL_FILE_NAME).dSYM $(TARGET)/$(KERNEL_FILE_NAME).ctf
 	@$(LOG_STRIP) "$(@F)"
 	$(_v)$(STRIP) $(STRIP_FLAGS) $< -o $@
 	@echo "built kernel at $@"
 	$(_v)$(RM) $@.ctfdata
 ifeq ($(DO_CTFMERGE),1)
-	@$(LOG_CTFCONVERT) "$(@F)"
-	$(_v)$(CTFCONVERT) -c -l xnu -u xnu -o $@.ctf $(TARGET)/$(KERNEL_FILE_NAME).dSYM/Contents/Resources/DWARF/$(KERNEL_FILE_NAME)
 	@$(LOG_CTFMERGE) "$(@F)"
 	$(_v)$(CTFMERGE) -l xnu -o $@ -Z $@.ctfdata $@.ctf
-	-$(_v)$(CTFDUMP) -S $@.ctf $(_vstdout) $(_vstderr)
 	$(_v)if [ -s $@.ctfdata ]; then                          \
 		$(LOG_CTFINSERT) "$(@F)";                            \
 		$(CTFINSERT) $@	$(ARCH_FLAGS_$(CURRENT_ARCH_CONFIG)) \
 			     $@.ctfdata -o $@;                           \
+	else                                                     \
+	    exit 1;                                              \
 	fi;
+	-$(_v)$(CTFDUMP) -S $@ $(_vstdout) $(_vstderr)
 endif
 	$(_v)$(LN) $(call function_convert_build_config_to_objdir,$(CURRENT_BUILD_CONFIG))/$(KERNEL_FILE_NAME) $(OBJROOT)/$(KERNEL_FILE_NAME)
 
-$(TARGET)/$(KERNEL_FILE_NAME).dSYM: $(TARGET)/$(KERNEL_FILE_NAME).unstripped
+# Merge the CTF into the unstripped kernel (Debug Rich Executable)
+$(TARGET)/$(KERNEL_FILE_NAME).unstripped: $(TARGET)/$(KERNEL_FILE_NAME).ctf $(TARGET)/$(KERNEL_FILE_NAME).unstripped.noctf
+	$(_v)$(CP) $(TARGET)/$(KERNEL_FILE_NAME).unstripped.noctf $(TARGET)/$(KERNEL_FILE_NAME).unstripped
+	$(_v)$(RM) $@.ctfdata
+ifeq ($(DO_CTFMERGE),1)
+	@$(LOG_CTFMERGE) "$(@F)"
+	$(_v)$(CTFMERGE) -l xnu -o $@ -Z $@.ctfdata $(TARGET)/$(KERNEL_FILE_NAME).ctf
+	$(_v)if [ -s $@.ctfdata ]; then                          \
+		$(LOG_CTFINSERT) "$(@F)";                            \
+		$(CTFINSERT) $@	$(ARCH_FLAGS_$(CURRENT_ARCH_CONFIG)) \
+			     $@.ctfdata -o $@;                           \
+	else                                                     \
+	    exit 1;                                              \
+	fi;
+	-$(_v)$(CTFDUMP) -S $@ $(_vstdout) $(_vstderr)
+endif
+
+$(TARGET)/$(KERNEL_FILE_NAME).dSYM: $(TARGET)/$(KERNEL_FILE_NAME).unstripped.noctf
 ifeq ($(BUILD_DSYM),1)
 	@$(LOG_DSYMUTIL) "$(@F)"
 	$(_v)$(BASH) -c "$(DSYMUTIL) $(DSYMUTIL_FLAGS) $< -o $@ $(_vstdout) 2> >(grep -v '^warning:.*could not find object file symbol for symbol' 1>&2)"
-	$(_v)$(MV) $@/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME).unstripped $@/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME)
+	$(_v)$(MV) $@/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME).unstripped.noctf $@/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME)
 else
 	$(_v)$(MKDIR) $@
 endif
 	$(_v)$(TOUCH) $@
 
 ifeq ($(BUILD_XNU_LIBRARY),1)
-$(TARGET)/lib$(KERNEL_FILE_NAME).a: $(addprefix $(TARGET)/,$(foreach component,$(COMPONENT_LIST),$(component)/$(CURRENT_KERNEL_CONFIG)/$(component).libfilelist)) nonlto.o $(SRCROOT)/config/version.c $(SRCROOT)/config/MasterVersion .LDFLAGS $(filter %/MakeInc.kernel,$(MAKEFILE_LIST))
-	$(_v)${MAKE} -f $(firstword $(MAKEFILE_LIST)) version.o
+$(TARGET)/lib$(KERNEL_FILE_NAME).a: $(addprefix $(TARGET)/,$(foreach component,$(COMPONENT_LIST),$(component)/$(CURRENT_KERNEL_CONFIG)/$(component).libfilelist)) nonlto.o version.o .LDFLAGS $(filter %/MakeInc.kernel,$(MAKEFILE_LIST))
 	@$(LOG_LIBTOOL) "$(@F)"
 	$(_v)$(CAT) $(filter %.libfilelist,$+) < /dev/null > link.filelist
 	$(_v)$(LIBTOOL) -static -csD -filelist link.filelist -o $@
 	$(_v)$(LN) $(call function_convert_build_config_to_objdir,$(CURRENT_BUILD_CONFIG))/lib$(KERNEL_FILE_NAME).a $(OBJROOT)/lib$(KERNEL_FILE_NAME).a
 endif
 
-$(TARGET)/$(KERNEL_FILE_NAME).unstripped: $(addprefix $(TARGET)/,$(foreach component,$(COMPONENT_LIST),$(component)/$(CURRENT_KERNEL_CONFIG)/$(component).filelist)) lastkerneldataconst.o lastkernelconstructor.o nonlto.o $(SRCROOT)/config/version.c $(SRCROOT)/config/MasterVersion $(LDFILES_KERNEL_ONLY) .LDFLAGS $(filter %/MakeInc.kernel,$(MAKEFILE_LIST))
-	$(_v)${MAKE} -f $(firstword $(MAKEFILE_LIST)) version.o
+$(TARGET)/$(KERNEL_FILE_NAME).unstripped.noctf: $(addprefix $(TARGET)/,$(foreach component,$(COMPONENT_LIST),$(component)/$(CURRENT_KERNEL_CONFIG)/$(component).filelist)) lastkerneldataconst.o lastkernelconstructor.o nonlto.o version.o $(LDFILES_KERNEL_ONLY) .LDFLAGS $(filter %/MakeInc.kernel,$(MAKEFILE_LIST))
 ifeq ($(PRE_LTO),1)
 	@$(LOG_LTO) "$(@F)"
 	$(_v)$(RM) ltolink.filelist
 	$(_v)$(RM) nonltolink.filelist
 	$(_v)$(RM) -r $(TARGET)/justlto.o
-	$(_v)files="$$($(CAT) $(filter %.filelist,$+)) version.o $(filter %.o,$+)"; \
+	$(_v)files="$$($(CAT) $(filter %.filelist,$+)) $(filter %.o,$+)"; \
 	for ofile in $$files; \
 	do \
 		hdr=$$(od -An -N 4 -t x4 $$ofile); \
@@ -190,7 +230,7 @@ ifeq ($(PRE_LTO),1)
 else
 	@$(LOG_LD) "$(@F)"
 	$(_v)$(CAT) $(filter %.filelist,$+) < /dev/null > link.filelist
-	$(_v)$(LD) $(LDFLAGS_KERNEL) $(LDFLAGS_KERNEL_ONLY) -filelist link.filelist version.o $(filter %.o,$+) -o $@ $(LD_KERNEL_LIBS) $(LD_KERNEL_ARCHIVES)
+	$(_v)$(LD) $(LDFLAGS_KERNEL) $(LDFLAGS_KERNEL_ONLY) -filelist link.filelist $(filter %.o,$+) -o $@ $(LD_KERNEL_LIBS) $(LD_KERNEL_ARCHIVES)
 endif
 
 # for now, rename LASTDATA_CONST to LAST on static kernel cache builds
@@ -229,11 +269,31 @@ version.o: $(OBJPATH)/version.c
 	${C_RULE_2}
 	${C_RULE_4}
 
-# Always recreate version.sh
-$(OBJPATH)/version.c: $(SRCROOT)/config/version.c $(NEWVERS) $(SRCROOT)/config/MasterVersion ALWAYS
+$(OBJPATH)/version.c: $(SRCROOT)/config/version.c.template $(NEWVERS) $(XNU_VERSION)
 	$(_v)$(CP) $< $@
-	$(_v)$(NEWVERS) $(OBJPATH)/version.c > /dev/null;
+	$(_v)$(NEWVERS) $@ > /dev/null;
 
+# Generate xnuVersion file from B&I env var or the System.kext/Info.plist
+# found in the SDK or KDK. Only update the file if the version number has
+# actually changed to avoid rebuilding dependent source files unnecessarily.
+ifeq ($(origin RC_DARWIN_KERNEL_VERSION), undefined)
+SDK_SYSTEM_KEXT_INFO_PLIST := $(firstword $(wildcard $(addsuffix $(SYSTEM_KEXT_INFO_PLIST),$(SDKROOT_RESOLVED) $(KDKROOT))))
+ifneq ($(SDK_SYSTEM_KEXT_INFO_PLIST),)
+RC_DARWIN_KERNEL_VERSION := $(strip $(shell $(PLUTIL) -extract CFBundleVersion raw -n $(SDK_SYSTEM_KEXT_INFO_PLIST)))
+endif
+endif
+ifeq ($(RC_DARWIN_KERNEL_VERSION),)
+$(error Could not determine xnu version from SDK or KDK! Set RC_DARWIN_KERNEL_VERSION environment variable.)
+endif
+EXISTING_KERNEL_VERSION := $(strip $(shell test -r $(XNU_VERSION) && head -1 $(XNU_VERSION)))
+ifneq ($(EXISTING_KERNEL_VERSION), $(RC_DARWIN_KERNEL_VERSION))
+$(XNU_VERSION): ALWAYS
+	@$(LOG_GENERATE) "$(notdir $@)$(Color0) with version \"$(ColorF)$(RC_DARWIN_KERNEL_VERSION)$(Color0)\""
+	$(_v)printf > $@ '%s\n' "$(RC_DARWIN_KERNEL_VERSION)"
+else ifeq ($(VERBOSE),YES)
+$(XNU_VERSION): ALWAYS
+	@echo "xnuVersion unchanged: checked for \"$(RC_DARWIN_KERNEL_VERSION)\" in $@"
+endif
 
 -include lastkerneldataconst.d
 lastkerneldataconst.o: .CFLAGS $(filter %/MakeInc.kernel,$(MAKEFILE_LIST))
@@ -458,11 +518,12 @@ endif
 # The $(RM) is needed so that the $(LN) doesn't dereference an existing
 # symlink during incremental builds and create a new symlink inside
 # the target of the existing symlink
-do_installhdrs_mi:: $(DSTROOT)/$(KRESDIR)/Info.plist
 ifneq ($(INSTALLHDRS_SKIP_HOST),YES)
+do_installhdrs_mi:: $(DSTROOT)/$(KRESDIR)/Info.plist
 	$(_v)$(MKDIR) $(DSTROOT)/$(KINCFRAME)
 	$(_v)$(MKDIR) $(DSTROOT)/$(KPINCDIR)
 	$(_v)$(MKDIR) $(DSTROOT)/$(KRESDIR)
+	$(_v)$(MKDIR) $(DSTROOT)/$(KLIBCXXINCDIR)
 	$(_v)$(RM) $(DSTROOT)/$(KINCFRAME)/Versions/Current
 	$(_v)$(LN) $(KINCVERS) $(DSTROOT)/$(KINCFRAME)/Versions/Current
 	$(_v)$(RM) $(DSTROOT)/$(KINCFRAME)/Headers
@@ -476,8 +537,8 @@ ifneq ($(INSTALLHDRS_SKIP_HOST),YES)
 		   $(DSTROOT)/$(KINCFRAME)/Resources
 endif
 
-$(DSTROOT)/$(KRESDIR)/Info.plist: $(SOURCE)/EXTERNAL_HEADERS/Info.plist
 ifneq ($(INSTALLHDRS_SKIP_HOST),YES)
+$(DSTROOT)/$(KRESDIR)/Info.plist: $(SOURCE)/EXTERNAL_HEADERS/Info.plist $(NEWVERS) $(XNU_VERSION)
 	$(_v)$(MKDIR) $(DSTROOT)/$(KRESDIR)
 	$(_v)$(INSTALL) $(DATA_INSTALL_FLAGS) $< $@
 	$(_v)$(NEWVERS) $@ $(_vstdout)

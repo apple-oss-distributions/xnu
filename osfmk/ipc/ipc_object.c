@@ -88,6 +88,7 @@
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_hash.h>
+#include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_right.h>
 #include <ipc/ipc_notify.h>
 #include <ipc/ipc_port.h>
@@ -642,6 +643,11 @@ ipc_object_copyin(
 	    context,
 	    guard_flags);
 	is_write_unlock(space);
+
+	if (moved_provisional_reply_port(msgt_name, soright)) {
+		send_prp_telemetry(-1);
+	}
+
 
 #if IMPORTANCE_INHERITANCE
 	if (0 < assertcnt && ipc_importance_task_is_any_receiver_type(current_task()->task_imp_base)) {

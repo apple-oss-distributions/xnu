@@ -104,7 +104,6 @@ extern  int mockfs_mountroot(mount_t, vnode_t, vfs_context_t);
 #endif /* MOCKFS */
 
 enum fs_type_num {
-	FT_NFS = 2,
 	FT_DEVFS = 19,
 	FT_SYNTHFS = 20,
 	FT_ROUTEFS = 21,

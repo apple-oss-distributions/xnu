@@ -187,6 +187,8 @@ tcp_cc_delay_ack(struct tcpcb *tp, struct tcphdr *th)
 			 *    (this makes sure that during ramp-up we ACK every second MSS
 			 *    until we pass the tcp_recvspace * 1.5-threshold)
 			 * 6. We haven't waited for half a BDP
+			 * 7. The amount of unacked data is less than the maximum ACK-burst (256 MSS)
+			 *    We try to avoid having the sender end up hitting huge ACK-ranges.
 			 *
 			 * (a note on 6: The receive-window is
 			 * roughly 2 BDP. Thus, recwin / 4 means half a BDP and
@@ -199,7 +201,8 @@ tcp_cc_delay_ack(struct tcpcb *tp, struct tcphdr *th)
 			    recwin <= tp->t_last_recwin &&
 			    (tp->rcv_nxt - tp->last_ack_sent <= tp->t_maxseg ||
 			    recwin > (uint32_t)(tcp_recvspace + (tcp_recvspace >> 1))) &&
-			    (tp->rcv_nxt - tp->last_ack_sent) < (recwin >> 2)) {
+			    (tp->rcv_nxt - tp->last_ack_sent) < (recwin >> 2) &&
+			    (tp->rcv_nxt - tp->last_ack_sent) < 256 * tp->t_maxseg) {
 				tp->t_stat.acks_delayed++;
 				return 1;
 			}

@@ -123,7 +123,7 @@ int fill_taskthreadschedinfo(task_t task, uint64_t thaddr, struct proc_threadsch
 int get_numthreads(task_t);
 boolean_t bsd_hasthreadname(void *uth);
 void bsd_getthreadname(void *uth, char* buffer);
-void bsd_setthreadname(void *uth, const char* buffer);
+void bsd_setthreadname(void *uth, uint64_t tid, const char* buffer);
 void bsd_threadcdir(void * uth, void *vptr, int *vidp);
 extern void bsd_copythreadname(void *dst_uth, void *src_uth);
 int fill_taskipctableinfo(task_t task, uint32_t *table_size, uint32_t *table_free);

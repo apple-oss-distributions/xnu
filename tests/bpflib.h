@@ -25,7 +25,10 @@
 #ifndef _S_BPFLIB_H
 #define _S_BPFLIB_H
 
+#include <sys/types.h>
+
 int bpf_get_blen(int fd, int * blen);
+int bpf_set_blen(int fd, int blen);
 int bpf_new(void);
 int bpf_dispose(int fd);
 int bpf_setif(int fd, const char * en_name);
@@ -35,5 +38,8 @@ int bpf_arp_filter(int fd, int type_offset, int type, u_int packet_size);
 int bpf_set_timeout(int fd, struct timeval * tv_p);
 int bpf_set_header_complete(int fd, u_int header_complete);
 int bpf_set_see_sent(int fd, u_int see_send);
+int bpf_set_traffic_class(int fd, int tc);
+int bpf_set_direction(int fd, u_int direction);
+int bpf_get_direction(int fd, u_int *direction);
 
 #endif /* _S_BPFLIB_H */

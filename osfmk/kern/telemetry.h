@@ -49,6 +49,95 @@ enum telemetry_pmi {
 
 #if XNU_KERNEL_PRIVATE
 
+__options_decl(kernel_brk_options_t, uint32_t, {
+	/* Recoverability */
+	KERNEL_BRK_UNRECOVERABLE       = 0x00,
+	KERNEL_BRK_RECOVERABLE         = 0x01,
+
+	/* Telemetry collection mode */
+	KERNEL_BRK_CORE_ANALYTICS      = 0x10,
+	KERNEL_BRK_SIMULATED_PANIC     = 0x20, /* Future */
+});
+
+#define KERNEL_BRK_TELEMETRY_OPTIONS 0xf0
+
+__enum_decl(kernel_brk_type_t, uint32_t, {
+	KERNEL_BRK_TYPE_KASAN,             /* <Unrecoverable> KASan violation traps */
+	KERNEL_BRK_TYPE_PTRAUTH,           /* <Unrecoverable> Pointer Auth failure traps */
+	KERNEL_BRK_TYPE_CLANG,             /* <Unrecoverable> Clang sanitizer traps */
+	KERNEL_BRK_TYPE_LIBCXX,            /* <Unrecoverable> Libc++ abort trap*/
+	KERNEL_BRK_TYPE_TELEMETRY,         /* <Rerecoverable> Soft telemetry collection traps */
+
+	KERNEL_BRK_TYPE_TEST,              /* Development only */
+});
+
+enum kernel_brk_trap_comment {
+	/* CLANG (reserved)       : [0x0000 ~ 0x00FF] <Intel only> */
+	CLANG_TRAPS_X86_START          = 0x0000,
+	CLANG_BOUND_CHK_TRAP_X86       = 0x0019, /* bound check fatal trap */
+	CLANG_TRAPS_X86_END            = 0x00FF,
+
+	/* LIBCXX                 : [0x0800 ~ 0x0800] */
+	LIBCXX_TRAPS_START             = 0x0800,
+	LIBCXX_ABORT_TRAP              = 0x0800, /* libcxx abort() in libcxx_support/stdlib.h */
+	LIBCXX_TRAPS_END               = 0x0800,
+
+	/* KASAN (kasan-tbi.h)    : [0x0900 ~ 0x093F] <ARM only> */
+
+	/* CLANG (reserved)       : [0x5500 ~ 0x56FF] <ARM only> */
+	CLANG_TRAPS_ARM_START          = 0x5500,
+	CLANG_BOUND_CHK_TRAP_ARM       = 0x5519, /* bound check fatal trap */
+	CLANG_TRAPS_ARM_END            = 0X55FF,
+
+	/* PTRAUTH (sleh.c)       : [0xC470 ~ 0xC473] <ARM only> */
+
+	/* TELEMETRY              : [0xFF00 ~ 0xFFFE] */
+	TELEMETRY_TRAPS_START          = 0xFF00,
+	UBSAN_SIGNED_OVERFLOW_TRAP     = 0xFF00, /* ubsan minimal signed overflow*/
+	CLANG_BOUND_CHK_SOFT_TRAP      = 0xFF19, /* ml_bound_chk_soft_trap */
+	TELEMETRY_TRAPS_END            = 0xFFFE,
+
+	/* TEST */
+	TEST_RECOVERABLE_SOFT_TRAP     = 0xFFFF, /* development only */
+};
+
+typedef struct kernel_brk_descriptor {
+	kernel_brk_type_t     type;
+	uint16_t              base;
+	uint16_t              max;
+	kernel_brk_options_t  options;
+
+	void (*handle_breakpoint)(void *states, uint16_t comment);
+} *kernel_brk_descriptor_t;
+
+extern struct kernel_brk_descriptor brk_descriptors[]
+__SECTION_START_SYM("__DATA_CONST", "__brk_desc");
+
+extern struct kernel_brk_descriptor brk_descriptors_end[]
+__SECTION_END_SYM("__DATA_CONST", "__brk_desc");
+
+#define KERNEL_BRK_DESCRIPTOR_DEFINE(name, ...) \
+__PLACE_IN_SECTION("__DATA_CONST,__brk_desc") \
+static const struct kernel_brk_descriptor name = { __VA_ARGS__ };
+
+const static inline struct kernel_brk_descriptor *
+find_brk_descriptor_by_comment(uint16_t comment)
+{
+	for (kernel_brk_descriptor_t des = brk_descriptors; des < brk_descriptors_end; des++) {
+		if (comment >= des->base && comment <= des->max) {
+			return des;
+		}
+	}
+
+	return NULL;
+}
+
+extern void telemetry_kernel_brk(
+	kernel_brk_type_t     type,
+	kernel_brk_options_t  options,
+	void                  *state,
+	uint16_t              comment);
+
 /* boolean_t must be used since variable is loaded from assembly. */
 extern volatile boolean_t telemetry_needs_record;
 

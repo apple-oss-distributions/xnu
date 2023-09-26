@@ -147,16 +147,10 @@ vn_getxattr(vnode_t vp, const char *name, uio_t uio, size_t *size,
 		if ((error = vnode_authorize(vp, NULL, KAUTH_VNODE_READ_EXTATTRIBUTES, context))) {
 			goto out;
 		}
-		/* The offset can only be non-zero for resource forks. */
-		if (uio != NULL && uio_offset(uio) != 0 &&
-		    strncmp(name, XATTR_RESOURCEFORK_NAME, sizeof(XATTR_RESOURCEFORK_NAME)) != 0) {
-			error = EINVAL;
-			goto out;
-		}
 	}
 
 	/* The offset can only be non-zero for resource forks. */
-	if (uio != NULL && uio_offset(uio) != 0 &&
+	if (uio_offset(uio) != 0 &&
 	    strncmp(name, XATTR_RESOURCEFORK_NAME, sizeof(XATTR_RESOURCEFORK_NAME)) != 0) {
 		error = EINVAL;
 		goto out;

@@ -104,11 +104,12 @@ struct bpf_d {
 	uint32_t        bd_hcnt;        /* number of packets in hold buffer */
 
 	uint32_t        bd_bufsize;     /* absolute length of buffers */
-	int             bd_hbuf_read;   /* reading from hbuf */
-	int             bd_headdrop;    /* Keep newer packets */
+	bool            bd_hbuf_read;   /* reading from hbuf */
+	bool            bd_hbuf_write;  /* writing on device */
+	bool            bd_headdrop;    /* Keep newer packets */
 
 	uint32_t        bd_rtout;       /* Read timeout in 'ticks' */
-	struct bpf_if   *bd_bif;         /* interface descriptor */
+	struct bpf_if   *bd_bif;        /* interface descriptor */
 	struct bpf_insn *bd_filter;     /* filter code */
 	uint64_t        bd_rcount;      /* number of packets received */
 	uint64_t        bd_dcount;      /* number of received packets dropped */
@@ -128,7 +129,7 @@ struct bpf_d {
 	struct selinfo  bd_sel;         /* bsd select info */
 
 	int             bd_hdrcmplt;    /* false to fill in src lladdr automatically */
-	int             bd_seesent;     /* true if bpf should see sent packets */
+	u_int           bd_direction;   /* direction of packets to see */
 	int             bd_oflags;      /* device open flags */
 	thread_call_t   bd_thread_call; /* for BPF timeouts with select */
 	int             bd_traffic_class; /* traffic service class */

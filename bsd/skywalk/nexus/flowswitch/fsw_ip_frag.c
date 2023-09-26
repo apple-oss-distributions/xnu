@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -133,7 +133,7 @@ struct ipfq {
 	uint64_t        ipfq_timestamp; /* time of creation */
 	struct ipf_key  ipfq_key;       /* ipfq search key */
 	uint16_t        ipfq_nfrag;     /* # of fragments in queue */
-	uint16_t        ipfq_unfraglen; /* len of unfragmentable part */
+	int             ipfq_unfraglen; /* len of unfragmentable part */
 	bool            ipfq_is_dirty;  /* q is dirty, don't use */
 };
 
@@ -169,7 +169,7 @@ static uint32_t ipfq_freef(struct fsw_ip_frag_mgr *mgr, struct ipfq *,
 static void ipfq_timeout(thread_call_param_t, thread_call_param_t);
 static void ipfq_sched_timeout(struct fsw_ip_frag_mgr *, boolean_t);
 
-static struct ipfq *ipfq_alloc(struct fsw_ip_frag_mgr *mgr, int how);
+static struct ipfq *ipfq_alloc(struct fsw_ip_frag_mgr *mgr);
 static void ipfq_free(struct fsw_ip_frag_mgr *mgr, struct ipfq *q);
 static uint32_t ipfq_freefq(struct fsw_ip_frag_mgr *mgr, struct ipfq *q,
     void (*ipf_cb)(struct fsw_ip_frag_mgr *, struct ipf *));
@@ -189,10 +189,6 @@ fsw_ip_frag_mgr_create(struct nx_flowswitch *fsw, struct ifnet *ifp,
     size_t f_limit)
 {
 	struct fsw_ip_frag_mgr *mgr;
-
-	/* ipf/ipfq uses mbufs for IP fragment queue structures */
-	_CASSERT(sizeof(struct ipfq) <= _MLEN);
-	_CASSERT(sizeof(struct ipf) <= _MLEN);
 
 	ASSERT(ifp != NULL);
 
@@ -516,6 +512,7 @@ ipf_process(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt_ptr,
 	int next;
 	int first_frag = 0;
 	int err = 0;
+	int local_ipfq_unfraglen;
 
 	*nfrags = 0;
 
@@ -552,7 +549,7 @@ ipf_process(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt_ptr,
 	if (q == mq) {
 		first_frag = 1;
 
-		q = ipfq_alloc(mgr, M_DONTWAIT);
+		q = ipfq_alloc(mgr);
 		if (q == NULL) {
 			STATS_INC(mgr->ipfm_stats,
 			    FSW_STATS_RX_FRAG_DROP_NOMEM);
@@ -565,7 +562,7 @@ ipf_process(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt_ptr,
 
 		bcopy(key, &q->ipfq_key, sizeof(struct ipf_key));
 		q->ipfq_down = q->ipfq_up = (struct ipf *)q;
-		q->ipfq_unfraglen = 0;
+		q->ipfq_unfraglen = -1;  /* The 1st fragment has not arrived. */
 		q->ipfq_nfrag = 0;
 		q->ipfq_timestamp = _net_uptime;
 	}
@@ -581,16 +578,22 @@ ipf_process(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt_ptr,
 		goto done;
 	}
 
+	local_ipfq_unfraglen = q->ipfq_unfraglen;
+
 	/*
 	 * If it's the 1st fragment, record the length of the
 	 * unfragmentable part and the next header of the fragment header.
+	 * Assume the first fragement to arrive will be correct.
+	 * We do not have any duplicate checks here yet so another packet
+	 * with fragoff == 0 could come and overwrite the ipfq_unfraglen
+	 * and worse, the next header, at any time.
 	 */
-	if (fragoff == 0) {
-		q->ipfq_unfraglen = unfraglen;
+	if (fragoff == 0 && local_ipfq_unfraglen == -1) {
+		local_ipfq_unfraglen = unfraglen;
 	}
 
 	/* Check that the reassembled packet would not exceed 65535 bytes. */
-	if (q->ipfq_unfraglen + fragoff + fragpartlen > IP_MAXPACKET) {
+	if (local_ipfq_unfraglen + fragoff + fragpartlen > IP_MAXPACKET) {
 		SK_DF(SK_VERB_IP_FRAG, "frag too big");
 		STATS_INC(mgr->ipfm_stats, FSW_STATS_RX_FRAG_BAD);
 		ipf_icmp_param_err(mgr, pkt, sizeof(struct ip6_hdr) +
@@ -608,7 +611,7 @@ ipf_process(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt_ptr,
 	if (fragoff == 0) {
 		for (f = q->ipfq_down; f != (struct ipf *)q; f = f_down) {
 			f_down = f->ipf_down;
-			if (q->ipfq_unfraglen + f->ipf_off + f->ipf_len >
+			if (local_ipfq_unfraglen + f->ipf_off + f->ipf_len >
 			    IP_MAXPACKET) {
 				SK_DF(SK_VERB_IP_FRAG, "frag too big");
 				STATS_INC(mgr->ipfm_stats,
@@ -688,6 +691,8 @@ ipf_process(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt_ptr,
 	}
 
 insert:
+	q->ipfq_unfraglen = local_ipfq_unfraglen;
+
 	/*
 	 * Stick new segment in its place;
 	 * check for complete reassembly.
@@ -920,9 +925,8 @@ ipfq_drain_sysctl SYSCTL_HANDLER_ARGS
 }
 
 static struct ipfq *
-ipfq_alloc(struct fsw_ip_frag_mgr *mgr, int how)
+ipfq_alloc(struct fsw_ip_frag_mgr *mgr)
 {
-	struct mbuf *t;
 	struct ipfq *q;
 
 	if (mgr->ipfm_q_count > mgr->ipfm_q_limit) {
@@ -930,14 +934,10 @@ ipfq_alloc(struct fsw_ip_frag_mgr *mgr, int how)
 	}
 	ASSERT(mgr->ipfm_q_count <= mgr->ipfm_q_limit);
 
-	t = m_get(how, MT_FTABLE);
-	if (t != NULL) {
+	q = kalloc_type(struct ipfq, Z_WAITOK | Z_ZERO);
+	if (q != NULL) {
 		mgr->ipfm_q_count++;
-		q = mtod(t, struct ipfq *);
-		bzero(q, sizeof(*q));
 		q->ipfq_is_dirty = false;
-	} else {
-		q = NULL;
 	}
 	return q;
 }
@@ -946,7 +946,7 @@ ipfq_alloc(struct fsw_ip_frag_mgr *mgr, int how)
 static void
 ipfq_free(struct fsw_ip_frag_mgr *mgr, struct ipfq *q)
 {
-	(void) m_free(dtom(q));
+	kfree_type(struct ipfq, q);
 	mgr->ipfm_q_count--;
 }
 
@@ -992,7 +992,6 @@ ipfq_freefq(struct fsw_ip_frag_mgr *mgr, struct ipfq *q,
 static struct ipf *
 ipf_alloc(struct fsw_ip_frag_mgr *mgr)
 {
-	struct mbuf *t;
 	struct ipf *f;
 
 	if (mgr->ipfm_f_count > mgr->ipfm_f_limit) {
@@ -1000,13 +999,9 @@ ipf_alloc(struct fsw_ip_frag_mgr *mgr)
 		return NULL;
 	}
 
-	t = m_get(M_DONTWAIT, MT_FTABLE);
-	if (t != NULL) {
+	f = kalloc_type(struct ipf, Z_WAITOK | Z_ZERO);
+	if (f != NULL) {
 		mgr->ipfm_f_count++;
-		f = mtod(t, struct ipf *);
-		bzero(f, sizeof(*f));
-	} else {
-		f = NULL;
 	}
 	return f;
 }
@@ -1023,6 +1018,6 @@ ipf_free_pkt(struct ipf *f)
 static void
 ipf_free(struct fsw_ip_frag_mgr *mgr, struct ipf *f)
 {
-	(void) m_free(dtom(f));
+	kfree_type(struct ipf, f);
 	mgr->ipfm_f_count--;
 }

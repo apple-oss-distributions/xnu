@@ -477,10 +477,9 @@ persona_id_from_proc(proc_t p)
 	return PERSONA_ID_NONE;
 }
 
-int persona_proc_inherit(proc_t child, proc_t parent);
+/* consumes persona */
+int persona_proc_adopt(proc_t p, struct persona *persona, kauth_cred_derive_t fn);
 
-int persona_proc_adopt(proc_t p, struct persona *persona,
-    kauth_cred_t auth_override);
 int persona_proc_drop(proc_t p);
 
 /* returns a reference that must be released with persona_put() */

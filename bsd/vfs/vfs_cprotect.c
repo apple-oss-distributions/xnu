@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -415,6 +415,7 @@ typedef unsigned char cp_vfs_callback_arg_type_t;
 enum {
 	CP_TYPE_LOCK_STATE   = 0,
 	CP_TYPE_EP_STATE     = 1,
+	CP_TYPE_CX_STATE     = 2,
 };
 
 typedef struct {
@@ -422,6 +423,7 @@ typedef struct {
 	union {
 		cp_lock_state_t lock_state;
 		cp_ep_state_t   ep_state;
+		cp_cx_state_t   cx_state;
 	};
 	int             valid_uuid;
 	uuid_t          volume_uuid;
@@ -457,6 +459,9 @@ cp_vfs_callback(mount_t mp, void *arg)
 	case(CP_TYPE_EP_STATE):
 		VFS_IOCTL(mp, FIODEVICEEPSTATE, (void *)(uintptr_t)callback_arg->ep_state, 0, vfs_context_kernel());
 		break;
+	case(CP_TYPE_CX_STATE):
+		VFS_IOCTL(mp, FIODEVICECXSTATE, (void *)(uintptr_t)callback_arg->cx_state, 0, vfs_context_kernel());
+		break;
 	default:
 		break;
 	}
@@ -468,19 +473,22 @@ cp_key_store_action(cp_key_store_action_t action)
 {
 	cp_vfs_callback_arg callback_arg;
 
+	memset(callback_arg.volume_uuid, 0, sizeof(uuid_t));
+	callback_arg.valid_uuid = 0;
+
 	switch (action) {
 	case CP_ACTION_LOCKED:
 	case CP_ACTION_UNLOCKED:
 		callback_arg.type = CP_TYPE_LOCK_STATE;
 		callback_arg.lock_state = (action == CP_ACTION_LOCKED ? CP_LOCKED_STATE : CP_UNLOCKED_STATE);
-		memset(callback_arg.volume_uuid, 0, sizeof(uuid_t));
-		callback_arg.valid_uuid = 0;
 		return vfs_iterate(0, cp_vfs_callback, (void *)&callback_arg);
 	case CP_ACTION_EP_INVALIDATED:
 		callback_arg.type = CP_TYPE_EP_STATE;
 		callback_arg.ep_state = CP_EP_INVALIDATED;
-		memset(callback_arg.volume_uuid, 0, sizeof(uuid_t));
-		callback_arg.valid_uuid = 0;
+		return vfs_iterate(0, cp_vfs_callback, (void *)&callback_arg);
+	case CP_ACTION_CX_EXPIRED:
+		callback_arg.type = CP_TYPE_CX_STATE;
+		callback_arg.cx_state = CP_CX_EXPIRED;
 		return vfs_iterate(0, cp_vfs_callback, (void *)&callback_arg);
 	default:
 		return -1;
@@ -492,19 +500,22 @@ cp_key_store_action_for_volume(uuid_t volume_uuid, cp_key_store_action_t action)
 {
 	cp_vfs_callback_arg callback_arg;
 
+	memcpy(callback_arg.volume_uuid, volume_uuid, sizeof(uuid_t));
+	callback_arg.valid_uuid = 1;
+
 	switch (action) {
 	case CP_ACTION_LOCKED:
 	case CP_ACTION_UNLOCKED:
 		callback_arg.type = CP_TYPE_LOCK_STATE;
 		callback_arg.lock_state = (action == CP_ACTION_LOCKED ? CP_LOCKED_STATE : CP_UNLOCKED_STATE);
-		memcpy(callback_arg.volume_uuid, volume_uuid, sizeof(uuid_t));
-		callback_arg.valid_uuid = 1;
 		return vfs_iterate(0, cp_vfs_callback, (void *)&callback_arg);
 	case CP_ACTION_EP_INVALIDATED:
 		callback_arg.type = CP_TYPE_EP_STATE;
 		callback_arg.ep_state = CP_EP_INVALIDATED;
-		memcpy(callback_arg.volume_uuid, volume_uuid, sizeof(uuid_t));
-		callback_arg.valid_uuid = 1;
+		return vfs_iterate(0, cp_vfs_callback, (void *)&callback_arg);
+	case CP_ACTION_CX_EXPIRED:
+		callback_arg.type = CP_TYPE_CX_STATE;
+		callback_arg.cx_state = CP_CX_EXPIRED;
 		return vfs_iterate(0, cp_vfs_callback, (void *)&callback_arg);
 	default:
 		return -1;
@@ -521,11 +532,12 @@ cp_is_valid_class(int isdir, int32_t protectionclass)
 	 */
 	if (isdir) {
 		/* Directories are not allowed to have F, but they can have "NONE" */
-		return (protectionclass >= PROTECTION_CLASS_DIR_NONE) &&
-		       (protectionclass <= PROTECTION_CLASS_D);
+		return (protectionclass == PROTECTION_CLASS_CX) ||
+		       ((protectionclass >= PROTECTION_CLASS_DIR_NONE) &&
+		       (protectionclass <= PROTECTION_CLASS_D));
 	} else {
 		return (protectionclass >= PROTECTION_CLASS_A) &&
-		       (protectionclass <= PROTECTION_CLASS_F);
+		       (protectionclass <= PROTECTION_CLASS_CX);
 	}
 }
 

@@ -256,7 +256,7 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, autosndbufinc,
     8 * 1024, "Increment in send socket bufffer size");
 
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, autosndbufmax,
-    CTLFLAG_RW | CTLFLAG_LOCKED, uint32_t, tcp_autosndbuf_max, 2 * 1024 * 1024,
+    CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, uint32_t, tcp_autosndbuf_max, 2 * 1024 * 1024,
     "Maximum send socket buffer size");
 
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, rtt_recvbg,
@@ -457,7 +457,11 @@ tcp_tfo_write_cookie(struct tcpcb *tp, unsigned int optlen, int32_t len,
 static inline bool
 tcp_send_ecn_flags_on_syn(struct tcpcb *tp)
 {
-	return !(tp->ecn_flags & (TE_SETUPSENT | TE_ACE_SETUPSENT));
+	/* We allow Accurate ECN negotiation on first retransmission as well */
+	bool send_on_first_retrans = (tp->ecn_flags & TE_ACE_SETUPSENT) &&
+	    (tp->t_rxtshift <= 1);
+
+	return !(tp->ecn_flags & (TE_SETUPSENT | TE_ACE_SETUPSENT)) || send_on_first_retrans;
 }
 
 void
@@ -506,11 +510,21 @@ tcp_set_ecn(struct tcpcb *tp, struct ifnet *ifp)
 	return;
 
 check_heuristic:
-	if (!tcp_heuristic_do_ecn(tp) && !TCP_ACC_ECN_ENABLED()) {
+	if (TCP_ACC_ECN_ENABLED(tp)) {
+		/* Allow ECN when Accurate ECN is enabled until heuristics are fixed */
+		tp->ecn_flags |= TE_ENABLE_ECN;
+		/* Set the accurate ECN state */
+		if (tp->t_client_accecn_state == tcp_connection_client_accurate_ecn_feature_disabled) {
+			tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_feature_enabled;
+		}
+		if (tp->t_server_accecn_state == tcp_connection_server_accurate_ecn_feature_disabled) {
+			tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_feature_enabled;
+		}
+	}
+	if (!tcp_heuristic_do_ecn(tp) && !TCP_ACC_ECN_ENABLED(tp)) {
 		/* Allow ECN when Accurate ECN is enabled until heuristics are fixed */
 		tp->ecn_flags &= ~TE_ENABLE_ECN;
 	}
-
 	/*
 	 * If the interface setting, system-level setting and heuristics
 	 * allow to enable ECN, randomly select 5% of connections to
@@ -522,7 +536,7 @@ check_heuristic:
 		 * Use the random value in iss for randomizing
 		 * this selection
 		 */
-		if ((tp->iss % 100) >= tcp_ecn_setup_percentage && !TCP_ACC_ECN_ENABLED()) {
+		if ((tp->iss % 100) >= tcp_ecn_setup_percentage && !TCP_ACC_ECN_ENABLED(tp)) {
 			/* Don't disable Accurate ECN randomly */
 			tp->ecn_flags &= ~TE_ENABLE_ECN;
 		}
@@ -573,10 +587,24 @@ tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *lp, uint8_t *o
 		return;
 	}
 
-	if (!(flags & TH_SYN || tp->ecn_flags & (TE_ACO_ECT1 | TE_ACO_ECT0))) {
+	if (!(flags & TH_SYN || (tp->ecn_flags & TE_ACE_FINAL_ACK_3WHS) ||
+	    tp->snd_una == tp->iss + 1 ||
+	    tp->ecn_flags & (TE_ACO_ECT1 | TE_ACO_ECT0))) {
 		/*
-		 * Since this is neither a SYN-ACK packet nor any of the ECT byte
+		 * Since this is neither a SYN-ACK packet, nor the final ACK of
+		 * the 3WHS (nor the first acked data segment) nor any of the ECT byte
 		 * counter flags are set, no need to send the option.
+		 */
+		return;
+	}
+
+	if ((flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK) &&
+	    tp->t_rxtshift >= 1) {
+		/*
+		 * If this is a SYN-ACK retransmission (first),
+		 * retry without AccECN option and just with ACE fields.
+		 * From second retransmission onwards, we don't send any
+		 * Accurate ECN state.
 		 */
 		return;
 	}
@@ -666,6 +694,7 @@ tcp_output(struct tcpcb *tp)
 	struct inpcb *inp = tp->t_inpcb;
 	struct socket *so = inp->inp_socket;
 	int32_t len, recwin, sendwin, off;
+	uint32_t max_len = 0;
 	uint16_t flags;
 	int error;
 	struct mbuf *m;
@@ -908,7 +937,7 @@ again:
 	 * resending already delivered data.  Adjust snd_nxt accordingly.
 	 */
 	if (SACK_ENABLED(tp) && SEQ_LT(tp->snd_nxt, tp->snd_max)) {
-		tcp_sack_adjust(tp);
+		max_len = tcp_sack_adjust(tp);
 	}
 	sendalot = 0;
 	off = tp->snd_nxt - tp->snd_una;
@@ -1113,6 +1142,10 @@ after_sack_rexmit:
 				tp->t_flagsext |= TF_RESCUE_RXT;
 			}
 		}
+	}
+
+	if (max_len != 0 && len > 0) {
+		len = min(len, max_len);
 	}
 
 	/*
@@ -1693,6 +1726,18 @@ send:
 		}
 	}
 	/*
+	 * If we are connected and no segment has been ACKed or SACKed yet and we
+	 * hit a retransmission timeout, then we should disable AccECN option
+	 * for the rest of the connection.
+	 */
+	if (TCP_ACC_ECN_ON(tp) && tp->t_state == TCPS_ESTABLISHED &&
+	    tp->snd_una == tp->iss + 1 && (tp->snd_fack == 0)
+	    && tp->t_rxtshift > 0) {
+		if ((tp->ecn_flags & TE_RETRY_WITHOUT_ACO) == 0) {
+			tp->ecn_flags |= TE_RETRY_WITHOUT_ACO;
+		}
+	}
+	/*
 	 * Before ESTABLISHED, force sending of initial options
 	 * unless TCP set not to do any options.
 	 * NOTE: we assume that the IP/TCP header plus TCP options
@@ -1885,16 +1930,16 @@ send:
 	 * AccECN option - after SACK
 	 * Don't send on <SYN>,
 	 * send only on <SYN,ACK> before ACCECN is negotiated or
-	 * when doing an AccECN session.
+	 * when doing an AccECN session. Don't send AccECN option
+	 * if retransmitting a SYN-ACK or a data segment
 	 */
-	if (TCP_ACC_ECN_ON(tp) ||
-	    (TCP_ACC_ECN_ENABLED() && (flags & (TH_SYN | TH_ACK)) ==
-	    (TH_SYN | TH_ACK))) {
+	if ((TCP_ACC_ECN_ON(tp) ||
+	    (TCP_ACC_ECN_ENABLED(tp) && (flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK)))
+	    && ((tp->ecn_flags & TE_RETRY_WITHOUT_ACO) == 0)) {
 		uint32_t *lp = (uint32_t *)(void *)(opt + optlen);
 		/* lp will become outdated after options are added */
 		tcp_add_accecn_option(tp, flags, lp, (uint8_t *)&optlen);
 	}
-
 	/* Pad TCP options to a 4 byte boundary */
 	if (optlen < MAX_TCPOPTLEN && (optlen % sizeof(u_int32_t))) {
 		int pad = sizeof(u_int32_t) - (optlen % sizeof(u_int32_t));
@@ -1961,7 +2006,7 @@ send:
 		/* Server received either legacy or Accurate ECN setup SYN */
 		if (tp->ecn_flags & (TE_SETUPRECEIVED | TE_ACE_SETUPRECEIVED)) {
 			if (tcp_send_ecn_flags_on_syn(tp)) {
-				if (TCP_ACC_ECN_ENABLED() && (tp->ecn_flags & TE_ACE_SETUPRECEIVED)) {
+				if (TCP_ACC_ECN_ENABLED(tp) && (tp->ecn_flags & TE_ACE_SETUPRECEIVED)) {
 					/*
 					 * Accurate ECN mode is on. Initialize packet and byte counters
 					 * for the server sending SYN-ACK. Although s_cep will be initialized
@@ -1977,28 +2022,28 @@ send:
 					tp->t_rcv_ce_packets = 5;
 					tp->t_snd_ce_packets = 5;
 
-					/* Initialize ECT byte counter to 1 to distinguish zeroing of options */
-					tp->t_rcv_ect1_bytes = tp->t_rcv_ect0_bytes = 1;
-					tp->t_snd_ect1_bytes = tp->t_snd_ect0_bytes = 1;
-
 					/* Initialize CE byte counter to 0 */
 					tp->t_rcv_ce_bytes = tp->t_snd_ce_bytes = 0;
 
 					if (tp->ecn_flags & TE_ACE_SETUP_NON_ECT) {
-						flags |= TH_CWR;
+						tp->t_prev_ace_flags = TH_CWR;
+						flags |= tp->t_prev_ace_flags;
 						/* Remove the setup flag as it is also used for final ACK */
 						tp->ecn_flags &= ~TE_ACE_SETUP_NON_ECT;
 						tcpstat.tcps_ecn_ace_syn_not_ect++;
 					} else if (tp->ecn_flags & TE_ACE_SETUP_ECT1) {
-						flags |= (TH_CWR | TH_ECE);
+						tp->t_prev_ace_flags = (TH_CWR | TH_ECE);
+						flags |= tp->t_prev_ace_flags;
 						tp->ecn_flags &= ~TE_ACE_SETUP_ECT1;
 						tcpstat.tcps_ecn_ace_syn_ect1++;
 					} else if (tp->ecn_flags & TE_ACE_SETUP_ECT0) {
-						flags |= TH_AE;
+						tp->t_prev_ace_flags = TH_AE;
+						flags |= tp->t_prev_ace_flags;
 						tp->ecn_flags &= ~TE_ACE_SETUP_ECT0;
 						tcpstat.tcps_ecn_ace_syn_ect0++;
 					} else if (tp->ecn_flags & TE_ACE_SETUP_CE) {
-						flags |= (TH_AE | TH_CWR);
+						tp->t_prev_ace_flags = (TH_AE | TH_CWR);
+						flags |= tp->t_prev_ace_flags;
 						tp->ecn_flags &= ~TE_ACE_SETUP_CE;
 						/*
 						 * Receive counter is updated on
@@ -2007,8 +2052,13 @@ send:
 						 */
 						tcpstat.tcps_ecn_ace_syn_ce++;
 					} else {
-						/* We shouldn't come here */
-						panic("ECN flags (0x%x) not set correctly", tp->ecn_flags);
+						if (tp->t_prev_ace_flags != 0) {
+							/* Set the flags for retransmitted SYN-ACK same as the previous one */
+							flags |= tp->t_prev_ace_flags;
+						} else {
+							/* We shouldn't come here */
+							panic("ECN flags (0x%x) not set correctly", tp->ecn_flags);
+						}
 					}
 					/*
 					 * We are not yet committing to send IP ECT packets when
@@ -2031,7 +2081,7 @@ send:
 				tcpstat.tcps_ecn_server_success++;
 			} else {
 				/*
-				 * We sent an ECN-setup SYN-ACK but it was
+				 * For classic ECN, we sent an ECN-setup SYN-ACK but it was
 				 * dropped. Fallback to non-ECN-setup
 				 * SYN-ACK and clear flag to indicate that
 				 * we should not send data with IP ECT set
@@ -2043,6 +2093,10 @@ send:
 				 * assuming that the ECN setup will
 				 * succeed. Decrementing here
 				 * tcps_ecn_server_success to correct it.
+				 *
+				 * For Accurate ECN, we don't yet remove TE_ACE_SETUPRECEIVED
+				 * as the client might have received Accurate ECN SYN-ACK.
+				 * We decide Accurate ECN's state on processing last ACK from the client.
 				 */
 				if (tp->ecn_flags & (TE_SETUPSENT | TE_ACE_SETUPSENT)) {
 					tcpstat.tcps_ecn_lost_synack++;
@@ -2052,13 +2106,13 @@ send:
 
 				tp->ecn_flags &=
 				    ~(TE_SETUPRECEIVED | TE_SENDIPECT |
-				    TE_SENDCWR | TE_ACE_SETUPRECEIVED);
+				    TE_SENDCWR);
 			}
 		}
 	} else if ((flags & (TH_SYN | TH_ACK)) == TH_SYN &&
 	    (tp->ecn_flags & TE_ENABLE_ECN)) {
 		if (tcp_send_ecn_flags_on_syn(tp)) {
-			if (TCP_ACC_ECN_ENABLED()) {
+			if (TCP_ACC_ECN_ENABLED(tp)) {
 				/* We are negotiating AccECN in SYN */
 				flags |= TH_ACE;
 				/*
@@ -2257,6 +2311,9 @@ send:
 				tp->t_stat.txretransmitbytes += len;
 				tp->t_stat.rxmitpkts++;
 			}
+			if (tp->ecn_flags & TE_SENDIPECT) {
+				tp->t_ecn_capable_packets_lost++;
+			}
 		} else {
 			tcpstat.tcps_sndpack++;
 			tcpstat.tcps_sndbyte += len;
@@ -2266,6 +2323,9 @@ send:
 				    txpackets, 1);
 				INP_ADD_STAT(inp, cell, wifi, wired,
 				    txbytes, len);
+			}
+			if (tp->ecn_flags & TE_SENDIPECT) {
+				tp->t_ecn_capable_packets_sent++;
 			}
 			inp_decr_sndbytes_unsent(so, len);
 		}
@@ -3215,6 +3275,13 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 	if (INP_INTCOPROC_ALLOWED(inp) && isipv6) {
 		ip6oa.ip6oa_flags |=  IP6OAF_INTCOPROC_ALLOWED;
 	}
+	if (INP_MANAGEMENT_ALLOWED(inp)) {
+		if (isipv6) {
+			ip6oa.ip6oa_flags |=  IP6OAF_MANAGEMENT_ALLOWED;
+		} else {
+			ipoa.ipoa_flags |=  IPOAF_MANAGEMENT_ALLOWED;
+		}
+	}
 	if (isipv6) {
 		ip6oa.ip6oa_sotc = so->so_traffic_class;
 		ip6oa.ip6oa_netsvctype = so->so_netsvctype;
@@ -3265,6 +3332,7 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 	tp->t_flags &= ~(TF_ACKNOW | TF_DELACK);
 	tp->t_timer[TCPT_DELACK] = 0;
 	tp->t_unacksegs = 0;
+	tp->t_unacksegs_ce = 0;
 
 	/* Increment the count of outstanding send operations */
 	inp->inp_sndinprog_cnt++;

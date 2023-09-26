@@ -59,6 +59,7 @@
 #define ARM64_REG_LSU_ERR_CTL_L1DTlbMultiHitEN (1ULL<<3)
 
 
+
 #if defined(HAS_IPI)
 #define ARM64_REG_IPI_RR_TYPE_IMMEDIATE (0 << 28)
 #define ARM64_REG_IPI_RR_TYPE_RETRACT   (1 << 28)
@@ -88,6 +89,12 @@
 
 #define CPU_PIO_CPU_STS_OFFSET               (0x100ULL)
 #define CPU_PIO_CPU_STS_cpuRunSt_mask        (0xff)
+
+/*
+ * CORE_THRTL_CFG2 non-sysreg tunable
+ */
+#define CORE_THRTL_CFG2_OFFSET               (0x218)
+
 
 
 

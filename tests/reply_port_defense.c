@@ -11,7 +11,7 @@
 #include "../osfmk/mach/port.h"
 #include "../osfmk/kern/exc_guard.h"
 
-#define MAX_TEST_NUM 4
+#define MAX_TEST_NUM 5
 #define MAX_ARGV 3
 
 extern char **environ;
@@ -133,6 +133,7 @@ T_DECL(reply_port_defense, "Test reply port semantics violations", T_META_IGNORE
 	char *child_args[MAX_ARGV];
 	pid_t client_pid = 0;
 	posix_spawnattr_t attrs;
+	bool triggers_exception;
 
 	pthread_t s_exc_thread;
 	mach_port_t exc_port;
@@ -146,8 +147,14 @@ T_DECL(reply_port_defense, "Test reply port semantics violations", T_META_IGNORE
 	}
 
 	for (int i = 0; i < MAX_TEST_NUM; i++) {
+		received_exception_code = 0;
+		triggers_exception = true;
 		exc_port = alloc_exception_port();
 		T_QUIET; T_ASSERT_NE(exc_port, MACH_PORT_NULL, "Create a new exception port");
+
+		if (i == 4) {
+			triggers_exception = false;
+		}
 
 		/* Create exception serving thread */
 		ret = pthread_create(&s_exc_thread, NULL, exception_server_thread, &exc_port);
@@ -173,23 +180,25 @@ T_DECL(reply_port_defense, "Test reply port semantics violations", T_META_IGNORE
 		int child_status;
 		/* Wait for child and check for exception */
 		if (-1 == waitpid(-1, &child_status, 0)) {
-			T_FAIL("waitpid: child");
+			T_FAIL("%s waitpid: child", strerror(errno));
 		}
 		if (WIFEXITED(child_status) && WEXITSTATUS(child_status)) {
-			T_FAIL("Child exited with status = %x", child_status);
+			T_FAIL("Child exited with status = 0x%x", child_status);
 			T_END;
 		}
-
 		sleep(1);
 		kill(1, SIGKILL);
-
-		ret = pthread_join(s_exc_thread, NULL);
-		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "pthread_join");
+		if (triggers_exception) {
+			ret = pthread_join(s_exc_thread, NULL);
+			T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "pthread_join");
+		}
 
 		mach_port_deallocate(mach_task_self(), exc_port);
 
 		if (i == 0) { /* The first test is setup as moving immovable receive right of a reply port. */
 			expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_IMMOVABLE;
+		} else if (!triggers_exception) {
+			expected_exception_code = 0;
 		} else {
 			expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_INVALID_RIGHT;
 		}
@@ -197,4 +206,6 @@ T_DECL(reply_port_defense, "Test reply port semantics violations", T_META_IGNORE
 		T_LOG("Exception code: Received code = 0x%llx Expected code = 0x%llx", received_exception_code, expected_exception_code);
 		T_EXPECT_EQ(received_exception_code, expected_exception_code, "Exception code: Received == Expected");
 	}
+
+	T_END;
 }

@@ -91,6 +91,13 @@ and
 .Fa path
 as a directory, not a normal file.
 .El
+.Bl -tag -width indent
+.It Dv AT_SYMLINK_NOFOLLOW_ANY
+If
+.Fa path
+contains a symbolic link in any intermediate directory of the path, it is not
+followed and an error is returned instead.
+.El
 .Pp
 If
 .Fn unlinkat
@@ -216,6 +223,14 @@ argument is not an absolute path and
 is neither
 .Dv AT_FDCWD
 nor a file descriptor associated with a directory.
+.It Bq Er ELOOP
+The
+.Fa flag
+parameter has the
+.Dv AT_SYMLINK_NOFOLLOW_ANY
+bit set and one of the intermediate directories in the
+.Fa path
+argument is a symbolic link.
 .El
 .Sh SEE ALSO
 .Xr close 2 ,

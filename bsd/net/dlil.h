@@ -180,6 +180,10 @@ struct dlil_threading_info {
 	lck_grp_t       *dlth_lock_grp; /* lock group (for lock stats) */
 	char            dlth_name[DLIL_THREADNAME_LEN]; /* name storage */
 
+	/* Accounting for trimming of input queues that exceed their limits */
+	uint32_t        dlth_trim_cnt;          /* # of trim events */
+	uint32_t        dlth_trim_pkts_dropped; /* # of packets dropped
+	                                         * when trimming */
 #if IFNET_INPUT_SANITY_CHK
 	/*
 	 * For debugging.
@@ -361,6 +365,22 @@ extern boolean_t ifnet_detach_netif_nexus(ifnet_t ifp);
 extern boolean_t ifnet_add_netagent(ifnet_t ifp);
 extern boolean_t ifnet_remove_netagent(ifnet_t ifp);
 extern void      ifnet_attach_native_flowswitch(ifnet_t ifp);
+extern void      ifnet_start_set_pacemaker_time(ifnet_t ifp, uint64_t tx_time);
+extern void      ifnet_start_ignore_delay(ifnet_t interface);
+extern int       ifnet_set_flowswitch_rx_callback(ifnet_t ifp, ifnet_fsw_rx_cb_t cb, void *arg);
+extern int       ifnet_get_flowswitch_rx_callback(ifnet_t ifp, ifnet_fsw_rx_cb_t *cbp, void **argp);
+extern void      ifnet_release_flowswitch_rx_callback(ifnet_t ifp);
+extern int       ifnet_set_delegate_parent(ifnet_t difp, ifnet_t parent);
+extern int       ifnet_get_delegate_parent(ifnet_t difp, ifnet_t *parent);
+extern void      ifnet_release_delegate_parent(ifnet_t difp);
+extern void      ifnet_set_detach_notify_locked(ifnet_t ifp,
+    ifnet_detach_notify_cb_t cb, void *arg);
+extern void      ifnet_get_detach_notify_locked(ifnet_t ifp,
+    ifnet_detach_notify_cb_t *cbp, void **argp);
+extern void      ifnet_set_detach_notify(ifnet_t ifp,
+    ifnet_detach_notify_cb_t cb, void *arg);
+extern void      ifnet_get_detach_notify(ifnet_t ifp,
+    ifnet_detach_notify_cb_t *cbp, void **argp);
 
 #endif /* SKYWALK */
 
@@ -412,11 +432,6 @@ extern errno_t dlil_set_output_handler(struct ifnet *ifp, dlil_output_func fn);
 extern void dlil_reset_input_handler(struct ifnet *ifp);
 extern void dlil_reset_output_handler(struct ifnet *ifp);
 #endif /* SKYWALK */
-
-#if DEVELOPMENT || DEBUG
-extern void trace_pkt_dump_payload(struct ifnet *ifp, struct __kern_packet *pkt,
-    bool input);
-#endif /* DEVELOPMENT || DEBUG */
 
 /*
  * This is mostly called from the context of the DLIL input thread;

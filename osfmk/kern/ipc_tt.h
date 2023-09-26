@@ -282,6 +282,9 @@ extern kern_return_t thread_get_kernel_special_reply_port(void);
 
 extern void thread_dealloc_kernel_special_reply_port(thread_t thread);
 
+extern boolean_t set_exception_behavior_allowed(const ipc_port_t new_port, int new_behavior,
+    const task_t excepting_task, const exception_mask_t mask, const char *level);
+
 #if MACH_KERNEL_PRIVATE
 extern void ipc_thread_port_unpin(
 	ipc_port_t port);

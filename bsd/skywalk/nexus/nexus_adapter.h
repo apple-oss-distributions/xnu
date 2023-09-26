@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -141,6 +141,9 @@ struct nexus_adapter {
 	/* number of event rings */
 	uint32_t na_num_event_rings;
 
+	/* number of large buffer alloc rings */
+	uint32_t na_num_large_buf_alloc_rings;
+
 	uint64_t na_work_ts;            /* when we last worked on it */
 
 	/*
@@ -174,12 +177,13 @@ struct nexus_adapter {
 	struct skmem_arena *na_arena;
 
 	/*
-	 * Number of descriptor in each queue.
+	 * Number of descriptors in each queue.
 	 */
 	uint32_t na_num_tx_slots;
 	uint32_t na_num_rx_slots;
 	uint32_t na_num_allocator_slots;
 	uint32_t na_num_event_slots;
+	uint32_t na_num_large_buf_alloc_slots;
 
 	/*
 	 * Combined slot count of all rings.
@@ -203,6 +207,7 @@ struct nexus_adapter {
 	struct __kern_channel_ring *na_alloc_rings;
 	struct __kern_channel_ring *na_free_rings;
 	struct __kern_channel_ring *na_event_rings;
+	struct __kern_channel_ring *na_large_buf_alloc_rings;
 
 	uint64_t na_ch_mit_ival;        /* mitigation interval */
 
@@ -405,6 +410,8 @@ na_get_nslots(const struct nexus_adapter *na, enum txrx t)
 		return na->na_num_allocator_slots;
 	case NR_EV:
 		return na->na_num_event_slots;
+	case NR_LBA:
+		return na->na_num_large_buf_alloc_slots;
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
@@ -430,6 +437,9 @@ na_set_nslots(struct nexus_adapter *na, enum txrx t, uint32_t v)
 	case NR_EV:
 		na->na_num_event_slots = v;
 		break;
+	case NR_LBA:
+		na->na_num_large_buf_alloc_slots = v;
+		break;
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
@@ -451,6 +461,8 @@ na_get_nrings(const struct nexus_adapter *na, enum txrx t)
 		return na->na_num_allocator_ring_pairs;
 	case NR_EV:
 		return na->na_num_event_rings;
+	case NR_LBA:
+		return na->na_num_large_buf_alloc_rings;
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
@@ -476,6 +488,11 @@ na_set_nrings(struct nexus_adapter *na, enum txrx t, uint32_t v)
 	case NR_EV:
 		na->na_num_event_rings = v;
 		break;
+	case NR_LBA:
+		/* we only support one ring for now */
+		ASSERT(v <= 1);
+		na->na_num_large_buf_alloc_rings = v;
+		break;
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
@@ -498,6 +515,8 @@ NAKR(struct nexus_adapter *na, enum txrx t)
 		return na->na_free_rings;
 	case NR_EV:
 		return na->na_event_rings;
+	case NR_LBA:
+		return na->na_large_buf_alloc_rings;
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
@@ -542,7 +561,7 @@ na_reject_channel(struct kern_channel *ch, struct nexus_adapter *na)
 		if (!(na->na_flags & NAF_REJECT)) {
 			SK_ERR("%s(%d) marked as non-permissive",
 			    ch->ch_name, ch->ch_pid);
-			atomic_bitset_32(&na->na_flags, NAF_REJECT);
+			os_atomic_or(&na->na_flags, NAF_REJECT, relaxed);
 			ch_deactivate(ch);
 		}
 		reject = TRUE;
@@ -639,6 +658,9 @@ extern bool na_flowadv_set(const struct nexus_adapter *,
     const flowadv_idx_t, const flowadv_token_t);
 extern boolean_t na_flowadv_clear(const struct kern_channel *,
     const flowadv_idx_t, const flowadv_token_t);
+extern int na_flowadv_report_ce_event(const struct kern_channel *ch,
+    const flowadv_idx_t fe_idx, const flowadv_token_t flow_token,
+    uint32_t ce_cnt, uint32_t total_pkt_cnt);
 extern void na_flowadv_event(struct __kern_channel_ring *);
 extern void na_post_event(struct __kern_channel_ring *, boolean_t, boolean_t,
     boolean_t, uint32_t);

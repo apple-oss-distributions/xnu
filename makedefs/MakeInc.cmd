@@ -67,6 +67,7 @@ LOG_SYMBOLSET = $(call _LOG_COMP,SYMSET)
 LOG_SYMBOLSETPLIST = $(call _LOG_COMP,SYMSETPLIST)
 
 # Host-side operations.
+LOG_TIGHTBEAMC = $(call _LOG_HOST,TIGHTBEAMC)
 LOG_IIG = $(call _LOG_HOST,IIG)
 LOG_HOST_CC = $(call _LOG_HOST,CC)
 LOG_HOST_LD = $(call _LOG_HOST,LD)
@@ -142,7 +143,7 @@ endif
 
 ifeq ($(origin PLATFORM),undefined)
 	export PLATFORMPATH := $(shell $(XCRUN) -sdk $(SDKROOT) -show-sdk-platform-path)
-	export PLATFORM := $(shell echo $(PLATFORMPATH) | sed 's,^.*/\([^/]*\)\.platform$$,\1,')
+	export PLATFORM := $(shell echo $(PLATFORMPATH) | sed 's,^.*/\([^/]*\)\.platform$$,\1,' | sed 's,\.[^.]*$$,,')
 	ifeq ($(PLATFORM),)
 		export PLATFORM := MacOSX
 	else ifeq ($(shell echo $(PLATFORM) | tr A-Z a-z),watchos)
@@ -178,6 +179,38 @@ ifeq ($(PLATFORM),MacOSX)
 	endif
 endif
 
+ifeq ($(PLATFORM),ExclaveKit)
+	ifeq ($(origin COHORT_SDKROOT_RESOLVED),undefined)
+		SDK_NAME = $(notdir $(SDKROOT))
+		export COHORT_NAME := $(shell echo $(SDK_NAME) | sed -e 's|ExclaveKit.\([a-zA-Z]*\)$(SDKVERSION)\([.Internal]*\).sdk|\1\2|g' | tr A-Z a-z)
+		export COHORT_SDKROOT_RESOLVED := $(shell $(XCRUN) -sdk $(COHORT_NAME) -show-sdk-path)
+		ifeq ($(strip $(COHORT_SDKROOT_RESOLVED)),)
+		export COHORT_SDKROOT_RESOLVED := $(SDKROOT_RESOLVED)
+		endif
+	endif
+	override COHORT_SDKROOT = $(COHORT_SDKROOT_RESOLVED)
+	export PLATFORMPATH = $(shell $(XCRUN) -sdk $(COHORT_SDKROOT) -show-sdk-platform-path)
+	export PLATFORM := ExclaveKit
+	export EXCLAVEKIT ?= 1
+	export EXCLAVEKITROOT ?= /System/ExclaveKit
+endif
+
+ifeq ($(PLATFORM),ExclaveCore)
+	ifeq ($(origin COHORT_SDKROOT_RESOLVED),undefined)
+		SDK_NAME = $(notdir $(SDKROOT))
+		export COHORT_NAME := $(shell echo $(SDK_NAME) | sed -e 's|ExclaveCore.\([a-zA-Z]*\)$(SDKVERSION)\([.Internal]*\).sdk|\1\2|g' | tr A-Z a-z)
+		export COHORT_SDKROOT_RESOLVED := $(shell $(XCRUN) -sdk $(COHORT_NAME) -show-sdk-path)
+		ifeq ($(strip $(COHORT_SDKROOT_RESOLVED)),)
+		export COHORT_SDKROOT_RESOLVED := $(SDKROOT_RESOLVED)
+		endif
+	endif
+	override COHORT_SDKROOT = $(COHORT_SDKROOT_RESOLVED)
+	export PLATFORMPATH = $(shell $(XCRUN) -sdk $(COHORT_SDKROOT) -show-sdk-platform-path)
+	export PLATFORM := ExclaveCore
+	export EXCLAVECORE ?= 1
+	export EXCLAVECOREROOT ?= /System/ExclaveCore
+endif
+
 # CC/CXX get defined by make(1) by default, so we can't check them
 # against the empty string to see if they haven't been set
 ifeq ($(origin CC),default)
@@ -197,6 +230,9 @@ ifeq ($(origin MIGCC),undefined)
 endif
 ifeq ($(origin IIG),undefined)
 	export IIG := $(shell $(XCRUN) -sdk $(SDKROOT) -find iig)
+endif
+ifeq ($(origin TIGHTBEAMC),undefined)
+	export TIGHTBEAMC := $(shell $(XCRUN) -sdk $(SDKROOT) -find tightbeamc)
 endif
 ifeq ($(origin STRIP),undefined)
 	export STRIP := $(shell $(XCRUN) -sdk $(SDKROOT) -find strip)
@@ -251,7 +287,7 @@ SUPPORTED_EMBEDDED_PLATFORMS := iPhoneOS iPhoneOSNano tvOS AppleTVOS WatchOS Bri
 SUPPORTED_SIMULATOR_PLATFORMS := iPhoneSimulator iPhoneNanoSimulator tvSimulator AppleTVSimulator WatchSimulator
 
 
-SUPPORTED_PLATFORMS := MacOSX DriverKit $(SUPPORTED_SIMULATOR_PLATFORMS) $(SUPPORTED_EMBEDDED_PLATFORMS)
+SUPPORTED_PLATFORMS := MacOSX DriverKit ExclaveKit ExclaveCore $(SUPPORTED_SIMULATOR_PLATFORMS) $(SUPPORTED_EMBEDDED_PLATFORMS)
 
 # Platform-specific tools
 EDM_DBPATH ?= $(PLATFORMPATH)/usr/local/standalone/firmware/device_map.db

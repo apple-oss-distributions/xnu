@@ -52,6 +52,8 @@ extern "C" {
 #define AQM_KTRACE_STATS_FLOW_CTL       AQMDBG_CODE(DBG_AQM_STATS, 0x003)
 #define AQM_KTRACE_STATS_FLOW_ALLOC     AQMDBG_CODE(DBG_AQM_STATS, 0x004)
 #define AQM_KTRACE_STATS_FLOW_DESTROY   AQMDBG_CODE(DBG_AQM_STATS, 0x005)
+#define AQM_KTRACE_STATS_FLOW_REPORT_CE AQMDBG_CODE(DBG_AQM_STATS, 0x006)
+#define AQM_KTRACE_STATS_GET_QLEN       AQMDBG_CODE(DBG_AQM_STATS, 0x007)
 
 #define AQM_KTRACE_FQ_GRP_SC_IDX(_fq_) \
 	((_fq_)->fq_group->fqg_index << 4 | (_fq_)->fq_sc_index)
@@ -103,6 +105,8 @@ extern "C" {
  */
 #define FQ_EMPTY_PURGE_MAX      4
 
+#define FQ_INVALID_TX_TS        UINT64_MAX
+
 struct flowq {
 #pragma pack(push,1)
 	union {
@@ -123,6 +127,7 @@ struct flowq {
 #define FQF_FLOWCTL_ON  0x10    /* Currently flow controlled */
 #define FQF_EMPTY_FLOW  0x20    /* Currently on empty flows queue */
 #define FQF_OVERWHELMING  0x40  /* The largest flow when AQM hits queue limit */
+#define FQF_FRESH_FLOW  0x80  /* The flow queue has just been allocated */
 	uint8_t        fq_flags;       /* flags */
 	uint8_t        fq_sc_index; /* service_class index */
 	bool           fq_in_dqlist;
@@ -130,6 +135,10 @@ struct flowq {
 	uint8_t        __fq_pad_uint8[4];
 	uint64_t       fq_min_qdelay; /* min queue delay for Codel */
 	uint64_t       fq_getqtime;    /* last dequeue time */
+	/* total pkt count since last congestion event report */
+	uint32_t       fq_pkts_since_last_report;
+	/* the next time that a paced packet is ready to go*/
+	uint64_t       fq_next_tx_time;
 	union {
 		uint64_t   fq_updatetime; /* next update interval */
 		/* empty list purge time (in nanoseconds) */
@@ -250,6 +259,8 @@ extern void fq_codel_dequeue(fq_if_t *fqs, fq_t *fq,
 extern void fq_getq_flow_internal(struct fq_codel_sched_data *,
     fq_t *, pktsched_pkt_t *);
 extern void fq_head_drop(struct fq_codel_sched_data *, fq_t *);
+extern boolean_t fq_tx_time_ready(fq_if_t *fqs, fq_t *fq, uint64_t now,
+    uint64_t *ready_time);
 
 #ifdef __cplusplus
 }

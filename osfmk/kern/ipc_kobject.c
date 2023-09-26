@@ -151,9 +151,10 @@ extern int proc_pid(struct proc *p);
 
 typedef struct {
 	mach_msg_id_t num;
-	mig_routine_t routine;
-	int size;
 	int kobjidx;
+	mig_kern_routine_t kroutine;    /* Kernel server routine */
+	unsigned int kreply_size;       /* Size of kernel reply msg */
+	unsigned int kreply_desc_cnt;   /* Number of descs in kernel reply msg */
 } mig_hash_t;
 
 static void ipc_kobject_subst_once_no_senders(ipc_port_t, mach_msg_type_number_t);
@@ -175,32 +176,32 @@ ZONE_DEFINE_TYPE(ipc_kobject_label_zone, "ipc kobject labels",
     struct ipc_kobject_label, ZC_ZFREE_CLEARMEM);
 
 __startup_data
-static const struct mig_subsystem *mig_e[] = {
-	(const struct mig_subsystem *)&mach_vm_subsystem,
-	(const struct mig_subsystem *)&mach_port_subsystem,
-	(const struct mig_subsystem *)&mach_host_subsystem,
-	(const struct mig_subsystem *)&host_priv_subsystem,
-	(const struct mig_subsystem *)&clock_subsystem,
-	(const struct mig_subsystem *)&processor_subsystem,
-	(const struct mig_subsystem *)&processor_set_subsystem,
-	(const struct mig_subsystem *)&is_iokit_subsystem,
-	(const struct mig_subsystem *)&task_subsystem,
-	(const struct mig_subsystem *)&thread_act_subsystem,
+static const struct mig_kern_subsystem *mig_e[] = {
+	(const struct mig_kern_subsystem *)&mach_vm_subsystem,
+	(const struct mig_kern_subsystem *)&mach_port_subsystem,
+	(const struct mig_kern_subsystem *)&mach_host_subsystem,
+	(const struct mig_kern_subsystem *)&host_priv_subsystem,
+	(const struct mig_kern_subsystem *)&clock_subsystem,
+	(const struct mig_kern_subsystem *)&processor_subsystem,
+	(const struct mig_kern_subsystem *)&processor_set_subsystem,
+	(const struct mig_kern_subsystem *)&is_iokit_subsystem,
+	(const struct mig_kern_subsystem *)&task_subsystem,
+	(const struct mig_kern_subsystem *)&thread_act_subsystem,
 #ifdef VM32_SUPPORT
-	(const struct mig_subsystem *)&vm32_map_subsystem,
+	(const struct mig_kern_subsystem *)&vm32_map_subsystem,
 #endif
 #if CONFIG_USER_NOTIFICATION
-	(const struct mig_subsystem *)&UNDReply_subsystem,
+	(const struct mig_kern_subsystem *)&UNDReply_subsystem,
 #endif
-	(const struct mig_subsystem *)&mach_voucher_subsystem,
-	(const struct mig_subsystem *)&memory_entry_subsystem,
-	(const struct mig_subsystem *)&task_restartable_subsystem,
-	(const struct mig_subsystem *)&catch_exc_subsystem,
-	(const struct mig_subsystem *)&catch_mach_exc_subsystem,
+	(const struct mig_kern_subsystem *)&mach_voucher_subsystem,
+	(const struct mig_kern_subsystem *)&memory_entry_subsystem,
+	(const struct mig_kern_subsystem *)&task_restartable_subsystem,
+	(const struct mig_kern_subsystem *)&catch_exc_subsystem,
+	(const struct mig_kern_subsystem *)&catch_mach_exc_subsystem,
 #if CONFIG_ARCADE
-	(const struct mig_subsystem *)&arcade_register_subsystem,
+	(const struct mig_kern_subsystem *)&arcade_register_subsystem,
 #endif
-	(const struct mig_subsystem *)&mach_eventlink_subsystem,
+	(const struct mig_kern_subsystem *)&mach_eventlink_subsystem,
 };
 
 static struct ipc_kobject_ops __security_const_late
@@ -229,7 +230,7 @@ __startup_func
 static void
 mig_init(void)
 {
-	unsigned int i, n = sizeof(mig_e) / sizeof(const struct mig_subsystem *);
+	unsigned int i, n = sizeof(mig_e) / sizeof(const struct mig_kern_subsystem *);
 	int howmany;
 	mach_msg_id_t j, pos, nentry, range;
 
@@ -246,7 +247,7 @@ mig_init(void)
 		}
 
 		for (j = 0; j < range; j++) {
-			if (mig_e[i]->routine[j].stub_routine) {
+			if (mig_e[i]->kroutine[j].kstub_routine) {
 				/* Only put real entries in the table */
 				nentry = j + mig_e[i]->start;
 				for (pos = MIG_HASH(nentry) % MAX_MIG_ENTRIES, howmany = 1;
@@ -262,11 +263,17 @@ mig_init(void)
 				}
 
 				mig_buckets[pos].num = nentry;
-				mig_buckets[pos].routine = mig_e[i]->routine[j].stub_routine;
-				if (mig_e[i]->routine[j].max_reply_msg) {
-					mig_buckets[pos].size = mig_e[i]->routine[j].max_reply_msg;
+				mig_buckets[pos].kroutine = mig_e[i]->kroutine[j].kstub_routine;
+				if (mig_e[i]->kroutine[j].max_reply_msg) {
+					mig_buckets[pos].kreply_size = mig_e[i]->kroutine[j].max_reply_msg;
+					mig_buckets[pos].kreply_desc_cnt = mig_e[i]->kroutine[j].reply_descr_count;
 				} else {
-					mig_buckets[pos].size = mig_e[i]->maxsize;
+					/*
+					 * Allocating a larger-than-needed kmsg creates hole for
+					 * inlined kmsgs (IKM_TYPE_ALL_INLINED) during copyout.
+					 * Disallow that.
+					 */
+					panic("kroutine must have precise size %d %d", mig_e[i]->start, j);
 				}
 
 				mig_buckets[pos].kobjidx = KOBJ_IDX_NOT_SET;
@@ -302,23 +309,78 @@ find_mig_hash_entry(int msgh_id)
 		ptr = &mig_buckets[i++ % MAX_MIG_ENTRIES];
 	} while (msgh_id != ptr->num && ptr->num && --max_iter);
 
-	if (!ptr->routine || msgh_id != ptr->num) {
+	if (!ptr->kroutine || msgh_id != ptr->num) {
 		ptr = (mig_hash_t *)0;
 	}
 
 	return ptr;
 }
 
+/*
+ * Routine: ipc_kobject_reply_status
+ *
+ * Returns the error/success status from a given kobject call reply message.
+ *
+ * Contract for KernelServer MIG routines is as follows:
+ *
+ * (1) If reply header has complex bit set, kernel server implementation routine
+ *     must have implicitly returned KERN_SUCCESS.
+ *
+ * (2) Otherwise we can always read RetCode from after the header. This is not
+ *     obvious to see, and is discussed below by case.
+ *
+ * MIG can return three types of replies from KernelServer routines.
+ *
+ * (A) Complex Reply (i.e. with Descriptors)
+ *
+ *     E.g.: thread_get_exception_ports()
+ *
+ *       If complex bit is set, we can deduce the call is successful since the bit
+ *     is set at the very end.
+ *       If complex bit is not set, we must have returned from MIG_RETURN_ERROR.
+ *     MIG writes RetCode to immediately after the header, and we know this is
+ *     safe to do for all kmsg layouts. (See discussion in ipc_kmsg_server_internal()).
+ *
+ *  (B) Simple Reply with Out Params
+ *
+ *      E.g.: thread_get_states()
+ *
+ *        If the call failed, we return from MIG_RETURN_ERROR, which writes RetCode
+ *      to immediately after the header.
+ *        If the call succeeded, MIG writes RetCode as KERN_SUCCESS to USER DATA
+ *      buffer. *BUT* since the region after header is always initialized with
+ *      KERN_SUCCESS, reading from there gives us the same result. We rely on
+ *      this behavior to not make a special case.
+ *
+ *  (C) Simple Reply without Out Params
+ *
+ *      E.g.: thread_set_states()
+ *
+ *        For this type of MIG routines we always allocate a mig_reply_error_t
+ *      as reply kmsg, which fits inline in kmsg. RetCode can be found after
+ *      header, and can be KERN_SUCCESS or otherwise a failure code.
+ */
 static kern_return_t
-ipc_kobject_reply_status(ipc_kmsg_t kmsg)
+ipc_kobject_reply_status(ipc_kmsg_t reply)
 {
-	mach_msg_header_t *hdr = ikm_header(kmsg);
+	mach_msg_header_t *hdr = ikm_header(reply);
 
 	if (hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
 		return KERN_SUCCESS;
 	}
 
 	return ((mig_reply_error_t *)hdr)->RetCode;
+}
+
+static void
+ipc_kobject_set_reply_error_status(
+	ipc_kmsg_t    reply,
+	kern_return_t kr)
+{
+	mig_reply_error_t *error = (mig_reply_error_t *)ikm_header(reply);
+
+	assert(!(error->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX));
+	error->RetCode = kr;
 }
 
 /*
@@ -350,15 +412,13 @@ ipc_kobject_init_reply(
 	const ipc_kmsg_t    request,
 	kern_return_t       kr)
 {
-	mach_msg_header_t *req_hdr = ikm_header(request);
+	mach_msg_header_t *req_hdr   = ikm_header(request);
 	mach_msg_header_t *reply_hdr = ikm_header(reply);
 
 #define InP     ((mach_msg_header_t *) req_hdr)
 #define OutP    ((mig_reply_error_t *) reply_hdr)
 
-	OutP->NDR = NDR_record;
 	OutP->Head.msgh_size = sizeof(mig_reply_error_t);
-
 	OutP->Head.msgh_bits =
 	    MACH_MSGH_BITS_SET(MACH_MSGH_BITS_LOCAL(InP->msgh_bits), 0, 0, 0);
 	OutP->Head.msgh_remote_port = InP->msgh_local_port;
@@ -366,9 +426,45 @@ ipc_kobject_init_reply(
 	OutP->Head.msgh_voucher_port = MACH_PORT_NULL;
 	OutP->Head.msgh_id = InP->msgh_id + 100;
 
+	OutP->NDR = NDR_record;
 	OutP->RetCode = kr;
+
 #undef  InP
 #undef  OutP
+}
+
+static void
+ipc_kobject_init_new_reply(
+	ipc_kmsg_t          new_reply,
+	const ipc_kmsg_t    old_reply,
+	kern_return_t       kr)
+{
+	mach_msg_header_t *new_hdr = ikm_header(new_reply);
+	mach_msg_header_t *old_hdr = ikm_header(old_reply);
+
+#define InP     ((mig_reply_error_t *) old_hdr)
+#define OutP    ((mig_reply_error_t *) new_hdr)
+
+	OutP->Head.msgh_size = sizeof(mig_reply_error_t);
+	OutP->Head.msgh_bits = InP->Head.msgh_bits & ~MACH_MSGH_BITS_COMPLEX;
+	OutP->Head.msgh_remote_port = InP->Head.msgh_remote_port;
+	OutP->Head.msgh_local_port = MACH_PORT_NULL;
+	OutP->Head.msgh_voucher_port = MACH_PORT_NULL;
+	OutP->Head.msgh_id = InP->Head.msgh_id;
+
+	OutP->NDR = InP->NDR;
+	OutP->RetCode = kr;
+
+#undef  InP
+#undef  OutP
+}
+
+static ipc_kmsg_t
+ipc_kobject_alloc_mig_error(void)
+{
+	return ipc_kmsg_alloc(sizeof(mig_reply_error_t),
+	           0, 0, IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_SAVED | IPC_KMSG_ALLOC_ZERO |
+	           IPC_KMSG_ALLOC_NOFAIL);
 }
 
 /*
@@ -383,16 +479,24 @@ ipc_kobject_init_reply(
 static kern_return_t
 ipc_kobject_server_internal(
 	__unused ipc_port_t port,
-	ipc_kmsg_t      request,
-	ipc_kmsg_t      *replyp)
+	ipc_kmsg_t          request,
+	ipc_kmsg_t          *replyp)
 {
 	int request_msgh_id;
 	ipc_kmsg_t reply = IKM_NULL;
-	mach_msg_size_t reply_size;
+	mach_msg_size_t reply_size, reply_desc_cnt;
 	mig_hash_t *ptr;
 	mach_msg_header_t *req_hdr, *reply_hdr;
+	void *req_data, *reply_data;
+	mach_msg_max_trailer_t *req_trailer;
+
+	thread_ro_t tro = current_thread_ro();
+	task_t curtask = tro->tro_task;
+	struct proc *curproc = tro->tro_proc;
 
 	req_hdr = ikm_header(request);
+	req_data = ikm_udata_from_header(request);
+	req_trailer = ipc_kmsg_get_trailer(request, FALSE);
 	request_msgh_id = req_hdr->msgh_id;
 
 	/* Find corresponding mig_hash entry, if any */
@@ -401,74 +505,143 @@ ipc_kobject_server_internal(
 	/* Get the reply_size. */
 	if (ptr == (mig_hash_t *)0) {
 		reply_size = sizeof(mig_reply_error_t);
+		reply_desc_cnt = 0;
 	} else {
-		reply_size = ptr->size;
+		reply_size = ptr->kreply_size;
+		reply_desc_cnt = ptr->kreply_desc_cnt;
 	}
+
+	assert(reply_size >= sizeof(mig_reply_error_t));
 
 	/*
 	 * MIG should really assure no data leakage -
 	 * but until it does, pessimistically zero the
 	 * whole reply buffer.
 	 */
-	reply = ipc_kmsg_alloc(reply_size, 0, 0, IPC_KMSG_ALLOC_KERNEL |
-	    IPC_KMSG_ALLOC_LINEAR | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
-	ipc_kobject_init_reply(reply, request, KERN_SUCCESS);
-	reply_hdr = ikm_header(reply);
+	reply = ipc_kmsg_alloc(reply_size, 0, reply_desc_cnt, IPC_KMSG_ALLOC_KERNEL |
+	    IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
+	/* reply can be non-linear */
 
-	/*
-	 * Find the routine to call, and call it
-	 * to perform the kernel function
-	 */
-	if (ptr) {
-		thread_ro_t tro = current_thread_ro();
-		task_t curtask = tro->tro_task;
-		struct proc *curproc = tro->tro_proc;
-
-#if CONFIG_MACF
-		int idx = ptr->kobjidx;
-		uint8_t *filter_mask = task_get_mach_kobj_filter_mask(curtask);
-
-		/* Check kobject mig filter mask, if exists. */
-		if (filter_mask != NULL &&
-		    idx != KOBJ_IDX_NOT_SET &&
-		    !bitstr_test(filter_mask, idx) &&
-		    mac_task_kobj_msg_evaluate != NULL) {
-			/* Not in filter mask, evaluate policy. */
-			kern_return_t kr = mac_task_kobj_msg_evaluate(curproc,
-			    request_msgh_id, idx);
-			if (kr != KERN_SUCCESS) {
-				((mig_reply_error_t *)reply_hdr)->RetCode = kr;
-				goto skip_kobjcall;
-			}
-		}
-#endif /* CONFIG_MACF */
-
-		__BeforeKobjectServerTrace(idx);
-		(*ptr->routine)(req_hdr, reply_hdr);
-		__AfterKobjectServerTrace(idx);
-
-#if CONFIG_MACF
-skip_kobjcall:
-#endif
-
-		counter_inc(&kernel_task->messages_received);
-	} else {
+	if (ptr == (mig_hash_t *)0) {
 #if DEVELOPMENT || DEBUG
 		printf("ipc_kobject_server: bogus kernel message, id=%d\n",
 		    req_hdr->msgh_id);
 #endif  /* DEVELOPMENT || DEBUG */
 		_MIG_MSGID_INVALID(req_hdr->msgh_id);
 
-		((mig_reply_error_t *)reply_hdr)->RetCode = MIG_BAD_ID;
+		ipc_kobject_init_reply(reply, request, MIG_BAD_ID);
+
+		*replyp = reply;
+		return KERN_SUCCESS;
 	}
 
-	if (ipc_kobject_reply_status(reply) == MIG_NO_REPLY) {
+	/*
+	 * We found the routine to call. Call it to perform the kernel function.
+	 */
+	assert(ptr != (mig_hash_t *)0);
+
+	reply_hdr = ikm_header(reply);
+	/* reply is allocated by kernel. non-zero desc count means complex msg */
+	reply_data = ikm_udata(reply, reply_desc_cnt, (reply_desc_cnt > 0));
+
+	/*
+	 * Reply can be of layout IKM_TYPE_ALL_INLINED, IKM_TYPE_UDATA_OOL,
+	 * or IKM_TYPE_ALL_OOL, each of which guarantees kernel/user data segregation.
+	 *
+	 * Here is the trick: In each case, there _must_ be enough space in
+	 * the kdata (header) buffer in `reply` to hold a mig_reply_error_t.
+	 */
+	assert(reply->ikm_type != IKM_TYPE_KDATA_OOL);
+	assert((vm_offset_t)reply_hdr + sizeof(mig_reply_error_t) <= ikm_kdata_end(reply));
+
+	/*
+	 * Discussion by case:
+	 *
+	 * (1) IKM_TYPE_ALL_INLINED
+	 *     - IKM_SAVED_MSG_SIZE is large enough for mig_reply_error_t
+	 * (2) IKM_TYPE_UDATA_OOL
+	 *     - Same as (1).
+	 * (3) IKM_TYPE_ALL_OOL
+	 *     - This layout is only possible if kdata (header + descs) doesn't fit
+	 *       in IKM_SAVED_MSG_SIZE. So we must have at least one descriptor
+	 *       following the header, which is enough to fit mig_reply_error_t.
+	 */
+	static_assert(sizeof(mig_reply_error_t) < IKM_SAVED_MSG_SIZE);
+	static_assert(sizeof(mig_reply_error_t) < sizeof(mach_msg_base_t) +
+	    1 * sizeof(mach_msg_descriptor_t));
+
+	/*
+	 * Therefore, we can temporarily treat `reply` as a *simple* message that
+	 * contains NDR Record + RetCode immediately after the header (which overlaps
+	 * with descriptors, if the reply msg is supposed to be complex).
+	 *
+	 * In doing so we save having a separate allocation specifically for errors.
+	 */
+	ipc_kobject_init_reply(reply, request, KERN_SUCCESS);
+
+	/* Check if the kobject call should be filtered */
+#if CONFIG_MACF
+	int idx = ptr->kobjidx;
+	uint8_t *filter_mask = task_get_mach_kobj_filter_mask(curtask);
+
+	/* Check kobject mig filter mask, if exists. */
+	if (filter_mask != NULL &&
+	    idx != KOBJ_IDX_NOT_SET &&
+	    !bitstr_test(filter_mask, idx) &&
+	    mac_task_kobj_msg_evaluate != NULL) {
+		/* Not in filter mask, evaluate policy. */
+		kern_return_t kr = mac_task_kobj_msg_evaluate(curproc,
+		    request_msgh_id, idx);
+		if (kr != KERN_SUCCESS) {
+			ipc_kobject_set_reply_error_status(reply, kr);
+			goto skip_kobjcall;
+		}
+	}
+#endif /* CONFIG_MACF */
+
+	__BeforeKobjectServerTrace(idx);
+	/* See contract in header doc for ipc_kobject_reply_status() */
+	(*ptr->kroutine)(req_hdr, req_data, req_trailer, reply_hdr, reply_data);
+	__AfterKobjectServerTrace(idx);
+
+#if CONFIG_MACF
+skip_kobjcall:
+#endif
+	counter_inc(&kernel_task->messages_received);
+
+	kern_return_t reply_status = ipc_kobject_reply_status(reply);
+
+	if (reply_status == MIG_NO_REPLY) {
 		/*
 		 *	The server function will send a reply message
 		 *	using the reply port right, which it has saved.
 		 */
 		ipc_kmsg_free(reply);
 		reply = IKM_NULL;
+	} else if (reply_status != KERN_SUCCESS && reply_size > sizeof(mig_reply_error_t)) {
+		assert(ikm_header(reply)->msgh_size == sizeof(mig_reply_error_t));
+		/*
+		 * MIG returned an error, and the original kmsg we allocated for reply
+		 * is oversized. Deallocate it and allocate a smaller, proper kmsg
+		 * that fits mig_reply_error_t snuggly.
+		 *
+		 * We must do so because we used the trick mentioned above which (depending
+		 * on the kmsg layout) may cause payload in mig_reply_error_t to overlap
+		 * with kdata buffer meant for descriptors.
+		 *
+		 * This will mess with ikm_kdata_size() calculation down the line so
+		 * reallocate a new buffer immediately here.
+		 */
+		ipc_kmsg_t new_reply = ipc_kobject_alloc_mig_error();
+		ipc_kobject_init_new_reply(new_reply, reply, reply_status);
+
+		/* MIG contract: If status is not KERN_SUCCESS, reply must be simple. */
+		assert(!(ikm_header(reply)->msgh_bits & MACH_MSGH_BITS_COMPLEX));
+		assert(ikm_header(reply)->msgh_local_port == MACH_PORT_NULL);
+		assert(ikm_header(reply)->msgh_voucher_port == MACH_PORT_NULL);
+		/* So we can simply free the original reply message. */
+		ipc_kmsg_free(reply);
+		reply = new_reply;
 	}
 
 	*replyp = reply;
@@ -510,6 +683,7 @@ ipc_kobject_server(
 		kr = uext_server(port, request, &reply);
 	} else {
 		kr = ipc_kobject_server_internal(port, request, &reply);
+		assert(kr == KERN_SUCCESS);
 	}
 
 	if (kr != KERN_SUCCESS) {
@@ -519,11 +693,7 @@ ipc_kobject_server(
 		assert(reply == IKM_NULL);
 
 		/* convert the server error into a MIG error */
-		reply = ipc_kmsg_alloc(sizeof(mig_reply_error_t), 0, 0,
-		    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_SAVED |
-		    IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_NOFAIL);
-		static_assert(sizeof(mig_reply_error_t) < IKM_SAVED_MSG_SIZE);
-
+		reply = ipc_kobject_alloc_mig_error();
 		ipc_kobject_init_reply(reply, request, kr);
 	}
 
@@ -810,8 +980,8 @@ ipc_kobject_alloc_port(
 	ipc_kobject_alloc_options_t     options)
 {
 	ipc_port_t port;
+	port = ipc_port_alloc_special(ipc_space_kernel, IPC_PORT_ENFORCE_RIGID_REPLY_PORT_SEMANTICS);
 
-	port = ipc_port_alloc_special(ipc_space_kernel, IPC_PORT_INIT_NONE);
 	if (port == IP_NULL) {
 		panic("ipc_kobject_alloc_port(): failed to allocate port");
 	}

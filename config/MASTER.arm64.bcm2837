@@ -18,8 +18,8 @@
 #
 #  KERNEL_BASE =    [ arm64 config_pmap_ppl xsmall msgb_small config_embedded config_requires_u32_munging ARM_EXTRAS_BASE ]
 #  KERNEL_RELEASE = [ KERNEL_BASE ]
-#  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug ]
-#  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug ]
+#  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug config_ext_paniclog ]
+#  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug config_ext_paniclog ]
 #  BSD_BASE =       [ mach_bsd psynch config_proc_uuid_policy config_personas ]
 #  BSD_RELEASE =    [ BSD_BASE no_printf_str no_kprintf_str secure_kernel ]
 #  BSD_DEV =        [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]
@@ -33,9 +33,9 @@
 #  SKYWALK_RELEASE = [ SKYWALK_BASE ]
 #  SKYWALK_DEV =    [ SKYWALK_BASE ]
 #  SKYWALK_DEBUG =  [ SKYWALK_BASE ]
-#  NETWORKING =     [ inet bpfilter if_bridge traffic_mgt dummynet ah_all_crypto if_fake ]
+#  NETWORKING =     [ inet bpfilter if_bridge traffic_mgt dummynet ah_all_crypto if_fake if_redirect ]
 #  NETWORKING_RELEASE = [ NETWORKING ]
-#  NETWORKING_DEV = [ NETWORKING_RELEASE packet_mangler if_headless ]
+#  NETWORKING_DEV = [ NETWORKING_RELEASE packet_mangler if_headless kctl_test ]
 #  NETWORKING_DEBUG = [ NETWORKING_DEV ]
 #  VPN =            [ ipsec flow_divert necp content_filter ]
 #  PF =             [ pf ]
@@ -64,7 +64,7 @@
 #  VM_RELEASE =     [ VM_BASE ]
 #  VM_DEV =         [ VM_BASE dynamic_codesigning ubsan_minimal pgzalloc ]
 #  VM_DEBUG =       [ VM_BASE dynamic_codesigning ubsan_minimal pgzalloc ]
-#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov kernel_tbi]
+#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov kernel_tagging kernel_tbi]
 #  SECURITY_BASE =     [ config_macf kernel_integrity config_secure_bsd_root ]
 #  SECURITY_RELEASE = [ SECURITY_BASE ]
 #  SECURITY_DEV =     [ SECURITY_BASE config_setuid config_kas_info ]
@@ -94,3 +94,4 @@ options	  CONFIG_MACH_APPROXIMATE_TIME
 options   CONFIG_KERNEL_INTEGRITY		# <kernel_integrity>
 options   CONFIG_UBSAN_MINIMAL		# <ubsan_minimal>
 options   CONFIG_KERNEL_TBI	# <kernel_tbi>
+options   CONFIG_KERNEL_TAGGING		# <kernel_tagging>

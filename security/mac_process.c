@@ -110,8 +110,29 @@ mac_cred_label_init(struct ucred *cred)
 }
 
 void
+mac_cred_label_seal(struct ucred *cred)
+{
+#if DEVELOPMENT || DEBUG
+	struct label **seal = (struct label **)-1;
+
+	zalloc_ro_update_field(ZONE_ID_MAC_LABEL, cred->cr_label, l_owner, &seal);
+#else
+	(void)cred;
+#endif
+}
+
+void
 mac_cred_label_free(struct label *label)
 {
+#if DEVELOPMENT || DEBUG
+	struct label **seal = (struct label **)-1;
+
+	if (label->l_owner == seal) {
+		seal = NULL;
+		zalloc_ro_update_field(ZONE_ID_MAC_LABEL, label, l_owner, &seal);
+	}
+#endif
+
 	MAC_PERFORM(cred_label_destroy, label);
 	mac_labelzone_free(label);
 }
@@ -378,6 +399,15 @@ mac_proc_check_remote_thread_create(struct task *task, int flavor, thread_state_
 	proc_rele(proc);
 
 	return error;
+}
+
+void
+mac_proc_notify_service_port_derive(struct mach_service_port_info *sp_info)
+{
+	proc_t curp = current_proc();
+	kauth_cred_t cred = kauth_cred_proc_ref(curp);
+	MAC_PERFORM(proc_notify_service_port_derive, cred, sp_info);
+	kauth_cred_unref(&cred);
 }
 
 int

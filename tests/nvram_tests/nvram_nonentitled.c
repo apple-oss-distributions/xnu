@@ -14,13 +14,13 @@ T_DECL(TestBasicCmds, "Test basic nvram commands")
 {
 	const char *varToTest = "varToTest1";
 
-	optionsRef = GetOptions();
+	optionsRef = CreateOptionsRef();
 
-	T_ASSERT_EQ(SetVariable(varToTest, "1234", optionsRef), KERN_SUCCESS, "Set variable %s successfully\n", varToTest);
-	T_ASSERT_EQ(GetVariable(varToTest, optionsRef), KERN_SUCCESS, "Read variable %s successfully\n", varToTest);
-	T_ASSERT_EQ(DeleteVariable(varToTest, optionsRef), KERN_SUCCESS, "Deleted variable %s successfully\n", varToTest);
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_GET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_DEL, varToTest, NULL, KERN_SUCCESS, optionsRef);
 
-	ReleaseOptions(optionsRef);
+	ReleaseOptionsRef(optionsRef);
 }
 
 // Test basic read, write, delete for a random variable with random guid
@@ -28,13 +28,13 @@ T_DECL(TestRandomGuid, "Test random guid")
 {
 	const char *varToTest = "11112222-77F8-4392-B4A3-1E7304206516:varToTest3";
 
-	optionsRef = GetOptions();
+	optionsRef = CreateOptionsRef();
 
-	T_ASSERT_EQ(SetVariable(varToTest, "1234", optionsRef), KERN_SUCCESS, "Set variable %s successfully\n", varToTest);
-	T_ASSERT_EQ(GetVariable(varToTest, optionsRef), KERN_SUCCESS, "Read variable %s successfully\n", varToTest);
-	T_ASSERT_EQ(DeleteVariable(varToTest, optionsRef), KERN_SUCCESS, "Deleted variable %s successfully\n", varToTest);
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_GET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_DEL, varToTest, NULL, KERN_SUCCESS, optionsRef);
 
-	ReleaseOptions(optionsRef);
+	ReleaseOptionsRef(optionsRef);
 }
 
 #if !(__x86_64__)
@@ -42,15 +42,41 @@ T_DECL(TestRandomGuid, "Test random guid")
 // Test that writing of system variables without system entitlement should fail
 T_DECL(TestSystem, "Test system guids")
 {
-	const char *varToTest = "40A0DDD2-77F8-4392-B4A3-1E7304206516:varToTest2";
+	const char *varToTest = SystemNVRAMGuidString ":" "varToTest2";
 
-	optionsRef = GetOptions();
+	optionsRef = CreateOptionsRef();
 
-	T_ASSERT_NE(SetVariable(varToTest, "1234", optionsRef), KERN_SUCCESS, "Set variable %s failed as expected\n", varToTest);
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, kIOReturnNotPrivileged, optionsRef);
 
-	ReleaseOptions(optionsRef);
+	ReleaseOptionsRef(optionsRef);
 }
 #endif /* (TARGET_OS_OSX) */
+
+// Test that writing of kernel variables without w/o kernel task should fail
+T_DECL(TestKernelPrefix, "Test kernel prefix")
+{
+	char * varToTest = KernelOnlyVariablePrefix "kernelVar";
+
+	optionsRef = CreateOptionsRef();
+
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, kIOReturnNotPrivileged, optionsRef);
+
+	TestVarOp(OP_GET, varToTest, DefaultSetVal, KERN_FAILURE, optionsRef);
+
+	ReleaseOptionsRef(optionsRef);
+}
+
+// Test that variables with KernelOnly bit set cannot be modified from user space
+T_DECL(TestKernelOnly, "Test variable with TestKernelOnly bit set")
+{
+	char * varToTest = "testKernelOnly";
+
+	optionsRef = CreateOptionsRef();
+
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, kIOReturnNotPrivileged, optionsRef);
+
+	ReleaseOptionsRef(optionsRef);
+}
 
 // Test that variables with NeverAllowedToDelete bit set cannot be deleted even with ResetNVram()
 // To reset nvram, call the test with -r argument:
@@ -61,17 +87,17 @@ T_DECL(TestImmutable, "Test immutable variable")
 	optind = 0;
 	const char * varToTest = "testNeverDel";
 
-	optionsRef = GetOptions();
+	optionsRef = CreateOptionsRef();
 
-	T_ASSERT_EQ(SetVariable(varToTest, "1234", optionsRef), KERN_SUCCESS, "Set variable %s successfully\n", varToTest);
-	T_ASSERT_NE(DeleteVariable(varToTest, optionsRef), KERN_SUCCESS, "Delete variable %s failed as expected\n", varToTest);
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_DEL, varToTest, NULL, KERN_FAILURE, optionsRef);
 
 	if (getopt(argc, argv, "r") == 'r') {
-		T_ASSERT_EQ(ResetNVram(optionsRef), KERN_SUCCESS, "Reset NVram successfully\n");
+		TestVarOp(OP_RES, NULL, NULL, KERN_SUCCESS, optionsRef);
 	}
-	T_ASSERT_EQ(GetVariable(varToTest, optionsRef), KERN_SUCCESS, "Read variable %s successfully\n", varToTest);
+	TestVarOp(OP_GET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
 
-	ReleaseOptions(optionsRef);
+	ReleaseOptionsRef(optionsRef);
 }
 
 // Test that variables with ResetNVRAMOnlyDelete bit set can be deleted only by ResetNVram
@@ -83,28 +109,172 @@ T_DECL(TestResetOnlyDel, "Test variable with ResetNVRAMOnlyDelete bit set")
 	optind = 0;
 	const char * varToTest = "testResetOnlyDel";
 
-	optionsRef = GetOptions();
+	optionsRef = CreateOptionsRef();
 
-	T_ASSERT_EQ(SetVariable(varToTest, "1234", optionsRef), KERN_SUCCESS, "Set variable %s successfully\n", varToTest);
-	T_ASSERT_NE(DeleteVariable(varToTest, optionsRef), KERN_SUCCESS, "Delete variable %s failed as expected\n", varToTest);
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_DEL, varToTest, NULL, KERN_FAILURE, optionsRef);
 
 	if (getopt(argc, argv, "r") == 'r') {
-		T_ASSERT_EQ(ResetNVram(optionsRef), KERN_SUCCESS, "Reset NVram successfully\n");
-		T_ASSERT_NE(GetVariable(varToTest, optionsRef), KERN_SUCCESS, "Read variable %s failed as expected\n", varToTest);
+		TestVarOp(OP_RES, NULL, NULL, KERN_SUCCESS, optionsRef);
+		TestVarOp(OP_GET, varToTest, NULL, KERN_FAILURE, optionsRef);
 	}
 
-	ReleaseOptions(optionsRef);
+	ReleaseOptionsRef(optionsRef);
+}
+
+// Test that read of entitled variables without entitlement should fail
+T_DECL(TestEntRd, "Test read entitled variables")
+{
+	char * varToTest = "testEntRd";
+
+	optionsRef = CreateOptionsRef();
+
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_GET, varToTest, NULL, KERN_FAILURE, optionsRef);
+	TestVarOp(OP_DEL, varToTest, NULL, KERN_SUCCESS, optionsRef);
+
+	ReleaseOptionsRef(optionsRef);
 }
 
 // Test that writing of entitled variables without entitlement should fail
-T_DECL(TestVarEnt, "Test variable specific entitlement")
+T_DECL(TestEntModRst, "Test write entitled variables")
 {
-	const char * varToTest = "testEntitlement";
+	char * varToTest = "testEntModRst";
 
-	optionsRef = GetOptions();
+	optionsRef = CreateOptionsRef();
 
-	T_ASSERT_NE(SetVariable(varToTest, "1234", optionsRef), KERN_SUCCESS, "Set variable %s failed as expected\n", varToTest);
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, kIOReturnNotPrivileged, optionsRef);
 
-	ReleaseOptions(optionsRef);
+	ReleaseOptionsRef(optionsRef);
+}
+
+// Test that deleting of entitled variables without entitlement should fail
+// To reset nvram, call the test with -r argument:
+// sudo ./tests/build/sym/nvram_nonentitled -n xnu.nvram.TestEntDel -- -r
+T_DECL(TestEntDel, "Test delete entitled variables")
+{
+	opterr = 0;
+	optind = 0;
+	char * varToTest = "testEntDel";
+
+	optionsRef = CreateOptionsRef();
+
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_DEL, varToTest, NULL, KERN_FAILURE, optionsRef);
+
+	if (getopt(argc, argv, "r") == 'r') {
+		TestVarOp(OP_RES, NULL, NULL, KERN_SUCCESS, optionsRef);
+		TestVarOp(OP_GET, varToTest, NULL, KERN_FAILURE, optionsRef);
+	}
+
+	ReleaseOptionsRef(optionsRef);
+}
+
+// Test resetting of nvram without entitlement should not erase TestEntRst
+// To reset nvram, call the test with -r argument:
+// sudo ./tests/build/sym/nvram_nonentitled -n xnu.nvram.TestEntRst -- -r
+T_DECL(TestEntRst, "Test reset entitled variables")
+{
+	opterr = 0;
+	optind = 0;
+	char * varToTest = "testEntRst";
+
+	optionsRef = CreateOptionsRef();
+
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+
+	if (getopt(argc, argv, "r") == 'r') {
+		TestVarOp(OP_RES, NULL, NULL, KERN_SUCCESS, optionsRef);
+		TestVarOp(OP_GET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+	} else {
+		TestVarOp(OP_DEL, varToTest, NULL, KERN_SUCCESS, optionsRef);
+		T_PASS("NVram reset not invoked");
+	}
+
+	ReleaseOptionsRef(optionsRef);
+}
+
+// Test nvram types
+T_DECL(TestTypes, "Test nvram types")
+{
+	char * boolVar = "test-bool";
+	char * numVar  = "test-num";
+	char * strVar  = "test-str";
+	char * dataVar = "test-data";
+
+	optionsRef = CreateOptionsRef();
+
+	TestVarOp(OP_SET, boolVar, "true", KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_SET, numVar, "123", KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_SET, strVar, "teststring", KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_SET, dataVar, "testdata", KERN_SUCCESS, optionsRef);
+
+	T_ASSERT_EQ(GetVarType(boolVar, optionsRef), CFBooleanGetTypeID(), "Verified %s type as boolean.\n", boolVar);
+	T_ASSERT_EQ(GetVarType(numVar, optionsRef), CFNumberGetTypeID(), "Verified %s type as number.\n", numVar);
+	T_ASSERT_EQ(GetVarType(strVar, optionsRef), CFStringGetTypeID(), "Verified %s type as string.\n", strVar);
+	T_ASSERT_EQ(GetVarType(dataVar, optionsRef), CFDataGetTypeID(), "Verified %s type as data.\n", dataVar);
+
+	TestVarOp(OP_DEL, boolVar, NULL, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_DEL, numVar, NULL, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_DEL, strVar, NULL, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_DEL, dataVar, NULL, KERN_SUCCESS, optionsRef);
+
+	ReleaseOptionsRef(optionsRef);
+}
+
+// Test NVRAM Reset
+// To reset nvram, call the test with -r argument:
+// sudo ./tests/build/sym/nvram_nonentitled -n xnu.nvram.TestNVRAMReset -- -r
+T_DECL(TestNVRAMReset, "Test NVRAM Reset")
+{
+	opterr = 0;
+	optind = 0;
+	const char * varToTest = "testVar1";
+	const char * varToTestWRand = RandomNVRAMGuidString ":" "testVar2";
+
+
+	optionsRef = CreateOptionsRef();
+
+	if (getopt(argc, argv, "r") == 'r') {
+		TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+		TestVarOp(OP_SET, varToTestWRand, DefaultSetVal, KERN_SUCCESS, optionsRef);
+
+		TestVarOp(OP_RES, NULL, NULL, KERN_SUCCESS, optionsRef);
+
+		TestVarOp(OP_GET, varToTest, NULL, KERN_FAILURE, optionsRef);
+		TestVarOp(OP_GET, varToTestWRand, NULL, KERN_FAILURE, optionsRef);
+	} else {
+		T_PASS("NVram reset not invoked");
+	}
+
+	ReleaseOptionsRef(optionsRef);
+}
+
+// Test NVRAM Obliterate
+// To obliterate nvram, call the test with -r argument:
+// sudo ./tests/build/sym/nvram_nonentitled -n xnu.nvram.TestNVRAMOblit -- -r
+T_DECL(TestNVRAMOblit, "Test NVRAM Obliterate")
+{
+	opterr = 0;
+	optind = 0;
+	const char * varToTest = "testVar1";
+	const char * varToTestWRand = RandomNVRAMGuidString ":" "testVar2";
+	const char * oblitNonSys = CommonNVRAMGuidString ":" "ObliterateNVRam";
+
+	optionsRef = CreateOptionsRef();
+
+	if (getopt(argc, argv, "r") == 'r') {
+		TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+		TestVarOp(OP_SET, varToTestWRand, DefaultSetVal, KERN_SUCCESS, optionsRef);
+
+		TestVarOp(OP_OBL, oblitNonSys, NULL, KERN_SUCCESS, optionsRef);
+
+		TestVarOp(OP_GET, varToTest, NULL, KERN_FAILURE, optionsRef);
+		TestVarOp(OP_GET, varToTestWRand, NULL, KERN_FAILURE, optionsRef);
+	} else {
+		T_PASS("NVram obliterate not invoked");
+	}
+
+	ReleaseOptionsRef(optionsRef);
 }
 #endif /* !(__x86_64__) */

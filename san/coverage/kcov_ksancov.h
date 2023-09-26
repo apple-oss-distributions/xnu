@@ -55,6 +55,9 @@
 #define KSANCOV_IOC_NEDGES       _IOR('K', 50, size_t)
 #define KSANCOV_IOC_TESTPANIC    _IOW('K', 20, uint64_t)
 
+/* Operations related to on-demand instrumentation */
+#define KSANCOV_IOC_ON_DEMAND    _IOWR('K', 60, struct ksancov_on_demand_msg)
+
 /*
  * ioctl
  */
@@ -65,10 +68,31 @@ struct ksancov_buf_desc {
 };
 
 /*
+ * On-demand related functionalities
+ */
+typedef enum {
+	KS_OD_GET_GATE = 1,
+	KS_OD_SET_GATE = 2,
+	KS_OD_GET_RANGE = 3,
+} ksancov_on_demand_operation_t;
+
+struct ksancov_on_demand_msg {
+	char bundle[/*KMOD_MAX_NAME*/ 64];
+	ksancov_on_demand_operation_t operation;
+	union {
+		uint64_t gate;
+		struct {
+			uint32_t start;
+			uint32_t stop;
+		} range;
+	};
+};
+
+/*
  * shared kernel-user mapping
  */
 
-#define KSANCOV_MAX_EDGES       512UL*1024
+#define KSANCOV_MAX_EDGES       (1 << 24)
 #define KSANCOV_MAX_HITS        UINT8_MAX
 #define KSANCOV_TRACE_MAGIC     (uint32_t)0x5AD17F5BU
 #define KSANCOV_COUNTERS_MAGIC  (uint32_t)0x5AD27F6BU
@@ -78,6 +102,7 @@ struct ksancov_buf_desc {
 
 __BEGIN_DECLS
 
+void ksancov_init(void); /* invoked by kcov_init */
 int ksancov_init_dev(void);
 
 void kcov_ksancov_init_thread(ksancov_dev_t *);

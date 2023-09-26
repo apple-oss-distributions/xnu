@@ -403,7 +403,7 @@ pktsched_get_pkt_svc(pktsched_pkt_t *pkt)
 void
 pktsched_get_pkt_vars(pktsched_pkt_t *pkt, volatile uint32_t **flags,
     uint64_t **timestamp, uint32_t *flowid, uint8_t *flowsrc, uint8_t *proto,
-    uint32_t *comp_gencnt)
+    uint32_t *comp_gencnt, uint64_t *pkt_tx_time)
 {
 	switch (pkt->pktsched_ptype) {
 	case QP_MBUF: {
@@ -437,6 +437,16 @@ pktsched_get_pkt_vars(pktsched_pkt_t *pkt, volatile uint32_t **flags,
 		if (comp_gencnt != NULL) {
 			*comp_gencnt = pkth->comp_gencnt;
 		}
+		if (pkt_tx_time != NULL) {
+			struct m_tag *tag;
+			tag = m_tag_locate(pkt->pktsched_pkt_mbuf, KERNEL_MODULE_TAG_ID,
+			    KERNEL_TAG_TYPE_AQM);
+			if (__improbable(tag != NULL)) {
+				*pkt_tx_time = *(uint64_t *)tag->m_tag_data;
+			} else {
+				*pkt_tx_time = 0;
+			}
+		}
 
 		break;
 	}
@@ -463,6 +473,9 @@ pktsched_get_pkt_vars(pktsched_pkt_t *pkt, volatile uint32_t **flags,
 		}
 		if (comp_gencnt != NULL) {
 			*comp_gencnt = kp->pkt_comp_gencnt;
+		}
+		if (pkt_tx_time != NULL && (kp->pkt_pflags & PKT_F_OPT_TX_TIMESTAMP) != 0) {
+			*pkt_tx_time = kp->pkt_com_opt->__po_pkt_tx_time;
 		}
 
 		break;
@@ -681,12 +694,12 @@ pktsched_kpkt_mark_ecn(struct __kern_packet *kpkt)
 {
 	uint8_t ipv = 0, *l3_hdr;
 
-	if (__improbable((kpkt->pkt_qum_qflags & QUM_F_FLOW_CLASSIFIED) != 0)) {
+	if ((kpkt->pkt_qum_qflags & QUM_F_FLOW_CLASSIFIED) != 0) {
 		ipv = kpkt->pkt_flow_ip_ver;
 		l3_hdr = (uint8_t *)kpkt->pkt_flow_ip_hdr;
 	} else {
 		uint8_t *pkt_buf;
-		uint16_t bdlen, bdlim, bdoff;
+		uint32_t bdlen, bdlim, bdoff;
 		MD_BUFLET_ADDR_ABS_DLEN(kpkt, pkt_buf, bdlen, bdlim, bdoff);
 
 		/* takes care of both IPv4 and IPv6 */
@@ -787,4 +800,56 @@ pktsched_is_pkt_l4s(pktsched_pkt_t *pkt)
 		__builtin_unreachable();
 	}
 	return FALSE;
+}
+
+struct aqm_tag_container {
+	struct m_tag            aqm_m_tag;
+	uint64_t                aqm_tag;
+};
+
+static struct  m_tag *
+m_tag_kalloc_aqm(u_int32_t id, u_int16_t type, uint16_t len, int wait)
+{
+	struct aqm_tag_container *tag_container;
+	struct m_tag *tag = NULL;
+
+	assert3u(id, ==, KERNEL_MODULE_TAG_ID);
+	assert3u(type, ==, KERNEL_TAG_TYPE_AQM);
+	assert3u(len, ==, sizeof(uint64_t));
+
+	if (len != sizeof(uint64_t)) {
+		return NULL;
+	}
+
+	tag_container = kalloc_type(struct aqm_tag_container, wait | M_ZERO);
+	if (tag_container != NULL) {
+		tag = &tag_container->aqm_m_tag;
+
+		assert3p(tag, ==, tag_container);
+
+		M_TAG_INIT(tag, id, type, len, &tag_container->aqm_tag, NULL);
+	}
+
+	return tag;
+}
+
+static void
+m_tag_kfree_aqm(struct m_tag *tag)
+{
+	struct aqm_tag_container *tag_container = (struct aqm_tag_container *)tag;
+
+	assert3u(tag->m_tag_len, ==, sizeof(uint64_t));
+
+	kfree_type(struct aqm_tag_container, tag_container);
+}
+
+void
+pktsched_register_m_tag(void)
+{
+	int error;
+
+	error = m_register_internal_tag_type(KERNEL_TAG_TYPE_AQM, sizeof(uint64_t),
+	    m_tag_kalloc_aqm, m_tag_kfree_aqm);
+
+	assert3u(error, ==, 0);
 }

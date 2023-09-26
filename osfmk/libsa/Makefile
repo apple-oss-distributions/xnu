@@ -9,6 +9,11 @@ include $(MakeInc_def)
 DATAFILES = \
 	string.h
 
+LIBCXX_DATAFILES = \
+	string.h
+
+INSTALL_KF_LIBCXX_MI_LIST = ${LIBCXX_DATAFILES}
+
 INSTALL_MI_LIST =
 
 INSTALL_MI_DIR =

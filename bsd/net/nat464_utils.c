@@ -906,7 +906,7 @@ nat464_translate_proto(pbuf_t *pbuf, struct nat464_addr *osrc,
 		 * that has not yet been one's complemented.
 		 */
 		if (direction == NT_OUT &&
-		    (*pbuf->pb_csum_flags & CSUM_DELAY_DATA)) {
+		    (*pbuf->pb_csum_flags & CSUM_PARTIAL)) {
 			do_ones_complement = TRUE;
 		}
 

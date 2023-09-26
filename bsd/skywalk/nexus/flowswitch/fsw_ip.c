@@ -50,7 +50,7 @@ fsw_ip_demux(struct nx_flowswitch *fsw, struct __kern_packet *pkt)
 	const struct ip *iph;
 	const struct ip6_hdr *ip6h;
 	sa_family_t af = AF_UNSPEC;
-	uint16_t bdlim, bdlen, bdoff;
+	uint32_t bdlen, bdlim, bdoff;
 	uint8_t *baddr;
 
 	MD_BUFLET_ADDR_ABS_DLEN(pkt, baddr, bdlen, bdlim, bdoff);

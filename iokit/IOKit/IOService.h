@@ -102,7 +102,8 @@ enum {
 	// options for registerService() & terminate()
 	kIOServiceSynchronous   = 0x00000002,
 	// options for registerService()
-	kIOServiceAsynchronous  = 0x00000008
+	kIOServiceAsynchronous  = 0x00000008,
+	kIOServiceDextRequirePowerForMatching = 0x00000010,
 };
 
 // options for open()
@@ -198,6 +199,7 @@ extern const OSSymbol *     gIODriverKitTestDriverEntitlementKey;
 extern const OSSymbol *     gIODriverKitUserClientEntitlementCommunicatesWithDriversKey;
 extern const OSSymbol *     gIODriverKitUserClientEntitlementAllowThirdPartyUserClientsKey;
 extern const OSSymbol *     gIOMatchDeferKey;
+extern const OSSymbol *     gIOExclaveAssignedKey;
 
 extern const OSSymbol *     gIOAllCPUInitializedKey;
 
@@ -280,6 +282,7 @@ typedef void (^OSObjectApplierBlock)(OSObject * object);
 class IOUserClient;
 class IOPlatformExpert;
 class IOUserServerCheckInToken;
+class IOInterruptEventSource;
 
 /*! @class IOService
  *   @abstract The base class for most I/O Kit families, devices, and drivers.
@@ -438,6 +441,9 @@ protected:
 private:
 	IOService *     __provider;
 	SInt32      __providerGeneration;
+#if XNU_KERNEL_PRIVATE
+	uint32_t         __resv1;
+#endif
 	IOService *     __owner;
 	IOOptionBits    __state[2];
 	uint64_t        __timeBusy;
@@ -447,6 +453,10 @@ private:
 protected:
 // TRUE once PMinit has been called
 	bool            initialized;
+#if XNU_KERNEL_PRIVATE
+	bool            __machPortHoldDestroy;
+	uint8_t         __resv2[6];
+#endif /* XNU_KERNEL_PRIVATE */
 
 public:
 // DEPRECATED
@@ -768,6 +778,8 @@ public:
 
 #ifdef XNU_KERNEL_PRIVATE
 	static uint32_t isLockedForArbitration(IOService * service);
+	void setMachPortHoldDestroy(bool holdDestroy);
+	bool machPortHoldDestroy();
 #endif /* XNU_KERNEL_PRIVATE */
 
 
@@ -1547,6 +1559,59 @@ public:
 	virtual int errnoFromReturn( IOReturn rtn );
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+#ifdef KERNEL_PRIVATE
+	struct IOExclaveProxyState;
+
+	bool
+	exclaveStart(IOService * provider, IOExclaveProxyState ** state);
+
+	// value for tb_endpoint_create_with_value(TB_TRANSPORT_TYPE_XNU, ...)
+	uint64_t
+	exclaveEndpoint(IOExclaveProxyState * pRef);
+
+	/*! @function exclaveAsyncNotificationRegister
+	 *   @abstract Register an asynchronous notification to be signaled from the exclave driver
+	 *   @discussion This function uses the default IOService workloop for locking the internal data structure to keep track of registered asynchronous notifications.
+	 *   @param pRef Exclave proxy state
+	 *   @param notification IOInterruptEventSource notification to register. This should be created with a `NULL` provider and index `0` and should be added to a workloop.
+	 *   @param notificationID Out parameter for the notification ID. This is used by the exclave driver to signal the registered notification. It is the driver's responsibility to pass this ID to the exclave driver.
+	 *   @result kIOReturnSuccess on success. See IOReturn.h for error codes. */
+	kern_return_t exclaveAsyncNotificationRegister(IOExclaveProxyState * pRef, IOInterruptEventSource *notification, uint32_t *notificationID);
+
+#ifdef XNU_KERNEL_PRIVATE
+	// Interrupts
+	bool
+	exclaveRegisterInterrupt(IOExclaveProxyState * pRef, int index, bool noProvider);
+	bool
+	exclaveRemoveInterrupt(IOExclaveProxyState * pRef, int index);
+	bool
+	exclaveEnableInterrupt(IOExclaveProxyState * pRef, int index, bool enable);
+
+	// Timers
+	bool
+	exclaveRegisterTimer(IOExclaveProxyState * pRef, uint32_t *timer_id);
+	bool
+	exclaveRemoveTimer(IOExclaveProxyState * pRef, uint32_t timer_id);
+	bool
+	exclaveEnableTimer(IOExclaveProxyState * pRef, uint32_t timer_id, bool enable);
+	bool
+	exclaveTimerCancelTimeout(IOExclaveProxyState * pRef, uint32_t timer_id);
+	bool
+	exclaveTimerSetTimeout(IOExclaveProxyState * pRef, uint32_t timer_id, uint32_t options, AbsoluteTime interval, AbsoluteTime leeway, kern_return_t *kr);
+
+	/* Internal downcalls to EDK */
+	void
+	exclaveInterruptOccurred(IOInterruptEventSource *eventSource, int count);
+	void
+	exclaveTimerFired(IOTimerEventSource *eventSource);
+
+	kern_return_t exclaveAsyncNotificationSignal(IOExclaveProxyState * pRef, uint32_t notificationID);
+#endif /* XNU_KERNEL_PRIVATE */
+
+#endif /* KERNEL_PRIVATE */
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 /* * * * * * * * * * end of IOService API  * * * * * * * */
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -1571,6 +1636,7 @@ public:
 	static void initialize( void );
 	static void setPlatform( IOPlatformExpert * platform);
 	static void setPMRootDomain( class IOPMrootDomain * rootDomain );
+	static void publishPMRootDomain( void );
 	static IOReturn catalogNewDrivers( OSOrderedSet * newTables );
 	uint64_t getAccumulatedBusyTime( void );
 	static void updateConsoleUsers(OSArray * consoleUsers, IOMessage systemMessage,

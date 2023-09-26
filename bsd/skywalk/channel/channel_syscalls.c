@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -413,7 +413,7 @@ __channel_sync(struct proc *p, struct __channel_sync_args *uap, int *retval)
 
 	/* clear CHANF_DEFUNCT_SKIP if it was set during defunct last time */
 	if (__improbable(ch->ch_flags & CHANF_DEFUNCT_SKIP)) {
-		atomic_bitclear_32(&ch->ch_flags, CHANF_DEFUNCT_SKIP);
+		os_atomic_andnot(&ch->ch_flags, CHANF_DEFUNCT_SKIP, relaxed);
 	}
 
 	na = ch->ch_na; /* we have a reference */
@@ -434,7 +434,7 @@ __channel_sync(struct proc *p, struct __channel_sync_args *uap, int *retval)
 
 	/* and make this channel eligible for draining again */
 	if (na->na_flags & NAF_DRAINING) {
-		atomic_bitclear_32(&na->na_flags, NAF_DRAINING);
+		os_atomic_andnot(&na->na_flags, NAF_DRAINING, relaxed);
 	}
 
 	if (mode == CHANNEL_SYNC_UPP) {
@@ -547,19 +547,29 @@ __channel_sync(struct proc *p, struct __channel_sync_args *uap, int *retval)
 	}
 
 packet_pool_sync:
-	if (flags & (CHANNEL_SYNCF_ALLOC | CHANNEL_SYNCF_ALLOC_BUF)) {
-		qfirst = ch->ch_first[NR_A];
-		qlast = ch->ch_last[NR_A];
+	if (flags & (CHANNEL_SYNCF_ALLOC |
+	    CHANNEL_SYNCF_LARGE_ALLOC | CHANNEL_SYNCF_ALLOC_BUF)) {
+		enum txrx type;
 
-		if (!(flags & CHANNEL_SYNCF_ALLOC)) {
-			qfirst++;
-		} else if ((qlast - qfirst) > 1 &&
-		    !(flags & CHANNEL_SYNCF_ALLOC_BUF)) {
-			qlast--;
+		if (flags & CHANNEL_SYNCF_LARGE_ALLOC) {
+			ASSERT(!(flags & CHANNEL_SYNCF_ALLOC));
+			ASSERT(!(flags & CHANNEL_SYNCF_ALLOC_BUF));
+			type = NR_LBA;
+			qfirst = ch->ch_first[type];
+			qlast = ch->ch_last[type];
+		} else {
+			type = NR_A;
+			qfirst = ch->ch_first[type];
+			qlast = ch->ch_last[type];
+			if (!(flags & CHANNEL_SYNCF_ALLOC)) {
+				qfirst++;
+			} else if ((qlast - qfirst) > 1 &&
+			    !(flags & CHANNEL_SYNCF_ALLOC_BUF)) {
+				qlast--;
+			}
 		}
-
 		ASSERT(qfirst != qlast);
-		krings = NAKR(na, NR_A);
+		krings = NAKR(na, type);
 
 		for (i = qfirst; i < qlast; i++) {
 			kring = krings + i;

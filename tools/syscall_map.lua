@@ -425,6 +425,15 @@ local syscalls = {
         'mach_port_name_t *previous',
       },
     },
+    { number = 88, name = 'exclaves_ctl',
+      arguments = {
+        'mach_port_name_t name',
+        'uint32_t operation_and_flags',
+        'uint64_t identifier',
+        'mach_vm_address_t buffer',
+        'mach_vm_size_t size',
+      },
+    },
 
     { number = 89, name = 'mach_timebase_info',
       arguments = {

@@ -220,6 +220,8 @@ public:
 
 	bool                   serviceMatchesCheckInToken(IOUserServerCheckInToken *token);
 	bool                   checkEntitlements(IOService * provider, IOService * dext);
+	bool                   checkEntitlements(LIBKERN_CONSUMED OSObject * prop,
+	    IOService * provider, IOService * dext);
 	static bool            checkEntitlements(OSDictionary * entitlements, LIBKERN_CONSUMED OSObject * prop,
 	    IOService * provider, IOService * dext);
 

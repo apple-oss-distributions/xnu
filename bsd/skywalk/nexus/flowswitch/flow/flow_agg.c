@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -428,15 +428,12 @@ _copy_data_sum_dbuf(struct __kern_packet *spkt, uint16_t soff, uint16_t plen,
     boolean_t do_csum)
 {
 	uint8_t i = 0;
-	uint16_t buf_off = 0;
-	uint16_t buflet_dlim;
-	uint16_t buflet_dlen;
+	uint32_t buflet_dlim, buflet_dlen, buf_off = 0;
 
 	ASSERT(plen > 0);
 	while (plen > 0) {
 		ASSERT(i < dbuf->dba_num_dbufs);
-		uint16_t tmplen;
-		uint16_t dbuf_lim;
+		uint32_t dbuf_lim, tmplen;
 		uint8_t *dbuf_addr;
 
 		if (dbuf->dba_is_buflet) {
@@ -449,7 +446,7 @@ _copy_data_sum_dbuf(struct __kern_packet *spkt, uint16_t soff, uint16_t plen,
 			dbuf_lim = buflet_dlim - buf_off;
 			dbuf_addr += buf_off;
 		} else {
-			dbuf_lim = M_TRAILINGSPACE(dbuf->dba_mbuf[i]);
+			dbuf_lim = (uint32_t) M_TRAILINGSPACE(dbuf->dba_mbuf[i]);
 			dbuf_addr = mtod(dbuf->dba_mbuf[i], uint8_t *);
 			buf_off = dbuf->dba_mbuf[i]->m_len;
 			dbuf_addr += buf_off;
@@ -1604,7 +1601,7 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 	uint32_t largest_spkt = 0; /* largest aggregated packet size */
 	uint32_t agg_bufsize;
 	uint8_t iter = 0;
-	uint32_t bft_alloc_flags = PP_ALLOC_BFT_ATTACH_BUFFER;
+	bool large_buffer = false;
 
 	SK_LOG_VAR(uint64_t logflags = (SK_VERB_FSW | SK_VERB_RX));
 	SK_DF(logflags, "Rx input queue len %u", KPKTQ_LEN(&fe->fe_rx_pktq));
@@ -1616,7 +1613,7 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			agg_bufsize = PP_BUF_SIZE_DEF(dpp);
 		} else {
 			agg_bufsize = PP_BUF_SIZE_LARGE(dpp);
-			bft_alloc_flags |= PP_ALLOC_BFT_LARGE;
+			large_buffer = true;
 		}
 		bh_cnt = estimate_buf_cnt(fe, PP_BUF_SIZE_DEF(dpp),
 		    agg_bufsize);
@@ -1634,7 +1631,7 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 	}
 
 	err = pp_alloc_buflet_batch(dpp, buf_arr, &bh_cnt, SKMEM_NOSLEEP,
-	    bft_alloc_flags);
+	    large_buffer);
 	if (__improbable(bh_cnt == 0)) {
 		SK_ERR("failed to alloc %u buflets (err %d), use slow path",
 		    bh_cnt_tmp, err);
@@ -1750,7 +1747,7 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			ASSERT(tmp <= (MAX_BUFLET_COUNT - bh_cnt));
 			DTRACE_SKYWALK1(refilled_blt_cnt, uint32_t, tmp);
 			err = pp_alloc_buflet_batch(dpp, &buf_arr[bh_cnt],
-			    &tmp, SKMEM_NOSLEEP, bft_alloc_flags);
+			    &tmp, SKMEM_NOSLEEP, large_buffer);
 			bh_cnt += tmp;
 			if (__improbable((tmp == 0) || (bh_cnt < bh_cnt_tmp))) {
 				STATS_INC(fsws, FSW_STATS_DROP_NOMEM_PKT);
@@ -1862,6 +1859,7 @@ next:
 	}
 
 	/* Free unused buflets */
+	STATS_ADD(fsws, FSW_STATS_RX_WASTED_BFLT, bh_cnt);
 	while (bh_cnt > 0) {
 		pp_free_buflet(dpp, (kern_buflet_t)(buf_arr[iter]));
 		buf_arr[iter] = 0;
@@ -1891,6 +1889,29 @@ next:
 	pp_free_pktq(&disposed_pkts);
 }
 
+/* streamline a smbuf */
+static bool
+_finalize_smbuf(struct mbuf *smbuf)
+{
+	/* the 1st mbuf always contains something, so start with the 2nd one */
+	struct mbuf *m_chained = smbuf->m_next;
+	struct mbuf *prev_m = smbuf;
+	bool freed = false;
+
+	while (m_chained != NULL) {
+		if (m_chained->m_len != 0) {
+			prev_m = m_chained;
+			m_chained = m_chained->m_next;
+			continue;
+		}
+		prev_m->m_next = m_chained->m_next;
+		m_free(m_chained);
+		m_chained = prev_m->m_next;
+		freed = true;
+	}
+	return freed;
+}
+
 SK_NO_INLINE_ATTRIBUTE
 static void
 flow_rx_agg_host(struct nx_flowswitch *fsw, struct flow_entry *fe,
@@ -1916,7 +1937,7 @@ flow_rx_agg_host(struct nx_flowswitch *fsw, struct flow_entry *fe,
 	/* super mbuf, at the end it points to last mbuf packet */
 	struct  mbuf *smbuf = NULL, *curr_m = NULL;
 	bool prev_csum_ok = false, csum_ok, agg_ok;
-	uint16_t smbufs = 0;
+	uint16_t smbufs = 0, smbuf_finalized = 0;
 	uint32_t bytes = 0, rcvd_ulen = 0;
 	uint32_t rcvd_packets = 0, rcvd_bytes = 0; /* raw packets & bytes */
 	uint32_t drop_packets = 0, drop_bytes = 0; /* dropped packets & bytes */
@@ -1929,8 +1950,8 @@ flow_rx_agg_host(struct nx_flowswitch *fsw, struct flow_entry *fe,
 	SK_LOG_VAR(uint64_t logflags = (SK_VERB_FSW | SK_VERB_RX));
 
 	/* state for mbuf batch alloc */
-	uint32_t mhead_cnt;
-	uint32_t mhead_bufsize;
+	uint32_t mhead_cnt = 0;
+	uint32_t mhead_bufsize = 0;
 	struct mbuf * mhead = NULL;
 
 	uint16_t l2len = KPKTQ_FIRST(&fe->fe_rx_pktq)->pkt_l2_len;
@@ -1945,12 +1966,16 @@ flow_rx_agg_host(struct nx_flowswitch *fsw, struct flow_entry *fe,
 		if (__probable(fe->fe_rx_largest_size != 0 &&
 		    NX_FSW_TCP_RX_AGG_ENABLED())) {
 			unsigned int num_segs = 1;
+			int pktq_len = KPKTQ_LEN(&fe->fe_rx_pktq);
 
-			if (fe->fe_rx_largest_size <= MCLBYTES) {
+			if (fe->fe_rx_largest_size <= MCLBYTES &&
+			    fe->fe_rx_pktq_bytes / pktq_len <= MCLBYTES) {
 				mhead_bufsize = MCLBYTES;
-			} else if (fe->fe_rx_largest_size <= MBIGCLBYTES) {
+			} else if (fe->fe_rx_largest_size <= MBIGCLBYTES &&
+			    fe->fe_rx_pktq_bytes / pktq_len <= MBIGCLBYTES) {
 				mhead_bufsize = MBIGCLBYTES;
-			} else if (fe->fe_rx_largest_size <= M16KCLBYTES) {
+			} else if (fe->fe_rx_largest_size <= M16KCLBYTES &&
+			    fe->fe_rx_pktq_bytes / pktq_len <= M16KCLBYTES) {
 				mhead_bufsize = M16KCLBYTES;
 			} else {
 				mhead_bufsize = M16KCLBYTES * 2;
@@ -1964,7 +1989,7 @@ try_again:
 			} else {
 				/* No payload, thus it's all small-sized ACKs/... */
 				mhead_bufsize = MHLEN;
-				mhead_cnt = KPKTQ_LEN(&fe->fe_rx_pktq);
+				mhead_cnt = pktq_len;
 			}
 
 			mhead = m_allocpacket_internal(&mhead_cnt,
@@ -2143,9 +2168,6 @@ try_again:
 				mhead = m->m_nextpkt;
 				m->m_nextpkt = NULL;
 				mhead_cnt--;
-				if (__improbable(mhead_bufsize >= tot_len + M16KCLBYTES)) {
-					FSW_STATS_INC(FSW_STATS_RX_WASTED_16KMBUF);
-				}
 			}
 			m->m_data += pad;
 			m->m_pkthdr.pkt_hdr = mtod(m, uint8_t *);
@@ -2335,6 +2357,14 @@ non_agg:
 				 */
 				mbuf_agg_log(smbuf, kernproc, is_mbuf);
 				smbuf->m_nextpkt = m;
+				/*
+				 * Clean up (finalize) a smbuf only if it pre-allocated >1 segments,
+				 * which only happens when mhead_bufsize > M16KCLBYTES
+				 */
+				if (_finalize_smbuf(smbuf)) {
+					FSW_STATS_INC(FSW_STATS_RX_WASTED_16KMBUF);
+				}
+				smbuf_finalized++;
 				smbuf = m;
 				curr_m = m;
 			} else {
@@ -2376,10 +2406,10 @@ next:
 	/* Free any leftover mbufs, true only for native  */
 	if (__improbable(mhead != NULL)) {
 		ASSERT(mhead_cnt != 0);
+		STATS_ADD(fsws, FSW_STATS_RX_WASTED_MBUF, mhead_cnt);
 		(void) m_freem_list(mhead);
 		mhead = NULL;
 		mhead_cnt = 0;
-		mhead_bufsize = 0;
 	}
 
 	converge_aggregation_size(fe, largest_smbuf);
@@ -2391,6 +2421,16 @@ next:
 
 		ASSERT(m_chain != NULL);
 		ASSERT(smbuf != NULL);
+
+		/*
+		 * If the last mbuf needs to be finalized (mhead_bufsize > M16KCLBYTES)
+		 * but is not (smbuf_finalized < smbuf), do it now.
+		 */
+		if (smbuf_finalized < smbufs &&
+		    _finalize_smbuf(smbuf)) {
+			FSW_STATS_INC(FSW_STATS_RX_WASTED_16KMBUF);
+		}
+
 		/*
 		 * Call fsw_host_sendup() with mbuf chain
 		 * directly.
@@ -2418,13 +2458,15 @@ next:
 }
 
 void
-flow_rx_agg_tcp(struct nx_flowswitch *fsw, struct flow_entry *fe)
+flow_rx_agg_tcp(struct nx_flowswitch *fsw, struct flow_entry *fe,
+    uint32_t flags)
 {
+#pragma unused(flags)
 	struct pktq dropped_pkts;
 	bool is_mbuf;
 
 	if (__improbable(fe->fe_rx_frag_count > 0)) {
-		dp_flow_rx_process(fsw, fe);
+		dp_flow_rx_process(fsw, fe, 0);
 		return;
 	}
 

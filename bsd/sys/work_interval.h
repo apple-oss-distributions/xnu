@@ -162,6 +162,10 @@ __BEGIN_DECLS
  * after creation. */
 #define WORK_INTERVAL_FLAG_HAS_WORKLOAD_ID              (0x80)
 
+/* Internal-only flag: Telemetry data will be aggregated from threads while they are joined to
+ * the work interval. */
+#define WORK_INTERVAL_FLAG_ENABLE_TELEMETRY_DATA        (0x100)
+
 /* Flags to describe the interval flavor to the performance controller */
 #define WORK_INTERVAL_TYPE_MASK                 (0xF0000000)
 #define WORK_INTERVAL_TYPE_DEFAULT              (0x0 << 28)
@@ -179,6 +183,7 @@ __BEGIN_DECLS
 
 typedef struct work_interval *work_interval_t;
 typedef struct work_interval_instance *work_interval_instance_t;
+typedef struct work_interval_data *work_interval_data_t;
 
 /*
  * Create a new work interval handle.
@@ -282,6 +287,7 @@ int     work_interval_leave(void);
 
 #endif /* !KERNEL */
 
+
 #if PRIVATE
 
 /* Private interface between Libsyscall and xnu */
@@ -293,7 +299,6 @@ int     work_interval_leave(void);
 #define WORK_INTERVAL_OPERATION_GET_FLAGS 0x00000009    /* arg is a port name */
 #define WORK_INTERVAL_OPERATION_SET_NAME  0x0000000a    /* arg is name string (char[WORK_INTERVAL_NAME_MAX])*/
 #define WORK_INTERVAL_OPERATION_SET_WORKLOAD_ID  0x0000000b    /* arg is a work_interval_workload_id_params */
-
 #define WORK_INTERVAL_NAME_MAX  32
 #define WORK_INTERVAL_WORKLOAD_ID_NAME_MAX  64
 

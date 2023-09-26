@@ -623,6 +623,11 @@ export INSTALLHDRS_SKIP_HOST=YES
 export INSTALLHDRS_MODULEMAPS_SKIP_HOST=YES
 else ifneq ($(filter $(RC_ProjectName),xnu_headers_driverkit),)
 install: installhdrs_desktop
+else ifneq ($(filter $(RC_ProjectName),xnu_headers_exclavekit xnu_headers_exclavecore),)
+install: installhdrs_desktop
+export INSTALLHDRS_MODULEMAPS_SKIP_HOST=YES
+export INSTALLHDRS_SKIP_HOST=YES
+export EXPORTHDRS_SKIP_EXCLAVES=YES
 else
 
 install: installhdrs install_textfiles install_config install_kernels install_aliases

@@ -30,8 +30,6 @@
 #define _LIBKERN_OSKEXTLIB_H
 
 #include <sys/cdefs.h>
-__BEGIN_DECLS
-
 #include <stdint.h>
 #include <mach/kmod.h>
 #include <mach/vm_types.h>
@@ -43,6 +41,8 @@ __BEGIN_DECLS
 #else
 #include <libkern/OSReturn.h>
 #endif /* KERNEL */
+
+__BEGIN_DECLS
 
 /*!
  * @header

@@ -1191,6 +1191,7 @@ retry:
 		lucid_ctx_buffer = kalloc_data(lucidlen, Z_WAITOK | Z_ZERO);
 		error = nfs_gss_mach_vmcopyout((vm_map_copy_t) octx, lucidlen, lucid_ctx_buffer);
 		if (error) {
+			vm_map_copy_discard((vm_map_copy_t) octx);
 			vm_map_copy_discard((vm_map_copy_t) otoken);
 			kfree_data(lucid_ctx_buffer, lucidlen);
 			goto out;
@@ -1223,6 +1224,7 @@ retry:
 		}
 		error = nfs_gss_mach_vmcopyout((vm_map_copy_t) otoken, otokenlen, cp->gss_svc_token);
 		if (error) {
+			vm_map_copy_discard((vm_map_copy_t) otoken);
 			kfree_data(cp->gss_svc_token, otokenlen);
 			return NFSERR_EAUTH;
 		}

@@ -536,6 +536,37 @@ typedef struct task_debug_info_internal task_debug_info_internal_data_t;
 
 #endif /* PRIVATE */
 
+#ifdef PRIVATE
+
+typedef struct task_suspend_stats_s {
+	uint64_t tss_last_start; /* mach_absolute_time of beginning of last suspension*/
+	uint64_t tss_last_end; /* mach_absolute_time of end of last suspension */
+	uint64_t tss_count; /* number of times this task has been suspended */
+	uint64_t tss_duration; /* sum(mach_absolute_time) of time spend suspended */
+} *task_suspend_stats_t;
+
+typedef struct task_suspend_stats_s task_suspend_stats_data_t;
+#define TASK_SUSPEND_STATS_INFO 30
+#define TASK_SUSPEND_STATS_INFO_COUNT ((mach_msg_type_number_t) \
+	        (sizeof(task_suspend_stats_data_t) / sizeof(natural_t)))
+
+typedef struct task_suspend_source_s {
+	uint64_t tss_time; /* mach_absolute_time of suspend */
+	uint64_t tss_tid; /* tid of suspending thread */
+	int tss_pid; /* pid of suspending task */
+	char tss_procname[65]; /* name of suspending task */
+	uint8_t tss_padding[3]; /* pad to multiple of natural_t */
+} *task_suspend_source_t;
+#define TASK_SUSPEND_SOURCES_MAX 4
+typedef struct task_suspend_source_s task_suspend_source_array_t[TASK_SUSPEND_SOURCES_MAX];
+
+typedef struct task_suspend_source_s task_suspend_source_data_t;
+#define TASK_SUSPEND_SOURCES_INFO 31
+#define TASK_SUSPEND_SOURCES_INFO_COUNT ((mach_msg_type_number_t) \
+	        (sizeof(task_suspend_source_data_t) * TASK_SUSPEND_SOURCES_MAX / sizeof(natural_t)))
+
+#endif /* PRIVATE */
+
 /*
  * Type to control EXC_GUARD delivery options for a task
  * via task_get/set_exc_guard_behavior interface(s).

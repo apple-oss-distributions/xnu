@@ -29,11 +29,7 @@
 #include <libkern/OSAtomic.h>
 #include <kern/debug.h>
 #include <machine/atomic.h>
-
-enum {
-	false   = 0,
-	true    = 1
-};
+#include <stdbool.h>
 
 #ifndef NULL
 #define NULL ((void *)0)
@@ -172,7 +168,7 @@ OSBitXorAtomic(UInt32 mask, volatile UInt32 * value)
 }
 
 static Boolean
-OSTestAndSetClear(UInt32 bit, Boolean wantSet, volatile UInt8 * startAddress)
+OSTestAndSetClear(UInt32 bit, bool wantSet, volatile UInt8 * startAddress)
 {
 	UInt8           mask = 1;
 	UInt8           oldValue, newValue;

@@ -30,6 +30,7 @@
 #include <mach/vm_param.h>
 #include <mach/mach_vm.h>
 #include <mach/clock_types.h>
+#include <sys/code_signing.h>
 #include <sys/errno.h>
 #include <sys/stackshot.h>
 #ifdef IMPORTANCE_INHERITANCE
@@ -122,12 +123,12 @@ static uint64_t stackshots_taken;               /* total stackshots taken since 
 static uint64_t stackshots_duration;            /* total abs time spent in stackshot_trap() since boot */
 
 /*
- * Experimentally, our current estimates are 20% short 96% of the time; 40 gets
- * us into 99.9%+ territory.  In the longer run, we need to make stackshot
- * estimates use a better approach (rdar://78880038); this is intended to be a
- * short-term fix.
+ * Experimentally, our current estimates are 40% short 77% of the time; adding
+ * 75% to the estimate gets us into 99%+ territory.  In the longer run, we need
+ * to make stackshot estimates use a better approach (rdar://78880038); this is
+ * intended to be a short-term fix.
  */
-uint32_t stackshot_estimate_adj = 40; /* experiment factor: 0-100, adjust our estimate up by this amount */
+uint32_t stackshot_estimate_adj = 75; /* experiment factor: 0-100, adjust our estimate up by this amount */
 
 static uint32_t stackshot_initial_estimate;
 static uint32_t stackshot_initial_estimate_adj;
@@ -1775,15 +1776,65 @@ kcdata_record_task_codesigning_info(kcdata_descriptor_t kcd, task_t task)
 {
 	struct stackshot_task_codesigning_info codesigning_info = {};
 	void * bsdtask_info = NULL;
+	uint32_t trust = 0;
+	kern_return_t ret = 0;
+	pmap_t pmap = get_task_pmap(task);
 	if (task != kernel_task) {
 		bsdtask_info = get_bsdtask_info(task);
 		codesigning_info.csflags = proc_getcsflags_kdp(bsdtask_info);
-		codesigning_info.cs_trust_level = 0; //TODO in rdar://102261763
+		ret = get_trust_level_kdp(pmap, &trust);
+		if (ret != KERN_SUCCESS) {
+			trust = KCDATA_INVALID_CS_TRUST_LEVEL;
+		}
+		codesigning_info.cs_trust_level = trust;
 	} else {
 		return KERN_SUCCESS;
 	}
 	return kcdata_push_data(kcd, STACKSHOT_KCTYPE_CODESIGNING_INFO, sizeof(struct stackshot_task_codesigning_info), &codesigning_info);
 }
+#if CONFIG_TASK_SUSPEND_STATS
+static kern_return_t
+kcdata_record_task_suspension_info(kcdata_descriptor_t kcd, task_t task)
+{
+	kern_return_t ret = KERN_SUCCESS;
+	struct stackshot_suspension_info suspension_info = {};
+	task_suspend_stats_data_t suspend_stats;
+	task_suspend_source_array_t suspend_sources;
+	struct stackshot_suspension_source suspension_sources[TASK_SUSPEND_SOURCES_MAX];
+	int i;
+
+	if (task == kernel_task) {
+		return KERN_SUCCESS;
+	}
+
+	ret = task_get_suspend_stats_kdp(task, &suspend_stats);
+	if (ret != KERN_SUCCESS) {
+		return ret;
+	}
+
+	suspension_info.tss_count = suspend_stats.tss_count;
+	suspension_info.tss_duration = suspend_stats.tss_duration;
+	suspension_info.tss_last_end = suspend_stats.tss_last_end;
+	suspension_info.tss_last_start = suspend_stats.tss_last_start;
+	ret = kcdata_push_data(kcd, STACKSHOT_KCTYPE_SUSPENSION_INFO, sizeof(suspension_info), &suspension_info);
+	if (ret != KERN_SUCCESS) {
+		return ret;
+	}
+
+	ret = task_get_suspend_sources_kdp(task, suspend_sources);
+	if (ret != KERN_SUCCESS) {
+		return ret;
+	}
+
+	for (i = 0; i < TASK_SUSPEND_SOURCES_MAX; ++i) {
+		suspension_sources[i].tss_pid = suspend_sources[i].tss_pid;
+		strlcpy(suspension_sources[i].tss_procname, suspend_sources[i].tss_procname, sizeof(suspend_sources[i].tss_procname));
+		suspension_sources[i].tss_tid = suspend_sources[i].tss_tid;
+		suspension_sources[i].tss_time = suspend_sources[i].tss_time;
+	}
+	return kcdata_push_array(kcd, STACKSHOT_KCTYPE_SUSPENSION_SOURCE, sizeof(suspension_sources[0]), TASK_SUSPEND_SOURCES_MAX, &suspension_sources);
+}
+#endif /* CONFIG_TASK_SUSPEND_STATS */
 
 static kern_return_t
 kcdata_record_transitioning_task_snapshot(kcdata_descriptor_t kcd, task_t task, unaligned_u64 task_snap_ss_flags, uint64_t transition_type)
@@ -1836,15 +1887,15 @@ kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace
 kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace_flags, boolean_t have_pmap, unaligned_u64 task_snap_ss_flags)
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 {
-	boolean_t collect_delta_stackshot = ((trace_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) != 0);
-	boolean_t collect_iostats         = !collect_delta_stackshot && !(trace_flags & STACKSHOT_NO_IO_STATS);
+	bool collect_delta_stackshot = ((trace_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) != 0);
+	bool collect_iostats         = !collect_delta_stackshot && !(trace_flags & STACKSHOT_NO_IO_STATS);
 #if CONFIG_PERVASIVE_CPI
-	boolean_t collect_instrs_cycles   = ((trace_flags & STACKSHOT_INSTRS_CYCLES) != 0);
+	bool collect_instrs_cycles   = ((trace_flags & STACKSHOT_INSTRS_CYCLES) != 0);
 #endif /* CONFIG_PERVASIVE_CPI */
 #if __arm64__
-	boolean_t collect_asid            = ((trace_flags & STACKSHOT_ASID) != 0);
+	bool collect_asid            = ((trace_flags & STACKSHOT_ASID) != 0);
 #endif
-	boolean_t collect_pagetables       = ((trace_flags & STACKSHOT_PAGE_TABLES) != 0);
+	bool collect_pagetables      = ((trace_flags & STACKSHOT_PAGE_TABLES) != 0);
 
 
 	kern_return_t error                 = KERN_SUCCESS;
@@ -1978,6 +2029,10 @@ kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace
 
 	kcd_exit_on_error(kcdata_record_task_cpu_architecture(kcd, task));
 	kcd_exit_on_error(kcdata_record_task_codesigning_info(kcd, task));
+
+#if CONFIG_TASK_SUSPEND_STATS
+	kcd_exit_on_error(kcdata_record_task_suspension_info(kcd, task));
+#endif /* CONFIG_TASK_SUSPEND_STATS */
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 	latency_info->end_latency = mach_absolute_time() - latency_info->end_latency;

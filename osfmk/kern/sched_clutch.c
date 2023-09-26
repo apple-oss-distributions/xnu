@@ -408,7 +408,6 @@ sched_clutch_root_init(
  * - Clutch buckets are inserted at the head when it becomes runnable due to
  *   thread preemption. This allows threads that were preempted to maintain
  *   their order in the queue.
- *
  */
 
 /*
@@ -1144,9 +1143,6 @@ sched_clutch_bucket_group_init(
 	clutch_bucket_group->scbg_interactivity_data.scct_count = (sched_clutch_bucket_group_interactive_pri * 2);
 	clutch_bucket_group->scbg_interactivity_data.scct_timestamp = 0;
 	os_atomic_store(&clutch_bucket_group->scbg_cpu_data.cpu_data.scbcd_cpu_blocked, (clutch_cpu_data_t)sched_clutch_bucket_group_adjust_threshold, relaxed);
-#if !__LP64__
-	lck_spin_init(&clutch_bucket_group->scbg_stats_lock, &pset_lck_grp, NULL);
-#endif /* !__LP64__ */
 	clutch_bucket_group->scbg_blocked_data.scct_timestamp = SCHED_CLUTCH_BUCKET_GROUP_BLOCKED_TS_INVALID;
 	clutch_bucket_group->scbg_pending_data.scct_timestamp = SCHED_CLUTCH_BUCKET_GROUP_PENDING_INVALID;
 	clutch_bucket_group->scbg_amp_rebalance_last_chosen = UINT32_MAX;
@@ -1894,6 +1890,9 @@ sched_edge_bound_thread_insert(
 	run_queue_enqueue(&root_bucket->scrb_bound_thread_runq, thread, options);
 	thread->th_bound_cluster_enqueued = true;
 
+	/* Increment the urgency counter for the root if necessary */
+	sched_clutch_root_urgency_inc(root_clutch, thread);
+
 	int16_t root_old_pri = root_clutch->scr_priority;
 	sched_clutch_root_pri_update(root_clutch);
 	return root_clutch->scr_priority > root_old_pri;
@@ -1908,6 +1907,9 @@ sched_edge_bound_thread_remove(
 	assert((thread->th_bound_cluster_enqueued) == true);
 	run_queue_remove(&root_bucket->scrb_bound_thread_runq, thread);
 	thread->th_bound_cluster_enqueued = false;
+
+	/* Decrement the urgency counter for the root if necessary */
+	sched_clutch_root_urgency_dec(root_clutch, thread);
 
 	/* Update the clutch runnable count and priority */
 	sched_clutch_thr_count_dec(&root_clutch->scr_thr_count);
@@ -2074,8 +2076,8 @@ sched_clutch_thread_bound_lookup(
  * as expected:
  * - The clutch scheduler would be deployed on single cluster platforms where the pset lock
  *   is held when threads are added/removed and pending timestamps are updated
- * - The edge scheduler would have support for double wide 128 bit atomics which allow the
- *   thread count and pending timestamp to be updated atomically.
+ * - The thread count and pending timestamp can be updated atomically using double wide
+ *   128 bit atomics
  *
  * Clutch bucket group interactivity timestamp and score updates also rely on the properties
  * above to atomically update the interactivity score for a clutch bucket group.
@@ -2279,55 +2281,9 @@ sched_clutch_bucket_group_interactivity_score_calculate(
  * Since the blocked time of the clutch bucket group is based on this count, it is
  * important to make sure the blocking timestamp and the run count are updated atomically.
  *
- * Since the run count increments happen without any pset locks held, the scheduler makes
- * these updates atomic in the following way:
- * - On 64-bit platforms, it uses double wide atomics to update the count & timestamp
- * - On 32-bit platforms, it uses a lock to synchronize the count & timestamp update
+ * Since the run count increments happen without any pset locks held, the scheduler updates
+ * the count & timestamp using double wide 128 bit atomics.
  */
-
-#if !__LP64__
-
-static uint32_t
-sched_clutch_bucket_group_run_count_inc(
-	sched_clutch_bucket_group_t clutch_bucket_group)
-{
-	uint64_t blocked_time = 0;
-	uint64_t updated_run_count = 0;
-
-	lck_spin_lock(&clutch_bucket_group->scbg_stats_lock);
-	if ((clutch_bucket_group->scbg_blocked_data.scct_timestamp != SCHED_CLUTCH_BUCKET_GROUP_BLOCKED_TS_INVALID) &&
-	    (clutch_bucket_group->scbg_blocked_data.scct_count == 0)) {
-		/* Run count is transitioning from 0 to 1; calculate blocked time and add it to CPU data */
-		blocked_time = mach_absolute_time() - clutch_bucket_group->scbg_blocked_data.scct_timestamp;
-		clutch_bucket_group->scbg_blocked_data.scct_timestamp = SCHED_CLUTCH_BUCKET_GROUP_BLOCKED_TS_INVALID;
-	}
-	clutch_bucket_group->scbg_blocked_data.scct_count = clutch_bucket_group->scbg_blocked_data.scct_count + 1;
-	updated_run_count = clutch_bucket_group->scbg_blocked_data.scct_count;
-	lck_spin_unlock(&clutch_bucket_group->scbg_stats_lock);
-
-	blocked_time = MIN(blocked_time, sched_clutch_bucket_group_adjust_threshold);
-	os_atomic_add(&(clutch_bucket_group->scbg_cpu_data.cpu_data.scbcd_cpu_blocked), (clutch_cpu_data_t)blocked_time, relaxed);
-	return (uint32_t)updated_run_count;
-}
-
-static uint32_t
-sched_clutch_bucket_group_run_count_dec(
-	sched_clutch_bucket_group_t clutch_bucket_group)
-{
-	uint64_t updated_run_count = 0;
-
-	lck_spin_lock(&clutch_bucket_group->scbg_stats_lock);
-	clutch_bucket_group->scbg_blocked_data.scct_count = clutch_bucket_group->scbg_blocked_data.scct_count - 1;
-	if (clutch_bucket_group->scbg_blocked_data.scct_count == 0) {
-		/* Run count is transitioning from 1 to 0; start the blocked timer */
-		clutch_bucket_group->scbg_blocked_data.scct_timestamp = mach_absolute_time();
-	}
-	updated_run_count = clutch_bucket_group->scbg_blocked_data.scct_count;
-	lck_spin_unlock(&clutch_bucket_group->scbg_stats_lock);
-	return (uint32_t)updated_run_count;
-}
-
-#else /* !__LP64__ */
 
 static uint32_t
 sched_clutch_bucket_group_run_count_inc(
@@ -2374,9 +2330,6 @@ sched_clutch_bucket_group_run_count_dec(
 	});
 	return (uint32_t)new_blocked_data.scct_count;
 }
-
-#endif /* !__LP64__ */
-
 
 /*
  * sched_clutch_thread_insert()
@@ -2755,7 +2708,7 @@ static uint32_t
 sched_clutch_initial_quantum_size(thread_t thread);
 
 static bool
-sched_clutch_thread_avoid_processor(processor_t processor, thread_t thread);
+sched_clutch_thread_avoid_processor(processor_t processor, thread_t thread, __unused ast_t reason);
 
 static uint32_t
 sched_clutch_run_incr(thread_t thread);
@@ -2765,6 +2718,9 @@ sched_clutch_run_decr(thread_t thread);
 
 static void
 sched_clutch_update_thread_bucket(thread_t thread);
+
+static void
+sched_clutch_thread_group_recommendation_change(struct thread_group *tg, cluster_type_t new_recommendation);
 
 const struct sched_dispatch_table sched_clutch_dispatch = {
 	.sched_name                                     = "clutch",
@@ -2817,6 +2773,7 @@ const struct sched_dispatch_table sched_clutch_dispatch = {
 	.run_count_decr                                 = sched_clutch_run_decr,
 	.update_thread_bucket                           = sched_clutch_update_thread_bucket,
 	.pset_made_schedulable                          = sched_pset_made_schedulable,
+	.thread_group_recommendation_change             = sched_clutch_thread_group_recommendation_change,
 	.cpu_init_completed                             = NULL,
 	.thread_eligible_for_pset                       = NULL,
 };
@@ -2967,7 +2924,7 @@ sched_clutch_processor_csw_check(processor_t processor)
 	boolean_t       has_higher;
 	int             pri;
 
-	if (sched_clutch_thread_avoid_processor(processor, current_thread())) {
+	if (sched_clutch_thread_avoid_processor(processor, current_thread(), AST_NONE)) {
 		return AST_PREEMPT | AST_URGENT;
 	}
 
@@ -3176,6 +3133,9 @@ sched_clutch_thread_update_scan(sched_update_scan_context_t scan_context)
 					qe_foreach_element(clutch_bucket, clutch_bucket_list, scb_listlink) {
 						sched_clutch_bucket_group_timeshare_update(clutch_bucket->scb_group, clutch_bucket, scan_context->sched_tick_last_abstime);
 						restart_needed = sched_clutch_timeshare_scan(&clutch_bucket->scb_thread_timeshare_queue, clutch_bucket->scb_thr_count, scan_context);
+						if (restart_needed) {
+							break;
+						}
 					}
 				}
 
@@ -3202,7 +3162,7 @@ extern int sched_allow_rt_smt;
 
 /* Return true if this thread should not continue running on this processor */
 static bool
-sched_clutch_thread_avoid_processor(processor_t processor, thread_t thread)
+sched_clutch_thread_avoid_processor(processor_t processor, thread_t thread, __unused ast_t reason)
 {
 	if (processor->processor_primary != processor) {
 		/*
@@ -3297,6 +3257,14 @@ sched_clutch_update_thread_bucket(thread_t thread)
 	}
 }
 
+static void
+sched_clutch_thread_group_recommendation_change(__unused struct thread_group *tg, __unused cluster_type_t new_recommendation)
+{
+	/* Clutch ignores the recommendation because Clutch does not migrate
+	 * threads between cluster types independently from the Edge scheduler.
+	 */
+}
+
 #if CONFIG_SCHED_EDGE
 
 /* Implementation of the AMP version of the clutch scheduler */
@@ -3329,9 +3297,9 @@ static processor_t
 sched_edge_choose_processor(processor_set_t pset, processor_t processor, thread_t thread);
 
 static bool
-sched_edge_thread_avoid_processor(processor_t processor, thread_t thread);
+sched_edge_thread_avoid_processor(processor_t processor, thread_t thread, ast_t reason);
 
-static void
+static bool
 sched_edge_balance(processor_t cprocessor, processor_set_t cpset);
 
 static void
@@ -4085,7 +4053,7 @@ sched_edge_shared_rsrc_migrate_possible(thread_t thread, processor_set_t preferr
 
 /* Return true if this thread should not continue running on this processor */
 static bool
-sched_edge_thread_avoid_processor(processor_t processor, thread_t thread)
+sched_edge_thread_avoid_processor(processor_t processor, thread_t thread, ast_t reason)
 {
 	processor_set_t preferred_pset = pset_array[sched_edge_thread_preferred_cluster(thread)];
 	if (thread_shared_rsrc_policy_get(thread, CLUSTER_SHARED_RSRC_TYPE_RR)) {
@@ -4112,10 +4080,22 @@ sched_edge_thread_avoid_processor(processor_t processor, thread_t thread)
 	    (sched_edge_cluster_load_metric(preferred_pset, thread->th_sched_bucket) == 0)) {
 		return true;
 	}
+
+	/*
+	 * On quantum expiry, check the migration bitmask if this thread should be migrated off this core.
+	 * A migration is only recommended if there's a preferred core in this cluster that's idle.
+	 */
+	if (reason & AST_QUANTUM) {
+		if (bit_test(processor->processor_set->perfcontrol_cpu_migration_bitmask, processor->cpu_id) &&
+		    (processor->processor_set->cpu_state_map[PROCESSOR_IDLE] & processor->processor_set->perfcontrol_cpu_preferred_bitmask) != 0) {
+			return true;
+		}
+	}
+
 	return false;
 }
 
-static void
+static bool
 sched_edge_balance(__unused processor_t cprocessor, processor_set_t cpset)
 {
 	assert(cprocessor == current_processor());
@@ -4152,6 +4132,9 @@ sched_edge_balance(__unused processor_t cprocessor, processor_set_t cpset)
 		sched_ipi_perform(ast_processor, ipi_type[cpuid]);
 		KDBG(MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_EDGE_REBAL_RUNNING) | DBG_FUNC_NONE, 0, cprocessor->cpu_id, cpuid, 0);
 	}
+
+	/* Core should light-weight idle using WFE if it just sent out rebalance IPIs */
+	return ast_processor_map != 0;
 }
 
 /*
@@ -4439,9 +4422,8 @@ sched_edge_amp_rebalance_pset(processor_set_t preferred_pset, thread_t thread)
  * resultant pset lock is held.
  */
 static processor_set_t
-sched_edge_migrate_candidate(processor_set_t preferred_pset, thread_t thread, processor_set_t locked_pset, bool switch_pset_locks)
+sched_edge_migrate_candidate(_Nullable processor_set_t preferred_pset, thread_t thread, processor_set_t locked_pset, bool switch_pset_locks)
 {
-	__kdebug_only uint32_t preferred_cluster_id = preferred_pset->pset_cluster_id;
 	processor_set_t selected_pset = preferred_pset;
 	cluster_shared_rsrc_type_t shared_rsrc_type = sched_edge_thread_shared_rsrc_type(thread);
 	bool shared_rsrc_thread = (shared_rsrc_type != CLUSTER_SHARED_RSRC_TYPE_NONE);
@@ -4449,14 +4431,16 @@ sched_edge_migrate_candidate(processor_set_t preferred_pset, thread_t thread, pr
 	if (SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread)) {
 		/* For bound threads always recommend the cluster its bound to */
 		selected_pset = pset_array[sched_edge_thread_bound_cluster_id(thread)];
-		locked_pset = sched_edge_switch_pset_lock(selected_pset, locked_pset, switch_pset_locks);
-		if (sched_edge_pset_available(selected_pset) || (SCHED_CLUTCH_THREAD_CLUSTER_BOUND_SOFT(thread) == false)) {
-			/*
-			 * If the bound cluster is not available, check if the thread is soft bound. For soft bound threads,
-			 * fall through to the regular cluster selection logic which handles unavailable clusters
-			 * appropriately. If the thread is hard bound, then return the bound cluster always.
-			 */
-			return selected_pset;
+		if (selected_pset != NULL) {
+			locked_pset = sched_edge_switch_pset_lock(selected_pset, locked_pset, switch_pset_locks);
+			if (sched_edge_pset_available(selected_pset) || (SCHED_CLUTCH_THREAD_CLUSTER_BOUND_SOFT(thread) == false)) {
+				/*
+				 * If the bound cluster is not available, check if the thread is soft bound. For soft bound threads,
+				 * fall through to the regular cluster selection logic which handles unavailable clusters
+				 * appropriately. If the thread is hard bound, then return the bound cluster always.
+				 */
+				return selected_pset;
+			}
 		}
 	}
 
@@ -4466,12 +4450,17 @@ sched_edge_migrate_candidate(processor_set_t preferred_pset, thread_t thread, pr
 	task_t task = get_threadtask(thread);
 	if (enable_task_set_cluster_type && (task->t_flags & TF_USE_PSET_HINT_CLUSTER_TYPE)) {
 		processor_set_t pset_hint = task->pset_hint;
-		if (pset_hint && selected_pset->pset_cluster_type != pset_hint->pset_cluster_type) {
+		if (pset_hint && (selected_pset == NULL || selected_pset->pset_cluster_type != pset_hint->pset_cluster_type)) {
 			selected_pset = pset_hint;
 			goto migrate_candidate_available_check;
 		}
 	}
 #endif
+
+	if (preferred_pset == NULL) {
+		/* The preferred_pset has not finished initializing at boot */
+		goto migrate_candidate_available_check;
+	}
 
 	if (thread->sched_pri >= BASEPRI_RTQUEUES) {
 		/* For realtime threads, try and schedule them on the preferred pset always */
@@ -4507,9 +4496,15 @@ sched_edge_migrate_candidate(processor_set_t preferred_pset, thread_t thread, pr
 	selected_pset = sched_edge_migrate_edges_evaluate(preferred_pset, preferred_cluster_load, thread);
 
 migrate_candidate_available_check:
+	if (selected_pset == NULL) {
+		/* The selected_pset has not finished initializing at boot */
+		pset_unlock(locked_pset);
+		return NULL;
+	}
+
 	locked_pset = sched_edge_switch_pset_lock(selected_pset, locked_pset, switch_pset_locks);
 	if (sched_edge_pset_available(selected_pset) == true) {
-		KDBG(MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_EDGE_CLUSTER_OVERLOAD) | DBG_FUNC_NONE, thread_tid(thread), preferred_cluster_id, selected_pset->pset_cluster_id, preferred_cluster_load);
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_EDGE_CLUSTER_OVERLOAD) | DBG_FUNC_NONE, thread_tid(thread), preferred_pset->pset_cluster_id, selected_pset->pset_cluster_id, preferred_cluster_load);
 		return selected_pset;
 	}
 	/* Looks like selected_pset is not available for scheduling; remove it from candidate_cluster_bitmap */
@@ -4730,8 +4725,9 @@ sched_edge_migrate_thread_group_running_threads(
 			if (ipi_type[cpuid] != SCHED_IPI_NONE) {
 				bit_set(ast_processor_map, cpuid);
 			} else if (src_processor == current_processor()) {
-				ast_on(AST_PREEMPT);
 				bit_set(root_clutch->scr_pset->pending_AST_PREEMPT_cpu_mask, cpuid);
+				ast_t new_preempt = update_pending_nonurgent_preemption(src_processor, AST_PREEMPT);
+				ast_on(new_preempt);
 			}
 		}
 	}

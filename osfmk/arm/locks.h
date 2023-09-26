@@ -45,25 +45,6 @@
 #endif
 
 #ifdef  MACH_KERNEL_PRIVATE
-
-#define enaLkDeb                0x00000001      /* Request debug in default attribute */
-#define enaLkStat               0x00000002      /* Request statistic in default attribute */
-#define disLkRWPrio             0x00000004      /* Disable RW lock priority promotion */
-#define enaLkTimeStat           0x00000008      /* Request time statistics in default attribute */
-#define disLkRWDebug            0x00000010      /* Disable RW lock best-effort debugging */
-
-#define disLkType               0x80000000      /* Disable type checking */
-#define disLktypeb              0
-#define disLkThread             0x40000000      /* Disable ownership checking */
-#define disLkThreadb            1
-#define enaLkExtStck            0x20000000      /* Enable extended backtrace */
-#define enaLkExtStckb           2
-#define disLkMyLck              0x10000000      /* Disable recursive lock dectection */
-#define disLkMyLckb             3
-
-#endif
-
-#ifdef  MACH_KERNEL_PRIVATE
 #if LCK_SPIN_IS_TICKET_LOCK
 typedef lck_ticket_t lck_spin_t;
 #else

@@ -396,7 +396,10 @@ _coproc_list_callback(kd_callback_type type, void *arg)
 	}
 }
 
-#define EXTRA_COPROC_COUNT (32)
+// Leave some extra space for coprocessors to register while tracing is active.
+#define EXTRA_COPROC_COUNT      (16)
+// There are more coprocessors registering during boot tracing.
+#define EXTRA_COPROC_COUNT_BOOT (32)
 
 static kdebug_emit_filter_t
 _trace_emit_filter(void)
@@ -2398,7 +2401,7 @@ _kd_sysctl_internal(int op, int value, user_addr_t where, size_t *sizep)
 		kdbg_set_nkdbufs_trace(value);
 		return 0;
 	case KERN_KDSETUP:
-		return kdbg_reinit(0);
+		return kdbg_reinit(EXTRA_COPROC_COUNT);
 	case KERN_KDREMOVE:
 		ktrace_reset(KTRACE_KDEBUG);
 		return 0;
@@ -2839,7 +2842,7 @@ kdebug_trace_start(unsigned int n_events, const char *filter_desc,
 
 	kernel_debug_string_early("start_kern_tracing");
 
-	int error = kdbg_reinit(EXTRA_COPROC_COUNT);
+	int error = kdbg_reinit(EXTRA_COPROC_COUNT_BOOT);
 	if (error != 0) {
 		printf("kdebug: allocation failed, kernel tracing not started: %d\n",
 		    error);

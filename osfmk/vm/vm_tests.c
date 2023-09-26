@@ -1187,7 +1187,7 @@ vm_test_collapse_overflow(void)
 	/* create an object for which (int)(size>>PAGE_SHIFT) = 0 */
 	size = 0x400000000000ULL;
 	assert((int)(size >> PAGE_SHIFT) == 0);
-	backing_object = vm_object_allocate(size);
+	backing_object = vm_object_allocate(size + PAGE_SIZE);
 	assert(backing_object);
 	vm_object_reference(backing_object);
 	/* insert a page */
@@ -1211,13 +1211,30 @@ vm_test_collapse_overflow(void)
 	/* trigger a bypass */
 	vm_object_lock(object);
 	vm_object_collapse(object, 0, TRUE);
+	/* check that it did not bypass the backing object */
 	if (object->shadow != backing_object) {
 		panic("%s:%d FAIL\n", __FUNCTION__, __LINE__);
 	}
 	vm_object_unlock(object);
+
+	/* remove the page from the backing object */
+	vm_object_lock(backing_object);
+	vm_page_remove(m, TRUE);
+	vm_object_unlock(backing_object);
+	/* trigger a bypass */
+	vm_object_lock(object);
+	vm_object_collapse(object, 0, TRUE);
+	/* check that it did bypass the backing object */
+	if (object->shadow == backing_object) {
+		panic("%s:%d FAIL\n", __FUNCTION__, __LINE__);
+	}
+	vm_page_insert(m, object, 0);
+	vm_object_unlock(object);
+
 	/* cleanup */
 	vm_object_deallocate(object);
-	vm_object_deallocate(backing_object);
+	/* "backing_object" already lost its reference during the bypass */
+//	vm_object_deallocate(backing_object);
 
 	printf("%s:%d PASS\n", __FUNCTION__, __LINE__);
 }

@@ -28,6 +28,7 @@
 
 #include <sys/errno.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 
 #include <netinet/in.h>
 
@@ -104,7 +105,7 @@ test_ip_drop_membership(uint32_t max)
 		maddr += 1;
 
 		mreq.imr_multiaddr.s_addr = htonl(maddr);
-		mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+		mreq.imr_interface.s_addr = htonl(INADDR_LOOPBACK);
 
 		print_mreq("IP_ADD_MEMBERSHIP", &mreq);
 		if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void *)&mreq, sizeof(mreq)) == -1) {
@@ -112,7 +113,7 @@ test_ip_drop_membership(uint32_t max)
 			 * The call is expected to fail when we reach the limit of membership
 			 * and when the device does not have an IP address
 			 */
-			if (errno == ETOOMANYREFS || errno == EADDRNOTAVAIL) {
+			if (errno == ETOOMANYREFS || errno == EADDRNOTAVAIL || errno == ENOMEM) {
 				T_LOG("setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP) %s", strerror(errno));
 				break;
 			}
@@ -122,13 +123,13 @@ test_ip_drop_membership(uint32_t max)
 		maddr += 1;
 
 		mreq_src.imr_multiaddr.s_addr = htonl(maddr);
-		mreq_src.imr_sourceaddr.s_addr = htonl(INADDR_ANY);
-		mreq_src.imr_interface.s_addr = htonl(INADDR_ANY);
+		mreq_src.imr_sourceaddr.s_addr = htonl(INADDR_LOOPBACK);
+		mreq_src.imr_interface.s_addr = htonl(INADDR_LOOPBACK);
 
 		print_mreq_src("IP_ADD_SOURCE_MEMBERSHIP", &mreq_src);
 
 		if (setsockopt(fd, IPPROTO_IP, IP_ADD_SOURCE_MEMBERSHIP, (void *)&mreq_src, sizeof(mreq_src)) == -1) {
-			if (errno == ETOOMANYREFS || errno == EADDRNOTAVAIL) {
+			if (errno == ETOOMANYREFS || errno == EADDRNOTAVAIL || errno == ENOMEM) {
 				T_LOG("setsockopt(IPPROTO_IP, IP_ADD_SOURCE_MEMBERSHIP) %s", strerror(errno));
 				break;
 			}
@@ -149,10 +150,12 @@ test_ip_drop_membership(uint32_t max)
 			T_ASSERT_POSIX_SUCCESS(-1, "setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP)");
 		}
 	}
+	close(fd);
 }
 
 T_DECL(ip_drop_membership, "test IP_DROP_MEMBERSHIP")
 {
 	test_ip_drop_membership(0xffff);
+
 	T_PASS("ip_drop_membership");
 }

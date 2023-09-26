@@ -54,7 +54,7 @@
 #include "kasan-classic-arm64.h"
 #elif KASAN_TBI
 #include "kasan-tbi-arm64.h"
-_Static_assert((KASAN_TBI_ADDR_SIZE > VM_KERNEL_POINTER_SIGNIFICANT_BITS), "Kernel pointers leave no room for tagging");
+_Static_assert((VM_MEMTAG_PTR_SIZE > VM_KERNEL_POINTER_SIGNIFICANT_BITS), "Kernel pointers leave no room for tagging");
 #else /* KASAN_CLASSIC || KASAN_TBI */
 #error "No model defined for the shadow table"
 #endif /* KASAN_CLASSIC || KASAN_TBI */

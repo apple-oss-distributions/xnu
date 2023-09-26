@@ -14,7 +14,7 @@ EXPINC_SUBDIRS = \
 
 # Files that are public on macOS, but private on embedded
 EMBEDDED_PRIVATE_DATAFILES = \
-	disk.h ioctl_compat.h kdebug.h kernel_types.h ttychars.h ttydev.h vnode.h
+	disk.h ioctl_compat.h kdebug.h kern_control.h kernel_types.h proc_info.h reboot.h ttychars.h ttydev.h vnode.h
 
 ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
 EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
@@ -35,9 +35,9 @@ DATAFILES = $(sort \
 	errno.h ev.h event.h fasttrap.h fasttrap_isa.h fcntl.h file.h filedesc.h filio.h fsgetpath.h gmon.h \
 	ioccom.h ioctl.h \
 	ipc.h kernel.h kern_event.h lctx.h loadable_fs.h lock.h lockf.h \
-	kauth.h kdebug_signpost.h kern_control.h lockstat.h malloc.h \
+	kauth.h kdebug_signpost.h lockstat.h malloc.h \
 	mbuf.h mman.h mount.h msg.h msgbuf.h netport.h param.h paths.h pipe.h poll.h \
-	proc.h  proc_info.h ptrace.h queue.h quota.h reboot.h resource.h resourcevar.h \
+	proc.h ptrace.h queue.h quota.h resource.h resourcevar.h \
 	sbuf.h posix_sem.h posix_shm.h random.h sdt.h\
 	select.h sem.h semaphore.h shm.h signal.h signalvar.h snapshot.h socket.h socketvar.h sockio.h stat.h stdio.h \
 	sysctl.h syslimits.h syslog.h sys_domain.h termios.h  time.h \
@@ -78,6 +78,7 @@ PRIVATE_DATAFILES = $(sort \
 	domain.h \
 	event.h \
 	event_log.h \
+	event_private.h \
 	fcntl.h \
 	fileport.h \
 	fsctl.h \
@@ -91,7 +92,6 @@ PRIVATE_DATAFILES = $(sort \
 	kdebug.h \
 	kdebug_private.h \
 	kdebug_triage.h \
-	kern_control.h \
 	kern_debug.h \
 	kern_event.h \
 	kern_memorystatus.h \
@@ -107,7 +107,7 @@ PRIVATE_DATAFILES = $(sort \
 	preoslog.h \
 	priv.h \
 	proc.h \
-	proc_info.h \
+	proc_info_private.h \
 	proc_uuid_policy.h \
 	process_policy.h \
 	reason.h \
@@ -181,11 +181,11 @@ PRIVATE_KERNELFILES = \
 	disktab.h \
 	eventhandler.h \
 	event_log.h \
+	event_private.h \
 	fbt.h \
 	fileport.h \
 	fsctl.h \
 	fslog.h \
-	kasl.h \
 	kern_memorystatus.h \
 	kern_memorystatus_freeze.h \
 	kern_memorystatus_notify.h \
@@ -200,6 +200,7 @@ PRIVATE_KERNELFILES = \
 	persona.h \
 	preoslog.h \
 	proc_info.h \
+	proc_info_private.h \
 	pthread_shims.h \
 	quota.h \
 	reboot.h \
@@ -213,6 +214,7 @@ PRIVATE_KERNELFILES = \
 	tty.h  ttychars.h \
 	ttydefaults.h ttydev.h \
 	user.h \
+	variant_internal.h \
 	vfs_context.h \
 	vmmeter.h \
 	reason.h \
@@ -227,6 +229,7 @@ PRIVATE_KERNELFILES = \
 	vsock_transport.h \
 	trust_caches.h \
 	code_signing.h \
+	lockdown_mode.h \
 
 XNU_ONLY_EXPORTS = \
 	bsdtask_info.h \
@@ -248,8 +251,8 @@ XNU_ONLY_EXPORTS = \
 	ux_exception.h \
 	vnode_internal.h \
 	vsock_domain.h \
-	code_signing_internal.h
-
+	code_signing_internal.h \
+	trusted_execution_monitor.h
 
 # /usr/include
 INSTALL_MI_LIST	= ${DATAFILES}
@@ -272,9 +275,9 @@ EXPORT_MI_DIR = sys
 
 # /usr/local/include
 INSTALL_MI_LCL_LIST = $(sort \
-	codesign.h content_protection.h csr.h decmpfs.h fsevents.h kdebug_private.h \
-	kern_memorystatus.h perfmon_private.h preoslog.h reason.h resource_private.h \
-	stackshot.h work_interval.h event_log.h code_signing.h \
+	codesign.h content_protection.h csr.h decmpfs.h event_private.h fsevents.h guarded.h \
+	kdebug_private.h kern_memorystatus.h perfmon_private.h preoslog.h proc_info_private.h \
+	reason.h resource_private.h stackshot.h work_interval.h event_log.h code_signing.h \
 	${EXTRA_PRIVATE_DATAFILES})
 
 # /System/Library/Frameworks/System.framework/PrivateHeaders
@@ -329,6 +332,9 @@ _symbol_aliasing.h: $(MAKE_SYMBOL_ALIASING)
 
 # generated headers needed early (used by iig during installhdrs of iokit/DriverKit)
 SETUP_GEN_LIST = _posix_availability.h _symbol_aliasing.h
+ifneq ($(filter 1,$(EXCLAVEKIT) $(EXCLAVECORE)),)
+SETUP_GEN_LIST =
+endif
 
 do_build_setup:: $(SETUP_GEN_LIST)
 

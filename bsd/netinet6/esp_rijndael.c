@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -329,7 +329,7 @@ esp_cbc_decrypt_aes(
 		dn += len;
 
 		// next iv
-		bcopy(sp + len - AES_BLOCKLEN, iv, AES_BLOCKLEN);
+		memcpy(iv, sp + len - AES_BLOCKLEN, AES_BLOCKLEN);
 
 		/* find the next source block */
 		while (s && sn >= s->m_len) {
@@ -584,6 +584,87 @@ esp_cbc_encrypt_aes(
 	return 0;
 }
 
+int
+esp_aes_cbc_encrypt_data(struct secasvar *sav, uint8_t *input_data,
+    size_t input_data_len, struct newesp *esp_hdr, uint8_t *out_iv,
+    size_t out_ivlen, uint8_t *output_data, size_t output_data_len)
+{
+	aes_encrypt_ctx *ctx = NULL;
+	uint8_t *ivp = NULL;
+	aes_rval rc = 0;
+
+	ESP_CHECK_ARG(sav);
+	ESP_CHECK_ARG(input_data);
+	ESP_CHECK_ARG(esp_hdr);
+	ESP_CHECK_ARG(out_iv);
+	ESP_CHECK_ARG(output_data);
+
+	VERIFY(input_data_len > 0);
+	VERIFY(output_data_len >= input_data_len);
+
+	VERIFY(out_ivlen == AES_BLOCKLEN);
+	memcpy(out_iv, sav->iv, out_ivlen);
+	ivp = (uint8_t *)sav->iv;
+
+	if (input_data_len % AES_BLOCKLEN) {
+		esp_log_err("payload length %zu must be multiple of "
+		    "AES_BLOCKLEN, SPI 0x%08x", input_data_len, ntohl(sav->spi));
+		return EINVAL;
+	}
+
+	ctx = (aes_encrypt_ctx *)(&(((aes_ctx *)sav->sched)->encrypt));
+
+	VERIFY((input_data_len >> 4) <= UINT32_MAX);
+	if (__improbable((rc = aes_encrypt_cbc(input_data, ivp,
+	    (unsigned int)(input_data_len >> 4), output_data, ctx)) != 0)) {
+		esp_log_err("encrypt failed %d, SPI 0x%08x", rc, ntohl(sav->spi));
+		return rc;
+	}
+
+	key_sa_stir_iv(sav);
+	return 0;
+}
+
+int
+esp_aes_cbc_decrypt_data(struct secasvar *sav, uint8_t *input_data,
+    size_t input_data_len, struct newesp *esp_hdr, uint8_t *iv,
+    size_t ivlen, uint8_t *output_data, size_t output_data_len)
+{
+	aes_decrypt_ctx *ctx = NULL;
+	aes_rval rc = 0;
+
+	ESP_CHECK_ARG(sav);
+	ESP_CHECK_ARG(input_data);
+	ESP_CHECK_ARG(esp_hdr);
+	ESP_CHECK_ARG(output_data);
+
+	VERIFY(input_data_len > 0);
+	VERIFY(output_data_len >= input_data_len);
+
+	if (__improbable(ivlen != AES_BLOCKLEN)) {
+		esp_log_err("ivlen(%zu) != AES_BLOCKLEN, SPI 0x%08x",
+		    ivlen, ntohl(sav->spi));
+		return EINVAL;
+	}
+
+	if (__improbable(input_data_len % AES_BLOCKLEN)) {
+		esp_packet_log_err("input data length(%zu) must be a multiple of "
+		    "AES_BLOCKLEN", input_data_len);
+		return EINVAL;
+	}
+
+	ctx = (aes_decrypt_ctx *)(&(((aes_ctx *)sav->sched)->decrypt));
+
+	VERIFY((input_data_len >> 4) <= UINT32_MAX);
+	if (__improbable((rc = aes_decrypt_cbc(input_data, iv,
+	    (unsigned int)(input_data_len >> 4), output_data, ctx)) != 0)) {
+		esp_log_err("decrypt failed %d, SPI 0x%08x", rc, ntohl(sav->spi));
+		return rc;
+	}
+
+	return 0;
+}
+
 size_t
 esp_gcm_schedlen(
 	__unused const struct esp_algorithm *algo)
@@ -599,6 +680,7 @@ esp_gcm_schedule( __unused const struct esp_algorithm *algo,
 	aes_gcm_ctx *ctx = (aes_gcm_ctx*)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
 	const u_int ivlen = sav->ivlen;
 	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) != 0);
+	const bool gmac_only = (sav->alg_enc == SADB_X_EALG_AES_GMAC);
 	unsigned char nonce[ESP_GCM_SALT_LEN + ivlen];
 	int rc;
 
@@ -607,6 +689,11 @@ esp_gcm_schedule( __unused const struct esp_algorithm *algo,
 
 	if (ivlen != (implicit_iv ? 0 : ESP_GCM_IVLEN)) {
 		ipseclog((LOG_ERR, "%s: unsupported ivlen %d\n", __FUNCTION__, ivlen));
+		return EINVAL;
+	}
+
+	if (implicit_iv && gmac_only) {
+		ipseclog((LOG_ERR, "%s: IIV and GMAC-only not supported together\n", __FUNCTION__));
 		return EINVAL;
 	}
 
@@ -680,27 +767,31 @@ esp_gcm_encrypt_aes(
 	const struct esp_algorithm *algo __unused,
 	int ivlen)
 {
-	struct mbuf *s;
-	struct mbuf *d, *d0, *dp;
-	int soff;       /* offset from the head of chain, to head of this mbuf */
-	int sn, dn;     /* offset from the head of the mbuf, to meat */
-	const size_t ivoff = off + sizeof(struct newesp);
-	const size_t bodyoff = ivoff + ivlen;
-	u_int8_t *dptr, *sp, *sp_unaligned, *sp_aligned = NULL;
+	struct mbuf *s = m;
+	uint32_t soff = 0;       /* offset from the head of chain, to head of this mbuf */
+	uint32_t sn = 0;     /* offset from the head of the mbuf, to meat */
+	uint8_t *sp = NULL;
 	aes_gcm_ctx *ctx;
-	struct mbuf *scut;
-	int scutoff;
-	int i, len;
+	uint32_t len;
 	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) != 0);
+	const bool gmac_only = (sav->alg_enc == SADB_X_EALG_AES_GMAC);
 	struct newesp esp;
 	unsigned char nonce[ESP_GCM_SALT_LEN + ESP_GCM_IVLEN];
 
 	VERIFY(off <= INT_MAX);
+	const size_t ivoff = off + sizeof(struct newesp);
 	VERIFY(ivoff <= INT_MAX);
+	const size_t bodyoff = ivoff + ivlen;
 	VERIFY(bodyoff <= INT_MAX);
 
 	if (ivlen != (implicit_iv ? 0 : ESP_GCM_IVLEN)) {
 		ipseclog((LOG_ERR, "%s: unsupported ivlen %d\n", __FUNCTION__, ivlen));
+		m_freem(m);
+		return EINVAL;
+	}
+
+	if (implicit_iv && gmac_only) {
+		ipseclog((LOG_ERR, "%s: IIV and GMAC-only not supported together\n", __FUNCTION__));
 		m_freem(m);
 		return EINVAL;
 	}
@@ -736,7 +827,6 @@ esp_gcm_encrypt_aes(
 		 */
 		memcpy(sav->iv, (nonce + ESP_GCM_SALT_LEN), ivlen);
 		m_copyback(m, (int)ivoff, ivlen, sav->iv);
-		cc_clear(sizeof(nonce), nonce);
 	} else {
 		/* Use the ESP sequence number in the header to form the
 		 * nonce according to RFC 8750. The first 4 bytes are the
@@ -745,10 +835,9 @@ esp_gcm_encrypt_aes(
 		 */
 		memcpy(nonce, _KEYBUF(sav->key_enc) + _KEYLEN(sav->key_enc) - ESP_GCM_SALT_LEN, ESP_GCM_SALT_LEN);
 		memcpy(nonce + sizeof(nonce) - sizeof(esp.esp_seq), &esp.esp_seq, sizeof(esp.esp_seq));
-		int rc = aes_encrypt_set_iv_gcm((const unsigned char *)nonce, sizeof(nonce), ctx->encrypt);
-		cc_clear(sizeof(nonce), nonce);
-		if (rc) {
+		if (aes_encrypt_set_iv_gcm((const unsigned char *)nonce, sizeof(nonce), ctx->encrypt)) {
 			ipseclog((LOG_ERR, "%s: iv set failure\n", __FUNCTION__));
+			cc_clear(sizeof(nonce), nonce);
 			m_freem(m);
 			return EINVAL;
 		}
@@ -757,160 +846,73 @@ esp_gcm_encrypt_aes(
 	if (m->m_pkthdr.len < bodyoff) {
 		ipseclog((LOG_ERR, "%s: bad len %d/%u\n", __FUNCTION__,
 		    m->m_pkthdr.len, (u_int32_t)bodyoff));
+		cc_clear(sizeof(nonce), nonce);
 		m_freem(m);
 		return EINVAL;
 	}
 
-
-	/* Set Additional Authentication Data */
+	/* Add ESP header to Additional Authentication Data */
 	if (aes_encrypt_aad_gcm((unsigned char*)&esp, sizeof(esp), ctx->encrypt)) {
-		ipseclog((LOG_ERR, "%s: packet encryption AAD failure\n", __FUNCTION__));
+		ipseclog((LOG_ERR, "%s: packet encryption ESP header AAD failure\n", __FUNCTION__));
+		cc_clear(sizeof(nonce), nonce);
 		m_freem(m);
 		return EINVAL;
 	}
+	/* Add IV to Additional Authentication Data for GMAC-only mode */
+	if (gmac_only) {
+		if (aes_encrypt_aad_gcm(nonce + ESP_GCM_SALT_LEN, ESP_GCM_IVLEN, ctx->encrypt)) {
+			ipseclog((LOG_ERR, "%s: packet encryption IV AAD failure\n", __FUNCTION__));
+			cc_clear(sizeof(nonce), nonce);
+			m_freem(m);
+			return EINVAL;
+		}
+	}
 
-	s = m;
-	soff = sn = dn = 0;
-	d = d0 = dp = NULL;
-	sp = dptr = NULL;
+	/* Clear nonce */
+	cc_clear(sizeof(nonce), nonce);
 
 	/* skip headers/IV */
-	while (soff < bodyoff) {
+	while (s != NULL && soff < bodyoff) {
 		if (soff + s->m_len > bodyoff) {
-			sn = (int)(bodyoff - soff);
+			sn = (uint32_t)bodyoff - soff;
 			break;
 		}
 
 		soff += s->m_len;
 		s = s->m_next;
 	}
-	scut = s;
-	scutoff = sn;
 
-	/* skip over empty mbuf */
-	while (s && s->m_len == 0) {
+	/* Encrypt (or add to AAD) payload */
+	while (s != NULL && soff < m->m_pkthdr.len) {
+		/* skip empty mbufs */
+		if ((len = s->m_len - sn) != 0) {
+			sp = mtod(s, uint8_t *) + sn;
+
+			if (!gmac_only) {
+				if (aes_encrypt_gcm(sp, len, sp, ctx->encrypt)) {
+					ipseclog((LOG_ERR, "%s: failed to encrypt\n", __FUNCTION__));
+					m_freem(m);
+					return EINVAL;
+				}
+			} else {
+				if (aes_encrypt_aad_gcm(sp, len, ctx->encrypt)) {
+					ipseclog((LOG_ERR, "%s: failed to add data to AAD\n", __FUNCTION__));
+					m_freem(m);
+					return EINVAL;
+				}
+			}
+		}
+
+		sn = 0;
+		soff += s->m_len;
 		s = s->m_next;
 	}
 
-	while (soff < m->m_pkthdr.len) {
-		/* source */
-		sp = mtod(s, u_int8_t *) + sn;
-		len = s->m_len - sn;
-
-		/* destination */
-		if (!d || (dn + len > d->m_len)) {
-			if (d) {
-				dp = d;
-			}
-			MGET(d, M_DONTWAIT, MT_DATA);
-			i = m->m_pkthdr.len - (soff + sn);
-			if (d && i > MLEN) {
-				MCLGET(d, M_DONTWAIT);
-				if ((d->m_flags & M_EXT) == 0) {
-					d = m_mbigget(d, M_DONTWAIT);
-					if ((d->m_flags & M_EXT) == 0) {
-						m_free(d);
-						d = NULL;
-					}
-				}
-			}
-			if (!d) {
-				m_freem(m);
-				if (d0) {
-					m_freem(d0);
-				}
-				return ENOBUFS;
-			}
-			if (!d0) {
-				d0 = d;
-			}
-			if (dp) {
-				dp->m_next = d;
-			}
-
-			// try to make mbuf data aligned
-			if (!IPSEC_IS_P2ALIGNED(d->m_data)) {
-				m_adj(d, IPSEC_GET_P2UNALIGNED_OFS(d->m_data));
-			}
-
-			d->m_len = (int)M_TRAILINGSPACE(d);
-
-			if (d->m_len > i) {
-				d->m_len = i;
-			}
-
-			dptr = mtod(d, u_int8_t *);
-			dn = 0;
-		}
-
-		/* adjust len if greater than space available */
-		if (len > d->m_len - dn) {
-			len = d->m_len - dn;
-		}
-
-		/* encrypt */
-		// check input pointer alignment and use a separate aligned buffer (if sp is not aligned on 4-byte boundary).
-		if (IPSEC_IS_P2ALIGNED(sp)) {
-			sp_unaligned = NULL;
-		} else {
-			sp_unaligned = sp;
-			if (len > MAX_REALIGN_LEN) {
-				m_freem(m);
-				if (d0) {
-					m_freem(d0);
-				}
-				if (sp_aligned != NULL) {
-					kfree_data(sp_aligned, MAX_REALIGN_LEN);
-					sp_aligned = NULL;
-				}
-				return ENOBUFS;
-			}
-			if (sp_aligned == NULL) {
-				sp_aligned = (u_int8_t *)kalloc_data(MAX_REALIGN_LEN, Z_NOWAIT);
-				if (sp_aligned == NULL) {
-					m_freem(m);
-					if (d0) {
-						m_freem(d0);
-					}
-					return ENOMEM;
-				}
-			}
-			sp = sp_aligned;
-			memcpy(sp, sp_unaligned, len);
-		}
-
-		if (aes_encrypt_gcm(sp, len, dptr + dn, ctx->encrypt)) {
-			ipseclog((LOG_ERR, "%s: failed to encrypt\n", __FUNCTION__));
-			m_freem(m);
-			return EINVAL;
-		}
-
-		// update unaligned pointers
-		if (!IPSEC_IS_P2ALIGNED(sp_unaligned)) {
-			sp = sp_unaligned;
-		}
-
-		/* update offsets */
-		sn += len;
-		dn += len;
-
-		/* find the next source block and skip empty mbufs */
-		while (s && sn >= s->m_len) {
-			sn -= s->m_len;
-			soff += s->m_len;
-			s = s->m_next;
-		}
-	}
-
-	/* free un-needed source mbufs and add dest mbufs to chain */
-	m_freem(scut->m_next);
-	scut->m_len = scutoff;
-	scut->m_next = d0;
-
-	// free memory
-	if (sp_aligned != NULL) {
-		kfree_data(sp_aligned, MAX_REALIGN_LEN);
-		sp_aligned = NULL;
+	if (s == NULL && soff != m->m_pkthdr.len) {
+		ipseclog((LOG_ERR, "%s: not enough mbufs %d %d, SPI 0x%08x",
+		    __FUNCTION__, soff, m->m_pkthdr.len, ntohl(sav->spi)));
+		m_freem(m);
+		return EFBIG;
 	}
 
 	return 0;
@@ -924,28 +926,31 @@ esp_gcm_decrypt_aes(
 	const struct esp_algorithm *algo __unused,
 	int ivlen)
 {
-	struct mbuf *s;
-	struct mbuf *d, *d0, *dp;
-	int soff;       /* offset from the head of chain, to head of this mbuf */
-	int sn, dn;     /* offset from the head of the mbuf, to meat */
-	const size_t ivoff = off + sizeof(struct newesp);
-	const size_t bodyoff = ivoff + ivlen;
-	u_int8_t *dptr;
-	u_int8_t *sp, *sp_unaligned, *sp_aligned = NULL;
+	struct mbuf *s = m;
+	uint32_t soff = 0;       /* offset from the head of chain, to head of this mbuf */
+	uint32_t sn = 0;     /* offset from the head of the mbuf, to meat */
+	uint8_t *sp = NULL;
 	aes_gcm_ctx *ctx;
-	struct mbuf *scut;
-	int scutoff;
-	int     i, len;
+	uint32_t len;
 	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) != 0);
+	const bool gmac_only = (sav->alg_enc == SADB_X_EALG_AES_GMAC);
 	struct newesp esp;
 	unsigned char nonce[ESP_GCM_SALT_LEN + ESP_GCM_IVLEN];
 
 	VERIFY(off <= INT_MAX);
+	const size_t ivoff = off + sizeof(struct newesp);
 	VERIFY(ivoff <= INT_MAX);
+	const size_t bodyoff = ivoff + ivlen;
 	VERIFY(bodyoff <= INT_MAX);
 
 	if (ivlen != (implicit_iv ? 0 : ESP_GCM_IVLEN)) {
 		ipseclog((LOG_ERR, "%s: unsupported ivlen %d\n", __FUNCTION__, ivlen));
+		m_freem(m);
+		return EINVAL;
+	}
+
+	if (implicit_iv && gmac_only) {
+		ipseclog((LOG_ERR, "%s: IIV and GMAC-only not supported together\n", __FUNCTION__));
 		m_freem(m);
 		return EINVAL;
 	}
@@ -978,164 +983,275 @@ esp_gcm_decrypt_aes(
 	}
 
 	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
-	int rc = aes_decrypt_set_iv_gcm(nonce, sizeof(nonce), ctx->decrypt);
-	cc_clear(sizeof(nonce), nonce);
-	if (rc) {
+	if (aes_decrypt_set_iv_gcm(nonce, sizeof(nonce), ctx->decrypt)) {
 		ipseclog((LOG_ERR, "%s: failed to set IV\n", __FUNCTION__));
+		cc_clear(sizeof(nonce), nonce);
 		m_freem(m);
 		return EINVAL;
 	}
 
-	/* Set Additional Authentication Data */
+	/* Add ESP header to Additional Authentication Data */
 	if (aes_decrypt_aad_gcm((unsigned char*)&esp, sizeof(esp), ctx->decrypt)) {
-		ipseclog((LOG_ERR, "%s: packet decryption AAD failure\n", __FUNCTION__));
+		ipseclog((LOG_ERR, "%s: packet decryption ESP header AAD failure\n", __FUNCTION__));
+		cc_clear(sizeof(nonce), nonce);
 		m_freem(m);
 		return EINVAL;
 	}
 
-	s = m;
-	soff = sn = dn = 0;
-	d = d0 = dp = NULL;
-	sp = dptr = NULL;
+	/* Add IV to Additional Authentication Data for GMAC-only mode */
+	if (gmac_only) {
+		if (aes_decrypt_aad_gcm(nonce + ESP_GCM_SALT_LEN, ESP_GCM_IVLEN, ctx->decrypt)) {
+			ipseclog((LOG_ERR, "%s: packet decryption IV AAD failure\n", __FUNCTION__));
+			cc_clear(sizeof(nonce), nonce);
+			m_freem(m);
+			return EINVAL;
+		}
+	}
 
-	/* skip header/IV offset */
-	while (soff < bodyoff) {
+	/* Clear nonce */
+	cc_clear(sizeof(nonce), nonce);
+
+	/* skip headers/IV */
+	while (s != NULL && soff < bodyoff) {
 		if (soff + s->m_len > bodyoff) {
-			sn = (int)(bodyoff - soff);
+			sn = (uint32_t)bodyoff - soff;
 			break;
 		}
 
 		soff += s->m_len;
 		s = s->m_next;
 	}
-	scut = s;
-	scutoff = sn;
 
-	/* skip over empty mbuf */
-	while (s && s->m_len == 0) {
+	/* Decrypt (or just authenticate) payload */
+	while (s != NULL && soff < m->m_pkthdr.len) {
+		/* skip empty mbufs */
+		if ((len = s->m_len - sn) != 0) {
+			sp = mtod(s, uint8_t *) + sn;
+
+			if (!gmac_only) {
+				if (aes_decrypt_gcm(sp, len, sp, ctx->decrypt)) {
+					ipseclog((LOG_ERR, "%s: failed to decrypt\n", __FUNCTION__));
+					m_freem(m);
+					return EINVAL;
+				}
+			} else {
+				if (aes_decrypt_aad_gcm(sp, len, ctx->decrypt)) {
+					ipseclog((LOG_ERR, "%s: failed to add data to AAD\n", __FUNCTION__));
+					m_freem(m);
+					return EINVAL;
+				}
+			}
+		}
+
+		sn = 0;
+		soff += s->m_len;
 		s = s->m_next;
 	}
 
-	while (soff < m->m_pkthdr.len) {
-		/* source */
-		sp = mtod(s, u_int8_t *) + sn;
-		len = s->m_len - sn;
+	if (s == NULL && soff != m->m_pkthdr.len) {
+		ipseclog((LOG_ERR, "%s: not enough mbufs %d %d, SPI 0x%08x",
+		    __FUNCTION__, soff, m->m_pkthdr.len, ntohl(sav->spi)));
+		m_freem(m);
+		return EFBIG;
+	}
 
-		/* destination */
-		if (!d || (dn + len > d->m_len)) {
-			if (d) {
-				dp = d;
-			}
-			MGET(d, M_DONTWAIT, MT_DATA);
-			i = m->m_pkthdr.len - (soff + sn);
-			if (d && i > MLEN) {
-				MCLGET(d, M_DONTWAIT);
-				if ((d->m_flags & M_EXT) == 0) {
-					d = m_mbigget(d, M_DONTWAIT);
-					if ((d->m_flags & M_EXT) == 0) {
-						m_free(d);
-						d = NULL;
-					}
-				}
-			}
-			if (!d) {
-				m_freem(m);
-				if (d0) {
-					m_freem(d0);
-				}
-				return ENOBUFS;
-			}
-			if (!d0) {
-				d0 = d;
-			}
-			if (dp) {
-				dp->m_next = d;
-			}
+	return 0;
+}
 
-			// try to make mbuf data aligned
-			if (!IPSEC_IS_P2ALIGNED(d->m_data)) {
-				m_adj(d, IPSEC_GET_P2UNALIGNED_OFS(d->m_data));
-			}
+int
+esp_aes_gcm_encrypt_data(struct secasvar *sav, uint8_t *input_data,
+    size_t input_data_len, struct newesp *esp_hdr, uint8_t *out_iv,
+    size_t ivlen, uint8_t *output_data, size_t output_data_len)
+{
+	unsigned char nonce[ESP_GCM_SALT_LEN + ESP_GCM_IVLEN] = {};
+	int rc = 0; // return code of corecrypto operations
 
-			d->m_len = (int)M_TRAILINGSPACE(d);
+	ESP_CHECK_ARG(sav);
+	ESP_CHECK_ARG(input_data);
+	ESP_CHECK_ARG(esp_hdr);
+	ESP_CHECK_ARG(output_data);
 
-			if (d->m_len > i) {
-				d->m_len = i;
-			}
+	VERIFY(input_data_len > 0);
+	VERIFY(output_data_len >= input_data_len);
 
-			dptr = mtod(d, u_int8_t *);
-			dn = 0;
+	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) == SADB_X_EXT_IIV);
+	const bool gmac_only = (sav->alg_enc == SADB_X_EALG_AES_GMAC);
+
+	if (__improbable(implicit_iv && gmac_only)) {
+		esp_log_err("IIV and GMAC-only not supported together, SPI  0x%08x\n",
+		    ntohl(sav->spi));
+		return EINVAL;
+	}
+
+	aes_gcm_ctx *ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
+
+	if (__improbable((rc = aes_encrypt_reset_gcm(ctx->encrypt)) != 0)) {
+		esp_log_err("Context reset failure %d, SPI 0x%08x\n",
+		    rc, ntohl(sav->spi));
+		return rc;
+	}
+
+	if (implicit_iv) {
+		VERIFY(out_iv == NULL);
+		VERIFY(ivlen == 0);
+
+		/* Use the ESP sequence number in the header to form the
+		 * nonce according to RFC 8750. The first 4 bytes are the
+		 * salt value, the next 4 bytes are zeroes, and the final
+		 * 4 bytes are the ESP sequence number.
+		 */
+		memcpy(nonce, _KEYBUF(sav->key_enc) + _KEYLEN(sav->key_enc) -
+		    ESP_GCM_SALT_LEN, ESP_GCM_SALT_LEN);
+		memcpy(nonce + sizeof(nonce) - sizeof(esp_hdr->esp_seq),
+		    &esp_hdr->esp_seq, sizeof(esp_hdr->esp_seq));
+		if (__improbable((rc = aes_encrypt_set_iv_gcm((const unsigned char *)nonce,
+		    sizeof(nonce), ctx->encrypt)) != 0)) {
+			esp_log_err("Set IV failure %d, SPI 0x%08x\n",
+			    rc, ntohl(sav->spi));
+			cc_clear(sizeof(nonce), nonce);
+			return rc;
+		}
+	} else {
+		ESP_CHECK_ARG(out_iv);
+		VERIFY(ivlen == ESP_GCM_IVLEN);
+
+		/* generate new iv */
+		if (__improbable((rc = aes_encrypt_inc_iv_gcm((unsigned char *)nonce,
+		    ctx->encrypt)) != 0)) {
+			esp_log_err("IV generation failure %d, SPI 0x%08x\n",
+			    rc, ntohl(sav->spi));
+			cc_clear(sizeof(nonce), nonce);
+			return rc;
 		}
 
-		/* adjust len if greater than space available in dest */
-		if (len > d->m_len - dn) {
-			len = d->m_len - dn;
-		}
+		memcpy(out_iv, (nonce + ESP_GCM_SALT_LEN), ESP_GCM_IVLEN);
+	}
 
-		/* Decrypt */
-		// check input pointer alignment and use a separate aligned buffer (if sp is unaligned on 4-byte boundary).
-		if (IPSEC_IS_P2ALIGNED(sp)) {
-			sp_unaligned = NULL;
-		} else {
-			sp_unaligned = sp;
-			if (len > MAX_REALIGN_LEN) {
-				m_freem(m);
-				if (d0) {
-					m_freem(d0);
-				}
-				if (sp_aligned != NULL) {
-					kfree_data(sp_aligned, MAX_REALIGN_LEN);
-					sp_aligned = NULL;
-				}
-				return ENOBUFS;
-			}
-			if (sp_aligned == NULL) {
-				sp_aligned = (u_int8_t *)kalloc_data(MAX_REALIGN_LEN, Z_NOWAIT);
-				if (sp_aligned == NULL) {
-					m_freem(m);
-					if (d0) {
-						m_freem(d0);
-					}
-					return ENOMEM;
-				}
-			}
-			sp = sp_aligned;
-			memcpy(sp, sp_unaligned, len);
-		}
-		// no need to check output pointer alignment
+	/* Set Additional Authentication Data */
+	if (__improbable((rc = aes_encrypt_aad_gcm((unsigned char*)esp_hdr,
+	    sizeof(*esp_hdr), ctx->encrypt)) != 0)) {
+		esp_log_err("Set AAD failure %d, SPI 0x%08x\n", rc, ntohl(sav->spi));
+		cc_clear(sizeof(nonce), nonce);
+		return rc;
+	}
 
-		if (aes_decrypt_gcm(sp, len, dptr + dn, ctx->decrypt)) {
-			ipseclog((LOG_ERR, "%s: failed to decrypt\n", __FUNCTION__));
-			m_freem(m);
-			return EINVAL;
-		}
-
-		// update unaligned pointers
-		if (!IPSEC_IS_P2ALIGNED(sp_unaligned)) {
-			sp = sp_unaligned;
-		}
-
-		/* udpate offsets */
-		sn += len;
-		dn += len;
-
-		/* find the next source block */
-		while (s && sn >= s->m_len) {
-			sn -= s->m_len;
-			soff += s->m_len;
-			s = s->m_next;
+	/* Add IV to Additional Authentication Data for GMAC-only mode */
+	if (gmac_only) {
+		if (__improbable((rc = aes_encrypt_aad_gcm(nonce +
+		    ESP_GCM_SALT_LEN, ESP_GCM_IVLEN, ctx->encrypt)) != 0)) {
+			esp_log_err("Packet encryption IV AAD failure %d, SPI 0x%08x\n",
+			    rc, ntohl(sav->spi));
+			cc_clear(sizeof(nonce), nonce);
+			return rc;
 		}
 	}
 
-	/* free un-needed source mbufs and add dest mbufs to chain */
-	m_freem(scut->m_next);
-	scut->m_len = scutoff;
-	scut->m_next = d0;
+	cc_clear(sizeof(nonce), nonce);
 
-	// free memory
-	if (sp_aligned != NULL) {
-		kfree_data(sp_aligned, MAX_REALIGN_LEN);
-		sp_aligned = NULL;
+	if (gmac_only) {
+		if (__improbable((rc = aes_encrypt_aad_gcm(input_data, (unsigned int)input_data_len,
+		    ctx->encrypt)) != 0)) {
+			esp_log_err("set aad failure %d, SPI 0x%08x\n", rc, ntohl(sav->spi));
+			return rc;
+		}
+		memcpy(output_data, input_data, input_data_len);
+	} else {
+		if (__improbable((rc = aes_encrypt_gcm(input_data, (unsigned int)input_data_len,
+		    output_data, ctx->encrypt)) != 0)) {
+			esp_log_err("encrypt failure %d, SPI 0x%08x\n", rc, ntohl(sav->spi));
+			return rc;
+		}
+	}
+
+	return 0;
+}
+
+int
+esp_aes_gcm_decrypt_data(struct secasvar *sav, uint8_t *input_data,
+    size_t input_data_len, struct newesp *esp_hdr, uint8_t *iv, size_t ivlen,
+    uint8_t *output_data, size_t output_data_len)
+{
+	unsigned char nonce[ESP_GCM_SALT_LEN + ESP_GCM_IVLEN] = {};
+	aes_gcm_ctx *ctx = NULL;
+	int rc = 0;
+
+	ESP_CHECK_ARG(sav);
+	ESP_CHECK_ARG(input_data);
+	ESP_CHECK_ARG(esp_hdr);
+	ESP_CHECK_ARG(output_data);
+
+	VERIFY(input_data_len > 0);
+	VERIFY(output_data_len >= input_data_len);
+
+	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) == SADB_X_EXT_IIV);
+	const bool gmac_only = (sav->alg_enc == SADB_X_EALG_AES_GMAC);
+
+	if (__improbable(implicit_iv && gmac_only)) {
+		esp_log_err("IIV and GMAC-only not supported together, SPI  0x%08x\n",
+		    ntohl(sav->spi));
+		return EINVAL;
+	}
+
+	memcpy(nonce, _KEYBUF(sav->key_enc) + _KEYLEN(sav->key_enc) -
+	    ESP_GCM_SALT_LEN, ESP_GCM_SALT_LEN);
+
+	if (implicit_iv) {
+		VERIFY(iv == NULL);
+		VERIFY(ivlen == 0);
+
+		/* Use the ESP sequence number in the header to form the
+		 * rest of the nonce according to RFC 8750.
+		 */
+		memcpy(nonce + sizeof(nonce) - sizeof(esp_hdr->esp_seq), &esp_hdr->esp_seq, sizeof(esp_hdr->esp_seq));
+	} else {
+		ESP_CHECK_ARG(iv);
+		VERIFY(ivlen == ESP_GCM_IVLEN);
+
+		memcpy(nonce + ESP_GCM_SALT_LEN, iv, ESP_GCM_IVLEN);
+	}
+
+	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
+
+	if (__improbable((rc = aes_decrypt_set_iv_gcm(nonce, sizeof(nonce),
+	    ctx->decrypt)) != 0)) {
+		esp_log_err("set iv failure %d, SPI 0x%08x\n", rc, ntohl(sav->spi));
+		cc_clear(sizeof(nonce), nonce);
+		return rc;
+	}
+
+	/* Set Additional Authentication Data */
+	if (__improbable((rc = aes_decrypt_aad_gcm((unsigned char *)esp_hdr, sizeof(*esp_hdr),
+	    ctx->decrypt)) != 0)) {
+		esp_log_err("AAD failure %d, SPI 0x%08x\n", rc, ntohl(sav->spi));
+		cc_clear(sizeof(nonce), nonce);
+		return rc;
+	}
+
+	/* Add IV to Additional Authentication Data for GMAC-only mode */
+	if (gmac_only) {
+		if (__improbable((rc = aes_decrypt_aad_gcm(nonce + ESP_GCM_SALT_LEN,
+		    ESP_GCM_IVLEN, ctx->decrypt)) != 0)) {
+			esp_log_err("AAD failure %d, SPI 0x%08x\n", rc, ntohl(sav->spi));
+			cc_clear(sizeof(nonce), nonce);
+			return rc;
+		}
+	}
+
+	cc_clear(sizeof(nonce), nonce);
+
+	if (gmac_only) {
+		if (__improbable((rc = aes_decrypt_aad_gcm(input_data, (unsigned int)input_data_len,
+		    ctx->decrypt)) != 0)) {
+			esp_log_err("AAD failure %d, SPI 0x%08x\n", rc, ntohl(sav->spi));
+			return rc;
+		}
+		memcpy(output_data, input_data, input_data_len);
+	} else {
+		if (__improbable((rc = aes_decrypt_gcm(input_data, (unsigned int)input_data_len,
+		    output_data, ctx->decrypt)) != 0)) {
+			esp_log_err("decrypt failure %d, SPI 0x%08x\n", rc, ntohl(sav->spi));
+			return rc;
+		}
 	}
 
 	return 0;

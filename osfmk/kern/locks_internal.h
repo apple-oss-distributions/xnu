@@ -36,8 +36,9 @@
 #include <kern/percpu.h>
 #include <kern/lock_types.h>
 #include <kern/lock_group.h>
-#include <machine/locks.h>
 #include <machine/cpu_number.h>
+#include <machine/locks.h>
+#include <machine/machine_cpu.h>
 #include <os/atomic_private.h>
 
 /*

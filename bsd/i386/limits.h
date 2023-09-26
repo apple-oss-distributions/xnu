@@ -43,7 +43,7 @@
 #include <i386/_limits.h>
 #endif
 
-#define CHAR_BIT        8               /* number of bits in a char */
+#undef  MB_LEN_MAX
 #define MB_LEN_MAX      6               /* Allow 31 bit UTF2 */
 
 #ifndef DRIVERKIT
@@ -51,6 +51,18 @@
 #define CLK_TCK         __DARWIN_CLK_TCK        /* ticks per second */
 #endif /* !_ANSI_SOURCE && (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 #endif
+
+#if (defined(__has_include) && __has_include(<__xnu_libcxx_sentinel.h>))
+
+#if !__has_include_next(<limits.h>)
+#error Do not build with -nostdinc (use GCC_USE_STANDARD_INCLUDE_SEARCHING=NO)
+#else
+#include_next <limits.h>
+#endif /* __has_include_next */
+
+#else
+
+#define CHAR_BIT        8               /* number of bits in a char */
 
 /*
  * According to ANSI (section 2.2.4.2), the values below must be usable by
@@ -90,6 +102,8 @@
 #define ULLONG_MAX      0xffffffffffffffffULL   /* max unsigned long long */
 #define LLONG_MAX       0x7fffffffffffffffLL    /* max signed long long */
 #define LLONG_MIN       (-0x7fffffffffffffffLL-1) /* min signed long long */
+
+#endif /* defined(__has_include) && __has_include(<__xnu_libcxx_sentinel.h>) */
 
 #if !defined(_ANSI_SOURCE)
 #ifdef __LP64__

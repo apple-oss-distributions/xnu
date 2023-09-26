@@ -574,9 +574,8 @@ kern_packet_clone_internal(const kern_packet_t ph1, kern_packet_t *ph2,
 	VERIFY(SK_PTR_TYPE(ph1) == NEXUS_META_TYPE_PACKET);
 
 	/* Source needs to be finalized (not dropped) and with 1 buflet */
-	if (__improbable((p1->pkt_qum.qum_qflags & QUM_F_FINALIZED) == 0 ||
-	    (p1->pkt_qum.qum_qflags & QUM_F_DROPPED) != 0 ||
-	    p1->pkt_bufs_cnt == 0)) {
+	if ((p1->pkt_qum.qum_qflags & QUM_F_DROPPED) != 0 ||
+	    p1->pkt_bufs_cnt == 0) {
 		return EINVAL;
 	}
 
@@ -654,7 +653,7 @@ kern_packet_clone_internal(const kern_packet_t ph1, kern_packet_t *ph2,
 		ASSERT(p2->pkt_bufs_cnt == p1->pkt_bufs_cnt);
 		if (__probable(p1->pkt_bufs_cnt != 0)) {
 			uint8_t *saddr, *daddr;
-			uint16_t copy_len;
+			uint32_t copy_len;
 			/*
 			 * TODO -- wshen0123@apple.com
 			 * Packets from compat driver could have dlen > dlim
@@ -669,7 +668,7 @@ kern_packet_clone_internal(const kern_packet_t ph1, kern_packet_t *ph2,
 			if (copy_len != 0) {
 				bcopy(saddr, daddr, copy_len);
 			}
-			*__DECONST(uint16_t *, &p2_buf->buf_dlim) =
+			*__DECONST(uint32_t *, &p2_buf->buf_dlim) =
 			    p1_buf->buf_dlim;
 			p2_buf->buf_dlen = p1_buf->buf_dlen;
 			p2_buf->buf_doff = p1_buf->buf_doff;
@@ -707,9 +706,6 @@ kern_packet_clone_internal(const kern_packet_t ph1, kern_packet_t *ph2,
 			*__DECONST(uint16_t *, &p2->pkt_bufs_cnt) =
 			    p1->pkt_bufs_cnt;
 			_KBUF_COPY(p1_buf, p2_buf);
-			_CASSERT(sizeof(p2_buf->buf_flag) == sizeof(uint16_t));
-			*__DECONST(uint16_t *, &p2_buf->buf_flag) &=
-			    ~BUFLET_FLAG_EXTERNAL;
 			ASSERT(p2_buf->buf_nbft_addr == 0);
 			ASSERT(p2_buf->buf_nbft_idx == OBJ_IDX_NONE);
 		}
@@ -819,24 +815,24 @@ kern_packet_get_chain_counts(const kern_packet_t ph, uint32_t *count,
 }
 
 errno_t
-kern_buflet_set_data_offset(const kern_buflet_t buf, const uint16_t doff)
+kern_buflet_set_data_offset(const kern_buflet_t buf, const uint32_t doff)
 {
 	return __buflet_set_data_offset(buf, doff);
 }
 
-uint16_t
+uint32_t
 kern_buflet_get_data_offset(const kern_buflet_t buf)
 {
 	return __buflet_get_data_offset(buf);
 }
 
 errno_t
-kern_buflet_set_data_length(const kern_buflet_t buf, const uint16_t dlen)
+kern_buflet_set_data_length(const kern_buflet_t buf, const uint32_t dlen)
 {
 	return __buflet_set_data_length(buf, dlen);
 }
 
-uint16_t
+uint32_t
 kern_buflet_get_data_length(const kern_buflet_t buf)
 {
 	return __buflet_get_data_length(buf);
@@ -866,6 +862,12 @@ kern_buflet_set_data_address(const kern_buflet_t buf, const void *daddr)
 	return __buflet_set_data_address(buf, daddr);
 }
 
+errno_t
+kern_buflet_set_buffer_offset(const kern_buflet_t buf, const uint32_t off)
+{
+	return __buflet_set_buffer_offset(buf, off);
+}
+
 kern_segment_t
 kern_buflet_get_object_segment(const kern_buflet_t buf,
     kern_obj_idx_seg_t *idx)
@@ -873,95 +875,17 @@ kern_buflet_get_object_segment(const kern_buflet_t buf,
 	return __buflet_get_object_segment(buf, idx);
 }
 
-uint16_t
+uint32_t
 kern_buflet_get_data_limit(const kern_buflet_t buf)
 {
 	return __buflet_get_data_limit(buf);
 }
 
 errno_t
-kern_buflet_set_data_limit(const kern_buflet_t buf, const uint16_t dlim)
+kern_buflet_set_data_limit(const kern_buflet_t buf, const uint32_t dlim)
 {
 	return __buflet_set_data_limit(buf, dlim);
 }
-
-uint16_t
-kern_buflet_get_buffer_offset(const kern_buflet_t buf)
-{
-	return __buflet_get_buffer_offset(buf);
-}
-
-errno_t
-kern_buflet_set_buffer_offset(const kern_buflet_t buf, const uint16_t off)
-{
-	return __buflet_set_buffer_offset(buf, off);
-}
-
-uint16_t
-kern_buflet_get_gro_len(const kern_buflet_t buf)
-{
-	return __buflet_get_gro_len(buf);
-}
-
-errno_t
-kern_buflet_set_gro_len(const kern_buflet_t buf, const uint16_t len)
-{
-	return __buflet_set_gro_len(buf, len);
-}
-
-static int
-kern_buflet_clone_internal(const kern_buflet_t buf1, kern_buflet_t *pbuf_array,
-    uint32_t *size, kern_pbufpool_t pool, uint32_t skmflag)
-{
-	struct __kern_buflet *pbuf;
-	uint32_t itr;
-	int err;
-
-	if (skmflag & SKMEM_NOSLEEP) {
-		err = kern_pbufpool_alloc_batch_buflet_nosleep(pool, pbuf_array,
-		    size, FALSE);
-	} else {
-		err = kern_pbufpool_alloc_batch_buflet(pool, pbuf_array, size, FALSE);
-	}
-	if (__improbable(*size == 0)) {
-		SK_ERR("kern_buflet_clone failed to allocated buflet (err %d)", err);
-		return err;
-	}
-
-	for (itr = 0; itr < *size; itr++) {
-		pbuf = pbuf_array[itr];
-		/* Copy metadata from the src buflet */
-		_KBUF_COPY(buf1, pbuf);
-		_CASSERT(sizeof(pbuf->buf_flag) == sizeof(uint16_t));
-		*__DECONST(uint16_t *, &pbuf->buf_flag) |= BUFLET_FLAG_RAW;
-		BUF_NBFT_ADDR(pbuf, 0);
-		BUF_NBFT_IDX(pbuf, OBJ_IDX_NONE);
-	}
-
-	return err;
-}
-
-errno_t
-kern_buflet_clone(const kern_buflet_t buf1, kern_buflet_t *pbuf_array,
-    uint32_t *size, kern_pbufpool_t pool)
-{
-	return kern_buflet_clone_internal(buf1, pbuf_array, size, pool, 0);
-}
-
-errno_t
-kern_buflet_clone_nosleep(const kern_buflet_t buf1, kern_buflet_t *pbuf_array,
-    uint32_t *size, kern_pbufpool_t pool)
-{
-	return kern_buflet_clone_internal(buf1, pbuf_array, size,
-	           pool, SKMEM_NOSLEEP);
-}
-
-void *
-kern_buflet_get_next_buf(const kern_buflet_t buflet, const void *prev_buf)
-{
-	return __buflet_get_next_buf(buflet, prev_buf);
-}
-
 
 packet_trace_id_t
 kern_packet_get_trace_id(const kern_packet_t ph)
@@ -1037,10 +961,10 @@ kern_packet_get_tx_nexus_port_id(const kern_packet_t ph, uint32_t *nx_port_id)
 	return __packet_get_tx_nx_port_id(ph, nx_port_id);
 }
 
-errno_t
-kern_packet_get_protocol_segment_size(const kern_packet_t ph, uint16_t *seg_sz)
+uint16_t
+kern_packet_get_protocol_segment_size(const kern_packet_t ph)
 {
-	return __packet_get_protocol_segment_size(ph, seg_sz);
+	return __packet_get_protocol_segment_size(ph);
 }
 
 void
@@ -1065,4 +989,69 @@ void
 kern_packet_get_tso_flags(const kern_packet_t ph, packet_tso_flags_t *flags)
 {
 	return __packet_get_tso_flags(ph, flags);
+}
+
+errno_t
+kern_packet_check_for_expiry_and_notify(
+	const kern_packet_t ph, ifnet_t ifp, uint16_t origin, uint16_t status)
+{
+	errno_t err = 0;
+	uint32_t nx_port_id = 0;
+	packet_expiry_action_t exp_action = PACKET_EXPIRY_ACTION_NONE;
+	os_channel_event_packet_transmit_expired_t exp_notif = {0};
+
+	if (__improbable(!ifp)) {
+		return EINVAL;
+	}
+
+	err = __packet_get_expire_time(ph, &exp_notif.packet_tx_expiration_deadline);
+	if (__probable(err)) {
+		if (err == ENOENT) {
+			/* Expiration time is not set; can not continue; not an error. */
+			return 0;
+		}
+		return err;
+	}
+
+	err = __packet_get_expiry_action(ph, &exp_action);
+	if (__probable(err)) {
+		if (err == ENOENT) {
+			/* Expiry action is not set; can not continue; not an error. */
+			return 0;
+		}
+		return err;
+	}
+
+	if (exp_action == PACKET_EXPIRY_ACTION_NONE) {
+		/* Expiry action is no-op; can not continue; not an error. */
+		return 0;
+	}
+
+	exp_notif.packet_tx_expiration_timestamp = mach_absolute_time();
+
+	/* Check whether the packet has expired */
+	if (exp_notif.packet_tx_expiration_timestamp < exp_notif.packet_tx_expiration_deadline) {
+		/* The packet hasn't expired yet; can not continue; not an error */
+		return 0;
+	}
+
+	/* The packet has expired and notification is requested */
+	err = __packet_get_packetid(ph, &exp_notif.packet_id);
+	if (__improbable(err)) {
+		return err;
+	}
+
+	err = __packet_get_tx_nx_port_id(ph, &nx_port_id);
+	if (__improbable(err)) {
+		return err;
+	}
+
+	exp_notif.packet_tx_expiration_status = status;
+	exp_notif.packet_tx_expiration_origin = origin;
+
+	/* Send the notification status */
+	err = kern_channel_event_transmit_expired(
+		ifp, &exp_notif, nx_port_id);
+
+	return err;
 }

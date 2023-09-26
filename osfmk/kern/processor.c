@@ -148,6 +148,7 @@ processor_set_t         pset_array[MAX_PSETS] = { 0 };
 
 static timer_call_func_t running_timer_funcs[] = {
 	[RUNNING_TIMER_QUANTUM] = thread_quantum_expire,
+	[RUNNING_TIMER_PREEMPT] = thread_preempt_expire,
 	[RUNNING_TIMER_KPERF] = kperf_timer_expire,
 };
 static_assert(sizeof(running_timer_funcs) / sizeof(running_timer_funcs[0])
@@ -252,6 +253,7 @@ processor_init(
 	if (processor != master_processor) {
 		/* Scheduler state for master_processor initialized in sched_init() */
 		SCHED(processor_init)(processor);
+		smr_cpu_init(processor);
 	}
 
 	processor->state = PROCESSOR_OFF_LINE;
@@ -270,6 +272,7 @@ processor_init(
 	processor->processor_self = IP_NULL;
 	processor->processor_list = NULL;
 	processor->must_idle = false;
+	processor->next_idle_short = false;
 	processor->last_startup_reason = REASON_SYSTEM;
 	processor->last_shutdown_reason = REASON_NONE;
 	processor->shutdown_temporary = false;
@@ -603,6 +606,15 @@ pset_init(
 		pset->pset_cluster_shared_rsrc_load[shared_rsrc_type] = 0;
 	}
 #endif /* CONFIG_SCHED_EDGE */
+
+	/*
+	 * No initial preferences or forced migrations, so use the least numbered
+	 * available idle core when picking amongst idle cores in a cluster.
+	 */
+	pset->perfcontrol_cpu_preferred_bitmask = 0;
+	pset->perfcontrol_cpu_migration_bitmask = 0;
+	pset->cpu_preferred_last_chosen = -1;
+
 	pset->stealable_rt_threads_earliest_deadline = UINT64_MAX;
 
 	if (pset != &pset0) {

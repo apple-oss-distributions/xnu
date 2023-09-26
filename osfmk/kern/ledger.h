@@ -67,7 +67,10 @@ struct ledger_template_info {
 struct ledger_entry {
 	volatile uint32_t le_flags;
 #define LEDGER_PERCENT_NONE  UINT16_MAX
+#define LEDGER_DIAG_MEM_THRESHOLD_INFINITY ((int16_t)((1ULL << 16) - 1))
+
 	uint16_t                 le_warn_percent;
+	int16_t                  le_diag_threshold_scaled;  /* Diag mem threshold for this entry, handled in Mbytes */
 	ledger_amount_t          le_limit;
 	volatile ledger_amount_t le_credit __attribute__((aligned(8)));
 	volatile ledger_amount_t le_debit  __attribute__((aligned(8)));
@@ -140,6 +143,7 @@ typedef struct ledger_template *ledger_template_t;
  */
 #define LEDGER_WARNING_ROSE_ABOVE       1
 #define LEDGER_WARNING_DIPPED_BELOW     2
+#define LEDGER_WARNING_DIAG_MEM_THRESHOLD  3
 
 typedef void (*ledger_callback_t)(int warning, const void * param0, const void *param1);
 
@@ -262,6 +266,17 @@ ledger_get_entry_info(ledger_t ledger, int entry,
     struct ledger_entry_info *lei);
 
 extern int ledger_template_info(void **buf, int *len);
+
+#if DEBUG || DEVELOPMENT
+extern kern_return_t ledger_get_diag_mem_threshold(ledger_t ledger, int entry,
+    ledger_amount_t *limit);
+
+extern kern_return_t ledger_set_diag_mem_threshold(ledger_t ledger, int entry,
+    ledger_amount_t limit);
+extern kern_return_t ledger_set_diag_mem_threshold_disabled(ledger_t ledger, int entry);
+extern kern_return_t ledger_set_diag_mem_threshold_enabled(ledger_t ledger, int entry);
+extern kern_return_t ledger_is_diag_threshold_enabled(ledger_t ledger, int entry, bool *status);
+#endif // DEBUG || DEVELOPMENT
 
 #endif /* KERNEL_PRIVATE */
 

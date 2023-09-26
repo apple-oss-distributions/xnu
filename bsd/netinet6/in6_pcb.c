@@ -192,17 +192,25 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	struct ifnet *outif = NULL;
 	struct sockaddr_in6 sin6;
 	uint32_t lifscope = IFSCOPE_NONE;
+	int error = 0;
 #if XNU_TARGET_OS_OSX
-	int error;
 	kauth_cred_t cred;
 #endif /* XNU_TARGET_OS_OSX */
 
+	if (inp->inp_flags2 & INP2_BIND_IN_PROGRESS) {
+		return EINVAL;
+	}
+	inp->inp_flags2 |= INP2_BIND_IN_PROGRESS;
+
 	if (TAILQ_EMPTY(&in6_ifaddrhead)) { /* XXX broken! */
-		return EADDRNOTAVAIL;
+		error = EADDRNOTAVAIL;
+		goto done;
 	}
 	if (!(so->so_options & (SO_REUSEADDR | SO_REUSEPORT))) {
 		wild = 1;
 	}
+
+	in_pcb_check_management_entitled(inp);
 
 	socket_unlock(so, 0); /* keep reference */
 	lck_rw_lock_exclusive(&pcbinfo->ipi_lock);
@@ -210,7 +218,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		/* another thread completed the bind */
 		lck_rw_done(&pcbinfo->ipi_lock);
 		socket_lock(so, 0);
-		return EINVAL;
+		error = EINVAL;
+		goto done;
 	}
 
 	bzero(&sin6, sizeof(sin6));
@@ -218,7 +227,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		if (nam->sa_len != sizeof(struct sockaddr_in6)) {
 			lck_rw_done(&pcbinfo->ipi_lock);
 			socket_lock(so, 0);
-			return EINVAL;
+			error = EINVAL;
+			goto done;
 		}
 		/*
 		 * family check.
@@ -226,7 +236,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		if (nam->sa_family != AF_INET6) {
 			lck_rw_done(&pcbinfo->ipi_lock);
 			socket_lock(so, 0);
-			return EAFNOSUPPORT;
+			error = EAFNOSUPPORT;
+			goto done;
 		}
 		lport = SIN6(nam)->sin6_port;
 
@@ -237,7 +248,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		    NULL, &lifscope) != 0) {
 			lck_rw_done(&pcbinfo->ipi_lock);
 			socket_lock(so, 0);
-			return EINVAL;
+			error = EINVAL;
+			goto done;
 		}
 
 		/* Sanitize local copy for address searches */
@@ -265,7 +277,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			if (ifa == NULL) {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return EADDRNOTAVAIL;
+				error = EADDRNOTAVAIL;
+				goto done;
 			} else {
 				/*
 				 * XXX: bind to an anycast address might
@@ -282,7 +295,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 					IFA_REMREF(ifa);
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
-					return EADDRNOTAVAIL;
+					error = EADDRNOTAVAIL;
+					goto done;
 				}
 				/*
 				 * Opportunistically determine the outbound
@@ -307,7 +321,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			if (netns_error != 0) {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return netns_error;
+				error = netns_error;
+				goto done;
 			}
 
 			// Extract the reserved port
@@ -319,7 +334,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			} else {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return EINVAL;
+				error = EINVAL;
+				goto done;
 			}
 
 			// Validate or use the reserved port
@@ -328,7 +344,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			} else if (lport != reserved_lport) {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return EINVAL;
+				error = EINVAL;
+				goto done;
 			}
 		}
 
@@ -340,7 +357,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				log(LOG_ERR, "UDP port not available, less than 4096 UDP ports left");
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return EADDRNOTAVAIL;
+				error = EADDRNOTAVAIL;
+				goto done;
 			}
 		}
 
@@ -361,7 +379,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				if (error != 0) {
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
-					return EACCES;
+					error = EACCES;
+					goto done;
 				}
 			}
 #endif /* XNU_TARGET_OS_OSX */
@@ -372,7 +391,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			    (uint8_t)SOCK_PROTO(so), PORT_FLAGS_BSD)) {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return EADDRINUSE;
+				error = EADDRINUSE;
+				goto done;
 			}
 
 			if (!IN6_IS_ADDR_MULTICAST(&sin6.sin6_addr) &&
@@ -391,7 +411,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				    uuid_compare(t->necp_client_uuid, inp->necp_client_uuid) != 0)) {
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
-					return EADDRINUSE;
+					error = EADDRINUSE;
+					goto done;
 				}
 				if (!(inp->inp_flags & IN6P_IPV6_V6ONLY) &&
 				    IN6_IS_ADDR_UNSPECIFIED(&sin6.sin6_addr)) {
@@ -412,7 +433,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 					    uuid_compare(t->necp_client_uuid, inp->necp_client_uuid) != 0)) {
 						lck_rw_done(&pcbinfo->ipi_lock);
 						socket_lock(so, 0);
-						return EADDRINUSE;
+						error = EADDRINUSE;
+						goto done;
 					}
 
 #if SKYWALK
@@ -428,7 +450,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 						    NETNS_BSD, NULL) != 0) {
 							lck_rw_done(&pcbinfo->ipi_lock);
 							socket_lock(so, 0);
-							return EADDRINUSE;
+							error = EADDRINUSE;
+							goto done;
 						}
 					}
 #endif /* SKYWALK */
@@ -446,7 +469,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 #endif /* SKYWALK */
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return EADDRINUSE;
+				error = EADDRINUSE;
+				goto done;
 			}
 			if (!(inp->inp_flags & IN6P_IPV6_V6ONLY) &&
 			    IN6_IS_ADDR_UNSPECIFIED(&sin6.sin6_addr)) {
@@ -467,7 +491,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 #endif /* SKYWALK */
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
-					return EADDRINUSE;
+					error = EADDRINUSE;
+					goto done;
 				}
 #if SKYWALK
 				if ((SOCK_PROTO(so) == IPPROTO_TCP ||
@@ -482,7 +507,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 					    NETNS_BSD, NULL) != 0) {
 						lck_rw_done(&pcbinfo->ipi_lock);
 						socket_lock(so, 0);
-						return EADDRINUSE;
+						error = EADDRINUSE;
+						goto done;
 					}
 				}
 #endif /* SKYWALK */
@@ -497,7 +523,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 					netns_release(&inp->inp_wildcard_netns_token);
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
-					return EADDRINUSE;
+					error = EADDRINUSE;
+					goto done;
 				}
 			}
 #endif /* SKYWALK */
@@ -516,7 +543,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		netns_release(&inp->inp_wildcard_netns_token);
 #endif /* SKYWALK */
 		lck_rw_done(&pcbinfo->ipi_lock);
-		return ECONNABORTED;
+		error = ECONNABORTED;
+		goto done;
 	}
 
 	/* check if the socket got bound when the lock was released */
@@ -526,7 +554,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		netns_release(&inp->inp_wildcard_netns_token);
 #endif /* SKYWALK */
 		lck_rw_done(&pcbinfo->ipi_lock);
-		return EINVAL;
+		error = EINVAL;
+		goto done;
 	}
 
 	if (!IN6_IS_ADDR_UNSPECIFIED(&sin6.sin6_addr)) {
@@ -554,7 +583,8 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			inp->in6p_last_outifp = NULL;
 			inp->inp_lifscope = IFSCOPE_NONE;
 			lck_rw_done(&pcbinfo->ipi_lock);
-			return e;
+			error = e;
+			goto done;
 		}
 	} else {
 		inp->inp_lport = lport;
@@ -568,12 +598,15 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			inp->inp_lport = 0;
 			inp->in6p_last_outifp = NULL;
 			lck_rw_done(&pcbinfo->ipi_lock);
-			return EAGAIN;
+			error = EAGAIN;
+			goto done;
 		}
 	}
 	lck_rw_done(&pcbinfo->ipi_lock);
 	sflt_notify(so, sock_evt_bound, NULL);
-	return 0;
+done:
+	inp->inp_flags2 &= ~INP2_BIND_IN_PROGRESS;
+	return error;
 }
 
 /*
@@ -614,6 +647,8 @@ in6_pcbladdr(struct inpcb *inp, struct sockaddr *nam,
 	if (in6_embedscope(&SIN6(nam)->sin6_addr, SIN6(nam), inp, NULL, NULL, IN6_NULL_IF_EMBEDDED_SCOPE(&SIN6(nam)->sin6_scope_id)) != 0) {
 		return EINVAL;
 	}
+
+	in_pcb_check_management_entitled(inp);
 
 	if (!TAILQ_EMPTY(&in6_ifaddrhead)) {
 		/*
@@ -863,6 +898,14 @@ in6_pcbdetach(struct inpcb *inp)
 		    __func__, so, SOCK_PROTO(so));
 		/* NOTREACHED */
 	}
+
+#if SKYWALK
+	/* Free up the port in the namespace registrar if not in TIME_WAIT */
+	if (!(inp->inp_flags2 & INP2_TIMEWAIT)) {
+		netns_release(&inp->inp_netns_token);
+		netns_release(&inp->inp_wildcard_netns_token);
+	}
+#endif /* SKYWALK */
 
 	if (!(so->so_flags & SOF_PCBCLEARING)) {
 		struct ip_moptions *imo;

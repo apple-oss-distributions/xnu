@@ -32,20 +32,6 @@
 #if CONFIG_KSANCOV
 
 /*
- * On arm64 the VM_MIN_KERNEL_ADDRESS is too far from %pc to fit into 32-bit value. As a result
- * ksancov reports invalid %pcs. To make at least kernel %pc values corect a different base has
- * to be used for arm.
- */
-#if defined(__x86_64__) || defined(__i386__)
-#define KSANCOV_PC_OFFSET VM_MIN_KERNEL_ADDRESS
-#elif defined(__arm64__)
-#define KSANCOV_PC_OFFSET VM_KERNEL_LINK_ADDRESS
-#else
-#error "Unsupported platform"
-#endif
-
-
-/*
  * Supported coverage modes.
  */
 typedef enum {
@@ -73,20 +59,18 @@ typedef struct ksancov_header {
  */
 typedef struct ksancov_trace {
 	ksancov_header_t kt_hdr;         /* header (must be always first) */
-	uintptr_t        kt_offset;      /* All recorded PCs are relateive to this offset. */
 	uint32_t         kt_maxent;      /* Maximum entries in this shared buffer. */
 	_Atomic uint32_t kt_head;        /* Pointer to the first unused element. */
 	uint64_t         kt_entries[];   /* Trace entries in this buffer. */
 } ksancov_trace_t;
 
+/* PC tracing only records PCs */
+typedef uintptr_t ksancov_trace_pc_ent_t;
 
-/* PC tracing only records PC deltas from the offset. */
-typedef uint32_t ksancov_trace_pc_ent_t;
-
-/* STKSIZE tracing records PC deltas and stack size. */
+/* STKSIZE tracing records PCs and stack size. */
 typedef struct ksancov_trace_stksize_entry {
-	uint32_t pc;                      /* PC-delta (offset relative) */
-	uint32_t stksize;                 /* associated stack size */
+	uintptr_t pc;                      /* PC */
+	uint32_t  stksize;                 /* associated stack size */
 } ksancov_trace_stksize_ent_t;
 
 /*
@@ -104,8 +88,7 @@ typedef struct ksancov_counters {
 typedef struct ksancov_edgemap {
 	uint32_t  ke_magic;
 	uint32_t  ke_nedges;
-	uintptr_t ke_offset;              /* edge addrs relative to this */
-	uint32_t  ke_addrs[];             /* address of each edge relative to 'offset' */
+	uintptr_t ke_addrs[];             /* address of each edge relative to 'offset' */
 } ksancov_edgemap_t;
 
 /*

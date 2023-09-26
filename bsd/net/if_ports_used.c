@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -150,6 +150,12 @@ int sysctl_last_attributed_wake_event SYSCTL_HANDLER_ARGS;
 static SYSCTL_PROC(_net_link_generic_system_port_used, OID_AUTO,
     last_attributed_wake_event, CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, sysctl_last_attributed_wake_event, "S,net_port_info_wake_event", "");
+
+static bool            last_wake_phy_if_set = false;
+static char            last_wake_phy_if_name[IFNAMSIZ]; /* name + unit */
+static uint32_t        last_wake_phy_if_family;
+static uint32_t        last_wake_phy_if_subfamily;
+static uint32_t        last_wake_phy_if_functional_type;
 
 
 static bool has_notified_wake_pkt = false;
@@ -317,6 +323,12 @@ if_ports_used_update_wakeuuid(struct ifnet *ifp)
 		has_notified_unattributed_wake = false;
 
 		memset(&last_attributed_wake_event, 0, sizeof(last_attributed_wake_event));
+
+		last_wake_phy_if_set = false;
+		memset(&last_wake_phy_if_name, 0, sizeof(last_wake_phy_if_name));
+		last_wake_phy_if_family = IFRTYPE_FAMILY_ANY;
+		last_wake_phy_if_subfamily = IFRTYPE_SUBFAMILY_ANY;
+		last_wake_phy_if_functional_type = IFRTYPE_FUNCTIONAL_UNKNOWN;
 	}
 	/*
 	 * Record the time last checked
@@ -1062,9 +1074,9 @@ net_port_info_log_una_wake_event(const char *s, struct net_port_info_una_wake_ev
 		inet_ntop(PF_INET6, &ev->una_wake_pkt_foreign_addr_._in_a_6.s6_addr,
 		    fbuf, sizeof(fbuf));
 	}
-	os_log(OS_LOG_DEFAULT, "%s if %s (%u) proto %s local %s:%u foreign %s:%u len: %u datalen: %u cflags: 0x%x proto: %u",
+	os_log(OS_LOG_DEFAULT, "%s if %s (%u) phy_if %s proto %s local %s:%u foreign %s:%u len: %u datalen: %u cflags: 0x%x proto: %u",
 	    s != NULL ? s : "",
-	    ev->una_wake_pkt_ifname, ev->una_wake_pkt_if_index,
+	    ev->una_wake_pkt_ifname, ev->una_wake_pkt_if_index, ev->una_wake_pkt_phy_ifname,
 	    ev->una_wake_pkt_flags & NPIF_TCP ? "tcp" : ev->una_wake_pkt_flags ? "udp" :
 	    ev->una_wake_pkt_flags & NPIF_ESP ? "esp" : "unknown",
 	    lbuf, ntohs(ev->una_wake_pkt_local_port),
@@ -1090,9 +1102,9 @@ net_port_info_log_wake_event(const char *s, struct net_port_info_wake_event *ev)
 		inet_ntop(PF_INET6, &ev->wake_pkt_foreign_addr_._in_a_6.s6_addr,
 		    fbuf, sizeof(fbuf));
 	}
-	os_log(OS_LOG_DEFAULT, "%s if %s (%u) proto %s local %s:%u foreign %s:%u len: %u datalen: %u cflags: 0x%x proc %s eproc %s",
+	os_log(OS_LOG_DEFAULT, "%s if %s (%u) phy_if %s proto %s local %s:%u foreign %s:%u len: %u datalen: %u cflags: 0x%x proc %s eproc %s",
 	    s != NULL ? s : "",
-	    ev->wake_pkt_ifname, ev->wake_pkt_if_index,
+	    ev->wake_pkt_ifname, ev->wake_pkt_if_index, ev->wake_pkt_phy_ifname,
 	    ev->wake_pkt_flags & NPIF_TCP ? "tcp" : ev->wake_pkt_flags ? "udp" :
 	    ev->wake_pkt_flags & NPIF_ESP ? "esp" : "unknown",
 	    lbuf, ntohs(ev->wake_pkt_port),
@@ -1102,6 +1114,32 @@ net_port_info_log_wake_event(const char *s, struct net_port_info_wake_event *ev)
 }
 
 #endif /* (DEBUG || DEVELOPMENT) */
+
+/*
+ * The process attribution of a wake packet can take several steps:
+ *
+ * 1) After device wakes, the first interface that sees a wake packet is the
+ *    physical interface and we remember it via if_set_wake_physical_interface()
+ *
+ * 2) We try to attribute a packet to a flow or not based on the physical interface.
+ *    If we find a flow, then the physical interface is the same as the interface used
+ *    by the TCP/UDP flow.
+ *
+ * 3) If the packet is tunneled or redirected we are going to do the attribution again
+ *    and the physical will be different from the interface used the TCP/UDP flow.
+ */
+static void
+if_set_wake_physical_interface(struct ifnet *ifp)
+{
+	if (last_wake_phy_if_set == true || ifp == NULL) {
+		return;
+	}
+	last_wake_phy_if_set = true;
+	strlcpy(last_wake_phy_if_name, IF_XNAME(ifp), sizeof(last_wake_phy_if_name));
+	last_wake_phy_if_family = ifp->if_family;
+	last_wake_phy_if_subfamily = ifp->if_subfamily;
+	last_wake_phy_if_functional_type = if_functional_type(ifp, true);
+}
 
 static void
 if_notify_unattributed_wake_mbuf(struct ifnet *ifp, struct mbuf *m,
@@ -1150,6 +1188,15 @@ if_notify_unattributed_wake_mbuf(struct ifnet *ifp, struct mbuf *m,
 	if (ifp != NULL) {
 		strlcpy(event_data.una_wake_pkt_ifname, IF_XNAME(ifp),
 		    sizeof(event_data.una_wake_pkt_ifname));
+		event_data.una_wake_pkt_if_info.npi_if_family = ifp->if_family;
+		event_data.una_wake_pkt_if_info.npi_if_subfamily = ifp->if_subfamily;
+		event_data.una_wake_pkt_if_info.npi_if_functional_type = if_functional_type(ifp, true);
+
+		strlcpy(event_data.una_wake_pkt_phy_ifname, last_wake_phy_if_name,
+		    sizeof(event_data.una_wake_pkt_phy_ifname));
+		event_data.una_wake_pkt_phy_if_info.npi_if_family = last_wake_phy_if_family;
+		event_data.una_wake_pkt_phy_if_info.npi_if_subfamily = last_wake_phy_if_subfamily;
+		event_data.una_wake_pkt_phy_if_info.npi_if_functional_type = last_wake_phy_if_functional_type;
 	} else {
 		if_ports_used_stats.ifpu_unattributed_null_recvif += 1;
 	}
@@ -1221,6 +1268,16 @@ if_notify_wake_packet(struct ifnet *ifp, struct net_port_info *npi,
 	event_data.wake_pkt_local_addr_ = npi->npi_local_addr_;
 	event_data.wake_pkt_foreign_addr_ = npi->npi_foreign_addr_;
 	strlcpy(event_data.wake_pkt_ifname, IF_XNAME(ifp), sizeof(event_data.wake_pkt_ifname));
+
+	event_data.wake_pkt_if_info.npi_if_family = ifp->if_family;
+	event_data.wake_pkt_if_info.npi_if_subfamily = ifp->if_subfamily;
+	event_data.wake_pkt_if_info.npi_if_functional_type = if_functional_type(ifp, true);
+
+	strlcpy(event_data.wake_pkt_phy_ifname, last_wake_phy_if_name,
+	    sizeof(event_data.wake_pkt_phy_ifname));
+	event_data.wake_pkt_phy_if_info.npi_if_family = last_wake_phy_if_family;
+	event_data.wake_pkt_phy_if_info.npi_if_subfamily = last_wake_phy_if_subfamily;
+	event_data.wake_pkt_phy_if_info.npi_if_functional_type = last_wake_phy_if_functional_type;
 
 	event_data.wake_pkt_total_len = pkt_total_len;
 	event_data.wake_pkt_data_len = pkt_data_len;
@@ -1324,6 +1381,7 @@ if_ports_used_match_mbuf(struct ifnet *ifp, protocol_family_t proto_family, stru
 		if (IFNET_IS_COMPANION_LINK(ifp)) {
 			npi.npi_flags |= NPIF_COMPLINK;
 		}
+		if_set_wake_physical_interface(ifp);
 	}
 
 	if (proto_family == PF_INET) {
@@ -1722,6 +1780,7 @@ if_ports_used_match_pkt(struct ifnet *ifp, struct __kern_packet *pkt)
 		if (IFNET_IS_COMPANION_LINK(ifp)) {
 			npi.npi_flags |= NPIF_COMPLINK;
 		}
+		if_set_wake_physical_interface(ifp);
 	}
 
 	switch (pkt->pkt_flow_ip_ver) {

@@ -74,8 +74,10 @@ PRIVATE_DATAFILES = $(sort \
 	if_var_private.h \
 	if_vlan_var.h \
 	if_fake_var.h \
+	if_redirect.h \
 	iptap.h \
 	lacp.h \
+	kctl_test.h \
 	multi_layer_pkt_log.h \
 	ndrv_var.h \
 	necp.h \
@@ -122,7 +124,7 @@ INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
 INSTALL_MI_DIR = net
 
-INSTALL_MI_LCL_LIST = $(sort if_private.h if_var_private.h route_private.h ${EXTRA_PRIVATE_DATAFILES})
+INSTALL_MI_LCL_LIST = $(sort if_private.h if_var_private.h if_vlan_var.h route_private.h ${EXTRA_PRIVATE_DATAFILES})
 
 INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 

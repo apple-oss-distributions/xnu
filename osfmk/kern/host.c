@@ -232,7 +232,6 @@ host_info(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_type_num
 			basic_info->logical_cpu = machine_info.logical_cpu;
 #endif
 			basic_info->logical_cpu_max = machine_info.logical_cpu_max;
-
 			basic_info->max_mem = machine_info.max_mem;
 
 			*count = HOST_BASIC_INFO_COUNT;

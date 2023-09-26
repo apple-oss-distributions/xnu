@@ -296,6 +296,48 @@ set_fsblocksize(struct vnode *vp)
 	}
 }
 
+static void
+spec_init_bsdunit(vnode_t vp, vfs_context_t ctx, const char* caller)
+{
+	int     isssd = 0;
+	uint64_t throttle_mask = 0;
+	uint32_t devbsdunit = 0;
+
+	if (VNOP_IOCTL(vp, DKIOCISSOLIDSTATE, (caddr_t)&isssd, 0, ctx)) {
+		isssd = 0;
+	}
+	if (VNOP_IOCTL(vp, DKIOCGETTHROTTLEMASK, (caddr_t)&throttle_mask, 0, NULL)) {
+		throttle_mask = 0;
+	}
+
+	if (throttle_mask != 0) {
+		/*
+		 * as a reasonable approximation, only use the lowest bit of the mask
+		 * to generate a disk unit number
+		 */
+		devbsdunit = num_trailing_0(throttle_mask);
+	} else {
+		devbsdunit = 0;
+	}
+
+	if (vp->v_un.vu_specinfo->si_initted == 0) {
+		vnode_lock(vp);
+		if (vp->v_un.vu_specinfo->si_initted == 0) {
+			vp->v_un.vu_specinfo->si_isssd = isssd ? 1 : 0;
+			vp->v_un.vu_specinfo->si_devbsdunit = devbsdunit;
+			vp->v_un.vu_specinfo->si_throttle_mask = throttle_mask;
+			vp->v_un.vu_specinfo->si_throttleable = 1;
+			vp->v_un.vu_specinfo->si_initted = 1;
+		}
+		vnode_unlock(vp);
+		printf("%s : si_devbsdunit initialized to (%d), throttle_mask is (0x%llx), isssd is (%d)\n",
+		    caller, vp->v_un.vu_specinfo->si_devbsdunit,
+		    vp->v_un.vu_specinfo->si_throttle_mask,
+		    vp->v_un.vu_specinfo->si_isssd);
+	}
+}
+
+#define SPEC_INIT_BSDUNIT(vp, ctx) spec_init_bsdunit((vp), (ctx), __FUNCTION__)
 
 /*
  * Open a special file.
@@ -424,6 +466,9 @@ spec_open(struct vnop_open_args *ap)
 			int setsize = 0;
 			u_int32_t size512 = 512;
 
+			if (bdevsw[maj].d_type == D_DISK && !vp->v_un.vu_specinfo->si_initted) {
+				SPEC_INIT_BSDUNIT(vp, ap->a_context);
+			}
 
 			if (!VNOP_IOCTL(vp, DKIOCGETBLOCKSIZE, (caddr_t)&blksize, 0, ap->a_context)) {
 				/* Switch to 512 byte sectors (temporarily) */
@@ -2182,6 +2227,7 @@ throttle_info_set_initial_window(uthread_t ut, struct _throttle_io_info_t *info,
 void
 throttle_info_end_io(buf_t bp)
 {
+	vnode_t vp;
 	mount_t mp;
 	struct bufattr *bap;
 	struct _throttle_io_info_t *info;
@@ -2193,8 +2239,12 @@ throttle_info_end_io(buf_t bp)
 	}
 	CLR(bap->ba_flags, BA_STRATEGY_TRACKED_IO);
 
-	mp = buf_vnode(bp)->v_mount;
-	if (mp != NULL) {
+	vp = buf_vnode(bp);
+	mp = vp->v_mount;
+
+	if (vp && (vp->v_type == VBLK || vp->v_type == VCHR)) {
+		info = &_throttle_io_info[vp->v_un.vu_specinfo->si_devbsdunit];
+	} else if (mp != NULL) {
 		info = &_throttle_io_info[mp->mnt_devbsdunit];
 	} else {
 		info = &_throttle_io_info[LOWPRI_MAX_NUM_DEV - 1];
@@ -2452,6 +2502,7 @@ spec_strategy(struct vnop_strategy_args *ap)
 	int     passive;
 	dev_t   bdev;
 	uthread_t ut;
+	vnode_t vp;
 	mount_t mp;
 	struct  bufattr *bap;
 	int     strategy_ret;
@@ -2467,7 +2518,8 @@ spec_strategy(struct vnop_strategy_args *ap)
 
 	bp = ap->a_bp;
 	bdev = buf_device(bp);
-	mp = buf_vnode(bp)->v_mount;
+	vp = buf_vnode(bp);
+	mp = vp ? vp->v_mount : NULL;
 	bap = &bp->b_attr;
 
 #if CONFIG_PHYS_WRITE_ACCT
@@ -2612,7 +2664,21 @@ spec_strategy(struct vnop_strategy_args *ap)
 #endif /* CONFIG_IO_COMPRESSION_STATS */
 	thread_update_io_stats(current_thread(), buf_count(bp), code);
 
-	if (mp != NULL) {
+	if (vp && (vp->v_type == VBLK || vp->v_type == VCHR)) {
+		if (!vp->v_un.vu_specinfo->si_initted) {
+			SPEC_INIT_BSDUNIT(vp, vfs_context_current());
+		}
+		if (vp->v_un.vu_specinfo->si_devbsdunit > (LOWPRI_MAX_NUM_DEV - 1)) {
+			panic("Invalid value (%d) for si_devbsdunit for vnode %p",
+			    vp->v_un.vu_specinfo->si_devbsdunit, vp);
+		}
+		if (vp->v_un.vu_specinfo->si_isssd > 1) {
+			panic("Invalid value (%d) for si_isssd for vnode %p",
+			    vp->v_un.vu_specinfo->si_isssd, vp);
+		}
+		throttle_info = &_throttle_io_info[vp->v_un.vu_specinfo->si_devbsdunit];
+		isssd = vp->v_un.vu_specinfo->si_isssd;
+	} else if (mp != NULL) {
 		if (disk_conditioner_mount_is_ssd(mp)) {
 			isssd = TRUE;
 		}
@@ -2634,11 +2700,11 @@ spec_strategy(struct vnop_strategy_args *ap)
 	if ((bflags & B_READ) == 0) {
 		microuptime(&throttle_info->throttle_last_write_timestamp);
 
-		if (mp) {
+		if (!(vp && (vp->v_type == VBLK || vp->v_type == VCHR)) && mp) {
 			mp->mnt_last_write_issued_timestamp = throttle_info->throttle_last_write_timestamp;
 			INCR_PENDING_IO(buf_count(bp), mp->mnt_pending_write_size);
 		}
-	} else if (mp) {
+	} else if (!(vp && (vp->v_type == VBLK || vp->v_type == VCHR)) && mp) {
 		INCR_PENDING_IO(buf_count(bp), mp->mnt_pending_read_size);
 	}
 	/*
@@ -3038,8 +3104,9 @@ filt_specdetach(struct knote *kn)
 static int
 filt_specevent(struct knote *kn, long hint)
 {
-	/* knote_post() will have cleared it for us */
-	assert(kn->kn_hook == NULL);
+	/* Due to selwakeup_internal() on SI_SELSPEC */
+	assert(KNOTE_IS_AUTODETACHED(kn));
+	knote_kn_hook_set_raw(kn, NULL);
 
 	/* called by selwakeup with the selspec_lock lock held */
 	if (hint & NOTE_REVOKE) {

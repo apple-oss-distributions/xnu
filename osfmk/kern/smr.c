@@ -28,20 +28,19 @@
 
 #include <kern/locks_internal.h>
 #include <kern/cpu_data.h>
+#include <kern/machine.h>
 #include <kern/mpsc_queue.h>
 #include <kern/percpu.h>
+#include <kern/sched.h>
 #include <kern/smr.h>
 #include <kern/smr_hash.h>
+#include <kern/thread.h>
 #include <kern/zalloc.h>
-#include <sys/queue.h>
+#include <machine/commpage.h>
 #include <os/hash.h>
 
 
 #pragma mark - SMR domains
-
-typedef struct smr_pcpu {
-	smr_seq_t               c_rd_seq;
-} *smr_pcpu_t;
 
 /*
  * This SMR scheme is directly FreeBSD's "Global Unbounded Sequences".
@@ -219,26 +218,314 @@ typedef struct smr_pcpu {
  *
  */
 
+/*!
+ * @struct smr_worker
+ *
+ * @brief
+ * Structure tracking the per-cpu SMR workers state.
+ *
+ * @discussion
+ * This structure is system wide and global and is used to track
+ * the various active SMR domains at the granularity of a CPU.
+ *
+ * Each structure has an associated thread which is responsible
+ * for the forward progress the @c smr_call() and @c smr_barrier()
+ * interfaces.
+ *
+ * It also tracks all the active, non stalled, sleepable SMR sections.
+ */
+struct smr_worker {
+	/*
+	 * The thread for this worker,
+	 * and conveniency pointer to the processor it is bound to.
+	 */
+	struct thread          *thread;
+	struct processor       *processor;
+
+	/*
+	 * Thread binding/locking logic:
+	 *
+	 * If the worker thread is running on its canonical CPU,
+	 * then locking to access the various SMR per-cpu data
+	 * structures it is draining is just preemption disablement.
+	 *
+	 * However, if it is currently not bound to its canonical
+	 * CPU because the CPU has been offlined or de-recommended,
+	 * then a lock which serializes with the CPU going online
+	 * again is being used.
+	 */
+	struct waitq            waitq;
+	smr_cpu_reason_t        detach_reason;
+
+#if CONFIG_QUIESCE_COUNTER
+	/*
+	 * Currently active quiescent generation for this processor,
+	 * and the last timestamp when a scan of all cores was performed.
+	 */
+	smr_seq_t               rd_quiesce_seq;
+#endif
+
+	/*
+	 * List of all the active sleepable sections that haven't
+	 * been stalled.
+	 */
+	struct smrq_list_head   sect_queue;
+	struct thread          *sect_waiter;
+
+	/*
+	 * Queue of SMR domains with pending smr_call()
+	 * callouts to drain.
+	 *
+	 * This uses an ageing strategy in order to amortize
+	 * SMR clock updates:
+	 *
+	 * - the "old" queue have domains whose callbacks have
+	 *   a committed and aged sequence,
+	 * - the "age" queue have domains whose callbacks have
+	 *   a commited but fresh sequence and need ageing,
+	 * - the "cur" queue have domains whose callbacks have
+	 *   a sequence in the future and need for it to be committed.
+	 */
+	struct smr_pcpu        *whead;
+	struct smr_pcpu       **wold_tail;
+	struct smr_pcpu       **wage_tail;
+	struct smr_pcpu       **wcur_tail;
+	uint64_t                drain_ctime;
+
+	/*
+	 * Queue of smr_barrier() calls in flight,
+	 * that will be picked up by the worker thread
+	 * to enqueue as smr_call() entries in their
+	 * respective per-CPU data structures.
+	 */
+	struct mpsc_queue_head  barrier_queue;
+} __attribute__((aligned(64)));
+
+
+typedef struct smr_pcpu {
+	/*
+	 * CPU private cacheline.
+	 *
+	 * Nothing else than the CPU this state is made for,
+	 * ever writes to this cacheline.
+	 *
+	 * It holds the epoch activity witness (rd_seq), and
+	 * the local smr_call() queue, which is structured this way:
+	 *
+	 *     head -> n1 -> n2 -> n3 -> n4 -> ... -> ni -> ... -> nN -> NULL
+	 *                            ^            ^                  ^
+	 *     qold_tail -------------'            |                  |
+	 *     qage_tail --------------------------'                  |
+	 *     qcur_tail ---------------------------------------------'
+	 *
+	 * - the "old" queue can be reclaimed once qold_seq is past,
+	 *   qold_seq is always a commited sequence.
+	 * - the "age" queue can be reclaimed once qage_seq is past,
+	 *   qage_seq might not be commited yet.
+	 * - the "cur" queue has an approximate size of qcur_size bytes,
+	 *   and a length of qcur_cnt callbacks.
+	 */
+
+	smr_seq_t               c_rd_seq; /* might have SMR_SEQ_SLEEPABLE set */
+
+	smr_node_t              qhead;
+
+	smr_seq_t               qold_seq;
+	smr_node_t             *qold_tail;
+
+	smr_seq_t               qage_seq;
+	smr_node_t             *qage_tail;
+
+	uint32_t                qcur_size;
+	uint32_t                qcur_cnt;
+	smr_node_t             *qcur_tail;
+
+	uint8_t                 __cacheline_sep[0];
+
+	/*
+	 * Drain queue.
+	 *
+	 * This is used to drive smr_call() via the smr worker threads.
+	 * If the SMR domain is not using smr_call() or smr_barrier(),
+	 * this isn't used.
+	 */
+	struct smr             *drain_smr;
+	struct smr_pcpu        *drain_next;
+	uint16_t                __check_cpu;
+	uint8_t                 __check_reason;
+	uint8_t                 __check_list;
+
+	/*
+	 * Stalled queue.
+	 *
+	 * Stalled sections are enqueued onto this queue by the scheduler
+	 * when their thread blocks (see smr_mark_active_trackers_stalled()).
+	 *
+	 * If the SMR domain is not sleepable, then this isn't used.
+	 *
+	 * This list is protected by a lock.
+	 *
+	 * When there are stalled sections, stall_rd_seq contains
+	 * the oldest active stalled sequence number.
+	 *
+	 * When threads want to expedite a stalled section, they set
+	 * stall_waiter_goal to the sequence number they are waiting
+	 * for and block via turnstile on the oldest stalled section.
+	 */
+	hw_lck_ticket_t         stall_lock;
+	smr_seq_t               stall_rd_seq;
+	smr_seq_t               stall_waiter_goal;
+	struct smrq_tailq_head  stall_queue;
+	struct turnstile       *stall_ts;
+} __attribute__((aligned(128))) * smr_pcpu_t;
+
+static_assert(offsetof(struct smr_pcpu, __cacheline_sep) == 64);
+static_assert(sizeof(struct smr_pcpu) == 128);
+
+#define CPU_CHECKIN_MIN_INTERVAL_US     5000         /* 5ms */
+#define CPU_CHECKIN_MIN_INTERVAL_MAX_US USEC_PER_SEC /* 1s */
+static uint64_t cpu_checkin_min_interval;
+static uint32_t cpu_checkin_min_interval_us;
+
+/*! the amount of memory pending retiring that causes a foreceful flush */
+#if XNU_TARGET_OS_OSX
+static TUNABLE(vm_size_t, smr_call_size_cap, "smr_call_size_cap", 256 << 10);
+static TUNABLE(vm_size_t, smr_call_cnt_cap, "smr_call_cnt_cap", 128);
+#else
+static TUNABLE(vm_size_t, smr_call_size_cap, "smr_call_size_cap", 64 << 10);
+static TUNABLE(vm_size_t, smr_call_cnt_cap, "smr_call_cnt_cap", 32);
+#endif
+/* time __smr_wait_for_oncore busy spins before going the expensive route */
+static TUNABLE(uint32_t, smr_wait_spin_us, "smr_wait_spin_us", 20);
+
+static LCK_GRP_DECLARE(smr_lock_grp, "smr");
+static struct smr_worker PERCPU_DATA(smr_worker);
+static struct smrq_tailq_head smr_domains = SMRQ_TAILQ_INITIALIZER(smr_domains);
+
+SMR_DEFINE_FLAGS(smr_system, "system", SMR_NONE);
+SMR_DEFINE_FLAGS(smr_system_sleepable, "system (sleepable)", SMR_SLEEPABLE);
+
+
 #pragma mark SMR domains: init & helpers
+
+#define SMR_PCPU_NOT_QUEUED     ((struct smr_pcpu *)-1)
 
 __attribute__((always_inline, overloadable))
 static inline smr_pcpu_t
 __smr_pcpu(smr_t smr, int cpu)
 {
-	return zpercpu_get_cpu(smr->smr_pcpu, cpu);
+	return &smr->smr_pcpu[cpu];
 }
 
 __attribute__((always_inline, overloadable))
 static inline smr_pcpu_t
 __smr_pcpu(smr_t smr)
 {
-	return zpercpu_get(smr->smr_pcpu);
+	return __smr_pcpu(smr, cpu_number());
+}
+
+static inline bool
+__smr_pcpu_queued(smr_pcpu_t pcpu)
+{
+	return pcpu->drain_next != SMR_PCPU_NOT_QUEUED;
+}
+
+static inline void
+__smr_pcpu_set_not_queued(smr_pcpu_t pcpu)
+{
+	pcpu->drain_next = SMR_PCPU_NOT_QUEUED;
 }
 
 static inline void
 __smr_pcpu_associate(smr_t smr, smr_pcpu_t pcpu)
 {
+	zpercpu_foreach_cpu(cpu) {
+		pcpu[cpu].qold_tail = &pcpu[cpu].qhead;
+		pcpu[cpu].qage_tail = &pcpu[cpu].qhead;
+		pcpu[cpu].qcur_tail = &pcpu[cpu].qhead;
+
+		pcpu[cpu].drain_smr = smr;
+		__smr_pcpu_set_not_queued(&pcpu[cpu]);
+		hw_lck_ticket_init(&pcpu[cpu].stall_lock, &smr_lock_grp);
+		smrq_init(&pcpu[cpu].stall_queue);
+	}
+
 	os_atomic_store(&smr->smr_pcpu, pcpu, release);
+}
+
+static inline event64_t
+__smrw_oncore_event(struct smr_worker *smrw)
+{
+	return CAST_EVENT64_T(&smrw->sect_queue);
+}
+
+static inline event64_t
+__smrw_drain_event(struct smr_worker *smrw)
+{
+	return CAST_EVENT64_T(&smrw->whead);
+}
+
+static inline processor_t
+__smrw_drain_bind_target(struct smr_worker *smrw)
+{
+	return smrw->detach_reason ? PROCESSOR_NULL : smrw->processor;
+}
+
+static inline void
+__smrw_lock(struct smr_worker *smrw)
+{
+	waitq_lock(&smrw->waitq);
+}
+
+static inline void
+__smrw_unlock(struct smr_worker *smrw)
+{
+	waitq_unlock(&smrw->waitq);
+}
+
+/*!
+ * @function __smrw_wakeup_and_unlock()
+ *
+ * @brief
+ * Wakes up (with binding) the SMR worker.
+ *
+ * @discussion
+ * Wakeup the worker thread and bind it to the proper processor
+ * as a side effect.
+ *
+ * This function must be called with interrupts disabled.
+ */
+static bool
+__smrw_wakeup_and_unlock(struct smr_worker *smrw)
+{
+	thread_t thread;
+
+	assert(!ml_get_interrupts_enabled());
+
+	thread = waitq_wakeup64_identify_locked(&smrw->waitq,
+	    __smrw_drain_event(smrw), THREAD_AWAKENED, WAITQ_UNLOCK);
+
+	if (thread != THREAD_NULL) {
+		assert(thread == smrw->thread);
+
+		waitq_resume_and_bind_identified_thread(&smrw->waitq,
+		    thread, __smrw_drain_bind_target(smrw),
+		    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
+	}
+
+	return thread != THREAD_NULL;
+}
+
+static void
+__smr_call_drain(smr_node_t head)
+{
+	smr_node_t node;
+
+	while ((node = head) != NULL) {
+		head = node->smrn_next;
+		node->smrn_next = NULL;
+		node->smrn_cb(node);
+	}
 }
 
 __startup_func
@@ -246,30 +533,43 @@ void
 __smr_domain_init(smr_t smr)
 {
 	smr_pcpu_t pcpu;
+	vm_size_t size;
 
 	if (startup_phase < STARTUP_SUB_TUNABLES) {
 		smr_seq_t *rd_seqp = &smr->smr_early;
 
+		/*
+		 * This is a big cheat, but before the EARLY_BOOT phase,
+		 * all smr_* APIs that would access past the rd_seq
+		 * will early return.
+		 */
 		pcpu = __container_of(rd_seqp, struct smr_pcpu, c_rd_seq);
-		smr->smr_pcpu = __zpcpu_mangle_for_boot(pcpu);
+		smr->smr_pcpu = pcpu - cpu_number();
+		assert(&__smr_pcpu(smr)->c_rd_seq == &smr->smr_early);
 	} else {
-		pcpu = zalloc_percpu_permanent_type(struct smr_pcpu);
+		size = zpercpu_count() * sizeof(struct smr_pcpu);
+		pcpu = zalloc_permanent(size, ZALIGN(struct smr_pcpu));
+
 		__smr_pcpu_associate(smr, pcpu);
 	}
 }
 
 smr_t
-smr_domain_create(smr_flags_t flags)
+smr_domain_create(smr_flags_t flags, const char *name)
 {
 	smr_pcpu_t pcpu;
 	smr_t smr;
 
 	smr  = kalloc_type(struct smr, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-	pcpu = zalloc_percpu(percpu_u64_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	pcpu = kalloc_type(struct smr_pcpu, zpercpu_count(),
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	smr->smr_clock.s_rd_seq = SMR_SEQ_INIT;
 	smr->smr_clock.s_wr_seq = SMR_SEQ_INIT;
 	smr->smr_flags = flags;
+	static_assert(sizeof(struct smr) ==
+	    offsetof(struct smr, smr_name) + SMR_NAME_MAX);
+	strlcpy(smr->smr_name, name, sizeof(smr->smr_name));
 
 	__smr_pcpu_associate(smr, pcpu);
 
@@ -279,37 +579,55 @@ smr_domain_create(smr_flags_t flags)
 void
 smr_domain_free(smr_t smr)
 {
-	smr_synchronize(smr);
+	smr_barrier(smr);
 
-	zfree_percpu(percpu_u64_zone, smr->smr_pcpu);
+	zpercpu_foreach_cpu(cpu) {
+		smr_pcpu_t pcpu = __smr_pcpu(smr, cpu);
+
+		assert(pcpu->qhead == NULL);
+		hw_lck_ticket_destroy(&pcpu->stall_lock, &smr_lock_grp);
+	}
+
+	kfree_type(struct smr_pcpu, zpercpu_count(), smr->smr_pcpu);
 	kfree_type(struct smr, smr);
 }
 
+
 #pragma mark SMR domains: enter / leave
 
-static inline bool
-smr_entered_nopreempt(smr_t smr)
-{
-	return __smr_pcpu(smr)->c_rd_seq != SMR_SEQ_INVALID;
-}
-
-__attribute__((always_inline))
 bool
 smr_entered(smr_t smr)
 {
-	return get_preemption_level() != 0 && smr_entered_nopreempt(smr);
+	thread_t self = current_thread();
+	smr_tracker_t t;
+
+	if (lock_preemption_level_for_thread(self) &&
+	    __smr_pcpu(smr)->c_rd_seq != SMR_SEQ_INVALID) {
+		return true;
+	}
+
+	if (smr->smr_flags & SMR_SLEEPABLE) {
+		smrq_serialized_foreach(t, &self->smr_stack, smrt_stack) {
+			if (t->smrt_domain == smr) {
+				return true;
+			}
+		}
+	}
+
+	return false;
 }
 
 __attribute__((always_inline))
 bool
-smr_entered_cpu(smr_t smr, int cpu)
+smr_entered_cpu_noblock(smr_t smr, int cpu)
 {
+	assert((smr->smr_flags & SMR_SLEEPABLE) == 0);
 	return __smr_pcpu(smr, cpu)->c_rd_seq != SMR_SEQ_INVALID;
 }
 
 __attribute__((always_inline))
-static void
-__smr_enter(smr_t smr, smr_pcpu_t pcpu)
+static smr_seq_t
+__smr_enter(smr_t smr, smr_pcpu_t pcpu, smr_seq_t sleepable)
 {
 	smr_seq_t  s_wr_seq;
 	smr_seq_t  old_seq;
@@ -330,13 +648,15 @@ __smr_enter(smr_t smr, smr_pcpu_t pcpu)
 	s_wr_seq = os_atomic_load(&smr->smr_clock.s_wr_seq, relaxed);
 #if __x86_64__
 	/* [R1] */
-	old_seq = os_atomic_add_orig(&pcpu->c_rd_seq, s_wr_seq, seq_cst);
+	old_seq = os_atomic_add_orig(&pcpu->c_rd_seq, s_wr_seq | sleepable, seq_cst);
 #else
 	old_seq = pcpu->c_rd_seq;
-	os_atomic_store(&pcpu->c_rd_seq, s_wr_seq, relaxed);
+	os_atomic_store(&pcpu->c_rd_seq, s_wr_seq | sleepable, relaxed);
 	os_atomic_thread_fence(seq_cst); /* [R1] */
 #endif
 	assert(old_seq == SMR_SEQ_INVALID);
+
+	return s_wr_seq;
 }
 
 __attribute__((always_inline))
@@ -352,7 +672,7 @@ void
 smr_enter(smr_t smr)
 {
 	disable_preemption();
-	__smr_enter(smr, __smr_pcpu(smr));
+	__smr_enter(smr, __smr_pcpu(smr), 0);
 }
 
 __attribute__((always_inline))
@@ -361,6 +681,198 @@ smr_leave(smr_t smr)
 {
 	__smr_leave(__smr_pcpu(smr));
 	enable_preemption();
+}
+
+void
+smr_enter_sleepable(smr_t smr, smr_tracker_t tracker)
+{
+	thread_t self = current_thread();
+	struct smr_worker *smrw;
+	smr_pcpu_t pcpu;
+
+	assert(smr->smr_flags & SMR_SLEEPABLE);
+
+	lock_disable_preemption_for_thread(self);
+	lck_rw_lock_count_inc(self, smr);
+
+	pcpu = __smr_pcpu(smr);
+	smrw = PERCPU_GET(smr_worker);
+
+	tracker->smrt_domain = smr;
+	tracker->smrt_seq    = __smr_enter(smr, pcpu, SMR_SEQ_SLEEPABLE);
+	smrq_serialized_insert_head_relaxed(&smrw->sect_queue, &tracker->smrt_link);
+	smrq_serialized_insert_head_relaxed(&self->smr_stack, &tracker->smrt_stack);
+	tracker->smrt_ctid   = 0;
+	tracker->smrt_cpu    = -1;
+
+	lock_enable_preemption();
+}
+
+__attribute__((always_inline))
+static void
+__smr_wake_oncore_sleepers(struct smr_worker *smrw)
+{
+	/*
+	 * prevent reordering of making the list empty and checking for waiters.
+	 */
+	if (__improbable(os_atomic_load(&smrw->sect_waiter, compiler_acq_rel))) {
+		if (smrq_empty(&smrw->sect_queue)) {
+			os_atomic_store(&smrw->sect_waiter, NULL, relaxed);
+			waitq_wakeup64_all(&smrw->waitq,
+			    __smrw_oncore_event(smrw), THREAD_AWAKENED,
+			    WAITQ_WAKEUP_DEFAULT);
+		}
+	}
+}
+
+void
+smr_ack_ipi(void)
+{
+	/*
+	 * see __smr_wait_for_oncore(): if at the time of the IPI ack
+	 * the list is empty and there is still a waiter, wake it up.
+	 *
+	 * If the queue is not empty, then when smr_leave_sleepable()
+	 * runs it can't possibly fail to observe smrw->sect_waiter
+	 * being non NULL and will do the wakeup then.
+	 */
+	__smr_wake_oncore_sleepers(PERCPU_GET(smr_worker));
+}
+
+void
+smr_mark_active_trackers_stalled(thread_t self)
+{
+	struct smr_worker *smrw = PERCPU_GET(smr_worker);
+	int cpu = cpu_number();
+	smr_tracker_t t;
+
+	/* called at splsched */
+
+	smrq_serialized_foreach_safe(t, &smrw->sect_queue, smrt_link) {
+		smr_t smr = t->smrt_domain;
+		smr_pcpu_t pcpu;
+
+		pcpu = __smr_pcpu(smr, cpu);
+
+		t->smrt_ctid = self->ctid;
+		t->smrt_cpu  = cpu;
+
+		hw_lck_ticket_lock_nopreempt(&pcpu->stall_lock, &smr_lock_grp);
+
+		/*
+		 * Transfer the section to the stalled queue,
+		 * and _then_ leave the regular one.
+		 *
+		 * A store-release is sufficient to order these stores,
+		 * and guarantee that __smr_scan() can't fail to observe
+		 * both the @c rd_seq and @c stall_rd_seq during a transfer
+		 * of a stalled section that was active when it started.
+		 */
+		if (smrq_empty(&pcpu->stall_queue)) {
+			os_atomic_store(&pcpu->stall_rd_seq, t->smrt_seq, relaxed);
+		}
+		os_atomic_store(&pcpu->c_rd_seq, SMR_SEQ_INVALID, release);
+
+		smrq_serialized_insert_tail_relaxed(&pcpu->stall_queue, &t->smrt_link);
+
+		hw_lck_ticket_unlock_nopreempt(&pcpu->stall_lock);
+	}
+
+	smrq_init(&smrw->sect_queue);
+
+	__smr_wake_oncore_sleepers(smrw);
+}
+
+
+__attribute__((noinline))
+static void
+__smr_leave_stalled(smr_t smr, smr_tracker_t tracker, thread_t self)
+{
+	smr_seq_t new_stall_seq = SMR_SEQ_INVALID;
+	smr_tracker_t first = NULL;
+	smr_pcpu_t pcpu;
+	bool progress;
+
+	pcpu = __smr_pcpu(smr, tracker->smrt_cpu);
+
+	hw_lck_ticket_lock_nopreempt(&pcpu->stall_lock, &smr_lock_grp);
+
+	progress = smrq_serialized_first(&pcpu->stall_queue,
+	    struct smr_tracker, smrt_link) == tracker;
+
+	smrq_serialized_remove(&self->smr_stack, &tracker->smrt_stack);
+	smrq_serialized_remove(&pcpu->stall_queue, &tracker->smrt_link);
+	bzero(tracker, sizeof(*tracker));
+
+	if (progress) {
+		if (!smrq_empty(&pcpu->stall_queue)) {
+			first = smrq_serialized_first(&pcpu->stall_queue,
+			    struct smr_tracker, smrt_link);
+			new_stall_seq = first->smrt_seq;
+			__builtin_assume(new_stall_seq != SMR_SEQ_INVALID);
+			assert(SMR_SEQ_CMP(pcpu->stall_rd_seq, <=, new_stall_seq));
+		}
+
+		os_atomic_store(&pcpu->stall_rd_seq, new_stall_seq, release);
+
+		progress = pcpu->stall_waiter_goal != SMR_SEQ_INVALID;
+	}
+
+	if (progress) {
+		struct turnstile *ts;
+
+		ts = turnstile_prepare((uintptr_t)pcpu, &pcpu->stall_ts,
+		    TURNSTILE_NULL, TURNSTILE_KERNEL_MUTEX);
+
+		if (new_stall_seq == SMR_SEQ_INVALID ||
+		    SMR_SEQ_CMP(pcpu->stall_waiter_goal, <=, new_stall_seq)) {
+			pcpu->stall_waiter_goal = SMR_SEQ_INVALID;
+			waitq_wakeup64_all(&ts->ts_waitq, CAST_EVENT64_T(pcpu),
+			    THREAD_AWAKENED, WAITQ_UPDATE_INHERITOR);
+		} else {
+			turnstile_update_inheritor(ts, ctid_get_thread(first->smrt_ctid),
+			    TURNSTILE_IMMEDIATE_UPDATE | TURNSTILE_INHERITOR_THREAD);
+		}
+
+		turnstile_update_inheritor_complete(ts, TURNSTILE_INTERLOCK_HELD);
+
+		turnstile_complete((uintptr_t)pcpu, &pcpu->stall_ts,
+		    NULL, TURNSTILE_KERNEL_MUTEX);
+	}
+
+	/* reenables preemption disabled in smr_leave_sleepable() */
+	hw_lck_ticket_unlock(&pcpu->stall_lock);
+
+	turnstile_cleanup();
+}
+
+void
+smr_leave_sleepable(smr_t smr, smr_tracker_t tracker)
+{
+	struct smr_worker *smrw;
+	thread_t self = current_thread();
+
+	assert(tracker->smrt_seq != SMR_SEQ_INVALID);
+	assert(smr->smr_flags & SMR_SLEEPABLE);
+
+	lock_disable_preemption_for_thread(self);
+
+	lck_rw_lock_count_dec(self, smr);
+
+	if (__improbable(tracker->smrt_cpu != -1)) {
+		return __smr_leave_stalled(smr, tracker, self);
+	}
+
+	__smr_leave(__smr_pcpu(smr));
+
+	smrw = PERCPU_GET(smr_worker);
+	smrq_serialized_remove(&self->smr_stack, &tracker->smrt_stack);
+	smrq_serialized_remove(&smrw->sect_queue, &tracker->smrt_link);
+	bzero(tracker, sizeof(*tracker));
+
+	__smr_wake_oncore_sleepers(PERCPU_GET(smr_worker));
+
+	lock_enable_preemption();
 }
 
 
@@ -391,11 +903,141 @@ __smr_rd_advance(smr_t smr, smr_seq_t goal, smr_seq_t rd_seq)
 }
 
 __attribute__((noinline))
+static smr_seq_t
+__smr_wait_for_stalled(smr_pcpu_t pcpu, smr_seq_t goal)
+{
+	struct turnstile *ts;
+	thread_t inheritor;
+	wait_result_t wr;
+	smr_seq_t stall_rd_seq;
+
+	hw_lck_ticket_lock(&pcpu->stall_lock, &smr_lock_grp);
+
+	stall_rd_seq = pcpu->stall_rd_seq;
+	if (stall_rd_seq == SMR_SEQ_INVALID ||
+	    SMR_SEQ_CMP(goal, <=, stall_rd_seq)) {
+		hw_lck_ticket_unlock(&pcpu->stall_lock);
+		return stall_rd_seq;
+	}
+
+	if (pcpu->stall_waiter_goal == SMR_SEQ_INVALID ||
+	    SMR_SEQ_CMP(goal, <, pcpu->stall_waiter_goal)) {
+		pcpu->stall_waiter_goal = goal;
+	}
+
+	inheritor = ctid_get_thread(smrq_serialized_first(&pcpu->stall_queue,
+	    struct smr_tracker, smrt_link)->smrt_ctid);
+
+	ts = turnstile_prepare((uintptr_t)pcpu, &pcpu->stall_ts,
+	    TURNSTILE_NULL, TURNSTILE_KERNEL_MUTEX);
+
+	turnstile_update_inheritor(ts, inheritor,
+	    TURNSTILE_DELAYED_UPDATE | TURNSTILE_INHERITOR_THREAD);
+	wr = waitq_assert_wait64(&ts->ts_waitq, CAST_EVENT64_T(pcpu),
+	    THREAD_UNINT, TIMEOUT_WAIT_FOREVER);
+	turnstile_update_inheritor_complete(ts, TURNSTILE_INTERLOCK_HELD);
+
+	if (wr == THREAD_WAITING) {
+		hw_lck_ticket_unlock(&pcpu->stall_lock);
+		thread_block(THREAD_CONTINUE_NULL);
+		hw_lck_ticket_lock(&pcpu->stall_lock, &smr_lock_grp);
+	}
+
+	turnstile_complete((uintptr_t)pcpu, &pcpu->stall_ts,
+	    NULL, TURNSTILE_KERNEL_MUTEX);
+
+	stall_rd_seq = pcpu->stall_rd_seq;
+	hw_lck_ticket_unlock(&pcpu->stall_lock);
+
+	turnstile_cleanup();
+
+	return stall_rd_seq;
+}
+
+__attribute__((noinline))
+static smr_seq_t
+__smr_wait_for_oncore(smr_pcpu_t pcpu, smr_seq_t goal, uint32_t cpu)
+{
+	thread_t self = current_thread();
+	struct smr_worker *smrw;
+	uint64_t deadline = 0;
+	vm_offset_t base;
+	smr_seq_t rd_seq;
+
+	/*
+	 * We are waiting for a currently active SMR section.
+	 * Start spin-waiting for it for a bit.
+	 */
+	for (;;) {
+		if (hw_spin_wait_until(&pcpu->c_rd_seq, rd_seq,
+		    rd_seq == SMR_SEQ_INVALID || SMR_SEQ_CMP(goal, <=, rd_seq))) {
+			return rd_seq;
+		}
+
+		if (deadline == 0) {
+			clock_interval_to_deadline(smr_wait_spin_us,
+			    NSEC_PER_USEC, &deadline);
+		} else if (mach_absolute_time() > deadline) {
+			break;
+		}
+	}
+
+	/*
+	 * This section is being active for a while,
+	 * we need to move to a more passive way of waiting.
+	 *
+	 * We post ourselves on the remote processor tracking head,
+	 * to denote we need a thread_wakeup() when the tracker head clears,
+	 * then send an IPI which will have 2 possible outcomes:
+	 *
+	 * 1. when smr_ack_ipi() runs, the queue is already cleared,
+	 *    and we will be woken up immediately.
+	 *
+	 * 2. when smr_ack_ipi() runs, the queue isn't cleared,
+	 *    then it does nothing, but there is a guarantee that
+	 *    when the queue clears, the remote core will observe
+	 *    that there is a waiter, and thread_wakeup() will be
+	 *    called then.
+	 *
+	 * In order to avoid to actually wait, we do spin some more,
+	 * hoping for the remote sequence to change.
+	 */
+	base = other_percpu_base(cpu);
+	smrw = PERCPU_GET_WITH_BASE(base, smr_worker);
+
+	waitq_assert_wait64(&smrw->waitq, __smrw_oncore_event(smrw),
+	    THREAD_UNINT, TIMEOUT_WAIT_FOREVER);
+
+	if (lock_cmpxchg(&smrw->sect_waiter, NULL, self, relaxed)) {
+		/*
+		 * only really send the IPI if we're first,
+		 * to avoid IPI storms in case of a pile-up
+		 * of smr_synchronize() calls stalled on the same guy.
+		 */
+		cause_ast_check(PERCPU_GET_WITH_BASE(base, processor));
+	}
+
+	if (hw_spin_wait_until(&pcpu->c_rd_seq, rd_seq,
+	    rd_seq == SMR_SEQ_INVALID || SMR_SEQ_CMP(goal, <=, rd_seq))) {
+		clear_wait(self, THREAD_AWAKENED);
+		return rd_seq;
+	}
+
+	thread_block(THREAD_CONTINUE_NULL);
+
+	return os_atomic_load(&pcpu->c_rd_seq, relaxed);
+}
+
+__attribute__((noinline))
 static bool
 __smr_scan(smr_t smr, smr_seq_t goal, smr_clock_t clk, bool wait)
 {
 	smr_delta_t delta;
 	smr_seq_t rd_seq;
+
+	if (__improbable(startup_phase < STARTUP_SUB_EARLY_BOOT)) {
+		return true;
+	}
 
 	/*
 	 * Validate that the goal is sane.
@@ -453,8 +1095,9 @@ __smr_scan(smr_t smr, smr_seq_t goal, smr_clock_t clk, bool wait)
 	 */
 	rd_seq = clk.s_wr_seq;
 
-	zpercpu_foreach(it, smr->smr_pcpu) {
-		smr_seq_t seq = os_atomic_load(&it->c_rd_seq, relaxed);
+	zpercpu_foreach_cpu(cpu) {
+		smr_pcpu_t pcpu = __smr_pcpu(smr, cpu);
+		smr_seq_t seq   = os_atomic_load(&pcpu->c_rd_seq, relaxed);
 
 		while (seq != SMR_SEQ_INVALID) {
 			/*
@@ -473,16 +1116,51 @@ __smr_scan(smr_t smr, smr_seq_t goal, smr_clock_t clk, bool wait)
 			}
 
 			if (!wait || SMR_SEQ_CMP(goal, <=, seq)) {
+				seq &= ~SMR_SEQ_SLEEPABLE;
 				break;
 			}
 
-			disable_preemption();
-			seq = hw_wait_while_equals_long(&it->c_rd_seq, seq);
-			enable_preemption();
+			if (seq & SMR_SEQ_SLEEPABLE) {
+				seq = __smr_wait_for_oncore(pcpu, goal, cpu);
+			} else {
+				disable_preemption();
+				seq = hw_wait_while_equals_long(&pcpu->c_rd_seq, seq);
+				enable_preemption();
+			}
 		}
 
 		if (seq != SMR_SEQ_INVALID && SMR_SEQ_CMP(seq, <, rd_seq)) {
 			rd_seq = seq;
+		}
+	}
+
+	if (smr->smr_flags & SMR_SLEEPABLE) {
+		/*
+		 * Order observation of stalled sections,
+		 * see smr_mark_active_trackers_stalled().
+		 */
+		os_atomic_thread_fence(seq_cst);
+
+		zpercpu_foreach_cpu(cpu) {
+			smr_pcpu_t pcpu = __smr_pcpu(smr, cpu);
+			smr_seq_t  seq  = os_atomic_load(&pcpu->stall_rd_seq, relaxed);
+
+			while (seq != SMR_SEQ_INVALID) {
+				if (SMR_SEQ_CMP(seq, <, clk.s_rd_seq)) {
+					seq = clk.s_rd_seq;
+				}
+
+				if (!wait || SMR_SEQ_CMP(goal, <=, seq)) {
+					seq &= ~SMR_SEQ_SLEEPABLE;
+					break;
+				}
+
+				seq = __smr_wait_for_stalled(pcpu, goal);
+			}
+
+			if (seq != SMR_SEQ_INVALID && SMR_SEQ_CMP(seq, <, rd_seq)) {
+				rd_seq = seq;
+			}
 		}
 	}
 
@@ -526,7 +1204,7 @@ smr_advance(smr_t smr)
 
 	/*
 	 * We assume that there will at least be a successful __smr_poll
-	 * call every 2^61 calls to smr_advance() or so, so we do not need
+	 * call every 2^60 calls to smr_advance() or so, so we do not need
 	 * to check if [s_rd_seq, s_wr_seq) is growing too wide.
 	 */
 	static_assert(sizeof(clk.s_wr_seq) == 8);
@@ -563,6 +1241,9 @@ void
 smr_wait(smr_t smr, smr_seq_t goal)
 {
 	assert(!smr_entered(smr) && goal != SMR_SEQ_INVALID);
+	if (smr->smr_flags & SMR_SLEEPABLE) {
+		assert(get_preemption_level() == 0);
+	}
 	(void)__smr_poll(smr, goal, true);
 }
 
@@ -572,6 +1253,9 @@ smr_synchronize(smr_t smr)
 	smr_clock_t clk;
 
 	assert(!smr_entered(smr));
+	if (smr->smr_flags & SMR_SLEEPABLE) {
+		assert(get_preemption_level() == 0);
+	}
 
 	/*
 	 * Similar to __smr_poll() but also does a deferred advance which
@@ -586,162 +1270,975 @@ smr_synchronize(smr_t smr)
 }
 
 
-#pragma mark system global SMR
+#pragma mark SMR domains: smr_call & smr_barrier
 
-typedef struct smr_record {
-	void                   *smrr_val;
-	void                  (*smrr_dtor)(void *);
-} *smr_record_t;
+/*!
+ * @struct smr_barrier_ctx
+ *
+ * @brief
+ * Data structure to track the completion of an smr_barrier() call.
+ */
+struct smr_barrier_ctx {
+	struct smr             *smrb_domain;
+	struct thread          *smrb_waiter;
+	uint32_t                smrb_pending;
+	uint32_t                smrb_count;
+};
 
-typedef struct smr_bucket {
+/*!
+ * @struct smr_barrier_job
+ *
+ * @brief
+ * Data structure used to track completion of smr_barrier() calls.
+ */
+struct smr_barrier_job {
+	struct smr_barrier_ctx *smrj_context;
 	union {
-		struct mpsc_queue_chain  smrb_mplink;
-		STAILQ_ENTRY(smr_bucket) smrb_stqlink;
+		struct smr_node smrj_node;
+		struct mpsc_queue_chain smrj_link;
 	};
-	uint32_t             smrb_count;
-	uint32_t             smrb_size;
-	smr_seq_t            smrb_seq;
-	struct smr_record    smrb_recs[];
-} *smr_bucket_t;
+};
 
-STAILQ_HEAD(smr_bucket_list, smr_bucket);
+#define SMR_BARRIER_SIZE        24
+static_assert(sizeof(struct smr_barrier_job) == SMR_BARRIER_SIZE);
+#define SMR_BARRIER_USE_STACK   (SMR_BARRIER_SIZE * MAX_CPUS <= 512)
 
-SMR_DEFINE(smr_system);
-
-/*! per-cpu state for smr pointers. */
-static smr_bucket_t PERCPU_DATA(smr_bucket);
-
-/*! the minimum number of items cached in per-cpu buckets */
-static TUNABLE(uint32_t, smr_bucket_count_min, "smr_bucket_count_min", 8);
-
-/*! the amount of memory pending retiring that causes a foreceful flush */
-#if XNU_TARGET_OS_OSX
-#define SMR_RETIRE_THRESHOLD_DEFAULT    (256 << 10)
-#else
-#define SMR_RETIRE_THRESHOLD_DEFAULT    (64 << 10)
-#endif
-static TUNABLE(vm_size_t, smr_retire_threshold, "smr_retire_threshold",
-    SMR_RETIRE_THRESHOLD_DEFAULT);
-
-/*! the number of items cached in per-cpu buckets */
-static SECURITY_READ_ONLY_LATE(uint32_t) smr_bucket_count;
-
-/*! the queue of elements that couldn't be freed immediately */
-static struct smr_bucket_list smr_buckets_pending =
-    STAILQ_HEAD_INITIALIZER(smr_buckets_pending);
-
-/*! the atomic queue handling deferred deallocations */
-static struct mpsc_daemon_queue smr_deallocate_queue;
-
-static smr_bucket_t
-smr_bucket_alloc(zalloc_flags_t flags)
+static void
+__smr_worker_check_invariants(struct smr_worker *smrw)
 {
-	return kalloc_type(struct smr_bucket, struct smr_record,
-	           smr_bucket_count, Z_ZERO | flags);
+#if MACH_ASSERT
+	smr_pcpu_t pcpu = smrw->whead;
+	uint16_t num = (uint16_t)cpu_number();
+
+	assert(!ml_get_interrupts_enabled() || get_preemption_level());
+
+	for (; pcpu != *smrw->wold_tail; pcpu = pcpu->drain_next) {
+		assertf(pcpu->qold_seq != SMR_SEQ_INVALID &&
+		    __smr_pcpu_queued(pcpu),
+		    "pcpu %p doesn't belong on %p old queue", pcpu, smrw);
+		pcpu->__check_cpu = num;
+		pcpu->__check_reason = (uint8_t)smrw->detach_reason;
+		pcpu->__check_list = 1;
+	}
+
+	for (; pcpu != *smrw->wage_tail; pcpu = pcpu->drain_next) {
+		__assert_only smr_t smr = pcpu->drain_smr;
+
+		assertf(pcpu->qold_seq == SMR_SEQ_INVALID &&
+		    pcpu->qage_seq != SMR_SEQ_INVALID &&
+		    SMR_SEQ_CMP(pcpu->qage_seq, <=, smr->smr_clock.s_wr_seq) &&
+		    __smr_pcpu_queued(pcpu),
+		    "pcpu %p doesn't belong on %p aging queue", pcpu, smrw);
+		pcpu->__check_cpu = num;
+		pcpu->__check_reason = (uint8_t)smrw->detach_reason;
+		pcpu->__check_list = 2;
+	}
+
+	for (; pcpu != *smrw->wcur_tail; pcpu = pcpu->drain_next) {
+		assertf(pcpu->qold_seq == SMR_SEQ_INVALID &&
+		    pcpu->qage_seq != SMR_SEQ_INVALID &&
+		    __smr_pcpu_queued(pcpu),
+		    "pcpu %p doesn't belong on %p current queue", pcpu, smrw);
+		pcpu->__check_cpu = num;
+		pcpu->__check_reason = (uint8_t)smrw->detach_reason;
+		pcpu->__check_list = 3;
+	}
+
+	assert(pcpu == NULL);
+#else
+	(void)smrw;
+#endif
+}
+
+__attribute__((noinline))
+static void
+__smr_cpu_lazy_up(struct smr_worker *smrw)
+{
+	spl_t spl;
+
+	/*
+	 * calling smr_call/smr_barrier() from the context of a CPU
+	 * with a detached worker is illegal.
+	 *
+	 * However, bound threads might run on a derecommended (IGNORED)
+	 * cpu which we correct for here (and the CPU will go back to IGNORED
+	 * in smr_cpu_leave()).
+	 */
+	assert(smrw->detach_reason == SMR_CPU_REASON_IGNORED);
+
+	spl = splsched();
+	__smrw_lock(smrw);
+	smrw->detach_reason &= ~SMR_CPU_REASON_IGNORED;
+	__smrw_unlock(smrw);
+	splx(spl);
 }
 
 static void
-smr_bucket_free(smr_bucket_t bucket)
+__smr_cpu_lazy_up_if_needed(struct smr_worker *smrw)
 {
-	return kfree_type(struct smr_bucket, struct smr_record,
-	           smr_bucket_count, bucket);
+	if (__improbable(smrw->detach_reason != SMR_CPU_REASON_NONE)) {
+		__smr_cpu_lazy_up(smrw);
+	}
+}
+
+static bool
+__smr_call_should_advance(smr_pcpu_t pcpu)
+{
+	if (pcpu->qcur_cnt > smr_call_cnt_cap) {
+		return true;
+	}
+	if (pcpu->qcur_size > smr_call_size_cap) {
+		return true;
+	}
+	return false;
+}
+
+static void
+__smr_call_advance_qcur(smr_t smr, smr_pcpu_t pcpu, bool needs_commit)
+{
+	smr_seq_t new_seq;
+
+	if (needs_commit || pcpu->qage_seq) {
+		new_seq = smr_advance(smr);
+	} else {
+		new_seq = smr_deferred_advance(smr);
+	}
+	__builtin_assume(new_seq != SMR_SEQ_INVALID);
+
+	pcpu->qage_seq  = new_seq;
+	pcpu->qage_tail = pcpu->qcur_tail;
+
+	pcpu->qcur_size = 0;
+	pcpu->qcur_cnt  = 0;
+}
+
+static void
+__smr_call_push(smr_pcpu_t pcpu, smr_node_t node, smr_cb_t cb)
+{
+	assert(pcpu->c_rd_seq == SMR_SEQ_INVALID);
+
+	node->smrn_next  = NULL;
+	node->smrn_cb    = cb;
+
+	*pcpu->qcur_tail = node;
+	pcpu->qcur_tail  = &node->smrn_next;
+	pcpu->qcur_cnt  += 1;
+}
+
+static void
+__smr_call_dispatch(struct smr_worker *smrw, smr_pcpu_t pcpu)
+{
+	__smr_worker_check_invariants(smrw);
+
+	if (!__smr_pcpu_queued(pcpu)) {
+		assert(pcpu->qold_seq == SMR_SEQ_INVALID);
+		assert(pcpu->qage_seq != SMR_SEQ_INVALID);
+
+		pcpu->drain_next   = NULL;
+		*smrw->wcur_tail   = pcpu;
+		smrw->wcur_tail    = &pcpu->drain_next;
+	}
 }
 
 void
-smr_global_retire(void *value, size_t size, void (*destructor)(void *))
+smr_call(smr_t smr, smr_node_t node, vm_size_t size, smr_cb_t cb)
 {
-	smr_bucket_t *slot;
-	smr_bucket_t bucket, free_bucket = NULL;
+	struct smr_worker *smrw;
+	smr_pcpu_t pcpu;
 
 	if (__improbable(startup_phase < STARTUP_SUB_EARLY_BOOT)) {
-		/*
-		 * The system is still single threaded and this module
-		 * is still not fully initialized.
-		 */
-		destructor(value);
-		return;
+		return cb(node);
 	}
 
-again:
-	disable_preemption();
-	slot = PERCPU_GET(smr_bucket);
-	bucket = *slot;
-	if (bucket && bucket->smrb_seq) {
-		mpsc_daemon_enqueue(&smr_deallocate_queue,
-		    &bucket->smrb_mplink, MPSC_QUEUE_NONE);
-		*slot = bucket = NULL;
+	lock_disable_preemption_for_thread(current_thread());
+
+	smrw = PERCPU_GET(smr_worker);
+	__smr_cpu_lazy_up_if_needed(smrw);
+
+	pcpu = __smr_pcpu(smr);
+	assert(pcpu->c_rd_seq == SMR_SEQ_INVALID);
+
+	if (os_add_overflow(pcpu->qcur_size, size, &pcpu->qcur_size)) {
+		pcpu->qcur_size = UINT32_MAX;
 	}
-	if (bucket == NULL) {
-		if (free_bucket) {
-			bucket = free_bucket;
-			free_bucket = NULL;
-		} else if ((bucket = smr_bucket_alloc(Z_NOWAIT)) == NULL) {
-			enable_preemption();
-			free_bucket = smr_bucket_alloc(Z_WAITOK | Z_NOFAIL);
-			goto again;
+
+	__smr_call_push(pcpu, node, cb);
+	if (__smr_call_should_advance(pcpu)) {
+		if (pcpu->qage_seq == SMR_SEQ_INVALID) {
+			__smr_call_advance_qcur(smr, pcpu, false);
 		}
-		*slot = bucket;
+		__smr_call_dispatch(smrw, pcpu);
 	}
 
-	bucket->smrb_recs[bucket->smrb_count].smrr_val = value;
-	bucket->smrb_recs[bucket->smrb_count].smrr_dtor = destructor;
+	return lock_enable_preemption();
+}
 
-	if (os_add_overflow(bucket->smrb_size, size, &bucket->smrb_size)) {
-		bucket->smrb_size = UINT32_MAX;
-	}
+static inline event_t
+__smrb_event(struct smr_barrier_ctx *ctx)
+{
+	return ctx;
+}
 
-	if (++bucket->smrb_count == smr_bucket_count ||
-	    bucket->smrb_size >= smr_retire_threshold) {
+static void
+__smr_barrier_cb(struct smr_node *node)
+{
+	struct smr_barrier_job *job;
+	struct smr_barrier_ctx *ctx;
+
+	job = __container_of(node, struct smr_barrier_job, smrj_node);
+	ctx = job->smrj_context;
+
+	if (os_atomic_dec(&ctx->smrb_pending, relaxed) == 0) {
 		/*
-		 * This will be retired the next time around,
-		 * to give readers a chance to notice the new clock.
+		 * It is permitted to still reach into the context
+		 * because smr_barrier() always blocks, which means
+		 * that the context will be valid until this wakeup
+		 * happens.
 		 */
-		bucket->smrb_seq = smr_advance(&smr_system);
-	}
-	enable_preemption();
-
-	if (__improbable(free_bucket)) {
-		smr_bucket_free(free_bucket);
+		thread_wakeup_thread(__smrb_event(ctx), ctx->smrb_waiter);
 	}
 }
 
-
-static void
-smr_deallocate_queue_invoke(mpsc_queue_chain_t e,
-    __assert_only mpsc_daemon_queue_t dq)
+static bool
+__smr_barrier_drain(struct smr_worker *smrw, bool needs_commit)
 {
-	smr_bucket_t bucket;
+	mpsc_queue_chain_t head, tail, it;
 
-	assert(dq == &smr_deallocate_queue);
+	head = mpsc_queue_dequeue_batch(&smrw->barrier_queue, &tail,
+	    OS_ATOMIC_DEPENDENCY_NONE);
 
-	bucket = mpsc_queue_element(e, struct smr_bucket, smrb_mplink);
-	smr_wait(&smr_system, bucket->smrb_seq);
+	mpsc_queue_batch_foreach_safe(it, head, tail) {
+		struct smr_barrier_job *job;
+		struct smr_barrier_ctx *ctx;
+		smr_pcpu_t pcpu;
+		smr_t smr;
 
-	for (uint32_t i = 0; i < bucket->smrb_count; i++) {
-		struct smr_record *smrr = &bucket->smrb_recs[i];
+		job  = __container_of(it, struct smr_barrier_job, smrj_link);
+		ctx  = job->smrj_context;
+		smr  = ctx->smrb_domain;
+		pcpu = __smr_pcpu(smr, smrw->processor->cpu_id);
 
-		smrr->smrr_dtor(smrr->smrr_val);
+		pcpu->qcur_size = UINT32_MAX;
+		__smr_call_push(pcpu, &job->smrj_node, __smr_barrier_cb);
+		__smr_call_advance_qcur(smr, pcpu, needs_commit);
+		__smr_call_dispatch(smrw, pcpu);
 	}
 
-	smr_bucket_free(bucket);
+	return head != NULL;
+}
+
+
+void
+smr_barrier(smr_t smr)
+{
+#if SMR_BARRIER_USE_STACK
+	struct smr_barrier_job jobs[MAX_CPUS];
+#else
+	struct smr_barrier_job *jobs;
+#endif
+	struct smr_barrier_job *job;
+	struct smr_barrier_ctx  ctx = {
+		.smrb_domain  = smr,
+		.smrb_waiter  = current_thread(),
+		.smrb_pending = zpercpu_count(),
+		.smrb_count   = zpercpu_count(),
+	};
+	spl_t spl;
+
+	/*
+	 * First wait for all readers to observe whatever it is
+	 * that changed prior to this call.
+	 *
+	 * _then_ enqueue callbacks that push out anything ahead.
+	 */
+	smr_synchronize(smr);
+
+#if !SMR_BARRIER_USE_STACK
+	jobs = kalloc_type(struct smr_barrier_job, ctx.smrb_count,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+#endif
+	job  = jobs;
+	spl  = splsched();
+
+	__smr_cpu_lazy_up_if_needed(PERCPU_GET(smr_worker));
+
+	percpu_foreach(smrw, smr_worker) {
+		job->smrj_context = &ctx;
+		if (mpsc_queue_append(&smrw->barrier_queue, &job->smrj_link)) {
+			__smrw_lock(smrw);
+			__smrw_wakeup_and_unlock(smrw);
+		}
+		job++;
+	}
+
+	/*
+	 * Because we disabled interrupts, our own CPU's callback
+	 * can't possibly have run, so just block.
+	 *
+	 * We must block in order to guarantee the lifetime of "ctx".
+	 * (See comment in __smr_barrier_cb).
+	 */
+	assert_wait(__smrb_event(&ctx), THREAD_UNINT);
+	assert(ctx.smrb_pending > 0);
+	splx(spl);
+	thread_block(THREAD_CONTINUE_NULL);
+
+#if !SMR_BARRIER_USE_STACK
+	kfree_type(struct smr_barrier_job, ctx.smrb_count, jobs);
+#endif
+}
+
+
+#pragma mark SMR domains: smr_worker
+
+static void
+__smr_worker_drain_lock(struct smr_worker *smrw)
+{
+	for (;;) {
+		ml_set_interrupts_enabled(false);
+		__smrw_lock(smrw);
+
+		/*
+		 * Check we are on an appropriate processor
+		 *
+		 * Note that we might be running on the canonical
+		 * processor incorrectly: if the processor has been
+		 * de-recommended but isn't offline.
+		 */
+		if (__probable(current_processor() == smrw->processor)) {
+			if (__probable(!smrw->detach_reason)) {
+				break;
+			}
+		} else {
+			if (__probable(smrw->detach_reason)) {
+				break;
+			}
+		}
+
+		/* go bind in the right place and retry */
+		thread_bind(__smrw_drain_bind_target(smrw));
+		__smrw_unlock(smrw);
+		ml_set_interrupts_enabled(true);
+		thread_block(THREAD_CONTINUE_NULL);
+	}
+}
+
+static void
+__smr_worker_drain_unlock(struct smr_worker *smrw)
+{
+	__smrw_unlock(smrw);
+	ml_set_interrupts_enabled(true);
+}
+
+/*!
+ * @function __smr_worker_tick
+ *
+ * @brief
+ * Make the SMR worker queues make gentle progress
+ *
+ * @discussion
+ * One round of progress will:
+ * - move entries that have aged as being old,
+ * - commit entries that have a deferred sequence and let them age.
+ *
+ * If this results into any callbacks to become "old",
+ * then the worker is being woken up to start running callbacks.
+ *
+ * This function must run either on the processfor for this worker,
+ * or under the worker drain lock being held.
+ */
+static void
+__smr_worker_tick(struct smr_worker *smrw, uint64_t ctime, bool wakeup)
+{
+	smr_pcpu_t pcpu = *smrw->wold_tail;
+
+	__smr_worker_check_invariants(smrw);
+
+	for (; pcpu != *smrw->wage_tail; pcpu = pcpu->drain_next) {
+		assert(pcpu->qold_seq == SMR_SEQ_INVALID);
+		assert(pcpu->qage_seq != SMR_SEQ_INVALID);
+
+		pcpu->qold_seq  = pcpu->qage_seq;
+		pcpu->qold_tail = pcpu->qage_tail;
+
+		pcpu->qage_seq  = SMR_SEQ_INVALID;
+	}
+
+	for (; pcpu; pcpu = pcpu->drain_next) {
+		assert(pcpu->qold_seq == SMR_SEQ_INVALID);
+		assert(pcpu->qage_seq != SMR_SEQ_INVALID);
+
+		smr_deferred_advance_commit(pcpu->drain_smr, pcpu->qage_seq);
+	}
+
+	smrw->wold_tail = smrw->wage_tail;
+	smrw->wage_tail = smrw->wcur_tail;
+	smrw->drain_ctime = ctime;
+
+	__smr_worker_check_invariants(smrw);
+
+	if (wakeup && smrw->wold_tail != &smrw->whead) {
+		__smrw_lock(smrw);
+		__smrw_wakeup_and_unlock(smrw);
+	}
+}
+
+static void
+__smr_worker_update_wold_tail(struct smr_worker *smrw, smr_pcpu_t *new_tail)
+{
+	smr_pcpu_t *old_tail = smrw->wold_tail;
+
+	if (smrw->wcur_tail == old_tail) {
+		smrw->wage_tail = new_tail;
+		smrw->wcur_tail = new_tail;
+	} else if (smrw->wage_tail == old_tail) {
+		smrw->wage_tail = new_tail;
+	}
+
+	smrw->wold_tail = new_tail;
+}
+
+static void
+__smr_worker_drain_one(struct smr_worker *smrw, smr_pcpu_t pcpu)
+{
+	smr_t       smr  = pcpu->drain_smr;
+	smr_seq_t   seq  = pcpu->qold_seq;
+	smr_node_t  head;
+
+	/*
+	 * Step 1: pop the "old" items,
+	 *         (qold_tail/qold_seq left dangling)
+	 */
+
+	assert(seq != SMR_SEQ_INVALID);
+	head = pcpu->qhead;
+	pcpu->qhead = *pcpu->qold_tail;
+	*pcpu->qold_tail = NULL;
+
+	/*
+	 * Step 2: Reconstruct the queue
+	 *         based on the sequence numbers and count fields.
+	 *
+	 *         Do what __smr_worker_tick() would do on this queue:
+	 *         - commit the aging queue
+	 *         - advance the current queue if needed
+	 */
+
+	if (pcpu->qage_seq != SMR_SEQ_INVALID) {
+		assert(pcpu->qage_tail != pcpu->qold_tail);
+
+		smr_deferred_advance_commit(smr, pcpu->qage_seq);
+		pcpu->qold_seq  = pcpu->qage_seq;
+		pcpu->qold_tail = pcpu->qage_tail;
+	} else {
+		assert(pcpu->qage_tail == pcpu->qold_tail);
+
+		pcpu->qold_seq  = SMR_SEQ_INVALID;
+		pcpu->qold_tail = &pcpu->qhead;
+	}
+
+	if (__smr_call_should_advance(pcpu)) {
+		__smr_call_advance_qcur(smr, pcpu, false);
+	} else {
+		pcpu->qage_seq  = SMR_SEQ_INVALID;
+		pcpu->qage_tail = pcpu->qold_tail;
+		if (pcpu->qcur_cnt == 0) {
+			pcpu->qcur_tail = pcpu->qage_tail;
+		}
+	}
+
+	if (pcpu->qold_seq != SMR_SEQ_INVALID) {
+		/*
+		 * The node has gained an "old seq" back,
+		 * it goes to the ready queue.
+		 */
+		pcpu->drain_next = *smrw->wold_tail;
+		*smrw->wold_tail = pcpu;
+		__smr_worker_update_wold_tail(smrw,
+		    &pcpu->drain_next);
+	} else if (pcpu->qage_seq != SMR_SEQ_INVALID) {
+		/*
+		 * The node has gained an "age seq" back,
+		 * it needs to age and wait for a tick
+		 * for its sequence number to be commited.
+		 */
+		pcpu->drain_next = NULL;
+		*smrw->wcur_tail = pcpu;
+		smrw->wcur_tail  = &pcpu->drain_next;
+	} else {
+		/*
+		 * The node is empty or with "current"
+		 * callbacks only, it can be dequeued.
+		 */
+		assert(!__smr_call_should_advance(pcpu));
+		pcpu->__check_cpu = (uint16_t)cpu_number();
+		pcpu->__check_reason = (uint8_t)smrw->detach_reason;
+		pcpu->__check_list = 0;
+		__smr_pcpu_set_not_queued(pcpu);
+	}
+
+	/*
+	 * Step 3: drain callbacks.
+	 */
+	__smr_worker_check_invariants(smrw);
+	__smr_worker_drain_unlock(smrw);
+
+	__smr_poll(smr, seq, true);
+	__smr_call_drain(head);
+
+	__smr_worker_drain_lock(smrw);
+}
+
+static void
+__smr_worker_continue(void *arg, wait_result_t wr __unused)
+{
+	smr_pcpu_t pcpu = NULL, next = NULL;
+	struct smr_worker *const smrw = arg;
+	uint64_t deadline;
+
+	__smr_worker_drain_lock(smrw);
+	__smr_worker_check_invariants(smrw);
+
+	if (smrw->wold_tail != &smrw->whead) {
+		next = smrw->whead;
+		smrw->whead = *smrw->wold_tail;
+		*smrw->wold_tail = NULL;
+		__smr_worker_update_wold_tail(smrw, &smrw->whead);
+	}
+
+	/*
+	 * The pipeline of per-cpu SMR data structures with pending
+	 * smr_call() callbacks has three stages: wcur -> wage -> wold.
+	 *
+	 * In order to guarantee forward progress, a tick happens
+	 * for each of them, either via __smr_worker_tick(),
+	 * or via __smr_worker_drain_one().
+	 *
+	 * The second tick will happen either because to core stayed
+	 * busy enough that a subsequent smr_cpu_tick() decided to
+	 * perform it, or because the CPU idled, and smr_cpu_leave()
+	 * will perform an unconditional __smr_worker_tick().
+	 */
+	__smr_barrier_drain(smrw, false);
+	__smr_worker_tick(smrw, mach_absolute_time(), false);
+
+	while ((pcpu = next)) {
+		next = next->drain_next;
+		__smr_worker_drain_one(smrw, pcpu);
+	}
+
+	if (__improbable(smrw->whead && smrw->detach_reason)) {
+		/*
+		 * If the thread isn't bound, we want to flush anything
+		 * that is pending without causing too much contention.
+		 *
+		 * Sleep for a bit in order to give the system time
+		 * to observe any advance commits we did.
+		 */
+		deadline = mach_absolute_time() + cpu_checkin_min_interval;
+	} else {
+		deadline = TIMEOUT_WAIT_FOREVER;
+	}
+	waitq_assert_wait64_locked(&smrw->waitq, __smrw_drain_event(smrw),
+	    THREAD_UNINT, TIMEOUT_URGENCY_SYS_NORMAL, deadline,
+	    TIMEOUT_NO_LEEWAY, smrw->thread);
+
+	/*
+	 * Make sure there's no barrier left, after we called assert_wait()
+	 * in order to pair with __smr_barrier_cb(). If we do find some,
+	 * we must be careful about invariants and forward progress.
+	 *
+	 * For affected domains, the dequeued barriers have been added
+	 * to their "qage" queue. If their "qage" queue was non empty,
+	 * then its "qage_seq" was already commited, and we must preserve
+	 * this invariant.
+	 *
+	 * Affected domains that were idle before will get enqueued on this
+	 * worker's "wcur" queue. In order to guarantee forward progress,
+	 * we must force a tick if both the "wage" and "wold" queues
+	 * of the worker are empty.
+	 */
+	if (__improbable(__smr_barrier_drain(smrw, true))) {
+		if (smrw->wage_tail == &smrw->whead) {
+			__smr_worker_tick(smrw, mach_absolute_time(), false);
+		}
+	}
+
+	__smr_worker_check_invariants(smrw);
+	__smr_worker_drain_unlock(smrw);
+
+	thread_block_parameter(__smr_worker_continue, smrw);
+}
+
+
+#pragma mark SMR domains: scheduler integration
+
+#if CONFIG_QUIESCE_COUNTER
+__startup_data
+static uint64_t _Atomic quiesce_gen_startup;
+static uint64_t _Atomic *quiesce_genp = &quiesce_gen_startup;
+static uint64_t _Atomic quiesce_ctime;
+
+void
+cpu_quiescent_set_storage(uint64_t _Atomic *ptr)
+{
+	/*
+	 * Transfer to the real location for the commpage.
+	 *
+	 * this is ok to do like this because the system
+	 * is still single threaded.
+	 */
+	uint64_t gen = os_atomic_load(&quiesce_gen_startup, relaxed);
+
+	os_atomic_store(ptr, gen, relaxed);
+	quiesce_genp = ptr;
+}
+
+static smr_seq_t
+cpu_quiescent_gen_to_seq(uint64_t gen)
+{
+	return gen * SMR_SEQ_INC + SMR_SEQ_INIT;
+}
+
+static void
+cpu_quiescent_advance(uint64_t gen, uint64_t ctime __kdebug_only)
+{
+	smr_seq_t seq = cpu_quiescent_gen_to_seq(gen);
+
+	os_atomic_thread_fence(seq_cst);
+
+	percpu_foreach(it, smr_worker) {
+		smr_seq_t rd_seq = os_atomic_load(&it->rd_quiesce_seq, relaxed);
+
+		if (rd_seq != SMR_SEQ_INVALID && SMR_SEQ_CMP(rd_seq, <, seq)) {
+			return;
+		}
+	}
+
+	os_atomic_thread_fence(seq_cst);
+
+	if (lock_cmpxchg(quiesce_genp, gen, gen + 1, relaxed)) {
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_QUIESCENT_COUNTER),
+		    gen, 0, ctime, 0);
+	}
+}
+
+static void
+cpu_quiescent_join(struct smr_worker *smrw)
+{
+	uint64_t gen = os_atomic_load(quiesce_genp, relaxed);
+
+	assert(smrw->rd_quiesce_seq == SMR_SEQ_INVALID);
+	os_atomic_store(&smrw->rd_quiesce_seq,
+	    cpu_quiescent_gen_to_seq(gen), relaxed);
+	os_atomic_thread_fence(seq_cst);
+}
+
+static void
+cpu_quiescent_tick(struct smr_worker *smrw, uint64_t ctime, uint64_t interval)
+{
+	uint64_t  gen  = os_atomic_load(quiesce_genp, relaxed);
+	smr_seq_t seq  = cpu_quiescent_gen_to_seq(gen);
+
+	if (smrw->rd_quiesce_seq == SMR_SEQ_INVALID) {
+		/*
+		 * Likely called because of the scheduler tick,
+		 * smr_maintenance() will do the right thing.
+		 */
+		assert(current_processor()->state != PROCESSOR_RUNNING);
+	} else if (seq != smrw->rd_quiesce_seq) {
+		/*
+		 * Someone managed to update the sequence already,
+		 * learn it, update our ctime.
+		 */
+		os_atomic_store(&smrw->rd_quiesce_seq, seq, release);
+		os_atomic_store(&quiesce_ctime, ctime, relaxed);
+		os_atomic_thread_fence(seq_cst);
+	} else if ((ctime - os_atomic_load(&quiesce_ctime, relaxed)) > interval) {
+		/*
+		 * The system looks busy enough we want to update
+		 * the counter faster than every scheduler tick.
+		 */
+		os_atomic_store(&quiesce_ctime, ctime, relaxed);
+		cpu_quiescent_advance(gen, ctime);
+	}
+}
+
+static void
+cpu_quiescent_leave(struct smr_worker *smrw)
+{
+	assert(smrw->rd_quiesce_seq != SMR_SEQ_INVALID);
+	os_atomic_store(&smrw->rd_quiesce_seq, SMR_SEQ_INVALID, release);
+}
+#endif /* CONFIG_QUIESCE_COUNTER */
+
+uint32_t
+smr_cpu_checkin_get_min_interval_us(void)
+{
+	return cpu_checkin_min_interval_us;
 }
 
 void
-smr_register_mpsc_queue(void)
+smr_cpu_checkin_set_min_interval_us(uint32_t new_value_us)
 {
-	thread_deallocate_daemon_register_queue(&smr_deallocate_queue,
-	    smr_deallocate_queue_invoke);
+	/* clamp to something vaguely sane */
+	if (new_value_us > CPU_CHECKIN_MIN_INTERVAL_MAX_US) {
+		new_value_us = CPU_CHECKIN_MIN_INTERVAL_MAX_US;
+	}
+
+	cpu_checkin_min_interval_us = new_value_us;
+
+	uint64_t abstime = 0;
+	clock_interval_to_absolutetime_interval(cpu_checkin_min_interval_us,
+	    NSEC_PER_USEC, &abstime);
+	cpu_checkin_min_interval = abstime;
+}
+
+__startup_func
+static void
+smr_cpu_checkin_init_min_interval_us(void)
+{
+	smr_cpu_checkin_set_min_interval_us(CPU_CHECKIN_MIN_INTERVAL_US);
+}
+STARTUP(TUNABLES, STARTUP_RANK_FIRST, smr_cpu_checkin_init_min_interval_us);
+
+static void
+__smr_cpu_init_thread(struct smr_worker *smrw)
+{
+	char name[MAXTHREADNAMESIZE];
+	thread_t th = THREAD_NULL;
+
+	kernel_thread_create(__smr_worker_continue, smrw, MINPRI_KERNEL, &th);
+	smrw->thread = th;
+
+	snprintf(name, sizeof(name), "smr.reclaim:%d", smrw->processor->cpu_id);
+	thread_set_thread_name(th, name);
+	thread_start_in_assert_wait(th,
+	    &smrw->waitq, __smrw_drain_event(smrw), THREAD_UNINT);
+}
+
+void
+smr_cpu_init(struct processor *processor)
+{
+	struct smr_worker *smrw;
+
+	smrw = PERCPU_GET_RELATIVE(smr_worker, processor, processor);
+	smrw->processor = processor;
+
+	waitq_init(&smrw->waitq, WQT_QUEUE, SYNC_POLICY_FIFO);
+	smrw->detach_reason = SMR_CPU_REASON_OFFLINE;
+
+	smrq_init(&smrw->sect_queue);
+	smrw->wold_tail = &smrw->whead;
+	smrw->wage_tail = &smrw->whead;
+	smrw->wcur_tail = &smrw->whead;
+	mpsc_queue_init(&smrw->barrier_queue);
+
+	if (processor != master_processor) {
+		__smr_cpu_init_thread(smrw);
+	}
+}
+STARTUP_ARG(LOCKS, STARTUP_RANK_LAST, smr_cpu_init, master_processor);
+STARTUP_ARG(THREAD_CALL, STARTUP_RANK_LAST,
+    __smr_cpu_init_thread, PERCPU_GET_MASTER(smr_worker));
+
+/*!
+ * @function smr_cpu_up()
+ *
+ * @brief
+ * Scheduler callback to notify this processor is going up.
+ *
+ * @discussion
+ * Called at splsched() under the sched_available_cores_lock.
+ */
+void
+smr_cpu_up(struct processor *processor, smr_cpu_reason_t reason)
+{
+	struct smr_worker *smrw;
+
+	smrw = PERCPU_GET_RELATIVE(smr_worker, processor, processor);
+
+	__smrw_lock(smrw);
+	if (reason != SMR_CPU_REASON_IGNORED) {
+		assert((smrw->detach_reason & reason) == reason);
+	}
+	smrw->detach_reason &= ~reason;
+	__smrw_unlock(smrw);
 }
 
 static void
-smr_startup(void)
+__smr_cpu_down_and_unlock(
+	struct processor       *processor,
+	struct smr_worker      *smrw,
+	smr_cpu_reason_t        reason)
 {
-	smr_bucket_count = zpercpu_count();
-	if (smr_bucket_count < smr_bucket_count_min) {
-		smr_bucket_count = smr_bucket_count_min;
+	bool detach = !smrw->detach_reason;
+
+	/*
+	 * When reason is SMR_CPU_REASON_IGNORED,
+	 * this is called from smr_cpu_leave() on the way to idle.
+	 *
+	 * However this isn't sychronized with the recommendation
+	 * lock, hence it is possible that the CPU might actually
+	 * be recommended again while we're on the way to idle.
+	 *
+	 * By re-checking processor recommendation under
+	 * the __smrw_lock, we serialize with smr_cpu_up().
+	 */
+	if (reason != SMR_CPU_REASON_IGNORED) {
+		assert((smrw->detach_reason & reason) == 0);
+	} else if (processor->is_recommended) {
+		/*
+		 * The race we try to detect happened,
+		 * do nothing.
+		 */
+		reason = SMR_CPU_REASON_NONE;
+		detach = false;
+	}
+	smrw->detach_reason |= reason;
+	reason = smrw->detach_reason;
+
+	if (detach && smrw->whead) {
+		detach = !__smrw_wakeup_and_unlock(smrw);
+	} else {
+		__smrw_unlock(smrw);
+	}
+
+	if (detach) {
+		thread_unbind_after_queue_shutdown(smrw->thread, processor);
 	}
 }
-STARTUP(PERCPU, STARTUP_RANK_LAST, smr_startup);
+
+/*!
+ * @function smr_cpu_down()
+ *
+ * @brief
+ * Scheduler callback to notify this processor is going down.
+ *
+ * @discussion
+ * Called at splsched() when the processor run queue is being shut down.
+ */
+void
+smr_cpu_down(struct processor *processor, smr_cpu_reason_t reason)
+{
+	struct smr_worker *smrw;
+
+	smrw = PERCPU_GET_RELATIVE(smr_worker, processor, processor);
+
+	__smrw_lock(smrw);
+	__smr_cpu_down_and_unlock(processor, smrw, reason);
+}
+
+
+/*!
+ * @function smr_cpu_join()
+ *
+ * @brief
+ * Scheduler callback to notify this processor is going out of idle.
+ *
+ * @discussion
+ * Called at splsched().
+ */
+void
+smr_cpu_join(struct processor *processor, uint64_t ctime __unused)
+{
+#if CONFIG_QUIESCE_COUNTER
+	struct smr_worker *smrw;
+
+	smrw = PERCPU_GET_RELATIVE(smr_worker, processor, processor);
+	cpu_quiescent_join(smrw);
+#else
+	(void)processor;
+#endif /* CONFIG_QUIESCE_COUNTER */
+}
+
+/*!
+ * @function smr_cpu_tick()
+ *
+ * @brief
+ * Scheduler callback invoked during the scheduler maintenance routine.
+ *
+ * @discussion
+ * Called at splsched().
+ */
+void
+smr_cpu_tick(uint64_t ctime, bool safe_point)
+{
+	struct smr_worker *smrw = PERCPU_GET(smr_worker);
+	uint64_t interval = cpu_checkin_min_interval;
+
+#if CONFIG_QUIESCE_COUNTER
+	cpu_quiescent_tick(smrw, ctime, interval);
+#endif /* CONFIG_QUIESCE_COUNTER */
+
+	/*
+	 * if a bound thread was woken up on a derecommended core,
+	 * our detach_reason might be "IGNORED" and we want to leave
+	 * it alone in that case
+	 */
+	if (safe_point && !smrw->detach_reason && smrw->whead &&
+	    current_processor()->state == PROCESSOR_RUNNING &&
+	    (ctime - smrw->drain_ctime) > interval) {
+		__smr_worker_tick(smrw, ctime, true);
+	}
+}
+
+/*!
+ * @function smr_cpu_leave()
+ *
+ * @brief
+ * Scheduler callback to notify this processor is going idle.
+ *
+ * @discussion
+ * Called at splsched().
+ */
+void
+smr_cpu_leave(struct processor *processor, uint64_t ctime)
+{
+	struct smr_worker *smrw;
+
+	smrw = PERCPU_GET_RELATIVE(smr_worker, processor, processor);
+
+	/*
+	 * if a bound thread was woken up on a derecommended core,
+	 * our detach_reason might be "IGNORED" and we want to leave
+	 * it alone in that case
+	 *
+	 * See comment in __smr_worker_continue for why this must be
+	 * done unconditionally otherwise.
+	 */
+	if (!smrw->detach_reason && smrw->whead) {
+		__smr_worker_tick(smrw, ctime, true);
+	}
+
+	if (__improbable(!processor->is_recommended)) {
+		__smrw_lock(smrw);
+		__smr_cpu_down_and_unlock(processor, smrw, SMR_CPU_REASON_IGNORED);
+	}
+
+#if CONFIG_QUIESCE_COUNTER
+	cpu_quiescent_leave(smrw);
+#endif /* CONFIG_QUIESCE_COUNTER */
+}
+
+/*!
+ * @function smr_maintenance()
+ *
+ * @brief
+ * Scheduler callback called at the scheduler tick.
+ *
+ * @discussion
+ * Called at splsched().
+ */
+void
+smr_maintenance(uint64_t ctime)
+{
+#if CONFIG_QUIESCE_COUNTER
+	cpu_quiescent_advance(os_atomic_load(quiesce_genp, relaxed), ctime);
+#else
+	(void)ctime;
+#endif /* CONFIG_QUIESCE_COUNTER */
+}
 
 
 #pragma mark - SMR hash tables
@@ -1251,7 +2748,7 @@ __smr_shash_entered_get_or_insert(
 	state = os_atomic_load(&smrh->smrsh_state, dependency);
 	hash  = __smr_shash_hash(smrh, state.curidx, key, traits);
 	head  = __smr_shash_bucket(smrh, state, SMRSH_CUR, hash);
-	first = hw_lck_ptr_lock_nopreempt(head, &smr_shash_grp);
+	first = hw_lck_ptr_lock(head, &smr_shash_grp);
 
 	if (__improbable(first == SMRSH_MIGRATED)) {
 		hw_lck_ptr_unlock_nopreempt(head, first, &smr_shash_grp);
@@ -1269,7 +2766,7 @@ __smr_shash_entered_get_or_insert(
 		if (traits->obj_equ(other, key)) {
 			obj = __smrht_link_to_obj(traits, other);
 			if (traits->obj_try_get(obj)) {
-				hw_lck_ptr_unlock_nopreempt(head, first,
+				hw_lck_ptr_unlock(head, first,
 				    &smr_shash_grp);
 				return obj;
 			}
@@ -1280,7 +2777,7 @@ __smr_shash_entered_get_or_insert(
 
 	counter_inc_preemption_disabled(&smrh->smrsh_count);
 	smr_serialized_store_relaxed(&link->next, first);
-	hw_lck_ptr_unlock_nopreempt(head, link, &smr_shash_grp);
+	hw_lck_ptr_unlock(head, link, &smr_shash_grp);
 
 	if (__smr_shash_should_reseed(smrh, depth)) {
 		__smr_shash_schedule_rehash(smrh, traits, SMRSH_REHASH_RESEED);
@@ -1317,7 +2814,7 @@ __smr_shash_entered_mut_begin(
 	state = os_atomic_load(&smrh->smrsh_state, dependency);
 	hash  = __smr_shash_hash(smrh, state.curidx, link, traits);
 	head  = __smr_shash_bucket(smrh, state, SMRSH_CUR, hash);
-	first = hw_lck_ptr_lock_nopreempt(head, &smr_shash_grp);
+	first = hw_lck_ptr_lock(head, &smr_shash_grp);
 
 	if (__improbable(first == SMRSH_MIGRATED)) {
 		hw_lck_ptr_unlock_nopreempt(head, first, &smr_shash_grp);
@@ -1354,12 +2851,13 @@ __smr_shash_entered_mut_erase(
 
 	next  = smr_serialized_load(&link->next);
 	if (first == link) {
-		hw_lck_ptr_unlock_nopreempt(cursor.head, next, &smr_shash_grp);
+		counter_dec_preemption_disabled(&smrh->smrsh_count);
+		hw_lck_ptr_unlock(cursor.head, next, &smr_shash_grp);
 	} else {
 		smr_serialized_store_relaxed(cursor.prev, next);
-		hw_lck_ptr_unlock_nopreempt(cursor.head, first, &smr_shash_grp);
+		counter_dec_preemption_disabled(&smrh->smrsh_count);
+		hw_lck_ptr_unlock(cursor.head, first, &smr_shash_grp);
 	}
-	counter_dec_preemption_disabled(&smrh->smrsh_count);
 
 	state = atomic_load_explicit(&smrh->smrsh_state, memory_order_relaxed);
 	if (first == link && __smr_shash_is_stop(next) &&
@@ -1381,17 +2879,17 @@ __smr_shash_entered_mut_replace(
 	next  = smr_serialized_load(&old_link->next);
 	smr_serialized_store_relaxed(&new_link->next, next);
 	if (first == old_link) {
-		hw_lck_ptr_unlock_nopreempt(cursor.head, new_link, &smr_shash_grp);
+		hw_lck_ptr_unlock(cursor.head, new_link, &smr_shash_grp);
 	} else {
 		smr_serialized_store_relaxed(cursor.prev, new_link);
-		hw_lck_ptr_unlock_nopreempt(cursor.head, first, &smr_shash_grp);
+		hw_lck_ptr_unlock(cursor.head, first, &smr_shash_grp);
 	}
 }
 
 void
 __smr_shash_entered_mut_abort(smr_shash_mut_cursor_t cursor)
 {
-	hw_lck_ptr_unlock_nopreempt(cursor.head,
+	hw_lck_ptr_unlock(cursor.head,
 	    hw_lck_ptr_value(cursor.head), &smr_shash_grp);
 }
 

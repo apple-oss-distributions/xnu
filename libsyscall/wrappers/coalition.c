@@ -57,6 +57,12 @@ coalition_info_resource_usage(uint64_t cid, struct coalition_resource_usage *cru
 }
 
 int
+coalition_info_debug_info(uint64_t cid, struct coalinfo_debuginfo *cru, size_t sz)
+{
+	return __coalition_info(COALITION_INFO_GET_DEBUG_INFO, &cid, cru, &sz);
+}
+
+int
 coalition_info_set_name(uint64_t cid, const char *name, size_t size)
 {
 	return __coalition_info(COALITION_INFO_SET_NAME, &cid, (void *)name, &size);

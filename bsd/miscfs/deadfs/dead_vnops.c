@@ -241,11 +241,16 @@ dead_strategy(struct vnop_strategy_args *ap)
 #endif
 			}
 			vnode_unlock(vp);
+			printf("%s: returning EIO for vnode v_flags = 0x%x v_numoutput = %d\n",
+			    __func__, vp->v_flag, vp->v_numoutput);
 		}
 		buf_seterror(ap->a_bp, EIO);
 		buf_biodone(ap->a_bp);
 		return EIO;
 	}
+
+	printf("%s: vnode is going to call the original bwrite routine v_lflag 0x%x v_flags = 0x%x v_numoutput = %d\n",
+	    __func__, vp->v_lflag, vp->v_flag, vp->v_numoutput);
 
 	return VOCALL(vp->v_op, VOFFSET(vnop_strategy), ap);
 }
@@ -283,10 +288,15 @@ dead_bwrite(struct vnop_bwrite_args *ap)
 			 * buf_biodone is expecting this to be incremented (see buf_bwrite)
 			 */
 			OSAddAtomic(1, &buf_vp->v_numoutput);
+			printf("%s: returning EIO for vnode v_flags = 0x%x v_numoutput = %d\n",
+			    __func__, buf_vp->v_flag, buf_vp->v_numoutput);
 		}
 		buf_biodone(bp);
 		return EIO;
 	}
+
+	printf("%s: vnode is going to call the original bwrite routine v_lflag 0x%x v_flags = 0x%x v_numoutput = %d\n",
+	    __func__, vp->v_lflag, vp->v_flag, vp->v_numoutput);
 
 	return VOCALL(vp->v_op, VOFFSET(vnop_bwrite), ap);
 }

@@ -198,19 +198,20 @@ extern void             lck_rw_startup_init(
 #define LCK_RW_ASSERT_EXCLUSIVE 0x02
 #define LCK_RW_ASSERT_HELD      0x03
 #define LCK_RW_ASSERT_NOTHELD   0x04
-#endif /* XNU_KERNEL_PRIVATE */
 
 #if MACH_ASSERT
-#define LCK_RW_ASSERT(lck, type) lck_rw_assert((lck),(type))
+extern boolean_t lck_rw_assert_enabled;
+#define LCK_RW_ASSERT(lck, type) do { \
+	        if (__improbable(!(lck_opts_get() & LCK_OPTION_DISABLE_RW_DEBUG))) { \
+	                lck_rw_assert((lck),(type)); \
+	        } \
+	} while (0)
 #else /* MACH_ASSERT */
 #define LCK_RW_ASSERT(lck, type)
 #endif /* MACH_ASSERT */
 
-#if DEBUG
-#define LCK_RW_ASSERT_DEBUG(lck, type) lck_rw_assert((lck),(type))
-#else /* DEBUG */
-#define LCK_RW_ASSERT_DEBUG(lck, type)
-#endif /* DEBUG */
+#endif /* XNU_KERNEL_PRIVATE */
+
 
 /*!
  * @function lck_rw_alloc_init

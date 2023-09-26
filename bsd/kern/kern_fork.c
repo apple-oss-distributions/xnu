@@ -326,12 +326,6 @@ fork1(proc_t parent_proc, thread_t *child_threadp, int kind, coalition_t *coalit
 		if (!spawn) {
 			/* Copy current thread state into the child thread (only for fork) */
 			thread_dup(child_thread);
-			/*
-			 * Also enable task ports for the new task for fork. In the spawn
-			 * case, task ports enablement is delayed until after image activation
-			 * since task map will be swapped during mach executable loading.
-			 */
-			ipc_task_enable(get_threadtask(child_thread));
 		}
 
 // XXX BEGIN: wants to move to be common code (and safe)
@@ -343,13 +337,14 @@ fork1(proc_t parent_proc, thread_t *child_threadp, int kind, coalition_t *coalit
 		 *       association without informing the policy in other
 		 *       situations (keep long enough to get policies changed)
 		 */
-		mac_cred_label_associate_fork(proc_ucred(child_proc), child_proc);
+		mac_cred_label_associate_fork(proc_ucred_unsafe(child_proc),
+		    child_proc);
 #endif
 
 		/*
 		 * Propogate change of PID - may get new cred if auditing.
 		 */
-		set_security_token(child_proc);
+		set_security_token(child_proc, proc_ucred_unsafe(child_proc));
 
 		AUDIT_ARG(pid, proc_getpid(child_proc));
 
@@ -455,6 +450,11 @@ fork_create_child(task_t parent_task,
 	proc_ro_t       proc_ro;
 	bool inherit_memory = !!(clone_flags & CLONEPROC_FLAGS_INHERIT_MEMORY);
 	bool in_exec = !!(clone_flags & CLONEPROC_FLAGS_FOR_EXEC);
+	/*
+	 * Exec complete hook should be called for spawn and exec, but not for fork.
+	 */
+	uint8_t returnwaitflags = (!inherit_memory ? TRW_LEXEC_COMPLETE : 0) |
+	    (TRW_LRETURNWAIT | TRW_LRETURNWAITER);
 
 	proc_ro = proc_get_ro(child_proc);
 	if (proc_ro_task(proc_ro) != NULL) {
@@ -475,8 +475,8 @@ fork_create_child(task_t parent_task,
 	    is_64bit_data,
 	    TF_NONE,
 	    TF_NONE,
-	    in_exec ? TPF_EXEC_COPY : TPF_NONE,                        /* Mark the task exec copy if in execve */
-	    (TRW_LRETURNWAIT | TRW_LRETURNWAITER),                     /* All created threads will wait in task_wait_to_return */
+	    in_exec ? TPF_EXEC_COPY : TPF_NONE,           /* Mark the task exec copy if in execve */
+	    returnwaitflags,                              /* All created threads will wait in task_wait_to_return */
 	    child_task);
 	if (result != KERN_SUCCESS) {
 		printf("%s: task_create_internal failed.  Code: %d\n",
@@ -589,6 +589,12 @@ fork(proc_t parent_proc, __unused struct fork_args *uap, int32_t *retval)
 		/* task_control_port_options has been inherited from parent, apply it */
 		task_set_immovable_pinned(child_task);
 		main_thread_set_immovable_pinned(child_thread);
+
+		/*
+		 * Since the task ports for this new task are now set to be immovable,
+		 * we can enable them.
+		 */
+		ipc_task_enable(get_threadtask(child_thread));
 
 		/*
 		 * Drop the signal lock on the child which was taken on our
@@ -854,13 +860,13 @@ forkproc_free(proc_t p)
 
 	lck_mtx_destroy(&p->p_mlock, &proc_mlock_grp);
 	lck_mtx_destroy(&p->p_ucred_mlock, &proc_ucred_mlock_grp);
+#if CONFIG_AUDIT
+	lck_mtx_destroy(&p->p_audit_mlock, &proc_ucred_mlock_grp);
+#endif /* CONFIG_AUDIT */
 #if CONFIG_DTRACE
 	lck_mtx_destroy(&p->p_dtrace_sprlock, &proc_lck_grp);
 #endif
 	lck_spin_destroy(&p->p_slock, &proc_slock_grp);
-
-	/* Release the credential reference */
-	proc_set_ucred(p, NOCRED);
 
 	proc_list_lock();
 	/* Decrement the count of processes in the system */
@@ -890,12 +896,7 @@ forkproc_free(proc_t p)
 	p->p_stats = NULL;
 	if (p->p_subsystem_root_path) {
 		zfree(ZV_NAMEI, p->p_subsystem_root_path);
-	}
-
-	p->p_proc_ro = proc_ro_release_proc(p->p_proc_ro);
-	if (p->p_proc_ro != NULL) {
-		proc_ro_free(p->p_proc_ro);
-		p->p_proc_ro = NULL;
+		p->p_subsystem_root_path = NULL;
 	}
 
 	proc_checkdeadrefs(p);
@@ -1037,7 +1038,7 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 	child_proc->p_flag = (parent_proc->p_flag & (P_LP64 | P_TRANSLATED | P_DISABLE_ASLR | P_SUGID | P_AFFINITY));
 #endif /* CONFIG_DELAY_IDLE_SLEEP */
 
-	child_proc->p_vfs_iopolicy = (parent_proc->p_vfs_iopolicy & (P_VFS_IOPOLICY_VALID_MASK));
+	child_proc->p_vfs_iopolicy = (parent_proc->p_vfs_iopolicy & (P_VFS_IOPOLICY_INHERITED_MASK));
 
 	child_proc->p_responsible_pid = parent_proc->p_responsible_pid;
 
@@ -1045,10 +1046,13 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 	 * Note that if the current thread has an assumed identity, this
 	 * credential will be granted to the new process.
 	 */
-	kauth_cred_set(&proc_ro_data.p_ucred, kauth_cred_get());
+	kauth_cred_set(&proc_ro_data.p_ucred.__smr_ptr, kauth_cred_get());
 
 	lck_mtx_init(&child_proc->p_mlock, &proc_mlock_grp, &proc_lck_attr);
 	lck_mtx_init(&child_proc->p_ucred_mlock, &proc_ucred_mlock_grp, &proc_lck_attr);
+#if CONFIG_AUDIT
+	lck_mtx_init(&child_proc->p_audit_mlock, &proc_ucred_mlock_grp, &proc_lck_attr);
+#endif /* CONFIG_AUDIT */
 #if CONFIG_DTRACE
 	lck_mtx_init(&child_proc->p_dtrace_sprlock, &proc_lck_grp, &proc_lck_attr);
 #endif
@@ -1075,7 +1079,7 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 	child_proc->p_proc_ro = proc_ro_alloc(child_proc, &proc_ro_data, NULL, NULL);
 
 	/* update cred on proc */
-	proc_update_creds_onproc(child_proc);
+	proc_update_creds_onproc(child_proc, proc_ucred_unsafe(child_proc));
 
 	/* update audit session proc count */
 	AUDIT_SESSION_PROCNEW(child_proc);
@@ -1168,12 +1172,19 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 
 #if CONFIG_PERSONAS
 	child_proc->p_persona = NULL;
-	error = persona_proc_inherit(child_proc, parent_proc);
-	if (error != 0) {
-		printf("forkproc: persona_proc_inherit failed (persona %d being destroyed?)\n", persona_id_from_proc(parent_proc));
-		forkproc_free(child_proc);
-		child_proc = NULL;
-		goto bad;
+	if (parent_proc->p_persona) {
+		struct persona *persona = proc_persona_get(parent_proc);
+
+		if (persona) {
+			error = persona_proc_adopt(child_proc, persona, NULL);
+			if (error != 0) {
+				printf("forkproc: persona_proc_inherit failed (persona %d being destroyed?)\n",
+				    persona_get_id(persona));
+				forkproc_free(child_proc);
+				child_proc = NULL;
+				goto bad;
+			}
+		}
 	}
 #endif
 
@@ -1259,10 +1270,8 @@ proc_ucred_unlock(proc_t p)
 }
 
 void
-proc_update_creds_onproc(proc_t p)
+proc_update_creds_onproc(proc_t p, kauth_cred_t cred)
 {
-	kauth_cred_t cred = proc_ucred(p);
-
 	p->p_uid = kauth_cred_getuid(cred);
 	p->p_gid = kauth_cred_getgid(cred);
 	p->p_ruid = kauth_cred_getruid(cred);

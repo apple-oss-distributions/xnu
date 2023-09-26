@@ -147,7 +147,7 @@ static int frag_timeout_run;            /* frag timer is scheduled to run */
 static void frag_timeout(void *);
 static void frag_sched_timeout(void);
 
-static struct ipq *ipq_alloc(int);
+static struct ipq *ipq_alloc(void);
 static void ipq_free(struct ipq *);
 static void ipq_updateparams(void);
 static void ip_input_second_pass(struct mbuf *, struct ifnet *,
@@ -408,13 +408,13 @@ static inline u_short ip_cksum(struct mbuf *, int);
 	if (!IP_HDR_ALIGNED_P(mtod(_m, caddr_t))) {                     \
 	        struct mbuf *_n;                                        \
 	        struct ifnet *__ifp = (_ifp);                           \
-	        atomic_add_64(&(__ifp)->if_alignerrs, 1);               \
+	        os_atomic_inc(&(__ifp)->if_alignerrs, relaxed);               \
 	        if (((_m)->m_flags & M_PKTHDR) &&                       \
 	            (_m)->m_pkthdr.pkt_hdr != NULL)                     \
 	                (_m)->m_pkthdr.pkt_hdr = NULL;                  \
 	        _n = m_defrag_offset(_m, max_linkhdr, M_NOWAIT);        \
 	        if (_n == NULL) {                                       \
-	                atomic_add_32(&ipstat.ips_toosmall, 1);         \
+	                os_atomic_inc(&ipstat.ips_toosmall, relaxed);         \
 	                m_freem(_m);                                    \
 	                (_m) = NULL;                                    \
 	                _action;                                        \
@@ -475,9 +475,6 @@ ip_init(struct protosw *pp, struct domain *dp)
 
 	domain_proto_mtx_lock_assert_held();
 	VERIFY((pp->pr_flags & (PR_INITIALIZED | PR_ATTACHED)) == PR_ATTACHED);
-
-	/* ipq_alloc() uses mbufs for IP fragment queue structures */
-	_CASSERT(sizeof(struct ipq) <= _MLEN);
 
 	/*
 	 * Some ioctls (e.g. SIOCAIFADDR) use ifaliasreq struct, which is
@@ -967,7 +964,7 @@ ip_input_first_pass(struct mbuf *m, struct ip_fw_in_args *args, struct mbuf **mo
 			if (p->m_tag_type == KERNEL_TAG_TYPE_DUMMYNET) {
 				struct dn_pkt_tag *dn_tag;
 
-				dn_tag = (struct dn_pkt_tag *)(p + 1);
+				dn_tag = (struct dn_pkt_tag *)(p->m_tag_data);
 				args->fwai_pf_rule = dn_tag->dn_pf_rule;
 				delete = TRUE;
 			}
@@ -1208,7 +1205,7 @@ check_with_pf:
 #endif /* PF */
 
 #if IPSEC
-	if (ipsec_bypass == 0 && ipsec_gethist(m, NULL)) {
+	if (ipsec_bypass == 0 && ipsec_get_history_count(m)) {
 		retval = IPINPUT_DONTCHAIN; /* XXX scope for chaining here? */
 		goto pass;
 	}
@@ -1750,10 +1747,10 @@ ip_input(struct mbuf *m)
 
 	/* Grab info from mtags prepended to the chain */
 	if ((tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_DUMMYNET, NULL)) != NULL) {
+	    KERNEL_TAG_TYPE_DUMMYNET)) != NULL) {
 		struct dn_pkt_tag *dn_tag;
 
-		dn_tag = (struct dn_pkt_tag *)(tag + 1);
+		dn_tag = (struct dn_pkt_tag *)(tag->m_tag_data);
 		args.fwa_pf_rule = dn_tag->dn_pf_rule;
 
 		m_tag_delete(m, tag);
@@ -1956,7 +1953,7 @@ check_with_pf:
 #endif /* PF */
 
 #if IPSEC
-	if (ipsec_bypass == 0 && ipsec_gethist(m, NULL)) {
+	if (ipsec_bypass == 0 && ipsec_get_history_count(m)) {
 		goto pass;
 	}
 #endif
@@ -2350,7 +2347,7 @@ found:
 	 * If first fragment to arrive, create a reassembly queue.
 	 */
 	if (fp == NULL) {
-		fp = ipq_alloc(M_DONTWAIT);
+		fp = ipq_alloc();
 		if (fp == NULL) {
 			goto dropfrag;
 		}
@@ -2713,9 +2710,8 @@ frag_drain(void)
 }
 
 static struct ipq *
-ipq_alloc(int how)
+ipq_alloc(void)
 {
-	struct mbuf *t;
 	struct ipq *fp;
 
 	/*
@@ -2727,13 +2723,9 @@ ipq_alloc(int how)
 		return NULL;
 	}
 
-	t = m_get(how, MT_FTABLE);
-	if (t != NULL) {
-		atomic_add_32(&ipq_count, 1);
-		fp = mtod(t, struct ipq *);
-		bzero(fp, sizeof(*fp));
-	} else {
-		fp = NULL;
+	fp = kalloc_type(struct ipq, Z_NOWAIT | Z_ZERO);
+	if (fp != NULL) {
+		os_atomic_inc(&ipq_count, relaxed);
 	}
 	return fp;
 }
@@ -2741,8 +2733,8 @@ ipq_alloc(int how)
 static void
 ipq_free(struct ipq *fp)
 {
-	(void) m_free(dtom(fp));
-	atomic_add_32(&ipq_count, -1);
+	kfree_type(struct ipq, fp);
+	os_atomic_dec(&ipq_count, relaxed);
 }
 
 /*

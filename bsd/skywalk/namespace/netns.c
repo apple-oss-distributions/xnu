@@ -1822,6 +1822,38 @@ netns_local_port_scan_flow_entry(struct flow_entry *fe, protocol_family_t protoc
 
 	if (!(flags & IFNET_GET_LOCAL_PORTS_NOWAKEUPOK) &&
 	    (token->nt_flags & NETNS_NOWAKEFROMSLEEP)) {
+#if DEBUG || DEVELOPMENT
+		char lbuf[MAX_IPv6_STR_LEN + 6] = {};
+		char fbuf[MAX_IPv6_STR_LEN + 6] = {};
+		in_port_t lport;
+		in_port_t fport;
+		char pname[MAXCOMLEN + 1];
+		const struct ns_flow_info *nfi = token->nt_flow_info;
+
+		proc_name(nfi->nfi_owner_pid, pname, sizeof(pname));
+
+		if (protocol == PF_INET) {
+			inet_ntop(PF_INET, &nfi->nfi_laddr.sin.sin_addr,
+			    lbuf, sizeof(lbuf));
+			inet_ntop(PF_INET, &nfi->nfi_faddr.sin.sin_addr,
+			    fbuf, sizeof(fbuf));
+			lport = nfi->nfi_laddr.sin.sin_port;
+			fport = nfi->nfi_faddr.sin.sin_port;
+		} else {
+			inet_ntop(PF_INET6, &nfi->nfi_laddr.sin6.sin6_addr.s6_addr,
+			    lbuf, sizeof(lbuf));
+			inet_ntop(PF_INET6, &nfi->nfi_faddr.sin6.sin6_addr,
+			    fbuf, sizeof(fbuf));
+			lport = nfi->nfi_laddr.sin6.sin6_port;
+			fport = nfi->nfi_faddr.sin6.sin6_port;
+		}
+
+		os_log(OS_LOG_DEFAULT,
+		    "netns_local_port_scan_flow_entry: no wake from sleep %s %s:%u %s:%u ifp %s proc %s:%d",
+		    token->nt_proto == IPPROTO_TCP ? "tcp" : "udp",
+		    lbuf, ntohs(lport), fbuf, ntohs(fport),
+		    token->nt_ifp->if_xname, pname, nfi->nfi_owner_pid);
+#endif /* DEBUG || DEVELOPMENT */
 		return;
 	}
 

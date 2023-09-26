@@ -64,4 +64,9 @@
 #ifndef _ARM_SCHED_PARAM_H_
 #define _ARM_SCHED_PARAM_H_
 
+#ifdef __arm64__
+extern uint32_t expecting_ipi_wfe_timeout_usec;
+extern uint64_t expecting_ipi_wfe_timeout_mt;
+#endif
+
 #endif /* _ARM_SCHED_PARAM_H_ */

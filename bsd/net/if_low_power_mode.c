@@ -110,7 +110,7 @@ if_low_power_evhdlr_callback(__unused struct eventhandler_entry_arg arg,
 	}
 
 	if (event_code == IF_LOW_POWER_EVENT_ON) {
-		atomic_add_32(&ifp->if_low_power_gencnt, 1);
+		os_atomic_inc(&ifp->if_low_power_gencnt, relaxed);
 
 		if (if_low_power_restricted != 0) {
 			shutdown_sockets_on_interface(ifp);

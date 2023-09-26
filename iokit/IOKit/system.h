@@ -35,19 +35,12 @@
 #include <sys/cdefs.h>
 #include <kern/thread.h>
 
-__BEGIN_DECLS
-
-#include <mach/mach_types.h>
-#include <mach/mach_interface.h>
-#include <mach/memory_object_types.h>
-
 #include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
 
 #include <IOKit/assert.h>  /* Must be before other includes of kern/assert.h */
 
-#include <kern/kern_types.h>
 #include <kern/debug.h>
 #include <kern/task.h>
 #include <kern/sched_prim.h>
@@ -60,6 +53,17 @@ __BEGIN_DECLS
 
 #ifdef  KERNEL_PRIVATE
 #include <kern/kalloc.h>
+#endif /* KERNEL_PRIVATE */
+
+__BEGIN_DECLS
+
+#include <mach/mach_types.h>
+#include <mach/mach_interface.h>
+#include <mach/memory_object_types.h>
+
+#include <kern/kern_types.h>
+
+#ifdef  KERNEL_PRIVATE
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>

@@ -128,6 +128,8 @@ typedef __uint64_t      rlim_t;
 #define PRIO_DARWIN_ROLE_TAL_LAUNCH     0x5     /* Throttled-launch (for OS X TAL resume) */
 #define PRIO_DARWIN_ROLE_DARWIN_BG      0x6     /* Throttled for running in the background */
 
+/* Additional private parameters to getpriority()/setpriority() are in resource_private.h */
+
 #endif /* PRIVATE */
 
 /*
@@ -601,6 +603,7 @@ struct proc_rlimit_control_wakeupmon {
 #define IOPOL_TYPE_VFS_DISALLOW_RW_FOR_O_EVTONLY 10
 #if PRIVATE
 #define IOPOL_TYPE_VFS_ALTLINK 11
+#define IOPOL_TYPE_VFS_NOCACHE_WRITE_FS_BLKSIZE  12
 #endif
 
 /* scope */
@@ -655,6 +658,9 @@ struct proc_rlimit_control_wakeupmon {
 
 #define IOPOL_VFS_DISALLOW_RW_FOR_O_EVTONLY_DEFAULT 0
 #define IOPOL_VFS_DISALLOW_RW_FOR_O_EVTONLY_ON 1
+
+#define IOPOL_VFS_NOCACHE_WRITE_FS_BLKSIZE_DEFAULT 0
+#define IOPOL_VFS_NOCACHE_WRITE_FS_BLKSIZE_ON 1
 
 #ifdef PRIVATE
 /*

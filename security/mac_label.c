@@ -40,28 +40,11 @@
 ZONE_DEFINE_ID(ZONE_ID_MAC_LABEL, "MAC Labels", struct label,
     ZC_READONLY | ZC_ZFREE_CLEARMEM);
 
-#define MAC_LABEL_NULL_SLOT (void *)~0ULL
-
 /*
  * Number of initial values matches logic in security/_label.h
  */
-static const struct label empty_label = {
-	.l_perpolicy = {
-		/* at least 3 */
-		MAC_LABEL_NULL_SLOT,
-		MAC_LABEL_NULL_SLOT,
-		MAC_LABEL_NULL_SLOT,
-#if defined(XNU_TARGET_OS_OSX)
-		/* +4 for macOS = 7 */
-		MAC_LABEL_NULL_SLOT,
-		MAC_LABEL_NULL_SLOT,
-		MAC_LABEL_NULL_SLOT,
-		MAC_LABEL_NULL_SLOT,
-#elif CONFIG_VNGUARD
-		/* otherwise, +1 for vnguard = 4 */
-		MAC_LABEL_NULL_SLOT,
-#endif
-	}
+const struct label empty_label = {
+	.l_perpolicy[0 ... MAC_MAX_SLOTS - 1] = MAC_LABEL_NULL_SLOT,
 };
 
 static struct label *
@@ -177,13 +160,21 @@ mac_label_verify(struct label **labelp)
 static intptr_t
 mac_label_slot_encode(intptr_t p)
 {
-	return (p == 0) ? (intptr_t)MAC_LABEL_NULL_SLOT : p;
+	return p ?: MAC_LABEL_NULL_SLOT;
 }
 
 static intptr_t
 mac_label_slot_decode(intptr_t p)
 {
-	return (p == (intptr_t)MAC_LABEL_NULL_SLOT) ? 0 : p;
+	switch (p) {
+	case 0:
+		/* make sure 0 doesn't mean NULL and causes crashes */
+		return MAC_LABEL_NULL_SLOT;
+	case MAC_LABEL_NULL_SLOT:
+		return 0l;
+	default:
+		return p;
+	}
 }
 
 /*
@@ -210,11 +201,15 @@ mac_label_set(struct label *label, int slot, intptr_t v)
 {
 	KASSERT(label != NULL, ("mac_label_set: NULL label"));
 
-	if (v == (intptr_t)MAC_LABEL_NULL_SLOT) {
+#if DEVELOPMENT || DEBUG
+	/* can't modify a sealed label, see mac_cred_label_seal() */
+	assertf(label->l_owner != (struct label **)-1,
+	    "mac_label_set(%p, %d, 0x%lx) is sealed",
+	    label, slot, v);
+#endif
+	if (v == MAC_LABEL_NULL_SLOT) {
 		panic_label_set_sentinel();
 	}
-
 	v = mac_label_slot_encode(v);
-	zalloc_ro_update_field(ZONE_ID_MAC_LABEL, label, l_perpolicy[slot],
-	    (void **)&v);
+	zalloc_ro_update_field(ZONE_ID_MAC_LABEL, label, l_perpolicy[slot], &v);
 }

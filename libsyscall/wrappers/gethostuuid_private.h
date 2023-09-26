@@ -32,12 +32,15 @@
 #include <gethostuuid.h>
 #include <sys/_types/_timespec.h>
 #include <sys/_types/_uuid_t.h>
+#include <sys/cdefs.h>
 #include <Availability.h>
 
+__BEGIN_DECLS
 /* SPI prototype, TEMPORARY */
 int _getprivatesystemidentifier(uuid_t uuid, const struct timespec *timeout) __OSX_AVAILABLE_STARTING(__MAC_10_9, __IPHONE_7_0);
 
 /* Callback should return -1 and set errno on failure */
 int _register_gethostuuid_callback(int (*)(uuid_t)) __OSX_AVAILABLE_STARTING(__MAC_10_9, __IPHONE_7_0);
+__END_DECLS
 
 #endif /* __GETHOSTUUID_PRIVATE_H */

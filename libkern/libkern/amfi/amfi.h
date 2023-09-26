@@ -261,7 +261,7 @@ __BEGIN_DECLS
  * @const amfi
  * The AMFI interface that was registered.
  */
-extern const amfi_t *amfi;
+extern const amfi_t * amfi;
 
 /*!
  * @function amfi_interface_register

@@ -201,6 +201,39 @@ report_compressor_age()
 }
 #endif /* XNU_TARGET_OS_WATCH */
 
+
+extern uint64_t max_mem;
+CA_EVENT(accounting_health, CA_INT, percentage);
+/**
+ * Report health of resident vm page accounting.
+ */
+static void
+report_accounting_health()
+{
+	/**
+	 * @note If a new accounting bucket is added, it must also be added in
+	 * MemoryMaintenance sysstatuscheck, which panics when accounting reaches
+	 * unhealthy levels.
+	 */
+	int64_t pages = (vm_page_wire_count
+	    + vm_page_free_count
+	    + vm_page_inactive_count
+	    + vm_page_active_count
+	    + VM_PAGE_COMPRESSOR_COUNT
+	    + vm_page_speculative_count
+#if CONFIG_SECLUDED_MEMORY
+	    + vm_page_secluded_count
+#endif /* CONFIG_SECLUDED_MEMORY */
+	    );
+	int64_t percentage = (pages * 100) / (max_mem >> PAGE_SHIFT);
+
+	/* Send the percentage health to CoreAnalytics. */
+	ca_event_t event = CA_EVENT_ALLOCATE(accounting_health);
+	CA_EVENT_TYPE(accounting_health) * e = event->data;
+	e->percentage = percentage;
+	CA_EVENT_SEND(event);
+}
+
 static void
 schedule_analytics_thread_call()
 {
@@ -224,6 +257,7 @@ vm_analytics_tick(void *arg0, void *arg1)
 #if XNU_TARGET_OS_WATCH
 	report_compressor_age();
 #endif /* XNU_TARGET_OS_WATCH */
+	report_accounting_health();
 	schedule_analytics_thread_call();
 }
 

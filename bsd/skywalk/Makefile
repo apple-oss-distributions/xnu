@@ -33,12 +33,26 @@ PRIVATE_DATAFILES = \
 PRIVATE_KERNELFILES = \
 	os_skywalk.h
 
+# Makes module map file available to Apple internal in user level -
+#	  $(DSTROOT)/usr/local/include
+PRIVATE_MODULEMAPFILES = \
+	module.modulemap
+
 INSTALL_MI_LIST	= ${DATAFILES}
 
 # /System/Library/Frameworks/System.framework/PrivateHeaders
 INSTALL_SF_MI_LCL_LIST = $(sort ${DATAFILES} ${PRIVATE_DATAFILES})
 
+# Installs header file for Apple internal use in user level -
+#	  $(DSTROOT)/usr/local/include
+# See also module.modulemap.
+INSTALL_MI_LCL_LIST = $(sort ${PRIVATE_DATAFILES})
+
+INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
+
 INSTALL_MI_DIR = skywalk
+
+INSTALL_MODULEMAP_MI_DIR = skywalk
 
 EXPORT_MI_LIST = $(sort ${INSTALL_MI_LIST} ${INSTALL_SF_MI_LCL_LIST})
 

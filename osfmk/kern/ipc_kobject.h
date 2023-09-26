@@ -143,7 +143,6 @@ __enum_decl(ipc_kotype_t, natural_t, {
 	IKOT_TASK_FATAL               = 51,
 #endif
 	IKOT_KCDATA                   = 52,
-
 	/* magic catch-all; should be the last entry */
 	IKOT_UNKNOWN,
 });

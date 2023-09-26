@@ -35,11 +35,11 @@
 #include <sys/cdefs.h>
 #include <sys/kdebug.h>
 
-__BEGIN_DECLS
-
 #if !KERNEL
 
 #include <Availability.h>
+
+__BEGIN_DECLS
 
 #pragma mark - User space SPI
 
@@ -165,6 +165,8 @@ __API_AVAILABLE(macos(10.11), ios(9), watchos(2), tvos(9));
 extern void *kdebug_typefilter(void)
 __API_AVAILABLE(macos(10.12), ios(10), watchos(3), tvos(10));
 
+#else
+__BEGIN_DECLS
 #endif /* !KERNEL */
 
 #pragma mark - Private debug IDs
@@ -196,9 +198,6 @@ __API_AVAILABLE(macos(10.12), ios(10), watchos(3), tvos(10));
 #define DBG_AQM_ALWAYSON       0x30
 #define DBG_AQM_STATS          0x31
 
-// DBG_IFNET is the same as DBG_DLIL, DBG_AQM and DBG_SKYWALK, so don't reuse subclasses
-#define DBG_IFNET              0x40
-
 #define PPT_TEST           0x01
 #define PPT_JETSAM_HIWAT   0x02
 #define PPT_JETSAM_TOPPROC 0x03
@@ -210,7 +209,6 @@ __API_AVAILABLE(macos(10.12), ios(10), watchos(3), tvos(10));
 #define PPTDBG_CODE(SubClass, code) KDBG_CODE(DBG_PPT, SubClass, code)
 #define PERFCTRL_CODE(SubClass, code) KDBG_CODE(DBG_PERFCTRL, SubClass, code)
 #define AQMDBG_CODE(SubClass, code) KDBG_CODE(DBG_DLIL, SubClass, code)
-#define IFNETDBG_CODE(SubClass, code) KDBG_CODE(DBG_DLIL, SubClass, code)
 
 #if !defined(DRIVERKIT)
 

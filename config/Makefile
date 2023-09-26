@@ -83,7 +83,7 @@ endef
 # Each parallel invocation of this target must use a distinct location, as it is
 # not safe to call multiple NEWVERS on the same file concurrently (rdar://66173684)
 define kext_plist_template
-$$(TARGET)/$(1): $$(SOURCE)/$(1) $$(NEWVERS) $$(SRCROOT)/config/MasterVersion
+$$(TARGET)/$(1): $$(SOURCE)/$(1) $$(NEWVERS) $$(XNU_VERSION)
 	@$$(LOG_GENERATE) "$(1)"
 	$$(_v)$$(MKDIR) $$(@D)
 	$$(_v)$$(CP) $$< $$@

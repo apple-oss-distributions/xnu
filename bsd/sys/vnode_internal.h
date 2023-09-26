@@ -312,8 +312,8 @@ struct vnode {
 #define VFASTDEVCANDIDATE  0x8000000        /* vnode is a candidate to store on a fast device */
 #define VAUTOCANDIDATE 0x10000000       /* vnode was automatically marked as a fast-dev candidate */
 #define VFMLINKTARGET  0x20000000       /* vnode is firmlink target */
+#define VMOUNTEDHERE   0x40000000       /* vnode is a mountpoint */
 /*
- *  0x40000000 not used
  *  0x80000000 not used.
  */
 
@@ -609,6 +609,7 @@ void vn_clearunionwait(vnode_t, int);
 
 void SPECHASH_LOCK(void);
 void SPECHASH_UNLOCK(void);
+lck_mtx_t * SPECHASH_LOCK_ADDR(void);
 
 void    vnode_authorize_init(void);
 
@@ -663,8 +664,6 @@ int     build_path_with_parent(vnode_t, vnode_t /* parent */, char *, int, int *
 
 void    nspace_resolver_init(void);
 void    nspace_resolver_exited(struct proc *);
-
-int     vnode_materialize_dataless_file(vnode_t, uint64_t);
 
 int     vnode_isinuse_locked(vnode_t, int, int );
 

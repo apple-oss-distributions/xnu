@@ -1,6 +1,7 @@
 #include <darwintest.h>
 #include <mach-o/dyld.h>
 #include <spawn.h>
+#include <spawn_private.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>

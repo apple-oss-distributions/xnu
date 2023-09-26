@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <mach/kern_return.h>
 #include <mach/mach_types.h>
 #include <mach/notify.h>
 #include <ipc/ipc_types.h>
@@ -930,6 +931,9 @@ retry:
 		}
 
 		ipc_importance_unlock();
+
+		/* reevaluate turnstile boost */
+		pend_token.tpt_update_turnstile = 1;
 
 		/* apply the policy adjust to the target task (while it is still locked) */
 		task_update_boost_locked(target_task, boost, &pend_token);
@@ -3596,6 +3600,11 @@ ipc_importance_extract_content(
 
 	IMPORTANCE_ASSERT_MANAGER(manager);
 	IMPORTANCE_ASSERT_KEY(key);
+
+	if (size < 1) {
+		/* rdar://110276886 we need space for the terminating NUL */
+		return KERN_NO_SPACE;
+	}
 
 	/* the first non-default value provides the data */
 	for (i = 0; i < value_count; i++) {

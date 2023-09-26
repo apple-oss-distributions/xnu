@@ -212,3 +212,49 @@ T_DECL(recvmsg_x_test, "exercise revcmsg_x() with various parameter")
 	close(sendSocket);
 	close(recvSocket);
 }
+
+T_DECL(recvmsg_x_empty_packet, "exercise revcmsg_x() with an empty packet")
+{
+	const size_t bufsize = 16;
+	int sockets[2];
+
+	T_EXPECT_POSIX_SUCCESS(socketpair(AF_UNIX, SOCK_DGRAM, 0, sockets), "socketpair");
+
+	void *buffer = calloc(1, bufsize);
+
+	write(sockets[0], buffer, bufsize);
+	write(sockets[0], NULL, 0);
+	write(sockets[0], buffer, bufsize);
+
+	struct iovec iov1 = {
+		.iov_base = malloc(bufsize),
+		.iov_len = bufsize,
+	};
+	struct iovec iov2 = {
+		.iov_base = malloc(bufsize),
+		.iov_len = bufsize,
+	};
+	struct iovec iov3 = {
+		.iov_base = malloc(bufsize),
+		.iov_len = bufsize,
+	};
+	struct msghdr_x headers[3] = {
+		{
+			.msg_iov = &iov1,
+			.msg_iovlen = 1,
+		},
+		{
+			.msg_iov = &iov2,
+			.msg_iovlen = 1,
+		},
+		{
+			.msg_iov = &iov3,
+			.msg_iovlen = 1,
+		},
+	};
+	ssize_t received = recvmsg_x(sockets[1], headers, 3, 0);
+	T_LOG("received = %zd\n", received);
+	T_LOG("%zu %zu %zu\n", headers[0].msg_datalen, headers[1].msg_datalen, headers[2].msg_datalen);
+
+	T_ASSERT_EQ(received, 3L, "received 3 packets at once");
+}

@@ -49,6 +49,8 @@
 #include <pexpert/pexpert.h>
 #include <sys/coalition.h>
 #include <sys/kern_event.h>
+#include <sys/kdebug.h>
+#include <sys/kdebug_kernel.h>
 #include <sys/proc.h>
 #include <sys/proc_info.h>
 #include <sys/reason.h>
@@ -97,7 +99,6 @@ unsigned int memorystatus_frozen_count = 0;
 unsigned int memorystatus_frozen_count_webcontent = 0;
 unsigned int memorystatus_frozen_count_xpc_service = 0;
 unsigned int memorystatus_suspended_count = 0;
-unsigned long freeze_threshold_percentage = 50;
 
 #if CONFIG_FREEZE
 
@@ -117,6 +118,7 @@ unsigned int memorystatus_freeze_max_candidate_band = FREEZE_MAX_CANDIDATE_BAND;
 
 unsigned int memorystatus_max_frozen_demotions_daily = 0;
 unsigned int memorystatus_thaw_count_demotion_threshold = 0;
+unsigned int memorystatus_min_thaw_refreeze_threshold;
 
 boolean_t memorystatus_freeze_enabled = FALSE;
 int memorystatus_freeze_wakeup = 0;
@@ -195,7 +197,7 @@ extern boolean_t vm_swap_max_budget(uint64_t *);
 static void memorystatus_freeze_update_throttle(uint64_t *budget_pages_allowed);
 static void memorystatus_demote_frozen_processes(bool urgent_mode);
 
-static void memorystatus_freeze_handle_error(proc_t p, const int freezer_error_code, bool was_refreeze, pid_t pid, const coalition_t coalition, const char* log_prefix);
+static void memorystatus_freeze_handle_error(proc_t p, const freezer_error_code_t freezer_error_code, bool was_refreeze, pid_t pid, const coalition_t coalition, const char* log_prefix);
 static void memorystatus_freeze_out_of_slots(void);
 uint64_t memorystatus_freezer_thread_next_run_ts = 0;
 
@@ -457,6 +459,11 @@ EXPERIMENT_FACTOR_UINT(_kern, memorystatus_max_freeze_demotions_daily, &memoryst
  */
 EXPERIMENT_FACTOR_UINT(_kern, memorystatus_thaw_count_demotion_threshold, &memorystatus_thaw_count_demotion_threshold, 0, UINT32_MAX, "");
 
+/*
+ * min # of global thaws needed for us to consider refreezing these processes.
+ */
+EXPERIMENT_FACTOR_UINT(_kern, memorystatus_min_thaw_refreeze_threshold, &memorystatus_min_thaw_refreeze_threshold, 0, UINT32_MAX, "");
+
 #if DEVELOPMENT || DEBUG
 
 SYSCTL_UINT(_kern, OID_AUTO, memorystatus_freeze_daily_mb_max, CTLFLAG_RW | CTLFLAG_LOCKED, &memorystatus_freeze_daily_mb_max, 0, "");
@@ -496,7 +503,7 @@ sysctl_memorystatus_freeze SYSCTL_HANDLER_ARGS
 #pragma unused(arg1, arg2)
 	int error, pid = 0;
 	proc_t p;
-	int freezer_error_code = 0;
+	freezer_error_code_t freezer_error_code = 0;
 	pid_t pid_list[MAX_XPC_SERVICE_PIDS];
 	int ntasks = 0;
 	coalition_t coal = COALITION_NULL;
@@ -515,7 +522,7 @@ sysctl_memorystatus_freeze SYSCTL_HANDLER_ARGS
 	lck_mtx_lock(&freezer_mutex);
 	if (memorystatus_freeze_enabled == FALSE) {
 		lck_mtx_unlock(&freezer_mutex);
-		printf("sysctl_freeze: Freeze is DISABLED\n");
+		memorystatus_log("sysctl_freeze: Freeze is DISABLED\n");
 		return ENOTSUP;
 	}
 
@@ -561,7 +568,7 @@ again:
 		 * explicitly disabled freezing.
 		 */
 		if (state & (P_MEMSTAT_TERMINATED | P_MEMSTAT_LOCKED | P_MEMSTAT_FREEZE_DISABLED)) {
-			printf("sysctl_freeze: p_memstat_state check failed, process is%s%s%s\n",
+			memorystatus_log_error("sysctl_freeze: p_memstat_state check failed, process is%s%s%s\n",
 			    (state & P_MEMSTAT_TERMINATED) ? " terminated" : "",
 			    (state & P_MEMSTAT_LOCKED) ? " locked" : "",
 			    (state & P_MEMSTAT_FREEZE_DISABLED) ? " unfreezable" : "");
@@ -571,10 +578,12 @@ again:
 			return EPERM;
 		}
 
+		KDBG(MEMSTAT_CODE(BSD_MEMSTAT_FREEZE) | DBG_FUNC_START, memorystatus_available_pages, pid, max_pages);
 		error = task_freeze(proc_task(p), &purgeable, &wired, &clean, &dirty, max_pages, &shared, &freezer_error_code, FALSE /* eval only */);
 		if (!error || freezer_error_code == FREEZER_ERROR_LOW_PRIVATE_SHARED_RATIO) {
 			memorystatus_freezer_stats.mfs_shared_pages_skipped += shared;
 		}
+		KDBG(MEMSTAT_CODE(BSD_MEMSTAT_FREEZE) | DBG_FUNC_END, purgeable, wired, clean, dirty);
 
 		if (error) {
 			memorystatus_freeze_handle_error(p, freezer_error_code, state & P_MEMSTAT_FROZEN, pid, coal, "sysctl_freeze");
@@ -625,7 +634,7 @@ again:
 				    memorystatus_freeze_jetsam_band, TRUE);
 
 				if (error) {
-					printf("sysctl_freeze: Elevating frozen process to higher jetsam band failed with %d\n", error);
+					memorystatus_log_error("sysctl_freeze: Elevating frozen process to higher jetsam band failed with %d\n", error);
 				}
 			}
 		}
@@ -666,7 +675,7 @@ again:
 		lck_mtx_unlock(&freezer_mutex);
 		return error;
 	} else {
-		printf("sysctl_freeze: Invalid process\n");
+		memorystatus_log_error("sysctl_freeze: Invalid process\n");
 	}
 
 
@@ -1318,8 +1327,8 @@ memorystatus_disable_freeze(void)
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_NOTOWNED);
 
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FREEZE_DISABLE) | DBG_FUNC_START,
-	    memorystatus_available_pages, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_FREEZE_DISABLE) | DBG_FUNC_START,
+	    memorystatus_available_pages);
 	memorystatus_log("memorystatus: Disabling freezer. Will kill all frozen processes\n");
 
 	/*
@@ -1366,8 +1375,8 @@ memorystatus_disable_freeze(void)
 		memorystatus_log_info("memorystatus: No frozen processes to kill.\n");
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FREEZE_DISABLE) | DBG_FUNC_END,
-	    memorystatus_available_pages, memory_reclaimed, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_FREEZE_DISABLE) | DBG_FUNC_END,
+	    memorystatus_available_pages, memory_reclaimed);
 
 	return;
 }
@@ -1745,7 +1754,7 @@ memorystatus_freeze_process(
 	kern_return_t kr;
 	uint32_t purgeable, wired, clean, dirty, shared;
 	uint64_t max_pages = 0;
-	int    freezer_error_code = 0;
+	freezer_error_code_t freezer_error_code = 0;
 	bool is_refreeze = false;
 	task_t curr_task = TASK_NULL;
 
@@ -1780,6 +1789,10 @@ memorystatus_freeze_process(
 		if (!memorystatus_is_process_eligible_for_freeze(p)) {
 			return EINVAL;
 		}
+		if (memorystatus_frozen_count >= memorystatus_frozen_processes_max) {
+			memorystatus_freeze_handle_error(p, FREEZER_ERROR_NO_SLOTS, is_refreeze, aPid, (coal ? *coal : NULL), "memorystatus_freeze_process");
+			return ENOSPC;
+		}
 	}
 
 	if (VM_CONFIG_FREEZER_SWAP_IS_ACTIVE) {
@@ -1807,8 +1820,7 @@ memorystatus_freeze_process(
 
 	proc_list_unlock();
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FREEZE) | DBG_FUNC_START,
-	    memorystatus_available_pages, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_FREEZE) | DBG_FUNC_START, memorystatus_available_pages, aPid, max_pages);
 
 	max_pages = MIN(max_pages, UINT32_MAX);
 	kr = task_freeze(proc_task(p), &purgeable, &wired, &clean, &dirty, (uint32_t) max_pages, &shared, &freezer_error_code, FALSE /* eval only */);
@@ -1816,11 +1828,10 @@ memorystatus_freeze_process(
 		memorystatus_freezer_stats.mfs_shared_pages_skipped += shared;
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FREEZE) | DBG_FUNC_END,
-	    memorystatus_available_pages, aPid, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_FREEZE) | DBG_FUNC_END, purgeable, wired, clean, dirty);
 
 	memorystatus_log_debug("memorystatus_freeze_top_process: task_freeze %s for pid %d [%s] - "
-	    "memorystatus_pages: %d, purgeable: %d, wired: %d, clean: %d, dirty: %d, max_pages %llu, shared %d\n",
+	    "memorystatus_pages: %d, purgeable: %d, wired: %d, clean: %d, dirty: %d, max_pages %llu, shared %d",
 	    (kr == KERN_SUCCESS) ? "SUCCEEDED" : "FAILED", aPid, (*p->p_name ? p->p_name : "(unknown)"),
 	    memorystatus_available_pages, purgeable, wired, clean, dirty, max_pages, shared);
 
@@ -1870,7 +1881,7 @@ memorystatus_freeze_process(
 			ret = memorystatus_update_inactive_jetsam_priority_band(proc_getpid(p), MEMORYSTATUS_CMD_ELEVATED_INACTIVEJETSAMPRIORITY_ENABLE, memorystatus_freeze_jetsam_band, TRUE);
 
 			if (ret) {
-				printf("Elevating the frozen process failed with %d\n", ret);
+				memorystatus_log_error("Elevating the frozen process failed with %d\n", ret);
 				/* not fatal */
 			}
 
@@ -1939,7 +1950,7 @@ memorystatus_freeze_process(
 		} else {
 			p->p_memstat_state |= P_MEMSTAT_FREEZE_IGNORE;
 		}
-		memorystatus_freeze_handle_error(p, freezer_error_code, p->p_memstat_state & P_MEMSTAT_FROZEN, aPid, (coal != NULL) ? *coal : NULL, "memorystatus_freeze_top_process");
+		memorystatus_freeze_handle_error(p, freezer_error_code, p->p_memstat_state & P_MEMSTAT_FROZEN, aPid, (coal != NULL) ? *coal : NULL, "memorystatus_freeze_process");
 
 		p->p_memstat_state &= ~P_MEMSTAT_LOCKED;
 		wakeup(&p->p_memstat_state);
@@ -1978,23 +1989,23 @@ memorystatus_freeze_process_sync(proc_t p)
 	lck_mtx_lock(&freezer_mutex);
 
 	if (p == NULL) {
-		printf("memorystatus_freeze_process_sync: Invalid process\n");
+		memorystatus_log_error("memorystatus_freeze_process_sync: Invalid process\n");
 		goto exit;
 	}
 
 	if (memorystatus_freeze_enabled == FALSE) {
-		printf("memorystatus_freeze_process_sync: Freezing is DISABLED\n");
+		memorystatus_log_error("memorystatus_freeze_process_sync: Freezing is DISABLED\n");
 		goto exit;
 	}
 
 	if (!memorystatus_can_freeze(&memorystatus_freeze_swap_low)) {
-		printf("memorystatus_freeze_process_sync: Low compressor and/or low swap space...skipping freeze\n");
+		memorystatus_log_info("memorystatus_freeze_process_sync: Low compressor and/or low swap space...skipping freeze\n");
 		goto exit;
 	}
 
 	memorystatus_freeze_update_throttle(&memorystatus_freeze_budget_pages_remaining);
 	if (!memorystatus_freeze_budget_pages_remaining) {
-		printf("memorystatus_freeze_process_sync: exit with NO available budget\n");
+		memorystatus_log_info("memorystatus_freeze_process_sync: exit with NO available budget\n");
 		goto exit;
 	}
 
@@ -2063,7 +2074,8 @@ memorystatus_freeze_pid_list(pid_t *pid_list, unsigned int num_pids)
 {
 	int ret = 0;
 	size_t num_frozen = 0;
-	while (num_pids > 0) {
+	while (num_pids > 0 &&
+	    memorystatus_frozen_count < memorystatus_frozen_processes_max) {
 		pid_t pid = pid_list[--num_pids];
 		proc_t p = proc_find_locked(pid);
 		if (p) {
@@ -2095,7 +2107,7 @@ memorystatus_freeze_top_process(void)
 	LCK_MTX_ASSERT(&freezer_mutex, LCK_MTX_ASSERT_OWNED);
 
 	bzero(&iterator, sizeof(struct memorystatus_freeze_list_iterator));
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FREEZE_SCAN) | DBG_FUNC_START, memorystatus_available_pages, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_FREEZE_SCAN) | DBG_FUNC_START, memorystatus_available_pages);
 
 	proc_list_lock();
 	while (true) {
@@ -2130,7 +2142,7 @@ memorystatus_freeze_top_process(void)
 	}
 	proc_list_unlock();
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FREEZE_SCAN) | DBG_FUNC_END, memorystatus_available_pages, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_FREEZE_SCAN) | DBG_FUNC_END, memorystatus_available_pages);
 
 	return num_frozen;
 }
@@ -2521,7 +2533,7 @@ memorystatus_freeze_mark_eligible_processes_with_skip_reason(memorystatus_freeze
 static void
 memorystatus_freeze_handle_error(
 	proc_t p,
-	const int freezer_error_code,
+	const freezer_error_code_t freezer_error_code,
 	bool was_refreeze,
 	pid_t pid,
 	const coalition_t coalition,
@@ -2550,6 +2562,11 @@ memorystatus_freeze_handle_error(
 		memorystatus_freezer_stats.mfs_error_no_swap_space_count++;
 		reason = "no swap space";
 		skip_reason = kMemorystatusFreezeSkipReasonNoSwapSpace;
+		break;
+	case FREEZER_ERROR_NO_SLOTS:
+		memorystatus_freezer_stats.mfs_skipped_full_count++;
+		reason = "no slots";
+		skip_reason = kMemorystatusFreezeSkipReasonOutOfSlots;
 		break;
 	default:
 		reason = "unknown error";
@@ -2691,9 +2708,9 @@ memorystatus_freeze_out_of_budget(const struct throttle_interval_t *interval)
 
 	SUB_MACH_TIMESPEC(&time_left, &now_ts);
 	memorystatus_freezer_stats.mfs_budget_exhaustion_duration_remaining = time_left.tv_sec;
-	os_log(OS_LOG_DEFAULT,
-	    "memorystatus_freeze: Out of NAND write budget with %u minutes left in the current freezer interval. %u procs are frozen.\n",
-	    time_left.tv_sec / 60, memorystatus_frozen_count);
+	memorystatus_log(
+		"memorystatus_freeze: Out of NAND write budget with %u minutes left in the current freezer interval. %u procs are frozen.\n",
+		time_left.tv_sec / 60, memorystatus_frozen_count);
 
 	memorystatus_freeze_mark_eligible_processes_with_skip_reason(kMemorystatusFreezeSkipReasonOutOfBudget, false);
 }
@@ -2709,9 +2726,9 @@ memorystatus_freeze_out_of_slots(void)
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 	assert(memorystatus_frozen_count == memorystatus_frozen_processes_max);
 
-	os_log(OS_LOG_DEFAULT,
-	    "memorystatus_freeze: Out of slots in the freezer. %u procs are frozen.\n",
-	    memorystatus_frozen_count);
+	memorystatus_log(
+		"memorystatus_freeze: Out of slots in the freezer. %u procs are frozen.\n",
+		memorystatus_frozen_count);
 
 	memorystatus_freeze_mark_eligible_processes_with_skip_reason(kMemorystatusFreezeSkipReasonOutOfSlots, true);
 }
@@ -2862,7 +2879,7 @@ memorystatus_freeze_thread(void *param __unused, wait_result_t wr __unused)
 		while (num_frozen < max_to_freeze &&
 		    memorystatus_can_freeze(&memorystatus_freeze_swap_low) &&
 		    ((memorystatus_frozen_count < memorystatus_frozen_processes_max) ||
-		    (memorystatus_refreeze_eligible_count >= MIN_THAW_REFREEZE_THRESHOLD))) {
+		    (memorystatus_refreeze_eligible_count >= memorystatus_min_thaw_refreeze_threshold))) {
 			/* Only freeze if we've not exceeded our pageout budgets.*/
 			memorystatus_freeze_update_throttle(&memorystatus_freeze_budget_pages_remaining);
 
@@ -2990,11 +3007,11 @@ memorystatus_set_process_is_freezable(pid_t pid, boolean_t is_freezable)
 	if (is_freezable == FALSE) {
 		/* Freeze preference set to FALSE. Set the P_MEMSTAT_FREEZE_DISABLED bit. */
 		p->p_memstat_state |= P_MEMSTAT_FREEZE_DISABLED;
-		os_log(OS_LOG_DEFAULT, "memorystatus_set_process_is_freezable: disabling freeze for pid %d [%s]\n",
+		memorystatus_log_info("memorystatus_set_process_is_freezable: disabling freeze for pid %d [%s]\n",
 		    proc_getpid(p), (*p->p_name ? p->p_name : "unknown"));
 	} else {
 		p->p_memstat_state &= ~P_MEMSTAT_FREEZE_DISABLED;
-		os_log(OS_LOG_DEFAULT, "memorystatus_set_process_is_freezable: enabling freeze for pid %d [%s]\n",
+		memorystatus_log_info("memorystatus_set_process_is_freezable: enabling freeze for pid %d [%s]\n",
 		    proc_getpid(p), (*p->p_name ? p->p_name : "unknown"));
 	}
 	proc_rele(p);
@@ -3091,12 +3108,12 @@ set_freezer_candidate_list(user_addr_t buffer, size_t buffer_size, struct memory
 	for (size_t i = 0; i < entry_count; i++) {
 		memorystatus_properties_freeze_entry_v1 *entry = &entries[i];
 		if (entry->version != 1) {
-			os_log(OS_LOG_DEFAULT, "memorystatus_cmd_grp_set_freeze_priority: Invalid entry version number.");
+			memorystatus_log_error("memorystatus_cmd_grp_set_freeze_priority: Invalid entry version number.");
 			error = EINVAL;
 			goto out;
 		}
 		if (i > 0 && entry->priority >= entries[i - 1].priority) {
-			os_log(OS_LOG_DEFAULT, "memorystatus_cmd_grp_set_freeze_priority: Entry list is not in descending order.");
+			memorystatus_log_error("memorystatus_cmd_grp_set_freeze_priority: Entry list is not in descending order.");
 			error = EINVAL;
 			goto out;
 		}

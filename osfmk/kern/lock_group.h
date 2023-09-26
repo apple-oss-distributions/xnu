@@ -248,7 +248,17 @@ extern void             lck_grp_enable_feature(
 
 extern void             lck_grp_disable_feature(
 	lck_debug_feature_t     feat);
+
+__pure2
+static inline uint32_t
+lck_opts_get(void)
+{
+	return LcksOpts;
+}
+
 #pragma GCC visibility pop
+
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 __END_DECLS

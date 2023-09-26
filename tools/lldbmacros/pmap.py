@@ -768,8 +768,7 @@ def DecodeTTE(cmd_args=None):
     else:
         raise NotImplementedError("decode_tte does not support {0}".format(kern.arch))
 
-
-PVH_HIGH_FLAGS_ARM64 = (1 << 62) | (1 << 61) | (1 << 60) | (1 << 59) | (1 << 58) | (1 << 57) | (1 << 56) | (1 << 55)
+PVH_HIGH_FLAGS_ARM64 = (1 << 62) | (1 << 61) | (1 << 60) | (1 << 59) | (1 << 58) | (1 << 57) | (1 << 56) | (1 << 55) | (1 << 54)
 PVH_HIGH_FLAGS_ARM32 = (1 << 31)
 
 def PVDumpPTE(pvep, ptep, verbose_level = vHUMAN):
@@ -823,27 +822,30 @@ def PVDumpPTE(pvep, ptep, verbose_level = vHUMAN):
         # Why don't we just do the same casting for pve_ptep[] you ask? Well not
         # for a lack of trying, that's for sure. If you can figure out how to
         # cast that array correctly, then be my guest.
-        if ptep & iommu_table_flag:
-            pte_str = ' (IOMMU table), entry'
+        if kern.globals.page_protection_type <= kern.PAGE_PROTECTION_TYPE_PPL:
+            if ptep & iommu_table_flag:
+                pte_str = ' (IOMMU table), entry'
+                ptd = GetPtDesc(KVToPhysARM(ptep))
+                iommu = dereference(ptd.iommu)
+            else:
+                # Instead of dumping the PTE (since we don't have that), dump the
+                # descriptor object used by the IOMMU state (t8020dart/nvme_ppl/etc).
+                #
+                # This works because later on when the "ptep" is dereferenced as a
+                # PTE pointer (uint64_t pointer), the descriptor pointer will be
+                # dumped as that's the first 64-bit value in the IOMMU state object.
+                pte_str = ' (IOMMU state), descriptor'
+                ptep = ptep | iommu_table_flag
+                iommu = dereference(kern.GetValueFromAddress(ptep, 'ppl_iommu_state *'))
 
-            ptd = GetPtDesc(KVToPhysARM(ptep))
-            iommu = dereference(ptd.iommu)
+            # For IOMMU mappings, dump who owns the mapping as the extra string.
+            extra_str = 'Mapped by {:s}'.format(dereference(iommu.desc).name)
+            if unsigned(iommu.name) != 0:
+                extra_str += '/{:s}'.format(iommu.name)
+            extra_str += ' (iommu state: {:x})'.format(addressof(iommu))
         else:
-            # Instead of dumping the PTE (since we don't have that), dump the
-            # descriptor object used by the IOMMU state (t8020dart/nvme_ppl/etc).
-            #
-            # This works because later on when the "ptep" is dereferenced as a
-            # PTE pointer (uint64_t pointer), the descriptor pointer will be
-            # dumped as that's the first 64-bit value in the IOMMU state object.
-            pte_str = ' (IOMMU state), descriptor'
-            ptep = ptep | iommu_table_flag
-            iommu = dereference(kern.GetValueFromAddress(ptep, 'ppl_iommu_state *'))
-
-        # For IOMMU mappings, dump who owns the mapping as the extra string.
-        extra_str = 'Mapped by {:s}'.format(dereference(iommu.desc).name)
-        if unsigned(iommu.name) != 0:
-            extra_str += '/{:s}'.format(iommu.name)
-        extra_str += ' (iommu state: {:x})'.format(addressof(iommu))
+            ptd = GetPtDesc(KVToPhysARM(ptep))
+            extra_str = 'Mapped by IOMMU {:x}'.format(ptd.iommu)
     else:
         # The mapping is a CPU Mapping
         pte_str += ', entry'
@@ -1022,12 +1024,12 @@ def PhysToKV(cmd_args=None):
     print("{:#x}".format(kern.PhysToKernelVirt(int(unsigned(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'))))))
 
 def KVToPhysARM(addr):
-    try:
+    if kern.globals.page_protection_type <= kern.PAGE_PROTECTION_TYPE_PPL:
         ptov_table = kern.globals.ptov_table
         for i in range(0, kern.globals.ptov_index):
             if (addr >= int(unsigned(ptov_table[i].va))) and (addr < (int(unsigned(ptov_table[i].va)) + int(unsigned(ptov_table[i].len)))):
                 return (addr - int(unsigned(ptov_table[i].va)) + int(unsigned(ptov_table[i].pa)))
-    except Exception as exc:
+    else:
         raise ValueError("VA {:#x} not found in physical region lookup table".format(addr))
     return (addr - unsigned(kern.globals.gVirtBase) + unsigned(kern.globals.gPhysBase))
 
@@ -1046,19 +1048,38 @@ def GetPtDesc(paddr):
     return ptd
 
 
-def ShowPTEARM(pte, page_size, stage2 = False):
+def ShowPTEARM(pte, page_size, level):
     """ Display vital information about an ARM page table entry
-        pte: kernel virtual address of the PTE.  Should be L3 PTE.  May also work with L2 TTEs for certain devices.
+        pte: kernel virtual address of the PTE.  page_size and level may be None,
+        in which case we'll try to infer them from the page table descriptor.
+        Inference of level may only work for L2 and L3 TTEs depending upon system
+        configuration.
     """
-    def GetPageTableInfo(ptd, pt_index, paddr):
-        try:
-            refcnt =  ptd.ptd_info[pt_index].refcnt
-            if refcnt == 0x4000:
-                level = 2
-            else:
-                level = 3
+    pt_index = 0
+    stage2 = False
+    def GetPageTableInfo(ptd, paddr):
+        nonlocal pt_index, page_size, level
+        if kern.globals.page_protection_type <= kern.PAGE_PROTECTION_TYPE_PPL:
+            # First load ptd_info[0].refcnt so that we can check if this is an IOMMU page.
+            # IOMMUs don't split PTDs across multiple 4K regions as CPU page tables sometimes
+            # do, so the IOMMU refcnt token is always stored at index 0.  If this is not
+            # an IOMMU page, we may end up using a different final value for pt_index below.
+            refcnt = ptd.ptd_info[0].refcnt
             # PTDs used to describe IOMMU pages always have a refcnt of 0x8000/0x8001.
             is_iommu_pte = (refcnt & 0x8000) == 0x8000
+            if not is_iommu_pte and page_size is None and hasattr(ptd.pmap, 'pmap_pt_attr'):
+                page_size = ptd.pmap.pmap_pt_attr.pta_page_size
+            elif page_size is None:
+                page_size = kern.globals.native_pt_attr.pta_page_size
+            pt_index = (pte % kern.globals.page_size) // page_size
+            refcnt =  ptd.ptd_info[pt_index].refcnt
+            if not is_iommu_pte and hasattr(ptd.pmap, 'pmap_pt_attr') and hasattr(ptd.pmap.pmap_pt_attr, 'stage2'):
+                stage2 = ptd.pmap.pmap_pt_attr.stage2
+            if level is None:
+                if refcnt == 0x4000:
+                    level = 2
+                else:
+                    level = 3
             if is_iommu_pte:
                 iommu_desc_name = '{:s}'.format(dereference(dereference(ptd.iommu).desc).name)
                 if unsigned(dereference(ptd.iommu).name) != 0:
@@ -1067,12 +1088,11 @@ def ShowPTEARM(pte, page_size, stage2 = False):
             else:
                 info_str = None
             return (int(unsigned(refcnt)), level, info_str)
-        except Exception as exc:
+        else:
             raise ValueError("Unable to retrieve PTD refcnt")
     pte_paddr = KVToPhysARM(pte)
     ptd = GetPtDesc(pte_paddr)
-    pt_index = (pte % kern.globals.page_size) // page_size
-    refcnt, level, info_str = GetPageTableInfo(ptd, pt_index, pte_paddr)
+    refcnt, level, info_str = GetPageTableInfo(ptd, pte_paddr)
     wiredcnt = ptd.ptd_info[pt_index].wiredcnt
     va = ptd.va[pt_index]
     print("descriptor: {:#x} (refcnt: {:#x}, wiredcnt: {:#x}, va: {:#x})".format(ptd, refcnt, wiredcnt, va))
@@ -1088,7 +1108,7 @@ def ShowPTEARM(pte, page_size, stage2 = False):
             pmap_str = "(User Task: {:s})".format("{:#x}".format(task) if task is not None else "<unknown>")
         print("pmap: {:#x} {:s}".format(ptd.pmap, pmap_str))
         nttes = page_size // 8
-        granule = page_size * (nttes ** (4 - level))
+        granule = page_size * (nttes ** (3 - level))
         pte_pgoff = pte % page_size
         pte_pgoff = pte_pgoff // 8
         print("maps {}: {:#x}".format("IPA" if stage2 else "VA", int(unsigned(ptd.va[pt_index])) + (pte_pgoff * granule)))
@@ -1100,18 +1120,22 @@ def ShowPTEARM(pte, page_size, stage2 = False):
 @lldb_command('showpte')
 def ShowPTE(cmd_args=None):
     """ Display vital information about the page table entry at VA <pte>
-        Syntax: (lldb) showpte <pte_va> [4k|16k|16k_s2]
+        Syntax: (lldb) showpte <pte_va> [level] [4k|16k|16k_s2]
     """
     if cmd_args == None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to showpte.")
 
     if kern.arch.startswith('arm64'):
-        pmap_pt_attr = kern.globals.native_pt_attr if len(cmd_args) < 2 else GetMemoryAttributesFromUser(cmd_args[1])
-        if pmap_pt_attr is None:
-            raise ArgumentError("Invalid translation attribute type.")
+        if len(cmd_args) >= 3:
+            pmap_pt_attr = GetMemoryAttributesFromUser(cmd_args[2])
+            if pmap_pt_attr is None:
+                raise ArgumentError("Invalid translation attribute type.")
+            page_size = pmap_pt_attr.pta_page_size
+        else:
+            page_size = None
 
-        stage2 = bool(pmap_pt_attr.stage2 if hasattr(pmap_pt_attr, 'stage2') else False)
-        ShowPTEARM(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'), pmap_pt_attr.pta_page_size, stage2)
+        level = ArgumentStringToInt(cmd_args[1]) if len(cmd_args) >= 2 else None
+        ShowPTEARM(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'), page_size, level)
     else:
         raise NotImplementedError("showpte does not support {0}".format(kern.arch))
 

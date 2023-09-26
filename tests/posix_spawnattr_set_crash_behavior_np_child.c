@@ -16,6 +16,7 @@ _should_spin(char *mode)
 	char *spin_modes[] = {
 		"spin",
 		"reason",
+		"reason_signal",
 		"clean",
 		"dirty",
 	};

@@ -353,7 +353,7 @@ test4(void)
 	/* Create a thread at priority 4 and take SYSCTL_TURNSTILE_TEST_KERNEL_DEFAULT lock */
 	data[0].pri_to_set = 4;
 	data[0].lock1 = SYSCTL_TURNSTILE_TEST_KERNEL_DEFAULT; /* this should be not locked */
-	data[0].lock2 = NULL;
+	data[0].lock2 = 0;
 	data[0].sleep = 10; /* long sleep, nothing is blocking this thread */
 	data[0].sched_pri_to_check = 60;
 	data[0].base_pri_to_check = 4;
@@ -393,7 +393,7 @@ test4(void)
 	/* Create a thread at priority 60 and take SYSCTL_TURNSTILE_TEST_USER_DEFAULT */
 	data[4].pri_to_set = 60;
 	data[4].lock1 = SYSCTL_TURNSTILE_TEST_USER_DEFAULT; /* this should be locked */
-	data[4].lock2 = NULL;
+	data[4].lock2 = 0;
 	data[4].sleep = 0; /* no need to sleep, nothing should be pushing by the time it acquires the lock */
 	data[4].sched_pri_to_check = 60; /* this is its own priority */
 	data[4].base_pri_to_check = 60;
@@ -424,7 +424,7 @@ test5(void)
 	/* Create a thread at priority 4 and take SYSCTL_TURNSTILE_TEST_KERNEL_DEFAULT lock */
 	data[0].pri_to_set = 4;
 	data[0].lock1 = SYSCTL_TURNSTILE_TEST_KERNEL_DEFAULT; /* this should be not locked */
-	data[0].lock2 = NULL;
+	data[0].lock2 = 0;
 	data[0].sleep = 10; /* long sleep, nothing is blocking this thread */
 	data[0].sched_pri_to_check = 41;
 	data[0].base_pri_to_check = 4;
@@ -464,7 +464,7 @@ test5(void)
 	/* Create a thread at priority 60 and take SYSCTL_TURNSTILE_TEST_USER_DEFAULT */
 	data[4].pri_to_set = 60;
 	data[4].lock1 = SYSCTL_TURNSTILE_TEST_USER_DEFAULT; /* this should be locked */
-	data[4].lock2 = NULL;
+	data[4].lock2 = 0;
 	data[4].sleep = 0; /* no need to sleep, nothing should be pushing by the time it acquires the lock */
 	data[4].sched_pri_to_check = 60; /* this is its own priority */
 	data[4].base_pri_to_check = 60;

@@ -241,7 +241,7 @@ nx_netif_qset_init(struct netif_qset *qset, struct netif_llink *llink,
 {
 #define _NETIF_QSET_MAX_TXQS    4
 	kern_packet_svc_class_t svc[_NETIF_QSET_MAX_TXQS] =
-	{KPKT_SC_VO, KPKT_SC_VI, KPKT_SC_BE, KPKT_SC_BK};
+	{KPKT_SC_BE, KPKT_SC_BK, KPKT_SC_VI, KPKT_SC_VO};
 	struct ifnet *ifp = llink->nll_nif->nif_ifp;
 	uint8_t i;
 
@@ -271,21 +271,17 @@ nx_netif_qset_init(struct netif_qset *qset, struct netif_llink *llink,
 		    KPKT_SC_UNSPEC, true);
 	}
 
-	/*
-	 * TODO:
-	 * Could be more flexible here to allow an arbitrary number of queues.
-	 */
-	if (qset->nqs_num_tx_queues > 1) {
+	if (ifp->if_output_sched_model == IFNET_SCHED_MODEL_DRIVER_MANAGED) {
 		VERIFY(qset->nqs_num_tx_queues == _NETIF_QSET_MAX_TXQS);
-		VERIFY(ifp->if_output_sched_model ==
-		    IFNET_SCHED_MODEL_DRIVER_MANAGED);
-		for (i = 0; i < _NETIF_QSET_MAX_TXQS; i++) {
+		for (i = 0; i < qset->nqs_num_tx_queues; i++) {
 			nx_netif_driver_queue_init(qset,
 			    NETIF_QSET_TX_QUEUE(qset, i), svc[i], false);
 		}
 	} else {
-		nx_netif_driver_queue_init(qset, NETIF_QSET_RX_QUEUE(qset, i),
-		    KPKT_SC_UNSPEC, false);
+		for (i = 0; i < qset->nqs_num_tx_queues; i++) {
+			nx_netif_driver_queue_init(qset,
+			    NETIF_QSET_TX_QUEUE(qset, i), KPKT_SC_UNSPEC, false);
+		}
 	}
 }
 
@@ -572,33 +568,6 @@ nx_netif_default_llink_remove(struct nx_netif *nif)
 	nx_netif_llink_release(&nif->nif_default_llink);
 	ASSERT(nif->nif_default_llink == NULL);
 	nx_netif_llink_destroy_locked(nif, &llink);
-}
-
-__attribute__((always_inline))
-static inline void
-netif_ifp_inc_traffic_class_out_pkt(struct ifnet *ifp, uint32_t svc,
-    uint32_t cnt, uint32_t len)
-{
-	switch (svc) {
-	case PKT_TC_BE:
-		ifp->if_tc.ifi_obepackets += cnt;
-		ifp->if_tc.ifi_obebytes += len;
-		break;
-	case PKT_TC_BK:
-		ifp->if_tc.ifi_obkpackets += cnt;
-		ifp->if_tc.ifi_obkbytes += len;
-		break;
-	case PKT_TC_VI:
-		ifp->if_tc.ifi_ovipackets += cnt;
-		ifp->if_tc.ifi_ovibytes += len;
-		break;
-	case PKT_TC_VO:
-		ifp->if_tc.ifi_ovopackets += cnt;
-		ifp->if_tc.ifi_ovobytes += len;
-		break;
-	default:
-		break;
-	}
 }
 
 static int

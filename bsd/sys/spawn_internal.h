@@ -50,6 +50,7 @@
 #include <mach/coalition.h>     /* COALITION_NUM_TYPES */
 #include <mach/task_policy.h>
 #include <os/overflow.h>
+#include <mach/mach_param.h>
 
 /*
  * Safely compute the size in bytes of a structure, '_type', whose last
@@ -264,6 +265,7 @@ typedef struct _posix_spawnattr {
 	struct _posix_spawn_persona_info   *psa_persona_info;    /* spawn new process into given persona */
 	struct _posix_spawn_posix_cred_info *psa_posix_cred_info; /* posix creds: uid/gid/groups */
 	char                                *psa_subsystem_root_path; /* pass given path in apple strings */
+	char                                *psa_conclave_id;         /* conclave string */
 } *_posix_spawnattr_t;
 
 /*
@@ -478,6 +480,9 @@ struct _posix_spawn_args_desc {
 
 	__darwin_size_t subsystem_root_path_size;
 	char *subsystem_root_path;
+
+	__darwin_size_t conclave_id_size;
+	char *conclave_id;
 };
 
 #ifdef KERNEL
@@ -505,6 +510,8 @@ struct user32__posix_spawn_args_desc {
 	uint32_t        posix_cred_info;
 	uint32_t        subsystem_root_path_size;
 	uint32_t        subsystem_root_path;
+	uint32_t        conclave_id_size;
+	uint32_t        conclave_id;
 };
 
 struct user__posix_spawn_args_desc {
@@ -524,6 +531,8 @@ struct user__posix_spawn_args_desc {
 	user_addr_t     posix_cred_info;
 	user_size_t     subsystem_root_path_size;
 	user_addr_t     subsystem_root_path;
+	user_size_t     conclave_id_size;
+	user_addr_t     conclave_id;
 };
 
 

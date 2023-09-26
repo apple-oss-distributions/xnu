@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -364,7 +364,7 @@ ah4_output(struct mbuf *m, struct secasvar *sav)
 	ipsecstat.out_success++;
 	ipsecstat.out_ahhist[sav->alg_auth]++;
 	lck_mtx_unlock(&sadb_stat_mutex);
-	key_sa_recordxfer(sav, m);
+	key_sa_recordxfer(sav, m->m_pkthdr.len);
 
 	return 0;
 }
@@ -539,7 +539,7 @@ ah6_output(struct mbuf *m, u_char *nexthdrp, struct mbuf *md,
 		m_freem(m);
 	} else {
 		IPSEC_STAT_INCREMENT(ipsec6stat.out_success);
-		key_sa_recordxfer(sav, m);
+		key_sa_recordxfer(sav, m->m_pkthdr.len);
 	}
 	IPSEC_STAT_INCREMENT(ipsec6stat.out_ahhist[sav->alg_auth]);
 

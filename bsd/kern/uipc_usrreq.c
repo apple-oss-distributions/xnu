@@ -95,6 +95,12 @@
 #include <kern/locks.h>
 #include <kern/task.h>
 
+#include <net/sockaddr_utils.h>
+
+#if __has_ptrcheck
+#include <machine/trap.h>
+#endif /* __has_ptrcheck */
+
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #endif /* CONFIG_MACF */
@@ -182,7 +188,7 @@ struct mdns_ipc_msg_hdr {
  *	need a proper out-of-band
  *	lock pushdown
  */
-static struct   sockaddr sun_noname = { .sa_len = sizeof(sun_noname), .sa_family = AF_LOCAL, .sa_data = { 0 } };
+static struct   sockaddr sun_noname = { .sa_len = 3, .sa_family = AF_LOCAL, .sa_data = { 0 } };
 static ino_t    unp_ino;                /* prototype for fake inode numbers */
 
 static int      unp_attach(struct socket *);
@@ -800,7 +806,7 @@ uipc_ctloutput(struct socket *so, struct sockopt *sopt)
 	int error = 0;
 	pid_t peerpid;
 	proc_t p;
-	task_t t;
+	task_t t __single;
 	struct socket *peerso;
 
 	switch (sopt->sopt_dir) {
@@ -1102,7 +1108,7 @@ unp_bind(
 	proc_t p)
 {
 	struct sockaddr_un *soun = (struct sockaddr_un *)nam;
-	struct vnode *vp, *dvp;
+	struct vnode *vp __single, *dvp;
 	struct vnode_attr va;
 	vfs_context_t ctx = vfs_context_current();
 	int error, namelen;
@@ -1746,7 +1752,8 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp,arg2)
 	int error, i, n;
-	struct unpcb *unp, **unp_list;
+	struct unpcb *unp, **unp_list __bidi_indexable;
+	size_t unp_list_len;
 	unp_gen_t gencnt;
 	struct xunpgen xug;
 	struct unp_head *head;
@@ -1796,7 +1803,7 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 		return 0;
 	}
 
-	size_t unp_list_len = n;
+	unp_list_len = n;
 	unp_list = kalloc_type(struct unpcb *, unp_list_len, Z_WAITOK);
 	if (unp_list == 0) {
 		lck_rw_done(&unp_list_mtx);
@@ -1826,13 +1833,10 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 			 * connect/disconnect races for SMP.
 			 */
 			if (unp->unp_addr) {
-				bcopy(unp->unp_addr, &xu.xu_au,
-				    unp->unp_addr->sun_len);
+				SOCKADDR_COPY(unp->unp_addr, &xu.xu_au);
 			}
 			if (unp->unp_conn && unp->unp_conn->unp_addr) {
-				bcopy(unp->unp_conn->unp_addr,
-				    &xu.xu_cau,
-				    unp->unp_conn->unp_addr->sun_len);
+				SOCKADDR_COPY(unp->unp_conn->unp_addr, &xu.xu_cau);
 			}
 			unpcb_to_compat(unp, &xu.xu_unp);
 			sotoxsocket(unp->unp_socket, &xu.xu_socket);
@@ -1859,13 +1863,16 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 	return error;
 }
 
+const caddr_t SYSCTL_SOCK_DGRAM_ARG = __unsafe_forge_single(caddr_t, SOCK_DGRAM);
+const caddr_t SYSCTL_SOCK_STREAM_ARG = __unsafe_forge_single(caddr_t, SOCK_STREAM);
+
 SYSCTL_PROC(_net_local_dgram, OID_AUTO, pcblist,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
-    (caddr_t)(long)SOCK_DGRAM, 0, unp_pcblist, "S,xunpcb",
+    SYSCTL_SOCK_DGRAM_ARG, 0, unp_pcblist, "S,xunpcb",
     "List of active local datagram sockets");
 SYSCTL_PROC(_net_local_stream, OID_AUTO, pcblist,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
-    (caddr_t)(long)SOCK_STREAM, 0, unp_pcblist, "S,xunpcb",
+    SYSCTL_SOCK_STREAM_ARG, 0, unp_pcblist, "S,xunpcb",
     "List of active local stream sockets");
 
 #if XNU_TARGET_OS_OSX
@@ -2014,11 +2021,11 @@ unp_pcblist64 SYSCTL_HANDLER_ARGS
 
 SYSCTL_PROC(_net_local_dgram, OID_AUTO, pcblist64,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
-    (caddr_t)(long)SOCK_DGRAM, 0, unp_pcblist64, "S,xunpcb64",
+    SYSCTL_SOCK_DGRAM_ARG, 0, unp_pcblist64, "S,xunpcb64",
     "List of active local datagram sockets 64 bit");
 SYSCTL_PROC(_net_local_stream, OID_AUTO, pcblist64,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
-    (caddr_t)(long)SOCK_STREAM, 0, unp_pcblist64, "S,xunpcb64",
+    SYSCTL_SOCK_STREAM_ARG, 0, unp_pcblist64, "S,xunpcb64",
     "List of active local stream sockets 64 bit");
 
 #endif /* XNU_TARGET_OS_OSX */
@@ -2033,7 +2040,7 @@ unp_pcblist_n SYSCTL_HANDLER_ARGS
 	unp_gen_t gencnt;
 	struct xunpgen xug;
 	struct unp_head *head;
-	void *buf = NULL;
+	void *buf __single = NULL;
 	size_t item_size = ROUNDUP64(sizeof(struct xunpcb_n)) +
 	    ROUNDUP64(sizeof(struct xsocket_n)) +
 	    2 * ROUNDUP64(sizeof(struct xsockbuf_n)) +
@@ -2116,13 +2123,10 @@ unp_pcblist_n SYSCTL_HANDLER_ARGS
 		xu->xunp_gencnt = unp->unp_gencnt;
 
 		if (unp->unp_addr) {
-			bcopy(unp->unp_addr, &xu->xu_au,
-			    unp->unp_addr->sun_len);
+			SOCKADDR_COPY(unp->unp_addr, &xu->xu_au);
 		}
 		if (unp->unp_conn && unp->unp_conn->unp_addr) {
-			bcopy(unp->unp_conn->unp_addr,
-			    &xu->xu_cau,
-			    unp->unp_conn->unp_addr->sun_len);
+			SOCKADDR_COPY(unp->unp_conn->unp_addr, &xu->xu_cau);
 		}
 		sotoxsocket_n(unp->unp_socket, xso);
 		sbtoxsockbuf_n(unp->unp_socket ?
@@ -2159,11 +2163,11 @@ done:
 
 SYSCTL_PROC(_net_local_dgram, OID_AUTO, pcblist_n,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
-    (caddr_t)(long)SOCK_DGRAM, 0, unp_pcblist_n, "S,xunpcb_n",
+    SYSCTL_SOCK_DGRAM_ARG, 0, unp_pcblist_n, "S,xunpcb_n",
     "List of active local datagram sockets");
 SYSCTL_PROC(_net_local_stream, OID_AUTO, pcblist_n,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
-    (caddr_t)(long)SOCK_STREAM, 0, unp_pcblist_n, "S,xunpcb_n",
+    SYSCTL_SOCK_STREAM_ARG, 0, unp_pcblist_n, "S,xunpcb_n",
     "List of active local stream sockets");
 
 static void
@@ -2330,7 +2334,7 @@ unp_externalize(struct mbuf *rights)
 	struct cmsghdr *cm = mtod(rights, struct cmsghdr *);
 	struct fileglob **rp = (struct fileglob **)(cm + 1);
 	const int newfds = (cm->cmsg_len - sizeof(*cm)) / sizeof(int);
-	int *fds;
+	int *fds __bidi_indexable;
 	int error = 0;
 
 	fds = kalloc_data(newfds * sizeof(int), Z_WAITOK);
@@ -2706,7 +2710,7 @@ unp_dispose(struct mbuf *m)
 static int
 unp_listen(struct unpcb *unp, proc_t p)
 {
-	kauth_cred_t safecred = kauth_cred_proc_ref(p);
+	kauth_cred_t safecred __single = kauth_cred_proc_ref(p);
 	cru2x(safecred, &unp->unp_peercred);
 	kauth_cred_unref(&safecred);
 	unp->unp_flags |= UNP_HAVEPCCACHED;
@@ -2778,9 +2782,9 @@ unp_discard(struct fileglob *fg, void *p)
 int
 unp_lock(struct socket *so, int refcount, void * lr)
 {
-	void * lr_saved;
+	void * lr_saved __single;
 	if (lr == 0) {
-		lr_saved = (void *)  __builtin_return_address(0);
+		lr_saved = __unsafe_forge_single(void*, __builtin_return_address(0));
 	} else {
 		lr_saved = lr;
 	}
@@ -2809,12 +2813,12 @@ unp_lock(struct socket *so, int refcount, void * lr)
 int
 unp_unlock(struct socket *so, int refcount, void * lr)
 {
-	void * lr_saved;
+	void * lr_saved __single;
 	lck_mtx_t * mutex_held = NULL;
-	struct unpcb *unp = sotounpcb(so);
+	struct unpcb *unp __single = sotounpcb(so);
 
 	if (lr == 0) {
-		lr_saved = (void *) __builtin_return_address(0);
+		lr_saved = __unsafe_forge_single(void*, __builtin_return_address(0));
 	} else {
 		lr_saved = lr;
 	}

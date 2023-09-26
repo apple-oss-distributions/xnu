@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -93,7 +93,6 @@
 #include <kern/percpu.h>
 #include <kern/zalloc.h>
 
-#include <libkern/OSAtomic.h>
 #include <libkern/OSDebug.h>
 #include <libkern/libkern.h>
 
@@ -105,7 +104,9 @@
 #include <machine/limits.h>
 #include <machine/machine_routines.h>
 
+#if CONFIG_MBUF_MCACHE
 #include <sys/mcache.h>
+#endif /* CONFIG_MBUF_MCACHE */
 #include <net/ntstat.h>
 
 #if INET
@@ -122,13 +123,14 @@ extern int dump_mptcp_reass_qlen(char *, int);
 extern int dlil_dump_top_if_qlen(char *, int);
 #endif /* NETWORKING */
 
+#if CONFIG_MBUF_MCACHE
 /*
  * MBUF IMPLEMENTATION NOTES.
  *
  * There is a total of 5 per-CPU caches:
  *
  * MC_MBUF:
- *	This is a cache of rudimentary objects of MSIZE in size; each
+ *	This is a cache of rudimentary objects of _MSIZE in size; each
  *	object represents an mbuf structure.  This cache preserves only
  *	the m_type field of the mbuf during its transactions.
  *
@@ -317,12 +319,179 @@ extern int dlil_dump_top_if_qlen(char *, int);
  * remaining entries unused.  For 16KB cluster, only one entry from the first
  * page is allocated and used for the entire object.
  */
+#else
+/*
+ * MBUF IMPLEMENTATION NOTES (using zalloc).
+ *
+ * There are a total of 4 zones and 3 zcaches.
+ *
+ * MC_MBUF:
+ *	This is a zone of rudimentary objects of _MSIZE in size; each
+ *	object represents an mbuf structure.  This cache preserves only
+ *	the m_type field of the mbuf during its transactions.
+ *
+ * MC_CL:
+ *	This is a zone of rudimentary objects of MCLBYTES in size; each
+ *	object represents a mcluster structure.  This cache does not
+ *	preserve the contents of the objects during its transactions.
+ *
+ * MC_BIGCL:
+ *	This is a zone of rudimentary objects of MBIGCLBYTES in size; each
+ *	object represents a mbigcluster structure.  This cache does not
+ *	preserve the contents of the objects during its transaction.
+ *
+ * MC_16KCL:
+ *	This is a zone of rudimentary objects of M16KCLBYTES in size; each
+ *	object represents a m16kcluster structure.  This cache does not
+ *	preserve the contents of the objects during its transaction.
+ *
+ * MC_MBUF_CL:
+ *	This is a cache of mbufs each having a cluster attached to it.
+ *	It is backed by MC_MBUF and MC_CL rudimentary caches.  Several
+ *	fields of the mbuf related to the external cluster are preserved
+ *	during transactions.
+ *
+ * MC_MBUF_BIGCL:
+ *	This is a cache of mbufs each having a big cluster attached to it.
+ *	It is backed by MC_MBUF and MC_BIGCL rudimentary caches.  Several
+ *	fields of the mbuf related to the external cluster are preserved
+ *	during transactions.
+ *
+ * MC_MBUF_16KCL:
+ *	This is a cache of mbufs each having a big cluster attached to it.
+ *	It is backed by MC_MBUF and MC_16KCL rudimentary caches.  Several
+ *	fields of the mbuf related to the external cluster are preserved
+ *	during transactions.
+ *
+ * OBJECT ALLOCATION:
+ *
+ * Allocation requests are handled first at the zalloc per-CPU layer
+ * before falling back to the zalloc depot.  Performance is optimal when
+ * the request is satisfied at the CPU layer. zalloc has an additional
+ * overflow layer called the depot, not pictured in the diagram below.
+ *
+ * Allocation paths are different depending on the class of objects:
+ *
+ * a. Rudimentary object:
+ *
+ *	{ m_get_common(), m_clattach(), m_mclget(),
+ *	  m_mclalloc(), m_bigalloc(), m_copym_with_hdrs(),
+ *	  composite object allocation }
+ *			|	^
+ *			|	|
+ *			|	+------- (done) --------+
+ *			v				|
+ *	      zalloc_flags/zalloc_n()	              KASAN
+ *			|				^
+ *			v				|
+ *      +----> [zalloc per-CPU cache] -----> (found?) --+
+ *	|		|				|
+ *	|		v				|
+ *	|  [zalloc recirculation layer] --> (found?) ---+
+ *	|		|
+ *	|		v
+ *	+--<<-- [zone backing store]
+ *
+ * b. Composite object:
+ *
+ *	{ m_getpackets_internal(), m_allocpacket_internal() }
+ *			|	^
+ *			|	|
+ *			|	+------	(done) ---------+
+ *			v				|
+ *              mz_composite_alloc()                  KASAN
+ *			|				^
+ *                      v                               |
+ *                zcache_alloc_n()                      |
+ *			|                               |
+ *			v                               |
+ *	     [zalloc per-CPU cache] --> mark_valid() ---+
+ *			|				|
+ *			v				|
+ *	  [zalloc recirculation layer] -> mark_valid() -+
+ *			|				|
+ *			v				|
+ *               mz_composite_build()                   |
+ *			|				|
+ *			v				|
+ *		(rudimentary objects)			|
+ *                   zalloc_id() ---------------->>-----+
+ *
+ * Auditing notes: If KASAN enabled, buffers will be subjected to
+ * integrity checks by the AddressSanitizer.
+ *
+ * OBJECT DEALLOCATION:
+ *
+ * Freeing an object simply involves placing it into the CPU cache; this
+ * pollutes the cache to benefit subsequent allocations.  The depot
+ * will only be entered if the object is to be purged out of the cache.
+ * Objects may be purged based on the overall memory pressure or
+ * during zone garbage collection.
+ * To improve performance, objects are not zero-filled when freed
+ * as it's custom for other zalloc zones.
+ *
+ * Deallocation paths are different depending on the class of objects:
+ *
+ * a. Rudimentary object:
+ *
+ *	{ m_free(), m_freem_list(), composite object deallocation }
+ *			|	^
+ *			|	|
+ *			|	+------	(done) ---------+
+ *			v				|
+ *	          zfree_nozero()                        |
+ *			|			        |
+ *                      v                               |
+ *                    KASAN                             |
+ *			|				|
+ *			v				|
+ *	     [zalloc per-CPU cache] -> (not purging?) --+
+ *			|				|
+ *			v				|
+ *	    [zalloc recirculation layer] --->>----------+
+ *
+ *
+ * b. Composite object:
+ *
+ *	{ m_free(), m_freem_list() }
+ *			|	^
+ *			|	|
+ *			|	+------	(done) ---------+
+ *			v				|
+ *	        mz_composite_free()	                |
+ *			|			        |
+ *			v				|
+ *                zcache_free_n()                       |
+ *                      |                               |
+ *			v				|
+ *                    KASAN                             |
+ *			|				|
+ *			v				|
+ *	     [zalloc per-CPU cache] -> mark_invalid() --+
+ *			|				|
+ *			v				|
+ *	        mz_composite_destroy()                  |
+ *			|				|
+ *			v				|
+ *		(rudimentary object)			|
+ *	           zfree_nozero() -------------->>------+
+ *
+ * Auditing notes: If KASAN enabled, buffers will be subjected to
+ * integrity checks by the AddressSanitizer.
+ *
+ * DEBUGGING:
+ *
+ * Debugging mbufs can be done by booting a KASAN enabled kernel.
+ */
+
+#endif /* CONFIG_MBUF_MCACHE */
 
 /* TODO: should be in header file */
 /* kernel translater */
 extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 extern vm_map_t mb_map;         /* special map */
 
+#if CONFIG_MBUF_MCACHE
 static uint32_t mb_kmem_contig_failed;
 static uint32_t mb_kmem_failed;
 static uint32_t mb_kmem_one_failed;
@@ -333,12 +502,14 @@ static uint64_t mb_kmem_one_failed_ts;
 static uint64_t mb_kmem_contig_failed_size;
 static uint64_t mb_kmem_failed_size;
 static uint32_t mb_kmem_stats[6];
+#endif /* CONFIG_MBUF_MCACHE */
 
 /* Global lock */
 static LCK_GRP_DECLARE(mbuf_mlock_grp, "mbuf");
 static LCK_MTX_DECLARE(mbuf_mlock_data, &mbuf_mlock_grp);
 static lck_mtx_t *const mbuf_mlock = &mbuf_mlock_data;
 
+#if CONFIG_MBUF_MCACHE
 /* Back-end (common) layer */
 static uint64_t mb_expand_cnt;
 static uint64_t mb_expand_cl_cnt;
@@ -359,7 +530,10 @@ static ppnum_t mcl_paddr_base;  /* Handle returned by IOMapper::iovmAlloc() */
 static mcache_t *ref_cache;     /* Cache of cluster reference & flags */
 static mcache_t *mcl_audit_con_cache; /* Audit contents cache */
 unsigned int mbuf_debug; /* patchable mbuf mcache flags */
+#endif /* CONFIG_MBUF_DEBUG */
 static unsigned int mb_normalized; /* number of packets "normalized" */
+
+extern unsigned int mb_tag_mbuf;
 
 #define MB_GROWTH_AGGRESSIVE    1       /* Threshold: 1/2 of total */
 #define MB_GROWTH_NORMAL        2       /* Threshold: 3/4 of total */
@@ -446,6 +620,7 @@ typedef struct mcl_slabg {
  */
 #define NSLABSP16KB     (M16KCLBYTES >> PAGE_SHIFT)
 
+#if CONFIG_MBUF_MCACHE
 /*
  * Per-cluster audit structure.
  */
@@ -475,7 +650,7 @@ typedef struct {
 	 * cluster cache case).  Note that we don't save the contents of
 	 * clusters when they are freed; we simply pattern-fill them.
 	 */
-	u_int8_t                sc_mbuf[(MSIZE - _MHLEN) + sizeof(_m_ext_t)];
+	u_int8_t                sc_mbuf[(_MSIZE - _MHLEN) + sizeof(_m_ext_t)];
 	mcl_scratch_audit_t     sc_scratch __attribute__((aligned(8)));
 } mcl_saved_contents_t;
 
@@ -504,6 +679,7 @@ static unsigned int maxclaudit; /* max # of entries in audit table */
 static mcl_slabg_t **slabstbl;  /* cluster slabs table */
 static unsigned int maxslabgrp; /* max # of entries in slabs table */
 static unsigned int slabgrp;    /* # of entries in slabs table */
+#endif /* CONFIG_MBUF_MCACHE */
 
 /* Globals */
 int nclusters;                  /* # of clusters for non-jumbo (legacy) sizes */
@@ -516,6 +692,7 @@ int max_protohdr;              /* largest protocol header */
 int max_hdr;                    /* largest link+protocol header */
 int max_datalen;                /* MHLEN - max_hdr */
 
+#if CONFIG_MBUF_MCACHE
 static boolean_t mclverify;     /* debug: pattern-checking */
 static boolean_t mcltrace;      /* debug: stack tracing */
 static boolean_t mclfindleak;   /* debug: leak detection */
@@ -600,6 +777,7 @@ struct mtracelarge {
 static struct mtracelarge mtracelarge_table[MTRACELARGE_NUM_TRACES];
 
 static void mtracelarge_register(size_t size);
+#endif /* CONFIG_MBUF_MCACHE */
 
 /* Lock to protect the completion callback table */
 static LCK_GRP_DECLARE(mbuf_tx_compl_tbl_lck_grp, "mbuf_tx_compl_tbl");
@@ -618,9 +796,11 @@ extern u_int32_t high_sb_max;
 
 typedef struct {
 	mbuf_class_t    mtbl_class;     /* class type */
+#if CONFIG_MBUF_MCACHE
 	mcache_t        *mtbl_cache;    /* mcache for this buffer class */
 	TAILQ_HEAD(mcl_slhead, mcl_slab) mtbl_slablist; /* slab list */
 	mcache_obj_t    *mtbl_cobjlist; /* composite objects freelist */
+#endif /* CONFIG_MBUF_MCACHE */
 	mb_class_stat_t *mtbl_stats;    /* statistics fetchable via sysctl */
 	u_int32_t       mtbl_maxsize;   /* maximum buffer size */
 	int             mtbl_minlimit;  /* minimum allowed */
@@ -631,9 +811,13 @@ typedef struct {
 } mbuf_table_t;
 
 #define m_class(c)      mbuf_table[c].mtbl_class
+#if CONFIG_MBUF_MCACHE
 #define m_cache(c)      mbuf_table[c].mtbl_cache
 #define m_slablist(c)   mbuf_table[c].mtbl_slablist
 #define m_cobjlist(c)   mbuf_table[c].mtbl_cobjlist
+#else
+#define m_stats(c)      mbuf_table[c].mtbl_stats
+#endif /* CONFIG_MBUF_MCACHE */
 #define m_maxsize(c)    mbuf_table[c].mtbl_maxsize
 #define m_minlimit(c)   mbuf_table[c].mtbl_minlimit
 #define m_maxlimit(c)   mbuf_table[c].mtbl_maxlimit
@@ -655,6 +839,7 @@ typedef struct {
 #define m_region_expand(c)      mbuf_table[c].mtbl_expand
 
 static mbuf_table_t mbuf_table[] = {
+#if CONFIG_MBUF_MCACHE
 	/*
 	 * The caches for mbufs, regular clusters and big clusters.
 	 * The average total values were based on data gathered by actual
@@ -679,16 +864,26 @@ static mbuf_table_t mbuf_table[] = {
 	{ MC_MBUF_CL, NULL, { NULL, NULL }, NULL, NULL, 0, 0, 0, 0, 2000, 0 },
 	{ MC_MBUF_BIGCL, NULL, { NULL, NULL }, NULL, NULL, 0, 0, 0, 0, 1000, 0 },
 	{ MC_MBUF_16KCL, NULL, { NULL, NULL }, NULL, NULL, 0, 0, 0, 0, 200, 0 },
+#else
+	{ .mtbl_class = MC_MBUF },
+	{ .mtbl_class = MC_CL },
+	{ .mtbl_class = MC_BIGCL },
+	{ .mtbl_class = MC_16KCL },
+	{ .mtbl_class = MC_MBUF_CL },
+	{ .mtbl_class = MC_MBUF_BIGCL },
+	{ .mtbl_class = MC_MBUF_16KCL },
+#endif /* CONFIG_MBUF_MCACHE */
 };
 
 #define NELEM(a)        (sizeof (a) / sizeof ((a)[0]))
 
-#if SKYWALK
+#if SKYWALK && CONFIG_MBUF_MCACHE
 #define MC_THRESHOLD_SCALE_DOWN_FACTOR  2
 static unsigned int mc_threshold_scale_down_factor =
     MC_THRESHOLD_SCALE_DOWN_FACTOR;
 #endif /* SKYWALK */
 
+#if CONFIG_MBUF_MCACHE
 static uint32_t
 m_avgtotal(mbuf_class_t c)
 {
@@ -700,9 +895,12 @@ m_avgtotal(mbuf_class_t c)
 	return mbuf_table[c].mtbl_avgtotal;
 #endif /* SKYWALK */
 }
+#endif /* CONFIG_MBUF_MCACHE */
 
+#if CONFIG_MBUF_MCACHE
 static void *mb_waitchan = &mbuf_table; /* wait channel for all caches */
 static int mb_waiters;                  /* number of waiters */
+#endif /* CONFIG_MBUF_MCACHE */
 
 boolean_t mb_peak_newreport = FALSE;
 boolean_t mb_peak_firstreport = FALSE;
@@ -710,6 +908,7 @@ boolean_t mb_peak_firstreport = FALSE;
 /* generate a report by default after 1 week of uptime */
 #define MBUF_PEAK_FIRST_REPORT_THRESHOLD        604800
 
+#if CONFIG_MBUF_MCACHE
 #define MB_WDT_MAXTIME  10              /* # of secs before watchdog panic */
 static struct timeval mb_wdtstart;      /* watchdog start timestamp */
 static char *mbuf_dump_buf;
@@ -729,6 +928,7 @@ static unsigned int mb_drain_maxint = 60;
 #else /* XNU_TARGET_OS_OSX */
 static unsigned int mb_drain_maxint = 0;
 #endif /* XNU_TARGET_OS_OSX */
+#endif /* CONFIG_MBUF_MCACHE */
 static unsigned int mb_memory_pressure_percentage = 80;
 
 uintptr_t mb_obscure_extfree __attribute__((visibility("hidden")));
@@ -739,21 +939,29 @@ static u_int32_t mb_redzone_cookie;
 static void m_redzone_init(struct mbuf *);
 static void m_redzone_verify(struct mbuf *m);
 
+static void m_set_rfa(struct mbuf *, struct ext_ref *);
+
+#if CONFIG_MBUF_MCACHE
 /* The following are used to serialize m_clalloc() */
 static boolean_t mb_clalloc_busy;
 static void *mb_clalloc_waitchan = &mb_clalloc_busy;
 static int mb_clalloc_waiters;
+#endif /* CONFIG_MBUF_MCACHE */
 
 static void mbuf_mtypes_sync(boolean_t);
 static int mbstat_sysctl SYSCTL_HANDLER_ARGS;
 static void mbuf_stat_sync(void);
 static int mb_stat_sysctl SYSCTL_HANDLER_ARGS;
+#if CONFIG_MBUF_MCACHE
 static int mleak_top_trace_sysctl SYSCTL_HANDLER_ARGS;
 static int mleak_table_sysctl SYSCTL_HANDLER_ARGS;
 static char *mbuf_dump(void);
+#endif /* CONFIG_MBUF_MCACHE */
 static void mbuf_table_init(void);
 static inline void m_incref(struct mbuf *);
 static inline u_int16_t m_decref(struct mbuf *);
+static void mbuf_watchdog_defunct(thread_call_param_t, thread_call_param_t);
+#if CONFIG_MBUF_MCACHE
 static int m_clalloc(const u_int32_t, const int, const u_int32_t);
 static void mbuf_worker_thread_init(void);
 static mcache_obj_t *slab_alloc(mbuf_class_t, int);
@@ -809,12 +1017,77 @@ static boolean_t slab_inrange(mcl_slab_t *, void *);
 static void slab_nextptr_panic(mcl_slab_t *, void *);
 static void slab_detach(mcl_slab_t *);
 static boolean_t slab_is_detached(mcl_slab_t *);
+#else /* !CONFIG_MBUF_MCACHE */
+static struct mbuf *mz_alloc(zalloc_flags_t);
+static void mz_free(struct mbuf *);
+static struct ext_ref *mz_ref_alloc(zalloc_flags_t);
+static void mz_ref_free(struct ext_ref *);
+static void *mz_cl_alloc(zone_id_t, zalloc_flags_t);
+static void mz_cl_free(zone_id_t, void *);
+static struct mbuf *mz_composite_alloc(mbuf_class_t, zalloc_flags_t);
+static zstack_t mz_composite_alloc_n(mbuf_class_t, unsigned int, zalloc_flags_t);
+static void mz_composite_free(mbuf_class_t, struct mbuf *);
+static void mz_composite_free_n(mbuf_class_t, zstack_t);
+static void *mz_composite_build(zone_id_t, zalloc_flags_t);
+static void *mz_composite_mark_valid(zone_id_t, void *);
+static void *mz_composite_mark_invalid(zone_id_t, void *);
+static void  mz_composite_destroy(zone_id_t, void *);
+
+ZONE_DEFINE_ID(ZONE_ID_MBUF_REF, "mbuf.ref", struct ext_ref,
+    ZC_CACHING | ZC_NOPGZ | ZC_KASAN_NOQUARANTINE);
+ZONE_DEFINE_ID(ZONE_ID_MBUF, "mbuf", struct mbuf,
+    ZC_CACHING | ZC_NOPGZ | ZC_KASAN_NOQUARANTINE);
+ZONE_DEFINE_ID(ZONE_ID_CLUSTER_2K, "mbuf.cluster.2k", union mcluster,
+    ZC_CACHING | ZC_NOPGZ | ZC_KASAN_NOQUARANTINE | ZC_DATA);
+ZONE_DEFINE_ID(ZONE_ID_CLUSTER_4K, "mbuf.cluster.4k", union mbigcluster,
+    ZC_CACHING | ZC_NOPGZ | ZC_KASAN_NOQUARANTINE | ZC_DATA);
+ZONE_DEFINE_ID(ZONE_ID_CLUSTER_16K, "mbuf.cluster.16k", union m16kcluster,
+    ZC_CACHING | ZC_NOPGZ | ZC_KASAN_NOQUARANTINE | ZC_DATA);
+static_assert(sizeof(union mcluster) == MCLBYTES);
+static_assert(sizeof(union mbigcluster) == MBIGCLBYTES);
+static_assert(sizeof(union m16kcluster) == M16KCLBYTES);
+
+static const struct zone_cache_ops mz_composite_ops = {
+	.zc_op_alloc        = mz_composite_build,
+	.zc_op_mark_valid   = mz_composite_mark_valid,
+	.zc_op_mark_invalid = mz_composite_mark_invalid,
+	.zc_op_free         = mz_composite_destroy,
+};
+ZCACHE_DEFINE(ZONE_ID_MBUF_CLUSTER_2K, "mbuf.composite.2k", struct mbuf,
+    sizeof(struct mbuf) + sizeof(struct ext_ref) + MCLBYTES,
+    &mz_composite_ops);
+ZCACHE_DEFINE(ZONE_ID_MBUF_CLUSTER_4K, "mbuf.composite.4k", struct mbuf,
+    sizeof(struct mbuf) + sizeof(struct ext_ref) + MBIGCLBYTES,
+    &mz_composite_ops);
+ZCACHE_DEFINE(ZONE_ID_MBUF_CLUSTER_16K, "mbuf.composite.16k", struct mbuf,
+    sizeof(struct mbuf) + sizeof(struct ext_ref) + M16KCLBYTES,
+    &mz_composite_ops);
+static_assert(ZONE_ID_MBUF + MC_MBUF == ZONE_ID_MBUF);
+static_assert(ZONE_ID_MBUF + MC_CL == ZONE_ID_CLUSTER_2K);
+static_assert(ZONE_ID_MBUF + MC_BIGCL == ZONE_ID_CLUSTER_4K);
+static_assert(ZONE_ID_MBUF + MC_16KCL == ZONE_ID_CLUSTER_16K);
+static_assert(ZONE_ID_MBUF + MC_MBUF_CL == ZONE_ID_MBUF_CLUSTER_2K);
+static_assert(ZONE_ID_MBUF + MC_MBUF_BIGCL == ZONE_ID_MBUF_CLUSTER_4K);
+static_assert(ZONE_ID_MBUF + MC_MBUF_16KCL == ZONE_ID_MBUF_CLUSTER_16K);
+
+/* Converts a an mbuf class to a zalloc zone ID. */
+__attribute__((always_inline))
+static inline zone_id_t
+m_class_to_zid(mbuf_class_t class)
+{
+	return ZONE_ID_MBUF + class - MC_MBUF;
+}
+
+static thread_call_t mbuf_defunct_tcall;
+#endif /* CONFIG_MBUF_MCACHE */
 
 static int m_copyback0(struct mbuf **, int, int, const void *, int, int);
 static struct mbuf *m_split0(struct mbuf *, int, int, int);
 __private_extern__ void mbuf_report_peak_usage(void);
+#if CONFIG_MBUF_MCACHE
 static boolean_t mbuf_report_usage(mbuf_class_t);
-#if DEBUG || DEVELOPMENT
+#endif /* CONFIG_MBUF_MCACHE */
+#if CONFIG_MBUF_MCACHE && (DEBUG || DEVELOPMENT)
 #define mbwdog_logger(fmt, ...)  _mbwdog_logger(__func__, __LINE__, fmt, ## __VA_ARGS__)
 static void _mbwdog_logger(const char *func, const int line, const char *fmt, ...);
 static char *mbwdog_logging;
@@ -822,8 +1095,10 @@ const unsigned mbwdog_logging_size = 4096;
 static size_t mbwdog_logging_used;
 #else
 #define mbwdog_logger(fmt, ...)  do { } while (0)
-#endif
+#endif /* CONFIG_MBUF_MCACHE &&DEBUG || DEVELOPMENT */
+#if CONFIG_MBUF_MCACHE
 static void mbuf_drain_locked(boolean_t);
+#endif /* CONFIG_MBUF_MCACHE */
 
 /* flags for m_copyback0 */
 #define M_COPYBACK0_COPYBACK    0x0001  /* copyback from cp */
@@ -885,6 +1160,7 @@ static void mbuf_drain_locked(boolean_t);
 /*
  * Macros used to verify the integrity of the mbuf.
  */
+#if CONFIG_MBUF_MCACHE
 #define _MCHECK(m) {                                                    \
 	if ((m)->m_type != MT_FREE && !MBUF_IS_PAIRED(m)) {             \
 	        if (mclaudit == NULL)                                   \
@@ -894,7 +1170,20 @@ static void mbuf_drain_locked(boolean_t);
 	                mcl_audit_mcheck_panic(m);                      \
 	}                                                               \
 }
+#else
+#define _MCHECK(m)                                                      \
+	if ((m)->m_type != MT_FREE && !MBUF_IS_PAIRED(m)) {             \
+	        panic("MCHECK: m_type=%d m=%p",                         \
+	                    (u_int16_t)(m)->m_type, m);                 \
+	}
+#endif /* CONFIG_MBUF_MCACHE */
 
+/*
+ * Macro version of mtod.
+ */
+#define MTOD(m, t)      ((t)((m)->m_data))
+
+#if CONFIG_MBUF_MCACHE
 #define MBUF_IN_MAP(addr)                                               \
 	((unsigned char *)(addr) >= mbutl &&                            \
 	(unsigned char *)(addr) < embutl)
@@ -903,11 +1192,6 @@ static void mbuf_drain_locked(boolean_t);
 	if (!MBUF_IN_MAP(addr))                                         \
 	        panic("MRANGE: address out of range 0x%p", addr);       \
 }
-
-/*
- * Macro version of mtod.
- */
-#define MTOD(m, t)      ((t)((m)->m_data))
 
 /*
  * Macros to obtain page index given a base cluster address
@@ -919,7 +1203,7 @@ static void mbuf_drain_locked(boolean_t);
  * Macro to find the mbuf index relative to a base.
  */
 #define MBPAGEIDX(c, m) \
-	(((unsigned char *)(m) - (unsigned char *)(c)) >> MSIZESHIFT)
+	(((unsigned char *)(m) - (unsigned char *)(c)) >> _MSIZESHIFT)
 
 /*
  * Same thing for 2KB cluster index.
@@ -932,6 +1216,7 @@ static void mbuf_drain_locked(boolean_t);
  */
 #define BCLPAGEIDX(c, m) \
 	(((unsigned char *)(m) - (unsigned char *)(c)) >> MBIGCLSHIFT)
+#endif /* CONFIG_MBUF_MCACHE */
 
 /*
  * Macros used during mbuf and cluster initialization.
@@ -944,7 +1229,7 @@ static void mbuf_drain_locked(boolean_t);
 	(m)->m_pkthdr.csum_data = 0;                                    \
 	(m)->m_pkthdr.vlan_tag = 0;                                     \
 	(m)->m_pkthdr.comp_gencnt = 0;                                  \
-	(m)->m_pkthdr.pkt_crumbs = 0;                                     \
+	(m)->m_pkthdr.pkt_crumbs = 0;                                   \
 	m_classifier_init(m, 0);                                        \
 	m_tag_init(m, 1);                                               \
 	m_scratch_init(m);                                              \
@@ -1047,9 +1332,9 @@ static mbuf_mtypes_t PERCPU_DATA(mbuf_mtypes);
 #define mtype_stat_add(type, n) {                                       \
 	if ((unsigned)(type) < MT_MAX) {                                \
 	        mbuf_mtypes_t *mbs = PERCPU_GET(mbuf_mtypes);           \
-	        atomic_add_32(&mbs->cpu_mtypes[type], n);               \
+	        os_atomic_add(&mbs->cpu_mtypes[type], n, relaxed);               \
 	} else if ((unsigned)(type) < (unsigned)MBSTAT_MTYPES_MAX) {    \
-	        atomic_add_16((int16_t *)&mbstat.m_mtypes[type], n);    \
+	        os_atomic_add((int16_t *)&mbstat.m_mtypes[type], n, relaxed);    \
 	}                                                               \
 }
 
@@ -1088,7 +1373,15 @@ static int
 mbstat_sysctl SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
+
+#if CONFIG_MBUF_MCACHE
 	mbuf_mtypes_sync(FALSE);
+#else
+	lck_mtx_lock(mbuf_mlock);
+	mbuf_stat_sync();
+	mbuf_mtypes_sync(TRUE);
+	lck_mtx_unlock(mbuf_mlock);
+#endif
 
 	return SYSCTL_OUT(req, &mbstat, sizeof(mbstat));
 }
@@ -1097,12 +1390,19 @@ static void
 mbuf_stat_sync(void)
 {
 	mb_class_stat_t *sp;
+#if CONFIG_MBUF_MCACHE
 	mcache_cpu_t *ccp;
 	mcache_t *cp;
 	int k, m, bktsize;
+#else
+	int k;
+	uint64_t drops = 0;
+#endif /* CONFIG_MBUF_MCACHE */
+
 
 	LCK_MTX_ASSERT(mbuf_mlock, LCK_MTX_ASSERT_OWNED);
 
+#if CONFIG_MBUF_MCACHE
 	for (k = 0; k < NELEM(mbuf_table); k++) {
 		cp = m_cache(k);
 		ccp = &cp->mc_cpu[0];
@@ -1143,7 +1443,7 @@ mbuf_stat_sync(void)
 		case MC_MBUF:
 			/* Deduct mbufs used in composite caches */
 			sp->mbcl_ctotal -= (m_total(MC_MBUF_CL) +
-			    m_total(MC_MBUF_BIGCL));
+			    m_total(MC_MBUF_BIGCL) - m_total(MC_MBUF_16KCL));
 			break;
 
 		case MC_CL:
@@ -1165,6 +1465,58 @@ mbuf_stat_sync(void)
 			break;
 		}
 	}
+#else
+	for (k = 0; k < NELEM(mbuf_table); k++) {
+		const zone_id_t zid = m_class_to_zid(m_class(k));
+		const zone_t zone = zone_by_id(zid);
+		struct zone_basic_stats stats = {};
+
+		sp = m_stats(k);
+		zone_get_stats(zone, &stats);
+		drops += stats.zbs_alloc_fail;
+		sp->mbcl_total = stats.zbs_avail;
+		sp->mbcl_active = stats.zbs_alloc;
+		/*
+		 * infree is what mcache considers the freelist (uncached)
+		 * free_cnt contains all the cached/uncached elements
+		 * in a zone.
+		 */
+		sp->mbcl_infree = stats.zbs_free - stats.zbs_cached;
+		sp->mbcl_fail_cnt = stats.zbs_alloc_fail;
+		sp->mbcl_ctotal = sp->mbcl_total;
+
+		/* These stats are not available in zalloc. */
+		sp->mbcl_alloc_cnt = 0;
+		sp->mbcl_free_cnt = 0;
+		sp->mbcl_notified = 0;
+		sp->mbcl_purge_cnt = 0;
+		sp->mbcl_slab_cnt = 0;
+		sp->mbcl_release_cnt = 0;
+
+		/* zalloc caches are always on. */
+		sp->mbcl_mc_state = MCS_ONLINE;
+		sp->mbcl_mc_cached = stats.zbs_cached;
+		/* These stats are not collected by zalloc. */
+		sp->mbcl_mc_waiter_cnt = 0;
+		sp->mbcl_mc_wretry_cnt = 0;
+		sp->mbcl_mc_nwretry_cnt = 0;
+	}
+	/* Deduct clusters used in composite cache */
+	m_ctotal(MC_MBUF) -= (m_total(MC_MBUF_CL) +
+	    m_total(MC_MBUF_BIGCL) -
+	    m_total(MC_MBUF_16KCL));
+	m_ctotal(MC_CL) -= m_total(MC_MBUF_CL);
+	m_ctotal(MC_BIGCL) -= m_total(MC_MBUF_BIGCL);
+	m_ctotal(MC_16KCL) -= m_total(MC_MBUF_16KCL);
+
+	/* Update mbstat. */
+	mbstat.m_mbufs = m_total(MC_MBUF);
+	mbstat.m_clusters = m_total(MC_CL);
+	mbstat.m_clfree = m_infree(MC_CL) + m_infree(MC_MBUF_CL);
+	mbstat.m_drops = drops;
+	mbstat.m_bigclusters = m_total(MC_BIGCL);
+	mbstat.m_bigclfree = m_infree(MC_BIGCL) + m_infree(MC_MBUF_BIGCL);
+#endif /* CONFIG_MBUF_MCACHE */
 }
 
 static int
@@ -1218,6 +1570,293 @@ mb_stat_sysctl SYSCTL_HANDLER_ARGS
 	return SYSCTL_OUT(req, statp, statsz);
 }
 
+#if !CONFIG_MBUF_MCACHE
+/*
+ * The following functions are wrappers around mbuf
+ * allocation for zalloc.  They all have the prefix "mz"
+ * which was chosen to avoid conflicts with the mbuf KPIs.
+ *
+ * Z_NOPAGEWAIT is used in place of Z_NOWAIT because
+ * Z_NOPAGEWAIT maps closer to MCR_TRYHARD. Z_NOWAIT will
+ * fail immediately if it has to take a mutex and that
+ * may cause packets to be dropped more frequently.
+ * In general, the mbuf subsystem can sustain grabbing a mutex
+ * during "non-blocking" allocation and that's the reason
+ * why Z_NOPAGEWAIT was chosen.
+ *
+ * mbufs are elided (removed all pointers) before they are
+ * returned to the cache. The exception are composite mbufs which
+ * are re-initialized on allocation.
+ */
+__attribute__((always_inline))
+static inline void
+m_elide(struct mbuf *m)
+{
+	m->m_next = m->m_nextpkt = NULL;
+	m->m_data = NULL;
+	memset(&m->m_ext, 0, sizeof(m->m_ext));
+	m->m_pkthdr.rcvif = NULL;
+	m->m_pkthdr.pkt_hdr = NULL;
+	m->m_flags |= M_PKTHDR;
+	m_tag_init(m, 1);
+	m->m_pkthdr.pkt_flags = 0;
+	m_scratch_init(m);
+	m->m_pkthdr.redzone = 0;
+	m->m_flags &= ~M_PKTHDR;
+}
+
+__attribute__((always_inline))
+static inline struct mbuf *
+mz_alloc(zalloc_flags_t flags)
+{
+	if (flags & Z_NOWAIT) {
+		flags ^= Z_NOWAIT | Z_NOPAGEWAIT;
+	} else if (!(flags & Z_NOPAGEWAIT)) {
+		flags |= Z_NOFAIL;
+	}
+	return zalloc_id(ZONE_ID_MBUF, flags | Z_NOZZC);
+}
+
+__attribute__((always_inline))
+static inline zstack_t
+mz_alloc_n(uint32_t count, zalloc_flags_t flags)
+{
+	if (flags & Z_NOWAIT) {
+		flags ^= Z_NOWAIT | Z_NOPAGEWAIT;
+	} else if (!(flags & Z_NOPAGEWAIT)) {
+		flags |= Z_NOFAIL;
+	}
+	return zalloc_n(ZONE_ID_MBUF, count, flags | Z_NOZZC);
+}
+
+__attribute__((always_inline))
+static inline void
+mz_free(struct mbuf *m)
+{
+#if KASAN
+	zone_require(zone_by_id(ZONE_ID_MBUF), m);
+#endif
+	m_elide(m);
+	zfree_nozero(ZONE_ID_MBUF, m);
+}
+
+__attribute__((always_inline))
+static inline void
+mz_free_n(zstack_t list)
+{
+	/* Callers of this function have already elided the mbuf. */
+	zfree_nozero_n(ZONE_ID_MBUF, list);
+}
+
+__attribute__((always_inline))
+static inline struct ext_ref *
+mz_ref_alloc(zalloc_flags_t flags)
+{
+	if (flags & Z_NOWAIT) {
+		flags ^= Z_NOWAIT | Z_NOPAGEWAIT;
+	}
+	return zalloc_id(ZONE_ID_MBUF_REF, flags | Z_NOZZC);
+}
+
+__attribute__((always_inline))
+static inline void
+mz_ref_free(struct ext_ref *rfa)
+{
+	VERIFY(rfa->minref == rfa->refcnt);
+#if KASAN
+	zone_require(zone_by_id(ZONE_ID_MBUF_REF), rfa);
+#endif
+	zfree_nozero(ZONE_ID_MBUF_REF, rfa);
+}
+
+__attribute__((always_inline))
+static inline void *
+mz_cl_alloc(zone_id_t zid, zalloc_flags_t flags)
+{
+	if (flags & Z_NOWAIT) {
+		flags ^= Z_NOWAIT | Z_NOPAGEWAIT;
+	} else if (!(flags & Z_NOPAGEWAIT)) {
+		flags |= Z_NOFAIL;
+	}
+	return (zalloc_id)(zid, flags | Z_NOZZC);
+}
+
+__attribute__((always_inline))
+static inline void
+mz_cl_free(zone_id_t zid, void *cl)
+{
+#if KASAN
+	zone_require(zone_by_id(zid), cl);
+#endif
+	zfree_nozero(zid, cl);
+}
+
+__attribute__((always_inline))
+static inline zstack_t
+mz_composite_alloc_n(mbuf_class_t class, unsigned int n, zalloc_flags_t flags)
+{
+	if (flags & Z_NOWAIT) {
+		flags ^= Z_NOWAIT | Z_NOPAGEWAIT;
+	}
+	return (zcache_alloc_n)(m_class_to_zid(class), n, flags,
+	       &mz_composite_ops);
+}
+
+__attribute__((always_inline))
+static inline struct mbuf *
+mz_composite_alloc(mbuf_class_t class, zalloc_flags_t flags)
+{
+	zstack_t list = {};
+	list = mz_composite_alloc_n(class, 1, flags);
+	if (!zstack_empty(list)) {
+		return zstack_pop(&list);
+	} else {
+		return NULL;
+	}
+}
+
+__attribute__((always_inline))
+static inline void
+mz_composite_free_n(mbuf_class_t class, zstack_t list)
+{
+	(zcache_free_n)(m_class_to_zid(class), list, &mz_composite_ops);
+}
+
+__attribute__((always_inline))
+static inline void
+mz_composite_free(mbuf_class_t class, struct mbuf *m)
+{
+	zstack_t list = {};
+	zstack_push(&list, m);
+	(zcache_free_n)(m_class_to_zid(class), list, &mz_composite_ops);
+}
+
+/* Converts composite zone ID to the cluster zone ID. */
+__attribute__((always_inline))
+static inline zone_id_t
+mz_cl_zid(zone_id_t zid)
+{
+	return ZONE_ID_CLUSTER_2K + zid - ZONE_ID_MBUF_CLUSTER_2K;
+}
+
+static void *
+mz_composite_build(zone_id_t zid, zalloc_flags_t flags)
+{
+	const zone_id_t cl_zid = mz_cl_zid(zid);
+	struct mbuf *m = NULL;
+	struct ext_ref *rfa = NULL;
+	void *cl = NULL;
+
+	cl = mz_cl_alloc(cl_zid, flags);
+	if (__improbable(cl == NULL)) {
+		goto out;
+	}
+	rfa = mz_ref_alloc(flags);
+	if (__improbable(rfa == NULL)) {
+		goto out_free_cl;
+	}
+	m = mz_alloc(flags);
+	if (__improbable(m == NULL)) {
+		goto out_free_rfa;
+	}
+	MBUF_INIT(m, 0, MT_FREE);
+	if (zid == ZONE_ID_MBUF_CLUSTER_2K) {
+		MBUF_CL_INIT(m, cl, rfa, 0, EXTF_COMPOSITE);
+	} else if (zid == ZONE_ID_MBUF_CLUSTER_4K) {
+		MBUF_BIGCL_INIT(m, cl, rfa, 0, EXTF_COMPOSITE);
+	} else {
+		MBUF_16KCL_INIT(m, cl, rfa, 0, EXTF_COMPOSITE);
+	}
+	VERIFY(m->m_flags == M_EXT);
+	VERIFY(m_get_rfa(m) != NULL && MBUF_IS_COMPOSITE(m));
+
+	return m;
+out_free_rfa:
+	mz_ref_free(rfa);
+out_free_cl:
+	mz_cl_free(cl_zid, cl);
+out:
+	return NULL;
+}
+
+static void *
+mz_composite_mark_valid(zone_id_t zid, void *p)
+{
+	struct mbuf *m = p;
+
+	m = zcache_mark_valid(zone_by_id(ZONE_ID_MBUF), m);
+#if KASAN
+	struct ext_ref *rfa = m_get_rfa(m);
+	const zone_id_t cl_zid = mz_cl_zid(zid);
+	void *cl = m->m_ext.ext_buf;
+
+	cl = zcache_mark_valid(zone_by_id(cl_zid), cl);
+	rfa = zcache_mark_valid(zone_by_id(ZONE_ID_MBUF_REF), rfa);
+	m->m_data = m->m_ext.ext_buf = cl;
+	m_set_rfa(m, rfa);
+#else
+#pragma unused(zid)
+#endif
+	VERIFY(MBUF_IS_COMPOSITE(m));
+
+	return m;
+}
+
+static void *
+mz_composite_mark_invalid(zone_id_t zid, void *p)
+{
+	struct mbuf *m = p;
+
+	VERIFY(MBUF_IS_COMPOSITE(m));
+	VERIFY(MEXT_REF(m) == MEXT_MINREF(m));
+#if KASAN
+	struct ext_ref *rfa = m_get_rfa(m);
+	const zone_id_t cl_zid = mz_cl_zid(zid);
+	void *cl = m->m_ext.ext_buf;
+
+	cl = zcache_mark_invalid(zone_by_id(cl_zid), cl);
+	rfa = zcache_mark_invalid(zone_by_id(ZONE_ID_MBUF_REF), rfa);
+	m->m_data = m->m_ext.ext_buf = cl;
+	m_set_rfa(m, rfa);
+#else
+#pragma unused(zid)
+#endif
+
+	return zcache_mark_invalid(zone_by_id(ZONE_ID_MBUF), m);
+}
+
+static void
+mz_composite_destroy(zone_id_t zid, void *p)
+{
+	const zone_id_t cl_zid = mz_cl_zid(zid);
+	struct ext_ref *rfa = NULL;
+	struct mbuf *m = p;
+
+	VERIFY(MBUF_IS_COMPOSITE(m));
+
+	MEXT_MINREF(m) = 0;
+	MEXT_REF(m) = 0;
+	MEXT_PREF(m) = 0;
+	MEXT_FLAGS(m) = 0;
+	MEXT_PRIV(m) = 0;
+	MEXT_PMBUF(m) = NULL;
+	MEXT_TOKEN(m) = 0;
+
+	rfa = m_get_rfa(m);
+	m_set_ext(m, NULL, NULL, NULL);
+
+	m->m_type = MT_FREE;
+	m->m_flags = m->m_len = 0;
+	m->m_next = m->m_nextpkt = NULL;
+
+	mz_cl_free(cl_zid, m->m_ext.ext_buf);
+	m->m_ext.ext_buf = NULL;
+	mz_ref_free(rfa);
+	mz_free(m);
+}
+#endif /* !CONFIG_MBUF_MCACHE */
+
+#if CONFIG_MBUF_MCACHE
 static int
 mleak_top_trace_sysctl SYSCTL_HANDLER_ARGS
 {
@@ -1254,42 +1893,30 @@ mleak_table_sysctl SYSCTL_HANDLER_ARGS
 
 	return i;
 }
+#endif /* CONFIG_MBUF_MCACHE */
 
 static inline void
 m_incref(struct mbuf *m)
 {
-	UInt16 old, new;
-	volatile UInt16 *addr = (volatile UInt16 *)&MEXT_REF(m);
+	uint16_t new = os_atomic_inc(&MEXT_REF(m), relaxed);
 
-	do {
-		old = *addr;
-		new = old + 1;
-		VERIFY(new != 0);
-	} while (!OSCompareAndSwap16(old, new, addr));
-
+	VERIFY(new != 0);
 	/*
 	 * If cluster is shared, mark it with (sticky) EXTF_READONLY;
 	 * we don't clear the flag when the refcount goes back to the
 	 * minimum, to simplify code calling m_mclhasreference().
 	 */
 	if (new > (MEXT_MINREF(m) + 1) && !(MEXT_FLAGS(m) & EXTF_READONLY)) {
-		(void) OSBitOrAtomic16(EXTF_READONLY, &MEXT_FLAGS(m));
+		os_atomic_or(&MEXT_FLAGS(m), EXTF_READONLY, relaxed);
 	}
 }
 
-static inline u_int16_t
+static inline uint16_t
 m_decref(struct mbuf *m)
 {
-	UInt16 old, new;
-	volatile UInt16 *addr = (volatile UInt16 *)&MEXT_REF(m);
+	VERIFY(MEXT_REF(m) != 0);
 
-	do {
-		old = *addr;
-		new = old - 1;
-		VERIFY(old != 0);
-	} while (!OSCompareAndSwap16(old, new, addr));
-
-	return new;
+	return os_atomic_dec(&MEXT_REF(m), acq_rel);
 }
 
 static void
@@ -1357,7 +1984,7 @@ mbuf_table_init(void)
 	 * clusters (1/64th each.)
 	 */
 	c = P2ROUNDDOWN((nclusters >> 6), NCLPG);       /* in 2KB unit */
-	b = P2ROUNDDOWN((nclusters >> (6 + NCLPBGSHIFT)), NBCLPG); /* in 4KB unit */
+	b = P2ROUNDDOWN((nclusters >> (6 + NCLPBGSHIFT)), NBCLPG);  /* in 4KB unit */
 	s = nclusters - (c + (b << NCLPBGSHIFT));       /* in 2KB unit */
 
 	/*
@@ -1366,7 +1993,7 @@ mbuf_table_init(void)
 	m_minlimit(MC_CL) = c;
 	m_maxlimit(MC_CL) = s + c;                      /* in 2KB unit */
 	m_maxsize(MC_CL) = m_size(MC_CL) = MCLBYTES;
-	(void) snprintf(m_cname(MC_CL), MAX_MBUF_CNAME, "cl");
+	snprintf(m_cname(MC_CL), MAX_MBUF_CNAME, "cl");
 
 	/*
 	 * Another 1/64th (b) of the map is reserved for 4KB clusters.
@@ -1375,15 +2002,15 @@ mbuf_table_init(void)
 	m_minlimit(MC_BIGCL) = b;
 	m_maxlimit(MC_BIGCL) = (s >> NCLPBGSHIFT) + b;  /* in 4KB unit */
 	m_maxsize(MC_BIGCL) = m_size(MC_BIGCL) = MBIGCLBYTES;
-	(void) snprintf(m_cname(MC_BIGCL), MAX_MBUF_CNAME, "bigcl");
+	snprintf(m_cname(MC_BIGCL), MAX_MBUF_CNAME, "bigcl");
 
 	/*
 	 * The remaining 31/32ths (s) are all-purpose (mbufs, 2KB, or 4KB)
 	 */
 	m_minlimit(MC_MBUF) = 0;
-	m_maxlimit(MC_MBUF) = (s << NMBPCLSHIFT);       /* in mbuf unit */
-	m_maxsize(MC_MBUF) = m_size(MC_MBUF) = MSIZE;
-	(void) snprintf(m_cname(MC_MBUF), MAX_MBUF_CNAME, "mbuf");
+	m_maxlimit(MC_MBUF) = s * NMBPCL;       /* in mbuf unit */
+	m_maxsize(MC_MBUF) = m_size(MC_MBUF) = _MSIZE;
+	snprintf(m_cname(MC_MBUF), MAX_MBUF_CNAME, "mbuf");
 
 	/*
 	 * Set limits for the composite classes.
@@ -1392,13 +2019,13 @@ mbuf_table_init(void)
 	m_maxlimit(MC_MBUF_CL) = m_maxlimit(MC_CL);
 	m_maxsize(MC_MBUF_CL) = MCLBYTES;
 	m_size(MC_MBUF_CL) = m_size(MC_MBUF) + m_size(MC_CL);
-	(void) snprintf(m_cname(MC_MBUF_CL), MAX_MBUF_CNAME, "mbuf_cl");
+	snprintf(m_cname(MC_MBUF_CL), MAX_MBUF_CNAME, "mbuf_cl");
 
 	m_minlimit(MC_MBUF_BIGCL) = 0;
 	m_maxlimit(MC_MBUF_BIGCL) = m_maxlimit(MC_BIGCL);
 	m_maxsize(MC_MBUF_BIGCL) = MBIGCLBYTES;
 	m_size(MC_MBUF_BIGCL) = m_size(MC_MBUF) + m_size(MC_BIGCL);
-	(void) snprintf(m_cname(MC_MBUF_BIGCL), MAX_MBUF_CNAME, "mbuf_bigcl");
+	snprintf(m_cname(MC_MBUF_BIGCL), MAX_MBUF_CNAME, "mbuf_bigcl");
 
 	/*
 	 * And for jumbo classes.
@@ -1406,13 +2033,13 @@ mbuf_table_init(void)
 	m_minlimit(MC_16KCL) = 0;
 	m_maxlimit(MC_16KCL) = (njcl >> NCLPJCLSHIFT);  /* in 16KB unit */
 	m_maxsize(MC_16KCL) = m_size(MC_16KCL) = M16KCLBYTES;
-	(void) snprintf(m_cname(MC_16KCL), MAX_MBUF_CNAME, "16kcl");
+	snprintf(m_cname(MC_16KCL), MAX_MBUF_CNAME, "16kcl");
 
 	m_minlimit(MC_MBUF_16KCL) = 0;
 	m_maxlimit(MC_MBUF_16KCL) = m_maxlimit(MC_16KCL);
 	m_maxsize(MC_MBUF_16KCL) = M16KCLBYTES;
 	m_size(MC_MBUF_16KCL) = m_size(MC_MBUF) + m_size(MC_16KCL);
-	(void) snprintf(m_cname(MC_MBUF_16KCL), MAX_MBUF_CNAME, "mbuf_16kcl");
+	snprintf(m_cname(MC_MBUF_16KCL), MAX_MBUF_CNAME, "mbuf_16kcl");
 
 	/*
 	 * Initialize the legacy mbstat structure.
@@ -1462,6 +2089,7 @@ mbuf_class_under_pressure(struct mbuf *m)
 {
 	int mclass = mbuf_get_class(m);
 
+#if CONFIG_MBUF_MCACHE
 	if (m_total(mclass) - m_infree(mclass) >= (m_maxlimit(mclass) * mb_memory_pressure_percentage) / 100) {
 		/*
 		 * The above computation does not include the per-CPU cached objects.
@@ -1496,7 +2124,6 @@ mbuf_class_under_pressure(struct mbuf *m)
 			}
 		}
 		cached += (bl_total * bktsize);
-
 		if (m_total(mclass) - m_infree(mclass) - cached >= (m_maxlimit(mclass) * mb_memory_pressure_percentage) / 100) {
 			os_log(OS_LOG_DEFAULT,
 			    "%s memory-pressure on mbuf due to class %u, total %u free %u cached %u max %u",
@@ -1504,6 +2131,23 @@ mbuf_class_under_pressure(struct mbuf *m)
 			return true;
 		}
 	}
+#else
+	/*
+	 * Grab the statistics from zalloc.
+	 * We can't call mbuf_stat_sync() since that requires a lock.
+	 */
+	const zone_id_t zid = m_class_to_zid(m_class(mclass));
+	const zone_t zone = zone_by_id(zid);
+	struct zone_basic_stats stats = {};
+
+	zone_get_stats(zone, &stats);
+	if (stats.zbs_avail - stats.zbs_free >= (m_maxlimit(mclass) * mb_memory_pressure_percentage) / 100) {
+		os_log(OS_LOG_DEFAULT,
+		    "%s memory-pressure on mbuf due to class %u, total %llu free %llu max %u",
+		    __func__, mclass, stats.zbs_avail, stats.zbs_free, m_maxlimit(mclass));
+		return true;
+	}
+#endif /* CONFIG_MBUF_MCACHE */
 
 	return false;
 }
@@ -1556,10 +2200,14 @@ __private_extern__ void
 mbinit(void)
 {
 	unsigned int m;
+#if CONFIG_MBUF_MCACHE
 	unsigned int initmcl = 0;
 	thread_t thread = THREAD_NULL;
+#endif /* CONFIG_MBUF_MCACHE */
 
+#if CONFIG_MBUF_MCACHE
 	microuptime(&mb_start);
+#endif /* CONFIG_MBUF_MCACHE */
 
 	/*
 	 * These MBUF_ values must be equal to their private counterparts.
@@ -1642,10 +2290,13 @@ mbinit(void)
 	read_random(&mb_obscure_extref, sizeof(mb_obscure_extref));
 	read_random(&mb_obscure_extfree, sizeof(mb_obscure_extfree));
 	mb_obscure_extref |= 0x3;
+	mb_obscure_extref = 0;
 	mb_obscure_extfree |= 0x3;
 
+#if CONFIG_MBUF_MCACHE
 	/* Make sure we don't save more than we should */
 	_CASSERT(MCA_SAVED_MBUF_SIZE <= sizeof(struct mbuf));
+#endif /* CONFIG_MBUF_MCACHE */
 
 	if (nmbclusters == 0) {
 		nmbclusters = NMBCLUSTERS;
@@ -1657,6 +2308,9 @@ mbinit(void)
 	/* Setup the mbuf table */
 	mbuf_table_init();
 
+	_CASSERT(sizeof(struct mbuf) == _MSIZE);
+
+#if CONFIG_MBUF_MCACHE
 	/*
 	 * Allocate cluster slabs table:
 	 *
@@ -1744,6 +2398,19 @@ mbinit(void)
 	freelist_populate(m_class(MC_BIGCL), initmcl, M_WAIT);
 	VERIFY(m_total(MC_BIGCL) >= m_minlimit(MC_BIGCL));
 	freelist_init(m_class(MC_CL));
+#else
+	/*
+	 * We have yet to create the non composite zones
+	 * and thus we haven't asked zalloc to allocate
+	 * anything yet, which means that at this point
+	 * m_total() is zero.  Once we create the zones and
+	 * raise the reserve, m_total() will be calculated,
+	 * but until then just assume that we will have
+	 * at least the minium limit allocated.
+	 */
+	m_total(MC_BIGCL) = m_minlimit(MC_BIGCL);
+	m_total(MC_CL) = m_minlimit(MC_CL);
+#endif /* CONFIG_MBUF_MCACHE */
 
 	for (m = 0; m < NELEM(mbuf_table); m++) {
 		/* Make sure we didn't miss any */
@@ -1755,6 +2422,7 @@ mbinit(void)
 	}
 	mb_peak_newreport = FALSE;
 
+#if CONFIG_MBUF_MCACHE
 	lck_mtx_unlock(mbuf_mlock);
 
 	(void) kernel_thread_start((thread_continue_t)mbuf_worker_thread_init,
@@ -1763,9 +2431,11 @@ mbinit(void)
 
 	ref_cache = mcache_create("mext_ref", sizeof(struct ext_ref),
 	    0, 0, MCR_SLEEP);
+#endif /* CONFIG_MBUF_MCACHE */
 
 	/* Create the cache for each class */
 	for (m = 0; m < NELEM(mbuf_table); m++) {
+#if CONFIG_MBUF_MCACHE
 		void *allocfunc, *freefunc, *auditfunc, *logfunc;
 		u_int32_t flags;
 
@@ -1801,6 +2471,20 @@ mbinit(void)
 		m_cache(m) = mcache_create_ext(m_cname(m), m_maxsize(m),
 		    allocfunc, freefunc, auditfunc, logfunc, mbuf_slab_notify,
 		    (void *)(uintptr_t)m, flags, MCR_SLEEP);
+#else
+		if (!MBUF_CLASS_COMPOSITE(m)) {
+			zone_t zone = zone_by_id(m_class_to_zid(m));
+
+			zone_set_exhaustible(zone, m_maxlimit(m));
+			zone_raise_reserve(zone, m_minlimit(m));
+			/*
+			 * Pretend that we have allocated m_total() items
+			 * at this point.  zalloc will eventually do that
+			 * but it's an async operation.
+			 */
+			m_total(m) = m_minlimit(m);
+		}
+#endif /* CONFIG_MBUF_MCACHE */
 	}
 
 	/*
@@ -1822,8 +2506,11 @@ mbinit(void)
 		} else {
 			sb_max = high_sb_max;
 		}
+		sb_max_adj = SB_MAX_ADJUST(sb_max);
+		assert(sb_max_adj < UINT32_MAX);
 	}
 
+#if CONFIG_MBUF_MCACHE
 	/* allocate space for mbuf_dump_buf */
 	mbuf_dump_buf = zalloc_permanent(MBUF_DUMP_BUF_SIZE, ZALIGN_NONE);
 
@@ -1831,13 +2518,22 @@ mbinit(void)
 		printf("%s: MLEN %d, MHLEN %d\n", __func__,
 		    (int)_MLEN, (int)_MHLEN);
 	}
-
+#else
+	mbuf_defunct_tcall =
+	    thread_call_allocate_with_options(mbuf_watchdog_defunct,
+	    NULL,
+	    THREAD_CALL_PRIORITY_KERNEL,
+	    THREAD_CALL_OPTIONS_ONCE);
+#endif /* CONFIG_MBUF_MCACHE */
 	printf("%s: done [%d MB total pool size, (%d/%d) split]\n", __func__,
 	    (nmbclusters << MCLSHIFT) >> MBSHIFT,
 	    (nclusters << MCLSHIFT) >> MBSHIFT,
 	    (njcl << MCLSHIFT) >> MBSHIFT);
+
+	PE_parse_boot_argn("mb_tag_mbuf", &mb_tag_mbuf, sizeof(mb_tag_mbuf));
 }
 
+#if CONFIG_MBUF_MCACHE
 /*
  * Obtain a slab of object(s) from the class's freelist.
  */
@@ -3664,11 +4360,14 @@ m_reclaim(mbuf_class_t class, unsigned int num, boolean_t comp)
 	}
 	lck_mtx_lock(mbuf_mlock);
 }
+#endif /* CONFIG_MBUF_MCACHE */
 
 static inline struct mbuf *
 m_get_common(int wait, short type, int hdr)
 {
 	struct mbuf *m;
+
+#if CONFIG_MBUF_MCACHE
 	int mcflags = MSLEEPF(wait);
 
 	/* Is this due to a non-blocking retry?  If so, then try harder */
@@ -3677,6 +4376,9 @@ m_get_common(int wait, short type, int hdr)
 	}
 
 	m = mcache_alloc(m_cache(MC_MBUF), mcflags);
+#else
+	m = mz_alloc(wait);
+#endif /* CONFIG_MBUF_MCACHE */
 	if (m != NULL) {
 		MBUF_INIT(m, hdr, type);
 		mtype_stat_inc(type);
@@ -3737,22 +4439,15 @@ m_free_paired(struct mbuf *m)
 {
 	VERIFY((m->m_flags & M_EXT) && (MEXT_FLAGS(m) & EXTF_PAIRED));
 
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 	if (MEXT_PMBUF(m) == m) {
-		volatile UInt16 *addr = (volatile UInt16 *)&MEXT_PREF(m);
-		int16_t oprefcnt, prefcnt;
-
 		/*
 		 * Paired ref count might be negative in case we lose
 		 * against another thread clearing MEXT_PMBUF, in the
 		 * event it occurs after the above memory barrier sync.
 		 * In that case just ignore as things have been unpaired.
 		 */
-		do {
-			oprefcnt = *addr;
-			prefcnt = oprefcnt - 1;
-		} while (!OSCompareAndSwap16(oprefcnt, prefcnt, addr));
-
+		int16_t prefcnt = os_atomic_dec(&MEXT_PREF(m), acq_rel);
 		if (prefcnt > 1) {
 			return 1;
 		} else if (prefcnt == 1) {
@@ -3776,7 +4471,7 @@ m_free_paired(struct mbuf *m)
 			 * as it is immutable.  atomic_set_ptr also causes
 			 * memory barrier sync.
 			 */
-			atomic_set_ptr(&MEXT_PMBUF(m), NULL);
+			os_atomic_store(&MEXT_PMBUF(m), NULL, release);
 
 			switch (m->m_ext.ext_size) {
 			case MCLBYTES:
@@ -3819,7 +4514,7 @@ m_free(struct mbuf *m)
 		/* Check for scratch area overflow */
 		m_redzone_verify(m);
 		/* Free the aux data and tags if there is any */
-		m_tag_delete_chain(m, NULL);
+		m_tag_delete_chain(m);
 
 		m_do_tx_compl_callback(m, NULL);
 	}
@@ -3840,6 +4535,7 @@ m_free(struct mbuf *m)
 		const uint16_t refcnt = m_decref(m);
 
 		if (refcnt == minref && !composite) {
+#if CONFIG_MBUF_MCACHE
 			if (m_free_func == NULL) {
 				mcache_free(m_cache(MC_CL), m->m_ext.ext_buf);
 			} else if (m_free_func == m_bigfree) {
@@ -3853,6 +4549,19 @@ m_free(struct mbuf *m)
 				    m->m_ext.ext_size, m_get_ext_arg(m));
 			}
 			mcache_free(ref_cache, m_get_rfa(m));
+#else
+			if (m_free_func == NULL) {
+				mz_cl_free(ZONE_ID_CLUSTER_2K, m->m_ext.ext_buf);
+			} else if (m_free_func == m_bigfree) {
+				mz_cl_free(ZONE_ID_CLUSTER_4K, m->m_ext.ext_buf);
+			} else if (m_free_func == m_16kfree) {
+				mz_cl_free(ZONE_ID_CLUSTER_16K, m->m_ext.ext_buf);
+			} else {
+				(*m_free_func)(m->m_ext.ext_buf,
+				    m->m_ext.ext_size, m_get_ext_arg(m));
+			}
+			mz_ref_free(m_get_rfa(m));
+#endif /* CONFIG_MBUF_MCACHE */
 			m_set_ext(m, NULL, NULL, NULL);
 		} else if (refcnt == minref && composite) {
 			VERIFY(!(MEXT_FLAGS(m) & EXTF_PAIRED));
@@ -3872,6 +4581,7 @@ m_free(struct mbuf *m)
 			 */
 			MEXT_FLAGS(m) &= ~EXTF_READONLY;
 
+#if CONFIG_MBUF_MCACHE
 			/* "Free" into the intermediate cache */
 			if (m_free_func == NULL) {
 				mcache_free(m_cache(MC_MBUF_CL), m);
@@ -3881,6 +4591,17 @@ m_free(struct mbuf *m)
 				VERIFY(m_free_func == m_16kfree);
 				mcache_free(m_cache(MC_MBUF_16KCL), m);
 			}
+#else
+			/* "Free" into the intermediate cache */
+			if (m_free_func == NULL) {
+				mz_composite_free(MC_MBUF_CL, m);
+			} else if (m_free_func == m_bigfree) {
+				mz_composite_free(MC_MBUF_BIGCL, m);
+			} else {
+				VERIFY(m_free_func == m_16kfree);
+				mz_composite_free(MC_MBUF_16KCL, m);
+			}
+#endif /* CONFIG_MBUF_MCACHE */
 			return n;
 		}
 	}
@@ -3894,7 +4615,11 @@ m_free(struct mbuf *m)
 	m->m_flags = m->m_len = 0;
 	m->m_next = m->m_nextpkt = NULL;
 
+#if CONFIG_MBUF_MCACHE
 	mcache_free(m_cache(MC_MBUF), m);
+#else
+	mz_free(m);
+#endif /* CONFIG_MBUF_MCACHE */
 
 	return n;
 }
@@ -3930,6 +4655,7 @@ m_clattach(struct mbuf *m, int type, caddr_t extbuf,
 		const uint16_t refcnt = m_decref(m);
 
 		if (refcnt == minref && !composite) {
+#if CONFIG_MBUF_MCACHE
 			if (m_free_func == NULL) {
 				mcache_free(m_cache(MC_CL), m->m_ext.ext_buf);
 			} else if (m_free_func == m_bigfree) {
@@ -3942,6 +4668,18 @@ m_clattach(struct mbuf *m, int type, caddr_t extbuf,
 				(*m_free_func)(m->m_ext.ext_buf,
 				    m->m_ext.ext_size, m_get_ext_arg(m));
 			}
+#else
+			if (m_free_func == NULL) {
+				mz_cl_free(ZONE_ID_CLUSTER_2K, m->m_ext.ext_buf);
+			} else if (m_free_func == m_bigfree) {
+				mz_cl_free(ZONE_ID_CLUSTER_4K, m->m_ext.ext_buf);
+			} else if (m_free_func == m_16kfree) {
+				mz_cl_free(ZONE_ID_CLUSTER_16K, m->m_ext.ext_buf);
+			} else {
+				(*m_free_func)(m->m_ext.ext_buf,
+				    m->m_ext.ext_size, m_get_ext_arg(m));
+			}
+#endif /* CONFIG_MBUF_MCACHE */
 			/* Re-use the reference structure */
 			rfa = m_get_rfa(m);
 		} else if (refcnt == minref && composite) {
@@ -3963,6 +4701,7 @@ m_clattach(struct mbuf *m, int type, caddr_t extbuf,
 			MEXT_FLAGS(m) &= ~EXTF_READONLY;
 
 			/* "Free" into the intermediate cache */
+#if CONFIG_MBUF_MCACHE
 			if (m_free_func == NULL) {
 				mcache_free(m_cache(MC_MBUF_CL), m);
 			} else if (m_free_func == m_bigfree) {
@@ -3971,6 +4710,16 @@ m_clattach(struct mbuf *m, int type, caddr_t extbuf,
 				VERIFY(m_free_func == m_16kfree);
 				mcache_free(m_cache(MC_MBUF_16KCL), m);
 			}
+#else
+			if (m_free_func == NULL) {
+				mz_composite_free(MC_MBUF_CL, m);
+			} else if (m_free_func == m_bigfree) {
+				mz_composite_free(MC_MBUF_BIGCL, m);
+			} else {
+				VERIFY(m_free_func == m_16kfree);
+				mz_composite_free(MC_MBUF_16KCL, m);
+			}
+#endif /* CONFIG_MBUF_MCACHE */
 			/*
 			 * Allocate a new mbuf, since we didn't divorce
 			 * the composite mbuf + cluster pair above.
@@ -3981,11 +4730,19 @@ m_clattach(struct mbuf *m, int type, caddr_t extbuf,
 		}
 	}
 
+#if CONFIG_MBUF_MCACHE
 	if (rfa == NULL &&
 	    (rfa = mcache_alloc(ref_cache, MSLEEPF(wait))) == NULL) {
 		m_free(m);
 		return NULL;
 	}
+#else
+	if (rfa == NULL &&
+	    (rfa = mz_ref_alloc(wait)) == NULL) {
+		m_free(m);
+		return NULL;
+	}
+#endif /* CONFIG_MBUF_MCACHE */
 
 	if (!pair) {
 		MEXT_INIT(m, extbuf, extsize, extfree, extarg, rfa,
@@ -4005,9 +4762,11 @@ m_clattach(struct mbuf *m, int type, caddr_t extbuf,
 struct mbuf *
 m_getcl(int wait, int type, int flags)
 {
-	struct mbuf *m;
-	int mcflags = MSLEEPF(wait);
+	struct mbuf *m = NULL;
 	int hdr = (flags & M_PKTHDR);
+
+#if CONFIG_MBUF_MCACHE
+	int mcflags = MSLEEPF(wait);
 
 	/* Is this due to a non-blocking retry?  If so, then try harder */
 	if (mcflags & MCR_NOSLEEP) {
@@ -4015,6 +4774,9 @@ m_getcl(int wait, int type, int flags)
 	}
 
 	m = mcache_alloc(m_cache(MC_MBUF_CL), mcflags);
+#else
+	m = mz_composite_alloc(MC_MBUF_CL, wait);
+#endif /* CONFIG_MBUF_MCACHE */
 	if (m != NULL) {
 		u_int16_t flag;
 		struct ext_ref *rfa;
@@ -4042,18 +4804,28 @@ m_getcl(int wait, int type, int flags)
 struct mbuf *
 m_mclget(struct mbuf *m, int wait)
 {
-	struct ext_ref *rfa;
+	struct ext_ref *rfa = NULL;
 
+#if CONFIG_MBUF_MCACHE
 	if ((rfa = mcache_alloc(ref_cache, MSLEEPF(wait))) == NULL) {
 		return m;
 	}
-
+#else
+	if ((rfa = mz_ref_alloc(wait)) == NULL) {
+		return m;
+	}
+#endif /* CONFIG_MBUF_MCACHE */
 	m->m_ext.ext_buf = m_mclalloc(wait);
 	if (m->m_ext.ext_buf != NULL) {
 		MBUF_CL_INIT(m, m->m_ext.ext_buf, rfa, 1, 0);
 	} else {
+#if CONFIG_MBUF_MCACHE
 		mcache_free(ref_cache, rfa);
+#else
+		mz_ref_free(rfa);
+#endif /* CONFIG_MBUF_MCACHE */
 	}
+
 	return m;
 }
 
@@ -4061,6 +4833,7 @@ m_mclget(struct mbuf *m, int wait)
 caddr_t
 m_mclalloc(int wait)
 {
+#if CONFIG_MBUF_MCACHE
 	int mcflags = MSLEEPF(wait);
 
 	/* Is this due to a non-blocking retry?  If so, then try harder */
@@ -4069,13 +4842,20 @@ m_mclalloc(int wait)
 	}
 
 	return mcache_alloc(m_cache(MC_CL), mcflags);
+#else
+	return mz_cl_alloc(ZONE_ID_CLUSTER_2K, wait);
+#endif /* CONFIG_MBUF_MCACHE */
 }
 
 /* Free an mbuf cluster */
 void
 m_mclfree(caddr_t p)
 {
+#if CONFIG_MBUF_MCACHE
 	mcache_free(m_cache(MC_CL), p);
+#else
+	mz_cl_free(ZONE_ID_CLUSTER_2K, p);
+#endif /* CONFIG_MBUF_MCACHE */
 }
 
 /*
@@ -4097,6 +4877,7 @@ m_mclhasreference(struct mbuf *m)
 __private_extern__ caddr_t
 m_bigalloc(int wait)
 {
+#if CONFIG_MBUF_MCACHE
 	int mcflags = MSLEEPF(wait);
 
 	/* Is this due to a non-blocking retry?  If so, then try harder */
@@ -4105,29 +4886,45 @@ m_bigalloc(int wait)
 	}
 
 	return mcache_alloc(m_cache(MC_BIGCL), mcflags);
+#else
+	return mz_cl_alloc(ZONE_ID_CLUSTER_4K, wait);
+#endif /* CONFIG_MBUF_MCACHE */
 }
 
 __private_extern__ void
 m_bigfree(caddr_t p, __unused u_int size, __unused caddr_t arg)
 {
+#if CONFIG_MBUF_MCACHE
 	mcache_free(m_cache(MC_BIGCL), p);
+#else
+	mz_cl_free(ZONE_ID_CLUSTER_4K, p);
+#endif /* CONFIG_MBUF_MCACHE */
 }
 
 /* m_mbigget() add an 4KB mbuf cluster to a normal mbuf */
 __private_extern__ struct mbuf *
 m_mbigget(struct mbuf *m, int wait)
 {
-	struct ext_ref *rfa;
+	struct ext_ref *rfa = NULL;
 
+#if CONFIG_MBUF_MCACHE
 	if ((rfa = mcache_alloc(ref_cache, MSLEEPF(wait))) == NULL) {
 		return m;
 	}
-
-	m->m_ext.ext_buf =  m_bigalloc(wait);
+#else
+	if ((rfa = mz_ref_alloc(wait)) == NULL) {
+		return m;
+	}
+#endif /* CONFIG_MBUF_MCACHE */
+	m->m_ext.ext_buf = m_bigalloc(wait);
 	if (m->m_ext.ext_buf != NULL) {
 		MBUF_BIGCL_INIT(m, m->m_ext.ext_buf, rfa, 1, 0);
 	} else {
+#if CONFIG_MBUF_MCACHE
 		mcache_free(ref_cache, rfa);
+#else
+		mz_ref_free(rfa);
+#endif /* CONFIG_MBUF_MCACHE */
 	}
 	return m;
 }
@@ -4135,6 +4932,7 @@ m_mbigget(struct mbuf *m, int wait)
 __private_extern__ caddr_t
 m_16kalloc(int wait)
 {
+#if CONFIG_MBUF_MCACHE
 	int mcflags = MSLEEPF(wait);
 
 	/* Is this due to a non-blocking retry?  If so, then try harder */
@@ -4143,30 +4941,47 @@ m_16kalloc(int wait)
 	}
 
 	return mcache_alloc(m_cache(MC_16KCL), mcflags);
+#else
+	return mz_cl_alloc(ZONE_ID_CLUSTER_16K, wait);
+#endif /* CONFIG_MBUF_MCACHE */
 }
 
 __private_extern__ void
 m_16kfree(caddr_t p, __unused u_int size, __unused caddr_t arg)
 {
+#if CONFIG_MBUF_MCACHE
 	mcache_free(m_cache(MC_16KCL), p);
+#else
+	mz_cl_free(ZONE_ID_CLUSTER_16K, p);
+#endif /* CONFIG_MBUF_MCACHE */
 }
 
 /* m_m16kget() add a 16KB mbuf cluster to a normal mbuf */
 __private_extern__ struct mbuf *
 m_m16kget(struct mbuf *m, int wait)
 {
-	struct ext_ref *rfa;
+	struct ext_ref *rfa = NULL;
 
+#if CONFIG_MBUF_MCACHE
 	if ((rfa = mcache_alloc(ref_cache, MSLEEPF(wait))) == NULL) {
 		return m;
 	}
-
+#else
+	if ((rfa = mz_ref_alloc(wait)) == NULL) {
+		return m;
+	}
+#endif /* CONFIG_MBUF_MCACHE */
 	m->m_ext.ext_buf =  m_16kalloc(wait);
 	if (m->m_ext.ext_buf != NULL) {
 		MBUF_16KCL_INIT(m, m->m_ext.ext_buf, rfa, 1, 0);
 	} else {
+#if CONFIG_MBUF_MCACHE
 		mcache_free(ref_cache, rfa);
+#else
+		mz_ref_free(rfa);
+#endif /* CONFIG_MBUF_MCACHE */
 	}
+
 	return m;
 }
 
@@ -4186,7 +5001,7 @@ m_copy_pkthdr(struct mbuf *to, struct mbuf *from)
 		/* Check for scratch area overflow */
 		m_redzone_verify(to);
 		/* We will be taking over the tags of 'to' */
-		m_tag_delete_chain(to, NULL);
+		m_tag_delete_chain(to);
 	}
 	to->m_pkthdr = from->m_pkthdr;          /* especially tags */
 	m_classifier_init(from, 0);             /* purge classifier info */
@@ -4216,7 +5031,7 @@ m_dup_pkthdr(struct mbuf *to, struct mbuf *from, int how)
 		/* Check for scratch area overflow */
 		m_redzone_verify(to);
 		/* We will be taking over the tags of 'to' */
-		m_tag_delete_chain(to, NULL);
+		m_tag_delete_chain(to);
 	}
 	to->m_flags = (from->m_flags & M_COPYFLAGS) | (to->m_flags & M_EXT);
 	if ((to->m_flags & M_EXT) == 0) {
@@ -4298,14 +5113,19 @@ __private_extern__ struct mbuf *
 m_getpackets_internal(unsigned int *num_needed, int num_with_pkthdrs,
     int wait, int wantall, size_t bufsize)
 {
-	struct mbuf *m;
+	struct mbuf *m = NULL;
 	struct mbuf **np, *top;
 	unsigned int pnum, needed = *num_needed;
+#if CONFIG_MBUF_MCACHE
 	mcache_obj_t *mp_list = NULL;
 	int mcflags = MSLEEPF(wait);
+	mcache_t *cp;
+#else
+	zstack_t mp_list = {};
+	mbuf_class_t class = MC_MBUF_CL;
+#endif /* CONFIG_MBUF_MCACHE */
 	u_int16_t flag;
 	struct ext_ref *rfa;
-	mcache_t *cp;
 	void *cl;
 
 	ASSERT(bufsize == m_maxsize(MC_CL) ||
@@ -4322,6 +5142,7 @@ m_getpackets_internal(unsigned int *num_needed, int num_with_pkthdrs,
 	np = &top;
 	pnum = 0;
 
+#if CONFIG_MBUF_MCACHE
 	/*
 	 * The caller doesn't want all the requested buffers; only some.
 	 * Try hard to get what we can, but don't block.  This effectively
@@ -4341,10 +5162,26 @@ m_getpackets_internal(unsigned int *num_needed, int num_with_pkthdrs,
 		cp = m_cache(MC_MBUF_16KCL);
 	}
 	needed = mcache_alloc_ext(cp, &mp_list, needed, mcflags);
+#else
+	/* Allocate the composite mbuf + cluster elements from the cache */
+	if (bufsize == m_maxsize(MC_CL)) {
+		class = MC_MBUF_CL;
+	} else if (bufsize == m_maxsize(MC_BIGCL)) {
+		class = MC_MBUF_BIGCL;
+	} else {
+		class = MC_MBUF_16KCL;
+	}
+	mp_list = mz_composite_alloc_n(class, needed, wait);
+	needed = zstack_count(mp_list);
+#endif /* CONFIG_MBUF_MCACHE */
 
 	for (pnum = 0; pnum < needed; pnum++) {
+#if CONFIG_MBUF_MCACHE
 		m = (struct mbuf *)mp_list;
 		mp_list = mp_list->obj_next;
+#else
+		m = zstack_pop(&mp_list);
+#endif /* CONFIG_MBUF_MCACHE */
 
 		VERIFY(m->m_type == MT_FREE && m->m_flags == M_EXT);
 		cl = m->m_ext.ext_buf;
@@ -4375,11 +5212,17 @@ m_getpackets_internal(unsigned int *num_needed, int num_with_pkthdrs,
 			np = &m->m_next;
 		}
 	}
+#if CONFIG_MBUF_MCACHE
 	ASSERT(pnum != *num_needed || mp_list == NULL);
 	if (mp_list != NULL) {
 		mcache_free_ext(cp, mp_list);
 	}
-
+#else
+	ASSERT(pnum != *num_needed || zstack_empty(mp_list));
+	if (!zstack_empty(mp_list)) {
+		mz_composite_free_n(class, mp_list);
+	}
+#endif /* CONFIG_MBUF_MCACHE */
 	if (pnum > 0) {
 		mtype_stat_add(MT_DATA, pnum);
 		mtype_stat_sub(MT_FREE, pnum);
@@ -4397,8 +5240,8 @@ m_getpackets_internal(unsigned int *num_needed, int num_with_pkthdrs,
 			needed = %u, pnum = %u, num_needed = %u \n",
 		    __func__, needed, pnum, *num_needed);
 	}
-
 	*num_needed = pnum;
+
 	return top;
 }
 
@@ -4422,12 +5265,18 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 	size_t bufsize, r_bufsize;
 	unsigned int num = 0;
 	unsigned int nsegs = 0;
-	unsigned int needed, resid;
+	unsigned int needed = 0, resid;
+#if CONFIG_MBUF_MCACHE
 	int mcflags = MSLEEPF(wait);
 	mcache_obj_t *mp_list = NULL, *rmp_list = NULL;
 	mcache_t *cp = NULL, *rcp = NULL;
+#else
+	zstack_t mp_list = {}, rmp_list = {};
+	mbuf_class_t class = MC_MBUF, rclass = MC_MBUF_CL;
+#endif /* CONFIG_MBUF_MCACHE */
 
 	if (*numlist == 0) {
+		os_log(OS_LOG_DEFAULT, "m_allocpacket_internal *numlist is 0");
 		return NULL;
 	}
 
@@ -4453,6 +5302,7 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 		bufsize = wantsize;
 	} else {
 		*numlist = 0;
+		os_log(OS_LOG_DEFAULT, "m_allocpacket_internal wantsize unsupported");
 		return NULL;
 	}
 
@@ -4477,11 +5327,13 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 		if (*maxsegments && nsegs > *maxsegments) {
 			*maxsegments = nsegs;
 			*numlist = 0;
+			os_log(OS_LOG_DEFAULT, "m_allocpacket_internal nsegs > *maxsegments");
 			return NULL;
 		}
 		*maxsegments = nsegs;
 	}
 
+#if CONFIG_MBUF_MCACHE
 	/*
 	 * The caller doesn't want all the requested buffers; only some.
 	 * Try hard to get what we can, but don't block.  This effectively
@@ -4491,6 +5343,7 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 	if (!wantall || (mcflags & MCR_NOSLEEP)) {
 		mcflags |= MCR_TRYHARD;
 	}
+#endif /* CONFIG_MBUF_MCACHE */
 
 	/*
 	 * Simple case where all elements in the lists/chains are mbufs.
@@ -4502,9 +5355,15 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 	if (bufsize <= MINCLSIZE) {
 		/* Allocate the elements in one shot from the mbuf cache */
 		ASSERT(bufsize <= MHLEN || nsegs == 2);
+#if CONFIG_MBUF_MCACHE
 		cp = m_cache(MC_MBUF);
 		needed = mcache_alloc_ext(cp, &mp_list,
 		    (*numlist) * nsegs, mcflags);
+#else
+		class = MC_MBUF;
+		mp_list = mz_alloc_n((*numlist) * nsegs, wait);
+		needed = zstack_count(mp_list);
+#endif /* CONFIG_MBUF_MCACHE */
 
 		/*
 		 * The number of elements must be even if we are to use an
@@ -4518,18 +5377,27 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 		}
 
 		while (num < needed) {
-			struct mbuf *m;
+			struct mbuf *m = NULL;
 
+#if CONFIG_MBUF_MCACHE
 			m = (struct mbuf *)mp_list;
 			mp_list = mp_list->obj_next;
+#else
+			m = zstack_pop(&mp_list);
+#endif /* CONFIG_MBUF_MCACHE */
 			ASSERT(m != NULL);
 
 			MBUF_INIT(m, 1, MT_DATA);
 			num++;
 			if (bufsize > MHLEN) {
 				/* A second mbuf for this segment chain */
+#if CONFIG_MBUF_MCACHE
 				m->m_next = (struct mbuf *)mp_list;
 				mp_list = mp_list->obj_next;
+#else
+				m->m_next = zstack_pop(&mp_list);
+#endif /* CONFIG_MBUF_MCACHE */
+
 				ASSERT(m->m_next != NULL);
 
 				MBUF_INIT(m->m_next, 0, MT_DATA);
@@ -4538,7 +5406,11 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 			*np = m;
 			np = &m->m_nextpkt;
 		}
+#if CONFIG_MBUF_MCACHE
 		ASSERT(num != *numlist || mp_list == NULL);
+#else
+		ASSERT(num != *numlist || zstack_empty(mp_list));
+#endif /* CONFIG_MBUF_MCACHE */
 
 		if (num > 0) {
 			mtype_stat_add(MT_DATA, num);
@@ -4601,6 +5473,7 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 		 * elements that can be allocated so that we know how many
 		 * segment chains we can afford to create.
 		 */
+#if CONFIG_MBUF_MCACHE
 		if (r_bufsize <= m_maxsize(MC_CL)) {
 			rcp = m_cache(MC_MBUF_CL);
 		} else if (r_bufsize <= m_maxsize(MC_BIGCL)) {
@@ -4609,7 +5482,17 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 			rcp = m_cache(MC_MBUF_16KCL);
 		}
 		needed = mcache_alloc_ext(rcp, &rmp_list, *numlist, mcflags);
-
+#else
+		if (r_bufsize <= m_maxsize(MC_CL)) {
+			rclass = MC_MBUF_CL;
+		} else if (r_bufsize <= m_maxsize(MC_BIGCL)) {
+			rclass = MC_MBUF_BIGCL;
+		} else {
+			rclass = MC_MBUF_16KCL;
+		}
+		rmp_list = mz_composite_alloc_n(rclass, *numlist, wait);
+		needed = zstack_count(rmp_list);
+#endif /* CONFIG_MBUF_MCACHE */
 		if (needed == 0) {
 			goto fail;
 		}
@@ -4623,6 +5506,7 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 	 * Attempt to allocate the rest of the composite mbuf + cluster
 	 * elements for the number of segment chains that we need.
 	 */
+#if CONFIG_MBUF_MCACHE
 	if (bufsize <= m_maxsize(MC_CL)) {
 		cp = m_cache(MC_MBUF_CL);
 	} else if (bufsize <= m_maxsize(MC_BIGCL)) {
@@ -4631,6 +5515,17 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 		cp = m_cache(MC_MBUF_16KCL);
 	}
 	needed = mcache_alloc_ext(cp, &mp_list, needed * nsegs, mcflags);
+#else
+	if (bufsize <= m_maxsize(MC_CL)) {
+		class = MC_MBUF_CL;
+	} else if (bufsize <= m_maxsize(MC_BIGCL)) {
+		class = MC_MBUF_BIGCL;
+	} else {
+		class = MC_MBUF_16KCL;
+	}
+	mp_list = mz_composite_alloc_n(class, needed * nsegs, wait);
+	needed = zstack_count(mp_list);
+#endif /* CONFIG_MBUF_MCACHE */
 
 	/* Round it down to avoid creating a partial segment chain */
 	needed = (needed / nsegs) * nsegs;
@@ -4651,7 +5546,7 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 	}
 
 	for (;;) {
-		struct mbuf *m;
+		struct mbuf *m = NULL;
 		u_int16_t flag;
 		struct ext_ref *rfa;
 		void *cl;
@@ -4659,12 +5554,21 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 		m_ext_free_func_t m_free_func;
 
 		++num;
+
 		if (nsegs == 1 || (num % nsegs) != 0 || resid == 0) {
+#if CONFIG_MBUF_MCACHE
 			m = (struct mbuf *)mp_list;
 			mp_list = mp_list->obj_next;
+#else
+			m = zstack_pop(&mp_list);
+#endif /* CONFIG_MBUF_MCACHE */
 		} else {
+#if CONFIG_MBUF_MCACHE
 			m = (struct mbuf *)rmp_list;
 			rmp_list = rmp_list->obj_next;
+#else
+			m = zstack_pop(&rmp_list);
+#endif /* CONFIG_MBUF_MCACHE */
 		}
 		m_free_func = m_get_ext_free(m);
 		ASSERT(m != NULL);
@@ -4714,18 +5618,36 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 
 	/* We've got them all; return to caller */
 	if (num == *numlist) {
+#if CONFIG_MBUF_MCACHE
 		ASSERT(mp_list == NULL && rmp_list == NULL);
+#else
+		ASSERT(zstack_empty(mp_list) && zstack_empty(rmp_list));
+#endif /* CONFIG_MBUF_MCACHE */
 		return top;
 	}
 
 fail:
 	/* Free up what's left of the above */
+#if CONFIG_MBUF_MCACHE
 	if (mp_list != NULL) {
 		mcache_free_ext(cp, mp_list);
 	}
 	if (rmp_list != NULL) {
 		mcache_free_ext(rcp, rmp_list);
 	}
+#else
+	if (!zstack_empty(mp_list)) {
+		if (class == MC_MBUF) {
+			/* No need to elide, these mbufs came from the cache. */
+			mz_free_n(mp_list);
+		} else {
+			mz_composite_free_n(class, mp_list);
+		}
+	}
+	if (!zstack_empty(rmp_list)) {
+		mz_composite_free_n(rclass, rmp_list);
+	}
+#endif /* CONFIG_MBUF_MCACHE */
 	if (wantall && top != NULL) {
 		m_freem_list(top);
 		*numlist = 0;
@@ -4811,6 +5733,7 @@ int
 m_freem_list(struct mbuf *m)
 {
 	struct mbuf *nextpkt;
+#if CONFIG_MBUF_MCACHE
 	mcache_obj_t *mp_list = NULL;
 	mcache_obj_t *mcl_list = NULL;
 	mcache_obj_t *mbc_list = NULL;
@@ -4819,6 +5742,11 @@ m_freem_list(struct mbuf *m)
 	mcache_obj_t *m_mbc_list = NULL;
 	mcache_obj_t *m_m16k_list = NULL;
 	mcache_obj_t *ref_list = NULL;
+#else
+	zstack_t mp_list = {}, mcl_list = {}, mbc_list = {},
+	    m16k_list = {}, m_mcl_list = {},
+	    m_mbc_list = {}, m_m16k_list = {}, ref_list = {};
+#endif /* CONFIG_MBUF_MCACHE */
 	int pktcount = 0;
 	int mt_free = 0, mt_data = 0, mt_header = 0, mt_soname = 0, mt_tag = 0;
 
@@ -4830,8 +5758,11 @@ m_freem_list(struct mbuf *m)
 
 		while (m != NULL) {
 			struct mbuf *next = m->m_next;
+#if CONFIG_MBUF_MCACHE
 			mcache_obj_t *o, *rfa;
-
+#else
+			void *cl = NULL;
+#endif /* CONFIG_MBUF_MCACHE */
 			if (m->m_type == MT_FREE) {
 				panic("m_free: freeing an already freed mbuf");
 			}
@@ -4840,7 +5771,7 @@ m_freem_list(struct mbuf *m)
 				/* Check for scratch area overflow */
 				m_redzone_verify(m);
 				/* Free the aux data and tags if there is any */
-				m_tag_delete_chain(m, NULL);
+				m_tag_delete_chain(m);
 				m_do_tx_compl_callback(m, NULL);
 			}
 
@@ -4856,7 +5787,11 @@ m_freem_list(struct mbuf *m)
 
 			mt_free++;
 
+#if CONFIG_MBUF_MCACHE
 			o = (mcache_obj_t *)(void *)m->m_ext.ext_buf;
+#else
+			cl = m->m_ext.ext_buf;
+#endif /* CONFIG_MBUF_MCACHE */
 			/*
 			 * Make sure that we don't touch any ext_ref
 			 * member after we decrement the reference count
@@ -4867,8 +5802,8 @@ m_freem_list(struct mbuf *m)
 			const m_ext_free_func_t m_free_func = m_get_ext_free(m);
 			const uint16_t minref = MEXT_MINREF(m);
 			const uint16_t refcnt = m_decref(m);
-
 			if (refcnt == minref && !composite) {
+#if CONFIG_MBUF_MCACHE
 				if (m_free_func == NULL) {
 					o->obj_next = mcl_list;
 					mcl_list = o;
@@ -4886,6 +5821,20 @@ m_freem_list(struct mbuf *m)
 				rfa = (mcache_obj_t *)(void *)m_get_rfa(m);
 				rfa->obj_next = ref_list;
 				ref_list = rfa;
+#else
+				if (m_free_func == NULL) {
+					zstack_push(&mcl_list, cl);
+				} else if (m_free_func == m_bigfree) {
+					zstack_push(&mbc_list, cl);
+				} else if (m_free_func == m_16kfree) {
+					zstack_push(&m16k_list, cl);
+				} else {
+					(*(m_free_func))((caddr_t)cl,
+					    m->m_ext.ext_size,
+					    m_get_ext_arg(m));
+				}
+				zstack_push(&ref_list, m_get_rfa(m));
+#endif /* CONFIG_MBUF_MCACHE */
 				m_set_ext(m, NULL, NULL, NULL);
 			} else if (refcnt == minref && composite) {
 				VERIFY(!(MEXT_FLAGS(m) & EXTF_PAIRED));
@@ -4919,6 +5868,7 @@ m_freem_list(struct mbuf *m)
 				MEXT_FLAGS(m) &= ~EXTF_READONLY;
 
 				/* "Free" into the intermediate cache */
+#if CONFIG_MBUF_MCACHE
 				o = (mcache_obj_t *)m;
 				if (m_free_func == NULL) {
 					o->obj_next = m_mcl_list;
@@ -4931,6 +5881,16 @@ m_freem_list(struct mbuf *m)
 					o->obj_next = m_m16k_list;
 					m_m16k_list = o;
 				}
+#else
+				if (m_free_func == NULL) {
+					zstack_push(&m_mcl_list, m);
+				} else if (m_free_func == m_bigfree) {
+					zstack_push(&m_mbc_list, m);
+				} else {
+					VERIFY(m_free_func == m_16kfree);
+					zstack_push(&m_m16k_list, m);
+				}
+#endif /* CONFIG_MBUF_MCACHE */
 				m = next;
 				continue;
 			}
@@ -4955,8 +5915,13 @@ simple_free:
 			m->m_flags = m->m_len = 0;
 			m->m_next = m->m_nextpkt = NULL;
 
+#if CONFIG_MBUF_MCACHE
 			((mcache_obj_t *)m)->obj_next = mp_list;
 			mp_list = (mcache_obj_t *)m;
+#else
+			m_elide(m);
+			zstack_push(&mp_list, m);
+#endif /* CONFIG_MBUF_MCACHE */
 
 			m = next;
 		}
@@ -4979,7 +5944,7 @@ simple_free:
 	if (mt_tag > 0) {
 		mtype_stat_sub(MT_TAG, mt_tag);
 	}
-
+#if CONFIG_MBUF_MCACHE
 	if (mp_list != NULL) {
 		mcache_free_ext(m_cache(MC_MBUF), mp_list);
 	}
@@ -5004,6 +5969,33 @@ simple_free:
 	if (ref_list != NULL) {
 		mcache_free_ext(ref_cache, ref_list);
 	}
+#else
+	if (!zstack_empty(mp_list)) {
+		/* mbufs elided above. */
+		mz_free_n(mp_list);
+	}
+	if (!zstack_empty(mcl_list)) {
+		zfree_nozero_n(ZONE_ID_CLUSTER_2K, mcl_list);
+	}
+	if (!zstack_empty(mbc_list)) {
+		zfree_nozero_n(ZONE_ID_CLUSTER_4K, mbc_list);
+	}
+	if (!zstack_empty(m16k_list)) {
+		zfree_nozero_n(ZONE_ID_CLUSTER_16K, m16k_list);
+	}
+	if (!zstack_empty(m_mcl_list)) {
+		mz_composite_free_n(MC_MBUF_CL, m_mcl_list);
+	}
+	if (!zstack_empty(m_mbc_list)) {
+		mz_composite_free_n(MC_MBUF_BIGCL, m_mbc_list);
+	}
+	if (!zstack_empty(m_m16k_list)) {
+		mz_composite_free_n(MC_MBUF_16KCL, m_m16k_list);
+	}
+	if (!zstack_empty(ref_list)) {
+		zfree_nozero_n(ZONE_ID_MBUF_REF, ref_list);
+	}
+#endif /* CONFIG_MBUF_MCACHE */
 
 	return pktcount;
 }
@@ -5098,8 +6090,6 @@ m_prepend_2(struct mbuf *m, int len, int how, int align)
  * continuing for "len" bytes.  If len is M_COPYALL, copy to end of mbuf.
  * The wait parameter is a choice of M_WAIT/M_DONTWAIT from caller.
  */
-int MCFail;
-
 struct mbuf *
 m_copym_mode(struct mbuf *m, int off0, int len, int wait, uint32_t mode)
 {
@@ -5191,7 +6181,7 @@ m_copym_mode(struct mbuf *m, int off0, int len, int wait, uint32_t mode)
 				n->m_len = MIN(n->m_len, MLEN);
 			}
 
-			if (MTOD(n, char *) + n->m_len > ((char *)n) + MSIZE) {
+			if (MTOD(n, char *) + n->m_len > ((char *)n) + _MSIZE) {
 				panic("%s n %p copy overflow",
 				    __func__, n);
 			}
@@ -5207,15 +6197,10 @@ m_copym_mode(struct mbuf *m, int off0, int len, int wait, uint32_t mode)
 		np = &n->m_next;
 	}
 
-	if (top == NULL) {
-		MCFail++;
-	}
-
 	return top;
 nospace:
-
 	m_freem(top);
-	MCFail++;
+
 	return NULL;
 }
 
@@ -5239,10 +6224,14 @@ m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
 	struct mbuf *m = m0, *n, **np = NULL;
 	int off = off0, len = len0;
 	struct mbuf *top = NULL;
+#if CONFIG_MBUF_MCACHE
 	int mcflags = MSLEEPF(wait);
+	mcache_obj_t *list = NULL;
+#else
+	zstack_t list = {};
+#endif /* CONFIG_MBUF_MCACHE */
 	int copyhdr = 0;
 	int type = 0;
-	mcache_obj_t *list = NULL;
 	int needed = 0;
 
 	if (off == 0 && (m->m_flags & M_PKTHDR)) {
@@ -5269,6 +6258,7 @@ m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
 	needed++;
 	len = len0;
 
+#if CONFIG_MBUF_MCACHE
 	/*
 	 * If the caller doesn't want to be put to sleep, mark it with
 	 * MCR_TRYHARD so that we may reclaim buffers from other places
@@ -5282,11 +6272,21 @@ m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
 	    mcflags) != needed) {
 		goto nospace;
 	}
+#else
+	list = mz_alloc_n(needed, wait);
+	if (zstack_count(list) != needed) {
+		goto nospace;
+	}
+#endif /* CONFIG_MBUF_MCACHE */
 
 	needed = 0;
 	while (len > 0) {
+#if CONFIG_MBUF_MCACHE
 		n = (struct mbuf *)list;
 		list = list->obj_next;
+#else
+		n = zstack_pop(&list);
+#endif /* CONFIG_MBUF_MCACHE */
 		ASSERT(n != NULL && m != NULL);
 
 		type = (top == NULL) ? MT_HEADER : m->m_type;
@@ -5308,6 +6308,9 @@ m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
 			} else if ((mode == M_COPYM_COPY_HDR) ||
 			    (mode == M_COPYM_MUST_COPY_HDR)) {
 				if (m_dup_pkthdr(n, m, wait) == 0) {
+#if !CONFIG_MBUF_MCACHE
+					m_elide(n);
+#endif
 					goto nospace;
 				}
 			}
@@ -5322,7 +6325,7 @@ m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
 			n->m_data = m->m_data + off;
 			n->m_flags |= M_EXT;
 		} else {
-			if (MTOD(n, char *) + n->m_len > ((char *)n) + MSIZE) {
+			if (MTOD(n, char *) + n->m_len > ((char *)n) + _MSIZE) {
 				panic("%s n %p copy overflow",
 				    __func__, n);
 			}
@@ -5353,17 +6356,28 @@ m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
 	mtype_stat_add(type, needed);
 	mtype_stat_sub(MT_FREE, needed + 1);
 
+#if CONFIG_MBUF_MCACHE
 	ASSERT(list == NULL);
+#else
+	ASSERT(zstack_empty(list));
+#endif /* CONFIG_MBUF_MCACHE */
+
 	return top;
 
 nospace:
+#if CONFIG_MBUF_MCACHE
 	if (list != NULL) {
 		mcache_free_ext(m_cache(MC_MBUF), list);
 	}
+#else
+	if (!zstack_empty(list)) {
+		/* No need to elide, these mbufs came from the cache. */
+		mz_free_n(list);
+	}
+#endif /* CONFIG_MBUF_MCACHE */
 	if (top != NULL) {
 		m_freem(top);
 	}
-	MCFail++;
 	return NULL;
 }
 
@@ -5518,14 +6532,12 @@ m_adj(struct mbuf *mp, int req_len)
 
 /*
  * Rearange an mbuf chain so that len bytes are contiguous
- * and in the data area of an mbuf (so that mtod and dtom
+ * and in the data area of an mbuf (so that mtod
  * will work for a structure of size len).  Returns the resulting
  * mbuf chain on success, frees it and returns null on failure.
  * If there is room, it will add up to max_protohdr-len extra bytes to the
  * contiguous region in an attempt to avoid being called next time.
  */
-int MPFail;
-
 struct mbuf *
 m_pullup(struct mbuf *n, int len)
 {
@@ -5604,7 +6616,6 @@ m_pullup(struct mbuf *n, int len)
 	return m;
 bad:
 	m_freem(n);
-	MPFail++;
 	return 0;
 }
 
@@ -5613,8 +6624,6 @@ bad:
  * the amount of empty space before the data in the new mbuf to be specified
  * (in the event that the caller expects to prepend later).
  */
-__private_extern__ int MSFail = 0;
-
 __private_extern__ struct mbuf *
 m_copyup(struct mbuf *n, int len, int dstoff)
 {
@@ -5659,7 +6668,7 @@ m_copyup(struct mbuf *n, int len, int dstoff)
 	return m;
 bad:
 	m_freem(n);
-	MSFail++;
+
 	return NULL;
 }
 
@@ -5861,6 +6870,7 @@ m_devget(char *buf, int totlen, int off0, struct ifnet *ifp,
 	return top;
 }
 
+#if CONFIG_MBUF_MCACHE
 #ifndef MBUF_GROWTH_NORMAL_THRESH
 #define MBUF_GROWTH_NORMAL_THRESH 25
 #endif
@@ -5989,6 +6999,7 @@ m_howmany(int num, size_t bufsize)
 	}
 	return i;
 }
+#endif /* CONFIG_MBUF_MCACHE */
 /*
  * Return the number of bytes in the mbuf chain, m.
  */
@@ -6310,6 +7321,7 @@ enobufs:
 uint64_t
 mcl_to_paddr(char *addr)
 {
+#if CONFIG_MBUF_MCACHE
 	vm_offset_t base_phys;
 
 	if (!MBUF_IN_MAP(addr)) {
@@ -6321,6 +7333,11 @@ mcl_to_paddr(char *addr)
 		return 0;
 	}
 	return (uint64_t)(ptoa_64(base_phys) | ((uint64_t)addr & PAGE_MASK));
+#else
+	extern addr64_t kvtophys(vm_offset_t va);
+
+	return kvtophys((vm_offset_t)addr);
+#endif /* CONFIG_MBUF_MCACHE */
 }
 
 /*
@@ -6330,8 +7347,6 @@ mcl_to_paddr(char *addr)
  * small packets, don't dup into a cluster.  That way received  packets
  * don't take up too much room in the sockbuf (cf. sbspace()).
  */
-int MDFail;
-
 struct mbuf *
 m_dup(struct mbuf *m, int how)
 {
@@ -6423,14 +7438,10 @@ m_dup(struct mbuf *m, int how)
 #endif
 	}
 
-	if (top == NULL) {
-		MDFail++;
-	}
 	return top;
 
 nospace:
 	m_freem(top);
-	MDFail++;
 	return NULL;
 }
 
@@ -6530,7 +7541,7 @@ m_normalize(struct mbuf *m)
 		m = n;
 	}
 	if (expanded) {
-		atomic_add_32(&mb_normalized, 1);
+		os_atomic_inc(&mb_normalized, relaxed);
 	}
 	return top;
 }
@@ -6743,12 +7754,6 @@ m_mtod(struct mbuf *m)
 	return MTOD(m, void *);
 }
 
-struct mbuf *
-m_dtom(void *x)
-{
-	return (struct mbuf *)((uintptr_t)(x) & ~(MSIZE - 1));
-}
-
 void
 m_mcheck(struct mbuf *m)
 {
@@ -6782,6 +7787,7 @@ m_getptr(struct mbuf *m, int loc, int *off)
 	return NULL;
 }
 
+#if CONFIG_MBUF_MCACHE
 /*
  * Inform the corresponding mcache(s) that there's a waiter below.
  */
@@ -6823,6 +7829,7 @@ mbuf_waiter_dec(mbuf_class_t class, boolean_t comp)
 		}
 	}
 }
+#endif /* CONFIG_MBUF_MCACHE */
 
 static bool mbuf_watchdog_defunct_active = false;
 
@@ -6927,10 +7934,12 @@ mbuf_watchdog_defunct(thread_call_param_t arg0, thread_call_param_t arg1)
 	 * Defunct all sockets from this app.
 	 */
 	if (args.top_app != NULL) {
+#if CONFIG_MBUF_MCACHE
 		/* Restart the watchdog count. */
 		lck_mtx_lock(mbuf_mlock);
 		microuptime(&mb_wdtstart);
 		lck_mtx_unlock(mbuf_mlock);
+#endif
 		os_log(OS_LOG_DEFAULT, "%s: defuncting all sockets from %s.%d",
 		    __func__,
 		    proc_name_address(args.top_app),
@@ -6958,10 +7967,42 @@ mbuf_watchdog_defunct(thread_call_param_t arg0, thread_call_param_t arg1)
 		proc_fdunlock(args.top_app);
 		proc_rele(args.top_app);
 		mbstat.m_forcedefunct++;
+#if !CONFIG_MBUF_MCACHE
+		zcache_drain(ZONE_ID_MBUF_CLUSTER_2K);
+		zcache_drain(ZONE_ID_MBUF_CLUSTER_4K);
+		zcache_drain(ZONE_ID_MBUF_CLUSTER_16K);
+		zone_drain(zone_by_id(ZONE_ID_MBUF));
+		zone_drain(zone_by_id(ZONE_ID_CLUSTER_2K));
+		zone_drain(zone_by_id(ZONE_ID_CLUSTER_4K));
+		zone_drain(zone_by_id(ZONE_ID_CLUSTER_16K));
+		zone_drain(zone_by_id(ZONE_ID_MBUF_REF));
+#endif
 	}
 	mbuf_watchdog_defunct_active = false;
 }
 
+#if !CONFIG_MBUF_MCACHE
+static void
+mbuf_zone_exhausted(zone_id_t zid, zone_t zone __unused)
+{
+	if (mbuf_defunct_tcall == NULL) {
+		return;
+	}
+
+	if (zid == ZONE_ID_MBUF ||
+	    zid == ZONE_ID_CLUSTER_2K ||
+	    zid == ZONE_ID_CLUSTER_4K ||
+	    zid == ZONE_ID_CLUSTER_16K) {
+		if (os_atomic_cmpxchg(&mbuf_watchdog_defunct_active,
+		    false, true, relaxed)) {
+			thread_call_enter(mbuf_defunct_tcall);
+		}
+	}
+}
+EVENT_REGISTER_HANDLER(ZONE_EXHAUSTED, mbuf_zone_exhausted);
+#endif /* !CONFIG_MBUF_MCACHE */
+
+#if CONFIG_MBUF_MCACHE
 /*
  * Called during slab (blocking and non-blocking) allocation.  If there
  * is at least one waiter, and the time since the first waiter is blocked
@@ -7811,7 +8852,7 @@ mleak_logger(u_int32_t num, mcache_obj_t *addr, boolean_t alloc)
 		return mleak_free(addr);
 	}
 
-	temp = atomic_add_32_ov(&mleak_table.mleak_capture, 1);
+	temp = os_atomic_inc_orig(&mleak_table.mleak_capture, relaxed);
 
 	if ((temp % mleak_table.mleak_sample_factor) == 0 && addr != NULL) {
 		uintptr_t bt[MLEAK_STACK_DEPTH];
@@ -8315,6 +9356,7 @@ done:
 }
 
 #undef MBUF_DUMP_BUF_CHK
+#endif /* CONFIG_MBUF_MCACHE */
 
 /*
  * Convert between a regular and a packet header mbuf.  Caller is responsible
@@ -8353,7 +9395,7 @@ m_reinit(struct mbuf *m, int hdr)
 		/* Check for scratch area overflow */
 		m_redzone_verify(m);
 		/* Free the aux data and tags if there is any */
-		m_tag_delete_chain(m, NULL);
+		m_tag_delete_chain(m);
 		m_do_tx_compl_callback(m, NULL);
 		m->m_flags &= ~M_PKTHDR;
 	}
@@ -8365,7 +9407,7 @@ int
 m_ext_set_prop(struct mbuf *m, uint32_t o, uint32_t n)
 {
 	ASSERT(m->m_flags & M_EXT);
-	return atomic_test_set_32(&MEXT_PRIV(m), o, n);
+	return os_atomic_cmpxchg(&MEXT_PRIV(m), o, n, acq_rel);
 }
 
 uint32_t
@@ -8452,6 +9494,7 @@ m_scratch_get(struct mbuf *m, u_int8_t **p)
 		/* NOTREACHED */
 	}
 
+#if CONFIG_MBUF_MCACHE
 	if (mcltrace) {
 		mcache_audit_t *mca;
 
@@ -8462,6 +9505,7 @@ m_scratch_get(struct mbuf *m, u_int8_t **p)
 		}
 		lck_mtx_unlock(mbuf_mlock);
 	}
+#endif /* CONFIG_MBUF_MCACHE */
 
 	*p = (u_int8_t *)&pkt->pkt_mpriv;
 	return sizeof(pkt->pkt_mpriv);
@@ -8508,8 +9552,7 @@ m_set_ext(struct mbuf *m, struct ext_ref *rfa, m_ext_free_func_t ext_free,
 {
 	VERIFY(m->m_flags & M_EXT);
 	if (rfa != NULL) {
-		m->m_ext.ext_refflags =
-		    (struct ext_ref *)(((uintptr_t)rfa) ^ mb_obscure_extref);
+		m_set_rfa(m, rfa);
 		if (ext_free != NULL) {
 			rfa->ext_token = ((uintptr_t)&rfa->ext_token) ^
 			    mb_obscure_extfree;
@@ -8560,6 +9603,17 @@ m_get_rfa(struct mbuf *m)
 	}
 }
 
+static inline void
+m_set_rfa(struct mbuf *m, struct ext_ref *rfa)
+{
+	if (rfa != NULL) {
+		m->m_ext.ext_refflags =
+		    (struct ext_ref *)(((uintptr_t)rfa) ^ mb_obscure_extref);
+	} else {
+		m->m_ext.ext_refflags = NULL;
+	}
+}
+
 __private_extern__ inline m_ext_free_func_t
 m_get_ext_free(struct mbuf *m)
 {
@@ -8595,6 +9649,7 @@ m_get_ext_arg(struct mbuf *m)
 	}
 }
 
+#if CONFIG_MBUF_MCACHE
 /*
  * Send a report of mbuf usage if the usage is at least 6% of max limit
  * or if there has been at least 3% increase since the last report.
@@ -8617,6 +9672,7 @@ mbuf_report_usage(mbuf_class_t cl)
 	}
 	return FALSE;
 }
+#endif /* CONFIG_MBUF_MCACHE */
 
 __private_extern__ void
 mbuf_report_peak_usage(void)
@@ -8629,6 +9685,8 @@ mbuf_report_peak_usage(void)
 
 	uptime = net_uptime();
 	lck_mtx_lock(mbuf_mlock);
+	mbuf_stat_sync();
+	mbuf_mtypes_sync(TRUE);
 
 	/* Generate an initial report after 1 week of uptime */
 	if (!mb_peak_firstreport &&
@@ -8682,6 +9740,7 @@ mbuf_report_peak_usage(void)
 	total_sbmb_cnt_floor = total_sbmb_cnt_peak;
 }
 
+#if CONFIG_MBUF_MCACHE
 /*
  * Simple routine to avoid taking the lock when we can't run the
  * mbuf drain.
@@ -9018,25 +10077,29 @@ mbuf_wd_dump_sysctl SYSCTL_HANDLER_ARGS
 }
 
 #endif /* DEBUG || DEVELOPMENT */
+#endif /* CONFIG_MBUF_MCACHE */
 
 SYSCTL_DECL(_kern_ipc);
 #if DEBUG || DEVELOPMENT
-#if SKYWALK
+#if SKYWALK && CONFIG_MBUF_MCACHE
 SYSCTL_UINT(_kern_ipc, OID_AUTO, mc_threshold_scale_factor,
     CTLFLAG_RW | CTLFLAG_LOCKED, &mc_threshold_scale_down_factor,
     MC_THRESHOLD_SCALE_DOWN_FACTOR,
     "scale down factor for mbuf cache thresholds");
-#endif /* SKYWALK */
+#endif /* SKYWALK && CONFIG_MBUF_MCACHE */
+#if CONFIG_MBUF_MCACHE
 SYSCTL_PROC(_kern_ipc, OID_AUTO, mb_wd_dump,
     CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, mbuf_wd_dump_sysctl, "A", "mbuf watchdog dump");
-#endif
+#endif /* CONFIG_MBUF_MCACHE */
+#endif /* DEBUG || DEVELOPMENT */
 SYSCTL_PROC(_kern_ipc, KIPC_MBSTAT, mbstat,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, mbstat_sysctl, "S,mbstat", "");
 SYSCTL_PROC(_kern_ipc, OID_AUTO, mb_stat,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, mb_stat_sysctl, "S,mb_stat", "");
+#if CONFIG_MBUF_MCACHE
 SYSCTL_PROC(_kern_ipc, OID_AUTO, mleak_top_trace,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, mleak_top_trace_sysctl, "S,mb_top_trace", "");
@@ -9056,6 +10119,15 @@ SYSCTL_PROC(_kern_ipc, OID_AUTO, mb_drain_force,
 SYSCTL_INT(_kern_ipc, OID_AUTO, mb_drain_maxint,
     CTLFLAG_RW | CTLFLAG_LOCKED, &mb_drain_maxint, 0,
     "Minimum time interval between garbage collection");
+#endif /* CONFIG_MBUF_MCACHE */
 SYSCTL_INT(_kern_ipc, OID_AUTO, mb_memory_pressure_percentage,
     CTLFLAG_RW | CTLFLAG_LOCKED, &mb_memory_pressure_percentage, 0,
     "Percentage of when we trigger memory-pressure for an mbuf-class");
+#if CONFIG_MBUF_MCACHE
+static int mb_uses_mcache = 1;
+#else
+static int mb_uses_mcache = 0;
+#endif /* CONFIG_MBUF_MCACHE */
+SYSCTL_INT(_kern_ipc, OID_AUTO, mb_uses_mcache,
+    CTLFLAG_LOCKED, &mb_uses_mcache, 0,
+    "Whether mbufs use mcache");

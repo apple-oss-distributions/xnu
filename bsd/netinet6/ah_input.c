@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -438,9 +438,9 @@ ah4_input(struct mbuf *m, int off)
 		m->m_flags &= ~M_AUTHIPDGM;
 #endif
 
-		key_sa_recordxfer(sav, m);
-		if (ipsec_addhist(m, IPPROTO_AH, spi) != 0 ||
-		    ipsec_addhist(m, IPPROTO_IPV4, 0) != 0) {
+		key_sa_recordxfer(sav, m->m_pkthdr.len);
+		if (ipsec_incr_history_count(m, IPPROTO_AH, spi) != 0 ||
+		    ipsec_incr_history_count(m, IPPROTO_IPV4, 0) != 0) {
 			IPSEC_STAT_INCREMENT(ipsecstat.in_nomem);
 			goto fail;
 		}
@@ -512,8 +512,8 @@ ah4_input(struct mbuf *m, int off)
 		ip->ip_p = (u_char)nxt;
 		/* forget about IP hdr checksum, the check has already been passed */
 
-		key_sa_recordxfer(sav, m);
-		if (ipsec_addhist(m, IPPROTO_AH, spi) != 0) {
+		key_sa_recordxfer(sav, m->m_pkthdr.len);
+		if (ipsec_incr_history_count(m, IPPROTO_AH, spi) != 0) {
 			IPSEC_STAT_INCREMENT(ipsecstat.in_nomem);
 			goto fail;
 		}
@@ -680,7 +680,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		}
 		VERIFY((sizeof(struct ah) + sizoff + siz1) <= INT_MAX);
 		IP6_EXTHDR_CHECK(m, off, (int)(sizeof(struct ah) + sizoff + siz1),
-		    {return IPPROTO_DONE;});
+		    {goto fail;});
 		ip6 = mtod(m, struct ip6_hdr *);
 		ah = (struct ah *)(void *)(mtod(m, caddr_t) + off);
 	}
@@ -829,9 +829,9 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		m->m_flags &= ~M_AUTHIPHDR;
 		m->m_flags &= ~M_AUTHIPDGM;
 
-		key_sa_recordxfer(sav, m);
-		if (ipsec_addhist(m, IPPROTO_AH, spi) != 0 ||
-		    ipsec_addhist(m, IPPROTO_IPV6, 0) != 0) {
+		key_sa_recordxfer(sav, m->m_pkthdr.len);
+		if (ipsec_incr_history_count(m, IPPROTO_AH, spi) != 0 ||
+		    ipsec_incr_history_count(m, IPPROTO_IPV6, 0) != 0) {
 			IPSEC_STAT_INCREMENT(ipsec6stat.in_nomem);
 			goto fail;
 		}
@@ -900,8 +900,8 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		/* XXX jumbogram */
 		ip6->ip6_plen = htons((u_int16_t)(ntohs(ip6->ip6_plen) - stripsiz));
 
-		key_sa_recordxfer(sav, m);
-		if (ipsec_addhist(m, IPPROTO_AH, spi) != 0) {
+		key_sa_recordxfer(sav, m->m_pkthdr.len);
+		if (ipsec_incr_history_count(m, IPPROTO_AH, spi) != 0) {
 			IPSEC_STAT_INCREMENT(ipsec6stat.in_nomem);
 			goto fail;
 		}

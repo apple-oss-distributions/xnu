@@ -74,7 +74,7 @@ struct page_table_level_info {
 struct page_table_ops {
 	bool (*alloc_id)(pmap_t pmap);
 	void (*free_id)(pmap_t pmap);
-	void (*flush_tlb_region_async)(vm_offset_t va, size_t length, pmap_t pmap, bool last_level_only);
+	void (*flush_tlb_region_async)(vm_offset_t va, size_t length, pmap_t pmap, bool last_level_only, bool strong);
 	void (*flush_tlb_async)(pmap_t pmap);
 	pt_entry_t (*wimg_to_pte)(unsigned int wimg, pmap_paddr_t pa);
 };

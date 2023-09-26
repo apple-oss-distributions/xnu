@@ -193,9 +193,6 @@
  *	NetBSD 1.4 or later requires splsoftnet().
  *	other operating systems use splnet().
  *
- * - dtom()
- *	NEVER USE IT!
- *
  * - struct ifnet for loopback interface
  *	BSDI3: struct ifnet loif;
  *	BSDI4: struct ifnet *loifp;

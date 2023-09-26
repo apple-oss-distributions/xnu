@@ -214,12 +214,6 @@ vm_object_tracking_init(void)
 static kern_return_t    vm_object_terminate(
 	vm_object_t     object);
 
-static kern_return_t    vm_object_copy_call(
-	vm_object_t             src_object,
-	vm_object_offset_t      src_offset,
-	vm_object_size_t        size,
-	vm_object_t             *_result_object);
-
 static void             vm_object_do_collapse(
 	vm_object_t     object,
 	vm_object_t     backing_object);
@@ -234,11 +228,11 @@ static void             vm_object_release_pager(
 SECURITY_READ_ONLY_LATE(zone_t) vm_object_zone; /* vm backing store zone */
 
 /*
- *	All wired-down kernel memory belongs to a single virtual
- *	memory object (kernel_object) to avoid wasting data structures.
+ *	All wired-down kernel memory belongs to this memory object
+ *	memory object (kernel_object) by default to avoid wasting data structures.
  */
 static struct vm_object                 kernel_object_store VM_PAGE_PACKED_ALIGNED;
-const vm_object_t                       kernel_object = &kernel_object_store;
+const vm_object_t                       kernel_object_default = &kernel_object_store;
 
 static struct vm_object                 compressor_object_store VM_PAGE_PACKED_ALIGNED;
 const vm_object_t                       compressor_object = &compressor_object_store;
@@ -274,7 +268,7 @@ static const struct vm_object vm_object_template = {
 	.resident_page_count = 0,
 	.wired_page_count = 0,
 	.reusable_page_count = 0,
-	.copy = VM_OBJECT_NULL,
+	.vo_copy = VM_OBJECT_NULL,
 	.shadow = VM_OBJECT_NULL,
 	.vo_shadow_offset = (vm_object_offset_t) 0,
 	.pager = MEMORY_OBJECT_NULL,
@@ -558,11 +552,11 @@ vm_object_bootstrap(void)
 	 * Note that in the following size specifications, we need to add 1 because
 	 * VM_MAX_KERNEL_ADDRESS (vm_last_addr) is a maximum address, not a size.
 	 */
-	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, kernel_object);
+	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, kernel_object_default);
 	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, compressor_object);
-	kernel_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
+	kernel_object_default->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 	compressor_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
-	kernel_object->no_tag_update = TRUE;
+	kernel_object_default->no_tag_update = TRUE;
 
 	/*
 	 * The object to hold retired VM pages.
@@ -635,14 +629,14 @@ vm_object_deallocate(
 		return;
 	}
 
-	if (object == kernel_object || object == compressor_object || object == retired_pages_object) {
+	if (is_kernel_object(object) || object == compressor_object || object == retired_pages_object) {
 		vm_object_lock_shared(object);
 
 		OSAddAtomic(-1, &object->ref_count);
 
 		if (object->ref_count == 0) {
-			if (object == kernel_object) {
-				panic("vm_object_deallocate: losing kernel_object");
+			if (is_kernel_object(object)) {
+				panic("vm_object_deallocate: losing a kernel_object");
 			} else if (object == retired_pages_object) {
 				panic("vm_object_deallocate: losing retired_pages_object");
 			} else {
@@ -1291,8 +1285,8 @@ vm_object_terminate(
 	if (((shadow_object = object->shadow) != VM_OBJECT_NULL) &&
 	    !(object->pageout)) {
 		vm_object_lock(shadow_object);
-		if (shadow_object->copy == object) {
-			shadow_object->copy = VM_OBJECT_NULL;
+		if (shadow_object->vo_copy == object) {
+			shadow_object->vo_copy = VM_OBJECT_NULL;
 		}
 		vm_object_unlock(shadow_object);
 	}
@@ -1704,7 +1698,7 @@ restart_after_sleep:
 				continue;
 			}
 
-			assert(VM_PAGE_OBJECT(p) != kernel_object);
+			assert(!is_kernel_object(VM_PAGE_OBJECT(p)));
 
 			/*
 			 * we can discard this page...
@@ -1902,12 +1896,8 @@ vm_object_release_pager(
  *		to the vm_object.
  */
 #if MACH_ASSERT
-extern vm_object_t fbdp_object;
-extern memory_object_t fbdp_moc;
-struct vnode;
-extern struct vnode *fbdp_vp;
 extern uint32_t system_inshutdown;
-int fbdp_no_panic = 0;
+int fbdp_no_panic = 1;
 #endif /* MACH_ASSERT */
 kern_return_t
 vm_object_destroy(
@@ -1929,21 +1919,40 @@ vm_object_destroy(
 	 *	the destroy call.]
 	 */
 
-#if MACH_ASSERT
-	if (object == fbdp_object) {
-		if (object->ref_count > 1 && !system_inshutdown) {
-			PE_parse_boot_argn("fbdp_no_panic2", &fbdp_no_panic, sizeof(fbdp_no_panic));
+	vm_object_lock(object);
+
+#if FBDP_DEBUG_OBJECT_NO_PAGER
+	static bool fbdp_no_panic_retrieved = false;
+	if (!fbdp_no_panic_retrieved) {
+		PE_parse_boot_argn("fbdp_no_panic4", &fbdp_no_panic, sizeof(fbdp_no_panic));
+		fbdp_no_panic_retrieved = true;
+	}
+
+	bool forced_unmount = false;
+	if (object->named &&
+	    object->ref_count > 2 &&
+	    object->pager != NULL &&
+	    vnode_pager_get_forced_unmount(object->pager, &forced_unmount) == KERN_SUCCESS &&
+	    forced_unmount == false) {
+		if (!fbdp_no_panic) {
+			panic("FBDP rdar://99829401 object %p refs %d pager %p (no forced unmount)\n", object, object->ref_count, object->pager);
+		}
+		DTRACE_VM3(vm_object_destroy_no_forced_unmount,
+		    vm_object_t, object,
+		    int, object->ref_count,
+		    memory_object_t, object->pager);
+	}
+
+	if (object->fbdp_tracked) {
+		if (object->ref_count > 2 && !system_inshutdown) {
 			if (!fbdp_no_panic) {
-				panic("FBDP %s:%d object %p refs %d moc %p vp %p\n", __FUNCTION__, __LINE__, fbdp_object, fbdp_object->ref_count, fbdp_moc, fbdp_vp);
+				panic("FBDP/4 rdar://99829401 object %p refs %d pager %p (tracked)\n", object, object->ref_count, object->pager);
 			}
 		}
-		fbdp_object = NULL;
-		fbdp_moc = NULL;
-		fbdp_vp = NULL;
+		object->fbdp_tracked = false;
 	}
-#endif /* MACH_ASSERT */
+#endif /* FBDP_DEBUG_OBJECT_NO_PAGER */
 
-	vm_object_lock(object);
 	object->can_persist = FALSE;
 	object->named = FALSE;
 #if 00
@@ -2201,7 +2210,13 @@ deactivate_pages_in_object(
 						 * it being reclaimed and
 						 * re-faulted.
 						 */
-						pmap_zero_page(VM_PAGE_GET_PHYS_PAGE(m));
+#if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
+						if (!m->vmp_unmodified_ro) {
+#else /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
+						if (true) {
+#endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
+							pmap_zero_page(VM_PAGE_GET_PHYS_PAGE(m));
+						}
 					}
 					m->vmp_precious = FALSE;
 					m->vmp_dirty = FALSE;
@@ -2218,6 +2233,35 @@ deactivate_pages_in_object(
 						dwp->dw_mask |= DW_move_page;
 					}
 
+#if 0
+#if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
+					/*
+					 * COMMENT BLOCK ON WHY THIS SHOULDN'T BE DONE.
+					 *
+					 * Since we are about to do a VM_COMPRESSOR_PAGER_STATE_CLR
+					 * below for this page, which drops any existing compressor
+					 * storage of this page (eg side-effect of a CoW operation or
+					 * a collapse operation), it is tempting to think that we should
+					 * treat this page as if it was just decompressed (during which
+					 * we also drop existing compressor storage) and so start its life
+					 * out with vmp_unmodified_ro set to FALSE.
+					 *
+					 * However, we can't do that here because we could swing around
+					 * and re-access this page in a read-only fault.
+					 * Clearing this bit means we'll try to zero it up above
+					 * and fail.
+					 *
+					 * Note that clearing the bit is unnecessary regardless because
+					 * dirty state has been cleared. During the next soft fault, the
+					 * right state will be restored and things will progress just fine.
+					 */
+					if (m->vmp_unmodified_ro == true) {
+						/* Need object and pageq locks for bit manipulation*/
+						m->vmp_unmodified_ro = false;
+						os_atomic_dec(&compressor_ro_uncompressed);
+					}
+#endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
+#endif /* 0 */
 					VM_COMPRESSOR_PAGER_STATE_CLR(object, offset);
 
 					if ((flags & DEACTIVATE_REUSABLE) && !m->vmp_reusable) {
@@ -3284,135 +3328,6 @@ vm_object_copy_quickly(
 	return TRUE;
 }
 
-static int copy_call_count = 0;
-static int copy_call_sleep_count = 0;
-static int copy_call_restart_count = 0;
-
-/*
- *	Routine:	vm_object_copy_call [internal]
- *
- *	Description:
- *		Copy the source object (src_object), using the
- *		user-managed copy algorithm.
- *
- *	In/out conditions:
- *		The source object must be locked on entry.  It
- *		will be *unlocked* on exit.
- *
- *	Results:
- *		If the copy is successful, KERN_SUCCESS is returned.
- *		A new object that represents the copied virtual
- *		memory is returned in a parameter (*_result_object).
- *		If the return value indicates an error, this parameter
- *		is not valid.
- */
-static kern_return_t
-vm_object_copy_call(
-	vm_object_t             src_object,
-	vm_object_offset_t      src_offset,
-	vm_object_size_t        size,
-	vm_object_t             *_result_object)        /* OUT */
-{
-	kern_return_t   kr;
-	vm_object_t     copy;
-	boolean_t       check_ready = FALSE;
-	uint32_t        try_failed_count = 0;
-
-	/*
-	 *	If a copy is already in progress, wait and retry.
-	 *
-	 *	XXX
-	 *	Consider making this call interruptable, as Mike
-	 *	intended it to be.
-	 *
-	 *	XXXO
-	 *	Need a counter or version or something to allow
-	 *	us to use the copy that the currently requesting
-	 *	thread is obtaining -- is it worth adding to the
-	 *	vm object structure? Depends how common this case it.
-	 */
-	copy_call_count++;
-	while (vm_object_wanted(src_object, VM_OBJECT_EVENT_COPY_CALL)) {
-		vm_object_sleep(src_object, VM_OBJECT_EVENT_COPY_CALL,
-		    THREAD_UNINT);
-		copy_call_restart_count++;
-	}
-
-	/*
-	 *	Indicate (for the benefit of memory_object_create_copy)
-	 *	that we want a copy for src_object. (Note that we cannot
-	 *	do a real assert_wait before calling memory_object_copy,
-	 *	so we simply set the flag.)
-	 */
-
-	vm_object_set_wanted(src_object, VM_OBJECT_EVENT_COPY_CALL);
-	vm_object_unlock(src_object);
-
-	/*
-	 *	Ask the memory manager to give us a memory object
-	 *	which represents a copy of the src object.
-	 *	The memory manager may give us a memory object
-	 *	which we already have, or it may give us a
-	 *	new memory object. This memory object will arrive
-	 *	via memory_object_create_copy.
-	 */
-
-	kr = KERN_FAILURE;      /* XXX need to change memory_object.defs */
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-
-	/*
-	 *	Wait for the copy to arrive.
-	 */
-	vm_object_lock(src_object);
-	while (vm_object_wanted(src_object, VM_OBJECT_EVENT_COPY_CALL)) {
-		vm_object_sleep(src_object, VM_OBJECT_EVENT_COPY_CALL,
-		    THREAD_UNINT);
-		copy_call_sleep_count++;
-	}
-Retry:
-	assert(src_object->copy != VM_OBJECT_NULL);
-	copy = src_object->copy;
-	if (!vm_object_lock_try(copy)) {
-		vm_object_unlock(src_object);
-
-		try_failed_count++;
-		mutex_pause(try_failed_count);  /* wait a bit */
-
-		vm_object_lock(src_object);
-		goto Retry;
-	}
-	if (copy->vo_size < src_offset + size) {
-		assertf(page_aligned(src_offset + size),
-		    "object %p size 0x%llx",
-		    copy, (uint64_t)(src_offset + size));
-		copy->vo_size = src_offset + size;
-	}
-
-	if (!copy->pager_ready) {
-		check_ready = TRUE;
-	}
-
-	/*
-	 *	Return the copy.
-	 */
-	*_result_object = copy;
-	vm_object_unlock(copy);
-	vm_object_unlock(src_object);
-
-	/* Wait for the copy to be ready. */
-	if (check_ready == TRUE) {
-		vm_object_lock(copy);
-		while (!copy->pager_ready) {
-			vm_object_sleep(copy, VM_OBJECT_EVENT_PAGER_READY, THREAD_UNINT);
-		}
-		vm_object_unlock(copy);
-	}
-
-	return KERN_SUCCESS;
-}
-
 static uint32_t copy_delayed_lock_collisions;
 static uint32_t copy_delayed_max_collisions;
 static uint32_t copy_delayed_lock_contention;
@@ -3509,7 +3424,7 @@ Retry:
 	 *	copy operation.
 	 */
 
-	old_copy = src_object->copy;
+	old_copy = src_object->vo_copy;
 	if (old_copy != VM_OBJECT_NULL) {
 		int lock_granted;
 
@@ -3601,7 +3516,8 @@ Retry:
 
 							return VM_OBJECT_NULL;
 						} else {
-							pmap_page_protect_options(VM_PAGE_GET_PHYS_PAGE(p), (VM_PROT_ALL & ~VM_PROT_WRITE),
+							pmap_page_protect_options(VM_PAGE_GET_PHYS_PAGE(p),
+							    (p->vmp_xpmapped ? (VM_PROT_READ | VM_PROT_EXECUTE) : VM_PROT_READ),
 							    PMAP_OPTIONS_NOFLUSH, (void *)&pmap_flush_context_storage);
 							delayed_pmap_flush = TRUE;
 						}
@@ -3708,7 +3624,8 @@ Retry:
 
 				return VM_OBJECT_NULL;
 			} else {
-				pmap_page_protect_options(VM_PAGE_GET_PHYS_PAGE(p), (VM_PROT_ALL & ~VM_PROT_WRITE),
+				pmap_page_protect_options(VM_PAGE_GET_PHYS_PAGE(p),
+				    (p->vmp_xpmapped ? (VM_PROT_READ | VM_PROT_EXECUTE) : VM_PROT_READ),
 				    PMAP_OPTIONS_NOFLUSH, (void *)&pmap_flush_context_storage);
 				delayed_pmap_flush = TRUE;
 			}
@@ -3748,7 +3665,7 @@ Retry:
 
 	vm_object_lock_assert_exclusive(src_object);
 	vm_object_reference_locked(src_object);
-	src_object->copy = new_copy;
+	src_object->vo_copy = new_copy;
 	vm_object_unlock(src_object);
 	vm_object_unlock(new_copy);
 
@@ -3768,6 +3685,7 @@ vm_object_copy_strategically(
 	vm_object_t             src_object,
 	vm_object_offset_t      src_offset,
 	vm_object_size_t        size,
+	bool                    forking,
 	vm_object_t             *dst_object,    /* OUT */
 	vm_object_offset_t      *dst_offset,    /* OUT */
 	boolean_t               *dst_needs_copy) /* OUT */
@@ -3818,6 +3736,19 @@ vm_object_copy_strategically(
 	 *	Use the appropriate copy strategy.
 	 */
 
+	if (copy_strategy == MEMORY_OBJECT_COPY_DELAY_FORK) {
+		if (forking) {
+			copy_strategy = MEMORY_OBJECT_COPY_DELAY;
+		} else {
+			copy_strategy = MEMORY_OBJECT_COPY_NONE;
+			if (object_lock_shared) {
+				vm_object_unlock(src_object);
+				vm_object_lock(src_object);
+				object_lock_shared = FALSE;
+			}
+		}
+	}
+
 	switch (copy_strategy) {
 	case MEMORY_OBJECT_COPY_DELAY:
 		*dst_object = vm_object_copy_delayed(src_object,
@@ -3840,22 +3771,14 @@ vm_object_copy_strategically(
 		}
 		break;
 
-	case MEMORY_OBJECT_COPY_CALL:
-		result = vm_object_copy_call(src_object, src_offset, size,
-		    dst_object);
-		if (result == KERN_SUCCESS) {
-			*dst_offset = src_offset;
-			*dst_needs_copy = TRUE;
-		}
-		break;
-
 	case MEMORY_OBJECT_COPY_SYMMETRIC:
 		vm_object_unlock(src_object);
 		result = KERN_MEMORY_RESTART_COPY;
 		break;
 
 	default:
-		panic("copy_strategically: bad strategy");
+		panic("copy_strategically: bad strategy %d for object %p",
+		    copy_strategy, src_object);
 		result = KERN_INVALID_ARGUMENT;
 	}
 	return result;
@@ -3934,7 +3857,7 @@ vm_object_shadow(
 			if (source->vo_size == length &&
 			    source->ref_count == 1 &&
 			    (source->shadow == VM_OBJECT_NULL ||
-			    source->shadow->copy == VM_OBJECT_NULL)) {
+			    source->shadow->vo_copy == VM_OBJECT_NULL)) {
 				source->shadowed = FALSE;
 				vm_object_unlock(source);
 				vm_object_shadow_skipped++;
@@ -4182,7 +4105,7 @@ vm_object_compressor_pager_create(
 	memory_object_t         pager;
 	vm_object_t             pager_object = VM_OBJECT_NULL;
 
-	assert(object != kernel_object);
+	assert(!is_kernel_object(object));
 
 	/*
 	 *	Prevent collapse or termination by holding a paging reference
@@ -4517,7 +4440,7 @@ vm_object_do_collapse(
 		object->vo_shadow_offset = 0;
 	}
 	assert((object->shadow == VM_OBJECT_NULL) ||
-	    (object->shadow->copy != backing_object));
+	    (object->shadow->vo_copy != backing_object));
 
 	/*
 	 *	Discard backing_object.
@@ -4595,8 +4518,8 @@ vm_object_do_bypass(
 	 *	Backing object might have had a copy pointer
 	 *	to us.  If it did, clear it.
 	 */
-	if (backing_object->copy == object) {
-		backing_object->copy = VM_OBJECT_NULL;
+	if (backing_object->vo_copy == object) {
+		backing_object->vo_copy = VM_OBJECT_NULL;
 	}
 
 	/*
@@ -4814,7 +4737,7 @@ retry:
 		 *	parent object.
 		 */
 		if (backing_object->shadow != VM_OBJECT_NULL &&
-		    backing_object->shadow->copy == backing_object) {
+		    backing_object->shadow->vo_copy == backing_object) {
 			/* try and collapse the rest of the shadow chain */
 			if (object != original_object) {
 				vm_object_unlock(object);
@@ -5245,7 +5168,7 @@ vm_object_coalesce(
 	if ((prev_object->ref_count > 1) ||
 	    prev_object->pager_created ||
 	    (prev_object->shadow != VM_OBJECT_NULL) ||
-	    (prev_object->copy != VM_OBJECT_NULL) ||
+	    (prev_object->vo_copy != VM_OBJECT_NULL) ||
 	    (prev_object->true_share != FALSE) ||
 	    (prev_object->purgable != VM_PURGABLE_DENY) ||
 	    (prev_object->paging_in_progress != 0) ||
@@ -5485,7 +5408,7 @@ vm_object_purge(vm_object_t object, int flags)
 		return 0;
 	}
 
-	assert(object->copy == VM_OBJECT_NULL);
+	assert(object->vo_copy == VM_OBJECT_NULL);
 	assert(object->copy_strategy == MEMORY_OBJECT_COPY_NONE);
 
 	/*
@@ -5702,7 +5625,7 @@ vm_object_purgable_control(
 	}
 
 	/* purgeable cant have delayed copies - now or in the future */
-	assert(object->copy == VM_OBJECT_NULL);
+	assert(object->vo_copy == VM_OBJECT_NULL);
 	assert(object->copy_strategy == MEMORY_OBJECT_COPY_NONE);
 
 	/*
@@ -6171,7 +6094,7 @@ vm_object_transpose(
 	vm_object_lock(object1);
 	object1_locked = TRUE;
 	if (!object1->alive || object1->terminating ||
-	    object1->copy || object1->shadow || object1->shadowed ||
+	    object1->vo_copy || object1->shadow || object1->shadowed ||
 	    object1->purgable != VM_PURGABLE_DENY) {
 		/*
 		 * We don't deal with copy or shadow objects (yet).
@@ -6200,7 +6123,7 @@ vm_object_transpose(
 	vm_object_lock(object2);
 	object2_locked = TRUE;
 	if (!object2->alive || object2->terminating ||
-	    object2->copy || object2->shadow || object2->shadowed ||
+	    object2->vo_copy || object2->shadow || object2->shadowed ||
 	    object2->purgable != VM_PURGABLE_DENY) {
 		retval = KERN_INVALID_VALUE;
 		goto done;
@@ -6295,8 +6218,8 @@ MACRO_END
 #endif /* ! VM_TAG_ACTIVE_UPDATE */
 	/* "reusable_page_count" was updated above when transposing pages */
 	/* there should be no "copy" */
-	assert(!object1->copy);
-	assert(!object2->copy);
+	assert(!object1->vo_copy);
+	assert(!object2->vo_copy);
 	/* there should be no "shadow" */
 	assert(!object1->shadow);
 	assert(!object2->shadow);
@@ -8145,7 +8068,7 @@ vm_object_ownership_change(
 #endif /* __arm64__ */
 	assert(object->copy_strategy == MEMORY_OBJECT_COPY_NONE);
 	assert(object->shadow == VM_OBJECT_NULL);
-	assert(object->copy == VM_OBJECT_NULL);
+	assert(object->vo_copy == VM_OBJECT_NULL);
 
 	old_ledger_tag = object->vo_ledger_tag;
 	old_no_footprint = object->vo_no_footprint;

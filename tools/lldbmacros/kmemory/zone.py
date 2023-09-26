@@ -515,7 +515,7 @@ class ZPercpuValue(object):
     def __iter__(self):
         sbv  = self.sbv
         kmem = KMem.get_shared()
-        addr = sbv.GetValueAsAddress() | 0x8000000000000000
+        addr = sbv.GetValueAsAddress() | 0xc0c0000000000000
         name = sbv.GetName()
         ty   = sbv.GetType().GetPointeeType()
 
@@ -805,6 +805,39 @@ class Zone(object):
             )
             for meta in self.iter_page_queue(name)
             for addr in meta.iter_all(self)
+        )
+
+        if ty is None:
+            return addresses
+
+        fn = self.kmem.target.xCreateValueFromAddress
+        return (fn('e', addr, ty) for addr in addresses)
+
+    def iter_free(self, ty = None):
+        """
+        Returns a generator for all free addresses/values
+
+        @param ty (SBType or None)
+            An optional type to use to form SBValues
+
+        @returns
+            - (generator<int>) if ty is None
+            - (generator<SBValue>) if ty is set
+        """
+
+        cached = set()
+        self.cached(into = cached)
+        self.recirc(into = cached)
+
+        addresses = (
+            addr
+            for name in (
+                'z_pageq_full',
+                'z_pageq_partial',
+            )
+            for meta in self.iter_page_queue(name)
+            for addr in meta.iter_all(self)
+            if  addr in cached or not meta.is_allocated(self, addr)
         )
 
         if ty is None:

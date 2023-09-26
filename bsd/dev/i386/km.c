@@ -62,12 +62,6 @@ void    cons_cinput(char ch);
 struct tty *km_tty[1] = { 0 };
 
 /*
- * this works early on, after initialize_screen() but before autoconf (and thus
- * before we have a kmDevice).
- */
-int disableConsoleOutput;
-
-/*
  * 'Global' variables, shared only by this file and kmDevice.m.
  */
 int initialized = 0;
@@ -273,7 +267,7 @@ fallthrough:
 int
 kmputc(__unused dev_t dev, char c)
 {
-	if (!disableConsoleOutput && initialized) {
+	if (initialized) {
 		/* OCRNL */
 		if (c == '\n') {
 			console_write_char('\r');

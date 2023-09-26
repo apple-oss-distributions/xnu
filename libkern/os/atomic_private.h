@@ -80,41 +80,10 @@
  * @macro OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
  *
  * @brief
- * Hide interfaces that can lead to starvation on certain hardware/build
- * configurations.
- *
- * @discussion
- * The following ABIs are currently supported by os_atomic:
- * - i386 and x86_64: Intel atomics
- * - armv7:           load/store exclusive
- * - armv8:           load/store exclusive
- * - armv8.1:         armv8.1 style atomics
- *
- * On armv8 hardware with asymmetric cores, using load/store exclusive based
- * atomics can lead to starvation in very hot code or non-preemptible context,
- * and code that is sensitive to such must not use these interfaces.
- *
- * When OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY is set, any os_atomic_* interface
- * that may cause starvation will be made unavailable to avoid accidental use.
- *
- * Defaults:
- * - XNU:   builds per SoC, already safe
- * - Kexts: default to avoid starvable interfaces by default
- * - User:  default to allow starvable interfaces by default
- *
- * Note: at this time, on Apple supported platforms, the only configuration
- *       that is affected by this would be for the "arm64" slices.
- *
- *       Intel, armv7 variants, and the arm64e slice always are unaffected.
+ * Obsolete, kept for backward compatibility
  */
 #ifndef OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
-#if XNU_KERNEL_PRIVATE
 #define OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY 0
-#elif KERNEL
-#define OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY 1
-#else
-#define OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY 0
-#endif
 #endif // OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
 
 /*!
@@ -347,8 +316,6 @@
 	_os_compiler_barrier_after_atomic(m); \
 	_v; \
 })
-
-#if OS_ATOMIC_HAS_STARVATION_FREE_RMW || !OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
 
 /*!
  * @function os_atomic_load_wide
@@ -783,40 +750,6 @@
  * further alter the control flow (e.g. using `return`, `goto`, ...).
  */
 #define os_atomic_rmw_loop_give_up(...) ({ __VA_ARGS__; break; })
-
-#else // !OS_ATOMIC_HAS_STARVATION_FREE_RMW && OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
-
-#define _os_atomic_error_is_starvable(name) \
-	_Static_assert(0, #name " is not starvation-free and isn't available in this configuration")
-#define os_atomic_load_wide(p, m)               _os_atomic_error_is_starvable(os_atomic_load_wide)
-#define os_atomic_store_wide(p, v, m)           _os_atomic_error_is_starvable(os_atomic_store_wide)
-#define os_atomic_add_orig(p, v, m)             _os_atomic_error_is_starvable(os_atomic_add_orig)
-#define os_atomic_add(p, v, m)                  _os_atomic_error_is_starvable(os_atomic_add)
-#define os_atomic_inc_orig(p, m)                _os_atomic_error_is_starvable(os_atomic_inc_orig)
-#define os_atomic_inc(p, m)                     _os_atomic_error_is_starvable(os_atomic_inc)
-#define os_atomic_sub_orig(p, v, m)             _os_atomic_error_is_starvable(os_atomic_sub_orig)
-#define os_atomic_sub(p, v, m)                  _os_atomic_error_is_starvable(os_atomic_sub)
-#define os_atomic_dec_orig(p, m)                _os_atomic_error_is_starvable(os_atomic_dec_orig)
-#define os_atomic_dec(p, m)                     _os_atomic_error_is_starvable(os_atomic_dec)
-#define os_atomic_and_orig(p, v, m)             _os_atomic_error_is_starvable(os_atomic_and_orig)
-#define os_atomic_and(p, v, m)                  _os_atomic_error_is_starvable(os_atomic_and)
-#define os_atomic_andnot_orig(p, v, m)          _os_atomic_error_is_starvable(os_atomic_andnot_orig)
-#define os_atomic_andnot(p, v, m)               _os_atomic_error_is_starvable(os_atomic_andnot)
-#define os_atomic_or_orig(p, v, m)              _os_atomic_error_is_starvable(os_atomic_or_orig)
-#define os_atomic_or(p, v, m)                   _os_atomic_error_is_starvable(os_atomic_or)
-#define os_atomic_xor_orig(p, v, m)             _os_atomic_error_is_starvable(os_atomic_xor_orig)
-#define os_atomic_xor(p, v, m)                  _os_atomic_error_is_starvable(os_atomic_xor)
-#define os_atomic_min_orig(p, v, m)             _os_atomic_error_is_starvable(os_atomic_min_orig)
-#define os_atomic_min(p, v, m)                  _os_atomic_error_is_starvable(os_atomic_min)
-#define os_atomic_max_orig(p, v, m)             _os_atomic_error_is_starvable(os_atomic_max_orig)
-#define os_atomic_max(p, v, m)                  _os_atomic_error_is_starvable(os_atomic_max)
-#define os_atomic_xchg(p, v, m)                 _os_atomic_error_is_starvable(os_atomic_xchg)
-#define os_atomic_cmpxchg(p, e, v, m)           _os_atomic_error_is_starvable(os_atomic_cmpxchg)
-#define os_atomic_cmpxchgv(p, e, v, g, m)       _os_atomic_error_is_starvable(os_atomic_cmpxchgv)
-#define os_atomic_rmw_loop(p, ov, nv, m, ...)   _os_atomic_error_is_starvable(os_atomic_rmw_loop)
-#define os_atomic_rmw_loop_give_up(...)         _os_atomic_error_is_starvable(os_atomic_rmw_loop_give_up)
-
-#endif // !OS_ATOMIC_HAS_STARVATION_FREE_RMW && OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
 
 #if OS_ATOMIC_CONFIG_MEMORY_ORDER_DEPENDENCY
 

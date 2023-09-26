@@ -194,6 +194,23 @@ flowadv_thread_cont(int err)
 			STAILQ_NEXT(fce, fce_link) = NULL;
 
 			lck_mtx_unlock(&fadv_lock);
+
+			if (fce->fce_event_type == FCE_EVENT_TYPE_CONGESTION_EXPERIENCED) {
+				switch (fce->fce_flowsrc_type) {
+				case FLOWSRC_CHANNEL:
+					kern_channel_flowadv_report_ce_event(fce, fce->fce_ce_cnt,
+					    fce->fce_pkts_since_last_report);
+					break;
+				case FLOWSRC_INPCB:
+				case FLOWSRC_IFNET:
+				case FLOWSRC_PF:
+				default:
+					break;
+				}
+
+				goto next;
+			}
+
 			switch (fce->fce_flowsrc_type) {
 			case FLOWSRC_INPCB:
 				inp_flowadv(fce->fce_flowid);
@@ -227,6 +244,7 @@ flowadv_thread_cont(int err)
 			default:
 				break;
 			}
+next:
 			flowadv_free_entry(fce);
 			lck_mtx_lock_spin(&fadv_lock);
 

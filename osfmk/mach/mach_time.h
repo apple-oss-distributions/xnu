@@ -69,20 +69,10 @@ uint64_t                        mach_continuous_time(void);
 __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0)
 uint64_t                        mach_continuous_approximate_time(void);
 
-#if !defined(KERNEL) && defined(PRIVATE)
-// Forward definition because this is a BSD value
-struct timespec;
-
-__OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0)
-kern_return_t           mach_get_times(uint64_t* absolute_time,
-    uint64_t* continuous_time,
-    struct timespec *tp);
-
-__OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0)
-uint64_t                mach_boottime_usec(void);
-
-#endif /* KERNEL */
-
 __END_DECLS
+
+#ifdef PRIVATE
+#include <mach/mach_time_private.h>
+#endif
 
 #endif /* _MACH_MACH_TIME_H_ */

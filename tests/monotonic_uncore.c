@@ -23,7 +23,8 @@
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.monotonic"),
-	T_META_CHECK_LEAKS(false)
+	T_META_CHECK_LEAKS(false),
+	XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL
 	);
 
 static bool

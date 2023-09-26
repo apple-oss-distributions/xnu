@@ -795,6 +795,9 @@ skmem_region_create(const char *name, struct skmem_region_params *srp,
 	if (cflags & SKMEM_REGION_CR_THREADSAFE) {
 		skr->skr_mode |= SKR_MODE_THREADSAFE;
 	}
+	if (cflags & SKMEM_REGION_CR_MEMTAG) {
+		skr->skr_mode |= SKR_MODE_MEMTAG;
+	}
 
 #if XNU_TARGET_OS_OSX
 	/*
@@ -2300,7 +2303,7 @@ skmem_region_set_mtbf(uint64_t newval)
 	}
 
 	if (skmem_region_mtbf != newval) {
-		atomic_set_64(&skmem_region_mtbf, newval);
+		os_atomic_store(&skmem_region_mtbf, newval, release);
 		SK_ERR("MTBF set to %llu msec", skmem_region_mtbf);
 	}
 }

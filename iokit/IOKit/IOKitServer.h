@@ -126,10 +126,17 @@ extern "C" {
  * Functions in iokit:IOUserClient.cpp
  */
 
+#ifdef __cplusplus
+class IOMachPort;
+typedef IOMachPort * io_kobject_t;
+#else
+typedef struct IOMachPort * io_kobject_t;
+#endif
+
 extern void iokit_add_reference( io_object_t obj, ipc_kobject_type_t type );
 
-extern ipc_port_t iokit_port_for_object( io_object_t obj,
-    ipc_kobject_type_t type );
+extern ipc_port_t iokit_port_for_object(io_object_t obj,
+    ipc_kobject_type_t type, ipc_kobject_t * kobj);
 
 extern kern_return_t iokit_client_died( io_object_t obj,
     ipc_port_t port, ipc_kobject_type_t type, mach_port_mscount_t * mscount );
@@ -146,11 +153,14 @@ iokit_client_memory_for_type(
  * Functions in osfmk:iokit_rpc.c
  */
 
-extern ipc_port_t iokit_alloc_object_port( io_object_t obj,
+extern ipc_port_t iokit_alloc_object_port( io_kobject_t obj,
     ipc_kobject_type_t type );
-
+extern void iokit_remove_object_port( ipc_port_t port,
+    ipc_kobject_type_t type );
 extern kern_return_t iokit_destroy_object_port( ipc_port_t port,
     ipc_kobject_type_t type );
+
+extern ipc_kobject_type_t iokit_port_type(ipc_port_t port);
 
 extern mach_port_name_t iokit_make_send_right( task_t task,
     io_object_t obj, ipc_kobject_type_t type );
@@ -176,8 +186,6 @@ extern void iokit_release_port_send( ipc_port_t port );
 
 extern void iokit_lock_port(ipc_port_t port);
 extern void iokit_unlock_port(ipc_port_t port);
-
-extern kern_return_t iokit_switch_object_port( ipc_port_t port, io_object_t obj, ipc_kobject_type_t type );
 
 extern ipc_port_t iokit_lookup_raw_current_task(mach_port_name_t name, ipc_kobject_type_t * type);
 

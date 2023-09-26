@@ -9,7 +9,9 @@
 #include <unistd.h>
 #include <darwintest.h>
 
-static int port = 2020;
+#define BASE_PORT 2020
+
+static int port = BASE_PORT;
 static bool server_ready = false;
 
 static void
@@ -46,7 +48,13 @@ server(void *arg __unused)
 	laddr.sin_family = AF_INET;
 	laddr.sin_port = htons(port);
 	laddr.sin_addr.s_addr = 0;
-	T_ASSERT_POSIX_SUCCESS(bind(sock, (struct sockaddr *)&laddr, sizeof(laddr)), "bind");
+	int res = bind(sock, (struct sockaddr *)&laddr, sizeof(laddr));
+	if (res == -1 && errno == EADDRNOTAVAIL) {
+		port = BASE_PORT;
+		port += arc4random_uniform(512);
+		res = bind(sock, (struct sockaddr *)&laddr, sizeof(laddr));
+	}
+	T_ASSERT_POSIX_SUCCESS(res, "bind");
 	T_ASSERT_POSIX_SUCCESS(listen(sock, 10), "listen");
 	server_ready = true;
 	while (1) {
@@ -61,7 +69,9 @@ server(void *arg __unused)
 	return NULL;
 }
 
-T_DECL(accept_race, "Exercises a race condition between socantrcvmore() and accept()", T_META_CHECK_LEAKS(false))
+T_DECL(accept_race,
+    "Exercises a race condition between socantrcvmore() and accept()",
+    T_META_CHECK_LEAKS(false))
 {
 	// Pick a random port
 	port += arc4random_uniform(1024);

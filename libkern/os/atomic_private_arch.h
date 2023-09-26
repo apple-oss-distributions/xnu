@@ -79,8 +79,6 @@
 	!__builtin_arm_strex(v, os_cast_to_nonatomic_pointer(p)); \
 })
 
-#if !OS_ATOMIC_HAS_STARVATION_FREE_RMW && !OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
-
 /*
  * armv7 override of os_atomic_rmw_loop
  * documentation for os_atomic_rmw_loop is in <os/atomic_private.h>
@@ -114,8 +112,6 @@
 #undef os_atomic_rmw_loop_give_up
 #define os_atomic_rmw_loop_give_up(...) \
 	({ os_atomic_clear_exclusive(); __VA_ARGS__; break; })
-
-#endif // !OS_ATOMIC_HAS_STARVATION_FREE_RMW && !OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
 
 #endif // __arm__
 
@@ -176,7 +172,7 @@
 	        : !__builtin_arm_strex(v, os_cast_to_nonatomic_pointer(p))); \
 })
 
-#if !OS_ATOMIC_HAS_STARVATION_FREE_RMW && !OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
+#if OS_ATOMIC_USE_LLSC
 
 /*
  * arm64 (without armv81 atomics) override of os_atomic_rmw_loop
@@ -212,7 +208,7 @@
 #define os_atomic_rmw_loop_give_up(...) \
 	({ os_atomic_clear_exclusive(); __VA_ARGS__; break; })
 
-#endif // !OS_ATOMIC_HAS_STARVATION_FREE_RMW && !OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
+#endif // OS_ATOMIC_USE_LLSC
 
 #endif // __arm64__
 

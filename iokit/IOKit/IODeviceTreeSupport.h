@@ -56,6 +56,9 @@ extern const OSSymbol *         gIODTAAPLInterruptsKey;
 extern const OSSymbol *         gIODTDefaultInterruptController;
 extern const OSSymbol *         gIODTNWInterruptMappingKey;
 
+extern const OSData *           gIODTAssociatedServiceKey;
+#define kIODTAssociatedServiceKey       "associated-service"
+
 LIBKERN_RETURNS_NOT_RETAINED IORegistryEntry * IODeviceTreeAlloc( void * dtTop );
 
 
@@ -70,11 +73,11 @@ bool IODTCompareNubName( const IORegistryEntry * regEntry,
     OSSharedPtr<OSString>& matchingName );
 
 enum {
-	kIODTRecursive      = 0x00000001,
-	kIODTExclusive      = 0x00000002
+	kIODTRecursive       = 0x00000001,
+	kIODTExclusive       = 0x00000002,
 };
 
-OSCollectionIterator * IODTFindMatchingEntries( IORegistryEntry * from,
+LIBKERN_RETURNS_RETAINED OSCollectionIterator * IODTFindMatchingEntries( IORegistryEntry * from,
     IOOptionBits options, const char * keys );
 
 #if !defined(__arm64__)

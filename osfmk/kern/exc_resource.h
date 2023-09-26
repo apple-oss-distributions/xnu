@@ -135,14 +135,16 @@
 	((subcode) & 0xFFFFFULL)
 
 /* RESOURCE_TYPE_MEMORY flavors */
-#define FLAVOR_HIGH_WATERMARK   1
+#define FLAVOR_HIGH_WATERMARK   1       /* Indicates that the exception is due to memory limit warning */
+#define FLAVOR_DIAG_MEMLIMIT    2       /* Indicates that the exception is due to a preset diagnostics memory consumption threshold  */
 
 /*
  * RESOURCE_TYPE_MEMORY / FLAVOR_HIGH_WATERMARK
  * exception code & subcode.
  *
  * This is sent by the kernel when a task crosses its high
- * watermark memory limit.
+ * watermark memory limit or when a preset memory consumption
+ * threshold is crossed.
  *
  * code:
  * +------------------------------------------------+

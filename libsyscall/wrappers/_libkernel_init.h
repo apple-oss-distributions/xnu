@@ -47,6 +47,8 @@ struct voucher_s;
 typedef struct voucher_s *voucher_t;
 #endif
 
+typedef unsigned long long malloc_type_id_t;
+
 #if __PTRAUTH_INTRINSICS__ && __has_builtin(__builtin_ptrauth_string_discriminator)
 #define LIBKERNEL_FUNCTION_PTRAUTH(f) \
 	__ptrauth(ptrauth_key_function_pointer,1, \
@@ -77,6 +79,11 @@ typedef const struct _libkernel_functions {
 
 	/* The following functions are included in version 4 of this structure */
 	int(*LIBKERNEL_FUNCTION_PTRAUTH(pthread_current_stack_contains_np))(const void *, size_t);
+
+	/* The following functions are included in version 5 of this structure */
+	void* (*LIBKERNEL_FUNCTION_PTRAUTH(malloc_type_malloc))(size_t, malloc_type_id_t);
+	void(*LIBKERNEL_FUNCTION_PTRAUTH(malloc_type_free))(void *, malloc_type_id_t);
+	void* (*LIBKERNEL_FUNCTION_PTRAUTH(malloc_type_realloc))(void *, size_t, malloc_type_id_t);
 
 	/* Subsequent versions must only add pointers! */
 } *_libkernel_functions_t;

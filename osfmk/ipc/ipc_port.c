@@ -69,6 +69,7 @@
  *	Functions to manipulate IPC ports.
  */
 
+#include <mach/boolean.h>
 #include <mach_assert.h>
 
 #include <mach/port.h>
@@ -100,6 +101,10 @@
 #include <ipc/ipc_service_port.h>
 
 #include <string.h>
+
+extern bool proc_is_simulated(struct proc *);
+extern struct proc *current_proc(void);
+extern int csproc_hardened_runtime(struct proc* p);
 
 static TUNABLE(bool, prioritize_launch, "prioritize_launch", true);
 TUNABLE_WRITEABLE(int, ipc_portbt, "ipc_portbt", false);
@@ -771,8 +776,15 @@ ipc_port_init(
 	if (flags & IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS) {
 		ip_enforce_reply_port_semantics(port);
 	}
+	if (flags & IPC_PORT_ENFORCE_RIGID_REPLY_PORT_SEMANTICS) {
+		ip_enforce_rigid_reply_port_semantics(port);
+	}
 	if (flags & IPC_PORT_INIT_PROVISIONAL_REPLY) {
 		ip_mark_provisional_reply_port(port);
+	}
+
+	if (flags & IPC_PORT_INIT_PROVISIONAL_ID_PROT_OPTOUT) {
+		ip_mark_id_prot_opt_out(port);
 	}
 
 	port->ip_kernel_qos_override = THREAD_QOS_UNSPECIFIED;
@@ -3425,6 +3437,52 @@ ipc_port_update_qos_n_iotier(
 
 	ip_mq_unlock(port);
 	return KERN_SUCCESS;
+}
+
+/* Returns true if a rigid reply port violation should be enforced (by killing the process) */
+static bool
+__ip_rigid_reply_port_semantics_violation(ipc_port_t reply_port, int *reply_port_semantics_violation)
+{
+	bool hardened_runtime = csproc_hardened_runtime(current_proc());
+
+	if (proc_is_simulated(current_proc())
+#if CONFIG_ROSETTA
+	    || task_is_translated(current_task())
+#endif
+	    ) {
+		return FALSE;
+	}
+
+	if (task_get_platform_binary(current_task())) {
+		return TRUE;
+	}
+	if (!ip_is_provisional_reply_port(reply_port)) {
+		/* record telemetry for when third party fails to use a provisional reply port */
+		*reply_port_semantics_violation = hardened_runtime ? RRP_HARDENED_RUNTIME_VIOLATOR : RRP_3P_VIOLATOR;
+	}
+	return FALSE;
+}
+
+bool
+ip_violates_reply_port_semantics(ipc_port_t dest_port, ipc_port_t reply_port,
+    int *reply_port_semantics_violation)
+{
+	if (ip_require_reply_port_semantics(dest_port)
+	    && !ip_is_reply_port(reply_port)
+	    && !ip_is_provisional_reply_port(reply_port)) {
+		*reply_port_semantics_violation = REPLY_PORT_SEMANTICS_VIOLATOR;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+/* Rigid reply port semantics don't allow for provisional reply ports */
+bool
+ip_violates_rigid_reply_port_semantics(ipc_port_t dest_port, ipc_port_t reply_port, int *violates_3p)
+{
+	return ip_require_rigid_reply_port_semantics(dest_port)
+	       && !ip_is_reply_port(reply_port)
+	       && __ip_rigid_reply_port_semantics_violation(reply_port, violates_3p);
 }
 
 #if MACH_ASSERT

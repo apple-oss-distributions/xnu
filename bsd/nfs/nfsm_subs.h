@@ -78,11 +78,9 @@
 int nfsm_chain_new_mbuf(struct nfsm_chain *, size_t);
 int nfsm_chain_add_opaque_f(struct nfsm_chain *, const u_char *, size_t);
 int nfsm_chain_add_opaque_nopad_f(struct nfsm_chain *, const u_char *, size_t);
-int nfsm_chain_add_uio(struct nfsm_chain *, uio_t, size_t);
 
 int nfsm_chain_advance(struct nfsm_chain *, size_t);
 size_t nfsm_chain_offset(struct nfsm_chain *);
-int nfsm_chain_reverse(struct nfsm_chain *, size_t);
 int nfsm_chain_get_opaque_pointer_f(struct nfsm_chain *, uint32_t, u_char **);
 int nfsm_chain_get_opaque_f(struct nfsm_chain *, size_t, u_char *);
 int nfsm_chain_get_uio(struct nfsm_chain *, size_t, uio_t);
@@ -517,8 +515,8 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	        if ((VERS) != NFS_VER2) { \
 	                nfsm_chain_get_32((E), (NMC), (FHSIZE)); \
 	                if (E) break; \
-	                if ((FHSIZE) > NFS_MAX_FH_SIZE) \
-	                        (E) = EBADRPC; \
+	                if ((FHSIZE) > NFSV3_MAX_FH_SIZE) \
+	                        (E) = NFSERR_BADHANDLE; \
 	        } else \
 	                (FHSIZE) = NFSX_V2FH;\
 	        if ((E) == 0) \

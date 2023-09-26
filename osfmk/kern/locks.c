@@ -116,7 +116,7 @@ SECURITY_READ_ONLY_LATE(bool) has_lock_pv = FALSE; /* used by waitq.py */
 #endif
 
 #if DEBUG
-TUNABLE(uint32_t, LcksOpts, "lcks", enaLkDeb);
+TUNABLE(uint32_t, LcksOpts, "lcks", LCK_OPTION_ENABLE_DEBUG);
 #else
 TUNABLE(uint32_t, LcksOpts, "lcks", 0);
 #endif
@@ -1240,7 +1240,6 @@ wakeup_with_inheritor_and_turnstile(
 	uint32_t index;
 	struct turnstile *ts = NULL;
 	kern_return_t ret = KERN_NOT_WAITING;
-	thread_t wokeup;
 
 	/*
 	 * the hash bucket spinlock is used as turnstile interlock
@@ -1262,24 +1261,23 @@ wakeup_with_inheritor_and_turnstile(
 		 * WAITQ_UPDATE_INHERITOR will call turnstile_update_inheritor
 		 * if it finds a thread
 		 */
-		wokeup = waitq_wakeup64_identify(&ts->ts_waitq,
-		    CAST_EVENT64_T(event), result, flags);
-		if (wokeup != NULL) {
-			if (thread_wokenup != NULL) {
-				*thread_wokenup = wokeup;
-			} else {
-				thread_deallocate_safe(wokeup);
-			}
-			ret = KERN_SUCCESS;
-			if (action == LCK_WAKE_DO_NOT_TRANSFER_PUSH) {
-				goto complete;
-			}
+		if (thread_wokenup) {
+			thread_t wokeup;
+
+			wokeup = waitq_wakeup64_identify(&ts->ts_waitq,
+			    CAST_EVENT64_T(event), result, flags);
+			*thread_wokenup = wokeup;
+			ret = wokeup ? KERN_SUCCESS : KERN_NOT_WAITING;
 		} else {
-			if (thread_wokenup != NULL) {
-				*thread_wokenup = NULL;
-			}
-			turnstile_update_inheritor(ts, TURNSTILE_INHERITOR_NULL, TURNSTILE_IMMEDIATE_UPDATE);
-			ret = KERN_NOT_WAITING;
+			ret = waitq_wakeup64_one(&ts->ts_waitq,
+			    CAST_EVENT64_T(event), result, flags);
+		}
+		if (ret == KERN_SUCCESS && action == LCK_WAKE_DO_NOT_TRANSFER_PUSH) {
+			goto complete;
+		}
+		if (ret == KERN_NOT_WAITING) {
+			turnstile_update_inheritor(ts, TURNSTILE_INHERITOR_NULL,
+			    TURNSTILE_IMMEDIATE_UPDATE);
 		}
 	} else {
 		ret = waitq_wakeup64_all(&ts->ts_waitq, CAST_EVENT64_T(event),

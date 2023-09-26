@@ -296,14 +296,6 @@ uint32_t
     );
 
 uint32_t
-    gss_krb5_verify_mic(uint32_t *,     /* minor_status */
-    gss_ctx_id_t,                       /* context_handle */
-    gss_buffer_t,                       /* message_buffer */
-    gss_buffer_t,                       /* message_token */
-    gss_qop_t *                         /* qop_state */
-    );
-
-uint32_t
     gss_krb5_verify_mic_mbuf(uint32_t *,        /* minor_status */
     gss_ctx_id_t,                               /* context_handle */
     mbuf_t,                                     /* message_buffer */

@@ -1160,7 +1160,7 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 	 *  Update other subsystems as necessary if something has changed
 	 */
 
-	bool update_threads = false, update_sfi = false;
+	bool update_threads = false, update_sfi = false, update_termination = false;
 
 	/*
 	 * Check for the attributes that thread_policy_update_internal_locked() consults,
@@ -1197,6 +1197,10 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 		if (task_policy_update_coalition_focal_tasks(task, prev.tep_role, next.tep_role, pend_token)) {
 			update_sfi = true;
 		}
+	}
+
+	if (prev.tep_terminated != next.tep_terminated) {
+		update_termination = true;
 	}
 
 	bool update_priority = false;
@@ -1267,6 +1271,10 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 			}
 
 			if (update_priority || update_threads) {
+				/* Check if we need to reevaluate turnstile push */
+				if (pend_token->tpt_update_turnstile) {
+					thread_pend_token.tpt_update_turnstile = 1;
+				}
 				thread_policy_update_tasklocked(thread,
 				    task->priority, task->max_priority,
 				    &thread_pend_token);
@@ -1290,6 +1298,18 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 			memorystatus_update_priority_for_appnap(((proc_t) get_bsdtask_info(task)), TRUE);
 		} else {
 			memorystatus_update_priority_for_appnap(((proc_t) get_bsdtask_info(task)), FALSE);
+		}
+	}
+
+	if (update_termination) {
+		/*
+		 * This update is done after the terminated bit is set,
+		 * and all updates other than this one will check that bit,
+		 * so we know that it will be the last update.  (This path
+		 * skips the check for the terminated bit.)
+		 */
+		if (task_set_game_mode_locked(task, false)) {
+			pend_token->tpt_update_game_mode = 1;
 		}
 	}
 }
@@ -1404,6 +1424,9 @@ task_policy_update_complete_unlocked(task_t task, task_pend_token_t pend_token)
 	}
 	if (pend_token->tpt_update_tg_app_flag) {
 		task_coalition_thread_group_application_set(task);
+	}
+	if (pend_token->tpt_update_game_mode) {
+		task_coalition_thread_group_game_mode_update(task);
 	}
 #endif /* CONFIG_THREAD_GROUPS */
 }
@@ -1779,6 +1802,12 @@ proc_get_effective_task_policy(task_t   task,
 		 * This controls whether or not a process is targeted for specific control by thermald.
 		 */
 		value = task->effective_policy.tep_sfi_managed;
+		break;
+	case TASK_POLICY_TERMINATED:
+		/*
+		 * This controls whether or not a process has its throttling properties shot down for termination.
+		 */
+		value = task->effective_policy.tep_terminated;
 		break;
 	default:
 		panic("unknown policy_flavor %d", flavor);

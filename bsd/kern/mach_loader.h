@@ -83,6 +83,8 @@ typedef struct _load_result {
 	unsigned char           uuid[16];
 	mach_vm_address_t       min_vm_addr;
 	mach_vm_address_t       max_vm_addr;
+	mach_vm_address_t       ro_vm_start;
+	mach_vm_address_t       ro_vm_end;
 	unsigned int            platform_binary;
 	off_t                   cs_end_offset;
 	void                    *threadstate;
@@ -92,6 +94,8 @@ typedef struct _load_result {
 	uint32_t                lr_sdk;
 	user_addr_t             dynlinker_mach_header;
 	user_addr_t             dynlinker_max_vm_addr;
+	mach_vm_address_t       dynlinker_ro_vm_start;
+	mach_vm_address_t       dynlinker_ro_vm_end;
 	int                     dynlinker_fd;
 	struct fileproc*        dynlinker_fp;
 } load_result_t;

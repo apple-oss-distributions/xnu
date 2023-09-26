@@ -77,9 +77,14 @@
 
 #include <net/dlil.h>
 #include <net/nwk_wq.h>
+#include <net/sockaddr_utils.h>
 
 #include <mach/boolean.h>
 #include <pexpert/pexpert.h>
+
+#if __has_ptrcheck
+#include <machine/trap.h> /* Needed by bound-checks-soft when enabled. */
+#endif /* __has_ptrcheck */
 
 /* Eventhandler context for protocol events */
 struct eventhandler_lists_ctxt protoctl_evhdlr_ctxt;
@@ -257,7 +262,7 @@ void
 net_add_domain_old(struct domain_old *odp)
 {
 	struct domain *dp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	VERIFY(odp != NULL);
 
@@ -320,9 +325,9 @@ net_add_domain_old(struct domain_old *odp)
 int
 net_del_domain_old(struct domain_old *odp)
 {
-	struct domain *dp1, *dp2;
+	struct domain *dp1 __single, *dp2 __single;
 	int error = 0;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	VERIFY(odp != NULL);
 
@@ -342,7 +347,7 @@ net_del_domain_old(struct domain_old *odp)
 		}
 	}
 	if (dp1 != NULL) {
-		struct protosw *pp1, *pp2;
+		struct protosw *pp1 __single, *pp2 __single;
 
 		VERIFY(dp1->dom_flags & DOM_OLD);
 		VERIFY(dp1->dom_old == odp);
@@ -436,11 +441,11 @@ int
 net_add_proto_old(struct protosw_old *opp, struct domain_old *odp)
 {
 	struct pr_usrreqs_old *opru;
-	struct pr_usrreqs *pru = NULL;
-	struct protosw *pp = NULL, *pp1;
+	struct pr_usrreqs *pru __single = NULL;
+	struct protosw *pp __single = NULL, *pp1;
 	int error = 0;
 	struct domain *dp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	/*
 	 * This could be called as part of initializing the domain,
@@ -562,7 +567,7 @@ done:
 int
 net_del_proto(int type, int protocol, struct domain *dp)
 {
-	struct protosw *pp;
+	struct protosw *pp __single;
 
 	/*
 	 * This could be called as part of initializing the domain,
@@ -597,9 +602,9 @@ int
 net_del_proto_old(int type, int protocol, struct domain_old *odp)
 {
 	int error = 0;
-	struct protosw *pp;
+	struct protosw *pp __single;
 	struct domain *dp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	/*
 	 * This could be called as part of initializing the domain,
@@ -682,7 +687,7 @@ domain_timeout(void *arg)
 #pragma unused(arg)
 	struct protosw *pp;
 	struct domain *dp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	lck_mtx_lock(&domain_timeout_mtx);
 	if (domain_draining) {
@@ -712,7 +717,7 @@ void
 domaininit(void)
 {
 	struct domain *dp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	eventhandler_lists_ctxt_init(&protoctl_evhdlr_ctxt);
 
@@ -768,7 +773,7 @@ pffindtype(int family, int type)
 {
 	struct protosw *pp = NULL;
 	struct domain *dp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	guard = domain_guard_deploy();
 	if ((dp = pffinddomain_locked(family)) == NULL) {
@@ -792,7 +797,7 @@ struct domain *
 pffinddomain(int pf)
 {
 	struct domain *dp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	guard = domain_guard_deploy();
 	dp = pffinddomain_locked(pf);
@@ -808,7 +813,7 @@ pffinddomain_old(int pf)
 {
 	struct domain_old *odp = NULL;
 	struct domain *dp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	guard = domain_guard_deploy();
 	if ((dp = pffinddomain_locked(pf)) != NULL && (dp->dom_flags & DOM_OLD)) {
@@ -825,7 +830,7 @@ struct protosw *
 pffindproto(int family, int protocol, int type)
 {
 	struct protosw *pp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	guard = domain_guard_deploy();
 	pp = pffindproto_locked(family, protocol, type);
@@ -872,7 +877,7 @@ pffindproto_old(int family, int protocol, int type)
 {
 	struct protosw_old *opr = NULL;
 	struct protosw *pp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	guard = domain_guard_deploy();
 	if ((pp = pffindproto_locked(family, protocol, type)) != NULL &&
@@ -913,7 +918,7 @@ struct protosw *
 pffindprotonotype(int family, int protocol)
 {
 	struct protosw *pp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	if (protocol == 0) {
 		return NULL;
@@ -936,7 +941,7 @@ pfctlinput2(int cmd, struct sockaddr *sa, void *ctlparam)
 {
 	struct domain *dp;
 	struct protosw *pp;
-	domain_guard_t guard;
+	domain_guard_t guard __single;
 
 	if (sa == NULL) {
 		return;
@@ -1034,7 +1039,7 @@ domain_proto_mtx_lock_assert_notheld(void)
 domain_guard_t
 domain_guard_deploy(void)
 {
-	net_thread_marks_t marks;
+	net_thread_marks_t marks __single;
 
 	marks = net_thread_marks_push(NET_THREAD_HELD_DOMAIN);
 	if (marks != net_thread_marks_none) {
@@ -1050,7 +1055,7 @@ domain_guard_deploy(void)
 void
 domain_guard_release(domain_guard_t guard)
 {
-	net_thread_marks_t marks = (net_thread_marks_t)(const void*)guard;
+	net_thread_marks_t marks __single = (net_thread_marks_t)(const void*)guard;
 
 	if (marks != net_thread_marks_none) {
 		LCK_MTX_ASSERT(&domain_proto_mtx, LCK_MTX_ASSERT_OWNED);
@@ -1064,7 +1069,7 @@ domain_guard_release(domain_guard_t guard)
 domain_unguard_t
 domain_unguard_deploy(void)
 {
-	net_thread_marks_t marks;
+	net_thread_marks_t marks __single;
 
 	marks = net_thread_unmarks_push(NET_THREAD_HELD_DOMAIN);
 	if (marks != net_thread_marks_none) {
@@ -1080,7 +1085,7 @@ domain_unguard_deploy(void)
 void
 domain_unguard_release(domain_unguard_t unguard)
 {
-	net_thread_marks_t marks = (net_thread_marks_t)(const void*)unguard;
+	net_thread_marks_t marks __single = (net_thread_marks_t)(const void*)unguard;
 
 	if (marks != net_thread_marks_none) {
 		LCK_MTX_ASSERT(&domain_proto_mtx, LCK_MTX_ASSERT_NOTOWNED);
@@ -1112,9 +1117,10 @@ struct protoctl_event_nwk_wq_entry {
 static void
 protoctl_event_callback(struct nwk_wq_entry *nwk_item)
 {
-	struct protoctl_event_nwk_wq_entry *p_ev = NULL;
+	struct protoctl_event_nwk_wq_entry *p_ev __single = NULL;
 
-	p_ev = __container_of(nwk_item, struct protoctl_event_nwk_wq_entry, nwk_wqe);
+	p_ev = __unsafe_forge_single(struct protoctl_event_nwk_wq_entry *,
+	    __container_of(nwk_item, struct protoctl_event_nwk_wq_entry, nwk_wqe));
 
 	/* Call this before we walk the tree */
 	EVENTHANDLER_INVOKE(&protoctl_evhdlr_ctxt, protoctl_event,
@@ -1139,15 +1145,17 @@ protoctl_event_enqueue_nwk_wq_entry(struct ifnet *ifp, struct sockaddr *p_laddr,
 	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	p_protoctl_ev->protoctl_ev_arg.ifp = ifp;
+
 	if (p_laddr != NULL) {
-		VERIFY(p_laddr->sa_len <= sizeof(p_protoctl_ev->protoctl_ev_arg.laddr));
-		bcopy(p_laddr, &(p_protoctl_ev->protoctl_ev_arg.laddr), p_laddr->sa_len);
+		SOCKADDR_COPY(p_laddr,
+		    &p_protoctl_ev->protoctl_ev_arg.laddr);
 	}
 
 	if (p_raddr != NULL) {
-		VERIFY(p_raddr->sa_len <= sizeof(p_protoctl_ev->protoctl_ev_arg.raddr));
-		bcopy(p_raddr, &(p_protoctl_ev->protoctl_ev_arg.raddr), p_raddr->sa_len);
+		SOCKADDR_COPY(p_raddr,
+		    &p_protoctl_ev->protoctl_ev_arg.raddr);
 	}
+
 	p_protoctl_ev->protoctl_ev_arg.lport = lport;
 	p_protoctl_ev->protoctl_ev_arg.rport = rport;
 	p_protoctl_ev->protoctl_ev_arg.protocol = protocol;

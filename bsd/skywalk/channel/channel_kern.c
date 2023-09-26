@@ -248,15 +248,11 @@ kern_channel_increment_ring_net_stats(kern_channel_ring_t kring,
     struct ifnet *ifp, struct kern_channel_ring_stat_increment *stats)
 {
 	if (kring->ckr_tx == NR_TX) {
-		atomic_add_64(&ifp->if_data.ifi_opackets,
-		    stats->kcrsi_slots_transferred);
-		atomic_add_64(&ifp->if_data.ifi_obytes,
-		    stats->kcrsi_bytes_transferred);
+		os_atomic_add(&ifp->if_data.ifi_opackets, stats->kcrsi_slots_transferred, relaxed);
+		os_atomic_add(&ifp->if_data.ifi_obytes, stats->kcrsi_bytes_transferred, relaxed);
 	} else {
-		atomic_add_64(&ifp->if_data.ifi_ipackets,
-		    stats->kcrsi_slots_transferred);
-		atomic_add_64(&ifp->if_data.ifi_ibytes,
-		    stats->kcrsi_bytes_transferred);
+		os_atomic_add(&ifp->if_data.ifi_ipackets, stats->kcrsi_slots_transferred, relaxed);
+		os_atomic_add(&ifp->if_data.ifi_ibytes, stats->kcrsi_bytes_transferred, relaxed);
 	}
 
 	if (ifp->if_data_threshold != 0) {
@@ -507,6 +503,65 @@ done:
 }
 
 void
+kern_channel_flowadv_report_ce_event(struct flowadv_fcentry *fce,
+    uint32_t ce_cnt, uint32_t total_pkt_cnt)
+{
+	const flowadv_token_t ch_token = fce->fce_flowsrc_token;
+	const flowadv_token_t flow_token = fce->fce_flowid;
+	const flowadv_idx_t flow_fidx = fce->fce_flowsrc_fidx;
+	struct ifnet *ifp = fce->fce_ifp;
+	struct nexus_adapter *hwna;
+	struct kern_nexus *fsw_nx;
+	struct kern_channel *ch = NULL;
+	struct nx_flowswitch *fsw;
+
+	_CASSERT(sizeof(ch->ch_info->cinfo_ch_token) == sizeof(ch_token));
+
+	SK_LOCK();
+	if (ifnet_is_attached(ifp, 0) == 0 || ifp->if_na == NULL) {
+		goto done;
+	}
+
+	hwna = &ifp->if_na->nifna_up;
+	VERIFY((hwna->na_type == NA_NETIF_DEV) ||
+	    (hwna->na_type == NA_NETIF_COMPAT_DEV));
+
+	if (!NA_IS_ACTIVE(hwna) || (fsw = fsw_ifp_to_fsw(ifp)) == NULL) {
+		goto done;
+	}
+
+	fsw_nx = fsw->fsw_nx;
+	VERIFY(fsw_nx != NULL);
+
+	/* find the channel */
+	STAILQ_FOREACH(ch, &fsw_nx->nx_ch_head, ch_link) {
+		if (ch_token == ch->ch_info->cinfo_ch_token) {
+			break;
+		}
+	}
+
+	if (ch != NULL) {
+		if (ch->ch_na != NULL &&
+		    na_flowadv_report_ce_event(ch, flow_fidx, flow_token,
+		    ce_cnt, total_pkt_cnt)) {
+			SK_DF(SK_VERB_FLOW_ADVISORY,
+			    "%s(%d) notified of flow update",
+			    ch->ch_name, ch->ch_pid);
+		} else if (ch->ch_na == NULL) {
+			SK_DF(SK_VERB_FLOW_ADVISORY,
+			    "%s(%d) is closing (flow update ignored)",
+			    ch->ch_name, ch->ch_pid);
+		}
+	} else {
+		SK_ERR("channel token 0x%x fidx %u on %s not found",
+		    ch_token, flow_fidx, ifp->if_xname);
+	}
+done:
+	SK_UNLOCK();
+}
+
+
+void
 kern_channel_memstatus(struct proc *p, uint32_t status,
     struct kern_channel *ch)
 {
@@ -616,18 +671,18 @@ kern_channel_defunct(struct proc *p, struct kern_channel *ch)
 				STATS_INC(&fsw->fsw_stats,
 				    FSW_STATS_CHAN_DEFUNCT_SKIP);
 			}
-			(void) atomic_bitset_32_ov(&ch->ch_flags,
-			    CHANF_DEFUNCT_SKIP);
+			os_atomic_or(&ch->ch_flags, CHANF_DEFUNCT_SKIP,
+			    relaxed);
 			/* skip defunct */
 			lck_mtx_unlock(&ch->ch_lock);
 			return;
 		}
-		(void) atomic_bitclear_32(&ch->ch_flags, CHANF_DEFUNCT_SKIP);
+		os_atomic_andnot(&ch->ch_flags, CHANF_DEFUNCT_SKIP, relaxed);
 
 		/*
 		 * Proceed with the rest of the defunct work.
 		 */
-		if (atomic_bitset_32_ov(&ch->ch_flags, CHANF_DEFUNCT) &
+		if (os_atomic_or_orig(&ch->ch_flags, CHANF_DEFUNCT, relaxed) &
 		    CHANF_DEFUNCT) {
 			/* already defunct; nothing to do */
 			lck_mtx_unlock(&ch->ch_lock);

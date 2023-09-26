@@ -108,7 +108,7 @@ KALLOC_TYPE_DEFINE(KT_LCK_RW, lck_rw_t, KT_PRIV_ACCT);
 static TUNABLE(bool, lck_rw_recursive_shared_assert_74048094, "lck_rw_recursive_shared_assert", false);
 SECURITY_READ_ONLY_EARLY(vm_packing_params_t) rwlde_caller_packing_params =
     VM_PACKING_PARAMS(LCK_RW_CALLER_PACKED);
-#define rw_lock_debug_disabled()                ((LcksOpts & disLkRWDebug) == disLkRWDebug)
+#define rw_lock_debug_disabled()                (lck_opts_get() & LCK_OPTION_DISABLE_RW_DEBUG)
 
 #define set_rwlde_caller_packed(entry, caller)          ((entry)->rwlde_caller_packed = VM_PACK_POINTER((vm_offset_t)caller, LCK_RW_CALLER_PACKED))
 #define get_rwlde_caller(entry)                         ((void*)VM_UNPACK_POINTER(entry->rwlde_caller_packed, LCK_RW_CALLER_PACKED))
@@ -271,7 +271,7 @@ static void
 rw_lock_init(void)
 {
 	if (kern_feature_override(KF_RW_LOCK_DEBUG_OVRD)) {
-		LcksOpts |= disLkRWDebug;
+		LcksOpts |= LCK_OPTION_DISABLE_RW_DEBUG;
 	}
 }
 STARTUP(LOCKS, STARTUP_RANK_FIRST, rw_lock_init);
@@ -319,12 +319,12 @@ canlock_rwlock_panic(lck_rw_t* lock, thread_t thread, struct rw_lock_debug_entry
 	    ordered_load_rw(lock), ctid_get_thread_unsafe(lock->lck_rw_owner));
 }
 
-static inline void
-assert_canlock_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
+__attribute__((noinline))
+static void
+assert_canlock_rwlock_slow(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
 {
 	rw_lock_debug_t *rw_locks_held = &thread->rw_lock_held;
-
-	if (__probable(rw_lock_debug_disabled() || (rw_locks_held->rwld_locks_acquired == 0))) {
+	if (__probable(rw_locks_held->rwld_locks_acquired == 0)) {
 		//no locks saved, safe to lock
 		return;
 	}
@@ -345,6 +345,14 @@ assert_canlock_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
 			return;
 		}
 		canlock_rwlock_panic(lock, thread, entry);
+	}
+}
+
+static inline void
+assert_canlock_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
+{
+	if (__improbable(!rw_lock_debug_disabled())) {
+		assert_canlock_rwlock_slow(lock, thread, type);
 	}
 }
 
@@ -370,14 +378,11 @@ held_rwlock_notheld_with_info_panic(lck_rw_t* lock, thread_t thread, lck_rw_type
 	}
 }
 
-static inline void
-assert_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
+__attribute__((noinline))
+static void
+assert_held_rwlock_slow(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
 {
 	rw_lock_debug_t *rw_locks_held = &thread->rw_lock_held;
-
-	if (__probable(rw_lock_debug_disabled())) {
-		return;
-	}
 
 	if (__improbable(rw_locks_held->rwld_locks_acquired == 0 || rw_locks_held->rwld_locks_saved == 0)) {
 		if (rw_locks_held->rwld_locks_acquired == 0 || rw_locks_held->rwld_overflow == 0) {
@@ -403,14 +408,18 @@ assert_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
 }
 
 static inline void
-change_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t typeFrom, void* caller)
+assert_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
+{
+	if (__improbable(!rw_lock_debug_disabled())) {
+		assert_held_rwlock_slow(lock, thread, type);
+	}
+}
+
+__attribute__((noinline))
+static void
+change_held_rwlock_slow(lck_rw_t* lock, thread_t thread, lck_rw_type_t typeFrom, void* caller)
 {
 	rw_lock_debug_t *rw_locks_held = &thread->rw_lock_held;
-
-	if (__probable(rw_lock_debug_disabled())) {
-		return;
-	}
-
 	if (__improbable(rw_locks_held->rwld_locks_saved == 0)) {
 		if (rw_locks_held->rwld_overflow == 0) {
 			held_rwlock_notheld_panic(lock, thread);
@@ -462,6 +471,14 @@ change_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t typeFrom, void
 	rw_locks_held->rwld_locks_saved++;
 }
 
+static inline void
+change_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t typeFrom, void* caller)
+{
+	if (__improbable(!rw_lock_debug_disabled())) {
+		change_held_rwlock_slow(lock, thread, typeFrom, caller);
+	}
+}
+
 __abortlike
 static void
 add_held_rwlock_too_many_panic(thread_t thread)
@@ -469,16 +486,11 @@ add_held_rwlock_too_many_panic(thread_t thread)
 	panic("RW lock too many rw locks held, rwld_locks_acquired maxed out for thread %p", thread);
 }
 
-static inline void
-add_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type, void* caller)
+static __attribute__((noinline)) void
+add_held_rwlock_slow(lck_rw_t* lock, thread_t thread, lck_rw_type_t type, void* caller)
 {
 	rw_lock_debug_t *rw_locks_held = &thread->rw_lock_held;
 	struct rw_lock_debug_entry *null_entry;
-
-	if (__probable(rw_lock_debug_disabled())) {
-		return;
-	}
-
 	if (__improbable(rw_locks_held->rwld_locks_acquired == UINT32_MAX)) {
 		add_held_rwlock_too_many_panic(thread);
 	}
@@ -541,14 +553,17 @@ add_shared:
 }
 
 static inline void
-remove_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
+add_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type, void* caller)
+{
+	if (__improbable(!rw_lock_debug_disabled())) {
+		add_held_rwlock_slow(lock, thread, type, caller);
+	}
+}
+
+static void
+remove_held_rwlock_slow(lck_rw_t *lock, thread_t thread, lck_rw_type_t type)
 {
 	rw_lock_debug_t *rw_locks_held = &thread->rw_lock_held;
-
-	if (__probable(rw_lock_debug_disabled())) {
-		return;
-	}
-
 	if (__improbable(rw_locks_held->rwld_locks_acquired == 0)) {
 		return;
 	}
@@ -583,6 +598,14 @@ out:
 		rw_locks_held->rwld_overflow = 0;
 	}
 	return;
+}
+
+static inline void
+remove_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
+{
+	if (__improbable(!rw_lock_debug_disabled())) {
+		remove_held_rwlock_slow(lock, thread, type);
+	}
 }
 #endif /* DEBUG_RW */
 
@@ -2748,7 +2771,7 @@ __attribute__((always_inline))
 void
 lck_rw_set_promotion_locked(thread_t thread)
 {
-	if (LcksOpts & disLkRWPrio) {
+	if (LcksOpts & LCK_OPTION_DISABLE_RW_PRIO) {
 		return;
 	}
 

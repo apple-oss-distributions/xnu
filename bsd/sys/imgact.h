@@ -118,6 +118,7 @@ struct image_params {
 	void            *ip_px_sa;              /* posix_spawn attrs */
 	void            *ip_px_sfa;             /* posix_spawn file actions */
 	void            *ip_px_spa;             /* posix_spawn port actions */
+	vm_map_t        ip_free_map;            /* map to free once iocount is dropped on vnode */
 	struct ip_px_smpx_s {
 		void        *array;
 		void        *data;

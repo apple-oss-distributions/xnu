@@ -24,7 +24,7 @@ run_sysctl_test(const char *t, int64_t value)
 T_DECL(kalloc_type, "kalloc_type_test",
     T_META_CHECK_LEAKS(false))
 {
-	T_EXPECT_EQ(1ll, run_sysctl_test("kalloc_type", 85), "test succeeded");
+	T_EXPECT_EQ(1ll, run_sysctl_test("kalloc_type", 260), "test succeeded");
 }
 
 T_DECL(kalloc, "kalloc_test",

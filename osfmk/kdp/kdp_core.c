@@ -194,7 +194,7 @@ static LCK_GRP_DECLARE(excluded_regions_grp, "kdp-exclude-regions");
 static LCK_MTX_DECLARE(excluded_regions_mtx, &excluded_regions_grp);
 static struct kdp_core_excluded_region *excluded_regions;
 
-kern_return_t
+void
 kdp_core_exclude_region(vm_offset_t addr, vm_size_t size)
 {
 	struct kdp_core_excluded_region *region;
@@ -216,11 +216,9 @@ kdp_core_exclude_region(vm_offset_t addr, vm_size_t size)
 	region->next = excluded_regions;
 	excluded_regions = region;
 	lck_mtx_unlock(&excluded_regions_mtx);
-
-	return KERN_SUCCESS;
 }
 
-kern_return_t
+void
 kdp_core_unexclude_region(vm_offset_t addr, vm_size_t size)
 {
 	struct kdp_core_excluded_region *region;
@@ -243,8 +241,6 @@ kdp_core_unexclude_region(vm_offset_t addr, vm_size_t size)
 	// We had exclusive access to the list when we removed the region, and it is no longer
 	// reachable from the list, so it is safe to free.
 	kfree_type(typeof(*region), region);
-
-	return KERN_SUCCESS;
 }
 
 static bool
@@ -1856,16 +1852,14 @@ kern_dump_save_note_data(void *refcon __unused, core_save_note_data_cb callback,
 
 #else
 
-kern_return_t
+void
 kdp_core_exclude_region(__unused vm_offset_t addr, __unused vm_size_t size)
 {
-	return KERN_NOT_SUPPORTED;
 }
 
-kern_return_t
+void
 kdp_core_unexclude_region(__unused vm_offset_t addr, __unused vm_size_t size)
 {
-	return KERN_NOT_SUPPORTED;
 }
 
 #endif /* CONFIG_KDP_INTERACTIVE_DEBUGGING */

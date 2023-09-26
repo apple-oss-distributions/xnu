@@ -576,6 +576,31 @@ inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 
 		if ((so->so_options & SO_NOWAKEFROMSLEEP) &&
 		    !nowakeok) {
+#if DEBUG || DEVELOPMENT
+			char lbuf[MAX_IPv6_STR_LEN + 6] = {};
+			char fbuf[MAX_IPv6_STR_LEN + 6] = {};
+			char pname[MAXCOMLEN + 1];
+
+			proc_name(so->last_pid, pname, sizeof(pname));
+
+			if (protocol == PF_INET) {
+				inet_ntop(PF_INET, &inp->inp_laddr.s_addr,
+				    lbuf, sizeof(lbuf));
+				inet_ntop(PF_INET, &inp->inp_faddr.s_addr,
+				    fbuf, sizeof(fbuf));
+			} else {
+				inet_ntop(PF_INET6, &inp->in6p_laddr.s6_addr,
+				    lbuf, sizeof(lbuf));
+				inet_ntop(PF_INET6, &inp->in6p_faddr.s6_addr,
+				    fbuf, sizeof(fbuf));
+			}
+
+			os_log(OS_LOG_DEFAULT,
+			    "inpcb_get_if_ports_used: no wake from sleep %s %s:%u %s:%u ifp %s proc %s:%d",
+			    SOCK_PROTO(inp->inp_socket) == IPPROTO_TCP ? "tcp" : "udp",
+			    lbuf, ntohs(inp->inp_lport), fbuf, ntohs(inp->inp_fport),
+			    ifp->if_xname, pname, so->last_pid);
+#endif /* DEBUG || DEVELOPMENT */
 			continue;
 		}
 

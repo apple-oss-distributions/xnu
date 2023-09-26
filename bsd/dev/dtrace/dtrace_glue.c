@@ -56,7 +56,7 @@
 /* Solaris proc_t is the struct. Darwin's proc_t is a pointer to it. */
 #define proc_t struct proc /* Steer clear of the Darwin typedef for proc_t */
 
-KALLOC_HEAP_DEFINE(KHEAP_DTRACE, "dtrace", KHEAP_ID_DEFAULT);
+KALLOC_HEAP_DEFINE(KHEAP_DTRACE, "dtrace", KHEAP_ID_KT_VAR);
 
 void
 dtrace_sprlock(proc_t *p)

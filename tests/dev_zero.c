@@ -8,7 +8,7 @@ T_DECL(dev_zero,
     "test reading from /dev/zero",
     T_META_ASROOT(false))
 {
-	int dev = opendev("/dev/zero", O_RDONLY, NULL, NULL);
+	int dev = opendev("/dev/zero", O_RDONLY, 0, NULL);
 	char buffer[100];
 
 	for (int i = 0; i < 100; i++) {

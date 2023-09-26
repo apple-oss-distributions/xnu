@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -161,6 +161,7 @@ LCK_RW_DECLARE(pf_perim_lock, &pf_perim_lock_grp);
 /* state tables */
 struct pf_state_tree_lan_ext     pf_statetbl_lan_ext;
 struct pf_state_tree_ext_gwy     pf_statetbl_ext_gwy;
+static uint32_t pf_state_tree_ext_gwy_nat64_cnt = 0;
 
 struct pf_palist         pf_pabuf;
 struct pf_status         pf_status;
@@ -952,12 +953,19 @@ pf_state_compare_ext_gwy(struct pf_state_key *a, struct pf_state_key *b)
 {
 	int     diff;
 	int     extfilter;
+	int     a_nat64, b_nat64;
 
 	if ((diff = a->proto - b->proto) != 0) {
 		return diff;
 	}
 
 	if ((diff = a->af_gwy - b->af_gwy) != 0) {
+		return diff;
+	}
+
+	a_nat64 = (a->af_lan == PF_INET6 && a->af_gwy == PF_INET) ? 1 : 0;
+	b_nat64 = (b->af_lan == PF_INET6 && b->af_gwy == PF_INET) ? 1 : 0;
+	if ((diff = a_nat64 - b_nat64) != 0) {
 		return diff;
 	}
 
@@ -1123,10 +1131,35 @@ pf_find_state(struct pfi_kif *kif, struct pf_state_key_cmp *key, u_int dir)
 	case PF_OUT:
 		sk = RB_FIND(pf_state_tree_lan_ext, &pf_statetbl_lan_ext,
 		    (struct pf_state_key *)key);
+
 		break;
 	case PF_IN:
-		sk = RB_FIND(pf_state_tree_ext_gwy, &pf_statetbl_ext_gwy,
-		    (struct pf_state_key *)key);
+
+		/*
+		 * Generally, a packet can match to
+		 * at most 1 state in the GWY table, with the sole exception
+		 * of NAT64, where a packet can match with at most 2 states
+		 * on the GWY table. This is because, unlike NAT44 or NAT66,
+		 * NAT64 forward translation is done on the input, not output.
+		 * This means a forwarded packet could cause PF to generate 2 states
+		 * on both input and output.
+		 *
+		 * NAT64 reverse translation is done on input. If a packet
+		 * matches NAT64 state on the GWY table, prioritize it
+		 * over any IPv4 state on the GWY table.
+		 */
+		if (pf_state_tree_ext_gwy_nat64_cnt > 0 &&
+		    key->af_lan == PF_INET && key->af_gwy == PF_INET) {
+			key->af_lan = PF_INET6;
+			sk = RB_FIND(pf_state_tree_ext_gwy, &pf_statetbl_ext_gwy,
+			    (struct pf_state_key *) key);
+			key->af_lan = PF_INET;
+		}
+
+		if (sk == NULL) {
+			sk = RB_FIND(pf_state_tree_ext_gwy, &pf_statetbl_ext_gwy,
+			    (struct pf_state_key *)key);
+		}
 		/*
 		 * NAT64 is done only on input, for packets coming in from
 		 * from the LAN side, need to lookup the lan_ext tree.
@@ -1446,6 +1479,30 @@ pf_stateins_err(const char *tree, struct pf_state *s, struct pfi_kif *kif)
 	}
 }
 
+static __inline struct pf_state_key *
+pf_insert_state_key_ext_gwy(struct pf_state_key *psk)
+{
+	struct pf_state_key * ret = RB_INSERT(pf_state_tree_ext_gwy,
+	    &pf_statetbl_ext_gwy, psk);
+	if (!ret && psk->af_lan == PF_INET6 &&
+	    psk->af_gwy == PF_INET) {
+		pf_state_tree_ext_gwy_nat64_cnt++;
+	}
+	return ret;
+}
+
+static __inline struct pf_state_key *
+pf_remove_state_key_ext_gwy(struct pf_state_key *psk)
+{
+	struct pf_state_key * ret = RB_REMOVE(pf_state_tree_ext_gwy,
+	    &pf_statetbl_ext_gwy, psk);
+	if (ret && psk->af_lan == PF_INET6 &&
+	    psk->af_gwy == PF_INET) {
+		pf_state_tree_ext_gwy_nat64_cnt--;
+	}
+	return ret;
+}
+
 int
 pf_insert_state(struct pfi_kif *kif, struct pf_state *s)
 {
@@ -1470,8 +1527,8 @@ pf_insert_state(struct pfi_kif *kif, struct pf_state *s)
 	}
 
 	/* if cur != NULL, we already found a state key and attached to it */
-	if (cur == NULL && (cur = RB_INSERT(pf_state_tree_ext_gwy,
-	    &pf_statetbl_ext_gwy, s->state_key)) != NULL) {
+	if (cur == NULL &&
+	    (cur = pf_insert_state_key_ext_gwy(s->state_key)) != NULL) {
 		/* must not happen. we must have found the sk above! */
 		pf_stateins_err("tree_ext_gwy", s, kif);
 		pf_detach_state(s, PF_DT_SKIP_EXTGWY);
@@ -2190,10 +2247,10 @@ pf_addr_wrap_neq(struct pf_addr_wrap *aw1, struct pf_addr_wrap *aw2)
 	switch (aw1->type) {
 	case PF_ADDR_ADDRMASK:
 	case PF_ADDR_RANGE:
-		if (PF_ANEQ(&aw1->v.a.addr, &aw2->v.a.addr, 0)) {
+		if (PF_ANEQ(&aw1->v.a.addr, &aw2->v.a.addr, AF_INET6)) {
 			return 1;
 		}
-		if (PF_ANEQ(&aw1->v.a.mask, &aw2->v.a.mask, 0)) {
+		if (PF_ANEQ(&aw1->v.a.mask, &aw2->v.a.mask, AF_INET6)) {
 			return 1;
 		}
 		return 0;
@@ -3869,8 +3926,8 @@ pf_get_translation_aux(struct pf_pdesc *pd, pbuf_t *pbuf, int off,
 		struct pf_addr *nsaddr = &pd->naddr;
 		struct pf_addr *ndaddr = &pd->ndaddr;
 
-		*nsaddr = *saddr;
-		*ndaddr = *daddr;
+		PF_ACPY(nsaddr, saddr, pd->af);
+		PF_ACPY(ndaddr, daddr, pd->af);
 
 		switch (r->action) {
 		case PF_NONAT:
@@ -4399,8 +4456,7 @@ pf_detach_state(struct pf_state *s, int flags)
 	TAILQ_REMOVE(&sk->states, s, next);
 	if (--sk->refcnt == 0) {
 		if (!(flags & PF_DT_SKIP_EXTGWY)) {
-			RB_REMOVE(pf_state_tree_ext_gwy,
-			    &pf_statetbl_ext_gwy, sk);
+			pf_remove_state_key_ext_gwy(sk);
 		}
 		if (!(flags & PF_DT_SKIP_LANEXT)) {
 			RB_REMOVE(pf_state_tree_lan_ext,
@@ -8841,13 +8897,11 @@ pf_test_state_esp(struct pf_state **state, int direction, struct pfi_kif *kif,
 			if (s) {
 				struct pf_state_key *sk = s->state_key;
 
-				RB_REMOVE(pf_state_tree_ext_gwy,
-				    &pf_statetbl_ext_gwy, sk);
+				pf_remove_state_key_ext_gwy(sk);
 				sk->lan.xport.spi = sk->gwy.xport.spi =
 				    esp->spi;
 
-				if (RB_INSERT(pf_state_tree_ext_gwy,
-				    &pf_statetbl_ext_gwy, sk)) {
+				if (pf_insert_state_key_ext_gwy(sk)) {
 					pf_detach_state(s, PF_DT_SKIP_EXTGWY);
 				} else {
 					*state = s;
@@ -10982,29 +11036,25 @@ pf_copy_fragment_tag(struct mbuf *m, struct pf_fragment_tag *ftag, int how)
 	    sizeof(*ftag), how, m);
 	if (tag == NULL) {
 		return NULL;
-	} else {
-		m_tag_prepend(m, tag);
-		tag = tag + 1;
 	}
-	bcopy(ftag, tag, sizeof(*ftag));
+	m_tag_prepend(m, tag);
+	bcopy(ftag, tag->m_tag_data, sizeof(*ftag));
 	pftag->pftag_flags |= PF_TAG_REASSEMBLED;
-	return (struct pf_fragment_tag *)tag;
+	return (struct pf_fragment_tag *)tag->m_tag_data;
 }
 
 struct pf_fragment_tag *
 pf_find_fragment_tag(struct mbuf *m)
 {
 	struct m_tag *tag;
-	struct pf_fragment_tag *ftag;
+	struct pf_fragment_tag *ftag = NULL;
 	struct pf_mtag *pftag = pf_find_mtag(m);
 
-	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_PF_REASS,
-	    NULL);
+	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_PF_REASS);
 	VERIFY((tag == NULL) || (pftag->pftag_flags & PF_TAG_REASSEMBLED));
 	if (tag != NULL) {
-		tag = tag + 1;
+		ftag = (struct pf_fragment_tag *)tag->m_tag_data;
 	}
-	ftag = (struct pf_fragment_tag *)tag;
 	return ftag;
 }
 

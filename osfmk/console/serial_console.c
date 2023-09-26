@@ -151,6 +151,12 @@ static int nmi_counter           = 0;
 static bool console_suspended = false;
 
 /**
+ * Controls console output for underlying serial or video console.
+ * To be used only by core console and init accessors.
+ */
+int disableConsoleOutput;
+
+/**
  * Enforce policies around when console I/O is allowed. Most importantly about
  * not performing console I/O while interrupts are disabled (which can cause
  * serious latency issues).
@@ -261,6 +267,9 @@ _cnputc(char c, bool poll)
  * Helper function for outputting characters directly to the underlying console
  * (either video or serial).
  *
+ * @note disableConsoleOutput is to be used only by core console and init accessors
+ *       such as this function. Returns early if the serial output is disabled.
+ *
  * @param c The array of characters to print.
  * @param poll Whether or not this call should poll instead of going to sleep
  *             waiting for an interrupt when the hardware device isn't ready
@@ -269,8 +278,6 @@ _cnputc(char c, bool poll)
 static inline void
 _cnputs(char *c, int size, bool poll)
 {
-	extern int disableConsoleOutput;
-
 	if (disableConsoleOutput) {
 		return;
 	}
@@ -506,12 +513,20 @@ console_resume()
  *       underlying console with no buffering. This is the same for when the
  *       console is suspended.
  *
+ * @note disableConsoleOutput is to be used only by core console and init accessors
+ *       such as this function. Returns early if the serial output is disabled and
+ *       skips lock acquisition.
+ *
  * @param str The string of characters to print.
  * @param size The number of characters in `str` to print.
  */
 void
 console_write(char *str, int size)
 {
+	if (disableConsoleOutput) {
+		return;
+	}
+
 	assert(str != NULL);
 
 	char *write_ptr = NULL;
@@ -585,11 +600,18 @@ console_write(char *str, int size)
  *       there's a specific reason why this serial data can't get synchronized
  *       through the console buffer.
  *
+ * @note disableConsoleOutput is to be used only by core console and init accessors
+ *       such as this function. Returns early if the serial output is disabled.
+ *
  * @param c The character to print.
  */
 void
 console_write_unbuffered(char c)
 {
+	if (disableConsoleOutput) {
+		return;
+	}
+
 	_cnputc(c, true);
 }
 

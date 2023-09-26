@@ -1327,6 +1327,30 @@ vfs_context_can_break_leases(vfs_context_t ctx)
 	return true;
 }
 
+boolean_t
+vfs_context_allow_fs_blksize_nocache_write(vfs_context_t ctx)
+{
+	uthread_t uth;
+	thread_t t;
+	proc_t p;
+
+	if ((ctx == NULL) || (t = VFS_CONTEXT_GET_THREAD(ctx)) == NULL) {
+		return FALSE;
+	}
+
+	uth = get_bsdthread_info(t);
+	if (uth && (uth->uu_flag & UT_FS_BLKSIZE_NOCACHE_WRITES)) {
+		return TRUE;
+	}
+
+	p = (proc_t)get_bsdthreadtask_info(t);
+	if (p && (os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE)) {
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
 /*
  * vfs_context_proc
  *

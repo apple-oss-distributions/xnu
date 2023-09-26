@@ -206,7 +206,7 @@ static bool
 flow_entry_add_child(struct flow_entry *parent_fe, struct flow_entry *child_fe)
 {
 	SK_LOG_VAR(char dbgbuf[FLOWENTRY_DBGBUF_SIZE]);
-	ASSERT(parent_fe->fe_flags & FLOWENT_PARENT);
+	ASSERT(parent_fe->fe_flags & FLOWENTF_PARENT);
 
 	lck_rw_lock_exclusive(&parent_fe->fe_child_list_lock);
 
@@ -253,7 +253,7 @@ flow_entry_remove_all_children(struct flow_entry *parent_fe, struct nx_flowswitc
 {
 	bool sched_reaper_thread = false;
 
-	ASSERT(parent_fe->fe_flags & FLOWENT_PARENT);
+	ASSERT(parent_fe->fe_flags & FLOWENTF_PARENT);
 
 	lck_rw_lock_exclusive(&parent_fe->fe_child_list_lock);
 
@@ -267,11 +267,11 @@ flow_entry_remove_all_children(struct flow_entry *parent_fe, struct nx_flowswitc
 			 * atomic, let the increment happen first, and the
 			 * thread losing the CAS does decrement.
 			 */
-			atomic_add_32(&fsw->fsw_pending_nonviable, 1);
-			if (atomic_test_set_32(&fe->fe_want_nonviable, 0, 1)) {
+			os_atomic_inc(&fsw->fsw_pending_nonviable, relaxed);
+			if (os_atomic_cmpxchg(&fe->fe_want_nonviable, 0, 1, acq_rel)) {
 				sched_reaper_thread = true;
 			} else {
-				atomic_add_32(&fsw->fsw_pending_nonviable, -1);
+				os_atomic_dec(&fsw->fsw_pending_nonviable, relaxed);
 			}
 		}
 
@@ -290,7 +290,7 @@ flow_entry_remove_all_children(struct flow_entry *parent_fe, struct nx_flowswitc
 static void
 flow_entry_set_demux_patterns(struct flow_entry *fe, struct nx_flow_req *req)
 {
-	ASSERT(fe->fe_flags & FLOWENT_CHILD);
+	ASSERT(fe->fe_flags & FLOWENTF_CHILD);
 	ASSERT(req->nfr_flow_demux_count > 0);
 
 	fe->fe_demux_patterns = sk_alloc_type_array(struct kern_flow_demux_pattern, req->nfr_flow_demux_count,
@@ -432,7 +432,7 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 	struct flow_mgr *fm = fo->fo_fsw->fsw_flow_mgr;
 	fe = flow_mgr_find_conflicting_fe(fm, &key);
 	if (fe != NULL) {
-		if ((fe->fe_flags & FLOWENT_PARENT) &&
+		if ((fe->fe_flags & FLOWENTF_PARENT) &&
 		    uuid_compare(fe->fe_uuid, req->nfr_parent_flow_uuid) == 0) {
 			parent_fe = fe;
 			fe = NULL;
@@ -479,7 +479,7 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 
 	if (__improbable(req->nfr_flags & NXFLOWREQF_LISTENER)) {
 		/* mark this as listener mode */
-		atomic_bitset_32(&fe->fe_flags, FLOWENTF_LISTENER);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_LISTENER, relaxed);
 	} else {
 		ASSERT((fe->fe_key.fk_ipver == IPVERSION &&
 		    fe->fe_key.fk_src4.s_addr != INADDR_ANY) ||
@@ -487,9 +487,12 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 		    !IN6_IS_ADDR_UNSPECIFIED(&fe->fe_key.fk_src6)));
 
 		/* mark this as connected mode */
-		atomic_bitset_32(&fe->fe_flags, FLOWENTF_CONNECTED);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_CONNECTED, relaxed);
 	}
 
+	if (req->nfr_flags & NXFLOWREQF_NOWAKEFROMSLEEP) {
+		fe->fe_flags |= FLOWENTF_NOWAKEFROMSLEEP;
+	}
 	fe->fe_port_reservation = req->nfr_port_reservation;
 	req->nfr_port_reservation = NULL;
 	if (req->nfr_flags & NXFLOWREQF_EXT_PORT_RSV) {
@@ -524,7 +527,7 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 		fe->fe_qset_select = FE_QSET_SELECT_NONE;
 	}
 	if (req->nfr_flags & NXFLOWREQF_LOW_LATENCY) {
-		atomic_bitset_32(&fe->fe_flags, FLOWENTF_LOW_LATENCY);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_LOW_LATENCY, relaxed);
 	}
 
 	fe->fe_transport_protocol = req->nfr_transport_protocol;
@@ -540,7 +543,7 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 		switch (req->nfr_ip_protocol) {
 		case IPPROTO_TCP:
 		case IPPROTO_UDP:
-			atomic_bitset_32(&fe->fe_flags, FLOWENTF_TRACK);
+			os_atomic_or(&fe->fe_flags, FLOWENTF_TRACK, relaxed);
 			break;
 		default:
 			break;
@@ -548,11 +551,11 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 	}
 
 	if (req->nfr_flags & NXFLOWREQF_QOS_MARKING) {
-		atomic_bitset_32(&fe->fe_flags, FLOWENTF_QOS_MARKING);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_QOS_MARKING, relaxed);
 	}
 
 	if (req->nfr_flags & NXFLOWREQF_PARENT) {
-		atomic_bitset_32(&fe->fe_flags, FLOWENT_PARENT);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_PARENT, relaxed);
 		TAILQ_INIT(&fe->fe_child_list);
 		lck_rw_init(&fe->fe_child_list_lock, &nexus_lock_group, &nexus_lock_attr);
 	}
@@ -593,7 +596,7 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 	ASSERT(err == 0);
 
 	if (parent_fe != NULL) {
-		atomic_bitset_32(&fe->fe_flags, FLOWENT_CHILD);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_CHILD, relaxed);
 		flow_entry_set_demux_patterns(fe, req);
 		fe->fe_demux_pkt_data = sk_alloc_data(FLOW_DEMUX_MAX_LEN, Z_WAITOK | Z_NOFAIL, skmem_tag_flow_demux);
 		if (!flow_entry_add_child(parent_fe, fe)) {
@@ -671,24 +674,24 @@ flow_entry_teardown(struct flow_owner *fo, struct flow_entry *fe)
 	ASSERT(!(fe->fe_flags & FLOWENTF_LINGERING));
 	ASSERT(fsw != NULL);
 
-	if (atomic_test_set_32(&fe->fe_want_nonviable, 1, 0)) {
+	if (os_atomic_cmpxchg(&fe->fe_want_nonviable, 1, 0, acq_rel)) {
 		ASSERT(fsw->fsw_pending_nonviable != 0);
-		atomic_add_32(&fsw->fsw_pending_nonviable, -1);
-		atomic_bitset_32(&fe->fe_flags, FLOWENTF_NONVIABLE);
+		os_atomic_dec(&fsw->fsw_pending_nonviable, relaxed);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_NONVIABLE, relaxed);
 	}
 
 	/* always withdraw namespace during tear down */
 	if (!(fe->fe_flags & FLOWENTF_EXTRL_PORT) &&
 	    !(fe->fe_flags & FLOWENTF_WITHDRAWN)) {
-		atomic_bitset_32(&fe->fe_flags, FLOWENTF_WITHDRAWN);
-		atomic_set_32(&fe->fe_want_withdraw, 0);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_WITHDRAWN, relaxed);
+		os_atomic_store(&fe->fe_want_withdraw, 0, release);
 		/* local port is now inactive; not eligible for offload */
 		flow_namespace_withdraw(&fe->fe_port_reservation);
 	}
 
 	/* we may get here multiple times, so check */
 	if (!(fe->fe_flags & FLOWENTF_TORN_DOWN)) {
-		atomic_bitset_32(&fe->fe_flags, FLOWENTF_TORN_DOWN);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_TORN_DOWN, relaxed);
 		if (fe->fe_adv_idx != FLOWADV_IDX_NONE) {
 			if (fo->fo_nx_port_na != NULL) {
 				na_flowadv_entry_free(fo->fo_nx_port_na,
@@ -702,7 +705,7 @@ flow_entry_teardown(struct flow_owner *fo, struct flow_entry *fe)
 	ASSERT(fe->fe_flags & FLOWENTF_TORN_DOWN);
 
 	/* mark child flow as nonviable */
-	if (fe->fe_flags & FLOWENT_PARENT) {
+	if (fe->fe_flags & FLOWENTF_PARENT) {
 		flow_entry_remove_all_children(fe, fsw);
 	}
 }
@@ -721,7 +724,7 @@ flow_entry_destroy(struct flow_owner *fo, struct flow_entry *fe, bool nolinger,
 	 * child flow: one in id_tree, one here
 	 */
 	ASSERT(flow_entry_refcnt(fe) > 2 ||
-	    ((fe->fe_flags & FLOWENT_CHILD) && flow_entry_refcnt(fe) > 1));
+	    ((fe->fe_flags & FLOWENTF_CHILD) && flow_entry_refcnt(fe) > 1));
 
 	flow_entry_teardown(fo, fe);
 
@@ -729,7 +732,7 @@ flow_entry_destroy(struct flow_owner *fo, struct flow_entry *fe, bool nolinger,
 	ASSERT(err == 0);
 
 	/* only regular or parent flows have entries in flow_table */
-	if (__probable(!(fe->fe_flags & FLOWENT_CHILD))) {
+	if (__probable(!(fe->fe_flags & FLOWENTF_CHILD))) {
 		uint32_t hash;
 		hash = flow_key_hash(&fe->fe_key);
 		cuckoo_hashtable_del(fm->fm_flow_table, &fe->fe_cnode, hash);
@@ -740,7 +743,7 @@ flow_entry_destroy(struct flow_owner *fo, struct flow_entry *fe, bool nolinger,
 	flow_entry_release(&tfe);
 
 	ASSERT(!(fe->fe_flags & FLOWENTF_DESTROYED));
-	atomic_bitset_32(&fe->fe_flags, FLOWENTF_DESTROYED);
+	os_atomic_or(&fe->fe_flags, FLOWENTF_DESTROYED, relaxed);
 
 	if (fe->fe_transport_protocol == IPPROTO_QUIC) {
 		if (!nolinger && close_params != NULL) {
@@ -835,6 +838,7 @@ fe_stats_init(struct flow_entry *fe)
 
 	bzero(sf, sizeof(*sf));
 	uuid_copy(sf->sf_nx_uuid, fsw->fsw_nx->nx_uuid);
+	uuid_copy(sf->sf_uuid, fe->fe_uuid);
 	(void) strlcpy(sf->sf_if_name, fsw->fsw_flow_mgr->fm_name, IFNAMSIZ);
 	sf->sf_if_index = fsw->fsw_ifp->if_index;
 	sf->sf_pid = fe->fe_pid;
@@ -847,7 +851,7 @@ fe_stats_init(struct flow_entry *fe)
 	sf->sf_nx_port = fe->fe_nx_port;
 	sf->sf_key = fe->fe_key;
 	sf->sf_protocol = fe->fe_transport_protocol;
-	sf->sf_svc_class = fe->fe_svc_class;
+	sf->sf_svc_class = (packet_svc_class_t)fe->fe_svc_class;
 	sf->sf_adv_idx = fe->fe_adv_idx;
 
 	if (fe->fe_flags & FLOWENTF_TRACK) {
@@ -904,11 +908,16 @@ fe_stats_update(struct flow_entry *fe)
 	if (fe->fe_flags & FLOWENTF_LOW_LATENCY) {
 		sf->sf_flags |= SFLOWF_LOW_LATENCY;
 	}
-	if (fe->fe_flags & FLOWENT_PARENT) {
+	if (fe->fe_flags & FLOWENTF_PARENT) {
 		sf->sf_flags |= SFLOWF_PARENT;
 	}
-	if (fe->fe_flags & FLOWENT_CHILD) {
+	if (fe->fe_flags & FLOWENTF_CHILD) {
 		sf->sf_flags |= SFLOWF_CHILD;
+	}
+	if (fe->fe_flags & FLOWENTF_NOWAKEFROMSLEEP) {
+		sf->sf_flags |= SFLOWF_NOWAKEFROMSLEEP;
+	} else {
+		sf->sf_flags &= ~SFLOWF_NOWAKEFROMSLEEP;
 	}
 
 	sf->sf_bucket_idx = SFLOW_BUCKET_NONE;

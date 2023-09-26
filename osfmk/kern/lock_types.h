@@ -57,6 +57,24 @@ __options_decl(lck_wake_action_t, unsigned int, {
 
 typedef const struct hw_spin_policy *hw_spin_policy_t;
 
+#if XNU_KERNEL_PRIVATE
+
+/*!
+ * @enum lck_option_t
+ *
+ * @abstract
+ * Lock options to pass to "lcks=" boot-arg
+ */
+__options_decl(lck_option_t, unsigned int, {
+	LCK_OPTION_ENABLE_DEBUG     = 0x01, /**< Request debug in default attribute */
+	LCK_OPTION_ENABLE_STAT      = 0x02, /**< Request lock group statistics in default attribute */
+	LCK_OPTION_DISABLE_RW_PRIO  = 0x04, /**< Disable RW lock priority promotion */
+	LCK_OPTION_ENABLE_TIME_STAT = 0x08, /**< Request time lock group statistics in default attribute */
+	LCK_OPTION_DISABLE_RW_DEBUG = 0x10, /**< Disable RW lock best-effort debugging. */
+});
+
+#endif // XNU_KERNEL_PRIVATE
+
 #if MACH_KERNEL_PRIVATE
 
 /*

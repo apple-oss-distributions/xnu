@@ -613,6 +613,7 @@ mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
 	int error, slot, static_entry = 0;
 	u_int i;
 
+
 	/*
 	 * Some preliminary checks to make sure the policy's conf structure
 	 * contains the required fields.

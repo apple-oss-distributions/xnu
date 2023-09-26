@@ -238,13 +238,14 @@ extern vm_offset_t other_percpu_base(int cpu_number);
  */
 #define percpu_foreach_secondary(it, name) \
 	for (__PERCPU_TYPE(name) it, \
-	    __base_ ## it = (typeof(it))__unsafe_forge_bidi_indexable(void *, percpu_base.start, percpu_base.end - percpu_base.start), \
-	    __end_ ## it = (typeof(it))((caddr_t)__base_ ## it  + percpu_base.end - percpu_base.start); \
+	    __base_ ## it = (typeof(it))__unsafe_forge_bidi_indexable(void *, \
+	    percpu_base.start, percpu_base.end - percpu_base.start),          \
+	    __end_ ## it = (typeof(it))((vm_address_t)__base_ ## it  + percpu_base.end - percpu_base.start); \
         \
-	    (it = (typeof(it))((caddr_t)__base_ ## it + __PERCPU_ADDR(name)), \
+	    (it = (typeof(it))((vm_address_t)__base_ ## it + __PERCPU_ADDR(name)), \
 	    __base_ ## it <= __end_ ## it); \
         \
-	    __base_ ## it = (typeof(it))((caddr_t)__base_ ## it + percpu_section_size()))
+	    __base_ ## it = (typeof(it))((vm_address_t)__base_ ## it + percpu_section_size()))
 
 #pragma mark - implementation details
 

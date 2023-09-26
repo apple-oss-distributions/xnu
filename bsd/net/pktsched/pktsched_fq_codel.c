@@ -37,6 +37,9 @@
 #include <net/pktsched/pktsched_fq_codel.h>
 #include <os/log.h>
 #include <pexpert/pexpert.h>    /* for PE_parse_boot_argn */
+#include <mach/thread_act.h>
+#include <kern/thread.h>
+#include <kern/sched_prim.h>
 
 #define FQ_CODEL_DEFAULT_QUANTUM 1500
 
@@ -54,14 +57,19 @@
 static KALLOC_TYPE_DEFINE(fq_if_zone, fq_if_t, NET_KT_DEFAULT);
 static KALLOC_TYPE_DEFINE(fq_if_grp_zone, fq_if_group_t, NET_KT_DEFAULT);
 
-static uint64_t fq_empty_purge_delay = FQ_EMPTY_PURGE_DELAY;
-#if (DEVELOPMENT || DEBUG)
 SYSCTL_NODE(_net_classq, OID_AUTO, fq_codel, CTLFLAG_RW | CTLFLAG_LOCKED,
     0, "FQ-CODEL parameters");
 
+SYSCTL_INT(_net_classq_fq_codel, OID_AUTO, fq_enable_pacing, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &ifclassq_enable_pacing, 0, "Enable pacing");
+
+static uint64_t fq_empty_purge_delay = FQ_EMPTY_PURGE_DELAY;
+#if (DEVELOPMENT || DEBUG)
 SYSCTL_QUAD(_net_classq_fq_codel, OID_AUTO, fq_empty_purge_delay, CTLFLAG_RW |
     CTLFLAG_LOCKED, &fq_empty_purge_delay, "Empty flow queue purge delay (ns)");
 #endif /* !DEVELOPMENT && !DEBUG */
+
+unsigned int ifclassq_enable_pacing = 1;
 
 typedef STAILQ_HEAD(, flowq) flowq_dqlist_t;
 
@@ -71,7 +79,7 @@ static void fq_if_classq_init(fq_if_group_t *fqg, uint32_t priority,
     uint32_t quantum, uint32_t drr_max, uint32_t svc_class);
 static void fq_if_dequeue(fq_if_t *, fq_if_classq_t *, uint32_t,
     int64_t, classq_pkt_t *, classq_pkt_t *, uint32_t *,
-    uint32_t *, flowq_dqlist_t *, bool, uint64_t now);
+    uint32_t *, flowq_dqlist_t *, bool, uint64_t, bool*, uint64_t*);
 void fq_if_stat_sc(fq_if_t *fqs, cqrq_stat_sc_t *stat);
 static void fq_if_purge(fq_if_t *);
 static void fq_if_purge_classq(fq_if_t *, fq_if_classq_t *);
@@ -89,7 +97,7 @@ static int fq_if_dequeue_sc_classq_multi_separate(struct ifclassq *ifq,
     classq_pkt_t *first_packet, classq_pkt_t *last_packet, u_int32_t *retpktcnt,
     u_int32_t *retbytecnt, uint8_t grp_idx);
 static void fq_if_grp_stat_sc(fq_if_t *fqs, fq_if_group_t *grp,
-    cqrq_stat_sc_t *stat);
+    cqrq_stat_sc_t *stat, uint64_t now);
 static void fq_if_purge_grp(fq_if_t *fqs, fq_if_group_t *grp);
 static inline boolean_t fq_if_is_grp_combined(fq_if_t *fqs, uint8_t grp_idx);
 static void fq_if_destroy_grps(fq_if_t *fqs);
@@ -117,6 +125,8 @@ static void fq_if_grps_bitmap_clr(fq_grp_tailq_t *grp_list, int pri,
     fq_if_state state);
 static int fq_if_grps_bitmap_ffs(fq_grp_tailq_t *grp_list, int pri,
     fq_if_state state, fq_if_group_t **selected_grp);
+static void fq_if_grps_bitmap_move(fq_grp_tailq_t *grp_list, int pri,
+    fq_if_state dst_state, fq_if_state src_state);
 
 static boolean_t fq_if_grps_sc_bitmap_zeros(fq_grp_tailq_t *grp_list, int pri,
     fq_if_state state);
@@ -126,6 +136,8 @@ static void fq_if_grps_sc_bitmap_clr(fq_grp_tailq_t *grp_list, int pri,
     fq_if_state state);
 static int fq_if_grps_sc_bitmap_ffs(fq_grp_tailq_t *grp_list, int pri,
     fq_if_state state, fq_if_group_t **selected_grp);
+static void fq_if_grps_sc_bitmap_move(fq_grp_tailq_t *grp_list, int pri,
+    fq_if_state dst_state, fq_if_state src_state);
 
 bitmap_ops_t fq_if_grps_bitmap_ops =
 {
@@ -133,6 +145,7 @@ bitmap_ops_t fq_if_grps_bitmap_ops =
 	.zeros  = fq_if_grps_bitmap_zeros,
 	.cpy    = fq_if_grps_bitmap_cpy,
 	.clr    = fq_if_grps_bitmap_clr,
+	.move   = fq_if_grps_bitmap_move,
 };
 
 bitmap_ops_t fq_if_grps_sc_bitmap_ops =
@@ -141,11 +154,15 @@ bitmap_ops_t fq_if_grps_sc_bitmap_ops =
 	.zeros  = fq_if_grps_sc_bitmap_zeros,
 	.cpy    = fq_if_grps_sc_bitmap_cpy,
 	.clr    = fq_if_grps_sc_bitmap_clr,
+	.move   = fq_if_grps_sc_bitmap_move,
 };
 
 void
 pktsched_fq_init(void)
 {
+	PE_parse_boot_argn("ifclassq_enable_pacing", &ifclassq_enable_pacing,
+	    sizeof(ifclassq_enable_pacing));
+
 	// format looks like ifcq_drr_max=8,8,6
 	char buf[(FQ_IF_MAX_CLASSES) * 3];
 	size_t i, len, pri_index = 0;
@@ -177,7 +194,7 @@ pktsched_fq_init(void)
 typedef void (* fq_if_append_pkt_t)(classq_pkt_t *, classq_pkt_t *);
 typedef boolean_t (* fq_getq_flow_t)(fq_if_t *, fq_if_classq_t *, fq_t *,
     int64_t, uint32_t, classq_pkt_t *, classq_pkt_t *, uint32_t *,
-    uint32_t *, boolean_t *, uint32_t, uint64_t);
+    uint32_t *, boolean_t *, uint64_t);
 
 static void
 fq_if_append_mbuf(classq_pkt_t *pkt, classq_pkt_t *next_pkt)
@@ -209,7 +226,7 @@ static boolean_t
 fq_getq_flow_kpkt(fq_if_t *fqs, fq_if_classq_t *fq_cl, fq_t *fq,
     int64_t byte_limit, uint32_t pkt_limit, classq_pkt_t *head,
     classq_pkt_t *tail, uint32_t *byte_cnt, uint32_t *pkt_cnt,
-    boolean_t *qempty, uint32_t pflags, uint64_t now)
+    boolean_t *qempty, uint64_t now)
 {
 	uint32_t plen;
 	pktsched_pkt_t pkt;
@@ -221,17 +238,18 @@ fq_getq_flow_kpkt(fq_if_t *fqs, fq_if_classq_t *fq_cl, fq_t *fq,
 	 * Assert to make sure pflags is part of PKT_F_COMMON_MASK;
 	 * all common flags need to be declared in that mask.
 	 */
-	ASSERT((pflags & ~PKT_F_COMMON_MASK) == 0);
-
 	while (fq->fq_deficit > 0 && limit_reached == FALSE &&
-	    !KPKTQ_EMPTY(&fq->fq_kpktq)) {
+	    !KPKTQ_EMPTY(&fq->fq_kpktq) && fq_tx_time_ready(fqs, fq, now, NULL)) {
 		_PKTSCHED_PKT_INIT(&pkt);
 		fq_getq_flow(fqs, fq, &pkt, now);
 		ASSERT(pkt.pktsched_ptype == QP_PACKET);
 
 		plen = pktsched_get_pkt_len(&pkt);
 		fq->fq_deficit -= plen;
-		pkt.pktsched_pkt_kpkt->pkt_pflags |= pflags;
+		if (__improbable((fq->fq_flags & FQF_FRESH_FLOW) != 0)) {
+			pkt.pktsched_pkt_kpkt->pkt_pflags |= PKT_F_NEW_FLOW;
+			fq->fq_flags &= ~FQF_FRESH_FLOW;
+		}
 
 		if (head->cp_kpkt == NULL) {
 			*head = pkt.pktsched_pkt;
@@ -267,7 +285,7 @@ static boolean_t
 fq_getq_flow_mbuf(fq_if_t *fqs, fq_if_classq_t *fq_cl, fq_t *fq,
     int64_t byte_limit, uint32_t pkt_limit, classq_pkt_t *head,
     classq_pkt_t *tail, uint32_t *byte_cnt, uint32_t *pkt_cnt,
-    boolean_t *qempty, uint32_t pflags, uint64_t now)
+    boolean_t *qempty, uint64_t now)
 {
 	u_int32_t plen;
 	pktsched_pkt_t pkt;
@@ -276,14 +294,18 @@ fq_getq_flow_mbuf(fq_if_t *fqs, fq_if_classq_t *fq_cl, fq_t *fq,
 	struct ifnet *ifp = ifq->ifcq_ifp;
 
 	while (fq->fq_deficit > 0 && limit_reached == FALSE &&
-	    !MBUFQ_EMPTY(&fq->fq_mbufq)) {
+	    !MBUFQ_EMPTY(&fq->fq_mbufq) && fq_tx_time_ready(fqs, fq, now, NULL)) {
 		_PKTSCHED_PKT_INIT(&pkt);
 		fq_getq_flow(fqs, fq, &pkt, now);
 		ASSERT(pkt.pktsched_ptype == QP_MBUF);
 
 		plen = pktsched_get_pkt_len(&pkt);
 		fq->fq_deficit -= plen;
-		pkt.pktsched_pkt_mbuf->m_pkthdr.pkt_flags |= pflags;
+
+		if (__improbable((fq->fq_flags & FQF_FRESH_FLOW) != 0)) {
+			pkt.pktsched_pkt_mbuf->m_pkthdr.pkt_flags |= PKTF_NEW_FLOW;
+			fq->fq_flags &= ~FQF_FRESH_FLOW;
+		}
 
 		if (head->cp_mbuf == NULL) {
 			*head = pkt.pktsched_pkt;
@@ -431,6 +453,8 @@ fq_if_classq_init(fq_if_group_t *fqg, uint32_t pri, uint32_t quantum,
 	fq_cl->fcl_pri = pri;
 	fq_cl->fcl_drr_max = drr_max;
 	fq_cl->fcl_service_class = svc_class;
+	fq_cl->fcl_next_tx_time = 0;
+	fq_cl->fcl_flags = 0;
 	STAILQ_INIT(&fq_cl->fcl_new_flows);
 	STAILQ_INIT(&fq_cl->fcl_old_flows);
 }
@@ -466,7 +490,7 @@ fq_if_enqueue_classq(struct ifclassq *ifq, classq_pkt_t *head,
 	if (__improbable(svc == MBUF_SC_BK_SYS && fqs->fqs_throttle == 1)) {
 		IFCQ_UNLOCK(ifq);
 		/* BK_SYS is currently throttled */
-		atomic_add_32(&fq_cl->fcl_stat.fcl_throttle_drops, 1);
+		os_atomic_inc(&fq_cl->fcl_stat.fcl_throttle_drops, relaxed);
 		pktsched_free_pkt(&pkt);
 		*pdrop = TRUE;
 		ret = EQSUSPENDED;
@@ -675,6 +699,20 @@ fq_if_grps_bitmap_clr(fq_grp_tailq_t *grp_list, int pri, fq_if_state state)
 	}
 }
 
+static void
+fq_if_grps_bitmap_move(fq_grp_tailq_t *grp_list, int pri, fq_if_state dst_state,
+    fq_if_state src_state)
+{
+    #pragma unused(pri)
+
+	fq_if_group_t *grp;
+	TAILQ_FOREACH(grp, grp_list, fqg_grp_link) {
+		grp->fqg_bitmaps[dst_state] =
+		    grp->fqg_bitmaps[dst_state] | grp->fqg_bitmaps[src_state];
+		grp->fqg_bitmaps[src_state] = 0;
+	}
+}
+
 static int
 fq_if_grps_sc_bitmap_ffs(fq_grp_tailq_t *grp_list, int pri, fq_if_state state,
     fq_if_group_t **selected_grp)
@@ -729,6 +767,31 @@ fq_if_grps_sc_bitmap_clr(fq_grp_tailq_t *grp_list, int pri, fq_if_state state)
 	}
 }
 
+static void
+fq_if_grps_sc_bitmap_move(fq_grp_tailq_t *grp_list, int pri, fq_if_state dst_state,
+    fq_if_state src_state)
+{
+	fq_if_group_t *grp;
+
+	TAILQ_FOREACH(grp, grp_list, fqg_grp_link) {
+		pktsched_bit_move(pri, &grp->fqg_bitmaps[dst_state],
+		    &grp->fqg_bitmaps[src_state]);
+		pktsched_bit_clr(pri, &grp->fqg_bitmaps[src_state]);
+	}
+}
+
+static void
+fq_if_schedule_pacemaker(struct ifclassq *ifq, uint64_t next_tx_time)
+{
+	if (!ifclassq_enable_pacing || !ifclassq_enable_l4s) {
+		return;
+	}
+	ASSERT(next_tx_time != FQ_INVALID_TX_TS);
+
+	struct ifnet *ifp = ifq->ifcq_ifp;
+	ifnet_start_set_pacemaker_time(ifp, next_tx_time);
+}
+
 static int
 fq_if_dequeue_classq_multi_common(struct ifclassq *ifq, mbuf_svc_class_t svc,
     u_int32_t maxpktcnt, u_int32_t maxbytecnt, classq_pkt_t *first_packet,
@@ -745,8 +808,9 @@ fq_if_dequeue_classq_multi_common(struct ifclassq *ifq, mbuf_svc_class_t svc,
 	fq_grp_tailq_t *grp_list, tmp_grp_list;
 	fq_if_group_t *fq_grp = NULL;
 	fq_if_t *fqs;
-	uint64_t now;
+	uint64_t now, next_tx_time = FQ_INVALID_TX_TS;
 	int pri = 0, svc_pri = 0;
+	bool all_paced = true;
 
 	IFCQ_LOCK_ASSERT_HELD(ifq);
 
@@ -791,12 +855,22 @@ fq_if_dequeue_classq_multi_common(struct ifclassq *ifq, mbuf_svc_class_t svc,
 		uint32_t pktcnt = 0, bytecnt = 0;
 		classq_pkt_t head = CLASSQ_PKT_INITIALIZER(head);
 		classq_pkt_t tail = CLASSQ_PKT_INITIALIZER(tail);
+		bool fq_cl_all_paced = false;
+		uint64_t fq_cl_next_tx_time = FQ_INVALID_TX_TS;
 
 		if (fqs->grp_bitmaps_zeros(grp_list, svc_pri, FQ_IF_ER) &&
 		    fqs->grp_bitmaps_zeros(grp_list, svc_pri, FQ_IF_EB)) {
 			fqs->grp_bitmaps_cpy(grp_list, svc_pri, FQ_IF_EB, FQ_IF_IB);
 			fqs->grp_bitmaps_clr(grp_list, svc_pri, FQ_IF_IB);
 			if (fqs->grp_bitmaps_zeros(grp_list, svc_pri, FQ_IF_EB)) {
+				if (ifclassq_enable_pacing && ifclassq_enable_l4s) {
+					/*
+					 * Move fq_cl in IR back to ER, so that they will inspected with priority
+					 * the next time the driver dequeues
+					 */
+					fqs->grp_bitmaps_cpy(grp_list, svc_pri, FQ_IF_ER, FQ_IF_IR);
+					fqs->grp_bitmaps_clr(grp_list, svc_pri, FQ_IF_IR);
+				}
 				break;
 			}
 		}
@@ -828,7 +902,8 @@ fq_if_dequeue_classq_multi_common(struct ifclassq *ifq, mbuf_svc_class_t svc,
 		}
 		fq_if_dequeue(fqs, fq_cl, (maxpktcnt - total_pktcnt),
 		    (maxbytecnt - total_bytecnt), &head, &tail, &pktcnt,
-		    &bytecnt, &fq_dqlist_head, true, now);
+		    &bytecnt, &fq_dqlist_head, true, now, &fq_cl_all_paced,
+		    &fq_cl_next_tx_time);
 		if (head.cp_mbuf != NULL) {
 			ASSERT(STAILQ_EMPTY(&fq_dqlist_head));
 			if (first.cp_mbuf == NULL) {
@@ -840,6 +915,10 @@ fq_if_dequeue_classq_multi_common(struct ifclassq *ifq, mbuf_svc_class_t svc,
 			last = tail;
 			append_pkt(&last, &tmp);
 		}
+		if (fq_cl_all_paced && fq_cl_next_tx_time < next_tx_time) {
+			fq_cl->fcl_stat.fcl_fcl_pacemaker_needed++;
+			next_tx_time = fq_cl_next_tx_time;
+		}
 		fq_cl->fcl_budget -= bytecnt;
 		total_pktcnt += pktcnt;
 		total_bytecnt += bytecnt;
@@ -850,10 +929,20 @@ fq_if_dequeue_classq_multi_common(struct ifclassq *ifq, mbuf_svc_class_t svc,
 		 */
 state_change:
 		VERIFY(fq_grp != NULL);
+		all_paced &= fq_cl_all_paced;
 		if (!FQ_IF_CLASSQ_IDLE(fq_cl)) {
 			if (fq_cl->fcl_budget <= 0) {
 				pktsched_bit_set(pri, &fq_grp->fqg_bitmaps[FQ_IF_IB]);
 				pktsched_bit_clr(pri, &fq_grp->fqg_bitmaps[FQ_IF_ER]);
+			} else if (fq_cl_all_paced) {
+				if (ifclassq_enable_pacing && ifclassq_enable_l4s) {
+					/*
+					 * If a fq_cl still has budget but only paced queues, park it
+					 * to IR so that we will not keep loopping over it
+					 */
+					pktsched_bit_set(pri, &fq_grp->fqg_bitmaps[FQ_IF_IR]);
+					pktsched_bit_clr(pri, &fq_grp->fqg_bitmaps[FQ_IF_ER]);
+				}
 			}
 		} else {
 			pktsched_bit_clr(pri, &fq_grp->fqg_bitmaps[FQ_IF_ER]);
@@ -863,6 +952,13 @@ state_change:
 			fq_cl->fcl_budget = 0;
 		}
 		if (total_pktcnt >= maxpktcnt || total_bytecnt >= maxbytecnt) {
+			if (ifclassq_enable_pacing && ifclassq_enable_l4s) {
+				/*
+				 * Move fq_cl in IR back to ER, so that they will inspected with priority
+				 * the next time the driver dequeues
+				 */
+				fqs->grp_bitmaps_move(grp_list, svc_pri, FQ_IF_ER, FQ_IF_IR);
+			}
 			break;
 		}
 	}
@@ -886,6 +982,10 @@ state_change:
 	}
 	if (retbytecnt != NULL) {
 		*retbytecnt = total_bytecnt;
+	}
+	if (next_tx_time != FQ_INVALID_TX_TS) {
+		ASSERT(next_tx_time > now);
+		fq_if_schedule_pacemaker(ifq, next_tx_time);
 	}
 
 	IFCQ_XMIT_ADD(ifq, total_pktcnt, total_bytecnt);
@@ -975,10 +1075,12 @@ fq_if_dequeue_sc_classq_multi_separate(struct ifclassq *ifq, mbuf_svc_class_t sv
 		classq_pkt_t head = CLASSQ_PKT_INITIALIZER(head);
 		classq_pkt_t tail = CLASSQ_PKT_INITIALIZER(tail);
 		u_int32_t pktcnt = 0, bytecnt = 0;
+		bool all_paced = false;
+		uint64_t next_tx_time = FQ_INVALID_TX_TS;
 
 		fq_if_dequeue(fqs, fq_cl, (maxpktcnt - total_pktcnt),
 		    (maxbytecnt - total_bytecnt), &head, &tail, &pktcnt,
-		    &bytecnt, &fq_dqlist_head, false, now);
+		    &bytecnt, &fq_dqlist_head, false, now, &all_paced, &next_tx_time);
 		if (head.cp_mbuf != NULL) {
 			if (first.cp_mbuf == NULL) {
 				first = head;
@@ -990,6 +1092,13 @@ fq_if_dequeue_sc_classq_multi_separate(struct ifclassq *ifq, mbuf_svc_class_t sv
 		}
 		total_pktcnt += pktcnt;
 		total_bytecnt += bytecnt;
+
+		if (next_tx_time != FQ_INVALID_TX_TS) {
+			ASSERT(next_tx_time > now);
+			fq_cl->fcl_stat.fcl_fcl_pacemaker_needed++;
+			fq_if_schedule_pacemaker(ifq, next_tx_time);
+			break;
+		}
 	}
 
 	/*
@@ -1334,21 +1443,86 @@ fq_if_throttle(fq_if_t *fqs, cqrq_throttle_t *tr)
 	return 0;
 }
 
+static inline boolean_t
+fq_if_is_fq_cl_paced(fq_if_classq_t *fq_cl, uint64_t now)
+{
+	if ((fq_cl->fcl_flags & FCL_PACED) != 0 && fq_cl->fcl_next_tx_time > now) {
+		return true;
+	}
+
+	fq_cl->fcl_flags &= ~FCL_PACED;
+	fq_cl->fcl_next_tx_time = 0;
+	return false;
+}
+
 static void
-fq_if_grp_stat_sc(fq_if_t *fqs, fq_if_group_t *grp, cqrq_stat_sc_t *stat)
+fq_if_grp_stat_sc(fq_if_t *fqs, fq_if_group_t *grp, cqrq_stat_sc_t *stat, uint64_t now)
 {
 	uint8_t pri;
 	fq_if_classq_t *fq_cl;
 
-	if (stat == NULL) {
-		return;
-	}
-
+	ASSERT(stat != NULL);
 	pri = fq_if_service_to_priority(fqs, stat->sc);
 
 	fq_cl = &grp->fqg_classq[pri];
 	stat->packets = (uint32_t)fq_cl->fcl_stat.fcl_pkt_cnt;
 	stat->bytes = (uint32_t)fq_cl->fcl_stat.fcl_byte_cnt;
+
+	if (ifclassq_enable_pacing && ifclassq_enable_l4s &&
+	    fq_if_is_fq_cl_paced(fq_cl, now)) {
+		stat->packets = 0;
+		stat->bytes = 0;
+	}
+}
+
+static boolean_t
+fq_if_is_grp_all_paced(fq_if_group_t *grp)
+{
+	fq_if_classq_t *fq_cl;
+	uint64_t now;
+
+	if (!ifclassq_enable_pacing || !ifclassq_enable_l4s) {
+		return false;
+	}
+
+	now = fq_codel_get_time();
+	for (uint8_t fq_cl_idx = 0; fq_cl_idx < FQ_IF_MAX_CLASSES; fq_cl_idx++) {
+		fq_cl = &grp->fqg_classq[fq_cl_idx];
+		if (fq_cl == NULL || FQ_IF_CLASSQ_IDLE(fq_cl)) {
+			continue;
+		}
+		if (!fq_if_is_fq_cl_paced(fq_cl, now)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+boolean_t
+fq_if_is_all_paced(struct ifclassq *ifq)
+{
+	fq_if_group_t *grp;
+	fq_if_t *fqs = (fq_if_t *)ifq->ifcq_disc;
+
+	IFCQ_LOCK_ASSERT_HELD(ifq);
+
+	if (!ifclassq_enable_pacing || !ifclassq_enable_l4s) {
+		return false;
+	}
+
+	for (uint8_t grp_idx = 0; grp_idx < FQ_IF_MAX_GROUPS; grp_idx++) {
+		grp = fqs->fqs_classq_groups[grp_idx];
+		if (grp == NULL || FQG_BYTES(grp) == 0) {
+			continue;
+		}
+
+		if (!fq_if_is_grp_all_paced(grp)) {
+			return false;
+		}
+	}
+
+	return true;
 }
 
 void
@@ -1356,16 +1530,21 @@ fq_if_stat_sc(fq_if_t *fqs, cqrq_stat_sc_t *stat)
 {
 	cqrq_stat_sc_t grp_sc_stat;
 	fq_if_group_t *grp;
+	uint64_t now = fq_codel_get_time();
 
 	if (stat == NULL) {
 		return;
 	}
 	grp_sc_stat.sc = stat->sc;
+	stat->packets = 0;
+	stat->bytes = 0;
 
 	if (stat->grp_idx == IF_CLASSQ_ALL_GRPS) {
 		if (stat->sc == MBUF_SC_UNSPEC) {
-			stat->packets = IFCQ_LEN(fqs->fqs_ifq);
-			stat->bytes = IFCQ_BYTES(fqs->fqs_ifq);
+			if (!fq_if_is_all_paced(fqs->fqs_ifq)) {
+				stat->packets = IFCQ_LEN(fqs->fqs_ifq);
+				stat->bytes = IFCQ_BYTES(fqs->fqs_ifq);
+			}
 		} else {
 			for (uint8_t grp_idx = 0; grp_idx < FQ_IF_MAX_GROUPS; grp_idx++) {
 				grp = fqs->fqs_classq_groups[grp_idx];
@@ -1373,7 +1552,7 @@ fq_if_stat_sc(fq_if_t *fqs, cqrq_stat_sc_t *stat)
 					continue;
 				}
 
-				fq_if_grp_stat_sc(fqs, grp, &grp_sc_stat);
+				fq_if_grp_stat_sc(fqs, grp, &grp_sc_stat, now);
 				stat->packets += grp_sc_stat.packets;
 				stat->bytes += grp_sc_stat.bytes;
 			}
@@ -1384,24 +1563,32 @@ fq_if_stat_sc(fq_if_t *fqs, cqrq_stat_sc_t *stat)
 	if (stat->sc == MBUF_SC_UNSPEC) {
 		if (fq_if_is_grp_combined(fqs, stat->grp_idx)) {
 			TAILQ_FOREACH(grp, &fqs->fqs_combined_grp_list, fqg_grp_link) {
+				if (fq_if_is_grp_all_paced(grp)) {
+					continue;
+				}
 				stat->packets += FQG_LEN(grp);
 				stat->bytes += FQG_BYTES(grp);
 			}
 		} else {
 			grp = fq_if_find_grp(fqs, stat->grp_idx);
-			stat->packets = FQG_LEN(grp);
-			stat->bytes = FQG_BYTES(grp);
+			if (!fq_if_is_grp_all_paced(grp)) {
+				stat->packets = FQG_LEN(grp);
+				stat->bytes = FQG_BYTES(grp);
+			}
 		}
 	} else {
 		if (fq_if_is_grp_combined(fqs, stat->grp_idx)) {
 			TAILQ_FOREACH(grp, &fqs->fqs_combined_grp_list, fqg_grp_link) {
-				fq_if_grp_stat_sc(fqs, grp, &grp_sc_stat);
+				if (fq_if_is_grp_all_paced(grp)) {
+					continue;
+				}
+				fq_if_grp_stat_sc(fqs, grp, &grp_sc_stat, now);
 				stat->packets += grp_sc_stat.packets;
 				stat->bytes += grp_sc_stat.bytes;
 			}
 		} else {
 			grp = fq_if_find_grp(fqs, stat->grp_idx);
-			fq_if_grp_stat_sc(fqs, grp, stat);
+			fq_if_grp_stat_sc(fqs, grp, stat, now);
 		}
 	}
 }
@@ -1478,6 +1665,7 @@ fq_if_setup_ifclassq(struct ifclassq *ifq, u_int32_t flags,
 		    "failed to create a fq group: %d\n", __func__, err);
 		fq_if_destroy(fqs);
 	}
+
 	return err;
 }
 
@@ -1516,8 +1704,9 @@ fq_if_hash_pkt(fq_if_t *fqs, fq_if_group_t *fq_grp, u_int32_t flowid,
 			fq->fq_group = fq_grp;
 			fq->fq_tfc_type = tfc_type;
 			fq_cl = &FQ_CLASSQ(fq);
-			fq->fq_flags = FQF_FLOWCTL_CAPABLE;
+			fq->fq_flags = (FQF_FLOWCTL_CAPABLE | FQF_FRESH_FLOW);
 			fq->fq_updatetime = now + FQ_UPDATE_INTERVAL(fq);
+			fq->fq_next_tx_time = FQ_INVALID_TX_TS;
 			SLIST_INSERT_HEAD(fq_list, fq, fq_hashlink);
 			fq_cl->fcl_stat.fcl_flows_cnt++;
 		}
@@ -1702,7 +1891,7 @@ fq_if_drop_packet(fq_if_t *fqs, uint64_t now)
 	ASSERT(pkt.pktsched_ptype != QP_INVALID);
 
 	pktsched_get_pkt_vars(&pkt, &pkt_flags, &pkt_timestamp, NULL, NULL,
-	    NULL, NULL);
+	    NULL, NULL, NULL);
 
 	IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
 	*pkt_timestamp = 0;
@@ -1775,7 +1964,6 @@ fq_if_add_fcentry(fq_if_t *fqs, pktsched_pkt_t *pkt, uint8_t flowsrc,
 	}
 #endif /* DEBUG || DEVELOPMENT */
 
-	ASSERT(fq->fq_tfc_type != FQ_TFC_L4S);
 	STAILQ_FOREACH(fce, &fqs->fqs_fclist, fce_link) {
 		if ((uint8_t)fce->fce_flowsrc_type == flowsrc &&
 		    fce->fce_flowid == fq->fq_flowhash) {
@@ -1790,10 +1978,10 @@ fq_if_add_fcentry(fq_if_t *fqs, pktsched_pkt_t *pkt, uint8_t flowsrc,
 		STAILQ_INSERT_TAIL(&fqs->fqs_fclist, fce, fce_link);
 		fq_cl->fcl_stat.fcl_flow_control++;
 		os_log(OS_LOG_DEFAULT, "%s: num: %d, scidx: %d, flowsrc: %d, "
-		    "flow: 0x%x, iface: %s\n", __func__,
+		    "flow: 0x%x, iface: %s, B:%u\n", __func__,
 		    fq_cl->fcl_stat.fcl_flow_control,
 		    fq->fq_sc_index, fce->fce_flowsrc_type, fq->fq_flowhash,
-		    if_name(fqs->fqs_ifq->ifcq_ifp));
+		    if_name(fqs->fqs_ifq->ifcq_ifp), fq->fq_bytes);
 		KDBG(AQM_KTRACE_STATS_FLOW_CTL | DBG_FUNC_START,
 		    fq->fq_flowhash, AQM_KTRACE_FQ_GRP_SC_IDX(fq),
 		    fq->fq_bytes, fq->fq_min_qdelay);
@@ -1814,10 +2002,6 @@ fq_if_flow_feedback(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl)
 {
 	struct flowadv_fcentry *fce = NULL;
 
-	if (fq->fq_tfc_type == FQ_TFC_L4S) {
-		return;
-	}
-
 	IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
 	STAILQ_FOREACH(fce, &fqs->fqs_fclist, fce_link) {
 		if (fce->fce_flowid == fq->fq_flowhash) {
@@ -1826,11 +2010,13 @@ fq_if_flow_feedback(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl)
 	}
 	if (fce != NULL) {
 		fq_cl->fcl_stat.fcl_flow_feedback++;
+		fce->fce_event_type = FCE_EVENT_TYPE_FLOW_CONTROL_FEEDBACK;
 		os_log(OS_LOG_DEFAULT, "%s: num: %d, scidx: %d, flowsrc: %d, "
-		    "flow: 0x%x, iface: %s\n", __func__,
+		    "flow: 0x%x, iface: %s grp: %hhu, B:%u\n", __func__,
 		    fq_cl->fcl_stat.fcl_flow_feedback, fq->fq_sc_index,
 		    fce->fce_flowsrc_type, fce->fce_flowid,
-		    if_name(fqs->fqs_ifq->ifcq_ifp));
+		    if_name(fqs->fqs_ifq->ifcq_ifp), FQ_GROUP(fq)->fqg_index,
+		    fq->fq_bytes);
 		fq_if_remove_fcentry(fqs, fce);
 		KDBG(AQM_KTRACE_STATS_FLOW_CTL | DBG_FUNC_END,
 		    fq->fq_flowhash, AQM_KTRACE_FQ_GRP_SC_IDX(fq),
@@ -1839,19 +2025,48 @@ fq_if_flow_feedback(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl)
 	fq->fq_flags &= ~FQF_FLOWCTL_ON;
 }
 
+boolean_t
+fq_if_report_ce(fq_if_t *fqs, pktsched_pkt_t *pkt, uint32_t ce_cnt,
+    uint32_t pkt_cnt)
+{
+	struct flowadv_fcentry *fce;
+
+#if DEBUG || DEVELOPMENT
+	if (__improbable(ifclassq_flow_control_adv == 0)) {
+		os_log(OS_LOG_DEFAULT, "%s: skipped flow control", __func__);
+		return TRUE;
+	}
+#endif /* DEBUG || DEVELOPMENT */
+
+	IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
+	fce = pktsched_alloc_fcentry(pkt, fqs->fqs_ifq->ifcq_ifp, M_WAITOK);
+	if (fce != NULL) {
+		fce->fce_event_type = FCE_EVENT_TYPE_CONGESTION_EXPERIENCED;
+		fce->fce_ce_cnt = ce_cnt;
+		fce->fce_pkts_since_last_report = pkt_cnt;
+
+		flowadv_add_entry(fce);
+	}
+	return (fce != NULL) ? TRUE : FALSE;
+}
+
+
 void
 fq_if_dequeue(fq_if_t *fqs, fq_if_classq_t *fq_cl, uint32_t pktlimit,
     int64_t bytelimit, classq_pkt_t *top, classq_pkt_t *bottom,
     uint32_t *retpktcnt, uint32_t *retbytecnt, flowq_dqlist_t *fq_dqlist,
-    bool budget_restricted, uint64_t now)
+    bool budget_restricted, uint64_t now, bool *fq_cl_paced,
+    uint64_t *next_tx_time)
 {
 	fq_t *fq = NULL, *tfq = NULL;
 	flowq_stailq_t temp_stailq;
 	uint32_t pktcnt, bytecnt;
 	boolean_t qempty, limit_reached = FALSE;
+	bool all_paced = true;
 	classq_pkt_t last = CLASSQ_PKT_INITIALIZER(last);
 	fq_getq_flow_t fq_getq_flow_fn;
 	classq_pkt_t *head, *tail;
+	uint64_t fq_cl_tx_time = FQ_INVALID_TX_TS;
 
 	switch (fqs->fqs_ptype) {
 	case QP_MBUF:
@@ -1885,6 +2100,15 @@ fq_if_dequeue(fq_if_t *fqs, fq_if_classq_t *fq_cl, uint32_t pktlimit,
 	STAILQ_FOREACH_SAFE(fq, &fq_cl->fcl_new_flows, fq_actlink, tfq) {
 		ASSERT((fq->fq_flags & (FQF_NEW_FLOW | FQF_OLD_FLOW)) ==
 		    FQF_NEW_FLOW);
+		uint64_t fq_tx_time;
+		if (__improbable(!fq_tx_time_ready(fqs, fq, now, &fq_tx_time))) {
+			ASSERT(fq_tx_time != FQ_INVALID_TX_TS);
+			if (fq_tx_time < fq_cl_tx_time) {
+				fq_cl_tx_time = fq_tx_time;
+			}
+			continue;
+		}
+		all_paced = false;
 
 		if (fq_dqlist != NULL) {
 			if (!fq->fq_in_dqlist) {
@@ -1899,8 +2123,7 @@ fq_if_dequeue(fq_if_t *fqs, fq_if_classq_t *fq_cl, uint32_t pktlimit,
 		}
 
 		limit_reached = fq_getq_flow_fn(fqs, fq_cl, fq, bytelimit,
-		    pktlimit, head, tail, &bytecnt, &pktcnt, &qempty,
-		    PKTF_NEW_FLOW, now);
+		    pktlimit, head, tail, &bytecnt, &pktcnt, &qempty, now);
 
 		/*
 		 * From RFC 8290:
@@ -1913,6 +2136,14 @@ fq_if_dequeue(fq_if_t *fqs, fq_if_classq_t *fq_cl, uint32_t pktlimit,
 			fq->fq_deficit += fq_cl->fcl_quantum;
 			fq_if_empty_new_flow(fq, fq_cl);
 		}
+		//TODO: add credit when it's now paced? so that the fq is trated the same as empty
+
+		if (!fq_tx_time_ready(fqs, fq, now, &fq_tx_time)) {
+			ASSERT(fq_tx_time != FQ_INVALID_TX_TS);
+			if (fq_tx_time < fq_cl_tx_time) {
+				fq_cl_tx_time = fq_tx_time;
+			}
+		}
 
 		if (limit_reached) {
 			goto done;
@@ -1923,6 +2154,16 @@ fq_if_dequeue(fq_if_t *fqs, fq_if_classq_t *fq_cl, uint32_t pktlimit,
 		VERIFY((fq->fq_flags & (FQF_NEW_FLOW | FQF_OLD_FLOW)) ==
 		    FQF_OLD_FLOW);
 		bool destroy = true;
+		uint64_t fq_tx_time;
+
+		if (__improbable(!fq_tx_time_ready(fqs, fq, now, &fq_tx_time))) {
+			ASSERT(fq_tx_time != FQ_INVALID_TX_TS);
+			if (fq_tx_time < fq_cl_tx_time) {
+				fq_cl_tx_time = fq_tx_time;
+			}
+			continue;
+		}
+		all_paced = false;
 
 		if (fq_dqlist != NULL) {
 			if (!fq->fq_in_dqlist) {
@@ -1938,7 +2179,14 @@ fq_if_dequeue(fq_if_t *fqs, fq_if_classq_t *fq_cl, uint32_t pktlimit,
 		}
 
 		limit_reached = fq_getq_flow_fn(fqs, fq_cl, fq, bytelimit,
-		    pktlimit, head, tail, &bytecnt, &pktcnt, &qempty, 0, now);
+		    pktlimit, head, tail, &bytecnt, &pktcnt, &qempty, now);
+
+		if (!fq_tx_time_ready(fqs, fq, now, &fq_tx_time)) {
+			ASSERT(fq_tx_time != FQ_INVALID_TX_TS);
+			if (fq_tx_time < fq_cl_tx_time) {
+				fq_cl_tx_time = fq_tx_time;
+			}
+		}
 
 		if (qempty) {
 			fq_if_empty_old_flow(fqs, fq_cl, fq, now);
@@ -1959,6 +2207,10 @@ fq_if_dequeue(fq_if_t *fqs, fq_if_classq_t *fq_cl, uint32_t pktlimit,
 	}
 
 done:
+	if (all_paced) {
+		fq_cl->fcl_flags |= FCL_PACED;
+		fq_cl->fcl_next_tx_time = fq_cl_tx_time;
+	}
 	if (!STAILQ_EMPTY(&fq_cl->fcl_old_flows)) {
 		STAILQ_CONCAT(&fq_cl->fcl_old_flows, &temp_stailq);
 	} else if (!STAILQ_EMPTY(&temp_stailq)) {
@@ -1975,6 +2227,12 @@ done:
 	}
 	if (retbytecnt != NULL) {
 		*retbytecnt = bytecnt;
+	}
+	if (fq_cl_paced != NULL) {
+		*fq_cl_paced = all_paced;
+	}
+	if (next_tx_time != NULL) {
+		*next_tx_time = fq_cl_tx_time;
 	}
 }
 
@@ -2074,8 +2332,12 @@ fq_if_getqstats_ifclassq(struct ifclassq *ifq, uint8_t gid, u_int32_t qid,
 	fcls->fcls_avg_qdelay = fq_cl->fcl_stat.fcl_avg_qdelay;
 	fcls->fcls_overwhelming = fq_cl->fcl_stat.fcl_overwhelming;
 	fcls->fcls_ce_marked = fq_cl->fcl_stat.fcl_ce_marked;
+	fcls->fcls_ce_reported = fq_cl->fcl_stat.fcl_ce_reported;
 	fcls->fcls_ce_mark_failures = fq_cl->fcl_stat.fcl_ce_mark_failures;
 	fcls->fcls_l4s_pkts = fq_cl->fcl_stat.fcl_l4s_pkts;
+	fcls->fcls_ignore_tx_time = fq_cl->fcl_stat.fcl_ignore_tx_time;
+	fcls->fcls_paced_pkts = fq_cl->fcl_stat.fcl_paced_pkts;
+	fcls->fcls_fcl_pacing_needed = fq_cl->fcl_stat.fcl_fcl_pacemaker_needed;
 
 	/* Gather per flow stats */
 	flowstat_cnt = min((fcls->fcls_newflows_cnt +

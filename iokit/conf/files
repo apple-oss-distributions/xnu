@@ -13,6 +13,7 @@ OPTIONS/mach_assert				optional mach_assert
 ./DriverKit/OSObject.iig.cpp		optional iokitcpp
 ./DriverKit/OSAction.iig.cpp		optional iokitcpp
 ./DriverKit/IOService.iig.cpp		optional iokitcpp
+./DriverKit/IOExtensiblePaniclog.iig.cpp    optional iokitcpp
 ./DriverKit/IOUserClient.iig.cpp		optional iokitcpp
 ./DriverKit/IOMemoryDescriptor.iig.cpp		optional iokitcpp
 ./DriverKit/IOBufferMemoryDescriptor.iig.cpp		optional iokitcpp
@@ -86,6 +87,8 @@ iokit/Kernel/IOPlatformActions.cpp			optional iokitcpp
 
 iokit/Kernel/IONVRAM.cpp				optional iokitcpp
 
+iokit/Kernel/IOExtensiblePaniclog.cpp   optional iokitcpp
+
 iokit/Kernel/IODMAController.cpp			optional iokitcpp
 iokit/Kernel/IOInterruptController.cpp			optional iokitcpp
 iokit/Kernel/PassthruInterruptController.cpp		optional iokitcpp
@@ -148,3 +151,6 @@ iokit/Kernel/IOWorkloadConfig.cpp			optional iokitcpp
 
 # Skywalk
 iokit/bsddev/skywalk/IOSkywalkSupport.cpp		optional iokitcpp skywalk
+
+# Exclaves
+iokit/Exclaves/Exclaves.cpp			optional iokitcpp

@@ -383,12 +383,15 @@
 
 #define F_BARRIERFSYNC          85      /* fsync + issue barrier to drive */
 
-#ifdef PRIVATE
+#if __DARWIN_C_LEVEL >= __DARWIN_C_FULL
 #define F_OFD_SETLK             90      /* Acquire or release open file description lock */
 #define F_OFD_SETLKW            91      /* (as F_OFD_SETLK but blocking if conflicting lock) */
 #define F_OFD_GETLK             92      /* Examine OFD lock */
 
 #define F_OFD_SETLKWTIMEOUT     93      /* (as F_OFD_SETLKW but return if timeout) */
+#endif
+
+#ifdef PRIVATE
 #define F_OFD_GETLKPID          94      /* get record locking information */
 
 #define F_SETCONFINED           95      /* "confine" OFD to process */
@@ -402,9 +405,9 @@
 
 #define F_TRIM_ACTIVE_FILE      100     /* Trim an active file */
 
-#define F_SPECULATIVE_READ     101      /* Synchronous advisory read fcntl for regular and compressed file */
+#define F_SPECULATIVE_READ      101     /* Asynchronous advisory read fcntl for regular and compressed file */
 
-#define F_GETPATH_NOFIRMLINK       102              /* return the full path without firmlinks of the fd */
+#define F_GETPATH_NOFIRMLINK    102     /* return the full path without firmlinks of the fd */
 
 #define F_ADDFILESIGS_INFO      103     /* Add signature from same file, return information */
 #define F_ADDFILESUPPL          104     /* Add supplemental signature from same file with fd reference to original */
@@ -421,6 +424,8 @@
 #endif // PRIVATE
 
 #define F_TRANSFEREXTENTS       110      /* Transfer allocated extents beyond leof to a different file */
+
+#define F_ATTRIBUTION_TAG       111      /* Based on flags, query/set/delete a file's attribution tag */
 
 // FS-specific fcntl()'s numbers begin at 0x00010000 and go up
 #define FCNTL_FS_SPECIFIC_BASE  0x00010000
@@ -450,6 +455,7 @@
 #define F_ABORT         0x200           /* lock attempt aborted (force umount) */
 #define F_OFD_LOCK      0x400           /* Use "OFD" semantics for lock */
 #define F_TRANSFER      0x800           /* Transfer the lock to new proc */
+#define F_CONFINED      0x1000          /* fileglob cannot leave curproc */
 #endif
 
 #if PRIVATE
@@ -693,6 +699,19 @@ typedef struct fassertbgaccess {
 	unsigned long long ttl;          /* IN: time to live for the assertion (nanoseconds; continuous) */
 } fassertbgaccess_t;
 #endif // PRIVATE
+
+/* fattributiontag_t used by F_ATTRIBUTION_TAG */
+#define ATTRIBUTION_NAME_MAX 255
+typedef struct fattributiontag {
+	unsigned int ft_flags;  /* IN: flags word */
+	unsigned long long ft_hash; /* OUT: hash of attribution tag name */
+	char ft_attribution_name[ATTRIBUTION_NAME_MAX]; /* IN/OUT: attribution tag name associated with the file */
+} fattributiontag_t;
+
+/* ft_flags (F_ATTRIBUTION_TAG)*/
+#define F_CREATE_TAG  0x00000001
+#define F_DELETE_TAG  0x00000002
+#define F_QUERY_TAG   0x00000004
 
 /*
  * For F_LOG2PHYS this information is passed back to user

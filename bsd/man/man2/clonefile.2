@@ -47,7 +47,7 @@ shares its data blocks with the
 file but has its own copy of attributes and extended attributes which are identical to
 those of the named file
 .Fa src
-with the exceptions listed below
+with the exceptions listed below:
 .Pp
 .
 .Bl -enum
@@ -63,8 +63,7 @@ or
 .Xr symlinkat 2
 if the current user does not have privileges to change ownership. If the optional
 flag CLONE_NOOWNERCOPY is passed, the ownership information is the same as if the
-the current user does not have privileges to change ownership
-
+the current user does not have privileges to change ownership.
 .
 .It
 setuid and setgid bits are turned off in the mode bits for regular files.
@@ -83,7 +82,7 @@ return ENOSPC.  If
 names a directory, the directory hierarchy is cloned as if each item was cloned individually.  However, the use of
 .Xr copyfile 3
 is more appropriate for copying large directory hierarchies instead of
-.Xr clonefile 2
+.Xr clonefile 2 .
 .Pp
 The
 .Fn clonefileat
@@ -120,7 +119,8 @@ except that the source is identified by file descriptor
 rather than a path (as in
 .Fn clonefile
 or
-.Fn clonefileat )
+.Fn clonefileat
+).
 .Pp
 The
 .Fa flags
@@ -154,7 +154,6 @@ names a symbolic link.
 Copy ACLs from the source file.
 .El
 .Pp
-The
 The
 .Fn clonefile ,
 .Fn clonefileat
@@ -275,7 +274,7 @@ In addition, the
 .Fn clonefileat
 or
 .Fn fclonefileat
-functions may fail with the following errors
+functions may fail with the following errors:
 .Bl -tag -width Er                                                                 
 .It Bq Er EBADF                                                                    
 The                                                                                

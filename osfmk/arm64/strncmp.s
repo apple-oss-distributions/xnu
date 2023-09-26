@@ -154,17 +154,34 @@ L_s1aligned:
  *  Naive vector comparison                                                  *
  *****************************************************************************/
 
-.align 4
 L_naiveVector:
-	ldr       q0,     [x0],#(kVectorSize)
+  subs      x3,     x2, #(kVectorSize)
+  b.lo      L_scalar
+  add       x4,     x0, x3    // save the addresses of the last vectors
+  add       x5,     x1, x3
+  mov       x2,     x3        // length -= kVectorSize
+.align 4
+0:
+  ldr       q0,     [x0],#(kVectorSize)
 	ldr       q1,     [x1],#(kVectorSize)
 	cmeq.16b  v1,      v0, v1
 	and.16b   v0,      v0, v1   // contains zero byte iff mismatch or EOS
 	uminv.16b b1,      v0
 	fmov      w3,      s1       // zero only iff comparison is finished
 	cbz       w3,      L_vectorDone
-	subs      x2,      x2, #16
-	b.hi      L_naiveVector
+	subs      x2,      x2, #(kVectorSize)
+	b.hi      0b
+
+  // compare the last vector
+  mov       x0,      x4
+  mov       x1,      x5
+	ldr       q0,     [x0],#(kVectorSize)
+	ldr       q1,     [x1],#(kVectorSize)
+  cmeq.16b  v1,      v0, v1
+  and.16b   v0,      v0, v1   // contains zero byte iff mismatch or EOS
+  uminv.16b b1,      v0
+  fmov      w3,      s1       // zero only iff comparison is finished
+  cbz       w3,      L_vectorDone
 
 L_readNBytes:
 	eor       x0,      x0, x0
@@ -179,12 +196,21 @@ L_vectorDone:
 	orr.16b   v0,      v0, v1   // lane index in lanes containing mismatch or EOS
 	uminv.16b b1,      v0
 	fmov      w3,      s1
-//	If the index of the mismatch or EOS is greater than or equal to n, it
-//	occurs after the first n bytes of the string, and doesn't count.
-	cmp       x3,      x2
-	b.cs      L_readNBytes
 	sub       x3,      x3, #(kVectorSize)
 	ldrb      w4,     [x0, x3]
 	ldrb      w5,     [x1, x3]
 	sub       x0,      x4, x5
 	ClearFrameAndReturn
+
+L_scalar:
+  ldrb      w4,     [x0],#1  // load byte from src1
+  ldrb      w5,     [x1],#1  // load byte from src2
+  subs      x3,      x4, x5  // if the are not equal
+  ccmp      w4,  #0, #4, eq  //    or we find an EOS
+  b.eq      1f               // return the difference
+  subs      x2,      x2, #1  // decrement length
+  b.ne      L_scalar         // continue loop if non-zero
+1:
+	mov       x0,      x3
+	ClearFrameAndReturn
+  

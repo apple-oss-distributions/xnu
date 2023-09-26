@@ -157,6 +157,13 @@ pktsched_get_pkt_len(pktsched_pkt_t *pkt)
 	return pkt->pktsched_plen;
 }
 
+static inline void
+pktsched_bit_move(u_int32_t ix, pktsched_bitmap_t *pData_dst,
+    pktsched_bitmap_t *pData_src)
+{
+	*pData_dst |= (*pData_src & (1 << ix));
+}
+
 /*
  * We can use mach_absolute_time which returns a 64-bit value with
  * granularity less than a microsecond even on the slowest processor.
@@ -175,6 +182,8 @@ SYSCTL_DECL(_net_pktsched);
 
 struct if_ifclassq_stats;
 
+extern void pktsched_register_m_tag(void);
+
 extern void pktsched_init(void);
 extern int pktsched_setup(struct ifclassq *, u_int32_t, u_int32_t,
     classq_pkt_type_t);
@@ -187,7 +196,7 @@ extern void pktsched_free_pkt(pktsched_pkt_t *);
 extern int pktsched_clone_pkt(pktsched_pkt_t *, pktsched_pkt_t *);
 extern void pktsched_corrupt_packet(pktsched_pkt_t *pkt);
 extern void pktsched_get_pkt_vars(pktsched_pkt_t *, volatile uint32_t **,
-    uint64_t **, uint32_t *, uint8_t *, uint8_t *, uint32_t *);
+    uint64_t **, uint32_t *, uint8_t *, uint8_t *, uint32_t *, uint64_t *);
 extern uint32_t *pktsched_get_pkt_sfb_vars(pktsched_pkt_t *, uint32_t **);
 extern void pktsched_pkt_encap(pktsched_pkt_t *, classq_pkt_t *);
 extern void pktsched_pkt_encap_chain(pktsched_pkt_t *, classq_pkt_t *,

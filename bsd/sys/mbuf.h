@@ -94,23 +94,18 @@
 #include <sys/queue.h>
 #include <machine/endian.h>
 /*
- * Mbufs are of a single size, MSIZE (machine/param.h), which
- * includes overhead.  An mbuf may add a single "mbuf cluster" of size
+ * Mbufs are of a single size, which includes overhead.
+ * An mbuf may add a single "mbuf cluster" of size
  * MCLBYTES/MBIGCLBYTES/M16KCLBYTES (also in machine/param.h), which has
  * no additional overhead and is used instead of the internal data area;
  * this is done when at least MINCLSIZE of data must be stored.
  */
-
-/*
- * The following _MLEN and _MHLEN macros are private to xnu.  Private code
- * that are outside of xnu must use the mbuf_get_{mlen,mhlen} routines since
- * the sizes of the structures are dependent upon specific xnu configs.
- */
-#define _MLEN           (MSIZE - sizeof(struct m_hdr))  /* normal data len */
-#define _MHLEN          (_MLEN - sizeof(struct pkthdr)) /* data len w/pkthdr */
-
-#define NMBPGSHIFT      (PAGE_SHIFT - MSIZESHIFT)
-#define NMBPG           (1 << NMBPGSHIFT)       /* # of mbufs per page */
+#if CONFIG_MBUF_MCACHE
+#define _MSIZESHIFT      8                       /* 256 */
+#define _MSIZE           (1 << _MSIZESHIFT)       /* size of an mbuf */
+#else /* CONFIG_MBUF_MCACHE */
+#define _MSIZE           512
+#endif  /* CONFIG_MBUF_MCACHE */
 
 #define NCLPGSHIFT      (PAGE_SHIFT - MCLSHIFT)
 #define NCLPG           (1 << NCLPGSHIFT)       /* # of cl per page */
@@ -118,8 +113,7 @@
 #define NBCLPGSHIFT     (PAGE_SHIFT - MBIGCLSHIFT)
 #define NBCLPG          (1 << NBCLPGSHIFT)      /* # of big cl per page */
 
-#define NMBPCLSHIFT     (MCLSHIFT - MSIZESHIFT)
-#define NMBPCL          (1 << NMBPCLSHIFT)      /* # of mbufs per cl */
+#define NMBPCL             (MCLBYTES / _MSIZE)
 
 #define NCLPJCLSHIFT    (M16KCLSHIFT - MCLSHIFT)
 #define NCLPJCL         (1 << NCLPJCLSHIFT)     /* # of cl per jumbo cl */
@@ -127,18 +121,13 @@
 #define NCLPBGSHIFT     (MBIGCLSHIFT - MCLSHIFT)
 #define NCLPBG          (1 << NCLPBGSHIFT)      /* # of cl per big cl */
 
-#define NMBPBGSHIFT     (MBIGCLSHIFT - MSIZESHIFT)
-#define NMBPBG          (1 << NMBPBGSHIFT)      /* # of mbufs per big cl */
-
 /*
  * Macros for type conversion
  * mtod(m,t) -	convert mbuf pointer to data pointer of correct type
  * mtodo(m, o) -- Same as above but with offset 'o' into data.
- * dtom(x) -	convert data pointer within mbuf to mbuf pointer (XXX)
  */
 #define mtod(m, t)      ((t)m_mtod_indexable(m))
 #define mtodo(m, o)     ((void *)(mtod(m, uint8_t *) + (o)))
-#define dtom(x)         m_dtom(x)
 
 /* header at beginning of each mbuf: */
 struct m_hdr {
@@ -166,30 +155,42 @@ struct m_hdr {
  */
 struct m_tag {
 	uint64_t               m_tag_cookie;   /* Error checking */
-#ifndef __LP64__
-	uint32_t               pad;            /* For structure alignment */
-#endif /* !__LP64__ */
-	SLIST_ENTRY(m_tag)      m_tag_link;     /* List of packet tags */
+	SLIST_ENTRY(m_tag)     m_tag_link;     /* List of packet tags */
+	void                   *m_tag_data;
 	uint16_t               m_tag_type;     /* Module specific type */
 	uint16_t               m_tag_len;      /* Length of data */
 	uint32_t               m_tag_id;       /* Module ID */
+	void                   *m_tag_mb_cl;    /* pointer to mbuf or cluster container */
+#ifndef __LP64__
+	u_int32_t              m_tag_pad;
+#endif /* !__LP64__ */
 };
 
 #define M_TAG_ALIGN(len) \
 	(P2ROUNDUP(len, sizeof (u_int64_t)) + sizeof (struct m_tag))
 
+#define M_TAG_INIT(tag, id, type, len, data, mb_cl) {   \
+	VERIFY(IS_P2ALIGNED((tag), sizeof(u_int64_t)));     \
+	(tag)->m_tag_type = (type);                         \
+	(tag)->m_tag_len = (uint16_t)(len);                 \
+	(tag)->m_tag_id = (id);                             \
+	(tag)->m_tag_data = (data);                         \
+	(tag)->m_tag_mb_cl = (mb_cl);                       \
+	m_tag_create_cookie(tag);                           \
+}
+
 #define M_TAG_VALID_PATTERN     0xfeedfacefeedfaceULL
 #define M_TAG_FREE_PATTERN      0xdeadbeefdeadbeefULL
 
 /*
- * Packet tag header structure (at the top of mbuf).  Pointers are
- * 32-bit in ILP32; m_tag needs 64-bit alignment, hence padded.
+ * Packet tag header structure at the top of mbuf whe mbufs are use for m_tag
+ * Pointers are 32-bit in ILP32; m_tag needs 64-bit alignment, hence padded.
  */
 struct m_taghdr {
 #ifndef __LP64__
 	u_int32_t               pad;            /* For structure alignment */
 #endif /* !__LP64__ */
-	u_int64_t               refcnt;         /* Number of tags in this mbuf */
+	u_int64_t               mth_refcnt;         /* Number of tags in this mbuf */
 };
 
 /*
@@ -606,6 +607,20 @@ struct m_ext {
 /* define m_ext to a type since it gets redefined below */
 typedef struct m_ext _m_ext_t;
 
+#if CONFIG_MBUF_MCACHE
+/*
+ * The following _MLEN and _MHLEN macros are private to xnu.  Private code
+ * that are outside of xnu must use the mbuf_get_{mlen,mhlen} routines since
+ * the sizes of the structures are dependent upon specific xnu configs.
+ */
+#define _MLEN           (_MSIZE - sizeof(struct m_hdr))  /* normal data len */
+#define _MHLEN          (_MLEN - sizeof(struct pkthdr)) /* data len w/pkthdr */
+
+#define NMBPGSHIFT      (PAGE_SHIFT - _MSIZESHIFT)
+#define NMBPG           (1 << NMBPGSHIFT)       /* # of mbufs per page */
+
+#define NMBPCLSHIFT     (MCLSHIFT - _MSIZESHIFT)
+
 /*
  * The mbuf object
  */
@@ -630,9 +645,51 @@ struct mbuf {
 #define m_flags         m_hdr.mh_flags
 #define m_nextpkt       m_hdr.mh_nextpkt
 #define m_act           m_nextpkt
-#define m_pkthdr        M_dat.MH.MH_pkthdr
+
 #define m_ext           M_dat.MH.MH_dat.MH_ext
+#define m_pkthdr        M_dat.MH.MH_pkthdr
 #define m_pktdat        M_dat.MH.MH_dat.MH_databuf
+
+#else /* !CONFIG_MBUF_MCACHE */
+/*
+ * The following _MLEN and _MHLEN macros are private to xnu.  Private code
+ * that are outside of xnu must use the mbuf_get_{mlen,mhlen} routines since
+ * the sizes of the structures are dependent upon specific xnu configs.
+ */
+#define _MLEN           (_MSIZE - sizeof(struct m_hdr_common))  /* normal data len */
+#define _MHLEN          (_MLEN)                                /* data len w/pkthdr */
+
+struct m_hdr_common {
+	struct m_hdr M_hdr;
+	struct m_ext M_ext  __attribute__((aligned(16)));             /* M_EXT set */
+	struct pkthdr M_pkthdr  __attribute__((aligned(16)));         /* M_PKTHDR set */
+};
+
+/*
+ * The mbuf object
+ */
+struct mbuf {
+	struct m_hdr_common             M_hdr_common;
+	union {
+		char                    MH_databuf[_MHLEN];
+		char                    M_databuf[_MLEN];           /* !M_PKTHDR, !M_EXT */
+	} M_dat __attribute__((aligned(16)));
+};
+
+#define m_next          M_hdr_common.M_hdr.mh_next
+#define m_len           M_hdr_common.M_hdr.mh_len
+#define m_data          M_hdr_common.M_hdr.mh_data
+#define m_type          M_hdr_common.M_hdr.mh_type
+#define m_flags         M_hdr_common.M_hdr.mh_flags
+#define m_nextpkt       M_hdr_common.M_hdr.mh_nextpkt
+
+#define m_ext           M_hdr_common.M_ext
+#define m_pkthdr        M_hdr_common.M_pkthdr
+#define m_pktdat        M_dat.MH_databuf
+
+#endif /* CONFIG_MBUF_MCACHE */
+
+#define m_act           m_nextpkt
 #define m_dat           M_dat.M_databuf
 #define m_pktlen(_m)    ((_m)->m_pkthdr.len)
 #define m_pftag(_m)     (&(_m)->m_pkthdr.builtin_mtag._net_mtag._pf_mtag)
@@ -1273,6 +1330,22 @@ struct mleak_table {
 	/* Times mleak_log returned false because couldn't acquire the lock */
 	u_int64_t total_conflicts;
 };
+
+#define HAS_M_TAG_STATS 1
+
+struct m_tag_stats {
+	u_int32_t mts_id;
+	u_int16_t mts_type;
+	u_int16_t mts_len;
+	u_int64_t mts_alloc_count;
+	u_int64_t mts_alloc_failed;
+	u_int64_t mts_free_count;
+};
+
+
+#define M_TAG_TYPE_NAMES \
+    "other,dummynet,ipfilt,encap,inet6,ipsec,cfil_udp,pf_reass,aqm,drvaux"
+
 #endif /* PRIVATE */
 
 #ifdef KERNEL_PRIVATE
@@ -1540,23 +1613,37 @@ __private_extern__ void mbuf_drain(boolean_t);
  * identifies it. The id identifies the module and the type identifies the
  * type of data for that module. The id of zero is reserved for the kernel.
  *
- * Note that the packet tag returned by m_tag_allocate has the default
- * memory alignment implemented by malloc.  To reference private data one
- * can use a construct like:
+ * By default packet tags are allocated via kalloc except on Intel that still
+ * uses the legacy implementation of using mbufs for packet tags.
+ * This can be overidden via the boot-args 'mb_tag_mbuf'
  *
+ * When kalloc is used for allocation, packet tags returned by m_tag_allocate have
+ * the default memory alignment implemented by kalloc.
+ *
+ * When mbufs are used for allocation packets tag returned by m_tag_allocate has
+ * the default memory alignment implemented by malloc.
+ *
+ * To reference the private data one should use a construct like:
  *      struct m_tag *mtag = m_tag_allocate(...);
- *      struct foo *p = (struct foo *)(mtag+1);
+ *      struct foo *p = (struct foo *)(mtag->m_tag_data);
  *
- * if the alignment of struct m_tag is sufficient for referencing members
- * of struct foo.  Otherwise it is necessary to embed struct m_tag within
- * the private data structure to insure proper alignment; e.g.
+ * There should be no assumption on the location of the private data relative to the
+ * 'struct m_tag'
  *
- *      struct foo {
- *              struct m_tag    tag;
- *              ...
- *      };
- *      struct foo *p = (struct foo *) m_tag_allocate(...);
- *      struct m_tag *mtag = &p->tag;
+ * When kalloc is used, packet tags that are internal to xnu use KERNEL_MODULE_TAG_ID and
+ * they are allocated with kalloc_type using a single container data structure that has
+ * the 'struct m_tag' followed by a data structure for the private data
+ *
+ * Packet tags that are allocated by KEXTs are external to xnu and type of the private data
+ * is unknown to xnu, so they are allocated in two chunks:
+ *  - one allocation with kalloc_type for the 'struct m_tag'
+ *  - one allocation using kheap_alloc as for the private data
+ *
+ * Note that packet tags of type KERNEL_TAG_TYPE_DRVAUX are allocated by KEXTs with
+ * a variable length so they are allocated in two chunks
+ *
+ * In all cases the 'struct m_tag' is allocated using kalloc_type to avoid type
+ * confusion.
  */
 
 #define KERNEL_MODULE_TAG_ID    0
@@ -1564,38 +1651,41 @@ __private_extern__ void mbuf_drain(boolean_t);
 enum {
 	KERNEL_TAG_TYPE_NONE                    = 0,
 	KERNEL_TAG_TYPE_DUMMYNET                = 1,
-	KERNEL_TAG_TYPE_DIVERT                  = 2,
-	KERNEL_TAG_TYPE_IPFORWARD               = 3,
-	KERNEL_TAG_TYPE_IPFILT                  = 4,
-	KERNEL_TAG_TYPE_MACLABEL                = 5,
-	KERNEL_TAG_TYPE_MAC_POLICY_LABEL        = 6,
-	KERNEL_TAG_TYPE_ENCAP                   = 8,
-	KERNEL_TAG_TYPE_INET6                   = 9,
-	KERNEL_TAG_TYPE_IPSEC                   = 10,
-	KERNEL_TAG_TYPE_DRVAUX                  = 11,
-#if SKYWALK
-	KERNEL_TAG_TYPE_PKT_FLOWADV             = 12,
-#endif /* SKYWALK */
-	KERNEL_TAG_TYPE_CFIL_UDP                = 13,
-	KERNEL_TAG_TYPE_PF_REASS                = 14,
+	KERNEL_TAG_TYPE_IPFILT                  = 2,
+	KERNEL_TAG_TYPE_ENCAP                   = 3,
+	KERNEL_TAG_TYPE_INET6                   = 4,
+	KERNEL_TAG_TYPE_IPSEC                   = 5,
+	KERNEL_TAG_TYPE_CFIL_UDP                = 6,
+	KERNEL_TAG_TYPE_PF_REASS                = 7,
+	KERNEL_TAG_TYPE_AQM                     = 8,
+	KERNEL_TAG_TYPE_DRVAUX                  = 9,
+	KERNEL_TAG_TYPE_COUNT                   = 10
 };
 
 /* Packet tag routines */
-__private_extern__ struct  m_tag *m_tag_alloc(u_int32_t, u_int16_t, int, int);
+__private_extern__ struct m_tag *m_tag_alloc(u_int32_t, u_int16_t, int, int);
 __private_extern__ struct  m_tag *m_tag_create(u_int32_t, u_int16_t, int, int,
     struct mbuf *);
 __private_extern__ void m_tag_free(struct m_tag *);
 __private_extern__ void m_tag_prepend(struct mbuf *, struct m_tag *);
 __private_extern__ void m_tag_unlink(struct mbuf *, struct m_tag *);
 __private_extern__ void m_tag_delete(struct mbuf *, struct m_tag *);
-__private_extern__ void m_tag_delete_chain(struct mbuf *, struct m_tag *);
+__private_extern__ void m_tag_delete_chain(struct mbuf *);
 __private_extern__ struct m_tag *m_tag_locate(struct mbuf *, u_int32_t,
-    u_int16_t, struct m_tag *);
+    u_int16_t);
 __private_extern__ struct m_tag *m_tag_copy(struct m_tag *, int);
 __private_extern__ int m_tag_copy_chain(struct mbuf *, struct mbuf *, int);
 __private_extern__ void m_tag_init(struct mbuf *, int);
 __private_extern__ struct  m_tag *m_tag_first(struct mbuf *);
 __private_extern__ struct  m_tag *m_tag_next(struct mbuf *, struct m_tag *);
+
+typedef struct m_tag * (*m_tag_kalloc_func_t)(u_int32_t id, u_int16_t type, uint16_t len, int wait);
+typedef void (*m_tag_kfree_func_t)(struct m_tag *tag);
+
+int m_register_internal_tag_type(uint16_t type, uint16_t len, m_tag_kalloc_func_t alloc_func, m_tag_kfree_func_t free_func);
+void m_tag_create_cookie(struct m_tag *);
+
+void mbuf_tag_init(void);
 
 __private_extern__ void m_scratch_init(struct mbuf *);
 __private_extern__ u_int32_t m_scratch_get(struct mbuf *, u_int8_t **);
@@ -1608,6 +1698,9 @@ __private_extern__ mbuf_svc_class_t m_service_class_from_idx(u_int32_t);
 __private_extern__ mbuf_svc_class_t m_service_class_from_val(u_int32_t);
 __private_extern__ int m_set_traffic_class(struct mbuf *, mbuf_traffic_class_t);
 __private_extern__ mbuf_traffic_class_t m_get_traffic_class(struct mbuf *);
+
+__private_extern__ struct  m_tag *m_tag_alloc(u_int32_t, u_int16_t, int, int);
+__private_extern__ void mbuf_tag_init(void);
 
 #define ADDCARRY(_x)  do {                                              \
 	while (((_x) >> 16) != 0)                                       \
@@ -1626,6 +1719,8 @@ __private_extern__ caddr_t m_get_ext_arg(struct mbuf *);
 
 __private_extern__ void m_do_tx_compl_callback(struct mbuf *, struct ifnet *);
 __private_extern__ mbuf_tx_compl_func m_get_tx_compl_callback(u_int32_t);
+
+
 
 __END_DECLS
 #endif /* XNU_KERNEL_PRIVATE */

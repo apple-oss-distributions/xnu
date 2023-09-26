@@ -210,6 +210,7 @@ uint64_t timer_call_past_deadline_timer_handle(uint64_t deadline,
 
 enum running_timer {
 	RUNNING_TIMER_QUANTUM,
+	RUNNING_TIMER_PREEMPT,
 #if KPERF
 	RUNNING_TIMER_KPERF,
 #endif /* KPERF */

@@ -215,7 +215,7 @@ _os_atomic_mo_has_release(OS_ATOMIC_STD memory_order ord)
  */
 
 #define _os_atomic_value_cast(p, v) \
-	({ typeof(*os_cast_to_nonatomic_pointer(p)) ___v = (v); ___v; })
+	({ __typeof__(*os_cast_to_nonatomic_pointer(p)) ___v = (v); ___v; })
 
 #define _os_atomic_c11_op_orig(p, v, m, o)  ({ \
 	_os_compiler_barrier_before_atomic(m); \

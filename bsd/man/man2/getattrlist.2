@@ -1191,7 +1191,7 @@ in the forkattr field and can only be used if the FSOPT_ATTR_CMN_EXTENDED
 option is given. Use of these attributes is mutually exclusive with the above
 fork attributes.
 .
-.Bl -tag -width ATTR_VOL_ALLOCATIONCLUMP
+.Bl -tag -width ATTR_CMNEXT_RECURSIVE_GENCOUNT
 .
 .It ATTR_CMNEXT_RELPATH
 An
@@ -1273,11 +1273,11 @@ A
 that contains additional flags with information about the file.  The
 flags are:
 .
-.Bl -tag -width EF_MAY_SHARE_BLOCKS
+.Bl -tag -width EF_SHARES_ALL_BLOCKS
 .
 .It EF_MAY_SHARE_BLOCKS
 If this bit is set then the file may share blocks with another file
-(i.e. it is a clone of another file).
+(i.e. it may be a clone of another file).
 .
 .It EF_NO_XATTRS
 If this bit is set then the file has no extended attributes.  Useful
@@ -1297,6 +1297,11 @@ If this bit is set the item has sparse regions.
 .It EF_IS_SYNTHETIC
 If this bit is set the item is a synthetic directory/symlink.
 .
+.It EF_SHARES_ALL_BLOCKS
+If this bit is set then the file shares all of its blocks with another
+file (i.e. it is a full clone of another file). For compatibility reasons,
+EF_SHARES_ALL_BLOCKS means EF_MAY_SHARE_BLOCKS as well.
+.
 .El
 .
 .It ATTR_CMNEXT_RECURSIVE_GENCOUNT
@@ -1307,6 +1312,18 @@ been marked as maintain-dir-stats in an apfs file system.  This
 gencount is updated any time any child is modified (as part of the
 contract that a maintain-dir-stats directory manages).  If the
 directory is not marked maintain-dir-stats, a zero is returned.
+.
+.It ATTR_CMNEXT_ATTRIBUTION_TAG
+An optional
+.Vt u_int64_t
+id that represents the bundle id (owner) assoicated with the file
+(zero means the file isn't attributed yet)
+.
+.It ATTR_CMNEXT_CLONE_REFCNT
+A
+.Vt u_int32_t
+that represents the number of full clones
+(each shares all of its blocks with this file).
 .
 .El
 .Pp
@@ -1544,6 +1561,9 @@ obtaining object IDs from this volume. The values returned by ATTR_CMN_OBJID,
 ATTR_CMN_OBJPERMANENTID, and ATTR_CMN_PAROBJID can be interpreted as 64-bit
 object IDs instead of fsobj_id_t.
 .
+.It VOL_CAP_FMT_DOCUMENT_ID
+If this bit is set, the volume format supports document IDs
+(an ID which persists across object ID changes) for document revisions.
 .It VOL_CAP_FMT_NO_IMMUTABLE_FILES
 If this bit is set, the volume format does not support setting the UF_IMMUTABLE
 flag.

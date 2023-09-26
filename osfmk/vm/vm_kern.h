@@ -1180,7 +1180,7 @@ extern const char *             kern_allocation_get_name(kern_allocation_name_t 
 #ifdef XNU_KERNEL_PRIVATE
 #pragma GCC visibility push(hidden)
 
-extern void                     kern_allocation_update_size(kern_allocation_name_t allocation, int64_t delta);
+extern void                     kern_allocation_update_size(kern_allocation_name_t allocation, int64_t delta, vm_object_t object);
 extern void                     kern_allocation_update_subtotal(kern_allocation_name_t allocation, uint32_t subtag, int64_t delta);
 extern vm_tag_t                 kern_allocation_name_get_vm_tag(kern_allocation_name_t allocation);
 
@@ -1226,7 +1226,7 @@ extern vm_tag_t         vm_tag_alloc(vm_allocation_site_t * site);
 
 extern void             vm_tag_alloc_locked(vm_allocation_site_t * site, vm_allocation_site_t ** releasesiteP);
 
-extern void             vm_tag_update_size(vm_tag_t tag, int64_t size);
+extern void             vm_tag_update_size(vm_tag_t tag, int64_t size, vm_object_t object);
 
 extern uint64_t         vm_tag_get_size(vm_tag_t tag);
 

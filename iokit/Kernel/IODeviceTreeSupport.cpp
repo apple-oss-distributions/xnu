@@ -95,6 +95,8 @@ const OSSymbol *        gIODTInterruptCellKey;
 const OSSymbol *        gIODTInterruptParentKey;
 const OSSymbol *        gIODTNWInterruptMappingKey;
 
+const OSData *          gIODTAssociatedServiceKey;
+
 OSDictionary   *        gIODTSharedInterrupts;
 
 static IORegistryEntry * MakeReferenceTable( DTEntry dtEntry, bool copy );
@@ -124,6 +126,8 @@ IODeviceTreeAlloc( void * dtTop )
 	bool                        intMap;
 	bool                        foundDTNode;
 	bool                        freeDT;
+	char                        exBootArg[64];
+	const char *                found;
 
 	gIODTPlane = IORegistryEntry::makePlane( kIODeviceTreePlane );
 
@@ -138,6 +142,8 @@ IODeviceTreeAlloc( void * dtTop )
 	gIODTAddressCellKey = OSSymbol::withCStringNoCopy( "#address-cells" );
 	gIODTRangeKey               = OSSymbol::withCStringNoCopy( "ranges" );
 	gIODTPersistKey             = OSSymbol::withCStringNoCopy( "IODTPersist" );
+	gIODTAssociatedServiceKey   = OSData::withBytesNoCopy((void *) kIODTAssociatedServiceKey, sizeof(kIODTAssociatedServiceKey));
+
 
 	assert(    gIODTPlane && gIODTCompatibleKey
 	    && gIODTTypeKey && gIODTModelKey
@@ -165,6 +171,10 @@ IODeviceTreeAlloc( void * dtTop )
 	gIODTResolvers->alloc     = 2;
 	gIODTResolvers->resolvers = IONewZero(IODTPersistent, gIODTResolvers->alloc);
 	gIODTResolvers->lock      = IOLockAlloc();
+
+	if (!PE_parse_boot_argn("exp", exBootArg, sizeof(exBootArg))) {
+		exBootArg[0] = '\0';
+	}
 
 	gIODTInterruptCellKey
 	        = OSSymbol::withCStringNoCopy("#interrupt-cells");
@@ -198,6 +208,23 @@ IODeviceTreeAlloc( void * dtTop )
 			child->attachToParent( parent, gIODTPlane);
 
 			AddPHandle( child );
+			// E.g. exp=sgx:3 or exp=sgx:3,5
+			if ((found = strnstr(exBootArg, child->getName(), sizeof(exBootArg)))) {
+				child->setProperty(gIOExclaveAssignedKey, kOSBooleanTrue);
+				uint32_t ep = 0;
+				uint32_t edk_ep = 0;
+				found += strlen(child->getName());
+				if (':' == *found) {
+					char *end;
+					ep = (uint32_t) strtol(found + 1, &end, 0);
+					// Check for optional edk endpoint
+					if (',' == *end) {
+						edk_ep = (uint32_t) strtol(end + 1, &end, 0);
+						child->setProperty("exclave-edk-endpoint", &edk_ep, sizeof(edk_ep));
+					}
+				}
+				child->setProperty("exclave-endpoint", &ep, sizeof(ep));
+			}
 
 			if (kSuccess == SecureDTEnterEntry( &iter, dtChild)) {
 				stack->setObject( parent);
@@ -992,7 +1019,7 @@ IODTMatchNubWithKeys( IORegistryEntry * regEntry,
 	return result;
 }
 
-OSCollectionIterator *
+LIBKERN_RETURNS_RETAINED OSCollectionIterator *
 IODTFindMatchingEntries( IORegistryEntry * from,
     IOOptionBits options, const char * keys )
 {
@@ -1019,10 +1046,12 @@ IODTFindMatchingEntries( IORegistryEntry * from,
 			iter->reset();
 			while ((next = iter->getNextObject())) {
 				// Look for existence of a debug property to skip
-				if (next->getProperty("AAPL,ignore")) {
+				if (next->propertyExists("AAPL,ignore")) {
 					continue;
 				}
-
+				if (next->propertyHasValue(gIODTTypeKey, gIODTAssociatedServiceKey)) {
+					continue;
+				}
 				if (keys) {
 					cmp = IODTMatchNubWithKeys( next, keys );
 					if ((minus && (false == cmp))

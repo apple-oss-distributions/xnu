@@ -81,7 +81,7 @@ struct socket_filter_entry {
 	void                            *sfe_cookie;
 
 	uint32_t                        sfe_flags;
-	int32_t                         sfe_refcount;
+	struct os_refcnt                sfe_refcount;
 };
 
 struct socket_filter {
@@ -133,13 +133,14 @@ sflt_permission_check(struct inpcb *inp)
 	    !(inp->inp_vflag & INP_IPV6)) {
 		return 0;
 	}
-	/* Sockets that have this entitlement bypass socket filters. */
-	if (INP_INTCOPROC_ALLOWED(inp)) {
+	/* Sockets that have incoproc or management entitlements bypass socket filters. */
+	if (INP_INTCOPROC_ALLOWED(inp) || INP_MANAGEMENT_ALLOWED(inp)) {
 		return 1;
 	}
-	/* Sockets bound to an intcoproc interface bypass socket filters. */
+	/* Sockets bound to an intcoproc or management interface bypass socket filters. */
 	if ((inp->inp_flags & INP_BOUND_IF) &&
-	    IFNET_IS_INTCOPROC(inp->inp_boundifp)) {
+	    (IFNET_IS_INTCOPROC(inp->inp_boundifp) ||
+	    IFNET_IS_MANAGEMENT(inp->inp_boundifp))) {
 		return 1;
 	}
 #if NECP
@@ -191,17 +192,13 @@ sflt_release_locked(struct socket_filter *filter)
 static void
 sflt_entry_retain(struct socket_filter_entry *entry)
 {
-	if (OSIncrementAtomic(&entry->sfe_refcount) <= 0) {
-		panic("sflt_entry_retain - sfe_refcount <= 0");
-		/* NOTREACHED */
-	}
+	os_ref_retain(&entry->sfe_refcount);
 }
 
 static void
 sflt_entry_release(struct socket_filter_entry *entry)
 {
-	SInt32 old = OSDecrementAtomic(&entry->sfe_refcount);
-	if (old == 1) {
+	if (os_ref_release(&entry->sfe_refcount) == 0) {
 		/* That was the last reference */
 
 		/* Take the cleanup lock */
@@ -225,10 +222,6 @@ sflt_entry_release(struct socket_filter_entry *entry)
 
 		/* Drop the cleanup lock */
 		lck_mtx_unlock(&sock_filter_cleanup_lock);
-	} else if (old <= 0) {
-		panic("sflt_entry_release - sfe_refcount (%d) <= 0",
-		    (int)old);
-		/* NOTREACHED */
 	}
 }
 
@@ -346,7 +339,7 @@ sflt_attach_locked(struct socket *so, struct socket_filter *filter,
 	/* Initialize the socket filter entry */
 	entry->sfe_cookie = NULL;
 	entry->sfe_flags = SFEF_ATTACHED;
-	entry->sfe_refcount = 1; /* corresponds to SFEF_ATTACHED flag set */
+	os_ref_init(&entry->sfe_refcount, NULL); /* corresponds to SFEF_ATTACHED flag set */
 
 	/* Put the entry in the filter list */
 	sflt_retain_locked(filter);

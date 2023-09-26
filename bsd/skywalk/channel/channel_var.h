@@ -748,7 +748,7 @@ KR_SLOT_INDEX(const struct __kern_channel_ring *kr,
  */
 #define MD_BUFLET_ADDR(_md, _val) do {                                  \
 	void *_addr, *_objaddr;                                         \
-	uint16_t _doff, _dlen, _dlim;                                   \
+	uint32_t _doff, _dlen, _dlim;                                   \
 	_MD_BUFLET_ADDROFF(_md, _addr, _objaddr, _doff, _dlen, _dlim);  \
 	/* skip past buflet data offset */                              \
 	(_val) = (void *)((uint8_t *)_addr + _doff);                    \
@@ -761,7 +761,7 @@ KR_SLOT_INDEX(const struct __kern_channel_ring *kr,
  */
 #define MD_BUFLET_ADDR_ABS(_md, _val) do {                              \
 	void *_addr, *_objaddr;                                         \
-	uint16_t _doff, _dlen, _dlim;                                   \
+	uint32_t _doff, _dlen, _dlim;                                          \
 	_MD_BUFLET_ADDROFF(_md, _addr, _objaddr, _doff, _dlen, _dlim);  \
 	(_val) = (void *)_addr;                                         \
 } while (0)
@@ -787,7 +787,7 @@ KR_SLOT_INDEX(const struct __kern_channel_ring *kr,
  */
 #define MD_BUFLET_OBJADDR(_md, _val) do {                               \
 	void *_addr, *_objaddr;                                         \
-	uint16_t _doff, _dlen, _dlim;                                   \
+	uint32_t _doff, _dlen, _dlim;                                   \
 	_MD_BUFLET_ADDROFF(_md, _addr, _objaddr, _doff, _dlen, _dlim);  \
 	(_val) = (void *)_objaddr;                                      \
 } while (0)
@@ -799,7 +799,7 @@ KR_SLOT_INDEX(const struct __kern_channel_ring *kr,
  */
 #define MD_BUFLET_ADDR_DLEN(_md, _val, _dlen) do {                      \
 	void *_addr, *_objaddr;                                         \
-	uint16_t _doff, _dlim;                                          \
+	uint32_t _doff, _dlim;                                          \
 	_MD_BUFLET_ADDROFF(_md, _addr, _objaddr, _doff, _dlen, _dlim);  \
 	/* skip past buflet data offset */                              \
 	(_val) = (void *)((uint8_t *)_addr + _doff);                    \

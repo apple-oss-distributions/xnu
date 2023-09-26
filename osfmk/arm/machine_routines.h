@@ -88,11 +88,16 @@ void sched_perfcontrol_abandon_preemption_disable_measurement(void);
 /* Check if running at interrupt context */
 boolean_t ml_at_interrupt_context(void);
 
+
 /* Generate a fake interrupt */
 void ml_cause_interrupt(void);
 
 
 #ifdef XNU_KERNEL_PRIVATE
+
+/* did this interrupt context interrupt userspace? */
+bool ml_did_interrupt_userspace(void);
+
 /* Clear interrupt spin debug state for thread */
 
 #if SCHED_HYGIENE_DEBUG
@@ -284,8 +289,6 @@ unsigned int ml_cpu_cache_sharing(unsigned int level, cluster_type_t cluster_typ
 
 unsigned int ml_get_cpu_types(void);
 
-unsigned int ml_get_cluster_count(void);
-
 int ml_get_boot_cpu_number(void);
 
 int ml_get_cpu_number(uint32_t phys_id);
@@ -341,10 +344,12 @@ cluster_type_t ml_get_boot_cluster_type(void);
  * @typedef ml_topology_cpu_t
  * @brief Describes one CPU core in the topology.
  *
- * @field cpu_id            Logical CPU ID (EDT: cpu-id): 0, 1, 2, 3, 4, ...
+ * @field cpu_id            Logical CPU ID: 0, 1, 2, 3, 4, ...
+ *                          Dynamically assigned by XNU so it might not match EDT.  No holes.
  * @field phys_id           Physical CPU ID (EDT: reg).  Same as MPIDR[15:0], i.e.
  *                          (cluster_id << 8) | core_number_within_cluster
- * @field cluster_id        Cluster ID (EDT: cluster-id)
+ * @field cluster_id        Logical Cluster ID: 0, 1, 2, 3, 4, ...
+ *                          Dynamically assigned by XNU so it might not match EDT.  No holes.
  * @field die_id            Die ID (EDT: die-id)
  * @field cluster_type      The type of CPUs found in this cluster.
  * @field l2_access_penalty Indicates that the scheduler should try to de-prioritize a core because
@@ -362,8 +367,8 @@ cluster_type_t ml_get_boot_cluster_type(void);
  * @field coresight_regs    IO-mapped virtual address of CoreSight debug register block.
  * @field coresight_pa      Physical address of CoreSight register block.
  * @field coresight_len     Length of CoreSight register block.
- * @field die_cluster_id    Cluster ID within the local die (EDT: die-cluster-id)
- * @field cluster_core_id   Core ID within the local cluster (EDT: cluster-core-id)
+ * @field die_cluster_id    Physical cluster ID within the local die (EDT: die-cluster-id)
+ * @field cluster_core_id   Physical core ID within the local cluster (EDT: cluster-core-id)
  */
 typedef struct ml_topology_cpu {
 	unsigned int                    cpu_id;
@@ -655,6 +660,36 @@ void ml_phys_write_double(
 void ml_phys_write_double_64(
 	addr64_t paddr, unsigned long long data);
 
+#if defined(__SIZEOF_INT128__) && APPLE_ARM64_ARCH_FAMILY
+/*
+ * Not all dependent projects consuming `machine_routines.h` are built using
+ * toolchains that support 128-bit integers.
+ */
+#define BUILD_QUAD_WORD_FUNCS 1
+#else
+#define BUILD_QUAD_WORD_FUNCS 0
+#endif /* defined(__SIZEOF_INT128__) && APPLE_ARM64_ARCH_FAMILY */
+
+#if BUILD_QUAD_WORD_FUNCS
+/*
+ * Not all dependent projects have their own typedef of `uint128_t` at the
+ * time they consume `machine_routines.h`.
+ */
+typedef unsigned __int128 uint128_t;
+
+/* Read physical address quad word */
+uint128_t ml_phys_read_quad(
+	vm_offset_t paddr);
+uint128_t ml_phys_read_quad_64(
+	addr64_t paddr);
+
+/* Write physical address quad word */
+void ml_phys_write_quad(
+	vm_offset_t paddr, uint128_t data);
+void ml_phys_write_quad_64(
+	addr64_t paddr, uint128_t data);
+#endif /* BUILD_QUAD_WORD_FUNCS */
+
 void ml_static_mfree(
 	vm_offset_t,
 	vm_size_t);
@@ -799,8 +834,9 @@ void bzero_phys_nc(addr64_t src64, vm_size_t bytes);
 void fill32_dczva(addr64_t, vm_size_t);
 void fill32_nt(addr64_t, vm_size_t, uint32_t);
 bool cpu_interrupt_is_pending(void);
-#endif
-#endif
+
+#endif // __arm64__
+#endif // MACH_KERNEL_PRIVATE
 
 void ml_thread_policy(
 	thread_t thread,
@@ -993,7 +1029,9 @@ typedef struct perfcontrol_work_interval *perfcontrol_work_interval_t;
 typedef enum {
 	WORK_INTERVAL_START,
 	WORK_INTERVAL_UPDATE,
-	WORK_INTERVAL_FINISH
+	WORK_INTERVAL_FINISH,
+	WORK_INTERVAL_CREATE,
+	WORK_INTERVAL_DEALLOCATE,
 } work_interval_ctl_t;
 
 struct perfcontrol_work_interval_instance {
@@ -1282,6 +1320,19 @@ extern void sched_perfcontrol_thread_group_preferred_clusters_set(void *machine_
 
 extern void sched_perfcontrol_edge_matrix_get(sched_clutch_edge *edge_matrix, bool *edge_request_bitmap, uint64_t flags, uint64_t matrix_order);
 extern void sched_perfcontrol_edge_matrix_set(sched_clutch_edge *edge_matrix, bool *edge_changes_bitmap, uint64_t flags, uint64_t matrix_order);
+
+/*
+ * sched_perfcontrol_edge_cpu_rotation_bitmasks_get()/sched_perfcontrol_edge_cpu_rotation_bitmasks_set()
+ *
+ * In order to drive intra-cluster core rotation CLPC supplies the edge scheduler with a pair of
+ * per-cluster bitmasks. The preferred_bitmask is a bitmask of CPU cores where if a bit is set,
+ * CLPC would prefer threads to be scheduled on that core if it is idle. The migration_bitmask
+ * is a bitmask of CPU cores where if a bit is set, CLPC would prefer threads no longer continue
+ * running on that core if there is an idle core from the preferred_bitmask that is available.
+ */
+
+extern void sched_perfcontrol_edge_cpu_rotation_bitmasks_set(uint32_t cluster_id, uint64_t preferred_bitmask, uint64_t migration_bitmask);
+extern void sched_perfcontrol_edge_cpu_rotation_bitmasks_get(uint32_t cluster_id, uint64_t *preferred_bitmask, uint64_t *migration_bitmask);
 
 /*
  * Update the deadline after which sched_perfcontrol_deadline_passed will be called.

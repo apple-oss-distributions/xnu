@@ -232,14 +232,9 @@ struct skmem_arena_system {
 struct kern_nexus_advisory;
 
 __BEGIN_DECLS
-
-#define SKMEM_PP_FLAG_KERNEL_ONLY                  0x01
-#define SKMEM_PP_FLAG_TRUNCATED_BUF                0x02
-#define SKMEM_PP_FLAG_RAW_BFLT                     0x04
-
 extern struct skmem_arena *skmem_arena_create_for_nexus(
 	const struct nexus_adapter *, struct skmem_region_params[SKMEM_REGIONS],
-	struct kern_pbufpool **, struct kern_pbufpool **, uint32_t,
+	struct kern_pbufpool **, struct kern_pbufpool **, boolean_t, boolean_t,
 	struct kern_nexus_advisory *, int *);
 extern void skmem_arena_nexus_sd_set_noidle(struct skmem_arena_nexus *, int);
 extern boolean_t skmem_arena_nexus_sd_idle(struct skmem_arena_nexus *);

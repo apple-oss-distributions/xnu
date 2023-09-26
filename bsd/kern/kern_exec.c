@@ -166,6 +166,7 @@
 #include <vm/vm_fault.h>
 #include <vm/vm_pageout.h>
 #include <vm/pmap.h>
+#include <vm/vm_reclaim_internal.h>
 
 #include <kdp/kdp_dyld.h>
 
@@ -275,6 +276,7 @@ extern void task_set_no_smt(task_t task);
 char *task_get_vm_shared_region_id_and_jop_pid(task_t task, uint64_t *jop_pid);
 #endif
 task_t convert_port_to_task(ipc_port_t port);
+
 
 /*
  * Mach things for which prototypes are unavailable from Mach headers
@@ -1381,6 +1383,10 @@ grade:
 	proc_unlock(p);
 
 	/*
+	 * Set TPRO flags if enabled
+	 */
+
+	/*
 	 * Set code-signing flags if this binary is signed, or if parent has
 	 * requested them on exec.
 	 */
@@ -1441,7 +1447,7 @@ grade:
 		}
 
 		/* release new address space since we won't use it */
-		vm_map_deallocate(map);
+		imgp->ip_free_map = map;
 		map = VM_MAP_NULL;
 		goto badtoolate;
 	}
@@ -1459,7 +1465,7 @@ grade:
 		}
 
 		/* release new address space since we won't use it */
-		vm_map_deallocate(map);
+		imgp->ip_free_map = map;
 		map = VM_MAP_NULL;
 		goto badtoolate;
 	}
@@ -1590,7 +1596,7 @@ grade:
 		}
 
 		/* release new address space since we won't use it */
-		vm_map_deallocate(map);
+		imgp->ip_free_map = map;
 		map = VM_MAP_NULL;
 		goto badtoolate;
 	}
@@ -1616,7 +1622,7 @@ grade:
 	 */
 	vm_map_pmap_set_process(old_map, -1, "<old_map>");
 #endif /* MACH_ASSERT */
-	vm_map_deallocate(old_map);
+	imgp->ip_free_map = old_map;
 	old_map = NULL;
 
 	lret = activate_exec_state(task, p, thread, &load_result);
@@ -2578,7 +2584,7 @@ exec_handle_port_actions(struct image_params *imgp,
 			break;
 #if CONFIG_AUDIT
 		case PSPA_AU_SESSION:
-			ret = audit_session_spawnjoin(p, task, port);
+			ret = audit_session_spawnjoin(p, port);
 			if (ret) {
 				/* audit_session_spawnjoin() has already dropped the reference in case of error. */
 				goto done;
@@ -2600,25 +2606,7 @@ exec_handle_port_actions(struct image_params *imgp,
 			break;
 
 		case PSPA_PTRAUTH_TASK_PORT:
-#if defined(HAS_APPLE_PAC)
-			{
-				task_t ptr_auth_task = convert_port_to_task(port);
-
-				if (ptr_auth_task == TASK_NULL) {
-					ret = EINVAL;
-					break;
-				}
-
-				imgp->ip_inherited_shared_region_id =
-				    task_get_vm_shared_region_id_and_jop_pid(ptr_auth_task,
-				    &imgp->ip_inherited_jop_pid);
-
-				/* Deallocate task ref returned by convert_port_to_task */
-				task_deallocate(ptr_auth_task);
-			}
-#endif /* HAS_APPLE_PAC */
-
-			/* consume the port right in case of success */
+			/* No one uses this, this is no longer supported, just a no-op */
 			ipc_port_release_send(port);
 			break;
 		default:
@@ -3118,11 +3106,41 @@ out:
 	return error;
 }
 
+static bool
+kauth_cred_model_setpersona(
+	kauth_cred_t            model,
+	struct _posix_spawn_persona_info *px_persona)
+{
+	bool updated = false;
+
+	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_UID) {
+		updated |= kauth_cred_model_setresuid(model,
+		    px_persona->pspi_uid,
+		    px_persona->pspi_uid,
+		    px_persona->pspi_uid,
+		    KAUTH_UID_NONE);
+	}
+
+	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GID) {
+		updated |= kauth_cred_model_setresgid(model,
+		    px_persona->pspi_gid,
+		    px_persona->pspi_gid,
+		    px_persona->pspi_gid);
+	}
+
+	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GROUPS) {
+		updated |= kauth_cred_model_setgroups(model,
+		    px_persona->pspi_groups,
+		    px_persona->pspi_ngroups,
+		    px_persona->pspi_gmuid);
+	}
+
+	return updated;
+}
+
 static int
 spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
 {
-	int ret;
-	kauth_cred_t cred;
 	struct persona *persona = NULL;
 
 	/*
@@ -3134,35 +3152,10 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
 		return ESRCH;
 	}
 
-	cred = kauth_cred_proc_ref(p);
-
-	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_UID) {
-		cred = kauth_cred_setresuid(cred,
-		    px_persona->pspi_uid,
-		    px_persona->pspi_uid,
-		    px_persona->pspi_uid,
-		    KAUTH_UID_NONE);
-	}
-
-	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GID) {
-		cred = kauth_cred_setresgid(cred,
-		    px_persona->pspi_gid,
-		    px_persona->pspi_gid,
-		    px_persona->pspi_gid);
-	}
-
-	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GROUPS) {
-		cred = kauth_cred_setgroups(cred,
-		    px_persona->pspi_groups,
-		    px_persona->pspi_ngroups,
-		    px_persona->pspi_gmuid);
-	}
-
-	ret = persona_proc_adopt(p, persona, cred);
-
-	kauth_cred_unref(&cred);
-	persona_put(persona);
-	return ret;
+	return persona_proc_adopt(p, persona,
+	           ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
+		return kauth_cred_model_setpersona(model, px_persona);
+	});
 }
 #endif
 
@@ -3301,7 +3294,7 @@ proc_apply_jit_and_vm_policies(struct image_params *imgp, proc_t p, task_t task)
 	}
 
 #if CONFIG_MAP_RANGES
-	if (task_get_platform_binary(task)) {
+	if (task_get_platform_binary(task) && !proc_is_simulated(p)) {
 		/*
 		 * This must be done last as it needs to observe
 		 * any kind of VA space growth that was requested
@@ -3317,11 +3310,13 @@ proc_apply_jit_and_vm_policies(struct image_params *imgp, proc_t p, task_t task)
 	}
 #endif /* CONFIG_MACF */
 
-#if defined(__arm64e__)
-	if (imgp->ip_flags & IMGPF_HW_TPRO) {
-		vm_map_set_tpro(get_task_map(task));
+	if (task_get_platform_binary(task)) {
+		/*
+		 * Pre-emptively disable TPRO remapping for
+		 * platform binaries
+		 */
+		vm_map_set_tpro_enforcement(get_task_map(task));
 	}
-#endif /* __arm64e__ */
 }
 
 static int
@@ -3494,6 +3489,8 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 			px_args.posix_cred_info = CAST_USER_ADDR_T(px_args32.posix_cred_info);
 			px_args.subsystem_root_path_size = px_args32.subsystem_root_path_size;
 			px_args.subsystem_root_path = CAST_USER_ADDR_T(px_args32.subsystem_root_path);
+			px_args.conclave_id_size = px_args32.conclave_id_size;
+			px_args.conclave_id = CAST_USER_ADDR_T(px_args32.conclave_id);
 		}
 		if (error) {
 			goto bad;
@@ -3879,7 +3876,7 @@ do_fork1:
 	imgp->ip_subsystem_root_path = p->p_subsystem_root_path;
 
 	context.vc_thread = imgp->ip_new_thread;
-	context.vc_ucred = proc_ucred(p);  /* XXX must NOT be kauth_cred_get() */
+	context.vc_ucred = proc_ucred_unsafe(p);  /* in init */
 
 	/*
 	 * Post fdt_fork(), pre exec_handle_sugid() - this is where we want
@@ -3948,10 +3945,11 @@ do_fork1:
 		 * a garbage credential.
 		 */
 		if (px_sa.psa_flags & POSIX_SPAWN_RESETIDS) {
-			proc_update_label(p, false, ^kauth_cred_t (kauth_cred_t my_cred){
-				return kauth_cred_setuidgid(my_cred,
-				kauth_cred_getruid(my_cred),
-				kauth_cred_getrgid(my_cred));
+			kauth_cred_proc_update(p, PROC_SETTOKEN_NONE,
+			    ^bool (kauth_cred_t parent __unused, kauth_cred_t model){
+				return kauth_cred_model_setuidgid(model,
+				kauth_cred_getruid(parent),
+				kauth_cred_getrgid(parent));
 			});
 		}
 
@@ -4115,6 +4113,7 @@ do_fork1:
 		 */
 		ipc_task_enable(new_task);
 	}
+
 
 	if (!error && imgp->ip_px_sa != NULL) {
 		thread_t child_thread = imgp->ip_new_thread;
@@ -4510,6 +4509,10 @@ bad:
 		if (imgp->ip_strings) {
 			execargs_free(imgp);
 		}
+		if (imgp->ip_free_map) {
+			/* Free the map after dropping iocount on vnode to avoid deadlock */
+			vm_map_deallocate(imgp->ip_free_map);
+		}
 		kfree_data(imgp->ip_px_sfa,
 		    px_args.file_actions_size);
 		kfree_data(imgp->ip_px_spa,
@@ -4662,8 +4665,13 @@ bad:
 
 	/* Release the thread ref returned by cloneproc/fork1 */
 	if (imgp != NULL && imgp->ip_new_thread) {
+		/* clear the exec complete flag if there is an error before point of no-return */
+		uint32_t clearwait_flags = TCRW_CLEAR_FINAL_WAIT;
+		if (!spawn_no_exec && !exec_done && error != 0) {
+			clearwait_flags |= TCRW_CLEAR_EXEC_COMPLETE;
+		}
 		/* wake up the new thread */
-		task_clear_return_wait(get_threadtask(imgp->ip_new_thread), TCRW_CLEAR_FINAL_WAIT);
+		task_clear_return_wait(get_threadtask(imgp->ip_new_thread), clearwait_flags);
 		thread_deallocate(imgp->ip_new_thread);
 		imgp->ip_new_thread = NULL;
 	}
@@ -4683,6 +4691,7 @@ bad:
 	if (inherit != NULL) {
 		ipc_importance_release(inherit);
 	}
+
 
 	assert(exec_failure_reason == NULL);
 	return error;
@@ -5086,6 +5095,10 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 	if (imgp->ip_scriptvp != NULLVP) {
 		vnode_put(imgp->ip_scriptvp);
 	}
+	if (imgp->ip_free_map) {
+		/* Free the map after dropping iocount on vnode to avoid deadlock */
+		vm_map_deallocate(imgp->ip_free_map);
+	}
 	if (imgp->ip_strings) {
 		execargs_free(imgp);
 	}
@@ -5216,8 +5229,13 @@ exit_with_error:
 
 		/* Release the thread ref returned by cloneproc */
 		if (imgp->ip_new_thread) {
+			/* clear the exec complete flag if there is an error before point of no-return */
+			uint32_t clearwait_flags = TCRW_CLEAR_FINAL_WAIT;
+			if (!exec_done && error != 0) {
+				clearwait_flags |= TCRW_CLEAR_EXEC_COMPLETE;
+			}
 			/* wake up the new exec thread */
-			task_clear_return_wait(get_threadtask(imgp->ip_new_thread), TCRW_CLEAR_FINAL_WAIT);
+			task_clear_return_wait(get_threadtask(imgp->ip_new_thread), clearwait_flags);
 			thread_deallocate(imgp->ip_new_thread);
 			imgp->ip_new_thread = NULL;
 		}
@@ -5830,6 +5848,18 @@ extern user32_addr_t commpage_text32_location;
 extern user64_addr_t commpage_text64_location;
 
 extern uuid_string_t bootsessionuuid_string;
+static TUNABLE(uint32_t, exe_boothash_salt, "exe_boothash_salt", 0);
+
+__startup_func
+static void
+exe_boothash_salt_generate(void)
+{
+	if (!PE_parse_boot_argn("exe_boothash_salt", NULL, 0)) {
+		read_random(&exe_boothash_salt, sizeof(exe_boothash_salt));
+	}
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, exe_boothash_salt_generate);
+
 
 #define MAIN_STACK_VALUES 4
 #define MAIN_STACK_KEY "main_stack="
@@ -5948,7 +5978,7 @@ exec_add_apple_strings(struct image_params *imgp,
 			imgp->ip_applec++;
 		}
 #if CONFIG_JETSAM && CONFIG_MEMORYSTATUS && CONFIG_DEFERRED_RECLAIM
-		if (memorystatus_swap_all_apps) {
+		if (vm_reclaim_max_threshold > 0) {
 			int psa_apptype = psa->psa_apptype;
 
 			if ((psa_apptype & POSIX_SPAWN_PROC_TYPE_MASK) == POSIX_SPAWN_PROC_TYPE_APP_DEFAULT) {
@@ -6062,6 +6092,7 @@ exec_add_apple_strings(struct image_params *imgp,
 		uint8_t sha_digest[SHA256_DIGEST_LENGTH];
 		SHA256_CTX sha_ctx;
 		SHA256_Init(&sha_ctx);
+		SHA256_Update(&sha_ctx, &exe_boothash_salt, sizeof(exe_boothash_salt));
 		SHA256_Update(&sha_ctx, bootsessionuuid_string, sizeof(bootsessionuuid_string));
 		SHA256_Update(&sha_ctx, cdhash, sizeof(cdhash));
 		SHA256_Final(sha_digest, &sha_ctx);
@@ -6199,6 +6230,7 @@ exec_add_apple_strings(struct image_params *imgp,
 		}
 
 		imgp->ip_applec++;
+
 	}
 
 	/* Align the tail of the combined applev area */
@@ -6361,7 +6393,6 @@ exec_handle_sugid(struct image_params *imgp)
 	int                     leave_sugid_clear = 0;
 	int                     mac_reset_ipc = 0;
 	int                     error = 0;
-	task_t                  task = NULL;
 #if CONFIG_MACF
 	int                     mac_transition, disjoint_cred = 0;
 	int             label_update_return = 0;
@@ -6435,8 +6466,9 @@ handle_mac_transition:
 		 */
 
 		if (imgp->ip_origvattr->va_mode & VSUID) {
-			proc_update_label(p, false, ^kauth_cred_t (kauth_cred_t my_cred) {
-				return kauth_cred_setresuid(my_cred,
+			kauth_cred_proc_update(p, PROC_SETTOKEN_NONE,
+			    ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
+				return kauth_cred_model_setresuid(model,
 				KAUTH_UID_NONE,
 				imgp->ip_origvattr->va_uid,
 				imgp->ip_origvattr->va_uid,
@@ -6445,8 +6477,9 @@ handle_mac_transition:
 		}
 
 		if (imgp->ip_origvattr->va_mode & VSGID) {
-			proc_update_label(p, false, ^kauth_cred_t (kauth_cred_t my_cred) {
-				return kauth_cred_setresgid(my_cred,
+			kauth_cred_proc_update(p, PROC_SETTOKEN_NONE,
+			    ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
+				return kauth_cred_model_setresgid(model,
 				KAUTH_GID_NONE,
 				imgp->ip_origvattr->va_gid,
 				imgp->ip_origvattr->va_gid);
@@ -6615,30 +6648,27 @@ handle_mac_transition:
 
 #endif  /* CONFIG_MACF */
 
+	/* Update the process' identity version and set the security token */
+	proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
+	task_set_uniqueid(proc_task(p));
+
 	/*
 	 * Implement the semantic where the effective user and group become
 	 * the saved user and group in exec'ed programs.
-	 *
-	 * Modifications to p_ucred must be guarded using the
-	 * proc's ucred lock. This prevents others from accessing
-	 * a garbage credential.
 	 */
-	proc_update_label(p, false, ^kauth_cred_t (kauth_cred_t my_cred) {
-		return kauth_cred_setsvuidgid(my_cred,
-		kauth_cred_getuid(my_cred),
-		kauth_cred_getgid(my_cred));
+	kauth_cred_proc_update(p, PROC_SETTOKEN_ALWAYS,
+	    ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
+		posix_cred_t pcred = posix_cred_get(model);
+
+		if (pcred->cr_svuid == pcred->cr_uid &&
+		pcred->cr_svgid == pcred->cr_gid) {
+		        return false;
+		}
+
+		pcred->cr_svuid = pcred->cr_uid;
+		pcred->cr_svgid = pcred->cr_gid;
+		return true;
 	});
-
-	if (imgp->ip_new_thread != NULL) {
-		task = get_threadtask(imgp->ip_new_thread);
-	} else {
-		task = proc_task(p);
-	}
-
-	/* Update the process' identity version and set the security token */
-	proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
-	task_set_uniqueid(task);
-	set_security_token_task_internal(p, task);
 
 	return error;
 }
@@ -6843,8 +6873,11 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 
 	/*
 	 * So that init task is set with uid,gid 0 token
+	 *
+	 * The access to the cred is safe:
+	 * the proc isn't running yet, it's stable.
 	 */
-	set_security_token(p);
+	set_security_token(p, proc_ucred_unsafe(p));
 
 	return execve(p, &init_exec_args, retval);
 }

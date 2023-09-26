@@ -202,6 +202,9 @@ static int ip6_hopopts_input(u_int32_t *, u_int32_t *, struct mbuf **, int *);
 
 static void in6_ifaddrhashtbl_init(void);
 
+static struct m_tag *m_tag_kalloc_inet6(u_int32_t id, u_int16_t type, uint16_t len, int wait);
+static void m_tag_kfree_inet6(struct m_tag *tag);
+
 #if NSTF
 extern void stfattach(void);
 #endif /* NSTF */
@@ -308,7 +311,7 @@ static ip6_check_if_result_t ip6_input_check_interface(struct mbuf *, struct ip6
 	if (!IP6_HDR_ALIGNED_P(mtod(_m, caddr_t))) {                    \
 	        struct mbuf *_n;                                        \
 	        struct ifnet *__ifp = (_ifp);                           \
-	        atomic_add_64(&(__ifp)->if_alignerrs, 1);               \
+	        os_atomic_inc(&(__ifp)->if_alignerrs, relaxed);               \
 	        if (((_m)->m_flags & M_PKTHDR) &&                       \
 	            (_m)->m_pkthdr.pkt_hdr != NULL)                     \
 	                (_m)->m_pkthdr.pkt_hdr = NULL;                  \
@@ -818,10 +821,10 @@ ip6_input(struct mbuf *m)
 
 #if DUMMYNET
 	if ((tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_DUMMYNET, NULL)) != NULL) {
+	    KERNEL_TAG_TYPE_DUMMYNET)) != NULL) {
 		struct dn_pkt_tag       *dn_tag;
 
-		dn_tag = (struct dn_pkt_tag *)(tag + 1);
+		dn_tag = (struct dn_pkt_tag *)(tag->m_tag_data);
 
 		args.fwa_pf_rule = dn_tag->dn_pf_rule;
 
@@ -2330,7 +2333,7 @@ ip6_addaux(struct mbuf *m)
 
 	/* Check if one is already allocated */
 	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_INET6, NULL);
+	    KERNEL_TAG_TYPE_INET6);
 	if (tag == NULL) {
 		/* Allocate a tag */
 		tag = m_tag_create(KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_INET6,
@@ -2342,7 +2345,7 @@ ip6_addaux(struct mbuf *m)
 		}
 	}
 
-	return tag ? (struct ip6aux *)(tag + 1) : NULL;
+	return tag ? (struct ip6aux *)(tag->m_tag_data) : NULL;
 }
 
 struct ip6aux *
@@ -2351,9 +2354,9 @@ ip6_findaux(struct mbuf *m)
 	struct m_tag    *tag;
 
 	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_INET6, NULL);
+	    KERNEL_TAG_TYPE_INET6);
 
-	return tag ? (struct ip6aux *)(tag + 1) : NULL;
+	return tag != NULL ? (struct ip6aux *)(tag->m_tag_data) : NULL;
 }
 
 void
@@ -2362,10 +2365,62 @@ ip6_delaux(struct mbuf *m)
 	struct m_tag    *tag;
 
 	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_INET6, NULL);
-	if (tag) {
+	    KERNEL_TAG_TYPE_INET6);
+	if (tag != NULL) {
 		m_tag_delete(m, tag);
 	}
+}
+
+struct inet6_tag_container {
+	struct m_tag    inet6_m_tag;
+	struct ip6aux   inet6_ip6a;
+};
+
+struct m_tag *
+m_tag_kalloc_inet6(u_int32_t id, u_int16_t type, uint16_t len, int wait)
+{
+	struct inet6_tag_container *tag_container;
+	struct m_tag *tag = NULL;
+
+	assert3u(id, ==, KERNEL_MODULE_TAG_ID);
+	assert3u(type, ==, KERNEL_TAG_TYPE_INET6);
+	assert3u(len, ==, sizeof(struct ip6aux));
+
+	if (len != sizeof(struct ip6aux)) {
+		return NULL;
+	}
+
+	tag_container = kalloc_type(struct inet6_tag_container, wait | M_ZERO);
+	if (tag_container != NULL) {
+		tag =  &tag_container->inet6_m_tag;
+
+		assert3p(tag, ==, tag_container);
+
+		M_TAG_INIT(tag, id, type, len, &tag_container->inet6_ip6a, NULL);
+	}
+
+	return tag;
+}
+
+void
+m_tag_kfree_inet6(struct m_tag *tag)
+{
+	struct inet6_tag_container *tag_container = (struct inet6_tag_container *)tag;
+
+	assert3u(tag->m_tag_len, ==, sizeof(struct ip6aux));
+
+	kfree_type(struct inet6_tag_container, tag_container);
+}
+
+void
+ip6_register_m_tag(void)
+{
+	int error;
+
+	error = m_register_internal_tag_type(KERNEL_TAG_TYPE_INET6, sizeof(struct ip6aux),
+	    m_tag_kalloc_inet6, m_tag_kfree_inet6);
+
+	assert3u(error, ==, 0);
 }
 
 /*

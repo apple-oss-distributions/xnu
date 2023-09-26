@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -97,7 +97,6 @@
  * Version 2.0.
  */
 
-
 /*#define PULLDOWN_DEBUG*/
 
 #include <sys/param.h>
@@ -106,10 +105,51 @@
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/mcache.h>
+#include <sys/sysctl.h>
+
 #include <netinet/in.h>
 #include <netinet/ip_var.h>
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
+
+#include <kern/assert.h>
+
+#include <os/log.h>
+
+#include <libkern/OSDebug.h>
+
+#include <ptrauth.h>
+
+#if defined(__i386__) || defined(__x86_64__)
+#define MB_TAG_MBUF_DEFAULT 1
+#else
+#define MB_TAG_MBUF_DEFAULT 0
+#endif /* defined(__i386__) || defined(__x86_64__) */
+
+SYSCTL_DECL(_kern_ipc);
+
+unsigned int mb_tag_mbuf = MB_TAG_MBUF_DEFAULT;
+SYSCTL_UINT(_kern_ipc, OID_AUTO, mb_tag_mbuf,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &mb_tag_mbuf, 0, "");
+
+struct m_tag_type_entry {
+	m_tag_kalloc_func_t mt_alloc_func;
+	m_tag_kfree_func_t mt_free_func;
+	uint16_t mt_type;
+	uint16_t mt_len;
+};
+
+struct m_tag_type_stats {
+	uint64_t mt_alloc_count;
+	uint64_t mt_alloc_failed;
+	uint64_t mt_free_count;
+};
+
+SECURITY_READ_ONLY_LATE(static struct m_tag_type_entry) m_tag_type_table[KERNEL_TAG_TYPE_COUNT] = {};
+
+static struct m_tag_type_stats m_tag_type_stats[KERNEL_TAG_TYPE_COUNT] = {};
+
+static struct m_tag *m_tag_create_mbuf(uint32_t, uint16_t, uint16_t, int, struct mbuf *);
 
 /*
  * ensure that [off, off + len) is contiguous on the mbuf chain "m".
@@ -334,19 +374,154 @@ ok:
 	return n;
 }
 
+static struct m_tag *
+m_tag_kalloc_notsupp(__unused uint32_t id, __unused uint16_t type, __unused uint16_t len, __unused int wait)
+{
+	return NULL;
+}
+
+static void
+m_tag_kfree_notsupp(__unused struct m_tag *tag)
+{
+	return;
+}
+
+#if defined(HAS_APPLE_PAC)
 /*
- * Create and return an m_tag, either by re-using space in a previous tag
- * or by allocating a new mbuf/cluster
+ * combine into a uintptr_t the m_tag_type that is 16 bits with the m_tag_id is 32 bits
  */
+static uintptr_t
+m_tag_cookie_from_id_and_type(struct m_tag *tag)
+{
+	uintptr_t cookie;
+
+#ifdef __LP64__
+	/*
+	 * upper 4 bytes: 2 bytes of type
+	 * lower 4 bytes: 4 bytes of id
+	 */
+	cookie = (((uintptr_t)tag->m_tag_type) << 32) | (uintptr_t)tag->m_tag_id;
+#else
+	/*
+	 * upper 2 bytes: 2 bytes of type or-ed with upper 2 bytes of id
+	 * lower 2 bytes: lower 2 bytes of id
+	 */
+	cookie = (((uintptr_t)tag->m_tag_type) << 16) | (uintptr_t)tag->m_tag_id;
+#endif
+	return cookie;
+}
+
+void
+m_tag_create_cookie(struct m_tag *tag)
+{
+	uintptr_t cookie = m_tag_cookie_from_id_and_type(tag);
+
+	tag->m_tag_cookie = (uintptr_t) ptrauth_sign_unauthenticated((void *)cookie,
+	    ptrauth_key_process_independent_data,
+	    ptrauth_blend_discriminator((void *)(uintptr_t)(tag->m_tag_type | tag->m_tag_id),
+	    ptrauth_string_discriminator("m_tag.m_tag_cookie")));
+}
+
+static void
+m_tag_verify_cookie(struct m_tag *tag)
+{
+	uintptr_t cookie = m_tag_cookie_from_id_and_type(tag);
+	uintptr_t auth_cookie;
+
+	auth_cookie = (uintptr_t) ptrauth_auth_data((void *)(uintptr_t)tag->m_tag_cookie,
+	    ptrauth_key_process_independent_data,
+	    ptrauth_blend_discriminator((void *)(uintptr_t)(tag->m_tag_type | tag->m_tag_id),
+	    ptrauth_string_discriminator("m_tag.m_tag_cookie")));
+	if (cookie != auth_cookie) {
+		panic("verify_m_tag_cookie bad m_tag cookie");
+	}
+}
+
+#else /* defined(HAS_APPLE_PAC) */
+
+void
+m_tag_create_cookie(struct m_tag *tag)
+{
+	tag->m_tag_cookie = M_TAG_VALID_PATTERN;
+}
+
+static void
+m_tag_verify_cookie(struct m_tag *tag)
+{
+	VERIFY(tag->m_tag_cookie == M_TAG_VALID_PATTERN);
+}
+
+#endif /* defined(HAS_APPLE_PAC) */
+
+
 struct m_tag *
-m_tag_create(u_int32_t id, u_int16_t type, int len, int wait, struct mbuf *buf)
+m_tag_create(uint32_t id, uint16_t type, int len, int wait, struct mbuf *buf)
+{
+	if (mb_tag_mbuf != 0) {
+		/*
+		 * Create and return an m_tag, either by re-using space in a previous tag
+		 * or by allocating a new mbuf/cluster
+		 */
+		return m_tag_create_mbuf(id, type, (uint16_t)len, wait, buf);
+	} else {
+		/*
+		 * Each packet tag has its own allocation
+		 */
+		return m_tag_alloc(id, type, (uint16_t)len, wait);
+	}
+}
+
+/* Get a packet tag structure along with specified data following. */
+static struct m_tag *
+m_tag_alloc_mbuf(u_int32_t id, u_int16_t type, uint16_t len, int wait)
+{
+	struct m_tag *t;
+	void *mb_cl = NULL;
+
+	if (M_TAG_ALIGN(len) + sizeof(struct m_taghdr) <= MLEN) {
+		struct mbuf *m = m_get(wait, MT_TAG);
+		struct m_taghdr *hdr;
+
+		if (m == NULL) {
+			return NULL;
+		}
+		mb_cl = m;
+
+		m->m_flags |= M_TAGHDR;
+
+		hdr = (struct m_taghdr *)(void *)m->m_data;
+		VERIFY(IS_P2ALIGNED(hdr + 1, sizeof(u_int64_t)));
+		hdr->mth_refcnt = 1;
+		m->m_len += sizeof(struct m_taghdr);
+		t = (struct m_tag *)(void *)(m->m_data + m->m_len);
+		VERIFY(IS_P2ALIGNED(t, sizeof(u_int64_t)));
+		m->m_len += M_TAG_ALIGN(len);
+		VERIFY(m->m_len <= MLEN);
+	} else if (len + sizeof(struct m_tag) <= MCLBYTES) {
+		mb_cl = m_mclalloc(wait);
+		t = (struct m_tag *)(void *)mb_cl;
+	} else {
+		t = NULL;
+	}
+
+	if (__improbable(t == NULL)) {
+		return NULL;
+	}
+
+	VERIFY(IS_P2ALIGNED(t, sizeof(u_int64_t)));
+	M_TAG_INIT(t, id, type, len, (void *)(t + 1), mb_cl);
+	if (len > 0) {
+		bzero(t->m_tag_data, len);
+	}
+	return t;
+}
+
+static struct m_tag *
+m_tag_create_mbuf(uint32_t id, uint16_t type, uint16_t len, int wait, struct mbuf *buf)
 {
 	struct m_tag *t = NULL;
 	struct m_tag *p;
-
-	if (len < 0) {
-		return NULL;
-	}
+	void *mb_cl = NULL;
 
 	if (len + sizeof(struct m_tag) + sizeof(struct m_taghdr) > MLEN) {
 		return m_tag_alloc(id, type, len, wait);
@@ -366,9 +541,9 @@ m_tag_create(u_int32_t id, u_int16_t type, int len, int wait, struct mbuf *buf)
 			continue;
 		}
 
-		VERIFY(p->m_tag_cookie == M_TAG_VALID_PATTERN);
+		m_tag_verify_cookie(p);
 
-		struct mbuf *m = m_dtom(p);
+		struct mbuf *m = p->m_tag_mb_cl;
 		struct m_taghdr *hdr = (struct m_taghdr *)(void *)m->m_data;
 
 		VERIFY(IS_P2ALIGNED(hdr + 1, sizeof(u_int64_t)));
@@ -376,9 +551,10 @@ m_tag_create(u_int32_t id, u_int16_t type, int len, int wait, struct mbuf *buf)
 
 		/* The mbuf can store this m_tag */
 		if (M_TAG_ALIGN(len) <= MLEN - m->m_len) {
+			mb_cl = m;
 			t = (struct m_tag *)(void *)(m->m_data + m->m_len);
 			VERIFY(IS_P2ALIGNED(t, sizeof(u_int64_t)));
-			hdr->refcnt++;
+			hdr->mth_refcnt++;
 			m->m_len += M_TAG_ALIGN(len);
 			VERIFY(m->m_len <= MLEN);
 			break;
@@ -391,85 +567,30 @@ m_tag_create(u_int32_t id, u_int16_t type, int len, int wait, struct mbuf *buf)
 		return m_tag_alloc(id, type, len, wait);
 	}
 
-	t->m_tag_cookie = M_TAG_VALID_PATTERN;
-	t->m_tag_type = type;
-	t->m_tag_len = (uint16_t)len;
-	t->m_tag_id = id;
+	M_TAG_INIT(t, id, type, len, (void *)(t + 1), mb_cl);
 	if (len > 0) {
-		bzero(t + 1, len);
+		bzero(t->m_tag_data, len);
 	}
 	return t;
 }
 
-/* Get a packet tag structure along with specified data following. */
-struct m_tag *
-m_tag_alloc(u_int32_t id, u_int16_t type, int len, int wait)
+static void
+m_tag_free_mbuf(struct m_tag *t)
 {
-	struct m_tag *t;
-
-	if (len < 0) {
-		return NULL;
-	}
-
-	if (M_TAG_ALIGN(len) + sizeof(struct m_taghdr) <= MLEN) {
-		struct mbuf *m = m_get(wait, MT_TAG);
-		struct m_taghdr *hdr;
-
-		if (m == NULL) {
-			return NULL;
-		}
-
-		m->m_flags |= M_TAGHDR;
-
-		hdr = (struct m_taghdr *)(void *)m->m_data;
-		VERIFY(IS_P2ALIGNED(hdr + 1, sizeof(u_int64_t)));
-		hdr->refcnt = 1;
-		m->m_len += sizeof(struct m_taghdr);
-		t = (struct m_tag *)(void *)(m->m_data + m->m_len);
-		VERIFY(IS_P2ALIGNED(t, sizeof(u_int64_t)));
-		m->m_len += M_TAG_ALIGN(len);
-		VERIFY(m->m_len <= MLEN);
-	} else if (len + sizeof(struct m_tag) <= MCLBYTES) {
-		t = (struct m_tag *)(void *)m_mclalloc(wait);
-	} else {
-		t = NULL;
-	}
-
-	if (t == NULL) {
-		return NULL;
-	}
-
-	VERIFY(IS_P2ALIGNED(t, sizeof(u_int64_t)));
-	t->m_tag_cookie = M_TAG_VALID_PATTERN;
-	t->m_tag_type = type;
-	t->m_tag_len = (uint16_t)len;
-	t->m_tag_id = id;
-	if (len > 0) {
-		bzero(t + 1, len);
-	}
-	return t;
-}
-
-
-/* Free a packet tag. */
-void
-m_tag_free(struct m_tag *t)
-{
-	if (t == NULL) {
+	if (__improbable(t == NULL)) {
 		return;
 	}
 
-	VERIFY(t->m_tag_cookie == M_TAG_VALID_PATTERN);
-
 	if (M_TAG_ALIGN(t->m_tag_len) + sizeof(struct m_taghdr) <= MLEN) {
-		struct mbuf * m = m_dtom(t);
+		struct mbuf * m = t->m_tag_mb_cl;
+
 		VERIFY(m->m_flags & M_TAGHDR);
 		struct m_taghdr *hdr = (struct m_taghdr *)(void *)m->m_data;
 
 		VERIFY(IS_P2ALIGNED(hdr + 1, sizeof(u_int64_t)));
 
 		/* No other tags in this mbuf */
-		if (--hdr->refcnt == 0) {
+		if (--hdr->mth_refcnt == 0) {
 			m_free(m);
 			return;
 		}
@@ -486,6 +607,268 @@ m_tag_free(struct m_tag *t)
 	}
 }
 
+/*
+ * Allocations for external data are known to not have pointers for
+ * most platforms -- for macOS this is not guaranteed
+ */
+#if XNU_TARGET_OS_OSX
+
+__typed_allocators_ignore_push
+
+static inline void *
+m_tag_data_kalloc(uint16_t len, int wait)
+{
+	return kheap_alloc(KHEAP_DEFAULT, len, wait | M_ZERO);
+}
+
+static inline void
+m_tag_data_free(struct m_tag *tag)
+{
+	kheap_free(KHEAP_DEFAULT, tag->m_tag_data, tag->m_tag_len);
+}
+__typed_allocators_ignore_pop
+
+#else /* XNU_TARGET_OS_OSX */
+
+static inline void *
+m_tag_data_kalloc(uint16_t len, int wait)
+{
+	return kalloc_data(len, wait | M_ZERO);
+}
+
+static inline void
+m_tag_data_free(struct m_tag *tag)
+{
+	kfree_data(tag->m_tag_data, tag->m_tag_len);
+}
+
+#endif /* XNU_TARGET_OS_OSX */
+
+static struct m_tag *
+m_tag_kalloc_external(uint32_t id, uint16_t type, uint16_t len, int wait)
+{
+	struct m_tag *tag;
+	void *data = NULL;
+
+	tag = kalloc_type(struct m_tag, wait | M_ZERO);
+	if (__improbable(tag == NULL)) {
+		return NULL;
+	}
+
+	if (len > 0) {
+		data = m_tag_data_kalloc(len, wait);
+		if (__improbable(data == NULL)) {
+			kfree_type(struct m_tag, tag);
+			return NULL;
+		}
+	}
+
+	M_TAG_INIT(tag, id, type, len, data, NULL);
+
+	return tag;
+}
+
+static void
+m_tag_kfree_external(struct m_tag *tag)
+{
+	if (tag->m_tag_data != NULL) {
+		m_tag_data_free(tag);
+	}
+	kfree_type(struct m_tag, tag);
+}
+
+static struct m_tag_type_entry *
+get_m_tag_type_entry(uint32_t id, uint16_t type, struct m_tag_type_stats **pmtts)
+{
+	struct m_tag_type_entry *mtte = &m_tag_type_table[KERNEL_TAG_TYPE_NONE];
+
+	if (pmtts != NULL) {
+		*pmtts = &m_tag_type_stats[KERNEL_TAG_TYPE_NONE];
+	}
+
+	if (id == KERNEL_MODULE_TAG_ID) {
+		switch (type) {
+		case KERNEL_TAG_TYPE_DUMMYNET:
+		case KERNEL_TAG_TYPE_IPFILT:
+		case KERNEL_TAG_TYPE_ENCAP:
+		case KERNEL_TAG_TYPE_INET6:
+		case KERNEL_TAG_TYPE_IPSEC:
+		case KERNEL_TAG_TYPE_CFIL_UDP:
+		case KERNEL_TAG_TYPE_PF_REASS:
+		case KERNEL_TAG_TYPE_AQM:
+		case KERNEL_TAG_TYPE_DRVAUX:
+			mtte = &m_tag_type_table[type];
+			if (pmtts != NULL) {
+				*pmtts = &m_tag_type_stats[type];
+			}
+			break;
+		default:
+#if DEBUG || DEVELOPMENT
+			if (type > 0 && type < KERNEL_TAG_TYPE_COUNT) {
+				panic("get_m_tag_type_entry unexpected m_tag type %u",
+				    type);
+			}
+#endif /* DEBUG || DEVELOPMENT */
+			break;
+		}
+	}
+
+	return mtte;
+}
+
+static struct m_tag *
+m_tag_kalloc(uint32_t id, uint16_t type, uint16_t len, int wait, struct m_tag_type_entry *mtte)
+{
+	struct m_tag *tag = NULL;
+
+	tag = mtte->mt_alloc_func(id, type, len, wait);
+
+	if (__probable(tag != NULL)) {
+		VERIFY(IS_P2ALIGNED(tag, sizeof(uint64_t)));
+
+		if (__improbable(tag->m_tag_data == NULL)) {
+			VERIFY(len == 0);
+		} else {
+			VERIFY(len != 0);
+			VERIFY(IS_P2ALIGNED(tag->m_tag_data, sizeof(uint64_t)));
+		}
+	}
+	return tag;
+}
+
+static void
+m_tag_kfree(struct m_tag *tag, struct m_tag_type_entry *mtte)
+{
+	mtte->mt_free_func(tag);
+}
+
+struct m_tag *
+m_tag_alloc(uint32_t id, uint16_t type, int len, int wait)
+{
+	struct m_tag *tag = NULL;
+	struct m_tag_type_entry *mtte = NULL;
+	struct m_tag_type_stats *mtts = NULL;
+
+	mtte = get_m_tag_type_entry(id, type, &mtts);
+
+	if (__improbable(len < 0 || len >= MCLBYTES - sizeof(struct m_tag))) {
+		goto done;
+	}
+
+	if (mb_tag_mbuf != 0) {
+		tag = m_tag_alloc_mbuf(id, type, (uint16_t)len, wait);
+	} else {
+		tag = m_tag_kalloc(id, type, (uint16_t)len, wait, mtte);
+	}
+done:
+	if (__probable(tag != NULL)) {
+		m_tag_verify_cookie(tag);
+		assert3u(tag->m_tag_id, ==, id);
+		assert3u(tag->m_tag_type, ==, type);
+		assert3u(tag->m_tag_len, ==, len);
+
+		os_atomic_inc(&mtts->mt_alloc_count, relaxed);
+	} else {
+		os_atomic_inc(&mtts->mt_alloc_failed, relaxed);
+	}
+
+	return tag;
+}
+
+/* Free a packet tag. */
+void
+m_tag_free(struct m_tag *tag)
+{
+	struct m_tag_type_entry *mtte = NULL;
+	struct m_tag_type_stats *mtts = NULL;
+
+	if (__improbable(tag == NULL)) {
+		return;
+	}
+
+	m_tag_verify_cookie(tag);
+
+	mtte = get_m_tag_type_entry(tag->m_tag_id, tag->m_tag_type, &mtts);
+
+	if (mb_tag_mbuf != 0) {
+		m_tag_free_mbuf(tag);
+	} else {
+		m_tag_kfree(tag, mtte);
+	}
+
+	os_atomic_inc(&mtts->mt_free_count, relaxed);
+}
+
+void
+mbuf_tag_init(void)
+{
+	for (uint16_t type = 0; type < KERNEL_TAG_TYPE_COUNT; type++) {
+		m_tag_type_table[type].mt_type = type;
+		m_tag_type_table[type].mt_len = 0;
+		m_tag_type_table[type].mt_alloc_func = m_tag_kalloc_notsupp;
+		m_tag_type_table[type].mt_free_func = m_tag_kfree_notsupp;
+	}
+	m_tag_type_table[KERNEL_TAG_TYPE_NONE].mt_alloc_func = m_tag_kalloc_external;
+	m_tag_type_table[KERNEL_TAG_TYPE_NONE].mt_free_func = m_tag_kfree_external;
+	m_tag_type_table[KERNEL_TAG_TYPE_DRVAUX].mt_alloc_func = m_tag_kalloc_external;
+	m_tag_type_table[KERNEL_TAG_TYPE_DRVAUX].mt_free_func = m_tag_kfree_external;
+
+#if NETWORKING
+	extern void pktsched_register_m_tag(void);
+	pktsched_register_m_tag();
+#endif /* NETWORKING */
+
+#if INET
+	extern void ip6_register_m_tag(void);
+	ip6_register_m_tag();
+
+	extern void ipfilter_register_m_tag(void);
+	ipfilter_register_m_tag();
+
+	extern void encap_register_m_tag(void);
+	encap_register_m_tag();
+#endif /* INET */
+
+#if IPSEC
+	extern void ipsec_register_m_tag(void);
+	ipsec_register_m_tag();
+#endif /* IPSEC */
+
+#if DUMMYNET
+	extern void dummynet_register_m_tag(void);
+	dummynet_register_m_tag();
+#endif /* DUMMYNET */
+
+#if PF
+	extern void pf_register_m_tag(void);
+	pf_register_m_tag();
+#endif /* PF */
+
+#if CONTENT_FILTER
+	extern void cfil_register_m_tag(void);
+	cfil_register_m_tag();
+#endif /* CONTENT_FILTER */
+}
+
+int
+m_register_internal_tag_type(uint16_t type, uint16_t len,
+    m_tag_kalloc_func_t alloc_func, m_tag_kfree_func_t free_func)
+{
+	int error = 0;
+
+	if (type <= 0 || type >= KERNEL_TAG_TYPE_DRVAUX) {
+		error = EINVAL;
+		goto done;
+	}
+	m_tag_type_table[type].mt_type = type;
+	m_tag_type_table[type].mt_len = len;
+	m_tag_type_table[type].mt_alloc_func = alloc_func;
+	m_tag_type_table[type].mt_free_func = free_func;
+
+done:
+	return error;
+}
+
 /* Prepend a packet tag. */
 void
 m_tag_prepend(struct mbuf *m, struct m_tag *t)
@@ -500,7 +883,7 @@ void
 m_tag_unlink(struct mbuf *m, struct m_tag *t)
 {
 	VERIFY(m->m_flags & M_PKTHDR);
-	VERIFY(t != NULL && t->m_tag_cookie == M_TAG_VALID_PATTERN);
+	VERIFY(t != NULL);
 
 	SLIST_REMOVE(&m->m_pkthdr.tags, t, m_tag, m_tag_link);
 }
@@ -515,24 +898,18 @@ m_tag_delete(struct mbuf *m, struct m_tag *t)
 
 /* Unlink and free a packet tag chain, starting from given tag. */
 void
-m_tag_delete_chain(struct mbuf *m, struct m_tag *t)
+m_tag_delete_chain(struct mbuf *m)
 {
 	struct m_tag *p, *q;
 
 	VERIFY(m->m_flags & M_PKTHDR);
 
-	if (t != NULL) {
-		p = t;
-	} else {
-		p = SLIST_FIRST(&m->m_pkthdr.tags);
-	}
+	p = SLIST_FIRST(&m->m_pkthdr.tags);
 	if (p == NULL) {
 		return;
 	}
 
-	VERIFY(p->m_tag_cookie == M_TAG_VALID_PATTERN);
 	while ((q = SLIST_NEXT(p, m_tag_link)) != NULL) {
-		VERIFY(q->m_tag_cookie == M_TAG_VALID_PATTERN);
 		m_tag_delete(m, q);
 	}
 	m_tag_delete(m, p);
@@ -540,21 +917,17 @@ m_tag_delete_chain(struct mbuf *m, struct m_tag *t)
 
 /* Find a tag, starting from a given position. */
 struct m_tag *
-m_tag_locate(struct mbuf *m, u_int32_t id, u_int16_t type, struct m_tag *t)
+m_tag_locate(struct mbuf *m, uint32_t id, uint16_t type)
 {
 	struct m_tag *p;
 
 	VERIFY(m->m_flags & M_PKTHDR);
 
-	if (t == NULL) {
-		p = SLIST_FIRST(&m->m_pkthdr.tags);
-	} else {
-		VERIFY(t->m_tag_cookie == M_TAG_VALID_PATTERN);
-		p = SLIST_NEXT(t, m_tag_link);
-	}
+	p = SLIST_FIRST(&m->m_pkthdr.tags);
+
 	while (p != NULL) {
-		VERIFY(p->m_tag_cookie == M_TAG_VALID_PATTERN);
 		if (p->m_tag_id == id && p->m_tag_type == type) {
+			m_tag_verify_cookie(p);
 			return p;
 		}
 		p = SLIST_NEXT(p, m_tag_link);
@@ -574,7 +947,7 @@ m_tag_copy(struct m_tag *t, int how)
 	if (p == NULL) {
 		return NULL;
 	}
-	bcopy(t + 1, p + 1, t->m_tag_len); /* Copy the data */
+	bcopy(t->m_tag_data, p->m_tag_data, t->m_tag_len); /* Copy the data */
 	return p;
 }
 
@@ -591,12 +964,12 @@ m_tag_copy_chain(struct mbuf *to, struct mbuf *from, int how)
 
 	VERIFY((to->m_flags & M_PKTHDR) && (from->m_flags & M_PKTHDR));
 
-	m_tag_delete_chain(to, NULL);
+	m_tag_delete_chain(to);
 	SLIST_FOREACH(p, &from->m_pkthdr.tags, m_tag_link) {
-		VERIFY(p->m_tag_cookie == M_TAG_VALID_PATTERN);
+		m_tag_verify_cookie(p);
 		t = m_tag_copy(p, how);
 		if (t == NULL) {
-			m_tag_delete_chain(to, NULL);
+			m_tag_delete_chain(to);
 			return 0;
 		}
 		if (tprev == NULL) {
@@ -641,7 +1014,6 @@ m_tag_next(struct mbuf *m, struct m_tag *t)
 {
 #pragma unused(m)
 	VERIFY(t != NULL);
-	VERIFY(t->m_tag_cookie == M_TAG_VALID_PATTERN);
 
 	return SLIST_NEXT(t, m_tag_link);
 }
@@ -649,7 +1021,7 @@ m_tag_next(struct mbuf *m, struct m_tag *t)
 int
 m_set_traffic_class(struct mbuf *m, mbuf_traffic_class_t tc)
 {
-	u_int32_t val = MBUF_TC2SCVAL(tc);      /* just the val portion */
+	uint32_t val = MBUF_TC2SCVAL(tc);      /* just the val portion */
 
 	return m_set_service_class(m, m_service_class_from_val(val));
 }
@@ -693,7 +1065,7 @@ m_get_service_class(struct mbuf *m)
 }
 
 mbuf_svc_class_t
-m_service_class_from_idx(u_int32_t i)
+m_service_class_from_idx(uint32_t i)
 {
 	mbuf_svc_class_t sc = MBUF_SC_BE;
 
@@ -738,7 +1110,7 @@ m_service_class_from_idx(u_int32_t i)
 }
 
 mbuf_svc_class_t
-m_service_class_from_val(u_int32_t v)
+m_service_class_from_val(uint32_t v)
 {
 	mbuf_svc_class_t sc = MBUF_SC_BE;
 
@@ -876,3 +1248,376 @@ m_sum16(struct mbuf *m, uint32_t off, uint32_t len)
 
 	return (uint16_t)os_cpu_in_cksum_mbuf(m, len, off, 0);
 }
+
+static int
+sysctl_mb_tag_stats(__unused struct sysctl_oid *oidp,
+    __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int error = 0;
+
+	if (req->oldptr == USER_ADDR_NULL) {
+		req->oldidx = KERNEL_TAG_TYPE_COUNT * sizeof(struct m_tag_stats);
+		return 0;
+	}
+	if (req->newptr != USER_ADDR_NULL) {
+		return EPERM;
+	}
+
+	for (uint16_t i = 0; i < KERNEL_TAG_TYPE_COUNT; i++) {
+		struct m_tag_stats m_tag_stats = {};
+
+		m_tag_stats.mts_id = KERNEL_MODULE_TAG_ID;
+		m_tag_stats.mts_type = i;
+		m_tag_stats.mts_len = m_tag_type_table[i].mt_len;
+		m_tag_stats.mts_alloc_count = m_tag_type_stats[i].mt_alloc_count;
+		m_tag_stats.mts_alloc_failed = m_tag_type_stats[i].mt_alloc_failed;
+		m_tag_stats.mts_free_count = m_tag_type_stats[i].mt_free_count;
+
+		error = SYSCTL_OUT(req, &m_tag_stats, sizeof(struct m_tag_stats));
+	}
+
+	return error;
+}
+
+SYSCTL_PROC(_kern_ipc, OID_AUTO, mb_tag_stats,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0,
+    sysctl_mb_tag_stats, "S,m_tag_stats", "");
+
+#if DEBUG || DEVELOPMENT
+
+struct m_tag_test_entry {
+	bool            mtte_test_id;
+	bool            mtte_alloc_must_fail;
+	uint16_t        mtte_type;
+	int             mtte_len;
+};
+
+struct m_tag_test_entry
+    m_tag_test_table[] = {
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = KERNEL_TAG_TYPE_DUMMYNET,
+		.mtte_len = 0,
+	},
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = KERNEL_TAG_TYPE_IPFILT,
+		.mtte_len = 0,
+	},
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = KERNEL_TAG_TYPE_ENCAP,
+		.mtte_len = 0,
+	},
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = KERNEL_TAG_TYPE_INET6,
+		.mtte_len = 0,
+	},
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = KERNEL_TAG_TYPE_IPSEC,
+		.mtte_len = 0,
+	},
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = KERNEL_TAG_TYPE_CFIL_UDP,
+		.mtte_len = 0,
+	},
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = KERNEL_TAG_TYPE_PF_REASS,
+		.mtte_len = 0,
+	},
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = KERNEL_TAG_TYPE_AQM,
+		.mtte_len = 0,
+	},
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = KERNEL_TAG_TYPE_DRVAUX,
+		.mtte_len = 0,
+	},
+
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = 0,
+		.mtte_len = MLEN,
+	},
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = KERNEL_TAG_TYPE_COUNT,
+		.mtte_len = MLEN,
+	},
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = true,
+		.mtte_type = 0,
+		.mtte_len = MCLBYTES,
+	},
+	{
+		.mtte_test_id = false,
+		.mtte_alloc_must_fail = true,
+		.mtte_type = KERNEL_TAG_TYPE_COUNT,
+		.mtte_len = MCLBYTES,
+	},
+
+	{
+		.mtte_test_id = true,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = 0,
+		.mtte_len = 0,
+	},
+	{
+		.mtte_test_id = true,
+		.mtte_alloc_must_fail = false,
+		.mtte_type = 0,
+		.mtte_len = MLEN,
+	},
+	{
+		.mtte_test_id = true,
+		.mtte_alloc_must_fail = true,
+		.mtte_type = 0,
+		.mtte_len = -1,
+	},
+	{
+		.mtte_test_id = true,
+		.mtte_alloc_must_fail = true,
+		.mtte_type = 0,
+		.mtte_len = MCLBYTES,
+	},
+};
+
+#define M_TAG_TEST_TABLE_COUNT (sizeof(m_tag_test_table) / sizeof(struct m_tag_test_entry))
+
+#define M_TAG_TEST_ID "com.apple.test.m_tag"
+
+static int
+do_m_tag_test(mbuf_tag_id_t test_tag_id)
+{
+	int error = 0;
+	struct mbuf *m = NULL;
+
+	m = m_getpacket();
+	if (m == NULL) {
+		os_log_error(OS_LOG_DEFAULT, "%s: m_getpacket failed", __func__);
+		error = ENOMEM;
+		goto done;
+	}
+
+	for (int i = 0; i < M_TAG_TEST_TABLE_COUNT; i++) {
+		struct m_tag_test_entry *entry = &m_tag_test_table[i];
+		struct m_tag *tag = NULL;
+		uint32_t id = test_tag_id;
+		int len = entry->mtte_len;
+		uint16_t type = entry->mtte_type;
+
+		if (entry->mtte_test_id == false) {
+			id = KERNEL_MODULE_TAG_ID;
+			switch (type) {
+			case KERNEL_TAG_TYPE_DUMMYNET:
+			case KERNEL_TAG_TYPE_IPFILT:
+			case KERNEL_TAG_TYPE_ENCAP:
+			case KERNEL_TAG_TYPE_INET6:
+			case KERNEL_TAG_TYPE_IPSEC:
+			case KERNEL_TAG_TYPE_CFIL_UDP:
+			case KERNEL_TAG_TYPE_PF_REASS:
+			case KERNEL_TAG_TYPE_AQM:
+				/* subsystems that use mbuf tags are optional */
+				if (m_tag_type_table[type].mt_alloc_func == m_tag_kalloc_notsupp) {
+					continue;
+				}
+				len = m_tag_type_table[type].mt_len;
+				if (entry->mtte_alloc_must_fail == true) {
+					os_log_error(OS_LOG_DEFAULT,
+					    "%s: FAIL m_tag_create(%u, %u, %u) must not fail",
+					    __func__, id, type, len);
+					error = EINVAL;
+					goto done;
+				}
+				break;
+			default:
+				break;
+			}
+		}
+		tag = m_tag_create(id, type, len, M_WAIT, m);
+		if (tag == NULL) {
+			if (entry->mtte_alloc_must_fail == false) {
+				os_log_error(OS_LOG_DEFAULT,
+				    "%s: FAIL m_tag_create(%u, %u, %u) unexpected failure",
+				    __func__, id, type, len);
+				error = ENOMEM;
+				goto done;
+			} else {
+				os_log(OS_LOG_DEFAULT,
+				    "%s: PASS m_tag_create(%u, %u, %u) expected failure",
+				    __func__, id, type, len);
+			}
+		} else {
+			if (entry->mtte_alloc_must_fail == true) {
+				os_log_error(OS_LOG_DEFAULT,
+				    "%s: FAIL m_tag_create(%u, %u, %u) unexpected success",
+				    __func__, id, type, len);
+				error = EINVAL;
+				goto done;
+			} else {
+				os_log(OS_LOG_DEFAULT,
+				    "%s: PASS m_tag_create(%u, %u, %u) expected success",
+				    __func__, id, type, len);
+			}
+			m_tag_prepend(m, tag);
+		}
+	}
+done:
+	if (m != NULL) {
+		m_freem(m);
+	}
+	os_log_error(OS_LOG_DEFAULT,
+	    "%s: %s error %d",
+	    __func__, error == 0 ? "PASS" : "FAIL", error);
+	return error;
+}
+
+static int
+do_test_m_tag_unlink(mbuf_tag_id_t test_tag_id)
+{
+	struct mbuf *m = NULL;
+	int error = 0;
+
+	m = m_gethdr(M_WAITOK, MT_DATA);
+	if (m == NULL) {
+		error = ENOMEM;
+		goto done;
+	}
+	for (int i = 0; i < M_TAG_TEST_TABLE_COUNT; i++) {
+		struct m_tag_test_entry *entry = &m_tag_test_table[i];
+		struct m_tag *tag = NULL;
+		uint32_t id = test_tag_id;
+		int len = entry->mtte_len;
+		uint16_t type = entry->mtte_type;
+
+		if (entry->mtte_alloc_must_fail == true) {
+			continue;
+		}
+
+		if (entry->mtte_test_id == false) {
+			id = KERNEL_MODULE_TAG_ID;
+			switch (type) {
+			case KERNEL_TAG_TYPE_DUMMYNET:
+			case KERNEL_TAG_TYPE_IPFILT:
+			case KERNEL_TAG_TYPE_ENCAP:
+			case KERNEL_TAG_TYPE_INET6:
+			case KERNEL_TAG_TYPE_IPSEC:
+			case KERNEL_TAG_TYPE_CFIL_UDP:
+			case KERNEL_TAG_TYPE_PF_REASS:
+			case KERNEL_TAG_TYPE_AQM:
+				/* subsystems that use mbuf tags are optional */
+				if (m_tag_type_table[type].mt_alloc_func == m_tag_kalloc_notsupp) {
+					continue;
+				}
+				len = m_tag_type_table[type].mt_len;
+				break;
+			default:
+				continue;
+			}
+		}
+		tag = m_tag_create(id, type, len, M_WAIT, m);
+		if (tag == NULL) {
+			os_log_error(OS_LOG_DEFAULT,
+			    "%s: FAIL m_tag_create(%u, %u, %u) failure",
+			    __func__, id, type, len);
+			error = ENOMEM;
+			goto done;
+		} else {
+			os_log_error(OS_LOG_DEFAULT,
+			    "%s: PASS m_tag_create(%u, %u, %u) success",
+			    __func__, id, type, len);
+			m_tag_prepend(m, tag);
+		}
+	}
+
+	struct m_tag *cfil_tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_CFIL_UDP);
+	if (cfil_tag == NULL) {
+		os_log_error(OS_LOG_DEFAULT,
+		    "%s: FAIL m_tag_locate(KERNEL_TAG_TYPE_CFIL_UDP) failure",
+		    __func__);
+		error = EINVAL;
+		goto done;
+	} else {
+		os_log_error(OS_LOG_DEFAULT,
+		    "%s: PASS m_tag_locate(KERNEL_TAG_TYPE_CFIL_UDP) success",
+		    __func__);
+	}
+
+	/*
+	 * Unlink the mbuf tag, free the mbuf and finally free the mbuf tag
+	 */
+	m_tag_unlink(m, cfil_tag);
+
+	m_freem(m);
+	m = NULL;
+
+	m_tag_free(cfil_tag);
+
+done:
+	if (m != NULL) {
+		m_freem(m);
+	}
+	os_log_error(OS_LOG_DEFAULT,
+	    "%s: %s error %d",
+	    __func__, error == 0 ? "PASS" : "FAIL", error);
+	return error;
+}
+
+static int
+sysctl_mb_tag_test(__unused struct sysctl_oid *oidp,
+    __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int error;
+	int newvalue;
+	int changed;
+	int value = 0;
+	mbuf_tag_id_t test_tag_id;
+
+	if ((error = sysctl_io_number(req, value, sizeof(int),
+	    &newvalue, &changed)) != 0) {
+		goto done;
+	}
+	if (!changed && newvalue == value) {
+		goto done;
+	}
+	error = mbuf_tag_id_find(M_TAG_TEST_ID, &test_tag_id);
+	if (error != 0) {
+		os_log_error(OS_LOG_DEFAULT, "%s: mbuf_tag_id_find failed error %d",
+		    __func__, error);
+		goto done;
+	}
+	error = do_m_tag_test(test_tag_id);
+	if (error != 0) {
+		goto done;
+	}
+	error = do_test_m_tag_unlink(test_tag_id);
+	if (error != 0) {
+		goto done;
+	}
+done:
+	return error;
+}
+
+SYSCTL_PROC(_kern_ipc, OID_AUTO, mb_tag_test,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0,
+    sysctl_mb_tag_test, "I", "mbuf test");
+
+#endif /* DEBUG || DEVELOPMENT */

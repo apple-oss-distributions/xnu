@@ -168,6 +168,7 @@ struct label *mac_cred_label(kauth_cred_t cred);
 int     mac_cred_label_externalize_audit(proc_t p, struct mac *mac) __result_use_check;
 void    mac_cred_label_free(struct label *label);
 void    mac_cred_label_init(kauth_cred_t cred);
+void    mac_cred_label_seal(kauth_cred_t cred);
 bool    mac_cred_label_is_equal(const struct label *a, const struct label *b) __result_use_check;
 uint32_t mac_cred_label_hash_update(const struct label *a, uint32_t hash);
 void    mac_cred_label_update(kauth_cred_t cred, struct label *newlabel);
@@ -317,8 +318,6 @@ int     mac_proc_check_get_movable_control_port(void) __result_use_check;
 int     mac_proc_check_inherit_ipc_ports(struct proc *p, struct vnode *cur_vp, off_t cur_offset, struct vnode *img_vp, off_t img_offset, struct vnode *scriptvp) __result_use_check;
 int     mac_proc_check_getaudit(proc_t proc) __result_use_check;
 int     mac_proc_check_getauid(proc_t proc) __result_use_check;
-int     mac_proc_check_getlcid(proc_t proc1, proc_t proc2,
-    pid_t pid) __result_use_check;
 int     mac_proc_check_dyld_process_info_notify_register(void) __result_use_check;
 int     mac_proc_check_ledger(proc_t curp, proc_t target, int op) __result_use_check;
 int     mac_proc_check_map_anon(proc_t proc, user_addr_t u_addr,
@@ -338,8 +337,6 @@ int     mac_proc_check_setgid(proc_t curp, kauth_cred_t cred, gid_t gid) __resul
 int     mac_proc_check_setreuid(proc_t curp, kauth_cred_t cred, uid_t ruid, uid_t euid) __result_use_check;
 int     mac_proc_check_setregid(proc_t curp, kauth_cred_t cred, gid_t rgid, gid_t egid) __result_use_check;
 int     mac_proc_check_settid(proc_t curp, uid_t uid, gid_t gid) __result_use_check;
-int     mac_proc_check_setlcid(proc_t proc1, proc_t proc2,
-    pid_t pid1, pid_t pid2) __result_use_check;
 int     mac_proc_check_signal(proc_t proc1, proc_t proc2,
     int signum) __result_use_check;
 int     mac_proc_check_syscall_unix(proc_t proc, int scnum) __result_use_check;

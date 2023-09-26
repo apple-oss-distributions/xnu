@@ -43,15 +43,9 @@
  */
 
 #pragma GCC visibility push(hidden)
-enum ubsan_minimal_trap_idx {
-	UBSAN_MINIMAL_SIGNED_OVERFLOW = 0x1206,
-	UBSAN_MINIMAL_TRAPS_END
-};
-#define UBSAN_MINIMAL_TRAPS_START       UBSAN_MINIMAL_SIGNED_OVERFLOW
-#define UBSAN_MINIMAL_TRAPS_TOTAL       (UBSAN_MINIMAL_TRAPS_END - UBSAN_MINIMAL_TRAPS_START)
 
 /* Trap handler for telemetry */
-void ubsan_handle_brk_trap(uint16_t, uintptr_t, uintptr_t);
+void ubsan_handle_brk_trap(void *, uint16_t);
 
 /* Setup ubsan minimal runtime */
 void ubsan_minimal_init(void);

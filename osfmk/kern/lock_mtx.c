@@ -288,7 +288,14 @@ lck_mtx_init(lck_mtx_t *lck, lck_grp_t *grp, lck_attr_t *attr)
 void
 lck_mtx_destroy(lck_mtx_t *lck, lck_grp_t *grp)
 {
-	if (lck->lck_mtx_tsid || lck->lck_mtx_type != LCK_TYPE_MUTEX ||
+	if (lck->lck_mtx_tsid && lck->lck_mtx_type == LCK_TYPE_MUTEX) {
+		panic("Mutex to destroy still has waiters: %p: "
+		    "<0x%06x 0x%02x 0x%08x 0x%08x/%p 0x%04x 0x%04x>",
+		    lck, lck->lck_mtx_tsid, lck->lck_mtx_type, lck->lck_mtx_grp,
+		    lck->lck_mtx.data, ctid_get_thread_unsafe(lck->lck_mtx.owner),
+		    lck->lck_mtx.as_tail, lck->lck_mtx.ilk_tail);
+	}
+	if (lck->lck_mtx_type != LCK_TYPE_MUTEX ||
 	    (lck->lck_mtx.data & ~LCK_MTX_PROFILE) ||
 	    lck->lck_mtx.as_tail || lck->lck_mtx.ilk_tail) {
 		__lck_mtx_invalid_panic(lck);

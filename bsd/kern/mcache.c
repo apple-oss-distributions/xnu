@@ -64,6 +64,8 @@
 #include <machine/limits.h>
 #include <machine/machine_routines.h>
 
+#include <os/atomic_private.h>
+
 #include <string.h>
 
 #include <sys/mcache.h>
@@ -553,17 +555,17 @@ retry_alloc:
 	 */
 	if (need > 0) {
 		if (!(wait & MCR_NONBLOCKING)) {
-			atomic_add_32(&cp->mc_wretry_cnt, 1);
+			os_atomic_inc(&cp->mc_wretry_cnt, relaxed);
 			goto retry_alloc;
 		} else if ((wait & (MCR_NOSLEEP | MCR_TRYHARD)) &&
 		    !mcache_bkt_isempty(cp)) {
 			if (!nwretry) {
 				nwretry = TRUE;
 			}
-			atomic_add_32(&cp->mc_nwretry_cnt, 1);
+			os_atomic_inc(&cp->mc_nwretry_cnt, relaxed);
 			goto retry_alloc;
 		} else if (nwretry) {
-			atomic_add_32(&cp->mc_nwfail_cnt, 1);
+			os_atomic_inc(&cp->mc_nwfail_cnt, relaxed);
 		}
 	}
 
@@ -623,13 +625,13 @@ mcache_alloc(mcache_t *cp, int wait)
 __private_extern__ void
 mcache_waiter_inc(mcache_t *cp)
 {
-	atomic_add_32(&cp->mc_waiter_cnt, 1);
+	os_atomic_inc(&cp->mc_waiter_cnt, relaxed);
 }
 
 __private_extern__ void
 mcache_waiter_dec(mcache_t *cp)
 {
-	atomic_add_32(&cp->mc_waiter_cnt, -1);
+	os_atomic_dec(&cp->mc_waiter_cnt, relaxed);
 }
 
 __private_extern__ boolean_t
@@ -1731,15 +1733,6 @@ mcache_audit_panic(mcache_audit_t *mca, void *addr, size_t offset,
 	panic("mcache_audit: buffer %p modified after free at offset 0x%lx "
 	    "(0x%llx instead of 0x%llx)\n%s\n",
 	    addr, offset, got, expected, mcache_dump_mca(buf, mca));
-	/* NOTREACHED */
-	__builtin_unreachable();
-}
-
-__attribute__((noinline, cold, not_tail_called, noreturn))
-__private_extern__ int
-assfail(const char *a, const char *f, int l)
-{
-	panic("assertion failed: %s, file: %s, line: %d", a, f, l);
 	/* NOTREACHED */
 	__builtin_unreachable();
 }

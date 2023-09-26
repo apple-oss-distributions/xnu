@@ -563,7 +563,8 @@ nd6_ra_input(
 			 * preference and lifetime values in the Router
 			 * Advertisement header.
 			 */
-			if (IN6_IS_ADDR_UNSPECIFIED(&rti_prefix.sin6_addr)) {
+			if (IN6_IS_ADDR_UNSPECIFIED(&rti_prefix.sin6_addr)
+			    && rti_opt->nd_opt_rti_prefixlen == 0) {
 				rti_defrtr_processed = TRUE;
 				/*
 				 * If the router lifetime is 0, set the state flag
@@ -2919,7 +2920,7 @@ nddr_trace(struct nd_defrouter *dr, int refhold)
 		tr = dr_dbg->nddr_refrele;
 	}
 
-	idx = atomic_add_16_ov(cnt, 1) % NDDR_TRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(cnt, relaxed) % NDDR_TRACE_HIST_SIZE;
 	ctrace_record(&tr[idx]);
 }
 
@@ -3048,7 +3049,7 @@ ndpr_trace(struct nd_prefix *pr, int refhold)
 		tr = pr_dbg->ndpr_refrele;
 	}
 
-	idx = atomic_add_16_ov(cnt, 1) % NDPR_TRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(cnt, relaxed) % NDPR_TRACE_HIST_SIZE;
 	ctrace_record(&tr[idx]);
 }
 

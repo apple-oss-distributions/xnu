@@ -71,6 +71,7 @@ extern thread_t Shutdown_context(void (*doshutdown)(processor_t), processor_t  p
 extern void __dead2 Call_continuation(thread_continue_t, void *, wait_result_t, boolean_t enable_interrupts);
 
 
+
 /**
  * Indicate during a context-switch event that we have updated some CPU
  * state which requires a later context-sync event.

@@ -2,6 +2,7 @@
 #include <mach/thread_policy_private.h>
 #include <mach/mach.h>
 #include <dispatch/dispatch.h>
+#include <sys/qos_private.h>
 
 static qos_class_t
 thread_qos_to_qos_class(uint32_t thread_qos)

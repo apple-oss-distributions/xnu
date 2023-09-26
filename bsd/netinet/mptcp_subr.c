@@ -1188,11 +1188,12 @@ mptcp_create_subflows(__unused void *arg)
 		struct socket *mp_so = mpp->mpp_socket;
 		struct mptses *mpte = mpp->mpp_pcbe;
 
+		socket_lock(mp_so, 1);
 		if (!(mpp->mpp_flags & MPP_CREATE_SUBFLOWS)) {
+			socket_unlock(mp_so, 1);
 			continue;
 		}
 
-		socket_lock(mp_so, 1);
 		VERIFY(mp_so->so_usecount > 0);
 
 		mpp->mpp_flags &= ~MPP_CREATE_SUBFLOWS;
@@ -1321,7 +1322,6 @@ static void
 mptcp_subflow_free(struct mptsub *mpts)
 {
 	VERIFY(mpts->mpts_refcnt == 0);
-	VERIFY(!(mpts->mpts_flags & MPTSF_ATTACHED));
 	VERIFY(mpts->mpts_mpte == NULL);
 	VERIFY(mpts->mpts_socket == NULL);
 
@@ -1376,7 +1376,6 @@ mptcp_subflow_attach(struct mptses *mpte, struct mptsub *mpts, struct socket *so
 	TAILQ_INSERT_TAIL(&mpte->mpte_subflows, mpts, mpts_entry);
 	mpte->mpte_numflows++;
 
-	atomic_bitset_32(&mpts->mpts_flags, MPTSF_ATTACHED);
 	mpts->mpts_mpte = mpte;
 	mpts->mpts_socket = so;
 	tp->t_mpsub = mpts;
@@ -2715,7 +2714,6 @@ mptcp_subflow_del(struct mptses *mpte, struct mptsub *mpts)
 
 	socket_lock_assert_owned(mp_so);
 	VERIFY(mpts->mpts_mpte == mpte);
-	VERIFY(mpts->mpts_flags & MPTSF_ATTACHED);
 	VERIFY(mpte->mpte_numflows != 0);
 	VERIFY(mp_so->so_usecount > 0);
 
@@ -2726,7 +2724,6 @@ mptcp_subflow_del(struct mptses *mpte, struct mptsub *mpts)
 	mpte->mpte_init_rxbytes = sotoinpcb(so)->inp_stat->rxbytes;
 	mpte->mpte_init_txbytes = sotoinpcb(so)->inp_stat->txbytes;
 
-	atomic_bitclear_32(&mpts->mpts_flags, MPTSF_ATTACHED);
 	TAILQ_REMOVE(&mpte->mpte_subflows, mpts, mpts_entry);
 	mpte->mpte_numflows--;
 	if (mpte->mpte_active_sub == mpts) {
@@ -4320,7 +4317,8 @@ mptcp_subflow_mustrst_ev(struct mptses *mpte, struct mptsub *mpts,
 	tp->t_mpflags |= TMPF_RESET;
 
 	if (tp->t_state != TCPS_CLOSED) {
-		struct tcptemp *t_template = tcp_maketemplate(tp);
+		struct mbuf *m;
+		struct tcptemp *t_template = tcp_maketemplate(tp, &m);
 
 		if (t_template) {
 			struct tcp_respond_args tra;
@@ -4336,7 +4334,7 @@ mptcp_subflow_mustrst_ev(struct mptses *mpte, struct mptsub *mpts,
 			tcp_respond(tp, t_template->tt_ipgen,
 			    &t_template->tt_t, (struct mbuf *)NULL,
 			    tp->rcv_nxt, tp->snd_una, TH_RST, &tra);
-			(void) m_free(dtom(t_template));
+			(void) m_free(m);
 		}
 	}
 

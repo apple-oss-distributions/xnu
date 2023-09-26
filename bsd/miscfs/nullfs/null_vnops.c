@@ -122,10 +122,18 @@ nullfs_checkspecialvp(struct vnode* vp)
 vfs_context_t
 nullfs_get_patched_context(struct null_mount * null_mp, vfs_context_t ctx)
 {
-	struct vfs_context* ectx = ctx;
+	struct vfs_context *ectx = ctx;
+	kauth_cred_t ucred;
+
 	if ((null_mp->nullm_flags & NULLM_UNVEIL) == NULLM_UNVEIL) {
 		ectx = vfs_context_create(ctx);
-		ectx->vc_ucred = kauth_cred_setuidgid(ectx->vc_ucred, null_mp->uid, null_mp->gid);
+		ucred = kauth_cred_derive(ectx->vc_ucred,
+		    ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
+			return kauth_cred_model_setuidgid(model,
+			null_mp->uid, null_mp->gid);
+		});
+		kauth_cred_unref(&ectx->vc_ucred);
+		ectx->vc_ucred = ucred;
 	}
 	return ectx;
 }

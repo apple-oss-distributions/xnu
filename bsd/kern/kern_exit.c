@@ -617,6 +617,10 @@ populate_corpse_crashinfo(proc_t p, task_t corpse_task, struct rusage_superset *
 		kcdata_memcpy(crash_info_ptr, uaddr, &cputype, sizeof(cpu_type_t));
 	}
 
+	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_PROC_CPUTYPE, sizeof(cpu_type_t), &uaddr)) {
+		kcdata_memcpy(crash_info_ptr, uaddr, &p->p_cputype, sizeof(cpu_type_t));
+	}
+
 	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_MEMORY_LIMIT, sizeof(max_footprint_mb), &uaddr)) {
 		max_footprint = get_task_phys_footprint_limit(proc_task(p));
 		max_footprint_mb = max_footprint >> 20;
@@ -818,7 +822,11 @@ populate_corpse_crashinfo(proc_t p, task_t corpse_task, struct rusage_superset *
 	}
 
 	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_CS_TRUST_LEVEL, sizeof(uint32_t), &uaddr)) {
-		uint32_t trust = 0; //Filling this in is a future action item: rdar://101973010
+		uint32_t trust = 0;
+		kern_return_t ret = get_trust_level_kdp(get_task_pmap(corpse_task), &trust);
+		if (ret != KERN_SUCCESS) {
+			trust = KCDATA_INVALID_CS_TRUST_LEVEL;
+		}
 		kcdata_memcpy(crash_info_ptr, uaddr, &trust, sizeof(trust));
 	}
 
@@ -989,6 +997,7 @@ current_thread_collect_backtrace_info(
 	kfree_data(btframes, max_frames * sizeof(btframes[0]));
 	btframes = NULL;
 
+	thread_set_exec_promotion(current_thread());
 	/* Next, suspend the task briefly and collect image load infos */
 	task_suspend_internal(task);
 
@@ -1035,6 +1044,7 @@ current_thread_collect_backtrace_info(
 		 * this data structure, or copyin of all_image_info struct failed.
 		 */
 		task_resume_internal(task);
+		thread_clear_exec_promotion(current_thread());
 		kfree_data(btdata_kernel, alloc_size);
 		kcdata_memory_destroy(kcdata);
 		return KERN_MEMORY_ERROR;
@@ -1049,6 +1059,7 @@ current_thread_collect_backtrace_info(
 		    uuid_info_size, uuid_info_count, &kaddr)) {
 			if (copyin((user_addr_t)uuid_info_addr, (void *)kaddr, uuid_info_size * uuid_info_count)) {
 				task_resume_internal(task);
+				thread_clear_exec_promotion(current_thread());
 				kfree_data(btdata_kernel, alloc_size);
 				kcdata_memory_destroy(kcdata);
 				return KERN_MEMORY_ERROR;
@@ -1057,6 +1068,7 @@ current_thread_collect_backtrace_info(
 	}
 
 	task_resume_internal(task);
+	thread_clear_exec_promotion(current_thread());
 
 	/* Next, collect all other information */
 	thread_flavor_t tsflavor;
@@ -1663,11 +1675,22 @@ _proc_is_fatal_reason(os_reason_t reason)
 	return true;
 }
 
+static TUNABLE(bool, panic_on_crash_disabled, "panic_on_crash_disabled", false);
+
 static bool
 proc_should_trigger_panic(proc_t p, int rv)
 {
-	if (p == initproc || (p->p_crash_behavior & POSIX_SPAWN_PANIC_ON_EXIT) != 0) {
-		/* Always panic for launchd or equivalents */
+	if (p == initproc) {
+		/* Always panic for launchd */
+		return true;
+	}
+
+	if (panic_on_crash_disabled) {
+		printf("panic-on-crash disabled via boot-arg\n");
+		return false;
+	}
+
+	if ((p->p_crash_behavior & POSIX_SPAWN_PANIC_ON_EXIT) != 0) {
 		return true;
 	}
 
@@ -1711,7 +1734,11 @@ proc_should_trigger_panic(proc_t p, int rv)
 					return false;
 				}
 				if (reason->osr_namespace == OS_REASON_SIGNAL) {
-					return _proc_is_crashing_signal(signal);
+					/*
+					 * OS_REASON_SIGNAL delivers as a SIGKILL with the actual signal
+					 * in osr_code, so we should check that signal here
+					 */
+					return _proc_is_crashing_signal((int)reason->osr_code);
 				} else {
 					/*
 					 * This branch covers the case of terminate_with_reason which
@@ -2150,18 +2177,18 @@ proc_exit(proc_t p)
 	dtrace_proc_exit(p);
 #endif
 
-	/*
-	 * need to cancel async IO requests that can be cancelled and wait for those
-	 * already active.  MAY BLOCK!
-	 */
-
 	proc_refdrain(p);
+	/* We now have unique ref to the proc */
 
 	/* if any pending cpu limits action, clear it */
 	task_clear_cpuusage(proc_task(p), TRUE);
 
 	workq_mark_exiting(p);
 
+	/*
+	 * need to cancel async IO requests that can be cancelled and wait for those
+	 * already active.  MAY BLOCK!
+	 */
 	_aio_exit( p );
 
 	/*
@@ -2461,6 +2488,11 @@ proc_exit(proc_t p)
 	zfree(proc_stats_zone, p->p_stats);
 	p->p_stats = NULL;
 
+	if (p->p_subsystem_root_path) {
+		zfree(ZV_NAMEI, p->p_subsystem_root_path);
+		p->p_subsystem_root_path = NULL;
+	}
+
 	proc_limitdrop(p);
 
 #if DEVELOPMENT || DEBUG
@@ -2537,7 +2569,7 @@ proc_exit(proc_t p)
 			 * p_ucred usage is safe as it is an exiting process
 			 * and reference is dropped in reap
 			 */
-			pp->si_uid = kauth_cred_getruid(proc_ucred(p));
+			pp->si_uid = kauth_cred_getruid(proc_ucred_unsafe(p));
 			proc_unlock(pp);
 		}
 		/* mark as a zombie */
@@ -2629,7 +2661,6 @@ static void
 reap_child_locked(proc_t parent, proc_t child, reap_flags_t flags)
 {
 	struct pgrp *pg;
-	kauth_cred_t cred;
 	boolean_t shadow_proc = proc_is_shadow(child);
 
 	if (flags & REAP_LOCKED) {
@@ -2671,7 +2702,7 @@ reap_child_locked(proc_t parent, proc_t child, reap_flags_t flags)
 					orig_parent->si_pid = proc_getpid(child);
 					orig_parent->si_status = child->p_xstat;
 					orig_parent->si_code = CLD_CONTINUED;
-					orig_parent->si_uid = kauth_cred_getruid(proc_ucred(child));
+					orig_parent->si_uid = kauth_cred_getruid(proc_ucred_unsafe(child));
 					proc_unlock(orig_parent);
 				}
 				proc_reparentlocked(child, orig_parent, 1, 0);
@@ -2740,7 +2771,8 @@ reap_child_locked(proc_t parent, proc_t child, reap_flags_t flags)
 #if CONFIG_PERSONAS
 	persona_proc_drop(child);
 #endif /* CONFIG_PERSONAS */
-	(void)chgproccnt(kauth_cred_getruid(proc_ucred(child)), -1);
+	/* proc_ucred_unsafe is safe, because child is not running */
+	(void)chgproccnt(kauth_cred_getruid(proc_ucred_unsafe(child)), -1);
 
 	os_reason_free(child->p_exit_reason);
 
@@ -2767,20 +2799,16 @@ reap_child_locked(proc_t parent, proc_t child, reap_flags_t flags)
 	if (flags & REAP_DEAD_PARENT) {
 		child->p_listflag |= P_LIST_DEADPARENT;
 	}
-	cred = proc_ucred(child);
-	child->p_proc_ro = proc_ro_release_proc(child->p_proc_ro);
 
 	proc_list_unlock();
 
 	pgrp_rele(pg);
-	if (child->p_proc_ro != NULL) {
-		proc_ro_free(child->p_proc_ro);
-		child->p_proc_ro = NULL;
-	}
-	kauth_cred_set(&cred, NOCRED);
 	fdt_destroy(child);
 	lck_mtx_destroy(&child->p_mlock, &proc_mlock_grp);
 	lck_mtx_destroy(&child->p_ucred_mlock, &proc_ucred_mlock_grp);
+#if CONFIG_AUDIT
+	lck_mtx_destroy(&child->p_audit_mlock, &proc_ucred_mlock_grp);
+#endif /* CONFIG_AUDIT */
 #if CONFIG_DTRACE
 	lck_mtx_destroy(&child->p_dtrace_sprlock, &proc_lck_grp);
 #endif

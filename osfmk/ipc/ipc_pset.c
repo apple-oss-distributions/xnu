@@ -397,7 +397,7 @@ filt_machport_stash_port(struct knote *kn, ipc_port_t port, int *link)
 			*link = PORT_SYNC_LINK_WORKLOOP_KNOTE;
 		}
 	} else {
-		ts = (struct turnstile *)kn->kn_hook;
+		ts = (struct turnstile *)knote_kn_hook_get_raw(kn);
 		if (link) {
 			*link = PORT_SYNC_LINK_WORKLOOP_STASH;
 		}
@@ -431,7 +431,7 @@ filt_machport_turnstile_prepare_lazily(
 		return;
 	}
 
-	if (kn->kn_ext[3] == 0 || kn->kn_hook) {
+	if (kn->kn_ext[3] == 0 || knote_kn_hook_get_raw(kn)) {
 		return;
 	}
 
@@ -439,8 +439,10 @@ filt_machport_turnstile_prepare_lazily(
 	if ((msgt_name == MACH_MSG_TYPE_PORT_SEND_ONCE && port->ip_specialreply) ||
 	    (msgt_name == MACH_MSG_TYPE_PORT_RECEIVE)) {
 		struct turnstile *kn_ts = turnstile_alloc();
-		kn_ts = turnstile_prepare((uintptr_t)kn,
-		    (struct turnstile **)&kn->kn_hook, kn_ts, TURNSTILE_KNOTE);
+		struct turnstile *ts_store;
+		kn_ts = turnstile_prepare((uintptr_t)kn, &ts_store, kn_ts, TURNSTILE_KNOTE);
+		knote_kn_hook_set_raw(kn, ts_store);
+
 		turnstile_update_inheritor(kn_ts, ts,
 		    TURNSTILE_IMMEDIATE_UPDATE | TURNSTILE_INHERITOR_TURNSTILE);
 		turnstile_cleanup();
@@ -520,14 +522,16 @@ filt_machport_turnstile_complete(struct knote *kn)
 		kn->kn_ext[3] = 0;
 	}
 
-	if (kn->kn_hook) {
-		struct turnstile *ts = kn->kn_hook;
-
+	struct turnstile *ts = knote_kn_hook_get_raw(kn);
+	if (ts) {
 		turnstile_update_inheritor(ts, TURNSTILE_INHERITOR_NULL,
 		    TURNSTILE_IMMEDIATE_UPDATE);
 		turnstile_update_inheritor_complete(ts, TURNSTILE_INTERLOCK_HELD);
 
-		turnstile_complete((uintptr_t)kn, (struct turnstile **)&kn->kn_hook, &ts, TURNSTILE_KNOTE);
+		struct turnstile *ts_store = ts;
+		turnstile_complete((uintptr_t)kn, (struct turnstile **)&ts_store, &ts, TURNSTILE_KNOTE);
+		knote_kn_hook_set_raw(kn, ts_store);
+
 		turnstile_cleanup();
 
 		assert(ts);

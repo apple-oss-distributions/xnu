@@ -63,7 +63,7 @@
 #include <sys/sockio.h>
 #include <sys/kernel.h>
 #include <sys/syslog.h>
-#include <libkern/crypto/sha1.h>
+#include <libkern/crypto/sha2.h>
 #include <libkern/OSAtomic.h>
 #include <kern/locks.h>
 
@@ -115,7 +115,7 @@ static int in6_ifattach_loopback(struct ifnet *);
  * IEEE802/EUI64 address sources.
  * The goal here is to get an interface identifier that is
  * (1) random enough and (2) does not change across reboot.
- * We currently use SHA1(hostname) for it.
+ * We currently use SHA256(hostname) for it.
  *
  * in6 - upper 64bits are preserved
  */
@@ -124,18 +124,18 @@ get_rand_iid(
 	__unused struct ifnet *ifp,
 	struct in6_addr *in6)   /* upper 64bits are preserved */
 {
-	SHA1_CTX ctxt;
-	u_int8_t digest[SHA1_RESULTLEN];
+	SHA256_CTX ctxt;
+	u_int8_t digest[SHA256_DIGEST_LENGTH];
 	size_t hostnlen;
 
 	/* generate 8 bytes of pseudo-random value. */
 	bzero(&ctxt, sizeof(ctxt));
-	SHA1Init(&ctxt);
+	SHA256_Init(&ctxt);
 	lck_mtx_lock(&hostname_lock);
 	hostnlen = strlen(hostname);
-	SHA1Update(&ctxt, hostname, hostnlen);
+	SHA256_Update(&ctxt, hostname, hostnlen);
 	lck_mtx_unlock(&hostname_lock);
-	SHA1Final(digest, &ctxt);
+	SHA256_Final(digest, &ctxt);
 
 	/* assumes sizeof (digest) > sizeof (iid) */
 	bcopy(digest, &in6->s6_addr[8], 8);
@@ -156,8 +156,8 @@ in6_generate_tmp_iid(
 	const u_int8_t *seed1,
 	u_int8_t *ret)
 {
-	SHA1_CTX ctxt;
-	u_int8_t seed[16], nullbuf[8], digest[SHA1_RESULTLEN];
+	SHA256_CTX ctxt;
+	u_int8_t seed[16], nullbuf[8], digest[SHA256_DIGEST_LENGTH];
 	u_int32_t val32;
 	struct timeval tv;
 
@@ -180,6 +180,7 @@ in6_generate_tmp_iid(
 	/* XXX assumption on the size of IFID */
 	bcopy(seed1, &seed[8], 8);
 
+#if DEVELOPMENT || DEBUG
 	if ((0)) {              /* for debugging purposes only */
 		int i;
 
@@ -189,16 +190,17 @@ in6_generate_tmp_iid(
 		}
 		printf(" ");
 	}
+#endif /* DEVELOPMENT || DEBUG */
 
 	/* generate 16 bytes of pseudo-random value. */
 	bzero(&ctxt, sizeof(ctxt));
-	SHA1Init(&ctxt);
-	SHA1Update(&ctxt, seed, sizeof(seed));
-	SHA1Final(digest, &ctxt);
+	SHA256_Init(&ctxt);
+	SHA256_Update(&ctxt, seed, sizeof(seed));
+	SHA256_Final(digest, &ctxt);
 
 	/*
 	 * RFC 4941 3.2.1. (3)
-	 * Take the left-most 64-bits of the SHA1 digest and set bit 6 (the
+	 * Take the left-most 64-bits of the SHA256 digest and set bit 6 (the
 	 * left-most bit is numbered 0) to zero.
 	 */
 	bcopy(digest, ret, 8);
@@ -211,7 +213,7 @@ in6_generate_tmp_iid(
 	 */
 	if (bcmp(nullbuf, ret, sizeof(nullbuf)) == 0) {
 		nd6log(info,
-		    "%s: computed SHA1 value is zero.\n", __func__);
+		    "%s: computed SHA256 value is zero.\n", __func__);
 
 		getmicrotime(&tv);
 		val32 = random() ^ tv.tv_usec;
@@ -220,12 +222,13 @@ in6_generate_tmp_iid(
 
 	/*
 	 * RFC 4941 3.2.1. (4)
-	 * Take the next 64-bits of the SHA1 digest and save them in
+	 * Take the next 64-bits of the SHA256 digest and save them in
 	 * stable storage as the history value to be used in the next
 	 * iteration of the algorithm.
 	 */
 	bcopy(&digest[8], seed0, 8);
 
+#if DEVELOPMENT || DEBUG
 	if ((0)) {              /* for debugging purposes only */
 		int i;
 
@@ -235,6 +238,7 @@ in6_generate_tmp_iid(
 		}
 		printf("\n");
 	}
+#endif
 
 	return 0;
 }
@@ -619,8 +623,8 @@ in6_nigroup(
 {
 	const char *p;
 	u_char *q;
-	SHA1_CTX ctxt;
-	u_int8_t digest[SHA1_RESULTLEN];
+	SHA256_CTX ctxt;
+	u_int8_t digest[SHA256_DIGEST_LENGTH];
 	size_t l;
 	char n[64];     /* a single label must not exceed 63 chars */
 
@@ -646,10 +650,10 @@ in6_nigroup(
 
 	/* generate 16 bytes of pseudo-random value. */
 	bzero(&ctxt, sizeof(ctxt));
-	SHA1Init(&ctxt);
-	SHA1Update(&ctxt, &l, sizeof(l));
-	SHA1Update(&ctxt, n, l);
-	SHA1Final(digest, &ctxt);
+	SHA256_Init(&ctxt);
+	SHA256_Update(&ctxt, &l, sizeof(l));
+	SHA256_Update(&ctxt, n, l);
+	SHA256_Final(digest, &ctxt);
 
 	bzero(in6, sizeof(*in6));
 	in6->s6_addr16[0] = IPV6_ADDR_INT16_MLL;

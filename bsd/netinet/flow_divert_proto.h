@@ -75,6 +75,7 @@
 #define FLOW_DIVERT_TLV_APP_REAL_AUDIT_TOKEN    35
 #define FLOW_DIVERT_TLV_CFIL_ID                 36
 #define FLOW_DIVERT_TLV_DATAGRAM_SIZE           37
+#define FLOW_DIVERT_TLV_ORDER                   38
 
 #define FLOW_DIVERT_FLOW_TYPE_TCP               1
 #define FLOW_DIVERT_FLOW_TYPE_UDP               3
@@ -92,6 +93,13 @@
 #define FLOW_DIVERT_GROUP_FLAG_DEFUNCT          0x0000002
 
 #define FLOW_DIVERT_IS_TRANSPARENT              0x80000000
+
+// Used for policies as well as opening control sockets
+#define FLOW_DIVERT_IN_PROCESS_UNIT             0x0FFFFFFF
+
+// Range for actual assigned control units
+#define FLOW_DIVERT_IN_PROCESS_UNIT_MIN         0x0000FFFF
+#define FLOW_DIVERT_IN_PROCESS_UNIT_MAX         0xFFFFFFFF
 
 struct flow_divert_packet_header {
 	uint8_t             packet_type;

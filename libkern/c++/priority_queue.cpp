@@ -29,9 +29,7 @@
 #if KERNEL
 #include <kern/priority_queue.h>
 #include <mach/vm_param.h>
-#if KASAN_TBI
-#include <san/kasan.h>
-#endif /* KASAN_TBI */
+#include <vm/vm_memtag.h>
 
 #ifdef __LP64__
 static_assert(PRIORITY_QUEUE_ENTRY_CHILD_BITS >= VM_KERNEL_POINTER_SIGNIFICANT_BITS,
@@ -131,18 +129,18 @@ struct pqueue {
 	static inline void
 	pack_child(entry_t e, const entry_t child)
 	{
-#if KASAN_TBI
-		e->tag = kasan_tbi_get_tag((long)child);
-#endif /* KASAN_TBI */
+#if CONFIG_KERNEL_TAGGING
+		e->tag = vm_memtag_extract_tag((vm_offset_t)child);
+#endif /* CONFIG_KERNEL_TAGGING */
 		e->child = (long)child;
 	}
 
 	static inline entry_t
 	unpack_child(entry_t e)
 	{
-#if KASAN_TBI
-		return (entry_t)(kasan_tbi_tag_ptr(e->child, e->tag));
-#endif /* KASAN_TBI */
+#if CONFIG_KERNEL_TAGGING
+		return (entry_t)(vm_memtag_add_ptr_tag(e->child, e->tag));
+#endif /* CONFIG_KERNEL_TAGGING */
 		return (entry_t)e->child;
 	}
 

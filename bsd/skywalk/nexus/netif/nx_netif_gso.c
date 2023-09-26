@@ -106,7 +106,7 @@ struct netif_gso_ip_tcp_state {
 	void (*update)(struct netif_gso_ip_tcp_state*,
 	    struct __kern_packet *pkt, uint8_t *baddr);
 	void (*internal)(struct netif_gso_ip_tcp_state*, uint32_t partial,
-	    uint16_t payload_len);
+	    uint16_t payload_len, uint32_t *csum_flags);
 	union {
 		struct ip *ip;
 		struct ip6_hdr *ip6;
@@ -122,6 +122,7 @@ struct netif_gso_ip_tcp_state {
 	uint8_t mac_hlen;
 	uint8_t ip_hlen;
 	uint8_t tcp_hlen;
+	boolean_t copy_data_sum;
 };
 
 static inline uint8_t
@@ -312,7 +313,7 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 
 	for (n = 1, off = state->hlen; off < total_len; off += mss, n++) {
 		uint8_t *baddr, *baddr0;
-		uint32_t partial;
+		uint32_t partial = 0;
 		struct __kern_packet *pkt;
 
 		KPKTQ_DEQUEUE(&pktq_alloc, pkt);
@@ -338,7 +339,11 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 			/* if last segment is less than mss */
 			mss = (uint16_t)(total_len - off);
 		}
-		partial = m_copydata_sum(m, off, mss, baddr, 0, NULL);
+		if (state->copy_data_sum) {
+			partial = m_copydata_sum(m, off, mss, baddr, 0, NULL);
+		} else {
+			m_copydata(m, off, mss, baddr);
+		}
 
 		/*
 		 * update packet metadata
@@ -378,7 +383,7 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 			state->tcp->th_seq = htonl(state->tcp_seq);
 		}
 		ASSERT(state->tcp->th_seq == pkt->pkt_flow_tcp_seq);
-		state->internal(state, partial, mss);
+		state->internal(state, partial, mss, &pkt->pkt_csum_flags);
 		METADATA_ADJUST_LEN(pkt, state->hlen + mss, tx_headroom);
 		VERIFY(__packet_finalize(SK_PKT2PH(pkt)) == 0);
 		KPKTQ_ENQUEUE(&pktq_seg, pkt);
@@ -421,7 +426,7 @@ netif_gso_ipv4_tcp_update(struct netif_gso_ip_tcp_state *state,
  */
 static void
 netif_gso_ipv4_tcp_internal(struct netif_gso_ip_tcp_state *state,
-    uint32_t partial, uint16_t payload_len)
+    uint32_t partial, uint16_t payload_len, uint32_t *csum_flags __unused)
 {
 	/*
 	 * Update IP header
@@ -450,6 +455,26 @@ netif_gso_ipv4_tcp_internal(struct netif_gso_ip_tcp_state *state,
 	state->tcp_seq += payload_len;
 }
 
+static void
+netif_gso_ipv4_tcp_internal_nosum(struct netif_gso_ip_tcp_state *state,
+    uint32_t partial __unused, uint16_t payload_len __unused,
+    uint32_t *csum_flags)
+{
+	/*
+	 * Update IP header
+	 */
+	state->hdr.ip->ip_id = htons((state->ip_id)++);
+	state->hdr.ip->ip_len = htons(state->ip_hlen + state->tcp_hlen +
+	    payload_len);
+	/*
+	 * Update tcp sequence number in gso state
+	 */
+	state->tcp_seq += payload_len;
+
+	/* offload csum to hardware */
+	*csum_flags |= PACKET_CSUM_IP | PACKET_CSUM_TCP;
+}
+
 /*
  * Updates the pointers to TCP and IPv6 headers
  */
@@ -467,8 +492,30 @@ netif_gso_ipv6_tcp_update(struct netif_gso_ip_tcp_state *state,
  * Finalize the TCP and IPv6 headers
  */
 static void
+netif_gso_ipv6_tcp_internal_nosum(struct netif_gso_ip_tcp_state *state,
+    uint32_t partial __unused, uint16_t payload_len __unused,
+    uint32_t *csum_flags)
+{
+	/*
+	 * Update IP header
+	 */
+	state->hdr.ip6->ip6_plen = htons(state->tcp_hlen + payload_len);
+
+	/*
+	 * Update tcp sequence number
+	 */
+	state->tcp_seq += payload_len;
+
+	/* offload csum to hardware */
+	*csum_flags |= PACKET_CSUM_TCPIPV6;
+}
+
+/*
+ * Finalize the TCP and IPv6 headers
+ */
+static void
 netif_gso_ipv6_tcp_internal(struct netif_gso_ip_tcp_state *state,
-    uint32_t partial, uint16_t payload_len)
+    uint32_t partial, uint16_t payload_len, uint32_t *csum_flags __unused)
 {
 	/*
 	 * Update IP header
@@ -494,7 +541,7 @@ netif_gso_ipv6_tcp_internal(struct netif_gso_ip_tcp_state *state,
  */
 static inline void
 netif_gso_ip_tcp_init_state(struct netif_gso_ip_tcp_state *state,
-    struct mbuf *m, uint8_t mac_hlen, uint8_t ip_hlen, bool isipv6)
+    struct mbuf *m, uint8_t mac_hlen, uint8_t ip_hlen, bool isipv6, ifnet_t ifp)
 {
 	if (isipv6) {
 		state->af = AF_INET6;
@@ -505,7 +552,13 @@ netif_gso_ip_tcp_init_state(struct netif_gso_ip_tcp_state *state,
 		state->tcp = (struct tcphdr *)(void *)((caddr_t)
 		    (state->hdr.ip6) + ip_hlen);
 		state->update = netif_gso_ipv6_tcp_update;
-		state->internal = netif_gso_ipv6_tcp_internal;
+		if (ifp->if_hwassist & IFNET_CSUM_TCPIPV6) {
+			state->internal = netif_gso_ipv6_tcp_internal_nosum;
+			state->copy_data_sum = false;
+		} else {
+			state->internal = netif_gso_ipv6_tcp_internal;
+			state->copy_data_sum = true;
+		}
 		state->psuedo_hdr_csum = in6_pseudo(&state->hdr.ip6->ip6_src,
 		    &state->hdr.ip6->ip6_dst, 0);
 	} else {
@@ -520,7 +573,14 @@ netif_gso_ip_tcp_init_state(struct netif_gso_ip_tcp_state *state,
 		state->tcp = (struct tcphdr *)(void *)((caddr_t)
 		    (state->hdr.ip) + ip_hlen);
 		state->update = netif_gso_ipv4_tcp_update;
-		state->internal = netif_gso_ipv4_tcp_internal;
+		if ((ifp->if_hwassist & (IFNET_CSUM_IP | IFNET_CSUM_TCP)) ==
+		    (IFNET_CSUM_IP | IFNET_CSUM_TCP)) {
+			state->internal = netif_gso_ipv4_tcp_internal_nosum;
+			state->copy_data_sum = false;
+		} else {
+			state->internal = netif_gso_ipv4_tcp_internal;
+			state->copy_data_sum = true;
+		}
 		bcopy(&state->hdr.ip->ip_src, &ip_src, sizeof(ip_src));
 		bcopy(&state->hdr.ip->ip_dst, &ip_dst, sizeof(ip_dst));
 		state->psuedo_hdr_csum = in_pseudo(ip_src.s_addr,
@@ -597,7 +657,7 @@ netif_gso_ipv4_tcp(struct ifnet *ifp, struct mbuf *m)
 			goto done;
 		}
 	}
-	netif_gso_ip_tcp_init_state(&state, m, mac_hlen, ip_hlen, false);
+	netif_gso_ip_tcp_init_state(&state, m, mac_hlen, ip_hlen, false, ifp);
 	error = netif_gso_tcp_segment_mbuf(m, ifp, &state, pp);
 done:
 	m_freem(m);
@@ -671,7 +731,7 @@ netif_gso_ipv6_tcp(struct ifnet *ifp, struct mbuf *m)
 			goto done;
 		}
 	}
-	netif_gso_ip_tcp_init_state(&state, m, mac_hlen, ip_hlen, true);
+	netif_gso_ip_tcp_init_state(&state, m, mac_hlen, ip_hlen, true, ifp);
 	error = netif_gso_tcp_segment_mbuf(m, ifp, &state, pp);
 done:
 	m_freem(m);

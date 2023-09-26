@@ -326,8 +326,8 @@ kplo_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	kern_buflet_t buf;      /* buflet handle */
 	kern_packet_idx_t pidx;
 	kern_packet_t *ary = NULL;
-	uint32_t ary_cnt = 0;
-	uint16_t rdlen, dlen, doff;
+	uint32_t ary_cnt = 0, dlen, doff;
+	uint16_t rdlen;
 	struct kern_pbufpool *pp;
 
 	KPLO_INJECT_ERROR(8);

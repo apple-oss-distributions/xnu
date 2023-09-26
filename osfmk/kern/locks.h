@@ -1143,7 +1143,7 @@ extern gate_wait_result_t lck_mtx_gate_wait(
 extern void lck_mtx_gate_assert(lck_mtx_t *lock, gate_t *gate, gate_assert_flags_t flags);
 
 extern void             lck_spin_assert(
-	lck_spin_t              *lck,
+	const lck_spin_t              *lck,
 	unsigned                int    type);
 
 #if CONFIG_PV_TICKET

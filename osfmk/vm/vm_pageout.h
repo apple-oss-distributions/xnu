@@ -278,6 +278,9 @@ extern ppnum_t            vm_page_get_phys_page(vm_page_t page);
 extern vm_page_t          vm_page_get_next(vm_page_t page);
 
 extern kern_return_t    mach_vm_pressure_level_monitor(boolean_t wait_for_pressure, unsigned int *pressure_level);
+#if KERNEL_PRIVATE
+extern kern_return_t    mach_vm_wire_level_monitor(int64_t requested_pages);
+#endif /* KERNEL_PRIVATE */
 
 #if XNU_TARGET_OS_OSX
 extern kern_return_t    vm_pageout_wait(uint64_t deadline);
@@ -826,9 +829,9 @@ extern struct vm_pageout_debug vm_pageout_debug;
 	MACRO_BEGIN                                     \
 	        vm_pageout_debug.member += value;       \
 	MACRO_END
-#else
+#else /* DEVELOPMENT || DEBUG */
 #define VM_PAGEOUT_DEBUG(member, value)
-#endif
+#endif /* DEVELOPMENT || DEBUG */
 
 #define MAX_COMPRESSOR_THREAD_COUNT      8
 
@@ -884,6 +887,6 @@ typedef struct vmct_stats_s {
 	int32_t vmct_minpages[MAX_COMPRESSOR_THREAD_COUNT];
 	int32_t vmct_maxpages[MAX_COMPRESSOR_THREAD_COUNT];
 } vmct_stats_t;
-#endif
-#endif
+#endif /* DEVELOPMENT || DEBUG */
+#endif /* XNU_KERNEL_PRIVATE */
 #endif  /* _VM_VM_PAGEOUT_H_ */

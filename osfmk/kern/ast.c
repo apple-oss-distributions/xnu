@@ -56,7 +56,6 @@
 
 #include <kern/ast.h>
 #include <kern/counter.h>
-#include <kern/cpu_quiesce.h>
 #include <kern/misc_protos.h>
 #include <kern/queue.h>
 #include <kern/sched_prim.h>
@@ -340,13 +339,22 @@ ast_taken_user(void)
 			thread_block_reason(thread_preempted, NULL, preemption_reasons);
 			/* NOTREACHED */
 		}
-	}
 
-	if (ast_consume(AST_UNQUIESCE) == AST_UNQUIESCE) {
-		cpu_quiescent_counter_ast();
+		/*
+		 * We previously had a pending AST_PREEMPT, but csw_check
+		 * decided that it should no longer be set, and to keep
+		 * executing the current thread instead.
+		 * Clear the pending preemption timer as we no longer
+		 * have a pending AST_PREEMPT to time out.
+		 *
+		 * TODO: just do the thread block if we see AST_PREEMPT
+		 * to avoid taking the pset lock twice.
+		 * To do that thread block needs to be smarter
+		 * about not context switching when it's not necessary
+		 * e.g. the first-timeslice check for queue has priority
+		 */
+		clear_pending_nonurgent_preemption(current_processor());
 	}
-
-	cpu_quiescent_counter_assert_ast();
 
 	splx(s);
 

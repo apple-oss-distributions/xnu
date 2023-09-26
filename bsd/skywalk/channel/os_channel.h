@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -44,10 +44,11 @@
 #endif /* !KERNEL */
 
 /*
- * Indicates that channel supports "CHANNEL_ATTR_NUM_BUFFERS" attribute.
- * used by Libnetcore.
+ * Compiler guards used by Libnetcore.
  */
-#define OS_CHANNEL_HAS_NUM_BUFFERS_ATTR 1
+#define OS_CHANNEL_HAS_NUM_BUFFERS_ATTR 1 /* CHANNEL_ATTR_NUM_BUFFERS */
+#define OS_CHANNEL_HAS_LARGE_PACKET 1     /* CHANNEL_ATTR_LARGE_BUF_SIZE and */
+                                          /* os_channel_large_packet_alloc() */
 
 /* Flow advisory table index */
 typedef uint32_t flowadv_idx_t;
@@ -91,6 +92,7 @@ typedef uint32_t sync_flags_t;
 #define CHANNEL_SYNCF_FREE         0x2     /* synchronize free ring */
 #define CHANNEL_SYNCF_PURGE        0x4     /* purge user packet pool */
 #define CHANNEL_SYNCF_ALLOC_BUF    0x8     /* synchronize buflet alloc ring */
+#define CHANNEL_SYNCF_LARGE_ALLOC  0x10    /* synchronize large alloc ring */
 #endif /* LIBSYSCALL_INTERFACE || BSD_KERNEL_PRIVATE */
 
 /*
@@ -445,6 +447,9 @@ extern void *os_channel_get_advisory_region(const channel_t channel);
 extern int os_channel_flow_admissible(const channel_ring_t ring,
     uuid_t flow_id, const flowadv_idx_t flow_index);
 
+extern int os_channel_flow_adv_get_ce_count(const channel_ring_t chrd,
+    uuid_t flow_id, const flowadv_idx_t flow_index, uint32_t *ce_cnt,
+    uint32_t *pkt_cnt);
 /*
  * Allocate a packet from the channel's packet pool.
  * Returns 0 on success with the packet handle in packet arg.
@@ -453,6 +458,15 @@ extern int os_channel_flow_admissible(const channel_ring_t ring,
  */
 extern int
 os_channel_packet_alloc(const channel_t chd, packet_t *packet);
+
+/*
+ * Allocate a large packet from the channel's packet pool.
+ * Returns 0 on success with the packet handle in packet arg.
+ * Note: os_channel_large_packet_alloc() & os_channel_packet_free() should be
+ * serialized and should not be called from the different thread context.
+ */
+extern int
+os_channel_large_packet_alloc(const channel_t chd, packet_t *packet);
 
 /*
  * Free a packet allocated from the channel's packet pool.
@@ -664,6 +678,8 @@ __private_extern__ errno_t kern_channel_slot_attach_packet_byidx(
 __private_extern__ errno_t kern_channel_slot_detach_packet_byidx(
 	const kern_channel_ring_t kring, const uint32_t sidx, kern_packet_t ph);
 __private_extern__ void kern_channel_flowadv_clear(struct flowadv_fcentry *);
+__private_extern__ void kern_channel_flowadv_report_ce_event(
+	struct flowadv_fcentry *, uint32_t, uint32_t);
 __private_extern__ void kern_channel_memstatus(struct proc *, uint32_t,
     struct kern_channel *);
 __private_extern__ void kern_channel_defunct(struct proc *,

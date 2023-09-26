@@ -30,6 +30,7 @@
 #include <arm/machine_routines.h>
 #include <arm64/monotonic.h>
 #include <kern/assert.h>
+#include <kern/cpc.h>
 #include <kern/debug.h> /* panic */
 #include <kern/kpc.h>
 #include <kern/monotonic.h>
@@ -526,6 +527,7 @@ uncmon_set_counting_locked_r(unsigned int monid, uint64_t enctrmask)
 #define UPMC_ALL(X, A) UPMC_0_7(X, A); UPMC_8_15(X, A)
 #endif /* UNCORE_NCTRS > 8 */
 
+__unused
 static inline uint64_t
 uncmon_read_counter_locked_l(__unused unsigned int monid, unsigned int ctr)
 {
@@ -586,18 +588,17 @@ uncmon_write_counter_locked_r(unsigned int mon_id, unsigned int ctr,
 #endif /* UNCORE_PER_CLUSTER */
 
 static inline void
-uncmon_update_locked(unsigned int monid, unsigned int curid, unsigned int ctr)
+uncmon_update_locked(unsigned int monid, unsigned int __unused curid,
+    unsigned int ctr)
 {
 	struct uncore_monitor *mon = &uncore_monitors[monid];
 	if (!mon->um_sleeping) {
 		uint64_t snap = 0;
-		if (curid == monid) {
-			snap = uncmon_read_counter_locked_l(monid, ctr);
-		} else {
 #if UNCORE_PER_CLUSTER
-			snap = uncmon_read_counter_locked_r(monid, ctr);
+		snap = uncmon_read_counter_locked_r(monid, ctr);
+#else /* UNCORE_PER_CLUSTER */
+		snap = uncmon_read_counter_locked_l(monid, ctr);
 #endif /* UNCORE_PER_CLUSTER */
-		}
 		if (snap < mon->um_snaps[ctr]) {
 #if MACH_ASSERT
 #if UNCORE_PER_CLUSTER
@@ -886,10 +887,15 @@ uncore_add(struct monotonic_config *config, uint32_t *ctr_out)
 		return EBUSY;
 	}
 
+	uint8_t selector = (uint8_t)config->event;
 	uint32_t available = ~uncore_active_ctrs & config->allowed_ctr_mask;
 
 	if (available == 0) {
 		return ENOSPC;
+	}
+
+	if (!cpc_event_allowed(CPC_HW_UPMU, selector)) {
+		return EPERM;
 	}
 
 	uint32_t valid_ctrs = (UINT32_C(1) << UNCORE_NCTRS) - 1;
@@ -914,9 +920,9 @@ uncore_add(struct monotonic_config *config, uint32_t *ctr_out)
 			if (!mon->um_sleeping) {
 				for (unsigned int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
 					if (remote) {
-	#if UNCORE_PER_CLUSTER
+#if UNCORE_PER_CLUSTER
 						uncmon_write_counter_locked_r(monid, ctr, 0);
-		#endif /* UNCORE_PER_CLUSTER */
+#endif /* UNCORE_PER_CLUSTER */
 					} else {
 						uncmon_write_counter_locked_l(monid, ctr, 0);
 					}
@@ -931,7 +937,7 @@ uncore_add(struct monotonic_config *config, uint32_t *ctr_out)
 	uint32_t ctr = __builtin_ffsll(available) - 1;
 
 	uncore_active_ctrs |= UINT64_C(1) << ctr;
-	uncore_config.uc_events.uce_ctrs[ctr] = (uint8_t)config->event;
+	uncore_config.uc_events.uce_ctrs[ctr] = selector;
 	uint64_t cpu_mask = UINT64_MAX;
 	if (config->cpu_mask != 0) {
 		cpu_mask = config->cpu_mask;

@@ -520,7 +520,7 @@ nx_kpipe_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	 */
 	na->na_arena = skmem_arena_create_for_nexus(na,
 	    NX_PROV(nx)->nxprov_region_params, &nx->nx_tx_pp,
-	    &nx->nx_rx_pp, 0, NULL, &err);
+	    &nx->nx_rx_pp, FALSE, FALSE, NULL, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 	ASSERT(nx->nx_tx_pp == NULL || (nx->nx_tx_pp->pp_md_type ==
 	    NX_DOM(nx)->nxdom_md_type && nx->nx_tx_pp->pp_md_subtype ==
@@ -644,14 +644,14 @@ nx_kpipe_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 
 	switch (mode) {
 	case NA_ACTIVATE_MODE_ON:
-		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_or(&na->na_flags, NAF_ACTIVE, relaxed);
 		break;
 
 	case NA_ACTIVATE_MODE_DEFUNCT:
 		break;
 
 	case NA_ACTIVATE_MODE_OFF:
-		atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_andnot(&na->na_flags, NAF_ACTIVE, relaxed);
 		break;
 
 	default:

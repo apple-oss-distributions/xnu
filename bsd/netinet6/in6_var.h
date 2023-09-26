@@ -838,8 +838,9 @@ extern u_int32_t in6_maxmtu;
 #define in6_ifstat_add_common(_ifp, _tag, _count, _atomic) do {         \
 	if (_ifp != NULL && IN6_IFEXTRA(_ifp) != NULL) {                \
 	        if (_atomic)                                            \
-	                atomic_add_64(                                  \
-	                    &IN6_IFEXTRA(_ifp)->in6_ifstat._tag, _count);\
+	                os_atomic_add(                                  \
+	                        &IN6_IFEXTRA(_ifp)->in6_ifstat._tag,    \
+	                        _count, relaxed);                       \
 	        else                                                    \
 	                IN6_IFEXTRA(_ifp)->in6_ifstat._tag += _count;   \
 	}                                                               \

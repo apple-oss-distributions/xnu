@@ -311,7 +311,13 @@ kern_open_file_for_direct_io(const char * name,
 			goto out;
 		}
 
-		device = (VATTR_IS_SUPPORTED(&va, va_devid)) ? va.va_devid : va.va_fsid;
+		/* Don't dump on fs without backing device. */
+		if (!VATTR_IS_SUPPORTED(&va, va_devid)) {
+			kprintf("kern_direct_file(%s): Not backed by block device.\n", ref->name);
+			error = ENODEV;
+			goto out;
+		}
+		device = va.va_devid;
 		ref->filelength = va.va_data_size;
 
 		p1 = &device;

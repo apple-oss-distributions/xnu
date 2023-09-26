@@ -6,6 +6,11 @@ module DarwinPrivate.netinet [system] {
     exclude header "netinet6/in6_private.h"
   }
 
+  module in_stat {
+    header "netinet/in_stat.h"
+    export *
+  }
+
   module tcp {
     header "netinet/tcp_private.h"
     export *

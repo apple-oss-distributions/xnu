@@ -203,7 +203,7 @@ _NumCPUs( void )
 #define _COMM_PAGE_ACTIVE_CPUS          (_COMM_PAGE_START_ADDRESS+0x034)        /* uint8_t number of active CPUs (hw.activecpu) */
 #define _COMM_PAGE_PHYSICAL_CPUS        (_COMM_PAGE_START_ADDRESS+0x035)        /* uint8_t number of physical CPUs (hw.physicalcpu_max) */
 #define _COMM_PAGE_LOGICAL_CPUS         (_COMM_PAGE_START_ADDRESS+0x036)        /* uint8_t number of logical CPUs (hw.logicalcpu_max) */
-#define _COMM_PAGE_UNUSED1              (_COMM_PAGE_START_ADDRESS+0x037)        /* 1 unused bytes */
+#define _COMM_PAGE_CPU_CLUSTERS         (_COMM_PAGE_START_ADDRESS+0x037)        /* uint8_t number of CPU clusters */
 #define _COMM_PAGE_MEMORY_SIZE          (_COMM_PAGE_START_ADDRESS+0x038)        /* uint64_t max memory size */
 
 #define _COMM_PAGE_CPUFAMILY            (_COMM_PAGE_START_ADDRESS+0x040)        /* uint32_t hw.cpufamily, x86*/
@@ -236,6 +236,8 @@ _NumCPUs( void )
 
 /* Resume packed values to the next cacheline */
 #define _COMM_PAGE_DYLD_FLAGS           (_COMM_PAGE_START_ADDRESS+0x100)        /* uint64_t export kern.dyld_system_flags to userspace */
+
+#define _COMM_PAGE_CPU_TO_CLUSTER       (_COMM_PAGE_START_ADDRESS+0x108)        /* 256 bytes reserved for (logical) CPU_ID -> CLUSTER_ID mappings */
 
 #define _COMM_PAGE_END                  (_COMM_PAGE_START_ADDRESS+0xfff)        /* end of common page */
 

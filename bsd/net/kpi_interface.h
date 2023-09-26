@@ -148,6 +148,8 @@ enum {
 	IFNET_SUBFAMILY_DEFAULT         = 8,
 	IFNET_SUBFAMILY_VMNET           = 9,
 	IFNET_SUBFAMILY_SIMCELL         = 10,
+	IFNET_SUBFAMILY_REDIRECT        = 11,
+	IFNET_SUBFAMILY_MANAGEMENT      = 12,
 };
 
 /*
@@ -277,6 +279,9 @@ typedef u_int32_t ifnet_offload_t;
 	(IFNET_CSUM_IP | IFNET_CSUM_TCP | IFNET_CSUM_UDP |              \
 	IFNET_CSUM_FRAGMENT | IFNET_CSUM_TCPIPV6 | IFNET_CSUM_UDPIPV6 | \
 	IFNET_CSUM_PARTIAL | IFNET_CSUM_ZERO_INVERT)
+
+#define IFNET_UDP_TCP_TX_CHECKSUMF \
+	(IFNET_CSUM_TCP | IFNET_CSUM_UDP | IFNET_CSUM_TCPIPV6 | IFNET_CSUM_UDPIPV6)
 
 #define IFNET_TSOF                                                      \
 	(IFNET_TSO_IPV4	| IFNET_TSO_IPV6)
@@ -2138,6 +2143,19 @@ extern errno_t ifnet_set_offload(ifnet_t interface, ifnet_offload_t offload)
 __NKE_API_DEPRECATED;
 
 /*!
+ *       @function ifnet_set_offload_enabled
+ *       @discussion Sets the enabled capabilities of the specified interface.
+ *               The supported capabilities (set by ifnet_set_offload()) are
+ *               left unmodified.
+ *       @param interface The interface.
+ *       @param offload The new set of flags indicating which supported offload
+ *               options should be enabled.
+ *       @result 0 on success otherwise the errno error.
+ */
+extern errno_t ifnet_set_offload_enabled(ifnet_t interface, ifnet_offload_t offload)
+__NKE_API_DEPRECATED;
+
+/*!
  *       @function ifnet_offload
  *       @discussion Returns flags indicating which operations can be
  *               offloaded to the interface.
@@ -3779,6 +3797,14 @@ extern errno_t ifnet_touch_lastupdown(ifnet_t interface);
  *  to.
  */
 extern errno_t ifnet_updown_delta(ifnet_t interface, struct timeval *updown_delta);
+
+/*!
+ *       @function ifnet_set_management
+ *       @param interface The interface.
+ *       @param on Set the truth value that the interface is management restricted.
+ *       @result Returns 0 on success, error number otherwise.
+ */
+extern errno_t ifnet_set_management(ifnet_t interface, boolean_t on);
 
 #endif /* KERNEL_PRIVATE */
 

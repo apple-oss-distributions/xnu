@@ -28,11 +28,31 @@ static mach_port_t service_port = MACH_PORT_NULL;
 #define SERVICE_NAME "com.apple.testservice"
 #define SERVICE_DOMAIN (1)
 
+static inline kern_return_t
+service_port_set_throttled(int is_throttled)
+{
+	return mach_port_set_attributes(mach_task_self(), service_port, MACH_PORT_SERVICE_THROTTLED, (mach_port_info_t)(&is_throttled),
+	           MACH_PORT_SERVICE_THROTTLED_COUNT);
+}
+
+static inline kern_return_t
+service_port_get_throttled(int *is_throttled)
+{
+	natural_t count = 0;
+	kern_return_t kr;
+
+	kr = mach_port_get_attributes(mach_task_self(), service_port, MACH_PORT_SERVICE_THROTTLED, (mach_port_info_t)(is_throttled), &count);
+	T_QUIET; T_ASSERT_EQ(count, MACH_PORT_SERVICE_THROTTLED_COUNT, NULL);
+
+	return kr;
+}
+
 T_DECL(mach_service_port, "Create a port with a service port label", T_META_CHECK_LEAKS(false)) {
 	mach_port_t connection_port;
 	mach_port_t notify_port;
 	mach_port_t previous;
 	uint64_t fpid = 0;
+	boolean_t is_throttled;
 
 	struct mach_service_port_info sp_info = {};
 
@@ -74,6 +94,25 @@ T_DECL(mach_service_port, "Create a port with a service port label", T_META_CHEC
 	    MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous);
 	T_ASSERT_MACH_SUCCESS(kr, "mach_port_request_notification service_port");
 	T_ASSERT_EQ(previous, MACH_PORT_NULL, "previous null");
+
+	/* Test port throttling flag */
+	kr = service_port_get_throttled(&is_throttled);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "get throttled flag value on port");
+	T_ASSERT_EQ(is_throttled, 0, "newly created service port is not throttled");
+
+	kr = service_port_set_throttled(1);
+	T_ASSERT_MACH_SUCCESS(kr, "set throttled flag on port");
+
+	kr = service_port_get_throttled(&is_throttled);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "get throttled flag value on port");
+	T_ASSERT_EQ(is_throttled, 1, "port is throttled");
+
+	kr = service_port_set_throttled(0);
+	T_ASSERT_MACH_SUCCESS(kr, "unset throttled flag on port");
+
+	kr = service_port_get_throttled(&is_throttled);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "get throttled flag value on port");
+	T_ASSERT_EQ(is_throttled, false, "port is no longer throttled");
 
 	/* Attempt to destroy port */
 	kr = mach_port_destruct(mach_task_self(), service_port, 0, SP_CONTEXT);

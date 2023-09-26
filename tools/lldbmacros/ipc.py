@@ -91,10 +91,13 @@ def GetTaskBusyPortsSummary(task):
     nbusy = 0
     nmsgs = 0
 
-    ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
-        gettype('struct ipc_port'))
+    if is_tableval:
+        ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
+            gettype('struct ipc_port'))
 
     for port in ports:
+        if not port or unsigned(port) == xnudefines.MACH_PORT_DEAD:
+            continue
         count = port.xGetIntegerByPath('.ip_messages.imq_msgcount')
         if count:
             nbusy += 1
@@ -555,6 +558,8 @@ def GetKObjectFromPort(portval):
         params: portval - core.value representation of 'ipc_port *' object
         returns: str - string of kobject information
     """
+    if not portval or unsigned(portval) == xnudefines.MACH_PORT_DEAD:
+        return "MACH_PORT_DEAD"
     io_bits       = unsigned(portval.ip_object.io_bits)
     objtype_index = io_bits & 0x3ff
 
@@ -604,14 +609,19 @@ def GetPortDestProc(port):
             str  : string containing receiver's name and pid
     """
 
-    bits = unsigned(port.ip_object.io_bits)
+    bits = unsigned(port.ip_object.io_bits) # osfmk/ipc/ipc_object.h
     name = unsigned(port.ip_messages.imq_receiver_name)
 
-    if bits & 0x3ff:
-        return ('', GetKObjectFromPort(port))
+    port_is_kobject_port = bits & xnudefines.IO_BITS_KOTYPE
 
-    if bits & 0x80000000 == 0:
-        return ('', 'inactive-port')
+    if bits & xnudefines.IO_BITS_ACTIVE == 0:
+        if port_is_kobject_port:
+            return ('', 'inactive-kobject-port')
+        else:
+            return ('', 'inactive-port')
+
+    if port_is_kobject_port:
+        return ('', GetKObjectFromPort(port))
 
     if name == 0:
         return ('{:<#20x}'.format(port.ip_destination), 'in-transit')
@@ -624,6 +634,8 @@ def GetPortDestinationSummary(port):
         params: port - core.value representation of 'ipc_port *' object
         returns: str - string of info about ports destination
     """
+    if not port or unsigned(port) == xnudefines.MACH_PORT_DEAD:
+        return "MACH_PORT_DEAD"
     a, b = GetPortDestProc(port)
     return "{:<20s} {:<20s}".format(a, b)
 
@@ -746,7 +758,9 @@ def GetPortUserStack(port, task):
         returns: str - string information on port's userstack
     """
     out_str = ''
-    pid = port.ip_made_pid;
+    if not port or unsigned(port) == xnudefines.MACH_PORT_DEAD:
+        return out_str
+    pid = port.ip_made_pid
     proc_val = GetProcFromTask(task)
     if port.ip_made_bt:
         btlib = kmemory.BTLibrary.get_shared()
@@ -774,7 +788,7 @@ def PrintIPCInformation(space, show_entries=False, show_userstack=False, rights_
             num_entries, space.is_low_mod, space.is_high_mod))
 
     #should show the each individual entries if asked.
-    if show_entries == True:
+    if show_entries == True and is_tableval:
         print("\t" + GetIPCEntrySummary.header)
 
         entries = (
@@ -793,7 +807,7 @@ def PrintIPCInformation(space, show_entries=False, show_userstack=False, rights_
             print("\t" + entry_str)
             if show_userstack == True:
                 entryport = Cast(entryval.ie_object, 'ipc_port *')
-                if entryval.ie_object and (int(entry_ie_bits) & 0x00070000) and entryport.ip_callstack[0]:
+                if entryval.ie_object and (int(entry_ie_bits) & 0x00070000) and entryport.ip_made_bt:
                     print(GetPortUserStack.header + GetPortUserStack(entryport, space.is_task))
 
     #done with showing entries
@@ -883,8 +897,9 @@ def GetTaskVoucherCount(t):
     count = 0
     voucher_kotype = int(GetEnumValue('ipc_kotype_t', 'IKOT_VOUCHER'))
 
-    ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00070000,
-        gettype('struct ipc_port'))
+    if is_tableval:
+        ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00070000,
+            gettype('struct ipc_port'))
 
     for port in ports:
         io_bits = port.xGetIntegerByPath('.ip_object.io_bits')
@@ -1060,6 +1075,8 @@ def PrintProgressForKmsg():
 def CollectPortsForAnalysis(port, disposition):
     """
     """
+    if not port or unsigned(port) == xnudefines.MACH_PORT_DEAD:
+        return
     p = Cast(port, 'struct ipc_port *')
     yield (p, disposition)
 
@@ -1235,11 +1252,12 @@ def IterateAllPorts(tasklist, func, ctx, include_psets, follow_busyports, should
         space = t.itk_space
         is_tableval, num_entries = GetSpaceTable(space)
 
-        base  = is_tableval.GetSBValue().Dereference()
-        entries = (
-            value(iep.AddressOf())
-            for iep in base.xIterSiblings(1, num_entries)
-        )
+        if is_tableval:
+            base  = is_tableval.GetSBValue().Dereference()
+            entries = (
+                value(iep.AddressOf())
+                for iep in base.xIterSiblings(1, num_entries)
+            )
 
         for idx, entry_val in enumerate(entries, 1):
             entry_bits= unsigned(entry_val.ie_bits)
@@ -1372,7 +1390,7 @@ def FindPortRightsCallback(task, space, ctx, entry_idx, ipc_entry, ipc_port, por
             entry_str = '\t' + GetIPCEntrySummary(ipc_entry, entry_name, rights_type)
 
     procname = GetProcNameForTask(task)
-    if unsigned(ipc_port) != 0 and ipc_port.ip_messages.imq_msgcount > 0:
+    if unsigned(ipc_port) != 0 and unsigned(ipc_port) != xnudefines.MACH_PORT_DEAD and ipc_port.ip_messages.imq_msgcount > 0:
         sys.stderr.write("  checking {:s} busy-port {}:{:#x}...{:30s}\r".format(procname, entry_name, unsigned(ipc_port), ''))
         ## Search through busy ports to find descriptors which could
         ## contain the only reference to this port!
@@ -1514,8 +1532,9 @@ def ShowTaskBusyPorts(cmd_args=None, cmd_options={}, O=None):
     task = kern.GetValueFromAddress(cmd_args[0], 'task_t')
     is_tableval, num_entries = GetSpaceTable(task.itk_space)
 
-    ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
-        gettype('struct ipc_port'))
+    if is_tableval:
+        ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
+            gettype('struct ipc_port'))
 
     with O.table(PrintPortSummary.header):
         for port in ports:
@@ -1589,8 +1608,9 @@ def ShowTaskBusyPortSets(cmd_args=None, cmd_options={}, O=None):
     task = kern.GetValueFromAddress(cmd_args[0], 'task_t')
     is_tableval, num_entries = GetSpaceTable(task.itk_space)
 
-    psets = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00080000,
-        gettype('struct ipc_pset'))
+    if is_tableval:
+        psets = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00080000,
+            gettype('struct ipc_pset'))
 
     with O.table(PrintPortSetSummary.header):
         for pset in (value(v.AddressOf()) for v in psets):
@@ -1666,6 +1686,10 @@ def ShowPortOrPset(obj, space=0, O=None):
     """ Routine that lists details about a given IPC port or pset
         Syntax: (lldb) showport 0xaddr
     """
+    if not obj or unsigned(obj) == xnudefines.IPC_OBJECT_DEAD:
+        print("IPC_OBJECT_DEAD")
+        return
+
     otype = (obj.io_bits & 0x7fff0000) >> 16
     if otype == 0: # IOT_PORT
         with O.table(PrintPortSummary.header):
@@ -2163,7 +2187,8 @@ def ShowPortSendRights(cmd_args=[], cmd_options={}):
     if not cmd_args:
         raise ArgumentError("no port address provided")
     port = kern.GetValueFromAddress(cmd_args[0], 'struct ipc_port *')
-    i = 1
+    if not port or unsigned(port) == xnudefines.MACH_PORT_DEAD:
+        return
 
     return FindPortRights(cmd_args=[unsigned(port)], cmd_options={'-R':'S'})
 
@@ -2187,7 +2212,11 @@ def ShowTaskSuspenders(cmd_args=[], cmd_options={}):
     # convert_task_suspension_token_to_port, then it's impossible to determine
     # which task did the suspension.
     port = task.itk_resume
-    if not port:
+    if task.pidsuspended:
+        print("task {:#x} ({:s}) has been `pid_suspend`ed. (Probably runningboardd's fault. Go look at the syslog for \"Suspending task.\")".format(unsigned(task), GetProcNameForTask(task)))
+        assert(not port)
+        return
+    elif not port:
         print("task {:#x} ({:s}) is suspended but no resume port exists".format(unsigned(task), GetProcNameForTask(task)))
         return
 

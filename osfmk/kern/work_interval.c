@@ -133,7 +133,7 @@ struct work_interval_auto_join_info {
 #endif
 
 /*
- * Work Interval structs
+ * Work Interval struct
  *
  * This struct represents a thread group and/or work interval context
  * in a mechanism that is represented with a kobject.
@@ -150,7 +150,6 @@ struct work_interval_auto_join_info {
  *      interval per thread group.
  *      CLPC only wants to see one WI-notify callout per group.
  */
-
 struct work_interval {
 	uint64_t wi_id;
 	struct os_refcnt wi_ref_count;
@@ -196,7 +195,50 @@ struct work_interval {
 	 */
 	wi_class_t wi_class;
 	uint8_t wi_class_offset;
+
+	struct recount_work_interval wi_recount;
 };
+
+/*
+ * work_interval_telemetry_data_enabled()
+ *
+ * Helper routine to check if work interval has the collection of telemetry data enabled.
+ */
+static inline bool
+work_interval_telemetry_data_enabled(struct work_interval *work_interval)
+{
+	return (work_interval->wi_create_flags & WORK_INTERVAL_FLAG_ENABLE_TELEMETRY_DATA) != 0;
+}
+
+/*
+ * work_interval_should_collect_telemetry_from_thread()
+ *
+ * Helper routine to determine whether any work interval telemetry should be collected
+ * for a thread.
+ */
+static inline bool
+work_interval_should_collect_telemetry_from_thread(thread_t thread)
+{
+	if (thread->th_work_interval == NULL) {
+		return false;
+	}
+	return work_interval_telemetry_data_enabled(thread->th_work_interval);
+}
+
+/*
+ * work_interval_get_recount_tracks()
+ *
+ * Returns the recount tracks associated with a work interval, or NULL
+ * if the work interval is NULL or has telemetry disabled.
+ */
+inline struct recount_track *
+work_interval_get_recount_tracks(struct work_interval *work_interval)
+{
+	if (work_interval != NULL && work_interval_telemetry_data_enabled(work_interval)) {
+		return work_interval->wi_recount.rwi_current_instance;
+	}
+	return NULL;
+}
 
 #if CONFIG_SCHED_AUTO_JOIN
 
@@ -319,12 +361,9 @@ work_interval_deallocate(struct work_interval *work_interval)
 {
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_WORKGROUP, WORKGROUP_INTERVAL_DESTROY),
 	    work_interval->wi_id);
-#if CONFIG_THREAD_GROUPS
-	if (work_interval->wi_group) {
-		thread_group_release(work_interval->wi_group);
-		work_interval->wi_group = NULL;
+	if (work_interval_telemetry_data_enabled(work_interval)) {
+		recount_work_interval_deinit(&work_interval->wi_recount);
 	}
-#endif /* CONFIG_THREAD_GROUPS */
 	kfree_type(struct work_interval, work_interval);
 }
 
@@ -1103,6 +1142,10 @@ kern_work_interval_create(thread_t thread,
 	};
 	os_ref_init(&work_interval->wi_ref_count, NULL);
 
+	if (work_interval_telemetry_data_enabled(work_interval)) {
+		recount_work_interval_init(&work_interval->wi_recount);
+	}
+
 	__kdebug_only uint64_t tg_id = 0;
 #if CONFIG_THREAD_GROUPS
 	struct thread_group *tg;
@@ -1146,6 +1189,7 @@ kern_work_interval_create(thread_t thread,
 			(ipc_kobject_t)work_interval, IKOT_WORK_INTERVAL,
 			IPC_KOBJECT_ALLOC_MAKE_SEND | IPC_KOBJECT_ALLOC_NSREQUEST);
 
+
 		name = ipc_port_copyout_send(work_interval->wi_port, current_space());
 
 		if (!MACH_PORT_VALID(name)) {
@@ -1167,6 +1211,7 @@ kern_work_interval_create(thread_t thread,
 			work_interval_release(work_interval, THREAD_WI_THREAD_LOCK_NEEDED);
 			return kr;
 		}
+
 		create_params->wica_port = MACH_PORT_NULL;
 	}
 
@@ -1371,7 +1416,6 @@ kern_work_interval_set_workload_id(mach_port_name_t port_name,
 
 			assert(work_interval->wi_group == NULL);
 			work_interval->wi_group = tg;
-
 			KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_WORKGROUP, WORKGROUP_INTERVAL_CREATE),
 			    work_interval->wi_id, work_interval->wi_create_flags,
 			    work_interval->wi_creator_pid, thread_group_get_id(tg));

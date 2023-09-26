@@ -68,7 +68,7 @@ extern int copyinframe(vm_address_t fp, char *frame, boolean_t is64bit);
 
 __END_DECLS
 
-extern lck_grp_t *IOLockGroup;
+extern lck_grp_t * IOLockGroup;
 
 static lck_mtx_t *sOSReportLock = lck_mtx_alloc_init(IOLockGroup, LCK_ATTR_NULL);
 
@@ -249,6 +249,9 @@ pad:
 		bt[i] = (void*)frameb[1]; // link register
 #endif
 		fp = frameb[0];
+#if defined(HAS_APPLE_PAC)
+		fp = (uintptr_t)ptrauth_strip((void *)fp, ptrauth_key_frame_pointer);
+#endif
 	} while (++i < maxAddrs);
 	frame = i;
 #else

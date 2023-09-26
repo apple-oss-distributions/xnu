@@ -231,7 +231,7 @@ struct ipsecstat {
 	/* security policy violation for outbound process */
 	u_quad_t out_nosa __attribute__ ((aligned(8)));     /* outbound SA is unavailable */
 	u_quad_t out_inval __attribute__ ((aligned(8)));    /* outbound process failed due to EINVAL */
-	u_quad_t out_nomem __attribute__ ((aligned(8)));     /* inbound processing failed due to ENOBUFS */
+	u_quad_t out_nomem __attribute__ ((aligned(8)));     /* outbound processing failed due to ENOBUFS */
 	u_quad_t out_noroute __attribute__ ((aligned(8)));  /* there is no route */
 	u_quad_t out_esphist[256] __attribute__ ((aligned(8)));
 	u_quad_t out_ahhist[256] __attribute__ ((aligned(8)));
@@ -345,8 +345,6 @@ extern int ip4_ipsec_dfbit;
 extern int ip4_ipsec_ecn;
 extern int ip4_esp_randpad;
 
-extern bool ipsec_save_wake_pkt;
-
 #define _ipsec_log(level, fmt, ...) do {                            \
 	os_log_type_t type;                                         \
 	switch (level) {                                            \
@@ -416,11 +414,15 @@ extern struct mbuf *ipsec_copypkt(struct mbuf *);
 extern void ipsec_delaux(struct mbuf *);
 extern int ipsec_setsocket(struct mbuf *, struct socket *);
 extern struct socket *ipsec_getsocket(struct mbuf *);
-extern int ipsec_addhist(struct mbuf *, int, u_int32_t);
-extern struct ipsec_history *ipsec_gethist(struct mbuf *, int *);
-extern void ipsec_clearhist(struct mbuf *);
+extern int ipsec_incr_history_count(struct mbuf *, int, u_int32_t);
+extern u_int32_t ipsec_get_history_count(struct mbuf *);
 extern void ipsec_monitor_sleep_wake(void);
-extern void ipsec_save_wake_packet(struct mbuf *, u_int32_t, u_int32_t);
+extern void ipsec_init(void);
+
+extern void ipsec_register_m_tag(void);
+
+extern int ipsec4_interface_kpipe_output(ifnet_t, kern_packet_t, kern_packet_t);
+extern int ipsec6_interface_kpipe_output(ifnet_t, kern_packet_t, kern_packet_t);
 #endif /* BSD_KERNEL_PRIVATE */
 
 #ifndef KERNEL

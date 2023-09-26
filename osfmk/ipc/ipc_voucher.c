@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <os/overflow.h>
 #include <mach/mach_types.h>
 #include <mach/mach_traps.h>
 #include <mach/notify.h>
@@ -66,7 +67,6 @@ IPC_KOBJECT_DEFINE(IKOT_VOUCHER,
 /*
  * Voucher hash table
  */
-static SMR_DEFINE(voucher_smr);
 static struct smr_shash voucher_table;
 
 /*
@@ -81,7 +81,7 @@ static bool     iv_obj_equ(const struct smrq_slink *, smrh_key_t);
 static bool     iv_obj_try_get(void *);
 
 SMRH_TRAITS_DEFINE_MEM(voucher_traits, struct ipc_voucher, iv_hash_link,
-    .domain      = &voucher_smr,
+    .domain      = &smr_ipc,
     .obj_hash    = iv_obj_hash,
     .obj_equ     = iv_obj_equ,
     .obj_try_get = iv_obj_try_get);
@@ -182,7 +182,7 @@ __startup_func
 static void
 ipc_voucher_init(void)
 {
-	zone_enable_smr(zone_by_id(ZONE_ID_IPC_VOUCHERS), &voucher_smr, bzero);
+	zone_enable_smr(zone_by_id(ZONE_ID_IPC_VOUCHERS), &smr_ipc, bzero);
 	smr_shash_init(&voucher_table, SMRSH_BALANCED, 128);
 }
 STARTUP(MACH_IPC, STARTUP_RANK_FIRST, ipc_voucher_init);
@@ -1824,7 +1824,9 @@ mach_voucher_extract_all_attr_recipes(
 		}
 
 		recipe = (mach_voucher_attr_recipe_t)(void *)&recipes[recipe_used];
-		content_size = recipe_size - recipe_used - sizeof(*recipe);
+		if (os_sub3_overflow(recipe_size, recipe_used, sizeof(*recipe), &content_size)) {
+			panic("voucher recipe underfow");
+		}
 
 		/*
 		 * Get the value(s) to pass to the manager

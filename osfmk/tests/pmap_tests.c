@@ -102,7 +102,8 @@ test_pmap_enter_disconnect(unsigned int num_loops)
 	}
 	ppnum_t phys_page = VM_PAGE_GET_PHYS_PAGE(m);
 	pmap_test_thread_args args = {.pmap = new_pmap, .stop = FALSE, .pn = phys_page};
-	kern_return_t res = kernel_thread_start(pmap_disconnect_thread, &args, &disconnect_thread);
+	kern_return_t res = kernel_thread_start_priority(pmap_disconnect_thread,
+	    &args, thread_kern_get_pri(current_thread()), &disconnect_thread);
 	if (res) {
 		pmap_destroy(new_pmap);
 		vm_page_lock_queues();
@@ -168,7 +169,7 @@ test_pmap_compress_remove(unsigned int num_loops)
 	ppnum_t phys_page = VM_PAGE_GET_PHYS_PAGE(m);
 	pmap_test_thread_args args = {.pmap = new_pmap, .stop = FALSE, .va = PMAP_TEST_VA, .pn = phys_page};
 	kern_return_t res = kernel_thread_start_priority(pmap_remove_thread,
-	    &args, current_thread()->base_pri, &remove_thread);
+	    &args, thread_kern_get_pri(current_thread()), &remove_thread);
 	if (res) {
 		pmap_destroy(new_pmap);
 		vm_page_lock_queues();

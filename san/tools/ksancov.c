@@ -37,6 +37,7 @@
 #include <sys/ioctl.h>
 
 #include <getopt.h>
+#include <unistd.h>
 
 #include "ksancov.h"
 
@@ -49,7 +50,8 @@ usage(void)
 	    "  -s | --stksize      use trace (PC log) with stack size mode\n"
 	    "  -c | --counters     use edge counter mode\n"
 	    "  -n | --entries <n>  override max entries in trace log\n"
-	    "  -x | --exec <path>  instrument execution of binary at <path>\n");
+	    "  -x | --exec <path>  instrument execution of binary at <path>\n"
+	    "  -b | --bundle <b>   bundle for on-demand tracing\n");
 	exit(1);
 }
 
@@ -168,6 +170,21 @@ ksancov_print_state(ksancov_state_t *state)
 	return 0;
 }
 
+static int
+ksancov_on_demand_set_enabled(int fd, const char *bundle, bool enabled)
+{
+	int ret = 0;
+	const uint64_t gate = enabled ? 1 : 0;
+	if (bundle) {
+		fprintf(stderr, "setting on-demand gate for '%s': %llu\n", bundle, gate);
+		ret = ksancov_on_demand_set_gate(fd, bundle, gate);
+		if (ret) {
+			perror("ksancov on demand");
+		}
+	}
+	return ret;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -177,6 +194,7 @@ main(int argc, char *argv[])
 	int ret;
 	size_t max_entries = 64UL * 1024;
 	char *path = NULL;
+	char *od_bundle = NULL;
 
 	static struct option opts[] = {
 		{ "entries", required_argument, NULL, 'n' },
@@ -186,11 +204,13 @@ main(int argc, char *argv[])
 		{ "counters", no_argument, NULL, 'c' },
 		{ "stksize", no_argument, NULL, 's' },
 
+		{ "bundle", required_argument, NULL, 'b' },
+
 		{ NULL, 0, NULL, 0 }
 	};
 
 	int ch;
-	while ((ch = getopt_long(argc, argv, "tsn:x:c", opts, NULL)) != -1) {
+	while ((ch = getopt_long(argc, argv, "tsn:x:cb:", opts, NULL)) != -1) {
 		switch (ch) {
 		case 'n':
 			max_entries = strtoul(optarg, NULL, 0);
@@ -206,6 +226,9 @@ main(int argc, char *argv[])
 			break;
 		case 's':
 			ksan_mode = KS_MODE_STKSIZE;
+			break;
+		case 'b':
+			od_bundle = optarg;
 			break;
 		default:
 			usage();
@@ -238,16 +261,19 @@ main(int argc, char *argv[])
 				return ret;
 			}
 
+			ksancov_on_demand_set_enabled(fd, od_bundle, true);
 			ksancov_reset(ksan_state.ks_header);
 			ksancov_start(ksan_state.ks_header);
 			ret = execl(path, path, 0);
 			perror("execl");
+			ksancov_on_demand_set_enabled(fd, od_bundle, false);
 
 			exit(1);
 		} else {
 			/* parent */
 			waitpid(pid, NULL, 0);
 			ksancov_stop(ksan_state.ks_header);
+			ksancov_on_demand_set_enabled(fd, od_bundle, false);
 		}
 	} else {
 		ret = ksancov_thread_self(fd);
@@ -256,10 +282,12 @@ main(int argc, char *argv[])
 			return ret;
 		}
 
+		ksancov_on_demand_set_enabled(fd, od_bundle, true);
 		ksancov_reset(ksan_state.ks_header);
 		ksancov_start(ksan_state.ks_header);
 		int ppid = getppid();
 		ksancov_stop(ksan_state.ks_header);
+		ksancov_on_demand_set_enabled(fd, od_bundle, false);
 		fprintf(stderr, "ppid = %i\n", ppid);
 	}
 

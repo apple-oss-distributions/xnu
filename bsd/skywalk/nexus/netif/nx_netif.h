@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -535,10 +535,8 @@ extern void nx_netif_copy_stats(struct nexus_netif_adapter *,
 extern struct nexus_netif_adapter * na_netif_alloc(zalloc_flags_t);
 extern void na_netif_free(struct nexus_adapter *);
 extern void na_netif_finalize(struct nexus_netif_adapter *, struct ifnet *);
-extern void nx_netif_detach_notify(struct nexus_netif_adapter *);
+extern void nx_netif_llw_detach_notify(void *);
 extern void nx_netif_config_interface_advisory(struct kern_nexus *, bool);
-extern void nx_netif_get_interface_tso_capabilities(struct ifnet *, uint32_t *,
-    uint32_t *);
 
 /*
  * netif netagent API
@@ -671,6 +669,8 @@ extern struct __kern_packet *nx_netif_alloc_packet(struct kern_pbufpool *,
     uint32_t, kern_packet_t *);
 extern void nx_netif_free_packet(struct __kern_packet *);
 extern void nx_netif_free_packet_chain(struct __kern_packet *, int *);
+extern void netif_ifp_inc_traffic_class_out_pkt(struct ifnet *, uint32_t,
+    uint32_t, uint32_t);
 
 #define NETIF_CONVERT_RX        0x0001
 #define NETIF_CONVERT_TX        0x0002
@@ -724,8 +724,10 @@ extern int netif_llw_rx_notify_fast(struct __kern_channel_ring *,
 extern void netif_receive(struct nexus_netif_adapter *,
     struct __kern_packet *, struct nexus_pkt_stats *);
 
-#define NETIF_XMIT_FLAG_CHANNEL 0x0001
-#define NETIF_XMIT_FLAG_HOST    0x0002
+#define NETIF_XMIT_FLAG_CHANNEL  0x0001
+#define NETIF_XMIT_FLAG_HOST     0x0002
+#define NETIF_XMIT_FLAG_REDIRECT 0x0004
+#define NETIF_XMIT_FLAG_PACING   0x0008
 extern void netif_transmit(struct ifnet *, uint32_t);
 extern int netif_ring_tx_refill(const kern_channel_ring_t,
     uint32_t, uint32_t, boolean_t, boolean_t *, boolean_t);

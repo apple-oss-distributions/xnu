@@ -149,12 +149,11 @@ class IOMachPort : public OSObject
 {
 	OSDeclareDefaultStructors(IOMachPort);
 public:
+	mach_port_mscount_t mscount;
+	IOLock      lock;
 	SLIST_ENTRY(IOMachPort) link;
 	ipc_port_t  port;
-	OSObject*   object;
-	UInt32      mscount;
-	UInt8       holdDestroy;
-	UInt8       type;
+	OSObject*   XNU_PTRAUTH_SIGNED_PTR("IOMachPort.object") object;
 
 	static IOMachPort* withObjectAndType(OSObject *obj, ipc_kobject_type_t type);
 
@@ -167,7 +166,6 @@ public:
 	    ipc_kobject_type_t type, mach_port_mscount_t * mscount );
 	static void releasePortForObject( OSObject * obj,
 	    ipc_kobject_type_t type );
-	static void setHoldDestroy( OSObject * obj, ipc_kobject_type_t type );
 
 	static mach_port_name_t makeSendRightForTask( task_t task,
 	    io_object_t obj, ipc_kobject_type_t type );
@@ -215,7 +213,7 @@ IOMachPort::portForObjectInBucket(IOMachPortHashList *bucket, OSObject *obj, ipc
 	IOMachPort *machPort;
 
 	SLIST_FOREACH(machPort, bucket, link) {
-		if (machPort->object == obj && machPort->type == type) {
+		if (machPort->object == obj && iokit_port_type(machPort->port) == type) {
 			return machPort;
 		}
 	}
@@ -234,8 +232,8 @@ IOMachPort::withObjectAndType(OSObject *obj, ipc_kobject_type_t type)
 	}
 
 	machPort->object = obj;
-	machPort->type = (typeof(machPort->type))type;
-	machPort->port = iokit_alloc_object_port(obj, type);
+	machPort->port = iokit_alloc_object_port(machPort, type);
+	IOLockInlineInit(&machPort->lock);
 
 	obj->taggedRetain(OSTypeID(OSCollection));
 	machPort->mscount++;
@@ -271,6 +269,11 @@ IOMachPort::noMoreSendersForObject( OSObject * obj,
 			}
 			SLIST_REMOVE(bucket, machPort, IOMachPort, link);
 
+			IOLockLock(&machPort->lock);
+			iokit_remove_object_port(machPort->port, type);
+			machPort->object = NULL;
+			IOLockUnlock(&machPort->lock);
+
 			lck_mtx_unlock(gIOObjectPortLock);
 
 			OS_ANALYZER_SUPPRESS("77508635") OSSafeReleaseNULL(machPort);
@@ -300,6 +303,7 @@ IOMachPort::releasePortForObject( OSObject * obj,
     ipc_kobject_type_t type )
 {
 	IOMachPort *machPort;
+	IOService  *service;
 	IOMachPortHashList *bucket = IOMachPort::bucketForObject(obj, type);
 
 	assert(IKOT_IOKIT_CONNECT != type);
@@ -308,9 +312,17 @@ IOMachPort::releasePortForObject( OSObject * obj,
 
 	machPort = IOMachPort::portForObjectInBucket(bucket, obj, type);
 
-	if (machPort && !machPort->holdDestroy) {
+	if (machPort
+	    && (type == IKOT_IOKIT_OBJECT)
+	    && (service = OSDynamicCast(IOService, obj))
+	    && !service->machPortHoldDestroy()) {
 		obj->retain();
 		SLIST_REMOVE(bucket, machPort, IOMachPort, link);
+
+		IOLockLock(&machPort->lock);
+		iokit_remove_object_port(machPort->port, type);
+		machPort->object = NULL;
+		IOLockUnlock(&machPort->lock);
 
 		lck_mtx_unlock(gIOObjectPortLock);
 
@@ -324,32 +336,10 @@ IOMachPort::releasePortForObject( OSObject * obj,
 }
 
 void
-IOMachPort::setHoldDestroy( OSObject * obj, ipc_kobject_type_t type )
-{
-	IOMachPort *        machPort;
-
-	IOMachPortHashList *bucket = IOMachPort::bucketForObject(obj, type);
-	lck_mtx_lock(gIOObjectPortLock);
-
-	machPort = IOMachPort::portForObjectInBucket(bucket, obj, type);
-
-	if (machPort) {
-		machPort->holdDestroy = true;
-	}
-
-	lck_mtx_unlock(gIOObjectPortLock);
-}
-
-void
-IOMachPortDestroyUserReferences(OSObject * obj, natural_t type)
-{
-	IOMachPort::releasePortForObject(obj, type);
-}
-
-void
 IOUserClient::destroyUserReferences( OSObject * obj )
 {
 	IOMachPort *machPort;
+	bool        destroyPort;
 
 	IOMachPort::releasePortForObject( obj, IKOT_IOKIT_OBJECT );
 
@@ -377,26 +367,33 @@ IOUserClient::destroyUserReferences( OSObject * obj )
 	SLIST_REMOVE(bucket, machPort, IOMachPort, link);
 	obj->taggedRelease(OSTypeID(OSCollection));
 
+	destroyPort = true;
 	if (uc) {
 		uc->noMoreSenders();
 		if (uc->mappings) {
 			uc->mappings->taggedRetain(OSTypeID(OSCollection));
-			machPort->object = uc->mappings;
 			SLIST_INSERT_HEAD(mappingBucket, machPort, link);
-			iokit_switch_object_port(machPort->port, uc->mappings, IKOT_IOKIT_CONNECT);
+
+			IOLockLock(&machPort->lock);
+			machPort->object = uc->mappings;
+			IOLockUnlock(&machPort->lock);
 
 			lck_mtx_unlock(gIOObjectPortLock);
 
 			OSSafeReleaseNULL(uc->mappings);
-		} else {
-			lck_mtx_unlock(gIOObjectPortLock);
-			OS_ANALYZER_SUPPRESS("77508635") OSSafeReleaseNULL(machPort);
+			destroyPort = false;
 		}
-	} else {
+	}
+
+	if (destroyPort) {
+		IOLockLock(&machPort->lock);
+		iokit_remove_object_port(machPort->port, IKOT_IOKIT_CONNECT);
+		machPort->object = NULL;
+		IOLockUnlock(&machPort->lock);
+
 		lck_mtx_unlock(gIOObjectPortLock);
 		OS_ANALYZER_SUPPRESS("77508635") OSSafeReleaseNULL(machPort);
 	}
-
 
 end:
 	OSSafeReleaseNULL(obj);
@@ -413,8 +410,9 @@ void
 IOMachPort::free( void )
 {
 	if (port) {
-		iokit_destroy_object_port( port, type );
+		iokit_destroy_object_port(port, iokit_port_type(port));
 	}
+	IOLockInlineDestroy(&lock);
 	super::free();
 }
 
@@ -610,6 +608,7 @@ iokit_remove_connect_reference(LIBKERN_CONSUMED io_object_t obj )
 	}
 
 	if ((uc = OSDynamicCast(IOUserClient, obj))) {
+		assert(uc->__ipc);
 		if (1 == OSDecrementAtomic(&uc->__ipc) && uc->isInactive()) {
 			IOLockLock(gIOObjectPortLock);
 			if ((finalize = uc->__ipcFinal)) {
@@ -623,6 +622,30 @@ iokit_remove_connect_reference(LIBKERN_CONSUMED io_object_t obj )
 	}
 
 	obj->release();
+}
+
+void
+iokit_kobject_retain(io_kobject_t machPort)
+{
+	assert(OSDynamicCast(IOMachPort, machPort));
+	machPort->retain();
+}
+
+io_object_t
+iokit_copy_object_for_consumed_kobject(LIBKERN_CONSUMED io_kobject_t machPort, natural_t type)
+{
+	io_object_t  result;
+
+	assert(OSDynamicCast(IOMachPort, machPort));
+
+	IOLockLock(&machPort->lock);
+	result = machPort->object;
+	if (result) {
+		iokit_add_reference(result, type);
+	}
+	IOLockUnlock(&machPort->lock);
+	machPort->release();
+	return result;
 }
 
 bool
@@ -642,7 +665,7 @@ IOUserClient::finalizeUserReferences(OSObject * obj)
 }
 
 ipc_port_t
-iokit_port_for_object( io_object_t obj, ipc_kobject_type_t type )
+iokit_port_for_object( io_object_t obj, ipc_kobject_type_t type, ipc_kobject_t * kobj )
 {
 	IOMachPort *machPort = NULL;
 	ipc_port_t   port = NULL;
@@ -667,6 +690,9 @@ iokit_port_for_object( io_object_t obj, ipc_kobject_type_t type )
 	port = machPort->port;
 
 end:
+	if (kobj) {
+		*kobj = machPort;
+	}
 	lck_mtx_unlock(gIOObjectPortLock);
 
 	return port;
@@ -959,11 +985,13 @@ IOServiceUserNotification::handler( void * ref,
 	IOUnlock( &lock );
 
 	if (kIOServiceTerminatedNotificationType == msgType) {
-		IOMachPort::setHoldDestroy( newService, IKOT_IOKIT_OBJECT );
+		lck_mtx_lock(gIOObjectPortLock);
+		newService->setMachPortHoldDestroy(true);
+		lck_mtx_unlock(gIOObjectPortLock);
 	}
 
 	if (sendPing) {
-		port = iokit_port_for_object( this, IKOT_IOKIT_OBJECT );
+		port = iokit_port_for_object( this, IKOT_IOKIT_OBJECT, NULL );
 
 		payloadSize = sizeof(PingMsgUdata) - sizeof(OSAsyncReference64) + msgReferenceSize;
 		msgSize = (mach_msg_size_t)(sizeof(PingMsgKdata) + payloadSize);
@@ -1144,8 +1172,8 @@ IOServiceMessageUserNotification::handler( void * ref,
 	}
 	mach_msg_size_t payloadSize = thisMsgSize - sizeof(PingMsgKdata);
 
-	providerPort = iokit_port_for_object( provider, IKOT_IOKIT_OBJECT );
-	thisPort = iokit_port_for_object( this, IKOT_IOKIT_OBJECT );
+	providerPort = iokit_port_for_object( provider, IKOT_IOKIT_OBJECT, NULL );
+	thisPort = iokit_port_for_object( this, IKOT_IOKIT_OBJECT, NULL );
 
 	kr = kernel_mach_msg_send_with_builder_internal(1, payloadSize,
 	    (MACH_SEND_MSG | MACH_SEND_ALWAYS | MACH_SEND_IMPORTANCE),
@@ -4204,7 +4232,12 @@ is_io_service_get_authorization_id(
 		return kr;
 	}
 
+#if defined(XNU_TARGET_OS_OSX)
 	*authorization_id = service->getAuthorizationID();
+#else /* defined(XNU_TARGET_OS_OSX) */
+	*authorization_id = 0;
+	kr = kIOReturnUnsupported;
+#endif /* defined(XNU_TARGET_OS_OSX) */
 
 	return kr;
 }
@@ -4217,7 +4250,11 @@ is_io_service_set_authorization_id(
 {
 	CHECK( IOService, _service, service );
 
+#if defined(XNU_TARGET_OS_OSX)
 	return service->setAuthorizationID( authorization_id );
+#else /* defined(XNU_TARGET_OS_OSX) */
+	return kIOReturnUnsupported;
+#endif /* defined(XNU_TARGET_OS_OSX) */
 }
 
 /* Routine io_service_open_ndr */

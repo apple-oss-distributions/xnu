@@ -104,14 +104,15 @@ ifneq ($(PLATFORM),MacOSX)
 		plugins/iosspeedtracer.sh
 endif
 
+
 include $(MakeInc_rule)
 include $(MakeInc_dir)
 
 # Strip macros during install (default)
 ifeq ($(SKIP_LLDBMACROS_UNIFDEF),1)
-	LLDBMACROS_UNIFDEF =
+	LLDBMACROS_UNIFDEF :=
 else
-	LLDBMACROS_UNIFDEF = $(DATA_UNIFDEF)
+	LLDBMACROS_UNIFDEF := $(DATA_UNIFDEF)
 endif
 
 INSTALL_LLDBMACROS_PYTHON_FILES=$(addprefix $(LLDBMACROS_DEST), $(LLDBMACROS_PYTHON_FILES))

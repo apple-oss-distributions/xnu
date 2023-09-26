@@ -77,7 +77,6 @@
 
 #include <kern/kern_types.h>
 #include <kern/cpu_data.h>
-#include <kern/cpu_quiesce.h>
 #include <kern/ipc_host.h>
 #include <kern/host.h>
 #include <kern/machine.h>
@@ -112,6 +111,7 @@ extern void (*dtrace_cpu_state_changed_hook)(int, boolean_t);
 
 #if defined(__arm64__)
 extern void wait_while_mp_kdp_trap(bool check_SIGPdebug);
+#include <arm/pmap/pmap_data.h>
 #endif
 
 #if defined(__x86_64__)
@@ -202,6 +202,7 @@ processor_up(
 	}
 	pset_unlock(pset);
 	ml_cpu_up();
+	smr_cpu_up(processor, SMR_CPU_REASON_OFFLINE);
 	sched_mark_processor_online_locked(processor, processor->last_startup_reason);
 	simple_unlock(&sched_available_cores_lock);
 	splx(s);
@@ -426,6 +427,7 @@ processor_doshutdown(
 	wait_while_mp_kdp_trap(false);
 #endif
 
+	smr_cpu_down(processor, SMR_CPU_REASON_OFFLINE);
 	ml_cpu_down();
 
 #if HIBERNATION
@@ -583,7 +585,7 @@ processor_offline_intstack(
 	recount_snapshot(&snap);
 	recount_processor_idle(&processor->pr_recount, &snap);
 
-	cpu_quiescent_counter_leave(processor->last_dispatch);
+	smr_cpu_leave(processor, processor->last_dispatch);
 
 	PMAP_DEACTIVATE_KERNEL(processor->cpu_id);
 
@@ -664,9 +666,6 @@ ml_io_init_timeouts(void)
  */
 STARTUP(TIMEOUTS, STARTUP_RANK_SECOND, ml_io_init_timeouts);
 #endif /* SCHED_HYGIENE_DEBUG */
-
-unsigned int report_phy_read_osbt;
-unsigned int report_phy_write_osbt;
 
 extern pmap_paddr_t kvtophys(vm_offset_t va);
 #endif
@@ -810,8 +809,9 @@ ml_io_reset_timeouts(uintptr_t iovaddr_base, unsigned int size)
 }
 
 #if ML_IO_TIMEOUTS_ENABLED
-static void
-override_io_timeouts(uintptr_t vaddr, uint64_t *read_timeout, uint64_t *write_timeout)
+
+static bool
+override_io_timeouts_va(uintptr_t vaddr, uint64_t *read_timeout, uint64_t *write_timeout)
 {
 	assert(!ml_get_interrupts_enabled());
 
@@ -827,7 +827,8 @@ override_io_timeouts(uintptr_t vaddr, uint64_t *read_timeout, uint64_t *write_ti
 			if (write_timeout) {
 				*write_timeout = node->write_timeout;
 			}
-			break;
+			lck_spin_unlock(&io_timeout_override_lock);
+			return true;
 		} else if (vaddr < node->iovaddr_base) {
 			node = RB_LEFT(node, tree);
 		} else {
@@ -835,6 +836,53 @@ override_io_timeouts(uintptr_t vaddr, uint64_t *read_timeout, uint64_t *write_ti
 		}
 	}
 	lck_spin_unlock(&io_timeout_override_lock);
+
+	return false;
+}
+
+static bool
+override_io_timeouts_pa(uint64_t paddr, uint64_t *read_timeout, uint64_t *write_timeout)
+{
+#if defined(__arm64__)
+	/*
+	 * PCIe regions are marked with PMAP_IO_RANGE_STRONG_SYNC. Apply a
+	 * timeout greater than the PCIe completion timeout (50ms). In some
+	 * cases those timeouts can stack so make the timeout significantly
+	 * higher.
+	 */
+	#define STRONG_SYNC_TIMEOUT 1800000 /* 75ms */
+
+	pmap_io_range_t *range = pmap_find_io_attr(paddr);
+	if (range != NULL && (range->wimg & PMAP_IO_RANGE_STRONG_SYNC) != 0) {
+		if (read_timeout) {
+			*read_timeout = STRONG_SYNC_TIMEOUT;
+		}
+		if (write_timeout) {
+			*write_timeout = STRONG_SYNC_TIMEOUT;
+		}
+
+		return true;
+	}
+#else
+	(void)paddr;
+	(void)read_timeout;
+	(void)write_timeout;
+#endif /* __arm64__ */
+	return false;
+}
+
+void
+override_io_timeouts(uintptr_t vaddr, uint64_t paddr, uint64_t *read_timeout, uint64_t *write_timeout)
+{
+	if (vaddr != 0 &&
+	    override_io_timeouts_va(vaddr, read_timeout, write_timeout)) {
+		return;
+	}
+
+	if (paddr != 0 &&
+	    override_io_timeouts_pa(paddr, read_timeout, write_timeout)) {
+		return;
+	}
 }
 #endif /* ML_IO_TIMEOUTS_ENABLED */
 
@@ -919,8 +967,11 @@ ml_io_read(uintptr_t vaddr, int size)
 		}
 
 		if (__improbable((eabs - sabs) > report_read_delay)) {
+			DTRACE_PHYSLAT5(physioread, uint64_t, (eabs - sabs),
+			    uint64_t, vaddr, uint32_t, size, uint64_t, paddr, uint64_t, result);
+
 			uint64_t override = 0;
-			override_io_timeouts(vaddr, &override, NULL);
+			override_io_timeouts(vaddr, paddr, &override, NULL);
 
 			if (override != 0) {
 #if SCHED_HYGIENE_DEBUG
@@ -934,6 +985,7 @@ ml_io_read(uintptr_t vaddr, int size)
 				 */
 				if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
 					ml_spin_debug_clear(current_thread());
+					ml_irq_debug_abandon();
 				}
 #endif
 				report_read_delay = override;
@@ -952,27 +1004,14 @@ ml_io_read(uintptr_t vaddr, int size)
 				    vaddr, paddr, nsec, result, sabs, eabs,
 				    report_read_delay);
 			}
+		}
 
-			(void)ml_set_interrupts_enabled(istate);
-
-			if (report_phy_read_osbt) {
-				uint64_t nsec = 0;
-				absolutetime_to_nanoseconds(eabs - sabs, &nsec);
-				OSReportWithBacktrace("ml_io_read(v=%p, p=%p) size %d result 0x%llx "
-				    "took %lluus",
-				    (void *)vaddr, (void *)paddr, size, result,
-				    nsec / NSEC_PER_USEC);
-			}
-			DTRACE_PHYSLAT5(physioread, uint64_t, (eabs - sabs),
-			    uint64_t, vaddr, uint32_t, size, uint64_t, paddr, uint64_t, result);
-		} else if (__improbable(trace_phy_read_delay > 0 && (eabs - sabs) > trace_phy_read_delay)) {
+		if (__improbable(trace_phy_read_delay > 0 && (eabs - sabs) > trace_phy_read_delay)) {
 			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_MMIO_READ),
 			    (eabs - sabs), VM_KERNEL_UNSLIDE_OR_PERM(vaddr), paddr, result);
-
-			(void)ml_set_interrupts_enabled(istate);
-		} else {
-			(void)ml_set_interrupts_enabled(istate);
 		}
+
+		(void)ml_set_interrupts_enabled(istate);
 	}
 #endif /*  ML_IO_TIMEOUTS_ENABLED */
 	return result;
@@ -1080,8 +1119,11 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 
 
 		if (__improbable((eabs - sabs) > report_write_delay)) {
+			DTRACE_PHYSLAT5(physiowrite, uint64_t, (eabs - sabs),
+			    uint64_t, vaddr, uint32_t, size, uint64_t, paddr, uint64_t, val);
+
 			uint64_t override = 0;
-			override_io_timeouts(vaddr, NULL, &override);
+			override_io_timeouts(vaddr, paddr, NULL, &override);
 
 			if (override != 0) {
 #if SCHED_HYGIENE_DEBUG
@@ -1095,6 +1137,7 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 				 */
 				if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
 					ml_spin_debug_clear(current_thread());
+					ml_irq_debug_abandon();
 				}
 #endif
 				report_write_delay = override;
@@ -1114,26 +1157,14 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 				    (void *)vaddr, (void *)paddr, val, nsec, sabs, eabs,
 				    report_write_delay);
 			}
+		}
 
-			(void)ml_set_interrupts_enabled(istate);
-
-			if (report_phy_write_osbt) {
-				uint64_t nsec = 0;
-				absolutetime_to_nanoseconds(eabs - sabs, &nsec);
-				OSReportWithBacktrace("ml_io_write size %d (v=%p, p=%p, 0x%llx) "
-				    "took %lluus",
-				    size, (void *)vaddr, (void *)paddr, val, nsec / NSEC_PER_USEC);
-			}
-			DTRACE_PHYSLAT5(physiowrite, uint64_t, (eabs - sabs),
-			    uint64_t, vaddr, uint32_t, size, uint64_t, paddr, uint64_t, val);
-		} else if (__improbable(trace_phy_write_delay > 0 && (eabs - sabs) > trace_phy_write_delay)) {
+		if (__improbable(trace_phy_write_delay > 0 && (eabs - sabs) > trace_phy_write_delay)) {
 			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_MMIO_WRITE),
 			    (eabs - sabs), VM_KERNEL_UNSLIDE_OR_PERM(vaddr), paddr, val);
-
-			(void)ml_set_interrupts_enabled(istate);
-		} else {
-			(void)ml_set_interrupts_enabled(istate);
 		}
+
+		(void)ml_set_interrupts_enabled(istate);
 	}
 #endif /* ML_IO_TIMEOUTS_ENABLED */
 }
@@ -1459,7 +1490,7 @@ ml_io_timeout_test_get_timeouts(uintptr_t vaddr, uint64_t *read_timeout, uint64_
 	*write_timeout = 0;
 
 	boolean_t istate = ml_set_interrupts_enabled(FALSE);
-	override_io_timeouts(vaddr, read_timeout, write_timeout);
+	override_io_timeouts(vaddr, 0, read_timeout, write_timeout);
 	ml_set_interrupts_enabled(istate);
 }
 

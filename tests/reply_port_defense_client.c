@@ -6,7 +6,7 @@
 #include <mach/task.h>
 #include <assert.h>
 
-#define MAX_TEST_NUM 4
+#define MAX_TEST_NUM 5
 
 static mach_port_t
 alloc_server_port(void)
@@ -21,6 +21,23 @@ alloc_server_port(void)
 	assert(kr == 0);
 
 	return server_port;
+}
+
+static mach_port_t
+alloc_provisional_reply_port()
+{
+	kern_return_t kr;
+	mach_port_t reply_port = MACH_PORT_NULL;
+	mach_port_t task = mach_task_self();
+
+	mach_port_options_t opts = {
+		.flags = MPO_PROVISIONAL_REPLY_PORT | MPO_INSERT_SEND_RIGHT,
+	};
+
+	kr = mach_port_construct(mach_task_self(), &opts, 0, &reply_port);
+	assert(kr == 0);
+
+	return reply_port;
 }
 
 static mach_port_t
@@ -131,6 +148,36 @@ test_move_send_right(void)
 	printf("[reply_port_defense_client test_move_send_right]: mach_msg2() returned %d\n", kr);
 }
 
+static void
+test_move_provisional_reply_port(void)
+{
+	kern_return_t kr;
+	mach_port_t server_port = MACH_PORT_NULL, reply_port = MACH_PORT_NULL;
+	struct {
+		mach_msg_header_t header;
+		mach_msg_body_t body;
+		mach_msg_port_descriptor_t desc;
+	} msg;
+
+	server_port = alloc_server_port();
+	reply_port = alloc_provisional_reply_port();
+
+	msg.header.msgh_remote_port = server_port;
+	msg.header.msgh_local_port = MACH_PORT_NULL;
+	msg.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0) | MACH_MSGH_BITS_COMPLEX;
+	msg.header.msgh_size = sizeof msg;
+
+	msg.body.msgh_descriptor_count = 1;
+
+	msg.desc.name = reply_port;
+	msg.desc.disposition = MACH_MSG_TYPE_MOVE_RECEIVE;
+	msg.desc.type = MACH_MSG_PORT_DESCRIPTOR;
+
+	kr = mach_msg_send(&msg.header);
+
+	printf("[reply_port_defense_client test_immovable_receive_right]: mach_msg2() returned %d\n", kr);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -140,7 +187,8 @@ main(int argc, char *argv[])
 		test_immovable_receive_right,
 		test_make_send_once_right,
 		test_using_send_right,
-		test_move_send_right
+		test_move_send_right,
+		test_move_provisional_reply_port
 	};
 
 	if (argc < 2) {
@@ -155,6 +203,5 @@ main(int argc, char *argv[])
 		printf("[reply_port_defense_client]: Invalid test num. Exiting...\n");
 		exit(-1);
 	}
-
 	exit(0);
 }

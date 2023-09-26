@@ -53,9 +53,15 @@
 #include <sys/stat.h> /* dev_t */
 #include <miscfs/devfs/devfs.h> /* must come after sys/stat.h */
 #include <sys/conf.h> /* must come after sys/stat.h */
+#include <sys/sysctl.h>
+
+#include <pexpert/pexpert.h> /* PE_parse_boot_argn */
 
 #include <libkern/libkern.h>
+#include <libkern/OSKextLibPrivate.h>
+#include <libkern/kernel_mach_header.h>
 #include <os/atomic_private.h>
+#include <os/log.h>
 #include <os/overflow.h>
 
 #include <san/kcov_data.h>
@@ -93,6 +99,103 @@ static struct ksancov_edgemap *ksancov_edgemap;
 /* Global flag that enables the sanitizer hook. */
 static _Atomic unsigned int ksancov_enabled = 0;
 
+/* Toggled after ksancov_init() */
+static boolean_t ksancov_initialized = false;
+
+
+/* Support for gated callbacks (referred to as "on demand", "od") */
+static void kcov_ksancov_bookmark_on_demand_module(uint32_t *start, uint32_t *stop);
+
+static LCK_MTX_DECLARE(ksancov_od_lck, &ksancov_lck_grp);
+
+/* Bookkeeping structures for gated sancov instrumentation */
+struct ksancov_od_module_entry {
+	char     bundle[KMOD_MAX_NAME]; /* module bundle */
+	uint32_t idx; /* index into entries/handles arrays */
+};
+
+struct ksancov_od_module_handle {
+	uint32_t *start; /* guards boundaries */
+	uint32_t *stop;
+	uint64_t *gate; /* pointer to __DATA,__sancov_gate*/
+};
+
+static struct ksancov_od_module_entry *ksancov_od_module_entries = NULL;
+static struct ksancov_od_module_handle *ksancov_od_module_handles = NULL;
+
+/* number of entries/handles allocated */
+static unsigned int ksancov_od_allocated_count = 0;
+
+/* number of registered modules */
+static unsigned int ksancov_od_modules_count = 0;
+/* number of modules whose callbacks are currently enabled */
+static unsigned int ksancov_od_enabled_count = 0;
+
+/* Valid values for ksancov.on_demand= boot-arg */
+#define KSANCOV_OD_SUPPORT  0x0010 // Enable runtime support
+#define KSANCOV_OD_LOGGING  0x0020 // Enable logging (via os_log)
+
+__options_decl(ksancov_od_config_t, uint32_t, {
+	KSANCOV_OD_NONE = 0,
+	KSANCOV_OD_ENABLE_SUPPORT = 0x0010,
+	KSANCOV_OD_ENABLE_LOGGING = 0x0020,
+});
+
+/* configurable at boot; enabled by default */
+static ksancov_od_config_t ksancov_od_config = KSANCOV_OD_ENABLE_SUPPORT;
+
+static unsigned ksancov_od_support_enabled = 1;
+static unsigned ksancov_od_logging_enabled = 0;
+
+SYSCTL_DECL(_kern_kcov);
+SYSCTL_ULONG(_kern_kcov, OID_AUTO, nedges, CTLFLAG_RD, &nedges, "");
+
+SYSCTL_NODE(_kern_kcov, OID_AUTO, od, CTLFLAG_RD, 0, "od");
+SYSCTL_UINT(_kern_kcov_od, OID_AUTO, config, CTLFLAG_RD, &ksancov_od_config, 0, "");
+SYSCTL_UINT(_kern_kcov_od, OID_AUTO, allocated_entries, CTLFLAG_RD, &ksancov_od_allocated_count, 0, "");
+SYSCTL_UINT(_kern_kcov_od, OID_AUTO, modules_count, CTLFLAG_RD, &ksancov_od_modules_count, 0, "");
+SYSCTL_UINT(_kern_kcov_od, OID_AUTO, enabled_count, CTLFLAG_RD, &ksancov_od_enabled_count, 0, "");
+SYSCTL_UINT(_kern_kcov_od, OID_AUTO, support_enabled, CTLFLAG_RD, &ksancov_od_support_enabled, 0, "");
+SYSCTL_UINT(_kern_kcov_od, OID_AUTO, logging_enabled, CTLFLAG_RW, &ksancov_od_logging_enabled, 0, "");
+
+#define ksancov_od_log(...) do { \
+	        if (ksancov_od_logging_enabled) { \
+	                os_log_debug(OS_LOG_DEFAULT, __VA_ARGS__); \
+	        } \
+	} while (0)
+
+__startup_func
+void
+ksancov_init(void)
+{
+	unsigned arg;
+
+	/* handle ksancov boot-args */
+	if (PE_parse_boot_argn("ksancov.on_demand", &arg, sizeof(arg))) {
+		ksancov_od_config = (ksancov_od_config_t)arg;
+	}
+
+	if (ksancov_od_config & KSANCOV_OD_ENABLE_SUPPORT) {
+		/* enable the runtime support for on-demand instrumentation */
+		ksancov_od_support_enabled = 1;
+		ksancov_od_allocated_count = 64;
+		ksancov_od_module_entries = kalloc_type_tag(struct ksancov_od_module_entry,
+		    ksancov_od_allocated_count, Z_WAITOK_ZERO_NOFAIL, VM_KERN_MEMORY_DIAG);
+		ksancov_od_module_handles = kalloc_type_tag(struct ksancov_od_module_handle,
+		    ksancov_od_allocated_count, Z_WAITOK_ZERO_NOFAIL, VM_KERN_MEMORY_DIAG);
+	} else {
+		ksancov_od_support_enabled = 0;
+	}
+
+	if (ksancov_od_config & KSANCOV_OD_ENABLE_LOGGING) {
+		ksancov_od_logging_enabled = 1;
+	} else {
+		ksancov_od_logging_enabled = 0;
+	}
+
+	ksancov_initialized = true;
+}
+
 /*
  * Coverage sanitizer per-thread routines.
  */
@@ -109,7 +212,7 @@ kcov_ksancov_init_thread(ksancov_dev_t *dev)
 #define GUARD_IDX_MASK (uint32_t)0x0fffffff
 
 static void
-trace_pc_guard_pcs(struct ksancov_dev *dev, uint32_t pc)
+trace_pc_guard_pcs(struct ksancov_dev *dev, uintptr_t pc)
 {
 	if (os_atomic_load(&dev->trace->kt_head, relaxed) >= dev->maxpcs) {
 		return; /* overflow */
@@ -126,7 +229,7 @@ trace_pc_guard_pcs(struct ksancov_dev *dev, uint32_t pc)
 
 #if CONFIG_STKSZ
 static void
-trace_pc_guard_pcs_stk(struct ksancov_dev *dev, uint32_t pc, uint32_t stksize)
+trace_pc_guard_pcs_stk(struct ksancov_dev *dev, uintptr_t pc, uint32_t stksize)
 {
 	if (os_atomic_load(&dev->trace->kt_head, relaxed) >= dev->maxpcs) {
 		return; /* overflow */
@@ -138,8 +241,10 @@ trace_pc_guard_pcs_stk(struct ksancov_dev *dev, uint32_t pc, uint32_t stksize)
 	}
 
 	ksancov_trace_stksize_ent_t *entries = (ksancov_trace_stksize_ent_t *)dev->trace->kt_entries;
-	entries[idx].pc = pc;
-	entries[idx].stksize = stksize;
+	entries[idx] = {
+		.pc = pc,
+		.stksize = stksize
+	};
 }
 #endif
 
@@ -158,14 +263,18 @@ trace_pc_guard_counter(struct ksancov_dev *dev, uint32_t *guardp)
 void
 kcov_ksancov_trace_guard(uint32_t *guardp, void *caller)
 {
-	uint32_t pc = (uint32_t)(VM_KERNEL_UNSLIDE(caller) - VM_MIN_KERNEL_ADDRESS - 1);
+	uintptr_t pc = (uintptr_t)(VM_KERNEL_UNSLIDE(caller) - 1);
 
 	if (guardp == NULL) {
 		return;
 	}
 
+	if (__probable(ksancov_edgemap == NULL)) {
+		return;
+	}
+
 	uint32_t gd = *guardp;
-	if (__improbable(gd && !(gd & GUARD_SEEN) && ksancov_edgemap)) {
+	if (__improbable(gd && !(gd & GUARD_SEEN))) {
 		size_t idx = gd & GUARD_IDX_MASK;
 		if (idx < ksancov_edgemap->ke_nedges) {
 			ksancov_edgemap->ke_addrs[idx] = pc;
@@ -178,7 +287,7 @@ void
 kcov_ksancov_trace_pc(kcov_thread_data_t *data, uint32_t *guardp, void *caller, uintptr_t sp)
 {
 #pragma unused(sp)
-	uint32_t pc = (uint32_t)(VM_KERNEL_UNSLIDE(caller) - VM_MIN_KERNEL_ADDRESS - 1);
+	uintptr_t pc = (uintptr_t)(VM_KERNEL_UNSLIDE(caller) - 1);
 	ksancov_dev_t dev = data->ktd_device;
 
 	/* Check that we have coverage recording enabled for a thread. */
@@ -218,13 +327,21 @@ kcov_ksancov_trace_pc(kcov_thread_data_t *data, uint32_t *guardp, void *caller, 
 void
 kcov_ksancov_trace_pc_guard_init(uint32_t *start, uint32_t *stop)
 {
+	const size_t orig_nedges = nedges;
+
 	/* assign a unique number to each guard */
-	for (; start != stop; start++) {
-		if (*start == 0) {
+	for (uint32_t *cur = start; cur != stop; cur++) {
+		/* zero means that the guard has not been assigned */
+		if (*cur == 0) {
 			if (nedges < KSANCOV_MAX_EDGES) {
-				*start = (uint32_t)++nedges;
+				*cur = (uint32_t)++nedges;
 			}
 		}
+	}
+
+	/* only invoke kcov_ksancov_bookmark_on_demand_module if we assigned new guards */
+	if (nedges > orig_nedges) {
+		kcov_ksancov_bookmark_on_demand_module(start, stop);
 	}
 }
 
@@ -256,6 +373,89 @@ kcov_ksancov_pcs_init(uintptr_t *start, uintptr_t *stop)
 #endif
 }
 
+static void
+kcov_ksancov_bookmark_on_demand_module(uint32_t *start, uint32_t *stop)
+{
+	OSKextLoadedKextSummary summary = {};
+	struct ksancov_od_module_entry *entry = NULL;
+	struct ksancov_od_module_handle *handle = NULL;
+	uint64_t *gate_section = NULL;
+	unsigned long gate_sz = 0;
+	uint32_t idx = 0;
+
+	if (!ksancov_od_support_enabled) {
+		return;
+	}
+
+	if (OSKextGetLoadedKextSummaryForAddress(start, &summary) != KERN_SUCCESS) {
+		return;
+	}
+
+	if (!ksancov_initialized) {
+		ksancov_od_log("ksancov: Dropping %s pre-initialization\n", summary.name);
+		return;
+	}
+
+	if (nedges >= KSANCOV_MAX_EDGES) {
+		ksancov_od_log("ksancov: Dropping %s: maximum number of edges reached\n",
+		    summary.name);
+		return;
+	}
+
+	/*
+	 * The __DATA,__sancov_gate section is where the compiler stores the 64-bit
+	 * global variable that is used by the inline instrumentation to decide
+	 * whether it should call into the runtime or not.
+	 */
+	gate_section = getsectdatafromheader((kernel_mach_header_t *)summary.address,
+	    "__DATA", "__sancov_gate", &gate_sz);
+	if (gate_sz == 0) {
+		ksancov_od_log("ksancov: Dropping %s: not instrumented with gated callbacks\n",
+		    summary.name);
+		return;
+	}
+
+	lck_mtx_lock(&ksancov_od_lck);
+
+	/* reallocate the bookkeeping structures if needed */
+	if (ksancov_od_modules_count >= ksancov_od_allocated_count) {
+		unsigned int old_ksancov_od_allocated_count = ksancov_od_allocated_count;
+		ksancov_od_allocated_count += (ksancov_od_allocated_count / 2);
+
+		ksancov_od_log("ksancov: Reallocating entries: %u -> %u\n",
+		    old_ksancov_od_allocated_count,
+		    ksancov_od_allocated_count);
+
+		ksancov_od_module_entries = krealloc_type_tag(struct ksancov_od_module_entry,
+		    old_ksancov_od_allocated_count,
+		    ksancov_od_allocated_count,
+		    ksancov_od_module_entries, Z_WAITOK_ZERO | Z_REALLOCF, VM_KERN_MEMORY_DIAG);
+
+		ksancov_od_module_handles = krealloc_type_tag(struct ksancov_od_module_handle,
+		    old_ksancov_od_allocated_count,
+		    ksancov_od_allocated_count,
+		    ksancov_od_module_handles, Z_WAITOK_ZERO | Z_REALLOCF, VM_KERN_MEMORY_DIAG);
+	}
+
+	/* this is the index of the entry we're going to fill in both arrays */
+	idx = ksancov_od_modules_count++;
+
+	entry = &ksancov_od_module_entries[idx];
+	handle = &ksancov_od_module_handles[idx];
+
+	handle->start = start;
+	handle->stop = stop;
+	handle->gate = gate_section;
+
+	strlcpy(entry->bundle, summary.name, sizeof(entry->bundle));
+	entry->idx = (uint32_t)idx;
+
+	ksancov_od_log("ksancov: Bookmarked module %s (0x%lx - 0x%lx, %lu guards) [idx: %u]\n",
+	    entry->bundle, (uintptr_t)handle->start, (uintptr_t)handle->stop,
+	    handle->stop - handle->start, entry->idx);
+	lck_mtx_unlock(&ksancov_od_lck);
+}
+
 /*
  * Coverage sanitizer pseudo-device code.
  */
@@ -265,7 +465,7 @@ create_dev(dev_t dev)
 {
 	ksancov_dev_t d;
 
-	d = kalloc_type(struct ksancov_dev, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	d = kalloc_type_tag(struct ksancov_dev, Z_WAITOK_ZERO_NOFAIL, VM_KERN_MEMORY_DIAG);
 	d->mode = KS_MODE_NONE;
 	d->maxpcs = KSANCOV_MAX_PCS;
 	d->dev = dev;
@@ -374,8 +574,15 @@ ksancov_map(ksancov_dev_t d, uintptr_t *bufp, size_t *sizep)
 static int
 ksancov_map_edgemap(uintptr_t *bufp, size_t *sizep)
 {
-	uintptr_t addr = (uintptr_t)ksancov_edgemap;
-	size_t size = sizeof(ksancov_edgemap_t) + ksancov_edgemap->ke_nedges * sizeof(uint32_t);
+	uintptr_t addr;
+	size_t size;
+
+	if (ksancov_edgemap == NULL) {
+		return EINVAL;
+	}
+
+	addr = (uintptr_t)ksancov_edgemap;
+	size = sizeof(ksancov_edgemap_t) + ksancov_edgemap->ke_nedges * sizeof(uintptr_t);
 
 	void *buf = ksancov_do_map(addr, size, VM_PROT_READ);
 	if (buf == NULL) {
@@ -414,6 +621,23 @@ ksancov_open(dev_t dev, int flags, int devtype, proc_t p)
 		return ENOMEM;
 	}
 	ksancov_devs[minor_num] = d;
+
+	if (ksancov_edgemap == NULL) {
+		uintptr_t buf;
+		size_t sz = sizeof(struct ksancov_edgemap) + nedges * sizeof(uintptr_t);
+
+		kern_return_t kr = kmem_alloc(kernel_map, &buf, sz,
+		    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_DIAG);
+		if (kr) {
+			printf("ksancov: failed to allocate edge addr map\n");
+			lck_rw_unlock_exclusive(&ksancov_devs_lck);
+			return ENOMEM;
+		}
+
+		ksancov_edgemap = (void *)buf;
+		ksancov_edgemap->ke_magic = KSANCOV_EDGEMAP_MAGIC;
+		ksancov_edgemap->ke_nedges = (uint32_t)nedges;
+	}
 
 	lck_rw_unlock_exclusive(&ksancov_devs_lck);
 
@@ -454,7 +678,6 @@ ksancov_trace_alloc(ksancov_dev_t d, ksancov_mode_t mode, size_t maxpcs)
 
 	struct ksancov_trace *trace = (struct ksancov_trace *)buf;
 	trace->kt_hdr.kh_magic = (mode == KS_MODE_TRACE) ? KSANCOV_TRACE_MAGIC : KSANCOV_STKSIZE_MAGIC;
-	trace->kt_offset = VM_MIN_KERNEL_ADDRESS;
 	os_atomic_init(&trace->kt_head, 0);
 	os_atomic_init(&trace->kt_hdr.kh_enabled, 0);
 	trace->kt_maxent = (uint32_t)maxpcs;
@@ -647,6 +870,73 @@ ksancov_testpanic(volatile uint64_t guess)
 }
 
 static int
+ksancov_handle_on_demand_cmd(struct ksancov_on_demand_msg *kmsg)
+{
+	struct ksancov_od_module_entry *entry = NULL;
+	struct ksancov_od_module_handle *handle = NULL;
+	ksancov_on_demand_operation_t op = kmsg->operation;
+	int ret = 0;
+
+	lck_mtx_lock(&ksancov_od_lck);
+
+	/* find the entry/handle to the module */
+	for (unsigned int idx = 0; idx < ksancov_od_modules_count; idx++) {
+		entry = &ksancov_od_module_entries[idx];
+		if (strncmp(entry->bundle, kmsg->bundle, sizeof(entry->bundle)) == 0) {
+			handle = &ksancov_od_module_handles[idx];
+			break;
+		}
+	}
+
+	if (handle == NULL) {
+		ksancov_od_log("ksancov: Could not find module '%s'\n", kmsg->bundle);
+		lck_mtx_unlock(&ksancov_od_lck);
+		return EINVAL;
+	}
+
+	switch (op) {
+	case KS_OD_GET_GATE:
+		/* Get whether on-demand instrumentation is enabled in a given module */
+		if (handle->gate) {
+			kmsg->gate = *handle->gate;
+		} else {
+			ret = EINVAL;
+		}
+		break;
+	case KS_OD_SET_GATE:
+		/* Toggle callback invocation for a given module */
+		if (handle->gate) {
+			ksancov_od_log("ksancov: Setting gate for '%s': %llu\n",
+			    kmsg->bundle, kmsg->gate);
+			if (kmsg->gate != *handle->gate) {
+				if (kmsg->gate) {
+					ksancov_od_enabled_count++;
+				} else {
+					ksancov_od_enabled_count--;
+				}
+				*handle->gate = kmsg->gate;
+			}
+		} else {
+			ret = EINVAL;
+		}
+		break;
+	case KS_OD_GET_RANGE:
+		/* Get which range of the guards table covers the given module */
+		ksancov_od_log("ksancov: Range for '%s': %u, %u\n",
+		    kmsg->bundle, *handle->start, *(handle->stop - 1));
+		kmsg->range.start = *handle->start;
+		kmsg->range.stop = *(handle->stop - 1);
+		break;
+	default:
+		ret = EINVAL;
+		break;
+	}
+
+	lck_mtx_unlock(&ksancov_od_lck);
+	return ret;
+}
+
+static int
 ksancov_ioctl(dev_t dev, unsigned long cmd, caddr_t _data, int fflag, proc_t p)
 {
 #pragma unused(fflag,p)
@@ -698,6 +988,9 @@ ksancov_ioctl(dev_t dev, unsigned long cmd, caddr_t _data, int fflag, proc_t p)
 		break;
 	case KSANCOV_IOC_NEDGES:
 		*(size_t *)data = nedges;
+		break;
+	case KSANCOV_IOC_ON_DEMAND:
+		ret = ksancov_handle_on_demand_cmd((struct ksancov_on_demand_msg *)data);
 		break;
 	case KSANCOV_IOC_TESTPANIC:
 		ksancov_testpanic(*(uint64_t *)data);
@@ -761,22 +1054,6 @@ ksancov_init_dev(void)
 		printf("ksancov: failed to create device node\n");
 		return -1;
 	}
-
-	/* This could be moved to the first use of /dev/ksancov to save memory */
-	uintptr_t buf;
-	size_t sz = sizeof(struct ksancov_edgemap) + KSANCOV_MAX_EDGES * sizeof(uint32_t);
-
-	kern_return_t kr = kmem_alloc(kernel_map, &buf, sz,
-	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_DIAG);
-	if (kr) {
-		printf("ksancov: failed to allocate edge addr map\n");
-		return -1;
-	}
-
-	ksancov_edgemap = (void *)buf;
-	ksancov_edgemap->ke_magic = KSANCOV_EDGEMAP_MAGIC;
-	ksancov_edgemap->ke_nedges = (uint32_t)nedges;
-	ksancov_edgemap->ke_offset = VM_MIN_KERNEL_ADDRESS;
 
 	return 0;
 }

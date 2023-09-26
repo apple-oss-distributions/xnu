@@ -596,7 +596,8 @@ nx_netif_pkt_to_pkt(struct nexus_netif_adapter *nifna,
 		pp = skmem_arena_nexus(na->na_arena)->arn_tx_pp;
 		off = (uint8_t)ifp->if_tx_headroom;
 	} else {
-		ASSERT(na->na_type == NA_NETIF_VP);
+		ASSERT(na->na_type == NA_NETIF_VP ||
+		    na->na_type == NA_NETIF_DEV);
 		pp = skmem_arena_nexus(na->na_arena)->arn_rx_pp;
 		off = 0;
 	}
@@ -608,7 +609,8 @@ nx_netif_pkt_to_pkt(struct nexus_netif_adapter *nifna,
 	 */
 	if ((pkt->pkt_pflags & PKT_F_MBUF_DATA) != 0) {
 		/* An outbound packet shouldn't have an mbuf attached */
-		ASSERT(na->na_type == NA_NETIF_VP);
+		ASSERT(na->na_type == NA_NETIF_VP ||
+		    na->na_type == NA_NETIF_DEV);
 		m = pkt->pkt_mbuf;
 		len = m_pktlen(m);
 	} else {
@@ -780,4 +782,31 @@ nx_netif_pktap_output(ifnet_t ifp, int af, struct __kern_packet *pkt)
 	}
 	pktap_output_packet(ifp, af, dlt, -1, NULL, -1, NULL, SK_PKT2PH(pkt),
 	    NULL, 0, pkt->pkt_flow_ip_proto, pkt->pkt_flow_token, flags);
+}
+
+__attribute__((always_inline))
+inline void
+netif_ifp_inc_traffic_class_out_pkt(struct ifnet *ifp, uint32_t svc,
+    uint32_t cnt, uint32_t len)
+{
+	switch (svc) {
+	case PKT_TC_BE:
+		ifp->if_tc.ifi_obepackets += cnt;
+		ifp->if_tc.ifi_obebytes += len;
+		break;
+	case PKT_TC_BK:
+		ifp->if_tc.ifi_obkpackets += cnt;
+		ifp->if_tc.ifi_obkbytes += len;
+		break;
+	case PKT_TC_VI:
+		ifp->if_tc.ifi_ovipackets += cnt;
+		ifp->if_tc.ifi_ovibytes += len;
+		break;
+	case PKT_TC_VO:
+		ifp->if_tc.ifi_ovopackets += cnt;
+		ifp->if_tc.ifi_ovobytes += len;
+		break;
+	default:
+		break;
+	}
 }

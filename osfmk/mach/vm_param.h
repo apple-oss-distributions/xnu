@@ -268,10 +268,12 @@ extern uint64_t         sane_size;              /* Memory size to use for defaul
 #ifdef  XNU_KERNEL_PRIVATE
 
 #include <kern/debug.h>
+#include <vm/vm_memtag.h>
 
 extern uint64_t         mem_actual;             /* 64-bit size of memory - not limited by maxmem */
 extern uint64_t         max_mem_actual;         /* Size of physical memory adjusted by maxmem */
 extern addr64_t         vm_last_addr;           /* Highest kernel virtual address known to the VM system */
+extern addr64_t         first_avail_phys;       /* First available physical address */
 
 extern const vm_offset_t        vm_min_kernel_address;
 extern const vm_offset_t        vm_max_kernel_address;
@@ -542,6 +544,10 @@ typedef struct vm_packing_params {
 static inline vm_offset_t
 vm_pack_pointer(vm_offset_t ptr, vm_packing_params_t params)
 {
+	if (ptr != 0) {
+		ptr = vm_memtag_canonicalize_address(ptr);
+	}
+
 	if (!params.vmpp_base_relative) {
 		return ptr >> params.vmpp_shift;
 	}
@@ -574,10 +580,10 @@ vm_unpack_pointer(vm_offset_t packed, vm_packing_params_t params)
 		intptr_t addr = (intptr_t)packed;
 		addr <<= __WORDSIZE - params.vmpp_bits;
 		addr >>= __WORDSIZE - params.vmpp_bits - params.vmpp_shift;
-		return (vm_offset_t)addr;
+		return vm_memtag_fixup_ptr((vm_offset_t)addr);
 	}
 	if (packed) {
-		return (packed << params.vmpp_shift) + params.vmpp_base;
+		return vm_memtag_fixup_ptr((packed << params.vmpp_shift) + params.vmpp_base);
 	}
 	return (vm_offset_t)0;
 }
@@ -637,6 +643,10 @@ vm_packing_pointer_invalid(vm_offset_t ptr, vm_packing_params_t params);
 static inline void
 vm_verify_pointer_packable(vm_offset_t ptr, vm_packing_params_t params)
 {
+	if (ptr != 0) {
+		ptr = vm_memtag_canonicalize_address(ptr);
+	}
+
 	if (ptr & ((1ul << params.vmpp_shift) - 1)) {
 		vm_packing_pointer_invalid(ptr, params);
 	}

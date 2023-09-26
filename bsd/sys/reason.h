@@ -121,11 +121,12 @@ void os_reason_set_description_data(os_reason_t cur_reason, uint32_t type, void 
 #define OS_REASON_MEDIA 33
 #define OS_REASON_ROSETTA 34
 #define OS_REASON_LIBIGNITION 35
+#define OS_REASON_BOOTMOUNT 36
 
 /*
  * Update whenever new OS_REASON namespaces are added.
  */
-#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_LIBIGNITION
+#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_BOOTMOUNT
 
 #define OS_REASON_BUFFER_MAX_SIZE 5120
 

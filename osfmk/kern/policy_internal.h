@@ -301,7 +301,8 @@ typedef struct task_pend_token {
 	    tpt_force_recompute_pri :1,
 	    tpt_update_tg_ui_flag   :1,
 	    tpt_update_turnstile    :1,
-	    tpt_update_tg_app_flag  :1;
+	    tpt_update_tg_app_flag  :1,
+	    tpt_update_game_mode    :1;
 } *task_pend_token_t;
 
 extern void task_policy_update_complete_unlocked(task_t task, task_pend_token_t pend_token);

@@ -742,9 +742,10 @@ extern lck_mtx_t nfsrv_fmod_mutex;
 extern int nfsrv_fmod_pending, nfsrv_fsevents_enabled;
 #endif
 
-extern int nfsrv_async, nfsrv_export_hash_size,
-    nfsrv_reqcache_size, nfsrv_sock_max_rec_queue_length;
+extern int nfsrv_async, nfsrv_export_hash_size, nfsrv_reqcache_size, nfsrv_sock_max_rec_queue_length;
 extern uint32_t nfsrv_gss_context_ttl;
+extern uint32_t nfsrv_unprocessed_rpc_current, nfsrv_unprocessed_rpc_max;
+
 extern struct nfsrvstats nfsrvstats;
 #define NFS_UC_Q_DEBUG
 #ifdef NFS_UC_Q_DEBUG
@@ -770,6 +771,8 @@ struct nfsclntstats {
 	uint64_t        lookupcache_misses;
 	uint64_t        direofcache_hits;
 	uint64_t        direofcache_misses;
+	uint64_t        accesscache_hits;
+	uint64_t        accesscache_misses;
 	uint64_t        biocache_reads;
 	uint64_t        read_bios;
 	uint64_t        read_physios;
@@ -987,7 +990,8 @@ struct nfsrv_sock {
 	int             ns_flag;
 	int             ns_sotype;
 	size_t          ns_cc;
-	size_t          ns_reclen;
+	u_int32_t       ns_reclen;              /* Unprocessed RPC record length */
+	u_int32_t       ns_recslen;             /* Total unprocessed RPC records length */
 	int             ns_reccnt;
 	u_int32_t       ns_sref;
 	time_t          ns_timestamp;           /* socket timestamp */

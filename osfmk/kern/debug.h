@@ -336,7 +336,7 @@ __options_decl(eph_panic_flags_t, uint64_t, {
 	EMBEDDED_PANIC_HEADER_FLAG_INCOHERENT_PANICLOG            = 0x8000                              /* ERROR: paniclog integrity check failed (a warning to consumer code i.e. DumpPanic) */
 });
 
-#define EMBEDDED_PANIC_HEADER_CURRENT_VERSION 4
+#define EMBEDDED_PANIC_HEADER_CURRENT_VERSION 5
 #define EMBEDDED_PANIC_MAGIC 0x46554E4B /* FUNK */
 #define EMBEDDED_PANIC_HEADER_OSVERSION_LEN 32
 
@@ -372,6 +372,8 @@ struct embedded_panic_header {
 	char eph_macos_version[EMBEDDED_PANIC_HEADER_OSVERSION_LEN];
 	uuid_string_t eph_bootsessionuuid_string;                      /* boot session UUID */
 	uint64_t eph_roots_installed;                                  /* bitmap indicating which roots are installed on this system */
+	uint32_t eph_ext_paniclog_offset;
+	uint32_t eph_ext_paniclog_len;
 } __attribute__((packed));
 
 
@@ -554,6 +556,7 @@ enum {
 #define DEBUGGER_INTERNAL_OPTION_THREAD_BACKTRACE   0x200ULL /* backtrace the specified thread in the paniclog (x86 only) */
 #define DEBUGGER_OPTION_PRINT_CPU_USAGE_PANICLOG    0x400ULL /* print extra CPU usage data in the panic log */
 #define DEBUGGER_OPTION_SKIP_PANICEND_CALLOUTS      0x800ULL /* (bridgeOS) skip the kPEPanicEnd callouts -- don't wait for x86 to finish sending panic data */
+#define DEBUGGER_OPTION_SYNC_ON_PANIC_UNSAFE        0x1000ULL /* sync() early in Panic - Can add unbounded delay, may be unsafe for some panic scenarios. Intended for userspace, watchdogs and RTBuddy panics */
 
 #define DEBUGGER_INTERNAL_OPTIONS_MASK              (DEBUGGER_INTERNAL_OPTION_THREAD_BACKTRACE)
 

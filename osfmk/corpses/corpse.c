@@ -127,6 +127,7 @@
 #include <kern/host.h>
 #include <kern/kern_types.h>
 #include <kern/mach_param.h>
+#include <kern/policy_internal.h>
 #include <kern/thread.h>
 #include <kern/task.h>
 #include <corpses/task_corpse.h>
@@ -135,6 +136,7 @@
 #include <mach/mach_vm.h>
 #include <kern/exc_guard.h>
 #include <os/log.h>
+#include <sys/kdebug_triage.h>
 
 #if CONFIG_MACF
 #include <security/mac_mach_internal.h>
@@ -452,8 +454,10 @@ task_generate_corpse(
 	}
 	task_unlock(task);
 
+	thread_set_exec_promotion(current_thread());
 	/* Generate a corpse for the given task, will return with a ref on corpse task */
 	kr = task_generate_corpse_internal(task, &new_task, &thread, 0, 0, 0, NULL);
+	thread_clear_exec_promotion(current_thread());
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
@@ -617,9 +621,11 @@ out:
 		task_t corpse = TASK_NULL;
 		thread_t thread = THREAD_NULL;
 
+		thread_set_exec_promotion(current_thread());
 		/* Generate a corpse for the given task, will return with a ref on corpse task */
 		kr = task_generate_corpse_internal(task, &corpse, &thread, etype,
 		    code[0], code[1], reason);
+		thread_clear_exec_promotion(current_thread());
 		if (kr == KERN_SUCCESS) {
 			if (thread == THREAD_NULL) {
 				return KERN_FAILURE;
@@ -671,17 +677,20 @@ task_generate_corpse_internal(
 	int num_udata = 0;
 	corpse_flags_t kc_u_flags = CORPSE_CRASHINFO_HAS_REF;
 	void *corpse_proc = NULL;
+	thread_t self = current_thread();
 
 #if CONFIG_MACF
 	struct label *label = NULL;
 #endif
 
 	if (!corpses_enabled()) {
+		ktriage_record(thread_tid(self), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_CORPSE, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_CORPSES_DISABLED), 0 /* arg */);
 		return KERN_NOT_SUPPORTED;
 	}
 
 	if (task_corpse_forking_disabled(task)) {
 		os_log(OS_LOG_DEFAULT, "corpse for pid %d disabled via SPI\n", task_pid(task));
+		ktriage_record(thread_tid(self), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_CORPSE, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_CORPSE_DISABLED_FOR_PROC), 0 /* arg */);
 		return KERN_FAILURE;
 	}
 
@@ -730,6 +739,7 @@ task_generate_corpse_internal(
 	    TWF_NONE,
 	    new_task);
 	if (kr != KERN_SUCCESS) {
+		new_task = TASK_NULL;
 		goto error_task_generate_corpse;
 	}
 

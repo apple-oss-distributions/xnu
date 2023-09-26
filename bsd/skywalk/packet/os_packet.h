@@ -186,6 +186,12 @@ typedef uint16_t packet_trace_tag_t;
 #define PACKET_CSUM_PARTIAL     0x01     /* partial one's complement */
 #define PACKET_CSUM_ZERO_INVERT 0x02     /* invert resulted 0 to 0xffff */
 
+#define PACKET_CSUM_IP          0x0004
+#define PACKET_CSUM_TCP         0x0008
+#define PACKET_CSUM_UDP         0x0010
+#define PACKET_CSUM_TCPIPV6     0x0020
+#define PACKET_CSUM_UDPIPV6     0x0040
+
 /*
  * Below flags are for RX.
  */
@@ -198,6 +204,9 @@ typedef enum : uint32_t {
 	PACKET_TSO_IPV4  = 0x00100000,
 	PACKET_TSO_IPV6  = 0x00200000,
 } packet_tso_flags_t;
+
+#define PACKET_CSUM_TSO_IPV4 0x00100000
+#define PACKET_CSUM_TSO_IPV6 0x00200000
 
 #define PACKET_HAS_VALID_IP_CSUM(_p) \
     (((_p)->pkt_csum_flags & (PACKET_CSUM_IP_CHECKED | PACKET_CSUM_IP_VALID)) \
@@ -214,11 +223,17 @@ typedef enum : uint32_t {
 	(PACKET_CSUM_RX_FULL_FLAGS | PACKET_CSUM_PARTIAL)
 
 #define PACKET_CSUM_TSO_FLAGS \
-	(PACKET_TSO_IPV4 | PACKET_TSO_IPV6)
+	(PACKET_CSUM_TSO_IPV4 | PACKET_CSUM_TSO_IPV6)
 
 #define PACKET_HAS_FULL_CHECKSUM_FLAGS(_p) \
 	(((_p)->pkt_csum_flags & PACKET_CSUM_RX_FULL_FLAGS) == PACKET_CSUM_RX_FULL_FLAGS)
 
+#define PACKET_TX_CSUM_OFFLOAD_FLAGS \
+	(PACKET_CSUM_IP | PACKET_CSUM_TCP | PACKET_CSUM_UDP | \
+	PACKET_CSUM_TCPIPV6 | PACKET_CSUM_UDPIPV6 | PACKET_CSUM_ZERO_INVERT)
+
+#define PACKET_CSUM_FLAGS \
+	(PACKET_TX_CSUM_OFFLOAD_FLAGS | PACKET_CSUM_RX_FLAGS | PACKET_CSUM_TSO_FLAGS)
 /*
  * TODO: adi@apple.com -- these are temporary and should be removed later.
  */
@@ -399,6 +414,8 @@ extern int os_packet_set_traffic_class(const packet_t, packet_traffic_class_t);
 extern packet_traffic_class_t os_packet_get_traffic_class(const packet_t);
 extern int os_packet_set_inet_checksum(const packet_t,
     const packet_csum_flags_t, const uint16_t, const uint16_t);
+#define HAS_OS_PACKET_ADD_CSUMF 1
+extern void os_packet_add_inet_csum_flags(const packet_t, const packet_csum_flags_t);
 extern packet_csum_flags_t os_packet_get_inet_checksum(const packet_t,
     uint16_t *, uint16_t *);
 extern void os_packet_set_group_start(const packet_t);
@@ -429,7 +446,10 @@ extern int os_packet_set_app_metadata(const packet_t,
     const packet_app_metadata_type_t, const uint8_t);
 extern int os_packet_set_protocol_segment_size(const packet_t, const uint16_t);
 extern void os_packet_set_tso_flags(const packet_t, packet_tso_flags_t);
-extern void os_packet_set_l4s_flag(const packet_t, const boolean_t);
+#define AQM_SUPPORTS_L4S 1
+extern void os_packet_set_l4s_flag(const packet_t);
+#define AQM_SUPPORTS_PACING 1
+extern void os_packet_set_tx_timestamp(const packet_t ph, const uint64_t ts);
 /*
  * Quantum & Packets.
  */
@@ -462,17 +482,15 @@ extern uint32_t os_copy_and_inet_checksum(const void *, void *,
 /*
  * Buflets.
  */
-extern int os_buflet_set_data_offset(const buflet_t, const uint16_t);
-extern uint16_t os_buflet_get_data_offset(const buflet_t);
-extern int os_buflet_set_data_length(const buflet_t, const uint16_t);
-extern uint16_t os_buflet_get_data_length(const buflet_t);
+#define SUPPORT_LARGE_BUFFER 1
+extern int os_buflet_set_data_offset(const buflet_t, const uint32_t);
+extern uint32_t os_buflet_get_data_offset(const buflet_t);
+extern int os_buflet_set_data_length(const buflet_t, const uint32_t);
+extern uint32_t os_buflet_get_data_length(const buflet_t);
 extern void *os_buflet_get_object_address(const buflet_t);
 extern uint32_t os_buflet_get_object_limit(const buflet_t);
 extern void *os_buflet_get_data_address(const buflet_t);
-extern uint16_t os_buflet_get_data_limit(const buflet_t);
-extern uint16_t os_buflet_get_object_offset(const buflet_t);
-extern uint16_t os_buflet_get_gro_len(const buflet_t);
-extern void *os_buflet_get_next_buf(const buflet_t, const void *);
+extern uint32_t os_buflet_get_data_limit(const buflet_t);
 __END_DECLS
 #endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 #else /* KERNEL */
@@ -557,7 +575,6 @@ struct kern_pbufpool_init {
 #define KBIF_IODIR_OUT          0x200   /* io direction out (host to device) */
 #define KBIF_KERNEL_READONLY    0x400   /* kernel read-only */
 #define KBIF_NO_MAGAZINES       0x800   /* disable per-CPU magazines layer */
-#define KBIF_RAW_BFLT           0x1000  /* configure raw buflet */
 #define KBIF_THREADSAFE         0x2000  /* thread safe memory descriptor */
 
 #define KERN_PBUFPOOL_VERSION_1         1
@@ -729,8 +746,6 @@ extern void kern_packet_set_group_end(const kern_packet_t);
 extern boolean_t kern_packet_get_group_end(const kern_packet_t);
 extern errno_t kern_packet_set_expire_time(const kern_packet_t, const uint64_t);
 extern errno_t kern_packet_get_expire_time(const kern_packet_t, uint64_t *);
-extern errno_t kern_packet_set_expiry_action(const kern_packet_t, const packet_expiry_action_t);
-extern errno_t kern_packet_get_expiry_action(const kern_packet_t, packet_expiry_action_t *);
 extern errno_t kern_packet_set_token(const kern_packet_t, const void *,
     const uint16_t);
 extern errno_t kern_packet_get_token(const kern_packet_t, void *, uint16_t *);
@@ -750,12 +765,20 @@ extern errno_t kern_packet_get_tx_nexus_port_id(const kern_packet_t,
     uint32_t *);
 extern errno_t kern_packet_get_app_metadata(const kern_packet_t,
     packet_app_metadata_type_t *, uint8_t *);
-extern errno_t kern_packet_get_protocol_segment_size(const kern_packet_t,
-    uint16_t *);
+#define NEW_KERN_PACKET_GET_PROTOCOL_SEGMENT_SIZE 1
+extern uint16_t kern_packet_get_protocol_segment_size(const kern_packet_t);
 extern void * kern_packet_get_priv(const kern_packet_t);
 extern void kern_packet_set_priv(const kern_packet_t, void *);
 extern void kern_packet_get_tso_flags(const kern_packet_t, packet_tso_flags_t *);
 void kern_packet_set_segment_count(const kern_packet_t, uint8_t);
+
+/*
+ * Expiry notification
+ */
+extern errno_t kern_packet_set_expiry_action(const kern_packet_t, const packet_expiry_action_t);
+extern errno_t kern_packet_get_expiry_action(const kern_packet_t, packet_expiry_action_t *);
+extern errno_t kern_packet_check_for_expiry_and_notify(const kern_packet_t ph, ifnet_t ifp,
+    uint16_t origin, uint16_t status);
 
 /*
  * Quantum & Packets.
@@ -804,28 +827,17 @@ extern errno_t kern_packet_copy_bytes(const kern_packet_t, size_t, size_t,
  */
 extern errno_t kern_buflet_set_data_address(const kern_buflet_t, const void *);
 extern void *kern_buflet_get_data_address(const kern_buflet_t);
-extern errno_t kern_buflet_set_data_offset(const kern_buflet_t, const uint16_t);
-extern uint16_t kern_buflet_get_data_offset(const kern_buflet_t);
-extern errno_t kern_buflet_set_data_length(const kern_buflet_t, const uint16_t);
-extern uint16_t kern_buflet_get_data_length(const kern_buflet_t);
+extern errno_t kern_buflet_set_data_offset(const kern_buflet_t, const uint32_t);
+extern uint32_t kern_buflet_get_data_offset(const kern_buflet_t);
+extern errno_t kern_buflet_set_data_length(const kern_buflet_t, const uint32_t);
+extern uint32_t kern_buflet_get_data_length(const kern_buflet_t);
 extern void *kern_buflet_get_object_address(const kern_buflet_t);
 extern uint32_t kern_buflet_get_object_limit(const kern_buflet_t);
 extern kern_segment_t kern_buflet_get_object_segment(const kern_buflet_t,
     kern_obj_idx_seg_t *);
-extern errno_t kern_buflet_set_data_limit(const kern_buflet_t, const uint16_t);
-extern uint16_t kern_buflet_get_data_limit(const kern_buflet_t);
-extern errno_t kern_buflet_set_buffer_offset(const kern_buflet_t buf,
-    const uint16_t off);
-extern uint16_t kern_buflet_get_buffer_offset(const kern_buflet_t buf);
-extern errno_t kern_buflet_set_gro_len(const kern_buflet_t buf,
-    const uint16_t len);
-extern uint16_t kern_buflet_get_gro_len(const kern_buflet_t buf);
-extern void *kern_buflet_get_next_buf(const kern_buflet_t buflet,
-    const void *prev_buf);
-extern errno_t kern_buflet_clone(const kern_buflet_t buf1,
-    kern_buflet_t *pbuf_array, uint32_t *size, struct kern_pbufpool *pool);
-extern errno_t kern_buflet_clone_nosleep(const kern_buflet_t buf1,
-    kern_buflet_t *pbuf_array, uint32_t *size, struct kern_pbufpool *pool);
+extern errno_t kern_buflet_set_data_limit(const kern_buflet_t, const uint32_t);
+extern uint32_t kern_buflet_get_data_limit(const kern_buflet_t);
+extern errno_t kern_buflet_set_buffer_offset(const kern_buflet_t, const uint32_t);
 
 /*
  * Packet buffer pool.
@@ -864,15 +876,9 @@ extern errno_t kern_pbufpool_alloc_buffer_nosleep(const kern_pbufpool_t
 extern void kern_pbufpool_free_buffer(const kern_pbufpool_t pbufpool,
     mach_vm_address_t baddr);
 extern errno_t kern_pbufpool_alloc_buflet(const kern_pbufpool_t,
-    kern_buflet_t *, bool);
+    kern_buflet_t *);
 extern errno_t kern_pbufpool_alloc_buflet_nosleep(const kern_pbufpool_t,
-    kern_buflet_t *, bool);
-extern errno_t kern_pbufpool_alloc_batch_buflet(const kern_pbufpool_t,
-    kern_buflet_t *, uint32_t *size, bool);
-extern errno_t kern_pbufpool_alloc_batch_buflet_nosleep(const kern_pbufpool_t,
-    kern_buflet_t *, uint32_t *size, bool);
-extern void kern_pbufpool_free_buflet(const kern_pbufpool_t pp,
-    kern_buflet_t pbuf);
+    kern_buflet_t *);
 extern void kern_pbufpool_destroy(kern_pbufpool_t);
 extern kern_segment_idx_t kern_segment_get_index(const kern_segment_t);
 __END_DECLS

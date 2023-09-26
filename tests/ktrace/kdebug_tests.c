@@ -1378,6 +1378,12 @@ set_nevents(unsigned int nevents)
 	return nevents_allocated;
 }
 
+static unsigned int
+_mb_of_events(unsigned int event_count)
+{
+	return (unsigned int)(((uint64_t)event_count * 64) >> 20);
+}
+
 T_DECL(set_buffer_size, "ensure large buffer sizes can be set",
 		XNU_T_META_SOC_SPECIFIC)
 {
@@ -1395,27 +1401,28 @@ T_DECL(set_buffer_size, "ensure large buffer sizes can be set",
 
 	start_controlling_ktrace();
 
-	/*
-	 * Try to allocate up to one-eighth of available memory towards
-	 * tracing.
-	 */
+	// Try to allocate up to one-eighth of available memory towards
+	// tracing.
 	uint64_t maxevents_u64 = memsize / 8 / sizeof(kd_buf);
 	if (maxevents_u64 > UINT32_MAX) {
 		maxevents_u64 = UINT32_MAX;
 	}
 	unsigned int maxevents = (unsigned int)maxevents_u64;
 
+	// Use hexadecimal representation to prevent failure signaturization on these values.
 	unsigned int minevents = set_nevents(0);
-	T_ASSERT_GT(minevents, 0, "saw non-zero minimum event count of %u",
+	T_ASSERT_GT(minevents, 0, "saw non-zero minimum event count of %#x",
 	    minevents);
 
 	unsigned int step = ((maxevents - minevents - 1) / 4);
-	T_ASSERT_GT(step, 0, "stepping by %u events", step);
+	T_ASSERT_GT(step, 0, "stepping by %#x events (%#x MiB)", step,
+	    _mb_of_events(step));
 
 	for (unsigned int i = minevents + step; i < maxevents; i += step) {
 		unsigned int actualevents = set_nevents(i);
 		T_ASSERT_GE(actualevents, i - minevents,
-		    "%u events in kernel when %u requested", actualevents, i);
+		    "%#x events (%#x MiB) in kernel when %#x (%#x MiB) requested",
+		    actualevents, _mb_of_events(actualevents), i, _mb_of_events(i));
 	}
 }
 

@@ -475,15 +475,6 @@ __nexus_set_opt(struct proc *p, struct __nexus_set_opt_args *uap, int *retval)
 	struct sockopt sopt;
 	int err = 0;
 
-	AUDIT_ARG(fd, uap->ctl);
-
-	err = fp_get_ftype(p, uap->ctl, DTYPE_NEXUS, ENODEV, &fp);
-	if (__improbable(err != 0)) {
-		SK_DSC(p, "fp_get_ftype: %d", err);
-		return err;
-	}
-	nxctl = (struct nxctl *)fp_get_data(fp);
-
 	bzero(&sopt, sizeof(sopt));
 	sopt.sopt_dir = SOPT_SET;
 	sopt.sopt_name = uap->opt;
@@ -491,11 +482,28 @@ __nexus_set_opt(struct proc *p, struct __nexus_set_opt_args *uap, int *retval)
 	sopt.sopt_valsize = uap->optlen;
 	sopt.sopt_p = p;
 
-	lck_mtx_lock(&nxctl->nxctl_lock);
-	err = nxctl_set_opt(nxctl, &sopt);
-	lck_mtx_unlock(&nxctl->nxctl_lock);
+	if (uap->ctl != __OS_NEXUS_SHARED_USER_CONTROLLER_FD) {
+		AUDIT_ARG(fd, uap->ctl);
 
-	fp_drop(p, uap->ctl, fp, 0);
+		err = fp_get_ftype(p, uap->ctl, DTYPE_NEXUS, ENODEV, &fp);
+		if (__improbable(err != 0)) {
+			SK_DSC(p, "fp_get_ftype: %d", err);
+			return err;
+		}
+		nxctl = (struct nxctl *)fp_get_data(fp);
 
+		lck_mtx_lock(&nxctl->nxctl_lock);
+		err = nxctl_set_opt(nxctl, &sopt);
+		lck_mtx_unlock(&nxctl->nxctl_lock);
+
+		fp_drop(p, uap->ctl, fp, 0);
+	} else {
+		/* opt that don't have nxctl uses shared user nxctl */
+		nxctl = usernxctl.ncd_nxctl;
+
+		lck_mtx_lock(&nxctl->nxctl_lock);
+		err = nxctl_set_opt(nxctl, &sopt);
+		lck_mtx_unlock(&nxctl->nxctl_lock);
+	}
 	return err;
 }

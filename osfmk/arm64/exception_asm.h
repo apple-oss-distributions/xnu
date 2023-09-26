@@ -186,7 +186,6 @@ Lsave_neon_state_done_\@:
 
 #if defined(HAS_APPLE_PAC)
 	.if \mode != HIBERNATE_MODE
-
 	/* Save x1 and LR to preserve across call */
 	mov		x21, x1
 	mov		x20, lr
@@ -230,17 +229,14 @@ Lsave_neon_state_done_\@:
 	b	.
 .endmacro
 
-// SP0 is expected to already be selected
-.macro SWITCH_TO_KERN_STACK
-	ldr		x1, [x1, TH_KSTACKPTR]	// Load the top of the kernel stack to x1
-	mov		sp, x1			// Set the stack pointer to the kernel stack
-.endmacro
-
-// SP0 is expected to already be selected
-.macro SWITCH_TO_INT_STACK
+/**
+ * Reloads SP with the current thread's interrupt stack.
+ *
+ * SP0 is expected to already be selected.  Clobbers x1 and tmp.
+ */
+.macro SWITCH_TO_INT_STACK	tmp
 	mrs		x1, TPIDR_EL1
-	ldr		x1, [x1, ACT_CPUDATAP]
-	ldr		x1, [x1, CPU_ISTACKPTR]
+	LOAD_INT_STACK	dst=x1, src=x1, tmp=\tmp
 	mov		sp, x1			// Set the stack pointer to the interrupt stack
 .endmacro
 

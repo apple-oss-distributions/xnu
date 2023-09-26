@@ -36,6 +36,8 @@
 #include <mach/mach_types.h>
 #include <mach/mach_vm.h>
 
+extern uint64_t vm_reclaim_max_threshold;
+
 typedef struct vm_deferred_reclamation_metadata_s *vm_deferred_reclamation_metadata_t;
 
 kern_return_t vm_deferred_reclamation_buffer_init_internal(task_t task, user_addr_t address, mach_vm_size_t size, user_addr_t indices);
@@ -47,6 +49,13 @@ kern_return_t vm_deferred_reclamation_buffer_init_internal(task_t task, user_add
  * anyways.
  */
 void vm_deferred_reclamation_buffer_deallocate(vm_deferred_reclamation_metadata_t metadata);
+
+/*
+ * Uninstall the the kernel metadata associated with this reclamation buffer from all global queues. This
+ * is called during task termination to ensure no kernel thread may start trying to reclaim from a task
+ * that is about to exit
+ */
+void vm_deferred_reclamation_buffer_uninstall(vm_deferred_reclamation_metadata_t metadata);
 
 kern_return_t vm_deferred_reclamation_buffer_synchronize_internal(task_t task, size_t max_entries_to_reclaim);
 

@@ -80,7 +80,6 @@
 #include <kern/clock.h>
 #include <kern/coalition.h>
 #include <kern/cpu_number.h>
-#include <kern/cpu_quiesce.h>
 #include <kern/ledger.h>
 #include <kern/machine.h>
 #include <kern/processor.h>
@@ -130,6 +129,10 @@
 #include <ipc/ipc_voucher.h>
 #include <mach/host_info.h>
 #include <pthread/workqueue_internal.h>
+
+#if SOCKETS
+extern void mbuf_tag_init(void);
+#endif
 
 #if CONFIG_XNUPOST
 #include <tests/ktest.h>
@@ -755,6 +758,13 @@ kernel_bootstrap_thread(void)
 	kernel_bootstrap_log("OSKextRemoveKextBootstrap");
 	OSKextRemoveKextBootstrap();
 
+#if SOCKETS
+	/*
+	 * Initialize callback table before machine lockdown
+	 */
+	mbuf_tag_init();
+#endif
+
 	/* No changes to kernel text and rodata beyond this point. */
 	kernel_bootstrap_log("machine_lockdown");
 	machine_lockdown();
@@ -945,7 +955,7 @@ load_context(
 	recount_processor_run(&processor->pr_recount, &snap);
 	recount_update_snap(&snap);
 
-	cpu_quiescent_counter_join(processor->last_dispatch);
+	smr_cpu_join(processor, processor->last_dispatch);
 
 	PMAP_ACTIVATE_USER(thread, processor->cpu_id);
 

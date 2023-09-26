@@ -64,8 +64,9 @@ nx_netif_host_adjust_if_capabilities(struct nexus_adapter *na, bool activate)
 		 * Re-enable the capabilities which Skywalk layer provides:
 		 *
 		 * Native driver: a copy from packet to mbuf always occurs
-		 * for each inbound and outbound packet; we leverage combined
-		 * and copy checksum, and thus advertise the capabilities.
+		 * for each inbound and outbound packet; if hardware
+		 * does not support csum offload, we leverage combined
+		 * copy and checksum, and thus advertise IFNET_CSUM_PARTIAL.
 		 * We also always enable 16KB jumbo mbuf support.
 		 *
 		 * Compat driver: inbound and outbound mbufs don't incur a
@@ -73,12 +74,25 @@ nx_netif_host_adjust_if_capabilities(struct nexus_adapter *na, bool activate)
 		 */
 		if (NA_KERNEL_ONLY(na)) {
 			if (na->na_type == NA_NETIF_HOST) {     /* native */
-				ifp->if_hwassist |= (IFNET_CSUM_TCP |
-				    IFNET_CSUM_UDP | IFNET_CSUM_TCPIPV6 |
-				    IFNET_CSUM_UDPIPV6 | IFNET_CSUM_PARTIAL |
-				    IFNET_CSUM_ZERO_INVERT | IFNET_MULTIPAGES);
-				ifp->if_capabilities |= SK_IFCAP_CSUM;
-				ifp->if_capenable |= SK_IFCAP_CSUM;
+				ifp->if_hwassist |=
+				    IFNET_MULTIPAGES | (nif->nif_hwassist &
+				    (IFNET_CHECKSUMF | IFNET_TSOF));
+				ifp->if_capabilities |=
+				    (nif->nif_capabilities &
+				    (SK_IFCAP_CSUM | IFCAP_TSO));
+				ifp->if_capenable |=
+				    (nif->nif_capenable &
+				    (SK_IFCAP_CSUM | IFCAP_TSO));
+				/*
+				 * If hardware doesn't support IP and TCP/UDP csum offload,
+				 * advertise IFNET_CSUM_PARTIAL.
+				 */
+				if ((ifp->if_hwassist & IFNET_UDP_TCP_TX_CHECKSUMF) !=
+				    IFNET_UDP_TCP_TX_CHECKSUMF) {
+					ifp->if_hwassist |= IFNET_CSUM_PARTIAL | IFNET_CSUM_ZERO_INVERT;
+					ifp->if_capabilities |= IFCAP_CSUM_PARTIAL | IFCAP_CSUM_ZERO_INVERT;
+					ifp->if_capenable |= IFCAP_CSUM_PARTIAL | IFCAP_CSUM_ZERO_INVERT;
+				}
 				if (sk_fsw_tx_agg_tcp != 0) {
 					ifp->if_hwassist |= IFNET_TSOF;
 					ifp->if_capabilities |= IFCAP_TSO;
@@ -177,7 +191,7 @@ nx_netif_host_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		 */
 		nx_netif_host_catch_tx(na, true);
 
-		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_or(&na->na_flags, NAF_ACTIVE, relaxed);
 		break;
 
 	case NA_ACTIVATE_MODE_DEFUNCT:
@@ -192,7 +206,7 @@ nx_netif_host_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		 * Note that here we cannot assert SKYWALK_CAPABLE()
 		 * as we're called in the destructor path.
 		 */
-		atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_andnot(&na->na_flags, NAF_ACTIVE, relaxed);
 
 		nx_netif_host_adjust_if_capabilities(na, false);
 		break;

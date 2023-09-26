@@ -67,6 +67,7 @@
 #include <sys/appleapiopts.h>
 #include <sys/cdefs.h>
 #include <stdint.h>
+#include <uuid/uuid.h>
 
 /*
  * Arguments to reboot system call.
@@ -92,6 +93,11 @@
 
 #ifndef KERNEL
 __BEGIN_DECLS
+enum panic_with_data_flags {
+	PANIC_WITH_DATA_FLAGS_NONE = 0,
+	PANIC_WITH_DATA_FLAGS_MAX,
+};
+
 /* userspace reboot control */
 int usrctl(uint32_t flags);
 /* The normal reboot syscall. */
@@ -99,6 +105,11 @@ int reboot(int howto);
 /* Used with RB_PANIC to panic the kernel from userspace with a message.
  * Requires an entitlement on Release. */
 int reboot_np(int howto, const char *message);
+
+/* Used to panic the kernel from user space and add additional data to
+ * the paniclog.
+ */
+int panic_with_data(uuid_t uuid, void *addr, uint32_t len, uint32_t flags, const char *msg);
 __END_DECLS
 #endif
 

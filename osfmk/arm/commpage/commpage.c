@@ -49,10 +49,12 @@
 #include <vm/vm_protos.h>
 #include <ipc/ipc_port.h>
 #include <arm/cpuid.h>          /* for cpuid_info() & cache_info() */
+#include <arm/misc_protos.h>
 #include <arm/rtclock.h>
 #include <libkern/OSAtomic.h>
 #include <stdatomic.h>
 #include <kern/remote_time.h>
+#include <kern/smr.h>
 #include <machine/atomic.h>
 #include <machine/machine_remote_time.h>
 #include <machine/machine_routines.h>
@@ -160,7 +162,7 @@ commpage_populate(void)
 
 	commpage_update_active_cpus();
 	cpufamily = cpuid_get_cpufamily();
-
+	*((uint8_t*)(_COMM_PAGE_CPU_CLUSTERS + _COMM_PAGE_RW_OFFSET)) = (uint8_t) ml_get_cluster_count();
 	*((uint8_t*)(_COMM_PAGE_PHYSICAL_CPUS + _COMM_PAGE_RW_OFFSET)) = (uint8_t) machine_info.physical_cpu_max;
 	*((uint8_t*)(_COMM_PAGE_LOGICAL_CPUS + _COMM_PAGE_RW_OFFSET)) = (uint8_t) machine_info.logical_cpu_max;
 	*((uint64_t*)(_COMM_PAGE_MEMORY_SIZE + _COMM_PAGE_RW_OFFSET)) = machine_info.max_mem;
@@ -168,6 +170,10 @@ commpage_populate(void)
 	*((uint32_t*)(_COMM_PAGE_DEV_FIRM_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint32_t)PE_i_can_has_debugger(NULL);
 	*((uint32_t*)(_COMM_PAGE_DEV_FIRM + _COMM_PAGE_RO_OFFSET)) = (uint32_t)PE_i_can_has_debugger(NULL);
 	*((uint8_t*)(_COMM_PAGE_USER_TIMEBASE + _COMM_PAGE_RW_OFFSET)) = user_timebase_type();
+
+	// Populate logical CPU -> logical cluster table
+	ml_map_cpus_to_clusters((uint8_t*)(_COMM_PAGE_CPU_TO_CLUSTER + _COMM_PAGE_RW_OFFSET));
+
 	*((uint8_t*)(_COMM_PAGE_CONT_HWCLOCK + _COMM_PAGE_RW_OFFSET)) = (uint8_t)user_cont_hwclock_allowed();
 	*((uint8_t*)(_COMM_PAGE_KERNEL_PAGE_SHIFT_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) page_shift;
 	*((uint8_t*)(_COMM_PAGE_KERNEL_PAGE_SHIFT + _COMM_PAGE_RO_OFFSET)) = (uint8_t) page_shift;
@@ -206,6 +212,11 @@ commpage_populate(void)
 
 
 	*((uint64_t*)(_COMM_PAGE_REMOTETIME_PARAMS + _COMM_PAGE_RW_OFFSET)) = BT_RESET_SENTINEL_TS;
+
+#if CONFIG_QUIESCE_COUNTER
+	cpu_quiescent_set_storage((_Atomic uint64_t *)(_COMM_PAGE_CPU_QUIESCENT_COUNTER +
+	    _COMM_PAGE_RW_OFFSET));
+#endif /* CONFIG_QUIESCE_COUNTER */
 }
 
 #define COMMPAGE_TEXT_SEGMENT "__TEXT_EXEC"
@@ -571,7 +582,7 @@ commpage_init_arm_optional_features_pfr0(uint64_t *commpage_bits)
  * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64PFR1_EL1
  */
 static void
-commpage_init_arm_optional_features_pfr1(uint64_t *commpage_bits __unused)
+commpage_init_arm_optional_features_pfr1(uint64_t *commpage_bits)
 {
 	uint64_t pfr1 = __builtin_arm_rsr64("ID_AA64PFR1_EL1");
 
@@ -582,6 +593,8 @@ commpage_init_arm_optional_features_pfr1(uint64_t *commpage_bits __unused)
 	if ((pfr1 & ID_AA64PFR1_EL1_BT_MASK) >= ID_AA64PFR1_EL1_BT_EN) {
 		gARM_FEAT_BTI = 1;
 	}
+
+#pragma unused(commpage_bits)
 }
 
 
@@ -857,44 +870,6 @@ commpage_set_remotetime_params(double rate, uint64_t base_local_ts, uint64_t bas
 	}
 }
 
-
-/*
- * After this counter has incremented, all running CPUs are guaranteed to
- * have quiesced, i.e. executed serially dependent memory barriers.
- * This is only tracked for CPUs running in userspace, therefore only useful
- * outside the kernel.
- *
- * Note that you can't know which side of those barriers your read was from,
- * so you have to observe 2 increments in order to ensure that you saw a
- * serially dependent barrier chain across all running CPUs.
- */
-uint64_t
-commpage_increment_cpu_quiescent_counter(void)
-{
-	if (!commPagePtr) {
-		return 0;
-	}
-
-	uint64_t old_gen;
-
-	_Atomic uint64_t *sched_gen = (_Atomic uint64_t *)(_COMM_PAGE_CPU_QUIESCENT_COUNTER +
-	    _COMM_PAGE_RW_OFFSET);
-	/*
-	 * On 32bit architectures, double-wide atomic load or stores are a CAS,
-	 * so the atomic increment is the most efficient way to increment the
-	 * counter.
-	 *
-	 * On 64bit architectures however, because the update is synchronized by
-	 * the cpu mask, relaxed loads and stores is more efficient.
-	 */
-#if __LP64__
-	old_gen = os_atomic_load(sched_gen, relaxed);
-	os_atomic_store(sched_gen, old_gen + 1, relaxed);
-#else
-	old_gen = atomic_fetch_add_explicit(sched_gen, 1, memory_order_relaxed);
-#endif
-	return old_gen;
-}
 
 /*
  * update the commpage with if dtrace user land probes are enabled

@@ -388,6 +388,9 @@ ptmx_get_ioctl(int minor, int open_flag)
 	DEVFS_LOCK();
 	if (minor >= 0 && minor < _state.pis_total) {
 		ptmx_ioctl = _state.pis_ioctl_list[minor];
+		if (ptmx_ioctl && (open_flag & PF_OPEN_S)) {
+			ptmx_ioctl->pt_flags |= PF_OPEN_S;
+		}
 	}
 	DEVFS_UNLOCK();
 
@@ -533,15 +536,17 @@ SECURITY_READ_ONLY_EARLY(struct filterops) ptsd_kqops = {
 static void
 ptsd_kqops_detach(struct knote *kn)
 {
-	struct tty *tp = kn->kn_hook;
-
+	struct tty *tp = knote_kn_hook_get_raw(kn);
 	tty_lock(tp);
 
-	/*
-	 * Only detach knotes from open ttys -- ttyclose detaches all knotes
-	 * under the lock and unsets TS_ISOPEN.
-	 */
-	if (tp->t_state & TS_ISOPEN) {
+	if (!KNOTE_IS_AUTODETACHED(kn)) {
+		/*
+		 * If we got here, it must be due to the fact that we are referencing an open
+		 * tty - ttyclose always autodetaches knotes under the tty lock and marks
+		 * the state as closed
+		 */
+		assert(tp->t_state & TS_ISOPEN);
+
 		switch (kn->kn_filter) {
 		case EVFILT_READ:
 			KNOTE_DETACH(&tp->t_rsel.si_note, kn);
@@ -554,6 +559,8 @@ ptsd_kqops_detach(struct knote *kn)
 			break;
 		}
 	}
+
+	knote_kn_hook_set_raw(kn, NULL);
 
 	tty_unlock(tp);
 	ttyfree(tp);
@@ -606,7 +613,7 @@ ptsd_kqops_common(struct knote *kn, struct kevent_qos_s *kev, struct tty *tp)
 static int
 ptsd_kqops_event(struct knote *kn, long hint)
 {
-	struct tty *tp = kn->kn_hook;
+	struct tty *tp = knote_kn_hook_get_raw(kn);
 	int ret;
 
 	TTY_LOCK_OWNED(tp);
@@ -624,7 +631,7 @@ ptsd_kqops_event(struct knote *kn, long hint)
 static int
 ptsd_kqops_touch(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct tty *tp = kn->kn_hook;
+	struct tty *tp = knote_kn_hook_get_raw(kn);
 	int ret;
 
 	tty_lock(tp);
@@ -644,7 +651,7 @@ ptsd_kqops_touch(struct knote *kn, struct kevent_qos_s *kev)
 static int
 ptsd_kqops_process(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct tty *tp = kn->kn_hook;
+	struct tty *tp = knote_kn_hook_get_raw(kn);
 	int ret;
 
 	tty_lock(tp);
@@ -680,7 +687,7 @@ ptsd_kqfilter(dev_t dev, struct knote *kn)
 	kn->kn_filtid = EVFILTID_PTSD;
 	/* the tty will be freed when detaching the knote */
 	ttyhold(tp);
-	kn->kn_hook = tp;
+	knote_kn_hook_set_raw(kn, tp);
 
 	switch (kn->kn_filter) {
 	case EVFILT_READ:
@@ -713,11 +720,11 @@ ptsd_revoke_knotes(__unused int minor, struct tty *tp)
 
 	ttwakeup(tp);
 	assert((tp->t_rsel.si_flags & SI_KNPOSTING) == 0);
-	KNOTE(&tp->t_rsel.si_note, NOTE_REVOKE);
+	knote(&tp->t_rsel.si_note, NOTE_REVOKE, true);
 
 	ttwwakeup(tp);
 	assert((tp->t_wsel.si_flags & SI_KNPOSTING) == 0);
-	KNOTE(&tp->t_wsel.si_note, NOTE_REVOKE);
+	knote(&tp->t_wsel.si_note, NOTE_REVOKE, true);
 
 	tty_unlock(tp);
 }
@@ -749,7 +756,7 @@ SECURITY_READ_ONLY_EARLY(struct filterops) ptmx_kqops = {
 static struct ptmx_ioctl *
 ptmx_knote_ioctl(struct knote *kn)
 {
-	return (struct ptmx_ioctl *)kn->kn_hook;
+	return (struct ptmx_ioctl *)knote_kn_hook_get_raw(kn);
 }
 
 static struct tty *
@@ -782,7 +789,7 @@ ptmx_kqfilter(dev_t dev, struct knote *kn)
 	kn->kn_filtid = EVFILTID_PTMX;
 	/* the tty will be freed when detaching the knote */
 	ttyhold(tp);
-	kn->kn_hook = pti;
+	knote_kn_hook_set_raw(kn, pti);
 
 	/*
 	 * Attach to the ptmx's selinfo structures.  This is the major difference
@@ -813,22 +820,26 @@ ptmx_kqfilter(dev_t dev, struct knote *kn)
 static void
 ptmx_kqops_detach(struct knote *kn)
 {
-	struct ptmx_ioctl *pti = kn->kn_hook;
+	struct ptmx_ioctl *pti = knote_kn_hook_get_raw(kn);
 	struct tty *tp = pti->pt_tty;
 
 	tty_lock(tp);
 
-	switch (kn->kn_filter) {
-	case EVFILT_READ:
-		KNOTE_DETACH(&pti->pt_selr.si_note, kn);
-		break;
-	case EVFILT_WRITE:
-		KNOTE_DETACH(&pti->pt_selw.si_note, kn);
-		break;
-	default:
-		panic("invalid knote %p detach, filter: %d", kn, kn->kn_filter);
-		break;
+	if (!KNOTE_IS_AUTODETACHED(kn)) {
+		switch (kn->kn_filter) {
+		case EVFILT_READ:
+			KNOTE_DETACH(&pti->pt_selr.si_note, kn);
+			break;
+		case EVFILT_WRITE:
+			KNOTE_DETACH(&pti->pt_selw.si_note, kn);
+			break;
+		default:
+			panic("invalid knote %p detach, filter: %d", kn, kn->kn_filter);
+			break;
+		}
 	}
+
+	knote_kn_hook_set_raw(kn, NULL);
 
 	tty_unlock(tp);
 	ttyfree(tp);

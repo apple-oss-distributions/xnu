@@ -276,6 +276,8 @@ struct cfil_msg_sock_closed {
 	unsigned char           cfc_op_list[CFI_MAX_TIME_LOG_ENTRY];
 	uint64_t                cfc_byte_inbound_count;
 	uint64_t                cfc_byte_outbound_count;
+#define CFC_CLOSED_EVENT_LADDR 1
+	union sockaddr_in_4_6   cfc_laddr;
 	cfil_crypto_signature   cfc_signature;
 	uint32_t                cfc_signature_length;
 } __attribute__((aligned(8)));
@@ -518,10 +520,14 @@ do { \
 } while (0)
 
 
+extern void cfil_register_m_tag(void);
+
 extern void cfil_init(void);
 
 extern boolean_t cfil_filter_present(void);
 extern boolean_t cfil_sock_connected_pending_verdict(struct socket *so);
+extern boolean_t cfil_sock_is_dead(struct socket *so);
+extern boolean_t cfil_sock_tcp_add_time_wait(struct socket *so);
 extern errno_t cfil_sock_attach(struct socket *so,
     struct sockaddr *local, struct sockaddr *remote, int dir);
 extern errno_t cfil_sock_detach(struct socket *so);

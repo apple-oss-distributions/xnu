@@ -160,10 +160,16 @@ kernel_trap(mach_voucher_extract_attr_recipe_trap,-72,4)
 kernel_trap(_kernelrpc_mach_port_type_trap,-76,3)
 kernel_trap(_kernelrpc_mach_port_request_notification_trap,-77,7)
 
+#if defined(__LP64__)
+kernel_trap(_exclaves_ctl_trap,-88,5)
+#else	/* __LP64__ */
+kernel_trap(_exclaves_ctl_trap,-88,8)
+#endif	/* __LP64__ */
+
 kernel_trap(mach_timebase_info_trap,-89,1)
 
 #if		defined(__LP64__)
-/* unit64_t arguments passed in one register in LP64 */
+/* uint64_t arguments passed in one register in LP64 */
 kernel_trap(mach_wait_until,-90,1)
 #else	/* __LP64__ */
 kernel_trap(mach_wait_until,-90,2)
@@ -173,7 +179,7 @@ kernel_trap(mk_timer_create,-91,0)
 kernel_trap(mk_timer_destroy,-92,1)
 
 #if		defined(__LP64__)
-/* unit64_t arguments passed in one register in LP64 */
+/* uint64_t arguments passed in one register in LP64 */
 kernel_trap(mk_timer_arm,-93,2)
 #else	/* __LP64__ */
 kernel_trap(mk_timer_arm,-93,3)

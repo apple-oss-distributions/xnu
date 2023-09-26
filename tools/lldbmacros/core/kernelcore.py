@@ -461,13 +461,16 @@ class KernelTarget(object):
         T1Sz = self.GetGlobalVariable('gT1Sz')
         return StripPAC(addr, T1Sz)
 
+    PAGE_PROTECTION_TYPE_NONE = 0
+    PAGE_PROTECTION_TYPE_PPL = 1
+
     def PhysToKVARM64(self, addr):
-        try:
+        if self.globals.page_protection_type <= self.PAGE_PROTECTION_TYPE_PPL:
             ptov_table = self.globals.ptov_table
             for i in range(0, self.globals.ptov_index):
                 if (addr >= int(unsigned(ptov_table[i].pa))) and (addr < (int(unsigned(ptov_table[i].pa)) + int(unsigned(ptov_table[i].len)))):
                     return (addr - int(unsigned(ptov_table[i].pa)) + int(unsigned(ptov_table[i].va)))
-        except Exception as exc:
+        else:
             raise ValueError("PA {:#x} not found in physical region lookup table".format(addr))
         return (addr - unsigned(self.globals.gPhysBase) + unsigned(self.globals.gVirtBase))
 

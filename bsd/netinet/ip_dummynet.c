@@ -231,6 +231,9 @@ static char *cp_pipe_to_32_user(struct dn_pipe *p, struct dn_pipe_32 *pipe_bp);
 static char* dn_copy_set_32(struct dn_flow_set *set, char *bp);
 static int cp_pipe_from_user_32( struct sockopt *sopt, struct dn_pipe *p );
 
+static struct m_tag * m_tag_kalloc_dummynet(u_int32_t id, u_int16_t type, uint16_t len, int wait);
+static void m_tag_kfree_dummynet(struct m_tag *tag);
+
 struct eventhandler_lists_ctxt dummynet_evhdlr_ctxt;
 
 uint32_t
@@ -711,7 +714,7 @@ dn_tag_get(struct mbuf *m)
 		    (uint64_t)VM_KERNEL_ADDRPERM(m));
 	}
 
-	return (struct dn_pkt_tag *)(mtag + 1);
+	return (struct dn_pkt_tag *)(mtag->m_tag_data);
 }
 
 /*
@@ -1604,7 +1607,7 @@ dummynet_io(struct mbuf *m, int pipe_nr, int dir, struct ip_fw_args *fwa)
 	}
 	m_tag_prepend(m, mtag); /* attach to mbuf chain */
 
-	pkt = (struct dn_pkt_tag *)(mtag + 1);
+	pkt = (struct dn_pkt_tag *)(mtag->m_tag_data);
 	bzero(pkt, sizeof(struct dn_pkt_tag));
 	/* ok, i can handle the pkt now... */
 	/* build and enqueue packet + parameters */
@@ -1779,9 +1782,9 @@ dropit:
  * Doing this would probably save us the initial bzero of dn_pkt
  */
 #define DN_FREE_PKT(_m) do {                                    \
-	struct m_tag *tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_DUMMYNET, NULL); \
+	struct m_tag *tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_DUMMYNET); \
 	if (tag) {                                              \
-	        struct dn_pkt_tag *n = (struct dn_pkt_tag *)(tag+1);    \
+	        struct dn_pkt_tag *n = (struct dn_pkt_tag *)(tag->m_tag_data);    \
 	        ROUTE_RELEASE(&n->dn_ro);                       \
 	}                                                       \
 	m_tag_delete(_m, tag);                                  \
@@ -2608,4 +2611,66 @@ dummynet_event_enqueue_nwk_wq_entry(struct dummynet_event *p_dn_event)
 	p_ev->nwk_wqe.func = dummynet_event_callback;
 	p_ev->dn_ev_arg = *p_dn_event;
 	nwk_wq_enqueue(&p_ev->nwk_wqe);
+}
+
+struct dummynet_tag_container {
+	struct m_tag            dtc_m_tag;
+	struct dn_pkt_tag       dtc_dn_pkt_tag;
+};
+
+struct m_tag *
+m_tag_kalloc_dummynet(u_int32_t id, u_int16_t type, uint16_t len, int wait)
+{
+	struct dummynet_tag_container *tag_container;
+	struct m_tag *tag = NULL;
+	zalloc_flags_t flags = M_ZERO;
+
+	assert3u(id, ==, KERNEL_MODULE_TAG_ID);
+	assert3u(type, ==, KERNEL_TAG_TYPE_DUMMYNET);
+	assert3u(len, ==, sizeof(struct dn_pkt_tag));
+
+	if (len != sizeof(struct dn_pkt_tag)) {
+		return NULL;
+	}
+
+	/*
+	 * Using Z_NOWAIT could cause retransmission delays when there aren't
+	 * many other colocated types in the zone that would prime it. Use
+	 * Z_NOPAGEWAIT instead which will only fail to allocate when zalloc
+	 * needs to block on the VM for pages.
+	 */
+	if (wait == M_NOWAIT) {
+		flags |= Z_NOPAGEWAIT;
+	}
+	tag_container = kalloc_type(struct dummynet_tag_container, flags);
+	if (tag_container != NULL) {
+		tag =  &tag_container->dtc_m_tag;
+
+		assert3p(tag, ==, tag_container);
+
+		M_TAG_INIT(tag, id, type, len, &tag_container->dtc_dn_pkt_tag, NULL);
+	}
+
+	return tag;
+}
+
+void
+m_tag_kfree_dummynet(struct m_tag *tag)
+{
+	struct dummynet_tag_container *tag_container = (struct dummynet_tag_container *)tag;
+
+	assert3u(tag->m_tag_len, ==, sizeof(struct dn_pkt_tag));
+
+	kfree_type(struct dummynet_tag_container, tag_container);
+}
+
+void
+dummynet_register_m_tag(void)
+{
+	int error;
+
+	error = m_register_internal_tag_type(KERNEL_TAG_TYPE_DUMMYNET, sizeof(struct dn_pkt_tag),
+	    m_tag_kalloc_dummynet, m_tag_kfree_dummynet);
+
+	assert3u(error, ==, 0);
 }

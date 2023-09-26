@@ -77,7 +77,7 @@ flow_track_tcp_get_wscale(struct flow_track *s, struct __kern_packet *pkt)
 			if (wscale > TCP_MAX_WINSHIFT) {
 				wscale = TCP_MAX_WINSHIFT;
 			}
-			atomic_bitset_16(&s->fse_flags, FLOWSTATEF_WSCALE);
+			os_atomic_or(&s->fse_flags, FLOWSTATEF_WSCALE, relaxed);
 			OS_FALLTHROUGH;
 		default:
 			optlen = opt[1];
@@ -139,7 +139,7 @@ flow_track_tcp_init(struct flow_entry *fe, struct flow_track *src,
 		fe->fe_linger_wait = FLOWTRACK_LINGER_MAX;
 	}
 
-	atomic_bitset_32(&fe->fe_flags, FLOWENTF_INITED);
+	os_atomic_or(&fe->fe_flags, FLOWENTF_INITED, relaxed);
 }
 
 /*
@@ -408,7 +408,7 @@ flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
 		}
 		if (tcp_flags & TH_FIN) {
 			if (src->fse_state < TCPS_CLOSING) {
-				src->fse_seqlast = orig_seq;
+				src->fse_seqlast = orig_seq + pkt->pkt_flow_ulen;
 				src->fse_state = TCPS_CLOSING;
 			}
 		}
@@ -489,7 +489,7 @@ flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
 
 		if (tcp_flags & TH_FIN) {
 			if (src->fse_state < TCPS_CLOSING) {
-				src->fse_seqlast = orig_seq;
+				src->fse_seqlast = orig_seq + pkt->pkt_flow_ulen;
 				src->fse_state = TCPS_CLOSING;
 			}
 		}
@@ -508,7 +508,7 @@ flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
 
 done:
 	if (__improbable((ftflags & FTF_HALFCLOSED) != 0)) {
-		atomic_bitset_32(&fe->fe_flags, FLOWENTF_HALF_CLOSED);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_HALF_CLOSED, relaxed);
 		ftflags &= ~FTF_HALFCLOSED;
 	}
 
@@ -517,7 +517,7 @@ done:
 	 */
 	if (__improbable((ftflags & FTF_WAITCLOSE) != 0 &&
 	    (fe->fe_flags & FLOWENTF_WAIT_CLOSE) == 0)) {
-		atomic_bitset_32(&fe->fe_flags, FLOWENTF_WAIT_CLOSE);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_WAIT_CLOSE, relaxed);
 		ftflags &= ~FTF_WAITCLOSE;
 	}
 
@@ -526,7 +526,7 @@ done:
 	 */
 	if (__improbable((ftflags & FTF_CLOSENOTIFY) != 0 &&
 	    (fe->fe_flags & FLOWENTF_CLOSE_NOTIFY) == 0)) {
-		atomic_bitset_32(&fe->fe_flags, FLOWENTF_CLOSE_NOTIFY);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_CLOSE_NOTIFY, relaxed);
 		ftflags &= ~FTF_CLOSENOTIFY;
 	}
 
@@ -541,7 +541,7 @@ done:
 	if (__improbable((ftflags & FTF_WITHDRAWN) != 0)) {
 		ftflags &= ~FTF_WITHDRAWN;
 		if (fe->fe_flags & FLOWENTF_HALF_CLOSED) {
-			atomic_bitclear_32(&fe->fe_flags, FLOWENTF_HALF_CLOSED);
+			os_atomic_andnot(&fe->fe_flags, FLOWENTF_HALF_CLOSED, relaxed);
 		}
 		fe->fe_want_withdraw = 1;
 	}
@@ -591,7 +591,7 @@ flow_track_tcp_want_abort(struct flow_entry *fe)
 	    dst->fse_state == TCPS_ESTABLISHED) {
 		src->fse_state = dst->fse_state = TCPS_TIME_WAIT;
 		/* don't process more than once */
-		atomic_bitset_32(&fe->fe_flags, FLOWENTF_ABORTED);
+		os_atomic_or(&fe->fe_flags, FLOWENTF_ABORTED, relaxed);
 		return TRUE;
 	}
 done:
@@ -613,7 +613,7 @@ flow_track_udp_init(struct flow_entry *fe, struct flow_track *src,
 	 */
 	dst->fse_state = FT_STATE_NO_TRAFFIC;
 
-	atomic_bitset_32(&fe->fe_flags, FLOWENTF_INITED);
+	os_atomic_or(&fe->fe_flags, FLOWENTF_INITED, relaxed);
 }
 
 __attribute__((always_inline))

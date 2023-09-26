@@ -577,7 +577,12 @@ dtrace_getarg(int arg, int aframes, dtrace_mstate_t *mstate, dtrace_vstate_t *vs
 	int inreg = 7;
 
 	for (i = 1; i <= aframes; ++i) {
+#if __has_feature(ptrauth_frames)
+		fp = ptrauth_strip(fp->backchain, ptrauth_key_frame_pointer);
+#else
 		fp = fp->backchain;
+#endif
+
 #if __has_feature(ptrauth_returns)
 		pc = (uintptr_t)ptrauth_strip((void*)fp->retaddr, ptrauth_key_return_address);
 #else

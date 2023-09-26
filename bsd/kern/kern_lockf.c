@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -327,18 +327,15 @@ lf_advlock(struct vnop_advlock_args *ap)
 	switch (ap->a_op) {
 	case F_SETLK:
 		/*
-		 * For F_OFD_* locks, lf_id is the fileglob.
+		 * For OFD locks, lf_id is derived from the fileglob.
 		 * Record an "lf_owner" iff this is a confined fd
 		 * i.e. it cannot escape this process and will be
 		 * F_UNLCKed before the owner exits.  (This is
 		 * the implicit guarantee needed to ensure lf_owner
-		 * remains a valid reference here.)
+		 * remains a valid reference.)
 		 */
-		if (ap->a_flags & F_OFD_LOCK) {
-			struct fileglob *fg = (void *)lock->lf_id;
-			if (fg->fg_lflags & FG_CONFINED) {
-				lock->lf_owner = current_proc();
-			}
+		if ((ap->a_flags & F_OFD_LOCK) && (ap->a_flags & F_CONFINED)) {
+			lock->lf_owner = current_proc();
 		}
 		error = lf_setlock(lock, ap->a_timeout);
 		break;

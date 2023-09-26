@@ -126,6 +126,7 @@
 
 #include <libkern/OSDebug.h>
 #include <IOKit/IOBSD.h>
+#include <sys/kdebug_triage.h>
 
 #if     VM_CPM
 #include <vm/cpm.h>
@@ -293,13 +294,16 @@ mach_vm_allocate_kernel(
 	kern_return_t   result;
 	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 
-	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags, tag);
-
-	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_ALLOCATE)) {
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_ALLOCATE) {
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_ALLOCATE_KERNEL_BADFLAGS_ERROR), KERN_INVALID_ARGUMENT /* arg */);
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags, tag);
+
 	if (map == VM_MAP_NULL) {
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_ALLOCATE_KERNEL_BADMAP_ERROR), KERN_INVALID_ARGUMENT /* arg */);
 		return KERN_INVALID_ARGUMENT;
 	}
 	if (size == 0) {
@@ -315,6 +319,7 @@ mach_vm_allocate_kernel(
 	map_size = vm_map_round_page(size,
 	    VM_MAP_PAGE_MASK(map));
 	if (map_size == 0) {
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_ALLOCATE_KERNEL_BADSIZE_ERROR), KERN_INVALID_ARGUMENT /* arg */);
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -338,7 +343,9 @@ mach_vm_allocate_kernel(
 		kasan_notify_address(map_addr, map_size);
 	}
 #endif
-
+	if (result != KERN_SUCCESS) {
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_ALLOCATE_KERNEL_VMMAPENTER_ERROR), result /* arg */);
+	}
 	*addr = map_addr;
 	return result;
 }
@@ -360,11 +367,12 @@ vm_allocate_external(
 	vm_map_size_t   map_size;
 	kern_return_t   result;
 
-	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags);
-
-	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_ALLOCATE)) {
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_ALLOCATE) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags);
 
 	if (map == VM_MAP_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -1111,6 +1119,11 @@ mach_vm_map_external(
 {
 	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_MAP) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
 	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags);
 	/* range_id is set by mach_vm_map_kernel */
 	return mach_vm_map_kernel(target_map, address, initial_size, mask,
@@ -1236,12 +1249,13 @@ mach_vm_remap_new_external(
 	vm_map_t                src_map;
 	kern_return_t           kr;
 
-	vm_map_kernel_flags_set_vmflags(&vmk_flags,
-	    flags | VM_FLAGS_RETURN_DATA_ADDR);
-
-	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_REMAP)) {
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_REMAP) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	vm_map_kernel_flags_set_vmflags(&vmk_flags,
+	    flags | VM_FLAGS_RETURN_DATA_ADDR);
 
 	if (target_map == VM_MAP_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -1344,12 +1358,13 @@ mach_vm_remap_kernel_helper(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	vm_map_kernel_flags_set_vmflags(&vmk_flags,
-	    flags | VM_FLAGS_RETURN_DATA_ADDR, tag);
-
-	if (!vm_map_kernel_flags_check_vmflags(vmk_flags, VM_FLAGS_USER_REMAP)) {
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_REMAP) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	vm_map_kernel_flags_set_vmflags(&vmk_flags,
+	    flags | VM_FLAGS_RETURN_DATA_ADDR, tag);
 
 	static_assert(sizeof(mach_vm_offset_t) == sizeof(vm_map_address_t));
 
@@ -2597,6 +2612,7 @@ mach_make_memory_entry_internal(
 	vm_object_t             object;
 	vm_map_size_t           map_size;
 	vm_map_offset_t         map_start, map_end;
+	vm_map_offset_t         tmp;
 
 	/*
 	 * Stash the offset in the page for use by vm_map_enter_mem_object()
@@ -2624,7 +2640,6 @@ mach_make_memory_entry_internal(
 	}
 
 	parent_entry = mach_memory_entry_from_port(parent_handle);
-
 	if (parent_entry && parent_entry->is_copy) {
 		DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_INVALID_ARGUMENT);
 		return KERN_INVALID_ARGUMENT;
@@ -2632,6 +2647,10 @@ mach_make_memory_entry_internal(
 
 	if (target_map == NULL || target_map->pmap == kernel_pmap) {
 		offset = pgz_decode(offset, *size);
+	}
+
+	if (__improbable(vm_map_range_overflows(target_map, offset, *size))) {
+		return KERN_INVALID_ADDRESS;
 	}
 
 	original_protections = permission & VM_PROT_ALL;
@@ -2648,7 +2667,13 @@ mach_make_memory_entry_internal(
 	if (permission & MAP_MEM_ONLY) {
 		boolean_t               parent_is_object;
 
+		if (__improbable(os_add_overflow(offset, *size, &map_end))) {
+			return KERN_INVALID_ARGUMENT;
+		}
 		map_end = vm_map_round_page(offset + *size, VM_MAP_PAGE_MASK(target_map));
+		if (__improbable(map_end == 0 && *size != 0)) {
+			return KERN_INVALID_ARGUMENT;
+		}
 		map_size = map_end - map_start;
 
 		if (use_data_addr || use_4K_compat || parent_entry == NULL) {
@@ -2695,18 +2720,23 @@ mach_make_memory_entry_internal(
 		task_t  owner;
 		bool    fully_owned = false;
 
-		map_end = vm_map_round_page(offset + *size, VM_MAP_PAGE_MASK(target_map));
+		if (__improbable(os_add_overflow(offset, *size, &map_end))) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		map_end = vm_map_round_page(map_end, VM_MAP_PAGE_MASK(target_map));
 		map_size = map_end - map_start;
+		if (__improbable(map_size == 0)) {
+			*size = 0;
+			*object_handle = IPC_PORT_NULL;
+			return KERN_SUCCESS;
+		}
+		if (__improbable(map_end == 0)) {
+			return KERN_INVALID_ARGUMENT;
+		}
 
 		if (use_data_addr || use_4K_compat) {
 			DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_INVALID_ARGUMENT);
 			return KERN_INVALID_ARGUMENT;
-		}
-
-		if (map_size == 0) {
-			*size = 0;
-			*object_handle = IPC_PORT_NULL;
-			return KERN_SUCCESS;
 		}
 
 		/*
@@ -2854,10 +2884,16 @@ mach_make_memory_entry_internal(
 			return KERN_INVALID_TASK;
 		}
 
-		map_end = vm_map_round_page(offset + *size, VM_MAP_PAGE_MASK(target_map));
+		if (__improbable(os_add_overflow(offset, *size, &map_end))) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		map_end = vm_map_round_page(map_end, VM_MAP_PAGE_MASK(target_map));
 		map_size = map_end - map_start;
-		if (map_size == 0) {
+		if (__improbable(map_size == 0)) {
 			DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_INVALID_ARGUMENT);
+			return KERN_INVALID_ARGUMENT;
+		}
+		if (__improbable(map_end == 0)) {
 			return KERN_INVALID_ARGUMENT;
 		}
 
@@ -2925,7 +2961,20 @@ mach_make_memory_entry_internal(
 			return KERN_INVALID_TASK;
 		}
 
-		map_end = vm_map_round_page(offset + *size, VM_MAP_PAGE_MASK(target_map));
+		if (__improbable(os_add_overflow(offset, *size, &map_end))) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		map_end = vm_map_round_page(map_end, VM_MAP_PAGE_MASK(target_map));
+		map_size = map_end - map_start;
+		if (__improbable(map_size == 0)) {
+			DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_INVALID_ARGUMENT);
+			return KERN_INVALID_ARGUMENT;
+		}
+		if (__improbable(map_end == 0)) {
+			/* rounding overflow */
+			return KERN_INVALID_ARGUMENT;
+		}
+
 		vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
 		parent_copy_entry = VM_MAP_ENTRY_NULL;
@@ -2982,12 +3031,6 @@ mach_make_memory_entry_internal(
 				parent_copy_entry = vm_map_copy_first_entry(parent_copy);
 				assert(!parent_copy_entry->is_sub_map);
 			}
-		}
-
-		map_size = map_end - map_start;
-		if (map_size == 0) {
-			DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_INVALID_ARGUMENT);
-			return KERN_INVALID_ARGUMENT;
 		}
 
 		if (use_data_addr || use_4K_compat) {
@@ -3189,23 +3232,52 @@ mach_make_memory_entry_internal(
 		 * Account for offset to data in parent entry and
 		 * compute our own offset to data.
 		 */
-		if ((offset + *size + parent_entry->data_offset) > parent_entry->size) {
+		if (__improbable(os_add3_overflow(offset, *size, parent_entry->data_offset, &map_size))) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto make_mem_done;
+		}
+		if (map_size > parent_entry->size) {
 			kr = KERN_INVALID_ARGUMENT;
 			goto make_mem_done;
 		}
 
-		map_start = vm_map_trunc_page(offset + parent_entry->data_offset, PAGE_MASK);
+		if (__improbable(os_add_overflow(offset, parent_entry->data_offset, &map_start))) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto make_mem_done;
+		}
+		map_start = vm_map_trunc_page(map_start, PAGE_MASK);
 		offset_in_page = (offset + parent_entry->data_offset) - map_start;
 		if (use_4K_compat) {
 			offset_in_page &= ~((signed)(0xFFF));
 		}
-		map_end = vm_map_round_page(offset + parent_entry->data_offset + *size, PAGE_MASK);
+		if (__improbable(os_add3_overflow(offset, parent_entry->data_offset, *size, &map_end))) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto make_mem_done;
+		}
+		map_end = vm_map_round_page(map_end, PAGE_MASK);
+		if (__improbable(map_end == 0 && *size != 0)) {
+			/* rounding overflow */
+			kr = KERN_INVALID_ARGUMENT;
+			goto make_mem_done;
+		}
 		map_size = map_end - map_start;
 	} else {
-		map_end = vm_map_round_page(offset + *size, PAGE_MASK);
+		if (__improbable(os_add_overflow(offset, *size, &map_end))) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto make_mem_done;
+		}
+		map_end = vm_map_round_page(map_end, PAGE_MASK);
+		if (__improbable(map_end == 0 && *size != 0)) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto make_mem_done;
+		}
 		map_size = map_end - map_start;
 		offset_in_page = 0;
 
+		if (__improbable(os_add_overflow(offset, map_size, &tmp))) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto make_mem_done;
+		}
 		if ((offset + map_size) > parent_entry->size) {
 			kr = KERN_INVALID_ARGUMENT;
 			goto make_mem_done;
@@ -3225,6 +3297,10 @@ mach_make_memory_entry_internal(
 		goto make_mem_done;
 	}
 
+	if (__improbable(os_add_overflow(parent_entry->offset, map_start, &tmp))) {
+		kr = KERN_INVALID_ARGUMENT;
+		goto make_mem_done;
+	}
 	user_entry = mach_memory_entry_allocate(object_handle);
 	user_entry->size = map_size;
 	user_entry->offset = parent_entry->offset + map_start;

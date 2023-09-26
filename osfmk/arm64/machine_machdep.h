@@ -32,15 +32,24 @@
 
 #include <pexpert/arm64/board_config.h>
 
-/* We cache the current cthread pointer in TPIDRRO_EL0 and
- * the current CPU number in the low 12 bits of TPIDR_EL0.
+#ifdef MACH_KERNEL_PRIVATE
+
+/* We cache the following in EL0 registers
+ *     TPIDRRO_EL0
+ *         - the current cthread pointer
+ *     TPIDR_EL0
+ *         - the current CPU number (12 bits)
+ *         - the current logical cluster id (8 bits)
  *
- * The cthread pointer must be aligned
- * sufficiently that the maximum CPU number will fit.
- *
- * NOTE: Keep this in sync with libsyscall/os/tsd.h, specifically _os_cpu_number()
+ * NOTE: Keep this in sync with libsyscall/os/tsd.h,
+ *       specifically _os_cpu_number(), _os_cpu_cluster_number()
  */
-#define MACHDEP_TPIDR_CPUNUM_MASK       (0x0000000000000fff)
+#define MACHDEP_TPIDR_CPUNUM_SHIFT     0
+#define MACHDEP_TPIDR_CPUNUM_MASK      0x0000000000000fff
+#define MACHDEP_TPIDR_CLUSTERID_SHIFT  12
+#define MACHDEP_TPIDR_CLUSTERID_MASK   0x00000000000ff000
+
+#endif // MACH_KERNEL_PRIVATE
 
 /*
  * Machine Thread Flags (machine_thread.flags)

@@ -27,6 +27,7 @@ _csfg_get_supplement_cdhash
 _csfg_get_supplement_linkage_cdhash
 _csfg_get_supplement_prod_signed
 _csfg_get_supplement_signer_type
+_csfg_get_supplement_validation_category
 _csfg_get_supplement_teamid
 _csfg_get_supplement_csblob
 _xts_decrypt

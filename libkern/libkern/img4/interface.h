@@ -374,7 +374,7 @@ __BEGIN_DECLS
  * @const img4if
  * The AppleImage4 interface that was registered.
  */
-extern const img4_interface_t *img4if;
+extern const img4_interface_t * img4if;
 
 /*!
  * @function img4_interface_register

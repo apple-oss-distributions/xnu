@@ -154,7 +154,7 @@
 	mrs		x0, SP_EL0					// Get SP_EL0
 	mrs		x1, TPIDR_EL1						// Get thread pointer
 Ltest_kstack_\@:
-	ldr		x2, [x1, TH_KSTACKPTR]				// Get top of kernel stack
+	LOAD_KERN_STACK_TOP	dst=x2, src=x1, tmp=x3	// Get top of kernel stack
 	sub		x3, x2, KERNEL_STACK_SIZE			// Find bottom of kernel stack
 	cmp		x0, x2								// if (SP_EL0 >= kstack top)
 	b.ge	Ltest_istack_\@						//    jump to istack test
@@ -303,6 +303,16 @@ Lel0_serror_vector_64:
 	mov		x0, sp								// Copy saved state pointer to x0
 .endmacro
 
+.macro EL1_SP0_VECTOR_SWITCH_TO_INT_STACK
+	// SWITCH_TO_INT_STACK requires a clobberable tmp register, but at this
+	// point in the exception vector we can't spare the extra GPR.  Instead note
+	// that EL1_SP0_VECTOR ends with x0 == sp and use this to unclobber x0.
+	mrs		x1, TPIDR_EL1
+	LOAD_INT_STACK	dst=x1, src=x1, tmp=x0
+	mov		x0, sp
+	mov		sp, x1
+.endmacro
+
 el1_sp0_synchronous_vector_long:
 	stp		x0, x1, [sp, #-16]!				// Save x0 and x1 to the exception stack
 	mrs		x1, ESR_EL1							// Get the exception syndrome
@@ -321,7 +331,7 @@ Lkernel_stack_valid:
 
 el1_sp0_irq_vector_long:
 	EL1_SP0_VECTOR
-	SWITCH_TO_INT_STACK
+	EL1_SP0_VECTOR_SWITCH_TO_INT_STACK
 	adrp	x1, EXT(fleh_irq)@page					// Load address for fleh
 	add		x1, x1, EXT(fleh_irq)@pageoff
 	b		fleh_dispatch64
@@ -329,7 +339,7 @@ el1_sp0_irq_vector_long:
 el1_sp0_fiq_vector_long:
 	// ARM64_TODO write optimized decrementer
 	EL1_SP0_VECTOR
-	SWITCH_TO_INT_STACK
+	EL1_SP0_VECTOR_SWITCH_TO_INT_STACK
 	adrp	x1, EXT(fleh_fiq)@page					// Load address for fleh
 	add		x1, x1, EXT(fleh_fiq)@pageoff
 	b		fleh_dispatch64
@@ -380,15 +390,15 @@ el1_sp1_serror_vector_long:
 	b		fleh_dispatch64
 
 
-.macro EL0_64_VECTOR
+
+.macro EL0_64_VECTOR guest_label
 	stp		x0, x1, [sp, #-16]!					// Save x0 and x1 to the exception stack
 #if __ARM_KERNEL_PROTECT__
 	mov		x18, #0 						// Zero x18 to avoid leaking data to user SS
 #endif
 	mrs		x0, TPIDR_EL1						// Load the thread register
+	LOAD_USER_PCB	dst=x0, src=x0, tmp=x1		// Load the user context pointer
 	mrs		x1, SP_EL0							// Load the user stack pointer
-	add		x0, x0, ACT_CONTEXT					// Calculate where we store the user context pointer
-	ldr		x0, [x0]						// Load the user context pointer
 	str		x1, [x0, SS64_SP]					// Store the user stack pointer in the user PCB
 	msr		SP_EL0, x0							// Copy the user PCB pointer to SP0
 	ldp		x0, x1, [sp], #16					// Restore x0 and x1 from the exception stack
@@ -397,35 +407,50 @@ el1_sp1_serror_vector_long:
 	mrs		x1, TPIDR_EL1						// Load the thread register
 
 
+
 	mov		x0, sp								// Copy the user PCB pointer to x0
 												// x1 contains thread register
 .endmacro
 
+.macro EL0_64_VECTOR_SWITCH_TO_INT_STACK
+	// Similarly to EL1_SP0_VECTOR_SWITCH_TO_INT_STACK, we need to take
+	// advantage of EL0_64_VECTOR ending with x0 == sp.  EL0_64_VECTOR also
+	// populates x1 with the thread state, so we can skip reloading it.
+	LOAD_INT_STACK	dst=x1, src=x1, tmp=x0
+	mov		x0, sp
+	mov		sp, x1
+.endmacro
+
+.macro EL0_64_VECTOR_SWITCH_TO_KERN_STACK
+	LOAD_KERN_STACK_TOP	dst=x1, src=x1, tmp=x0
+	mov		x0, sp
+	mov		sp, x1
+.endmacro
 
 el0_synchronous_vector_64_long:
 	EL0_64_VECTOR	sync
-	SWITCH_TO_KERN_STACK
+	EL0_64_VECTOR_SWITCH_TO_KERN_STACK
 	adrp	x1, EXT(fleh_synchronous)@page			// Load address for fleh
 	add		x1, x1, EXT(fleh_synchronous)@pageoff
 	b		fleh_dispatch64
 
 el0_irq_vector_64_long:
 	EL0_64_VECTOR	irq
-	SWITCH_TO_INT_STACK
+	EL0_64_VECTOR_SWITCH_TO_INT_STACK
 	adrp	x1, EXT(fleh_irq)@page					// load address for fleh
 	add		x1, x1, EXT(fleh_irq)@pageoff
 	b		fleh_dispatch64
 
 el0_fiq_vector_64_long:
 	EL0_64_VECTOR	fiq
-	SWITCH_TO_INT_STACK
+	EL0_64_VECTOR_SWITCH_TO_INT_STACK
 	adrp	x1, EXT(fleh_fiq)@page					// load address for fleh
 	add		x1, x1, EXT(fleh_fiq)@pageoff
 	b		fleh_dispatch64
 
 el0_serror_vector_64_long:
 	EL0_64_VECTOR	serror
-	SWITCH_TO_KERN_STACK
+	EL0_64_VECTOR_SWITCH_TO_KERN_STACK
 	adrp	x1, EXT(fleh_serror)@page				// load address for fleh
 	add		x1, x1, EXT(fleh_serror)@pageoff
 	b		fleh_dispatch64
@@ -503,6 +528,10 @@ check_ktrr_sctlr_trap:
 	.text
 	.align 2
 fleh_dispatch64:
+#if HAS_APPLE_PAC
+	pacia	x1, sp
+#endif
+
 	/* Save arm_saved_state64 */
 	SPILL_REGISTERS KERNEL_MODE
 
@@ -547,9 +576,6 @@ fleh_dispatch64:
 
 	mov		x21, x0								// Copy arm_context_t pointer to x21
 	mov		x22, x1								// Copy handler routine to x22
-#if HAS_APPLE_PAC
-	pacia	x22, sp
-#endif
 
 #if XNU_MONITOR
 	/* Zero x26 to indicate that this should not return to the PPL. */
@@ -665,7 +691,7 @@ UNWIND_EPILOGUE
 	sub		w0, w0, #1
 	str		w0, [x22, ACT_PREEMPT_CNT]
 	/* Switch back to kernel stack */
-	ldr		x0, [x22, TH_KSTACKPTR]
+	LOAD_KERN_STACK_TOP	dst=x0, src=x22, tmp=x28
 	mov		sp, x0
 	/* Generate a CPU-local event to terminate a post-IRQ WFE */
 	sevl
@@ -835,8 +861,7 @@ LEXT(thread_bootstrap_return)
 	.globl EXT(arm64_thread_exception_return)
 LEXT(arm64_thread_exception_return)
 	mrs		x0, TPIDR_EL1
-	add		x21, x0, ACT_CONTEXT
-	ldr		x21, [x21]
+	LOAD_USER_PCB	dst=x21, src=x0, tmp=x28
 	mov		x28, xzr
 
 	//
@@ -945,7 +970,7 @@ no_asts:
 	mrs		x3, TPIDR_EL1						// Reload thread pointer
 	ldr		x4, [x3, ACT_CPUDATAP]				// Reload CPU data pointer
 L_skip_user_set_debug_state:
-	ldrsh	x0, [x4, CPU_NUMBER_GS]
+	ldrsh	x0, [x4, CPU_TPIDR_EL0]
 	msr		TPIDR_EL0, x0
 
 
@@ -1001,18 +1026,20 @@ Lskip_el0_eret_mapping:
 Lexception_return_restore_registers:
 	mov 	x0, sp								// x0 = &pcb
 	// Loads authed $x0->ss_64.pc into x1 and $x0->ss_64.cpsr into w2
-	AUTH_THREAD_STATE_IN_X0	x20, x21, x22, x23, x24, el0_state_allowed=1
+	AUTH_THREAD_STATE_IN_X0	x20, x21, x22, x23, x24, x25, el0_state_allowed=1
+
+	msr		ELR_EL1, x1							// Load the return address into ELR
+	msr		SPSR_EL1, x2						// Load the return CPSR into SPSR
 
 /* Restore special register state */
 	ldr		w3, [sp, NS64_FPSR]
 	ldr		w4, [sp, NS64_FPCR]
 
-	msr		ELR_EL1, x1							// Load the return address into ELR
-	msr		SPSR_EL1, x2						// Load the return CPSR into SPSR
 	msr		FPSR, x3
 	mrs		x5, FPCR
 	CMSR FPCR, x5, x4, 1
 1:
+
 
 
 	/* Restore arm_neon_saved_state64 */
@@ -1200,11 +1227,11 @@ Lcorrupt_ppl_stack:
 	b		fleh_invalid_stack
 
 fleh_fiq_from_ppl:
-	SWITCH_TO_INT_STACK
+	SWITCH_TO_INT_STACK	tmp=x25
 	b		EXT(fleh_fiq)
 
 fleh_irq_from_ppl:
-	SWITCH_TO_INT_STACK
+	SWITCH_TO_INT_STACK	tmp=x25
 	b		EXT(fleh_irq)
 
 fleh_serror_from_ppl:
@@ -1474,8 +1501,12 @@ LEXT(ppl_dispatch)
 	 */
 	stp		x12, x13, [sp, #-0x10]!
 
-	/* Restore the original AIF state. */
-	msr		DAIF, x20
+	/*
+	 * Restore the original AIF state, force D set to mask debug exceptions
+	 * while PPL code runs.
+	 */
+	orr		x8, x20, DAIF_DEBUGF
+	msr		DAIF, x8
 
 	/*
 	 * Note that if the method is NULL, we'll blow up with a prefetch abort,
@@ -1489,8 +1520,8 @@ LEXT(ppl_dispatch)
 	blr		x10
 #endif
 
-	/* Disable AIF. */
-	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)
+	/* Disable DAIF. */
+	msr		DAIFSet, #(DAIFSC_ALL)
 
 	/* Restore those important registers. */
 	ldp		x12, x13, [sp], #0x10

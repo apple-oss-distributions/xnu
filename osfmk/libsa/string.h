@@ -35,6 +35,17 @@
  * HISTORY
  * @OSF_COPYRIGHT@
  */
+
+#if (defined(__has_include) && __has_include(<__xnu_libcxx_sentinel.h>) && !defined(XNU_LIBCXX_SDKROOT))
+
+#if !__has_include_next(<string.h>)
+#error Do not build with -nostdinc (use GCC_USE_STANDARD_INCLUDE_SEARCHING=NO)
+#endif /* !__has_include_next(<string.h>) */
+
+#include_next <string.h>
+
+#else /* (defined(__has_include) && __has_include(<__xnu_libcxx_sentinel.h>) && !defined(XNU_LIBCXX_SDKROOT)) */
+
 #ifndef _STRING_H_
 #define _STRING_H_      1
 
@@ -342,3 +353,5 @@ extern char *STRDUP(const char *, int);
 __END_DECLS
 
 #endif  /* _STRING_H_ */
+
+#endif

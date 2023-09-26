@@ -30,11 +30,14 @@
 #define _SKYWALK_OS_NEXUS_PRIVATE_H_
 
 #if defined(PRIVATE) || defined(BSD_KERNEL_PRIVATE)
+#include <stdbool.h>
 #include <sys/guarded.h>
 #include <skywalk/os_channel.h>
 #include <skywalk/os_nexus.h>
 #include <netinet/in.h>
+#include <netinet/in_private.h>
 #include <netinet/tcp.h>
+#include <netinet/tcp_private.h>
 #include <net/ethernet.h>
 
 /*
@@ -318,8 +321,9 @@ struct nexus_mib_filter {
 typedef enum {
 	NXCFG_CMD_ATTACH =      0,      /* attach an object to a nexus */
 	NXCFG_CMD_DETACH =      1,      /* detach an object from a nexus */
-	NXCFG_CMD_FLOW_ADD =    20,     /* bind namespace to a nexus port */
-	NXCFG_CMD_FLOW_DEL =    21,     /* unbind namespace from a nexus port */
+	NXCFG_CMD_FLOW_ADD =    20,     /* add a flow to a nexus */
+	NXCFG_CMD_FLOW_DEL =    21,     /* delete a flow from nexus */
+	NXCFG_CMD_FLOW_CONFIG = 22,     /* configure a flow in nexus */
 	NXCFG_CMD_NETEM =       30,     /* config packet scheduler */
 	NXCFG_CMD_GET_LLINK_INFO = 40,  /* collect llink info */
 } nxcfg_cmd_t;
@@ -520,8 +524,8 @@ extern const struct flow_key fk_mask_ipflow3;
     (NXFLOWREQF_TRACK | NXFLOWREQF_QOS_MARKING | NXFLOWREQF_FILTER | \
     NXFLOWREQF_CUSTOM_ETHER | NXFLOWREQF_IPV6_ULA | NXFLOWREQF_LISTENER | \
     NXFLOWREQF_OVERRIDE_ADDRESS_SELECTION | NXFLOWREQF_USE_STABLE_ADDRESS | \
-    NXFLOWREQF_FLOWADV | NXFLOWREQF_LOW_LATENCY | NXFLOWREQF_REUSEPORT | \
-    NXFLOWREQF_PARENT)
+    NXFLOWREQF_FLOWADV | NXFLOWREQF_LOW_LATENCY | NXFLOWREQF_NOWAKEFROMSLEEP | \
+    NXFLOWREQF_REUSEPORT | NXFLOWREQF_PARENT)
 
 #define NXFLOWREQF_EXT_PORT_RSV   0x1000  /* external port reservation */
 #define NXFLOWREQF_EXT_PROTO_RSV  0x2000  /* external proto reservation */
@@ -529,6 +533,9 @@ extern const struct flow_key fk_mask_ipflow3;
 static inline void
 nx_flow_req_internalize(struct nx_flow_req *req)
 {
+	_CASSERT(offsetof(struct nx_flow_req, _nfr_kernel_field_end) ==
+	    offsetof(struct nx_flow_req, _nfr_common_field_end));
+
 	/* init kernel only fields */
 	bzero(&req->_nfr_opaque, sizeof(req->_nfr_opaque));
 	req->nfr_flags &= NXFLOWREQF_MASK;
@@ -582,6 +589,9 @@ struct nexus_controller {
 	struct nxctl    *ncd_nxctl;
 #endif /* KERNEL */
 };
+
+/* For nexus ops without having to create a nexus controller */
+#define __OS_NEXUS_SHARED_USER_CONTROLLER_FD (-1)
 
 /*
  * Nexus attributes.
@@ -675,6 +685,8 @@ extern int __os_nexus_flow_del(const nexus_controller_t ncd,
     const uuid_t nx_uuid, const struct nx_flow_req *nfr);
 extern int __os_nexus_get_llink_info(const nexus_controller_t ncd,
     const uuid_t nx_uuid, const struct nx_llink_info_req *nlir, size_t len);
+extern int os_nexus_flow_set_wake_from_sleep(const uuid_t nx_uuid,
+    const uuid_t flow_uuid, bool enable);
 
 __END_DECLS
 #endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */

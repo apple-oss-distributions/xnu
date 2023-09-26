@@ -158,8 +158,6 @@ typedef struct namespace_handler_data {
 } namespace_handler_data;
 
 
-extern int resolve_nspace_item_ext(struct vnode *vp, uint64_t op, void *arg);
-
 #else
 
 typedef struct namespace_handler_info {
@@ -191,10 +189,9 @@ typedef struct namespace_handler_data {
 #ifdef KERNEL_PRIVATE
 
 #define NSPACE_REARM_NO_ARG ((void *)1)
-int resolve_nspace_item(struct vnode *vp, uint64_t op);
 int vfs_materialize_file(struct vnode *vp, uint64_t op, int64_t offset, int64_t size);
 int vfs_materialize_dir(struct vnode *vp, uint64_t op, char *file_name, size_t namelen);
-int nspace_snapshot_event(vnode_t vp, time_t ctime, uint64_t op_type, void *arg);
+int vfs_materialize_reparent(struct vnode *vp, struct vnode *tdvp);
 
 #endif // defined(KERNEL_PRIVATE)
 
@@ -282,8 +279,6 @@ struct fsioc_cas_bsdflags {
 	uint32_t actual_flags;          /* [OUT] the actual flags in inode */
 };
 
-#ifdef KERNEL
-
 #define FSIOC_GRAFT_VERSION          2
 
 /* Grafting flags */
@@ -293,6 +288,11 @@ struct fsioc_cas_bsdflags {
 #define FSCTL_GRAFT_PANIC_ON_AUTHFAIL           0x0008  /* On failure to authenticate, panic */
 #define FSCTL_GRAFT_STRICT_AUTH                 0x0010  /* Strict authentication mode */
 #define FSCTL_GRAFT_PRESERVE_GRAFT              0x0020  /* Preserve graft itself until unmount */
+
+/* Ungrafting flags */
+#define FSCTL_UNGRAFT_UNGRAFTALL                0x0001  /* Ungraft all currently grafted filesystems */
+
+#ifdef KERNEL
 
 typedef struct fsioc_graft_fs {
 	uint32_t graft_version;
@@ -308,9 +308,6 @@ typedef struct fsioc_graft_fs {
 	void *payload;
 	size_t payload_size;
 } fsioc_graft_fs_t;
-
-/* Ungrafting flags */
-#define FSCTL_UNGRAFT_UNGRAFTALL     0x001  /* Ungraft all currently grafted filesystems */
 
 typedef struct fsioc_ungraft_fs {
 	uint64_t ungraft_flags;

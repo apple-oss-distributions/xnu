@@ -184,14 +184,17 @@ __options_decl(pggrp_ref_bits_t, uint32_t, {
  * the group is orphaned (has no members), which prevents it
  * from being looked up.
  *
- * Process groups are retired through @c smr_global_retire().
+ * Process groups are retired through @c smr_proc_task_call().
  *
  * Process groups are hashed in a global hash table that can be consulted
  * while holding the @c proc_list_lock() with @c pghash_find_locked()
  * or using hazard pointers with @c pgrp_find().
  */
 struct pgrp {
-	lck_mtx_t               pg_mlock;       /* process group lock   (PGL) */
+	union {
+		lck_mtx_t       pg_mlock;       /* process group lock   (PGL) */
+		struct smr_node pg_smr_node;
+	};
 	struct smrq_slink       pg_hash;        /* hash chain           (PLL) */
 	LIST_HEAD(, proc)       pg_members;     /* group members        (PGL) */
 	struct session         *pg_session;     /* session           (static) */
@@ -257,8 +260,10 @@ struct  sigacts {
  * is running.
  */
 struct proc {
-	LIST_ENTRY(proc) p_list;                /* List of all processes. */
-
+	union {
+		LIST_ENTRY(proc) p_list;                /* List of all processes. */
+		struct smr_node  p_smr_node;
+	};
 	struct  proc *  XNU_PTRAUTH_SIGNED_PTR("proc.p_pptr") p_pptr;   /* Pointer to parent process.(LL) */
 	proc_ro_t       p_proc_ro;
 	pid_t           p_ppid;                 /* process's parent pid number */
@@ -293,6 +298,9 @@ struct proc {
 #endif
 
 	lck_mtx_t       p_ucred_mlock;          /* mutex lock to protect p_ucred */
+#if CONFIG_AUDIT
+	lck_mtx_t       p_audit_mlock;          /* mutex lock to protect audit sessions */
+#endif /* CONFIG_AUDIT */
 
 	/* substructures: */
 	struct  filedesc p_fd;                  /* open files structure */
@@ -576,7 +584,9 @@ struct proc_ident {
 #define P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES           0x0100
 #define P_VFS_IOPOLICY_DISALLOW_RW_FOR_O_EVTONLY        0x0200
 #define P_VFS_IOPOLICY_ALTLINK                          0x0400
-#define P_VFS_IOPOLICY_VALID_MASK                       \
+#define P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE         0x0800
+
+#define P_VFS_IOPOLICY_INHERITED_MASK                   \
 	(P_VFS_IOPOLICY_FORCE_HFS_CASE_SENSITIVITY | \
 	P_VFS_IOPOLICY_ATIME_UPDATES | \
 	P_VFS_IOPOLICY_MATERIALIZE_DATALESS_FILES | \
@@ -585,9 +595,13 @@ struct proc_ident {
 	P_VFS_IOPOLICY_IGNORE_CONTENT_PROTECTION | \
 	P_VFS_IOPOLICY_IGNORE_NODE_PERMISSIONS | \
 	P_VFS_IOPOLICY_SKIP_MTIME_UPDATE | \
-	P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES | \
 	P_VFS_IOPOLICY_DISALLOW_RW_FOR_O_EVTONLY | \
-	P_VFS_IOPOLICY_ALTLINK)
+	P_VFS_IOPOLICY_ALTLINK | \
+	P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE)
+
+#define P_VFS_IOPOLICY_VALID_MASK                       \
+	(P_VFS_IOPOLICY_INHERITED_MASK | \
+	P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES)
 
 /* process creation arguments */
 #define PROC_CREATE_FORK        0       /* independent child (running) */
@@ -795,7 +809,10 @@ extern void proc_dirs_lock_exclusive(struct proc *);
 extern void proc_dirs_unlock_exclusive(struct proc *);
 extern void proc_ucred_lock(struct proc *);
 extern void proc_ucred_unlock(struct proc *);
-extern void proc_update_creds_onproc(struct proc *);
+extern void proc_update_creds_onproc(struct proc *, kauth_cred_t cred);
+extern kauth_cred_t proc_ucred_locked(proc_t p);
+extern kauth_cred_t proc_ucred_smr(proc_t p);
+extern kauth_cred_t proc_ucred_unsafe(proc_t p) __exported;
 #if CONFIG_COREDUMP
 __private_extern__ int proc_core_name(const char *format, const char *name, uid_t uid, pid_t pid,
     char *cr_name, size_t cr_name_len);
@@ -923,10 +940,9 @@ extern void proc_set_sigact(proc_t, int, user_addr_t);
 extern void proc_set_trampact(proc_t, int, user_addr_t);
 extern void proc_set_sigact_trampact(proc_t, int, user_addr_t, user_addr_t);
 extern void proc_reset_sigact(proc_t, sigset_t);
-extern void proc_set_ucred(proc_t, kauth_cred_t);
-extern bool proc_update_label(proc_t p, bool setugid, kauth_cred_t (^update_cred)(kauth_cred_t));
 extern void proc_setexecutableuuid(proc_t, const uuid_t);
 extern const unsigned char *proc_executableuuid_addr(proc_t);
+
 
 #pragma mark - process iteration
 

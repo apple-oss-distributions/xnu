@@ -278,7 +278,7 @@
 182	AUE_SETEGID	ALL	{ int setegid(gid_t egid); }
 183	AUE_SETEUID	ALL	{ int seteuid(uid_t euid); }
 184	AUE_SIGRETURN	ALL	{ int sigreturn(struct ucontext *uctx, int infostyle, user_addr_t token) NO_SYSCALL_STUB; }
-185	AUE_NULL	ALL 	{ int enosys(void); } { old chud }
+185 AUE_NULL    ALL { int sys_panic_with_data(uuid_t uuid, void *addr, uint32_t len, uint32_t flags, const char *msg); }
 186	AUE_NULL	ALL	{ int thread_selfcounts(uint32_t kind, user_addr_t buf, user_size_t size); }
 187	AUE_FDATASYNC	ALL	{ int fdatasync(int fd); }
 188	AUE_STAT	ALL	{ int stat(user_addr_t path, user_addr_t ub); }
@@ -429,7 +429,7 @@
 282	AUE_CHMOD_EXTENDED	ALL	{ int chmod_extended(user_addr_t path, uid_t uid, gid_t gid, int mode, user_addr_t xsecurity) NO_SYSCALL_STUB; }
 283	AUE_FCHMOD_EXTENDED	ALL	{ int fchmod_extended(int fd, uid_t uid, gid_t gid, int mode, user_addr_t xsecurity) NO_SYSCALL_STUB; }
 284	AUE_ACCESS_EXTENDED	ALL	{ int access_extended(user_addr_t entries, size_t size, user_addr_t results, uid_t uid) NO_SYSCALL_STUB; }
-285	AUE_SETTID	ALL	{ int settid(uid_t uid, gid_t gid) NO_SYSCALL_STUB; }
+285	AUE_SETTID	ALL	{ int sys_settid(uid_t uid, gid_t gid) NO_SYSCALL_STUB; }
 286	AUE_GETTID	ALL	{ int gettid(uid_t *uidp, gid_t *gidp) NO_SYSCALL_STUB; }
 287	AUE_SETSGROUPS	ALL	{ int setsgroups(int setlen, user_addr_t guidset) NO_SYSCALL_STUB; }
 288	AUE_GETSGROUPS	ALL	{ int getsgroups(user_addr_t setlen, user_addr_t guidset) NO_SYSCALL_STUB; }
@@ -475,7 +475,7 @@
 309	AUE_NULL	ALL	{ int nosys(void); }
 #endif
 310	AUE_GETSID	ALL	{ int getsid(pid_t pid); }
-311	AUE_SETTIDWITHPID	ALL	{ int settid_with_pid(pid_t pid, int assume) NO_SYSCALL_STUB; }
+311	AUE_SETTIDWITHPID	ALL	{ int sys_settid_with_pid(pid_t pid, int assume) NO_SYSCALL_STUB; }
 #if PSYNCH
 312	AUE_NULL	ALL	{ int psynch_cvclrprepost(user_addr_t cv, uint32_t cvgen, uint32_t cvugen, uint32_t cvsgen, uint32_t prepocnt, uint32_t preposeq, uint32_t flags) NO_SYSCALL_STUB; }
 #else

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -858,13 +858,13 @@ routegenid_update(void)
 void
 routegenid_inet_update(void)
 {
-	atomic_add_32(&route_genid_inet, 1);
+	os_atomic_inc(&route_genid_inet, relaxed);
 }
 
 void
 routegenid_inet6_update(void)
 {
-	atomic_add_32(&route_genid_inet6, 1);
+	os_atomic_inc(&route_genid_inet6, relaxed);
 }
 
 /*
@@ -1356,7 +1356,7 @@ rtunref_audit(struct rtentry_dbg *rte)
 		panic("rtunref: on freed rte=%p", rte);
 		/* NOTREACHED */
 	}
-	idx = atomic_add_16_ov(&rte->rtd_refrele_cnt, 1) % CTRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(&rte->rtd_refrele_cnt, relaxed) % CTRACE_HIST_SIZE;
 	if (rte_debug & RTD_TRACE) {
 		ctrace_record(&rte->rtd_refrele[idx]);
 	}
@@ -1396,7 +1396,7 @@ rtref_audit(struct rtentry_dbg *rte)
 		panic("rtref_audit: on freed rte=%p", rte);
 		/* NOTREACHED */
 	}
-	idx = atomic_add_16_ov(&rte->rtd_refhold_cnt, 1) % CTRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(&rte->rtd_refhold_cnt, relaxed) % CTRACE_HIST_SIZE;
 	if (rte_debug & RTD_TRACE) {
 		ctrace_record(&rte->rtd_refhold[idx]);
 	}
@@ -1713,7 +1713,12 @@ ifa_ifwithroute_common_locked(int flags, const struct sockaddr *dst,
 		 * or host, the gateway may still be on the
 		 * other end of a pt to pt link.
 		 */
-		ifa = ifa_ifwithdstaddr(gw);
+		if ((flags & RTF_IFSCOPE) != 0 && ifscope != IFSCOPE_NONE) {
+			ifa = ifa_ifwithdstaddr_scoped(gw, ifscope);
+		}
+		if (ifa == NULL) {
+			ifa = ifa_ifwithdstaddr(gw);
+		}
 	}
 	if (ifa == NULL) {
 		ifa = ifa_ifwithnet_scoped(gw, ifscope);
@@ -3805,7 +3810,7 @@ rte_lock_debug(struct rtentry_dbg *rte)
 	uint32_t idx;
 
 	RT_LOCK_ASSERT_HELD((struct rtentry *)rte);
-	idx = atomic_add_32_ov(&rte->rtd_lock_cnt, 1) % CTRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(&rte->rtd_lock_cnt, relaxed) % CTRACE_HIST_SIZE;
 	if (rte_debug & RTD_TRACE) {
 		ctrace_record(&rte->rtd_lock[idx]);
 	}
@@ -3817,7 +3822,7 @@ rte_unlock_debug(struct rtentry_dbg *rte)
 	uint32_t idx;
 
 	RT_LOCK_ASSERT_HELD((struct rtentry *)rte);
-	idx = atomic_add_32_ov(&rte->rtd_unlock_cnt, 1) % CTRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(&rte->rtd_unlock_cnt, relaxed) % CTRACE_HIST_SIZE;
 	if (rte_debug & RTD_TRACE) {
 		ctrace_record(&rte->rtd_unlock[idx]);
 	}
@@ -3861,7 +3866,7 @@ rte_if_ref(struct ifnet *ifp, int cnt)
 		panic("%s: invalid count argument (%d)", __func__, cnt);
 		/* NOTREACHED */
 	}
-	old = atomic_add_32_ov(&ifp->if_route_refcnt, cnt);
+	old = os_atomic_add_orig(&ifp->if_route_refcnt, cnt, relaxed);
 	if (cnt < 0 && old == 0) {
 		panic("%s: ifp=%p negative route refcnt!", __func__, ifp);
 		/* NOTREACHED */

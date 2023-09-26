@@ -105,6 +105,7 @@
 #include <sys/kdebug.h>
 #include <mach/sdt.h>
 #include <netinet/mptcp_var.h>
+#include <net/content_filter.h>
 
 /* Max number of times a stretch ack can be delayed on a connection */
 #define TCP_STRETCHACK_DELAY_THRESHOLD  5
@@ -580,7 +581,6 @@ add_to_time_wait_locked(struct tcpcb *tp, uint32_t delay)
 void
 add_to_time_wait(struct tcpcb *tp, uint32_t delay)
 {
-	struct inpcbinfo *pcbinfo = &tcbinfo;
 	if (tp->t_inpcb->inp_socket->so_options & SO_NOWAKEFROMSLEEP) {
 		socket_post_kev_msg_closed(tp->t_inpcb->inp_socket);
 	}
@@ -589,6 +589,22 @@ add_to_time_wait(struct tcpcb *tp, uint32_t delay)
 
 	/* 19182803: Notify nstat that connection is closing before waiting. */
 	nstat_pcb_detach(tp->t_inpcb);
+
+#if CONTENT_FILTER
+	if ((tp->t_inpcb->inp_socket->so_flags & SOF_CONTENT_FILTER) != 0) {
+		/* If filter present, allow filter to finish processing all queued up data before adding to time wait queue */
+		(void) cfil_sock_tcp_add_time_wait(tp->t_inpcb->inp_socket);
+	} else
+#endif /* CONTENT_FILTER */
+	{
+		add_to_time_wait_now(tp, delay);
+	}
+}
+
+void
+add_to_time_wait_now(struct tcpcb *tp, uint32_t delay)
+{
+	struct inpcbinfo *pcbinfo = &tcbinfo;
 
 	if (!lck_rw_try_lock_exclusive(&pcbinfo->ipi_lock)) {
 		socket_unlock(tp->t_inpcb->inp_socket, 0);
@@ -803,7 +819,7 @@ tcp_gc(struct inpcbinfo *ipi)
 			KERNEL_DEBUG(DBG_FNC_TCP_SLOW | DBG_FUNC_END,
 			    tws_checked, cur_tw_slot, 0, 0, 0);
 			/* Lock upgrade failed, give up this round */
-			atomic_add_32(&ipi->ipi_gc_req.intimer_fast, 1);
+			os_atomic_inc(&ipi->ipi_gc_req.intimer_fast, relaxed);
 			return;
 		}
 		/* Upgrade failed, lost lock now take it again exclusive */
@@ -813,7 +829,7 @@ tcp_gc(struct inpcbinfo *ipi)
 
 	LIST_FOREACH_SAFE(inp, &tcb, inp_list, nxt) {
 		if (tcp_garbage_collect(inp, 0)) {
-			atomic_add_32(&ipi->ipi_gc_req.intimer_fast, 1);
+			os_atomic_inc(&ipi->ipi_gc_req.intimer_fast, relaxed);
 		}
 	}
 
@@ -832,19 +848,19 @@ tcp_gc(struct inpcbinfo *ipi)
 		if (tw_tp->t_state == TCPS_CLOSED ||
 		    TSTMP_GEQ(tcp_now, tw_tp->t_timer[TCPT_2MSL])) {
 			if (tcp_garbage_collect(tw_tp->t_inpcb, 1)) {
-				atomic_add_32(&ipi->ipi_gc_req.intimer_lazy, 1);
+				os_atomic_inc(&ipi->ipi_gc_req.intimer_lazy, relaxed);
 			}
 		}
 	}
 
 	/* take into account pcbs that are still in time_wait_slots */
-	atomic_add_32(&ipi->ipi_gc_req.intimer_lazy, ipi->ipi_twcount);
+	os_atomic_add(&ipi->ipi_gc_req.intimer_lazy, ipi->ipi_twcount, relaxed);
 
 	lck_rw_done(&ipi->ipi_lock);
 
 	/* Clean up the socache while we are here */
 	if (so_cache_timer()) {
-		atomic_add_32(&ipi->ipi_gc_req.intimer_lazy, 1);
+		os_atomic_inc(&ipi->ipi_gc_req.intimer_lazy, relaxed);
 	}
 
 	KERNEL_DEBUG(DBG_FNC_TCP_SLOW | DBG_FUNC_END, tws_checked,
@@ -981,9 +997,10 @@ static bool
 tcp_send_keep_alive(struct tcpcb *tp)
 {
 	struct tcptemp *t_template;
+	struct mbuf *m;
 
 	tcpstat.tcps_keepprobe++;
-	t_template = tcp_maketemplate(tp);
+	t_template = tcp_maketemplate(tp, &m);
 	if (t_template != NULL) {
 		struct inpcb *inp = tp->t_inpcb;
 		struct tcp_respond_args tra;
@@ -994,6 +1011,7 @@ tcp_send_keep_alive(struct tcpcb *tp)
 		tra.noconstrained = INP_NO_CONSTRAINED(inp) ? 1 : 0;
 		tra.awdl_unrestricted = INP_AWDL_UNRESTRICTED(inp) ? 1 : 0;
 		tra.intcoproc_allowed = INP_INTCOPROC_ALLOWED(inp) ? 1 : 0;
+		tra.management_allowed = INP_MANAGEMENT_ALLOWED(inp) ? 1 : 0;
 		tra.keep_alive = 1;
 		if (tp->t_inpcb->inp_flags & INP_BOUND_IF) {
 			tra.ifscope = tp->t_inpcb->inp_boundifp->if_index;
@@ -1003,7 +1021,7 @@ tcp_send_keep_alive(struct tcpcb *tp)
 		tcp_respond(tp, t_template->tt_ipgen,
 		    &t_template->tt_t, (struct mbuf *)NULL,
 		    tp->rcv_nxt, tp->snd_una - 1, 0, &tra);
-		(void) m_free(dtom(t_template));
+		(void) m_free(m);
 		return true;
 	} else {
 		return false;
@@ -2988,7 +3006,7 @@ tcp_itimer(struct inpcbinfo *ipi)
 	if (lck_rw_try_lock_exclusive(&ipi->ipi_lock) == FALSE) {
 		if (tcp_itimer_done == TRUE) {
 			tcp_itimer_done = FALSE;
-			atomic_add_32(&ipi->ipi_timer_req.intimer_fast, 1);
+			os_atomic_inc(&ipi->ipi_timer_req.intimer_fast, relaxed);
 			return;
 		}
 		/* Upgrade failed, lost lock now take it again exclusive */

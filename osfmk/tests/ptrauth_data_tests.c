@@ -77,21 +77,16 @@ kern_return_t ptrauth_data_tests(void);
 
 #define VALIDATE_DATA_PTR(decl, ptr, discr) VALIDATE_PTR(decl, ptr, ptrauth_key_process_independent_data, discr)
 
-static kern_return_t
-ptrauth_data_blob_tests(void)
-{
-	/*
-	 * Regression test for rdar://103054854
-	 */
-	unsigned char a[] = { 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-	unsigned char b[] = { 0x41, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-
-	if (ptrauth_utils_sign_blob_generic(a, 1, 0, 0) != ptrauth_utils_sign_blob_generic(b, 1, 0, 0)) {
-		printf("kern.run_pac_test: ptrauth_data_blob_tests: mismatched blob signatures (rdar://103054854)\n");
-		return KERN_FAILURE;
-	}
-
-	return KERN_SUCCESS;
+/*
+ * Regression test for rdar://103054854
+ */
+#define PTRAUTH_DATA_BLOB_TESTS(void) { \
+	unsigned char a[] = { 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }; \
+	unsigned char b[] = { 0x41, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }; \
+	if (ptrauth_utils_sign_blob_generic(a, 1, 0, 0) != ptrauth_utils_sign_blob_generic(b, 1, 0, 0)) { \
+	        printf("kern.run_pac_test: ptrauth_data_blob_tests: mismatched blob signatures\n"); \
+	        kr = KERN_FAILURE; \
+	} \
 }
 
 /*
@@ -131,7 +126,7 @@ ptrauth_data_tests(void)
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, void *, ikm_udata, "kmsg.ikm_udata");
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, struct ipc_port *, ikm_voucher_port, "kmsg.ikm_voucher_port");
 
-	kr = ptrauth_data_blob_tests();
+	PTRAUTH_DATA_BLOB_TESTS();
 	return kr;
 }
 

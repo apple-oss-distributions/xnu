@@ -123,7 +123,7 @@ has_v6_default_route(void)
 	struct sockaddr_in6 sin6 = {};
 
 	sin6.sin6_len = sizeof(struct sockaddr_in6);
-	sin6.sin6_family = AF_INET;
+	sin6.sin6_family = AF_INET6;
 
 	T_QUIET; T_ASSERT_NOTNULL(rtm = (struct rt_msghdr *)calloc(1, RTM_BUFLEN), NULL);
 

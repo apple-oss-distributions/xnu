@@ -1,7 +1,7 @@
 #
 # Mach Operating System
 # Copyright (c) 1986 Carnegie-Mellon University
-# Copyright 2022 Apple Inc.
+# Copyright 2022-2023 Apple Inc.
 #
 # All rights reserved.  The CMU software License Agreement
 # specifies the terms and conditions for use and redistribution.
@@ -17,9 +17,10 @@
 #  -------- ----- -- ---------------
 #
 #  KERNEL_BASE =    [ arm64 xsmall msgb_small config_embedded config_enforce_signed_code config_code_signature_reconstitution config_requires_u32_munging config_darkboot ]
-#  KERNEL_RELEASE = [ KERNEL_BASE ARM_EXTRAS_BASE config_pmap_ppl ]
-#  KERNEL_DEV =     [ KERNEL_BASE ARM_EXTRAS_BASE config_pmap_ppl development mach_assert config_xnupost proc_ref_debug config_proc_resource_limits ]
-#  KERNEL_DEBUG =   [ KERNEL_BASE ARM_EXTRAS_BASE config_pmap_ppl debug mach_assert config_xnupost config_waitq_stats config_workloop_debug config_proc_resource_limits ]
+#  KERNEL_RELEASE = [ KERNEL_BASE ARM_EXTRAS_BASE ]
+#  KERNEL_DEV =     [ KERNEL_BASE ARM_EXTRAS_BASE development mach_assert config_xnupost proc_ref_debug config_proc_resource_limits config_ext_paniclog ]
+#  KERNEL_DEV_PPL = [ KERNEL_BASE ARM_EXTRAS_BASE_PPL development mach_assert config_xnupost proc_ref_debug config_proc_resource_limits ]
+#  KERNEL_DEBUG =   [ KERNEL_BASE ARM_EXTRAS_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug config_proc_resource_limits config_ext_paniclog ]
 #  BSD_EXTRAS_BASE = [ ]
 #  BSD_EXTRAS_DEV = [ config_coredump ]
 #  BSD_EXTRAS_DEBUG = [ config_coredump ]
@@ -36,9 +37,9 @@
 #  SKYWALK_RELEASE = [ SKYWALK_BASE ]
 #  SKYWALK_DEV =    [ SKYWALK_BASE ]
 #  SKYWALK_DEBUG =  [ SKYWALK_BASE ]
-#  NETWORKING =     [ inet tcpdrop_synfin bpfilter if_bridge traffic_mgt dummynet ah_all_crypto if_fake vlan ]
+#  NETWORKING =     [ inet tcpdrop_synfin bpfilter if_bridge traffic_mgt dummynet ah_all_crypto if_fake if_redirect vlan ]
 #  NETWORKING_RELEASE = [ NETWORKING ]
-#  NETWORKING_DEV = [ NETWORKING_RELEASE packet_mangler if_headless ]
+#  NETWORKING_DEV = [ NETWORKING_RELEASE packet_mangler if_headless kctl_test ]
 #  NETWORKING_DEBUG = [ NETWORKING_DEV ]
 #  VPN =            [ ipsec flow_divert necp content_filter ]
 #  PF_RELEASE =     [ pf ]
@@ -65,10 +66,10 @@
 #else
 #  PARAVIRT_BASE =  [ ]
 #endif
-#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_io_compression_stats phys_write_acct config_service_port_info PARAVIRT_BASE ]
+#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_io_compression_stats phys_write_acct config_service_port_info PARAVIRT_BASE config_ledger_interval_max ]
 #  MACH_RELEASE =   [ MACH_BASE config_skip_precise_user_kernel_time debugger_for_zone_info ]
-#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace config_ledger_interval_max ]
-#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace config_ledger_interval_max importance_debug ]
+#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace config_task_suspend_stats ]
+#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug config_task_suspend_stats ]
 #  SCHED_BASE =     [ config_sched_traditional config_sched_multiq config_sched_deferred_ast config_clutch config_sched_sfi config_taskwatch config_preadopt_tg ]
 #  SCHED_RELEASE =  [ SCHED_BASE ]
 #  SCHED_DEV =      [ SCHED_BASE ]
@@ -77,7 +78,7 @@
 #  VM_RELEASE =     [ VM_BASE ]
 #  VM_DEV =         [ VM_BASE dynamic_codesigning ubsan_minimal pgzalloc ]
 #  VM_DEBUG =       [ VM_BASE dynamic_codesigning ubsan_minimal pgzalloc ]
-#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov kernel_tbi]
+#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov kernel_tagging kernel_tbi]
 #  SECURITY_BASE =    [ config_macf kernel_integrity config_secure_bsd_root reslide_shared_cache ]
 #  SECURITY_RELEASE = [ SECURITY_BASE ]
 #  SECURITY_DEV =     [ SECURITY_BASE config_setuid config_kas_info ]
@@ -86,7 +87,7 @@
 #  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE             SKYWALK_RELEASE NETWORKING_RELEASE PF_RELEASE IOKIT_RELEASE LIBKERN_RELEASE PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE SECURITY_RELEASE ]
 #  DEVELOPMENT =    [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     PF_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     SECURITY_DEV     ]
 #  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG               SKYWALK_DEBUG   NETWORKING_DEBUG   PF_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG   PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   SECURITY_DEBUG   ]
-#  KASAN =          [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     PF_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_KASAN   SECURITY_DEV     ]
+#  KASAN =          [ BASE KERNEL_DEV_PPL BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     PF_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_KASAN   SECURITY_DEV     ]
 #
 ######################################################################
 #
@@ -110,3 +111,4 @@ options   CONFIG_RESLIDE_SHARED_CACHE		# <reslide_shared_cache>
 
 options   CONFIG_UBSAN_MINIMAL		# <ubsan_minimal>
 options   CONFIG_KERNEL_TBI		# <kernel_tbi>
+options   CONFIG_KERNEL_TAGGING		# <kernel_tagging>

@@ -28,6 +28,7 @@
 
 #if !KERNEL
 
+#define __SPI_AVAILABLE(...)
 #include <stdlib.h>
 
 /* This demangler is part of the C++ ABI.  We don't include it directly from

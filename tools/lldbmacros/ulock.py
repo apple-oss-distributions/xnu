@@ -14,8 +14,8 @@ ulock_types = {
     5: "COMPARE_AND_WAIT64_SHARED"
 }
 
-@header("{:<20s} {:<20s} {:<20s} {:<10s} {:<20s} {:<20s} {:<20s}".format(
-    'ull_t', 'kind', 'addr/obj', 'pid/offs', 'owner', 'turnstile', 'waiters'))
+@header("{:<20s} {:<20s} {:<20s} {:<20s} {:<20s} {:<20s} {:<20s}".format(
+    'ull_t', 'kind', 'addr/obj', 'task/offs', 'owner', 'turnstile', 'waiters'))
 def GetUlockSummary(ull):
     code = int(ull.ull_opcode)
     if code in ulock_types:
@@ -26,7 +26,7 @@ def GetUlockSummary(ull):
     s = "{ull: <#20x} {ull_type: <20s}".format(ull=ull, ull_type=ull_type)
     ulk=ull.ull_key
     if int(ulk.ulk_key_type) == 1:
-        s += " {ulk.ulk_addr: <#20x} {ulk.ulk_pid: <10d}".format(ulk=ulk)
+        s += " {ulk.ulk_addr: <#20x} {ulk.ulk_task: <#20x}".format(ulk=ulk)
     elif int(ulk.ulk_key_type) == 2:
         s += " {ulk.ulk_object: <#20x} {ulk.ulk_offset: <10d}".format(ulk=ulk)
     else:

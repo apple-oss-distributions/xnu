@@ -178,7 +178,7 @@ struct bounded_array_ref {
 	// If the `bounded_array_ref` is empty, these methods will return null
 	// `bounded_ptr`s, which can be checked for equality but can't be
 	// dereferenced.
-	iterator
+	OS_ALWAYS_INLINE iterator
 	begin() const noexcept
 	{
 		return iterator(data_, data_, data_ + size_);

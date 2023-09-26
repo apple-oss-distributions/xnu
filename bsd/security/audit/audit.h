@@ -260,9 +260,6 @@ void     audit_arg_mach_port2(struct kaudit_record *ar, mach_port_name_t port);
 void     audit_sysclose(struct kaudit_record *ar, struct proc *p, int fd);
 
 void     audit_proc_coredump(proc_t proc, const char *path, int errcode);
-void     audit_proc_init(struct proc *p);
-void     audit_proc_fork(struct proc *parent, struct proc *child);
-void     audit_proc_free(struct proc *p);
 
 #ifndef _KAUTH_CRED_T
 #define _KAUTH_CRED_T
@@ -274,7 +271,7 @@ void     audit_session_ref(kauth_cred_t cred);
 void     audit_session_unref(kauth_cred_t cred);
 void     audit_session_procnew(proc_t p);
 void     audit_session_procexit(proc_t p);
-int      audit_session_spawnjoin(proc_t p, task_t task, ipc_port_t port);
+int      audit_session_spawnjoin(proc_t p, ipc_port_t port);
 
 void     audit_sdev_submit(au_id_t auid, au_asid_t asid, void *record,
     u_int record_len);

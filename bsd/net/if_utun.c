@@ -454,7 +454,7 @@ utun_netif_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 
 		bpf_tap_packet_out(pcb->utun_ifp, DLT_RAW, tx_ph, NULL, 0);
 
-		uint16_t tx_offset = kern_buflet_get_data_offset(tx_buf);
+		uint32_t tx_offset = kern_buflet_get_data_offset(tx_buf);
 		uint32_t tx_length = kern_buflet_get_data_length(tx_buf);
 
 		// The offset must be large enough for the headers

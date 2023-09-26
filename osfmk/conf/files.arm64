@@ -26,6 +26,8 @@ osfmk/arm64/WKdmData.s		standard
 osfmk/arm64/lz4_decode_arm64.s  standard
 osfmk/arm64/lz4_encode_arm64.s  standard
 osfmk/arm64/amcc_rorgn_ppl.c optional nos_arm_asm config_pmap_ppl
+osfmk/arm64/amcc_rorgn_ppl_amcc.c optional nos_arm_asm config_pmap_ppl
+osfmk/arm64/amcc_rorgn_ppl_ctrr3.c optional nos_arm_asm config_pmap_ppl
 osfmk/arm64/amcc_rorgn_common.c optional nos_arm_asm
 osfmk/arm64/bcopy.s standard
 osfmk/arm64/bzero.s standard
@@ -93,6 +95,7 @@ osfmk/OPTIONS/hi_res_clock	optional hi_res_clock
 osfmk/arm64/perfmon_arm64.c optional config_perfmon
 osfmk/arm64/kpc.c		optional kpc nos_arm_asm
 osfmk/arm64/monotonic_arm64.c optional monotonic
+osfmk/arm64/cpc_arm64_events.c optional kpc
 
 osfmk/arm64/platform_tests.c			optional config_xnupost
 osfmk/arm64/platform_tests_asm.s		optional config_xnupost

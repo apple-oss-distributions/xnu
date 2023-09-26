@@ -27,6 +27,7 @@ _do_set_crash_behavior_test(char *child_mode, int signal, uint32_t flags, bool e
 {
 	bool should_wait = (strcmp(child_mode, "wait") == 0);
 	bool reason = (strcmp(child_mode, "reason") == 0);
+	bool reason_signal = (strcmp(child_mode, "reason_signal") == 0);
 	bool dirty = (strcmp(child_mode, "dirty") == 0);
 	bool shutdown = (strcmp(child_mode, "clean") == 0) || dirty;
 	uint64_t deadline = mach_continuous_time();
@@ -79,6 +80,10 @@ _do_set_crash_behavior_test(char *child_mode, int signal, uint32_t flags, bool e
 		ret = terminate_with_reason(child_pid, OS_REASON_TEST, TEST_REASON_CODE,
 		    "Test forcing crash", OS_REASON_FLAG_CONSISTENT_FAILURE | OS_REASON_FLAG_NO_CRASH_REPORT);
 		T_ASSERT_POSIX_SUCCESS(ret, "terminate_with_reason(%d)", child_pid);
+	} else if (reason_signal) {
+		ret = terminate_with_reason(child_pid, OS_REASON_SIGNAL, SIGABRT,
+		    "Test forcing crash with signal", OS_REASON_FLAG_CONSISTENT_FAILURE | OS_REASON_FLAG_NO_CRASH_REPORT);
+		T_ASSERT_POSIX_SUCCESS(ret, "terminate_with_reason_signal(%d)", child_pid);
 	}
 
 	if (dirty) {
@@ -173,6 +178,13 @@ T_DECL(set_crash_behavior_panic_on_crash_terminate_with_reason,
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
 	_do_set_crash_behavior_test("reason", 0, POSIX_SPAWN_PANIC_ON_CRASH, true);
+}
+
+T_DECL(set_crash_behavior_panic_on_crash_terminate_with_reason_signal,
+    "set_crash_behavior_panic_on_crash_terminate_with_reason_signal",
+    T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+	_do_set_crash_behavior_test("reason_signal", 0, POSIX_SPAWN_PANIC_ON_CRASH, true);
 }
 
 T_DECL(set_crash_behavior_panic_on_crash_proc_terminate_clean,

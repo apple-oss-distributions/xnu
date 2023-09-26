@@ -19,4 +19,7 @@ void set_process_memorystatus_managed(pid_t pid);
 
 #define XNU_T_META_SOC_SPECIFIC T_META_TAG("SoCSpecific")
 
+#define XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)
+#define XNU_T_META_REQUIRES_RELEASE_KERNEL T_META_REQUIRES_SYSCTL_EQ("kern.development", 0)
+
 #endif /* XNU_DARWINTEST_UTILS_H */

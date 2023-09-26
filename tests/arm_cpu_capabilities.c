@@ -37,7 +37,8 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("arm"),
 	T_META_OWNER("sdooher"),
-	T_META_RUN_CONCURRENTLY(true)
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_TAG("SoCSpecific")
 	);
 
 static volatile bool cap_usable;
@@ -343,6 +344,18 @@ try_i8mm(void)
         );
 }
 
+static void
+try_ecv(void)
+{
+	/*
+	 * These registers are present only when FEAT_ECV is implemented.
+	 * Otherwise, direct accesses to CNTPCTSS_EL0 or CNTVCTSS_EL0 are UNDEFINED.
+	 */
+	(void)__builtin_arm_rsr64("CNTPCTSS_EL0");
+	(void)__builtin_arm_rsr64("CNTVCTSS_EL0");
+}
+
+
 
 static void
 try_fpexcp(void)
@@ -443,6 +456,7 @@ T_DECL(cpu_capabilities, "Verify ARM CPU capabilities") {
 	// The following features do not have a commpage entry
 	test_cpu_capability("BF16", 0, false, "hw.optional.arm.FEAT_BF16", try_bf16);
 	test_cpu_capability("I8MM", 0, false, "hw.optional.arm.FEAT_I8MM", try_i8mm);
+	test_cpu_capability("ECV", 0, false, "hw.optional.arm.FEAT_ECV", try_ecv);
 
 	// The following features do not add instructions or registers to test for the presence of
 	test_cpu_capability("LSE2", kHasFeatLSE2, true, "hw.optional.arm.FEAT_LSE2", NULL);

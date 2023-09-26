@@ -38,6 +38,7 @@
 #include <kern/kern_types.h>
 #include <kern/percpu.h>
 #include <kern/processor.h>
+#include <os/base.h>
 #include <pexpert/pexpert.h>
 #include <arm/dbgwrap.h>
 #include <arm/machine_routines.h>
@@ -113,10 +114,9 @@ typedef struct cpu_data {
 	int                             cpu_subtype;
 	int                             cpu_threadtype;
 
-	vm_offset_t                     istackptr;
+	void *                          XNU_PTRAUTH_SIGNED_PTR("cpu_data.istackptr") istackptr;
 	vm_offset_t                     intstack_top;
 #if __arm64__
-	vm_offset_t                     excepstackptr;
 	vm_offset_t                     excepstack_top;
 #endif
 	thread_t                        cpu_active_thread;
@@ -251,6 +251,9 @@ typedef struct cpu_data {
 	uint64_t ipi_pc;
 	uint64_t ipi_lr;
 	uint64_t ipi_fp;
+
+	/* Encoded data to store in TPIDR_EL0 on context switch */
+	uint64_t                        cpu_tpidr_el0;
 #endif
 } cpu_data_t;
 

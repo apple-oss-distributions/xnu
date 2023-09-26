@@ -673,6 +673,8 @@ struct dn_pipe_64 {             /* a pipe */
 extern struct eventhandler_lists_ctxt dummynet_evhdlr_ctxt;
 extern void dummynet_init(void);
 
+extern void dummynet_register_m_tag(void);
+
 struct dn_pipe_mini_config {
 	uint32_t bandwidth;
 	uint32_t delay;

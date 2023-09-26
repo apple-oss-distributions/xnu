@@ -92,6 +92,9 @@ ZONE_DEFINE(nfsrv_descript_zone, "NFSV3 srvdesc",
 
 int nfsrv_sock_max_rec_queue_length = 128; /* max # RPC records queued on (UDP) socket */
 
+uint32_t nfsrv_unprocessed_rpc_current = 0; /* Current bytes of unprocessed RPC records */
+uint32_t nfsrv_unprocessed_rpc_max = (64 * 1024 * 1024); /* Max bytes of unprocessed RPC records - 64MB by default */
+
 int nfsrv_getstream(struct nfsrv_sock *, int);
 int nfsrv_getreq(struct nfsrv_descript *);
 extern int nfsv3_procid[NFS_NPROCS];
@@ -379,10 +382,10 @@ nfsrv_rcv_locked(socket_t so, struct nfsrv_sock *slp, int waitflag)
 		 */
 		error = nfsrv_getstream(slp, waitflag);
 		if (error) {
-			if (error == EPERM) {
-				ns_flag = SLP_DISCONN;
-			} else {
+			if (error == EWOULDBLOCK) {
 				ns_flag = SLP_NEEDQ;
+			} else {
+				ns_flag = SLP_DISCONN;
 			}
 		}
 	} else {
@@ -512,8 +515,16 @@ nfsrv_getstream(struct nfsrv_sock *slp, int waitflag)
 			}
 			if (slp->ns_reclen <= 0 || slp->ns_reclen > NFS_MAXPACKET) {
 				slp->ns_flag &= ~SLP_GETSTREAM;
-				return EPERM;
+				return EINVAL;
 			}
+			/* check if we have reached the max allowed memory consumption */
+			if (nfsrv_unprocessed_rpc_max && (nfsrv_unprocessed_rpc_current + slp->ns_reclen > nfsrv_unprocessed_rpc_max)) {
+				slp->ns_flag &= ~SLP_GETSTREAM;
+				printf("nfsrv_getstream: nfsrv_unprocessed_rpc_current (%u) has reached the max allowed consumption (%u)\n", nfsrv_unprocessed_rpc_current, nfsrv_unprocessed_rpc_max);
+				return ENOBUFS;
+			}
+			OSAddAtomic(slp->ns_reclen, &nfsrv_unprocessed_rpc_current);
+			slp->ns_recslen += slp->ns_reclen;
 		}
 
 		/*
@@ -603,6 +614,8 @@ nfsrv_getstream(struct nfsrv_sock *slp, int waitflag)
 			} else {
 				slp->ns_rec = slp->ns_frag;
 				slp->ns_flag |= SLP_DOREC;
+				OSAddAtomic(-slp->ns_recslen, &nfsrv_unprocessed_rpc_current);
+				slp->ns_recslen = 0;
 			}
 			slp->ns_recend = slp->ns_frag;
 			slp->ns_frag = NULL;

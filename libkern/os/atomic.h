@@ -91,21 +91,27 @@
 #include <type_traits>
 
 namespace os {
-template <class T> using add_volatile_t = typename std::add_volatile<T>::type;
 template <class T> using remove_volatile_t = typename std::remove_volatile<T>::type;
 
 template <class T>
-inline add_volatile_t<std::atomic<remove_volatile_t<T> > > *
+inline volatile std::atomic<remove_volatile_t<T> > *
 cast_to_atomic_pointer(T *v)
 {
-	return reinterpret_cast<add_volatile_t<std::atomic<remove_volatile_t<T> > > *>(v);
+	return reinterpret_cast<volatile std::atomic<remove_volatile_t<T> > *>(v);
 }
 
 template <class T>
-inline add_volatile_t<std::atomic<remove_volatile_t<T> > > *
+inline volatile std::atomic<remove_volatile_t<T> > *
 cast_to_atomic_pointer(std::atomic<T> *v)
 {
-	return reinterpret_cast<add_volatile_t<std::atomic<remove_volatile_t<T> > > *>(v);
+	return reinterpret_cast<volatile std::atomic<remove_volatile_t<T> > *>(v);
+}
+
+template <class T>
+inline volatile std::atomic<remove_volatile_t<T> > *
+cast_to_atomic_pointer(volatile std::atomic<T> *v)
+{
+	return reinterpret_cast<volatile std::atomic<remove_volatile_t<T> > *>(v);
 }
 
 template <class T>

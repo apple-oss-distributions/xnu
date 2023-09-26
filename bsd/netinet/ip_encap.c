@@ -512,7 +512,7 @@ encap_fillarg(
 	    sizeof(struct encaptabtag), M_WAITOK, m);
 
 	if (tag != NULL) {
-		et = (struct encaptabtag*)(tag + 1);
+		et = (struct encaptabtag*)(tag->m_tag_data);
 		et->arg = arg;
 		m_tag_prepend(m, tag);
 	}
@@ -525,12 +525,64 @@ encap_getarg(struct mbuf *m)
 	struct encaptabtag *et;
 	void *p = NULL;
 
-	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_ENCAP, NULL);
+	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_ENCAP);
 	if (tag) {
-		et = (struct encaptabtag*)(tag + 1);
+		et = (struct encaptabtag*)(tag->m_tag_data);
 		p = et->arg;
 		m_tag_delete(m, tag);
 	}
 
 	return p;
+}
+
+struct encaptab_tag_container {
+	struct m_tag            encaptab_m_tag;
+	struct encaptabtag      encaptab_tag;
+};
+
+static struct m_tag *
+m_tag_kalloc_encap(u_int32_t id, u_int16_t type, uint16_t len, int wait)
+{
+	struct encaptab_tag_container *tag_container;
+	struct m_tag *tag = NULL;
+
+	assert3u(id, ==, KERNEL_MODULE_TAG_ID);
+	assert3u(type, ==, KERNEL_TAG_TYPE_ENCAP);
+	assert3u(len, ==, sizeof(struct encaptabtag));
+
+	if (len != sizeof(struct encaptabtag)) {
+		return NULL;
+	}
+
+	tag_container = kalloc_type(struct encaptab_tag_container, wait | M_ZERO);
+	if (tag_container != NULL) {
+		tag =  &tag_container->encaptab_m_tag;
+
+		assert3p(tag, ==, tag_container);
+
+		M_TAG_INIT(tag, id, type, len, &tag_container->encaptab_tag, NULL);
+	}
+
+	return tag;
+}
+
+static void
+m_tag_kfree_encap(struct m_tag *tag)
+{
+	struct encaptab_tag_container *tag_container = (struct encaptab_tag_container *)tag;
+
+	assert3u(tag->m_tag_len, ==, sizeof(struct encaptabtag));
+
+	kfree_type(struct encaptab_tag_container, tag_container);
+}
+
+void
+encap_register_m_tag(void)
+{
+	int error;
+
+	error = m_register_internal_tag_type(KERNEL_TAG_TYPE_ENCAP, sizeof(struct encaptabtag),
+	    m_tag_kalloc_encap, m_tag_kfree_encap);
+
+	assert3u(error, ==, 0);
 }

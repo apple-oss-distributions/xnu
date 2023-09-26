@@ -684,6 +684,16 @@ kern_return_t
 pmap_cs_allow_invalid(pmap_t pmap);
 
 /**
+ * Acquire the trust level which is put onto a pmap based on the code signature associated
+ * with the main region. This function does NOT take a lock on the pmap and does not trap
+ * into the PPL.
+ */
+kern_return_t
+pmap_get_trust_level_kdp(
+	pmap_t pmap,
+	pmap_cs_trust_t *trust_level);
+
+/**
  * Copy over the main binary association from the old address space to the new address
  * space. This is required since a fork copies over all associations from one address space
  * to another, and we need to make sure the main binary association is made before any

@@ -127,7 +127,8 @@ struct vm_object_fault_info {
 	/* boolean_t */ resilient_media:1,
 	/* boolean_t */ no_copy_on_read:1,
 	/* boolean_t */ fi_xnu_user_debug:1,
-	    __vm_object_fault_info_unused_bits:22;
+	/* boolean_t */ fi_used_for_tpro:1,
+	    __vm_object_fault_info_unused_bits:21;
 	int             pmap_options;
 };
 
@@ -170,7 +171,7 @@ struct vm_object {
 	                                           *  use VM_OBJECT_WIRED_PAGE_UPDATE macros to update */
 	unsigned int            reusable_page_count;
 
-	struct vm_object        *copy;          /* Object that should receive
+	struct vm_object        *vo_copy;       /* Object that should receive
 	                                         * a copy of my changed pages,
 	                                         * for copy_delay, or just the
 	                                         * temporary object that
@@ -217,7 +218,7 @@ struct vm_object {
 	 */
 
 	unsigned int
-	/* boolean_t array */ all_wanted:11,    /* Bit array of "want to be
+	/* boolean_t array */ all_wanted:6,     /* Bit array of "want to be
 	                                         * awakened" notations.  See
 	                                         * VM_OBJECT_EVENT_* items
 	                                         * below */
@@ -300,8 +301,14 @@ struct vm_object {
 	 * primary caching. (for
 	 * I/O)
 	 */
-	/* boolean_t */ for_realtime:1;
+	/* boolean_t */ for_realtime:1,
 	/* Might be needed for realtime code path */
+#if FBDP_DEBUG_OBJECT_NO_PAGER
+	/* boolean_t */ fbdp_tracked:1,
+	    __object1_unused_bits:4;
+#else /* FBDP_DEBUG_OBJECT_NO_PAGER */
+	__object1_unused_bits:5;
+#endif /* FBDP_DEBUG_OBJECT_NO_PAGER */
 
 	queue_chain_t           cached_list;    /* Attachment point for the
 	                                         * list of objects cached as a
@@ -408,11 +415,13 @@ extern void vm_object_access_tracking(vm_object_t object,
     uint32_t *acess_tracking_writes);
 #endif /* VM_OBJECT_ACCESS_TRACKING */
 
-extern const vm_object_t kernel_object;          /* the single kernel object */
+extern const vm_object_t kernel_object_default;          /* the default kernel object */
 
 extern const vm_object_t compressor_object;      /* the single compressor object */
 
-extern const vm_object_t retired_pages_object;   /* holds VM pages which should never be used */
+extern const vm_object_t retired_pages_object;   /* pages retired due to ECC, should never be used */
+
+#define is_kernel_object(object) ((object) == kernel_object_default)
 
 # define        VM_MSYNC_INITIALIZED                    0
 # define        VM_MSYNC_SYNCHRONIZING                  1
@@ -466,7 +475,7 @@ extern lck_attr_t               vm_map_lck_attr;
 	    VM_OBJECT_WIRED_DEQUEUE((object));                                          \
     }                                                                                   \
     if (VM_KERN_MEMORY_NONE != (object)->wire_tag) {                                    \
-	vm_tag_update_size((object)->wire_tag, -ptoa_64((object)->wired_page_count));   \
+	vm_tag_update_size((object)->wire_tag, -ptoa_64((object)->wired_page_count), (object));   \
 	(object)->wire_tag = VM_KERN_MEMORY_NONE;                                       \
     }                                                                                   \
     MACRO_END
@@ -489,10 +498,10 @@ extern lck_attr_t               vm_map_lck_attr;
 	            if (VM_KERN_MEMORY_NONE == __waswired) {                            \
 	                VM_OBJECT_WIRED((object), (tag));                               \
 	            }                                                                   \
-	            vm_tag_update_size((object)->wire_tag, ptoa_64(__wireddelta));      \
+	            vm_tag_update_size((object)->wire_tag, ptoa_64(__wireddelta), (object));      \
 	        } else if (VM_KERN_MEMORY_NONE != __waswired) {                         \
 	            assert (VM_KERN_MEMORY_NONE != (object)->wire_tag);                 \
-	            vm_tag_update_size((object)->wire_tag, ptoa_64(__wireddelta));      \
+	            vm_tag_update_size((object)->wire_tag, ptoa_64(__wireddelta), (object));      \
 	            if (!(object)->wired_page_count) {                                  \
 	                VM_OBJECT_UNWIRED((object));                                    \
 	            }                                                                   \
@@ -540,7 +549,7 @@ extern boolean_t        vm_object_lock_upgrade(vm_object_t);
 
 #define vm_object_lock_init(object)                                     \
 	lck_rw_init(&(object)->Lock, &vm_object_lck_grp,                \
-	            ((object) == kernel_object ?                        \
+	            (is_kernel_object(object) ?                         \
 	             &kernel_object_lck_attr :                          \
 	             (((object) == compressor_object) ?                 \
 	             &compressor_object_lck_attr :                      \
@@ -554,21 +563,14 @@ extern boolean_t        vm_object_lock_upgrade(vm_object_t);
  * check if anyone is holding the lock, but the holder may not necessarily
  * be the caller...
  */
-#if MACH_ASSERT || DEBUG
 #define vm_object_lock_assert_held(object) \
-	lck_rw_assert(&(object)->Lock, LCK_RW_ASSERT_HELD)
+	LCK_RW_ASSERT(&(object)->Lock, LCK_RW_ASSERT_HELD)
 #define vm_object_lock_assert_shared(object) \
-	lck_rw_assert(&(object)->Lock, LCK_RW_ASSERT_SHARED)
+	LCK_RW_ASSERT(&(object)->Lock, LCK_RW_ASSERT_SHARED)
 #define vm_object_lock_assert_exclusive(object) \
-	lck_rw_assert(&(object)->Lock, LCK_RW_ASSERT_EXCLUSIVE)
+	LCK_RW_ASSERT(&(object)->Lock, LCK_RW_ASSERT_EXCLUSIVE)
 #define vm_object_lock_assert_notheld(object) \
-	lck_rw_assert(&(object)->Lock, LCK_RW_ASSERT_NOTHELD)
-#else  /* MACH_ASSERT || DEBUG */
-#define vm_object_lock_assert_held(object)
-#define vm_object_lock_assert_shared(object)
-#define vm_object_lock_assert_exclusive(object)
-#define vm_object_lock_assert_notheld(object)
-#endif /* MACH_ASSERT || DEBUG */
+	LCK_RW_ASSERT(&(object)->Lock, LCK_RW_ASSERT_NOTHELD)
 
 
 /*
@@ -716,6 +718,7 @@ __private_extern__ kern_return_t        vm_object_copy_strategically(
 	vm_object_t             src_object,
 	vm_object_offset_t      src_offset,
 	vm_object_size_t        size,
+	bool                    forking,
 	vm_object_t             *dst_object,
 	vm_object_offset_t      *dst_offset,
 	boolean_t               *dst_needs_copy);
@@ -884,14 +887,10 @@ extern void vm_io_reprioritize_init(void);
 #define VM_OBJECT_EVENT_PAGER_READY             1
 #define VM_OBJECT_EVENT_PAGING_IN_PROGRESS      2
 #define VM_OBJECT_EVENT_MAPPING_IN_PROGRESS     3
-#define VM_OBJECT_EVENT_LOCK_IN_PROGRESS        4
-#define VM_OBJECT_EVENT_UNCACHING               5
-#define VM_OBJECT_EVENT_COPY_CALL               6
-#define VM_OBJECT_EVENT_CACHING                 7
-#define VM_OBJECT_EVENT_UNBLOCKED               8
-#define VM_OBJECT_EVENT_PAGING_ONLY_IN_PROGRESS 9
+#define VM_OBJECT_EVENT_UNBLOCKED               4
+#define VM_OBJECT_EVENT_PAGING_ONLY_IN_PROGRESS 5
 
-#define VM_OBJECT_EVENT_MAX 10 /* 11 bits in "all_wanted", so 0->10 */
+#define VM_OBJECT_EVENT_MAX 5 /* 6 bits in "all_wanted", so 0->5 */
 
 static __inline__ wait_result_t
 vm_object_assert_wait(

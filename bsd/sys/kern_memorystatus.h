@@ -33,6 +33,7 @@
 #include <mach_debug/zone_info.h>
 #include <sys/proc.h>
 #include <sys/reason.h>
+#include <stdbool.h>
 
 #define MEMORYSTATUS_ENTITLEMENT "com.apple.private.memorystatus"
 
@@ -379,6 +380,9 @@ __END_DECLS
 
 #define MEMORYSTATUS_CMD_CONVERT_MEMLIMIT_MB 28 /* Given a memlimit value (which may be 0 or -1), convert it to an actual limit in megabytes. */
 
+#define MEMORYSTATUS_CMD_SET_DIAG_LIMIT               30 /* Set the diagnostics memory limit */
+#define MEMORYSTATUS_CMD_GET_DIAG_LIMIT               31 /* Get the diagnostics memory limit */
+
 /* Commands that act on a group of processes */
 #define MEMORYSTATUS_CMD_GRP_SET_PROPERTIES           100
 
@@ -477,6 +481,15 @@ typedef struct memorystatus_memlimit_properties2 {
 } memorystatus_memlimit_properties2_t;
 
 #define MEMORYSTATUS_MEMLIMIT_ATTR_FATAL        0x1     /* if set, exceeding the memlimit is fatal */
+/*
+ * For use with diagnostics memorystatus_control:
+ * MEMORYSTATUS_CMD_SET_DIAG_LIMIT
+ */
+typedef struct memorystatus_diag_memlimit_properties {
+	uint64_t memlimit;                       /* max limit for memory usage before an exception is thrown expressed in bytes, but rounded internally to Mbytes */
+	bool     threshold_enabled;              /* Current status of the diagnostics threshold, only for get operations, not consider in set threshold */
+} memorystatus_diag_memlimit_properties_t;
+
 
 #ifdef XNU_KERNEL_PRIVATE
 
@@ -612,6 +625,7 @@ void memorystatus_knote_unregister(struct knote *kn);
 
 #if CONFIG_MEMORYSTATUS
 void memorystatus_log_exception(const int max_footprint_mb, boolean_t memlimit_is_active, boolean_t memlimit_is_fatal);
+void memorystatus_log_diag_threshold_exception(const int diag_threshold_value);
 void memorystatus_on_ledger_footprint_exceeded(int warning, boolean_t memlimit_is_active, boolean_t memlimit_is_fatal);
 void proc_memstat_skip(proc_t p, boolean_t set);
 void memorystatus_proc_flags_unsafe(void * v, boolean_t *is_dirty, boolean_t *is_dirty_tracked, boolean_t *allow_idle_exit);

@@ -424,6 +424,7 @@ __END_DECLS
 #define CPUFAMILY_INTEL_SKYLAKE         0x37fc219f
 #define CPUFAMILY_INTEL_KABYLAKE        0x0f817246
 #define CPUFAMILY_INTEL_ICELAKE         0x38435547
+#define CPUFAMILY_INTEL_COMETLAKE       0x1cf8a03e
 #define CPUFAMILY_ARM_9                 0xe73283ae
 #define CPUFAMILY_ARM_11                0x8ff620d8
 #define CPUFAMILY_ARM_XSCALE            0x53b005f5
@@ -448,10 +449,9 @@ __END_DECLS
 #define CPUSUBFAMILY_ARM_HP             1
 #define CPUSUBFAMILY_ARM_HG             2
 #define CPUSUBFAMILY_ARM_M              3
-#ifndef RC_HIDE_XNU_FIRESTORM
 #define CPUSUBFAMILY_ARM_HS             4
 #define CPUSUBFAMILY_ARM_HC_HD          5
-#endif /* !RC_HIDE_XNU_FIRESTORM */
+#define CPUSUBFAMILY_ARM_HA             6
 
 /* The following synonyms are deprecated: */
 #define CPUFAMILY_INTEL_6_23    CPUFAMILY_INTEL_PENRYN

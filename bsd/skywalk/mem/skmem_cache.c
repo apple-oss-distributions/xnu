@@ -31,6 +31,7 @@
 #include <pexpert/pexpert.h>    /* for PE_parse_boot_argn */
 #include <libkern/OSDebug.h>    /* for OSBacktrace */
 #include <kern/sched_prim.h>    /* for assert_wait */
+#include <vm/vm_memtag.h>
 
 /*
  * Memory allocator with per-CPU caching (magazines), derived from the kmem
@@ -825,6 +826,10 @@ skmem_cache_create(const char *name, size_t bufsize, size_t bufalign,
 		skmem_cache_magazine_enable(skm, 0);
 	}
 
+	if (cflags & SKMEM_CR_RECLAIM) {
+		skm->skm_mode |= SKM_MODE_RECLAIM;
+	}
+
 	return skm;
 }
 
@@ -845,7 +850,6 @@ skmem_cache_destroy(struct skmem_cache *skm)
 
 	/* purge all cached objects for this cache */
 	skmem_cache_magazine_purge(skm);
-
 
 	/*
 	 * Panic if we detect there are unfreed objects; the caller
@@ -989,7 +993,7 @@ slab_alloc_failure:
 	skmem_region_free(skr, slab, slabm);
 
 rg_alloc_failure:
-	atomic_add_64(&skm->skm_sl_alloc_fail, 1);
+	os_atomic_inc(&skm->skm_sl_alloc_fail, relaxed);
 
 	return NULL;
 }
@@ -1040,6 +1044,10 @@ skmem_slab_alloc_locked(struct skmem_cache *skm, struct skmem_obj_info *oi,
 	uint64_t boff = 0;                      /* in msec */
 	boolean_t new_slab;
 	void *buf;
+#if CONFIG_KERNEL_TAGGING
+	vm_offset_t tagged_address;             /* address tagging */
+	struct skmem_region *region;            /* region source for this slab */
+#endif /* CONFIG_KERNEL_TAGGING */
 
 	/* this flag is not for the caller to set */
 	VERIFY(!(skmflag & SKMEM_FAILOK));
@@ -1165,7 +1173,31 @@ again:
 	 * Also store the master object's region info for the caller.
 	 */
 	bzero(oi, sizeof(*oi));
-	SKMEM_OBJ_ADDR(oi) = buf = bc->bc_addr;
+#if CONFIG_KERNEL_TAGGING
+	region = sl->sl_cache->skm_region;
+	if (region->skr_mode & SKR_MODE_MEMTAG) {
+		/*
+		 * If this region is configured to be tagged, we generate a
+		 * unique tag for the object address, and return this tagged
+		 * address to the caller. vm_memtag_assign_tag generates a
+		 * unique tag for the given address and size, and
+		 * vm_memtag_set_tag commits the tag to the backing memory
+		 * metadata. This tagged address is returned back to the client,
+		 * and when the client frees the address, we "re-tag" the
+		 * address to prevent against use-after-free attacks (more on
+		 * this in skmem_cache_batch_free).
+		 */
+		tagged_address = vm_memtag_assign_tag((vm_offset_t)bc->bc_addr,
+		    skm->skm_objsize);
+		vm_memtag_set_tag(tagged_address, skm->skm_objsize);
+		buf = (void *)tagged_address;
+	} else {
+		buf = bc->bc_addr;
+	}
+#else /* !CONFIG_KERNEL_TAGGING */
+	buf = bc->bc_addr;
+#endif /* CONFIG_KERNEL_TAGGING */
+	SKMEM_OBJ_ADDR(oi) = buf;
 	SKMEM_OBJ_BUFCTL(oi) = bc;      /* master only; NULL for slave */
 	ASSERT(skm->skm_objsize <= UINT32_MAX);
 	SKMEM_OBJ_SIZE(oi) = (uint32_t)skm->skm_objsize;
@@ -1258,7 +1290,7 @@ skmem_slab_alloc_pseudo_locked(struct skmem_cache *skm,
 	ASSERT(!(skm->skm_mode & SKM_MODE_BATCH));
 
 	if ((obj = zalloc_flags(skr->skr_zreg, zflags | Z_ZERO)) == NULL) {
-		atomic_add_64(&skm->skm_sl_alloc_fail, 1);
+		os_atomic_inc(&skm->skm_sl_alloc_fail, relaxed);
 		return ENOMEM;
 	}
 
@@ -1381,6 +1413,15 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 	struct skmem_bufctl *bc, *tbc;
 	struct skmem_bufctl_bkt *bcb;
 	struct skmem_slab *sl = NULL;
+#if CONFIG_KERNEL_TAGGING
+	struct skmem_region *region;
+	vm_offset_t tagged_addr;
+	/*
+	 * If buf is tagged, then addr would have the canonicalized address.
+	 * If buf is untagged, then addr is same as buf.
+	 */
+	void *addr = (void *)vm_memtag_canonicalize_address((vm_offset_t)buf);
+#endif /* CONFIG_KERNEL_TAGGING */
 
 	SKM_SLAB_LOCK_ASSERT_HELD(skm);
 	ASSERT(buf != NULL);
@@ -1396,6 +1437,23 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 	 */
 	skm->skm_sl_free++;
 	bcb = SKMEM_CACHE_HASH(skm, buf);
+
+#if CONFIG_KERNEL_TAGGING
+	/*
+	 * If this region is configured to tag memory addresses, then buf is a
+	 * tagged address. When we search for the buffer control from the hash
+	 * table, we need to use the untagged address, because buffer control
+	 * maintains untagged address (bc_addr). vm_memtag_canonicalize_address
+	 * returns the untagged address.
+	 */
+	SLIST_FOREACH_SAFE(bc, &bcb->bcb_head, bc_link, tbc) {
+		if (bc->bc_addr == addr) {
+			SLIST_REMOVE(&bcb->bcb_head, bc, skmem_bufctl, bc_link);
+			sl = bc->bc_slab;
+			break;
+		}
+	}
+#else /* !CONFIG_KERNEL_TAGGING */
 	SLIST_FOREACH_SAFE(bc, &bcb->bcb_head, bc_link, tbc) {
 		if (bc->bc_addr == buf) {
 			SLIST_REMOVE(&bcb->bcb_head, bc, skmem_bufctl, bc_link);
@@ -1403,6 +1461,7 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 			break;
 		}
 	}
+#endif /* CONFIG_KERNEL_TAGGING */
 
 	if (bc == NULL) {
 		panic("%s: attempt to free invalid or already-freed obj %p "
@@ -1411,7 +1470,16 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 		__builtin_unreachable();
 	}
 	ASSERT(sl != NULL && sl->sl_cache == skm);
+
+#if CONFIG_KERNEL_TAGGING
+	/*
+	 * We use untagged address here, because SKMEM_SLAB_MEMBER compares the
+	 * address against sl_base, which is untagged.
+	 */
+	VERIFY(SKMEM_SLAB_MEMBER(sl, addr));
+#else /* !CONFIG_KERNEL_TAGGING */
 	VERIFY(SKMEM_SLAB_MEMBER(sl, buf));
+#endif /* CONFIG_KERNEL_TAGGING */
 
 	/* make sure this object is not currently in use by another object */
 	VERIFY(bc->bc_usecnt == 0);
@@ -1425,6 +1493,28 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 	if (skm->skm_mode & SKM_MODE_CLEARONFREE) {
 		bzero(buf, skm->skm_objsize);
 	}
+
+#if CONFIG_KERNEL_TAGGING
+	/*
+	 * If this region is configured to tag memory addresses, we re-tag this
+	 * address as the object is freed. We do the re-tagging in the magazine
+	 * layer too, but in case we need to free raw objects to the slab layer
+	 * (either becasue SKM_MODE_NOMAGAZINES is set, or the magazine layer
+	 * was not able to allocate empty magazines), we re-tag the addresses
+	 * here in the slab layer. Freeing to the slab layer is symmetrical to
+	 * allocating from the slab layer - when we allocate from slab layer, we
+	 * tag the address, and then construct the object; when we free to the
+	 * slab layer, we destruct the object, and retag the address.
+	 * We do the re-tagging here, because this is right after the last usage
+	 * of the buf variable (which is tagged).
+	 */
+	region = skm->skm_region;
+	if (region->skr_mode & SKR_MODE_MEMTAG) {
+		tagged_addr = vm_memtag_assign_tag((vm_offset_t)buf,
+		    skm->skm_objsize);
+		vm_memtag_set_tag(tagged_addr, skm->skm_objsize);
+	}
+#endif /* CONFIG_KERNEL_TAGGING */
 
 	/* insert the buffer control to the slab's freelist */
 	SLIST_INSERT_HEAD(&sl->sl_head, bc, bc_link);
@@ -1824,7 +1914,7 @@ skmem_depot_ws_reap(struct skmem_cache *skm)
 	}
 
 	if (f != 0 || e != 0) {
-		atomic_add_32(&skm->skm_cpu_mag_reap, 1);
+		os_atomic_inc(&skm->skm_cpu_mag_reap, relaxed);
 	}
 }
 
@@ -2092,8 +2182,8 @@ skmem_cache_batch_alloc(struct skmem_cache *skm, struct skmem_obj **list,
 			if (skm->skm_ctor(oi, ((SKMEM_OBJ_ADDR(oim) != NULL) ?
 			    oim : NULL), skm->skm_private, skmflag) != 0) {
 				VERIFY(rlist->mo_next == rlistn);
-				atomic_add_64(&skm->skm_sl_alloc_fail,
-				    rlistc - c);
+				os_atomic_add(&skm->skm_sl_alloc_fail,
+				    rlistc - c, relaxed);
 				if (rlistp != NULL) {
 					rlistp->mo_next = NULL;
 				}
@@ -2151,7 +2241,7 @@ skmem_cache_batch_alloc(struct skmem_cache *skm, struct skmem_obj **list,
 		if (skm->skm_ctor != NULL &&
 		    skm->skm_ctor(&oi, ((SKMEM_OBJ_ADDR(&oim) != NULL) ?
 		    &oim : NULL), skm->skm_private, skmflag) != 0) {
-			atomic_add_64(&skm->skm_sl_alloc_fail, 1);
+			os_atomic_inc(&skm->skm_sl_alloc_fail, relaxed);
 			skmem_slab_free(skm, buf);
 			goto done;
 		}
@@ -2191,6 +2281,10 @@ skmem_cache_batch_free(struct skmem_cache *skm, struct skmem_obj *list)
 	struct skmem_magtype *mtp;
 	struct skmem_mag *mg;
 	struct skmem_obj *listn;
+#if CONFIG_KERNEL_TAGGING
+	vm_offset_t tagged_address;           /* address tagging */
+	struct skmem_region *region;          /* region source for this cache */
+#endif /* CONFIG_KERNEL_TAGGING */
 
 	/* if auditing is enabled, record this transaction */
 	if (__improbable((skm->skm_mode & SKM_MODE_AUDIT) != 0)) {
@@ -2218,8 +2312,32 @@ skmem_cache_batch_free(struct skmem_cache *skm, struct skmem_obj *list)
 			} else {
 				listn = NULL;
 			}
-
+#if CONFIG_KERNEL_TAGGING
+			/*
+			 * If this region is configured to be tagged, we re-tag
+			 * the address that's being freed, to protect against
+			 * use-after-free bugs. This "re-tagged" address will
+			 * reside in the CPU's loaded magazine, and when cache
+			 * alloc is called, it is returned to client as is. At
+			 * this point, we know that this object will be freed to
+			 * the CPU's loaded magazine and not down to the slab
+			 * layer, so we won't be double tagging the same address
+			 * in the magazine layer and slab layer.
+			 */
+			region = skm->skm_region;
+			if (region->skr_mode & SKR_MODE_MEMTAG) {
+				tagged_address = vm_memtag_assign_tag(
+					(vm_offset_t)list, skm->skm_objsize);
+				vm_memtag_set_tag(tagged_address,
+				    skm->skm_objsize);
+				cp->cp_loaded->mg_round[cp->cp_rounds++] =
+				    (void *)tagged_address;
+			} else {
+				cp->cp_loaded->mg_round[cp->cp_rounds++] = list;
+			}
+#else /* !CONFIG_KERNEL_TAGGING */
 			cp->cp_loaded->mg_round[cp->cp_rounds++] = list;
+#endif /* CONFIG_KERNEL_TAGGING */
 			cp->cp_free++;
 
 			if ((list = listn) != NULL) {
@@ -2452,7 +2570,7 @@ skmem_cache_magazine_purge(struct skmem_cache *skm)
 	}
 
 	if (mg_cnt != 0 || pmg_cnt != 0) {
-		atomic_add_32(&skm->skm_cpu_mag_purge, 1);
+		os_atomic_inc(&skm->skm_cpu_mag_purge, relaxed);
 	}
 
 	skmem_depot_ws_zero(skm);
@@ -2759,7 +2877,7 @@ skmem_cache_reap_done(void)
 	volatile uint32_t *flag = &skmem_cache_reaping;
 
 	*flag = 0;
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 }
 
 /*
@@ -2769,7 +2887,8 @@ skmem_cache_reap_done(void)
 void
 skmem_cache_reap_now(struct skmem_cache *skm, boolean_t purge)
 {
-	if (purge) {
+	/* if SKM_MODE_RECLIAM flag is set for this cache, we purge */
+	if (purge || (skm->skm_mode & SKM_MODE_RECLAIM)) {
 		/*
 		 * If another thread is in the process of purging or
 		 * resizing, bail out and let the currently-ongoing
@@ -2783,6 +2902,30 @@ skmem_cache_reap_now(struct skmem_cache *skm, boolean_t purge)
 	} else {
 		skmem_depot_ws_zero(skm);
 		skmem_depot_ws_reap(skm);
+
+		/* clean up cp_ploaded magazines from each CPU */
+		SKM_SLAB_LOCK_ASSERT_NOTHELD(skm);
+
+		struct skmem_cpu_cache *cp;
+		struct skmem_mag *pmg;
+		int prounds;
+		uint32_t cpuid;
+
+		for (cpuid = 0; cpuid < ncpu; cpuid++) {
+			cp = &skm->skm_cpu_cache[cpuid];
+
+			SKM_CPU_LOCK_SPIN(cp);
+			pmg = cp->cp_ploaded;
+			prounds = cp->cp_prounds;
+
+			cp->cp_ploaded = NULL;
+			cp->cp_prounds = -1;
+			SKM_CPU_UNLOCK(cp);
+
+			if (pmg != NULL) {
+				skmem_magazine_destroy(skm, pmg, prounds);
+			}
+		}
 	}
 }
 
@@ -2794,7 +2937,7 @@ skmem_cache_reap(void)
 {
 	/* only one reaping episode is allowed at a time */
 	if (skmem_lock_owner == current_thread() ||
-	    !atomic_test_set_32(&skmem_cache_reaping, 0, 1)) {
+	    !os_atomic_cmpxchg(&skmem_cache_reaping, 0, 1, acq_rel)) {
 		return;
 	}
 
@@ -2928,6 +3071,21 @@ skmem_cache_mib_get_stats(struct skmem_cache *skm, void *out, size_t len)
 		contention = 0;
 	}
 	sca->sca_depot_contention_factor = contention;
+
+	sca->sca_cpu_rounds = 0;
+	sca->sca_cpu_prounds = 0;
+	for (int cpuid = 0; cpuid < ncpu; cpuid++) {
+		struct skmem_cpu_cache *ccp = &skm->skm_cpu_cache[cpuid];
+
+		SKM_CPU_LOCK(ccp);
+		if (ccp->cp_rounds > -1) {
+			sca->sca_cpu_rounds += ccp->cp_rounds;
+		}
+		if (ccp->cp_prounds > -1) {
+			sca->sca_cpu_prounds += ccp->cp_prounds;
+		}
+		SKM_CPU_UNLOCK(ccp);
+	}
 
 	sca->sca_sl_create = skm->skm_sl_create;
 	sca->sca_sl_destroy = skm->skm_sl_destroy;

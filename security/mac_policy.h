@@ -2355,25 +2355,6 @@ typedef int mpo_proc_check_getauid_t(
 	kauth_cred_t cred
 	);
 /**
- *  @brief Access control check for retrieving Login Context ID
- *  @param p0 Calling process
- *  @param p Effected process
- *  @param pid syscall PID argument
- *
- *  Determine if getlcid(2) system call is permitted.
- *
- *  Information returned by this system call is similar to that returned via
- *  process listings etc.
- *
- *  @return Return 0 if access is granted, otherwise an appropriate value for
- *  errno should be returned.
- */
-typedef int mpo_proc_check_getlcid_t(
-	struct proc *p0,
-	struct proc *p,
-	pid_t pid
-	);
-/**
  *  @brief Access control check for retrieving ledger information
  *  @param cred Subject credential
  *  @param target Object process
@@ -2560,29 +2541,6 @@ typedef int mpo_proc_check_setaudit_t(
 typedef int mpo_proc_check_setauid_t(
 	kauth_cred_t cred,
 	uid_t auid
-	);
-/**
- *  @brief Access control check for setting the Login Context
- *  @param p0 Calling process
- *  @param p Effected process
- *  @param pid syscall PID argument
- *  @param lcid syscall LCID argument
- *
- *  Determine if setlcid(2) system call is permitted.
- *
- *  See xnu/bsd/kern/kern_prot.c:setlcid() implementation for example of
- *  decoding syscall arguments to determine action desired by caller.
- *
- *  Five distinct actions are possible: CREATE JOIN LEAVE ADOPT ORPHAN
- *
- *  @return Return 0 if access is granted, otherwise an appropriate value for
- *  errno should be returned.
- */
-typedef int mpo_proc_check_setlcid_t(
-	struct proc *p0,
-	struct proc *p,
-	pid_t pid,
-	pid_t lcid
 	);
 /**
  *  @brief Access control check for delivering signal
@@ -3897,6 +3855,25 @@ typedef int mpo_proc_check_settid_t(
 	kauth_cred_t tcred,
 	uid_t uid,
 	gid_t gid
+	);
+
+/**
+ *  @brief Notification of connection port derivation from service port
+ *  @param cred Subject process credential
+ *  @param sp_info Service port info
+ *
+ *  Called when a process derives a connection port from a service port.
+ *
+ *  Notes:
+ *  - Port derivation is only mandatory if the receiving end of the
+ *    connection performs validation of that fact.
+ *  - MAC policies should not perform upcalls or expensive operations in
+ *    this hook.
+ *  - Only called on macOS.
+ */
+typedef void mpo_proc_notify_service_port_derive_t(
+	kauth_cred_t cred,
+	struct mach_service_port_info *sp_info
 	);
 
 /**
@@ -5783,7 +5760,7 @@ typedef void mpo_reserved_hook_t(void);
  * Please note that this should be kept in sync with the check assumptions
  * policy in bsd/kern/policy_check.c (policy_ops struct).
  */
-#define MAC_POLICY_OPS_VERSION 82 /* inc when new reserved slots are taken */
+#define MAC_POLICY_OPS_VERSION 84 /* inc when new reserved slots are taken */
 struct mac_policy_ops {
 	mpo_audit_check_postselect_t            *mpo_audit_check_postselect;
 	mpo_audit_check_preselect_t             *mpo_audit_check_preselect;
@@ -5833,8 +5810,8 @@ struct mac_policy_ops {
 	mpo_file_label_associate_t              *mpo_file_label_associate;  /* deprecated not called anymore */
 	mpo_file_notify_close_t                 *mpo_file_notify_close;
 	mpo_proc_check_launch_constraints_t     *mpo_proc_check_launch_constraints;
+	mpo_proc_notify_service_port_derive_t   *mpo_proc_notify_service_port_derive;
 
-	mpo_reserved_hook_t                     *mpo_reserved07;
 	mpo_reserved_hook_t                     *mpo_reserved08;
 	mpo_reserved_hook_t                     *mpo_reserved09;
 	mpo_reserved_hook_t                     *mpo_reserved10;
@@ -5966,12 +5943,12 @@ struct mac_policy_ops {
 	mpo_reserved_hook_t                     *mpo_reserved62;
 	mpo_proc_check_getaudit_t               *mpo_proc_check_getaudit;
 	mpo_proc_check_getauid_t                *mpo_proc_check_getauid;
-	mpo_proc_check_getlcid_t                *mpo_proc_check_getlcid;
+	mpo_reserved_hook_t                     *mpo_reserved63;
 	mpo_proc_check_mprotect_t               *mpo_proc_check_mprotect;
 	mpo_proc_check_sched_t                  *mpo_proc_check_sched;
 	mpo_proc_check_setaudit_t               *mpo_proc_check_setaudit;
 	mpo_proc_check_setauid_t                *mpo_proc_check_setauid;
-	mpo_proc_check_setlcid_t                *mpo_proc_check_setlcid;
+	mpo_reserved_hook_t                     *mpo_reserved64;
 	mpo_proc_check_signal_t                 *mpo_proc_check_signal;
 	mpo_proc_check_wait_t                   *mpo_proc_check_wait;
 	mpo_proc_check_dump_core_t              *mpo_proc_check_dump_core;

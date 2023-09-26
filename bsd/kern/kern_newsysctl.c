@@ -2151,17 +2151,11 @@ sysctl_test_handler SYSCTL_HANDLER_ARGS
 	int error;
 	int64_t value, out = 0;
 
-	/* require setting this sysctl to prevent sysctl -a from running this */
-	if (!req->newptr) {
-		return EINVAL;
-	}
-
-	if (req->newlen != sizeof(value)) {
-		return ERANGE;
-	}
-
 	error = SYSCTL_IN(req, &value, sizeof(value));
-	if (error == 0) {
+	/* Only run test when new value was provided to prevent just reading or
+	 * querying from triggering the test, but still allow for sysctl
+	 * presence tests via read requests with NULL oldptr */
+	if (error == 0 && req->newptr) {
 		/* call the test that was specified in SYSCTL_TEST_REGISTER */
 		error = ((int (*)(int64_t, int64_t *))(uintptr_t)arg1)(value, &out);
 	}
@@ -2180,7 +2174,7 @@ sysctl_register_test_startup(struct sysctl_test_setup_spec *spec)
 		.oid_parent     = &sysctl__debug_test_children,
 		.oid_number     = OID_AUTO,
 		.oid_kind       = CTLTYPE_QUAD | CTLFLAG_OID2 | CTLFLAG_WR |
-	    CTLFLAG_PERMANENT | CTLFLAG_LOCKED,
+	    CTLFLAG_PERMANENT | CTLFLAG_LOCKED | CTLFLAG_MASKED,
 		.oid_arg1       = (void *)(uintptr_t)spec->st_func,
 		.oid_name       = spec->st_name,
 		.oid_handler    = sysctl_test_handler,
@@ -2264,41 +2258,6 @@ SYSCTL_PROC(_kern, OID_AUTO, test_ca_event, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_L
 
 
 #if DEVELOPMENT || DEBUG
-#if CONFIG_DEFERRED_RECLAIM
-/*
- * VM reclaim testing
- */
-extern bool vm_deferred_reclamation_block_until_pid_has_been_reclaimed(pid_t pid);
-
-static int
-sysctl_vm_reclaim_drain_async_queue SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	int error = EINVAL, pid = 0;
-	/*
-	 * Only send on write
-	 */
-	error = sysctl_handle_int(oidp, &pid, 0, req);
-	if (error || !req->newptr) {
-		return error;
-	}
-
-	bool success = vm_deferred_reclamation_block_until_pid_has_been_reclaimed(pid);
-	if (success) {
-		error = 0;
-	}
-
-	return error;
-}
-
-SYSCTL_PROC(_vm, OID_AUTO, reclaim_drain_async_queue,
-    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0,
-    &sysctl_vm_reclaim_drain_async_queue, "I", "");
-
-extern uint64_t vm_reclaim_max_threshold;
-SYSCTL_QUAD(_vm, OID_AUTO, reclaim_max_threshold, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_reclaim_max_threshold, "");
-#endif /* CONFIG_DEFERRED_RECLAIM */
-
 kern_return_t
 run_compressor_perf_test(
 	user_addr_t buf,

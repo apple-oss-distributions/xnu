@@ -374,6 +374,7 @@ perfcontrol_callout_stat_avg(perfcontrol_callout_type_t type,
 }
 
 
+
 #if CONFIG_SCHED_EDGE
 
 /*
@@ -1127,6 +1128,27 @@ ml_at_interrupt_context(void)
 	 * preempted. */
 	return !ml_get_interrupts_enabled() && (getCpuDatap()->cpu_int_state != NULL);
 }
+
+/*
+ * This answers the question
+ * "after returning from this interrupt handler with the AST_URGENT bit set,
+ * will I end up in ast_taken_user or ast_taken_kernel?"
+ *
+ * If it's called in non-interrupt context (e.g. regular syscall), it should
+ * return false.
+ *
+ * Must be called with interrupts disabled.
+ */
+bool
+ml_did_interrupt_userspace(void)
+{
+	assert(ml_get_interrupts_enabled() == false);
+
+	struct arm_saved_state *state = getCpuDatap()->cpu_int_state;
+
+	return state && PSR64_IS_USER(get_saved_state_cpsr(state));
+}
+
 
 vm_offset_t
 ml_stack_remaining(void)

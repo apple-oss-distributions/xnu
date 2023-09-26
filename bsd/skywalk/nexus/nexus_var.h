@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -236,6 +236,7 @@ struct kern_nexus {
 	"\020\01ATTACHED\02CLOSED\040REJECT"
 
 #define NX_PROV(_nx)            ((_nx)->nx_prov)
+#define NX_PROV_PARAMS(_nx)     (NX_PROV(_nx)->nxprov_params)
 #define NX_DOM_PROV(_nx)        (NX_PROV(_nx)->nxprov_dom_prov)
 #define NX_DOM(_nx)             (NX_DOM_PROV(_nx)->nxdom_prov_dom)
 
@@ -413,6 +414,7 @@ struct nxdom {
 #define NXDOM_MAX(_dom, var)    ((_dom)->nxdom_##var.nb_max)
 
 extern struct nexus_controller kernnxctl;
+extern struct nexus_controller usernxctl;
 extern lck_grp_t nexus_lock_group;
 extern lck_grp_t nexus_mbq_lock_group;
 extern lck_grp_t nexus_pktq_lock_group;

@@ -338,6 +338,11 @@ extern void             thread_quantum_expire(
 	timer_call_param_t      processor,
 	timer_call_param_t      thread);
 
+/* Handle preemption timer expiration for an executing thread */
+extern void             thread_preempt_expire(
+	timer_call_param_t      processor,
+	timer_call_param_t      thread);
+
 /* Context switch check for current processor */
 extern ast_t    csw_check(
 	thread_t      thread,
@@ -346,6 +351,9 @@ extern ast_t    csw_check(
 
 /* Check for pending ASTs */
 extern void ast_check(processor_t processor);
+
+extern ast_t update_pending_nonurgent_preemption(processor_t processor, ast_t reason);
+extern void clear_pending_nonurgent_preemption(processor_t processor);
 
 extern void sched_update_generation_count(void);
 
@@ -408,7 +416,7 @@ extern uint32_t         sched_pri_shifts[TH_BUCKET_MAX];
 extern uint32_t         sched_fixed_shift;
 extern int8_t           sched_load_shifts[NRQS];
 extern uint32_t         sched_decay_usage_age_factor;
-void sched_timeshare_consider_maintenance(uint64_t ctime);
+void sched_timeshare_consider_maintenance(uint64_t ctime, bool safe_point);
 #endif /* CONFIG_SCHED_TIMESHARE_CORE */
 
 void sched_consider_recommended_cores(uint64_t ctime, thread_t thread);

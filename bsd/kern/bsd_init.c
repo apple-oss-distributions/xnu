@@ -93,7 +93,6 @@
 #include <sys/time.h>
 #include <sys/systm.h>
 #include <sys/mman.h>
-#include <sys/kasl.h>
 
 #include <security/audit/audit.h>
 
@@ -155,14 +154,16 @@
 #include <net/network_agent.h>          /* for netagent_init() */
 #include <net/packet_mangler.h>         /* for pkt_mnglr_init() */
 #include <net/if_utun.h>                /* for utun_register_control() */
-#include <net/if_ipsec.h>               /* for ipsec_register_control() */
+#include <netinet6/ipsec.h>             /* for ipsec_init() */
+#include <net/if_redirect.h>            /* for if_redirect_init() */
 #include <net/netsrc.h>                 /* for netsrc_init() */
 #include <net/ntstat.h>                 /* for nstat_init() */
-#include <netinet/tcp_cc.h>                     /* for tcp_cc_init() */
 #include <netinet/mptcp_var.h>          /* for mptcp_control_register() */
 #include <net/nwk_wq.h>                 /* for nwk_wq_init */
 #include <net/restricted_in_port.h>     /* for restricted_in_port_init() */
 #include <net/remote_vif.h>             /* for rvi_init() */
+#include <net/kctl_test.h>              /* for kctl_test_init() */
+#include <netinet/kpi_ipfilter_var.h>   /* for ipfilter_init() */
 #include <kern/assert.h>                /* for assert() */
 #include <sys/kern_overrides.h>         /* for init_system_override() */
 #include <sys/lockf.h>                  /* for lf_init() */
@@ -309,6 +310,10 @@ int use_panic_on_proc_spawn_fail = 0;
 
 char dyld_suffix[NAME_MAX];
 int use_dyld_suffix = 0;
+#endif
+
+#if DEVELOPMENT || DEBUG
+__private_extern__ bool bootarg_hide_process_traced = 0;
 #endif
 
 int     cmask = CMASK;
@@ -531,7 +536,7 @@ bsd_init(void)
 	TAILQ_INIT(&kernproc->p_uthlist);
 
 	/* set the cred */
-	kauth_cred_set(&kernproc_ro_data.p_ucred, vfs_context0.vc_ucred);
+	kauth_cred_set(&kernproc_ro_data.p_ucred.__smr_ptr, vfs_context0.vc_ucred);
 	kernproc->p_proc_ro = proc_ro_alloc(kernproc, &kernproc_ro_data,
 	    kernel_task, &kerntask_ro_data);
 
@@ -543,6 +548,9 @@ bsd_init(void)
 
 	lck_mtx_init(&kernproc->p_mlock, &proc_mlock_grp, &proc_lck_attr);
 	lck_mtx_init(&kernproc->p_ucred_mlock, &proc_ucred_mlock_grp, &proc_lck_attr);
+#if CONFIG_AUDIT
+	lck_mtx_init(&kernproc->p_audit_mlock, &proc_ucred_mlock_grp, &proc_lck_attr);
+#endif /* CONFIG_AUDIT */
 	lck_spin_init(&kernproc->p_slock, &proc_slock_grp, &proc_lck_attr);
 
 	/* Init the file descriptor table. */
@@ -622,14 +630,13 @@ bsd_init(void)
 
 	TAILQ_INSERT_TAIL(&kernproc->p_uthlist, ut, uu_list);
 
-	bsd_init_kprintf("calling kauth_cred_create\n");
 	/*
 	 * Officially associate the kernel with vfs_context0.vc_ucred.
 	 */
 #if CONFIG_MACF
 	mac_cred_label_associate_kernel(vfs_context0.vc_ucred);
 #endif
-	proc_update_creds_onproc(kernproc);
+	proc_update_creds_onproc(kernproc, vfs_context0.vc_ucred);
 
 	TAILQ_INIT(&kernproc->p_aio_activeq);
 	TAILQ_INIT(&kernproc->p_aio_doneq);
@@ -698,8 +705,10 @@ bsd_init(void)
 #endif
 
 #if SOCKETS
+#if CONFIG_MBUF_MCACHE
 	/* Initialize per-CPU cache allocator */
 	mcache_init();
+#endif /* CONFIG_MBUF_MCACHE */
 
 	/* Initialize mbuf's. */
 	bsd_init_kprintf("calling mbinit\n");
@@ -832,11 +841,10 @@ bsd_init(void)
 	 */
 	utun_register_control();
 #if IPSEC
-	ipsec_register_control();
+	ipsec_init();
 #endif /* IPSEC */
 	netsrc_init();
 	nstat_init();
-	tcp_cc_init();
 #if MPTCP
 	mptcp_control_register();
 #endif /* MPTCP */
@@ -844,6 +852,14 @@ bsd_init(void)
 #if REMOTE_VIF
 	rvi_init();
 #endif /* REMOTE_VIF */
+
+#if IF_REDIRECT
+	if_redirect_init();
+#endif /* REDIRECT */
+
+#if KCTL_TEST
+	kctl_test_init();
+#endif /* KCTL_TEST */
 
 	/*
 	 * The the networking stack is now initialized so it is a good time to call
@@ -1060,7 +1076,7 @@ bsdinit_task(void)
 	ux_handler_setup();
 
 #if CONFIG_MACF
-	mac_cred_label_associate_user(proc_ucred(p));
+	mac_cred_label_associate_user(proc_ucred_unsafe(p)); /* in init */
 #endif
 
 	vm_init_before_launchd();
@@ -1237,6 +1253,10 @@ parse_bsd_args(void)
 		if (strlen(panic_on_proc_spawn_fail) > 0) {
 			use_panic_on_proc_spawn_fail = 1;
 		}
+	}
+
+	if (PE_i_can_has_debugger(NULL) && PE_parse_boot_argn("-hide_process_traced", namep, sizeof(namep))) {
+		bootarg_hide_process_traced = 1;
 	}
 #endif /* DEVELOPMENT || DEBUG */
 }

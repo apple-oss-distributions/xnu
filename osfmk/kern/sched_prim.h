@@ -279,7 +279,15 @@ extern processor_set_t  task_choose_pset(
 	task_t                  task);
 
 /* Bind the current thread to a particular processor */
-extern processor_t              thread_bind(
+extern processor_t      thread_bind(
+	processor_t             processor);
+
+extern void             thread_bind_during_wakeup(
+	thread_t                thread,
+	processor_t             processor);
+
+extern void             thread_unbind_after_queue_shutdown(
+	thread_t                thread,
 	processor_t             processor);
 
 extern bool pset_has_stealable_threads(
@@ -308,7 +316,7 @@ extern processor_t      choose_processor(
 	processor_t                    processor,
 	thread_t                       thread);
 
-extern void sched_SMT_balance(
+extern bool sched_SMT_balance(
 	processor_t processor,
 	processor_set_t pset);
 
@@ -504,6 +512,7 @@ MACRO_END
 extern uint32_t sched_debug_flags;
 #define SCHED_DEBUG_FLAG_PLATFORM_TRACEPOINTS           0x00000001
 #define SCHED_DEBUG_FLAG_CHOOSE_PROCESSOR_TRACEPOINTS   0x00000002
+#define SCHED_DEBUG_FLAG_AST_CHECK_TRACEPOINTS   0x00000004
 
 #define SCHED_DEBUG_PLATFORM_KERNEL_DEBUG_CONSTANT(...)                         \
 MACRO_BEGIN                                                                     \
@@ -520,6 +529,15 @@ MACRO_BEGIN                                                                     
 	        KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, __VA_ARGS__);           \
 	}                                                                       \
 MACRO_END
+
+#define SCHED_DEBUG_AST_CHECK_KDBG_RELEASE(...)                                 \
+MACRO_BEGIN                                                                     \
+	if (__improbable(sched_debug_flags &                                    \
+	    SCHED_DEBUG_FLAG_AST_CHECK_TRACEPOINTS)) {                          \
+	        KDBG_RELEASE(__VA_ARGS__);                                      \
+	}                                                                       \
+MACRO_END
+
 
 /* Tells if there are "active" RT threads in the system (provided by CPU PM) */
 extern void     active_rt_threads(
@@ -972,14 +990,16 @@ struct sched_dispatch_table {
 	boolean_t   avoid_processor_enabled;
 
 	/* Returns true if this processor should avoid running this thread. */
-	bool    (*thread_avoid_processor)(processor_t processor, thread_t thread);
+	bool    (*thread_avoid_processor)(processor_t processor, thread_t thread, ast_t reason);
 
 	/*
 	 * Invoked when a processor is about to choose the idle thread
 	 * Used to send IPIs to a processor which would be preferred to be idle instead.
-	 * Called with pset lock held, returns pset lock unlocked.
+	 * Returns true if the current processor should anticipate a quick IPI reply back
+	 * from another core.
+	 * Called with pset lock held, returns with pset lock unlocked.
 	 */
-	void    (*processor_balance)(processor_t processor, processor_set_t pset);
+	bool    (*processor_balance)(processor_t processor, processor_set_t pset);
 	rt_queue_t      (*rt_runq)(processor_set_t pset);
 	void    (*rt_init)(processor_set_t pset);
 	void    (*rt_queue_shutdown)(processor_t processor);

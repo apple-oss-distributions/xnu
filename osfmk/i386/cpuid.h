@@ -279,6 +279,7 @@
 #define CPUID_MODEL_ICELAKE_ULX         0x7E
 #define CPUID_MODEL_ICELAKE_DT          0x7D
 #define CPUID_MODEL_ICELAKE_H           0x9F
+#define CPUID_MODEL_COMETLAKE_DT        0xA5
 
 #define CPUID_VMM_FAMILY_NONE           0x0
 #define CPUID_VMM_FAMILY_UNKNOWN        0x1

@@ -121,7 +121,7 @@ common_hook(void)
 	return rv;
 }
 
-#if (MAC_POLICY_OPS_VERSION != 82)
+#if (MAC_POLICY_OPS_VERSION != 84)
 # error "struct mac_policy_ops doesn't match definition in mac_policy.h"
 #endif
 /*
@@ -179,8 +179,8 @@ const static struct mac_policy_ops policy_ops = {
 	CHECK_SET_HOOK(file_label_associate)
 	CHECK_SET_HOOK(file_notify_close)
 	CHECK_SET_HOOK(proc_check_launch_constraints)
+	CHECK_SET_HOOK(proc_notify_service_port_derive)
 
-	.mpo_reserved07 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved08 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved09 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved10 = (mpo_reserved_hook_t *)common_hook,
@@ -314,12 +314,12 @@ const static struct mac_policy_ops policy_ops = {
 	.mpo_reserved62 = (mpo_reserved_hook_t *)common_hook,
 	CHECK_SET_HOOK(proc_check_getaudit)
 	CHECK_SET_HOOK(proc_check_getauid)
-	CHECK_SET_HOOK(proc_check_getlcid)
+	.mpo_reserved63 = (mpo_reserved_hook_t *)common_hook,
 	CHECK_SET_HOOK(proc_check_mprotect)
 	CHECK_SET_HOOK(proc_check_sched)
 	CHECK_SET_HOOK(proc_check_setaudit)
 	CHECK_SET_HOOK(proc_check_setauid)
-	CHECK_SET_HOOK(proc_check_setlcid)
+	.mpo_reserved64 = (mpo_reserved_hook_t *)common_hook,
 	CHECK_SET_HOOK(proc_check_signal)
 	CHECK_SET_HOOK(proc_check_wait)
 	CHECK_SET_HOOK(proc_check_dump_core)

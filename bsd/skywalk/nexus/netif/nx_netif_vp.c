@@ -422,9 +422,9 @@ netif_vp_na_activate_on(struct nexus_adapter *na)
 		return err;
 	}
 	nifna->nifna_flow = nf;
-	atomic_add_16(&nx_netif_vpna_gencnt, 1);
+	os_atomic_inc(&nx_netif_vpna_gencnt, relaxed);
 	nifna->nifna_gencnt = nx_netif_vpna_gencnt;
-	atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
+	os_atomic_or(&na->na_flags, NAF_ACTIVE, relaxed);
 	return 0;
 }
 
@@ -448,7 +448,7 @@ netif_vp_na_activate_off(struct nexus_adapter *na)
 	if (NETIF_IS_LOW_LATENCY(nif)) {
 		netif_hwna_teardown(nif);
 	}
-	atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+	os_atomic_andnot(&na->na_flags, NAF_ACTIVE, relaxed);
 	return 0;
 }
 
@@ -921,7 +921,7 @@ netif_vp_na_mem_new(struct kern_nexus *nx, struct nexus_adapter *na)
 	}
 	na->na_arena = skmem_arena_create_for_nexus(na, srp,
 	    tx_pp != NULL ? &tx_pp : NULL, NULL,
-	    0, &nx->nx_adv, &err);
+	    FALSE, FALSE, &nx->nx_adv, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 	return err;
 }
@@ -1011,12 +1011,12 @@ netif_vp_na_create(struct kern_nexus *nx, struct chreq *chr,
 	ASSERT(na_get_nslots(na, NR_TX) <= NX_DOM(nx)->nxdom_tx_slots.nb_max);
 	ASSERT(na_get_nslots(na, NR_RX) <= NX_DOM(nx)->nxdom_rx_slots.nb_max);
 
-	atomic_bitset_32(&na->na_flags, NAF_USER_PKT_POOL);
+	os_atomic_or(&na->na_flags, NAF_USER_PKT_POOL, relaxed);
 
 	if (chr->cr_mode & CHMODE_EVENT_RING) {
 		na_set_nrings(na, NR_EV, NX_NETIF_EVENT_RING_NUM);
 		na_set_nslots(na, NR_EV, NX_NETIF_EVENT_RING_SIZE);
-		atomic_bitset_32(&na->na_flags, NAF_EVENT_RING);
+		os_atomic_or(&na->na_flags, NAF_EVENT_RING, relaxed);
 		na->na_channel_event_notify = netif_vp_na_channel_event_notify;
 	}
 
@@ -1088,6 +1088,14 @@ netif_vp_na_channel_event_notify(struct nexus_adapter *vpna,
 	struct __kern_channel_ring *ring = &vpna->na_event_rings[0];
 	struct netif_stats *nifs = &NIFNA(vpna)->nifna_netif->nif_stats;
 
+	if (__probable(ev->ev_type == CHANNEL_EVENT_PACKET_TRANSMIT_STATUS)) {
+		STATS_INC(nifs, NETIF_STATS_EV_RECV_TX_STATUS);
+	}
+	if (__improbable(ev->ev_type == CHANNEL_EVENT_PACKET_TRANSMIT_EXPIRED)) {
+		STATS_INC(nifs, NETIF_STATS_EV_RECV_TX_EXPIRED);
+	}
+	STATS_INC(nifs, NETIF_STATS_EV_RECV);
+
 	if (__improbable(!NA_IS_ACTIVE(vpna))) {
 		STATS_INC(nifs, NETIF_STATS_EV_DROP_NA_INACTIVE);
 		err = ENXIO;
@@ -1117,7 +1125,7 @@ netif_vp_na_channel_event_notify(struct nexus_adapter *vpna,
 	buf = __packet_get_next_buflet(ph, NULL);
 	baddr = __buflet_get_data_address(buf);
 	emd = (struct __kern_channel_event_metadata *)(void *)baddr;
-	emd->emd_etype = CHANNEL_EVENT_PACKET_TRANSMIT_STATUS;
+	emd->emd_etype = ev->ev_type;
 	emd->emd_nevents = 1;
 	bcopy(ev, (baddr + __KERN_CHANNEL_EVENT_OFFSET), ev_len);
 	err = __buflet_set_data_length(buf,
@@ -1186,6 +1194,11 @@ netif_vp_na_channel_event(struct nx_netif *nif, uint32_t nx_port_id,
 	int err = 0;
 	struct nexus_adapter *netif_vpna;
 	struct netif_stats *nifs = &nif->nif_stats;
+
+	SK_DF(SK_VERB_EVENTS, "%s[%d] ev: %p ev_len: %hu "
+	    "ev_type: %u ev_flags: %u _reserved: %hu ev_dlen: %hu",
+	    if_name(nif->nif_ifp), nx_port_id, event, event_len,
+	    event->ev_type, event->ev_flags, event->_reserved, event->ev_dlen);
 
 	NETIF_RLOCK(nif);
 	if (!NETIF_IS_LOW_LATENCY(nif)) {

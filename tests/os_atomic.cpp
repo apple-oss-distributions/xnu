@@ -8,9 +8,9 @@ T_GLOBAL_META(
 
 T_DECL(os_atomic, "Just to make sure things build at all in c++ mode")
 {
-	os_atomic(int) i = 0;
+	static os_atomic(int) i;
+	static volatile int v_i = 0;
 	int old_i = 0;
-	volatile int v_i = 0;
 	int a, b;
 
 	T_ASSERT_EQ(os_atomic_inc_orig(&i, relaxed), 0, "atomic inc");

@@ -75,6 +75,7 @@ module Darwin.machine [system] {
     header "i386/endian.h"
     #endif
     header "arm/endian.h"
+    header "sys/_endian.h"
 
     export *
   }

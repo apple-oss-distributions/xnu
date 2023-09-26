@@ -73,6 +73,53 @@ reallocf(void *ptr, size_t size)
 }
 
 __attribute__((visibility("hidden")))
+void *
+malloc_type_malloc(size_t size, malloc_type_id_t type_id)
+{
+	if (_libkernel_functions->version >= 5) {
+		if (_libkernel_functions->malloc_type_malloc) {
+			return _libkernel_functions->malloc_type_malloc(size, type_id);
+		}
+	}
+	return malloc(size);
+}
+
+__attribute__((visibility("hidden")))
+void
+malloc_type_free(void *ptr, malloc_type_id_t type_id)
+{
+	if (_libkernel_functions->version >= 5) {
+		if (_libkernel_functions->malloc_type_free) {
+			return _libkernel_functions->malloc_type_free(ptr, type_id);
+		}
+	}
+	return free(ptr);
+}
+
+__attribute__((visibility("hidden")))
+void *
+malloc_type_realloc(void *ptr, size_t size, malloc_type_id_t type_id)
+{
+	if (_libkernel_functions->version >= 5) {
+		if (_libkernel_functions->malloc_type_realloc) {
+			return _libkernel_functions->malloc_type_realloc(ptr, size, type_id);
+		}
+	}
+	return realloc(ptr, size);
+}
+
+__attribute__((visibility("hidden")))
+void *
+malloc_type_reallocf(void *ptr, size_t size, malloc_type_id_t type_id)
+{
+	void *nptr = malloc_type_realloc(ptr, size, type_id);
+	if (!nptr && ptr) {
+		free(ptr);
+	}
+	return nptr;
+}
+
+__attribute__((visibility("hidden")))
 void
 _pthread_exit_if_canceled(int error)
 {

@@ -496,6 +496,9 @@ rip6_output(
 	if (INP_INTCOPROC_ALLOWED(in6p)) {
 		ip6oa.ip6oa_flags |= IP6OAF_INTCOPROC_ALLOWED;
 	}
+	if (INP_MANAGEMENT_ALLOWED(in6p)) {
+		ip6oa.ip6oa_flags |= IP6OAF_MANAGEMENT_ALLOWED;
+	}
 
 	dst = &dstsock->sin6_addr;
 	if (control) {
@@ -1168,9 +1171,12 @@ rip6_connect(struct socket *so, struct sockaddr *nam, __unused struct proc *p)
 	struct ifnet *src_ifp = NULL;
 	in6a = in6_selectsrc(addr, inp->in6p_outputopts, inp, &inp->in6p_route,
 	    &src_ifp, &storage, ifscope, &error);
-	if (src_ifp != NULL && in6a != NULL) {
-		inp->inp_lifscope = in6_addr2scopeid(src_ifp, in6a);
+	if (src_ifp != NULL) {
+		if (in6a != NULL) {
+			inp->inp_lifscope = in6_addr2scopeid(src_ifp, in6a);
+		}
 		ifnet_release(src_ifp);
+		src_ifp = NULL;
 	}
 	if (IN6_IS_SCOPE_EMBED(&addr->sin6_addr) && inp->inp_lifscope == IFSCOPE_NONE) {
 		inp->inp_lifscope = addr->sin6_scope_id;

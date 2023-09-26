@@ -48,7 +48,7 @@ __BEGIN_DECLS
  * Note that you may need to call this function multiple times if the
  * underlying memory is shared.
  */
-kern_return_t
+void
 kdp_core_exclude_region(vm_offset_t addr, vm_size_t size);
 
 /*
@@ -56,7 +56,7 @@ kdp_core_exclude_region(vm_offset_t addr, vm_size_t size);
  *
  * The address and size of the region must match a currently excluded region.
  */
-kern_return_t
+void
 kdp_core_unexclude_region(vm_offset_t addr, vm_size_t size);
 
 #endif /* KERNEL_PRIVATE */

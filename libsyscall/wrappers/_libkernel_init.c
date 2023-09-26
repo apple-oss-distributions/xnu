@@ -31,6 +31,7 @@
 #include <strings.h>
 #include <unistd.h>
 #include <mach/vm_page_size.h>
+#include <spawn_filtering_private.h>
 #include "_libkernel_init.h"
 #include "system-version-compat-support.h"
 
@@ -54,6 +55,10 @@ extern int (*system_version_compat_open_shim)(int opened_fd, int openat_fd, cons
 
 extern system_version_compat_mode_t system_version_compat_mode;
 
+int  __sysctlbyname(const char *name, size_t namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
+#endif /* SYSTEM_VERSION_COMPAT_ENABLED */
+
+#if POSIX_SPAWN_FILTERING_ENABLED
 struct _posix_spawn_args_desc;
 extern bool (*posix_spawn_with_filter)(pid_t *pid, const char *fname, char * const *argp,
     char * const *envp, struct _posix_spawn_args_desc *adp, int *ret);
@@ -61,9 +66,7 @@ extern bool _posix_spawn_with_filter(pid_t *pid, const char *fname, char * const
     char * const *envp, struct _posix_spawn_args_desc *adp, int *ret);
 extern int (*execve_with_filter)(char *fname, char **argp, char **envp);
 extern int _execve_with_filter(char *fname, char **argp, char **envp);
-
-int  __sysctlbyname(const char *name, size_t namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
-#endif /* SYSTEM_VERSION_COMPAT_ENABLED */
+#endif /* POSIX_SPAWN_FILTERING_ENABLED */
 
 #if TARGET_OS_OSX
 __attribute__((visibility("default")))
@@ -108,6 +111,7 @@ void
 __libkernel_init_late(_libkernel_late_init_config_t config)
 {
 	if (config->version >= 1) {
+#if SYSTEM_VERSION_COMPAT_ENABLED
 #if TARGET_OS_OSX && !defined(__i386__)
 		if (config->enable_system_version_compat) {
 			/* enable the version compatibility shim for this process (macOS only) */
@@ -139,12 +143,16 @@ __libkernel_init_late(_libkernel_late_init_config_t config)
 			 * don't need to inform the kernel that this app has the SystemVersion shim enabled.
 			 */
 		}
+#endif /* TARGET_OS_OSX && !defined(__i386__) */
 
+#endif /* SYSTEM_VERSION_COMPAT_ENABLED */
+
+#if POSIX_SPAWN_FILTERING_ENABLED
 		if ((config->version >= 3) && config->enable_posix_spawn_filtering) {
 			posix_spawn_with_filter = _posix_spawn_with_filter;
 			execve_with_filter = _execve_with_filter;
 		}
-#endif /* TARGET_OS_OSX && !defined(__i386__) */
+#endif /* POSIX_SPAWN_FILTERING_ENABLED */
 	}
 }
 
@@ -153,11 +161,11 @@ __libkernel_init_after_boot_tasks(
 	_libkernel_init_after_boot_tasks_config_t config)
 {
 	if (config->version >= 1) {
-#if TARGET_OS_OSX && !defined(__i386__)
+#if POSIX_SPAWN_FILTERING_ENABLED
 		if (config->enable_posix_spawn_filtering) {
 			posix_spawn_with_filter = _posix_spawn_with_filter;
 			execve_with_filter = _execve_with_filter;
 		}
-#endif
+#endif /* POSIX_SPAWN_FILTERING_ENABLED */
 	}
 }

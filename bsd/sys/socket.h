@@ -366,11 +366,18 @@
 #define SO_RESOLVER_SIGNATURE      0x1131  /* A signed data blob from the system resolver */
 #ifdef PRIVATE
 #define SO_MARK_CELLFALLBACK_UUID  0x1132  /* Mark as initiated by cell fallback using UUID of the connection */
+#define SO_APPLICATION_ID          0x1133  /* ID of attributing app - so_application_id_t */
 
 struct so_mark_cellfallback_uuid_args {
 	uuid_t flow_uuid;
 	int flow_cellfallback;
 };
+
+typedef struct {
+	uid_t               uid;
+	uuid_t              effective_uuid;
+	uid_t               persona_id;
+} so_application_id_t;
 
 #endif
 
@@ -902,7 +909,7 @@ struct msghdr_x {
 struct user_msghdr {
 	user_addr_t     msg_name;               /* optional address */
 	socklen_t       msg_namelen;            /* size of address */
-	user_addr_t     msg_iov;                /* scatter/gather array */
+	vm_address_t    msg_iov;                /* scatter/gather array */
 	int             msg_iovlen;             /* # elements in msg_iov */
 	user_addr_t     msg_control;            /* ancillary data, see below */
 	socklen_t       msg_controllen;         /* ancillary data buffer len */
@@ -951,7 +958,7 @@ __CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user32_msghdr, user32_msghdr);
 struct user_msghdr_x {
 	user_addr_t     msg_name;       /* optional address */
 	socklen_t       msg_namelen;    /* size of address */
-	user_addr_t     msg_iov;        /* scatter/gather array */
+	vm_address_t    msg_iov;        /* scatter/gather array */
 	int             msg_iovlen;     /* # elements in msg_iov */
 	user_addr_t     msg_control;    /* ancillary data, see below */
 	socklen_t       msg_controllen; /* ancillary data buffer len */

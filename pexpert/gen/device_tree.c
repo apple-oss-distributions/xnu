@@ -73,6 +73,7 @@ assert_prop_in_dt_region(vm_offset_t const start, vm_offset_t const end, DeviceT
 	vm_offset_t prop_end;
 
 	assert_in_dt_region(start, end, prop);
+	assert_in_dt_region(start, end, (uint8_t const *)prop + sizeof(DeviceTreeNodeProperty));
 	if (os_add3_overflow((vm_offset_t)prop, sizeof(DeviceTreeNodeProperty), prop->length, &prop_end)) {
 		panic("Device tree property overflow: prop %p, length 0x%x", prop, prop->length);
 	}
@@ -110,7 +111,7 @@ next_prop_region(vm_offset_t const start, vm_offset_t end, DeviceTreeNodePropert
 {
 	uintptr_t next_addr;
 
-	ASSERT_HEADER_IN_DT_REGION(start, end, prop, sizeof(DeviceTreeNode));
+	ASSERT_HEADER_IN_DT_REGION(start, end, prop, sizeof(DeviceTreeNodeProperty));
 
 	if (os_add3_overflow((uintptr_t)prop, prop->length, sizeof(DeviceTreeNodeProperty) + 3, &next_addr)) {
 		panic("Device tree property overflow: prop %p, length 0x%x", prop, prop->length);
@@ -246,7 +247,7 @@ SecureDTInit(void const *base, size_t size)
 bool
 SecureDTIsLockedDown(void)
 {
-#if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+#if   defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
 	/*
 	 * We cannot check if the DT is in the CTRR region early on,
 	 * because knowledge of the CTRR region is set up later.  But the
@@ -262,7 +263,6 @@ SecureDTIsLockedDown(void)
 		assert(kvtophys(DTEnd) <= exec_header_phys);
 		return true;
 	}
-
 #endif
 	return false;
 }

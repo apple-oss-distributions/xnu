@@ -38,7 +38,9 @@
 #include <sys/vnode_internal.h>
 #include <sys/fslog.h>
 #include <sys/mount_internal.h>
+#if 0   /* see rdar://81514225 */
 #include <sys/kasl.h>
+#endif
 
 #include <kern/zalloc.h>
 
@@ -56,8 +58,9 @@
  *  4. Target process Mach-O UUID
  */
 void
-fslog_extmod_msgtracer(proc_t caller, proc_t target)
+fslog_extmod_msgtracer(__unused proc_t caller, __unused proc_t target)
 {
+#if 0   /* see rdar://81514225 */
 	if ((caller != PROC_NULL) && (target != PROC_NULL)) {
 		/*
 		 * Print into buffer large enough for "ThisIsAnApplicat(BC223DD7-B314-42E0-B6B0-C5D2E6638337)",
@@ -102,4 +105,5 @@ fslog_extmod_msgtracer(proc_t caller, proc_t target)
 		    "com.apple.message.summarize", "YES",                                     /* 4 */
 		    NULL);
 	}
+#endif
 }

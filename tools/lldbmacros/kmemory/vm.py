@@ -29,9 +29,10 @@ def vm_prot_converter(prot):
 class VMMap(object):
     """ Helper class to manipulate a vm_map_t """
 
-    def __init__(self, vm_map):
-        self.sbv = vm_map
-        self.rb  = RB_HEAD(
+    def __init__(self, vm_map, name=None):
+        self.sbv  = vm_map
+        self.name = name
+        self.rb   = RB_HEAD(
             vm_map.chkGetValueForExpressionPath(".hdr.rb_head_store"),
             "entry",
             self.entry_compare
@@ -57,6 +58,12 @@ class VMMap(object):
         fmt = (
             "VM Map Info\n"
             " vm map               : {&v:#x} \n"
+        )
+        if self.name:
+            fmt += (
+                " vm map name          : {m.name:s} \n"
+            )
+        fmt += (
             " pmap                 : {$v.pmap:#x} \n"
             " vm size              : {$v.size|human_size} ({$v.size:,d} bytes) \n"
             " entries              : {$v.hdr.nentries} \n"
@@ -64,7 +71,7 @@ class VMMap(object):
                 "{$v.hdr.links.start:#x} - {$v.hdr.links.end:#x}\n"
             " map pgshift          : {$v.hdr.page_shift}\n"
         )
-        print(xnu_format(fmt, self, v=self.sbv))
+        print(xnu_format(fmt, m=self, v=self.sbv))
 
 
 class VMMapEntry(MemoryObject):
@@ -141,20 +148,24 @@ class VMMapEntry(MemoryObject):
                 "{$v.links.start:#x} - {$v.links.end:#x} "
                 "({0.pages:,d} pages)\n"
             " vm tag               : {$v.vme_alias|vm_kern_tag}\n"
-            " vm range id          : {range_id}\n"
+        )
+        range_id = next((
+            i
+            for i, r in enumerate(self.kmem.kmem_ranges)
+            if r.contains(self.address)
+        ), None)
+        if range_id:
+            fmt += (
+                " vm range id          : {range_id}\n"
+            )
+        fmt += (
             " protection           : "
                 "{$v.protection|vm_prot}/{$v.max_protection|vm_prot}\n"
             " vm object            : "
                 "{0.vme_object_type} ({0.vme_object[0]:#x})\n"
             " entry offset         : {0.vme_offset:#x}\n"
         )
-        print(xnu_format(fmt, self, v=self.sbv,
-            range_id=next(
-                i
-                for i, r in enumerate(self.kmem.kmem_ranges)
-                if r.contains(self.address)
-            )
-        ))
+        print(xnu_format(fmt, self, v=self.sbv, range_id=range_id))
 
 
 @whatis_provider
@@ -164,10 +175,26 @@ class KernelMapWhatisProvider(WhatisProvider):
     """
 
     def claims(self, address):
-        return any(r.contains(address) for r in self.kmem.kmem_ranges)
+        kmem = self.kmem
+
+        return any(r.contains(address) for r in kmem.kmem_ranges) or \
+            any(r.contains(address) for r in kmem.iokit_ranges)
 
     def lookup(self, address):
-        return VMMapEntry(self.kmem, address, VMMap(self.kmem.kernel_map))
+        kmem = self.kmem
+
+        if any(r.contains(address) for r in kmem.kmem_ranges):
+            return VMMapEntry(kmem, address, VMMap(kmem.kernel_map, 'kernel_map'))
+
+        idx = next(idx
+            for idx, r
+            in enumerate(kmem.iokit_ranges)
+            if r.contains(address))
+        gps  = kmem.target.chkFindFirstGlobalVariable('gIOKitPageableSpace')
+        map  = gps.chkGetValueForExpressionPath('.maps[{}].map'.format(idx)).Dereference()
+        name = 'gIOKitPageableFixed{}'.format(idx)
+        return VMMapEntry(kmem, address, VMMap(map, name))
+
 
 
 __all__ = [

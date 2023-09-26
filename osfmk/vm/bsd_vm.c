@@ -188,7 +188,7 @@ memory_object_control_uiomove(
 
 	vm_object_lock(object);
 
-	if (mark_dirty && object->copy != VM_OBJECT_NULL) {
+	if (mark_dirty && object->vo_copy != VM_OBJECT_NULL) {
 		/*
 		 * We can't modify the pages without honoring
 		 * copy-on-write obligations first, so fall off
@@ -492,6 +492,25 @@ vnode_pager_get_isSSD(
 	*isSSD = vnode_pager_isSSD(vnode_object->vnode_handle);
 	return KERN_SUCCESS;
 }
+
+#if FBDP_DEBUG_OBJECT_NO_PAGER
+kern_return_t
+vnode_pager_get_forced_unmount(
+	memory_object_t         mem_obj,
+	bool                    *forced_unmount)
+{
+	vnode_pager_t   vnode_object;
+
+	if (mem_obj->mo_pager_ops != &vnode_pager_ops) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	vnode_object = vnode_pager_lookup(mem_obj);
+
+	*forced_unmount = vnode_pager_forced_unmount(vnode_object->vnode_handle);
+	return KERN_SUCCESS;
+}
+#endif /* FBDP_DEBUG_OBJECT_NO_PAGER */
 
 kern_return_t
 vnode_pager_get_object_size(

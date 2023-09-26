@@ -105,6 +105,7 @@ enum cqrq;
 extern uint32_t ifclassq_flow_control_adv;
 #endif /* DEBUG || DEVELOPMENT */
 extern uint32_t ifclassq_enable_l4s;
+extern unsigned int ifclassq_enable_pacing;
 typedef int (*ifclassq_enq_func)(struct ifclassq *, classq_pkt_t *,
     boolean_t *);
 typedef void  (*ifclassq_deq_func)(struct ifclassq *, classq_pkt_t *);
@@ -136,6 +137,8 @@ struct ifclassq {
 	u_int32_t       ifcq_target_qdelay; /* target queue delay */
 	u_int32_t       ifcq_bytes;     /* bytes count */
 	u_int32_t       ifcq_pkt_drop_limit;
+	/* number of doorbells introduced by pacemaker thread */
+	uint64_t        ifcq_doorbells;
 	void            *ifcq_disc;     /* for scheduler-specific use */
 	/*
 	 * ifcq_disc_slots[] represents the leaf classes configured for the
@@ -217,6 +220,7 @@ extern "C" {
 struct if_ifclassq_stats {
 	u_int32_t       ifqs_len;
 	u_int32_t       ifqs_maxlen;
+	uint64_t        ifqs_doorbells;
 	struct pktcntr  ifqs_xmitcnt;
 	struct pktcntr  ifqs_dropcnt;
 	u_int32_t       ifqs_scheduler;

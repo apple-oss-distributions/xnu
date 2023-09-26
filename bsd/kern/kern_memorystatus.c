@@ -46,6 +46,7 @@
 #include <mach/mach_host.h>
 #include <pexpert/pexpert.h>
 #include <sys/coalition.h>
+#include <sys/code_signing.h>
 #include <sys/kern_event.h>
 #include <sys/proc.h>
 #include <sys/proc_info.h>
@@ -81,6 +82,7 @@
 #include <sys/kern_memorystatus.h>
 #include <sys/kern_memorystatus_freeze.h>
 #include <sys/kern_memorystatus_notify.h>
+#include <sys/kdebug_triage.h>
 
 
 extern uint32_t vm_compressor_pool_size(void);
@@ -220,18 +222,42 @@ MACRO_BEGIN                                                             \
 MACRO_END
 
 
-/* General tunables */
+#pragma mark General Tunables
 
-unsigned long delta_percentage = 5;
-unsigned long critical_threshold_percentage = 5;
-// On embedded devices with more than 3GB of memory we lower the critical percentage.
-uint64_t config_jetsam_large_memory_cutoff = 3UL * (1UL << 30);
-unsigned long critical_threshold_percentage_larger_devices = 4;
-unsigned long delta_percentage_larger_devices = 4;
-unsigned long idle_offset_percentage = 5;
-unsigned long pressure_threshold_percentage = 15;
-unsigned long policy_more_free_offset_percentage = 5;
-unsigned long sysproc_aging_aggr_threshold_percentage = 7;
+#define MEMORYSTATUS_SMALL_MEMORY_THRESHOLD (3UL * (1UL << 30))
+#define MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD (6UL * (1UL << 30))
+
+#define MEMORYSTATUS_MORE_FREE_OFFSET_PERCENTAGE 5UL
+#define MEMORYSTATUS_AGGR_SYSPROC_AGING_PERCENTAGE 7UL
+#define MEMORYSTATUS_DELTA_PERCENTAGE_LARGE 4UL
+#define MEMORYSTATUS_DELTA_PERCENTAGE_SMALL 5UL
+
+/*
+ * Fall back to these percentages/ratios if a mb value is not provided via EDT
+ *  DRAM (GB) | critical | idle | pressure | freeze
+ *  (0,3]     | 5%       | 10%  | 15%      | 50%
+ *  (3,6]     | 4%       | 9%   | 15%      | 50%
+ *  (6,∞)     | 4%       | 8%   | 12%      | 50%
+ */
+
+#define MEMORYSTATUS_CRITICAL_BASE_PERCENTAGE_SMALL 5UL
+#define MEMORYSTATUS_CRITICAL_BASE_PERCENTAGE_LARGE 4UL
+
+#define MEMORYSTATUS_CRITICAL_IDLE_RATIO_NUM 2UL
+#define MEMORYSTATUS_CRITICAL_IDLE_RATIO_DENOM 1UL
+#define MEMORYSTATUS_PRESSURE_RATIO_NUM 3UL
+#define MEMORYSTATUS_PRESSURE_RATIO_DENOM 1UL
+
+/*
+ * For historical reasons, devices with "medium"-sized memory configs have a critical:idle:pressure ratio of
+ * 4:9:15. This ratio is preserved for these devices when a fixed-mb base value has not been provided by EDT/boot-arg;
+ * all other devices use a 1:2:3 ratio.
+ */
+#define MEMORYSTATUS_CRITICAL_IDLE_RATIO_NUM_MEDIUM 9UL
+#define MEMORYSTATUS_CRITICAL_IDLE_RATIO_DENOM_MEDIUM 4UL
+#define MEMORYSTATUS_PRESSURE_RATIO_NUM_MEDIUM  15UL
+#define MEMORYSTATUS_PRESSURE_RATIO_DENOM_MEDIUM  4UL
+
 #if CONFIG_JETSAM
 static int32_t memorystatus_get_default_task_active_limit(proc_t p);
 #endif /* CONFIG_JETSAM */
@@ -253,6 +279,10 @@ memorystatus_jetsam_snapshot_t *memorystatus_jetsam_snapshot_freezer;
 unsigned int memorystatus_jetsam_snapshot_freezer_max;
 unsigned int memorystatus_jetsam_snapshot_freezer_size;
 TUNABLE(bool, memorystatus_jetsam_use_freezer_snapshot, "kern.jetsam_user_freezer_snapshot", true);
+
+#define MEMORYSTATUS_FREEZE_THRESHOLD_PERCENTAGE 50UL
+TUNABLE_DT(uint32_t, memorystatus_freeze_threshold_mb, "/defaults", "kern.memstat_freeze_mb",
+    "memorystatus_freeze_threshold_mb", 0, TUNABLE_DT_NONE);
 #endif /* CONFIG_FREEZE */
 
 unsigned int memorystatus_jetsam_snapshot_count = 0;
@@ -278,14 +308,18 @@ static void memorystatus_init_jetsam_snapshot_header(memorystatus_jetsam_snapsho
 
 uint64_t memorystatus_sysprocs_idle_delay_time = 0;
 uint64_t memorystatus_apps_idle_delay_time = 0;
-/* Some devices give entitled apps a higher memory limit */
-int32_t memorystatus_entitled_max_task_footprint_mb = 0;
 /* 2GB devices support an entitlement for a higher app memory limit of "almost 2GB". */
 static int32_t memorystatus_ios13extended_footprint_limit_mb = 1800;
+
+/* Some devices give entitled apps a higher memory limit */
+TUNABLE_DT_WRITEABLE(int32_t, memorystatus_entitled_max_task_footprint_mb, "/defaults", "kern.entitled_max_task_pmem", "entitled_max_task_pmem", 0, TUNABLE_DT_NONE);
+
 #if __arm64__
 #if DEVELOPMENT || DEBUG
-SYSCTL_INT(_kern, OID_AUTO, entitled_max_task_pmem, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &memorystatus_entitled_max_task_footprint_mb, 0, "");
 SYSCTL_INT(_kern, OID_AUTO, ios13extended_footprint_limit_mb, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, &memorystatus_ios13extended_footprint_limit_mb, 0, "");
+SYSCTL_INT(_kern, OID_AUTO, entitled_max_task_pmem, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &memorystatus_entitled_max_task_footprint_mb, 0, "");
+#else /* !(DEVELOPMENT || DEBUG) */
+SYSCTL_INT(_kern, OID_AUTO, entitled_max_task_pmem, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_MASKED | CTLFLAG_KERN, &memorystatus_entitled_max_task_footprint_mb, 0, "");
 #endif /* DEVELOPMENT || DEBUG */
 #endif /* __arm64__ */
 
@@ -486,7 +520,7 @@ SYSCTL_INT(_kern, OID_AUTO, jetsam_aging_policy, CTLTYPE_INT | CTLFLAG_RD, &jets
 
 static unsigned int memorystatus_dirty_count = 0;
 
-SYSCTL_INT(_kern, OID_AUTO, max_task_pmem, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_MASKED, &max_task_footprint_mb, 0, "");
+SYSCTL_INT(_kern, OID_AUTO, max_task_pmem, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_MASKED | CTLFLAG_KERN, &max_task_footprint_mb, 0, "");
 
 static int memorystatus_highwater_enabled = 1;  /* Update the cached memlimit data. */
 static boolean_t proc_jetsam_state_is_active_locked(proc_t);
@@ -671,6 +705,12 @@ static boolean_t memorystatus_kill_process_sync(pid_t victim_pid, uint32_t cause
 
 static int memorystatus_cmd_set_memlimit_properties(pid_t pid, user_addr_t buffer, size_t buffer_size, __unused int32_t *retval);
 
+#if DEBUG || DEVELOPMENT
+static int memorystatus_cmd_set_diag_memlimit_properties(pid_t pid, user_addr_t buffer, size_t buffer_size, __unused int32_t *retval);
+static int memorystatus_cmd_get_diag_memlimit_properties(pid_t pid, user_addr_t buffer, size_t buffer_size, __unused int32_t *retval);
+static int memorystatus_set_diag_memlimit_properties_internal(proc_t p, memorystatus_diag_memlimit_properties_t *p_entry);
+static int memorystatus_get_diag_memlimit_properties_internal(proc_t p, memorystatus_diag_memlimit_properties_t *p_entry);
+#endif  // DEBUG || DEVELOPMENT
 static int memorystatus_set_memlimit_properties(pid_t pid, memorystatus_memlimit_properties_t *entry);
 
 static int memorystatus_cmd_get_memlimit_properties(pid_t pid, user_addr_t buffer, size_t buffer_size, __unused int32_t *retval);
@@ -771,11 +811,30 @@ extern unsigned int     vm_page_secluded_count_over_target;
 unsigned int memorystatus_sysproc_aging_aggr_pages = 0;
 
 #if CONFIG_JETSAM
+
+/* Jetsam Thresholds in MB */
+TUNABLE_DT(uint32_t, memorystatus_critical_threshold_mb, "/defaults",
+    "kern.memstat_critical_mb", "memorystatus_critical_threshold_mb", 0, TUNABLE_DT_NONE);
+TUNABLE_DT(uint32_t, memorystatus_idle_threshold_mb, "/defaults",
+    "kern.memstat_idle_mb", "memorystatus_idle_threshold_mb", 0, TUNABLE_DT_NONE);
+TUNABLE_DT(uint32_t, memorystatus_pressure_threshold_mb, "/defaults",
+    "kern.memstat_pressure_mb", "memorystatus_pressure_threshold_mb", 0, TUNABLE_DT_NONE);
+TUNABLE_DT(uint32_t, memorystatus_more_free_offset_mb, "/defaults",
+    "kern.memstat_more_free_mb", "memorystatus_more_free_offset_mb", 0, TUNABLE_DT_NONE);
+
+/*
+ * Available Pages Thresholds
+ *     critical_base: jetsam above the idle band
+ *     critical_idle: jetsam in the idle band
+ *     more_free_offset: offset applied to critical/idle upon request from userspace
+ *     sysproc_aging_aggr: allow aggressive jetsam due to sysproc aging
+ *     pressure: jetsam hwm violators
+ */
 unsigned int memorystatus_available_pages = (unsigned int)-1;
 unsigned int memorystatus_available_pages_pressure = 0;
 unsigned int memorystatus_available_pages_critical = 0;
 unsigned int memorystatus_available_pages_critical_base = 0;
-unsigned int memorystatus_available_pages_critical_idle_offset = 0;
+unsigned int memorystatus_available_pages_critical_idle = 0;
 TUNABLE_DT_WRITEABLE(unsigned int, memorystatus_swap_all_apps, "/defaults", "kern.swap_all_apps", "kern.swap_all_apps", false, TUNABLE_DT_NONE);
 /* Will compact the early swapin queue if there are >= this many csegs on it. */
 static unsigned int memorystatus_swapin_trigger_segments = 10;
@@ -791,7 +850,7 @@ SYSCTL_UINT(_kern, OID_AUTO, memorystatus_swap_all_apps, CTLFLAG_RD | CTLFLAG_LO
 
 static unsigned int memorystatus_jetsam_policy = kPolicyDefault;
 unsigned int memorystatus_policy_more_free_offset_pages = 0;
-static void memorystatus_update_levels_locked(boolean_t critical_only);
+static void memorystatus_update_levels_locked(void);
 
 static int memorystatus_cmd_set_jetsam_memory_limit(pid_t pid, int32_t high_water_mark, __unused int32_t *retval, boolean_t is_fatal_limit);
 
@@ -1004,11 +1063,11 @@ SYSCTL_INT(_kern, OID_AUTO, memorystatus_idle_snapshot, CTLFLAG_RW | CTLFLAG_LOC
 
 #if CONFIG_JETSAM
 SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_critical, CTLFLAG_RD | CTLFLAG_LOCKED, &memorystatus_available_pages_critical, 0, "");
-SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_critical_base, CTLFLAG_RW | CTLFLAG_LOCKED, &memorystatus_available_pages_critical_base, 0, "");
-SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_critical_idle_offset, CTLFLAG_RW | CTLFLAG_LOCKED, &memorystatus_available_pages_critical_idle_offset, 0, "");
-SYSCTL_UINT(_kern, OID_AUTO, memorystatus_policy_more_free_offset_pages, CTLFLAG_RW, &memorystatus_policy_more_free_offset_pages, 0, "");
+SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_critical_base, CTLFLAG_RD | CTLFLAG_LOCKED, &memorystatus_available_pages_critical_base, 0, "");
+SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_critical_idle, CTLFLAG_RD | CTLFLAG_LOCKED, &memorystatus_available_pages_critical_idle, 0, "");
+SYSCTL_UINT(_kern, OID_AUTO, memorystatus_policy_more_free_offset_pages, CTLFLAG_RD, &memorystatus_policy_more_free_offset_pages, 0, "");
+SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_aggr_sysproc_aging, CTLFLAG_RD, &memorystatus_sysproc_aging_aggr_pages, 0, "");
 SYSCTL_UINT(_kern, OID_AUTO, memorystatus_kill_on_low_swap, CTLFLAG_RW, &jetsam_kill_on_low_swap, 0, "");
-
 #if VM_PRESSURE_EVENTS
 
 SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_pressure, CTLFLAG_RW | CTLFLAG_LOCKED, &memorystatus_available_pages_pressure, 0, "");
@@ -1281,21 +1340,22 @@ jetsam_current_thread()
 static void
 initialize_entitled_max_task_limit()
 {
-	if (!PE_parse_boot_argn("entitled_max_task_pmem", &memorystatus_entitled_max_task_footprint_mb,
-	    sizeof(memorystatus_entitled_max_task_footprint_mb))) {
-		if (memorystatus_swap_all_apps) {
-			/*
-			 * When we have swap, we let entitled apps go up to the dram config
-			 * regardless of what's set in EDT,
-			 * This can still be overriden with the entitled_max_task_pmem boot-arg.
-			 */
-			memorystatus_entitled_max_task_footprint_mb = (int32_t) (max_mem_actual / (1ULL << 20));
-		} else if (!PE_get_default("kern.entitled_max_task_pmem", &memorystatus_entitled_max_task_footprint_mb,
-		    sizeof(memorystatus_entitled_max_task_footprint_mb))) {
-			// entitled_max_task_pmem is not supported on this system.
-			memorystatus_entitled_max_task_footprint_mb = 0;
-		}
+	/**
+	 * We've already stored the potential boot-arg "entitled_max_task_pmem" in
+	 * memorystatus_entitled_max_task_footprint_mb as a TUNABLE_DT.  We provide
+	 * argptr=NULL and max_len=0 here to check only for existence of the boot-arg.
+	 *
+	 * The boot-arg takes precedence over memorystatus_swap_all_apps.
+	 */
+	if (!PE_parse_boot_argn("entitled_max_task_pmem", NULL, 0) && memorystatus_swap_all_apps) {
+		/*
+		 * When we have swap, we let entitled apps go up to the dram config
+		 * regardless of what's set in EDT,
+		 * This can still be overriden with the entitled_max_task_pmem boot-arg.
+		 */
+		memorystatus_entitled_max_task_footprint_mb = (int32_t) (max_mem_actual / (1ULL << 20));
 	}
+
 	if (memorystatus_entitled_max_task_footprint_mb < 0) {
 		memorystatus_log_error("Invalid value (%d) for entitled_max_task_pmem. Setting to 0\n",
 		    memorystatus_entitled_max_task_footprint_mb);
@@ -1321,6 +1381,7 @@ memorystatus_init(void)
 	memorystatus_freeze_pages_max = FREEZE_PAGES_MAX;
 	memorystatus_max_frozen_demotions_daily = MAX_FROZEN_PROCESS_DEMOTIONS;
 	memorystatus_thaw_count_demotion_threshold = MIN_THAW_DEMOTION_THRESHOLD;
+	memorystatus_min_thaw_refreeze_threshold = MIN_THAW_REFREEZE_THRESHOLD;
 #endif /* CONFIG_FREEZE */
 
 #if DEVELOPMENT || DEBUG
@@ -1329,7 +1390,7 @@ memorystatus_init(void)
 	}
 #endif
 	// Note: no-op pending rdar://27006343 (Custom kernel log handles)
-	memorystatus_log_handle = os_log_create("com.apple.xnu.memorystatus", "memorystatus");
+	memorystatus_log_handle = os_log_create("com.apple.xnu", "memorystatus");
 
 	/* Init buckets */
 	for (i = 0; i < MEMSTAT_BUCKET_COUNT; i++) {
@@ -1351,39 +1412,11 @@ memorystatus_init(void)
 		 */
 		PE_parse_boot_argn("jetsam_proc_cause_panic", &memorystatus_jetsam_proc_cause_panic, sizeof(memorystatus_jetsam_proc_cause_panic));
 		PE_parse_boot_argn("jetsam_proc_size_panic", &memorystatus_jetsam_proc_size_panic, sizeof(memorystatus_jetsam_proc_size_panic));
-
-		os_log_debug_with_startup_serial(memorystatus_log_handle, "Enabling panic on jetsam for process %s when cause is %d and when its footprint is >= %d MB.\n",
-		    memorystatus_jetsam_proc_name_panic,
-		    memorystatus_jetsam_proc_cause_panic,
-		    memorystatus_jetsam_proc_size_panic);
 	}
 
-	/* Apply overrides */
-	if (!PE_parse_boot_argn("kern.jetsam_delta", &delta_percentage, sizeof(delta_percentage))) {
-		PE_get_default("kern.jetsam_delta", &delta_percentage, sizeof(delta_percentage));
-	}
-	if (delta_percentage == 0) {
-		delta_percentage = 5;
-	}
-	if (max_mem > config_jetsam_large_memory_cutoff) {
-		critical_threshold_percentage = critical_threshold_percentage_larger_devices;
-		delta_percentage = delta_percentage_larger_devices;
-	}
-	assert(delta_percentage < 100);
-	if (!PE_parse_boot_argn("kern.jetsam_critical_threshold", &critical_threshold_percentage, sizeof(critical_threshold_percentage))) {
-		PE_get_default("kern.jetsam_critical_threshold", &critical_threshold_percentage, sizeof(critical_threshold_percentage));
-	}
-	assert(critical_threshold_percentage < 100);
 	if (memorystatus_swap_all_apps && vm_page_donate_mode == VM_PAGE_DONATE_DISABLED) {
 		panic("kern.swap_all_apps is not supported on this platform");
 	}
-	PE_get_default("kern.jetsam_idle_offset", &idle_offset_percentage, sizeof(idle_offset_percentage));
-	assert(idle_offset_percentage < 100);
-	PE_get_default("kern.jetsam_pressure_threshold", &pressure_threshold_percentage, sizeof(pressure_threshold_percentage));
-	assert(pressure_threshold_percentage < 100);
-	PE_get_default("kern.jetsam_freeze_threshold", &freeze_threshold_percentage, sizeof(freeze_threshold_percentage));
-	assert(freeze_threshold_percentage < 100);
-
 
 	/*
 	 * The aging bands cannot overlap with the JETSAM_PRIORITY_ELEVATED_INACTIVE
@@ -1400,11 +1433,60 @@ memorystatus_init(void)
 		PE_get_default("kern.jetsam_idle_snapshot", &memorystatus_idle_snapshot, sizeof(memorystatus_idle_snapshot));
 	}
 
-	memorystatus_delta = (unsigned int) (delta_percentage * atop_64(max_mem) / 100);
-	memorystatus_available_pages_critical_idle_offset = (unsigned int) (idle_offset_percentage * atop_64(max_mem) / 100);
-	memorystatus_available_pages_critical_base = (unsigned int) ((critical_threshold_percentage / delta_percentage) * memorystatus_delta);
-	memorystatus_policy_more_free_offset_pages = (unsigned int) ((policy_more_free_offset_percentage / delta_percentage) * memorystatus_delta);
-	memorystatus_sysproc_aging_aggr_pages = (unsigned int) (sysproc_aging_aggr_threshold_percentage * atop_64(max_mem) / 100);
+	memorystatus_sysproc_aging_aggr_pages = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_AGGR_SYSPROC_AGING_PERCENTAGE);
+
+	if (max_mem <= MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) {
+		memorystatus_delta = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_DELTA_PERCENTAGE_SMALL);
+	} else {
+		memorystatus_delta = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_DELTA_PERCENTAGE_LARGE);
+	}
+
+	if (memorystatus_critical_threshold_mb != 0) {
+		memorystatus_available_pages_critical_base = (unsigned int)atop_64((uint64_t)memorystatus_critical_threshold_mb << 20);
+	} else if (max_mem <= MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) {
+		memorystatus_available_pages_critical_base = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_CRITICAL_BASE_PERCENTAGE_SMALL);
+	} else {
+		memorystatus_available_pages_critical_base = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_CRITICAL_BASE_PERCENTAGE_LARGE);
+	}
+	assert(memorystatus_available_pages_critical_base < (unsigned int)atop_64(max_mem));
+
+	/*
+	 * For historical reasons, devices with "medium"-sized memory configs have a different critical:idle:pressure ratio
+	 */
+	if ((memorystatus_idle_threshold_mb != 0)) {
+		memorystatus_available_pages_critical_idle = (unsigned int)atop_64((uint64_t)memorystatus_idle_threshold_mb << 20);
+	} else {
+		if ((max_mem > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
+		    (max_mem <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
+			memorystatus_available_pages_critical_idle = (MEMORYSTATUS_CRITICAL_IDLE_RATIO_NUM_MEDIUM * memorystatus_available_pages_critical_base) /
+			    MEMORYSTATUS_CRITICAL_IDLE_RATIO_DENOM_MEDIUM;
+		} else {
+			memorystatus_available_pages_critical_idle = (MEMORYSTATUS_CRITICAL_IDLE_RATIO_NUM * memorystatus_available_pages_critical_base) /
+			    MEMORYSTATUS_CRITICAL_IDLE_RATIO_DENOM;
+		}
+	}
+	assert(memorystatus_available_pages_critical_idle < (unsigned int)atop_64(max_mem));
+
+	if (memorystatus_pressure_threshold_mb != 0) {
+		memorystatus_available_pages_pressure = (unsigned int)atop_64((uint64_t)memorystatus_pressure_threshold_mb << 20);
+	} else {
+		if ((max_mem > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
+		    (max_mem <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
+			memorystatus_available_pages_pressure = (MEMORYSTATUS_PRESSURE_RATIO_NUM_MEDIUM * memorystatus_available_pages_critical_base) /
+			    MEMORYSTATUS_PRESSURE_RATIO_DENOM_MEDIUM;
+		} else {
+			memorystatus_available_pages_pressure = (MEMORYSTATUS_PRESSURE_RATIO_NUM * memorystatus_available_pages_critical_base) /
+			    MEMORYSTATUS_PRESSURE_RATIO_DENOM;
+		}
+	}
+	assert(memorystatus_available_pages_pressure < (unsigned int)atop_64(max_mem));
+
+	if (memorystatus_more_free_offset_mb != 0) {
+		memorystatus_policy_more_free_offset_pages = (unsigned int)atop_64((uint64_t)memorystatus_more_free_offset_mb);
+	} else {
+		memorystatus_policy_more_free_offset_pages = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_MORE_FREE_OFFSET_PERCENTAGE);
+	}
+	assert(memorystatus_policy_more_free_offset_pages < (unsigned int)atop_64(max_mem));
 
 	/* Set the swapin trigger in pages based on the maximum size allocated for each c_seg */
 	memorystatus_swapin_trigger_pages = (unsigned int) atop_64(memorystatus_swapin_trigger_segments * c_seg_allocsize);
@@ -1421,7 +1503,7 @@ memorystatus_init(void)
 	memorystatus_jld_enabled = TRUE;
 
 	/* No contention at this point */
-	memorystatus_update_levels_locked(FALSE);
+	memorystatus_update_levels_locked();
 
 	initialize_entitled_max_task_limit();
 #endif /* CONFIG_JETSAM */
@@ -1450,7 +1532,12 @@ memorystatus_init(void)
 	memset(&memorystatus_at_boot_snapshot, 0, sizeof(memorystatus_jetsam_snapshot_t));
 
 #if CONFIG_FREEZE
-	memorystatus_freeze_threshold = (unsigned int) ((freeze_threshold_percentage / delta_percentage) * memorystatus_delta);
+	if (memorystatus_freeze_threshold_mb != 0) {
+		memorystatus_freeze_threshold = (unsigned int)atop_64((uint64_t)memorystatus_freeze_threshold_mb << 20);
+	} else {
+		memorystatus_freeze_threshold = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_FREEZE_THRESHOLD_PERCENTAGE);
+	}
+	assert(memorystatus_freeze_threshold < (unsigned int)atop_64(max_mem));
 
 	if (memorystatus_swap_all_apps) {
 		/*
@@ -1563,8 +1650,8 @@ memorystatus_do_kill(proc_t p, uint32_t cause, os_reason_t jetsam_reason, uint64
 	int32_t memstat_effectivepriority = p->p_memstat_effectivepriority;
 #endif /* (KDEBUG_LEVEL >= KDEBUG_LEVEL_STANDARD) */
 
-	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_DO_KILL)) | DBG_FUNC_START,
-	    victim_pid, cause, vm_page_free_count, footprint, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_DO_KILL) | DBG_FUNC_START,
+	    victim_pid, cause, vm_page_free_count, footprint);
 	DTRACE_MEMORYSTATUS4(memorystatus_do_kill, proc_t, p, os_reason_t, jetsam_reason, uint32_t, cause, uint64_t, footprint);
 
 #if CONFIG_JETSAM
@@ -1607,11 +1694,11 @@ memorystatus_do_kill(proc_t p, uint32_t cause, os_reason_t jetsam_reason, uint64
 	error = jetsam_do_kill(p, jetsam_flags, jetsam_reason);
 	*footprint_of_killed_proc = ((error == 0) ? footprint : 0);
 
-	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_DO_KILL)) | DBG_FUNC_END,
-	    victim_pid, memstat_effectivepriority, vm_page_free_count, error, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_DO_KILL) | DBG_FUNC_END,
+	    victim_pid, memstat_effectivepriority, vm_page_free_count, error);
 
-	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_COMPACTOR_RUN)) | DBG_FUNC_START,
-	    victim_pid, cause, vm_page_free_count, *footprint_of_killed_proc, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_COMPACTOR_RUN) | DBG_FUNC_START,
+	    victim_pid, cause, vm_page_free_count, *footprint_of_killed_proc);
 
 	if (jetsam_reason->osr_code == JETSAM_REASON_VNODE) {
 		/*
@@ -1625,8 +1712,8 @@ memorystatus_do_kill(proc_t p, uint32_t cause, os_reason_t jetsam_reason, uint64
 		vm_run_compactor();
 	}
 
-	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_COMPACTOR_RUN)) | DBG_FUNC_END,
-	    victim_pid, cause, vm_page_free_count, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_COMPACTOR_RUN) | DBG_FUNC_END,
+	    victim_pid, cause, vm_page_free_count);
 
 	os_reason_free(jetsam_reason);
 	return error == 0;
@@ -1641,7 +1728,7 @@ memorystatus_check_levels_locked(void)
 {
 #if CONFIG_JETSAM
 	/* Update levels */
-	memorystatus_update_levels_locked(TRUE);
+	memorystatus_update_levels_locked();
 #else /* CONFIG_JETSAM */
 	/*
 	 * Nothing to do here currently since we update
@@ -1745,7 +1832,7 @@ memorystatus_perform_idle_demotion(__unused void *spare1, __unused void *spare2)
 		return;
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_IDLE_DEMOTE) | DBG_FUNC_START, 0, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_IDLE_DEMOTE) | DBG_FUNC_START);
 
 	current_time = mach_absolute_time();
 
@@ -1798,7 +1885,7 @@ memorystatus_perform_idle_demotion(__unused void *spare1, __unused void *spare2)
 
 	proc_list_unlock();
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_IDLE_DEMOTE) | DBG_FUNC_END, 0, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_IDLE_DEMOTE) | DBG_FUNC_END);
 }
 
 static void
@@ -2262,7 +2349,7 @@ memorystatus_update_priority_locked(proc_t p, int priority, boolean_t head_inser
 		p->p_memstat_idle_start = mach_absolute_time();
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_CHANGE_PRIORITY), proc_getpid(p), priority, p->p_memstat_effectivepriority, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_CHANGE_PRIORITY), proc_getpid(p), priority, p->p_memstat_effectivepriority);
 
 	p->p_memstat_effectivepriority = priority;
 
@@ -2282,7 +2369,7 @@ int
 memorystatus_relaunch_flags_update(proc_t p, int relaunch_flags)
 {
 	p->p_memstat_relaunch_flags = relaunch_flags;
-	KDBG(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_RELAUNCH_FLAGS), proc_getpid(p), relaunch_flags, 0, 0, 0);
+	KDBG(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_RELAUNCH_FLAGS), proc_getpid(p), relaunch_flags);
 	return 0;
 }
 
@@ -2369,7 +2456,7 @@ memorystatus_update(proc_t p, int priority, uint64_t user_data, boolean_t is_ass
 	memorystatus_log_info("memorystatus_update: changing (%s) pid %d: priority %d, user_data 0x%llx\n",
 	    (*p->p_name ? p->p_name : "unknown"), proc_getpid(p), priority, user_data);
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_UPDATE) | DBG_FUNC_START, proc_getpid(p), priority, user_data, effective, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_UPDATE) | DBG_FUNC_START, proc_getpid(p), priority, user_data, effective);
 
 	if (priority == -1) {
 		/* Use as shorthand for default priority */
@@ -2505,9 +2592,9 @@ memorystatus_update(proc_t p, int priority, uint64_t user_data, boolean_t is_ass
 		 * (That's why forked processes can consume unlimited memory.)
 		 */
 
-		memorystatus_log(
-			"memorystatus_update(enter): pid %d, priority %d, dirty=0x%x, Active(%dMB %s), Inactive(%dMB, %s)\n",
-			proc_getpid(p), priority, p->p_memstat_dirty,
+		memorystatus_log_info(
+			"memorystatus_update: update memlimit (%s) pid %d, priority %d, dirty=0x%x, Active(%dMB %s), Inactive(%dMB, %s)\n",
+			(*p->p_name ? p->p_name : "unknown"), proc_getpid(p), priority, p->p_memstat_dirty,
 			memlimit_active, (memlimit_active_is_fatal ? "F " : "NF"),
 			memlimit_inactive, (memlimit_inactive_is_fatal ? "F " : "NF"));
 
@@ -2572,13 +2659,8 @@ memorystatus_update(proc_t p, int priority, uint64_t user_data, boolean_t is_ass
 		 */
 		if (memorystatus_highwater_enabled) {
 			/* apply now */
-			task_set_phys_footprint_limit_internal(proc_task(p), ((p->p_memstat_memlimit > 0) ? p->p_memstat_memlimit : -1), NULL, use_active, is_fatal);
-
-			memorystatus_log(
-				"memorystatus_update: init: limit on pid %d (%dMB %s) targeting priority(%d) dirty?=0x%x %s\n",
-				proc_getpid(p), (p->p_memstat_memlimit > 0 ? p->p_memstat_memlimit : -1),
-				(p->p_memstat_state & P_MEMSTAT_FATAL_MEMLIMIT ? "F " : "NF"), priority, p->p_memstat_dirty,
-				(p->p_memstat_dirty ? ((p->p_memstat_dirty & P_DIRTY) ? "isdirty" : "isclean") : ""));
+			task_set_phys_footprint_limit_internal(proc_task(p),
+			    ((p->p_memstat_memlimit > 0) ? p->p_memstat_memlimit : -1), NULL, use_active, is_fatal);
 		}
 	}
 
@@ -2615,7 +2697,7 @@ memorystatus_update(proc_t p, int priority, uint64_t user_data, boolean_t is_ass
 	ret = 0;
 
 out:
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_UPDATE) | DBG_FUNC_END, ret, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_UPDATE) | DBG_FUNC_END, ret);
 
 	return ret;
 }
@@ -2825,8 +2907,8 @@ memorystatus_dirty_track(proc_t p, uint32_t pcontrol)
 	boolean_t defer_now = FALSE;
 	int ret = 0;
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_DIRTY_TRACK),
-	    proc_getpid(p), p->p_memstat_dirty, pcontrol, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_DIRTY_TRACK),
+	    proc_getpid(p), p->p_memstat_dirty, pcontrol);
 
 	proc_list_lock();
 
@@ -3004,7 +3086,7 @@ memorystatus_dirty_set(proc_t p, boolean_t self, uint32_t pcontrol)
 	boolean_t now_dirty = FALSE;
 
 	memorystatus_log_debug("memorystatus_dirty_set(): %d %d 0x%x 0x%x\n", self, proc_getpid(p), pcontrol, p->p_memstat_dirty);
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_DIRTY_SET), proc_getpid(p), self, pcontrol, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_DIRTY_SET), proc_getpid(p), self, pcontrol);
 
 	proc_list_lock();
 
@@ -3203,7 +3285,7 @@ memorystatus_dirty_clear(proc_t p, uint32_t pcontrol)
 
 	memorystatus_log_debug("memorystatus_dirty_clear(): %d 0x%x 0x%x\n", proc_getpid(p), pcontrol, p->p_memstat_dirty);
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_DIRTY_CLEAR), proc_getpid(p), pcontrol, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_DIRTY_CLEAR), proc_getpid(p), pcontrol);
 
 	proc_list_lock();
 
@@ -4060,8 +4142,8 @@ memorystatus_thread_internal(jetsam_thread_state_t *jetsam_thread)
 		sched_cond_wait(&(jetsam_thread->jt_wakeup_cond), THREAD_UNINT, memorystatus_thread);
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_SCAN) | DBG_FUNC_START,
-	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, memorystatus_jld_enabled, memorystatus_jld_eval_period_msecs, memorystatus_jld_eval_aggressive_count, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_SCAN) | DBG_FUNC_START,
+	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, memorystatus_jld_enabled, memorystatus_jld_eval_period_msecs, memorystatus_jld_eval_aggressive_count);
 
 	extern uint32_t c_segment_count;
 	extern mach_timespec_t major_compact_ts;
@@ -4124,7 +4206,7 @@ memorystatus_thread_internal(jetsam_thread_state_t *jetsam_thread)
 			suspended_swappable_apps_remaining = true;
 		}
 
-		if ((action == MEMORYSTATUS_KILL_TOP_PROCESS || action == MEMORYSTATUS_KILL_AGGRESSIVE) && !killed && memorystatus_avail_pages_below_critical()) {
+		if ((action == MEMORYSTATUS_KILL_TOP_PROCESS || action == MEMORYSTATUS_KILL_AGGRESSIVE) && !killed && total_memory_reclaimed == 0 && memorystatus_avail_pages_below_critical()) {
 			/*
 			 * Still under pressure and unable to kill a process - purge corpse memory
 			 * and get everything back from the pmap.
@@ -4164,8 +4246,8 @@ memorystatus_thread_internal(jetsam_thread_state_t *jetsam_thread)
 		memorystatus_post_snapshot();
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_SCAN) | DBG_FUNC_END,
-	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, total_memory_reclaimed, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_SCAN) | DBG_FUNC_END,
+	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, total_memory_reclaimed);
 
 	if (jetsam_thread->corpse_list_purged) {
 		os_atomic_dec(&block_corpses, relaxed);
@@ -4279,7 +4361,7 @@ memorystatus_on_ledger_footprint_exceeded(boolean_t warning, boolean_t memlimit_
 	}
 }
 
-void
+inline void
 memorystatus_log_exception(const int max_footprint_mb, boolean_t memlimit_is_active, boolean_t memlimit_is_fatal)
 {
 	proc_t p = current_proc();
@@ -4294,10 +4376,22 @@ memorystatus_log_exception(const int max_footprint_mb, boolean_t memlimit_is_act
 	    ((p && *p->p_name) ? p->p_name : "unknown"), (p ? proc_getpid(p) : -1), (memlimit_is_active ? "Active" : "Inactive"),
 	    (memlimit_is_fatal  ? "Hard" : "Soft"), max_footprint_mb,
 	    (memlimit_is_fatal  ? "fatal" : "non-fatal"));
-
-	return;
 }
 
+inline void
+memorystatus_log_diag_threshold_exception(const int diag_threshold_value)
+{
+	proc_t p = current_proc();
+
+	/*
+	 * The limit violation is logged here, but only once per process per limit.
+	 * Soft memory limit is a non-fatal high-water-mark
+	 * Hard memory limit is a fatal custom-task-limit or system-wide per-task memory limit.
+	 */
+
+	memorystatus_log("EXC_RESOURCE -> %s[%d] exceeded diag threshold limit: %d MB \n",
+	    ((p && *p->p_name) ? p->p_name : "unknown"), (p ? proc_getpid(p) : -1), diag_threshold_value);
+}
 
 /*
  * Description:
@@ -4668,12 +4762,14 @@ memorystatus_allowed_vm_map_fork(task_t task, bool *is_large)
 	boolean_t is_allowed = TRUE;   /* default */
 	uint64_t footprint_in_bytes;
 	uint64_t max_allowed_bytes;
+	thread_t self = current_thread();
 
 	*is_large = false;
 
 	/* Jetsam in high bands blocks any new corpse */
 	if (os_atomic_load(&block_corpses, relaxed) != 0) {
-		memorystatus_log_info("memorystatus_allowed_vm_map_fork: corpse for pid %d blocked by jetsam).\n", task_pid(task));
+		memorystatus_log("memorystatus_allowed_vm_map_fork: corpse for pid %d blocked by jetsam).\n", task_pid(task));
+		ktriage_record(thread_tid(self), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_CORPSE, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_CORPSE_BLOCKED_JETSAM), 0 /* arg */);
 		return FALSE;
 	}
 
@@ -4716,8 +4812,9 @@ memorystatus_allowed_vm_map_fork(task_t task, bool *is_large)
 #endif /* DEBUG || DEVELOPMENT */
 
 	if (footprint_in_bytes > max_allowed_bytes) {
-		memorystatus_log_info("memorystatus disallowed vm_map_fork %lld  %lld\n", footprint_in_bytes, max_allowed_bytes);
+		memorystatus_log("memorystatus disallowed vm_map_fork %lld  %lld\n", footprint_in_bytes, max_allowed_bytes);
 		set_vm_map_fork_pidwatch(task, MEMORYSTATUS_VM_MAP_FORK_NOT_ALLOWED);
+		ktriage_record(thread_tid(self), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_CORPSE, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_CORPSE_PROC_TOO_BIG), 0 /* arg */);
 		return !is_allowed;
 	}
 
@@ -5133,7 +5230,8 @@ memorystatus_init_jetsam_snapshot_entry_locked(proc_t p, memorystatus_jetsam_sna
 	uint64_t frozen_to_swap_pages                   = 0;
 	uint64_t region_count                           = 0;
 	uint64_t cids[COALITION_NUM_TYPES];
-
+	uint32_t trust                                  = 0;
+	kern_return_t ret                               = 0;
 	memset(entry, 0, sizeof(memorystatus_jetsam_snapshot_entry_t));
 
 	entry->pid = proc_getpid(p);
@@ -5191,7 +5289,11 @@ memorystatus_init_jetsam_snapshot_entry_locked(proc_t p, memorystatus_jetsam_sna
 	proc_coalitionids(p, cids);
 	entry->jse_coalition_jetsam_id = cids[COALITION_TYPE_JETSAM];
 	entry->csflags = proc_getcsflags(p);
-	entry->cs_trust_level = 0; //TODO in rdar://102261763
+	ret = get_trust_level_kdp(get_task_pmap(proc_task(p)), &trust);
+	if (ret != KERN_SUCCESS) {
+		trust = KCDATA_INVALID_CS_TRUST_LEVEL;
+	}
+	entry->cs_trust_level = trust;
 	return TRUE;
 }
 
@@ -5528,6 +5630,7 @@ memorystatus_kill_proc(proc_t p, uint32_t cause, os_reason_t jetsam_reason, bool
 				    num_pages_reclaimed, num_pages_purged, num_pages_unsecluded, aPid, ((p && *p->p_name) ? p->p_name : "unknown"), memorystatus_kill_cause_name[cause]);
 
 				*killed = false;
+				*footprint_of_killed_proc = num_pages_reclaimed + num_pages_purged + num_pages_unsecluded;
 
 				return TRUE;
 			}
@@ -5593,8 +5696,8 @@ memorystatus_kill_top_process(bool any, bool sort_flag, uint32_t cause, os_reaso
 #pragma unused(any)
 #endif
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_JETSAM) | DBG_FUNC_START,
-	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_JETSAM) | DBG_FUNC_START,
+	    MEMORYSTATUS_LOG_AVAILABLE_PAGES);
 
 
 #if CONFIG_JETSAM
@@ -5602,6 +5705,7 @@ memorystatus_kill_top_process(bool any, bool sort_flag, uint32_t cause, os_reaso
 		(void)memorystatus_sort_bucket(JETSAM_PRIORITY_FOREGROUND, JETSAM_SORT_DEFAULT);
 	}
 
+	*memory_reclaimed = 0;
 	local_max_kill_prio = MIN(max_kill_priority, max_priority);
 
 #if VM_PRESSURE_EVENTS
@@ -5741,8 +5845,8 @@ memorystatus_kill_top_process(bool any, bool sort_flag, uint32_t cause, os_reaso
 			freed_mem = memorystatus_kill_proc(p, cause, jetsam_reason, &killed, &footprint_of_killed_proc); /* purged and/or killed 'p' */
 			/* Success? */
 			if (freed_mem) {
+				*memory_reclaimed = footprint_of_killed_proc;
 				if (killed) {
-					*memory_reclaimed = footprint_of_killed_proc;
 					if (priority) {
 						*priority = aPid_ep;
 					}
@@ -5777,8 +5881,6 @@ exit:
 	os_reason_free(jetsam_reason);
 
 	if (!killed) {
-		*memory_reclaimed = 0;
-
 		/* Clear snapshot if freshly captured and no target was found */
 		if (new_snapshot) {
 			proc_list_lock();
@@ -5787,8 +5889,8 @@ exit:
 		}
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_JETSAM) | DBG_FUNC_END,
-	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, killed ? aPid : 0, killed, *memory_reclaimed, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_JETSAM) | DBG_FUNC_END,
+	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, killed ? aPid : 0, killed, *memory_reclaimed);
 
 	return killed;
 }
@@ -5816,8 +5918,8 @@ memorystatus_kill_processes_aggressive(uint32_t cause, int aggr_count,
 
 	*memory_reclaimed = 0;
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_JETSAM) | DBG_FUNC_START,
-	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, priority_max, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_JETSAM) | DBG_FUNC_START,
+	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, priority_max);
 
 	if (priority_max >= JETSAM_PRIORITY_FOREGROUND) {
 		/*
@@ -6024,8 +6126,8 @@ exit:
 		proc_list_unlock();
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_JETSAM) | DBG_FUNC_END,
-	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, 0, kill_count, *memory_reclaimed, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_JETSAM) | DBG_FUNC_END,
+	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, 0, kill_count, *memory_reclaimed);
 
 	if (kill_count > 0) {
 		return TRUE;
@@ -6043,8 +6145,8 @@ memorystatus_kill_hiwat_proc(uint32_t *errors, boolean_t *purged, uint64_t *memo
 	unsigned int i = 0;
 	uint32_t aPid_ep;
 	os_reason_t jetsam_reason = OS_REASON_NULL;
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_JETSAM_HIWAT) | DBG_FUNC_START,
-	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_JETSAM_HIWAT) | DBG_FUNC_START,
+	    MEMORYSTATUS_LOG_AVAILABLE_PAGES);
 
 	jetsam_reason = os_reason_create(OS_REASON_JETSAM, JETSAM_REASON_MEMORY_HIGHWATER);
 	if (jetsam_reason == OS_REASON_NULL) {
@@ -6167,7 +6269,7 @@ exit:
 		}
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_JETSAM_HIWAT) | DBG_FUNC_END,
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_JETSAM_HIWAT) | DBG_FUNC_END,
 	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, killed ? aPid : 0, killed, *memory_reclaimed, 0);
 
 	return killed;
@@ -6194,8 +6296,8 @@ memorystatus_kill_elevated_process(uint32_t cause, os_reason_t jetsam_reason, un
 	uint64_t footprint_of_killed_proc = 0;
 
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_JETSAM) | DBG_FUNC_START,
-	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_JETSAM) | DBG_FUNC_START,
+	    MEMORYSTATUS_LOG_AVAILABLE_PAGES);
 
 #if CONFIG_FREEZE
 	boolean_t consider_frozen_only = FALSE;
@@ -6323,8 +6425,8 @@ exit:
 		}
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_JETSAM) | DBG_FUNC_END,
-	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, killed ? aPid : 0, kill_count, *memory_reclaimed, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_JETSAM) | DBG_FUNC_END,
+	    MEMORYSTATUS_LOG_AVAILABLE_PAGES, killed ? aPid : 0, kill_count, *memory_reclaimed);
 
 	return killed;
 }
@@ -6561,7 +6663,7 @@ memorystatus_clear_errors(void)
 	proc_t p;
 	unsigned int i = 0;
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_CLEAR_ERRORS) | DBG_FUNC_START, 0, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_CLEAR_ERRORS) | DBG_FUNC_START);
 
 	proc_list_lock();
 
@@ -6575,42 +6677,33 @@ memorystatus_clear_errors(void)
 
 	proc_list_unlock();
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_CLEAR_ERRORS) | DBG_FUNC_END, 0, 0, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_CLEAR_ERRORS) | DBG_FUNC_END);
 }
 
 #if CONFIG_JETSAM
 static void
-memorystatus_update_levels_locked(boolean_t critical_only)
+memorystatus_update_levels_locked(void)
 {
-	memorystatus_available_pages_critical = memorystatus_available_pages_critical_base;
-
 	/*
 	 * If there's an entry in the first bucket, we have idle processes.
 	 */
-
 	memstat_bucket_t *first_bucket = &memstat_bucket[JETSAM_PRIORITY_IDLE];
 	if (first_bucket->count) {
-		memorystatus_available_pages_critical += memorystatus_available_pages_critical_idle_offset;
+		memorystatus_available_pages_critical = memorystatus_available_pages_critical_idle;
+	} else {
+		memorystatus_available_pages_critical = memorystatus_available_pages_critical_base;
+	}
 
-		if (memorystatus_available_pages_critical > memorystatus_available_pages_pressure) {
-			/*
-			 * The critical threshold must never exceed the pressure threshold
-			 */
-			memorystatus_available_pages_critical = memorystatus_available_pages_pressure;
-		}
+	if (memorystatus_available_pages_critical > memorystatus_available_pages_pressure) {
+		/*
+		 * The critical threshold must never exceed the pressure threshold
+		 */
+		memorystatus_available_pages_critical = memorystatus_available_pages_pressure;
 	}
 
 	if (memorystatus_jetsam_policy & kPolicyMoreFree) {
 		memorystatus_available_pages_critical += memorystatus_policy_more_free_offset_pages;
 	}
-
-	if (critical_only) {
-		return;
-	}
-
-#if VM_PRESSURE_EVENTS
-	memorystatus_available_pages_pressure = (int32_t)(pressure_threshold_percentage * (atop_64(max_mem) / 100));
-#endif
 }
 
 void
@@ -6628,7 +6721,7 @@ memorystatus_fast_jetsam_override(boolean_t enable_override)
 		proc_list_lock();
 		memorystatus_jetsam_policy |= kPolicyMoreFree;
 		memorystatus_thread_pool_max();
-		memorystatus_update_levels_locked(TRUE);
+		memorystatus_update_levels_locked();
 		proc_list_unlock();
 	} else {
 		if ((memorystatus_jetsam_policy & kPolicyMoreFree) == 0) {
@@ -6637,7 +6730,7 @@ memorystatus_fast_jetsam_override(boolean_t enable_override)
 		proc_list_lock();
 		memorystatus_jetsam_policy &= ~kPolicyMoreFree;
 		memorystatus_thread_pool_default();
-		memorystatus_update_levels_locked(TRUE);
+		memorystatus_update_levels_locked();
 		proc_list_unlock();
 	}
 }
@@ -7059,7 +7152,7 @@ memorystatus_cmd_grp_set_priorities(user_addr_t buffer, size_t buffer_size)
 		goto out;
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_GRP_SET_PROP) | DBG_FUNC_START, MEMORYSTATUS_FLAGS_GRP_SET_PRIORITY, entry_count, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_GRP_SET_PROP) | DBG_FUNC_START, MEMORYSTATUS_FLAGS_GRP_SET_PRIORITY, entry_count);
 
 	if ((error = copyin(buffer, entries, buffer_size)) != 0) {
 		goto out;
@@ -7174,7 +7267,7 @@ memorystatus_cmd_grp_set_priorities(user_addr_t buffer, size_t buffer_size)
 	 * harmless but interesting...
 	 */
 out:
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_GRP_SET_PROP) | DBG_FUNC_END, MEMORYSTATUS_FLAGS_GRP_SET_PRIORITY, entry_count, table_count, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_GRP_SET_PROP) | DBG_FUNC_END, MEMORYSTATUS_FLAGS_GRP_SET_PRIORITY, entry_count, table_count);
 
 	kfree_data(entries, buffer_size);
 	kfree_type(memorystatus_internal_properties_t, entry_count, table);
@@ -7208,13 +7301,17 @@ memorystatus_cmd_grp_set_probabilities(user_addr_t buffer, size_t buffer_size)
 	}
 
 	entry_count = (buffer_size / sizeof(memorystatus_properties_entry_v1_t));
+	if (entry_count == 0) {
+		error = EINVAL;
+		goto out;
+	}
 
 	if ((entries = kalloc_data(buffer_size, Z_WAITOK)) == NULL) {
 		error = ENOMEM;
 		goto out;
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_GRP_SET_PROP) | DBG_FUNC_START, MEMORYSTATUS_FLAGS_GRP_SET_PROBABILITY, entry_count, 0, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_GRP_SET_PROP) | DBG_FUNC_START, MEMORYSTATUS_FLAGS_GRP_SET_PROBABILITY, entry_count);
 
 	if ((error = copyin(buffer, entries, buffer_size)) != 0) {
 		goto out;
@@ -7273,7 +7370,7 @@ memorystatus_cmd_grp_set_probabilities(user_addr_t buffer, size_t buffer_size)
 	proc_list_unlock();
 
 out:
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_GRP_SET_PROP) | DBG_FUNC_END, MEMORYSTATUS_FLAGS_GRP_SET_PROBABILITY, entry_count, tmp_table_new_size, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_GRP_SET_PROP) | DBG_FUNC_END, MEMORYSTATUS_FLAGS_GRP_SET_PROBABILITY, entry_count, tmp_table_new_size);
 
 	kfree_data(entries, buffer_size);
 	kfree_data(tmp_table_old, tmp_table_old_size);
@@ -7394,6 +7491,62 @@ memorystatus_cmd_set_memlimit_properties(pid_t pid, user_addr_t buffer, size_t b
 
 	return error;
 }
+
+#if DEBUG || DEVELOPMENT
+static int
+memorystatus_cmd_set_diag_memlimit_properties(pid_t pid, user_addr_t buffer, size_t buffer_size, __unused int32_t *retval)
+{
+	int error = 0;
+	memorystatus_diag_memlimit_properties_t mmp_entry;
+	proc_t p = proc_find(pid);
+	if (!p) {
+		return ESRCH;
+	}
+
+	/* Validate inputs */
+	if ((pid == 0) || (buffer == USER_ADDR_NULL) || (buffer_size != sizeof(memorystatus_diag_memlimit_properties_t))) {
+		proc_rele(p);
+		return EINVAL;
+	}
+
+	error = copyin(buffer, &mmp_entry, buffer_size);
+
+	if (error == 0) {
+		proc_list_lock();
+		error = memorystatus_set_diag_memlimit_properties_internal(p, &mmp_entry);
+		proc_list_unlock();
+	}
+	proc_rele(p);
+	return error;
+}
+
+static int
+memorystatus_cmd_get_diag_memlimit_properties(pid_t pid, user_addr_t buffer, size_t buffer_size, __unused int32_t *retval)
+{
+	int error = 0;
+	memorystatus_diag_memlimit_properties_t mmp_entry;
+	proc_t p = proc_find(pid);
+	if (!p) {
+		return ESRCH;
+	}
+
+	/* Validate inputs */
+	if ((pid == 0) || (buffer == USER_ADDR_NULL) || (buffer_size != sizeof(memorystatus_diag_memlimit_properties_t))) {
+		proc_rele(p);
+		return EINVAL;
+	}
+	proc_list_lock();
+	error = memorystatus_get_diag_memlimit_properties_internal(p, &mmp_entry);
+	proc_list_unlock();
+	proc_rele(p);
+	if (error == 0) {
+		error = copyout(&mmp_entry, buffer, buffer_size);
+	}
+
+
+	return error;
+}
+#endif //DEBUG || DEVELOPMENT
 
 static void
 memorystatus_get_memlimit_properties_internal(proc_t p, memorystatus_memlimit_properties_t* p_entry)
@@ -7725,6 +7878,36 @@ memorystatus_set_memlimit_properties_internal(proc_t p, memorystatus_memlimit_pr
 	return error;
 }
 
+#if DEBUG || DEVELOPMENT
+static int
+memorystatus_set_diag_memlimit_properties_internal(proc_t p, memorystatus_diag_memlimit_properties_t *p_entry)
+{
+	int error = 0;
+	uint64_t old_limit = 0;
+
+	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
+	/* Enforce the limit by writing to the ledgers */
+	error = (task_set_diag_footprint_limit_internal(proc_task(p), p_entry->memlimit, &old_limit) == KERN_SUCCESS) ? KERN_SUCCESS : EINVAL;
+
+	memorystatus_log_debug( "memorystatus_set_diag_memlimit_properties: new limit on pid %d (%lluMB old %lluMB)\n",
+	    proc_getpid(p), (p_entry->memlimit > 0 ? p_entry->memlimit : -1), (old_limit)
+	    );
+	DTRACE_MEMORYSTATUS2(memorystatus_diag_memlimit_properties_t, proc_t, p, int32_t, (p->p_memstat_memlimit > 0 ? p->p_memstat_memlimit : -1));
+	return error;
+}
+
+static int
+memorystatus_get_diag_memlimit_properties_internal(proc_t p, memorystatus_diag_memlimit_properties_t *p_entry)
+{
+	int error = 0;
+	/* Enforce the limit by writing to the ledgers */
+	error = (task_get_diag_footprint_limit_internal(proc_task(p), &p_entry->memlimit, &p_entry->threshold_enabled) == KERN_SUCCESS) ? KERN_SUCCESS : EINVAL;
+
+	DTRACE_MEMORYSTATUS2(memorystatus_diag_memlimit_properties_t, proc_t, p, int32_t, (p->p_memstat_memlimit > 0 ? p->p_memstat_memlimit : -1));
+	return error;
+}
+#endif // DEBUG || DEVELOPMENT
+
 bool
 memorystatus_task_has_increased_memory_limit_entitlement(task_t task)
 {
@@ -7965,6 +8148,16 @@ memorystatus_control(struct proc *p, struct memorystatus_control_args *args, int
 		skip_auth_check = TRUE;
 	}
 
+	/*
+	 * On development kernel, we don't need entitlements if we're adjusting the limit.
+	 * This required for limit adjustment by dyld when roots are detected, see rdar://99669958
+	 */
+#if DEVELOPMENT || DEBUG
+	if (args->command == MEMORYSTATUS_CMD_INCREASE_JETSAM_TASK_LIMIT && proc_getpid(p) == args->pid) {
+		skip_auth_check = TRUE;
+	}
+#endif /* DEVELOPMENT || DEBUG */
+
 	/* Need to be root or have entitlement. */
 	if (!kauth_cred_issuser(kauth_cred_get()) && !IOCurrentTaskHasEntitlement(MEMORYSTATUS_ENTITLEMENT) && !skip_auth_check) {
 		error = EPERM;
@@ -8124,6 +8317,12 @@ memorystatus_control(struct proc *p, struct memorystatus_control_args *args, int
 #if DEVELOPMENT || DEBUG
 	case MEMORYSTATUS_CMD_INCREASE_JETSAM_TASK_LIMIT:
 		error = memorystatus_cmd_increase_jetsam_task_limit(args->pid, args->flags);
+		break;
+	case MEMORYSTATUS_CMD_SET_DIAG_LIMIT:
+		error = memorystatus_cmd_set_diag_memlimit_properties(args->pid, args->buffer, args->buffersize, ret);
+		break;
+	case MEMORYSTATUS_CMD_GET_DIAG_LIMIT:
+		error = memorystatus_cmd_get_diag_memlimit_properties(args->pid, args->buffer, args->buffersize, ret);
 		break;
 #endif /* DEVELOPMENT || DEBUG */
 
@@ -8528,7 +8727,7 @@ memorystatus_update_priority_for_appnap(proc_t p, boolean_t is_appnap)
 		p->p_memstat_idle_start = mach_absolute_time();
 	}
 
-	KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_CHANGE_PRIORITY), proc_getpid(p), priority, p->p_memstat_effectivepriority, 0, 0);
+	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_CHANGE_PRIORITY), proc_getpid(p), priority, p->p_memstat_effectivepriority);
 
 	p->p_memstat_effectivepriority = priority;
 

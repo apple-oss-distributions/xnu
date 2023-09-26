@@ -85,8 +85,7 @@ extern int memorystatus_entitled_max_task_footprint_mb;
 #define MAX_FROZEN_PROCESS_DEMOTIONS 2
 #define MAX_FROZEN_PROCESS_DEMOTIONS_SWAP_ENABLED 4
 #define MIN_THAW_DEMOTION_THRESHOLD  5
-#define MIN_THAW_REFREEZE_THRESHOLD  3  /* min # of global thaws needed for us to consider refreezing these processes. */
-
+#define MIN_THAW_REFREEZE_THRESHOLD  3
 #define FREEZE_MAX_CANDIDATE_BAND JETSAM_PRIORITY_AGING_BAND2
 
 typedef struct throttle_interval_t {
@@ -111,6 +110,7 @@ extern boolean_t memorystatus_freeze_degradation; //protected by the freezer mut
 
 extern unsigned int memorystatus_max_frozen_demotions_daily;
 extern unsigned int memorystatus_thaw_count_demotion_threshold;
+extern unsigned int memorystatus_min_thaw_refreeze_threshold;
 
 #if DEVELOPMENT || DEBUG
 #define FREEZER_CONTROL_GET_STATUS      (1)

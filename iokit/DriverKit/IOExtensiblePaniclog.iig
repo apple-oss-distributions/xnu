@@ -1,0 +1,163 @@
+/*
+ * Copyright (c) 2022 Apple Computer, Inc. All rights reserved.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
+ *
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ */
+
+#if !__IIG
+#if KERNEL
+#include <IOKit/IOExtensiblePaniclog.h>
+#endif
+#endif
+
+#ifndef _IOKIT_UIOEXTENSIBLEPANICLOG_H
+#define _IOKIT_UIOEXTENSIBLEPANICLOG_H
+
+#include <DriverKit/OSObject.iig>
+#include <DriverKit/IOBufferMemoryDescriptor.iig>
+
+/*!
+@iig implementation
+#include <DriverKit/IODispatchQueue.h>
+#include <DriverKit/IOUserClient.h>
+#include <DriverKit/IOServiceStateNotificationDispatchSource.h>
+@iig end
+*/
+
+enum {
+    kIOExtensiblePaniclogOptionsNone = 0x0,
+    kIOExtensiblePaniclogOptionsWithBuffer = 0x1, 
+};
+
+class KERNEL IOExtensiblePaniclog : public OSObject
+{
+public:
+    virtual bool
+    init() override;
+
+    virtual void
+    free() override;
+
+    /*!
+     * @brief       This function is to be called to create IOExtensiblePaniclog object.
+     * @discussion  First function to be called.
+     * 
+     * @param       uuid  The UUID of the handle.
+     * @param       data_id The string describing the handle. MAX length of 32.
+     * @param       max_len The maximum length of the buffer.
+     * @param       options Options to be passed while creating the handle
+     * @param       out The pointer to the created IOExtensiblePaniclog object. NULL in case of an error.
+     * @return      True in case of success. False in case of an error.
+     */
+    static kern_return_t
+    Create(OSData *uuid, OSString *data_id, uint32_t max_len, uint32_t options,
+            IOExtensiblePaniclog **out);
+
+    /*!
+     * @brief       This function is called to set the IOExtensiblePaniclog object active.
+     * @discussion  When it is set active, it is picked up and added to the extensible paniclog
+     *              in case of a panic.
+     * 
+     * @return      0 on success, negative value in case of failure.
+     */
+    virtual kern_return_t SetActive();
+
+    /*!
+     * @brief       This function is called to set the IOExtensiblePaniclog object inactive.
+     * @discussion  When it is set inactive, this buffer is not picked up in case of a panic
+     * 
+     * @return      True in case of success. False in case of an error.
+     */ 
+    virtual kern_return_t SetInactive();
+
+    /*!
+     * @brief       This function is called to insert data into the buffer.
+     * @discussion  This function overwrites the data in the buffer. The write starts from
+     *              offset 0 and continues until 'len'
+     * 
+     * @param       data Data to be inserted
+     * @param       len The length to be copied.
+     * 
+     * @return      0 in case of success. Negative in case of an error.
+     */
+    virtual kern_return_t InsertData(OSData *data);
+
+    /*!
+     * @brief       This function is called to insert data into the buffer.
+     * @discussion  This function overwrites the data in the buffer. The write starts from
+     *              last written byte and continues until 'len'
+     * 
+     * @param       data Data to be inserted
+     * @param       len The length to be copied.
+     * 
+     * @return      0 in case of success. Negative in case of an error.
+     */
+    virtual kern_return_t AppendData(OSData *data);
+
+     /*!
+     * @brief       Function to get the Memory descriptor created in the Create function
+     * 
+     * @param       mem The pointer to the IOBufferMemoryDescriptor object
+     * 
+     * @return      0 in case of success. Negative in case of an error.
+     */
+    virtual kern_return_t CopyMemoryDescriptor(IOBufferMemoryDescriptor **mem);
+
+     /*!
+     * @brief       This function is called to get a pointer to the ext paniclog buffer
+     * @discussion  After this function is called, the user is responsible for copying data into the buffer. 
+     *              The entire buffer is copied when a system panics.
+     *              After claiming the buffer, YieldBuffer() has to be called to set the used_len of the buffer
+     *              before calling InsertData() or AppendData()
+     *
+     * @param       addr Address of the mapped buffer
+     * @param       len The length of the mapped buffer. This is same value as the max_len in
+     *                  the Create() function
+     * 
+     * @return      0 in case of success. Negative in case of an error.
+     */
+    virtual kern_return_t ClaimBuffer(uint64_t *addr, uint64_t *len) LOCALONLY;
+
+    /*!
+     * @brief       This function is called to yield the buffer and set the used_len for the buffer
+     * @discussion  After this function call, InsertData() and AppendData() can be called.
+     *
+     * @param       used_len The length of the buffer used by the client.
+     * 
+     * @return      0 in case of success. Negative in case of an error.
+     */
+    virtual kern_return_t YieldBuffer(uint32_t used_len) LOCALONLY;
+
+    /*!
+     * @brief       This function is called to set the used len of the buffer
+     *
+     * @param       used_len The length of the buffer used by the client.
+     * 
+     * @return      0 in case of success. Negative in case of an error.
+     */
+    virtual kern_return_t SetUsedLen(uint32_t used_len);
+};
+
+#endif /* _IOKIT_UIOEXTENSIBLEPANICLOG_H */

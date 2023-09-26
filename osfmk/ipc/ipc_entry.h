@@ -73,6 +73,7 @@
 
 #include <kern/kern_types.h>
 #include <kern/kalloc.h>
+#include <kern/smr_types.h>
 
 #include <ipc/ipc_types.h>
 
@@ -100,25 +101,28 @@
 
 #define IPC_ENTRY_DIST_BITS   12
 #define IPC_ENTRY_DIST_MAX    ((1 << IPC_ENTRY_DIST_BITS) - 1)
-#ifdef __LP64__
 #define IPC_ENTRY_INDEX_BITS  32
 #define IPC_ENTRY_INDEX_MAX   (UINT32_MAX)
-#else
-#define IPC_ENTRY_INDEX_BITS  20
-#define IPC_ENTRY_INDEX_MAX   ((1 << IPC_ENTRY_INDEX_BITS) - 1)
-#endif
 
 struct ipc_entry {
 	union {
 		struct ipc_object *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_object") ie_object;
 		struct ipc_object *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_object") volatile ie_volatile_object;
+		struct ipc_entry_table *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_self") ie_self;
 	};
-	ipc_entry_bits_t    ie_bits;
-	uint32_t            ie_dist  : IPC_ENTRY_DIST_BITS;
-	mach_port_index_t   ie_index : IPC_ENTRY_INDEX_BITS;
 	union {
-		mach_port_index_t ie_next;         /* next in freelist, or...  */
-		ipc_table_index_t ie_request;      /* dead name request notify */
+		struct {
+			ipc_entry_bits_t    ie_bits;
+			union {
+				mach_port_index_t ie_next;         /* next in freelist, or...  */
+				ipc_table_index_t ie_request;      /* dead name request notify */
+			};
+
+			/* hash fields */
+			uint32_t            ie_dist;
+			mach_port_index_t   ie_index;
+		};
+		struct smr_node             ie_smr_node;
 	};
 };
 

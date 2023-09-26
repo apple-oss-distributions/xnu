@@ -112,7 +112,7 @@ def GetProcInfo(proc):
                    "task:{task: <#020x} p_stat:{p.p_stat: <6d} parent pid: {p.p_ppid: <6d}\n"
                    ).format(GetProcName(proc), GetProcPID(proc), task=GetTaskFromProc(proc), p=proc)
     #print the Creds
-    ucred = proc.p_proc_ro.p_ucred
+    ucred = proc.p_proc_ro.p_ucred.__smr_ptr
     if ucred:
         out_string += "Cred: euid {:d} ruid {:d} svuid {:d}\n".format(ucred.cr_posix.cr_uid,
                                                                       ucred.cr_posix.cr_ruid,
@@ -242,15 +242,14 @@ def GetASTSummary(ast):
         I - AST_TELEMETRY_IO
         E - AST_KEVENT
         R - AST_REBALANCE
-        N - AST_UNQUIESCE
-        p  - AST_PROC_RESOURCE
+        p - AST_PROC_RESOURCE
     """
     out_string = ""
     state = int(ast)
     thread_state_chars = {0x0:'', 0x1:'P', 0x2:'Q', 0x4:'U', 0x8:'H', 0x10:'Y', 0x20:'A',
                           0x40:'L', 0x80:'B', 0x100:'K', 0x200:'M', 0x400: 'r', 0x800: 'a',
                           0x1000:'G', 0x2000:'T', 0x4000:'T', 0x8000:'T', 0x10000:'S',
-                          0x20000: 'D', 0x40000: 'I', 0x80000: 'E', 0x100000: 'R', 0x200000: 'N', 0x400000: 'p'}
+                          0x20000: 'D', 0x40000: 'I', 0x80000: 'E', 0x100000: 'R', 0x400000: 'p'}
     state_str = ''
     mask = 0x1
     while mask <= 0x200000:
@@ -1730,6 +1729,7 @@ def GetLedgerEntryWithTemplate(ledger_template, ledgerp, i):
         if (unsigned(le.le_warn_percent) < 65535):
             entry["warn_percent"] = unsigned (le.le_warn_percent * 100 / 65536)
         entry["flags"] = int(le.le_flags)
+        entry["diag_threshold_scaled"] = int(le.le_diag_threshold_scaled)
     else:
         return None
     

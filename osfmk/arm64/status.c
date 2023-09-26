@@ -751,6 +751,19 @@ machine_thread_state_convert_from_user(
 #endif /* __has_feature(ptrauth_calls) */
 }
 
+#if __has_feature(ptrauth_calls)
+bool
+machine_thread_state_is_debug_flavor(int flavor)
+{
+	if (flavor == ARM_DEBUG_STATE ||
+	    flavor == ARM_DEBUG_STATE64 ||
+	    flavor == ARM_DEBUG_STATE32) {
+		return true;
+	}
+	return false;
+}
+#endif /* __has_feature(ptrauth_calls) */
+
 /*
  * Translate signal context data pointer to userspace representation
  */
@@ -1660,6 +1673,7 @@ machine_thread_dup(thread_t self,
 	arm_neon_saved_state_t *self_neon_state = self->machine.uNeon;
 	arm_neon_saved_state_t *target_neon_state = target->machine.uNeon;
 	bcopy(self_neon_state, target_neon_state, sizeof(*target_neon_state));
+
 
 	return KERN_SUCCESS;
 }

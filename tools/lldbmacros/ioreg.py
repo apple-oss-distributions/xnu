@@ -552,11 +552,17 @@ def ShowIOServicePM(cmd_args=None):
     out_string += "), "
     
     if iopmpriv.MachineState != 20:
-        out_string += "DriverTimer = {0: <6d}, SettleTime = {1: < 6d}, HeadNoteFlags = {2: #12x}, HeadNotePendingAcks = {3: #012x}, ".format(
-                unsigned(iopmpriv.DriverTimer),
-                unsigned(iopmpriv.SettleTimeUS),
-                unsigned(iopmpriv.HeadNoteChangeFlags),
-                unsigned(iopmpriv.HeadNotePendingAcks))
+        if hasattr(iopmpriv, "SettleTimeUS"):
+            out_string += "DriverTimer = {0: <6d}, SettleTime = {1: < 6d}, HeadNoteFlags = {2: #12x}, HeadNotePendingAcks = {3: #012x}, ".format(
+                    unsigned(iopmpriv.DriverTimer),
+                    unsigned(iopmpriv.SettleTimeUS),
+                    unsigned(iopmpriv.HeadNoteChangeFlags),
+                    unsigned(iopmpriv.HeadNotePendingAcks))
+        else:
+            out_string += "DriverTimer = {0: <6d}, HeadNoteFlags = {1: #12x}, HeadNotePendingAcks = {2: #012x}, ".format(
+                    unsigned(iopmpriv.DriverTimer),
+                    unsigned(iopmpriv.HeadNoteChangeFlags),
+                    unsigned(iopmpriv.HeadNotePendingAcks))
     
     if iopmpriv.DeviceOverrideEnabled != 0:
         out_string += "DeviceOverrides, "

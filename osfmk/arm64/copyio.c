@@ -173,7 +173,7 @@ copy_validate(const user_addr_t user_addr, uintptr_t kernel_addr,
 		return EXDEV;
 	}
 
-	if (__improbable(user_addr & TBI_MASK)) {
+	if (__improbable(user_addr & ARM_TBI_USER_MASK)) {
 		return EINVAL;
 	}
 

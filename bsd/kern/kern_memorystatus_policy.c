@@ -634,7 +634,7 @@ memorystatus_freeze_pick_process(struct memorystatus_freeze_list_iterator *itera
 	 * Failed to find a new freezer candidate.
 	 * Try to re-freeze.
 	 */
-	if (memorystatus_refreeze_eligible_count >= MIN_THAW_REFREEZE_THRESHOLD) {
+	if (memorystatus_refreeze_eligible_count >= memorystatus_min_thaw_refreeze_threshold) {
 		assert(!iterator->refreeze_only);
 		iterator->refreeze_only = true;
 		iterator->last_p = memorystatus_freeze_pick_refreeze_process(PROC_NULL);
@@ -676,7 +676,7 @@ memorystatus_freeze_thread_should_run()
 		 * we won't freeze any new procs.
 		 */
 		memorystatus_freezer_stats.mfs_skipped_full_count++;
-		if (memorystatus_refreeze_eligible_count < MIN_THAW_REFREEZE_THRESHOLD) {
+		if (memorystatus_refreeze_eligible_count < memorystatus_min_thaw_refreeze_threshold) {
 			return false;
 		}
 	}

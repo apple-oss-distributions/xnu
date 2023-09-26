@@ -89,11 +89,11 @@ LEXT(vfptrash_data)
 #endif
 
 #if __arm64__
-        .section __DATA, __const
 
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
-/* reserve space for read only page tables */
+        .section __DATA, __const
         .align 14
+/* reserve space for read only page tables */
 LEXT(ropagetable_begin)
 #if XNU_TARGET_OS_OSX
 		// A big auxKC might need more page tables, especially because

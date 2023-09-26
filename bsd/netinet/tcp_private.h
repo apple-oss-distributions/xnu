@@ -141,6 +141,7 @@ struct tcp_notify_ack_complete {
 #define TCP_FASTOPEN_FORCE_ENABLE       0x218
 #define MPTCP_EXPECTED_PROGRESS_TARGET  0x219
 #define MPTCP_FORCE_VERSION             0x21a
+#define TCP_ENABLE_L4S                  0x21b   /* Enable or disable L4S */
 
 /* When adding new socket-options, you need to make sure MPTCP supports these as well! */
 
@@ -168,6 +169,34 @@ struct tcp_conn_status {
 		uint32_t        pad_field;
 	};
 };
+
+#define TCPINFO_HAS_L4S_ 1
+typedef enum {
+	tcp_connection_client_accurate_ecn_invalid                                    = 0,
+	tcp_connection_client_accurate_ecn_feature_disabled                           = 1,
+	tcp_connection_client_accurate_ecn_feature_enabled                            = 2,
+	tcp_connection_client_classic_ecn_available                                   = 3,
+	tcp_connection_client_ecn_not_available                                       = 4,
+	tcp_connection_client_accurate_ecn_negotiation_blackholed                     = 5,
+	tcp_connection_client_accurate_ecn_ace_bleaching_detected                     = 6,
+	tcp_connection_client_accurate_ecn_negotiation_success                        = 7,
+	tcp_connection_client_accurate_ecn_negotiation_success_ect_mangling_detected  = 8,
+	tcp_connection_client_accurate_ecn_negotiation_success_ect_bleaching_detected = 9,
+} tcp_connection_client_accurate_ecn_state_t;
+
+typedef enum {
+	tcp_connection_server_accurate_ecn_invalid                                    = 0,
+	tcp_connection_server_accurate_ecn_feature_disabled                           = 1,
+	tcp_connection_server_accurate_ecn_feature_enabled                            = 2,
+	tcp_connection_server_no_ecn_requested                                        = 3,
+	tcp_connection_server_classic_ecn_requested                                   = 4,
+	tcp_connection_server_accurate_ecn_requested                                  = 5,
+	tcp_connection_server_accurate_ecn_negotiation_blackholed                     = 6,
+	tcp_connection_server_accurate_ecn_ace_bleaching_detected                     = 7,
+	tcp_connection_server_accurate_ecn_negotiation_success                        = 8,
+	tcp_connection_server_accurate_ecn_negotiation_success_ect_mangling_detected  = 9,
+	tcp_connection_server_accurate_ecn_negotiation_success_ect_bleaching_detected = 10,
+} tcp_connection_server_accurate_ecn_state_t;
 
 /*
  * Add new fields to this structure at the end only. This will preserve
@@ -279,7 +308,13 @@ struct tcp_info {
 	u_int64_t       tcpi_txretransmitpackets __attribute__((aligned(8)));
 
 #define TCPINFO_HAS_RCV_RTT 1
-	u_int32_t       tcpi_rcv_srtt;      /* Receiver's Smoothed RTT */
+	uint32_t       tcpi_rcv_srtt;       /* Receiver's Smoothed RTT */
+	uint32_t       tcpi_client_accecn_state;   /* Client's Accurate ECN state */
+	uint32_t       tcpi_server_accecn_state;   /* Server's Accurate ECN state as seen by clent */
+	uint64_t       tcpi_ecn_capable_packets_sent;   /* Packets sent with ECT */
+	uint64_t       tcpi_ecn_capable_packets_acked;  /* Packets sent with ECT that were ACKed */
+	uint64_t       tcpi_ecn_capable_packets_marked; /* Packets sent with ECT that were marked */
+	uint64_t       tcpi_ecn_capable_packets_lost;   /* Packets sent with ECT that were lost */
 };
 
 struct tcp_measure_bw_burst {

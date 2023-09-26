@@ -901,9 +901,6 @@ mptcp_disconnect(struct mptses *mpte)
 	mp_so = mptetoso(mpte);
 	mp_tp = mpte->mpte_mptcb;
 
-	DTRACE_MPTCP3(disconnectx, struct mptses *, mpte,
-	    struct socket *, mp_so, struct mptcb *, mp_tp);
-
 	/* if we're not detached, go thru socket state checks */
 	if (!(mp_so->so_flags & SOF_PCBCLEARING) && !(mp_so->so_flags & SOF_DEFUNCT)) {
 		if (!(mp_so->so_state & (SS_ISCONNECTED |
@@ -920,8 +917,9 @@ mptcp_disconnect(struct mptses *mpte)
 	mptcp_cancel_all_timers(mp_tp);
 	if (mp_tp->mpt_state < MPTCPS_ESTABLISHED) {
 		mptcp_close(mpte, mp_tp);
-	} else if ((mp_so->so_options & SO_LINGER) &&
-	    mp_so->so_linger == 0) {
+	} else if (((mp_so->so_options & SO_LINGER) &&
+	    mp_so->so_linger == 0) ||
+	    (mp_so->so_flags1 & SOF1_DEFUNCTINPROG)) {
 		mptcp_drop(mpte, mp_tp, 0);
 	} else {
 		soisdisconnecting(mp_so);

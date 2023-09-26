@@ -1934,6 +1934,31 @@ mach_port_get_attributes(
 		break;
 	}
 
+	case MACH_PORT_SERVICE_THROTTLED: {
+		boolean_t *is_throttled = info;
+
+		if (!MACH_PORT_VALID(name)) {
+			return KERN_INVALID_RIGHT;
+		}
+
+		kr = ipc_port_translate_receive(space, name, &port);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
+		/* port is locked and active */
+
+		if (!port->ip_service_port) {
+			ip_mq_unlock(port);
+			return KERN_INVALID_CAPABILITY;
+		}
+
+		assert(port->ip_splabel != NULL);
+		*is_throttled = ipc_service_port_label_is_throttled((ipc_service_port_label_t)port->ip_splabel);
+		*count = MACH_PORT_SERVICE_THROTTLED_COUNT;
+		ip_mq_unlock(port);
+		break;
+	}
+
 	default:
 		return KERN_INVALID_ARGUMENT;
 		/*NOTREACHED*/
@@ -2022,7 +2047,7 @@ mach_port_set_attributes(
 		ip_mq_unlock(port);
 		break;
 	}
-	case MACH_PORT_TEMPOWNER:
+	case MACH_PORT_TEMPOWNER: {
 		if (!MACH_PORT_VALID(name)) {
 			return KERN_INVALID_RIGHT;
 		}
@@ -2111,6 +2136,35 @@ mach_port_set_attributes(
 
 		break;
 #endif /* IMPORTANCE_INHERITANCE */
+	}
+
+	case MACH_PORT_SERVICE_THROTTLED: {
+		boolean_t is_throttled = *info;
+
+		if (!MACH_PORT_VALID(name)) {
+			return KERN_INVALID_RIGHT;
+		}
+
+		kr = ipc_port_translate_receive(space, name, &port);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
+		/* port is locked and active */
+
+		if (!port->ip_service_port) {
+			ip_mq_unlock(port);
+			return KERN_INVALID_CAPABILITY;
+		}
+
+		assert(port->ip_splabel != NULL);
+		if (is_throttled) {
+			ipc_service_port_label_set_flag(port->ip_splabel, ISPL_FLAGS_THROTTLED);
+		} else {
+			ipc_service_port_label_clear_flag(port->ip_splabel, ISPL_FLAGS_THROTTLED);
+		}
+		ip_mq_unlock(port);
+		break;
+	}
 
 	default:
 		return KERN_INVALID_ARGUMENT;
@@ -2552,6 +2606,13 @@ mach_port_construct(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	at_most_one_flags = options->flags & (MPO_REPLY_PORT | MPO_ENFORCE_REPLY_PORT_SEMANTICS |
+	    MPO_PROVISIONAL_ID_PROT_OPTOUT | MPO_PROVISIONAL_REPLY_PORT);
+	if (at_most_one_flags & (at_most_one_flags - 1)) {
+		/* at most one of the listed flags can be set */
+		return KERN_INVALID_ARGUMENT;
+	}
+
 	if (space == IS_NULL) {
 		return KERN_INVALID_TASK;
 	}
@@ -2570,6 +2631,10 @@ mach_port_construct(
 
 	if (options->flags & MPO_ENFORCE_REPLY_PORT_SEMANTICS) {
 		init_flags |= IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS;
+	}
+
+	if (options->flags & MPO_PROVISIONAL_ID_PROT_OPTOUT) {
+		init_flags |= IPC_PORT_INIT_PROVISIONAL_ID_PROT_OPTOUT;
 	}
 
 	if (options->flags & MPO_PROVISIONAL_REPLY_PORT) {

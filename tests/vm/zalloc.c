@@ -7,6 +7,7 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vm"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("zalloc"),
+	T_META_CHECK_LEAKS(false),
 	T_META_ASROOT(YES));
 
 static int64_t
@@ -23,22 +24,24 @@ run_sysctl_test(const char *t, int64_t value)
 	return result;
 }
 
-T_DECL(basic_zone_test, "General zalloc test",
-    T_META_CHECK_LEAKS(false))
+T_DECL(basic_zone_test, "General zalloc test")
 {
 	T_EXPECT_EQ(1ull, run_sysctl_test("zone_basic_test", 0), "zone_basic_test");
 }
 
-T_DECL(read_only_zone_test, "Read-only zalloc test",
-    T_META_CHECK_LEAKS(false))
+T_DECL(read_only_zone_test, "Read-only zalloc test")
 {
 	T_EXPECT_EQ(1ull, run_sysctl_test("zone_ro_basic_test", 0), "zone_ro_basic_test");
 }
 
-T_DECL(zone_stress_test, "Zone stress test of edge cases",
-    T_META_CHECK_LEAKS(false))
+T_DECL(zone_stress_test, "Zone stress test of edge cases")
 {
 	T_EXPECT_EQ(1ull, run_sysctl_test("zone_stress_test", 0), "zone_stress_test");
+}
+
+T_DECL(zone_gc_stress_test, "stress test for zone_gc")
+{
+	T_EXPECT_EQ(1ull, run_sysctl_test("zone_gc_stress_test", 10), "zone_gc_stress_test");
 }
 
 #define ZLOG_ZONE "data.kalloc.128"

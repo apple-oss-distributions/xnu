@@ -457,7 +457,7 @@ flow_route_configure(struct flow_route *fr, struct ifnet *ifp, struct nx_flow_re
 		    EVENTHANDLER_REGISTER(&rt->rt_evhdlr_ctxt, route_event,
 		    flow_route_ev_callback, ee_arg, EVENTHANDLER_PRI_ANY);
 		ASSERT(fr->fr_rt_evhdlr_tag != NULL);
-		atomic_bitclear_32(&fr->fr_flags, FLOWRTF_DELETED);
+		os_atomic_andnot(&fr->fr_flags, FLOWRTF_DELETED, relaxed);
 
 		/*
 		 * Lookup gateway route (if any); returns locked gwrt
@@ -505,12 +505,12 @@ flow_route_configure(struct flow_route *fr, struct ifnet *ifp, struct nx_flow_re
 			(void) sa_copy(rt->rt_gateway, &ss, NULL);
 			_CASSERT(sizeof(fr->fr_gaddr) <= sizeof(ss));
 			bcopy(&ss, &fr->fr_gaddr, sizeof(fr->fr_gaddr));
-			atomic_bitset_32(&fr->fr_flags, FLOWRTF_GATEWAY);
+			os_atomic_or(&fr->fr_flags, FLOWRTF_GATEWAY, relaxed);
 		} else if (IS_DIRECT_HOSTROUTE(rt)) {
 			/*
 			 * Destination is on-link.
 			 */
-			atomic_bitset_32(&fr->fr_flags, FLOWRTF_ONLINK);
+			os_atomic_or(&fr->fr_flags, FLOWRTF_ONLINK, relaxed);
 		}
 		RT_UNLOCK(gwrt);
 	}
@@ -523,9 +523,9 @@ flow_route_configure(struct flow_route *fr, struct ifnet *ifp, struct nx_flow_re
 	    !(fr->fr_flags & FLOWRTF_STABLE_ADDR) != !use_stable_address) {
 		union sockaddr_in_4_6 old = fr->fr_laddr;
 		if (use_stable_address) {
-			atomic_bitset_32(&fr->fr_flags, FLOWRTF_STABLE_ADDR);
+			os_atomic_or(&fr->fr_flags, FLOWRTF_STABLE_ADDR, relaxed);
 		} else {
-			atomic_bitclear_32(&fr->fr_flags, FLOWRTF_STABLE_ADDR);
+			os_atomic_andnot(&fr->fr_flags, FLOWRTF_STABLE_ADDR, relaxed);
 		}
 		if ((err = flow_route_select_laddr(&fr->fr_laddr, &fr->fr_faddr,
 		    ifp, rt, &fr->fr_laddr_gencnt, use_stable_address)) != 0) {
@@ -546,7 +546,7 @@ flow_route_configure(struct flow_route *fr, struct ifnet *ifp, struct nx_flow_re
 
 done:
 	if (__probable(err == 0)) {
-		atomic_set_32(&fr->fr_want_configure, 0);
+		os_atomic_store(&fr->fr_want_configure, 0, release);
 	} else {
 		/* callee frees route entry */
 		flow_route_cleanup(fr);
@@ -603,7 +603,7 @@ flow_route_find(struct kern_nexus *nx, struct flow_mgr *fm,
 		if (__improbable(fr->fr_want_configure || fr->fr_laddr_gencnt !=
 		    ifp->if_nx_flowswitch.if_fsw_ipaddr_gencnt) ||
 		    __improbable(!(fr->fr_flags & FLOWRTF_STABLE_ADDR) != !use_stable_address)) {
-			atomic_add_32(&fr->fr_want_configure, 1);
+			os_atomic_inc(&fr->fr_want_configure, relaxed);
 			FR_LOCK(fr);
 			err = flow_route_configure(fr, ifp, req);
 			if (err != 0) {
@@ -686,7 +686,7 @@ flow_route_find(struct kern_nexus *nx, struct flow_mgr *fm,
 	*(struct flow_mgr **)(uintptr_t)&fr->fr_mgr = fm;
 
 	/* force configure newly-created flow route */
-	atomic_add_32(&fr->fr_want_configure, 1);
+	os_atomic_inc(&fr->fr_want_configure, relaxed);
 
 	FR_LOCK(fr);
 	if ((err = flow_route_configure(fr, ifp, req)) != 0) {
@@ -717,7 +717,7 @@ flow_route_find(struct kern_nexus *nx, struct flow_mgr *fm,
 	RB_INSERT(flow_route_tree, &frb->frb_head, fr);
 	RB_INSERT(flow_route_id_tree, &frib->frib_head, fr);
 
-	atomic_bitset_32(&fr->fr_flags, FLOWRTF_ATTACHED);
+	os_atomic_or(&fr->fr_flags, FLOWRTF_ATTACHED, relaxed);
 
 #if DEBUG
 	/* sanity checks for comparator routines */
@@ -884,7 +884,7 @@ flow_route_bucket_purge_common(struct flow_route_bucket *frb, uint32_t *resid,
 		RB_REMOVE(flow_route_tree, &frb->frb_head, fr);
 		RB_REMOVE(flow_route_id_tree, &frib->frib_head, fr);
 
-		atomic_bitclear_32(&fr->fr_flags, FLOWRTF_ATTACHED);
+		os_atomic_andnot(&fr->fr_flags, FLOWRTF_ATTACHED, relaxed);
 
 #if SK_LOG
 		if (fr->fr_flags & FLOWRTF_GATEWAY) {
@@ -1056,8 +1056,8 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 			 * it may.  For now, mark flow to perform a look-up
 			 * again as the gateway may have changed.
 			 */
-			atomic_add_32(&fr->fr_want_configure, 1);
-			atomic_bitclear_32(&fr->fr_flags, FLOWRTF_RESOLVED);
+			os_atomic_inc(&fr->fr_want_configure, relaxed);
+			os_atomic_andnot(&fr->fr_flags, FLOWRTF_RESOLVED, relaxed);
 			SK_DF(SK_VERB_FLOW_ROUTE, "%s: dst %s route changed",
 			    fm->fm_name, sk_sa_ntop(dst, dst_s,
 			    sizeof(dst_s)));
@@ -1073,9 +1073,9 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 			 * or being deleted the old eventhandler must be
 			 * de-registered.
 			 */
-			atomic_add_32(&fr->fr_want_configure, 1);
-			atomic_bitclear_32(&fr->fr_flags, FLOWRTF_RESOLVED);
-			atomic_bitset_32(&fr->fr_flags, FLOWRTF_DELETED);
+			os_atomic_inc(&fr->fr_want_configure, relaxed);
+			os_atomic_andnot(&fr->fr_flags, FLOWRTF_RESOLVED, relaxed);
+			os_atomic_or(&fr->fr_flags, FLOWRTF_DELETED, relaxed);
 			SK_DF(SK_VERB_FLOW_ROUTE, "%s: dst %s route deleted",
 			    fm->fm_name, sk_sa_ntop(dst, dst_s,
 			    sizeof(dst_s)));
@@ -1088,8 +1088,8 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 			 * reconfigure the flow route, but simply attempt
 			 * to resolve it next time to trigger a probe.
 			 */
-			atomic_add_32(&fr->fr_want_probe, 1);
-			atomic_bitclear_32(&fr->fr_flags, FLOWRTF_RESOLVED);
+			os_atomic_inc(&fr->fr_want_probe, relaxed);
+			os_atomic_andnot(&fr->fr_flags, FLOWRTF_RESOLVED, relaxed);
 			SK_DF(SK_VERB_FLOW_ROUTE, "%s: dst %s llentry stale",
 			    fm->fm_name, sk_sa_ntop(dst, dst_s,
 			    sizeof(dst_s)));
@@ -1118,13 +1118,11 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 				    sk_sa_ntop(dst, dst_s, sizeof(dst_s)),
 				    (!(fr->fr_flags & FLOWRTF_HAS_LLINFO) ?
 				    "resolved" : "changed"));
-				atomic_bitset_32(&fr->fr_flags,
-				    FLOWRTF_HAS_LLINFO);
+				os_atomic_or(&fr->fr_flags, FLOWRTF_HAS_LLINFO, relaxed);
 			} else {
-				atomic_bitclear_32(&fr->fr_flags,
-				    FLOWRTF_HAS_LLINFO);
+				os_atomic_andnot(&fr->fr_flags, FLOWRTF_HAS_LLINFO, relaxed);
 			}
-			atomic_bitset_32(&fr->fr_flags, FLOWRTF_RESOLVED);
+			os_atomic_or(&fr->fr_flags, FLOWRTF_RESOLVED, relaxed);
 #if SK_LOG
 			if (__improbable((sk_verbose & SK_VERB_FLOW_ROUTE) !=
 			    0) && (fr->fr_flags & FLOWRTF_HAS_LLINFO)) {
@@ -1157,9 +1155,8 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 			 * RTM_DELETE has been issued on it; force the
 			 * flow route to be reconfigured.
 			 */
-			atomic_add_32(&fr->fr_want_configure, 1);
-			atomic_bitclear_32(&fr->fr_flags,
-			    (FLOWRTF_HAS_LLINFO | FLOWRTF_RESOLVED));
+			os_atomic_inc(&fr->fr_want_configure, relaxed);
+			os_atomic_andnot(&fr->fr_flags, (FLOWRTF_HAS_LLINFO | FLOWRTF_RESOLVED), relaxed);
 			SK_DF(SK_VERB_FLOW_ROUTE, "%s: dst %s llentry deleted",
 			    fm->fm_name, sk_sa_ntop(dst, dst_s,
 			    sizeof(dst_s)));
@@ -1180,8 +1177,8 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 			 * When the route entry is marked with RTF_REJECT
 			 * or the probes have timed out, reconfigure.
 			 */
-			atomic_add_32(&fr->fr_want_configure, 1);
-			atomic_bitclear_32(&fr->fr_flags, FLOWRTF_RESOLVED);
+			os_atomic_inc(&fr->fr_want_configure, relaxed);
+			os_atomic_andnot(&fr->fr_flags, FLOWRTF_RESOLVED, relaxed);
 			SK_ERR("%s: dst %s llentry unreachable", fm->fm_name,
 			    sk_sa_ntop(dst, dst_s, sizeof(dst_s)));
 			break;
@@ -1369,7 +1366,7 @@ flow_route_cleanup(struct flow_route *fr)
 	}
 #endif /* SK_LOG */
 
-	atomic_bitclear_32(&fr->fr_flags, (FLOWRTF_GATEWAY | FLOWRTF_ONLINK));
+	os_atomic_andnot(&fr->fr_flags, (FLOWRTF_GATEWAY | FLOWRTF_ONLINK), relaxed);
 }
 
 static boolean_t

@@ -89,6 +89,9 @@
 #endif
 
 #include <kern/kalloc.h>
+#include <kern/ext_paniclog.h>
+
+#include <IOKit/IOBSD.h>
 
 /* Max panic string length */
 #define kPanicStringMaxLen 1024
@@ -159,6 +162,67 @@ skip_cred_check:
 
 	kfree_data(message, kPanicStringMaxLen);
 	return error;
+}
+
+int
+sys_panic_with_data(struct proc *p,
+    struct panic_with_data_args *uap,
+    __unused int32_t *retval)
+{
+	char *message = NULL;
+	void *data = NULL;
+	int copy_len = 0;
+	size_t dummy = 0;
+	uuid_t uuid = {0};
+
+	AUDIT_ARG(addr, uap->addr);
+	AUDIT_ARG(value32, uap->len);
+	AUDIT_ARG(addr, uap->uuid);
+
+	if (!IOCurrentTaskHasEntitlement(EXTPANICLOG_ENTITLEMENT)) {
+		return EPERM;
+	}
+
+	char *proc_name = proc_best_name(p);
+
+	if (uap->msg != USER_ADDR_NULL) {
+		message = (char *)kalloc_data(kPanicStringMaxLen, Z_WAITOK | Z_ZERO);
+		if (!message) {
+			goto finish;
+		}
+		int copy_error = copyinstr(uap->msg, (void *)message, kPanicStringMaxLen, (size_t *)&dummy);
+		if (copy_error != 0 && copy_error != ENAMETOOLONG) {
+			strlcpy(message, "user space panic_with_data message copyin failed", kPanicStringMaxLen - 1);
+		} else {
+			message[kPanicStringMaxLen - 1] = '\0';
+		}
+	}
+
+	if (uap->addr != USER_ADDR_NULL) {
+		copy_len = MIN(uap->len, PANIC_WITH_DATA_MAX_LEN);
+
+		data = kalloc_data(copy_len, Z_WAITOK | Z_ZERO);
+		if (!data) {
+			goto finish;
+		}
+
+		int copy_error = copyin(uap->addr, data, copy_len);
+		if (copy_error != 0) {
+			kfree_data(data, copy_len);
+			data = NULL;
+		}
+	}
+
+	if (uap->uuid != USER_ADDR_NULL) {
+		int copyerror = copyin(uap->uuid, &uuid[0], sizeof(uuid_t));
+		if (copyerror != 0) {
+			goto finish;
+		}
+	}
+
+finish:
+	panic_with_data(uuid, data, copy_len,
+	    "Panic called from Process: %s Message: %s", proc_name, message);
 }
 
 extern void OSKextResetAfterUserspaceReboot(void);

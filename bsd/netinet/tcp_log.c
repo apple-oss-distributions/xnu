@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -35,6 +35,7 @@
 
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
+#include <netinet/inp_log.h>
 
 #if !TCPDEBUG
 #define TCPSTATES
@@ -92,15 +93,6 @@ static uint64_t tcp_log_thflags_if_family = TCP_LOG_THFLAGS_IF_FAMILY_DEFAULT;
 SYSCTL_QUAD(_net_inet_tcp_log, OID_AUTO, thflags_if_family,
     CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_log_thflags_if_family, "");
 
-#if (DEVELOPMENT || DEBUG)
-#define TCP_LOG_PRIVACY_DEFAULT 0
-#else
-#define TCP_LOG_PRIVACY_DEFAULT 1
-#endif /* (DEVELOPMENT || DEBUG) */
-
-int tcp_log_privacy = TCP_LOG_PRIVACY_DEFAULT;
-SYSCTL_INT(_net_inet_tcp_log, OID_AUTO, privacy,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_log_privacy, 0, "");
 
 #define TCP_LOG_RATE_LIMIT 1000
 static unsigned int tcp_log_rate_limit = TCP_LOG_RATE_LIMIT;
@@ -194,7 +186,7 @@ tcp_log_inp_addresses(struct inpcb *inp, char *lbuf, socklen_t lbuflen, char *fb
 	/*
 	 * Ugly but %{private} does not work in the kernel version of os_log()
 	 */
-	if (tcp_log_privacy != 0) {
+	if (inp_log_privacy != 0) {
 		if (inp->inp_vflag & INP_IPV6) {
 			strlcpy(lbuf, "<IPv6-redacted>", lbuflen);
 			strlcpy(fbuf, "<IPv6-redacted>", fbuflen);
@@ -514,6 +506,57 @@ tcp_log_listen(struct tcpcb *tp, int error)
 #undef TCP_LOG_LISTEN_ARGS
 }
 
+static const char *
+tcp_connection_client_accurate_ecn_state_to_string(tcp_connection_client_accurate_ecn_state_t state)
+{
+	switch (state) {
+#define ECN_STATE_TO_STRING(_s, _str) \
+	case tcp_connection_client_accurate_ecn_##_s: { \
+	        return _str; \
+	}
+		ECN_STATE_TO_STRING(invalid, "Invalid")
+		ECN_STATE_TO_STRING(feature_disabled, "Disabled")
+		ECN_STATE_TO_STRING(feature_enabled, "Enabled")
+		ECN_STATE_TO_STRING(negotiation_blackholed, "Blackholed")
+		ECN_STATE_TO_STRING(ace_bleaching_detected, "ACE bleaching")
+		ECN_STATE_TO_STRING(negotiation_success, "Capable")
+		ECN_STATE_TO_STRING(negotiation_success_ect_mangling_detected, "ECT mangling")
+		ECN_STATE_TO_STRING(negotiation_success_ect_bleaching_detected, "ECT bleaching")
+#undef ECN_STATE_TO_STRING
+	case tcp_connection_client_classic_ecn_available:
+		return "Classic ECN";
+	case tcp_connection_client_ecn_not_available:
+		return "Unavailable";
+	}
+	return "Unknown";
+}
+
+static const char *
+tcp_connection_server_accurate_ecn_state_to_string(tcp_connection_server_accurate_ecn_state_t state)
+{
+	switch (state) {
+#define ECN_STATE_TO_STRING(_s, _str) \
+	case tcp_connection_server_accurate_ecn_##_s: { \
+	        return _str; \
+	}
+		ECN_STATE_TO_STRING(invalid, "Invalid")
+		ECN_STATE_TO_STRING(feature_disabled, "Disabled")
+		ECN_STATE_TO_STRING(feature_enabled, "Enabled")
+		ECN_STATE_TO_STRING(requested, "Requested")
+		ECN_STATE_TO_STRING(negotiation_blackholed, "Blackholed")
+		ECN_STATE_TO_STRING(ace_bleaching_detected, "ACE bleaching")
+		ECN_STATE_TO_STRING(negotiation_success, "Capable")
+		ECN_STATE_TO_STRING(negotiation_success_ect_mangling_detected, "ECT mangling")
+		ECN_STATE_TO_STRING(negotiation_success_ect_bleaching_detected, "ECT bleaching")
+#undef ECN_STATE_TO_STRING
+	case tcp_connection_server_no_ecn_requested:
+		return "Not requested";
+	case tcp_connection_server_classic_ecn_requested:
+		return "Classic ECN requested";
+	}
+	return "Unknown";
+}
+
 __attribute__((noinline))
 void
 tcp_log_connection_summary(struct tcpcb *tp)
@@ -543,10 +586,10 @@ tcp_log_connection_summary(struct tcpcb *tp)
 	foreign_port = inp->inp_fport;
 
 	/* Make sure the summary is logged once */
-	if (tp->t_flagsext & TF_LOGGED_CONN_SUMMARY) {
+	if (inp->inp_flags2 & INP2_LOGGED_SUMMARY) {
 		return;
 	}
-	tp->t_flagsext |= TF_LOGGED_CONN_SUMMARY;
+	inp->inp_flags2 |= INP2_LOGGED_SUMMARY;
 
 	/*
 	 * t_connect_time is the time when the connection started on
@@ -611,14 +654,17 @@ tcp_log_connection_summary(struct tcpcb *tp)
 	    "flowctl: %llu suspnd: %llu " \
 	    "SYN in/out: %u/%u " \
 	    "FIN in/out: %u/%u " \
-	    "RST in/out: %u/%u\n"
+	    "RST in/out: %u/%u " \
+	    "AccECN (client/server): %s/%s\n" \
 
 #define TCP_LOG_CONNECTION_SUMMARY_ARGS \
 	    TCP_LOG_COMMON_PCB_ARGS, \
 	    inp->inp_fadv_flow_ctrl_cnt, inp->inp_fadv_suspended_cnt, \
 	    tp->t_syn_rcvd, tp->t_syn_sent, \
 	    tp->t_fin_rcvd, tp->t_fin_sent, \
-	    tp->t_rst_rcvd, tp->t_rst_sent
+	    tp->t_rst_rcvd, tp->t_rst_sent, \
+	    tcp_connection_client_accurate_ecn_state_to_string(tp->t_client_accecn_state), \
+	    tcp_connection_server_accurate_ecn_state_to_string(tp->t_server_accecn_state)
 
 	os_log(OS_LOG_DEFAULT, TCP_LOG_CONNECTION_SUMMARY_FMT,
 	    TCP_LOG_CONNECTION_SUMMARY_ARGS);
@@ -647,7 +693,7 @@ tcp_log_pkt_addresses(void *hdr, struct tcphdr *th, bool outgoing,
 			}
 		}
 
-		if (tcp_log_privacy != 0) {
+		if (inp_log_privacy != 0) {
 			strlcpy(lbuf, "<IPv6-redacted>", lbuflen);
 			strlcpy(fbuf, "<IPv6-redacted>", fbuflen);
 		} else if (outgoing) {
@@ -667,7 +713,7 @@ tcp_log_pkt_addresses(void *hdr, struct tcphdr *th, bool outgoing,
 			}
 		}
 
-		if (tcp_log_privacy != 0) {
+		if (inp_log_privacy != 0) {
 			strlcpy(lbuf, "<IPv4-redacted>", lbuflen);
 			strlcpy(fbuf, "<IPv4-redacted>", fbuflen);
 		} else if (outgoing) {
@@ -688,8 +734,8 @@ __attribute__((noinline))
 void
 tcp_log_drop_pcb(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, const char *reason)
 {
-	struct inpcb *inp = tp->t_inpcb;
-	struct socket *so = inp->inp_socket;
+	struct inpcb *inp;
+	struct socket *so;
 	struct ifnet *ifp;
 	char laddr_buf[ADDRESS_STR_LEN];
 	char faddr_buf[ADDRESS_STR_LEN];
@@ -700,9 +746,17 @@ tcp_log_drop_pcb(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 	if (tp == NULL) {
 		return;
 	}
+	inp = tp->t_inpcb;
+	if (inp == NULL) {
+		return;
+	}
+	so = inp->inp_socket;
+	if (so == NULL) {
+		return;
+	}
 
 	/* Do not log common drops after the connection termination is logged */
-	if ((tp->t_flagsext & TF_LOGGED_CONN_SUMMARY) && ((so->so_state & SS_NOFDREF) ||
+	if ((inp->inp_flags2 & INP2_LOGGED_SUMMARY) && ((so->so_state & SS_NOFDREF) ||
 	    (so->so_flags & SOF_DEFUNCT) || (so->so_state & SS_CANTRCVMORE))) {
 		return;
 	}

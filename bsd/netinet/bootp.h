@@ -39,6 +39,9 @@
  *	packet.
  */
 
+#ifndef _NETINET_BOOTP_H_
+#define _NETINET_BOOTP_H_
+
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
@@ -134,3 +137,5 @@ struct bootp_packet {
 #define BOOTP_MIN_BACKOFF       0x7ff           /* 2.048 sec */
 #define BOOTP_MAX_BACKOFF       0xffff          /* 65.535 sec */
 #define BOOTP_RETRY             6               /* # retries */
+
+#endif /* _NETINET_BOOTP_H_ */

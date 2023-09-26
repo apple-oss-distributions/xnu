@@ -126,7 +126,7 @@ receive_port(
 	T_QUIET; T_ASSERT_NE(msg.header.msgh_bits & MACH_MSGH_BITS_COMPLEX, 0,
 	    "message is complex");
 	T_QUIET; T_ASSERT_EQ(msg.body.msgh_descriptor_count, 1, "message has one right");
-	T_QUIET; T_ASSERT_EQ(msg.port_descriptor.disposition, expected_disp,
+	T_QUIET; T_ASSERT_EQ((mach_msg_type_name_t)msg.port_descriptor.disposition, expected_disp,
 	    "port has right disposition");
 	return msg.port_descriptor.name;
 }

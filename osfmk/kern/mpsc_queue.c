@@ -192,7 +192,9 @@ _mpsc_daemon_queue_init_with_thread(mpsc_daemon_queue_t dq,
 	    &dq->mpd_thread);
 	if (kr == KERN_SUCCESS) {
 		thread_set_thread_name(dq->mpd_thread, name);
-		thread_start_in_assert_wait(dq->mpd_thread, (event_t)dq, THREAD_UNINT);
+		thread_start_in_assert_wait(dq->mpd_thread,
+		    assert_wait_queue(dq), CAST_EVENT64_T(dq),
+		    THREAD_UNINT);
 		thread_deallocate(dq->mpd_thread);
 	}
 	return kr;

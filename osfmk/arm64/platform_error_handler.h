@@ -20,8 +20,6 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#pragma once
-
 typedef enum {
 	PLAT_ERR_SRC_ASYNC = 0, /* platform error source is async exception (SError) */
 	PLAT_ERR_SRC_SYNC  = 1, /* platform error source is sync exception */

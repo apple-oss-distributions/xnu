@@ -69,11 +69,10 @@
 #define persona_valid(p)      ((p)->pna_valid == PERSONA_MAGIC)
 #define persona_mkinvalid(p)  ((p)->pna_valid = ~(PERSONA_MAGIC))
 
-static LIST_HEAD(personalist, persona) all_personas;
+static LIST_HEAD(personalist, persona) all_personas = LIST_HEAD_INITIALIZER(all_personas);
 static uint32_t g_total_personas;
 const uint32_t g_max_personas = MAX_PERSONAS;
-
-static uid_t g_next_persona_id;
+static uid_t g_next_persona_id = FIRST_PERSONA_ID;
 
 LCK_GRP_DECLARE(persona_lck_grp, "personas");
 LCK_MTX_DECLARE(all_personas_lock, &persona_lck_grp);
@@ -85,44 +84,10 @@ static KALLOC_TYPE_DEFINE(persona_zone, struct persona, KT_DEFAULT);
 #define lock_personas()    lck_mtx_lock(&all_personas_lock)
 #define unlock_personas()  lck_mtx_unlock(&all_personas_lock)
 
-extern void mach_kauth_cred_thread_update(void);
-
 extern kern_return_t bank_get_bank_ledger_thread_group_and_persona(void *voucher,
     void *bankledger, void **banktg, uint32_t *persona_id);
 void
 ipc_voucher_release(void *voucher);
-
-static void
-personas_bootstrap(void)
-{
-	struct ucred cred;
-	posix_cred_t pcred;
-
-	persona_dbg("Initializing persona subsystem");
-	LIST_INIT(&all_personas);
-	g_total_personas = 0;
-
-	g_next_persona_id = FIRST_PERSONA_ID;
-
-	/*
-	 * setup the default credentials that a persona temporarily
-	 * inherits (to work around kauth APIs)
-	 */
-	bzero(&cred, sizeof(cred));
-	pcred = &cred.cr_posix;
-	pcred->cr_uid = pcred->cr_ruid = pcred->cr_svuid = TEMP_PERSONA_ID;
-	pcred->cr_rgid = pcred->cr_svgid = TEMP_PERSONA_ID;
-	pcred->cr_groups[0] = TEMP_PERSONA_ID;
-	pcred->cr_ngroups = 1;
-	pcred->cr_flags = CRF_NOMEMBERD;
-	pcred->cr_gmuid = KAUTH_UID_NONE;
-
-#if CONFIG_AUDIT
-	/* posix_cred_create() sets this value to NULL */
-	cred.cr_audit.as_aia_p = audit_default_aia_p;
-#endif
-}
-STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, personas_bootstrap);
 
 struct persona *
 persona_alloc(uid_t id, const char *login, persona_type_t type, char *path, uid_t uid, int *error)
@@ -351,16 +316,11 @@ proc_persona_get(proc_t p)
 	return persona;
 }
 
-void
-persona_put(struct persona *persona)
+static void
+persona_put_and_unlock(struct persona *persona)
 {
 	int destroy = 0;
 
-	if (!persona) {
-		return;
-	}
-
-	persona_lock(persona);
 	if (os_ref_release_locked(&persona->pna_refcount) == 0) {
 		destroy = 1;
 	}
@@ -391,6 +351,15 @@ persona_put(struct persona *persona)
 	assert(LIST_EMPTY(&persona->pna_members));
 	memset(persona, 0, sizeof(*persona));
 	zfree(persona_zone, persona);
+}
+
+void
+persona_put(struct persona *persona)
+{
+	if (persona) {
+		persona_lock(persona);
+		persona_put_and_unlock(persona);
+	}
 }
 
 uid_t
@@ -584,33 +553,13 @@ current_persona_get(void)
 	return persona;
 }
 
-/**
- * inherit a persona from parent to child
- */
-int
-persona_proc_inherit(proc_t child, proc_t parent)
-{
-	if (child->p_persona != NULL) {
-		persona_dbg("proc_inherit: child already in persona: %s",
-		    persona_desc(child->p_persona, 0));
-		return -1;
-	}
-
-	/* no persona to inherit */
-	if (parent->p_persona == NULL) {
-		return 0;
-	}
-
-	return persona_proc_adopt(child, parent->p_persona, proc_ucred(parent));
-}
-
 typedef enum e_persona_reset_op {
 	PROC_REMOVE_PERSONA = 1,
 	PROC_RESET_OLD_PERSONA = 2,
 } persona_reset_op_t;
 
 /*
- * internal cleanup routine for proc_set_cred_internal
+ * internal cleanup routine for proc_set_persona_internal
  *
  */
 static struct persona *
@@ -666,19 +615,16 @@ proc_reset_persona_internal(proc_t p, persona_reset_op_t op,
  * responsible to release the reference.
  */
 static struct persona *
-proc_set_cred_internal(proc_t p, struct persona *persona,
-    kauth_cred_t auth_override, int *rlim_error)
+proc_set_persona_internal(
+	proc_t                  p,
+	struct persona         *persona,
+	kauth_cred_derive_t     derive_fn,
+	int                    *rlim_error)
 {
-	assert(auth_override != NULL);
-
 	struct persona *old_persona = NULL;
-	kauth_cred_t new_cred;
-	uid_t new_uid;
-	uid_t new_cred_uid;
+	uid_t old_uid, new_uid;
 	size_t count;
 	rlim_t nproc = proc_limitgetcur(p, RLIMIT_NPROC);
-	bool changed;
-	__block uid_t old_uid;
 
 	/*
 	 * This operation must be done under the proc trans lock
@@ -727,39 +673,15 @@ proc_set_cred_internal(proc_t p, struct persona *persona,
 
 	*rlim_error = 0;
 
-	/*
-	 * Select the appropriate credentials.
-	 */
-	new_cred = auth_override;
-	new_cred_uid = kauth_cred_getuid(new_cred);
-
-	/*
-	 * Set the new credentials on the proc
-	 */
-	changed = proc_update_label(p, true, ^(kauth_cred_t cur_cred) {
-		old_uid = kauth_cred_getruid(cur_cred);
-
-		if (new_cred != cur_cred) {
-		        kauth_cred_ref(new_cred);
-		        kauth_cred_unref(&cur_cred);
-		}
-
-		return new_cred;
-	});
-
-	if (changed) {
-		/*
-		 * Make sure current_thread()'s cred is updated now.
-		 */
-		mach_kauth_cred_thread_update();
-	}
-
-	/*
-	 * Update the proc count.
-	 * If the UIDs are the same, then there is no work to do.
-	 */
 	if (old_persona) {
 		old_uid = old_persona->pna_id;
+	} else {
+		/* proc_ucred_unsafe() is OK because p is a fork/exec/... child */
+		old_uid = kauth_cred_getruid(proc_ucred_unsafe(p));
+	}
+
+	if (derive_fn) {
+		kauth_cred_proc_update(p, PROC_SETTOKEN_SETUGID, derive_fn);
 	}
 
 	if (new_uid != old_uid) {
@@ -773,8 +695,8 @@ proc_set_cred_internal(proc_t p, struct persona *persona,
 		 * as in fork1()
 		 */
 		count = chgproccnt(new_uid, 1);
-		persona_dbg("Increment Persona:%d (UID:%d) proc_count to: %lu",
-		    new_uid, new_cred_uid, count);
+		persona_dbg("Increment Persona:%d proc_count to: %lu",
+		    new_uid, count);
 	}
 
 	OSBitOrAtomic(P_ADOPTPERSONA, &p->p_flag);
@@ -787,8 +709,12 @@ proc_set_cred_internal(proc_t p, struct persona *persona,
 	return old_persona;
 }
 
+/* only called during fork or exec: child's ucred is stable */
 int
-persona_proc_adopt(proc_t p, struct persona *persona, kauth_cred_t auth_override)
+persona_proc_adopt(
+	proc_t                  p,
+	struct persona         *persona, /* consumed */
+	kauth_cred_derive_t     derive_fn)
 {
 	int error;
 	struct persona *old_persona;
@@ -803,7 +729,7 @@ persona_proc_adopt(proc_t p, struct persona *persona, kauth_cred_t auth_override
 	persona_lock(persona);
 	if (!persona_valid(persona)) {
 		persona_dbg("Invalid persona (%s)!", persona_desc(persona, 1));
-		persona_unlock(persona);
+		persona_put_and_unlock(persona);
 		return EINVAL;
 	}
 
@@ -811,7 +737,7 @@ persona_proc_adopt(proc_t p, struct persona *persona, kauth_cred_t auth_override
 	 * assume the persona: this may drop and re-acquire the persona lock!
 	 */
 	error = 0;
-	old_persona = proc_set_cred_internal(p, persona, auth_override, &error);
+	old_persona = proc_set_persona_internal(p, persona, derive_fn, &error);
 
 	/* Only Multiuser Mode needs to update the session login name to the persona name */
 #if XNU_TARGET_OS_IOS
@@ -829,9 +755,7 @@ persona_proc_adopt(proc_t p, struct persona *persona, kauth_cred_t auth_override
 		}
 	}
 #endif
-	persona_unlock(persona);
-
-	set_security_token(p);
+	persona_put_and_unlock(persona);
 
 	/*
 	 * Drop the reference to the old persona.
@@ -874,7 +798,10 @@ try_again:
 		LIST_REMOVE(p, p_persona_list);
 		p->p_persona = NULL;
 
-		ruid = kauth_cred_getruid(proc_ucred(p));
+		smr_proc_task_enter();
+		ruid = kauth_cred_getruid(proc_ucred_smr(p));
+		smr_proc_task_leave();
+
 		puid = persona->pna_id;
 		proc_unlock(p);
 		(void)chgproccnt(ruid, 1);

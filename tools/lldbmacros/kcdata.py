@@ -119,6 +119,8 @@ kcdata_type_def = {
     'STACKSHOT_KCTYPE_PORTLABEL' : 0x935,
     'STACKSHOT_KCTYPE_PORTLABEL_NAME' : 0x936,
     'STACKSHOT_KCTYPE_DYLD_COMPACTINFO' : 0x937,
+    'STACKSHOT_KCTYPE_SUSPENSION_INFO' : 0x938,
+    'STACKSHOT_KCTYPE_SUSPENSION_SOURCE' : 0x939,
     'STACKSHOT_KCTYPE_TASK_DELTA_SNAPSHOT': 0x940,
     'STACKSHOT_KCTYPE_THREAD_DELTA_SNAPSHOT': 0x941,
     'STACKSHOT_KCCONTAINER_SHAREDCACHE' : 0x942,
@@ -889,7 +891,7 @@ KNOWN_TYPES_COLLECTION[0x905] = KCTypeDescription(0x905, (
 
 KNOWN_TYPES_COLLECTION[0x946] = KCTypeDescription(0x946, (
      KCSubTypeElement.FromBasicCtype('csflags', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
-     KCSubTypeElement.FromBasicCtype('cs_trust_level', KCSUBTYPE_TYPE.KC_ST_UINT32, 4),
+     KCSubTypeElement.FromBasicCtype('cs_trust_level', KCSUBTYPE_TYPE.KC_ST_UINT32, 8),
      ),
      'stackshot_task_codesigning_info'
 )
@@ -1419,6 +1421,20 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_PAGE_TABLES')] = KCTypeD
     naked=True
 )
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_SUSPENSION_INFO')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_SUSPENSION_INFO'), (
+    KCSubTypeElement.FromBasicCtype('tss_last_start', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+    KCSubTypeElement.FromBasicCtype('tss_last_end', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
+    KCSubTypeElement.FromBasicCtype('tss_count', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
+    KCSubTypeElement.FromBasicCtype('tss_duration', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
+), 'suspension_info')
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_SUSPENSION_SOURCE')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_SUSPENSION_SOURCE'), (
+    KCSubTypeElement.FromBasicCtype('tss_time', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+    KCSubTypeElement.FromBasicCtype('tss_tid', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
+    KCSubTypeElement.FromBasicCtype('tss_pid', KCSUBTYPE_TYPE.KC_ST_INT32, 16),
+    KCSubTypeElement('tss_procname', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(65, 1), 20, 1)
+), 'suspension_source')
+
 def GetSecondsFromMATime(mat, tb):
     return (float(long(mat) * tb['numer']) / tb['denom']) / 1e9
 
@@ -1555,17 +1571,24 @@ def portlabel_domain(x):
     return PORTLABEL_DOMAINS.get(x, "unknown.{}".format(x))
 
 STACKSHOT_WAITINFO_FLAGS_SPECIALREPLY = 0x1
+STACKSHOT_PORTLABEL_THROTTLED = 0x2
+
+def portThrottledSuffix(portlabel_flags):
+    if (portlabel_flags & STACKSHOT_PORTLABEL_THROTTLED):
+        return " (service port throttled by launchd)"
+    else:
+        return ""
 
 def formatPortLabelID(portlabel_id, portlabels):
+    portlabel = {}
     if portlabel_id > 0:
-        portlabel = {}
         if portlabels is not None:
             portlabel = portlabels.get(str(portlabel_id), {})
         portlabel_name = portlabel_domain(portlabel.get('portlabel_domain')) + " "
         portlabel_name += portlabel.get("portlabel_name", "!!!unknown, ID {} !!!".format(portlabel_id));
-        return " {" + portlabel_name + "}"
+        return " {" + portlabel_name + portThrottledSuffix(portlabel.get('portlabel_flags', 0)) + "}"
     if portlabel_id < 0:
-        return" {labeled, info trucated}"
+        return " {labeled, info truncated" + portThrottledSuffix(portlabel.get('portlabel_flags', 0)) + "}"
     return ""
 
 def formatWaitInfo(info, wantHex, portlabels):
@@ -1961,6 +1984,30 @@ def SaveStackshotReport(j, outfile_name, incomplete):
             csinfo = piddata.get('stackshot_task_codesigning_info', {})
             tsnap['csflags'] = csinfo['csflags']
             tsnap['cs_trust_level'] = csinfo['cs_trust_level']
+        if 'suspension_info' in piddata:
+            suspinfo = piddata.get('suspension_info', {})
+            tsnap['suspension_count'] = suspinfo['tss_count']
+            tsnap['suspension_duration_secs'] = GetSecondsFromMATime(suspinfo['tss_duration'], timebase)
+            tsnap['suspension_last_start'] = GetSecondsFromMATime(suspinfo['tss_last_start'], timebase)
+            tsnap['suspension_last_end'] = GetSecondsFromMATime(suspinfo['tss_last_end'], timebase)
+
+            suspsources = piddata.get('suspension_source', [])
+            suspension_sources = []
+            for source in filter(lambda x: x['tss_time'] != 0, suspsources):
+                suspension_sources.append({
+                    'suspension_time': GetSecondsFromMATime(source['tss_time'], timebase),
+                    'suspension_tid': source['tss_tid'],
+                    'suspension_pid': source['tss_pid'],
+                    'suspension_procname': source['tss_procname'],
+                })
+            tsnap['suspension_sources'] = suspension_sources
+
+            # check if process is currently suspended
+            if tsnap['suspension_last_start'] > tsnap['suspension_last_end']:
+                obj['notes'] += "\nPID {} ({}) is currently suspended (count: {}, total duration: {:.4f}s, last_start: {:.4f}, last_end: {:.4f}) - recent suspensions are:\n".format(pid, tsnap['procname'], tsnap['suspension_count'], tsnap['suspension_duration_secs'], tsnap['suspension_last_start'], tsnap['suspension_last_end'])
+                for source in suspension_sources:
+                    obj['notes'] += "From PID {} TID {} ({}) - at {}\n".format(source['suspension_pid'], source['suspension_tid'], source['suspension_procname'], source['suspension_time'])
+
     obj['binaryImages'] = AllImageCatalog
     if outfile_name == '-':
         fh = sys.stdout
@@ -2049,7 +2096,7 @@ def iterate_kcdatas(kcdata_file):
 # Values for various flag fields.  Each entry's key is the key seen in the
 # processed kcdata, the value is an array of bits, from low (0x1) to high, with
 # either a string flag name or None for unused holes.
-# 
+#
 # Only put flags in here which are stable - this is run against stackshots
 # of all different versions.  For anything unstable, we'll need a decoder ring
 # added to the stackshot.
@@ -2099,7 +2146,7 @@ PRETTIFY_FLAGS = {
         'page_tables',
         'disable_latency_info',
         'save_dyld_compactinfo',
-        'include_driver_threads_in_kernel'
+        'include_driver_threads_in_kernel',
     ],
     'system_state_flags': [
         'kUser64_p',
@@ -2194,6 +2241,10 @@ PRETTIFY_FLAGS = {
         'turnstile_status_blocked_on_task',
         'turnstile_status_held_iplock',
     ],
+    'portlabel_flags': [
+        'label_read_failed',
+        'service_throttled',
+    ]
 }
 PRETTIFY_FLAGS['stackshot_out_flags'] = PRETTIFY_FLAGS['stackshot_in_flags']
 PRETTIFY_FLAGS['tts_ss_flags'] = PRETTIFY_FLAGS['ts_ss_flags']
@@ -2340,6 +2391,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.multiple and args.stackshot_file:
+        raise NotImplementedError
+
+    if args.pretty and args.stackshot_file:
         raise NotImplementedError
 
     if args.list_known_types:

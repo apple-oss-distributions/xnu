@@ -950,7 +950,7 @@ flow_mgr_flow_add(struct kern_nexus *nx, struct flow_mgr *fm,
 	VERIFY(NETNS_TOKEN_VALID(&fe->fe_port_reservation) ||
 	    !(fe->fe_key.fk_mask & FKMASK_SPORT) ||
 	    req->nfr_flags & NXFLOWREQF_ASIS ||
-	    (fe->fe_flags & FLOWENT_CHILD));
+	    (fe->fe_flags & FLOWENTF_CHILD));
 	VERIFY((req->nfr_flags & NXFLOWREQF_FLOWADV) ^
 	    (req->nfr_flowadv_idx == FLOWADV_IDX_NONE));
 	req->nfr_flowadv_idx = fe->fe_adv_idx;
@@ -1085,7 +1085,7 @@ flow_hash_mask_add(struct flow_mgr *fm, uint32_t mask, int32_t v)
 {
 	for (uint32_t i = 0; i < FKMASK_IDX_MAX; i++) {
 		if (fm->fm_flow_hash_masks[i] == mask) {
-			atomic_add_32(&fm->fm_flow_hash_count[i], v);
+			os_atomic_add(&fm->fm_flow_hash_count[i], v, relaxed);
 			return 0;
 		}
 	}
@@ -1209,7 +1209,7 @@ flow_mgr_foreach_flow(struct flow_mgr *fm,
 		fe = container_of(node, struct flow_entry, fe_cnode);
 		flow_handler(fe);
 
-		if (fe->fe_flags & FLOWENT_PARENT) {
+		if (fe->fe_flags & FLOWENTF_PARENT) {
 		        struct flow_entry *child_fe;
 		        lck_rw_lock_shared(&fe->fe_child_list_lock);
 		        TAILQ_FOREACH(child_fe, &fe->fe_child_list, fe_child_link) {
@@ -1226,11 +1226,10 @@ rx_flow_demux_match(struct nx_flowswitch *fsw, struct flow_entry *fe, struct __k
 {
 	struct udphdr *uh;
 	uint8_t *pkt_buf;
-	uint16_t bdlen, bdlim, bdoff;
-	uint16_t pkt_payload_len;
+	uint32_t bdlen, bdlim, bdoff, pkt_payload_len;
 	uint8_t *demux_data;
 
-	ASSERT(fe->fe_flags & FLOWENT_CHILD);
+	ASSERT(fe->fe_flags & FLOWENTF_CHILD);
 	ASSERT(fe->fe_demux_pattern_count > 0);
 
 	if (fe->fe_flags & (FLOWENTF_TORN_DOWN | FLOWENTF_NONVIABLE)) {
@@ -1253,7 +1252,7 @@ rx_flow_demux_match(struct nx_flowswitch *fsw, struct flow_entry *fe, struct __k
 
 	MD_BUFLET_ADDR_ABS_DLEN(pkt, pkt_buf, bdlen, bdlim, bdoff);
 	pkt_payload_len = bdlim - bdoff;
-	pkt_payload_len = (uint16_t)MIN(pkt_payload_len, pkt->pkt_length);
+	pkt_payload_len = MIN(pkt_payload_len, pkt->pkt_length);
 	pkt_payload_len -= udp_payload_offset;
 
 	for (int index = 0; index < fe->fe_demux_pattern_count; index++) {
@@ -1324,7 +1323,7 @@ tx_lookup_child_flow(struct flow_entry *parent_fe, uuid_t flow_id)
 {
 	struct flow_entry *child_fe;
 
-	ASSERT(parent_fe->fe_flags & FLOWENT_PARENT);
+	ASSERT(parent_fe->fe_flags & FLOWENTF_PARENT);
 
 	lck_rw_lock_shared(&parent_fe->fe_child_list_lock);
 	TAILQ_FOREACH(child_fe, &parent_fe->fe_child_list, fe_child_link) {

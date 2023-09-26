@@ -503,6 +503,13 @@ OSKextKextForAddress(const void *addr)
 	return OSKext::kextForAddress(addr);
 }
 
+kern_return_t
+OSKextGetLoadedKextSummaryForAddress(
+	const void              * addr,
+	OSKextLoadedKextSummary * summary)
+{
+	return OSKext::summaryForAddressExt(addr, summary);
+}
 
 /*********************************************************************
 * Compatibility implementation for kmod_get_info() host_priv routine.

@@ -1042,8 +1042,6 @@ thread_update_qos_cpu_time(thread_t thread)
  *
  * Called with thread_lock and thread mutex held.
  */
-extern boolean_t vps_dynamic_priority_enabled;
-
 void
 thread_recompute_priority(
 	thread_t                thread)
@@ -2056,6 +2054,7 @@ thread_set_requested_policy_spinlocked(thread_t     thread,
 		} else {
 			requested.thrp_int_darwinbg = value;
 		}
+		pend_token->tpt_update_turnstile = 1;
 		break;
 
 	case TASK_POLICY_IOPOL:
@@ -2090,6 +2089,7 @@ thread_set_requested_policy_spinlocked(thread_t     thread,
 	case TASK_POLICY_PIDBIND_BG:
 		assert(category == TASK_POLICY_ATTRIBUTE);
 		requested.thrp_pidbind_bg = value;
+		pend_token->tpt_update_turnstile = 1;
 		break;
 
 	case TASK_POLICY_LATENCY_QOS:
@@ -3389,6 +3389,14 @@ TUNABLE_DEV_WRITEABLE(uint8_t, rt_allow_limit_percent,
 TUNABLE_DEV_WRITEABLE(uint16_t, rt_allow_limit_interval_ms,
     "rt_allow_limit_interval", 10);
 
+static bool
+thread_has_rt(thread_t thread)
+{
+	return
+	        thread->sched_mode == TH_MODE_REALTIME ||
+	        thread->saved_mode == TH_MODE_REALTIME;
+}
+
 /*
  * Set a CPU limit on a thread based on the RT allow policy. This will be picked
  * up by the target thread via the ledger AST.
@@ -3403,12 +3411,16 @@ thread_rt_set_cpulimit(thread_t thread)
 	thread->t_ledger_req_percentage = percent;
 	thread->t_ledger_req_interval_ms = interval_ms;
 	thread->t_ledger_req_action = THREAD_CPULIMIT_BLOCK;
+
+	thread->sched_flags |= TH_SFLAG_RT_CPULIMIT;
 }
 
 /* Similar to the above but removes any CPU limit. */
 static void
 thread_rt_clear_cpulimit(thread_t thread)
 {
+	thread->sched_flags &= ~TH_SFLAG_RT_CPULIMIT;
+
 	thread->t_ledger_req_percentage = 0;
 	thread->t_ledger_req_interval_ms = 0;
 	thread->t_ledger_req_action = THREAD_CPULIMIT_DISABLE;
@@ -3447,8 +3459,7 @@ thread_rt_evaluate(thread_t thread)
 	 * threads are demoted. Once those conditions no longer hold, the thread
 	 * undemoted.
 	 */
-	if ((thread->sched_mode == TH_MODE_REALTIME || thread->saved_mode == TH_MODE_REALTIME) &&
-	    (wi_flags & TH_WORK_INTERVAL_FLAGS_RT_ALLOWED) == 0) {
+	if (thread_has_rt(thread) && (wi_flags & TH_WORK_INTERVAL_FLAGS_RT_ALLOWED) == 0) {
 		if (!sched_thread_mode_has_demotion(thread, TH_SFLAG_RT_DISALLOWED)) {
 			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RT_DISALLOWED_WORK_INTERVAL),
 			    thread_tid(thread));
@@ -3462,20 +3473,31 @@ thread_rt_evaluate(thread_t thread)
 
 	/*
 	 * RT threads get a CPU limit unless they're part of a platform binary
-	 * task.
+	 * task. If the thread is no longer RT, any existing CPU limit should be
+	 * removed.
 	 */
-	if ((thread->sched_mode == TH_MODE_REALTIME || thread->saved_mode == TH_MODE_REALTIME) &&
-	    !platform_binary) {
+	bool set_ast = false;
+	if (!platform_binary &&
+	    thread_has_rt(thread) &&
+	    (thread->sched_flags & TH_SFLAG_RT_CPULIMIT) == 0) {
 		thread_rt_set_cpulimit(thread);
-	} else {
+		set_ast = true;
+	}
+
+	if (!platform_binary &&
+	    !thread_has_rt(thread) &&
+	    (thread->sched_flags & TH_SFLAG_RT_CPULIMIT) != 0) {
 		thread_rt_clear_cpulimit(thread);
+		set_ast = true;
 	}
 
 	thread_unlock(thread);
 	splx(s);
 
-	/* Ensure the target thread picks up any CPU limit change. */
-	act_set_astledger(thread);
+	if (set_ast) {
+		/* Ensure the target thread picks up any CPU limit change. */
+		act_set_astledger(thread);
+	}
 }
 
 #else

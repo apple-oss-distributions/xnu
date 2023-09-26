@@ -127,7 +127,7 @@ static_assert((C_SEG_OFFSET_BITS + C_SLOT_C_SIZE_BITS +
     C_SLOT_C_PADDING_BITS + C_SLOT_PACKED_PTR_BITS) % 32 == 0);
 
 struct c_slot {
-	uint64_t        c_offset:C_SEG_OFFSET_BITS;
+	uint64_t        c_offset:C_SEG_OFFSET_BITS __kernel_ptr_semantics;
 	uint64_t        c_size:C_SLOT_C_SIZE_BITS;
 #if C_SLOT_C_CODEC_BITS
 	uint64_t        c_codec:C_SLOT_C_CODEC_BITS;
@@ -145,7 +145,7 @@ struct c_slot {
 #if C_SLOT_C_PADDING_BITS
 	uint64_t        c_padding:C_SLOT_C_PADDING_BITS;
 #endif
-	uint64_t        c_packed_ptr:C_SLOT_PACKED_PTR_BITS;
+	uint64_t        c_packed_ptr:C_SLOT_PACKED_PTR_BITS __kernel_ptr_semantics;
 
 	/* debugging fields, typically not present on release kernels */
 #if CHECKSUM_THE_DATA
@@ -247,8 +247,22 @@ struct c_segment {
 
 
 struct  c_slot_mapping {
+#if !CONFIG_TRACK_UNMODIFIED_ANON_PAGES
 	uint32_t        s_cseg:22,      /* segment number + 1 */
 	    s_cindx:10;                 /* index in the segment */
+#else /* !CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
+	uint32_t        s_cseg:21,      /* segment number + 1 */
+	    s_cindx:10,                 /* index in the segment */
+	    s_uncompressed:1;           /* This bit indicates that the page resides uncompressed in a swapfile.
+	                                 * This can happen in 2 ways:-
+	                                 * 1) Page used to be in the compressor, got decompressed, was not
+	                                 * modified, and so was pushed uncompressed to a different swapfile on disk.
+	                                 * 2) Page was in its uncompressed form in a swapfile on disk. It got swapped in
+	                                 * but was not modified. As we are about to reclaim it, we notice that this bit
+	                                 * is set in its current slot. And so we can safely toss this clean anonymous page
+	                                 * because its copy exists on disk.
+	                                 */
+#endif /* !CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 };
 #define C_SLOT_MAX_INDEX        (1 << 10)
 

@@ -51,6 +51,10 @@ int coalition_info_set_name(uint64_t cid, const char *name, size_t size);
 int coalition_info_set_efficiency(uint64_t cid, uint64_t flags);
 int coalition_ledger_set_logical_writes_limit(uint64_t cid, int64_t limit);
 
+#ifdef PRIVATE
+int coalition_info_debug_info(uint64_t cid, struct coalinfo_debuginfo *cru, size_t sz);
+#endif /* PRIVATE */
+
 #else /* KERNEL */
 
 #if CONFIG_COALITIONS

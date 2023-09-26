@@ -87,6 +87,8 @@ typedef arm_kernel_context_t machine_thread_kernel_state;
 #error Unknown arch
 #endif
 
+
+
 /*
  * Machine Thread Structure
  */
@@ -105,7 +107,9 @@ struct machine_thread {
 	arm_saved_state_t *       XNU_PTRAUTH_SIGNED_PTR("machine_thread.upcb") upcb;   /* pointer to user GPR state */
 	arm_neon_saved_state_t *  uNeon;                   /* pointer to user VFP state */
 	arm_saved_state_t *       kpcb;                    /* pointer to kernel GPR state */
+
 	void *                    reserved3;
+
 	long                      reserved4;
 	uint64_t                  recover_far;
 
@@ -115,7 +119,7 @@ struct machine_thread {
 	uint32_t                  recover_esr;
 	uint32_t                  arm_machine_flags;          /* thread flags (arm64/machine_machdep.h) */
 
-	vm_offset_t               kstackptr;                  /* top of kernel stack */
+	void *                    XNU_PTRAUTH_SIGNED_PTR("machine_thread.kstackptr") kstackptr; /* top of kernel stack */
 	struct perfcontrol_state  perfctrl_state;
 	uint64_t                  reserved5;
 
@@ -162,6 +166,7 @@ struct machine_thread {
 #endif
 
 	uint64_t                  reserved11;
+
 };
 #endif
 
@@ -191,6 +196,8 @@ extern void arm_debug_set64(arm_debug_state_t *debug_state);
 extern void *act_thread_csave(void);
 extern void act_thread_catt(void *ctx);
 extern void act_thread_cfree(void *ctx);
+
+
 
 
 /*

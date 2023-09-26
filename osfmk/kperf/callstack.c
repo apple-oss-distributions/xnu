@@ -591,6 +591,10 @@ chudxnu_thread_get_callstack64_internal(
 		currSP = state->sp;
 
 		fp = (uint64_t *)state->fp; /* frame pointer */
+#if defined(HAS_APPLE_PAC)
+		/* frame pointers on stack will be signed by arm64e ABI */
+		fp = ptrauth_strip(fp, ptrauth_key_frame_pointer);
+#endif
 		topfp = fp;
 
 		bufferIndex = 0;  // start with a stack of size zero
@@ -638,6 +642,10 @@ chudxnu_thread_get_callstack64_internal(
 						pc = frame[1];
 #endif
 						nextFramePointer = (uint64_t *)frame[0];
+#if defined(HAS_APPLE_PAC)
+						/* frame pointers on stack will be signed by arm64e ABI */
+						nextFramePointer = ptrauth_strip(nextFramePointer, ptrauth_key_frame_pointer);
+#endif
 					} else {
 						pc = 0ULL;
 						nextFramePointer = 0ULL;
@@ -657,6 +665,10 @@ chudxnu_thread_get_callstack64_internal(
 					pc = frame[1];
 #endif
 					nextFramePointer = (uint64_t *)(frame[0]);
+#if defined(HAS_APPLE_PAC)
+					/* frame pointers on stack will be signed by arm64e ABI */
+					nextFramePointer = ptrauth_strip(nextFramePointer, ptrauth_key_frame_pointer);
+#endif
 				} else {
 					pc = 0ULL;
 					nextFramePointer = 0ULL;

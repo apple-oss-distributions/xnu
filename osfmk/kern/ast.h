@@ -129,7 +129,7 @@ typedef uint32_t ast_t;
 #define AST_TELEMETRY_IO        0x40000 /* telemetry sample requested for I/O */
 #define AST_KEVENT              0x80000
 #define AST_REBALANCE           0x100000 /* thread context switched due to rebalancing */
-#define AST_UNQUIESCE           0x200000 /* catch unquiesced processor before returning to userspace */
+// was  AST_UNQUIESCE           0x200000
 #define AST_PROC_RESOURCE       0x400000 /* port space and/or file descriptor table has reached its limits */
 #define AST_DEBUG_ASSERT        0x800000 /* check debug assertion */
 #define AST_TELEMETRY_MACF      0x1000000 /* telemetry sample requested by MAC framework */

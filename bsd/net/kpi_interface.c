@@ -84,6 +84,8 @@
 #include <skywalk/nexus/netif/nx_netif.h>
 #endif /* SKYWALK */
 
+extern uint64_t if_creation_generation_count;
+
 #undef ifnet_allocate
 errno_t ifnet_allocate(const struct ifnet_init_params *init,
     ifnet_t *ifp);
@@ -105,6 +107,7 @@ static errno_t ifnet_list_get_common(ifnet_family_t, boolean_t, ifnet_t **,
 static errno_t ifnet_set_lladdr_internal(ifnet_t, const void *, size_t,
     u_char, int);
 static errno_t ifnet_awdl_check_eflags(ifnet_t, u_int32_t *, u_int32_t *);
+
 
 /*
  * Temporary work around until we have real reference counting
@@ -558,6 +561,16 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 			INC_ATOMIC_INT64_LIM(
 				net_api_stats.nas_ifnet_alloc_os_total);
 		}
+
+		if (ifp->if_subfamily == IFNET_SUBFAMILY_MANAGEMENT) {
+			if_set_xflags(ifp, IFXF_MANAGEMENT);
+			if_management_interface_check_needed = true;
+		}
+
+		/*
+		 * Increment the generation count on interface creation
+		 */
+		ifp->if_creation_generation_id = os_atomic_inc(&if_creation_generation_count, relaxed);
 
 		*interface = ifp;
 	}
@@ -1045,8 +1058,8 @@ static const ifnet_offload_t offload_mask =
 
 static const ifnet_offload_t any_offload_csum = IFNET_CHECKSUMF;
 
-errno_t
-ifnet_set_offload(ifnet_t interface, ifnet_offload_t offload)
+static errno_t
+ifnet_set_offload_common(ifnet_t interface, ifnet_offload_t offload, boolean_t set_both)
 {
 	u_int32_t ifcaps = 0;
 
@@ -1063,16 +1076,6 @@ ifnet_set_offload(ifnet_t interface, ifnet_offload_t offload)
 		ifcaps |= IFCAP_SKYWALK;
 	}
 #endif /* SKYWALK */
-	/*
-	 * Hardware capable of partial checksum offload is
-	 * flexible enough to handle any transports utilizing
-	 * Internet Checksumming.  Include those transports
-	 * here, and leave the final decision to IP.
-	 */
-	if (interface->if_hwassist & IFNET_CSUM_PARTIAL) {
-		interface->if_hwassist |= (IFNET_CSUM_TCP | IFNET_CSUM_UDP |
-		    IFNET_CSUM_TCPIPV6 | IFNET_CSUM_UDPIPV6);
-	}
 	if (dlil_verbose) {
 		log(LOG_DEBUG, "%s: set offload flags=%b\n",
 		    if_name(interface),
@@ -1114,13 +1117,27 @@ ifnet_set_offload(ifnet_t interface, ifnet_offload_t offload)
 		ifcaps |= IFCAP_CSUM_ZERO_INVERT;
 	}
 	if (ifcaps != 0) {
-		(void) ifnet_set_capabilities_supported(interface, ifcaps,
-		    IFCAP_VALID);
+		if (set_both) {
+			(void) ifnet_set_capabilities_supported(interface,
+			    ifcaps, IFCAP_VALID);
+		}
 		(void) ifnet_set_capabilities_enabled(interface, ifcaps,
 		    IFCAP_VALID);
 	}
 
 	return 0;
+}
+
+errno_t
+ifnet_set_offload(ifnet_t interface, ifnet_offload_t offload)
+{
+	return ifnet_set_offload_common(interface, offload, TRUE);
+}
+
+errno_t
+ifnet_set_offload_enabled(ifnet_t interface, ifnet_offload_t offload)
+{
+	return ifnet_set_offload_common(interface, offload, FALSE);
 }
 
 ifnet_offload_t
@@ -1801,30 +1818,30 @@ ifnet_stat_increment(struct ifnet *ifp,
 	}
 
 	if (s->packets_in != 0) {
-		atomic_add_64(&ifp->if_data.ifi_ipackets, s->packets_in);
+		os_atomic_add(&ifp->if_data.ifi_ipackets, s->packets_in, relaxed);
 	}
 	if (s->bytes_in != 0) {
-		atomic_add_64(&ifp->if_data.ifi_ibytes, s->bytes_in);
+		os_atomic_add(&ifp->if_data.ifi_ibytes, s->bytes_in, relaxed);
 	}
 	if (s->errors_in != 0) {
-		atomic_add_64(&ifp->if_data.ifi_ierrors, s->errors_in);
+		os_atomic_add(&ifp->if_data.ifi_ierrors, s->errors_in, relaxed);
 	}
 
 	if (s->packets_out != 0) {
-		atomic_add_64(&ifp->if_data.ifi_opackets, s->packets_out);
+		os_atomic_add(&ifp->if_data.ifi_opackets, s->packets_out, relaxed);
 	}
 	if (s->bytes_out != 0) {
-		atomic_add_64(&ifp->if_data.ifi_obytes, s->bytes_out);
+		os_atomic_add(&ifp->if_data.ifi_obytes, s->bytes_out, relaxed);
 	}
 	if (s->errors_out != 0) {
-		atomic_add_64(&ifp->if_data.ifi_oerrors, s->errors_out);
+		os_atomic_add(&ifp->if_data.ifi_oerrors, s->errors_out, relaxed);
 	}
 
 	if (s->collisions != 0) {
-		atomic_add_64(&ifp->if_data.ifi_collisions, s->collisions);
+		os_atomic_add(&ifp->if_data.ifi_collisions, s->collisions, relaxed);
 	}
 	if (s->dropped != 0) {
-		atomic_add_64(&ifp->if_data.ifi_iqdrops, s->dropped);
+		os_atomic_add(&ifp->if_data.ifi_iqdrops, s->dropped, relaxed);
 	}
 
 	/* Touch the last change time. */
@@ -1846,13 +1863,13 @@ ifnet_stat_increment_in(struct ifnet *ifp, u_int32_t packets_in,
 	}
 
 	if (packets_in != 0) {
-		atomic_add_64(&ifp->if_data.ifi_ipackets, packets_in);
+		os_atomic_add(&ifp->if_data.ifi_ipackets, packets_in, relaxed);
 	}
 	if (bytes_in != 0) {
-		atomic_add_64(&ifp->if_data.ifi_ibytes, bytes_in);
+		os_atomic_add(&ifp->if_data.ifi_ibytes, bytes_in, relaxed);
 	}
 	if (errors_in != 0) {
-		atomic_add_64(&ifp->if_data.ifi_ierrors, errors_in);
+		os_atomic_add(&ifp->if_data.ifi_ierrors, errors_in, relaxed);
 	}
 
 	TOUCHLASTCHANGE(&ifp->if_lastchange);
@@ -1873,13 +1890,13 @@ ifnet_stat_increment_out(struct ifnet *ifp, u_int32_t packets_out,
 	}
 
 	if (packets_out != 0) {
-		atomic_add_64(&ifp->if_data.ifi_opackets, packets_out);
+		os_atomic_add(&ifp->if_data.ifi_opackets, packets_out, relaxed);
 	}
 	if (bytes_out != 0) {
-		atomic_add_64(&ifp->if_data.ifi_obytes, bytes_out);
+		os_atomic_add(&ifp->if_data.ifi_obytes, bytes_out, relaxed);
 	}
 	if (errors_out != 0) {
-		atomic_add_64(&ifp->if_data.ifi_oerrors, errors_out);
+		os_atomic_add(&ifp->if_data.ifi_oerrors, errors_out, relaxed);
 	}
 
 	TOUCHLASTCHANGE(&ifp->if_lastchange);
@@ -1898,19 +1915,19 @@ ifnet_set_stat(struct ifnet *ifp, const struct ifnet_stats_param *s)
 		return EINVAL;
 	}
 
-	atomic_set_64(&ifp->if_data.ifi_ipackets, s->packets_in);
-	atomic_set_64(&ifp->if_data.ifi_ibytes, s->bytes_in);
-	atomic_set_64(&ifp->if_data.ifi_imcasts, s->multicasts_in);
-	atomic_set_64(&ifp->if_data.ifi_ierrors, s->errors_in);
+	os_atomic_store(&ifp->if_data.ifi_ipackets, s->packets_in, release);
+	os_atomic_store(&ifp->if_data.ifi_ibytes, s->bytes_in, release);
+	os_atomic_store(&ifp->if_data.ifi_imcasts, s->multicasts_in, release);
+	os_atomic_store(&ifp->if_data.ifi_ierrors, s->errors_in, release);
 
-	atomic_set_64(&ifp->if_data.ifi_opackets, s->packets_out);
-	atomic_set_64(&ifp->if_data.ifi_obytes, s->bytes_out);
-	atomic_set_64(&ifp->if_data.ifi_omcasts, s->multicasts_out);
-	atomic_set_64(&ifp->if_data.ifi_oerrors, s->errors_out);
+	os_atomic_store(&ifp->if_data.ifi_opackets, s->packets_out, release);
+	os_atomic_store(&ifp->if_data.ifi_obytes, s->bytes_out, release);
+	os_atomic_store(&ifp->if_data.ifi_omcasts, s->multicasts_out, release);
+	os_atomic_store(&ifp->if_data.ifi_oerrors, s->errors_out, release);
 
-	atomic_set_64(&ifp->if_data.ifi_collisions, s->collisions);
-	atomic_set_64(&ifp->if_data.ifi_iqdrops, s->dropped);
-	atomic_set_64(&ifp->if_data.ifi_noproto, s->no_protocol);
+	os_atomic_store(&ifp->if_data.ifi_collisions, s->collisions, release);
+	os_atomic_store(&ifp->if_data.ifi_iqdrops, s->dropped, release);
+	os_atomic_store(&ifp->if_data.ifi_noproto, s->no_protocol, release);
 
 	/* Touch the last change time. */
 	TOUCHLASTCHANGE(&ifp->if_lastchange);
@@ -1929,19 +1946,19 @@ ifnet_stat(struct ifnet *ifp, struct ifnet_stats_param *s)
 		return EINVAL;
 	}
 
-	atomic_get_64(s->packets_in, &ifp->if_data.ifi_ipackets);
-	atomic_get_64(s->bytes_in, &ifp->if_data.ifi_ibytes);
-	atomic_get_64(s->multicasts_in, &ifp->if_data.ifi_imcasts);
-	atomic_get_64(s->errors_in, &ifp->if_data.ifi_ierrors);
+	s->packets_in = os_atomic_load(&ifp->if_data.ifi_ipackets, relaxed);
+	s->bytes_in = os_atomic_load(&ifp->if_data.ifi_ibytes, relaxed);
+	s->multicasts_in = os_atomic_load(&ifp->if_data.ifi_imcasts, relaxed);
+	s->errors_in = os_atomic_load(&ifp->if_data.ifi_ierrors, relaxed);
 
-	atomic_get_64(s->packets_out, &ifp->if_data.ifi_opackets);
-	atomic_get_64(s->bytes_out, &ifp->if_data.ifi_obytes);
-	atomic_get_64(s->multicasts_out, &ifp->if_data.ifi_omcasts);
-	atomic_get_64(s->errors_out, &ifp->if_data.ifi_oerrors);
+	s->packets_out = os_atomic_load(&ifp->if_data.ifi_opackets, relaxed);
+	s->bytes_out = os_atomic_load(&ifp->if_data.ifi_obytes, relaxed);
+	s->multicasts_out = os_atomic_load(&ifp->if_data.ifi_omcasts, relaxed);
+	s->errors_out = os_atomic_load(&ifp->if_data.ifi_oerrors, relaxed);
 
-	atomic_get_64(s->collisions, &ifp->if_data.ifi_collisions);
-	atomic_get_64(s->dropped, &ifp->if_data.ifi_iqdrops);
-	atomic_get_64(s->no_protocol, &ifp->if_data.ifi_noproto);
+	s->collisions = os_atomic_load(&ifp->if_data.ifi_collisions, relaxed);
+	s->dropped = os_atomic_load(&ifp->if_data.ifi_iqdrops, relaxed);
+	s->no_protocol = os_atomic_load(&ifp->if_data.ifi_noproto, relaxed);
 
 	if (ifp->if_data_threshold != 0) {
 		ifnet_notify_data_threshold(ifp);
@@ -2947,27 +2964,11 @@ fail:
 /* misc							*/
 /**************************************************************************/
 
-errno_t
-ifnet_get_local_ports_extended(ifnet_t ifp, protocol_family_t protocol,
+static errno_t
+ifnet_get_local_ports_extended_inner(ifnet_t ifp, protocol_family_t protocol,
     u_int32_t flags, u_int8_t *bitfield)
 {
 	u_int32_t ifindex;
-
-	if (bitfield == NULL) {
-		return EINVAL;
-	}
-
-	switch (protocol) {
-	case PF_UNSPEC:
-	case PF_INET:
-	case PF_INET6:
-		break;
-	default:
-		return EINVAL;
-	}
-
-	/* bit string is long enough to hold 16-bit port values */
-	bzero(bitfield, bitstr_size(IP_PORTRANGE_SIZE));
 
 	/* no point in continuing if no address is assigned */
 	if (ifp != NULL && TAILQ_EMPTY(&ifp->if_addrhead)) {
@@ -2992,6 +2993,40 @@ ifnet_get_local_ports_extended(ifnet_t ifp, protocol_family_t protocol,
 	if (!(flags & IFNET_GET_LOCAL_PORTS_UDPONLY)) {
 		tcp_get_ports_used(ifp, protocol, flags,
 		    bitfield);
+	}
+
+	return 0;
+}
+
+errno_t
+ifnet_get_local_ports_extended(ifnet_t ifp, protocol_family_t protocol,
+    u_int32_t flags, u_int8_t *bitfield)
+{
+	ifnet_t parent_ifp = NULL;
+
+	if (bitfield == NULL) {
+		return EINVAL;
+	}
+
+	switch (protocol) {
+	case PF_UNSPEC:
+	case PF_INET:
+	case PF_INET6:
+		break;
+	default:
+		return EINVAL;
+	}
+
+	/* bit string is long enough to hold 16-bit port values */
+	bzero(bitfield, bitstr_size(IP_PORTRANGE_SIZE));
+
+	ifnet_get_local_ports_extended_inner(ifp, protocol, flags, bitfield);
+
+	/* get local ports for parent interface */
+	if (ifp != NULL && ifnet_get_delegate_parent(ifp, &parent_ifp) == 0) {
+		ifnet_get_local_ports_extended_inner(parent_ifp, protocol,
+		    flags, bitfield);
+		ifnet_release_delegate_parent(ifp);
 	}
 
 	return 0;
@@ -3352,8 +3387,7 @@ ifnet_link_status_report(ifnet_t ifp, const void *buffer,
 		    IF_CELL_UL_MSS_RECOMMENDED_VALID) &&
 		    new_cell_sr->mss_recommended !=
 		    if_cell_sr->mss_recommended) {
-			atomic_bitset_32(&tcbinfo.ipi_flags,
-			    INPCBINFO_UPDATE_MSS);
+			os_atomic_or(&tcbinfo.ipi_flags, INPCBINFO_UPDATE_MSS, relaxed);
 			inpcb_timer_sched(&tcbinfo, INPCB_TIMER_FAST);
 #if NECP
 			necp_update_all_clients();

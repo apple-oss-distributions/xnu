@@ -5,6 +5,6 @@ TARGETS	= kt-dump
 all:	$(TARGETS)
 
 kt-dump: kt-dump.cpp
-	${CXX} ${CXXFLAGS} -o $@ $?
+	${CXX} ${CXXFLAGS} -g -o $@ $?
 clean:
-	rm -rf $(TARGETS)
+	rm -rf $(TARGETS) $(TARGETS:=.dSYM)

@@ -53,22 +53,16 @@ can also tunnel ISO traffic over IPv[46] using EON encapsulation.
 Each
 .Nm
 interface is created at runtime using interface cloning.
-This is
-most easily done with the
+This is done with the
 .Xr ifconfig 8
 .Cm create
-command or using the
-.Va gifconfig_ Ns Aq Ar interface
-variable in
-.Xr rc.conf 5 .
+command.
 .Pp
 To use
 .Nm ,
 administrator needs to configure protocol and addresses used for the outer
 header.
-This can be done by using
-.Xr gifconfig 8 ,
-or
+This can be done by using the
 .Dv SIOCSIFPHYADDR
 ioctl.
 Also, administrator needs to configure protocol and addresses used for the
@@ -171,7 +165,6 @@ to 1.
 .Sh SEE ALSO
 .Xr inet 4 ,
 .Xr inet6 4 ,
-.Xr gifconfig 8
 .Rs
 .%A	R. Gilligan
 .%A	E. Nordmark

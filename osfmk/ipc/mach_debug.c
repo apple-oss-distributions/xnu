@@ -449,6 +449,7 @@ mach_port_kobject_description(
 	kern_return_t kr;
 	mach_vm_address_t kaddr = 0;
 	io_object_t obj = NULL;
+	io_kobject_t kobj = NULL;
 
 	if (space == IS_NULL) {
 		return KERN_INVALID_TASK;
@@ -479,8 +480,10 @@ mach_port_kobject_description(
 		case IKOT_IOKIT_CONNECT:
 		case IKOT_IOKIT_IDENT:
 		case IKOT_UEXT_OBJECT:
-			obj = (io_object_t) kaddr;
-			iokit_add_reference(obj, IKOT_IOKIT_OBJECT);
+			kobj = (io_kobject_t) kaddr;
+			if (kobj) {
+				iokit_kobject_retain(kobj);
+			}
 			break;
 
 		default:
@@ -492,7 +495,10 @@ mach_port_kobject_description(
 #endif
 
 	io_unlock(object);
-
+	if (kobj) {
+		// IKOT_IOKIT_OBJECT since iokit_remove_reference() follows
+		obj = iokit_copy_object_for_consumed_kobject(kobj, IKOT_IOKIT_OBJECT);
+	}
 	if (obj) {
 		iokit_port_object_description(obj, desc);
 		iokit_remove_reference(obj);

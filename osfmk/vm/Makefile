@@ -19,6 +19,7 @@ KERNELFILES = \
 	vm_fault.h \
 	vm_kern.h \
 	vm_map.h \
+	vm_memtag.h \
 	vm_options.h \
 	vm_pageout.h \
 	vm_protos.h \

@@ -30,15 +30,24 @@ typedef uint32_t code_signing_monitor_type_t;
 enum {
 	CS_MONITOR_TYPE_NONE = 0,
 	CS_MONITOR_TYPE_PPL = 1,
-
+	CS_MONITOR_TYPE_TXM = 2
 };
 
 typedef uint32_t code_signing_config_t;
 enum {
+	/* Exemptions */
 	CS_CONFIG_UNRESTRICTED_DEBUGGING = (1 << 0),
 	CS_CONFIG_ALLOW_ANY_SIGNATURE = (1 << 1),
 	CS_CONFIG_ENFORCEMENT_DISABLED = (1 << 2),
 	CS_CONFIG_GET_OUT_OF_MY_WAY = (1 << 3),
+	CS_CONFIG_INTEGRITY_SKIP = (1 << 4),
+
+	/* Features */
+	CS_CONFIG_MAP_JIT = (1 << 26),
+	CS_CONFIG_DEVELOPER_MODE_SUPPORTED = (1 << 27),
+	CS_CONFIG_COMPILATION_SERVICE = (1 << 28),
+	CS_CONFIG_LOCAL_SIGNING = (1 << 29),
+	CS_CONFIG_OOP_JIT = (1 << 30),
 	CS_CONFIG_CSM_ENABLED = (1 << 31),
 };
 
@@ -56,6 +65,7 @@ enum {
 #define XNU_SUPPORTS_COMPILATION_SERVICE 1
 #define XNU_SUPPORTS_LOCAL_SIGNING 1
 #define XNU_SUPPORTS_CE_ACCELERATION 1
+#define XNU_SUPPORTS_DISABLE_CODE_SIGNING_FEATURE 1
 
 /* Local signing public key size */
 #define XNU_LOCAL_SIGNING_KEY_SIZE 97
@@ -122,6 +132,17 @@ void
 code_signing_configuration(
 	code_signing_monitor_type_t *monitor_type,
 	code_signing_config_t *config);
+
+/**
+ * This function can be called by a component to disable a particular code signing
+ * feature on the system. For instance, code_signing_configuration is initialized in
+ * early boot, where some kernel extensions which affect code signing aren't online.
+ * When these extensions come online, they may choose to call this function to affect
+ * the state which was previously initialized within code_signing_configuration.
+ */
+void
+disable_code_signing_feature(
+	code_signing_config_t feature);
 
 /**
  * Enable developer mode on the system. When the system contains a monitor environment,
@@ -288,6 +309,27 @@ csm_resolve_os_entitlements_from_proc(
 	const proc_t process,
 	const void **os_entitlements);
 
+/**
+ * Wrapper function that calls csm_get_trust_level_kdp if there is a CODE_SIGNING_MONITOR
+ * or returns KERN_NOT_SUPPORTED if there isn't one.
+ */
+kern_return_t
+get_trust_level_kdp(
+	pmap_t pmap,
+	uint32_t *trust_level);
+
+/**
+ * Check whether a particular proc is marked as debugged or not. For many use cases, this
+ * is a stronger check than simply checking for the enablement of developer mode since
+ * an address space can only be marked as debugged if developer mode is already enabled.
+ *
+ * When the system has a code signing monitor, this function acquires the state of the
+ * address space from the monitor.
+ */
+kern_return_t
+address_space_debugged(
+	const proc_t process);
+
 #if CODE_SIGNING_MONITOR
 
 /**
@@ -419,6 +461,15 @@ csm_associate_code_signature(
 	const vm_offset_t region_offset);
 
 /**
+ * Validate that an address space will allow mapping in a JIT region within the monitor
+ * environment. An address space can only have a single JIT region, and only when it
+ * has the appropriate JIT entitlement.
+ */
+kern_return_t
+csm_allow_jit_region(
+	pmap_t pmap);
+
+/**
  * Associate a JIT region with an address space in the monitor environment. An address
  * space can only have a JIT region if it has the appropriate JIT entitlement.
  */
@@ -446,6 +497,24 @@ csm_associate_debug_region(
 kern_return_t
 csm_allow_invalid_code(
 	pmap_t pmap);
+
+/**
+ * Acquire the trust level which is placed on the address space within the monitor
+ * environment. There is no clear mapping of the 32-bit integer returned to the actual
+ * trust level because different code signing monitors use different trust levels.
+ *
+ * The code signing monitor itself does not depend on this value and instead uses
+ * other, more secure methods of checking for trust. In general, we only expect this
+ * function to be used for debugging purposes.
+ *
+ * This function should be careful that any code paths within it do not mutate the
+ * state of the system, and as a result, no code paths here should attempt to take
+ * locks of any kind.
+ */
+kern_return_t
+csm_get_trust_level_kdp(
+	pmap_t pmap,
+	uint32_t *trust_level);
 
 /**
  * Certain address spaces are exempt from code signing enforcement. This function can be

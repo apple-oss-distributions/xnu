@@ -324,7 +324,7 @@ arp_llinfo_addq(struct llinfo_arp *la, struct mbuf *m)
 			    "%s: dropping packet due to maxhold_total\n",
 			    __func__);
 		}
-		atomic_add_32(&arpstat.dropped, 1);
+		os_atomic_inc(&arpstat.dropped, relaxed);
 		return false;
 	}
 
@@ -343,12 +343,12 @@ arp_llinfo_addq(struct llinfo_arp *la, struct mbuf *m)
 			    __func__, MBUF_SCIDX(mbuf_get_service_class(_m)));
 		}
 		m_freem(_m);
-		atomic_add_32(&arpstat.dropped, 1);
-		atomic_add_32(&arpstat.held, -1);
+		os_atomic_inc(&arpstat.dropped, relaxed);
+		os_atomic_dec(&arpstat.held, relaxed);
 	}
 	CLASSQ_PKT_INIT_MBUF(&pkt, m);
 	_addq(&la->la_holdq, &pkt);
-	atomic_add_32(&arpstat.held, 1);
+	os_atomic_inc(&arpstat.held, relaxed);
 	if (arp_verbose) {
 		log(LOG_DEBUG, "%s: enqueued packet (scidx %u), qlen now %u\n",
 		    __func__, MBUF_SCIDX(mbuf_get_service_class(m)),
@@ -364,8 +364,8 @@ arp_llinfo_flushq(struct llinfo_arp *la)
 	uint32_t held = qlen(&la->la_holdq);
 
 	if (held != 0) {
-		atomic_add_32(&arpstat.purged, held);
-		atomic_add_32(&arpstat.held, -held);
+		os_atomic_add(&arpstat.purged, held, relaxed);
+		os_atomic_add(&arpstat.held, -held, relaxed);
 		_flushq(&la->la_holdq);
 	}
 	la->la_prbreq_cnt = 0;
@@ -1584,7 +1584,7 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 					    CLASSQ_PKT_INITIALIZER(pkt);
 
 					_getq_tail(&llinfo->la_holdq, &pkt);
-					atomic_add_32(&arpstat.held, -1);
+					os_atomic_dec(&arpstat.held, relaxed);
 					VERIFY(pkt.cp_mbuf == packet);
 				}
 				result = EHOSTUNREACH;
@@ -1609,7 +1609,7 @@ release_just_return:
 
 release:
 	if (result == EHOSTUNREACH) {
-		atomic_add_32(&arpstat.dropped, 1);
+		os_atomic_inc(&arpstat.dropped, relaxed);
 	}
 
 	if (route != NULL) {
@@ -1810,7 +1810,7 @@ match:
 		    sizeof(struct kev_in_collision) + in_collision->hw_len;
 		ev_msg.dv[1].data_length = 0;
 		dlil_post_complete_msg(NULL, &ev_msg);
-		atomic_add_32(&arpstat.dupips, 1);
+		os_atomic_inc(&arpstat.dupips, relaxed);
 		goto respond;
 	}
 
@@ -1914,7 +1914,7 @@ match:
 				    (const struct sockaddr *)target_ip);
 				IFA_REMREF(ifa);
 				ifa = NULL;
-				atomic_add_32(&arpstat.txconflicts, 1);
+				os_atomic_inc(&arpstat.txconflicts, relaxed);
 			}
 			goto respond;
 		} else if (keep_announcements != 0 &&
@@ -2157,7 +2157,7 @@ match:
 			log(LOG_DEBUG, "%s: sending %u held packets\n",
 			    __func__, held);
 		}
-		atomic_add_32(&arpstat.held, -held);
+		os_atomic_add(&arpstat.held, -held, relaxed);
 		VERIFY(qempty(&llinfo->la_holdq));
 		RT_UNLOCK(route);
 		dlil_output(ifp, PF_INET, m0, (caddr_t)route,

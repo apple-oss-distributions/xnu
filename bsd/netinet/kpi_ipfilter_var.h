@@ -59,6 +59,8 @@ extern void ipf_unref(void);
 extern void ip_proto_dispatch_in(struct mbuf *m, int hlen, u_int8_t proto,
     ipfilter_t ipfref);
 
+extern void ipfilter_register_m_tag(void);
+
 #endif /* KERNEL_PRIVATE */
 
 #endif /*__KPI_IPFILTER_VAR__*/

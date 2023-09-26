@@ -81,7 +81,7 @@ class KMem(object):
     heap data structures, globals, ...
     """
 
-    _HEAP_NAMES = [ "", "default.", "data.", "" ]
+    _HEAP_NAMES = [ "", "shared.", "data.", "" ]
 
     @staticmethod
     def _parse_range(zone_info_v, name):
@@ -137,6 +137,14 @@ class KMem(object):
         count       = kmem_ranges.GetByteSize() // target.GetAddressByteSize()
         addresses   = target.xIterAsUInt64(kmem_ranges.GetLoadAddress(), count)
         self.kmem_ranges = [
+            MemoryRange(next(addresses), next(addresses))
+            for i in range(0, count, 2)
+        ]
+
+        kmem_ranges = target.chkFindFirstGlobalVariable('gIOKitPageableFixedRanges')
+        count       = kmem_ranges.GetByteSize() // target.GetAddressByteSize()
+        addresses   = target.xIterAsUInt64(kmem_ranges.GetLoadAddress(), count)
+        self.iokit_ranges = [
             MemoryRange(next(addresses), next(addresses))
             for i in range(0, count, 2)
         ]

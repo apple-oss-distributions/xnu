@@ -569,6 +569,8 @@ static struct getattrlist_attrtab getattrlist_common_extended_tab[] = {
 	{.attr = ATTR_CMNEXT_CLONEID, .bits = VATTR_BIT(va_clone_id), .size = sizeof(uint64_t), .action = KAUTH_VNODE_READ_ATTRIBUTES},
 	{.attr = ATTR_CMNEXT_EXT_FLAGS, .bits = VATTR_BIT(va_extflags), .size = sizeof(uint64_t), .action = KAUTH_VNODE_READ_ATTRIBUTES},
 	{.attr = ATTR_CMNEXT_RECURSIVE_GENCOUNT, .bits = VATTR_BIT(va_recursive_gencount), .size = sizeof(uint64_t), .action = KAUTH_VNODE_READ_ATTRIBUTES},
+	{.attr = ATTR_CMNEXT_ATTRIBUTION_TAG, .bits = VATTR_BIT(va_attribution_tag), .size = sizeof(uint64_t), .action = KAUTH_VNODE_READ_ATTRIBUTES},
+	{.attr = ATTR_CMNEXT_CLONE_REFCNT, .bits = VATTR_BIT(va_clone_refcnt), .size = sizeof(uint32_t), .action = KAUTH_VNODE_READ_ATTRIBUTES},
 	{.attr = 0, .bits = 0, .size = 0, .action = 0}
 };
 
@@ -878,7 +880,7 @@ static int
 setattrlist_setfinderinfo(vnode_t vp, char *fndrinfo, struct vfs_context *ctx)
 {
 	uio_t   auio;
-	uio_stackbuf_t    uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	int     error;
 
 	if ((auio = uio_createwithbuffer(1, 0, UIO_SYSSPACE, UIO_WRITE, uio_buf, sizeof(uio_buf))) == NULL) {
@@ -955,6 +957,7 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 	int             pack_invalid;
 	vnode_t         root_vp = NULL;
 	const char      *fstypename = NULL;
+	size_t          fstypenamelen = 0;
 
 	_ATTRLIST_BUF_INIT(&ab);
 	VATTR_INIT(&va);
@@ -1185,12 +1188,10 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 		varsize += roundup(strlen(mnt->mnt_vfsstat.f_mntfromname) + 1, 4);
 	}
 	if (alp->volattr & ATTR_VOL_FSTYPENAME) {
-		if (mnt->mnt_kern_flag & MNTK_TYPENAME_OVERRIDE) {
-			fstypename = mnt->fstypename_override;
-		} else {
-			fstypename = mnt->mnt_vfsstat.f_fstypename;
-		}
-		varsize += roundup(strlen(fstypename) + 1, 4);
+		mount_lock_spin(mnt);
+		fstypename = vfs_getfstypenameref_locked(mnt, &fstypenamelen);
+		mount_unlock(mnt);
+		varsize += roundup(fstypenamelen + 1, 4);
 	}
 
 	/*
@@ -1564,9 +1565,21 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 		ab.actual.volattr |= ATTR_VOL_ATTRIBUTES;
 	}
 	if (alp->volattr & ATTR_VOL_FSTYPENAME) {
+		size_t curlen;
+
+		/* Verify that the reference didn't change. */
 		assert(fstypename != NULL);
-		attrlist_pack_string(&ab, fstypename, 0);
-		ab.actual.volattr |= ATTR_VOL_FSTYPENAME;
+		mount_lock_spin(mnt);
+		if (vfs_getfstypenameref_locked(mnt, &curlen) == fstypename &&
+		    fstypenamelen == curlen) {
+			attrlist_pack_string(&ab, fstypename, 0);
+			ab.actual.volattr |= ATTR_VOL_FSTYPENAME;
+			mount_unlock(mnt);
+		} else {
+			mount_unlock(mnt);
+			error = ERESTART;
+			goto out;
+		}
 	}
 	if (alp->volattr & ATTR_VOL_FSSUBTYPE) {
 		ATTR_PACK(&ab, vs.f_fssubtype);
@@ -1847,7 +1860,7 @@ attr_pack_common(vfs_context_t ctx, mount_t mp, vnode_t vp, struct attrlist *alp
 		error = 0;
 		if (vp && !is_bulk) {
 			uio_t   auio;
-			uio_stackbuf_t    uio_buf[UIO_SIZEOF(1)];
+			UIO_STACKBUF(uio_buf, 1);
 
 			if ((auio = uio_createwithbuffer(1, 0, UIO_SYSSPACE,
 			    UIO_READ, uio_buf, sizeof(uio_buf))) == NULL) {
@@ -2441,6 +2454,26 @@ attr_pack_common_extended(mount_t mp, struct vnode *vp, struct attrlist *alp,
 		} else if (!return_valid || pack_invalid) {
 			uint64_t zero_val = 0;
 			ATTR_PACK8((*abp), zero_val);
+		}
+	}
+
+	if (alp->forkattr & ATTR_CMNEXT_ATTRIBUTION_TAG) {
+		if (VATTR_IS_SUPPORTED(vap, va_attribution_tag)) {
+			ATTR_PACK8((*abp), vap->va_attribution_tag);
+			abp->actual.forkattr |= ATTR_CMNEXT_ATTRIBUTION_TAG;
+		} else if (!return_valid || pack_invalid) {
+			uint64_t zero_val = 0;
+			ATTR_PACK8((*abp), zero_val);
+		}
+	}
+
+	if (alp->forkattr & ATTR_CMNEXT_CLONE_REFCNT) {
+		if (VATTR_IS_SUPPORTED(vap, va_clone_refcnt)) {
+			ATTR_PACK4((*abp), vap->va_clone_refcnt);
+			abp->actual.forkattr |= ATTR_CMNEXT_CLONE_REFCNT;
+		} else if (!return_valid || pack_invalid) {
+			uint32_t zero_val = 0;
+			ATTR_PACK4((*abp), zero_val);
 		}
 	}
 
@@ -3120,7 +3153,7 @@ getattrlist_internal(vfs_context_t ctx, vnode_t vp, struct attrlist  *alp,
 	int             pack_invalid;
 	int             vtype = 0;
 	uio_t           auio;
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	// must be true for fork attributes to be used as new common attributes
 	const int use_fork = (options & FSOPT_ATTR_CMN_EXTENDED) != 0;
 
@@ -3474,7 +3507,7 @@ refill_fd_direntries(vfs_context_t ctx, vnode_t dvp, struct fd_vn_data *fvd,
     int *eofflagp)
 {
 	uio_t rdir_uio;
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	size_t rdirbufsiz;
 	size_t rdirbufused;
 	int eofflag;
@@ -4048,7 +4081,7 @@ getattrlistbulk(proc_t p, struct getattrlistbulk_args *uap, int32_t *retval)
 	enum uio_seg segflg;
 	int count;
 	uio_t auio = NULL;
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	kauth_action_t action;
 	int eofflag;
 	uint64_t options;

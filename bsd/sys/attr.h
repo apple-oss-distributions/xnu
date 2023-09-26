@@ -362,6 +362,9 @@ typedef struct vol_capabilities_attr {
  *
  * VOL_CAP_INT_RENAME_OPENFAIL: When set, the volume may fail rename
  * operations on files that are open.
+ *
+ * VOL_CAP_INT_RENAME_SECLUDE: When set, the volume supports a
+ * seclude rename operation.
  */
 #define VOL_CAP_INT_SEARCHFS                    0x00000001
 #define VOL_CAP_INT_ATTRLIST                    0x00000002
@@ -387,6 +390,7 @@ typedef struct vol_capabilities_attr {
 #define VOL_CAP_INT_RENAME_SWAP                 0x00040000
 #define VOL_CAP_INT_RENAME_EXCL                 0x00080000
 #define VOL_CAP_INT_RENAME_OPENFAIL             0x00100000
+#define VOL_CAP_INT_RENAME_SECLUDE              0x00200000
 
 typedef struct vol_attributes_attr {
 	attribute_set_t validattr;
@@ -550,8 +554,10 @@ typedef struct vol_attributes_attr {
 #define ATTR_CMNEXT_CLONEID     0x00000100
 #define ATTR_CMNEXT_EXT_FLAGS   0x00000200
 #define ATTR_CMNEXT_RECURSIVE_GENCOUNT 0x00000400
+#define ATTR_CMNEXT_ATTRIBUTION_TAG    0x00000800
+#define ATTR_CMNEXT_CLONE_REFCNT       0x00001000
 
-#define ATTR_CMNEXT_VALIDMASK   0x000007fc
+#define ATTR_CMNEXT_VALIDMASK   0x00001ffc
 #define ATTR_CMNEXT_SETMASK             0x00000000
 
 /* Deprecated fork attributes */

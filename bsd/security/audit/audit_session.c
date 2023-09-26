@@ -79,7 +79,10 @@ struct au_sentry {
 	long                    se_refcnt;      /* Reference count. */
 	long                    se_procnt;      /* Processes in session. */
 	ipc_port_t              se_port;        /* Session port. */
-	LIST_ENTRY(au_sentry)   se_link;        /* Hash bucket link list (1) */
+	union {
+		LIST_ENTRY(au_sentry)   se_link;        /* Hash bucket link list (1) */
+		struct smr_node         se_smr_node;
+	};
 };
 typedef struct au_sentry au_sentry_t;
 
@@ -370,27 +373,13 @@ static int audit_sdev_init(void);
 #define AUDIT_SENTRY_RUNLOCK()          rw_runlock(&se_entry_lck)
 #define AUDIT_SENTRY_WUNLOCK()          rw_wunlock(&se_entry_lck)
 
-/* Access control on the auditinfo_addr.ai_flags member. */
-static uint64_t audit_session_superuser_set_sflags_mask;
-static uint64_t audit_session_superuser_clear_sflags_mask;
-static uint64_t audit_session_member_set_sflags_mask;
-static uint64_t audit_session_member_clear_sflags_mask;
-SYSCTL_NODE(, OID_AUTO, audit, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "Audit controls");
-SYSCTL_NODE(_audit, OID_AUTO, session, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "Audit sessions");
-SYSCTL_QUAD(_audit_session, OID_AUTO, superuser_set_sflags_mask, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &audit_session_superuser_set_sflags_mask,
-    "Audit session flags settable by superuser");
-SYSCTL_QUAD(_audit_session, OID_AUTO, superuser_clear_sflags_mask, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &audit_session_superuser_clear_sflags_mask,
-    "Audit session flags clearable by superuser");
-SYSCTL_QUAD(_audit_session, OID_AUTO, member_set_sflags_mask, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &audit_session_member_set_sflags_mask,
-    "Audit session flags settable by a session member");
-SYSCTL_QUAD(_audit_session, OID_AUTO, member_clear_sflags_mask, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &audit_session_member_clear_sflags_mask,
-    "Audit session flags clearable by a session member");
-
-extern int set_security_token_task_internal(proc_t p, void *task);
+/*
+ * Access control on the auditinfo_addr.ai_flags member.
+ */
+static const uint64_t audit_session_superuser_set_sflags_mask = AU_SESSION_FLAG_HAS_GRAPHIC_ACCESS | AU_SESSION_FLAG_HAS_CONSOLE_ACCESS | AU_SESSION_FLAG_HAS_AUTHENTICATED;
+static const uint64_t audit_session_superuser_clear_sflags_mask = AU_SESSION_FLAG_HAS_GRAPHIC_ACCESS | AU_SESSION_FLAG_HAS_CONSOLE_ACCESS | AU_SESSION_FLAG_HAS_AUTHENTICATED;
+static const uint64_t audit_session_member_set_sflags_mask = 0;
+static const uint64_t audit_session_member_clear_sflags_mask = AU_SESSION_FLAG_HAS_AUTHENTICATED;
 
 #define AUDIT_SESSION_DEBUG     0
 #if     AUDIT_SESSION_DEBUG
@@ -673,6 +662,14 @@ audit_session_find(au_asid_t asid)
 	return NULL;
 }
 
+static void
+audit_session_free(smr_node_t node)
+{
+	au_sentry_t *se = __container_of(node, au_sentry_t, se_smr_node);
+
+	kfree_type(au_sentry_t, se);
+}
+
 /*
  * Remove the given audit_session entry from the hash table.
  */
@@ -710,8 +707,8 @@ audit_session_remove(au_sentry_t *se)
 
 			LIST_REMOVE(found_se, se_link);
 			AUDIT_SENTRY_WUNLOCK();
-			kfree_type(au_sentry_t, found_se);
-
+			smr_call(&smr_proc_task, &found_se->se_smr_node,
+			    sizeof(found_se), audit_session_free);
 			return;
 		}
 	}
@@ -1027,7 +1024,7 @@ audit_session_unref(kauth_cred_t cred)
 void
 audit_session_procnew(proc_t p)
 {
-	kauth_cred_t cred = proc_ucred(p);
+	kauth_cred_t cred = proc_ucred_unsafe(p); /* during create */
 	auditinfo_addr_t *aia_p;
 
 	KASSERT(IS_VALID_CRED(cred),
@@ -1045,7 +1042,7 @@ audit_session_procnew(proc_t p)
 void
 audit_session_procexit(proc_t p)
 {
-	kauth_cred_t cred = proc_ucred(p);
+	kauth_cred_t cred = proc_ucred_unsafe(p); /* during exit */
 	auditinfo_addr_t *aia_p;
 
 	KASSERT(IS_VALID_CRED(cred),
@@ -1134,89 +1131,80 @@ audit_session_update_check(kauth_cred_t cred, auditinfo_addr_t *old,
 }
 
 /*
+ * Protect updates to proc->cred->session
+ *
+ * The lifecycle of sessions and kauth creds do not compose well,
+ * so this lock makes sure that even in the presence of concurrent
+ * updates to the proc's credential, sessions stay stable.
+ *
+ * This lock is only used to serialize audit_session_setaia()
+ * and audit_session_join_internal() with each other,
+ * which are called from posix_spawn() or regular syscall context.
+ *
+ * Once the session is established in the cred, this lock
+ * is no longer required, it is only about avoiding racing
+ * updates and lifetime bugs due to the discrepancy between
+ * audit sessions and creds.
+ */
+static void
+proc_audit_session_lock(proc_t p)
+{
+	lck_mtx_lock(&p->p_audit_mlock);
+}
+
+static void
+proc_audit_session_unlock(proc_t p)
+{
+	lck_mtx_unlock(&p->p_audit_mlock);
+}
+
+/*
  * Safely update kauth cred of the given process with new the given audit info.
  */
 int
 audit_session_setaia(proc_t p, auditinfo_addr_t *new_aia_p)
 {
-	kauth_cred_t my_cred, my_new_cred;
-	struct au_session  as;
-	struct au_session  tmp_as;
+	kauth_cred_t my_cred;
+	struct au_session as, *asp = &as;
 	auditinfo_addr_t caia, *old_aia_p;
 	int ret;
+
+	proc_audit_session_lock(p);
+	my_cred = kauth_cred_proc_ref(p);
 
 	/*
 	 * If this is going to modify an existing session then do some
 	 * immutable checks.
 	 */
 	if (audit_session_lookup(new_aia_p->ai_asid, &caia) == 0) {
-		my_cred = kauth_cred_proc_ref(p);
 		ret = audit_session_update_check(my_cred, &caia, new_aia_p);
-		kauth_cred_unref(&my_cred);
 		if (ret) {
+			proc_audit_session_unlock(p);
+			kauth_cred_unref(&my_cred);
 			return ret;
 		}
 	}
 
-	my_cred = kauth_cred_proc_ref(p);
 	bcopy(&new_aia_p->ai_mask, &as.as_mask, sizeof(as.as_mask));
 	old_aia_p = my_cred->cr_audit.as_aia_p;
 	/* audit_session_new() adds a reference on the session */
 	as.as_aia_p = audit_session_new(new_aia_p, old_aia_p);
+
+	kauth_cred_proc_update(p, PROC_SETTOKEN_LAZY,
+	    ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
+		return kauth_cred_model_setauditinfo(model, asp);
+	});
+
+	proc_audit_session_unlock(p);
+	kauth_cred_unref(&my_cred);
 
 	/* If the process left a session then update the process count. */
 	if (old_aia_p != new_aia_p) {
 		audit_dec_procount(AU_SENTRY_PTR(old_aia_p));
 	}
 
-
-	/*
-	 * We are modifying the audit info in a credential so we need a new
-	 * credential (or take another reference on an existing credential that
-	 * matches our new one).  We must do this because the audit info in the
-	 * credential is used as part of our hash key.	Get current credential
-	 * in the target process and take a reference while we muck with it.
-	 */
-	for (;;) {
-		/*
-		 * Set the credential with new info.  If there is no change,
-		 * we get back the same credential we passed in; if there is
-		 * a change, we drop the reference on the credential we
-		 * passed in.  The subsequent compare is safe, because it is
-		 * a pointer compare rather than a contents compare.
-		 */
-		bcopy(&as, &tmp_as, sizeof(tmp_as));
-		my_new_cred = kauth_cred_setauditinfo(my_cred, &tmp_as);
-
-		if (my_cred != my_new_cred) {
-			proc_ucred_lock(p);
-			/* Need to protect for a race where another thread also
-			 * changed the credential after we took our reference.
-			 * If p_ucred has changed then we should restart this
-			 * again with the new cred.
-			 */
-			if (proc_ucred(p) != my_cred) {
-				proc_ucred_unlock(p);
-				kauth_cred_unref(&my_new_cred);
-				/* try again */
-				my_cred = kauth_cred_proc_ref(p);
-				continue;
-			}
-			proc_set_ucred(p, my_new_cred);
-			/* update cred on proc */
-			proc_update_creds_onproc(p);
-			proc_ucred_unlock(p);
-		}
-
-		kauth_cred_unref(&my_new_cred);
-		break;
-	}
-
 	/* Drop the reference taken by audit_session_new() above. */
 	audit_unref_session(AU_SENTRY_PTR(as.as_aia_p));
-
-	/* Propagate the change from the process to the Mach task. */
-	set_security_token(p);
 
 	return 0;
 }
@@ -1405,59 +1393,46 @@ done:
 }
 
 static int
-audit_session_join_internal(proc_t p, task_t task, ipc_port_t port, au_asid_t *new_asid)
+audit_session_join_internal(proc_t p, ipc_port_t port, au_asid_t *new_asid)
 {
-	auditinfo_addr_t *new_aia_p, *old_aia_p;
-	kauth_cred_t my_cred = NULL;
-	au_asid_t old_asid;
+	__block auditinfo_addr_t *old_aia_p = NULL;
+	auditinfo_addr_t *new_aia_p;
 	int err = 0;
-
-	*new_asid = AU_DEFAUDITSID;
 
 	if ((new_aia_p = audit_session_porttoaia(port)) == NULL) {
 		err = EINVAL;
+		*new_asid = AU_DEFAUDITSID;
 		goto done;
 	}
 
-	proc_ucred_lock(p);
-	my_cred = proc_ucred(p);
-	kauth_cred_ref(my_cred);
+	/* Increment the proc count of new session */
+	audit_inc_procount(AU_SENTRY_PTR(new_aia_p));
 
-	old_aia_p = my_cred->cr_audit.as_aia_p;
-	old_asid = old_aia_p->ai_asid;
-	*new_asid = new_aia_p->ai_asid;
+	proc_audit_session_lock(p);
 
-	/*
-	 * Add process in if not already in the session.
-	 */
-	if (*new_asid != old_asid) {
-		kauth_cred_t my_new_cred;
+	kauth_cred_proc_update(p, PROC_SETTOKEN_LAZY,
+	    ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
 		struct au_session new_as;
 
+		old_aia_p = model->cr_audit.as_aia_p;
+
+		if (old_aia_p->ai_asid == new_aia_p->ai_asid) {
+		        return false;
+		}
+
 		bcopy(&new_aia_p->ai_mask, &new_as.as_mask,
-		    sizeof(new_as.as_mask));
+		sizeof(new_as.as_mask));
 		new_as.as_aia_p = new_aia_p;
 
-		my_new_cred = kauth_cred_setauditinfo(my_cred, &new_as);
-		proc_set_ucred(p, my_new_cred);
-		proc_update_creds_onproc(p);
+		return kauth_cred_model_setauditinfo(model, &new_as);
+	});
 
-		/* Increment the proc count of new session */
-		audit_inc_procount(AU_SENTRY_PTR(new_aia_p));
+	proc_audit_session_unlock(p);
 
-		proc_ucred_unlock(p);
+	/* Decrement the process count of the former session. */
+	audit_dec_procount(AU_SENTRY_PTR(old_aia_p));
 
-		kauth_cred_unref(&my_new_cred);
-
-		/* Propagate the change from the process to the Mach task. */
-		set_security_token_task_internal(p, task);
-
-		/* Decrement the process count of the former session. */
-		audit_dec_procount(AU_SENTRY_PTR(old_aia_p));
-	} else {
-		proc_ucred_unlock(p);
-		kauth_cred_unref(&my_cred);
-	}
+	*new_asid = new_aia_p->ai_asid;
 
 done:
 	if (port != IPC_PORT_NULL) {
@@ -1477,11 +1452,11 @@ done:
  *              ESRCH		Invalid calling process/cred.
  */
 int
-audit_session_spawnjoin(proc_t p, task_t task, ipc_port_t port)
+audit_session_spawnjoin(proc_t p, ipc_port_t port)
 {
 	au_asid_t new_asid;
 
-	return audit_session_join_internal(p, task, port, &new_asid);
+	return audit_session_join_internal(p, port, &new_asid);
 }
 
 /*
@@ -1511,11 +1486,12 @@ audit_session_join(proc_t p, struct audit_session_join_args *uap,
 
 
 	if (ipc_object_copyin(get_task_ipcspace(proc_task(p)), send,
-	    MACH_MSG_TYPE_COPY_SEND, &port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND) != KERN_SUCCESS) {
+	    MACH_MSG_TYPE_COPY_SEND, &port, 0, NULL,
+	    IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND) != KERN_SUCCESS) {
 		*ret_asid = AU_DEFAUDITSID;
 		err = EINVAL;
 	} else {
-		err = audit_session_join_internal(p, proc_task(p), port, ret_asid);
+		err = audit_session_join_internal(p, port, ret_asid);
 	}
 
 	return err;

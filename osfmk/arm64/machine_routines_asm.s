@@ -473,7 +473,15 @@ LEXT(_bcopyin)
 	strb	w3, [x1], #1
 	b.hi	2b
 3:
-	mov		x0, #0
+	mov		x0, xzr
+	/*
+	 * x3 and x4 now contain user-controlled values which may be used to form
+	 * addresses under speculative execution past the _bcopyin(); prevent any
+	 * attempts by userspace to influence kernel execution by zeroing them out
+	 * before we return.
+	 */
+	mov		x3, xzr
+	mov		x4, xzr
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
@@ -534,6 +542,11 @@ LEXT(_copyin_atomic32)
 1:
 	str		w8, [x1]
 	mov		x0, #0
+	/*
+	 * While x8 does contain a user-controlled value at this point, we will
+	 * be overwriting it immediately after returning to this asm function's
+	 * C wrapper. So, no need to zero it out here.
+	 */
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
@@ -556,6 +569,11 @@ LEXT(_copyin_atomic32_wait_if_equals)
 	wfe
 1:
 	clrex
+	/*
+	 * While x8 does contain a user-controlled value at this point, we will
+	 * be overwriting it immediately after returning to this asm function's
+	 * C wrapper. So, no need to zero it out here.
+	 */
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
@@ -578,6 +596,11 @@ LEXT(_copyin_atomic64)
 1:
 	str		x8, [x1]
 	mov		x0, #0
+	/*
+	 * While x8 does contain a user-controlled value at this point, we will
+	 * be overwriting it immediately after returning to this asm function's
+	 * C wrapper. So, no need to zero it out here.
+	 */
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
@@ -675,6 +698,30 @@ Lcopyinstr_too_long:
 Lcopyinstr_done:
 	str		x4, [x3]					// Return number of bytes copied
 	mov		x0, x5						// Set error code (0 on success, ENAMETOOLONG on failure)
+	/*
+	 * A malicious userspace has weak control over the range of values held in
+	 * x2 based on which path through the kernel was taken to the copyinstr(),
+	 * for example:
+	 *  - (PSHMNAMLEN + 1) = 32
+	 *  - (MAXPATHLEN - 1) = 1023
+	 *  - (PAGE_SIZE * 2) = {8192, 32768}
+	 *  - etc
+	 *
+	 * This indirectly determines how much control a malicious userspace has
+	 * over the value held in x4 as they choose the length of the string in
+	 * the range of [0..x2] inclusive based on the index of the null terminator
+	 * (or lack thereof). This in turn controls the value held in x5, though
+	 * this is tightly constrained to either 0 or ENAMETOOLONG (i.e. 63) so
+	 * is less of a concern.
+	 *
+	 * The values held in these three registers (x2, x4, and x5) may be used
+	 * to form addresses under speculative execution past the _bcopyinstr();
+	 * prevent any attempts by userspace to influence kernel execution by
+	 * zeroing them out before we return.
+	 */
+	mov x2, xzr
+	mov x4, xzr
+	mov x5, xzr
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
@@ -706,25 +753,25 @@ LEXT(copyinframe)
 	adrp	x5, EXT(gVirtBase)@page // For 32-bit frame, make sure we're not trying to copy from kernel
 	add		x5, x5, EXT(gVirtBase)@pageoff
 	ldr		x5, [x5]
-	cmp     x5, x0					// See if address is in kernel virtual range
+	cmp     x5, x0				// See if address is in kernel virtual range
 	b.hi	Lcopyinframe32			// If below kernel virtual range, proceed.
-	mov		w0, #EFAULT				// Should never have a 32-bit frame in kernel virtual range
+	mov		w0, #EFAULT		// Should never have a 32-bit frame in kernel virtual range
 	b		Lcopyinframe_done		
 
 Lcopyinframe32:
-	ldr		x12, [x0]				// Copy 8 bytes
+	ldr		x12, [x0]			// Copy 8 bytes
 	str		x12, [x1]
 	mov 	w0, #0					// Success
 	b		Lcopyinframe_done
 
 Lcopyinframe64:
 	ldr		x3, =VM_MIN_KERNEL_ADDRESS		// Check if kernel address
-	orr		x9, x0, TBI_MASK				// Hide tags in address comparison
-	cmp		x9, x3							// If in kernel address range, skip tag test
+	orr		x9, x0, ARM_TBI_USER_MASK		// Hide tags in address comparison
+	cmp		x9, x3					// If in kernel address range, skip tag test
 	b.hs	Lcopyinframe_valid
-	tst		x0, TBI_MASK					// Detect tagged pointers
+	tst		x0, ARM_TBI_USER_MASK			// Detect tagged pointers
 	b.eq	Lcopyinframe_valid
-	mov		w0, #EFAULT						// Tagged address, fail
+	mov		w0, #EFAULT				// Tagged address, fail
 	b		Lcopyinframe_done
 Lcopyinframe_valid:
 	ldp		x12, x13, [x0]			// Copy 16 bytes
@@ -866,7 +913,7 @@ LEXT(arm64_prepare_for_sleep)
 
 
 #if HAS_CLUSTER
-	cbnz		x0, 1f                                      // Skip if deep_sleep == true
+	cbnz		x0, is_deep_sleep                           // Skip if deep_sleep == true
 
 
 	// Mask FIQ and IRQ to avoid spurious wakeups
@@ -876,10 +923,10 @@ LEXT(arm64_prepare_for_sleep)
 	orr		x9, x9, x10
 	msr		CPU_OVRD, x9
 	isb
-1:
+is_deep_sleep:
 #endif
 
-	cbz		x0, 1f                                          // Skip if deep_sleep == false
+	cbz		x0, not_deep_sleep                              // Skip if deep_sleep == false
 #if   __ARM_GLOBAL_SLEEP_BIT__
 	// Enable deep sleep
 	mrs		x1, ACC_OVRD
@@ -921,7 +968,7 @@ LEXT(arm64_prepare_for_sleep)
 #endif
 #endif
 
-1:
+not_deep_sleep:
 	// Set "OK to power down" (<rdar://problem/12390433>)
 	mrs		x9, CPU_OVRD
 	orr		x9, x9, #(ARM64_REG_CYC_OVRD_ok2pwrdn_force_down)
@@ -1090,6 +1137,9 @@ LEXT(monitor_call)
  * void ml_sign_thread_state(arm_saved_state_t *ss, uint64_t pc,
  *							 uint32_t cpsr, uint64_t lr, uint64_t x16,
  *							 uint64_t x17)
+ *
+ * ml_sign_thread_state uses a custom calling convention that
+ * preserves all registers except x1 and x2.
  */
 	.text
 	.align 2
@@ -1104,14 +1154,17 @@ LEXT(ml_sign_thread_state)
  * void ml_check_signed_state(arm_saved_state_t *ss, uint64_t pc,
  *							  uint32_t cpsr, uint64_t lr, uint64_t x16,
  *							  uint64_t x17)
+ *
+ * ml_check_signed_state uses a custom calling convention that
+ * preserves all registers except x1, x2, and x6.
  */
 	.text
 	.align 2
 	.globl EXT(ml_check_signed_state)
 LEXT(ml_check_signed_state)
+	ldr		x6, [x0, SS64_JOPHASH]
 	COMPUTE_THREAD_STATE_HASH
-	ldr		x2, [x0, SS64_JOPHASH]
-	cmp		x1, x2
+	cmp		x1, x6
 	b.ne	Lcheck_hash_panic
 	CHECK_THREAD_STATE_INTERRUPTS
 	ret
@@ -1123,10 +1176,10 @@ Lcheck_hash_panic:
 	 * *only* using the stack frame for unwinding purposes, and without one
 	 * we'd be missing information about the caller.
 	 */
-	ARM64_STACK_PROLOG
-	PUSH_FRAME
 	mov		x1, x0
 	adr		x0, Lcheck_hash_str
+	ARM64_STACK_PROLOG
+	PUSH_FRAME
 	CALL_EXTERN panic_with_thread_kernel_state
 
 Lcheck_hash_str:

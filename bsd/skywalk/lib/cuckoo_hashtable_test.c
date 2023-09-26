@@ -316,7 +316,7 @@ cht_concurrent_ops_begin()
 {
 	/* let skmem_test_start() know we're ready */
 	lck_mtx_lock(&cht_lock);
-	atomic_add_32(&chth_cnt, 1);
+	os_atomic_inc(&chth_cnt, relaxed);
 	wakeup((caddr_t)&chth_cnt);
 
 	do {
@@ -331,7 +331,7 @@ cht_concurrent_ops_done()
 {
 	/* let skmem_test_start() know we're finished */
 	lck_mtx_lock(&cht_lock);
-	VERIFY(atomic_add_32_ov(&chth_cnt, -1) != 0);
+	VERIFY(os_atomic_dec_orig(&chth_cnt, relaxed) != 0);
 	wakeup((caddr_t)&chth_cnt);
 	lck_mtx_unlock(&cht_lock);
 }
@@ -374,7 +374,7 @@ cht_concurrent_add(void *v, wait_result_t w)
 }
 
 static void
-cht_concurrent_add_check()
+cht_concurrent_add_check(void)
 {
 	__block struct cht_obj *co = NULL;
 	struct cuckoo_node *node = NULL;
@@ -471,7 +471,7 @@ cht_concurrent_del(void *v, wait_result_t w)
 }
 
 static void
-cht_concurrent_del_check()
+cht_concurrent_del_check(void)
 {
 	ASSERT(cuckoo_hashtable_entries(h) == 0);
 
@@ -533,7 +533,7 @@ cht_concurrent_duo(void *v, wait_result_t w)
 		// choose an ops (add, del, shrink)
 		if (ops < DUO_OPS_ADD) {
 			struct cht_obj *co = &cht_objs[idx];
-			if (atomic_test_set_32(&co->co_state, COS_NOT_ADDED, COS_BUSY)) {
+			if (os_atomic_cmpxchg(&co->co_state, COS_NOT_ADDED, COS_BUSY, acq_rel)) {
 				struct cuckoo_node *node = cuckoo_hashtable_find_with_hash(h, &co->co_key, co->co_hash);
 				ASSERT(node == NULL);
 				int error = cuckoo_hashtable_add_with_hash(h, &co->co_cnode, co->co_hash);
@@ -544,7 +544,7 @@ cht_concurrent_duo(void *v, wait_result_t w)
 			}
 		} else {
 			struct cht_obj *co = &cht_objs[idx];
-			if (atomic_test_set_32(&co->co_state, COS_ADDED, COS_BUSY)) {
+			if (os_atomic_cmpxchg(&co->co_state, COS_ADDED, COS_BUSY, acq_rel)) {
 				struct cuckoo_node *node = cuckoo_hashtable_find_with_hash(h, &co->co_key, co->co_hash);
 				ASSERT(node != NULL);
 				ASSERT(node == &co->co_cnode);
@@ -563,7 +563,7 @@ cht_concurrent_duo(void *v, wait_result_t w)
 }
 
 static void
-cht_concurrent_duo_check()
+cht_concurrent_duo_check(void)
 {
 	size_t added = 0;
 	for (uint32_t i = 0; i < CHT_OBJ_MAX; i++) {

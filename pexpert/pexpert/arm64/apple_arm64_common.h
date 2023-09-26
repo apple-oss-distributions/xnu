@@ -46,8 +46,12 @@
 #define APPLE_ARM64_ARCH_FAMILY              1
 #define ARM_ARCH_TIMER
 
-#if defined(HAS_CTRR)
+#if defined(HAS_CTRR3)
 #define KERNEL_INTEGRITY_CTRR                1
+#define KERNEL_CTRR_VERSION                  3
+#elif defined(HAS_CTRR)
+#define KERNEL_INTEGRITY_CTRR                1
+#define KERNEL_CTRR_VERSION                  2
 #elif defined(HAS_KTRR)
 #define KERNEL_INTEGRITY_KTRR                1
 #elif defined(MONITOR)

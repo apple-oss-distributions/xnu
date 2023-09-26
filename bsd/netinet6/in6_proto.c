@@ -547,9 +547,9 @@ sysctl_ip6_tempvltime SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg2)
 	int error = 0;
-	int value = 0;
+	uint32_t value = 0;
 
-	error = SYSCTL_OUT(req, arg1, sizeof(int));
+	error = SYSCTL_OUT(req, arg1, sizeof(uint32_t));
 	if (error || !req->newptr) {
 		return error;
 	}

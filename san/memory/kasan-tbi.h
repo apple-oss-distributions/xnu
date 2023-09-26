@@ -47,41 +47,6 @@
 
 /* Granularity is 16 bytes */
 #define KASAN_SIZE_ALIGNMENT        0xFUL
-/* TBI reserves the topmost 8 bits, we use the lower 4 of this reserved range */
-#define KASAN_TBI_ADDR_SIZE         56
-#define KASAN_TBI_TAG_SIZE          4
-#define KASAN_TBI_PAD_SIZE          4
-
-union kasan_tbi_ptr {
-	long value;
-
-	struct {
-		long ptr_no_tbi: KASAN_TBI_ADDR_SIZE;
-		uint8_t ptr_tag:    KASAN_TBI_TAG_SIZE;
-		long ptr_pad:    KASAN_TBI_PAD_SIZE;
-	};
-};
-
-static inline long
-kasan_tbi_tag_ptr(long ptr, uint8_t tag)
-{
-	union kasan_tbi_ptr p = {
-		.value = ptr,
-	};
-
-	p.ptr_tag = tag;
-	return p.value;
-}
-
-static inline uint8_t
-kasan_tbi_get_tag(long ptr)
-{
-	union kasan_tbi_ptr p = {
-		.value = ptr,
-	};
-
-	return p.ptr_tag;
-}
 
 /*
  * KASAN_TBI inline insturmentation emits a brk instruction as a violation
@@ -97,16 +62,33 @@ kasan_tbi_get_tag(long ptr)
 	                            KASAN_TBI_ESR_IGNORE | KASAN_TBI_ESR_SIZE_MASK)
 #define KASAN_TBI_GET_SIZE(x)       (1 << ((x) & KASAN_TBI_ESR_SIZE_MASK))
 
-uint8_t kasan_tbi_get_memory_tag(vm_offset_t);
-uint8_t *kasan_tbi_get_tag_address(vm_offset_t);
-void kasan_tbi_copy_tags(vm_offset_t, vm_offset_t, vm_size_t);
-vm_offset_t kasan_tbi_tag_zalloc(vm_offset_t, vm_size_t, vm_size_t, boolean_t);
-vm_offset_t kasan_tbi_tag_zfree(vm_offset_t, vm_offset_t, boolean_t);
-vm_offset_t kasan_tbi_tag_zalloc_default(vm_offset_t, vm_size_t, boolean_t);
-vm_offset_t kasan_tbi_fix_address_tag(vm_offset_t);
-vm_offset_t kasan_tbi_tag_large_alloc(vm_offset_t, vm_size_t, vm_size_t);
-vm_offset_t kasan_tbi_tag_large_free(vm_offset_t, vm_size_t);
+/*
+ * An allocator may reserve more memory than the user requested. If the unused
+ * space amounts to more than 16 bytes, then it's worth to tag it differently,
+ * in order to catch off-by-small cases.
+ */
+void kasan_tbi_retag_unused_space(vm_offset_t, vm_size_t, vm_size_t);
 
-void kasan_handle_brk_failure(vm_offset_t, uint16_t);
+/*
+ * KASAN-TBI tags virtual address ranges. Use this function whenever it's
+ * desired to mark a free'd range back with the default (0xFF) tag.
+ */
+void kasan_tbi_mark_free_space(vm_offset_t, vm_size_t);
+
+/*
+ * Retrieve the location in the shadow table where the metadata associated
+ * with the given address is stored.
+ */
+uint8_t *kasan_tbi_get_tag_address(vm_offset_t);
+
+/*
+ * Copy the metadata associated with one address onto the metadata associated
+ * to another address. This function is useful whenever a given virtual address
+ * view of a mapping gets migrated to a new virtual address.
+ */
+void kasan_tbi_copy_tags(vm_offset_t, vm_offset_t, vm_size_t);
+
+/* Hanlder for the brk emitted instruction, see ESR definitions above */
+void kasan_handle_brk_failure(void *, uint16_t);
 
 #endif /* _KASAN_TBI_H_ */

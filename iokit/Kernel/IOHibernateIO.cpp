@@ -1513,8 +1513,10 @@ hibernate_set_preview SYSCTL_HANDLER_ARGS
 		IOService::getPMRootDomain()->removeProperty(kIOHibernatePreviewBufferKey);
 		return 0;
 	}
-
-	size_t rounded_size = round_page(req->newlen);
+	size_t rounded_size;
+	if (round_page_overflow(req->newlen, &rounded_size)) {
+		return ENOMEM;
+	}
 	IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::withOptions(kIODirectionOutIn, rounded_size, page_size);
 	if (!md) {
 		return ENOMEM;

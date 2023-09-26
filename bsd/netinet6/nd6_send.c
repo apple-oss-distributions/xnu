@@ -32,8 +32,6 @@
 #include <sys/sysctl.h>
 #include <sys/syslog.h>
 
-#include <libkern/crypto/sha1.h>
-
 #include <net/if.h>
 
 #include <netinet/in.h>

@@ -88,6 +88,8 @@
 #include <netinet/ip6.h>
 #include <netinet6/nd6.h>
 
+#include <IOKit/IOBSD.h>
+
 extern struct rtstat rtstat;
 extern struct domain routedomain_s;
 static struct domain *routedomain = NULL;
@@ -196,14 +198,14 @@ rts_attach(struct socket *so, int proto, struct proc *p)
 
 	switch (rp->rcb_proto.sp_protocol) {
 	case AF_INET:
-		atomic_add_32(&route_cb.ip_count, 1);
+		os_atomic_inc(&route_cb.ip_count, relaxed);
 		break;
 	case AF_INET6:
-		atomic_add_32(&route_cb.ip6_count, 1);
+		os_atomic_inc(&route_cb.ip6_count, relaxed);
 		break;
 	}
 	rp->rcb_faddr = &route_src;
-	atomic_add_32(&route_cb.any_count, 1);
+	os_atomic_inc(&route_cb.any_count, relaxed);
 	/* the socket is already locked when we enter rts_attach */
 	soisconnected(so);
 	so->so_options |= SO_USELOOPBACK;
@@ -234,13 +236,13 @@ rts_detach(struct socket *so)
 
 	switch (rp->rcb_proto.sp_protocol) {
 	case AF_INET:
-		atomic_add_32(&route_cb.ip_count, -1);
+		os_atomic_dec(&route_cb.ip_count, relaxed);
 		break;
 	case AF_INET6:
-		atomic_add_32(&route_cb.ip6_count, -1);
+		os_atomic_dec(&route_cb.ip6_count, relaxed);
 		break;
 	}
-	atomic_add_32(&route_cb.any_count, -1);
+	os_atomic_dec(&route_cb.any_count, relaxed);
 	return raw_usrreqs.pru_detach(so);
 }
 
@@ -445,7 +447,7 @@ route_output(struct mbuf *m, struct socket *so)
 	/*
 	 * Block changes on INTCOPROC interfaces.
 	 */
-	if (ifscope) {
+	if (ifscope != IFSCOPE_NONE) {
 		unsigned int intcoproc_scope = 0;
 		ifnet_head_lock_shared();
 		TAILQ_FOREACH(ifp, &ifnet_head, if_link) {
@@ -456,6 +458,25 @@ route_output(struct mbuf *m, struct socket *so)
 		}
 		ifnet_head_done();
 		if (intcoproc_scope == ifscope && proc_getpid(current_proc()) != 0) {
+			senderr(EINVAL);
+		}
+	}
+	/*
+	 * Require entitlement to change management interfaces
+	 */
+	if (management_control_unrestricted == false && if_management_interface_check_needed == true &&
+	    ifscope != IFSCOPE_NONE && proc_getpid(current_proc()) != 0) {
+		bool is_management = false;
+
+		ifnet_head_lock_shared();
+		if (IF_INDEX_IN_RANGE(ifscope)) {
+			if (IFNET_IS_MANAGEMENT(ifindex2ifnet[ifscope])) {
+				is_management = true;
+			}
+		}
+		ifnet_head_done();
+
+		if (is_management && !IOCurrentTaskHasEntitlement(MANAGEMENT_CONTROL_ENTITLEMENT)) {
 			senderr(EINVAL);
 		}
 	}

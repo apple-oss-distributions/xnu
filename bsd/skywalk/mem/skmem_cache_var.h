@@ -310,10 +310,11 @@ struct skmem_cache {
 #define SKM_MODE_DYNAMIC        0x00000010      /* enable magazine resizing */
 #define SKM_MODE_CLEARONFREE    0x00000020      /* zero-out upon slab free */
 #define SKM_MODE_PSEUDO         0x00000040      /* external backing store */
+#define SKM_MODE_RECLAIM        0x00000080      /* aggressive memory reclaim */
 
 #define SKM_MODE_BITS \
 	"\020\01NOMAGAZINES\02AUDIT\03NOREDIRECT\04BATCH\05DYNAMIC"     \
-	"\06CLEARONFREE\07PSEUDO"
+	"\06CLEARONFREE\07PSEUDO\10RECLAIM"
 
 /*
  * Valid flags for sk{mem,region}_alloc().  SKMEM_FAILOK is valid only if
@@ -332,6 +333,7 @@ struct skmem_cache {
 #define SKMEM_CR_BATCH          0x2     /* support batch alloc/free */
 #define SKMEM_CR_DYNAMIC        0x4     /* enable magazine resizing */
 #define SKMEM_CR_CLEARONFREE    0x8     /* zero-out upon slab free */
+#define SKMEM_CR_RECLAIM        0x10    /* aggressive memory reclaim */
 
 __BEGIN_DECLS
 /*

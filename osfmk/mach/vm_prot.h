@@ -173,6 +173,16 @@ typedef int             vm_prot_t;
 #define VM_PROT_COPY_FAIL_IF_EXECUTABLE ((vm_prot_t)0x100)
 #endif /* PRIVATE */
 
+/*
+ * Another invalid protection value to support pager TPRO protection.
+ * VM_PROT_TPRO is a special marker that tells the a pager to
+ * set TPRO flags on a given entry. We do it this way to prevent
+ * bloating the pager structures and it allows dyld to pass through
+ * this flag in lieue of specifying explicit VM flags, allowing us to handle
+ * the final permissions internally.
+ */
+#define VM_PROT_TPRO                    ((vm_prot_t) 0x200)
+
 #if defined(__x86_64__)
 /*
  * Another invalid protection value to support specifying different

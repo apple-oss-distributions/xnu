@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -98,6 +98,8 @@ static int na_pseudo_krings_create(struct nexus_adapter *,
 static void na_pseudo_krings_delete(struct nexus_adapter *,
     struct kern_channel *, boolean_t);
 static int na_packet_pool_alloc_sync(struct __kern_channel_ring *,
+    struct proc *, uint32_t);
+static int na_packet_pool_alloc_large_sync(struct __kern_channel_ring *,
     struct proc *, uint32_t);
 static int na_packet_pool_free_sync(struct __kern_channel_ring *,
     struct proc *, uint32_t);
@@ -275,15 +277,23 @@ na_set_ringid(struct kern_channel *ch, ring_set_t ring_set, ring_id_t ring_id)
 
 	n_alloc_rings = na_get_nrings(na, NR_A);
 	if (n_alloc_rings != 0) {
+		uint32_t n_large_alloc_rings;
+
 		ch->ch_first[NR_A] = ch->ch_first[NR_F] = 0;
 		ch->ch_last[NR_A] = ch->ch_last[NR_F] =
 		    ch->ch_first[NR_A] + n_alloc_rings;
+
+		n_large_alloc_rings = na_get_nrings(na, NR_LBA);
+		ch->ch_first[NR_LBA] = 0;
+		ch->ch_last[NR_LBA] = ch->ch_first[NR_LBA] + n_large_alloc_rings;
 	} else {
 		ch->ch_first[NR_A] = ch->ch_last[NR_A] = 0;
 		ch->ch_first[NR_F] = ch->ch_last[NR_F] = 0;
+		ch->ch_first[NR_LBA] = ch->ch_last[NR_LBA] = 0;
 	}
 	ch->ch_first[NR_EV] = 0;
 	ch->ch_last[NR_EV] = ch->ch_first[NR_EV] + na_get_nrings(na, NR_EV);
+
 	/* XXX: should we initialize na_si_users for event ring ? */
 
 	/*
@@ -452,17 +462,17 @@ na_bind_channel(struct nexus_adapter *na, struct kern_channel *ch,
 		goto err;
 	}
 
-	atomic_bitclear_32(&ch->ch_flags, (CHANF_RXONLY | CHANF_EXCLUSIVE |
-	    CHANF_USER_PACKET_POOL | CHANF_EVENT_RING));
+	os_atomic_andnot(&ch->ch_flags, (CHANF_RXONLY | CHANF_EXCLUSIVE |
+	    CHANF_USER_PACKET_POOL | CHANF_EVENT_RING), relaxed);
 	if (ch_mode & CHMODE_EXCLUSIVE) {
-		atomic_bitset_32(&ch->ch_flags, CHANF_EXCLUSIVE);
+		os_atomic_or(&ch->ch_flags, CHANF_EXCLUSIVE, relaxed);
 	}
 	/*
 	 * Disallow automatic sync for monitor mode, since TX
 	 * direction is disabled.
 	 */
 	if (ch_mode & CHMODE_MONITOR) {
-		atomic_bitset_32(&ch->ch_flags, CHANF_RXONLY);
+		os_atomic_or(&ch->ch_flags, CHANF_RXONLY, relaxed);
 	}
 
 	if (!!(na->na_flags & NAF_USER_PKT_POOL) ^
@@ -482,14 +492,14 @@ na_bind_channel(struct nexus_adapter *na, struct kern_channel *ch,
 		ASSERT(na->na_flags & NAF_USER_PKT_POOL);
 		ASSERT(ch->ch_first[NR_A] != ch->ch_last[NR_A]);
 		ASSERT(ch->ch_first[NR_F] != ch->ch_last[NR_F]);
-		atomic_bitset_32(&ch->ch_flags, CHANF_USER_PACKET_POOL);
+		os_atomic_or(&ch->ch_flags, CHANF_USER_PACKET_POOL, relaxed);
 	}
 
 	if (ch_mode & CHMODE_EVENT_RING) {
 		ASSERT(na->na_flags & NAF_USER_PKT_POOL);
 		ASSERT(na->na_flags & NAF_EVENT_RING);
 		ASSERT(ch->ch_first[NR_EV] != ch->ch_last[NR_EV]);
-		atomic_bitset_32(&ch->ch_flags, CHANF_EVENT_RING);
+		os_atomic_or(&ch->ch_flags, CHANF_EVENT_RING, relaxed);
 	}
 
 	/*
@@ -691,7 +701,7 @@ na_unbind_channel(struct kern_channel *ch)
 	skmem_arena_munmap_channel(na->na_arena, ch);
 
 	/* mark the channel as unbound */
-	atomic_bitclear_32(&ch->ch_flags, (CHANF_RXONLY | CHANF_EXCLUSIVE));
+	os_atomic_andnot(&ch->ch_flags, (CHANF_RXONLY | CHANF_EXCLUSIVE), relaxed);
 	ch->ch_na = NULL;
 
 	/* and finally release the nexus adapter; this might free it */
@@ -816,6 +826,12 @@ na_schema_alloc(struct kern_channel *ch)
 		ASSERT(n[NR_A] != 0 && n[NR_A] <= na_get_nrings(na, NR_A));
 		ASSERT(n[NR_A] == (ch->ch_last[NR_A] - ch->ch_first[NR_A]));
 		ASSERT(n[NR_F] == (ch->ch_last[NR_F] - ch->ch_first[NR_F]));
+
+		n[NR_LBA] = na->na_num_large_buf_alloc_rings;
+		if (n[NR_LBA] != 0) {
+			*(uint32_t *)(uintptr_t)&csm->csm_large_buf_alloc_rings = n[NR_LBA];
+			ASSERT(n[NR_LBA] == (ch->ch_last[NR_LBA] - ch->ch_first[NR_LBA]));
+		}
 	}
 
 	if (ch->ch_flags & CHANF_EVENT_RING) {
@@ -966,6 +982,28 @@ na_schema_alloc(struct kern_channel *ch)
 	    n[NR_A] + n[NR_F]; i < n[NR_EV]; i++, j++) {
 		ASSERT(csm->csm_num_event_rings != 0);
 		kr = &na->na_event_rings[j];
+		ASSERT(!KR_KERNEL_ONLY(kr));
+		ASSERT(kr->ckr_flags & CKRF_MEM_RING_INITED);
+		skmem_cache_get_obj_info(arn->arn_ring_cache,
+		    kr->ckr_ring, &ring_oi, NULL);
+		*(mach_vm_offset_t *)
+		(uintptr_t)&csm->csm_ring_ofs[i + k].ring_off =
+		    (roff[SKMEM_REGION_RING] + SKMEM_OBJ_ROFF(&ring_oi)) - base;
+
+		ASSERT(kr->ckr_flags & CKRF_MEM_SD_INITED);
+		skmem_cache_get_obj_info(kr->ckr_ksds_cache,
+		    kr->ckr_ksds, &ksd_oi, &usd_oi);
+
+		*(mach_vm_offset_t *)
+		(uintptr_t)&csm->csm_ring_ofs[i + k].sd_off =
+		    (roff[SKMEM_REGION_TXAUSD] + SKMEM_OBJ_ROFF(&usd_oi)) -
+		    base;
+	}
+	/* initialize schema with large buf alloc ring info */
+	for (i = 0, j = ch->ch_first[NR_LBA], k = n[NR_TX] + n[NR_RX] +
+	    n[NR_A] + n[NR_F] + n[NR_EV]; i < n[NR_LBA]; i++, j++) {
+		ASSERT(csm->csm_large_buf_alloc_rings != 0);
+		kr = &na->na_large_buf_alloc_rings[j];
 		ASSERT(!KR_KERNEL_ONLY(kr));
 		ASSERT(kr->ckr_flags & CKRF_MEM_RING_INITED);
 		skmem_cache_get_obj_info(arn->arn_ring_cache,
@@ -1260,6 +1298,7 @@ na_kr_q_lck_grp(enum txrx t)
 		return &channel_rxq_lock_group;
 	case NR_A:
 	case NR_F:
+	case NR_LBA:
 		return &channel_alloc_lock_group;
 	case NR_EV:
 		return &channel_evq_lock_group;
@@ -1280,6 +1319,7 @@ na_kr_s_lck_grp(enum txrx t)
 		return &channel_rxs_lock_group;
 	case NR_A:
 	case NR_F:
+	case NR_LBA:
 		return &channel_alloc_lock_group;
 	case NR_EV:
 		return &channel_evs_lock_group;
@@ -1310,6 +1350,7 @@ na_kr_get_pp(struct nexus_adapter *na, enum txrx t)
 		break;
 	case NR_TX:
 	case NR_A:
+	case NR_LBA:
 		pp = skmem_arena_nexus(na->na_arena)->arn_tx_pp;
 		break;
 	default:
@@ -1325,23 +1366,27 @@ na_kr_get_pp(struct nexus_adapter *na, enum txrx t)
  * Create the krings array and initialize the fields common to all adapters.
  * The array layout is this:
  *
- *                       +----------+
- * na->na_tx_rings ----->|          | \
- *                       |          |  } na->num_tx_ring
- *                       |          | /
- * na->na_rx_rings ----> +----------+
- *                       |          | \
- *                       |          |  } na->na_num_rx_rings
- *                       |          | /
- * na->na_alloc_rings -> +----------+
- *                       |          | \
- * na->na_free_rings --> +----------+  } na->na_num_allocator_ring_pairs
- *                       |          | /
- * na->na_event_rings -> +----------+
- *                       |          | \
- *                       |          |  } na->na_num_event_rings
- *                       |          | /
- * na->na_tail     ----->+----------+
+ *                                 +----------+
+ * na->na_tx_rings ----->          |          | \
+ *                                 |          |  } na->na_num_tx_rings
+ *                                 |          | /
+ * na->na_rx_rings ---->           +----------+
+ *                                 |          | \
+ *                                 |          |  } na->na_num_rx_rings
+ *                                 |          | /
+ * na->na_alloc_rings ->           +----------+
+ *                                 |          | \
+ * na->na_free_rings -->           +----------+  } na->na_num_allocator_ring_pairs
+ *                                 |          | /
+ * na->na_event_rings ->           +----------+
+ *                                 |          | \
+ *                                 |          |  } na->na_num_event_rings
+ *                                 |          | /
+ * na->na_large_buf_alloc_rings -> +----------+
+ *                                 |          | \
+ *                                 |          |  } na->na_num_large_buf_alloc_rings
+ *                                 |          | /
+ * na->na_tail ----->              +----------+
  */
 /* call with SK_LOCK held */
 static int
@@ -1362,8 +1407,9 @@ na_kr_create(struct nexus_adapter *na, boolean_t alloc_ctx)
 	n[NR_A] = na_get_nrings(na, NR_A);
 	n[NR_F] = na_get_nrings(na, NR_F);
 	n[NR_EV] = na_get_nrings(na, NR_EV);
+	n[NR_LBA] = na_get_nrings(na, NR_LBA);
 
-	count = n[NR_TX] + n[NR_RX] + n[NR_A] + n[NR_F] + n[NR_EV];
+	count = n[NR_TX] + n[NR_RX] + n[NR_A] + n[NR_F] + n[NR_EV] + n[NR_LBA];
 
 	na->na_tx_rings = sk_alloc_type_array(struct __kern_channel_ring, count,
 	    Z_WAITOK, skmem_tag_nx_rings);
@@ -1387,6 +1433,16 @@ na_kr_create(struct nexus_adapter *na, boolean_t alloc_ctx)
 			na->na_event_rings = na->na_rx_rings + n[NR_RX];
 		}
 	}
+	if (n[NR_LBA] != 0) {
+		ASSERT(n[NR_A] != 0);
+		if (na->na_event_rings != NULL) {
+			na->na_large_buf_alloc_rings = na->na_event_rings + n[NR_EV];
+		} else {
+			/* alloc/free rings must also be present */
+			ASSERT(na->na_free_rings != NULL);
+			na->na_large_buf_alloc_rings = na->na_free_rings + n[NR_F];
+		}
+	}
 
 	/* total number of slots for TX/RX adapter rings */
 	c = tot_slots = (n[NR_TX] * na_get_nslots(na, NR_TX)) +
@@ -1396,6 +1452,7 @@ na_kr_create(struct nexus_adapter *na, boolean_t alloc_ctx)
 	if (n[NR_A] != 0) {
 		tot_slots += n[NR_A] * na_get_nslots(na, NR_A);
 		tot_slots += n[NR_F] * na_get_nslots(na, NR_F);
+		tot_slots += n[NR_LBA] * na_get_nslots(na, NR_LBA);
 		c = tot_slots;
 	}
 	na->na_total_slots = tot_slots;
@@ -1410,7 +1467,7 @@ na_kr_create(struct nexus_adapter *na, boolean_t alloc_ctx)
 			err = ENOMEM;
 			goto error;
 		}
-		atomic_bitset_32(&na->na_flags, NAF_SLOT_CONTEXT);
+		os_atomic_or(&na->na_flags, NAF_SLOT_CONTEXT, relaxed);
 	}
 
 	/*
@@ -1437,7 +1494,9 @@ na_kr_create(struct nexus_adapter *na, boolean_t alloc_ctx)
 			bzero(kring, sizeof(*kring));
 			kring->ckr_na = na;
 			kring->ckr_pp = pp;
-			kring->ckr_max_pkt_len = PP_BUF_SIZE_DEF(pp) *
+			kring->ckr_max_pkt_len =
+			    (t == NR_LBA ? PP_BUF_SIZE_LARGE(pp) :
+			    PP_BUF_SIZE_DEF(pp)) *
 			    pp->pp_max_frags;
 			kring->ckr_ring_id = i;
 			kring->ckr_tx = t;
@@ -1458,11 +1517,11 @@ na_kr_create(struct nexus_adapter *na, boolean_t alloc_ctx)
 				    na->na_slot_ctxs + (tot_slots - c);
 			}
 			ASSERT(na->na_scratch != NULL);
-			if (t < NR_TXRXAF) {
+			if (t < NR_TXRXAF || t == NR_LBA) {
 				kring->ckr_scratch =
 				    na->na_scratch + (tot_slots - c);
 			}
-			if (t < NR_TXRXAF) {
+			if (t < NR_TXRXAF || t == NR_LBA) {
 				c -= ndesc;
 			}
 			switch (t) {
@@ -1569,6 +1628,10 @@ na_kr_create(struct nexus_adapter *na, boolean_t alloc_ctx)
 			case NR_EV:
 				kring->ckr_na_sync = kern_channel_event_sync;
 				break;
+			case NR_LBA:
+				kring->ckr_na_sync = na_packet_pool_alloc_large_sync;
+				kring->ckr_alloc_ws = na_upp_alloc_lowat;
+				break;
 			default:
 				VERIFY(0);
 				/* NOTREACHED */
@@ -1605,7 +1668,8 @@ na_kr_create(struct nexus_adapter *na, boolean_t alloc_ctx)
 		    na->na_ch_mit_ival);
 	}
 	ASSERT(c == 0);
-	na->na_tail = na->na_rx_rings + n[NR_RX] + n[NR_A] + n[NR_F];
+	na->na_tail = na->na_rx_rings + n[NR_RX] + n[NR_A] + n[NR_F] +
+	    n[NR_EV] + n[NR_LBA];
 
 	if (na->na_type == NA_NETIF_DEV) {
 		na_kr_setup_netif_svc_map(na);
@@ -1664,7 +1728,7 @@ na_kr_delete(struct nexus_adapter *na)
 	}
 	if (na->na_slot_ctxs != NULL) {
 		ASSERT(na->na_flags & NAF_SLOT_CONTEXT);
-		atomic_bitclear_32(&na->na_flags, NAF_SLOT_CONTEXT);
+		os_atomic_andnot(&na->na_flags, NAF_SLOT_CONTEXT, relaxed);
 		skn_free_type_array(slot_ctxs,
 		    struct slot_ctx, na->na_total_slots,
 		    na->na_slot_ctxs);
@@ -1810,7 +1874,7 @@ na_kr_setup(struct nexus_adapter *na, struct kern_channel *ch)
 				*(uint16_t *)(uintptr_t)&ring->ring_md_size = 0;
 			}
 
-			if (t == NR_TX || t == NR_A || t == NR_EV) {
+			if (t == NR_TX || t == NR_A || t == NR_EV || t == NR_LBA) {
 				usd_roff = roff[SKMEM_REGION_TXAUSD];
 			} else {
 				ASSERT(t == NR_RX || t == NR_F);
@@ -1892,6 +1956,7 @@ na_kr_setup(struct nexus_adapter *na, struct kern_channel *ch)
 			_CASSERT(NR_A == CR_KIND_ALLOC);
 			_CASSERT(NR_F == CR_KIND_FREE);
 			_CASSERT(NR_EV == CR_KIND_EVENT);
+			_CASSERT(NR_LBA == CR_KIND_LARGE_BUF_ALLOC);
 
 skip_user_ring_setup:
 			/*
@@ -1899,7 +1964,7 @@ skip_user_ring_setup:
 			 * go thru the checks to free up the slot maps.
 			 */
 			kring->ckr_flags |= CKRF_MEM_SD_INITED;
-			if (t == NR_TX || t == NR_A || t == NR_EV) {
+			if (t == NR_TX || t == NR_A || t == NR_EV || t == NR_LBA) {
 				kring->ckr_ksds_cache = arn->arn_txaksd_cache;
 			} else {
 				ASSERT(t == NR_RX || t == NR_F);
@@ -2553,8 +2618,7 @@ na_connect(struct kern_nexus *nx, struct kern_channel *ch, struct chreq *chr,
 
 	if (!(skmem_arena_nexus(na->na_arena)->arn_mode &
 	    AR_NEXUS_MODE_EXTERNAL_PPOOL)) {
-		atomic_bitset_32(__DECONST(uint32_t *,
-		    &ch->ch_schema->csm_flags), CSM_PRIV_MEM);
+		os_atomic_or(__DECONST(uint32_t *, &ch->ch_schema->csm_flags), CSM_PRIV_MEM, relaxed);
 	}
 
 	err = skmem_arena_mmap(na->na_arena, p, &ch->ch_mmap);
@@ -2562,8 +2626,7 @@ na_connect(struct kern_nexus *nx, struct kern_channel *ch, struct chreq *chr,
 		goto done;
 	}
 
-	atomic_bitset_32(__DECONST(uint32_t *, &ch->ch_schema->csm_flags),
-	    CSM_ACTIVE);
+	os_atomic_or(__DECONST(uint32_t *, &ch->ch_schema->csm_flags), CSM_ACTIVE, relaxed);
 	chr->cr_memsize = memsize;
 	chr->cr_memoffset = ch->ch_schema_offset;
 
@@ -2635,7 +2698,7 @@ na_defunct(struct kern_nexus *nx, struct kern_channel *ch,
 		 * Mark this adapter as defunct to inform nexus-specific
 		 * teardown handler called by na_teardown() below.
 		 */
-		atomic_bitset_32(&na->na_flags, NAF_DEFUNCT);
+		os_atomic_or(&na->na_flags, NAF_DEFUNCT, relaxed);
 
 		/*
 		 * Depopulate slots.
@@ -2919,11 +2982,11 @@ na_retain_locked(struct nexus_adapter *na)
 
 	if (na != NULL) {
 #if SK_LOG
-		uint32_t oref = atomic_add_32_ov(&na->na_refcount, 1);
+		uint32_t oref = os_atomic_inc_orig(&na->na_refcount, relaxed);
 		SK_DF(SK_VERB_REFCNT, "na \"%s\" (0x%llx) refcnt %u chcnt %u",
 		    na->na_name, SK_KVA(na), oref + 1, na->na_channels);
 #else /* !SK_LOG */
-		atomic_add_32(&na->na_refcount, 1);
+		os_atomic_inc(&na->na_refcount, relaxed);
 #endif /* !SK_LOG */
 	}
 }
@@ -2937,7 +3000,7 @@ na_release_locked(struct nexus_adapter *na)
 	SK_LOCK_ASSERT_HELD();
 
 	ASSERT(na->na_refcount > 0);
-	oref = atomic_add_32_ov(&na->na_refcount, -1);
+	oref = os_atomic_dec_orig(&na->na_refcount, relaxed);
 	if (oref > 1) {
 		SK_DF(SK_VERB_REFCNT, "na \"%s\" (0x%llx) refcnt %u chcnt %u",
 		    na->na_name, SK_KVA(na), oref - 1, na->na_channels);
@@ -3028,14 +3091,14 @@ na_pseudo_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 
 	switch (mode) {
 	case NA_ACTIVATE_MODE_ON:
-		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_or(&na->na_flags, NAF_ACTIVE, relaxed);
 		break;
 
 	case NA_ACTIVATE_MODE_DEFUNCT:
 		break;
 
 	case NA_ACTIVATE_MODE_OFF:
-		atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_andnot(&na->na_flags, NAF_ACTIVE, relaxed);
 		break;
 
 	default:
@@ -3308,6 +3371,53 @@ na_flowadv_clear(const struct kern_channel *ch, const flowadv_idx_t fe_idx,
 	return resume;
 }
 
+int
+na_flowadv_report_ce_event(const struct kern_channel *ch, const flowadv_idx_t fe_idx,
+    const flowadv_token_t flow_token, uint32_t ce_cnt, uint32_t total_pkt_cnt)
+{
+	struct nexus_adapter *na = ch->ch_na;
+	struct skmem_arena *ar = na->na_arena;
+	struct skmem_arena_nexus *arn = skmem_arena_nexus(ar);
+	boolean_t added;
+
+	ASSERT(NA_IS_ACTIVE(na) && (na->na_flowadv_max != 0));
+	ASSERT(fe_idx < na->na_flowadv_max);
+	ASSERT(ar->ar_type == SKMEM_ARENA_TYPE_NEXUS);
+
+	AR_LOCK(ar);
+
+	ASSERT(arn->arn_flowadv_obj != NULL || (ar->ar_flags & ARF_DEFUNCT));
+
+	if (arn->arn_flowadv_obj != NULL) {
+		struct __flowadv_entry *fae = &arn->arn_flowadv_obj[fe_idx];
+
+		_CASSERT(sizeof(fae->fae_token) == sizeof(flow_token));
+		/*
+		 * We cannot guarantee that the flow is still around by now,
+		 * so check if that's the case and let the caller know.
+		 */
+		if ((added = (fae->fae_token == flow_token))) {
+			ASSERT(fae->fae_flags & FLOWADVF_VALID);
+			fae->fae_ce_cnt += ce_cnt;
+			fae->fae_pkt_cnt += total_pkt_cnt;
+		}
+	} else {
+		added = FALSE;
+	}
+	if (added) {
+		SK_DF(SK_VERB_FLOW_ADVISORY, "%s(%d): flow token 0x%x "
+		    "fidx %u ce cnt incremented", ch->ch_name,
+		    ch->ch_pid, flow_token, fe_idx);
+	} else {
+		SK_ERR("%s(%d): flow token 0x%x fidx %u no longer around",
+		    ch->ch_name, ch->ch_pid, flow_token, fe_idx);
+	}
+
+	AR_UNLOCK(ar);
+
+	return added;
+}
+
 void
 na_flowadv_event(struct __kern_channel_ring *kring)
 {
@@ -3395,9 +3505,81 @@ done:
 	return ret;
 }
 
+#define MAX_BUFLETS 64
 static int
-na_packet_pool_alloc_sync(struct __kern_channel_ring *kring, struct proc *p,
-    uint32_t flags)
+alloc_packets(kern_pbufpool_t pp, uint64_t *buf_arr, bool large, uint32_t *ph_cnt)
+{
+	int err;
+	uint32_t need, need_orig, remain, alloced, i;
+	uint64_t buflets[MAX_BUFLETS];
+	uint64_t *pkts;
+
+	need_orig = *ph_cnt;
+	err = kern_pbufpool_alloc_batch_nosleep(pp, large ? 0 : 1, buf_arr, ph_cnt);
+	if (!large) {
+		return err;
+	}
+	if (*ph_cnt == 0) {
+		SK_ERR("failed to alloc %d packets for alloc ring: err %d",
+		    need_orig, err);
+		DTRACE_SKYWALK2(alloc__pkts__fail, uint32_t, need_orig, int, err);
+		return err;
+	}
+	need = remain = *ph_cnt;
+	alloced = 0;
+	pkts = buf_arr;
+	while (remain > 0) {
+		uint32_t cnt, cnt_orig;
+
+		cnt = MIN(remain, MAX_BUFLETS);
+		cnt_orig = cnt;
+		err = pp_alloc_buflet_batch(pp, buflets, &cnt, SKMEM_NOSLEEP, true);
+		if (cnt == 0) {
+			SK_ERR("failed to alloc %d buflets for alloc ring: "
+			    "remain %d, err %d", cnt_orig, remain, err);
+			DTRACE_SKYWALK3(alloc__bufs__fail, uint32_t, cnt_orig,
+			    uint32_t, remain, int, err);
+			break;
+		}
+		for (i = 0; i < cnt; i++) {
+			kern_packet_t ph = (kern_packet_t)pkts[i];
+			kern_buflet_t buf = (kern_buflet_t)buflets[i];
+			kern_buflet_t pbuf = kern_packet_get_next_buflet(ph, NULL);
+			VERIFY(kern_packet_add_buflet(ph, pbuf, buf) == 0);
+			buflets[i] = 0;
+		}
+		DTRACE_SKYWALK3(alloc__bufs, uint32_t, remain, uint32_t, cnt,
+		    uint32_t, cnt_orig);
+		pkts += cnt;
+		alloced += cnt;
+		remain -= cnt;
+	}
+	/* free packets without attached buffers */
+	if (remain > 0) {
+		DTRACE_SKYWALK1(remaining__pkts, uint32_t, remain);
+		ASSERT(remain + alloced == need);
+		pp_free_packet_batch(pp, pkts, remain);
+
+		/* pp_free_packet_batch() should clear the pkts array */
+		for (i = 0; i < remain; i++) {
+			ASSERT(pkts[i] == 0);
+		}
+	}
+	*ph_cnt = alloced;
+	if (*ph_cnt == 0) {
+		err = ENOMEM;
+	} else if (*ph_cnt < need_orig) {
+		err = EAGAIN;
+	} else {
+		err = 0;
+	}
+	DTRACE_SKYWALK3(alloc__packets, uint32_t, need_orig, uint32_t, *ph_cnt, int, err);
+	return err;
+}
+
+static int
+na_packet_pool_alloc_sync_common(struct __kern_channel_ring *kring, struct proc *p,
+    uint32_t flags, bool large)
 {
 	int b, err;
 	uint32_t n = 0;
@@ -3462,9 +3644,8 @@ na_packet_pool_alloc_sync(struct __kern_channel_ring *kring, struct proc *p,
 		goto done;
 	}
 
-	err = kern_pbufpool_alloc_batch_nosleep(pp, 1, kring->ckr_scratch,
-	    &ph_cnt);
-
+	err = alloc_packets(pp, kring->ckr_scratch,
+	    PP_HAS_BUFFER_ON_DEMAND(pp) && large, &ph_cnt);
 	if (__improbable(ph_cnt == 0)) {
 		SK_ERR("kr 0x%llx failed to alloc %u packet s(%d)",
 		    SK_KVA(kring), ph_needed, err);
@@ -3475,7 +3656,6 @@ na_packet_pool_alloc_sync(struct __kern_channel_ring *kring, struct proc *p,
 		 */
 		pp_insert_upp_batch(pp, pid, kring->ckr_scratch, ph_cnt);
 	}
-
 
 	for (n = 0; n < ph_cnt; n++) {
 		ksd = KR_KSD(kring, j);
@@ -3511,6 +3691,20 @@ done:
 	ASSERT(j != kring->ckr_khead || j == kring->ckr_ktail);
 	kring->ckr_ktail = j;
 	return 0;
+}
+
+static int
+na_packet_pool_alloc_sync(struct __kern_channel_ring *kring, struct proc *p,
+    uint32_t flags)
+{
+	return na_packet_pool_alloc_sync_common(kring, p, flags, false);
+}
+
+static int
+na_packet_pool_alloc_large_sync(struct __kern_channel_ring *kring, struct proc *p,
+    uint32_t flags)
+{
+	return na_packet_pool_alloc_sync_common(kring, p, flags, true);
 }
 
 static int
@@ -3645,7 +3839,7 @@ na_packet_pool_alloc_buf_sync(struct __kern_channel_ring *kring, struct proc *p,
 	}
 
 	err = pp_alloc_buflet_batch(pp, kring->ckr_scratch, &bh_cnt,
-	    SKMEM_NOSLEEP, PP_ALLOC_BFT_ATTACH_BUFFER);
+	    SKMEM_NOSLEEP, false);
 
 	if (bh_cnt == 0) {
 		SK_ERR("kr 0x%llx failed to alloc %u buflets(%d)",
@@ -3697,7 +3891,7 @@ void
 na_drain(struct nexus_adapter *na, boolean_t purge)
 {
 	/* will be cleared on next channel sync */
-	if (!(atomic_bitset_32_ov(&na->na_flags, NAF_DRAINING) &
+	if (!(os_atomic_or_orig(&na->na_flags, NAF_DRAINING, relaxed) &
 	    NAF_DRAINING) && NA_IS_ACTIVE(na)) {
 		SK_DF(SK_VERB_NA, "%s: %s na 0x%llx flags %b",
 		    na->na_name, (purge ? "purging" : "pruning"),

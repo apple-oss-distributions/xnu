@@ -138,7 +138,7 @@ T_DECL(permanent_mapping, "check permanent mappings semantics")
 		addr2 = 0;
 		kr2 = mach_vm_allocate(mach_task_self(), &addr2, size,
 		VM_FLAGS_ANYWHERE);
-		T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "vm_allocate()");
+		T_QUIET; T_EXPECT_MACH_SUCCESS(kr2, "vm_allocate()");
 
 		remap_addr = addr;
 		kr2 = mach_vm_remap(mach_task_self(), &remap_addr, size, 0,

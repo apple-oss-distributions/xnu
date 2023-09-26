@@ -77,7 +77,7 @@ static boolean_t sym_is_name_indexed(const KXLDSym *sym);
 /*******************************************************************************
 *******************************************************************************/
 size_t
-kxld_symtab_sizeof()
+kxld_symtab_sizeof(void)
 {
 	return sizeof(KXLDSymtab);
 }

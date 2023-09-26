@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2017, 2022-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -45,6 +45,10 @@ int esp_chachapoly_encrypt(struct mbuf *, size_t, size_t, struct secasvar *,
     const struct esp_algorithm *, int);
 int esp_chachapoly_decrypt(struct mbuf *, size_t, struct secasvar *,
     const struct esp_algorithm *, int);
+int esp_chachapoly_encrypt_data(struct secasvar *, uint8_t *, size_t,
+    struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
+int esp_chachapoly_decrypt_data(struct secasvar *, uint8_t *, size_t,
+    struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
 int esp_chachapoly_encrypt_finalize(struct secasvar *, unsigned char *, size_t);
 int esp_chachapoly_decrypt_finalize(struct secasvar *, unsigned char *, size_t);
 int esp_chachapoly_mature(struct secasvar *);

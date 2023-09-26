@@ -62,12 +62,14 @@ DRIVERKIT_DATAFILES = \
 	udp.h
 
 PRIVATE_KERNELFILES = ${KERNELFILES} \
+	inp_log.h \
 	ip_ecn.h \
 	ip_encap.h \
 	tcp_log.h \
 	tcp_includes.h \
 	tcp_utils.h \
-	tcp_sysctls.h
+	tcp_sysctls.h \
+	udp_log.h
 
 INSTALL_MI_LIST	= ${DATAFILES}
 
@@ -77,7 +79,7 @@ INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
 INSTALL_MI_DIR = netinet
 
-INSTALL_MI_LCL_LIST = in_private.h tcp_private.h
+INSTALL_MI_LCL_LIST = in_private.h in_stat.h tcp_private.h
 
 INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 

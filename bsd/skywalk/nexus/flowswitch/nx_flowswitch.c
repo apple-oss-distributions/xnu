@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -362,13 +362,59 @@ nx_fsw_prov_params(struct kern_nexus_domain_provider *nxdom_prov,
 	           nx_fsw_prov_params_adjust);
 }
 
+static void
+fsw_vp_region_params_setup(struct nexus_adapter *na, struct skmem_region_params *srp0,
+    struct skmem_region_params *srp)
+{
+	int i;
+	uint32_t totalrings, nslots, afslots, evslots, lbaslots;
+
+	/* copy default flowswitch parameters initialized in nxprov_params_adjust() */
+	for (i = 0; i < SKMEM_REGIONS; i++) {
+		srp[i] = srp0[i];
+	}
+	/* customize parameters that could vary across NAs */
+	totalrings = na_get_nrings(na, NR_TX) + na_get_nrings(na, NR_RX) +
+	    na_get_nrings(na, NR_A) + na_get_nrings(na, NR_F) +
+	    na_get_nrings(na, NR_EV) + na_get_nrings(na, NR_LBA);
+
+	srp[SKMEM_REGION_SCHEMA].srp_r_obj_size =
+	    (uint32_t)CHANNEL_SCHEMA_SIZE(totalrings);
+	srp[SKMEM_REGION_SCHEMA].srp_r_obj_cnt = totalrings;
+	skmem_region_params_config(&srp[SKMEM_REGION_SCHEMA]);
+
+	srp[SKMEM_REGION_RING].srp_r_obj_size =
+	    sizeof(struct __user_channel_ring);
+	srp[SKMEM_REGION_RING].srp_r_obj_cnt = totalrings;
+	skmem_region_params_config(&srp[SKMEM_REGION_RING]);
+
+	nslots = na_get_nslots(na, NR_TX);
+	afslots = na_get_nslots(na, NR_A);
+	evslots = na_get_nslots(na, NR_EV);
+	lbaslots = na_get_nslots(na, NR_LBA);
+	srp[SKMEM_REGION_TXAKSD].srp_r_obj_size =
+	    MAX(MAX(MAX(nslots, afslots), evslots), lbaslots) * SLOT_DESC_SZ;
+	srp[SKMEM_REGION_TXAKSD].srp_r_obj_cnt =
+	    na_get_nrings(na, NR_TX) + na_get_nrings(na, NR_A) +
+	    na_get_nrings(na, NR_EV) + na_get_nrings(na, NR_LBA);
+	skmem_region_params_config(&srp[SKMEM_REGION_TXAKSD]);
+
+	/* USD and KSD objects share the same size and count */
+	srp[SKMEM_REGION_TXAUSD].srp_r_obj_size =
+	    srp[SKMEM_REGION_TXAKSD].srp_r_obj_size;
+	srp[SKMEM_REGION_TXAUSD].srp_r_obj_cnt =
+	    srp[SKMEM_REGION_TXAKSD].srp_r_obj_cnt;
+	skmem_region_params_config(&srp[SKMEM_REGION_TXAUSD]);
+}
+
 static int
 nx_fsw_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
     struct kern_nexus *nx, struct nexus_adapter *na)
 {
 #pragma unused(nxdom_prov)
 	int err = 0;
-	struct skmem_region_params *srp = NX_PROV(nx)->nxprov_region_params;
+	struct skmem_region_params *srp0 = NX_PROV(nx)->nxprov_region_params;
+	struct skmem_region_params srp[SKMEM_REGIONS];
 
 	SK_DF(SK_VERB_FSW,
 	    "nx 0x%llx (\"%s\":\"%s\") na \"%s\" (0x%llx)", SK_KVA(nx),
@@ -378,6 +424,8 @@ nx_fsw_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	ASSERT(na->na_type == NA_FLOWSWITCH_VP);
 	ASSERT(na->na_arena == NULL);
 	ASSERT((na->na_flags & NAF_USER_PKT_POOL) != 0);
+
+	fsw_vp_region_params_setup(na, srp0, srp);
 	/*
 	 * Each port in the flow switch is isolated from one another;
 	 * use NULL for the packet buffer pool references to indicate
@@ -389,10 +437,8 @@ nx_fsw_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	 * of providing port isolation, and also since we don't expose
 	 * the flow switch to external kernel clients.
 	 */
-	uint32_t pp_flags = NX_USER_CHANNEL_PROV(nx) ?
-	    0 : SKMEM_PP_FLAG_TRUNCATED_BUF;
-	na->na_arena = skmem_arena_create_for_nexus(na, srp, NULL, NULL, pp_flags,
-	    &nx->nx_adv, &err);
+	na->na_arena = skmem_arena_create_for_nexus(na, srp, NULL, NULL, FALSE,
+	    !NX_USER_CHANNEL_PROV(nx), &nx->nx_adv, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 	return err;
 }
@@ -407,12 +453,6 @@ nx_fsw_prov_config(struct kern_nexus_domain_provider *nxdom_prov,
 	int err = 0;
 
 	SK_LOCK_ASSERT_HELD();
-
-	/* proceed only if the client possesses flow switch entitlement */
-	if ((err = skywalk_priv_check_cred(p, cred,
-	    PRIV_SKYWALK_REGISTER_FLOW_SWITCH)) != 0) {
-		goto done;
-	}
 
 	if (ncr->nc_req == USER_ADDR_NULL) {
 		err = EINVAL;
@@ -430,8 +470,15 @@ nx_fsw_prov_config(struct kern_nexus_domain_provider *nxdom_prov,
 	switch (ncr->nc_cmd) {
 	case NXCFG_CMD_ATTACH:
 	case NXCFG_CMD_DETACH: {
-		struct nx_spec_req nsr;
+		/* proceed only if the client possesses flow switch entitlement */
+		if (cred == NULL || (err = skywalk_priv_check_cred(p, cred,
+		    PRIV_SKYWALK_REGISTER_FLOW_SWITCH)) != 0) {
+			SK_ERR("missing nxctl credential");
+			err = EPERM;
+			goto done;
+		}
 
+		struct nx_spec_req nsr;
 		bzero(&nsr, sizeof(nsr));
 		err = sooptcopyin(&sopt, &nsr, sizeof(nsr), sizeof(nsr));
 		if (err != 0) {
@@ -452,17 +499,22 @@ nx_fsw_prov_config(struct kern_nexus_domain_provider *nxdom_prov,
 			goto done;
 		}
 
-		/* XXX: adi@apple.com -- can this copyout fail? */
-		(void) sooptcopyout(&sopt, &nsr, sizeof(nsr));
+		err = sooptcopyout(&sopt, &nsr, sizeof(nsr));
 		break;
 	}
 
 	case NXCFG_CMD_FLOW_ADD:
 	case NXCFG_CMD_FLOW_DEL: {
-		_CASSERT(offsetof(struct nx_flow_req, _nfr_kernel_field_end) ==
-		    offsetof(struct nx_flow_req, _nfr_common_field_end));
+		/* need to have owner nxctl or kernnxctl */
+		if (cred == NULL) {
+			SK_ERR("missing nxctl credential");
+			err = EPERM;
+			goto done;
+		}
+	} /* fall through */
+	case NXCFG_CMD_FLOW_CONFIG: {
+		/* checks flow PID ownership instead of nxctl creditial */
 		struct nx_flow_req nfr;
-
 		bzero(&nfr, sizeof(nfr));
 		err = sooptcopyin(&sopt, &nfr, sizeof(nfr), sizeof(nfr));
 		if (err != 0) {
@@ -474,8 +526,7 @@ nx_fsw_prov_config(struct kern_nexus_domain_provider *nxdom_prov,
 			goto done;
 		}
 
-		/* XXX: adi@apple.com -- can this copyout fail? */
-		(void) sooptcopyout(&sopt, &nfr, sizeof(nfr));
+		err = sooptcopyout(&sopt, &nfr, sizeof(nfr));
 		break;
 	}
 
@@ -738,7 +789,7 @@ nx_fsw_dom_connect(struct kern_nexus_domain_provider *nxdom_prov,
 		    sk_uuid_unparse(chr->cr_spec_uuid, uuidstr));
 		chr->cr_ring_set = RING_SET_DEFAULT;
 		if (chr->cr_mode & CHMODE_HOST) {
-			atomic_bitset_32(&ch->ch_flags, CHANF_HOST);
+			os_atomic_or(&ch->ch_flags, CHANF_HOST, relaxed);
 		}
 		err = na_connect_spec(nx, ch, chr, p);
 	} else {

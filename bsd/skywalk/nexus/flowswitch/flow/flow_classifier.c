@@ -99,7 +99,7 @@ flow_pkt_classify(struct __kern_packet *pkt, struct ifnet *ifp, sa_family_t af,
 	uint32_t mtu = ifp->if_mtu;
 
 	size_t pkt_len;       /* remaining packet length left for parsing */
-	uint16_t cls_len;
+	uint32_t cls_len;
 
 	/*
 	 * These are length parsed from packet header, needs to be
@@ -177,7 +177,7 @@ flow_pkt_classify(struct __kern_packet *pkt, struct ifnet *ifp, sa_family_t af,
 	 * actual buffer is limited to NETIF_COMPAT_BUF_SIZE (128 bytes).
 	 */
 	uint8_t *pkt_buf, *l3_hdr;
-	uint16_t bdlen, bdlim, bdoff;
+	uint32_t bdlen, bdlim, bdoff;
 
 	MD_BUFLET_ADDR_ABS_DLEN(pkt, pkt_buf, bdlen, bdlim, bdoff);
 	cls_len = bdlim - bdoff;

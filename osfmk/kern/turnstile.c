@@ -70,6 +70,7 @@ static const turnstile_promote_policy_t turnstile_promote_policy[TURNSTILE_TOTAL
 	[TURNSTILE_WORKQS]        = TURNSTILE_USER_IPC_PROMOTE,
 	[TURNSTILE_KNOTE]         = TURNSTILE_USER_IPC_PROMOTE,
 	[TURNSTILE_SLEEP_INHERITOR] = TURNSTILE_KERNEL_PROMOTE,
+	[TURNSTILE_EPOCH]         = TURNSTILE_KERNEL_PROMOTE,
 };
 
 /* Global table for turnstile hash lock policy for all type of turnstiles */
@@ -83,6 +84,7 @@ static const turnstile_hash_lock_policy_t turnstile_hash_lock_policy[TURNSTILE_T
 	[TURNSTILE_WORKQS]        = TURNSTILE_HASH_LOCK_POLICY_NONE,
 	[TURNSTILE_KNOTE]         = TURNSTILE_HASH_LOCK_POLICY_NONE,
 	[TURNSTILE_SLEEP_INHERITOR] = (TURNSTILE_IRQ_UNSAFE_HASH | TURNSTILE_LOCKED_HASH),
+	[TURNSTILE_EPOCH]         = TURNSTILE_HASH_LOCK_POLICY_NONE,
 };
 
 os_refgrp_decl(static, turnstile_refgrp, "turnstile", NULL);

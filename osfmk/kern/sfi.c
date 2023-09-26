@@ -176,7 +176,7 @@ struct sfi_class_state {
 	uint64_t        off_time_usecs;
 	uint64_t        off_time_interval;
 
-	timer_call_data_t       on_timer;
+	thread_call_t       on_timer;
 	uint64_t        on_timer_deadline;
 	boolean_t                       on_timer_programmed;
 
@@ -237,7 +237,9 @@ sfi_init(void)
 	for (i = 0; i < MAX_SFI_CLASS_ID; i++) {
 		/* If the class was set up in sfi_early_init(), initialize remaining fields */
 		if (sfi_classes[i].continuation) {
-			timer_call_setup(&sfi_classes[i].on_timer, sfi_timer_per_class_on, (void *)(uintptr_t)i);
+			sfi_classes[i].on_timer = thread_call_allocate_with_options(
+				sfi_timer_per_class_on, (void *)(uintptr_t)i, THREAD_CALL_PRIORITY_HIGH,
+				THREAD_CALL_OPTIONS_ONCE);
 			sfi_classes[i].on_timer_programmed = FALSE;
 
 			waitq_init(&sfi_classes[i].waitq, WQT_QUEUE, SYNC_POLICY_FIFO);
@@ -326,14 +328,14 @@ sfi_timer_global_off(
 			on_timer_deadline = now + sfi_classes[i].off_time_interval;
 			sfi_classes[i].on_timer_deadline = on_timer_deadline;
 
-			timer_call_enter1(&sfi_classes[i].on_timer, NULL, on_timer_deadline, TIMER_CALL_SYS_CRITICAL);
+			thread_call_enter_delayed_with_leeway(sfi_classes[i].on_timer, NULL, on_timer_deadline, 0, THREAD_CALL_DELAY_SYS_CRITICAL);
 		} else {
 			/* If this class no longer needs SFI, make sure the timer is cancelled */
 			sfi_classes[i].class_in_on_phase = TRUE;
 			if (sfi_classes[i].on_timer_programmed) {
 				sfi_classes[i].on_timer_programmed = FALSE;
 				sfi_classes[i].on_timer_deadline = ~0ULL;
-				timer_call_cancel(&sfi_classes[i].on_timer);
+				thread_call_cancel(sfi_classes[i].on_timer);
 			}
 		}
 	}
@@ -398,10 +400,8 @@ sfi_timer_per_class_on(
 {
 	sfi_class_id_t sfi_class_id = (sfi_class_id_t)(uintptr_t)param0;
 	struct sfi_class_state  *sfi_class = &sfi_classes[sfi_class_id];
-	kern_return_t   kret;
-	spl_t           s;
 
-	s = splsched();
+	spl_t s = splsched();
 
 	simple_lock(&sfi_lock, LCK_GRP_NULL);
 
@@ -422,15 +422,14 @@ sfi_timer_per_class_on(
 	 * Issue the wakeup outside the lock to reduce lock hold time
 	 * rdar://problem/96463639
 	 */
+	__assert_only kern_return_t kret;
 
 	kret = waitq_wakeup64_all(&sfi_class->waitq,
 	    CAST_EVENT64_T(sfi_class_id),
-	    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
+	    THREAD_AWAKENED, waitq_flags_splx(s));
 	assert(kret == KERN_SUCCESS || kret == KERN_NOT_WAITING);
 
 	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SFI, SFI_ON_TIMER) | DBG_FUNC_END, 0, 0, 0, 0, 0);
-
-	splx(s);
 }
 
 
@@ -547,9 +546,8 @@ sfi_window_cancel(void)
 kern_return_t
 sfi_defer(uint64_t sfi_defer_matus)
 {
-	spl_t           s;
 	kern_return_t kr = KERN_FAILURE;
-	s = splsched();
+	spl_t s = splsched();
 
 	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SFI, SFI_GLOBAL_DEFER), sfi_defer_matus, 0, 0, 0, 0);
 
@@ -563,13 +561,12 @@ sfi_defer(uint64_t sfi_defer_matus)
 	sfi_next_off_deadline += sfi_defer_matus;
 	timer_call_enter1(&sfi_timer_call_entry, NULL, sfi_next_off_deadline, TIMER_CALL_SYS_CRITICAL);
 
-	int i;
-	for (i = 0; i < MAX_SFI_CLASS_ID; i++) {
+	for (int i = 0; i < MAX_SFI_CLASS_ID; i++) {
 		if (sfi_classes[i].class_sfi_is_enabled) {
 			if (sfi_classes[i].on_timer_programmed) {
 				uint64_t new_on_deadline = sfi_classes[i].on_timer_deadline + sfi_defer_matus;
 				sfi_classes[i].on_timer_deadline = new_on_deadline;
-				timer_call_enter1(&sfi_classes[i].on_timer, NULL, new_on_deadline, TIMER_CALL_SYS_CRITICAL);
+				thread_call_enter_delayed_with_leeway(sfi_classes[i].on_timer, NULL, new_on_deadline, 0, THREAD_CALL_DELAY_SYS_CRITICAL);
 			}
 		}
 	}

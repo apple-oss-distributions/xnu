@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2023 Apple Inc. All rights reserved.
  * Copyright (c) 2005-2006 Apple Computer, Inc. All rights reserved.
  */
 #ifndef _PEXPERT_ARM_BOARD_CONFIG_H
@@ -87,6 +87,9 @@
 
 
 
+
+
+
 #ifdef ARM64_BOARD_CONFIG_BCM2837
 #include <pexpert/arm64/BCM2837.h>
 
@@ -107,6 +110,10 @@
 #define CORE_NCTRS                     2
 
 #define USE_APPLEARMSMP                1
+
+#if XNU_TARGET_OS_WATCH
+#define PREFER_ARM64_32_BINARIES       1
+#endif
 
 #endif  /* ARM64_BOARD_CONFIG_VMAPPLE */
 

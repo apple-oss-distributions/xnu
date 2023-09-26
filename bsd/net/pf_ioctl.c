@@ -402,6 +402,58 @@ invalidate_all_tokens(void)
 	nr_tokens = 0;
 }
 
+struct pf_reass_tag_container {
+	struct m_tag           pf_reass_m_tag;
+	struct pf_fragment_tag pf_reass_fragment_tag;
+};
+
+static struct m_tag *
+m_tag_kalloc_pf_reass(u_int32_t id, u_int16_t type, uint16_t len, int wait)
+{
+	struct pf_reass_tag_container *tag_container;
+	struct m_tag *tag = NULL;
+
+	assert3u(id, ==, KERNEL_MODULE_TAG_ID);
+	assert3u(type, ==, KERNEL_TAG_TYPE_PF_REASS);
+	assert3u(len, ==, sizeof(struct pf_fragment_tag));
+
+	if (len != sizeof(struct pf_fragment_tag)) {
+		return NULL;
+	}
+
+	tag_container = kalloc_type(struct pf_reass_tag_container, wait | M_ZERO);
+	if (tag_container != NULL) {
+		tag =  &tag_container->pf_reass_m_tag;
+
+		assert3p(tag, ==, tag_container);
+
+		M_TAG_INIT(tag, id, type, len, &tag_container->pf_reass_fragment_tag, NULL);
+	}
+
+	return tag;
+}
+
+static void
+m_tag_kfree_pf_reass(struct m_tag *tag)
+{
+	struct pf_reass_tag_container *tag_container = (struct pf_reass_tag_container *)tag;
+
+	assert3u(tag->m_tag_len, ==, sizeof(struct pf_fragment_tag));
+
+	kfree_type(struct pf_reass_tag_container, tag_container);
+}
+
+void
+pf_register_m_tag(void)
+{
+	int error;
+
+	error = m_register_internal_tag_type(KERNEL_TAG_TYPE_PF_REASS, sizeof(struct pf_fragment_tag),
+	    m_tag_kalloc_pf_reass, m_tag_kfree_pf_reass);
+
+	assert3u(error, ==, 0);
+}
+
 void
 pfinit(void)
 {
@@ -2854,7 +2906,7 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 		}
 
 		if (rule->action == PF_NAT64) {
-			atomic_add_16(&pf_nat64_configured, 1);
+			os_atomic_inc(&pf_nat64_configured, relaxed);
 		}
 
 		if (pr->anchor_call[0] == '\0') {
@@ -3293,7 +3345,7 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 			pffwrules++;
 		}
 		if (rule->action == PF_NAT64) {
-			atomic_add_16(&pf_nat64_configured, 1);
+			os_atomic_inc(&pf_nat64_configured, relaxed);
 		}
 
 		if (pr->anchor_call[0] == '\0') {
@@ -3332,7 +3384,7 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 		}
 		pr->nr = pffwrules;
 		if (pr->rule.action == PF_NAT64) {
-			atomic_add_16(&pf_nat64_configured, -1);
+			os_atomic_dec(&pf_nat64_configured, relaxed);
 		}
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
 		pf_process_compatibilities();
@@ -4559,8 +4611,10 @@ pf_af_hook(struct ifnet *ifp, struct mbuf **mppn, struct mbuf **mp,
 	net_thread_marks_t marks;
 	struct ifnet * pf_ifp = ifp;
 
-	/* Always allow traffic on co-processor interfaces. */
-	if (!intcoproc_unrestricted && ifp && IFNET_IS_INTCOPROC(ifp)) {
+	/* Always allow traffic on co-processor and management interfaces. */
+	if (ifp != NULL &&
+	    ((!intcoproc_unrestricted && IFNET_IS_INTCOPROC(ifp)) ||
+	    (!management_data_unrestricted && IFNET_IS_MANAGEMENT(ifp)))) {
 		return 0;
 	}
 

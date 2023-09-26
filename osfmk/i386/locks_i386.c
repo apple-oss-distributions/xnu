@@ -408,7 +408,7 @@ lck_spin_try_lock_nopreempt_grp(
  *	Routine:	lck_spin_assert
  */
 void
-lck_spin_assert(lck_spin_t *lock, unsigned int type)
+lck_spin_assert(const lck_spin_t *lock, unsigned int type)
 {
 	thread_t thread, holder;
 	uintptr_t state;
@@ -1134,24 +1134,12 @@ unlock:
 	ordered_store_mtx_owner(lock, 0);
 
 	if (__improbable(state & LCK_MTX_WAITERS_MSK)) {
-#if     MACH_LDEBUG
-		if (thread) {
-			thread->mutex_count--;
-		}
-#endif
 		return lck_mtx_unlock_wakeup_tail(lock, state);
 	}
 
 	/* release interlock, promotion and clear spin flag */
 	state &= (~(LCK_MTX_ILOCKED_MSK | LCK_MTX_SPIN_MSK));
 	ordered_store_mtx_state_release(lock, state);           /* since I own the interlock, I don't need an atomic update */
-
-#if     MACH_LDEBUG
-	/* perform lock statistics after drop to prevent delay */
-	if (thread) {
-		thread->mutex_count--;          /* lock statistic */
-	}
-#endif  /* MACH_LDEBUG */
 
 	/* re-enable preemption */
 	lck_mtx_unlock_finish_inline(lock, state);
@@ -1439,11 +1427,6 @@ try_again:
 			ordered_store_mtx_state_release(lock, state);
 			thread = current_thread();
 			ordered_store_mtx_owner(lock, thread->ctid);
-#if     MACH_LDEBUG
-			if (thread) {
-				thread->mutex_count++;
-			}
-#endif  /* MACH_LDEBUG */
 		}
 
 		break;
@@ -1608,11 +1591,6 @@ lck_mtx_lock_slow(
 	/* record owner of mutex */
 	ordered_store_mtx_owner(lock, current_thread()->ctid);
 
-#if MACH_LDEBUG
-	if (thread) {
-		thread->mutex_count++;          /* lock statistic */
-	}
-#endif
 	/*
 	 * Check if there are waiters to
 	 * inherit their priority.
@@ -1674,11 +1652,6 @@ lck_mtx_try_lock_slow(
 	/* record owner of mutex */
 	ordered_store_mtx_owner(lock, current_thread()->ctid);
 
-#if MACH_LDEBUG
-	if (thread) {
-		thread->mutex_count++;          /* lock statistic */
-	}
-#endif
 	/*
 	 * Check if there are waiters to
 	 * inherit their priority.
@@ -1767,11 +1740,6 @@ past_spin:
 	/* record owner of mutex */
 	ordered_store_mtx_owner(lock, current_thread()->ctid);
 
-#if MACH_LDEBUG
-	if (thread) {
-		thread->mutex_count++;          /* lock statistic */
-	}
-#endif
 	LCK_MTX_ACQUIRED(lock, lock->lck_mtx_grp, true, profile);
 
 	/* return with the interlock held and preemption disabled */
@@ -1820,12 +1788,6 @@ lck_mtx_try_lock_spin_slow(
 
 	/* record owner of mutex */
 	ordered_store_mtx_owner(lock, current_thread()->ctid);
-
-#if MACH_LDEBUG
-	if (thread) {
-		thread->mutex_count++;          /* lock statistic */
-	}
-#endif
 
 #if     CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_LOCK_SPIN_ACQUIRE, lock, 0);
@@ -1884,12 +1846,6 @@ lck_mtx_lock_grab_mutex(
 
 	/* record owner of mutex */
 	ordered_store_mtx_owner(lock, current_thread()->ctid);
-
-#if MACH_LDEBUG
-	if (thread) {
-		thread->mutex_count++;          /* lock statistic */
-	}
-#endif
 	return TRUE;
 }
 

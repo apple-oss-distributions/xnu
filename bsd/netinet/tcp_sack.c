@@ -813,16 +813,16 @@ tcp_sack_lost_rexmit(struct tcpcb *tp)
  * should be used to avoid retransmitting SACKed data.  This function
  * traverses the SACK list to see if snd_nxt should be moved forward.
  */
-void
+uint32_t
 tcp_sack_adjust(struct tcpcb *tp)
 {
 	struct sackhole *p, *cur = TAILQ_FIRST(&tp->snd_holes);
 
 	if (cur == NULL) {
-		return; /* No holes */
+		return 0; /* No holes */
 	}
 	if (SEQ_GEQ(tp->snd_nxt, tp->snd_fack)) {
-		return; /* We're already beyond any SACKed blocks */
+		return 0; /* We're already beyond any SACKed blocks */
 	}
 	/*
 	 * Two cases for which we want to advance snd_nxt:
@@ -831,20 +831,20 @@ tcp_sack_adjust(struct tcpcb *tp)
 	 */
 	while ((p = TAILQ_NEXT(cur, scblink)) != NULL) {
 		if (SEQ_LT(tp->snd_nxt, cur->end)) {
-			return;
+			return cur->end - tp->snd_nxt;
 		}
 		if (SEQ_GEQ(tp->snd_nxt, p->start)) {
 			cur = p;
 		} else {
 			tp->snd_nxt = p->start;
-			return;
+			return p->end - tp->snd_nxt;
 		}
 	}
 	if (SEQ_LT(tp->snd_nxt, cur->end)) {
-		return;
+		return cur->end - tp->snd_nxt;
 	}
 	tp->snd_nxt = tp->snd_fack;
-	return;
+	return 0;
 }
 
 /*

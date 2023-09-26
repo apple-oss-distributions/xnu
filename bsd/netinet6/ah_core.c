@@ -1394,6 +1394,11 @@ invalopt:
 		int hdrsiz;
 		int totlen;
 
+		if (m->m_pkthdr.len - off < sizeof(ah)) {
+			error = EMSGSIZE;
+			goto fail;
+		}
+
 		m_copydata(m, off, sizeof(ah), (caddr_t)&ah);
 		hdrsiz = (sav->flags & SADB_X_EXT_OLD)
 		    ? sizeof(struct ah)
@@ -1401,12 +1406,16 @@ invalopt:
 		siz = (*algo->sumsiz)(sav);
 		totlen = (ah.ah_len + 2) << 2;
 
+		if (totlen > m->m_pkthdr.len - off) {
+			error = EMSGSIZE;
+			goto fail;
+		}
+
 		/*
 		 * special treatment is necessary for the first one, not others
 		 */
 		if (!ahseen) {
-			if (totlen > m->m_pkthdr.len - off ||
-			    totlen > MCLBYTES) {
+			if (totlen > MCLBYTES) {
 				error = EMSGSIZE;
 				goto fail;
 			}

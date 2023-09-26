@@ -1646,14 +1646,14 @@ netem_config(struct netem **ne, const char *name, struct ifnet *ifp,
 				ret = ENOMEM;
 				goto done;
 			}
-			atomic_set_ptr(ne, netem);
+			os_atomic_store(ne, netem, release);
 		}
 		netem_set_params(*ne, ifp, p);
 	} else {
 		NETEM_LOG(LOG_INFO, "| netem disable %s", name);
 		if (*ne != NULL) {
 			netem = *ne;
-			atomic_set_ptr(ne, NULL);
+			os_atomic_store(ne, NULL, release);
 			NETEM_LOG(LOG_INFO, "| netem destroy %s", name);
 			netem_destroy(netem);
 		}

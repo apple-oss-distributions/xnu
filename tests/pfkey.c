@@ -42,6 +42,7 @@ typedef enum {
 
 static test_identifier test_id = TEST_INVALID;
 static dispatch_source_t pfkey_source = NULL;
+static unsigned long oldmax;
 
 static void pfkey_cleanup(void);
 
@@ -1054,6 +1055,10 @@ pfkey_cleanup(void)
 		dispatch_source_cancel(pfkey_source);
 		pfkey_source = NULL;
 	}
+
+	if (oldmax != 0) {
+		(void)sysctlbyname("kern.ipc.maxsockbuf", NULL, NULL, &oldmax, sizeof(oldmax));
+	}
 }
 
 static int
@@ -1062,7 +1067,6 @@ pfkey_setup_socket(void)
 	int pfkey_socket = -1;
 	int bufsiz = 0;
 	const unsigned long newbufk = 1536;
-	unsigned long oldmax;
 	size_t  oldmaxsize = sizeof(oldmax);
 	unsigned long newmax = newbufk * (1024 + 128);
 
@@ -1071,7 +1075,7 @@ pfkey_setup_socket(void)
 	if (sysctlbyname("kern.ipc.maxsockbuf", &oldmax, &oldmaxsize, &newmax, sizeof(newmax)) != 0) {
 		bufsiz = 233016;        /* Max allowed by default */
 	} else {
-		bufsiz = newbufk * 1024;
+		bufsiz = newbufk * 800;
 	}
 
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(setsockopt(pfkey_socket, SOL_SOCKET, SO_SNDBUF, &bufsiz, sizeof(bufsiz)), "pfkey set snd socket buf failed %d", bufsiz);
@@ -1651,7 +1655,7 @@ pfkey_process_message_test_60687183_2(uint8_t **mhp, int pfkey_socket)
 }
 
 static void
-pfkey_process_message_test_78944570(uint8_t **mhp, int pfkey_socket)
+pfkey_process_message_test_78944570(uint8_t **mhp, __unused int pfkey_socket)
 {
 	struct sadb_msg *message = (struct sadb_msg *)(void *)mhp[0];
 
@@ -1665,11 +1669,10 @@ pfkey_process_message_test_78944570(uint8_t **mhp, int pfkey_socket)
 		if (message->sadb_msg_errno != 0) {
 			T_QUIET; T_ASSERT_EQ(message->sadb_msg_errno, EINVAL, "SADB error for type %u error %d", message->sadb_msg_type, message->sadb_msg_errno);
 			T_PASS("SADB spd add received EINVAL");
-			T_END;
 		} else {
 			T_FAIL("SADB spd add received success");
-			T_END;
 		}
+		T_END;
 		break;
 	}
 	case SADB_FLUSH:
@@ -1724,7 +1727,7 @@ setup_loopback_tcp_client(uint16_t server_port)
 static void
 setup_socket_policy(int socket_fd)
 {
-	uint8_t buf[
+	uint8_t __attribute__((aligned(4))) buf[
 		sizeof(struct sadb_x_policy) +
 		sizeof(struct sadb_x_ipsecrequest) +
 		sizeof(struct sockaddr_in) +
@@ -1750,7 +1753,7 @@ setup_socket_policy(int socket_fd)
 	sa = (struct sockaddr *)(xisr + 1);
 	sa->sa_len = sizeof(struct sockaddr_in);
 	/* dst sockaddr: */
-	sa = (struct sockaddr *)((void *)(xisr + 1) + sa->sa_len);
+	sa = (struct sockaddr *)((char *)(xisr + 1) + sa->sa_len);
 	sa->sa_len = sizeof(struct sockaddr_in);
 
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(setsockopt(socket_fd, IPPROTO_IP, IP_IPSEC_POLICY,

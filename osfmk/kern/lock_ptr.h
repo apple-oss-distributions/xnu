@@ -33,18 +33,16 @@
 #include <kern/lock_types.h>
 #include <kern/lock_group.h>
 #include <kern/lock_attr.h>
-#if KASAN_TBI
-#include <san/kasan-tbi.h>
-#endif /* KASAN_TBI */
+#include <vm/vm_memtag.h>
 
 __BEGIN_DECLS
 #pragma GCC visibility push(hidden)
 
-#if KASAN_TBI
+#if CONFIG_KERNEL_TAGGING
 #define HW_LCK_PTR_BITS         (64 - 4 - 1 - 1 - 16)
-#else /* !KASAN_TBI */
+#else /* !CONFIG_KERNEL_TAGGING */
 #define HW_LCK_PTR_BITS         (64 - 1 - 1 - 16)
-#endif /* !KASAN_TBI */
+#endif /* !CONFIG_KERNEL_TAGGING */
 
 /*!
  * @typedef hw_lck_ptr_t
@@ -78,9 +76,9 @@ __BEGIN_DECLS
 typedef union hw_lck_ptr {
 	struct {
 		intptr_t        lck_ptr_bits    : HW_LCK_PTR_BITS;
-#if KASAN_TBI
+#if CONFIG_KERNEL_TAGGING
 		uintptr_t       lck_ptr_tag     : 4;
-#endif /* KASAN_TBI */
+#endif /* CONFIG_KERNEL_TAGGING */
 		uintptr_t       lck_ptr_locked  : 1;
 		uintptr_t       lck_ptr_stats   : 1;
 		uint16_t        lck_ptr_mcs_tail __kernel_ptr_semantics;
@@ -241,11 +239,11 @@ __hw_lck_ptr_value(hw_lck_ptr_t val)
 {
 	vm_offset_t ptr = val.lck_ptr_bits;
 
-#if KASAN_TBI
+#if CONFIG_KERNEL_TAGGING
 	if (ptr) {
-		ptr = kasan_tbi_tag_ptr(ptr, val.lck_ptr_tag);
+		ptr = vm_memtag_add_ptr_tag(ptr, val.lck_ptr_tag);
 	}
-#endif
+#endif /* CONFIG_KERNEL_TAGGING */
 	return (void *)ptr;
 }
 

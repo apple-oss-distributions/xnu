@@ -21,6 +21,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <spawn_filtering_private.h>
+
+#if POSIX_SPAWN_FILTERING_ENABLED
+
 #include <spawn.h>
 #include <spawn_private.h>
 #include <sys/spawn_internal.h>
@@ -356,3 +360,5 @@ _execve_with_filter(const char *fname, char * const *argp, char * const *envp)
 	ret = __execve(fname, argp, envp);
 	return ret;
 }
+
+#endif /* POSIX_SPAWN_FILTERING_ENABLED */

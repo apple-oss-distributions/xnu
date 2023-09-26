@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -151,6 +151,8 @@ static int nx_netif_ctl_detach(struct kern_nexus *, struct nx_spec_req *);
 static int nx_netif_attach(struct kern_nexus *, struct ifnet *);
 static void nx_netif_flags_init(struct nx_netif *);
 static void nx_netif_flags_fini(struct nx_netif *);
+static void nx_netif_callbacks_init(struct nx_netif *);
+static void nx_netif_callbacks_fini(struct nx_netif *);
 static void nx_netif_capabilities_fini(struct nx_netif *);
 static errno_t nx_netif_interface_advisory_notify(void *,
     const struct ifnet_interface_advisory *);
@@ -278,7 +280,6 @@ struct nexus_ifnet_ops na_netif_ops = {
 	.ni_reap = nx_netif_reap,
 	.ni_dequeue = nx_netif_native_tx_dequeue,
 	.ni_get_len = nx_netif_native_tx_get_len,
-	.ni_detach_notify = nx_netif_detach_notify
 };
 
 #define NX_NETIF_DOORBELL_MAX_DEQUEUE    64
@@ -424,16 +425,16 @@ nx_netif_prov_nx_stop(struct kern_nexus *nx)
 	na_kr_drop(na, TRUE);
 
 	/* ensure global visibility */
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 
 	/* reset all TX notify callbacks */
 	for (r = 0; r < na_get_nrings(na, NR_TX); r++) {
-		while (!atomic_test_set_ptr(&na->na_tx_rings[r].ckr_na_notify,
+		while (!os_atomic_cmpxchg((void * volatile *)&na->na_tx_rings[r].ckr_na_notify,
 		    ptrauth_nop_cast(void *, na->na_tx_rings[r].ckr_na_notify),
-		    ptrauth_nop_cast(void *, &nx_netif_na_notify_drop))) {
+		    ptrauth_nop_cast(void *, &nx_netif_na_notify_drop), acq_rel)) {
 			;
 		}
-		membar_sync();
+		os_atomic_thread_fence(seq_cst);
 		if (nifna->nifna_tx_mit != NULL) {
 			nx_netif_mit_cleanup(&nifna->nifna_tx_mit[r]);
 		}
@@ -446,12 +447,12 @@ nx_netif_prov_nx_stop(struct kern_nexus *nx)
 
 	/* reset all RX notify callbacks */
 	for (r = 0; r < na_get_nrings(na, NR_RX); r++) {
-		while (!atomic_test_set_ptr(&na->na_rx_rings[r].ckr_na_notify,
+		while (!os_atomic_cmpxchg((void * volatile *)&na->na_rx_rings[r].ckr_na_notify,
 		    ptrauth_nop_cast(void *, na->na_rx_rings[r].ckr_na_notify),
-		    ptrauth_nop_cast(void *, &nx_netif_na_notify_drop))) {
+		    ptrauth_nop_cast(void *, &nx_netif_na_notify_drop), acq_rel)) {
 			;
 		}
-		membar_sync();
+		os_atomic_thread_fence(seq_cst);
 		if (nifna->nifna_rx_mit != NULL) {
 			nx_netif_mit_cleanup(&nifna->nifna_rx_mit[r]);
 		}
@@ -587,8 +588,9 @@ nx_netif_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 {
 #pragma unused(nxdom_prov)
 	int err = 0;
+	boolean_t pp_truncated_buf = FALSE;
 	boolean_t allow_direct;
-	uint32_t pp_flags = 0;
+	boolean_t kernel_only;
 
 	SK_DF(SK_VERB_NETIF,
 	    "nx 0x%llx (\"%s\":\"%s\") na \"%s\" (0x%llx)", SK_KVA(nx),
@@ -598,7 +600,7 @@ nx_netif_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	ASSERT(na->na_arena == NULL);
 	if ((na->na_type == NA_NETIF_COMPAT_DEV) ||
 	    (na->na_type == NA_NETIF_COMPAT_HOST)) {
-		pp_flags |= SKMEM_PP_FLAG_TRUNCATED_BUF;
+		pp_truncated_buf = TRUE;
 	}
 	/*
 	 * We do this check to determine whether to create the extra
@@ -613,12 +615,10 @@ nx_netif_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	 * gets stored in the nexus, which will then be used by any
 	 * subsequent opens.
 	 */
-	if (!allow_direct || !NX_USER_CHANNEL_PROV(nx)) {
-		pp_flags |= SKMEM_PP_FLAG_KERNEL_ONLY;
-	}
+	kernel_only = !allow_direct || !NX_USER_CHANNEL_PROV(nx);
 	na->na_arena = skmem_arena_create_for_nexus(na,
 	    NX_PROV(nx)->nxprov_region_params, &nx->nx_tx_pp,
-	    &nx->nx_rx_pp, pp_flags, &nx->nx_adv, &err);
+	    &nx->nx_rx_pp, pp_truncated_buf, kernel_only, &nx->nx_adv, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 	ASSERT(nx->nx_tx_pp == NULL || (nx->nx_tx_pp->pp_md_type ==
 	    NX_DOM(nx)->nxdom_md_type && nx->nx_tx_pp->pp_md_subtype ==
@@ -1016,7 +1016,7 @@ __netif_mib_get_queue_stats(struct kern_nexus *nx, void *out, size_t len)
 				nqi->nqi_qset_id = qset->nqs_id;
 				nqi->nqi_queue_idx = k;
 				if (KPKT_VALID_SVC(nq->nq_svc)) {
-					nqi->nqi_svc = nq->nq_svc;
+					nqi->nqi_svc = (packet_svc_class_t)nq->nq_svc;
 				}
 				if (nq->nq_flags & NETIF_QUEUE_IS_RX) {
 					nqi->nqi_queue_flag = NQI_QUEUE_FLAG_IS_RX;
@@ -1174,7 +1174,7 @@ nx_netif_dom_connect(struct kern_nexus_domain_provider *nxdom_prov,
 		 * This channel is exclusively opened to the host
 		 * rings; don't notify the external provider.
 		 */
-		atomic_bitset_32(&ch->ch_flags, CHANF_HOST | CHANF_EXT_SKIP);
+		os_atomic_or(&ch->ch_flags, CHANF_HOST | CHANF_EXT_SKIP, relaxed);
 		break;
 
 	default:
@@ -1182,7 +1182,7 @@ nx_netif_dom_connect(struct kern_nexus_domain_provider *nxdom_prov,
 		 * This channel is shared between netif and user process;
 		 * don't notify the external provider.
 		 */
-		atomic_bitset_32(&ch->ch_flags, CHANF_EXT_SKIP);
+		os_atomic_or(&ch->ch_flags, CHANF_EXT_SKIP, relaxed);
 		break;
 	}
 
@@ -1445,6 +1445,7 @@ nx_netif_clean(struct nx_netif *nif, boolean_t quiesce_needed)
 		ifnet_datamov_drain(ifp);
 		SK_LOCK();
 	}
+	nx_netif_callbacks_fini(nif);
 	nx_netif_agent_fini(nif);
 	nx_netif_capabilities_fini(nif);
 	nx_netif_flow_fini(nif);
@@ -1984,6 +1985,19 @@ nx_netif_na_notify_rx(struct __kern_channel_ring *kring, struct proc *p,
 	return ret;
 }
 
+static int
+nx_netif_na_notify_rx_redirect(struct __kern_channel_ring *kring, struct proc *p,
+    uint32_t flags)
+{
+	struct netif_stats *nifs =
+	    &NX_NETIF_PRIVATE(KRNA(kring)->na_nx)->nif_stats;
+	uint32_t work_done;
+
+	ASSERT(kring->ckr_tx == NR_RX);
+	STATS_INC(nifs, NETIF_STATS_RX_IRQ);
+	return nx_netif_common_intr(kring, p, flags, &work_done);
+}
+
 void
 nx_netif_mit_config(struct nexus_netif_adapter *nifna,
     boolean_t *tx_mit, boolean_t *tx_mit_simple,
@@ -2129,8 +2143,8 @@ nx_netif_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		for (r = 0; r < na_get_nrings(na, NR_RX); r++) {
 			na->na_rx_rings[r].ckr_netif_notify =
 			    na->na_rx_rings[r].ckr_na_notify;
-			na->na_rx_rings[r].ckr_na_notify =
-			    nx_netif_na_notify_rx;
+			na->na_rx_rings[r].ckr_na_notify = IFNET_IS_REDIRECT(ifp) ?
+			    nx_netif_na_notify_rx_redirect : nx_netif_na_notify_rx;
 			if (nifna->nifna_rx_mit != NULL) {
 				nx_netif_mit_init(nif, ifp,
 				    &nifna->nifna_rx_mit[r],
@@ -2139,7 +2153,7 @@ nx_netif_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		}
 		nx_netif_filter_enable(nif);
 		nx_netif_flow_enable(nif);
-		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_or(&na->na_flags, NAF_ACTIVE, relaxed);
 
 		/* steer all start requests to netif; this must not fail */
 		lck_mtx_lock(&ifp->if_start_lock);
@@ -2157,7 +2171,7 @@ nx_netif_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		 * Note that here we cannot assert SKYWALK_CAPABLE()
 		 * as we're called in the destructor path.
 		 */
-		atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_andnot(&na->na_flags, NAF_ACTIVE, relaxed);
 		nx_netif_flow_disable(nif);
 		nx_netif_filter_disable(nif);
 
@@ -2308,7 +2322,7 @@ __attribute__((optnone))
 		 */
 		na_flags |= NAF_MEM_NO_INIT;
 	}
-	atomic_bitset_32(&devna->na_flags, na_flags);
+	os_atomic_or(&devna->na_flags, na_flags, relaxed);
 	*(nexus_stats_type_t *)(uintptr_t)&devna->na_stats_type =
 	    NEXUS_STATS_TYPE_INVALID;
 
@@ -2387,7 +2401,7 @@ __attribute__((optnone))
 		 */
 		na_flags |= NAF_MEM_NO_INIT;
 	}
-	atomic_bitset_32(&hostna->na_flags, na_flags);
+	os_atomic_or(&hostna->na_flags, na_flags, relaxed);
 	*(nexus_stats_type_t *)(uintptr_t)&hostna->na_stats_type =
 	    NEXUS_STATS_TYPE_INVALID;
 
@@ -2571,6 +2585,35 @@ nx_netif_flags_fini(struct nx_netif *nif)
 	nif->nif_flags = 0;
 }
 
+SK_NO_INLINE_ATTRIBUTE
+static void
+nx_netif_callbacks_init(struct nx_netif *nif)
+{
+	ifnet_t ifp = nif->nif_ifp;
+
+	/*
+	 * XXX
+	 * This function is meant to be called by na_netif_finalize(), which is
+	 * called by ifnet_attach() while holding if_lock exclusively.
+	 */
+	ifnet_lock_assert(ifp, IFNET_LCK_ASSERT_EXCLUSIVE);
+	if (ifnet_is_low_latency(ifp)) {
+		ifnet_set_detach_notify_locked(ifp,
+		    nx_netif_llw_detach_notify, ifp->if_na);
+	}
+}
+
+SK_NO_INLINE_ATTRIBUTE
+static void
+nx_netif_callbacks_fini(struct nx_netif *nif)
+{
+	ifnet_t ifp = nif->nif_ifp;
+
+	if (ifnet_is_low_latency(ifp)) {
+		ifnet_set_detach_notify(ifp, NULL, NULL);
+	}
+}
+
 static void
 configure_capab_interface_advisory(struct nx_netif *nif,
     nxprov_capab_config_fn_t capab_fn)
@@ -2703,15 +2746,16 @@ nx_netif_capabilities_fini(struct nx_netif *nif)
 }
 
 static void
-nx_netif_verify_tso_config(struct nx_netif *nif, struct ifnet *ifp)
+nx_netif_verify_tso_config(struct nx_netif *nif)
 {
+	ifnet_t ifp = nif->nif_ifp;
 	uint32_t tso_v4_mtu = 0;
 	uint32_t tso_v6_mtu = 0;
 
-	if ((nif->nif_hwassist & IFNET_TSO_IPV4) != 0) {
+	if ((ifp->if_hwassist & IFNET_TSO_IPV4) != 0) {
 		tso_v4_mtu = ifp->if_tso_v4_mtu;
 	}
-	if ((nif->nif_hwassist & IFNET_TSO_IPV6) != 0) {
+	if ((ifp->if_hwassist & IFNET_TSO_IPV6) != 0) {
 		tso_v6_mtu = ifp->if_tso_v6_mtu;
 	}
 	VERIFY(PP_BUF_SIZE_DEF(nif->nif_nx->nx_tx_pp) >=
@@ -2756,7 +2800,8 @@ na_netif_finalize(struct nexus_netif_adapter *nifna, struct ifnet *ifp)
 	nx_netif_agent_init(nif);
 	(void) nxctl_inet_traffic_rule_get_count(ifp->if_xname,
 	    &ifp->if_traffic_rule_count);
-	nx_netif_verify_tso_config(nif, ifp);
+	nx_netif_verify_tso_config(nif);
+	nx_netif_callbacks_init(nif);
 }
 
 void
@@ -2814,8 +2859,9 @@ nx_netif_reap(struct nexus_netif_adapter *nifna, struct ifnet *ifp,
  *    references held by the device and host ports (nx_netif_clean()).
  */
 void
-nx_netif_detach_notify(struct nexus_netif_adapter *nifna)
+nx_netif_llw_detach_notify(void *arg)
 {
+	struct nexus_netif_adapter *nifna = arg;
 	struct nx_netif *nif = nifna->nifna_netif;
 	struct kern_nexus *nx = nif->nif_nx;
 	struct kern_channel **ch_list = NULL;
@@ -2978,13 +3024,13 @@ nx_netif_na_special_common(struct nexus_adapter *na, struct kern_channel *ch,
 		}
 		ASSERT(!(na->na_flags & NAF_SPEC_INIT));
 
-		atomic_bitset_32(&na->na_flags, NAF_KERNEL_ONLY);
+		os_atomic_or(&na->na_flags, NAF_KERNEL_ONLY, relaxed);
 		error = na_bind_channel(na, ch, chr);
 		if (error != 0) {
-			atomic_bitclear_32(&na->na_flags, NAF_KERNEL_ONLY);
+			os_atomic_andnot(&na->na_flags, NAF_KERNEL_ONLY, relaxed);
 			goto done;
 		}
-		atomic_bitset_32(&na->na_flags, NAF_SPEC_INIT);
+		os_atomic_or(&na->na_flags, NAF_SPEC_INIT, relaxed);
 		break;
 
 	case NXSPEC_CMD_DISCONNECT:
@@ -2992,8 +3038,7 @@ nx_netif_na_special_common(struct nexus_adapter *na, struct kern_channel *ch,
 		ASSERT(na->na_channels > 0);
 		ASSERT(na->na_flags & NAF_SPEC_INIT);
 		na_unbind_channel(ch);
-		atomic_bitclear_32(&na->na_flags,
-		    (NAF_SPEC_INIT | NAF_KERNEL_ONLY));
+		os_atomic_andnot(&na->na_flags, (NAF_SPEC_INIT | NAF_KERNEL_ONLY), relaxed);
 		break;
 
 	case NXSPEC_CMD_START:
@@ -3284,7 +3329,12 @@ nx_netif_interface_advisory_report(struct kern_nexus *nx,
 	struct kern_nexus *notify_nx;
 	struct __kern_netif_intf_advisory *intf_adv;
 	struct nx_netif *nif = NX_NETIF_PRIVATE(nx);
+	ifnet_t difp = nif->nif_ifp, parent = NULL;
 
+	/* If we are a delegate, notify the parent instead */
+	if (ifnet_get_delegate_parent(difp, &parent) == 0) {
+		nif = parent->if_na->nifna_netif;
+	}
 	if (nif->nif_fsw_nxadv != NULL) {
 		ASSERT(nif->nif_fsw != NULL);
 		intf_adv = &nif->nif_fsw_nxadv->_nxadv_intf_adv;
@@ -3303,6 +3353,9 @@ nx_netif_interface_advisory_report(struct kern_nexus *nx,
 	 * notify user channels on advisory report availability
 	 */
 	nx_interface_advisory_notify(notify_nx);
+	if (parent != NULL) {
+		ifnet_release_delegate_parent(difp);
+	}
 	return 0;
 }
 
@@ -3366,28 +3419,6 @@ nx_netif_config_interface_advisory(struct kern_nexus *nx, bool enable)
 	if (nif->nif_intf_adv_config != NULL) {
 		nif->nif_intf_adv_config(nif->nif_intf_adv_prov_ctx, enable);
 	}
-}
-
-void
-nx_netif_get_interface_tso_capabilities(struct ifnet *ifp, uint32_t *tso_v4_mtu,
-    uint32_t *tso_v6_mtu)
-{
-#pragma unused (ifp)
-	*tso_v4_mtu = 0;
-	*tso_v6_mtu = 0;
-
-#ifdef XNU_TARGET_OS_OSX
-	if (SKYWALK_CAPABLE(ifp) && SKYWALK_NATIVE(ifp)) {
-		struct nx_netif *nif = NA(ifp)->nifna_netif;
-
-		if ((nif->nif_hwassist & IFNET_TSO_IPV4) != 0) {
-			*tso_v4_mtu = ifp->if_tso_v4_mtu;
-		}
-		if ((nif->nif_hwassist & IFNET_TSO_IPV6) != 0) {
-			*tso_v6_mtu = ifp->if_tso_v6_mtu;
-		}
-	}
-#endif /* XNU_TARGET_OS_OSX */
 }
 
 /*
@@ -3786,11 +3817,10 @@ netif_hwna_config_mode(struct nexus_adapter *hwna, netif_mode_t mode,
 	if (set) {
 		hwna->na_rx = rx;
 		flag = netif_mode_to_flag(mode);
-		atomic_bitset_32(&hwna->na_flags, flag);
+		os_atomic_or(&hwna->na_flags, flag, relaxed);
 	} else {
 		hwna->na_rx = NULL;
-		atomic_bitclear_32(&hwna->na_flags,
-		    (NAF_MODE_FSW | NAF_MODE_LLW));
+		os_atomic_andnot(&hwna->na_flags, (NAF_MODE_FSW | NAF_MODE_LLW), relaxed);
 	}
 }
 
@@ -3987,12 +4017,14 @@ netif_use_starter_thread(struct ifnet *ifp, uint32_t flags)
 	 * - caller is in rx workloop context
 	 * - caller is from the flowswitch path doing ARP resolving
 	 * - caller requires the use of starter thread (stack usage)
+	 * - caller requires starter thread for pacing
 	 */
 	if (!SKYWALK_NATIVE(ifp) || NA(ifp) == NULL ||
 	    !NA_IS_ACTIVE(&NA(ifp)->nifna_up) ||
 	    ((NA(ifp)->nifna_up.na_flags & NAF_VIRTUAL_DEVICE) != 0) ||
 	    IFCQ_TBR_IS_ENABLED(ifp->if_snd) ||
 	    (ifp->if_eflags & IFEF_ENQUEUE_MULTI) ||
+	    (flags & NETIF_XMIT_FLAG_PACING) != 0 ||
 	    sk_is_rx_notify_protected() ||
 	    sk_is_async_transmit_protected() ||
 	    (sk_is_sync_protected() && (flags & NETIF_XMIT_FLAG_HOST) != 0)) {
@@ -4343,11 +4375,11 @@ kern_netif_increment_queue_stats(kern_netif_queue_t queue,
 	struct netif_llink *llink = queue->nq_qset->nqs_llink;
 	struct ifnet *ifp = llink->nll_nif->nif_ifp;
 	if ((queue->nq_flags & NETIF_QUEUE_IS_RX) == 0) {
-		atomic_add_64(&ifp->if_data.ifi_opackets, pkt_count);
-		atomic_add_64(&ifp->if_data.ifi_obytes, byte_count);
+		os_atomic_add(&ifp->if_data.ifi_opackets, pkt_count, relaxed);
+		os_atomic_add(&ifp->if_data.ifi_obytes, byte_count, relaxed);
 	} else {
-		atomic_add_64(&ifp->if_data.ifi_ipackets, pkt_count);
-		atomic_add_64(&ifp->if_data.ifi_ibytes, byte_count);
+		os_atomic_add(&ifp->if_data.ifi_ipackets, pkt_count, relaxed);
+		os_atomic_add(&ifp->if_data.ifi_ibytes, byte_count, relaxed);
 	}
 
 	if (ifp->if_data_threshold != 0) {

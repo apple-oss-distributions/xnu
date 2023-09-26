@@ -67,8 +67,8 @@ pinned_test_main_thread_mod_ref(void)
 	printf("[Crasher pinned_test_main_thread_mod_ref] mach_port_mod_refs returned %s \n.", mach_error_string(kr));
 }
 
-static void*
-pthread_run(void)
+static void* _Nullable
+pthread_run(void *_Nullable)
 {
 	printf("[Crasher]: Deallocate pthread_self\n");
 	mach_port_t th_self = pthread_mach_thread_np(pthread_self());

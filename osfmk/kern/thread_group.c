@@ -382,15 +382,9 @@ thread_group_clear_flags(struct thread_group *tg, uint32_t flags)
 /*
  * Set thread group flags and perform related actions.
  * The tg_flags_update_lock should be held.
- * Currently supported flags are:
- * Exclusive Flags:
- * - THREAD_GROUP_FLAGS_EFFICIENT
- * - THREAD_GROUP_FLAGS_APPLICATION
- * - THREAD_GROUP_FLAGS_CRITICAL
- * Shared Flags:
- * - THREAD_GROUP_FLAGS_UI_APP
+ * Currently supported flags are listed in the
+ * THREAD_GROUP_FLAGS_EXCLUSIVE and THREAD_GROUP_FLAGS_SHARED masks.
  */
-
 void
 thread_group_set_flags_locked(struct thread_group *tg, uint32_t flags)
 {
@@ -433,15 +427,9 @@ thread_group_set_flags_locked(struct thread_group *tg, uint32_t flags)
 /*
  * Clear thread group flags and perform related actions
  * The tg_flags_update_lock should be held.
- * Currently supported flags are:
- * Exclusive Flags:
- * - THREAD_GROUP_FLAGS_EFFICIENT
- * - THREAD_GROUP_FLAGS_APPLICATION
- * - THREAD_GROUP_FLAGS_CRITICAL
- * Shared Flags:
- * - THREAD_GROUP_FLAGS_UI_APP
+ * Currently supported flags are listed in the
+ * THREAD_GROUP_FLAGS_EXCLUSIVE and THREAD_GROUP_FLAGS_SHARED masks.
  */
-
 void
 thread_group_clear_flags_locked(struct thread_group *tg, uint32_t flags)
 {
@@ -1351,12 +1339,31 @@ sched_perfcontrol_thread_group_preferred_clusters_set(void *machine_data, uint32
 	uint32_t tg_bucket_preferred_cluster[TH_BUCKET_SCHED_MAX] = {
 		[TH_BUCKET_FIXPRI]   = (overrides[PERFCONTROL_CLASS_ABOVEUI] != SCHED_PERFCONTROL_PREFERRED_CLUSTER_OVERRIDE_NONE) ? overrides[PERFCONTROL_CLASS_ABOVEUI] : tg_preferred_cluster,
 		[TH_BUCKET_SHARE_FG] = (overrides[PERFCONTROL_CLASS_UI] != SCHED_PERFCONTROL_PREFERRED_CLUSTER_OVERRIDE_NONE) ? overrides[PERFCONTROL_CLASS_UI] : tg_preferred_cluster,
-		[TH_BUCKET_SHARE_IN] = (overrides[PERFCONTROL_CLASS_UI] != SCHED_PERFCONTROL_PREFERRED_CLUSTER_OVERRIDE_NONE) ? overrides[PERFCONTROL_CLASS_UI] : tg_preferred_cluster,
+		[TH_BUCKET_SHARE_IN] = (overrides[PERFCONTROL_CLASS_USER_INITIATED] != SCHED_PERFCONTROL_PREFERRED_CLUSTER_OVERRIDE_NONE) ? overrides[PERFCONTROL_CLASS_USER_INITIATED] : tg_preferred_cluster,
 		[TH_BUCKET_SHARE_DF] = (overrides[PERFCONTROL_CLASS_NONUI] != SCHED_PERFCONTROL_PREFERRED_CLUSTER_OVERRIDE_NONE) ? overrides[PERFCONTROL_CLASS_NONUI] : tg_preferred_cluster,
 		[TH_BUCKET_SHARE_UT] = (overrides[PERFCONTROL_CLASS_UTILITY] != SCHED_PERFCONTROL_PREFERRED_CLUSTER_OVERRIDE_NONE) ? overrides[PERFCONTROL_CLASS_UTILITY] : tg_preferred_cluster,
 		[TH_BUCKET_SHARE_BG] = (overrides[PERFCONTROL_CLASS_BACKGROUND] != SCHED_PERFCONTROL_PREFERRED_CLUSTER_OVERRIDE_NONE) ? overrides[PERFCONTROL_CLASS_BACKGROUND] : tg_preferred_cluster,
 	};
 	sched_edge_tg_preferred_cluster_change(tg, tg_bucket_preferred_cluster, options);
+}
+
+void
+sched_perfcontrol_edge_cpu_rotation_bitmasks_set(uint32_t cluster_id, uint64_t preferred_bitmask, uint64_t migration_bitmask)
+{
+	assert(cluster_id < MAX_PSETS);
+	assert((preferred_bitmask & migration_bitmask) == 0);
+	processor_set_t pset = pset_array[cluster_id];
+	pset->perfcontrol_cpu_preferred_bitmask = preferred_bitmask;
+	pset->perfcontrol_cpu_migration_bitmask = migration_bitmask;
+}
+
+void
+sched_perfcontrol_edge_cpu_rotation_bitmasks_get(uint32_t cluster_id, uint64_t *preferred_bitmask, uint64_t *migration_bitmask)
+{
+	assert(cluster_id < MAX_PSETS);
+	processor_set_t pset = pset_array[cluster_id];
+	*preferred_bitmask = pset->perfcontrol_cpu_preferred_bitmask;
+	*migration_bitmask = pset->perfcontrol_cpu_migration_bitmask;
 }
 
 #else /* CONFIG_SCHED_EDGE */
@@ -1381,6 +1388,16 @@ sched_perfcontrol_edge_matrix_set(__unused sched_clutch_edge *edge_matrix, __unu
 void
 sched_perfcontrol_thread_group_preferred_clusters_set(__unused void *machine_data, __unused uint32_t tg_preferred_cluster,
     __unused uint32_t overrides[PERFCONTROL_CLASS_MAX], __unused sched_perfcontrol_preferred_cluster_options_t options)
+{
+}
+
+void
+sched_perfcontrol_edge_cpu_rotation_bitmasks_set(__unused uint32_t cluster_id, __unused uint64_t preferred_bitmask, __unused uint64_t migration_bitmask)
+{
+}
+
+void
+sched_perfcontrol_edge_cpu_rotation_bitmasks_get(__unused uint32_t cluster_id, __unused uint64_t *preferred_bitmask, __unused uint64_t *migration_bitmask)
 {
 }
 

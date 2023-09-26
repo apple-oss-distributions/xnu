@@ -205,6 +205,12 @@ os_packet_set_inet_checksum(const packet_t ph, const packet_csum_flags_t flags,
 	return __packet_set_inet_checksum(ph, flags, start, stuff, TRUE);
 }
 
+void
+os_packet_add_inet_csum_flags(const packet_t ph, const packet_csum_flags_t flags)
+{
+	__packet_add_inet_csum_flags(ph, flags);
+}
+
 packet_csum_flags_t
 os_packet_get_inet_checksum(const packet_t ph, uint16_t *start, uint16_t *val)
 {
@@ -359,9 +365,9 @@ os_packet_get_truncated(const packet_t ph)
 }
 
 void
-os_packet_set_l4s_flag(const packet_t ph, const boolean_t is_l4s)
+os_packet_set_l4s_flag(const packet_t ph)
 {
-	__packet_set_l4s_flag(ph, is_l4s);
+	__packet_set_l4s_flag(ph);
 }
 
 uint32_t
@@ -427,6 +433,12 @@ os_packet_get_aggregation_type(const packet_t ph)
 	return __packet_get_aggregation_type(ph);
 }
 
+void
+os_packet_set_tx_timestamp(const packet_t ph, const uint64_t ts)
+{
+	__packet_set_tx_timestamp(ph, ts);
+}
+
 uint32_t
 os_inet_checksum(const void *data, uint32_t len, uint32_t sum0)
 {
@@ -441,26 +453,26 @@ os_copy_and_inet_checksum(const void *src, void *dst, uint32_t len,
 	return __packet_fold_sum_final(sum);
 }
 
-uint16_t
+uint32_t
 os_buflet_get_data_offset(const buflet_t buf)
 {
 	return __buflet_get_data_offset(buf);
 }
 
-uint16_t
+uint32_t
 os_buflet_get_data_length(const buflet_t buf)
 {
 	return __buflet_get_data_length(buf);
 }
 
 int
-os_buflet_set_data_offset(const buflet_t buf, const uint16_t doff)
+os_buflet_set_data_offset(const buflet_t buf, const uint32_t doff)
 {
 	return __buflet_set_data_offset(buf, doff);
 }
 
 int
-os_buflet_set_data_length(const buflet_t buf, const uint16_t dlen)
+os_buflet_set_data_length(const buflet_t buf, const uint32_t dlen)
 {
 	return __buflet_set_data_length(buf, dlen);
 }
@@ -483,28 +495,10 @@ os_buflet_get_data_address(const buflet_t buf)
 	return __buflet_get_data_address(buf);
 }
 
-uint16_t
+uint32_t
 os_buflet_get_data_limit(const buflet_t buf)
 {
 	return __buflet_get_data_limit(buf);
-}
-
-uint16_t
-os_buflet_get_object_offset(const buflet_t buf)
-{
-	return __buflet_get_buffer_offset(buf);
-}
-
-uint16_t
-os_buflet_get_gro_len(const buflet_t buf)
-{
-	return __buflet_get_gro_len(buf);
-}
-
-void *
-os_buflet_get_next_buf(const buflet_t buflet, const void *prev_buf)
-{
-	return __buflet_get_next_buf(buflet, prev_buf);
 }
 
 packet_trace_id_t

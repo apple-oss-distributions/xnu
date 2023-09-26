@@ -189,8 +189,8 @@ __XNU_PRIVATE_EXTERN char drivercorefilename[MAXPATHLEN + 1] = {"/private/var/in
 #elif defined(XNU_TARGET_OS_OSX)
 __XNU_PRIVATE_EXTERN const char * defaultcorefiledir = "/cores";
 __XNU_PRIVATE_EXTERN char corefilename[MAXPATHLEN + 1] = {"/cores/core.%P"};
-__XNU_PRIVATE_EXTERN const char * defaultdrivercorefiledir = "/cores";
-__XNU_PRIVATE_EXTERN char drivercorefilename[MAXPATHLEN + 1] = {"/cores/core.%P"};
+__XNU_PRIVATE_EXTERN const char * defaultdrivercorefiledir = "/private/var/dextcores";
+__XNU_PRIVATE_EXTERN char drivercorefilename[MAXPATHLEN + 1] = {"/private/var/dextcores/%N.core"};
 #else
 __XNU_PRIVATE_EXTERN const char * defaultcorefiledir = "/private/var/cores";
 __XNU_PRIVATE_EXTERN char corefilename[MAXPATHLEN + 1] = {"/private/var/cores/%N.core"};
@@ -762,16 +762,19 @@ proc_ref(proc_t p, int locked)
 }
 
 static void
-proc_free(void *_p)
+proc_wait_free(smr_node_t node)
 {
-	proc_release_proc_task_struct(_p);
+	struct proc *p = __container_of(node, struct proc, p_smr_node);
+
+	proc_release_proc_task_struct(p);
 }
 
 void
 proc_wait_release(proc_t p)
 {
 	if (__probable(os_ref_release_raw(&p->p_waitref, &p_refgrp) == 0)) {
-		smr_global_retire(p, sizeof(*p), proc_free);
+		smr_proc_task_call(&p->p_smr_node, proc_and_task_size,
+		    proc_wait_free);
 	}
 }
 
@@ -896,12 +899,27 @@ proc_ref_hold_proc_task_struct(proc_t proc)
 	os_atomic_or(&proc->p_refcount, P_REF_PROC_HOLD, relaxed);
 }
 
+static void
+proc_free(proc_t proc)
+{
+	proc_ro_t proc_ro = proc->p_proc_ro;
+	kauth_cred_t cred;
+
+	if (proc_ro) {
+		cred = smr_serialized_load(&proc_ro->p_ucred);
+
+		kauth_cred_set(&cred, NOCRED);
+		zfree_ro(ZONE_ID_PROC_RO, proc_ro);
+	}
+	zfree(proc_task_zone, proc);
+}
+
 void
 proc_release_proc_task_struct(proc_t proc)
 {
 	uint32_t old_ref = os_atomic_andnot_orig(&proc->p_refcount, P_REF_PROC_HOLD, relaxed);
 	if ((old_ref & P_REF_TASK_HOLD) == 0) {
-		zfree(proc_task_zone, proc);
+		proc_free(proc);
 	}
 }
 
@@ -919,7 +937,7 @@ task_release_proc_task_struct(task_t task)
 	uint32_t old_ref = os_atomic_andnot_orig(&proc_from_task->p_refcount, P_REF_TASK_HOLD, relaxed);
 
 	if ((old_ref & P_REF_PROC_HOLD) == 0) {
-		zfree(proc_task_zone, proc_from_task);
+		proc_free(proc_from_task);
 	}
 }
 
@@ -1589,9 +1607,25 @@ proc_thread(proc_t proc)
 }
 
 kauth_cred_t
-proc_ucred(proc_t p)
+proc_ucred_unsafe(proc_t p)
 {
-	return kauth_cred_require(proc_get_ro(p)->p_ucred);
+	kauth_cred_t cred = smr_serialized_load(&proc_get_ro(p)->p_ucred);
+
+	return kauth_cred_require(cred);
+}
+
+kauth_cred_t
+proc_ucred_smr(proc_t p)
+{
+	assert(smr_entered(&smr_proc_task));
+	return proc_ucred_unsafe(p);
+}
+
+kauth_cred_t
+proc_ucred_locked(proc_t p)
+{
+	LCK_MTX_ASSERT(&p->p_ucred_mlock, LCK_ASSERT_OWNED);
+	return proc_ucred_unsafe(p);
 }
 
 struct uthread *
@@ -1799,55 +1833,6 @@ proc_getexecutableuuid(proc_t p, unsigned char *uuidbuf, unsigned long size)
 	}
 }
 
-void
-proc_set_ucred(proc_t p, kauth_cred_t cred)
-{
-	kauth_cred_t my_cred = proc_ucred(p);
-
-	/* update the field first so the proc never points to a freed cred. */
-	zalloc_ro_update_field(ZONE_ID_PROC_RO, proc_get_ro(p), p_ucred, &cred);
-
-	kauth_cred_set(&my_cred, cred);
-}
-
-bool
-proc_update_label(proc_t p, bool setugid,
-    kauth_cred_t (^update_cred)(kauth_cred_t))
-{
-	kauth_cred_t cur_cred;
-	kauth_cred_t new_cred;
-	bool changed = false;
-
-	cur_cred = kauth_cred_proc_ref(p);
-retry:
-	new_cred = update_cred(cur_cred);
-	if (new_cred != cur_cred) {
-		proc_ucred_lock(p);
-
-		/* Compare again under the lock. */
-		if (__improbable(proc_ucred(p) != cur_cred)) {
-			proc_ucred_unlock(p);
-			kauth_cred_unref(&new_cred);
-			cur_cred = kauth_cred_proc_ref(p);
-			goto retry;
-		}
-
-		proc_set_ucred(p, new_cred);
-		proc_update_creds_onproc(p);
-		proc_ucred_unlock(p);
-
-		if (setugid) {
-			OSBitOrAtomic(P_SUGID, &p->p_flag);
-			set_security_token(p);
-		}
-
-		changed = true;
-	}
-
-	kauth_cred_unref(&new_cred);
-	return changed;
-}
-
 /* Return vnode for executable with an iocount. Must be released with vnode_put() */
 vnode_t
 proc_getexecutablevnode(proc_t p)
@@ -1856,6 +1841,24 @@ proc_getexecutablevnode(proc_t p)
 
 	if (tvp != NULLVP) {
 		if (vnode_getwithref(tvp) == 0) {
+			return tvp;
+		}
+	}
+
+	return NULLVP;
+}
+
+/*
+ * Similar to proc_getexecutablevnode() but returns NULLVP if the vnode is
+ * being reclaimed rather than blocks until reclaim is done.
+ */
+vnode_t
+proc_getexecutablevnode_noblock(proc_t p)
+{
+	vnode_t tvp  = p->p_textvp;
+
+	if (tvp != NULLVP) {
+		if (vnode_getwithref_noblock(tvp) == 0) {
 			return tvp;
 		}
 	}
@@ -1986,8 +1989,7 @@ IS_64BIT_PROCESS(proc_t p)
 #endif
 
 SMRH_TRAITS_DEFINE_SCALAR(pid_hash_traits, struct proc, p_pid, p_hash,
-    .domain = &smr_system,
-    );
+    .domain = &smr_proc_task);
 
 /*
  * Locate a process by number
@@ -1996,7 +1998,6 @@ proc_t
 phash_find_locked(pid_t pid)
 {
 	smrh_key_t key = SMRH_SCALAR_KEY(pid);
-	proc_t p;
 
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
@@ -2004,8 +2005,7 @@ phash_find_locked(pid_t pid)
 		return kernproc;
 	}
 
-	p = smr_hash_serialized_find(&pid_hash, key, &pid_hash_traits);
-	return p && p->p_proc_ro ? p : PROC_NULL;
+	return smr_hash_serialized_find(&pid_hash, key, &pid_hash_traits);
 }
 
 void
@@ -2052,13 +2052,13 @@ retry:
 	bits = 0;
 	shadow_proc = false;
 
-	smr_global_enter();
+	smr_proc_task_enter();
 	p = smr_hash_entered_find(&pid_hash, key, &pid_hash_traits);
-	if (p && p->p_proc_ro) {
+	if (p) {
 		bits = proc_ref_try_fast(p);
 		shadow_proc = !!proc_is_shadow(p);
 	}
-	smr_global_leave();
+	smr_proc_task_leave();
 
 	/* Retry if the proc is a shadow proc */
 	if (shadow_proc) {
@@ -2190,9 +2190,8 @@ pg_ref(struct pgrp *pgrp)
 }
 
 SMRH_TRAITS_DEFINE_SCALAR(pgrp_hash_traits, struct pgrp, pg_id, pg_hash,
-    .domain = &smr_system,
-    .obj_try_get = pgrp_hash_obj_try_get,
-    );
+    .domain      = &smr_proc_task,
+    .obj_try_get = pgrp_hash_obj_try_get);
 
 /*
  * Locate a process group by number
@@ -2582,9 +2581,11 @@ pgrp_enter_locked(struct proc *parent, struct proc *child)
  * delete a process group
  */
 static void
-pgrp_free(void *_pg)
+pgrp_free(smr_node_t node)
 {
-	zfree(pgrp_zone, _pg);
+	struct pgrp *pgrp = __container_of(node, struct pgrp, pg_smr_node);
+
+	zfree(pgrp_zone, pgrp);
 }
 
 __attribute__((noinline))
@@ -2606,7 +2607,7 @@ pgrp_destroy(struct pgrp *pgrp)
 
 	lck_mtx_destroy(&pgrp->pg_mlock, &proc_mlock_grp);
 	if (os_ref_release_raw(&pgrp->pg_hashref, &p_refgrp) == 0) {
-		smr_global_retire(pgrp, sizeof(*pgrp), pgrp_free);
+		smr_proc_task_call(&pgrp->pg_smr_node, sizeof(*pgrp), pgrp_free);
 	}
 }
 
@@ -2980,6 +2981,15 @@ bool
 proc_use_alternative_symlink_ea(proc_t p)
 {
 	return os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_ALTLINK;
+}
+
+bool
+proc_allow_nocache_write_fs_blksize(proc_t p)
+{
+	struct uthread *ut = get_bsdthread_info(current_thread());
+
+	return (ut && (ut->uu_flag & UT_FS_BLKSIZE_NOCACHE_WRITES)) ||
+	       os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE;
 }
 
 bool
@@ -4018,10 +4028,10 @@ proc_pgrp(proc_t p, struct session **sessp)
 	bool success = false;
 
 	if (__probable(p != PROC_NULL)) {
-		smr_global_enter();
+		smr_proc_task_enter();
 		pgrp = smr_entered_load(&p->p_pgrp);
 		success = pgrp == PGRP_NULL || pg_ref_try(pgrp);
-		smr_global_leave();
+		smr_proc_task_leave();
 
 		if (__improbable(!success)) {
 			/*
@@ -4904,12 +4914,6 @@ proc_ro_alloc(proc_t p, proc_ro_data_t p_data, task_t t, task_ro_data_t t_data)
 	return pr;
 }
 
-void
-proc_ro_free(proc_ro_t pr)
-{
-	zfree_ro(ZONE_ID_PROC_RO, pr);
-}
-
 proc_ro_t
 proc_ro_ref_task(proc_ro_t pr, task_t t, task_ro_data_t t_data)
 {
@@ -4928,48 +4932,11 @@ proc_ro_ref_task(proc_ro_t pr, task_t t, task_ro_data_t t_data)
 	return pr;
 }
 
-proc_ro_t
-proc_ro_release_proc(proc_ro_t pr)
+void
+proc_ro_erase_task(proc_ro_t pr)
 {
-	/*
-	 * No need to take a lock in here: when called in the racy case
-	 * (reap_child_locked vs task_deallocate_internal), the proc list is
-	 * already held.  All other callsites are not racy.
-	 */
-	if (pr->pr_task == TASK_NULL) {
-		/* We're dropping the last ref. */
-		return pr;
-	} else if (pr->pr_proc != PROC_NULL) {
-		/* Task still has a ref, so just clear the proc owner. */
-		zalloc_ro_clear_field(ZONE_ID_PROC_RO, pr, pr_proc);
-	}
-
-	return NULL;
-}
-
-proc_ro_t
-proc_ro_release_task(proc_ro_t pr)
-{
-	/*
-	 * We take the proc list here to avoid a race between a child proc being
-	 * reaped and the associated task being deallocated.
-	 *
-	 * This function is only ever called in the racy case
-	 * (task_deallocate_internal), so we always take the lock.
-	 */
-	proc_list_lock();
-
-	if (pr->pr_proc == PROC_NULL) {
-		/* We're dropping the last ref. */
-		proc_list_unlock();
-		return pr;
-	} else if (pr->pr_task != TASK_NULL) {
-		/* Proc still has a ref, so just clear the task owner. */
-		zalloc_ro_clear_field(ZONE_ID_PROC_RO, pr, pr_task);
-	}
-
-	proc_list_unlock();
-	return NULL;
+	zalloc_ro_update_field_atomic(ZONE_ID_PROC_RO,
+	    pr, pr_task, ZRO_ATOMIC_XCHG_LONG, TASK_NULL);
 }
 
 __abortlike
@@ -4977,7 +4944,7 @@ static void
 panic_proc_ro_proc_backref_mismatch(proc_t p, proc_ro_t ro)
 {
 	panic("proc_ro->proc backref mismatch: p=%p, ro=%p, "
-	    "proc_ro_proc(ro)=%p", p, ro, proc_ro_proc(ro));
+	    "ro->pr_proc(ro)=%p", p, ro, ro->pr_proc);
 }
 
 proc_ro_t
@@ -4986,27 +4953,11 @@ proc_get_ro(proc_t p)
 	proc_ro_t ro = p->p_proc_ro;
 
 	zone_require_ro(ZONE_ID_PROC_RO, sizeof(struct proc_ro), ro);
-	if (__improbable(proc_ro_proc(ro) != p)) {
+	if (__improbable(ro->pr_proc != p)) {
 		panic_proc_ro_proc_backref_mismatch(p, ro);
 	}
 
 	return ro;
-}
-
-proc_ro_t
-current_proc_ro(void)
-{
-	if (__improbable(current_thread_ro()->tro_proc == NULL)) {
-		return kernproc->p_proc_ro;
-	}
-
-	return current_thread_ro()->tro_proc_ro;
-}
-
-proc_t
-proc_ro_proc(proc_ro_t pr)
-{
-	return pr->pr_proc;
 }
 
 task_t

@@ -13,8 +13,6 @@
 #include <darwintest_utils.h>
 #include <darwintest_multiprocess.h>
 
-#define RDAR_104863182
-
 #ifndef INVALID_AUDIT_TOKEN_VALUE
 #define INVALID_AUDIT_TOKEN_VALUE {{ \
 	UINT_MAX, UINT_MAX, UINT_MAX, UINT_MAX, \
@@ -43,12 +41,31 @@ get_asid_auid(au_asid_t *asidp, au_id_t *auidp)
 	audit_token_t token = INVALID_AUDIT_TOKEN_VALUE;
 	mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
 	T_ASSERT_MACH_SUCCESS(task_info(mach_task_self(), TASK_AUDIT_TOKEN, (task_info_t)&token, &count), "obtain audit token for self");
+	T_LOG("Task audit token for pid %d has asid %d auid %d", (int)getpid(), (int)token.val[6], (int)token.val[0]);
 	if (asidp) {
 		*asidp = (au_asid_t)token.val[6];
 	}
 	if (auidp) {
 		*auidp = (au_id_t)token.val[0];
 	}
+}
+
+static void
+tlog_aia(struct auditinfo_addr *aiap, const char *label)
+{
+	T_LOG("%s:", label);
+
+	// Match formatting used by `id -A`
+	T_LOG("auid=%d", aiap->ai_auid);
+	T_LOG("mask.success=0x%08x", aiap->ai_mask.am_success);
+	T_LOG("mask.failure=0x%08x", aiap->ai_mask.am_failure);
+	T_LOG("asid=%d", aiap->ai_asid);
+	T_LOG("termid_addr.port=0x%08jx", (uintmax_t)aiap->ai_termid.at_port);
+	T_LOG("termid_addr.addr[0]=0x%08x", aiap->ai_termid.at_addr[0]);
+	T_LOG("termid_addr.addr[1]=0x%08x", aiap->ai_termid.at_addr[1]);
+	T_LOG("termid_addr.addr[2]=0x%08x", aiap->ai_termid.at_addr[2]);
+	T_LOG("termid_addr.addr[3]=0x%08x", aiap->ai_termid.at_addr[3]);
+	T_LOG("flags=0x%llx", aiap->ai_flags);
 }
 
 T_DECL(getaudit_addr, "getaudit_addr smoke test")
@@ -63,7 +80,9 @@ T_DECL(getaudit_addr, "getaudit_addr smoke test")
 		T_SKIP("Kernel support for getaudit_addr(2) not available");
 	}
 	T_ASSERT_POSIX_SUCCESS(rv_from_getaudit_addr, "getaudit_addr(2) succeeds");
+	tlog_aia(&aia, "aia");
 	T_EXPECT_EQ(aia.ai_auid, auid, NULL);
+	T_EXPECT_NE(aia.ai_auid, AU_DEFAUDITID, NULL);
 	// any ai_mask
 	// any ai_termid
 	T_EXPECT_EQ(aia.ai_asid, asid, NULL);
@@ -83,6 +102,7 @@ T_DECL(getauid, "getauid smoke test")
 	}
 	T_ASSERT_POSIX_SUCCESS(rv_from_getauid, "getauid(2) succeeds");
 	T_EXPECT_EQ(auid2, auid, NULL);
+	T_EXPECT_NE(auid2, AU_DEFAUDITID, NULL);
 }
 
 T_DECL(auditon_getsflags, "auditon(A_GETSFLAGS) smoke test")
@@ -113,6 +133,7 @@ T_DECL(auditon_getpinfo_addr, "auditon(A_GETPINFO_ADDR) smoke test")
 	T_EXPECT_EQ(apia.ap_pid, getpid(), NULL);
 	T_EXPECT_EQ(apia.ap_asid, asid, NULL);
 	T_EXPECT_EQ(apia.ap_auid, auid, NULL);
+	T_EXPECT_NE(apia.ap_auid, AU_DEFAUDITID, NULL);
 	// any ap_mask
 	// any ap_termid
 	T_EXPECT_BITS_NOTSET(apia.ap_flags, ~(au_asflgs_t)VALID_AU_SESSION_FLAGS, NULL);
@@ -134,6 +155,7 @@ T_DECL(auditon_getsinfo_addr, "auditon(A_GETSINFO_ADDR) smoke test")
 	T_ASSERT_POSIX_SUCCESS(rv_from_auditon, "auditon(2) A_GETSINFO_ADDR succeeds");
 	T_EXPECT_EQ(aia.ai_asid, asid, NULL);
 	T_EXPECT_EQ(aia.ai_auid, auid, NULL);
+	T_EXPECT_NE(aia.ai_auid, AU_DEFAUDITID, NULL);
 	// any ap_mask
 	// any ap_termid
 	T_EXPECT_BITS_NOTSET(aia.ai_flags, ~(au_asflgs_t)VALID_AU_SESSION_FLAGS, NULL);
@@ -251,12 +273,14 @@ new_session_flow(au_asid_t asid, enum termid_mode termid_mode, uint32_t termid_t
 	if (auid_mode == AUIDM_NOUPDATE) {
 		aia1a.ai_flags |= AU_SESSION_FLAG_HAS_AUTHENTICATED;
 	}
+	tlog_aia(&aia1a, "aia1a");
 
 	bcopy(&aia1a, &aia1b, sizeof(aia1b));
 	int rv_from_setaudit_addr = setaudit_addr(&aia1b, sizeof(aia1b));
 	if (rv_from_setaudit_addr == -1 && errno == ENOSYS) {
 		T_SKIP("Kernel support for setaudit_addr(2) not available");
 	}
+	tlog_aia(&aia1b, "aia1b");
 	T_ASSERT_POSIX_SUCCESS(rv_from_setaudit_addr, "setaudit_addr(2) succeeds at creating a new session");
 	if (asid == AU_ASSIGN_ASID || asid == AU_DEFAUDITSID) {
 		// Kernel choses free asid above pid range
@@ -267,57 +291,21 @@ new_session_flow(au_asid_t asid, enum termid_mode termid_mode, uint32_t termid_t
 		// Kernel uses our asid suggestion
 		T_EXPECT_EQ(aia1b.ai_asid, aia1a.ai_asid, NULL);
 	}
-	T_EXPECT_EQ(aia1b.ai_auid, aia1a.ai_auid, NULL);
-#ifdef RDAR_104863182
-	if (asid == AU_ASSIGN_ASID || asid == AU_DEFAUDITSID) {
-		// New session was copied out because of AU_ASSIGN_ASID.
-		// Masks on session have been zeroed at session creation,
-		// and we got the masks from the session, not the cred.
-		T_EXPECT_EQ(aia1b.ai_mask.am_success, 0, NULL);
-		T_EXPECT_EQ(aia1b.ai_mask.am_failure, 0, NULL);
-	} else {
-		// The new session was not copied out.
-		// Buffer still contains the masks we passed in.
-		T_EXPECT_EQ(aia1b.ai_mask.am_success, aia1a.ai_mask.am_success, NULL);
-		T_EXPECT_EQ(aia1b.ai_mask.am_failure, aia1a.ai_mask.am_failure, NULL);
-	}
-#else // RDAR_104863182
-	// A reasonable expectation would be that the mask is visible in a
-	// symmetrical fashion to setaudit_addr(2) and getaudit_addr(2),
-	// despite being per-process.  Otherwise the typical getaudit_addr(2)
-	// then setaudit_addr(2) combo would not work as expected.
-	T_EXPECT_EQ(aia1b.ai_mask.am_success, aia1a.ai_mask.am_success, NULL);
-	T_EXPECT_EQ(aia1b.ai_mask.am_failure, aia1a.ai_mask.am_failure, NULL);
-#endif // RDAR_104863182
-	T_EXPECT_EQ(aia1b.ai_termid.at_port, aia1a.ai_termid.at_port, NULL);
-	T_EXPECT_EQ(aia1b.ai_termid.at_type, aia1a.ai_termid.at_type, NULL);
-	T_EXPECT_EQ(aia1b.ai_termid.at_addr[0], aia1a.ai_termid.at_addr[0], NULL);
-	T_EXPECT_EQ(aia1b.ai_termid.at_addr[1], aia1a.ai_termid.at_addr[1], NULL);
-	T_EXPECT_EQ(aia1b.ai_termid.at_addr[2], aia1a.ai_termid.at_addr[2], NULL);
-	T_EXPECT_EQ(aia1b.ai_termid.at_addr[3], aia1a.ai_termid.at_addr[3], NULL);
-	T_EXPECT_EQ(aia1b.ai_flags, aia1a.ai_flags, NULL);
+	// Don't check other fields of aia1b, the contract is only well-defined for the asid.
 
 	T_ASSERT_POSIX_SUCCESS(getaudit_addr(&aia1c, sizeof(aia1c)), "getaudit_addr(2) succeeds at obtaining new session aia");
+	tlog_aia(&aia1c, "aia1c");
 	T_EXPECT_EQ(aia1c.ai_asid, aia1b.ai_asid, NULL);
-	T_EXPECT_EQ(aia1c.ai_auid, aia1b.ai_auid, NULL);
-#ifdef RDAR_104863182
-	// Masks on session have been zeroed at session creation, and we got
-	// the masks from the session back, not the cred.
-	T_EXPECT_EQ(aia1c.ai_mask.am_success, 0, NULL);
-	T_EXPECT_EQ(aia1c.ai_mask.am_failure, 0, NULL);
-#else // RDAR_104863182
-	// Expect this to match what we passed into setaudit_addr(2), or what
-	// setaudit_addr(2) copied out (see reasonable expectation above).
-	T_EXPECT_EQ(aia1c.ai_mask.am_success, aia1b.ai_mask.am_success, NULL);
-	T_EXPECT_EQ(aia1c.ai_mask.am_failure, aia1b.ai_mask.am_failure, NULL);
-#endif // RDAR_104863182
-	T_EXPECT_EQ(aia1c.ai_termid.at_port, aia1b.ai_termid.at_port, NULL);
-	T_EXPECT_EQ(aia1c.ai_termid.at_type, aia1b.ai_termid.at_type, NULL);
-	T_EXPECT_EQ(aia1c.ai_termid.at_addr[0], aia1b.ai_termid.at_addr[0], NULL);
-	T_EXPECT_EQ(aia1c.ai_termid.at_addr[1], aia1b.ai_termid.at_addr[1], NULL);
-	T_EXPECT_EQ(aia1c.ai_termid.at_addr[2], aia1b.ai_termid.at_addr[2], NULL);
-	T_EXPECT_EQ(aia1c.ai_termid.at_addr[3], aia1b.ai_termid.at_addr[3], NULL);
-	T_EXPECT_EQ(aia1c.ai_flags, aia1b.ai_flags, NULL);
+	T_EXPECT_EQ(aia1c.ai_auid, aia1a.ai_auid, NULL);
+	T_EXPECT_EQ(aia1c.ai_mask.am_success, aia1a.ai_mask.am_success, NULL);
+	T_EXPECT_EQ(aia1c.ai_mask.am_failure, aia1a.ai_mask.am_failure, NULL);
+	T_EXPECT_EQ(aia1c.ai_termid.at_port, aia1a.ai_termid.at_port, NULL);
+	T_EXPECT_EQ(aia1c.ai_termid.at_type, aia1a.ai_termid.at_type, NULL);
+	T_EXPECT_EQ(aia1c.ai_termid.at_addr[0], aia1a.ai_termid.at_addr[0], NULL);
+	T_EXPECT_EQ(aia1c.ai_termid.at_addr[1], aia1a.ai_termid.at_addr[1], NULL);
+	T_EXPECT_EQ(aia1c.ai_termid.at_addr[2], aia1a.ai_termid.at_addr[2], NULL);
+	T_EXPECT_EQ(aia1c.ai_termid.at_addr[3], aia1a.ai_termid.at_addr[3], NULL);
+	T_EXPECT_EQ(aia1c.ai_flags, aia1a.ai_flags, NULL);
 
 	au_asflgs_t flags1c = -1UL;
 	T_ASSERT_POSIX_SUCCESS(auditon(A_GETSFLAGS, &flags1c, sizeof(flags1c)), "auditon(2) A_GETSFLAGS succeeds");
@@ -341,43 +329,27 @@ new_session_flow(au_asid_t asid, enum termid_mode termid_mode, uint32_t termid_t
 			aia2a.ai_termid.at_addr[2] = test_addr_c;
 			aia2a.ai_termid.at_addr[3] = test_addr_d;
 		}
-#ifdef RDAR_104863182
-		// aia1c contains the masks from the session that were zeroed at
-		// session creation.  Updating the session with setaudit_addr(2)
-		// will cause the masks to be updated on both the process cred
-		// and the session aia itself.  To avoid losing the masks we
-		// asked for at session creation, copy the masks we asked for.
-		// We'd reset them to 0 otherwise.
-		aia2a.ai_mask.am_success = aia1a.ai_mask.am_success;
-		aia2a.ai_mask.am_failure = aia1a.ai_mask.am_failure;
-#endif // RDAR_104863182
+		tlog_aia(&aia2a, "aia2a");
 
 		bcopy(&aia2a, &aia2b, sizeof(aia2b));
 		T_ASSERT_POSIX_SUCCESS(setaudit_addr(&aia2b, sizeof(aia2b)), "setaudit_addr(2) succeeds at updating the session with a terminal ID");
+		tlog_aia(&aia2b, "aia2b");
 		T_EXPECT_EQ(aia2b.ai_asid, aia2a.ai_asid, NULL);
-		T_EXPECT_EQ(aia2b.ai_auid, aia2a.ai_auid, NULL);
-		T_EXPECT_EQ(aia2b.ai_mask.am_success, aia2a.ai_mask.am_success, NULL);
-		T_EXPECT_EQ(aia2b.ai_mask.am_failure, aia2a.ai_mask.am_failure, NULL);
-		T_EXPECT_EQ(aia2b.ai_termid.at_port, aia2a.ai_termid.at_port, NULL);
-		T_EXPECT_EQ(aia2b.ai_termid.at_type, aia2a.ai_termid.at_type, NULL);
-		T_EXPECT_EQ(aia2b.ai_termid.at_addr[0], aia2a.ai_termid.at_addr[0], NULL);
-		T_EXPECT_EQ(aia2b.ai_termid.at_addr[1], aia2a.ai_termid.at_addr[1], NULL);
-		T_EXPECT_EQ(aia2b.ai_termid.at_addr[2], aia2a.ai_termid.at_addr[2], NULL);
-		T_EXPECT_EQ(aia2b.ai_termid.at_addr[3], aia2a.ai_termid.at_addr[3], NULL);
-		T_EXPECT_EQ(aia2b.ai_flags, aia2a.ai_flags, NULL);
+		// Don't check other fields of aia2b, the contract is only well-defined for the asid.
 
 		T_ASSERT_POSIX_SUCCESS(getaudit_addr(&aia2c, sizeof(aia2c)), "getaudit_addr(2) succeeds at obtaining updated session aia");
-		T_EXPECT_EQ(aia2c.ai_asid, aia2b.ai_asid, NULL);
-		T_EXPECT_EQ(aia2c.ai_auid, aia2b.ai_auid, NULL);
-		T_EXPECT_EQ(aia2c.ai_mask.am_success, aia2b.ai_mask.am_success, NULL);
-		T_EXPECT_EQ(aia2c.ai_mask.am_failure, aia2b.ai_mask.am_failure, NULL);
-		T_EXPECT_EQ(aia2c.ai_termid.at_port, aia2b.ai_termid.at_port, NULL);
-		T_EXPECT_EQ(aia2c.ai_termid.at_type, aia2b.ai_termid.at_type, NULL);
-		T_EXPECT_EQ(aia2c.ai_termid.at_addr[0], aia2b.ai_termid.at_addr[0], NULL);
-		T_EXPECT_EQ(aia2c.ai_termid.at_addr[1], aia2b.ai_termid.at_addr[1], NULL);
-		T_EXPECT_EQ(aia2c.ai_termid.at_addr[2], aia2b.ai_termid.at_addr[2], NULL);
-		T_EXPECT_EQ(aia2c.ai_termid.at_addr[3], aia2b.ai_termid.at_addr[3], NULL);
-		T_EXPECT_EQ(aia2c.ai_flags, aia2b.ai_flags, NULL);
+		tlog_aia(&aia2c, "aia2c");
+		T_EXPECT_EQ(aia2c.ai_asid, aia2a.ai_asid, NULL);
+		T_EXPECT_EQ(aia2c.ai_auid, aia2a.ai_auid, NULL);
+		T_EXPECT_EQ(aia2c.ai_mask.am_success, aia2a.ai_mask.am_success, NULL);
+		T_EXPECT_EQ(aia2c.ai_mask.am_failure, aia2a.ai_mask.am_failure, NULL);
+		T_EXPECT_EQ(aia2c.ai_termid.at_port, aia2a.ai_termid.at_port, NULL);
+		T_EXPECT_EQ(aia2c.ai_termid.at_type, aia2a.ai_termid.at_type, NULL);
+		T_EXPECT_EQ(aia2c.ai_termid.at_addr[0], aia2a.ai_termid.at_addr[0], NULL);
+		T_EXPECT_EQ(aia2c.ai_termid.at_addr[1], aia2a.ai_termid.at_addr[1], NULL);
+		T_EXPECT_EQ(aia2c.ai_termid.at_addr[2], aia2a.ai_termid.at_addr[2], NULL);
+		T_EXPECT_EQ(aia2c.ai_termid.at_addr[3], aia2a.ai_termid.at_addr[3], NULL);
+		T_EXPECT_EQ(aia2c.ai_flags, aia2a.ai_flags, NULL);
 	} else {
 		assert(termid_mode == TERMIDM_NOUPDATE);
 
@@ -399,20 +371,13 @@ new_session_flow(au_asid_t asid, enum termid_mode termid_mode, uint32_t termid_t
 			// up the users masks using au_user_mask(3).
 			aia3a.ai_mask.am_success = test_fin_mask_success;
 			aia3a.ai_mask.am_failure = test_fin_mask_failure;
+			tlog_aia(&aia3a, "aia3a");
 
 			bcopy(&aia3a, &aia3b, sizeof(aia3b));
 			T_ASSERT_POSIX_SUCCESS(setaudit_addr(&aia3b, sizeof(aia3b)), "setaudit_addr(2) succeeds at updating the session as authenticated");
+			tlog_aia(&aia3b, "aia3b");
 			T_EXPECT_EQ(aia3b.ai_asid, aia3a.ai_asid, NULL);
-			T_EXPECT_EQ(aia3b.ai_auid, aia3a.ai_auid, NULL);
-			T_EXPECT_EQ(aia3b.ai_mask.am_success, aia3a.ai_mask.am_success, NULL);
-			T_EXPECT_EQ(aia3b.ai_mask.am_failure, aia3a.ai_mask.am_failure, NULL);
-			T_EXPECT_EQ(aia3b.ai_termid.at_port, aia3a.ai_termid.at_port, NULL);
-			T_EXPECT_EQ(aia3b.ai_termid.at_type, aia3a.ai_termid.at_type, NULL);
-			T_EXPECT_EQ(aia3b.ai_termid.at_addr[0], aia3a.ai_termid.at_addr[0], NULL);
-			T_EXPECT_EQ(aia3b.ai_termid.at_addr[1], aia3a.ai_termid.at_addr[1], NULL);
-			T_EXPECT_EQ(aia3b.ai_termid.at_addr[2], aia3a.ai_termid.at_addr[2], NULL);
-			T_EXPECT_EQ(aia3b.ai_termid.at_addr[3], aia3a.ai_termid.at_addr[3], NULL);
-			T_EXPECT_EQ(aia3b.ai_flags, aia3a.ai_flags, NULL);
+			// Don't check other fields of aia3b, the contract is only well-defined for the asid.
 		} else {
 			assert(auid_mode == AUIDM_UPDATE_SETAUID);
 
@@ -424,22 +389,11 @@ new_session_flow(au_asid_t asid, enum termid_mode termid_mode, uint32_t termid_t
 
 			struct auditinfo_addr new_aia = {};
 			T_ASSERT_POSIX_SUCCESS(getaudit_addr(&new_aia, sizeof(new_aia)), "getaudit_addr(2) after auditon(2) A_SETPMASK succeeds");
+			tlog_aia(&new_aia, "new_aia");
 			T_EXPECT_EQ(new_aia.ai_asid, aia2c.ai_asid, NULL);
 			T_EXPECT_EQ(new_aia.ai_auid, aia2c.ai_auid, NULL);
-#ifdef RDAR_104863182
-			// auditon(A_SETPMASK) sets the new masks only on process credential,
-			// because audit_session_setaia() only copies the aia to the session
-			// when fields other than only the masks have changed.
-			// The call to setauid(2) below will propagate the masks from the
-			// process credential to the audit session, from where it will be
-			// visible to getaudit_addr(2).
-			T_EXPECT_EQ(new_aia.ai_mask.am_success, aia2c.ai_mask.am_success, NULL);
-			T_EXPECT_EQ(new_aia.ai_mask.am_failure, aia2c.ai_mask.am_failure, NULL);
-#else
-			// Expect the per-process mask to be visible to getaudit_addr(2).
 			T_EXPECT_EQ(new_aia.ai_mask.am_success, test_fin_mask_success, NULL);
 			T_EXPECT_EQ(new_aia.ai_mask.am_failure, test_fin_mask_failure, NULL);
-#endif
 			T_EXPECT_EQ(new_aia.ai_termid.at_port, aia2c.ai_termid.at_port, NULL);
 			T_EXPECT_EQ(new_aia.ai_termid.at_type, aia2c.ai_termid.at_type, NULL);
 			T_EXPECT_EQ(new_aia.ai_termid.at_addr[0], aia2c.ai_termid.at_addr[0], NULL);
@@ -453,6 +407,7 @@ new_session_flow(au_asid_t asid, enum termid_mode termid_mode, uint32_t termid_t
 			T_EXPECT_EQ(new_auid, test_auid_a, NULL);
 
 			T_ASSERT_POSIX_SUCCESS(getaudit_addr(&new_aia, sizeof(new_aia)), "getaudit_addr(2) after setauid(2) succeeds");
+			tlog_aia(&new_aia, "new_aia");
 			T_EXPECT_EQ(new_aia.ai_asid, aia2c.ai_asid, NULL);
 			T_EXPECT_EQ(new_aia.ai_auid, new_auid, NULL);
 			T_EXPECT_EQ(new_aia.ai_mask.am_success, test_fin_mask_success, NULL);
@@ -476,29 +431,32 @@ new_session_flow(au_asid_t asid, enum termid_mode termid_mode, uint32_t termid_t
 			T_ASSERT_POSIX_SUCCESS(auditon(A_GETSFLAGS, &new_flags, sizeof(new_flags)), "auditon(2) A_GETSFLAGS succeeds");
 			T_EXPECT_EQ(new_flags, flags1c | AU_SESSION_FLAG_HAS_AUTHENTICATED, NULL);
 
-			bcopy(&aia2c, &aia3b, sizeof(aia3b));
-			aia3b.ai_auid = new_auid;
-			aia3b.ai_flags |= AU_SESSION_FLAG_HAS_AUTHENTICATED;
-			aia3b.ai_mask.am_success = test_fin_mask_success;
-			aia3b.ai_mask.am_failure = test_fin_mask_failure;
+			bcopy(&aia2c, &aia3a, sizeof(aia3a));
+			aia3a.ai_auid = new_auid;
+			aia3a.ai_flags |= AU_SESSION_FLAG_HAS_AUTHENTICATED;
+			aia3a.ai_mask.am_success = test_fin_mask_success;
+			aia3a.ai_mask.am_failure = test_fin_mask_failure;
+			tlog_aia(&aia3a, "aia3a");
 		}
 
 		T_ASSERT_POSIX_SUCCESS(getaudit_addr(&aia3c, sizeof(aia3c)), "getaudit_addr(2) succeeds at obtaining updated session aia");
-		T_EXPECT_EQ(aia3c.ai_asid, aia3b.ai_asid, NULL);
-		T_EXPECT_EQ(aia3c.ai_auid, aia3b.ai_auid, NULL);
-		T_EXPECT_EQ(aia3c.ai_mask.am_success, aia3b.ai_mask.am_success, NULL);
-		T_EXPECT_EQ(aia3c.ai_mask.am_failure, aia3b.ai_mask.am_failure, NULL);
-		T_EXPECT_EQ(aia3c.ai_termid.at_port, aia3b.ai_termid.at_port, NULL);
-		T_EXPECT_EQ(aia3c.ai_termid.at_type, aia3b.ai_termid.at_type, NULL);
-		T_EXPECT_EQ(aia3c.ai_termid.at_addr[0], aia3b.ai_termid.at_addr[0], NULL);
-		T_EXPECT_EQ(aia3c.ai_termid.at_addr[1], aia3b.ai_termid.at_addr[1], NULL);
-		T_EXPECT_EQ(aia3c.ai_termid.at_addr[2], aia3b.ai_termid.at_addr[2], NULL);
-		T_EXPECT_EQ(aia3c.ai_termid.at_addr[3], aia3b.ai_termid.at_addr[3], NULL);
-		T_EXPECT_EQ(aia3c.ai_flags, aia3b.ai_flags, NULL);
+		tlog_aia(&aia3c, "aia3c");
+		T_EXPECT_EQ(aia3c.ai_asid, aia3a.ai_asid, NULL);
+		T_EXPECT_EQ(aia3c.ai_auid, aia3a.ai_auid, NULL);
+		T_EXPECT_EQ(aia3c.ai_mask.am_success, aia3a.ai_mask.am_success, NULL);
+		T_EXPECT_EQ(aia3c.ai_mask.am_failure, aia3a.ai_mask.am_failure, NULL);
+		T_EXPECT_EQ(aia3c.ai_termid.at_port, aia3a.ai_termid.at_port, NULL);
+		T_EXPECT_EQ(aia3c.ai_termid.at_type, aia3a.ai_termid.at_type, NULL);
+		T_EXPECT_EQ(aia3c.ai_termid.at_addr[0], aia3a.ai_termid.at_addr[0], NULL);
+		T_EXPECT_EQ(aia3c.ai_termid.at_addr[1], aia3a.ai_termid.at_addr[1], NULL);
+		T_EXPECT_EQ(aia3c.ai_termid.at_addr[2], aia3a.ai_termid.at_addr[2], NULL);
+		T_EXPECT_EQ(aia3c.ai_termid.at_addr[3], aia3a.ai_termid.at_addr[3], NULL);
+		T_EXPECT_EQ(aia3c.ai_flags, aia3a.ai_flags, NULL);
 	} else {
 		assert(auid_mode == AUIDM_NOUPDATE);
 
 		bcopy(&aia2c, &aia3c, sizeof(aia3c));
+		tlog_aia(&aia3c, "aia3c");
 	}
 
 	// At this point, the session is fully set up.
@@ -650,23 +608,10 @@ new_session_flow(au_asid_t asid, enum termid_mode termid_mode, uint32_t termid_t
 	auditinfo_addr_t aia9 = {};
 	aia9.ai_asid = aia3c.ai_asid;
 	T_ASSERT_POSIX_SUCCESS(auditon(A_GETSINFO_ADDR, &aia9, sizeof(aia9)), "auditon(2) A_GETSINFO_ADDR succeeds");
+	tlog_aia(&aia9, "aia9");
 	T_EXPECT_EQ(aia9.ai_asid, aia3c.ai_asid, NULL);
 	T_EXPECT_EQ(aia9.ai_auid, aia3c.ai_auid, NULL);
-#ifdef RDAR_104863182
-	if (termid_mode == TERMIDM_NOUPDATE && auid_mode == AUIDM_NOUPDATE) {
-		// Session still has the initial 0 masks from session creation
-		T_EXPECT_EQ(aia9.ai_mask.am_success, 0, NULL);
-		T_EXPECT_EQ(aia9.ai_mask.am_failure, 0, NULL);
-	} else {
-		// Session masks got overwritten by a session update
-		T_EXPECT_EQ(aia9.ai_mask.am_success, test_fin_mask_success, NULL);
-		T_EXPECT_EQ(aia9.ai_mask.am_failure, test_fin_mask_failure, NULL);
-	}
-#else // RDAR_104863182
-	// Session masks should still be zero unless clobbered by audit session Mach port creation
-	T_EXPECT_EQ(aia9.ai_mask.am_success, 0, NULL);
-	T_EXPECT_EQ(aia9.ai_mask.am_failure, 0, NULL);
-#endif // RDAR_104863182
+	// Masks on the session without process context are undefined, don't check them
 	T_EXPECT_EQ(aia9.ai_termid.at_port, aia3c.ai_termid.at_port, NULL);
 	T_EXPECT_EQ(aia9.ai_termid.at_type, aia3c.ai_termid.at_type, NULL);
 	T_EXPECT_EQ(aia9.ai_termid.at_addr[0], aia3c.ai_termid.at_addr[0], NULL);
@@ -877,6 +822,7 @@ T_HELPER_DECL(check_child_session, "Check child aia against file")
 
 	struct auditinfo_addr aia;
 	T_ASSERT_POSIX_SUCCESS(getaudit_addr(&aia, sizeof(aia)), "getaudit_addr(2) succeeds");
+	tlog_aia(&aia, "aia in child");
 	T_EXPECT_EQ(aia.ai_asid, expected_aia.ai_asid, NULL);
 	T_EXPECT_EQ(aia.ai_auid, expected_aia.ai_auid, NULL);
 	T_EXPECT_EQ(aia.ai_mask.am_success, expected_aia.ai_mask.am_success, NULL);
@@ -900,9 +846,11 @@ T_DECL(new_session_check_child_aia, "new session is inherited by child processes
 	}
 
 	new_session_flow(AU_ASSIGN_ASID, TERMIDM_UPDATE_SETAUDIT_ADDR, AU_IPv6, AUIDM_UPDATE_SETAUDIT_ADDR);
+	T_LOG("Created new audit session using AU_ASSIGN_ASID");
 
 	struct auditinfo_addr aia;
 	T_ASSERT_POSIX_SUCCESS(getaudit_addr(&aia, sizeof(aia)), "getaudit_addr(2) succeeds");
+	tlog_aia(&aia, "aia in parent");
 
 	char path[MAXPATHLEN];
 	snprintf(path, MAXPATHLEN, "%s/" NEW_SESSION_CHECK_CHILD_FILENAME, dt_tmpdir());
@@ -923,6 +871,7 @@ T_DECL(new_session_check_child_aia, "new session is inherited by child processes
 T_HELPER_DECL(child_create_session, "Create a session in a child process")
 {
 	new_session_flow(AU_ASSIGN_ASID, TERMIDM_UPDATE_SETAUDIT_ADDR, AU_IPv6, AUIDM_UPDATE_SETAUDIT_ADDR);
+	T_LOG("Created new audit session using AU_ASSIGN_ASID");
 
 	struct auditinfo_addr aia;
 	T_ASSERT_POSIX_SUCCESS(getaudit_addr(&aia, sizeof(aia)), "getaudit_addr(2) succeeds");
@@ -1016,9 +965,26 @@ T_DECL(audit_session_self, "audit_session_self(2) smoke test")
 
 	mach_port_t session_port = audit_session_self();
 	T_ASSERT_TRUE(MACH_PORT_VALID(session_port), "audit_session_self(2) returns valid send right");
+	mach_port_deallocate(mach_task_self(), session_port);
 }
 
-T_DECL(audit_session_port_join, "audit_session_port(2) and audit_session_join(2) smoke test")
+static mach_port_t new_session_port = MACH_PORT_NULL;
+static mach_port_t original_session_port = MACH_PORT_NULL;
+
+static void
+audit_session_join_cleanup(void)
+{
+	if (MACH_PORT_VALID(new_session_port)) {
+		mach_port_deallocate(mach_task_self(), new_session_port);
+		new_session_port = MACH_PORT_NULL;
+	}
+	if (MACH_PORT_VALID(original_session_port)) {
+		mach_port_deallocate(mach_task_self(), original_session_port);
+		original_session_port = MACH_PORT_NULL;
+	}
+}
+
+T_DECL(audit_session_join, "audit_session_join(2) and port/session lifecycle test")
 {
 	int cond, rv_from_auditon = auditon(A_GETCOND, &cond, sizeof(cond));
 	if (rv_from_auditon == -1 && errno == ENOSYS) {
@@ -1029,26 +995,102 @@ T_DECL(audit_session_port_join, "audit_session_port(2) and audit_session_join(2)
 	au_id_t original_auid;
 	get_asid_auid(&original_asid, &original_auid);
 
-	// Change into newly created session
+	// Create new session
 	new_session_flow(AU_ASSIGN_ASID, TERMIDM_UPDATE_SETAUDIT_ADDR, AU_IPv6, AUIDM_UPDATE_SETAUDIT_ADDR);
-
-	// Assert we're in a new session
+	T_LOG("Created new audit session using AU_ASSIGN_ASID");
 	au_asid_t new_asid;
 	au_id_t new_auid;
 	get_asid_auid(&new_asid, &new_auid);
 	T_ASSERT_NE(new_asid, original_asid, NULL);
 	T_ASSERT_NE(new_auid, original_auid, NULL);
 
+	T_ATEND(audit_session_join_cleanup);
+
+	// Obtain session port for new session
+	new_session_port = audit_session_self();
+	T_ASSERT_TRUE(MACH_PORT_VALID(new_session_port), NULL);
+
 	// Obtain session port for original session
-	mach_port_t session_port;
-	T_ASSERT_POSIX_SUCCESS(audit_session_port(original_asid, &session_port), "audit_session_port(2) succeeds");
-	T_ASSERT_TRUE(MACH_PORT_VALID(session_port), NULL);
+	T_ASSERT_POSIX_SUCCESS(audit_session_port(original_asid, &original_session_port), "audit_session_port(2) succeeds");
+	T_ASSERT_TRUE(MACH_PORT_VALID(original_session_port), NULL);
 
 	// Join original session
-	T_ASSERT_POSIX_SUCCESS(audit_session_join(session_port), "audit_session_join(2) succeeds");
+	T_ASSERT_POSIX_SUCCESS(audit_session_join(original_session_port), "audit_session_join(2) succeeds");
+	au_asid_t asid;
+	au_id_t auid;
+	get_asid_auid(&asid, &auid);
+	T_ASSERT_EQ(asid, original_asid, NULL);
+	T_ASSERT_EQ(auid, original_auid, NULL);
 
-	// Assert we're back in the original session
+	// The last process (we) has now left new session.  The new session
+	// is still referenced by the session port to which we're holding a
+	// send right, preventing its destruction.
+
+	// Make sure the session can still be looked up.
+	auditinfo_addr_t aia = {};
+	aia.ai_asid = new_asid;
+	T_ASSERT_POSIX_SUCCESS(auditon(A_GETSINFO_ADDR, &aia, sizeof(aia)), "auditon(2) A_GETSINFO_ADDR can still find the new session");
+	T_ASSERT_EQ(aia.ai_asid, new_asid, NULL);
+	T_ASSERT_EQ(aia.ai_auid, new_auid, NULL);
+
+	// Join new session that should still be around despite being empty.
+	T_ASSERT_POSIX_SUCCESS(audit_session_join(new_session_port), "audit_session_join(2) succeeds");
+	get_asid_auid(&asid, &auid);
+	T_ASSERT_EQ(asid, new_asid, NULL);
+	T_ASSERT_EQ(auid, new_auid, NULL);
+
+	// Join original session
+	T_ASSERT_POSIX_SUCCESS(audit_session_join(original_session_port), "audit_session_join(2) succeeds");
+	get_asid_auid(&asid, &auid);
+	T_ASSERT_EQ(asid, original_asid, NULL);
+	T_ASSERT_EQ(auid, original_auid, NULL);
+
+	// Destroy new session by way of releasing the send right to it.
+	mach_port_deallocate(mach_task_self(), new_session_port);
+	new_session_port = MACH_PORT_NULL;
+
+	// The new session should now have disappeared.
+	bzero(&aia, sizeof(aia));
+	aia.ai_asid = new_asid;
+	T_LOG("Looking for asid %d", aia.ai_asid);
+	T_ASSERT_POSIX_FAILURE(auditon(A_GETSINFO_ADDR, &aia, sizeof(aia)), EINVAL, "auditon(2) A_GETSINFO_ADDR cannot find the new session");
+}
+
+T_DECL(setaudit_addr_join, "join session the BSD way using setaudit_addr(2)")
+{
+	int cond, rv_from_auditon = auditon(A_GETCOND, &cond, sizeof(cond));
+	if (rv_from_auditon == -1 && errno == ENOSYS) {
+		T_SKIP("Kernel support for auditon(2) not available");
+	}
+
+	au_asid_t original_asid;
+	au_id_t original_auid;
+	get_asid_auid(&original_asid, &original_auid);
+
+	// Create new session
+	new_session_flow(AU_ASSIGN_ASID, TERMIDM_UPDATE_SETAUDIT_ADDR, AU_IPv6, AUIDM_UPDATE_SETAUDIT_ADDR);
+	T_LOG("Created new audit session using AU_ASSIGN_ASID");
+	au_asid_t new_asid;
+	au_id_t new_auid;
 	get_asid_auid(&new_asid, &new_auid);
-	T_ASSERT_EQ(new_asid, original_asid, NULL);
-	T_ASSERT_EQ(new_auid, original_auid, NULL);
+	T_ASSERT_NE(new_asid, original_asid, NULL);
+	T_ASSERT_NE(new_auid, original_auid, NULL);
+
+	// Look up the original session aia
+	auditinfo_addr_t aia = {};
+	aia.ai_asid = original_asid;
+	T_ASSERT_POSIX_SUCCESS(auditon(A_GETSINFO_ADDR, &aia, sizeof(aia)), "auditon(2) A_GETSINFO_ADDR can find the old session");
+	T_ASSERT_EQ(aia.ai_asid, original_asid, NULL);
+	T_ASSERT_EQ(aia.ai_auid, original_auid, NULL);
+
+	// Switch back to original session
+	T_ASSERT_POSIX_SUCCESS(setaudit_addr(&aia, sizeof(aia)), "setaudit_addr(2) succeeds at joining the original session");
+
+	// The new session was destroyed after we left.
+
+	// Looking up the new session should fail now.
+	bzero(&aia, sizeof(aia));
+	aia.ai_asid = new_asid;
+	T_LOG("Looking for asid %d", aia.ai_asid);
+	T_ASSERT_POSIX_FAILURE(auditon(A_GETSINFO_ADDR, &aia, sizeof(aia)), EINVAL, "auditon(2) A_GETSINFO_ADDR cannot find the new session");
 }

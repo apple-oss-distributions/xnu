@@ -280,6 +280,9 @@ struct processor_set {
 	pset_execution_time_t   pset_execution_time[TH_BUCKET_SCHED_MAX];
 	uint64_t                pset_cluster_shared_rsrc_load[CLUSTER_SHARED_RSRC_TYPE_COUNT];
 #endif /* CONFIG_SCHED_EDGE */
+	cpumap_t                perfcontrol_cpu_preferred_bitmask;
+	cpumap_t                perfcontrol_cpu_migration_bitmask;
+	int                     cpu_preferred_last_chosen;
 	bool                    is_SMT;                 /* pset contains SMT processors */
 };
 
@@ -330,6 +333,7 @@ struct processor {
 	bool                    current_is_NO_SMT;      /* cached TH_SFLAG_NO_SMT of current thread */
 	bool                    current_is_bound;       /* current thread is bound to this processor */
 	bool                    current_is_eagerpreempt;/* current thread is TH_SFLAG_EAGERPREEMPT */
+	bool                    pending_nonurgent_preemption; /* RUNNING_TIMER_PREEMPT is armed */
 	struct thread          *active_thread;          /* thread running on processor */
 	struct thread          *idle_thread;            /* this processor's idle thread. */
 	struct thread          *startup_thread;
@@ -371,6 +375,7 @@ struct processor {
 
 	bool                    processor_offlined;     /* has the processor been explicitly processor_offline'ed */
 	bool                    must_idle;              /* Needs to be forced idle as next selected thread is allowed on this processor */
+	bool                    next_idle_short;        /* Expecting a response IPI soon, so the next idle period is likely very brief */
 
 	bool                    running_timers_active;  /* whether the running timers should fire */
 	struct timer_call       running_timers[RUNNING_TIMER_MAX];

@@ -229,7 +229,12 @@ struct vm_page {
 	    vmp_reference:1,                 /* page has been used (P) */
 	    vmp_lopage:1,
 	    vmp_realtime:1,                  /* page used by realtime thread */
+#if !CONFIG_TRACK_UNMODIFIED_ANON_PAGES
 	    vmp_unused_page_bits:3;
+#else /* ! CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
+	vmp_unmodified_ro:1,                 /* Tracks if an anonymous page is modified after a decompression (O&P).*/
+	vmp_unused_page_bits:2;
+#endif /* ! CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 
 	/*
 	 * MUST keep the 2 32 bit words used as bit fields
@@ -1837,6 +1842,15 @@ extern lck_grp_t vm_page_lck_grp_local;
 	vm_page_stolen_count -=	(page_count);                   \
 	vm_page_wire_count_initial -= (page_count);             \
 	MACRO_END
+
+extern kern_return_t pmap_enter_check(
+	pmap_t           pmap,
+	vm_map_address_t virtual_address,
+	vm_page_t        page,
+	vm_prot_t        protection,
+	vm_prot_t        fault_type,
+	unsigned int     flags,
+	boolean_t        wired);
 
 #define DW_vm_page_unwire               0x01
 #define DW_vm_page_wire                 0x02

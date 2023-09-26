@@ -515,7 +515,7 @@ decmpfs_fetch_compressed_header(vnode_t vp, decmpfs_cnode *cp, decmpfs_header **
 	const bool no_additional_data = ((cp != NULL)
 	    && (cp->cmp_type != 0)
 	    && (cp->cmp_minimal_xattr != 0));
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 	decmpfs_header *hdr = NULL;
 
 	/*

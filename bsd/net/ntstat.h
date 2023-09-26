@@ -58,12 +58,14 @@ enum{
 	, NSTAT_EVENT_SRC_DID_CHANGE_PROPERTY    = 0x00000200
 	, NSTAT_EVENT_SRC_ENTER_CELLFALLBACK     = 0x00000400
 	, NSTAT_EVENT_SRC_EXIT_CELLFALLBACK      = 0x00000800
-#if (DEBUG || DEVELOPMENT)
-	, NSTAT_EVENT_SRC_RESERVED_1             = 0x00001000
-	, NSTAT_EVENT_SRC_RESERVED_2             = 0x00002000
-#endif /* (DEBUG || DEVELOPMENT) */
+	, NSTAT_EVENT_SRC_FLOW_STATE_LISTEN      = 0x00001000
+	, NSTAT_EVENT_SRC_FLOW_STATE_OUTBOUND    = 0x00002000
 	, NSTAT_EVENT_SRC_FLOW_UUID_ASSIGNED     = 0x00004000
 	, NSTAT_EVENT_SRC_FLOW_UUID_CHANGED      = 0x00008000
+#if (DEBUG || DEVELOPMENT)
+	, NSTAT_EVENT_SRC_RESERVED_1             = 0x00010000
+	, NSTAT_EVENT_SRC_RESERVED_2             = 0x00020000
+#endif /* (DEBUG || DEVELOPMENT) */
 };
 
 typedef struct nstat_counts {
@@ -359,7 +361,12 @@ enum{
 #define NSTAT_IFNET_IS_WIFI_INFRA        0x10000
 
 // Not interface properties, but used for filtering in similar fashion
-#define NSTAT_NECP_CONN_HAS_NET_ACCESS     0x01000000
+#define NSTAT_NECP_CONN_HAS_NET_ACCESS   0x01000000
+
+// Not interface properties but conveniently handled in the same flags word
+#define NSTAT_SOURCE_IS_LISTENER         0x02000000
+#define NSTAT_SOURCE_IS_INBOUND          0x04000000
+#define NSTAT_SOURCE_IS_OUTBOUND         0x08000000
 
 
 typedef enum {
@@ -465,6 +472,8 @@ typedef struct nstat_tcp_descriptor {
 	uuid_t          euuid;
 	uuid_t          vuuid;
 	uuid_t          fuuid;
+	uid_t           persona_id;
+	uid_t           uid;
 	union {
 		struct tcp_conn_status connstatus;
 		// On armv7k, tcp_conn_status is 1 byte instead of 4
@@ -509,6 +518,8 @@ typedef struct nstat_udp_descriptor {
 	uuid_t          euuid;
 	uuid_t          vuuid;
 	uuid_t          fuuid;
+	uid_t           persona_id;
+	uid_t           uid;
 	uint32_t        ifnet_properties;
 	uint8_t         fallback_mode;
 	uint8_t         reserved[3];
@@ -538,6 +549,8 @@ typedef struct nstat_connection_descriptor {
 	uuid_t          cuuid;  /* Connection UUID */
 	uuid_t          puuid;  /* Parent UUID */
 	uuid_t          fuuid;  /* Flow UUID */
+	uid_t           persona_id;
+	uid_t           uid;
 	uint8_t         reserved[4];
 } nstat_connection_descriptor;
 
@@ -1448,7 +1461,7 @@ void nstat_provider_stats_event(nstat_context nstat_ctx, uint64_t event);
 } while (0)
 #else
 #define locked_add_64(__addr, __count) do { \
-	atomic_add_64((__addr), (__count)); \
+	os_atomic_add((__addr), (__count), relaxed); \
 } while (0)
 #endif
 

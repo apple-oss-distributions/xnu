@@ -118,11 +118,25 @@ ipc_space_free(ipc_space_t space)
 	zfree(ipc_space_zone, space);
 }
 
+static void
+ipc_space_free_table(smr_node_t node)
+{
+	ipc_entry_t entry = __container_of(node, struct ipc_entry, ie_smr_node);
+	ipc_entry_table_t table = entry->ie_self;
+
+	ipc_entry_table_free_noclear(table);
+}
+
 void
 ipc_space_retire_table(ipc_entry_table_t table)
 {
-	smr_global_retire(table, ipc_entry_table_size(table),
-	    (void (*)(void*))ipc_entry_table_free_noclear);
+	ipc_entry_t base;
+	vm_size_t size;
+
+	base = ipc_entry_table_base(table);
+	size = ipc_entry_table_size(table);
+	base->ie_self = table;
+	smr_ipc_call(&base->ie_smr_node, size, ipc_space_free_table);
 }
 
 void

@@ -136,7 +136,7 @@ __lck_ticket_invalid_panic(lck_ticket_t *lck)
 
 __abortlike
 static void
-__lck_ticket_owned_panic(lck_ticket_t *lck)
+__lck_ticket_owned_panic(const lck_ticket_t *lck)
 {
 	thread_t self = current_thread();
 
@@ -145,7 +145,7 @@ __lck_ticket_owned_panic(lck_ticket_t *lck)
 
 __abortlike
 static void
-__lck_ticket_not_owned_panic(lck_ticket_t *lck)
+__lck_ticket_not_owned_panic(const lck_ticket_t *lck)
 {
 	thread_t self = current_thread();
 
@@ -961,7 +961,7 @@ lck_ticket_unlock(lck_ticket_t *tlock)
 }
 
 void
-lck_ticket_assert_owned(lck_ticket_t *tlock)
+lck_ticket_assert_owned(const lck_ticket_t *tlock)
 {
 	if (current_thread()->ctid != tlock->lck_ticket_owner) {
 		__lck_ticket_not_owned_panic(tlock);
@@ -969,7 +969,7 @@ lck_ticket_assert_owned(lck_ticket_t *tlock)
 }
 
 void
-lck_ticket_assert_not_owned(lck_ticket_t *tlock)
+lck_ticket_assert_not_owned(const lck_ticket_t *tlock)
 {
 	if (current_thread()->ctid == tlock->lck_ticket_owner) {
 		__lck_ticket_owned_panic(tlock);

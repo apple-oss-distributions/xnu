@@ -237,6 +237,7 @@ diagCall64(x86_saved_state_t * state)
 		case CPUFAMILY_INTEL_SKYLAKE:
 		case CPUFAMILY_INTEL_KABYLAKE:
 		case CPUFAMILY_INTEL_ICELAKE:
+		case CPUFAMILY_INTEL_COMETLAKE:
 			ia_perf_limits = MSR_IA32_IA_PERF_LIMIT_REASONS_SKL;
 			break;
 		default:

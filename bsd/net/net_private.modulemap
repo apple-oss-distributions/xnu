@@ -16,6 +16,11 @@ module DarwinPrivate.net [system] {
     export *
   }
 
+  module if_vlan_var {
+    header "net/if_vlan_var.h"
+    export *
+  }
+
   module route {
     #ifndef XNU_PLATFORM_MacOSX
     header "net/route.h"

@@ -33,12 +33,13 @@ endif
 INCFLAGS_MAKEFILE= -I$(SOURCE)libsa
 
 #
-# Directories for mig generated files
+# Directories for generated files
 #
 COMP_SUBDIRS = \
 	atm \
 	default_pager \
 	device \
+	kern \
 	mach \
 	UserNotification \
 	gssd \
@@ -202,7 +203,6 @@ copyio.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 corpse.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 cpu.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 cpu_common.o_CWARNFLAGS_ADD += -Wno-sign-conversion
-cpu_quiesce.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 cpu_threads.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 cpu_topology.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 cpuid.o_CWARNFLAGS_ADD += -Wno-sign-conversion
@@ -256,6 +256,7 @@ ktest_emit.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 lapic_native.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 lazy.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 ledger.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+lockdown_mode.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 locks.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 locks_arm.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 locks_i386.o_CWARNFLAGS_ADD += -Wno-sign-conversion
@@ -369,6 +370,7 @@ xcpm_idle.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 xcpm_ioctl.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 # -Wno-xnu-typed-allocators
 kalloc.o_CWARNFLAGS_ADD += -Wno-xnu-typed-allocators
+conclave_launcher.tightbeam.o_CWARNFLAGS_ADD += -Wno-unused-parameter
 
 # Rebuild if per-file overrides change
 ${OBJS}: $(firstword $(MAKEFILE_LIST))

@@ -135,8 +135,8 @@ static int soqlencomp = 0;
  * get scaled up or down to suit that memory configuration. high_sb_max is a
  * higher limit on sb_max that is checked when sb_max gets set through sysctl.
  */
-
-u_int32_t       sb_max = SB_MAX;                /* XXX should be static */
+u_int32_t       sb_max = SB_MAX;
+uint64_t        sb_max_adj = SB_MAX_ADJUST(SB_MAX);
 u_int32_t       high_sb_max = SB_MAX;
 
 static  u_int32_t sb_efficiency = 8;    /* parameter for sbreserve() */
@@ -380,6 +380,7 @@ sonewconn_internal(struct socket *head, int connstatus)
 	so->so_pgid  = head->so_pgid;
 	kauth_cred_ref(head->so_cred);
 	so->so_cred = head->so_cred;
+	so->so_persona_id = head->so_persona_id;
 	so->last_pid = head->last_pid;
 	so->last_upid = head->last_upid;
 	memcpy(so->last_uuid, head->last_uuid, sizeof(so->last_uuid));
@@ -448,7 +449,7 @@ sonewconn_internal(struct socket *head, int connstatus)
 	if (so->so_proto->pr_copy_last_owner != NULL) {
 		(*so->so_proto->pr_copy_last_owner)(so, head);
 	}
-	atomic_add_32(&so->so_proto->pr_domain->dom_refs, 1);
+	os_atomic_inc(&so->so_proto->pr_domain->dom_refs, relaxed);
 
 	/* Insert in head appropriate lists */
 	so_acquire_accept_list(head, NULL);
@@ -763,12 +764,11 @@ soreserve(struct socket *so, uint32_t sndcc, uint32_t rcvcc)
 	 * so force the buffer sizes to be at most the
 	 * limit enforced by sbreserve()
 	 */
-	uint64_t maxcc = (uint64_t)sb_max * MCLBYTES / (MSIZE + MCLBYTES);
-	if (sndcc > maxcc) {
-		sndcc = (uint32_t)maxcc;
+	if (sndcc > sb_max_adj) {
+		sndcc = (uint32_t)sb_max_adj;
 	}
-	if (rcvcc > maxcc) {
-		rcvcc = (uint32_t)maxcc;
+	if (rcvcc > sb_max_adj) {
+		rcvcc = (uint32_t)sb_max_adj;
 	}
 	if (sbreserve(&so->so_snd, sndcc) == 0) {
 		goto bad;
@@ -816,7 +816,7 @@ soreserve_preconnect(struct socket *so, unsigned int pre_cc)
 int
 sbreserve(struct sockbuf *sb, u_int32_t cc)
 {
-	if ((u_quad_t)cc > (u_quad_t)sb_max * MCLBYTES / (MSIZE + MCLBYTES) ||
+	if ((u_quad_t)cc > (u_quad_t)sb_max_adj ||
 	    (cc > sb->sb_hiwat && (sb->sb_flags & SB_LIMITED))) {
 		return 0;
 	}
@@ -1035,7 +1035,7 @@ sbcheck(struct sockbuf *sb)
 		n = m->m_nextpkt;
 		for (; m; m = m->m_next) {
 			len += m->m_len;
-			mbcnt += MSIZE;
+			mbcnt += _MSIZE;
 			/* XXX pretty sure this is bogus */
 			if (m->m_flags & M_EXT) {
 				mbcnt += m->m_ext.ext_size;
@@ -1233,9 +1233,13 @@ sbconcat_mbufs(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0, struct
 	}
 
 	if (asa != NULL) {
+		_CASSERT(sizeof(asa->sa_len) == sizeof(__uint8_t));
+#if _MSIZE <= UINT8_MAX
 		if (asa->sa_len > MLEN) {
 			return NULL;
 		}
+#endif
+		_CASSERT(sizeof(asa->sa_len) == sizeof(__uint8_t));
 		space += asa->sa_len;
 	}
 
@@ -2100,10 +2104,10 @@ pru_send_notsupp(struct socket *so, int flags, struct mbuf *m,
 }
 
 int
-pru_send_list_notsupp(struct socket *so, int flags, struct mbuf *m,
-    struct sockaddr *addr, struct mbuf *control, struct proc *p)
+pru_send_list_notsupp(struct socket *so, struct mbuf *m, u_int *pktcnt,
+    int flags)
 {
-#pragma unused(so, flags, m, addr, control, p)
+#pragma unused(so, m, pktcnt, flags)
 	return EOPNOTSUPP;
 }
 
@@ -2129,7 +2133,6 @@ pru_sense_null(struct socket *so, void *ub, int isstat64)
 	return 0;
 }
 
-
 int
 pru_sosend_notsupp(struct socket *so, struct sockaddr *addr, struct uio *uio,
     struct mbuf *top, struct mbuf *control, int flags)
@@ -2139,10 +2142,9 @@ pru_sosend_notsupp(struct socket *so, struct sockaddr *addr, struct uio *uio,
 }
 
 int
-pru_sosend_list_notsupp(struct socket *so, struct uio **uio,
-    u_int uiocnt, int flags)
+pru_sosend_list_notsupp(struct socket *so, struct mbuf *m, size_t total_len, u_int *pktcnt, int flags)
 {
-#pragma unused(so, uio, uiocnt, flags)
+#pragma unused(so, m, total_len, pktcnt, flags)
 	return EOPNOTSUPP;
 }
 
@@ -2151,14 +2153,6 @@ pru_soreceive_notsupp(struct socket *so, struct sockaddr **paddr,
     struct uio *uio, struct mbuf **mp0, struct mbuf **controlp, int *flagsp)
 {
 #pragma unused(so, paddr, uio, mp0, controlp, flagsp)
-	return EOPNOTSUPP;
-}
-
-int
-pru_soreceive_list_notsupp(struct socket *so,
-    struct recv_msg_elem *recv_msg_array, u_int uiocnt, int *flagsp)
-{
-#pragma unused(so, recv_msg_array, uiocnt, flagsp)
 	return EOPNOTSUPP;
 }
 
@@ -2234,7 +2228,6 @@ pru_sanitize(struct pr_usrreqs *pru)
 	DEFAULT(pru->pru_sockaddr, pru_sockaddr_notsupp);
 	DEFAULT(pru->pru_sopoll, pru_sopoll_notsupp);
 	DEFAULT(pru->pru_soreceive, pru_soreceive_notsupp);
-	DEFAULT(pru->pru_soreceive_list, pru_soreceive_list_notsupp);
 	DEFAULT(pru->pru_sosend, pru_sosend_notsupp);
 	DEFAULT(pru->pru_sosend_list, pru_sosend_list_notsupp);
 	DEFAULT(pru->pru_socheckopt, pru_socheckopt_null);
@@ -2268,9 +2261,14 @@ int
 sbspace(struct sockbuf *sb)
 {
 	int pending = 0;
-	int space = imin((int)(sb->sb_hiwat - sb->sb_cc),
-	    (int)(sb->sb_mbmax - sb->sb_mbcnt));
+	int space;
 
+	if (sb->sb_flags & SB_KCTL) {
+		space = (int)(sb->sb_hiwat - sb->sb_cc);
+	} else {
+		space = imin((int)(sb->sb_hiwat - sb->sb_cc),
+		    (int)(sb->sb_mbmax - sb->sb_mbcnt));
+	}
 	if (sb->sb_preconn_hiwat != 0) {
 		space = imin((int)(sb->sb_preconn_hiwat - sb->sb_cc), space);
 	}
@@ -2402,11 +2400,11 @@ sballoc(struct sockbuf *sb, struct mbuf *m)
 	    m->m_type != MT_OOBDATA) {
 		sb->sb_ctl += m->m_len;
 	}
-	sb->sb_mbcnt += MSIZE;
+	sb->sb_mbcnt += _MSIZE;
 
 	if (m->m_flags & M_EXT) {
 		sb->sb_mbcnt += m->m_ext.ext_size;
-		cnt += (m->m_ext.ext_size >> MSIZESHIFT);
+		cnt += (m->m_ext.ext_size + _MSIZE - 1) / _MSIZE;
 	}
 	OSAddAtomic(cnt, &total_sbmb_cnt);
 	VERIFY(total_sbmb_cnt > 0);
@@ -2435,10 +2433,10 @@ sbfree(struct sockbuf *sb, struct mbuf *m)
 	    m->m_type != MT_OOBDATA) {
 		sb->sb_ctl -= m->m_len;
 	}
-	sb->sb_mbcnt -= MSIZE;
+	sb->sb_mbcnt -= _MSIZE;
 	if (m->m_flags & M_EXT) {
 		sb->sb_mbcnt -= m->m_ext.ext_size;
-		cnt -= (m->m_ext.ext_size >> MSIZESHIFT);
+		cnt -= (m->m_ext.ext_size + _MSIZE - 1) / _MSIZE;
 	}
 	OSAddAtomic(cnt, &total_sbmb_cnt);
 	VERIFY(total_sbmb_cnt >= 0);
@@ -2951,8 +2949,10 @@ sysctl_sb_max SYSCTL_HANDLER_ARGS
 	int error = sysctl_io_number(req, sb_max, sizeof(u_int32_t),
 	    &new_value, &changed);
 	if (!error && changed) {
-		if (new_value > LOW_SB_MAX && new_value <= high_sb_max) {
+		if (new_value > LOW_SB_MAX && new_value <= high_sb_max &&
+		    SB_MAX_ADJUST(new_value) < UINT32_MAX) {
 			sb_max = new_value;
+			sb_max_adj = SB_MAX_ADJUST(sb_max);
 		} else {
 			error = ERANGE;
 		}

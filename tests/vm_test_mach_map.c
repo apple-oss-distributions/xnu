@@ -563,19 +563,25 @@ T_DECL(madvise_shared, "test madvise shared for rdar://problem/2295713 logging \
     T_META_ALL_VALID_ARCHS(true))
 {
 	vm_address_t            vmaddr = 0, vmaddr2 = 0;
-	vm_size_t               vmsize;
+	vm_size_t               vmsize, vmsize1, vmsize2;
 	kern_return_t           kr;
 	char                    *cp;
 	vm_prot_t               curprot, maxprot;
 	int                     ret;
 	task_vm_info_data_t     ti;
 	mach_msg_type_number_t  ti_count;
+	int                     vmflags;
+	uint64_t                footprint_before, footprint_after;
 
-	vmsize = 10 * 1024 * 1024; /* 10MB */
+	vmsize1 = 64 * 1024; /* 64KB to madvise() */
+	vmsize2 = 32 * 1024; /* 32KB to mlock() */
+	vmsize = vmsize1 + vmsize2;
+	vmflags = VM_FLAGS_ANYWHERE;
+	VM_SET_FLAGS_ALIAS(vmflags, VM_MEMORY_MALLOC);
 	kr = vm_allocate(mach_task_self(),
 	    &vmaddr,
 	    vmsize,
-	    VM_FLAGS_ANYWHERE);
+	    vmflags);
 	T_QUIET;
 	T_EXPECT_MACH_SUCCESS(kr, "vm_allocate()");
 	if (T_RESULT == T_RESULT_FAIL) {
@@ -633,14 +639,24 @@ T_DECL(madvise_shared, "test madvise shared for rdar://problem/2295713 logging \
 		goto done;
 	}
 #endif /* defined(__x86_64__) || defined(__i386__) */
+
+	ret = mlock((char *)(uintptr_t)(vmaddr2 + vmsize1),
+	    vmsize2);
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "mlock()");
+
+	footprint_before = task_footprint();
+
 	ret = madvise((char *)(uintptr_t)vmaddr,
-	    vmsize,
+	    vmsize1,
 	    MADV_FREE_REUSABLE);
 	T_QUIET;
 	T_EXPECT_POSIX_SUCCESS(ret, "madvise()");
 	if (T_RESULT == T_RESULT_FAIL) {
 		goto done;
 	}
+
+	footprint_after = task_footprint();
+	T_ASSERT_EQ(footprint_after, footprint_before - 2 * vmsize1, NULL);
 
 	ti_count = TASK_VM_INFO_COUNT;
 	kr = task_info(mach_task_self(),
@@ -654,8 +670,8 @@ T_DECL(madvise_shared, "test madvise shared for rdar://problem/2295713 logging \
 	}
 
 	T_QUIET;
-	T_EXPECT_EQ(ti.reusable, 2ULL * vmsize, "ti.reusable=%lld expected %lld",
-	    ti.reusable, (uint64_t)(2 * vmsize));
+	T_EXPECT_EQ(ti.reusable, 2ULL * vmsize1, "ti.reusable=%lld expected %lld",
+	    ti.reusable, (uint64_t)(2 * vmsize1));
 	if (T_RESULT == T_RESULT_FAIL) {
 		goto done;
 	}

@@ -173,6 +173,10 @@ walk_kext_callstack(int (^cb)(uintptr_t))
 
 		/* Next frame pointer is pointed to by the previous one */
 		frameptr_next = (uintptr_t*) *frameptr;
+#if defined(HAS_APPLE_PAC)
+		frameptr_next = ptrauth_strip(frameptr_next,
+		    ptrauth_key_frame_pointer);
+#endif
 
 		/* Pull return address from one spot above the frame pointer */
 		retaddr = *(frameptr + 1);

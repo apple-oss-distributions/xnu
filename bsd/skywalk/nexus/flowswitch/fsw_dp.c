@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -100,6 +100,7 @@
 #include <netinet/udp.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
+#include <netinet/in_var.h>
 
 extern kern_return_t thread_terminate(thread_t);
 
@@ -133,10 +134,14 @@ static uint32_t fsw_flow_purge_thresh = NX_FSW_FLOW_PURGE_THRES;
 #define FSW_DRAIN_CH_THRES       (FSW_REAP_IVAL << 5)
 #define FSW_IFSTATS_THRES        1
 
+#define NX_FSW_CHANNEL_REAP_THRES 1000  /* threshold (bytes/sec) for reaping*/
+uint64_t fsw_channel_reap_thresh = NX_FSW_CHANNEL_REAP_THRES;
+
 #define RX_BUFLET_BATCH_COUNT 64 /* max batch size for buflet allocation */
 
 uint32_t fsw_rx_batch = NX_FSW_RXBATCH; /* # of packets per batch (RX) */
 uint32_t fsw_tx_batch = NX_FSW_TXBATCH; /* # of packets per batch (TX) */
+uint32_t fsw_gso_batch = 8;
 #if (DEVELOPMENT || DEBUG)
 SYSCTL_UINT(_kern_skywalk_flowswitch, OID_AUTO, rx_batch,
     CTLFLAG_RW | CTLFLAG_LOCKED, &fsw_rx_batch, 0,
@@ -144,6 +149,12 @@ SYSCTL_UINT(_kern_skywalk_flowswitch, OID_AUTO, rx_batch,
 SYSCTL_UINT(_kern_skywalk_flowswitch, OID_AUTO, tx_batch,
     CTLFLAG_RW | CTLFLAG_LOCKED, &fsw_tx_batch, 0,
     "flowswitch Tx batch size");
+SYSCTL_UINT(_kern_skywalk_flowswitch, OID_AUTO, gso_batch,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &fsw_gso_batch, 0,
+    "flowswitch GSO batch size");
+SYSCTL_QUAD(_kern_skywalk_flowswitch, OID_AUTO, reap_throughput,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &fsw_channel_reap_thresh,
+    "flowswitch channel reap threshold throughput (bytes/sec)");
 #endif /* !DEVELOPMENT && !DEBUG */
 
 SYSCTL_UINT(_kern_skywalk_flowswitch, OID_AUTO, rx_agg_tcp,
@@ -152,6 +163,9 @@ SYSCTL_UINT(_kern_skywalk_flowswitch, OID_AUTO, rx_agg_tcp,
 SYSCTL_UINT(_kern_skywalk_flowswitch, OID_AUTO, rx_agg_tcp_host,
     CTLFLAG_RW | CTLFLAG_LOCKED, &sk_fsw_rx_agg_tcp_host, 0,
     "flowswitch RX aggregation for tcp kernel path (0/1/2 (off/on/auto))");
+SYSCTL_UINT(_kern_skywalk_flowswitch, OID_AUTO, gso_mtu,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &sk_fsw_gso_mtu, 0,
+    "flowswitch GSO for tcp flows (mtu > 0: enable, mtu == 0: disable)");
 
 /*
  * IP reassembly
@@ -707,10 +721,10 @@ top:
 	}
 
 	if (__improbable(fe != NULL &&
-	    (fe->fe_flags & (FLOWENT_PARENT | FLOWENT_CHILD)) != 0)) {
+	    (fe->fe_flags & (FLOWENTF_PARENT | FLOWENTF_CHILD)) != 0)) {
 		/* Rx */
 		if (input) {
-			if (fe->fe_flags & FLOWENT_PARENT) {
+			if (fe->fe_flags & FLOWENTF_PARENT) {
 				struct flow_entry *child_fe = rx_lookup_child_flow(fsw, fe, pkt);
 				if (child_fe != NULL) {
 					flow_entry_release(&fe);
@@ -726,7 +740,7 @@ top:
 		} else {
 			/* Tx */
 			if (__improbable(!_UUID_MATCH(pkt->pkt_flow_id, fe->fe_uuid))) {
-				if (__probable(fe->fe_flags & FLOWENT_PARENT)) {
+				if (__probable(fe->fe_flags & FLOWENTF_PARENT)) {
 					struct flow_entry *parent_fe = fe;
 					fe = tx_lookup_child_flow(parent_fe, pkt->pkt_flow_id);
 					flow_entry_release(&parent_fe);
@@ -750,6 +764,150 @@ top:
 	return fe;
 }
 
+SK_NO_INLINE_ATTRIBUTE
+static bool
+pkt_is_for_listener(struct flow_entry *fe, struct __kern_packet *pkt)
+{
+	struct nx_flowswitch *fsw = fe->fe_fsw;
+	struct ifnet *ifp = fsw->fsw_ifp;
+	struct in_ifaddr *ia = NULL;
+	struct in_ifaddr *best_ia = NULL;
+	struct in6_ifaddr *ia6 = NULL;
+	struct in6_ifaddr *best_ia6 = NULL;
+	struct ifnet *match_ifp = NULL;
+	struct __flow *flow = pkt->pkt_flow;
+	bool result = false;
+
+	ASSERT(pkt->pkt_qum_qflags & QUM_F_FLOW_CLASSIFIED);
+
+	if (flow->flow_ip_ver == IPVERSION) {
+		if (IN_ZERONET(ntohl(flow->flow_ipv4_dst.s_addr)) ||
+		    IN_LOOPBACK(ntohl(flow->flow_ipv4_dst.s_addr)) ||
+		    IN_LINKLOCAL(ntohl(flow->flow_ipv4_dst.s_addr)) ||
+		    IN_DS_LITE(ntohl(flow->flow_ipv4_dst.s_addr)) ||
+		    IN_6TO4_RELAY_ANYCAST(ntohl(flow->flow_ipv4_dst.s_addr)) ||
+		    IN_MULTICAST(ntohl(flow->flow_ipv4_dst.s_addr)) ||
+		    INADDR_BROADCAST == flow->flow_ipv4_dst.s_addr) {
+			result = true;
+			goto done;
+		}
+
+		/*
+		 * Check for a match in the hash bucket.
+		 */
+		lck_rw_lock_shared(&in_ifaddr_rwlock);
+		TAILQ_FOREACH(ia, INADDR_HASH(flow->flow_ipv4_dst.s_addr), ia_hash) {
+			if (IA_SIN(ia)->sin_addr.s_addr == flow->flow_ipv4_dst.s_addr) {
+				best_ia = ia;
+				match_ifp = ia->ia_ifp;
+
+				if (match_ifp == ifp) {
+					break;
+				}
+				/*
+				 * Continue the loop in case there's a exact match with another
+				 * interface
+				 */
+			}
+		}
+
+		if (best_ia != NULL) {
+			if (match_ifp != ifp && ipforwarding == 0 &&
+			    (match_ifp->if_family == IFNET_FAMILY_IPSEC ||
+			    match_ifp->if_family == IFNET_FAMILY_UTUN)) {
+				/*
+				 * Drop when interface address check is strict and forwarding
+				 * is disabled
+				 */
+			} else {
+				lck_rw_done(&in_ifaddr_rwlock);
+				result = true;
+				goto done;
+			}
+		}
+		lck_rw_done(&in_ifaddr_rwlock);
+
+		if (ifp->if_flags & IFF_BROADCAST) {
+			/*
+			 * Check for broadcast addresses.
+			 *
+			 * Only accept broadcast packets that arrive via the matching
+			 * interface.  Reception of forwarded directed broadcasts would be
+			 * handled via ip_forward() and ether_frameout() with the loopback
+			 * into the stack for SIMPLEX interfaces handled by ether_frameout().
+			 */
+			struct ifaddr *ifa;
+
+			ifnet_lock_shared(ifp);
+			TAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
+				if (ifa->ifa_addr->sa_family != AF_INET) {
+					continue;
+				}
+				ia = ifatoia(ifa);
+				if (satosin(&ia->ia_broadaddr)->sin_addr.s_addr == flow->flow_ipv4_dst.s_addr ||
+				    ia->ia_netbroadcast.s_addr == flow->flow_ipv4_dst.s_addr) {
+					ifnet_lock_done(ifp);
+					result = true;
+					goto done;
+				}
+			}
+			ifnet_lock_done(ifp);
+		}
+	} else {
+		if (IN6_IS_ADDR_LOOPBACK(&flow->flow_ipv6_dst) ||
+		    IN6_IS_ADDR_LINKLOCAL(&flow->flow_ipv6_dst) ||
+		    IN6_IS_ADDR_MULTICAST(&flow->flow_ipv6_dst)) {
+			result = true;
+			goto done;
+		}
+
+		/*
+		 * Check for exact addresses in the hash bucket.
+		 */
+		lck_rw_lock_shared(&in6_ifaddr_rwlock);
+		TAILQ_FOREACH(ia6, IN6ADDR_HASH(&flow->flow_ipv6_dst), ia6_hash) {
+			if (in6_are_addr_equal_scoped(&ia6->ia_addr.sin6_addr, &flow->flow_ipv6_dst, ia6->ia_ifp->if_index, ifp->if_index)) {
+				if ((ia6->ia6_flags & (IN6_IFF_NOTREADY | IN6_IFF_CLAT46))) {
+					continue;
+				}
+				best_ia6 = ia6;
+				if (ia6->ia_ifp == ifp) {
+					break;
+				}
+				/*
+				 * Continue the loop in case there's a exact match with another
+				 * interface
+				 */
+			}
+		}
+		if (best_ia6 != NULL) {
+			if (best_ia6->ia_ifp != ifp && ip6_forwarding == 0 &&
+			    (best_ia6->ia_ifp->if_family == IFNET_FAMILY_IPSEC ||
+			    best_ia6->ia_ifp->if_family == IFNET_FAMILY_UTUN)) {
+				/*
+				 * Drop when interface address check is strict and forwarding
+				 * is disabled
+				 */
+			} else {
+				lck_rw_done(&in6_ifaddr_rwlock);
+				result = true;
+				goto done;
+			}
+		}
+		lck_rw_done(&in6_ifaddr_rwlock);
+	}
+
+	/*
+	 * In forwarding mode, if the destination address
+	 * of the packet does not match any interface
+	 * address, it maybe destined to the client device
+	 */
+	SK_DF(SK_VERB_FSW_DP | SK_VERB_RX | SK_VERB_FLOW,
+	    "Rx flow does not match interface address");
+done:
+	return result;
+}
+
 static struct flow_entry *
 rx_lookup_flow(struct nx_flowswitch *fsw, struct __kern_packet *pkt,
     struct flow_entry *prev_fe)
@@ -760,6 +918,14 @@ rx_lookup_flow(struct nx_flowswitch *fsw, struct __kern_packet *pkt,
 	_FSW_INJECT_ERROR(2, fe, NULL, flow_entry_release, &fe);
 	if (fe == NULL) {
 		FSW_STATS_INC(FSW_STATS_RX_FLOW_NOT_FOUND);
+		return NULL;
+	}
+
+	if (__improbable(fe->fe_key.fk_mask == FKMASK_2TUPLE &&
+	    fe->fe_flags & FLOWENTF_LISTENER) &&
+	    !pkt_is_for_listener(fe, pkt)) {
+		FSW_STATS_INC(FSW_STATS_RX_PKT_NOT_LISTENER);
+		flow_entry_release(&fe);
 		return NULL;
 	}
 
@@ -820,18 +986,15 @@ tx_flow_batch_packet(struct flow_entry_list *fes, struct flow_entry *fe,
 }
 
 static inline void
-fsw_ring_dequeue_pktq(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
+fsw_rx_ring_dequeue_pktq(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
     uint32_t n_pkts_max, struct pktq *pktq, uint32_t *n_bytes)
 {
 	uint32_t n_pkts = 0;
-
-	KPKTQ_INIT(pktq);
-
 	slot_idx_t idx, idx_end;
 	idx = r->ckr_khead;
 	idx_end = r->ckr_rhead;
-	struct nexus_vp_adapter *vpna = VPNA(KRNA(r));
 
+	ASSERT(KPKTQ_EMPTY(pktq));
 	*n_bytes = 0;
 	for (; n_pkts < n_pkts_max && idx != idx_end;
 	    idx = SLOT_NEXT(idx, r->ckr_lim)) {
@@ -849,19 +1012,115 @@ fsw_ring_dequeue_pktq(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
 			pp_free_packet_single(pkt);
 			continue;
 		}
-		if (NA_CHANNEL_EVENT_ATTACHED(&vpna->vpna_up)) {
-			__packet_set_tx_nx_port(SK_PKT2PH(pkt),
-			    vpna->vpna_nx_port, vpna->vpna_gencnt);
-		}
-
 		n_pkts++;
 		*n_bytes += pkt->pkt_length;
 
 		KPKTQ_ENQUEUE(pktq, pkt);
 	}
-
 	r->ckr_khead = idx;
 	r->ckr_ktail = SLOT_PREV(idx, r->ckr_lim);
+}
+
+/*
+ * This is only for estimating how many packets each GSO packet will need.
+ * The number does not need to be exact because any leftover packets allocated
+ * will be freed.
+ */
+static uint32_t
+estimate_gso_pkts(struct __kern_packet *pkt)
+{
+	packet_tso_flags_t tso_flags;
+	uint16_t mss;
+	uint32_t n_pkts = 0, total_hlen = 0, total_len = 0;
+
+	tso_flags = pkt->pkt_csum_flags & PACKET_CSUM_TSO_FLAGS;
+	mss = pkt->pkt_proto_seg_sz;
+
+	if (tso_flags == PACKET_TSO_IPV4) {
+		total_hlen = sizeof(struct ip) + sizeof(struct tcphdr);
+	} else if (tso_flags == PACKET_TSO_IPV6) {
+		total_hlen = sizeof(struct ip6_hdr) + sizeof(struct tcphdr);
+	}
+	if (total_hlen != 0 && mss != 0) {
+		total_len = pkt->pkt_length;
+		n_pkts = (uint32_t)
+		    (SK_ROUNDUP((total_len - total_hlen), mss) / mss);
+	}
+	DTRACE_SKYWALK5(estimate__gso, packet_tso_flags_t, tso_flags,
+	    uint32_t, total_hlen, uint32_t, total_len, uint16_t, mss,
+	    uint32_t, n_pkts);
+	return n_pkts;
+}
+
+/*
+ * This function retrieves a chain of packets of the same type only
+ * (GSO or non-GSO).
+ */
+static inline void
+fsw_tx_ring_dequeue_pktq(struct nx_flowswitch *fsw,
+    struct __kern_channel_ring *r, uint32_t n_pkts_max,
+    struct pktq *pktq, uint32_t *n_bytes, uint32_t *gso_pkts_estimate)
+{
+	uint32_t n_pkts = 0;
+	slot_idx_t idx, idx_end;
+	idx = r->ckr_khead;
+	idx_end = r->ckr_rhead;
+	struct nexus_vp_adapter *vpna = VPNA(KRNA(r));
+	boolean_t gso_enabled, gso_required;
+	uint32_t gso_pkts;
+
+	gso_enabled = (fsw->fsw_tso_mode == FSW_TSO_MODE_SW);
+	ASSERT(KPKTQ_EMPTY(pktq));
+	*n_bytes = 0;
+	for (; n_pkts < n_pkts_max &&
+	    (!gso_enabled || fsw_gso_batch == 0 ||
+	    *gso_pkts_estimate < fsw_gso_batch) &&
+	    idx != idx_end; idx = SLOT_NEXT(idx, r->ckr_lim)) {
+		struct __kern_slot_desc *ksd = KR_KSD(r, idx);
+		struct __kern_packet *pkt = ksd->sd_pkt;
+
+		ASSERT(pkt->pkt_nextpkt == NULL);
+
+		_FSW_INJECT_ERROR(20, pkt->pkt_qum_qflags,
+		    pkt->pkt_qum_qflags | QUM_F_DROPPED, null_func);
+		if (__improbable(((pkt->pkt_qum_qflags & QUM_F_DROPPED) != 0))
+		    || (pkt->pkt_length == 0)) {
+			KR_SLOT_DETACH_METADATA(r, ksd);
+			FSW_STATS_INC(FSW_STATS_DROP);
+			pp_free_packet_single(pkt);
+			continue;
+		}
+		if (gso_enabled) {
+			gso_pkts = estimate_gso_pkts(pkt);
+
+			/*
+			 * We use the first packet to determine what
+			 * type the subsequent ones need to be (GSO or
+			 * non-GSO).
+			 */
+			if (n_pkts == 0) {
+				gso_required = (gso_pkts != 0);
+			} else {
+				if (gso_required != (gso_pkts != 0)) {
+					break;
+				}
+			}
+			*gso_pkts_estimate += gso_pkts;
+		}
+		KR_SLOT_DETACH_METADATA(r, ksd);
+		if (NA_CHANNEL_EVENT_ATTACHED(&vpna->vpna_up)) {
+			__packet_set_tx_nx_port(SK_PKT2PH(pkt),
+			    vpna->vpna_nx_port, vpna->vpna_gencnt);
+		}
+		n_pkts++;
+		*n_bytes += pkt->pkt_length;
+		KPKTQ_ENQUEUE(pktq, pkt);
+	}
+	r->ckr_khead = idx;
+	r->ckr_ktail = SLOT_PREV(idx, r->ckr_lim);
+	DTRACE_SKYWALK5(tx__ring__dequeue, struct nx_flowswitch *, fsw,
+	    ifnet_t, fsw->fsw_ifp, uint32_t, n_pkts, uint32_t, *n_bytes,
+	    uint32_t, *gso_pkts_estimate);
 }
 
 static void
@@ -905,7 +1164,7 @@ fsw_ring_enqueue_pktq(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
 	 * ensure slot attachments are visible before updating the
 	 * tail pointer
 	 */
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 
 	r->ckr_ktail = idx_end;
 
@@ -1046,7 +1305,18 @@ convert_native_pktq_to_mbufs(struct nx_flowswitch *fsw, struct pktq *pktq,
 			    tot_len < (mhead_bufsize >> 1))) {
 				++mhead_waste;
 			}
+			/*
+			 * Clean up unused mbuf.
+			 * Ony need to do this when we pre-alloc 2x16K mbufs
+			 */
 			if (__improbable(mhead_bufsize >= tot_len + M16KCLBYTES)) {
+				ASSERT(mhead_bufsize == 2 * M16KCLBYTES);
+				struct mbuf *m_extra = m->m_next;
+				ASSERT(m_extra != NULL);
+				ASSERT(m_extra->m_len == 0);
+				ASSERT(M_SIZE(m_extra) == M16KCLBYTES);
+				m->m_next = NULL;
+				m_freem(m_extra);
 				FSW_STATS_INC(FSW_STATS_RX_WASTED_16KMBUF);
 			}
 		}
@@ -1111,7 +1381,7 @@ convert_native_pktq_to_mbufs(struct nx_flowswitch *fsw, struct pktq *pktq,
 	}
 
 	if (largest != fsw->fsw_rx_largest_size) {
-		atomic_set_32(&fsw->fsw_rx_largest_size, largest);
+		os_atomic_store(&fsw->fsw_rx_largest_size, largest, release);
 	}
 
 	pp_free_pktq(pktq);
@@ -1209,9 +1479,19 @@ fsw_host_rx(struct nx_flowswitch *fsw, struct pktq *pktq)
 {
 	struct mbuf *m_head = NULL, *m_tail = NULL;
 	uint32_t cnt = 0, bytes = 0;
+	ifnet_fsw_rx_cb_t cb;
+	void *cb_arg;
 	boolean_t compat;
 
 	ASSERT(!KPKTQ_EMPTY(pktq));
+	if (ifnet_get_flowswitch_rx_callback(fsw->fsw_ifp, &cb, &cb_arg) == 0) {
+		ASSERT(cb != NULL);
+		ASSERT(cb_arg != NULL);
+		/* callback consumes packets */
+		(*cb)(cb_arg, pktq);
+		ifnet_release_flowswitch_rx_callback(fsw->fsw_ifp);
+		return;
+	}
 
 	/* All packets in the pktq must have the same type */
 	compat = ((KPKTQ_FIRST(pktq)->pkt_pflags & PKT_F_MBUF_DATA) != 0);
@@ -1362,15 +1642,15 @@ dp_flow_route_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 			 * atomic, let the increment happen first, and the
 			 * thread losing the CAS does decrement.
 			 */
-			atomic_add_32(&fsw->fsw_pending_nonviable, 1);
-			if (atomic_test_set_32(&fe->fe_want_nonviable, 0, 1)) {
+			os_atomic_inc(&fsw->fsw_pending_nonviable, relaxed);
+			if (os_atomic_cmpxchg(&fe->fe_want_nonviable, 0, 1, acq_rel)) {
 				fsw_reap_sched(fsw);
 			} else {
-				atomic_add_32(&fsw->fsw_pending_nonviable, -1);
+				os_atomic_dec(&fsw->fsw_pending_nonviable, relaxed);
 			}
 		}
 		if (fr != NULL) {
-			atomic_add_32(&fr->fr_want_configure, 1);
+			os_atomic_inc(&fr->fr_want_configure, relaxed);
 		}
 	}
 
@@ -1399,8 +1679,10 @@ dp_flow_rx_route_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 }
 
 void
-dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
+dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe,
+    uint32_t flags)
 {
+#pragma unused(flags)
 	struct pktq dpkts;              /* dst pool alloc'ed packets */
 	struct pktq disposed_pkts;         /* done src packets */
 	struct pktq dropped_pkts;         /* dropped src packets */
@@ -1470,7 +1752,7 @@ dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 		cnt -= n_pkts;
 		buf_cnt = MIN(RX_BUFLET_BATCH_COUNT, cnt);
 		err = pp_alloc_buflet_batch(dpp, buf_array, &buf_cnt,
-		    SKMEM_NOSLEEP, PP_ALLOC_BFT_ATTACH_BUFFER);
+		    SKMEM_NOSLEEP, false);
 		if (__improbable(buf_cnt == 0)) {
 			KPKTQ_CONCAT(&dropped_pkts, &fe->fe_rx_pktq);
 			FSW_STATS_ADD(FSW_STATS_DROP_NOMEM_PKT, n_pkts);
@@ -1535,7 +1817,7 @@ dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 					cnt = buf_cnt;
 					err = pp_alloc_buflet_batch(dpp,
 					    buf_array, &buf_cnt,
-					    SKMEM_NOSLEEP, PP_ALLOC_BFT_ATTACH_BUFFER);
+					    SKMEM_NOSLEEP, false);
 					if (__improbable(buf_cnt == 0)) {
 						FSW_STATS_INC(FSW_STATS_DROP_NOMEM_PKT);
 						KPKTQ_ENQUEUE(&dropped_pkts,
@@ -1608,7 +1890,8 @@ done:
 }
 
 static inline void
-rx_flow_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
+rx_flow_process(struct nx_flowswitch *fsw, struct flow_entry *fe,
+    uint32_t flags)
 {
 	ASSERT(!KPKTQ_EMPTY(&fe->fe_rx_pktq));
 	ASSERT(KPKTQ_LEN(&fe->fe_rx_pktq) != 0);
@@ -1617,7 +1900,7 @@ rx_flow_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 	    KPKTQ_LEN(&fe->fe_rx_pktq), fe, fe->fe_nx_port);
 
 	/* flow related processing (default, agg, fpd, etc.) */
-	fe->fe_rx_process(fsw, fe);
+	fe->fe_rx_process(fsw, fe, flags);
 
 	if (__improbable(fe->fe_want_withdraw)) {
 		fsw_reap_sched(fsw);
@@ -1708,10 +1991,6 @@ _fsw_receive_locked(struct nx_flowswitch *fsw, struct pktq *pktq)
 			}
 		}
 
-#if DEVELOPMENT || DEBUG
-		trace_pkt_dump_payload(fsw->fsw_ifp, pkt, true);
-#endif /* DEVELOPMENT || DEBUG */
-
 		prev_fe = fe = rx_lookup_flow(fsw, pkt, prev_fe);
 		if (__improbable(fe == NULL)) {
 			KPKTQ_ENQUEUE_LIST(&host_pkts, pkt);
@@ -1728,7 +2007,7 @@ _fsw_receive_locked(struct nx_flowswitch *fsw, struct pktq *pktq)
 
 	struct flow_entry *tfe = NULL;
 	TAILQ_FOREACH_SAFE(fe, &fes, fe_rx_link, tfe) {
-		rx_flow_process(fsw, fe);
+		rx_flow_process(fsw, fe, 0);
 		TAILQ_REMOVE(&fes, fe, fe_rx_link);
 		fe->fe_rx_pktq_bytes = 0;
 		fe->fe_rx_frag_count = 0;
@@ -2108,7 +2387,7 @@ dp_copy_to_dev_mbuf(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
     struct __kern_packet *dpkt)
 {
 	struct mbuf *m = NULL;
-	uint16_t bdlen, bdlim, bdoff;
+	uint32_t bdlen, bdlim, bdoff;
 	uint8_t *bdaddr;
 	unsigned int one = 1;
 	int err = 0;
@@ -2236,15 +2515,9 @@ dp_copy_to_dev_log(struct nx_flowswitch *fsw, const struct kern_pbufpool *pp,
 #define dp_copy_to_dev_log(...)
 #endif /* SK_LOG */
 
-static int
-dp_copy_to_dev(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
-    struct __kern_packet *dpkt)
+static void
+fsw_pkt_copy_metadata(struct __kern_packet *spkt, struct __kern_packet *dpkt)
 {
-	const struct kern_pbufpool *pp = dpkt->pkt_qum.qum_pp;
-	struct ifnet *ifp = fsw->fsw_ifp;
-	uint32_t dev_pkt_len;
-	int err = 0;
-
 	ASSERT(!(spkt->pkt_pflags & PKT_F_MBUF_MASK));
 	ASSERT(!(spkt->pkt_pflags & PKT_F_PKT_MASK));
 
@@ -2264,7 +2537,18 @@ dp_copy_to_dev(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 	_UUID_COPY(dpkt->pkt_flowsrc_id, spkt->pkt_flowsrc_id);
 	_UUID_COPY(dpkt->pkt_policy_euuid, spkt->pkt_policy_euuid);
 	dpkt->pkt_policy_id = spkt->pkt_policy_id;
+}
 
+static int
+dp_copy_to_dev(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
+    struct __kern_packet *dpkt)
+{
+	const struct kern_pbufpool *pp = dpkt->pkt_qum.qum_pp;
+	struct ifnet *ifp = fsw->fsw_ifp;
+	uint32_t dev_pkt_len;
+	int err = 0;
+
+	fsw_pkt_copy_metadata(spkt, dpkt);
 	switch (fsw->fsw_classq_enq_ptype) {
 	case QP_MBUF:
 		err = dp_copy_to_dev_mbuf(fsw, spkt, dpkt);
@@ -2288,6 +2572,34 @@ dp_copy_to_dev(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 done:
 	dp_copy_to_dev_log(fsw, pp, spkt, dpkt, err);
 	return err;
+}
+
+static int
+dp_copy_headers_to_dev(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
+    struct __kern_packet *dpkt)
+{
+	uint8_t *sbaddr, *dbaddr;
+	uint16_t headroom = fsw->fsw_frame_headroom + fsw->fsw_ifp->if_tx_headroom;
+	uint16_t hdrs_len_estimate = (uint16_t)MIN(spkt->pkt_length, 128);
+
+	fsw_pkt_copy_metadata(spkt, dpkt);
+
+	MD_BUFLET_ADDR_ABS(spkt, sbaddr);
+	ASSERT(sbaddr != NULL);
+	sbaddr += spkt->pkt_headroom;
+
+	MD_BUFLET_ADDR_ABS(dpkt, dbaddr);
+	ASSERT(dbaddr != NULL);
+	dpkt->pkt_headroom = (uint8_t)headroom;
+	dbaddr += headroom;
+
+	pkt_copy(sbaddr, dbaddr, hdrs_len_estimate);
+	METADATA_SET_LEN(dpkt, hdrs_len_estimate, headroom);
+
+	/* packet length is set to the full length */
+	dpkt->pkt_length = spkt->pkt_length;
+	dpkt->pkt_pflags |= PKT_F_TRUNCATED;
+	return 0;
 }
 
 static struct mbuf *
@@ -2322,11 +2634,11 @@ convert_pkt_to_mbuf(struct __kern_packet *pkt)
 
 	m->m_pkthdr.pkt_flags &= ~PKT_F_COMMON_MASK;
 	m->m_pkthdr.pkt_flags |= (pkt->pkt_pflags & PKT_F_COMMON_MASK);
+	/* set pkt_hdr so that AQM can find IP header and mark ECN bits */
+	m->m_pkthdr.pkt_hdr = m->m_data + pkt->pkt_l2_len;
+
 	if ((pkt->pkt_pflags & PKT_F_START_SEQ) != 0) {
 		m->m_pkthdr.tx_start_seq = ntohl(pkt->pkt_flow_tcp_seq);
-	}
-	if ((pkt->pkt_pflags & PKT_F_L4S) != 0) {
-		m->m_pkthdr.pkt_ext_flags |= PKTF_EXT_L4S;
 	}
 	KPKT_CLEAR_MBUF_DATA(pkt);
 
@@ -2549,6 +2861,8 @@ classq_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			flowadv_is_set = na_flowadv_set(flow_get_na(fsw, fe),
 			    flow_adv_idx, flow_adv_token);
 		}
+		DTRACE_SKYWALK3(chain__enqueue, uint32_t, cnt, uint32_t, bytes,
+		    bool, flowadv_is_set);
 	} else {
 		uint32_t c = 0, b = 0;
 
@@ -2574,6 +2888,8 @@ classq_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
 		}
 		ASSERT(c == cnt);
 		ASSERT(b == bytes);
+		DTRACE_SKYWALK3(non__chain__enqueue, uint32_t, cnt, uint32_t, bytes,
+		    bool, flowadv_is_set);
 	}
 
 	/* notify flow advisory event */
@@ -2596,6 +2912,7 @@ static void
 classq_qset_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
     bool chain, uint32_t cnt, uint32_t bytes)
 {
+#pragma unused(chain)
 	struct __kern_packet *pkt, *tail;
 	flowadv_idx_t flow_adv_idx;
 	bool flowadv_is_set = false;
@@ -2607,10 +2924,6 @@ classq_qset_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
 	SK_DF(SK_VERB_FSW_DP | SK_VERB_AQM, "%s classq enqueued %d pkts",
 	    if_name(fsw->fsw_ifp), KPKTQ_LEN(&fe->fe_tx_pktq));
 
-	/*
-	 * Not supporting chains for now
-	 */
-	VERIFY(!chain);
 	pkt = KPKTQ_FIRST(&fe->fe_tx_pktq);
 	tail = KPKTQ_LAST(&fe->fe_tx_pktq);
 	KPKTQ_INIT(&fe->fe_tx_pktq);
@@ -2793,26 +3106,21 @@ fsw_update_timestamps(struct __kern_packet *pkt, volatile uint64_t *fg_ts,
 	}
 }
 
-/*
- * TODO:
- * We can check the flow entry as well to only allow chain enqueue
- * on flows matching a certain criteria.
- */
 static bool
-fsw_chain_enqueue_enabled(struct nx_flowswitch *fsw, struct flow_entry *fe)
+fsw_chain_enqueue_enabled(struct nx_flowswitch *fsw, bool gso_enabled)
 {
-#pragma unused(fe)
 	return fsw_chain_enqueue != 0 &&
 	       fsw->fsw_ifp->if_output_netem == NULL &&
 	       (fsw->fsw_ifp->if_eflags & IFEF_ENQUEUE_MULTI) == 0 &&
-	       fe->fe_qset == NULL;
+	       gso_enabled;
 }
 
 void
-dp_flow_tx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
+dp_flow_tx_process(struct nx_flowswitch *fsw, struct flow_entry *fe,
+    uint32_t flags)
 {
 	struct pktq dropped_pkts;
-	bool chain;
+	bool chain, gso = ((flags & FLOW_PROC_FLAG_GSO) != 0);
 	uint32_t cnt = 0, bytes = 0;
 	volatile struct sk_nexusadv *nxadv = NULL;
 	volatile uint64_t *fg_ts = NULL;
@@ -2832,7 +3140,7 @@ dp_flow_tx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 		KPKTQ_CONCAT(&dropped_pkts, &fe->fe_tx_pktq);
 		goto done;
 	}
-	chain = fsw_chain_enqueue_enabled(fsw, fe);
+	chain = fsw_chain_enqueue_enabled(fsw, gso);
 	if (chain) {
 		nxadv = fsw->fsw_nx->nx_adv.flowswitch_nxv_adv;
 		if (nxadv != NULL) {
@@ -2842,7 +3150,9 @@ dp_flow_tx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 	}
 	struct __kern_packet *pkt, *tpkt;
 	KPKTQ_FOREACH_SAFE(pkt, &fe->fe_tx_pktq, tpkt) {
-		int err = flow_pkt_track(fe, pkt, false);
+		int err = 0;
+
+		err = flow_pkt_track(fe, pkt, false);
 		if (__improbable(err != 0)) {
 			SK_RDERR(5, "flow_pkt_track failed (err %d)", err);
 			FSW_STATS_INC(FSW_STATS_TX_FLOW_TRACK_ERR);
@@ -2850,7 +3160,6 @@ dp_flow_tx_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 			KPKTQ_ENQUEUE(&dropped_pkts, pkt);
 			continue;
 		}
-
 		_UUID_COPY(pkt->pkt_policy_euuid, fe->fe_eproc_uuid);
 		pkt->pkt_transport_protocol = fe->fe_transport_protocol;
 
@@ -2972,7 +3281,8 @@ done:
 }
 
 static inline void
-tx_flow_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
+tx_flow_process(struct nx_flowswitch *fsw, struct flow_entry *fe,
+    uint32_t flags)
 {
 	ASSERT(!KPKTQ_EMPTY(&fe->fe_tx_pktq));
 	ASSERT(KPKTQ_LEN(&fe->fe_tx_pktq) != 0);
@@ -2981,7 +3291,7 @@ tx_flow_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 	    KPKTQ_LEN(&fe->fe_tx_pktq), fe, fe->fe_nx_port);
 
 	/* flow related processing (default, agg, etc.) */
-	fe->fe_tx_process(fsw, fe);
+	fe->fe_tx_process(fsw, fe, flags);
 
 	KPKTQ_FINI(&fe->fe_tx_pktq);
 }
@@ -3012,6 +3322,7 @@ dp_tx_pktq(struct nx_flowswitch *fsw, struct pktq *spktq)
 	struct ifnet *ifp;
 	sa_family_t af;
 	uint32_t n_pkts, n_flows = 0;
+	boolean_t do_pacing = FALSE;
 
 	int err;
 	KPKTQ_INIT(&dpktq);
@@ -3079,6 +3390,7 @@ dp_tx_pktq(struct nx_flowswitch *fsw, struct pktq *spktq)
 			continue;
 		}
 
+		do_pacing |= ((pkt->pkt_pflags & PKT_F_OPT_TX_TIMESTAMP) != 0);
 		af = fsw_ip_demux(fsw, pkt);
 		if (__improbable(af == AF_UNSPEC)) {
 			dp_tx_log_pkt(SK_VERB_ERROR, "demux err", pkt);
@@ -3122,7 +3434,7 @@ flow_batch:
 
 	struct flow_entry *tfe = NULL;
 	TAILQ_FOREACH_SAFE(fe, &fes, fe_tx_link, tfe) {
-		tx_flow_process(fsw, fe);
+		tx_flow_process(fsw, fe, 0);
 		TAILQ_REMOVE(&fes, fe, fe_tx_link);
 		fe->fe_tx_is_cont_frag = false;
 		fe->fe_tx_frag_id = 0;
@@ -3133,10 +3445,430 @@ flow_batch:
 done:
 	FSW_RUNLOCK(fsw);
 	if (n_flows > 0) {
-		netif_transmit(ifp, NETIF_XMIT_FLAG_CHANNEL);
+		netif_transmit(ifp, NETIF_XMIT_FLAG_CHANNEL | (do_pacing ? NETIF_XMIT_FLAG_PACING : 0));
 	}
 	dp_drop_pktq(fsw, &dropped_pkts);
 	KPKTQ_FINI(&dropped_pkts);
+	KPKTQ_FINI(&dpktq);
+}
+
+static sa_family_t
+get_tso_af(struct __kern_packet *pkt)
+{
+	packet_tso_flags_t tso_flags;
+
+	tso_flags = pkt->pkt_csum_flags & PACKET_CSUM_TSO_FLAGS;
+	if (tso_flags == PACKET_TSO_IPV4) {
+		return AF_INET;
+	} else if (tso_flags == PACKET_TSO_IPV6) {
+		return AF_INET6;
+	} else {
+		panic("invalid tso flags: 0x%x\n", tso_flags);
+		/* NOTREACHED */
+		__builtin_unreachable();
+	}
+}
+
+static inline void
+update_flow_info(struct __kern_packet *pkt, void *iphdr, void *tcphdr,
+    uint16_t payload_sz)
+{
+	struct tcphdr *tcp = tcphdr;
+
+	DTRACE_SKYWALK4(update__flow__info, struct __kern_packet *, pkt,
+	    void *, iphdr, void *, tcphdr, uint16_t, payload_sz);
+	pkt->pkt_flow_ip_hdr = (mach_vm_address_t)iphdr;
+	pkt->pkt_flow_tcp_hdr = (mach_vm_address_t)tcphdr;
+	pkt->pkt_flow_tcp_flags = tcp->th_flags;
+	pkt->pkt_flow_tcp_seq = tcp->th_seq;
+	pkt->pkt_flow_ulen = payload_sz;
+}
+
+static int
+do_gso(struct nx_flowswitch *fsw, int af, struct __kern_packet *orig_pkt,
+    struct __kern_packet *first_pkt, struct pktq *dev_pktq,
+    struct pktq *gso_pktq)
+{
+	ifnet_t ifp = fsw->fsw_ifp;
+	struct __kern_packet *pkt = first_pkt;
+	uint8_t proto = pkt->pkt_flow_ip_proto;
+	uint16_t ip_hlen = pkt->pkt_flow_ip_hlen;
+	uint16_t tcp_hlen = pkt->pkt_flow_tcp_hlen;
+	uint16_t total_hlen = ip_hlen + tcp_hlen;
+	uint16_t mtu = (uint16_t)ifp->if_mtu;
+	uint16_t mss = pkt->pkt_proto_seg_sz, payload_sz;
+	uint32_t n, n_pkts, off = 0, total_len = orig_pkt->pkt_length;
+	uint16_t headroom = fsw->fsw_frame_headroom + ifp->if_tx_headroom;
+	kern_packet_t orig_ph = SK_PKT2PH(orig_pkt);
+	uint8_t *orig_pkt_baddr;
+	struct tcphdr *tcp;
+	struct ip *ip;
+	struct ip6_hdr *ip6;
+	uint32_t tcp_seq;
+	uint16_t ipid;
+	uint32_t pseudo_hdr_csum, bufsz;
+
+	ASSERT(headroom <= UINT8_MAX);
+	if (proto != IPPROTO_TCP) {
+		SK_ERR("invalid proto: %d", proto);
+		DTRACE_SKYWALK3(invalid__proto, struct nx_flowswitch *,
+		    fsw, ifnet_t, ifp, uint8_t, proto);
+		return EINVAL;
+	}
+	if (mss == 0 || mss > (mtu - total_hlen)) {
+		SK_ERR("invalid args: mss %d, mtu %d, total_hlen %d",
+		    mss, mtu, total_hlen);
+		DTRACE_SKYWALK5(invalid__args1, struct nx_flowswitch *,
+		    fsw, ifnet_t, ifp, uint16_t, mss, uint16_t, mtu,
+		    uint32_t, total_hlen);
+		return EINVAL;
+	}
+	bufsz = PP_BUF_SIZE_DEF(pkt->pkt_qum.qum_pp);
+	if ((headroom + total_hlen + mss) > bufsz) {
+		SK_ERR("invalid args: headroom %d, total_hlen %d, "
+		    "mss %d, bufsz %d", headroom, total_hlen, mss, bufsz);
+		DTRACE_SKYWALK6(invalid__args2, struct nx_flowswitch *,
+		    fsw, ifnet_t, ifp, uint16_t, headroom, uint16_t,
+		    total_hlen, uint16_t, mss, uint32_t, bufsz);
+		return EINVAL;
+	}
+	n_pkts = (uint32_t)(SK_ROUNDUP((total_len - total_hlen), mss) / mss);
+
+	ASSERT(pkt->pkt_headroom == headroom);
+	ASSERT(pkt->pkt_length == total_len);
+	ASSERT(pkt->pkt_l2_len == 0);
+	ASSERT((pkt->pkt_qum.qum_qflags & QUM_F_FINALIZED) == 0);
+	ASSERT((pkt->pkt_pflags & PKT_F_TRUNCATED) != 0);
+	pkt->pkt_pflags &= ~PKT_F_TRUNCATED;
+	pkt->pkt_proto_seg_sz = 0;
+	pkt->pkt_csum_flags = 0;
+	MD_BUFLET_ADDR_ABS(orig_pkt, orig_pkt_baddr);
+	orig_pkt_baddr += orig_pkt->pkt_headroom;
+
+	if (af == AF_INET) {
+		ip = (struct ip *)pkt->pkt_flow_ip_hdr;
+		tcp = (struct tcphdr *)pkt->pkt_flow_tcp_hdr;
+		ipid = ip->ip_id;
+		pseudo_hdr_csum = in_pseudo(pkt->pkt_flow_ipv4_src.s_addr,
+		    pkt->pkt_flow_ipv4_dst.s_addr, 0);
+	} else {
+		ASSERT(af == AF_INET6);
+		tcp = (struct tcphdr *)pkt->pkt_flow_tcp_hdr;
+		pseudo_hdr_csum = in6_pseudo(&pkt->pkt_flow_ipv6_src,
+		    &pkt->pkt_flow_ipv6_dst, 0);
+	}
+	tcp_seq = ntohl(tcp->th_seq);
+
+	for (n = 1, payload_sz = mss, off = total_hlen; off < total_len;
+	    off += payload_sz) {
+		uint8_t *baddr, *baddr0;
+		uint32_t partial;
+
+		if (pkt == NULL) {
+			n++;
+			KPKTQ_DEQUEUE(dev_pktq, pkt);
+			ASSERT(pkt != NULL);
+		}
+		MD_BUFLET_ADDR_ABS(pkt, baddr0);
+		baddr = baddr0;
+		baddr += headroom;
+
+		/* Copy headers from the original packet */
+		if (n != 1) {
+			ASSERT(pkt != first_pkt);
+			pkt_copy(orig_pkt_baddr, baddr, total_hlen);
+			fsw_pkt_copy_metadata(first_pkt, pkt);
+
+			ASSERT((pkt->pkt_qum_qflags & QUM_F_FLOW_CLASSIFIED) != 0);
+			/* flow info still needs to be updated below */
+			bcopy(first_pkt->pkt_flow, pkt->pkt_flow,
+			    sizeof(*pkt->pkt_flow));
+			pkt->pkt_trace_id = 0;
+			ASSERT(pkt->pkt_headroom == headroom);
+		} else {
+			METADATA_SET_LEN(pkt, 0, 0);
+		}
+		baddr += total_hlen;
+
+		/* Copy/checksum the payload from the original packet */
+		if (off + payload_sz > total_len) {
+			payload_sz = (uint16_t)(total_len - off);
+		}
+		pkt_copypkt_sum(orig_ph,
+		    (uint16_t)(orig_pkt->pkt_headroom + off),
+		    SK_PKT2PH(pkt), headroom + total_hlen, payload_sz,
+		    &partial, TRUE);
+
+		DTRACE_SKYWALK6(copy__csum, struct nx_flowswitch *, fsw,
+		    ifnet_t, ifp, uint8_t *, baddr, uint16_t, payload_sz,
+		    uint16_t, mss, uint32_t, partial);
+		FSW_STATS_INC(FSW_STATS_TX_COPY_PKT2PKT);
+
+		/*
+		 * Adjust header information and fill in the missing fields.
+		 */
+		if (af == AF_INET) {
+			ip = (struct ip *)(void *)(baddr0 + pkt->pkt_headroom);
+			tcp = (struct tcphdr *)(void *)((caddr_t)ip + ip_hlen);
+
+			if (n != n_pkts) {
+				tcp->th_flags &= ~(TH_FIN | TH_PUSH);
+			}
+			if (n != 1) {
+				tcp->th_flags &= ~TH_CWR;
+				tcp->th_seq = htonl(tcp_seq);
+			}
+			update_flow_info(pkt, ip, tcp, payload_sz);
+
+			ip->ip_id = htons((ipid)++);
+			ip->ip_len = htons(ip_hlen + tcp_hlen + payload_sz);
+			ip->ip_sum = 0;
+			ip->ip_sum = inet_cksum_buffer(ip, 0, 0, ip_hlen);
+			tcp->th_sum = 0;
+			partial = __packet_cksum(tcp, tcp_hlen, partial);
+			partial += htons(tcp_hlen + IPPROTO_TCP + payload_sz);
+			partial += pseudo_hdr_csum;
+			ADDCARRY(partial);
+			tcp->th_sum = ~(uint16_t)partial;
+		} else {
+			ASSERT(af == AF_INET6);
+			ip6 = (struct ip6_hdr *)(baddr0 + pkt->pkt_headroom);
+			tcp = (struct tcphdr *)(void *)((caddr_t)ip6 + ip_hlen);
+
+			if (n != n_pkts) {
+				tcp->th_flags &= ~(TH_FIN | TH_PUSH);
+			}
+			if (n != 1) {
+				tcp->th_flags &= ~TH_CWR;
+				tcp->th_seq = htonl(tcp_seq);
+			}
+			update_flow_info(pkt, ip6, tcp, payload_sz);
+
+			ip6->ip6_plen = htons(tcp_hlen + payload_sz);
+			tcp->th_sum = 0;
+			partial = __packet_cksum(tcp, tcp_hlen, partial);
+			partial += htonl(tcp_hlen + IPPROTO_TCP + payload_sz);
+			partial += pseudo_hdr_csum;
+			ADDCARRY(partial);
+			tcp->th_sum = ~(uint16_t)partial;
+		}
+		tcp_seq += payload_sz;
+		METADATA_ADJUST_LEN(pkt, total_hlen, headroom);
+#if (DEVELOPMENT || DEBUG)
+		struct __kern_buflet *bft;
+		uint32_t blen;
+		PKT_GET_FIRST_BUFLET(pkt, 1, bft);
+		blen = __buflet_get_data_length(bft);
+		if (blen != total_hlen + payload_sz) {
+			panic("blen (%d) != total_len + payload_sz (%d)\n",
+			    blen, total_hlen + payload_sz);
+		}
+#endif /* DEVELOPMENT || DEBUG */
+
+		pkt->pkt_length = total_hlen + payload_sz;
+		KPKTQ_ENQUEUE(gso_pktq, pkt);
+		pkt = NULL;
+
+		/*
+		 * Note that at this point the packet is not yet finalized.
+		 * The finalization happens in dp_flow_tx_process() after
+		 * the framing is done.
+		 */
+	}
+	ASSERT(n == n_pkts);
+	ASSERT(off == total_len);
+	DTRACE_SKYWALK7(gso__done, struct nx_flowswitch *, fsw, ifnet_t, ifp,
+	    uint32_t, n_pkts, uint32_t, total_len, uint16_t, ip_hlen,
+	    uint16_t, tcp_hlen, uint8_t *, orig_pkt_baddr);
+	return 0;
+}
+
+static void
+tx_flow_enqueue_gso_pktq(struct flow_entry_list *fes, struct flow_entry *fe,
+    struct pktq *gso_pktq)
+{
+	if (KPKTQ_EMPTY(&fe->fe_tx_pktq)) {
+		ASSERT(KPKTQ_LEN(&fe->fe_tx_pktq) == 0);
+		TAILQ_INSERT_TAIL(fes, fe, fe_tx_link);
+		KPKTQ_ENQUEUE_MULTI(&fe->fe_tx_pktq, KPKTQ_FIRST(gso_pktq),
+		    KPKTQ_LAST(gso_pktq), KPKTQ_LEN(gso_pktq));
+		KPKTQ_INIT(gso_pktq);
+	} else {
+		ASSERT(!TAILQ_EMPTY(fes));
+		KPKTQ_ENQUEUE_MULTI(&fe->fe_tx_pktq, KPKTQ_FIRST(gso_pktq),
+		    KPKTQ_LAST(gso_pktq), KPKTQ_LEN(gso_pktq));
+		KPKTQ_INIT(gso_pktq);
+		flow_entry_release(&fe);
+	}
+}
+
+static void
+dp_gso_pktq(struct nx_flowswitch *fsw, struct pktq *spktq,
+    uint32_t gso_pkts_estimate)
+{
+	struct __kern_packet *spkt, *pkt;
+	struct flow_entry_list fes = TAILQ_HEAD_INITIALIZER(fes);
+	struct flow_entry *fe, *prev_fe;
+	struct pktq dpktq;
+	struct nexus_adapter *dev_na;
+	struct kern_pbufpool *dev_pp;
+	struct ifnet *ifp;
+	sa_family_t af;
+	uint32_t n_pkts, n_flows = 0;
+	int err;
+
+	KPKTQ_INIT(&dpktq);
+	n_pkts = KPKTQ_LEN(spktq);
+
+	FSW_RLOCK(fsw);
+	if (__improbable(FSW_QUIESCED(fsw))) {
+		DTRACE_SKYWALK1(tx__quiesced, struct nx_flowswitch *, fsw);
+		SK_ERR("flowswitch detached, dropping %d pkts", n_pkts);
+		dp_drop_pktq(fsw, spktq);
+		goto done;
+	}
+	dev_na = fsw->fsw_dev_ch->ch_na;
+	if (__improbable(dev_na == NULL)) {
+		SK_ERR("dev port not attached, dropping %d pkts", n_pkts);
+		FSW_STATS_ADD(FSW_STATS_DST_NXPORT_INACTIVE, n_pkts);
+		dp_drop_pktq(fsw, spktq);
+		goto done;
+	}
+	/*
+	 * fsw_ifp should still be valid at this point. If fsw is detached
+	 * after fsw_lock is released, this ifp will remain valid and
+	 * netif_transmit() will behave properly even if the ifp is in
+	 * detached state.
+	 */
+	ifp = fsw->fsw_ifp;
+	dev_pp = na_kr_get_pp(dev_na, NR_TX);
+
+	/*
+	 * Batch allocate enough packets to perform GSO on all
+	 * packets in spktq.
+	 */
+	err = pp_alloc_pktq(dev_pp, dev_pp->pp_max_frags, &dpktq,
+	    gso_pkts_estimate, NULL, NULL, SKMEM_NOSLEEP);
+#if DEVELOPMENT || DEBUG
+	if (__probable(err != ENOMEM)) {
+		_FSW_INJECT_ERROR(12, err, ENOMEM, pp_free_pktq, &dpktq);
+	}
+#endif /* DEVELOPMENT || DEBUG */
+	/*
+	 * We either get all packets or none. No partial allocations.
+	 */
+	if (__improbable(err != 0)) {
+		if (err == ENOMEM) {
+			ASSERT(KPKTQ_EMPTY(&dpktq));
+		} else {
+			dp_free_pktq(fsw, &dpktq);
+		}
+		DTRACE_SKYWALK1(gso__no__mem, int, err);
+		dp_drop_pktq(fsw, spktq);
+		FSW_STATS_ADD(FSW_STATS_DROP_NOMEM_PKT, n_pkts);
+		SK_ERR("failed to alloc %u pkts from device pool",
+		    gso_pkts_estimate);
+		goto done;
+	}
+	prev_fe = NULL;
+	KPKTQ_FOREACH(spkt, spktq) {
+		KPKTQ_DEQUEUE(&dpktq, pkt);
+		ASSERT(pkt != NULL);
+		/*
+		 * Copy only headers to the first packet of the GSO chain.
+		 * The headers will be used for classification below.
+		 */
+		err = dp_copy_headers_to_dev(fsw, spkt, pkt);
+		if (__improbable(err != 0)) {
+			pp_free_packet_single(pkt);
+			DTRACE_SKYWALK2(copy__headers__failed,
+			    struct nx_flowswitch *, fsw,
+			    struct __kern_packet *, spkt);
+			continue;
+		}
+		af = get_tso_af(pkt);
+		ASSERT(af == AF_INET || af == AF_INET6);
+
+		err = flow_pkt_classify(pkt, ifp, af, false);
+		if (__improbable(err != 0)) {
+			dp_tx_log_pkt(SK_VERB_ERROR, "flow extract err", pkt);
+			FSW_STATS_INC(FSW_STATS_TX_FLOW_EXTRACT_ERR);
+			pp_free_packet_single(pkt);
+			DTRACE_SKYWALK4(classify__failed,
+			    struct nx_flowswitch *, fsw,
+			    struct __kern_packet *, spkt,
+			    struct __kern_packet *, pkt,
+			    int, err);
+			continue;
+		}
+		/*
+		 * GSO cannot be done on a fragment and it's a bug in user
+		 * space to mark a fragment as needing GSO.
+		 */
+		if (__improbable(pkt->pkt_flow_ip_is_frag)) {
+			FSW_STATS_INC(FSW_STATS_TX_FRAG_BAD_CONT);
+			pp_free_packet_single(pkt);
+			DTRACE_SKYWALK3(is__frag,
+			    struct nx_flowswitch *, fsw,
+			    struct __kern_packet *, spkt,
+			    struct __kern_packet *, pkt);
+			continue;
+		}
+		fe = tx_lookup_flow(fsw, pkt, prev_fe);
+		if (__improbable(fe == NULL)) {
+			FSW_STATS_INC(FSW_STATS_TX_FLOW_NOT_FOUND);
+			pp_free_packet_single(pkt);
+			DTRACE_SKYWALK3(lookup__failed,
+			    struct nx_flowswitch *, fsw,
+			    struct __kern_packet *, spkt,
+			    struct __kern_packet *, pkt);
+			prev_fe = NULL;
+			continue;
+		}
+		/*
+		 * Perform GSO on spkt using the flow information
+		 * obtained above.
+		 */
+		struct pktq gso_pktq;
+		KPKTQ_INIT(&gso_pktq);
+		err = do_gso(fsw, af, spkt, pkt, &dpktq, &gso_pktq);
+		if (__probable(err == 0)) {
+			tx_flow_enqueue_gso_pktq(&fes, fe, &gso_pktq);
+			prev_fe = fe;
+		} else {
+			DTRACE_SKYWALK1(gso__error, int, err);
+			/* TODO: increment error stat */
+			pp_free_packet_single(pkt);
+			flow_entry_release(&fe);
+			prev_fe = NULL;
+		}
+		KPKTQ_FINI(&gso_pktq);
+	}
+	struct flow_entry *tfe = NULL;
+	TAILQ_FOREACH_SAFE(fe, &fes, fe_tx_link, tfe) {
+		/* Chain-enqueue can be used for GSO chains */
+		tx_flow_process(fsw, fe, FLOW_PROC_FLAG_GSO);
+		TAILQ_REMOVE(&fes, fe, fe_tx_link);
+		flow_entry_release(&fe);
+		n_flows++;
+	}
+done:
+	FSW_RUNLOCK(fsw);
+	if (n_flows > 0) {
+		netif_transmit(ifp, NETIF_XMIT_FLAG_CHANNEL);
+	}
+
+	/*
+	 * It's possible for packets to be left in dpktq because
+	 * gso_pkts_estimate is only an estimate. The actual number
+	 * of packets needed could be less.
+	 */
+	uint32_t dpktq_len;
+	if ((dpktq_len = KPKTQ_LEN(&dpktq)) > 0) {
+		DTRACE_SKYWALK2(leftover__dev__pkts,
+		    struct nx_flowswitch *, fsw, uint32_t, dpktq_len);
+		dp_free_pktq(fsw, &dpktq);
+	}
 	KPKTQ_FINI(&dpktq);
 }
 
@@ -3151,7 +3883,7 @@ fsw_dev_ring_flush(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
 		struct pktq pktq;
 		KPKTQ_INIT(&pktq);
 		uint32_t n_bytes;
-		fsw_ring_dequeue_pktq(fsw, r, fsw_rx_batch, &pktq, &n_bytes);
+		fsw_rx_ring_dequeue_pktq(fsw, r, fsw_rx_batch, &pktq, &n_bytes);
 		if (n_bytes == 0) {
 			break;
 		}
@@ -3188,7 +3920,10 @@ fsw_user_ring_flush(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
 		struct pktq pktq;
 		KPKTQ_INIT(&pktq);
 		uint32_t n_bytes;
-		fsw_ring_dequeue_pktq(fsw, r, fsw_tx_batch, &pktq, &n_bytes);
+		uint32_t gso_pkts_estimate = 0;
+
+		fsw_tx_ring_dequeue_pktq(fsw, r, fsw_tx_batch, &pktq, &n_bytes,
+		    &gso_pkts_estimate);
 		if (n_bytes == 0) {
 			break;
 		}
@@ -3196,13 +3931,17 @@ fsw_user_ring_flush(struct nx_flowswitch *fsw, struct __kern_channel_ring *r,
 		total_bytes += n_bytes;
 
 		KPKTQ_FIRST(&pktq)->pkt_trace_id = ++trace_id;
-		KDBG(SK_KTRACE_PKT_TX_FSW | DBG_FUNC_START, KPKTQ_FIRST(&pktq)->pkt_trace_id);
+		KDBG(SK_KTRACE_PKT_TX_FSW | DBG_FUNC_START,
+		    KPKTQ_FIRST(&pktq)->pkt_trace_id);
 
-		dp_tx_pktq(fsw, &pktq);
+		if (gso_pkts_estimate > 0) {
+			dp_gso_pktq(fsw, &pktq, gso_pkts_estimate);
+		} else {
+			dp_tx_pktq(fsw, &pktq);
+		}
 		dp_free_pktq(fsw, &pktq);
 		KPKTQ_FINI(&pktq);
 	}
-
 	kr_update_stats(r, total_pkts, total_bytes);
 
 	KDBG(SK_KTRACE_FSW_USER_RING_FLUSH, SK_KVA(r), total_pkts, total_bytes);
@@ -3403,7 +4142,7 @@ fsw_linger_insert(struct flow_entry *fe)
 	ASSERT(fe->fe_flags & FLOWENTF_WAIT_CLOSE);
 	ASSERT(fe->fe_linger_wait != 0);
 	fe->fe_linger_expire = (_net_uptime + fe->fe_linger_wait);
-	atomic_bitset_32(&fe->fe_flags, FLOWENTF_LINGERING);
+	os_atomic_or(&fe->fe_flags, FLOWENTF_LINGERING, relaxed);
 
 	lck_mtx_lock_spin(&fsw->fsw_linger_lock);
 	TAILQ_INSERT_TAIL(&fsw->fsw_linger_head, fe, fe_linger_link);
@@ -3426,7 +4165,7 @@ fsw_linger_remove_internal(struct flow_entry_linger_head *linger_head,
 	ASSERT(fe->fe_flags & FLOWENTF_TORN_DOWN);
 	ASSERT(fe->fe_flags & FLOWENTF_DESTROYED);
 	ASSERT(fe->fe_flags & FLOWENTF_LINGERING);
-	atomic_bitclear_32(&fe->fe_flags, FLOWENTF_LINGERING);
+	os_atomic_andnot(&fe->fe_flags, FLOWENTF_LINGERING, relaxed);
 
 	TAILQ_REMOVE(linger_head, fe, fe_linger_link);
 	flow_entry_release(&fe);
@@ -3567,9 +4306,9 @@ fsw_reap_thread_cont(void *v, wait_result_t wres)
 		 * all flowswitch instances, and so we limit this to no
 		 * more than once every FSW_REAP_SK_THRES seconds.
 		 */
-		atomic_get_64(last, &fsw_reap_last);
+		last = os_atomic_load(&fsw_reap_last, relaxed);
 		if ((low || (last != 0 && (now - last) >= FSW_REAP_SK_THRES)) &&
-		    atomic_test_set_64(&fsw_reap_last, last, now)) {
+		    os_atomic_cmpxchg(&fsw_reap_last, last, now, acq_rel)) {
 			fsw_purge_cache(fsw, low);
 
 			/* increase sleep interval if idle */
@@ -3578,7 +4317,7 @@ fsw_reap_thread_cont(void *v, wait_result_t wres)
 				i <<= 3;
 			}
 		} else if (last == 0) {
-			atomic_set_64(&fsw_reap_last, now);
+			os_atomic_store(&fsw_reap_last, now, release);
 		}
 
 		/*
@@ -3694,8 +4433,30 @@ fsw_drain_channels(struct nx_flowswitch *fsw, uint64_t now, boolean_t low)
 	/* BEGIN IGNORE CODESTYLE */
 	nx_port_foreach(nx, ^(nexus_port_t p) {
 		struct nexus_adapter *na = nx_port_get_na(nx, p);
-		if (na == NULL || na->na_work_ts == 0 ||
-		    (now - na->na_work_ts) < FSW_DRAIN_CH_THRES) {
+		if (na == NULL || na->na_work_ts == 0 || na->na_rx_rings == NULL) { 
+			return;
+		}
+
+		boolean_t purge;
+
+		/*
+		 * If some activity happened in the last FSW_DRAIN_CH_THRES
+		 * seconds on this channel, we reclaim memory if the channel 
+		 * throughput is less than the reap threshold value.
+		 */
+		if ((now - na->na_work_ts) < FSW_DRAIN_CH_THRES) {
+			struct __kern_channel_ring *ring;
+			channel_ring_stats *stats;
+			uint64_t bps;
+
+			ring = na->na_rx_rings;
+			stats = &ring->ckr_stats;
+			bps = stats->crs_bytes_per_second;
+
+			if (bps < fsw_channel_reap_thresh) {
+				purge = FALSE;
+				na_drain(na, purge);
+			}
 			return;
 		}
 
@@ -3706,7 +4467,6 @@ fsw_drain_channels(struct nx_flowswitch *fsw, uint64_t now, boolean_t low)
 		 * can be expensive since we'd need to allocate and construct
 		 * them again, so we do it only when necessary.
 		 */
-		boolean_t purge;
 		if (low || ((now - na->na_work_ts) >= (FSW_DRAIN_CH_THRES << 1))) {
 			na->na_work_ts = 0;
 			purge = TRUE;
@@ -3725,7 +4485,7 @@ static void
 fsw_purge_cache(struct nx_flowswitch *fsw, boolean_t low)
 {
 #pragma unused(fsw)
-	uint64_t o = atomic_add_64_ov(&fsw_want_purge, 1);
+	uint64_t o = os_atomic_inc_orig(&fsw_want_purge, relaxed);
 	uint32_t p = fsw_flow_purge_thresh;
 	boolean_t purge = (low || (o != 0 && p != 0 && (o % p) == 0));
 
@@ -3741,9 +4501,11 @@ fsw_purge_cache(struct nx_flowswitch *fsw, boolean_t low)
 	netns_reap_caches(purge);
 	skmem_reap_caches(purge);
 
+#if CONFIG_MBUF_MCACHE
 	if (if_is_fsw_transport_netagent_enabled() && purge) {
 		mbuf_drain(FALSE);
 	}
+#endif /* CONFIG_MBUF_MCACHE */
 }
 
 static void
@@ -3751,8 +4513,8 @@ fsw_flow_handle_low_power(struct nx_flowswitch *fsw, struct flow_entry *fe)
 {
 	/* When the interface is in low power mode, the flow is nonviable */
 	if (!(fe->fe_flags & FLOWENTF_NONVIABLE) &&
-	    atomic_test_set_32(&fe->fe_want_nonviable, 0, 1)) {
-		atomic_add_32(&fsw->fsw_pending_nonviable, 1);
+	    os_atomic_cmpxchg(&fe->fe_want_nonviable, 0, 1, acq_rel)) {
+		os_atomic_inc(&fsw->fsw_pending_nonviable, relaxed);
 	}
 }
 
@@ -3811,7 +4573,7 @@ fsw_process_deferred(struct nx_flowswitch *fsw)
 					fsw_flow_handle_low_power(fsw, fe);
 				}
 				if (__improbable(fe->fe_flags & FLOWENTF_HALF_CLOSED)) {
-					atomic_bitclear_32(&fe->fe_flags, FLOWENTF_HALF_CLOSED);
+					os_atomic_andnot(&fe->fe_flags, FLOWENTF_HALF_CLOSED, relaxed);
 					flow_namespace_half_close(&fe->fe_port_reservation);
 				}
 

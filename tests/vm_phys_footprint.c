@@ -350,7 +350,11 @@ T_DECL(phys_footprint_file,
 	T_SETUPEND;
 
 	/* pre-warm to account for page table expansion */
+#if TARGET_OS_OSX
 	pre_vm_addr = pre_warm_with_tag(TEMP_FILE_SIZE, VM_MEMORY_MALLOC);
+#else
+	pre_vm_addr = pre_warm_with_tag(TEMP_FILE_SIZE, VM_MEMORY_MALLOC_TINY);
+#endif
 
 	/* mapping a file does not impact footprint... */
 	get_ledger_info(&footprint_before, &pagetable_before);

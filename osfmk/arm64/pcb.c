@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -65,6 +65,8 @@
 
 #include <IOKit/IOBSD.h>
 
+#include <pexpert/pexpert.h>
+
 extern int debug_task;
 
 /* zone for debug_state area */
@@ -90,6 +92,7 @@ void
 consider_machine_adjust(void)
 {
 }
+
 
 
 
@@ -127,6 +130,7 @@ static inline void
 machine_switch_pmap_and_extended_context(thread_t old, thread_t new)
 {
 	pmap_t new_pmap;
+
 
 
 
@@ -258,11 +262,19 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
 
 	if (task != kernel_task) {
 		/* If this isn't a kernel thread, we'll have userspace state. */
-		thread->machine.contextData = zalloc_flags(user_ss_zone,
+		arm_context_t *contextData = zalloc_flags(user_ss_zone,
 		    Z_WAITOK | Z_NOFAIL);
 
-		thread->machine.upcb = &thread->machine.contextData->ss;
-		thread->machine.uNeon = &thread->machine.contextData->ns;
+#if __has_feature(ptrauth_calls)
+		uint64_t intr = ml_pac_safe_interrupts_disable();
+		zone_require(user_ss_zone, contextData);
+#endif
+		thread->machine.contextData = contextData;
+		thread->machine.upcb = &contextData->ss;
+		thread->machine.uNeon = &contextData->ns;
+#if __has_feature(ptrauth_calls)
+		ml_pac_safe_interrupts_restore(intr);
+#endif
 
 		if (task_has_64Bit_data(task)) {
 			thread->machine.upcb->ash.flavor = ARM_SAVED_STATE64;
@@ -281,6 +293,7 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
 		thread->machine.uNeon = NULL;
 		thread->machine.contextData = NULL;
 	}
+
 
 
 
@@ -390,6 +403,8 @@ machine_thread_destroy(thread_t thread)
 }
 
 
+
+
 /*
  * Routine: machine_thread_init
  *
@@ -397,6 +412,7 @@ machine_thread_destroy(thread_t thread)
 void
 machine_thread_init(void)
 {
+
 }
 
 /*
@@ -436,7 +452,7 @@ machine_stack_detach(thread_t thread)
 	kcov_stksz_set_thread_stack(thread, stack);
 #endif
 	thread->kernel_stack = 0;
-	thread->machine.kstackptr = 0;
+	thread->machine.kstackptr = NULL;
 
 	return stack;
 }
@@ -465,16 +481,17 @@ machine_stack_attach(thread_t thread,
 #if CONFIG_STKSZ
 	kcov_stksz_set_thread_stack(thread, 0);
 #endif
-	thread->machine.kstackptr = stack + kernel_stack_size - sizeof(struct thread_kernel_state);
+	void *kstackptr = (void *)(stack + kernel_stack_size - sizeof(struct thread_kernel_state));
+	thread->machine.kstackptr = kstackptr;
 	thread_initialize_kernel_state(thread);
 
-	machine_stack_attach_kprintf("kstackptr: %lx\n", (vm_address_t)thread->machine.kstackptr);
+	machine_stack_attach_kprintf("kstackptr: %lx\n", (vm_address_t)kstackptr);
 
 	current_el = (uint32_t) __builtin_arm_rsr64("CurrentEL");
 	context = &((thread_kernel_state_t) thread->machine.kstackptr)->machine;
 	savestate = &context->ss;
 	savestate->fp = 0;
-	savestate->sp = thread->machine.kstackptr;
+	savestate->sp = (uint64_t)kstackptr;
 	savestate->pc_was_in_userspace = false;
 #if defined(HAS_APPLE_PAC)
 	/* Sign the initial kernel stack saved state */
@@ -524,7 +541,8 @@ machine_stack_handoff(thread_t old,
 	kcov_stksz_set_thread_stack(new, 0);
 #endif
 	new->kernel_stack = stack;
-	new->machine.kstackptr = stack + kernel_stack_size - sizeof(struct thread_kernel_state);
+	void *kstackptr = (void *)(stack + kernel_stack_size - sizeof(struct thread_kernel_state));
+	new->machine.kstackptr = kstackptr;
 	if (stack == old->reserved_stack) {
 		assert(new->reserved_stack);
 		old->reserved_stack = new->reserved_stack;
@@ -970,6 +988,7 @@ arm_debug_set64(arm_debug_state_t *debug_state)
 	 * Software debug single step enable
 	 */
 	if (debug_state->uds.ds64.mdscr_el1 & 0x1) {
+
 		update_mdscr(0x8000, 1); // ~MDE | SS : no brk/watch while single stepping (which we've set)
 
 		mask_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);

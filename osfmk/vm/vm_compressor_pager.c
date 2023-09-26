@@ -169,7 +169,7 @@ typedef struct compressor_pager {
 
 /* embedded slot pointers in compressor_pager get packed, so VA restricted */
 static ZONE_DEFINE_TYPE(compressor_pager_zone, "compressor_pager",
-    struct compressor_pager, ZC_NOENCRYPT | ZC_VM | ZC_NOTBITAG);
+    struct compressor_pager, ZC_NOENCRYPT | ZC_VM);
 
 LCK_GRP_DECLARE(compressor_pager_lck_grp, "compressor_pager");
 
@@ -696,7 +696,7 @@ vm_compressor_slots_init(void)
 		compressor_slots_zones[idx] = zone_create(
 			compressor_slots_zones_names[idx],
 			compressor_slots_zones_sizes[idx],
-			ZC_PGZ_USE_GUARDS | ZC_VM | ZC_NOTBITAG);
+			ZC_PGZ_USE_GUARDS | ZC_VM);
 	}
 }
 STARTUP(ZALLOC, STARTUP_RANK_MIDDLE, vm_compressor_slots_init);
@@ -744,6 +744,7 @@ vm_compressor_pager_put(
 	memory_object_t                 mem_obj,
 	memory_object_offset_t          offset,
 	ppnum_t                         ppnum,
+	bool                            unmodified,
 	void                            **current_chead,
 	char                            *scratch_buf,
 	int                             *compressed_count_delta_p)
@@ -786,7 +787,7 @@ vm_compressor_pager_put(
 		 * the "backing_object" had some pages paged out and the
 		 * "object" had an equivalent page resident.
 		 */
-		vm_compressor_free(slot_p, 0);
+		vm_compressor_free(slot_p, (unmodified ? C_PAGE_UNMODIFIED : 0));
 		*compressed_count_delta_p -= 1;
 	}
 
@@ -796,7 +797,7 @@ vm_compressor_pager_put(
 	 * disconnected.
 	 */
 
-	if (vm_compressor_put(ppnum, slot_p, current_chead, scratch_buf)) {
+	if (vm_compressor_put(ppnum, slot_p, current_chead, scratch_buf, unmodified)) {
 		return KERN_RESOURCE_SHORTAGE;
 	}
 	*compressed_count_delta_p += 1;
@@ -849,9 +850,9 @@ vm_compressor_pager_get(
 
 	if (kr == KERN_SUCCESS) {
 		int     retval;
-
+		bool unmodified = (vm_compressor_is_slot_compressed(slot_p) == false);
 		/* get the page from the compressor */
-		retval = vm_compressor_get(ppnum, slot_p, flags);
+		retval = vm_compressor_get(ppnum, slot_p, (unmodified ? (flags | C_PAGE_UNMODIFIED) : flags));
 		if (retval == -1) {
 			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_COMPRESSOR_DECOMPRESS_FAILED), 0 /* arg */);
 			kr = KERN_MEMORY_FAILURE;

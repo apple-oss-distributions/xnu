@@ -455,7 +455,7 @@ kr_reclaim(struct __kern_channel_ring *kr)
 
 		kr->ckr_khead = kr->ckr_rhead;
 		/* ensure global visibility */
-		membar_sync();
+		os_atomic_thread_fence(seq_cst);
 	}
 
 	return (slot_idx_t)r;
@@ -674,7 +674,7 @@ kr_txsync_prologue(struct kern_channel *ch, struct __kern_channel_ring *kring,
 	head = ring->ring_head;
 	ckr_khead = kring->ckr_khead;
 	ckr_ktail = kring->ckr_ktail;
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 	ckr_rtail = kring->ckr_rtail;
 
 	SK_DF(SK_VERB_SYNC | SK_VERB_TX, "%s(%d) kr \"%s\", kh %u kt %u | "
@@ -740,7 +740,7 @@ kr_free_sync_prologue(struct __kern_channel_ring *kring, struct proc *p)
 	head = ring->ring_head;
 	ckr_khead = kring->ckr_khead;
 	ckr_ktail = kring->ckr_ktail;
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 	ckr_rtail = kring->ckr_rtail;
 
 	SK_DF(SK_VERB_SYNC, "%s(%d) kr \"%s\", kh %u kt %u | "
@@ -1637,8 +1637,8 @@ kr_internalize_metadata(struct kern_channel *ch,
 	struct __kern_packet *kpkt;
 	const nexus_meta_type_t md_type = METADATA_TYPE(kqum);
 	const nexus_meta_subtype_t md_subtype = METADATA_SUBTYPE(kqum);
-	uint32_t len = 0;
-	uint16_t bcnt = 0, bmax, i, bdoff, bdlim;
+	uint32_t len = 0, bdoff, bdlim;
+	uint16_t bcnt = 0, bmax, i;
 	boolean_t dropped;
 	int err = 0;
 
@@ -1757,7 +1757,6 @@ kr_internalize_metadata(struct kern_channel *ch,
 		 * buffer, since otherwise the ubuf and kbuf buffer
 		 * indices would not match.  Assert this is the case.
 		 */
-		ASSERT(kbuf->buf_boff == 0);
 		ASSERT(kbuf->buf_addr == (mach_vm_address_t)kbuf->buf_objaddr);
 
 		kbuf->buf_dlen = ubuf->buf_dlen;

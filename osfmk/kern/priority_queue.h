@@ -128,22 +128,22 @@ typedef uint16_t priority_queue_key_t;
  * implementation. The idea is to define the packed location as a long and
  * for unpacking simply cast it to a full pointer which sign extends it.
  */
-#if KASAN_TBI
+#if CONFIG_KERNEL_TAGGING
 #define PRIORITY_QUEUE_ENTRY_CHILD_BITS     44
 #define PRIORITY_QUEUE_ENTRY_TAG_BITS       4
 #define PRIORITY_QUEUE_ENTRY_KEY_BITS       16
-#else /* KASAN_TBI */
+#else /* CONFIG_KERNEL_TAGGING */
 #define PRIORITY_QUEUE_ENTRY_CHILD_BITS     48
 #define PRIORITY_QUEUE_ENTRY_KEY_BITS       16
-#endif /* KASAN_TBI */
+#endif /* CONFIG_KERNEL_TAGGING */
 
 typedef struct priority_queue_entry {
 	struct priority_queue_entry        *next;
 	struct priority_queue_entry        *prev;
 	long                                __key: PRIORITY_QUEUE_ENTRY_KEY_BITS;
-#if KASAN_TBI
+#if CONFIG_KERNEL_TAGGING
 	unsigned long                       tag: PRIORITY_QUEUE_ENTRY_TAG_BITS;
-#endif /* KASAN_TBI */
+#endif /* CONFIG_KERNEL_TAGGING */
 	long                                child: PRIORITY_QUEUE_ENTRY_CHILD_BITS;
 } *priority_queue_entry_t;
 
@@ -151,9 +151,9 @@ typedef struct priority_queue_entry_deadline {
 	struct priority_queue_entry_deadline *next;
 	struct priority_queue_entry_deadline *prev;
 	long                                  __key: PRIORITY_QUEUE_ENTRY_KEY_BITS;
-#if KASAN_TBI
+#if CONFIG_KERNEL_TAGGING
 	unsigned long                         tag: PRIORITY_QUEUE_ENTRY_TAG_BITS;
-#endif /* KASAN_TBI */
+#endif /* CONFIG_KERNEL_TAGGING */
 	long                                  child: PRIORITY_QUEUE_ENTRY_CHILD_BITS;
 	uint64_t                              deadline;
 } *priority_queue_entry_deadline_t;
@@ -162,9 +162,9 @@ typedef struct priority_queue_entry_sched {
 	struct priority_queue_entry_sched  *next;
 	struct priority_queue_entry_sched  *prev;
 	long                                key: PRIORITY_QUEUE_ENTRY_KEY_BITS;
-#if KASAN_TBI
+#if CONFIG_KERNEL_TAGGING
 	unsigned long                       tag: PRIORITY_QUEUE_ENTRY_TAG_BITS;
-#endif /* KASAN_TBI */
+#endif /* CONFIG_KERNEL_TAGGING */
 	long                                child: PRIORITY_QUEUE_ENTRY_CHILD_BITS;
 } *priority_queue_entry_sched_t;
 
@@ -172,9 +172,9 @@ typedef struct priority_queue_entry_stable {
 	struct priority_queue_entry_stable *next;
 	struct priority_queue_entry_stable *prev;
 	long                                key: PRIORITY_QUEUE_ENTRY_KEY_BITS;
-#if KASAN_TBI
+#if CONFIG_KERNEL_TAGGING
 	unsigned long                       tag: PRIORITY_QUEUE_ENTRY_TAG_BITS;
-#endif /* KASAN_TBI */
+#endif /* CONFIG_KERNEL_TAGGING */
 	long                                child: PRIORITY_QUEUE_ENTRY_CHILD_BITS;
 	uint64_t                            stamp;
 } *priority_queue_entry_stable_t;

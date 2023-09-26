@@ -359,3 +359,24 @@ def ShowAllKqueues(cmd_args=None, cmd_options={}, O=None):
     with O.table(GetKqueueSummary.header):
         for kq in IterateAllKqueues():
             print(GetKqueueSummary(kq))
+
+@lldb_command('showkqueuecounts', fancy=True)
+def ShowKqCounts(cmd_args=None, cmd_options={}, O=None):
+    """ Display a count of all the kqueues in the system - lskq summary
+
+        usage: showkqueuecounts
+    """
+    print ('{: <20s} {: <35s} {: <10s} {: <6s}'.format('process', 'proc_name', '#kqfiles', '#kqworkloop'))
+    for t in kern.tasks:
+        proc = GetProcFromTask(t)
+        if not proc:
+            continue
+        proc = kern.GetValueFromAddress(unsigned(proc), 'proc_t')
+        kqfcount = 0
+        kqwlcount = 0
+        for kqf in IterateProcKqfiles(proc):
+            kqfcount += 1
+        for kqwl in IterateProcKqworkloops(proc):
+            kqwlcount += 1
+        print("{proc: <#20x} {name: <35s} {kqfile: <10d} {kqwl: <6d}".format(proc=proc,
+            name=GetProcName(proc), kqfile=kqfcount, kqwl=kqwlcount))

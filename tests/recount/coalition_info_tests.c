@@ -1,3 +1,5 @@
+// Copyright 2021 (c) Apple Inc.  All rights reserved.
+
 #include <darwintest.h>
 #include <inttypes.h>
 #include <mach/coalition.h>

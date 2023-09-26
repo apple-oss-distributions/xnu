@@ -21,6 +21,22 @@
  *===-----------------------------------------------------------------------===
  */
 
+#if XNU_KERNEL_PRIVATE
+
+#include_next <stdatomic.h>
+/* __CLANG_STDATOMIC_H guard defined */
+
+#elif (defined(__has_include) && __has_include(<__xnu_libcxx_sentinel.h>))
+
+#if !__has_include_next(<stdatomic.h>)
+#error Do not build with -nostdinc (use GCC_USE_STANDARD_INCLUDE_SEARCHING=NO)
+#else
+#include_next <stdatomic.h>
+/* __CLANG_STDATOMIC_H guard defined */
+#endif /* __has_include_next */
+
+#else /* XNU_KERNEL_PRIVATE */
+
 #ifndef __clang__
 #error unsupported compiler
 #endif
@@ -63,12 +79,12 @@ extern "C" {
 /* 7.17.3 Order and consistency */
 
 typedef enum memory_order {
-  memory_order_relaxed = __ATOMIC_RELAXED,
-  memory_order_consume = __ATOMIC_CONSUME,
-  memory_order_acquire = __ATOMIC_ACQUIRE,
-  memory_order_release = __ATOMIC_RELEASE,
-  memory_order_acq_rel = __ATOMIC_ACQ_REL,
-  memory_order_seq_cst = __ATOMIC_SEQ_CST
+	memory_order_relaxed = __ATOMIC_RELAXED,
+	memory_order_consume = __ATOMIC_CONSUME,
+	memory_order_acquire = __ATOMIC_ACQUIRE,
+	memory_order_release = __ATOMIC_RELEASE,
+	memory_order_acq_rel = __ATOMIC_ACQ_REL,
+	memory_order_seq_cst = __ATOMIC_SEQ_CST
 } memory_order;
 
 #define kill_dependency(y) (y)
@@ -196,3 +212,4 @@ void atomic_flag_clear_explicit(volatile atomic_flag *, memory_order);
 #endif /* __STDC_HOSTED__ */
 #endif /* __CLANG_STDATOMIC_H */
 
+#endif /* XNU_KERNEL_PRIVATE */

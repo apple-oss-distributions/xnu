@@ -122,17 +122,10 @@ static void putchar(int c, void *arg);
  */
 extern const char *debugger_panic_str;
 
-extern struct tty cons;     /* standard console tty */
 extern struct tty *constty; /* pointer to console "window" tty */
 
 extern int __doprnt(const char *, va_list, void (*)(int, void *), void *, int, int);
 extern void console_write_char(char);  /* standard console putc */
-extern void logwakeup(struct msgbuf *);
-extern bool bsd_log_lock(bool);
-extern void bsd_log_unlock(void);
-
-uint32_t vaddlog_msgcount = 0;
-uint32_t vaddlog_msgcount_dropped = 0;
 
 static void
 putchar_args_init(struct putchar_args *pca, struct session *sessp)
@@ -303,41 +296,6 @@ void
 logtime(time_t secs)
 {
 	printf("Time 0x%lx Message ", secs);
-}
-
-static void
-putchar_asl(int c, void *arg)
-{
-	struct putchar_args *pca = arg;
-
-	if ((pca->flags & TOLOGLOCKED) && c != '\0' && c != '\r' && c != 0177) {
-		log_putc_locked(aslbufp, (char)c);
-	}
-	putchar(c, arg);
-}
-
-/*
- * Vestigial support for kern_asl_msg() via /dev/klog
- */
-int
-vaddlog(const char *fmt, va_list ap)
-{
-	if (!bsd_log_lock(oslog_is_safe())) {
-		os_atomic_inc(&vaddlog_msgcount_dropped, relaxed);
-		return 1;
-	}
-
-	struct putchar_args pca = {
-		.flags = TOLOGLOCKED,
-		.tty = NULL,
-	};
-
-	__doprnt(fmt, ap, putchar_asl, &pca, 10, TRUE);
-	bsd_log_unlock();
-	logwakeup(NULL);
-
-	os_atomic_inc(&vaddlog_msgcount, relaxed);
-	return 0;
 }
 
 int

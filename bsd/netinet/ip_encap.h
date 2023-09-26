@@ -88,6 +88,10 @@ const struct encaptab *encap_attach_func(int, int,
     const struct protosw *, void *);
 int     encap_detach(const struct encaptab *);
 void    *encap_getarg(struct mbuf *);
+void    encap_init(void);
+
+void encap_register_m_tag(void);
+
 __END_DECLS
 
 #endif /* BSD_KERNEL_PRIVATE */

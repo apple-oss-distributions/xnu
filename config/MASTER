@@ -62,6 +62,7 @@ options		VLAN		#				# <vlan>
 options		BOND		#				# <bond>
 options		IF_FAKE		#				# <if_fake>
 options		IF_HEADLESS	#				# <if_headless>
+options		IF_REDIRECT	#				# <if_redirect>
 options		AH_ALL_CRYPTO	# AH all crypto algs		# <ah_all_crypto>
 options		PF		# Packet Filter			# <pf>
 options		PF_ECN		# PF use ECN marking		# <pf_ecn>
@@ -89,6 +90,8 @@ options		CONFIG_NEXUS_KERNEL_PIPE #	# <config_nexus_kernel_pipe>
 options		CONFIG_NEXUS_MONITOR	#	# <config_nexus_monitor>
 options		CONFIG_NEXUS_FLOWSWITCH	#	# <config_nexus_flowswitch>
 options		CONFIG_NEXUS_NETIF	#	# <config_nexus_netif>
+options		CONFIG_MBUF_MCACHE	# mbufs use mcache	# <config_mbuf_mcache>
+options		KCTL_TEST		# kernel control test	# <kctl_test>
 
 # secure_kernel - secure kernel from user programs
 options     SECURE_KERNEL       # <secure_kernel>
@@ -388,10 +391,16 @@ options		CHECK_CS_VALIDATION_BITMAP	# <config_cs_validation_bitmap>
 options		CONFIG_PHYS_WRITE_ACCT		# <phys_write_acct>
 
 #
-# enable detectiion of file cache thrashing - used on platforms with
+# enable detection of file cache thrashing - used on platforms with
 # dynamic VM compression enabled
 #
 options		CONFIG_PHANTOM_CACHE		# <phantom_cache>
+
+#
+# enable detection of anonymous pages staying unmodified after first use
+# - used on platforms with dynamic VM compression enabled
+#
+options		CONFIG_TRACK_UNMODIFIED_ANON_PAGES		# <track_unmodified_anon_pages>
 
 #
 # memory pressure event support
@@ -781,3 +790,9 @@ options		SCHED_HYGIENE_DEBUG # <sched_hygiene_debug>
 
 # support for system call rejection/tracing
 options		CONFIG_DEBUG_SYSCALL_REJECTION	# <config_debug_syscall_rejection>
+
+# Extensible panic log support
+options		CONFIG_EXT_PANICLOG		# <config_ext_paniclog>
+
+# support for collecting statistics on task suspension
+options		CONFIG_TASK_SUSPEND_STATS	# <config_task_suspend_stats>

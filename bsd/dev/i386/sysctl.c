@@ -922,12 +922,6 @@ SYSCTL_QUAD(_machdep, OID_AUTO, tracephyreadabs,
 SYSCTL_QUAD(_machdep, OID_AUTO, tracephywriteabs,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
     &trace_phy_write_delay, "");
-SYSCTL_INT(_machdep, OID_AUTO, reportphyreadosbt,
-    CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &report_phy_read_osbt, 0, "");
-SYSCTL_INT(_machdep, OID_AUTO, reportphywriteosbt,
-    CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &report_phy_write_osbt, 0, "");
 SYSCTL_INT(_machdep, OID_AUTO, phyreaddelaypanic,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
     &phy_read_panic, 0, "");

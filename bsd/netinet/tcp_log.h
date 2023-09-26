@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -53,7 +53,6 @@
 extern os_log_t tcp_mpkl_log_object;
 extern uint32_t tcp_log_enable_flags;
 extern uint32_t tcp_log_port;
-extern int tcp_log_privacy;
 
 #define TCP_ENABLE_FLAG_LIST \
 	X(TLEF_CONNECTION,	0x00000001, connection) \
@@ -103,11 +102,14 @@ extern void tcp_log_output(const char *func_name, int line_no, struct tcpcb *tp,
 static inline bool
 tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 {
+	struct inpcb *inp;
+
 	if (tp == NULL || tp->t_inpcb == NULL) {
 		return false;
 	}
+	inp = tp->t_inpcb;
 	if (tcp_log_port > 0 && tcp_log_port <= IPPORT_HILASTAUTO) {
-		if (ntohs(tp->t_inpcb->inp_lport) != tcp_log_port &&
+		if (ntohs(inp->inp_lport) != tcp_log_port &&
 		    ntohs(tp->t_inpcb->inp_fport) != tcp_log_port) {
 			return false;
 		}
@@ -115,23 +117,23 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 	/*
 	 * First find out the kind of destination
 	 */
-	if (tp->t_log_flags == 0) {
+	if (inp->inp_log_flags == 0) {
 		if (tp->t_inpcb->inp_vflag & INP_IPV6) {
 			if (IN6_IS_ADDR_LOOPBACK(&tp->t_inpcb->in6p_laddr) ||
 			    IN6_IS_ADDR_LOOPBACK(&tp->t_inpcb->in6p_faddr)) {
-				tp->t_log_flags |= TLEF_DST_LOOPBACK;
+				inp->inp_log_flags |= TLEF_DST_LOOPBACK;
 			}
 		} else {
 			if (ntohl(tp->t_inpcb->inp_laddr.s_addr) == INADDR_LOOPBACK ||
 			    ntohl(tp->t_inpcb->inp_faddr.s_addr) == INADDR_LOOPBACK) {
-				tp->t_log_flags |= TLEF_DST_LOOPBACK;
+				inp->inp_log_flags |= TLEF_DST_LOOPBACK;
 			}
 		}
-		if (tp->t_log_flags == 0) {
+		if (inp->inp_log_flags == 0) {
 			if (tp->t_flags & TF_LOCAL) {
-				tp->t_log_flags |= TLEF_DST_LOCAL;
+				inp->inp_log_flags |= TLEF_DST_LOCAL;
 			} else {
-				tp->t_log_flags |= TLEF_DST_GW;
+				inp->inp_log_flags |= TLEF_DST_GW;
 			}
 		}
 	}
@@ -139,7 +141,7 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 	 * Check separately the destination flags that are per TCP connection
 	 * and the other functional flags that are global
 	 */
-	return (tp->t_log_flags & tcp_log_enable_flags & TLEF_MASK_DST) &&
+	return (inp->inp_log_flags & tcp_log_enable_flags & TLEF_MASK_DST) &&
 	       (tcp_log_enable_flags & (req_flags & ~TLEF_MASK_DST));
 }
 
@@ -197,6 +199,6 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 #define TCP_LOG_OUTPUT(tp, format, ...) if (tcp_is_log_enabled(tp, TLEF_OUTPUT)) \
     tcp_log_output(__func__, __LINE__, tp, format, ## __VA_ARGS__)
 
-#endif /* BSD_KERNEL_RPIVATE */
+#endif /* BSD_KERNEL_PRIVATE */
 
 #endif /* _NETINET_TCP_LOG_H_ */

@@ -1,4 +1,4 @@
-/* * Copyright (c) 2019 Apple Inc. All rights reserved. */
+/* * Copyright (c) 2019-2023 Apple Inc. All rights reserved. */
 
 #include <stddef.h>
 #undef offset
@@ -58,7 +58,7 @@ extern firehose_chunk_t firehose_boot_chunk;
 
 extern bool bsd_log_lock(bool);
 extern void bsd_log_unlock(void);
-extern void logwakeup(struct msgbuf *);
+extern void logwakeup(void);
 
 extern void oslog_stream(bool, firehose_tracepoint_id_u, uint64_t, const void *, size_t);
 extern void *OSKextKextForAddress(const void *);
@@ -237,7 +237,7 @@ _os_log_internal_driverKit(void *dso, os_log_t log, uint8_t type, const char *fm
 	uint64_t loadTag = get_task_loadTag(self_task);
 	if (loadTag != 0) {
 		driverKitLog = TRUE;
-		addr = (void*) loadTag;
+		addr = (void *)loadTag;
 	}
 
 	va_start(args, fmt);
@@ -537,7 +537,7 @@ _os_log_to_msgbuf_internal(const char *format, va_list args, uint64_t timestamp,
 #pragma clang diagnostic pop
 
 	bsd_log_unlock();
-	logwakeup(msgbufp);
+	logwakeup();
 	counter_inc(&oslog_msgbuf_msgcount);
 }
 
@@ -772,162 +772,289 @@ __firehose_critical_region_leave(void)
 
 #ifdef CONFIG_XNUPOST
 
+#include <dev/random/randomdev.h>
 #include <tests/xnupost.h>
-#define TESTOSLOGFMT(fn_name) "%u^%llu/%llu^kernel^0^test^" fn_name
-#define TESTOSLOGPFX "TESTLOG:%u#"
-#define TESTOSLOG(fn_name) TESTOSLOGPFX TESTOSLOGFMT(fn_name "#")
 
-extern u_int32_t RandomULong(void);
-extern size_t find_pattern_in_buffer(const char *pattern, size_t len, size_t expected_count);
-void test_oslog_default_helper(uint32_t uniqid, uint64_t count);
-void test_oslog_info_helper(uint32_t uniqid, uint64_t count);
-void test_oslog_debug_helper(uint32_t uniqid, uint64_t count);
-void test_oslog_error_helper(uint32_t uniqid, uint64_t count);
-void test_oslog_fault_helper(uint32_t uniqid, uint64_t count);
-void _test_log_loop(void * arg __unused, wait_result_t wres __unused);
-void test_oslog_handleOSLogCtl(int32_t * in, int32_t * out, int32_t len);
-kern_return_t test_stresslog_dropmsg(uint32_t uniqid);
+typedef struct {
+	size_t total;
+	size_t saved;
+	size_t dropped;
+	size_t truncated;
+	size_t errors;
+	size_t errors_kc;
+	size_t errors_fmt;
+	size_t errors_max_args;
+} log_stats_t;
 
+#define TESTBUFLEN              256
+#define TESTOSLOGFMT(fn_name)   "%u^%llu/%llu^kernel^0^test^" fn_name
+#define TESTOSLOGPFX            "TESTLOG:%u#"
+#define TESTOSLOG(fn_name)      TESTOSLOGPFX TESTOSLOGFMT(fn_name "#")
+
+#define LOG_STAT_CMP(cmp, b, a, e, stat, msg, test) \
+    { \
+	size_t n##stat = (a)->stat - (b)->stat; \
+	size_t n##expected = (e)->stat; \
+	cmp(n##stat, n##expected, (msg), (test), n##expected); \
+    }
+#define LOG_STAT_EQ(b, a, e, stat, msg, test) \
+    LOG_STAT_CMP(T_EXPECT_EQ_UINT, b, a, e, stat, msg, test)
+#define LOG_STAT_GE(b, a, e, stat, msg, test) \
+    LOG_STAT_CMP(T_EXPECT_GE_UINT, b, a, e, stat, msg, test)
+
+#define GENOSLOGHELPER(fname, ident, callout_f) \
+    static void \
+    fname(uint32_t uniqid, uint64_t count, log_stats_t *before, log_stats_t *after) \
+    { \
+	uint32_t checksum = 0; \
+	char pattern[TESTBUFLEN]; \
+	T_LOG("Testing " ident "() with %d logs", count); \
+	log_stats_get(before); \
+	for (uint64_t i = 0; i < count; i++) { \
+	    (void) save_pattern(pattern, &checksum, TESTOSLOGFMT(ident), uniqid, i + 1, count); \
+	    callout_f(OS_LOG_DEFAULT, TESTOSLOG(ident), checksum, uniqid, i + 1, count); \
+	} \
+	log_stats_get(after); \
+    }
+
+extern size_t find_pattern_in_buffer(const char *, size_t, size_t);
+
+void test_oslog_handleOSLogCtl(int32_t *, int32_t *, int32_t);
+kern_return_t test_printf(void);
 kern_return_t test_os_log(void);
 kern_return_t test_os_log_parallel(void);
 
-#define GENOSLOGHELPER(fname, ident, callout_f)                                                            \
-    void fname(uint32_t uniqid, uint64_t count)                                                            \
-    {                                                                                                      \
-	int32_t datalen = 0;                                                                               \
-	uint32_t checksum = 0;                                                                             \
-	char databuffer[256];                                                                              \
-	T_LOG("Doing os_log of %llu TESTLOG msgs for fn " ident, count);                                   \
-	for (uint64_t i = 0; i < count; i++)                                                               \
-	{                                                                                                  \
-	    datalen = scnprintf(databuffer, sizeof(databuffer), TESTOSLOGFMT(ident), uniqid, i + 1, count); \
-	    checksum = crc32(0, databuffer, datalen);                                                      \
-	    callout_f(OS_LOG_DEFAULT, TESTOSLOG(ident), checksum, uniqid, i + 1, count);                   \
-	/*T_LOG(TESTOSLOG(ident), checksum, uniqid, i + 1, count);*/                                   \
-	}                                                                                                  \
-    }
+SCALABLE_COUNTER_DECLARE(oslog_p_fmt_invalid_msgcount);
+SCALABLE_COUNTER_DECLARE(oslog_p_fmt_max_args_msgcount);
+SCALABLE_COUNTER_DECLARE(oslog_p_truncated_msgcount);
+SCALABLE_COUNTER_DECLARE(log_queue_cnt_received);
 
-GENOSLOGHELPER(test_oslog_info_helper, "oslog_info_helper", os_log_info);
-GENOSLOGHELPER(test_oslog_fault_helper, "oslog_fault_helper", os_log_fault);
-GENOSLOGHELPER(test_oslog_debug_helper, "oslog_debug_helper", os_log_debug);
-GENOSLOGHELPER(test_oslog_error_helper, "oslog_error_helper", os_log_error);
-GENOSLOGHELPER(test_oslog_default_helper, "oslog_default_helper", os_log);
+static void
+log_stats_get(log_stats_t *stats)
+{
+	if (!stats) {
+		return;
+	}
+	stats->total = counter_load(&oslog_p_total_msgcount);
+	stats->saved = counter_load(&log_queue_cnt_received);
+	stats->dropped = counter_load(&oslog_p_dropped_msgcount);
+	stats->truncated = counter_load(&oslog_p_truncated_msgcount);
+	stats->errors = counter_load(&oslog_p_error_count);
+	stats->errors_kc = counter_load(&oslog_p_unresolved_kc_msgcount);
+	stats->errors_fmt = counter_load(&oslog_p_fmt_invalid_msgcount);
+	stats->errors_max_args = counter_load(&oslog_p_fmt_max_args_msgcount);
+}
+
+static void
+log_stats_diff(const log_stats_t *before, const log_stats_t *after, log_stats_t *diff)
+{
+	log_stats_t d = {};
+
+	if (before) {
+		d = *before;
+	}
+	if (after) {
+		d.total = after->total - d.total;
+		d.saved = after->saved - d.saved;
+		d.dropped = after->dropped - d.dropped;
+		d.truncated = after->truncated - d.truncated;
+		d.errors = after->errors - d.errors;
+		d.errors_kc = after->errors_kc - d.errors_kc;
+		d.errors_fmt = after->errors_fmt - d.errors_fmt;
+		d.errors_max_args = after->errors_max_args - d.errors_max_args;
+	}
+	*diff = d;
+}
+
+static void
+log_stats_check_errors(const log_stats_t *before, const log_stats_t *after, const log_stats_t *expected,
+    const char *test)
+{
+	LOG_STAT_EQ(before, after, expected, errors, "%s: Expected %lu encoding errors", test);
+	LOG_STAT_EQ(before, after, expected, errors_kc, "%s: Expected %lu DSO errors", test);
+	LOG_STAT_EQ(before, after, expected, errors_fmt, "%s: Expected %lu bad format errors", test);
+	LOG_STAT_EQ(before, after, expected, errors_max_args, "%s: Expected %lu max arguments errors", test);
+}
+
+static void
+log_stats_check(const log_stats_t *before, const log_stats_t *after, const log_stats_t *expected,
+    const char *test)
+{
+	/*
+	 * The comparison is >= (_GE) for total and saved counters because tests
+	 * are running while the system is up and potentially logging. Test and
+	 * regular logs interfere rather rarely but can make the test flaky
+	 * which is not desired.
+	 */
+	LOG_STAT_GE(before, after, expected, total, "%s: Expected %lu logs total", test);
+	LOG_STAT_GE(before, after, expected, saved, "%s: Expected %lu saved logs", test);
+	LOG_STAT_EQ(before, after, expected, dropped, "%s: Expected %lu logs dropped", test);
+	log_stats_check_errors(before, after, expected, test);
+}
+
+static void
+log_stats_report(const log_stats_t *before, const log_stats_t *after, const char *test)
+{
+	log_stats_t diff = {};
+	log_stats_diff(before, after, &diff);
+
+	T_LOG("\n%s: Logging stats:\n\ttotal: %u\n\tsaved: %u\n\tdropped: %u\n"
+	    "\terrors: %u\n\terrors_kc: %u\n\terrors_fmt: %u\n\terrors_max_args: %u",
+	    test, diff.total, diff.saved, diff.dropped,
+	    diff.errors, diff.errors_kc, diff.errors_fmt, diff.errors_max_args);
+}
+
+static int
+save_pattern(char buf[static TESTBUFLEN], uint32_t *crc, const char *fmt, ...)
+{
+	va_list va;
+
+	va_start(va, fmt);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+	int n = vscnprintf(buf, TESTBUFLEN, fmt, va);
+#pragma clang diagnostic pop
+	va_end(va);
+	if (crc) {
+		*crc = crc32(0, buf, n);
+	}
+	return n;
+}
+
+/*
+ * Actual GENOSLOGHELPER() 2nd argument values below are expected by libtrace
+ * test_kern_oslog test suite and shall not be changed without updating given
+ * test suite.
+ */
+GENOSLOGHELPER(test_oslog_info, "oslog_info_helper", os_log_info);
+GENOSLOGHELPER(test_oslog_fault, "oslog_fault_helper", os_log_fault);
+GENOSLOGHELPER(test_oslog_debug, "oslog_debug_helper", os_log_debug);
+GENOSLOGHELPER(test_oslog_error, "oslog_error_helper", os_log_error);
+GENOSLOGHELPER(test_oslog_default, "oslog_default_helper", os_log);
 
 kern_return_t
-test_os_log()
+test_printf(void)
 {
+	const uint32_t uniqid = RandomULong();
+	T_ASSERT_NE_UINT(0, uniqid, "Random number should not be zero");
+
+	uint64_t stamp = mach_absolute_time();
+	T_ASSERT_NE_ULLONG(0, stamp, "Absolute time should not be zero");
+
+	T_LOG("Validating with atm_diagnostic_config=%#x uniqid=%u stamp=%llu",
+	    atm_get_diagnostic_config(), uniqid, stamp);
+
 	__attribute__((uninitialized))
-	char databuffer[256];
-	uint32_t uniqid = RandomULong();
-	size_t match_count = 0;
+	char pattern[TESTBUFLEN];
+	log_stats_t before = {}, after = {};
 	uint32_t checksum = 0;
-	uint32_t total_msg = 0;
-	uint32_t saved_msg = 0;
-	uint32_t dropped_msg = 0;
-	size_t datalen = 0;
-	uint64_t a = mach_absolute_time();
-	uint64_t seqno = 1;
-	uint64_t total_seqno = 2;
 
-	os_log_t log_handle = os_log_create("com.apple.xnu.test.t1", "kpost");
+	log_stats_get(&before);
 
-	T_ASSERT_EQ_PTR(&_os_log_default, log_handle, "os_log_create returns valid value.");
-	T_ASSERT_EQ_INT(TRUE, os_log_info_enabled(log_handle), "os_log_info is enabled");
-	T_ASSERT_EQ_INT(TRUE, os_log_debug_enabled(log_handle), "os_log_debug is enabled");
-	T_ASSERT_EQ_PTR(&_os_log_default, OS_LOG_DEFAULT, "ensure OS_LOG_DEFAULT is _os_log_default");
+	(void) save_pattern(pattern, &checksum, TESTOSLOGFMT("printf_only"), uniqid, 1LL, 2LL);
+	printf(TESTOSLOG("printf_only") "mat%llu\n", checksum, uniqid, 1LL, 2LL, stamp);
 
-	total_msg = counter_load(&oslog_p_total_msgcount);
-	saved_msg = counter_load(&oslog_p_saved_msgcount);
-	dropped_msg = counter_load(&oslog_p_dropped_msgcount);
-	T_LOG("oslog internal counters total %u , saved %u, dropped %u", total_msg, saved_msg, dropped_msg);
+	(void) save_pattern(pattern, &checksum, TESTOSLOGFMT("printf_only"), uniqid, 2LL, 2LL);
+	printf(TESTOSLOG("printf_only") "mat%llu\n", checksum, uniqid, 2LL, 2LL, stamp);
 
-	T_LOG("Validating with uniqid %u u64 %llu", uniqid, a);
-	T_ASSERT_NE_UINT(0, uniqid, "random number should not be zero");
-	T_ASSERT_NE_ULLONG(0, a, "absolute time should not be zero");
+	size_t saved = save_pattern(pattern, NULL, "kernel^0^test^printf_only#mat%llu", stamp);
+	size_t match_count = find_pattern_in_buffer(pattern, saved, 2LL);
+	T_EXPECT_EQ_ULONG(match_count, 2LL, "printf() logs to msgbuf");
 
-	datalen = scnprintf(databuffer, sizeof(databuffer), TESTOSLOGFMT("printf_only"), uniqid, seqno, total_seqno);
-	checksum = crc32(0, databuffer, datalen);
-	printf(TESTOSLOG("printf_only") "mat%llu\n", checksum, uniqid, seqno, total_seqno, a);
+	log_stats_get(&after);
 
-	seqno += 1;
-	datalen = scnprintf(databuffer, sizeof(databuffer), TESTOSLOGFMT("printf_only"), uniqid, seqno, total_seqno);
-	checksum = crc32(0, databuffer, datalen);
-	printf(TESTOSLOG("printf_only") "mat%llu\n", checksum, uniqid, seqno, total_seqno, a);
-
-	datalen = scnprintf(databuffer, sizeof(databuffer), "kernel^0^test^printf_only#mat%llu", a);
-	match_count = find_pattern_in_buffer(databuffer, datalen, total_seqno);
-	T_EXPECT_EQ_ULONG(match_count, total_seqno, "verify printf_only goes to systemlog buffer");
-
-	uint32_t logging_config = atm_get_diagnostic_config();
-	T_LOG("checking atm_diagnostic_config 0x%X", logging_config);
-
-	if ((logging_config & ATM_TRACE_OFF) || (logging_config & ATM_TRACE_DISABLE)) {
-		T_LOG("ATM_TRACE_OFF / ATM_TRACE_DISABLE is set. Would not see oslog messages. skipping the rest of test.");
-		return KERN_SUCCESS;
+	if (!os_log_turned_off()) {
+		// printf() should log to OSLog with OSLog enabled.
+		log_stats_t expected = { .total = 2, .saved = 2 };
+		log_stats_check(&before, &after, &expected, "printf() logs to oslog");
 	}
 
-	/* for enabled logging printfs should be saved in oslog as well */
-	T_EXPECT_GE_UINT((counter_load(&oslog_p_total_msgcount) - total_msg), 2, "atleast 2 msgs should be seen by oslog system");
-
-	a = mach_absolute_time();
-	total_seqno = 1;
-	seqno = 1;
-	total_msg = counter_load(&oslog_p_total_msgcount);
-	saved_msg = counter_load(&oslog_p_saved_msgcount);
-	dropped_msg = counter_load(&oslog_p_dropped_msgcount);
-	datalen = scnprintf(databuffer, sizeof(databuffer), TESTOSLOGFMT("oslog_info"), uniqid, seqno, total_seqno);
-	checksum = crc32(0, databuffer, datalen);
-	os_log_info(log_handle, TESTOSLOG("oslog_info") "mat%llu", checksum, uniqid, seqno, total_seqno, a);
-	T_EXPECT_GE_UINT((counter_load(&oslog_p_total_msgcount) - total_msg), 1, "total message count in buffer");
-
-	datalen = scnprintf(databuffer, sizeof(databuffer), "kernel^0^test^oslog_info#mat%llu", a);
-	match_count = find_pattern_in_buffer(databuffer, datalen, total_seqno);
-	T_EXPECT_EQ_ULONG(match_count, total_seqno, "verify oslog_info does not go to systemlog buffer");
-
-	total_msg = counter_load(&oslog_p_total_msgcount);
-	test_oslog_info_helper(uniqid, 10);
-	T_EXPECT_GE_UINT(counter_load(&oslog_p_total_msgcount) - total_msg, 10, "test_oslog_info_helper: Should have seen 10 msgs");
-
-	total_msg = counter_load(&oslog_p_total_msgcount);
-	test_oslog_debug_helper(uniqid, 10);
-	T_EXPECT_GE_UINT(counter_load(&oslog_p_total_msgcount) - total_msg, 10, "test_oslog_debug_helper:Should have seen 10 msgs");
-
-	total_msg = counter_load(&oslog_p_total_msgcount);
-	test_oslog_error_helper(uniqid, 10);
-	T_EXPECT_GE_UINT(counter_load(&oslog_p_total_msgcount) - total_msg, 10, "test_oslog_error_helper:Should have seen 10 msgs");
-
-	total_msg = counter_load(&oslog_p_total_msgcount);
-	test_oslog_default_helper(uniqid, 10);
-	T_EXPECT_GE_UINT(counter_load(&oslog_p_total_msgcount) - total_msg, 10, "test_oslog_default_helper:Should have seen 10 msgs");
-
-	total_msg = counter_load(&oslog_p_total_msgcount);
-	test_oslog_fault_helper(uniqid, 10);
-	T_EXPECT_GE_UINT(counter_load(&oslog_p_total_msgcount) - total_msg, 10, "test_oslog_fault_helper:Should have seen 10 msgs");
-
-	T_LOG("oslog internal counters total %u , saved %u, dropped %u", counter_load(&oslog_p_total_msgcount), counter_load(&oslog_p_saved_msgcount),
-	    counter_load(&oslog_p_dropped_msgcount));
+	log_stats_report(&before, &after, __FUNCTION__);
 
 	return KERN_SUCCESS;
 }
 
-static uint32_t _test_log_loop_count = 0;
-void
-_test_log_loop(void * arg __unused, wait_result_t wres __unused)
+kern_return_t
+test_os_log(void)
 {
-	uint32_t uniqid = RandomULong();
-	test_oslog_debug_helper(uniqid, 100);
+	const uint32_t uniqid = RandomULong();
+	T_ASSERT_NE_UINT(0, uniqid, "Random number should not be zero");
+
+	uint64_t stamp = mach_absolute_time();
+	T_ASSERT_NE_ULLONG(0, stamp, "Absolute time should not be zero");
+
+	T_LOG("Validating with atm_diagnostic_config=%#x uniqid=%u stamp=%llu",
+	    atm_get_diagnostic_config(), uniqid, stamp);
+
+	os_log_t log_handle = os_log_create("com.apple.xnu.test.t1", "kpost");
+	T_ASSERT_EQ_PTR(&_os_log_default, log_handle, "os_log_create() returns valid value");
+	T_ASSERT_EQ_PTR(&_os_log_default, OS_LOG_DEFAULT, "Ensure OS_LOG_DEFAULT is _os_log_default");
+
+	const bool enabled = !os_log_turned_off();
+	T_ASSERT_EQ_INT(enabled, os_log_info_enabled(log_handle), "Info log level is enabled");
+	T_ASSERT_EQ_INT(enabled, os_log_debug_enabled(log_handle), "Debug log level is enabled");
+
+	__attribute__((uninitialized))
+	char pattern[TESTBUFLEN];
+	uint32_t checksum = 0;
+
+	(void) save_pattern(pattern, &checksum, TESTOSLOGFMT("oslog_info"), uniqid, 1LL, 1LL);
+	os_log_info(log_handle, TESTOSLOG("oslog_info") "mat%llu", checksum, uniqid, 1LL, 1LL, stamp);
+	size_t saved = save_pattern(pattern, NULL, "kernel^0^test^oslog_info#mat%llu", stamp);
+	size_t match_count = find_pattern_in_buffer(pattern, saved, 1LL);
+	T_EXPECT_EQ_ULONG(match_count, 1LL, "oslog_info() logs to system message buffer");
+
+	const size_t n = 10;
+
+	log_stats_t expected = {
+		.total = enabled ? n : 0,
+		.saved = enabled ? n : 0
+	};
+
+	log_stats_t before = {}, after = {};
+
+	test_oslog_info(uniqid, n, &before, &after);
+	log_stats_check(&before, &after, &expected, "test_oslog_info");
+
+	test_oslog_debug(uniqid, n, &before, &after);
+	log_stats_check(&before, &after, &expected, "test_oslog_debug");
+
+	test_oslog_error(uniqid, n, &before, &after);
+	log_stats_check(&before, &after, &expected, "test_oslog_error");
+
+	test_oslog_default(uniqid, n, &before, &after);
+	log_stats_check(&before, &after, &expected, "test_oslog_default");
+
+	test_oslog_fault(uniqid, n, &before, &after);
+	log_stats_check(&before, &after, &expected, "test_oslog_fault");
+
+	log_stats_report(&before, &after, __FUNCTION__);
+
+	return KERN_SUCCESS;
+}
+
+static size_t _test_log_loop_count = 0;
+
+static void
+_test_log_loop(void *arg __unused, wait_result_t wres __unused)
+{
+	test_oslog_debug(RandomULong(), 100, NULL, NULL);
 	os_atomic_add(&_test_log_loop_count, 100, relaxed);
 }
 
 kern_return_t
 test_os_log_parallel(void)
 {
+	if (os_log_turned_off()) {
+		T_LOG("Logging disabled, skipping tests.");
+		return KERN_SUCCESS;
+	}
+
 	thread_t thread[2];
 	kern_return_t kr;
-	uint32_t uniqid = RandomULong();
+	log_stats_t after, before, expected = {};
 
-	printf("oslog internal counters total %lld , saved %lld, dropped %lld", counter_load(&oslog_p_total_msgcount), counter_load(&oslog_p_saved_msgcount),
-	    counter_load(&oslog_p_dropped_msgcount));
+	log_stats_get(&before);
 
 	kr = kernel_thread_start(_test_log_loop, NULL, &thread[0]);
 	T_ASSERT_EQ_INT(kr, KERN_SUCCESS, "kernel_thread_start returned successfully");
@@ -935,7 +1062,7 @@ test_os_log_parallel(void)
 	kr = kernel_thread_start(_test_log_loop, NULL, &thread[1]);
 	T_ASSERT_EQ_INT(kr, KERN_SUCCESS, "kernel_thread_start returned successfully");
 
-	test_oslog_info_helper(uniqid, 100);
+	test_oslog_info(RandomULong(), 100, NULL, NULL);
 
 	/* wait until other thread has also finished */
 	while (_test_log_loop_count < 200) {
@@ -945,15 +1072,36 @@ test_os_log_parallel(void)
 	thread_deallocate(thread[0]);
 	thread_deallocate(thread[1]);
 
-	T_LOG("oslog internal counters total %lld , saved %lld, dropped %lld", counter_load(&oslog_p_total_msgcount), counter_load(&oslog_p_saved_msgcount),
-	    counter_load(&oslog_p_dropped_msgcount));
-	T_PASS("parallel_logging tests is now complete");
+	log_stats_get(&after);
+	log_stats_check_errors(&before, &after, &expected, __FUNCTION__);
+	log_stats_report(&before, &after, __FUNCTION__);
+
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+test_stresslog_dropmsg(const uint32_t uniqid)
+{
+	if (os_log_turned_off()) {
+		T_LOG("Logging disabled, skipping tests.");
+		return KERN_SUCCESS;
+	}
+
+	log_stats_t after, before, expected = {};
+
+	test_oslog_debug(uniqid, 100, &before, &after);
+	while ((after.dropped - before.dropped) == 0) {
+		test_oslog_debug(uniqid, 100, NULL, &after);
+	}
+
+	log_stats_check_errors(&before, &after, &expected, __FUNCTION__);
+	log_stats_report(&before, &after, __FUNCTION__);
 
 	return KERN_SUCCESS;
 }
 
 void
-test_oslog_handleOSLogCtl(int32_t * in, int32_t * out, int32_t len)
+test_oslog_handleOSLogCtl(int32_t *in, int32_t *out, int32_t len)
 {
 	if (!in || !out || len != 4) {
 		return;
@@ -992,12 +1140,22 @@ test_oslog_handleOSLogCtl(int32_t * in, int32_t * out, int32_t len)
 		}
 
 		switch (in[1]) {
-		case OS_LOG_TYPE_INFO: test_oslog_info_helper(uniqid, msgcount); break;
-		case OS_LOG_TYPE_DEBUG: test_oslog_debug_helper(uniqid, msgcount); break;
-		case OS_LOG_TYPE_ERROR: test_oslog_error_helper(uniqid, msgcount); break;
-		case OS_LOG_TYPE_FAULT: test_oslog_fault_helper(uniqid, msgcount); break;
+		case OS_LOG_TYPE_INFO:
+			test_oslog_info(uniqid, msgcount, NULL, NULL);
+			break;
+		case OS_LOG_TYPE_DEBUG:
+			test_oslog_debug(uniqid, msgcount, NULL, NULL);
+			break;
+		case OS_LOG_TYPE_ERROR:
+			test_oslog_error(uniqid, msgcount, NULL, NULL);
+			break;
+		case OS_LOG_TYPE_FAULT:
+			test_oslog_fault(uniqid, msgcount, NULL, NULL);
+			break;
 		case OS_LOG_TYPE_DEFAULT:
-		default: test_oslog_default_helper(uniqid, msgcount); break;
+		default:
+			test_oslog_default(uniqid, msgcount, NULL, NULL);
+			break;
 		}
 		out[0] = KERN_SUCCESS;
 		break;
@@ -1012,21 +1170,4 @@ test_oslog_handleOSLogCtl(int32_t * in, int32_t * out, int32_t len)
 	return;
 }
 
-kern_return_t
-test_stresslog_dropmsg(uint32_t uniqid)
-{
-	uint32_t total, saved, dropped;
-	total = counter_load(&oslog_p_total_msgcount);
-	saved = counter_load(&oslog_p_saved_msgcount);
-	dropped = counter_load(&oslog_p_dropped_msgcount);
-	uniqid = RandomULong();
-	test_oslog_debug_helper(uniqid, 100);
-	while ((counter_load(&oslog_p_dropped_msgcount) - dropped) == 0) {
-		test_oslog_debug_helper(uniqid, 100);
-	}
-	printf("test_stresslog_dropmsg: logged %lld msgs, saved %lld and caused a drop of %lld msgs. \n", counter_load(&oslog_p_total_msgcount) - total,
-	    counter_load(&oslog_p_saved_msgcount) - saved, counter_load(&oslog_p_dropped_msgcount) - dropped);
-	return KERN_SUCCESS;
-}
-
-#endif
+#endif /* CONFIG_XNUPOST */

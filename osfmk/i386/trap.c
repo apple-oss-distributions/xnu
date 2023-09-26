@@ -93,6 +93,7 @@
 #if CONFIG_TELEMETRY
 #include <kern/telemetry.h>
 #endif
+#include <kern/zalloc_internal.h>
 #include <sys/kdebug.h>
 #include <kperf/kperf.h>
 #include <prng/random.h>
@@ -509,6 +510,90 @@ unsigned kdp_has_active_watchpoints = 0;
 #else
 #define NO_WATCHPOINTS 1
 #endif
+
+static uint32_t bound_chk_violations_event;
+
+static void
+telemetry_handle_brk_trap(
+	__unused void     *tstate,
+	uint16_t          comment)
+{
+	if (comment == CLANG_BOUND_CHK_SOFT_TRAP) {
+		os_atomic_inc(&bound_chk_violations_event, relaxed);
+	}
+}
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(clang_desc,
+    .type                = KERNEL_BRK_TYPE_CLANG,
+    .base                = CLANG_TRAPS_X86_START,
+    .max                 = CLANG_TRAPS_X86_END,
+    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .handle_breakpoint   = NULL);
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(telemetry_desc,
+    .type                = KERNEL_BRK_TYPE_TELEMETRY,
+    .base                = TELEMETRY_TRAPS_START,
+    .max                 = TELEMETRY_TRAPS_END,
+    .options             = KERNEL_BRK_RECOVERABLE | KERNEL_BRK_CORE_ANALYTICS,
+    .handle_breakpoint   = telemetry_handle_brk_trap);
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(libcxx_desc,
+    .type                = KERNEL_BRK_TYPE_LIBCXX,
+    .base                = LIBCXX_TRAPS_START,
+    .max                 = LIBCXX_TRAPS_END,
+    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .handle_breakpoint   = NULL);
+
+static bool
+handle_kernel_breakpoint(x86_saved_state64_t *state)
+{
+	uint16_t comment;
+	const struct kernel_brk_descriptor *desc;
+	uint8_t inst_buf[8];
+	uint32_t prefix16 = 0x80B90F67; /* Encoding prefix for ud1 <16-bit code>(%eax), %eax */
+	uint32_t prefix8 = 0x40B90F67; /* Encoding prefix for ud1 <8-bit code>(%eax), %eax */
+	bool found_prefix8 = false;
+
+	vm_size_t sz = ml_nofault_copy(state->isf.rip, (vm_offset_t)inst_buf, sizeof(inst_buf));
+	if (sz != sizeof(inst_buf)) {
+		return false;
+	}
+
+	if (bcmp(inst_buf, &prefix16, sizeof(prefix16)) == 0) {
+		/* The two bytes following the prefix is our code */
+		comment = inst_buf[5] << 8 | inst_buf[4];
+	} else if (bcmp(inst_buf, &prefix8, sizeof(prefix8)) == 0) {
+		/* The one byte following the prefix is our code */
+		found_prefix8 = true;
+		comment = inst_buf[4];
+	} else {
+		return false;
+	}
+
+	desc = find_brk_descriptor_by_comment(comment);
+
+	if (!desc) {
+		return false;
+	}
+
+	if (desc->options & KERNEL_BRK_TELEMETRY_OPTIONS) {
+		telemetry_kernel_brk(desc->type, desc->options, (void *)state, comment);
+	}
+
+	if (desc->handle_breakpoint) {
+		desc->handle_breakpoint(state, comment); /* May trigger panic */
+	}
+
+	/* Still alive? Check if we should recover. */
+	if (desc->options & KERNEL_BRK_RECOVERABLE) {
+		/* ud1 can be five or eight-byte long depending on the prefix */
+		set_recovery_ip(state, state->isf.rip + (found_prefix8 ? 5 : 8));
+		return true;
+	}
+
+	return false;
+}
+
 /*
  * Trap from kernel mode.  Only page-fault errors are recoverable,
  * and then only in special circumstances.  All other errors are
@@ -674,6 +759,9 @@ kernel_trap(
 		goto common_return;
 
 	case T_INVALID_OPCODE:
+		if (handle_kernel_breakpoint(saved_state)) {
+			goto common_return;
+		}
 		fpUDflt(kern_ip);
 		goto debugger_entry;
 
@@ -774,6 +862,9 @@ debugger_entry:
 			goto common_return;
 		}
 #endif
+	}
+	if (type == T_PAGE_FAULT) {
+		panic_fault_address = vaddr;
 	}
 	pal_cli();
 	panic_trap(saved_state, trap_pl, fault_result);
@@ -1573,4 +1664,37 @@ thread_exception_return(void)
 	assert(get_preemption_level() == 0);
 	thread_exception_return_internal();
 }
+#endif
+
+#if DEVELOPMENT || DEBUG
+static int trap_handled;
+
+static void
+handle_recoverable_kernel_trap(
+	__unused void     *tstate,
+	uint16_t          comment)
+{
+	assert(comment == TEST_RECOVERABLE_SOFT_TRAP);
+
+	printf("Recoverable trap handled.\n");
+	trap_handled = 1;
+}
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(test_desc,
+    .type                = KERNEL_BRK_TYPE_TEST,
+    .base                = TEST_RECOVERABLE_SOFT_TRAP,
+    .max                 = TEST_RECOVERABLE_SOFT_TRAP,
+    .options             = KERNEL_BRK_RECOVERABLE,
+    .handle_breakpoint   = handle_recoverable_kernel_trap);
+
+static int
+recoverable_kernel_trap_test(__unused int64_t in, int64_t *out)
+{
+	ml_recoverable_trap(TEST_RECOVERABLE_SOFT_TRAP);
+
+	*out = trap_handled;
+	return 0;
+}
+
+SYSCTL_TEST_REGISTER(recoverable_kernel_trap, recoverable_kernel_trap_test);
 #endif

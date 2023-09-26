@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021, 2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -67,9 +67,13 @@
 /* Max supported ASIDs (can be virtual). */
 #define MAX_ASIDS (1 << ASID_SHIFT)
 
-/* Shift for the maximum ARM ASID value (256) */
+/* Shift for the maximum ARM ASID value (256 or 65536) */
 #ifndef ARM_ASID_SHIFT
+#if HAS_16BIT_ASID
+#define ARM_ASID_SHIFT (16)
+#else
 #define ARM_ASID_SHIFT (8)
+#endif /* HAS_16BIT_ASID */
 #endif /* ARM_ASID_SHIFT */
 
 /* Max ASIDs supported by the hardware. */
@@ -179,6 +183,8 @@ struct pmap_cpu_data {
 	void *iofilter_stack;
 	void *iofilter_saved_sp;
 #endif
+
+	void *scratch_page;
 #endif /* XNU_MONITOR */
 	pmap_t cpu_nested_pmap;
 #if __ARM_MIXED_PAGE_SIZE__
@@ -197,6 +203,7 @@ struct pmap_cpu_data {
 	pv_free_list_t pv_free;
 	pv_entry_t *pv_free_spill_marker;
 
+#if !HAS_16BIT_ASID
 	/*
 	 * This supports overloading of ARM ASIDs by the pmap.  The field needs
 	 * to be wide enough to cover all the virtual bits in a virtual ASID.
@@ -209,6 +216,7 @@ struct pmap_cpu_data {
 	 * an implementation would be more error prone.
 	 */
 	uint8_t cpu_sw_asids[MAX_HW_ASIDS];
+#endif /* !HAS_16BIT_ASID */
 };
 typedef struct pmap_cpu_data pmap_cpu_data_t;
 
@@ -372,6 +380,7 @@ struct pmap {
 
 	void *          reserved0;
 	void *          reserved1;
+	uint8_t         reserved12;
 	uint64_t        reserved2;
 	uint64_t        reserved3;
 
@@ -433,8 +442,30 @@ struct pmap {
 	/* Whether this pmap represents a 64-bit address space. */
 	bool is_64bit;
 
-	/* Nested a pmap when the bounds were not set. */
-	bool nested_has_no_bounds_ref;
+	enum : uint8_t {
+		/**
+		 * pmap contains no lingering mappings outside the established
+		 * bounds of pmap->nested_pmap, and its reference has been removed
+		 * from pmap->nested_pmap->nested_no_bounds_refcnt.
+		 */
+		NESTED_NO_BOUNDS_REF_NONE = 0,
+		/**
+		 * pmap's mappings outside the established bounds of pmap->nested_pmap
+		 * have been removed, but pmap->nested_pmap->nested_no_bounds_refcnt
+		 * still contains pmap's reference.
+		 */
+		NESTED_NO_BOUNDS_REF_SUBORD,
+		/**
+		 * pmap contains mappings after the end of the established bounds
+		 * of pmap->nested_pmap.
+		 */
+		NESTED_NO_BOUNDS_REF_AFTER,
+		/**
+		 * pmap contains mappings before the beginning and after the end of
+		 * the established bounds of pmap->nested_pmap.
+		 */
+		NESTED_NO_BOUNDS_REF_BEFORE_AND_AFTER,
+	} nested_no_bounds_ref_state;
 
 	/* The nesting bounds have been set. */
 	bool nested_bounds_set;
@@ -657,9 +688,9 @@ void pmap_abandon_measurement(void);
 #define PHYS_ATTRIBUTE_CLEAR_RANGE_INDEX 66
 
 
-#if __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX)
+#if __has_feature(ptrauth_calls) && (defined(XNU_TARGET_OS_OSX) || (DEVELOPMENT || DEBUG))
 #define PMAP_DISABLE_USER_JOP_INDEX 69
-#endif /* __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX) */
+#endif /* __has_feature(ptrauth_calls) && (defined(XNU_TARGET_OS_OSX) || (DEVELOPMENT || DEBUG)) */
 
 
 #define PMAP_SET_VM_MAP_CS_ENFORCED_INDEX 72

@@ -198,6 +198,9 @@ INSTALL_MI_LIST	= \
 
 INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
 
+EXCLAVES_DATAFILES = \
+	exclaves.h
+
 # installed into System.framework's PrivateHeaders/mach subdirectory
 PRIVATE_DATAFILES = $(sort \
 	bootstrap.h \
@@ -211,6 +214,7 @@ PRIVATE_DATAFILES = $(sort \
 	ktrace_background.defs \
 	mach_eventlink_types.h \
 	mach_host.defs \
+	mach_time_private.h \
 	mach_traps.h \
 	memory_error_notification.defs \
 	memory_object_types.h \
@@ -233,6 +237,7 @@ PRIVATE_DATAFILES = $(sort \
 	vfs_nspace.defs \
 	vm_prot.h \
 	vm_reclaim.h \
+	${EXCLAVES_DATAFILES} \
 	${EXTRA_PRIVATE_DATAFILES} \
 	${MIG_PRIVATE_DEFS})
 
@@ -241,7 +246,7 @@ PRIVATE_DATAFILES = $(sort \
 PRIVATE_MODULEMAPFILES = \
 	mach_private.modulemap
 
-INSTALL_MI_LCL_LIST = $(sort resource_monitors.h task_policy_private.h thread_policy_private.h ${EXTRA_PRIVATE_DATAFILES})
+INSTALL_MI_LCL_LIST = $(sort coalition.h mach_time_private.h mk_timer.h resource_monitors.h task_policy_private.h thread_policy_private.h ${EXCLAVES_DATAFILES} ${EXTRA_PRIVATE_DATAFILES})
 
 INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 
@@ -254,8 +259,10 @@ INSTALL_KF_MI_LIST = $(sort \
 INSTALL_KF_MI_LCL_LIST = $(sort \
 	coalition.h \
 	mach_interface.h \
+	mach_time_private.h \
 	task_policy_private.h \
 	thread_policy_private.h \
+	${EXCLAVES_DATAFILES} \
 	$(filter-out mach_traps.h mach_syscalls.h thread_switch.h, ${DATAFILES} ${EXTRA_PRIVATE_DATAFILES}))
 
 INSTALL_MI_GEN_LIST =
@@ -265,12 +272,14 @@ INSTALL_MI_DIR = mach
 EXPORT_MI_LIST	= $(sort \
 	coalition.h \
 	mach_interface.h \
+	mach_time_private.h \
 	memory_object_control.h \
 	resource_monitors.h \
 	task_policy_private.h \
 	thread_policy_private.h \
 	mach_eventlink_types.h \
 	sfi_class.h \
+	${EXCLAVES_DATAFILES} \
 	${DATAFILES} \
 	${EXTRA_PRIVATE_DATAFILES})
 
@@ -306,7 +315,7 @@ ${MIG_USHDRS} : \
 
 INCFLAGS_MAKEFILE= -I..
 
-MIGKSFLAGS      = -DMACH_KERNEL_PRIVATE -DKERNEL_SERVER=1
+MIGKSFLAGS      = -DMACH_KERNEL_PRIVATE -DKERNEL_SERVER=1 -mach_msg2
 MIGKUFLAGS      = -DMACH_KERNEL_PRIVATE -DKERNEL_USER=1 -maxonstack 1024
 #
 # MIG-generated headers that are traditionally used by kernel

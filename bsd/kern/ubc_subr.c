@@ -519,6 +519,7 @@ cs_validate_csblob(
 	const CS_GenericBlob *self_constraint = NULL;
 	const CS_GenericBlob *parent_constraint = NULL;
 	const CS_GenericBlob *responsible_proc_constraint = NULL;
+	const CS_GenericBlob *library_constraint = NULL;
 
 	*rcd = NULL;
 	*rentitlements = NULL;
@@ -650,6 +651,15 @@ cs_validate_csblob(
 					return EBADEXEC;
 				}
 				responsible_proc_constraint = subBlob;
+			} else if (type == CSSLOT_LIBRARY_CONSTRAINT) {
+				if (ntohl(subBlob->magic) != CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT) {
+					return EBADEXEC;
+				}
+				if (library_constraint != NULL) {
+					printf("multiple library constraint blobs\n");
+					return EBADEXEC;
+				}
+				library_constraint = subBlob;
 			}
 		}
 
@@ -2008,7 +2018,7 @@ ubc_map(vnode_t vp, int flags)
 			}
 			SET(uip->ui_flags, (UI_WASMAPPED | UI_ISMAPPED));
 			if (flags & PROT_WRITE) {
-				SET(uip->ui_flags, UI_MAPPEDWRITE);
+				SET(uip->ui_flags, (UI_WASMAPPEDWRITE | UI_MAPPEDWRITE));
 			}
 		}
 		CLR(uip->ui_flags, UI_MAPBUSY);
@@ -3016,6 +3026,25 @@ ubc_is_mapped_writable(const struct vnode *vp)
 	return ubc_is_mapped(vp, &writable) && writable;
 }
 
+boolean_t
+ubc_was_mapped(const struct vnode *vp, boolean_t *writable)
+{
+	if (!UBCINFOEXISTS(vp) || !ISSET(vp->v_ubcinfo->ui_flags, UI_WASMAPPED)) {
+		return FALSE;
+	}
+	if (writable) {
+		*writable = ISSET(vp->v_ubcinfo->ui_flags, UI_WASMAPPEDWRITE);
+	}
+	return TRUE;
+}
+
+boolean_t
+ubc_was_mapped_writable(const struct vnode *vp)
+{
+	boolean_t writable;
+	return ubc_was_mapped(vp, &writable) && writable;
+}
+
 
 /*
  * CODE SIGNING
@@ -3278,6 +3307,7 @@ ubc_cs_reconstitute_code_signature(
 	const CS_GenericBlob *launch_constraint_self = NULL;
 	const CS_GenericBlob *launch_constraint_parent = NULL;
 	const CS_GenericBlob *launch_constraint_responsible = NULL;
+	const CS_GenericBlob *library_constraint = NULL;
 	CS_SuperBlob *superblob = NULL;
 	uint32_t num_blobs = 0;
 	uint32_t blob_index = 0;
@@ -3319,9 +3349,10 @@ ubc_cs_reconstitute_code_signature(
 	 * 3. launch constraint self (if present)
 	 * 4. launch constraint parent (if present)
 	 * 5. launch constraint responsible (if present)
-	 * 6. entitlements blob (if present)
-	 * 7. cms blob (if present)
-	 * 8. first code directory (if not already the best match, and if cms blob is present)
+	 * 6. library constraint (if present)
+	 * 7. entitlements blob (if present)
+	 * 8. cms blob (if present)
+	 * 9. first code directory (if not already the best match, and if cms blob is present)
 	 *
 	 * This order is chosen deliberately, as later on, we expect to get rid of the CMS blob
 	 * and the first code directory once their verification is complete.
@@ -3376,6 +3407,18 @@ ubc_cs_reconstitute_code_signature(
 	if (launch_constraint_responsible) {
 		new_blob_size += sizeof(CS_BlobIndex);
 		new_blob_size += ntohl(launch_constraint_responsible->length);
+		num_blobs += 1;
+	}
+
+	/* Conditional storage for the library constraintsblob */
+	library_constraint = csblob_find_blob_bytes(
+		(const uint8_t *)blob->csb_mem_kaddr,
+		blob->csb_mem_size,
+		CSSLOT_LIBRARY_CONSTRAINT,
+		CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT);
+	if (library_constraint) {
+		new_blob_size += sizeof(CS_BlobIndex);
+		new_blob_size += ntohl(library_constraint->length);
 		num_blobs += 1;
 	}
 
@@ -3510,6 +3553,20 @@ ubc_cs_reconstitute_code_signature(
 		blob_offset += ntohl(launch_constraint_responsible->length);
 	}
 
+	/* library constraints blob */
+	if (library_constraint) {
+		blob_index += 1;
+		superblob->index[blob_index].offset = htonl(blob_offset);
+		superblob->index[blob_index].type = htonl(CSSLOT_LIBRARY_CONSTRAINT);
+
+		memcpy(
+			(void*)(new_blob_addr + blob_offset),
+			library_constraint,
+			ntohl(library_constraint->length));
+
+		blob_offset += ntohl(library_constraint->length);
+	}
+
 	/* Entitlements blob */
 	if (entitlements_blob) {
 		blob_index += 1;
@@ -3596,6 +3653,7 @@ ubc_cs_reconstitute_code_signature_2nd_stage(
 	const CS_GenericBlob *launch_constraint_self = NULL;
 	const CS_GenericBlob *launch_constraint_parent = NULL;
 	const CS_GenericBlob *launch_constraint_responsible = NULL;
+	const CS_GenericBlob *library_constraint = NULL;
 	CS_SuperBlob *superblob = NULL;
 	uint32_t num_blobs = 0;
 	vm_size_t last_needed_blob_offset = 0;
@@ -3606,8 +3664,9 @@ ubc_cs_reconstitute_code_signature_2nd_stage(
 	 * 1. Code directory
 	 * 2. DER encoded entitlements (if present)
 	 * 3. Launch constraints self (if present)
-	 * 3. Launch constraints parent (if present)
-	 * 3. Launch constraints responsible (if present)
+	 * 4. Launch constraints parent (if present)
+	 * 5. Launch constraints responsible (if present)
+	 * 6. Library constraints (if present)
 	 *
 	 * We need to clear out the remaining page after these blobs end, and fix up
 	 * the superblob for the changes. Things gets a little more complicated for
@@ -3670,6 +3729,17 @@ ubc_cs_reconstitute_code_signature_2nd_stage(
 	if (launch_constraint_responsible) {
 		num_blobs += 1;
 		last_needed_blob_offset += ntohl(launch_constraint_responsible->length);
+	}
+
+	/* Check for library constraint */
+	library_constraint = csblob_find_blob_bytes(
+		(const uint8_t *)blob->csb_mem_kaddr,
+		blob->csb_mem_size,
+		CSSLOT_LIBRARY_CONSTRAINT,
+		CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT);
+	if (library_constraint) {
+		num_blobs += 1;
+		last_needed_blob_offset += ntohl(library_constraint->length);
 	}
 
 	superblob->count = htonl(num_blobs);
@@ -4207,15 +4277,21 @@ register_code_signature_monitor(
 	int vnode_path_len = MAXPATHLEN;
 	char *vnode_path = kalloc_data(vnode_path_len, Z_WAITOK);
 
-	errno_t error = vnode_getwithref(vnode);
+	/*
+	 * Taking a reference on the vnode recursively can sometimes lead to a
+	 * deadlock on the system. Since we already have a vnode pointer, it means
+	 * the caller performed a vnode lookup, which implicitly takes a reference
+	 * on the vnode. However, there is more than just having a reference on a
+	 * vnode which is important. vnode's also have an iocount, and we must only
+	 * access a vnode which has an iocount of greater than 0. Thankfully, all
+	 * the conditions which lead to calling this function ensure that this
+	 * vnode is safe to access here.
+	 *
+	 * For more details: rdar://105819068.
+	 */
+	errno_t error = vn_getpath(vnode, vnode_path, &vnode_path_len);
 	if (error == 0) {
-		error = vn_getpath(vnode, vnode_path, &vnode_path_len);
-		if (error == 0) {
-			vnode_path_ptr = vnode_path;
-		}
-
-		/* Release reference count on the vnode */
-		(void)vnode_put(vnode);
+		vnode_path_ptr = vnode_path;
 	}
 
 	ret = csm_register_code_signature(
@@ -4347,7 +4423,8 @@ validate_auxiliary_signed_blobs(
 	const struct cs_blob_identifier identifiers[] = {
 		{CSSLOT_LAUNCH_CONSTRAINT_SELF, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT},
 		{CSSLOT_LAUNCH_CONSTRAINT_PARENT, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT},
-		{CSSLOT_LAUNCH_CONSTRAINT_RESPONSIBLE, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT}
+		{CSSLOT_LAUNCH_CONSTRAINT_RESPONSIBLE, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT},
+		{CSSLOT_LIBRARY_CONSTRAINT, CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT}
 	};
 	const uint32_t num_identifiers = sizeof(identifiers) / sizeof(identifiers[0]);
 
@@ -5837,7 +5914,22 @@ cs_validate_range(
 	}
 #endif
 
+#if DEVELOPMENT || DEBUG
+	code_signing_config_t cs_config = 0;
 
+	/*
+	 * This exemption is specifically useful for systems which want to avoid paying
+	 * the cost of verifying the integrity of pages, since that is done by computing
+	 * hashes, which can take some time.
+	 */
+	code_signing_configuration(NULL, &cs_config);
+	if (cs_config & CS_CONFIG_INTEGRITY_SKIP) {
+		*tainted = 0;
+
+		/* Return early to avoid paying the cost of hashing */
+		return true;
+	}
+#endif
 
 	*tainted = 0;
 
@@ -5894,6 +5986,25 @@ cs_validate_page(
 		if (supp != NULL) {
 			blobs = supp;
 		}
+	}
+#endif
+
+#if DEVELOPMENT || DEBUG
+	code_signing_config_t cs_config = 0;
+
+	/*
+	 * This exemption is specifically useful for systems which want to avoid paying
+	 * the cost of verifying the integrity of pages, since that is done by computing
+	 * hashes, which can take some time.
+	 */
+	code_signing_configuration(NULL, &cs_config);
+	if (cs_config & CS_CONFIG_INTEGRITY_SKIP) {
+		*validated_p = VMP_CS_ALL_TRUE;
+		*tainted_p = VMP_CS_ALL_FALSE;
+		*nx_p = VMP_CS_ALL_FALSE;
+
+		/* Return early to avoid paying the cost of hashing */
+		return;
 	}
 #endif
 

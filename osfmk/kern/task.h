@@ -108,7 +108,6 @@
 #endif /* XNU_KERNEL_PRIVATE */
 
 #ifdef  MACH_KERNEL_PRIVATE
-
 #include <mach/boolean.h>
 #include <mach/port.h>
 #include <mach/time_value.h>
@@ -202,6 +201,10 @@ struct task {
 	int                     thread_count;
 	uint32_t                active_thread_count;
 	int                     suspend_count;  /* Internal scheduling only */
+#ifdef CONFIG_TASK_SUSPEND_STATS
+	struct task_suspend_stats_s t_suspend_stats; /* suspension statistics for this task */
+	task_suspend_source_array_t t_suspend_sources; /* array of suspender debug info for this task */
+#endif /* CONFIG_TASK_SUSPEND_STATS */
 
 	/* User-visible scheduling information */
 	integer_t               user_stop_count;        /* outstanding stops */
@@ -301,6 +304,8 @@ struct task {
 #define TF_DYLD_ALL_IMAGE_FINAL   0x00400000                            /* all_image_info_addr can no longer be changed */
 #define TF_HASPROC              0x00800000                              /* task points to a proc */
 #define TF_HAS_REPLY_PORT_TELEMETRY 0x10000000                          /* Rate limit telemetry for reply port security semantics violations rdar://100244531 */
+#define TF_HAS_EXCEPTION_TELEMETRY  0x20000000                          /* Rate limit telemetry for exception identity violations rdar://100729339 */
+#define TF_GAME_MODE            0x40000000                              /* Set the game mode bit for CLPC */
 
 /*
  * RO-protected flags:
@@ -367,6 +372,12 @@ struct task {
 #define task_set_reply_port_telemetry(task) \
 	((task)->t_flags |= TF_HAS_REPLY_PORT_TELEMETRY)
 
+#define task_has_exception_telemetry(task) \
+	(((task)->t_flags & TF_HAS_EXCEPTION_TELEMETRY) != 0)
+
+#define task_set_exception_telemetry(task) \
+	((task)->t_flags |= TF_HAS_EXCEPTION_TELEMETRY)
+
 	uint32_t t_procflags;                                            /* general-purpose task flags protected by proc_lock (PL) */
 #define TPF_NONE                 0
 #define TPF_DID_EXEC             0x00000001                              /* task has been execed to a new task */
@@ -404,6 +415,7 @@ struct task {
 #define TWF_NONE                 0
 #define TRW_LRETURNWAIT          0x01           /* task is waiting for fork/posix_spawn/exec to complete */
 #define TRW_LRETURNWAITER        0x02           /* task is waiting for TRW_LRETURNWAIT to get cleared */
+#define TRW_LEXEC_COMPLETE       0x04           /* thread should call exec complete */
 
 #if __has_feature(ptrauth_calls)
 	bool                            shared_region_auth_remapped;    /* authenticated sections ready for use */
@@ -558,10 +570,21 @@ task_require(struct task *task)
 	zone_id_require(ZONE_ID_PROC_TASK, proc_and_task_size, task_get_proc_raw(task));
 }
 
-#define task_lock(task)                 lck_mtx_lock(&(task)->lock)
+/*
+ * task_lock() and task_unlock() need to be callable from the `bsd/` tree of
+ * XNU and are therefore promoted to full functions instead of macros so that
+ * they can be linked against.
+ *
+ * We provide `extern` declarations here for consumers of `task.h` in `osfmk/`,
+ * then separately provide `inline` definitions in `task.c`. Together with the
+ * `BUILD_LTO=1` build argument, this guarantees these functions are always
+ * inlined regardless of whether called from the `osfmk/` tree or `bsd/` tree.
+ */
+extern void task_lock(task_t);
+extern void task_unlock(task_t);
+
 #define task_lock_assert_owned(task)    LCK_MTX_ASSERT(&(task)->lock, LCK_MTX_ASSERT_OWNED)
 #define task_lock_try(task)             lck_mtx_try_lock(&(task)->lock)
-#define task_unlock(task)               lck_mtx_unlock(&(task)->lock)
 
 #define task_objq_lock_init(task)       lck_mtx_init(&(task)->task_objq_lock, &vm_object_lck_grp, &vm_object_lck_attr)
 #define task_objq_lock_destroy(task)    lck_mtx_destroy(&(task)->task_objq_lock, &vm_object_lck_grp)
@@ -578,6 +601,7 @@ task_require(struct task *task)
 /* task clear return wait flags */
 #define TCRW_CLEAR_INITIAL_WAIT   0x1
 #define TCRW_CLEAR_FINAL_WAIT     0x2
+#define TCRW_CLEAR_EXEC_COMPLETE  0x4
 #define TCRW_CLEAR_ALL_WAIT       (TCRW_CLEAR_INITIAL_WAIT | TCRW_CLEAR_FINAL_WAIT)
 
 /* Initialize task module */
@@ -688,10 +712,12 @@ extern bool task_is_driver(task_t task);
 #define TWF_NONE                 0
 #define TRW_LRETURNWAIT          0x01           /* task is waiting for fork/posix_spawn/exec to complete */
 #define TRW_LRETURNWAITER        0x02           /* task is waiting for TRW_LRETURNWAIT to get cleared */
+#define TRW_LEXEC_COMPLETE       0x04           /* thread should call exec complete */
 
 /* task clear return wait flags */
 #define TCRW_CLEAR_INITIAL_WAIT   0x1
 #define TCRW_CLEAR_FINAL_WAIT     0x2
+#define TCRW_CLEAR_EXEC_COMPLETE  0x4
 #define TCRW_CLEAR_ALL_WAIT       (TCRW_CLEAR_INITIAL_WAIT | TCRW_CLEAR_FINAL_WAIT)
 
 
@@ -709,7 +735,7 @@ __BEGIN_DECLS
 extern boolean_t                task_is_app_suspended(task_t task);
 extern bool task_is_exotic(task_t task);
 extern bool task_is_alien(task_t task);
-#endif
+#endif /* KERNEL_PRIVATE */
 
 #ifdef  XNU_KERNEL_PRIVATE
 
@@ -727,7 +753,9 @@ extern kern_return_t    task_release(
 	task_t          task);
 
 /* Suspend/resume a task where the kernel owns the suspend count */
+extern kern_return_t    task_suspend_internal_locked(   task_t          task);
 extern kern_return_t    task_suspend_internal(          task_t          task);
+extern kern_return_t    task_resume_internal_locked(    task_t          task);
 extern kern_return_t    task_resume_internal(           task_t          task);
 
 /* Suspends a task by placing a hold on its threads */
@@ -1002,6 +1030,13 @@ extern uint64_t get_task_neural_footprint_compressed(task_t task);
 extern kern_return_t task_convert_phys_footprint_limit(int, int *);
 extern kern_return_t task_set_phys_footprint_limit_internal(task_t, int, int *, boolean_t, boolean_t);
 extern kern_return_t task_get_phys_footprint_limit(task_t task, int *limit_mb);
+#if DEBUG || DEVELOPMENT
+#if CONFIG_MEMORYSTATUS
+extern kern_return_t task_set_diag_footprint_limit_internal(task_t, uint64_t, uint64_t *);
+extern kern_return_t task_get_diag_footprint_limit_internal(task_t, uint64_t *, bool *);
+extern kern_return_t task_set_diag_footprint_limit(task_t task, uint64_t new_limit_mb, uint64_t *old_limit_mb);
+#endif /* CONFIG_MEMORYSTATUS */
+#endif /* DEBUG || DEVELOPMENT */
 
 extern security_token_t *task_get_sec_token(task_t task);
 extern void task_set_sec_token(task_t task, security_token_t *token);
@@ -1191,6 +1226,11 @@ extern boolean_t task_has_assertions(task_t task);
 extern void      task_set_gpu_denied(task_t task, boolean_t denied);
 extern boolean_t task_is_gpu_denied(task_t task);
 
+extern void task_set_game_mode(task_t task, bool enabled);
+/* returns true if update must be pushed to coalition (Automatically handled by task_set_game_mode) */
+extern bool task_set_game_mode_locked(task_t task, bool enabled);
+extern bool task_get_game_mode(task_t task);
+
 extern queue_head_t * task_io_user_clients(task_t task);
 extern void     task_set_message_app_suspended(task_t task, boolean_t enable);
 
@@ -1230,6 +1270,7 @@ extern kern_return_t task_get_exception_ports(
 	exception_port_array_t          ports,
 	exception_behavior_array_t      behaviors,
 	thread_state_flavor_array_t     flavors);
+
 
 #endif  /* XNU_KERNEL_PRIVATE */
 #ifdef  KERNEL_PRIVATE
@@ -1355,11 +1396,25 @@ extern int task_get_no_footprint_for_debug(
 	task_t task);
 #endif /* DEVELOPMENT || DEBUG */
 
+#ifdef KERNEL_PRIVATE
+extern kern_return_t task_get_suspend_stats(task_t task, task_suspend_stats_t stats);
+extern kern_return_t task_get_suspend_stats_kdp(task_t task, task_suspend_stats_t stats);
+#endif /* KERNEL_PRIVATE*/
+
+#ifdef XNU_KERNEL_PRIVATE
+extern kern_return_t task_get_suspend_sources(task_t task, task_suspend_source_array_t sources);
+extern kern_return_t task_get_suspend_sources_kdp(task_t task, task_suspend_source_array_t sources);
+#endif /* XNU_KERNEL_PRIVATE */
 
 #if CONFIG_ROSETTA
 extern bool task_is_translated(task_t task);
 #endif
 
+
+#ifdef MACH_KERNEL_PRIVATE
+void task_procname(task_t task, char *buf, int size);
+void task_best_name(task_t task, char *buf, size_t size);
+#endif /* MACH_KERNEL_PRIVATE */
 
 __END_DECLS
 

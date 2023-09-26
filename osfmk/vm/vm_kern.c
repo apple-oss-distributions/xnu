@@ -75,6 +75,7 @@
 #include <vm/vm_pageout.h>
 #include <vm/vm_init.h>
 #include <vm/vm_fault.h>
+#include <vm/vm_memtag.h>
 #include <kern/misc_protos.h>
 #include <vm/cpm.h>
 #include <kern/ledger.h>
@@ -87,6 +88,7 @@
 #include <libkern/crypto/sha2.h>
 #include <libkern/section_keywords.h>
 #include <sys/kdebug.h>
+#include <sys/kdebug_triage.h>
 
 #include <san/kasan.h>
 #include <kern/kext_alloc.h>
@@ -187,25 +189,19 @@ __kmem_entry_not_found_panic(
 	panic("kmem(map=%p) no entry found at %p", map, (void *)addr);
 }
 
-__abortlike
-static void
-__kmem_invalid_object_panic(uint32_t flags)
-{
-	if (flags == 0) {
-		panic("KMEM_KOBJECT or KMEM_COMPRESSOR is required");
-	}
-	panic("more than one of KMEM_KOBJECT or KMEM_COMPRESSOR specified");
-}
-
 static inline vm_object_t
 __kmem_object(kmem_flags_t flags)
 {
-	flags &= (KMEM_KOBJECT | KMEM_COMPRESSOR);
-	if (flags == 0 || (flags & (flags - 1))) {
-		__kmem_invalid_object_panic(flags);
+	if (flags & KMEM_COMPRESSOR) {
+		if (flags & KMEM_KOBJECT) {
+			panic("both KMEM_KOBJECT and KMEM_COMPRESSOR specified");
+		}
+		return compressor_object;
 	}
-
-	return (flags & KMEM_KOBJECT) ? kernel_object : compressor_object;
+	if (!(flags & KMEM_KOBJECT)) {
+		panic("KMEM_KOBJECT or KMEM_COMPRESSOR is required");
+	}
+	return kernel_object_default;
 }
 
 static inline vm_size_t
@@ -289,11 +285,11 @@ mach_vm_range_contains(const struct mach_vm_range *r, mach_vm_offset_t addr)
 {
 	mach_vm_offset_t rmin, rmax;
 
-#if CONFIG_KERNEL_TBI
+#if CONFIG_KERNEL_TAGGING
 	if (VM_KERNEL_ADDRESS(addr)) {
-		addr = VM_KERNEL_TBI_FILL(addr);
+		addr = vm_memtag_canonicalize_address(addr);
 	}
-#endif /* CONFIG_KERNEL_TBI */
+#endif /* CONFIG_KERNEL_TAGGING */
 
 	/*
 	 * The `&` is not a typo: we really expect the check to pass,
@@ -312,11 +308,11 @@ mach_vm_range_contains(
 {
 	mach_vm_offset_t rmin, rmax;
 
-#if CONFIG_KERNEL_TBI
+#if CONFIG_KERNEL_TAGGING
 	if (VM_KERNEL_ADDRESS(addr)) {
-		addr = VM_KERNEL_TBI_FILL(addr);
+		addr = vm_memtag_canonicalize_address(addr);
 	}
-#endif /* CONFIG_KERNEL_TBI */
+#endif /* CONFIG_KERNEL_TAGGING */
 
 	/*
 	 * The `&` is not a typo: we really expect the check to pass,
@@ -359,9 +355,7 @@ mach_vm_range_intersects(
 {
 	struct mach_vm_range r2;
 
-#if CONFIG_KERNEL_TBI
 	addr = VM_KERNEL_STRIP_UPTR(addr);
-#endif /* CONFIG_KERNEL_TBI */
 	r2.min_address = addr;
 	if (os_add_overflow(addr, size, &r2.max_address)) {
 		__mach_vm_range_overflow(addr, size);
@@ -411,11 +405,9 @@ kmem_range_contains_fully(
 	mach_vm_offset_t rmin, rmax;
 	bool result = false;
 
-#if CONFIG_KERNEL_TBI
 	if (VM_KERNEL_ADDRESS(addr)) {
-		addr = VM_KERNEL_TBI_FILL(addr);
+		addr = vm_memtag_canonicalize_address(addr);
 	}
-#endif /* CONFIG_KERNEL_TBI */
 
 	/*
 	 * The `&` is not a typo: we really expect the check to pass,
@@ -623,9 +615,7 @@ kmem_size_guard(
 #if KASAN_CLASSIC
 	addr -= PAGE_SIZE;
 #endif /* KASAN_CLASSIC */
-#if KASAN_TBI
-	addr = VM_KERNEL_TBI_FILL(addr);
-#endif /* KASAN_TBI */
+	addr = vm_memtag_canonicalize_address(addr);
 
 	if (!vm_map_lookup_entry(map, addr, &entry)) {
 		__kmem_entry_not_found_panic(map, addr);
@@ -881,7 +871,7 @@ kmem_alloc_guard_internal(
 	 *	locking the map, or risk deadlock with the default pager.
 	 */
 	if (flags & KMA_KOBJECT) {
-		object = kernel_object;
+		object = kernel_object_default;
 		vm_object_reference(object);
 	} else if (flags & KMA_COMPRESSOR) {
 		object = compressor_object;
@@ -925,6 +915,7 @@ kmem_alloc_guard_internal(
 
 	if (!(flags & (KMA_COMPRESSOR | KMA_PAGEABLE))) {
 		entry->wired_count = 1;
+		vme_btref_consider_and_set(entry, __builtin_frame_address(0));
 	}
 
 	if (guard_left || guard_right || wired_page_list) {
@@ -989,12 +980,15 @@ kmem_alloc_guard_internal(
 		kasan_alloc_large(kmr.kmr_address, size);
 	}
 #endif /* KASAN_CLASSIC */
+#if CONFIG_KERNEL_TAGGING
+	if (!(flags & KMA_VAONLY) && (flags & KMA_TAG)) {
+		kmr.kmr_address = vm_memtag_assign_tag(kmr.kmr_address, size);
+		vm_memtag_set_tag((vm_offset_t)kmr.kmr_address, size);
 #if KASAN_TBI
-	if (flags & KMA_TAG) {
-		kmr.kmr_address = kasan_tbi_tag_large_alloc(kmr.kmr_address,
-		    map_size, size);
-	}
+		kasan_tbi_retag_unused_space((vm_offset_t)kmr.kmr_address, map_size, size);
 #endif /* KASAN_TBI */
+	}
+#endif /* CONFIG_KERNEL_TAGGING */
 	return kmr;
 
 out_error:
@@ -1230,7 +1224,9 @@ kernel_memory_populate_pmap_enter(
 	kern_return_t   pe_result;
 	int             pe_options;
 
-	PMAP_ENTER_CHECK(kernel_pmap, mem);
+	if (VMP_ERROR_GET(mem)) {
+		panic("VM page %p should not have an error", mem);
+	}
 
 	pe_options = PMAP_OPTIONS_NOWAIT;
 	if (object->internal) {
@@ -1274,7 +1270,7 @@ kernel_memory_populate_object_and_unlock(
 	int             pe_flags;
 	bool            gobbled_list = page_list && page_list->vmp_gobbled;
 
-	assert3u((bool)(flags & KMA_KOBJECT), ==, object == kernel_object);
+	assert(((flags & KMA_KOBJECT) != 0) == (is_kernel_object(object) != 0));
 	assert3u((bool)(flags & KMA_COMPRESSOR), ==, object == compressor_object);
 	if (flags & (KMA_KOBJECT | KMA_COMPRESSOR)) {
 		assert3u(offset, ==, addr);
@@ -1292,6 +1288,7 @@ kernel_memory_populate_object_and_unlock(
 	} else {
 		pe_flags = 0;
 	}
+
 
 	for (vm_object_offset_t pg_offset = 0;
 	    pg_offset < size;
@@ -1375,7 +1372,7 @@ kernel_memory_populate_object_and_unlock(
 
 	if (flags & KMA_KOBJECT) {
 		/* vm_page_insert_wired() handles regular objects already */
-		vm_tag_update_size(tag, size);
+		vm_tag_update_size(tag, size, NULL);
 	}
 
 #if KASAN
@@ -1476,7 +1473,7 @@ kernel_memory_depopulate(
 
 	if (flags & KMA_KOBJECT) {
 		/* vm_page_remove() handles regular objects already */
-		vm_tag_update_size(tag, -ptoa_64(pages_unwired));
+		vm_tag_update_size(tag, -ptoa_64(pages_unwired), NULL);
 	}
 }
 
@@ -1527,11 +1524,10 @@ kmem_realloc_shrink_guard(
 		newsize += delta;
 	}
 #endif /* KASAN_CLASSIC */
-#if KASAN_TBI
+
 	if (flags & KMR_TAG) {
-		oldaddr = VM_KERNEL_TBI_FILL(req_oldaddr);
+		oldaddr = vm_memtag_canonicalize_address(req_oldaddr);
 	}
-#endif /* KASAN_TBI */
 
 	vm_map_lock_assert_exclusive(map);
 
@@ -1553,7 +1549,6 @@ kmem_realloc_shrink_guard(
 	if (entry->vme_kernel_object && was_atomic) {
 		entry->vme_object_or_delta = (-req_newsize & PAGE_MASK) + delta;
 	}
-#endif /* KASAN */
 #if KASAN_CLASSIC
 	if (flags & KMR_KASAN_GUARD) {
 		kasan_poison_range(oldaddr + newsize, oldsize - newsize,
@@ -1562,10 +1557,10 @@ kmem_realloc_shrink_guard(
 #endif
 #if KASAN_TBI
 	if (flags & KMR_TAG) {
-		kasan_tbi_tag_large_free(req_oldaddr + newsize,
-		    oldsize - newsize);
+		kasan_tbi_mark_free_space(req_oldaddr + newsize, oldsize - newsize);
 	}
 #endif /* KASAN_TBI */
+#endif /* KASAN */
 	(void)vm_map_remove_and_unlock(map,
 	    oldaddr + newsize, oldaddr + oldsize,
 	    vmr_flags, KMEM_GUARD_NONE);
@@ -1621,8 +1616,9 @@ kmem_realloc_shrink_guard(
 #endif /* KASAN_CLASSIC */
 #if KASAN_TBI
 	if ((flags & KMR_TAG) && (flags & KMR_FREEOLD)) {
-		kmr.kmr_address = kasan_tbi_tag_large_alloc(kmr.kmr_address,
-		    newsize, req_newsize);
+		kmr.kmr_address = vm_memtag_assign_tag(kmr.kmr_address, req_newsize);
+		vm_memtag_set_tag(kmr.kmr_address, req_newsize);
+		kasan_tbi_retag_unused_space(kmr.kmr_address, newsize, req_newsize);
 	}
 #endif /* KASAN_TBI */
 
@@ -1690,19 +1686,19 @@ kmem_realloc_guard(
 		newsize += delta;
 	}
 #endif /* KASAN_CLASSIC */
-#if KASAN_TBI
+#if CONFIG_KERNEL_TAGGING
 	if (flags & KMR_TAG) {
-		__asan_load1(req_oldaddr);
-		oldaddr = VM_KERNEL_TBI_FILL(req_oldaddr);
+		vm_memtag_verify_tag(req_oldaddr);
+		oldaddr = vm_memtag_canonicalize_address(req_oldaddr);
 	}
-#endif /* KASAN_TBI */
+#endif /* CONFIG_KERNEL_TAGGING */
 
 #if !KASAN
 	/*
-	 *	If not on a KASAN variant, just return.
+	 *	If not on a KASAN variant and no difference in requested size,
+	 *  just return.
 	 *
-	 *	Otherwise we want to validate the size
-	 *	and re-tag for KASAN_TBI.
+	 *	Otherwise we want to validate the size and re-tag for KASAN_TBI.
 	 */
 	if (oldsize == newsize) {
 		kmr.kmr_address = req_oldaddr;
@@ -1800,8 +1796,9 @@ again:
 #endif /* KASAN_CLASSIC */
 #if KASAN_TBI
 		if ((flags & KMR_TAG) && (flags & KMR_FREEOLD)) {
-			kmr.kmr_address = kasan_tbi_tag_large_alloc(kmr.kmr_address,
-			    newsize, req_newsize);
+			kmr.kmr_address = vm_memtag_assign_tag(kmr.kmr_address, req_newsize);
+			vm_memtag_set_tag(kmr.kmr_address, req_newsize);
+			kasan_tbi_retag_unused_space(kmr.kmr_address, newsize, req_newsize);
 		}
 #endif /* KASAN_TBI */
 		return kmr;
@@ -1840,6 +1837,7 @@ again:
 		oldentry->in_transition = true;
 		VME_OFFSET_SET(newentry, newaddr);
 		newentry->wired_count = 1;
+		vme_btref_consider_and_set(newentry, __builtin_frame_address(0));
 		newoffs = newaddr + oldsize;
 	} else {
 		if (object->vo_size != oldsize) {
@@ -1968,7 +1966,7 @@ again:
 #endif
 #if KASAN_TBI
 		if (flags & KMR_TAG) {
-			kasan_tbi_tag_large_free(req_oldaddr, oldsize);
+			kasan_tbi_mark_free_space(req_oldaddr, oldsize);
 		}
 #endif /* KASAN_TBI */
 		if (flags & KMR_GUARD_LAST) {
@@ -2002,8 +2000,9 @@ again:
 #endif /* KASAN_CLASSIC */
 #if KASAN_TBI
 	if (flags & KMR_TAG) {
-		kmr.kmr_address = kasan_tbi_tag_large_alloc(kmr.kmr_address,
-		    newsize, req_newsize);
+		kmr.kmr_address = vm_memtag_assign_tag(kmr.kmr_address, req_newsize);
+		vm_memtag_set_tag(kmr.kmr_address, req_newsize);
+		kasan_tbi_retag_unused_space(kmr.kmr_address, newsize, req_newsize);
 	}
 #endif /* KASAN_TBI */
 
@@ -2057,12 +2056,12 @@ kmem_free_guard(
 		delta  = ptoa(2);
 	}
 #endif /* KASAN_CLASSIC */
-#if KASAN_TBI
+#if CONFIG_KERNEL_TAGGING
 	if (flags & KMF_TAG) {
-		__asan_load1(req_addr);
-		addr = VM_KERNEL_TBI_FILL(req_addr);
+		vm_memtag_verify_tag(req_addr);
+		addr = vm_memtag_canonicalize_address(req_addr);
 	}
-#endif /* KASAN_TBI */
+#endif /* CONFIG_KERNEL_TAGGING */
 
 	if (flags & KMF_GUESS_SIZE) {
 		vmr_flags |= VM_MAP_REMOVE_GUESS_SIZE;
@@ -2105,9 +2104,16 @@ kmem_free_guard(
 #endif
 #if KASAN_TBI
 	if (flags & KMF_TAG) {
-		kasan_tbi_tag_large_free(req_addr, size);
+		kasan_tbi_mark_free_space(req_addr, size);
 	}
 #endif /* KASAN_TBI */
+
+	/*
+	 * vm_map_remove_and_unlock is called with VM_MAP_REMOVE_KUNWIRE, which
+	 * unwires the kernel mapping. The page won't be mapped any longer so
+	 * there is no extra step that is required for memory tagging to "clear"
+	 * it -- the page will be later laundered when reused.
+	 */
 	return vm_map_remove_and_unlock(map, addr, addr + size,
 	           vmr_flags, guard).kmr_size - delta;
 }
@@ -3624,8 +3630,8 @@ kmem_scramble_ranges(void)
 			panic("kmem_range_init: vm_map_find_space failing for claim %s",
 			    sp.kc_name);
 		}
-		vm_object_reference(kernel_object);
-		VME_OBJECT_SET(entry, kernel_object, false, 0);
+		vm_object_reference(kernel_object_default);
+		VME_OBJECT_SET(entry, kernel_object_default, false, 0);
 		VME_OFFSET_SET(entry, entry->vme_start);
 		vm_map_unlock(kernel_map);
 	}
@@ -3704,7 +3710,7 @@ kmem_get_gobj_stats(void)
 	kmem_gobj_stats stats = {};
 
 	vm_map_lock(kernel_map);
-	for (uint32_t i = 0; i < kmem_ptr_ranges; i++) {
+	for (uint8_t i = 0; i < kmem_ptr_ranges; i++) {
 		kmem_range_id_t range_id = KMEM_RANGE_ID_FIRST + i;
 		struct mach_vm_range range = kmem_ranges[range_id];
 		struct kmem_page_meta *meta = kmem_meta_hwm[kmem_get_front(range_id, 0)];
@@ -3908,12 +3914,14 @@ copyoutmap(
 		memcpy(CAST_DOWN(void *, toaddr), fromdata, length);
 	} else if (current_map() == map) {
 		if (copyout(fromdata, toaddr, length) != 0) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_COPYOUTMAP_SAMEMAP_ERROR), KERN_INVALID_ADDRESS /* arg */);
 			kr = KERN_INVALID_ADDRESS;
 		}
 	} else {
 		vm_map_reference(map);
 		oldmap = vm_map_switch(map);
 		if (copyout(fromdata, toaddr, length) != 0) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_COPYOUTMAP_DIFFERENTMAP_ERROR), KERN_INVALID_ADDRESS /* arg */);
 			kr = KERN_INVALID_ADDRESS;
 		}
 		vm_map_switch(oldmap);

@@ -43,13 +43,14 @@
 #include <kern/ecc.h>
 #include <machine/machine_routines.h>
 #include <machine/commpage.h>
+#include <machine/config.h>
 #if HIBERNATION
 #include <machine/pal_hibernate.h>
 #endif /* HIBERNATION */
 /* ARM64_TODO unify boot.h */
 #if __arm64__
-#include <pexpert/arm64/apple_arm64_common.h>
 #include <pexpert/arm64/boot.h>
+#include <arm64/amcc_rorgn.h>
 #else
 #error Unsupported arch
 #endif
@@ -121,6 +122,13 @@ boolean_t sched_hygiene_debug_pmc = 1;
 #endif
 
 #if SCHED_HYGIENE_DEBUG
+
+#if XNU_PLATFORM_iPhoneOS
+#define DEFAULT_INTERRUPT_MASKED_TIMEOUT 12000   /* 500us */
+#else
+#define DEFAULT_INTERRUPT_MASKED_TIMEOUT 0xd0000 /* 35.499ms */
+#endif /* XNU_PLATFORM_iPhoneOS */
+
 TUNABLE_DT_WRITEABLE(sched_hygiene_mode_t, interrupt_masked_debug_mode,
     "machine-timeouts", "interrupt-masked-debug-mode",
     "interrupt-masked-debug-mode",
@@ -128,7 +136,7 @@ TUNABLE_DT_WRITEABLE(sched_hygiene_mode_t, interrupt_masked_debug_mode,
     TUNABLE_DT_CHECK_CHOSEN);
 
 MACHINE_TIMEOUT_DEV_WRITEABLE(interrupt_masked_timeout, "interrupt-masked",
-    0xd0000, MACHINE_TIMEOUT_UNIT_TIMEBASE,  /* 35.499ms */
+    DEFAULT_INTERRUPT_MASKED_TIMEOUT, MACHINE_TIMEOUT_UNIT_TIMEBASE,
     NULL);
 #if __arm64__
 #define SSHOT_INTERRUPT_MASKED_TIMEOUT 0xf9999 /* 64-bit: 42.599ms */
@@ -175,6 +183,7 @@ SECURITY_READ_ONLY_LATE(bool) enable_processor_exit = true;
 SECURITY_READ_ONLY_LATE(bool) enable_processor_exit = false;
 #endif
 
+
 /*
  * Forward definition
  */
@@ -184,8 +193,9 @@ void arm_init(boot_args * args);
 unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
 
 extern void configure_misc_apple_boot_args(void);
-extern void configure_misc_apple_regs(void);
+extern void configure_misc_apple_regs(bool is_boot_cpu);
 extern void configure_timer_apple_regs(void);
+extern void configure_late_apple_regs(void);
 #endif /* __arm64__ */
 
 
@@ -368,7 +378,7 @@ arm_init(
 	wfe_timeout_init();
 
 	configure_misc_apple_boot_args();
-	configure_misc_apple_regs();
+	configure_misc_apple_regs(true);
 
 #if (DEVELOPMENT || DEBUG)
 	unsigned long const *platform_stall_ptr = NULL;
@@ -429,10 +439,9 @@ arm_init(
 
 	BootCpuData.cpu_number = (unsigned short)master_cpu;
 	BootCpuData.intstack_top = (vm_offset_t) &intstack_top;
-	BootCpuData.istackptr = BootCpuData.intstack_top;
+	BootCpuData.istackptr = &intstack_top;
 #if __arm64__
 	BootCpuData.excepstack_top = (vm_offset_t) &excepstack_top;
-	BootCpuData.excepstackptr = BootCpuData.excepstack_top;
 #endif
 	CpuDataEntries[master_cpu].cpu_data_vaddr = &BootCpuData;
 	CpuDataEntries[master_cpu].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
@@ -589,6 +598,11 @@ arm_init(
 	}
 
 	ml_map_cpu_pio();
+
+#if APPLE_ARM64_ARCH_FAMILY
+	configure_late_apple_regs();
+#endif
+
 #endif
 
 	cpu_timebase_init(TRUE);
@@ -660,13 +674,17 @@ arm_init_cpu(
 
 #ifdef __arm64__
 	configure_timer_apple_regs();
-	configure_misc_apple_regs();
+	configure_misc_apple_regs(false);
 #endif
 
 	cpu_data_ptr->cpu_flags &= ~SleepState;
 
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
+
+#if APPLE_ARM64_ARCH_FAMILY
+	configure_late_apple_regs();
+#endif
 
 #if HIBERNATION
 	if ((cpu_data_ptr == &BootCpuData) && (gIOHibernateState == kIOHibernateStateWakingFromHibernate)) {
@@ -741,6 +759,10 @@ arm_init_cpu(
 #if DEVELOPMENT || DEBUG
 	PE_arm_debug_enable_trace(should_kprintf);
 #endif /* DEVELOPMENT || DEBUG */
+
+#if KERNEL_INTEGRITY_KTRR || KERNEL_INTEGRITY_CTRR
+	rorgn_validate_core();
+#endif
 
 
 	if (should_kprintf) {

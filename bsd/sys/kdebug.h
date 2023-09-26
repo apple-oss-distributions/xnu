@@ -282,6 +282,9 @@ __BEGIN_DECLS
 #define MACH_MODE_UNDEMOTE_RT_DISALLOWED 0x5e /* Sched mode undemotion - rt not allowed */
 #define MACH_INT_MASKED_RESET            0x5f /* interrupt masked threshold reset */
 #define MACH_RT_DISALLOWED_WORK_INTERVAL 0x60 /* RT disallowed due to unmet work interval requirements */
+#define MACH_SCHED_WI_EXTERNAL_WAKEUP    0x61 /* WI thread woken by a thread outside its same work interval */
+#define MACH_SCHED_AST_CHECK             0x62 /* run ast check interrupt handler */
+#define MACH_SCHED_PREEMPT_TIMER_ACTIVE  0x63 /* preempt timer is armed */
 
 /* Codes for Clutch/Edge Scheduler (DBG_MACH_SCHED_CLUTCH) */
 #define MACH_SCHED_CLUTCH_ROOT_BUCKET_STATE     0x0 /* __unused */
@@ -554,6 +557,7 @@ __BEGIN_DECLS
 #define DBG_IOPOWER                     7       /* Power Managerment */
 #define DBG_IOSERVICE                   8       /* Matching etc. */
 #define DBG_IOREGISTRY                  9       /* Registry */
+#define DBG_IOPORT                      10      /* IOPort */
 
 /* **** 9-32 reserved for internal IOKit usage **** */
 
@@ -588,8 +592,8 @@ __BEGIN_DECLS
 /* **** 67-79 reserved for physical address mapping information **** */
 
 /* Backwards compatibility */
-#define DBG_IOPOINTING          DBG_IOHID                       /* OBSOLETE: Use DBG_IOHID instead */
-#define DBG_IODISK                      DBG_IOSTORAGE           /* OBSOLETE: Use DBG_IOSTORAGE instead */
+#define DBG_IOPOINTING DBG_IOHID     /* OBSOLETE: Use DBG_IOHID instead */
+#define DBG_IODISK     DBG_IOSTORAGE /* OBSOLETE: Use DBG_IOSTORAGE instead */
 
 /* **** The Kernel Debug Sub Classes for Device Drivers (DBG_DRIVERS) **** */
 #define DBG_DRVSTORAGE        1 /* Storage layers */
@@ -617,13 +621,14 @@ __BEGIN_DECLS
 #define DBG_DRVSSM           24 /* System State Manager(AppleSSM) */
 #define DBG_DRVSMC           25 /* System Management Controller */
 #define DBG_DRVMACEFIMANAGER 26 /* Mac EFI Manager */
-#define DBG_DRVANE           27 /* ANE */
+#define DBG_DRVANE           27 /* Apple Neural Engine */
 #define DBG_DRVETHERNET      28 /* Ethernet */
 #define DBG_DRVMCC           29 /* Memory Cache Controller */
 #define DBG_DRVACCESSORY     30 /* Accessories */
 #define DBG_SOCDIAGS         31 /* SoC Diagnostics */
 #define DBG_DRVVIRTIO        32 /* Hypervisor VirtIO */
 #define DBG_DRVCELLULAR      33 /* Cellular */
+#define DBG_DRVSPMI          34 /* System Power Management Interface */
 
 /* Backwards compatibility */
 #define DBG_DRVPOINTING         DBG_DRVHID      /* OBSOLETE: Use DBG_DRVHID instead */
@@ -654,7 +659,8 @@ __BEGIN_DECLS
 #define DBG_THROTTLE  0x11    /* I/O Throttling events */
 #define DBG_DECMP     0x12    /* Decmpfs-specific events */
 #define DBG_VFS       0x13    /* VFS layer events */
-#define DBG_LIVEFS    0x14    /* LiveFS events; see the UserFS project */
+#define DBG_LIVEFS    0x14    /* LiveFS events; see the FSKit project */
+#define DBG_NFS       0x15    /* NFS-specific events; see the nfs project */
 #define DBG_CONTENT_PROT 0xCF /* Content Protection Events: see bsd/sys/cprotect.h */
 
 /*
@@ -775,6 +781,7 @@ __BEGIN_DECLS
 #define DBG_MT_DEBUG 2
 #define DBG_MT_RESOURCES_PROC_EXIT 3
 #define DBG_MT_RESOURCES_THR_EXIT 4
+#define DBG_MT_INSTRS_CYCLES_ON_CPU 5
 #define DBG_MT_TMPTH 0xfe
 #define DBG_MT_TMPCPU 0xff
 
@@ -848,6 +855,7 @@ __BEGIN_DECLS
 #define DBG_APP_SAMBA            0x80
 #define DBG_APP_EOSSUPPORT       0x81
 #define DBG_APP_MACEFIMANAGER    0x82
+#define DBG_APP_ENTERPRISE       0x83
 
 /* Kernel Debug codes for Throttling (DBG_THROTTLE) */
 #define OPEN_THROTTLE_WINDOW    0x1
@@ -1033,6 +1041,8 @@ __BEGIN_DECLS
 #define ZALLOC_CODE_2 MACHDBG_CODE(DBG_MACH_LEAKS, 5)
 #define ZFREE_CODE MACHDBG_CODE(DBG_MACH_LEAKS, 6)
 #define ZFREE_CODE_2 MACHDBG_CODE(DBG_MACH_LEAKS, 7)
+
+#define MEMSTAT_CODE(code) BSDDBG_CODE(DBG_BSD_MEMSTAT, code)
 
 #define PMAP_CODE(code) MACHDBG_CODE(DBG_MACH_PMAP, code)
 

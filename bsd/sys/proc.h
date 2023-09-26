@@ -328,9 +328,14 @@ extern int proc_exiting(proc_t);
 /* returns whether the process has started down proc_exit() */
 extern int proc_in_teardown(proc_t);
 /* this routine returns error if the process is not one with super user privileges */
-int proc_suser(proc_t p);
+extern int proc_suser(proc_t p);
+
 /* returns the cred assicaited with the process; temporary api */
+#if !BSD_KERNEL_PRIVATE
+__deprecated_msg("proc_ucred is unsafe, use kauth_cred_proc_ref()")
 kauth_cred_t proc_ucred(proc_t p);
+#endif
+
 /* returns 1 if the process is tainted by uid or gid changes,e else 0 */
 extern int proc_issetugid(proc_t p);
 
@@ -453,6 +458,9 @@ bool proc_use_alternative_symlink_ea(proc_t p);
 /* return true if rsr is set for process */
 bool proc_is_rsr(proc_t p);
 
+/* return true if process is allowed to do sub 16K nocache writes, aligned to the filesystem blocksize */
+bool proc_allow_nocache_write_fs_blksize(proc_t p);
+
 /*
  * Return true if the process disallows read or write access for files that
  * it opens with O_EVTONLY.
@@ -494,6 +502,7 @@ extern uint64_t get_current_unique_pid(void);
 extern int proc_selfexecutableargs(uint8_t *buf, size_t *buflen);
 extern off_t proc_getexecutableoffset(proc_t p);
 extern vnode_t proc_getexecutablevnode(proc_t); /* Returned with iocount, use vnode_put() to drop */
+extern vnode_t proc_getexecutablevnode_noblock(proc_t); /* Returned with iocount, use vnode_put() to drop */
 extern int networking_memstatus_callout(proc_t p, uint32_t);
 
 /* System call filtering for BSD syscalls, mach traps and kobject routines. */

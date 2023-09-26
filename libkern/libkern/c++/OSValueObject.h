@@ -37,6 +37,7 @@
 #include <libkern/c++/OSObject.h>
 #include <libkern/c++/OSPtr.h>
 #include <os/base.h>
+#include <os/cpp_util.h>   /* operator new */
 #include <string.h>
 
 /*!
@@ -411,8 +412,6 @@ OSPtr<OSValueObject<T> > OSValueObjectWithValue(const T& value);
 
 
 #pragma mark -
-
-void* operator new(size_t, void*) noexcept; // forward declaration needed for placement-new
 
 template <typename T>
 OSPtr<OSValueObject<T> >

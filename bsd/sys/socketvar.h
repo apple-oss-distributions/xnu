@@ -187,6 +187,7 @@ struct socket {
 		u_int32_t       sb_preconn_hiwat; /* preconnect hiwat mark */
 	} so_rcv, so_snd;
 #define SB_MAX          (8192*1024)     /* default for max chars in sockbuf */
+#define SB_MSIZE_ADJ    256             /* fixed adjustment for mbuf */
 #define LOW_SB_MAX      (2*9*1024)      /* lower limit on max socket buffer
 	                                 *  size, 2 max datagrams */
 #define SB_LOCK         0x1             /* lock on data queue */
@@ -205,6 +206,7 @@ struct socket {
 #define SB_SNDBYTE_CNT  0x2000          /* keep track of snd bytes per interface */
 #define SB_UPCALL_LOCK  0x4000          /* Keep socket locked when doing the upcall */
 #define SB_LIMITED      0x8000          /* Socket buffer size limited */
+#define SB_KCTL         0x10000         /* kernel control socket buffer */
 	/* XXX Note that Unix domain socket's sb_flags is defined as short */
 	caddr_t so_tpcb;                /* Misc. protocol control block, used
 	                                 *  by some kexts */
@@ -337,6 +339,8 @@ struct socket {
 	uuid_t          so_ruuid;       /* UUID of the responsible process */
 #endif /* XNU_TARGET_OS_OSX */
 
+	uid_t           so_persona_id;  /* persona of effective owner */
+
 	int32_t         so_policy_gencnt; /* UUID policy gencnt */
 
 	u_int64_t       so_extended_bk_start;
@@ -352,6 +356,8 @@ struct socket {
 	uint8_t         so_mpkl_send_proto;
 	uuid_t          so_mpkl_send_uuid;
 };
+
+#define SB_MAX_ADJUST(_sz) ((((uint64_t)(_sz)) * MCLBYTES) / (SB_MSIZE_ADJ + MCLBYTES))
 
 /* Control message accessor in mbufs */
 
@@ -723,6 +729,7 @@ struct so_procinfo {
 };
 
 extern u_int32_t sb_max;
+extern uint64_t sb_max_adj;
 extern so_gen_t so_gencnt;
 extern int socket_debug;
 extern int sosendjcl;
@@ -742,6 +749,8 @@ extern u_int32_t net_io_policy_uuid;
 #endif /* CONFIG_PROC_UUID_POLICY */
 
 extern struct soextbkidlestat soextbkidlestat;
+
+extern int soreserveheadroom;
 
 #endif /* BSD_KERNEL_PRIVATE */
 
@@ -806,10 +815,11 @@ extern int sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
     struct mbuf *top, struct mbuf *control, int flags);
 extern int sosend_reinject(struct socket *so, struct sockaddr *addr, struct mbuf *top,
     struct mbuf *control, uint32_t sendflags);
-extern int sosend_list(struct socket *so, struct uio **uio, u_int uiocnt,
-    int flags);
+extern int sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_pkt_len, u_int *pktcnt, int flags);
 extern int soreceive_list(struct socket *so, struct recv_msg_elem *msgarray,
     u_int msgcnt, int *flags);
+extern int soreceive_m_list(struct socket *, u_int *, struct mbuf **madrp,
+    struct mbuf **, struct mbuf **, int *);
 extern void sonullevent(struct socket *so, void *arg, uint32_t hint);
 extern struct mbuf *sbconcat_mbufs(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
     struct mbuf *control);

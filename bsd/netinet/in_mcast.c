@@ -3593,7 +3593,7 @@ inm_trace(struct in_multi *inm, int refhold)
 		tr = inm_dbg->inm_refrele;
 	}
 
-	idx = atomic_add_16_ov(cnt, 1) % INM_TRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(cnt, relaxed) % INM_TRACE_HIST_SIZE;
 	ctrace_record(&tr[idx]);
 }
 

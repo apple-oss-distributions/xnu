@@ -111,6 +111,10 @@ filetype_strings = { DTYPE_VNODE: 'VNODE',
                      DTYPE_NETPOLICY: 'NETPOLI'
                      }
 
+
+MACH_PORT_DEAD = 0xffffffffffffffff
+IPC_OBJECT_DEAD = MACH_PORT_DEAD
+
 mach_msg_type_descriptor_strings = {0: "PORT", 1: "OOLDESC", 2: "OOLPORTS", 3: "OOLVOLATILE"}
 
 proc_state_strings = ["", "Idle", "Run", "Sleep", "Stop", "Zombie", "Reaping"]
@@ -182,6 +186,13 @@ P_PLATFORM_IOSSIMULATOR = 7
 P_PLATFORM_TVOSSIMULATOR = 8
 P_PLATFORM_WATCHOSSIMULATOR = 9
 P_PLATFORM_DRIVERKIT = 10
+
+# File: osfmk/ipc/ipc_object.h
+IO_BITS_ACTIVE = 0x80000000
+IO_BITS_KOTYPE = 0x3ff
+
+# File: kern_memorystatus.h
+P_MEMSTAT_FROZEN = 0x00000002
 
 
 if __name__ == "__main__":

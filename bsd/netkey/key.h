@@ -84,7 +84,7 @@ extern void key_randomfill(void *, size_t);
 extern void key_freereg(struct socket *);
 extern int key_parse(struct mbuf *, struct socket *);
 extern int key_checktunnelsanity(struct secasvar *, u_int, caddr_t, caddr_t);
-extern void key_sa_recordxfer(struct secasvar *, struct mbuf *);
+extern void key_sa_recordxfer(struct secasvar *, size_t);
 extern void key_sa_routechange(struct sockaddr *);
 extern void key_sa_chgstate(struct secasvar *, u_int8_t);
 extern void key_sa_stir_iv(struct secasvar *);

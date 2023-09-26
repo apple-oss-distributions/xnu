@@ -73,6 +73,8 @@
 #include <kern/locks.h>
 #include <kern/zalloc.h>
 
+#include <mach/mach_time.h>
+
 #ifdef INET
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
@@ -118,6 +120,9 @@ static int if_fake_debug = 0;
 SYSCTL_INT(_net_link_fake, OID_AUTO, debug, CTLFLAG_RW | CTLFLAG_LOCKED,
     &if_fake_debug, 0, "Fake interface debug logs");
 
+#define FETH_DPRINTF(fmt, ...)                                  \
+	{ if (if_fake_debug != 0) printf("%s " fmt, __func__, ## __VA_ARGS__); }
+
 static int if_fake_wmm_mode = 0;
 SYSCTL_INT(_net_link_fake, OID_AUTO, wmm_mode, CTLFLAG_RW | CTLFLAG_LOCKED,
     &if_fake_wmm_mode, 0, "Fake interface in 802.11 WMM mode");
@@ -143,6 +148,16 @@ SYSCTL_INT(_net_link_fake, OID_AUTO, switch_mode_frequency,
 static int if_fake_tso_support = 0;
 SYSCTL_INT(_net_link_fake, OID_AUTO, tso_support, CTLFLAG_RW | CTLFLAG_LOCKED,
     &if_fake_tso_support, 0, "Fake interface with support for TSO offload");
+
+#define DEFAULT_EXPIRATION_THRESHOLD 500 /* usec */
+static int if_fake_expiration_threshold_us = DEFAULT_EXPIRATION_THRESHOLD;
+SYSCTL_INT(_net_link_fake, OID_AUTO, expiration_threshold, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &if_fake_expiration_threshold_us, DEFAULT_EXPIRATION_THRESHOLD,
+    "Expiration threshold (usec) for expiration testing");
+
+static int if_fake_lro = 0;
+SYSCTL_INT(_net_link_fake, OID_AUTO, lro, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &if_fake_lro, 0, "Fake interface report LRO capability");
 
 typedef enum {
 	IFF_PP_MODE_GLOBAL = 0,         /* share a global pool */
@@ -422,6 +437,43 @@ SYSCTL_PROC(_net_link_fake, OID_AUTO, tx_drops,
     feth_fake_tx_drops_sysctl, "IU",
     "Fake interface will intermittently drop packets on Tx path");
 
+/* sysctl.net.link.fake.tx_exp_policy */
+
+typedef enum {
+	IFF_TX_EXP_POLICY_DISABLED = 0,          /* Expiry notification disabled */
+	IFF_TX_EXP_POLICY_DROP_AND_NOTIFY = 1,   /* Expiry notification enabled; drop + notify mode */
+	IFF_TX_EXP_POLICY_NOTIFY_ONLY = 2,       /* Expiry notification enabled; notify only mode */
+	IFF_TX_EXP_POLICY_METADATA = 3,          /* Expiry notification enabled; use packet metadata */
+} iff_tx_exp_policy_t;
+static iff_tx_exp_policy_t if_fake_tx_exp_policy = IFF_TX_EXP_POLICY_DISABLED;
+
+static int
+feth_fake_tx_exp_policy_sysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	unsigned int new_value;
+	int changed;
+	int error;
+
+	error = sysctl_io_number(req, if_fake_tx_exp_policy,
+	    sizeof(if_fake_tx_exp_policy), &new_value, &changed);
+	FETH_DPRINTF("if_fake_tx_exp_policy: %u -> %u (%d)",
+	    if_fake_tx_exp_policy, new_value, changed);
+	if (error == 0 && changed != 0) {
+		if (new_value > IFF_TX_EXP_POLICY_METADATA ||
+		    new_value < IFF_TX_EXP_POLICY_DISABLED) {
+			return EINVAL;
+		}
+		if_fake_tx_exp_policy = new_value;
+	}
+	return 0;
+}
+SYSCTL_PROC(_net_link_fake, OID_AUTO, tx_exp_policy,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0,
+    feth_fake_tx_exp_policy_sysctl, "IU",
+    "Fake interface handling policy for expired TX attempts "
+    "(0 disabled, 1 drop and notify, 2 notify only, 3 packet metadata)");
+
 /* sysctl net.link.fake.tx_completion_mode */
 typedef enum {
 	IFF_TX_COMPL_MODE_SYNC = 0,
@@ -542,6 +594,7 @@ typedef uint16_t        iff_flags_t;
 #define IFF_FLAGS_WMM_MODE              0x0008
 #define IFF_FLAGS_MULTIBUFLETS          0x0010
 #define IFF_FLAGS_TSO_SUPPORT           0x0020
+#define IFF_FLAGS_LRO                   0x0040
 
 #if SKYWALK
 
@@ -624,6 +677,7 @@ struct if_fake {
 	bool                    iff_intf_adv_enabled;
 	void                    *iff_intf_adv_kern_ctx;
 	kern_nexus_capab_interface_advisory_notify_fn_t iff_intf_adv_notify;
+	iff_tx_exp_policy_t     iff_tx_exp_policy;
 #endif /* SKYWALK */
 };
 
@@ -631,9 +685,6 @@ typedef struct if_fake * if_fake_ref;
 
 static if_fake_ref
 ifnet_get_if_fake(ifnet_t ifp);
-
-#define FETH_DPRINTF(fmt, ...)                                  \
-	{ if (if_fake_debug != 0) printf("%s " fmt, __func__, ## __VA_ARGS__); }
 
 static inline boolean_t
 feth_in_bsd_mode(if_fake_ref fakeif)
@@ -1062,7 +1113,7 @@ static inline void
 feth_copy_buflet(kern_buflet_t sbuf, kern_buflet_t dbuf)
 {
 	errno_t err;
-	uint16_t off, len;
+	uint32_t off, len;
 	uint8_t *saddr, *daddr;
 
 	saddr = kern_buflet_get_data_address(sbuf);
@@ -1089,9 +1140,9 @@ feth_add_packet_trailer(kern_packet_t ph, void *trailer, size_t trailer_len)
 	}
 	ASSERT(buf != NULL);
 
-	uint16_t dlim = kern_buflet_get_data_limit(buf);
-	uint16_t doff = kern_buflet_get_data_offset(buf);
-	uint16_t dlen = kern_buflet_get_data_length(buf);
+	uint32_t dlim = kern_buflet_get_data_limit(buf);
+	uint32_t doff = kern_buflet_get_data_offset(buf);
+	uint32_t dlen = kern_buflet_get_data_length(buf);
 
 	size_t trailer_room = dlim - doff - dlen;
 
@@ -1124,8 +1175,8 @@ feth_add_packet_fcs(kern_packet_t ph)
 
 	kern_buflet_t buf = NULL;
 	while ((buf = kern_packet_get_next_buflet(ph, buf)) != NULL) {
-		uint16_t doff = kern_buflet_get_data_offset(buf);
-		uint16_t dlen = kern_buflet_get_data_length(buf);
+		uint32_t doff = kern_buflet_get_data_offset(buf);
+		uint32_t dlen = kern_buflet_get_data_length(buf);
 		void *data = (void *)((uintptr_t)kern_buflet_get_data_address(buf) + doff);
 		crc = crc32(crc, data, dlen);
 	}
@@ -1178,7 +1229,7 @@ feth_copy_packet(if_fake_ref dif, kern_packet_t sph, kern_packet_t *pdph)
 
 		sbuf = kern_packet_get_next_buflet(sph, sbuf);
 		VERIFY(sbuf != NULL);
-		err = kern_pbufpool_alloc_buflet_nosleep(pp, &dbuf_next, true);
+		err = kern_pbufpool_alloc_buflet_nosleep(pp, &dbuf_next);
 		if (err != 0) {
 			STATS_INC(dif->iff_nifs, NETIF_STATS_DROP);
 			STATS_INC(dif->iff_nifs, NETIF_STATS_DROP_NOMEM_BUF);
@@ -1229,7 +1280,7 @@ feth_update_pkt_tso_metadata_for_rx(kern_packet_t ph)
 	 * Nothing to do if not a TSO offloaded packet.
 	 */
 	uint16_t seg_sz = 0;
-	(void) kern_packet_get_protocol_segment_size(ph, &seg_sz);
+	seg_sz = kern_packet_get_protocol_segment_size(ph);
 	if (seg_sz == 0) {
 		return;
 	}
@@ -1407,10 +1458,162 @@ feth_tx_complete(if_fake_ref fakeif, kern_packet_t phs[], uint32_t nphs)
 	}
 }
 
+#define NSEC_PER_USEC 1000ull
+/*
+ * Calculate the time delta that passed from `since' to `until'.
+ * If `until' happens before `since', returns negative value.
+ */
+static bool
+feth_packet_has_expired(if_fake_ref __unused fakeif, kern_packet_t ph,
+    uint64_t *out_deadline)
+{
+	uint64_t now;
+	uint64_t packet_expire_time_mach;
+	int64_t time_until_expiration;
+	errno_t err;
+	bool expired = false;
+
+	static mach_timebase_info_data_t clock_timebase = {0, 0};
+
+	if (clock_timebase.denom == 0) {
+		clock_timebase_info(&clock_timebase);
+		VERIFY(clock_timebase.denom != 0);
+	}
+
+	err = kern_packet_get_expire_time(ph, &packet_expire_time_mach);
+	if (err) {
+		goto out;
+	}
+
+	now = mach_absolute_time();
+	time_until_expiration = packet_expire_time_mach - now;
+	if (time_until_expiration < 0) {
+		/* The packet had expired */
+		expired = true;
+		goto out;
+	}
+
+	/* Convert the time_delta from mach ticks to nanoseconds */
+	time_until_expiration *= clock_timebase.numer;
+	time_until_expiration /= clock_timebase.denom;
+	/* convert from nanoseconds to microseconds */
+	time_until_expiration /= 1000ull;
+
+	if (if_fake_expiration_threshold_us < time_until_expiration) {
+		/* packet has some life ahead of it */
+		FETH_DPRINTF("Packet has %llu usec until expiration", time_until_expiration);
+		goto out;
+	}
+
+out:
+	if (expired && out_deadline) {
+		*out_deadline = packet_expire_time_mach;
+	}
+
+	return expired;
+}
+
+static errno_t
+feth_get_packet_notification_details(if_fake_ref fakeif, kern_packet_t ph,
+    packet_id_t *pkt_id, uint32_t *nx_port_id)
+{
+	errno_t err = 0;
+
+	err = kern_packet_get_packetid(ph, pkt_id);
+	if (err != 0) {
+		FETH_DPRINTF("%s err=%d getting packetid", fakeif->iff_name, err);
+		return err;
+	}
+
+	err = kern_packet_get_tx_nexus_port_id(ph, nx_port_id);
+	if (err != 0) {
+		FETH_DPRINTF("%s err=%d getting nx_port_id", fakeif->iff_name, err);
+		return err;
+	}
+
+	return 0;
+}
+
+static packet_expiry_action_t
+feth_get_effective_expn_action(if_fake_ref fakeif, kern_packet_t ph)
+{
+	errno_t err;
+	packet_expiry_action_t expiry_action;
+
+	switch (fakeif->iff_tx_exp_policy) {
+	case IFF_TX_EXP_POLICY_DISABLED:
+		expiry_action = PACKET_EXPIRY_ACTION_NONE;
+		break;
+	case IFF_TX_EXP_POLICY_NOTIFY_ONLY:
+		expiry_action = PACKET_EXPIRY_ACTION_NOTIFY;
+		break;
+	case IFF_TX_EXP_POLICY_DROP_AND_NOTIFY:
+		expiry_action = PACKET_EXPIRY_ACTION_DROP;
+		break;
+	case IFF_TX_EXP_POLICY_METADATA:
+		err = kern_packet_get_expiry_action(ph, &expiry_action);
+		if (err != 0) {
+			if (err != ENOENT) {
+				FETH_DPRINTF("Error %d when getting expiry action", err);
+			}
+			expiry_action = PACKET_EXPIRY_ACTION_NONE;
+		}
+		break;
+	default:
+		FETH_DPRINTF("Unrecognized value %d for \"net.link.fake.tx_exp_policy\"",
+		    fakeif->iff_tx_exp_policy);
+		expiry_action = PACKET_EXPIRY_ACTION_NONE;
+	}
+
+	return expiry_action;
+}
+
+/* returns true if the packet is selected for epxiration and should be dropped */
+static bool
+feth_tx_expired_error(if_fake_ref fakeif, kern_packet_t ph)
+{
+	int err = 0;
+	uint32_t nx_port_id = 0;
+	os_channel_event_packet_transmit_expired_t expn = {0};
+	packet_expiry_action_t expiry_action = PACKET_EXPIRY_ACTION_NONE;
+
+	FETH_DPRINTF("%s\n", fakeif->iff_name);
+
+	if (feth_packet_has_expired(fakeif, ph, &expn.packet_tx_expiration_deadline)) {
+		expiry_action = feth_get_effective_expn_action(fakeif, ph);
+	}
+
+	bool drop_packet = (expiry_action == PACKET_EXPIRY_ACTION_DROP);
+	if (expiry_action != PACKET_EXPIRY_ACTION_NONE) {
+		/* set the expiration status code */
+		expn.packet_tx_expiration_status = drop_packet ?
+		    CHANNEL_EVENT_PKT_TRANSMIT_EXPIRED_ERR_EXPIRED_DROPPED :
+		    CHANNEL_EVENT_PKT_TRANSMIT_EXPIRED_ERR_EXPIRED_NOT_DROPPED;
+
+		/* Mark the expiration timestamp */
+		expn.packet_tx_expiration_timestamp = mach_absolute_time();
+
+		err = feth_get_packet_notification_details(fakeif, ph,
+		    &expn.packet_id, &nx_port_id);
+
+		if (err == 0) {
+			err = kern_channel_event_transmit_expired(
+				fakeif->iff_ifp, &expn, nx_port_id);
+			FETH_DPRINTF("%s sent epxiry notification on nexus port %u notif code %u\n",
+			    fakeif->iff_name, nx_port_id, expn.packet_tx_expiration_status);
+		}
+		if (err != 0) {
+			FETH_DPRINTF("%s err=%d, nx_port_id: 0x%x\n",
+			    fakeif->iff_name, err, nx_port_id);
+		}
+	}
+
+	return drop_packet;
+}
+
 /* returns true if the packet is selected for TX error & dropped */
 static bool
-feth_tx_complete_error(if_fake_ref fakeif, kern_packet_t *ph,
-    struct netif_stats *nifs)
+feth_tx_complete_error(if_fake_ref fakeif, kern_packet_t ph)
 {
 	int err;
 
@@ -1420,39 +1623,28 @@ feth_tx_complete_error(if_fake_ref fakeif, kern_packet_t *ph,
 	}
 	/* simulate TX completion error on the packet */
 	if (fakeif->iff_tx_completion_mode == IFF_TX_COMPL_MODE_SYNC) {
-		err = kern_packet_set_tx_completion_status(*ph,
+		err = kern_packet_set_tx_completion_status(ph,
 		    CHANNEL_EVENT_PKT_TRANSMIT_STATUS_ERR_RETRY_FAILED);
 		VERIFY(err == 0);
-		kern_packet_tx_completion(*ph, fakeif->iff_ifp);
+		kern_packet_tx_completion(ph, fakeif->iff_ifp);
 	} else {
 		uint32_t nx_port_id = 0;
 		os_channel_event_packet_transmit_status_t pkt_tx_status = {0};
 
 		pkt_tx_status.packet_status =
 		    CHANNEL_EVENT_PKT_TRANSMIT_STATUS_ERR_RETRY_FAILED;
-		do {
-			err = kern_packet_get_packetid(*ph,
-			    &pkt_tx_status.packet_id);
-			if (err != 0) {
-				break;
-			}
-			err = kern_packet_get_tx_nexus_port_id(*ph,
-			    &nx_port_id);
-			if (err != 0) {
-				break;
-			}
+		err = feth_get_packet_notification_details(fakeif, ph,
+		    &pkt_tx_status.packet_id, &nx_port_id);
+		if (err == 0) {
 			err = kern_channel_event_transmit_status(
 				fakeif->iff_ifp, &pkt_tx_status, nx_port_id);
-		} while (0);
+		}
 		if (err != 0) {
-			FETH_DPRINTF("err %d, nx_port_id: 0x%x\n",
-			    err, nx_port_id);
+			FETH_DPRINTF("%s err=%d, nx_port_id: 0x%x\n",
+			    fakeif->iff_name, err, nx_port_id);
 		}
 	}
-	fakeif->iff_tx_pkts_count = 0;
-	kern_pbufpool_free(fakeif->iff_tx_pp, *ph);
-	*ph = 0;
-	STATS_INC(nifs, NETIF_STATS_DROP);
+
 	return true;
 }
 
@@ -1858,7 +2050,7 @@ feth_nx_sync_tx(kern_nexus_provider_t nxprov,
 	fakeif = feth_nexus_context(nexus);
 	FETH_DPRINTF("%s ring %d flags 0x%x\n", fakeif->iff_name,
 	    tx_ring->ckr_ring_id, flags);
-
+	(void)flags;
 	feth_lock();
 	if (feth_is_detaching(fakeif) || !fakeif->iff_channel_connected) {
 		feth_unlock();
@@ -1869,14 +2061,26 @@ feth_nx_sync_tx(kern_nexus_provider_t nxprov,
 	if (peer_ifp != NULL) {
 		peer_fakeif = ifnet_get_if_fake(peer_ifp);
 		if (peer_fakeif != NULL) {
-			if (feth_is_detaching(peer_fakeif) ||
-			    !peer_fakeif->iff_channel_connected) {
+			if (feth_is_detaching(peer_fakeif)) {
+				FETH_DPRINTF("%s peer fakeif %s is detaching\n",
+				    fakeif->iff_name, peer_fakeif->iff_name);
 				goto done;
 			}
+			if (!peer_fakeif->iff_channel_connected) {
+				if (fakeif->iff_tx_exp_policy ==
+				    IFF_TX_EXP_POLICY_DISABLED) {
+					FETH_DPRINTF("%s peer fakeif %s channel not connected, expn: %d\n",
+					    fakeif->iff_name, peer_fakeif->iff_name,
+					    fakeif->iff_tx_exp_policy);
+					goto done;
+				}
+			}
 		} else {
+			FETH_DPRINTF("%s no peer fakeif (peer %p)\n", fakeif->iff_name, peer_ifp);
 			goto done;
 		}
 	} else {
+		FETH_DPRINTF("%s no peer\n", fakeif->iff_name);
 		goto done;
 	}
 	tx_slot = kern_channel_get_next_slot(tx_ring, NULL, NULL);
@@ -1898,9 +2102,15 @@ feth_nx_sync_tx(kern_nexus_provider_t nxprov,
 
 		/* drop packets, if requested */
 		fakeif->iff_tx_pkts_count++;
-		if (feth_tx_complete_error(fakeif, &sph, nifs)) {
+		if (feth_tx_expired_error(fakeif, sph) ||
+		    feth_tx_complete_error(fakeif, sph) ||
+		    !peer_fakeif->iff_channel_connected) {
+			fakeif->iff_tx_pkts_count = 0;
+			kern_pbufpool_free(fakeif->iff_tx_pp, sph);
+			STATS_INC(nifs, NETIF_STATS_DROP);
 			goto next_tx_slot;
 		}
+
 		ASSERT(sph != 0);
 		STATS_INC(nifs, NETIF_STATS_TX_COPY_DIRECT);
 		STATS_INC(nifs, NETIF_STATS_TX_PACKETS);
@@ -2452,6 +2662,8 @@ feth_nx_tx_queue_deliver_pkt_chain(if_fake_ref fakeif, kern_packet_t sph,
 	kern_packet_t pkts[IFF_MAX_BATCH_SIZE];
 	uint32_t n_pkts = 0;
 
+	FETH_DPRINTF("%s -> %s\n", fakeif->iff_name, peer_fakeif->iff_name);
+
 	while (sph != 0) {
 		uint16_t off;
 		kern_packet_t next;
@@ -2468,7 +2680,11 @@ feth_nx_tx_queue_deliver_pkt_chain(if_fake_ref fakeif, kern_packet_t sph,
 
 		/* drop packets, if requested */
 		fakeif->iff_tx_pkts_count++;
-		if (feth_tx_complete_error(fakeif, &sph, nifs)) {
+		if (feth_tx_expired_error(fakeif, sph) ||
+		    feth_tx_complete_error(fakeif, sph)) {
+			fakeif->iff_tx_pkts_count = 0;
+			kern_pbufpool_free(fakeif->iff_tx_pp, sph);
+			STATS_INC(nifs, NETIF_STATS_DROP);
 			goto next_pkt;
 		}
 		ASSERT(sph != 0);
@@ -2893,7 +3109,19 @@ feth_detach_netif_nexus(if_fake_ref fakeif)
 static void
 feth_ifnet_set_attrs(if_fake_ref fakeif, ifnet_t ifp)
 {
-	(void)ifnet_set_capabilities_enabled(ifp, 0, -1);
+	uint32_t        cap;
+
+	cap = ((fakeif->iff_flags & IFF_FLAGS_LRO) != 0) ? IFCAP_LRO : 0;
+	if (cap != 0) {
+		errno_t         error;
+
+		error = ifnet_set_capabilities_supported(ifp, cap, IFCAP_VALID);
+		if (error != 0) {
+			printf("%s: failed to enable LRO, %d\n",
+			    ifp->if_xname, error);
+		}
+	}
+	(void)ifnet_set_capabilities_enabled(ifp, cap, IFCAP_VALID);
 	ifnet_set_addrlen(ifp, ETHER_ADDR_LEN);
 	ifnet_set_baudrate(ifp, 0);
 	ifnet_set_mtu(ifp, ETHERMTU);
@@ -2967,6 +3195,9 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	if (if_fake_hwcsum != 0) {
 		fakeif->iff_flags |= IFF_FLAGS_HWCSUM;
 	}
+	if (if_fake_lro != 0) {
+		fakeif->iff_flags |= IFF_FLAGS_LRO;
+	}
 	fakeif->iff_max_mtu = get_max_mtu(if_fake_bsd_mode, if_fake_max_mtu);
 	fakeif->iff_fcs = if_fake_fcs;
 	fakeif->iff_trailer_length = if_fake_trailer_length;
@@ -3029,6 +3260,7 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 		}
 		fakeif->iff_tx_drop_rate = if_fake_tx_drops;
 		fakeif->iff_tx_completion_mode = if_tx_completion_mode;
+		fakeif->iff_tx_exp_policy = if_fake_tx_exp_policy;
 	}
 	feth_init.tx_headroom = fakeif->iff_tx_headroom;
 #endif /* SKYWALK */
@@ -3745,6 +3977,21 @@ feth_ioctl(ifnet_t ifp, u_long cmd, void * data)
 	case SIOCDELMULTI:
 		error = 0;
 		break;
+	case SIOCSIFCAP: {
+		uint32_t        cap;
+
+		feth_lock();
+		fakeif = ifnet_get_if_fake(ifp);
+		if (fakeif == NULL ||
+		    (fakeif->iff_flags & IFF_FLAGS_LRO) == 0) {
+			feth_unlock();
+			return EOPNOTSUPP;
+		}
+		feth_unlock();
+		cap = (ifr->ifr_reqcap & IFCAP_LRO) != 0 ? IFCAP_LRO : 0;
+		error = ifnet_set_capabilities_enabled(ifp, cap, IFCAP_LRO);
+		break;
+	}
 	default:
 		error = EOPNOTSUPP;
 		break;

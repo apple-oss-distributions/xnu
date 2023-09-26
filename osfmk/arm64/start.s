@@ -314,8 +314,8 @@ start_cpu:
 	ldr		x26, [x20, BA_BOOT_FLAGS]			// Get the kernel boot flags
 
 
-	// Set TPIDR_EL0 with the CPU number
-	ldrsh	x0, [x21, CPU_NUMBER_GS]
+	// Set TPIDR_EL0 with cached CPU info
+	ldr		x0, [x21, CPU_TPIDR_EL0]
 	msr		TPIDR_EL0, x0
 
 	// Set TPIDRRO_EL0 to 0
@@ -666,20 +666,27 @@ common_start:
 	mov		x0, xzr
 	mov		x1, #(MAIR_WRITEBACK << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_WRITEBACK))
 	orr		x0, x0, x1
-	mov		x1, #(MAIR_INNERWRITEBACK << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_INNERWRITEBACK))
-	orr		x0, x0, x1
 	mov		x1, #(MAIR_DISABLE << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_DISABLE))
 	orr		x0, x0, x1
 	mov		x1, #(MAIR_WRITETHRU << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_WRITETHRU))
 	orr		x0, x0, x1
 	mov		x1, #(MAIR_WRITECOMB << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_WRITECOMB))
 	orr		x0, x0, x1
+	mov		x1, #(MAIR_WRITEBACK << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_RESERVED))
+	orr		x0, x0, x1
+	mov		x1, #(MAIR_POSTED_COMBINED_REORDERED << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED))
+	orr		x0, x0, x1
+#if HAS_FEAT_XS
+	mov		x1, #(MAIR_POSTED_XS << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_POSTED_XS))
+	orr		x0, x0, x1
+	mov		x1, #(MAIR_POSTED_COMBINED_REORDERED_XS << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED_XS))
+	orr		x0, x0, x1
+#else
 	mov		x1, #(MAIR_POSTED << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_POSTED))
 	orr		x0, x0, x1
 	mov		x1, #(MAIR_POSTED_REORDERED << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_POSTED_REORDERED))
 	orr		x0, x0, x1
-	mov		x1, #(MAIR_POSTED_COMBINED_REORDERED << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED))
-	orr		x0, x0, x1
+#endif /* HAS_FEAT_XS */
 	msr		MAIR_EL1, x0
 	isb
 	tlbi	vmalle1
@@ -745,9 +752,11 @@ common_start:
 	MSR_SCTLR_EL1_X0
 	isb		sy
 
+#if !VMAPPLE
 	MOV64   x1, SCTLR_EL1_DEFAULT
 	cmp		x0, x1
 	bne		.
+#endif /* !VMAPPLE */
 
 #if (!CONFIG_KERNEL_INTEGRITY || (CONFIG_KERNEL_INTEGRITY && !defined(KERNEL_INTEGRITY_WT)))
 	/* Watchtower
@@ -776,7 +785,6 @@ common_start:
 	mrs x12, MIDR_EL1
 
 	APPLY_TUNABLES x12, x13, x14
-
 
 #if HAS_CLUSTER
 	// Unmask external IRQs if we're restarting from non-retention WFI

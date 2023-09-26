@@ -26,21 +26,39 @@
  * $FreeBSD: src/include/stdbool.h,v 1.6 2002/08/16 07:33:14 alfred Exp $
  */
 
-#ifndef _STDBOOL_H_
-#define	_STDBOOL_H_	
+#if XNU_KERNEL_PRIVATE
 
-#define	__bool_true_false_are_defined	1
+#include_next <stdbool.h>
+/* __STDBOOL_H guard defined */
+
+#elif (defined(__has_include) && __has_include(<__xnu_libcxx_sentinel.h>))
+
+#if !__has_include_next(<stdbool.h>)
+#error Do not build with -nostdinc (use GCC_USE_STANDARD_INCLUDE_SEARCHING=NO)
+#else
+#include_next <stdbool.h>
+/* __STDBOOL_H guard defined */
+#endif /* __has_include_next */
+
+#else /* XNU_KERNEL_PRIVATE */
+
+#ifndef _STDBOOL_H_
+#define _STDBOOL_H_
+
+#define __bool_true_false_are_defined   1
 
 #ifndef __cplusplus
 
-#define	false	0
-#define	true	1
+#define false   0
+#define true    1
 
-#define	bool	_Bool
+#define bool    _Bool
 #if __STDC_VERSION__ < 199901L && __GNUC__ < 3
-typedef	int	_Bool;
+typedef int     _Bool;
 #endif
 
 #endif /* !__cplusplus */
 
 #endif /* !_STDBOOL_H_ */
+
+#endif /* XNU_KERNEL_PRIVATE */

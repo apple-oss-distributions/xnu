@@ -96,7 +96,7 @@ static sched_mode_t
 sched_dualq_initial_thread_sched_mode(task_t parent_task);
 
 static bool
-sched_dualq_thread_avoid_processor(processor_t processor, thread_t thread);
+sched_dualq_thread_avoid_processor(processor_t processor, thread_t thread, __unused ast_t reason);
 
 const struct sched_dispatch_table sched_dualq_dispatch = {
 	.sched_name                                     = "dualq",
@@ -312,7 +312,7 @@ sched_dualq_processor_csw_check(processor_t processor)
 	boolean_t       has_higher;
 	int             pri;
 
-	if (sched_dualq_thread_avoid_processor(processor, current_thread())) {
+	if (sched_dualq_thread_avoid_processor(processor, current_thread(), AST_NONE)) {
 		return AST_PREEMPT | AST_URGENT;
 	}
 
@@ -549,7 +549,7 @@ extern int sched_allow_rt_smt;
 
 /* Return true if this thread should not continue running on this processor */
 static bool
-sched_dualq_thread_avoid_processor(processor_t processor, thread_t thread)
+sched_dualq_thread_avoid_processor(processor_t processor, thread_t thread, __unused ast_t reason)
 {
 	if (thread->bound_processor == processor) {
 		/* Thread is bound here */

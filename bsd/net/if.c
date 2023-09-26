@@ -133,6 +133,8 @@
 
 #include <os/log.h>
 
+#include <IOKit/IOBSD.h>
+
 /*
  * System initialization
  */
@@ -287,7 +289,85 @@ SYSCTL_PROC(_net_link_generic_system, OID_AUTO, companion_sndbuf_limit,
     &companion_link_sock_buffer_limit, 0, sysctl_set_companion_link_sock_buf_limit,
     "I", "set sock send buffer limit of connections using companion links");
 
+
 TUNABLE(bool, intcoproc_unrestricted, "intcoproc_unrestricted", false);
+
+SYSCTL_NODE(_net_link_generic_system, OID_AUTO, management,
+    CTLFLAG_RW | CTLFLAG_LOCKED, 0, "management interface");
+
+TUNABLE_WRITEABLE(int, if_management_verbose, "management_data_unrestricted", 0);
+
+SYSCTL_INT(_net_link_generic_system_management, OID_AUTO, verbose,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &if_management_verbose, 0, "");
+
+/*
+ * boot-args to disable entitlement check for data transfer on management interface
+ */
+TUNABLE_DEV_WRITEABLE(bool, management_data_unrestricted, "management_data_unrestricted", false);
+
+#if DEBUG || DEVELOPMENT
+#define MANAGEMENT_CTLFLAG_ACCESS CTLFLAG_RW
+#else
+#define MANAGEMENT_CTLFLAG_ACCESS CTLFLAG_RD
+#endif
+
+static int
+sysctl_management_data_unrestricted SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int val = management_data_unrestricted;
+
+	int error = sysctl_handle_int(oidp, &val, 0, req);
+#if DEBUG || DEVELOPMENT
+	if (error == 0 && req->newptr != USER_ADDR_NULL) {
+		management_data_unrestricted = (val == 0) ? false : true;
+		if (if_management_verbose > 0) {
+			os_log(OS_LOG_DEFAULT,
+			    "sysctl_management_data_unrestricted val %d -> management_data_unrestricted %d",
+			    val, management_data_unrestricted);
+		}
+	}
+#endif /* DEBUG || DEVELOPMENT */
+	return error;
+}
+
+SYSCTL_PROC(_net_link_generic_system_management, OID_AUTO, data_unrestricted,
+    CTLTYPE_INT | MANAGEMENT_CTLFLAG_ACCESS | CTLFLAG_LOCKED, 0, 0,
+    sysctl_management_data_unrestricted, "I", "");
+
+/*
+ * boot-args to disable entitlement restrictions to control management interfaces
+ */
+TUNABLE_DEV_WRITEABLE(bool, management_control_unrestricted, "management_control_unrestricted", false);
+
+static int
+sysctl_management_control_unrestricted SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int val = management_control_unrestricted;
+
+	int error = sysctl_handle_int(oidp, &val, 0, req);
+#if DEBUG || DEVELOPMENT
+	if (error == 0 && req->newptr != USER_ADDR_NULL) {
+		management_control_unrestricted = (val == 0) ? false : true;
+		if (if_management_verbose > 0) {
+			os_log(OS_LOG_DEFAULT,
+			    "sysctl_management_control_unrestricted val %d -> management_control_unrestricted %d",
+			    val, management_control_unrestricted);
+		}
+	}
+#endif /* DEBUG || DEVELOPMENT */
+	return error;
+}
+
+SYSCTL_PROC(_net_link_generic_system_management, OID_AUTO, control_unrestricted,
+    CTLTYPE_INT | MANAGEMENT_CTLFLAG_ACCESS | CTLFLAG_LOCKED, 0, 0,
+    sysctl_management_control_unrestricted, "I", "");
+
+#undef MANAGEMENT_CTLFLAG_ACCESS
+
+/* The following is set as soon as IFNET_SUBFAMILY_MANAGEMENT is used */
+bool if_management_interface_check_needed = false;
 
 /* Eventhandler context for interface events */
 struct eventhandler_lists_ctxt ifnet_evhdlr_ctxt;
@@ -513,6 +593,7 @@ static int
 if_clone_create(char *name, int len, void *params)
 {
 	struct if_clone *ifc;
+	struct ifnet *ifp;
 	char *dp;
 	int wildcard;
 	u_int32_t bytoff, bitoff;
@@ -594,7 +675,10 @@ again:
 		}
 	}
 	lck_mtx_unlock(&ifc->ifc_mutex);
-
+	ifp = ifunit(name);
+	if (ifp != NULL) {
+		if_set_eflags(ifp, IFEF_CLONE);
+	}
 	return 0;
 }
 
@@ -627,7 +711,10 @@ if_clone_destroy(const char *name)
 		error = ENXIO;
 		goto done;
 	}
-
+	if ((ifp->if_eflags & IFEF_CLONE) == 0) {
+		error = EOPNOTSUPP;
+		goto done;
+	}
 	if (ifc->ifc_destroy == NULL) {
 		error = EOPNOTSUPP;
 		goto done;
@@ -818,6 +905,8 @@ if_functional_type(struct ifnet *ifp, bool exclude_delegate)
 			ret = IFRTYPE_FUNCTIONAL_CELLULAR;
 		} else if (IFNET_IS_INTCOPROC(ifp)) {
 			ret = IFRTYPE_FUNCTIONAL_INTCOPROC;
+		} else if (IFNET_IS_MANAGEMENT(ifp)) {
+			ret = IFRTYPE_FUNCTIONAL_MANAGEMENT;
 		} else if ((exclude_delegate &&
 		    (ifp->if_family == IFNET_FAMILY_ETHERNET ||
 		    ifp->if_family == IFNET_FAMILY_BOND ||
@@ -993,35 +1082,67 @@ ifa_ifwithaddr(const struct sockaddr *addr)
  * Locate the point to point interface with a given destination address.
  */
 /*ARGSUSED*/
+
+static struct ifaddr *
+ifa_ifwithdstaddr_ifp(const struct sockaddr *addr, struct ifnet * ifp)
+{
+	struct ifaddr *ifa;
+	struct ifaddr *result = NULL;
+
+	if ((ifp->if_flags & IFF_POINTOPOINT) != 0) {
+		ifnet_lock_shared(ifp);
+
+		for (ifa = ifp->if_addrhead.tqh_first; ifa;
+		    ifa = ifa->ifa_link.tqe_next) {
+			IFA_LOCK_SPIN(ifa);
+			if (ifa->ifa_addr->sa_family !=
+			    addr->sa_family) {
+				IFA_UNLOCK(ifa);
+				continue;
+			}
+			if (sa_equal(addr, ifa->ifa_dstaddr)) {
+				result = ifa;
+				IFA_ADDREF_LOCKED(ifa); /* for caller */
+				IFA_UNLOCK(ifa);
+				break;
+			}
+			IFA_UNLOCK(ifa);
+		}
+
+		ifnet_lock_done(ifp);
+	}
+	return result;
+}
+
 struct ifaddr *
 ifa_ifwithdstaddr(const struct sockaddr *addr)
 {
 	struct ifnet *ifp;
-	struct ifaddr *ifa;
 	struct ifaddr *result = NULL;
 
 	ifnet_head_lock_shared();
 	for (ifp = ifnet_head.tqh_first; ifp && !result;
 	    ifp = ifp->if_link.tqe_next) {
-		if ((ifp->if_flags & IFF_POINTOPOINT)) {
-			ifnet_lock_shared(ifp);
-			for (ifa = ifp->if_addrhead.tqh_first; ifa;
-			    ifa = ifa->ifa_link.tqe_next) {
-				IFA_LOCK_SPIN(ifa);
-				if (ifa->ifa_addr->sa_family !=
-				    addr->sa_family) {
-					IFA_UNLOCK(ifa);
-					continue;
-				}
-				if (sa_equal(addr, ifa->ifa_dstaddr)) {
-					result = ifa;
-					IFA_ADDREF_LOCKED(ifa); /* for caller */
-					IFA_UNLOCK(ifa);
-					break;
-				}
-				IFA_UNLOCK(ifa);
-			}
-			ifnet_lock_done(ifp);
+		result = ifa_ifwithdstaddr_ifp(addr, ifp);
+	}
+	ifnet_head_done();
+	return result;
+}
+
+struct ifaddr *
+ifa_ifwithdstaddr_scoped(const struct sockaddr *addr, unsigned int ifscope)
+{
+	struct ifnet *ifp;
+	struct ifaddr *result = NULL;
+
+	if (ifscope == IFSCOPE_NONE) {
+		return ifa_ifwithdstaddr(addr);
+	}
+	ifnet_head_lock_shared();
+	if (ifscope <= (unsigned int)if_index) {
+		ifp = ifindex2ifnet[ifscope];
+		if (ifp != NULL) {
+			result = ifa_ifwithdstaddr_ifp(addr, ifp);
 		}
 	}
 	ifnet_head_done();
@@ -2866,6 +2987,7 @@ ifioctl_restrict_intcoproc(unsigned long cmd, const char *ifname,
 	case SIOCGIFPROTOLIST64:
 	case SIOCGIFXFLAGS:
 	case SIOCGIFNOTRAFFICSHAPING:
+	case SIOCGIFGENERATIONID:
 		return false;
 	default:
 #if (DEBUG || DEVELOPMENT)
@@ -2873,6 +2995,99 @@ ifioctl_restrict_intcoproc(unsigned long cmd, const char *ifname,
 		    __func__, cmd, proc_pid(p));
 #endif
 		return true;
+	}
+	return false;
+}
+
+static bool
+ifioctl_restrict_management(unsigned long cmd, const char *ifname,
+    struct ifnet *ifp, struct proc *p)
+{
+	if (if_management_interface_check_needed == false) {
+		return false;
+	}
+	if (management_control_unrestricted) {
+		return false;
+	}
+	if (proc_pid(p) == 0) {
+		return false;
+	}
+	if (ifname) {
+		ifp = ifunit(ifname);
+	}
+	if (ifp == NULL) {
+		return false;
+	}
+	if (!IFNET_IS_MANAGEMENT(ifp)) {
+		return false;
+	}
+	switch (cmd) {
+	case SIOCGIFBRDADDR:
+	case SIOCGIFCONF32:
+	case SIOCGIFCONF64:
+	case SIOCGIFFLAGS:
+	case SIOCGIFEFLAGS:
+	case SIOCGIFCAP:
+	case SIOCGIFMETRIC:
+	case SIOCGIFMTU:
+	case SIOCGIFPHYS:
+	case SIOCGIFTYPE:
+	case SIOCGIFFUNCTIONALTYPE:
+	case SIOCGIFPSRCADDR:
+	case SIOCGIFPDSTADDR:
+	case SIOCGIFGENERIC:
+	case SIOCGIFDEVMTU:
+	case SIOCGIFVLAN:
+	case SIOCGIFBOND:
+	case SIOCGIFWAKEFLAGS:
+	case SIOCGIFGETRTREFCNT:
+	case SIOCGIFOPPORTUNISTIC:
+	case SIOCGIFLINKQUALITYMETRIC:
+	case SIOCGIFLOG:
+	case SIOCGIFDELEGATE:
+	case SIOCGIFEXPENSIVE:
+	case SIOCGIFINTERFACESTATE:
+	case SIOCGIFPROBECONNECTIVITY:
+	case SIOCGIFTIMESTAMPENABLED:
+	case SIOCGECNMODE:
+	case SIOCGQOSMARKINGMODE:
+	case SIOCGQOSMARKINGENABLED:
+	case SIOCGIFLOWINTERNET:
+	case SIOCGIFSTATUS:
+	case SIOCGIFMEDIA32:
+	case SIOCGIFMEDIA64:
+	case SIOCGIFXMEDIA32:
+	case SIOCGIFXMEDIA64:
+	case SIOCGIFDESC:
+	case SIOCGIFLINKPARAMS:
+	case SIOCGIFQUEUESTATS:
+	case SIOCGIFTHROTTLE:
+	case SIOCGIFAGENTIDS32:
+	case SIOCGIFAGENTIDS64:
+	case SIOCGIFNETSIGNATURE:
+	case SIOCGIFINFO_IN6:
+	case SIOCGIFAFLAG_IN6:
+	case SIOCGNBRINFO_IN6:
+	case SIOCGIFALIFETIME_IN6:
+	case SIOCGIFNETMASK_IN6:
+#if SKYWALK
+	case SIOCGIFNEXUS:
+#endif /* SKYWALK */
+	case SIOCGIFPROTOLIST32:
+	case SIOCGIFPROTOLIST64:
+	case SIOCGIFXFLAGS:
+	case SIOCGIFNOTRAFFICSHAPING:
+	case SIOCGIFGENERATIONID:
+		return false;
+	default:
+		if (!IOCurrentTaskHasEntitlement(MANAGEMENT_CONTROL_ENTITLEMENT)) {
+#if (DEBUG || DEVELOPMENT)
+			printf("ifioctl_restrict_management: cmd 0x%lx on %s not allowed for %s:%u\n",
+			    cmd, ifname, proc_name_address(p), proc_pid(p));
+#endif
+			return true;
+		}
+		return false;
 	}
 	return false;
 }
@@ -3069,6 +3284,7 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 	case SIOCGIFPHYS:                       /* struct ifreq */
 	case SIOCSIFFLAGS:                      /* struct ifreq */
 	case SIOCSIFCAP:                        /* struct ifreq */
+	case SIOCSIFMANAGEMENT:                 /* struct ifreq */
 	case SIOCSIFMETRIC:                     /* struct ifreq */
 	case SIOCSIFPHYS:                       /* struct ifreq */
 	case SIOCSIFMTU:                        /* struct ifreq */
@@ -3114,6 +3330,7 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 #if (DEBUG || DEVELOPMENT)
 	case SIOCSIFDISABLEOUTPUT:              /* struct ifreq */
 #endif /* (DEBUG || DEVELOPMENT) */
+	case SIOCSIFSUBFAMILY:                  /* struct ifreq */
 	case SIOCGECNMODE:                      /* struct ifreq */
 	case SIOCSECNMODE:
 	case SIOCSQOSMARKINGMODE:               /* struct ifreq */
@@ -3136,12 +3353,17 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 	case SIOCSIFMARKWAKEPKT:                /* struct ifreq */
 	case SIOCSIFNOTRAFFICSHAPING:           /* struct ifreq */
 	case SIOCGIFNOTRAFFICSHAPING:           /* struct ifreq */
+	case SIOCGIFGENERATIONID:               /* struct ifreq */
 	{                       /* struct ifreq */
 		struct ifreq ifr;
 		bcopy(data, &ifr, sizeof(ifr));
 		ifr.ifr_name[IFNAMSIZ - 1] = '\0';
 		bcopy(&ifr.ifr_name, ifname, IFNAMSIZ);
 		if (ifioctl_restrict_intcoproc(cmd, ifname, NULL, p) == true) {
+			error = EPERM;
+			goto done;
+		}
+		if (ifioctl_restrict_management(cmd, ifname, NULL, p) == true) {
 			error = EPERM;
 			goto done;
 		}
@@ -4254,9 +4476,44 @@ ifioctl_ifreq(struct socket *so, u_long cmd, struct ifreq *ifr, struct proc *p)
 		    PRIV_NET_INTERFACE_CONTROL, 0)) != 0) {
 			return error;
 		}
+#if (DEBUG || DEVELOPMENT)
+		if (management_control_unrestricted) {
+			uint32_t subfamily = ifr->ifr_type.ift_subfamily;
+
+			if (subfamily == ifp->if_subfamily) {
+				break;
+			} else if (subfamily == IFRTYPE_SUBFAMILY_MANAGEMENT && ifp->if_subfamily == 0) {
+				ifp->if_subfamily = IFNET_SUBFAMILY_MANAGEMENT;
+				ifnet_set_management(ifp, true);
+				break;
+			} else if (subfamily == 0 && ifp->if_subfamily == IFNET_SUBFAMILY_MANAGEMENT) {
+				ifnet_set_management(ifp, false);
+				break;
+			}
+		}
+#endif /* (DEBUG || DEVELOPMENT) */
 		error = ifnet_ioctl(ifp, SOCK_DOM(so), cmd, (caddr_t)ifr);
 		break;
 
+	case SIOCSIFMANAGEMENT: {
+		if (management_control_unrestricted == false &&
+		    !IOCurrentTaskHasEntitlement(MANAGEMENT_CONTROL_ENTITLEMENT)) {
+			os_log(OS_LOG_DEFAULT, "ifioctl_req: cmd SIOCSIFMANAGEMENT on %s not allowed for %s:%u\n",
+			    ifp->if_xname, proc_name_address(p), proc_pid(p));
+			return EPERM;
+		}
+		if (ifr->ifr_intval != 0) {
+			ifnet_set_management(ifp, true);
+		} else {
+			if (ifp->if_subfamily == IFNET_SUBFAMILY_MANAGEMENT) {
+				os_log(OS_LOG_DEFAULT, "ifioctl_req: cmd SIOCSIFMANAGEMENT 0 not allowed on %s with subfamily management",
+				    ifp->if_xname);
+				return EPERM;
+			}
+			ifnet_set_management(ifp, false);
+		}
+		break;
+	}
 	case SIOCSIFLOWINTERNET:
 		if ((error = priv_check_cred(kauth_cred_get(),
 		    PRIV_NET_INTERFACE_CONTROL, 0)) != 0) {
@@ -4369,6 +4626,10 @@ ifioctl_ifreq(struct socket *so, u_long cmd, struct ifreq *ifr, struct proc *p)
 		} else {
 			ifr->ifr_intval = 0;
 		}
+		break;
+
+	case SIOCGIFGENERATIONID:
+		ifr->ifr_creation_generation_id = ifp->if_creation_generation_id;
 		break;
 
 	default:
@@ -4717,7 +4978,7 @@ ifma_trace(struct ifmultiaddr *ifma, int refhold)
 		tr = ifma_dbg->ifma_refrele;
 	}
 
-	idx = atomic_add_16_ov(cnt, 1) % IFMA_TRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(cnt, relaxed) % IFMA_TRACE_HIST_SIZE;
 	ctrace_record(&tr[idx]);
 }
 
@@ -5486,9 +5747,8 @@ if_data_internal_to_if_data(struct ifnet *ifp,
 #define COPYFIELD32(fld)        if_data->fld = (u_int32_t)(if_data_int->fld)
 /* compiler will cast down to 32-bit */
 #define COPYFIELD32_ATOMIC(fld) do {                                    \
-	u_int64_t _val = 0;                                             \
-	atomic_get_64(_val,                                             \
-	        (u_int64_t *)(void *)(uintptr_t)&if_data_int->fld);     \
+	uint64_t _val = 0;                                              \
+	_val = os_atomic_load((uint64_t *)(void *)(uintptr_t)&if_data_int->fld, relaxed); \
 	if_data->fld = (uint32_t) _val;                                 \
 } while (0)
 
@@ -5545,8 +5805,7 @@ if_data_internal_to_if_data64(struct ifnet *ifp,
 #pragma unused(ifp)
 #define COPYFIELD64(fld)        if_data64->fld = if_data_int->fld
 #define COPYFIELD64_ATOMIC(fld) do {                                    \
-	atomic_get_64(if_data64->fld,                                   \
-	    (u_int64_t *)(void *)(uintptr_t)&if_data_int->fld);         \
+	if_data64->fld = os_atomic_load((uint64_t *)(void *)(uintptr_t)&if_data_int->fld, relaxed); \
 } while (0)
 
 	COPYFIELD64(ifi_type);
@@ -5593,8 +5852,7 @@ if_copy_traffic_class(struct ifnet *ifp,
     struct if_traffic_class *if_tc)
 {
 #define COPY_IF_TC_FIELD64_ATOMIC(fld) do {                     \
-	atomic_get_64(if_tc->fld,                               \
-	    (u_int64_t *)(void *)(uintptr_t)&ifp->if_tc.fld);   \
+	if_tc->fld = os_atomic_load((uint64_t *)(void *)(uintptr_t)&ifp->if_tc.fld, relaxed); \
 } while (0)
 
 	bzero(if_tc, sizeof(*if_tc));
@@ -5626,8 +5884,7 @@ void
 if_copy_data_extended(struct ifnet *ifp, struct if_data_extended *if_de)
 {
 #define COPY_IF_DE_FIELD64_ATOMIC(fld) do {                     \
-	atomic_get_64(if_de->fld,                               \
-	    (u_int64_t *)(void *)(uintptr_t)&ifp->if_data.fld); \
+	if_de->fld = os_atomic_load((uint64_t *)(void *)(uintptr_t)&ifp->if_data.fld, relaxed); \
 } while (0)
 
 	bzero(if_de, sizeof(*if_de));
@@ -5643,13 +5900,11 @@ void
 if_copy_packet_stats(struct ifnet *ifp, struct if_packet_stats *if_ps)
 {
 #define COPY_IF_PS_TCP_FIELD64_ATOMIC(fld) do {                         \
-	atomic_get_64(if_ps->ifi_tcp_##fld,                             \
-	    (u_int64_t *)(void *)(uintptr_t)&ifp->if_tcp_stat->fld);    \
+	if_ps->ifi_tcp_##fld = os_atomic_load((uint64_t *)(void *)(uintptr_t)&ifp->if_tcp_stat->fld, relaxed); \
 } while (0)
 
 #define COPY_IF_PS_UDP_FIELD64_ATOMIC(fld) do {                         \
-	atomic_get_64(if_ps->ifi_udp_##fld,                             \
-	    (u_int64_t *)(void *)(uintptr_t)&ifp->if_udp_stat->fld);    \
+	if_ps->ifi_udp_##fld = os_atomic_load((uint64_t *)(void *)(uintptr_t)&ifp->if_udp_stat->fld, relaxed); \
 } while (0)
 
 	COPY_IF_PS_TCP_FIELD64_ATOMIC(badformat);
@@ -5947,6 +6202,8 @@ ifioctl_cassert(void)
 	case SIOCSIFCAP:
 	case SIOCGIFCAP:
 
+	case SIOCSIFMANAGEMENT:
+
 	case SIOCIFCREATE:
 	case SIOCIFDESTROY:
 	case SIOCIFCREATE2:
@@ -6164,4 +6421,26 @@ if_get_tcp_kao_max(struct ifnet *ifp)
 		ifnet_lock_done(ifp);
 	}
 	return error;
+}
+
+int
+ifnet_set_management(struct ifnet *ifp, boolean_t on)
+{
+	if (ifp == NULL) {
+		return EINVAL;
+	}
+	if (if_management_verbose > 0) {
+		os_log(OS_LOG_DEFAULT,
+		    "interface %s management set %s by %s:%d",
+		    ifp->if_xname, on ? "true" : "false",
+		    proc_best_name(current_proc()), proc_selfpid());
+	}
+	if (on) {
+		if_set_xflags(ifp, IFXF_MANAGEMENT);
+		if_management_interface_check_needed = true;
+		in_management_interface_check();
+	} else {
+		if_clear_xflags(ifp, IFXF_MANAGEMENT);
+	}
+	return 0;
 }

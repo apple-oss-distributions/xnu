@@ -126,10 +126,14 @@ static const load_result_t load_result_null = {
 	.uuid = { 0 },
 	.min_vm_addr = MACH_VM_MAX_ADDRESS,
 	.max_vm_addr = MACH_VM_MIN_ADDRESS,
+	.ro_vm_start = MACH_VM_MIN_ADDRESS,
+	.ro_vm_end = MACH_VM_MIN_ADDRESS,
 	.cs_end_offset = 0,
 	.threadstate = NULL,
 	.threadstate_sz = 0,
 	.is_rosetta = 0,
+	.dynlinker_ro_vm_start = 0,
+	.dynlinker_ro_vm_end = 0,
 	.dynlinker_mach_header = MACH_VM_MIN_ADDRESS,
 	.dynlinker_fd = -1,
 };
@@ -2368,6 +2372,24 @@ load_segment(
 		return LOAD_SUCCESS;
 	}
 
+	if (scp->flags & SG_READ_ONLY) {
+		/*
+		 * Record the VM start/end of a segment which should
+		 * be RO after fixups. Only __DATA_CONST should
+		 * have this flag.
+		 */
+		if (result->ro_vm_start != MACH_VM_MIN_ADDRESS ||
+		    result->ro_vm_end != MACH_VM_MIN_ADDRESS) {
+			DEBUG4K_ERROR("LOAD_BADMACHO segment flags [%x] "
+			    "multiple segments with SG_READ_ONLY flag\n",
+			    scp->flags);
+			return LOAD_BADMACHO;
+		}
+
+		result->ro_vm_start = vm_start;
+		result->ro_vm_end = vm_end;
+	}
+
 	if (vm_size > 0) {
 		initprot = (scp->initprot) & VM_PROT_ALL;
 		maxprot = (scp->maxprot) & VM_PROT_ALL;
@@ -3156,6 +3178,8 @@ load_dylinker(
 					result->dynlinker_fp = fp;
 					result->dynlinker_mach_header = myresult->mach_header;
 					result->dynlinker_max_vm_addr = myresult->max_vm_addr;
+					result->dynlinker_ro_vm_start = myresult->ro_vm_start;
+					result->dynlinker_ro_vm_end = myresult->ro_vm_end;
 				} else {
 					fp_free(p, dyld_fd, fp);
 					ret = LOAD_IOERROR;
@@ -3187,11 +3211,7 @@ novp_out:
 }
 
 #if CONFIG_ROSETTA
-#if defined(APPLEVORTEX)
-static const char* rosetta_runtime_path = "/usr/libexec/rosetta/runtime_t8027";
-#else
 static const char* rosetta_runtime_path = "/usr/libexec/rosetta/runtime";
-#endif
 
 #if (DEVELOPMENT || DEBUG)
 static const char* rosetta_runtime_path_alt_x86 = "/usr/local/libexec/rosetta/runtime_internal";

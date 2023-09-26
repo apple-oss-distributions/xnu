@@ -54,8 +54,6 @@
 
 #include <kern/sched_urgency.h>
 
-extern int disableConsoleOutput;
-
 #define DELAY_UNSET             0xFFFFFFFFFFFFFFFFULL
 
 uint64_t cpu_itime_bins[CPU_ITIME_BINS] = {16 * NSEC_PER_USEC, 32 * NSEC_PER_USEC, 64 * NSEC_PER_USEC, 128 * NSEC_PER_USEC, 256 * NSEC_PER_USEC, 512 * NSEC_PER_USEC, 1024 * NSEC_PER_USEC, 2048 * NSEC_PER_USEC, 4096 * NSEC_PER_USEC, 8192 * NSEC_PER_USEC, 16384 * NSEC_PER_USEC, 32768 * NSEC_PER_USEC};

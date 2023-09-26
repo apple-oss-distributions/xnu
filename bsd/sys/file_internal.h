@@ -192,6 +192,14 @@ struct fileglob {
 #endif
 };
 
+/* Disambiguate OFD ids from flock ids (fileglobs) */
+__pure2
+static inline caddr_t
+ofd_to_id(const struct fileglob *fg)
+{
+	return (caddr_t)~(uintptr_t)fg;
+}
+
 extern int maxfiles;                    /* kernel limit on number of open files */
 extern int nfiles;                      /* actual number of open files */
 extern int maxfilesperproc;

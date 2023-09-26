@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -25,7 +25,6 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-
 
 #ifndef _NET_IF_PORT_USED_H_
 #define _NET_IF_PORT_USED_H_
@@ -111,12 +110,67 @@ struct net_port_info {
 
 #define NPI_HAS_WAKE_EVENT_TUPLE 1
 #define NPI_HAS_PACKET_INFO 1
+#define NPI_HAS_PHYSICAL_LINK 1 /* npi_if_info and phy_if fields are present */
+
+/*
+ * struct npi_if_info provides detailed information about the kind of interface
+ *
+ * See <net/if_private.h> for definitions of possible values of each field
+ *
+ * Note: the IFRTYPE_xxx values are the same as the IFNET_xxx used inside the kernel
+ */
+struct npi_if_info {
+	uint32_t            npi_if_family; /* IFRTYPE_FAMILY_xxx */
+	uint32_t            npi_if_subfamily; /* IFRTYPE_SUBFAMILY_xxx */
+	uint32_t            npi_if_functional_type; /* IFRTYPE_FUNCTIONAL_xxx */
+};
+
+#define NPI_IF_INFO_IS_ETHERNET(_npi) \
+    ((_npi)->npi_if_family == IFRTYPE_FAMILY_ETHERNET)
+
+#define NPI_IF_INFO_IS_ETHERNET_WIRED(_npi) \
+    (NPI_IF_INFO_IS_ETHERNET(_npi) && \
+    (_npi)->npi_if_subfamily != IFRTYPE_SUBFAMILY_WIFI)
+
+#define NPI_IF_INFO_IS_WIFI(_npi) \
+    (NPI_IF_INFO_IS_ETHERNET(_npi) && \
+    (_npi)->npi_if_subfamily == IFRTYPE_SUBFAMILY_WIFI)
+
+#define NPI_IF_INFO_IS_CELLULAR(_npi) \
+    ((_npi)->npi_if_family == IFRTYPE_FAMILY_CELLULAR)
+
+#define NPI_IF_INFO_IS_IPSEC(_npi) \
+    ((_npi)->npi_if_family == IFRTYPE_FAMILY_IPSEC)
+
+#define NPI_IF_INFO_IS_IPSEC_COMPANIONLINK(_npi) \
+    ((_npi)->npi_if_family == IFRTYPE_FAMILY_IPSEC && \
+    (_npi)->npi_if_functional_type == IFRTYPE_FUNCTIONAL_COMPANIONLINK)
+
+#define NPI_IF_INFO_IS_IPSEC_COMPANIONLINK_BLUETOOTH(_npi) \
+    (NPI_IF_INFO_IS_IPSEC_COMPANIONLINK(_npi) && \
+    (_npi)->npi_if_subfamily == IFRTYPE_SUBFAMILY_BLUETOOTH)
+
+#define NPI_IF_INFO_IS_IPSEC_COMPANIONLINK_WIFI(_npi) \
+    (NPI_IF_INFO_IS_IPSEC_COMPANIONLINK(_npi) && \
+    (_npi)->npi_if_subfamily == IFRTYPE_SUBFAMILY_WIFI)
+
+#define NPI_IF_INFO_IS_IPSEC_COMPANIONLINK_QUICKRELAY(_npi) \
+    (NPI_IF_INFO_IS_IPSEC_COMPANIONLINK(_npi) && \
+    (_npi)->npi_if_subfamily == IFRTYPE_SUBFAMILY_QUICKRELAY)
+
+#define NPI_IF_INFO_IS_UTUN(_npi) \
+    ((_npi)->npi_if_family == IFRTYPE_FAMILY_UTUN)
 
 /*
  * struct net_port_info_una_wake_event is the event data for KEV_POWER_WAKE_PACKET
  *
  * una_wake_pkt_control_flags is valid when NPIF_TCP is set and contains the TCP packet
  * header flags -- see TH_FLAGS in netinet/tcp.h
+ *
+ * See <net/if_private.h> for definiton of values of these kinds of fields:
+ *  - xxx_if_family             IFRTYPE_FAMILY_YYY
+ *  - xxx_if_subfamily          IFRTYPE_SUBFAMILY_YYY
+ *  - xxx_if_functional_type    IFRTYPE_FUNCTIONAL_YYY
  */
 struct net_port_info_wake_event {
 	uuid_t              wake_uuid;
@@ -139,6 +193,12 @@ struct net_port_info_wake_event {
 	uint32_t            wake_pkt_total_len; /* actual length of packet */
 	uint32_t            wake_pkt_data_len; /* exclude transport (TCP/UDP) header length */
 	uint16_t            wake_pkt_control_flags;
+
+	/* Followings fields added with NPI_HAS_PHYSICAL_LINK */
+	struct npi_if_info  wake_pkt_if_info;  /* inner-most interface of TCP/UDP packet */
+
+	char                wake_pkt_phy_ifname[IFNAMSIZ]; /* name + unit */
+	struct npi_if_info  wake_pkt_phy_if_info; /* outer-most interface of wake packet */
 };
 
 /*
@@ -169,6 +229,12 @@ struct net_port_info_una_wake_event {
 	uint32_t            una_wake_pkt_data_len; /* exclude transport (TCP/UDP) header length */
 	uint16_t            una_wake_pkt_control_flags; /* for NPIF_TCP, see TH_FLAGS in netinet/tcp.h */
 	uint16_t            una_wake_pkt_proto; /* IPv4 or IPv6 protocol */
+
+	/* Followings fields added with NPI_HAS_PHYSICAL_LINK */
+	struct npi_if_info  una_wake_pkt_if_info; /* inner-most interface for TCP/UDP tuple  */
+
+	char                una_wake_pkt_phy_ifname[IFNAMSIZ]; /* name + unit */
+	struct npi_if_info  una_wake_pkt_phy_if_info; /* outer-most interface of wake packet */
 };
 
 #define IFPU_HAS_MATCH_WAKE_PKT_NO_FLAG 1 /* ifpu_match_wake_pkt_no_flag is defined */

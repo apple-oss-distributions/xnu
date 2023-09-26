@@ -269,6 +269,8 @@ struct bpf_comp_stats {
 #define BIOCSHDRCOMP    _IOW('B', 135, int)
 #define BIOCGHDRCOMPSTATS    _IOR('B', 136, struct bpf_comp_stats)
 #define BIOCGHDRCOMPON  _IOR('B', 137, int)
+#define BIOCGDIRECTION  _IOR('B', 138, int)
+#define BIOCSDIRECTION  _IOW('B', 139, int)
 #endif /* PRIVATE */
 /*
  * Structure prepended to each packet.
@@ -341,7 +343,7 @@ struct xbpf_d {
 	uint8_t         bd_async;
 
 	uint8_t         bd_headdrop;
-	uint8_t         bd_seesent;
+	uint8_t         bd_direction;
 	uint8_t         bh_compreq;
 	uint8_t         bh_compenabled;
 
@@ -368,6 +370,14 @@ struct xbpf_d {
 	uint64_t        bd_fsize;
 };
 
+#ifndef bd_seesent
+/*
+ * Code compatibility workaround so that old versions of network_cmds will continue to build
+ * even if netstat -B shows an incorrect value.
+ */
+#define bd_seesent bd_direction
+#endif /* bd_seesent */
+
 #define _HAS_STRUCT_XBPF_D_ 2
 
 struct bpf_comp_hdr {
@@ -383,6 +393,13 @@ struct bpf_comp_hdr {
 #define HAS_BPF_HDR_COMP 1
 #define BPF_HDR_COMP_LEN_MAX 255
 
+/*
+ * Packet tap directions
+ */
+#define BPF_D_NONE      0x0     /* See no packet (for writing only) */
+#define BPF_D_IN        0x1     /* See incoming packets */
+#define BPF_D_OUT       0x2     /* See outgoing packets */
+#define BPF_D_INOUT     0x3     /* See incoming and outgoing packets */
 
 #endif /* PRIVATE */
 #endif /* !defined(DRIVERKIT) */

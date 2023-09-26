@@ -2257,7 +2257,8 @@ icmp6_reflect(struct mbuf *m, size_t off)
 	bzero(&ip6oa, sizeof(ip6oa));
 	ip6oa.ip6oa_boundif = IFSCOPE_NONE;
 	ip6oa.ip6oa_flags = IP6OAF_SELECT_SRCIF | IP6OAF_BOUND_SRCADDR |
-	    IP6OAF_INTCOPROC_ALLOWED | IP6OAF_AWDL_UNRESTRICTED;
+	    IP6OAF_INTCOPROC_ALLOWED | IP6OAF_AWDL_UNRESTRICTED |
+	    IP6OAF_MANAGEMENT_ALLOWED;
 	ip6oa.ip6oa_sotc = SO_TC_UNSPEC;
 	ip6oa.ip6oa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
 

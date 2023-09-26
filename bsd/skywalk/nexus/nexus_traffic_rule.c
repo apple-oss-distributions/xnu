@@ -178,18 +178,48 @@ struct nxctl_traffic_rule_inet {
 /*
  * Currently supported tuple types.
  */
-static uint8_t nxctl_inet_traffic_rule_masks[] = {
-	(IFNET_TRAFFIC_DESCRIPTOR_INET_IPVER |
-	IFNET_TRAFFIC_DESCRIPTOR_INET_PROTO |
-	IFNET_TRAFFIC_DESCRIPTOR_INET_LADDR |
-	IFNET_TRAFFIC_DESCRIPTOR_INET_RADDR |
-	IFNET_TRAFFIC_DESCRIPTOR_INET_LPORT |
-	IFNET_TRAFFIC_DESCRIPTOR_INET_RPORT),
+#define ITDBIT(set, bit) (((set) != 0) ? (bit) : 0)
+#define ITRM(proto, laddr, raddr, lport, rport) \
+	(IFNET_TRAFFIC_DESCRIPTOR_INET_IPVER | \
+	ITDBIT(proto, IFNET_TRAFFIC_DESCRIPTOR_INET_PROTO) | \
+	ITDBIT(laddr, IFNET_TRAFFIC_DESCRIPTOR_INET_LADDR) | \
+	ITDBIT(raddr, IFNET_TRAFFIC_DESCRIPTOR_INET_RADDR) | \
+	ITDBIT(lport, IFNET_TRAFFIC_DESCRIPTOR_INET_LPORT) | \
+	ITDBIT(rport, IFNET_TRAFFIC_DESCRIPTOR_INET_RPORT))
 
-	(IFNET_TRAFFIC_DESCRIPTOR_INET_IPVER |
-	IFNET_TRAFFIC_DESCRIPTOR_INET_PROTO |
-	IFNET_TRAFFIC_DESCRIPTOR_INET_RADDR |
-	IFNET_TRAFFIC_DESCRIPTOR_INET_RPORT),
+static uint8_t nxctl_inet_traffic_rule_masks[] = {
+	ITRM(1, 1, 1, 1, 1),
+	ITRM(1, 1, 1, 1, 0),
+	ITRM(1, 1, 1, 0, 1),
+	ITRM(1, 1, 1, 0, 0),
+	ITRM(1, 1, 0, 1, 1),
+	ITRM(1, 1, 0, 1, 0),
+	ITRM(1, 1, 0, 0, 1),
+	ITRM(1, 1, 0, 0, 0),
+	ITRM(1, 0, 1, 1, 1),
+	ITRM(1, 0, 1, 1, 0),
+	ITRM(1, 0, 1, 0, 1),
+	ITRM(1, 0, 1, 0, 0),
+	ITRM(1, 0, 0, 1, 1),
+	ITRM(1, 0, 0, 1, 0),
+	ITRM(1, 0, 0, 0, 1),
+	// ITRM(1, 0, 0, 0, 0), addr or port is required
+	ITRM(0, 1, 1, 1, 1),
+	ITRM(0, 1, 1, 1, 0),
+	ITRM(0, 1, 1, 0, 1),
+	ITRM(0, 1, 1, 0, 0),
+	ITRM(0, 1, 0, 1, 1),
+	ITRM(0, 1, 0, 1, 0),
+	ITRM(0, 1, 0, 0, 1),
+	ITRM(0, 1, 0, 0, 0),
+	ITRM(0, 0, 1, 1, 1),
+	ITRM(0, 0, 1, 1, 0),
+	ITRM(0, 0, 1, 0, 1),
+	ITRM(0, 0, 1, 0, 0),
+	ITRM(0, 0, 0, 1, 1),
+	ITRM(0, 0, 0, 1, 0),
+	ITRM(0, 0, 0, 0, 1),
+	// ITRM(0, 0, 0, 0, 0),
 };
 #define NINETRULEMASKS \
     (sizeof(nxctl_inet_traffic_rule_masks)/sizeof(uint8_t))
@@ -321,7 +351,7 @@ fill_inet_td(struct __kern_packet *pkt, struct ifnet_traffic_descriptor_inet *td
 	#define tcph _l4._tcph
 	#define udph _l4._udph
 	uint8_t *pkt_buf, *l3_hdr;
-	uint16_t bdlen, bdlim, bdoff, cls_len;
+	uint32_t bdlen, bdlim, bdoff, cls_len;
 	size_t pkt_len;
 	uint8_t ipv, l3hlen = 0; /* IP header length */
 	uint16_t l3tlen = 0;     /* total length of IP packet */
@@ -335,7 +365,7 @@ fill_inet_td(struct __kern_packet *pkt, struct ifnet_traffic_descriptor_inet *td
 	MD_BUFLET_ADDR_ABS_DLEN(pkt, pkt_buf, bdlen, bdlim, bdoff);
 	cls_len = bdlim - bdoff;
 	cls_len -= pkt->pkt_l2_len;
-	cls_len = (uint16_t)MIN(cls_len, pkt_len);
+	cls_len = (uint32_t)MIN(cls_len, pkt_len);
 	VERIFY(pkt_len >= cls_len);
 	if (cls_len == 0) {
 		SK_ERR("cls_len == 0");
@@ -802,8 +832,8 @@ inet_traffic_rule_match(struct nxctl_traffic_rule_inet *ntri, const char *ifname
 		    uint8_t, tdi0->inet_ipver, uint8_t, tdi->inet_ipver);
 		return FALSE;
 	}
-	ASSERT((mask & IFNET_TRAFFIC_DESCRIPTOR_INET_PROTO) != 0);
-	if (tdi0->inet_proto != tdi->inet_proto) {
+	if ((mask & IFNET_TRAFFIC_DESCRIPTOR_INET_PROTO) != 0 &&
+	    tdi0->inet_proto != tdi->inet_proto) {
 		DTRACE_SKYWALK2(proto__mismatch,
 		    uint8_t, tdi0->inet_proto, uint8_t, tdi->inet_proto);
 		return FALSE;

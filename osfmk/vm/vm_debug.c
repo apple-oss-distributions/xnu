@@ -214,7 +214,7 @@ vm32_region_info(
 				vio->vio_resident_page_count =
 				    cobject->resident_page_count;
 				vio->vio_copy =
-				    (natural_t)(uintptr_t) cobject->copy;
+				    (natural_t)(uintptr_t) cobject->vo_copy;
 				vio->vio_shadow =
 				    (natural_t)(uintptr_t) cobject->shadow;
 				vio->vio_shadow_offset =
@@ -425,7 +425,7 @@ vm32_region_info_64(
 				vio->vio_resident_page_count =
 				    cobject->resident_page_count;
 				vio->vio_copy =
-				    (natural_t)(uintptr_t) cobject->copy;
+				    (natural_t)(uintptr_t) cobject->vo_copy;
 				vio->vio_shadow =
 				    (natural_t)(uintptr_t) cobject->shadow;
 				vio->vio_shadow_offset =

@@ -127,7 +127,7 @@
  */
 
 #define MACH_EXCEPTION_BACKTRACE_PREFERRED   0x20000000
-/* Prefer sending a catch_exception_raice_backtrace message, if applicable */
+/* Prefer sending a catch_exception_raise_backtrace message, if applicable */
 
 #define MACH_EXCEPTION_ERRORS           0x40000000
 /*	include additional exception specific errors, not used yet.  */

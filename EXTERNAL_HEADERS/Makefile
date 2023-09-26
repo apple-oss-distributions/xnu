@@ -36,6 +36,12 @@ KERNEL_FILES = \
 	stdint.h	\
 	ptrauth.h
 
+LIBCXX_DATAFILES = \
+	stddef.h \
+	stdint.h
+
+INSTALL_KF_LIBCXX_MI_LIST = ${LIBCXX_DATAFILES}
+
 INSTALL_MI_LIST =
 
 INSTALL_MI_DIR = .

@@ -1,5 +1,3 @@
-#include <IOKit/IOKitLib.h>
-#include <CoreFoundation/CoreFoundation.h>
 #include <darwintest.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -16,7 +14,7 @@
  * @brief Print the given firmware variable.
  */
 static void
-PrintVariable(const void *key, const void *value, void *context)
+PrintVariable(const void *key, const void *value)
 {
 	if (CFGetTypeID(key) != CFStringGetTypeID()) {
 		printf("Variable name passed in isn't a string");
@@ -191,19 +189,47 @@ GetVariable(const char *name, io_registry_entry_t optionsRef)
 	CFTypeRef valueRef = NULL;
 	nameRef = CFStringCreateWithCString(kCFAllocatorDefault, name,
 	    kCFStringEncodingUTF8);
-	if (nameRef == 0) {
+	if (nameRef == NULL) {
 		printf("Error creating CFString for key %s", name);
 		return KERN_FAILURE;
 	}
 
 	valueRef = IORegistryEntryCreateCFProperty(optionsRef, nameRef, 0, 0);
-	if (valueRef == 0) {
+	if (valueRef == NULL) {
+		CFRelease(nameRef);
 		return kIOReturnNotFound;
 	}
 
-	PrintVariable(nameRef, valueRef, 0);
+	PrintVariable(nameRef, valueRef);
+
+	CFRelease(nameRef);
+	CFRelease(valueRef);
 
 	return KERN_SUCCESS;
+}
+
+/**
+ * @brief Returns variable type. 0xFF if variable doesn't exist or on error creating CFString
+ */
+CFTypeID
+GetVarType(const char *name, io_registry_entry_t optionsRef)
+{
+	CFStringRef nameRef = NULL;
+	CFTypeRef valueRef = NULL;
+	CFTypeID typeID = 0;
+
+	nameRef = CFStringCreateWithCString(kCFAllocatorDefault, name,
+	    kCFStringEncodingUTF8);
+	if (nameRef != NULL) {
+		valueRef = IORegistryEntryCreateCFProperty(optionsRef, nameRef, 0, 0);
+		CFRelease(nameRef);
+		if (valueRef != NULL) {
+			typeID = CFGetTypeID(valueRef);
+			CFRelease(valueRef);
+		}
+	}
+
+	return typeID;
 }
 
 /**
@@ -242,7 +268,7 @@ SetVariable(const char *name, const char *value, io_registry_entry_t optionsRef)
 		// In the default case, try data, string, number, then boolean.
 		CFTypeID types[] = {CFDataGetTypeID(),
 			            CFStringGetTypeID(), CFNumberGetTypeID(), CFBooleanGetTypeID()};
-		for (int i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+		for (unsigned long i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
 			valueRef = ConvertValueToCFTypeRef(types[i], value);
 			if (valueRef != 0) {
 				result = IORegistryEntrySetCFProperty(optionsRef, nameRef, valueRef);
@@ -274,22 +300,10 @@ DeleteVariable(const char *name, io_registry_entry_t optionsRef)
 }
 
 /**
- * @brief Reset NVram
- */
-kern_return_t
-ResetNVram(io_registry_entry_t optionsRef)
-{
-	if (SetVariable("ResetNVRam", "1", optionsRef) == KERN_SUCCESS) {
-		return KERN_SUCCESS;
-	}
-	return KERN_FAILURE;
-}
-
-/**
  * @brief Get the Options object
  */
 io_registry_entry_t
-GetOptions(void)
+CreateOptionsRef(void)
 {
 	io_registry_entry_t optionsRef = IORegistryEntryFromPath(kIOMainPortDefault, "IODeviceTree:/options");
 	T_ASSERT_NE(optionsRef, IO_OBJECT_NULL, "got options");
@@ -300,9 +314,88 @@ GetOptions(void)
  * @brief Release option object passed in
  */
 void
-ReleaseOptions(io_registry_entry_t optionsRef)
+ReleaseOptionsRef(io_registry_entry_t optionsRef)
 {
 	if (optionsRef != IO_OBJECT_NULL) {
 		IOObjectRelease(optionsRef);
 	}
+}
+
+static const char *
+GetOpString(nvram_op op)
+{
+	switch (op) {
+	case OP_GET:
+		return "read";
+	case OP_SET:
+		return "write";
+	case OP_DEL:
+		return "delete";
+	case OP_RES:
+		return "reset";
+	case OP_OBL:
+		return "obliterate";
+	default:
+		return "unknown";
+	}
+}
+
+static const char *
+GetRetString(kern_return_t ret)
+{
+	switch (ret) {
+	case KERN_SUCCESS:
+		return "success";
+	case KERN_FAILURE:
+		return "failure";
+	case kIOReturnNotPrivileged:
+		return "not privileged";
+	default:
+		return "unknown";
+	}
+}
+
+/**
+ * @brief Tests get/set/delete/reset variable
+ */
+void
+TestVarOp(nvram_op op, const char *var, const char *val, kern_return_t exp_ret, io_registry_entry_t optionsRef)
+{
+	kern_return_t ret = KERN_FAILURE;
+
+	if (var == NULL && (op != OP_RES)) {
+		return;
+	}
+
+	switch (op) {
+	case OP_SET:
+		ret = SetVariable(var, val, optionsRef);
+		break;
+	case OP_GET:
+		ret = GetVariable(var, optionsRef);
+		break;
+	case OP_DEL:
+		ret = DeleteVariable(var, optionsRef);
+		break;
+	case OP_RES:
+		ret = SetVariable("ResetNVRam", "1", optionsRef);
+		break;
+	case OP_OBL:
+		// Obliterate NVram (system guid deletes all variables in system region, common guid deletes all non-system variables)
+		ret = SetVariable(var, "1", optionsRef);
+		break;
+	default:
+		T_FAIL("TestVarOp: Invalid NVRAM operation %d\n", op);
+		return;
+	}
+
+	// Allow passing in a value other than KERN_SUCCESS || KERN_FAILURE to assert against
+	// otherwise remain as pass/fail
+	if ((exp_ret == KERN_SUCCESS) || (exp_ret == KERN_FAILURE)) {
+		if (ret != KERN_SUCCESS) {
+			ret = KERN_FAILURE;
+		}
+	}
+
+	T_ASSERT_EQ(ret, exp_ret, "Operation %s for variable %s returned %s(%#x) as expected\n", GetOpString(op), var, GetRetString(exp_ret), ret);
 }

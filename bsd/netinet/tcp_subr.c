@@ -143,7 +143,6 @@
 #include <libkern/crypto/md5.h>
 #include <sys/kdebug.h>
 #include <mach/sdt.h>
-#include <atm/atm_internal.h>
 #include <pexpert/pexpert.h>
 
 #define DBG_FNC_TCP_CLOSE       NETDBG_CODE(DBG_NETTCP, ((5 << 8) | 2))
@@ -206,6 +205,7 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, icmp_may_rst, CTLFLAG_RW | CTLFLAG_LOCKED,
 
 static int      tcp_strict_rfc1948 = 0;
 static int      tcp_isn_reseed_interval = 0;
+int             tcp_do_timestamps = 1;
 #if (DEVELOPMENT || DEBUG)
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, strict_rfc1948, CTLFLAG_RW | CTLFLAG_LOCKED,
     &tcp_strict_rfc1948, 0, "Determines if RFC1948 is followed exactly");
@@ -213,6 +213,9 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, strict_rfc1948, CTLFLAG_RW | CTLFLAG_LOCKED,
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, isn_reseed_interval,
     CTLFLAG_RW | CTLFLAG_LOCKED,
     &tcp_isn_reseed_interval, 0, "Seconds between reseeding of ISN secret");
+
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, do_timestamps,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_do_timestamps, 0, "enable TCP timestamps");
 #endif /* (DEVELOPMENT || DEBUG) */
 
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, rtt_min, CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -498,7 +501,6 @@ tcp_init(struct protosw *pp, struct domain *dp)
 #pragma unused(dp)
 	static int tcp_initialized = 0;
 	struct inpcbinfo *pcbinfo;
-	uint32_t logging_config;
 
 	VERIFY((pp->pr_flags & (PR_INITIALIZED | PR_ATTACHED)) == PR_ATTACHED);
 
@@ -571,7 +573,7 @@ tcp_init(struct protosw *pp, struct domain *dp)
 	    &tcbinfo.ipi_hashmask);
 	tcbinfo.ipi_porthashbase = hashinit(tcp_tcbhashsize, M_PCB,
 	    &tcbinfo.ipi_porthashmask);
-	tcbinfo.ipi_zone.zov_kt_heap = tcpcbzone;
+	tcbinfo.ipi_zone = tcpcbzone;
 
 	tcbinfo.ipi_gc = tcp_gc;
 	tcbinfo.ipi_timer = tcp_itimer;
@@ -612,11 +614,6 @@ tcp_init(struct protosw *pp, struct domain *dp)
 		panic("MPKL_CREATE_LOGOBJECT failed");
 	}
 
-	logging_config = atm_get_diagnostic_config();
-	if (logging_config & 0x80000000) {
-		tcp_log_privacy = 1;
-	}
-
 	if (PE_parse_boot_argn("tcp_log", &tcp_log_enable_flags, sizeof(tcp_log_enable_flags))) {
 		os_log(OS_LOG_DEFAULT, "tcp_init: set tcp_log_enable_flags to 0x%x", tcp_log_enable_flags);
 	}
@@ -632,6 +629,9 @@ tcp_init(struct protosw *pp, struct domain *dp)
 		SYSCTL_SKMEM_UPDATE_FIELD(tcp.autorcvbufmax, tcp_autorcvbuf_max);
 		SYSCTL_SKMEM_UPDATE_FIELD(tcp.autosndbufmax, tcp_autosndbuf_max);
 	}
+
+	/* Initialize the TCP CCA array */
+	tcp_cc_init();
 }
 
 /*
@@ -701,12 +701,12 @@ tcp_fillheaders(struct mbuf *m, struct tcpcb *tp, void *ip_ptr, void *tcp_ptr)
  * use for this function is in keepalives, which use tcp_respond.
  */
 struct tcptemp *
-tcp_maketemplate(struct tcpcb *tp)
+tcp_maketemplate(struct tcpcb *tp, struct mbuf **mp)
 {
 	struct mbuf *m;
 	struct tcptemp *n;
 
-	m = m_get(M_DONTWAIT, MT_HEADER);
+	*mp = m = m_get(M_DONTWAIT, MT_HEADER);
 	if (m == NULL) {
 		return NULL;
 	}
@@ -959,6 +959,9 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		if (tra->intcoproc_allowed) {
 			ip6oa.ip6oa_flags |= IP6OAF_INTCOPROC_ALLOWED;
 		}
+		if (tra->management_allowed) {
+			ip6oa.ip6oa_flags |= IP6OAF_MANAGEMENT_ALLOWED;
+		}
 		ip6oa.ip6oa_sotc = sotc;
 		if (tp != NULL) {
 			if ((tp->t_inpcb->inp_socket->so_flags1 & SOF1_QOSMARKING_ALLOWED)) {
@@ -1020,6 +1023,9 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		}
 		if (tra->awdl_unrestricted) {
 			ipoa.ipoa_flags |= IPOAF_AWDL_UNRESTRICTED;
+		}
+		if (tra->management_allowed) {
+			ipoa.ipoa_flags |= IPOAF_MANAGEMENT_ALLOWED;
 		}
 		ipoa.ipoa_sotc = sotc;
 		if (tp != NULL) {
@@ -1097,7 +1103,7 @@ tcp_newtcpcb(struct inpcb *inp)
 	LIST_INIT(&tp->t_segq);
 	tp->t_maxseg = tp->t_maxopd = isipv6 ? tcp_v6mssdflt : tcp_mssdflt;
 
-	tp->t_flags = (TF_REQ_SCALE | TF_REQ_TSTMP);
+	tp->t_flags = TF_REQ_SCALE | (tcp_do_timestamps ? TF_REQ_TSTMP : 0);
 	tp->t_flagsext |= TF_SACK_ENABLE;
 
 	TAILQ_INIT(&tp->snd_holes);
@@ -1176,6 +1182,10 @@ tcp_newtcpcb(struct inpcb *inp)
 	if (__probable(tcp_randomize_timestamps)) {
 		tp->t_ts_offset = random_32;
 	}
+
+	/* Initialize Accurate ECN state */
+	tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_feature_disabled;
+	tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_feature_disabled;
 
 	/*
 	 * IPv4 TTL initialization is necessary for an IPv6 socket as well,
@@ -1705,7 +1715,7 @@ tcp_freeq(struct tcpcb *tp)
 
 	while ((q = LIST_FIRST(&tp->t_segq)) != NULL) {
 		LIST_REMOVE(q, tqe_q);
-		tp->t_reassq_mbcnt -= MSIZE + (q->tqe_m->m_flags & M_EXT) ?
+		tp->t_reassq_mbcnt -= _MSIZE + (q->tqe_m->m_flags & M_EXT) ?
 		    q->tqe_m->m_ext.ext_size : 0;
 		m_freem(q->tqe_m);
 		zfree(tcp_reass_zone, q);

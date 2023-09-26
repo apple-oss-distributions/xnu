@@ -55,7 +55,9 @@
 #include <netinet/tcp_var.h>
 
 extern uint32_t kern_maxvnodes;
+#if CONFIG_MBUF_MCACHE
 extern vm_map_t mb_map;
+#endif /* CONFIG_MBUF_MCACHE */
 
 #if INET
 extern uint32_t   tcp_sendspace;
@@ -236,7 +238,7 @@ bsd_bufferinit(void)
 
 	bsd_startupearly();
 
-#if SOCKETS
+#if CONFIG_MBUF_MCACHE
 	mb_map = kmem_suballoc(kernel_map,
 	    &mb_range.min_address,
 	    (vm_size_t) (nmbclusters * MCLBYTES),
@@ -245,7 +247,7 @@ bsd_bufferinit(void)
 	    KMS_PERMANENT | KMS_NOFAIL,
 	    VM_KERN_MEMORY_MBUF).kmr_submap;
 	mbutl = (unsigned char *)mb_range.min_address;
-#endif /* SOCKETS */
+#endif /* CONFIG_MBUF_MCACHE */
 
 	/*
 	 * Set up buffers, so they can be used to read disk labels.

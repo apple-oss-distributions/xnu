@@ -148,6 +148,7 @@ STUB(ifnet_set_lladdr);
 STUB(ifnet_set_metric);
 STUB(ifnet_set_mtu);
 STUB(ifnet_set_offload);
+STUB(ifnet_set_offload_enabled);
 STUB(ifnet_set_promiscuous);
 STUB(ifnet_set_stat);
 STUB(ifnet_set_tso_mtu);

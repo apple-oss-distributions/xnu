@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -33,6 +33,7 @@
 #include <strings.h>
 #include <unistd.h>
 #include <errno.h>
+#include <os/atomic_private.h>
 #include <skywalk/os_skywalk_private.h>
 #include <skywalk/os_packet_private.h>
 
@@ -50,24 +51,6 @@ extern int __exit(int) __attribute__((noreturn));
 static ring_id_t _ring_id(struct ch_info *cinfo, const ring_id_type_t type);
 static void os_channel_info2attr(struct channel *chd, channel_attr_t cha);
 static int _flowadv_id_equal(struct __flowadv_entry *, uuid_t);
-
-#if defined(__arm__) || defined(__arm64__)
-__attribute__((always_inline, visibility("hidden")))
-static inline void
-membar_sync(void)
-{
-	__asm__ volatile ("dmb ish" ::: "memory");
-}
-#elif defined(__i386__) || defined(__x86_64__)
-__attribute__((always_inline, visibility("hidden")))
-static inline void
-membar_sync(void)
-{
-	__asm__ volatile ("mfence" ::: "memory");
-}
-#else /* !__arm__ && !__arm64__ && !__i386__ && !__x86_64__ */
-#error "Unknown platform; membar_sync() not available"
-#endif /* !__arm__ && !__arm64__ && !__i386__ && !__x86_64__ */
 
 /*
  * This is pretty much what an inlined memcmp() would do for UUID
@@ -155,7 +138,7 @@ membar_sync(void)
 
 #define _SCHEMA_VER_VERIFY(_chd) do {                                   \
 	/* ensure all stores are globally visible */                    \
-	membar_sync();                                                  \
+	os_atomic_thread_fence(seq_cst);                                                  \
 	if (CHD_SCHEMA(_chd)->csm_ver != CSM_CURRENT_VERSION)	{       \
 	        char *_msg = malloc(_ABORT_MSGSZ);                      \
 	        uint32_t _ver = (uint32_t)CHD_SCHEMA(_chd)->csm_ver;    \
@@ -205,18 +188,18 @@ membar_sync(void)
 #define _CHANNEL_SCHEMA(_base, _off)                                    \
 	_CHANNEL_OFFSET(struct __user_channel_schema *, _base, _off)
 
-#define _CHANNEL_RING_DEF_BUF(_chrd, _ring, _idx, _off)                       \
+#define _CHANNEL_RING_DEF_BUF(_chrd, _ring, _idx)                       \
 	((_chrd)->chrd_def_buf_base_addr +                              \
-	((_idx) * (_ring)->ring_def_buf_size) + _off)
+	((_idx) * (_ring)->ring_def_buf_size))
 
-#define _CHANNEL_RING_LARGE_BUF(_chrd, _ring, _idx, _off)                     \
+#define _CHANNEL_RING_LARGE_BUF(_chrd, _ring, _idx)                     \
 	((_chrd)->chrd_large_buf_base_addr +                            \
-	((_idx) * (_ring)->ring_large_buf_size) + _off)
+	((_idx) * (_ring)->ring_large_buf_size))
 
 #define _CHANNEL_RING_BUF(_chrd, _ring, _bft)                           \
 	BUFLET_HAS_LARGE_BUF(_bft) ?                                    \
-	_CHANNEL_RING_LARGE_BUF(_chrd, _ring, (_bft)->buf_idx, (_bft)->buf_boff) : \
-	_CHANNEL_RING_DEF_BUF(_chrd, _ring, (_bft)->buf_idx, (_bft)->buf_boff)
+	_CHANNEL_RING_LARGE_BUF(_chrd, _ring, (_bft)->buf_idx) :        \
+	_CHANNEL_RING_DEF_BUF(_chrd, _ring, (_bft)->buf_idx)
 
 #define _CHANNEL_RING_BFT(_chrd, _ring, _idx)                           \
 	((_chrd)->chrd_bft_base_addr + ((_idx) * (_ring)->ring_bft_size))
@@ -475,7 +458,7 @@ os_channel_create_extended(const uuid_t uuid, const nexus_port_t port,
     const ring_dir_t dir, const ring_id_t ring, const channel_attr_t cha)
 {
 	uint32_t num_tx_rings, num_rx_rings, num_allocator_rings;
-	uint32_t ring_offset, ring_index, num_event_rings;
+	uint32_t ring_offset, ring_index, num_event_rings, num_large_buf_alloc_rings;
 	struct __user_channel_schema *ucs;
 	struct channel *chd = NULL;
 	struct ch_info *ci = NULL;
@@ -567,6 +550,7 @@ os_channel_create_extended(const uuid_t uuid, const nexus_port_t port,
 	num_rx_rings = _num_rx_rings(ci);       /* # of channel rx rings */
 	num_allocator_rings = _num_allocator_rings(ucs);
 	num_event_rings = ucs->csm_num_event_rings;
+	num_large_buf_alloc_rings = ucs->csm_large_buf_alloc_rings;
 
 	/*
 	 * if the user requested packet allocation mode for channel, then
@@ -587,7 +571,7 @@ os_channel_create_extended(const uuid_t uuid, const nexus_port_t port,
 	}
 
 	chd_sz = CHD_SIZE(num_tx_rings + num_rx_rings + num_allocator_rings +
-	    num_event_rings);
+	    num_event_rings + num_large_buf_alloc_rings);
 	chd = malloc(chd_sz);
 	if (chd == NULL) {
 		err = errno = ENOMEM;
@@ -706,6 +690,13 @@ os_channel_create_extended(const uuid_t uuid, const nexus_port_t port,
 		    ring_index);
 	}
 
+	ring_offset += num_event_rings;
+	for (i = 0; i < num_large_buf_alloc_rings; i++) {
+		ring_index = ring_offset + i;
+		os_channel_init_ring(&chd->chd_rings[ring_index], chd,
+		    ring_index);
+	}
+
 	if (init.ci_ch_mode & CHMODE_USER_PACKET_POOL) {
 		chd->chd_sync_flags = CHANNEL_SYNCF_ALLOC | CHANNEL_SYNCF_FREE;
 		*__DECONST(uint8_t *, &chd->chd_alloc_ring_idx) =
@@ -726,6 +717,14 @@ os_channel_create_extended(const uuid_t uuid, const nexus_port_t port,
 			*__DECONST(uint8_t *, &chd->chd_free_ring_idx) =
 			    chd->chd_alloc_ring_idx + 1;
 		}
+		if (num_large_buf_alloc_rings > 0) {
+			*__DECONST(uint8_t *, &chd->chd_large_buf_alloc_ring_idx) =
+			    num_tx_rings + num_rx_rings + num_allocator_rings +
+			    num_event_rings;
+		} else {
+			*__DECONST(uint8_t *, &chd->chd_large_buf_alloc_ring_idx) =
+			    CHD_RING_IDX_NONE;
+		}
 	} else {
 		*__DECONST(uint8_t *, &chd->chd_alloc_ring_idx) =
 		    CHD_RING_IDX_NONE;
@@ -735,6 +734,8 @@ os_channel_create_extended(const uuid_t uuid, const nexus_port_t port,
 		    CHD_RING_IDX_NONE;
 		*__DECONST(uint8_t *, &chd->chd_buf_free_ring_idx) =
 		    CHD_RING_IDX_NONE;
+		*__DECONST(uint8_t *, &chd->chd_large_buf_alloc_ring_idx) =
+		    CHD_RING_IDX_NONE;
 	}
 
 	if (__os_ch_md_redzone_cookie == 0) {
@@ -743,7 +744,7 @@ os_channel_create_extended(const uuid_t uuid, const nexus_port_t port,
 	}
 
 	/* ensure all stores are globally visible */
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 
 done:
 	if (err != 0) {
@@ -1288,6 +1289,43 @@ os_channel_flow_admissible(const channel_ring_t chrd, uuid_t flow_id,
 	       ENOBUFS: 0;
 }
 
+int
+os_channel_flow_adv_get_ce_count(const channel_ring_t chrd, uuid_t flow_id,
+    const flowadv_idx_t flow_index, uint32_t *ce_cnt, uint32_t *pkt_cnt)
+{
+	const struct __user_channel_ring *ring = chrd->chrd_ring;
+	const struct channel *chd = chrd->chrd_channel;
+	struct __flowadv_entry *fe = CHD_NX_FLOWADV(chd);
+
+	/*
+	 * Currently, flow advisory is on a per-nexus port basis.
+	 * To anticipate for future requirements, we use the ring
+	 * as parameter instead, even though we use it only to
+	 * check if this is a TX ring for now.
+	 */
+	if (__improbable(CHD_NX_FLOWADV(chd) == NULL)) {
+		return ENXIO;
+	} else if (__improbable(ring->ring_kind != CR_KIND_TX ||
+	    flow_index >= CHD_PARAMS(chd)->nxp_flowadv_max)) {
+		return EINVAL;
+	}
+
+	/*
+	 * Rather than checking if the UUID is all zeroes, check
+	 * against fae_flags since the presence of FLOWADV_VALID
+	 * means fae_id is non-zero.  This avoids another round of
+	 * comparison against zeroes.
+	 */
+	fe = &CHD_NX_FLOWADV(chd)[flow_index];
+	if (__improbable(fe->fae_flags == 0 || !_flowadv_id_equal(fe, flow_id))) {
+		return ENOENT;
+	}
+
+	*ce_cnt = fe->fae_ce_cnt;
+	*pkt_cnt = fe->fae_pkt_cnt;
+	return 0;
+}
+
 channel_attr_t
 os_channel_attr_create(void)
 {
@@ -1690,8 +1728,8 @@ os_channel_attr_destroy(channel_attr_t cha)
 	free(cha);
 }
 
-int
-os_channel_packet_alloc(const channel_t chd, packet_t *ph)
+static int
+os_channel_packet_alloc_common(const channel_t chd, packet_t *ph, bool large)
 {
 	struct __user_channel_ring *ring;
 	struct channel_ring_desc *chrd;
@@ -1704,8 +1742,12 @@ os_channel_packet_alloc(const channel_t chd, packet_t *ph)
 	if (__improbable((ci->cinfo_ch_mode & CHMODE_USER_PACKET_POOL) == 0)) {
 		return ENOTSUP;
 	}
-
-	chrd = &chd->chd_rings[chd->chd_alloc_ring_idx];
+	if (__improbable(large &&
+	    chd->chd_large_buf_alloc_ring_idx == CHD_RING_IDX_NONE)) {
+		return ENOTSUP;
+	}
+	chrd = &chd->chd_rings[large ?
+	    chd->chd_large_buf_alloc_ring_idx : chd->chd_alloc_ring_idx];
 	ring = __DECONST(struct __user_channel_ring *, chrd->chrd_ring);
 	idx = ring->ring_head;
 
@@ -1716,8 +1758,17 @@ os_channel_packet_alloc(const channel_t chd, packet_t *ph)
 		 * free ring as well.
 		 */
 		int err;
-		err = __channel_sync(chd->chd_fd, CHANNEL_SYNC_UPP,
-		    (chd->chd_sync_flags & ~CHANNEL_SYNCF_ALLOC_BUF));
+		sync_flags_t flags;
+
+		if (large) {
+			flags = (chd->chd_sync_flags &
+			    ~(CHANNEL_SYNCF_ALLOC_BUF | CHANNEL_SYNCF_ALLOC)) |
+			    CHANNEL_SYNCF_LARGE_ALLOC;
+		} else {
+			flags = chd->chd_sync_flags & ~CHANNEL_SYNCF_ALLOC_BUF;
+		}
+
+		err = __channel_sync(chd->chd_fd, CHANNEL_SYNC_UPP, flags);
 		if (__improbable(err != 0)) {
 			if (!_CHANNEL_IS_DEFUNCT(chd)) {
 				SK_ABORT_WITH_CAUSE("packet pool alloc "
@@ -1752,6 +1803,18 @@ os_channel_packet_alloc(const channel_t chd, packet_t *ph)
 	}
 	ring->ring_head = _CHANNEL_RING_NEXT(ring, idx);
 	return __improbable(_CHANNEL_IS_DEFUNCT(chd)) ? ENXIO : 0;
+}
+
+int
+os_channel_packet_alloc(const channel_t chd, packet_t *ph)
+{
+	return os_channel_packet_alloc_common(chd, ph, false);
+}
+
+int
+os_channel_large_packet_alloc(const channel_t chd, packet_t *ph)
+{
+	return os_channel_packet_alloc_common(chd, ph, true);
 }
 
 int
@@ -1921,7 +1984,7 @@ done:
 
 __attribute__((visibility("hidden")))
 static inline int
-os_channel_purge_packet_alloc_ring(const channel_t chd)
+os_channel_purge_packet_alloc_ring_common(const channel_t chd, bool large)
 {
 	struct __user_channel_ring *ring;
 	struct channel_ring_desc *chrd;
@@ -1930,7 +1993,8 @@ os_channel_purge_packet_alloc_ring(const channel_t chd)
 	packet_t ph;
 	int npkts, err;
 
-	chrd = &chd->chd_rings[chd->chd_alloc_ring_idx];
+	chrd = &chd->chd_rings[large ?
+	    chd->chd_large_buf_alloc_ring_idx : chd->chd_alloc_ring_idx];
 	ring = __DECONST(struct __user_channel_ring *, chrd->chrd_ring);
 	idx = ring->ring_head;
 
@@ -1993,6 +2057,20 @@ os_channel_purge_packet_alloc_ring(const channel_t chd)
 	}
 
 	return 0;
+}
+
+__attribute__((visibility("hidden")))
+static inline int
+os_channel_purge_packet_alloc_ring(const channel_t chd)
+{
+	return os_channel_purge_packet_alloc_ring_common(chd, false);
+}
+
+__attribute__((visibility("hidden")))
+static inline int
+os_channel_purge_large_packet_alloc_ring(const channel_t chd)
+{
+	return os_channel_purge_packet_alloc_ring_common(chd, true);
 }
 
 __attribute__((visibility("hidden")))
@@ -2076,7 +2154,7 @@ os_channel_packet_pool_purge(const channel_t chd)
 	}
 
 	err = __channel_sync(chd->chd_fd, CHANNEL_SYNC_UPP,
-	    (chd->chd_sync_flags | ~CHANNEL_SYNCF_FREE | CHANNEL_SYNCF_PURGE));
+	    ((chd->chd_sync_flags & ~CHANNEL_SYNCF_FREE) | CHANNEL_SYNCF_PURGE));
 	if (__improbable(err != 0)) {
 		if (!_CHANNEL_IS_DEFUNCT(chd)) {
 			SK_ABORT_WITH_CAUSE("packet pool purge sync failed",
@@ -2091,7 +2169,12 @@ os_channel_packet_pool_purge(const channel_t chd)
 	if (__improbable(err != 0)) {
 		return err;
 	}
-
+	if (chd->chd_large_buf_alloc_ring_idx != CHD_RING_IDX_NONE) {
+		err = os_channel_purge_large_packet_alloc_ring(chd);
+		if (__improbable(err != 0)) {
+			return err;
+		}
+	}
 	if (_num_allocator_rings(CHD_SCHEMA(chd)) > 2) {
 		err = os_channel_purge_buflet_alloc_ring(chd);
 		if (__improbable(err != 0)) {

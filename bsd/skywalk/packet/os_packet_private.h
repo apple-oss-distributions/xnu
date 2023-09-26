@@ -238,10 +238,6 @@ struct __flow {
 
 /*
  * Common buflet structure shared by {__user,__kern}_buflet.
- *
- * |     boff    |   doff   |       dlen        |         |             |
- * +-------------+----------+-------------------+---------+-------------+
- * objaddr      baddr                                    dlim         objlim
  */
 struct __buflet {
 	union {
@@ -258,16 +254,12 @@ struct __buflet {
 	const obj_idx_t __bidx;
 	/* object index in buflet region of next buflet(for buflet chaining) */
 	const obj_idx_t __nbft_idx;
-	const uint16_t  __dlim;         /* maximum length */
-	uint16_t        __dlen;         /* length of data in buflet */
-	uint16_t        __doff;         /* offset of data in buflet */
+	const uint32_t  __dlim;         /* maximum length */
+	uint32_t        __doff;         /* offset of data in buflet */
+	uint32_t        __dlen;         /* length of data in buflet */
 	const uint16_t  __flag;
-	const uint16_t  __gro_len;      /* length of each gro segement */
-	/* offset of buf_addr relative to the start of the buffer object */
-	const uint16_t  __buf_off;
 #define BUFLET_FLAG_EXTERNAL    0x0001
 #define BUFLET_FLAG_LARGE_BUF   0x0002 /* buflet holds large buffer */
-#define BUFLET_FLAG_RAW         0x0004 /* buflet comes from the raw bflt cache */
 } __attribute((packed));
 
 /*
@@ -291,14 +283,10 @@ struct __user_buflet {
 #define buf_doff        buf_com.__doff
 #define buf_flag        buf_com.__flag
 #define buf_bft_idx_reg buf_com.__bft_idx
-#define buf_grolen      buf_com.__gro_len
-#define buf_boff        buf_com.__buf_off
 };
 
-#define BUFLET_HAS_LARGE_BUF(_buf)          \
+#define BUFLET_HAS_LARGE_BUF(_buf)    \
 	(((_buf)->buf_flag & BUFLET_FLAG_LARGE_BUF) != 0)
-#define BUFLET_FROM_RAW_BFLT_CACHE(_buf)    \
-	(((_buf)->buf_flag & BUFLET_FLAG_RAW) != 0)
 
 #define BUF_BADDR(_buf, _addr)                                              \
 	*__DECONST(mach_vm_address_t *, &(_buf)->buf_addr) =                \
@@ -324,22 +312,17 @@ struct __user_buflet {
 } while (0)
 
 #ifdef KERNEL
-#define BUF_CTOR(_buf, _baddr, _bidx, _dlim, _dlen, _doff, _nbaddr, _nbidx, _bflag, _boff, _grolen) do {  \
+#define BUF_CTOR(_buf, _baddr, _bidx, _dlim, _dlen, _doff, _nbaddr, _nbidx, _bflag) do {  \
 	_CASSERT(sizeof ((_buf)->buf_addr) == sizeof (mach_vm_address_t)); \
 	_CASSERT(sizeof ((_buf)->buf_idx) == sizeof (obj_idx_t));       \
-	_CASSERT(sizeof ((_buf)->buf_dlim) == sizeof (uint16_t));       \
-	_CASSERT(sizeof ((_buf)->buf_boff) == sizeof (uint16_t));       \
-	_CASSERT(sizeof ((_buf)->buf_grolen) == sizeof (uint16_t));     \
-	_CASSERT(sizeof ((_buf)->buf_flag) == sizeof (uint16_t));       \
+	_CASSERT(sizeof ((_buf)->buf_dlim) == sizeof (uint32_t));       \
 	BUF_BADDR(_buf, _baddr);                                        \
 	BUF_NBFT_ADDR(_buf, _nbaddr);                                   \
 	BUF_BIDX(_buf, _bidx);                                          \
 	BUF_NBFT_IDX(_buf, _nbidx);                                     \
+	*(uint32_t *)(uintptr_t)&(_buf)->buf_dlim = (_dlim);            \
 	(_buf)->buf_dlen = (_dlen);                                     \
 	(_buf)->buf_doff = (_doff);                                     \
-	*(uint16_t *)(uintptr_t)&(_buf)->buf_dlim = (_dlim);            \
-	*(uint16_t *)(uintptr_t)&(_buf)->buf_boff = (_boff);            \
-	*(uint16_t *)(uintptr_t)&(_buf)->buf_grolen = (_grolen);        \
 	*(uint16_t *)(uintptr_t)&(_buf)->buf_flag = (_bflag);           \
 } while (0)
 
@@ -355,9 +338,7 @@ struct __user_buflet {
 	((_buf)->buf_addr >= (mach_vm_address_t)(_buf)->buf_objaddr &&  \
 	((uintptr_t)(_buf)->buf_addr + (_buf)->buf_dlim) <=             \
 	((uintptr_t)(_buf)->buf_objaddr + (_buf)->buf_objlim) &&        \
-	((mach_vm_address_t)(_buf)->buf_objaddr + (_buf)->buf_boff == (_buf)->buf_addr) && \
-	((_buf)->buf_doff + (_buf)->buf_dlen) <= (_buf)->buf_dlim &&    \
-	(_buf)->buf_grolen <= (_buf)->buf_dlen)
+	((_buf)->buf_doff + (_buf)->buf_dlen) <= (_buf)->buf_dlim)
 #else /* !KERNEL */
 #define BUF_IN_RANGE(_buf)                                              \
 	(((_buf)->buf_doff + (_buf)->buf_dlen) <= (_buf)->buf_dlim)
@@ -485,7 +466,7 @@ struct __user_quantum {
 	_CASSERT(sizeof(METADATA_IDX(_kqum)) == sizeof(obj_idx_t));          \
 	*(obj_idx_t *)(uintptr_t)&METADATA_IDX(_kqum) = (_qidx);             \
 	BUF_CTOR(&(_kqum)->qum_buf[0], (_baddr), (_bidx), (_dlim), 0, 0, 0,  \
-	    OBJ_IDX_NONE, 0, 0, 0);                                          \
+	    OBJ_IDX_NONE, 0);                                                \
 } while (0)
 
 #define _KQUM_INIT(_kqum, _flags, _len, _qidx) do {                          \
@@ -621,6 +602,7 @@ struct __packet_opt_com {
 		uint8_t         __token[PKT_OPT_MAX_TOKEN_SIZE];
 	};
 	uint64_t        __expire_ts;
+	uint64_t        __pkt_tx_time;
 	uint16_t        __vlan_tag;
 	uint16_t        __token_len;
 	uint8_t         __token_type;
@@ -631,7 +613,7 @@ struct __packet_opt_com {
 
 struct __packet_opt {
 	union {
-		uint64_t                __pkt_opt_data[4];
+		uint64_t                __pkt_opt_data[5];
 		struct __packet_opt_com __pkt_opt_com;
 	};
 #define __po_token_type         __pkt_opt_com.__token_type
@@ -643,6 +625,7 @@ struct __packet_opt {
 #define __po_expiry_action      __pkt_opt_com.__expiry_action
 #define __po_app_type           __pkt_opt_com.__app_type
 #define __po_app_metadata       __pkt_opt_com.__app_metadata
+#define __po_pkt_tx_time        __pkt_opt_com.__pkt_tx_time
 };
 
 /*
@@ -814,7 +797,7 @@ struct __user_packet {
 #define PKT_F_OPT_EXP_ACTION    0x0000200000000000ULL /* (U+K) */
 #define PKT_F_OPT_APP_METADATA  0x0000400000000000ULL /* (U+K) */
 #define PKT_F_L4S               0x0000800000000000ULL /* (U+K) */
-/*                              0x0001000000000000ULL */
+#define PKT_F_OPT_TX_TIMESTAMP  0x0001000000000000ULL /* (U+K) */
 /*                              0x0002000000000000ULL */
 /*                              0x0004000000000000ULL */
 /*                              0x0008000000000000ULL */
@@ -838,7 +821,7 @@ struct __user_packet {
 	(PKT_F_OPT_GROUP_START | PKT_F_OPT_GROUP_END |                  \
 	PKT_F_OPT_EXPIRE_TS | PKT_F_OPT_TOKEN |                         \
 	PKT_F_OPT_VLTAG | PKT_F_OPT_VLTAG_IN_PKT | PKT_F_OPT_EXP_ACTION | \
-	PKT_F_OPT_APP_METADATA)
+	PKT_F_OPT_APP_METADATA | PKT_F_OPT_TX_TIMESTAMP)
 
 #ifdef KERNEL
 /*

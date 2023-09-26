@@ -28,7 +28,7 @@ struct os_refgrp {
 
 #endif
 
-# define OS_REF_ATOMIC_INITIALIZER ATOMIC_VAR_INIT(0)
+# define OS_REF_ATOMIC_INITIALIZER 0
 #if OS_REFCNT_DEBUG
 # define OS_REF_INITIALIZER { .ref_count = OS_REF_ATOMIC_INITIALIZER, .ref_group = NULL }
 #else
@@ -123,10 +123,10 @@ os_ref_release_explicit(struct os_refcnt *rc, memory_order release_order, memory
 # define os_refgrp_initializer(name, parent, flags) \
 	 { \
 	        .grp_name =          (name), \
-	        .grp_children =      ATOMIC_VAR_INIT(0u), \
-	        .grp_count =         ATOMIC_VAR_INIT(0u), \
-	        .grp_retain_total =  ATOMIC_VAR_INIT(0u), \
-	        .grp_release_total = ATOMIC_VAR_INIT(0u), \
+	        .grp_children =      (0u), \
+	        .grp_count =         (0u), \
+	        .grp_retain_total =  (0u), \
+	        .grp_release_total = (0u), \
 	        .grp_parent =        (parent), \
 	        .grp_log =           NULL, \
 	        .grp_flags =         flags, \

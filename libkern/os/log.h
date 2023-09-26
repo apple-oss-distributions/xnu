@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -63,9 +63,13 @@ extern uint64_t startup_serial_num_procs;
 // must be included in the os_log firehose buffer
 #define OS_LOG_DATA_MAX_SIZE (OS_LOG_BUFFER_MAX_SIZE - 16)
 
-OS_ALWAYS_INLINE static inline void
-    _os_log_verify_format_str(__unused const char *msg, ...) __osloglike(1, 2);
-OS_ALWAYS_INLINE static inline void
+OS_ALWAYS_INLINE
+static inline void
+    _os_log_verify_format_str(__unused const char *msg, ...)
+__osloglike(1, 2);
+
+OS_ALWAYS_INLINE
+static inline void
 _os_log_verify_format_str(__unused const char *msg, ...)                                       /* placeholder */
 {
 }
@@ -91,7 +95,6 @@ typedef struct os_log_s *os_log_t;
  * Use this to log a message in accordance with current system settings.
  */
 #define OS_LOG_DEFAULT OS_OBJECT_GLOBAL_OBJECT(os_log_t, _os_log_default)
-__OSX_AVAILABLE_STARTING(__MAC_10_12, __IPHONE_10_0)
 OS_EXPORT
 struct os_log_s _os_log_default;
 
@@ -132,87 +135,27 @@ OS_ENUM(os_log_type, uint8_t,
  * Creates a log object to be used with other log related functions.
  *
  * @discussion
- * Creates a log object to be used with other log related functions.  The
- * log object serves two purposes:  (1) tag related messages by subsystem
- * and category name for easy filtering, and (2) control logging system
- * behavior for messages.
- *
- * A log object may customize logging system behavior for its messages by
- * adding a configuration file in /Library/LogPreferences. Most options
- * accept 3 values: "Default", "Yes" or "No" as strings, where "Default"
- * signifies follow system behavior for the level of messages.
- *
- * For log:
- *
- *      os_log_create("com.company.mysubsystem", "connections");
- *
- * System-provided preferences are located in /System/Library/LogPreferences/<subsystem>.plist
- *
- *	<dict>
- *
- *          <!-- Default options applied to message types in each category, which can be overriden. -->
- *          <key>DEFAULT-OPTIONS</key>
- *          <dict>
- *              <key>Enabled</key>              <!-- Enabled state follows system defaults -->
- *              <string>Default</string>
- *              <key>Persist</key>              <!-- Do not persist to disk, use memory-only buffer if enabled -->
- *              <string>No</string>
- *              <key>TTL</key>                  <!-- Follow system default behavior if persistence is enabled -->
- *              <string>Default</string>        <!-- Can specify in days with "d" or hours "h" (e.g., "4h" = 4 hours) -->
- *          </dict>
- *
- *          <!-- category named “connections” -->
- *          <key>connections</key>
- *          <dict>
- *
- *              <!-- Options that control "os_log()" behavior.  The "Enabled" option is ignored. -->
- *              <key>Default</key>
- *              <dict>
- *                  <key>Persist</key>          <!-- Always persist to disk -->
- *                  <string>Yes</string>
- *                  <key>TTL</key>              <!-- Store default messages for maximum 4 days -->
- *                  <integer>4d</integer>
- *              </dict>
- *
- *              <!-- Subdictionary of options that control "os_log_info()" behavior -->
- *              <key>Info</key>
- *              <dict>
- *                  <key>Persist</key>          <!-- If enabled persist to disk -->
- *                  <string>Yes</string>
- *                  <key>TTL</key>              <!-- Store Info messages for 2 days -->
- *                  <string>2d</string>
- *              </dict>
- *
- *              <!-- Subdictionary of options that control "os_log_debug()" behavior -->
- *              <key>Debug</key>
- *              <dict>
- *                  <key>Enabled</key>          <!-- Not enabled, must be enabled specifically -->
- *                  <string>No</string>
- *              </dict>
- *          </dict>
- *      </dict>
- *
- * All other preferences and system-overrides are stored in /Library/LogPreferences/.
+ * Creates a log object to be used with other log related functions. The log
+ * object serves two purposes: (1) tag related messages by subsystem and
+ * category name for easy filtering, and (2) control logging system behavior for
+ * messages.
  *
  * @param subsystem
- * The identifier of the given subsystem should be in reverse DNS form
- * (i.e., com.company.mysubsystem).  This string must be a constant string,
- * not dynamically generated.
+ * The identifier of the given subsystem should be in reverse DNS form (i.e.,
+ * com.company.mysubsystem). This string must be a constant string, not
+ * dynamically generated.
  *
  * @param category
- * The category within the given subsystem that specifies the settings for
- * the log object.  This string must be a constant string, not dynamically
- * generated.
+ * The category within the given subsystem that specifies the settings for the
+ * log object. This string must be a constant string, not dynamically generated.
  *
  * @result
- * Returns an os_log_t value to be passed to other os_log API calls.  This
- * should be called once at log initialization and rely on system to detect
- * changes to settings.  This object should be released when no longer used
- * via os_release or -[release] method.
+ * Returns an os_log_t value to be passed to other os_log API calls. This should
+ * be called once at log initialization and rely on system to detect changes to
+ * settings.
  *
  * A value will always be returned to allow for dynamic enablement.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_12, __IPHONE_10_0)
 OS_EXPORT OS_NOTHROW OS_WARN_RESULT OS_OBJECT_RETURNS_RETAINED
 os_log_t
 os_log_create(const char *subsystem, const char *category);
@@ -234,7 +177,6 @@ os_log_create(const char *subsystem, const char *category);
  * @result
  * Returns ‘true’ if additional information log messages are enabled.
  */
-__WATCHOS_AVAILABLE(3.0) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0)
 OS_EXPORT OS_NOTHROW OS_WARN_RESULT
 bool
 os_log_info_enabled(os_log_t log);
@@ -254,7 +196,6 @@ os_log_info_enabled(os_log_t log);
  * @result
  * Returns ‘true’ if debug log messages are enabled.
  */
-__WATCHOS_AVAILABLE(3.0) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0)
 OS_EXPORT OS_NOTHROW OS_WARN_RESULT
 bool
 os_log_debug_enabled(os_log_t log);
@@ -532,8 +473,8 @@ os_log_debug_enabled(os_log_t log);
  * @function os_log_coprocessor
  *
  * @abstract
- * IOP logging function, intended for use by RTBuddy for
- * coprocessor os log functionality only.
+ * IOP logging function, intended for use by RTBuddy for coprocessor os log
+ * functionality only.
  */
 bool
 os_log_coprocessor(void *buff, uint64_t buff_len, os_log_type_t type,
@@ -543,9 +484,9 @@ os_log_coprocessor(void *buff, uint64_t buff_len, os_log_type_t type,
  * @function os_log_coprocessor_register
  *
  * @abstract
- * IOP metadata registration, intended for use by RTBuddy for
- * coprocessor os log functionality only.
- * Will be removed after all user code will be updated to use os_log_coprocessor_register_with_type
+ * IOP metadata registration, intended for use by RTBuddy for coprocessor os log
+ * functionality only. Will be removed after all user code will be updated to
+ * use os_log_coprocessor_register_with_type.
  */
 void
 os_log_coprocessor_register(const char *uuid, const char *file_path, bool copy);
@@ -559,8 +500,8 @@ typedef enum {
  * @function os_log_coprocessor_register_with_type
  *
  * @abstract
- * IOP metadata registration, intended for use by RTBuddy for
- * coprocessor os log functionality only.
+ * IOP metadata registration, intended for use by RTBuddy for coprocessor os log
+ * functionality only.
  */
 void
 os_log_coprocessor_register_with_type(const char *uuid, const char *file_path, os_log_coproc_reg_t register_type);
@@ -588,10 +529,10 @@ os_log_coprocessor_register_with_type(const char *uuid, const char *file_path, o
  * @abstract
  * Internal function used by macros.
  */
-__WATCHOS_AVAILABLE(3.0) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0)
 OS_EXPORT OS_NOTHROW
 void
-_os_log_internal(void *dso, os_log_t log, os_log_type_t type, const char *message, ...) __osloglike(4, 5);
+_os_log_internal(void *dso, os_log_t log, os_log_type_t type, const char *message, ...)
+__osloglike(4, 5);
 
 /*!
  * @function _os_log_internal_driverKit
@@ -599,10 +540,10 @@ _os_log_internal(void *dso, os_log_t log, os_log_type_t type, const char *messag
  * @abstract
  * Internal function used by macros.
  */
-__WATCHOS_AVAILABLE(6.0) __OSX_AVAILABLE(10.15) __IOS_AVAILABLE(13.0) __TVOS_AVAILABLE(13.0)
 OS_EXPORT OS_NOTHROW
 int
-_os_log_internal_driverKit(void *dso, os_log_t log, os_log_type_t type, const char *message, ...) __osloglike(4, 5);
+_os_log_internal_driverKit(void *dso, os_log_t log, os_log_type_t type, const char *message, ...)
+__osloglike(4, 5);
 
 /*!
  * @function _os_log_internal_props
@@ -610,10 +551,10 @@ _os_log_internal_driverKit(void *dso, os_log_t log, os_log_type_t type, const ch
  * @abstract
  * Internal function used by macros.
  */
-__WATCHOS_AVAILABLE(9.0) __OSX_AVAILABLE(13) __IOS_AVAILABLE(16.0) __TVOS_AVAILABLE(16.0)
 OS_EXPORT OS_NOTHROW
 void
-_os_log_at_time(void *dso, os_log_t log, os_log_type_t type, uint64_t ts, const char *message, ...) __osloglike(5, 6);
+_os_log_at_time(void *dso, os_log_t log, os_log_type_t type, uint64_t ts, const char *message, ...)
+__osloglike(5, 6);
 
 __END_DECLS
 

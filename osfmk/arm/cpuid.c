@@ -253,7 +253,7 @@ cpuid_get_cpusubfamily(void)
 		cpusubfamily = CPUSUBFAMILY_ARM_HC_HD;
 		break;
 	default:
-		cpusubfamily = CPUFAMILY_UNKNOWN;
+		cpusubfamily = CPUSUBFAMILY_UNKNOWN;
 		break;
 	}
 

@@ -78,6 +78,7 @@
 #include <kern/kern_types.h>
 #include <kern/assert.h>
 #include <kern/macro_help.h>
+#include <kern/kalloc.h>
 #include <kern/circle_queue.h>
 #include <ipc/ipc_types.h>
 #include <ipc/ipc_object.h>
@@ -181,6 +182,8 @@ extern zone_t ipc_kmsg_zone;
 #define IKM_SAVED_KMSG_SIZE     256
 #define IKM_SAVED_MSG_SIZE      (IKM_SAVED_KMSG_SIZE - sizeof(struct ipc_kmsg))
 
+KALLOC_TYPE_VAR_DECLARE(KT_IPC_KMSG_KDATA_OOL);
+
 #define ikm_prealloc_inuse_port(kmsg)                                   \
 	((kmsg)->ikm_prealloc)
 
@@ -265,7 +268,7 @@ __options_decl(ipc_kmsg_alloc_flags_t, uint32_t, {
 extern ipc_kmsg_t ipc_kmsg_alloc(
 	mach_msg_size_t         msg_size,
 	mach_msg_size_t         aux_size,
-	mach_msg_size_t         user_descriptors,
+	mach_msg_size_t         desc_count,
 	ipc_kmsg_alloc_flags_t  flags);
 
 /* Free a kernel message buffer */
@@ -308,6 +311,9 @@ extern void *ikm_udata(
 	ipc_kmsg_t              kmsg,
 	mach_msg_size_t         desc_count,
 	bool                    complex);
+
+extern void * ikm_udata_from_header(
+	ipc_kmsg_t              kmsg);
 
 /* get the size of auxiliary data for a kmsg */
 extern mach_msg_size_t ipc_kmsg_aux_data_size(
@@ -441,12 +447,22 @@ extern void ipc_kmsg_validate_sig(
 	ipc_kmsg_t              kmsg,
 	bool                    partial);
 
+#define moved_provisional_reply_port(port_type, port) \
+	(port_type == MACH_MSG_TYPE_MOVE_RECEIVE && IP_VALID(port) && ip_is_provisional_reply_port(port)) \
+
+extern void send_prp_telemetry(int msgh_id);
+
 #if (KDEBUG_LEVEL >= KDEBUG_LEVEL_STANDARD)
 extern void ipc_kmsg_trace_send(
 	ipc_kmsg_t              kmsg,
 	mach_msg_option_t       option);
 #else
 #define ipc_kmsg_trace_send(a, b) do { } while (0)
+#endif
+
+#if (DEVELOPMENT || DEBUG)
+vm_offset_t ikm_kdata_end(ipc_kmsg_t kmsg);
+vm_offset_t ikm_udata_end(ipc_kmsg_t kmsg);
 #endif
 
 #endif  /* _IPC_IPC_KMSG_H_ */

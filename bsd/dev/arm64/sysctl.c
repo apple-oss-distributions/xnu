@@ -11,6 +11,7 @@
 #include <mach/mach_host.h>
 #include <arm/cpuid.h>
 #include <kern/hvg_hypercall.h>
+#include <vm/pmap.h>
 #include <kern/zalloc.h>
 #include <libkern/libkern.h>
 #include <pexpert/device_tree.h>
@@ -72,7 +73,6 @@ SYSCTL_QUAD(_machdep, OID_AUTO, wfe_rec_clamp,
     "");
 
 #endif
-
 
 static
 SYSCTL_QUAD(_machdep, OID_AUTO, wake_abstime,
@@ -284,7 +284,6 @@ make_brand_string SYSCTL_HANDLER_ARGS
 		break;
 	}
 
-
 	char buf[80];
 	snprintf(buf, sizeof(buf), "%s processor", impl);
 	return SYSCTL_OUT(req, buf, strlen(buf) + 1);
@@ -400,10 +399,6 @@ SYSCTL_QUAD(_machdep, OID_AUTO, trace_phy_read_delay, MMIO_TIMEOUT_FLAGS,
     &trace_phy_read_delay_to, "Maximum time before io/phys read gets ktraced");
 SYSCTL_QUAD(_machdep, OID_AUTO, trace_phy_write_delay, MMIO_TIMEOUT_FLAGS,
     &trace_phy_write_delay_to, "Maximum time before io/phys write gets ktraced");
-SYSCTL_UINT(_machdep, OID_AUTO, report_phy_read_osbt, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &report_phy_read_osbt, 0, "Whether to report exceeding io/phys read duration via OSReportWithBacktrace");
-SYSCTL_UINT(_machdep, OID_AUTO, report_phy_write_osbt, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &report_phy_write_osbt, 0, "Whether to report exceeding io/phys write duration via OSReportWithBacktrace");
 
 SYSCTL_INT(_machdep, OID_AUTO, phy_read_delay_panic, CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
     &phy_read_panic, 0, "if set, report-phy-read-delay timeout panics");

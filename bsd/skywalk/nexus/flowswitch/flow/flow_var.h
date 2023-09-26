@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -243,7 +243,9 @@ struct kern_flow_demux_pattern {
 
 TAILQ_HEAD(flow_entry_list, flow_entry);
 
-typedef void (*flow_action_t)(struct nx_flowswitch *fsw, struct flow_entry *fe);
+#define FLOW_PROC_FLAG_GSO        0x0001
+typedef void (*flow_action_t)(struct nx_flowswitch *fsw, struct flow_entry *fe,
+    uint32_t flags);
 
 struct flow_entry {
 	/**** Common Group ****/
@@ -335,26 +337,27 @@ struct flow_entry {
 };
 
 /* valid values for fe_flags */
-#define FLOWENTF_INITED         0x00000001 /* {src,dst} states initialized */
-#define FLOWENTF_TRACK          0x00000010 /* enable state tracking */
-#define FLOWENTF_CONNECTED      0x00000020 /* connected mode */
-#define FLOWENTF_LISTENER       0x00000040 /* listener mode */
-#define FLOWENTF_QOS_MARKING    0x00000100 /* flow can have qos marking */
-#define FLOWENTF_LOW_LATENCY    0x00000200 /* low latency flow */
-#define FLOWENTF_WAIT_CLOSE     0x00001000 /* defer free after close */
-#define FLOWENTF_CLOSE_NOTIFY   0x00002000 /* notify NECP upon tear down */
-#define FLOWENTF_EXTRL_PORT     0x00004000 /* port reservation is held externally */
-#define FLOWENTF_EXTRL_PROTO    0x00008000 /* proto reservation is held externally */
-#define FLOWENTF_EXTRL_FLOWID   0x00010000 /* flowid reservation is held externally */
-#define FLOWENT_CHILD           0x00020000 /* child flow */
-#define FLOWENT_PARENT          0X00040000 /* parent flow */
-#define FLOWENTF_ABORTED        0x01000000 /* has sent RST to peer */
-#define FLOWENTF_NONVIABLE      0x02000000 /* disabled; awaiting tear down */
-#define FLOWENTF_WITHDRAWN      0x04000000 /* flow has been withdrawn */
-#define FLOWENTF_TORN_DOWN      0x08000000 /* torn down and awaiting destroy */
-#define FLOWENTF_HALF_CLOSED    0x10000000 /* flow is half closed */
-#define FLOWENTF_DESTROYED      0x40000000 /* not in RB trees anymore */
-#define FLOWENTF_LINGERING      0x80000000 /* destroyed and in linger list */
+#define FLOWENTF_INITED                 0x00000001 /* {src,dst} states initialized */
+#define FLOWENTF_TRACK                  0x00000010 /* enable state tracking */
+#define FLOWENTF_CONNECTED              0x00000020 /* connected mode */
+#define FLOWENTF_LISTENER               0x00000040 /* listener mode */
+#define FLOWENTF_QOS_MARKING            0x00000100 /* flow can have qos marking */
+#define FLOWENTF_LOW_LATENCY            0x00000200 /* low latency flow */
+#define FLOWENTF_WAIT_CLOSE             0x00001000 /* defer free after close */
+#define FLOWENTF_CLOSE_NOTIFY           0x00002000 /* notify NECP upon tear down */
+#define FLOWENTF_EXTRL_PORT             0x00004000 /* port reservation is held externally */
+#define FLOWENTF_EXTRL_PROTO            0x00008000 /* proto reservation is held externally */
+#define FLOWENTF_EXTRL_FLOWID           0x00010000 /* flowid reservation is held externally */
+#define FLOWENTF_CHILD                  0x00020000 /* child flow */
+#define FLOWENTF_PARENT                 0x00040000 /* parent flow */
+#define FLOWENTF_NOWAKEFROMSLEEP        0x00080000 /* don't wake for this flow */
+#define FLOWENTF_ABORTED                0x01000000 /* has sent RST to peer */
+#define FLOWENTF_NONVIABLE              0x02000000 /* disabled; awaiting tear down */
+#define FLOWENTF_WITHDRAWN              0x04000000 /* flow has been withdrawn */
+#define FLOWENTF_TORN_DOWN              0x08000000 /* torn down and awaiting destroy */
+#define FLOWENTF_HALF_CLOSED            0x10000000 /* flow is half closed */
+#define FLOWENTF_DESTROYED              0x40000000 /* not in RB trees anymore */
+#define FLOWENTF_LINGERING              0x80000000 /* destroyed and in linger list */
 
 #define FLOWENTF_BITS                                            \
     "\020\01INITED\05TRACK\06CONNECTED\07LISTNER\011QOS_MARKING" \
@@ -996,7 +999,8 @@ extern void fsw_host_rx(struct nx_flowswitch *, struct pktq *);
 extern void fsw_host_sendup(struct ifnet *, struct mbuf *, struct mbuf *,
     uint32_t, uint32_t);
 
-extern void flow_rx_agg_tcp(struct nx_flowswitch *fsw, struct flow_entry *fe);
+extern void flow_rx_agg_tcp(struct nx_flowswitch *fsw, struct flow_entry *fe,
+    uint32_t flags);
 
 extern void flow_route_init(void);
 extern void flow_route_fini(void);

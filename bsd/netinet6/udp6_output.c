@@ -144,8 +144,6 @@
  * UDP protocol inplementation.
  * Per RFC 768, August, 1980.
  */
-extern int soreserveheadroom;
-
 int
 udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
     struct mbuf *control, struct proc *p)
@@ -214,6 +212,9 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	}
 	if (INP_INTCOPROC_ALLOWED(in6p)) {
 		ip6oa.ip6oa_flags |= IP6OAF_INTCOPROC_ALLOWED;
+	}
+	if (INP_MANAGEMENT_ALLOWED(in6p)) {
+		ip6oa.ip6oa_flags |= IP6OAF_MANAGEMENT_ALLOWED;
 	}
 
 #if CONTENT_FILTER

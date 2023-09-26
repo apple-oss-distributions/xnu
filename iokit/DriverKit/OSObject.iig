@@ -74,6 +74,7 @@ typedef OSObject * OSObjectPtr;
 //#define IIG_IMPLEMENTS(i)		void __implements(i *);
 #define IIG_QUEUENAME(name)		__attribute__((annotate("queuename=" # name)))
 #define IIG_SERIALIZABLE		__attribute__((annotate("serializable")))
+#define IIG_CONCRETE			__attribute__((annotate("concrete")))
 
 #if __IIG
 #define KERNEL					IIG_KERNEL
@@ -130,6 +131,116 @@ class IIG_SERIALIZABLE OSContainer;
 #else /* !__IIG */
 class IIG_SERIALIZABLE OSContainer;
 #endif  /* !__IIG */
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+/*
+ * DRIVERKIT_ macros below can be used to describe the ownership semantics
+ * of functions handling subclasses of OSObject.
+ * The attributes propagate with inheritance, but can be overriden.
+ * New versions of the Clang Static Analyzer can use this knowledge to
+ * check the code for leaks or uses-after-free.
+ */
+
+#ifndef KERNEL
+/*
+ * By default, methods returning OSObjects are assumed to have the following
+ * owneship semantics:
+ *   - Functions and methods that have "Get" in their name are assumed to be
+ *  getters. They return at "+0" and the caller is not responsible for releasing
+ *  the returned object.
+ *
+ *  - All other methods are assumed to return at "+1", and the caller is
+ *  responsible for releasing the returned object.
+ *
+ *  The semantics implied by the naming convention described above can be
+ *  overriden using either DRIVERKIT_RETURNS_RETAINED or
+ *  DRIVERKIT_RETURNS_NOT_RETAINED attribute applied to a function.
+ *  In the former case, it stipulates that the function is returning at "+1",
+ *  and in the latter case "+0".
+ *  DRIVERKIT_RETURNS_RETAINED and DRIVERKIT_RETURNS_NOT_RETAINED attributes
+ *  can be also applied to out parameters, in which case they specify
+ *  that an out parameter is written into at +1 or +0 respectively.
+ *  Behavior of out parameters of non-void functions can be additionally
+ *  customized via annotations that explain how a function returns a retained
+ *  or a non-retained value through its out-parameter depending on its
+ *  return value: DRIVERKIT_RETURNS_RETAINED_ON_ZERO and
+ *  DRIVERKIT_RETURNS_RETAINED_ON_NONZERO.
+ */
+#if __has_attribute(os_returns_retained)
+#define DRIVERKIT_RETURNS_RETAINED __attribute__((os_returns_retained))
+#else
+#define DRIVERKIT_RETURNS_RETAINED
+#endif
+#if __has_attribute(os_returns_not_retained)
+#define DRIVERKIT_RETURNS_NOT_RETAINED __attribute__((os_returns_not_retained))
+#else
+#define DRIVERKIT_RETURNS_NOT_RETAINED
+#endif
+
+/*
+ * DRIVERKIT_CONSUMED attribute can be applied to parameters.
+ * It specifies that this function call would consume the reference to the
+ * annotated parameter.
+ */
+#if __has_attribute(os_consumed)
+#define DRIVERKIT_CONSUMED __attribute__((os_consumed))
+#else
+#define DRIVERKIT_CONSUMED
+#endif
+
+/*
+ * DRIVERKIT_CONSUMES_THIS attribute can be applied to C++ methods.
+ * It specifies that this method call consumes a reference to "this" (e.g.
+ * by storing a reference to "this" in a passed parameter).
+ */
+#if __has_attribute(os_consumes_this)
+#define DRIVERKIT_CONSUMES_THIS __attribute__((os_consumes_this))
+#else
+#define DRIVERKIT_CONSUMES_THIS
+#endif
+
+/*
+ * DRIVERKIT_RETURNS_RETAINED_ON_ZERO is an attribute applicable to out
+ * parameters.
+ * It specifies that an out parameter at +1 is written into an argument iff
+ * the function returns a zero return value.
+ */
+#if __has_attribute(os_returns_retained_on_zero)
+#define DRIVERKIT_RETURNS_RETAINED_ON_ZERO __attribute__((os_returns_retained_on_zero))
+#else
+#define DRIVERKIT_RETURNS_RETAINED_ON_ZERO
+#endif
+
+/*
+ * DRIVERKIT_RETURNS_RETAINED_ON_NON_ZERO is an attribute applicable to out
+ * parameters.
+ * It specifies that an out parameter at +1 is written into an argument iff
+ * the function returns a non-zero return value.
+ */
+#if __has_attribute(os_returns_retained_on_non_zero)
+#define DRIVERKIT_RETURNS_RETAINED_ON_NONZERO __attribute__((os_returns_retained_on_non_zero))
+#else
+#define DRIVERKIT_RETURNS_RETAINED_ON_NONZERO
+#endif
+
+
+/*
+ * Macros below are equivalent to their DRIVERKIT_ counterparts.
+ * They are provided for source-compatibility with IOKit code so they can
+ * be used in code that gets compiled for both platforms.
+ */
+#define LIBKERN_RETURNS_RETAINED DRIVERKIT_RETURNS_RETAINED
+#define LIBKERN_RETURNS_NOT_RETAINED DRIVERKIT_RETURNS_NOT_RETAINED
+#define LIBKERN_CONSUMED DRIVERKIT_CONSUMED
+#define LIBKERN_CONSUMES_THIS DRIVERKIT_CONSUMES_THIS
+#define LIBKERN_RETURNS_RETAINED_ON_ZERO DRIVERKIT_RETURNS_RETAINED_ON_ZERO
+#define LIBKERN_RETURNS_RETAINED_ON_NONZERO DRIVERKIT_RETURNS_RETAINED_ON_NONZERO
+
+#endif  /* !defined(KERNEL) */
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
 
 class IIG_SERIALIZABLE OSData;
 class IIG_SERIALIZABLE OSNumber;

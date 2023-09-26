@@ -34,8 +34,10 @@
 #include <skywalk/os_nexus_private.h>
 #include <skywalk/os_packet.h>
 #include <netinet/in.h>
+#include <netinet/in_private.h>
 #include <netinet/in_stat.h>
 #include <net/if.h>
+#include <net/if_var_private.h>
 #include <net/ethernet.h>
 
 /*
@@ -649,8 +651,12 @@
 	X(NETIF_STATS_DROP_KRDROP_MODE,		"DropKrDropMode",	"\t\t%llu dropped due to dst kring in drop mode\n")     \
 	X(NETIF_STATS_DROP_RXQ_OVFL,		"DropRxqOverflow",	"\t\t%llu dropped due to RX Queue overflow\n")     \
 	X(NETIF_STATS_DROP_NO_RX_CB,		"DropNoRxCallback",	"\t\t%llu dropped due to missing RX callback\n") \
+	X(NETIF_STATS_DROP_NO_DELEGATE,		"DropNoDelegate",	"\t\t%llu dropped due to missing delegate interface\n") \
         \
 	/* Channel event stats */  \
+	X(NETIF_STATS_EV_RECV,			"EvRecv",		"\t%llu channel event received\n")     \
+	X(NETIF_STATS_EV_RECV_TX_STATUS,	"EvRecvTxStatus",	"\t\t%llu channel event received, TX status\n")     \
+	X(NETIF_STATS_EV_RECV_TX_EXPIRED,       "EvRecvTxExpired",	"\t\t%llu channel event received, TX expired\n")     \
 	X(NETIF_STATS_EV_SENT,			"EvSent",		"\t%llu channel event delivered\n")     \
 	X(NETIF_STATS_EV_DROP,			"EvDrop",		"\t%llu channel event dropped\n")     \
 	X(NETIF_STATS_EV_DROP_NOMEM_PKT,	"EvDropNoMemPkt",	"\t%llu channel event dropped due to packet alloc failure\n")     \
@@ -792,6 +798,7 @@
 	X(FSW_STATS_RX_DROP_NOMEM_BUF,		"RxDropNoMemBuf",	"\t\t%llu dropped due to mbuf alloc failure\n") \
 	X(FSW_STATS_RX_DEMUX_SHORT_ERR,		"RxDemuxShortErr",	"\t\t%llu demux failed, classify length short\n") \
 	X(FSW_STATS_RX_WASTED_16KMBUF,		 "RxWasted16KMbuf",	"\t\t%llu wasted an entire pre-allocated 16K mbuf\n") \
+	X(FSW_STATS_RX_PKT_NOT_LISTENER,	"RxPktNotListener",	"\t\t%llu packet not for listener\n") \
 	/* Rx frag stats (fsw doesn't manage fragments on Tx) */        \
 	X(FSW_STATS_RX_FRAG_V4,			"RxFragV4",		"\t\t%llu total received ipv4 fragments\n")     \
 	X(FSW_STATS_RX_FRAG_V6,			"RxFragV6",		"\t\t%llu total received ipv6 fragments\n")     \
@@ -832,6 +839,8 @@
 	X(FSW_STATS_RX_AGG_NO_OPTTS_TCP,        "RxAggNoOptionTStampTCP", "\t\t%llu TCP timestamp option compare mismatch\n") \
 	X(FSW_STATS_RX_AGG_BAD_CSUM,            "RxAggIncorrectChecksum", "\t\t%llu Incorrect TCP/IP checksum\n") \
 	X(FSW_STATS_RX_AGG_NO_SHORT_MBUF,       "RxAggNoShortMbuf",      "\t\t%llu mbuf too short for mask compare\n") \
+	X(FSW_STATS_RX_WASTED_MBUF,                     "RxAggWastedMbuf",      "\t\t%llu wasted pre-allocate mbufs\n") \
+	X(FSW_STATS_RX_WASTED_BFLT,                     "RxAggWastedBflt",      "\t\t%llu wasted pre-allocate buflets\n") \
         \
 	/* Tx stats */  \
 	X(FSW_STATS_TX_PACKETS,			"TXPackets",		"\t%llu total Tx packets\n")    \
@@ -860,6 +869,9 @@
 	X(FSW_STATS_DROP_NOMEM_MBUF,		"DropNoMemMbuf",	"\t\t%llu dropped, mbuf alloc failure\n") \
         \
 	/* Channel event stats */  \
+	X(FSW_STATS_EV_RECV,			"EvRecv",		"\t%llu channel event received\n")     \
+	X(FSW_STATS_EV_RECV_TX_STATUS,		"EvRecvTxStatus",	"\t\t%llu channel event received, TX status\n")     \
+	X(FSW_STATS_EV_RECV_TX_EXPIRED,		"EvRecvTxExpired",	"\t\t%llu channel event received, TX expired\n")     \
 	X(FSW_STATS_EV_SENT,			"EvSent",		"\t%llu channel event delivered\n")     \
 	X(FSW_STATS_EV_DROP,			"EvDrop",		"\t%llu channel event dropped\n")     \
 	X(FSW_STATS_EV_DROP_NOMEM_PKT,	"EvDropNoMemPkt",	"\t%llu channel event dropped due to packet alloc failure\n")     \
@@ -1305,6 +1317,7 @@ struct sk_stats_flow_track {
 #define SK_STATS_FLOW   "kern.skywalk.stats.flow"
 struct sk_stats_flow {
 	uuid_t          sf_nx_uuid;             /* nexus instance uuid */
+	uuid_t          sf_uuid;                /* flow uuid */
 	char            sf_if_name[IFNAMSIZ];   /* interface name */
 	uint32_t        sf_if_index;            /* interface index */
 	uint32_t        sf_bucket_idx;          /* flow bucket index */
@@ -1352,6 +1365,7 @@ struct sk_stats_flow {
 #define SFLOWF_LOW_LATENCY      0x00000800      /* low latency flow */
 #define SFLOWF_WAIT_CLOSE       0x00001000      /* defer free after close */
 #define SFLOWF_CLOSE_NOTIFY     0x00002000      /* notify NECP upon tear down */
+#define SFLOWF_NOWAKEFROMSLEEP  0x00004000      /* don't wake for this flow */
 #define SFLOWF_ABORTED          0x01000000      /* has sent RST to peer */
 #define SFLOWF_NONVIABLE        0x02000000      /* disabled; to be torn down */
 #define SFLOWF_WITHDRAWN        0x04000000      /* flow has been withdrawn */
@@ -1799,6 +1813,9 @@ struct sk_stats_cache {
 	uint64_t        sca_depot_ws_zero;      /* # of working set flushes */
 	uint64_t        sca_depot_contention_factor; /* contention factor */
 
+	uint64_t        sca_cpu_rounds;         /* current rounds in all cpu */
+	uint64_t        sca_cpu_prounds;
+
 	/*
 	 * Slab statistics.
 	 */
@@ -1822,10 +1839,11 @@ struct sk_stats_cache {
 #define SCA_MODE_DYNAMIC        0x00000010      /* enable magazine resizing */
 #define SCA_MODE_CLEARONFREE    0x00000020      /* zero-out upon slab free */
 #define SCA_MODE_PSEUDO         0x00000040      /* external backing store */
+#define SCA_MODE_RECLAIM        0x00000080      /* aggressive memory reclaim */
 
 #define SCA_MODE_BITS \
 	"\020\01NOMAGAZINES\02AUDIT\03NOREDIRECT\04BATCH\05DYNAMIC"     \
-	"\06CLEARONFREE\07PSEUDO"
+	"\06CLEARONFREE\07PSEUDO\10RECLAIM"
 
 #endif /* PRIVATE || BSD_KERNEL_PRIVATE */
 #endif /* !_SKYWALK_OS_STATS_H_ */

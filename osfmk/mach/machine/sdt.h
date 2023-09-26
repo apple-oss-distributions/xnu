@@ -379,6 +379,14 @@
 	    type4, arg4, type5, arg5, type6, arg6)                      \
 	DTRACE_PROBE6(__skywalk_, name, arg1, arg2, arg3, arg4, arg5, arg6)
 
+#define DTRACE_SKYWALK7(name, type1, arg1, type2, arg2, type3, arg3,    \
+	    type4, arg4, type5, arg5, type6, arg6, type7, arg7)         \
+	DTRACE_PROBE7(__skywalk_, name, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+
+#define DTRACE_SKYWALK8(name, type1, arg1, type2, arg2, type3, arg3,         \
+	    type4, arg4, type5, arg5, type6, arg6, type7, arg7, type8, arg8) \
+	DTRACE_PROBE8(__skywalk_, name, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+
 #endif /* PRIVATE */
 
 #ifdef PRIVATE

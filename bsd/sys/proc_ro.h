@@ -32,6 +32,7 @@
 #include <stdint.h>
 #include <sys/_types/_pid_t.h>
 #include <sys/cdefs.h>
+#include <kern/smr_types.h>
 
 __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
 #pragma GCC visibility push(hidden)
@@ -64,7 +65,7 @@ struct proc_ro {
 		uint64_t p_uniqueid;                               /* process unique ID - incremented on fork/spawn/vfork, remains same across exec. */
 		int p_idversion;                                   /* version of process identity */
 		uint32_t p_csflags;
-		struct ucred *p_ucred;                             /* Process owner's identity. (PUCL) */
+		SMR_POINTER(struct ucred *) p_ucred;               /* Process owner's identity. (PUCL) */
 		uint8_t *__unsafe_indexable syscall_filter_mask;   /* syscall filter bitmask (length: nsysent bits) */
 		struct proc_platform_ro_data p_platform_data;
 	});
@@ -85,16 +86,12 @@ typedef const struct task_ro_data *task_ro_data_t;
 typedef struct proc_ro *proc_ro_t;
 
 extern proc_ro_t proc_ro_alloc(struct proc *p, proc_ro_data_t p_data, struct task *t, task_ro_data_t t_data);
-extern void proc_ro_free(proc_ro_t pr);
 extern proc_ro_t proc_ro_ref_task(proc_ro_t pr, struct task *t, task_ro_data_t t_data);
-extern proc_ro_t proc_ro_release_proc(proc_ro_t pr);
-extern proc_ro_t proc_ro_release_task(proc_ro_t pr);
+extern void proc_ro_erase_task(proc_ro_t pr);
 
 extern proc_ro_t proc_get_ro(struct proc *p) __pure2;
-extern proc_ro_t current_proc_ro(void) __pure2;
 extern proc_ro_t task_get_ro(struct task *t) __pure2;
 
-extern struct proc *proc_ro_proc(proc_ro_t pr) __pure2;
 extern struct task *proc_ro_task(proc_ro_t pr) __pure2;
 
 #pragma GCC visibility pop

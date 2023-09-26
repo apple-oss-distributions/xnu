@@ -84,6 +84,64 @@
 #define T_PF_WRITE              0x2             /* write access */
 #define T_PF_USER               0x4             /* from user state */
 
+#if !defined(ASSEMBLER)
+__attribute__((cold, always_inline))
+static inline void
+ml_recoverable_trap(unsigned int code)
+__attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant", "error")))
+{
+	__asm__ volatile ("brk #%0" : : "i"(code));
+}
+
+__attribute__((cold, noreturn, always_inline))
+static inline void
+ml_fatal_trap(unsigned int code)
+__attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant", "error")))
+{
+	__asm__ volatile ("brk #%0" : : "i"(code));
+	__builtin_unreachable();
+}
+
+#if defined(XNU_KERNEL_PRIVATE)
+/*
+ * Unfortunately brk instruction only takes constant, so we have to unroll all the
+ * cases and let compiler do the real work.  ¯\_(ツ)_/¯
+ *
+ * Codegen should be clean due to inlining which enables constant-folding.
+ */
+#define TRAP_CASE(code) \
+	case code: \
+	    ml_fatal_trap(0x5500 + code);
+
+#define TRAP_5CASES(code) \
+	TRAP_CASE(code) \
+	TRAP_CASE(code + 1) \
+	TRAP_CASE(code + 2) \
+	TRAP_CASE(code + 3) \
+	TRAP_CASE(code + 4)
+
+/* For use by clang option -ftrap-function only */
+__attribute__((cold, always_inline))
+static inline void
+ml_bound_chk_soft_trap(unsigned char code)
+{
+	switch (code) {
+		/* 0 ~ 24 */
+		TRAP_5CASES(0)
+		TRAP_5CASES(5)
+		TRAP_5CASES(10)
+		TRAP_5CASES(15)
+		TRAP_5CASES(20)
+	case 25:         /* Bound check */
+		ml_recoverable_trap(0xFF00 + 25);         /* code defined in kern/telemetry.h */
+		break;
+	default:
+		ml_fatal_trap(0x0);
+	}
+}
+#endif /* XNU_KERNEL_PRIVATE */
+#endif /* !ASSEMBLER */
+
 #if defined(MACH_KERNEL_PRIVATE)
 
 #if !defined(ASSEMBLER) && defined(MACH_KERNEL)

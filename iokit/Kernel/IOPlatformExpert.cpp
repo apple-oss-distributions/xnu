@@ -976,7 +976,7 @@ PEInitiatePanic(void)
 	 * Trigger a TLB flush so any hard hangs exercise the SoC diagnostic
 	 * collection flow rather than hanging late in panic (see rdar://58062030)
 	 */
-	flush_mmu_tlb_entry_async(0);
+	flush_mmu_tlb_entries_async(0, PAGE_SIZE, PAGE_SIZE, true, true);
 	arm64_sync_tlb(true);
 #endif // defined(__arm64__)
 }
@@ -1202,6 +1202,39 @@ PEReadNVRAMProperty(const char *symbol, void *value,
 	if (value && vlen) {
 		memcpy((void *) value, data->getBytesNoCopy(), vlen);
 	}
+
+	return TRUE;
+
+err:
+	return FALSE;
+}
+
+boolean_t
+PEReadNVRAMBooleanProperty(const char *symbol, boolean_t *value)
+{
+	OSObject  *obj;
+	OSBoolean *data;
+
+	if (!symbol || !value) {
+		goto err;
+	}
+
+	if (init_gIOOptionsEntry() < 0) {
+		goto err;
+	}
+
+	obj = gIOOptionsEntry->getProperty(symbol);
+	if (!obj) {
+		return TRUE;
+	}
+
+	/* convert to bool */
+	data = OSDynamicCast(OSBoolean, obj);
+	if (!data) {
+		goto err;
+	}
+
+	*value = data->isTrue() ? TRUE : FALSE;
 
 	return TRUE;
 

@@ -40,7 +40,11 @@
 #include <libkern/c++/bounded_ptr.h>
 #endif /* DRIVERKIT_FRAMEWORK_INCLUDE */
 
+#if (defined(__has_include) && __has_include(<__xnu_libcxx_sentinel.h>) && __has_include(<new>))
+#include <new>
+#else
 void* operator new(size_t, void*) noexcept; // forward declaration needed for placement-new
+#endif
 
 namespace libkern {
 namespace sa_detail {

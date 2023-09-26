@@ -78,6 +78,7 @@
 #include <kern/ipc_kobject.h>
 #include <kern/misc_protos.h>
 #include <kern/policy_internal.h>
+#include <libkern/coreanalytics/coreanalytics.h>
 #include <ipc/port.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_space.h>
@@ -90,6 +91,9 @@
 #include <ipc/ipc_importance.h>
 #include <ipc/ipc_service_port.h>
 #include <security/mac_mach_internal.h>
+
+extern struct proc *current_proc(void);
+extern int csproc_hardened_runtime(struct proc* p);
 
 extern void * XNU_PTRAUTH_SIGNED_PTR("initproc") initproc;
 
@@ -128,13 +132,13 @@ ipc_right_lookup_read(
 		return KERN_INVALID_NAME;
 	}
 
-	smr_global_enter();
+	smr_ipc_enter();
 
 	/*
 	 * Acquire a (possibly stale) pointer to the table,
 	 * and guard it so that it can't be deallocated while we use it.
 	 *
-	 * smr_global_enter() has the property that it strongly serializes
+	 * smr_ipc_enter() has the property that it strongly serializes
 	 * after any store-release. This is important because it means that if
 	 * one considers this (broken) userspace usage:
 	 *
@@ -249,7 +253,7 @@ ipc_right_lookup_read(
 	}
 
 	/* Done with hazardous accesses to the table */
-	smr_global_leave();
+	smr_ipc_leave();
 
 	*bitsp = bits;
 	*objectp = object;
@@ -258,7 +262,7 @@ ipc_right_lookup_read(
 out_put_unlock:
 	ipc_object_unlock(object);
 out_put:
-	smr_global_leave();
+	smr_ipc_leave();
 	return kr;
 }
 
@@ -910,7 +914,6 @@ ipc_right_destroy(
 	mach_port_type_t type;
 
 	bits = entry->ie_bits;
-	entry->ie_bits &= ~IE_BITS_TYPE_MASK;
 	type = IE_BITS_TYPE(bits);
 
 	assert(is_active(space));
@@ -1974,7 +1977,7 @@ ipc_right_copyin_check_reply(
 	ipc_entry_t                     reply_entry,
 	mach_msg_type_name_t            reply_type,
 	ipc_entry_t                     dest_entry,
-	boolean_t                       *reply_port_semantics_violation)
+	int                             *reply_port_semantics_violation)
 {
 	ipc_entry_bits_t bits;
 	ipc_port_t reply_port;
@@ -2066,13 +2069,15 @@ ipc_right_copyin_check_reply(
 
 		/* When sending a msg to remote port that requires reply port semantics enforced the local port of that msg needs to be a reply port. */
 		dest_port = ip_object_to_port(dest_entry->ie_object);
-		if (IP_VALID(dest_port) && ip_active(dest_port) && ip_require_reply_port_semantics(dest_port)
-		    && !ip_is_reply_port(reply_port) && !ip_is_provisional_reply_port(reply_port)) {
-			*reply_port_semantics_violation = TRUE;
-
-			if (reply_port_semantics) {
-				mach_port_guard_exception(reply_name, 0, 0, kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS);
-				return FALSE;
+		if (IP_VALID(dest_port) && ip_active(dest_port)) {
+			/* populates reply_port_semantics_violation if we need to send telemetry */
+			if (ip_violates_rigid_reply_port_semantics(dest_port, reply_port, reply_port_semantics_violation) ||
+			    ip_violates_reply_port_semantics(dest_port, reply_port, reply_port_semantics_violation)) {
+				if (reply_port_semantics && (*reply_port_semantics_violation == REPLY_PORT_SEMANTICS_VIOLATOR)) {
+					/* Don't crash for rigid reply ports */
+					mach_port_guard_exception(reply_name, 0, 0, kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS);
+					return FALSE;
+				}
 			}
 		}
 	}
@@ -2262,7 +2267,9 @@ ipc_right_copyin(
 			allow_imm_recv = !!(flags & IPC_OBJECT_COPYIN_FLAGS_ALLOW_CONN_IMMOVABLE_RECEIVE);
 		}
 
-		if ((!allow_imm_recv && port->ip_immovable_receive) || port->ip_specialreply) {
+		if ((!allow_imm_recv && port->ip_immovable_receive) ||
+		    ip_is_reply_port(port) ||     /* never move reply port rcv right */
+		    port->ip_specialreply) {
 			assert(!ip_in_space(port, ipc_space_kernel));
 			ip_mq_unlock(port);
 			assert(current_task() != kernel_task);

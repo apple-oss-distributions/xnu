@@ -1109,6 +1109,24 @@ shared_region_make_permanent(
 	return true;
 }
 
+static bool
+shared_region_tpro_protect(
+	vm_shared_region_t sr,
+	vm_prot_t max_prot __unused)
+{
+	if (sr->sr_cpu_type != CPU_TYPE_ARM64 ||
+	    (sr->sr_cpu_subtype & ~CPU_SUBTYPE_MASK) != CPU_SUBTYPE_ARM64E) {
+		return false;
+	}
+
+
+	/*
+	 * Unless otherwise explicitly requested all other mappings do not get
+	 * TPRO protection.
+	 */
+	return false;
+}
+
 #if __has_feature(ptrauth_calls)
 
 /*
@@ -1758,7 +1776,9 @@ vm_shared_region_map_file_setup(
 			vmk_flags.vmf_permanent = shared_region_make_permanent(
 				shared_region,
 				mappings[i].sms_max_prot);
-
+			vmk_flags.vmf_tpro = shared_region_tpro_protect(
+				shared_region,
+				mappings[i].sms_max_prot);
 
 			/* establish that mapping, OK if it's "already" there */
 			if (map_port == MACH_PORT_NULL) {
@@ -2658,8 +2678,6 @@ vm_shared_region_slide_mapping(
 	}
 	si->si_shared_region = NULL;
 	si->si_ptrauth = FALSE;
-#else /* __has_feature(ptrauth_calls) */
-	(void)prot;     /* silence unused warning */
 #endif /* __has_feature(ptrauth_calls) */
 
 	/*
@@ -2703,7 +2721,8 @@ vm_shared_region_slide_mapping(
 	vmk_flags.vmkf_overwrite_immutable = true;
 	vmk_flags.vmf_permanent = shared_region_make_permanent(sr,
 	    tmp_entry->max_protection);
-
+	vmk_flags.vmf_tpro = shared_region_tpro_protect(sr,
+	    prot);
 	kr = vm_map_enter_mem_object(sr_map,
 	    &map_addr,
 	    (tmp_entry->vme_end - tmp_entry->vme_start),

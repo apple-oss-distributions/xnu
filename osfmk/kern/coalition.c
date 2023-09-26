@@ -272,6 +272,7 @@ struct coalition {
 	                             *  to the coalition */
 	uint32_t focal_task_count;   /* Number of TASK_FOREGROUND_APPLICATION tasks in the coalition */
 	uint32_t nonfocal_task_count; /* Number of TASK_BACKGROUND_APPLICATION tasks in the coalition */
+	uint32_t game_task_count;    /* Number of GAME_MODE tasks in the coalition */
 
 	/* coalition flags */
 	uint32_t privileged : 1;    /* Members of this coalition may create
@@ -290,7 +291,10 @@ struct coalition {
 
 	struct smrq_slink link;     /* global list of coalitions */
 
-	lck_mtx_t lock;             /* Coalition lock. */
+	union {
+		lck_mtx_t lock;     /* Coalition lock. */
+		struct smr_node smr_node;
+	};
 
 	/* put coalition type-specific structures here */
 	union {
@@ -316,9 +320,8 @@ coal_hash_obj_try_get(void *coal)
 }
 
 SMRH_TRAITS_DEFINE_SCALAR(coal_hash_traits, struct coalition, id, link,
-    .domain = &smr_system,
-    .obj_try_get = coal_hash_obj_try_get,
-    );
+    .domain      = &smr_proc_task,
+    .obj_try_get = coal_hash_obj_try_get);
 
 /*
  * register different coalition types:
@@ -929,6 +932,36 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	return KERN_SUCCESS;
 }
 
+kern_return_t
+coalition_debug_info_internal(coalition_t coal,
+    struct coalinfo_debuginfo *c_debuginfo)
+{
+	/* Return KERN_INVALID_ARGUMENT for Corpse coalition */
+	for (int i = 0; i < COALITION_NUM_TYPES; i++) {
+		if (coal == corpse_coalition[i]) {
+			return KERN_INVALID_ARGUMENT;
+		}
+	}
+
+	if (coal->type == COALITION_FOCAL_TASKS_ACCOUNTING) {
+		c_debuginfo->focal_task_count = coal->focal_task_count;
+		c_debuginfo->nonfocal_task_count = coal->nonfocal_task_count;
+		c_debuginfo->game_task_count = coal->game_task_count;
+	}
+
+#if CONFIG_THREAD_GROUPS
+	struct thread_group * group = coalition_get_thread_group(coal);
+
+	if (group != NULL) {
+		c_debuginfo->thread_group_id = thread_group_id(group);
+		c_debuginfo->thread_group_flags = thread_group_get_flags(group);
+		c_debuginfo->thread_group_recommendation = thread_group_recommendation(group);
+	}
+#endif /* CONFIG_THREAD_GROUPS */
+
+	return KERN_SUCCESS;
+}
+
 /*
  *
  * COALITION_TYPE_JETSAM
@@ -1234,8 +1267,11 @@ coalition_create_internal(int type, int role, boolean_t privileged, boolean_t ef
 }
 
 static void
-coalition_free(void *coal)
+coalition_free(struct smr_node *node)
 {
+	struct coalition *coal;
+
+	coal = __container_of(node, struct coalition, smr_node);
 	zfree(coalition_zone, coal);
 }
 
@@ -1254,6 +1290,7 @@ coalition_retire(coalition_t coal)
 	assert(coal->reaped);
 	assert(coal->focal_task_count == 0);
 	assert(coal->nonfocal_task_count == 0);
+	assert(coal->game_task_count == 0);
 #if CONFIG_THREAD_GROUPS
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_COALITION, MACH_COALITION_FREE),
 	    coal->id, coal->type,
@@ -1270,7 +1307,7 @@ coalition_retire(coalition_t coal)
 
 	lck_mtx_destroy(&coal->lock, &coalitions_lck_grp);
 
-	smr_global_retire(coal, sizeof(*coal), coalition_free);
+	smr_proc_task_call(&coal->smr_node, sizeof(*coal), coalition_free);
 }
 
 /*
@@ -1486,6 +1523,18 @@ task_coalition_focal_count(task_t task)
 	return coal->focal_task_count;
 }
 
+uint32_t
+task_coalition_game_mode_count(task_t task)
+{
+	coalition_t coal = task->coalition[COALITION_FOCAL_TASKS_ACCOUNTING];
+	if (coal == COALITION_NULL) {
+		return 0;
+	}
+
+	return coal->game_task_count;
+}
+
+
 boolean_t
 task_coalition_adjust_nonfocal_count(task_t task, int count, uint32_t *new_count)
 {
@@ -1510,7 +1559,22 @@ task_coalition_nonfocal_count(task_t task)
 	return coal->nonfocal_task_count;
 }
 
+bool
+task_coalition_adjust_game_mode_count(task_t task, int count, uint32_t *new_count)
+{
+	coalition_t coal = task->coalition[COALITION_FOCAL_TASKS_ACCOUNTING];
+	if (coal == COALITION_NULL) {
+		return false;
+	}
+
+	*new_count = os_atomic_add(&coal->game_task_count, count, relaxed);
+	assert(*new_count != UINT32_MAX);
+	return true;
+}
+
 #if CONFIG_THREAD_GROUPS
+
+/* Thread group lives as long as the task is holding the coalition reference */
 struct thread_group *
 task_coalition_get_thread_group(task_t task)
 {
@@ -1533,6 +1597,7 @@ kdp_coalition_get_thread_group(coalition_t coal)
 	return coal->j.thread_group;
 }
 
+/* Thread group lives as long as the coalition reference is held */
 struct thread_group *
 coalition_get_thread_group(coalition_t coal)
 {
@@ -1540,9 +1605,10 @@ coalition_get_thread_group(coalition_t coal)
 		return NULL;
 	}
 	assert(coal->j.thread_group != NULL);
-	return thread_group_retain(coal->j.thread_group);
+	return coal->j.thread_group;
 }
 
+/* Donates the thread group reference to the coalition */
 void
 coalition_set_thread_group(coalition_t coal, struct thread_group *tg)
 {
@@ -1577,6 +1643,19 @@ task_coalition_thread_group_focal_update(task_t task)
 }
 
 void
+task_coalition_thread_group_game_mode_update(task_t task)
+{
+	assert(task->coalition[COALITION_FOCAL_TASKS_ACCOUNTING] != COALITION_NULL);
+	thread_group_flags_update_lock();
+	if (task_coalition_game_mode_count(task)) {
+		thread_group_set_flags_locked(task_coalition_get_thread_group(task), THREAD_GROUP_FLAGS_GAME_MODE);
+	} else {
+		thread_group_clear_flags_locked(task_coalition_get_thread_group(task), THREAD_GROUP_FLAGS_GAME_MODE);
+	}
+	thread_group_flags_update_unlock();
+}
+
+void
 task_coalition_thread_group_application_set(task_t task)
 {
 	/*
@@ -1589,7 +1668,7 @@ task_coalition_thread_group_application_set(task_t task)
 	thread_group_flags_update_unlock();
 }
 
-#endif
+#endif /* CONFIG_THREAD_GROUPS */
 
 void
 coalition_for_each_task(coalition_t coal, void *ctx,

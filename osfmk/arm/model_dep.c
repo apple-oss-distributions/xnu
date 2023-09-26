@@ -85,6 +85,10 @@
 #include <kern/ledger.h>
 
 
+#if DEVELOPMENT || DEBUG
+#include <kern/ext_paniclog.h>
+#endif
+
 #if     MACH_KDP
 void    kdp_trap(unsigned int, struct arm_saved_state *);
 #endif
@@ -207,6 +211,9 @@ print_one_backtrace(pmap_t pmap, vm_offset_t topfp, const char *cur_marker,
 	vm_offset_t     raddrs[FP_MAX_NUM_TO_EVALUATE] = { 0 };
 	bool            dump_kernel_stack = (fp >= VM_MIN_KERNEL_ADDRESS);
 
+#if defined(HAS_APPLE_PAC)
+	fp = (addr64_t)ptrauth_strip((void *)fp, ptrauth_key_frame_pointer);
+#endif
 	do {
 		if ((fp == 0) || ((fp & FP_ALIGNMENT_MASK) != 0)) {
 			break;
@@ -252,6 +259,10 @@ print_one_backtrace(pmap_t pmap, vm_offset_t topfp, const char *cur_marker,
 		if (ppn != (ppnum_t)NULL) {
 			if (is_64_bit) {
 				fp = ml_phys_read_double_64(((((vm_offset_t)ppn) << PAGE_SHIFT)) | (fp & PAGE_MASK));
+#if defined(HAS_APPLE_PAC)
+				/* frame pointers on stack will be signed by arm64e ABI */
+				fp = (addr64_t) ptrauth_strip((void *)fp, ptrauth_key_frame_pointer);
+#endif
 			} else {
 				fp = ml_phys_read_word(((((vm_offset_t)ppn) << PAGE_SHIFT)) | (fp & PAGE_MASK));
 			}
@@ -402,6 +413,9 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 	char *stackshot_begin_loc = NULL;
 	kc_format_t kc_format;
 	bool filesetKC = false;
+#if CONFIG_EXT_PANICLOG
+	uint32_t ext_paniclog_bytes = 0;
+#endif
 
 #if defined(__arm64__)
 	__asm__         volatile ("add %0, xzr, fp":"=r"(cur_fp));
@@ -728,6 +742,15 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 		}
 	}
 
+#if CONFIG_EXT_PANICLOG
+	// Write ext paniclog at the end of the paniclog region.
+	ext_paniclog_bytes = ext_paniclog_write_panicdata();
+	panic_info->eph_ext_paniclog_offset = (ext_paniclog_bytes != 0) ?
+	    PE_get_offset_into_panic_region((debug_buf_base + debug_buf_size) - ext_paniclog_bytes) :
+	    0;
+	panic_info->eph_ext_paniclog_len = ext_paniclog_bytes;
+#endif
+
 	assert(panic_info->eph_other_log_offset != 0);
 
 	if (print_vnodes != 0) {
@@ -850,6 +873,7 @@ SavePanicInfo(
 
 	PanicInfoSaved = TRUE;
 
+
 	print_all_backtraces(message, panic_options);
 
 	assert(panic_info->eph_panic_log_len != 0);
@@ -871,7 +895,7 @@ paniclog_flush()
 	unsigned int panicbuf_length = 0;
 
 	panicbuf_length = (unsigned int)(debug_buf_ptr - gPanicBase);
-	if (!panicbuf_length) {
+	if (!debug_buf_ptr || !panicbuf_length) {
 		return;
 	}
 
@@ -1182,7 +1206,7 @@ DebuggerXCall(
 #endif
 	}
 
-	kstackptr = current_thread()->machine.kstackptr;
+	kstackptr = (vm_offset_t)current_thread()->machine.kstackptr;
 
 #if defined(__arm64__)
 	arm_kernel_saved_state_t *state = (arm_kernel_saved_state_t *)kstackptr;

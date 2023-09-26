@@ -905,6 +905,9 @@ cpuid_set_cpufamily(i386_cpu_info_t *info_p)
 		case CPUID_MODEL_ICELAKE_DT:
 			cpufamily = CPUFAMILY_INTEL_ICELAKE;
 			break;
+		case CPUID_MODEL_COMETLAKE_DT:
+			cpufamily = CPUFAMILY_INTEL_COMETLAKE;
+			break;
 		}
 		break;
 	}

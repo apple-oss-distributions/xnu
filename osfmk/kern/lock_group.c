@@ -120,17 +120,17 @@ __startup_func
 static void
 lck_group_init(void)
 {
-	if (LcksOpts & enaLkStat) {
+	if (LcksOpts & LCK_OPTION_ENABLE_STAT) {
 		lck_grp_attr_default.grp_attr_val |= LCK_GRP_ATTR_STAT;
 	}
-	if (LcksOpts & enaLkTimeStat) {
+	if (LcksOpts & LCK_OPTION_ENABLE_TIME_STAT) {
 		lck_grp_attr_default.grp_attr_val |= LCK_GRP_ATTR_TIME_STAT;
 	}
-	if (LcksOpts & enaLkDeb) {
+	if (LcksOpts & LCK_OPTION_ENABLE_DEBUG) {
 		lck_grp_attr_default.grp_attr_val |= LCK_GRP_ATTR_DEBUG;
 	}
 
-	if (LcksOpts & enaLkDeb) {
+	if (LcksOpts & LCK_OPTION_ENABLE_DEBUG) {
 		lck_attr_default.lck_attr_val = LCK_ATTR_DEBUG;
 	} else {
 		lck_attr_default.lck_attr_val = LCK_ATTR_NONE;

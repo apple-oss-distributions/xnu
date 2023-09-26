@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2013, 2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -98,6 +98,25 @@ struct esptail {
 #ifdef BSD_KERNEL_PRIVATE
 struct secasvar;
 
+#define ESP_ASSERT(_cond, _format, ...)                                                  \
+	do {                                                                             \
+	        if (__improbable(!(_cond))) {                                            \
+	                panic("%s:%d " _format, __FUNCTION__, __LINE__, ##__VA_ARGS__);  \
+	        }                                                                        \
+	} while (0)
+
+#define ESP_CHECK_ARG(_arg) ESP_ASSERT(_arg != NULL, #_arg " is NULL")
+
+#define _esp_log(_level, _format, ...)  \
+	log(_level, "%s:%d " _format, __FUNCTION__, __LINE__, ##__VA_ARGS__)
+#define esp_log_err(_format, ...) _esp_log(LOG_ERR, _format, ##__VA_ARGS__)
+#define esp_log_default(_format, ...) _esp_log(LOG_NOTICE, _format, ##__VA_ARGS__)
+#define esp_log_info(_format, ...) _esp_log(LOG_INFO, _format, ##__VA_ARGS__)
+
+#define _esp_packet_log(_level, _format, ...)  \
+	ipseclog((_level, "%s:%d " _format, __FUNCTION__, __LINE__, ##__VA_ARGS__))
+#define esp_packet_log_err(_format, ...) _esp_packet_log(LOG_ERR, _format, ##__VA_ARGS__)
+
 struct esp_algorithm {
 	uint32_t padbound;        /* pad boundary, in byte */
 	int ivlenval;           /* iv length, in byte */
@@ -121,6 +140,10 @@ struct esp_algorithm {
 	size_t icvlen;
 	int (*finalizedecrypt)(struct secasvar *, u_int8_t *, size_t);
 	int (*finalizeencrypt)(struct secasvar *, u_int8_t *, size_t);
+	int (*encrypt_pkt)(struct secasvar *, uint8_t *, size_t,
+	    struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
+	int (*decrypt_pkt)(struct secasvar *, uint8_t *, size_t,
+	    struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
 };
 
 extern os_log_t esp_mpkl_log_object;
@@ -133,10 +156,13 @@ extern int esp4_output(struct mbuf *, struct secasvar *);
 extern void esp4_input(struct mbuf *, int off);
 extern struct mbuf *esp4_input_extended(struct mbuf *, int off, ifnet_t interface);
 extern size_t esp_hdrsiz(struct ipsecrequest *);
+extern int esp_kpipe_output(struct secasvar *, kern_packet_t, kern_packet_t);
+extern int esp_kpipe_input(ifnet_t, kern_packet_t, kern_packet_t);
 
 extern int esp_schedule(const struct esp_algorithm *, struct secasvar *);
 extern int esp_auth(struct mbuf *, size_t, size_t,
     struct secasvar *, u_char *);
+extern int esp_auth_data(struct secasvar *, uint8_t *, size_t, uint8_t *, size_t);
 
 extern void esp_init(void);
 #endif /* BSD_KERNEL_PRIVATE */

@@ -287,6 +287,14 @@ ppl_associate_code_signature(
 }
 
 kern_return_t
+ppl_allow_jit_region(
+	__unused pmap_t pmap)
+{
+	/* PPL does not support this API */
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t
 ppl_associate_jit_region(
 	pmap_t pmap,
 	const vm_address_t region_addr,
@@ -315,10 +323,32 @@ ppl_associate_debug_region(
 }
 
 kern_return_t
+ppl_address_space_debugged(
+	pmap_t pmap)
+{
+	/*
+	 * ppl_associate_debug_region is a fairly idempotent function which simply
+	 * checks if an address space is already debugged or not and returns a value
+	 * based on that. The actual memory region is not inserted into the address
+	 * space, so we can pass whatever in this case. The only caveat here though
+	 * is that the memory region needs to be page-aligned and cannot be NULL.
+	 */
+	return ppl_associate_debug_region(pmap, PAGE_SIZE, PAGE_SIZE);
+}
+
+kern_return_t
 ppl_allow_invalid_code(
 	pmap_t pmap)
 {
 	return pmap_cs_allow_invalid(pmap);
+}
+
+kern_return_t
+ppl_get_trust_level_kdp(
+	pmap_t pmap,
+	uint32_t *trust_level)
+{
+	return pmap_get_trust_level_kdp(pmap, trust_level);
 }
 
 kern_return_t

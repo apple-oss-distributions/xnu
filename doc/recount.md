@@ -105,3 +105,7 @@ Reading the counters requires holding the lock and iterating the constituent tas
 
 The energy counters on ARM systems count a custom unit of energy that needs to be scaled to nanojoules.
 Because this unit can be very small and may overflow a 64-bit counter, it's scaled to nanojoules during context-switch.
+
+## See Also
+
+- `doc/cpu_counters.md`

@@ -69,8 +69,12 @@ struct fcl_stat {
 	uint64_t fcl_avg_qdelay;
 	uint32_t fcl_overwhelming;
 	uint64_t fcl_ce_marked;
+	uint64_t fcl_ce_reported;
 	uint64_t fcl_ce_mark_failures;
 	uint64_t fcl_l4s_pkts;
+	uint64_t fcl_ignore_tx_time;
+	uint64_t fcl_paced_pkts;
+	uint64_t fcl_fcl_pacemaker_needed;
 };
 
 /*
@@ -140,10 +144,13 @@ typedef struct fq_if_classq {
 	uint32_t fcl_service_class;    /* service class */
 	uint32_t fcl_quantum;          /* quantum in bytes */
 	uint32_t fcl_drr_max;          /* max flows per class for DRR */
-	int64_t fcl_budget;             /* budget for this classq */
+	int64_t  fcl_budget;             /* budget for this classq */
+	uint64_t fcl_next_tx_time;      /* next time a packet is ready */
 	flowq_stailq_t fcl_new_flows;   /* List of new flows */
 	flowq_stailq_t fcl_old_flows;   /* List of old flows */
 	struct fcl_stat fcl_stat;
+#define FCL_PACED               0x1
+	uint8_t fcl_flags;
 } fq_if_classq_t;
 typedef struct fq_codel_classq_group {
 	/* Target queue delays (ns) */
@@ -181,6 +188,7 @@ typedef int (* fq_if_bitmaps_ffs)(fq_grp_tailq_t *, int, fq_if_state, fq_if_grou
 typedef boolean_t (* fq_if_bitmaps_zeros)(fq_grp_tailq_t *, int, fq_if_state);
 typedef void (* fq_if_bitmaps_cpy)(fq_grp_tailq_t *, int, fq_if_state, fq_if_state);
 typedef void (* fq_if_bitmaps_clr)(fq_grp_tailq_t *, int, fq_if_state);
+typedef void (* fq_if_bitmaps_move)(fq_grp_tailq_t *, int, fq_if_state, fq_if_state);
 
 /*
  * Functions that are used to look at groups'
@@ -192,6 +200,7 @@ typedef struct fq_if_bitmap_ops {
 	fq_if_bitmaps_zeros     zeros;
 	fq_if_bitmaps_cpy       cpy;
 	fq_if_bitmaps_clr       clr;
+	fq_if_bitmaps_move      move;
 } bitmap_ops_t;
 
 typedef struct fq_codel_sched_data {
@@ -215,6 +224,7 @@ typedef struct fq_codel_sched_data {
 #define grp_bitmaps_zeros   fqs_bm_ops->zeros
 #define grp_bitmaps_cpy     fqs_bm_ops->cpy
 #define grp_bitmaps_clr     fqs_bm_ops->clr
+#define grp_bitmaps_move    fqs_bm_ops->move
 	fq_if_group_t           *fqs_classq_groups[FQ_IF_MAX_GROUPS];
 } fq_if_t;
 
@@ -277,6 +287,7 @@ struct fq_codel_flowstats {
 };
 
 #define FQ_IF_MAX_FLOWSTATS     20
+#define FQ_IF_STATS_MAX_GROUPS  16
 
 struct fq_codel_classstats {
 	u_int32_t       fcls_pri;
@@ -314,11 +325,19 @@ struct fq_codel_classstats {
 	uint64_t        fcls_avg_qdelay;
 	uint32_t        fcls_overwhelming;
 	uint64_t        fcls_ce_marked;
+	uint64_t        fcls_ce_reported;
 	uint64_t        fcls_ce_mark_failures;
 	uint64_t        fcls_l4s_pkts;
+	uint64_t        fcls_ignore_tx_time;
+	uint64_t        fcls_paced_pkts;
+	uint64_t        fcls_fcl_pacing_needed;
 };
 
 #ifdef BSD_KERNEL_PRIVATE
+
+_Static_assert(FQ_IF_STATS_MAX_GROUPS == FQ_IF_MAX_GROUPS,
+    "max group counts do not match");
+
 extern void pktsched_fq_init(void);
 extern void fq_codel_scheduler_init(void);
 extern int fq_if_enqueue_classq(struct ifclassq *ifq, classq_pkt_t *h,
@@ -344,6 +363,7 @@ extern void fq_if_is_flow_heavy(fq_if_t *, struct flowq *);
 extern boolean_t fq_if_add_fcentry(fq_if_t *, pktsched_pkt_t *, uint8_t,
     struct flowq *, fq_if_classq_t *);
 extern void fq_if_flow_feedback(fq_if_t *, struct flowq *, fq_if_classq_t *);
+extern boolean_t fq_if_report_ce(fq_if_t *, pktsched_pkt_t *, uint32_t, uint32_t);
 extern int fq_if_setup_ifclassq(struct ifclassq *ifq, u_int32_t flags,
     classq_pkt_type_t ptype);
 extern void fq_if_teardown_ifclassq(struct ifclassq *ifq);
@@ -356,6 +376,7 @@ extern int fq_if_create_grp(struct ifclassq *ifcq, uint8_t qset_idx, uint8_t fla
 extern void fq_if_set_grp_combined(struct ifclassq *ifcq, uint8_t qset_idx);
 extern void fq_if_set_grp_separated(struct ifclassq *ifcq, uint8_t qset_idx);
 extern fq_if_group_t *fq_if_find_grp(fq_if_t *fqs, uint8_t grp_idx);
+extern boolean_t fq_if_is_all_paced(struct ifclassq *ifq);
 #endif /* BSD_KERNEL_PRIVATE */
 
 #ifdef __cplusplus

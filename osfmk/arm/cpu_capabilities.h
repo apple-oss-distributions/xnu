@@ -313,7 +313,8 @@ _Static_assert((_COMM_PAGE64_BASE_ADDRESS >= _COMM_PAGE64_NESTING_START) &&
 
 #define _COMM_PAGE_CACHE_LINESIZE               (_COMM_PAGE_START_ADDRESS+0x026)        // uint16_t cache line size
 #define _COMM_PAGE_UNUSED4                      (_COMM_PAGE_START_ADDRESS+0x028)        // used to be _COMM_PAGE_SCHED_GEN: uint32_t scheduler generation number (count of pre-emptions)
-#define _COMM_PAGE_UNUSED3                      (_COMM_PAGE_START_ADDRESS+0x02C)        // used to be _COMM_PAGE_SPIN_COUNT: uint32_t max spin count for mutex's
+#define _COMM_PAGE_UNUSED3                      (_COMM_PAGE_START_ADDRESS+0x02C)        // used to be _COMM_PAGE_SPIN_COUNT: uint32_t max spin count for mutex's (3 bytes unused)
+#define _COMM_PAGE_CPU_CLUSTERS                 (_COMM_PAGE_START_ADDRESS+0x02F)        // uint8_t number of CPU clusters
 #define _COMM_PAGE_MEMORY_PRESSURE              (_COMM_PAGE_START_ADDRESS+0x030)        // uint32_t copy of vm_memory_pressure
 #define _COMM_PAGE_ACTIVE_CPUS                  (_COMM_PAGE_START_ADDRESS+0x034)        // uint8_t number of active CPUs (hw.activecpu)
 #define _COMM_PAGE_PHYSICAL_CPUS                (_COMM_PAGE_START_ADDRESS+0x035)        // uint8_t number of physical CPUs (hw.physicalcpu_max)
@@ -364,6 +365,8 @@ _Static_assert((_COMM_PAGE64_BASE_ADDRESS >= _COMM_PAGE64_NESTING_START) &&
 
 // aligning to 128 bytes for cacheline/fabric size
 #define _COMM_PAGE_CPU_QUIESCENT_COUNTER        (_COMM_PAGE_START_ADDRESS+0x180)        // uint64_t, but reserve the whole 128 (0x80) bytes
+
+#define _COMM_PAGE_CPU_TO_CLUSTER               (_COMM_PAGE_START_ADDRESS+0x200)        // 256 bytes reserved for (logical) CPU_ID -> CLUSTER_ID mappings
 
 #define _COMM_PAGE_END                          (_COMM_PAGE_START_ADDRESS+0xfff)        // end of common page
 

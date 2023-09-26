@@ -79,6 +79,10 @@
 #include <os/atomic_private.h>
 #include <libkern/c++/OSBoundedArrayRef.h>
 
+#if DEVELOPMENT || DEBUG
+#include <os/system_event_log.h>
+#endif /* DEVELOPMENT || DEBUG */
+
 __BEGIN_DECLS
 #include <mach/shared_region.h>
 #include <kern/clock.h>
@@ -1607,6 +1611,7 @@ IOPMrootDomain::start( IOService * nub )
 	settingsCtrlLock = IOLockAlloc();
 	wakeEventLock = IOLockAlloc();
 	gHaltLogLock = IOLockAlloc();
+	setPMRootDomain(this);
 
 	extraSleepTimer = thread_call_allocate(
 		idleSleepTimerExpired,
@@ -1742,7 +1747,7 @@ IOPMrootDomain::start( IOService * nub )
 
 	// Avoid publishing service early so gIOPMWorkLoop is
 	// guaranteed to be initialized by rootDomain.
-	setPMRootDomain(this);
+	publishPMRootDomain();
 
 	// create our power parent
 	gPatriarch = new IORootParent;
@@ -2903,12 +2908,23 @@ IOPMrootDomain::powerChangeDone( unsigned long previousPowerState )
 		}
 #if HIBERNATION
 		LOG("System %sSleep\n", gIOHibernateState ? "Safe" : "");
-
+#if (DEVELOPMENT || DEBUG)
+		record_system_event(SYSTEM_EVENT_TYPE_INFO,
+		    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+		    "System State",
+		    gIOHibernateState ? "Enter Hibernate" : "Enter Sleep"
+		    );
+#endif /* DEVELOPMENT || DEBUG */
 		IOHibernateSystemHasSlept();
 
 		evaluateSystemSleepPolicyFinal();
 #else
 		LOG("System Sleep\n");
+#if (DEVELOPMENT || DEBUG)
+		record_system_event(SYSTEM_EVENT_TYPE_INFO,
+		    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+		    "System State", "Enter Sleep");
+#endif /* DEVELOPMENT || DEBUG */
 #endif
 		if (thermalWarningState) {
 			OSSharedPtr<const OSSymbol> event = OSSymbol::withCString(kIOPMThermalLevelWarningKey);
@@ -2944,6 +2960,12 @@ IOPMrootDomain::powerChangeDone( unsigned long previousPowerState )
 
 		clock_get_uptime(&gIOLastWakeAbsTime);
 		IOLog("gIOLastWakeAbsTime: %lld\n", gIOLastWakeAbsTime);
+#if DEVELOPMENT || DEBUG
+		record_system_event(SYSTEM_EVENT_TYPE_INFO,
+		    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+		    "System State", "Waking Up"
+		    );
+#endif /* DEVELOPMENT || DEBUG */
 		_highestCapability = 0;
 
 #if HIBERNATION
@@ -6382,6 +6404,12 @@ IOPMrootDomain::handleOurPowerChangeStart(
 		uint32_t reasonIndex = sleepReason - kIOPMSleepReasonClamshell;
 		if (reasonIndex < sizeof(IOPMSleepReasons) / sizeof(IOPMSleepReasons[0])) {
 			DLOG("sleep reason %s\n", IOPMSleepReasons[reasonIndex]);
+#if DEVELOPMENT || DEBUG
+			record_system_event(SYSTEM_EVENT_TYPE_INFO,
+			    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+			    "Sleep Reason", "%s\n", IOPMSleepReasons[reasonIndex]
+			    );
+#endif /* DEVELOPMENT || DEBUG */
 			setProperty(kRootDomainSleepReasonKey, IOPMSleepReasons[reasonIndex]);
 		}
 	}
@@ -6397,6 +6425,23 @@ IOPMrootDomain::handleOurPowerChangeStart(
 		    _currentCapability, _pendingCapability,
 		    *inOutChangeFlags, _systemStateGeneration, _systemMessageClientMask,
 		    requestTag);
+#if DEVELOPMENT || DEBUG
+		if (currentPowerState != (uint32_t) newPowerState) {
+			record_system_event(SYSTEM_EVENT_TYPE_INFO,
+			    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+			    "Start Power State Trans.",
+			    "(%s->%s, %x->%x, 0x%x) gen %u, msg %x, tag %x\n",
+			    getPowerStateString(currentPowerState),
+			    getPowerStateString((uint32_t) newPowerState),
+			    _currentCapability,
+			    _pendingCapability,
+			    *inOutChangeFlags,
+			    _systemStateGeneration,
+			    _systemMessageClientMask,
+			    requestTag
+			    );
+		}
+#endif /* DEVELOPMENT || DEBUG */
 	}
 
 	if ((AOT_STATE == newPowerState) && (SLEEP_STATE != currentPowerState)) {
@@ -6512,6 +6557,24 @@ IOPMrootDomain::handleOurPowerChangeDone(
 					_systemStateGeneration );
 			}
 		}
+
+#if DEVELOPMENT || DEBUG
+		if (currentPowerState != (uint32_t) oldPowerState) {
+			record_system_event(SYSTEM_EVENT_TYPE_INFO,
+			    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+			    "Finish Power State Trans.",
+			    "(%s->%s, %x->%x, 0x%x) gen %u, msg %x, tag %x\n",
+			    getPowerStateString((uint32_t)oldPowerState),
+			    getPowerStateString(currentPowerState),
+			    _currentCapability,
+			    _pendingCapability,
+			    changeFlags,
+			    _systemStateGeneration,
+			    _systemMessageClientMask,
+			    request->getTag()
+			    );
+		}
+#endif /* DEVELOPMENT || DEBUG */
 
 		DLOG("=== FINISH (%s->%s, %x->%x, 0x%x) gen %u, msg %x, tag %x\n",
 		    getPowerStateString((uint32_t) oldPowerState), getPowerStateString(currentPowerState),
@@ -7418,6 +7481,11 @@ IOPMrootDomain::checkSystemSleepAllowed( IOOptionBits options,
 
 		if (preventSystemSleepList->getCount() != 0) {
 			err = kPMChildPreventSystemSleep; // 4. child prevent system sleep clamp
+			break;
+		}
+
+		if (_driverKitMatchingAssertionCount != 0) {
+			err = kPMCPUAssertion;
 			break;
 		}
 
@@ -9203,11 +9271,9 @@ IOPMrootDomain::pmStatsRecordApplicationResponse(
 		if (!id && notify) {
 			id = notify->uuid0;
 		}
-		if (id != 0) {
-			pidNum = OSNumber::withNumber(id, 64);
-			if (pidNum) {
-				responseDescription->setObject(_statsPIDKey.get(), pidNum.get());
-			}
+		pidNum = OSNumber::withNumber(id, 64);
+		if (pidNum) {
+			responseDescription->setObject(_statsPIDKey.get(), pidNum.get());
 		}
 
 		delayNum = OSNumber::withNumber(delay_ms, 32);
@@ -9805,7 +9871,7 @@ PMTraceWorker::RTC_TRACE(void)
 		IOLockLock(l);
 		IOLockLock(l);
 	}
-#endif
+#endif /* DEVELOPMENT || DEBUG */
 }
 
 int
@@ -10473,6 +10539,51 @@ IOPMrootDomain::setPMAssertionUserLevels(IOPMDriverAssertionType inLevels)
 	return pmAssertions->setUserAssertionLevels(inLevels);
 }
 
+IOReturn
+IOPMrootDomain::acquireDriverKitMatchingAssertion()
+{
+	return gIOPMWorkLoop->runActionBlock(^{
+		if (_driverKitMatchingAssertionCount != 0) {
+		        _driverKitMatchingAssertionCount++;
+		        return kIOReturnSuccess;
+		} else {
+		        bool fullToDarkTransition = (kSystemTransitionCapability == _systemTransitionType) && CAP_LOSS(kIOPMSystemCapabilityGraphics);
+		        if (kSystemTransitionSleep == _systemTransitionType || fullToDarkTransition) {
+		                // system transitioning from wake to sleep/darkwake
+		                return kIOReturnBusy;
+			} else {
+		                // createPMAssertion is asynchronous.
+		                // we must also set _driverKitMatchingAssertionCount under the PM workloop lock so that we can cancel sleep immediately
+		                // The assertion is used so that on release, we reevaluate all assertions
+		                _driverKitMatchingAssertion = createPMAssertion(kIOPMDriverAssertionCPUBit, kIOPMDriverAssertionLevelOn, this, "DK matching");
+		                if (_driverKitMatchingAssertion != kIOPMUndefinedDriverAssertionID) {
+		                        _driverKitMatchingAssertionCount = 1;
+		                        return kIOReturnSuccess;
+				} else {
+		                        return kIOReturnBusy;
+				}
+			}
+		}
+	});
+}
+
+void
+IOPMrootDomain::releaseDriverKitMatchingAssertion()
+{
+	gIOPMWorkLoop->runActionBlock(^{
+		if (_driverKitMatchingAssertionCount != 0) {
+		        _driverKitMatchingAssertionCount--;
+		        if (_driverKitMatchingAssertionCount == 0) {
+		                releasePMAssertion(_driverKitMatchingAssertion);
+		                _driverKitMatchingAssertion = kIOPMUndefinedDriverAssertionID;
+			}
+		} else {
+		        panic("Over-release of driverkit matching assertion");
+		}
+		return kIOReturnSuccess;
+	});
+}
+
 bool
 IOPMrootDomain::serializeProperties( OSSerialize * s ) const
 {
@@ -10798,6 +10909,20 @@ IOPMrootDomain::claimSystemWakeEvent(
 	    reason, (int)flags, deviceName->getCStringNoCopy(), device->getRegistryEntryID(),
 	    _aotNow, pmTracer->getTracePhase(), addWakeReason);
 
+#if DEVELOPMENT || DEBUG
+	if (addWakeReason) {
+		record_system_event(SYSTEM_EVENT_TYPE_INFO,
+		    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+		    "Report System Wake Event",
+		    "Reason: %s Flags: 0x%x Device: %s, DeviceRegEntry: 0x%llx\n",
+		    reason,
+		    (int)flags,
+		    deviceName->getCStringNoCopy(),
+		    device->getRegistryEntryID()
+		    );
+	}
+#endif /* DEVELOPMENT || DEBUG */
+
 	if (!gWakeReasonSysctlRegistered) {
 		// Lazy registration until the platform driver stops registering
 		// the same name.
@@ -10840,6 +10965,16 @@ IOPMrootDomain::claimSystemBootEvent(
 	}
 
 	DEBUG_LOG("claimSystemBootEvent(%s, %s, 0x%x)\n", reason, device->getName(), (uint32_t) flags);
+#if DEVELOPMENT || DEBUG
+	record_system_event(SYSTEM_EVENT_TYPE_INFO,
+	    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+	    "Report System Boot Device",
+	    "Reason: %s Flags: 0x%x Device: %s",
+	    reason,
+	    (int)flags,
+	    device->getName()
+	    );
+#endif /* DEVELOPMENT || DEBUG */
 	WAKEEVENT_LOCK();
 	if (!gBootReasonSysctlRegistered) {
 		// Lazy sysctl registration after setting gBootReasonString
@@ -10867,6 +11002,16 @@ IOPMrootDomain::claimSystemShutdownEvent(
 	}
 
 	DEBUG_LOG("claimSystemShutdownEvent(%s, %s, 0x%x)\n", reason, device->getName(), (uint32_t) flags);
+#if DEVELOPMENT || DEBUG
+	record_system_event(SYSTEM_EVENT_TYPE_INFO,
+	    SYSTEM_EVENT_SUBSYSTEM_PMRD,
+	    "Report System Shutdown Cause From Previous Boot",
+	    "Reason: %s Flags: 0x%x Device: %s",
+	    reason,
+	    (int)flags,
+	    device->getName()
+	    );
+#endif /* DEVELOPMENT || DEBUG */
 	WAKEEVENT_LOCK();
 	if (gShutdownReasonString[0] != '\0') {
 		strlcat(gShutdownReasonString, " ", sizeof(gShutdownReasonString));

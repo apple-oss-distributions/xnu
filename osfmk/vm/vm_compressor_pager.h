@@ -39,6 +39,7 @@ extern kern_return_t vm_compressor_pager_put(
 	memory_object_t                 mem_obj,
 	memory_object_offset_t          offset,
 	ppnum_t                         ppnum,
+	bool                            unmodified,
 	void                            **current_chead,
 	char                            *scratch_buf,
 	int                             *compressed_count_delta_p);
@@ -50,9 +51,12 @@ extern kern_return_t vm_compressor_pager_get(
 	int                     flags,
 	int                     *compressed_count_delta_p);
 
-#define C_DONT_BLOCK            0x01
-#define C_KEEP                  0x02
-#define C_KDP                   0x04
+__options_decl(vm_compressor_options_t, uint32_t, {
+	C_DONT_BLOCK            = 0x00000001,
+	C_KEEP                  = 0x00000002,
+	C_KDP                   = 0x00000004,
+	C_PAGE_UNMODIFIED       = 0x00000008,
+});
 
 extern unsigned int vm_compressor_pager_state_clr(
 	memory_object_t         mem_obj,
@@ -110,9 +114,24 @@ extern memory_object_offset_t vm_compressor_pager_next_compressed(
 
 extern bool osenvironment_is_diagnostics(void);
 extern void vm_compressor_init(void);
-extern int vm_compressor_put(ppnum_t pn, int *slot, void **current_chead, char *scratch_buf);
-extern int vm_compressor_get(ppnum_t pn, int *slot, int flags);
-extern int vm_compressor_free(int *slot, int flags);
+extern bool vm_compressor_is_slot_compressed(int *slot);
+extern int vm_compressor_put(ppnum_t pn, int *slot, void **current_chead, char *scratch_buf, bool unmodified);
+extern int vm_compressor_get(ppnum_t pn, int *slot, vm_compressor_options_t flags);
+extern int vm_compressor_free(int *slot, vm_compressor_options_t flags);
+
+#if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
+extern uint64_t compressor_ro_uncompressed;
+extern uint64_t compressor_ro_uncompressed_total_returned;
+extern uint64_t compressor_ro_uncompressed_skip_returned;
+extern uint64_t compressor_ro_uncompressed_get;
+extern uint64_t compressor_ro_uncompressed_put;
+extern uint64_t compressor_ro_uncompressed_swap_usage;
+
+extern int vm_uncompressed_put(ppnum_t pn, int *slot);
+extern int vm_uncompressed_get(ppnum_t pn, int *slot, vm_compressor_options_t flags);
+extern int vm_uncompressed_free(int *slot, vm_compressor_options_t flags);
+#endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
+
 extern unsigned int vm_compressor_pager_reap_pages(memory_object_t mem_obj, int flags);
 extern unsigned int vm_compressor_pager_get_count(memory_object_t mem_obj);
 extern void vm_compressor_pager_count(memory_object_t mem_obj,

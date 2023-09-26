@@ -885,7 +885,9 @@ auditon(proc_t p, struct auditon_args *uap, __unused int32_t *retval)
 		if (sizeof(udata.au_flags) != uap->length) {
 			return EINVAL;
 		}
-		bcopy(kauth_cred_get()->cr_audit.as_aia_p, &aia, sizeof(aia));
+		scred = kauth_cred_get();
+		bcopy(scred->cr_audit.as_aia_p, &aia, sizeof(aia));
+		bcopy(&scred->cr_audit.as_mask, &aia.ai_mask, sizeof(au_mask_t));
 		aia.ai_flags = udata.au_flags;
 		error = audit_session_setaia(p, &aia);
 		if (error) {
@@ -1064,6 +1066,8 @@ getaudit_addr_internal(proc_t p, user_addr_t user_addr, size_t length)
 	if (suser(scred, &p->p_acflag)) {
 		aia.ai_mask.am_success = ~0;
 		aia.ai_mask.am_failure = ~0;
+	} else {
+		bcopy(&scred->cr_audit.as_mask, &aia.ai_mask, sizeof(au_mask_t));
 	}
 	kauth_cred_unref(&scred);
 

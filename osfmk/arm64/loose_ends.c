@@ -268,17 +268,34 @@ bzero_phys(addr64_t src, vm_size_t bytes)
  *  Read data from a physical address.
  */
 
+#if BUILD_QUAD_WORD_FUNCS
+static inline uint128_t
+__read128(vm_address_t addr)
+{
+	uint64_t hi, lo;
 
-static uint64_t
+	asm volatile (
+                    "ldp    %[lo], %[hi], [%[addr]]"   "\n"
+                    : [lo] "=r"(lo), [hi] "=r"(hi)
+                    : [addr] "r"(addr)
+                    : "memory"
+        );
+
+	return (((uint128_t)hi) << 64) + lo;
+}
+#endif /* BUILD_QUAD_WORD_FUNCS */
+
+static uint128_t
 ml_phys_read_data(pmap_paddr_t paddr, int size)
 {
 	vm_address_t   addr;
 	ppnum_t        pn = atop_kernel(paddr);
 	ppnum_t        pn_end = atop_kernel(paddr + size - 1);
-	uint64_t       result = 0;
+	uint128_t      result = 0;
 	uint8_t        s1;
 	uint16_t       s2;
 	uint32_t       s4;
+	uint64_t       s8;
 	unsigned int   index;
 	bool           use_copy_window = true;
 
@@ -290,7 +307,7 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 	bool istate, timeread = false;
 	uint64_t sabs, eabs;
 
-	uint32_t const report_phy_read_delay = os_atomic_load(&report_phy_read_delay_to, relaxed);
+	uint32_t report_phy_read_delay = os_atomic_load(&report_phy_read_delay_to, relaxed);
 	uint32_t const trace_phy_read_delay = os_atomic_load(&trace_phy_read_delay_to, relaxed);
 
 	if (__improbable(report_phy_read_delay != 0)) {
@@ -333,8 +350,14 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 		result = s4;
 		break;
 	case 8:
-		result = *(volatile uint64_t *)addr;
+		s8 = *(volatile uint64_t *)addr;
+		result = s8;
 		break;
+#if BUILD_QUAD_WORD_FUNCS
+	case 16:
+		result = __read128(addr);
+		break;
+#endif /* BUILD_QUAD_WORD_FUNCS */
 	default:
 		panic("Invalid size %d for ml_phys_read_data", size);
 		break;
@@ -352,31 +375,48 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 		iotrace(IOTRACE_PHYS_READ, 0, addr, size, result, sabs, eabs - sabs);
 
 		if (__improbable((eabs - sabs) > report_phy_read_delay)) {
-			ml_set_interrupts_enabled(istate);
-
-			if (phy_read_panic && (machine_timeout_suspended() == FALSE)) {
-				panic("Read from physical addr 0x%llx took %llu ns, "
-				    "result: 0x%llx (start: %llu, end: %llu), ceiling: %llu",
-				    (unsigned long long)addr, (eabs - sabs), result, sabs, eabs,
-				    (uint64_t)report_phy_read_delay);
-			}
-
-			if (report_phy_read_osbt) {
-				OSReportWithBacktrace("ml_phys_read_data took %llu us",
-				    (eabs - sabs) / NSEC_PER_USEC);
-			}
-#if CONFIG_DTRACE
 			DTRACE_PHYSLAT4(physread, uint64_t, (eabs - sabs),
 			    uint64_t, addr, uint32_t, size, uint64_t, result);
-#endif /* CONFIG_DTRACE */
-		} else if (__improbable(trace_phy_read_delay > 0 && (eabs - sabs) > trace_phy_read_delay)) {
+
+			uint64_t override = 0;
+			override_io_timeouts(0, paddr, &override, NULL);
+
+			if (override != 0) {
+#if SCHED_HYGIENE_DEBUG
+				/*
+				 * The IO timeout was overridden. As interrupts are disabled in
+				 * order to accurately measure IO time this can cause the
+				 * interrupt masked timeout threshold to be exceeded.  If the
+				 * interrupt masked debug mode is set to panic, abandon the
+				 * measurement. If in trace mode leave it as-is for
+				 * observability.
+				 */
+				if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
+					ml_spin_debug_clear(current_thread());
+					ml_irq_debug_abandon();
+				}
+#endif
+				report_phy_read_delay = override;
+			}
+		}
+
+		if (__improbable((eabs - sabs) > report_phy_read_delay)) {
+			if (phy_read_panic && (machine_timeout_suspended() == FALSE)) {
+				const uint64_t hi = (uint64_t)(result >> 64);
+				const uint64_t lo = (uint64_t)(result);
+				panic("Read from physical addr 0x%llx took %llu ns, "
+				    "result: 0x%016llx%016llx (start: %llu, end: %llu), ceiling: %llu",
+				    (unsigned long long)addr, (eabs - sabs), hi, lo, sabs, eabs,
+				    (uint64_t)report_phy_read_delay);
+			}
+		}
+
+		if (__improbable(trace_phy_read_delay > 0 && (eabs - sabs) > trace_phy_read_delay)) {
 			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_PHYS_READ),
 			    (eabs - sabs), sabs, addr, result);
-
-			ml_set_interrupts_enabled(istate);
-		} else {
-			ml_set_interrupts_enabled(istate);
 		}
+
+		ml_set_interrupts_enabled(istate);
 	}
 #endif /*  ML_IO_TIMEOUTS_ENABLED */
 
@@ -443,14 +483,42 @@ ml_phys_read_double_64(addr64_t paddr64)
 	return ml_phys_read_data((pmap_paddr_t)paddr64, 8);
 }
 
+#if BUILD_QUAD_WORD_FUNCS
+uint128_t
+ml_phys_read_quad(vm_offset_t paddr)
+{
+	return ml_phys_read_data((pmap_paddr_t)paddr, 16);
+}
 
+uint128_t
+ml_phys_read_quad_64(addr64_t paddr64)
+{
+	return ml_phys_read_data((pmap_paddr_t)paddr64, 16);
+}
+#endif /* BUILD_QUAD_WORD_FUNCS */
 
 /*
  *  Write data to a physical address.
  */
 
+#if BUILD_QUAD_WORD_FUNCS
+static inline void
+__write128(vm_address_t addr, uint128_t data)
+{
+	const uint64_t hi = (uint64_t)(data >> 64);
+	const uint64_t lo = (uint64_t)(data);
+
+	asm volatile (
+                    "stp    %[lo], %[hi], [%[addr]]"   "\n"
+                    : /**/
+                    : [lo] "r"(lo), [hi] "r"(hi), [addr] "r"(addr)
+                    : "memory"
+        );
+}
+#endif /* BUILD_QUAD_WORD_FUNCS */
+
 static void
-ml_phys_write_data(pmap_paddr_t paddr, uint64_t data, int size)
+ml_phys_write_data(pmap_paddr_t paddr, uint128_t data, int size)
 {
 	vm_address_t   addr;
 	ppnum_t        pn = atop_kernel(paddr);
@@ -466,7 +534,7 @@ ml_phys_write_data(pmap_paddr_t paddr, uint64_t data, int size)
 	bool istate, timewrite = false;
 	uint64_t sabs, eabs;
 
-	uint32_t const report_phy_write_delay = os_atomic_load(&report_phy_write_delay_to, relaxed);
+	uint32_t report_phy_write_delay = os_atomic_load(&report_phy_write_delay_to, relaxed);
 	uint32_t const trace_phy_write_delay = os_atomic_load(&trace_phy_write_delay_to, relaxed);
 
 	if (__improbable(report_phy_write_delay != 0)) {
@@ -506,8 +574,13 @@ ml_phys_write_data(pmap_paddr_t paddr, uint64_t data, int size)
 		*(volatile uint32_t *)addr = (uint32_t)data;
 		break;
 	case 8:
-		*(volatile uint64_t *)addr = data;
+		*(volatile uint64_t *)addr = (uint64_t)data;
 		break;
+#if BUILD_QUAD_WORD_FUNCS
+	case 16:
+		__write128(addr, data);
+		break;
+#endif /* BUILD_QUAD_WORD_FUNCS */
 	default:
 		panic("Invalid size %d for ml_phys_write_data", size);
 	}
@@ -524,31 +597,47 @@ ml_phys_write_data(pmap_paddr_t paddr, uint64_t data, int size)
 		iotrace(IOTRACE_PHYS_WRITE, 0, paddr, size, data, sabs, eabs - sabs);
 
 		if (__improbable((eabs - sabs) > report_phy_write_delay)) {
-			ml_set_interrupts_enabled(istate);
-
-			if (phy_write_panic && (machine_timeout_suspended() == FALSE)) {
-				panic("Write from physical addr 0x%llx took %llu ns, "
-				    "data: 0x%llx (start: %llu, end: %llu), ceiling: %llu",
-				    (unsigned long long)paddr, (eabs - sabs), data, sabs, eabs,
-				    (uint64_t)report_phy_write_delay);
-			}
-
-			if (report_phy_write_osbt) {
-				OSReportWithBacktrace("ml_phys_write_data took %llu us",
-				    (eabs - sabs) / NSEC_PER_USEC);
-			}
-#if CONFIG_DTRACE
 			DTRACE_PHYSLAT4(physwrite, uint64_t, (eabs - sabs),
 			    uint64_t, paddr, uint32_t, size, uint64_t, data);
-#endif /* CONFIG_DTRACE */
-		} else if (__improbable(trace_phy_write_delay > 0 && (eabs - sabs) > trace_phy_write_delay)) {
+
+			uint64_t override = 0;
+			override_io_timeouts(0, paddr, NULL, &override);
+			if (override != 0) {
+#if SCHED_HYGIENE_DEBUG
+				/*
+				 * The IO timeout was overridden. As interrupts are disabled in
+				 * order to accurately measure IO time this can cause the
+				 * interrupt masked timeout threshold to be exceeded.  If the
+				 * interrupt masked debug mode is set to panic, abandon the
+				 * measurement. If in trace mode leave it as-is for
+				 * observability.
+				 */
+				if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
+					ml_spin_debug_clear(current_thread());
+					ml_irq_debug_abandon();
+				}
+#endif
+				report_phy_write_delay = override;
+			}
+		}
+
+		if (__improbable((eabs - sabs) > report_phy_write_delay)) {
+			if (phy_write_panic && (machine_timeout_suspended() == FALSE)) {
+				const uint64_t hi = (uint64_t)(data >> 64);
+				const uint64_t lo = (uint64_t)(data);
+				panic("Write from physical addr 0x%llx took %llu ns, "
+				    "data: 0x%016llx%016llx (start: %llu, end: %llu), ceiling: %llu",
+				    (unsigned long long)paddr, (eabs - sabs), hi, lo, sabs, eabs,
+				    (uint64_t)report_phy_write_delay);
+			}
+		}
+
+		if (__improbable(trace_phy_write_delay > 0 && (eabs - sabs) > trace_phy_write_delay)) {
 			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_PHYS_WRITE),
 			    (eabs - sabs), sabs, paddr, data);
-
-			ml_set_interrupts_enabled(istate);
-		} else {
-			ml_set_interrupts_enabled(istate);
 		}
+
+		ml_set_interrupts_enabled(istate);
 	}
 #endif /*  ML_IO_TIMEOUTS_ENABLED */
 }
@@ -613,6 +702,19 @@ ml_phys_write_double_64(addr64_t paddr64, unsigned long long data)
 	ml_phys_write_data((pmap_paddr_t)paddr64, data, 8);
 }
 
+#if BUILD_QUAD_WORD_FUNCS
+void
+ml_phys_write_quad(vm_offset_t paddr, uint128_t data)
+{
+	ml_phys_write_data((pmap_paddr_t)paddr, data, 16);
+}
+
+void
+ml_phys_write_quad_64(addr64_t paddr64, uint128_t data)
+{
+	ml_phys_write_data((pmap_paddr_t)paddr64, data, 16);
+}
+#endif /* BUILD_QUAD_WORD_FUNCS */
 
 /*
  * Set indicated bit in bit string.

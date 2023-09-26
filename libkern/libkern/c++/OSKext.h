@@ -112,6 +112,10 @@ kern_return_t is_io_catalog_send_data(
 void kmod_dump_log(vm_offset_t*, unsigned int, boolean_t);
 void *OSKextKextForAddress(const void *addr);
 
+kern_return_t OSKextGetLoadedKextSummaryForAddress(
+	const void              * addr,
+	OSKextLoadedKextSummary * summary);
+
 #endif /* XNU_KERNEL_PRIVATE */
 };
 
@@ -290,6 +294,10 @@ class OSKext : public OSObject
 	friend void kmod_dump_log(vm_offset_t*, unsigned int, boolean_t);
 	friend void kext_dump_panic_lists(int (*printf_func)(const char * fmt, ...));
 	friend void *OSKextKextForAddress(const void *addr);
+
+	friend kern_return_t OSKextGetLoadedKextSummaryForAddress(
+		const void              * addr,
+		OSKextLoadedKextSummary * summary);
 
 #endif /* XNU_KERNEL_PRIVATE */
 
@@ -550,7 +558,8 @@ private:
 	virtual OSReturn unload(void);
 	static OSReturn queueKextNotification(
 		const char * notificationName,
-		OSString   * kextIdentifier);
+		OSString   * kextIdentifier,
+		OSData     * dextUniqueIdentifier);
 
 	static void recordIdentifierRequest(
 		OSString * kextIdentifier);
@@ -730,6 +739,9 @@ public:
 	bool isInFileset(void);
 private:
 	static OSKextLoadedKextSummary *summaryForAddress(const uintptr_t addr);
+	static kern_return_t summaryForAddressExt(
+		const void              * addr,
+		OSKextLoadedKextSummary * summary);
 	static void *kextForAddress(const void *addr);
 	static boolean_t summaryIsInBacktrace(
 		OSKextLoadedKextSummary * summary,
@@ -902,6 +914,7 @@ public:
 	virtual bool               isKernel(void);
 	virtual bool               isKernelComponent(void);
 	virtual bool               isExecutable(void);
+	virtual bool               isSpecialKernelBinary(void);
 	virtual bool               isLoadableInSafeBoot(void);
 	virtual bool               isPrelinked(void);
 	virtual bool               isLoaded(void);

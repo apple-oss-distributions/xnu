@@ -27,7 +27,7 @@
 
 #if defined(PRIVATE) && \
         defined(_LIBPROC_PRIVATE_H_) /* Defeat unifdef */
-#include <sys/event.h>
+#include <sys/event_private.h>
 
 __BEGIN_DECLS
 

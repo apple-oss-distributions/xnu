@@ -135,12 +135,6 @@ raw_detach_nofree(struct rawcb *rp)
 	}
 	LIST_REMOVE(rp, list);
 	lck_mtx_unlock(&raw_mtx);
-#ifdef notdef
-	if (rp->rcb_laddr) {
-		m_freem(dtom(rp->rcb_laddr));
-	}
-	rp->rcb_laddr = 0;
-#endif
 	rp->rcb_socket = NULL;
 }
 
@@ -152,12 +146,6 @@ raw_disconnect(struct rawcb *rp)
 {
 	struct socket *so = rp->rcb_socket;
 
-#ifdef notdef
-	if (rp->rcb_faddr) {
-		m_freem(dtom(rp->rcb_faddr));
-	}
-	rp->rcb_faddr = 0;
-#endif
 	/*
 	 * A multipath subflow socket would have its SS_NOFDREF set by default,
 	 * so check for SOF_MP_SUBFLOW socket flag before detaching the PCB;

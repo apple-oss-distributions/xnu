@@ -1199,7 +1199,9 @@ vnode_update_identity(vnode_t vp, vnode_t dvp, const char *name, int name_len, u
 			vfs_removename(vname);
 		}
 
-		kauth_cred_set(&tcred, NOCRED);
+		if (IS_VALID_CRED(tcred)) {
+			kauth_cred_unref(&tcred);
+		}
 	}
 	if (dvp != NULLVP) {
 		/* Back-out the ref we took if we lost a race for vp->v_parent. */
@@ -1366,10 +1368,14 @@ vnode_setasfirmlink(vnode_t vp, vnode_t target_vp)
 
 	NAME_CACHE_UNLOCK();
 
-	kauth_cred_set(&target_vp_cred, NOCRED);
+	if (IS_VALID_CRED(target_vp_cred)) {
+		kauth_cred_unref(&target_vp_cred);
+	}
 
 	if (old_target_vp) {
-		kauth_cred_set(&old_target_vp_cred, NOCRED);
+		if (IS_VALID_CRED(old_target_vp_cred)) {
+			kauth_cred_unref(&old_target_vp_cred);
+		}
 
 		vnode_rele_ext(old_target_vp, O_EVTONLY, 1);
 		if (old_target_vp_v_fmlink) {
@@ -1503,7 +1509,9 @@ vnode_uncache_authorized_action(vnode_t vp, kauth_action_t action)
 	}
 	NAME_CACHE_UNLOCK();
 
-	kauth_cred_set(&tcred, NOCRED);
+	if (IS_VALID_CRED(tcred)) {
+		kauth_cred_unref(&tcred);
+	}
 }
 
 
@@ -1599,13 +1607,15 @@ vnode_cache_authorized_action(vnode_t vp, vfs_context_t ctx, kauth_action_t acti
 	}
 	NAME_CACHE_LOCK();
 
-	if (vnode_cred(vp) != ucred) {
+	tcred = vnode_cred(vp);
+	if (tcred == ucred) {
+		tcred = NOCRED;
+	} else {
 		/*
 		 * Use a temp variable to avoid kauth_cred_drop() while NAME_CACHE_LOCK is held
 		 */
-		tcred = vnode_cred(vp);
-		vp->v_cred = NOCRED;
-		kauth_cred_set(&vp->v_cred, ucred);
+		kauth_cred_ref(ucred);
+		vp->v_cred = ucred;
 		vp->v_authorized_actions = 0;
 	}
 	if (ttl_active == TRUE && vp->v_authorized_actions == 0) {
@@ -1623,7 +1633,9 @@ vnode_cache_authorized_action(vnode_t vp, vfs_context_t ctx, kauth_action_t acti
 
 	NAME_CACHE_UNLOCK();
 
-	kauth_cred_set(&tcred, NOCRED);
+	if (IS_VALID_CRED(tcred)) {
+		kauth_cred_unref(&tcred);
+	}
 }
 
 
@@ -1687,6 +1699,20 @@ restore_ndp_state(struct nameidata *ndp, struct componentname *cnp, struct namei
 	cnp->cn_hash = saved_statep->cn_hash;
 }
 
+static inline bool
+vid_is_same(vnode_t vp, uint32_t vid)
+{
+	return !(os_atomic_load(&vp->v_lflag, relaxed) & (VL_DRAIN | VL_TERMINATE | VL_DEAD)) && (vnode_vid(vp) == vid);
+}
+
+static inline bool
+can_check_v_mountedhere(vnode_t vp)
+{
+	return (os_atomic_load(&vp->v_usecount, relaxed) > 0) &&
+	       (os_atomic_load(&vp->v_flag, relaxed) & VMOUNTEDHERE) &&
+	       !(os_atomic_load(&vp->v_lflag, relaxed) & (VL_TERMINATE | VL_DEAD) &&
+	       (vp->v_type == VDIR));
+}
 
 /*
  * Returns:	0			Success
@@ -1944,6 +1970,7 @@ skiprsrcfork:
 			 * check once already and don't need to do it again.
 			 */
 			if (!locked && (ndp->ni_rootdir != rootvnode)) {
+				vfs_smr_leave();
 				needs_lock = true;
 				goto prep_lock_retry;
 			} else if (locked && !dotdotchecked && (ndp->ni_rootdir != rootvnode)) {
@@ -1983,9 +2010,16 @@ skiprsrcfork:
 		} else {
 			if (!locked) {
 				vp = cache_lookup_smr(dp, cnp, &vvid);
+				if (!vid_is_same(dp, vid)) {
+					vp = NULLVP;
+					needs_lock = true;
+					vfs_smr_leave();
+					goto prep_lock_retry;
+				}
 			} else {
 				vp = cache_lookup_locked(dp, cnp, &vvid);
 			}
+
 
 			if (!vp) {
 				break;
@@ -2041,10 +2075,30 @@ skiprsrcfork:
 			break;
 		}
 
-		if ((mp = vp->v_mountedhere) && ((cnp->cn_flags & NOCROSSMOUNT) == 0)) {
-			vnode_t tmp_vp = mp->mnt_realrootvp;
-			int tmp_vid = mp->mnt_realrootvp_vid;
+		/*
+		 * v_mountedhere is PAC protected which means vp has to be a VDIR
+		 * to access that pointer as v_mountedhere. However, if we don't
+		 * have the name cache lock or an iocount (which we won't in the
+		 * !locked case) we can't guarantee that. So we try to detect it
+		 * via other fields to avoid having to dereference v_mountedhere
+		 * when we don't need to. Note that in theory if entire reclaim
+		 * happens between the time we check can_check_v_mountedhere()
+		 * and the subsequent access this will still fail but the fields
+		 * we check make that exceedingly unlikely and will result in
+		 * the chances of that happening being practically zero (but not
+		 * zero).
+		 */
+		if ((locked || can_check_v_mountedhere(vp)) &&
+		    (mp = vp->v_mountedhere) && ((cnp->cn_flags & NOCROSSMOUNT) == 0)) {
+			vnode_t tmp_vp;
+			int tmp_vid;
 
+			if (!(locked || vid_is_same(vp, vvid))) {
+				vp = NULL;
+				break;
+			}
+			tmp_vp = mp->mnt_realrootvp;
+			tmp_vid = mp->mnt_realrootvp_vid;
 			if (tmp_vp == NULLVP || mp->mnt_generation != mount_generation ||
 			    tmp_vid != tmp_vp->v_id) {
 				break;
@@ -2076,6 +2130,10 @@ skiprsrcfork:
 		}
 #endif /* CONFIG_TRIGGERS */
 
+		if (!(locked || vid_is_same(vp, vvid))) {
+			vp = NULL;
+			break;
+		}
 
 		dp = vp;
 		vid = vvid;
@@ -2095,6 +2153,7 @@ skiprsrcfork:
 			vvid = 0;
 		}
 		if (!vnode_hold_smr(dp)) {
+			vfs_smr_leave();
 			if (vp) {
 				vnode_drop(vp);
 				vp = NULLVP;
@@ -2280,7 +2339,6 @@ errorout:
 	return error;
 
 prep_lock_retry:
-	vfs_smr_leave();
 	restore_ndp_state(ndp, cnp, &saved_state);
 	dp = start_dp;
 	goto retry;
@@ -3022,6 +3080,14 @@ resize_namecache(int newsize)
 	}
 
 	NAME_CACHE_LOCK();
+
+	/* No need to switch if the hash table size hasn't changed. */
+	if (new_size == nchash) {
+		NAME_CACHE_UNLOCK();
+		hashdestroy(new_table, M_CACHE, new_size - 1);
+		return 0;
+	}
+
 	// do the switch!
 	old_table = nchashtbl;
 	nchashtbl = new_table;
@@ -3163,7 +3229,9 @@ cache_purge(vnode_t vp)
 
 	NAME_CACHE_UNLOCK();
 
-	kauth_cred_set(&tcred, NOCRED);
+	if (IS_VALID_CRED(tcred)) {
+		kauth_cred_unref(&tcred);
+	}
 }
 
 /*

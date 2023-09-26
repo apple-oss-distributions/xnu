@@ -568,6 +568,8 @@ struct vnode_trigger_param {
 #define VNODE_ATTR_va_clone_id          (1LL<<44)       /* 100000000000 */
 #define VNODE_ATTR_va_extflags          (1LL<<45)       /* 200000000000 */
 #define VNODE_ATTR_va_recursive_gencount (1LL<<46)      /* 400000000000 */
+#define VNODE_ATTR_va_attribution_tag    (1LL<<47)      /* 800000000000 */
+#define VNODE_ATTR_va_clone_refcnt       (1LL<<48)      /* 1000000000000 */
 
 #define VNODE_ATTR_BIT(n)       (VNODE_ATTR_ ## n)
 
@@ -620,7 +622,10 @@ struct vnode_trigger_param {
 	                        VNODE_ATTR_BIT(va_private_size) |       \
 	                        VNODE_ATTR_BIT(va_clone_id) |           \
 	                        VNODE_ATTR_BIT(va_extflags) |           \
-	                        VNODE_ATTR_BIT(va_recursive_gencount))
+	                        VNODE_ATTR_BIT(va_recursive_gencount) | \
+	                        VNODE_ATTR_BIT(va_attribution_tag) |    \
+	                        VNODE_ATTR_BIT(va_clone_refcnt))
+
 
 /*
  * Read-only attributes.
@@ -653,7 +658,9 @@ struct vnode_trigger_param {
 	                        VNODE_ATTR_BIT(va_private_size) |       \
 	                        VNODE_ATTR_BIT(va_clone_id) |           \
 	                        VNODE_ATTR_BIT(va_extflags) |           \
-	                        VNODE_ATTR_BIT(va_recursive_gencount))
+	                        VNODE_ATTR_BIT(va_recursive_gencount) | \
+	                        VNODE_ATTR_BIT(va_attribution_tag) |    \
+	                        VNODE_ATTR_BIT(va_clone_refcnt))
 
 /*
  * Attributes that can be applied to a new file object.
@@ -761,6 +768,8 @@ struct vnode_attr {
 	uint64_t va_clone_id;     /* If a file is cloned this is a unique id shared by all "perfect" clones */
 	uint64_t va_extflags;     /* extended file/directory flags */
 	uint64_t va_recursive_gencount; /* for dir-stats enabled directories */
+	uint64_t va_attribution_tag;    /* a 64 bit hash of the bundle name associated with this file */
+	uint32_t va_clone_refcnt;       /* the number of "perfect" clones sharing the same clone_id */
 
 	/* add new fields here only */
 };
@@ -828,6 +837,9 @@ extern int              vttoif_tab[];
 #define VNODE_REMOVE_SKIP_NAMESPACE_EVENT       0x0002 /* Do not upcall to userland handlers */
 #define VNODE_REMOVE_NO_AUDIT_PATH              0x0004 /* Do not audit the path */
 #define VNODE_REMOVE_DATALESS_DIR               0x0008 /* Special handling for removing a dataless directory without materialization */
+#ifdef BSD_KERNEL_PRIVATE
+#define VNODE_REMOVE_NOFOLLOW_ANY               0x0010
+#endif
 
 /* VNOP_READDIR flags: */
 #define VNODE_READDIR_EXTENDED    0x0001   /* use extended directory entries */
@@ -1687,6 +1699,10 @@ int vnode_getwithvid_drainok(vnode_t, uint32_t);
  */
 int     vnode_getwithref(vnode_t vp);
 
+#ifdef BSD_KERNEL_PRIVATE
+int vnode_getwithref_noblock(vnode_t vp);
+#endif /* BSD_KERNEL_PRIVATE */
+
 /*!
  *  @function vnode_put
  *  @abstract Decrement the iocount on a vnode.
@@ -1788,7 +1804,7 @@ int     vnode_recycle(vnode_t vp);
 	                                VNODE_ATTR_BIT(va_fileid)| \
 	                                VNODE_ATTR_BIT(va_mode)  | \
 	                                VNODE_ATTR_BIT(va_uid)   | \
-	                                VNODE_ATTR_BIT(va_gid)   | \
+	                                VNODE_ATTR_BIT(va_document_id)   | \
 	                                VNODE_ATTR_BIT(va_dirlinkcount) | \
 	                                VNODE_ATTR_BIT(va_nlink))
 
@@ -2170,6 +2186,7 @@ int     vnode_iterate(struct mount *mp, int flags, int (*callout)(struct vnode *
 #define VNODE_ALWAYS            0x400
 #define VNODE_DRAINO            0x800
 #define VNODE_PAGER             0x1000
+#define VNODE_NOBLOCK           0x2000
 #endif /* BSD_KERNEL_PRIVATE */
 
 /*
@@ -2436,6 +2453,14 @@ thread_t vfs_context_thread(vfs_context_t ctx);
  * @return The task for this context, or NULL, if there is not one.
  */
 task_t vfs_context_task(vfs_context_t ctx);
+
+/*!
+ *  @function vnode_isauthfs
+ *  @abstract Determine if the given vnode is on an authenticated volume.
+ *  @param vp Vnode to examine.
+ *  @result Non-zero to indicate that the vnode is on an authenticated volume. Zero otherwise.
+ */
+int vnode_isauthfs(vnode_t vp);
 
 #endif /* KERNEL_PRIVATE */
 

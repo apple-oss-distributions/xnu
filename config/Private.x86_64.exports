@@ -90,7 +90,7 @@ _dqreclaim
 
 # HFS Kext Requirements
 _file_vnode
-_proc_ucred
+_proc_ucred:_proc_ucred_unsafe
 _suser
 
 #For copyout_shim private KPI

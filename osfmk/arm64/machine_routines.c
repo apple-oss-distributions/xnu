@@ -118,6 +118,9 @@ extern unsigned long segSizeLAST;
 extern vm_offset_t   vm_kernelcache_base;
 extern vm_offset_t   vm_kernelcache_top;
 
+/* Location of the physmap / physical aperture */
+extern uint64_t physmap_base;
+
 extern vm_offset_t arm_vm_kernelcache_phys_start;
 extern vm_offset_t arm_vm_kernelcache_phys_end;
 
@@ -206,6 +209,14 @@ ml_cpu_signal_type(unsigned int cpu_mpidr, uint32_t type)
 	uint64_t x = type | MPIDR_CPU_ID(cpu_mpidr);
 	MSR("S3_5_C15_C0_1", x);
 #endif
+	/* The recommended local/global IPI sequence is:
+	 *   DSB <sys> (This ensures visibility of e.g. older stores to the
+	 *     pending CPU signals bit vector in DRAM prior to IPI reception,
+	 *     and is present in cpu_signal_internal())
+	 *   MSR S3_5_C15_C0_1, Xt
+	 *   ISB
+	 */
+	__builtin_arm_isb(ISB_SY);
 }
 #endif
 
@@ -322,7 +333,7 @@ wfe_process_recommendation(void)
 			/* Issue WFE until the recommendation expires,
 			 * with IRQs unmasked.
 			 */
-			ipending = wfe_to_deadline_or_interrupt(cid, wfe_deadline, cdp, true);
+			ipending = wfe_to_deadline_or_interrupt(cid, wfe_deadline, cdp, true, true);
 #if DEVELOPMENT || DEBUG
 			KDBG(CPUPM_IDLE_WFE | DBG_FUNC_END, ipending, cdp->wfe_count - wc, wfe_deadline, cdp->cpu_stat.irq_ex_cnt_wake);
 #endif
@@ -520,10 +531,6 @@ machine_lockdown(void)
 #endif
 #endif /* KERNEL_INTEGRITY_WT */
 
-#if XNU_MONITOR
-	pmap_lockdown_ppl();
-#endif
-
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
 	/* KTRR
 	 *
@@ -533,6 +540,10 @@ machine_lockdown(void)
 
 	rorgn_lockdown();
 #endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
+
+#if XNU_MONITOR
+	pmap_lockdown_ppl();
+#endif
 
 #endif /* CONFIG_KERNEL_INTEGRITY */
 
@@ -1109,17 +1120,21 @@ ml_parse_cpu_topology(void)
 	assert(topology_info.boot_cpu != NULL);
 	ml_read_chip_revision(&topology_info.chip_revision);
 
-	/*
-	 * Set TPIDR_EL0 to indicate the correct cpu number, as we may
-	 * not be booting from cpu 0.  Userspace will consume the current
-	 * CPU number through this register.  For non-boot cores, this is
-	 * done in start.s (start_cpu) using the cpu_number field of the
-	 * per-cpu data object.
-	 */
-	uint64_t cpuid = topology_info.boot_cpu->cpu_id;
 
-	__builtin_arm_wsr64("TPIDR_EL0", cpuid & MACHDEP_TPIDR_CPUNUM_MASK);
-	assert((cpuid & MACHDEP_TPIDR_CPUNUM_MASK) == cpuid);
+	/*
+	 * Set TPIDR_EL0 to indicate the correct cpu number & cluster id,
+	 * as we may not be booting from cpu 0. Userspace will consume
+	 * the current CPU number through this register. For non-boot
+	 * cores, this is done in start.s (start_cpu) using the per-cpu
+	 * data object.
+	 */
+	ml_topology_cpu_t *boot_cpu = topology_info.boot_cpu;
+	uint64_t tpidr_el0 = ((boot_cpu->cpu_id << MACHDEP_TPIDR_CPUNUM_SHIFT) & MACHDEP_TPIDR_CPUNUM_MASK) | \
+	    ((boot_cpu->cluster_id << MACHDEP_TPIDR_CLUSTERID_SHIFT) & MACHDEP_TPIDR_CLUSTERID_MASK);
+	assert(((tpidr_el0 & MACHDEP_TPIDR_CPUNUM_MASK) >> MACHDEP_TPIDR_CPUNUM_SHIFT) == boot_cpu->cpu_id);
+	assert(((tpidr_el0 & MACHDEP_TPIDR_CLUSTERID_MASK) >> MACHDEP_TPIDR_CLUSTERID_SHIFT) == boot_cpu->cluster_id);
+	__builtin_arm_wsr64("TPIDR_EL0", tpidr_el0);
+
 	__builtin_arm_wsr64("TPIDRRO_EL0", 0);
 }
 
@@ -1253,6 +1268,16 @@ unsigned int
 ml_get_first_cpu_id(unsigned int cluster_id)
 {
 	return topology_info.clusters[cluster_id].first_cpu_id;
+}
+
+static_assert(MAX_CPUS <= 256, "MAX_CPUS must fit in _COMM_PAGE_CPU_TO_CLUSTER; Increase table size if needed");
+
+void
+ml_map_cpus_to_clusters(uint8_t *table)
+{
+	for (uint16_t cpu_id = 0; cpu_id < topology_info.num_cpus; cpu_id++) {
+		*(table + cpu_id) = (uint8_t)(topology_info.cpus[cpu_id].cluster_id);
+	}
 }
 
 /*
@@ -1400,6 +1425,16 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 	this_cpu_datap->cpu_l2_size = in_processor_info->l2_cache_size;
 	this_cpu_datap->cpu_l3_id = in_processor_info->l3_cache_id;
 	this_cpu_datap->cpu_l3_size = in_processor_info->l3_cache_size;
+
+	/*
+	 * Encode cpu_id, cluster_id to be stored in TPIDR_EL0 (see
+	 * cswitch.s:set_thread_registers, start.s:start_cpu) for consumption
+	 * by userspace.
+	 */
+	this_cpu_datap->cpu_tpidr_el0 = ((this_cpu_datap->cpu_number << MACHDEP_TPIDR_CPUNUM_SHIFT) & MACHDEP_TPIDR_CPUNUM_MASK) | \
+	    ((this_cpu_datap->cpu_cluster_id << MACHDEP_TPIDR_CLUSTERID_SHIFT) & MACHDEP_TPIDR_CLUSTERID_MASK);
+	assert(((this_cpu_datap->cpu_tpidr_el0 & MACHDEP_TPIDR_CPUNUM_MASK) >> MACHDEP_TPIDR_CPUNUM_SHIFT) == this_cpu_datap->cpu_number);
+	assert(((this_cpu_datap->cpu_tpidr_el0 & MACHDEP_TPIDR_CLUSTERID_MASK) >> MACHDEP_TPIDR_CLUSTERID_SHIFT) == this_cpu_datap->cpu_cluster_id);
 
 #if HAS_CLUSTER
 	this_cpu_datap->cluster_master = !OSTestAndSet(this_cpu_datap->cpu_cluster_id, &cluster_initialized);
@@ -1630,8 +1665,8 @@ ml_static_protect(
 	ppnum_t       ppn;
 	kern_return_t result = KERN_SUCCESS;
 
-	if (vaddr < VM_MIN_KERNEL_ADDRESS) {
-		panic("ml_static_protect(): %p < %p", (void *) vaddr, (void *) VM_MIN_KERNEL_ADDRESS);
+	if (vaddr < physmap_base) {
+		panic("ml_static_protect(): %p < %p", (void *) vaddr, (void *) physmap_base);
 		return KERN_FAILURE;
 	}
 
@@ -1761,7 +1796,7 @@ ml_static_mfree(
 
 
 	/* It is acceptable (if bad) to fail to free. */
-	if (vaddr < VM_MIN_KERNEL_ADDRESS) {
+	if (vaddr < physmap_base) {
 		return;
 	}
 
@@ -2032,10 +2067,19 @@ ml_set_decrementer(uint32_t dec_value)
 }
 
 /**
- * Reads from a non-speculative view of the timebase.  If no such view exists on
- * this CPU, then an ISB is used to prevent speculation instead.
- *
- * @return the current value of the hardware timebase
+ * Perform a read of the timebase which is permitted to be executed
+ * speculatively and/or out of program order.
+ */
+static inline uint64_t
+speculative_timebase(void)
+{
+	return __builtin_arm_rsr64("CNTVCT_EL0");
+}
+
+/**
+ * Read a non-speculative view of the timebase if one is available,
+ * otherwise fallback on an ISB to prevent prevent speculation and
+ * enforce ordering.
  */
 static inline uint64_t
 nonspeculative_timebase(void)
@@ -2049,7 +2093,7 @@ nonspeculative_timebase(void)
 	// "Reads of CNT[PV]CT[_EL0] can occur speculatively and out of order relative
 	// to other instructions executed on the same processor."
 	__builtin_arm_isb(ISB_SY);
-	return __builtin_arm_rsr64("CNTVCT_EL0");
+	return speculative_timebase();
 #endif
 }
 
@@ -2121,7 +2165,7 @@ ml_get_speculative_timebase(void)
 	do {
 		timebase = getCpuDatap()->cpu_base_timebase;
 		os_compiler_barrier();
-		clock = __builtin_arm_rsr64("CNTVCT_EL0");
+		clock = speculative_timebase();
 
 		os_compiler_barrier();
 	} while (getCpuDatap()->cpu_base_timebase != timebase);
@@ -2782,3 +2826,4 @@ ml_get_backtrace_pc(struct arm_saved_state *state)
 
 	return get_saved_state_pc(state);
 }
+

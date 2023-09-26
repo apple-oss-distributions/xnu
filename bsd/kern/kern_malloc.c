@@ -77,7 +77,7 @@
 #include <libkern/libkern.h>
 
 ZONE_VIEW_DEFINE(ZV_NAMEI, "vfs.namei", KHEAP_ID_DATA_BUFFERS, MAXPATHLEN);
-KALLOC_HEAP_DEFINE(KERN_OS_MALLOC, "kern_os_malloc", KHEAP_ID_DEFAULT);
+KALLOC_HEAP_DEFINE(KERN_OS_MALLOC, "kern_os_malloc", KHEAP_ID_KT_VAR);
 
 /*
  * macOS Only deprecated interfaces, here only for legacy reasons.
@@ -392,19 +392,6 @@ sysctl_zleak_threshold SYSCTL_HANDLER_ARGS
 
 	return mach_to_bsd_errno(zleak_update_threshold(arg1, value));
 }
-
-/*
- * kern.zleak.global_threshold
- *
- * Set the global zleak threshold size (in bytes).  If the zone map
- * grows larger than this value, zleaks are automatically activated.
- *
- * The default value is set in zleak_init().
- */
-SYSCTL_PROC(_kern_zleak, OID_AUTO, global_threshold,
-    CTLTYPE_QUAD | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &zleak_global_tracking_threshold, 0, sysctl_zleak_threshold, "Q",
-    "zleak global threshold");
 
 /*
  * kern.zleak.zone_threshold

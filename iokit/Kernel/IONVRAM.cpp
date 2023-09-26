@@ -135,7 +135,16 @@ class IONVRAMV3Handler;
 	        IORWLockAssert(_variableLock, kIORWLockAssertWrite); \
 })
 
-#define ENTITLED_MODIFY_ONLY ((1 << kIONVRAMOperationWrite) | (1 << kIONVRAMOperationDelete) | (1 << kIONVRAMOperationObliterate) | (1 << kIONVRAMOperationReset))
+// MOD = Write, Delete
+// RST = Reset, Obliterate
+// RD  = Read
+// DEL = Delete
+#define ENT_MOD_RST     ((1 << kIONVRAMOperationWrite) | (1 << kIONVRAMOperationDelete) | (1 << kIONVRAMOperationObliterate) | (1 << kIONVRAMOperationReset))
+#define ENT_MOD_RD      ((1 << kIONVRAMOperationRead) | (1 << kIONVRAMOperationWrite) | (1 << kIONVRAMOperationDelete))
+#define ENT_MOD         ((1 << kIONVRAMOperationWrite) | (1 << kIONVRAMOperationDelete))
+#define ENT_RST         ((1 << kIONVRAMOperationObliterate) | (1 << kIONVRAMOperationReset))
+#define ENT_RD          ((1 << kIONVRAMOperationRead))
+#define ENT_DEL         ((1 << kIONVRAMOperationDelete))
 
 enum NVRAMVersion {
 	kNVRAMVersionUnknown,
@@ -152,6 +161,9 @@ UUID_DEFINE(gAppleSystemVariableGuid, 0x40, 0xA0, 0xDD, 0xD2, 0x77, 0xF8, 0x43, 
 // Apple NVRAM Variable namespace (APPLE_VENDOR_OS_VARIABLE_GUID)
 // 7C436110-AB2A-4BBB-A880-FE41995C9F82
 UUID_DEFINE(gAppleNVRAMGuid, 0x7C, 0x43, 0x61, 0x10, 0xAB, 0x2A, 0x4B, 0xBB, 0xA8, 0x80, 0xFE, 0x41, 0x99, 0x5C, 0x9F, 0x82);
+
+// Prefix for kernel-only variables
+#define KERNEL_ONLY_VAR_NAME_PREFIX "krn."
 
 static TUNABLE(bool, gNVRAMLogging, "nvram-log", false);
 static bool gInternalBuild = false;
@@ -187,6 +199,7 @@ VariableTypeEntry gVariableTypes[] = {
 	{"input-device", kOFVariableTypeString},
 	{"input-device-1", kOFVariableTypeString},
 	{"little-endian?", kOFVariableTypeBoolean},
+	{"ldm", kOFVariableTypeBoolean},
 	{"load-base", kOFVariableTypeNumber},
 	{"mouse-device", kOFVariableTypeString},
 	{"nvramrc", kOFVariableTypeString},
@@ -209,7 +222,11 @@ VariableTypeEntry gVariableTypes[] = {
 	{"use-nvramrc?", kOFVariableTypeBoolean},
 	{"virt-base", kOFVariableTypeNumber},
 	{"virt-size", kOFVariableTypeNumber},
-
+	// Variables used for testing
+	{"test-bool", kOFVariableTypeBoolean},
+	{"test-num", kOFVariableTypeNumber},
+	{"test-str", kOFVariableTypeString},
+	{"test-data", kOFVariableTypeData},
 #if !defined(__x86_64__)
 	{"acc-cm-override-charger-count", kOFVariableTypeNumber},
 	{"acc-cm-override-count", kOFVariableTypeNumber},
@@ -266,6 +283,7 @@ VariablePermissionEntry gVariablePermissions[] = {
 	{"acc-mb-ld-lifetime", .p.Bits.KernelOnly = 1},
 	{"backlight-level", .p.Bits.UserWrite = 1},
 	{"backlight-nits", .p.Bits.UserWrite = 1},
+	{"ldm", .p.Bits.KernelOnly = 1},
 	{"com.apple.System.boot-nonce", .p.Bits.KernelOnly = 1},
 	{"com.apple.System.sep.art", .p.Bits.KernelOnly = 1},
 	{"darkboot", .p.Bits.UserWrite = 1},
@@ -291,9 +309,20 @@ typedef struct {
 // variable-guid pair entries that require entitlement check to do specified nvram operations
 static const
 VariableEntitlementEntry gVariableEntitlements[] = {
-	{ENTITLED_MODIFY_ONLY, &gAppleNVRAMGuid, "ownership-warning", "com.apple.private.iokit.ddl-write"},
-	// Variable used for testing entitlement
-	{ENTITLED_MODIFY_ONLY, &gAppleNVRAMGuid, "testEntitlement", "com.apple.private.iokit.testentitlement"},
+	{ENT_MOD_RST, &gAppleNVRAMGuid, "ownership-warning", "com.apple.private.iokit.ddl-write"},
+	{ENT_MOD, &gAppleSystemVariableGuid, "BluetoothInfo", "com.apple.private.iokit.nvram-bluetooth"},
+	{ENT_MOD, &gAppleSystemVariableGuid, "BluetoothUHEDevices", "com.apple.private.iokit.nvram-bluetooth"},
+	{ENT_MOD, &gAppleNVRAMGuid, "bluetoothExternalDongleFailed", "com.apple.private.iokit.nvram-bluetooth"},
+	{ENT_MOD, &gAppleNVRAMGuid, "bluetoothInternalControllerInfo", "com.apple.private.iokit.nvram-bluetooth"},
+	// Variables used for testing entitlement
+	{ENT_MOD_RST, &gAppleNVRAMGuid, "testEntModRst", "com.apple.private.iokit.testEntModRst"},
+	{ENT_MOD_RST, &gAppleSystemVariableGuid, "testEntModRstSys", "com.apple.private.iokit.testEntModRst"},
+	{ENT_RST, &gAppleNVRAMGuid, "testEntRst", "com.apple.private.iokit.testEntRst"},
+	{ENT_RST, &gAppleSystemVariableGuid, "testEntRstSys", "com.apple.private.iokit.testEntRst"},
+	{ENT_RD, &gAppleNVRAMGuid, "testEntRd", "com.apple.private.iokit.testEntRd"},
+	{ENT_RD, &gAppleSystemVariableGuid, "testEntRdSys", "com.apple.private.iokit.testEntRd"},
+	{ENT_DEL, &gAppleNVRAMGuid, "testEntDel", "com.apple.private.iokit.testEntDel"},
+	{ENT_DEL, &gAppleSystemVariableGuid, "testEntDelSys", "com.apple.private.iokit.testEntDel"},
 	{0, &UUID_NULL, nullptr, nullptr}
 };
 
@@ -460,9 +489,6 @@ translateGUID(const uuid_t varGuid, const char *variableName, uuid_t destGuid, b
 
 	if (systemActive) {
 		if (variableInAllowList(variableName)) {
-			if (!systemGuid) {
-				DEBUG_ERROR("System GUID not supplied for %s\n", variableName);
-			}
 			DEBUG_INFO("Using system GUID due to allow list\n");
 			uuid_copy(destGuid, gAppleSystemVariableGuid);
 		} else if (systemGuid) {
@@ -507,13 +533,15 @@ verifyVarEntitlement(const uuid_t varGuid, const char *varName, IONVRAMOperation
 	const VariableEntitlementEntry *entry;
 	*veChecked = false;
 
+	translateGUID(varGuid, varName, translatedGuid, systemActive);
+
 	entry = gVariableEntitlements;
 	while ((entry != nullptr) && (entry->varName != nullptr)) {
-		translateGUID(varGuid, varName, translatedGuid, systemActive);
 		if ((strcmp(entry->varName, varName) == 0) && (uuid_compare(translatedGuid, *(entry->varGuid)) == 0)) {
 			// check if task entitlement check is required for this operation
 			if (entry->checkOp & (1 << op)) {
 				*veChecked = true;
+				DEBUG_INFO("Checking entitlement %s for %s for operation %s\n", entry->varEntitlement, varName, getNVRAMOpString(op));
 				return IOCurrentTaskHasEntitlement(entry->varEntitlement);
 			}
 			break;
@@ -522,6 +550,16 @@ verifyVarEntitlement(const uuid_t varGuid, const char *varName, IONVRAMOperation
 	}
 
 	return true;
+}
+
+static bool
+kernelOnlyVar(const uuid_t varGuid, const char *varName)
+{
+	if (strncmp(varName, KERNEL_ONLY_VAR_NAME_PREFIX, sizeof(KERNEL_ONLY_VAR_NAME_PREFIX) - 1) == 0) {
+		return true;
+	}
+
+	return false;
 }
 
 static bool
@@ -540,7 +578,7 @@ verifyPermission(IONVRAMOperation op, const uuid_t varGuid, const char *varName,
 
 	kernel = current_task() == kernel_task;
 
-	if (perm.Bits.KernelOnly) {
+	if (perm.Bits.KernelOnly || kernelOnlyVar(varGuid, varName)) {
 		DEBUG_INFO("KernelOnly access for %s, kernel=%d\n", varName, kernel);
 		ok = kernel;
 		goto exit;
@@ -561,7 +599,7 @@ verifyPermission(IONVRAMOperation op, const uuid_t varGuid, const char *varName,
 	case kIONVRAMOperationRead:
 		if (systemGuid && perm.Bits.SystemReadHidden) {
 			ok = systemReadHiddenAllow;
-		} else if (kernel || admin || readEntitled || perm.Bits.FullAccess) {
+		} else if (kernel || admin || readEntitled || perm.Bits.FullAccess || varEntitled) {
 			ok = true;
 		}
 		break;
@@ -573,6 +611,8 @@ verifyPermission(IONVRAMOperation op, const uuid_t varGuid, const char *varName,
 					if (!systemAllow) {
 						DEBUG_ERROR("Allowed write to system region when NOT entitled for %s\n", varName);
 					}
+				} else if (varEntitled) {
+					DEBUG_INFO("Allowed write to system region using variable specific entitlement for %s\n", varName);
 				} else if (!systemAllow) {
 					DEBUG_ERROR("Not entitled for system region writes for %s\n", varName);
 					break;
@@ -602,6 +642,8 @@ verifyPermission(IONVRAMOperation op, const uuid_t varGuid, const char *varName,
 					if (!systemAllow) {
 						DEBUG_ERROR("Allowed delete to system region when NOT entitled for %s\n", varName);
 					}
+				} else if (varEntitled) {
+					DEBUG_INFO("Allowed delete to system region using variable specific entitlement for %s\n", varName);
 				} else if (!systemAllow) {
 					DEBUG_ERROR("Not entitled for system region deletes for %s\n", varName);
 					break;
@@ -645,6 +687,7 @@ skipKey(const OSSymbol *aKey)
 	       aKey->isEqualTo(kIOBSDMinorKey) ||
 	       aKey->isEqualTo(kIOBSDUnitKey) ||
 	       aKey->isEqualTo(kIOUserServicePropertiesKey) ||
+	       aKey->isEqualTo(kIOExclaveAssignedKey) ||
 	       aKey->isEqualTo(kIOMatchCategoryKey);
 }
 
@@ -1361,6 +1404,7 @@ IODTNVRAM::initImageFormat(void)
 	require(data != nullptr, skip);
 
 	size = *((uint32_t*)data->getBytesNoCopy());
+	require_action(size != 0, skip, panic("NVRAM size is 0 bytes, possibly due to bad config with iBoot + xnu mismatch"));
 	DEBUG_ALWAYS("NVRAM size is %u bytes\n", size);
 
 	prop = entry->copyProperty(proxyDataKey);
@@ -1769,21 +1813,21 @@ IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t guid, const char *name, OSObj
 	case kOFVariableTypeBoolean:
 		propObject = OSDynamicPtrCast<OSBoolean>(sharedObject);
 		if (propObject) {
-			record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "write", "%s to %d", name, ((OSBoolean *)propObject.get())->getValue());
+			record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "write", "%s as bool to %d", name, ((OSBoolean *)propObject.get())->getValue());
 		}
 		break;
 
 	case kOFVariableTypeNumber:
 		propObject = OSDynamicPtrCast<OSNumber>(sharedObject);
 		if (propObject) {
-			record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "write", "%s to %#llx", name, ((OSNumber *)propObject.get())->unsigned64BitValue());
+			record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "write", "%s as number to %#llx", name, ((OSNumber *)propObject.get())->unsigned64BitValue());
 		}
 		break;
 
 	case kOFVariableTypeString:
 		propObject = OSDynamicPtrCast<OSString>(sharedObject);
 		if (propObject != nullptr) {
-			record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "write", "%s to %s", name, ((OSString *)propObject.get())->getCStringNoCopy());
+			record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "write", "%s as string to %s", name, ((OSString *)propObject.get())->getCStringNoCopy());
 
 			propDataSize = (OSDynamicPtrCast<OSString>(propObject))->getLength();
 
@@ -1807,7 +1851,7 @@ IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t guid, const char *name, OSObj
 
 		if (propObject != nullptr) {
 			propDataSize = (OSDynamicPtrCast<OSData>(propObject))->getLength();
-			record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "write", "%s with data size %#x", name, ((OSData *)propObject.get())->getLength());
+			record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "write", "%s as data with size %#x", name, ((OSData *)propObject.get())->getLength());
 		}
 
 #if defined(XNU_TARGET_OS_OSX)
@@ -1821,7 +1865,7 @@ IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t guid, const char *name, OSObj
 	}
 
 	if (propObject == nullptr) {
-		DEBUG_INFO("No property object\n");
+		DEBUG_ERROR("No property object\n");
 		ret = kIOReturnBadArgument;
 		goto exit;
 	}

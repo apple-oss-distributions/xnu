@@ -344,6 +344,11 @@ SECURITY_READ_ONLY_LATE(unsigned long)   real_phys_size;
 SECURITY_READ_ONLY_LATE(vm_map_address_t) physmap_base = (vm_map_address_t)0;
 SECURITY_READ_ONLY_LATE(vm_map_address_t) physmap_end = (vm_map_address_t)0;
 
+/**
+ * First physical address freely available to xnu.
+ */
+SECURITY_READ_ONLY_LATE(addr64_t) first_avail_phys = 0;
+
 /*
  * Bounds of the kernelcache; used for accounting.
  */
@@ -1854,9 +1859,11 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	} else {
 		max_mem_actual = mem_actual;
 	}
+#if !defined(ARM_LARGE_MEMORY)
 	if (mem_size >= ((VM_MAX_KERNEL_ADDRESS - VM_MIN_KERNEL_ADDRESS) / 2)) {
 		panic("Unsupported memory configuration %lx", mem_size);
 	}
+#endif
 
 #if defined(ARM_LARGE_MEMORY)
 	unsigned long physmap_l1_entries = ((real_phys_size + ARM64_PHYSMAP_SLIDE_RANGE) >> ARM_TT_L1_SHIFT) + 1;
@@ -1937,7 +1944,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	 * after bootstrap complete, xnu can warm start with a single 16KB page mapping
 	 * to trampoline to KVA. this requires only 3 pages to stay resident.
 	 */
-	avail_start = args->topOfKernelData;
+	first_avail_phys = avail_start = args->topOfKernelData;
 
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
 	arm_replace_identity_map();

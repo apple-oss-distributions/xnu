@@ -4,5 +4,7 @@
 <dict>
 	<key>com.apple.security.get-movable-control-port</key>
 	<true/>
+	<key>com.apple.private.set-exception-port</key>
+	<true/>
 </dict>
 </plist>

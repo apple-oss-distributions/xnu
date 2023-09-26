@@ -1720,17 +1720,33 @@ def GetInPcb(pcb, proto):
 def CalcMbufInList(mpkt, pkt_cnt, buf_byte_cnt, mbuf_cnt, mbuf_cluster_cnt):
     while (mpkt != 0):
         mp = mpkt
-        mpkt = mpkt.m_hdr.mh_nextpkt
+        if kern.globals.mb_uses_mcache == 1:
+            mpkt = mp.m_hdr.mh_nextpktpkt
+        else:
+            mpkt = mp.M_hdr_common.M_hdr.mh_nextpkt
         pkt_cnt[0] +=1
         while (mp != 0):
+            if kern.globals.mb_uses_mcache == 1:
+                mnext = mp.m_hdr.mh_next
+                mflags = mp.m_hdr.mh_flags
+                mtype = mp.m_hdr.mh_type
+            else:
+                mnext = mp.M_hdr_common.M_hdr.mh_next
+                mflags = mp.M_hdr_common.M_hdr.mh_flags
+                mtype = mp.M_hdr_common.M_hdr.mh_type
+            print(" mp: 0x{:x} mh_next: 0x{:x}".format(mp, mnext))
             mbuf_cnt[0] += 1
-            buf_byte_cnt[int(mp.m_hdr.mh_type)] += 256
+            buf_byte_cnt[int(mtype)] += 256
             buf_byte_cnt[Mbuf_Type.MT_LAST] += 256
-            if (mp.m_hdr.mh_flags & 0x01):
+            if (mflags & 0x01):
                 mbuf_cluster_cnt[0] += 1
-                buf_byte_cnt[int(mp.m_hdr.mh_type)] += mp.M_dat.MH.MH_dat.MH_ext.ext_size
-                buf_byte_cnt[Mbuf_Type.MT_LAST] += mp.M_dat.MH.MH_dat.MH_ext.ext_size
-            mp = mp.m_hdr.mh_next
+                if kern.globals.mb_uses_mcache == 1:
+                    extsize = mp.M_dat.MH.MH_dat.MH_ext.ext_size
+                else:
+                    extsize = mp.M_hdr_common.M_ext.ext_size
+                buf_byte_cnt[int(mtype)] += extsize
+                buf_byte_cnt[Mbuf_Type.MT_LAST] += extsize
+            mp = mnext
 
 def CalcMbufInSB(so, snd_cc, snd_buf, rcv_cc, rcv_buf, snd_record_cnt, rcv_record_cnt, snd_mbuf_cnt, rcv_mbuf_cnt, snd_mbuf_cluster_cnt, rcv_mbuf_cluster_cnt):
     snd_cc[0] += so.so_snd.sb_cc
@@ -1739,6 +1755,42 @@ def CalcMbufInSB(so, snd_cc, snd_buf, rcv_cc, rcv_buf, snd_record_cnt, rcv_recor
     rcv_cc[0] += so.so_rcv.sb_cc
     mpkt = so.so_rcv.sb_mb
     CalcMbufInList(mpkt, rcv_record_cnt, rcv_buf, rcv_mbuf_cnt, rcv_mbuf_cluster_cnt)
+
+# Macro: show_socket_sb_mbuf_usage
+@lldb_command('show_socket_sb_mbuf_usage')
+def ShowSocketSbMbufUsage(cmd_args=None):
+    """ Display for a socket the mbuf usage of the send and receive socket buffers
+    """
+    if (cmd_args == None or len(cmd_args) == 0):
+            print("Missing argument 0 in user function.")
+            return
+    so = kern.GetValueFromAddress(cmd_args[0], 'socket *')
+    out_string = ""
+    if (so != 0):
+        snd_mbuf_cnt = [0]
+        snd_mbuf_cluster_cnt = [0]
+        snd_record_cnt = [0]
+        snd_cc = [0]
+        snd_buf = [0] * (Mbuf_Type.MT_LAST + 1)
+        rcv_mbuf_cnt = [0]
+        rcv_mbuf_cluster_cnt = [0]
+        rcv_record_cnt = [0]
+        rcv_cc = [0]
+        rcv_buf = [0] * (Mbuf_Type.MT_LAST + 1)
+        total_mbuf_bytes = 0
+        CalcMbufInSB(so, snd_cc, snd_buf, rcv_cc, rcv_buf, snd_record_cnt, rcv_record_cnt, snd_mbuf_cnt, rcv_mbuf_cnt, snd_mbuf_cluster_cnt, rcv_mbuf_cluster_cnt)
+        out_string += "total send mbuf count: " + str(int(snd_mbuf_cnt[0])) + " receive mbuf count: " + str(int(rcv_mbuf_cnt[0])) + "\n"
+        out_string += "total send mbuf cluster count: " + str(int(snd_mbuf_cluster_cnt[0])) + " receive mbuf cluster count: " + str(int(rcv_mbuf_cluster_cnt[0])) + "\n"
+        out_string += "total send record count: " + str(int(snd_record_cnt[0])) + " receive record count: " + str(int(rcv_record_cnt[0])) + "\n"
+        out_string += "total snd_cc (total bytes in send buffers): " + str(int(snd_cc[0])) + " rcv_cc (total bytes in receive buffers): " + str(int(rcv_cc[0])) + "\n"
+        out_string += "total snd_buf bytes " + str(int(snd_buf[Mbuf_Type.MT_LAST])) + " rcv_buf bytes " + str(int(rcv_buf[Mbuf_Type.MT_LAST])) + "\n"
+        for x in range(Mbuf_Type.MT_LAST):
+            if (snd_buf[x] != 0 or rcv_buf[x] != 0):
+                out_string += "total snd_buf bytes of type " + Mbuf_Type.reverse_mapping[x] + " : " + str(int(snd_buf[x])) + " total recv_buf bytes of type " + Mbuf_Type.reverse_mapping[x] + " : " + str(int(rcv_buf[x])) + "\n"
+                total_mbuf_bytes += snd_buf[x] + rcv_buf[x]
+    print(out_string)
+# EndMacro:  show_socket_sb_mbuf_usage
+
 
 def GetMptcpInfo():
     mptcp = kern.globals.mtcbinfo

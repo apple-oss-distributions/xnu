@@ -2722,6 +2722,11 @@ vc_progress_task(__unused void *arg0, __unused void *arg)
 			thread_call_enter_delayed(&vc_progress_call, vc_progress_deadline);
 		}while (FALSE);
 	}
+
+#if SCHED_HYGIENE_DEBUG
+	abandon_preemption_disable_measurement();
+#endif /* SCHED_HYGIENE_DEBUG */
+
 	simple_unlock(&vc_progress_lock);
 }
 
@@ -3144,7 +3149,7 @@ vc_draw_progress_meter(unsigned int flags, int start, int end, int pos)
 		case kDataRotate90: // left middle, bar goes down
 			rectW   = barHeight;
 			rectH   = width;
-			rectX   = ((vinfo.v_width / 3) - (barHeight / 2));
+			rectX   = (6 * vinfo.v_width) / 100 + 34 * vc_uiscale - (barHeight / 2);
 			rectY   = ((vinfo.v_height - barWidth) / 2) + i;
 			bx      = i * barHeight;
 			backRow = barHeight;
@@ -3153,14 +3158,14 @@ vc_draw_progress_meter(unsigned int flags, int start, int end, int pos)
 			rectW   = width;
 			rectH   = barHeight;
 			rectX   = ((vinfo.v_width - barWidth) / 2) + barWidth - width - i;
-			rectY   = (vinfo.v_height / 3) - (barHeight / 2);
+			rectY   = (6 * vinfo.v_height) / 100 + 34 * vc_uiscale - (barHeight / 2);
 			bx      = barWidth - width - i;
 			backRow = barWidth;
 			break;
 		case kDataRotate270: // right middle, bar goes up
 			rectW   = barHeight;
 			rectH   = width;
-			rectX   = (vinfo.v_width - (vinfo.v_width / 3) - (barHeight / 2));
+			rectX   = (94 * vinfo.v_width) / 100 - 34 * vc_uiscale - (barHeight / 2);
 			rectY   = ((vinfo.v_height - barWidth) / 2) + barWidth - width - i;
 			bx      = (barWidth - width - i) * barHeight;
 			backRow = barHeight;
@@ -3170,7 +3175,7 @@ vc_draw_progress_meter(unsigned int flags, int start, int end, int pos)
 			rectW   = width;
 			rectH   = barHeight;
 			rectX   = ((vinfo.v_width - barWidth) / 2) + i;
-			rectY   = vinfo.v_height - (vinfo.v_height / 3) - (barHeight / 2);
+			rectY   = (94 * vinfo.v_height) / 100 - 34 * vc_uiscale - (barHeight / 2);
 			bx      = i;
 			backRow = barWidth;
 			break;

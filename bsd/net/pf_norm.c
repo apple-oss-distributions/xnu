@@ -1453,7 +1453,7 @@ insert:
 		m_freem(m);
 		return NULL;
 	}
-	ftag = (struct pf_fragment_tag *)(mtag + 1);
+	ftag = (struct pf_fragment_tag *)mtag->m_tag_data;
 	ftag->ft_hdrlen = hdrlen;
 	ftag->ft_unfragpartlen = unfragpartlen;
 	ftag->ft_extoff = extoff;
@@ -1838,8 +1838,7 @@ pf_refragment6(struct ifnet *ifp, pbuf_t **pbufp, struct pf_fragment_tag *ftag)
 	maxlen = ftag->ft_maxlen;
 	frag_id = ftag->ft_id;
 	unfragpartlen = ftag->ft_unfragpartlen;
-	tag = (struct m_tag *)(void *)ftag;
-	tag = tag - 1;
+	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_PF_REASS);
 	m_tag_delete(m, tag);
 	ftag = NULL;
 	tag = NULL;

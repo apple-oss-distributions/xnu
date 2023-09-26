@@ -76,13 +76,6 @@ __BEGIN_DECLS
 #define KMEM_SMALLMAP_THRESHOLD     (KiB(256))
 #endif
 
-#if CONFIG_MAP_RANGES
-/*
- * This has been tuned for iOS only
- */
-#define VM_MAP_USER_RANGE_MAX       (GiB(12))
-#endif
-
 struct kmem_page_meta;
 
 /* Initialize the module */

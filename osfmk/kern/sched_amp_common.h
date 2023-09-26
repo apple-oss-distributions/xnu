@@ -61,7 +61,7 @@ int sched_amp_steal_threshold(processor_set_t pset, bool spill_pending);
 bool sched_amp_steal_thread_enabled(processor_set_t pset);
 
 /* Rebalance logic */
-void sched_amp_balance(processor_t cprocessor, processor_set_t cpset);
+bool sched_amp_balance(processor_t cprocessor, processor_set_t cpset);
 
 /* IPI policy */
 sched_ipi_type_t sched_amp_ipi_policy(processor_t dst, thread_t thread, boolean_t dst_idle, sched_ipi_event_t event);

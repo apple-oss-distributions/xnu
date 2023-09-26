@@ -909,8 +909,14 @@ SYSCTL_QUAD(_hw, OID_AUTO, prffrequency_max, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG
 SYSCTL_QUAD(_hw, OID_AUTO, fixfrequency, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gPEClockFrequencyInfo.fix_frequency_hz, "");
 #endif /* __arm64__ */
 SYSCTL_PROC(_hw, OID_AUTO, tbfrequency, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, 0, sysctl_tbfrequency, "Q", "");
+/**
+ * The naming around the sysctls for max_mem and max_mem_actual are different between macOS and
+ * non-macOS platforms because historically macOS's hw.memsize provided the value of the actual
+ * physical memory size, whereas on non-macOS it is the memory size minus any carveouts.
+ */
 #if XNU_TARGET_OS_OSX
 SYSCTL_QUAD(_hw, HW_MEMSIZE, memsize, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &max_mem_actual, "");
+SYSCTL_QUAD(_hw, OID_AUTO, memsize_usable, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &max_mem, "");
 #else
 SYSCTL_QUAD(_hw, HW_MEMSIZE, memsize, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &max_mem, "");
 SYSCTL_QUAD(_hw, OID_AUTO, memsize_physical, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &max_mem_actual, "");

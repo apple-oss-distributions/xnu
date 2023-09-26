@@ -355,7 +355,7 @@ fg_transfer_filelocks(proc_t p, struct fileglob *fg, thread_t thread)
 
 		vp = (struct vnode *)fg_get_data(fg);
 		if (vnode_getwithref(vp) == 0) {
-			(void)VNOP_ADVLOCK(vp, (caddr_t)fg, F_TRANSFER, &lf, F_OFD_LOCK, &context, NULL);
+			(void)VNOP_ADVLOCK(vp, ofd_to_id(fg), F_TRANSFER, &lf, F_OFD_LOCK, &context, NULL);
 			(void)vnode_put(vp);
 		}
 	}
@@ -780,7 +780,7 @@ fdt_exec(proc_t p, short posix_spawn_flags, thread_t thread, bool in_exec)
 			 */
 			inherit_file = false;
 #if CONFIG_MACF
-		} else if (mac_file_check_inherit(proc_ucred(p), fp->fp_glob)) {
+		} else if (mac_file_check_inherit(proc_ucred_unsafe(p), fp->fp_glob)) {
 			inherit_file = false;
 #endif
 		}
@@ -1035,7 +1035,7 @@ fdt_invalidate(proc_t p)
 
 	proc_fdunlock(p);
 
-	lck_mtx_lock(&fdp->fd_knhashlock);
+	lck_mtx_lock(&fdp->fd_kqhashlock);
 
 	kqhash = fdp->fd_kqhash;
 	kqhashmask = fdp->fd_kqhashmask;
@@ -1043,7 +1043,7 @@ fdt_invalidate(proc_t p)
 	fdp->fd_kqhash = 0;
 	fdp->fd_kqhashmask = 0;
 
-	lck_mtx_unlock(&fdp->fd_knhashlock);
+	lck_mtx_unlock(&fdp->fd_kqhashlock);
 
 	kfree_type(struct fileproc *, n_files, ofiles);
 	kfree_data(ofileflags, n_files);
@@ -3045,13 +3045,16 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		case F_OFD_SETLKW:
 		case F_OFD_SETLKWTIMEOUT:
 			flg |= F_OFD_LOCK;
+			if (fp->fp_glob->fg_lflags & FG_CONFINED) {
+				flg |= F_CONFINED;
+			}
 			switch (fl.l_type) {
 			case F_RDLCK:
 				if ((fflag & FREAD) == 0) {
 					error = EBADF;
 					break;
 				}
-				error = VNOP_ADVLOCK(vp, (caddr_t)fp->fp_glob,
+				error = VNOP_ADVLOCK(vp, ofd_to_id(fp->fp_glob),
 				    F_SETLK, &fl, flg, &context, timeout);
 				break;
 			case F_WRLCK:
@@ -3059,11 +3062,11 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 					error = EBADF;
 					break;
 				}
-				error = VNOP_ADVLOCK(vp, (caddr_t)fp->fp_glob,
+				error = VNOP_ADVLOCK(vp, ofd_to_id(fp->fp_glob),
 				    F_SETLK, &fl, flg, &context, timeout);
 				break;
 			case F_UNLCK:
-				error = VNOP_ADVLOCK(vp, (caddr_t)fp->fp_glob,
+				error = VNOP_ADVLOCK(vp, ofd_to_id(fp->fp_glob),
 				    F_UNLCK, &fl, F_OFD_LOCK, &context,
 				    timeout);
 				break;
@@ -3185,11 +3188,11 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 #endif
 			switch (cmd) {
 			case F_OFD_GETLK:
-				error = VNOP_ADVLOCK(vp, (caddr_t)fp->fp_glob,
+				error = VNOP_ADVLOCK(vp, ofd_to_id(fp->fp_glob),
 				    F_GETLK, &fl, F_OFD_LOCK, &context, NULL);
 				break;
 			case F_OFD_GETLKPID:
-				error = VNOP_ADVLOCK(vp, (caddr_t)fp->fp_glob,
+				error = VNOP_ADVLOCK(vp, ofd_to_id(fp->fp_glob),
 				    F_GETLKPID, &fl, F_OFD_LOCK, &context, NULL);
 				break;
 			default:
@@ -3423,6 +3426,34 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		}
 		error = VNOP_IOCTL(vp, F_SPECULATIVE_READ, (caddr_t)&args, 0, &context);
 		(void)vnode_put(vp);
+
+		goto outdrop;
+	}
+	case F_ATTRIBUTION_TAG: {
+		fattributiontag_t args;
+
+		if (fp->f_type != DTYPE_VNODE) {
+			error = EBADF;
+			goto out;
+		}
+
+		vp = (struct vnode *)fp_get_data(fp);
+		proc_fdunlock(p);
+
+		if ((error = copyin(argp, (caddr_t)&args, sizeof(args)))) {
+			goto outdrop;
+		}
+
+		if ((error = vnode_getwithref(vp))) {
+			goto outdrop;
+		}
+
+		error = VNOP_IOCTL(vp, F_ATTRIBUTION_TAG, (caddr_t)&args, 0, &context);
+		(void)vnode_put(vp);
+
+		if (error == 0) {
+			error = copyout((caddr_t)&args, argp, sizeof(args));
+		}
 
 		goto outdrop;
 	}
@@ -3757,7 +3788,23 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		proc_fdunlock(p);
 
 		if ((error = vnode_getwithref(vp)) == 0) {
+			if ((cmd == F_BARRIERFSYNC) &&
+			    (vp->v_mount->mnt_supl_kern_flag & MNTK_SUPL_USE_FULLSYNC)) {
+				cmd = F_FULLFSYNC;
+			}
 			error = VNOP_IOCTL(vp, cmd, (caddr_t)NULL, 0, &context);
+
+			/*
+			 * Promote F_BARRIERFSYNC to F_FULLFSYNC if the underlying
+			 * filesystem doesn't support it.
+			 */
+			if ((error == ENOTTY || error == ENOTSUP || error == EINVAL) &&
+			    (cmd == F_BARRIERFSYNC)) {
+				os_atomic_or(&vp->v_mount->mnt_supl_kern_flag,
+				    MNTK_SUPL_USE_FULLSYNC, relaxed);
+
+				error = VNOP_IOCTL(vp, F_FULLFSYNC, (caddr_t)NULL, 0, &context);
+			}
 
 			(void)vnode_put(vp);
 		}
@@ -5070,8 +5117,8 @@ dropboth:
 			goto outdrop;
 		}
 
-		/* Only proceed if you have write access */
-		if (vnode_authorize(vp, NULLVP, (KAUTH_VNODE_ACCESS | KAUTH_VNODE_WRITE_DATA), &context) != 0) {
+		/* Only proceed if you have read access */
+		if (vnode_authorize(vp, NULLVP, (KAUTH_VNODE_ACCESS | KAUTH_VNODE_READ_DATA), &context) != 0) {
 			vnode_put(vp);
 			error = EBADF;
 			goto outdrop;
@@ -5108,12 +5155,19 @@ dropboth:
 			goto out;
 		}
 
-		/* Catch any now-invalid fcntl() selectors */
+		/*
+		 * Catch any now-invalid fcntl() selectors.
+		 * (When adding a selector to this list, it may be prudent
+		 * to consider adding it to the list in fsctl_internal() as well.)
+		 */
 		switch (cmd) {
 		case (int)APFSIOC_REVERT_TO_SNAPSHOT:
 		case (int)FSIOC_FIOSEEKHOLE:
 		case (int)FSIOC_FIOSEEKDATA:
 		case (int)FSIOC_CAS_BSDFLAGS:
+		case (int)FSIOC_KERNEL_ROOTAUTH:
+		case (int)FSIOC_GRAFT_FS:
+		case (int)FSIOC_UNGRAFT_FS:
 		case (int)FSIOC_AUTH_FS:
 		case HFS_GET_BOOT_INFO:
 		case HFS_SET_BOOT_INFO:

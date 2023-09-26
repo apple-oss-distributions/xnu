@@ -72,7 +72,8 @@ typedef enum __attribute__((packed)) turnstile_type {
 	TURNSTILE_WORKQS = 6,
 	TURNSTILE_KNOTE = 7,
 	TURNSTILE_SLEEP_INHERITOR = 8,
-	TURNSTILE_TOTAL_TYPES = 9,
+	TURNSTILE_EPOCH = 9,
+	TURNSTILE_TOTAL_TYPES = 10,
 } turnstile_type_t;
 
 /*
@@ -123,6 +124,10 @@ typedef enum __attribute__((packed)) turnstile_type {
  *    Inheritor: threads.
  *    Lock order: turnstile lock, thread lock.
  *
+ * TURNSTILE_EPOCH
+ *    Interlock: the epoch sync interlock.
+ *    Inheritor: threads.
+ *    Lock order: turnstile lock, thread lock.
  */
 
 typedef enum __attribute__((flag_enum)) turnstile_promote_policy {

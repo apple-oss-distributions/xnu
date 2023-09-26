@@ -60,7 +60,7 @@ __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
 /*!
  * @enum waitq_wakeup_flags_t
  *
- * @const WAITQ_DEFAULT
+ * @const WAITQ_WAKEUP_DEFAULT
  * Use the default behavior for wakeup.
  *
  * @const WAITQ_UPDATE_INHERITOR
@@ -752,6 +752,20 @@ extern thread_t waitq_wakeup64_identify_locked(
 extern void waitq_resume_identified_thread(
 	waitq_t                 waitq,
 	thread_t                thread,
+	wait_result_t           result,
+	waitq_wakeup_flags_t    flags);
+
+/**
+ * @function waitq_resume_and_bind_identified_thread()
+ *
+ * @brief
+ * Set a thread runnable that has been woken with
+ * waitq_wakeup64_identify_locked, and bind it to a processor at the same time.
+ */
+extern void waitq_resume_and_bind_identified_thread(
+	waitq_t                 waitq,
+	thread_t                thread,
+	processor_t             processor,
 	wait_result_t           result,
 	waitq_wakeup_flags_t    flags);
 

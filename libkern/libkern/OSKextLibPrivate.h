@@ -1016,6 +1016,21 @@ extern vm_tag_t gIOSurfaceTag;
 
 extern void *OSKextKextForAddress(const void *addr);
 
+/*!
+ * @function OSKextGetLoadedKextSummaryForAddress
+ * @abstract Given an address, retrieve the summary of the kext which contains it.
+ *
+ * @discussion
+ * This function invokes OSKext::summaryForAddressExt, which will copy into the
+ * caller-provided pointer the summary of the kext containing the given address.
+ * This is done while holding the sKextSummariesLock lock, thus making it possible
+ * to use the content of the summary even if gLoadedKextSummaries is reallocated
+ * in the meantime.
+ */
+extern kern_return_t OSKextGetLoadedKextSummaryForAddress(
+	const void              * addr,
+	OSKextLoadedKextSummary * summary);
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 __END_DECLS

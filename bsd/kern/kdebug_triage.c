@@ -327,6 +327,20 @@ const char *vm_triage_strings[] =
 	[KDBG_TRIAGE_VM_VNODEPAGEIN_NO_UPL] = "vnode_pagein couldn't create a UPL\n",
 	[KDBG_TRIAGE_VM_ECC_DIRTY] = "Accessed a page that has uncorrected ECC error\n",
 	[KDBG_TRIAGE_VM_ECC_CLEAN] = "Clean page had an uncorrected ECC error\n",
+	[KDBG_TRIAGE_VM_COPYOUTMAP_SAMEMAP_ERROR] = "vm_copyout_map failed with same src-dest map\n",
+	[KDBG_TRIAGE_VM_COPYOUTMAP_DIFFERENTMAP_ERROR] = "vm_copyout_map failed with different src-dest map\n",
+	[KDBG_TRIAGE_VM_COPYOVERWRITE_FULL_NESTED_ERROR] = "vm_map_copy_overwrite_nested failed when trying full copy\n",
+	[KDBG_TRIAGE_VM_COPYOVERWRITE_PARTIAL_NESTED_ERROR] = "vm_map_copy_overwrite_nested failed when trying partial copy\n",
+	[KDBG_TRIAGE_VM_COPYOVERWRITE_PARTIAL_HEAD_NESTED_ERROR] = "vm_map_copy_overwrite_nested failed when trying misaligned head copy\n",
+	[KDBG_TRIAGE_VM_COPYOVERWRITE_PARTIAL_TAIL_NESTED_ERROR] = "vm_map_copy_overwrite_nested failed when trying misaligned tail copy\n",
+	[KDBG_TRIAGE_VM_COPYOUT_INTERNAL_SIZE_ERROR] = "vm_map_copyout_internal failed due to bad size\n",
+	[KDBG_TRIAGE_VM_COPYOUT_KERNEL_BUFFER_ERROR] = "vm_map_copyout_kernel_buffer failed\n",
+	[KDBG_TRIAGE_VM_COPYOUT_INTERNAL_ADJUSTING_ERROR] = "vm_map_copyout_internal failed when trying to adjust src-dest params\n",
+	[KDBG_TRIAGE_VM_COPYOUT_INTERNAL_SPACE_ERROR] = "vm_map_copyout_internal failed because we couldn't locate space\n",
+	[KDBG_TRIAGE_VM_ALLOCATE_KERNEL_BADFLAGS_ERROR] = "mach_vm_allocate_kernel failed due to bad flags\n",
+	[KDBG_TRIAGE_VM_ALLOCATE_KERNEL_BADMAP_ERROR] = "mach_vm_allocate_kernel failed due to bad map\n",
+	[KDBG_TRIAGE_VM_ALLOCATE_KERNEL_BADSIZE_ERROR] = "mach_vm_allocate_kernel failed due to bad size\n",
+	[KDBG_TRIAGE_VM_ALLOCATE_KERNEL_VMMAPENTER_ERROR] = "mach_vm_allocate_kernel failed within call to vm_map_enter\n",
 };
 /* VM end */
 
@@ -356,8 +370,19 @@ const char *dyld_pager_triage_strings[] =
 {
 	[KDBG_TRIAGE_DYLD_PAGER_PREFIX] = "DP - ",
 	[KDBG_TRIAGE_DYLD_PAGER_NO_UPL] = "dyld_pager_data_request couldn't create a upl\n",
-	[KDBG_TRIAGE_DYLD_PAGER_SLIDE_ERROR] = "dyld_pager_data_request hit a page sliding error\n",
 	[KDBG_TRIAGE_DYLD_PAGER_MEMORY_SHORTAGE] = "dyld_pager_data_request hit memory shortage\n",
+	[KDBG_TRIAGE_DYLD_PAGER_SLIDE_ERROR] = "dyld_pager_data_request hit a page sliding error\n",
+	[KDBG_TRIAGE_DYLD_PAGER_CHAIN_OUT_OF_RANGE] = "dyld_pager_data_request chain out of range\n",
+	[KDBG_TRIAGE_DYLD_PAGER_SEG_INFO_OUT_OF_RANGE] = "dyld_pager_data_request seg_info out of range\n",
+	[KDBG_TRIAGE_DYLD_PAGER_SEG_SIZE_OUT_OF_RANGE] = "dyld_pager_data_request seg->size out of range\n",
+	[KDBG_TRIAGE_DYLD_PAGER_SEG_PAGE_CNT_OUT_OF_RANGE] = "dyld_pager_data_request seg->page_count out of range\n",
+	[KDBG_TRIAGE_DYLD_PAGER_NO_SEG_FOR_VA] = "dyld_pager_data_request no segment for VA\n",
+	[KDBG_TRIAGE_DYLD_PAGER_RANGE_NOT_FOUND] = "dyld_pager_data_request no range for offset\n",
+	[KDBG_TRIAGE_DYLD_PAGER_DELTA_TOO_LARGE] = "dyld_pager_data_request delta * 4 > PAGE_SIZE\n",
+	[KDBG_TRIAGE_DYLD_PAGER_PAGE_START_OUT_OF_RANGE] = "dyld_pager_data_request segInfo page_start out of range\n",
+	[KDBG_TRIAGE_DYLD_PAGER_BAD_POINTER_FMT] = "dyld_pager_data_request unkown pointer format\n",
+	[KDBG_TRIAGE_DYLD_PAGER_INVALID_AUTH_KEY] = "dyld_pager_data_request unkown auth key\n",
+	[KDBG_TRIAGE_DYLD_PAGER_BIND_ORDINAL] = "dyld_pager_data_request invalid bind ordinal\n",
 };
 /* Dyld Pager end */
 
@@ -379,6 +404,20 @@ const char *fourk_pager_triage_strings[] =
 };
 /* Fourk Pager end */
 
+/* Corpse section begin */
+
+const char *corpse_triage_strings[] =
+{
+	[KDBG_TRIAGE_CORPSE_PREFIX] = "Corpse - ",
+	[KDBG_TRIAGE_CORPSE_PROC_TOO_BIG] = "Process too big for corpse. Corpse disallowed.\n",
+	[KDBG_TRIAGE_CORPSE_FAIL_LIBGMALLOC] = "Process linked against libgmalloc. Corpse disallowed.\n",
+	[KDBG_TRIAGE_CORPSE_BLOCKED_JETSAM] = "Jetsams happening in higher bands. Corpse disallowed.\n",
+	[KDBG_TRIAGE_CORPSE_LIMIT] = "Too many corpses in flight. Corpse disallowed.\n",
+	[KDBG_TRIAGE_CORPSES_DISABLED] = "Corpse disabled on system.\n",
+	[KDBG_TRIAGE_CORPSE_DISABLED_FOR_PROC] = "Corpse disabled for this process.\n",
+};
+/* Corpse section end */
+
 /* subsystems starts at index 1 */
 ktriage_strings_t ktriage_subsystems_strings[KDBG_TRIAGE_SUBSYS_MAX + 1] = {
 	[KDBG_TRIAGE_SUBSYS_VM]            = {VM_MAX_TRIAGE_STRINGS, vm_triage_strings},
@@ -390,6 +429,7 @@ ktriage_strings_t ktriage_subsystems_strings[KDBG_TRIAGE_SUBSYS_MAX + 1] = {
 
 	[KDBG_TRIAGE_SUBSYS_APFS]          = {-1, NULL},
 	[KDBG_TRIAGE_SUBSYS_DECMPFS]       = {-1, NULL},
+	[KDBG_TRIAGE_SUBSYS_CORPSE]        = {CORPSE_MAX_TRIAGE_STRINGS, corpse_triage_strings},
 };
 
 /* KDBG_TRIAGE_CODE_* section */

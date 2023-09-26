@@ -501,6 +501,21 @@ log_unnest_badness(
 	printf("%s[%d] triggered unnest of range 0x%qx->0x%qx of DYLD shared region in VM map %p. While not abnormal for debuggers, this increases system memory footprint until the target exits.\n", current_proc()->p_comm, proc_getpid(current_proc()), (uint64_t)s, (uint64_t)e, (void *) VM_KERNEL_ADDRPERM(m));
 }
 
+uint64_t
+vm_purge_filebacked_pagers(void)
+{
+	uint64_t pages_purged;
+
+	pages_purged = 0;
+	pages_purged += apple_protect_pager_purge_all();
+	pages_purged += shared_region_pager_purge_all();
+	pages_purged += dyld_pager_purge_all();
+#if DEVELOPMENT || DEBUG
+	printf("%s:%d pages purged: %llu\n", __FUNCTION__, __LINE__, pages_purged);
+#endif /* DEVELOPMENT || DEBUG */
+	return pages_purged;
+}
+
 int
 useracc(
 	user_addr_t     addr,
@@ -3159,10 +3174,27 @@ map_with_linking_np(
 			kr = KERN_FAILURE;
 			goto done;
 		}
-		regions[r].mwlr_protections &= VM_PROT_ALL;
+
+		/*
+		 * Only allow data mappings and not zero fill. Permit TPRO
+		 * mappings only when VM_PROT_READ | VM_PROT_WRITE.
+		 */
 		if (regions[r].mwlr_protections & VM_PROT_EXECUTE) {
 			printf("%s: [%d(%s)]: mwlr_protections EXECUTE not allowed\n",
 			    __func__, proc_getpid(p), p->p_comm);
+			kr = KERN_FAILURE;
+			goto done;
+		}
+		if (regions[r].mwlr_protections & VM_PROT_ZF) {
+			printf("%s: [%d(%s)]: region %d, found VM_PROT_ZF not allowed\n",
+			    __func__, proc_getpid(p), p->p_comm, r);
+			kr = KERN_FAILURE;
+			goto done;
+		}
+		if ((regions[r].mwlr_protections & VM_PROT_TPRO) &&
+		    !(regions[r].mwlr_protections & VM_PROT_WRITE)) {
+			printf("%s: [%d(%s)]: region %d, found VM_PROT_TPRO without VM_PROT_WRITE\n",
+			    __func__, proc_getpid(p), p->p_comm, r);
 			kr = KERN_FAILURE;
 			goto done;
 		}
@@ -3223,22 +3255,6 @@ map_with_linking_np(
 
 	for (r = 0; r < region_count; ++r) {
 		rp = &regions[r];
-
-		/*
-		 * Only allow data mappings and not zero fill.
-		 */
-		if (rp->mwlr_protections & VM_PROT_ZF) {
-			printf("%s: [%d(%s)]: region %d, found VM_PROT_ZF\n",
-			    __func__, proc_getpid(p), p->p_comm, r);
-			kr = KERN_FAILURE;
-			goto done;
-		}
-		if (rp->mwlr_protections & VM_PROT_EXECUTE) {
-			printf("%s: [%d(%s)]: region %d, found VM_PROT_EXECUTE\n",
-			    __func__, proc_getpid(p), p->p_comm, r);
-			kr = KERN_FAILURE;
-			goto done;
-		}
 
 #if CONFIG_MACF
 		vm_prot_t prot = (rp->mwlr_protections & VM_PROT_ALL);
@@ -3514,6 +3530,51 @@ SYSCTL_UINT(_vm, OID_AUTO, page_secluded_grab_for_iokit, CTLFLAG_RD | CTLFLAG_LO
 SYSCTL_UINT(_vm, OID_AUTO, page_secluded_grab_for_iokit_success, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_secluded.grab_for_iokit_success, 0, "");
 
 #endif /* CONFIG_SECLUDED_MEMORY */
+
+#pragma mark Deferred Reclaim
+
+#if CONFIG_DEFERRED_RECLAIM
+
+#if DEVELOPMENT || DEBUG
+/*
+ * VM reclaim testing
+ */
+extern bool vm_deferred_reclamation_block_until_pid_has_been_reclaimed(pid_t pid);
+
+static int
+sysctl_vm_reclaim_drain_async_queue SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error = EINVAL, pid = 0;
+	/*
+	 * Only send on write
+	 */
+	error = sysctl_handle_int(oidp, &pid, 0, req);
+	if (error || !req->newptr) {
+		return error;
+	}
+
+	bool success = vm_deferred_reclamation_block_until_pid_has_been_reclaimed(pid);
+	if (success) {
+		error = 0;
+	}
+
+	return error;
+}
+
+SYSCTL_PROC(_vm, OID_AUTO, reclaim_drain_async_queue,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0,
+    &sysctl_vm_reclaim_drain_async_queue, "I", "");
+
+
+extern uint64_t vm_reclaim_max_threshold;
+extern uint64_t vm_reclaim_trim_divisor;
+
+SYSCTL_ULONG(_vm, OID_AUTO, reclaim_max_threshold, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_max_threshold, "");
+SYSCTL_ULONG(_vm, OID_AUTO, reclaim_trim_divisor, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_trim_divisor, "");
+#endif /* DEVELOPMENT || DEBUG */
+
+#endif /* CONFIG_DEFERRED_RECLAIM */
 
 #include <kern/thread.h>
 #include <sys/user.h>
@@ -4005,8 +4066,39 @@ SYSCTL_PROC(_vm, OID_AUTO, corrupt_text_addr,
     0, 0, corrupt_text_addr, "-", "");
 #endif /* DEBUG || DEVELOPMENT */
 
-#if DEBUG || DEVELOPMENT
 #if CONFIG_MAP_RANGES
+/*
+ * vm.malloc_ranges
+ *
+ * space-separated list of <left:right> hexadecimal addresses.
+ */
+static int
+vm_map_malloc_ranges SYSCTL_HANDLER_ARGS
+{
+	vm_map_t map = current_map();
+	struct mach_vm_range r1, r2;
+	char str[20 * 4];
+	int len;
+
+	if (vm_map_get_user_range(map, UMEM_RANGE_ID_DEFAULT, &r1)) {
+		return ENOENT;
+	}
+	if (vm_map_get_user_range(map, UMEM_RANGE_ID_HEAP, &r2)) {
+		return ENOENT;
+	}
+
+	len = scnprintf(str, sizeof(str), "0x%llx:0x%llx 0x%llx:0x%llx",
+	    r1.max_address, r2.min_address,
+	    r2.max_address, get_map_max(map));
+
+	return SYSCTL_OUT(req, str, len);
+}
+
+SYSCTL_PROC(_vm, OID_AUTO, malloc_ranges,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_MASKED,
+    0, 0, &vm_map_malloc_ranges, "A", "");
+
+#if DEBUG || DEVELOPMENT
 static int
 vm_map_user_range_default SYSCTL_HANDLER_ARGS
 {
@@ -4044,11 +4136,16 @@ SYSCTL_PROC(_vm, OID_AUTO, vm_map_user_range_default, CTLTYPE_STRUCT | CTLFLAG_R
 SYSCTL_PROC(_vm, OID_AUTO, vm_map_user_range_heap, CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, &vm_map_user_range_heap, "S,mach_vm_range", "");
 
-#endif /* CONFIG_MAP_RANGES */
 #endif /* DEBUG || DEVELOPMENT */
+#endif /* CONFIG_MAP_RANGES */
 
 #if DEBUG || DEVELOPMENT
 #endif /* DEBUG || DEVELOPMENT */
+
+extern uint64_t vm_map_range_overflows_count;
+SYSCTL_QUAD(_vm, OID_AUTO, map_range_overflows_count, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_map_range_overflows_count, "");
+extern boolean_t vm_map_range_overflows_log;
+SYSCTL_INT(_vm, OID_AUTO, map_range_oveflows_log, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_map_range_overflows_log, 0, "");
 
 extern uint64_t c_seg_filled_no_contention;
 extern uint64_t c_seg_filled_contention;
@@ -4082,3 +4179,4 @@ SYSCTL_INT(_vm, OID_AUTO, panic_object_not_alive, CTLFLAG_RW | CTLFLAG_LOCKED | 
 extern int fbdp_no_panic;
 SYSCTL_INT(_vm, OID_AUTO, fbdp_no_panic, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY, &fbdp_no_panic, 0, "");
 #endif /* MACH_ASSERT */
+

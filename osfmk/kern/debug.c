@@ -112,8 +112,11 @@
 #include <mach_debug/zone_info.h>
 #include <mach/resource_monitors.h>
 #include <machine/machine_routines.h>
+#include <sys/proc_require.h>
 
 #include <os/log_private.h>
+
+#include <kern/ext_paniclog.h>
 
 #if defined(__arm64__)
 #include <pexpert/pexpert.h> /* For gPanicBase */
@@ -140,7 +143,7 @@ extern void IODTFreeLoaderInfo( const char *key, void *infoAddr, int infoSize );
 unsigned int    halt_in_debugger = 0;
 unsigned int    current_debugger = 0;
 unsigned int    active_debugger = 0;
-unsigned int    panicDebugging = FALSE;
+SECURITY_READ_ONLY_LATE(unsigned int)    panicDebugging = FALSE;
 unsigned int    kernel_debugger_entry_count = 0;
 
 #if DEVELOPMENT || DEBUG
@@ -168,6 +171,14 @@ struct additional_panic_data_buffer *panic_data_buffers = NULL;
 #define panic_stop()    pmCPUHalt(PM_HALT_PANIC)
 #else
 #define panic_stop()    panic_spin_forever()
+#endif
+
+#if defined(__arm64__) && (DEVELOPMENT || DEBUG)
+/*
+ * More than enough for any typical format string passed to panic();
+ * anything longer will be truncated but that's better than nothing.
+ */
+#define EARLY_PANIC_BUFLEN 256
 #endif
 
 struct debugger_state {
@@ -246,9 +257,11 @@ static void kdp_machine_reboot_type(unsigned int type, uint64_t debugger_flags);
 void panic_spin_forever(void) __dead2;
 extern kern_return_t do_stackshot(void);
 extern void PE_panic_hook(const char*);
+extern int sync(proc_t p, void *, void *);
 
 #define NESTEDDEBUGGERENTRYMAX 5
-static unsigned int max_debugger_entry_count = NESTEDDEBUGGERENTRYMAX;
+static TUNABLE(unsigned int, max_debugger_entry_count, "nested_panic_max",
+    NESTEDDEBUGGERENTRYMAX);
 
 SECURITY_READ_ONLY_LATE(bool) awl_scratch_reg_supported = false;
 static bool PERCPU_DATA(hv_entry_detected); // = false
@@ -292,7 +305,7 @@ boolean_t extended_debug_log_enabled = FALSE;
 #endif
 
 /* Debugger state */
-atomic_int     debugger_cpu = ATOMIC_VAR_INIT(DEBUGGER_NO_CPU);
+atomic_int     debugger_cpu = DEBUGGER_NO_CPU;
 boolean_t      debugger_allcpus_halted = FALSE;
 boolean_t      debugger_safe_to_return = TRUE;
 unsigned int   debugger_context = 0;
@@ -404,10 +417,6 @@ panic_init(void)
 #endif /* defined(__arm64__) */
 	}
 
-	if (!PE_parse_boot_argn("nested_panic_max", &max_debugger_entry_count, sizeof(max_debugger_entry_count))) {
-		max_debugger_entry_count = NESTEDDEBUGGERENTRYMAX;
-	}
-
 #if defined(__arm64__)
 	char kdpname[80];
 
@@ -477,6 +486,10 @@ debug_log_init(void)
 	debug_buf_base = (char *)gPanicBase + sizeof(struct embedded_panic_header);
 	debug_buf_ptr = debug_buf_base;
 	debug_buf_size = gPanicSize - sizeof(struct embedded_panic_header);
+
+#if CONFIG_EXT_PANICLOG
+	ext_paniclog_init();
+#endif
 #else
 	kern_return_t kr = KERN_SUCCESS;
 	bzero(panic_info, DEBUG_BUF_SIZE);
@@ -506,6 +519,11 @@ phys_carveout_init(void)
 	if (!PE_i_can_has_debugger(NULL)) {
 		return;
 	}
+
+#if __arm__ || __arm64__
+#if DEVELOPMENT || DEBUG
+#endif /* DEVELOPMENT || DEBUG  */
+#endif /* __arm__ || __arm64__ */
 
 	struct carveout {
 		const char *name;
@@ -666,6 +684,21 @@ DebuggerTrapWithState(debugger_op db_op, const char *db_message, const char *db_
     boolean_t db_proceed_on_sync_failure, unsigned long db_panic_caller)
 {
 	kern_return_t ret;
+
+#if defined(__arm64__) && (DEVELOPMENT || DEBUG)
+	if (!PE_arm_debug_and_trace_initialized()) {
+		/*
+		 * In practice this can only happen if we panicked very early,
+		 * when only the boot CPU is online and before it has finished
+		 * initializing the debug and trace infrastructure. We're going
+		 * to hang soon, so let's at least make sure the message passed
+		 * to panic() is actually logged.
+		 */
+		char buf[EARLY_PANIC_BUFLEN];
+		vsnprintf(buf, EARLY_PANIC_BUFLEN, db_panic_str, *db_panic_args);
+		paniclog_append_noflush("%s\n", buf);
+	}
+#endif
 
 	assert(ml_get_interrupts_enabled() == FALSE);
 	DebuggerSaveState(db_op, db_message, db_panic_str, db_panic_args,
@@ -978,6 +1011,18 @@ panic(const char *str, ...)
 }
 
 void
+panic_with_data(uuid_t uuid, void *addr, uint32_t len, const char *str, ...)
+{
+	va_list panic_str_args;
+
+	ext_paniclog_panic_with_data(uuid, addr, len);
+
+	va_start(panic_str_args, str);
+	panic_trap_to_debugger(str, &panic_str_args, 0, NULL, 0, NULL, (unsigned long)(char *)__builtin_return_address(0));
+	va_end(panic_str_args);
+}
+
+void
 panic_with_options(unsigned int reason, void *ctx, uint64_t debugger_options_mask, const char *str, ...)
 {
 	va_list panic_str_args;
@@ -1076,6 +1121,11 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 	read_lbr();
 #endif
 
+	/* optionally call sync, to reduce lost logs on restart, avoid on recursive panic. Unsafe due to unbounded sync() duration */
+	if ((panic_options_mask & DEBUGGER_OPTION_SYNC_ON_PANIC_UNSAFE) && (CPUDEBUGGERCOUNT == 0)) {
+		sync(NULL, NULL, NULL);
+	}
+
 	/* Turn off I/O tracing once we've panicked */
 	iotrace_disable();
 
@@ -1133,12 +1183,12 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 		handle_debugger_trap(reason, 0, 0, ctx);
 	}
 
-#if defined(__arm64__)
+#if defined(__arm64__) && !APPLEVIRTUALPLATFORM
 	/*
 	 *  Signal to fastsim that it should open debug ports (nop on hardware)
 	 */
-	__asm__         volatile ("HINT 0x45");
-#endif /* defined(__arm64__) */
+	__asm__         volatile ("hint #0x45");
+#endif /* defined(__arm64__) && !APPLEVIRTUALPLATFORM */
 
 	DebuggerTrapWithState(DBOP_PANIC, "panic", panic_format_str,
 	    panic_args, panic_options_mask, panic_data_ptr, TRUE, panic_caller);
@@ -1355,8 +1405,8 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 			}
 		}
 #if XNU_MONITOR
-		else if ((pmap_get_cpu_data()->ppl_state == PPL_STATE_PANIC) && (debug_boot_arg & (DB_KERN_DUMP_ON_PANIC | DB_KERN_DUMP_ON_NMI))) {
-			paniclog_append_noflush("skipping local kernel core because the PPL is in PANIC state\n");
+		else if (pmap_get_cpu_data()->ppl_state != PPL_STATE_KERNEL) {
+			paniclog_append_noflush("skipping local kernel core because the PPL is not in KERNEL state\n");
 			panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_FAILED;
 			paniclog_flush();
 		}
@@ -1552,6 +1602,13 @@ handle_debugger_trap(unsigned int exception, unsigned int code, unsigned int sub
 #endif
 	} else {
 		/* note: this is the panic path...  */
+#if defined(__arm64__) && (DEBUG || DEVELOPMENT)
+		if (!PE_arm_debug_and_trace_initialized()) {
+			paniclog_append_noflush("kernel panicked before debug and trace infrastructure initialized!\n"
+			    "spinning forever...\n");
+			panic_spin_forever();
+		}
+#endif
 		debugger_collect_diagnostics(exception, code, subcode, state);
 	}
 
@@ -1650,7 +1707,8 @@ void
 debug_putc(char c)
 {
 	if ((debug_buf_size != 0) &&
-	    ((debug_buf_ptr - debug_buf_base) < (int)debug_buf_size)) {
+	    ((debug_buf_ptr - debug_buf_base) < (int)debug_buf_size) &&
+	    (!is_debug_ptr_in_ext_paniclog())) {
 		*debug_buf_ptr = c;
 		debug_buf_ptr++;
 	}
@@ -2001,6 +2059,7 @@ sysctl_debug_free_preoslog(void)
 #endif // RELEASE
 }
 
+
 #if (DEVELOPMENT || DEBUG)
 
 void
@@ -2016,6 +2075,7 @@ platform_stall_panic_or_spin(uint32_t req)
 	}
 }
 #endif
+
 
 #define AWL_HV_ENTRY_FLAG (0x1)
 

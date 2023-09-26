@@ -550,6 +550,7 @@ extern void munge_user32_stat64(struct stat64 *sbp, struct user32_stat64 *usbp);
 #define EF_IS_PURGEABLE         0x00000008      /* file is purgeable */
 #define EF_IS_SPARSE            0x00000010      /* file has at least one sparse region */
 #define EF_IS_SYNTHETIC         0x00000020      /* a synthetic directory/symlink */
+#define EF_SHARES_ALL_BLOCKS    0x00000040      /* file shares all of its blocks with another file */
 #endif
 
 
@@ -581,11 +582,13 @@ int     futimens(int __fd, const struct timespec __times[2]) __API_AVAILABLE(mac
 int     utimensat(int __fd, const char *__path, const struct timespec __times[2],
     int __flag) __API_AVAILABLE(macosx(10.13), ios(11.0), tvos(11.0), watchos(4.0));
 #endif
+__END_DECLS
 
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 
 #include <sys/_types/_filesec_t.h>
 
+__BEGIN_DECLS
 int     chflags(const char *, __uint32_t);
 int     chmodx_np(const char *, filesec_t);
 int     fchflags(int, __uint32_t);
@@ -608,8 +611,9 @@ int     fstat64(int, struct stat64 *) __OSX_AVAILABLE_BUT_DEPRECATED(__MAC_10_5,
 int     lstat64(const char *, struct stat64 *) __OSX_AVAILABLE_BUT_DEPRECATED(__MAC_10_5, __MAC_10_6, __IPHONE_NA, __IPHONE_NA);
 int     stat64(const char *, struct stat64 *) __OSX_AVAILABLE_BUT_DEPRECATED(__MAC_10_5, __MAC_10_6, __IPHONE_NA, __IPHONE_NA);
 #endif /* !__DARWIN_ONLY_64_BIT_INO_T */
+__END_DECLS
+
 #endif /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 
-__END_DECLS
 #endif /* !KERNEL */
 #endif /* !_SYS_STAT_H_ */

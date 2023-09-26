@@ -799,7 +799,7 @@ static int
 authenticate_root_with_img4(const char *rootpath)
 {
 	errno_t rv;
-	vnode_t vp;
+	vnode_t vp = NULLVP;
 	size_t ticket_pathsz = 0;
 	char *ticket_path;
 	img4_buff_t tck = IMG4_BUFF_INIT;
@@ -852,6 +852,10 @@ out_with_ticket_path:
 	kfree_data(ticket_path, ticket_pathsz);
 
 	img4_firmware_destroy(&fw);
+
+	if (vp) {
+		vnode_put(vp);
+	}
 	return rv;
 }
 #endif /* CONFIG_IMAGEBOOT_IMG4 */

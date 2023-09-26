@@ -114,7 +114,7 @@
 		24B223B5121DFF29007DAEDE /* sigsuspend.c in Sources */ = {isa = PBXBuildFile; fileRef = 24B223B4121DFF29007DAEDE /* sigsuspend.c */; };
 		24B8C2621237F53900D36CC3 /* remove-counter.c in Sources */ = {isa = PBXBuildFile; fileRef = 24B8C2611237F53900D36CC3 /* remove-counter.c */; };
 		24D1158311E671B20063D54D /* SYS.h in Headers */ = {isa = PBXBuildFile; fileRef = 24D1157411E671B20063D54D /* SYS.h */; };
-		24E4782712088267009A384D /* _libc_funcptr.c in Sources */ = {isa = PBXBuildFile; fileRef = 24E47824120881DF009A384D /* _libc_funcptr.c */; };
+		24E4782712088267009A384D /* _libc_funcptr.c in Sources */ = {isa = PBXBuildFile; fileRef = 24E47824120881DF009A384D /* _libc_funcptr.c */; settings = {COMPILER_FLAGS = "-fno-typed-memory-operations"; }; };
 		2561E8AA25082E6300EAA925 /* task.c in Sources */ = {isa = PBXBuildFile; fileRef = 2561E8A925082E6300EAA925 /* task.c */; };
 		2579B8A027556DDD00A8BC8E /* _libc_weak_funcptr.c in Sources */ = {isa = PBXBuildFile; fileRef = 2579B89F27556DDD00A8BC8E /* _libc_weak_funcptr.c */; };
 		291D3C281354FDD100D46061 /* mach_port.c in Sources */ = {isa = PBXBuildFile; fileRef = 291D3C261354FDD100D46061 /* mach_port.c */; };
@@ -276,15 +276,18 @@
 		C9D9BD58114B00600000D8B9 /* thread_act.defs in Sources */ = {isa = PBXBuildFile; fileRef = C9D9BD10114B00600000D8B9 /* thread_act.defs */; };
 		C9D9BD59114B00600000D8B9 /* vm_map.defs in Sources */ = {isa = PBXBuildFile; fileRef = C9D9BD11114B00600000D8B9 /* vm_map.defs */; };
 		C9FD8508166D6BD400963B73 /* tsd.h in CopyFiles */ = {isa = PBXBuildFile; fileRef = C9EE57F51669673D00337E4B /* tsd.h */; };
+		D03FDED528B6321A00159650 /* spawn_filtering_private.h in Headers */ = {isa = PBXBuildFile; fileRef = D03FDED428B62F4100159650 /* spawn_filtering_private.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		D03FDED628B6321B00159650 /* spawn_filtering_private.h in Headers */ = {isa = PBXBuildFile; fileRef = D03FDED428B62F4100159650 /* spawn_filtering_private.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E214BDC81C2E358300CEE8A3 /* clonefile.c in Sources */ = {isa = PBXBuildFile; fileRef = E214BDC71C2E34E200CEE8A3 /* clonefile.c */; };
 		E2A0F3341C3B17D100A11F8A /* fs_snapshot.c in Sources */ = {isa = PBXBuildFile; fileRef = E2A0F3331C3B17D100A11F8A /* fs_snapshot.c */; };
 		E414C69B26F1CBA900B17EAA /* libproc_private.h in Headers */ = {isa = PBXBuildFile; fileRef = E414C69A26F1CBA900B17EAA /* libproc_private.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E414C69C26F1CBA900B17EAA /* libproc_private.h in Headers */ = {isa = PBXBuildFile; fileRef = E414C69A26F1CBA900B17EAA /* libproc_private.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E4216C311822D404006F2632 /* mach_voucher.defs in Sources */ = {isa = PBXBuildFile; fileRef = E4216C301822D404006F2632 /* mach_voucher.defs */; };
+		E436DFD428DD368B00503A8A /* exclaves.c in Sources */ = {isa = PBXBuildFile; fileRef = E436DFD328DD368B00503A8A /* exclaves.c */; };
 		E4512B8C21AFDF1600673F73 /* mach_right_private.h in Headers */ = {isa = PBXBuildFile; fileRef = E4512B8B21AFDF1500673F73 /* mach_right_private.h */; };
 		E4512B8D21AFDF1600673F73 /* mach_right_private.h in Headers */ = {isa = PBXBuildFile; fileRef = E4512B8B21AFDF1500673F73 /* mach_right_private.h */; };
 		E453AF351700FD3C00F2C94C /* getiopolicy_np.c in Sources */ = {isa = PBXBuildFile; fileRef = E453AF341700FD3C00F2C94C /* getiopolicy_np.c */; };
-		E453AF3617013CBF00F2C94C /* libproc.h in Headers */ = {isa = PBXBuildFile; fileRef = E4D45C2B16F868ED0002AF25 /* libproc.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E453AF3617013CBF00F2C94C /* libproc.h in Headers */ = {isa = PBXBuildFile; fileRef = E4D45C2B16F868ED0002AF25 /* libproc.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E453AF3717013CC200F2C94C /* libproc_internal.h in Headers */ = {isa = PBXBuildFile; fileRef = E4D45C2C16F868ED0002AF25 /* libproc_internal.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E453AF3817013F1400F2C94C /* spawn.h in Headers */ = {isa = PBXBuildFile; fileRef = E4D45C3D16FB20970002AF25 /* spawn.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		E453AF3917013F1B00F2C94C /* spawn_private.h in Headers */ = {isa = PBXBuildFile; fileRef = E4D45C3E16FB20970002AF25 /* spawn_private.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -292,7 +295,7 @@
 		E4D45C2416F856900002AF25 /* __commpage_gettimeofday.c in Sources */ = {isa = PBXBuildFile; fileRef = E4D45C2116F856900002AF25 /* __commpage_gettimeofday.c */; };
 		E4D45C2616F856900002AF25 /* mach_absolute_time.s in Sources */ = {isa = PBXBuildFile; fileRef = E4D45C2316F856900002AF25 /* mach_absolute_time.s */; };
 		E4D45C2E16F868ED0002AF25 /* libproc.c in Sources */ = {isa = PBXBuildFile; fileRef = E4D45C2A16F868ED0002AF25 /* libproc.c */; };
-		E4D45C2F16F868ED0002AF25 /* libproc.h in Headers */ = {isa = PBXBuildFile; fileRef = E4D45C2B16F868ED0002AF25 /* libproc.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E4D45C2F16F868ED0002AF25 /* libproc.h in Headers */ = {isa = PBXBuildFile; fileRef = E4D45C2B16F868ED0002AF25 /* libproc.h */; };
 		E4D45C3016F868ED0002AF25 /* libproc_internal.h in Headers */ = {isa = PBXBuildFile; fileRef = E4D45C2C16F868ED0002AF25 /* libproc_internal.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E4D45C3116F868ED0002AF25 /* proc_listpidspath.c in Sources */ = {isa = PBXBuildFile; fileRef = E4D45C2D16F868ED0002AF25 /* proc_listpidspath.c */; };
 		E4D45C3616F86BD80002AF25 /* posix_spawn.c in Sources */ = {isa = PBXBuildFile; fileRef = E4D45C3316F86BD80002AF25 /* posix_spawn.c */; };
@@ -594,6 +597,7 @@
 		72FB18801B437F7A00181A5B /* mach_continuous_time.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = mach_continuous_time.c; sourceTree = "<group>"; };
 		7466C923170CB99B004557CC /* vm_page_size.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = vm_page_size.h; sourceTree = "<group>"; };
 		7AE28FDE18AC41B1006A5626 /* csr.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = csr.c; sourceTree = "<group>"; };
+		84A59E912859038E00EA1221 /* copy_embedded_private_headers.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = copy_embedded_private_headers.sh; sourceTree = "<group>"; };
 		8C4F7C8C264DDD37005DAF64 /* posix_spawn_filtering.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = posix_spawn_filtering.c; sourceTree = "<group>"; };
 		906AA2D018F74CD1001C681A /* renamex.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = renamex.c; sourceTree = "<group>"; };
 		92197BAE1EAD8DF2003994B9 /* utimensat.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = utimensat.c; sourceTree = "<group>"; };
@@ -693,11 +697,13 @@
 		C9D9BD11114B00600000D8B9 /* vm_map.defs */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.mig; path = vm_map.defs; sourceTree = "<group>"; };
 		C9D9BE0F114FFADC0000D8B9 /* Libsyscall.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; path = Libsyscall.xcconfig; sourceTree = "<group>"; };
 		C9EE57F51669673D00337E4B /* tsd.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = tsd.h; sourceTree = "<group>"; };
+		D03FDED428B62F4100159650 /* spawn_filtering_private.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = spawn_filtering_private.h; sourceTree = "<group>"; };
 		D2AAC0630554660B00DB518D /* libsystem_kernel.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libsystem_kernel.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		E214BDC71C2E34E200CEE8A3 /* clonefile.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = clonefile.c; sourceTree = "<group>"; };
 		E2A0F3331C3B17D100A11F8A /* fs_snapshot.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = fs_snapshot.c; sourceTree = "<group>"; };
 		E414C69A26F1CBA900B17EAA /* libproc_private.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = libproc_private.h; sourceTree = "<group>"; };
 		E4216C301822D404006F2632 /* mach_voucher.defs */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.mig; path = mach_voucher.defs; sourceTree = "<group>"; };
+		E436DFD328DD368B00503A8A /* exclaves.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = exclaves.c; sourceTree = "<group>"; };
 		E4512B8B21AFDF1500673F73 /* mach_right_private.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = mach_right_private.h; sourceTree = "<group>"; };
 		E453AF341700FD3C00F2C94C /* getiopolicy_np.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = getiopolicy_np.c; sourceTree = "<group>"; };
 		E4D45C2116F856900002AF25 /* __commpage_gettimeofday.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = __commpage_gettimeofday.c; sourceTree = "<group>"; };
@@ -850,6 +856,7 @@
 				24D1159911E6723E0063D54D /* create-syscalls.pl */,
 				24614EA111E7A2ED00E78584 /* compile-syscalls.pl */,
 				240D716711933ED300556E97 /* mach_install_mig.sh */,
+				84A59E912859038E00EA1221 /* copy_embedded_private_headers.sh */,
 			);
 			path = xcodescripts;
 			sourceTree = "<group>";
@@ -883,8 +890,8 @@
 				FB50F1B315AB7DE700F814BA /* carbon_delete.c */,
 				E214BDC71C2E34E200CEE8A3 /* clonefile.c */,
 				2BA88DCB1810A3CE00EB63F6 /* coalition.c */,
-				F960CB6425CA80EE00056616 /* kern_debug.c */,
 				7AE28FDE18AC41B1006A5626 /* csr.c */,
+				E436DFD328DD368B00503A8A /* exclaves.c */,
 				E2A0F3331C3B17D100A11F8A /* fs_snapshot.c */,
 				C6C40121174154D9000AE69F /* gethostuuid_private.h */,
 				C6C4012017415384000AE69F /* gethostuuid.c */,
@@ -895,6 +902,7 @@
 				C99A4F511305B43F0054B7B7 /* init_cpu_capabilities.c */,
 				248BA07F121DA36B008C073F /* ioctl.c */,
 				BA0D9FB0199031AD007E8A73 /* kdebug_trace.c */,
+				F960CB6425CA80EE00056616 /* kern_debug.c */,
 				248BA081121DA4F3008C073F /* kill.c */,
 				24A7C6951200AF8A007669EB /* legacy */,
 				E4D45C2916F868ED0002AF25 /* libproc */,
@@ -1161,6 +1169,7 @@
 				8C4F7C8C264DDD37005DAF64 /* posix_spawn_filtering.c */,
 				E4D45C3D16FB20970002AF25 /* spawn.h */,
 				E4D45C3E16FB20970002AF25 /* spawn_private.h */,
+				D03FDED428B62F4100159650 /* spawn_filtering_private.h */,
 			);
 			path = spawn;
 			sourceTree = "<group>";
@@ -1193,6 +1202,7 @@
 				C6D3EFB716542C510052CF30 /* externs.h in Headers */,
 				C6AB38DB174202C10036DD9F /* gethostuuid.h in Headers */,
 				C6D3EFB816542C510052CF30 /* errorlib.h in Headers */,
+				D03FDED628B6321B00159650 /* spawn_filtering_private.h in Headers */,
 				C6C401241741566D000AE69F /* gethostuuid_private.h in Headers */,
 				C6D3EFB916542C510052CF30 /* mach.h in Headers */,
 				C6D3EFBA16542C510052CF30 /* mach_error.h in Headers */,
@@ -1243,6 +1253,7 @@
 				C9D9BD2C114B00600000D8B9 /* sync.h in Headers */,
 				A50BD5301DDA5500006622C8 /* thread_self_restrict.h in Headers */,
 				E414C69B26F1CBA900B17EAA /* libproc_private.h in Headers */,
+				D03FDED528B6321A00159650 /* spawn_filtering_private.h in Headers */,
 				C9D9BD2F114B00600000D8B9 /* vm_task.h in Headers */,
 				C9D9BD50114B00600000D8B9 /* key_defs.h in Headers */,
 				C9D9BD51114B00600000D8B9 /* ls_defs.h in Headers */,
@@ -1315,6 +1326,7 @@
 				BA4414A818336A1300AAE813 /* CopyFiles */,
 				BA4414AC18336A7700AAE813 /* CopyFiles */,
 				72950DF722418F7F00EFD5E0 /* CopyFiles */,
+				84D0E49628584CFF0093DF89 /* Copy Embedded Private Headers */,
 				D2AAC0610554660B00DB518D /* Sources */,
 				D289988505E68E00004EDB86 /* Frameworks */,
 			);
@@ -1391,6 +1403,27 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -x\n[ $ACTION = \"installhdrs\" ] && exit 0\n# workaround 48125283\n[ -n \"$DRIVERKIT_DEPLOYMENT_TARGET\" ] && unset MACOSX_DEPLOYMENT_TARGET\n\nmkdir -p $OBJROOT/UninstalledProducts\n\n$SRCROOT/xcodescripts/compile-syscalls.pl \\\n\t$OBJROOT/sys/stubs.list \\\n\t$BUILD_ROOT/syscalls.a\n";
+		};
+		84D0E49628584CFF0093DF89 /* Copy Embedded Private Headers */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(PROJECT_DIR)/wrappers/libproc/libproc.h",
+				"$(PROJECT_DIR)/xcodescripts/copy_embedded_private_headers.sh",
+			);
+			name = "Copy Embedded Private Headers";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SCRIPT_OUTPUT_DIR)/$(EMBEDDED_PRIVATE_HEADERS_FOLDER_PATH)/libproc.h",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = ". xcodescripts/copy_embedded_private_headers.sh\n";
 		};
 		BA4414A41833672200AAE813 /* Generate MIG Headers */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -1477,6 +1510,7 @@
 				C9D9BD37114B00600000D8B9 /* mach_error.c in Sources */,
 				C9D9BD3B114B00600000D8B9 /* mach_init.c in Sources */,
 				E4D45C2616F856900002AF25 /* mach_absolute_time.s in Sources */,
+				E436DFD428DD368B00503A8A /* exclaves.c in Sources */,
 				C9D9BD3C114B00600000D8B9 /* mach_msg.c in Sources */,
 				C9D9BD3E114B00600000D8B9 /* mach_traps.s in Sources */,
 				C9D9BD41114B00600000D8B9 /* mig_allocate.c in Sources */,
@@ -1639,8 +1673,8 @@
 			buildSettings = {
 				COPY_PHASE_STRIP = NO;
 				INSTALL_PATH = /usr/local/lib/dyld;
-				SKIP_INSTALL = "$(SKIP_INSTALL_$(SDK_INSTALL_VARIANT))";
-				SKIP_INSTALL_driverkit = YES;
+				SKIP_INSTALL = NO;
+				"SKIP_INSTALL[sdk=driverkit*]" = YES;
 				STRIP_INSTALLED_PRODUCT = NO;
 			};
 			name = Release;
@@ -1663,9 +1697,8 @@
 				MAP_PLATFORM_driverkit = DriverKit;
 				MAP_PLATFORM_iphoneos = iPhoneOS;
 				MAP_PLATFORM_iphoneosnano = iPhoneOS;
-				MAP_PLATFORM_macosx = "$(MAP_PLATFORM_macosx_$(SDK_INSTALL_VARIANT))";
-				MAP_PLATFORM_macosx_default = MacOSX;
-				MAP_PLATFORM_macosx_driverkit = DriverKit;
+				MAP_PLATFORM_macosx = MacOSX;
+				"MAP_PLATFORM_macosx[sdk=driverkit*]" = DriverKit;
 				MAP_PLATFORM_tvos = iPhoneOS;
 				MAP_PLATFORM_watchos = iPhoneOS;
 				PRODUCT_NAME = Syscalls;

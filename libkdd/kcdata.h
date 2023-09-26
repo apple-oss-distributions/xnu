@@ -542,6 +542,8 @@ struct kcdata_type_definition {
 #define STACKSHOT_KCTYPE_PORTLABEL                   0x935u /* struct stackshot_portlabel */
 #define STACKSHOT_KCTYPE_PORTLABEL_NAME              0x936u /* string port name */
 #define STACKSHOT_KCTYPE_DYLD_COMPACTINFO            0x937u /* binary blob of dyld info (variable size) */
+#define STACKSHOT_KCTYPE_SUSPENSION_INFO             0x938u /* struct stackshot_suspension_info */
+#define STACKSHOT_KCTYPE_SUSPENSION_SOURCE           0x939u /* struct stackshot_suspension_source */
 
 #define STACKSHOT_KCTYPE_TASK_DELTA_SNAPSHOT         0x940u   /* task_delta_snapshot_v2 */
 #define STACKSHOT_KCTYPE_THREAD_DELTA_SNAPSHOT       0x941u /* thread_delta_snapshot_v* */
@@ -970,6 +972,7 @@ struct task_delta_snapshot_v2 {
 	uint32_t  tds_latency_qos;
 } __attribute__ ((packed));
 
+#define KCDATA_INVALID_CS_TRUST_LEVEL 0xffffffff
 struct stackshot_task_codesigning_info {
 	uint64_t csflags;
 	uint32_t cs_trust_level;
@@ -1061,6 +1064,7 @@ typedef struct stackshot_thread_turnstileinfo_v2 {
 #define STACKSHOT_WAITOWNER_SUSPENDED      (UINT64_MAX - 7) /* workloop is suspended */
 
 #define STACKSHOT_PORTLABEL_READFAILED     0x1  /* could not read port information */
+#define STACKSHOT_PORTLABEL_THROTTLED      0x2  /* service port is marked as throttled */
 
 struct portlabel_info {
 	int16_t portlabel_id;         /* kcdata-specific ID for this port label  */
@@ -1114,6 +1118,19 @@ struct stackshot_latency_thread {
 	uint64_t misc_latency;
 } __attribute__((packed));
 
+struct stackshot_suspension_info {
+	uint64_t tss_last_start; /* mach_absolute_time of beginning of last suspension*/
+	uint64_t tss_last_end;   /* mach_absolute_time of end of last suspension */
+	uint64_t tss_count;      /* number of times this task has been suspended */
+	uint64_t tss_duration;   /* sum(mach_absolute_time) of time spend suspended */
+} __attribute__((packed));
+
+struct stackshot_suspension_source {
+	uint64_t tss_time;     /* mach_absolute_time of suspend */
+	uint64_t tss_tid;      /* tid of suspending thread */
+	int tss_pid;           /* pid of suspending task */
+	char tss_procname[65]; /* name of suspending task */
+} __attribute__((packed));
 
 /**************** definitions for crashinfo *********************/
 
@@ -1217,6 +1234,7 @@ struct kernel_triage_info_v1 {
 #define TASK_CRASHINFO_CS_TEAM_ID                               0x83C /* string of len MAX_CRASHINFO_TEAM_ID_LEN */
 #define TASK_CRASHINFO_CS_VALIDATION_CATEGORY                   0x83D /* uint32_t */
 #define TASK_CRASHINFO_CS_TRUST_LEVEL                           0x83E /* uint32_t */
+#define TASK_CRASHINFO_PROC_CPUTYPE                             0x83F /* cpu_type_t */
 
 #define TASK_CRASHINFO_END                  KCDATA_TYPE_BUFFER_END
 

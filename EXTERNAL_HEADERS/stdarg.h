@@ -23,6 +23,22 @@
  *===-----------------------------------------------------------------------===
  */
 
+#if XNU_KERNEL_PRIVATE
+
+#include_next <stdarg.h>
+/* __STDARG_H guard defined */
+
+#elif (defined(__has_include) && __has_include(<__xnu_libcxx_sentinel.h>))
+
+#if !__has_include_next(<stdarg.h>)
+#error Do not build with -nostdinc (use GCC_USE_STANDARD_INCLUDE_SEARCHING=NO)
+#else
+#include_next <stdarg.h>
+/* __STDARG_H guard defined */
+#endif /* __has_include_next */
+
+#else /* XNU_KERNEL_PRIVATE */
+
 #ifndef __STDARG_H
 #define __STDARG_H
 
@@ -37,7 +53,7 @@ typedef __builtin_va_list va_list;
 /* GCC always defines __va_copy, but does not define va_copy unless in c99 mode
  * or -ansi is not specified, since it was not part of C90.
  */
-#define __va_copy(d,s) __builtin_va_copy(d,s)
+#define __va_copy(d, s) __builtin_va_copy(d,s)
 
 #if __STDC_VERSION__ >= 199900L || __cplusplus >= 201103L || !defined(__STRICT_ANSI__)
 #define va_copy(dest, src)  __builtin_va_copy(dest, src)
@@ -48,3 +64,5 @@ typedef __builtin_va_list va_list;
 typedef __builtin_va_list __gnuc_va_list;
 
 #endif /* __STDARG_H */
+
+#endif /* XNU_KERNEL_PRIVATE */

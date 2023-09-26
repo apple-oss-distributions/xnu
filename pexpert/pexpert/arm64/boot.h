@@ -21,9 +21,8 @@
  * computed in https://confluence.sd.apple.com/display/TK/System+Token.
  *
  * This value matches iBoot's IBOOT_MAX_ENV_VAR_DATA_SIZE.
- * There are no iBoot headers so have to duplicate it here for now.
  */
-#define BOOT_LINE_LENGTH        608
+#define BOOT_LINE_LENGTH        1024
 
 /*
  * Video information..

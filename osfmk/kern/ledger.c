@@ -63,6 +63,8 @@
 #define LF_TRACKING_MAX         0x4000  /* track max balance. Exclusive w.r.t refill */
 #define LF_PANIC_ON_NEGATIVE    0x8000  /* panic if it goes negative */
 #define LF_TRACK_CREDIT_ONLY    0x10000 /* only update "credit" */
+#define LF_DIAG_WARNED          0x20000 /* callback was called for balance diag */
+#define LF_DIAG_DISABLED        0x40000 /* diagnostics threshold are disabled at the moment */
 
 
 /*
@@ -81,6 +83,10 @@ _Static_assert(((sizeof(struct ledger_entry_small) << ENTRY_ID_SIZE_SHIFT) | (UI
 _Static_assert(((sizeof(struct ledger_entry) << ENTRY_ID_SIZE_SHIFT) | (UINT16_MAX / sizeof(struct ledger_entry_small))) > 0, "Valid ledger index < 0");
 _Static_assert(sizeof(int) * 8 >= ENTRY_ID_SIZE_SHIFT * 2, "Ledger indices don't fit in an int.");
 #define MAX_LEDGER_ENTRIES (UINT16_MAX / sizeof(struct ledger_entry_small))
+
+#define LEDGER_DIAG_MEM_THRESHOLD_SHIFT 20
+#define LEDGER_DIAG_MEM_AMOUNT_TO_THRESHOLD(X)   ((X) >> (LEDGER_DIAG_MEM_THRESHOLD_SHIFT))
+#define LEDGER_DIAG_MEM_AMOUNT_FROM_THRESHOLD(X) (((ledger_amount_t)(X)) << (LEDGER_DIAG_MEM_THRESHOLD_SHIFT))
 
 /* These features can fit in a small ledger entry. All others require a full size ledger entry */
 #define LEDGER_ENTRY_SMALL_FLAGS (LEDGER_ENTRY_ALLOW_PANIC_ON_NEGATIVE | LEDGER_ENTRY_ALLOW_INACTIVE)
@@ -250,7 +256,9 @@ static uint32_t flag_clear(volatile uint32_t *flags, uint32_t bit);
 
 static void ledger_entry_check_new_balance(thread_t thread, ledger_t ledger,
     int entry);
-
+#if DEBUG || DEVELOPMENT
+static inline bool ledger_is_diag_threshold_enabled_internal(struct ledger_entry *le);
+#endif
 #if 0
 static void
 debug_callback(const void *p0, __unused const void *p1)
@@ -695,6 +703,7 @@ ledger_instantiate(ledger_template_t template, int entry_type)
 			le->le_debit         = 0;
 			le->le_limit         = LEDGER_LIMIT_INFINITY;
 			le->le_warn_percent  = LEDGER_PERCENT_NONE;
+			le->le_diag_threshold_scaled = LEDGER_DIAG_MEM_THRESHOLD_INFINITY;
 			le->_le.le_refill.le_refill_period = 0;
 			le->_le.le_refill.le_last_refill   = 0;
 		} else {
@@ -764,7 +773,7 @@ ledger_dereference(ledger_t ledger)
 /*
  * Determine whether an entry has exceeded its warning level.
  */
-static inline int
+static inline bool
 warn_level_exceeded(struct ledger_entry *le)
 {
 	ledger_amount_t balance;
@@ -782,15 +791,44 @@ warn_level_exceeded(struct ledger_entry *le)
 	balance = le->le_credit - le->le_debit;
 	if (le->le_warn_percent != LEDGER_PERCENT_NONE &&
 	    ((balance > (le->le_limit * le->le_warn_percent) >> 16))) {
-		return 1;
+		return true;
+	}
+	return false;
+}
+#if DEBUG || DEVELOPMENT
+
+/*
+ * Determine whether an entry has exceeded its diag mem threshold level.
+ */
+static inline bool
+diag_mem_threshold_exceeded(struct ledger_entry *le)
+{
+	ledger_amount_t balance;
+	ledger_amount_t diag_mem_threshold;
+
+	if ((le->le_diag_threshold_scaled != LEDGER_DIAG_MEM_THRESHOLD_INFINITY) && (ledger_is_diag_threshold_enabled_internal(le) == true)) {
+		if (le->le_flags & LF_TRACK_CREDIT_ONLY) {
+			assert(le->le_debit == 0);
+		} else {
+			assert((le->le_credit >= 0) && (le->le_debit >= 0));
+		}
+
+		diag_mem_threshold = LEDGER_DIAG_MEM_AMOUNT_FROM_THRESHOLD(le->le_diag_threshold_scaled);
+		balance = le->le_credit - le->le_debit;
+		if ((diag_mem_threshold <= 0) && (balance < diag_mem_threshold)) {
+			return 1;
+		}
+		if ((diag_mem_threshold > 0) && (balance > diag_mem_threshold)) {
+			return 1;
+		}
 	}
 	return 0;
 }
-
+#endif
 /*
  * Determine whether an entry has exceeded its limit.
  */
-static inline int
+static inline bool
 limit_exceeded(struct ledger_entry *le)
 {
 	ledger_amount_t balance;
@@ -803,13 +841,13 @@ limit_exceeded(struct ledger_entry *le)
 
 	balance = le->le_credit - le->le_debit;
 	if ((le->le_limit <= 0) && (balance < le->le_limit)) {
-		return 1;
+		return true;
 	}
 
 	if ((le->le_limit > 0) && (balance > le->le_limit)) {
-		return 1;
+		return true;
 	}
-	return 0;
+	return false;
 }
 
 static inline struct ledger_callback *
@@ -1028,11 +1066,6 @@ ledger_entry_check_new_balance(thread_t thread, ledger_t ledger,
 			}
 
 			if (le->le_flags & LEDGER_ACTION_CALLBACK) {
-				/*
-				 * Client has requested that a callback be invoked whenever
-				 * the ledger's balance crosses into or out of the warning
-				 * level.
-				 */
 				if (warn_level_exceeded(le)) {
 					/*
 					 * This ledger's balance is above the warning level.
@@ -1063,7 +1096,18 @@ ledger_entry_check_new_balance(thread_t thread, ledger_t ledger,
 				}
 			}
 		}
-
+#if DEBUG || DEVELOPMENT
+		if (diag_mem_threshold_exceeded(le)) {
+			/*
+			 * Even if the limit is below the threshold, we may be interested
+			 * in diagnostics limits. Lets process them if the ast is not
+			 * invoked
+			 */
+			if ((le->le_flags & LF_DIAG_WARNED) == 0) {
+				act_set_astledger_async(thread);
+			}
+		}
+#endif
 		if ((le->le_flags & LF_PANIC_ON_NEGATIVE) &&
 		    (le->le_credit < le->le_debit)) {
 			panic("ledger_entry_check_new_balance(%p,%d): negative ledger %p credit:%lld debit:%lld balance:%lld",
@@ -2020,9 +2064,30 @@ ledger_check_needblock(ledger_t l, uint64_t now)
 					}
 				}
 			}
-
+#if DEBUG || DEVELOPMENT
+			if (diag_mem_threshold_exceeded(le)) {
+				if (le->le_flags & LEDGER_ACTION_CALLBACK) {
+					assert(lc != NULL);
+					flags = flag_set(&le->le_flags, LF_DIAG_WARNED);
+					if ((flags & LF_DIAG_WARNED) == 0) {
+						lc->lc_func(LEDGER_WARNING_DIAG_MEM_THRESHOLD, lc->lc_param0, lc->lc_param1);
+					}
+				}
+			}
+#endif
 			continue;
 		}
+#if DEBUG || DEVELOPMENT
+		if (diag_mem_threshold_exceeded(le)) {
+			if (le->le_flags & LEDGER_ACTION_CALLBACK) {
+				assert(lc != NULL);
+				flags = flag_set(&le->le_flags, LF_DIAG_WARNED);
+				if ((flags & LF_DIAG_WARNED) == 0) {
+					lc->lc_func(LEDGER_WARNING_DIAG_MEM_THRESHOLD, lc->lc_param0, lc->lc_param1);
+				}
+			}
+		}
+#endif
 
 		/* We're over the limit, so refill if we are eligible and past due. */
 		if (le->le_flags & LF_REFILL_SCHEDULED) {
@@ -2493,3 +2558,159 @@ ledger_limit(task_t task, struct ledger_limit_args *args)
 	return 0;
 }
 #endif
+
+/*
+ * Adjust the diag mem threshold limit of a resource. The diag mem threshold limit only
+ * works prescaled by 20 bits (mb)
+ */
+#if DEBUG || DEVELOPMENT
+kern_return_t
+ledger_set_diag_mem_threshold(ledger_t ledger, int entry, ledger_amount_t limit)
+{
+	struct ledger_entry *le;
+
+	if (!is_entry_valid_and_active(ledger, entry)) {
+		return KERN_INVALID_VALUE;
+	}
+
+	if (ENTRY_ID_SIZE(entry) != sizeof(struct ledger_entry)) {
+		/* Small entries can't have limits */
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	lprintf(("ledger_set_diag mem threshold_limit: %lld\n", limit));
+	le = ledger_entry_identifier_to_entry(ledger, entry);
+	le->le_diag_threshold_scaled = (int16_t)LEDGER_DIAG_MEM_AMOUNT_TO_THRESHOLD(limit);
+	lprintf(("ledger_set_diag mem threshold_limit new : %lld\n", limit));
+	flag_clear(&le->le_flags, LF_DIAG_WARNED);
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ledger_get_diag_mem_threshold(ledger_t ledger, int entry, ledger_amount_t *limit)
+{
+	struct ledger_entry *le;
+
+	if (!is_entry_valid_and_active(ledger, entry)) {
+		return KERN_INVALID_VALUE;
+	}
+
+	if (ENTRY_ID_SIZE(entry) != sizeof(struct ledger_entry)) {
+		/* Small entries can't have limits */
+		*limit = LEDGER_LIMIT_INFINITY;
+	} else {
+		le = ledger_entry_identifier_to_entry(ledger, entry);
+		if (le->le_diag_threshold_scaled == LEDGER_DIAG_MEM_THRESHOLD_INFINITY) {
+			*limit = LEDGER_LIMIT_INFINITY;
+		} else {
+			*limit = LEDGER_DIAG_MEM_AMOUNT_FROM_THRESHOLD(le->le_diag_threshold_scaled);
+		}
+	}
+
+	lprintf(("ledger_get_diag mem threshold_limit: %lld\n", *limit));
+
+	return KERN_SUCCESS;
+}
+
+static inline void
+ledger_set_diag_mem_threshold_flag_disabled_internal(struct ledger_entry *le, bool value)
+{
+	if (value == true) {
+		flag_set(&le->le_flags, LF_DIAG_DISABLED);
+	} else {
+		flag_clear(&le->le_flags, LF_DIAG_DISABLED);
+	}
+}
+
+static inline bool
+ledger_is_diag_threshold_enabled_internal( struct ledger_entry *le)
+{
+	return ((le->le_flags & LF_DIAG_DISABLED) == 0)? true : false;
+}
+
+/**
+ * Disable the diagnostics threshold due to overlap with footprint limit
+ */
+kern_return_t
+ledger_set_diag_mem_threshold_disabled(ledger_t ledger, int entry)
+{
+	struct ledger_entry *le;
+
+	if (!is_entry_valid_and_active(ledger, entry)) {
+		return KERN_INVALID_VALUE;
+	}
+
+	if (ENTRY_ID_SIZE(entry) != sizeof(struct ledger_entry)) {
+		/* Small entries can't have limits */
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	lprintf(("ledger_set_diag_mem_threshold_disabled"));
+	le = ledger_entry_identifier_to_entry(ledger, entry);
+	if (le->le_diag_threshold_scaled == LEDGER_DIAG_MEM_THRESHOLD_INFINITY) {
+		lprintf(("ledger_set_diag_mem_threshold_disabled, cannot disable a ledger entry that have no value, returning error"));
+		return KERN_INVALID_ARGUMENT;
+	}
+	ledger_set_diag_mem_threshold_flag_disabled_internal(le, true);
+	return KERN_SUCCESS;
+}
+/**
+ * Enable the diagnostics threshold for a specific entry
+ */
+kern_return_t
+ledger_set_diag_mem_threshold_enabled(ledger_t ledger, int entry)
+{
+	struct ledger_entry *le;
+
+	if (!is_entry_valid_and_active(ledger, entry)) {
+		return KERN_INVALID_VALUE;
+	}
+
+	if (ENTRY_ID_SIZE(entry) != sizeof(struct ledger_entry)) {
+		/* Small entries can't have limits */
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	lprintf(("ledger_set_diag_mem_threshold_enabled"));
+	le = ledger_entry_identifier_to_entry(ledger, entry);
+	/*
+	 *  if (le->le_diag_threshold_scaled == LEDGER_DIAG_MEM_THRESHOLD_INFINITY) {
+	 *       lprintf(("ledger_set_diag_mem_threshold_enabled, cannot disable a ledger entry that have no value, returning error"));
+	 *       return KERN_INVALID_ARGUMENT;
+	 *  }
+	 */
+	ledger_set_diag_mem_threshold_flag_disabled_internal(le, false);
+
+	return KERN_SUCCESS;
+}
+/**
+ * Obtain the diagnostics threshold enabled flag. If the diagnostics threshold is enabled, returns true
+ * else returns false.
+ */
+kern_return_t
+ledger_is_diag_threshold_enabled(ledger_t ledger, int entry, bool *status)
+{
+	struct ledger_entry *le;
+
+	if (!is_entry_valid_and_active(ledger, entry)) {
+		return KERN_INVALID_VALUE;
+	}
+
+	if (ENTRY_ID_SIZE(entry) != sizeof(struct ledger_entry)) {
+		/* Small entries can't have limits */
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	lprintf(("ledger_is_diag_threshold_enabled"));
+	le = ledger_entry_identifier_to_entry(ledger, entry);
+	/*
+	 *  if (le->le_diag_threshold_scaled == LEDGER_DIAG_MEM_THRESHOLD_INFINITY) {
+	 *       lprintf(("ledger_is_diag_threshold_enabled, get enabled flag for a ledger entry that have no value, returning error"));
+	 *       return KERN_INVALID_ARGUMENT;
+	 *  }
+	 */
+	*status = ledger_is_diag_threshold_enabled_internal(le);
+	return KERN_SUCCESS;
+}
+#endif // DEBUG || DEVELOPMENT

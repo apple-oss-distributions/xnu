@@ -32,10 +32,10 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <sys/ioccom.h>
+#include <sys/ioctl.h>
 #include <strings.h>
 #include <assert.h>
 #include <unistd.h>
-
 
 #define KSANCOV_DEVNODE "ksancov"
 #define KSANCOV_PATH "/dev/" KSANCOV_DEVNODE
@@ -55,11 +55,14 @@
 #define KSANCOV_IOC_START        _IOW('K', 10, uintptr_t)
 #define KSANCOV_IOC_NEDGES       _IOR('K', 50, size_t)
 
+/* kext-related operations */
+#define KSANCOV_IOC_ON_DEMAND    _IOWR('K', 60, struct ksancov_on_demand_msg)
+
 /*
  * shared kernel-user mapping
  */
 
-#define KSANCOV_MAX_EDGES       512UL*1024
+#define KSANCOV_MAX_EDGES       (1 << 24)
 #define KSANCOV_MAX_HITS        UINT8_MAX
 #define KSANCOV_TRACE_MAGIC     (uint32_t)0x5AD17F5BU
 #define KSANCOV_COUNTERS_MAGIC  (uint32_t)0x5AD27F6BU
@@ -103,20 +106,18 @@ typedef struct ksancov_header {
  */
 typedef struct ksancov_trace {
 	ksancov_header_t kt_hdr;         /* header (must be always first) */
-	uintptr_t        kt_offset;      /* All recorded PCs are relateive to this offset. */
 	uint32_t         kt_maxent;      /* Maximum entries in this shared buffer. */
 	_Atomic uint32_t kt_head;        /* Pointer to the first unused element. */
 	uint64_t         kt_entries[];   /* Trace entries in this buffer. */
 } ksancov_trace_t;
 
+/* PC tracing only records PCs. */
+typedef uintptr_t ksancov_trace_pc_ent_t;
 
-/* PC tracing only records PC deltas from the offset. */
-typedef uint32_t ksancov_trace_pc_ent_t;
-
-/* STKSIZE tracing records PC deltas and stack size. */
+/* STKSIZE tracing records PCs and stack size. */
 typedef struct ksancov_trace_stksize_entry {
-	uint32_t pc;                      /* PC-delta (offset relative) */
-	uint32_t stksize;                 /* associated stack size */
+	uintptr_t pc;                      /* PC */
+	uint32_t  stksize;                 /* associated stack size */
 } ksancov_trace_stksize_ent_t;
 
 /*
@@ -134,9 +135,29 @@ typedef struct ksancov_counters {
 typedef struct ksancov_edgemap {
 	uint32_t  ke_magic;
 	uint32_t  ke_nedges;
-	uintptr_t ke_offset;              /* edge addrs relative to this */
-	uint32_t  ke_addrs[];             /* address of each edge relative to 'offset' */
+	uintptr_t ke_addrs[];             /* address of each edge relative to 'offset' */
 } ksancov_edgemap_t;
+
+/*
+ * On-demand related functionalities
+ */
+typedef enum {
+	KS_OD_GET_GATE = 1,
+	KS_OD_SET_GATE = 2,
+	KS_OD_GET_RANGE = 3,
+} ksancov_on_demand_operation_t;
+
+struct ksancov_on_demand_msg {
+	char bundle[/*KMOD_MAX_NAME*/ 64];
+	ksancov_on_demand_operation_t operation;
+	union {
+		uint64_t gate;
+		struct {
+			uint32_t start;
+			uint32_t stop;
+		} range;
+	};
+};
 
 /*
  * ksancov userspace API
@@ -171,7 +192,7 @@ ksancov_map(int fd, uintptr_t *buf, size_t *sz)
 		*sz = mc.sz;
 	}
 
-	ksancov_header_t *hdr = (void *)mc.ptr;
+	ksancov_header_t *hdr = (ksancov_header_t *)mc.ptr;
 	assert(hdr->kh_magic == KSANCOV_TRACE_MAGIC ||
 	    hdr->kh_magic == KSANCOV_COUNTERS_MAGIC ||
 	    hdr->kh_magic == KSANCOV_STKSIZE_MAGIC);
@@ -195,7 +216,7 @@ ksancov_map_edgemap(int fd, uintptr_t *buf, size_t *sz)
 		*sz = mc.sz;
 	}
 
-	ksancov_edgemap_t *emap = (void *)mc.ptr;
+	ksancov_edgemap_t *emap = (ksancov_edgemap_t *)mc.ptr;
 	assert(emap->ke_magic == KSANCOV_EDGEMAP_MAGIC);
 
 	return 0;
@@ -296,7 +317,7 @@ ksancov_edge_addr(ksancov_edgemap_t *kemap, size_t idx)
 	if (idx >= kemap->ke_nedges) {
 		return 0;
 	}
-	return kemap->ke_addrs[idx] + kemap->ke_offset;
+	return kemap->ke_addrs[idx];
 }
 
 static inline size_t
@@ -304,13 +325,6 @@ ksancov_trace_max_ent(ksancov_trace_t *trace)
 {
 	assert(trace);
 	return trace->kt_maxent;
-}
-
-static inline uintptr_t
-ksancov_trace_offset(ksancov_trace_t *trace)
-{
-	assert(trace);
-	return trace->kt_offset;
 }
 
 static inline size_t
@@ -332,7 +346,7 @@ ksancov_trace_entry(ksancov_trace_t *trace, size_t i)
 	}
 
 	ksancov_trace_pc_ent_t *entries = (ksancov_trace_pc_ent_t *)trace->kt_entries;
-	return entries[i] + trace->kt_offset;
+	return entries[i];
 }
 
 static inline uintptr_t
@@ -345,7 +359,7 @@ ksancov_stksize_pc(ksancov_trace_t *trace, size_t i)
 	}
 
 	ksancov_trace_stksize_ent_t *entries = (ksancov_trace_stksize_ent_t *)trace->kt_entries;
-	return entries[i].pc + trace->kt_offset;
+	return entries[i].pc;
 }
 
 static inline uint32_t
@@ -359,6 +373,73 @@ ksancov_stksize_size(ksancov_trace_t *trace, size_t i)
 
 	ksancov_trace_stksize_ent_t *entries = (ksancov_trace_stksize_ent_t *)trace->kt_entries;
 	return entries[i].stksize;
+}
+
+/*
+ * On-demand control API
+ */
+
+static inline int
+_ksancov_on_demand_operation(int fd, const char *bundle, ksancov_on_demand_operation_t op, struct ksancov_on_demand_msg *msg)
+{
+	int ret;
+
+	msg->operation = op;
+	strlcpy(msg->bundle, bundle, sizeof(msg->bundle));
+
+	ret = ioctl(fd, KSANCOV_IOC_ON_DEMAND, msg);
+	if (ret == -1) {
+		return errno;
+	}
+
+	return ret;
+}
+
+/*
+ * Retrieve the value of the gate for a given module bundle ID.
+ */
+static inline int
+ksancov_on_demand_get_gate(int fd, const char *bundle, uint64_t *gate)
+{
+	assert(gate);
+
+	struct ksancov_on_demand_msg msg;
+	int ret = _ksancov_on_demand_operation(fd, bundle, KS_OD_GET_GATE, &msg);
+	if (ret == 0) {
+		*gate = msg.gate;
+	}
+	return ret;
+}
+
+/*
+ * Set the value of the gate for a given module bundle ID.
+ *
+ * Any non-zero value enables the invocation of the sanitizer coverage callbacks
+ * inserted in the specified module.
+ */
+static inline int
+ksancov_on_demand_set_gate(int fd, const char *bundle, uint64_t value)
+{
+	struct ksancov_on_demand_msg msg = {};
+	msg.gate = value;
+	return _ksancov_on_demand_operation(fd, bundle, KS_OD_SET_GATE, &msg);
+}
+
+/*
+ * Get the guards range for a specified module.
+ */
+static inline int
+ksancov_on_demand_get_range(int fd, const char *bundle, uint32_t *start, uint32_t *stop)
+{
+	assert(start && stop);
+
+	struct ksancov_on_demand_msg msg = {};
+	int ret = _ksancov_on_demand_operation(fd, bundle, KS_OD_GET_RANGE, &msg);
+	if (ret == 0) {
+		*start = msg.range.start;
+		*stop = msg.range.stop;
+	}
+	return ret;
 }
 
 #endif /* _KSANCOV_H_ */

@@ -1300,6 +1300,15 @@ __NKE_API_DEPRECATED;
 extern u_int32_t mbuf_get_minclsize(void)
 __NKE_API_DEPRECATED;
 
+#ifdef XNU_KERNEL_PRIVATE
+/*
+ *      @function   mbuf_get_minclsize
+ *      @discussion Kernel internal function that returns the size of an mbuf
+ *      @result     The size of an mbuf
+ */
+extern u_int32_t mbuf_get_msize(void);
+#endif /* XNU_KERNEL_PRIVATE */
+
 /*!
  *       @function mbuf_clear_csum_performed
  *       @discussion Clears the hardware checksum flags and values.

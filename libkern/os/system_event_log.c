@@ -17,6 +17,8 @@ convert_subsystem_to_string(uint8_t subsystem)
 		return "nvram";
 	case SYSTEM_EVENT_SUBSYSTEM_PROCESS:
 		return "process";
+	case SYSTEM_EVENT_SUBSYSTEM_PMRD:
+		return "iopmrd";
 	default:
 		break;
 	}

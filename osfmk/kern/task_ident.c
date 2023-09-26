@@ -156,6 +156,7 @@ task_create_identity_token(
 	if (task_is_a_corpse(task)) {
 		token->task_uniqueid = task->task_uniqueid;
 	} else if (task->active && bsd_info != NULL) {
+		/* must check if the task is active to avoid a UAF - rdar://91431693 */
 		token->ident = proc_ident(bsd_info);
 	} else {
 		task_unlock(task);

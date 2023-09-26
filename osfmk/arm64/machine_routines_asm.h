@@ -50,9 +50,10 @@
  * tmp3 - scratch register 3
  * tmp4 - scratch register 4
  * tmp5 - scratch register 5
+ * tmp6 - scratch register 6
  */
 /* BEGIN IGNORE CODESTYLE */
-.macro AUTH_THREAD_STATE_IN_X0 tmp1, tmp2, tmp3, tmp4, tmp5, el0_state_allowed=0
+.macro AUTH_THREAD_STATE_IN_X0 tmp1, tmp2, tmp3, tmp4, tmp5, tmp6, el0_state_allowed=0
 #if __has_feature(ptrauth_calls)
 	msr		SPSel, #1
 #endif
@@ -67,10 +68,11 @@
 	ldp		x16, x17, [x0, SS64_X16]
 
 #if defined(HAS_APPLE_PAC)
-	// Save x3-x5 to preserve across call
+	// Save x3-x6 to preserve across call
 	mov		\tmp3, x3
 	mov		\tmp4, x4
 	mov		\tmp5, x5
+	mov		\tmp6, x6
 
 	/*
 	* Arg0: The ARM context pointer (already in x0)
@@ -103,9 +105,96 @@
 	mov		x3, \tmp3
 	mov		x4, \tmp4
 	mov		x5, \tmp5
+	mov		x6, \tmp6
 #else
 	ldr		lr, [x0, SS64_LR]
 #endif /* defined(HAS_APPLE_PAC) */
+.endmacro
+
+#if !__ARM_ARCH_8_6__
+.set BRK_AUTDA_FAILURE, 0xc472
+#endif
+
+/**
+ * Loads and auths the top of a thread's kernel stack pointer.
+ *
+ * Faults on auth failure.  src and dst can be the same register, as long as
+ * the caller doesn't mind clobbering the input.
+ *
+ * src (input): struct thread *
+ * dst (output): ptrauth_auth(src->machine.kstackptr)
+ * tmp: clobbered
+ */
+.macro LOAD_KERN_STACK_TOP	dst, src, tmp
+	add		\tmp, \src, TH_KSTACKPTR
+	ldr		\dst, [\tmp]
+#if __has_feature(ptrauth_calls)
+	movk		\tmp, TH_KSTACKPTR_DIVERSIFIER, lsl #48
+	autda		\dst, \tmp
+#if !__ARM_ARCH_8_6__
+	mov		\tmp, \dst
+	xpacd		\tmp
+	cmp		\tmp, \dst
+	b.eq		Lkstackptr_ok_\@
+	brk		BRK_AUTDA_FAILURE
+Lkstackptr_ok_\@:
+#endif /* !__ARM_ARCH_8_6__ */
+#endif /* __has_feature(ptrauth_calls) */
+.endmacro
+
+/**
+ * Loads and auths a thread's user context data.
+ *
+ * Faults on auth failure.  src and dst can be the same register, as long as
+ * the caller doesn't mind clobbering the input.
+ *
+ * src (input): struct thread *
+ * dst (output): ptrauth_auth(src->machine.upcb)
+ * tmp: clobbered
+ */
+.macro LOAD_USER_PCB	dst, src, tmp
+	add		\tmp, \src, TH_UPCB
+	ldr		\dst, [\tmp]
+#if __has_feature(ptrauth_calls)
+	movk		\tmp, TH_UPCB_DIVERSIFIER, lsl #48
+	autda		\dst, \tmp
+#if !__ARM_ARCH_8_6__
+	mov		\tmp, \dst
+	xpacd		\tmp
+	cmp		\tmp, \dst
+	b.eq		Lupcb_ok_\@
+	brk		BRK_AUTDA_FAILURE
+Lupcb_ok_\@:
+#endif /* !__ARM_ARCH_8_6__ */
+#endif /* __has_feature(ptrauth_calls) */
+.endmacro
+
+/**
+ * Loads and auths a thread's interrupt stack pointer.
+ *
+ * Faults on auth failure.  src and dst can be the same register, as long as
+ * the caller doesn't mind clobbering the input.
+ *
+ * src (input): struct thread *
+ * dst (output): ptrauth_auth(src->cpuDataP.istackptr)
+ * tmp: clobbered
+ */
+.macro LOAD_INT_STACK	dst, src, tmp
+	ldr		\tmp, [\src, ACT_CPUDATAP]
+	add		\tmp, \tmp, CPU_ISTACKPTR
+	ldr		\dst, [\tmp]
+#if __has_feature(ptrauth_calls)
+	movk		\tmp, CPU_ISTACKPTR_DIVERSIFIER, lsl #48
+	autda		\dst, \tmp
+#if !__ARM_ARCH_8_6__
+	mov		\tmp, \dst
+	xpacd		\tmp
+	cmp		\tmp, \dst
+	b.eq		Listackptr_ok_\@
+	brk		BRK_AUTDA_FAILURE
+Listackptr_ok_\@:
+#endif /* !__ARM_ARCH_8_6__ */
+#endif /* __has_feature(ptrauth_calls) */
 .endmacro
 /* END IGNORE CODESTYLE */
 

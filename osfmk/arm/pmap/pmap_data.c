@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2020-2021, 2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -938,7 +938,7 @@ ppr_remove_pt_page(pt_desc_t *ptdp)
 			 * handle it here explicitly. If there is any mapping updated,
 			 * update the TLB. */
 			if (pte_changed > 0) {
-				pmap_get_pt_ops(pmap)->flush_tlb_region_async(va, (size_t) (eva - va), pmap, false);
+				pmap_get_pt_ops(pmap)->flush_tlb_region_async(va, (size_t) (eva - va), pmap, false, need_strong_sync);
 				arm64_sync_tlb(need_strong_sync);
 			}
 
@@ -1232,13 +1232,11 @@ pmap_enqueue_pages(vm_page_t mem)
 	vm_object_unlock(pmap_object);
 }
 
-#if !XNU_MONITOR
 static inline boolean_t
 pmap_is_preemptible(void)
 {
 	return preemption_enabled() || (startup_phase < STARTUP_SUB_EARLY_BOOT);
 }
-#endif
 
 /**
  * Allocate a page for usage within the pmap and zero it out. If running on a
@@ -1419,6 +1417,11 @@ pmap_alloc_page_for_kern(unsigned int options)
 {
 	pmap_paddr_t pa = 0;
 	vm_page_t mem = VM_PAGE_NULL;
+
+	/* It's not possible to lock VM page queue lock if not preemptible. */
+	if (!pmap_is_preemptible()) {
+		return 0;
+	}
 
 	while ((mem = vm_page_grab()) == VM_PAGE_NULL) {
 		if (options & PMAP_PAGES_ALLOCATE_NOWAIT) {
@@ -2619,6 +2622,9 @@ pmap_remove_pv(
 		pmap_set_ptov_ap(pai, AP_RWNA, flush_tlb_async);
 	}
 #endif /* PVH_FLAG_EXEC */
+	if (__improbable((pvh_flags & PVH_FLAG_FLUSH_NEEDED) && pvh_test_type(pvh, PVH_TYPE_NULL))) {
+		pmap_flush_noncoherent_page((pmap_paddr_t)ptoa(pai) + vm_first_phys);
+	}
 
 	*is_internal_p = is_internal;
 	*is_altacct_p = is_altacct;
@@ -4218,6 +4224,12 @@ pmap_cpu_data_array_init(void)
 
 	iofilter_stacks_end_pa = avail_start;
 #endif /* HAS_GUARDED_IO_FILTER */
+
+	/* Carve out scratch space for each cpu */
+	for (unsigned int cpu_num = 0; cpu_num < MAX_CPUS; cpu_num++) {
+		pmap_cpu_data_array[cpu_num].cpu_data.scratch_page = (void*)phystokv(avail_start);
+		avail_start += PAGE_SIZE;
+	}
 #endif /* XNU_MONITOR */
 
 	pmap_cpu_data_init();
@@ -4268,4 +4280,42 @@ pmap_get_remote_cpu_data(unsigned int cpu)
 		return &cpu_data->cpu_pmap_cpu_data;
 	}
 #endif
+}
+
+void
+pmap_mark_page_for_cache_flush(pmap_paddr_t pa)
+{
+	if (!pa_valid(pa)) {
+		return;
+	}
+	const unsigned int pai = pa_index(pa);
+	pv_entry_t **pvh = pai_to_pvh(pai);
+	pvh_lock(pai);
+	pvh_set_flags(pvh, pvh_get_flags(pvh) | PVH_FLAG_FLUSH_NEEDED);
+	pvh_unlock(pai);
+}
+
+#if HAS_DC_INCPA
+void
+#else
+void __attribute__((noreturn))
+#endif
+pmap_flush_noncoherent_page(pmap_paddr_t paddr __unused)
+{
+	assertf((paddr & PAGE_MASK) == 0, "%s: paddr 0x%llx not page-aligned",
+	    __func__, (unsigned long long)paddr);
+
+#if HAS_DC_INCPA
+	for (unsigned int i = 0; i < (PAGE_SIZE >> 12); ++i) {
+		const register uint64_t dc_arg asm("x8") = paddr + (i << 12);
+		/**
+		 * rdar://problem/106067403
+		 * __asm__ __volatile__("dc incpa4k, %0" : : "r"(dc_arg));
+		 */
+		__asm__ __volatile__ (".long 0x201308" : : "r"(dc_arg));
+	}
+	__builtin_arm_dsb(DSB_OSH);
+#else
+	panic("%s called on unsupported configuration", __func__);
+#endif /* HAS_DC_INCPA */
 }

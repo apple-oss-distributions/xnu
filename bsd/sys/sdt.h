@@ -29,9 +29,7 @@
 
 /*
  * This is a wrapper header that wraps the mach visible sdt.h header so that
- * the header file ends up visible where software expects it to be.  We also
- * do the C/C++ symbol wrapping here, since Mach headers are technically C
- * interfaces.
+ * the header file ends up visible where software expects it to be.
  *
  * Note:  The process of adding USDT probes to code is slightly different
  * than documented in the "Solaris Dynamic Tracing Guide".
@@ -40,8 +38,6 @@
  *
  */
 #include <sys/cdefs.h>
-__BEGIN_DECLS
 #include <mach/sdt.h>
-__END_DECLS
 
 #endif  /* _SYS_SDT_H */

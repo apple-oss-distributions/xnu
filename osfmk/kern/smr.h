@@ -430,6 +430,36 @@ __BEGIN_DECLS
 
 
 /*!
+ * @macro smrq_serialized_insert_head_relaxed
+ *
+ * @brief
+ * Inserts an element at the head of an SMR queue, while being serialized
+ * by an external mechanism, without any barrier.
+ */
+#define smrq_serialized_insert_head_relaxed(head, elem)  ({ \
+	__auto_type __head = (head);                                            \
+                                                                                \
+	__smrq_serialized_insert_relaxed(&__head->first, (elem),                \
+	   smr_serialized_load(&__head->first), __smrq_lastp(__head));          \
+})
+
+
+/*!
+ * @macro smrq_serialized_insert_tail_relaxed
+ *
+ * @brief
+ * Inserts an element at the tail of an SMR queue, while being serialized
+ * by an external mechanism, without any barrier.
+ */
+#define smrq_serialized_insert_tail_relaxed(head, elem)  ({ \
+	__auto_type __head = (head);                                            \
+                                                                                \
+	__smrq_serialized_insert_relaxed(__head->last, (elem),                  \
+	   NULL, &__head->last);                                                \
+})
+
+
+/*!
  * @macro smrq_serialized_remove
  *
  * @brief
@@ -480,7 +510,7 @@ __BEGIN_DECLS
  * The iterator variable will _not_ be updated until the next
  * loop iteration.
  *
- * This form is prefered to smrq_serialized_foreach_safe()
+ * This form is preferred to smrq_serialized_foreach_safe()
  * for singly linked lists as smrq_serialized_iter_erase()
  * is O(1) as opposed to smrq_serialized_remove().
  */
@@ -549,9 +579,17 @@ __BEGIN_DECLS
  *
  * @const SMR_NONE
  * Default values for the flags.
+ #if XNU_KERNEL_PRIVATE
+ *
+ * @const SMR_SLEEPABLE
+ * Create a sleepable SMR domain.
+ #endif
  */
 __options_closed_decl(smr_flags_t, unsigned long, {
 	SMR_NONE              = 0x00000000,
+#if XNU_KERNEL_PRIVATE
+	SMR_SLEEPABLE         = 0x00000001,
+#endif
 });
 
 /*!
@@ -559,8 +597,84 @@ __options_closed_decl(smr_flags_t, unsigned long, {
  *
  * @brief
  * Create an SMR domain.
+ *
+ * @discussion
+ * Be mindful when creating SMR domains, and consider carefully
+ * whether to add one or consolidate an existing one.
+ *
+ *
+ * Memory usage
+ * ~~~~~~~~~~~~
+ *
+ * SMR domains are fairly large structures that scale with the number
+ * of cores of the machine. They are meant to be use in a coarse grained
+ * manner.
+ *
+ * In addition to that, when @c smr_call() is used with the domain,
+ * the queues of callbacks are drained based on memory pressure within
+ * the domain. The more domains, the more dormant memory might exist.
+ *
+ * In general, memory considerations drive toward less domains.
+ *
+ *
+ * Scalability
+ * ~~~~~~~~~~~
+ *
+ * An SMR domain is built on top of an atomic state that is used
+ * to perform grace period detection. The more "write" activity
+ * there is on the domain (@c smr_call(), @c smr_advance(), etc...),
+ * the more this atomic might become contended. In particular,
+ * certain usage patterns might scale extremely well independently,
+ * but cause higher contention when sharing a domain.
+ *
+ * Another thing to consider is that when @c smr_call() is being used,
+ * if the callbacks act on vastly different data structures, then as
+ * the callbacks are being drained, cache misses will be higher.
+ *
+ * However, the more domains are in use, the more probable it is
+ * that using it will cause a cache miss.
+ *
+ * Generally, scalability considerations drive toward balanced
+ * coarse-grained domains.
+ *
+ *
+ * Invariants
+ * ~~~~~~~~~~
+ *
+ * The last aspect leading to the decision of creating versus reusing
+ * an SMR domain is about the invariants that these domains protect.
+ *
+ * Object graphs that are protected with SMR and are used together
+ * in many workloads will likely require to share an SMR domain
+ * in order to provide the required guarantees. Having @c smr_call()
+ * callbacks in a given domain cause downstream @c smr_call() into
+ * another different domain regularly is probably a sign that these
+ * domains should be shared.
+ *
+ * Another aspect to consider is that using @c smr_synchronize()
+ * or @c smr_barrier() can lead to two classes of problems:
+ *
+ * - these operations are extremely heavy, and if some subsystem needs to
+ *    perform them on several domains, performance will be disappointing.
+ *
+ * - these operations are akin to taking a "write lock" on the domain,
+ *   and as such can cause deadlocks when used improperly.
+ *   Using a coarser grained unique domain is a good way to simplify
+ *   reasoning about the locking dependencies between SMR domains
+ *   and other regular locks.
+ *
+ *
+ * Guidance
+ * ~~~~~~~~
+ *
+ * In general, the entire kernel should have relatively few SMR domains,
+ * at the scale of the big subsystems of the kernel (think: Mach IPC, Mach VM,
+ * VFS, Networking, ...).
+ *
+ * When write operations (@c smr_call(), @c smr_synchronize, ...) are used
+ * rarely, consider using the system wide default domains.
  */
-extern smr_t smr_domain_create(smr_flags_t flags);
+extern smr_t smr_domain_create(smr_flags_t flags, const char *name);
 
 /*!
  * @function smr_domain_free()
@@ -603,20 +717,69 @@ extern void smr_leave(smr_t smr);
 
 
 /*!
+ * @function smr_call()
+ *
+ * @brief
+ * Defer making a call until it is safe to assume all readers
+ * will observe any update prior to this call.
+ *
+ * @discussion
+ * The target SMR domain must NOT be entered when making this call.
+ *
+ * The passed @c size doesn't have to be precise, it should be a rough
+ * estimate of the memory that will be reclaimed when when the call is made.
+ *
+ * This function gives no guarantee of forward progress,
+ * unless the magic SMR_CALL_EXPEDITE size is passed to @c smr_call().
+ */
+extern void smr_call(smr_t smr, smr_node_t node, vm_size_t size, smr_cb_t cb);
+
+#define SMR_CALL_EXPEDITE       ((vm_size_t)~0)
+
+/*!
  * @function smr_synchronize()
  *
  * @brief
- * Synchronize advances the write sequence
- * and returns when all readers have observed it.
+ * Wait until all readers have observed any updates made prior to this call.
  *
  * @discussion
- * This is roughly equivalent to @c smr_wait(smr, smr_advance(smr))
+ * The target SMR domain must NOT be entered when making this call.
  *
- * It is however better to cache a sequence number returned
- * from @c smr_advance(), and poll or wait for it at a latter time,
- * as there will be less chance of spinning while waiting for readers.
+ * This function is quite expensive, and asynchronous deferred processing
+ * using @c smr_call() should be used instead when possible.
+ *
+ * Reserve using this call for events that are extremely rare (like system
+ * configuration events such as configuring networking interfaces, changing
+ * system wide security policies, or loading/unloading a kernel extension).
+ *
+ * This function should typically be called with preemption enabled,
+ * and no locks held.
  */
 extern void smr_synchronize(smr_t smr);
+
+/*!
+ * @function smr_barrier()
+ *
+ * @brief
+ * Wait until all readers have observed any updates made prior to this call,
+ * and all @c smr_call() callbacks dispatched prior to this call on any core
+ * have completed.
+ *
+ * @discussion
+ * The target SMR domain must NOT be entered when making this call.
+ *
+ * This function is typically used when some data structure is being
+ * accessed by @c smr_call() callbacks and that data structure needs
+ * to be retired.
+ *
+ * Reserve using this call for events that are extremely rare (like system
+ * configuration events such as configuring networking interfaces, changing
+ * system wide security policies, or loading/unloading a kernel extension).
+ *
+ * This function should typically be called with preemption enabled,
+ * and no locks held.
+ */
+extern void smr_barrier(smr_t smr);
 
 
 #ifdef XNU_KERNEL_PRIVATE
@@ -625,8 +788,9 @@ extern void smr_synchronize(smr_t smr);
 #pragma mark XNU only: SMR domains advanced
 
 #define SMR_SEQ_INVALID         ((smr_seq_t)0)
-#define SMR_SEQ_INIT            ((smr_seq_t)1)
-#define SMR_SEQ_INC             ((smr_seq_t)2)
+#define SMR_SEQ_SLEEPABLE       ((smr_seq_t)1) /* only on smr_pcpu::rd_seq */
+#define SMR_SEQ_INIT            ((smr_seq_t)2)
+#define SMR_SEQ_INC             ((smr_seq_t)4)
 
 typedef long                    smr_delta_t;
 
@@ -644,6 +808,8 @@ typedef struct {
 	smr_seq_t               s_wr_seq;
 } smr_clock_t;
 
+#define SMR_NAME_MAX            24
+
 /*!
  * @typedef smr_t
  *
@@ -655,7 +821,8 @@ struct smr {
 	struct smr_pcpu        *smr_pcpu;
 	unsigned long           smr_flags;
 	unsigned long           smr_early;
-};
+	char                    smr_name[SMR_NAME_MAX];
+} __attribute__((aligned(64)));
 
 /*!
  * @macro SMR_DEFINE_FLAGS
@@ -663,11 +830,12 @@ struct smr {
  * @brief
  * Define an SMR domain with specific create flags.
  */
-#define SMR_DEFINE_FLAGS(var, flags) \
+#define SMR_DEFINE_FLAGS(var, name, flags) \
 	struct smr var = { \
 	        .smr_clock.s_rd_seq = SMR_SEQ_INIT, \
 	        .smr_clock.s_wr_seq = SMR_SEQ_INIT, \
 	        .smr_flags = (flags), \
+	        .smr_name  = "" name, \
 	}; \
 	STARTUP_ARG(TUNABLES, STARTUP_RANK_LAST, __smr_domain_init, &(var)); \
 	STARTUP_ARG(ZALLOC, STARTUP_RANK_LAST, __smr_domain_init, &(var))
@@ -678,8 +846,18 @@ struct smr {
  * @brief
  * Define an SMR domain.
  */
-#define SMR_DEFINE(var) \
-	SMR_DEFINE_FLAGS(var, SMR_NONE)
+#define SMR_DEFINE(var, name) \
+	SMR_DEFINE_FLAGS(var, name, SMR_NONE)
+
+
+/*!
+ * @macro SMR_DEFINE_SLEEPABLE
+ *
+ * @brief
+ * Define a sleepable SMR domain.
+ */
+#define SMR_DEFINE_SLEEPABLE(var, name) \
+	SMR_DEFINE_FLAGS(var, name, SMR_SLEEPABLE)
 
 
 /*!
@@ -760,50 +938,149 @@ extern bool smr_poll(smr_t smr, smr_seq_t goal) __result_use_check;
 extern void smr_wait(smr_t smr, smr_seq_t goal);
 
 
-#pragma mark XNU only: system global SMR
+#pragma mark XNU only: major sleepable SMR domains
+/*
+ * Note: this is private for now because sleepable sections that do "bad" things
+ *       (such as doing an upcall to userspace, or doing VM allocations) have
+ *       the danger that they can stall the reclamation worker threads,
+ *       which are a singleton resource.
+ *
+ *       Until this can be mitigated or designed better, this stays private.
+ */
+
+/*!
+ * @typedef smr_tracker_t
+ *
+ * @brief
+ * Structure used to track active sleepable SMR sections.
+ *
+ * @field smrt_domain  the entered SMR domain
+ * @field smrt_seq     the SMR sequence at the time of smr_enter_sleepable().
+ * @field smrt_link    linkage used to track stalled sections.
+ * @field smrt_stack   linkage used to track entered sections.
+ * @field smrt_ctid    (if stalled) the ctid of the thread in this section.
+ * @field smrt_cpu     (if stalled) the cpu the thread was on when stalled.
+ */
+typedef struct smr_tracker {
+	smr_t                   smrt_domain;
+	smr_seq_t               smrt_seq;
+	struct smrq_link        smrt_link;
+	struct smrq_slink       smrt_stack;
+	uint32_t                smrt_ctid;
+	int                     smrt_cpu;
+} *smr_tracker_t;
+
+/*!
+ * @function smr_enter_sleepable()
+ *
+ * @brief
+ * Enter a sleepable SMR critical section.
+ *
+ * @discussion
+ * Entering an SMR critical section is non recursive
+ * (entering it recursively is undefined and will panic on development kernels)
+ *
+ * @c smr_leave_sleepable() must be called to end this section,
+ * passing the same tracker pointer.
+ *
+ * The SMR domain must have been created with the @c SMR_SLEEPABLE flag.
+ *
+ * It is permitted to do operations that might block under such a transaction,
+ * such as acquiring a lock, or freeing memory.
+ *
+ * It is forbidden to perform operations that wait for an unbounded amount of
+ * time such as waiting for networking packets or even a hardware driver event,
+ * as these could cause grace periods (and memory reclamation) to stall for
+ * a very long time.
+ */
+extern void smr_enter_sleepable(smr_t smr, smr_tracker_t tracker);
+
+/*!
+ * @function smr_leave_sleepable()
+ *
+ * @brief
+ * Leave a sleepable SMR critical section entered with @c smr_enter_sleepable().
+ */
+extern void smr_leave_sleepable(smr_t smr, smr_tracker_t tracker);
+
+
+#pragma mark XNU only: major subsystems SMR domains
 
 /*!
  * @brief
- * The SMR domain behind the smr_global_*() KPI.
+ * A global system wide non preemptible domain.
  *
  * @discussion
  * This is provided as a fallback for when a specific SMR domain
  * would be overkill.
+ *
+ * Try not use the @c smr_system name directly, instead define
+ * a subsystem domain that happens to be defined to it, so that
+ * understanding the invariants being provided is easier.
  */
 extern struct smr smr_system;
 
-#define smr_global_entered()           smr_entered(&smr_system)
-#define smr_global_enter()             smr_enter(&smr_system)
-#define smr_global_leave()             smr_leave(&smr_system)
-
-#define smr_global_advance()           smr_advance(&smr_system)
-#define smr_global_poll(goal)          smr_poll(&smr_system, goal)
-#define smr_global_wait(goal)          smr_wait(&smr_system, goal)
-#define smr_global_synchronize()       smr_synchronize(&smr_system)
-
 /*!
- * @function smr_global_retire()
- *
  * @brief
- * Schedule a callback to free some memory once it is safe to collect it.
+ * A global system wide sleepable domain.
  *
  * @discussion
- * The default system wide global SMR system provides a way
- * for elements protected by it (using @c smr_global_enter()
- * and @c smr_global_leave() to protect access) to be reclaimed
- * when this is safe to.
+ * This is provided as a fallback for when a specific SMR domain
+ * would be overkill.
  *
- * This function can't be called with preemption disabled as it may block.
- * In particular it can't be called from within an SMR critical section.
- *
- * @param value         the address of the element to reclaim.
- * @param size          an estimate of the size of the memory that will be freed.
- * @param destructor    the callback to run to actually destroy the element.
+ * Try not use the @c smr_system_sleepable name directly,
+ * instead define a subsystem domain that happens to be defined to it,
+ * so that understanding the invariants being provided is easier.
  */
-extern void smr_global_retire(
-	void                   *value,
-	size_t                  size,
-	void                  (*destructor)(void *));
+extern struct smr smr_system_sleepable;
+
+
+/*!
+ * @macro smr_ipc
+ *
+ * @brief
+ * The SMR domain for the Mach IPC subsystem.
+ */
+#define smr_ipc                         smr_system
+#define smr_ipc_entered()               smr_entered(&smr_ipc)
+#define smr_ipc_enter()                 smr_enter(&smr_ipc)
+#define smr_ipc_leave()                 smr_leave(&smr_ipc)
+
+#define smr_ipc_call(n, sz, cb)         smr_call(&smr_ipc, n, sz, cb)
+#define smr_ipc_synchronize()           smr_synchronize(&smr_ipc)
+#define smr_ipc_barrier()               smr_barrier(&smr_ipc)
+
+
+/*!
+ * @macro smr_proc_task
+ *
+ * @brief
+ * The SMR domain for the proc/task and adjacent objects.
+ */
+#define smr_proc_task                   smr_system
+#define smr_proc_task_entered()         smr_entered(&smr_proc_task)
+#define smr_proc_task_enter()           smr_enter(&smr_proc_task)
+#define smr_proc_task_leave()           smr_leave(&smr_proc_task)
+
+#define smr_proc_task_call(n, sz, cb)   smr_call(&smr_proc_task, n, sz, cb)
+#define smr_proc_task_synchronize()     smr_synchronize(&smr_proc_task)
+#define smr_proc_task_barrier()         smr_barrier(&smr_proc_task)
+
+
+/*!
+ * @macro smr_iokit
+ *
+ * @brief
+ * The SMR domain for IOKit
+ */
+#define smr_iokit                       smr_system
+#define smr_iokit_entered()             smr_entered(&smr_iokit)
+#define smr_iokit_enter()               smr_enter(&smr_iokit)
+#define smr_iokit_leave()               smr_leave(&smr_iokit)
+
+#define smr_iokit_call(n, sz, cb)       smr_call(&smr_iokit, n, sz, cb)
+#define smr_iokit_synchronize()         smr_synchronize(&smr_iokit)
+#define smr_iokit_barrier()             smr_barrier(&smr_iokit)
 
 
 #pragma mark XNU only: implementation details
@@ -811,12 +1088,41 @@ extern void smr_global_retire(
 extern void __smr_domain_init(smr_t);
 
 #ifdef MACH_KERNEL_PRIVATE
+struct processor;
 
-extern bool smr_entered_cpu(smr_t smr, int cpu) __result_use_check;
+extern bool smr_entered_cpu_noblock(smr_t smr, int cpu) __result_use_check;
 
-extern void smr_register_mpsc_queue(void);
+extern void smr_ack_ipi(void);
 
+extern void smr_mark_active_trackers_stalled(struct thread *self);
+
+__options_closed_decl(smr_cpu_reason_t, uint8_t, {
+	SMR_CPU_REASON_NONE        = 0x00,
+	SMR_CPU_REASON_OFFLINE     = 0x01,
+	SMR_CPU_REASON_IGNORED     = 0x02,
+	SMR_CPU_REASON_ALL         = 0x03,
+});
+
+extern void smr_cpu_init(struct processor *);
+extern void smr_cpu_up(struct processor *, smr_cpu_reason_t);
+extern void smr_cpu_down(struct processor *, smr_cpu_reason_t);
+
+extern void smr_cpu_join(struct processor *, uint64_t ctime);
+extern void smr_cpu_tick(uint64_t ctime, bool safe_point);
+extern void smr_cpu_leave(struct processor *, uint64_t ctime);
+
+extern void smr_maintenance(uint64_t ctime);
+
+#if CONFIG_QUIESCE_COUNTER
+extern void cpu_quiescent_set_storage(uint64_t _Atomic *ptr);
+#endif
 #endif /* MACH_KERNEL_PRIVATE */
+
+extern uint32_t smr_cpu_checkin_get_min_interval_us(void);
+
+extern uint32_t smr_cpu_checkin_get_min_interval_us(void);
+
+extern void smr_cpu_checkin_set_min_interval_us(uint32_t new_value);
 
 #pragma GCC visibility pop
 #endif /* XNU_KERNEL_PRIVATE */
@@ -903,6 +1209,56 @@ __smrq_serialized_insert(
 	smr_serialized_store_relaxed(&elem->next, next);
 	elem->prev = prev;
 	smr_serialized_store(prev, elem);
+
+	if (next != NULL) {
+		next->prev = &elem->next;
+	} else if (lastp) {
+		*lastp = &elem->next;
+	}
+}
+
+
+__attribute__((always_inline, overloadable))
+static inline void
+__smrq_serialized_insert_relaxed(
+	__smrq_slink_t         *prev,
+	struct smrq_slink      *elem,
+	struct smrq_slink      *next,
+	__smrq_slink_t        **lastp)
+{
+	if (next == NULL && lastp) {
+		if (*lastp != prev || smr_serialized_load(prev)) {
+			__smr_stail_invalid(prev, *lastp);
+		}
+	}
+
+	smr_serialized_store_relaxed(&elem->next, next);
+	smr_serialized_store_relaxed(prev, elem);
+	if (next == NULL && lastp) {
+		*lastp = &elem->next;
+	}
+}
+
+__attribute__((always_inline, overloadable))
+static inline void
+__smrq_serialized_insert_relaxed(
+	__smrq_link_t          *prev,
+	struct smrq_link       *elem,
+	struct smrq_link       *next,
+	__smrq_link_t         **lastp)
+{
+	if (next != NULL && next->prev != prev) {
+		__smr_linkage_invalid(prev);
+	}
+	if (next == NULL && lastp) {
+		if (*lastp != prev || smr_serialized_load(prev)) {
+			__smr_tail_invalid(prev, *lastp);
+		}
+	}
+
+	smr_serialized_store_relaxed(&elem->next, next);
+	elem->prev = prev;
+	smr_serialized_store_relaxed(prev, elem);
 
 	if (next != NULL) {
 		next->prev = &elem->next;

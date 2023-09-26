@@ -208,7 +208,12 @@ struct c_sv_hash_entry {
 #define C_SV_HASH_MAX_MISS      32
 #define C_SV_HASH_SIZE          ((1 << 10))
 #define C_SV_HASH_MASK          ((1 << 10) - 1)
+
+#if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
+#define C_SV_CSEG_ID            ((1 << 21) - 1)
+#else /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 #define C_SV_CSEG_ID            ((1 << 22) - 1)
+#endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 
 
 union c_segu {
@@ -383,10 +388,8 @@ static void vm_compressor_process_special_swapped_in_segments_locked(void);
 
 struct vm_compressor_swapper_stats vmcs_stats;
 
+static void vm_compressor_process_major_segments(bool);
 #if XNU_TARGET_OS_OSX
-#if (__arm64__)
-static void vm_compressor_process_major_segments(void);
-#endif /* (__arm64__) */
 static void vm_compressor_take_paging_space_action(void);
 #endif /* XNU_TARGET_OS_OSX */
 
@@ -838,26 +841,6 @@ vm_compressor_set_size(void)
 		compressor_pool_multiplier = 4;
 	}
 
-#elif defined(__arm64__) && defined(XNU_TARGET_OS_WATCH)
-
-	/*
-	 * On M9 watches the compressor can become big and can lead to
-	 * churn in workingset resulting in audio drops. Setting a cap
-	 * on the compressor size favors reclaiming unused memory
-	 * sitting in idle band via jetsams
-	 */
-
-#define COMPRESSOR_CAP_PERCENTAGE        37ULL
-
-	if (compressor_pool_max_size > max_mem) {
-		compressor_pool_max_size = max_mem;
-	}
-
-	if (vm_compression_limit == 0) {
-		compressor_pool_size = (max_mem * COMPRESSOR_CAP_PERCENTAGE) / 100ULL;
-	}
-	compressor_pool_multiplier = 1;
-
 #else
 
 	if (compressor_pool_max_size > max_mem) {
@@ -867,8 +850,26 @@ vm_compressor_set_size(void)
 	if (vm_compression_limit == 0) {
 		compressor_pool_size = max_mem;
 	}
+
+#if XNU_TARGET_OS_WATCH
+	compressor_pool_multiplier = 2;
+#elif XNU_TARGET_OS_IOS
+	if (max_mem <= (2ULL * 1024ULL * 1024ULL * 1024ULL)) {
+		compressor_pool_multiplier = 2;
+	} else {
+		compressor_pool_multiplier = 1;
+	}
+#else
 	compressor_pool_multiplier = 1;
 #endif
+
+#endif
+
+	PE_parse_boot_argn("kern.compressor_pool_multiplier", &compressor_pool_multiplier, sizeof(compressor_pool_multiplier));
+	if (compressor_pool_multiplier < 1) {
+		compressor_pool_multiplier = 1;
+	}
+
 	if (compressor_pool_size > compressor_pool_max_size) {
 		compressor_pool_size = compressor_pool_max_size;
 	}
@@ -2024,8 +2025,8 @@ c_seg_free_locked(c_segment_t c_seg)
 	lck_mtx_destroy(&c_seg->c_lock, &vm_compressor_lck_grp);
 
 	if (c_seg->c_slot_var_array_len) {
-		kfree_data(c_seg->c_slot_var_array,
-		    sizeof(struct c_slot) * c_seg->c_slot_var_array_len);
+		kfree_type(struct c_slot, c_seg->c_slot_var_array_len,
+		    c_seg->c_slot_var_array);
 	}
 
 	zfree(compressor_segment_zone, c_seg);
@@ -2206,8 +2207,7 @@ c_seg_alloc_nextslot(c_segment_t c_seg)
 			newlen = oldlen * 2;
 		}
 
-		new_slot_array = kalloc_data(sizeof(struct c_slot) * newlen,
-		    Z_WAITOK);
+		new_slot_array = kalloc_type(struct c_slot, newlen, Z_WAITOK);
 
 		lck_mtx_lock_spin_always(&c_seg->c_lock);
 
@@ -2221,7 +2221,7 @@ c_seg_alloc_nextslot(c_segment_t c_seg)
 
 		lck_mtx_unlock_always(&c_seg->c_lock);
 
-		kfree_data(old_slot_array, sizeof(struct c_slot) * oldlen);
+		kfree_type(struct c_slot, oldlen, old_slot_array);
 	}
 }
 
@@ -2811,10 +2811,6 @@ vm_wake_compactor_swapper(void)
 void
 vm_consider_swapping()
 {
-	c_segment_t     c_seg, c_seg_next;
-	clock_sec_t     now;
-	clock_nsec_t    nsec;
-
 	assert(VM_CONFIG_SWAP_IS_PRESENT);
 
 	lck_mtx_lock_spin_always(c_list_lock);
@@ -2835,28 +2831,8 @@ vm_consider_swapping()
 
 	vm_swapout_ripe_segments = TRUE;
 
-	if (!queue_empty(&c_major_list_head)) {
-		clock_get_system_nanotime(&now, &nsec);
+	vm_compressor_process_major_segments(vm_swapout_ripe_segments);
 
-		c_seg = (c_segment_t)queue_first(&c_major_list_head);
-
-		while (!queue_end(&c_major_list_head, (queue_entry_t)c_seg)) {
-			if (c_overage_swapped_count >= c_overage_swapped_limit) {
-				break;
-			}
-
-			c_seg_next = (c_segment_t) queue_next(&c_seg->c_age_list);
-
-			if ((now - c_seg->c_creation_ts) >= vm_ripe_target_age) {
-				lck_mtx_lock_spin_always(&c_seg->c_lock);
-
-				c_seg_switch_state(c_seg, C_ON_AGE_Q, FALSE);
-
-				lck_mtx_unlock_always(&c_seg->c_lock);
-			}
-			c_seg = c_seg_next;
-		}
-	}
 	vm_compressor_compact_and_swap(FALSE);
 
 	compaction_swapper_running = 0;
@@ -3114,7 +3090,6 @@ vm_compressor_major_compact_cseg(c_segment_t c_seg, uint32_t* c_seg_considered, 
 	(rsecs) -= (secs);                                              \
 	MACRO_END
 
-#if (XNU_TARGET_OS_OSX && __arm64__)
 clock_nsec_t c_process_major_report_over_ms = 9; /* report if over 9 ms */
 int c_process_major_yield_after = 1000; /* yield after moving 1,000 segments */
 uint64_t c_process_major_reports = 0;
@@ -3122,7 +3097,7 @@ clock_sec_t c_process_major_max_sec = 0;
 clock_nsec_t c_process_major_max_nsec = 0;
 uint32_t c_process_major_peak_segcount = 0;
 static void
-vm_compressor_process_major_segments(void)
+vm_compressor_process_major_segments(bool ripe_age_only)
 {
 	c_segment_t c_seg = NULL;
 	int count = 0, total = 0, breaks = 0;
@@ -3140,10 +3115,38 @@ vm_compressor_process_major_segments(void)
 	} else {
 		report_over_ns = (clock_nsec_t)-1;
 	}
+
+	if (ripe_age_only) {
+		if (c_overage_swapped_count >= c_overage_swapped_limit) {
+			/*
+			 * Return while we wait for the overage segments
+			 * in our queue to get pushed out first.
+			 */
+			return;
+		}
+	}
+
 	clock_get_system_nanotime(&start_sec, &start_nsec);
 	while (!queue_empty(&c_major_list_head)) {
-		/* start from the end to preserve aging order */
-		c_seg = (c_segment_t)queue_last(&c_major_list_head);
+		if (!ripe_age_only) {
+			/*
+			 * Start from the end to preserve aging order. The newer
+			 * segments are at the tail and so need to be inserted in
+			 * the aging queue in this way so we have the older segments
+			 * at the end of the AGE_Q.
+			 */
+			c_seg = (c_segment_t)queue_last(&c_major_list_head);
+		} else {
+			c_seg = (c_segment_t)queue_first(&c_major_list_head);
+			if ((start_sec - c_seg->c_creation_ts) < vm_ripe_target_age) {
+				/*
+				 * We have found the first segment in our queue that is not ripe. Segments after it
+				 * will be the same. So let's bail here. Return with c_list_lock held.
+				 */
+				break;
+			}
+		}
+
 		lck_mtx_lock_spin_always(&c_seg->c_lock);
 		c_seg_switch_state(c_seg, C_ON_AGE_Q, FALSE);
 		lck_mtx_unlock_always(&c_seg->c_lock);
@@ -3192,7 +3195,6 @@ vm_compressor_process_major_segments(void)
 		breaks++;
 	}
 }
-#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 
 /*
  * macOS special swappable csegs -> early_swapin queue
@@ -3715,7 +3717,7 @@ vm_compressor_compact_and_swap(boolean_t flush_all)
 	 * path that we can skip reconsidering them here because we already
 	 * consider them for major compaction in those paths.
 	 */
-	vm_compressor_process_major_segments();
+	vm_compressor_process_major_segments(false /*all segments and not just the ripe-aged ones*/);
 #endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 
 	/*
@@ -4748,6 +4750,9 @@ retry:
 		if (hash_index != -1) {
 			slot_ptr->s_cindx = hash_index;
 			slot_ptr->s_cseg = C_SV_CSEG_ID;
+#if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
+			slot_ptr->s_uncompressed = 0;
+#endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 
 			OSAddAtomic(1, &c_segment_svp_hash_succeeded);
 #if RECORD_THE_COMPRESSED_DATA
@@ -4789,6 +4794,10 @@ retry:
 	slot_ptr->s_cindx = c_seg->c_nextslot++;
 	/* <csegno=0,indx=0> would mean "empty slot", so use csegno+1 */
 	slot_ptr->s_cseg = c_seg->c_mysegno + 1;
+
+#if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
+	slot_ptr->s_uncompressed = 0;
+#endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 
 sv_compression:
 	if (c_seg->c_nextoffset >= c_seg_off_limit || c_seg->c_nextslot >= C_SLOT_MAX_INDEX) {
@@ -4878,7 +4887,7 @@ sv_decompress(int32_t *ddst, int32_t pattern)
 }
 
 static int
-c_decompress_page(char *dst, volatile c_slot_mapping_t slot_ptr, int flags, int *zeroslot)
+c_decompress_page(char *dst, volatile c_slot_mapping_t slot_ptr, vm_compressor_options_t flags, int *zeroslot)
 {
 	c_slot_t        cs;
 	c_segment_t     c_seg;
@@ -5338,13 +5347,36 @@ done:
 }
 
 
+inline bool
+vm_compressor_is_slot_compressed(int *slot)
+{
+#if !CONFIG_TRACK_UNMODIFIED_ANON_PAGES
+#pragma unused(slot)
+	return true;
+#else /* !CONFIG_TRACK_UNMODIFIED_ANON_PAGES*/
+	c_slot_mapping_t slot_ptr = (c_slot_mapping_t)slot;
+	return !slot_ptr->s_uncompressed;
+#endif /* !CONFIG_TRACK_UNMODIFIED_ANON_PAGES*/
+}
+
 int
-vm_compressor_get(ppnum_t pn, int *slot, int flags)
+vm_compressor_get(ppnum_t pn, int *slot, vm_compressor_options_t flags)
 {
 	c_slot_mapping_t  slot_ptr;
 	char    *dst;
 	int     zeroslot = 1;
 	int     retval;
+
+#if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
+	if (flags & C_PAGE_UNMODIFIED) {
+		retval = vm_uncompressed_get(pn, slot, flags | C_KEEP);
+		if (retval == 0) {
+			os_atomic_inc(&compressor_ro_uncompressed_get, relaxed);
+		}
+
+		return retval;
+	}
+#endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 
 	dst = pmap_map_compressor_page(pn);
 	slot_ptr = (c_slot_mapping_t)slot;
@@ -5401,142 +5433,74 @@ vm_compressor_get(ppnum_t pn, int *slot, int flags)
 	return retval;
 }
 
-#if DEVELOPMENT || DEBUG
-
-void
-vm_compressor_inject_error(int *slot)
+int
+vm_compressor_free(int *slot, vm_compressor_options_t flags)
 {
-	c_slot_mapping_t slot_ptr = (c_slot_mapping_t)slot;
+	bool slot_is_compressed = vm_compressor_is_slot_compressed(slot);
 
-	/* No error detection for single-value compression. */
-	if (slot_ptr->s_cseg == C_SV_CSEG_ID) {
-		printf("%s(): cannot inject errors in SV-compressed pages\n", __func__ );
-		return;
-	}
+	if (slot_is_compressed) {
+		c_slot_mapping_t  slot_ptr;
+		int     zeroslot = 1;
+		int     retval = 0;
 
-	/* s_cseg is actually "segno+1" */
-	const uint32_t c_segno = slot_ptr->s_cseg - 1;
+		assert(flags == 0 || flags == C_DONT_BLOCK);
 
-	assert(c_segno < c_segments_available);
-	assert(c_segments[c_segno].c_segno >= c_segments_available);
+		slot_ptr = (c_slot_mapping_t)slot;
 
-	const c_segment_t c_seg = c_segments[c_segno].c_seg;
+		if (slot_ptr->s_cseg == C_SV_CSEG_ID) {
+			c_segment_sv_hash_drop_ref(slot_ptr->s_cindx);
+			OSAddAtomic(-1, &c_segment_pages_compressed);
 
-	PAGE_REPLACEMENT_DISALLOWED(TRUE);
-
-	lck_mtx_lock_spin_always(&c_seg->c_lock);
-	assert(c_seg->c_state != C_IS_EMPTY && c_seg->c_state != C_IS_FREE);
-
-	const uint16_t c_indx = slot_ptr->s_cindx;
-	assert(c_indx < c_seg->c_nextslot);
-
-	/*
-	 * To safely make this segment temporarily writable, we need to mark
-	 * the segment busy, which allows us to release the segment lock.
-	 */
-	while (c_seg->c_busy) {
-		c_seg_wait_on_busy(c_seg);
-		lck_mtx_lock_spin_always(&c_seg->c_lock);
-	}
-	C_SEG_BUSY(c_seg);
-
-	bool already_writable = (c_seg->c_state == C_IS_FILLING);
-	if (!already_writable) {
+			*slot = 0;
+			return 0;
+		}
+		retval = c_decompress_page(NULL, slot_ptr, flags, &zeroslot);
 		/*
-		 * Protection update must be performed preemptibly, so temporarily drop
-		 * the lock. Having set c_busy will prevent most other concurrent
-		 * operations.
+		 * returns 0 if we successfully freed the specified compressed page
+		 * returns -1 if we encountered an error swapping in the segment - decompression failed
+		 * returns -2 if (flags & C_DONT_BLOCK) and we found 'c_busy' set
 		 */
-		lck_mtx_unlock_always(&c_seg->c_lock);
-		C_SEG_MAKE_WRITEABLE(c_seg);
-		lck_mtx_lock_spin_always(&c_seg->c_lock);
+
+		if (retval == 0) {
+			*slot = 0;
+		}
+
+		return retval;
 	}
-
-	/*
-	 * Once we've released the lock following our c_state == C_IS_FILLING check,
-	 * c_current_seg_filled() can (re-)write-protect the segment. However, it
-	 * will transition from C_IS_FILLING before releasing the c_seg lock, so we
-	 * can detect this by re-checking after we've reobtained the lock.
-	 */
-	if (already_writable && c_seg->c_state != C_IS_FILLING) {
-		lck_mtx_unlock_always(&c_seg->c_lock);
-		C_SEG_MAKE_WRITEABLE(c_seg);
-		lck_mtx_lock_spin_always(&c_seg->c_lock);
-		already_writable = false;
-		/* Segment can't be freed while c_busy is set. */
-		assert(c_seg->c_state != C_IS_FILLING);
+#if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
+	else {
+		if ((flags & C_PAGE_UNMODIFIED) == 0) {
+			/* moving from uncompressed state to compressed. Free it.*/
+			vm_uncompressed_free(slot, 0);
+			assert(*slot == 0);
+		}
 	}
-
-	/*
-	 * Skip if the segment is on disk. This check can only be performed after
-	 * the final acquisition of the segment lock before we attempt to write to
-	 * the segment.
-	 */
-	if (!C_SEG_IS_ON_DISK_OR_SOQ(c_seg)) {
-		c_slot_t cs = C_SEG_SLOT_FROM_INDEX(c_seg, c_indx);
-		int32_t *data = &c_seg->c_store.c_buffer[cs->c_offset];
-		/* assume that the compressed data holds at least one int32_t */
-		assert(UNPACK_C_SIZE(cs) > sizeof(*data));
-		/*
-		 * This bit is known to be in the payload of a MISS packet resulting from
-		 * the pattern used in the test pattern from decompression_failure.c.
-		 * Flipping it should result in many corrupted bits in the test page.
-		 */
-		data[0] ^= 0x00000100;
-	}
-
-	if (!already_writable) {
-		lck_mtx_unlock_always(&c_seg->c_lock);
-		C_SEG_WRITE_PROTECT(c_seg);
-		lck_mtx_lock_spin_always(&c_seg->c_lock);
-	}
-
-	C_SEG_WAKEUP_DONE(c_seg);
-	lck_mtx_unlock_always(&c_seg->c_lock);
-
-	PAGE_REPLACEMENT_DISALLOWED(FALSE);
+#endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
+	return KERN_SUCCESS;
 }
 
-#endif /* DEVELOPMENT || DEBUG */
-
 int
-vm_compressor_free(int *slot, int flags)
-{
-	c_slot_mapping_t  slot_ptr;
-	int     zeroslot = 1;
-	int     retval;
-
-	assert(flags == 0 || flags == C_DONT_BLOCK);
-
-	slot_ptr = (c_slot_mapping_t)slot;
-
-	if (slot_ptr->s_cseg == C_SV_CSEG_ID) {
-		c_segment_sv_hash_drop_ref(slot_ptr->s_cindx);
-		OSAddAtomic(-1, &c_segment_pages_compressed);
-
-		*slot = 0;
-		return 0;
-	}
-	retval = c_decompress_page(NULL, slot_ptr, flags, &zeroslot);
-	/*
-	 * returns 0 if we successfully freed the specified compressed page
-	 * returns -1 if we encountered an error swapping in the segment - decompression failed
-	 * returns -2 if (flags & C_DONT_BLOCK) and we found 'c_busy' set
-	 */
-
-	if (retval == 0) {
-		*slot = 0;
-	}
-
-	return retval;
-}
-
-
-int
-vm_compressor_put(ppnum_t pn, int *slot, void  **current_chead, char *scratch_buf)
+vm_compressor_put(ppnum_t pn, int *slot, void  **current_chead, char *scratch_buf, bool unmodified)
 {
 	char    *src;
-	int     retval;
+	int     retval = 0;
+
+#if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
+	if (unmodified) {
+		if (*slot) {
+			os_atomic_inc(&compressor_ro_uncompressed_skip_returned, relaxed);
+			return retval;
+		} else {
+			retval = vm_uncompressed_put(pn, slot);
+			if (retval == KERN_SUCCESS) {
+				os_atomic_inc(&compressor_ro_uncompressed_put, relaxed);
+				return retval;
+			}
+		}
+	}
+#else /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
+#pragma unused(unmodified)
+#endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 
 	src = pmap_map_compressor_page(pn);
 	assert(src != NULL);
@@ -5559,7 +5523,7 @@ vm_compressor_transfer(
 
 	src_slot = (c_slot_mapping_t) src_slot_p;
 
-	if (src_slot->s_cseg == C_SV_CSEG_ID) {
+	if (src_slot->s_cseg == C_SV_CSEG_ID || !vm_compressor_is_slot_compressed(src_slot_p)) {
 		*dst_slot_p = *src_slot_p;
 		*src_slot_p = 0;
 		return;
@@ -5668,6 +5632,14 @@ vm_compressor_relocate(
 		 * no need to relocate... this is a page full of a single
 		 * value which is hashed to a single entry not contained
 		 * in a c_segment_t
+		 */
+		return kr;
+	}
+
+	if (vm_compressor_is_slot_compressed((int *)src_slot) == false) {
+		/*
+		 * Unmodified anonymous pages are sitting uncompressed on disk.
+		 * So don't pull them back in again.
 		 */
 		return kr;
 	}
@@ -5880,3 +5852,395 @@ out:
 	return kr;
 }
 #endif /* CONFIG_FREEZE */
+
+#if DEVELOPMENT || DEBUG
+
+void
+vm_compressor_inject_error(int *slot)
+{
+	c_slot_mapping_t slot_ptr = (c_slot_mapping_t)slot;
+
+	/* No error detection for single-value compression. */
+	if (slot_ptr->s_cseg == C_SV_CSEG_ID) {
+		printf("%s(): cannot inject errors in SV-compressed pages\n", __func__ );
+		return;
+	}
+
+	/* s_cseg is actually "segno+1" */
+	const uint32_t c_segno = slot_ptr->s_cseg - 1;
+
+	assert(c_segno < c_segments_available);
+	assert(c_segments[c_segno].c_segno >= c_segments_available);
+
+	const c_segment_t c_seg = c_segments[c_segno].c_seg;
+
+	PAGE_REPLACEMENT_DISALLOWED(TRUE);
+
+	lck_mtx_lock_spin_always(&c_seg->c_lock);
+	assert(c_seg->c_state != C_IS_EMPTY && c_seg->c_state != C_IS_FREE);
+
+	const uint16_t c_indx = slot_ptr->s_cindx;
+	assert(c_indx < c_seg->c_nextslot);
+
+	/*
+	 * To safely make this segment temporarily writable, we need to mark
+	 * the segment busy, which allows us to release the segment lock.
+	 */
+	while (c_seg->c_busy) {
+		c_seg_wait_on_busy(c_seg);
+		lck_mtx_lock_spin_always(&c_seg->c_lock);
+	}
+	C_SEG_BUSY(c_seg);
+
+	bool already_writable = (c_seg->c_state == C_IS_FILLING);
+	if (!already_writable) {
+		/*
+		 * Protection update must be performed preemptibly, so temporarily drop
+		 * the lock. Having set c_busy will prevent most other concurrent
+		 * operations.
+		 */
+		lck_mtx_unlock_always(&c_seg->c_lock);
+		C_SEG_MAKE_WRITEABLE(c_seg);
+		lck_mtx_lock_spin_always(&c_seg->c_lock);
+	}
+
+	/*
+	 * Once we've released the lock following our c_state == C_IS_FILLING check,
+	 * c_current_seg_filled() can (re-)write-protect the segment. However, it
+	 * will transition from C_IS_FILLING before releasing the c_seg lock, so we
+	 * can detect this by re-checking after we've reobtained the lock.
+	 */
+	if (already_writable && c_seg->c_state != C_IS_FILLING) {
+		lck_mtx_unlock_always(&c_seg->c_lock);
+		C_SEG_MAKE_WRITEABLE(c_seg);
+		lck_mtx_lock_spin_always(&c_seg->c_lock);
+		already_writable = false;
+		/* Segment can't be freed while c_busy is set. */
+		assert(c_seg->c_state != C_IS_FILLING);
+	}
+
+	/*
+	 * Skip if the segment is on disk. This check can only be performed after
+	 * the final acquisition of the segment lock before we attempt to write to
+	 * the segment.
+	 */
+	if (!C_SEG_IS_ON_DISK_OR_SOQ(c_seg)) {
+		c_slot_t cs = C_SEG_SLOT_FROM_INDEX(c_seg, c_indx);
+		int32_t *data = &c_seg->c_store.c_buffer[cs->c_offset];
+		/* assume that the compressed data holds at least one int32_t */
+		assert(UNPACK_C_SIZE(cs) > sizeof(*data));
+		/*
+		 * This bit is known to be in the payload of a MISS packet resulting from
+		 * the pattern used in the test pattern from decompression_failure.c.
+		 * Flipping it should result in many corrupted bits in the test page.
+		 */
+		data[0] ^= 0x00000100;
+	}
+
+	if (!already_writable) {
+		lck_mtx_unlock_always(&c_seg->c_lock);
+		C_SEG_WRITE_PROTECT(c_seg);
+		lck_mtx_lock_spin_always(&c_seg->c_lock);
+	}
+
+	C_SEG_WAKEUP_DONE(c_seg);
+	lck_mtx_unlock_always(&c_seg->c_lock);
+
+	PAGE_REPLACEMENT_DISALLOWED(FALSE);
+}
+
+#endif /* DEVELOPMENT || DEBUG */
+
+
+#if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
+
+struct vnode;
+extern void vm_swapfile_open(const char *path, struct vnode **vp);
+extern int vm_swapfile_preallocate(struct vnode *vp, uint64_t *size, boolean_t *pin);
+
+struct vnode *uncompressed_vp0 = NULL;
+struct vnode *uncompressed_vp1 = NULL;
+uint32_t uncompressed_file0_free_pages = 0, uncompressed_file1_free_pages = 0;
+uint64_t uncompressed_file0_free_offset = 0, uncompressed_file1_free_offset = 0;
+
+uint64_t compressor_ro_uncompressed = 0;
+uint64_t compressor_ro_uncompressed_total_returned = 0;
+uint64_t compressor_ro_uncompressed_skip_returned = 0;
+uint64_t compressor_ro_uncompressed_get = 0;
+uint64_t compressor_ro_uncompressed_put = 0;
+uint64_t compressor_ro_uncompressed_swap_usage = 0;
+
+extern void vnode_put(struct vnode* vp);
+extern int vnode_getwithref(struct vnode* vp);
+extern int vm_swapfile_io(struct vnode *vp, uint64_t offset, uint64_t start, int npages, int flags, void *upl_ctx);
+
+#define MAX_OFFSET_PAGES        (255)
+uint64_t uncompressed_file0_space_bitmap[MAX_OFFSET_PAGES];
+uint64_t uncompressed_file1_space_bitmap[MAX_OFFSET_PAGES];
+
+#define UNCOMPRESSED_FILEIDX_OFFSET_MASK (((uint32_t)1<<31ull) - 1)
+#define UNCOMPRESSED_FILEIDX_SHIFT (29)
+#define UNCOMPRESSED_FILEIDX_MASK (3)
+#define UNCOMPRESSED_OFFSET_SHIFT (29)
+#define UNCOMPRESSED_OFFSET_MASK (7)
+
+static uint32_t
+vm_uncompressed_extract_swap_file(int slot)
+{
+	uint32_t fileidx = (((uint32_t)slot & UNCOMPRESSED_FILEIDX_OFFSET_MASK) >> UNCOMPRESSED_FILEIDX_SHIFT) & UNCOMPRESSED_FILEIDX_MASK;
+	return fileidx;
+}
+
+static uint32_t
+vm_uncompressed_extract_swap_offset(int slot)
+{
+	return slot & (uint32_t)(~(UNCOMPRESSED_OFFSET_MASK << UNCOMPRESSED_OFFSET_SHIFT));
+}
+
+static void
+vm_uncompressed_return_space_to_swap(int slot)
+{
+	PAGE_REPLACEMENT_ALLOWED(TRUE);
+	uint32_t fileidx = vm_uncompressed_extract_swap_file(slot);
+	if (fileidx == 1) {
+		uint32_t free_offset = vm_uncompressed_extract_swap_offset(slot);
+		uint64_t pgidx = free_offset / PAGE_SIZE_64;
+		uint64_t chunkidx = pgidx / 64;
+		uint64_t chunkoffset = pgidx % 64;
+#if DEVELOPMENT || DEBUG
+		uint64_t vaddr = (uint64_t)&uncompressed_file0_space_bitmap[chunkidx];
+		uint64_t maxvaddr = (uint64_t)&uncompressed_file0_space_bitmap[MAX_OFFSET_PAGES];
+		assertf(vaddr < maxvaddr, "0x%llx 0x%llx", vaddr, maxvaddr);
+#endif /*DEVELOPMENT || DEBUG*/
+		assertf((uncompressed_file0_space_bitmap[chunkidx] & ((uint64_t)1 << chunkoffset)),
+		    "0x%x %llu %llu", slot, chunkidx, chunkoffset);
+		uncompressed_file0_space_bitmap[chunkidx] &= ~((uint64_t)1 << chunkoffset);
+		assertf(!(uncompressed_file0_space_bitmap[chunkidx] & ((uint64_t)1 << chunkoffset)),
+		    "0x%x %llu %llu", slot, chunkidx, chunkoffset);
+
+		uncompressed_file0_free_pages++;
+	} else {
+		uint32_t free_offset = vm_uncompressed_extract_swap_offset(slot);
+		uint64_t pgidx = free_offset / PAGE_SIZE_64;
+		uint64_t chunkidx = pgidx / 64;
+		uint64_t chunkoffset = pgidx % 64;
+		assertf((uncompressed_file1_space_bitmap[chunkidx] & ((uint64_t)1 << chunkoffset)),
+		    "%llu %llu", chunkidx, chunkoffset);
+		uncompressed_file1_space_bitmap[chunkidx] &= ~((uint64_t)1 << chunkoffset);
+
+		uncompressed_file1_free_pages++;
+	}
+	compressor_ro_uncompressed_swap_usage--;
+	PAGE_REPLACEMENT_ALLOWED(FALSE);
+}
+
+static int
+vm_uncompressed_reserve_space_in_swap()
+{
+	int slot = 0;
+	if (uncompressed_file0_free_pages == 0 && uncompressed_file1_free_pages == 0) {
+		return -1;
+	}
+
+	PAGE_REPLACEMENT_ALLOWED(TRUE);
+	if (uncompressed_file0_free_pages) {
+		uint64_t chunkidx = 0;
+		uint64_t chunkoffset = 0;
+		while (uncompressed_file0_space_bitmap[chunkidx] == 0xffffffffffffffff) {
+			chunkidx++;
+		}
+		while (uncompressed_file0_space_bitmap[chunkidx] & ((uint64_t)1 << chunkoffset)) {
+			chunkoffset++;
+		}
+
+		assertf((uncompressed_file0_space_bitmap[chunkidx] & ((uint64_t)1 << chunkoffset)) == 0,
+		    "%llu %llu", chunkidx, chunkoffset);
+#if DEVELOPMENT || DEBUG
+		uint64_t vaddr = (uint64_t)&uncompressed_file0_space_bitmap[chunkidx];
+		uint64_t maxvaddr = (uint64_t)&uncompressed_file0_space_bitmap[MAX_OFFSET_PAGES];
+		assertf(vaddr < maxvaddr, "0x%llx 0x%llx", vaddr, maxvaddr);
+#endif /*DEVELOPMENT || DEBUG*/
+		uncompressed_file0_space_bitmap[chunkidx] |= ((uint64_t)1 << chunkoffset);
+		uncompressed_file0_free_offset = ((chunkidx * 64) + chunkoffset) * PAGE_SIZE_64;
+		assertf((uncompressed_file0_space_bitmap[chunkidx] & ((uint64_t)1 << chunkoffset)),
+		    "%llu %llu", chunkidx, chunkoffset);
+
+		assert(uncompressed_file0_free_offset <= (1 << UNCOMPRESSED_OFFSET_SHIFT));
+		slot = (int)((1 << UNCOMPRESSED_FILEIDX_SHIFT) + uncompressed_file0_free_offset);
+		uncompressed_file0_free_pages--;
+	} else {
+		uint64_t chunkidx = 0;
+		uint64_t chunkoffset = 0;
+		while (uncompressed_file1_space_bitmap[chunkidx] == 0xFFFFFFFFFFFFFFFF) {
+			chunkidx++;
+		}
+		while (uncompressed_file1_space_bitmap[chunkidx] & ((uint64_t)1 << chunkoffset)) {
+			chunkoffset++;
+		}
+		assert((uncompressed_file1_space_bitmap[chunkidx] & ((uint64_t)1 << chunkoffset)) == 0);
+		uncompressed_file1_space_bitmap[chunkidx] |= ((uint64_t)1 << chunkoffset);
+		uncompressed_file1_free_offset = ((chunkidx * 64) + chunkoffset) * PAGE_SIZE_64;
+		slot = (int)((2 << UNCOMPRESSED_FILEIDX_SHIFT) + uncompressed_file1_free_offset);
+		uncompressed_file1_free_pages--;
+	}
+	compressor_ro_uncompressed_swap_usage++;
+	PAGE_REPLACEMENT_ALLOWED(FALSE);
+	return slot;
+}
+
+#define MAX_IO_REQ (16)
+struct _uncompressor_io_req {
+	uint64_t addr;
+	bool inuse;
+} uncompressor_io_req[MAX_IO_REQ];
+
+int
+vm_uncompressed_put(ppnum_t pn, int *slot)
+{
+	int retval = 0;
+	struct vnode *uncompressed_vp = NULL;
+	uint64_t uncompress_offset = 0;
+
+again:
+	if (uncompressed_vp0 == NULL) {
+		PAGE_REPLACEMENT_ALLOWED(TRUE);
+		if (uncompressed_vp0 == NULL) {
+			uint64_t size = (MAX_OFFSET_PAGES * 1024 * 1024ULL);
+			vm_swapfile_open("/private/var/vm/uncompressedswap0", &uncompressed_vp0);
+			if (uncompressed_vp0 == NULL) {
+				PAGE_REPLACEMENT_ALLOWED(FALSE);
+				return KERN_NO_ACCESS;
+			}
+			vm_swapfile_preallocate(uncompressed_vp0, &size, NULL);
+			uncompressed_file0_free_pages = (uint32_t)atop(size);
+			bzero(uncompressed_file0_space_bitmap, sizeof(uint64_t) * MAX_OFFSET_PAGES);
+
+			int i = 0;
+			for (; i < MAX_IO_REQ; i++) {
+				kmem_alloc(kernel_map, (vm_offset_t*)&uncompressor_io_req[i].addr, PAGE_SIZE_64, KMA_NOFAIL | KMA_KOBJECT, VM_KERN_MEMORY_COMPRESSOR);
+				uncompressor_io_req[i].inuse = false;
+			}
+
+			vm_swapfile_open("/private/var/vm/uncompressedswap1", &uncompressed_vp1);
+			assert(uncompressed_vp1);
+			vm_swapfile_preallocate(uncompressed_vp1, &size, NULL);
+			uncompressed_file1_free_pages = (uint32_t)atop(size);
+			bzero(uncompressed_file1_space_bitmap, sizeof(uint64_t) * MAX_OFFSET_PAGES);
+			PAGE_REPLACEMENT_ALLOWED(FALSE);
+		} else {
+			PAGE_REPLACEMENT_ALLOWED(FALSE);
+			delay(100);
+			goto again;
+		}
+	}
+
+	int swapinfo = vm_uncompressed_reserve_space_in_swap();
+	if (swapinfo == -1) {
+		*slot = 0;
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	if (vm_uncompressed_extract_swap_file(swapinfo) == 1) {
+		uncompressed_vp = uncompressed_vp0;
+	} else {
+		uncompressed_vp = uncompressed_vp1;
+	}
+	uncompress_offset = vm_uncompressed_extract_swap_offset(swapinfo);
+	if ((retval = vnode_getwithref(uncompressed_vp)) != 0) {
+		os_log_error_with_startup_serial(OS_LOG_DEFAULT, "vm_uncompressed_put: vnode_getwithref on swapfile failed with %d\n", retval);
+	} else {
+		int i = 0;
+retry:
+		PAGE_REPLACEMENT_ALLOWED(TRUE);
+		for (i = 0; i < MAX_IO_REQ; i++) {
+			if (uncompressor_io_req[i].inuse == false) {
+				uncompressor_io_req[i].inuse = true;
+				break;
+			}
+		}
+		if (i == MAX_IO_REQ) {
+			assert_wait((event_t)&uncompressor_io_req, THREAD_UNINT);
+			PAGE_REPLACEMENT_ALLOWED(FALSE);
+			thread_block(THREAD_CONTINUE_NULL);
+			goto retry;
+		}
+		PAGE_REPLACEMENT_ALLOWED(FALSE);
+		void *addr = pmap_map_compressor_page(pn);
+		memcpy((void*)uncompressor_io_req[i].addr, addr, PAGE_SIZE_64);
+		pmap_unmap_compressor_page(pn, addr);
+
+		retval = vm_swapfile_io(uncompressed_vp, uncompress_offset, (uint64_t)uncompressor_io_req[i].addr, 1, SWAP_WRITE, NULL);
+		if (retval) {
+			*slot = 0;
+		} else {
+			*slot = (int)swapinfo;
+			((c_slot_mapping_t)(slot))->s_uncompressed = 1;
+		}
+		vnode_put(uncompressed_vp);
+		PAGE_REPLACEMENT_ALLOWED(TRUE);
+		uncompressor_io_req[i].inuse = false;
+		thread_wakeup((event_t)&uncompressor_io_req);
+		PAGE_REPLACEMENT_ALLOWED(FALSE);
+	}
+	return retval;
+}
+
+int
+vm_uncompressed_get(ppnum_t pn, int *slot, __unused vm_compressor_options_t flags)
+{
+	int retval = 0;
+	struct vnode *uncompressed_vp = NULL;
+	uint32_t fileidx = vm_uncompressed_extract_swap_file(*slot);
+	uint64_t uncompress_offset = vm_uncompressed_extract_swap_offset(*slot);
+
+	if (__improbable(flags & C_KDP)) {
+		return -2;
+	}
+
+	if (fileidx == 1) {
+		uncompressed_vp = uncompressed_vp0;
+	} else {
+		uncompressed_vp = uncompressed_vp1;
+	}
+
+	if ((retval = vnode_getwithref(uncompressed_vp)) != 0) {
+		os_log_error_with_startup_serial(OS_LOG_DEFAULT, "vm_uncompressed_put: vnode_getwithref on swapfile failed with %d\n", retval);
+	} else {
+		int i = 0;
+retry:
+		PAGE_REPLACEMENT_ALLOWED(TRUE);
+		for (i = 0; i < MAX_IO_REQ; i++) {
+			if (uncompressor_io_req[i].inuse == false) {
+				uncompressor_io_req[i].inuse = true;
+				break;
+			}
+		}
+		if (i == MAX_IO_REQ) {
+			assert_wait((event_t)&uncompressor_io_req, THREAD_UNINT);
+			PAGE_REPLACEMENT_ALLOWED(FALSE);
+			thread_block(THREAD_CONTINUE_NULL);
+			goto retry;
+		}
+		PAGE_REPLACEMENT_ALLOWED(FALSE);
+		retval = vm_swapfile_io(uncompressed_vp, uncompress_offset, (uint64_t)uncompressor_io_req[i].addr, 1, SWAP_READ, NULL);
+		vnode_put(uncompressed_vp);
+		void *addr = pmap_map_compressor_page(pn);
+		memcpy(addr, (void*)uncompressor_io_req[i].addr, PAGE_SIZE_64);
+		pmap_unmap_compressor_page(pn, addr);
+		PAGE_REPLACEMENT_ALLOWED(TRUE);
+		uncompressor_io_req[i].inuse = false;
+		thread_wakeup((event_t)&uncompressor_io_req);
+		PAGE_REPLACEMENT_ALLOWED(FALSE);
+	}
+	return retval;
+}
+
+int
+vm_uncompressed_free(int *slot, __unused vm_compressor_options_t flags)
+{
+	vm_uncompressed_return_space_to_swap(*slot);
+	*slot = 0;
+	return 0;
+}
+
+#endif /*CONFIG_TRACK_UNMODIFIED_ANON_PAGES*/

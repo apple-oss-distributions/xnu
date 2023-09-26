@@ -190,13 +190,13 @@ netif_filter_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 			return err;
 		}
 		nifna->nifna_filter = nf;
-		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_or(&na->na_flags, NAF_ACTIVE, relaxed);
 	} else {
 		err = nx_netif_filter_remove(nifna->nifna_netif,
 		    nifna->nifna_filter);
 		VERIFY(err == 0);
 		nifna->nifna_filter = NULL;
-		atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_andnot(&na->na_flags, NAF_ACTIVE, relaxed);
 	}
 
 	SK_DF(SK_VERB_FILTER, "na \"%s\" (0x%llx) %s", na->na_name,
@@ -343,7 +343,7 @@ netif_filter_na_mem_new(struct nexus_adapter *na)
 		nif->nif_filter_pp = pp;
 	}
 	na->na_arena = skmem_arena_create_for_nexus(na, srp,
-	    &nif->nif_filter_pp, NULL, 0, NULL, &err);
+	    &nif->nif_filter_pp, NULL, FALSE, FALSE, NULL, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 	ASSERT(nx->nx_tx_pp == NULL || (nx->nx_tx_pp->pp_md_type ==
 	    NX_DOM(nx)->nxdom_md_type && nx->nx_tx_pp->pp_md_subtype ==
@@ -585,7 +585,7 @@ netif_filter_na_create(struct kern_nexus *nx, struct chreq *chr,
 	ASSERT(na_get_nslots(na, NR_TX) <= NX_DOM(nx)->nxdom_tx_slots.nb_max);
 	ASSERT(na_get_nslots(na, NR_RX) <= NX_DOM(nx)->nxdom_rx_slots.nb_max);
 
-	atomic_bitset_32(&na->na_flags, NAF_USER_PKT_POOL);
+	os_atomic_or(&na->na_flags, NAF_USER_PKT_POOL, relaxed);
 
 	na->na_nx_port = chr->cr_port;
 	na->na_type = NA_NETIF_FILTER;

@@ -134,7 +134,7 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 	if (tgt_rt == NULL || !(tgt_rt->rt_flags & RTF_UP) ||
 	    fr->fr_want_configure) {
 		if (fr->fr_want_configure == 0) {
-			atomic_add_32(&fr->fr_want_configure, 1);
+			os_atomic_inc(&fr->fr_want_configure, relaxed);
 		}
 		err = flow_route_configure(fr, ifp, NULL);
 		if (err != 0) {
@@ -223,19 +223,17 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 	    SDL(tgt_rt->rt_gateway)->sdl_alen == ETHER_ADDR_LEN)) {
 		VERIFY(m == NULL);
 		FLOWRT_UPD_ETH_DST(fr, LLADDR(SDL(tgt_rt->rt_gateway)));
-		atomic_bitset_32(&fr->fr_flags,
-		    (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO));
+		os_atomic_or(&fr->fr_flags, (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO), relaxed);
 		/* if we're not probing, then we're done */
 		if (!(probing = (fr->fr_want_probe != 0))) {
 			VERIFY(err == 0);
 			RT_UNLOCK(tgt_rt);
 			goto done;
 		}
-		atomic_set_32(&fr->fr_want_probe, 0);
+		os_atomic_store(&fr->fr_want_probe, 0, release);
 	} else {
 		probing = FALSE;
-		atomic_bitclear_32(&fr->fr_flags,
-		    (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO));
+		os_atomic_andnot(&fr->fr_flags, (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO), relaxed);
 	}
 
 	SK_DF(SK_VERB_FLOW_ROUTE, "%s %s on %s", (probing ?
@@ -276,8 +274,7 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 				    sk_sa_ntop(SA(&fr->fr_faddr), dst_s,
 				    sizeof(dst_s)), ifp->if_xname);
 				FLOWRT_UPD_ETH_DST(fr, LLADDR(&sdl));
-				atomic_bitset_32(&fr->fr_flags,
-				    (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO));
+				os_atomic_or(&fr->fr_flags, (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO), relaxed);
 			}
 			if (err == EJUSTRETURN && m != NULL) {
 				SK_DF(SK_VERB_FLOW_ROUTE, "packet queued "
@@ -364,8 +361,7 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 				/* copy permanent address into the flow route */
 				FLOWRT_UPD_ETH_DST(fr,
 				    LLADDR(SDL(tgt_rt->rt_gateway)));
-				atomic_bitset_32(&fr->fr_flags,
-				    (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO));
+				os_atomic_or(&fr->fr_flags, (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO), relaxed);
 				VERIFY(err == 0);
 			}
 			RT_UNLOCK(tgt_rt);
@@ -429,8 +425,7 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 			 * copy the address into the flow route.
 			 */
 			FLOWRT_UPD_ETH_DST(fr, LLADDR(SDL(tgt_rt->rt_gateway)));
-			atomic_bitset_32(&fr->fr_flags,
-			    (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO));
+			os_atomic_or(&fr->fr_flags, (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO), relaxed);
 			RT_UNLOCK(tgt_rt);
 			VERIFY(err == 0);
 		}
@@ -466,7 +461,7 @@ done:
 		    sk_sa_ntop(SA(&fr->fr_faddr), dst_s, sizeof(dst_s)),
 		    ifp->if_xname, err);
 		/* keep FLOWRTF_HAS_LLINFO as llinfo is still useful */
-		atomic_bitclear_32(&fr->fr_flags, FLOWRTF_RESOLVED);
+		os_atomic_andnot(&fr->fr_flags, FLOWRTF_RESOLVED, relaxed);
 		flow_route_cleanup(fr);
 	}
 
@@ -538,7 +533,7 @@ fsw_ethernet_demux(struct nx_flowswitch *fsw, struct __kern_packet *pkt)
 #pragma unused(fsw)
 	const struct ether_header *eh;
 	sa_family_t af = AF_UNSPEC;
-	uint16_t bdlim, bdlen, bdoff;
+	uint32_t bdlen, bdlim, bdoff;
 	uint8_t *baddr;
 
 	MD_BUFLET_ADDR_ABS_DLEN(pkt, baddr, bdlen, bdlim, bdoff);

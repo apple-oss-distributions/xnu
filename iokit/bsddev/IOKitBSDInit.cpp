@@ -220,7 +220,19 @@ IOBSDNameMatching( const char * name )
 OSDictionary *
 IOUUIDMatching( void )
 {
-	return IOService::resourceMatching( "boot-uuid-media" );
+	OSObject     * obj;
+	OSDictionary * result;
+
+	obj = OSUnserialize(
+		"{"
+		"'IOProviderClass' = 'IOResources';"
+		"'IOResourceMatch' = ('IOBSD', 'boot-uuid-media');"
+		"}",
+		NULL);
+	result = OSDynamicCast(OSDictionary, obj);
+	assert(result);
+
+	return result;
 }
 
 OSDictionary *
@@ -645,7 +657,7 @@ do_reboot:
 
 	if (reboot) {
 		IOLog("\nAbout to reboot into Recovery!\n");
-		(void)PEHaltRestart(kPERestartCPU);
+		(void)PEHaltRestart(kPEPanicRestartCPUNoCallouts);
 	}
 
 	return true;

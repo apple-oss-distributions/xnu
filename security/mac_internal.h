@@ -188,7 +188,7 @@ static __inline__ bool
 mac_cred_check_enforce(kauth_cred_t cred)
 {
 #if CONFIG_MACF
-	return cred != proc_ucred(kernproc);
+	return cred != proc_ucred_unsafe(kernproc);
 #else
 #pragma unused(p)
 	return false;

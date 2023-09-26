@@ -42,12 +42,13 @@
  */
 #define PROTECTION_CLASS_DIR_NONE 0
 
-#define PROTECTION_CLASS_A 1
-#define PROTECTION_CLASS_B 2
-#define PROTECTION_CLASS_C 3
-#define PROTECTION_CLASS_D 4
-#define PROTECTION_CLASS_E 5
-#define PROTECTION_CLASS_F 6
+#define PROTECTION_CLASS_A  1
+#define PROTECTION_CLASS_B  2
+#define PROTECTION_CLASS_C  3
+#define PROTECTION_CLASS_D  4
+#define PROTECTION_CLASS_E  5
+#define PROTECTION_CLASS_F  6
+#define PROTECTION_CLASS_CX 7
 
 /*
  * This forces open_dprotected_np to behave as though the file were created with

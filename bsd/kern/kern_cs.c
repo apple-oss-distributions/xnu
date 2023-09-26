@@ -1276,6 +1276,76 @@ out:
 }
 
 /*
+ * Function: csfg_get_validation_category
+ *
+ * Description: This returns the validation category
+ *              for the fileglob fg
+ */
+unsigned int
+csfg_get_validation_category(struct fileglob *fg, uint64_t offset)
+{
+	unsigned int validation_category = CS_VALIDATION_CATEGORY_INVALID;
+	vnode_t vp;
+
+	if (FILEGLOB_DTYPE(fg) != DTYPE_VNODE) {
+		return CS_VALIDATION_CATEGORY_INVALID;
+	}
+
+	vp = (struct vnode *)fg_get_data(fg);
+	if (vp == NULL) {
+		return CS_VALIDATION_CATEGORY_INVALID;
+	}
+
+	vnode_lock(vp);
+
+	struct cs_blob *csblob = NULL;
+	if ((csblob = ubc_cs_blob_get(vp, -1, -1, offset)) == NULL) {
+		goto out;
+	}
+
+	validation_category = csblob->csb_validation_category;
+out:
+	vnode_unlock(vp);
+
+	return validation_category;
+}
+
+unsigned int
+csfg_get_supplement_validation_category(struct fileglob *fg __unused, uint64_t offset __unused)
+{
+#if CONFIG_SUPPLEMENTAL_SIGNATURES
+	unsigned int validation_category = CS_VALIDATION_CATEGORY_INVALID;
+	vnode_t vp;
+
+	if (FILEGLOB_DTYPE(fg) != DTYPE_VNODE) {
+		return CS_SIGNER_TYPE_UNKNOWN;
+	}
+
+	vp = (struct vnode *)fg_get_data(fg);
+	if (vp == NULL) {
+		return CS_SIGNER_TYPE_UNKNOWN;
+	}
+
+	vnode_lock(vp);
+
+	struct cs_blob *csblob = NULL;
+	if ((csblob = ubc_cs_blob_get_supplement(vp, offset)) == NULL) {
+		goto out;
+	}
+
+	validation_category = csblob->csb_validation_category;
+out:
+	vnode_unlock(vp);
+
+	return validation_category;
+#else
+	// Supplemental signatures are only available in CONFIG_SUPPLEMENTAL_SIGNATURES
+	// Return invalid if anyone asks
+	return CS_VALIDATION_CATEGORY_INVALID;
+#endif
+}
+
+/*
  * Function: csfg_get_teamid
  *
  * Description: This returns a pointer to

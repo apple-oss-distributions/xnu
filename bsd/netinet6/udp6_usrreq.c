@@ -122,6 +122,8 @@
 #include <netinet/ip_var.h>
 #include <netinet/udp.h>
 #include <netinet/udp_var.h>
+#include <netinet/udp_log.h>
+
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
 #include <netinet6/in6_pcb.h>
@@ -191,7 +193,6 @@ struct pr_usrreqs udp6_usrreqs = {
 	.pru_sockaddr =         in6_mapped_sockaddr,
 	.pru_sosend =           sosend,
 	.pru_soreceive =        soreceive,
-	.pru_soreceive_list =   soreceive_list,
 	.pru_defunct =          udp6_defunct,
 };
 
@@ -596,20 +597,22 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 		icmp6_error(m, ICMP6_DST_UNREACH, ICMP6_DST_UNREACH_NOPORT, 0);
 		return IPPROTO_DONE;
 	}
-#if NECP
-	if (!necp_socket_is_allowed_to_send_recv_v6(in6p, uh->uh_dport,
-	    uh->uh_sport, &ip6->ip6_dst, &ip6->ip6_src, ifp, pf_tag, NULL, NULL, NULL, NULL)) {
-		in_pcb_checkstate(in6p, WNT_RELEASE, 0);
-		IF_UDP_STATINC(ifp, badipsec);
-		goto bad;
-	}
-#endif /* NECP */
 
 	/*
 	 * Construct sockaddr format source address.
 	 * Stuff source address and datagram in user buffer.
 	 */
 	udp_lock(in6p->in6p_socket, 1, 0);
+
+#if NECP
+	if (!necp_socket_is_allowed_to_send_recv_v6(in6p, uh->uh_dport,
+	    uh->uh_sport, &ip6->ip6_dst, &ip6->ip6_src, ifp, pf_tag, NULL, NULL, NULL, NULL)) {
+		in_pcb_checkstate(in6p, WNT_RELEASE, 1);
+		udp_unlock(in6p->in6p_socket, 1, 0);
+		IF_UDP_STATINC(ifp, badipsec);
+		goto bad;
+	}
+#endif /* NECP */
 
 	if (in_pcb_checkstate(in6p, WNT_RELEASE, 1) == WNT_STOPUSING) {
 		udp_unlock(in6p->in6p_socket, 1, 0);
@@ -841,6 +844,12 @@ udp6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	if (inp == NULL) {
 		return EINVAL;
 	}
+	/*
+	 * Another thread won the binding race so do not change inp_vflag
+	 */
+	if (inp->inp_flags2 & INP2_BIND_IN_PROGRESS) {
+		return EINVAL;
+	}
 
 	const uint8_t old_flags = inp->inp_vflag;
 	inp->inp_vflag &= ~INP_IPV4;
@@ -874,6 +883,9 @@ udp6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	if (error != 0) {
 		inp->inp_vflag = old_flags;
 	}
+
+	UDP_LOG_BIND(inp, error);
+
 	return error;
 }
 
@@ -950,6 +962,7 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 			} else {
 				inp->inp_vflag = old_flags;
 			}
+			UDP_LOG_CONNECT(inp, error);
 			return error;
 		}
 	}
@@ -1002,7 +1015,9 @@ do_flow_divert:
 			inp->inp_flow |=
 			    (htonl(ip6_randomflowlabel()) & IPV6_FLOWLABEL_MASK);
 		}
+		inp->inp_connect_timestamp = mach_continuous_time();
 	}
+	UDP_LOG_CONNECT(inp, error);
 	return error;
 }
 
@@ -1025,6 +1040,9 @@ udp6_detach(struct socket *so)
 	if (inp == NULL) {
 		return EINVAL;
 	}
+
+	UDP_LOG_CONNECTION_SUMMARY(inp);
+
 	in6_pcbdetach(inp);
 	return 0;
 }
@@ -1053,6 +1071,8 @@ udp6_disconnect(struct socket *so)
 	if (IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_faddr)) {
 		return ENOTCONN;
 	}
+
+	UDP_LOG_CONNECTION_SUMMARY(inp);
 
 	in6_pcbdisconnect(inp);
 

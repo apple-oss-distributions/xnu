@@ -63,6 +63,9 @@
 #include <uuid/uuid.h>
 #include <kdp/kdp_dyld.h>
 
+#include <libkern/coreanalytics/coreanalytics.h>
+#include <kern/thread_call.h>
+
 #define TELEMETRY_DEBUG 0
 
 struct proc;
@@ -183,6 +186,46 @@ LCK_MTX_DECLARE(telemetry_macf_mtx, &telemetry_lck_grp);
 #define TELEMETRY_MACF_LOCK() do { lck_mtx_lock(&telemetry_macf_mtx); } while (0)
 #define TELEMETRY_MACF_UNLOCK() do { lck_mtx_unlock(&telemetry_macf_mtx); } while (0)
 
+#define TELEMETRY_BT_FRAMES                       (5)
+#define BACKTRACE_FRAMES_BUF                      (((TELEMETRY_BT_FRAMES) * 17) + 1)
+
+_Static_assert(BACKTRACE_FRAMES_BUF == CA_UBSANBUF_LEN, "Telemetry buffer size should match.");
+/*
+ * Telemetry reporting is unsafe in interrupt context, since the CA framework
+ * relies on being able to successfully zalloc some memory for the event.
+ * Therefore we maintain a small buffer that is then flushed by an helper thread.
+ */
+#define CA_ENTRIES_SIZE                           (5)
+
+struct telemetry_ca_entry {
+	uint32_t        type;
+	uint16_t        code;
+	uint32_t        num_frames;
+	uintptr_t       faulting_address;
+	uintptr_t       frames[TELEMETRY_BT_FRAMES];
+};
+
+LCK_GRP_DECLARE(ca_entries_lock_grp, "ca_entries_lck");
+LCK_SPIN_DECLARE(ca_entries_lck, &ca_entries_lock_grp);
+
+static struct telemetry_ca_entry ca_entries[CA_ENTRIES_SIZE];
+static uint8_t ca_entries_index = 0;
+static struct thread_call *telemetry_ca_send_callout;
+
+CA_EVENT(kernel_breakpoint_event,
+    CA_INT, brk_type,
+    CA_INT, brk_code,
+    CA_INT, faulting_address,
+    CA_STATIC_STRING(CA_UBSANBUF_LEN), backtrace,
+    CA_STATIC_STRING(CA_UUID_LEN), uuid);
+
+/* Rate-limit telemetry on last seen faulting address */
+static uintptr_t PERCPU_DATA(brk_telemetry_cache_address);
+/* Get out from the brk handler if the CPU is already servicing one */
+static bool PERCPU_DATA(brk_telemetry_in_handler);
+
+static void telemetry_flush_ca_events(thread_call_param_t, thread_call_param_t);
+
 void
 telemetry_init(void)
 {
@@ -224,6 +267,11 @@ telemetry_init(void)
 		telemetry_sample_rate = TELEMETRY_DEFAULT_SAMPLE_RATE;
 	}
 
+	telemetry_ca_send_callout = thread_call_allocate_with_options(
+		telemetry_flush_ca_events, NULL, THREAD_CALL_PRIORITY_KERNEL,
+		THREAD_CALL_OPTIONS_ONCE);
+
+	assert(telemetry_ca_send_callout != NULL);
 	/*
 	 * To enable telemetry for all tasks, include "telemetry_sample_all_tasks=1" in boot-args.
 	 */
@@ -1344,6 +1392,170 @@ telemetry_macf_mark_curthread(void)
 	return 0;
 }
 #endif /* CONFIG_MACF */
+
+
+static void
+telemetry_stash_ca_event(
+	kernel_brk_type_t    type,
+	uint16_t             comment,
+	uint32_t             total_frames,
+	uintptr_t            *backtrace,
+	uintptr_t            faulting_address)
+{
+	/* Skip telemetry if we accidentally took a fault while handling telemetry */
+	bool *in_handler = PERCPU_GET(brk_telemetry_in_handler);
+	if (*in_handler) {
+#if DEVELOPMENT
+		panic("Breakpoint trap re-entered from within a spinlock");
+#endif
+		return;
+	}
+
+	/* Rate limit on repeatedly seeing the same address */
+	uintptr_t *cache_address = PERCPU_GET(brk_telemetry_cache_address);
+	if (*cache_address == faulting_address) {
+		return;
+	}
+
+	*cache_address = faulting_address;
+
+	lck_spin_lock(&ca_entries_lck);
+	*in_handler = true;
+
+	if (__improbable(ca_entries_index > CA_ENTRIES_SIZE)) {
+		panic("Invalid CA interrupt buffer index %d >= %d",
+		    ca_entries_index, CA_ENTRIES_SIZE);
+	}
+
+	/* We're full, just drop the event */
+	if (ca_entries_index == CA_ENTRIES_SIZE) {
+		*in_handler = false;
+		lck_spin_unlock(&ca_entries_lck);
+		return;
+	}
+
+	ca_entries[ca_entries_index].type = type;
+	ca_entries[ca_entries_index].code = comment;
+	ca_entries[ca_entries_index].faulting_address = faulting_address;
+
+	assert(total_frames <= TELEMETRY_BT_FRAMES);
+
+	if (total_frames <= TELEMETRY_BT_FRAMES) {
+		ca_entries[ca_entries_index].num_frames = total_frames;
+		memcpy(ca_entries[ca_entries_index].frames, backtrace,
+		    total_frames * sizeof(uintptr_t));
+	}
+
+	ca_entries_index++;
+
+	*in_handler = false;
+	lck_spin_unlock(&ca_entries_lck);
+
+	thread_call_enter(telemetry_ca_send_callout);
+}
+
+static void
+telemetry_backtrace_to_string(
+	char        *buf,
+	size_t       buflen,
+	uint32_t     tot,
+	uintptr_t   *frames)
+{
+	size_t l = 0;
+
+	for (uint32_t i = 0; i < tot; i++) {
+		l += scnprintf(buf + l, buflen - l, "%lx\n", VM_KERNEL_UNSLIDE(frames[i]));
+	}
+}
+
+static void
+telemetry_flush_ca_events(
+	__unused thread_call_param_t p0,
+	__unused thread_call_param_t p1)
+{
+	struct telemetry_ca_entry local_entries[CA_ENTRIES_SIZE] = {0};
+	uint8_t entry_cnt = 0;
+	bool *in_handler = PERCPU_GET(brk_telemetry_in_handler);
+
+	lck_spin_lock(&ca_entries_lck);
+	*in_handler = true;
+
+	if (__improbable(ca_entries_index > CA_ENTRIES_SIZE)) {
+		panic("Invalid CA interrupt buffer index %d > %d", ca_entries_index,
+		    CA_ENTRIES_SIZE);
+	}
+
+	if (ca_entries_index == 0) {
+		*in_handler = false;
+		lck_spin_unlock(&ca_entries_lck);
+		return;
+	} else {
+		memcpy(local_entries, ca_entries, sizeof(local_entries));
+		entry_cnt = ca_entries_index;
+		ca_entries_index = 0;
+	}
+
+	*in_handler = false;
+	lck_spin_unlock(&ca_entries_lck);
+
+	/* Send the events */
+	for (uint8_t i = 0; i < entry_cnt; i++) {
+		ca_event_t ca_event = CA_EVENT_ALLOCATE(kernel_breakpoint_event);
+		CA_EVENT_TYPE(kernel_breakpoint_event) * event = ca_event->data;
+
+		event->brk_type = local_entries[i].type;
+		event->brk_code = local_entries[i].code;
+		event->faulting_address = local_entries[i].faulting_address;
+
+		telemetry_backtrace_to_string(event->backtrace, BACKTRACE_FRAMES_BUF,
+		    local_entries[i].num_frames, local_entries[i].frames);
+		strlcpy(event->uuid, kernel_uuid_string, CA_UUID_LEN);
+
+		CA_EVENT_SEND(ca_event);
+	}
+}
+
+void
+telemetry_kernel_brk(
+	kernel_brk_type_t     type,
+	kernel_brk_options_t  options,
+	void                  *tstate,
+	uint16_t              comment)
+{
+#if __arm64__
+	arm_saved_state_t *state = (arm_saved_state_t *)tstate;
+
+	uintptr_t faulting_address = get_saved_state_pc(state);
+	uintptr_t saved_fp = get_saved_state_fp(state);
+#else
+	x86_saved_state64_t *state = (x86_saved_state64_t *)tstate;
+
+	uintptr_t faulting_address = state->isf.rip;
+	uintptr_t saved_fp = state->rbp;
+#endif
+
+	assert(options & KERNEL_BRK_TELEMETRY_OPTIONS);
+
+	if (startup_phase < STARTUP_SUB_THREAD_CALL) {
+#if DEVELOPMENT || DEBUG
+		panic("Attempting kernel breakpoint telemetry in early boot.");
+#endif
+		return;
+	}
+
+	if (options & KERNEL_BRK_CORE_ANALYTICS) {
+		uintptr_t frames[TELEMETRY_BT_FRAMES];
+
+		struct backtrace_control ctl = {
+			.btc_frame_addr = (uintptr_t)saved_fp,
+		};
+
+		uint32_t total_frames = backtrace(frames, TELEMETRY_BT_FRAMES, &ctl, NULL);
+
+		telemetry_stash_ca_event(type, comment, total_frames,
+		    frames, VM_KERNEL_UNSLIDE(faulting_address));
+	}
+}
 
 /************************/
 /* BOOT PROFILE SUPPORT */

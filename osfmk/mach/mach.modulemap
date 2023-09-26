@@ -93,13 +93,11 @@ module Darwin.Mach [system] {
     export *
   }
 
-  #ifndef XNU_PLATFORM_MacOSX
   module hv {
     header "arm64/hv/hv_kern_types.h"
     export *
   }
 
-  #endif
   module kern_return {
     header "mach/kern_return.h"
     export *

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -183,6 +183,12 @@ struct fsw_rps_thread {
 #define FRT_TERMINATED          0x40000000
 #endif /* !DEVELOPMENT && !DEBUG */
 
+typedef enum {
+	FSW_TSO_MODE_NONE,
+	FSW_TSO_MODE_HW,
+	FSW_TSO_MODE_SW
+} fsw_tso_mode_t;
+
 /*
  * nx_flowswitch is a descriptor for a flow switch instance.
  * Interfaces for a flow switch are all in fsw_ports[].
@@ -303,6 +309,9 @@ struct nx_flowswitch {
 	struct flow_entry_linger_head fsw_linger_head;
 	uint32_t                fsw_linger_cnt;
 
+	fsw_tso_mode_t          fsw_tso_mode;
+	uint32_t                fsw_tso_sw_mtu;
+
 #if (DEVELOPMENT || DEBUG)
 	uint32_t                fsw_rps_nthreads;
 	struct fsw_rps_thread   *fsw_rps_threads;
@@ -356,7 +365,7 @@ extern void nx_fsw_netagent_update(struct kern_nexus *nx);
 extern void fsw_devna_rx(struct nexus_adapter *, struct __kern_packet *,
     struct nexus_pkt_stats *);
 extern struct nx_flowswitch *fsw_ifp_to_fsw(struct ifnet *);
-
+extern void fsw_get_tso_capabilities(struct ifnet *, uint32_t *, uint32_t *);
 __END_DECLS
 #endif /* CONFIG_NEXUS_FLOWSWITCH */
 #endif /* _SKYWALK_NEXUS_FLOWSWITCH_H_ */

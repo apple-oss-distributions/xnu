@@ -256,7 +256,7 @@ mptcp_urgency_stop(void *param0, __unused void *param1)
 
 	socket_lock(mp_so, 1);
 
-	VERIFY(mp_so->so_usecount >= 0);
+	VERIFY(mp_so->so_usecount >= 1);
 
 	os_log(mptcp_log_handle, "%s - %lx: usecount %u\n",
 	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte), mp_so->so_usecount);
@@ -285,10 +285,7 @@ mptcp_set_urgency_timer(struct mptses *mpte)
 
 	socket_lock_assert_owned(mp_so);
 
-	VERIFY(mp_so->so_usecount >= 0);
-	if (mp_so->so_usecount == 0) {
-		goto exit_log;
-	}
+	VERIFY(mp_so->so_usecount >= 1);
 
 	if (mpte->mpte_time_target == 0) {
 		/* Close subflows right now */
@@ -346,11 +343,13 @@ mptcp_cancel_urgency_timer(struct mptses *mpte)
 	mptcp_check_subflows_and_remove(mpte);
 
 	if (ret) {
+		VERIFY(mp_so->so_usecount >= 1);
 		mp_so->so_usecount--;
 	}
 
 	ret = thread_call_cancel(mpte->mpte_stop_urgency);
 	if (ret) {
+		VERIFY(mp_so->so_usecount >= 1);
 		mp_so->so_usecount--;
 	}
 

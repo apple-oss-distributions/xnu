@@ -95,7 +95,7 @@ SYSCTL_QUAD(_net_classq, OID_AUTO, ll_l4s_update_interval,
     CTLFLAG_RW | CTLFLAG_LOCKED, &ifclassq_ll_l4s_update_interval,
     "low latency L4S update interval in nanoseconds");
 
-uint32_t ifclassq_enable_l4s = 0;
+uint32_t ifclassq_enable_l4s = 1;
 SYSCTL_UINT(_net_classq, OID_AUTO, enable_l4s,
     CTLFLAG_RW | CTLFLAG_LOCKED, &ifclassq_enable_l4s, 0,
     "enable/disable L4S");
@@ -270,7 +270,11 @@ ifclassq_get_len(struct ifclassq *ifq, mbuf_svc_class_t sc, u_int8_t grp_idx,
 	}
 	if (sc == MBUF_SC_UNSPEC && grp_idx == IF_CLASSQ_ALL_GRPS) {
 		VERIFY(packets != NULL);
-		*packets = IFCQ_LEN(ifq);
+		if (fq_if_is_all_paced(ifq)) {
+			*packets = 0;
+		} else {
+			*packets = IFCQ_LEN(ifq);
+		}
 	} else {
 		cqrq_stat_sc_t req = { sc, grp_idx, 0, 0 };
 
@@ -284,6 +288,9 @@ ifclassq_get_len(struct ifclassq *ifq, mbuf_svc_class_t sc, u_int8_t grp_idx,
 			*bytes = req.bytes;
 		}
 	}
+	KDBG(AQM_KTRACE_STATS_GET_QLEN, ifq->ifcq_ifp->if_index,
+	    packets ? *packets : 0, bytes ? *bytes : 0, fq_if_is_all_paced(ifq));
+
 	IFCQ_UNLOCK(ifq);
 
 #if SKYWALK
@@ -551,6 +558,7 @@ ifclassq_getqstats(struct ifclassq *ifq, u_int8_t gid, u_int32_t qid, void *ubuf
 	*(&ifqs->ifqs_xmitcnt) = *(&ifq->ifcq_xmitcnt);
 	*(&ifqs->ifqs_dropcnt) = *(&ifq->ifcq_dropcnt);
 	ifqs->ifqs_scheduler = ifq->ifcq_type;
+	ifqs->ifqs_doorbells = ifq->ifcq_doorbells;
 
 	err = pktsched_getqstats(ifq, gid, qid, ifqs);
 	IFCQ_UNLOCK(ifq);
@@ -842,7 +850,12 @@ ifclassq_calc_target_qdelay(struct ifnet *ifp, uint64_t *if_target_qdelay,
 		break;
 	case IF_CLASSQ_L4S:
 		qdelay_configed = ifclassq_def_l4s_target_qdelay;
-		qdely_default = IFQ_DEF_L4S_TARGET_DELAY;
+		if (ifp->if_subfamily == IFNET_SUBFAMILY_WIFI ||
+		    ifp->if_family == IFNET_FAMILY_CELLULAR) {
+			qdely_default = IFQ_DEF_L4S_WIRELESS_TARGET_DELAY;
+		} else {
+			qdely_default = IFQ_DEF_L4S_TARGET_DELAY;
+		}
 		break;
 	case IF_CLASSQ_LOW_LATENCY:
 		qdelay_configed = ifclassq_ll_c_target_qdelay;
@@ -850,7 +863,12 @@ ifclassq_calc_target_qdelay(struct ifnet *ifp, uint64_t *if_target_qdelay,
 		break;
 	case (IF_CLASSQ_LOW_LATENCY | IF_CLASSQ_L4S):
 		qdelay_configed = ifclassq_ll_l4s_target_qdelay;
-		qdely_default = IFQ_LL_L4S_TARGET_DELAY;
+		if (ifp->if_subfamily == IFNET_SUBFAMILY_WIFI ||
+		    ifp->if_family == IFNET_FAMILY_CELLULAR) {
+			qdely_default = IFQ_LL_L4S_WIRELESS_TARGET_DELAY;
+		} else {
+			qdely_default = IFQ_LL_L4S_TARGET_DELAY;
+		}
 		break;
 	default:
 		VERIFY(0);

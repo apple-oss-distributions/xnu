@@ -276,7 +276,8 @@ int ml_io_reset_timeouts(uintptr_t iovaddr_base, unsigned int size);
 
 #if XNU_KERNEL_PRIVATE
 
-#if ML_IO_TIMEOUTS_ENABLED && !defined(__x86_64__)
+#if ML_IO_TIMEOUTS_ENABLED
+#if !defined(__x86_64__)
 /* x86 does not have the MACHINE_TIMEOUTs types, and the variables are
  * declared elsewhere. */
 extern machine_timeout_t report_phy_read_delay_to;
@@ -284,12 +285,15 @@ extern machine_timeout_t report_phy_write_delay_to;
 extern machine_timeout_t report_phy_read_delay_to;
 extern machine_timeout_t trace_phy_read_delay_to;
 extern machine_timeout_t trace_phy_write_delay_to;
-extern unsigned int report_phy_read_osbt;
-extern unsigned int report_phy_write_osbt;
+#endif /* !defined(__x86_64__) */
+extern void override_io_timeouts(uintptr_t vaddr, uint64_t paddr,
+    uint64_t *read_timeout, uint64_t *write_timeout);
 #endif /* ML_IO_TIMEOUTS_ENABLED */
 
 void ml_get_cluster_type_name(cluster_type_t cluster_type, char *name,
     size_t name_size);
+
+unsigned int ml_get_cluster_count(void);
 
 /**
  * Depending on the system, it's possible that a kernel backtrace could contain
@@ -305,6 +309,18 @@ void ml_get_cluster_type_name(cluster_type_t cluster_type, char *name,
 bool ml_addr_in_non_xnu_stack(uintptr_t addr);
 
 #endif /* XNU_KERNEL_PRIVATE */
+
+#if MACH_KERNEL_PRIVATE
+
+/*!
+ * @func          ml_map_cpus_to_clusters
+ * @brief         Populate the logical CPU -> logical cluster ID table at address addr.
+ *
+ * @param table   array to write to
+ */
+void ml_map_cpus_to_clusters(uint8_t *table);
+
+#endif /* MACH_KERNEL_PRIVATE */
 
 __END_DECLS
 

@@ -6,6 +6,9 @@ from builtins import bytes
 
 import sys, os, re, time, getopt, shlex, inspect, xnudefines
 import lldb
+import uuid
+import base64
+import json
 from functools import wraps
 from ctypes import c_ulonglong as uint64_t
 from ctypes import c_void_p as voidptr_t
@@ -848,6 +851,10 @@ def ParseEmbeddedPanicLog(panic_header, cmd_options={}):
         if panic_log_begin_offset == 0:
             return
 
+    if "-E" in cmd_options:
+        ProcessExtensiblePaniclog(panic_header, cmd_options)
+        return
+
     if "-S" in cmd_options:
         if panic_header_flags & xnudefines.EMBEDDED_PANIC_STACKSHOT_SUCCEEDED_FLAG:
             ProcessPanicStackshot(panic_stackshot_addr, panic_stackshot_len)
@@ -1022,7 +1029,7 @@ def ParseUnknownPanicLog(panic_header, cmd_options={}):
     return
 
 
-@lldb_command('paniclog', 'SM')
+@lldb_command('paniclog', 'SME:')
 def ShowPanicLog(cmd_args=None, cmd_options={}):
     """ Display the paniclog information
         usage: (lldb) paniclog
@@ -1030,6 +1037,7 @@ def ShowPanicLog(cmd_args=None, cmd_options={}):
             -v : increase verbosity
             -S : parse stackshot data (if panic stackshot available)
             -M : parse macOS panic area (print panic string (if available), and/or capture crashlog info)
+            -E : Takes a file name and redirects the ext paniclog output to the file
     """
 
     if "-M" in cmd_options:
@@ -1066,6 +1074,68 @@ def ShowPanicLog(cmd_args=None, cmd_options={}):
 
     # execute it
     return parser(panic_header, cmd_options)
+
+def ProcessExtensiblePaniclog(panic_header, cmd_options):
+
+    process = LazyTarget().GetProcess()
+    error = lldb.SBError()
+    EXT_PANICLOG_MAX_SIZE = 32 # 32 is the max size of the string in Data ID
+
+    ext_paniclog_len = unsigned(panic_header.eph_ext_paniclog_len)
+    if ext_paniclog_len == 0:
+        print("Cannot find extensible paniclog")
+        return
+
+    ext_paniclog_addr = unsigned(panic_header) + unsigned(panic_header.eph_ext_paniclog_offset)
+
+    ext_paniclog_bytes = process.chkReadMemory(ext_paniclog_addr, ext_paniclog_len);
+
+    idx = 0;
+    ext_paniclog_ver_bytes = ext_paniclog_bytes[idx:idx+sizeof('uint32_t')]
+    ext_paniclog_ver = int.from_bytes(ext_paniclog_ver_bytes, 'little')
+
+    idx += sizeof('uint32_t')
+    no_of_logs_bytes = ext_paniclog_bytes[idx:idx+sizeof('uint32_t')]
+    no_of_logs = int.from_bytes(no_of_logs_bytes, 'little')
+
+    idx += sizeof('uint32_t')
+
+    ext_paniclog = dict()
+
+    logs_processed = 0
+    for _ in range(no_of_logs):
+        uuid_bytes = ext_paniclog_bytes[idx:idx+sizeof('uuid_t')]
+        ext_uuid = str(uuid.UUID(bytes=uuid_bytes))
+
+        idx += sizeof('uuid_t')
+        data_id_bytes = ext_paniclog_bytes[idx:idx + EXT_PANICLOG_MAX_SIZE].split(b'\0')[0]
+        data_id = data_id_bytes.decode('utf-8')
+        data_id_len = len(data_id_bytes)
+
+        idx += data_id_len + 1
+        data_len_bytes = ext_paniclog_bytes[idx:idx+sizeof('uint32_t')]
+        data_len = int.from_bytes(data_len_bytes, 'little')
+
+        idx += sizeof('uint32_t')
+        data_bytes = ext_paniclog_bytes[idx:idx+data_len]
+        data = base64.b64encode(data_bytes).decode('ascii')
+
+        idx += data_len
+
+        temp_dict = dict(Data_Id=data_id, Data=data)
+
+        ext_paniclog.setdefault(ext_uuid, []).append(temp_dict)
+
+        logs_processed += 1
+
+    if logs_processed < no_of_logs:
+        print("** Warning: Extensible paniclog might be corrupted **")
+
+    with open(cmd_options['-E'], 'w') as out_file:
+        out_file.write(json.dumps(ext_paniclog))
+        print("Wrote extensible paniclog to %s" % cmd_options['-E'])
+
+    return
 
 @lldb_command('showbootargs')
 def ShowBootArgs(cmd_args=None):

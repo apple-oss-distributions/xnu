@@ -350,7 +350,8 @@ nx_upipe_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	 * user pipe to external kernel clients.
 	 */
 	na->na_arena = skmem_arena_create_for_nexus(na,
-	    NX_PROV(nx)->nxprov_region_params, NULL, NULL, 0, NULL, &err);
+	    NX_PROV(nx)->nxprov_region_params, NULL, NULL, FALSE,
+	    FALSE, NULL, &err);
 	ASSERT(na->na_arena != NULL || err != 0);
 
 	return err;
@@ -585,7 +586,7 @@ nx_upipe_dom_disconnect(struct kern_nexus_domain_provider *nxdom_prov,
 	 * peer adapter to cease to function.
 	 */
 	if (NX_PROV(nx)->nxprov_params->nxp_reject_on_close) {
-		atomic_bitset_32(&nx->nx_flags, NXF_REJECT);
+		os_atomic_or(&nx->nx_flags, NXF_REJECT, relaxed);
 	}
 }
 
@@ -816,11 +817,11 @@ nx_upipe_na_txsync(struct __kern_channel_ring *txkring, struct proc *p,
 	 * Record the time of sync and grab sync time of other side;
 	 * use atomic store and load since we're not holding the
 	 * lock used by the receive ring.  This allows us to avoid
-	 * the potentially costly membar_sync().
+	 * the potentially costly os_atomic_thread_fence(seq_cst).
 	 */
 	/* deconst */
 	tx_tsync = __DECONST(uint64_t *, &txkring->ckr_ring->ring_sync_time);
-	atomic_set_64(tx_tsync, txkring->ckr_sync_time);
+	os_atomic_store(tx_tsync, txkring->ckr_sync_time, release);
 
 	/*
 	 * Read from the peer's kring, not its user ring; the peer's channel
@@ -828,7 +829,7 @@ nx_upipe_na_txsync(struct __kern_channel_ring *txkring, struct proc *p,
 	 */
 	rx_tsync = __DECONST(uint64_t *, &rxkring->ckr_sync_time);
 	tx_tnote = __DECONST(uint64_t *, &txkring->ckr_ring->ring_notify_time);
-	*tx_tnote = atomic_add_64_ov(rx_tsync, 0);
+	*tx_tnote = os_atomic_add_orig(rx_tsync, 0, relaxed);
 
 	if (__probable(txkring->ckr_rhead != txkring->ckr_khead)) {
 		sent = nx_upipe_na_txsync_locked(txkring, p, flags,
@@ -956,7 +957,7 @@ nx_upipe_na_txsync_locked(struct __kern_channel_ring *txkring, struct proc *p,
 	 * Make sure the slots are updated before ckr_ktail reach global
 	 * visibility, since we are not holding rx ring's kr_enter().
 	 */
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 
 	rxkring->ckr_ktail = j;
 	txkring->ckr_khead = k;
@@ -1021,7 +1022,7 @@ nx_upipe_na_rxsync(struct __kern_channel_ring *rxkring, struct proc *p,
 	 * ckr_qlock and potentially returning from "internal txsync"
 	 * without anything to process, which is okay.
 	 */
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 	n = txkring->ckr_rhead - txkring->ckr_khead;
 	if (n < 0) {
 		n += txkring->ckr_num_slots;
@@ -1036,11 +1037,11 @@ nx_upipe_na_rxsync(struct __kern_channel_ring *rxkring, struct proc *p,
 	 * Record the time of sync and grab sync time of other side;
 	 * use atomic store and load since we're not holding the
 	 * lock used by the receive ring.  This allows us to avoid
-	 * the potentially costly membar_sync().
+	 * the potentially costly os_atomic_thread_fence(seq_cst).
 	 */
 	/* deconst */
 	rx_tsync = __DECONST(uint64_t *, &rxkring->ckr_ring->ring_sync_time);
-	atomic_set_64(rx_tsync, rxkring->ckr_sync_time);
+	os_atomic_store(rx_tsync, rxkring->ckr_sync_time, release);
 
 	/*
 	 * Read from the peer's kring, not its user ring; the peer's channel
@@ -1048,7 +1049,7 @@ nx_upipe_na_rxsync(struct __kern_channel_ring *rxkring, struct proc *p,
 	 */
 	tx_tsync = __DECONST(uint64_t *, &txkring->ckr_sync_time);
 	rx_tnote = __DECONST(uint64_t *, &rxkring->ckr_ring->ring_notify_time);
-	*rx_tnote = atomic_add_64_ov(tx_tsync, 0);
+	*rx_tnote = os_atomic_add_orig(tx_tsync, 0, relaxed);
 
 	/*
 	 * If we have slots to pick up from the transmit side and and we
@@ -1277,14 +1278,14 @@ nx_upipe_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 
 	switch (mode) {
 	case NA_ACTIVATE_MODE_ON:
-		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_or(&na->na_flags, NAF_ACTIVE, relaxed);
 		break;
 
 	case NA_ACTIVATE_MODE_DEFUNCT:
 		break;
 
 	case NA_ACTIVATE_MODE_OFF:
-		atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_andnot(&na->na_flags, NAF_ACTIVE, relaxed);
 		break;
 
 	default:
@@ -1571,7 +1572,7 @@ nx_upipe_na_find(struct kern_nexus *nx, struct kern_channel *ch,
 	mna->pna_up.na_krings_delete = nx_upipe_na_krings_delete;
 	mna->pna_up.na_arena = pna->na_arena;
 	skmem_arena_retain((&mna->pna_up)->na_arena);
-	atomic_bitset_32(&mna->pna_up.na_flags, NAF_MEM_LOANED);
+	os_atomic_or(&mna->pna_up.na_flags, NAF_MEM_LOANED, relaxed);
 	*(nexus_meta_type_t *)(uintptr_t)&mna->pna_up.na_md_type =
 	    pna->na_md_type;
 	*(nexus_meta_subtype_t *)(uintptr_t)&mna->pna_up.na_md_subtype =
@@ -1612,7 +1613,7 @@ nx_upipe_na_find(struct kern_nexus *nx, struct kern_channel *ch,
 	/* most fields are the same, copy from master and then fix */
 	bcopy(mna, sna, sizeof(*sna));
 	skmem_arena_retain((&sna->pna_up)->na_arena);
-	atomic_bitset_32(&sna->pna_up.na_flags, NAF_MEM_LOANED);
+	os_atomic_or(&sna->pna_up.na_flags, NAF_MEM_LOANED, relaxed);
 
 	ASSERT(sna->pna_up.na_type == NA_USER_PIPE);
 	ASSERT(sna->pna_up.na_free == na_upipe_free);
@@ -1635,7 +1636,7 @@ nx_upipe_na_find(struct kern_nexus *nx, struct kern_channel *ch,
 	na_retain_locked(pna);
 
 	if ((chr->cr_mode & CHMODE_DEFUNCT_OK) != 0) {
-		atomic_bitset_32(&pna->na_flags, NAF_DEFUNCT_OK);
+		os_atomic_or(&pna->na_flags, NAF_DEFUNCT_OK, relaxed);
 	}
 
 	if (ep == CH_ENDPOINT_USER_PIPE_MASTER) {
@@ -1710,7 +1711,7 @@ found:
 	    (req->pna_role == CH_ENDPOINT_USER_PIPE_MASTER ?
 	    "master" : "slave"), SK_KVA(req));
 	if ((chr->cr_mode & CHMODE_DEFUNCT_OK) == 0) {
-		atomic_bitclear_32(&pna->na_flags, NAF_DEFUNCT_OK);
+		os_atomic_andnot(&pna->na_flags, NAF_DEFUNCT_OK, relaxed);
 	}
 	*na = &req->pna_up;
 	na_retain_locked(*na);

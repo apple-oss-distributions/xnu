@@ -426,3 +426,25 @@ T_DECL(vm_test_shreg_ro, "Tests that read-only shared-region mappings can't be o
 
 //	T_LOG("pausing..."); getchar();
 }
+
+T_DECL(shared_region_x86_writable, "Tests shared region PROT_WRITE is permitted on Intel only, and fails on all other architectures",
+    T_META_ALL_VALID_ARCHS(true))
+{
+	mach_vm_address_t vmaddr_sub;
+	mach_vm_size_t vmsize_sub;
+	vm_region_submap_short_info_data_64_t ri;
+
+	if (!find_nested_read_only_mapping(&vmaddr_sub, &vmsize_sub, &ri)) {
+		T_FAIL("could not find appropriate mapping");
+		return;
+	}
+
+	kern_return_t kr;
+	kr = mach_vm_protect(mach_task_self(), vmaddr_sub, vmsize_sub, FALSE, VM_PROT_READ | VM_PROT_WRITE);
+
+#if defined(__x86_64__) || defined(__i386__)
+	T_ASSERT_MACH_SUCCESS(kr, "mach_vm_protect()");
+#else /* defined(__x86_64__) || defined(__i386__) */
+	T_ASSERT_MACH_ERROR(kr, KERN_PROTECTION_FAILURE, "mach_vm_protect()");
+#endif /* defined(__x86_64__) || defined(__i386__) */
+}

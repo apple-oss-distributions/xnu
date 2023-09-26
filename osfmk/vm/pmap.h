@@ -130,7 +130,7 @@ extern pmap_t           pmap_create_options(    /* Create a pmap_t. */
 	vm_map_size_t   size,
 	unsigned int    flags);
 
-#if __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX)
+#if __has_feature(ptrauth_calls) && (defined(XNU_TARGET_OS_OSX) || (DEVELOPMENT || DEBUG))
 /**
  * Informs the pmap layer that a process will be running with user JOP disabled,
  * as if PMAP_CREATE_DISABLE_JOP had been passed during pmap creation.
@@ -144,7 +144,7 @@ extern pmap_t           pmap_create_options(    /* Create a pmap_t. */
  */
 extern void             pmap_disable_user_jop(
 	pmap_t          pmap);
-#endif /* __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX) */
+#endif /* __has_feature(ptrauth_calls) && (defined(XNU_TARGET_OS_OSX) || (DEVELOPMENT || DEBUG)) */
 #endif /* MACH_KERNEL_PRIVATE || BSD_KERNEL_PRIVATE */
 
 #ifdef  MACH_KERNEL_PRIVATE
@@ -166,6 +166,7 @@ extern void             pmap_disable_user_jop(
 
 extern void *pmap_steal_memory(vm_size_t size, vm_size_t alignment); /* Early memory allocation */
 extern void *pmap_steal_freeable_memory(vm_size_t size); /* Early memory allocation */
+extern void *pmap_steal_zone_memory(vm_size_t size, vm_size_t alignment); /* Early zone memory allocation */
 
 extern uint_t pmap_free_pages(void); /* report remaining unused physical pages */
 #if defined(__arm__) || defined(__arm64__)
@@ -444,71 +445,6 @@ extern kern_return_t(pmap_attribute)(           /* Get/Set special memory
 #endif  /* PMAP_DEACTIVATE */
 #endif  /* PMAP_DEACTIVATE_KERNEL */
 
-#ifndef PMAP_ENTER
-/*
- *	Macro to be used in place of pmap_enter()
- */
-#define PMAP_ENTER(pmap, virtual_address, page, protection, fault_type, \
-	    flags, wired, result)                                \
-	MACRO_BEGIN                                                     \
-	pmap_t		__pmap = (pmap);                                \
-	vm_page_t	__page = (page);                                \
-	int		__options = 0;                                  \
-	vm_object_t	__obj;                                          \
-                                                                        \
-	PMAP_ENTER_CHECK(__pmap, __page)                                \
-	__obj = VM_PAGE_OBJECT(__page);                                 \
-	if (__obj->internal) {                                          \
-	        __options |= PMAP_OPTIONS_INTERNAL;                     \
-	}                                                               \
-	if (__page->vmp_reusable || __obj->all_reusable) {              \
-	        __options |= PMAP_OPTIONS_REUSABLE;                     \
-	}                                                               \
-	result = pmap_enter_options(__pmap,                             \
-	                            (virtual_address),                  \
-	                            VM_PAGE_GET_PHYS_PAGE(__page),      \
-	                            (protection),                               \
-	                            (fault_type),                               \
-	                            (flags),                            \
-	                            (wired),                            \
-	                            __options,                          \
-	                            NULL);                              \
-	MACRO_END
-#endif  /* !PMAP_ENTER */
-
-#ifndef PMAP_ENTER_OPTIONS
-#define PMAP_ENTER_OPTIONS(pmap, virtual_address, fault_phys_offset,   \
-	    page, protection,                                           \
-	    fault_type, flags, wired, options, result)                  \
-	MACRO_BEGIN                                                     \
-	pmap_t		__pmap = (pmap);                                \
-	vm_page_t	__page = (page);                                \
-	int		__extra_options = 0;                            \
-	vm_object_t	__obj;                                          \
-                                                                        \
-	PMAP_ENTER_CHECK(__pmap, __page)                                \
-	__obj = VM_PAGE_OBJECT(__page);                                 \
-	if (__obj->internal) {                                          \
-	        __extra_options |= PMAP_OPTIONS_INTERNAL;               \
-	}                                                               \
-	if (__page->vmp_reusable || __obj->all_reusable) {              \
-	        __extra_options |= PMAP_OPTIONS_REUSABLE;               \
-	}                                                               \
-	result = pmap_enter_options_addr(__pmap,                        \
-	                            (virtual_address),                  \
-	                            (((pmap_paddr_t)                    \
-	                              VM_PAGE_GET_PHYS_PAGE(__page)     \
-	                              << PAGE_SHIFT)                    \
-	                             + fault_phys_offset),             \
-	                            (protection),                       \
-	                            (fault_type),                       \
-	                            (flags),                            \
-	                            (wired),                            \
-	                            (options) | __extra_options,        \
-	                            NULL);                              \
-	MACRO_END
-#endif  /* !PMAP_ENTER_OPTIONS */
-
 #ifndef PMAP_SET_CACHE_ATTR
 #define PMAP_SET_CACHE_ATTR(mem, object, cache_attr, batch_pmap_op)             \
 	MACRO_BEGIN                                                             \
@@ -549,14 +485,6 @@ extern kern_return_t(pmap_attribute)(           /* Get/Set special memory
 	MACRO_END
 #endif
 #endif  /* PMAP_BATCH_SET_CACHE_ATTR */
-
-#define PMAP_ENTER_CHECK(pmap, page)                                    \
-{                                                                       \
-	if (VMP_ERROR_GET(page)) {                                      \
-	        panic("VM page %p should not have an error\n",          \
-	                (page));                                        \
-	}                                                               \
-}
 
 /*
  *	Routines to manage reference/modify bits based on
@@ -802,6 +730,8 @@ extern bool pmap_get_tpro(pmap_t pmap);
  */
 extern void pmap_trim(pmap_t grand, pmap_t subord, addr64_t vstart, uint64_t size);
 
+extern bool pmap_is_nested(pmap_t pmap);
+
 /*
  * Dump page table contents into the specified buffer.  Returns KERN_INSUFFICIENT_BUFFER_SIZE
  * if insufficient space, KERN_NOT_SUPPORTED if unsupported in the current configuration.
@@ -913,6 +843,7 @@ pmap_performs_stage2_translations(const pmap_t pmap);
 
 #endif /* defined(__arm64__) */
 #endif /* XNU_KERNEL_PRIVATE */
+
 
 
 #endif  /* KERNEL_PRIVATE */

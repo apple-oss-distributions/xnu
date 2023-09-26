@@ -245,6 +245,7 @@ extern struct mount * const dead_mountp;
  *		because the bits here were broken out from the high bits
  *		of the mount flags.
  */
+#define MNTK_FSKIT              0x00000020      /* Volume is a FSKit mount */
 #define MNTK_SYSTEM             0x00000040      /* Volume associated with system volume (do not allow unmount) */
 #define MNTK_NOSWAP             0x00000080      /* swap files cannot be used on this mount */
 #define MNTK_SWAP_MOUNT         0x00000100      /* we are swapping to this mount */
@@ -282,7 +283,7 @@ extern struct mount * const dead_mountp;
  * exhausted, so this is intended as a supplement.
  */
 #define MNTK_SUPL_BASESYSTEM    0x00000001
-
+#define MNTK_SUPL_USE_FULLSYNC  0x00000002
 
 /*
  * Mount Lifecycle Flags (stored in mnt_lflag)
@@ -457,6 +458,9 @@ void    vfs_unmountall(int only_non_system);
 int     safedounmount(struct mount *, int, vfs_context_t);
 int     dounmount(struct mount *, int, int, vfs_context_t);
 void    dounmount_submounts(struct mount *, int, vfs_context_t);
+int     vfs_setmounting(vnode_t);
+void    vfs_clearmounting(vnode_t);
+void    vfs_setmountedon(vnode_t);
 
 /* xnu internal api */
 void  mount_dropcrossref(mount_t, vnode_t, int);

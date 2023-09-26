@@ -322,10 +322,10 @@ extern __exported void lck_ticket_unlock(
 	lck_ticket_t            *tlock);
 
 extern __exported void lck_ticket_assert_owned(
-	lck_ticket_t            *tlock);
+	const lck_ticket_t            *tlock);
 
 extern __exported void lck_ticket_assert_not_owned(
-	lck_ticket_t            *tlock);
+	const lck_ticket_t            *tlock);
 
 #if MACH_ASSERT
 #define LCK_TICKET_ASSERT_OWNED(tlock)     lck_ticket_assert_owned(tlock)

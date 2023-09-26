@@ -81,9 +81,6 @@
 #include <sys/socketvar.h>
 #include <sys/syslog.h>
 #include <sys/mcache.h>
-#if XNU_TARGET_OS_OSX
-#include <sys/kasl.h>
-#endif /* XNU_TARGET_OS_OSX */
 #include <sys/kauth.h>
 #include <kern/cpu_number.h>    /* before tcp_seq.h, for tcp_random18() */
 
@@ -234,7 +231,7 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, autotunereorder,
     "Enable automatic socket buffer tuning even when reordering is present");
 
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, autorcvbufmax,
-    CTLFLAG_RW | CTLFLAG_LOCKED, u_int32_t, tcp_autorcvbuf_max, 2 * 1024 * 1024,
+    CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, u_int32_t, tcp_autorcvbuf_max, 2 * 1024 * 1024,
     "Maximum receive socket buffer size");
 
 int tcp_disable_access_to_stats = 1;
@@ -693,15 +690,21 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 			th->th_seq += i;
 		}
 	}
-	tp->t_rcvoopack++;
-	tcpstat.tcps_rcvoopack++;
-	tcpstat.tcps_rcvoobyte += *tlenp;
+
+	if (th->th_seq != tp->rcv_nxt) {
+		tp->t_rcvoopack++;
+		tcpstat.tcps_rcvoopack++;
+		tcpstat.tcps_rcvoobyte += *tlenp;
+		if (nstat_collect) {
+			tp->t_stat.rxoutoforderbytes += *tlenp;
+		}
+	}
+
 	if (nstat_collect) {
 		nstat_route_rx(inp->inp_route.ro_rt, 1, *tlenp,
 		    NSTAT_RX_FLAG_OUT_OF_ORDER);
 		INP_ADD_STAT(inp, cell, wifi, wired, rxpackets, 1);
 		INP_ADD_STAT(inp, cell, wifi, wired, rxbytes, *tlenp);
-		tp->t_stat.rxoutoforderbytes += *tlenp;
 		inp_set_activity_bitmap(inp);
 	}
 
@@ -745,7 +748,7 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 
 		nq = LIST_NEXT(q, tqe_q);
 		LIST_REMOVE(q, tqe_q);
-		tp->t_reassq_mbcnt -= MSIZE + (q->tqe_m->m_flags & M_EXT) ?
+		tp->t_reassq_mbcnt -= _MSIZE + (q->tqe_m->m_flags & M_EXT) ?
 		    q->tqe_m->m_ext.ext_size : 0;
 		m_freem(q->tqe_m);
 		zfree(tcp_reass_zone, q);
@@ -759,7 +762,7 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 	te->tqe_th = th;
 	te->tqe_len = *tlenp;
 
-	tp->t_reassq_mbcnt += MSIZE + (m->m_flags & M_EXT) ? m->m_ext.ext_size : 0;
+	tp->t_reassq_mbcnt += _MSIZE + (m->m_flags & M_EXT) ? m->m_ext.ext_size : 0;
 
 	if (p == NULL) {
 		LIST_INSERT_HEAD(&tp->t_segq, te, tqe_q);
@@ -797,7 +800,7 @@ present:
 		tp->rcv_nxt += q->tqe_len;
 		flags = q->tqe_th->th_flags & TH_FIN;
 		LIST_REMOVE(q, tqe_q);
-		tp->t_reassq_mbcnt -= MSIZE + (q->tqe_m->m_flags & M_EXT) ?
+		tp->t_reassq_mbcnt -= _MSIZE + (q->tqe_m->m_flags & M_EXT) ?
 		    q->tqe_m->m_ext.ext_size : 0;
 		if (so->so_state & SS_CANTRCVMORE) {
 			m_freem(q->tqe_m);
@@ -972,11 +975,11 @@ tcp6_input(struct mbuf **mp, int *offp, int proto)
 u_int8_t
 tcp_cansbgrow(struct sockbuf *sb)
 {
-	/* Calculate the host level space limit in terms of MSIZE buffers.
+	/* Calculate the host level space limit in terms of _MSIZE buffers.
 	 * We can use a maximum of half of the available mbuf space for
 	 * socket buffers.
 	 */
-	u_int32_t mblim = ((nmbclusters >> 1) << (MCLSHIFT - MSIZESHIFT));
+	u_int32_t mblim = (nmbclusters >> 1) * (MCLBYTES / _MSIZE);
 
 	/* Calculate per sb limit in terms of bytes. We optimize this limit
 	 * for upto 16 socket buffers.
@@ -1866,6 +1869,87 @@ tcp_input_ip_ecn(struct tcpcb *tp, struct inpcb *inp, uint32_t tlen, uint32_t se
 	}
 }
 
+/* Process SYN packet that wishes to negotiate Accurate ECN */
+static void
+tcp_input_process_accecn_syn(struct tcpcb *tp, int ace_flags, uint8_t ip_ecn)
+{
+	switch (ace_flags) {
+	case (0 | 0 | 0):
+		/* No ECN */
+		tp->t_server_accecn_state = tcp_connection_server_no_ecn_requested;
+		break;
+	case (0 | TH_CWR | TH_ECE):
+		/* Legacy ECN-setup */
+		tp->ecn_flags |= (TE_SETUPRECEIVED | TE_SENDIPECT);
+		tp->t_server_accecn_state = tcp_connection_server_classic_ecn_requested;
+		break;
+	case (TH_ACE):
+		/* Accurate ECN */
+		if (TCP_ACC_ECN_ENABLED(tp)) {
+			switch (ip_ecn) {
+			case IPTOS_ECN_NOTECT:
+				tp->ecn_flags |= TE_ACE_SETUP_NON_ECT;
+				break;
+			case IPTOS_ECN_ECT1:
+				tp->ecn_flags |= TE_ACE_SETUP_ECT1;
+				break;
+			case IPTOS_ECN_ECT0:
+				tp->ecn_flags |= TE_ACE_SETUP_ECT0;
+				break;
+			case IPTOS_ECN_CE:
+				tp->ecn_flags |= TE_ACE_SETUP_CE;
+				break;
+			}
+			/*
+			 * We are not yet committing to send IP ECT packets when
+			 * Accurate ECN is enabled
+			 */
+			tp->ecn_flags |= (TE_ACE_SETUPRECEIVED);
+
+			/* Initialize ECT byte counter to 1 to distinguish zeroing of options */
+			tp->t_rcv_ect1_bytes = tp->t_rcv_ect0_bytes = 1;
+			tp->t_snd_ect1_bytes = tp->t_snd_ect0_bytes = 1;
+			tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_requested;
+		} else {
+			/*
+			 * If AccECN is not enabled, ignore
+			 * the TH_AE bit and do Legacy ECN-setup
+			 */
+			tp->ecn_flags |= (TE_SETUPRECEIVED | TE_SENDIPECT);
+		}
+	default:
+		/* Forward Compatibility */
+		/* Accurate ECN */
+		if (TCP_ACC_ECN_ENABLED(tp)) {
+			switch (ip_ecn) {
+			case IPTOS_ECN_NOTECT:
+				tp->ecn_flags |= TE_ACE_SETUP_NON_ECT;
+				break;
+			case IPTOS_ECN_ECT1:
+				tp->ecn_flags |= TE_ACE_SETUP_ECT1;
+				break;
+			case IPTOS_ECN_ECT0:
+				tp->ecn_flags |= TE_ACE_SETUP_ECT0;
+				break;
+			case IPTOS_ECN_CE:
+				tp->ecn_flags |= TE_ACE_SETUP_CE;
+				break;
+			}
+			/*
+			 * We are not yet committing to send IP ECT packets when
+			 * Accurate ECN is enabled
+			 */
+			tp->ecn_flags |= (TE_ACE_SETUPRECEIVED);
+
+			/* Initialize ECT byte counter to 1 to distinguish zeroing of options */
+			tp->t_rcv_ect1_bytes = tp->t_rcv_ect0_bytes = 1;
+			tp->t_snd_ect1_bytes = tp->t_snd_ect0_bytes = 1;
+			tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_requested;
+		}
+		break;
+	}
+}
+
 void
 tcp_input(struct mbuf *m, int off0)
 {
@@ -2394,10 +2478,10 @@ findpcb:
 			struct sockaddr_storage to2;
 			struct inpcb *oinp = sotoinpcb(so);
 			struct ifnet *head_ifscope;
-			unsigned int head_nocell, head_recvanyif,
+			bool head_nocell, head_recvanyif,
 			    head_noexpensive, head_awdl_unrestricted,
 			    head_intcoproc_allowed, head_external_port,
-			    head_noconstrained;
+			    head_noconstrained, head_management_allowed;
 
 			/* Get listener's bound-to-interface, if any */
 			head_ifscope = (inp->inp_flags & INP_BOUND_IF) ?
@@ -2412,6 +2496,7 @@ findpcb:
 			head_awdl_unrestricted = INP_AWDL_UNRESTRICTED(inp);
 			head_intcoproc_allowed = INP_INTCOPROC_ALLOWED(inp);
 			head_external_port = (inp->inp_flags2 & INP2_EXTERNAL_PORT);
+			head_management_allowed = INP_MANAGEMENT_ALLOWED(inp);
 
 			/*
 			 * If the state is LISTEN then ignore segment if it contains an RST.
@@ -2614,6 +2699,9 @@ findpcb:
 			if (head_intcoproc_allowed) {
 				inp_set_intcoproc_allowed(inp);
 			}
+			if (head_management_allowed) {
+				inp_set_management_allowed(inp);
+			}
 			/*
 			 * Inherit {IN,IN6}_RECV_ANYIF from listener.
 			 */
@@ -2783,8 +2871,21 @@ findpcb:
 		}
 	}
 
+	if (tp->t_state == TCPS_ESTABLISHED && BYTES_ACKED(th, tp) > 0) {
+		if (tp->ecn_flags & TE_SENDIPECT) {
+			/*
+			 * Data sent with ECT has been acknowledged, calculate
+			 * packets approx. by dividing by MSS. This is done to
+			 * count MSS sized packets in case packets are aggregated
+			 * by GRO/LRO.
+			 */
+			uint32_t bytes_acked = tcp_round_to(BYTES_ACKED(th, tp), tp->t_maxseg);
+			tp->t_ecn_capable_packets_acked += max(1, (bytes_acked / tp->t_maxseg));
+		}
+	}
+
 	/* Accurate ECN has different semantics for TH_CWR. */
-	if (!TCP_ACC_ECN_ENABLED()) {
+	if (!TCP_ACC_ECN_ENABLED(tp)) {
 		/*
 		 * Clear TE_SENDECE if TH_CWR is set. This is harmless, so we don't
 		 * bother doing extensive checks for state and whatnot.
@@ -2807,8 +2908,8 @@ findpcb:
 		 * Update s.cep if bytes have been acknowledged
 		 * otherwise, this ACK has already been superseded.
 		 */
+		uint8_t ace = tcp_get_ace(th);
 		if (BYTES_ACKED(th, tp) > 0) {
-			uint8_t ace = tcp_get_ace(th);
 			/* Congestion was experienced if delta_cep > 0 */
 			tp->t_delta_ce_packets = (ace + TCP_ACE_DIV - (tp->t_snd_ce_packets % TCP_ACE_DIV)) % TCP_ACE_DIV;
 			tp->t_snd_ce_packets += tp->t_delta_ce_packets;
@@ -2818,6 +2919,11 @@ findpcb:
 		    SEQ_GEQ(th->th_seq, tp->last_ack_sent) &&
 		    SEQ_LT(th->th_seq, tp->last_ack_sent + tp->rcv_wnd))) {
 			tcp_input_ip_ecn(tp, inp, (uint32_t)tlen, (uint32_t)segment_count, ip_ecn);
+		}
+
+		/* Test for ACE bleaching, initial value of ace should be non-zero */
+		if (th->th_seq == tp->iss + 1 && ace == 0) {
+			tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_ace_bleaching_detected;
 		}
 	} else {
 		/*
@@ -3017,6 +3123,14 @@ findpcb:
 		    SEQ_LEQ(th->th_seq, tp->last_ack_sent)) {
 			tp->ts_recent_age = tcp_now;
 			tp->ts_recent = to.to_tsval;
+		}
+
+		/*
+		 * We increment t_unacksegs_ce for both data segments
+		 * and pure ACKs for Accurate ECN
+		 */
+		if (TCP_ACC_ECN_ON(tp) && ip_ecn == IPTOS_ECN_CE) {
+			TCP_INC_VAR(tp->t_unacksegs_ce, segment_count);
 		}
 
 		if (tlen == 0) {
@@ -3289,8 +3403,8 @@ findpcb:
 		socket_lock_assert_owned(so);
 
 		/* Clear the logging flags inherited from the listening socket */
-		tp->t_log_flags = 0;
-		tp->t_flagsext &= ~TF_LOGGED_CONN_SUMMARY;
+		inp->inp_log_flags = 0;
+		inp->inp_flags2 |= INP2_LOGGED_SUMMARY;
 
 		if (isipv6) {
 			sin6 = kalloc_type(struct sockaddr_in6, Z_NOWAIT | Z_ZERO);
@@ -3373,6 +3487,7 @@ findpcb:
 		tp->max_sndwnd = tp->snd_wnd;
 		tp->t_flags |= TF_ACKNOW;
 		tp->t_unacksegs = 0;
+		tp->t_unacksegs_ce = 0;
 		DTRACE_TCP4(state__change, void, NULL, struct inpcb *, inp,
 		    struct tcpcb *, tp, int32_t, TCPS_SYN_RECEIVED);
 		TCP_LOG_STATE(tp, TCPS_SYN_RECEIVED);
@@ -3399,69 +3514,7 @@ findpcb:
 		tcpstat.tcps_accepts++;
 
 		int ace_flags = ((th->th_x2 << 8) | thflags) & TH_ACE;
-		switch (ace_flags) {
-		case (0 | 0 | 0):
-			/* No ECN */
-			break;
-		case (0 | TH_CWR | TH_ECE):
-			/* Legacy ECN-setup */
-			tp->ecn_flags |= (TE_SETUPRECEIVED | TE_SENDIPECT);
-			break;
-		case (TH_ACE):
-			/* Accurate ECN */
-			if (TCP_ACC_ECN_ENABLED()) {
-				switch (ip_ecn) {
-				case IPTOS_ECN_NOTECT:
-					tp->ecn_flags |= TE_ACE_SETUP_NON_ECT;
-					break;
-				case IPTOS_ECN_ECT1:
-					tp->ecn_flags |= TE_ACE_SETUP_ECT1;
-					break;
-				case IPTOS_ECN_ECT0:
-					tp->ecn_flags |= TE_ACE_SETUP_ECT0;
-					break;
-				case IPTOS_ECN_CE:
-					tp->ecn_flags |= TE_ACE_SETUP_CE;
-					break;
-				}
-				/*
-				 * We are not yet committing to send IP ECT packets when
-				 * Accurate ECN is enabled
-				 */
-				tp->ecn_flags |= (TE_ACE_SETUPRECEIVED);
-			} else {
-				/*
-				 * If AccECN is not enabled, ignore
-				 * the TH_AE bit and do Legacy ECN-setup
-				 */
-				tp->ecn_flags |= (TE_SETUPRECEIVED | TE_SENDIPECT);
-			}
-		default:
-			/* Forward Compatibility */
-			/* Accurate ECN */
-			if (TCP_ACC_ECN_ENABLED()) {
-				switch (ip_ecn) {
-				case IPTOS_ECN_NOTECT:
-					tp->ecn_flags |= TE_ACE_SETUP_NON_ECT;
-					break;
-				case IPTOS_ECN_ECT1:
-					tp->ecn_flags |= TE_ACE_SETUP_ECT1;
-					break;
-				case IPTOS_ECN_ECT0:
-					tp->ecn_flags |= TE_ACE_SETUP_ECT0;
-					break;
-				case IPTOS_ECN_CE:
-					tp->ecn_flags |= TE_ACE_SETUP_CE;
-					break;
-				}
-				/*
-				 * We are not yet committing to send IP ECT packets when
-				 * Accurate ECN is enabled
-				 */
-				tp->ecn_flags |= (TE_ACE_SETUPRECEIVED);
-			}
-			break;
-		}
+		tcp_input_process_accecn_syn(tp, ace_flags, ip_ecn);
 
 		/*
 		 * The address and connection state are finalized
@@ -3497,52 +3550,6 @@ findpcb:
 		    !(to.to_flags & TOF_SCALE)) {
 			tp->t_flags &= ~TF_RCVD_SCALE;
 		}
-
-		/*
-		 * AccECN server in SYN-RCVD state received an ACK with
-		 * SYN=0, process handshake encoding present in the ACK for SYN-ACK
-		 * and update receive side counters.
-		 */
-		if (TCP_ACC_ECN_ON(tp) && (thflags & (TH_SYN | TH_ACK)) == TH_ACK) {
-			const uint32_t ace_flags = ((th->th_x2 << 8) | thflags) & TH_ACE;
-			if (tlen == 0 && to.to_nsacks > 0) {
-				/*
-				 * ACK for SYN-ACK reflects the state (ECN) in which SYN-ACK packet
-				 * was delivered. Use Table 4 of Accurate ECN draft to decode only
-				 * when a pure ACK with no SACK block is received.
-				 * 0|0|0 will fail Accurate ECN negotiation and disable ECN.
-				 */
-				switch (ace_flags) {
-				case (0 | TH_CWR | 0):
-					/* Non-ECT SYN-ACK was delivered */
-					OS_FALLTHROUGH;
-				case (0 | TH_CWR | TH_ECE):
-					/* ECT1 SYN-ACK was delivered */
-					OS_FALLTHROUGH;
-				case (TH_AE | 0 | 0):
-					/* ECT0 SYN-ACK was delivered */
-					tp->t_snd_ce_packets = 5;
-					break;
-				case (TH_AE | TH_CWR | 0):
-					/* CE SYN-ACK was delivered, set cwnd to 2 segments */
-					tp->t_snd_ce_packets = 6;
-					tp->snd_cwnd = 2 * tp->t_maxseg;
-					break;
-				case (0 | 0 | 0):
-					/* Disable ECN */
-					tp->ecn_flags &= ~(TE_SETUPRECEIVED | TE_SENDIPECT |
-					    TE_SENDCWR | TE_ACE_SETUPRECEIVED);
-					break;
-				default:
-					/* Unused values for forward compatibility */
-					tp->t_snd_ce_packets = 5;
-					break;
-				}
-			}
-			/* Increment receive side counters based on IP-ECN */
-			tcp_input_ip_ecn(tp, inp, (uint32_t)tlen, (uint32_t)segment_count, ip_ecn);
-		}
-
 		break;
 
 	/*
@@ -3623,8 +3630,11 @@ findpcb:
 					 */
 					tp->ecn_flags |= (TE_SETUPSENT | TE_SENDIPECT);
 					tp->ecn_flags &= ~TE_ACE_SETUPSENT;
+					if (tp->t_client_accecn_state == tcp_connection_client_accurate_ecn_feature_enabled) {
+						tp->t_client_accecn_state = tcp_connection_client_classic_ecn_available;
+					}
 				}
-			} else if (TCP_ACC_ECN_ENABLED() && ace_flags != 0 &&
+			} else if (TCP_ACC_ECN_ENABLED(tp) && ace_flags != 0 &&
 			    ace_flags != TH_ACE) {
 				/* Initialize sender side packet & byte counters */
 				tp->t_snd_ce_packets = 5;
@@ -3645,6 +3655,7 @@ findpcb:
 					/* Non-ECT SYN was delivered */
 					tp->ecn_flags |= TE_ACE_SETUPRECEIVED;
 					tcpstat.tcps_ecn_ace_syn_not_ect++;
+					tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_negotiation_success;
 					break;
 				case (0 | TH_CWR | TH_ECE):
 					/* ECT1 SYN was delivered */
@@ -3652,6 +3663,7 @@ findpcb:
 					/* Mangling detected, set Non-ECT on outgoing packets */
 					tp->ecn_flags &= ~TE_SENDIPECT;
 					tcpstat.tcps_ecn_ace_syn_ect1++;
+					tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_negotiation_success_ect_mangling_detected;
 					break;
 				case (TH_AE | 0 | 0):
 					/* ECT0 SYN was delivered */
@@ -3659,11 +3671,13 @@ findpcb:
 					/* Mangling detected, set Non-ECT on outgoing packets */
 					tp->ecn_flags &= ~TE_SENDIPECT;
 					tcpstat.tcps_ecn_ace_syn_ect0++;
+					tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_negotiation_success_ect_mangling_detected;
 					break;
 				case (TH_AE | TH_CWR | 0):
 					/* CE SYN was delivered */
 					tp->ecn_flags |= TE_ACE_SETUPRECEIVED;
 					/* Mangling detected, set Non-ECT on outgoing packets */
+					tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_negotiation_success_ect_mangling_detected;
 					tp->ecn_flags &= ~TE_SENDIPECT;
 					/*
 					 * Although we don't send ECT SYN yet, it is possible that
@@ -3727,6 +3741,22 @@ findpcb:
 
 				/* non-ECN-setup SYN-ACK */
 				tp->ecn_flags &= ~TE_SENDIPECT;
+				/*
+				 * If Accurate ECN SYN was retransmitted twice and non-ECN SYN-ACK
+				 * was received, then we consider it as Accurate ECN blackholing
+				 */
+				if ((tp->ecn_flags & TE_LOST_SYN) && tp->t_rxtshift <= 2 &&
+				    tp->t_client_accecn_state == tcp_connection_client_accurate_ecn_feature_enabled) {
+					tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_negotiation_blackholed;
+				}
+				/*
+				 * If SYN wasn't retransmitted twice yet, the server supports neither classic nor
+				 * accurate ECN SYN-ACK. Accurate ECN should already be disabled for both half connections
+				 * as TE_ACE_SETUPRECEIVED flag is not set.
+				 */
+				if (tp->t_client_accecn_state == tcp_connection_client_accurate_ecn_feature_enabled) {
+					tp->t_client_accecn_state = tcp_connection_client_ecn_not_available;
+				}
 			}
 
 			/* Do window scaling on this connection? */
@@ -3783,6 +3813,9 @@ findpcb:
 			 * ACKNOW will be turned on later.
 			 */
 			TCP_INC_VAR(tp->t_unacksegs, segment_count);
+			if (TCP_ACC_ECN_ON(tp) && ip_ecn == IPTOS_ECN_CE) {
+				TCP_INC_VAR(tp->t_unacksegs_ce, segment_count);
+			}
 			if (DELAY_ACK(tp, th) && tlen != 0) {
 				if ((tp->t_flags & TF_DELACK) == 0) {
 					tp->t_flags |= TF_DELACK;
@@ -3927,6 +3960,9 @@ trimthenstep6:
 	 * in RFC793 page 34, send an ACK so the remote reset the connection
 	 * or recovers by adjusting its sequence numbering. Sending an ACK is
 	 * in accordance with RFC 5961 Section 4.2
+	 *
+	 * For Accurate ECN, if we receive a packet with SYN in ESTABLISHED
+	 * state, we don't send the handshake encoding.
 	 */
 	case TCPS_ESTABLISHED:
 		if (thflags & TH_SYN && tlen <= 0) {
@@ -4415,6 +4451,9 @@ close:
 					needoutput = 1;
 				}
 			}
+			/* Process this same as newly received Accurate ECN SYN */
+			int ace_flags = ((th->th_x2 << 8) | thflags) & TH_ACE;
+			tcp_input_process_accecn_syn(tp, ace_flags, ip_ecn);
 
 			goto step6;
 		} else if (tp->t_flags & TF_ACKNOW) {
@@ -4488,6 +4527,82 @@ close:
 
 		VERIFY(LIST_EMPTY(&tp->t_segq));
 		tp->snd_wl1 = th->th_seq - 1;
+
+		/*
+		 * AccECN server in SYN-RCVD state received an ACK with
+		 * SYN=0, process handshake encoding present in the ACK for SYN-ACK
+		 * and update receive side counters.
+		 */
+		if (TCP_ACC_ECN_ON(tp) && (thflags & (TH_SYN | TH_ACK)) == TH_ACK) {
+			const uint32_t ace_flags = ((th->th_x2 << 8) | thflags) & TH_ACE;
+			if (tlen == 0 && to.to_nsacks == 0) {
+				/*
+				 * ACK for SYN-ACK reflects the state (ECN) in which SYN-ACK packet
+				 * was delivered. Use Table 4 of Accurate ECN draft to decode only
+				 * when a pure ACK with no SACK block is received.
+				 * 0|0|0 will fail Accurate ECN negotiation and disable ECN.
+				 */
+				switch (ace_flags) {
+				case (0 | TH_CWR | 0):
+					/* Non-ECT SYN-ACK was delivered */
+					tp->t_snd_ce_packets = 5;
+					if (tp->t_server_accecn_state == tcp_connection_server_accurate_ecn_requested) {
+						tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_negotiation_success;
+					}
+					break;
+				case (0 | TH_CWR | TH_ECE):
+					/* ECT1 SYN-ACK was delivered, mangling detected */
+					OS_FALLTHROUGH;
+				case (TH_AE | 0 | 0):
+					/* ECT0 SYN-ACK was delivered, mangling detected */
+					tp->t_snd_ce_packets = 5;
+					if (tp->t_server_accecn_state == tcp_connection_server_accurate_ecn_requested) {
+						tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_negotiation_success_ect_mangling_detected;
+					}
+					break;
+				case (TH_AE | TH_CWR | 0):
+					/*
+					 * CE SYN-ACK was delivered, even though mangling happened,
+					 * CE could indicate congestion at a node after mangling occured.
+					 * Set cwnd to 2 segments
+					 */
+					tp->t_snd_ce_packets = 6;
+					tp->snd_cwnd = 2 * tp->t_maxseg;
+					if (tp->t_server_accecn_state == tcp_connection_server_accurate_ecn_requested) {
+						tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_negotiation_success_ect_mangling_detected;
+					}
+					break;
+				case (0 | 0 | 0):
+					/* Disable ECN, as ACE fields were zeroed */
+					tp->ecn_flags &= ~(TE_SETUPRECEIVED | TE_SENDIPECT |
+					    TE_SENDCWR | TE_ACE_SETUPRECEIVED);
+					/*
+					 * Since last ACK has no ECN flag set and TE_LOST_SYNACK is set, this is in response
+					 * to the second (non-ECN setup) SYN-ACK retransmission. In such a case, we assume
+					 * that AccECN SYN-ACK was blackholed.
+					 */
+					if ((tp->ecn_flags & TE_LOST_SYNACK) && tp->t_rxtshift <= 2 &&
+					    (tp->t_server_accecn_state == tcp_connection_server_classic_ecn_requested ||
+					    tp->t_server_accecn_state == tcp_connection_server_accurate_ecn_requested)) {
+						tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_negotiation_blackholed;
+					}
+					/*
+					 * SYN-ACK hasn't been retransmitted twice yet, so this could likely mean bleaching of ACE
+					 * on the path from client to server on last ACK.
+					 */
+					if (tp->t_server_accecn_state == tcp_connection_server_accurate_ecn_requested) {
+						tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_ace_bleaching_detected;
+					}
+					break;
+				default:
+					/* Unused values for forward compatibility */
+					tp->t_snd_ce_packets = 5;
+					break;
+				}
+			}
+			/* Increment receive side counters based on IP-ECN */
+			tcp_input_ip_ecn(tp, inp, (uint32_t)tlen, (uint32_t)segment_count, ip_ecn);
+		}
 
 #if MPTCP
 		/*
@@ -5100,6 +5215,7 @@ process_ACK:
 					tp->ecn_flags |= (TE_INRECOVERY);
 					/* update the stats */
 					tcpstat.tcps_ecn_ace_recv_ce += tp->t_delta_ce_packets;
+					tp->t_ecn_capable_packets_marked += tp->t_delta_ce_packets;
 					tcp_ccdbg_trace(tp, th, TCP_CC_ECN_RCVD);
 				}
 			} else if (TCP_ECN_ENABLED(tp) && (thflags & TH_ECE)) {
@@ -5112,11 +5228,14 @@ process_ACK:
 					tp->ecn_flags |= (TE_INRECOVERY | TE_SENDCWR);
 					/*
 					 * Also note that the connection received
-					 * ECE atleast once
+					 * ECE atleast once. We increment
+					 * t_ecn_capable_packets_marked when we first
+					 * enter fast recovery.
 					 */
 					tp->ecn_flags |= TE_RECV_ECN_ECE;
 					INP_INC_IFNET_STAT(inp, ecn_recv_ece);
 					tcpstat.tcps_ecn_recv_ece++;
+					tp->t_ecn_capable_packets_marked++;
 					tcp_ccdbg_trace(tp, th, TCP_CC_ECN_RCVD);
 				}
 			}
@@ -5549,7 +5668,28 @@ dodata:
 		}
 		thflags &= ~TH_FIN;
 	}
-
+	/*
+	 * We increment t_unacksegs_ce for both data segments and pure ACKs
+	 * No need to increment if a FIN has already been received.
+	 */
+	if (TCP_ACC_ECN_ON(tp) && TCPS_HAVEESTABLISHED(tp->t_state) &&
+	    TCPS_HAVERCVDFIN(tp->t_state) == 0) {
+		if (ip_ecn == IPTOS_ECN_CE) {
+			TCP_INC_VAR(tp->t_unacksegs_ce, segment_count);
+		}
+		/*
+		 * Send an ACK immediately if there is a change in IP ECN
+		 * from non-CE to CE.
+		 * If new data is delivered, then ACK for every 2 CE marks,
+		 * otherwise ACK for every 3 CE marks
+		 */
+		if ((ip_ecn == IPTOS_ECN_CE && ip_ecn != tp->t_prev_ip_ecn) ||
+		    (tp->t_unacksegs_ce >= 2 && tp->last_ack_sent != tp->rcv_nxt) ||
+		    tp->t_unacksegs_ce >= 3) {
+			tp->t_flags |= TF_ACKNOW;
+		}
+		tp->t_prev_ip_ecn = ip_ecn;
+	}
 	/*
 	 * If FIN is received ACK the FIN and let the user know
 	 * that the connection is closing.
@@ -5723,6 +5863,7 @@ dropwithreset:
 	tra.ifscope = ifscope;
 	tra.awdl_unrestricted = 1;
 	tra.intcoproc_allowed = 1;
+	tra.management_allowed = 1;
 	if (thflags & TH_ACK) {
 		/* mtod() below is safe as long as hdr dropping is delayed */
 		tcp_respond(tp, mtod(m, void *), th, m, (tcp_seq)0, th->th_ack,
@@ -5839,7 +5980,7 @@ tcp_dooptions(struct tcpcb *tp, u_char *cp, int cnt, struct tcphdr *th,
 			NTOHL(to->to_tsecr);
 			to->to_tsecr -= tp->t_ts_offset;
 			/* Re-enable sending Timestamps if we received them */
-			if (!(tp->t_flags & TF_REQ_TSTMP)) {
+			if (!(tp->t_flags & TF_REQ_TSTMP) && tcp_do_timestamps) {
 				tp->t_flags |= TF_REQ_TSTMP;
 			}
 			break;
@@ -6476,7 +6617,6 @@ tcp_mss(struct tcpcb *tp, int offer, unsigned int input_ifscope)
 	struct inpcb *inp;
 	struct socket *so;
 	int origoffer = offer;
-	uint32_t sb_max_corrected;
 	int isnetlocal = 0;
 	int isipv6;
 	int min_protoh;
@@ -6603,12 +6743,6 @@ tcp_mss(struct tcpcb *tp, int offer, unsigned int input_ifscope)
 	tp->t_maxseg = mss;
 
 	/*
-	 * Calculate corrected value for sb_max; ensure to upgrade the
-	 * numerator for large sb_max values else it will overflow.
-	 */
-	sb_max_corrected = (sb_max * (u_int64_t)MCLBYTES) / (MSIZE + MCLBYTES);
-
-	/*
 	 * If there's a pipesize (ie loopback), change the socket
 	 * buffer to that size only if it's bigger than the current
 	 * sockbuf size.  Make the socket buffers an integral
@@ -6624,8 +6758,8 @@ tcp_mss(struct tcpcb *tp, int offer, unsigned int input_ifscope)
 		mss = bufsize;
 	} else {
 		bufsize = (((bufsize + mss - 1) / mss) * mss);
-		if (bufsize > sb_max_corrected) {
-			bufsize = sb_max_corrected;
+		if (bufsize > sb_max_adj) {
+			bufsize = (uint32_t)sb_max_adj;
 		}
 		(void)sbreserve(&so->so_snd, bufsize);
 	}
@@ -6646,8 +6780,8 @@ tcp_mss(struct tcpcb *tp, int offer, unsigned int input_ifscope)
 	bufsize = so->so_rcv.sb_hiwat;
 	if (bufsize > mss) {
 		bufsize = (((bufsize + mss - 1) / mss) * mss);
-		if (bufsize > sb_max_corrected) {
-			bufsize = sb_max_corrected;
+		if (bufsize > sb_max_adj) {
+			bufsize = (uint32_t)sb_max_adj;
 		}
 		(void)sbreserve(&so->so_rcv, bufsize);
 	}

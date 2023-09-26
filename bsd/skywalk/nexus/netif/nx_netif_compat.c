@@ -150,7 +150,6 @@ struct nexus_ifnet_ops na_netif_compat_ops = {
 	.ni_reap = nx_netif_reap,
 	.ni_dequeue = nx_netif_compat_tx_dequeue,
 	.ni_get_len = nx_netif_compat_tx_get_len,
-	.ni_detach_notify = NULL
 };
 
 #define SKMEM_TAG_NETIF_COMPAT_MIT      "com.apple.skywalk.netif.compat.mit"
@@ -561,7 +560,7 @@ nx_netif_compat_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		}
 		nx_netif_filter_enable(nifna->nifna_netif);
 		nx_netif_flow_enable(nifna->nifna_netif);
-		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_or(&na->na_flags, NAF_ACTIVE, relaxed);
 		break;
 
 	case NA_ACTIVATE_MODE_DEFUNCT:
@@ -573,7 +572,7 @@ nx_netif_compat_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		 * Note that here we cannot assert SKYWALK_CAPABLE()
 		 * as we're called in the destructor path.
 		 */
-		atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_andnot(&na->na_flags, NAF_ACTIVE, relaxed);
 		nx_netif_flow_disable(nifna->nifna_netif);
 		nx_netif_filter_disable(nifna->nifna_netif);
 
@@ -1301,7 +1300,7 @@ nx_netif_compat_na_rxsync(struct __kern_channel_ring *kring, struct proc *p,
 	if (kring->ckr_khead != head) {
 		kring->ckr_khead = head;
 		/* ensure global visibility */
-		membar_sync();
+		os_atomic_thread_fence(seq_cst);
 	}
 
 	STATS_INC(nifs, NETIF_STATS_RX_SYNC);
@@ -1704,7 +1703,7 @@ nx_netif_compat_attach(struct kern_nexus *nx, struct ifnet *ifp)
 	hostna->na_krings_delete = nx_netif_host_krings_delete;
 	hostna->na_special = nx_netif_host_na_special;
 
-	atomic_bitset_32(&hostna->na_flags, NAF_HOST_ONLY);
+	os_atomic_or(&hostna->na_flags, NAF_HOST_ONLY, relaxed);
 	*(nexus_stats_type_t *)(uintptr_t)&hostna->na_stats_type =
 	    NEXUS_STATS_TYPE_INVALID;
 

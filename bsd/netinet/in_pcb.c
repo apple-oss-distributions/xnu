@@ -78,6 +78,7 @@
 #include <sys/proc_uuid_policy.h>
 #include <sys/syslog.h>
 #include <sys/priv.h>
+#include <sys/file_internal.h>
 #include <net/dlil.h>
 
 #include <libkern/OSAtomic.h>
@@ -94,10 +95,12 @@
 #include <net/flowadv.h>
 #include <net/nat464_utils.h>
 #include <net/ntstat.h>
+#include <net/nwk_wq.h>
 #include <net/restricted_in_port.h>
 
 #include <netinet/in.h>
 #include <netinet/in_pcb.h>
+#include <netinet/inp_log.h>
 #include <netinet/in_var.h>
 #include <netinet/ip_var.h>
 
@@ -110,6 +113,7 @@
 #include <dev/random/randomdev.h>
 #include <mach/boolean.h>
 
+#include <atm/atm_internal.h>
 #include <pexpert/pexpert.h>
 
 #if NECP
@@ -125,6 +129,8 @@
 #if SKYWALK
 #include <skywalk/namespace/flowidns.h>
 #endif /* SKYWALK */
+
+#include <IOKit/IOBSD.h>
 
 extern const char *proc_name_address(struct proc *);
 
@@ -325,9 +331,15 @@ void
 in_pcbinit(void)
 {
 	static int inpcb_initialized = 0;
+	uint32_t logging_config;
 
 	VERIFY(!inpcb_initialized);
 	inpcb_initialized = 1;
+
+	logging_config = atm_get_diagnostic_config();
+	if (logging_config & 0x80000000) {
+		inp_log_privacy = 1;
+	}
 
 	inpcb_thread_call = thread_call_allocate_with_priority(inpcb_timeout,
 	    NULL, THREAD_CALL_PRIORITY_KERNEL);
@@ -504,15 +516,15 @@ inpcb_gc_sched(struct inpcbinfo *ipi, u_int32_t type)
 
 	switch (type) {
 	case INPCB_TIMER_NODELAY:
-		atomic_add_32(&ipi->ipi_gc_req.intimer_nodelay, 1);
+		os_atomic_inc(&ipi->ipi_gc_req.intimer_nodelay, relaxed);
 		inpcb_sched_timeout();
 		break;
 	case INPCB_TIMER_FAST:
-		atomic_add_32(&ipi->ipi_gc_req.intimer_fast, 1);
+		os_atomic_inc(&ipi->ipi_gc_req.intimer_fast, relaxed);
 		inpcb_sched_timeout();
 		break;
 	default:
-		atomic_add_32(&ipi->ipi_gc_req.intimer_lazy, 1);
+		os_atomic_inc(&ipi->ipi_gc_req.intimer_lazy, relaxed);
 		inpcb_sched_lazy_timeout();
 		break;
 	}
@@ -526,15 +538,15 @@ inpcb_timer_sched(struct inpcbinfo *ipi, u_int32_t type)
 	inpcb_ticking = TRUE;
 	switch (type) {
 	case INPCB_TIMER_NODELAY:
-		atomic_add_32(&ipi->ipi_timer_req.intimer_nodelay, 1);
+		os_atomic_inc(&ipi->ipi_timer_req.intimer_nodelay, relaxed);
 		inpcb_sched_timeout();
 		break;
 	case INPCB_TIMER_FAST:
-		atomic_add_32(&ipi->ipi_timer_req.intimer_fast, 1);
+		os_atomic_inc(&ipi->ipi_timer_req.intimer_fast, relaxed);
 		inpcb_sched_timeout();
 		break;
 	default:
-		atomic_add_32(&ipi->ipi_timer_req.intimer_lazy, 1);
+		os_atomic_inc(&ipi->ipi_timer_req.intimer_lazy, relaxed);
 		inpcb_sched_lazy_timeout();
 		break;
 	}
@@ -578,6 +590,74 @@ in_pcbinfo_detach(struct inpcbinfo *ipi)
 	lck_mtx_unlock(&inpcb_lock);
 
 	return error;
+}
+
+__attribute__((noinline))
+char *
+inp_snprintf_tuple(struct inpcb *inp, char *buf, size_t buflen)
+{
+	char laddrstr[MAX_IPv6_STR_LEN];
+	char faddrstr[MAX_IPv6_STR_LEN];
+	uint16_t lport = 0;
+	uint16_t fport = 0;
+	uint16_t proto = IPPROTO_IP;
+
+	if (inp->inp_socket != NULL && inp->inp_socket->so_proto != NULL) {
+		proto = inp->inp_socket->so_proto->pr_protocol;
+
+		if (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
+			lport  = inp->inp_lport;
+			fport = inp->inp_fport;
+		}
+	}
+	if (inp->inp_vflag & INP_IPV4) {
+		inet_ntop(AF_INET, (void *)&inp->inp_laddr.s_addr, laddrstr, sizeof(laddrstr));
+		inet_ntop(AF_INET, (void *)&inp->inp_faddr.s_addr, faddrstr, sizeof(faddrstr));
+	} else if (inp->inp_vflag & INP_IPV6) {
+		inet_ntop(AF_INET6, (void *)&inp->in6p_faddr, laddrstr, sizeof(laddrstr));
+		inet_ntop(AF_INET6, (void *)&inp->in6p_faddr, faddrstr, sizeof(faddrstr));
+	}
+	snprintf(buf, buflen, "[%u %s:%u %s:%u]",
+	    proto, laddrstr, ntohs(lport), faddrstr, ntohs(fport));
+
+	return buf;
+}
+
+__attribute__((noinline))
+void
+in_pcb_check_management_entitled(struct inpcb *inp)
+{
+	if (inp->inp_flags2 & INP2_MANAGEMENT_CHECKED) {
+		return;
+	}
+
+	if (management_data_unrestricted) {
+		inp->inp_flags2 |= INP2_MANAGEMENT_ALLOWED;
+		inp->inp_flags2 |= INP2_MANAGEMENT_CHECKED;
+	} else if (if_management_interface_check_needed == true) {
+		inp->inp_flags2 |= INP2_MANAGEMENT_CHECKED;
+		/*
+		 * Note that soopt_cred_check check both intcoproc entitlements
+		 * We check MANAGEMENT_DATA_ENTITLEMENT as there is no corresponding PRIV value
+		 */
+		if (soopt_cred_check(inp->inp_socket, PRIV_NET_RESTRICTED_INTCOPROC, false, false) == 0
+		    || IOCurrentTaskHasEntitlement(MANAGEMENT_DATA_ENTITLEMENT) == true
+#if DEBUG || DEVELOPMENT
+		    || IOCurrentTaskHasEntitlement(MANAGEMENT_DATA_ENTITLEMENT_DEVELOPMENT) == true
+#endif /* DEBUG || DEVELOPMENT */
+		    ) {
+			inp->inp_flags2 |= INP2_MANAGEMENT_ALLOWED;
+		} else {
+			if (__improbable(if_management_verbose > 1)) {
+				char buf[128];
+
+				os_log(OS_LOG_DEFAULT, "in_pcb_check_management_entitled %s:%d not management entitled %s",
+				    proc_best_name(current_proc()),
+				    proc_selfpid(),
+				    inp_snprintf_tuple(inp, buf, sizeof(buf)));
+			}
+		}
+	}
 }
 
 /*
@@ -754,15 +834,24 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	unsigned short *lastport;
 	struct inpcbinfo *pcbinfo = inp->inp_pcbinfo;
 	u_short lport = 0, rand_port = 0;
-	int wild = 0, reuseport = (so->so_options & SO_REUSEPORT);
-	int error, randomport, conflict = 0;
+	int wild = 0;
+	int reuseport = (so->so_options & SO_REUSEPORT);
+	int error = 0;
+	int randomport;
+	int conflict = 0;
 	boolean_t anonport = FALSE;
 	kauth_cred_t cred;
 	struct in_addr laddr;
 	struct ifnet *outif = NULL;
 
+	if (inp->inp_flags2 & INP2_BIND_IN_PROGRESS) {
+		return EINVAL;
+	}
+	inp->inp_flags2 |= INP2_BIND_IN_PROGRESS;
+
 	if (TAILQ_EMPTY(&in_ifaddrhead)) { /* XXX broken! */
-		return EADDRNOTAVAIL;
+		error = EADDRNOTAVAIL;
+		goto done;
 	}
 	if (!(so->so_options & (SO_REUSEADDR | SO_REUSEPORT))) {
 		wild = 1;
@@ -776,14 +865,16 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		/* another thread completed the bind */
 		lck_rw_done(&pcbinfo->ipi_lock);
 		socket_lock(so, 0);
-		return EINVAL;
+		error = EINVAL;
+		goto done;
 	}
 
 	if (nam != NULL) {
 		if (nam->sa_len != sizeof(struct sockaddr_in)) {
 			lck_rw_done(&pcbinfo->ipi_lock);
 			socket_lock(so, 0);
-			return EINVAL;
+			error = EINVAL;
+			goto done;
 		}
 #if 0
 		/*
@@ -793,7 +884,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		if (nam->sa_family != AF_INET) {
 			lck_rw_done(&pcbinfo->ipi_lock);
 			socket_lock(so, 0);
-			return EAFNOSUPPORT;
+			error = EAFNOSUPPORT;
+			goto done;
 		}
 #endif /* 0 */
 		lport = SIN(nam)->sin_port;
@@ -823,7 +915,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			if (ifa == NULL) {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return EADDRNOTAVAIL;
+				error = EADDRNOTAVAIL;
+				goto done;
 			} else {
 				/*
 				 * Opportunistically determine the outbound
@@ -849,7 +942,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			if (error != 0) {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return error;
+				goto done;
 			}
 
 			// Extract the reserved port
@@ -861,7 +954,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			} else {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return EINVAL;
+				error = EINVAL;
+				goto done;
 			}
 
 			// Validate or use the reserved port
@@ -870,7 +964,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			} else if (lport != reserved_lport) {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return EINVAL;
+				error = EINVAL;
+				goto done;
 			}
 		}
 
@@ -886,7 +981,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				log(LOG_ERR, "UDP port not available, less than 4096 UDP ports left");
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return EADDRNOTAVAIL;
+				error = EADDRNOTAVAIL;
+				goto done;
 			}
 		}
 
@@ -907,7 +1003,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				if (error != 0) {
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
-					return EACCES;
+					error = EACCES;
+					goto done;
 				}
 			}
 #endif /* XNU_TARGET_OS_OSX */
@@ -918,7 +1015,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			    (uint8_t)so->so_proto->pr_protocol, PORT_FLAGS_BSD)) {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return EADDRINUSE;
+				error = EADDRINUSE;
+				goto done;
 			}
 
 			if (!IN_MULTICAST(ntohl(SIN(nam)->sin_addr.s_addr)) &&
@@ -949,7 +1047,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				}
 
 				socket_lock(so, 0);
-				return EADDRINUSE;
+				error = EADDRINUSE;
+				goto done;
 			}
 			t = in_pcblookup_local_and_cleanup(pcbinfo,
 			    SIN(nam)->sin_addr, lport, wild);
@@ -974,7 +1073,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 						in_pcb_conflict_post_msg(lport);
 					}
 					socket_lock(so, 0);
-					return EADDRINUSE;
+					error = EADDRINUSE;
+					goto done;
 				}
 			}
 #if SKYWALK
@@ -997,7 +1097,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				if (res_err != 0) {
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
-					return EADDRINUSE;
+					error = EADDRINUSE;
+					goto done;
 				}
 			}
 #endif /* SKYWALK */
@@ -1037,7 +1138,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			if (error != 0) {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
-				return error;
+				goto done;
 			}
 			first = (u_short)ipport_lowfirstauto;    /* 1023 */
 			last  = (u_short)ipport_lowlastauto;     /* 600 */
@@ -1080,7 +1181,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				if (count-- < 0) {      /* completely used? */
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
-					return EADDRNOTAVAIL;
+					error = EADDRNOTAVAIL;
+					goto done;
 				}
 				--*lastport;
 				if (*lastport > first || *lastport < last) {
@@ -1141,7 +1243,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				if (count-- < 0) {      /* completely used? */
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
-					return EADDRNOTAVAIL;
+					error = EADDRNOTAVAIL;
+					goto done;
 				}
 				++*lastport;
 				if (*lastport < first || *lastport > last) {
@@ -1195,7 +1298,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		netns_release(&inp->inp_netns_token);
 #endif /* SKYWALK */
 		lck_rw_done(&pcbinfo->ipi_lock);
-		return ECONNABORTED;
+		error = ECONNABORTED;
+		goto done;
 	}
 
 	if (inp->inp_lport != 0 || inp->inp_laddr.s_addr != INADDR_ANY) {
@@ -1203,7 +1307,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		netns_release(&inp->inp_netns_token);
 #endif /* SKYWALK */
 		lck_rw_done(&pcbinfo->ipi_lock);
-		return EINVAL;
+		error = EINVAL;
+		goto done;
 	}
 
 	if (laddr.s_addr != INADDR_ANY) {
@@ -1232,11 +1337,16 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			inp->inp_flags &= ~INP_ANONPORT;
 		}
 		lck_rw_done(&pcbinfo->ipi_lock);
-		return EAGAIN;
+		error = EAGAIN;
+		goto done;
 	}
 	lck_rw_done(&pcbinfo->ipi_lock);
 	sflt_notify(so, sock_evt_bound, NULL);
-	return 0;
+
+	in_pcb_check_management_entitled(inp);
+done:
+	inp->inp_flags2 &= ~INP2_BIND_IN_PROGRESS;
+	return error;
 }
 
 #define APN_FALLBACK_IP_FILTER(a)       \
@@ -1446,6 +1556,8 @@ in_pcbladdr(struct inpcb *inp, struct sockaddr *nam, struct in_addr *laddr,
 	if (raw == 0 && SIN(nam)->sin_port == 0) {
 		return EADDRNOTAVAIL;
 	}
+
+	in_pcb_check_management_entitled(inp);
 
 	/*
 	 * If the destination address is INADDR_ANY,
@@ -1898,6 +2010,14 @@ in_pcbdetach(struct inpcb *inp)
 		    __func__, so, SOCK_PROTO(so));
 		/* NOTREACHED */
 	}
+
+#if SKYWALK
+	/* Free up the port in the namespace registrar if not in TIME_WAIT */
+	if (!(inp->inp_flags2 & INP2_TIMEWAIT)) {
+		netns_release(&inp->inp_netns_token);
+		netns_release(&inp->inp_wildcard_netns_token);
+	}
+#endif /* SKYWALK */
 
 	if (!(so->so_flags & SOF_PCBCLEARING)) {
 		struct ip_moptions *imo;
@@ -3195,6 +3315,31 @@ inp_clear_intcoproc_allowed(struct inpcb *inp)
 	ROUTE_RELEASE(&inp->inp_route);
 }
 
+void
+inp_set_management_allowed(struct inpcb *inp)
+{
+	inp->inp_flags2 |= INP2_MANAGEMENT_ALLOWED;
+	inp->inp_flags2 |= INP2_MANAGEMENT_CHECKED;
+
+	/* Blow away any cached route in the PCB */
+	ROUTE_RELEASE(&inp->inp_route);
+}
+
+boolean_t
+inp_get_management_allowed(struct inpcb *inp)
+{
+	return (inp->inp_flags2 & INP2_MANAGEMENT_ALLOWED) ? TRUE : FALSE;
+}
+
+void
+inp_clear_management_allowed(struct inpcb *inp)
+{
+	inp->inp_flags2 &= ~INP2_MANAGEMENT_ALLOWED;
+
+	/* Blow away any cached route in the PCB */
+	ROUTE_RELEASE(&inp->inp_route);
+}
+
 #if NECP
 /*
  * Called when PROC_UUID_NECP_APP_POLICY is set.
@@ -3767,11 +3912,13 @@ inp_update_policy(struct inpcb *inp)
 #endif /* !CONFIG_PROC_UUID_POLICY */
 }
 
-static unsigned int log_restricted;
+unsigned int log_restricted;
 SYSCTL_DECL(_net_inet);
 SYSCTL_INT(_net_inet, OID_AUTO, log_restricted,
     CTLFLAG_RW | CTLFLAG_LOCKED, &log_restricted, 0,
     "Log network restrictions");
+
+
 /*
  * Called when we need to enforce policy restrictions in the input path.
  *
@@ -3817,6 +3964,22 @@ _inp_restricted_recv(struct inpcb *inp, struct ifnet *ifp)
 		return FALSE;
 	}
 
+	/*
+	 * An entitled process can use the management interface without being bound
+	 * to the interface
+	 */
+	if (IFNET_IS_MANAGEMENT(ifp)) {
+		if (INP_MANAGEMENT_ALLOWED(inp)) {
+			return FALSE;
+		}
+		if (if_management_verbose > 1) {
+			os_log(OS_LOG_DEFAULT, "_inp_restricted_recv %s:%d not allowed on management interface %s",
+			    proc_best_name(current_proc()), proc_getpid(current_proc()),
+			    ifp->if_xname);
+		}
+		return TRUE;
+	}
+
 	if ((inp->inp_flags & INP_BOUND_IF) && inp->inp_boundifp == ifp) {
 		return FALSE;
 	}
@@ -3824,6 +3987,7 @@ _inp_restricted_recv(struct inpcb *inp, struct ifnet *ifp)
 	if (IFNET_IS_INTCOPROC(ifp) && !INP_INTCOPROC_ALLOWED(inp)) {
 		return TRUE;
 	}
+
 
 	return TRUE;
 }
@@ -3877,6 +4041,17 @@ _inp_restricted_send(struct inpcb *inp, struct ifnet *ifp)
 
 	if (IFNET_IS_AWDL_RESTRICTED(ifp) && !INP_AWDL_UNRESTRICTED(inp)) {
 		return TRUE;
+	}
+
+	if (IFNET_IS_MANAGEMENT(ifp)) {
+		if (!INP_MANAGEMENT_ALLOWED(inp)) {
+			if (if_management_verbose > 1) {
+				os_log(OS_LOG_DEFAULT, "_inp_restricted_send %s:%d not allowed on management interface %s",
+				    proc_best_name(current_proc()), proc_getpid(current_proc()),
+				    ifp->if_xname);
+			}
+			return TRUE;
+		}
 	}
 
 	if (IFNET_IS_INTCOPROC(ifp) && !INP_INTCOPROC_ALLOWED(inp)) {
@@ -4088,4 +4263,96 @@ inp_copy_last_owner(struct socket *so, struct socket *head)
 
 	strlcpy(&inp->inp_last_proc_name[0], &head_inp->inp_last_proc_name[0], sizeof(inp->inp_last_proc_name));
 	strlcpy(&inp->inp_e_proc_name[0], &head_inp->inp_e_proc_name[0], sizeof(inp->inp_e_proc_name));
+}
+
+static int
+in_check_management_interface_proc_callout(proc_t proc, void *arg __unused)
+{
+	struct fileproc *fp = NULL;
+	task_t task = proc_task(proc);
+	bool allowed = false;
+
+	if (IOTaskHasEntitlement(task, INTCOPROC_RESTRICTED_ENTITLEMENT) == true
+	    || IOTaskHasEntitlement(task, MANAGEMENT_DATA_ENTITLEMENT) == true
+#if DEBUG || DEVELOPMENT
+	    || IOTaskHasEntitlement(task, INTCOPROC_RESTRICTED_ENTITLEMENT_DEVELOPMENT) == true
+	    || IOTaskHasEntitlement(task, MANAGEMENT_DATA_ENTITLEMENT_DEVELOPMENT) == true
+#endif /* DEBUG || DEVELOPMENT */
+	    ) {
+		allowed = true;
+	}
+	if (allowed == false && management_data_unrestricted == false) {
+		return PROC_RETURNED;
+	}
+
+	proc_fdlock(proc);
+	fdt_foreach(fp, proc) {
+		struct fileglob *fg = fp->fp_glob;
+		struct socket *so;
+		struct inpcb *inp;
+
+		if (FILEGLOB_DTYPE(fg) != DTYPE_SOCKET) {
+			continue;
+		}
+
+		so = (struct socket *)fp_get_data(fp);
+		if (SOCK_DOM(so) != PF_INET && SOCK_DOM(so) != PF_INET6) {
+			continue;
+		}
+
+		inp = (struct inpcb *)so->so_pcb;
+
+		if (in_pcb_checkstate(inp, WNT_ACQUIRE, 0) == WNT_STOPUSING) {
+			continue;
+		}
+
+		socket_lock(so, 1);
+
+		if (in_pcb_checkstate(inp, WNT_RELEASE, 1) == WNT_STOPUSING) {
+			socket_unlock(so, 1);
+			continue;
+		}
+		inp->inp_flags2 |= INP2_MANAGEMENT_ALLOWED;
+		inp->inp_flags2 |= INP2_MANAGEMENT_CHECKED;
+
+		socket_unlock(so, 1);
+	}
+	proc_fdunlock(proc);
+
+	return PROC_RETURNED;
+}
+
+static bool in_management_interface_checked = false;
+
+static void
+in_management_interface_event_callback(struct nwk_wq_entry *nwk_item)
+{
+	kfree_type(struct nwk_wq_entry, nwk_item);
+
+	if (in_management_interface_checked == true) {
+		return;
+	}
+	in_management_interface_checked = true;
+
+	proc_iterate(PROC_ALLPROCLIST,
+	    in_check_management_interface_proc_callout,
+	    NULL, NULL, NULL);
+}
+
+void
+in_management_interface_check(void)
+{
+	struct nwk_wq_entry *nwk_item;
+
+	if (if_management_interface_check_needed == false ||
+	    in_management_interface_checked == true) {
+		return;
+	}
+
+	nwk_item  = kalloc_type(struct nwk_wq_entry,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+
+	nwk_item->func = in_management_interface_event_callback;
+
+	nwk_wq_enqueue(nwk_item);
 }

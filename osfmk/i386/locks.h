@@ -33,16 +33,6 @@
 #include <kern/lock_types.h>
 #include <kern/assert.h>
 
-#ifdef  MACH_KERNEL_PRIVATE
-
-#define enaLkDeb                0x00000001      /* Request debug in default attribute */
-#define enaLkStat               0x00000002      /* Request statistic in default attribute */
-#define disLkRWPrio             0x00000004      /* Disable RW lock priority promotion */
-#define enaLkTimeStat           0x00000008      /* Request time statistics in default attribute */
-#define disLkRWDebug            0x00000010      /* Disable RW lock best-effort debugging */
-
-#endif /* MACH_KERNEL_PRIVATE */
-
 #ifdef MACH_KERNEL_PRIVATE
 typedef struct {
 	volatile uintptr_t      interlock __kernel_data_semantics;

@@ -384,6 +384,11 @@ exception_deliver(
 		c_thr_exc_raise_identity_token++;
 
 		kr = task_create_identity_token(task, &task_token);
+		if (!task->active && kr == KERN_INVALID_ARGUMENT) {
+			/* The task is terminating, don't need to send more exceptions */
+			kr = KERN_SUCCESS;
+			goto out_release_right;
+		}
 		/* task_token now represents a task, or corpse */
 		assert(kr == KERN_SUCCESS);
 		task_token_port = convert_task_id_token_to_port(task_token);

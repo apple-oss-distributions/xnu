@@ -225,10 +225,10 @@ pmap_assert_locked(__unused pmap_t pmap, __unused pmap_lock_mode_t mode)
 #if MACH_ASSERT
 	switch (mode) {
 	case PMAP_LOCK_SHARED:
-		lck_rw_assert(&pmap->rwlock, LCK_RW_ASSERT_SHARED);
+		LCK_RW_ASSERT(&pmap->rwlock, LCK_RW_ASSERT_SHARED);
 		break;
 	case PMAP_LOCK_EXCLUSIVE:
-		lck_rw_assert(&pmap->rwlock, LCK_RW_ASSERT_EXCLUSIVE);
+		LCK_RW_ASSERT(&pmap->rwlock, LCK_RW_ASSERT_EXCLUSIVE);
 		break;
 	default:
 		panic("%s: Unknown pmap_lock_mode. pmap=%p, mode=%d", __FUNCTION__, pmap, mode);
@@ -244,9 +244,7 @@ pmap_assert_locked(__unused pmap_t pmap, __unused pmap_lock_mode_t mode)
 __unused static inline void
 pmap_assert_locked_any(__unused pmap_t pmap)
 {
-#if MACH_ASSERT
-	lck_rw_assert(&pmap->rwlock, LCK_RW_ASSERT_HELD);
-#endif
+	LCK_RW_ASSERT(&pmap->rwlock, LCK_RW_ASSERT_HELD);
 }
 
 /**
@@ -435,8 +433,11 @@ pmap_interrupts_disable(void)
 {
 	uint64_t state = __builtin_arm_rsr64("DAIF");
 
-	if ((state & DAIF_STANDARD_DISABLE) != DAIF_STANDARD_DISABLE) {
-		__builtin_arm_wsr64("DAIFSet", DAIFSC_STANDARD_DISABLE);
+	/* Ensure that debug exceptions are masked. */
+	assert((state & DAIF_DEBUGF) == DAIF_DEBUGF);
+
+	if ((state & DAIF_ALL) != DAIF_ALL) {
+		__builtin_arm_wsr64("DAIFSet", DAIFSC_ALL);
 	}
 
 	return state;
@@ -453,7 +454,10 @@ pmap_interrupts_restore(uint64_t state)
 	// no unknown bits?
 	assert((state & ~DAIF_ALL) == 0);
 
-	if (state != DAIF_STANDARD_DISABLE) {
+	/* Assert that previous state had debug exceptions masked. */
+	assert((state & DAIF_DEBUGF) == DAIF_DEBUGF);
+
+	if (state != DAIF_ALL) {
 		__builtin_arm_wsr64("DAIF", state);
 	}
 }
@@ -472,7 +476,7 @@ pmap_interrupts_restore(uint64_t state)
 static inline bool __attribute__((warn_unused_result)) __used
 pmap_interrupts_enabled(void)
 {
-	return (__builtin_arm_rsr64("DAIF") & DAIF_STANDARD_DISABLE) != DAIF_STANDARD_DISABLE;
+	return (__builtin_arm_rsr64("DAIF") & DAIF_ALL) != DAIF_ALL;
 }
 #endif /* __arm64__ */
 

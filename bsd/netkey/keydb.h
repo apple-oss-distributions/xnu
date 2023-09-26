@@ -74,6 +74,8 @@ struct secashead {
 };
 
 #define MAX_REPLAY_WINDOWS 4
+#define PER_TC_REPLAY_WINDOW_RANGE ((1ULL << 32) / MAX_REPLAY_WINDOWS)
+#define PER_TC_REPLAY_WINDOW_SN_SHIFT 30
 
 /* Security Association */
 struct secasvar {
@@ -129,7 +131,7 @@ struct secasvar {
 struct secreplay {
 	u_int8_t wsize;         /* window size */
 	u_int32_t count;        /* used by sender/receiver */
-	u_int32_t seq;          /* used by sender */
+	u_int32_t seq;          /* used by sender/receiver */
 	u_int32_t lastseq;      /* used by sender/receiver */
 	caddr_t bitmap;         /* used by receiver */
 	int overflow;           /* overflow flag */

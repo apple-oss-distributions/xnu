@@ -59,6 +59,10 @@
 #ifndef _NET_IF_VLAN_VAR_H_
 #define _NET_IF_VLAN_VAR_H_     1
 
+#include <net/ethernet.h>
+#include <net/if_var.h>
+#include <sys/types.h>
+
 #define ETHER_VLAN_ENCAP_LEN    4       /* len of 802.1Q VLAN encapsulation */
 struct  ether_vlan_header {
 	u_char  evl_dhost[ETHER_ADDR_LEN];

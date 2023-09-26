@@ -116,7 +116,7 @@ EXPORT_MI_GEN_LIST = version.h
 
 EXPORT_MI_DIR = libkern
 
-version.h: version.h.template $(SRCROOT)/config/MasterVersion
+version.h: version.h.template $(NEWVERS) $(XNU_VERSION)
 	@$(LOG_GENERATE) "libkern/$@$(Color0) from $(ColorF)$<"
 	$(_v)install $(DATA_INSTALL_FLAGS) $< $@
 	$(_v)$(NEWVERS) $@ > /dev/null

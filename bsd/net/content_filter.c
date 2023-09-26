@@ -357,6 +357,7 @@
 
 #define MAX_CONTENT_FILTER 8
 
+extern int tcp_msl;
 extern struct inpcbinfo ripcbinfo;
 struct cfil_entry;
 
@@ -524,16 +525,18 @@ struct cfil_info {
 	os_refcnt_t             cfi_ref_count;
 } __attribute__((aligned(8)));
 
-#define CFIF_DROP               0x0001  /* drop action applied */
-#define CFIF_CLOSE_WAIT         0x0002  /* waiting for filter to close */
-#define CFIF_SOCK_CLOSED        0x0004  /* socket is closed */
-#define CFIF_RETRY_INJECT_IN    0x0010  /* inject in failed */
-#define CFIF_RETRY_INJECT_OUT   0x0020  /* inject out failed */
-#define CFIF_SHUT_WR            0x0040  /* shutdown write */
-#define CFIF_SHUT_RD            0x0080  /* shutdown read */
-#define CFIF_SOCKET_CONNECTED   0x0100  /* socket is connected */
-#define CFIF_INITIAL_VERDICT    0x0200  /* received initial verdict */
-#define CFIF_NO_CLOSE_WAIT      0x0400  /* do not wait to close */
+#define CFIF_DROP                       0x0001  /* drop action applied */
+#define CFIF_CLOSE_WAIT                 0x0002  /* waiting for filter to close */
+#define CFIF_SOCK_CLOSED                0x0004  /* socket is closed */
+#define CFIF_RETRY_INJECT_IN            0x0010  /* inject in failed */
+#define CFIF_RETRY_INJECT_OUT           0x0020  /* inject out failed */
+#define CFIF_SHUT_WR                    0x0040  /* shutdown write */
+#define CFIF_SHUT_RD                    0x0080  /* shutdown read */
+#define CFIF_SOCKET_CONNECTED           0x0100  /* socket is connected */
+#define CFIF_INITIAL_VERDICT            0x0200  /* received initial verdict */
+#define CFIF_NO_CLOSE_WAIT              0x0400  /* do not wait to close */
+#define CFIF_SO_DELAYED_DEAD            0x0800  /* Delayed socket DEAD marking */
+#define CFIF_SO_DELAYED_TCP_TIME_WAIT   0x1000  /* Delayed TCP FIN TIME WAIT */
 
 #define CFI_MASK_GENCNT         0xFFFFFFFF00000000      /* upper 32 bits */
 #define CFI_SHIFT_GENCNT        32
@@ -615,6 +618,37 @@ os_refgrp_decl(static, cfil_refgrp, "CFILRefGroup", NULL);
 
 #define DEBUG_FLOW(inp, so, local, remote) \
     ((cfil_log_port && MATCH_PORT(inp, local, remote)) || (cfil_log_pid && MATCH_PID(so)) || (cfil_log_proto && MATCH_PROTO(so)))
+
+#define SO_DELAYED_DEAD_SET(so, set) \
+    if (so->so_cfil) { \
+	if (set) { \
+	    so->so_cfil->cfi_flags |= CFIF_SO_DELAYED_DEAD; \
+	} else { \
+	    so->so_cfil->cfi_flags &= ~CFIF_SO_DELAYED_DEAD; \
+	} \
+    } else if (so->so_flow_db) { \
+	if (set) { \
+	    so->so_flow_db->soflow_db_flags |= SOFLOWF_SO_DELAYED_DEAD; \
+	} else { \
+	    so->so_flow_db->soflow_db_flags &= ~SOFLOWF_SO_DELAYED_DEAD; \
+	} \
+    }
+
+#define SO_DELAYED_DEAD_GET(so) \
+    (so->so_cfil ? (so->so_cfil->cfi_flags & CFIF_SO_DELAYED_DEAD) : \
+	            (so->so_flow_db) ? (so->so_flow_db->soflow_db_flags & SOFLOWF_SO_DELAYED_DEAD) : false)
+
+#define SO_DELAYED_TCP_TIME_WAIT_SET(so, set) \
+    if (so->so_cfil) { \
+    if (set) { \
+       so->so_cfil->cfi_flags |= CFIF_SO_DELAYED_TCP_TIME_WAIT; \
+    } else { \
+       so->so_cfil->cfi_flags &= ~CFIF_SO_DELAYED_TCP_TIME_WAIT; \
+    } \
+    }
+
+#define SO_DELAYED_TCP_TIME_WAIT_GET(so) \
+    (so->so_cfil ? (so->so_cfil->cfi_flags & CFIF_SO_DELAYED_TCP_TIME_WAIT) : false)
 
 /*
  * Periodic Statistics Report:
@@ -949,7 +983,7 @@ cfil_data_length(struct mbuf *m, int *retmbcnt, int *retmbnum)
 	for (m0 = m; m0 != NULL; m0 = m0->m_next) {
 		pktlen += m0->m_len;
 		mbnum++;
-		mbcnt += MSIZE;
+		mbcnt += _MSIZE;
 		if (m0->m_flags & M_EXT) {
 			mbcnt += m0->m_ext.ext_size;
 		}
@@ -1410,7 +1444,7 @@ cfil_ctl_disconnect(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo)
 			entry->cfe_flags |= CFEF_CFIL_DETACHED;
 
 			if (cfil_info->cfi_debug) {
-				cfil_info_log(LOG_INFO, cfil_info, "CFIL: FILTER DISCONNECTED");
+				cfil_info_log(LOG_ERR, cfil_info, "CFIL: FILTER DISCONNECTED");
 			}
 
 			CFIL_LOG(LOG_NOTICE, "so %llx detached %u",
@@ -1806,9 +1840,9 @@ cfil_info_stats_toggle(struct cfil_info *cfil_info, struct cfil_entry *entry, ui
 			cfil_sock_attached_stats_count++;
 
 			if (cfil_info->cfi_debug && cfil_log_stats) {
-				CFIL_LOG(LOG_DEBUG, "CFIL: VERDICT RECEIVED - STATS FLOW INSERTED: <so %llx sockID %llu> stats frequency %d msecs",
+				CFIL_LOG(LOG_ERR, "CFIL: VERDICT RECEIVED - STATS FLOW INSERTED: <so %llx sockID %llu <%llx>> stats frequency %d msecs",
 				    cfil_info->cfi_so ? (uint64_t)VM_KERNEL_ADDRPERM(cfil_info->cfi_so) : 0,
-				    cfil_info->cfi_sock_id,
+				    cfil_info->cfi_sock_id, cfil_info->cfi_sock_id,
 				    entry->cfe_stats_report_frequency);
 			}
 		}
@@ -1842,9 +1876,9 @@ cfil_info_stats_toggle(struct cfil_info *cfil_info, struct cfil_entry *entry, ui
 				cfil_sock_attached_stats_count--;
 				TAILQ_REMOVE(&cfil_sock_head_stats, cfil_info, cfi_link_stats);
 				if (cfil_info->cfi_debug && cfil_log_stats) {
-					CFIL_LOG(LOG_DEBUG, "CFIL: VERDICT RECEIVED - STATS FLOW DELETED: <so %llx sockID %llu> stats frequency reset",
+					CFIL_LOG(LOG_ERR, "CFIL: VERDICT RECEIVED - STATS FLOW DELETED: <so %llx sockID %llu <%llx>> stats frequency reset",
 					    cfil_info->cfi_so ? (uint64_t)VM_KERNEL_ADDRPERM(cfil_info->cfi_so) : 0,
-					    cfil_info->cfi_sock_id);
+					    cfil_info->cfi_sock_id, cfil_info->cfi_sock_id);
 				}
 			}
 		}
@@ -1996,7 +2030,7 @@ cfil_ctl_send(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo, mbuf_t m,
 	}
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_DEBUG, cfil_info, "CFIL: RECEIVED MSG FROM FILTER");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: RECEIVED MSG FROM FILTER");
 	}
 
 	entry = &cfil_info->cfi_entries[kcunit - 1];
@@ -2026,10 +2060,10 @@ cfil_ctl_send(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo, mbuf_t m,
 	case CFM_OP_DATA_UPDATE:
 
 		if (cfil_info->cfi_debug) {
-			cfil_info_log(LOG_DEBUG, cfil_info, "CFIL: RECEIVED CFM_OP_DATA_UPDATE");
-			CFIL_LOG(LOG_DEBUG, "CFIL: VERDICT RECEIVED: <so %llx sockID %llu> <IN peek:%llu pass:%llu, OUT peek:%llu pass:%llu>",
+			cfil_info_log(LOG_ERR, cfil_info, "CFIL: RECEIVED CFM_OP_DATA_UPDATE");
+			CFIL_LOG(LOG_ERR, "CFIL: VERDICT RECEIVED: <so %llx sockID %llu <%llx>> <IN peek:%llu pass:%llu, OUT peek:%llu pass:%llu>",
 			    (uint64_t)VM_KERNEL_ADDRPERM(so),
-			    cfil_info->cfi_sock_id,
+			    cfil_info->cfi_sock_id, cfil_info->cfi_sock_id,
 			    action_msg->cfa_in_peek_offset, action_msg->cfa_in_pass_offset,
 			    action_msg->cfa_out_peek_offset, action_msg->cfa_out_pass_offset);
 		}
@@ -2072,10 +2106,10 @@ cfil_ctl_send(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo, mbuf_t m,
 
 	case CFM_OP_DROP:
 		if (cfil_info->cfi_debug) {
-			cfil_info_log(LOG_DEBUG, cfil_info, "CFIL: RECEIVED CFM_OP_DROP");
-			CFIL_LOG(LOG_DEBUG, "CFIL: VERDICT DROP RECEIVED: <so %llx sockID %llu> <IN peek:%llu pass:%llu, OUT peek:%llu pass:%llu>",
+			cfil_info_log(LOG_ERR, cfil_info, "CFIL: RECEIVED CFM_OP_DROP");
+			CFIL_LOG(LOG_ERR, "CFIL: VERDICT DROP RECEIVED: <so %llx sockID %llu <%llx>> <IN peek:%llu pass:%llu, OUT peek:%llu pass:%llu>",
 			    (uint64_t)VM_KERNEL_ADDRPERM(so),
-			    cfil_info->cfi_sock_id,
+			    cfil_info->cfi_sock_id, cfil_info->cfi_sock_id,
 			    action_msg->cfa_in_peek_offset, action_msg->cfa_in_pass_offset,
 			    action_msg->cfa_out_peek_offset, action_msg->cfa_out_pass_offset);
 		}
@@ -2441,6 +2475,56 @@ done:
 	cfil_rw_unlock_shared(&cfil_lck_rw);
 }
 
+struct cflil_tag_container {
+	struct m_tag    cfil_m_tag;
+	struct cfil_tag cfil_tag;
+};
+
+static struct m_tag *
+m_tag_kalloc_cfil_udp(u_int32_t id, u_int16_t type, uint16_t len, int wait)
+{
+	struct cflil_tag_container *tag_container;
+	struct m_tag *tag = NULL;
+
+	assert3u(id, ==, KERNEL_MODULE_TAG_ID);
+	assert3u(type, ==, KERNEL_TAG_TYPE_CFIL_UDP);
+	assert3u(len, ==, sizeof(struct cfil_tag));
+
+	if (len != sizeof(struct cfil_tag)) {
+		return NULL;
+	}
+
+	tag_container = kalloc_type(struct cflil_tag_container, wait | M_ZERO);
+	if (tag_container != NULL) {
+		tag =  &tag_container->cfil_m_tag;
+
+		assert3p(tag, ==, tag_container);
+
+		M_TAG_INIT(tag, id, type, len, &tag_container->cfil_tag, NULL);
+	}
+
+	return tag;
+}
+
+static void
+m_tag_kfree_cfil_udp(struct m_tag *tag)
+{
+	struct cflil_tag_container *tag_container = (struct cflil_tag_container *)tag;
+
+	kfree_type(struct cflil_tag_container, tag_container);
+}
+
+void
+cfil_register_m_tag(void)
+{
+	errno_t error = 0;
+
+	error = m_register_internal_tag_type(KERNEL_TAG_TYPE_CFIL_UDP, sizeof(struct cfil_tag),
+	    m_tag_kalloc_cfil_udp, m_tag_kfree_cfil_udp);
+
+	assert3u(error, ==, 0);
+}
+
 void
 cfil_init(void)
 {
@@ -2686,7 +2770,7 @@ cfil_info_free(struct cfil_info *cfil_info)
 	cfil_rw_lock_exclusive(&cfil_lck_rw);
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_INFO, cfil_info, "CFIL: FREEING CFIL_INFO");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: FREEING CFIL_INFO");
 	}
 
 	for (kcunit = 1; kcunit <= MAX_CONTENT_FILTER; kcunit++) {
@@ -2793,6 +2877,82 @@ cfil_sock_connected_pending_verdict(struct socket *so)
 	}
 }
 
+/*
+ * Entry point from Flow Divert
+ * The socket is locked.
+ *
+ * Mark socket as DEAD if all CFIL data has been processed by filter(s).
+ * Otherwise, delay the marking until all data has been processed.
+ */
+boolean_t
+cfil_sock_is_dead(struct socket *so)
+{
+	struct inpcb *inp = NULL;
+
+	if (so == NULL) {
+		return false;
+	}
+
+	socket_lock_assert_owned(so);
+
+	if ((so->so_flags & SOF_CONTENT_FILTER) != 0) {
+		int32_t pending_snd = cfil_sock_data_pending(&so->so_snd);
+		int32_t pending_rcv = cfil_sock_data_pending(&so->so_rcv);
+		if (pending_snd || pending_rcv) {
+			SO_DELAYED_DEAD_SET(so, true)
+			return false;
+		}
+	}
+
+	inp = sotoinpcb(so);
+	if (inp != NULL) {
+		inp->inp_state = INPCB_STATE_DEAD;
+		inpcb_gc_sched(inp->inp_pcbinfo, INPCB_TIMER_FAST);
+		SO_DELAYED_DEAD_SET(so, false)
+		return true;
+	}
+	return false;
+}
+
+/*
+ * Entry point from tcp_timer.c
+ * The socket is locked.
+ *
+ * Perform TCP FIN time wait handling if all CFIL data has been processed by filter(s).
+ * Otherwise, delay until all data has been processed.
+ */
+boolean_t
+cfil_sock_tcp_add_time_wait(struct socket *so)
+{
+	struct inpcb *inp = NULL;
+	struct tcpcb *tp = NULL;
+
+	// Only handle TCP sockets
+	if (so == NULL || !IS_TCP(so)) {
+		return false;
+	}
+
+	socket_lock_assert_owned(so);
+
+	if ((so->so_flags & SOF_CONTENT_FILTER) != 0) {
+		int32_t pending_snd = cfil_sock_data_pending(&so->so_snd);
+		int32_t pending_rcv = cfil_sock_data_pending(&so->so_rcv);
+		if (pending_snd || pending_rcv) {
+			SO_DELAYED_TCP_TIME_WAIT_SET(so, true)
+			return false;
+		}
+	}
+
+	inp = sotoinpcb(so);
+	tp = inp ? intotcpcb(inp) : NULL;
+	if (tp != NULL) {
+		add_to_time_wait_now(tp, 2 * tcp_msl);
+		SO_DELAYED_TCP_TIME_WAIT_SET(so, false)
+		return true;
+	}
+	return false;
+}
+
 boolean_t
 cfil_filter_present(void)
 {
@@ -2868,9 +3028,9 @@ cfil_sock_attach(struct socket *so, struct sockaddr *local, struct sockaddr *rem
 		OSIncrementAtomic(&cfil_stats.cfs_sock_attach_failed);
 		goto done;
 	}
-	CFIL_LOG(LOG_INFO, "so %llx filter_control_unit %u sockID %llx",
+	CFIL_LOG(LOG_INFO, "so %llx filter_control_unit %u sockID %llu <%llx>",
 	    (uint64_t)VM_KERNEL_ADDRPERM(so),
-	    filter_control_unit, so->so_cfil->cfi_sock_id);
+	    filter_control_unit, so->so_cfil->cfi_sock_id, so->so_cfil->cfi_sock_id);
 
 	so->so_flags |= SOF_CONTENT_FILTER;
 	OSIncrementAtomic(&cfil_stats.cfs_sock_attached);
@@ -3006,8 +3166,8 @@ cfil_dispatch_attach_event_sign(cfil_crypto_state_t crypto_state,
 	msg->cfs_signature_length = sizeof(cfil_crypto_signature);
 	if (cfil_crypto_sign_data(crypto_state, &data, extra_data, sizeof(extra_data) / sizeof(extra_data[0]), msg->cfs_signature, &msg->cfs_signature_length) != 0) {
 		msg->cfs_signature_length = 0;
-		CFIL_LOG(LOG_ERR, "CFIL: Failed to sign attached msg <sockID %llu>",
-		    msg->cfs_msghdr.cfm_sock_id);
+		CFIL_LOG(LOG_ERR, "CFIL: Failed to sign attached msg <sockID %llu <%llx>>",
+		    msg->cfs_msghdr.cfm_sock_id, msg->cfs_msghdr.cfm_sock_id);
 		return false;
 	}
 
@@ -3093,8 +3253,8 @@ cfil_dispatch_data_event_sign(cfil_crypto_state_t crypto_state,
 	necp_with_inp_domain_name(so, &parameters, cfil_sign_with_domain_name);
 
 	if (msg->cfd_signature_length == 0) {
-		CFIL_LOG(LOG_ERR, "CFIL: Failed to sign data msg <sockID %llu>",
-		    msg->cfd_msghdr.cfm_sock_id);
+		CFIL_LOG(LOG_ERR, "CFIL: Failed to sign data msg <sockID %llu <%llx>>",
+		    msg->cfd_msghdr.cfm_sock_id, msg->cfd_msghdr.cfm_sock_id);
 		return false;
 	}
 
@@ -3162,8 +3322,8 @@ cfil_dispatch_closed_event_sign(cfil_crypto_state_t crypto_state,
 	necp_with_inp_domain_name(so, &parameters, cfil_sign_with_domain_name);
 
 	if (msg->cfc_signature_length == 0) {
-		CFIL_LOG(LOG_ERR, "CFIL: Failed to sign closed msg <sockID %llu>",
-		    msg->cfc_msghdr.cfm_sock_id);
+		CFIL_LOG(LOG_ERR, "CFIL: Failed to sign closed msg <sockID %llu <%llx>>",
+		    msg->cfc_msghdr.cfm_sock_id, msg->cfc_msghdr.cfm_sock_id);
 		return false;
 	}
 
@@ -3307,7 +3467,8 @@ cfil_dispatch_attach_event(struct socket *so, struct cfil_info *cfil_info,
 
 	if (msg_attached->cfs_e_pid != 0) {
 		if (!cfil_copy_audit_token(msg_attached->cfs_e_pid, (audit_token_t *)&msg_attached->cfs_audit_token)) {
-			CFIL_LOG(LOG_ERR, "CFIL: Failed to get effective audit token for <sockID %llu> ", entry->cfe_cfil_info->cfi_sock_id);
+			CFIL_LOG(LOG_ERR, "CFIL: Failed to get effective audit token for <sockID %llu <%llx>> ",
+			    entry->cfe_cfil_info->cfi_sock_id, entry->cfe_cfil_info->cfi_sock_id);
 		}
 	}
 
@@ -3315,14 +3476,15 @@ cfil_dispatch_attach_event(struct socket *so, struct cfil_info *cfil_info,
 		if (msg_attached->cfs_pid == msg_attached->cfs_e_pid) {
 			memcpy(&msg_attached->cfs_real_audit_token, &msg_attached->cfs_audit_token, sizeof(msg_attached->cfs_real_audit_token));
 		} else if (!cfil_copy_audit_token(msg_attached->cfs_pid, (audit_token_t *)&msg_attached->cfs_real_audit_token)) {
-			CFIL_LOG(LOG_ERR, "CFIL: Failed to get real audit token for <sockID %llu> ", entry->cfe_cfil_info->cfi_sock_id);
+			CFIL_LOG(LOG_ERR, "CFIL: Failed to get real audit token for <sockID %llu <%llx>> ",
+			    entry->cfe_cfil_info->cfi_sock_id, entry->cfe_cfil_info->cfi_sock_id);
 		}
 	}
 
 	necp_with_inp_domain_name(so, msg_attached, cfil_populate_attached_msg_domain_name);
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_INFO, cfil_info, "CFIL: SENDING ATTACH UP");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: SENDING ATTACH UP");
 	}
 
 	cfil_dispatch_attach_event_sign(entry->cfe_filter->cf_crypto_state, cfil_info, msg_attached);
@@ -3428,7 +3590,7 @@ cfil_dispatch_disconnect_event(struct socket *so, struct cfil_info *cfil_info, u
 	}
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_INFO, cfil_info, outgoing ?
+		cfil_info_log(LOG_ERR, cfil_info, outgoing ?
 		    "CFIL: OUT - SENDING DISCONNECT UP":
 		    "CFIL: IN - SENDING DISCONNECT UP");
 	}
@@ -3492,6 +3654,7 @@ cfil_dispatch_closed_event(struct socket *so, struct cfil_info *cfil_info, int k
 	struct cfil_msg_sock_closed msg_closed;
 	errno_t error = 0;
 	struct content_filter *cfc;
+	struct inpcb *inp = NULL;
 
 	socket_lock_assert_owned(so);
 
@@ -3538,10 +3701,29 @@ cfil_dispatch_closed_event(struct socket *so, struct cfil_info *cfil_info, int k
 	msg_closed.cfc_byte_inbound_count = cfil_info->cfi_byte_inbound_count;
 	msg_closed.cfc_byte_outbound_count = cfil_info->cfi_byte_outbound_count;
 
+	if (entry->cfe_laddr_sent == false) {
+		/* cache it if necessary */
+		if (cfil_info->cfi_so_attach_laddr.sa.sa_len == 0) {
+			inp = cfil_info->cfi_so ? sotoinpcb(cfil_info->cfi_so) : NULL;
+			if (inp != NULL) {
+				boolean_t outgoing = (cfil_info->cfi_dir == CFS_CONNECTION_DIR_OUT);
+				union sockaddr_in_4_6 *src = outgoing ? &cfil_info->cfi_so_attach_laddr : NULL;
+				union sockaddr_in_4_6 *dst = outgoing ? NULL : &cfil_info->cfi_so_attach_laddr;
+				cfil_fill_event_msg_addresses(cfil_info->cfi_hash_entry, inp,
+				    src, dst, !IS_INP_V6(inp), outgoing);
+			}
+		}
+
+		if (cfil_info->cfi_so_attach_laddr.sa.sa_len != 0) {
+			msg_closed.cfc_laddr.sin6 = cfil_info->cfi_so_attach_laddr.sin6;
+			entry->cfe_laddr_sent = true;
+		}
+	}
+
 	cfil_dispatch_closed_event_sign(entry->cfe_filter->cf_crypto_state, so, cfil_info, &msg_closed);
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_INFO, cfil_info, "CFIL: SENDING CLOSED UP");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: SENDING CLOSED UP");
 	}
 
 	/* for debugging
@@ -3780,7 +3962,7 @@ cfil_dispatch_data_event(struct socket *so, struct cfil_info *cfil_info, uint32_
 	    !IS_INP_V6(inp), outgoing);
 
 	if (cfil_info->cfi_debug && cfil_log_data) {
-		cfil_info_log(LOG_DEBUG, cfil_info, "CFIL: SENDING DATA UP");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: SENDING DATA UP");
 	}
 
 	if (cfil_info->cfi_isSignatureLatest == false) {
@@ -3803,8 +3985,8 @@ cfil_dispatch_data_event(struct socket *so, struct cfil_info *cfil_info, uint32_
 	OSIncrementAtomic(&cfil_stats.cfs_data_event_ok);
 
 	if (cfil_info->cfi_debug && cfil_log_data) {
-		CFIL_LOG(LOG_DEBUG, "CFIL: VERDICT ACTION: so %llx sockID %llu outgoing %d: mbuf %llx copyoffset %u copylen %u (%s)",
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), cfil_info->cfi_sock_id, outgoing, (uint64_t)VM_KERNEL_ADDRPERM(data), copyoffset, copylen,
+		CFIL_LOG(LOG_ERR, "CFIL: VERDICT ACTION: so %llx sockID %llu <%llx> outgoing %d: mbuf %llx copyoffset %u copylen %u (%s)",
+		    (uint64_t)VM_KERNEL_ADDRPERM(so), cfil_info->cfi_sock_id, cfil_info->cfi_sock_id, outgoing, (uint64_t)VM_KERNEL_ADDRPERM(data), copyoffset, copylen,
 		    data_req->cfd_flags & CFD_DATA_FLAG_IP_HEADER ? "IP HDR" : "NO IP HDR");
 	}
 
@@ -3877,7 +4059,7 @@ cfil_data_service_ctl_q(struct socket *so, struct cfil_info *cfil_info, uint32_t
 	}
 
 	if (cfil_info->cfi_debug && cfil_log_data) {
-		CFIL_LOG(LOG_DEBUG, "CFIL: SERVICE CTL-Q: pass_offset %llu peeked %llu peek_offset %llu",
+		CFIL_LOG(LOG_ERR, "CFIL: SERVICE CTL-Q: pass_offset %llu peeked %llu peek_offset %llu",
 		    entrybuf->cfe_pass_offset,
 		    entrybuf->cfe_peeked,
 		    entrybuf->cfe_peek_offset);
@@ -3904,7 +4086,7 @@ cfil_data_service_ctl_q(struct socket *so, struct cfil_info *cfil_info, uint32_t
 		VERIFY(copylen <= datalen);
 
 		if (cfil_info->cfi_debug && cfil_log_data) {
-			CFIL_LOG(LOG_DEBUG,
+			CFIL_LOG(LOG_ERR,
 			    "CFIL: SERVICE CTL-Q PASSING: %llx first %llu peeked %llu pass %llu peek %llu"
 			    "datalen %u copylen %u",
 			    (uint64_t)VM_KERNEL_ADDRPERM(tmp),
@@ -3988,7 +4170,7 @@ cfil_data_service_ctl_q(struct socket *so, struct cfil_info *cfil_info, uint32_t
 		}
 
 		if (cfil_info->cfi_debug && cfil_log_data) {
-			CFIL_LOG(LOG_DEBUG,
+			CFIL_LOG(LOG_ERR,
 			    "CFIL: SERVICE CTL-Q PEEKING: %llx current %llu peeked %llu pass %llu peek %llu "
 			    "datalen %u copylen %u copyoffset %u",
 			    (uint64_t)VM_KERNEL_ADDRPERM(tmp),
@@ -4182,7 +4364,7 @@ cfil_service_inject_queue(struct socket *so, struct cfil_info *cfil_info, int ou
 	}
 
 	if (cfil_info->cfi_debug && cfil_log_data) {
-		CFIL_LOG(LOG_DEBUG, "CFIL: SERVICE INJECT-Q: <so %llx> outgoing %d queue len %llu",
+		CFIL_LOG(LOG_ERR, "CFIL: SERVICE INJECT-Q: <so %llx> outgoing %d queue len %llu",
 		    (uint64_t)VM_KERNEL_ADDRPERM(so), outgoing, cfil_queue_len(inject_q));
 	}
 
@@ -4190,7 +4372,7 @@ cfil_service_inject_queue(struct socket *so, struct cfil_info *cfil_info, int ou
 		datalen = cfil_data_length(data, &mbcnt, &mbnum);
 
 		if (cfil_info->cfi_debug && cfil_log_data) {
-			CFIL_LOG(LOG_DEBUG, "CFIL: SERVICE INJECT-Q: <so %llx> data %llx datalen %u (mbcnt %u)",
+			CFIL_LOG(LOG_ERR, "CFIL: SERVICE INJECT-Q: <so %llx> data %llx datalen %u (mbcnt %u)",
 			    (uint64_t)VM_KERNEL_ADDRPERM(so), (uint64_t)VM_KERNEL_ADDRPERM(data), datalen, mbcnt);
 		}
 
@@ -4256,7 +4438,7 @@ cfil_service_inject_queue(struct socket *so, struct cfil_info *cfil_info, int ou
 	}
 
 	if (cfil_info->cfi_debug && cfil_log_data) {
-		CFIL_LOG(LOG_DEBUG, "CFIL: SERVICE INJECT-Q: <so %llx> injected %d",
+		CFIL_LOG(LOG_ERR, "CFIL: SERVICE INJECT-Q: <so %llx> injected %d",
 		    (uint64_t)VM_KERNEL_ADDRPERM(so), count);
 	}
 
@@ -4300,6 +4482,21 @@ cfil_service_inject_queue(struct socket *so, struct cfil_info *cfil_info, int ou
 			CFIL_LOG(LOG_INFO, "so %llx waking",
 			    (uint64_t)VM_KERNEL_ADDRPERM(so));
 			wakeup((caddr_t)cfil_info);
+		}
+	}
+
+	if (SO_DELAYED_DEAD_GET(so)) {
+		// Check to see if all data processed for this socket, if so mark it DEAD now.
+		const bool is_dead = cfil_sock_is_dead(so);
+		if (is_dead && cfil_info->cfi_debug) {
+			cfil_info_log(LOG_ERR, cfil_info, "CFIL: Marked previoulsy delayed socket as DEAD");
+		}
+	}
+	if (SO_DELAYED_TCP_TIME_WAIT_GET(so)) {
+		// Check to see if all data processed for this socket, if so handle the TCP time wait now
+		const bool is_added = cfil_sock_tcp_add_time_wait(so);
+		if (is_added && cfil_info->cfi_debug) {
+			cfil_info_log(LOG_ERR, cfil_info, "CFIL: Handled previously delayed socket for TCP time wait");
 		}
 	}
 
@@ -4358,7 +4555,7 @@ cfil_service_pending_queue(struct socket *so, struct cfil_info *cfil_info, uint3
 		datalen = cfil_data_length(data, NULL, NULL);
 
 		if (cfil_info->cfi_debug && cfil_log_data) {
-			CFIL_LOG(LOG_DEBUG,
+			CFIL_LOG(LOG_ERR,
 			    "CFIL: SERVICE PENDING-Q: data %llx datalen %u passlen %llu curlen %llu",
 			    (uint64_t)VM_KERNEL_ADDRPERM(data), datalen,
 			    passlen, curlen);
@@ -4485,7 +4682,7 @@ done:
 		entry->cfe_flags |= CFEF_CFIL_DETACHED;
 
 		if (cfil_info->cfi_debug) {
-			cfil_info_log(LOG_INFO, cfil_info, outgoing ?
+			cfil_info_log(LOG_ERR, cfil_info, outgoing ?
 			    "CFIL: OUT - PASSED ALL - DETACH":
 			    "CFIL: IN - PASSED ALL - DETACH");
 		}
@@ -4495,7 +4692,7 @@ done:
 		if ((cfil_info->cfi_flags & CFIF_CLOSE_WAIT) &&
 		    cfil_filters_attached(so) == 0) {
 			if (cfil_info->cfi_debug) {
-				cfil_info_log(LOG_INFO, cfil_info, "CFIL: WAKING");
+				cfil_info_log(LOG_ERR, cfil_info, "CFIL: WAKING");
 			}
 			CFIL_LOG(LOG_INFO, "so %llx waking",
 			    (uint64_t)VM_KERNEL_ADDRPERM(so));
@@ -4525,7 +4722,7 @@ cfil_set_socket_pass_offset(struct socket *so, struct cfil_info *cfil_info, int 
 	}
 
 	if (cfil_info->cfi_debug && cfil_log_data) {
-		CFIL_LOG(LOG_DEBUG, "so %llx outgoing %d",
+		CFIL_LOG(LOG_ERR, "so %llx outgoing %d",
 		    (uint64_t)VM_KERNEL_ADDRPERM(so), outgoing);
 	}
 
@@ -4538,8 +4735,8 @@ cfil_set_socket_pass_offset(struct socket *so, struct cfil_info *cfil_info, int 
 	}
 
 	if (cfil_info->cfi_debug && cfil_log_data) {
-		CFIL_LOG(LOG_DEBUG, "CFIL: <so %llx, sockID %llu> outgoing %d cfi_pending_first %llu cfi_pending_last %llu",
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), cfil_info->cfi_sock_id, outgoing,
+		CFIL_LOG(LOG_ERR, "CFIL: <so %llx, sockID %llu <%llx>> outgoing %d cfi_pending_first %llu cfi_pending_last %llu",
+		    (uint64_t)VM_KERNEL_ADDRPERM(so), cfil_info->cfi_sock_id, cfil_info->cfi_sock_id, outgoing,
 		    cfi_buf->cfi_pending_first, cfi_buf->cfi_pending_last);
 	}
 
@@ -4569,8 +4766,8 @@ cfil_set_socket_pass_offset(struct socket *so, struct cfil_info *cfil_info, int 
 	}
 
 	if (cfil_info->cfi_debug && cfil_log_data) {
-		CFIL_LOG(LOG_DEBUG, "CFIL: <so %llx, sockID %llu>, cfi_pass_offset %llu",
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), cfil_info->cfi_sock_id, cfi_buf->cfi_pass_offset);
+		CFIL_LOG(LOG_ERR, "CFIL: <so %llx, sockID %llu <%llx>>, cfi_pass_offset %llu",
+		    (uint64_t)VM_KERNEL_ADDRPERM(so), cfil_info->cfi_sock_id, cfil_info->cfi_sock_id, cfi_buf->cfi_pass_offset);
 	}
 
 	return 0;
@@ -4723,7 +4920,7 @@ cfil_action_drop(struct socket *so, struct cfil_info *cfil_info, uint32_t kcunit
 	entry->cfe_flags |= CFEF_CFIL_DETACHED;
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_INFO, cfil_info, "CFIL: DROP - DETACH");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: DROP - DETACH");
 	}
 
 	CFIL_LOG(LOG_INFO, "so %llx detached %u",
@@ -4763,7 +4960,7 @@ cfil_action_bless_client(uint32_t kcunit, struct cfil_msg_hdr *msghdr)
 
 		if (cfil_attached) {
 			if (cfil_info != NULL && cfil_info->cfi_debug) {
-				cfil_info_log(LOG_INFO, cfil_info, "CFIL: VERDICT RECEIVED: BLESS");
+				cfil_info_log(LOG_ERR, cfil_info, "CFIL: VERDICT RECEIVED: BLESS");
 			}
 			cfil_sock_received_verdict(so);
 			(void)cfil_action_data_pass(so, cfil_info, kcunit, 1, CFM_MAX_OFFSET, CFM_MAX_OFFSET);
@@ -4917,7 +5114,7 @@ cfil_data_common(struct socket *so, struct cfil_info *cfil_info, int outgoing, s
 	cfil_info_buf_verify(cfi_buf);
 
 	if (cfil_info->cfi_debug && cfil_log_data) {
-		CFIL_LOG(LOG_DEBUG, "CFIL: QUEUEING DATA: <so %llx> %s: data %llx len %u flags 0x%x nextpkt %llx - cfi_pending_last %llu cfi_pending_mbcnt %u   cfi_pass_offset %llu",
+		CFIL_LOG(LOG_ERR, "CFIL: QUEUEING DATA: <so %llx> %s: data %llx len %u flags 0x%x nextpkt %llx - cfi_pending_last %llu cfi_pending_mbcnt %u   cfi_pass_offset %llu",
 		    (uint64_t)VM_KERNEL_ADDRPERM(so),
 		    outgoing ? "OUT" : "IN",
 		    (uint64_t)VM_KERNEL_ADDRPERM(data), datalen, data->m_flags,
@@ -4931,7 +5128,7 @@ cfil_data_common(struct socket *so, struct cfil_info *cfil_info, int outgoing, s
 	if (cfi_buf->cfi_pending_last <= cfi_buf->cfi_pass_offset) {
 		cfil_update_entry_offsets(so, cfil_info, outgoing, datalen);
 		if (cfil_info->cfi_debug && cfil_log_data) {
-			CFIL_LOG(LOG_DEBUG, "CFIL: QUEUEING DATA: FAST PATH");
+			CFIL_LOG(LOG_ERR, "CFIL: QUEUEING DATA: FAST PATH");
 		}
 	} else {
 		struct cfil_entry *iter_entry;
@@ -5357,7 +5554,7 @@ cfil_sock_close_wait(struct socket *so)
 	// This flow does not need to wait for close ack from user-space
 	if (IS_NO_CLOSE_WAIT(so->so_cfil)) {
 		if (so->so_cfil->cfi_debug) {
-			cfil_info_log(LOG_INFO, so->so_cfil, "CFIL: SKIP CLOSE WAIT");
+			cfil_info_log(LOG_ERR, so->so_cfil, "CFIL: SKIP CLOSE WAIT");
 		}
 		return;
 	}
@@ -5794,10 +5991,10 @@ cfil_hash_entry_log(int level, struct socket *so, struct soflow_hash_entry *entr
 		return;
 	}
 
-	CFIL_LOG(level, "<%s>: <%s(%d) so %llx cfil %p, entry %p, sockID %llu <%llu>> lport %d fport %d laddr %s faddr %s hash %X",
+	CFIL_LOG(level, "<%s>: <%s(%d) so %llx cfil %p, entry %p, sockID %llu <%llx> feat_ctxt_id <%llu> lport %d fport %d laddr %s faddr %s hash %X",
 	    msg,
 	    IS_UDP(so) ? "UDP" : "proto", GET_SO_PROTO(so),
-	    (uint64_t)VM_KERNEL_ADDRPERM(so), entry->soflow_feat_ctxt, entry, sockId, entry->soflow_feat_ctxt_id,
+	    (uint64_t)VM_KERNEL_ADDRPERM(so), entry->soflow_feat_ctxt, entry, sockId, sockId, entry->soflow_feat_ctxt_id,
 	    ntohs(entry->soflow_lport), ntohs(entry->soflow_fport), local, remote,
 	    entry->soflow_flowhash);
 }
@@ -5834,9 +6031,9 @@ cfil_inp_log(int level, struct socket *so, const char* msg)
 	}
 
 	if (so->so_cfil != NULL) {
-		CFIL_LOG(level, "<%s>: <%s so %llx cfil %p - flags 0x%x 0x%x, sockID %llu> lport %d fport %d laddr %s faddr %s",
+		CFIL_LOG(level, "<%s>: <%s so %llx cfil %p - flags 0x%x 0x%x, sockID %llu <%llx>> lport %d fport %d laddr %s faddr %s",
 		    msg, IS_UDP(so) ? "UDP" : "TCP",
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), so->so_cfil, inp->inp_flags, inp->inp_socket->so_flags, so->so_cfil->cfi_sock_id,
+		    (uint64_t)VM_KERNEL_ADDRPERM(so), so->so_cfil, inp->inp_flags, inp->inp_socket->so_flags, so->so_cfil->cfi_sock_id, so->so_cfil->cfi_sock_id,
 		    ntohs(inp->inp_lport), ntohs(inp->inp_fport), local, remote);
 	} else {
 		CFIL_LOG(level, "<%s>: <%s so %llx - flags 0x%x 0x%x> lport %d fport %d laddr %s faddr %s",
@@ -5878,7 +6075,7 @@ cfil_sock_udp_unlink_flow(struct socket *so, struct soflow_hash_entry *hash_entr
 	cfil_info->cfi_hash_entry = NULL;
 
 	if (cfil_info->cfi_debug) {
-		CFIL_LOG(LOG_INFO, "CFIL <%s>: <so %llx> - use count %d",
+		CFIL_LOG(LOG_ERR, "CFIL <%s>: <so %llx> - use count %d",
 		    IS_UDP(so) ? "UDP" : "TCP", (uint64_t)VM_KERNEL_ADDRPERM(so), so->so_usecount);
 	}
 
@@ -5973,9 +6170,9 @@ cfil_sock_udp_get_info(struct socket *so, uint32_t filter_control_unit, bool out
 	cfil_info->cfi_dir = outgoing ? CFS_CONNECTION_DIR_OUT : CFS_CONNECTION_DIR_IN;
 	cfil_info->cfi_debug = DEBUG_FLOW(sotoinpcb(so), so, local, remote);
 	if (cfil_info->cfi_debug) {
-		CFIL_LOG(LOG_INFO, "CFIL: <so %llx> UDP (outgoing %d) - debug flow with port %d", (uint64_t)VM_KERNEL_ADDRPERM(so), outgoing, cfil_log_port);
-		CFIL_LOG(LOG_INFO, "CFIL: <so %llx> UDP so_gencnt %llx entry flowhash %x cfil %p sockID %llx",
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), so->so_gencnt, hash_entry->soflow_flowhash, cfil_info, cfil_info->cfi_sock_id);
+		CFIL_LOG(LOG_ERR, "CFIL: <so %llx> UDP (outgoing %d) - debug flow with port %d", (uint64_t)VM_KERNEL_ADDRPERM(so), outgoing, cfil_log_port);
+		CFIL_LOG(LOG_ERR, "CFIL: <so %llx> UDP so_gencnt %llx entry flowhash %x cfil %p sockID %llu <%llx>",
+		    (uint64_t)VM_KERNEL_ADDRPERM(so), so->so_gencnt, hash_entry->soflow_flowhash, cfil_info, cfil_info->cfi_sock_id, cfil_info->cfi_sock_id);
 	}
 
 	if (cfil_info_attach_unit(so, filter_control_unit, cfil_info) == 0) {
@@ -5987,9 +6184,9 @@ cfil_sock_udp_get_info(struct socket *so, uint32_t filter_control_unit, bool out
 	}
 
 	if (cfil_info->cfi_debug) {
-		CFIL_LOG(LOG_DEBUG, "CFIL: UDP <so %llx> filter_control_unit %u sockID %llu attached",
+		CFIL_LOG(LOG_ERR, "CFIL: UDP <so %llx> filter_control_unit %u sockID %llu <%llx> attached",
 		    (uint64_t)VM_KERNEL_ADDRPERM(so),
-		    filter_control_unit, cfil_info->cfi_sock_id);
+		    filter_control_unit, cfil_info->cfi_sock_id, cfil_info->cfi_sock_id);
 	}
 
 	so->so_flags |= SOF_CONTENT_FILTER;
@@ -6003,7 +6200,7 @@ cfil_sock_udp_get_info(struct socket *so, uint32_t filter_control_unit, bool out
 	hash_entry->soflow_feat_ctxt_id = cfil_info->cfi_sock_id;
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_INFO, cfil_info, "CFIL: ADDED");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: ADDED");
 	}
 
 	error = cfil_dispatch_attach_event(so, cfil_info, 0,
@@ -6076,12 +6273,12 @@ cfil_sock_udp_handle_data(bool outgoing, struct socket *so,
 	// Update last used timestamp, this is for flow Idle TO
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_DEBUG, cfil_info, "CFIL: Got flow");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: Got flow");
 	}
 
 	if (cfil_info->cfi_flags & CFIF_DROP) {
 		if (cfil_info->cfi_debug) {
-			cfil_info_log(LOG_INFO, cfil_info, "CFIL: UDP DROP");
+			cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP DROP");
 		}
 		return EPIPE;
 	}
@@ -6142,7 +6339,7 @@ cfil_filters_udp_attached_per_flow(struct socket *so,
 
 		if (apply_context->need_wait == TRUE) {
 			if (cfil_info->cfi_debug) {
-				cfil_info_log(LOG_INFO, cfil_info, "CFIL: UDP PER-FLOW WAIT FOR FLOW TO FINISH");
+				cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP PER-FLOW WAIT FOR FLOW TO FINISH");
 			}
 
 			ts.tv_sec = cfil_close_wait_timeout / 1000;
@@ -6165,7 +6362,7 @@ cfil_filters_udp_attached_per_flow(struct socket *so,
 			cfil_info->cfi_flags &= ~CFIF_CLOSE_WAIT;
 
 			if (cfil_info->cfi_debug) {
-				cfil_info_log(LOG_INFO, cfil_info, "CFIL: UDP PER-FLOW WAIT FOR FLOW DONE");
+				cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP PER-FLOW WAIT FOR FLOW DONE");
 			}
 
 			/*
@@ -6175,7 +6372,7 @@ cfil_filters_udp_attached_per_flow(struct socket *so,
 				OSIncrementAtomic(&cfil_stats.cfs_close_wait_timeout);
 
 				if (cfil_info->cfi_debug) {
-					cfil_info_log(LOG_INFO, cfil_info, "CFIL: UDP PER-FLOW WAIT FOR FLOW TIMED OUT, FORCE DETACH");
+					cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP PER-FLOW WAIT FOR FLOW TIMED OUT, FORCE DETACH");
 				}
 
 				entry->cfe_flags |= CFEF_CFIL_DETACHED;
@@ -6333,7 +6530,7 @@ cfil_sock_udp_notify_shutdown_per_flow(struct socket *so,
 	}
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_INFO, cfil_info, "CFIL: UDP PER-FLOW NOTIFY_SHUTDOWN");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP PER-FLOW NOTIFY_SHUTDOWN");
 	}
 
 	return true;
@@ -6486,7 +6683,7 @@ cfil_sock_udp_is_closed_per_flow(struct socket *so,
 	CFIL_INFO_VERIFY(cfil_info);
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_INFO, cfil_info, "CFIL: UDP PER-FLOW IS_CLOSED");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP PER-FLOW IS_CLOSED");
 	}
 
 	return true;
@@ -6685,7 +6882,7 @@ cfil_info_action_timed_out(struct cfil_info *cfil_info, int timeout)
 				timersub(&current_tv, &entry->cfe_last_action, &diff_time);
 				if (diff_time.tv_sec >= timeout) {
 					if (cfil_info->cfi_debug) {
-						cfil_info_log(LOG_INFO, cfil_info, "CFIL: flow ACTION timeout expired");
+						cfil_info_log(LOG_ERR, cfil_info, "CFIL: flow ACTION timeout expired");
 					}
 					return true;
 				}
@@ -6708,12 +6905,12 @@ cfil_info_buffer_threshold_exceeded(struct cfil_info *cfil_info)
 	if (cfil_info->cfi_snd.cfi_tail_drop_cnt ||
 	    cfil_info->cfi_rcv.cfi_tail_drop_cnt) {
 		if (cfil_info->cfi_debug) {
-			CFIL_LOG(LOG_INFO, "CFIL: queue threshold exceeded:mbuf max < count: %d bytes: %d > tail drop count < OUT: %d IN: %d > ",
+			CFIL_LOG(LOG_ERR, "CFIL: queue threshold exceeded:mbuf max < count: %d bytes: %d > tail drop count < OUT: %d IN: %d > ",
 			    cfil_udp_gc_mbuf_num_max,
 			    cfil_udp_gc_mbuf_cnt_max,
 			    cfil_info->cfi_snd.cfi_tail_drop_cnt,
 			    cfil_info->cfi_rcv.cfi_tail_drop_cnt);
-			cfil_info_log(LOG_INFO, cfil_info, "CFIL: queue threshold exceeded");
+			cfil_info_log(LOG_ERR, cfil_info, "CFIL: queue threshold exceeded");
 		}
 		return true;
 	}
@@ -6737,7 +6934,7 @@ cfil_dgram_gc_needed(struct socket *so, struct soflow_hash_entry *hash_entry, u_
 	if (cfil_info_action_timed_out(cfil_info, UDP_FLOW_GC_ACTION_TO) ||
 	    cfil_info_buffer_threshold_exceeded(cfil_info)) {
 		if (cfil_info->cfi_debug) {
-			cfil_info_log(LOG_INFO, cfil_info, "CFIL: UDP PER-FLOW GC NEEDED");
+			cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP PER-FLOW GC NEEDED");
 		}
 		cfil_rw_unlock_shared(&cfil_lck_rw);
 		return true;
@@ -6758,7 +6955,7 @@ cfil_dgram_gc_perform(struct socket *so, struct soflow_hash_entry *hash_entry)
 	cfil_info = (struct cfil_info *) hash_entry->soflow_feat_ctxt;
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_INFO, cfil_info, "CFIL: UDP PER-FLOW GC PERFORM");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP PER-FLOW GC PERFORM");
 	}
 
 	for (int kcunit = 1; kcunit <= MAX_CONTENT_FILTER; kcunit++) {
@@ -6782,7 +6979,7 @@ cfil_dgram_detach_entry(struct socket *so, struct soflow_hash_entry *hash_entry)
 	cfil_info = (struct cfil_info *) hash_entry->soflow_feat_ctxt;
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_INFO, cfil_info, "CFIL: DGRAM DETACH ENTRY");
+		cfil_info_log(LOG_ERR, cfil_info, "CFIL: DGRAM DETACH ENTRY");
 	}
 
 	cfil_sock_udp_unlink_flow(so, hash_entry, cfil_info);
@@ -6823,7 +7020,7 @@ cfil_dgram_save_socket_state(struct cfil_info *cfil_info, struct mbuf *m)
 	    sizeof(struct cfil_tag), M_DONTWAIT, m);
 
 	if (tag) {
-		ctag = (struct cfil_tag*)(tag + 1);
+		ctag = (struct cfil_tag *)(tag->m_tag_data);
 		ctag->cfil_so_state_change_cnt = cfil_info->cfi_so->so_state_change_cnt;
 		ctag->cfil_so_options = cfil_info->cfi_so->so_options;
 		ctag->cfil_inp_flags = inp ? inp->inp_flags : 0;
@@ -6851,9 +7048,9 @@ cfil_dgram_get_socket_state(struct mbuf *m, uint32_t *state_change_cnt, uint32_t
 	struct m_tag *tag = NULL;
 	struct cfil_tag *ctag = NULL;
 
-	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_CFIL_UDP, NULL);
+	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_CFIL_UDP);
 	if (tag) {
-		ctag = (struct cfil_tag *)(tag + 1);
+		ctag = (struct cfil_tag *)(tag->m_tag_data);
 		if (state_change_cnt) {
 			*state_change_cnt = ctag->cfil_so_state_change_cnt;
 		}
@@ -6883,9 +7080,9 @@ cfil_dgram_peek_socket_state(struct mbuf *m, int *inp_flags)
 	struct m_tag *tag = NULL;
 	struct cfil_tag *ctag = NULL;
 
-	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_CFIL_UDP, NULL);
+	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_CFIL_UDP);
 	if (tag) {
-		ctag = (struct cfil_tag *)(tag + 1);
+		ctag = (struct cfil_tag *)(tag->m_tag_data);
 		if (inp_flags) {
 			*inp_flags = ctag->cfil_inp_flags;
 		}
@@ -7032,7 +7229,7 @@ cfil_stats_collect_flow_stats_for_filter(int kcunit,
 	diff_time_usecs = (diff_time.tv_sec * USEC_PER_SEC) + diff_time.tv_usec;
 
 	if (cfil_info->cfi_debug && cfil_log_stats) {
-		CFIL_LOG(LOG_DEBUG, "CFIL: STATS REPORT - elapsed time - ts %llu %llu cur ts %llu %llu diff %llu %llu(usecs %llu) @freq %llu usecs sockID %llu",
+		CFIL_LOG(LOG_ERR, "CFIL: STATS REPORT - elapsed time - ts %llu %llu cur ts %llu %llu diff %llu %llu(usecs %llu) @freq %llu usecs sockID %llu <%llx>",
 		    (unsigned long long)entry->cfe_stats_report_ts.tv_sec,
 		    (unsigned long long)entry->cfe_stats_report_ts.tv_usec,
 		    (unsigned long long)current_tv.tv_sec,
@@ -7041,16 +7238,16 @@ cfil_stats_collect_flow_stats_for_filter(int kcunit,
 		    (unsigned long long)diff_time.tv_usec,
 		    (unsigned long long)diff_time_usecs,
 		    (unsigned long long)((entry->cfe_stats_report_frequency * NSEC_PER_MSEC) / NSEC_PER_USEC),
-		    cfil_info->cfi_sock_id);
+		    cfil_info->cfi_sock_id, cfil_info->cfi_sock_id);
 	}
 
 	// Compare elapsed time in usecs
 	if (diff_time_usecs >= (entry->cfe_stats_report_frequency * NSEC_PER_MSEC) / NSEC_PER_USEC) {
 		if (cfil_info->cfi_debug && cfil_log_stats) {
-			CFIL_LOG(LOG_DEBUG, "CFIL: STATS REPORT - in %llu reported %llu",
+			CFIL_LOG(LOG_ERR, "CFIL: STATS REPORT - in %llu reported %llu",
 			    cfil_info->cfi_byte_inbound_count,
 			    entry->cfe_byte_inbound_count_reported);
-			CFIL_LOG(LOG_DEBUG, "CFIL: STATS REPORT - out %llu reported %llu",
+			CFIL_LOG(LOG_ERR, "CFIL: STATS REPORT - out %llu reported %llu",
 			    cfil_info->cfi_byte_outbound_count,
 			    entry->cfe_byte_outbound_count_reported);
 		}
@@ -7090,7 +7287,7 @@ cfil_stats_collect_flow_stats_for_filter(int kcunit,
 			entry->cfe_byte_inbound_count_reported = cfil_info->cfi_byte_inbound_count;
 			entry->cfe_byte_outbound_count_reported = cfil_info->cfi_byte_outbound_count;
 			if (cfil_info->cfi_debug && cfil_log_stats) {
-				cfil_info_log(LOG_DEBUG, cfil_info, "CFIL: STATS COLLECTED");
+				cfil_info_log(LOG_ERR, cfil_info, "CFIL: STATS COLLECTED");
 			}
 			CFI_ADD_TIME_LOG(cfil_info, &current_tv, &cfil_info->cfi_first_event, CFM_OP_STATS);
 			return true;
@@ -7157,7 +7354,7 @@ cfil_stats_report(void *v, wait_result_t w)
 					entry = &cfil_info->cfi_entries[kcunit - 1];
 					if (entry->cfe_filter == NULL) {
 						if (cfil_info->cfi_debug && cfil_log_stats) {
-							CFIL_LOG(LOG_DEBUG, "CFIL: STATS REPORT - so %llx no filter",
+							CFIL_LOG(LOG_ERR, "CFIL: STATS REPORT - so %llx no filter",
 							    cfil_info->cfi_so ? (uint64_t)VM_KERNEL_ADDRPERM(cfil_info->cfi_so) : 0);
 						}
 						continue;

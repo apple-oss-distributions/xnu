@@ -114,10 +114,10 @@ typedef struct eventhandler_entry       *eventhandler_tag;
 /*
  * Macro to invoke the handlers for a given event.
  */
-#define _EVENTHANDLER_INVOKE(name, list, ...) do {                      \
-	struct eventhandler_entry *_ep;                                 \
-	struct eventhandler_entry_ ## name *_t;                         \
-                                                                        \
+#define _EVENTHANDLER_INVOKE(name, list, ...) do {                  \
+	struct eventhandler_entry * _ep __single;                       \
+	struct eventhandler_entry_ ## name * _t __single;               \
+                                                                    \
 	VERIFY((list)->el_flags & EHL_INITTED);                         \
 	EHL_LOCK_ASSERT((list), LCK_MTX_ASSERT_OWNED);                  \
 	(list)->el_runcount++;                                          \
@@ -128,7 +128,7 @@ typedef struct eventhandler_entry       *eventhandler_tag;
 	                EHL_UNLOCK((list));                             \
 	                _t = (struct eventhandler_entry_ ## name *)_ep; \
 	                evhlog((LOG_DEBUG, "eventhandler_invoke: executing %p", \
-	                    (void *)VM_KERNEL_UNSLIDE((void *)_t->eh_func)));   \
+	                    (void *)VM_KERNEL_UNSLIDE((uint64_t)(_t->eh_func))));   \
 	                _t->eh_func(_ep->ee_arg , ## __VA_ARGS__);      \
 	                EHL_LOCK_SPIN((list));                          \
 	        }                                                       \

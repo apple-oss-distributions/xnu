@@ -100,7 +100,7 @@ static processor_t
 sched_amp_choose_processor(processor_set_t pset, processor_t processor, thread_t thread);
 
 static bool
-sched_amp_thread_avoid_processor(processor_t processor, thread_t thread);
+sched_amp_thread_avoid_processor(processor_t processor, thread_t thread, __unused ast_t reason);
 
 static bool
 sched_amp_thread_should_yield(processor_t processor, thread_t thread);
@@ -637,7 +637,7 @@ pcores_recommended(thread_t thread)
 
 /* Return true if this thread should not continue running on this processor */
 static bool
-sched_amp_thread_avoid_processor(processor_t processor, thread_t thread)
+sched_amp_thread_avoid_processor(processor_t processor, thread_t thread, __unused ast_t reason)
 {
 	if (processor->processor_set->pset_cluster_type == PSET_AMP_E) {
 		if (pcores_recommended(thread)) {

@@ -258,7 +258,7 @@ thread_quantum_expire(
 	    0, thread);
 
 #if defined(CONFIG_SCHED_TIMESHARE_CORE)
-	sched_timeshare_consider_maintenance(ctime);
+	sched_timeshare_consider_maintenance(ctime, false);
 #endif /* CONFIG_SCHED_TIMESHARE_CORE */
 
 #if __arm64__

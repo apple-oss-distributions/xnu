@@ -138,6 +138,7 @@ pset_signal_spill(processor_set_t pset, int spilled_thread_priority)
 	}
 
 	processor_t ast_processor = NULL;
+	ast_t preempt = AST_NONE;
 	uint64_t running_map = pset->recommended_bitmask & pset->cpu_state_map[PROCESSOR_RUNNING];
 	for (int cpuid = lsb_first(running_map); cpuid >= 0; cpuid = lsb_next(running_map, cpuid)) {
 		processor = processor_array[cpuid];
@@ -158,7 +159,7 @@ pset_signal_spill(processor_set_t pset, int spilled_thread_priority)
 		bit_set(pset->pending_spill_cpu_mask, processor->cpu_id);
 		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_AMP_SIGNAL_SPILL) | DBG_FUNC_NONE, processor->cpu_id, 1, 0, 0);
 		if (processor == current_processor()) {
-			ast_on(AST_PREEMPT);
+			preempt = AST_PREEMPT;
 		}
 		ipi_type = sched_ipi_action(processor, NULL, SCHED_IPI_EVENT_SPILL);
 		if (ipi_type != SCHED_IPI_NONE) {
@@ -169,6 +170,11 @@ pset_signal_spill(processor_set_t pset, int spilled_thread_priority)
 
 	pset_unlock(pset);
 	sched_ipi_perform(ast_processor, ipi_type);
+
+	if (preempt != AST_NONE) {
+		ast_t new_preempt = update_pending_nonurgent_preemption(processor, preempt);
+		ast_on(new_preempt);
+	}
 }
 
 /*
@@ -296,7 +302,7 @@ sched_amp_steal_thread_enabled(processor_set_t pset)
  *
  * Invoked with pset locked, returns with pset unlocked
  */
-void
+bool
 sched_amp_balance(processor_t cprocessor, processor_set_t cpset)
 {
 	assert(cprocessor == current_processor());
@@ -304,7 +310,7 @@ sched_amp_balance(processor_t cprocessor, processor_set_t cpset)
 	pset_unlock(cpset);
 
 	if (!ecore_set || cpset->pset_cluster_type == PSET_AMP_E || !cprocessor->is_recommended) {
-		return;
+		return false;
 	}
 
 	/*
@@ -339,6 +345,9 @@ sched_amp_balance(processor_t cprocessor, processor_set_t cpset)
 		processor_t ast_processor = processor_array[cpuid];
 		sched_ipi_perform(ast_processor, ipi_type[cpuid]);
 	}
+
+	/* Core should light-weight idle using WFE if it just sent out rebalance IPIs */
+	return ast_processor_map != 0;
 }
 
 /*

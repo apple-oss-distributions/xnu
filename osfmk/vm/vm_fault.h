@@ -190,7 +190,8 @@ extern kern_return_t vm_fault_enter(
 	vm_tag_t  wire_tag,             /* if wiring must pass tag != VM_KERN_MEMORY_NONE */
 	vm_object_fault_info_t fault_info,
 	boolean_t *need_retry,
-	int *type_of_fault);
+	int *type_of_fault,
+	uint8_t *object_lock_type);
 
 extern vm_offset_t kdp_lightweight_fault(
 	vm_map_t map,

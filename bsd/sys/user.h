@@ -401,6 +401,7 @@ typedef struct uthread * uthread_t;
 #define UT_ATIME_UPDATE 0x00002000      /* don't update atime for files accessed by this thread */
 #define UT_NSPACE_FORCEDATALESSFAULTS  0x00004000 /* thread always materializes dataless files */
 #define UT_LP64         0x00010000      /* denormalized P_LP64 bit from proc */
+#define UT_FS_BLKSIZE_NOCACHE_WRITES  0x00020000 /* thread wants sub pagesize directIO writes */
 
 #endif /* BSD_KERNEL_PRIVATE */
 

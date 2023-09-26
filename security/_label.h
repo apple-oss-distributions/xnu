@@ -78,9 +78,19 @@
 #endif
 #endif
 
+#if XNU_KERNEL_PRIVATE
+/* l_owner set to this value means the label is inlined in the cred */
+#define MAC_LABEL_CRED_OWNED  ((struct label **)~0ul)
+#define MAC_LABEL_NULL_SLOT   (~0l)
+
 struct label {
 	struct label **l_owner;
-	void *l_perpolicy[MAC_MAX_SLOTS];
+	long           l_perpolicy[MAC_MAX_SLOTS];
 };
+
+extern const struct label empty_label;
+#else
+struct label;
+#endif
 
 #endif /* !_SECURITY_LABEL_H_ */

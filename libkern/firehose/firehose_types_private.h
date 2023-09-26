@@ -36,7 +36,7 @@ __BEGIN_DECLS
  * The lower 8 bits are or-ed in the upper 8 bits of Activity ID and propagated
  * to children activities
  */
-    OS_OPTIONS(firehose_activity_flags, unsigned long,
+OS_OPTIONS(firehose_activity_flags, unsigned long,
     firehose_activity_flags_default             = 0x0000,
 
     firehose_activity_flags_info_mode           = 0x0001,

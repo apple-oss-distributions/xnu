@@ -170,7 +170,7 @@ struct __attribute__((trivial_abi)) intrusive_shared_ptr {
 	// If the original code contained a manual retain that you removed and
 	// you use this constructor, you will cause a use-after-free bug.
 	explicit constexpr
-	intrusive_shared_ptr(pointer p, no_retain_t) noexcept : ptr_(p) {
+	intrusive_shared_ptr(__attribute__((os_consumed)) pointer p, no_retain_t) noexcept : ptr_(p) {
 	}
 
 	// Makes a copy of a shared pointer, incrementing the refcount.
@@ -367,7 +367,7 @@ struct __attribute__((trivial_abi)) intrusive_shared_ptr {
 	// If the shared pointer is pointing to an object before calling `reset`,
 	// the refcount is decremented on that object.
 	intrusive_shared_ptr&
-	reset(pointer p, no_retain_t) noexcept
+	reset(__attribute__((os_consumed)) pointer p, no_retain_t) noexcept
 	{
 		if (ptr_ != nullptr) {
 			RefcountPolicy::release(*ptr_);

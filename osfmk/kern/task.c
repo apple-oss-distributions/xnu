@@ -155,6 +155,7 @@
 #include <sys/resource.h>
 #include <sys/signalvar.h> /* for coredump */
 #include <sys/bsdtask_info.h>
+#include <sys/kdebug_triage.h>
 /*
  * Exported interfaces
  */
@@ -181,6 +182,8 @@
 #include <IOKit/IOBSD.h>
 #include <kdp/processor_core.h>
 
+#include <string.h>
+
 #if KPERF
 extern int kpc_force_all_ctrs(task_t, int);
 #endif
@@ -205,6 +208,7 @@ static void task_port_no_senders(ipc_port_t, mach_msg_type_number_t);
 static void task_port_with_flavor_no_senders(ipc_port_t, mach_msg_type_number_t);
 static void task_suspension_no_senders(ipc_port_t, mach_msg_type_number_t);
 static inline void task_zone_init(void);
+
 
 IPC_KOBJECT_DEFINE(IKOT_TASK_NAME);
 IPC_KOBJECT_DEFINE(IKOT_TASK_CONTROL,
@@ -239,6 +243,24 @@ typedef struct zinfo_usage_store_t {
 	uint64_t        alloc __attribute__((aligned(8)));              /* allocation counter */
 	uint64_t        free __attribute__((aligned(8)));               /* free counter */
 } zinfo_usage_store_t;
+
+/**
+ * Return codes related to diag threshold and memory limit
+ */
+__options_decl(diagthreshold_check_return, int, {
+	THRESHOLD_IS_SAME_AS_LIMIT_FLAG_DISABLED        = 0,
+	THRESHOLD_IS_SAME_AS_LIMIT_FLAG_ENABLED         = 1,
+	THRESHOLD_IS_NOT_SAME_AS_LIMIT_FLAG_DISABLED    = 2,
+	THRESHOLD_IS_NOT_SAME_AS_LIMIT_FLAG_ENABLED     = 3,
+});
+
+/**
+ * Return codes related to diag threshold and memory limit
+ */
+__options_decl(current_, int, {
+	THRESHOLD_IS_SAME_AS_LIMIT      = 0,
+	THRESHOLD_IS_NOT_SAME_AS_LIMIT  = 1
+});
 
 zinfo_usage_store_t tasks_tkm_private;
 zinfo_usage_store_t tasks_tkm_shared;
@@ -324,20 +346,49 @@ SECURITY_READ_ONLY_LATE(struct _task_ledger_indices) task_ledgers __attribute__(
 /* System sleep state */
 boolean_t tasks_suspend_state;
 
+__options_decl(send_exec_resource_is_fatal, bool, {
+	IS_NOT_FATAL            = false,
+	IS_FATAL                = true
+});
 
+__options_decl(send_exec_resource_is_diagnostics, bool, {
+	IS_NOT_DIAGNOSTICS      = false,
+	IS_DIAGNOSTICS          = true
+});
+
+__options_decl(send_exec_resource_is_warning, bool, {
+	IS_NOT_WARNING          = false,
+	IS_WARNING              = true
+});
+
+__options_decl(send_exec_resource_options_t, uint8_t, {
+	EXEC_RESOURCE_FATAL = 0x01,
+	EXEC_RESOURCE_DIAGNOSTIC = 0x02,
+	EXEC_RESOURCE_WARNING = 0x04,
+});
+
+/**
+ * Actions to take when a process has reached the memory limit or the diagnostics threshold limits
+ */
+static inline void task_process_crossed_limit_no_diag(task_t task, ledger_amount_t ledger_limit_size, bool memlimit_is_fatal, bool memlimit_is_active, send_exec_resource_is_warning is_warning);
+#if DEBUG || DEVELOPMENT
+static inline void task_process_crossed_limit_diag(ledger_amount_t ledger_limit_size);
+#endif
 void init_task_ledgers(void);
 void task_footprint_exceeded(int warning, __unused const void *param0, __unused const void *param1);
 void task_wakeups_rate_exceeded(int warning, __unused const void *param0, __unused const void *param1);
 void task_io_rate_exceeded(int warning, const void *param0, __unused const void *param1);
 void __attribute__((noinline)) SENDING_NOTIFICATION__THIS_PROCESS_IS_CAUSING_TOO_MANY_WAKEUPS(void);
-void __attribute__((noinline)) PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb, boolean_t is_fatal);
+void __attribute__((noinline)) PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb, send_exec_resource_options_t exception_options);
 void __attribute__((noinline)) SENDING_NOTIFICATION__THIS_PROCESS_IS_CAUSING_TOO_MUCH_IO(int flavor);
 #if CONFIG_PROC_RESOURCE_LIMITS
 void __attribute__((noinline)) SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_FILE_DESCRIPTORS(task_t task, int current_size, int soft_limit, int hard_limit);
 mach_port_name_t current_task_get_fatal_port_name(void);
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
+kern_return_t task_suspend_internal_locked(task_t);
 kern_return_t task_suspend_internal(task_t);
+kern_return_t task_resume_internal_locked(task_t);
 kern_return_t task_resume_internal(task_t);
 static kern_return_t task_start_halt_locked(task_t task, boolean_t should_mark_corpse);
 
@@ -349,6 +400,9 @@ extern void bsd_copythreadname(void *dst_uth, void *src_uth);
 extern kern_return_t thread_resume(thread_t thread);
 
 extern int exit_with_port_space_exception(void *proc, mach_exception_code_t code, mach_exception_subcode_t subcode);
+
+// Condition to include diag footprints
+#define RESETTABLE_DIAG_FOOTPRINT_LIMITS ((DEBUG || DEVELOPMENT) && CONFIG_MEMORYSTATUS)
 
 // Warn tasks when they hit 80% of their memory limit.
 #define PHYS_FOOTPRINT_WARNING_LEVEL 80
@@ -369,11 +423,19 @@ int task_wakeups_monitor_rate;     /* In hz. Maximum allowable wakeups per task 
 
 unsigned int task_wakeups_monitor_ustackshots_trigger_pct; /* Percentage. Level at which we start gathering telemetry. */
 
-int disable_exc_resource; /* Global override to supress EXC_RESOURCE for resource monitor violations. */
+TUNABLE(bool, disable_exc_resource, "disable_exc_resource", false); /* Global override to suppress EXC_RESOURCE for resource monitor violations. */
+TUNABLE(bool, disable_exc_resource_during_audio, "disable_exc_resource_during_audio", true); /* Global override to suppress EXC_RESOURCE while audio is active */
 
 ledger_amount_t max_task_footprint = 0;  /* Per-task limit on physical memory consumption in bytes     */
 unsigned int max_task_footprint_warning_level = 0;  /* Per-task limit warning percentage */
-int max_task_footprint_mb = 0;  /* Per-task limit on physical memory consumption in megabytes */
+
+/*
+ * Configure per-task memory limit.
+ * The boot-arg is interpreted as Megabytes,
+ * and takes precedence over the device tree.
+ * Setting the boot-arg to 0 disables task limits.
+ */
+TUNABLE_DT_WRITEABLE(int, max_task_footprint_mb, "/defaults", "kern.max_task_pmem", "max_task_pmem", 0, TUNABLE_DT_NONE);
 
 /* I/O Monitor Limits */
 #define IOMON_DEFAULT_LIMIT                     (20480ull)      /* MB of logical/physical I/O */
@@ -388,6 +450,9 @@ int64_t global_logical_writes_count = 0;        /* Global count for logical writ
 int64_t global_logical_writes_to_external_count = 0;        /* Global count for logical writes to external storage*/
 static boolean_t global_update_logical_writes(int64_t, int64_t*);
 
+#if DEBUG || DEVELOPMENT
+static diagthreshold_check_return task_check_memorythreshold_is_valid(task_t task, uint64_t new_limit, bool is_diagnostics_value);
+#endif
 #define TASK_MAX_THREAD_LIMIT 256
 
 #if MACH_ASSERT
@@ -417,8 +482,9 @@ extern struct proc *kernproc;
 
 #if CONFIG_MEMORYSTATUS
 extern void     proc_memstat_skip(struct proc* p, boolean_t set);
-extern void     memorystatus_on_ledger_footprint_exceeded(int warning, boolean_t memlimit_is_active, boolean_t memlimit_is_fatal);
-extern void     memorystatus_log_exception(const int max_footprint_mb, boolean_t memlimit_is_active, boolean_t memlimit_is_fatal);
+extern void     memorystatus_on_ledger_footprint_exceeded(int warning, bool memlimit_is_active, bool memlimit_is_fatal);
+extern void     memorystatus_log_exception(const int max_footprint_mb, bool memlimit_is_active, bool memlimit_is_fatal);
+extern void     memorystatus_log_diag_threshold_exception(const int diag_threshold_value);
 extern boolean_t memorystatus_allowed_vm_map_fork(task_t task, bool *is_large);
 extern uint64_t  memorystatus_available_memory_internal(struct proc *p);
 
@@ -429,10 +495,6 @@ extern void memorystatus_abort_vm_map_fork(task_t);
 #endif /* CONFIG_MEMORYSTATUS */
 
 #endif /* MACH_BSD */
-
-#if DEVELOPMENT || DEBUG
-int exc_resource_threads_enabled;
-#endif /* DEVELOPMENT || DEBUG */
 
 /* Boot-arg that turns on fatal pac exception delivery for all first-party apps */
 static TUNABLE(bool, enable_pac_exception, "enable_pac_exception", false);
@@ -523,6 +585,18 @@ task_watchports_alloc_init(
 static void
 task_watchports_deallocate(
 	struct task_watchports *watchports);
+
+__attribute__((always_inline)) inline void
+task_lock(task_t task)
+{
+	lck_mtx_lock(&(task)->lock);
+}
+
+__attribute__((always_inline)) inline void
+task_unlock(task_t task)
+{
+	lck_mtx_unlock(&(task)->lock);
+}
 
 void
 task_set_64bit(
@@ -765,6 +839,10 @@ task_clear_return_wait(task_t task, uint32_t flags)
 		task->t_returnwaitflags &= ~TRW_LRETURNWAIT;
 		task->returnwait_inheritor = NULL;
 
+		if (flags & TCRW_CLEAR_EXEC_COMPLETE) {
+			task->t_returnwaitflags &= ~TRW_LEXEC_COMPLETE;
+		}
+
 		if (task->t_returnwaitflags & TRW_LRETURNWAITER) {
 			struct turnstile *turnstile = turnstile_prepare_hash((uintptr_t) task_get_return_wait_event(task),
 			    TURNSTILE_ULOCK);
@@ -787,6 +865,7 @@ void __attribute__((noreturn))
 task_wait_to_return(void)
 {
 	task_t task = current_task();
+	uint8_t returnwaitflags;
 
 	is_write_lock(task->itk_space);
 
@@ -815,6 +894,7 @@ task_wait_to_return(void)
 		turnstile_complete_hash((uintptr_t) task_get_return_wait_event(task), TURNSTILE_ULOCK);
 	}
 
+	returnwaitflags = task->t_returnwaitflags;
 	is_write_unlock(task->itk_space);
 	turnstile_cleanup();
 
@@ -828,7 +908,9 @@ task_wait_to_return(void)
 	extern void mach_kauth_cred_thread_update(void);
 
 	mach_kauth_cred_thread_update();
-	mac_proc_notify_exec_complete(current_proc());
+	if (returnwaitflags & TRW_LEXEC_COMPLETE) {
+		mac_proc_notify_exec_complete(current_proc());
+	}
 #endif
 
 	thread_bootstrap_return();
@@ -861,26 +943,6 @@ task_is_halting(task_t task)
 void
 task_init(void)
 {
-	/*
-	 * Configure per-task memory limit.
-	 * The boot-arg is interpreted as Megabytes,
-	 * and takes precedence over the device tree.
-	 * Setting the boot-arg to 0 disables task limits.
-	 */
-	if (!PE_parse_boot_argn("max_task_pmem", &max_task_footprint_mb,
-	    sizeof(max_task_footprint_mb))) {
-		/*
-		 * No limit was found in boot-args, so go look in the device tree.
-		 */
-		if (!PE_get_default("kern.max_task_pmem", &max_task_footprint_mb,
-		    sizeof(max_task_footprint_mb))) {
-			/*
-			 * No limit was found in device tree.
-			 */
-			max_task_footprint_mb = 0;
-		}
-	}
-
 	if (max_task_footprint_mb != 0) {
 #if CONFIG_MEMORYSTATUS
 		if (max_task_footprint_mb < 50) {
@@ -932,11 +994,6 @@ task_init(void)
 	}
 
 #if DEVELOPMENT || DEBUG
-	if (!PE_parse_boot_argn("exc_resource_threads",
-	    &exc_resource_threads_enabled,
-	    sizeof(exc_resource_threads_enabled))) {
-		exc_resource_threads_enabled = 1;
-	}
 	PE_parse_boot_argn("task_exc_guard_default",
 	    &task_exc_guard_default,
 	    sizeof(task_exc_guard_default));
@@ -962,11 +1019,6 @@ task_init(void)
 	if (!PE_parse_boot_argn("task_wakeups_monitor_ustackshots_trigger_pct", &task_wakeups_monitor_ustackshots_trigger_pct,
 	    sizeof(task_wakeups_monitor_ustackshots_trigger_pct))) {
 		task_wakeups_monitor_ustackshots_trigger_pct = TASK_WAKEUPS_MONITOR_DEFAULT_USTACKSHOTS_TRIGGER;
-	}
-
-	if (!PE_parse_boot_argn("disable_exc_resource", &disable_exc_resource,
-	    sizeof(disable_exc_resource))) {
-		disable_exc_resource = 0;
 	}
 
 	if (!PE_parse_boot_argn("task_iomon_limit_mb", &task_iomon_limit_mb, sizeof(task_iomon_limit_mb))) {
@@ -1932,6 +1984,7 @@ task_deallocate_internal(
 	assert(!is_active(task->itk_space));
 	assert(!task->active);
 	assert(task->active_thread_count == 0);
+	assert(!task_get_game_mode(task));
 
 	lck_mtx_lock(&tasks_threads_lock);
 	assert(terminated_tasks_count > 0);
@@ -2090,14 +2143,7 @@ task_deallocate_internal(
 	}
 
 	task_ref_count_fini(task);
-
-	task->bsd_info_ro = proc_ro_release_task((proc_ro_t)task->bsd_info_ro);
-
-	if (task->bsd_info_ro != NULL) {
-		proc_ro_free(task->bsd_info_ro);
-		task->bsd_info_ro = NULL;
-	}
-
+	proc_ro_erase_task(task->bsd_info_ro);
 	task_release_proc_task_struct(task);
 }
 
@@ -2676,6 +2722,7 @@ task_duplicate_map_and_threads(
 #if DEVELOPMENT || DEBUG
 		memorystatus_abort_vm_map_fork(task);
 #endif
+		ktriage_record(thread_tid(self), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_CORPSE, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_CORPSE_FAIL_LIBGMALLOC), 0 /* arg */);
 		task_resume_internal(task);
 		return KERN_FAILURE;
 	}
@@ -2989,6 +3036,15 @@ task_terminate_internal(
 	    task_ledgers.alternate_accounting_compressed);
 #endif
 
+#if CONFIG_DEFERRED_RECLAIM
+	/*
+	 * Remove this tasks reclaim buffer from global queues.
+	 */
+	if (task->deferred_reclamation_metadata != NULL) {
+		vm_deferred_reclamation_buffer_uninstall(task->deferred_reclamation_metadata);
+	}
+#endif /* CONFIG_DEFERRED_RECLAIM */
+
 	/*
 	 * If the current thread is a member of the task
 	 * being terminated, then the last reference to
@@ -3264,6 +3320,139 @@ task_complete_halt(task_t task)
 	iokit_task_terminate(task);
 }
 
+#ifdef CONFIG_TASK_SUSPEND_STATS
+
+static void
+_task_mark_suspend_source(task_t task)
+{
+	int idx;
+	task_suspend_stats_t stats;
+	task_suspend_source_t source;
+	task_lock_assert_owned(task);
+	stats = &task->t_suspend_stats;
+
+	idx = stats->tss_count % TASK_SUSPEND_SOURCES_MAX;
+	source = &task->t_suspend_sources[idx];
+	bzero(source, sizeof(*source));
+
+	source->tss_time = mach_absolute_time();
+	source->tss_tid = current_thread()->thread_id;
+	source->tss_pid = task_pid(current_task());
+	task_best_name(current_task(), source->tss_procname, sizeof(source->tss_procname));
+
+	stats->tss_count++;
+}
+
+static inline void
+_task_mark_suspend_start(task_t task)
+{
+	task_lock_assert_owned(task);
+	task->t_suspend_stats.tss_last_start = mach_absolute_time();
+}
+
+static inline void
+_task_mark_suspend_end(task_t task)
+{
+	task_lock_assert_owned(task);
+	task->t_suspend_stats.tss_last_end = mach_absolute_time();
+	task->t_suspend_stats.tss_duration += (task->t_suspend_stats.tss_last_end -
+	    task->t_suspend_stats.tss_last_start);
+}
+
+static kern_return_t
+_task_get_suspend_stats_locked(task_t task, task_suspend_stats_t stats)
+{
+	if (task == TASK_NULL || stats == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	task_lock_assert_owned(task);
+	memcpy(stats, &task->t_suspend_stats, sizeof(task->t_suspend_stats));
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+_task_get_suspend_sources_locked(task_t task, task_suspend_source_t sources)
+{
+	if (task == TASK_NULL || sources == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	task_lock_assert_owned(task);
+	memcpy(sources, task->t_suspend_sources,
+	    sizeof(struct task_suspend_source_s) * TASK_SUSPEND_SOURCES_MAX);
+	return KERN_SUCCESS;
+}
+
+#endif /* CONFIG_TASK_SUSPEND_STATS */
+
+kern_return_t
+task_get_suspend_stats(task_t task, task_suspend_stats_t stats)
+{
+#ifdef CONFIG_TASK_SUSPEND_STATS
+	kern_return_t kr;
+	if (task == TASK_NULL || stats == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	task_lock(task);
+	kr = _task_get_suspend_stats_locked(task, stats);
+	task_unlock(task);
+	return kr;
+#else /* CONFIG_TASK_SUSPEND_STATS */
+	(void)task;
+	(void)stats;
+	return KERN_NOT_SUPPORTED;
+#endif
+}
+
+kern_return_t
+task_get_suspend_stats_kdp(task_t task, task_suspend_stats_t stats)
+{
+#ifdef CONFIG_TASK_SUSPEND_STATS
+	if (task == TASK_NULL || stats == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	memcpy(stats, &task->t_suspend_stats, sizeof(task->t_suspend_stats));
+	return KERN_SUCCESS;
+#else /* CONFIG_TASK_SUSPEND_STATS */
+#pragma unused(task, stats)
+	return KERN_NOT_SUPPORTED;
+#endif /* CONFIG_TASK_SUSPEND_STATS */
+}
+
+kern_return_t
+task_get_suspend_sources(task_t task, task_suspend_source_array_t sources)
+{
+#ifdef CONFIG_TASK_SUSPEND_STATS
+	kern_return_t kr;
+	if (task == TASK_NULL || sources == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	task_lock(task);
+	kr = _task_get_suspend_sources_locked(task, sources);
+	task_unlock(task);
+	return kr;
+#else /* CONFIG_TASK_SUSPEND_STATS */
+	(void)task;
+	(void)sources;
+	return KERN_NOT_SUPPORTED;
+#endif
+}
+
+kern_return_t
+task_get_suspend_sources_kdp(task_t task, task_suspend_source_array_t sources)
+{
+#ifdef CONFIG_TASK_SUSPEND_STATS
+	if (task == TASK_NULL || sources == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	memcpy(sources, task->t_suspend_sources,
+	    sizeof(struct task_suspend_source_s) * TASK_SUSPEND_SOURCES_MAX);
+	return KERN_SUCCESS;
+#else /* CONFIG_TASK_SUSPEND_STATS */
+#pragma unused(task, sources)
+	return KERN_NOT_SUPPORTED;
+#endif
+}
+
 /*
  *	task_hold_locked:
  *
@@ -3298,6 +3487,10 @@ task_hold_locked(
 		thread_hold(thread);
 		thread_mtx_unlock(thread);
 	}
+
+#ifdef CONFIG_TASK_SUSPEND_STATS
+	_task_mark_suspend_start(task);
+#endif
 }
 
 /*
@@ -3327,6 +3520,9 @@ task_hold(
 		return KERN_FAILURE;
 	}
 
+#ifdef CONFIG_TASK_SUSPEND_STATS
+	_task_mark_suspend_source(task);
+#endif /* CONFIG_TASK_SUSPEND_STATS */
 	task_hold_locked(task);
 	task_unlock(task);
 
@@ -3424,6 +3620,10 @@ task_release_locked(
 		thread_release(thread);
 		thread_mtx_unlock(thread);
 	}
+
+#if CONFIG_TASK_SUSPEND_STATS
+	_task_mark_suspend_end(task);
+#endif
 }
 
 /*
@@ -3651,6 +3851,10 @@ place_task_hold(
 		task->legacy_stop_count++;
 	}
 
+#ifdef CONFIG_TASK_SUSPEND_STATS
+	_task_mark_suspend_source(task);
+#endif /* CONFIG_TASK_SUSPEND_STATS */
+
 	if (task->user_stop_count++ > 0) {
 		/*
 		 *	If the stop count was positive, the task is
@@ -3877,8 +4081,22 @@ task_resume(
 }
 
 /*
- * Suspend the target task.
- * Making/holding a token/reference/port is the callers responsibility.
+ * Suspend a task that is already protected by a held lock.
+ * Making/holding a token/reference/port is the caller's responsibility.
+ */
+kern_return_t
+task_suspend_internal_locked(task_t task)
+{
+	if (task == TASK_NULL || task == kernel_task) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	return place_task_hold(task, TASK_HOLD_NORMAL);
+}
+
+/*
+ * Suspend a task.
+ * Making/holding a token/reference/port is the caller's responsibility.
  */
 kern_return_t
 task_suspend_internal(task_t task)
@@ -3890,7 +4108,7 @@ task_suspend_internal(task_t task)
 	}
 
 	task_lock(task);
-	kr = place_task_hold(task, TASK_HOLD_NORMAL);
+	kr = task_suspend_internal_locked(task);
 	task_unlock(task);
 	return kr;
 }
@@ -3941,7 +4159,22 @@ task_suspend2_external(
 }
 
 /*
- * Resume the task
+ * Resume a task that is already protected by a held lock.
+ * (reference/token/port management is caller's responsibility).
+ */
+kern_return_t
+task_resume_internal_locked(
+	task_suspension_token_t         task)
+{
+	if (task == TASK_NULL || task == kernel_task) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	return release_task_hold(task, TASK_HOLD_NORMAL);
+}
+
+/*
+ * Resume a task.
  * (reference/token/port management is caller's responsibility).
  */
 kern_return_t
@@ -3955,7 +4188,7 @@ task_resume_internal(
 	}
 
 	task_lock(task);
-	kr = release_task_hold(task, TASK_HOLD_NORMAL);
+	kr = task_resume_internal_locked(task);
 	task_unlock(task);
 	return kr;
 }
@@ -4028,7 +4261,7 @@ task_suspension_send_once(ipc_port_t port)
 	task_t task = convert_port_to_task_suspension_token(port);
 
 	if (task == TASK_NULL || task == kernel_task) {
-		return;         /* nothing to do */
+		return; /* nothing to do */
 	}
 
 	/* release the hold held by this specific send-once right */
@@ -5815,13 +6048,13 @@ task_info(
 		dbg_info->ipc_space_size = 0;
 
 		if (space) {
-			smr_global_enter();
+			smr_ipc_enter();
 			ipc_entry_table_t table = smr_entered_load(&space->is_table);
 			if (table) {
 				dbg_info->ipc_space_size =
 				    ipc_entry_table_count(table);
 			}
-			smr_global_leave();
+			smr_ipc_leave();
 		}
 
 		dbg_info->suspend_count = task->suspend_count;
@@ -5833,6 +6066,36 @@ task_info(
 		error = KERN_NOT_SUPPORTED;
 		break;
 #endif /* DEVELOPMENT || DEBUG */
+	}
+	case TASK_SUSPEND_STATS_INFO:
+	{
+#if CONFIG_TASK_SUSPEND_STATS && (DEVELOPMENT || DEBUG)
+		if (*task_info_count < TASK_SUSPEND_STATS_INFO_COUNT || task_info_out == NULL) {
+			error = KERN_INVALID_ARGUMENT;
+			break;
+		}
+		error = _task_get_suspend_stats_locked(task, (task_suspend_stats_t)task_info_out);
+		*task_info_count = TASK_SUSPEND_STATS_INFO_COUNT;
+		break;
+#else /* CONFIG_TASK_SUSPEND_STATS && (DEVELOPMENT || DEBUG) */
+		error = KERN_NOT_SUPPORTED;
+		break;
+#endif /* CONFIG_TASK_SUSPEND_STATS && (DEVELOPMENT || DEBUG) */
+	}
+	case TASK_SUSPEND_SOURCES_INFO:
+	{
+#if CONFIG_TASK_SUSPEND_STATS && (DEVELOPMENT || DEBUG)
+		if (*task_info_count < TASK_SUSPEND_SOURCES_INFO_COUNT || task_info_out == NULL) {
+			error = KERN_INVALID_ARGUMENT;
+			break;
+		}
+		error = _task_get_suspend_sources_locked(task, (task_suspend_source_t)task_info_out);
+		*task_info_count = TASK_SUSPEND_SOURCES_INFO_COUNT;
+		break;
+#else /* CONFIG_TASK_SUSPEND_STATS && (DEVELOPMENT || DEBUG) */
+		error = KERN_NOT_SUPPORTED;
+		break;
+#endif /* CONFIG_TASK_SUSPEND_STATS && (DEVELOPMENT || DEBUG) */
 	}
 	default:
 		error = KERN_INVALID_ARGUMENT;
@@ -6692,7 +6955,7 @@ task_mark_has_triggered_exc_resource(task_t task, boolean_t memlimit_is_active)
 #define HWM_USERCORE_MINSPACE 250 // free space (in MB) required *after* core file creation
 
 void __attribute__((noinline))
-PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb, boolean_t is_fatal)
+PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb, send_exec_resource_options_t exception_options)
 {
 	task_t                                          task            = current_task();
 	int                                                     pid         = 0;
@@ -6747,9 +7010,11 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 
 	if (disable_exc_resource) {
 		printf("process %s[%d] crossed memory high watermark (%d MB); EXC_RESOURCE "
-		    "supressed by a boot-arg.\n", procname, pid, max_footprint_mb);
+		    "suppressed by a boot-arg.\n", procname, pid, max_footprint_mb);
 		return;
 	}
+	printf("process %s [%d] crossed memory %s (%d MB); EXC_RESOURCE "
+	    "\n", procname, pid, (!(exception_options & EXEC_RESOURCE_DIAGNOSTIC) ? "high watermark" : "diagnostics limit"), max_footprint_mb);
 
 	/*
 	 * A task that has triggered an EXC_RESOURCE, should not be
@@ -6765,14 +7030,22 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 
 	code[0] = code[1] = 0;
 	EXC_RESOURCE_ENCODE_TYPE(code[0], RESOURCE_TYPE_MEMORY);
-	EXC_RESOURCE_ENCODE_FLAVOR(code[0], FLAVOR_HIGH_WATERMARK);
+	/*
+	 * Regardless if there was a diag memlimit violation, fatal exceptions shall be notified always
+	 * as high level watermaks. In another words, if there was a diag limit and a watermark, and the
+	 * violation if for limit watermark, a watermark shall be reported.
+	 */
+	if (!(exception_options & EXEC_RESOURCE_FATAL)) {
+		EXC_RESOURCE_ENCODE_FLAVOR(code[0], !(exception_options & EXEC_RESOURCE_DIAGNOSTIC)  ? FLAVOR_HIGH_WATERMARK : FLAVOR_DIAG_MEMLIMIT);
+	} else {
+		EXC_RESOURCE_ENCODE_FLAVOR(code[0], FLAVOR_HIGH_WATERMARK );
+	}
 	EXC_RESOURCE_HWM_ENCODE_LIMIT(code[0], max_footprint_mb);
-
 	/*
 	 * Do not generate a corpse fork if the violation is a fatal one
 	 * or the process wants synchronous EXC_RESOURCE exceptions.
 	 */
-	if (is_fatal || send_sync_exc_resource || !exc_via_corpse_forking) {
+	if ((exception_options & EXEC_RESOURCE_FATAL) || send_sync_exc_resource || !exc_via_corpse_forking) {
 		/* Do not send a EXC_RESOURCE if corpse_for_fatal_memkill is set */
 		if (send_sync_exc_resource || !corpse_for_fatal_memkill) {
 			/*
@@ -6784,9 +7057,9 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 			task_resume_internal(task);
 		}
 	} else {
-		if (audio_active) {
+		if (disable_exc_resource_during_audio && audio_active) {
 			printf("process %s[%d] crossed memory high watermark (%d MB); EXC_RESOURCE "
-			    "supressed due to audio playback.\n", procname, pid, max_footprint_mb);
+			    "suppressed due to audio playback.\n", procname, pid, max_footprint_mb);
 		} else {
 			task_enqueue_exception_with_corpse(task, EXC_RESOURCE,
 			    code, EXCEPTION_CODE_MAX, NULL, FALSE);
@@ -6800,23 +7073,30 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 	 */
 	proc_memstat_skip(cur_bsd_info, FALSE);         /* clear the flag */
 }
-
 /*
  * Callback invoked when a task exceeds its physical footprint limit.
  */
 void
 task_footprint_exceeded(int warning, __unused const void *param0, __unused const void *param1)
 {
-	ledger_amount_t max_footprint, max_footprint_mb;
+	ledger_amount_t max_footprint = 0;
+	ledger_amount_t max_footprint_mb = 0;
+#if DEBUG || DEVELOPMENT
+	ledger_amount_t diag_threshold_limit_mb = 0;
+	ledger_amount_t diag_threshold_limit = 0;
+#endif
 #if CONFIG_DEFERRED_RECLAIM
 	ledger_amount_t current_footprint;
 #endif /* CONFIG_DEFERRED_RECLAIM */
 	task_t task;
-	boolean_t is_warning;
+	send_exec_resource_is_warning is_warning = IS_NOT_WARNING;
 	boolean_t memlimit_is_active;
-	boolean_t memlimit_is_fatal;
-
-	if (warning == LEDGER_WARNING_DIPPED_BELOW) {
+	send_exec_resource_is_fatal memlimit_is_fatal;
+	send_exec_resource_is_diagnostics is_diag_mem_threshold = IS_NOT_DIAGNOSTICS;
+	if (warning == LEDGER_WARNING_DIAG_MEM_THRESHOLD) {
+		is_diag_mem_threshold = IS_DIAGNOSTICS;
+		is_warning = IS_WARNING;
+	} else if (warning == LEDGER_WARNING_DIPPED_BELOW) {
 		/*
 		 * Task memory limits only provide a warning on the way up.
 		 */
@@ -6826,18 +7106,21 @@ task_footprint_exceeded(int warning, __unused const void *param0, __unused const
 		 * This task is in danger of violating a memory limit,
 		 * It has exceeded a percentage level of the limit.
 		 */
-		is_warning = TRUE;
+		is_warning = IS_WARNING;
 	} else {
 		/*
 		 * The task has exceeded the physical footprint limit.
 		 * This is not a warning but a true limit violation.
 		 */
-		is_warning = FALSE;
+		is_warning = IS_NOT_WARNING;
 	}
 
 	task = current_task();
 
 	ledger_get_limit(task->ledger, task_ledgers.phys_footprint, &max_footprint);
+#if DEBUG || DEVELOPMENT
+	ledger_get_diag_mem_threshold(task->ledger, task_ledgers.phys_footprint, &diag_threshold_limit);
+#endif
 #if CONFIG_DEFERRED_RECLAIM
 	if (task->deferred_reclamation_metadata != NULL) {
 		/*
@@ -6852,24 +7135,64 @@ task_footprint_exceeded(int warning, __unused const void *param0, __unused const
 	}
 #endif /* CONFIG_DEFERRED_RECLAIM */
 	max_footprint_mb = max_footprint >> 20;
-
+#if DEBUG || DEVELOPMENT
+	diag_threshold_limit_mb = diag_threshold_limit >> 20;
+#endif
 	memlimit_is_active = task_get_memlimit_is_active(task);
-	memlimit_is_fatal = task_get_memlimit_is_fatal(task);
+	memlimit_is_fatal = task_get_memlimit_is_fatal(task) == FALSE ? IS_NOT_FATAL : IS_FATAL;
+#if DEBUG || DEVELOPMENT
+	if (is_diag_mem_threshold == IS_NOT_DIAGNOSTICS) {
+		task_process_crossed_limit_no_diag(task, max_footprint_mb, memlimit_is_fatal, memlimit_is_active, is_warning);
+	} else {
+		task_process_crossed_limit_diag(diag_threshold_limit_mb);
+	}
+#else
+	task_process_crossed_limit_no_diag(task, max_footprint_mb, memlimit_is_fatal, memlimit_is_active, is_warning);
+#endif
+}
 
+/*
+ * Actions to perfrom when a process has crossed watermark or is a fatal consumption */
+static inline void
+task_process_crossed_limit_no_diag(task_t task, ledger_amount_t ledger_limit_size, bool memlimit_is_fatal, bool memlimit_is_active, send_exec_resource_is_warning is_warning)
+{
+	send_exec_resource_options_t exception_options = 0;
+	if (memlimit_is_fatal) {
+		exception_options |= EXEC_RESOURCE_FATAL;
+	}
 	/*
 	 * If this is an actual violation (not a warning), then generate EXC_RESOURCE exception.
 	 * We only generate the exception once per process per memlimit (active/inactive limit).
 	 * To enforce this, we monitor state based on the  memlimit's active/inactive attribute
 	 * and we disable it by marking that memlimit as exception triggered.
 	 */
-	if ((is_warning == FALSE) && (!task_has_triggered_exc_resource(task, memlimit_is_active))) {
-		PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND((int)max_footprint_mb, memlimit_is_fatal);
-		memorystatus_log_exception((int)max_footprint_mb, memlimit_is_active, memlimit_is_fatal);
+	if (is_warning == IS_NOT_WARNING && !task_has_triggered_exc_resource(task, memlimit_is_active)) {
+		PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND((int)ledger_limit_size, exception_options);
+		// If it was not a diag threshold (if was a memory limit), then we do not want more signalling,
+		// however, if was a diag limit, the user may reload a different limit and signal again the violation
+		memorystatus_log_exception((int)ledger_limit_size, memlimit_is_active, memlimit_is_fatal);
 		task_mark_has_triggered_exc_resource(task, memlimit_is_active);
 	}
-
-	memorystatus_on_ledger_footprint_exceeded(is_warning, memlimit_is_active, memlimit_is_fatal);
+	memorystatus_on_ledger_footprint_exceeded(is_warning == IS_NOT_WARNING ? FALSE : TRUE, memlimit_is_active, memlimit_is_fatal);
 }
+
+#if DEBUG || DEVELOPMENT
+/**
+ * Actions to take when a process has crossed the diagnostics limit
+ */
+static inline void
+task_process_crossed_limit_diag(ledger_amount_t ledger_limit_size)
+{
+	/*
+	 * If this is an actual violation (not a warning), then generate EXC_RESOURCE exception.
+	 * In the case of the diagnostics thresholds, the exception will be signaled only once, but the
+	 * inhibit / rearm mechanism if performed at ledger level.
+	 */
+	send_exec_resource_options_t exception_options = EXEC_RESOURCE_DIAGNOSTIC;
+	PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND((int)ledger_limit_size, exception_options);
+	memorystatus_log_diag_threshold_exception((int)ledger_limit_size);
+}
+#endif
 
 extern int proc_check_footprint_priv(void);
 
@@ -6897,6 +7220,29 @@ task_set_phys_footprint_limit(
 
 	return task_set_phys_footprint_limit_internal(task, new_limit_mb, old_limit_mb, memlimit_is_active, memlimit_is_fatal);
 }
+
+/*
+ * Set the limit of diagnostics memory consumption for a concrete task
+ */
+#if CONFIG_MEMORYSTATUS
+#if DEVELOPMENT || DEBUG
+kern_return_t
+task_set_diag_footprint_limit(
+	task_t task,
+	uint64_t new_limit_mb,
+	uint64_t *old_limit_mb)
+{
+	kern_return_t error;
+
+	if ((error = proc_check_footprint_priv())) {
+		return KERN_NO_ACCESS;
+	}
+
+	return task_set_diag_footprint_limit_internal(task, new_limit_mb, old_limit_mb);
+}
+
+#endif // DEVELOPMENT || DEBUG
+#endif // CONFIG_MEMORYSTATUS
 
 kern_return_t
 task_convert_phys_footprint_limit(
@@ -6930,12 +7276,29 @@ task_set_phys_footprint_limit_internal(
 {
 	ledger_amount_t old;
 	kern_return_t ret;
-
+#if DEVELOPMENT || DEBUG
+	diagthreshold_check_return diag_threshold_validity;
+#endif
 	ret = ledger_get_limit(task->ledger, task_ledgers.phys_footprint, &old);
 
 	if (ret != KERN_SUCCESS) {
 		return ret;
 	}
+	/**
+	 * Maybe we will need to re-enable the diag threshold, lets get the value
+	 * and the current status
+	 */
+#if DEVELOPMENT || DEBUG
+	diag_threshold_validity = task_check_memorythreshold_is_valid( task, new_limit_mb, false);
+	/**
+	 * If the footprint and diagnostics threshold are going to be same, lets disable the threshold
+	 */
+	if (diag_threshold_validity == THRESHOLD_IS_SAME_AS_LIMIT_FLAG_ENABLED) {
+		ledger_set_diag_mem_threshold_disabled(task->ledger, task_ledgers.phys_footprint);
+	} else if (diag_threshold_validity == THRESHOLD_IS_NOT_SAME_AS_LIMIT_FLAG_DISABLED) {
+		ledger_set_diag_mem_threshold_enabled(task->ledger, task_ledgers.phys_footprint);
+	}
+#endif
 
 	/*
 	 * Check that limit >> 20 will not give an "unexpected" 32-bit
@@ -6960,7 +7323,16 @@ task_set_phys_footprint_limit_internal(
 		task_set_memlimit_is_active(task, memlimit_is_active);
 		task_set_memlimit_is_fatal(task, memlimit_is_fatal);
 		task_unlock(task);
-
+		/**
+		 * If the diagnostics were disabled, and now we have a new limit, we have to re-enable it.
+		 */
+#if DEVELOPMENT || DEBUG
+		if (diag_threshold_validity == THRESHOLD_IS_SAME_AS_LIMIT_FLAG_ENABLED) {
+			ledger_set_diag_mem_threshold_disabled(task->ledger, task_ledgers.phys_footprint);
+		} else if (diag_threshold_validity == THRESHOLD_IS_NOT_SAME_AS_LIMIT_FLAG_DISABLED) {
+			ledger_set_diag_mem_threshold_enabled(task->ledger, task_ledgers.phys_footprint);
+		}
+	#endif
 		return KERN_SUCCESS;
 	}
 
@@ -6992,9 +7364,110 @@ task_set_phys_footprint_limit_internal(
 	}
 
 	task_unlock(task);
+#if DEVELOPMENT || DEBUG
+	if (diag_threshold_validity == THRESHOLD_IS_NOT_SAME_AS_LIMIT_FLAG_DISABLED) {
+		ledger_set_diag_mem_threshold_enabled(task->ledger, task_ledgers.phys_footprint);
+	}
+	#endif
 
 	return KERN_SUCCESS;
 }
+
+#if RESETTABLE_DIAG_FOOTPRINT_LIMITS
+kern_return_t
+task_set_diag_footprint_limit_internal(
+	task_t task,
+	uint64_t new_limit_bytes,
+	uint64_t *old_limit_bytes)
+{
+	ledger_amount_t old = 0;
+	kern_return_t ret = KERN_SUCCESS;
+	diagthreshold_check_return diag_threshold_validity;
+	ret = ledger_get_diag_mem_threshold(task->ledger, task_ledgers.phys_footprint, &old);
+
+	if (ret != KERN_SUCCESS) {
+		return ret;
+	}
+	/**
+	 * Maybe we will need to re-enable the diag threshold, lets get the value
+	 * and the current status
+	 */
+	diag_threshold_validity = task_check_memorythreshold_is_valid( task, new_limit_bytes >> 20, true);
+	/**
+	 * If the footprint and diagnostics threshold are going to be same, lets disable the threshold
+	 */
+	if (diag_threshold_validity == THRESHOLD_IS_SAME_AS_LIMIT_FLAG_ENABLED) {
+		ledger_set_diag_mem_threshold_disabled(task->ledger, task_ledgers.phys_footprint);
+	}
+
+	/*
+	 * Check that limit >> 20 will not give an "unexpected" 32-bit
+	 * result. There are, however, implicit assumptions that -1 mb limit
+	 * equates to LEDGER_LIMIT_INFINITY.
+	 */
+	if (old_limit_bytes) {
+		*old_limit_bytes = old;
+	}
+
+	if (new_limit_bytes == -1) {
+		/*
+		 * Caller wishes to remove the limit.
+		 */
+		ledger_set_diag_mem_threshold(task->ledger, task_ledgers.phys_footprint,
+		    LEDGER_LIMIT_INFINITY);
+		/*
+		 * If the memory diagnostics flag was disabled, lets enable it again
+		 */
+		ledger_set_diag_mem_threshold_enabled(task->ledger, task_ledgers.phys_footprint);
+		return KERN_SUCCESS;
+	}
+
+#ifdef CONFIG_NOMONITORS
+	return KERN_SUCCESS;
+#else
+
+	task_lock(task);
+	ledger_set_diag_mem_threshold(task->ledger, task_ledgers.phys_footprint,
+	    (ledger_amount_t)new_limit_bytes );
+	if (task == current_task()) {
+		ledger_check_new_balance(current_thread(), task->ledger,
+		    task_ledgers.phys_footprint);
+	}
+
+	task_unlock(task);
+	if (diag_threshold_validity == THRESHOLD_IS_SAME_AS_LIMIT_FLAG_ENABLED) {
+		ledger_set_diag_mem_threshold_disabled(task->ledger, task_ledgers.phys_footprint);
+	} else if (diag_threshold_validity == THRESHOLD_IS_NOT_SAME_AS_LIMIT_FLAG_DISABLED) {
+		ledger_set_diag_mem_threshold_enabled(task->ledger, task_ledgers.phys_footprint);
+	}
+
+	return KERN_SUCCESS;
+#endif /* CONFIG_NOMONITORS */
+}
+
+kern_return_t
+task_get_diag_footprint_limit_internal(
+	task_t task,
+	uint64_t *new_limit_bytes,
+	bool *threshold_disabled)
+{
+	ledger_amount_t ledger_limit;
+	kern_return_t ret = KERN_SUCCESS;
+	if (new_limit_bytes == NULL || threshold_disabled == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	ret = ledger_get_diag_mem_threshold(task->ledger, task_ledgers.phys_footprint, &ledger_limit);
+	if (ledger_limit == LEDGER_LIMIT_INFINITY) {
+		ledger_limit = -1;
+	}
+	if (ret == KERN_SUCCESS) {
+		*new_limit_bytes = ledger_limit;
+		ret = ledger_is_diag_threshold_enabled(task->ledger, task_ledgers.phys_footprint, threshold_disabled);
+	}
+	return ret;
+}
+#endif /* RESETTABLE_DIAG_FOOTPRINT_LIMITS */
+
 
 kern_return_t
 task_get_phys_footprint_limit(
@@ -7507,17 +7980,17 @@ SENDING_NOTIFICATION__THIS_PROCESS_IS_CAUSING_TOO_MANY_WAKEUPS(void)
 #ifdef EXC_RESOURCE_MONITORS
 	if (disable_exc_resource) {
 		printf("process %s[%d] caught causing excessive wakeups. EXC_RESOURCE "
-		    "supressed by a boot-arg\n", procname, pid);
+		    "suppressed by a boot-arg\n", procname, pid);
 		return;
 	}
-	if (audio_active) {
+	if (disable_exc_resource_during_audio && audio_active) {
 		os_log(OS_LOG_DEFAULT, "process %s[%d] caught causing excessive wakeups. EXC_RESOURCE "
-		    "supressed due to audio playback\n", procname, pid);
+		    "suppressed due to audio playback\n", procname, pid);
 		return;
 	}
 	if (lei.lei_last_refill == 0) {
 		os_log(OS_LOG_DEFAULT, "process %s[%d] caught causing excessive wakeups. EXC_RESOURCE "
-		    "supressed due to lei.lei_last_refill = 0 \n", procname, pid);
+		    "suppressed due to lei.lei_last_refill = 0 \n", procname, pid);
 	}
 
 	code[0] = code[1] = 0;
@@ -7986,6 +8459,71 @@ task_is_gpu_denied(task_t task)
 {
 	/* We don't need the lock to read this flag */
 	return (task->t_flags & TF_GPU_DENIED) ? TRUE : FALSE;
+}
+
+/*
+ * Task policy termination uses this path to clear the bit the final time
+ * during the termination flow, and the TASK_POLICY_TERMINATED bit guarantees
+ * that it won't be changed again on a terminated task.
+ */
+bool
+task_set_game_mode_locked(task_t task, bool enabled)
+{
+	task_lock_assert_owned(task);
+
+	if (enabled) {
+		assert(proc_get_effective_task_policy(task, TASK_POLICY_TERMINATED) == 0);
+	}
+
+	bool previously_enabled = task_get_game_mode(task);
+	bool needs_update = false;
+	uint32_t new_count = 0;
+
+	if (enabled) {
+		task->t_flags |= TF_GAME_MODE;
+	} else {
+		task->t_flags &= ~TF_GAME_MODE;
+	}
+
+	if (enabled && !previously_enabled) {
+		if (task_coalition_adjust_game_mode_count(task, 1, &new_count) && (new_count == 1)) {
+			needs_update = true;
+		}
+	} else if (!enabled && previously_enabled) {
+		if (task_coalition_adjust_game_mode_count(task, -1, &new_count) && (new_count == 0)) {
+			needs_update = true;
+		}
+	}
+
+	return needs_update;
+}
+
+void
+task_set_game_mode(task_t task, bool enabled)
+{
+	bool needs_update = false;
+
+	task_lock(task);
+
+	/* After termination, further updates are no longer effective */
+	if (proc_get_effective_task_policy(task, TASK_POLICY_TERMINATED) == 0) {
+		needs_update = task_set_game_mode_locked(task, enabled);
+	}
+
+	task_unlock(task);
+
+#if CONFIG_THREAD_GROUPS
+	if (needs_update) {
+		task_coalition_thread_group_game_mode_update(task);
+	}
+#endif /* CONFIG_THREAD_GROUPS */
+}
+
+bool
+task_get_game_mode(task_t task)
+{
+	/* We don't need the lock to read this flag */
+	return task->t_flags & TF_GAME_MODE;
 }
 
 
@@ -8815,10 +9353,10 @@ mac_task_set_kobj_filter_mask(task_t task, uint8_t *maskptr)
 }
 
 /* Hook for mach trap/sc filter evaluation policy. */
-mac_task_mach_filter_cbfunc_t mac_task_mach_trap_evaluate = NULL;
+SECURITY_READ_ONLY_LATE(mac_task_mach_filter_cbfunc_t) mac_task_mach_trap_evaluate = NULL;
 
 /* Hook for kobj message filter evaluation policy. */
-mac_task_kobj_filter_cbfunc_t mac_task_kobj_msg_evaluate = NULL;
+SECURITY_READ_ONLY_LATE(mac_task_kobj_filter_cbfunc_t) mac_task_kobj_msg_evaluate = NULL;
 
 /* Set the callback hooks for the filtering policy. */
 int
@@ -9132,4 +9670,67 @@ boolean_t
 kdp_task_is_locked(task_t task)
 {
 	return kdp_lck_mtx_lock_spin_is_acquired(&task->lock);
+}
+
+#if DEBUG || DEVELOPMENT
+/**
+ *
+ * Check if a threshold limit is valid based on the actual phys memory
+ * limit. If they are same, race conditions may arise, so we have to prevent
+ * it to happen.
+ */
+static diagthreshold_check_return
+task_check_memorythreshold_is_valid(task_t task, uint64_t new_limit, bool is_diagnostics_value)
+{
+	int phys_limit_mb;
+	kern_return_t ret_value;
+	bool threshold_enabled;
+	bool dummy;
+	ret_value = ledger_is_diag_threshold_enabled(task->ledger, task_ledgers.phys_footprint, &threshold_enabled);
+	if (ret_value != KERN_SUCCESS) {
+		return ret_value;
+	}
+	if (is_diagnostics_value == true) {
+		ret_value = task_get_phys_footprint_limit(task, &phys_limit_mb);
+	} else {
+		uint64_t diag_limit;
+		ret_value = task_get_diag_footprint_limit_internal(task, &diag_limit, &dummy);
+		phys_limit_mb = (int)(diag_limit >> 20);
+	}
+	if (ret_value != KERN_SUCCESS) {
+		return ret_value;
+	}
+	if (phys_limit_mb == (int)  new_limit) {
+		if (threshold_enabled == false) {
+			return THRESHOLD_IS_SAME_AS_LIMIT_FLAG_DISABLED;
+		} else {
+			return THRESHOLD_IS_SAME_AS_LIMIT_FLAG_ENABLED;
+		}
+	}
+	if (threshold_enabled == false) {
+		return THRESHOLD_IS_NOT_SAME_AS_LIMIT_FLAG_DISABLED;
+	} else {
+		return THRESHOLD_IS_NOT_SAME_AS_LIMIT_FLAG_ENABLED;
+	}
+}
+#endif
+
+
+#pragma mark task utils
+
+/* defined in bsd/kern/kern_proc.c */
+extern void proc_name(int pid, char *buf, int size);
+extern char *proc_best_name(struct proc *p);
+
+void
+task_procname(task_t task, char *buf, int size)
+{
+	proc_name(task_pid(task), buf, size);
+}
+
+void
+task_best_name(task_t task, char *buf, size_t size)
+{
+	char *name = proc_best_name(task_get_proc_raw(task));
+	strlcpy(buf, name, size);
 }

@@ -69,14 +69,27 @@ int      coalition_type(coalition_t coal);
 void     task_coalition_update_gpu_stats(task_t task, uint64_t gpu_ns_delta);
 boolean_t task_coalition_adjust_focal_count(task_t task, int count, uint32_t *new_count);
 uint32_t task_coalition_focal_count(task_t task);
+uint32_t task_coalition_game_mode_count(task_t task);
+bool task_coalition_adjust_game_mode_count(task_t task, int count, uint32_t *new_count);
 boolean_t task_coalition_adjust_nonfocal_count(task_t task, int count, uint32_t *new_count);
 uint32_t task_coalition_nonfocal_count(task_t task);
+
+#if CONFIG_THREAD_GROUPS
+
+/* Thread group lives as long as the task is holding the coalition reference */
 struct thread_group *task_coalition_get_thread_group(task_t task);
+
+/* Donates the thread group reference to the coalition */
 void     coalition_set_thread_group(coalition_t coal, struct thread_group *tg);
 struct thread_group *kdp_coalition_get_thread_group(coalition_t coal);
+
+/* Thread group lives as long as the coalition reference is held */
 struct thread_group *coalition_get_thread_group(coalition_t coal);
+
 void task_coalition_thread_group_focal_update(task_t task);
+void task_coalition_thread_group_game_mode_update(task_t task);
 void task_coalition_thread_group_application_set(task_t task);
+#endif /* CONFIG_THREAD_GROUPS */
 
 void coalition_for_each_task(coalition_t coal, void *ctx,
     void (*callback)(coalition_t, void *, task_t));
@@ -165,6 +178,9 @@ boolean_t coalition_is_privileged(coalition_t coal);
 boolean_t task_is_in_privileged_coalition(task_t task, int type);
 
 kern_return_t coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_usage *cru_out);
+
+kern_return_t coalition_debug_info_internal(coalition_t coal,
+    struct coalinfo_debuginfo *c_debuginfo);
 
 task_t kdp_coalition_get_leader(coalition_t coal);
 

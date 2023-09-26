@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -362,7 +362,7 @@ ip6_output_list(struct mbuf *m0, int packetchain, struct ip6_pktopts *opt,
 
 	/* Grab info from mtags prepended to the chain */
 	if ((tag = m_tag_locate(m0, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_DUMMYNET, NULL)) != NULL) {
+	    KERNEL_TAG_TYPE_DUMMYNET)) != NULL) {
 		struct dn_pkt_tag       *dn_tag;
 
 		/*
@@ -372,7 +372,7 @@ ip6_output_list(struct mbuf *m0, int packetchain, struct ip6_pktopts *opt,
 		 */
 		VERIFY(0 == packetchain);
 
-		dn_tag = (struct dn_pkt_tag *)(tag + 1);
+		dn_tag = (struct dn_pkt_tag *)(tag->m_tag_data);
 		args.fwa_pf_rule = dn_tag->dn_pf_rule;
 
 		bcopy(&dn_tag->dn_dst6, &dst_buf, sizeof(dst_buf));
@@ -702,7 +702,7 @@ loopit:
 		if (sp->ipsec_if) {
 			goto skip_ipsec;
 		} else {
-			ip6obf.needipsec = TRUE;
+			ip6obf.needipsec = true;
 		}
 		break;
 
@@ -749,7 +749,7 @@ skip_ipsec:
 			goto freehdrs;
 		}
 		m = exthdrs.ip6e_ip6;
-		ip6obf.hdrsplit = TRUE;
+		ip6obf.hdrsplit = true;
 	}
 
 	/* adjust pointer */
@@ -767,7 +767,7 @@ skip_ipsec:
 				goto freehdrs;
 			}
 			m = exthdrs.ip6e_ip6;
-			ip6obf.hdrsplit = TRUE;
+			ip6obf.hdrsplit = true;
 		}
 		/* adjust pointer */
 		ip6 = mtod(m, struct ip6_hdr *);
@@ -846,7 +846,8 @@ skip_ipsec:
 
 	if (!TAILQ_EMPTY(&ipv6_filters) &&
 	    !((flags & IPV6_OUTARGS) &&
-	    (ip6oa->ip6oa_flags & IP6OAF_INTCOPROC_ALLOWED)
+	    (ip6oa->ip6oa_flags & IP6OAF_INTCOPROC_ALLOWED) &&
+	    (ip6oa->ip6oa_flags & IP6OAF_MANAGEMENT_ALLOWED)
 #if NECP
 	    && !necp_packet_should_skip_filters(m)
 #endif // NECP
@@ -1179,7 +1180,7 @@ skip_ipsec:
 			/* ifp (if non-NULL) will be released at the end */
 			goto bad;
 		}
-		ip6obf.route_selected = TRUE;
+		ip6obf.route_selected = true;
 	}
 	if (rt == NULL) {
 		/*
@@ -3541,7 +3542,7 @@ im6o_trace(struct ip6_moptions *im6o, int refhold)
 		tr = im6o_dbg->im6o_refrele;
 	}
 
-	idx = atomic_add_16_ov(cnt, 1) % IM6O_TRACE_HIST_SIZE;
+	idx = os_atomic_inc_orig(cnt, relaxed) % IM6O_TRACE_HIST_SIZE;
 	ctrace_record(&tr[idx]);
 }
 
@@ -4177,29 +4178,26 @@ ip6_output_checksum(struct ifnet *ifp, uint32_t mtu, struct mbuf *m,
     int nxt0, uint32_t tlen, uint32_t optlen)
 {
 	uint32_t sw_csum, hwcap = ifp->if_hwassist;
-	int tso = TSO_IPV6_OK(ifp, m);
 
 	if (!hwcksum_tx) {
 		/* do all in software; checksum offload is disabled */
 		sw_csum = CSUM_DELAY_IPV6_DATA & m->m_pkthdr.csum_flags;
 	} else {
 		/* do in software what the hardware cannot */
-		sw_csum = m->m_pkthdr.csum_flags &
-		    ~IF_HWASSIST_CSUM_FLAGS(hwcap);
+		sw_csum = m->m_pkthdr.csum_flags & ~IF_HWASSIST_CSUM_FLAGS(hwcap);
 	}
 
 	if (optlen != 0) {
 		sw_csum |= (CSUM_DELAY_IPV6_DATA &
 		    m->m_pkthdr.csum_flags);
-	} else if (!(sw_csum & CSUM_DELAY_IPV6_DATA) &&
-	    (hwcap & CSUM_PARTIAL)) {
+	} else if ((sw_csum & CSUM_DELAY_IPV6_DATA) && (hwcap & CSUM_PARTIAL)) {
 		/*
 		 * Partial checksum offload, ere), if no extension headers,
 		 * and TCP only (no UDP support, as the hardware may not be
 		 * able to convert +0 to -0 (0xffff) per RFC1122 4.1.3.4.
 		 * unless the interface supports "invert zero" capability.)
 		 */
-		if (hwcksum_tx && !tso &&
+		if (hwcksum_tx &&
 		    ((m->m_pkthdr.csum_flags & CSUM_TCPIPV6) ||
 		    ((hwcap & CSUM_ZERO_INVERT) &&
 		    (m->m_pkthdr.csum_flags & CSUM_ZERO_INVERT))) &&
@@ -4224,14 +4222,25 @@ ip6_output_checksum(struct ifnet *ifp, uint32_t mtu, struct mbuf *m,
 	}
 
 	if (hwcksum_tx) {
+		uint32_t delay_data = m->m_pkthdr.csum_flags & CSUM_DELAY_IPV6_DATA;
+		uint32_t hw_csum = IF_HWASSIST_CSUM_FLAGS(hwcap);
+
 		/*
 		 * Drop off bits that aren't supported by hardware;
 		 * also make sure to preserve non-checksum related bits.
 		 */
 		m->m_pkthdr.csum_flags =
-		    ((m->m_pkthdr.csum_flags &
-		    (IF_HWASSIST_CSUM_FLAGS(hwcap) | CSUM_DATA_VALID)) |
+		    ((m->m_pkthdr.csum_flags & (hw_csum | CSUM_DATA_VALID)) |
 		    (m->m_pkthdr.csum_flags & ~IF_HWASSIST_CSUM_MASK));
+
+		/*
+		 * If hardware supports partial checksum but not delay_data,
+		 * add back delay_data.
+		 */
+		if ((hw_csum & CSUM_PARTIAL) != 0 &&
+		    (hw_csum & delay_data) == 0) {
+			m->m_pkthdr.csum_flags |= delay_data;
+		}
 	} else {
 		/* drop all bits; checksum offload is disabled */
 		m->m_pkthdr.csum_flags = 0;

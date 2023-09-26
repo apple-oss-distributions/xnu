@@ -50,9 +50,9 @@ static inline void
 __hw_lck_ptr_encode(hw_lck_ptr_t *lck, const void *ptr)
 {
 	lck->lck_ptr_bits = (intptr_t)ptr;
-#if KASAN_TBI
-	lck->lck_ptr_tag  = kasan_tbi_get_tag((vm_offset_t)ptr);
-#endif /* KASAN_TBI */
+#if CONFIG_KERNEL_TAGGING
+	lck->lck_ptr_tag  = vm_memtag_extract_tag((vm_offset_t)ptr);
+#endif /* CONFIG_KERNEL_TAGGING */
 }
 
 __abortlike

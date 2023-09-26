@@ -964,7 +964,7 @@ vn_rdwr_64(
 	int spacetype;
 	struct vfs_context context;
 	int error = 0;
-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
+	UIO_STACKBUF(uio_buf, 1);
 
 	context.vc_thread = current_thread();
 	context.vc_ucred = cred;
@@ -1819,7 +1819,7 @@ vn_closefile(struct fileglob *fg, vfs_context_t ctx)
 			}
 
 			if ((fg->fg_lflags & FG_HAS_OFDLOCK) != 0) {
-				(void) VNOP_ADVLOCK(vp, (caddr_t)fg,
+				(void) VNOP_ADVLOCK(vp, ofd_to_id(fg),
 				    F_UNLCK, &lf, F_OFD_LOCK, ctx, NULL);
 			}
 		}
@@ -1966,8 +1966,8 @@ vn_kqfilter(struct fileproc *fp, struct knote *kn, struct kevent_qos_s *kev)
 			}
 #endif
 
-			kn->kn_hook = (void*)vp;
 			kn->kn_filtid = EVFILTID_VN;
+			knote_kn_hook_set_raw(kn, (void *)vp);
 			vnode_hold(vp);
 
 			vnode_lock(vp);
@@ -1997,7 +1997,7 @@ static void
 filt_vndetach(struct knote *kn)
 {
 	vfs_context_t ctx = vfs_context_current();
-	struct vnode *vp = (struct vnode *)kn->kn_hook;
+	struct vnode *vp = (struct vnode *)knote_kn_hook_get_raw(kn);
 	uint32_t vid = vnode_vid(vp);
 	if (vnode_getwithvid(vp, vid)) {
 		vnode_drop(vp);
@@ -2145,7 +2145,7 @@ filt_vnode_common(struct knote *kn, struct kevent_qos_s *kev, vnode_t vp, long h
 static int
 filt_vnode(struct knote *kn, long hint)
 {
-	vnode_t vp = (struct vnode *)kn->kn_hook;
+	vnode_t vp = (struct vnode *)knote_kn_hook_get_raw(kn);
 
 	return filt_vnode_common(kn, NULL, vp, hint);
 }
@@ -2153,7 +2153,7 @@ filt_vnode(struct knote *kn, long hint)
 static int
 filt_vntouch(struct knote *kn, struct kevent_qos_s *kev)
 {
-	vnode_t vp = (struct vnode *)kn->kn_hook;
+	vnode_t vp = (struct vnode *)knote_kn_hook_get_raw(kn);
 	uint32_t vid = vnode_vid(vp);
 	int activate;
 	int hint = 0;
@@ -2180,7 +2180,7 @@ filt_vntouch(struct knote *kn, struct kevent_qos_s *kev)
 static int
 filt_vnprocess(struct knote *kn, struct kevent_qos_s *kev)
 {
-	vnode_t vp = (struct vnode *)kn->kn_hook;
+	vnode_t vp = (struct vnode *)knote_kn_hook_get_raw(kn);
 	uint32_t vid = vnode_vid(vp);
 	int activate;
 	int hint = 0;
@@ -2315,4 +2315,16 @@ vnode_t
 vnio_vnode(vniodesc_t vnio)
 {
 	return vnio->vnio_vnode;
+}
+
+int
+vnode_isauthfs(vnode_t vp)
+{
+	fsioc_auth_fs_t afs = { .authvp = NULL };
+	int error;
+
+	error = VNOP_IOCTL(vp, FSIOC_AUTH_FS, (caddr_t)&afs, 0,
+	    vfs_context_current());
+
+	return error == 0 ? 1 : 0;
 }

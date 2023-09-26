@@ -380,21 +380,21 @@ def GetUserDataAsString(task, addr, size):
             addr: int - start address to get data from.
             size: int - no of bytes to read.
         returns:
-            str - a stream of bytes. Empty string if read fails.
+            data - a stream of bytes. Empty bytes() if read fails.
     """
     err = lldb.SBError()
     if GetConnectionProtocol() == "kdp":
         kdp_pmap_addr = unsigned(addressof(kern.globals.kdp_pmap))
         if not WriteInt64ToMemoryAddress(unsigned(task.map.pmap), kdp_pmap_addr):
             debuglog("Failed to write in kdp_pmap from GetUserDataAsString.")
-            return ""
+            return b""
         content = LazyTarget.GetProcess().ReadMemory(addr, size, err)
         if not err.Success():
             debuglog("Failed to read process memory. Error: " + err.description)
-            return ""
+            return b""
         if not WriteInt64ToMemoryAddress(0, kdp_pmap_addr):
             debuglog("Failed to reset in kdp_pmap from GetUserDataAsString.")
-            return ""
+            return b""
     elif (kern.arch == 'x86_64' or kern.arch.startswith('arm')) and (int(size) < (2 * kern.globals.page_size)):
         # Without the benefit of a KDP stub on the target, try to
         # find the user task's physical mapping and memcpy the data.
@@ -413,7 +413,7 @@ def GetUserDataAsString(task, addr, size):
         paddr_range1 = PmapWalk(task.map.pmap, range1_addr, vSILENT)
         if not paddr_range1:
             debuglog("Not mapped task 0x{:x} address 0x{:x}".format(task, addr))
-            return ""
+            return b""
 
         range1_in_kva = kern.PhysToKernelVirt(paddr_range1)
         content = LazyTarget.GetProcess().ReadMemory(range1_in_kva, range1_size, err)
@@ -424,7 +424,7 @@ def GetUserDataAsString(task, addr, size):
             paddr_range2 = PmapWalk(task.map.pmap, range2_addr, vSILENT)
             if not paddr_range2:
                 debuglog("Not mapped task 0x{:x} address 0x{:x}".format(task, addr))
-                return ""
+                return b""
             range2_in_kva = kern.PhysToKernelVirt(paddr_range2)
             content += LazyTarget.GetProcess().ReadMemory(range2_in_kva, range2_size, err)
             if not err.Success():
@@ -475,28 +475,17 @@ def GetUserspaceString(task, string_address):
         returns:
             str - string path of the file. "" if failed to read.
     """
-    done = False
-    retval = ""
-
-    if string_address == 0:
-        done = True
-
-    while not done:
-        str_data = bytes(GetUserDataAsString(task, string_address, 32), 'utf8')
-        if len(str_data) == 0:
+    retval = []
+    while string_address > 0:
+        str_data = GetUserDataAsString(task, string_address, 32)
+        if not str_data:
             break
-        i = 0
-        while i < 32:
-            if str_data[i]:
-                retval += chr(str_data[i])
-            else:
-                break
-            i += 1
-        if i < 32:
-            done = True
-        else:
-            string_address += 32
-    return six.ensure_str(retval)
+        str_data = str_data.split(b"\x00", 1)[0]
+        retval.append(str_data)
+        if len(str_data) < 32:
+            break # short read or found NUL byte
+        string_address += 32
+    return six.ensure_str(b"".join(retval))
 
 def GetImageInfo(task, mh_image_address, mh_path_address, approx_end_address=None):
     """ Print user library informaiton.

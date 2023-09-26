@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
+#include <spawn_filtering_private.h>
 #include <spawn_private.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -41,7 +42,7 @@ T_DECL(posix_spawn_filtering,
     "Check posix_spawn_filtering",
     T_META_ENVVAR("FEATUREFLAGS_ENABLED=Libsystem/posix_spawn_filtering"))
 {
-#if TARGET_OS_OSX
+#if POSIX_SPAWN_FILTERING_ENABLED
 	const char *tmpdir = dt_tmpdir();
 	T_LOG("tmpdir: %s\n", tmpdir);
 
@@ -113,7 +114,7 @@ T_DECL(posix_spawn_filtering,
 
 	T_PASS("posix_spawn_filtering did succeed to set an env var");
 
-#else // TARGET_OS_OSX
-	T_SKIP("posix_spawn_filtering only supported on macOS");
-#endif // TARGET_OS_OSX
+#else // POSIX_SPAWN_FILTERING_ENABLED
+	T_SKIP("posix_spawn_filtering only supported with POSIX_SPAWN_FILTERING_ENABLED");
+#endif // POSIX_SPAWN_FILTERING_ENABLED
 }

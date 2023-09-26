@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -87,11 +87,11 @@ fsw_vp_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 	 */
 	FSW_WLOCK(fsw);
 
-	atomic_add_16(&fsw_vpna_gencnt, 1);
+	os_atomic_inc(&fsw_vpna_gencnt, relaxed);
 	vpna->vpna_gencnt = fsw_vpna_gencnt;
 
 	if (mode == NA_ACTIVATE_MODE_ON) {
-		atomic_bitset_32(&na->na_flags, NAF_ACTIVE);
+		os_atomic_or(&na->na_flags, NAF_ACTIVE, relaxed);
 	}
 
 	ret = fsw_port_na_activate(fsw, vpna, mode);
@@ -99,7 +99,7 @@ fsw_vp_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		SK_DF(SK_VERB_FSW, "na \"%s\" (0x%llx) %s err(%d)",
 		    na->na_name, SK_KVA(na), na_activate_mode2str(mode), ret);
 		if (mode == NA_ACTIVATE_MODE_ON) {
-			atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+			os_atomic_andnot(&na->na_flags, NAF_ACTIVE, relaxed);
 		}
 		goto done;
 	}
@@ -109,7 +109,7 @@ fsw_vp_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		struct skmem_arena_nexus *arn = skmem_arena_nexus(na->na_arena);
 
 		if (mode == NA_ACTIVATE_MODE_OFF) {
-			atomic_bitclear_32(&na->na_flags, NAF_ACTIVE);
+			os_atomic_andnot(&na->na_flags, NAF_ACTIVE, relaxed);
 		}
 
 		AR_LOCK(na->na_arena);
@@ -260,7 +260,7 @@ fsw_vp_na_rxsync(struct __kern_channel_ring *kring, struct proc *p,
 	kring->ckr_khead = head;
 
 	/* ensure global visibility */
-	membar_sync();
+	os_atomic_thread_fence(seq_cst);
 
 	SK_DF(SK_VERB_FSW | SK_VERB_SYNC | SK_VERB_RX,
 	    "%s(%d) kr \"%s\" (0x%llx) krflags 0x%b ring %u "
@@ -312,13 +312,13 @@ fsw_vp_na_special(struct nexus_adapter *na, struct kern_channel *ch,
 			goto done;
 		}
 
-		atomic_bitset_32(&na->na_flags, NAF_SPEC_INIT);
+		os_atomic_or(&na->na_flags, NAF_SPEC_INIT, relaxed);
 		break;
 
 	case NXSPEC_CMD_DISCONNECT:
 		ASSERT(na->na_channels > 0);
 		ASSERT(na->na_flags & NAF_SPEC_INIT);
-		atomic_bitclear_32(&na->na_flags, NAF_SPEC_INIT);
+		os_atomic_andnot(&na->na_flags, NAF_SPEC_INIT, relaxed);
 
 		na_unbind_channel(ch);
 		break;
@@ -353,6 +353,7 @@ fsw_vp_na_create(struct kern_nexus *nx, struct chreq *chr,
     struct nexus_vp_adapter **ret)
 {
 	struct nxprov_params *nxp = NX_PROV(nx)->nxprov_params;
+	struct nx_flowswitch *fsw = NX_FSW_PRIVATE(nx);
 	struct nexus_vp_adapter *vpna;
 	struct nexus_adapter *na;
 	int error;
@@ -401,19 +402,22 @@ fsw_vp_na_create(struct kern_nexus *nx, struct chreq *chr,
 	ASSERT(na_get_nslots(na, NR_TX) <= NX_DOM(nx)->nxdom_tx_slots.nb_max);
 	ASSERT(na_get_nslots(na, NR_RX) <= NX_DOM(nx)->nxdom_rx_slots.nb_max);
 
-	atomic_bitset_32(&na->na_flags, NAF_USER_PKT_POOL);
+	os_atomic_or(&na->na_flags, NAF_USER_PKT_POOL, relaxed);
 
 	if (chr->cr_mode & CHMODE_LOW_LATENCY) {
-		atomic_bitset_32(&na->na_flags, NAF_LOW_LATENCY);
+		os_atomic_or(&na->na_flags, NAF_LOW_LATENCY, relaxed);
 	}
 
 	if (chr->cr_mode & CHMODE_EVENT_RING) {
 		na_set_nrings(na, NR_EV, NX_FSW_EVENT_RING_NUM);
 		na_set_nslots(na, NR_EV, NX_FSW_EVENT_RING_SIZE);
-		atomic_bitset_32(&na->na_flags, NAF_EVENT_RING);
+		os_atomic_or(&na->na_flags, NAF_EVENT_RING, relaxed);
 		na->na_channel_event_notify = fsw_vp_na_channel_event_notify;
 	}
-
+	if (nxp->nxp_max_frags > 1 && fsw->fsw_tso_mode != FSW_TSO_MODE_NONE) {
+		na_set_nrings(na, NR_LBA, 1);
+		na_set_nslots(na, NR_LBA, NX_FSW_AFRINGSIZE);
+	}
 	vpna->vpna_nx_port = chr->cr_port;
 	na->na_dtor = fsw_vp_na_dtor;
 	na->na_activate = fsw_vp_na_activate;
@@ -551,6 +555,14 @@ fsw_vp_na_channel_event_notify(struct nexus_adapter *vpna,
 	struct __kern_channel_ring *ring = &vpna->na_event_rings[0];
 	struct fsw_stats *fs = &((struct nexus_vp_adapter *)(vpna))->vpna_fsw->fsw_stats;
 
+	if (__probable(ev->ev_type == CHANNEL_EVENT_PACKET_TRANSMIT_STATUS)) {
+		STATS_INC(fs, FSW_STATS_EV_RECV_TX_STATUS);
+	}
+	if (__improbable(ev->ev_type == CHANNEL_EVENT_PACKET_TRANSMIT_EXPIRED)) {
+		STATS_INC(fs, FSW_STATS_EV_RECV_TX_EXPIRED);
+	}
+	STATS_INC(fs, FSW_STATS_EV_RECV);
+
 	if (__improbable(!NA_IS_ACTIVE(vpna))) {
 		STATS_INC(fs, FSW_STATS_EV_DROP_NA_INACTIVE);
 		err = ENXIO;
@@ -581,7 +593,7 @@ fsw_vp_na_channel_event_notify(struct nexus_adapter *vpna,
 	buf = __packet_get_next_buflet(ph, NULL);
 	baddr = __buflet_get_data_address(buf);
 	emd = (struct __kern_channel_event_metadata *)(void *)baddr;
-	emd->emd_etype = CHANNEL_EVENT_PACKET_TRANSMIT_STATUS;
+	emd->emd_etype = ev->ev_type;
 	emd->emd_nevents = 1;
 	bcopy(ev, (baddr + __KERN_CHANNEL_EVENT_OFFSET), ev_len);
 	err = __buflet_set_data_length(buf,
@@ -652,6 +664,11 @@ fsw_vp_na_channel_event(struct nx_flowswitch *fsw, uint32_t nx_port_id,
 {
 	int err = 0;
 	struct nexus_adapter *fsw_vpna;
+
+	SK_DF(SK_VERB_EVENTS, "%s[%d] ev: %p ev_len: %hu "
+	    "ev_type: %u ev_flags: %u _reserved: %hu ev_dlen: %hu",
+	    if_name(fsw->fsw_ifp), nx_port_id, event, event_len,
+	    event->ev_type, event->ev_flags, event->_reserved, event->ev_dlen);
 
 	FSW_RLOCK(fsw);
 	struct fsw_stats *fs = &fsw->fsw_stats;

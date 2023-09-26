@@ -1418,7 +1418,7 @@ static int
 filt_pipenotsup(struct knote *kn, long hint)
 {
 #pragma unused(hint)
-	struct pipe *rpipe = kn->kn_hook;
+	struct pipe *rpipe = knote_kn_hook_get_raw(kn);
 
 	return filt_pipe_draincommon(kn, rpipe);
 }
@@ -1426,7 +1426,7 @@ filt_pipenotsup(struct knote *kn, long hint)
 static int
 filt_pipenotsuptouch(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct pipe *rpipe = kn->kn_hook;
+	struct pipe *rpipe = knote_kn_hook_get_raw(kn);
 	int res;
 
 	PIPE_LOCK(rpipe);
@@ -1446,7 +1446,7 @@ filt_pipenotsuptouch(struct knote *kn, struct kevent_qos_s *kev)
 static int
 filt_pipenotsupprocess(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct pipe *rpipe = kn->kn_hook;
+	struct pipe *rpipe = knote_kn_hook_get_raw(kn);
 	int res;
 
 	PIPE_LOCK(rpipe);
@@ -1481,7 +1481,7 @@ static int
 filt_piperead(struct knote *kn, long hint)
 {
 #pragma unused(hint)
-	struct pipe *rpipe = kn->kn_hook;
+	struct pipe *rpipe = knote_kn_hook_get_raw(kn);
 
 	return filt_piperead_common(kn, NULL, rpipe);
 }
@@ -1489,7 +1489,7 @@ filt_piperead(struct knote *kn, long hint)
 static int
 filt_pipereadtouch(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct pipe *rpipe = kn->kn_hook;
+	struct pipe *rpipe = knote_kn_hook_get_raw(kn);
 	int retval;
 
 	PIPE_LOCK(rpipe);
@@ -1509,7 +1509,7 @@ filt_pipereadtouch(struct knote *kn, struct kevent_qos_s *kev)
 static int
 filt_pipereadprocess(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct pipe *rpipe = kn->kn_hook;
+	struct pipe *rpipe = knote_kn_hook_get_raw(kn);
 	int    retval;
 
 	PIPE_LOCK(rpipe);
@@ -1543,7 +1543,7 @@ static int
 filt_pipewrite(struct knote *kn, long hint)
 {
 #pragma unused(hint)
-	struct pipe *rpipe = kn->kn_hook;
+	struct pipe *rpipe = knote_kn_hook_get_raw(kn);
 
 	return filt_pipewrite_common(kn, NULL, rpipe);
 }
@@ -1552,7 +1552,7 @@ filt_pipewrite(struct knote *kn, long hint)
 static int
 filt_pipewritetouch(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct pipe *rpipe = kn->kn_hook;
+	struct pipe *rpipe = knote_kn_hook_get_raw(kn);
 	int res;
 
 	PIPE_LOCK(rpipe);
@@ -1572,7 +1572,7 @@ filt_pipewritetouch(struct knote *kn, struct kevent_qos_s *kev)
 static int
 filt_pipewriteprocess(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct pipe *rpipe = kn->kn_hook;
+	struct pipe *rpipe = knote_kn_hook_get_raw(kn);
 	int res;
 
 	PIPE_LOCK(rpipe);
@@ -1646,7 +1646,7 @@ pipe_kqfilter(struct fileproc *fp, struct knote *kn,
 		return 0;
 	}
 
-	kn->kn_hook = rpipe;
+	knote_kn_hook_set_raw(kn, rpipe);
 	KNOTE_ATTACH(&rpipe->pipe_sel.si_note, kn);
 
 	PIPE_UNLOCK(cpipe);

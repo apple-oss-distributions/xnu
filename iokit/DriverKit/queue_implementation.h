@@ -82,7 +82,7 @@ __BEGIN_DECLS
 /*
  * Queue Management APIs
  *
- * There are currently two subtly different methods of maintining
+ * There are currently two subtly different methods of maintaining
  * a queue of objects. Both APIs are contained in this file, and
  * unfortunately overlap.
  * (there is also a third way maintained in bsd/sys/queue.h)

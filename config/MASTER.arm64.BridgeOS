@@ -29,9 +29,9 @@
 #  FILESYS_DEV =    [ FILESYS_BASE config_union_mounts fdesc ]
 #  FILESYS_DEBUG =  [ FILESYS_BASE config_union_mounts fdesc ]
 #  NFS_DEV =        [ nfsserver ]
-#  NETWORKING =     [ inet tcpdrop_synfin bpfilter if_bridge traffic_mgt dummynet ah_all_crypto if_fake ]
+#  NETWORKING =     [ inet tcpdrop_synfin bpfilter if_bridge traffic_mgt dummynet ah_all_crypto if_fake if_redirect ]
 #  NETWORKING_RELEASE = [ NETWORKING ]
-#  NETWORKING_DEV = [ NETWORKING_RELEASE packet_mangler if_headless ]
+#  NETWORKING_DEV = [ NETWORKING_RELEASE packet_mangler if_headless kctl_test ]
 #  NETWORKING_DEBUG = [ NETWORKING_DEV ]
 #  VPN =            [ ipsec flow_divert necp content_filter ]
 #  PF_RELEASE =     [ pf ]
@@ -52,17 +52,17 @@
 #  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace lock_stats zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_iotrace]
 #  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_service_port_info config_ledger_interval_max ]
 #  MACH_RELEASE =   [ MACH_BASE config_skip_precise_user_kernel_time debugger_for_zone_info ]
-#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace ]
-#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug ]
+#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace config_task_suspend_stats ]
+#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug config_task_suspend_stats ]
 #  SCHED_BASE =     [ config_sched_traditional config_sched_multiq config_sched_deferred_ast config_clutch config_sched_sfi config_taskwatch ]
 #  SCHED_RELEASE =  [ SCHED_BASE ]
 #  SCHED_DEV =      [ SCHED_BASE ]
 #  SCHED_DEBUG =    [ SCHED_BASE config_sched_grrr config_sched_proto ]
-#  VM_BASE =        [ vps_dynamic_prio vm_pressure_events jetsam memorystatus config_code_decryption phantom_cache config_secluded_memory config_cs_validation_bitmap config_deferred_reclaim ]
+#  VM_BASE =        [ vps_dynamic_prio vm_pressure_events jetsam memorystatus config_code_decryption phantom_cache config_secluded_memory config_cs_validation_bitmap config_deferred_reclaim config_map_ranges ]
 #  VM_RELEASE =     [ VM_BASE ]
 #  VM_DEV =         [ VM_BASE dynamic_codesigning pgzalloc ]
 #  VM_DEBUG =       [ VM_BASE dynamic_codesigning pgzalloc ]
-#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov kernel_tbi ]
+#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov kernel_tagging kernel_tbi ]
 #  SECURITY_BASE =    [ config_macf kernel_integrity config_secure_bsd_root ]
 #  SECURITY_RELEASE = [ SECURITY_BASE ]
 #  SECURITY_DEV =     [ SECURITY_BASE config_setuid config_kas_info ]
@@ -91,3 +91,4 @@ options	  CONFIG_MACH_APPROXIMATE_TIME
 
 options   CONFIG_KERNEL_INTEGRITY		# <kernel_integrity>
 options   CONFIG_KERNEL_TBI		# <kernel_tbi>
+options   CONFIG_KERNEL_TAGGING		# <kernel_tagging>

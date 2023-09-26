@@ -1112,7 +1112,7 @@ vlan_output(struct ifnet * ifp, struct mbuf * m)
 	/* do not run parent's if_output() if the parent is not up */
 	if ((ifnet_flags(p) & (IFF_UP | IFF_RUNNING)) != (IFF_UP | IFF_RUNNING)) {
 		m_freem(m);
-		atomic_add_64(&ifp->if_collisions, 1);
+		os_atomic_inc(&ifp->if_collisions, relaxed);
 		return 0;
 	}
 	/*
@@ -1131,7 +1131,7 @@ vlan_output(struct ifnet * ifp, struct mbuf * m)
 		if (m == NULL) {
 			printf("%s%d: unable to prepend VLAN header\n", ifnet_name(ifp),
 			    ifnet_unit(ifp));
-			atomic_add_64(&ifp->if_oerrors, 1);
+			os_atomic_inc(&ifp->if_oerrors, relaxed);
 			return 0;
 		}
 		/* M_PREPEND takes care of m_len, m_pkthdr.len for us */
@@ -1140,7 +1140,7 @@ vlan_output(struct ifnet * ifp, struct mbuf * m)
 			if (m == NULL) {
 				printf("%s%d: unable to pullup VLAN header\n", ifnet_name(ifp),
 				    ifnet_unit(ifp));
-				atomic_add_64(&ifp->if_oerrors, 1);
+				os_atomic_inc(&ifp->if_oerrors, relaxed);
 				return 0;
 			}
 		}
@@ -1395,6 +1395,11 @@ vlan_config(struct ifnet * ifp, struct ifnet * p, int tag)
 			vlan_lock();
 			goto signal_done;
 		}
+	}
+
+	/* inherit management restriction from parent by default */
+	if (IFNET_IS_MANAGEMENT(p)) {
+		ifnet_set_management(ifp, true);
 	}
 
 	/* configure parent to receive our multicast addresses */

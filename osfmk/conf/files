@@ -119,11 +119,12 @@ osfmk/kern/coalition.c			optional config_coalitions
 osfmk/kern/compact_id.c			standard
 osfmk/kern/core_analytics.c		standard
 osfmk/kern/counter_common.c		standard
-osfmk/kern/cpu_quiesce.c		optional config_quiesce_counter
 osfmk/kern/debug.c			standard
+osfmk/kern/ext_paniclog.c 	standard
 osfmk/kern/ecc_logging.c			optional config_ecc_logging
 osfmk/kern/energy_perf.c		standard
 osfmk/kern/exception.c		standard
+osfmk/kern/exclaves.c		standard
 osfmk/kern/extmod_statistics.c		standard
 osfmk/kern/host.c			standard
 osfmk/kern/host_notify.c		standard
@@ -326,6 +327,7 @@ osfmk/kperf/kdebug_trigger.c            optional kperf
 osfmk/kperf/lazy.c                      optional kperf
 osfmk/kern/kpc_thread.c                 optional kpc
 osfmk/kern/kpc_common.c                 optional kpc
+osfmk/kern/cpc.c                        optional kpc
 
 osfmk/kern/kern_monotonic.c optional monotonic
 

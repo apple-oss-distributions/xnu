@@ -181,7 +181,6 @@ struct vm_named_entry {
 #endif /* VM_NAMED_ENTRY_DEBUG */
 };
 
-
 /*
  * Bit 3 of the protection and max_protection bitfields in a vm_map_entry
  * does not correspond to bit 3 of a vm_prot_t, so these macros provide a means
@@ -250,7 +249,22 @@ struct vm_map_entry {
 			uint32_t    vme_ctx_atomic : 1;
 			uint32_t    vme_ctx_is_sub_map : 1;
 			uint32_t    vme_context : 30;
-			vm_page_object_t vme_object_or_delta;
+
+			/**
+			 * If vme_kernel_object==1 && KASAN,
+			 * vme_object_or_delta holds the delta.
+			 *
+			 * If vme_kernel_object==1 && !KASAN,
+			 * vme_tag_btref holds a btref when vme_alias is equal to the "vmtaglog"
+			 * boot-arg.
+			 *
+			 * If vme_kernel_object==0,
+			 * vme_object_or_delta holds the packed vm object.
+			 */
+			union {
+				vm_page_object_t vme_object_or_delta;
+				btref_t vme_tag_btref;
+			};
 		};
 	};
 
@@ -357,11 +371,13 @@ static inline vm_object_t
 _VME_OBJECT(
 	vm_map_entry_t entry)
 {
-	vm_object_t object = kernel_object;
+	vm_object_t object;
 
 	if (!entry->vme_kernel_object) {
 		object = VM_OBJECT_UNPACK(entry->vme_object_or_delta);
-		__builtin_assume(object != kernel_object);
+		__builtin_assume(!is_kernel_object(object));
+	} else {
+		object = kernel_object_default;
 	}
 	return object;
 }
@@ -384,13 +400,25 @@ VME_OBJECT_SET(
 		entry->vme_context = 0;
 	}
 
-	if (!object || object == kernel_object) {
+	if (!object) {
 		entry->vme_object_or_delta = 0;
+	} else if (is_kernel_object(object)) {
+#if VM_BTLOG_TAGS
+		if (!(entry->vme_kernel_object && entry->vme_tag_btref))
+#endif /* VM_BTLOG_TAGS */
+		{
+			entry->vme_object_or_delta = 0;
+		}
 	} else {
+#if VM_BTLOG_TAGS
+		if (entry->vme_kernel_object && entry->vme_tag_btref) {
+			btref_put(entry->vme_tag_btref);
+		}
+#endif /* VM_BTLOG_TAGS */
 		entry->vme_object_or_delta = VM_OBJECT_PACK(object);
 	}
 
-	entry->vme_kernel_object = (object == kernel_object);
+	entry->vme_kernel_object = is_kernel_object(object);
 	entry->vme_resilient_codesign = false;
 	entry->used_for_jit = false;
 }
@@ -447,6 +475,35 @@ VME_OBJECT_SHADOW(
 	}
 }
 
+#if (DEBUG || DEVELOPMENT) && !KASAN
+#define VM_BTLOG_TAGS 1
+#else
+#define VM_BTLOG_TAGS 0
+#endif
+
+extern vm_tag_t vmtaglog_tag; /* Collected from a tunable in vm_resident.c */
+static inline void
+vme_btref_consider_and_set(__unused vm_map_entry_t entry, __unused void *fp)
+{
+#if VM_BTLOG_TAGS
+	if (vmtaglog_tag && (VME_ALIAS(entry) == vmtaglog_tag) && entry->vme_kernel_object && entry->wired_count) {
+		assert(!entry->vme_tag_btref); /* We should have already zeroed and freed the btref if we're here. */
+		entry->vme_tag_btref = btref_get(fp, BTREF_GET_NOWAIT);
+	}
+#endif /* VM_BTLOG_TAGS */
+}
+
+static inline void
+vme_btref_consider_and_put(__unused vm_map_entry_t entry)
+{
+#if VM_BTLOG_TAGS
+	if (entry->vme_tag_btref && entry->vme_kernel_object && (entry->wired_count == 0) && (entry->user_wired_count == 0)) {
+		btref_put(entry->vme_tag_btref);
+		entry->vme_tag_btref = 0;
+	}
+#endif /* VM_BTLOG_TAGS */
+}
+
 
 /*
  * Convenience macros for dealing with superpages
@@ -463,6 +520,12 @@ VME_OBJECT_SHADOW(
  */
 #define MAX_WIRE_COUNT          65535
 
+typedef struct vm_map_user_range {
+	vm_map_address_t        vmur_min_address __kernel_data_semantics;
+
+	vm_map_address_t        vmur_max_address : 56 __kernel_data_semantics;
+	vm_map_range_id_t       vmur_range_id : 8;
+} *vm_map_user_range_t;
 
 /*
  *	Type:		vm_map_t [exported; contents invisible]
@@ -494,12 +557,20 @@ struct _vm_map {
 	uint64_t                data_limit;     /* rlimit on data size */
 	vm_map_size_t           user_wire_limit;/* rlimit on user locked memory */
 	vm_map_size_t           user_wire_size; /* current size of user locked memory in this map */
-#if CONFIG_MAP_RANGES
-	struct mach_vm_range    user_range[UMEM_RANGE_COUNT]; /* user VM ranges */
-#endif /* CONFIG_MAP_RANGES */
-#if XNU_TARGET_OS_OSX
+#if __x86_64__
 	vm_map_offset_t         vmmap_high_start;
-#endif /* XNU_TARGET_OS_OSX */
+#endif /* __x86_64__ */
+
+	os_ref_atomic_t         map_refcnt;       /* Reference count */
+
+#if CONFIG_MAP_RANGES
+#define VM_MAP_EXTRA_RANGES_MAX 1024
+	struct mach_vm_range    default_range;
+	struct mach_vm_range    data_range;
+
+	uint16_t                extra_ranges_count;
+	vm_map_user_range_t     extra_ranges;
+#endif /* CONFIG_MAP_RANGES */
 
 	union {
 		/*
@@ -532,8 +603,6 @@ struct _vm_map {
 #define first_free              f_s._first_free
 #define holes_list              f_s._holes
 
-	os_ref_atomic_t         map_refcnt;       /* Reference count */
-
 	unsigned int
 	/* boolean_t */ wait_for_space:1,         /* Should callers wait for space? */
 	/* boolean_t */ wiring_required:1,        /* All memory wired? */
@@ -548,15 +617,16 @@ struct _vm_map {
 	/* boolean_t */ jit_entry_exists:1,
 	/* boolean_t */ has_corpse_footprint:1,
 	/* boolean_t */ terminated:1,
-	/* boolean_t */ is_alien:1,              /* for platform simulation, i.e. PLATFORM_IOS on OSX */
-	/* boolean_t */ cs_enforcement:1,        /* code-signing enforcement */
-	/* boolean_t */ cs_debugged:1,           /* code-signed but debugged */
-	/* boolean_t */ reserved_regions:1,      /* has reserved regions. The map size that userspace sees should ignore these. */
-	/* boolean_t */ single_jit:1,            /* only allow one JIT mapping */
-	/* boolean_t */ never_faults:1,          /* this map should never cause faults */
-	/* boolean_t */ uses_user_ranges:1,      /* has the map been configured to use user VM ranges */
-	/* reserved  */ pad:12;
-	unsigned int            timestamp;       /* Version number */
+	/* boolean_t */ is_alien:1,               /* for platform simulation, i.e. PLATFORM_IOS on OSX */
+	/* boolean_t */ cs_enforcement:1,         /* code-signing enforcement */
+	/* boolean_t */ cs_debugged:1,            /* code-signed but debugged */
+	/* boolean_t */ reserved_regions:1,       /* has reserved regions. The map size that userspace sees should ignore these. */
+	/* boolean_t */ single_jit:1,             /* only allow one JIT mapping */
+	/* boolean_t */ never_faults:1,           /* this map should never cause faults */
+	/* boolean_t */ uses_user_ranges:1,       /* has the map been configured to use user VM ranges */
+	/* boolean_t */ tpro_enforcement:1,       /* enforce TPRO propagation */
+	/* reserved  */ pad:11;
+	unsigned int            timestamp;        /* Version number */
 };
 
 #define CAST_TO_VM_MAP_ENTRY(x) ((struct vm_map_entry *)(uintptr_t)(x))
@@ -724,21 +794,14 @@ boolean_t vm_map_try_lock_read(vm_map_t map);
 int vm_self_region_page_shift(vm_map_t target_map);
 int vm_self_region_page_shift_safely(vm_map_t target_map);
 
-#if MACH_ASSERT || DEBUG
 #define vm_map_lock_assert_held(map) \
-	lck_rw_assert(&(map)->lock, LCK_RW_ASSERT_HELD)
+	LCK_RW_ASSERT(&(map)->lock, LCK_RW_ASSERT_HELD)
 #define vm_map_lock_assert_shared(map)  \
-	lck_rw_assert(&(map)->lock, LCK_RW_ASSERT_SHARED)
+	LCK_RW_ASSERT(&(map)->lock, LCK_RW_ASSERT_SHARED)
 #define vm_map_lock_assert_exclusive(map) \
-	lck_rw_assert(&(map)->lock, LCK_RW_ASSERT_EXCLUSIVE)
+	LCK_RW_ASSERT(&(map)->lock, LCK_RW_ASSERT_EXCLUSIVE)
 #define vm_map_lock_assert_notheld(map) \
-	lck_rw_assert(&(map)->lock, LCK_RW_ASSERT_NOTHELD)
-#else  /* MACH_ASSERT || DEBUG */
-#define vm_map_lock_assert_held(map)
-#define vm_map_lock_assert_shared(map)
-#define vm_map_lock_assert_exclusive(map)
-#define vm_map_lock_assert_notheld(map)
-#endif /* MACH_ASSERT || DEBUG */
+	LCK_RW_ASSERT(&(map)->lock, LCK_RW_ASSERT_NOTHELD)
 
 /*
  *	Exported procedures that operate on vm_map_t.
@@ -1098,6 +1161,7 @@ extern void vm_map_cs_debugged_set(
 	boolean_t val);
 
 extern kern_return_t vm_map_cs_wx_enable(vm_map_t map);
+extern kern_return_t vm_map_csm_allow_jit(vm_map_t map);
 
 /* wire down a region */
 
@@ -1307,7 +1371,8 @@ extern kern_return_t    vm_map_copyin_common(
 #define VM_MAP_COPYIN_USE_MAXPROT       0x00000002
 #define VM_MAP_COPYIN_ENTRY_LIST        0x00000004
 #define VM_MAP_COPYIN_PRESERVE_PURGEABLE 0x00000008
-#define VM_MAP_COPYIN_ALL_FLAGS         0x0000000F
+#define VM_MAP_COPYIN_FORK              0x00000010
+#define VM_MAP_COPYIN_ALL_FLAGS         0x0000001F
 extern kern_return_t    vm_map_copyin_internal(
 	vm_map_t                src_map,
 	vm_map_address_t        src_addr,
@@ -1347,6 +1412,17 @@ extern boolean_t        vm_map_tpro(
 
 extern void             vm_map_set_tpro(
 	vm_map_t                map);
+
+extern boolean_t        vm_map_tpro_enforcement(
+	vm_map_t                map);
+
+extern void             vm_map_set_tpro_enforcement(
+	vm_map_t                map);
+
+extern boolean_t        vm_map_set_tpro_range(
+	vm_map_t                map,
+	vm_map_address_t        start,
+	vm_map_address_t        end);
 
 extern boolean_t        vm_map_is_64bit(
 	vm_map_t                map);
@@ -1427,20 +1503,10 @@ extern boolean_t        vm_map_page_aligned(
 	vm_map_offset_t         offset,
 	vm_map_offset_t         mask);
 
-static inline int
-vm_map_range_overflows(vm_map_offset_t addr, vm_map_size_t size)
-{
-	vm_map_offset_t sum;
-	return os_add_overflow(addr, size, &sum);
-}
-
-static inline int
-mach_vm_range_overflows(mach_vm_offset_t addr, mach_vm_size_t size)
-{
-	mach_vm_offset_t sum;
-	return os_add_overflow(addr, size, &sum);
-}
-
+extern bool vm_map_range_overflows(
+	vm_map_t                map,
+	vm_map_offset_t         addr,
+	vm_map_size_t           size);
 #ifdef XNU_KERNEL_PRIVATE
 
 /* Support for vm_map ranges */
@@ -1731,6 +1797,7 @@ extern int vm_map_disconnect_page_mappings(
 extern kern_return_t vm_map_inject_error(vm_map_t map, vm_map_offset_t vaddr);
 
 #endif /* DEVELOPMENT || DEBUG */
+
 #if CONFIG_FREEZE
 
 extern kern_return_t vm_map_freeze(
@@ -1744,11 +1811,14 @@ extern kern_return_t vm_map_freeze(
 	int          *freezer_error_code,
 	boolean_t    eval_only);
 
-#define FREEZER_ERROR_GENERIC                   (-1)
-#define FREEZER_ERROR_EXCESS_SHARED_MEMORY      (-2)
-#define FREEZER_ERROR_LOW_PRIVATE_SHARED_RATIO  (-3)
-#define FREEZER_ERROR_NO_COMPRESSOR_SPACE       (-4)
-#define FREEZER_ERROR_NO_SWAP_SPACE             (-5)
+__enum_decl(freezer_error_code_t, int, {
+	FREEZER_ERROR_GENERIC = -1,
+	FREEZER_ERROR_EXCESS_SHARED_MEMORY = -2,
+	FREEZER_ERROR_LOW_PRIVATE_SHARED_RATIO = -3,
+	FREEZER_ERROR_NO_COMPRESSOR_SPACE = -4,
+	FREEZER_ERROR_NO_SWAP_SPACE = -5,
+	FREEZER_ERROR_NO_SLOTS = -6,
+});
 
 #endif /* CONFIG_FREEZE */
 #if XNU_KERNEL_PRIVATE
