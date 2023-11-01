@@ -25,14 +25,14 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-#include <arm64/proc_reg.h>
+#include "assym.s"
 #include <arm64/asm.h>
+#include <arm64/proc_reg.h>
 #include <arm64/machine_machdep.h>
 #include <arm64/proc_reg.h>
 #include <pexpert/arm64/board_config.h>
 #include <mach_assert.h>
 #include <machine/asm.h>
-#include "assym.s"
 #include <arm64/tunables/tunables.s>
 #include <arm64/exception_asm.h>
 
@@ -162,6 +162,8 @@ Lnext_cpu_data_entry:
 	b.eq	Lskip_cpu_reset_handler				// Not found
 	b		Lcheck_cpu_data_entry	// loop
 Lfound_cpu_data_entry:
+
+
 	adrp	x20, EXT(const_boot_args)@page
 	add		x20, x20, EXT(const_boot_args)@pageoff
 	ldr		x0, [x21, CPU_RESET_HANDLER]		// Call CPU reset handler

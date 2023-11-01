@@ -89,7 +89,6 @@
 
 kern_return_t arm64_lock_test(void);
 kern_return_t arm64_munger_test(void);
-kern_return_t ex_cb_test(void);
 kern_return_t arm64_pan_test(void);
 kern_return_t arm64_late_pan_test(void);
 #if defined(HAS_APPLE_PAC)
@@ -1101,73 +1100,6 @@ mt_test_mungers()
 			T_PASS(test->mt_name);
 		}
 	}
-}
-
-/* Exception Callback Test */
-static ex_cb_action_t
-excb_test_action(
-	ex_cb_class_t           cb_class,
-	void                            *refcon,
-	const ex_cb_state_t     *state
-	)
-{
-	ex_cb_state_t *context = (ex_cb_state_t *)refcon;
-
-	if ((NULL == refcon) || (NULL == state)) {
-		return EXCB_ACTION_TEST_FAIL;
-	}
-
-	context->far = state->far;
-
-	switch (cb_class) {
-	case EXCB_CLASS_TEST1:
-		return EXCB_ACTION_RERUN;
-	case EXCB_CLASS_TEST2:
-		return EXCB_ACTION_NONE;
-	default:
-		return EXCB_ACTION_TEST_FAIL;
-	}
-}
-
-
-kern_return_t
-ex_cb_test()
-{
-	const vm_offset_t far1 = 0xdead0001;
-	const vm_offset_t far2 = 0xdead0002;
-	kern_return_t kr;
-	ex_cb_state_t test_context_1 = {0xdeadbeef};
-	ex_cb_state_t test_context_2 = {0xdeadbeef};
-	ex_cb_action_t action;
-
-	T_LOG("Testing Exception Callback.");
-
-	T_LOG("Running registration test.");
-
-	kr = ex_cb_register(EXCB_CLASS_TEST1, &excb_test_action, &test_context_1);
-	T_ASSERT(KERN_SUCCESS == kr, "First registration of TEST1 exception callback");
-	kr = ex_cb_register(EXCB_CLASS_TEST2, &excb_test_action, &test_context_2);
-	T_ASSERT(KERN_SUCCESS == kr, "First registration of TEST2 exception callback");
-
-	kr = ex_cb_register(EXCB_CLASS_TEST2, &excb_test_action, &test_context_2);
-	T_ASSERT(KERN_SUCCESS != kr, "Second registration of TEST2 exception callback");
-	kr = ex_cb_register(EXCB_CLASS_TEST1, &excb_test_action, &test_context_1);
-	T_ASSERT(KERN_SUCCESS != kr, "Second registration of TEST1 exception callback");
-
-	T_LOG("Running invocation test.");
-
-	action = ex_cb_invoke(EXCB_CLASS_TEST1, far1);
-	T_ASSERT(EXCB_ACTION_RERUN == action, NULL);
-	T_ASSERT(far1 == test_context_1.far, NULL);
-
-	action = ex_cb_invoke(EXCB_CLASS_TEST2, far2);
-	T_ASSERT(EXCB_ACTION_NONE == action, NULL);
-	T_ASSERT(far2 == test_context_2.far, NULL);
-
-	action = ex_cb_invoke(EXCB_CLASS_TEST3, 0);
-	T_ASSERT(EXCB_ACTION_NONE == action, NULL);
-
-	return KERN_SUCCESS;
 }
 
 #if defined(HAS_APPLE_PAC)

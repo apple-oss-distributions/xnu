@@ -309,7 +309,7 @@ extern wait_result_t lck_mtx_sleep_with_inheritor(
 	uint64_t                deadline);
 
 /*
- * Name: lck_mtx_sleep_with_inheritor
+ * Name: lck_rw_sleep_with_inheritor
  *
  * Description:
  *   deschedule the current thread and wait on the waitq associated with event
@@ -384,6 +384,12 @@ extern kern_return_t wakeup_one_with_inheritor(
 	wait_result_t           result,
 	lck_wake_action_t       action,
 	thread_t                *thread_wokenup);
+
+extern kern_return_t wakeup_thread_with_inheritor(
+	event_t                 event,
+	wait_result_t           result,
+	lck_wake_action_t       action,
+	thread_t                thread_towake);
 
 /*
  * Name: wakeup_all_with_inheritor

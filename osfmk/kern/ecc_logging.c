@@ -38,22 +38,27 @@
 #include <kern/spl.h>
 #include <kern/mpsc_queue.h>
 #include <kern/thread.h>
+#include <kern/thread_call.h>
 #include <kern/startup.h>
 #include <os/log.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include <libkern/OSAtomic.h>
 #include <arm/pmap_public.h>
 #include <vm/vm_protos.h>
 
 /* New CoreAnalytics ECC logging mechanism */
 
+/**
+ * Stubs for targets which do not support ECC.
+ */
 
 kern_return_t
 ecc_log_memory_error(
 	__unused pmap_paddr_t physical_address,
 	__unused uint32_t ecc_flags)
 {
-	return KERN_FAILURE;
+	return KERN_NOT_SUPPORTED;
 }
 
 kern_return_t
@@ -61,13 +66,35 @@ ecc_log_memory_error_internal(
 	__unused pmap_paddr_t physical_address,
 	__unused uint32_t ecc_flags)
 {
-	return KERN_FAILURE;
+	return KERN_NOT_SUPPORTED;
 }
 
 kern_return_t
-ecc_log_memory_error_ce(__unused pmap_paddr_t physical_address,
-    __unused uint32_t ecc_flags,
-    __unused uint32_t ce_count)
+ecc_log_memory_error_ce(
+	__unused pmap_paddr_t physical_address,
+	__unused uint32_t ecc_flags,
+	__unused uint32_t ce_count)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
+
+kern_return_t
+kern_ecc_poll_register(
+	__unused platform_error_handler_ecc_poll_t poll_func,
+	__unused uint32_t max_errors)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
+/*
+ * Used to report earlier errors that were found after ECC gets enabled.
+ * We don't want the VM to panic for these.
+ */
+kern_return_t
+ecc_log_memory_error_delayed(
+	__unused pmap_paddr_t physical_address,
+	__unused uint32_t ecc_flags)
 {
 	return KERN_FAILURE;
 }

@@ -137,20 +137,20 @@
 
 #include <IOKit/IOBSD.h>
 
-#define BPF_WRITE_MAX 65535
 
 extern int tvtohz(struct timeval *);
 extern char *proc_name_address(void *p);
 
 #define BPF_BUFSIZE 4096
-#define UIOMOVE(cp, len, code, uio) uiomove(cp, len, uio)
 
 #define PRINET  26                      /* interruptible */
 
 #define ISAKMP_HDR_SIZE (sizeof(struct isakmp) + sizeof(struct isakmp_gen))
 #define ESP_HDR_SIZE sizeof(struct newesp)
 
-#define BPF_WRITE_LEEWAY 18
+#define BPF_WRITE_LEEWAY 18     /* space for link layer header */
+
+#define BPF_WRITE_MAX 0x1000000 /* 16 MB arbitrary value */
 
 typedef void (*pktcopyfunc_t)(const void *, void *, size_t);
 
@@ -291,12 +291,11 @@ static const struct cdevsw bpf_cdevsw = {
 #define SOCKADDR_HDR_LEN           offsetof(struct sockaddr, sa_data)
 
 static int
-copy_uio_to_mbuf_packet(struct uio *auio, struct mbuf *top)
+bpf_copy_uio_to_mbuf_packet(struct uio *auio, int bytes_to_copy, struct mbuf *top)
 {
 	int error = 0;
 
 	for (struct mbuf *m = top; m != NULL; m = m->m_next) {
-		int bytes_to_copy = (int)uio_resid(auio);
 		int mlen;
 
 		if (m->m_flags & M_EXT) {
@@ -310,26 +309,34 @@ copy_uio_to_mbuf_packet(struct uio *auio, struct mbuf *top)
 
 		error = uiomove(mtod(m, caddr_t), (int)copy_len, auio);
 		if (error != 0) {
-			os_log(OS_LOG_DEFAULT, "mbuf_packet_from_uio: len %d error %d",
+			os_log(OS_LOG_DEFAULT, "bpf_copy_uio_to_mbuf_packet: len %d error %d",
 			    copy_len, error);
 			goto done;
 		}
 		m->m_len = copy_len;
 		top->m_pkthdr.len += copy_len;
+
+		if (bytes_to_copy > copy_len) {
+			bytes_to_copy -= copy_len;
+		} else {
+			break;
+		}
 	}
 done:
 	return error;
 }
 
 static int
-bpf_movein(struct uio *uio, struct ifnet *ifp, int linktype, struct mbuf **mp,
-    struct sockaddr *sockp, int *datlen)
+bpf_movein(struct uio *uio, int copy_len, struct bpf_d *d, struct mbuf **mp,
+    struct sockaddr *sockp)
 {
-	struct mbuf *m;
+	struct mbuf *m = NULL;
 	int error;
 	int len;
 	uint8_t sa_family;
 	int hlen = 0;
+	struct ifnet *ifp = d->bd_bif->bif_ifp;
+	int linktype = (int)d->bd_bif->bif_dlt;
 
 	switch (linktype) {
 #if SLIP
@@ -425,45 +432,58 @@ bpf_movein(struct uio *uio, struct ifnet *ifp, int linktype, struct mbuf **mp,
 	}
 
 	len = (int)uio_resid(uio);
+	if (len < copy_len) {
+		os_log(OS_LOG_DEFAULT, "bpfwrite: len %d if %s less than copy_len %d",
+		    (unsigned)len, ifp->if_xname, copy_len);
+		return EMSGSIZE;
+	}
+	len = copy_len;
 	if (len < hlen || (unsigned)len > BPF_WRITE_MAX) {
 		os_log(OS_LOG_DEFAULT, "bpfwrite: bad len %d if %s",
 		    (unsigned)len, ifp->if_xname);
 		return EMSGSIZE;
 	}
-	if ((len - hlen) > (ifp->if_mtu + BPF_WRITE_LEEWAY)) {
+	if (d->bd_write_size_max != 0) {
+		if ((len - hlen) > (d->bd_write_size_max + BPF_WRITE_LEEWAY)) {
+			os_log(OS_LOG_DEFAULT, "bpfwrite: len %u - hlen %u too big if %s write_size_max %u",
+			    (unsigned)len, (unsigned)hlen, ifp->if_xname, d->bd_write_size_max);
+		}
+	} else if ((len - hlen) > (ifp->if_mtu + BPF_WRITE_LEEWAY)) {
 		os_log(OS_LOG_DEFAULT, "bpfwrite: len %u - hlen %u too big if %s mtu %u",
 		    (unsigned)len, (unsigned)hlen, ifp->if_xname, ifp->if_mtu);
 		return EMSGSIZE;
 	}
 
-	*datlen = len - hlen;
+	/* drop lock while allocating mbuf and copying data */
+	lck_mtx_unlock(bpf_mlock);
 
 	error = mbuf_allocpacket(MBUF_WAITOK, len, NULL, &m);
 	if (error != 0) {
 		os_log(OS_LOG_DEFAULT,
 		    "bpfwrite mbuf_allocpacket len %d error %d", len, error);
-		return error;
+		goto bad;
 	}
 	/*
 	 * Make room for link header -- the packet length is 0 at this stage
 	 */
 	if (hlen != 0) {
 		m->m_data += hlen; /* leading space */
-		error = UIOMOVE((caddr_t)sockp->sa_data, hlen, UIO_WRITE, uio);
+		error = uiomove((caddr_t)sockp->sa_data, hlen, uio);
 		if (error) {
 			os_log(OS_LOG_DEFAULT,
-			    "bpfwrite UIOMOVE hlen %d error %d", hlen, error);
+			    "bpfwrite uiomove hlen %d error %d", hlen, error);
 			goto bad;
 		}
+		len -= hlen;
 	}
 	/*
-	 * copy_uio_to_mbuf_packet() does set the length of each mbuf and adds it to
+	 * bpf_copy_uio_to_mbuf_packet() does set the length of each mbuf and adds it to
 	 * the total packet length
 	 */
-	error = copy_uio_to_mbuf_packet(uio, m);
+	error = bpf_copy_uio_to_mbuf_packet(uio, len, m);
 	if (error != 0) {
 		os_log(OS_LOG_DEFAULT,
-		    "bpfwrite copy_uio_to_mbuf_packet error %d", error);
+		    "bpfwrite bpf_copy_uio_to_mbuf_packet error %d", error);
 		goto bad;
 	}
 
@@ -486,9 +506,107 @@ bpf_movein(struct uio *uio, struct ifnet *ifp, int linktype, struct mbuf **mp,
 	}
 	*mp = m;
 
+	lck_mtx_lock(bpf_mlock);
 	return 0;
 bad:
-	m_freem(m);
+	if (m != NULL) {
+		m_freem(m);
+	}
+	lck_mtx_lock(bpf_mlock);
+	return error;
+}
+
+static int
+bpf_movein_batch(struct uio *uio, struct bpf_d *d, struct mbuf **mp,
+    struct sockaddr *sockp)
+{
+	int error = 0;
+	user_ssize_t resid;
+	int count = 0;
+	struct mbuf *last = NULL;
+
+	*mp = NULL;
+	while ((resid = uio_resid(uio)) >= sizeof(struct bpf_hdr)) {
+		struct bpf_hdr bpfhdr = {};
+		int bpf_hdr_min_len = offsetof(struct bpf_hdr, bh_hdrlen) + sizeof(bpfhdr.bh_hdrlen);
+		int padding_len;
+
+		error = uiomove((caddr_t)&bpfhdr, bpf_hdr_min_len, uio);
+		if (error != 0) {
+			os_log(OS_LOG_DEFAULT, "bpf_movein_batch uiomove error %d", error);
+			break;
+		}
+		/*
+		 * Buffer validation:
+		 * - ignore bh_tstamp
+		 * - bh_hdrlen must fit
+		 * - bh_caplen and bh_datalen must be equal
+		 */
+		if (bpfhdr.bh_hdrlen < bpf_hdr_min_len) {
+			error = EINVAL;
+			os_log(OS_LOG_DEFAULT, "bpf_movein_batch bh_hdrlen %u too small",
+			    bpfhdr.bh_hdrlen);
+			break;
+		}
+		if (bpfhdr.bh_caplen != bpfhdr.bh_datalen) {
+			error = EINVAL;
+			os_log(OS_LOG_DEFAULT, "bpf_movein_batch bh_caplen %u != bh_datalen %u",
+			    bpfhdr.bh_caplen, bpfhdr.bh_datalen);
+			break;
+		}
+		if (bpfhdr.bh_hdrlen > resid) {
+			error = EINVAL;
+			os_log(OS_LOG_DEFAULT, "bpf_movein_batch bh_hdrlen %u too large",
+			    bpfhdr.bh_hdrlen);
+			break;
+		}
+
+		/*
+		 * Ignore additional bytes in the header
+		 */
+		padding_len = bpfhdr.bh_hdrlen - bpf_hdr_min_len;
+		if (padding_len > 0) {
+			uio_update(uio, padding_len);
+		}
+
+		/* skip empty packets */
+		if (bpfhdr.bh_caplen > 0) {
+			struct mbuf *m;
+
+			/*
+			 * For time being assume all packets have same destination
+			 */
+			error = bpf_movein(uio, bpfhdr.bh_caplen, d, &m, sockp);
+			if (error != 0) {
+				os_log(OS_LOG_DEFAULT, "bpf_movein_batch bpf_movein error %d",
+				    error);
+				break;
+			}
+			count += 1;
+
+			if (last == NULL) {
+				*mp = m;
+			} else {
+				last->m_nextpkt = m;
+			}
+			last = m;
+		}
+
+		/*
+		 * Each BPF packet is padded for alignment
+		 */
+		padding_len = BPF_WORDALIGN(bpfhdr.bh_hdrlen + bpfhdr.bh_caplen) - (bpfhdr.bh_hdrlen + bpfhdr.bh_caplen);
+		if (padding_len > 0) {
+			uio_update(uio, padding_len);
+		}
+	}
+
+	if (error != 0) {
+		if (*mp != NULL) {
+			m_freem_list(*mp);
+			*mp = NULL;
+		}
+	}
 	return error;
 }
 
@@ -1347,7 +1465,7 @@ bpfread(dev_t dev, struct uio *uio, int ioflag)
 	 * We know the entire buffer is transferred since
 	 * we checked above that the read buffer is bpf_bufsize bytes.
 	 */
-	error = UIOMOVE(hbuf, hbuf_len, UIO_READ, uio);
+	error = uiomove(hbuf, hbuf_len, uio);
 
 	lck_mtx_lock(bpf_mlock);
 	/*
@@ -1429,9 +1547,9 @@ bpfwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 	struct mbuf *m = NULL;
 	int error = 0;
 	char              dst_buf[SOCKADDR_HDR_LEN + MAX_DATALINK_HDR_LEN];
-	int datlen = 0;
 	int bif_dlt;
 	int bd_hdrcmplt;
+	bpf_send_func bif_send;
 
 	lck_mtx_lock(bpf_mlock);
 
@@ -1475,30 +1593,32 @@ bpfwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 		error = ENETDOWN;
 		goto done;
 	}
-	if (uio_resid(uio) == 0) {
-		error = 0;
+	int resid = (int)uio_resid(uio);
+	if (resid <= 0) {
+		error = resid == 0 ? 0 : EINVAL;
+		os_log(OS_LOG_DEFAULT, "bpfwrite: resid %d error %d", resid, error);
 		goto done;
 	}
-	((struct sockaddr *)dst_buf)->sa_len = sizeof(dst_buf);
+	SA(dst_buf)->sa_len = sizeof(dst_buf);
 
 	/*
-	 * fix for PR-6849527
-	 * geting variables onto stack before dropping lock for bpf_movein()
+	 * geting variables onto stack before dropping the lock
 	 */
 	bif_dlt = (int)d->bd_bif->bif_dlt;
 	bd_hdrcmplt  = d->bd_hdrcmplt;
+	bool batch_write = (d->bd_flags & BPF_BATCH_WRITE) ? true : false;
 
-	/* bpf_movein allocating mbufs; drop lock */
-	lck_mtx_unlock(bpf_mlock);
-
-	error = bpf_movein(uio, ifp, bif_dlt, &m,
-	    bd_hdrcmplt ? NULL : (struct sockaddr *)dst_buf,
-	    &datlen);
-
-	/* take the lock again */
-	lck_mtx_lock(bpf_mlock);
-	if (error != 0) {
-		goto done;
+	if (batch_write) {
+		error = bpf_movein_batch(uio, d, &m, bd_hdrcmplt ? NULL : SA(dst_buf));
+		if (error != 0) {
+			goto done;
+		}
+	} else {
+		error = bpf_movein(uio, resid, d, &m, bd_hdrcmplt ? NULL : SA(dst_buf));
+		if (error != 0) {
+			goto done;
+		}
+		bpf_set_packet_service_class(m, d->bd_traffic_class);
 	}
 
 	/* verify the device is still open */
@@ -1512,33 +1632,42 @@ bpfwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 		goto done;
 	}
 
-	bpf_set_packet_service_class(m, d->bd_traffic_class);
+	bif_send = d->bd_bif->bif_send;
 
 	lck_mtx_unlock(bpf_mlock);
 
-	/*
-	 * The driver frees the mbuf.
-	 */
-	if (d->bd_hdrcmplt) {
-		if (d->bd_bif->bif_send) {
-			error = d->bd_bif->bif_send(ifp, d->bd_bif->bif_dlt, m);
+	if (bd_hdrcmplt) {
+		if (bif_send) {
+			/*
+			 * Send one packet at a time, the driver frees the mbuf
+			 * but we need to take care of the leftover
+			 */
+			while (m != NULL && error == 0) {
+				struct mbuf *next = m->m_nextpkt;
+
+				m->m_nextpkt = NULL;
+				error = bif_send(ifp, bif_dlt, m);
+				m = next;
+			}
 		} else {
 			error = dlil_output(ifp, 0, m, NULL, NULL, 1, NULL);
+			/* Make sure we do not double free */
+			m = NULL;
 		}
 	} else {
 		error = dlil_output(ifp, PF_INET, m, NULL,
-		    (struct sockaddr *)dst_buf, 0, NULL);
+		    SA(dst_buf), 0, NULL);
+		/* Make sure we do not double free */
+		m = NULL;
 	}
-	/* Make sure we do not double free */
-	m = NULL;
 
 	lck_mtx_lock(bpf_mlock);
 done:
-	if (error != 0) {
+	if (error != 0 && m != NULL) {
 		++d->bd_wdcount;
 	}
 	if (m != NULL) {
-		m_freem(m);
+		m_freem_list(m);
 	}
 	d->bd_hbuf_write = false;
 	wakeup((caddr_t)d);
@@ -1796,7 +1925,13 @@ done:
 	X(BIOCGHDRCOMP) \
 	X(BIOCSHDRCOMP) \
 	X(BIOCGHDRCOMPSTATS) \
-	X(BIOCGHDRCOMPON)
+	X(BIOCGHDRCOMPON) \
+	X(BIOCGDIRECTION) \
+	X(BIOCSDIRECTION) \
+	X(BIOCSWRITEMAX) \
+	X(BIOCGWRITEMAX) \
+	X(BIOCGBATCHWRITE) \
+	X(BIOCSBATCHWRITE)
 
 static void
 log_bpf_ioctl_str(struct bpf_d *d, u_long cmd)
@@ -2189,6 +2324,13 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 	 */
 	case BIOCSHDRCMPLT:             /* u_int */
 		bcopy(addr, &int_arg, sizeof(int_arg));
+		if (int_arg == 0 && (d->bd_flags & BPF_BATCH_WRITE)) {
+			os_log(OS_LOG_DEFAULT,
+			    "bpf%u cannot set BIOCSHDRCMPLT when BIOCSBATCHWRITE is set",
+			    d->bd_dev_minor);
+			error = EINVAL;
+			break;
+		}
 		d->bd_hdrcmplt = int_arg ? 1 : 0;
 		break;
 
@@ -2252,6 +2394,13 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 		int tc;
 
 		bcopy(addr, &tc, sizeof(int));
+		if (tc != 0 && (d->bd_flags & BPF_BATCH_WRITE)) {
+			os_log(OS_LOG_DEFAULT,
+			    "bpf%u cannot set BIOCSETTC when BIOCSBATCHWRITE is set",
+			    d->bd_dev_minor);
+			error = EINVAL;
+			break;
+		}
 		error = bpf_set_traffic_class(d, tc);
 		break;
 	}
@@ -2429,6 +2578,49 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 		bcopy(&bcs, addr, sizeof(bcs));
 		break;
 	}
+	case BIOCSWRITEMAX:
+		bcopy(addr, &int_arg, sizeof(int_arg));
+		if (int_arg > BPF_WRITE_MAX) {
+			os_log(OS_LOG_DEFAULT, "bpf%u bd_write_size_max %u too big",
+			    d->bd_dev_minor, d->bd_write_size_max);
+			error = EINVAL;
+			break;
+		}
+		d->bd_write_size_max = int_arg;
+		break;
+
+	case BIOCGWRITEMAX:
+		int_arg = d->bd_write_size_max;
+		bcopy(&int_arg, addr, sizeof(int_arg));
+		break;
+
+	case BIOCGBATCHWRITE:                    /* int */
+		int_arg = d->bd_flags & BPF_BATCH_WRITE ? 1 : 0;
+		bcopy(&int_arg, addr, sizeof(int_arg));
+		break;
+
+	case BIOCSBATCHWRITE:                    /* int */
+		bcopy(addr, &int_arg, sizeof(int_arg));
+		if (int_arg != 0) {
+			if (d->bd_hdrcmplt == 0) {
+				os_log(OS_LOG_DEFAULT,
+				    "bpf%u cannot set BIOCSBATCHWRITE when BIOCSHDRCMPLT is not set",
+				    d->bd_dev_minor);
+				error = EINVAL;
+				break;
+			}
+			if (d->bd_traffic_class != 0) {
+				os_log(OS_LOG_DEFAULT,
+				    "bpf%u cannot set BIOCSBATCHWRITE when BIOCSETTC is set",
+				    d->bd_dev_minor);
+				error = EINVAL;
+				break;
+			}
+			d->bd_flags |= BPF_BATCH_WRITE;
+		} else {
+			d->bd_flags &= ~BPF_BATCH_WRITE;
+		}
+		break;
 	}
 
 	bpf_release_d(d);

@@ -180,6 +180,7 @@ static int      mld_initial_join(struct in6_multi *, struct mld_ifinfo *,
 static const char *     mld_rec_type_to_str(const int);
 #endif
 static uint32_t mld_set_version(struct mld_ifinfo *, const int);
+static void     mld_append_relq(struct mld_ifinfo *, struct in6_multi *);
 static void     mld_flush_relq(struct mld_ifinfo *, struct mld_in6m_relhead *);
 static void     mld_dispatch_queue_locked(struct mld_ifinfo *, struct ifqueue *, int);
 static int      mld_v1_input_query(struct ifnet *, const struct ip6_hdr *,
@@ -689,7 +690,6 @@ mli_delete(const struct ifnet *ifp, struct mld_in6m_relhead *in6m_dthead)
 			IF_DRAIN(&mli->mli_gq);
 			IF_DRAIN(&mli->mli_v1q);
 			mld_flush_relq(mli, in6m_dthead);
-			VERIFY(SLIST_EMPTY(&mli->mli_relinmhead));
 			mli->mli_debug &= ~IFD_ATTACHED;
 			MLI_UNLOCK(mli);
 
@@ -829,7 +829,6 @@ mli_remref(struct mld_ifinfo *mli)
 	IF_DRAIN(&mli->mli_v1q);
 	SLIST_INIT(&in6m_dthead);
 	mld_flush_relq(mli, (struct mld_in6m_relhead *)&in6m_dthead);
-	VERIFY(SLIST_EMPTY(&mli->mli_relinmhead));
 	MLI_UNLOCK(mli);
 
 	/* Now that we're dropped all locks, release detached records */
@@ -1822,7 +1821,6 @@ next:
 		 * version change case.
 		 */
 		mld_flush_relq(mli, (struct mld_in6m_relhead *)&in6m_dthead);
-		VERIFY(SLIST_EMPTY(&mli->mli_relinmhead));
 		mli->mli_flags |= MLIF_PROCESSED;
 		MLI_UNLOCK(mli);
 		MLI_REMREF(mli);
@@ -1908,6 +1906,22 @@ mld_sched_fast_timeout(void)
 }
 
 /*
+ * Appends an in6_multi to the list to be released later.
+ *
+ * Caller must be holding mli_lock.
+ */
+static void
+mld_append_relq(struct mld_ifinfo *mli, struct in6_multi *inm)
+{
+	MLI_LOCK_ASSERT_HELD(mli);
+	MLD_PRINTF(("%s: adding inm %llx on relq ifp 0x%llx(%s)\n",
+	    __func__, (uint64_t)VM_KERNEL_ADDRPERM(inm),
+	    (uint64_t)VM_KERNEL_ADDRPERM(mli->mli_ifp),
+	    if_name(mli->mli_ifp)));
+	SLIST_INSERT_HEAD(&mli->mli_relinmhead, inm, in6m_nrele);
+}
+
+/*
  * Free the in6_multi reference(s) for this MLD lifecycle.
  *
  * Caller must be holding mli_lock.
@@ -1916,17 +1930,25 @@ static void
 mld_flush_relq(struct mld_ifinfo *mli, struct mld_in6m_relhead *in6m_dthead)
 {
 	struct in6_multi *inm;
+	SLIST_HEAD(, in6_multi) temp_relinmhead;
 
-again:
+	/*
+	 * Before dropping the mli_lock, copy all the items in the
+	 * release list to a temporary list to prevent other threads
+	 * from changing mli_relinmhead while we are traversing it.
+	 */
 	MLI_LOCK_ASSERT_HELD(mli);
-	inm = SLIST_FIRST(&mli->mli_relinmhead);
-	if (inm != NULL) {
+	SLIST_INIT(&temp_relinmhead);
+	while ((inm = SLIST_FIRST(&mli->mli_relinmhead)) != NULL) {
+		SLIST_REMOVE_HEAD(&mli->mli_relinmhead, in6m_nrele);
+		SLIST_INSERT_HEAD(&temp_relinmhead, inm, in6m_nrele);
+	}
+	MLI_UNLOCK(mli);
+	in6_multihead_lock_exclusive();
+	while ((inm = SLIST_FIRST(&temp_relinmhead)) != NULL) {
 		int lastref;
 
-		SLIST_REMOVE_HEAD(&mli->mli_relinmhead, in6m_nrele);
-		MLI_UNLOCK(mli);
-
-		in6_multihead_lock_exclusive();
+		SLIST_REMOVE_HEAD(&temp_relinmhead, in6m_nrele);
 		IN6M_LOCK(inm);
 		VERIFY(inm->in6m_nrelecnt != 0);
 		inm->in6m_nrelecnt--;
@@ -1934,7 +1956,6 @@ again:
 		VERIFY(!lastref || (!(inm->in6m_debug & IFD_ATTACHED) &&
 		    inm->in6m_reqcnt == 0));
 		IN6M_UNLOCK(inm);
-		in6_multihead_lock_done();
 		/* from mli_relinmhead */
 		IN6M_REMREF(inm);
 		/* from in6_multihead_list */
@@ -1949,9 +1970,9 @@ again:
 			 */
 			MLD_ADD_DETACHED_IN6M(in6m_dthead, inm);
 		}
-		MLI_LOCK(mli);
-		goto again;
 	}
+	in6_multihead_lock_done();
+	MLI_LOCK(mli);
 }
 
 /*
@@ -2129,8 +2150,7 @@ mld_v2_process_group_timers(struct mld_ifinfo *mli,
 				 * dequeued later on.
 				 */
 				VERIFY(inm->in6m_nrelecnt != 0);
-				SLIST_INSERT_HEAD(&mli->mli_relinmhead,
-				    inm, in6m_nrele);
+				mld_append_relq(mli, inm);
 			}
 		}
 		break;
@@ -2238,8 +2258,7 @@ mld_v2_cancel_link_timers(struct mld_ifinfo *mli)
 			 */
 			VERIFY(inm->in6m_nrelecnt != 0);
 			MLI_LOCK(mli);
-			SLIST_INSERT_HEAD(&mli->mli_relinmhead, inm,
-			    in6m_nrele);
+			mld_append_relq(mli, inm);
 			MLI_UNLOCK(mli);
 			OS_FALLTHROUGH;
 		case MLD_G_QUERY_PENDING_MEMBER:
@@ -2533,8 +2552,7 @@ mld_initial_join(struct in6_multi *inm, struct mld_ifinfo *mli,
 		if (mli->mli_version == MLD_VERSION_2 &&
 		    inm->in6m_state == MLD_LEAVING_MEMBER) {
 			VERIFY(inm->in6m_nrelecnt != 0);
-			SLIST_INSERT_HEAD(&mli->mli_relinmhead, inm,
-			    in6m_nrele);
+			mld_append_relq(mli, inm);
 		}
 
 		inm->in6m_state = MLD_REPORTING_MEMBER;

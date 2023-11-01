@@ -574,17 +574,9 @@ iokit_port_object_description(io_object_t obj, kobject_description_t desc)
 void
 iokit_add_reference( io_object_t obj, natural_t type )
 {
-	IOUserClient * uc;
-
 	if (!obj) {
 		return;
 	}
-
-	if ((IKOT_IOKIT_CONNECT == type)
-	    && (uc = OSDynamicCast(IOUserClient, obj))) {
-		OSIncrementAtomic(&uc->__ipc);
-	}
-
 	obj->retain();
 }
 
@@ -600,28 +592,63 @@ iokit_remove_reference( io_object_t obj )
 void
 iokit_remove_connect_reference(LIBKERN_CONSUMED io_object_t obj )
 {
-	IOUserClient * uc;
-	bool           finalize = false;
-
 	if (!obj) {
 		return;
 	}
+	obj->release();
+}
 
-	if ((uc = OSDynamicCast(IOUserClient, obj))) {
-		assert(uc->__ipc);
-		if (1 == OSDecrementAtomic(&uc->__ipc) && uc->isInactive()) {
-			IOLockLock(gIOObjectPortLock);
-			if ((finalize = uc->__ipcFinal)) {
-				uc->__ipcFinal = false;
-			}
-			IOLockUnlock(gIOObjectPortLock);
-		}
-		if (finalize) {
-			uc->scheduleFinalize(true);
-		}
+enum {
+	kIPCLockNone  = 0,
+	kIPCLockRead  = 1,
+	kIPCLockWrite = 2
+};
+
+void
+IOUserClient::ipcEnter(int locking)
+{
+	switch (locking) {
+	case kIPCLockWrite:
+		IORWLockWrite(&lock);
+		break;
+	case kIPCLockRead:
+		IORWLockRead(&lock);
+		break;
+	case kIPCLockNone:
+		break;
+	default:
+		panic("ipcEnter");
 	}
 
-	obj->release();
+	OSIncrementAtomic(&__ipc);
+}
+
+void
+IOUserClient::ipcExit(int locking)
+{
+	bool finalize = false;
+
+	assert(__ipc);
+	if (1 == OSDecrementAtomic(&__ipc) && isInactive()) {
+		IOLockLock(gIOObjectPortLock);
+		if ((finalize = __ipcFinal)) {
+			__ipcFinal = false;
+		}
+		IOLockUnlock(gIOObjectPortLock);
+		if (finalize) {
+			scheduleFinalize(true);
+		}
+	}
+	switch (locking) {
+	case kIPCLockWrite:
+	case kIPCLockRead:
+		IORWLockUnlock(&lock);
+		break;
+	case kIPCLockNone:
+		break;
+	default:
+		panic("ipcExit");
+	}
 }
 
 void
@@ -3193,10 +3220,10 @@ is_io_connect_get_notification_semaphore(
 	CHECK( IOUserClient, connection, client );
 
 	IOStatisticsClientCall();
-	IORWLockWrite(&client->lock);
+	client->ipcEnter(kIPCLockWrite);
 	ret = client->getNotificationSemaphore((UInt32) notification_type,
 	    semaphore );
-	IORWLockUnlock(&client->lock);
+	client->ipcExit(kIPCLockWrite);
 
 	return ret;
 }
@@ -4496,7 +4523,7 @@ is_io_service_open_extended(
 /* Routine io_service_close */
 kern_return_t
 is_io_service_close(
-	io_object_t connection )
+	io_connect_t connection )
 {
 	OSSet * mappings;
 	if ((mappings = OSDynamicCast(OSSet, connection))) {
@@ -4508,9 +4535,9 @@ is_io_service_close(
 	IOStatisticsClientCall();
 
 	if (client->sharedInstance || OSCompareAndSwap8(0, 1, &client->closed)) {
-		IORWLockWrite(&client->lock);
+		client->ipcEnter(kIPCLockWrite);
 		client->clientClose();
-		IORWLockUnlock(&client->lock);
+		client->ipcExit(kIPCLockWrite);
 	} else {
 		IOLog("ignored is_io_service_close(0x%qx,%s)\n",
 		    client->getRegistryEntryID(), client->getName());
@@ -4522,17 +4549,21 @@ is_io_service_close(
 /* Routine io_connect_get_service */
 kern_return_t
 is_io_connect_get_service(
-	io_object_t connection,
+	io_connect_t connection,
 	io_object_t *service )
 {
 	IOService * theService;
 
 	CHECK( IOUserClient, connection, client );
 
+	client->ipcEnter(kIPCLockNone);
+
 	theService = client->getService();
 	if (theService) {
 		theService->retain();
 	}
+
+	client->ipcExit(kIPCLockNone);
 
 	*service = theService;
 
@@ -4542,7 +4573,7 @@ is_io_connect_get_service(
 /* Routine io_connect_set_notification_port */
 kern_return_t
 is_io_connect_set_notification_port(
-	io_object_t connection,
+	io_connect_t connection,
 	uint32_t notification_type,
 	mach_port_t port,
 	uint32_t reference)
@@ -4551,17 +4582,19 @@ is_io_connect_set_notification_port(
 	CHECK( IOUserClient, connection, client );
 
 	IOStatisticsClientCall();
-	IORWLockWrite(&client->lock);
+
+	client->ipcEnter(kIPCLockWrite);
 	ret = client->registerNotificationPort( port, notification_type,
 	    (io_user_reference_t) reference );
-	IORWLockUnlock(&client->lock);
+	client->ipcExit(kIPCLockWrite);
+
 	return ret;
 }
 
 /* Routine io_connect_set_notification_port */
 kern_return_t
 is_io_connect_set_notification_port_64(
-	io_object_t connection,
+	io_connect_t connection,
 	uint32_t notification_type,
 	mach_port_t port,
 	io_user_reference_t reference)
@@ -4570,10 +4603,12 @@ is_io_connect_set_notification_port_64(
 	CHECK( IOUserClient, connection, client );
 
 	IOStatisticsClientCall();
-	IORWLockWrite(&client->lock);
+
+	client->ipcEnter(kIPCLockWrite);
 	ret = client->registerNotificationPort( port, notification_type,
 	    reference );
-	IORWLockUnlock(&client->lock);
+	client->ipcExit(kIPCLockWrite);
+
 	return ret;
 }
 
@@ -4599,13 +4634,9 @@ is_io_connect_map_memory_into_task
 	}
 
 	IOStatisticsClientCall();
-	if (client->defaultLocking) {
-		IORWLockWrite(&client->lock);
-	}
+
+	client->ipcEnter(client->defaultLocking ? kIPCLockWrite : kIPCLockNone);
 	map = client->mapClientMemory64( memory_type, into_task, flags, *address );
-	if (client->defaultLocking) {
-		IORWLockUnlock(&client->lock);
-	}
 
 	if (map) {
 		*address = map->getAddress();
@@ -4637,6 +4668,8 @@ is_io_connect_map_memory_into_task
 	} else {
 		err = kIOReturnBadArgument;
 	}
+
+	client->ipcExit(client->defaultLocking ? kIPCLockWrite : kIPCLockNone);
 
 	return err;
 }
@@ -4714,13 +4747,9 @@ is_io_connect_unmap_memory_from_task
 	}
 
 	IOStatisticsClientCall();
-	if (client->defaultLocking) {
-		IORWLockWrite(&client->lock);
-	}
+
+	client->ipcEnter(client->defaultLocking ? kIPCLockWrite : kIPCLockNone);
 	err = client->clientMemoryForType((UInt32) memory_type, &options, &memory );
-	if (client->defaultLocking) {
-		IORWLockUnlock(&client->lock);
-	}
 
 	if (memory && (kIOReturnSuccess == err)) {
 		options = (options & ~kIOMapUserOptionsMask)
@@ -4757,6 +4786,8 @@ is_io_connect_unmap_memory_from_task
 		}
 	}
 
+	client->ipcExit(client->defaultLocking ? kIPCLockWrite : kIPCLockNone);
+
 	return err;
 }
 
@@ -4781,7 +4812,7 @@ is_io_connect_unmap_memory(
 /* Routine io_connect_add_client */
 kern_return_t
 is_io_connect_add_client(
-	io_object_t connection,
+	io_connect_t connection,
 	io_object_t connect_to)
 {
 	CHECK( IOUserClient, connection, client );
@@ -4790,13 +4821,11 @@ is_io_connect_add_client(
 	IOReturn ret;
 
 	IOStatisticsClientCall();
-	if (client->defaultLocking) {
-		IORWLockWrite(&client->lock);
-	}
+
+	client->ipcEnter(client->defaultLocking ? kIPCLockWrite : kIPCLockNone);
 	ret = client->connectClient( to );
-	if (client->defaultLocking) {
-		IORWLockUnlock(&client->lock);
-	}
+	client->ipcExit(client->defaultLocking ? kIPCLockWrite : kIPCLockNone);
+
 	return ret;
 }
 
@@ -4804,7 +4833,7 @@ is_io_connect_add_client(
 /* Routine io_connect_set_properties */
 kern_return_t
 is_io_connect_set_properties(
-	io_object_t connection,
+	io_connect_t connection,
 	io_buf_ptr_t properties,
 	mach_msg_type_number_t propertiesCnt,
 	kern_return_t * result)
@@ -6358,21 +6387,14 @@ IOUserClient::callExternalMethod(uint32_t selector, IOExternalMethodArguments * 
 {
 	IOReturn ret;
 
-	if (defaultLocking) {
-		if (defaultLockingSingleThreadExternalMethod) {
-			IORWLockWrite(&lock);
-		} else {
-			IORWLockRead(&lock);
-		}
-	}
+	ipcEnter(defaultLocking ? (defaultLockingSingleThreadExternalMethod ? kIPCLockWrite : kIPCLockRead) : kIPCLockNone);
 	if (uc2022) {
 		ret = ((IOUserClient2022 *) this)->externalMethod(selector, (IOExternalMethodArgumentsOpaque *) args);
 	} else {
 		ret = externalMethod(selector, args);
 	}
-	if (defaultLocking) {
-		IORWLockUnlock(&lock);
-	}
+	ipcExit(defaultLocking ? (defaultLockingSingleThreadExternalMethod ? kIPCLockWrite : kIPCLockRead) : kIPCLockNone);
+
 	return ret;
 }
 

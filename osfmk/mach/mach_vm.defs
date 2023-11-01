@@ -548,8 +548,7 @@ routine PREFIX(KERNEL_SERVER_SUFFIX(vm_remap_new)) (
 routine mach_vm_deferred_reclamation_buffer_init(
 		target_task	: task_t;
 		address		: mach_vm_offset_t;
-		size		: mach_vm_size_t;
-		indices		: mach_vm_address_t);
+		size		: mach_vm_size_t);
 
 routine mach_vm_deferred_reclamation_buffer_synchronize(
 		target_task		: task_t;

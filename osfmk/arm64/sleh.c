@@ -89,6 +89,11 @@
 #error Should only be compiling for arm64.
 #endif
 
+#if DEBUG || DEVELOPMENT
+#define HAS_TELEMETRY_KERNEL_BRK 1
+#endif
+
+
 #define TEST_CONTEXT32_SANITY(context) \
 	(context->ss.ash.flavor == ARM_SAVED_STATE32 && context->ss.ash.count == ARM_SAVED_STATE32_COUNT && \
 	 context->ns.nsh.flavor == ARM_NEON_SAVED_STATE32 && context->ns.nsh.count == ARM_NEON_SAVED_STATE32_COUNT)
@@ -277,11 +282,13 @@ copyio_recovery_offset(uintptr_t addr)
 	return (ptrdiff_t)(addr - (uintptr_t)copyio_recover_table);
 }
 
+#if !HAS_APPLE_PAC
 static inline uintptr_t
 copyio_recovery_addr(ptrdiff_t offset)
 {
 	return (uintptr_t)copyio_recover_table + (uintptr_t)offset;
 }
+#endif
 
 static inline struct copyio_recovery_entry *
 find_copyio_recovery_entry(arm_saved_state_t *state)
@@ -296,18 +303,6 @@ find_copyio_recovery_entry(arm_saved_state_t *state)
 	}
 
 	return NULL;
-}
-
-static inline uintptr_t
-copyio_recovery_get_recover_addr(
-	arm_saved_state_t              *state)
-{
-	struct copyio_recovery_entry *e = find_copyio_recovery_entry(state);
-	if (e == NULL) {
-		panic("copyio recovery: couldn't find a range for %p",
-		    (void *)get_saved_state_pc(state));
-	}
-	return copyio_recovery_addr(e->cre_recovery);
 }
 
 static inline int
@@ -630,6 +625,31 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 	 * that would disclose the behavior of PT_DENY_ATTACH processes.
 	 */
 	if (is_user) {
+		/* Sanitize FAR (but only if the exception was taken from userspace) */
+		switch (class) {
+		case ESR_EC_IABORT_EL1:
+		case ESR_EC_IABORT_EL0:
+			/* If this is a SEA, since we can't trust FnV, just clear FAR from the save area. */
+			if (ISS_IA_FSC(ESR_ISS(esr)) == FSC_SYNC_EXT_ABORT) {
+				saved_state64(state)->far = 0;
+			}
+			break;
+		case ESR_EC_DABORT_EL1:
+		case ESR_EC_DABORT_EL0:
+			/* If this is a SEA, since we can't trust FnV, just clear FAR from the save area. */
+			if (ISS_DA_FSC(ESR_ISS(esr)) == FSC_SYNC_EXT_ABORT) {
+				saved_state64(state)->far = 0;
+			}
+			break;
+		case ESR_EC_WATCHPT_MATCH_EL1:
+		case ESR_EC_WATCHPT_MATCH_EL0:
+		case ESR_EC_PC_ALIGN:
+			break;  /* FAR_ELx is valid */
+		default:
+			saved_state64(state)->far = 0;
+			break;
+		}
+
 		thread->machine.exception_trace_code = (uint16_t)(ARM64_KDBG_CODE_USER | class);
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
 		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, thread->machine.exception_trace_code) | DBG_FUNC_START,
@@ -813,15 +833,9 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		__builtin_unreachable();
 
 	case ESR_EC_ILLEGAL_INSTR_SET:
-		if (EXCB_ACTION_RERUN !=
-		    ex_cb_invoke(EXCB_CLASS_ILLEGAL_INSTR_SET, far)) {
-			// instruction is not re-executed
-			panic("Illegal instruction set exception. state=%p class=%u esr=%u far=%p spsr=0x%x",
-			    state, class, esr, (void *)far, get_saved_state_cpsr(state));
-		}
-		// must clear this fault in PSR to re-run
-		mask_saved_state_cpsr(state, 0, PSR64_IL);
-		break;
+		panic("Illegal instruction set exception. state=%p class=%u esr=%u far=%p spsr=0x%x",
+		    state, class, esr, (void *)far, get_saved_state_cpsr(state));
+		__builtin_unreachable();
 
 	case ESR_EC_MCR_MRC_CP15_TRAP:
 	case ESR_EC_MCRR_MRRC_CP15_TRAP:
@@ -1006,6 +1020,7 @@ ptrauth_handle_brk_trap(void *tstate, uint16_t comment)
 }
 #endif /* __has_feature(ptrauth_calls) */
 
+#if HAS_TELEMETRY_KERNEL_BRK
 static uint32_t bound_chk_violations_event;
 
 static void
@@ -1025,6 +1040,7 @@ telemetry_handle_brk_trap(
 		os_atomic_inc(&bound_chk_violations_event, relaxed);
 	}
 }
+#endif /* HAS_TELEMETRY_KERNEL_BRK */
 
 #if __has_feature(ptrauth_calls)
 KERNEL_BRK_DESCRIPTOR_DEFINE(ptrauth_desc,
@@ -1049,14 +1065,19 @@ KERNEL_BRK_DESCRIPTOR_DEFINE(libcxx_desc,
     .options             = KERNEL_BRK_UNRECOVERABLE,
     .handle_breakpoint   = NULL);
 
+#if HAS_TELEMETRY_KERNEL_BRK
 KERNEL_BRK_DESCRIPTOR_DEFINE(telemetry_desc,
     .type                = KERNEL_BRK_TYPE_TELEMETRY,
     .base                = TELEMETRY_TRAPS_START,
     .max                 = TELEMETRY_TRAPS_END,
     .options             = KERNEL_BRK_RECOVERABLE | KERNEL_BRK_CORE_ANALYTICS,
     .handle_breakpoint   = telemetry_handle_brk_trap);
+#endif /* HAS_TELEMETRY_KERNEL_BRK */
 
 static void
+#if !HAS_TELEMETRY_KERNEL_BRK
+__attribute__((noreturn))
+#endif
 handle_kernel_breakpoint(arm_saved_state_t *state, uint32_t esr)
 {
 	uint16_t comment = ISS_BRK_COMMENT(esr);
@@ -1071,19 +1092,23 @@ handle_kernel_breakpoint(arm_saved_state_t *state, uint32_t esr)
 		goto brk_out;
 	}
 
+#if HAS_TELEMETRY_KERNEL_BRK
 	if (desc->options & KERNEL_BRK_TELEMETRY_OPTIONS) {
 		telemetry_kernel_brk(desc->type, desc->options, (void *)state, comment);
 	}
+#endif
 
 	if (desc->handle_breakpoint) {
 		desc->handle_breakpoint(state, comment); /* May trigger panic */
 	}
 
+#if HAS_TELEMETRY_KERNEL_BRK
 	/* Still alive? Check if we should recover. */
 	if (desc->options & KERNEL_BRK_RECOVERABLE) {
 		add_saved_state_pc(state, 4);
 		return;
 	}
+#endif
 
 brk_out:
 	snprintf(msg, sizeof(msg), MSG_FMT, comment);
@@ -1376,7 +1401,7 @@ handle_sw_step_debug(arm_saved_state_t *state)
 		panic_with_thread_kernel_state("SW_STEP_DEBUG exception thread DebugData is NULL.", state);
 	}
 
-	mask_saved_state_cpsr(thread->machine.upcb, 0, PSR64_SS | DAIF_ALL);
+	mask_user_saved_state_cpsr(thread->machine.upcb, 0, PSR64_SS | DAIF_ALL);
 
 	// Special encoding for gdb single step event on ARM
 	exc = EXC_BREAKPOINT;
@@ -1520,23 +1545,56 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 	__builtin_unreachable();
 }
 
+/**
+ * Panic because the kernel abort handler tried to apply a recovery handler that
+ * isn't inside copyio_recover_table[].
+ *
+ * @param state original saved-state
+ * @param recover invalid recovery handler
+ */
+__attribute__((noreturn, used))
+static void
+panic_on_invalid_recovery_handler(arm_saved_state_t *state, struct copyio_recovery_entry *recover)
+{
+	panic("attempt to set invalid recovery handler %p on kernel saved-state %p", recover, state);
+}
+
 static void
 handle_kernel_abort_recover(
 	arm_saved_state_t              *state,
 	uint32_t                        esr,
 	vm_offset_t                     fault_addr,
-	thread_t                        thread)
+	thread_t                        thread,
+	struct copyio_recovery_entry   *_Nonnull recover)
 {
 	thread->machine.recover_esr = esr;
 	thread->machine.recover_far = fault_addr;
 #if defined(HAS_APPLE_PAC)
 	MANIPULATE_SIGNED_THREAD_STATE(state,
-	    "mov	x1, %[pc]		\n"
-	    "str	x1, [x0, %[SS64_PC]]	\n",
-	    [pc] "r"(copyio_recovery_get_recover_addr(state))
+	    "adrp	x6, _copyio_recover_table_end@page		\n"
+	    "add	x6, x6, _copyio_recover_table_end@pageoff	\n"
+	    "cmp	%[recover], x6					\n"
+	    "b.lt	1f						\n"
+	    "b		_panic_on_invalid_recovery_handler		\n"
+	    "1:								\n"
+	    "adrp	x6, _copyio_recover_table@page			\n"
+	    "add	x6, x6, _copyio_recover_table@pageoff		\n"
+	    "cmp	%[recover], x6					\n"
+	    "b.ge	1f						\n"
+	    "b		_panic_on_invalid_recovery_handler		\n"
+	    "1:								\n"
+	    "ldr	x1, [%[recover], %[CRE_RECOVERY]]		\n"
+	    "add	x1, x1, x6					\n"
+	    "str	x1, [x0, %[SS64_PC]]				\n",
+	    [recover] "r"(recover),
+	    [CRE_RECOVERY] "i"(offsetof(struct copyio_recovery_entry, cre_recovery))
 	    );
 #else
-	saved_state64(state)->pc = copyio_recovery_get_recover_addr(state);
+	if ((uintptr_t)recover < (uintptr_t)copyio_recover_table ||
+	    (uintptr_t)recover >= (uintptr_t)copyio_recover_table_end) {
+		panic_on_invalid_recovery_handler(state, recover);
+	}
+	saved_state64(state)->pc = copyio_recovery_addr(recover->cre_recovery);
 #endif
 }
 
@@ -1545,7 +1603,7 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
     fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
 {
 	thread_t thread = current_thread();
-	bool recover = find_copyio_recovery_entry(state) != 0;
+	struct copyio_recovery_entry *recover = find_copyio_recovery_entry(state);
 
 #ifdef CONFIG_KERNEL_TAGGING
 	/*
@@ -1569,7 +1627,7 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
 			 * Point to next instruction, or recovery handler if set.
 			 */
 			if (recover) {
-				handle_kernel_abort_recover(state, esr, fault_addr, thread);
+				handle_kernel_abort_recover(state, esr, fault_addr, thread, recover);
 			} else {
 				add_saved_state_pc(state, 4);
 			}
@@ -1654,14 +1712,14 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
 		 *  If we have a recover handler, invoke it now.
 		 */
 		if (recover) {
-			handle_kernel_abort_recover(state, esr, fault_addr, thread);
+			handle_kernel_abort_recover(state, esr, fault_addr, thread, recover);
 			return;
 		}
 
 		panic_fault_address = fault_addr;
 	} else if (is_alignment_fault(fault_code)) {
 		if (recover) {
-			handle_kernel_abort_recover(state, esr, fault_addr, thread);
+			handle_kernel_abort_recover(state, esr, fault_addr, thread, recover);
 			return;
 		}
 		panic_with_thread_kernel_state("Unaligned kernel data abort.", state);
@@ -2047,6 +2105,10 @@ sleh_serror(arm_context_t *context, uint32_t esr, vm_offset_t far)
 	int preemption_level = sleh_get_preemption_level();
 #endif
 
+	if (PSR64_IS_USER(get_saved_state_cpsr(state))) {
+		/* Sanitize FAR (only if we came from userspace) */
+		saved_state64(state)->far = 0;
+	}
 
 	ASSERT_CONTEXT_SANITY(context);
 	arm64_platform_error(state, esr, far, PLAT_ERR_SRC_ASYNC);
@@ -2105,7 +2167,14 @@ syscall_trace(
 static void
 sleh_interrupt_handler_prologue(arm_saved_state_t *state, unsigned int type)
 {
-	boolean_t is_user = PSR64_IS_USER(get_saved_state_cpsr(state));
+	const bool is_user = PSR64_IS_USER(get_saved_state_cpsr(state));
+
+	if (is_user == true) {
+		/* Sanitize FAR (only if the interrupt occurred while the CPU was in usermode) */
+		saved_state64(state)->far = 0;
+	}
+
+	recount_enter_interrupt();
 
 	task_vtimer_check(current_thread());
 
@@ -2129,6 +2198,7 @@ sleh_interrupt_handler_epilogue(void)
 	kperf_interrupt();
 #endif /* KPERF */
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCP_INTR, 0) | DBG_FUNC_END);
+	recount_leave_interrupt();
 }
 
 void

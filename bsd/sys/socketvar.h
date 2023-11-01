@@ -163,28 +163,30 @@ struct socket {
 	 * Variables for socket buffering.
 	 */
 	struct sockbuf {
-		u_int32_t       sb_cc;          /* actual chars in buffer */
-		u_int32_t       sb_hiwat;       /* max actual char count */
-		u_int32_t       sb_mbcnt;       /* chars of mbufs used */
-		u_int32_t       sb_mbmax;       /* max chars of mbufs to use */
-		u_int32_t       sb_ctl;         /* non-data chars in buffer */
-		u_int32_t       sb_lowat;       /* low water mark */
+		uint32_t       sb_cc;          /* actual chars in buffer */
+		uint32_t       sb_hiwat;       /* max actual char count */
+		uint32_t       sb_mbcnt;       /* chars of mbufs used */
+		uint32_t       sb_mbmax;       /* max chars of mbufs to use */
+		uint32_t       sb_ctl;         /* non-data chars in buffer */
+		uint32_t       sb_lowat;       /* low water mark */
 		struct mbuf     *sb_mb;         /* the mbuf chain */
 		struct mbuf     *sb_mbtail;     /* the last mbuf in the chain */
 		struct mbuf     *sb_lastrecord; /* first mbuf of last record */
 		struct socket   *sb_so;         /* socket back ptr for kexts */
 		struct selinfo  sb_sel;         /* process selecting rd/wr */
 		struct timeval  sb_timeo;       /* timeout for read/write */
-		u_int32_t       sb_flags;       /* flags, see below */
-		u_int32_t       sb_idealsize;   /* Ideal size for the sb based
-		                                 *  on bandwidth and delay */
+		uint32_t       sb_flags;       /* flags, see below */
+		uint32_t       sb_idealsize;   /* Ideal size for the sb based
+		                                *  on bandwidth and delay */
 		void    (*sb_upcall)(struct socket *, void *arg, int waitf);
 		void    *sb_upcallarg;          /* Arg for above */
-		u_int32_t       sb_wantlock;    /* # of SB_LOCK waiters */
-		u_int32_t       sb_waiters;     /* # of data/space waiters */
+		uint32_t       sb_wantlock;    /* # of SB_LOCK waiters */
+		uint32_t       sb_waiters;     /* # of data/space waiters */
 		thread_t        sb_cfil_thread; /* content filter thread */
-		u_int32_t       sb_cfil_refs;   /* # of nested calls */
-		u_int32_t       sb_preconn_hiwat; /* preconnect hiwat mark */
+		uint32_t       sb_cfil_refs;   /* # of nested calls */
+		uint32_t       sb_preconn_hiwat; /* preconnect hiwat mark */
+		struct mbuf   *sb_sendhead;
+		int            sb_sendoff;
 	} so_rcv, so_snd;
 #define SB_MAX          (8192*1024)     /* default for max chars in sockbuf */
 #define SB_MSIZE_ADJ    256             /* fixed adjustment for mbuf */
@@ -207,6 +209,7 @@ struct socket {
 #define SB_UPCALL_LOCK  0x4000          /* Keep socket locked when doing the upcall */
 #define SB_LIMITED      0x8000          /* Socket buffer size limited */
 #define SB_KCTL         0x10000         /* kernel control socket buffer */
+#define SB_SENDHEAD     0x20000
 	/* XXX Note that Unix domain socket's sb_flags is defined as short */
 	caddr_t so_tpcb;                /* Misc. protocol control block, used
 	                                 *  by some kexts */

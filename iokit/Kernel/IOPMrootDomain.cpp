@@ -8122,7 +8122,9 @@ IOPMrootDomain::dispatchPowerEvent(
 				requestUserActive(this, "WakeTypeUser");
 				wakeType = kIOPMRootDomainWakeTypeUser;
 			} else if (arg0 == gIOPMSettingDebugWakeRelativeKey) {
-				requestUserActive(this, "WakeTypeAlarm");
+				if (!(gDarkWakeFlags & kDarkWakeFlagAlarmIsDark)) {
+					requestUserActive(this, "WakeTypeAlarm");
+				}
 				wakeType = kIOPMRootDomainWakeTypeAlarm;
 			} else if (arg0 == gIOPMSettingSleepServiceWakeCalendarKey) {
 				darkWakeSleepService = true;
@@ -10547,9 +10549,8 @@ IOPMrootDomain::acquireDriverKitMatchingAssertion()
 		        _driverKitMatchingAssertionCount++;
 		        return kIOReturnSuccess;
 		} else {
-		        bool fullToDarkTransition = (kSystemTransitionCapability == _systemTransitionType) && CAP_LOSS(kIOPMSystemCapabilityGraphics);
-		        if (kSystemTransitionSleep == _systemTransitionType || fullToDarkTransition) {
-		                // system transitioning from wake to sleep/darkwake
+		        if (kSystemTransitionSleep == _systemTransitionType) {
+		                // system going to sleep
 		                return kIOReturnBusy;
 			} else {
 		                // createPMAssertion is asynchronous.

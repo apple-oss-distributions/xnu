@@ -121,7 +121,7 @@ extern char *proc_name_address(void *p);
 
 errno_t tcp_fill_info_for_info_tuple(struct info_tuple *, struct tcp_info *);
 
-int tcp_sysctl_info(struct sysctl_oid *, void *, int, struct sysctl_req *);
+static int tcp_sysctl_info(struct sysctl_oid *, void *, int, struct sysctl_req *);
 static void tcp_connection_fill_info(struct tcpcb *tp,
     struct tcp_connection_info *tci);
 static int tcp_get_mpkl_send_info(struct mbuf *, struct so_mpkl_send_info *);
@@ -152,6 +152,11 @@ extern void tcp_sbrcv_trim(struct tcpcb *tp, struct sockbuf *sb);
 SYSCTL_PROC(_net_inet_tcp, OID_AUTO, info,
     CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN,
     0, 0, tcp_sysctl_info, "S", "TCP info per tuple");
+
+int faster_mcopy = 0;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, faster_mcopy,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &faster_mcopy, 0,
+    "Speed up m_copym");
 
 /*
  * TCP attaches to socket via pru_attach(), reserving space,
@@ -185,6 +190,12 @@ tcp_usr_attach(struct socket *so, __unused int proto, struct proc *p)
 	if ((so->so_options & SO_LINGER) && so->so_linger == 0) {
 		so->so_linger = (short)(TCP_LINGERTIME * hz);
 	}
+	if (faster_mcopy) {
+		so->so_snd.sb_flags |= SB_SENDHEAD;
+		so->so_snd.sb_sendhead = NULL;
+		so->so_snd.sb_sendoff = 0;
+	}
+
 	tp = sototcpcb(so);
 out:
 	TCPDEBUG2(PRU_ATTACH);
@@ -2968,8 +2979,8 @@ done:
  * sizes, respectively.  These are obsolescent (this information should
  * be set by the route).
  */
-u_int32_t       tcp_sendspace = 1448 * 256;
-u_int32_t       tcp_recvspace = 1448 * 384;
+uint32_t       tcp_sendspace = 1448 * 256;
+uint32_t       tcp_recvspace = 1448 * 384;
 
 /* During attach, the size of socket buffer allocated is limited to
  * sb_max in sbreserve. Disallow setting the tcp send and recv space

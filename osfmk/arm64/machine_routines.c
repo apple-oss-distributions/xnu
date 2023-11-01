@@ -79,6 +79,16 @@
  * bits back to read/write.  However it will still catch xnu changes that
  * accidentally write to HID bits after they've been made read-only.
  */
+SECURITY_READ_ONLY_LATE(bool) skip_spr_lockdown_glb = 0;
+
+/*
+ * On some SoCs, PIO lockdown is applied in assembly in early boot by
+ * secondary CPUs.
+ * Since the cluster_pio_ro_ctl value is dynamic, it is stored here by the
+ * primary CPU so that it doesn't have to be computed each time by the
+ * startup code.
+ */
+SECURITY_READ_ONLY_LATE(uint64_t) cluster_pio_ro_ctl_mask_glb = 0;
 
 #if KPC
 #include <kern/kpc.h>
@@ -515,6 +525,8 @@ set_invalidate_hmac_function(invalidate_fn_t fn)
 void
 machine_lockdown(void)
 {
+
+
 	arm_vm_prot_finalize(PE_state.bootArgs);
 
 #if CONFIG_KERNEL_INTEGRITY
@@ -1120,7 +1132,6 @@ ml_parse_cpu_topology(void)
 	assert(topology_info.boot_cpu != NULL);
 	ml_read_chip_revision(&topology_info.chip_revision);
 
-
 	/*
 	 * Set TPIDR_EL0 to indicate the correct cpu number & cluster id,
 	 * as we may not be booting from cpu 0. Userspace will consume
@@ -1490,6 +1501,7 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 		goto processor_register_error;
 	}
 #endif /* KPC */
+
 
 	if (!is_boot_cpu) {
 		random_cpu_init(this_cpu_datap->cpu_number);
@@ -2231,7 +2243,7 @@ platform_syscall(arm_saved_state_t *state)
 	case 3:
 		/* get cthread */
 		platform_syscall_kprintf("get cthread self.\n");
-		set_saved_state_reg(state, 0, thread_get_cthread_self());
+		set_user_saved_state_reg(state, 0, thread_get_cthread_self());
 		break;
 	case 0: /* I-Cache flush (removed) */
 	case 1: /* D-Cache flush (removed) */
@@ -2427,60 +2439,6 @@ thread_t
 current_thread(void)
 {
 	return current_thread_fast();
-}
-
-typedef struct{
-	ex_cb_t         cb;
-	void            *refcon;
-}
-ex_cb_info_t;
-
-ex_cb_info_t ex_cb_info[EXCB_CLASS_MAX];
-
-/*
- * Callback registration
- * Currently we support only one registered callback per class but
- * it should be possible to support more callbacks
- */
-kern_return_t
-ex_cb_register(
-	ex_cb_class_t   cb_class,
-	ex_cb_t                 cb,
-	void                    *refcon)
-{
-	ex_cb_info_t *pInfo = &ex_cb_info[cb_class];
-
-	if ((NULL == cb) || (cb_class >= EXCB_CLASS_MAX)) {
-		return KERN_INVALID_VALUE;
-	}
-
-	if (NULL == pInfo->cb) {
-		pInfo->cb = cb;
-		pInfo->refcon = refcon;
-		return KERN_SUCCESS;
-	}
-	return KERN_FAILURE;
-}
-
-/*
- * Called internally by platform kernel to invoke the registered callback for class
- */
-ex_cb_action_t
-ex_cb_invoke(
-	ex_cb_class_t   cb_class,
-	vm_offset_t             far)
-{
-	ex_cb_info_t *pInfo = &ex_cb_info[cb_class];
-	ex_cb_state_t state = {far};
-
-	if (cb_class >= EXCB_CLASS_MAX) {
-		panic("Invalid exception callback class 0x%x", cb_class);
-	}
-
-	if (pInfo->cb) {
-		return pInfo->cb(cb_class, pInfo->refcon, &state);
-	}
-	return EXCB_ACTION_NONE;
 }
 
 #if defined(HAS_APPLE_PAC)
@@ -2827,3 +2785,28 @@ ml_get_backtrace_pc(struct arm_saved_state *state)
 	return get_saved_state_pc(state);
 }
 
+
+/**
+ * Panic because an ARM saved-state accessor expected user saved-state but was
+ * passed non-user saved-state.
+ *
+ * @param ss invalid saved-state (CPSR.M != EL0)
+ */
+void
+ml_panic_on_invalid_old_cpsr(const arm_saved_state_t *ss)
+{
+	panic("invalid CPSR in user saved-state %p", ss);
+}
+
+/**
+ * Panic because an ARM saved-state accessor was passed user saved-state and
+ * asked to assign a non-user CPSR.
+ *
+ * @param ss original EL0 saved-state
+ * @param cpsr invalid new CPSR value (CPSR.M != EL0)
+ */
+void
+ml_panic_on_invalid_new_cpsr(const arm_saved_state_t *ss, uint32_t cpsr)
+{
+	panic("attempt to set non-user CPSR %#010x on user saved-state %p", cpsr, ss);
+}

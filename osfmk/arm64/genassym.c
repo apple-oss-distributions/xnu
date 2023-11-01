@@ -289,6 +289,7 @@ main(int     argc,
 	DECLARE("CPU_PHYS_ID", offsetof(cpu_data_t, cpu_phys_id));
 	DECLARE("CPU_TPIDR_EL0", offsetof(cpu_data_t, cpu_tpidr_el0));
 
+
 	DECLARE("RTCLOCKDataSize", sizeof(rtclock_data_t));
 
 	DECLARE("rhdSize", sizeof(struct reset_handler_data));

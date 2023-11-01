@@ -930,7 +930,6 @@ struct in6_multi_mship {
 
 #ifdef BSD_KERNEL_PRIVATE
 #include <netinet6/nd6_var.h>
-#include <net/if_llatbl.h>
 
 /*
  * Per-interface IPv6 structures.
@@ -943,10 +942,8 @@ struct in6_ifextra {
 	uint32_t                netsig_len;
 	u_int8_t                netsig[IFNET_SIGNATURELEN];
 	struct ipv6_prefix      nat64_prefixes[NAT64_MAX_NUM_PREFIXES];
-	struct lltable          *ii_llt;        /* NDP state */
 };
 #define IN6_IFEXTRA(_ifp)       (_ifp->if_inet6data)
-#define LLTABLE6(ifp)           ((IN6_IFEXTRA(ifp) == NULL) ? NULL : IN6_IFEXTRA(ifp)->ii_llt)
 #endif /* BSD_KERNEL_PRIVATE */
 
 struct mld_ifinfo;

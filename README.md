@@ -93,7 +93,6 @@ Other makefile options
  * $ make BUILD_LTO=0     # build without LLVM Link Time Optimization
  * $ make BOUND_CHECKS=0  # disable -fbound-attributes for this build
  * $ make REMOTEBUILD=user@remotehost # perform build on remote host
- * $ make BUILD_JSON_COMPILATION_DATABASE=1 # Build Clang JSON Compilation Database
 
 The XNU build system can optionally output color-formatted build output. To enable this, you can either
 set the `XNU_LOGCOLORS` environment variable to `y`, or you can pass `LOGCOLORS=y` to the make command.

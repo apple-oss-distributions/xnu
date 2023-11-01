@@ -331,6 +331,10 @@ panic_display_hung_cpus_help(void)
 		unsigned i, retry;
 
 		for (i = 0; i < info->num_cpus; i++) {
+			if (!PE_cpu_power_check_kdp(i)) {
+				paniclog_append_noflush("CORE %u is offline, skipping\n", i);
+				continue;
+			}
 			if (info->cpus[i].cpu_UTTDBG_regs) {
 				volatile uint64_t *pcsr = (volatile uint64_t*)(info->cpus[i].cpu_UTTDBG_regs + pcsr_offset);
 				volatile uint32_t *pcsrTrigger = (volatile uint32_t*)pcsr;

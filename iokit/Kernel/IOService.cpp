@@ -1642,6 +1642,7 @@ IOService::lockForArbitration( bool isSuccessRequired )
 	bool                          found;
 	bool                          success;
 	ArbitrationLockQueueElement * element;
+	ArbitrationLockQueueElement * owner;
 	ArbitrationLockQueueElement * active;
 	ArbitrationLockQueueElement * waiting;
 
@@ -1671,17 +1672,18 @@ IOService::lockForArbitration( bool isSuccessRequired )
 	// determine whether this object is already locked (ie. on active queue)
 	found = false;
 	queue_iterate( &gArbitrationLockQueueActive,
-	    active,
+	    owner,
 	    ArbitrationLockQueueElement *,
 	    link )
 	{
-		if (active->service == element->service) {
+		if (owner->service == element->service) {
 			found = true;
 			break;
 		}
 	}
 
 	if (found) { // this object is already locked
+		active = owner;
 		// determine whether it is the same or a different thread trying to lock
 		if (active->thread != element->thread) { // it is a different thread
 			ArbitrationLockQueueElement * victim = NULL;
@@ -1751,9 +1753,8 @@ IOService::lockForArbitration( bool isSuccessRequired )
 								    link );
 
 								// wake the victim
-								IOLockWakeup( gArbitrationLockQueueLock,
-								    victim,
-								    /* one thread */ true );
+								wakeup_thread_with_inheritor(&victim->service->__machPortHoldDestroy, // event
+								    THREAD_AWAKENED, LCK_WAKE_DEFAULT, victim->thread);
 
 								// allow this thread to proceed (ie. wait)
 								success = true; // (put request on wait queue)
@@ -1789,18 +1790,14 @@ IOService::lockForArbitration( bool isSuccessRequired )
 				    link );
 
 				// declare that this thread will wait for a given event
-restart_sleep:                  wait_result = assert_wait( element,
-				    element->required ? THREAD_UNINT
-				    : THREAD_INTERRUPTIBLE );
-
+restart_sleep:
 				// unlock global access
-				IOUnlock( gArbitrationLockQueueLock );
-
-				// put thread to sleep, waiting for our event to fire...
-				if (wait_result == THREAD_WAITING) {
-					wait_result = thread_block(THREAD_CONTINUE_NULL);
-				}
-
+				// & put thread to sleep, waiting for our event to fire...
+				wait_result = lck_mtx_sleep_with_inheritor(gArbitrationLockQueueLock,
+				    LCK_SLEEP_UNLOCK,
+				    &element->service->__machPortHoldDestroy,     // event
+				    owner->thread,
+				    element->required ? THREAD_UNINT : THREAD_INTERRUPTIBLE, TIMEOUT_WAIT_FOREVER);
 
 				// ...and we've been woken up; we might be in one of two states:
 				// (a) we've been aborted and our queue element is not on
@@ -1858,7 +1855,6 @@ restart_sleep:                  wait_result = assert_wait( element,
 				// determine whether we've been aborted while we were asleep
 				if (element->aborted) {
 					assert( false == element->required );
-
 					// re-lock global access
 					IOTakeLock( gArbitrationLockQueueLock );
 
@@ -1947,20 +1943,25 @@ IOService::unlockForArbitration( void )
 		    ArbitrationLockQueueElement *,
 		    link );
 
-		// determine whether a thread is waiting for object (head to tail scan)
-		found = false;
-		queue_iterate( &gArbitrationLockQueueWaiting,
-		    element,
-		    ArbitrationLockQueueElement *,
-		    link )
-		{
-			if (element->service == this) {
-				found = true;
-				break;
-			}
-		}
+		// determine whether a thread is waiting for object
+		thread_t woken;
+		kern_return_t kr =
+		    wakeup_one_with_inheritor(&__machPortHoldDestroy, // event
+		    THREAD_AWAKENED, LCK_WAKE_DEFAULT, &woken);
 
-		if (found) { // we found an interested thread on waiting queue
+		if (KERN_SUCCESS == kr) {
+			found = false;
+			queue_iterate( &gArbitrationLockQueueWaiting,
+			    element,
+			    ArbitrationLockQueueElement *,
+			    link )
+			{
+				if (element->thread == woken) {
+					found = true;
+					break;
+				}
+			}
+			assert(found); // we found an interested thread on waiting queue
 			// remove it from the waiting queue
 			queue_remove( &gArbitrationLockQueueWaiting,
 			    element,
@@ -1973,10 +1974,7 @@ IOService::unlockForArbitration( void )
 			    ArbitrationLockQueueElement *,
 			    link );
 
-			// wake the waiting thread
-			IOLockWakeup( gArbitrationLockQueueLock,
-			    element,
-			    /* one thread */ true );
+			thread_deallocate(woken);
 		}
 	}
 
@@ -4468,17 +4466,19 @@ bool
 IOServicePH::matchingStart(IOService * service)
 {
 	uint32_t idx;
-	bool assertionActive = gIOPMRootDomain->acquireDriverKitMatchingAssertion() == kIOReturnSuccess;
+	bool ok = gIOPMRootDomain->acquireDriverKitMatchingAssertion() == kIOReturnSuccess;
+	if (!ok) {
+		return ok;
+	}
 
 	lock();
-	bool matchNow = !fSystemOff && assertionActive;
-	if (matchNow) {
+	ok = !fSystemOff;
+	if (ok) {
 		idx = fMatchingWork->getNextIndexOfObject(service, 0);
 		if (idx == -1U) {
 			fMatchingWork->setObject(service);
 		}
 	} else {
-		// Delay matching if system is transitioning to sleep / darkwake
 		if (!fMatchingDelayed) {
 			fMatchingDelayed = OSArray::withObjects((const OSObject **) &service, 1, 1);
 		} else {
@@ -4489,11 +4489,11 @@ IOServicePH::matchingStart(IOService * service)
 		}
 	}
 	unlock();
-	if (!matchNow && assertionActive) {
+	if (!ok) {
 		gIOPMRootDomain->releaseDriverKitMatchingAssertion();
 	}
 
-	return matchNow;
+	return ok;
 }
 
 void

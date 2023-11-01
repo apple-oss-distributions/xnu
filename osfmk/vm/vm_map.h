@@ -625,7 +625,8 @@ struct _vm_map {
 	/* boolean_t */ never_faults:1,           /* this map should never cause faults */
 	/* boolean_t */ uses_user_ranges:1,       /* has the map been configured to use user VM ranges */
 	/* boolean_t */ tpro_enforcement:1,       /* enforce TPRO propagation */
-	/* reserved  */ pad:11;
+	/* boolean_t */ corpse_source:1,          /* map is being used to create a corpse for diagnostics.*/
+	/* reserved  */ pad:10;
 	unsigned int            timestamp;        /* Version number */
 };
 
@@ -1746,6 +1747,9 @@ extern bool vm_map_is_exotic(vm_map_t map);
 extern bool vm_map_is_alien(vm_map_t map);
 extern pmap_t vm_map_get_pmap(vm_map_t map);
 
+extern bool vm_map_is_corpse_source(vm_map_t map);
+extern void vm_map_set_corpse_source(vm_map_t map);
+extern void vm_map_unset_corpse_source(vm_map_t map);
 #endif /* XNU_KERNEL_PRIVATE */
 
 #define vm_map_round_page(x, pgmask) (((vm_map_offset_t)(x) + (pgmask)) & ~((signed)(pgmask)))

@@ -178,6 +178,7 @@ void recount_current_thread_perf_level_usage(struct recount_usage
     *usage_levels);
 uint64_t recount_current_thread_time_mach(void);
 uint64_t recount_current_thread_user_time_mach(void);
+uint64_t recount_current_thread_interrupt_time_mach(void);
 uint64_t recount_current_thread_energy_nj(void);
 void recount_current_task_usage(struct recount_usage *usage);
 void recount_current_task_usage_perf_only(struct recount_usage *usage,
@@ -229,6 +230,8 @@ struct recount_thread {
 	// Resources consumed across the lifetime of the thread, according to
 	// `recount_thread_plan`.
 	struct recount_track *rth_lifetime;
+	// Time spent by this thread running interrupt handlers.
+	uint64_t rth_interrupt_time_mach;
 };
 void recount_thread_init(struct recount_thread *th);
 void recount_thread_copy(struct recount_thread *dst,
@@ -304,6 +307,8 @@ struct recount_snap {
 struct recount_processor {
 	struct recount_snap rpr_snap;
 	struct recount_track rpr_active;
+	struct recount_snap rpr_interrupt_snap;
+	uint64_t rpr_interrupt_time_mach;
 	uint64_t rpr_idle_time_mach;
 	_Atomic uint64_t rpr_state_last_abs_time;
 #if __AMP__
@@ -317,6 +322,10 @@ void recount_processor_init(struct processor *processor);
 // of its idle time (to now if the processor is currently idle).
 void recount_processor_usage(struct recount_processor *pr,
     struct recount_usage *usage, uint64_t *idle_time_mach);
+
+// Get the current amount of time spent handling interrupts by the current
+// processor.
+uint64_t recount_current_processor_interrupt_time_mach(void);
 
 #pragma mark updates
 
@@ -341,9 +350,6 @@ void recount_log_switch_thread(const struct recount_snap *snap);
 // Log a kdebug event when a thread switches on-CPU.
 void recount_log_switch_thread_on(const struct recount_snap *snap);
 
-// Called by the startup threads on each CPU to initialize Recount.
-void recount_update_snap(struct recount_snap *cur);
-
 // This function requires that no writers race with it -- this is only safe in
 // debugger context or while running in the context of the track being
 // inspected.
@@ -353,6 +359,9 @@ void recount_sum_unsafe(recount_plan_t plan, const struct recount_track *tracks,
 // For handling precise user/kernel time updates.
 void recount_leave_user(void);
 void recount_enter_user(void);
+// For handling interrupt time updates.
+void recount_enter_interrupt(void);
+void recount_leave_interrupt(void);
 #if __x86_64__
 // Handle interrupt time-keeping on Intel, which aren't unified with the trap
 // handlers, so whether the user or system timers are updated depends on the
@@ -361,11 +370,12 @@ void recount_enter_intel_interrupt(x86_saved_state_t *state);
 void recount_leave_intel_interrupt(void);
 #endif // __x86_64__
 
-// Hooks for each processor idling and running.
+// Hooks for each processor idling, running, and onlining.
 void recount_processor_idle(struct recount_processor *pr,
     struct recount_snap *snap);
 void recount_processor_run(struct recount_processor *pr,
     struct recount_snap *snap);
+void recount_processor_online(processor_t processor, struct recount_snap *snap);
 
 #pragma mark rollups
 

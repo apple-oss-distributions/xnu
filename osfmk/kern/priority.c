@@ -167,6 +167,11 @@ thread_quantum_expire(
 
 		new_computation = ctime - thread->computation_epoch;
 		new_computation += thread->computation_metered;
+		/*
+		 * Remove any time spent handling interrupts outside of the thread's
+		 * control.
+		 */
+		new_computation -= recount_current_thread_interrupt_time_mach() - thread->computation_interrupt_epoch;
 
 		bool demote = false;
 		switch (thread->sched_mode) {

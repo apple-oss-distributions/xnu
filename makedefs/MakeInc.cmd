@@ -308,7 +308,6 @@ DECOMMENT = $(OBJROOT)/SETUP/decomment/decomment
 NEWVERS = $(SRCROOT)/config/newvers.pl
 INSTALL = $(OBJROOT)/SETUP/installfile/installfile
 REPLACECONTENTS = $(OBJROOT)/SETUP/replacecontents/replacecontents
-JSONCOMPILATIONDB = $(OBJROOT)/SETUP/json_compilation_db/json_compilation_db
 
 # Standard BSD tools
 RM = /bin/rm -f

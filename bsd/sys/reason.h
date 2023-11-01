@@ -123,6 +123,7 @@ void os_reason_set_description_data(os_reason_t cur_reason, uint32_t type, void 
 #define OS_REASON_LIBIGNITION 35
 #define OS_REASON_BOOTMOUNT 36
 
+
 /*
  * Update whenever new OS_REASON namespaces are added.
  */

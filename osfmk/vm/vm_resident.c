@@ -1636,7 +1636,7 @@ vm_page_module_init_delayed(void)
 	    ZC_KASAN_NOREDZONE | ZC_KASAN_NOQUARANTINE, ZONE_ID_VM_PAGES, ^(zone_t z) {
 		uint64_t vm_page_zone_pages, vm_page_array_zone_data_size;
 
-		zone_set_exhaustible(z, 0);
+		zone_set_exhaustible(z, 0, true);
 		/*
 		 * Reflect size and usage information for vm_pages[].
 		 */

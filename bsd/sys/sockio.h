@@ -182,6 +182,10 @@
 
 #define SIOCSIFMANAGEMENT       _IOWR('i', 92, struct ifreq)   /* set management interface */
 
+#ifdef PRIVATE
+#define SIOCSATTACHPROTONULL _IOWR('i', 94, struct ifreq)    /* attach/detach NULL proto to interface */
+#endif /* PRIVATE */
+
 #define SIOCIFCREATE    _IOWR('i', 120, struct ifreq)   /* create clone if */
 #define SIOCIFDESTROY    _IOW('i', 121, struct ifreq)   /* destroy clone if */
 #define SIOCIFCREATE2   _IOWR('i', 122, struct ifreq)   /* create clone if with data */
@@ -372,6 +376,7 @@
 #define SIOCGIFNOTRAFFICSHAPING _IOWR('i', 216, struct ifreq) /* skip dummynet and netem traffic shaping */
 
 #define SIOCGIFGENERATIONID _IOWR('i', 217, struct ifreq) /* value of generation count at interface creation */
+
 #endif /* PRIVATE */
 
 #endif /* !_SYS_SOCKIO_H_ */

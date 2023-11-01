@@ -22,8 +22,10 @@ _cpu_number
 _cpu_qos_update_register
 _ecc_log_memory_error
 _ecc_log_memory_error_ce
+_ecc_log_memory_error_delayed
 _ecc_log_record_event
 _get_preemption_level
+_kern_ecc_poll_register
 _mach_vm_map:_mach_vm_map_external
 _mach_vm_remap:_mach_vm_remap_external
 _mcc_log_memory_error
@@ -74,7 +76,6 @@ _ml_page_protection_type
 _ml_static_ptovirt
 _ml_static_mfree
 _ml_update_cluster_wfe_recommendation
-_ex_cb_register
 _mach_bridge_recv_timestamps
 _mach_bridge_init_timestamp
 _mach_bridge_set_params

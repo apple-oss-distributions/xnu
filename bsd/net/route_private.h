@@ -78,9 +78,9 @@ struct route_old {
 #ifdef BSD_KERNEL_PRIVATE
 #include <kern/locks.h>
 #include <net/radix.h>
-#include <net/if_llatbl.h>
 #include <sys/eventhandler.h>
 #include <net/if_dl.h>
+#include <netinet/in_private.h>
 
 extern boolean_t trigger_v6_defrtr_select;
 /*
@@ -108,8 +108,6 @@ struct route {
 	 * to a 'struct route *'.
 	 */
 	struct rtentry        *ro_rt;
-	struct llentry        *ro_lle;
-
 	struct ifaddr         *ro_srcia;
 	uint32_t              ro_flags;       /* route flags (see below) */
 #if __has_ptrcheck
@@ -120,17 +118,6 @@ struct route {
 };
 
 #define ROF_SRCIF_SELECTED      0x0001  /* source interface was selected */
-#if 0
-/* XXX These will be used in the changes coming in later */
-#define        ROF_NORTREF             0x0002  /* doesn't hold reference on ro_rt */
-#define        ROF_L2_ME               0x0004  /* dst L2 addr is our address */
-#define        ROF_MAY_LOOP            0x0008  /* dst may require loop copy */
-#define        ROF_HAS_HEADER          0x0010  /* mbuf already have its header prepended */
-#define        ROF_REJECT              0x0020  /* Destination is reject */
-#define        ROF_BLACKHOLE           0x0040  /* Destination is blackhole */
-#define        ROF_HAS_GW              0x0080  /* Destination has GW  */
-#endif
-#define ROF_LLE_CACHE   0x0100  /* Cache link layer  */
 
 #define ROUTE_UNUSABLE(_ro)                                             \
 	((_ro)->ro_rt == NULL ||                                        \
@@ -150,11 +137,6 @@ struct route {
 	        IFA_REMREF((_ro)->ro_srcia);                            \
 	        (_ro)->ro_srcia = NULL;                                 \
 	        (_ro)->ro_flags &= ~ROF_SRCIF_SELECTED;                 \
-	}                                                               \
-	if ((_ro)->ro_lle != NULL) {                                    \
-	        LLE_REMREF((_ro)->ro_lle);                              \
-	        (_ro)->ro_lle = NULL;                                   \
-	        (_ro)->ro_flags &= ~ROF_LLE_CACHE;                      \
 	}                                                               \
 } while (0)
 

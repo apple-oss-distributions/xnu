@@ -361,9 +361,16 @@ SYSCTL_INT(_security_mac, OID_AUTO, platform_exec_logging, CTLFLAG_RW, &platform
 
 static os_log_t peLog = OS_LOG_DEFAULT;
 
+struct exception_port_action_t {
+	ipc_port_t port;
+	_ps_port_action_t *port_action;
+};
+
 struct exec_port_actions {
+	uint32_t exception_port_count;
 	uint32_t portwatch_count;
 	uint32_t registered_count;
+	struct exception_port_action_t *excport_array;
 	ipc_port_t *portwatch_array;
 	ipc_port_t *registered_array;
 };
@@ -387,6 +394,8 @@ static int process_signature(proc_t, struct image_params *);
 static void exec_prefault_data(proc_t, struct image_params *, load_result_t *);
 static errno_t exec_handle_port_actions(struct image_params *imgp,
     struct exec_port_actions *port_actions);
+static errno_t exec_handle_exception_port_actions(const struct image_params *imgp,
+    const struct exec_port_actions *port_actions);
 static errno_t exec_handle_spawnattr_policy(proc_t p, thread_t thread, int psa_apptype, uint64_t psa_qos_clamp,
     task_role_t psa_darwin_role, struct exec_port_actions *port_actions);
 static void exec_port_actions_destroy(struct exec_port_actions *port_actions);
@@ -1693,6 +1702,7 @@ grade:
 		task_set_platform_binary(task, FALSE);
 	}
 
+
 	/*
 	 * Set starting EXC_GUARD and control port behavior for task now that
 	 * platform is set. Use the name directly from imgp since we haven't
@@ -2439,6 +2449,17 @@ exec_handle_spawnattr_policy(proc_t p, thread_t thread, int psa_apptype, uint64_
 static void
 exec_port_actions_destroy(struct exec_port_actions *port_actions)
 {
+	if (port_actions->excport_array) {
+		for (uint32_t i = 0; i < port_actions->exception_port_count; i++) {
+			ipc_port_t port = NULL;
+			if ((port = port_actions->excport_array[i].port) != NULL) {
+				ipc_port_release_send(port);
+			}
+		}
+		kfree_type(struct exception_port_action_t, port_actions->exception_port_count,
+		    port_actions->excport_array);
+	}
+
 	if (port_actions->portwatch_array) {
 		for (uint32_t i = 0; i < port_actions->portwatch_count; i++) {
 			ipc_port_t port = NULL;
@@ -2487,7 +2508,7 @@ exec_handle_port_actions(struct image_params *imgp,
 	task_t task = get_threadtask(imgp->ip_new_thread);
 	ipc_port_t port = NULL;
 	errno_t ret = 0;
-	int i, portwatch_i = 0, registered_i = 0;
+	int i = 0, portwatch_i = 0, registered_i = 0, excport_i = 0;
 	kern_return_t kr;
 	boolean_t task_has_watchport_boost = task_has_watchports(current_task());
 	boolean_t in_exec = (imgp->ip_flags & IMGPF_EXEC);
@@ -2498,10 +2519,15 @@ exec_handle_port_actions(struct image_params *imgp,
 
 		switch (act->port_type) {
 		case PSPA_SPECIAL:
-		case PSPA_EXCEPTION:
 #if CONFIG_AUDIT
 		case PSPA_AU_SESSION:
 #endif
+			break;
+		case PSPA_EXCEPTION:
+			if (++actions->exception_port_count > TASK_MAX_EXCEPTION_PORT_COUNT) {
+				ret = EINVAL;
+				goto done;
+			}
 			break;
 		case PSPA_IMP_WATCHPORTS:
 			if (++actions->portwatch_count > TASK_MAX_WATCHPORT_COUNT) {
@@ -2527,6 +2553,15 @@ exec_handle_port_actions(struct image_params *imgp,
 		}
 	}
 
+	if (actions->exception_port_count) {
+		actions->excport_array = kalloc_type(struct exception_port_action_t,
+		    actions->exception_port_count, Z_WAITOK | Z_ZERO);
+
+		if (actions->excport_array == NULL) {
+			ret = ENOMEM;
+			goto done;
+		}
+	}
 	if (actions->portwatch_count) {
 		if (in_exec && task_has_watchport_boost) {
 			ret = EINVAL;
@@ -2575,13 +2610,6 @@ exec_handle_port_actions(struct image_params *imgp,
 			}
 			break;
 
-		case PSPA_EXCEPTION:
-			kr = task_set_exception_ports(task, act->mask, port,
-			    act->behavior, act->flavor);
-			if (kr != KERN_SUCCESS) {
-				ret = EINVAL;
-			}
-			break;
 #if CONFIG_AUDIT
 		case PSPA_AU_SESSION:
 			ret = audit_session_spawnjoin(p, port);
@@ -2592,15 +2620,20 @@ exec_handle_port_actions(struct image_params *imgp,
 
 			break;
 #endif
+		case PSPA_EXCEPTION:
+			assert(excport_i < actions->exception_port_count);
+			/* hold on to this till end of spawn */
+			actions->excport_array[excport_i].port_action = act;
+			actions->excport_array[excport_i].port = port;
+			excport_i++;
+			break;
 		case PSPA_IMP_WATCHPORTS:
-			if (actions->portwatch_array) {
-				/* hold on to this till end of spawn */
-				actions->portwatch_array[portwatch_i++] = port;
-			} else {
-				ipc_port_release_send(port);
-			}
+			assert(portwatch_i < actions->portwatch_count);
+			/* hold on to this till end of spawn */
+			actions->portwatch_array[portwatch_i++] = port;
 			break;
 		case PSPA_REGISTERED_PORTS:
+			assert(registered_i < actions->registered_count);
 			/* hold on to this till end of spawn */
 			actions->registered_array[registered_i++] = port;
 			break;
@@ -2627,6 +2660,44 @@ done:
 	}
 	return ret;
 }
+
+
+/*
+ * exec_handle_exception_port_actions
+ *
+ * Description:	Go through the saved exception ports in exec_port_actions,
+ *              calling task_set_exception_ports for the current Task.
+ *              This must happen after image activation, and after exec_resettextvp()
+ *				because task_set_exception_ports checks the `TF_PLATFORM` bit and entitlements.
+ *
+ * Parameters:	struct image_params *		Image parameter block
+ *                              struct exec_port_actions *  Saved Port Actions
+ *
+ * Returns:	0			Success
+ *              EINVAL			task_set_exception_ports failed
+ */
+static errno_t
+exec_handle_exception_port_actions(const struct image_params *imgp,
+    const struct exec_port_actions *actions)
+{
+	task_t task = get_threadtask(imgp->ip_new_thread);
+
+	for (int i = 0; i < actions->exception_port_count; i++) {
+		ipc_port_t port = actions->excport_array[i].port;
+		_ps_port_action_t *act = actions->excport_array[i].port_action;
+		assert(act != NULL);
+		kern_return_t kr = task_set_exception_ports(task, act->mask, port,
+		    act->behavior, act->flavor);
+		if (kr != KERN_SUCCESS) {
+			DTRACE_PROC1(spawn__exception__port__failure, mach_port_name_t, act->new_port);
+			return EINVAL;
+		}
+		actions->excport_array[i].port = NULL;
+	}
+
+	return 0;
+}
+
 
 /*
  * exec_handle_file_actions
@@ -4078,6 +4149,7 @@ do_fork1:
 	ml_thread_set_jop_pid(imgp->ip_new_thread, new_task);
 #endif
 
+
 	/*
 	 * If you've come here to add support for some new HW feature or some per-process or per-vmmap
 	 * or per-pmap flag that needs to be set before the process runs, or are in general lost, here
@@ -4248,6 +4320,11 @@ bad:
 		}
 		exec_resettextvp(p, imgp);
 
+		/* Set task exception ports now that we can check entitlements */
+		if (imgp->ip_px_spa != NULL) {
+			error = exec_handle_exception_port_actions(imgp, &port_actions);
+		}
+
 #if CONFIG_MEMORYSTATUS
 		/* Set jetsam priority for DriverKit processes */
 		if (px_sa.psa_apptype == POSIX_SPAWN_PROC_TYPE_DRIVER) {
@@ -4329,6 +4406,7 @@ bad:
 			task_wakeups_monitor_ctl(new_task, &flags, NULL);
 		}
 	}
+
 
 	/*
 	 * If we successfully called fork1() or cloneproc, we always need

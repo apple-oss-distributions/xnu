@@ -101,8 +101,6 @@ bool ml_did_interrupt_userspace(void);
 /* Clear interrupt spin debug state for thread */
 
 #if SCHED_HYGIENE_DEBUG
-void ml_adjust_preemption_disable_time(thread_t thread, int64_t duration);
-
 void mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, uint64_t *instrs);
 
 #if MONOTONIC
@@ -205,14 +203,12 @@ typedef void (*lockdown_handler_t)(void *);
 typedef void (*platform_error_handler_t)(void *refcon, vm_offset_t fault_addr);
 
 /*
- * The exception callback (ex_cb) module allows kernel drivers to
- * register and receive callbacks for exceptions, and indicate
- * actions to be taken by the platform kernel
- * Currently this is supported for ARM64 but extending support for ARM32
- * should be straightforward
+ * The exception callback (ex_cb) module is obsolete.  Some definitions related
+ * to ex_cb were exported through the SDK, and are only left here for historical
+ * reasons.
  */
 
-/* Supported exception classes for callbacks */
+/* Unused.  Left for historical reasons. */
 typedef enum{
 	EXCB_CLASS_ILLEGAL_INSTR_SET,
 #ifdef CONFIG_XNUPOST
@@ -220,43 +216,36 @@ typedef enum{
 	EXCB_CLASS_TEST2,
 	EXCB_CLASS_TEST3,
 #endif
-	EXCB_CLASS_MAX          // this must be last
+	EXCB_CLASS_MAX
 }
 ex_cb_class_t;
 
-/* Actions indicated by callbacks to be taken by platform kernel */
+/* Unused.  Left for historical reasons. */
 typedef enum{
-	EXCB_ACTION_RERUN,      // re-run the faulting instruction
-	EXCB_ACTION_NONE,       // continue normal exception handling
+	EXCB_ACTION_RERUN,
+	EXCB_ACTION_NONE,
 #ifdef CONFIG_XNUPOST
 	EXCB_ACTION_TEST_FAIL,
 #endif
 }
 ex_cb_action_t;
 
-/*
- * Exception state
- * We cannot use a private kernel data structure such as arm_saved_state_t
- * The CPSR and ESR are not clobbered when the callback function is invoked so
- * those registers can be examined by the callback function;
- * the same is done in the platform error handlers
- */
+/* Unused.  Left for historical reasons. */
 typedef struct{
 	vm_offset_t far;
 }
 ex_cb_state_t;
 
-/* callback type definition */
+/* Unused.  Left for historical reasons. */
 typedef ex_cb_action_t (*ex_cb_t) (
 	ex_cb_class_t           cb_class,
-	void                            *refcon,// provided at registration
-	const ex_cb_state_t     *state  // exception state
+	void                            *refcon,
+	const ex_cb_state_t     *state
 	);
 
 /*
- * Callback registration
- * Currently we support only one registered callback per class but
- * it should be possible to support more callbacks
+ * This function is unimplemented.  Its definition is left for historical
+ * reasons.
  */
 kern_return_t ex_cb_register(
 	ex_cb_class_t   cb_class,
@@ -264,7 +253,8 @@ kern_return_t ex_cb_register(
 	void                    *refcon );
 
 /*
- * Called internally by platform kernel to invoke the registered callback for class
+ * This function is unimplemented.  Its definition is left for historical
+ * reasons.
  */
 ex_cb_action_t ex_cb_invoke(
 	ex_cb_class_t   cb_class,

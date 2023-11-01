@@ -95,6 +95,7 @@ extern _Atomic bool memorystatus_compressor_space_shortage;
  */
 extern _Atomic bool memorystatus_phantom_cache_pressure;
 
+extern _Atomic bool memorystatus_pageout_starved;
 /*
  * The actions that the memorystatus thread can perform
  * when we're low on memory.
@@ -150,6 +151,7 @@ typedef struct memorystatus_system_health {
 	bool msh_swapin_queue_over_limit;
 	bool msh_swap_low_on_space;
 	bool msh_swap_out_of_space;
+	bool msh_pageout_starved;
 #endif /* CONFIG_JETSAM */
 	bool msh_zone_map_is_exhausted;
 } memorystatus_system_health_t;

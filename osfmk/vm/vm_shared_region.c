@@ -171,10 +171,14 @@ static LCK_MTX_DECLARE(vm_shared_region_lock, &vm_shared_region_lck_grp);
 #define vm_shared_region_lock() lck_mtx_lock(&vm_shared_region_lock)
 #define vm_shared_region_unlock() lck_mtx_unlock(&vm_shared_region_lock)
 #define vm_shared_region_sleep(event, interruptible)                    \
-	lck_mtx_sleep(&vm_shared_region_lock,                           \
+	lck_mtx_sleep_with_inheritor(&vm_shared_region_lock,            \
 	              LCK_SLEEP_DEFAULT,                                \
 	              (event_t) (event),                                \
-	              (interruptible))
+	              *(event),                                         \
+	              (interruptible) | THREAD_WAIT_NOREPORT,           \
+	              TIMEOUT_WAIT_FOREVER)
+#define vm_shared_region_wakeup(event)                                  \
+	wakeup_all_with_inheritor((event), THREAD_AWAKENED)
 
 /* the list of currently available shared regions (one per environment) */
 queue_head_t    vm_shared_region_queue = QUEUE_HEAD_INITIALIZER(vm_shared_region_queue);
@@ -843,8 +847,8 @@ vm_shared_region_create(
 	shared_region->sr_root_dir = root_dir;
 
 	queue_init(&shared_region->sr_q);
-	shared_region->sr_mapping_in_progress = FALSE;
-	shared_region->sr_slide_in_progress = FALSE;
+	shared_region->sr_mapping_in_progress = THREAD_NULL;
+	shared_region->sr_slide_in_progress = THREAD_NULL;
 	shared_region->sr_persists = FALSE;
 	shared_region->sr_stale = FALSE;
 	shared_region->sr_timer_call = NULL;
@@ -1186,7 +1190,7 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
 	}
 
 	/* let others know to wait while we're working in this shared region */
-	sr->sr_mapping_in_progress = TRUE;
+	sr->sr_mapping_in_progress = current_thread();
 	vm_shared_region_unlock();
 
 	/*
@@ -1245,6 +1249,11 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
 		vmk_flags.vmf_permanent = shared_region_make_permanent(sr,
 		    tmp_entry->max_protection);
 
+		/* Preserve the TPRO flag if task has TPRO enabled */
+		vmk_flags.vmf_tpro = (vm_map_tpro(task->map) &&
+		    tmp_entry->used_for_tpro &&
+		    task_get_platform_binary(task));
+
 		map_addr = si->si_slid_address;
 		kr = vm_map_enter_mem_object(task->map,
 		    &map_addr,
@@ -1293,8 +1302,9 @@ done:
 	 */
 	vm_shared_region_lock();
 	task->shared_region_auth_remapped = TRUE;
-	sr->sr_mapping_in_progress = FALSE;
-	thread_wakeup((event_t)&sr->sr_mapping_in_progress);
+	assert(sr->sr_mapping_in_progress == current_thread());
+	sr->sr_mapping_in_progress = THREAD_NULL;
+	vm_shared_region_wakeup((event_t)&sr->sr_mapping_in_progress);
 	vm_shared_region_unlock();
 	return kr;
 }
@@ -1338,7 +1348,7 @@ vm_shared_region_undo_mappings(
 		assert(!shared_region->sr_mapping_in_progress);
 		assert(shared_region->sr_ref_count > 0);
 		/* let others know we're working in this shared region */
-		shared_region->sr_mapping_in_progress = TRUE;
+		shared_region->sr_mapping_in_progress = current_thread();
 
 		vm_shared_region_unlock();
 
@@ -1402,10 +1412,10 @@ vm_shared_region_undo_mappings(
 	if (reset_shared_region_state) {
 		vm_shared_region_lock();
 		assert(shared_region->sr_ref_count > 0);
-		assert(shared_region->sr_mapping_in_progress);
+		assert(shared_region->sr_mapping_in_progress == current_thread());
 		/* we're done working on that shared region */
-		shared_region->sr_mapping_in_progress = FALSE;
-		thread_wakeup((event_t) &shared_region->sr_mapping_in_progress);
+		shared_region->sr_mapping_in_progress = THREAD_NULL;
+		vm_shared_region_wakeup((event_t) &shared_region->sr_mapping_in_progress);
 		vm_shared_region_unlock();
 		reset_shared_region_state = FALSE;
 	}
@@ -1470,7 +1480,7 @@ vm_shared_region_map_file_setup(
 
 
 	/* let others know we're working in this shared region */
-	shared_region->sr_mapping_in_progress = TRUE;
+	shared_region->sr_mapping_in_progress = current_thread();
 
 	/*
 	 * Did someone race in and map this shared region already?
@@ -1915,9 +1925,9 @@ vm_shared_region_map_file_setup(
 
 		/*
 		 * Respect the design of vm_shared_region_undo_mappings
-		 * as we are holding the sr_mapping_in_progress == true here.
+		 * as we are holding the sr_mapping_in_progress here.
 		 * So don't allow sr_map == NULL otherwise vm_shared_region_undo_mappings
-		 * will be blocked at waiting sr_mapping_in_progress to be false.
+		 * will be blocked at waiting sr_mapping_in_progress to be NULL.
 		 */
 		assert(sr_map != NULL);
 		/* undo all the previous mappings */
@@ -2067,7 +2077,7 @@ vm_shared_region_map_file(
 
 	vm_shared_region_lock();
 	assert(shared_region->sr_ref_count > 0);
-	assert(shared_region->sr_mapping_in_progress);
+	assert(shared_region->sr_mapping_in_progress == current_thread());
 
 	vm_shared_region_map_file_final(shared_region, sr_map, sfm_min_address, sfm_max_address);
 
@@ -2076,8 +2086,9 @@ done:
 	 * We're done working on that shared region.
 	 * Wake up any waiting threads.
 	 */
-	shared_region->sr_mapping_in_progress = FALSE;
-	thread_wakeup((event_t) &shared_region->sr_mapping_in_progress);
+	assert(shared_region->sr_mapping_in_progress == current_thread());
+	shared_region->sr_mapping_in_progress = THREAD_NULL;
+	vm_shared_region_wakeup((event_t) &shared_region->sr_mapping_in_progress);
 	vm_shared_region_unlock();
 
 #if __has_feature(ptrauth_calls)
@@ -3714,7 +3725,7 @@ vm_shared_region_slide(
 		vm_shared_region_sleep(&sr->sr_slide_in_progress, THREAD_UNINT);
 	}
 
-	sr->sr_slide_in_progress = TRUE;
+	sr->sr_slide_in_progress = current_thread();
 	vm_shared_region_unlock();
 
 	error = vm_shared_region_slide_mapping(sr,
@@ -3732,9 +3743,9 @@ vm_shared_region_slide(
 
 	vm_shared_region_lock();
 
-	assert(sr->sr_slide_in_progress);
-	sr->sr_slide_in_progress = FALSE;
-	thread_wakeup(&sr->sr_slide_in_progress);
+	assert(sr->sr_slide_in_progress == current_thread());
+	sr->sr_slide_in_progress = THREAD_NULL;
+	vm_shared_region_wakeup(&sr->sr_slide_in_progress);
 
 #if XNU_TARGET_OS_OSX
 	if (error == KERN_SUCCESS) {

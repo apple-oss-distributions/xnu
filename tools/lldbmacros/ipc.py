@@ -1782,7 +1782,7 @@ def GetIPCImportanceElemSummary(iie):
 
     out_str = ''
     fmt = "{: <#18x} {: <4s} {: <8d} {: <8d} {: <#18x} {: <#18x}"
-    if unsigned(iie.iie_bits) & 0x80000000:
+    if unsigned(iie.iie_bits) & xnudefines.IIE_TYPE_MASK:
         type_str = "INH"
         inherit_count = 0
     else:
@@ -1790,7 +1790,7 @@ def GetIPCImportanceElemSummary(iie):
         iit = Cast(iie, 'struct ipc_importance_task *')
         inherit_count = sum(1 for i in IterateQueue(iit.iit_inherits, 'struct ipc_importance_inherit *',  'iii_inheritance'))
 
-    refs = unsigned(iie.iie_bits) & 0x7fffffff
+    refs = unsigned(iie.iie_bits) >> xnudefines.IIE_TYPE_BITS
     made_refs = unsigned(iie.iie_made)
     kmsg_count = sum(1 for i in IterateQueue(iie.iie_kmsgs, 'struct ipc_kmsg *',  'ikm_inheritance'))
     out_str += fmt.format(iie, type_str, refs, made_refs, kmsg_count, inherit_count)
@@ -1950,7 +1950,7 @@ def GetIPCHandleSummary(handle_ptr):
         returns: str - string summary of the element held in internal structure
     """
     elem = kern.GetValueFromAddress(handle_ptr, 'ipc_importance_elem_t')
-    if elem.iie_bits & 0x80000000 :
+    if elem.iie_bits & xnudefines.IIE_TYPE_MASK:
         iie = Cast(elem, 'struct ipc_importance_inherit *')
         return GetIPCImportanceInheritSummary(iie)
     else:
@@ -2221,3 +2221,21 @@ def ShowTaskSuspenders(cmd_args=[], cmd_options={}):
         return
 
     return FindPortRights(cmd_args=[unsigned(port)], cmd_options={'-R':'S'})
+
+
+# Macro: showmqueue:
+@lldb_command('showmqueue', fancy=True)
+def ShowMQueue(cmd_args=None, cmd_options={}, O=None):
+    """ Routine that lists details about a given mqueue.
+        An mqueue is directly tied to a mach port, so it just shows the details of that port.
+        Syntax: (lldb) showmqueue <address>
+    """
+    if not cmd_args:
+        return O.error("Missing mqueue argument")
+    space = 0
+    mqueue = kern.GetValueFromAddress(cmd_args[0], 'struct ipc_mqueue *')
+    portoff = getfieldoffset('struct ipc_port', 'ip_messages')
+    port = unsigned(ArgumentStringToInt(cmd_args[0])) - unsigned(portoff)
+    obj = kern.GetValueFromAddress(port, 'struct ipc_object *')
+    ShowPortOrPset(obj, O=O)
+# EndMacro: showmqueue

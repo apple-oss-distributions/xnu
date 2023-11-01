@@ -3829,6 +3829,13 @@ thread_dispatch(
 
 	assert(self->block_hint == kThreadWaitNone);
 	self->computation_epoch = processor->last_dispatch;
+	/*
+	 * This relies on the interrupt time being tallied up to the thread in the
+	 * exception handler epilogue, which is before AST context where preemption
+	 * is considered (and the scheduler is potentially invoked to
+	 * context switch, here).
+	 */
+	self->computation_interrupt_epoch = recount_current_thread_interrupt_time_mach();
 	self->reason = AST_NONE;
 	processor->starting_pri = self->sched_pri;
 
@@ -8103,6 +8110,7 @@ sched_update_powered_cores(uint64_t requested_powered_cores, processor_reason_t 
 	}
 
 	/* First set powered cores */
+	cpumap_t started_cores = 0ull;
 	for (pset_node_t node = &pset_node0; node != NULL; node = node->node_list) {
 		for (int pset_id = lsb_first(node->pset_map); pset_id >= 0; pset_id = lsb_next(node->pset_map, pset_id)) {
 			processor_set_t pset = pset_array[pset_id];
@@ -8110,7 +8118,7 @@ sched_update_powered_cores(uint64_t requested_powered_cores, processor_reason_t 
 			spl_t s = splsched();
 			pset_lock(pset);
 			cpumap_t pset_requested_powered_cores = requested_powered_cores & pset->cpu_bitmask;
-			cpumap_t powered_cores = (pset->cpu_state_map[PROCESSOR_IDLE] | pset->cpu_state_map[PROCESSOR_DISPATCHING] | pset->cpu_state_map[PROCESSOR_RUNNING]);
+			cpumap_t powered_cores = (pset->cpu_state_map[PROCESSOR_START] | pset->cpu_state_map[PROCESSOR_IDLE] | pset->cpu_state_map[PROCESSOR_DISPATCHING] | pset->cpu_state_map[PROCESSOR_RUNNING]);
 			cpumap_t requested_changes = pset_requested_powered_cores ^ powered_cores;
 			pset_unlock(pset);
 			splx(s);
@@ -8134,17 +8142,17 @@ sched_update_powered_cores(uint64_t requested_powered_cores, processor_reason_t 
 				continue;
 			}
 
-			int last_start_cpu_id = bit_first(cpu_map);
-
 			for (int cpu_id = lsb_first(cpu_map); cpu_id >= 0; cpu_id = lsb_next(cpu_map, cpu_id)) {
 				processor_t processor = processor_array[cpu_id];
-
-				if ((flags & WAIT_FOR_LAST_START) && (cpu_id == last_start_cpu_id)) {
-					processor_start_reason(processor, reason, flags | WAIT_FOR_START);
-				} else {
-					processor_start_reason(processor, reason, flags);
-				}
+				processor_start_reason(processor, reason, flags);
+				bit_set(started_cores, cpu_id);
 			}
+		}
+	}
+	if (flags & WAIT_FOR_LAST_START) {
+		for (int cpu_id = lsb_first(started_cores); cpu_id >= 0; cpu_id = lsb_next(started_cores, cpu_id)) {
+			processor_t processor = processor_array[cpu_id];
+			processor_wait_for_start(processor);
 		}
 	}
 
@@ -8155,7 +8163,7 @@ sched_update_powered_cores(uint64_t requested_powered_cores, processor_reason_t 
 
 			spl_t s = splsched();
 			pset_lock(pset);
-			cpumap_t powered_cores = (pset->cpu_state_map[PROCESSOR_IDLE] | pset->cpu_state_map[PROCESSOR_DISPATCHING] | pset->cpu_state_map[PROCESSOR_RUNNING]);
+			cpumap_t powered_cores = (pset->cpu_state_map[PROCESSOR_START] | pset->cpu_state_map[PROCESSOR_IDLE] | pset->cpu_state_map[PROCESSOR_DISPATCHING] | pset->cpu_state_map[PROCESSOR_RUNNING]);
 			cpumap_t requested_changes = (requested_powered_cores & pset->cpu_bitmask) ^ powered_cores;
 			pset_unlock(pset);
 			splx(s);

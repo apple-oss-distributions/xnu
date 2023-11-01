@@ -160,6 +160,7 @@ __options_decl(vmr_flags_t, uint32_t, {
 	VM_MAP_REMOVE_NO_YIELD          = 0x040,
 	VM_MAP_REMOVE_GUESS_SIZE        = 0x080,
 	VM_MAP_REMOVE_IMMUTABLE_CODE    = 0x100,
+	VM_MAP_REMOVE_TO_OVERWRITE      = 0x200,
 });
 
 /* Deallocate a region */

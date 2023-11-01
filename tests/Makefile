@@ -661,6 +661,9 @@ endif
 bpf_write: bpflib.c in_cksum.c net_test_lib.c
 bpf_write: OTHER_LDFLAGS += -ldarwintest_utils
 
+bpf_write_batch: bpflib.c in_cksum.c net_test_lib.c
+bpf_write_batch: OTHER_LDFLAGS += -ldarwintest_utils
+
 udp_bind_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 tcp_bind_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 tcp_send_implied_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist

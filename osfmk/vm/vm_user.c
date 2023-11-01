@@ -4471,11 +4471,10 @@ kern_return_t
 mach_vm_deferred_reclamation_buffer_init(
 	task_t task,
 	mach_vm_offset_t address,
-	mach_vm_size_t size,
-	mach_vm_address_t indices)
+	mach_vm_size_t size)
 {
 #if CONFIG_DEFERRED_RECLAIM
-	return vm_deferred_reclamation_buffer_init_internal(task, address, size, indices);
+	return vm_deferred_reclamation_buffer_init_internal(task, address, size);
 #else
 	(void) task;
 	(void) address;

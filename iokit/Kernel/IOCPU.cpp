@@ -191,6 +191,12 @@ PE_cpu_perfmon_interrupt_enable(cpu_id_t target, boolean_t enable)
 }
 #endif
 
+bool
+PE_cpu_power_check_kdp(int cpu_id)
+{
+	return true;
+}
+
 #endif /* !USE_APPLEARMSMP */
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */

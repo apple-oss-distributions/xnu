@@ -152,6 +152,8 @@ static tcp_cc tcp_ccgen;
 extern struct tcptimerlist tcp_timer_list;
 extern struct tcptailq tcp_tw_tailq;
 
+extern int tcp_awdl_rtobase;
+
 SYSCTL_SKMEM_TCP_INT(TCPCTL_MSSDFLT, mssdflt, CTLFLAG_RW | CTLFLAG_LOCKED,
     int, tcp_mssdflt, TCP_MSS, "Default TCP Maximum Segment Size");
 
@@ -1273,6 +1275,24 @@ tcp_getrt_rtt(struct tcpcb *tp, struct rtentry *rt)
 		    TCP_REXMTVAL(tp),
 		    tp->t_rttmin, TCPTV_REXMTMAX,
 		    TCP_ADD_REXMTSLOP(tp));
+	} else if (tp->t_state < TCPS_ESTABLISHED && tp->t_srtt == 0 &&
+	    tp->t_rxtshift == 0) {
+		struct ifnet *ifp = rt->rt_ifp;
+
+		if (ifp != NULL && (ifp->if_eflags & IFEF_AWDL) != 0) {
+			/*
+			 * AWDL needs a special value for the default initial retransmission timeout
+			 */
+			if (tcp_awdl_rtobase > tcp_TCPTV_MIN) {
+				tp->t_rttvar = ((tcp_awdl_rtobase - TCPTV_SRTTBASE) << TCP_RTTVAR_SHIFT) / 4;
+			} else {
+				tp->t_rttvar = ((tcp_TCPTV_MIN - TCPTV_SRTTBASE) << TCP_RTTVAR_SHIFT) / 4;
+			}
+			TCPT_RANGESET(tp->t_rxtcur,
+			    TCP_REXMTVAL(tp),
+			    tp->t_rttmin, TCPTV_REXMTMAX,
+			    TCP_ADD_REXMTSLOP(tp));
+		}
 	}
 
 	TCP_LOG_RTT_INFO(tp);

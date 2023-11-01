@@ -749,6 +749,7 @@ __CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct sockaddr_storage, sockaddr_storage);
 #define PF_BOND         ((uint32_t)0x626f6e64)  /* 'bond' */
 #ifdef KERNEL_PRIVATE
 #define PF_BRIDGE       ((uint32_t)0x62726467)  /* 'brdg' */
+#define PF_NULL         ((uint32_t)0x6e756c6c)  /* 'null' */
 #endif /* KERNEL_PRIVATE */
 
 /*

@@ -3021,61 +3021,95 @@ ifioctl_restrict_management(unsigned long cmd, const char *ifname,
 	if (!IFNET_IS_MANAGEMENT(ifp)) {
 		return false;
 	}
+	/*
+	 * Allow all the "get" ioctls
+	 */
 	switch (cmd) {
+	case SIOCGHIWAT:
+	case SIOCGLOWAT:
+	case SIOCGPGRP:
+	case SIOCGIFFLAGS:
+	case SIOCGIFMETRIC:
+	case SIOCGIFADDR:
+	case SIOCGIFDSTADDR:
 	case SIOCGIFBRDADDR:
 	case SIOCGIFCONF32:
 	case SIOCGIFCONF64:
-	case SIOCGIFFLAGS:
-	case SIOCGIFEFLAGS:
-	case SIOCGIFCAP:
-	case SIOCGIFMETRIC:
+	case SIOCGIFNETMASK:
 	case SIOCGIFMTU:
 	case SIOCGIFPHYS:
-	case SIOCGIFTYPE:
-	case SIOCGIFFUNCTIONALTYPE:
-	case SIOCGIFPSRCADDR:
-	case SIOCGIFPDSTADDR:
-	case SIOCGIFGENERIC:
-	case SIOCGIFDEVMTU:
-	case SIOCGIFVLAN:
-	case SIOCGIFBOND:
-	case SIOCGIFWAKEFLAGS:
-	case SIOCGIFGETRTREFCNT:
-	case SIOCGIFOPPORTUNISTIC:
-	case SIOCGIFLINKQUALITYMETRIC:
-	case SIOCGIFLOG:
-	case SIOCGIFDELEGATE:
-	case SIOCGIFEXPENSIVE:
-	case SIOCGIFINTERFACESTATE:
-	case SIOCGIFPROBECONNECTIVITY:
-	case SIOCGIFTIMESTAMPENABLED:
-	case SIOCGECNMODE:
-	case SIOCGQOSMARKINGMODE:
-	case SIOCGQOSMARKINGENABLED:
-	case SIOCGIFLOWINTERNET:
-	case SIOCGIFSTATUS:
 	case SIOCGIFMEDIA32:
 	case SIOCGIFMEDIA64:
+	case SIOCGIFGENERIC:
+	case SIOCGIFSTATUS:
+	case SIOCGIFPSRCADDR:
+	case SIOCGIFPDSTADDR:
+	case SIOCGIFDEVMTU:
+	case SIOCGIFALTMTU:
+	case SIOCGIFBOND:
 	case SIOCGIFXMEDIA32:
 	case SIOCGIFXMEDIA64:
+	case SIOCGIFCAP:
+	case SIOCGDRVSPEC32:
+	case SIOCGDRVSPEC64:
+	case SIOCGIFVLAN:
+	case SIOCGIFASYNCMAP:
+	case SIOCGIFMAC:
+	case SIOCGIFKPI:
+	case SIOCGIFWAKEFLAGS:
+	case SIOCGIFGETRTREFCNT:
+	case SIOCGIFLINKQUALITYMETRIC:
+	case SIOCGIFOPPORTUNISTIC:
+	case SIOCGIFEFLAGS:
 	case SIOCGIFDESC:
 	case SIOCGIFLINKPARAMS:
 	case SIOCGIFQUEUESTATS:
 	case SIOCGIFTHROTTLE:
+	case SIOCGASSOCIDS32:
+	case SIOCGASSOCIDS64:
+	case SIOCGCONNIDS32:
+	case SIOCGCONNIDS64:
+	case SIOCGCONNINFO32:
+	case SIOCGCONNINFO64:
+	case SIOCGCONNORDER:
+	case SIOCGIFLOG:
+	case SIOCGIFDELEGATE:
+	case SIOCGIFLLADDR:
+	case SIOCGIFTYPE:
+	case SIOCGIFEXPENSIVE:
+	case SIOCGIF2KCL:
+	case SIOCGSTARTDELAY:
 	case SIOCGIFAGENTIDS32:
 	case SIOCGIFAGENTIDS64:
+	case SIOCGIFAGENTDATA32:
+	case SIOCGIFAGENTDATA64:
+	case SIOCGIFINTERFACESTATE:
+	case SIOCGIFPROBECONNECTIVITY:
+	case SIOCGIFFUNCTIONALTYPE:
 	case SIOCGIFNETSIGNATURE:
-	case SIOCGIFINFO_IN6:
-	case SIOCGIFAFLAG_IN6:
-	case SIOCGNBRINFO_IN6:
-	case SIOCGIFALIFETIME_IN6:
-	case SIOCGIFNETMASK_IN6:
+	case SIOCGECNMODE:
+	case SIOCGIFORDER:
+	case SIOCGQOSMARKINGMODE:
+	case SIOCGQOSMARKINGENABLED:
+	case SIOCGIFTIMESTAMPENABLED:
+	case SIOCGIFAGENTLIST32:
+	case SIOCGIFAGENTLIST64:
+	case SIOCGIFLOWINTERNET:
+	case SIOCGIFNAT64PREFIX:
 #if SKYWALK
 	case SIOCGIFNEXUS:
 #endif /* SKYWALK */
 	case SIOCGIFPROTOLIST32:
 	case SIOCGIFPROTOLIST64:
+	case SIOCGIF6LOWPAN:
+	case SIOCGIFTCPKAOMAX:
+	case SIOCGIFLOWPOWER:
+	case SIOCGIFCLAT46ADDR:
+	case SIOCGIFMPKLOG:
+	case SIOCGIFCONSTRAINED:
 	case SIOCGIFXFLAGS:
+	case SIOCGIFNOACKPRIO:
+	case SIOCGETROUTERMODE:
 	case SIOCGIFNOTRAFFICSHAPING:
 	case SIOCGIFGENERATIONID:
 		return false;
@@ -3213,6 +3247,17 @@ ifioctl_get_media(struct ifnet *ifp, struct socket *so, u_long cmd, caddr_t data
 	}
 	return error;
 }
+
+static errno_t
+null_proto_input(ifnet_t ifp, protocol_family_t protocol, mbuf_t packet,
+    char *header)
+{
+#pragma unused(protocol, packet, header)
+	os_log(OS_LOG_DEFAULT, "null_proto_input unexpected packet on %s",
+	    ifp->if_xname);
+	return 0;
+}
+
 /*
  * Interface ioctls.
  *
@@ -3285,6 +3330,7 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 	case SIOCSIFFLAGS:                      /* struct ifreq */
 	case SIOCSIFCAP:                        /* struct ifreq */
 	case SIOCSIFMANAGEMENT:                 /* struct ifreq */
+	case SIOCSATTACHPROTONULL:              /* struct ifreq */
 	case SIOCSIFMETRIC:                     /* struct ifreq */
 	case SIOCSIFPHYS:                       /* struct ifreq */
 	case SIOCSIFMTU:                        /* struct ifreq */
@@ -4514,6 +4560,34 @@ ifioctl_ifreq(struct socket *so, u_long cmd, struct ifreq *ifr, struct proc *p)
 		}
 		break;
 	}
+
+	case SIOCSATTACHPROTONULL: {
+		if ((error = priv_check_cred(kauth_cred_get(),
+		    PRIV_NET_INTERFACE_CONTROL, 0)) != 0) {
+			return error;
+		}
+		if (ifr->ifr_intval != 0) {
+			struct ifnet_attach_proto_param reg = {};
+
+			reg.input = null_proto_input;
+
+			error = ifnet_attach_protocol(ifp, PF_NULL, &reg);
+			if (error != 0) {
+				os_log(OS_LOG_DEFAULT,
+				    "ifioctl_req: SIOCSATTACHPROTONULL ifnet_attach_protocol(%s) failed, %d",
+				    ifp->if_xname, error);
+			}
+		} else {
+			error = ifnet_detach_protocol(ifp, PF_NULL);
+			if (error != 0) {
+				os_log(OS_LOG_DEFAULT,
+				    "ifioctl_req: SIOCSATTACHPROTONULL ifnet_detach_protocol(%s) failed, %d",
+				    ifp->if_xname, error);
+			}
+		}
+		break;
+	}
+
 	case SIOCSIFLOWINTERNET:
 		if ((error = priv_check_cred(kauth_cred_get(),
 		    PRIV_NET_INTERFACE_CONTROL, 0)) != 0) {
@@ -6203,6 +6277,7 @@ ifioctl_cassert(void)
 	case SIOCGIFCAP:
 
 	case SIOCSIFMANAGEMENT:
+	case SIOCSATTACHPROTONULL:
 
 	case SIOCIFCREATE:
 	case SIOCIFDESTROY:

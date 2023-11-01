@@ -108,6 +108,8 @@ struct bpf_d {
 	bool            bd_hbuf_write;  /* writing on device */
 	bool            bd_headdrop;    /* Keep newer packets */
 
+	uint32_t        bd_write_size_max;      /* max length of packet when writing */
+
 	uint32_t        bd_rtout;       /* Read timeout in 'ticks' */
 	struct bpf_if   *bd_bif;        /* interface descriptor */
 	struct bpf_insn *bd_filter;     /* filter code */
@@ -176,6 +178,7 @@ struct bpf_d {
 #define BPF_PKTHDRV2            0x0100  /* pktap header version 2 */
 #define BPF_COMP_REQ            0x0200  /* compression requested */
 #define BPF_COMP_ENABLED        0x0400  /* compression enabled */
+#define BPF_BATCH_WRITE         0x0800  /* batch write enabled */
 
 /*
  * Descriptor associated with each attached hardware interface.

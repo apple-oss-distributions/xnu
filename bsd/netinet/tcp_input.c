@@ -256,6 +256,10 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, use_min_curr_rtt,
     CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_use_min_curr_rtt, 1,
     "Use a min of k=4 RTT samples for congestion controllers");
 
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, awdl_rtobase,
+    CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_awdl_rtobase, 100,
+    "Initial RTO for AWDL interface");
+
 extern int tcp_acc_iaj_high;
 extern int tcp_acc_iaj_react_limit;
 extern int tcp_fin_timeout;

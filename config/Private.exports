@@ -991,6 +991,7 @@ _ttspeedtab
 _ttwakeup
 _ttwwakeup
 _tty_lock
+_tty_trylock
 _tty_unlock
 _ttyclose
 _ttyflush

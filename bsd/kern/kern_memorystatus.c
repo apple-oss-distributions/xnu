@@ -93,21 +93,22 @@ int block_corpses = 0; /* counter to block new corpses if jetsam purges them */
 
 /* For logging clarity */
 static const char *memorystatus_kill_cause_name[] = {
-	"",                                                                             /* kMemorystatusInvalid							*/
-	"jettisoned",                                                   /* kMemorystatusKilled							*/
-	"highwater",                                                            /* kMemorystatusKilledHiwat						*/
-	"vnode-limit",                                                  /* kMemorystatusKilledVnodes					*/
-	"vm-pageshortage",                                              /* kMemorystatusKilledVMPageShortage			*/
-	"proc-thrashing",                                               /* kMemorystatusKilledProcThrashing				*/
-	"fc-thrashing",                                                 /* kMemorystatusKilledFCThrashing				*/
-	"per-process-limit",                                            /* kMemorystatusKilledPerProcessLimit			*/
-	"disk-space-shortage",                                  /* kMemorystatusKilledDiskSpaceShortage			*/
-	"idle-exit",                                                            /* kMemorystatusKilledIdleExit					*/
-	"zone-map-exhaustion",                                  /* kMemorystatusKilledZoneMapExhaustion			*/
-	"vm-compressor-thrashing",                              /* kMemorystatusKilledVMCompressorThrashing		*/
-	"vm-compressor-space-shortage",                 /* kMemorystatusKilledVMCompressorSpaceShortage	*/
-	"low-swap",                                    /* kMemorystatusKilledLowSwap */
-	"sustained-memory-pressure",                    /* kMemorystatusKilledSustainedPressure */
+	"",                                             /* kMemorystatusInvalid							*/
+	"jettisoned",                                   /* kMemorystatusKilled							*/
+	"highwater",                                    /* kMemorystatusKilledHiwat						*/
+	"vnode-limit",                                  /* kMemorystatusKilledVnodes					*/
+	"vm-pageshortage",                              /* kMemorystatusKilledVMPageShortage			*/
+	"proc-thrashing",                               /* kMemorystatusKilledProcThrashing				*/
+	"fc-thrashing",                                 /* kMemorystatusKilledFCThrashing				*/
+	"per-process-limit",                            /* kMemorystatusKilledPerProcessLimit			*/
+	"disk-space-shortage",                          /* kMemorystatusKilledDiskSpaceShortage			*/
+	"idle-exit",                                    /* kMemorystatusKilledIdleExit					*/
+	"zone-map-exhaustion",                         /* kMemorystatusKilledZoneMapExhaustion			*/
+	"vm-compressor-thrashing",                     /* kMemorystatusKilledVMCompressorThrashing		*/
+	"vm-compressor-space-shortage",                /* kMemorystatusKilledVMCompressorSpaceShortage	*/
+	"low-swap",                                    /* kMemorystatusKilledLowSwap                   */
+	"sustained-memory-pressure",                   /* kMemorystatusKilledSustainedPressure         */
+	"vm-pageout-starvation",                       /* kMemorystatusKilledVMPageoutStarvation       */
 };
 
 static const char *
@@ -385,6 +386,7 @@ int applications_aging_band = JETSAM_PRIORITY_AGING_BAND2;
 
 _Atomic bool memorystatus_zone_map_is_exhausted = false;
 _Atomic bool memorystatus_compressor_space_shortage = false;
+_Atomic bool memorystatus_pageout_starved = false;
 #if CONFIG_PHANTOM_CACHE
 _Atomic bool memorystatus_phantom_cache_pressure = false;
 #endif /* CONFIG_PHANTOM_CACHE */
@@ -3935,41 +3937,16 @@ memorystatus_thread_init(jetsam_thread_state_t *jetsam_thread)
  * Create a new jetsam reason from the given kill cause.
  */
 static os_reason_t
-create_jetsam_reason(uint32_t cause)
+create_jetsam_reason(memorystatus_kill_cause_t cause)
 {
 	os_reason_t jetsam_reason = OS_REASON_NULL;
-	uint64_t jetsam_reason_code = JETSAM_REASON_INVALID;
-	switch (cause) {
-	case kMemorystatusKilledFCThrashing:
-		jetsam_reason_code = JETSAM_REASON_MEMORY_FCTHRASHING;
-		break;
-	case kMemorystatusKilledVMCompressorThrashing:
-		jetsam_reason_code = JETSAM_REASON_MEMORY_VMCOMPRESSOR_THRASHING;
-		break;
-	case kMemorystatusKilledVMCompressorSpaceShortage:
-		jetsam_reason_code = JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE;
-		break;
-	case kMemorystatusKilledZoneMapExhaustion:
-		jetsam_reason_code = JETSAM_REASON_ZONE_MAP_EXHAUSTION;
-		break;
-	case kMemorystatusKilledVMPageShortage:
-		jetsam_reason_code = JETSAM_REASON_MEMORY_VMPAGESHORTAGE;
-		break;
-	case kMemorystatusKilledProcThrashing:
-		jetsam_reason_code = JETSAM_REASON_MEMORY_PROCTHRASHING;
-		break;
-	case kMemorystatusKilledLowSwap:
-		jetsam_reason_code = JETSAM_REASON_LOWSWAP;
-		break;
-	default:
-		/* Explicit support must be added to this switch statement for new async kills */
-		panic("create_jetsam_reason: Unknown kill cause %d!\n", cause);
-		break;
-	}
 
-	jetsam_reason = os_reason_create(OS_REASON_JETSAM, jetsam_reason_code);
+	jetsam_reason_t reason_code = (jetsam_reason_t)cause;
+	assert3u(reason_code, <=, JETSAM_REASON_MEMORYSTATUS_MAX);
+
+	jetsam_reason = os_reason_create(OS_REASON_JETSAM, reason_code);
 	if (jetsam_reason == OS_REASON_NULL) {
-		memorystatus_log_error("memorystatus_thread: failed to allocate jetsam reason\n");
+		memorystatus_log_error("memorystatus: failed to allocate jetsam reason for cause %u\n", cause);
 	}
 	return jetsam_reason;
 }
@@ -4181,7 +4158,7 @@ memorystatus_thread_internal(jetsam_thread_state_t *jetsam_thread)
 		}
 
 		if (cause == kMemorystatusKilledVMCompressorThrashing || cause == kMemorystatusKilledVMCompressorSpaceShortage) {
-			memorystatus_log_info("memorystatus: jetsam cause=%u compression_ratio=%u\n", cause, vm_compression_ratio());
+			memorystatus_log("memorystatus: killing due to \"%s\" - compression_ratio=%u\n", memorystatus_kill_cause_name[cause], vm_compression_ratio());
 		}
 
 		killed = memorystatus_do_action(jetsam_thread, action, cause);
@@ -4198,7 +4175,7 @@ memorystatus_thread_internal(jetsam_thread_state_t *jetsam_thread)
 			}
 		} else {
 			if (cause == kMemorystatusKilledVMCompressorThrashing || cause == kMemorystatusKilledVMCompressorSpaceShortage) {
-				memorystatus_log_info("memorystatus: after jetsam fragmentation_level=%u\n", vm_compressor_fragmentation_level());
+				memorystatus_log("memorystatus: post-jetsam compressor fragmentation_level=%u\n", vm_compressor_fragmentation_level());
 			}
 			/* Always re-check for highwater and swappable kills after doing a kill. */
 			highwater_remaining = true;
@@ -4235,6 +4212,8 @@ memorystatus_thread_internal(jetsam_thread_state_t *jetsam_thread)
 #endif /* CONFIG_JETSAM */
 		} else if (killed && is_reason_zone_map_exhaustion(cause)) {
 			os_atomic_store(&memorystatus_zone_map_is_exhausted, false, release);
+		} else if (killed && cause == kMemorystatusKilledVMPageoutStarvation) {
+			os_atomic_store(&memorystatus_pageout_starved, false, release);
 		}
 	}
 
@@ -6450,15 +6429,11 @@ memorystatus_kill_on_VM_compressor_space_shortage(boolean_t async)
 
 #if CONFIG_JETSAM
 
-boolean_t
-memorystatus_kill_on_VM_page_shortage()
+void
+memorystatus_kill_on_vps_starvation(void)
 {
-	os_reason_t jetsam_reason = os_reason_create(OS_REASON_JETSAM, JETSAM_REASON_MEMORY_VMPAGESHORTAGE);
-	if (jetsam_reason == OS_REASON_NULL) {
-		memorystatus_log_error("memorystatus_kill_on_VM_page_shortage -- sync: failed to allocate jetsam reason\n");
-	}
-
-	return memorystatus_kill_process_sync(-1, kMemorystatusKilledVMPageShortage, jetsam_reason);
+	os_atomic_store(&memorystatus_pageout_starved, true, release);
+	memorystatus_thread_wake();
 }
 
 boolean_t
@@ -8845,6 +8820,8 @@ memorystatus_pick_kill_cause(const memorystatus_system_health_t *status)
 		return kMemorystatusKilledFCThrashing;
 	} else if (status->msh_zone_map_is_exhausted) {
 		return kMemorystatusKilledZoneMapExhaustion;
+	} else if (status->msh_pageout_starved) {
+		return kMemorystatusKilledVMPageoutStarvation;
 	} else {
 		assert(status->msh_available_pages_below_critical);
 		return kMemorystatusKilledVMPageShortage;

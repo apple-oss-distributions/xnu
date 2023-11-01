@@ -257,6 +257,7 @@ struct zone {
 	    z_depot_cleanup    :1,  /* per cpu depots need cleaning */
 	    z_expanding_wait   :1,  /* is thread waiting for expansion? */
 	    z_exhausted_wait   :1,  /* are threads waiting for exhaustion end */
+	    z_exhausts         :1,  /* whether the zone exhausts by design */
 
 	/*
 	 * Behavior configuration bits
@@ -269,7 +270,7 @@ struct zone {
 	    no_callout         :1,
 	    z_destructible     :1,  /* zone can be zdestroy()ed  */
 
-	    _reserved          :7,
+	    _reserved          :6,
 
 	/*
 	 * Debugging features

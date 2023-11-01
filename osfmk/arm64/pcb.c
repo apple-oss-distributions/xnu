@@ -788,7 +788,7 @@ arm_debug_set32(arm_debug_state_t *debug_state)
 	if (debug_state->uds.ds32.mdscr_el1 & 0x1) {
 		update_mdscr(0x8000, 1); // ~MDE | SS : no brk/watch while single stepping (which we've set)
 
-		mask_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
+		mask_user_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
 	} else {
 		update_mdscr(0x1, 0);
 	}
@@ -991,7 +991,7 @@ arm_debug_set64(arm_debug_state_t *debug_state)
 
 		update_mdscr(0x8000, 1); // ~MDE | SS : no brk/watch while single stepping (which we've set)
 
-		mask_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
+		mask_user_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
 	} else {
 		update_mdscr(0x1, 0);
 	}

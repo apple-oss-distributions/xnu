@@ -29,6 +29,7 @@
 #include <mach/kern_return.h>
 #include <mach/mach_types.h>
 #include <mach/notify.h>
+#include <os/refcnt.h>
 #include <ipc/ipc_types.h>
 #include <ipc/ipc_importance.h>
 #include <ipc/ipc_port.h>
@@ -84,11 +85,11 @@ static LCK_SPIN_DECLARE_ATTR(ipc_importance_lock_data, &ipc_lck_grp, &ipc_lck_at
 #define incr_ref_counter(x) (os_atomic_inc(&(x), relaxed))
 
 static inline
-uint32_t
+void
 ipc_importance_reference_internal(ipc_importance_elem_t elem)
 {
 	incr_ref_counter(elem->iie_refs_added);
-	return os_atomic_inc(&elem->iie_bits, relaxed) & IIE_REFS_MASK;
+	os_ref_retain_mask(&elem->iie_bits, IIE_TYPE_BITS, &iie_refgrp);
 }
 
 static inline
@@ -96,17 +97,16 @@ uint32_t
 ipc_importance_release_internal(ipc_importance_elem_t elem)
 {
 	incr_ref_counter(elem->iie_refs_dropped);
-	return os_atomic_dec(&elem->iie_bits, relaxed) & IIE_REFS_MASK;
+	return os_ref_release_relaxed_mask(&elem->iie_bits, IIE_TYPE_BITS, &iie_refgrp);
 }
 
 static inline
-uint32_t
+void
 ipc_importance_task_reference_internal(ipc_importance_task_t task_imp)
 {
 	uint32_t out;
-	out = ipc_importance_reference_internal(&task_imp->iit_elem);
+	ipc_importance_reference_internal(&task_imp->iit_elem);
 	incr_ref_counter(task_imp->iit_elem.iie_task_refs_added);
-	return out;
 }
 
 static inline
@@ -490,6 +490,13 @@ ipc_importance_release(ipc_importance_elem_t elem)
 	/* unlocked */
 }
 
+__abortlike
+static void
+iit_over_release_panic(ipc_importance_task_t task_imp)
+{
+	panic("iit unexpected zero refs: %p", task_imp);
+}
+
 /*
  *	Routine:	ipc_importance_task_reference
  *
@@ -660,7 +667,10 @@ ipc_importance_task_check_transition(
 			if (&ipc_importance_delayed_drop_queue != task_imp->iit_updateq) {
 				queue_remove(task_imp->iit_updateq, task_imp, ipc_importance_task_t, iit_updates);
 				task_imp->iit_updateq = NULL;
-				ipc_importance_task_release_internal(task_imp); /* can't be last ref */
+				if (!ipc_importance_task_release_internal(task_imp)) {
+					/* can't be last ref */
+					iit_over_release_panic(task_imp);
+				}
 			}
 		} else {
 			task_imp->iit_updatepolicy = 1;
@@ -745,7 +755,10 @@ ipc_importance_task_propagate_helper(
 			queue_enter(propagation, temp_task_imp, ipc_importance_task_t, iit_props);
 			/* reference donated */
 		} else {
-			ipc_importance_task_release_internal(temp_task_imp);
+			if (!ipc_importance_task_release_internal(temp_task_imp)) {
+				/* can't be last ref */
+				iit_over_release_panic(temp_task_imp);
+			}
 		}
 	}
 
@@ -1150,7 +1163,10 @@ ipc_importance_task_propagate_assertion_locked(
 			}
 		}
 
-		ipc_importance_task_release_internal(temp_task_imp);
+		if (!ipc_importance_task_release_internal(temp_task_imp)) {
+			/* can't be last ref */
+			iit_over_release_panic(temp_task_imp);
+		}
 	}
 
 	/* apply updates to task (may drop importance lock) */
@@ -1924,11 +1940,9 @@ retry:
 		/* Add a made reference (borrowing active task ref to do it) */
 		if (made) {
 			if (0 == task_elem->iit_made++) {
-				assert(IIT_REFS_MAX > IIT_REFS(task_elem));
 				ipc_importance_task_reference_internal(task_elem);
 			}
 		} else {
-			assert(IIT_REFS_MAX > IIT_REFS(task_elem));
 			ipc_importance_task_reference_internal(task_elem);
 		}
 		ipc_importance_unlock();
@@ -1947,7 +1961,9 @@ retry:
 		goto retry;
 	}
 
-	task_elem->iit_bits = IIE_TYPE_TASK | 2; /* one for task, one for return/made */
+	/* one for task, one for return/made */
+	os_ref_init_count_mask(&task_elem->iit_bits, IIE_TYPE_BITS, &iie_refgrp, 2, IIE_TYPE_TASK);
+
 	task_elem->iit_made = (made) ? 1 : 0;
 	task_elem->iit_task = task; /* take actual ref when we're sure */
 #if IIE_REF_DEBUG
@@ -2820,7 +2836,6 @@ ipc_importance_inherit_from_kmsg(ipc_kmsg_t kmsg)
 
 		/* add in a made reference */
 		if (0 == inherit->iii_made++) {
-			assert(III_REFS_MAX > III_REFS(inherit));
 			ipc_importance_inherit_reference_internal(inherit);
 		}
 
@@ -2841,7 +2856,7 @@ ipc_importance_inherit_from_kmsg(ipc_kmsg_t kmsg)
 	} else {
 		/* initialize the previously allocated space */
 		inherit = alloc;
-		inherit->iii_bits = IIE_TYPE_INHERIT | 1;
+		os_ref_init_mask(&inherit->iii_bits, IIE_TYPE_BITS, &iie_refgrp, IIE_TYPE_INHERIT);
 		inherit->iii_made = 1;
 		inherit->iii_externcnt = 1;
 		inherit->iii_externdrop = 0;
@@ -3027,7 +3042,6 @@ ipc_importance_inherit_from_task(
 		assert(0 < IIE_REFS(inherit->iii_from_elem));
 
 		/* Take a reference for inherit */
-		assert(III_REFS_MAX > III_REFS(inherit));
 		ipc_importance_inherit_reference_internal(inherit);
 
 		/* Reflect the inherit's change of status into the task boosts */
@@ -3047,7 +3061,7 @@ ipc_importance_inherit_from_task(
 	} else {
 		/* initialize the previously allocated space */
 		inherit = alloc;
-		inherit->iii_bits = IIE_TYPE_INHERIT | 1;
+		os_ref_init_mask(&inherit->iii_bits, IIE_TYPE_BITS, &iie_refgrp, IIE_TYPE_INHERIT);
 		inherit->iii_made = 0;
 		inherit->iii_externcnt = 1;
 		inherit->iii_externdrop = 0;

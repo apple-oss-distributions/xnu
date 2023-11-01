@@ -255,6 +255,7 @@ typedef struct cpu_data {
 	/* Encoded data to store in TPIDR_EL0 on context switch */
 	uint64_t                        cpu_tpidr_el0;
 #endif
+
 } cpu_data_t;
 
 /*

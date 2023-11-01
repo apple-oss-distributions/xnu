@@ -423,6 +423,9 @@ extern void PE_cpu_power_enable(int cpu_id);
 
 extern void PE_cpu_power_disable(int cpu_id);
 
+/* This has no locking to prevent races, so it is only used in the panic path */
+extern bool PE_cpu_power_check_kdp(int cpu_id);
+
 extern void PE_singlestep_hook(void);
 
 #if defined(__arm__) || defined(__arm64__)

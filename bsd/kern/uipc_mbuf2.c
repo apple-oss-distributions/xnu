@@ -758,6 +758,16 @@ m_tag_alloc(uint32_t id, uint16_t type, int len, int wait)
 	if (mb_tag_mbuf != 0) {
 		tag = m_tag_alloc_mbuf(id, type, (uint16_t)len, wait);
 	} else {
+		/*
+		 * Using Z_NOWAIT could cause retransmission delays when there aren't
+		 * many other colocated types in the zone that would prime it. Use
+		 * Z_NOPAGEWAIT instead which will only fail to allocate when zalloc
+		 * needs to block on the VM for pages.
+		 */
+		if (wait & Z_NOWAIT) {
+			wait &= ~Z_NOWAIT;
+			wait |= Z_NOPAGEWAIT;
+		}
 		tag = m_tag_kalloc(id, type, (uint16_t)len, wait, mtte);
 	}
 done:

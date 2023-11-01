@@ -727,6 +727,30 @@ ipc_port_clear_receiver(
 	return reap_messages;
 }
 
+
+/*
+ *	Routine:	ipc_port_init_validate_flags
+ *	Purpose:
+ *		Validates the flag arguments for ipc_port_init
+ *		so that overlapping flags are not accidentally used together
+ */
+
+static kern_return_t
+ipc_port_init_validate_flags(ipc_port_init_flags_t flags)
+{
+	uint32_t at_most_one_flags = flags & (IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS |
+	    IPC_PORT_ENFORCE_RIGID_REPLY_PORT_SEMANTICS |
+	    IPC_PORT_INIT_PROVISIONAL_ID_PROT_OPTOUT |
+	    IPC_PORT_INIT_PROVISIONAL_REPLY);
+
+	if (at_most_one_flags & (at_most_one_flags - 1)) {
+		/* at most one of the listed flags can be set */
+		return KERN_INVALID_ARGUMENT;
+	}
+	return KERN_SUCCESS;
+}
+
+
 /*
  *	Routine:	ipc_port_init
  *	Purpose:
@@ -832,6 +856,11 @@ ipc_port_alloc(
 	mach_port_type_t type = MACH_PORT_TYPE_RECEIVE;
 	mach_port_urefs_t urefs = 0;
 
+	kr = ipc_port_init_validate_flags(flags);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+
 	if (flags & IPC_PORT_INIT_MAKE_SEND_RIGHT) {
 		type |= MACH_PORT_TYPE_SEND;
 		urefs = 1;
@@ -881,6 +910,11 @@ ipc_port_alloc_name(
 {
 	mach_port_type_t type = MACH_PORT_TYPE_RECEIVE;
 	mach_port_urefs_t urefs = 0;
+
+	kern_return_t kr = ipc_port_init_validate_flags(flags);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
 
 	if (flags & IPC_PORT_INIT_MAKE_SEND_RIGHT) {
 		type |= MACH_PORT_TYPE_SEND;
@@ -2716,6 +2750,9 @@ ipc_port_importance_delta(
 	dropped = ipc_port_importance_delta_internal(port, options, &delta, &imp_task);
 
 	if (IIT_NULL == imp_task || delta == 0) {
+		if (imp_task) {
+			ipc_importance_task_release(imp_task);
+		}
 		return dropped;
 	}
 
@@ -3104,6 +3141,11 @@ ipc_port_alloc_special(
 	ipc_port_init_flags_t   flags)
 {
 	ipc_port_t port;
+
+	kern_return_t kr = ipc_port_init_validate_flags(flags);
+	if (kr != KERN_SUCCESS) {
+		return IP_NULL;
+	}
 
 	port = ip_object_to_port(io_alloc(IOT_PORT, Z_WAITOK | Z_ZERO));
 	if (port == IP_NULL) {

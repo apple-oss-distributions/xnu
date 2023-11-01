@@ -2808,31 +2808,21 @@ SYSCTL_INT(_kern, OID_AUTO, sched_preemption_disable_debug_mode, CTLFLAG_RW | CT
     &sched_preemption_disable_debug_mode, 0,
     "Enable preemption disablement tracing or panic (0: off, 1: trace, 2: panic)");
 
-PERCPU_DECL(uint64_t _Atomic, preemption_disable_max_mt);
-
 static int
 sysctl_sched_preemption_disable_stats(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
+	extern unsigned int preemption_disable_get_max_durations(uint64_t *durations, size_t count);
+	extern void preemption_disable_reset_max_durations(void);
+
 	uint64_t stats[MAX_CPUS]; // maximum per CPU
 
-	/*
-	 * No synchronization here. The individual values are pretty much
-	 * independent, and reading/writing them is atomic.
-	 */
-
-	int cpu = 0;
-	percpu_foreach(max_stat, preemption_disable_max_mt) {
-		stats[cpu++] = os_atomic_load(max_stat, relaxed);
-	}
-
+	unsigned int ncpus = preemption_disable_get_max_durations(stats, MAX_CPUS);
 	if (req->newlen > 0) {
-		// writing just resets all stats.
-		percpu_foreach(max_stat, preemption_disable_max_mt) {
-			os_atomic_store(max_stat, 0, relaxed);
-		}
+		/* Reset when attempting to write to the sysctl. */
+		preemption_disable_reset_max_durations();
 	}
 
-	return sysctl_io_opaque(req, stats, cpu * sizeof(uint64_t), NULL);
+	return sysctl_io_opaque(req, stats, ncpus * sizeof(uint64_t), NULL);
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, sched_preemption_disable_stats,

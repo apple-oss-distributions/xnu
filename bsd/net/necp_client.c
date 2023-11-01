@@ -4723,17 +4723,29 @@ necp_update_client_result(proc_t proc,
 			necp_client_add_interface_option_if_needed(client, direct_interface->if_index,
 			    ifnet_get_generation(direct_interface), NULL, false);
 		}
-		// Get other multipath interface options from ordered list
-		struct ifnet *multi_interface = NULL;
-		TAILQ_FOREACH(multi_interface, &ifnet_ordered_head, if_ordered_link) {
-			if (multi_interface != direct_interface &&
-			    necp_ifnet_matches_parameters(multi_interface, parsed_parameters, 0, NULL, true, false)) {
-				// Add nexus agents for multipath
-				necp_client_add_agent_interface_options(client, parsed_parameters, multi_interface);
+		if (parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_INBOUND) {
+			// For inbound multipath, add from the global list (like a listener)
+			struct ifnet *multi_interface = NULL;
+			TAILQ_FOREACH(multi_interface, &ifnet_head, if_link) {
+				if ((multi_interface->if_flags & (IFF_UP | IFF_RUNNING)) &&
+				    necp_ifnet_matches_parameters(multi_interface, parsed_parameters, 0, NULL, true, false)) {
+					// Add nexus agents for inbound multipath
+					necp_client_add_agent_interface_options(client, parsed_parameters, multi_interface);
+				}
+			}
+		} else {
+			// Get other multipath interface options from ordered list
+			struct ifnet *multi_interface = NULL;
+			TAILQ_FOREACH(multi_interface, &ifnet_ordered_head, if_ordered_link) {
+				if (multi_interface != direct_interface &&
+				    necp_ifnet_matches_parameters(multi_interface, parsed_parameters, 0, NULL, true, false)) {
+					// Add nexus agents for multipath
+					necp_client_add_agent_interface_options(client, parsed_parameters, multi_interface);
 
-				// Add multipath interface flows for kernel MPTCP
-				necp_client_add_interface_option_if_needed(client, multi_interface->if_index,
-				    ifnet_get_generation(multi_interface), NULL, false);
+					// Add multipath interface flows for kernel MPTCP
+					necp_client_add_interface_option_if_needed(client, multi_interface->if_index,
+					    ifnet_get_generation(multi_interface), NULL, false);
+				}
 			}
 		}
 	} else if (parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_LISTENER) {
@@ -7240,7 +7252,7 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 				    parsed_parameters.ip_protocol);
 				break;
 			}
-			if (parsed_parameters.ip_protocol != parent_parameters.transport_protocol) {
+			if (parsed_parameters.ip_protocol != parent_parameters.ip_protocol) {
 				NECPLOG0(LOG_INFO, "necp_client_add, parent/child ip protocol mismatch");
 				break;
 			}

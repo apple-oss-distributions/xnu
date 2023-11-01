@@ -1048,6 +1048,7 @@ thread_recompute_priority(
 {
 	integer_t               priority;
 	integer_t               adj_priority;
+	bool                    wi_priority = false;
 
 	if (thread->policy_reset) {
 		return;
@@ -1077,6 +1078,7 @@ thread_recompute_priority(
 	} else if (thread->effective_policy.thep_wi_driven &&
 	    work_interval_get_priority(thread) < BASEPRI_RTQUEUES) {
 		priority = work_interval_get_priority(thread);
+		wi_priority = true;
 	} else if (thread->effective_policy.thep_qos != THREAD_QOS_UNSPECIFIED) {
 		int qos = thread->effective_policy.thep_qos;
 		int qos_ui_is_urgent = thread->effective_policy.thep_qos_ui_is_urgent;
@@ -1130,7 +1132,7 @@ thread_recompute_priority(
 	adj_priority = MAX(adj_priority, MINPRI);
 
 	/* Allow workload driven priorities to exceed max_priority. */
-	if (thread->effective_policy.thep_wi_driven) {
+	if (wi_priority) {
 		adj_priority = MAX(adj_priority, priority);
 	}
 

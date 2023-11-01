@@ -287,7 +287,7 @@ rip_input_inner(struct mbuf *m, int iphlen, bool is_ipv4_pass, uint32_t *total_d
 			continue;
 		}
 		if (last != NULL) {
-			struct mbuf *n = m_copym_mode(m, 0, (int)M_COPYALL, M_DONTWAIT, M_COPYM_MUST_COPY_HDR);
+			struct mbuf *n = m_copym_mode(m, 0, (int)M_COPYALL, M_DONTWAIT, NULL, NULL, M_COPYM_MUST_COPY_HDR);
 
 			if (n == NULL) {
 				continue;
@@ -310,7 +310,7 @@ rip_input_inner(struct mbuf *m, int iphlen, bool is_ipv4_pass, uint32_t *total_d
 		}
 	} else {
 		if (last != NULL) {
-			struct mbuf *n = m_copym_mode(m, 0, (int)M_COPYALL, M_DONTWAIT, M_COPYM_MUST_COPY_HDR);
+			struct mbuf *n = m_copym_mode(m, 0, (int)M_COPYALL, M_DONTWAIT, NULL, NULL, M_COPYM_MUST_COPY_HDR);
 
 			if (n != NULL) {
 				num_delivered += rip_inp_input(last, n, iphlen);

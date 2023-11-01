@@ -247,7 +247,7 @@ fsevents_internal_init(void)
 	    ZC_NOGC | ZC_NOCALLOUT, ZONE_ID_ANY, ^(zone_t z) {
 		// mark the zone as exhaustible so that it will not
 		// ever grow beyond what we initially filled it with
-		zone_set_exhaustible(z, max_kfs_events);
+		zone_set_exhaustible(z, max_kfs_events, /* exhausts */ true);
 	});
 
 	zone_fill_initially(event_zone, max_kfs_events);

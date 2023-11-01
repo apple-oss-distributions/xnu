@@ -276,7 +276,7 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 	 * processing may modify the mbuf.
 	 */
 	mcopy = m_copym_mode(m, 0, imin(m->m_pkthdr.len, ICMPV6_PLD_MAXLEN),
-	    M_DONTWAIT, M_COPYM_COPY_HDR);
+	    M_DONTWAIT, NULL, NULL, M_COPYM_COPY_HDR);
 #if IPSEC
 	if (ipsec_bypass != 0) {
 		goto skip_ipsec;

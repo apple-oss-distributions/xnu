@@ -275,7 +275,43 @@ void
 tty_lock(struct tty *tp)
 {
 	TTY_LOCK_NOTOWNED(tp);  /* debug assert */
+	ttyhold(tp);
 	lck_mtx_lock(&tp->t_lock);
+	os_atomic_store(&tp->t_locked_thread, current_thread(), relaxed);
+}
+
+/*
+ * tty_lock
+ *
+ * Try locking the requested tty structure.
+ *
+ * Parameters:	tp				The tty we want to lock
+ *
+ * Returns:	true if locked, false otherwise
+ *
+ */
+bool
+tty_trylock(struct tty *tp)
+{
+	TTY_LOCK_NOTOWNED(tp);  /* debug assert */
+	ttyhold(tp);
+	if (lck_mtx_try_lock(&tp->t_lock)) {
+		/* locked */
+		os_atomic_store(&tp->t_locked_thread, current_thread(), relaxed);
+		return true;
+	} else {
+		/* not locked */
+		ttyfree(tp);
+		return false;
+	}
+}
+
+
+bool
+tty_islocked(struct tty *tp)
+{
+	thread_t owner = os_atomic_load(&tp->t_locked_thread, relaxed);
+	return owner == current_thread();
 }
 
 
@@ -294,7 +330,9 @@ void
 tty_unlock(struct tty *tp)
 {
 	TTY_LOCK_OWNED(tp);     /* debug assert */
+	os_atomic_store(&tp->t_locked_thread, NULL, relaxed);
 	lck_mtx_unlock(&tp->t_lock);
+	ttyfree(tp);
 }
 
 /*
@@ -340,11 +378,24 @@ ttyclose(struct tty *tp)
 	struct pgrp * oldpg;
 	struct session *oldsessp;
 	struct tty *freetp = TTY_NULL;
+	struct tty *constty = TTY_NULL;
 
 	TTY_LOCK_OWNED(tp);     /* debug assert */
 
+	constty = copy_constty();
+
 	if (constty == tp) {
+		ttyfree_locked(constty);
 		constty = NULL;
+		freetp = set_constty(NULL);
+		if (freetp) {
+			if (freetp == tp) {
+				ttyfree_locked(freetp);
+			} else {
+				ttyfree(freetp);
+			}
+			freetp = NULL;
+		}
 
 
 		/*
@@ -353,6 +404,15 @@ ttyclose(struct tty *tp)
 		 */
 		(*cdevsw[major(tp->t_dev)].d_ioctl)
 		(tp->t_dev, KMIOCDISABLCONS, NULL, 0, current_proc());
+	}
+
+	if (constty != NULL) {
+		if (constty == tp) {
+			ttyfree_locked(constty);
+		} else {
+			ttyfree(constty);
+		}
+		constty = NULL;
 	}
 
 	ttyflush(tp, FREAD | FWRITE);
@@ -1105,17 +1165,54 @@ ttioctl_locked(struct tty *tp, u_long cmd, caddr_t data, int flag, proc_t p)
 	}
 		OS_FALLTHROUGH;
 	case TIOCCONS: {                        /* become virtual console */
+		struct tty *constty = NULL;
+		constty = copy_constty();
 		if (*(int *)data) {
 			if (constty && constty != tp &&
 			    ISSET(constty->t_state, TS_CONNECTED)) {
 				error = EBUSY;
+				// constty != tp, so constty is not locked
+				ttyfree(constty);
+				constty = NULL;
 				goto out;
 			}
 			if ((error = suser(kauth_cred_get(), &p->p_acflag))) {
+				if (constty == tp) {
+					ttyfree_locked(constty);
+				} else {
+					ttyfree(constty);
+				}
+				constty = NULL;
 				goto out;
 			}
-			constty = tp;
+			if (tp != constty) {
+				freetp = set_constty(tp);
+				if (freetp != NULL) {
+					if (freetp == tp) {
+						ttyfree_locked(freetp);
+					} else {
+						ttyfree(freetp);
+					}
+					freetp = NULL;
+				}
+				if (constty != NULL) {
+					// constty != tp, so constty is not locked
+					ttyfree(constty);
+				}
+				constty = copy_constty();
+			}
 		} else if (tp == constty) {
+			freetp = set_constty(NULL);
+			if (freetp != NULL) {
+				if (freetp == tp) {
+					ttyfree_locked(freetp);
+				} else {
+					ttyfree(freetp);
+				}
+				freetp = NULL;
+			}
+			// constty == tp, so constty is locked
+			ttyfree_locked(constty);
 			constty = NULL;
 		}
 		if (constty) {
@@ -1124,6 +1221,13 @@ ttioctl_locked(struct tty *tp, u_long cmd, caddr_t data, int flag, proc_t p)
 		} else {
 			(*cdevsw[major(tp->t_dev)].d_ioctl)
 			(tp->t_dev, KMIOCDISABLCONS, NULL, 0, p);
+		}
+		if (constty != NULL) {
+			if (constty == tp) {
+				ttyfree_locked(constty);
+			} else {
+				ttyfree(constty);
+			}
 		}
 		break;
 	}
@@ -3175,6 +3279,7 @@ ttymalloc(void)
 void
 ttyhold(struct tty *tp)
 {
+	assert(tp != NULL);
 	os_ref_retain_raw(&tp->t_refcnt, &t_refgrp);
 }
 
@@ -3185,11 +3290,24 @@ ttyhold(struct tty *tp)
 void
 ttyfree(struct tty *tp)
 {
+	assert(tp != NULL);
 	TTY_LOCK_NOTOWNED(tp);
 
 	if (os_ref_release_raw(&tp->t_refcnt, &t_refgrp) == 0) {
 		ttydeallocate(tp);
 	}
+}
+
+/*
+ * Drops a reference count on a tty structure while holding the tty lock.
+ * Panics if the last reference is dropped.
+ */
+void
+ttyfree_locked(struct tty *tp)
+{
+	assert(tp != NULL);
+	TTY_LOCK_OWNED(tp);
+	os_ref_release_live_raw(&tp->t_refcnt, &t_refgrp);
 }
 
 /*

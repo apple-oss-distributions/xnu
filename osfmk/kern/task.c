@@ -2573,6 +2573,7 @@ task_port_no_senders(ipc_port_t port, __unused mach_port_mscount_t mscount)
 	task_remove_from_corpse_task_list(task);
 
 	task_clear_corpse(task);
+	vm_map_unset_corpse_source(task->map);
 	task_terminate_internal(task);
 }
 
@@ -3283,6 +3284,16 @@ task_complete_halt(task_t task)
 	} else {
 		task_unlock(task);
 	}
+
+#if CONFIG_DEFERRED_RECLAIM
+	if (task->deferred_reclamation_metadata) {
+		vm_deferred_reclamation_buffer_uninstall(
+			task->deferred_reclamation_metadata);
+		vm_deferred_reclamation_buffer_deallocate(
+			task->deferred_reclamation_metadata);
+		task->deferred_reclamation_metadata = NULL;
+	}
+#endif /* CONFIG_DEFERRED_RECLAIM */
 
 	/*
 	 *	Give the machine dependent code a chance
@@ -7046,6 +7057,10 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 	 * or the process wants synchronous EXC_RESOURCE exceptions.
 	 */
 	if ((exception_options & EXEC_RESOURCE_FATAL) || send_sync_exc_resource || !exc_via_corpse_forking) {
+		if (exception_options & EXEC_RESOURCE_FATAL) {
+			vm_map_set_corpse_source(task->map);
+		}
+
 		/* Do not send a EXC_RESOURCE if corpse_for_fatal_memkill is set */
 		if (send_sync_exc_resource || !corpse_for_fatal_memkill) {
 			/*
@@ -7264,7 +7279,6 @@ task_convert_phys_footprint_limit(
 	}
 	return KERN_SUCCESS;
 }
-
 
 kern_return_t
 task_set_phys_footprint_limit_internal(

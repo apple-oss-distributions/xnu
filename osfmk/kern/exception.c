@@ -854,14 +854,23 @@ bsd_exception(
 /*
  * Raise an exception on a task.
  * This should tell launchd to launch Crash Reporter for this task.
+ * If the exception is fatal, we should be careful about sending a synchronous exception
  */
 kern_return_t
 task_exception_notify(exception_type_t exception,
-    mach_exception_data_type_t exccode, mach_exception_data_type_t excsubcode)
+    mach_exception_data_type_t exccode, mach_exception_data_type_t excsubcode, const bool fatal)
 {
 	mach_exception_data_type_t      code[EXCEPTION_CODE_MAX];
 	wait_interrupt_t                wsave;
 	kern_return_t kr = KERN_SUCCESS;
+
+	/*
+	 * If we are not in dev mode, nobody should be allowed to synchronously handle
+	 * a fatal EXC_GUARD - they might stall on it indefinitely
+	 */
+	if (fatal && !developer_mode_state() && exception == EXC_GUARD) {
+		return KERN_DENIED;
+	}
 
 	code[0] = exccode;
 	code[1] = excsubcode;

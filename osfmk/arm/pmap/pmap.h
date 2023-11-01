@@ -374,8 +374,8 @@ struct pmap {
 	vm_map_offset_t  nested_region_size;
 	vm_map_offset_t  nested_region_true_start;
 	vm_map_offset_t  nested_region_true_end;
-	unsigned int     *nested_region_asid_bitmap;
-	unsigned int     nested_region_asid_bitmap_size;
+	unsigned int     *nested_region_unnested_table_bitmap;
+	unsigned int     nested_region_unnested_table_bitmap_size;
 
 
 	void *          reserved0;

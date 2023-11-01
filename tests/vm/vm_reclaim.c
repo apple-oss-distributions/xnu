@@ -6,6 +6,8 @@
 #include <mach-o/dyld.h>
 #include <os/atomic_private.h>
 #include <signal.h>
+#include <spawn.h>
+#include <spawn_private.h>
 #include <unistd.h>
 
 #include <darwintest.h>
@@ -48,7 +50,7 @@ T_DECL(vm_reclaim_init_fails_when_disabled, "Initializing a ring buffer on a sys
 
 	kern_return_t kr = mach_vm_reclaim_ringbuffer_init(&ringbuffer);
 
-	T_QUIET; T_EXPECT_MACH_ERROR(kr, KERN_FAILURE, "mach_vm_reclaim_ringbuffer_init");
+	T_QUIET; T_EXPECT_MACH_ERROR(kr, KERN_NOT_SUPPORTED, "mach_vm_reclaim_ringbuffer_init");
 }
 
 /*
@@ -219,7 +221,9 @@ allocate_and_suspend(char *const *argv, bool free_buffer, bool double_free)
 	}
 
 	if (free_buffer) {
-		kr = mach_vm_deallocate(mach_task_self(), (mach_vm_address_t) ringbuffer.buffer, ringbuffer.buffer_len * sizeof(mach_vm_reclaim_entry_v1_t));
+		mach_vm_size_t buffer_size = ringbuffer.buffer_len * sizeof(mach_vm_reclaim_entry_v1_t) + \
+		    offsetof(struct mach_vm_reclaim_buffer_v1_s, entries);
+		kr = mach_vm_deallocate(mach_task_self(), (mach_vm_address_t) ringbuffer.buffer, buffer_size);
 		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_vm_deallocate");
 	}
 
@@ -440,38 +444,6 @@ T_DECL(vm_reclaim_update_reclaimable_bytes_threshold, "Kernel reclaims when num_
 	    (int64_t) ((kNumEntries) * kAllocationSize), "Entries were reclaimed as we crossed threshold");
 }
 
-T_HELPER_DECL(deallocate_indices,
-    "deallocate the indices from underneath the kernel")
-{
-	mach_vm_reclaim_ringbuffer_v1_t ringbuffer = NULL;
-	static const size_t kAllocationSize = (1UL << 20); // 1MB
-	mach_vm_address_t addr;
-
-	kern_return_t kr;
-	kr = mach_vm_map(mach_task_self(), (mach_vm_address_t *) &ringbuffer, vm_page_size, 0, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, FALSE, VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT);
-	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_vm_map");
-	kr = mach_vm_reclaim_ringbuffer_init(ringbuffer);
-	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_vm_reclaim_ringbuffer_init");
-
-	uint64_t idx = allocate_and_defer_free(kAllocationSize, ringbuffer, 1, &addr);
-	T_QUIET; T_ASSERT_EQ(idx, 0ULL, "Entry placed at start of buffer");
-	kr = mach_vm_deallocate(mach_task_self(), (mach_vm_address_t) ringbuffer, vm_page_size);
-	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_vm_deallocate");
-
-	mach_vm_reclaim_synchronize(ringbuffer, 10);
-
-	T_FAIL("Test did not crash when synchronizing with deallocated indices");
-}
-
-T_DECL(vm_reclaim_copyio_indices_error, "Force a copyio error on the indices",
-    T_META_IGNORECRASHES("vm_reclaim_copyio_indices_error*"),
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_LOW))
-{
-	int status = spawn_helper_and_wait_for_exit("deallocate_indices");
-	T_QUIET; T_ASSERT_TRUE(WIFSIGNALED(status), "Test process crashed.");
-	T_QUIET; T_ASSERT_EQ(WTERMSIG(status), SIGKILL, "Test process crashed with SIGKILL.");
-}
-
 T_HELPER_DECL(deallocate_buffer,
     "deallocate the buffer from underneath the kernel")
 {
@@ -484,7 +456,9 @@ T_HELPER_DECL(deallocate_buffer,
 
 	uint64_t idx = allocate_and_defer_free(kAllocationSize, &ringbuffer, 1, &addr);
 	T_QUIET; T_ASSERT_EQ(idx, 0ULL, "Entry placed at start of buffer");
-	kr = mach_vm_deallocate(mach_task_self(), (mach_vm_address_t) ringbuffer.buffer, ringbuffer.buffer_len * sizeof(mach_vm_reclaim_entry_v1_t));
+	mach_vm_size_t buffer_size = ringbuffer.buffer_len * sizeof(mach_vm_reclaim_entry_v1_t) + \
+	    offsetof(struct mach_vm_reclaim_buffer_v1_s, entries);
+	kr = mach_vm_deallocate(mach_task_self(), (mach_vm_address_t) ringbuffer.buffer, buffer_size);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_vm_deallocate");
 
 	mach_vm_reclaim_synchronize(&ringbuffer, 10);
@@ -644,4 +618,74 @@ T_DECL(reclaim_async_on_repeated_suspend,
 		T_QUIET; T_ASSERT_EQ(WEXITSTATUS(status), 0, "Test process exited cleanly.");
 		T_END;
 	});
+}
+
+T_HELPER_DECL(ringbuffer_init_after_exec,
+    "initialize a ringbuffer after exec")
+{
+	struct mach_vm_reclaim_ringbuffer_v1_s ringbuffer;
+	kern_return_t kr = mach_vm_reclaim_ringbuffer_init(&ringbuffer);
+	T_ASSERT_MACH_SUCCESS(kr, "mach_vm_reclaim_ringbuffer_init()");
+}
+
+extern char **environ;
+
+T_HELPER_DECL(exec_after_ringbuffer_init,
+    "initialize a ringbuffer then exec")
+{
+	char **launch_tool_args;
+	char testpath[PATH_MAX];
+	uint32_t testpath_buf_size;
+	struct mach_vm_reclaim_ringbuffer_v1_s ringbuffer;
+
+	kern_return_t kr = mach_vm_reclaim_ringbuffer_init(&ringbuffer);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_vm_reclaim_ringbuffer_init()");
+
+	testpath_buf_size = sizeof(testpath);
+	int ret = _NSGetExecutablePath(testpath, &testpath_buf_size);
+	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "_NSGetExecutablePath");
+	T_LOG("Executable path: %s", testpath);
+	launch_tool_args = (char *[]){
+		testpath,
+		"-n",
+		"ringbuffer_init_after_exec",
+		NULL
+	};
+
+	/* Spawn the child process. */
+	posix_spawnattr_t spawnattrs;
+	posix_spawnattr_init(&spawnattrs);
+	posix_spawnattr_setflags(&spawnattrs, POSIX_SPAWN_SETEXEC);
+	posix_spawn(&child_pid, testpath, NULL, &spawnattrs, launch_tool_args, environ);
+	T_ASSERT_FAIL("should not be reached");
+}
+
+T_DECL(reclaim_exec_new_reclaim_buffer,
+    "verify that an exec-ed process may instantiate a new buffer",
+    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_LOW))
+{
+	char **launch_tool_args;
+	char testpath[PATH_MAX];
+	uint32_t testpath_buf_size;
+
+	testpath_buf_size = sizeof(testpath);
+	int ret = _NSGetExecutablePath(testpath, &testpath_buf_size);
+	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "_NSGetExecutablePath");
+	T_LOG("Executable path: %s", testpath);
+	launch_tool_args = (char *[]){
+		testpath,
+		"-n",
+		"exec_after_ringbuffer_init",
+		NULL
+	};
+
+	/* Spawn the child process. */
+	ret = dt_launch_tool(&child_pid, launch_tool_args, false, NULL, NULL);
+	if (ret != 0) {
+		T_LOG("dt_launch tool returned %d with error code %d", ret, errno);
+	}
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(child_pid, "dt_launch_tool");
+
+	bool success = dt_waitpid(child_pid, NULL, NULL, 10);
+	T_QUIET; T_ASSERT_TRUE(success, "dt_waitpid()");
 }

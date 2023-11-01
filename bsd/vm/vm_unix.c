@@ -39,6 +39,7 @@
  */
 #include <vm/vm_options.h>
 
+#include <kern/ecc.h>
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/debug.h>

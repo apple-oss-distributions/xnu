@@ -424,8 +424,6 @@ route_init(void)
 
 	_CASSERT(offsetof(struct route, ro_rt) ==
 	    offsetof(struct route_in6, ro_rt));
-	_CASSERT(offsetof(struct route, ro_lle) ==
-	    offsetof(struct route_in6, ro_lle));
 	_CASSERT(offsetof(struct route, ro_srcia) ==
 	    offsetof(struct route_in6, ro_srcia));
 	_CASSERT(offsetof(struct route, ro_flags) ==
@@ -3969,11 +3967,6 @@ route_clear(struct route *ro)
 		ro->ro_rt = NULL;
 	}
 
-        if (ro->ro_lle != NULL) {
-		LLE_REMREF(ro->ro_lle);
-		ro->ro_lle = NULL;
-	}
-
 	if (ro->ro_srcia != NULL) {
 		IFA_REMREF(ro->ro_srcia);
 		ro->ro_srcia = NULL;
@@ -3993,11 +3986,6 @@ route_copyout(struct route *dst, const struct route *src, size_t length)
 		RT_ADDREF(dst->ro_rt);
 	}
 
-	/* Hold one reference for the local copy of struct lle */
-	if (dst->ro_lle != NULL) {
-		LLE_ADDREF(dst->ro_lle);
-	}
-
 	/* Hold one reference for the local copy of struct ifaddr */
 	if (dst->ro_srcia != NULL) {
 		IFA_ADDREF(dst->ro_srcia);
@@ -4014,13 +4002,6 @@ route_copyin(struct route *src, struct route *dst, size_t length)
 	 */
 	if (dst->ro_rt == NULL) {
 		/*
-		 * Ditch the cached link layer reference (dst)
-		 * since we're about to take everything there is in src
-		 */
-		if (dst->ro_lle != NULL) {
-			LLE_REMREF(dst->ro_lle);
-		}
-		/*
 		 * Ditch the address in the cached copy (dst) since
 		 * we're about to take everything there is in src.
 		 */
@@ -4028,7 +4009,7 @@ route_copyin(struct route *src, struct route *dst, size_t length)
 			IFA_REMREF(dst->ro_srcia);
 		}
 		/*
-		 * Copy everything (rt, ro_lle, srcia, flags, dst) from src; the
+		 * Copy everything (rt, srcia, flags, dst) from src; the
 		 * references to rt and/or srcia were held at the time
 		 * of storage and are kept intact.
 		 */
@@ -4038,20 +4019,11 @@ route_copyin(struct route *src, struct route *dst, size_t length)
 
 	/*
 	 * We know dst->ro_rt is not NULL here.
-	 * If the src->ro_rt is the same, update ro_lle, srcia and flags
+	 * If the src->ro_rt is the same, update srcia and flags
 	 * and ditch the route in the local copy.
 	 */
 	if (dst->ro_rt == src->ro_rt) {
 		dst->ro_flags = src->ro_flags;
-
-		if (dst->ro_lle != src->ro_lle) {
-			if (dst->ro_lle != NULL) {
-				LLE_REMREF(dst->ro_lle);
-			}
-			dst->ro_lle = src->ro_lle;
-		} else if (src->ro_lle != NULL) {
-			LLE_REMREF(src->ro_lle);
-		}
 
 		if (dst->ro_srcia != src->ro_srcia) {
 			if (dst->ro_srcia != NULL) {
@@ -4073,9 +4045,6 @@ route_copyin(struct route *src, struct route *dst, size_t length)
 	if (src->ro_rt != NULL) {
 		rtfree(dst->ro_rt);
 
-		if (dst->ro_lle != NULL) {
-			LLE_REMREF(dst->ro_lle);
-		}
 		if (dst->ro_srcia != NULL) {
 			IFA_REMREF(dst->ro_srcia);
 		}
@@ -4094,16 +4063,8 @@ route_copyin(struct route *src, struct route *dst, size_t length)
 		 */
 		IFA_REMREF(src->ro_srcia);
 	}
-	if (src->ro_lle != NULL) {
-		/*
-		 * Ditch cache lle in the local copy (src) since we're
-		 * not caching the route anyway (ro_rt is NULL).
-		 */
-		LLE_REMREF(src->ro_lle);
-	}
 done:
 	/* This function consumes the references on src */
-	src->ro_lle = NULL;
 	src->ro_rt = NULL;
 	src->ro_srcia = NULL;
 }

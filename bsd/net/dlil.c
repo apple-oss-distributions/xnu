@@ -81,7 +81,6 @@
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
 #include <skywalk/lib/net_filter_event.h>
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
-#include <net/if_llatbl.h>
 #include <net/net_api_stats.h>
 #include <net/if_ports_used.h>
 #include <net/if_vlan_var.h>

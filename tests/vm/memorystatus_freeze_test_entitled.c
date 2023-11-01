@@ -39,7 +39,7 @@ T_HELPER_DECL(simple_bg, "no-op bg process") {
 
 static pid_t helper_pid;
 static void
-signal_helper_process()
+signal_helper_process(void)
 {
 	kill(helper_pid, SIGUSR1);
 }

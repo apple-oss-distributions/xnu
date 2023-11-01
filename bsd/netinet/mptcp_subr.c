@@ -3239,7 +3239,7 @@ dont_reinject:
 			goto next;
 		}
 
-		m = m_copym_mode(mpt_mbuf, (int)off, mlen, M_DONTWAIT,
+		m = m_copym_mode(mpt_mbuf, (int)off, mlen, M_DONTWAIT, NULL, NULL,
 		    M_COPYM_MUST_COPY_HDR);
 		if (m == NULL) {
 			os_log_error(mptcp_log_handle, "%s - %lx: m_copym_mode failed\n", __func__,
@@ -3504,7 +3504,7 @@ mptcp_copy_mbuf_list(struct mptses *mpte, struct mbuf *m, int len)
 
 		VERIFY((m->m_flags & M_PKTHDR) && (m->m_pkthdr.pkt_flags & PKTF_MPTCP));
 
-		n = m_copym_mode(m, 0, m->m_len, M_DONTWAIT, M_COPYM_MUST_COPY_HDR);
+		n = m_copym_mode(m, 0, m->m_len, M_DONTWAIT, NULL, NULL, M_COPYM_MUST_COPY_HDR);
 		if (n == NULL) {
 			os_log_error(mptcp_log_handle, "%s - %lx: m_copym_mode returned NULL\n",
 			    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte));

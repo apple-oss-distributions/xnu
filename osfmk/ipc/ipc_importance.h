@@ -28,6 +28,7 @@
 #ifndef _IPC_IPC_IMPORTANCE_H_
 #define _IPC_IPC_IMPORTANCE_H_
 
+#include <os/refcnt.h>
 #include <mach/mach_types.h>
 #include <mach/mach_voucher_types.h>
 #include <mach/boolean.h>
@@ -59,7 +60,7 @@
  */
 
 struct ipc_importance_elem {
-	uint32_t                                iie_bits;       /* type and refs */
+	os_ref_atomic_t                         iie_bits;       /* type and refs */
 	mach_voucher_attr_value_reference_t     iie_made;       /* references given to vouchers */
 	queue_head_t                            iie_kmsgs;      /* list of kmsgs inheriting from this */
 	uint32_t                                iie_externcnt;  /* number of externalized boosts */
@@ -82,23 +83,24 @@ struct ipc_importance_elem {
 #endif
 };
 
-#define IIE_TYPE_MASK           0x80000000      /* Just the high bit for now */
-#define IIE_TYPE_TASK           0x00000000      /* Element is a task element */
-#define IIE_TYPE_INHERIT        0x80000000      /* Element inherits from a previous element */
-#define IIE_TYPE(e)             ((e)->iie_bits & IIE_TYPE_MASK)
+os_refgrp_decl(static, iie_refgrp, "IIERefGroup", NULL);
 
-#define IIE_REFS_MASK           0x7FFFFFFF      /* Mask to extract references */
-#define IIE_REFS_MAX            0x7FFFFFFF
-#define IIE_REFS(e)             ((e)->iie_bits & IIE_REFS_MASK)
+#define IIE_TYPE_BITS           1               /* Just the low bit for now */
+#define IIE_TYPE_MASK           ((1u << IIE_TYPE_BITS) - 1)
+
+#define IIE_TYPE_TASK           0x00000000      /* Element is a task element */
+#define IIE_TYPE_INHERIT        0x00000001      /* Element inherits from a previous element */
+#define IIE_TYPE(e)             (os_atomic_load(&(e)->iie_bits, relaxed) & IIE_TYPE_MASK)
+#define IIE_REFS(e)             (os_ref_get_count_mask(&(e)->iie_bits, IIE_TYPE_BITS))
 
 #define IIE_EXTERN(e)           ((e)->iie_externcnt - (e)->iie_externdrop)
 
 #if !IIE_REF_DEBUG
 #define ipc_importance_reference_internal(elem)         \
-	(os_atomic_inc(&(elem)->iie_bits, relaxed) & IIE_REFS_MASK)
+	os_ref_retain_mask(&(elem)->iie_bits, IIE_TYPE_BITS, &iie_refgrp)
 
 #define ipc_importance_release_internal(elem)           \
-	(os_atomic_dec(&(elem)->iie_bits, relaxed) & IIE_REFS_MASK)
+	os_ref_release_relaxed_mask(&(elem)->iie_bits, IIE_TYPE_BITS, &iie_refgrp)
 #endif
 
 struct ipc_importance_task {
@@ -132,7 +134,6 @@ struct ipc_importance_task {
 #define iit_externcnt           iit_elem.iie_externcnt
 #define iit_externdrop          iit_elem.iie_externdrop
 
-#define IIT_REFS_MAX            IIE_REFS_MAX
 #define IIT_REFS(t)             IIE_REFS(&(t)->iit_elem)
 #define IIT_EXTERN(t)           IIE_EXTERN(&(t)->iit_elem)
 #define IIT_LEGACY_EXTERN(t)    ((t)->iit_legacy_externcnt - (t)->iit_legacy_externdrop)
@@ -162,7 +163,6 @@ struct ipc_importance_inherit {
 #define iii_kmsgs                       iii_elem.iie_kmsgs
 #define iii_externcnt                   iii_elem.iie_externcnt
 #define iii_externdrop                  iii_elem.iie_externdrop
-#define III_REFS_MAX                    IIE_REFS_MAX
 #define III_REFS(i)                     IIE_REFS(&(i)->iii_elem)
 #define III_EXTERN(i)                   IIE_EXTERN(&(i)->iii_elem)
 

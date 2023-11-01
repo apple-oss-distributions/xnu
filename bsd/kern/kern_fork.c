@@ -149,7 +149,6 @@ static void (*dtrace_proc_waitfor_hook)(proc_t) = NULL;
 #endif
 
 /* XXX routines which should have Mach prototypes, but don't */
-void thread_set_parent(thread_t parent, int pid);
 extern void act_thread_catt(void *ctx);
 void thread_set_child(thread_t child, int pid);
 boolean_t thread_is_active(thread_t thread);

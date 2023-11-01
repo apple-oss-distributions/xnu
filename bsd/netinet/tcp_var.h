@@ -1754,9 +1754,10 @@ lck_mtx_t *      tcp_getlock(struct socket *, int);
 void *   tcp_getlock(struct socket *, int);
 #endif
 
-extern  struct pr_usrreqs tcp_usrreqs;
-extern  u_int32_t tcp_sendspace;
-extern  u_int32_t tcp_recvspace;
+extern int faster_mcopy;
+extern struct pr_usrreqs tcp_usrreqs;
+extern u_int32_t tcp_sendspace;
+extern u_int32_t tcp_recvspace;
 tcp_seq tcp_new_isn(struct tcpcb *);
 
 extern int tcp_input_checksum(int, struct mbuf *, struct tcphdr *, int, int);

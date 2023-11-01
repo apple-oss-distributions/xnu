@@ -178,6 +178,8 @@ struct vm_object {
 	                                         * shadows this object, for
 	                                         * copy_call.
 	                                         */
+	uint32_t                vo_copy_version;
+	uint32_t                __vo_unused_padding;
 	struct vm_object        *shadow;        /* My shadow */
 	memory_object_t         pager;          /* Where to get data */
 
@@ -1161,5 +1163,17 @@ extern kern_return_t vm_object_ownership_change(
 // so probably should be a real 32b ID vs. ptr.
 // Current users just check for equality
 #define VM_OBJECT_ID(o) ((uint32_t)(uintptr_t)VM_KERNEL_ADDRPERM((o)))
+
+static inline void
+VM_OBJECT_COPY_SET(
+	vm_object_t object,
+	vm_object_t copy)
+{
+	vm_object_lock_assert_exclusive(object);
+	object->vo_copy = copy;
+	if (copy != VM_OBJECT_NULL) {
+		object->vo_copy_version++;
+	}
+}
 
 #endif  /* _VM_VM_OBJECT_H_ */

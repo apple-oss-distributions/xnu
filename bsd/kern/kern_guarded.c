@@ -73,7 +73,7 @@ extern int exit_with_guard_exception(void *p, mach_exception_data_type_t code,
  */
 
 kern_return_t task_exception_notify(exception_type_t exception,
-    mach_exception_data_type_t code, mach_exception_data_type_t subcode);
+    mach_exception_data_type_t code, mach_exception_data_type_t subcode, const bool fatal);
 
 #define GUARD_REQUIRED (GUARD_DUP)
 #define GUARD_ALL      (GUARD_REQUIRED |        \
@@ -226,12 +226,13 @@ fd_guard_ast(
 	mach_exception_code_t code,
 	mach_exception_subcode_t subcode)
 {
+	const bool fatal = true;
 	/*
 	 * Check if anyone has registered for Synchronous EXC_GUARD, if yes then,
 	 * deliver it synchronously and then kill the process, else kill the process
-	 * and deliver the exception via EXC_CORPSE_NOTIFY.
+	 * and deliver the exception via EXC_CORPSE_NOTIFY. Always kill the process if we are not in dev mode.
 	 */
-	if (task_exception_notify(EXC_GUARD, code, subcode) == KERN_SUCCESS) {
+	if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
 		psignal(current_proc(), SIGKILL);
 	} else {
 		exit_with_guard_exception(current_proc(), code, subcode);
@@ -1310,12 +1311,13 @@ void
 vn_guard_ast(thread_t __unused t,
     mach_exception_data_type_t code, mach_exception_data_type_t subcode)
 {
+	const bool fatal = true;
 	/*
 	 * Check if anyone has registered for Synchronous EXC_GUARD, if yes then,
 	 * deliver it synchronously and then kill the process, else kill the process
-	 * and deliver the exception via EXC_CORPSE_NOTIFY.
+	 * and deliver the exception via EXC_CORPSE_NOTIFY. Always kill the process if we are not in dev mode.
 	 */
-	if (task_exception_notify(EXC_GUARD, code, subcode) == KERN_SUCCESS) {
+	if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
 		psignal(current_proc(), SIGKILL);
 	} else {
 		exit_with_guard_exception(current_proc(), code, subcode);

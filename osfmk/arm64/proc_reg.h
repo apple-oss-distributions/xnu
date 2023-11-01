@@ -1877,15 +1877,19 @@ typedef enum {
 
 /*
  * Instruction Abort ISS (EL1)
- *  24           10 9      5    0
- * +---------------+--+---+------+
- * |000000000000000|EA|000| IFSC |
- * +---------------+--+---+------+
+ *  24              10  9     5    0
+ * +--------------+---+--+---+------+
+ * |00000000000000|FnV|EA|000| IFSC |
+ * +--------------+---+--+---+------+
  *
  * where:
+ *   FnV:  FAR not Valid
  *   EA:   External Abort type
  *   IFSC: Instruction Fault Status Code
  */
+
+#define ISS_IA_FNV_SHIFT 10
+#define ISS_IA_FNV      (0x1 << ISS_IA_FNV_SHIFT)
 
 #define ISS_IA_EA_SHIFT 9
 #define ISS_IA_EA       (0x1 << ISS_IA_EA_SHIFT)
@@ -1897,18 +1901,22 @@ typedef enum {
 /*
  * Data Abort ISS (EL1)
  *
- *  24              9  8  7  6  5  0
- * +---------------+--+--+-+---+----+
- * |000000000000000|EA|CM|S1PTW|WnR|DFSC|
- * +---------------+--+--+-+---+----+
+ *  24              10  9  8   7    6  5  0
+ * +--------------+---+--+--+-----+---+----+
+ * |00000000000000|FnV|EA|CM|S1PTW|WnR|DFSC|
+ * +--------------+---+--+--+-----+---+----+
  *
  * where:
+ *   FnV:   FAR not Valid
  *   EA:    External Abort type
  *   CM:    Cache Maintenance operation
  *   WnR:   Write not Read
  *   S1PTW: Stage 2 exception on Stage 1 page table walk
  *   DFSC:  Data Fault Status Code
  */
+#define ISS_DA_FNV_SHIFT 10
+#define ISS_DA_FNV      (0x1 << ISS_DA_FNV_SHIFT)
+
 #define ISS_DA_EA_SHIFT  9
 #define ISS_DA_EA        (0x1 << ISS_DA_EA_SHIFT)
 
@@ -2691,6 +2699,7 @@ nop
 nop
 #endif /* !__ARM_SB_AVAILABLE__ */
 .endmacro
+
 
 #endif /* __ASSEMBLER__ */
 

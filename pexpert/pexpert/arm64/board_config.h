@@ -152,4 +152,12 @@
 #define PRECISE_USER_KERNEL_TIME 1
 #endif /* !CONFIG_SKIP_PRECISE_USER_KERNEL_TIME */
 
+/**
+ * On supported hardware, debuggable builds make the HID bits read-only
+ * without locking them.  This lets people manually modify HID bits while
+ * debugging, since they can use a debugging tool to first reset the HID
+ * bits back to read/write.  However it will still catch xnu changes that
+ * accidentally write to HID bits after they've been made read-only.
+ */
+
 #endif /* ! _PEXPERT_ARM_BOARD_CONFIG_H */

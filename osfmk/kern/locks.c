@@ -1228,11 +1228,18 @@ lck_mtx_sleep_deadline(
  * sleep_with_inheritor_turnstile to perform the handoff with the bucket spinlock.
  */
 
+
+typedef enum {
+	LCK_WAKEUP_THREAD,
+	LCK_WAKEUP_ONE,
+	LCK_WAKEUP_ALL
+} lck_wakeup_type_t;
+
 static kern_return_t
 wakeup_with_inheritor_and_turnstile(
 	event_t                 event,
 	wait_result_t           result,
-	bool                    wake_one,
+	lck_wakeup_type_t       wake_type,
 	lck_wake_action_t       action,
 	thread_t               *thread_wokenup)
 {
@@ -1248,7 +1255,8 @@ wakeup_with_inheritor_and_turnstile(
 
 	ts = turnstile_prepare_hash((uintptr_t)event, type);
 
-	if (wake_one) {
+	switch (wake_type) {
+	case LCK_WAKEUP_ONE: {
 		waitq_wakeup_flags_t flags = WAITQ_WAKEUP_DEFAULT;
 
 		if (action == LCK_WAKE_DEFAULT) {
@@ -1279,9 +1287,19 @@ wakeup_with_inheritor_and_turnstile(
 			turnstile_update_inheritor(ts, TURNSTILE_INHERITOR_NULL,
 			    TURNSTILE_IMMEDIATE_UPDATE);
 		}
-	} else {
+		break;
+	}
+	case LCK_WAKEUP_ALL: {
 		ret = waitq_wakeup64_all(&ts->ts_waitq, CAST_EVENT64_T(event),
 		    result, WAITQ_UPDATE_INHERITOR);
+		break;
+	}
+	case LCK_WAKEUP_THREAD: {
+		assert(thread_wokenup);
+		ret = waitq_wakeup64_thread(&ts->ts_waitq, CAST_EVENT64_T(event),
+		    *thread_wokenup, result);
+		break;
+	}
 	}
 
 	/*
@@ -1592,11 +1610,21 @@ lck_rw_sleep_with_inheritor(
  */
 
 kern_return_t
+wakeup_thread_with_inheritor(event_t event, wait_result_t result, lck_wake_action_t action, thread_t thread_towake)
+{
+	return wakeup_with_inheritor_and_turnstile(event,
+	           result,
+	           LCK_WAKEUP_THREAD,
+	           action,
+	           &thread_towake);
+}
+
+kern_return_t
 wakeup_one_with_inheritor(event_t event, wait_result_t result, lck_wake_action_t action, thread_t *thread_wokenup)
 {
 	return wakeup_with_inheritor_and_turnstile(event,
 	           result,
-	           TRUE,
+	           LCK_WAKEUP_ONE,
 	           action,
 	           thread_wokenup);
 }
@@ -1606,7 +1634,7 @@ wakeup_all_with_inheritor(event_t event, wait_result_t result)
 {
 	return wakeup_with_inheritor_and_turnstile(event,
 	           result,
-	           FALSE,
+	           LCK_WAKEUP_ALL,
 	           0,
 	           NULL);
 }
@@ -1889,7 +1917,7 @@ cond_wakeup_one_with_inheritor(cond_swi_var_t cond, wait_result_t result, lck_wa
 {
 	return wakeup_with_inheritor_and_turnstile((event_t)cond,
 	           result,
-	           TRUE,
+	           LCK_WAKEUP_ONE,
 	           action,
 	           thread_wokenup);
 }
@@ -1912,7 +1940,7 @@ cond_wakeup_all_with_inheritor(cond_swi_var_t cond, wait_result_t result)
 {
 	return wakeup_with_inheritor_and_turnstile((event_t)cond,
 	           result,
-	           FALSE,
+	           LCK_WAKEUP_ALL,
 	           0,
 	           NULL);
 }

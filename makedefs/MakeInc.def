@@ -973,21 +973,6 @@ LDFLAGS_KERNEL_STRIP_LTO =
 CFLAGS_NOLTO_FLAG =
 endif
 
-ifeq ($(BUILD_JSON_COMPILATION_DATABASE),1)
-# To build the json compilation database, kernel compile commands are
-# substituted with JSONCOMPILATIONDB, which appends compile commands to the
-# compilation database (compile_commands.json) rather than executing them.
-# Because kernel compilations do not actually occur in this mode, downstream
-# build steps (dSYM, static link, etc) that depend on *.o outputs must be bypassed.
-BUILD_DSYM	:= 0
-BUILD_STATIC_LINK := 0
-DO_CTFMERGE  	:= 0
-KCC		= $(JSONCOMPILATIONDB) $(OBJPATH)/compile_commands.json $(PWD) $< $(CC)
-KC++		= $(JSONCOMPILATIONDB) $(OBJPATH)/compile_commands.json $(PWD) $< $(CXX)
-S_KCC		= $(JSONCOMPILATIONDB) $(OBJPATH)/compile_commands.json $(PWD) $< $(CC)
-STRIP		= true
-endif
-
 #
 # Default VPATH
 #

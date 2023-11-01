@@ -51,6 +51,21 @@ typedef struct mach_vm_reclaim_indices_v1_s {
 	_Atomic uint64_t busy;
 } mach_vm_reclaim_indices_v1_t;
 
+/*
+ * Contains the data used for synchronization with the kernel. This structure
+ * should be page-aligned.
+ */
+typedef struct mach_vm_reclaim_buffer_v1_s {
+	mach_vm_reclaim_indices_v1_t indices;
+	/* align to multiple of entry size */
+	uint64_t _unused;
+	/*
+	 * The ringbuffer entries themselves populate the remainder of this
+	 * buffer's vm allocation.
+	 */
+	mach_vm_reclaim_entry_v1_t entries[0];
+} *mach_vm_reclaim_buffer_v1_t;
+
 #if !KERNEL
 #define VM_RECLAIM_INDEX_NULL UINT64_MAX
 
@@ -63,9 +78,8 @@ typedef struct mach_vm_reclaim_indices_v1_s {
  */
 
 typedef struct mach_vm_reclaim_ringbuffer_v1_s {
-	mach_vm_reclaim_entry_v1_t *buffer;
+	mach_vm_reclaim_buffer_v1_t buffer;
 	mach_vm_size_t buffer_len;
-	mach_vm_reclaim_indices_v1_t indices;
 	uint64_t va_in_buffer;
 	uint64_t last_accounting_given_to_kernel;
 } *mach_vm_reclaim_ringbuffer_v1_t;

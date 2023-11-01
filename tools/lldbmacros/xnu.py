@@ -268,7 +268,7 @@ lldb_command_documentation = {}
 _DEBUG_OPTS = { "--debug", "--radar", "--pdb" }
 
 def lldb_command(cmd_name, option_string = '', fancy=False):
-    """ A function decorator to define a command with namd 'cmd_name' in the lldb scope to call python function.
+    """ A function decorator to define a command with name 'cmd_name' in the lldb scope to call python function.
         params: cmd_name - str : name of command to be set in lldb prompt.
             option_string - str: getopt like option string. Only CAPITAL LETTER options allowed.
                                  see README on Customizing command options.

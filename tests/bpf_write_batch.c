@@ -30,6 +30,7 @@
 
 #include <sys/ioctl.h>
 #include <sys/sysctl.h>
+#include <sys/uio.h>
 
 #include <net/if.h>
 #include <net/if_arp.h>
@@ -53,7 +54,6 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("networking"),
 	T_META_CHECK_LEAKS(false));
-
 
 #define MAXBUF 32
 static void
@@ -174,6 +174,7 @@ create_bpf_on_interface(const char *ifname, int *out_fd, int *out_bdlen, u_int w
 	int bpf_fd = -1;
 	int error = 0;
 	int bdlen = 0;
+	u_int value;
 
 	bpf_fd = bpf_new();
 	if (bpf_fd < 0) {
@@ -192,12 +193,11 @@ create_bpf_on_interface(const char *ifname, int *out_fd, int *out_bdlen, u_int w
 
 	T_ASSERT_POSIX_SUCCESS(bpf_set_see_sent(bpf_fd, 1), NULL);
 
-	T_ASSERT_POSIX_SUCCESS(bpf_set_header_complete(bpf_fd, 0), NULL);
+	T_ASSERT_POSIX_SUCCESS(bpf_set_header_complete(bpf_fd, 1), NULL);
 
 #ifdef BIOCSWRITEMAX
 	T_ASSERT_POSIX_SUCCESS(bpf_set_write_size_max(bpf_fd, write_size_max), NULL);
 
-	u_int value;
 	T_ASSERT_POSIX_SUCCESS(bpf_get_write_size_max(bpf_fd, &value), NULL);
 
 	T_LOG("write_size_max %u %s value %u", write_size_max, write_size_max != value ? "!=" : "==", value);
@@ -206,6 +206,17 @@ create_bpf_on_interface(const char *ifname, int *out_fd, int *out_bdlen, u_int w
 		T_SKIP("BIOCSWRITEMAX not supported");
 	}
 #endif
+
+#ifdef BIOCSBATCHWRITE
+	T_ASSERT_POSIX_SUCCESS(bpf_set_batch_write(bpf_fd, 1), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(bpf_get_batch_write(bpf_fd, &value), NULL);
+
+	T_LOG("batch_write %u %s 1", value, value != 1 ? "!=" : "==");
+#else
+	T_SKIP("BIOCSBATCHWRITE not supported");
+#endif
+
 	struct timeval five_seconds = { .tv_sec = 5, .tv_usec = 0 };
 	T_ASSERT_POSIX_SUCCESS(bpf_set_timeout(bpf_fd, &five_seconds), NULL);
 
@@ -216,10 +227,8 @@ done:
 }
 
 static void
-do_bpf_write(const char *ifname, u_int ip_len, bool expect_success, u_int write_size_max)
+make_bootp_packet(struct iovec *iov, u_int ip_len, int id)
 {
-	int bpf_fd = -1;
-	int bdlen = 0;
 	u_int payload_len;
 
 	if (ip_len == 0) {
@@ -229,9 +238,6 @@ do_bpf_write(const char *ifname, u_int ip_len, bool expect_success, u_int write_
 		    "ip_len");
 		payload_len = ip_len - (sizeof(struct ip) + sizeof(struct udphdr));
 	}
-
-	T_ASSERT_POSIX_ZERO(create_bpf_on_interface(ifname, &bpf_fd, &bdlen, write_size_max), NULL);
-	T_LOG("bpf bdlen %d", bdlen);
 
 	struct ether_addr src_eaddr = {};
 	ifnet_get_lladdr(udp_fd, ifname1, &src_eaddr);
@@ -246,9 +252,12 @@ do_bpf_write(const char *ifname, u_int ip_len, bool expect_success, u_int write_
 
 	uint16_t dst_port = 67;
 
-	char *payload = calloc(1, payload_len);
+	void *payload = calloc(1, payload_len);
 
-	make_dhcp_payload((dhcp_min_payload_t)(void *)payload, &src_eaddr);
+	make_dhcp_payload((dhcp_min_payload_t)payload, &src_eaddr);
+
+	struct bootp *dhcp = (struct bootp *)payload;
+	dhcp->bp_xid = (uint32_t)id;
 
 	u_int pkt_size = ETHER_HDR_LEN + IP_MAXPACKET;
 	unsigned char *pkt = calloc(1, pkt_size);
@@ -264,13 +273,61 @@ do_bpf_write(const char *ifname, u_int ip_len, bool expect_success, u_int write_
 	    payload,
 	    payload_len);
 
-	T_LOG("frame_length %u ip_len %u payload_len %u", frame_length, ip_len, payload_len);
+	T_ASSERT_EQ(sizeof(struct bpf_hdr), BPF_WORDALIGN(sizeof(struct bpf_hdr)), "bpfhdr.bh_hdrlen == BPF_WORDALIGN(sizeof(struct bpf_hdr))");
 
-	T_ASSERT_GT((size_t)frame_length, (size_t)0, "frame_length must greater than zero");
+	struct bpf_hdr bpfhdr = {};
+	bpfhdr.bh_caplen = frame_length;
+	bpfhdr.bh_datalen = frame_length;
+	bpfhdr.bh_hdrlen = sizeof(struct bpf_hdr);
 
+	iov->iov_len = BPF_WORDALIGN(bpfhdr.bh_hdrlen + frame_length);
+	iov->iov_base = calloc(1, iov->iov_len);
+
+	T_LOG("iov_len %lu bh_hdrlen %u frame_length %u ip_len %u payload_len %u",
+	    iov->iov_len, bpfhdr.bh_hdrlen, frame_length, ip_len, payload_len);
+
+	bcopy(&bpfhdr, iov->iov_base, bpfhdr.bh_hdrlen);
+	bcopy(pkt, (char *)iov->iov_base + bpfhdr.bh_hdrlen, frame_length);
+
+	free(pkt);
+	free(payload);
+}
+
+static void
+do_bpf_write_batch(int count, const char *ifname, u_int ip_len, bool expect_success, u_int write_size_max)
+{
+	int bpf_fd = -1;
+	int bdlen = 0;
+	struct iovec *iovs = NULL;
+	int i;
+
+	T_ASSERT_POSIX_ZERO(create_bpf_on_interface(ifname, &bpf_fd, &bdlen, write_size_max), NULL);
+	T_LOG("bpf bdlen %d", bdlen);
+
+	/*
+	 * Allocate an iovec for each packet that contains the BPF header + the data
+	 */
+	iovs = calloc((size_t)count, sizeof(struct iovec));
+
+	ssize_t total_len = 0;
+	for (i = 0; i < count; i++) {
+		make_bootp_packet(&iovs[i], ip_len, i + 1);
+		total_len += iovs[i].iov_len;
+
+		struct bpf_hdr *h0 = (struct bpf_hdr *)iovs[i].iov_base;;
+
+		T_LOG("tv_sec %u tv_usec %u caplen %u datalen %u hdrlen %u",
+		    h0->bh_tstamp.tv_sec, h0->bh_tstamp.tv_usec,
+		    h0->bh_caplen, h0->bh_datalen, h0->bh_hdrlen);
+
+		HexDump(iovs[i].iov_base, MIN((size_t)iovs[i].iov_len, 512));
+
+		T_ASSERT_EQ((int)(iovs[i].iov_len % BPF_ALIGNMENT), 0, "iovs[i].iov_len %% BPF_ALIGNMENT == 0");
+	}
+	T_LOG("total_len %ld", total_len);
 
 	ssize_t nwritten;
-	nwritten = write(bpf_fd, pkt, frame_length);
+	nwritten = writev(bpf_fd, iovs, count);
 
 	T_LOG("bpf write returned %ld", nwritten);
 
@@ -281,9 +338,18 @@ do_bpf_write(const char *ifname, u_int ip_len, bool expect_success, u_int write_
 		goto done;
 	}
 
-	T_LOG("bpf written %ld bytes over %u", nwritten, frame_length);
-	HexDump(pkt, MIN((size_t)nwritten, 512));
+	T_LOG("bpf written %ld bytes over %lu", nwritten, total_len);
 
+	T_ASSERT_GE((size_t)nwritten, iovs[0].iov_len, "nwritten %lu >= iovs[0].iov_len %lu", nwritten, iovs[0].iov_len);
+
+	/*
+	 * Give 100 ms for the packets to be captured
+	 */
+	usleep(100000);
+
+	/*
+	 * Read the batch and verify the content matches what we just sent.
+	 */
 	unsigned char *buffer = calloc(1, (size_t)bdlen);
 	T_ASSERT_NOTNULL(buffer, "malloc()");
 
@@ -298,19 +364,31 @@ do_bpf_write(const char *ifname, u_int ip_len, bool expect_success, u_int write_
 	 */
 	T_ASSERT_GT((size_t)nread, sizeof(sizeof(struct bpf_hdr)), NULL);
 
-	/*
-	 * Note: The following will fail if there is parasitic traffic and that should not happen
-	 */
-	struct bpf_hdr *hp = (struct bpf_hdr *)(void *)buffer;
-	T_LOG("tv_sec %u tv_usec %u caplen %u datalen %u hdrlen %u",
-	    hp->bh_tstamp.tv_sec, hp->bh_tstamp.tv_usec,
-	    hp->bh_caplen, hp->bh_datalen, hp->bh_hdrlen);
+	unsigned char *bp = buffer;
+	unsigned char *ep = buffer + nread;
 
-	HexDump(buffer, MIN((size_t)(hp->bh_hdrlen + hp->bh_caplen), 512));
+	for (i = 0; i < count && bp < ep; i++) {
+		struct bpf_hdr *hp = (struct bpf_hdr *)(void *)bp;
 
-	T_ASSERT_EQ_LONG(nwritten, (long)hp->bh_caplen, "bpf read same size as written");
+		T_LOG("tv_sec %u tv_usec %u caplen %u datalen %u hdrlen %u",
+		    hp->bh_tstamp.tv_sec, hp->bh_tstamp.tv_usec,
+		    hp->bh_caplen, hp->bh_datalen, hp->bh_hdrlen);
 
-	T_ASSERT_EQ_INT(bcmp(buffer + hp->bh_hdrlen, pkt, (size_t)nwritten), 0, "bpf read same bytes as written");
+		HexDump(bp, MIN((size_t)BPF_WORDALIGN(hp->bh_hdrlen + hp->bh_caplen), 512));
+
+		/*
+		 * Note: The following will fail if there is parasitic traffic and that should not happen over feth
+		 */
+		unsigned char *p0 = iovs[i].iov_base;
+		struct bpf_hdr *h0 = (struct bpf_hdr *)iovs[i].iov_base;;
+
+		T_ASSERT_EQ(h0->bh_caplen, hp->bh_caplen, "h0->bh_caplen %d == hp->bh_caplen %d", h0->bh_caplen, hp->bh_caplen);
+		T_ASSERT_EQ(h0->bh_datalen, hp->bh_datalen, "h0->bh_datalen %d == hp->bh_datalen %d", h0->bh_datalen, hp->bh_datalen);
+
+		T_ASSERT_EQ_INT(bcmp(h0->bh_hdrlen + p0, hp->bh_hdrlen + bp, hp->bh_caplen), 0, "bpf read same bytes as written iov %d", i);
+
+		bp += BPF_WORDALIGN(hp->bh_hdrlen + hp->bh_caplen);
+	}
 
 	if (buffer != NULL) {
 		free(buffer);
@@ -322,76 +400,46 @@ done:
 }
 
 static void
-test_bpf_write(u_int data_len, int mtu, bool expect_success, u_int write_size_max)
+test_bpf_write_batch(int count, u_int data_len, int mtu, bool expect_success, u_int write_size_max)
 {
 	init(mtu);
 
 	T_ASSERT_POSIX_ZERO(setup_feth_pair(mtu), NULL);
 
-	do_bpf_write(ifname1, data_len, expect_success, write_size_max);
+	do_bpf_write_batch(count, ifname1, data_len, expect_success, write_size_max);
 }
 
-T_DECL(bpf_write_dhcp, "BPF write DHCP feth MTU 1500")
+T_DECL(bpf_write_batch_dhcp, "BPF write DHCP feth MTU 1500")
 {
-	test_bpf_write(0, 1500, true, 0);
+	test_bpf_write_batch(1, 0, 1500, true, 0);
 }
 
-T_DECL(bpf_write_1024, "BPF write 1024 feth MTU 1500")
+T_DECL(bpf_write_batch_dhcp_x2, "BPF write DHCP feth MTU 1500 x 2")
 {
-	test_bpf_write(1024, 1500, true, 0);
+	test_bpf_write_batch(2, 0, 1500, true, 0);
 }
 
-T_DECL(bpf_write_1514, "BPF write 1500 feth MTU 1500")
+T_DECL(bpf_write_batch_dhcp_x3, "BPF write DHCP feth MTU 1500 x 3")
 {
-	test_bpf_write(1514, 1500, true, 0);
+	test_bpf_write_batch(3, 0, 1500, true, 0);
 }
 
-T_DECL(bpf_write_65482, "BPF write 65482 feth MTU 1500")
+T_DECL(bpf_write_batch_1020, "BPF write 1020 feth MTU 1500 x 2")
 {
-	test_bpf_write(65482, 1500, false, 0);
+	test_bpf_write_batch(2, 1020, 1500, true, 0);
 }
 
-T_DECL(bpf_write_2048, "BPF write 2048 feth MTU 1500")
+T_DECL(bpf_write_batch_1021, "BPF write 1021 feth MTU 1500 x 2")
 {
-	test_bpf_write(2048, 1500, false, 0);
+	test_bpf_write_batch(2, 1021, 1500, true, 0);
 }
 
-T_DECL(bpf_write_2048_mtu_4096, "BPF write 2048 feth MTU 4096 ")
+T_DECL(bpf_write_batch_1022, "BPF write 1022 feth MTU 1500 x 2")
 {
-	test_bpf_write(2048, 4096, true, 0);
+	test_bpf_write_batch(2, 1022, 1500, true, 0);
 }
 
-T_DECL(bpf_write_4110_mtu_4096, "BPF write 4110 feth MTU 4096 ")
+T_DECL(bpf_write_batch_1023, "BPF write 1023 feth MTU 1500 x2 ")
 {
-	test_bpf_write(4110, 4096, true, 0);
-}
-
-T_DECL(bpf_write_4096_mtu_9000, "BPF write 4096 feth MTU 9000")
-{
-	test_bpf_write(4096, 9000, true, 0);
-}
-
-T_DECL(bpf_write_8192_mtu_9000, "BPF write 8192 feth MTU 9000")
-{
-	test_bpf_write(8192, 9000, true, 0);
-}
-
-T_DECL(bpf_write_9000_mtu_9000, "BPF write 9000 feth MTU 9000")
-{
-	test_bpf_write(9000, 9000, true, 0);
-}
-
-T_DECL(bpf_write_9018_mtu_9000, "BPF write 9018 feth MTU 9000")
-{
-	test_bpf_write(9018, 9000, true, 0);
-}
-
-T_DECL(bpf_write_16370_mtu_9000, "BPF write 16370 feth MTU 9000")
-{
-	test_bpf_write(16370, 9000, false, 0);
-}
-
-T_DECL(bpf_write_16370_mtu_9000_max_16370, "BPF write 16370 feth MTU 9000 max 16370")
-{
-	test_bpf_write(16370, 9000, true, 16370);
+	test_bpf_write_batch(2, 1023, 1500, true, 0);
 }

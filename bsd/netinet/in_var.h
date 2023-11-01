@@ -167,7 +167,6 @@ extern void socket_post_kev_msg_closed(struct socket *);
 
 #include <net/if.h>
 #include <net/if_var.h>
-#include <net/if_llatbl.h>
 #include <kern/locks.h>
 #include <sys/tree.h>
 /*
@@ -483,10 +482,8 @@ struct inpcb;
 struct in_ifextra {
 	uint32_t                netsig_len;
 	u_int8_t                netsig[IFNET_SIGNATURELEN];
-	struct lltable          *ii_llt;        /* ARP state */
 };
 #define IN_IFEXTRA(_ifp)        (_ifp->if_inetdata)
-#define LLTABLE(ifp)            ((IN_IFEXTRA(ifp) == NULL) ? NULL : IN_IFEXTRA(ifp)->ii_llt)
 
 extern u_int32_t ipv4_ll_arp_aware;
 

@@ -185,8 +185,21 @@ kdp_setintegerstate(char * state_in)
 	saved_state = kdp.saved_state;
 	assert(is_saved_state64(saved_state));
 
+	/*
+	 * thread_state64_to_saved_state() expects the target thread to be EL0
+	 * state and ignores attempts to change many CPSR bits.
+	 * kdp_setintegerstate() is rarely used and is gated behind significant
+	 * security boundaries.  So rather than creating a variant of
+	 * thread_state64_to_saved_state() just for kdp_setintegerstate(), it's
+	 * simpler to reset CPSR.M before converting, then adjust CPSR after
+	 * conversion.
+	 */
+	uint32_t cpsr = get_saved_state_cpsr(saved_state);
+	cpsr &= ~(PSR64_MODE_EL_MASK);
+	cpsr |= PSR64_MODE_EL0;
+	set_saved_state_cpsr(saved_state, cpsr);
 	thread_state64_to_saved_state(&thread_state64, saved_state);
-	set_saved_state_cpsr(saved_state, thread_state64.cpsr); /* override CPSR sanitization */
+	set_saved_state_cpsr(saved_state, thread_state64.cpsr);
 #else
 #error Unknown architecture.
 #endif
@@ -320,6 +333,26 @@ kdp_trap(unsigned int exception, struct arm_saved_state * saved_state)
 #if defined(__arm64__)
 	assert(is_saved_state64(saved_state));
 
+#if HAS_APPLE_PAC
+	MANIPULATE_SIGNED_THREAD_STATE(saved_state,
+	    "ldr	w6, [x1]				\n"
+	    "mov	w7, %[GDB_TRAP_INSTR1_L]		\n"
+	    "movk	w7, %[GDB_TRAP_INSTR1_H], lsl #16	\n"
+	    "cmp	w6, w7					\n"
+	    "b.eq	1f					\n"
+	    "mov	w7, %[GDB_TRAP_INSTR2_L]		\n"
+	    "movk	w7, %[GDB_TRAP_INSTR2_H], lsl #16	\n"
+	    "cmp	w6, w7					\n"
+	    "b.ne	0f					\n"
+	    "1:							\n"
+	    "add	x1, x1, #4				\n"
+	    "str	x1, [x0, %[SS64_PC]]			\n",
+	    [GDB_TRAP_INSTR1_L] "i" (GDB_TRAP_INSTR1 & 0xFFFF),
+	    [GDB_TRAP_INSTR1_H] "i" (GDB_TRAP_INSTR1 >> 16),
+	    [GDB_TRAP_INSTR2_L] "i" (GDB_TRAP_INSTR2 & 0xFFFF),
+	    [GDB_TRAP_INSTR2_H] "i" (GDB_TRAP_INSTR2 >> 16)
+	    );
+#else
 	uint32_t instr = *((uint32_t *)get_saved_state_pc(saved_state));
 
 	/*
@@ -328,8 +361,10 @@ kdp_trap(unsigned int exception, struct arm_saved_state * saved_state)
 	 * increment for both of them.
 	 */
 	if ((instr == GDB_TRAP_INSTR1) || (instr == GDB_TRAP_INSTR2)) {
-		add_saved_state_pc(saved_state, 4);
+		saved_state64(saved_state)->pc += 4;
 	}
+#endif
+
 #else
 #error Unknown architecture.
 #endif

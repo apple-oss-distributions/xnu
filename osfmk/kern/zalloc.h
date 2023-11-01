@@ -1818,7 +1818,8 @@ extern void     zone_id_require(
 /* Make zone exhaustible, to be called from the zone_create_ext() setup hook */
 extern void     zone_set_exhaustible(
 	zone_t                  zone,
-	vm_size_t               max_elements);
+	vm_size_t               max_elements,
+	bool                    exhausts_by_design);
 
 /*!
  * @function zone_raise_reserve()
@@ -1905,7 +1906,7 @@ extern void zone_get_stats(
  * @brief
  * The callback type for the ZONE_EXHAUSTED event.
  */
-typedef void (zone_exhausted_cb_t)(zone_id_t zid, zone_t zone);
+typedef void (zone_exhausted_cb_t)(zone_id_t zid, zone_t zone, bool exhausted);
 
 /*!
  * @brief

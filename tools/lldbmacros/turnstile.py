@@ -89,7 +89,7 @@ def GetTurnstileSummary(turnstile):
         ts_v=ts_v)
 
 
-def PrintTurnstile(turnstile):
+def PrintTurnstile(turnstile, O=None):
     """ print turnstile and it's free list.
         params:
             turnstile - turnstile to print
@@ -97,16 +97,21 @@ def PrintTurnstile(turnstile):
     print(GetTurnstileSummary(turnstile))
 
     """ print turnstile freelist if its not on a thread or freelist """
+
+    waitq = Waitq(addressof(turnstile.ts_waitq))
+    if waitq.hasThreads():
+        with O.table(GetWaitqSummary.header):
+            ShowWaitqHelper(waitq, O=O)
+
     if turnstile.ts_state & 0x3 == 0:
         needsHeader = True
         for free_turnstile in IterateListEntry(turnstile.ts_free_turnstiles, 'ts_free_elm', 's'):
             if needsHeader:
-                print("    Turnstile free List")
+                print("Turnstile free List:")
                 header_str = "    " + GetTurnstileSummary.header
                 print(header_str)
                 needsHeader = False
             print("    " + GetTurnstileSummary(free_turnstile))
-            print("")
 
 # Macro: showturnstile
 @lldb_command('showturnstile', fancy=True)
@@ -117,9 +122,9 @@ def ShowTurnstile(cmd_args=None, cmd_options={}, O=None):
     if not cmd_args:
       raise ArgumentError("Please provide arguments")
 
-    turnstile = kern.GetValueFromAddress(cmd_args[0], 'struct turnstile')
+    turnstile = kern.GetValueFromAddress(cmd_args[0], 'struct turnstile *')
     with O.table(GetTurnstileSummary.header):
-        PrintTurnstile(turnstile)
+        PrintTurnstile(dereference(turnstile), O=O)
 # EndMacro: showturnstile
 
 @lldb_command('showturnstilehashtable', fancy=True)
@@ -132,7 +137,7 @@ def ShowTurnstileHashTable(cmd_args=None, cmd_options={}, O=None):
         for index in range(0, turnstile_htable_buckets):
             turnstile_bucket = GetObjectAtIndexFromArray(kern.globals.turnstile_htable, index)
             for turnstile in IterateQueue(turnstile_bucket.ts_ht_bucket_list, 'struct turnstile *', 'ts_htable_link'):
-                PrintTurnstile(turnstile)
+                PrintTurnstile(turnstile, O=O)
 
 # Macro: showallturnstiles
 @lldb_command('showallturnstiles', fancy=True)
@@ -143,7 +148,7 @@ def ShowAllTurnstiles(cmd_args=None, cmd_options={}, O=None):
     with O.table(GetTurnstileSummary.header):
         ts_ty = gettype('struct turnstile')
         for ts in kmemory.Zone("turnstiles").iter_allocated(ts_ty):
-            PrintTurnstile(value(ts))
+            PrintTurnstile(value(ts), O=O)
 # EndMacro showallturnstiles
 
 # Macro: showallbusyturnstiles
@@ -170,7 +175,7 @@ def ShowAllBusyTurnstiles(cmd_args=None, cmd_options={}, O=None):
         ts_ty = gettype('struct turnstile')
         for ts in kmemory.Zone("turnstiles").iter_allocated(ts_ty):
             if ts_is_interesting(ts):
-                PrintTurnstile(value(ts))
+                PrintTurnstile(value(ts), O=O)
 
 # EndMacro showallbusyturnstiles
 
@@ -185,7 +190,7 @@ def ShowThreadInheritorBase(cmd_args=None, cmd_options={}, O=None):
     thread = kern.GetValueFromAddress(cmd_args[0], "thread_t")
     with O.table(GetTurnstileSummary.header):
         for turnstile in IterateSchedPriorityQueue(thread.base_inheritor_queue, 'struct turnstile', 'ts_inheritor_links'):
-            PrintTurnstile(turnstile)
+            PrintTurnstile(turnstile, O=O)
 
 @lldb_command('showthreadschedturnstiles', fancy=True)
 def ShowThreadInheritorSched(cmd_args=None, cmd_options={}, O=None):
@@ -199,4 +204,4 @@ def ShowThreadInheritorSched(cmd_args=None, cmd_options={}, O=None):
     thread = kern.GetValueFromAddress(cmd_args[0], "thread_t")
     with O.table(GetTurnstileSummary.header):
         for turnstile in IterateSchedPriorityQueue(thread.sched_inheritor_queue, 'struct turnstile', 'ts_inheritor_links'):
-            PrintTurnstile(turnstile)
+            PrintTurnstile(turnstile, O=O)

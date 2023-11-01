@@ -188,7 +188,15 @@ struct mdns_ipc_msg_hdr {
  *	need a proper out-of-band
  *	lock pushdown
  */
-static struct   sockaddr sun_noname = { .sa_len = 3, .sa_family = AF_LOCAL, .sa_data = { 0 } };
+static struct   sockaddr sun_noname = {
+	.sa_len = sizeof(struct sockaddr),
+	.sa_family = AF_LOCAL,
+	.sa_data = {
+		0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0
+	}
+};
+
 static ino_t    unp_ino;                /* prototype for fake inode numbers */
 
 static int      unp_attach(struct socket *);

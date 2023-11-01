@@ -148,6 +148,7 @@ static struct mbuf *igmp_ra_alloc(void);
 static const char *igmp_rec_type_to_str(const int);
 #endif
 static uint32_t igmp_set_version(struct igmp_ifinfo *, const int);
+static void     igmp_append_relq(struct igmp_ifinfo *, struct in_multi *);
 static void     igmp_flush_relq(struct igmp_ifinfo *,
     struct igmp_inm_relhead *);
 static int      igmp_v1v2_queue_report(struct in_multi *, const int);
@@ -707,7 +708,6 @@ igi_delete(const struct ifnet *ifp, struct igmp_inm_relhead *inm_dthead)
 			IF_DRAIN(&igi->igi_gq);
 			IF_DRAIN(&igi->igi_v2q);
 			igmp_flush_relq(igi, inm_dthead);
-			VERIFY(SLIST_EMPTY(&igi->igi_relinmhead));
 			igi->igi_debug &= ~IFD_ATTACHED;
 			IGI_UNLOCK(igi);
 
@@ -838,7 +838,6 @@ igi_remref(struct igmp_ifinfo *igi)
 	IF_DRAIN(&igi->igi_v2q);
 	SLIST_INIT(&inm_dthead);
 	igmp_flush_relq(igi, (struct igmp_inm_relhead *)&inm_dthead);
-	VERIFY(SLIST_EMPTY(&igi->igi_relinmhead));
 	IGI_UNLOCK(igi);
 
 	/* Now that we're dropped all locks, release detached records */
@@ -2079,7 +2078,6 @@ next:
 		 * version change case.
 		 */
 		igmp_flush_relq(igi, (struct igmp_inm_relhead *)&inm_dthead);
-		VERIFY(SLIST_EMPTY(&igi->igi_relinmhead));
 		IGI_UNLOCK(igi);
 
 		IF_DRAIN(&qrq);
@@ -2149,6 +2147,22 @@ igmp_sched_fast_timeout(void)
 }
 
 /*
+ * Appends an in_multi to the list to be released later.
+ *
+ * Caller must be holding igi_lock.
+ */
+static void
+igmp_append_relq(struct igmp_ifinfo *igi, struct in_multi *inm)
+{
+	IGI_LOCK_ASSERT_HELD(igi);
+	IGMP_PRINTF(("%s: adding inm %llx on relq ifp 0x%llx(%s)\n",
+	    __func__, (uint64_t)VM_KERNEL_ADDRPERM(inm),
+	    (uint64_t)VM_KERNEL_ADDRPERM(igi->igi_ifp),
+	    if_name(igi->igi_ifp)));
+	SLIST_INSERT_HEAD(&igi->igi_relinmhead, inm, inm_nrele);
+}
+
+/*
  * Free the in_multi reference(s) for this IGMP lifecycle.
  *
  * Caller must be holding igi_lock.
@@ -2157,17 +2171,25 @@ static void
 igmp_flush_relq(struct igmp_ifinfo *igi, struct igmp_inm_relhead *inm_dthead)
 {
 	struct in_multi *inm;
+	SLIST_HEAD(, in_multi) temp_relinmhead;
 
-again:
+	/*
+	 * Before dropping the igi_lock, copy all the items in the
+	 * release list to a temporary list to prevent other threads
+	 * from changing igi_relinmhead while we are traversing it.
+	 */
 	IGI_LOCK_ASSERT_HELD(igi);
-	inm = SLIST_FIRST(&igi->igi_relinmhead);
-	if (inm != NULL) {
+	SLIST_INIT(&temp_relinmhead);
+	while ((inm = SLIST_FIRST(&igi->igi_relinmhead)) != NULL) {
+		SLIST_REMOVE_HEAD(&igi->igi_relinmhead, inm_nrele);
+		SLIST_INSERT_HEAD(&temp_relinmhead, inm, inm_nrele);
+	}
+	IGI_UNLOCK(igi);
+	in_multihead_lock_exclusive();
+	while ((inm = SLIST_FIRST(&temp_relinmhead)) != NULL) {
 		int lastref;
 
-		SLIST_REMOVE_HEAD(&igi->igi_relinmhead, inm_nrele);
-		IGI_UNLOCK(igi);
-
-		in_multihead_lock_exclusive();
+		SLIST_REMOVE_HEAD(&temp_relinmhead, inm_nrele);
 		INM_LOCK(inm);
 		VERIFY(inm->inm_nrelecnt != 0);
 		inm->inm_nrelecnt--;
@@ -2175,7 +2197,6 @@ again:
 		VERIFY(!lastref || (!(inm->inm_debug & IFD_ATTACHED) &&
 		    inm->inm_reqcnt == 0));
 		INM_UNLOCK(inm);
-		in_multihead_lock_done();
 		/* from igi_relinmhead */
 		INM_REMREF(inm);
 		/* from in_multihead list */
@@ -2190,9 +2211,9 @@ again:
 			 */
 			IGMP_ADD_DETACHED_INM(inm_dthead, inm);
 		}
-		IGI_LOCK(igi);
-		goto again;
 	}
+	in_multihead_lock_done();
+	IGI_LOCK(igi);
 }
 
 /*
@@ -2371,8 +2392,7 @@ igmp_v3_process_group_timers(struct igmp_ifinfo *igi,
 				 * dequeued later on.
 				 */
 				VERIFY(inm->inm_nrelecnt != 0);
-				SLIST_INSERT_HEAD(&igi->igi_relinmhead,
-				    inm, inm_nrele);
+				igmp_append_relq(igi, inm);
 			}
 		}
 		break;
@@ -2527,7 +2547,7 @@ igmp_v3_cancel_link_timers(struct igmp_ifinfo *igi)
 			 */
 			VERIFY(inm->inm_nrelecnt != 0);
 			IGI_LOCK(igi);
-			SLIST_INSERT_HEAD(&igi->igi_relinmhead, inm, inm_nrele);
+			igmp_append_relq(igi, inm);
 			IGI_UNLOCK(igi);
 			OS_FALLTHROUGH;
 		case IGMP_G_QUERY_PENDING_MEMBER:
@@ -2852,7 +2872,7 @@ igmp_initial_join(struct in_multi *inm, struct igmp_ifinfo *igi,
 		if (igi->igi_version == IGMP_VERSION_3 &&
 		    inm->inm_state == IGMP_LEAVING_MEMBER) {
 			VERIFY(inm->inm_nrelecnt != 0);
-			SLIST_INSERT_HEAD(&igi->igi_relinmhead, inm, inm_nrele);
+			igmp_append_relq(igi, inm);
 		}
 
 		inm->inm_state = IGMP_REPORTING_MEMBER;

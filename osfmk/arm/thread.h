@@ -124,20 +124,10 @@ struct machine_thread {
 	uint64_t                  reserved5;
 
 #if SCHED_HYGIENE_DEBUG
-	/*
-	 * Preemption disable timestamp, adjusted to
-	 * exclude duration of any interrupts that happened.
-	 */
-	volatile uint64_t         preemption_disable_mt;      /* timestamp of when preemption was disabled */
-	volatile uint64_t         preemption_disable_adjust;  /* preemption disabled time spent in interrupt context */
-	uint64_t                  preemption_disable_cycles;  /* cycle count snapshot of when preemption was disabled */
-	uint64_t                  preemption_disable_instr;   /* instruction count snapshot of when preemption was disabled */
-
 	uint64_t                  intmask_timestamp;          /* timestamp of when interrupts were manually masked */
 	uint64_t                  inthandler_timestamp;       /* timestamp of when interrupt handler started */
 	uint64_t                  intmask_cycles;             /* cycle count snapshot of when interrupts were masked */
 	uint64_t                  intmask_instr;              /* instruction count snapshot of when interrupts were masked */
-	volatile bool             preemption_disable_abandon; /* whether to abandon the current measurement */
 	bool                      inthandler_abandon;         /* whether to abandon the current measurement */
 
 	unsigned int              int_type;                   /* interrupt type of the interrupt that was processed */

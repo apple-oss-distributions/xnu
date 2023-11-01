@@ -941,9 +941,6 @@ __ml_handle_interrupts_disabled_duration(thread_t thread, uint64_t timeout, bool
 
 		if (is_int_handler) {
 			uint64_t const duration = now - start;
-#if SCHED_HYGIENE_DEBUG
-			ml_adjust_preemption_disable_time(thread, duration);
-#endif /* SCHED_HYGIENE_DEBUG */
 			/*
 			 * No need for an atomic add, the only thread modifying
 			 * this is ourselves. Other threads querying will just see
@@ -978,20 +975,6 @@ ml_handle_interrupt_handler_duration(thread_t thread)
 {
 	__ml_handle_interrupts_disabled_duration(thread, os_atomic_load(&interrupt_masked_timeout, relaxed), INT_MASK_FROM_HANDLER);
 }
-
-#if SCHED_HYGIENE_DEBUG
-void
-ml_adjust_preemption_disable_time(thread_t thread, int64_t duration)
-{
-	/* We don't want to count interrupt handler duration in preemption disable time. */
-	if (thread->machine.preemption_disable_mt != 0) {
-		/* We don't care *when* preemption was disabled, just for how
-		 * long.  So to exclude interrupt handling intervals, we
-		 * adjust the start time forward. */
-		thread->machine.preemption_disable_adjust += duration;
-	}
-}
-#endif /* SCHED_HYGIENE_DEBUG */
 
 void
 ml_irq_debug_start(uintptr_t handler, uintptr_t vector)

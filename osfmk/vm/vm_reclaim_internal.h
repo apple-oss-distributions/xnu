@@ -40,7 +40,7 @@ extern uint64_t vm_reclaim_max_threshold;
 
 typedef struct vm_deferred_reclamation_metadata_s *vm_deferred_reclamation_metadata_t;
 
-kern_return_t vm_deferred_reclamation_buffer_init_internal(task_t task, user_addr_t address, mach_vm_size_t size, user_addr_t indices);
+kern_return_t vm_deferred_reclamation_buffer_init_internal(task_t task, user_addr_t address, mach_vm_size_t size);
 
 /*
  * Deallocate the kernel metadata associated with this reclamation buffer

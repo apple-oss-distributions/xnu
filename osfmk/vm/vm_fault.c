@@ -4193,6 +4193,7 @@ vm_fault_internal(
 	vm_object_offset_t      offset;         /* Top-level offset */
 	vm_prot_t               prot;           /* Protection for mapping */
 	vm_object_t             old_copy_object; /* Saved copy object */
+	uint32_t                old_copy_version;
 	vm_page_t               result_page;    /* Result of vm_fault_page */
 	vm_page_t               top_page;       /* Placeholder page */
 	kern_return_t           kr;
@@ -4383,6 +4384,7 @@ RetryFault:
 	    &fault_info,
 	    &real_map,
 	    &object_is_contended);
+	object_is_contended = false; /* avoid unsafe optimization */
 
 	if (kr != KERN_SUCCESS) {
 		vm_map_unlock_read(map);
@@ -5552,6 +5554,14 @@ FastPmapEnter:
 						assert(fault_info.cs_bypass);
 					}
 				}
+				assertf(!((fault_type & VM_PROT_WRITE) && object->vo_copy),
+				    "map %p va 0x%llx wrong path for write fault (fault_type 0x%x) on object %p with copy %p\n",
+				    map, (uint64_t)vaddr, fault_type, object, object->vo_copy);
+
+				vm_object_t saved_copy_object;
+				uint32_t saved_copy_version;
+				saved_copy_object = object->vo_copy;
+				saved_copy_version = object->vo_copy_version;
 
 				/*
 				 * Zeroing the page and entering into it into the pmap
@@ -5611,6 +5621,7 @@ FastPmapEnter:
 						 * (it hasn't been zeroed) mark it busy before dropping the object lock.
 						 */
 						m->vmp_busy = TRUE;
+						vm_object_paging_begin(object); /* keep object alive */
 						vm_object_unlock(object);
 					}
 					if (type_of_fault == DBG_ZERO_FILL_FAULT) {
@@ -5627,6 +5638,41 @@ FastPmapEnter:
 						counter_inc(&vm_statistics_zero_fill_count);
 						DTRACE_VM2(zfod, int, 1, (uint64_t *), NULL);
 					}
+
+					if (object_is_contended) {
+						/*
+						 * It's not safe to do the pmap_enter() without holding
+						 * the object lock because its "vo_copy" could change.
+						 */
+						object_is_contended = false; /* get out of that code path */
+
+						vm_object_lock(object);
+						vm_object_paging_end(object);
+						if (object->vo_copy != saved_copy_object ||
+						    object->vo_copy_version != saved_copy_version) {
+							/*
+							 * The COPY_DELAY copy-on-write situation for
+							 * this VM object has changed while it was
+							 * unlocked, so do not grant write access to
+							 * this page.
+							 * The write access will fault again and we'll
+							 * resolve the copy-on-write then.
+							 */
+							if (!pmap_has_prot_policy(pmap,
+							    fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE,
+							    prot)) {
+								/* the pmap layer is OK with changing the PTE's prot */
+								prot &= ~VM_PROT_WRITE;
+							} else {
+								/* we should not do CoW on pmap_has_prot_policy mappings */
+								panic("map %p va 0x%llx obj %p,%u saved %p,%u: unexpected CoW",
+								    map, (uint64_t)vaddr,
+								    object, object->vo_copy_version,
+								    saved_copy_object, saved_copy_version);
+							}
+						}
+					}
+
 					if (page_needs_data_sync) {
 						pmap_sync_page_data_phys(VM_PAGE_GET_PHYS_PAGE(m));
 					}
@@ -5641,11 +5687,15 @@ FastPmapEnter:
 						fault_info.pmap_options |= PMAP_OPTIONS_XNU_USER_DEBUG;
 					}
 					if (object_is_contended) {
+						panic("object_is_contended");
 						kr = vm_fault_pmap_enter(destination_pmap, destination_pmap_vaddr,
 						    fault_page_size, fault_phys_offset,
 						    m, &prot, caller_prot, enter_fault_type, wired,
 						    fault_info.pmap_options, need_retry_ptr);
 						vm_object_lock(object);
+						assertf(!((prot & VM_PROT_WRITE) && object->vo_copy),
+						    "prot 0x%x object %p copy %p\n",
+						    prot, object, object->vo_copy);
 					} else {
 						kr = vm_fault_pmap_enter_with_object_lock(object, destination_pmap, destination_pmap_vaddr,
 						    fault_page_size, fault_phys_offset,
@@ -5959,12 +6009,17 @@ handle_copy_delay:
 	 * So we do a try_lock() first and, if that fails, we
 	 * drop the object locks and go in for the map lock again.
 	 */
+	if (m != VM_PAGE_NULL) {
+		old_copy_object = m_object->vo_copy;
+		old_copy_version = m_object->vo_copy_version;
+	} else {
+		old_copy_object = VM_OBJECT_NULL;
+		old_copy_version = 0;
+	}
 	if (!vm_map_try_lock_read(original_map)) {
 		if (m != VM_PAGE_NULL) {
-			old_copy_object = m_object->vo_copy;
 			vm_object_unlock(m_object);
 		} else {
-			old_copy_object = VM_OBJECT_NULL;
 			vm_object_unlock(object);
 		}
 
@@ -5976,10 +6031,8 @@ handle_copy_delay:
 	if ((map != original_map) || !vm_map_verify(map, &version)) {
 		if (object_locks_dropped == FALSE) {
 			if (m != VM_PAGE_NULL) {
-				old_copy_object = m_object->vo_copy;
 				vm_object_unlock(m_object);
 			} else {
-				old_copy_object = VM_OBJECT_NULL;
 				vm_object_unlock(object);
 			}
 
@@ -6101,20 +6154,23 @@ handle_copy_delay:
 			assertf(VM_PAGE_OBJECT(m) == m_object, "m=%p m_object=%p", m, m_object);
 			assert(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL);
 			vm_object_lock(m_object);
-
-			if (m_object->vo_copy != old_copy_object) {
-				/*
-				 * The copy object changed while the top-level object
-				 * was unlocked, so take away write permission.
-				 */
-				assert(!pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot));
-				prot &= ~VM_PROT_WRITE;
-			}
 		} else {
 			vm_object_lock(object);
 		}
 
 		object_locks_dropped = FALSE;
+	}
+
+	if ((prot & VM_PROT_WRITE) &&
+	    m != VM_PAGE_NULL &&
+	    (m_object->vo_copy != old_copy_object ||
+	    m_object->vo_copy_version != old_copy_version)) {
+		/*
+		 * The copy object changed while the top-level object
+		 * was unlocked, so take away write permission.
+		 */
+		assert(!pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot));
+		prot &= ~VM_PROT_WRITE;
 	}
 
 	if (!need_copy &&
@@ -7084,6 +7140,7 @@ vm_fault_copy(
 
 	vm_map_size_t           amount_left;
 	vm_object_t             old_copy_object;
+	uint32_t                old_copy_version;
 	vm_object_t             result_page_object = NULL;
 	kern_return_t           error = 0;
 	vm_fault_return_t       result;
@@ -7182,6 +7239,7 @@ RetryDestinationFault:;
 
 		assert(dst_object == VM_PAGE_OBJECT(dst_page));
 		old_copy_object = dst_object->vo_copy;
+		old_copy_version = dst_object->vo_copy_version;
 
 		/*
 		 * There exists the possiblity that the source and
@@ -7298,7 +7356,8 @@ RetrySourceFault:;
 
 		vm_object_lock(dst_object);
 
-		if (dst_object->vo_copy != old_copy_object) {
+		if ((dst_object->vo_copy != old_copy_object ||
+		    dst_object->vo_copy_version != old_copy_version)) {
 			vm_object_unlock(dst_object);
 			vm_map_unlock_read(dst_map);
 			if (result_page != VM_PAGE_NULL && src_page != dst_page) {

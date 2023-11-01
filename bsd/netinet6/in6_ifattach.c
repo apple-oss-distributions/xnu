@@ -72,7 +72,6 @@
 #include <net/if_types.h>
 #include <net/route.h>
 #include <net/kpi_protocol.h>
-#include <net/if_llatbl.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -753,7 +752,6 @@ skipmcast:
 		    sizeof(IN6_IFEXTRA(ifp)->icmp6_ifstat));
 		bzero(&IN6_IFEXTRA(ifp)->in6_ifstat,
 		    sizeof(IN6_IFEXTRA(ifp)->in6_ifstat));
-		/* XXX TBD Purge the layer two table */
 		/*
 		 * XXX When recycling, nd_ifinfo gets initialized, other
 		 * than the lock, inside nd6_ifattach
@@ -1043,10 +1041,6 @@ in6_ifdetach(struct ifnet *ifp)
 
 	/* remove neighbor management table */
 	nd6_purge(ifp);
-
-	if (LLTABLE6(ifp)) {
-		lltable_free(LLTABLE6(ifp));
-	}
 
 	/* nuke any of IPv6 addresses we have */
 	lck_rw_lock_exclusive(&in6_ifaddr_rwlock);

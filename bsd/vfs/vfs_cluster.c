@@ -126,12 +126,14 @@
 #define CL_ENCRYPTED    0x10000
 #define CL_RAW_ENCRYPTED        0x20000
 #define CL_NOCACHE      0x40000
+#define CL_DIRECT_IO_FSBLKSZ    0x80000
 
 #define MAX_VECTOR_UPL_SIZE     (2 * MAX_UPL_SIZE_BYTES)
 
 #define CLUSTER_IO_WAITING              ((buf_t)1)
 
 extern upl_t vector_upl_create(vm_offset_t, uint32_t);
+extern upl_size_t vector_upl_get_size(const upl_t);
 extern uint32_t vector_upl_max_upls(upl_t);
 extern boolean_t vector_upl_is_valid(upl_t);
 extern boolean_t vector_upl_set_subupl(upl_t, upl_t, u_int32_t);
@@ -206,9 +208,7 @@ static int cluster_read_contig(vnode_t vp, struct uio *uio, off_t filesize, int 
 
 static int cluster_write_copy(vnode_t vp, struct uio *uio, u_int32_t io_req_size, off_t oldEOF, off_t newEOF,
     off_t headOff, off_t tailOff, int flags, int (*)(buf_t, void *), void *callback_arg) __attribute__((noinline));
-static int cluster_write_direct(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF,
-    int *write_type, u_int32_t *write_length, int flags, int (*)(buf_t, void *), void *callback_arg) __attribute__((noinline));
-static int cluster_write_direct_small(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, int *write_type, u_int32_t *write_length,
+static int cluster_write_direct(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, int *write_type, u_int32_t *write_length,
     int flags, int (*callback)(buf_t, void *), void *callback_arg, uint32_t min_io_size) __attribute__((noinline));
 static int cluster_write_contig(vnode_t vp, struct uio *uio, off_t newEOF,
     int *write_type, u_int32_t *write_length, int (*)(buf_t, void *), void *callback_arg, int bflag) __attribute__((noinline));
@@ -578,9 +578,10 @@ cluster_iostate_wait(struct clios *iostate, u_int target, const char *wait_name)
 	lck_mtx_unlock(&iostate->io_mtxp);
 }
 
+
 static void
 cluster_handle_associated_upl(struct clios *iostate, upl_t upl,
-    upl_offset_t upl_offset, upl_size_t size)
+    upl_offset_t upl_offset, upl_size_t size, off_t f_offset)
 {
 	if (!size) {
 		return;
@@ -592,116 +593,133 @@ cluster_handle_associated_upl(struct clios *iostate, upl_t upl,
 		return;
 	}
 
-#if 0
-	printf("1: %d %d\n", upl_offset, upl_offset + size);
-#endif
+	upl_offset_t upl_end = upl_offset + size;
+	upl_size_t upl_size = vector_upl_get_size(upl);
+	upl_offset_t assoc_upl_offset, assoc_upl_end;
+	upl_size_t assoc_upl_size = upl_get_size(associated_upl);
 
-	/*
-	 * The associated UPL is page aligned to file offsets whereas the
-	 * UPL it's attached to has different alignment requirements.  The
-	 * upl_offset that we have refers to @upl.  The code that follows
-	 * has to deal with the first and last pages in this transaction
-	 * which might straddle pages in the associated UPL.  To keep
-	 * track of these pages, we use the mark bits: if the mark bit is
-	 * set, we know another transaction has completed its part of that
-	 * page and so we can unlock that page here.
-	 *
-	 * The following illustrates what we have to deal with:
-	 *
-	 *    MEM u <------------ 1 PAGE ------------> e
-	 *        +-------------+----------------------+-----------------
-	 *        |             |######################|#################
-	 *        +-------------+----------------------+-----------------
-	 *   FILE | <--- a ---> o <------------ 1 PAGE ------------>
-	 *
-	 * So here we show a write to offset @o.  The data that is to be
-	 * written is in a buffer that is not page aligned; it has offset
-	 * @a in the page.  The upl that carries the data starts in memory
-	 * at @u.  The associated upl starts in the file at offset @o.  A
-	 * transaction will always end on a page boundary (like @e above)
-	 * except for the very last transaction in the group.  We cannot
-	 * unlock the page at @o in the associated upl until both the
-	 * transaction ending at @e and the following transaction (that
-	 * starts at @e) has completed.
-	 */
-
-	/*
-	 * We record whether or not the two UPLs are aligned as the mark
-	 * bit in the first page of @upl.
-	 */
-	upl_page_info_t *pl = UPL_GET_INTERNAL_PAGE_LIST(upl);
-	bool is_unaligned = upl_page_get_mark(pl, 0);
-
-	if (is_unaligned) {
-		upl_page_info_t *assoc_pl = UPL_GET_INTERNAL_PAGE_LIST(associated_upl);
-
-		upl_offset_t upl_end = upl_offset + size;
-		assert(upl_end >= PAGE_SIZE);
-
-		upl_size_t assoc_upl_size = upl_get_size(associated_upl);
-
-		/*
-		 * In the very first transaction in the group, upl_offset will
-		 * not be page aligned, but after that it will be and in that
-		 * case we want the preceding page in the associated UPL hence
-		 * the minus one.
-		 */
-		assert(upl_offset);
-		if (upl_offset) {
-			upl_offset = trunc_page_32(upl_offset - 1);
-		}
-
-		lck_mtx_lock_spin(&iostate->io_mtxp);
-
-		// Look at the first page...
-		if (upl_offset
-		    && !upl_page_get_mark(assoc_pl, upl_offset >> PAGE_SHIFT)) {
-			/*
-			 * The first page isn't marked so let another transaction
-			 * completion handle it.
-			 */
-			upl_page_set_mark(assoc_pl, upl_offset >> PAGE_SHIFT, true);
-			upl_offset += PAGE_SIZE;
-		}
-
-		// And now the last page...
-
-		/*
-		 * This needs to be > rather than >= because if it's equal, it
-		 * means there's another transaction that is sharing the last
-		 * page.
-		 */
-		if (upl_end > assoc_upl_size) {
-			upl_end = assoc_upl_size;
-		} else {
-			upl_end = trunc_page_32(upl_end);
-			const int last_pg = (upl_end >> PAGE_SHIFT) - 1;
-
-			if (!upl_page_get_mark(assoc_pl, last_pg)) {
-				/*
-				 * The last page isn't marked so mark the page and let another
-				 * transaction completion handle it.
-				 */
-				upl_page_set_mark(assoc_pl, last_pg, true);
-				upl_end -= PAGE_SIZE;
-			}
-		}
-
-		lck_mtx_unlock(&iostate->io_mtxp);
-
-#if 0
-		printf("2: %d %d\n", upl_offset, upl_end);
-#endif
-
-		if (upl_end <= upl_offset) {
-			return;
-		}
-
-		size = upl_end - upl_offset;
-	} else {
-		assert(!(upl_offset & PAGE_MASK));
-		assert(!(size & PAGE_MASK));
+	/* knock off the simple case first -> this transaction covers the entire UPL */
+	if ((trunc_page_32(upl_offset) == 0) && (round_page_32(upl_end) == upl_size)) {
+		assoc_upl_offset = 0;
+		assoc_upl_end = assoc_upl_size;
+		goto do_commit;
+	} else if ((upl_offset & PAGE_MASK) == (f_offset & PAGE_MASK)) { /* or the UPL's are actually aligned */
+		assoc_upl_offset = trunc_page_32(upl_offset);
+		assoc_upl_end = round_page_32(upl_offset + size);
+		goto do_commit;
 	}
+
+	/*
+	 *  ( See also cluster_io where the associated upl is created )
+	 *  While we create the upl in one go, we will be dumping the pages in
+	 *  the upl in "transaction sized chunks" relative to the upl. Except
+	 *  for the first transction, the upl_offset will always be page aligned.
+	 *  and when the upl's are not aligned the associated upl offset will not
+	 *  be page aligned and so we have to truncate and round up the starting
+	 *  and the end of the pages in question and see if they are shared with
+	 *  other transctions or not. If two transctions "share" a page in the
+	 *  associated upl, the first one to complete "marks" it and skips that
+	 *  page and the second  one will include it in the "commit range"
+	 *
+	 *  As an example, consider the case where 4 transctions are needed (this
+	 *  is the worst case).
+	 *
+	 *  Transaction for 0-1 (size -> PAGE_SIZE - upl_offset)
+	 *
+	 *  This covers the associated upl from a -> c. a->b is not shared but
+	 *  b-c is shared with the next transction so the first one to complete
+	 *  will only "mark" it.
+	 *
+	 *  Transaction for 1-2 (size -> PAGE_SIZE)
+	 *
+	 *  For transaction 1, assoc_upl_offset would be 0 (corresponding to the
+	 *  file offset a)  and assoc_upl_end would correspond to the file offset c
+	 *
+	 *                 (associated_upl - based on f_offset alignment)
+	 *       0         a    b    c    d    e     f
+	 *       <----|----|----|----|----|----|-----|---->
+	 *
+	 *
+	 *                  (upl - based on user buffer address alignment)
+	 *                   <__--|----|----|--__>
+	 *
+	 *                   0    1    2    3
+	 *
+	 *             Here the cached upl strictly only
+	 *             needs to be from b to e (3 pages). However,
+	 *             we also need to be able the offset
+	 *             for the associated upl from the f_offset
+	 *             and upl_offset and so we round down the
+	 *             cached upl f_offset coresponding to the
+	 *             upl_offset 0 i.e. we end up locking one
+	 *             more page than is strictly required. We don't
+	 *             do the same thing at the end.
+	 *
+	 *        (upl)
+	 *  <___-|----|---_>
+	 *
+	 *  0    1   2
+	 *
+	 *             The f_offset < upl_offset condition caters
+	 *             to writes in the first page of the file
+	 *             with the upl alignment being as above.
+	 *             where the subtracting the upl_offset would
+	 *             would result in the offset going negative
+	 *
+	 */
+	if (f_offset > upl_offset) {
+		assoc_upl_offset = (upl_offset_t)(f_offset - trunc_page_64(f_offset - upl_offset));
+		assoc_upl_end = assoc_upl_offset + size;
+		/*
+		 * When upl_offset < PAGE_SIZE (i.e. the first transaction),
+		 * the corresponding first page is further back than simply
+		 * trunc_page_32(assoc_upl_size). upl_offset is page aligned
+		 * for every transction other than the first one which means
+		 * upl_offset & PAGE_MASK will be 0 for every transction other
+		 * than the first one.
+		 */
+		assoc_upl_offset = trunc_page_32(assoc_upl_offset - (upl_offset & PAGE_MASK));
+	} else {
+		assoc_upl_offset = f_offset;
+		assoc_upl_end = assoc_upl_offset + size;
+		assoc_upl_offset = trunc_page_32(assoc_upl_offset);
+	}
+	assoc_upl_end = round_page_32(assoc_upl_end);
+
+	assert(assoc_upl_end <= assoc_upl_size);
+
+	upl_page_info_t *assoc_pl = UPL_GET_INTERNAL_PAGE_LIST(associated_upl);
+
+	lck_mtx_lock_spin(&iostate->io_mtxp);
+
+	int first_pg = assoc_upl_offset >> PAGE_SHIFT;
+	if (!(trunc_page_32(upl_offset) == 0) && !upl_page_get_mark(assoc_pl, first_pg)) {
+		/*
+		 * The first page isn't marked so let another transaction
+		 * completion handle it.
+		 */
+		upl_page_set_mark(assoc_pl, first_pg, true);
+		assoc_upl_offset += PAGE_SIZE;
+	}
+
+	int last_pg = trunc_page_32(assoc_upl_end - 1) >> PAGE_SHIFT;
+	if (!(round_page_32(upl_end) == upl_size) && !upl_page_get_mark(assoc_pl, last_pg)) {
+		/*
+		 * The last page isn't marked so mark the page and let another
+		 * transaction completion handle it.
+		 */
+		upl_page_set_mark(assoc_pl, last_pg, true);
+		assoc_upl_end -= PAGE_SIZE;
+	}
+
+	lck_mtx_unlock(&iostate->io_mtxp);
+
+	if (assoc_upl_end <= assoc_upl_offset) {
+		return;
+	}
+
+do_commit:
+	size = assoc_upl_end - assoc_upl_offset;
 
 	boolean_t empty;
 
@@ -709,7 +727,7 @@ cluster_handle_associated_upl(struct clios *iostate, upl_t upl,
 	 * We can unlock these pages now and as this is for a
 	 * direct/uncached write, we want to dump the pages too.
 	 */
-	kern_return_t kr = upl_abort_range(associated_upl, upl_offset, size,
+	kern_return_t kr = upl_abort_range(associated_upl, assoc_upl_offset, size,
 	    UPL_ABORT_DUMP_PAGES, &empty);
 
 	assert(!kr);
@@ -879,7 +897,8 @@ cluster_iodone(buf_t bp, void *callback_arg)
 		cluster_handle_associated_upl(iostate,
 		    cbp_head->b_upl,
 		    upl_offset,
-		    transaction_size);
+		    transaction_size,
+		    cbp_head->b_lblkno * cbp_head->b_lblksize);
 	}
 
 	if (error == 0 && total_resid) {
@@ -1410,25 +1429,64 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 		 * read in from the file
 		 */
 		zero_offset = (int)(upl_offset + non_rounded_size);
-	} else if (!ISSET(flags, CL_READ) && ISSET(flags, CL_DIRECT_IO) &&
-	    (!proc_allow_nocache_write_fs_blksize(current_proc()) ||
-	    (page_aligned(f_offset) && page_aligned(non_rounded_size)))) {
+	} else if (!ISSET(flags, CL_READ) && ISSET(flags, CL_DIRECT_IO)) {
 		assert(ISSET(flags, CL_COMMIT));
 
 		// For a direct/uncached write, we need to lock pages...
-		//
-		// ...except if the write offsets and lengths  are not page aligned.
-		// This specific case is allowed to enhance performance with the
-		// understanding that the caller is responsible for synchronization
-		// between writers and other writers/readers.
-
 		upl_t cached_upl;
+		off_t cached_upl_f_offset;
+		int cached_upl_size;
+
+		assert(upl_offset < PAGE_SIZE);
+
+		/*
+		 *
+		 *                       f_offset = b
+		 *                      upl_offset = 8K
+		 *
+		 *                       (cached_upl - based on f_offset alignment)
+		 *       0         a    b              c
+		 *       <----|----|----|----|----|----|-----|---->
+		 *
+		 *
+		 *                          (upl - based on user buffer address alignment)
+		 *                   <__--|----|----|--__>
+		 *
+		 *                   0    1x   2x  3x
+		 *
+		 *             Here the cached upl strictly only
+		 *             needs to be from b to c. However,
+		 *             we also need to be able the offset
+		 *             for the associated upl from the f_offset
+		 *             and upl_offset and so we round down the
+		 *             cached upl f_offset coresponding to the
+		 *             upl_offset 0 i.e. we end up locking one
+		 *             more page than is strictly required.
+		 *
+		 *        (upl)
+		 *  <___-|----|---_>
+		 *
+		 *  0    1x   2x
+		 *
+		 *             The f_offset < upl_offset condition caters
+		 *             to writes in the first page of the file
+		 *             with the upl alignment being as above.
+		 *             where the subtracting the upl_offset would
+		 *             would result in the offset going negative
+		 */
+		if (f_offset >= upl_offset) {
+			cached_upl_f_offset = trunc_page_64(f_offset - upl_offset);
+		} else {
+			cached_upl_f_offset = 0; /* trunc_page_32(upl_offset) */
+		}
+		cached_upl_size = round_page_32(f_offset - cached_upl_f_offset + non_rounded_size);
+
 
 		/*
 		 * Create a UPL to lock the pages in the cache whilst the
 		 * write is in progress.
 		 */
-		ubc_create_upl_kernel(vp, f_offset, non_rounded_size, &cached_upl,
+		ubc_create_upl_kernel(vp, cached_upl_f_offset, cached_upl_size, &cached_upl,
 		    NULL, UPL_SET_LITE, VM_KERN_MEMORY_FILE);
 
 		/*
@@ -1436,16 +1494,6 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 		 * later.
 		 */
 		upl_set_associated_upl(upl, cached_upl);
-
-		if (upl_offset & PAGE_MASK) {
-			/*
-			 * The two UPLs are not aligned, so mark the first page in
-			 * @upl so that cluster_handle_associated_upl can handle
-			 * it accordingly.
-			 */
-			upl_page_info_t *pl = UPL_GET_INTERNAL_PAGE_LIST(upl);
-			upl_page_set_mark(pl, 0, true);
-		}
 	}
 
 	while (size) {
@@ -2041,7 +2089,8 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 		if (ISSET(flags, CL_COMMIT)) {
 			cluster_handle_associated_upl(iostate, upl,
 			    (upl_offset_t)upl_offset,
-			    (upl_size_t)(upl_end_offset - upl_offset));
+			    (upl_size_t)(upl_end_offset - upl_offset),
+			    (cbp_head ? (cbp_head->b_lblkno * cbp_head->b_lblksize) : f_offset));
 		}
 
 		// Free all the IO buffers in this transaction
@@ -2497,7 +2546,7 @@ cluster_write_ext(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, off_t
 		if (proc_allow_nocache_write_fs_blksize(current_proc())) {
 			uint32_t fs_bsize = vp->v_mount->mnt_vfsstat.f_bsize;
 
-			if (fs_bsize && (fs_bsize < PAGE_SIZE_64) &&
+			if (fs_bsize && (fs_bsize < MIN_DIRECT_WRITE_SIZE) &&
 			    ((fs_bsize & (fs_bsize - 1)) == 0)) {
 				min_direct_size = fs_bsize;
 			}
@@ -2588,12 +2637,7 @@ cluster_write_ext(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, off_t
 			/*
 			 * cluster_write_direct is never called with IO_TAILZEROFILL || IO_HEADZEROFILL
 			 */
-			if (min_direct_size >= MIN_DIRECT_WRITE_SIZE) {
-				retval = cluster_write_direct(vp, uio, oldEOF, newEOF, &write_type, &write_length, flags, callback, callback_arg);
-			} else {
-				retval = cluster_write_direct_small(vp, uio, oldEOF, newEOF, &write_type, &write_length, flags, callback, callback_arg, min_direct_size);
-			}
-
+			retval = cluster_write_direct(vp, uio, oldEOF, newEOF, &write_type, &write_length, flags, callback, callback_arg, min_direct_size);
 			break;
 
 		case IO_UNKNOWN:
@@ -2620,7 +2664,7 @@ cluster_write_ext(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, off_t
 
 static int
 cluster_write_direct(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, int *write_type, u_int32_t *write_length,
-    int flags, int (*callback)(buf_t, void *), void *callback_arg)
+    int flags, int (*callback)(buf_t, void *), void *callback_arg, uint32_t min_io_size)
 {
 	upl_t            upl = NULL;
 	upl_page_info_t  *pl;
@@ -2656,6 +2700,7 @@ cluster_write_direct(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, in
 	int              vector_upl_index = 0;
 	upl_t            vector_upl = NULL;
 
+	uint32_t         io_align_mask;
 
 	/*
 	 * When we enter this routine, we know
@@ -2706,12 +2751,20 @@ cluster_write_direct(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, in
 		devblocksize = PAGE_SIZE;
 	}
 
+	io_align_mask = PAGE_MASK;
+	if (min_io_size < MIN_DIRECT_WRITE_SIZE) {
+		/* The process has opted into fs blocksize direct io writes */
+		assert((min_io_size & (min_io_size - 1)) == 0);
+		io_align_mask = min_io_size - 1;
+		io_flag |= CL_DIRECT_IO_FSBLKSZ;
+	}
+
 next_dwrite:
 	io_req_size = *write_length;
 	iov_base = uio_curriovbase(uio);
 
-	offset_in_file = (u_int32_t)uio->uio_offset & PAGE_MASK;
-	offset_in_iovbase = (u_int32_t)iov_base & mem_alignment_mask;
+	offset_in_file = (u_int32_t)(uio->uio_offset & io_align_mask);
+	offset_in_iovbase = (u_int32_t)(iov_base & mem_alignment_mask);
 
 	if (offset_in_file || offset_in_iovbase) {
 		/*
@@ -2730,439 +2783,9 @@ next_dwrite:
 	}
 
 	task_update_logical_writes(current_task(), (io_req_size & ~PAGE_MASK), TASK_WRITE_IMMEDIATE, vp);
-	while (io_req_size >= PAGE_SIZE && uio->uio_offset < newEOF && retval == 0) {
-		int     throttle_type;
-
-		if ((throttle_type = cluster_is_throttled(vp))) {
-			uint32_t max_throttle_size = calculate_max_throttle_size(vp);
-
-			/*
-			 * we're in the throttle window, at the very least
-			 * we want to limit the size of the I/O we're about
-			 * to issue
-			 */
-			if ((flags & IO_RETURN_ON_THROTTLE) && throttle_type == THROTTLE_NOW) {
-				/*
-				 * we're in the throttle window and at least 1 I/O
-				 * has already been issued by a throttleable thread
-				 * in this window, so return with EAGAIN to indicate
-				 * to the FS issuing the cluster_write call that it
-				 * should now throttle after dropping any locks
-				 */
-				throttle_info_update_by_mount(vp->v_mount);
-
-				io_throttled = TRUE;
-				goto wait_for_dwrites;
-			}
-			max_vector_size = max_throttle_size;
-			max_io_size = max_throttle_size;
-		} else {
-			max_vector_size = MAX_VECTOR_UPL_SIZE;
-			max_io_size = max_upl_size;
-		}
-
-		if (first_IO) {
-			cluster_syncup(vp, newEOF, callback, callback_arg, callback ? PUSH_SYNC : 0);
-			first_IO = 0;
-		}
-		io_size  = io_req_size & ~PAGE_MASK;
-		iov_base = uio_curriovbase(uio);
-
-		if (io_size > max_io_size) {
-			io_size = max_io_size;
-		}
-
-		if (useVectorUPL && (iov_base & PAGE_MASK)) {
-			/*
-			 * We have an iov_base that's not page-aligned.
-			 * Issue all I/O's that have been collected within
-			 * this Vectored UPL.
-			 */
-			if (vector_upl_index) {
-				retval = vector_cluster_io(vp, vector_upl, vector_upl_offset, v_upl_uio_offset, vector_upl_iosize, io_flag, (buf_t)NULL, &iostate, callback, callback_arg);
-				reset_vector_run_state();
-			}
-
-			/*
-			 * After this point, if we are using the Vector UPL path and the base is
-			 * not page-aligned then the UPL with that base will be the first in the vector UPL.
-			 */
-		}
-
-		upl_offset = (vm_offset_t)((u_int32_t)iov_base & PAGE_MASK);
-		upl_needed_size = (upl_offset + io_size + (PAGE_SIZE - 1)) & ~PAGE_MASK;
-
-		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 76)) | DBG_FUNC_START,
-		    (int)upl_offset, upl_needed_size, (int)iov_base, io_size, 0);
-
-		vm_map_t map = UIO_SEG_IS_USER_SPACE(uio->uio_segflg) ? current_map() : kernel_map;
-		for (force_data_sync = 0; force_data_sync < 3; force_data_sync++) {
-			pages_in_pl = 0;
-			upl_size = (upl_size_t)upl_needed_size;
-			upl_flags = UPL_FILE_IO | UPL_COPYOUT_FROM | UPL_NO_SYNC |
-			    UPL_CLEAN_IN_PLACE | UPL_SET_INTERNAL | UPL_SET_LITE | UPL_SET_IO_WIRE;
-
-			kret = vm_map_get_upl(map,
-			    (vm_map_offset_t)(iov_base & ~((user_addr_t)PAGE_MASK)),
-			    &upl_size,
-			    &upl,
-			    NULL,
-			    &pages_in_pl,
-			    &upl_flags,
-			    VM_KERN_MEMORY_FILE,
-			    force_data_sync);
-
-			if (kret != KERN_SUCCESS) {
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 76)) | DBG_FUNC_END,
-				    0, 0, 0, kret, 0);
-				/*
-				 * failed to get pagelist
-				 *
-				 * we may have already spun some portion of this request
-				 * off as async requests... we need to wait for the I/O
-				 * to complete before returning
-				 */
-				goto wait_for_dwrites;
-			}
-			pl = UPL_GET_INTERNAL_PAGE_LIST(upl);
-			pages_in_pl = upl_size / PAGE_SIZE;
-
-			for (i = 0; i < pages_in_pl; i++) {
-				if (!upl_valid_page(pl, i)) {
-					break;
-				}
-			}
-			if (i == pages_in_pl) {
-				break;
-			}
-
-			/*
-			 * didn't get all the pages back that we
-			 * needed... release this upl and try again
-			 */
-			ubc_upl_abort(upl, 0);
-		}
-		if (force_data_sync >= 3) {
-			KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 76)) | DBG_FUNC_END,
-			    i, pages_in_pl, upl_size, kret, 0);
-			/*
-			 * for some reason, we couldn't acquire a hold on all
-			 * the pages needed in the user's address space
-			 *
-			 * we may have already spun some portion of this request
-			 * off as async requests... we need to wait for the I/O
-			 * to complete before returning
-			 */
-			goto wait_for_dwrites;
-		}
-
-		/*
-		 * Consider the possibility that upl_size wasn't satisfied.
-		 */
-		if (upl_size < upl_needed_size) {
-			if (upl_size && upl_offset == 0) {
-				io_size = upl_size;
-			} else {
-				io_size = 0;
-			}
-		}
-		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 76)) | DBG_FUNC_END,
-		    (int)upl_offset, upl_size, (int)iov_base, io_size, 0);
-
-		if (io_size == 0) {
-			ubc_upl_abort(upl, 0);
-			/*
-			 * we may have already spun some portion of this request
-			 * off as async requests... we need to wait for the I/O
-			 * to complete before returning
-			 */
-			goto wait_for_dwrites;
-		}
-
-		if (useVectorUPL) {
-			vm_offset_t end_off = ((iov_base + io_size) & PAGE_MASK);
-			if (end_off) {
-				issueVectorUPL = 1;
-			}
-			/*
-			 * After this point, if we are using a vector UPL, then
-			 * either all the UPL elements end on a page boundary OR
-			 * this UPL is the last element because it does not end
-			 * on a page boundary.
-			 */
-		}
-
-		/*
-		 * we want push out these writes asynchronously so that we can overlap
-		 * the preparation of the next I/O
-		 * if there are already too many outstanding writes
-		 * wait until some complete before issuing the next
-		 */
-		if (vp->v_mount->mnt_minsaturationbytecount) {
-			bytes_outstanding_limit = vp->v_mount->mnt_minsaturationbytecount;
-		} else {
-			if (__improbable(os_mul_overflow(max_upl_size, IO_SCALE(vp, 2),
-			    &bytes_outstanding_limit) ||
-			    (bytes_outstanding_limit > overlapping_write_max))) {
-				bytes_outstanding_limit = overlapping_write_max;
-			}
-		}
-
-		cluster_iostate_wait(&iostate, bytes_outstanding_limit, "cluster_write_direct");
-
-		if (iostate.io_error) {
-			/*
-			 * one of the earlier writes we issued ran into a hard error
-			 * don't issue any more writes, cleanup the UPL
-			 * that was just created but not used, then
-			 * go wait for all writes that are part of this stream
-			 * to complete before returning the error to the caller
-			 */
-			ubc_upl_abort(upl, 0);
-
-			goto wait_for_dwrites;
-		}
-
-		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 77)) | DBG_FUNC_START,
-		    (int)upl_offset, (int)uio->uio_offset, io_size, io_flag, 0);
-
-		if (!useVectorUPL) {
-			retval = cluster_io(vp, upl, upl_offset, uio->uio_offset,
-			    io_size, io_flag, (buf_t)NULL, &iostate, callback, callback_arg);
-		} else {
-			if (!vector_upl_index) {
-				vector_upl = vector_upl_create(upl_offset, uio->uio_iovcnt);
-				v_upl_uio_offset = uio->uio_offset;
-				vector_upl_offset = upl_offset;
-			}
-
-			vector_upl_set_subupl(vector_upl, upl, upl_size);
-			vector_upl_set_iostate(vector_upl, upl, vector_upl_size, upl_size);
-			vector_upl_index++;
-			vector_upl_iosize += io_size;
-			vector_upl_size += upl_size;
-
-			if (issueVectorUPL || vector_upl_index == vector_upl_max_upls(vector_upl) || vector_upl_size >= max_vector_size) {
-				retval = vector_cluster_io(vp, vector_upl, vector_upl_offset, v_upl_uio_offset, vector_upl_iosize, io_flag, (buf_t)NULL, &iostate, callback, callback_arg);
-				reset_vector_run_state();
-			}
-		}
-
-		/*
-		 * update the uio structure to
-		 * reflect the I/O that we just issued
-		 */
-		uio_update(uio, (user_size_t)io_size);
-
-		/*
-		 * in case we end up calling through to cluster_write_copy to finish
-		 * the tail of this request, we need to update the oldEOF so that we
-		 * don't zero-fill the head of a page if we've successfully written
-		 * data to that area... 'cluster_write_copy' will zero-fill the head of a
-		 * page that is beyond the oldEOF if the write is unaligned... we only
-		 * want that to happen for the very first page of the cluster_write,
-		 * NOT the first page of each vector making up a multi-vector write.
-		 */
-		if (uio->uio_offset > oldEOF) {
-			oldEOF = uio->uio_offset;
-		}
-
-		io_req_size -= io_size;
-
-		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 77)) | DBG_FUNC_END,
-		    (int)upl_offset, (int)uio->uio_offset, io_req_size, retval, 0);
-	} /* end while */
-
-	if (retval == 0 && iostate.io_error == 0 && io_req_size == 0) {
-		retval = cluster_io_type(uio, write_type, write_length, MIN_DIRECT_WRITE_SIZE);
-
-		if (retval == 0 && *write_type == IO_DIRECT) {
-			KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 75)) | DBG_FUNC_NONE,
-			    (int)uio->uio_offset, *write_length, (int)newEOF, 0, 0);
-
-			goto next_dwrite;
-		}
-	}
-
-wait_for_dwrites:
-
-	if (retval == 0 && iostate.io_error == 0 && useVectorUPL && vector_upl_index) {
-		retval = vector_cluster_io(vp, vector_upl, vector_upl_offset, v_upl_uio_offset, vector_upl_iosize, io_flag, (buf_t)NULL, &iostate, callback, callback_arg);
-		reset_vector_run_state();
-	}
-	/*
-	 * make sure all async writes issued as part of this stream
-	 * have completed before we return
-	 */
-	cluster_iostate_wait(&iostate, 0, "cluster_write_direct");
-
-	if (iostate.io_error) {
-		retval = iostate.io_error;
-	}
-
-	lck_mtx_destroy(&iostate.io_mtxp, &cl_mtx_grp);
-
-	if (io_throttled == TRUE && retval == 0) {
-		retval = EAGAIN;
-	}
-
-	if (io_req_size && retval == 0) {
-		/*
-		 * we couldn't handle the tail of this request in DIRECT mode
-		 * so fire it through the copy path
-		 *
-		 * note that flags will never have IO_HEADZEROFILL or IO_TAILZEROFILL set
-		 * so we can just pass 0 in for the headOff and tailOff
-		 */
-		if (uio->uio_offset > oldEOF) {
-			oldEOF = uio->uio_offset;
-		}
-
-		retval = cluster_write_copy(vp, uio, io_req_size, oldEOF, newEOF, (off_t)0, (off_t)0, flags, callback, callback_arg);
-
-		*write_type = IO_UNKNOWN;
-	}
-	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 75)) | DBG_FUNC_END,
-	    (int)uio->uio_offset, io_req_size, retval, 4, 0);
-
-	return retval;
-}
-
-
-static int
-cluster_write_direct_small(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, int *write_type, u_int32_t *write_length,
-    int flags, int (*callback)(buf_t, void *), void *callback_arg, uint32_t min_io_size)
-{
-	upl_t            upl = NULL;
-	upl_page_info_t  *pl;
-	vm_offset_t      upl_offset;
-	vm_offset_t      vector_upl_offset = 0;
-	u_int32_t        io_req_size;
-	u_int32_t        offset_in_file;
-	u_int32_t        offset_in_iovbase;
-	u_int32_t        io_size;
-	int              io_flag = 0;
-	upl_size_t       upl_size = 0, vector_upl_size = 0;
-	vm_size_t        upl_needed_size;
-	mach_msg_type_number_t  pages_in_pl = 0;
-	upl_control_flags_t upl_flags;
-	kern_return_t    kret = KERN_SUCCESS;
-	mach_msg_type_number_t  i = 0;
-	int              force_data_sync;
-	int              retval = 0;
-	int              first_IO = 1;
-	struct clios     iostate;
-	user_addr_t      iov_base;
-	u_int32_t        mem_alignment_mask;
-	u_int32_t        devblocksize;
-	u_int32_t        max_io_size;
-	u_int32_t        max_upl_size;
-	u_int32_t        max_vector_size;
-	u_int32_t        bytes_outstanding_limit;
-	boolean_t        io_throttled = FALSE;
-
-	u_int32_t        vector_upl_iosize = 0;
-	int              issueVectorUPL = 0, useVectorUPL = (uio->uio_iovcnt > 1);
-	off_t            v_upl_uio_offset = 0;
-	int              vector_upl_index = 0;
-	upl_t            vector_upl = NULL;
-
-	user_size_t      iov_len;
-	uint32_t         io_align_mask;
-
-	/*
-	 * When we enter this routine, we know
-	 *  -- the resid will not exceed iov_len
-	 */
-	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 75)) | DBG_FUNC_START,
-	    (int)uio->uio_offset, *write_length, (int)newEOF, 0, 0);
-
-	assert(vm_map_page_shift(current_map()) >= PAGE_SHIFT);
-
-	max_upl_size = cluster_max_io_size(vp->v_mount, CL_WRITE);
-
-	io_flag = CL_ASYNC | CL_PRESERVE | CL_COMMIT | CL_THROTTLE | CL_DIRECT_IO;
-
-	if (flags & IO_PASSIVE) {
-		io_flag |= CL_PASSIVE;
-	}
-
-	if (flags & IO_NOCACHE) {
-		io_flag |= CL_NOCACHE;
-	}
-
-	if (flags & IO_SKIP_ENCRYPTION) {
-		io_flag |= CL_ENCRYPTED;
-	}
-
-	iostate.io_completed = 0;
-	iostate.io_issued = 0;
-	iostate.io_error = 0;
-	iostate.io_wanted = 0;
-
-	lck_mtx_init(&iostate.io_mtxp, &cl_mtx_grp, LCK_ATTR_NULL);
-
-	devblocksize = (u_int32_t)vp->v_mount->mnt_devblocksize;
-	if (devblocksize == 1) {
-		/*
-		 * the AFP client advertises a devblocksize of 1
-		 * however, its BLOCKMAP routine maps to physical
-		 * blocks that are PAGE_SIZE in size...
-		 * therefore we can't ask for I/Os that aren't page aligned
-		 * or aren't multiples of PAGE_SIZE in size
-		 * by setting devblocksize to PAGE_SIZE, we re-instate
-		 * the old behavior we had before the mem_alignment_mask
-		 * changes went in...
-		 */
-		devblocksize = PAGE_SIZE;
-	}
-
-	io_align_mask = PAGE_MASK;
-	mem_alignment_mask = PAGE_MASK;
-	if (min_io_size < MIN_DIRECT_WRITE_SIZE) {
-		/* The process has opted into fs blocksize direct io writes */
-		assert((min_io_size & (min_io_size - 1)) == 0);
-		io_align_mask = min_io_size - 1;
-		mem_alignment_mask = (u_int32_t)vp->v_mount->mnt_alignmentmask;
-	}
-	if ((devblocksize - 1) > mem_alignment_mask) {
-		/*
-		 * the offset in memory must be on a device block boundary
-		 * so that we can guarantee that we can generate an
-		 * I/O that ends on a page boundary in cluster_io
-		 */
-		mem_alignment_mask = devblocksize - 1;
-	}
-
-next_dwrite:
-	io_req_size = *write_length;
-
 	while ((io_req_size >= PAGE_SIZE || io_req_size >= min_io_size) && uio->uio_offset < newEOF && retval == 0) {
 		int     throttle_type;
 
-		iov_base = uio_curriovbase(uio);
-		iov_len = uio_curriovlen(uio);
-		if (iov_len > io_req_size) {
-			iov_len = io_req_size;
-		}
-		io_size = iov_len;
-
-		offset_in_file = (u_int32_t)(uio->uio_offset & io_align_mask);
-		offset_in_iovbase = (u_int32_t)(iov_base & mem_alignment_mask);
-
-		if (offset_in_file || offset_in_iovbase) {
-			/*
-			 * one of the 2 important offsets is misaligned
-			 * so fire an I/O through the cache for this entire vector
-			 */
-			if (min_io_size < MIN_DIRECT_WRITE_SIZE) {
-				if (iov_len < io_req_size) {
-					io_req_size = iov_len;
-				}
-			}
-			goto wait_for_dwrites;
-		}
-
 		if ((throttle_type = cluster_is_throttled(vp))) {
 			uint32_t max_throttle_size = calculate_max_throttle_size(vp);
 
@@ -3195,11 +2818,12 @@ next_dwrite:
 			cluster_syncup(vp, newEOF, callback, callback_arg, callback ? PUSH_SYNC : 0);
 			first_IO = 0;
 		}
+		io_size  = io_req_size & ~io_align_mask;
+		iov_base = uio_curriovbase(uio);
 
 		if (io_size > max_io_size) {
 			io_size = max_io_size;
 		}
-		io_size  = io_size & ~io_align_mask;
 
 		if (useVectorUPL && (iov_base & PAGE_MASK)) {
 			/*
@@ -3282,9 +2906,6 @@ next_dwrite:
 			 * off as async requests... we need to wait for the I/O
 			 * to complete before returning
 			 */
-			if (io_req_size > upl_needed_size) {
-				io_req_size = upl_needed_size;
-			}
 			goto wait_for_dwrites;
 		}
 
@@ -3308,7 +2929,6 @@ next_dwrite:
 			 * off as async requests... we need to wait for the I/O
 			 * to complete before returning
 			 */
-			io_req_size = upl_needed_size;
 			goto wait_for_dwrites;
 		}
 
@@ -3355,8 +2975,6 @@ next_dwrite:
 
 			goto wait_for_dwrites;
 		}
-
-		task_update_logical_writes(current_task(), io_size, TASK_WRITE_IMMEDIATE, vp);
 
 		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 77)) | DBG_FUNC_START,
 		    (int)upl_offset, (int)uio->uio_offset, io_size, io_flag, 0);
@@ -3462,6 +3080,7 @@ wait_for_dwrites:
 
 	return retval;
 }
+
 
 static int
 cluster_write_contig(vnode_t vp, struct uio *uio, off_t newEOF, int *write_type, u_int32_t *write_length,
@@ -7207,7 +6826,10 @@ cluster_copy_upl_data(struct uio *uio, upl_t upl, int upl_offset, int *io_resid)
 
 	uio->uio_segflg = segflg;
 
-	task_update_logical_writes(current_task(), (dirty_count * PAGE_SIZE), TASK_WRITE_DEFERRED, upl_lookup_vnode(upl));
+	if (dirty_count) {
+		task_update_logical_writes(current_task(), (dirty_count * PAGE_SIZE), TASK_WRITE_DEFERRED, upl_lookup_vnode(upl));
+	}
+
 	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 34)) | DBG_FUNC_END,
 	    (int)uio->uio_offset, xsize, retval, segflg, 0);
 
@@ -7275,6 +6897,11 @@ cluster_copy_ubc_data_internal(vnode_t vp, struct uio *uio, int *io_resid, int m
 		retval = memory_object_control_uiomove(control, uio->uio_offset - start_offset, uio,
 		    start_offset, io_size, mark_dirty, take_reference);
 		xsize -= uio_resid(uio);
+
+		int num_bytes_copied = xsize;
+		if (num_bytes_copied && uio_rw(uio)) {
+			task_update_logical_writes(current_task(), num_bytes_copied, TASK_WRITE_DEFERRED, vp);
+		}
 		io_size -= xsize;
 	}
 	uio->uio_segflg = segflg;

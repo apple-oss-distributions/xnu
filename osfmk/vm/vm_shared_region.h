@@ -237,8 +237,8 @@ struct vm_shared_region {
 #if __ARM_MIXED_PAGE_SIZE__
 	uint8_t                 sr_page_shift;
 #endif /* __ARM_MIXED_PAGE_SIZE__ */
-	bool                    sr_mapping_in_progress; /* sr_first_mapping will be != -1 when done */
-	bool                    sr_slide_in_progress;
+	thread_t                sr_mapping_in_progress; /* sr_first_mapping will be != -1 when done */
+	thread_t                sr_slide_in_progress;
 	bool                    sr_64bit;
 	bool                    sr_persists;
 	bool                    sr_uuid_copied;

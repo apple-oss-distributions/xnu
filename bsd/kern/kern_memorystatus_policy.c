@@ -89,9 +89,8 @@ memorystatus_health_check(memorystatus_system_health_t *status)
 	    !(status->msh_compressor_is_thrashing && status->msh_compressor_is_low_on_space)) {
 		status->msh_filecache_is_thrashing = true;
 	}
-	if (os_atomic_load(&memorystatus_compressor_space_shortage, relaxed)) {
-		status->msh_compressor_is_low_on_space = true;
-	}
+	status->msh_compressor_is_low_on_space = os_atomic_load(&memorystatus_compressor_space_shortage, acquire);
+	status->msh_pageout_starved = os_atomic_load(&memorystatus_pageout_starved, acquire);
 	status->msh_swappable_compressor_segments_over_limit = memorystatus_swap_over_trigger(100);
 	status->msh_swapin_queue_over_limit = memorystatus_swapin_over_trigger();
 	status->msh_swap_low_on_space = vm_swap_low_on_space();
@@ -104,11 +103,12 @@ bool
 memorystatus_is_system_healthy(const memorystatus_system_health_t *status)
 {
 #if CONFIG_JETSAM
-	return !(status->msh_available_pages_below_critical
-	       || status->msh_compressor_is_low_on_space
-	       || status->msh_compressor_is_thrashing
-	       || status->msh_filecache_is_thrashing
-	       || status->msh_zone_map_is_exhausted);
+	return !(status->msh_available_pages_below_critical ||
+	       status->msh_compressor_is_low_on_space ||
+	       status->msh_compressor_is_thrashing ||
+	       status->msh_filecache_is_thrashing ||
+	       status->msh_zone_map_is_exhausted ||
+	       status->msh_pageout_starved);
 #else /* CONFIG_JETSAM */
 	return !status->msh_zone_map_is_exhausted;
 #endif /* CONFIG_JETSAM */

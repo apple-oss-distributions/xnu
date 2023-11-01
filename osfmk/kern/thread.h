@@ -571,6 +571,7 @@ struct thread {
 	/* Fail-safe computation since last unblock or qualifying yield */
 	uint64_t                computation_metered;
 	uint64_t                computation_epoch;
+	uint64_t                computation_interrupt_epoch;
 	uint64_t                safe_release;           /* when to release fail-safe */
 
 	/* Call out from scheduler */

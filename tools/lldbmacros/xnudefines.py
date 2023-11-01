@@ -195,6 +195,13 @@ IO_BITS_KOTYPE = 0x3ff
 P_MEMSTAT_FROZEN = 0x00000002
 
 
+#File: osfmk/ipc/ipc_importance.h
+IIE_TYPE_BITS = 1
+IIE_TYPE_MASK = ((1 << IIE_TYPE_BITS) - 1)
+IIE_TYPE_TASK =     0x00000000
+IIE_TYPE_INHERIT =  0x00000001
+
+
 if __name__ == "__main__":
     pass
 

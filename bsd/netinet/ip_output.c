@@ -2941,7 +2941,7 @@ ip_mloopback(struct ifnet *srcifp, struct ifnet *origifp, struct mbuf *m,
 	 * is in an mbuf cluster, so that we can safely override the IP
 	 * header portion later.
 	 */
-	copym = m_copym_mode(m, 0, M_COPYALL, M_DONTWAIT, M_COPYM_COPY_HDR);
+	copym = m_copym_mode(m, 0, M_COPYALL, M_DONTWAIT, NULL, NULL, M_COPYM_COPY_HDR);
 	if (copym != NULL && ((copym->m_flags & M_EXT) || copym->m_len < hlen)) {
 		copym = m_pullup(copym, hlen);
 	}

@@ -221,7 +221,7 @@ int     wait1continue(int result);
 int     waitidcontinue(int result);
 kern_return_t sys_perf_notify(thread_t thread, int pid);
 kern_return_t task_exception_notify(exception_type_t exception,
-    mach_exception_data_type_t code, mach_exception_data_type_t subcode);
+    mach_exception_data_type_t code, mach_exception_data_type_t subcode, bool fatal);
 void    delay(int);
 
 #if __has_feature(ptrauth_calls)
@@ -1871,9 +1871,16 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 	struct rusage_superset *rup;
 	int kr = 0;
 	int create_corpse = FALSE;
+	bool corpse_source = false;
+	task_t task = proc_task(p);
+
 
 	if (p->p_crash_behavior != 0 || p == initproc) {
 		proc_handle_critical_exit(p, rv);
+	}
+
+	if (task) {
+		corpse_source = vm_map_is_corpse_source(get_task_map(task));
 	}
 
 	/*
@@ -1931,11 +1938,10 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 			}
 		}
 #endif
-
-		kr = task_exception_notify(EXC_CRASH, code, subcode);
-
+		const bool fatal = false;
+		kr = task_exception_notify(EXC_CRASH, code, subcode, fatal);
 		/* Nobody handled EXC_CRASH?? remember to make corpse */
-		if (kr != 0 && p == current_proc()) {
+		if ((kr != 0 || corpse_source) && p == current_proc()) {
 			/*
 			 * Do not create corpse when exit is called from jetsam thread.
 			 * Corpse creation code requires that proc_prepareexit is
@@ -1955,7 +1961,6 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 		 * of extra work we cause in case this is a development kernel with an
 		 * active memory stomp happening.
 		 */
-		task_t task = proc_task(p);
 		uintptr_t bt[2];
 		struct backtrace_user_info btinfo = BTUINFO_INIT;
 		unsigned int frame_count = backtrace_user(bt, 2, NULL, &btinfo);
@@ -1994,8 +1999,8 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 	}
 
 skipcheck:
-	if (task_is_driver(proc_task(p)) && PROC_HAS_EXITREASON(p)) {
-		IOUserServerRecordExitReason(proc_task(p), p->p_exit_reason);
+	if (task_is_driver(task) && PROC_HAS_EXITREASON(p)) {
+		IOUserServerRecordExitReason(task, p->p_exit_reason);
 	}
 
 	/* Notify the perf server? */
@@ -2006,7 +2011,7 @@ skipcheck:
 
 	/* stash the usage into corpse data if making_corpse == true */
 	if (create_corpse == TRUE) {
-		kr = task_mark_corpse(proc_task(p));
+		kr = task_mark_corpse(task);
 		if (kr != KERN_SUCCESS) {
 			if (kr == KERN_NO_SPACE) {
 				printf("Process[%d] has no vm space for corpse info.\n", proc_getpid(p));
@@ -2019,6 +2024,11 @@ skipcheck:
 			}
 			create_corpse = FALSE;
 		}
+	}
+
+	if (corpse_source && !create_corpse) {
+		/* vm_map was marked for corpse, but we decided to not create one, unmark the vmmap */
+		vm_map_unset_corpse_source(get_task_map(task));
 	}
 
 	if (!proc_is_shadow(p)) {
@@ -2060,7 +2070,7 @@ skipcheck:
 
 		/* Update the code, subcode based on exit reason */
 		proc_update_corpse_exception_codes(p, &code, &subcode);
-		populate_corpse_crashinfo(p, proc_task(p), rup,
+		populate_corpse_crashinfo(p, task, rup,
 		    code, subcode, buffer, num_knotes, NULL, etype);
 		kfree_data(buffer, buf_size);
 	}

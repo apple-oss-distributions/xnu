@@ -1248,7 +1248,11 @@ L_skip_save_extra_segregs:
 	xor	%r14, %r14
 
 	/* cr2 is significant only for page-faults */
+	xor	%rax, %rax
+	cmpl	$T_PAGE_FAULT, R64_TRAPNO(%r15)
+	jne	1f
 	mov	%cr2, %rax
+1:
 	mov	%rax, R64_CR2(%r15)
 
 L_dispatch_U64_after_fault:
@@ -1284,7 +1288,11 @@ L_dispatch_U32: /* 32-bit user task */
 	mov	%edi, R32_EDI(%r15)
 
 	/* Unconditionally save cr2; only meaningful on page faults */
+	xor	%eax, %eax
+	cmpl	$T_PAGE_FAULT, R64_TRAPNO(%r15)
+	jne	1f
 	mov	%cr2, %rax
+1:
 	mov	%eax, R32_CR2(%r15)
 	/* Zero unused GPRs. BX/DX/SI/R15 are clobbered elsewhere across the exception handler, and are skipped. */
 	xor	%ecx, %ecx

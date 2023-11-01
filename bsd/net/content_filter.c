@@ -3899,7 +3899,7 @@ cfil_dispatch_data_event(struct socket *so, struct cfil_info *cfil_info, uint32_
 	}
 
 	/* Make a copy of the data to pass to kernel control socket */
-	copy = m_copym_mode(data, copyoffset, copylen, M_DONTWAIT,
+	copy = m_copym_mode(data, copyoffset, copylen, M_DONTWAIT, NULL, NULL,
 	    M_COPYM_NOOP_HDR);
 	if (copy == NULL) {
 		CFIL_LOG(LOG_ERR, "m_copym_mode() failed");

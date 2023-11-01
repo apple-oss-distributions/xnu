@@ -3401,11 +3401,9 @@ zleak_should_enable_for_zone(zone_t z)
 	if (z->z_btlog) {
 		return false;
 	}
-#if KASAN_FAKESTACK
-	if (z->z_kasan_fakestacks) {
+	if (z->z_exhausts) {
 		return false;
 	}
-#endif
 	if (zone_exhaustible(z)) {
 		return z->z_wired_cur * 8 >= z->z_wired_max * 7;
 	}
@@ -3759,6 +3757,7 @@ zfree_log(zone_t zone, vm_offset_t addr, uint32_t count, void *fp)
  */
 
 static void zone_reclaim_elements(zone_t z, uint16_t n, vm_offset_t *elems);
+static void zone_depot_trim(zone_t z, uint32_t target, struct zone_depot *zd);
 static thread_call_data_t zone_expand_callout;
 
 __attribute__((overloadable))
@@ -4620,24 +4619,26 @@ __attribute__((noinline))
 static bool
 zalloc_expand_drain_exhausted_caches_locked(zone_t z)
 {
+	struct zone_depot zd;
 	zone_magazine_t mag = NULL;
 
-	z->z_depot_size = 0;
-	z->z_depot_cleanup = true;
+	if (z->z_depot_size) {
+		z->z_depot_size = 0;
+		z->z_depot_cleanup = true;
 
-	zpercpu_foreach(zc, z->z_pcpu_cache) {
-		uint32_t n;
+		zone_depot_init(&zd);
+		zone_depot_trim(z, 0, &zd);
 
-		assert(zone_cache_smr(zc) == NULL);
-		zone_depot_lock_nopreempt(zc);
-		n = zc->zc_depot.zd_full;
-		if (n) {
-			zone_recirc_lock_nopreempt(z);
+		zone_recirc_lock_nopreempt(z);
+		if (zd.zd_full) {
 			zone_depot_move_full(&z->z_recirc,
-			    &zc->zc_depot, n, NULL);
-			zone_recirc_unlock_nopreempt(z);
+			    &zd, zd.zd_full, NULL);
 		}
-		zone_depot_unlock_nopreempt(zc);
+		if (zd.zd_empty) {
+			zone_depot_move_empty(&z->z_recirc,
+			    &zd, zd.zd_empty, NULL);
+		}
+		zone_recirc_unlock_nopreempt(z);
 	}
 
 	zone_recirc_lock_nopreempt(z);
@@ -4671,17 +4672,34 @@ zalloc_needs_refill(zone_t zone, zalloc_flags_t flags)
 	return (flags & Z_NOFAIL) != 0;
 }
 
+static void
+zone_wakeup_exhausted_waiters(zone_t z)
+{
+	z->z_exhausted_wait = false;
+	EVENT_INVOKE(ZONE_EXHAUSTED, zone_index(z), z, false);
+	thread_wakeup(&z->z_expander);
+}
+
 __attribute__((noinline))
 static void
 __ZONE_EXHAUSTED_AND_WAITING_HARD__(zone_t z)
 {
-	z->z_exhausted_wait = true;
-	EVENT_INVOKE(ZONE_EXHAUSTED, zone_index(z), z);
+	if (z->z_pcpu_cache && z->z_depot_size &&
+	    zalloc_expand_drain_exhausted_caches_locked(z)) {
+		return;
+	}
+
+	if (!z->z_exhausted_wait) {
+		zone_recirc_lock_nopreempt(z);
+		z->z_exhausted_wait = true;
+		zone_recirc_unlock_nopreempt(z);
+		EVENT_INVOKE(ZONE_EXHAUSTED, zone_index(z), z, true);
+	}
+
 	assert_wait(&z->z_expander, TH_UNINT);
 	zone_unlock(z);
 	thread_block(THREAD_CONTINUE_NULL);
 	zone_lock(z);
-	z->z_exhausted_wait = false;
 }
 
 static void
@@ -5693,8 +5711,7 @@ zfree_drop(zone_t zone, vm_offset_t addr)
 	}
 
 	if (__improbable(zone->z_exhausted_wait)) {
-		zone->z_exhausted_wait = false;
-		thread_wakeup(&zone->z_expander);
+		zone_wakeup_exhausted_waiters(zone);
 	}
 }
 
@@ -5760,6 +5777,7 @@ zfree_cached_recirculate(zone_t zone, zone_cache_t cache)
 {
 	zone_magazine_t mag = NULL, tmp = NULL;
 	smr_t smr = zone_cache_smr(cache);
+	bool wakeup_exhausted = false;
 
 	if (zone->z_recirc.zd_empty == 0) {
 		mag = zone_magazine_alloc(Z_NOWAIT);
@@ -5781,9 +5799,19 @@ zfree_cached_recirculate(zone_t zone, zone_cache_t cache)
 		} else {
 			zone_depot_insert_tail_full(&zone->z_recirc, tmp);
 		}
+
+		wakeup_exhausted = zone->z_exhausted_wait;
 	}
 
 	zone_recirc_unlock_nopreempt(zone);
+
+	if (__improbable(wakeup_exhausted)) {
+		zone_lock_nopreempt(zone);
+		if (zone->z_exhausted_wait) {
+			zone_wakeup_exhausted_waiters(zone);
+		}
+		zone_unlock_nopreempt(zone);
+	}
 
 	return mag ? cache : NULL;
 }
@@ -5813,6 +5841,7 @@ zfree_cached_trim(zone_t zone, zone_cache_t cache)
 			tmp = zone_magazine_replace(cache, mag, true);
 			zone_depot_insert_tail_full(&cache->zc_depot, tmp);
 		}
+
 		zone_depot_unlock_nopreempt(cache);
 
 		return mag ? cache : NULL;
@@ -6859,6 +6888,51 @@ zcache_alloc_fail(zone_id_t zid, zstack_t stack, uint32_t count)
 	return stack;
 }
 
+#define ZCACHE_ALLOC_RETRY  ((void *)-1)
+
+__attribute__((noinline))
+static void *
+zcache_alloc_one(
+	zone_id_t               zid,
+	zalloc_flags_t          flags,
+	zone_cache_ops_t        ops)
+{
+	zone_t zone = zone_by_id(zid);
+	void *o;
+
+	/*
+	 * First try to allocate in rudimentary zones without ever going into
+	 * __ZONE_EXHAUSTED_AND_WAITING_HARD__() by clearing Z_NOFAIL.
+	 */
+	enable_preemption();
+	o = ops->zc_op_alloc(zid, flags & ~Z_NOFAIL);
+	if (__probable(o)) {
+		os_atomic_inc(&zone->z_elems_avail, relaxed);
+	} else if (__probable(flags & Z_NOFAIL)) {
+		zone_cache_t cache;
+		vm_offset_t index;
+		int cpu;
+
+		zone_lock(zone);
+
+		cpu   = cpu_number();
+		cache = zalloc_cached_get_pcpu_cache(zone, ops, cpu, flags);
+		o     = ZCACHE_ALLOC_RETRY;
+		if (__probable(cache)) {
+			index = --cache->zc_alloc_cur;
+			o     = (void *)cache->zc_alloc_elems[index];
+			cache->zc_alloc_elems[index] = 0;
+			o = ops->zc_op_mark_valid(zid, o);
+		} else if (zone->z_elems_free == 0) {
+			__ZONE_EXHAUSTED_AND_WAITING_HARD__(zone);
+		}
+
+		zone_unlock(zone);
+	}
+
+	return o;
+}
+
 __attribute__((always_inline))
 static zstack_t
 zcache_alloc_n_ext(
@@ -6888,18 +6962,16 @@ zcache_alloc_n_ext(
 			void *o;
 
 			if (ops) {
-				enable_preemption();
-				o = ops->zc_op_alloc(zid, flags);
+				o = zcache_alloc_one(zid, flags, ops);
 			} else {
 				o = zalloc_item(zone, zone->z_stats, flags).addr;
 			}
 			if (__improbable(o == NULL)) {
 				return zcache_alloc_fail(zid, stack, count);
 			}
-			if (ops) {
-				os_atomic_inc(&zone->z_elems_avail, relaxed);
+			if (ops == NULL || o != ZCACHE_ALLOC_RETRY) {
+				zstack_push(&stack, o);
 			}
-			zstack_push(&stack, o);
 		}
 
 		if (stack.z_count == count) {
@@ -7977,8 +8049,10 @@ compute_zone_working_set_size(__unused void *param)
 			uint16_t size = z->z_depot_size;
 
 			if (zone_exhausted(z)) {
-				z->z_depot_size = 0;
-				z->z_depot_cleanup = true;
+				if (z->z_depot_size) {
+					z->z_depot_size = 0;
+					z->z_depot_cleanup = true;
+				}
 			} else if (size < z->z_depot_limit && cur > zc_grow_level()) {
 				/*
 				 * lose history on purpose now
@@ -9039,10 +9113,11 @@ zone_init_defaults(zone_id_t zid)
 }
 
 void
-zone_set_exhaustible(zone_t zone, vm_size_t nelems)
+zone_set_exhaustible(zone_t zone, vm_size_t nelems, bool exhausts_by_design)
 {
 	zone_lock(zone);
 	zone->z_wired_max = zone_alloc_pages_for_nelems(zone, nelems);
+	zone->z_exhausts = exhausts_by_design;
 	zone_unlock(zone);
 }
 

@@ -195,7 +195,7 @@ unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
 extern void configure_misc_apple_boot_args(void);
 extern void configure_misc_apple_regs(bool is_boot_cpu);
 extern void configure_timer_apple_regs(void);
-extern void configure_late_apple_regs(void);
+extern void configure_late_apple_regs(bool cold_boot);
 #endif /* __arm64__ */
 
 
@@ -600,7 +600,7 @@ arm_init(
 	ml_map_cpu_pio();
 
 #if APPLE_ARM64_ARCH_FAMILY
-	configure_late_apple_regs();
+	configure_late_apple_regs(true);
 #endif
 
 #endif
@@ -683,7 +683,7 @@ arm_init_cpu(
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
 
 #if APPLE_ARM64_ARCH_FAMILY
-	configure_late_apple_regs();
+	configure_late_apple_regs(false);
 #endif
 
 #if HIBERNATION

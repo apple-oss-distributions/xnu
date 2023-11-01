@@ -25,29 +25,45 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-#include <arm/pmap/pmap_internal.h>
-#include <arm/preemption_disable_internal.h>
+
+#include <kern/percpu.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+#pragma once
+
 
 /**
- * Placeholder for random pmap functionality that doesn't fit into any of the
- * other files. This will contain things like the CPU copy windows, ASID
- * management and context switching code, and stage 2 pmaps (among others).
- *
- * My idea is that code that doesn't fit into any of the other files will live
- * in this file until we deem it large and important enough to break into its
- * own file.
+ * Track time and other counters during a preemption disabled window,
+ * when `SCHED_HYGIENE` is configured.
  */
-
-
-void
-pmap_abandon_measurement(void)
-{
-#if SCHED_HYGIENE_DEBUG
-	struct _preemption_disable_pcpu *pcpu = PERCPU_GET(_preemption_disable_pcpu_data);
-	uint64_t istate = pmap_interrupts_disable();
-	if (pcpu->pdp_start.pds_mach_time != 0) {
-		pcpu->pdp_abandon = true;
+struct _preemption_disable_pcpu {
+	/**
+	 * A snapshot of times and counters relevant to preemption disable measurement.
+	 */
+	struct _preemption_disable_snap {
+		/* The time when preemption was disabled, in Mach time units. */
+		uint64_t pds_mach_time;
+		/* The amount of time spent in interrupts by the current CPU, in Mach time units. */
+		uint64_t pds_int_mach_time;
+#if MONOTONIC
+		/* The number of cycles elapsed on this CPU. */
+		uint64_t pds_cycles;
+		/* The number of instructions seen by this CPU. */
+		uint64_t pds_instrs;
+#endif /* MONOTONIC */
 	}
-	pmap_interrupts_restore(istate);
-#endif /* SCHED_HYGIENE_DEBUG */
-}
+	/* At the start of the preemption disabled window. */
+	pdp_start;
+
+	/* The maximum duration seen by this CPU, in Mach time units. */
+	_Atomic uint64_t pdp_max_mach_duration;
+	/*
+	 * Whether to abandon the measurement on this CPU,
+	 * due to a call to abandon_preemption_disable_measurement().
+	 */
+	bool pdp_abandon;
+};
+
+PERCPU_DECL(struct _preemption_disable_pcpu, _preemption_disable_pcpu_data);

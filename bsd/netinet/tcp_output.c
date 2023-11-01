@@ -2404,8 +2404,21 @@ send:
 			}
 #endif /* MPTCP */
 			if (m != NULL) {
-				m->m_next = m_copym_mode(so->so_snd.sb_mb,
-				    off, (int)len, M_DONTWAIT, copymode);
+				if (so->so_snd.sb_flags & SB_SENDHEAD) {
+					VERIFY(so->so_snd.sb_flags & SB_SENDHEAD);
+					VERIFY(so->so_snd.sb_sendoff <= so->so_snd.sb_cc);
+
+					m->m_next = m_copym_mode(so->so_snd.sb_mb,
+					    off, (int)len, M_DONTWAIT,
+					    &so->so_snd.sb_sendhead,
+					    &so->so_snd.sb_sendoff, copymode);
+
+					VERIFY(so->so_snd.sb_sendoff <= so->so_snd.sb_cc);
+				} else {
+					m->m_next = m_copym_mode(so->so_snd.sb_mb,
+					    off, (int)len, M_DONTWAIT,
+					    NULL, NULL, copymode);
+				}
 				if (m->m_next == NULL) {
 					(void) m_free(m);
 					error = ENOBUFS;
@@ -2427,9 +2440,21 @@ send:
 				 * it acted on to fullfill the current request,
 				 * whether a valid 'hint' was passed in or not.
 				 */
-				if ((m = m_copym_with_hdrs(so->so_snd.sb_mb,
-				    off, len, M_DONTWAIT, NULL, NULL,
-				    copymode)) == NULL) {
+				if (so->so_snd.sb_flags & SB_SENDHEAD) {
+					VERIFY(so->so_snd.sb_flags & SB_SENDHEAD);
+					VERIFY(so->so_snd.sb_sendoff <= so->so_snd.sb_cc);
+
+					m = m_copym_with_hdrs(so->so_snd.sb_mb,
+					    off, len, M_DONTWAIT, &so->so_snd.sb_sendhead,
+					    &so->so_snd.sb_sendoff, copymode);
+
+					VERIFY(so->so_snd.sb_sendoff <= so->so_snd.sb_cc);
+				} else {
+					m = m_copym_with_hdrs(so->so_snd.sb_mb,
+					    off, len, M_DONTWAIT, NULL,
+					    NULL, copymode);
+				}
+				if (m == NULL) {
 					error = ENOBUFS;
 					goto out;
 				}

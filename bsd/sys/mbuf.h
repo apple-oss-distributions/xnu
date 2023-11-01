@@ -1392,7 +1392,7 @@ extern void m_adj(struct mbuf *, int);
 extern void m_cat(struct mbuf *, struct mbuf *);
 extern void m_copydata(struct mbuf *, int, int, void *);
 extern struct mbuf *m_copym(struct mbuf *, int, int, int);
-extern struct mbuf *m_copym_mode(struct mbuf *, int, int, int, uint32_t);
+extern struct mbuf *m_copym_mode(struct mbuf *, int, int, int, struct mbuf **, int *, uint32_t);
 extern struct mbuf *m_get(int, int);
 extern struct mbuf *m_gethdr(int, int);
 extern struct mbuf *m_getpacket(void);

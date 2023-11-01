@@ -321,9 +321,6 @@ memory_object_control_uiomove(
 		}
 		orig_offset = 0;
 	}
-	if (object->pager) {
-		task_update_logical_writes(current_task(), (dirty_count * PAGE_SIZE), TASK_WRITE_DEFERRED, vnode_pager_lookup_vnode(object->pager));
-	}
 	vm_object_unlock(object);
 	return retval;
 }

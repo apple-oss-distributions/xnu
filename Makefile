@@ -222,11 +222,6 @@ TOP_TARGETS += \
 	install_textfiles \
 	install_config
 
-ifeq ($(BUILD_JSON_COMPILATION_DATABASE),1)
-MAKEARGS += -B
-DEFAULT_TARGET := build
-endif
-
 .PHONY: $(TOP_TARGETS)
 
 default: $(DEFAULT_TARGET)

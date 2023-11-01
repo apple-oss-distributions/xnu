@@ -342,7 +342,7 @@ int     vm_debug_events = 0;
 LCK_GRP_DECLARE(vm_pageout_lck_grp, "vm_pageout");
 
 #if CONFIG_MEMORYSTATUS
-extern boolean_t memorystatus_kill_on_VM_page_shortage(void);
+extern void memorystatus_kill_on_vps_starvation(void);
 
 uint32_t vm_pageout_memorystatus_fb_factor_nr = 5;
 uint32_t vm_pageout_memorystatus_fb_factor_dr = 2;
@@ -2812,7 +2812,7 @@ vps_switch_object(vm_page_t m, vm_object_t m_object, vm_object_t *object, int pa
  */
 static void
 vps_deal_with_throttled_queues(vm_page_t m, vm_object_t *object, uint32_t *vm_pageout_inactive_external_forced_reactivate_limit,
-    int *delayed_unlock, boolean_t *force_anonymous, __unused boolean_t is_page_from_bg_q)
+    boolean_t *force_anonymous, __unused boolean_t is_page_from_bg_q)
 {
 	struct  vm_pageout_queue *eq;
 	vm_object_t cur_object = VM_OBJECT_NULL;
@@ -2869,38 +2869,13 @@ vps_deal_with_throttled_queues(vm_page_t m, vm_object_t *object, uint32_t *vm_pa
 			/*
 			 * Possible deadlock scenario so request jetsam action
 			 */
-
-			assert(cur_object);
-			vm_object_unlock(cur_object);
-
-			cur_object = VM_OBJECT_NULL;
-
-			/*
-			 * VM pageout scan needs to know we have dropped this lock and so set the
-			 * object variable we got passed in to NULL.
-			 */
-			*object = VM_OBJECT_NULL;
-
-			vm_page_unlock_queues();
-
-			VM_DEBUG_CONSTANT_EVENT(vm_pageout_jetsam, VM_PAGEOUT_JETSAM, DBG_FUNC_START,
+			memorystatus_kill_on_vps_starvation();
+			VM_DEBUG_CONSTANT_EVENT(vm_pageout_jetsam, VM_PAGEOUT_JETSAM, DBG_FUNC_NONE,
 			    vm_page_active_count, vm_page_inactive_count, vm_page_free_count, vm_page_free_count);
-
-			/* Kill first suitable process. If this call returned FALSE, we might have simply purged a process instead. */
-			if (memorystatus_kill_on_VM_page_shortage() == TRUE) {
-				VM_PAGEOUT_DEBUG(vm_pageout_inactive_external_forced_jetsam_count, 1);
-			}
-
-			VM_DEBUG_CONSTANT_EVENT(vm_pageout_jetsam, VM_PAGEOUT_JETSAM, DBG_FUNC_END,
-			    vm_page_active_count, vm_page_inactive_count, vm_page_free_count, vm_page_free_count);
-
-			vm_page_lock_queues();
-			*delayed_unlock = 1;
 		}
 #else /* CONFIG_MEMORYSTATUS && CONFIG_JETSAM */
 
 #pragma unused(vm_pageout_inactive_external_forced_reactivate_limit)
-#pragma unused(delayed_unlock)
 
 		*force_anonymous = TRUE;
 #endif /* CONFIG_MEMORYSTATUS && CONFIG_JETSAM */
@@ -3691,7 +3666,7 @@ throttle_inactive:
 		}
 		if (inactive_throttled == TRUE) {
 			vps_deal_with_throttled_queues(m, &object, &vm_pageout_inactive_external_forced_reactivate_limit,
-			    &delayed_unlock, &force_anonymous, page_from_bg_q);
+			    &force_anonymous, page_from_bg_q);
 
 			inactive_burst_count = 0;
 
@@ -5804,6 +5779,7 @@ vm_object_upl_request(
 	vm_page_t               alias_page = NULL;
 	int                     refmod_state = 0;
 	vm_object_t             last_copy_object;
+	uint32_t                last_copy_version;
 	struct  vm_page_delayed_work    dw_array;
 	struct  vm_page_delayed_work    *dwp, *dwp_start;
 	bool                    dwp_finish_ctx = TRUE;
@@ -5965,6 +5941,7 @@ vm_object_upl_request(
 	 * remember which copy object we synchronized with
 	 */
 	last_copy_object = object->vo_copy;
+	last_copy_version = object->vo_copy_version;
 	entry = 0;
 
 	xfer_size = size;
@@ -6194,7 +6171,9 @@ check_busy:
 				}
 			}
 		} else {
-			if ((cntrl_flags & UPL_WILL_MODIFY) && object->vo_copy != last_copy_object) {
+			if ((cntrl_flags & UPL_WILL_MODIFY) &&
+			    (object->vo_copy != last_copy_object ||
+			    object->vo_copy_version != last_copy_version)) {
 				/*
 				 * Honor copy-on-write obligations
 				 *
@@ -6234,6 +6213,7 @@ check_busy:
 				 * remember the copy object we synced with
 				 */
 				last_copy_object = object->vo_copy;
+				last_copy_version = object->vo_copy_version;
 			}
 			dst_page = vm_page_lookup(object, dst_offset);
 
@@ -10472,6 +10452,16 @@ vector_upl_create(vm_offset_t upl_offset, uint32_t max_upls)
 		vector_upl->upls[i].iostate.offset = 0;
 	}
 	return upl;
+}
+
+upl_size_t
+vector_upl_get_size(const upl_t upl)
+{
+	if (!vector_upl_is_valid(upl)) {
+		return upl_get_size(upl);
+	} else {
+		return round_page_32(upl->vector_upl->size);
+	}
 }
 
 uint32_t

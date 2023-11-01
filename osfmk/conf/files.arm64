@@ -63,6 +63,7 @@ osfmk/arm64/machine_routines_asm.s	optional nos_arm_asm
 osfmk/arm64/machine_task.c		standard
 osfmk/arm/machine_routines_apple.c	optional nos_arm_asm
 osfmk/arm/pal_routines.c		standard
+osfmk/arm/preemption_disable.c	standard
 osfmk/arm64/mcount.s		optional profile
 osfmk/arm64/memcmp_zero.s	standard
 osfmk/arm64/strnlen.s   standard

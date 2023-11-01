@@ -98,6 +98,7 @@ LEXT(ml_enable_user_jop_key)
 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
 	mov		x1, #1
 	hvc		#0
+	cbnz		x0, .
 	LOAD_CPU_JOP_KEY x0, x1
 	ret
 #endif /* HAS_PARAVIRTUALIZED_PAC */
@@ -113,6 +114,7 @@ LEXT(ml_disable_user_jop_key)
 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
 	mov		x1, #0
 	hvc		#0
+	cbnz		x0, .
 	ret
 #endif /* HAS_PARAVIRTUALIZED_PAC */
 

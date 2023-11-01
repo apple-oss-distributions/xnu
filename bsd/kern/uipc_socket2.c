@@ -1776,6 +1776,10 @@ sbflush(struct sockbuf *sb)
 		sbdrop(sb, (int)sb->sb_cc);
 	}
 
+	if (sb->sb_flags & SB_SENDHEAD) {
+		sb->sb_sendhead = NULL;
+	}
+
 	sb_empty_assert(sb, __func__);
 	sbunlock(sb, TRUE);     /* keep socket locked */
 }
@@ -1817,6 +1821,10 @@ sbdrop(struct sockbuf *sb, int len)
 	free_list = last = m;
 	ml = (struct mbuf *)0;
 
+	if (sb->sb_flags & SB_SENDHEAD) {
+		sb->sb_sendoff -= MIN(len, sb->sb_sendoff);
+	}
+
 	while (len > 0) {
 		if (m == NULL) {
 			if (next == NULL) {
@@ -1849,6 +1857,11 @@ sbdrop(struct sockbuf *sb, int len)
 			/* update the send byte count */
 			if (sb->sb_flags & SB_SNDBYTE_CNT) {
 				inp_decr_sndbytes_total(sb->sb_so, len);
+			}
+			if (sb->sb_flags & SB_SENDHEAD) {
+				if (sb->sb_sendhead == m) {
+					sb->sb_sendhead = NULL;
+				}
 			}
 			if (m->m_type != MT_DATA && m->m_type != MT_HEADER &&
 			    m->m_type != MT_OOBDATA) {
@@ -2450,6 +2463,12 @@ sbfree(struct sockbuf *sb, struct mbuf *m)
 	 */
 	if (sb->sb_flags & SB_SNDBYTE_CNT) {
 		inp_decr_sndbytes_total(sb->sb_so, m->m_len);
+	}
+
+	if (sb->sb_flags & SB_SENDHEAD) {
+		if (m == sb->sb_sendhead) {
+			sb->sb_sendhead = NULL;
+		}
 	}
 }
 

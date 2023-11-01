@@ -1831,71 +1831,6 @@ pmap_map(
 	return virt;
 }
 
-vm_map_address_t
-pmap_map_bd_with_options(
-	vm_map_address_t virt,
-	vm_offset_t start,
-	vm_offset_t end,
-	vm_prot_t prot,
-	int32_t options)
-{
-	pt_entry_t      tmplate;
-	pt_entry_t     *ptep;
-	vm_map_address_t vaddr;
-	vm_offset_t     paddr;
-	pt_entry_t      mem_attr;
-
-	switch (options & PMAP_MAP_BD_MASK) {
-	case PMAP_MAP_BD_WCOMB:
-		mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
-		mem_attr |= ARM_PTE_SH(SH_OUTER_MEMORY);
-		break;
-	case PMAP_MAP_BD_POSTED:
-		mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED);
-		break;
-	case PMAP_MAP_BD_POSTED_REORDERED:
-		mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED_REORDERED);
-		break;
-	case PMAP_MAP_BD_POSTED_COMBINED_REORDERED:
-		mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED);
-		break;
-	default:
-		mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DISABLE);
-		break;
-	}
-
-	tmplate = pa_to_pte(start) | ARM_PTE_AP((prot & VM_PROT_WRITE) ? AP_RWNA : AP_RONA) |
-	    mem_attr | ARM_PTE_TYPE | ARM_PTE_NX | ARM_PTE_PNX | ARM_PTE_AF;
-#if __ARM_KERNEL_PROTECT__
-	tmplate |= ARM_PTE_NG;
-#endif /* __ARM_KERNEL_PROTECT__ */
-
-	vaddr = virt;
-	paddr = start;
-	while (paddr < end) {
-		ptep = pmap_pte(kernel_pmap, vaddr);
-		if (ptep == PT_ENTRY_NULL) {
-			panic("%s: no PTE for vaddr=%p, "
-			    "virt=%p, start=%p, end=%p, prot=0x%x, options=0x%x",
-			    __FUNCTION__, (void*)vaddr,
-			    (void*)virt, (void*)start, (void*)end, prot, options);
-		}
-
-		assert(!ARM_PTE_IS_COMPRESSED(*ptep, ptep));
-		write_pte_strong(ptep, tmplate);
-
-		pte_increment_pa(tmplate);
-		vaddr += PAGE_SIZE;
-		paddr += PAGE_SIZE;
-	}
-
-	if (end >= start) {
-		flush_mmu_tlb_region(virt, (unsigned)(end - start));
-	}
-
-	return vaddr;
-}
-
 #if XNU_MONITOR
 /**
  * Remove kernel writeablity from an IO PTE value if the page is owned by
@@ -1933,6 +1868,85 @@ pmap_construct_io_pte(pmap_paddr_t paddr, pt_entry_t tmplate)
 }
 #endif /* XNU_MONITOR */
 
+vm_map_address_t
+pmap_map_bd_with_options(
+	vm_map_address_t virt,
+	vm_offset_t start,
+	vm_offset_t end,
+	vm_prot_t prot,
+	int32_t options)
+{
+	pt_entry_t      mem_attr;
+
+	switch (options & PMAP_MAP_BD_MASK) {
+	case PMAP_MAP_BD_WCOMB:
+		mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
+		mem_attr |= ARM_PTE_SH(SH_OUTER_MEMORY);
+		break;
+	case PMAP_MAP_BD_POSTED:
+		mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED);
+		break;
+	case PMAP_MAP_BD_POSTED_REORDERED:
+		mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED_REORDERED);
+		break;
+	case PMAP_MAP_BD_POSTED_COMBINED_REORDERED:
+		mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED);
+		break;
+	default:
+		mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DISABLE);
+		break;
+	}
+
+	/* not cacheable and not buffered */
+	pt_entry_t tmplate = pa_to_pte(start)
+	    | ARM_PTE_TYPE | ARM_PTE_AF | ARM_PTE_NX | ARM_PTE_PNX
+	    | ARM_PTE_AP((prot & VM_PROT_WRITE) ? AP_RWNA : AP_RONA)
+	    | mem_attr;
+
+#if __ARM_KERNEL_PROTECT__
+	tmplate |= ARM_PTE_NG;
+#endif /* __ARM_KERNEL_PROTECT__ */
+
+	vm_map_address_t vaddr = virt;
+	vm_offset_t paddr = start;
+	while (paddr < end) {
+		pt_entry_t *ptep = pmap_pte(kernel_pmap, vaddr);
+		if (ptep == PT_ENTRY_NULL) {
+			panic("pmap_map_bd");
+		}
+
+		/**
+		 * For every iteration, the paddr encoded in tmplate is incrementing,
+		 * but we always start with the original AP bits defined at the top
+		 * of the function in tmplate and only modify the AP bits in the pte
+		 * variable.
+		 */
+		pt_entry_t pte;
+#if XNU_MONITOR
+		if (!pa_valid(paddr)) {
+			pte = pmap_construct_io_pte(paddr, tmplate);
+		} else {
+			pte = tmplate;
+		}
+#else /* !XNU_MONITOR */
+		pte = tmplate;
+#endif
+
+		assert(!ARM_PTE_IS_COMPRESSED(*ptep, ptep));
+		write_pte_strong(ptep, pte);
+
+		pte_increment_pa(tmplate);
+		vaddr += PAGE_SIZE;
+		paddr += PAGE_SIZE;
+	}
+
+	if (end >= start) {
+		flush_mmu_tlb_region(virt, (unsigned)(end - start));
+	}
+
+	return vaddr;
+}
+
 /*
  *      Back-door routine for mapping kernel VM at initialization.
  *      Useful for mapping memory outside the range
@@ -1946,47 +1960,7 @@ pmap_map_bd(
 	vm_offset_t end,
 	vm_prot_t prot)
 {
-	pt_entry_t      tmplate;
-	pt_entry_t              *ptep;
-	vm_map_address_t vaddr;
-	vm_offset_t             paddr;
-
-	/* not cacheable and not buffered */
-	tmplate = pa_to_pte(start)
-	    | ARM_PTE_TYPE | ARM_PTE_AF | ARM_PTE_NX | ARM_PTE_PNX
-	    | ARM_PTE_AP((prot & VM_PROT_WRITE) ? AP_RWNA : AP_RONA)
-	    | ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DISABLE);
-#if __ARM_KERNEL_PROTECT__
-	tmplate |= ARM_PTE_NG;
-#endif /* __ARM_KERNEL_PROTECT__ */
-
-	vaddr = virt;
-	paddr = start;
-	while (paddr < end) {
-		ptep = pmap_pte(kernel_pmap, vaddr);
-		if (ptep == PT_ENTRY_NULL) {
-			panic("pmap_map_bd");
-		}
-
-#if XNU_MONITOR
-		if (!pa_valid(paddr)) {
-			tmplate = pmap_construct_io_pte(paddr, tmplate);
-		}
-#endif
-
-		assert(!ARM_PTE_IS_COMPRESSED(*ptep, ptep));
-		write_pte_strong(ptep, tmplate);
-
-		pte_increment_pa(tmplate);
-		vaddr += PAGE_SIZE;
-		paddr += PAGE_SIZE;
-	}
-
-	if (end >= start) {
-		flush_mmu_tlb_region(virt, (unsigned)(end - start));
-	}
-
-	return vaddr;
+	return pmap_map_bd_with_options(virt, start, end, prot, 0);
 }
 
 /*
@@ -2248,8 +2222,8 @@ pmap_bootstrap(
 
 	kernel_pmap->nested_region_addr = 0x0ULL;
 	kernel_pmap->nested_region_size = 0x0ULL;
-	kernel_pmap->nested_region_asid_bitmap = NULL;
-	kernel_pmap->nested_region_asid_bitmap_size = 0x0UL;
+	kernel_pmap->nested_region_unnested_table_bitmap = NULL;
+	kernel_pmap->nested_region_unnested_table_bitmap_size = 0x0UL;
 	kernel_pmap->type = PMAP_TYPE_KERNEL;
 
 	kernel_pmap->hw_asid = 0;
@@ -2991,7 +2965,6 @@ pmap_create_options_internal(
 
 
 	p->pmap_vm_map_cs_enforced = false;
-	p->min = 0;
 
 
 #if CONFIG_ROSETTA
@@ -3024,6 +2997,8 @@ pmap_create_options_internal(
 	}
 #endif /* __ARM_MIXED_PAGE_SIZE__ */
 	p->max = pmap_user_va_size(p);
+	/* Don't allow mapping the first page (i.e. NULL or near-NULL). */
+	p->min = pt_attr_page_size(pmap_get_pt_attr(p));
 
 	if (!pmap_get_pt_ops(p)->alloc_id(p)) {
 		local_kr = KERN_NO_SPACE;
@@ -3061,8 +3036,8 @@ pmap_create_options_internal(
 	 */
 	p->nested_region_addr = 0x0ULL;
 	p->nested_region_size = 0x0ULL;
-	p->nested_region_asid_bitmap = NULL;
-	p->nested_region_asid_bitmap_size = 0x0UL;
+	p->nested_region_unnested_table_bitmap = NULL;
+	p->nested_region_unnested_table_bitmap_size = 0x0UL;
 
 	p->nested_no_bounds_ref_state = NESTED_NO_BOUNDS_REF_NONE;
 	p->nested_no_bounds_refcnt = 0;
@@ -3358,12 +3333,12 @@ pmap_destroy_internal(
 
 	pmap_check_ledgers(pmap);
 
-	if (pmap->nested_region_asid_bitmap) {
+	if (pmap->nested_region_unnested_table_bitmap) {
 #if XNU_MONITOR
-		pmap_pages_free(kvtophys_nofail((vm_offset_t)(pmap->nested_region_asid_bitmap)), PAGE_SIZE);
+		pmap_pages_free(kvtophys_nofail((vm_offset_t)(pmap->nested_region_unnested_table_bitmap)), PAGE_SIZE);
 #else
-		kfree_data(pmap->nested_region_asid_bitmap,
-		    pmap->nested_region_asid_bitmap_size * sizeof(unsigned int));
+		kfree_data(pmap->nested_region_unnested_table_bitmap,
+		    pmap->nested_region_unnested_table_bitmap_size * sizeof(unsigned int));
 #endif
 	}
 
@@ -4877,6 +4852,11 @@ pmap_page_protect_options_with_flush_range(
 
 		/* Remove the mapping if new protection is NONE */
 		if (remove) {
+			if (__improbable(pmap->type == PMAP_TYPE_COMMPAGE)) {
+				panic("%s: trying to remove mappings from a COMMPAGE pmap %p when unmapping ppnum %u.",
+				    __func__, pmap, ppnum);
+			}
+
 			const bool is_internal = ppattr_pve_is_internal(pai, pve_p, pve_ptep_idx);
 			const bool is_altacct = ppattr_pve_is_altacct(pai, pve_p, pve_ptep_idx);
 			const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
@@ -5951,13 +5931,13 @@ pmap_construct_pte(
 	} else {
 		if (pmap->type != PMAP_TYPE_NESTED) {
 			pte |= ARM_PTE_NG;
-		} else if ((pmap->nested_region_asid_bitmap)
+		} else if ((pmap->nested_region_unnested_table_bitmap)
 		    && (va >= pmap->nested_region_addr)
 		    && (va < (pmap->nested_region_addr + pmap->nested_region_size))) {
 			unsigned int index = (unsigned int)((va - pmap->nested_region_addr)  >> pt_attr_twig_shift(pt_attr));
 
-			if ((pmap->nested_region_asid_bitmap)
-			    && testbit(index, (int *)pmap->nested_region_asid_bitmap)) {
+			if ((pmap->nested_region_unnested_table_bitmap)
+			    && testbit(index, (int *)pmap->nested_region_unnested_table_bitmap)) {
 				pte |= ARM_PTE_NG;
 			}
 		}
@@ -6025,15 +6005,19 @@ pmap_enter_options_internal(
 
 #if XNU_MONITOR
 	if (__improbable((options & PMAP_OPTIONS_NOWAIT) == 0)) {
-		panic("pmap_enter_options() called without PMAP_OPTIONS_NOWAIT set");
+		panic("%s called without PMAP_OPTIONS_NOWAIT set", __func__);
 	}
 #endif
 
 	__unused const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
 
-	if ((v) & pt_attr_leaf_offmask(pt_attr)) {
-		panic("pmap_enter_options() pmap %p v 0x%llx",
-		    pmap, (uint64_t)v);
+	if (__improbable(v & pt_attr_leaf_offmask(pt_attr))) {
+		panic("%s: pmap %p v 0x%llx not page-aligned",
+		    __func__, pmap, (unsigned long long)v);
+	}
+
+	if (__improbable((v < pmap->min) || (v >= pmap->max))) {
+		panic("%s: attempt to map out-of-bounds VA 0x%llx in pmap %p", __func__, (unsigned long long)v, pmap);
 	}
 
 	/* Only check kernel_pmap here as CPUWINDOWS only exists in kernel address space. */
@@ -8884,11 +8868,19 @@ pmap_set_nested_internal(
 	pmap_t pmap)
 {
 	validate_pmap_mutable(pmap);
-	if (__improbable(pmap->type != PMAP_TYPE_USER)) {
+	if (__improbable(!(os_atomic_cmpxchg(&pmap->type, PMAP_TYPE_USER, PMAP_TYPE_NESTED, seq_cst)))) {
 		panic("%s: attempt to nest unsupported pmap %p of type 0x%hhx",
 		    __func__, pmap, pmap->type);
 	}
-	pmap->type = PMAP_TYPE_NESTED;
+
+	/**
+	 * Ensure that a (potentially concurrent) call to pmap_nest() hasn't tried to give
+	 * this pmap its own nested pmap.
+	 */
+	if (__improbable(os_atomic_load(&pmap->nested_pmap, seq_cst) != NULL)) {
+		panic("%s: attempt to nest pmap %p which already has a nested pmap", __func__, pmap);
+	}
+
 	pmap_get_pt_ops(pmap)->free_id(pmap);
 }
 
@@ -9469,10 +9461,10 @@ pmap_nest_internal(
 	vm_map_offset_t vaddr;
 	tt_entry_t     *stte_p;
 	tt_entry_t     *gtte_p;
-	unsigned int    nested_region_asid_bitmap_size;
-	unsigned int*   nested_region_asid_bitmap = NULL;
-	unsigned int    new_nested_region_asid_bitmap_size;
-	unsigned int*   new_nested_region_asid_bitmap = NULL;
+	uint64_t        nested_region_unnested_table_bitmap_size;
+	unsigned int*   nested_region_unnested_table_bitmap = NULL;
+	uint64_t        new_nested_region_unnested_table_bitmap_size;
+	unsigned int*   new_nested_region_unnested_table_bitmap = NULL;
 	int             expand_options = 0;
 	bool            deref_subord = true;
 	bool            grand_locked = false;
@@ -9529,16 +9521,23 @@ pmap_nest_internal(
 		panic("%s: grand pmap %p is of unsupported type 0x%hhx for nesting", __func__, grand, grand->type);
 	}
 
-	if (subord->nested_region_asid_bitmap == NULL) {
-		nested_region_asid_bitmap_size  = (unsigned int)(size >> pt_attr_twig_shift(pt_attr)) / (sizeof(unsigned int) * NBBY);
+	if (subord->nested_region_unnested_table_bitmap == NULL) {
+		nested_region_unnested_table_bitmap_size = (size >> pt_attr_twig_shift(pt_attr)) / (sizeof(unsigned int) * NBBY) + 1;
+
+		if (__improbable((nested_region_unnested_table_bitmap_size > UINT_MAX))) {
+			panic("%s: subord->nested_region_unnested_table_bitmap_size=%llu will truncate, "
+			    "grand=%p, subord=%p, vstart=0x%llx, size=%llx",
+			    __func__, nested_region_unnested_table_bitmap_size,
+			    grand, subord, vstart, size);
+		}
 
 #if XNU_MONITOR
 		pmap_paddr_t pa = 0;
 
-		if (__improbable((nested_region_asid_bitmap_size * sizeof(unsigned int)) > PAGE_SIZE)) {
-			panic("%s: nested_region_asid_bitmap_size=%u will not fit in a page, "
+		if (__improbable((nested_region_unnested_table_bitmap_size * sizeof(unsigned int)) > PAGE_SIZE)) {
+			panic("%s: nested_region_unnested_table_bitmap_size=%llu will not fit in a page, "
 			    "grand=%p, subord=%p, vstart=0x%llx, size=%llx",
-			    __FUNCTION__, nested_region_asid_bitmap_size,
+			    __FUNCTION__, nested_region_unnested_table_bitmap_size,
 			    grand, subord, vstart, size);
 		}
 
@@ -9550,10 +9549,10 @@ pmap_nest_internal(
 
 		assert(pa);
 
-		nested_region_asid_bitmap = (unsigned int *)phystokv(pa);
+		nested_region_unnested_table_bitmap = (unsigned int *)phystokv(pa);
 #else
-		nested_region_asid_bitmap = kalloc_data(
-			nested_region_asid_bitmap_size * sizeof(unsigned int),
+		nested_region_unnested_table_bitmap = kalloc_data(
+			nested_region_unnested_table_bitmap_size * sizeof(unsigned int),
 			Z_WAITOK | Z_ZERO);
 #endif
 
@@ -9562,29 +9561,29 @@ pmap_nest_internal(
 			goto nest_cleanup;
 		}
 
-		if (subord->nested_region_asid_bitmap == NULL) {
-			subord->nested_region_asid_bitmap_size = nested_region_asid_bitmap_size;
+		if (subord->nested_region_unnested_table_bitmap == NULL) {
+			subord->nested_region_unnested_table_bitmap_size = (unsigned int) nested_region_unnested_table_bitmap_size;
 			subord->nested_region_addr = vstart;
 			subord->nested_region_size = (mach_vm_offset_t) size;
 
 			/**
 			 * Ensure that the rest of the subord->nested_region_* fields are
-			 * initialized and visible before setting the nested_region_asid_bitmap
+			 * initialized and visible before setting the nested_region_unnested_table_bitmap
 			 * field (which is used as the flag to say that the rest are initialized).
 			 */
 			__builtin_arm_dmb(DMB_ISHST);
-			subord->nested_region_asid_bitmap = nested_region_asid_bitmap;
-			nested_region_asid_bitmap = NULL;
+			subord->nested_region_unnested_table_bitmap = nested_region_unnested_table_bitmap;
+			nested_region_unnested_table_bitmap = NULL;
 		}
 		pmap_unlock(subord, PMAP_LOCK_EXCLUSIVE);
-		if (nested_region_asid_bitmap != NULL) {
+		if (nested_region_unnested_table_bitmap != NULL) {
 #if XNU_MONITOR
-			pmap_pages_free(kvtophys_nofail((vm_offset_t)nested_region_asid_bitmap), PAGE_SIZE);
+			pmap_pages_free(kvtophys_nofail((vm_offset_t)nested_region_unnested_table_bitmap), PAGE_SIZE);
 #else
-			kfree_data(nested_region_asid_bitmap,
-			    nested_region_asid_bitmap_size * sizeof(unsigned int));
+			kfree_data(nested_region_unnested_table_bitmap,
+			    nested_region_unnested_table_bitmap_size * sizeof(unsigned int));
 #endif
-			nested_region_asid_bitmap = NULL;
+			nested_region_unnested_table_bitmap = NULL;
 		}
 	}
 
@@ -9597,20 +9596,26 @@ pmap_nest_internal(
 	if ((subord->nested_region_addr + subord->nested_region_size) < vend) {
 		uint64_t        new_size;
 
-		nested_region_asid_bitmap = NULL;
-		nested_region_asid_bitmap_size = 0;
+		nested_region_unnested_table_bitmap = NULL;
+		nested_region_unnested_table_bitmap_size = 0ULL;
 		new_size =  vend - subord->nested_region_addr;
 
-		/* We explicitly add 1 to the bitmap allocation size in order to avoid issues with truncation. */
-		new_nested_region_asid_bitmap_size  = (unsigned int)((new_size >> pt_attr_twig_shift(pt_attr)) / (sizeof(unsigned int) * NBBY)) + 1;
+		new_nested_region_unnested_table_bitmap_size = (new_size >> pt_attr_twig_shift(pt_attr)) / (sizeof(unsigned int) * NBBY) + 1;
+
+		if (__improbable((new_nested_region_unnested_table_bitmap_size > UINT_MAX))) {
+			panic("%s: subord->nested_region_unnested_table_bitmap_size=%llu will truncate, "
+			    "grand=%p, subord=%p, vstart=0x%llx, size=%llx",
+			    __func__, new_nested_region_unnested_table_bitmap_size,
+			    grand, subord, vstart, size);
+		}
 
 #if XNU_MONITOR
 		pmap_paddr_t pa = 0;
 
-		if (__improbable((new_nested_region_asid_bitmap_size * sizeof(unsigned int)) > PAGE_SIZE)) {
-			panic("%s: new_nested_region_asid_bitmap_size=%u will not fit in a page, "
+		if (__improbable((new_nested_region_unnested_table_bitmap_size * sizeof(unsigned int)) > PAGE_SIZE)) {
+			panic("%s: new_nested_region_unnested_table_bitmap_size=%llu will not fit in a page, "
 			    "grand=%p, subord=%p, vstart=0x%llx, new_size=%llx",
-			    __FUNCTION__, new_nested_region_asid_bitmap_size,
+			    __FUNCTION__, new_nested_region_unnested_table_bitmap_size,
 			    grand, subord, vstart, new_size);
 		}
 
@@ -9622,10 +9627,10 @@ pmap_nest_internal(
 
 		assert(pa);
 
-		new_nested_region_asid_bitmap = (unsigned int *)phystokv(pa);
+		new_nested_region_unnested_table_bitmap = (unsigned int *)phystokv(pa);
 #else
-		new_nested_region_asid_bitmap = kalloc_data(
-			new_nested_region_asid_bitmap_size * sizeof(unsigned int),
+		new_nested_region_unnested_table_bitmap = kalloc_data(
+			new_nested_region_unnested_table_bitmap_size * sizeof(unsigned int),
 			Z_WAITOK | Z_ZERO);
 #endif
 		if (!pmap_lock_preempt(subord, PMAP_LOCK_EXCLUSIVE)) {
@@ -9634,33 +9639,33 @@ pmap_nest_internal(
 		}
 
 		if (subord->nested_region_size < new_size) {
-			bcopy(subord->nested_region_asid_bitmap,
-			    new_nested_region_asid_bitmap, subord->nested_region_asid_bitmap_size);
-			nested_region_asid_bitmap_size  = subord->nested_region_asid_bitmap_size;
-			nested_region_asid_bitmap = subord->nested_region_asid_bitmap;
-			subord->nested_region_asid_bitmap = new_nested_region_asid_bitmap;
-			subord->nested_region_asid_bitmap_size = new_nested_region_asid_bitmap_size;
+			bcopy(subord->nested_region_unnested_table_bitmap,
+			    new_nested_region_unnested_table_bitmap, subord->nested_region_unnested_table_bitmap_size);
+			nested_region_unnested_table_bitmap_size  = subord->nested_region_unnested_table_bitmap_size;
+			nested_region_unnested_table_bitmap = subord->nested_region_unnested_table_bitmap;
+			subord->nested_region_unnested_table_bitmap = new_nested_region_unnested_table_bitmap;
+			subord->nested_region_unnested_table_bitmap_size = (unsigned int) new_nested_region_unnested_table_bitmap_size;
 			subord->nested_region_size = new_size;
-			new_nested_region_asid_bitmap = NULL;
+			new_nested_region_unnested_table_bitmap = NULL;
 		}
 		pmap_unlock(subord, PMAP_LOCK_EXCLUSIVE);
-		if (nested_region_asid_bitmap != NULL) {
+		if (nested_region_unnested_table_bitmap != NULL) {
 #if XNU_MONITOR
-			pmap_pages_free(kvtophys_nofail((vm_offset_t)nested_region_asid_bitmap), PAGE_SIZE);
+			pmap_pages_free(kvtophys_nofail((vm_offset_t)nested_region_unnested_table_bitmap), PAGE_SIZE);
 #else
-			kfree_data(nested_region_asid_bitmap,
-			    nested_region_asid_bitmap_size * sizeof(unsigned int));
+			kfree_data(nested_region_unnested_table_bitmap,
+			    nested_region_unnested_table_bitmap_size * sizeof(unsigned int));
 #endif
-			nested_region_asid_bitmap = NULL;
+			nested_region_unnested_table_bitmap = NULL;
 		}
-		if (new_nested_region_asid_bitmap != NULL) {
+		if (new_nested_region_unnested_table_bitmap != NULL) {
 #if XNU_MONITOR
-			pmap_pages_free(kvtophys_nofail((vm_offset_t)new_nested_region_asid_bitmap), PAGE_SIZE);
+			pmap_pages_free(kvtophys_nofail((vm_offset_t)new_nested_region_unnested_table_bitmap), PAGE_SIZE);
 #else
-			kfree_data(new_nested_region_asid_bitmap,
-			    new_nested_region_asid_bitmap_size * sizeof(unsigned int));
+			kfree_data(new_nested_region_unnested_table_bitmap,
+			    new_nested_region_unnested_table_bitmap_size * sizeof(unsigned int));
 #endif
-			new_nested_region_asid_bitmap = NULL;
+			new_nested_region_unnested_table_bitmap = NULL;
 		}
 	}
 
@@ -9669,7 +9674,14 @@ pmap_nest_internal(
 		goto nest_cleanup;
 	}
 
-	if (os_atomic_cmpxchg(&grand->nested_pmap, PMAP_NULL, subord, relaxed)) {
+	if (os_atomic_cmpxchg(&grand->nested_pmap, PMAP_NULL, subord, seq_cst)) {
+		/**
+		 * Ensure that a concurrent call to pmap_set_nested() hasn't turned grand
+		 * into a nested pmap, which would then produce multiple levels of nesting.
+		 */
+		if (__improbable(os_atomic_load(&grand->type, seq_cst) != PMAP_TYPE_USER)) {
+			panic("%s: attempt to nest into non-USER pmap %p", __func__, grand);
+		}
 		/*
 		 * If this is grand's first nesting operation, keep the reference on subord.
 		 * It will be released by pmap_destroy_internal() when grand is destroyed.
@@ -9756,6 +9768,9 @@ nest_grand:
 	}
 	while (vaddr < true_end) {
 		stte_p = pmap_tte(subord, vaddr);
+		if (__improbable(stte_p == PT_ENTRY_NULL)) {
+			panic("%s: subord pmap %p not exapnded at va 0x%llx", __func__, subord, (unsigned long long)vaddr);
+		}
 		gtte_p = pmap_tte(grand, vaddr);
 		if (gtte_p == PT_ENTRY_NULL) {
 			pmap_unlock(grand, PMAP_LOCK_EXCLUSIVE);
@@ -9813,20 +9828,20 @@ nest_cleanup:
 		*krp = kr;
 	}
 #endif
-	if (nested_region_asid_bitmap != NULL) {
+	if (nested_region_unnested_table_bitmap != NULL) {
 #if XNU_MONITOR
-		pmap_pages_free(kvtophys_nofail((vm_offset_t)nested_region_asid_bitmap), PAGE_SIZE);
+		pmap_pages_free(kvtophys_nofail((vm_offset_t)nested_region_unnested_table_bitmap), PAGE_SIZE);
 #else
-		kfree_data(nested_region_asid_bitmap,
-		    nested_region_asid_bitmap_size * sizeof(unsigned int));
+		kfree_data(nested_region_unnested_table_bitmap,
+		    nested_region_unnested_table_bitmap_size * sizeof(unsigned int));
 #endif
 	}
-	if (new_nested_region_asid_bitmap != NULL) {
+	if (new_nested_region_unnested_table_bitmap != NULL) {
 #if XNU_MONITOR
-		pmap_pages_free(kvtophys_nofail((vm_offset_t)new_nested_region_asid_bitmap), PAGE_SIZE);
+		pmap_pages_free(kvtophys_nofail((vm_offset_t)new_nested_region_unnested_table_bitmap), PAGE_SIZE);
 #else
-		kfree_data(new_nested_region_asid_bitmap,
-		    new_nested_region_asid_bitmap_size * sizeof(unsigned int));
+		kfree_data(new_nested_region_unnested_table_bitmap,
+		    new_nested_region_unnested_table_bitmap_size * sizeof(unsigned int));
 #endif
 	}
 	if (deref_subord) {
@@ -10017,7 +10032,7 @@ pmap_unnest_options_internal(
 			 * the run of PTEs.  We therefore also need to check for a non-twig-aligned starting
 			 * address.
 			 */
-			if (!testbit(current_index, (int *)grand->nested_pmap->nested_region_asid_bitmap) ||
+			if (!testbit(current_index, (int *)grand->nested_pmap->nested_region_unnested_table_bitmap) ||
 			    (addr & pt_attr_twig_offmask(pt_attr))) {
 				/*
 				 * Mark the 'twig' region as being unnested.  Every mapping entered within
@@ -10028,7 +10043,7 @@ pmap_unnest_options_internal(
 				 * is later inserted for the same VA in a pmap which has fully unnested this
 				 * region.
 				 */
-				setbit(current_index, (int *)grand->nested_pmap->nested_region_asid_bitmap);
+				setbit(current_index, (int *)grand->nested_pmap->nested_region_unnested_table_bitmap);
 				for (cpte = bpte; (bpte != NULL) && (addr < vlim); cpte += PAGE_RATIO) {
 					pmap_paddr_t    pa;
 					unsigned int    pai = 0;
@@ -10120,6 +10135,8 @@ unnest_subord_done:
 	if (addr < grand->nested_pmap->nested_region_true_start) {
 		addr = grand->nested_pmap->nested_region_true_start;
 	}
+
+	start = addr;
 
 	while (addr < true_end) {
 		tte_p = pmap_tte(grand, addr);
@@ -10268,6 +10285,9 @@ pmap_disable_NX(
 #else
 #define ARM64_FULL_TLB_FLUSH_THRESHOLD  256
 #endif // __ARM_RANGE_TLBI__
+static_assert(ARM64_FULL_TLB_FLUSH_THRESHOLD < (1ULL << (sizeof(ppnum_t) * 8)),
+    "ARM64_FULL_TLB_FLUSH_THRESHOLD is too large so that the integer conversion"
+    "of npages to 32 bits below may truncate.");
 
 static void
 flush_mmu_tlb_region_asid_async(
@@ -10279,8 +10299,8 @@ flush_mmu_tlb_region_asid_async(
 {
 	unsigned long pmap_page_shift = pt_attr_leaf_shift(pmap_get_pt_attr(pmap));
 	const uint64_t pmap_page_size = 1ULL << pmap_page_shift;
-	ppnum_t npages = (ppnum_t)(length >> pmap_page_shift);
-	uint32_t    asid;
+	size_t npages = length >> pmap_page_shift;
+	uint32_t asid;
 
 	asid = pmap->hw_asid;
 
@@ -10299,7 +10319,11 @@ flush_mmu_tlb_region_asid_async(
 	}
 #if __ARM_RANGE_TLBI__
 	if (npages > ARM64_RANGE_TLB_FLUSH_THRESHOLD) {
-		va = generate_rtlbi_param(npages, asid, va, pmap_page_shift);
+		/**
+		 * Note that casting npages to 32 bits here is always safe thanks to
+		 * the ARM64_FULL_TLB_FLUSH_THRESHOLD check above.
+		 */
+		va = generate_rtlbi_param((ppnum_t) npages, asid, va, pmap_page_shift);
 		if (pmap->type == PMAP_TYPE_NESTED) {
 			flush_mmu_tlb_allrange_async(va, last_level_only, strong);
 		} else {

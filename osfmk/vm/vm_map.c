@@ -2811,7 +2811,7 @@ vm_map_enter(
 		}
 
 		if (overwrite) {
-			vmr_flags_t remove_flags = VM_MAP_REMOVE_NO_MAP_ALIGN;
+			vmr_flags_t remove_flags = VM_MAP_REMOVE_NO_MAP_ALIGN | VM_MAP_REMOVE_TO_OVERWRITE;
 			kern_return_t remove_kr;
 
 			/*
@@ -7896,10 +7896,11 @@ virt_memory_guard_ast(
 		}
 	}
 
+	const bool fatal = task->task_exc_guard & TASK_EXC_GUARD_VM_FATAL;
 	/* Raise exception synchronously and see if handler claimed it */
-	sync_exception_result = task_exception_notify(EXC_GUARD, code, subcode);
+	sync_exception_result = task_exception_notify(EXC_GUARD, code, subcode, fatal);
 
-	if (task->task_exc_guard & TASK_EXC_GUARD_VM_FATAL) {
+	if (fatal) {
 		/*
 		 * If Synchronous EXC_GUARD delivery was successful then
 		 * kill the process and return, else kill the process
@@ -8106,6 +8107,18 @@ vm_map_delete(
 
 	if (map->terminated || os_ref_get_count_raw(&map->map_refcnt) == 0) {
 		state |= VMDS_GAPS_OK;
+	}
+
+	if (map->corpse_source &&
+	    !(flags & VM_MAP_REMOVE_TO_OVERWRITE) &&
+	    !map->terminated) {
+		/*
+		 * The map is being used for corpses related diagnostics.
+		 * So skip any entry removal to avoid perturbing the map state.
+		 * The cleanup will happen in task_terminate_internal after the
+		 * call to task_port_no_senders.
+		 */
+		goto out;
 	}
 
 	interruptible = (flags & VM_MAP_REMOVE_INTERRUPTIBLE) ?
@@ -22112,6 +22125,37 @@ done:
 
 #endif /* CODE_SIGNING_MONITOR */
 
+inline bool
+vm_map_is_corpse_source(vm_map_t map)
+{
+	bool status = false;
+	if (map) {
+		vm_map_lock_read(map);
+		status = map->corpse_source;
+		vm_map_unlock_read(map);
+	}
+	return status;
+}
+
+inline void
+vm_map_set_corpse_source(vm_map_t map)
+{
+	if (map) {
+		vm_map_lock(map);
+		map->corpse_source = true;
+		vm_map_unlock(map);
+	}
+}
+
+inline void
+vm_map_unset_corpse_source(vm_map_t map)
+{
+	if (map) {
+		vm_map_lock(map);
+		map->corpse_source = false;
+		vm_map_unlock(map);
+	}
+}
 /*
  * FORKED CORPSE FOOTPRINT
  *

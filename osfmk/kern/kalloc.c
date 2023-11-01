@@ -2372,7 +2372,7 @@ kalloc_use_shared_heap(
 	zone_id_t               zstart,
 	zalloc_flags_t         *flags)
 {
-	if (kheap != KHEAP_DATA_BUFFERS) {
+	if (kheap->kh_heap_id != KHEAP_ID_DATA_BUFFERS) {
 		zone_stats_t zstats_cpu = zpercpu_get(zstats);
 
 		if (os_atomic_load(&zstats_cpu->zs_alloc_not_shared, relaxed) == 0) {

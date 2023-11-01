@@ -44,7 +44,7 @@
 void configure_misc_apple_boot_args(void);
 void configure_misc_apple_regs(bool is_boot_cpu);
 void configure_timer_apple_regs(void);
-void configure_late_apple_regs(void);
+void configure_late_apple_regs(bool cold_boot);
 
 void
 configure_misc_apple_boot_args(void)
@@ -88,21 +88,24 @@ cpu_needs_throttle_tunable(uint32_t midr_pnum)
  * and after cpu_number() is valid.
  */
 void
-configure_late_apple_regs(void)
+configure_late_apple_regs(bool cold_boot)
 {
 	const ml_topology_info_t *tinfo = ml_get_topology_info();
 	uint32_t midr_pnum = machine_read_midr() & MIDR_EL1_PNUM_MASK;
 	uint64_t reg_val;
 
-	if (cpu_needs_throttle_tunable(midr_pnum)) {
-		vm_offset_t cpu_impl = tinfo->cpus[cpu_number()].cpu_IMPL_regs;
-		const uint64_t c1pptThrtlRate = 0xb2;
-
-		reg_val = ml_io_read64(cpu_impl + CORE_THRTL_CFG2_OFFSET);
-		reg_val &= ~(0xffULL << 56);
-		reg_val |= c1pptThrtlRate << 56;
-		ml_io_write64(cpu_impl + CORE_THRTL_CFG2_OFFSET, reg_val);
+	bool apply_late_pio_regs = cold_boot;
+	if (apply_late_pio_regs) {
+		if (cpu_needs_throttle_tunable(midr_pnum)) {
+			vm_offset_t cpu_impl = tinfo->cpus[cpu_number()].cpu_IMPL_regs;
+			const uint64_t c1pptThrtlRate = 0xb2;
+			reg_val = ml_io_read64(cpu_impl + CORE_THRTL_CFG2_OFFSET);
+			reg_val &= ~CORE_THRTL_CFG2_c1pptThrtlRate_mask;
+			reg_val |= c1pptThrtlRate << CORE_THRTL_CFG2_c1pptThrtlRate_shift;
+			ml_io_write64(cpu_impl + CORE_THRTL_CFG2_OFFSET, reg_val);
+		}
 	}
+
 
 }
 #endif /* APPLE_ARM64_ARCH_FAMILY */
@@ -132,6 +135,7 @@ vmapple_pac_get_default_keys()
 	asm volatile (
                 "mov	x0, %[fn]"      "\n"
                 "hvc	#0"             "\n"
+                "cbnz	x0, ."          "\n"
                 "str	x2, %[b_key]"   "\n"
                 "str	x3, %[el0_key]" "\n"
                 : [b_key] "=m"(vmapple_default_rop_pid),

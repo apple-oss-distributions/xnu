@@ -2623,7 +2623,6 @@ m_tag_kalloc_dummynet(u_int32_t id, u_int16_t type, uint16_t len, int wait)
 {
 	struct dummynet_tag_container *tag_container;
 	struct m_tag *tag = NULL;
-	zalloc_flags_t flags = M_ZERO;
 
 	assert3u(id, ==, KERNEL_MODULE_TAG_ID);
 	assert3u(type, ==, KERNEL_TAG_TYPE_DUMMYNET);
@@ -2633,16 +2632,7 @@ m_tag_kalloc_dummynet(u_int32_t id, u_int16_t type, uint16_t len, int wait)
 		return NULL;
 	}
 
-	/*
-	 * Using Z_NOWAIT could cause retransmission delays when there aren't
-	 * many other colocated types in the zone that would prime it. Use
-	 * Z_NOPAGEWAIT instead which will only fail to allocate when zalloc
-	 * needs to block on the VM for pages.
-	 */
-	if (wait == M_NOWAIT) {
-		flags |= Z_NOPAGEWAIT;
-	}
-	tag_container = kalloc_type(struct dummynet_tag_container, flags);
+	tag_container = kalloc_type(struct dummynet_tag_container, wait | M_ZERO);
 	if (tag_container != NULL) {
 		tag =  &tag_container->dtc_m_tag;
 

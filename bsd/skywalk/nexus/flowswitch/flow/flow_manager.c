@@ -756,10 +756,10 @@ flow_req_prepare(struct nx_flow_req *req, struct kern_nexus *nx,
 	}
 
 	if (req->nfr_flow_demux_count > 0) {
-		if (req->nfr_transport_protocol != IPPROTO_UDP) {
+		if (req->nfr_ip_protocol != IPPROTO_UDP) {
 			err = EINVAL;
-			SK_ERR("invalid transport protocol(%u) for flow demux",
-			    req->nfr_transport_protocol);
+			SK_ERR("invalid ip protocol(%u) for flow demux",
+			    req->nfr_ip_protocol);
 			goto fail;
 		}
 

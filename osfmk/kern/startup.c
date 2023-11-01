@@ -952,8 +952,7 @@ load_context(
 	struct recount_snap snap = { 0 };
 	recount_snapshot(&snap);
 	processor->last_dispatch = snap.rsn_time_mach;
-	recount_processor_run(&processor->pr_recount, &snap);
-	recount_update_snap(&snap);
+	recount_processor_online(processor, &snap);
 
 	smr_cpu_join(processor, processor->last_dispatch);
 

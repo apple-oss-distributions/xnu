@@ -300,6 +300,35 @@ device_pager_init(
 	return KERN_SUCCESS;
 }
 
+static kern_return_t
+device_pager_data_action(
+	memory_object_t                 mem_obj,
+	memory_object_offset_t          offset,
+	memory_object_cluster_size_t    length,
+	vm_prot_t                       protection)
+{
+	device_pager_t  device_object;
+	memory_object_offset_t end_offset;
+	kern_return_t kr;
+
+	device_object = device_pager_lookup(mem_obj);
+
+	if (device_object == DEVICE_PAGER_NULL) {
+		panic("%s: lookup failed", __func__);
+	}
+
+	if (offset >= device_object->size ||
+	    os_add_overflow(offset, length, &end_offset) ||
+	    end_offset > device_object->size) {
+		return KERN_INVALID_VALUE;
+	}
+
+	__IGNORE_WCASTALIGN(kr = device_data_action(device_object->device_handle,
+	    (ipc_port_t) device_object, protection, offset, length));
+
+	return kr;
+}
+
 /*
  *
  */
@@ -315,17 +344,8 @@ device_pager_data_return(
 	__unused boolean_t              kernel_copy,
 	__unused int                    upl_flags)
 {
-	device_pager_t  device_object;
-
-	device_object = device_pager_lookup(mem_obj);
-	if (device_object == DEVICE_PAGER_NULL) {
-		panic("device_pager_data_return: lookup failed");
-	}
-
-	__IGNORE_WCASTALIGN(return device_data_action(device_object->device_handle,
-	    (ipc_port_t) device_object,
-	    VM_PROT_READ | VM_PROT_WRITE,
-	    offset, data_cnt));
+	return device_pager_data_action(mem_obj, offset, data_cnt,
+	           VM_PROT_READ | VM_PROT_WRITE);
 }
 
 /*
@@ -339,18 +359,7 @@ device_pager_data_request(
 	__unused vm_prot_t      protection_required,
 	__unused memory_object_fault_info_t     fault_info)
 {
-	device_pager_t  device_object;
-
-	device_object = device_pager_lookup(mem_obj);
-
-	if (device_object == DEVICE_PAGER_NULL) {
-		panic("device_pager_data_request: lookup failed");
-	}
-
-	__IGNORE_WCASTALIGN(device_data_action(device_object->device_handle,
-	    (ipc_port_t) device_object,
-	    VM_PROT_READ, offset, length));
-	return KERN_SUCCESS;
+	return device_pager_data_action(mem_obj, offset, length, VM_PROT_READ);
 }
 
 /*

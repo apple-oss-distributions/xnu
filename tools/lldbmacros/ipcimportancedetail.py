@@ -45,14 +45,14 @@ class IIINode(object):
         self.children.append(elemNode)
 
     def __str__(self):
-        if unsigned(self.elem.iii_elem.iie_bits) & 0x80000000:
+        if unsigned(self.elem.iii_elem.iie_bits) & xnudefines.IIE_TYPE_MASK:
             return GetIPCImportanceInheritSummary(self.elem)
         else:
             return GetIPCImportantTaskSummary(self.elem)
     
     def GetShortSummary(self):
         to_task = self.GetToTask()
-        if unsigned(self.elem.iii_elem.iie_bits) & 0x80000000:
+        if unsigned(self.elem.iii_elem.iie_bits) & xnudefines.IIE_TYPE_MASK:
             return "{: <#018x} INH ({:d}){: <s}".format(self.elem, GetProcPIDForTask(to_task), GetProcNameForTask(to_task))
         else:
             return "{: <#018x} IIT ({:d}){: <s}".format(self.elem, GetProcPIDForTask(to_task), GetProcNameForTask(to_task))
@@ -65,7 +65,7 @@ class IIINode(object):
         return "\n".join(retval)
 
     def GetToTask(self):
-        if unsigned(self.elem.iii_elem.iie_bits) & 0x80000000:
+        if unsigned(self.elem.iii_elem.iie_bits) & xnudefines.IIE_TYPE_MASK:
             return self.elem.iii_to_task.iit_task
         else:
             return self.elem.iit_task
@@ -80,15 +80,15 @@ class IIINode(object):
         from_elem = Cast(cur_elem.iii_from_elem, 'ipc_importance_inherit *')
         # NOTE: We are exploiting the layout of iit and iii to have iie at the begining.
         # so casting one to another is fine as long as we tread carefully.
-        
-        while unsigned(from_elem.iii_elem.iie_bits) & 0x80000000:
+
+        while (unsigned(from_elem.iii_elem.iie_bits) & xnudefines.IIE_TYPE_MASK) == xnudefines.IIE_TYPE_INHERIT:
             out_str += " <- {: <#018x} INH ({:d}){: <s}".format(from_elem, GetProcPIDForTask(from_elem.iii_to_task.iit_task), GetProcNameForTask(from_elem.iii_to_task.iit_task))
             from_elem = Cast(from_elem.iii_from_elem, 'ipc_importance_inherit *')
 
-        if unsigned(from_elem.iii_elem.iie_bits) & 0x80000000 == 0:
+        if (unsigned(from_elem.iii_elem.iie_bits) & xnudefines.IIE_TYPE_MASK) == xnudefines.IIE_TYPE_TASK:
             iit_elem = Cast(from_elem, 'ipc_importance_task *')
             out_str += " <- {: <#018x} IIT ({:d}){: <s}".format(iit_elem, GetProcPIDForTask(iit_elem.iit_task), GetProcNameForTask(iit_elem.iit_task))
-        
+
         return out_str
 
         #unused
@@ -97,13 +97,13 @@ class IIINode(object):
             out_str += "<-" + cur_elem.GetShortSummary()
             cur_elem = cur_elem.GetParentNode()
         return out_str
-        
+
 def GetIIIListFromIIT(iit, rootnode):
     """ walk the iii queue and find each III element in a list format
     """
     for iii in IterateQueue(iit.iit_inherits, 'struct ipc_importance_inherit *',  'iii_inheritance'):
         iiiNode = IIINode(iii, rootnode)
-        if unsigned(iii.iii_elem.iie_bits) & 0x80000000:
+        if unsigned(iii.iii_elem.iie_bits) & xnudefines.IIE_TYPE_MASK:
             rootnode.addChildNode(iiiNode)
             GetIIIListFromIIT(iii.iii_to_task, iiiNode)
             GetTaskNodeByKernelTaskObj(iiiNode.GetToTask()).AddImportanceNode(iiiNode)

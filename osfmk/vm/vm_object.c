@@ -269,6 +269,7 @@ static const struct vm_object vm_object_template = {
 	.wired_page_count = 0,
 	.reusable_page_count = 0,
 	.vo_copy = VM_OBJECT_NULL,
+	.vo_copy_version = 0,
 	.shadow = VM_OBJECT_NULL,
 	.vo_shadow_offset = (vm_object_offset_t) 0,
 	.pager = MEMORY_OBJECT_NULL,
@@ -1286,7 +1287,7 @@ vm_object_terminate(
 	    !(object->pageout)) {
 		vm_object_lock(shadow_object);
 		if (shadow_object->vo_copy == object) {
-			shadow_object->vo_copy = VM_OBJECT_NULL;
+			VM_OBJECT_COPY_SET(shadow_object, VM_OBJECT_NULL);
 		}
 		vm_object_unlock(shadow_object);
 	}
@@ -3665,7 +3666,7 @@ Retry:
 
 	vm_object_lock_assert_exclusive(src_object);
 	vm_object_reference_locked(src_object);
-	src_object->vo_copy = new_copy;
+	VM_OBJECT_COPY_SET(src_object, new_copy);
 	vm_object_unlock(src_object);
 	vm_object_unlock(new_copy);
 
@@ -4519,7 +4520,7 @@ vm_object_do_bypass(
 	 *	to us.  If it did, clear it.
 	 */
 	if (backing_object->vo_copy == object) {
-		backing_object->vo_copy = VM_OBJECT_NULL;
+		VM_OBJECT_COPY_SET(backing_object, VM_OBJECT_NULL);
 	}
 
 	/*

@@ -281,46 +281,46 @@ extern uint64_t memorystatus_apps_idle_delay_time;
  *	kMemorystatusKilled... Cause enum
  *	memorystatus_kill_cause_name[]
  */
-#define JETSAM_REASON_INVALID                                                           0
-#define JETSAM_REASON_GENERIC                                                           1
-#define JETSAM_REASON_MEMORY_HIGHWATER                                          2
-#define JETSAM_REASON_VNODE                                                                     3
-#define JETSAM_REASON_MEMORY_VMPAGESHORTAGE                                     4
-#define JETSAM_REASON_MEMORY_PROCTHRASHING                                      5
-#define JETSAM_REASON_MEMORY_FCTHRASHING                                        6
-#define JETSAM_REASON_MEMORY_PERPROCESSLIMIT                            7
-#define JETSAM_REASON_MEMORY_DISK_SPACE_SHORTAGE                        8
-#define JETSAM_REASON_MEMORY_IDLE_EXIT                                          9
-#define JETSAM_REASON_ZONE_MAP_EXHAUSTION                                       10
-#define JETSAM_REASON_MEMORY_VMCOMPRESSOR_THRASHING                     11
-#define JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE        12
-#define JETSAM_REASON_LOWSWAP                                   13
-#define JETSAM_REASON_MEMORY_SUSTAINED_PRESSURE                 14
-#define JETSAM_REASON_MEMORYSTATUS_MAX  JETSAM_REASON_MEMORY_SUSTAINED_PRESSURE
+#define JETSAM_REASON_INVALID                            0
+#define JETSAM_REASON_GENERIC                            1
+#define JETSAM_REASON_MEMORY_HIGHWATER                   2
+#define JETSAM_REASON_VNODE                              3
+#define JETSAM_REASON_MEMORY_VMPAGESHORTAGE              4
+#define JETSAM_REASON_MEMORY_PROCTHRASHING               5
+#define JETSAM_REASON_MEMORY_FCTHRASHING                 6
+#define JETSAM_REASON_MEMORY_PERPROCESSLIMIT             7
+#define JETSAM_REASON_MEMORY_DISK_SPACE_SHORTAGE         8
+#define JETSAM_REASON_MEMORY_IDLE_EXIT                   9
+#define JETSAM_REASON_ZONE_MAP_EXHAUSTION                10
+#define JETSAM_REASON_MEMORY_VMCOMPRESSOR_THRASHING      11
+#define JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE 12
+#define JETSAM_REASON_LOWSWAP                            13
+#define JETSAM_REASON_MEMORY_SUSTAINED_PRESSURE          14
+#define JETSAM_REASON_MEMORY_VMPAGEOUT_STARVATION        15
+#define JETSAM_REASON_MEMORYSTATUS_MAX  JETSAM_REASON_MEMORY_VMPAGEOUT_STARVATION
+/* non-memorystatus jetsam reasons */
+#define JETSAM_REASON_CPULIMIT                           100
+typedef uint64_t jetsam_reason_t;
 
-/*
- * Jetsam exit reason definitions - not related to memorystatus
- */
-#define JETSAM_REASON_CPULIMIT                  100
-
-/* Cause */
-enum {
-	kMemorystatusInvalid                                                    = JETSAM_REASON_INVALID,
-	kMemorystatusKilled                                                             = JETSAM_REASON_GENERIC,
-	kMemorystatusKilledHiwat                                                = JETSAM_REASON_MEMORY_HIGHWATER,
-	kMemorystatusKilledVnodes                                               = JETSAM_REASON_VNODE,
-	kMemorystatusKilledVMPageShortage                               = JETSAM_REASON_MEMORY_VMPAGESHORTAGE,
-	kMemorystatusKilledProcThrashing                                = JETSAM_REASON_MEMORY_PROCTHRASHING,
-	kMemorystatusKilledFCThrashing                                  = JETSAM_REASON_MEMORY_FCTHRASHING,
-	kMemorystatusKilledPerProcessLimit                              = JETSAM_REASON_MEMORY_PERPROCESSLIMIT,
-	kMemorystatusKilledDiskSpaceShortage                    = JETSAM_REASON_MEMORY_DISK_SPACE_SHORTAGE,
-	kMemorystatusKilledIdleExit                                             = JETSAM_REASON_MEMORY_IDLE_EXIT,
-	kMemorystatusKilledZoneMapExhaustion                    = JETSAM_REASON_ZONE_MAP_EXHAUSTION,
-	kMemorystatusKilledVMCompressorThrashing                = JETSAM_REASON_MEMORY_VMCOMPRESSOR_THRASHING,
-	kMemorystatusKilledVMCompressorSpaceShortage    = JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE,
-	kMemorystatusKilledLowSwap                      = JETSAM_REASON_LOWSWAP,
-	kMemorystatusKilledSustainedPressure            = JETSAM_REASON_MEMORY_SUSTAINED_PRESSURE
-};
+/* memorystatus kill cause */
+typedef enum {
+	kMemorystatusInvalid = JETSAM_REASON_INVALID,
+	kMemorystatusKilled = JETSAM_REASON_GENERIC,
+	kMemorystatusKilledHiwat = JETSAM_REASON_MEMORY_HIGHWATER,
+	kMemorystatusKilledVnodes = JETSAM_REASON_VNODE,
+	kMemorystatusKilledVMPageShortage = JETSAM_REASON_MEMORY_VMPAGESHORTAGE,
+	kMemorystatusKilledProcThrashing = JETSAM_REASON_MEMORY_PROCTHRASHING,
+	kMemorystatusKilledFCThrashing = JETSAM_REASON_MEMORY_FCTHRASHING,
+	kMemorystatusKilledPerProcessLimit = JETSAM_REASON_MEMORY_PERPROCESSLIMIT,
+	kMemorystatusKilledDiskSpaceShortage = JETSAM_REASON_MEMORY_DISK_SPACE_SHORTAGE,
+	kMemorystatusKilledIdleExit = JETSAM_REASON_MEMORY_IDLE_EXIT,
+	kMemorystatusKilledZoneMapExhaustion = JETSAM_REASON_ZONE_MAP_EXHAUSTION,
+	kMemorystatusKilledVMCompressorThrashing = JETSAM_REASON_MEMORY_VMCOMPRESSOR_THRASHING,
+	kMemorystatusKilledVMCompressorSpaceShortage = JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE,
+	kMemorystatusKilledLowSwap = JETSAM_REASON_LOWSWAP,
+	kMemorystatusKilledSustainedPressure = JETSAM_REASON_MEMORY_SUSTAINED_PRESSURE,
+	kMemorystatusKilledVMPageoutStarvation = JETSAM_REASON_MEMORY_VMPAGEOUT_STARVATION,
+} memorystatus_kill_cause_t;
 
 /*
  * For backwards compatibility
@@ -685,6 +685,7 @@ bool memorystatus_disable_swap(void);
 
 boolean_t memorystatus_kill_on_zone_map_exhaustion(pid_t pid);
 boolean_t memorystatus_kill_on_VM_compressor_space_shortage(boolean_t async);
+void memorystatus_kill_on_vps_starvation(void);
 void memorystatus_pages_update(unsigned int pages_avail);
 boolean_t memorystatus_idle_exit_from_VM(void);
 proc_t memorystatus_get_first_proc_locked(unsigned int *bucket_index, boolean_t search);

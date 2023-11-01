@@ -101,6 +101,7 @@
 #include <ipc/ipc_service_port.h>
 #include <kern/mach_filter.h>
 
+
 #if IMPORTANCE_INHERITANCE
 #include <ipc/ipc_importance.h>
 #endif
@@ -2501,18 +2502,19 @@ mach_port_guard_ast(thread_t t,
 	unsigned int reason = EXC_GUARD_DECODE_GUARD_FLAVOR(code);
 	task_t task = get_threadtask(t);
 	unsigned int behavior = task->task_exc_guard;
+	bool fatal = true;
 
 	assert(task == current_task());
 	assert(task != kernel_task);
 
 	if (reason <= MAX_FATAL_kGUARD_EXC_CODE) {
 		/*
-		 * Fatal Mach port guards - always delivered synchronously.
+		 * Fatal Mach port guards - always delivered synchronously if dev mode is on.
 		 * Check if anyone has registered for Synchronous EXC_GUARD, if yes then,
 		 * deliver it synchronously and then kill the process, else kill the process
 		 * and deliver the exception via EXC_CORPSE_NOTIFY.
 		 */
-		if (task_exception_notify(EXC_GUARD, code, subcode) == KERN_SUCCESS) {
+		if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
 			task_bsdtask_kill(task);
 		} else {
 			exit_with_guard_exception(get_bsdtask_info(task), code, subcode);
@@ -2539,9 +2541,10 @@ mach_port_guard_ast(thread_t t,
 				return;
 			}
 		}
-
+		fatal = (task->task_exc_guard & TASK_EXC_GUARD_MP_FATAL)
+		    && (reason <= MAX_OPTIONAL_kGUARD_EXC_CODE);
 		kern_return_t sync_exception_result;
-		sync_exception_result = task_exception_notify(EXC_GUARD, code, subcode);
+		sync_exception_result = task_exception_notify(EXC_GUARD, code, subcode, fatal);
 
 		if (task->task_exc_guard & TASK_EXC_GUARD_MP_FATAL) {
 			if (reason > MAX_OPTIONAL_kGUARD_EXC_CODE) {

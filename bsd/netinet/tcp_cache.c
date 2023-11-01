@@ -371,7 +371,7 @@ tcp_getcache_with_lock(struct tcp_cache_key_src *tcks,
 			tpcache->tc_tfo_cookie_len = 0;
 		} else {
 			/* Create a new cache and add it to the list */
-			tpcache = kalloc_type(struct tcp_cache, Z_NOWAIT | Z_ZERO);
+			tpcache = kalloc_type(struct tcp_cache, Z_NOPAGEWAIT | Z_ZERO);
 			if (tpcache == NULL) {
 				os_log_error(OS_LOG_DEFAULT, "%s could not allocate cache", __func__);
 				goto out_null;
@@ -725,9 +725,9 @@ tcp_getheuristic_with_lock(struct tcp_cache_key_src *tcks,
 			    tpheur->th_val_end - tpheur->th_val_start);
 		} else {
 			/* Create a new heuristic and add it to the list */
-			tpheur = kalloc_type(struct tcp_heuristic, Z_NOWAIT | Z_ZERO);
+			tpheur = kalloc_type(struct tcp_heuristic, Z_NOPAGEWAIT | Z_ZERO);
 			if (tpheur == NULL) {
-				os_log_error(OS_LOG_DEFAULT, "%s could not allocate cache", __func__);
+				os_log_error(OS_LOG_DEFAULT, "%s could not allocate heuristic", __func__);
 				goto out_null;
 			}
 

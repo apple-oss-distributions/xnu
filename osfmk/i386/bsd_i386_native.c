@@ -118,32 +118,6 @@ machine_thread_dup(
 	return KERN_SUCCESS;
 }
 
-void thread_set_parent(thread_t parent, int pid);
-
-void
-thread_set_parent(thread_t parent, int pid)
-{
-	pal_register_cache_state(parent, DIRTY);
-
-	if (thread_is_64bit_addr(parent)) {
-		x86_saved_state64_t     *iss64;
-
-		iss64 = USER_REGS64(parent);
-
-		iss64->rax = pid;
-		iss64->rdx = 0;
-		iss64->isf.rflags &= ~EFL_CF;
-	} else {
-		x86_saved_state32_t     *iss32;
-
-		iss32 = USER_REGS32(parent);
-
-		iss32->eax = pid;
-		iss32->edx = 0;
-		iss32->efl &= ~EFL_CF;
-	}
-}
-
 /*
  * thread_fast_set_cthread_self: Sets the machine kernel thread ID of the
  * current thread to the given thread ID; fast version for 32-bit processes

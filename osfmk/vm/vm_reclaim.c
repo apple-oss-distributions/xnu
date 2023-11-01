@@ -34,11 +34,13 @@
 #include <kern/startup.h>
 #include <kern/sched.h>
 #include <libkern/OSAtomic.h>
+#include <mach/kern_return.h>
 #include <mach/mach_types.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_reclaim.h>
 #include <os/log.h>
 #include <pexpert/pexpert.h>
+#include <vm/vm_map.h>
 #include <vm/vm_map_internal.h>
 #include <vm/vm_reclaim_internal.h>
 #include <sys/queue.h>
@@ -100,6 +102,12 @@ static os_log_t vm_reclaim_log_handle;
 static size_t kReclaimChunkFailed = UINT64_MAX;
 
 /*
+ * The ringbuffer must contain at least 2 entries to distinguish between empty
+ * (head == tail) and full (head == tail + 1).
+ */
+#define BUFFER_MIN_ENTRY_COUNT 2
+
+/*
  * We maintain two lists of reclamation buffers.
  * The reclamation_buffers list contains every buffer in the system.
  * The async_reclamation_buffers_list contains buffers that are ripe for reclamation.
@@ -122,6 +130,49 @@ static SECURITY_READ_ONLY_LATE(thread_t) vm_reclaim_thread;
 static void reclaim_thread(void *param __unused, wait_result_t wr __unused);
 
 #pragma mark Implementation
+
+/*
+ * The current design is not tolerant to faulting on the buffer under the
+ * metadata lock. Wire the buffer as a stop-gap solution for now; in the
+ * future, the synchronization scheme should be revised to allow the buffer
+ * to be pageable (rdar://112039103).
+ */
+
+static kern_return_t
+vmdr_metadata_wire(vm_deferred_reclamation_metadata_t metadata)
+{
+	kern_return_t kr;
+	vm_map_offset_t buffer_start = (metadata->vdrm_reclaim_buffer -
+	    offsetof(struct mach_vm_reclaim_buffer_v1_s, entries));
+	vm_map_offset_t buffer_end = (metadata->vdrm_reclaim_buffer +
+	    metadata->vdrm_buffer_size);
+	kr = vm_map_wire_kernel(metadata->vdrm_map, buffer_start, buffer_end,
+	    VM_PROT_NONE, VM_KERN_MEMORY_OSFMK, TRUE);
+	if (kr != KERN_SUCCESS) {
+		os_log_error(vm_reclaim_log_handle,
+		    "vm_reclaim: failed to wire userspace reclaim buffer for pid %d (%d)",
+		    task_pid(metadata->vdrm_task), kr);
+	}
+	return kr;
+}
+
+static kern_return_t
+vmdr_metadata_unwire(vm_deferred_reclamation_metadata_t metadata)
+{
+	kern_return_t kr;
+	vm_map_offset_t buffer_start = (metadata->vdrm_reclaim_buffer -
+	    offsetof(struct mach_vm_reclaim_buffer_v1_s, entries));
+	vm_map_offset_t buffer_end = (metadata->vdrm_reclaim_buffer +
+	    metadata->vdrm_buffer_size);
+	kr = vm_map_unwire(metadata->vdrm_map, buffer_start, buffer_end, TRUE);
+	if (kr != KERN_SUCCESS) {
+		os_log_error(vm_reclaim_log_handle,
+		    "vm_reclaim: unable to un-wire buffer %p (%llu) for pid %d (%d)",
+		    (void *)buffer_start, (buffer_end - buffer_start),
+		    task_pid(metadata->vdrm_task), kr);
+	}
+	return kr;
+}
 
 static vm_deferred_reclamation_metadata_t
 vmdr_metadata_alloc(
@@ -163,15 +214,18 @@ kern_return_t
 vm_deferred_reclamation_buffer_init_internal(
 	task_t                  task,
 	mach_vm_offset_t        address,
-	mach_vm_size_t          size,
-	user_addr_t             indices)
+	mach_vm_size_t          size)
 {
-	kern_return_t kr = KERN_FAILURE;
+	kern_return_t kr = KERN_FAILURE, tmp_kr;
 	vm_deferred_reclamation_metadata_t metadata = NULL;
 	bool success;
 	uint64_t head = 0, tail = 0, busy = 0;
 
-	if (address == 0 || indices == 0 || size < 2 * sizeof(mach_vm_reclaim_entry_v1_t)) {
+	if (address == 0 ||
+	    size < (sizeof(struct mach_vm_reclaim_buffer_v1_s) +
+	    BUFFER_MIN_ENTRY_COUNT * sizeof(mach_vm_reclaim_entry_v1_t)) ||
+	    !VM_MAP_PAGE_ALIGNED(address, VM_MAP_PAGE_MASK(task->map)) ||
+	    !VM_MAP_PAGE_ALIGNED((address + size), VM_MAP_PAGE_MASK(task->map))) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -180,10 +234,17 @@ vm_deferred_reclamation_buffer_init_internal(
 		os_log_error(vm_reclaim_log_handle,
 		    "vm_reclaim: failed to initialize vmdr buffer - reclaim is disabled (%llu)",
 		    vm_reclaim_max_threshold);
-		return KERN_FAILURE;
+		return KERN_NOT_SUPPORTED;
 	}
 
-	metadata = vmdr_metadata_alloc(task, address, size, indices);
+	user_addr_t buffer = address + \
+	    offsetof(struct mach_vm_reclaim_buffer_v1_s, entries);
+	mach_vm_size_t buffer_size = size - \
+	    offsetof(struct mach_vm_reclaim_buffer_v1_s, entries);
+	user_addr_t indices = address + \
+	    offsetof(struct mach_vm_reclaim_buffer_v1_s, indices);
+
+	metadata = vmdr_metadata_alloc(task, buffer, buffer_size, indices);
 
 	/*
 	 * Validate the starting indices
@@ -208,24 +269,47 @@ vm_deferred_reclamation_buffer_init_internal(
 		goto out;
 	}
 
-	task_lock(task);
-	if (task->deferred_reclamation_metadata != NULL) {
-		/* Attempt to overwrite existing reclaim buffer. This is not allowed. */
-		os_log_error(vm_reclaim_log_handle,
-		    "vm_reclaim: tried to overwrite exisiting reclaim buffer for task %p", task);
-		kr = KERN_INVALID_ARGUMENT;
-		task_unlock(task);
+	kr = vmdr_metadata_wire(metadata);
+	if (kr != KERN_SUCCESS) {
 		goto out;
 	}
+
+	/*
+	 * Publish the metadata to the task & global buffer list. This must be
+	 * done under the task lock to synchronize with task termination - i.e.
+	 * task_terminate_internal is guaranteed to see the published metadata and
+	 * tear it down.
+	 */
+	lck_mtx_lock(&reclamation_buffers_lock);
+	task_lock(task);
+
+	if (!task_is_active(task)) {
+		os_log_error(vm_reclaim_log_handle,
+		    "vm_reclaim: failed to initialize buffer on dying task (pid %d)", task_pid(task));
+		kr = KERN_TERMINATED;
+		goto fail_wired;
+	} else if (task->deferred_reclamation_metadata != NULL) {
+		os_log_error(vm_reclaim_log_handle,
+		    "vm_reclaim: tried to overwrite existing reclaim buffer for pid %d", task_pid(task));
+		kr = KERN_INVALID_ARGUMENT;
+		goto fail_wired;
+	}
+
+	TAILQ_INSERT_TAIL(&reclamation_buffers, metadata, vdrm_list);
+	reclamation_buffers_length++;
+
 	task->deferred_reclamation_metadata = metadata;
 
 	task_unlock(task);
-	lck_mtx_lock(&reclamation_buffers_lock);
-	TAILQ_INSERT_TAIL(&reclamation_buffers, metadata, vdrm_list);
-	reclamation_buffers_length++;
 	lck_mtx_unlock(&reclamation_buffers_lock);
 
 	return KERN_SUCCESS;
+
+fail_wired:
+	task_unlock(task);
+	lck_mtx_unlock(&reclamation_buffers_lock);
+	tmp_kr = vmdr_metadata_unwire(metadata);
+	assert3u(tmp_kr, ==, KERN_SUCCESS);
 
 out:
 	vmdr_metadata_free(metadata);
@@ -260,6 +344,8 @@ vm_deferred_reclamation_buffer_uninstall(vm_deferred_reclamation_metadata_t meta
 	// any such workers are finished operating on the buffer.
 	lck_mtx_lock(&metadata->vdrm_lock);
 	lck_mtx_unlock(&metadata->vdrm_lock);
+
+	vmdr_metadata_unwire(metadata);
 }
 
 void
@@ -903,6 +989,7 @@ vm_deferred_reclamation_reclaim_from_task_sync(task_t task, size_t max_entries_t
 vm_deferred_reclamation_metadata_t
 vm_deferred_reclamation_buffer_fork(task_t task, vm_deferred_reclamation_metadata_t parent)
 {
+	kern_return_t kr;
 	vm_deferred_reclamation_metadata_t metadata = NULL;
 
 	LCK_MTX_ASSERT(&parent->vdrm_lock, LCK_MTX_ASSERT_OWNED);
@@ -911,6 +998,12 @@ vm_deferred_reclamation_buffer_fork(task_t task, vm_deferred_reclamation_metadat
 	metadata = vmdr_metadata_alloc(task, parent->vdrm_reclaim_buffer,
 	    parent->vdrm_buffer_size, parent->vdrm_reclaim_indices);
 	lck_mtx_unlock(&parent->vdrm_lock);
+
+	kr = vmdr_metadata_wire(metadata);
+	if (kr != KERN_SUCCESS) {
+		vmdr_metadata_free(metadata);
+		return NULL;
+	}
 
 	lck_mtx_lock(&reclamation_buffers_lock);
 	TAILQ_INSERT_TAIL(&reclamation_buffers, metadata, vdrm_list);

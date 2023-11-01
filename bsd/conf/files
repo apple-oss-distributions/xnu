@@ -223,7 +223,6 @@ bsd/net/flowadv.c			optional networking
 bsd/net/content_filter.c		optional content_filter
 bsd/net/content_filter_crypto.c         optional content_filter
 bsd/net/packet_mangler.c		optional packet_mangler
-bsd/net/if_llatbl.c			optional networking
 bsd/net/nwk_wq.c			optional networking
 bsd/net/skmem_sysctl.c			optional skywalk
 bsd/net/restricted_in_port.c		optional networking

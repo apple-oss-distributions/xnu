@@ -99,6 +99,7 @@
 
 #include <console/serial_protos.h>
 #include <kern/task.h> /* for get_bsdthreadtask_info() */
+#include <kern/sched_prim.h>  /* for preemption_enabled() */
 #include <libkern/libkern.h>
 #include <os/log_private.h>
 
@@ -122,7 +123,9 @@ static void putchar(int c, void *arg);
  */
 extern const char *debugger_panic_str;
 
-extern struct tty *constty; /* pointer to console "window" tty */
+extern struct tty cons;     /* standard console tty */
+extern struct tty       *copy_constty(void);               /* current console device */
+extern struct tty       *set_constty(struct tty *);
 
 extern int __doprnt(const char *, va_list, void (*)(int, void *), void *, int, int);
 extern void console_write_char(char);  /* standard console putc */
@@ -334,17 +337,52 @@ putchar(int c, void *arg)
 {
 	struct putchar_args *pca = arg;
 	char **sp = (char**) pca->tty;
+	struct tty *constty = NULL;
+	struct tty *freetp = NULL;
+	const bool allow_constty = preemption_enabled();
 
-	if (debugger_panic_str) {
-		constty = 0;
+	if (allow_constty) {
+		constty = copy_constty();
+	}
+
+	if (debugger_panic_str && allow_constty && constty != NULL) {
+		if (tty_islocked(constty)) {
+			ttyfree_locked(constty);
+		} else {
+			ttyfree(constty);
+		}
+		constty = NULL;
+		freetp = set_constty(NULL);
+		if (freetp != NULL) {
+			if (tty_islocked(freetp)) {
+				ttyfree_locked(freetp);
+			} else {
+				ttyfree(freetp);
+			}
+			freetp = NULL;
+		}
 	}
 	if ((pca->flags & TOCONS) && pca->tty == NULL && constty) {
 		pca->tty = constty;
 		pca->flags |= TOTTY;
 	}
 	if ((pca->flags & TOTTY) && pca->tty && tputchar(c, pca->tty) < 0 &&
-	    (pca->flags & TOCONS) && pca->tty == constty) {
-		constty = 0;
+	    (pca->flags & TOCONS) && pca->tty == constty && allow_constty) {
+		if (tty_islocked(constty)) {
+			ttyfree_locked(constty);
+		} else {
+			ttyfree(constty);
+		}
+		constty = NULL;
+		freetp = set_constty(NULL);
+		if (freetp) {
+			if (tty_islocked(freetp)) {
+				ttyfree_locked(freetp);
+			} else {
+				ttyfree(freetp);
+			}
+			freetp = NULL;
+		}
 	}
 	if ((pca->flags & TOLOG) && c != '\0' && c != '\r' && c != 0177) {
 		log_putc((char)c);
@@ -352,7 +390,7 @@ putchar(int c, void *arg)
 	if ((pca->flags & TOLOGLOCKED) && c != '\0' && c != '\r' && c != 0177) {
 		log_putc_locked(msgbufp, (char)c);
 	}
-	if ((pca->flags & TOCONS) && constty == 0 && c != '\0') {
+	if ((pca->flags & TOCONS) && constty == NULL && c != '\0') {
 		console_write_char((char)c);
 	}
 	if (pca->flags & TOSTR) {
@@ -361,6 +399,13 @@ putchar(int c, void *arg)
 	}
 
 	pca->last_char_was_cr = ('\n' == c);
+	if (constty) {
+		if (tty_islocked(constty)) {
+			ttyfree_locked(constty);
+		} else {
+			ttyfree(constty);
+		}
+	}
 }
 
 bool

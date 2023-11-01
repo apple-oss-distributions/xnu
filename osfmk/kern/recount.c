@@ -160,6 +160,12 @@ recount_get_snap(processor_t processor)
 	return &processor->pr_recount.rpr_snap;
 }
 
+static struct recount_snap *
+recount_get_interrupt_snap(processor_t processor)
+{
+	return &processor->pr_recount.rpr_interrupt_snap;
+}
+
 // A simple sequence lock implementation.
 
 static void
@@ -423,17 +429,6 @@ recount_snap_diff(struct recount_snap *result,
 #endif // CONFIG_PERVASIVE_CPI
 }
 
-void
-recount_update_snap(struct recount_snap *cur)
-{
-	struct recount_snap *this_snap = recount_get_snap(current_processor());
-	this_snap->rsn_time_mach = cur->rsn_time_mach;
-#if CONFIG_PERVASIVE_CPI
-	this_snap->rsn_cycles = cur->rsn_cycles;
-	this_snap->rsn_insns = cur->rsn_insns;
-#endif // CONFIG_PERVASIVE_CPI
-}
-
 static void
 _fix_time_precision(struct recount_usage *usage)
 {
@@ -592,6 +587,13 @@ recount_thread_usage(thread_t thread, struct recount_usage *usage)
 {
 	recount_sum(&recount_thread_plan, thread->th_recount.rth_lifetime, usage);
 	_fix_time_precision(usage);
+}
+
+uint64_t
+recount_current_thread_interrupt_time_mach(void)
+{
+	thread_t thread = current_thread();
+	return thread->th_recount.rth_interrupt_time_mach;
 }
 
 void
@@ -759,21 +761,25 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 	// The processor-level metrics include idle time, instead, as the idle time
 	// needs to be read as up-to-date from `recount_processor_usage`.
 
-	bool was_idle = (thread->options & TH_OPT_IDLE_THREAD) != 0;
-	struct recount_track *wi_tracks_array = work_interval_get_recount_tracks(thread->th_work_interval);
-	bool collect_work_interval_telemetry = wi_tracks_array != NULL;
+	const bool was_idle = (thread->options & TH_OPT_IDLE_THREAD) != 0;
+
+	struct recount_track *wi_tracks_array = NULL;
+	if (!was_idle) {
+		wi_tracks_array = work_interval_get_recount_tracks(
+			thread->th_work_interval);
+	}
+	bool absorb_work_interval = wi_tracks_array != NULL;
 
 	struct recount_track *th_track = recount_update_start(
 		thread->th_recount.rth_lifetime, recount_thread_plan.rpl_topo,
 		processor);
-	struct recount_track *wi_track =
-	    (was_idle || !collect_work_interval_telemetry) ? NULL : recount_update_start(
-		wi_tracks_array,
-		recount_work_interval_plan.rpl_topo,
-		processor);
+	struct recount_track *wi_track = NULL;
+	if (absorb_work_interval) {
+		wi_track = recount_update_start(wi_tracks_array,
+		    recount_work_interval_plan.rpl_topo, processor);
+	}
 	struct recount_track *tk_track = was_idle ? NULL : recount_update_start(
-		task->tk_recount.rtk_lifetime, recount_task_plan.rpl_topo,
-		processor);
+		task->tk_recount.rtk_lifetime, recount_task_plan.rpl_topo, processor);
 	struct recount_track *pr_track = was_idle ? NULL : recount_update_start(
 		&processor->pr_recount.rpr_active, recount_processor_plan.rpl_topo,
 		processor);
@@ -794,7 +800,7 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 
 	recount_usage_add_snap(&th_track->rt_usage, th_time, to_add);
 	if (!was_idle) {
-		if (collect_work_interval_telemetry) {
+		if (absorb_work_interval) {
 			recount_usage_add_snap(&wi_track->rt_usage, wi_time, to_add);
 		}
 		recount_usage_add_snap(&tk_track->rt_usage, tk_time, to_add);
@@ -804,7 +810,7 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 	recount_update_commit();
 	recount_update_end(th_track);
 	if (!was_idle) {
-		if (collect_work_interval_telemetry) {
+		if (absorb_work_interval) {
 			recount_update_end(wi_track);
 		}
 		recount_update_end(tk_track);
@@ -828,7 +834,7 @@ recount_switch_thread(struct recount_snap *cur, struct thread *off_thread,
 	struct recount_snap diff = { 0 };
 	recount_snap_diff(&diff, cur, last);
 	recount_absorb_snap(&diff, off_thread, off_task, processor, false);
-	recount_update_snap(cur);
+	memcpy(last, cur, sizeof(*last));
 }
 
 void
@@ -954,7 +960,7 @@ recount_kernel_transition(bool from_user)
 	struct recount_snap cur = { 0 };
 	recount_precise_transition_diff(&diff, last, &cur);
 	recount_absorb_snap(&diff, thread, task, processor, from_user);
-	recount_update_snap(&cur);
+	memcpy(last, &cur, sizeof(*last));
 
 	return cur.rsn_time_mach;
 #else // PRECISE_USER_KERNEL_TIME
@@ -975,6 +981,28 @@ void
 recount_enter_user(void)
 {
 	recount_kernel_transition(false);
+}
+
+void
+recount_enter_interrupt(void)
+{
+	processor_t processor = current_processor();
+	struct recount_snap *last = recount_get_interrupt_snap(processor);
+	recount_snapshot_speculative(last);
+}
+
+void
+recount_leave_interrupt(void)
+{
+	processor_t processor = current_processor();
+	thread_t thread = processor->active_thread;
+	struct recount_snap *last = recount_get_snap(processor);
+	uint64_t last_time = last->rsn_time_mach;
+	recount_snapshot_speculative(last);
+	processor->pr_recount.rpr_interrupt_time_mach +=
+	    last->rsn_time_mach - last_time;
+	thread->th_recount.rth_interrupt_time_mach +=
+	    last->rsn_time_mach - last_time;
 }
 
 #if __x86_64__
@@ -1047,6 +1075,14 @@ recount_processor_run(struct recount_processor *pr, struct recount_snap *snap)
 }
 
 void
+recount_processor_online(processor_t processor, struct recount_snap *cur)
+{
+	recount_processor_run(&processor->pr_recount, cur);
+	struct recount_snap *pr_snap = recount_get_snap(processor);
+	memcpy(pr_snap, cur, sizeof(*pr_snap));
+}
+
+void
 recount_processor_usage(struct recount_processor *pr,
     struct recount_usage *usage, uint64_t *idle_time_out)
 {
@@ -1063,6 +1099,13 @@ recount_processor_usage(struct recount_processor *pr,
 		idle_time += mach_absolute_time() - _state_time(idle_stamp);
 	}
 	*idle_time_out = idle_time;
+}
+
+uint64_t
+recount_current_processor_interrupt_time_mach(void)
+{
+	assert(!preemption_enabled());
+	return current_processor()->pr_recount.rpr_interrupt_time_mach;
 }
 
 bool

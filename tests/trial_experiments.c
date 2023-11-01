@@ -94,7 +94,7 @@ T_DECL(experiment_factor_numeric_limits,
 static uint64_t original_libmalloc_experiment_value = 0;
 
 static void
-reset_libmalloc_experiment()
+reset_libmalloc_experiment(void)
 {
 	int ret = sysctlbyname("kern.libmalloc_experiments", NULL, NULL, &original_libmalloc_experiment_value, sizeof(original_libmalloc_experiment_value));
 	T_ASSERT_POSIX_SUCCESS(ret, "reset kern.libmalloc_experiments");

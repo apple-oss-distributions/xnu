@@ -295,14 +295,6 @@ stash_reply_port_semantics_violations_telemetry(mach_service_port_info_t sp_info
 {
 	struct reply_port_semantics_violations_rb_entry *entry;
 
-	lck_spin_lock(&reply_port_telemetry_lock);
-
-	if (reply_port_semantics_violations_rb_index == REPLY_PORT_SEMANTICS_VIOLATIONS_RB_SIZE) {
-		/* Dropping the event since buffer is full. */
-		lck_spin_unlock(&reply_port_telemetry_lock);
-		return;
-	}
-
 	task_t task = current_task_early();
 	if (task) {
 		struct proc_ro *pro = current_thread_ro()->tro_proc_ro;
@@ -312,17 +304,25 @@ stash_reply_port_semantics_violations_telemetry(mach_service_port_info_t sp_info
 #ifdef MACH_BSD
 		proc_name = proc_name_address(get_bsdtask_info(task));
 #endif /* MACH_BSD */
-		entry = &reply_port_semantics_violations_rb[reply_port_semantics_violations_rb_index++];
-		strlcpy(entry->proc_name, proc_name, CA_PROCNAME_LEN);
-
+		const char *team_id = csproc_get_identity(current_proc());
+		const char *signing_id = csproc_get_teamid(current_proc());
 		char *service_name = (char *) "unknown";
 		if (sp_info) {
 			service_name = sp_info->mspi_string_name;
 		}
+
+		lck_spin_lock(&reply_port_telemetry_lock);
+
+		if (reply_port_semantics_violations_rb_index >= REPLY_PORT_SEMANTICS_VIOLATIONS_RB_SIZE) {
+			/* Dropping the event since buffer is full. */
+			lck_spin_unlock(&reply_port_telemetry_lock);
+			return;
+		}
+		entry = &reply_port_semantics_violations_rb[reply_port_semantics_violations_rb_index++];
+		strlcpy(entry->proc_name, proc_name, CA_PROCNAME_LEN);
+
 		strlcpy(entry->service_name, service_name, CA_MACH_SERVICE_PORT_NAME_LEN);
 		entry->reply_port_semantics_violation = reply_port_semantics_violation;
-		const char *team_id = csproc_get_identity(current_proc());
-		const char *signing_id = csproc_get_teamid(current_proc());
 		if (team_id) {
 			strlcpy(entry->team_id, team_id, CA_TEAMID_MAX_LEN);
 		}
