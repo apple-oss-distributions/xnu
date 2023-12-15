@@ -587,7 +587,7 @@ IOProtectCacheMode(vm_map_t __unused map, mach_vm_address_t __unused va,
 		ppnum_t ppnum = pmap_find_phys(pmap, va + off);
 		if (ppnum) {
 			pmap_enter_options(pmap, va + off, ppnum, prot, VM_PROT_NONE, flags, TRUE,
-			    PMAP_OPTIONS_NOFLUSH, (void *)&pmap_flush_context_storage);
+			    PMAP_OPTIONS_NOFLUSH, (void *)&pmap_flush_context_storage, PMAP_MAPPING_TYPE_INFER);
 			delayed_pmap_flush = TRUE;
 		}
 	}

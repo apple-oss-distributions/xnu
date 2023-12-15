@@ -3650,7 +3650,7 @@ inms_free(struct in_msource *inms)
 
 #ifdef IGMP_DEBUG
 
-static const char *inm_modestrs[] = { "un\n", "in", "ex" };
+static const char *inm_modestrs[] = { "un", "in", "ex" };
 
 static const char *
 inm_mode_str(const int mode)
@@ -3662,15 +3662,15 @@ inm_mode_str(const int mode)
 }
 
 static const char *inm_statestrs[] = {
-	"not-member\n",
-	"silent\n",
-	"reporting\n",
-	"idle\n",
-	"lazy\n",
-	"sleeping\n",
-	"awakening\n",
-	"query-pending\n",
-	"sg-query-pending\n",
+	"not-member",
+	"silent",
+	"reporting",
+	"idle",
+	"lazy",
+	"sleeping",
+	"awakening",
+	"query-pending",
+	"sg-query-pending",
 	"leaving"
 };
 

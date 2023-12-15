@@ -423,6 +423,7 @@ struct __kern_packet {
 #define pkt_classq_hash         pkt_flow->flow_classq_hash
 #define pkt_classq_flags        pkt_flow->flow_classq_flags
 #define pkt_policy_id           pkt_flow->flow_policy_id
+#define pkt_skip_policy_id      pkt_flow->flow_skip_policy_id
 #define pkt_policy_euuid        pkt_flow->flow_policy_euuid
 
 	/*

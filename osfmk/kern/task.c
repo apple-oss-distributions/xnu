@@ -392,7 +392,7 @@ kern_return_t task_resume_internal_locked(task_t);
 kern_return_t task_resume_internal(task_t);
 static kern_return_t task_start_halt_locked(task_t task, boolean_t should_mark_corpse);
 
-extern kern_return_t iokit_task_terminate(task_t task);
+extern kern_return_t iokit_task_terminate(task_t task, int phase);
 extern void          iokit_task_app_suspended_changed(task_t task);
 
 extern kern_return_t exception_deliver(thread_t, exception_type_t, mach_exception_data_t, mach_msg_type_number_t, struct exception_action *, lck_mtx_t *);
@@ -2008,8 +2008,8 @@ task_deallocate_internal(
 
 	ipc_task_terminate(task);
 
-	/* let iokit know */
-	iokit_task_terminate(task);
+	/* let iokit know 2 */
+	iokit_task_terminate(task, 2);
 
 	/* Unregister task from userspace coredumps on panic */
 	kern_unregister_userspace_coredump(task);
@@ -2052,6 +2052,7 @@ task_deallocate_internal(
 		task->is_large_corpse = false;
 	}
 	is_release(task->itk_space);
+
 	if (task->t_rr_ranges) {
 		restartable_ranges_release(task->t_rr_ranges);
 	}
@@ -2497,6 +2498,9 @@ task_mark_corpse(task_t task)
 	 * convert_port_to_{map,space}_with_flavor relies on this behavior.
 	 */
 	ipc_task_disable(task);
+
+	/* let iokit know 1 */
+	iokit_task_terminate(task, 1);
 
 	/* terminate the ipc space */
 	ipc_space_terminate(task->itk_space);
@@ -3018,6 +3022,9 @@ task_terminate_internal(
 	 */
 	task_remove_turnstile_watchports(task);
 
+	/* let iokit know 1 */
+	iokit_task_terminate(task, 1);
+
 	/*
 	 *	Destroy the IPC space, leaving just a reference for it.
 	 */
@@ -3308,6 +3315,9 @@ task_complete_halt(task_t task)
 	 */
 	task_synchronizer_destroy_all(task);
 
+	/* let iokit know 1 */
+	iokit_task_terminate(task, 1);
+
 	/*
 	 *	Terminate the IPC space.  A long time ago,
 	 *	this used to be ipc_space_clean() which would
@@ -3328,7 +3338,8 @@ task_complete_halt(task_t task)
 	 * Kick out any IOKitUser handles to the task. At best they're stale,
 	 * at worst someone is racing a SUID exec.
 	 */
-	iokit_task_terminate(task);
+	/* let iokit know 2 */
+	iokit_task_terminate(task, 2);
 }
 
 #ifdef CONFIG_TASK_SUSPEND_STATS

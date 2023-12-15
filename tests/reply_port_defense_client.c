@@ -1,3 +1,4 @@
+#include <mach/kern_return.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
@@ -6,7 +7,17 @@
 #include <mach/task.h>
 #include <assert.h>
 
-#define MAX_TEST_NUM 5
+#define MAX_TEST_NUM 6
+
+#if __arm64__
+#define EXCEPTION_THREAD_STATE          ARM_THREAD_STATE64
+#define EXCEPTION_THREAD_STATE_COUNT    ARM_THREAD_STATE64_COUNT
+#elif __x86_64__
+#define EXCEPTION_THREAD_STATE          x86_THREAD_STATE
+#define EXCEPTION_THREAD_STATE_COUNT    x86_THREAD_STATE_COUNT
+#else
+#error Unsupported architecture
+#endif
 
 static mach_port_t
 alloc_server_port(void)
@@ -178,6 +189,26 @@ test_move_provisional_reply_port(void)
 	printf("[reply_port_defense_client test_immovable_receive_right]: mach_msg2() returned %d\n", kr);
 }
 
+static void
+test_unentitled_thread_set_exception_ports(void)
+{
+	mach_port_t exc_port = alloc_server_port();
+
+	kern_return_t kr = thread_set_exception_ports(
+		mach_thread_self(),
+		EXC_MASK_ALL,
+		exc_port,
+		(exception_behavior_t)((unsigned int)EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES),
+		EXCEPTION_THREAD_STATE);
+#if defined(TARGET_OS_OSX)
+	/* This is not yet enforced on macos */
+	assert(kr == KERN_SUCCESS);
+#else
+	assert(kr == KERN_DENIED);
+	exit(1); /* should not reach here */
+#endif
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -188,7 +219,8 @@ main(int argc, char *argv[])
 		test_make_send_once_right,
 		test_using_send_right,
 		test_move_send_right,
-		test_move_provisional_reply_port
+		test_move_provisional_reply_port,
+		test_unentitled_thread_set_exception_ports
 	};
 
 	if (argc < 2) {

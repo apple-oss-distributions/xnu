@@ -206,9 +206,9 @@ install-vm_spawn_tool: vm_spawn_tool
 
 CUSTOM_TARGETS += imm_pinned_control_port_crasher
 
-imm_pinned_control_port: excserver
+imm_pinned_control_port: excserver_protect
 imm_pinned_control_port: CODE_SIGN_ENTITLEMENTS = task_for_pid_entitlement.plist
-imm_pinned_control_port: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
+imm_pinned_control_port: OTHER_CFLAGS += $(OBJROOT)/excserver_protect.c -I $(OBJROOT)
 imm_pinned_control_port: OTHER_LDFLAGS += -ldarwintest_utils -lpthread
 imm_pinned_control_port: imm_pinned_control_port_crasher
 
@@ -223,8 +223,8 @@ install-imm_pinned_control_port_crasher: imm_pinned_control_port_crasher
 
 CUSTOM_TARGETS += reply_port_defense_client
 
-reply_port_defense: excserver
-reply_port_defense: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
+reply_port_defense: excserver_protect
+reply_port_defense: OTHER_CFLAGS += $(OBJROOT)/excserver_protect.c -I $(OBJROOT)
 reply_port_defense: OTHER_LDFLAGS += -ldarwintest_utils -lpthread
 reply_port_defense: reply_port_defense_client
 
@@ -348,6 +348,22 @@ ecc_test_helper:
 install-ecc_test_helper: ecc_test_helper
 	mkdir -p $(INSTALLDIR)
 	cp $(SYMROOT)/ecc_test_helper $(INSTALLDIR)/
+
+vm/test_vm_no_pager: excserver
+vm/test_vm_no_pager: OTHER_LDFLAGS += -ldarwintest_utils -lpthread -lkdd -framework Foundation
+vm/test_vm_no_pager: OTHER_CFLAGS += -I$(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders $(OBJROOT)/excserver.c -I$(OBJROOT)
+vm,/test_vm_no_pager: vm/test_vm_no_pager_helper
+vm/test_vm_no_pager: CODE_SIGN_ENTITLEMENTS = set_exception_port.entitlement
+CUSTOM_TARGETS += vm/test_vm_no_pager_helper
+
+vm/test_vm_no_pager_helper: vm/test_vm_no_pager_helper.c
+	$(CC) $(CFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -lm -o $(SYMROOT)/$@;
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@;
+
+install-vm/test_vm_no_pager_helper: vm/test_vm_no_pager_helper
+	mkdir -p $(INSTALLDIR)/vm
+	cp $(SYMROOT)/vm/test_vm_no_pager_helper $(INSTALLDIR)/vm/
+
 
 kevent_qos: OTHER_CFLAGS += -Wno-unused-macros
 kevent_qos: OTHER_CFLAGS += -I $(OBJROOT)/

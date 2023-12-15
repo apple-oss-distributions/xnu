@@ -78,6 +78,19 @@ __BEGIN_DECLS
 
 struct kmem_page_meta;
 
+
+/* We can't extern this from vm_kern.h because we can't include pmap.h */
+extern void kernel_memory_populate_object_and_unlock(
+	vm_object_t             object, /* must be locked */
+	vm_address_t            addr,
+	vm_offset_t             offset,
+	vm_size_t               size,
+	struct vm_page         *page_list,
+	kma_flags_t             flags,
+	vm_tag_t                tag,
+	vm_prot_t               prot,
+	pmap_mapping_type_t     mapping_type);
+
 /* Initialize the module */
 extern void vm_map_init(void);
 

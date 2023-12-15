@@ -4153,9 +4153,9 @@ dlil_trim_overcomitted_queue_locked(class_queue_t *input_queue,
 {
 	uint32_t overcommitted_qlen;    /* Length in packets. */
 	uint64_t overcommitted_qsize;   /* Size in bytes. */
-	uint32_t target_qlen;                   /* The desired queue length after trimming. */
-	uint32_t pkts_to_drop;                  /* Number of packets to drop. */
-	uint32_t dropped_pkts = 0;              /* Number of packets that were dropped. */
+	uint32_t target_qlen;           /* The desired queue length after trimming. */
+	uint32_t pkts_to_drop = 0;      /* Number of packets to drop. */
+	uint32_t dropped_pkts = 0;      /* Number of packets that were dropped. */
 	uint32_t dropped_bytes = 0;     /* Number of dropped bytes. */
 	struct mbuf *m = NULL, *m_tmp = NULL;
 
@@ -5704,8 +5704,19 @@ ifnet_enqueue_common(struct ifnet *ifp, struct ifclassq *ifcq,
 errno_t
 ifnet_enqueue(struct ifnet *ifp, struct mbuf *m)
 {
+	uint32_t bytes = m_pktlen(m);
+	struct mbuf *tail = m;
+	uint32_t cnt = 1;
 	boolean_t pdrop;
-	return ifnet_enqueue_mbuf(ifp, m, TRUE, &pdrop);
+
+	while (tail->m_nextpkt) {
+		VERIFY(tail->m_flags & M_PKTHDR);
+		tail = tail->m_nextpkt;
+		cnt++;
+		bytes += m_pktlen(tail);
+	}
+
+	return ifnet_enqueue_mbuf_chain(ifp, m, tail, cnt, bytes, TRUE, &pdrop);
 }
 
 errno_t

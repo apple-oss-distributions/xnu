@@ -790,7 +790,7 @@ __options_decl(kmr_flags_t, uint32_t, {
 });
 
 #define KMEM_REALLOC_FLAGS_VALID(flags) \
-	(((flags) & (KMR_KOBJECT | KMEM_GUARD_LAST | KMEM_KASAN_GUARD)) == 0 || ((flags) & KMR_FREEOLD))
+	(((flags) & (KMR_KOBJECT | KMEM_GUARD_LAST | KMEM_KASAN_GUARD | KMR_DATA)) == KMR_DATA || ((flags) & KMR_FREEOLD))
 
 /*!
  * @function kmem_realloc_guard()
@@ -914,16 +914,6 @@ kmem_free(
 }
 
 #pragma mark kmem population
-
-extern void kernel_memory_populate_object_and_unlock(
-	vm_object_t             object, /* must be locked */
-	vm_address_t            addr,
-	vm_offset_t             offset,
-	vm_size_t               size,
-	struct vm_page         *page_list,
-	kma_flags_t             flags,
-	vm_tag_t                tag,
-	vm_prot_t               prot);
 
 extern kern_return_t kernel_memory_populate(
 	vm_offset_t             addr,

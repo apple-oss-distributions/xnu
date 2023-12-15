@@ -147,7 +147,8 @@ join_threads(int nthreads, pthread_t *threads)
 }
 
 T_DECL(task_vm_info_decompressions,
-    "Test multithreaded per-task decompressions counter")
+    "Test multithreaded per-task decompressions counter",
+    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1))
 {
 	int     err;
 	int     ncpu;

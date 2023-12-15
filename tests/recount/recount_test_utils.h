@@ -15,7 +15,7 @@
 #define REQUIRE_RECOUNT_ENERGY \
     T_META_REQUIRES_SYSTCL_EQ("kern.pervasive_energy", 1)
 #define REQUIRE_MULTIPLE_PERF_LEVELS \
-    T_META_REQUIRES_SYSCTL_NE("hw.nperflevels", 1)
+    T_META_REQUIRES_SYSCTL_EQ("hw.nperflevels", 2)
 #define SET_THREAD_BIND_BOOTARG \
     T_META_BOOTARGS_SET("enable_skstb=1")
 
@@ -29,11 +29,17 @@ bool has_user_system_times(void);
 // Returns true if the system can track energy usage.
 bool has_energy(void);
 
+// Bind the current thread to the given cluster.
+void bind_to_cluster(char type);
+
 // Returns the number of perf-levels on the system.
 unsigned int perf_level_count(void);
 
 // Returns the name of the specified perf-level.
 const char *perf_level_name(unsigned int perf_level);
+
+// Returns the index of the named perf-level.
+unsigned int perf_level_index(const char *name);
 
 // Run periodically on all perf levels -- must have `SET_THREAD_BIND_BOOTARG`.
 void run_on_all_perf_levels(void);

@@ -82,7 +82,7 @@ def KDPSendCore(cmd_args=None):
     optionally specify the filename to be used for the generated core file.
 
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print(KDPSendCore.__doc__)
         return False
     ip_address = cmd_args[0]
@@ -108,7 +108,7 @@ def KDPSendSyslog(cmd_args=None):
         will resume waiting in the debugger after completion. You can optionally
         specify the name to be used for the generated system log.
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print(KDPSendSyslog.__doc__)
         return False
     ip_address = cmd_args[0]
@@ -133,7 +133,7 @@ def KDPSendPaniclog(cmd_args=None):
         will resume waiting in the debugger after completion. You can optionally
         specify the name to be used for the generated panic log.
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print(KDPSendPaniclog.__doc__)
         return False
     ip_address = cmd_args[0]
@@ -302,7 +302,7 @@ def KDPMode(cmd_args=None):
     """
     global current_KDP_mode
 
-    if cmd_args == None or len(cmd_args) == 0:
+    if cmd_args is None or len(cmd_args) == 0:
         return current_KDP_mode
     if len(cmd_args) > 1 or cmd_args[0] not in {'swhosted', 'hwprobe'}:
         print("Invalid Arguments", KDPMode.__doc__)

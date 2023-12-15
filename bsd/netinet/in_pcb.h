@@ -168,10 +168,10 @@ struct inpcb {
 	int     inp_state;              /* state (INUSE/CACHED/DEAD) */
 	u_short inp_fport;              /* foreign port */
 	u_short inp_lport;              /* local port */
-	u_int32_t inp_flags;            /* generic IP/datagram flags */
-	u_int32_t inp_flags2;           /* generic IP/datagram flags #2 */
+	uint32_t inp_flags;            /* generic IP/datagram flags */
+	uint32_t inp_flags2;           /* generic IP/datagram flags #2 */
 	uint32_t inp_log_flags;
-	u_int32_t inp_flow;             /* IPv6 flow information */
+	uint32_t inp_flow;             /* IPv6 flow information */
 	uint32_t inp_lifscope;          /* IPv6 scope ID of the local address */
 	uint32_t inp_fifscope;          /* IPv6 scope ID of the foreign address */
 
@@ -184,7 +184,7 @@ struct inpcb {
 
 	struct ifnet *inp_boundifp;     /* interface for INP_BOUND_IF */
 	struct ifnet *inp_last_outifp;  /* last known outgoing interface */
-	u_int32_t inp_flowhash;         /* flow hash */
+	uint32_t inp_flowhash;         /* flow hash */
 
 	/* Protocol-dependent part */
 	union {
@@ -224,8 +224,9 @@ struct inpcb {
 		short   inp6_hops;
 	} inp_depend6;
 
-	uint64_t inp_fadv_flow_ctrl_cnt;
-	uint64_t inp_fadv_suspended_cnt;
+	uint64_t       inp_fadv_total_time;
+	uint64_t       inp_fadv_start_time;
+	uint64_t       inp_fadv_cnt;
 
 	caddr_t inp_saved_ppcb;         /* place to save pointer while cached */
 #if IPSEC
@@ -236,7 +237,7 @@ struct inpcb {
 	struct necp_inpcb_result inp_policyresult;
 	uuid_t necp_client_uuid;
 	necp_client_flow_cb necp_cb;
-	u_int8_t *inp_resolver_signature;
+	uint8_t *inp_resolver_signature;
 	size_t inp_resolver_signature_length;
 #endif
 #if SKYWALK
@@ -245,21 +246,21 @@ struct inpcb {
 	netns_token inp_wildcard_netns_token;
 #endif /* SKYWALK */
 	u_char *inp_keepalive_data;     /* for keepalive offload */
-	u_int8_t inp_keepalive_datalen; /* keepalive data length */
-	u_int8_t inp_keepalive_type;    /* type of application */
-	u_int16_t inp_keepalive_interval; /* keepalive interval */
+	uint8_t inp_keepalive_datalen; /* keepalive data length */
+	uint8_t inp_keepalive_type;    /* type of application */
+	uint16_t inp_keepalive_interval; /* keepalive interval */
 	uint32_t inp_nstat_refcnt __attribute__((aligned(4)));
 	struct inp_stat *inp_stat;
 	struct inp_stat *inp_cstat;     /* cellular data */
 	struct inp_stat *inp_wstat;     /* Wi-Fi data */
 	struct inp_stat *inp_Wstat;     /* Wired data */
-	u_int8_t inp_stat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
-	u_int8_t inp_cstat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
-	u_int8_t inp_wstat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
-	u_int8_t inp_Wstat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
+	uint8_t inp_stat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
+	uint8_t inp_cstat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
+	uint8_t inp_wstat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
+	uint8_t inp_Wstat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
 	activity_bitmap_t inp_nw_activity;
-	u_int64_t inp_start_timestamp;
-	u_int64_t inp_connect_timestamp;
+	uint64_t inp_start_timestamp;
+	uint64_t inp_connect_timestamp;
 
 	char inp_last_proc_name[MAXCOMLEN + 1];
 	char inp_e_proc_name[MAXCOMLEN + 1];
@@ -754,7 +755,8 @@ struct inpcbinfo {
 #define INP2_LOGGED_SUMMARY     0x00008000 /* logged: the final summary */
 #define INP2_MANAGEMENT_ALLOWED 0x00010000 /* Allow communication over a management interface */
 #define INP2_MANAGEMENT_CHECKED 0x00020000 /* Checked entitlements for a management interface */
-#define INP2_BIND_IN_PROGRESS   0x00040000 /* A bind call is in proggress */
+#define INP2_BIND_IN_PROGRESS   0x00040000 /* A bind call is in progress */
+#define INP2_LAST_ROUTE_LOCAL   0x00080000 /* Last used route was local */
 
 /*
  * Flags passed to in_pcblookup*() functions.

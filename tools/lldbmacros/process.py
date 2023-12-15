@@ -1139,7 +1139,7 @@ def TaskForPmap(cmd_args=None):
         Syntax: (lldb) taskforpmap <pmap>
             Multiple -v's can be specified for increased verbosity
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to taskforpmap.")
     pmap = kern.GetValueFromAddress(cmd_args[0], 'pmap_t')
     task = TaskForPmapHelper(pmap)
@@ -1271,7 +1271,7 @@ def ShowProcRefs(cmd_args=None, cmd_options={}, O=None):
               there's no way to pair references with drop-refs in the current infrastructure.
         Usage: showprocrefs <proc>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
          raise ArgumentError("No arguments passed")
 
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc *')
@@ -1396,7 +1396,7 @@ def SwitchToRegs(cmd_args=None):
         Note: This command ONLY works for ARM based kernel setup.
     """
     
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("No arguments passed")
 
     lldb_process = LazyTarget.GetProcess()

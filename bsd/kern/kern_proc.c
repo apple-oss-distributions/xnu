@@ -1813,6 +1813,12 @@ proc_exitstatus(proc_t p)
 	return p->p_xstat & 0xffff;
 }
 
+bool
+proc_is_zombie(proc_t p)
+{
+	return proc_list_exited(p);
+}
+
 void
 proc_setexecutableuuid(proc_t p, const unsigned char *uuid)
 {

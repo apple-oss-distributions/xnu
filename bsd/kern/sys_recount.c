@@ -71,6 +71,32 @@ _usage_to_time_energy_cpi(struct recount_usage *usage)
 	};
 }
 
+static recount_cpu_kind_t
+_perflevel_index_to_cpu_kind(unsigned int perflevel)
+{
+#if __AMP__
+	extern cluster_type_t cpu_type_for_perflevel(int perflevel);
+	cluster_type_t cluster = cpu_type_for_perflevel(perflevel);
+#else // __AMP__
+	cluster_type_t cluster = CLUSTER_TYPE_SMP;
+#endif // !__AMP__
+
+	switch (cluster) {
+	case CLUSTER_TYPE_SMP:
+		// Default to first index for SMP.
+		return (recount_cpu_kind_t)0;
+#if __AMP__
+	case CLUSTER_TYPE_E:
+		return RCT_CPU_EFFICIENCY;
+	case CLUSTER_TYPE_P:
+		return RCT_CPU_PERFORMANCE;
+#endif // __AMP__
+	default:
+		panic("recount: unexpected CPU type %d for perflevel %d", cluster,
+		    perflevel);
+	}
+}
+
 static int
 _selfcounts(thread_selfcounts_kind_t kind, user_addr_t buf, size_t size)
 {
@@ -106,27 +132,35 @@ _selfcounts_perf_level(thread_selfcounts_kind_t kind, user_addr_t buf,
 	recount_current_thread_perf_level_usage(usages);
 	ml_set_interrupts_enabled(interrupt_state);
 
+	unsigned int cpu_types = ml_get_cpu_types();
+	unsigned int level_count = __builtin_popcount(cpu_types);
+	const size_t counts_len = MIN(MIN(recount_topo_count(RCT_TOPO_CPU_KIND),
+	    RCT_CPU_KIND_COUNT), level_count);
+
 	switch (kind) {
 	case THSC_CPI_PER_PERF_LEVEL: {
 		struct thsc_cpi counts[RCT_CPU_KIND_COUNT] = { 0 };
-		for (size_t i = 0; i < RCT_CPU_KIND_COUNT; i++) {
-			counts[i] = _usage_to_cpi(&usages[i]);
+		for (unsigned int i = 0; i < counts_len; i++) {
+			const recount_cpu_kind_t cpu_kind = _perflevel_index_to_cpu_kind(i);
+			counts[i] = _usage_to_cpi(&usages[cpu_kind]);
 		}
-		return copyout(&counts, buf, MIN(sizeof(counts), size));
+		return copyout(&counts, buf, MIN(sizeof(counts[0]) * counts_len, size));
 	}
 	case THSC_TIME_CPI_PER_PERF_LEVEL: {
 		struct thsc_time_cpi counts[RCT_CPU_KIND_COUNT] = { 0 };
-		for (size_t i = 0; i < RCT_CPU_KIND_COUNT; i++) {
-			counts[i] = _usage_to_time_cpi(&usages[i]);
+		for (unsigned int i = 0; i < counts_len; i++) {
+			const recount_cpu_kind_t cpu_kind = _perflevel_index_to_cpu_kind(i);
+			counts[i] = _usage_to_time_cpi(&usages[cpu_kind]);
 		}
-		return copyout(&counts, buf, MIN(sizeof(counts), size));
+		return copyout(&counts, buf, MIN(sizeof(counts[0]) * counts_len, size));
 	}
 	case THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL: {
 		struct thsc_time_energy_cpi counts[RCT_CPU_KIND_COUNT] = { 0 };
-		for (size_t i = 0; i < RCT_CPU_KIND_COUNT; i++) {
-			counts[i] = _usage_to_time_energy_cpi(&usages[i]);
+		for (unsigned int i = 0; i < counts_len; i++) {
+			const recount_cpu_kind_t cpu_kind = _perflevel_index_to_cpu_kind(i);
+			counts[i] = _usage_to_time_energy_cpi(&usages[cpu_kind]);
 		}
-		return copyout(&counts, buf, MIN(sizeof(counts), size));
+		return copyout(&counts, buf, MIN(sizeof(counts[0]) * counts_len, size));
 	}
 	default:
 		panic("recount: unexpected thread_selfcounts kind: %d", kind);
@@ -165,32 +199,6 @@ _usage_to_proc_threadcounts(struct recount_usage *usage)
 		       .ptcd_energy_nj = usage->ru_energy_nj,
 #endif // CONFIG_PERVASIVE_ENERGY
 	};
-}
-
-static recount_cpu_kind_t
-_perflevel_index_to_cpu_kind(unsigned int perflevel)
-{
-#if __AMP__
-	extern cluster_type_t cpu_type_for_perflevel(int perflevel);
-	cluster_type_t cluster = cpu_type_for_perflevel(perflevel);
-#else // __AMP__
-	cluster_type_t cluster = CLUSTER_TYPE_SMP;
-#endif // !__AMP__
-
-	switch (cluster) {
-	case CLUSTER_TYPE_SMP:
-		// Default to first index for SMP.
-		return (recount_cpu_kind_t)0;
-#if __AMP__
-	case CLUSTER_TYPE_E:
-		return RCT_CPU_EFFICIENCY;
-	case CLUSTER_TYPE_P:
-		return RCT_CPU_PERFORMANCE;
-#endif // __AMP__
-	default:
-		panic("recount: unexpected CPU type %d for perflevel %d", cluster,
-		    perflevel);
-	}
 }
 
 int

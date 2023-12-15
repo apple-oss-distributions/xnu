@@ -305,11 +305,13 @@ struct vm_object {
 	 */
 	/* boolean_t */ for_realtime:1,
 	/* Might be needed for realtime code path */
+	/* vm_object_destroy_reason_t */ no_pager_reason:2,
+	/* differentiate known and unknown causes */
 #if FBDP_DEBUG_OBJECT_NO_PAGER
 	/* boolean_t */ fbdp_tracked:1,
-	    __object1_unused_bits:4;
+	    __object1_unused_bits:2;
 #else /* FBDP_DEBUG_OBJECT_NO_PAGER */
-	__object1_unused_bits:5;
+	__object1_unused_bits:3;
 #endif /* FBDP_DEBUG_OBJECT_NO_PAGER */
 
 	queue_chain_t           cached_list;    /* Attachment point for the
@@ -741,8 +743,8 @@ __private_extern__ vm_object_t  vm_object_copy_delayed(
 
 
 __private_extern__ kern_return_t        vm_object_destroy(
-	vm_object_t     object,
-	kern_return_t   reason);
+	vm_object_t                                     object,
+	vm_object_destroy_reason_t   reason);
 
 __private_extern__ void         vm_object_pager_create(
 	vm_object_t     object);

@@ -252,7 +252,7 @@ sysctl_kpc_set_config(uint32_t classes, void* buf)
 	if (classes & KPC_CLASS_POWER_MASK) {
 		return EPERM;
 	}
-	return kpc_set_config( classes, buf);
+	return kpc_set_config_kernel(classes, buf);
 }
 
 static int

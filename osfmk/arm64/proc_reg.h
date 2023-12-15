@@ -1772,9 +1772,12 @@
 
 #ifdef __ASSEMBLER__
 /* Define only the classes we need to test in the exception vectors. */
+#define ESR_EC_UNCATEGORIZED   0x00
+#define ESR_EC_PAC_FAIL        0x1C
 #define ESR_EC_IABORT_EL1      0x21
 #define ESR_EC_DABORT_EL1      0x25
 #define ESR_EC_SP_ALIGN        0x26
+#define ESR_EC_BRK_AARCH64     0x3C
 #else
 typedef enum {
 	ESR_EC_UNCATEGORIZED       = 0x00,

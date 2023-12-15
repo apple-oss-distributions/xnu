@@ -6,8 +6,8 @@ from __future__ import absolute_import, division, print_function
 from builtins import hex
 from builtins import range
 
-from xnu import *
 import sys
+from xnu import *
 from utils import *
 from process import *
 from bank import *
@@ -95,13 +95,13 @@ def GetTaskBusyPortsSummary(task):
         ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
             gettype('struct ipc_port'))
 
-    for port in ports:
-        if not port or unsigned(port) == xnudefines.MACH_PORT_DEAD:
-            continue
-        count = port.xGetIntegerByPath('.ip_messages.imq_msgcount')
-        if count:
-            nbusy += 1
-            nmsgs += count
+        for port in ports:
+            if not port or port == xnudefines.MACH_PORT_DEAD:
+                continue
+            count = port.xGetIntegerByPath('.ip_messages.imq_msgcount')
+            if count:
+                nbusy += 1
+                nmsgs += count
 
     return (nbusy, nmsgs)
 
@@ -161,7 +161,7 @@ def PrintPortSummary(port, show_kmsg_summary=True, show_sets=False, prefix="", O
                 print("")
 
 def GetPortDispositionString(disp):
-    if (disp < 0): ## use negative numbers for request ports
+    if disp < 0: ## use negative numbers for request ports
         portname = 'notify'
         if disp == -1:
             disp_str = 'reqNS'
@@ -227,11 +227,11 @@ def GetKmsgHeader(kmsgp):
     """
     inline_buffer = kmsgp + sizeof(dereference(kmsgp))
 
-    if (kmsgp.ikm_type <= int(GetEnumValue('ipc_kmsg_type_t', 'IKM_TYPE_UDATA_OOL'))):
+    if kmsgp.ikm_type <= int(GetEnumValue('ipc_kmsg_type_t', 'IKM_TYPE_UDATA_OOL')):
         return kern.GetValueFromAddress(inline_buffer, 'mach_msg_header_t *')
-    else:
-        vec = kern.GetValueFromAddress(inline_buffer, 'ipc_kmsg_vector_t *')
-        return kern.GetValueFromAddress(unsigned(vec.kmsgv_data), 'mach_msg_header_t *')
+
+    vec = kern.GetValueFromAddress(inline_buffer, 'ipc_kmsg_vector_t *')
+    return kern.GetValueFromAddress(unsigned(vec.kmsgv_data), 'mach_msg_header_t *')
 
 @header("{:<20s} {:<20s} {:<20s} {:<10s} {:>6s}  {:<20s}  {:<8s}  {:<26s} {:<26s}".format(
             "", "kmsg", "header", "msgid", "size", "reply-port", "disp", "source", "destination"))
@@ -287,7 +287,7 @@ def GetKMsgSummary(kmsgp, prefix_str=""):
     else:
         disposition = "vX"
 
-    out_string += "{:<2s}".format(disposition) 
+    out_string += "{:<2s}".format(disposition)
 
     # complex message
     if kmsgh.msgh_bits & 0x80000000:
@@ -327,7 +327,7 @@ def GetKmsgDescriptors(kmsgp):
     """
     kmsghp = GetKmsgHeader(kmsgp)
     kmsgh = dereference(kmsghp)
-    if not (kmsgh.msgh_bits & 0x80000000):
+    if not (kmsgh.msgh_bits & 0x80000000): # pragma pylint: disable=superfluous-parens
         return []
     ## Something in the python/lldb types is not getting alignment correct here.
     ## I'm grabbing a pointer to the body manually, and using tribal knowledge
@@ -366,7 +366,7 @@ def GetKMsgComplexBodyDesc(kmsgp, prefix_str=""):
     """
     kmsghp = GetKmsgHeader(kmsgp)
     kmsgh = dereference(kmsghp)
-    if not (kmsgh.msgh_bits & 0x80000000):
+    if not (kmsgh.msgh_bits & 0x80000000):  # pragma pylint: disable=superfluous-parens
         return ""
     format_string = "{: <#20x} {: <#8x} {: <#20x} {:#010x} {: <#20x}"
     out_string = ""
@@ -388,7 +388,7 @@ def GetKMsgComplexBodyDesc(kmsgp, prefix_str=""):
                 out_string += " " + GetMachMsgOOLDescriptorSummary(addressof(ool))
         except:
             out_string += "\n" + prefix_str + "Invalid Descriptor: {}".format(dsc)
-    return out_string 
+    return out_string
 
 def GetKmsgTrailer(kmsgp):
     """ Helper to get trailer address of a kmsg
@@ -464,17 +464,17 @@ def PrintPortSetSummary(pset, space=0, verbose=True, O=None):
             print("")
 
     if verbose and wqs.hasMembers():
-       with O.table(PrintPortSummary.header, indent=True):
-           for wq in wqs.iterateMembers():
-               portval = wq.asPort()
-               PrintPortSummary(wq.asPort(), show_kmsg_summary=show_kmsg_summary, O=O)
-           print("")
+        with O.table(PrintPortSummary.header, indent=True):
+            for wq in wqs.iterateMembers():
+                portval = wq.asPort()
+                PrintPortSummary(wq.asPort(), show_kmsg_summary=show_kmsg_summary, O=O)
+            print("")
 
 
 
 # Macro: showipc
 
-@lldb_command('showipc') 
+@lldb_command('showipc')
 def ShowIPC(cmd_args=None):
     """  Routine to print data for the given IPC space 
          Usage: showipc <address of ipc space>
@@ -489,12 +489,13 @@ def ShowIPC(cmd_args=None):
         return False
     print(PrintIPCInformation.header)
     PrintIPCInformation(ipc, False, False)
+    return True
 
 # EndMacro: showipc
 
 # Macro: showtaskipc
 
-@lldb_command('showtaskipc') 
+@lldb_command('showtaskipc')
 def ShowTaskIPC(cmd_args=None):
     """  Routine to print IPC summary of given task
          Usage: showtaskipc <address of task>
@@ -513,12 +514,13 @@ def ShowTaskIPC(cmd_args=None):
     print(GetTaskBusyIPCSummary.header)
     summary, _, _, _ = GetTaskBusyIPCSummary(tval)
     print(summary)
+    return True
 
 # EndMacro: showtaskipc
 
 # Macro: showallipc
 
-@lldb_command('showallipc') 
+@lldb_command('showallipc')
 def ShowAllIPC(cmd_args=None):
     """  Routine to print IPC summary of all tasks
          Usage: showallipc
@@ -528,7 +530,8 @@ def ShowAllIPC(cmd_args=None):
         pval = GetProcFromTask(t)
         print(GetTaskSummary(t) + " " + GetProcSummary(pval))
         print(PrintIPCInformation.header)
-        PrintIPCInformation(t.itk_space, False, False) + "\n\n"
+        PrintIPCInformation(t.itk_space, False, False)
+        print("\n\n")
 
 # EndMacro: showallipc
 
@@ -558,7 +561,7 @@ def GetKObjectFromPort(portval):
         params: portval - core.value representation of 'ipc_port *' object
         returns: str - string of kobject information
     """
-    if not portval or unsigned(portval) == xnudefines.MACH_PORT_DEAD:
+    if not portval or portval == xnudefines.MACH_PORT_DEAD:
         return "MACH_PORT_DEAD"
     io_bits       = unsigned(portval.ip_object.io_bits)
     objtype_index = io_bits & 0x3ff
@@ -617,8 +620,8 @@ def GetPortDestProc(port):
     if bits & xnudefines.IO_BITS_ACTIVE == 0:
         if port_is_kobject_port:
             return ('', 'inactive-kobject-port')
-        else:
-            return ('', 'inactive-port')
+
+        return ('', 'inactive-port')
 
     if port_is_kobject_port:
         return ('', GetKObjectFromPort(port))
@@ -634,7 +637,7 @@ def GetPortDestinationSummary(port):
         params: port - core.value representation of 'ipc_port *' object
         returns: str - string of info about ports destination
     """
-    if not port or unsigned(port) == xnudefines.MACH_PORT_DEAD:
+    if not port or port == xnudefines.MACH_PORT_DEAD:
         return "MACH_PORT_DEAD"
     a, b = GetPortDestProc(port)
     return "{:<20s} {:<20s}".format(a, b)
@@ -688,8 +691,8 @@ def GetIPCEntrySummary(entry, ipc_name='', rights_filter=0):
         for m in wqs.iterateMembers(): members += 1
         destname_str = "{:d} Members".format(members)
     else:
-        if ie_bits & 0x00010000 :
-            if ie_bits & 0x00020000 :
+        if ie_bits & 0x00010000:
+            if ie_bits & 0x00020000:
                 # SEND + RECV
                 right_str = 'SR'
             else:
@@ -698,7 +701,7 @@ def GetIPCEntrySummary(entry, ipc_name='', rights_filter=0):
         elif ie_bits & 0x00020000:
             # RECV only
             right_str = 'R'
-        elif ie_bits & 0x00040000 :
+        elif ie_bits & 0x00040000:
             # SEND_ONCE
             right_str = 'O'
         portval = kern.CreateTypedPointerFromAddress(unsigned(ie_object), 'struct ipc_port')
@@ -710,21 +713,29 @@ def GetIPCEntrySummary(entry, ipc_name='', rights_filter=0):
                 # dead-name notification requested
                 right_str += 'd'
                 # send-possible armed
-                if soright_ptr & 0x1 : right_str +='s'
+                if soright_ptr & 0x1:
+                    right_str +='s'
                 # send-possible requested
-                if soright_ptr & 0x2 : right_str +='r'
+                if soright_ptr & 0x2:
+                    right_str +='r'
         # No-senders notification requested
-        if portval.ip_nsrequest != 0: right_str += 'n'
+        if portval.ip_nsrequest != 0:
+            right_str += 'n'
         # port-destroy notification requested
-        if GetPortPDRequest(portval): right_str += 'x'
+        if GetPortPDRequest(portval):
+            right_str += 'x'
         # Immovable receive rights
-        if portval.ip_immovable_receive != 0: right_str += 'i'
+        if portval.ip_immovable_receive != 0:
+            right_str += 'i'
         # Immovable send rights
-        if portval.ip_immovable_send != 0: right_str += 'm'
+        if portval.ip_immovable_send != 0:
+            right_str += 'm'
         # No-grant Port
-        if portval.ip_no_grant != 0: right_str += 'g'
+        if portval.ip_no_grant != 0:
+            right_str += 'g'
         # Port with SB filtering on
-        if io_bits & 0x00001000 != 0: right_str += 'f'
+        if io_bits & 0x00001000 != 0:
+            right_str += 'f'
 
         # early-out if the rights-filter doesn't match
         if rights_filter != 0 and rights_filter != right_str:
@@ -758,7 +769,7 @@ def GetPortUserStack(port, task):
         returns: str - string information on port's userstack
     """
     out_str = ''
-    if not port or unsigned(port) == xnudefines.MACH_PORT_DEAD:
+    if not port or port == xnudefines.MACH_PORT_DEAD:
         return out_str
     pid = port.ip_made_pid
     proc_val = GetProcFromTask(task)
@@ -788,7 +799,7 @@ def PrintIPCInformation(space, show_entries=False, show_userstack=False, rights_
             num_entries, space.is_low_mod, space.is_high_mod))
 
     #should show the each individual entries if asked.
-    if show_entries == True and is_tableval:
+    if show_entries and is_tableval:
         print("\t" + GetIPCEntrySummary.header)
 
         entries = (
@@ -801,11 +812,11 @@ def PrintIPCInformation(space, show_entries=False, show_userstack=False, rights_
             entry_ie_bits = unsigned(entryval.ie_bits)
             entry_name = "{0: <#20x}".format( (index <<8 | entry_ie_bits >> 24) )
             entry_str = GetIPCEntrySummary(entryval, entry_name, rights_filter)
-            if not len(entry_str):
+            if not entry_str:
                 continue
 
             print("\t" + entry_str)
-            if show_userstack == True:
+            if show_userstack:
                 entryport = Cast(entryval.ie_object, 'ipc_port *')
                 if entryval.ie_object and (int(entry_ie_bits) & 0x00070000) and entryport.ip_made_bt:
                     print(GetPortUserStack.header + GetPortUserStack(entryport, space.is_task))
@@ -873,7 +884,7 @@ def ShowTaskRights(cmd_args=None, cmd_options={}):
                    'n'     : No-Senders notification requested
                    'x'     : Port-destroy notification requested
     """
-    if cmd_args == None:
+    if cmd_args is None:
         print("No arguments passed")
         print(ShowTaskStacksCmdHelper.__doc__)
         return False
@@ -901,10 +912,10 @@ def GetTaskVoucherCount(t):
         ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00070000,
             gettype('struct ipc_port'))
 
-    for port in ports:
-        io_bits = port.xGetIntegerByPath('.ip_object.io_bits')
-        if io_bits & 0x3ff == voucher_kotype:
-            count += 1
+        for port in ports:
+            io_bits = port.xGetIntegerByPath('.ip_object.io_bits')
+            if io_bits & 0x3ff == voucher_kotype:
+                count += 1
 
     format_str = "{: <#20x} {: <6d} {: <20s} {: <8d}"
     pval = GetProcFromTask(t)
@@ -945,7 +956,7 @@ def ShowTaskRightsBt(cmd_args=None, cmd_options={}):
                    'n'     : No-Senders notification requested
                    'x'     : Port-destroy notification requested
     """
-    if cmd_args == None:
+    if cmd_args is None:
         print("No arguments passed")
         print(ShowTaskRightsBt.__doc__)
         return False
@@ -1075,7 +1086,7 @@ def PrintProgressForKmsg():
 def CollectPortsForAnalysis(port, disposition):
     """
     """
-    if not port or unsigned(port) == xnudefines.MACH_PORT_DEAD:
+    if not port or port == xnudefines.MACH_PORT_DEAD:
         return
     p = Cast(port, 'struct ipc_port *')
     yield (p, disposition)
@@ -1252,12 +1263,14 @@ def IterateAllPorts(tasklist, func, ctx, include_psets, follow_busyports, should
         space = t.itk_space
         is_tableval, num_entries = GetSpaceTable(space)
 
-        if is_tableval:
-            base  = is_tableval.GetSBValue().Dereference()
-            entries = (
-                value(iep.AddressOf())
-                for iep in base.xIterSiblings(1, num_entries)
-            )
+        if not is_tableval:
+            continue
+
+        base  = is_tableval.GetSBValue().Dereference()
+        entries = (
+            value(iep.AddressOf())
+            for iep in base.xIterSiblings(1, num_entries)
+        )
 
         for idx, entry_val in enumerate(entries, 1):
             entry_bits= unsigned(entry_val.ie_bits)
@@ -1390,7 +1403,7 @@ def FindPortRightsCallback(task, space, ctx, entry_idx, ipc_entry, ipc_port, por
             entry_str = '\t' + GetIPCEntrySummary(ipc_entry, entry_name, rights_type)
 
     procname = GetProcNameForTask(task)
-    if unsigned(ipc_port) != 0 and unsigned(ipc_port) != xnudefines.MACH_PORT_DEAD and ipc_port.ip_messages.imq_msgcount > 0:
+    if ipc_port and ipc_port != xnudefines.MACH_PORT_DEAD and ipc_port.ip_messages.imq_msgcount > 0:
         sys.stderr.write("  checking {:s} busy-port {}:{:#x}...{:30s}\r".format(procname, entry_name, unsigned(ipc_port), ''))
         ## Search through busy ports to find descriptors which could
         ## contain the only reference to this port!
@@ -1445,7 +1458,6 @@ def FindPortRights(cmd_args=None, cmd_options={}):
     sys.stderr.write("{:120s}\r".format(' '))
 
     print("Done.")
-    return
 # EndMacro: findportrights
 
 # Macro: countallports
@@ -1504,7 +1516,6 @@ def CountAllPorts(cmd_args=None, cmd_options={}):
     for pname in sorted(p_bytask.keys()):
         count = p_bytask[pname]
         print("\t{: <20s}: table={: <5d}, transit={: <5d}, other={: <5d}".format(pname, count['table'], count['transit'], count['other']))
-    return
 # EndMacro: countallports
 # Macro: showpipestats
 
@@ -1536,10 +1547,10 @@ def ShowTaskBusyPorts(cmd_args=None, cmd_options={}, O=None):
         ports = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00020000,
             gettype('struct ipc_port'))
 
-    with O.table(PrintPortSummary.header):
-        for port in ports:
-            if port.xGetIntegerByPath('.ip_messages.imq_msgcount'):
-                PrintPortSummary(value(port.AddressOf()), O=O)
+        with O.table(PrintPortSummary.header):
+            for port in ports:
+                if port.xGetIntegerByPath('.ip_messages.imq_msgcount'):
+                    PrintPortSummary(value(port.AddressOf()), O=O)
 
 # EndMacro: showtaskbusyports
 # Macro: showallbusyports
@@ -1612,11 +1623,11 @@ def ShowTaskBusyPortSets(cmd_args=None, cmd_options={}, O=None):
         psets = GetSpaceObjectsWithBits(is_tableval, num_entries, 0x00080000,
             gettype('struct ipc_pset'))
 
-    with O.table(PrintPortSetSummary.header):
-        for pset in (value(v.AddressOf()) for v in psets):
-            for wq in Waitq(addressof(pset.ips_wqset)).iterateMembers():
-                if wq.asPort().ip_messages.imq_msgcount > 0:
-                    PrintPortSetSummary(pset, space=task.itk_space, O=O)
+        with O.table(PrintPortSetSummary.header):
+            for pset in (value(v.AddressOf()) for v in psets):
+                for wq in Waitq(addressof(pset.ips_wqset)).iterateMembers():
+                    if wq.asPort().ip_messages.imq_msgcount > 0:
+                        PrintPortSetSummary(pset, space=task.itk_space, O=O)
 
 # EndMacro: showtaskbusyports
 # Macro: showallbusypsets
@@ -1686,7 +1697,7 @@ def ShowPortOrPset(obj, space=0, O=None):
     """ Routine that lists details about a given IPC port or pset
         Syntax: (lldb) showport 0xaddr
     """
-    if not obj or unsigned(obj) == xnudefines.IPC_OBJECT_DEAD:
+    if not obj or obj == xnudefines.IPC_OBJECT_DEAD:
         print("IPC_OBJECT_DEAD")
         return
 
@@ -1745,7 +1756,7 @@ def ShowKMSG(cmd_args=[]):
 def ShowAllIITs(cmd_args=[], cmd_options={}):
     """ Development only macro. Show list of all iits allocated in the system. """
     try:
-        iit_queue = kern.globals.global_iit_alloc_queue 
+        iit_queue = kern.globals.global_iit_alloc_queue
     except ValueError:
         print("This debug macro is only available in development or debug kernels")
         return
@@ -1796,9 +1807,9 @@ def GetIPCImportanceElemSummary(iie):
     out_str += fmt.format(iie, type_str, refs, made_refs, kmsg_count, inherit_count)
     if config['verbosity'] > vHUMAN:
         if kmsg_count > 0:
-            out_str += "\n\t"+ GetKMsgSummary.header 
+            out_str += "\n\t"+ GetKMsgSummary.header
             for k in IterateQueue(iie.iie_kmsgs, 'struct ipc_kmsg *',  'ikm_inheritance'):
-                out_str += "\t" + "{: <#18x}".format(GetKmsgHeader(k).msgh_remote_port) + '   ' + GetKMsgSummary(k, "\t").lstrip() 
+                out_str += "\t" + "{: <#18x}".format(GetKmsgHeader(k).msgh_remote_port) + '   ' + GetKMsgSummary(k, "\t").lstrip()
             out_str += "\n"
         if inherit_count > 0:
             out_str += "\n\t" + GetIPCImportanceInheritSummary.header + "\n"
@@ -1941,7 +1952,7 @@ def GetBagofBitsElementSummary(data_element):
     out_string += " 0x"
 
     for i in range(0, (unsigned(data_element.e_size) - 1)):
-      out_string += "{:02x}".format(int(data_element.e_data[i]))
+        out_string += "{:02x}".format(int(data_element.e_data[i]))
     return out_string
 
 def GetIPCHandleSummary(handle_ptr):
@@ -2071,7 +2082,7 @@ def GetIPCVoucherSummary(voucher, show_entries=False):
                 if entries_header_str :
                     entries_str = entries_header_str
                     entries_header_str = ''
-                entries_str += "\n\t" + s 
+                entries_str += "\n\t" + s
         if not entries_header_str:
             entries_str += "\n\t"
     out_str += entries_str
@@ -2187,7 +2198,7 @@ def ShowPortSendRights(cmd_args=[], cmd_options={}):
     if not cmd_args:
         raise ArgumentError("no port address provided")
     port = kern.GetValueFromAddress(cmd_args[0], 'struct ipc_port *')
-    if not port or unsigned(port) == xnudefines.MACH_PORT_DEAD:
+    if not port or port == xnudefines.MACH_PORT_DEAD:
         return
 
     return FindPortRights(cmd_args=[unsigned(port)], cmd_options={'-R':'S'})
@@ -2214,7 +2225,6 @@ def ShowTaskSuspenders(cmd_args=[], cmd_options={}):
     port = task.itk_resume
     if task.pidsuspended:
         print("task {:#x} ({:s}) has been `pid_suspend`ed. (Probably runningboardd's fault. Go look at the syslog for \"Suspending task.\")".format(unsigned(task), GetProcNameForTask(task)))
-        assert(not port)
         return
     elif not port:
         print("task {:#x} ({:s}) is suspended but no resume port exists".format(unsigned(task), GetProcNameForTask(task)))

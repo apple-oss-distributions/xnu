@@ -3491,7 +3491,7 @@ in6ms_free(struct in6_msource *in6ms)
 
 #ifdef MLD_DEBUG
 
-static const char *in6m_modestrs[] = { "un\n", "in", "ex" };
+static const char *in6m_modestrs[] = { "un", "in", "ex" };
 
 static const char *
 in6m_mode_str(const int mode)
@@ -3503,15 +3503,15 @@ in6m_mode_str(const int mode)
 }
 
 static const char *in6m_statestrs[] = {
-	"not-member\n",
-	"silent\n",
-	"reporting\n",
-	"idle\n",
-	"lazy\n",
-	"sleeping\n",
-	"awakening\n",
-	"query-pending\n",
-	"sg-query-pending\n",
+	"not-member",
+	"silent",
+	"reporting",
+	"idle",
+	"lazy",
+	"sleeping",
+	"awakening",
+	"query-pending",
+	"sg-query-pending",
 	"leaving"
 };
 

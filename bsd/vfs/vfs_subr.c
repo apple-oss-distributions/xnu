@@ -3130,6 +3130,15 @@ vclean(vnode_t vp, int flags)
 	}
 #endif
 
+	vm_object_destroy_reason_t reason = VM_OBJECT_DESTROY_UNKNOWN_REASON;
+	bool forced_unmount = vnode_mount(vp) != NULL && (vnode_mount(vp)->mnt_lflag & MNT_LFORCE) != 0;
+	bool ungraft_heuristic = flags & REVOKEALL;
+	if (forced_unmount) {
+		reason = VM_OBJECT_DESTROY_FORCED_UNMOUNT;
+	} else if (ungraft_heuristic) {
+		reason = VM_OBJECT_DESTROY_UNGRAFT;
+	}
+
 	/*
 	 * Destroy ubc named reference
 	 * cluster_release is done on this path
@@ -3137,7 +3146,7 @@ vclean(vnode_t vp, int flags)
 	 * (and in the case of forced unmount of an mmap-ed file,
 	 * the ubc reference on the vnode is dropped here too).
 	 */
-	ubc_destroy_named(vp);
+	ubc_destroy_named(vp, reason);
 
 #if CONFIG_TRIGGERS
 	/*

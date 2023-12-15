@@ -637,6 +637,12 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 			struct rtentry *rt = in6p->in6p_route.ro_rt;
 			struct ifnet *outif;
 
+			if (IS_LOCALNET_ROUTE(rt)) {
+				in6p->in6p_flags2 |= INP2_LAST_ROUTE_LOCAL;
+			} else {
+				in6p->in6p_flags2 &= ~INP2_LAST_ROUTE_LOCAL;
+			}
+
 			if (rt->rt_flags & RTF_MULTICAST) {
 				rt = NULL;      /* unusable */
 			}

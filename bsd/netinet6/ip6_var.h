@@ -410,19 +410,19 @@ struct ip6aux {
 
 /*
  * On platforms which require strict alignment (currently for anything but
- * i386 or x86_64), this macro checks whether the pointer to the IP header
+ * i386 or x86_64 or arm64), this macro checks whether the pointer to the IP header
  * is 32-bit aligned, and assert otherwise.
  */
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm64__)
 #define IP6_HDR_STRICT_ALIGNMENT_CHECK(_ip6) do { } while (0)
-#else /* !__i386__ && !__x86_64__ */
+#else /* !__i386__ && !__x86_64__ && !__arm64__ */
 #define IP6_HDR_STRICT_ALIGNMENT_CHECK(_ip6) do {                       \
 	if (!IP_HDR_ALIGNED_P(_ip6)) {                                  \
 	        panic_plain("\n%s: Unaligned IPv6 header %p\n",         \
 	            __func__, _ip6);                                    \
 	}                                                               \
 } while (0)
-#endif /* !__i386__ && !__x86_64__ */
+#endif /* !__i386__ && !__x86_64__ && !__arm64__ */
 #endif /* BSD_KERNEL_PRIVATE */
 
 #include <net/flowadv.h>

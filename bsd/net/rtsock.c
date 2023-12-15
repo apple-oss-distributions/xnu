@@ -470,7 +470,8 @@ route_output(struct mbuf *m, struct socket *so)
 
 		ifnet_head_lock_shared();
 		if (IF_INDEX_IN_RANGE(ifscope)) {
-			if (IFNET_IS_MANAGEMENT(ifindex2ifnet[ifscope])) {
+			ifp = ifindex2ifnet[ifscope];
+			if (ifp != NULL && IFNET_IS_MANAGEMENT(ifp)) {
 				is_management = true;
 			}
 		}

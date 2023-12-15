@@ -416,7 +416,8 @@ tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 	    "base_rtt: %u ms " \
 	    "error: %d " \
 	    "so_error: %d " \
-	    "svc/tc: %u"
+	    "svc/tc: %u " \
+	    "flow: 0x%x"
 
 #define TCP_LOG_CONNECT_ARGS \
 	    event, \
@@ -429,7 +430,8 @@ tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 	    get_base_rtt(tp), \
 	    error, \
 	    so->so_error, \
-	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class
+	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class, \
+	    inp->inp_flowhash
 
 	if (so->so_head == NULL) {
 		os_log(OS_LOG_DEFAULT, TCP_LOG_CONNECT_FMT,
@@ -627,7 +629,8 @@ tcp_log_connection_summary(struct tcpcb *tp)
 	    "rttvar: %u.%03u ms " \
 	    "base rtt: %u ms " \
 	    "so_error: %d " \
-	    "svc/tc: %u"
+	    "svc/tc: %u " \
+	    "flow: 0x%x"
 
 #define TCP_LOG_CONNECTION_SUMMARY_ARGS \
 	    TCP_LOG_COMMON_PCB_ARGS, \
@@ -641,7 +644,8 @@ tcp_log_connection_summary(struct tcpcb *tp)
 	    P_MS(tp->t_rttvar, TCP_RTTVAR_SHIFT), \
 	    get_base_rtt(tp), \
 	    so->so_error, \
-	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class
+	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class, \
+	    inp->inp_flowhash
 
 	os_log(OS_LOG_DEFAULT, TCP_LOG_CONNECTION_SUMMARY_FMT,
 	    TCP_LOG_CONNECTION_SUMMARY_ARGS);
@@ -651,7 +655,7 @@ tcp_log_connection_summary(struct tcpcb *tp)
 #define TCP_LOG_CONNECTION_SUMMARY_FMT \
 	    "tcp_connection_summary " \
 	    TCP_LOG_COMMON_PCB_FMT \
-	    "flowctl: %llu suspnd: %llu " \
+	    "flowctl: %lluus (%llux) " \
 	    "SYN in/out: %u/%u " \
 	    "FIN in/out: %u/%u " \
 	    "RST in/out: %u/%u " \
@@ -659,7 +663,8 @@ tcp_log_connection_summary(struct tcpcb *tp)
 
 #define TCP_LOG_CONNECTION_SUMMARY_ARGS \
 	    TCP_LOG_COMMON_PCB_ARGS, \
-	    inp->inp_fadv_flow_ctrl_cnt, inp->inp_fadv_suspended_cnt, \
+	    inp->inp_fadv_total_time, \
+	    inp->inp_fadv_cnt, \
 	    tp->t_syn_rcvd, tp->t_syn_sent, \
 	    tp->t_fin_rcvd, tp->t_fin_sent, \
 	    tp->t_rst_rcvd, tp->t_rst_sent, \

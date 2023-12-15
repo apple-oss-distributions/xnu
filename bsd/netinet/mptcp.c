@@ -1351,6 +1351,10 @@ mptcp_session_necp_cb(void *handle, int action, uint32_t interface_index,
 		action = NECP_CLIENT_CBACTION_NONVIABLE;
 	}
 
+	if (action == NECP_CLIENT_CBACTION_INITIAL) {
+		mpte->mpte_flags |= MPTE_ITFINFO_INIT;
+	}
+
 	if (action == NECP_CLIENT_CBACTION_NONVIABLE) {
 		for (i = 0; i < mpte->mpte_itfinfo_size; i++) {
 			if (mpte->mpte_itfinfo[i].ifindex == IFSCOPE_NONE) {

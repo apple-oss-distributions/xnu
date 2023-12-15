@@ -383,7 +383,7 @@ def lldb_alias(alias_name, cmd_line):
 
 def SetupLLDBTypeSummaries(reset=False):
     global lldb_summary_definitions, MODULE_NAME
-    if reset == True:
+    if reset:
             lldb.debugger.HandleCommand("type category delete  kernel ")
     for single_type in list(lldb_summary_definitions.keys()):
         summary_function = lldb_summary_definitions[single_type]
@@ -423,7 +423,7 @@ def ProcessXNUPluginResult(result_data):
     ret_string = result_data[1]
     ret_commands = result_data[2]
 
-    if ret_status == False:
+    if not ret_status:
         print("Plugin failed: " + ret_string)
         return
     print(ret_string)

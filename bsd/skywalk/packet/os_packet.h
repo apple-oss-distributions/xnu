@@ -789,6 +789,8 @@ extern void kern_packet_clear_flow_uuid(const kern_packet_t);
 extern void kern_packet_get_euuid(const kern_packet_t, uuid_t);
 extern void kern_packet_set_policy_id(const kern_packet_t, uint32_t);
 extern uint32_t kern_packet_get_policy_id(const kern_packet_t);
+extern void kern_packet_set_skip_policy_id(const kern_packet_t, uint32_t);
+extern uint32_t kern_packet_get_skip_policy_id(const kern_packet_t);
 extern kern_packet_idx_t kern_packet_get_object_index(const kern_packet_t);
 extern uint32_t kern_packet_get_data_length(const kern_packet_t);
 extern uint32_t kern_packet_get_buflet_count(const kern_packet_t);

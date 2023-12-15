@@ -793,7 +793,7 @@ apple_protect_pager_terminate_internal(
 	pager->crypt_info = NULL;
 
 	/* trigger the destruction of the memory object */
-	memory_object_destroy(pager->ap_pgr_hdr.mo_control, 0);
+	memory_object_destroy(pager->ap_pgr_hdr.mo_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
 }
 
 /*

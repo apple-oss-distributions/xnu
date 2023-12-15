@@ -30,6 +30,15 @@ _check_cpi(struct thsc_cpi *before, struct thsc_cpi *after, const char *name)
 	    "%s: cycles monotonically-increasing", name);
 }
 
+static void
+_check_no_cpi(struct thsc_cpi *before, struct thsc_cpi *after, const char *name)
+{
+	T_EXPECT_EQ(after->tcpi_instructions, before->tcpi_instructions,
+	    "%s: instructions should not increase", name);
+	T_EXPECT_EQ(after->tcpi_cycles, before->tcpi_cycles,
+	    "%s: cycles should not increase", name);
+}
+
 static struct thsc_cpi
 _remove_time_from_cpi(struct thsc_time_cpi *time_cpi)
 {
@@ -56,6 +65,23 @@ _check_time_cpi(struct thsc_time_cpi *before, struct thsc_time_cpi *after,
 	}
 }
 
+static void
+_check_no_time_cpi(struct thsc_time_cpi *before, struct thsc_time_cpi *after,
+    const char *name)
+{
+	struct thsc_cpi before_cpi = _remove_time_from_cpi(before);
+	struct thsc_cpi after_cpi = _remove_time_from_cpi(after);
+	_check_no_cpi(&before_cpi, &after_cpi, name);
+
+	T_EXPECT_EQ(after->ttci_user_time_mach, before->ttci_user_time_mach,
+			"%s: user time should not change", name);
+
+	if (has_user_system_times()) {
+		T_EXPECT_EQ(after->ttci_system_time_mach, before->ttci_system_time_mach,
+				"%s: system time should not change", name);
+	}
+}
+
 static struct thsc_time_cpi
 _remove_energy_from_cpi(struct thsc_time_energy_cpi *energy_cpi)
 {
@@ -79,6 +105,15 @@ _check_usage(struct thsc_time_energy_cpi *before,
 		T_EXPECT_GT(after->ttec_energy_nj, UINT64_C(0),
 				"%s: energy monotonically-increasing", name);
 	}
+}
+
+static void
+_check_no_usage(struct thsc_time_energy_cpi *before,
+    struct thsc_time_energy_cpi *after, const char *name)
+{
+	struct thsc_time_cpi before_time = _remove_energy_from_cpi(before);
+	struct thsc_time_cpi after_time = _remove_energy_from_cpi(after);
+	_check_no_time_cpi(&before_time, &after_time, name);
 }
 
 T_DECL(thread_selfcounts_cpi_sanity, "check the current thread's CPI",
@@ -123,6 +158,79 @@ T_DECL(thread_selfcounts_perf_level_sanity,
 	for (unsigned int i = 0; i < level_count; i++) {
 		_check_usage(&before[i], &after[i], perf_level_name(i));
 	}
+
+	free(before);
+	free(after);
+}
+
+static void
+_expect_counts_on_perf_level(const char *name,
+		struct thsc_time_energy_cpi *before,
+		struct thsc_time_energy_cpi *after)
+{
+	unsigned int level_count = perf_level_count();
+	int err = thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, before,
+			level_count * sizeof(*before));
+	T_ASSERT_POSIX_ZERO(err,
+			"thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, ...)");
+	(void)getppid();
+	err = thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, after,
+			level_count * sizeof(*after));
+	T_ASSERT_POSIX_ZERO(err,
+			"thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, ...)");
+
+	unsigned int index = perf_level_index(name);
+	_check_usage(&before[index], &after[index], name);
+}
+
+static void
+_expect_no_counts_on_perf_level(const char *name,
+		struct thsc_time_energy_cpi *before,
+		struct thsc_time_energy_cpi *after)
+{
+	unsigned int level_count = perf_level_count();
+	int err = thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, before,
+			level_count * sizeof(*before));
+	T_ASSERT_POSIX_ZERO(err,
+			"thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, ...)");
+	(void)getppid();
+	err = thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, after,
+			level_count * sizeof(*after));
+	T_ASSERT_POSIX_ZERO(err,
+			"thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, ...)");
+
+	unsigned int index = perf_level_index(name);
+	_check_no_usage(&before[index], &after[index], name);
+}
+
+T_DECL(thread_selfcounts_perf_level_correct,
+    "check that runtimes on each perf level match binding request",
+    REQUIRE_RECOUNT_PMCS,
+    REQUIRE_MULTIPLE_PERF_LEVELS,
+    SET_THREAD_BIND_BOOTARG,
+    T_META_ASROOT(true))
+{
+	unsigned int level_count = perf_level_count();
+	for (unsigned int i = 0; i < level_count; i++) {
+		T_LOG("Level %d: %s", i, perf_level_name(i));
+	}
+
+	struct thsc_time_energy_cpi *before = calloc(level_count, sizeof(*before));
+	struct thsc_time_energy_cpi *after = calloc(level_count, sizeof(*after));
+
+	T_LOG("Binding to Efficiency cluster, should only see counts from E-cores");
+	T_SETUPBEGIN;
+	bind_to_cluster('E');
+	T_SETUPEND;
+	_expect_counts_on_perf_level("Efficiency", before, after);
+	_expect_no_counts_on_perf_level("Performance", before, after);
+
+	T_LOG("Binding to Performance cluster, should only see counts from P-cores");
+	T_SETUPBEGIN;
+	bind_to_cluster('P');
+	T_SETUPEND;
+	_expect_counts_on_perf_level("Performance", before, after);
+	_expect_no_counts_on_perf_level("Efficiency", before, after);
 
 	free(before);
 	free(after);

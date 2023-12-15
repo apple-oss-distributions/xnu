@@ -60,6 +60,11 @@ extern kern_return_t    ecc_log_record_event(const struct ecc_event *ev);
 #endif
 
 #ifdef XNU_KERNEL_PRIVATE
+#include <mach/vm_param.h>
+
+#define ECC_PANIC_PAGE_MAGIC 0xEC
+#define ECC_PANIC_PAGE_SIGN ((1ULL << 63) | (ECC_PANIC_PAGE_MAGIC))
+#define ECC_PANIC_PAGE_MASK ((1ULL << 63) | (PAGE_MASK))
 extern kern_return_t    ecc_log_get_next_event(struct ecc_event *ev);
 extern uint32_t         ecc_log_get_correction_count(void);
 #endif

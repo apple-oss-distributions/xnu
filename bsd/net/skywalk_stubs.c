@@ -122,6 +122,7 @@ STUB(kern_packet_get_network_header_offset);
 STUB(kern_packet_get_next_buflet);
 STUB(kern_packet_get_object_index);
 STUB(kern_packet_get_policy_id);
+STUB(kern_packet_get_skip_policy_id);
 STUB(kern_packet_get_service_class);
 STUB(kern_packet_get_service_class_index);
 STUB(kern_packet_is_high_priority);

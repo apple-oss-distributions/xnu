@@ -1180,9 +1180,9 @@ Lcheck_hash_panic:
 	 */
 	mov		x1, x0
 	adr		x0, Lcheck_hash_str
-	ARM64_STACK_PROLOG
 	PUSH_FRAME
 	CALL_EXTERN panic_with_thread_kernel_state
+	brk		#0
 
 Lcheck_hash_str:
 	.asciz "JOP Hash Mismatch Detected (PC, CPSR, or LR corruption)"
@@ -1190,10 +1190,10 @@ Lcheck_hash_str:
 #if DEBUG || DEVELOPMENT
 	.align 2
 Lintr_enabled_panic:
-	ARM64_STACK_PROLOG
 	PUSH_FRAME
 	adr		x0, Lintr_enabled_str
 	CALL_EXTERN panic
+	brk		#0
 Lintr_enabled_str:
 	/*
 	 * Please see the "Signing spilled register state" section of doc/pac.md
@@ -1211,11 +1211,11 @@ Lintr_enabled_str:
 	.align 2
 	.globl EXT(ml_auth_thread_state_invalid_cpsr)
 LEXT(ml_auth_thread_state_invalid_cpsr)
-	ARM64_STACK_PROLOG
 	PUSH_FRAME
 	mov		x1, x0
 	adr		x0, Linvalid_cpsr_str
 	CALL_EXTERN panic_with_thread_kernel_state
+	brk		#0
 
 Linvalid_cpsr_str:
 	.asciz "Thread state corruption detected (PE mode == 0)"

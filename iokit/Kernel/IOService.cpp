@@ -4466,19 +4466,17 @@ bool
 IOServicePH::matchingStart(IOService * service)
 {
 	uint32_t idx;
-	bool ok = gIOPMRootDomain->acquireDriverKitMatchingAssertion() == kIOReturnSuccess;
-	if (!ok) {
-		return ok;
-	}
+	bool assertionActive = gIOPMRootDomain->acquireDriverKitMatchingAssertion() == kIOReturnSuccess;
 
 	lock();
-	ok = !fSystemOff;
-	if (ok) {
+	bool matchNow = !fSystemOff && assertionActive;
+	if (matchNow) {
 		idx = fMatchingWork->getNextIndexOfObject(service, 0);
 		if (idx == -1U) {
 			fMatchingWork->setObject(service);
 		}
 	} else {
+		// Delay matching if system is transitioning to sleep
 		if (!fMatchingDelayed) {
 			fMatchingDelayed = OSArray::withObjects((const OSObject **) &service, 1, 1);
 		} else {
@@ -4489,11 +4487,11 @@ IOServicePH::matchingStart(IOService * service)
 		}
 	}
 	unlock();
-	if (!ok) {
+	if (!matchNow && assertionActive) {
 		gIOPMRootDomain->releaseDriverKitMatchingAssertion();
 	}
 
-	return ok;
+	return matchNow;
 }
 
 void
@@ -4719,6 +4717,27 @@ IOServicePH::systemPowerChange(
 	}
 
 	return ret;
+}
+
+bool
+IOServicePH::checkPMReady(void)
+{
+	bool __block ready = true;
+
+	lock();
+	fUserServers->iterateObjects(^bool (OSObject *obj) {
+		IOUserServer * us = OSDynamicCast(IOUserServer, obj);
+		if (us) {
+		        if (!us->checkPMReady()) {
+		                ready = false;
+		                return true;
+			}
+		}
+		return false;
+	});
+	unlock();
+
+	return ready;
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */

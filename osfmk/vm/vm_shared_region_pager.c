@@ -886,7 +886,7 @@ shared_region_pager_terminate_internal(
 		pager->srp_backing_object = VM_OBJECT_NULL;
 	}
 	/* trigger the destruction of the memory object */
-	memory_object_destroy(pager->srp_header.mo_control, 0);
+	memory_object_destroy(pager->srp_header.mo_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
 }
 
 /*

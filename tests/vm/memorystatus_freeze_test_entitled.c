@@ -44,7 +44,9 @@ signal_helper_process(void)
 	kill(helper_pid, SIGUSR1);
 }
 
-T_DECL(memorystatus_disable_freeze_in_other_process, "memorystatus_disable_freezer for another process")
+T_DECL(memorystatus_disable_freeze_in_other_process, "memorystatus_disable_freezer for another process",
+    T_META_BOOTARGS_SET("freeze_enabled=1"),
+    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1))
 {
 	helper_pid = launch_background_helper("simple_bg", true, true);
 	T_ATEND(signal_helper_process);

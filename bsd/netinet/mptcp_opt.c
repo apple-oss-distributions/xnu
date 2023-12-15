@@ -327,7 +327,7 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 	boolean_t do_csum = FALSE;
 	boolean_t send_64bit_dsn = FALSE;
 	boolean_t send_64bit_ack = FALSE;
-	u_int32_t old_mpt_flags = tp->t_mpflags & TMPF_MPTCP_SIGNALS;
+	uint32_t old_mpt_flags = tp->t_mpflags & TMPF_MPTCP_SIGNALS;
 	boolean_t initial_data = FALSE;
 
 	if (mptcp_enable == 0 || mp_tp == NULL || tp->t_state == TCPS_CLOSED) {
@@ -861,7 +861,7 @@ do_ack64_only:
 
 ret_optlen:
 	if (TRUE == *p_mptcp_acknow) {
-		u_int32_t new_mpt_flags = tp->t_mpflags & TMPF_MPTCP_SIGNALS;
+		uint32_t new_mpt_flags = tp->t_mpflags & TMPF_MPTCP_SIGNALS;
 
 		/*
 		 * If none of the above mpflags were acted on by
@@ -1682,11 +1682,15 @@ mptcp_do_add_addr_opt_v1(struct tcpcb *tp, u_char *cp)
 		mpte->mpte_last_added_addr_is_v4 = FALSE;
 	}
 
-	os_log(mptcp_log_handle, "%s - %lx: Received ADD_ADDRv%u\n",
-	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
-	    addr_opt->maddr_flags);
+	os_log(mptcp_log_handle, "%s - %lx: Received ADD_ADDRv1\n",
+	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte));
 
+	/* Once an incoming ADD_ADDR for v1 is valid, it means that the peer
+	 * receiver our keys.
+	 */
+	tp->t_mpflags &= ~TMPF_SND_KEYS;
 	tp->t_mpflags |= TMPF_MPTCP_ECHO_ADDR;
+	tp->t_flags |= TF_ACKNOW;
 	mptcp_sched_create_subflows(mpte);
 }
 
@@ -1775,9 +1779,8 @@ mptcp_do_add_addr_opt_v0(struct mptses *mpte, u_char *cp)
 		mpte->mpte_last_added_addr_is_v4 = FALSE;
 	}
 
-	os_log(mptcp_log_handle, "%s - %lx: Received ADD_ADDRv%u\n",
-	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
-	    addr_opt->maddr_flags);
+	os_log(mptcp_log_handle, "%s - %lx: Received ADD_ADDRv0\n",
+	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte));
 
 	mptcp_sched_create_subflows(mpte);
 }

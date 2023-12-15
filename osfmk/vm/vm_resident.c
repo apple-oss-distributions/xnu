@@ -1232,7 +1232,8 @@ pmap_steal_memory_internal(
 	vm_size_t size,
 	vm_size_t alignment,
 	boolean_t might_free,
-	unsigned int flags)
+	unsigned int flags,
+	pmap_mapping_type_t mapping_type)
 {
 	kern_return_t kr;
 	vm_offset_t addr;
@@ -1306,7 +1307,7 @@ pmap_steal_memory_internal(
 		    pmap_next_page_large(&phys_page) == KERN_SUCCESS) {
 			kr = pmap_enter(kernel_pmap, map_addr, phys_page,
 			    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE,
-			    VM_WIMG_USE_DEFAULT | VM_MEM_SUPERPAGE, FALSE);
+			    VM_WIMG_USE_DEFAULT | VM_MEM_SUPERPAGE, FALSE, mapping_type);
 
 			if (kr != KERN_SUCCESS) {
 				panic("pmap_steal_memory: pmap_enter() large failed, new_addr=%#lx, phys_page=%u",
@@ -1331,7 +1332,7 @@ pmap_steal_memory_internal(
 
 		kr = pmap_enter(kernel_pmap, map_addr, phys_page,
 		    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE,
-		    pmap_flags, FALSE);
+		    pmap_flags, FALSE, mapping_type);
 
 		if (kr != KERN_SUCCESS) {
 			panic("pmap_steal_memory() pmap_enter failed, map_addr=%#lx, phys_page=%u",
@@ -1366,14 +1367,14 @@ pmap_steal_memory(
 	vm_size_t size,
 	vm_size_t alignment)
 {
-	return pmap_steal_memory_internal(size, alignment, FALSE, 0);
+	return pmap_steal_memory_internal(size, alignment, FALSE, 0, PMAP_MAPPING_TYPE_RESTRICTED);
 }
 
 void *
 pmap_steal_freeable_memory(
 	vm_size_t size)
 {
-	return pmap_steal_memory_internal(size, 0, TRUE, 0);
+	return pmap_steal_memory_internal(size, 0, TRUE, 0, PMAP_MAPPING_TYPE_RESTRICTED);
 }
 
 void *
@@ -1384,7 +1385,7 @@ pmap_steal_zone_memory(
 	unsigned int flags = 0;
 
 
-	return pmap_steal_memory_internal(size, alignment, FALSE, flags);
+	return pmap_steal_memory_internal(size, alignment, FALSE, flags, PMAP_MAPPING_TYPE_RESTRICTED);
 }
 
 
@@ -5816,7 +5817,8 @@ pmap_enter_check(
 	           flags,
 	           wired,
 	           options,
-	           NULL);
+	           NULL,
+	           PMAP_MAPPING_TYPE_INFER);
 }
 
 

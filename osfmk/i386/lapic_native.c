@@ -140,7 +140,8 @@ map_local_apic(void)
 		    VM_PROT_READ | VM_PROT_WRITE,
 		    VM_PROT_NONE,
 		    VM_WIMG_IO,
-		    TRUE);
+		    TRUE,
+		    PMAP_MAPPING_TYPE_INFER);
 
 		assert(kr == KERN_SUCCESS);
 	}

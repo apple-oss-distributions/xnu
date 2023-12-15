@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <sys/sysctl.h>
+#include <unistd.h>
 
 #include "recount_test_utils.h"
 
@@ -84,11 +85,11 @@ perf_level_count(void)
 	return count;
 }
 
-const char *
-perf_level_name(unsigned int perf_level)
+static const char **
+_perf_level_names(void)
 {
-	static dispatch_once_t names_once;
 	static char names[2][32] = { 0 };
+	static dispatch_once_t names_once;
 	dispatch_once(&names_once, ^{
 		T_SETUPBEGIN;
 		unsigned int count = perf_level_count();
@@ -103,17 +104,41 @@ perf_level_name(unsigned int perf_level)
 		}
 		T_SETUPEND;
 	});
-	T_QUIET; T_ASSERT_LT(perf_level, 2, "no more than two perf levels");
-	return names[perf_level];
+	static const char *ret_names[] = {
+		(char *)&names[0],
+		(char *)&names[1],
+	};
+	return ret_names;
 }
 
-static void
+const char *
+perf_level_name(unsigned int perf_level)
+{
+	return _perf_level_names()[perf_level];
+}
+
+unsigned int
+perf_level_index(const char *name)
+{
+	unsigned int count = perf_level_count();
+	const char **names = _perf_level_names();
+	for (unsigned int i = 0; i < count; i++) {
+		if (strcmp(name, names[i]) == 0) {
+			return i;
+		}
+	}
+	T_ASSERT_FAIL("cannot find perf level named %s", name);
+}
+
+void
 bind_to_cluster(char type)
 {
 	int ret = sysctlbyname("kern.sched_thread_bind_cluster_type", NULL, NULL,
 			&type, sizeof(type));
 	T_QUIET;
 	T_ASSERT_POSIX_SUCCESS(ret, "sysctl kern.sched_thread_bind_cluster_type");
+	// Ensure the thread has seen a context switch while bound.
+	usleep(10000);
 }
 
 void

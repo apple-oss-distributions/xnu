@@ -1503,6 +1503,24 @@ after_sack_rexmit:
 		 */
 		if (!INP_WAIT_FOR_IF_FEEDBACK(inp) ||
 		    tp->t_state != TCPS_ESTABLISHED) {
+			if (off + len == tp->snd_wnd) {
+				/* We are limited by the receiver's window... */
+				if (tp->t_rcvwnd_limited_start_time == 0) {
+					tp->t_rcvwnd_limited_start_time = net_uptime_us();
+				}
+			} else {
+				/* We are no more limited by the receiver's window... */
+				if (tp->t_rcvwnd_limited_start_time != 0) {
+					uint64_t now = net_uptime_us();
+
+					ASSERT(now >= tp->t_rcvwnd_limited_start_time);
+
+					tp->t_rcvwnd_limited_total_time += (now - tp->t_rcvwnd_limited_start_time);
+
+					tp->t_rcvwnd_limited_start_time = 0;
+				}
+			}
+
 			if (len >= tp->t_maxseg) {
 				goto send;
 			}
@@ -3041,7 +3059,6 @@ timer:
 	}
 
 	if (sendalot == 0 || (tp->t_state != TCPS_ESTABLISHED) ||
-	    (tp->snd_cwnd <= (tp->snd_wnd / 8)) ||
 	    (tp->t_flags & TF_ACKNOW) ||
 	    (tp->t_flagsext & TF_FORCE) ||
 	    tp->t_lastchain >= tcp_packet_chaining) {

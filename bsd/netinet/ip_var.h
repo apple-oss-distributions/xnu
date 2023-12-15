@@ -290,19 +290,19 @@ struct ip_moptions;
 
 /*
  * On platforms which require strict alignment (currently for anything but
- * i386 or x86_64), this macro checks whether the pointer to the IP header
+ * i386 or x86_64 or arm64), this macro checks whether the pointer to the IP header
  * is 32-bit aligned, and assert otherwise.
  */
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm64__)
 #define IP_HDR_STRICT_ALIGNMENT_CHECK(_ip) do { } while (0)
-#else /* !__i386__ && !__x86_64__ */
+#else /* !__i386__ && !__x86_64__ && !__arm64__ */
 #define IP_HDR_STRICT_ALIGNMENT_CHECK(_ip) do {                         \
 	if (!IP_HDR_ALIGNED_P(_ip)) {                                   \
 	        panic_plain("\n%s: Unaligned IP header %p\n",           \
 	            __func__, _ip);                                     \
 	}                                                               \
 } while (0)
-#endif /* !__i386__ && !__x86_64__ */
+#endif /* !__i386__ && !__x86_64__ && !__arm64__ */
 
 struct ip;
 struct inpcb;

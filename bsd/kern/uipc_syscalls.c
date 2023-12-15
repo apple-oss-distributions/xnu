@@ -2049,11 +2049,12 @@ sendit_x(proc_ref_t p, socket_ref_t so, struct sendmsg_x_args *uap, u_int *retva
 			m = control;
 		}
 		MBUFQ_ENQUEUE(&pktlist, m);
+
+		pkt_cnt += 1;
 	}
 
 	top = MBUFQ_FIRST(&pktlist);
 	MBUFQ_INIT(&pktlist);
-	pkt_cnt = uap->cnt;
 	error = sosend_list(so, top, total_pkt_len, &pkt_cnt, flags);
 	if (error != 0) {
 		os_log(OS_LOG_DEFAULT, "sendit_x: sosend_list error %d\n", error);

@@ -288,6 +288,7 @@ struct flow_entry {
 	flowadv_idx_t           fe_adv_idx;
 	kern_packet_svc_class_t fe_svc_class;
 	uint32_t                fe_policy_id;   /* policy id matched to flow */
+	uint32_t                fe_skip_policy_id; /* skip policy id matched to flow */
 
 	/**** Misc Group ****/
 	struct nx_flowswitch *  const fe_fsw;

@@ -17,7 +17,7 @@ osplugin_target_obj = None
 class PluginValue(lldb.SBValue):
     def GetChildMemberWithName(val, name):
         val_type = val.GetType()
-        if val_type.IsPointerType() == True:
+        if val_type.IsPointerType():
             val_type = val_type.GetPointeeType()
         for i in range(val_type.GetNumberOfFields()):
             if name == val_type.GetFieldAtIndex(i).GetName():

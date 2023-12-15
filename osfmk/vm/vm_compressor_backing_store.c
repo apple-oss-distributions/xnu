@@ -2114,7 +2114,7 @@ vm_swap_reclaim(void)
 	c_segment_t     c_seg = NULL;
 
 	kmem_alloc(compressor_map, (vm_offset_t *)&addr, c_seg_bufsize,
-	    KMA_NOFAIL | KMA_KOBJECT, VM_KERN_MEMORY_COMPRESSOR);
+	    KMA_NOFAIL | KMA_KOBJECT | KMA_DATA, VM_KERN_MEMORY_COMPRESSOR);
 
 	lck_mtx_lock(&vm_swap_data_lock);
 

@@ -112,8 +112,9 @@ static LCK_MTX_DECLARE_ATTR(domain_proto_mtx,
 static LCK_MTX_DECLARE_ATTR(domain_timeout_mtx,
     &domain_proto_mtx_grp, &domain_proto_mtx_attr);
 
-u_int64_t _net_uptime;
-u_int64_t _net_uptime_ms;
+uint64_t _net_uptime;
+uint64_t _net_uptime_ms;
+uint64_t _net_uptime_us;
 
 #if (DEVELOPMENT || DEBUG)
 
@@ -961,18 +962,40 @@ pfctlinput2(int cmd, struct sockaddr *sa, void *ctlparam)
 void
 net_update_uptime_with_time(const struct timeval *tvp)
 {
-	_net_uptime = tvp->tv_sec;
+	uint64_t tmp;
+	uint64_t seconds = tvp->tv_sec;;
+	uint64_t milliseconds = ((uint64_t)tvp->tv_sec * 1000) + ((uint64_t)tvp->tv_usec / 1000);
+	uint64_t microseconds = ((uint64_t)tvp->tv_sec * USEC_PER_SEC) + (uint64_t)tvp->tv_usec;
+
 	/*
 	 * Round up the timer to the nearest integer value because otherwise
 	 * we might setup networking timers that are off by almost 1 second.
 	 */
 	if (tvp->tv_usec > 500000) {
-		_net_uptime++;
+		seconds++;
+	}
+
+	tmp = os_atomic_load(&_net_uptime, relaxed);
+	if (tmp < seconds) {
+		os_atomic_cmpxchg(&_net_uptime, tmp, seconds, relaxed);
+
+		/*
+		 * No loop needed. If we are racing with another thread, let's give
+		 * the other one the priority.
+		 */
 	}
 
 	/* update milliseconds variant */
-	_net_uptime_ms = (((u_int64_t)tvp->tv_sec * 1000) +
-	    ((u_int64_t)tvp->tv_usec / 1000));
+	tmp = os_atomic_load(&_net_uptime_ms, relaxed);
+	if (tmp < milliseconds) {
+		os_atomic_cmpxchg(&_net_uptime_ms, tmp, milliseconds, relaxed);
+	}
+
+	/* update microseconds variant */
+	tmp = os_atomic_load(&_net_uptime_us, relaxed);
+	if (tmp < microseconds) {
+		os_atomic_cmpxchg(&_net_uptime_us, tmp, microseconds, relaxed);
+	}
 }
 
 void
@@ -1004,7 +1027,7 @@ net_uptime2timeval(struct timeval *tv)
  * for networking code which do not require high-precision timestamp,
  * as this is significantly cheaper than microuptime().
  */
-u_int64_t
+uint64_t
 net_uptime(void)
 {
 	if (_net_uptime == 0) {
@@ -1014,7 +1037,7 @@ net_uptime(void)
 	return _net_uptime;
 }
 
-u_int64_t
+uint64_t
 net_uptime_ms(void)
 {
 	if (_net_uptime_ms == 0) {
@@ -1022,6 +1045,16 @@ net_uptime_ms(void)
 	}
 
 	return _net_uptime_ms;
+}
+
+uint64_t
+net_uptime_us(void)
+{
+	if (_net_uptime_us == 0) {
+		net_update_uptime();
+	}
+
+	return _net_uptime_us;
 }
 
 void

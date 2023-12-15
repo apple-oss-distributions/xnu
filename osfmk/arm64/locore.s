@@ -65,6 +65,7 @@
 
 #endif /* XNU_MONITOR */
 
+
 /*
  * MAP_KERNEL
  *
@@ -180,7 +181,7 @@ Lcorrupt_stack_\@:
 	mov		x0, sp								// Copy exception frame pointer to x0
 	adrp	x1, fleh_invalid_stack@page			// Load address for fleh
 	add		x1, x1, fleh_invalid_stack@pageoff	// fleh_dispatch64 will save register state before we get there
-	b		fleh_dispatch64
+	b		fleh_dispatch64_noreturn
 Lvalid_stack_\@:
 	ldp		x2, x3, [sp], #16			// Restore {x2-x3}
 .endmacro
@@ -369,25 +370,25 @@ Lel1_sp1_synchronous_vector_continue:
 	EL1_SP1_VECTOR
 	adrp	x1, fleh_synchronous_sp1@page
 	add		x1, x1, fleh_synchronous_sp1@pageoff
-	b		fleh_dispatch64
+	b		fleh_dispatch64_noreturn
 
 el1_sp1_irq_vector_long:
 	EL1_SP1_VECTOR
 	adrp	x1, fleh_irq_sp1@page
 	add		x1, x1, fleh_irq_sp1@pageoff
-	b		fleh_dispatch64
+	b		fleh_dispatch64_noreturn
 
 el1_sp1_fiq_vector_long:
 	EL1_SP1_VECTOR
 	adrp	x1, fleh_fiq_sp1@page
 	add		x1, x1, fleh_fiq_sp1@pageoff
-	b		fleh_dispatch64
+	b		fleh_dispatch64_noreturn
 
 el1_sp1_serror_vector_long:
 	EL1_SP1_VECTOR
 	adrp	x1, fleh_serror_sp1@page
 	add		x1, x1, fleh_serror_sp1@pageoff
-	b		fleh_dispatch64
+	b		fleh_dispatch64_noreturn
 
 
 
@@ -469,17 +470,21 @@ check_exception_stack:
 	mrs		x18, TPIDR_EL1					// Get thread pointer
 	cbz		x18, Lvalid_exception_stack			// Thread context may not be set early in boot
 	ldr		x18, [x18, ACT_CPUDATAP]
-	cbz		x18, .						// If thread context is set, cpu data should be too
+	cbz		x18, Lcheck_exception_stack_fail	// If thread context is set, cpu data should be too
 	ldr		x18, [x18, CPU_EXCEPSTACK_TOP]
 	cmp		sp, x18
-	b.gt		.						// Hang if above exception stack top
+	b.gt	Lcheck_exception_stack_fail	// Hang if above exception stack top
 	sub		x18, x18, EXCEPSTACK_SIZE_NUM			// Find bottom of exception stack
 	cmp		sp, x18
-	b.lt		.						// Hang if below exception stack bottom
+	b.lt	Lcheck_exception_stack_fail	// Hang if below exception stack bottom
 Lvalid_exception_stack:
 	mov		x18, #0
 	b		Lel1_sp1_synchronous_valid_stack
 
+Lcheck_exception_stack_fail:
+1:  
+	wfi
+	b		1b		// Spin for debugger/watchdog
 
 #if defined(KERNEL_INTEGRITY_KTRR)
 	.text
@@ -516,6 +521,31 @@ check_ktrr_sctlr_trap:
 #endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
 
 /* 64-bit first level exception handler dispatcher.
+ * Completes register context saving and branches to a non-returning FLEH.
+ * FLEH can inspect the spilled thread state, but it contains an invalid
+ * thread signature.
+ *
+ * Expects:
+ *  {x0, x1, sp} - saved
+ *  x0 - arm_context_t
+ *  x1 - address of FLEH
+ *  fp - previous stack frame if EL1
+ *  lr - unused
+ *  sp - kernel stack
+ */
+	.text
+	.align 2
+fleh_dispatch64_noreturn:
+#if HAS_APPLE_PAC
+	pacia	x1, sp
+	/* Save arm_saved_state64 with invalid signature */
+	SPILL_REGISTERS KERNEL_MODE, POISON_THREAD_SIGNATURE
+	b	fleh_dispatch64_common
+#else
+	// Fall through to fleh_dispatch64
+#endif
+
+/* 64-bit first level exception handler dispatcher.
  * Completes register context saving and branches to FLEH.
  * Expects:
  *  {x0, x1, sp} - saved
@@ -535,6 +565,7 @@ fleh_dispatch64:
 	/* Save arm_saved_state64 */
 	SPILL_REGISTERS KERNEL_MODE
 
+fleh_dispatch64_common:
 	/* If exception is from userspace, zero unused registers */
 	and		x23, x23, #(PSR64_MODE_EL_MASK)
 	cmp		x23, #(PSR64_MODE_EL0)
@@ -618,12 +649,13 @@ UNWIND_DIRECTIVES
 	 * exception if we put it in our stack frame, so we load the LR from the
 	 * exception saved state instead.
 	 */
-	and		w3, w1, #(ESR_EC_MASK)
-	lsr		w3, w3, #(ESR_EC_SHIFT)
+	and		w6, w1, #(ESR_EC_MASK)
+	lsr		w6, w6, #(ESR_EC_SHIFT)
 	mov		w4, #(ESR_EC_IABORT_EL1)
-	cmp		w3, w4
+	cmp		w6, w4
 	b.eq	Lfleh_sync_load_lr
 Lvalid_link_register:
+
 
 	PUSH_FRAME
 	bl		EXT(sleh_synchronous)
@@ -639,7 +671,9 @@ Lvalid_link_register:
 Lfleh_sync_load_lr:
 	ldr		lr, [x0, SS64_LR]
 	b Lvalid_link_register
+
 UNWIND_EPILOGUE
+
 	
 /* Shared prologue code for fleh_irq and fleh_fiq.
  * Does any interrupt booking we may want to do
@@ -785,6 +819,8 @@ fleh_synchronous_sp1:
 	str		x1, [x0, SS64_ESR]
 	mrs		x2, FAR_EL1							// Load fault address
 	str		x2, [x0, SS64_FAR]
+
+
 	PUSH_FRAME
 	bl		EXT(sleh_synchronous_sp1)
 	b 		.

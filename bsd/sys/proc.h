@@ -478,6 +478,17 @@ extern bool proc_disallow_rw_for_o_evtonly(proc_t p);
  */
 extern int proc_exitstatus(proc_t p);
 
+/*!
+ *  @function    proc_is_zombie
+ *  @abstract    KPI to determine if the provided process is a zombie
+ *  @discussion  This lookup is atomic and safe to call with either a proc ref or
+ *               or a zombie ref.
+ *  @param p     The process to be queried.
+ *  @return      Boolean indicating whether the process has been removed from the primary proclist
+ *               and moved to the zombproc list.
+ */
+extern bool   proc_is_zombie(proc_t p);
+
 #endif /* KERNEL_PRIVATE */
 
 #ifdef XNU_KERNEL_PRIVATE

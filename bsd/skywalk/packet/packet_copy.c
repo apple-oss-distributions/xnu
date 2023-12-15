@@ -928,6 +928,8 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		necp_get_app_uuid_from_packet(m, pkt->pkt_policy_euuid);
 		pkt->pkt_policy_id =
 		    (uint32_t)necp_get_policy_id_from_packet(m);
+		pkt->pkt_skip_policy_id =
+		    (uint32_t)necp_get_skip_policy_id_from_packet(m);
 
 		if ((m->m_pkthdr.pkt_flags & PKTF_TX_COMPL_TS_REQ) != 0) {
 			if ((m->m_pkthdr.pkt_flags & PKTF_DRIVER_MTAG) != 0) {
@@ -1309,6 +1311,8 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 		necp_get_app_uuid_from_packet(m, pkt->pkt_policy_euuid);
 		pkt->pkt_policy_id =
 		    (uint32_t)necp_get_policy_id_from_packet(m);
+		pkt->pkt_skip_policy_id =
+		    (uint32_t)necp_get_skip_policy_id_from_packet(m);
 
 		if ((m->m_pkthdr.pkt_flags & PKTF_TX_COMPL_TS_REQ) != 0) {
 			if ((m->m_pkthdr.pkt_flags & PKTF_DRIVER_MTAG) != 0) {
@@ -1576,6 +1580,8 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 				*(uint64_t *)tag->m_tag_data = pkt->pkt_com_opt->__po_pkt_tx_time;
 			}
 		}
+		m->m_pkthdr.necp_mtag.necp_policy_id = pkt->pkt_policy_id;
+		m->m_pkthdr.necp_mtag.necp_skip_policy_id = pkt->pkt_skip_policy_id;
 
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_TX,
 		    "%s(%d) TX len %u, copy+sum %u (csum 0x%04x), start %u",
@@ -1694,6 +1700,9 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 				m->m_pkthdr.csum_flags |= CSUM_PARTIAL;
 			}
 		}
+
+		m->m_pkthdr.necp_mtag.necp_policy_id = pkt->pkt_policy_id;
+		m->m_pkthdr.necp_mtag.necp_skip_policy_id = pkt->pkt_skip_policy_id;
 
 		/* translate packet metadata */
 		mbuf_set_timestamp(m, pkt->pkt_timestamp,

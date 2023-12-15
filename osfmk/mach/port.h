@@ -480,6 +480,7 @@ enum mach_port_guard_exception_codes {
 	kGUARD_EXC_INVALID_OPTIONS           = 3,
 	kGUARD_EXC_SET_CONTEXT               = 4,
 	kGUARD_EXC_THREAD_SET_STATE          = 5,
+	kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE= 6,
 	kGUARD_EXC_UNGUARDED                 = 1u << 3,
 	kGUARD_EXC_INCORRECT_GUARD           = 1u << 4,
 	kGUARD_EXC_IMMOVABLE                 = 1u << 5,
@@ -503,7 +504,6 @@ enum mach_port_guard_exception_codes {
 	kGUARD_EXC_MOD_REFS_NON_FATAL           = 1u << 21,
 	kGUARD_EXC_IMMOVABLE_NON_FATAL          = 1u << 22,
 	kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS = 1u << 23,
-	kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE   = 1u << 24,
 };
 
 #define MAX_FATAL_kGUARD_EXC_CODE (1u << 7)

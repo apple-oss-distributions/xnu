@@ -182,7 +182,7 @@ def ShowBufCtl(cmd_args=None) :
     """ Show slabs and bufctls of a skmem cache
     """
 
-    if (cmd_args == None or len(cmd_args) == 0) :
+    if cmd_args is None or len(cmd_args) == 0:
         print("Missing argument 0 (skmem_cache address).")
         return
 
@@ -274,7 +274,7 @@ def ShowSkmemRegion(cmd_args=None) :
     """ Show segments of a skmem region
     """
 
-    if (cmd_args == None or len(cmd_args) == 0) :
+    if cmd_args is None or len(cmd_args) == 0 :
         print("Missing argument 0 (skmem_region address).")
         return
 
@@ -307,7 +307,7 @@ def ShowChannelUppHash(cmd_args=None) :
     """ Show channel user packet pool hash chain
     """
 
-    if (cmd_args == None or len(cmd_args) == 0) :
+    if cmd_args is None or len(cmd_args) == 0 :
         print("Missing argument 0 (skmem_cache address).")
         return
 
@@ -458,7 +458,7 @@ def ShowNetNSTokens(cmd_args=None):
         with no args, shows unbound tokens
     """
 
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
         print("No ifp argument provided, showing unbound tokens")
         tokenhead = kern.globals.netns_unbound_tokens
     elif len(cmd_args) > 0:
@@ -485,7 +485,7 @@ def IterateSTAILQ_HEAD(headval, element_name):
 def ShowNexusChannels(cmd_args=None):
     """ show nexus channels
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
         print("Missing argument 0 (kern_nexus address).")
         return
 

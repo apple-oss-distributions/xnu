@@ -282,7 +282,7 @@ pmap_map(
 	ps = PAGE_SIZE;
 	while (start_addr < end_addr) {
 		kr = pmap_enter(kernel_pmap, (vm_map_offset_t)virt,
-		    (ppnum_t) i386_btop(start_addr), prot, VM_PROT_NONE, flags, TRUE);
+		    (ppnum_t) i386_btop(start_addr), prot, VM_PROT_NONE, flags, TRUE, PMAP_MAPPING_TYPE_INFER);
 
 		if (kr != KERN_SUCCESS) {
 			panic("%s: failed pmap_enter, "
@@ -2036,7 +2036,7 @@ pmap_map_block(
 	}
 
 	for (page = 0; page < size; page += cur_page_size / PAGE_SIZE) {
-		kr = pmap_enter(pmap, va, pa, prot, VM_PROT_NONE, attr, TRUE);
+		kr = pmap_enter(pmap, va, pa, prot, VM_PROT_NONE, attr, TRUE, PMAP_MAPPING_TYPE_INFER);
 
 		if (kr != KERN_SUCCESS) {
 			/*

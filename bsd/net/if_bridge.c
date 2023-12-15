@@ -8379,7 +8379,7 @@ bridge_mac_nat_ip_output(struct bridge_softc *sc,
 		    eh->ether_shost);
 	}
 	if (mnr != NULL) {
-		if (iphdr->ip_p == IPPROTO_UDP) {
+		if (ip.s_addr == 0 && iphdr->ip_p == IPPROTO_UDP) {
 			/* handle DHCP must broadcast */
 			bridge_mac_nat_udp_output(sc, bif, *data,
 			    ip_header_len, mnr);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021, 2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -2050,6 +2050,14 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	/* Synchronize PCB cached route */
 	inp_route_copyin(inp, &ro);
 
+	if (inp->inp_route.ro_rt != NULL) {
+		if (IS_LOCALNET_ROUTE(inp->inp_route.ro_rt)) {
+			inp->inp_flags2 |= INP2_LAST_ROUTE_LOCAL;
+		} else {
+			inp->inp_flags2 &= ~INP2_LAST_ROUTE_LOCAL;
+		}
+	}
+
 abort:
 	if (udp_dodisconnect) {
 		/* Always discard the cached route for unconnected socket */
@@ -2300,6 +2308,8 @@ udp_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 		}
 		UDP_LOG_CONNECT(inp, error);
 		return error;
+	} else {
+		so->so_flags1 |= SOF1_FLOW_DIVERT_SKIP;
 	}
 #endif /* FLOW_DIVERT */
 #endif /* NECP */
@@ -2526,6 +2536,8 @@ udp_send(struct socket *so, int flags, struct mbuf *m,
 		/* Implicit connect */
 		return flow_divert_implicit_data_out(so, flags, m, addr,
 		           control, p);
+	} else {
+		so->so_flags1 |= SOF1_FLOW_DIVERT_SKIP;
 	}
 #endif /* FLOW_DIVERT */
 #endif /* NECP */

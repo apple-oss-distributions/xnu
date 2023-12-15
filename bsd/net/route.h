@@ -140,6 +140,12 @@ struct rt_metrics {
 	(((rt)->rt_flags & (RTF_CLONING | RTF_PRCLONING | RTF_HOST | RTF_LLINFO |\
 	    RTF_WASCLONED | RTF_GATEWAY)) ==\
 	 (RTF_HOST | RTF_LLINFO | RTF_WASCLONED))
+
+#define IS_LOCALNET_ROUTE(rt) \
+    (!((rt)->rt_flags & RTF_LOCAL) && \
+     ((((rt)->rt_flags & (RTF_HOST | RTF_GATEWAY)) == RTF_HOST) || \
+     ((rt)->rt_flags & (RTF_MULTICAST | RTF_BROADCAST))))
+
 /*
  * Routing statistics.
  */

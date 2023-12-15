@@ -1863,6 +1863,7 @@ dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe,
 		_UUID_COPY(pkt->pkt_flow_id, fe->fe_uuid);
 		_UUID_COPY(pkt->pkt_policy_euuid, fe->fe_eproc_uuid);
 		pkt->pkt_policy_id = fe->fe_policy_id;
+		pkt->pkt_skip_policy_id = fe->fe_skip_policy_id;
 		pkt->pkt_transport_protocol = fe->fe_transport_protocol;
 		if (pkt->pkt_bufs_cnt > 1) {
 			pkt->pkt_aggr_type = PKT_AGGR_SINGLE_IP;
@@ -2537,6 +2538,7 @@ fsw_pkt_copy_metadata(struct __kern_packet *spkt, struct __kern_packet *dpkt)
 	_UUID_COPY(dpkt->pkt_flowsrc_id, spkt->pkt_flowsrc_id);
 	_UUID_COPY(dpkt->pkt_policy_euuid, spkt->pkt_policy_euuid);
 	dpkt->pkt_policy_id = spkt->pkt_policy_id;
+	dpkt->pkt_skip_policy_id = spkt->pkt_skip_policy_id;
 }
 
 static int
@@ -3175,6 +3177,9 @@ dp_flow_tx_process(struct nx_flowswitch *fsw, struct flow_entry *fe,
 		pkt->pkt_flow_token = fe->fe_flowid;
 		pkt->pkt_pflags |= PKT_F_FLOW_ID;
 		pkt->pkt_qset_idx = qset_idx;
+		pkt->pkt_policy_id = fe->fe_policy_id;
+		pkt->pkt_skip_policy_id = fe->fe_skip_policy_id;
+
 		/*
 		 * The same code is exercised per packet for the non-chain case
 		 * (see ifnet_enqueue_ifclassq()). It's replicated here to avoid

@@ -1848,6 +1848,7 @@ non_agg:
 			_UUID_COPY(spkt->pkt_flow_id, fe->fe_uuid);
 			_UUID_COPY(spkt->pkt_policy_euuid, fe->fe_eproc_uuid);
 			spkt->pkt_policy_id = fe->fe_policy_id;
+			spkt->pkt_skip_policy_id = fe->fe_skip_policy_id;
 			spkt->pkt_transport_protocol =
 			    fe->fe_transport_protocol;
 			flow_agg_init_spkt(fsw, &fa, spkt, pkt);

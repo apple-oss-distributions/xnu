@@ -591,6 +591,7 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 
 	uuid_copy(fe->fe_eproc_uuid, req->nfr_euuid);
 	fe->fe_policy_id = req->nfr_policy_id;
+	fe->fe_skip_policy_id = req->nfr_skip_policy_id;
 
 	err = flow_mgr_flow_hash_mask_add(fm, fe->fe_key.fk_mask);
 	ASSERT(err == 0);

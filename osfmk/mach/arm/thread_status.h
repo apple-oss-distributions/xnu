@@ -483,7 +483,8 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
 	        "and	w6, w2, %[CPSR_EL_MASK]"		"\n"            \
 	        "cmp	w6, %[CPSR_EL0]"			"\n"            \
 	        "b.eq	1f"					"\n"            \
-	        "b	_ml_panic_on_invalid_old_cpsr"		"\n"            \
+	        "bl	_ml_panic_on_invalid_old_cpsr"		"\n"            \
+	        "brk	#0"					"\n"            \
 	"1:"							"\n"
 
 #define VERIFY_USER_THREAD_STATE_INPUTS                                         \
@@ -843,7 +844,8 @@ mask_user_saved_state_cpsr(arm_saved_state_t *iss, uint32_t set_bits, uint32_t c
 		    "cmp	w6, %[CPSR_EL0]			\n"
 		    "b.eq	1f				\n"
 		    "mov	w1, w2				\n"
-		    "b		_ml_panic_on_invalid_new_cpsr	\n"
+		    "bl		_ml_panic_on_invalid_new_cpsr	\n"
+		    "brk	#0				\n"
 		    "1:						\n"
 		    "str	w2, [x0, %[SS64_CPSR]]		\n",
 		    [set_bits] "r"(set_bits),
@@ -897,7 +899,8 @@ set_user_saved_state_cpsr(arm_saved_state_t *iss, uint32_t cpsr)
 		    "cmp	w6, %[CPSR_EL0]			\n"
 		    "b.eq	1f				\n"
 		    "mov	w1, w2				\n"
-		    "b		_ml_panic_on_invalid_new_cpsr	\n"
+		    "bl		_ml_panic_on_invalid_new_cpsr	\n"
+		    "brk	#0				\n"
 		    "1:						\n"
 		    "str	w2, [x0, %[SS64_CPSR]]		\n",
 		    [cpsr] "r"(cpsr)

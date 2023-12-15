@@ -860,7 +860,8 @@ pmap_enter_options_addr(
 	unsigned int flags,
 	boolean_t wired,
 	unsigned int options,
-	__unused void   *arg);
+	__unused void   *arg,
+	__unused pmap_mapping_type_t mapping_type);
 
 #ifdef CONFIG_XNUPOST
 kern_return_t pmap_test(void);
@@ -1816,7 +1817,7 @@ pmap_map(
 	ps = PAGE_SIZE;
 	while (start < end) {
 		kr = pmap_enter(kernel_pmap, virt, (ppnum_t)atop(start),
-		    prot, VM_PROT_NONE, flags, FALSE);
+		    prot, VM_PROT_NONE, flags, FALSE, PMAP_MAPPING_TYPE_INFER);
 
 		if (kr != KERN_SUCCESS) {
 			panic("%s: failed pmap_enter, "
@@ -4332,13 +4333,13 @@ pmap_remove_options_internal(
 	bool            need_strong_sync = false;
 	bool            unlock = true;
 
-	if (__improbable(end < start)) {
-		panic("%s: invalid address range %p, %p", __func__, (void*)start, (void*)end);
-	}
-
 	validate_pmap_mutable(pmap);
 
 	__unused const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
+
+	if (__improbable((end < start) || ((start | end) & pt_attr_leaf_offmask(pt_attr)))) {
+		panic("%s: pmap %p invalid address range %p, %p", __func__, pmap, (void*)start, (void*)end);
+	}
 
 	pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE);
 
@@ -4402,17 +4403,6 @@ pmap_remove_options(
 	PMAP_TRACE(2, PMAP_CODE(PMAP__REMOVE) | DBG_FUNC_START,
 	    VM_KERNEL_ADDRHIDE(pmap), VM_KERNEL_ADDRHIDE(start),
 	    VM_KERNEL_ADDRHIDE(end));
-
-#if MACH_ASSERT
-	if ((start | end) & pt_attr_leaf_offmask(pt_attr)) {
-		panic("pmap_remove_options() pmap %p start 0x%llx end 0x%llx",
-		    pmap, (uint64_t)start, (uint64_t)end);
-	}
-	if ((end < start) || (start < pmap->min) || (end > pmap->max)) {
-		panic("pmap_remove_options(): invalid address range, pmap=%p, start=0x%llx, end=0x%llx",
-		    pmap, (uint64_t)start, (uint64_t)end);
-	}
-#endif
 
 	/*
 	 * We allow single-page requests to execute non-preemptibly,
@@ -5691,7 +5681,7 @@ pmap_enter_addr(
 	unsigned int flags,
 	boolean_t wired)
 {
-	return pmap_enter_options_addr(pmap, v, pa, prot, fault_type, flags, wired, 0, NULL);
+	return pmap_enter_options_addr(pmap, v, pa, prot, fault_type, flags, wired, 0, NULL, PMAP_MAPPING_TYPE_INFER);
 }
 
 /*
@@ -5715,7 +5705,8 @@ pmap_enter(
 	vm_prot_t prot,
 	vm_prot_t fault_type,
 	unsigned int flags,
-	boolean_t wired)
+	boolean_t wired,
+	__unused pmap_mapping_type_t mapping_type)
 {
 	return pmap_enter_addr(pmap, v, ((pmap_paddr_t)pn) << PAGE_SHIFT, prot, fault_type, flags, wired);
 }
@@ -6482,7 +6473,8 @@ pmap_enter_options_addr(
 	unsigned int flags,
 	boolean_t wired,
 	unsigned int options,
-	__unused void   *arg)
+	__unused void   *arg,
+	__unused pmap_mapping_type_t mapping_type)
 {
 	kern_return_t kr = KERN_FAILURE;
 
@@ -6528,9 +6520,10 @@ pmap_enter_options(
 	unsigned int flags,
 	boolean_t wired,
 	unsigned int options,
-	__unused void   *arg)
+	__unused void   *arg,
+	pmap_mapping_type_t mapping_type)
 {
-	return pmap_enter_options_addr(pmap, v, ((pmap_paddr_t)pn) << PAGE_SHIFT, prot, fault_type, flags, wired, options, arg);
+	return pmap_enter_options_addr(pmap, v, ((pmap_paddr_t)pn) << PAGE_SHIFT, prot, fault_type, flags, wired, options, arg, mapping_type);
 }
 
 /*
@@ -9700,6 +9693,13 @@ pmap_nest_internal(
 			subord->nested_no_bounds_refcnt++;
 		}
 
+		if (__improbable(vstart < subord->nested_region_addr ||
+		    vend > (subord->nested_region_addr + subord->nested_region_size))) {
+			panic("%s: grand nested region (%p: [%p, %p)) will fall outside of subord nested region (%p: [%p, %p))",
+			    __func__, grand, (void *) vstart, (void *) vend, subord, (void *) subord->nested_region_addr,
+			    (void *) (subord->nested_region_addr + subord->nested_region_size));
+		}
+
 		grand->nested_region_addr = vstart;
 		grand->nested_region_size = (mach_vm_offset_t) size;
 	} else {
@@ -9769,7 +9769,7 @@ nest_grand:
 	while (vaddr < true_end) {
 		stte_p = pmap_tte(subord, vaddr);
 		if (__improbable(stte_p == PT_ENTRY_NULL)) {
-			panic("%s: subord pmap %p not exapnded at va 0x%llx", __func__, subord, (unsigned long long)vaddr);
+			panic("%s: subord pmap %p not expanded at va 0x%llx", __func__, subord, (unsigned long long)vaddr);
 		}
 		gtte_p = pmap_tte(grand, vaddr);
 		if (gtte_p == PT_ENTRY_NULL) {
@@ -14070,6 +14070,7 @@ pmap_dump_page_tables_recurse(pmap_t pmap,
 	void *bufp = (uint8_t*)buf_start + *bytes_copied;
 
 	if (cur_level == pt_attr_root_level(pt_attr)) {
+		start_va &= ~(pt_attr->pta_level_info[cur_level].offmask);
 		num_entries = pmap_root_alloc_size(pmap) / sizeof(tt_entry_t);
 	}
 

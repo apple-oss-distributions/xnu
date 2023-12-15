@@ -118,7 +118,7 @@ extern boolean_t proc_is_simulated(const proc_t);
 extern struct proc* current_proc(void);
 
 /* bootarg to create lightweight corpse for thread identity lockdown */
-TUNABLE(bool, thid_should_crash, "thid_should_crash", false);
+TUNABLE(bool, thid_should_crash, "thid_should_crash", true);
 
 #define SET_EXCEPTION_ENTITLEMENT "com.apple.private.set-exception-port"
 
@@ -3982,6 +3982,7 @@ space_inspect_deallocate(
 }
 
 
+#if !defined(XNU_TARGET_OS_OSX)
 static boolean_t
 behavior_is_identity_protected(int new_behavior)
 {
@@ -4011,6 +4012,7 @@ send_set_exception_telemetry(const task_t excepting_task, const exception_mask_t
 	CA_EVENT_SEND(ca_event);
 }
 
+/* Returns whether the violation should be ignored */
 static boolean_t
 set_exception_behavior_violation(const ipc_port_t new_port, const task_t excepting_task,
     const exception_mask_t mask, const char *level)
@@ -4027,12 +4029,14 @@ set_exception_behavior_violation(const ipc_port_t new_port, const task_t excepti
 
 	if (thid_should_crash && !rate_limited) {
 		/* create lightweight corpse */
-		mach_port_guard_exception(new_name, 0, 0, 0);
+		mach_port_guard_exception(new_name, 0, 0, kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE);
 	}
 
 	/* always report the proc name to CA */
 	send_set_exception_telemetry(excepting_task, mask, level);
-	return TRUE;
+
+	/* if the bootarg has been manually set to false, ignore the violation */
+	return !thid_should_crash;
 }
 
 /*
@@ -4056,14 +4060,32 @@ exception_exposes_protected_ports(const ipc_port_t new_port, const task_t except
 	/* setting host port exposes all processes - always protect. */
 	return TRUE;
 }
+#endif /* !defined(XNU_TARGET_OS_OSX) */
+
+#if CONFIG_CSR
+#if !defined(XNU_TARGET_OS_OSX)
+static bool
+SIP_is_enabled()
+{
+	return csr_check(CSR_ALLOW_UNRESTRICTED_FS) == 0;
+}
+#endif /* !defined(XNU_TARGET_OS_OSX) */
+#endif /* CONFIG_CSR */
 
 boolean_t
-set_exception_behavior_allowed(const ipc_port_t new_port, int new_behavior,
-    const task_t excepting_task, const exception_mask_t mask, const char *level)
+set_exception_behavior_allowed(__unused const ipc_port_t new_port, __unused int new_behavior,
+    __unused const task_t excepting_task, __unused const exception_mask_t mask, __unused const char *level)
 {
+#if defined(XNU_TARGET_OS_OSX)
+	/* Third party plugins run in multiple platform binaries on macos, which we can't break */
+	return TRUE;
+#else /* defined(XNU_TARGET_OS_OSX) */
 	if (exception_exposes_protected_ports(new_port, excepting_task)
 	    && !behavior_is_identity_protected(new_behavior)
 	    && !identity_protection_opted_out(new_port) /* Ignore opted out */
+#if CONFIG_CSR
+	    && SIP_is_enabled() /* cannot enforce if SIP is disabled */
+#endif
 #if CONFIG_ROSETTA
 	    && !task_is_translated(current_task())
 #endif /* CONFIG_ROSETTA */
@@ -4074,6 +4096,7 @@ set_exception_behavior_allowed(const ipc_port_t new_port, int new_behavior,
 	}
 
 	return TRUE;
+#endif /* defined(XNU_TARGET_OS_OSX) */
 }
 
 /*
@@ -4132,7 +4155,14 @@ thread_set_exception_ports(
 		}
 	}
 
-	if (IP_VALID(new_port) && (new_port->ip_immovable_receive || new_port->ip_immovable_send)) {
+	/*
+	 * rdar://77996387
+	 * Avoid exposing immovable ports send rights (kobjects) to `get_exception_ports`,
+	 * but allow opted out ports to still be set on thread only.
+	 */
+	if (IP_VALID(new_port) &&
+	    ((!ip_is_id_prot_opted_out(new_port) && new_port->ip_immovable_receive) ||
+	    new_port->ip_immovable_send)) {
 		return KERN_INVALID_RIGHT;
 	}
 

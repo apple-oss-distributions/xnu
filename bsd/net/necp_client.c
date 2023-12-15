@@ -496,6 +496,7 @@ struct necp_client {
 	u_int8_t result[NECP_BASE_CLIENT_RESULT_SIZE];
 
 	necp_policy_id policy_id;
+	necp_policy_id skip_policy_id;
 
 	u_int8_t ip_protocol;
 	int proc_pid;
@@ -4485,6 +4486,7 @@ necp_update_client_result(proc_t proc,
 
 	// Save the last policy id on the client
 	client->policy_id = result.policy_id;
+	client->skip_policy_id = result.skip_policy_id;
 	uuid_copy(client->override_euuid, override_euuid);
 
 	if ((parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_MULTIPATH) ||
@@ -6593,6 +6595,7 @@ necp_request_udp_netstats(userland_stats_provider_context *ctx,
 		// Metadata from the route
 		desc->ifindex = route_ifindex;
 		desc->ifnet_properties = route_ifflags | nstat_diagnostic_flags;
+		desc->ifnet_properties |= (sf->sf_flags & SFLOWF_ONLINK) ? NSTAT_IFNET_IS_LOCAL : NSTAT_IFNET_IS_NON_LOCAL;
 
 		// Basic metadata is all that is required for UDP
 		desc->rcvbufsize = udpstats->necp_udp_basic.rcvbufsize;
@@ -6742,6 +6745,7 @@ necp_request_quic_netstats(userland_stats_provider_context *ctx,
 		// Metadata from the route
 		desc->ifindex = route_ifindex;
 		desc->ifnet_properties = route_ifflags | nstat_diagnostic_flags;
+		desc->ifnet_properties |= (sf->sf_flags & SFLOWF_ONLINK) ? NSTAT_IFNET_IS_LOCAL : NSTAT_IFNET_IS_NON_LOCAL;
 
 		// Basic metadata from userland
 		desc->rcvbufsize = quicstats->necp_quic_basic.rcvbufsize;
@@ -8186,6 +8190,7 @@ necp_client_copy_parameters_locked(struct necp_client *client,
 	parameters->is_interpose = (parsed_parameters.flags & NECP_CLIENT_PARAMETER_FLAG_INTERPOSE) ? 1 : 0;
 	parameters->is_custom_ether = (parsed_parameters.flags & NECP_CLIENT_PARAMETER_FLAG_CUSTOM_ETHER) ? 1 : 0;
 	parameters->policy_id = client->policy_id;
+	parameters->skip_policy_id = client->skip_policy_id;
 
 	// parse client result flag
 	u_int32_t client_result_flags = 0;

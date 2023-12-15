@@ -109,6 +109,7 @@ volatile int pan_exception_level = 0;
 volatile char pan_fault_value = 0;
 #endif
 
+
 #include <libkern/OSAtomic.h>
 #define LOCK_TEST_ITERATIONS 50
 static hw_lock_data_t   lt_hw_lock;
@@ -1306,7 +1307,7 @@ arm64_pan_test()
 
 	// Map the page in the user address space at some, non-zero address
 	pan_test_addr = PAGE_SIZE;
-	pmap_enter(pmap, pan_test_addr, pn, VM_PROT_READ, VM_PROT_READ, 0, true);
+	pmap_enter(pmap, pan_test_addr, pn, VM_PROT_READ, VM_PROT_READ, 0, true, PMAP_MAPPING_TYPE_INFER);
 
 	// Context-switch with PAN disabled is prohibited; prevent test logging from
 	// triggering a voluntary context switch.
@@ -1494,7 +1495,7 @@ ctrr_test_cpu(void)
 
 	T_LOG("Read only region test mapping virtual page %p to CTRR RO page number %d", ctrr_test_page, ro_pn);
 	kr = pmap_enter(kernel_pmap, ctrr_test_page, ro_pn,
-	    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+	    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
 	T_EXPECT(kr == KERN_SUCCESS, "Expect pmap_enter of RW mapping to succeed");
 
 	// assert entire mmu prot path (Hierarchical protection model) is NOT RO
@@ -1526,7 +1527,7 @@ ctrr_test_cpu(void)
 	T_LOG("No execute test mapping virtual page %p to CTRR PXN page number %d", ctrr_test_page, nx_pn);
 
 	kr = pmap_enter(kernel_pmap, ctrr_test_page, nx_pn,
-	    VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+	    VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
 	T_EXPECT(kr == KERN_SUCCESS, "Expect pmap_enter of RX mapping to succeed");
 
 	// assert entire mmu prot path (Hierarchical protection model) is NOT XN
@@ -1565,4 +1566,5 @@ ctrr_test_cpu(void)
 	return KERN_SUCCESS;
 }
 #endif /* defined(KERNEL_INTEGRITY_CTRR) && defined(CONFIG_XNUPOST) */
+
 

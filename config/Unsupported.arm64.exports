@@ -18,7 +18,7 @@ _kpc_set_running
 _kpc_get_cpu_counters
 _kpc_get_shadow_counters
 _kpc_get_config
-_kpc_set_config
+_kpc_set_config:_kpc_set_config_external
 _kpc_get_period
 _kpc_set_period
 _kpc_get_actionid

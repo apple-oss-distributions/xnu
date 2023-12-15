@@ -447,6 +447,17 @@ proc_terminate(pid_t pid, int *sig)
 }
 
 int
+proc_signal_with_audittoken(audit_token_t *audittoken, int sig)
+{
+	int retval = __proc_info(PROC_INFO_CALL_SIGNAL_AUDITTOKEN, 0, sig, 0, audittoken, 0);
+	if (retval == -1) {
+		return errno;
+	}
+
+	return 0;
+}
+
+int
 proc_terminate_all_rsr(int sig)
 {
 	int retval = 0;

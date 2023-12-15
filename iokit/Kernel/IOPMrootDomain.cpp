@@ -117,7 +117,7 @@ __END_DECLS
 
 #define DLOG(x...)  do { \
     if (kIOLogPMRootDomain & gIOKitDebug) \
-	kprintf(LOG_PREFIX x); \
+	IOLog(LOG_PREFIX x); \
     else \
 	os_log(OS_LOG_DEFAULT, LOG_PREFIX x); \
 } while (false)
@@ -478,6 +478,7 @@ enum {
 	kPMChildPreventSystemSleep,
 	kPMCPUAssertion,
 	kPMPCIUnsupported,
+	kPMDKNotReady,
 };
 
 const char *
@@ -491,6 +492,7 @@ getSystemSleepPreventerString( uint32_t preventer )
 		SYSTEM_SLEEP_PREVENTER( kPMChildPreventSystemSleep ),
 		SYSTEM_SLEEP_PREVENTER( kPMCPUAssertion ),
 		SYSTEM_SLEEP_PREVENTER( kPMPCIUnsupported ),
+		SYSTEM_SLEEP_PREVENTER( kPMDKNotReady ),
 		{ 0, NULL }
 	};
 	return IOFindNameForValue(preventer, systemSleepPreventers);
@@ -806,6 +808,7 @@ public:
 	IOReturn                    handleSetUserAssertionLevels(void * arg0);
 	void                        publishProperties(void);
 	void                        reportCPUBitAccounting(void);
+	PMAssertStruct              *detailsForID(IOPMDriverAssertionID, int *);
 
 private:
 	uint32_t                    tabulateProducerCount;
@@ -814,7 +817,6 @@ private:
 	uint64_t                    maxAssertCPUDuration;
 	uint64_t                    maxAssertCPUEntryId;
 
-	PMAssertStruct              *detailsForID(IOPMDriverAssertionID, int *);
 	void                        tabulate(void);
 	void                        updateCPUBitAccounting(PMAssertStruct * assertStruct);
 
@@ -4212,7 +4214,16 @@ IOPMrootDomain::willNotifyPowerChildren( IOPMPowerStateIndex newPowerState )
 		IOHibernateSystemSleep();
 		IOHibernateIOKitSleep();
 #endif
+#if defined(__arm64__) && HIBERNATION
+		// On AS, hibernation cannot be aborted. Resetting RTC to 1s during hibernation upon detecting
+		// user activity is pointless (we are likely to spend >1s hibernating). It also clears existing
+		// alarms, which can mess with cycler tools.
+		if (gRootDomain->activitySinceSleep() && gIOHibernateState == kIOHibernateStateInactive) {
+#else /* defined(__arm64__) && HIBERNATION */
+		// On non-AS, hibernation can be aborted if user activity is detected. So continue to reset the
+		// RTC alarm (even during hibernation) so we can immediately wake from regular S2R if needed.
 		if (gRootDomain->activitySinceSleep()) {
+#endif /* defined(__arm64__) && HIBERNATION */
 			dict = OSDictionary::withCapacity(1);
 			secs = OSNumber::withNumber(1, 32);
 
@@ -7489,6 +7500,22 @@ IOPMrootDomain::checkSystemSleepAllowed( IOOptionBits options,
 			break;
 		}
 
+		// Check for any dexts currently being added to the PM tree. Sleeping while
+		// this is in flight can cause IOServicePH to timeout.
+		if (!IOServicePH::checkPMReady()) {
+#if !defined(XNU_TARGET_OS_OSX)
+			// 116893363: kPMDKNotReady sleep cancellations often leaves embedded devices
+			// in dark wake for long periods of time, which causes issues as apps were
+			// already informed of sleep during the f->9 transition. As a temporary
+			// measure, always full wake if we hit this specific condition.
+			pmPowerStateQueue->submitPowerEvent(
+				kPowerEventPolicyStimulus,
+				(void *) kStimulusDarkWakeActivityTickle);
+#endif
+			err = kPMDKNotReady;
+			break;
+		}
+
 		if (getPMAssertionLevel( kIOPMDriverAssertionCPUBit ) ==
 		    kIOPMDriverAssertionLevelOn) {
 			err = kPMCPUAssertion; // 5. CPU assertion
@@ -10478,8 +10505,8 @@ IOPMrootDomain::createPMAssertion(
 
 	if (kIOReturnSuccess == ret) {
 #if (DEVELOPMENT || DEBUG)
-		if (_aotNow) {
-			OSReportWithBacktrace("IOPMrootDomain::createPMAssertion(0x%qx)", newAssertion);
+		if (_aotNow || (kIOLogPMRootDomain & gIOKitDebug)) {
+			OSReportWithBacktrace("PMRD: createPMAssertion(0x%qx) %s (%s)", newAssertion, ownerService->getName(), ownerDescription);
 		}
 #endif /* (DEVELOPMENT || DEBUG) */
 		return newAssertion;
@@ -10492,8 +10519,14 @@ IOReturn
 IOPMrootDomain::releasePMAssertion(IOPMDriverAssertionID releaseAssertion)
 {
 #if (DEVELOPMENT || DEBUG)
-	if (_aotNow) {
-		OSReportWithBacktrace("IOPMrootDomain::releasePMAssertion(0x%qx)", releaseAssertion);
+	if (_aotNow || (kIOLogPMRootDomain & gIOKitDebug)) {
+		PMAssertStruct *details = pmAssertions->detailsForID(releaseAssertion, NULL);
+		if (details && details->ownerService && details->ownerString) {
+			OSReportWithBacktrace("PMRD: releasePMAssertion(0x%qx) %s (%s)", releaseAssertion,
+			    details->ownerService->getName(), details->ownerString->getCStringNoCopy());
+		} else {
+			OSReportWithBacktrace("PMRD: releasePMAssertion(0x%qx)", releaseAssertion);
+		}
 	}
 #endif /* (DEVELOPMENT || DEBUG) */
 	if (!pmAssertions) {

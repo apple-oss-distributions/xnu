@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -649,6 +649,8 @@ tcp_usr_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 			error = flow_divert_connect_out(so, nam, p);
 		}
 		return error;
+	} else {
+		so->so_flags1 |= SOF1_FLOW_DIVERT_SKIP;
 	}
 #endif /* FLOW_DIVERT */
 #endif /* NECP */
@@ -808,6 +810,8 @@ tcp6_usr_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 			error = flow_divert_connect_out(so, nam, p);
 		}
 		return error;
+	} else {
+		so->so_flags1 |= SOF1_FLOW_DIVERT_SKIP;
 	}
 #endif /* FLOW_DIVERT */
 #endif /* NECP */
@@ -1906,6 +1910,9 @@ tcp_fill_info(struct tcpcb *tp, struct tcp_info *ti)
 	ti->tcpi_ecn_capable_packets_acked = tp->t_ecn_capable_packets_acked;
 	ti->tcpi_ecn_capable_packets_marked = tp->t_ecn_capable_packets_marked;
 	ti->tcpi_ecn_capable_packets_lost = tp->t_ecn_capable_packets_lost;
+
+	ti->tcpi_flow_control_total_time = inp->inp_fadv_total_time;
+	ti->tcpi_rcvwnd_limited_total_time = tp->t_rcvwnd_limited_total_time;
 }
 
 __private_extern__ errno_t

@@ -150,6 +150,10 @@ extern int kpc_threads_counting;
 /* AST callback for KPC */
 extern void kpc_thread_ast_handler( thread_t thread );
 
+#if XNU_KERNEL_PRIVATE
+int kpc_set_config_kernel(uint32_t classes, kpc_config_t *new_config);
+#endif /* XNU_KERNEL_PRIVATE */
+
 #ifdef MACH_KERNEL_PRIVATE
 
 /* context switch callback for KPC */
@@ -270,6 +274,7 @@ struct kpc_config_remote {
 	uint32_t classes;
 	kpc_config_t *configv;
 	uint64_t pmc_mask;
+	bool allow_list;
 };
 
 /* handler for mp operations */

@@ -1433,6 +1433,7 @@ uint64_t ml_gpu_stat(thread_t);
 
 #if __arm64__ && defined(CONFIG_XNUPOST) && defined(XNU_KERNEL_PRIVATE)
 extern void ml_expect_fault_begin(expected_fault_handler_t, uintptr_t);
+extern void ml_expect_fault_pc_begin(expected_fault_handler_t, uintptr_t);
 extern void ml_expect_fault_end(void);
 #endif /* __arm64__ && defined(CONFIG_XNUPOST) && defined(XNU_KERNEL_PRIVATE) */
 

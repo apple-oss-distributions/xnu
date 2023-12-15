@@ -2284,6 +2284,7 @@ private:
 	void stop_spindump_timer( void );
 	bool checkForDone( void );
 	bool responseValid( uint32_t x, int pid );
+	void updateClientResponses( void );
 	void computeDesiredState( unsigned long tempDesire, bool computeOnly );
 	void trackSystemSleepPreventers( IOPMPowerStateIndex, IOPMPowerStateIndex, IOPMPowerChangeFlags );
 	void tellSystemCapabilityChange( uint32_t nextMS );

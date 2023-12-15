@@ -101,9 +101,9 @@ struct ctl_cb {
 	struct kctl             *kctl;          /* back pointer to controller */
 	void                    *userdata;
 	struct sockaddr_ctl     sac;
-	u_int32_t               usecount;
-	u_int32_t               kcb_usecount;
-	u_int32_t               require_clearing_count;
+	uint32_t                usecount;
+	uint32_t                kcb_usecount;
+	uint32_t                require_clearing_count;
 #if DEVELOPMENT || DEBUG
 	enum ctl_status         status;
 #endif /* DEVELOPMENT || DEBUG */
@@ -241,10 +241,6 @@ SYSCTL_INT(_net_systm_kctl, OID_AUTO, panicdebug,
     CTLFLAG_RW | CTLFLAG_LOCKED, &ctl_panic_debug, 0, "");
 #endif /* DEVELOPMENT || DEBUG */
 
-u_int32_t ctl_send_list_mode = 1;
-SYSCTL_INT(_net_systm_kctl, OID_AUTO, send_list_mode,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &ctl_send_list_mode, 0, "");
-
 #define KCTL_TBL_INC 16
 
 static uintptr_t kctl_tbl_size = 0;
@@ -377,7 +373,9 @@ ctl_kcb_decrement_use_count(struct ctl_cb *kcb)
 {
 	assert(kcb->kcb_usecount != 0);
 	kcb->kcb_usecount--;
-	wakeup((caddr_t)&kcb->kcb_usecount);
+	if (kcb->require_clearing_count != 0) {
+		wakeup((caddr_t)&kcb->kcb_usecount);
+	}
 }
 
 static int
@@ -870,7 +868,7 @@ ctl_send_list(struct socket *so, struct mbuf *m, u_int *pktcnt, int flags)
 		goto done;
 	}
 
-	if (kctl->send_list != NULL && ctl_send_list_mode == 0) {
+	if (kctl->send_list != NULL) {
 		struct mbuf *nxt;
 
 		for (nxt = m; update_tc && nxt != NULL; nxt = nxt->m_nextpkt) {
@@ -1985,7 +1983,7 @@ kcb_find_socket(kern_ctl_ref kctlref, u_int32_t unit, u_int32_t *kctlflags)
 	}
 
 	kcb->usecount--;
-	if (kcb->usecount == 0) {
+	if (kcb->usecount == 0 && kcb->require_clearing_count != 0) {
 		wakeup((event_t)&kcb->usecount);
 	}
 

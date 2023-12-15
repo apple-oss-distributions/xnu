@@ -219,17 +219,18 @@ __sk_vcopy64_20(uint64_t *src, uint64_t *dst)
 {
 #if defined(__arm64__)
 	/*
-	 * Load pair 2x16-bytes, store single 16-bytes and 4-bytes;
+	 * Load/store 16 + 4 bytes;
 	 * no need to save/restore registers on arm64 (SPILL_REGISTERS).
 	 */
 	/* BEGIN CSTYLED */
 	__asm__ __volatile__ (
-                "ldp	q0, q1, [%[src]]	\n\t"
+                "ldr	q0, [%[src]]		\n\t"
                 "str	q0, [%[dst]]		\n\t"
-                "str	s1, [%[dst], #16]	\n\t"
+                "ldr	s0, [%[src], #16]	\n\t"
+                "str	s0, [%[dst], #16]	\n\t"
                 :
                 : [src] "r" (src), [dst] "r" (dst)
-                : "v0", "v1", "memory"
+                : "v0", "memory"
         );
 	/* END CSTYLED */
 #else

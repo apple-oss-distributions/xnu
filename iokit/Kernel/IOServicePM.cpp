@@ -167,7 +167,7 @@ SYSCTL_UINT(_kern, OID_AUTO, pmcallouttimer, CTLFLAG_RW | CTLFLAG_LOCKED, &gDriv
 #define RD_LOG(x...)                do { \
 	                            if ((kIOLogPMRootDomain & gIOKitDebug) && \
 	                                (getPMRootDomain() == this)) { \
-	                                kprintf("PMRD: " x); \
+	                                IOLog("PMRD: " x); \
 	                            }} while (false)
 #define PM_ASSERT_IN_GATE(x)          \
 do {                                  \
@@ -6448,9 +6448,10 @@ IOService::pmTellClientWithResponse( OSObject * object, void * arg )
 			context->responseArray->setObject(msgIndex, replied);
 		} else {
 			replied = kOSBooleanFalse;
+			uint32_t ackTimeRequested = (uint32_t) notify.returnValue;
 			if (notify.returnValue > context->maxTimeRequested) {
 				if (notify.returnValue > kPriorityClientMaxWait) {
-					context->maxTimeRequested = kPriorityClientMaxWait;
+					context->maxTimeRequested = ackTimeRequested = kPriorityClientMaxWait;
 					PM_ERROR("%s: client %p returned %llu for %s\n",
 					    context->us->getName(),
 					    notifier ? (void *)  OBFUSCATE(notifier->handler) : OBFUSCATE(object),
@@ -6460,14 +6461,14 @@ IOService::pmTellClientWithResponse( OSObject * object, void * arg )
 					context->maxTimeRequested = (typeof(context->maxTimeRequested))notify.returnValue;
 				}
 			}
-			//
-			// Track time taken to ack, by storing the timestamp of
-			// callback completion
-			OSNumber * num;
-			num = OSNumber::withNumber(AbsoluteTime_to_scalar(&end), sizeof(uint64_t) * 8);
-			if (num) {
-				context->responseArray->setObject(msgIndex, num);
-				num->release();
+
+			// Track acknowledgements by storing the timestamp of
+			// callback completion and requested ack time.
+			IOPMClientAck *ackState = new IOPMClientAck;
+			if (ackState) {
+				ackState->completionTimestamp = AbsoluteTime_to_scalar(&end);
+				ackState->maxTimeRequested = ackTimeRequested;
+				context->responseArray->setObject(msgIndex, ackState);
 			} else {
 				context->responseArray->setObject(msgIndex, replied);
 			}
@@ -6676,9 +6677,10 @@ IOService::pmTellCapabilityClientWithResponse(
 			context->responseArray->setObject(msgIndex, replied);
 		} else {
 			replied = kOSBooleanFalse;
+			uint32_t ackTimeRequested = msgArg.maxWaitForReply;
 			if (msgArg.maxWaitForReply > context->maxTimeRequested) {
 				if (msgArg.maxWaitForReply > kCapabilityClientMaxWait) {
-					context->maxTimeRequested = kCapabilityClientMaxWait;
+					context->maxTimeRequested = ackTimeRequested = kCapabilityClientMaxWait;
 					PM_ERROR("%s: client %p returned %u for %s\n",
 					    context->us->getName(),
 					    notifier ? (void *) OBFUSCATE(notifier->handler) : OBFUSCATE(object),
@@ -6689,13 +6691,13 @@ IOService::pmTellCapabilityClientWithResponse(
 				}
 			}
 
-			// Track time taken to ack, by storing the timestamp of
-			// callback completion
-			OSNumber * num;
-			num = OSNumber::withNumber(AbsoluteTime_to_scalar(&end), sizeof(uint64_t) * 8);
-			if (num) {
-				context->responseArray->setObject(msgIndex, num);
-				num->release();
+			// Track acknowledgements by storing the timestamp of
+			// callback completion and requested ack time.
+			IOPMClientAck *ackState = new IOPMClientAck;
+			if (ackState) {
+				ackState->completionTimestamp = AbsoluteTime_to_scalar(&end);
+				ackState->maxTimeRequested = ackTimeRequested;
+				context->responseArray->setObject(msgIndex, ackState);
 			} else {
 				context->responseArray->setObject(msgIndex, replied);
 			}
@@ -6974,14 +6976,15 @@ IOService::responseValid( uint32_t refcon, int pid )
 	}
 
 	OSNumber * num;
-	if ((num = OSDynamicCast(OSNumber, theFlag))) {
+	IOPMClientAck *ack;
+	if ((num = OSDynamicCast(OSNumber, theFlag)) || (ack = OSDynamicCast(IOPMClientAck, theFlag))) {
 		AbsoluteTime    now;
 		AbsoluteTime    start;
 		uint64_t        nsec;
 		char            name[128];
 
 		clock_get_uptime(&now);
-		AbsoluteTime_to_scalar(&start) = num->unsigned64BitValue();
+		AbsoluteTime_to_scalar(&start) = num ? num->unsigned64BitValue() : ack->completionTimestamp;
 		SUB_ABSOLUTETIME(&now, &start);
 		absolutetime_to_nanoseconds(now, &nsec);
 
@@ -7025,6 +7028,70 @@ IOService::responseValid( uint32_t refcon, int pid )
 	}
 
 	return true;
+}
+
+//*********************************************************************************
+// [private] updateClientResponses
+//
+// Only affects clients informed in pmTellClientWithResponse() and
+// pmTellCapabilityClientWithResponse().
+//
+// Called upon every client acknowledgement to scan through the response array and
+// update the ack timer based on which clients have yet to acknowledge the power
+// change. If a client hasn't acknowledged by their requested time, make sure not
+// to wait on that client.
+//*********************************************************************************
+
+OSDefineMetaClassAndStructors( IOPMClientAck, OSObject );
+
+void
+IOService::updateClientResponses( void )
+{
+	int i = 0;
+	uint32_t maxTimeToAckMS = 0;
+	bool editTimer = false;
+	OSObject *obj;
+	IOPMClientAck *ack;
+
+	for (i = 0;; i++) {
+		obj = fResponseArray->getObject(i);
+		if (obj == NULL) {
+			break;
+		}
+
+		// IOPMClientAck is used for pmTellClientWithResponse and
+		// pmTellCapabilityClientWithResponse, no-op otherwise
+		if ((ack = OSDynamicCast(IOPMClientAck, obj))) {
+			AbsoluteTime    now;
+			AbsoluteTime    start;
+			uint64_t        nsec;
+			uint64_t        timeRequestedNS = ack->maxTimeRequested * NSEC_PER_USEC;
+
+			editTimer = true;
+
+			// Calculate time since completion
+			clock_get_uptime(&now);
+			AbsoluteTime_to_scalar(&start) = ack->completionTimestamp;
+			SUB_ABSOLUTETIME(&now, &start);
+			absolutetime_to_nanoseconds(now, &nsec);
+			if (nsec >= timeRequestedNS) {
+				// Tardy; do not wait for this client
+				fResponseArray->replaceObject(i, kOSBooleanTrue);
+			} else {
+				// Calculate time left to ack
+				uint32_t timeToAckMS = NS_TO_MS(timeRequestedNS - nsec);
+				maxTimeToAckMS = timeToAckMS > maxTimeToAckMS ? timeToAckMS : maxTimeToAckMS;
+			}
+		}
+	}
+
+	if (editTimer) {
+		// Reset ack timer, but leave the PM watchdog set at the max client request
+		// time.
+		RD_LOG("resetting ack timer to %u ms\n", maxTimeToAckMS);
+		stop_ack_timer();
+		start_ack_timer(maxTimeToAckMS, kMillisecondScale);
+	}
 }
 
 //*********************************************************************************
@@ -8246,6 +8313,9 @@ IOService::actionPMReplyQueue( IOPMRequest * request, IOPMRequestQueue * queue )
 						0, (int)(uintptr_t) request->fArg1, NULL);
 				}
 			}
+
+			// Update any clients that have exceeded their requested ack periods.
+			updateClientResponses();
 
 			if (checkForDone()) {
 				stop_ack_timer();

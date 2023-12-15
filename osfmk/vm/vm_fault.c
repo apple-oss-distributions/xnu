@@ -1801,7 +1801,14 @@ vm_fault_page(
 			if (pager == MEMORY_OBJECT_NULL) {
 				vm_fault_cleanup(object, first_m);
 				thread_interrupt_level(interruptible_state);
-				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_OBJECT_NO_PAGER), 0 /* arg */);
+
+				static const enum vm_subsys_error_codes object_destroy_errors[VM_OBJECT_DESTROY_MAX + 1] = {
+					[VM_OBJECT_DESTROY_UNKNOWN_REASON] = KDBG_TRIAGE_VM_OBJECT_NO_PAGER,
+					[VM_OBJECT_DESTROY_FORCED_UNMOUNT] = KDBG_TRIAGE_VM_OBJECT_NO_PAGER_FORCED_UNMOUNT,
+					[VM_OBJECT_DESTROY_UNGRAFT] = KDBG_TRIAGE_VM_OBJECT_NO_PAGER_UNGRAFT,
+				};
+				enum vm_subsys_error_codes kdbg_code = object_destroy_errors[(vm_object_destroy_reason_t)object->no_pager_reason];
+				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, kdbg_code), 0 /* arg */);
 				return VM_FAULT_MEMORY_ERROR;
 			}
 
@@ -3409,7 +3416,6 @@ vm_fault_enter_set_mapped(
 #if KILL_FOR_CSM_VIOLATION
 static void
 vm_fault_kill_for_csm_violation(
-	pmap_t pmap,
 	vm_map_offset_t vaddr,
 	vm_prot_t prot,
 	vm_prot_t fault_type)
@@ -3417,9 +3423,6 @@ vm_fault_kill_for_csm_violation(
 	void *p;
 	char *pname;
 
-	if (pmap_is_nested(pmap)) {
-		panic("code-signing violation for nested pmap %p vaddr 0x%llx prot 0x%x fault 0x%x", pmap, (uint64_t)vaddr, prot, fault_type);
-	}
 	p = get_bsdtask_info(current_task());
 	pname = p ? proc_best_name(p) : "?";
 	printf("CODESIGNING: killing %d[%s] for CSM violation at vaddr 0x%llx prot 0x%x fault 0x%x\n",
@@ -3465,7 +3468,8 @@ pmap_enter_options_check(
 	           flags,
 	           wired,
 	           options | extra_options,
-	           NULL);
+	           NULL,
+	           PMAP_MAPPING_TYPE_INFER);
 }
 
 /*
@@ -3526,7 +3530,7 @@ vm_fault_attempt_pmap_enter(
 	}
 #if KILL_FOR_CSM_VIOLATION
 	if (kr == KERN_CODESIGN_ERROR && pmap != kernel_pmap) {
-		vm_fault_kill_for_csm_violation(pmap, vaddr, *prot, fault_type);
+		vm_fault_kill_for_csm_violation(vaddr, *prot, fault_type);
 	}
 #endif /* KILL_FOR_CSM_VIOLATION */
 #endif /* CODE_SIGNING_MONITOR */
@@ -3671,7 +3675,7 @@ vm_fault_pmap_enter_with_object_lock(
 
 #if KILL_FOR_CSM_VIOLATION
 		if (kr == KERN_CODESIGN_ERROR && pmap != kernel_pmap) {
-			vm_fault_kill_for_csm_violation(pmap, vaddr, *prot, fault_type);
+			vm_fault_kill_for_csm_violation(vaddr, *prot, fault_type);
 		}
 #endif /* KILL_FOR_CSM_VIOLATION */
 
@@ -4446,7 +4450,6 @@ RetryFault:
 			vm_map_unlock_read(map);
 			/* release our extra reference on failed object */
 //                     printf("FBDP %s:%d resilient_media_object %p deallocate\n", __FUNCTION__, __LINE__, resilient_media_object);
-			vm_object_lock_assert_notheld(resilient_media_object);
 			vm_object_deallocate(resilient_media_object);
 			resilient_media_object = VM_OBJECT_NULL;
 			resilient_media_offset = (vm_object_offset_t)-1;
@@ -5007,7 +5010,7 @@ FastPmapEnter:
 					 */
 					(void)pmap_enter_options(
 						pmap, vaddr, 0, 0, 0, 0, 0,
-						PMAP_OPTIONS_NOENTER, NULL);
+						PMAP_OPTIONS_NOENTER, NULL, PMAP_MAPPING_TYPE_INFER);
 
 					need_retry = FALSE;
 					goto RetryFault;
@@ -5761,7 +5764,7 @@ zero_fill_cleanup:
 					 */
 					(void)pmap_enter_options(
 						pmap, vaddr, 0, 0, 0, 0, 0,
-						PMAP_OPTIONS_NOENTER, NULL);
+						PMAP_OPTIONS_NOENTER, NULL, PMAP_MAPPING_TYPE_INFER);
 
 					need_retry = FALSE;
 					goto RetryFault;
@@ -5862,7 +5865,6 @@ handle_copy_delay:
 			 */
 			resilient_media_ref_transfer = true;
 		} else {
-			vm_object_lock_assert_notheld(resilient_media_object);
 			vm_object_deallocate(resilient_media_object);
 		}
 		resilient_media_object = VM_OBJECT_NULL;
@@ -6484,7 +6486,6 @@ done:
 		assert(resilient_media_offset != (vm_object_offset_t)-1);
 		/* release extra reference on failed object */
 //             printf("FBDP %s:%d resilient_media_object %p deallocate\n", __FUNCTION__, __LINE__, resilient_media_object);
-		vm_object_lock_assert_notheld(resilient_media_object);
 		vm_object_deallocate(resilient_media_object);
 		resilient_media_object = VM_OBJECT_NULL;
 		resilient_media_offset = (vm_object_offset_t)-1;

@@ -40,6 +40,7 @@
 
 #include <mach/mk_timer.h>
 
+#include <ipc/port.h>
 #include <ipc/ipc_space.h>
 
 #include <kern/lock_group.h>
@@ -224,25 +225,34 @@ mk_timer_destroy_trap(
 	struct mk_timer_destroy_trap_args *args)
 {
 	mach_port_name_t        name = args->name;
-	ipc_space_t                     myspace = current_space();
-	ipc_port_t                      port;
-	kern_return_t           result;
+	ipc_space_t             myspace = current_space();
+	ipc_port_t              port;
+	kern_return_t           kr;
+	ipc_entry_t             entry;
 
-	result = ipc_port_translate_receive(myspace, name, &port);
-	if (result != KERN_SUCCESS) {
-		return result;
+	kr = ipc_right_lookup_write(myspace, name, &entry);
+	if (kr != KERN_SUCCESS) {
+		return kr;
 	}
 
-	if (ip_kotype(port) == IKOT_TIMER) {
-		ip_mq_unlock(port);
-		/* TODO: this should be mach_port_mod_refs */
-		result = mach_port_destroy(myspace, name);
-	} else {
-		ip_mq_unlock(port);
-		result = KERN_INVALID_ARGUMENT;
+	/* space is write-locked and active */
+
+	if ((IE_BITS_TYPE(entry->ie_bits) & MACH_PORT_TYPE_RECEIVE) == 0) {
+		is_write_unlock(myspace);
+		return KERN_INVALID_RIGHT;
 	}
 
-	return result;
+	port = ip_object_to_port(entry->ie_object);
+	if (ip_kotype(port) != IKOT_TIMER) {
+		is_write_unlock(myspace);
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	/*
+	 * This should have been a mach_mod_refs(RR, -1) but unfortunately,
+	 * the fact this is a mach_port_destroy() is ABI now.
+	 */
+	return ipc_right_destroy(myspace, name, entry, TRUE, 0); /* unlocks space */
 }
 
 /*

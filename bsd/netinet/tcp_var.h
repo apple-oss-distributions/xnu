@@ -639,7 +639,7 @@ struct tcpcb {
 #define TMPF_TFO_REQUEST        0x00800000 /* TFO Requested */
 #define TMPF_MPTCP_ECHO_ADDR    0x01000000 /* MPTCP echoes add_addr */
 
-#define TMPF_MPTCP_SIGNALS      (TMPF_SND_MPPRIO | TMPF_SND_REM_ADDR | TMPF_SND_MPFAIL | TMPF_SND_JACK)
+#define TMPF_MPTCP_SIGNALS      (TMPF_SND_MPPRIO | TMPF_SND_REM_ADDR | TMPF_SND_MPFAIL | TMPF_SND_JACK | TMPF_MPTCP_ECHO_ADDR)
 
 	tcp_seq                 t_mpuna;        /* unacknowledged sequence */
 	struct mptcb            *t_mptcb;       /* pointer to MPTCP TCB */
@@ -718,6 +718,9 @@ struct tcpcb {
 	uint32_t        t_challengeack_count;   /* # of challenge ACKs already sent per sec */
 
 	u_int32_t       t_connect_time;         /* time when the connection started */
+
+	uint64_t        t_rcvwnd_limited_total_time;
+	uint64_t        t_rcvwnd_limited_start_time;
 
 	uint32_t        t_comp_gencnt; /* Current compression generation-count */
 	uint32_t        t_comp_lastinc; /* Last time the gen-count was changed - should change every TCP_COMP_CHANGE_RATE ms */

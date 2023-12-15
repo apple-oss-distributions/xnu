@@ -333,6 +333,24 @@ kern_packet_get_policy_id(const kern_packet_t ph)
 	}
 }
 
+void
+kern_packet_set_skip_policy_id(const kern_packet_t ph, uint32_t skip_policy_id)
+{
+	if (__probable(SK_PTR_TYPE(ph) == NEXUS_META_TYPE_PACKET)) {
+		PKT_ADDR(ph)->pkt_skip_policy_id = skip_policy_id;
+	}
+}
+
+uint32_t
+kern_packet_get_skip_policy_id(const kern_packet_t ph)
+{
+	if (__probable(SK_PTR_TYPE(ph) == NEXUS_META_TYPE_PACKET)) {
+		return PKT_ADDR(ph)->pkt_skip_policy_id;
+	} else {
+		return 0;
+	}
+}
+
 uint32_t
 kern_packet_get_data_length(const kern_packet_t ph)
 {
@@ -681,6 +699,7 @@ kern_packet_clone_internal(const kern_packet_t ph1, kern_packet_t *ph2,
 		_UUID_COPY(p2->pkt_flowsrc_id, p1->pkt_flowsrc_id);
 		_UUID_COPY(p2->pkt_policy_euuid, p1->pkt_policy_euuid);
 		p2->pkt_policy_id = p1->pkt_policy_id;
+		p2->pkt_skip_policy_id = p1->pkt_skip_policy_id;
 
 		p2->pkt_pflags = p1->pkt_pflags;
 		if (p1->pkt_pflags & PKT_F_MBUF_DATA) {

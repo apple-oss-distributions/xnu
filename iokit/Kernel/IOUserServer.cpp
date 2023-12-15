@@ -47,6 +47,7 @@
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/pwr_mgt/RootDomain.h>
+#include <IOKit/pwr_mgt/IOPowerConnection.h>
 #include <libkern/c++/OSAllocation.h>
 #include <libkern/c++/OSKext.h>
 #include <libkern/c++/OSSharedPtr.h>
@@ -4161,7 +4162,6 @@ IOUserServer::clientClose(void)
 	if (kIODKLogSetup & gIODKDebug) {
 		DKLOG("%s::clientClose(%p)\n", getName(), this);
 	}
-
 	services = NULL;
 	IOLockLock(fLock);
 	if (fServices) {
@@ -4202,7 +4202,7 @@ IOUserServer::clientClose(void)
 	if (unexpectedExit &&
 	    !gInUserspaceReboot &&
 	    !powerManagementFailed &&
-	    (fTaskCrashReason == OS_REASON_NULL || (fTaskCrashReason->osr_namespace != OS_REASON_JETSAM && fTaskCrashReason->osr_namespace != OS_REASON_RUNNINGBOARD)) &&
+	    (fTaskCrashReason != OS_REASON_NULL && fTaskCrashReason->osr_namespace != OS_REASON_JETSAM && fTaskCrashReason->osr_namespace != OS_REASON_RUNNINGBOARD) &&
 	    fStatistics != NULL) {
 		OSDextCrashPolicy policy = fStatistics->recordCrash();
 		bool allowPanic;
@@ -4967,6 +4967,31 @@ IOUserServer::powerStateDidChangeTo(IOPMPowerFlags flags, unsigned long state, I
 	}
 
 	return kIOPMAckImplied;
+}
+
+bool
+IOUserServer::checkPMReady()
+{
+	bool __block ready = true;
+
+	IOLockLock(fLock);
+	// Check if any services have not completely joined the PM tree (i.e.
+	// addPowerChild has not compeleted).
+	fServices->iterateObjects(^bool (OSObject * obj) {
+		IOPowerConnection *conn;
+		IOService *service = (IOService *) obj;
+		IORegistryEntry *parent = service->getParentEntry(gIOPowerPlane);
+		if ((conn = OSDynamicCast(IOPowerConnection, parent))) {
+		        if (!conn->getReadyFlag()) {
+		                ready = false;
+		                return true;
+			}
+		}
+		return false;
+	});
+	IOLockUnlock(fLock);
+
+	return ready;
 }
 
 kern_return_t

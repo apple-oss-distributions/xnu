@@ -208,6 +208,13 @@ extern kern_return_t pmap_next_page_large(ppnum_t *pnum);
 extern void pmap_hi_pages_done(void);
 #endif
 
+__enum_decl(pmap_mapping_type_t, uint8_t, {
+	PMAP_MAPPING_TYPE_INFER = 0,
+	PMAP_MAPPING_TYPE_DEFAULT,
+	PMAP_MAPPING_TYPE_ROZONE,
+	PMAP_MAPPING_TYPE_RESTRICTED
+});
+
 /*
  * Report virtual space available for the kernel.
  */
@@ -238,7 +245,8 @@ extern kern_return_t    pmap_enter(     /* Enter a mapping */
 	vm_prot_t       prot,
 	vm_prot_t       fault_type,
 	unsigned int    flags,
-	boolean_t       wired);
+	boolean_t       wired,
+	pmap_mapping_type_t mapping_type);
 
 extern kern_return_t    pmap_enter_options(
 	pmap_t pmap,
@@ -249,7 +257,8 @@ extern kern_return_t    pmap_enter_options(
 	unsigned int flags,
 	boolean_t wired,
 	unsigned int options,
-	void *arg);
+	void *arg,
+	pmap_mapping_type_t mapping_type);
 extern kern_return_t    pmap_enter_options_addr(
 	pmap_t pmap,
 	vm_map_offset_t v,
@@ -259,7 +268,8 @@ extern kern_return_t    pmap_enter_options_addr(
 	unsigned int flags,
 	boolean_t wired,
 	unsigned int options,
-	void *arg);
+	void *arg,
+	pmap_mapping_type_t mapping_type);
 
 extern void             pmap_remove_some_phys(
 	pmap_t          pmap,

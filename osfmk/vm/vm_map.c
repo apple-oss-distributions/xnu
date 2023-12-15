@@ -4900,7 +4900,7 @@ vm_map_enter_mem_object_helper(
 				kr = pmap_enter_options(target_map->pmap,
 				    va, UPL_PHYS_PAGE(page_list, i),
 				    cur_protection, VM_PROT_NONE,
-				    0, TRUE, pmap_options, NULL);
+				    0, TRUE, pmap_options, NULL, PMAP_MAPPING_TYPE_INFER);
 				if (kr != KERN_SUCCESS) {
 					OSIncrementAtomic64(&vm_prefault_nb_bailout);
 					if (kernel_prefault) {
@@ -22954,6 +22954,15 @@ vm_map_range_map_init(void)
 	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_MALLOC_PROB_GUARD);
 	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_MALLOC_SMALL);
 	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_MALLOC_TINY);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_TCMALLOC);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_LIBNETWORK);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_IOACCELERATOR);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_IOSURFACE);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_IMAGEIO);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_COREGRAPHICS);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_CORESERVICES);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_COREDATA);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_LAYERKIT);
 }
 
 static struct mach_vm_range

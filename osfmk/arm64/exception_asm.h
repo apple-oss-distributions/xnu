@@ -135,13 +135,17 @@
  * These keys are deliberately kept loaded into the CPU for later kernel use.
  *
  *   arg0 - KERNEL_MODE or HIBERNATE_MODE
+ *   arg1 - ADD_THREAD_SIGNATURE or POISON_THREAD_SIGNATURE
  *   x0 - Address of the save area
  *   x25 - Return the value of FPCR
  */
 #define KERNEL_MODE 0
 #define HIBERNATE_MODE 1
 
-.macro SPILL_REGISTERS	mode
+#define ADD_THREAD_SIGNATURE 0
+#define POISON_THREAD_SIGNATURE 1
+
+.macro SPILL_REGISTERS	mode, signing_mode = ADD_THREAD_SIGNATURE
 	stp		x2, x3, [x0, SS64_X2]                                   // Save remaining GPRs
 	stp		x4, x5, [x0, SS64_X4]
 	stp		x6, x7, [x0, SS64_X6]
@@ -186,6 +190,11 @@ Lsave_neon_state_done_\@:
 
 #if defined(HAS_APPLE_PAC)
 	.if \mode != HIBERNATE_MODE
+
+.if \signing_mode == POISON_THREAD_SIGNATURE
+	mov		x21, #-1
+	str		x21, [x0, SS64_JOPHASH]
+.else
 	/* Save x1 and LR to preserve across call */
 	mov		x21, x1
 	mov		x20, lr
@@ -212,6 +221,8 @@ Lsave_neon_state_done_\@:
 	msr		SPSel, x19
 	mov		lr, x20
 	mov		x1, x21
+.endif
+
 	.endif
 #endif /* defined(HAS_APPLE_PAC) */
 

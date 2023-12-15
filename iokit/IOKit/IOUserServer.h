@@ -149,6 +149,7 @@ void serverRemove(IOUserServer * server);
 void serverAck(IOUserServer * server);
 bool serverSlept(void);
 void systemHalt(int howto);
+bool checkPMReady(void);
 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -232,6 +233,7 @@ public:
 	void                   systemPower(bool powerOff);
 	void                               systemHalt(int howto);
 	static void            powerSourceChanged(bool acAttached);
+	bool                   checkPMReady();
 
 	IOReturn                                setPowerState(unsigned long state, IOService * service) APPLE_KEXT_OVERRIDE;
 	IOReturn                                powerStateWillChangeTo(IOPMPowerFlags flags, unsigned long state, IOService * service) APPLE_KEXT_OVERRIDE;

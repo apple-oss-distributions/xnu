@@ -299,7 +299,8 @@ udp_log_connection(struct inpcb *inp, const char *event, int error)
 	    "pkts in/out: %llu/%llu " \
 	    "error: %d " \
 	    "so_error: %d " \
-	    "svc/tc: %u"
+	    "svc/tc: %u " \
+	    "flow: 0x%x"
 
 #define UDP_LOG_CONNECT_ARGS \
 	    event, \
@@ -308,7 +309,8 @@ udp_log_connection(struct inpcb *inp, const char *event, int error)
 	    inp->inp_stat->rxpackets, inp->inp_stat->txpackets, \
 	    error, \
 	    so->so_error, \
-	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class
+	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class, \
+	    inp->inp_flowhash
 
 	os_log(OS_LOG_DEFAULT, UDP_LOG_CONNECT_FMT,
 	    UDP_LOG_CONNECT_ARGS);
@@ -389,7 +391,8 @@ udp_log_connection_summary(struct inpcb *inp)
 	    "bytes in/out: %llu/%llu " \
 	    "pkts in/out: %llu/%llu " \
 	    "so_error: %d " \
-	    "svc/tc: %u"
+	    "svc/tc: %u " \
+	    "flow: 0x%x"
 
 #define UDP_LOG_CONNECTION_SUMMARY_ARGS \
 	    UDP_LOG_COMMON_PCB_ARGS, \
@@ -398,7 +401,8 @@ udp_log_connection_summary(struct inpcb *inp)
 	    inp->inp_stat->rxbytes, inp->inp_stat->txbytes, \
 	    inp->inp_stat->rxpackets, inp->inp_stat->txpackets, \
 	    so->so_error, \
-	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class
+	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class, \
+	    inp->inp_flowhash
 
 	os_log(OS_LOG_DEFAULT, UDP_LOG_CONNECTION_SUMMARY_FMT,
 	    UDP_LOG_CONNECTION_SUMMARY_ARGS);
@@ -408,11 +412,12 @@ udp_log_connection_summary(struct inpcb *inp)
 #define UDP_LOG_CONNECTION_SUMMARY_FMT \
 	    "udp_connection_summary " \
 	    UDP_LOG_COMMON_PCB_FMT \
-	    "flowctl: %llu suspnd: %llu "
+	    "flowctl: %lluus (%llux) "
 
 #define UDP_LOG_CONNECTION_SUMMARY_ARGS \
 	    UDP_LOG_COMMON_PCB_ARGS, \
-	    inp->inp_fadv_flow_ctrl_cnt, inp->inp_fadv_suspended_cnt
+	    inp->inp_fadv_total_time, \
+	    inp->inp_fadv_cnt
 
 	os_log(OS_LOG_DEFAULT, UDP_LOG_CONNECTION_SUMMARY_FMT,
 	    UDP_LOG_CONNECTION_SUMMARY_ARGS);

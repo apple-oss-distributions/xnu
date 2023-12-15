@@ -205,6 +205,7 @@ static int __attribute__ ((noinline)) pid_kqueueinfo(struct kqueue * kq, struct 
 static int proc_terminate_all_rsr(__unused int pid, __unused int flavor, int arg, int32_t *retval);
 static int proc_terminate_all_rsr_filter(proc_t p, __unused void *arg);
 static int proc_terminate_all_rsr_callback(proc_t p, void *arg);
+static int proc_signal_with_audittoken(user_addr_t buffer, int signum, int32_t *retval);
 static int fill_vnodeinfo(vnode_t vp, struct vnode_info *vinfo, boolean_t check_fsgetpath);
 static void fill_fileinfo(struct fileproc *fp, proc_t proc, struct proc_fileinfo * finfo);
 static int proc_security_policy(proc_t targetp, int callnum, int flavor, boolean_t check_same_user);
@@ -333,6 +334,8 @@ proc_info_internal(int callnum, int pid, uint32_t flags, uint64_t ext_id, int fl
 		return proc_set_dyld_images(pid, buffer, buffersize, retval);
 	case PROC_INFO_CALL_TERMINATE_RSR:
 		return proc_terminate_all_rsr(pid, flavor, (int)arg, retval);
+	case PROC_INFO_CALL_SIGNAL_AUDITTOKEN:
+		return proc_signal_with_audittoken(buffer, flavor, retval);
 	default:
 		return EINVAL;
 	}
@@ -3455,6 +3458,66 @@ struct proc_terminate_all_rsr_struct {
 	int     ptss_sig;
 	int32_t *ptss_retval;
 };
+
+
+static int
+proc_signal_with_audittoken(user_addr_t uaudittoken, int signum, int32_t *retval)
+{
+	int error = 0;
+	pid_t pid = 0;
+	proc_t target_proc = PROC_NULL;
+	audit_token_t token = INVALID_AUDIT_TOKEN_VALUE;
+	kauth_cred_t uc = kauth_cred_get();
+
+	if (!((signum > 0) && (signum < NSIG))) {
+		error = EINVAL;
+		goto out;
+	}
+
+	if (uaudittoken != USER_ADDR_NULL) {
+		error = copyin(uaudittoken, &token, sizeof(audit_token_t));
+		if (error != 0) {
+			goto out;
+		}
+	} else {
+		error = EINVAL;
+		goto out;
+	}
+
+	pid = token.val[5];
+	if (pid <= 0) {
+		error = EINVAL;
+		goto out;
+	}
+
+	if ((target_proc = proc_find(pid)) == PROC_NULL) {
+		error = ESRCH;
+		goto out;
+	}
+
+	/* Check the target proc pidversion */
+	int pidversion = proc_pidversion(target_proc);
+	if (pidversion != token.val[7]) {
+		error = ESRCH;
+		goto out;
+	}
+
+	/* Check the calling process privileges, proceed if it can signal the target process */
+	if (!cansignal(current_proc(), uc, target_proc, signum)) {
+		error = EPERM;
+		goto out;
+	}
+
+	psignal(target_proc, signum);
+out:
+	if (target_proc != PROC_NULL) {
+		proc_rele(target_proc);
+	}
+
+	*retval = 0;
+
+	return error;
+}
 
 /*
  * proc_terminate_all_rsr() provides support for sudden termination of all

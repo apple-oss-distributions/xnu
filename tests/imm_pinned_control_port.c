@@ -4,11 +4,11 @@
 #include <darwintest.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
-#include <excserver.h>
 #include <sys/sysctl.h>
 #include <spawn.h>
 #include <signal.h>
 #include <TargetConditionals.h>
+#include "excserver_protect.h"
 
 #define MAX_ARGV 3
 #define EXC_CODE_SHIFT 32
@@ -115,6 +115,38 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
 }
 
 kern_return_t
+catch_mach_exception_raise_identity_protected(
+	mach_port_t               exception_port,
+	uint64_t                  thread_id,
+	mach_port_t               task_id_token,
+	exception_type_t          exception,
+	mach_exception_data_t     codes,
+	mach_msg_type_number_t    codeCnt)
+{
+#pragma unused(exception_port, codeCnt)
+	task_t task;
+	pid_t pid;
+	kern_return_t kr = task_identity_token_get_task_port(task_id_token, TASK_FLAVOR_READ, &task);
+	T_ASSERT_MACH_SUCCESS(kr, "task_identity_token_get_task_port");
+	kr = pid_for_task(task, &pid);
+	T_ASSERT_MACH_SUCCESS(kr, "pid_for_task");
+	T_LOG("Crashing child pid: %d, continuing...\n", pid);
+
+	kr = mach_port_deallocate(mach_task_self(), task);
+	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "mach_port_deallocate");
+
+	T_ASSERT_GT_UINT(codeCnt, 0, "CodeCnt");
+	T_LOG("Caught exception type: %d code: 0x%llx", exception, (uint64_t)codes[0]);
+	if (exception == EXC_GUARD || exception == EXC_CORPSE_NOTIFY) {
+		exception_taken = exception;
+		exception_code = (uint64_t)codes[0];
+	} else {
+		T_FAIL("Unexpected exception");
+	}
+	return KERN_SUCCESS;
+}
+
+kern_return_t
 catch_mach_exception_raise_state_identity(mach_port_t exception_port,
     mach_port_t thread,
     mach_port_t task,
@@ -140,25 +172,9 @@ catch_mach_exception_raise(mach_port_t exception_port,
     mach_exception_data_t code,
     mach_msg_type_number_t code_count)
 {
-#pragma unused(exception_port, code_count)
-	pid_t pid;
-	kern_return_t kr = pid_for_task(task, &pid);
-	T_EXPECT_MACH_SUCCESS(kr, "pid_for_task");
-	T_LOG("Crashing child pid: %d, continuing...\n", pid);
-
-	kr = mach_port_deallocate(mach_task_self(), thread);
-	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "mach_port_deallocate");
-	kr = mach_port_deallocate(mach_task_self(), task);
-	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "mach_port_deallocate");
-
-	T_LOG("Caught exception type: %d code: 0x%llx", exception, *((uint64_t*)code));
-	if (exception == EXC_GUARD || exception == EXC_CORPSE_NOTIFY) {
-		exception_taken = exception;
-		exception_code = *((uint64_t *)code);
-	} else {
-		T_FAIL("Unexpected exception");
-	}
-	return KERN_SUCCESS;
+#pragma unused(exception_port, thread, task, exception, code, code_count, flavor, old_state, old_state_count, new_state, new_state_count)
+	T_FAIL("Unsupported catch_mach_exception_raise_state_identity");
+	return KERN_NOT_SUPPORTED;
 }
 
 static void *
@@ -372,7 +388,7 @@ T_DECL(imm_pinned_control_port, "Test pinned & immovable task and thread control
 		posix_spawnattr_init(&attrs);
 
 		int err = posix_spawnattr_setexceptionports_np(&attrs, EXC_MASK_GUARD | EXC_MASK_CORPSE_NOTIFY, exc_port,
-		    (exception_behavior_t) (EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES), 0);
+		    (exception_behavior_t) (EXCEPTION_IDENTITY_PROTECTED | MACH_EXCEPTION_CODES), 0);
 		T_QUIET; T_ASSERT_POSIX_SUCCESS(err, "posix_spawnattr_setflags");
 
 		child_args[0] = test_prog_name;

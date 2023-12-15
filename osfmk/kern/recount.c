@@ -1056,7 +1056,8 @@ recount_processor_init(processor_t processor)
 {
 #if __AMP__
 	processor->pr_recount.rpr_cpu_kind_index =
-	    processor->processor_set->pset_cluster_type == PSET_AMP_P ? 1 : 0;
+	    processor->processor_set->pset_cluster_type == PSET_AMP_P ?
+	    RCT_CPU_PERFORMANCE : RCT_CPU_EFFICIENCY;
 #else // __AMP__
 #pragma unused(processor)
 #endif // !__AMP__

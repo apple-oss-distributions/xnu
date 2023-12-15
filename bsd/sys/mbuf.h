@@ -1414,13 +1414,13 @@ m_mtod_indexable(struct mbuf *m)
 
 /*
  * On platforms which require strict alignment (currently for anything but
- * i386 or x86_64), this macro checks whether the data pointer of an mbuf
+ * i386 or x86_64 or arm64), this macro checks whether the data pointer of an mbuf
  * is 32-bit aligned (this is the expected minimum alignment for protocol
  * headers), and assert otherwise.
  */
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm64__)
 #define MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(_m)
-#else /* !__i386__ && !__x86_64__ */
+#else /* !__i386__ && !__x86_64__ && !__arm64__ */
 #define MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(_m) do {                    \
 	if (!IS_P2ALIGNED((_m)->m_data, sizeof (u_int32_t))) {          \
 	        if (((_m)->m_flags & M_PKTHDR) &&                       \
@@ -1437,7 +1437,7 @@ m_mtod_indexable(struct mbuf *m)
 	        }                                                       \
 	}                                                               \
 } while (0)
-#endif /* !__i386__ && !__x86_64__ */
+#endif /* !__i386__ && !__x86_64__ && !__arm64__ */
 
 /* Maximum number of MBUF_SC values (excluding MBUF_SC_UNSPEC) */
 #define MBUF_SC_MAX_CLASSES     10

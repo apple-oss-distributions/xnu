@@ -1189,7 +1189,8 @@ mptcp_create_subflows(__unused void *arg)
 		struct mptses *mpte = mpp->mpp_pcbe;
 
 		socket_lock(mp_so, 1);
-		if (!(mpp->mpp_flags & MPP_CREATE_SUBFLOWS)) {
+		if (!(mpp->mpp_flags & MPP_CREATE_SUBFLOWS) ||
+		    !(mpte->mpte_flags & MPTE_ITFINFO_INIT)) {
 			socket_unlock(mp_so, 1);
 			continue;
 		}

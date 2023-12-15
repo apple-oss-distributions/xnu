@@ -676,6 +676,8 @@ thread_set_mode_and_absolute_pri_internal(thread_t              thread,
 	}
 
 	sched_mode_t old_mode = thread->sched_mode;
+	integer_t old_base_pri = thread->base_pri;
+	integer_t old_sched_pri = thread->sched_pri;
 
 	/*
 	 * Reverse engineer and apply the correct importance value
@@ -708,6 +710,11 @@ thread_set_mode_and_absolute_pri_internal(thread_t              thread,
 
 	if (mode != old_mode) {
 		pend_token->tpt_update_thread_sfi = 1;
+	}
+
+	if (thread->base_pri != old_base_pri ||
+	    thread->sched_pri != old_sched_pri) {
+		pend_token->tpt_update_turnstile = 1;
 	}
 
 unlock:
@@ -887,9 +894,9 @@ thread_set_workq_pri(thread_t  thread,
 	    &pend_token);
 	assert(kr == KERN_SUCCESS);
 
-	if (pend_token.tpt_update_thread_sfi) {
-		sfi_reevaluate(thread);
-	}
+	assert(pend_token.tpt_update_sockets == 0);
+
+	thread_policy_update_complete_unlocked(thread, &pend_token);
 }
 
 /*

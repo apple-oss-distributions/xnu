@@ -396,14 +396,14 @@ static inline u_short ip_cksum(struct mbuf *, int);
 
 /*
  * On platforms which require strict alignment (currently for anything but
- * i386 or x86_64), check if the IP header pointer is 32-bit aligned; if not,
+ * i386 or x86_64 or arm64), check if the IP header pointer is 32-bit aligned; if not,
  * copy the contents of the mbuf chain into a new chain, and free the original
  * one.  Create some head room in the first mbuf of the new chain, in case
  * it's needed later on.
  */
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm64__)
 #define IP_HDR_ALIGNMENT_FIXUP(_m, _ifp, _action) do { } while (0)
-#else /* !__i386__ && !__x86_64__ */
+#else /* !__i386__ && !__x86_64__ && !__arm64__ */
 #define IP_HDR_ALIGNMENT_FIXUP(_m, _ifp, _action) do {                  \
 	if (!IP_HDR_ALIGNED_P(mtod(_m, caddr_t))) {                     \
 	        struct mbuf *_n;                                        \
@@ -424,7 +424,7 @@ static inline u_short ip_cksum(struct mbuf *, int);
 	        }                                                       \
 	}                                                               \
 } while (0)
-#endif /* !__i386__ && !__x86_64__ */
+#endif /* !__i386__ && !__x86_64__ && !__arm64__ */
 
 
 typedef enum ip_check_if_result {
@@ -1262,7 +1262,7 @@ pass:
 	}
 
 	return retval;
-#if !defined(__i386__) && !defined(__x86_64__)
+#if !defined(__i386__) && !defined(__x86_64__) && !defined(__arm64__)
 bad:
 	m_freem(m);
 	return IPINPUT_FREED;

@@ -156,7 +156,7 @@ def __lldb_init_module(debugger, internal_dict):
             kexts = os.listdir(builtinkexts_path)
             if len(kexts) > 0:
                 print("\nBuiltin kexts: %s\n" % kexts)
-                if load_kexts == False:
+                if not load_kexts:
                     print("XNU_LLDBMACROS_NOBUILTINKEXTS is set, not loading:\n")
                 for kextdir in kexts:
                     # Python does not handle well modules that contain '-' in their names.

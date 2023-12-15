@@ -615,8 +615,9 @@ extern int net_add_proto_old(struct protosw_old *, struct domain_old *);
 extern int net_del_proto_old(int, int, struct domain_old *);
 extern void net_update_uptime(void);
 extern void net_update_uptime_with_time(const struct timeval *);
-extern u_int64_t net_uptime(void);
-extern u_int64_t net_uptime_ms(void);
+extern uint64_t net_uptime(void);
+extern uint64_t net_uptime_ms(void);
+extern uint64_t net_uptime_us(void);
 extern void net_uptime2timeval(struct timeval *);
 extern struct protosw *pffindproto(int family, int protocol, int type)
 __XNU_INTERNAL(pffindproto);

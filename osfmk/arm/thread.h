@@ -139,6 +139,7 @@ struct machine_thread {
 #if defined(CONFIG_XNUPOST)
 	volatile expected_fault_handler_t  expected_fault_handler;
 	volatile uintptr_t                 expected_fault_addr;
+	volatile uintptr_t                 expected_fault_pc;    /* PC at which an exception is expected to be thrown  (i.e. ELR_ELx) */
 #endif
 
 	uint64_t                  reserved6;

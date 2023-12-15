@@ -413,7 +413,7 @@ device_pager_deallocate(
 			device_object->device_handle = (device_port_t) NULL;
 		}
 		device_control = device_object->dev_pgr_hdr.mo_control;
-		memory_object_destroy(device_control, 0);
+		memory_object_destroy(device_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
 	} else if (ref_count == 0) {
 		/*
 		 * No more references: free the pager.

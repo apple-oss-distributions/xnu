@@ -3562,6 +3562,34 @@ inp_fc_feedback(struct inpcb *inp)
 	socket_unlock(so, 1);
 }
 
+static void
+inp_reset_fc_timerstat(struct inpcb *inp)
+{
+	uint64_t now;
+
+	if (inp->inp_fadv_start_time == 0) {
+		return;
+	}
+
+	now = net_uptime_us();
+	ASSERT(now >= inp->inp_fadv_start_time);
+
+	inp->inp_fadv_total_time += (now - inp->inp_fadv_start_time);
+	inp->inp_fadv_cnt++;
+
+	inp->inp_fadv_start_time = 0;
+}
+
+static void
+inp_set_fc_timerstat(struct inpcb *inp)
+{
+	if (inp->inp_fadv_start_time != 0) {
+		return;
+	}
+
+	inp->inp_fadv_start_time = net_uptime_us();
+}
+
 void
 inp_reset_fc_state(struct inpcb *inp)
 {
@@ -3570,6 +3598,8 @@ inp_reset_fc_state(struct inpcb *inp)
 	int needwakeup = (INP_WAIT_FOR_IF_FEEDBACK(inp)) ? 1 : 0;
 
 	inp->inp_flags &= ~(INP_FLOW_CONTROLLED | INP_FLOW_SUSPENDED);
+
+	inp_reset_fc_timerstat(inp);
 
 	if (suspended) {
 		so->so_flags &= ~(SOF_SUSPENDED);
@@ -3602,17 +3632,18 @@ inp_set_fc_state(struct inpcb *inp, int advcode)
 	if ((tmp_inp = inp_fc_getinp(inp->inp_flowhash,
 	    INPFC_SOLOCKED)) != NULL) {
 		if (in_pcb_checkstate(tmp_inp, WNT_RELEASE, 1) == WNT_STOPUSING) {
-			return 0;
+			goto exit_reset;
 		}
 		VERIFY(tmp_inp == inp);
 		switch (advcode) {
 		case FADV_FLOW_CONTROLLED:
 			inp->inp_flags |= INP_FLOW_CONTROLLED;
-			inp->inp_fadv_flow_ctrl_cnt++;
+			inp_set_fc_timerstat(inp);
 			break;
 		case FADV_SUSPENDED:
 			inp->inp_flags |= INP_FLOW_SUSPENDED;
-			inp->inp_fadv_suspended_cnt++;
+			inp_set_fc_timerstat(inp);
+
 			soevent(inp->inp_socket,
 			    (SO_FILT_HINT_LOCKED | SO_FILT_HINT_SUSPEND));
 
@@ -3626,6 +3657,10 @@ inp_set_fc_state(struct inpcb *inp, int advcode)
 		}
 		return 1;
 	}
+
+exit_reset:
+	inp_reset_fc_timerstat(inp);
+
 	return 0;
 }
 

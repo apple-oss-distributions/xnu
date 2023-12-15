@@ -362,6 +362,7 @@ static const struct vm_object vm_object_template = {
 #endif /* CONFIG_SECLUDED_MEMORY */
 
 	.for_realtime = false,
+	.no_pager_reason = VM_OBJECT_DESTROY_UNKNOWN_REASON,
 
 #if VM_OBJECT_ACCESS_TRACKING
 	.access_tracking = FALSE,
@@ -1902,8 +1903,8 @@ int fbdp_no_panic = 1;
 #endif /* MACH_ASSERT */
 kern_return_t
 vm_object_destroy(
-	vm_object_t             object,
-	__unused kern_return_t          reason)
+	vm_object_t                                     object,
+	vm_object_destroy_reason_t   reason)
 {
 	memory_object_t         old_pager;
 
@@ -1953,6 +1954,10 @@ vm_object_destroy(
 		object->fbdp_tracked = false;
 	}
 #endif /* FBDP_DEBUG_OBJECT_NO_PAGER */
+
+	if (reason != VM_OBJECT_DESTROY_UNKNOWN_REASON) {
+		object->no_pager_reason = reason;
+	}
 
 	object->can_persist = FALSE;
 	object->named = FALSE;
@@ -6280,6 +6285,7 @@ MACRO_END
 	/* "shadow_severed" refers to the object not its contents */
 	__TRANSPOSE_FIELD(phys_contiguous);
 	__TRANSPOSE_FIELD(nophyscache);
+	__TRANSPOSE_FIELD(no_pager_reason);
 	/* "cached_list.next" points to transposed object */
 	object1->cached_list.next = (queue_entry_t) object2;
 	object2->cached_list.next = (queue_entry_t) object1;

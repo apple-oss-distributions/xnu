@@ -262,22 +262,23 @@ struct kevent_extinfo {
 #define PROC_PIDDYNKQUEUE_EXTINFO_SIZE (sizeof(struct kevent_extinfo))
 
 /* __proc_info() call numbers */
-#define PROC_INFO_CALL_LISTPIDS          0x1
-#define PROC_INFO_CALL_PIDINFO           0x2
-#define PROC_INFO_CALL_PIDFDINFO         0x3
-#define PROC_INFO_CALL_KERNMSGBUF        0x4
-#define PROC_INFO_CALL_SETCONTROL        0x5
-#define PROC_INFO_CALL_PIDFILEPORTINFO   0x6
-#define PROC_INFO_CALL_TERMINATE         0x7
-#define PROC_INFO_CALL_DIRTYCONTROL      0x8
-#define PROC_INFO_CALL_PIDRUSAGE         0x9
-#define PROC_INFO_CALL_PIDORIGINATORINFO 0xa
-#define PROC_INFO_CALL_LISTCOALITIONS    0xb
-#define PROC_INFO_CALL_CANUSEFGHW        0xc
-#define PROC_INFO_CALL_PIDDYNKQUEUEINFO  0xd
-#define PROC_INFO_CALL_UDATA_INFO        0xe
-#define PROC_INFO_CALL_SET_DYLD_IMAGES   0xf
-#define PROC_INFO_CALL_TERMINATE_RSR     0x10
+#define PROC_INFO_CALL_LISTPIDS              0x1
+#define PROC_INFO_CALL_PIDINFO               0x2
+#define PROC_INFO_CALL_PIDFDINFO             0x3
+#define PROC_INFO_CALL_KERNMSGBUF            0x4
+#define PROC_INFO_CALL_SETCONTROL            0x5
+#define PROC_INFO_CALL_PIDFILEPORTINFO       0x6
+#define PROC_INFO_CALL_TERMINATE             0x7
+#define PROC_INFO_CALL_DIRTYCONTROL          0x8
+#define PROC_INFO_CALL_PIDRUSAGE             0x9
+#define PROC_INFO_CALL_PIDORIGINATORINFO     0xa
+#define PROC_INFO_CALL_LISTCOALITIONS        0xb
+#define PROC_INFO_CALL_CANUSEFGHW            0xc
+#define PROC_INFO_CALL_PIDDYNKQUEUEINFO      0xd
+#define PROC_INFO_CALL_UDATA_INFO            0xe
+#define PROC_INFO_CALL_SET_DYLD_IMAGES       0xf
+#define PROC_INFO_CALL_TERMINATE_RSR         0x10
+#define PROC_INFO_CALL_SIGNAL_AUDITTOKEN     0x11
 
 /* __proc_info_extended_id() flags */
 #define PIF_COMPARE_IDVERSION           0x01

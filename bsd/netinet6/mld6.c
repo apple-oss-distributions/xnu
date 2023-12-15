@@ -127,6 +127,8 @@
 #include <netinet6/mld6.h>
 #include <netinet6/mld6_var.h>
 
+#include <os/log.h>
+
 /* Lock group and attribute for mld_mtx */
 static LCK_ATTR_DECLARE(mld_mtx_attr, 0, 0);
 static LCK_GRP_DECLARE(mld_mtx_grp, "mld_mtx");
@@ -584,8 +586,8 @@ mld_domifattach(struct ifnet *ifp, zalloc_flags_t how)
 {
 	struct mld_ifinfo *mli;
 
-	MLD_PRINTF(("%s: called for ifp 0x%llx(%s)\n", __func__,
-	    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+	os_log_debug(OS_LOG_DEFAULT, "%s: called for ifp %s\n", __func__,
+	    if_name(ifp));
 
 	mli = mli_alloc(how);
 	if (mli == NULL) {
@@ -609,8 +611,8 @@ mld_domifattach(struct ifnet *ifp, zalloc_flags_t how)
 
 	MLD_UNLOCK();
 
-	MLD_PRINTF(("%s: allocate mld_ifinfo for ifp 0x%llx(%s)\n",
-	    __func__, (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+	os_log_info(OS_LOG_DEFAULT, "%s: allocated mld_ifinfo for ifp %s\n",
+	    __func__, if_name(ifp));
 
 	return mli;
 }
@@ -643,8 +645,8 @@ mld_domifreattach(struct mld_ifinfo *mli)
 
 	MLD_UNLOCK();
 
-	MLD_PRINTF(("%s: reattached mld_ifinfo for ifp 0x%llx(%s)\n",
-	    __func__, (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+	os_log_info(OS_LOG_DEFAULT, "%s: reattached mld_ifinfo for ifp %s\n",
+	    __func__, if_name(ifp));
 }
 
 /*
@@ -657,8 +659,8 @@ mld_domifdetach(struct ifnet *ifp)
 
 	SLIST_INIT(&in6m_dthead);
 
-	MLD_PRINTF(("%s: called for ifp 0x%llx(%s)\n", __func__,
-	    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+	os_log_info(OS_LOG_DEFAULT, "%s: called for ifp %s\n", __func__,
+	    if_name(ifp));
 
 	MLD_LOCK();
 	mli_delete(ifp, (struct mld_in6m_relhead *)&in6m_dthead);
@@ -834,8 +836,8 @@ mli_remref(struct mld_ifinfo *mli)
 	/* Now that we're dropped all locks, release detached records */
 	MLD_REMOVE_DETACHED_IN6M(&in6m_dthead);
 
-	MLD_PRINTF(("%s: freeing mld_ifinfo for ifp 0x%llx(%s)\n",
-	    __func__, (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+	os_log(OS_LOG_DEFAULT, "%s: freeing mld_ifinfo for ifp %s\n",
+	    __func__, if_name(ifp));
 
 	mli_free(mli);
 }
@@ -862,9 +864,8 @@ mld_v1_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 	is_general_query = 0;
 
 	if (!mld_v1enable) {
-		MLD_PRINTF(("%s: ignore v1 query %s on ifp 0x%llx(%s)\n",
-		    __func__, ip6_sprintf(&mld->mld_addr),
-		    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+		os_log_info(OS_LOG_DEFAULT, "%s: ignore v1 query on ifp %s\n",
+		    __func__, if_name(ifp));
 		goto done;
 	}
 
@@ -873,9 +874,9 @@ mld_v1_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 	 * a router's link-local address.
 	 */
 	if (!IN6_IS_SCOPE_LINKLOCAL(&ip6->ip6_src)) {
-		MLD_PRINTF(("%s: ignore v1 query src %s on ifp 0x%llx(%s)\n",
+		os_log_info(OS_LOG_DEFAULT, "%s: ignore v1 query src %s on ifp %s\n",
 		    __func__, ip6_sprintf(&ip6->ip6_src),
-		    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+		    if_name(ifp));
 		goto done;
 	}
 
@@ -923,8 +924,8 @@ mld_v1_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 	if (is_general_query) {
 		struct in6_multistep step;
 
-		MLD_PRINTF(("%s: process v1 general query on ifp 0x%llx(%s)\n",
-		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+		os_log_debug(OS_LOG_DEFAULT, "%s: process v1 general query on ifp %s\n",
+		    __func__, if_name(ifp));
 		/*
 		 * For each reporting group joined on this
 		 * interface, kick the report timer.
@@ -952,10 +953,10 @@ mld_v1_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 
 		if (inm != NULL) {
 			IN6M_LOCK(inm);
-			MLD_PRINTF(("%s: process v1 query %s on "
-			    "ifp 0x%llx(%s)\n", __func__,
+			os_log_debug(OS_LOG_DEFAULT, "%s: process v1 query %s on "
+			    "ifp %s\n", __func__,
 			    ip6_sprintf(&mld->mld_addr),
-			    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+			    if_name(ifp));
 			mtp.cst = mld_v1_update_group(inm, timer);
 			IN6M_UNLOCK(inm);
 			IN6M_REMREF(inm); /* from IN6_LOOKUP_MULTI */
@@ -1050,9 +1051,8 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 	is_general_query = 0;
 
 	if (!mld_v2enable) {
-		MLD_PRINTF(("%s: ignore v2 query %s on ifp 0x%llx(%s)\n",
-		    __func__, ip6_sprintf(&ip6->ip6_src),
-		    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+		os_log_info(OS_LOG_DEFAULT, "%s: ignore v2 query on ifp %s\n",
+		    __func__, if_name(ifp));
 		goto done;
 	}
 
@@ -1061,14 +1061,16 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 	 * a router's link-local address.
 	 */
 	if (!IN6_IS_SCOPE_LINKLOCAL(&ip6->ip6_src)) {
-		MLD_PRINTF(("%s: ignore v1 query src %s on ifp 0x%llx(%s)\n",
+		os_log_info(OS_LOG_DEFAULT,
+		    "%s: ignore v1 query src %s on ifp %s\n",
 		    __func__, ip6_sprintf(&ip6->ip6_src),
-		    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+		    if_name(ifp));
 		goto done;
 	}
 
-	MLD_PRINTF(("%s: input v2 query on ifp 0x%llx(%s)\n", __func__,
-	    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+	os_log_debug(OS_LOG_DEFAULT,
+	    "%s: input v2 query on ifp %s\n", __func__,
+	    if_name(ifp));
 
 	mld = (struct mldv2_query *)(mtod(m, uint8_t *) + off);
 
@@ -1163,8 +1165,8 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 		 * not schedule any other reports.
 		 * Otherwise, reset the interface timer.
 		 */
-		MLD_PRINTF(("%s: process v2 general query on ifp 0x%llx(%s)\n",
-		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+		os_log_debug(OS_LOG_DEFAULT, "%s: process v2 general query on ifp %s\n",
+		    __func__, if_name(ifp));
 		if (mli->mli_v2_timer == 0 || mli->mli_v2_timer >= timer) {
 			mtp.it = mli->mli_v2_timer = MLD_RANDOM_DELAY(timer);
 		}
@@ -1190,15 +1192,15 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 		if (nsrc > 0) {
 			if (!ratecheck(&inm->in6m_lastgsrtv,
 			    &mld_gsrdelay)) {
-				MLD_PRINTF(("%s: GS query throttled.\n",
-				    __func__));
+				os_log_info(OS_LOG_DEFAULT, "%s: GS query throttled\n",
+				    __func__);
 				IN6M_UNLOCK(inm);
 				IN6M_REMREF(inm); /* from IN6_LOOKUP_MULTI */
 				goto done;
 			}
 		}
-		MLD_PRINTF(("%s: process v2 group query on ifp 0x%llx(%s)\n",
-		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+		os_log_debug(OS_LOG_DEFAULT, "%s: process v2 group query on ifp %s\n",
+		    __func__, if_name(ifp));
 		/*
 		 * If there is a pending General Query response
 		 * scheduled sooner than the selected delay, no
@@ -1220,9 +1222,9 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 	}
 done:
 	if (mtp.it > 0) {
-		MLD_PRINTF(("%s: v2 general query response scheduled in "
-		    "T+%d seconds on ifp 0x%llx(%s)\n", __func__, mtp.it,
-		    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+		os_log_debug(OS_LOG_DEFAULT, "%s: v2 general query response scheduled in "
+		    "T+%d seconds on ifp %s\n", __func__, mtp.it,
+		    if_name(ifp));
 	}
 	mld_set_timeout(&mtp);
 
@@ -1357,9 +1359,8 @@ mld_v1_input_report(struct ifnet *ifp, struct mbuf *m,
 	struct in6_multi        *inm;
 
 	if (!mld_v1enable) {
-		MLD_PRINTF(("%s: ignore v1 report %s on ifp 0x%llx(%s)\n",
-		    __func__, ip6_sprintf(&mld->mld_addr),
-		    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+		os_log_info(OS_LOG_DEFAULT, "%s: ignore v1 report on ifp %s\n",
+		    __func__, if_name(ifp));
 		return 0;
 	}
 
@@ -1375,9 +1376,9 @@ mld_v1_input_report(struct ifnet *ifp, struct mbuf *m,
 	src = ip6->ip6_src;
 	in6_clearscope(&src);
 	if (!IN6_IS_SCOPE_LINKLOCAL(&src) && !IN6_IS_ADDR_UNSPECIFIED(&src)) {
-		MLD_PRINTF(("%s: ignore v1 query src %s on ifp 0x%llx(%s)\n",
+		os_log_info(OS_LOG_DEFAULT, "%s: ignore v1 query src %s on ifp %s\n",
 		    __func__, ip6_sprintf(&ip6->ip6_src),
-		    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+		    if_name(ifp));
 		return EINVAL;
 	}
 
@@ -1389,9 +1390,9 @@ mld_v1_input_report(struct ifnet *ifp, struct mbuf *m,
 	in6_clearscope(&dst);
 	if (!IN6_IS_ADDR_MULTICAST(&mld->mld_addr) ||
 	    !IN6_ARE_ADDR_EQUAL(&mld->mld_addr, &dst)) {
-		MLD_PRINTF(("%s: ignore v1 query dst %s on ifp 0x%llx(%s)\n",
+		os_log_info(OS_LOG_DEFAULT, "%s: ignore v1 query dst %s on ifp %s\n",
 		    __func__, ip6_sprintf(&ip6->ip6_dst),
-		    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+		    if_name(ifp));
 		return EINVAL;
 	}
 
@@ -1419,9 +1420,9 @@ mld_v1_input_report(struct ifnet *ifp, struct mbuf *m,
 		return 0;
 	}
 
-	MLD_PRINTF(("%s: process v1 report %s on ifp 0x%llx(%s)\n",
+	os_log_debug(OS_LOG_DEFAULT, "%s: process v1 report %s on ifp %s\n",
 	    __func__, ip6_sprintf(&mld->mld_addr),
-	    (uint64_t)VM_KERNEL_ADDRPERM(ifp), if_name(ifp)));
+	    if_name(ifp));
 
 	/*
 	 * Embed scope ID of receiving interface in MLD query for lookup
@@ -1914,10 +1915,9 @@ static void
 mld_append_relq(struct mld_ifinfo *mli, struct in6_multi *inm)
 {
 	MLI_LOCK_ASSERT_HELD(mli);
-	MLD_PRINTF(("%s: adding inm %llx on relq ifp 0x%llx(%s)\n",
+	os_log(OS_LOG_DEFAULT, "%s: adding inm %llx on relq ifp %s\n",
 	    __func__, (uint64_t)VM_KERNEL_ADDRPERM(inm),
-	    (uint64_t)VM_KERNEL_ADDRPERM(mli->mli_ifp),
-	    if_name(mli->mli_ifp)));
+	    mli->mli_ifp != NULL ? if_name(mli->mli_ifp) : "<null>");
 	SLIST_INSERT_HEAD(&mli->mli_relinmhead, inm, in6m_nrele);
 }
 
@@ -1950,6 +1950,9 @@ mld_flush_relq(struct mld_ifinfo *mli, struct mld_in6m_relhead *in6m_dthead)
 
 		SLIST_REMOVE_HEAD(&temp_relinmhead, in6m_nrele);
 		IN6M_LOCK(inm);
+		os_log(OS_LOG_DEFAULT, "%s: flushing inm %llx on relq ifp %s\n",
+		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(inm),
+		    inm->in6m_ifp != NULL ? if_name(inm->in6m_ifp) : "<null>");
 		VERIFY(inm->in6m_nrelecnt != 0);
 		inm->in6m_nrelecnt--;
 		lastref = in6_multi_detach(inm);
@@ -2168,9 +2171,8 @@ mld_set_version(struct mld_ifinfo *mli, const int mld_version)
 
 	MLI_LOCK_ASSERT_HELD(mli);
 
-	MLD_PRINTF(("%s: switching to v%d on ifp 0x%llx(%s)\n", __func__,
-	    mld_version, (uint64_t)VM_KERNEL_ADDRPERM(mli->mli_ifp),
-	    if_name(mli->mli_ifp)));
+	os_log(OS_LOG_DEFAULT, "%s: switching to v%d on ifp %s\n", __func__,
+	    mld_version, if_name(mli->mli_ifp));
 
 	if (mld_version == MLD_VERSION_1) {
 		/*
@@ -2299,10 +2301,9 @@ mld_v1_process_querier_timers(struct mld_ifinfo *mli)
 		/*
 		 * MLDv1 Querier Present timer expired; revert to MLDv2.
 		 */
-		MLD_PRINTF(("%s: transition from v%d -> v%d on 0x%llx(%s)\n",
+		os_log(OS_LOG_DEFAULT, "%s: transition from v%d -> v%d on %s\n",
 		    __func__, mli->mli_version, MLD_VERSION_2,
-		    (uint64_t)VM_KERNEL_ADDRPERM(mli->mli_ifp),
-		    if_name(mli->mli_ifp)));
+		    if_name(mli->mli_ifp));
 		mli->mli_version = MLD_VERSION_2;
 	}
 }
@@ -2396,7 +2397,7 @@ mld_v1_transmit_report(struct in6_multi *in6m, const uint8_t type)
 	 * avoiding unlocking in_multihead_lock here.
 	 */
 	if (IF_QFULL(&in6m->in6m_mli->mli_v1q)) {
-		MLD_PRINTF(("%s: v1 outbound queue full\n", __func__));
+		os_log_error(OS_LOG_DEFAULT, "%s: v1 outbound queue full\n", __func__);
 		error = ENOMEM;
 		m_freem(mh);
 	} else {
@@ -3026,7 +3027,8 @@ mld_v2_enqueue_group_record(struct ifqueue *ifq, struct in6_multi *inm,
 		MLD_PRINTF(("%s: use existing packet\n", __func__));
 	} else {
 		if (IF_QFULL(ifq)) {
-			MLD_PRINTF(("%s: outbound queue full\n", __func__));
+			os_log_error(OS_LOG_DEFAULT,
+			    "%s: outbound queue full\n", __func__);
 			return -ENOMEM;
 		}
 		m = NULL;
@@ -3060,7 +3062,7 @@ mld_v2_enqueue_group_record(struct ifqueue *ifq, struct in6_multi *inm,
 		if (m != m0) {
 			m_freem(m);
 		}
-		MLD_PRINTF(("%s: m_append() failed.\n", __func__));
+		os_log_error(OS_LOG_DEFAULT, "%s: m_append() failed.\n", __func__);
 		return -ENOMEM;
 	}
 	nbytes += sizeof(struct mldv2_record);
@@ -3115,8 +3117,9 @@ mld_v2_enqueue_group_record(struct ifqueue *ifq, struct in6_multi *inm,
 				if (m != m0) {
 					m_freem(m);
 				}
-				MLD_PRINTF(("%s: m_append() failed.\n",
-				    __func__));
+				os_log_error(OS_LOG_DEFAULT,
+				    "%s: m_append() failed\n",
+				    __func__);
 				return -ENOMEM;
 			}
 			nbytes += sizeof(struct in6_addr);
@@ -3163,7 +3166,7 @@ mld_v2_enqueue_group_record(struct ifqueue *ifq, struct in6_multi *inm,
 	 */
 	while (nims != NULL) {
 		if (IF_QFULL(ifq)) {
-			MLD_PRINTF(("%s: outbound queue full\n", __func__));
+			os_log_error(OS_LOG_DEFAULT, "%s: outbound queue full\n", __func__);
 			return -ENOMEM;
 		}
 		m = m_getcl(M_DONTWAIT, MT_DATA, M_PKTHDR);
@@ -3182,7 +3185,7 @@ mld_v2_enqueue_group_record(struct ifqueue *ifq, struct in6_multi *inm,
 			if (m != m0) {
 				m_freem(m);
 			}
-			MLD_PRINTF(("%s: m_append() failed.\n", __func__));
+			os_log_error(OS_LOG_DEFAULT, "%s: m_append() failed.\n", __func__);
 			return -ENOMEM;
 		}
 		m->m_pkthdr.vt_nrecs = 1;
@@ -3213,8 +3216,8 @@ mld_v2_enqueue_group_record(struct ifqueue *ifq, struct in6_multi *inm,
 				if (m != m0) {
 					m_freem(m);
 				}
-				MLD_PRINTF(("%s: m_append() failed.\n",
-				    __func__));
+				os_log_error(OS_LOG_DEFAULT, "%s: m_append() failed\n",
+				    __func__);
 				return -ENOMEM;
 			}
 			++msrcs;
@@ -3328,8 +3331,8 @@ mld_v2_enqueue_filter_change(struct ifqueue *ifq, struct in6_multi *inm)
 					m = m_gethdr(M_DONTWAIT, MT_DATA);
 				}
 				if (m == NULL) {
-					MLD_PRINTF(("%s: m_get*() failed\n",
-					    __func__));
+					os_log_error(OS_LOG_DEFAULT, "%s: m_get*() failed\n",
+					    __func__);
 					return -ENOMEM;
 				}
 				m->m_pkthdr.vt_nrecs = 0;
@@ -3355,8 +3358,8 @@ mld_v2_enqueue_filter_change(struct ifqueue *ifq, struct in6_multi *inm)
 				if (m != m0) {
 					m_freem(m);
 				}
-				MLD_PRINTF(("%s: m_append() failed\n",
-				    __func__));
+				os_log_error(OS_LOG_DEFAULT, "%s: m_append() failed\n",
+				    __func__);
 				return -ENOMEM;
 			}
 			npbytes += sizeof(struct mldv2_record);
@@ -3419,8 +3422,8 @@ mld_v2_enqueue_filter_change(struct ifqueue *ifq, struct in6_multi *inm)
 					if (m != m0) {
 						m_freem(m);
 					}
-					MLD_PRINTF(("%s: m_append() failed\n",
-					    __func__));
+					os_log_error(OS_LOG_DEFAULT, "%s: m_append() failed\n",
+					    __func__);
 					return -ENOMEM;
 				}
 				nallow += !!(crt == REC_ALLOW);
@@ -3536,9 +3539,8 @@ mld_v2_merge_state_changes(struct in6_multi *inm, struct ifqueue *ifscq)
 		}
 
 		if (!domerge && IF_QFULL(gq)) {
-			MLD_PRINTF(("%s: outbound queue full, skipping whole "
-			    "packet 0x%llx\n", __func__,
-			    (uint64_t)VM_KERNEL_ADDRPERM(m)));
+			os_log_info(OS_LOG_DEFAULT, "%s: outbound queue full",
+			    __func__);
 			n = m->m_nextpkt;
 			if (!docopy) {
 				IF_REMQUEUE(gq, m);
@@ -3688,9 +3690,8 @@ mld_dispatch_packet(struct mbuf *m)
 	 */
 	ifp = mld_restore_context(m);
 	if (ifp == NULL || !ifnet_is_attached(ifp, 0)) {
-		MLD_PRINTF(("%s: dropped 0x%llx as ifindex %u went away.\n",
-		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(m),
-		    (u_int)if_index));
+		os_log_error(OS_LOG_DEFAULT, "%s: dropped 0x%llx as interface went away\n",
+		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(m));
 		m_freem(m);
 		ip6stat.ip6s_noroute++;
 		return;
@@ -3711,8 +3712,8 @@ mld_dispatch_packet(struct mbuf *m)
 	} else {
 		m0 = mld_v2_encap_report(ifp, m);
 		if (m0 == NULL) {
-			MLD_PRINTF(("%s: dropped 0x%llx\n", __func__,
-			    (uint64_t)VM_KERNEL_ADDRPERM(m)));
+			os_log_error(OS_LOG_DEFAULT, "%s: dropped 0x%llx\n", __func__,
+			    (uint64_t)VM_KERNEL_ADDRPERM(m));
 			/*
 			 * mld_v2_encap_report() has already freed our mbuf.
 			 */
@@ -3751,8 +3752,8 @@ mld_dispatch_packet(struct mbuf *m)
 	IM6O_REMREF(im6o);
 
 	if (error) {
-		MLD_PRINTF(("%s: ip6_output(0x%llx) = %d\n", __func__,
-		    (uint64_t)VM_KERNEL_ADDRPERM(m0), error));
+		os_log_error(OS_LOG_DEFAULT, "%s: ip6_output(0x%llx) = %d\n", __func__,
+		    (uint64_t)VM_KERNEL_ADDRPERM(m0), error);
 		if (oifp != NULL) {
 			ifnet_release(oifp);
 		}
@@ -3882,7 +3883,7 @@ mld_rec_type_to_str(const int type)
 void
 mld_init(void)
 {
-	MLD_PRINTF(("%s: initializing\n", __func__));
+	os_log(OS_LOG_DEFAULT, "%s: initializing\n", __func__);
 
 	ip6_initpktopts(&mld_po);
 	mld_po.ip6po_hlim = 1;

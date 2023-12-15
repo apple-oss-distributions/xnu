@@ -130,6 +130,9 @@ main(int     argc,
 	DECLARE("TH_ROP_PID", offsetof(struct thread, machine.rop_pid));
 	DECLARE("TH_JOP_PID", offsetof(struct thread, machine.jop_pid));
 #endif /* defined(HAS_APPLE_PAC) */
+#if CONFIG_XNUPOST
+	DECLARE("TH_EXPECTED_FAULT_HANDLER", offsetof(struct thread, machine.expected_fault_handler));
+#endif /* CONFIG_XNUPOST */
 
 	DECLARE("TH_ARM_MACHINE_FLAGS", offsetof(struct thread, machine.arm_machine_flags));
 

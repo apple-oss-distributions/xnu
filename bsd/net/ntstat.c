@@ -416,6 +416,20 @@ nstat_ifnet_to_flags_extended(
 	return flags;
 }
 
+static void
+nstat_update_local_flag_from_inpcb_route(const struct inpcb *inp,
+    u_int32_t *flags)
+{
+	if (inp != NULL &&
+	    ((inp->inp_route.ro_rt != NULL &&
+	    IS_LOCALNET_ROUTE(inp->inp_route.ro_rt)) ||
+	    (inp->inp_flags2 & INP2_LAST_ROUTE_LOCAL))) {
+		*flags |= NSTAT_IFNET_IS_LOCAL;
+	} else {
+		*flags |= NSTAT_IFNET_IS_NON_LOCAL;
+	}
+}
+
 static u_int32_t
 nstat_inpcb_to_flags(
 	const struct inpcb *inp)
@@ -434,9 +448,12 @@ nstat_inpcb_to_flags(
 				} else {
 					flags |= NSTAT_IFNET_IS_NON_LOCAL;
 				}
+			} else {
+				nstat_update_local_flag_from_inpcb_route(inp, &flags);
 			}
 		} else {
 			flags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
+			nstat_update_local_flag_from_inpcb_route(inp, &flags);
 		}
 		if (inp->inp_socket != NULL &&
 		    (inp->inp_socket->so_flags1 & SOF1_CELLFALLBACK)) {

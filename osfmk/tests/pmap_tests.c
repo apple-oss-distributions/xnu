@@ -115,7 +115,7 @@ test_pmap_enter_disconnect(unsigned int num_loops)
 
 	while (num_loops-- != 0) {
 		kr = pmap_enter(new_pmap, PMAP_TEST_VA, phys_page,
-		    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+		    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
 		assert(kr == KERN_SUCCESS);
 	}
 
@@ -137,7 +137,7 @@ pmap_remove_thread(void *arg, wait_result_t __unused wres)
 	pmap_test_thread_args *args = arg;
 	do {
 		kern_return_t kr = pmap_enter_options(args->pmap, args->va, args->pn,
-		    VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_OPTIONS_INTERNAL, NULL);
+		    VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_OPTIONS_INTERNAL, NULL, PMAP_MAPPING_TYPE_INFER);
 		assert(kr == KERN_SUCCESS);
 		pmap_remove(args->pmap, args->va, args->va + PAGE_SIZE);
 	} while (!args->stop);
@@ -297,7 +297,7 @@ test_pmap_nesting(unsigned int num_loops)
 				continue;
 			}
 			kr = pmap_enter(nested_pmap, va, (rand_mod == 1) ? pp1 : pp2, VM_PROT_READ,
-			    VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+			    VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
 			assert(kr == KERN_SUCCESS);
 		}
 		kr = pmap_nest(main_pmap, nested_pmap, nesting_start, nesting_size);
@@ -488,7 +488,7 @@ test_pmap_page_protect_overhead(unsigned int num_loops __unused, unsigned int nu
 	for (unsigned int loop = 0; loop < num_loops; ++loop) {
 		for (unsigned int alias = 0; alias < num_aliases; ++alias) {
 			kr = pmap_enter(new_pmap, PMAP_TEST_VA + (PAGE_SIZE * alias), phys_page,
-			    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+			    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
 			assert(kr == KERN_SUCCESS);
 		}
 

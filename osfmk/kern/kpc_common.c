@@ -485,13 +485,14 @@ kpc_get_config(uint32_t classes, kpc_config_t *current_config)
 	return 0;
 }
 
-int
-kpc_set_config(uint32_t classes, kpc_config_t *configv)
+static int
+_kpc_set_config_internal(uint32_t classes, kpc_config_t *configv, bool allow_list)
 {
 	int ret = 0;
 	struct kpc_config_remote mp_config = {
 		.classes = classes, .configv = configv,
-		.pmc_mask = kpc_get_configurable_pmc_mask(classes)
+		.pmc_mask = kpc_get_configurable_pmc_mask(classes),
+		.allow_list = allow_list,
 	};
 
 	assert(configv);
@@ -520,6 +521,19 @@ kpc_set_config(uint32_t classes, kpc_config_t *configv)
 	lck_mtx_unlock(&kpc_config_lock);
 
 	return ret;
+}
+
+int
+kpc_set_config_kernel(uint32_t classes, kpc_config_t * configv)
+{
+	return _kpc_set_config_internal(classes, configv, true);
+}
+
+int kpc_set_config_external(uint32_t classes, kpc_config_t *configv);
+int
+kpc_set_config_external(uint32_t classes, kpc_config_t *configv)
+{
+	return _kpc_set_config_internal(classes, configv, false);
 }
 
 uint32_t

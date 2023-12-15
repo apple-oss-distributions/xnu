@@ -130,7 +130,7 @@ _Static_assert(ARM64_KDBG_CODE_GUEST <= UINT16_MAX, "arm64 KDBG trace codes out 
 void panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss) __abortlike;
 
 void sleh_synchronous_sp1(arm_context_t *, uint32_t, vm_offset_t) __abortlike;
-void sleh_synchronous(arm_context_t *, uint32_t, vm_offset_t);
+void sleh_synchronous(arm_context_t *, uint32_t, vm_offset_t, bool);
 
 
 
@@ -503,12 +503,16 @@ sleh_synchronous_sp1(arm_context_t *context, uint32_t esr, vm_offset_t far __unu
 	switch (class) {
 	case ESR_EC_UNCATEGORIZED:
 	{
+#if (DEVELOPMENT || DEBUG)
 		uint32_t instr = *((uint32_t*)get_saved_state_pc(state));
 		if (IS_ARM_GDB_TRAP(instr)) {
 			DebuggerCall(EXC_BREAKPOINT, state);
 		}
-	}
 		OS_FALLTHROUGH; // panic if we return from the debugger
+#else
+		panic_with_thread_kernel_state("Unexpected debugger trap while SP1 selected", state);
+#endif /* (DEVELOPMENT || DEBUG) */
+	}
 	default:
 		panic_with_thread_kernel_state("Synchronous exception taken while SP1 selected", state);
 	}
@@ -589,7 +593,7 @@ is_platform_error(uint32_t esr)
 }
 
 void
-sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
+sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far, __unused bool did_initiate_panic_lockdown)
 {
 	esr_exception_class_t  class   = ESR_EC(esr);
 	arm_saved_state_t    * state   = &context->ss;
@@ -601,6 +605,7 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 #ifdef CONFIG_XNUPOST
 	expected_fault_handler_t saved_expected_fault_handler = NULL;
 	uintptr_t saved_expected_fault_addr = 0;
+	uintptr_t saved_expected_fault_pc = 0;
 #endif /* CONFIG_XNUPOST */
 
 	ASSERT_CONTEXT_SANITY(context);
@@ -619,6 +624,7 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 	}
 #endif
 	bool is_user = PSR64_IS_USER(get_saved_state_cpsr(state));
+
 
 	/*
 	 * Use KERNEL_DEBUG_CONSTANT_IST here to avoid producing tracepoints
@@ -678,11 +684,14 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 	if (thread->machine.expected_fault_handler != NULL) {
 		saved_expected_fault_handler = thread->machine.expected_fault_handler;
 		saved_expected_fault_addr = thread->machine.expected_fault_addr;
+		saved_expected_fault_pc = thread->machine.expected_fault_pc;
 
 		thread->machine.expected_fault_handler = NULL;
 		thread->machine.expected_fault_addr = 0;
+		thread->machine.expected_fault_pc = 0;
 
-		if (saved_expected_fault_addr == far) {
+		if (saved_expected_fault_addr == far ||
+		    saved_expected_fault_pc == get_saved_state_pc(state)) {
 			expected_fault_handler = saved_expected_fault_handler;
 		}
 	}
@@ -733,6 +742,11 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
  */
 #if __has_feature(ptrauth_calls)
 	case ESR_EC_PAC_FAIL:
+#ifdef CONFIG_XNUPOST
+		if (expected_fault_handler != NULL && expected_fault_handler(state)) {
+			break;
+		}
+#endif /* CONFIG_XNUPOST */
 		handle_pac_fail(state, esr);
 		__builtin_unreachable();
 
@@ -763,6 +777,15 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 	case ESR_EC_UNCATEGORIZED:
 		assert(!ESR_ISS(esr));
 
+#if CONFIG_XNUPOST
+		if (!is_user && (expected_fault_handler != NULL) && expected_fault_handler(state)) {
+			/*
+			 * The fault handler accepted the exception and handled it on its
+			 * own. Don't trap to the debugger/panic.
+			 */
+			break;
+		}
+#endif /* CONFIG_XNUPOST */
 		handle_uncategorized(&context->ss);
 		break;
 
@@ -775,6 +798,11 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		__builtin_unreachable();
 
 	case ESR_EC_BRK_AARCH64:
+#ifdef CONFIG_XNUPOST
+		if ((expected_fault_handler != NULL) && expected_fault_handler(state)) {
+			break;
+		}
+#endif /* CONFIG_XNUPOST */
 		if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
 			handle_kernel_breakpoint(state, esr);
 			break;
@@ -862,6 +890,7 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 	if (saved_expected_fault_handler != NULL) {
 		thread->machine.expected_fault_handler = saved_expected_fault_handler;
 		thread->machine.expected_fault_addr = saved_expected_fault_addr;
+		thread->machine.expected_fault_pc = saved_expected_fault_pc;
 	}
 #endif /* CONFIG_XNUPOST */
 
@@ -880,6 +909,7 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		panic("synchronous exception changed preemption level from %d to %d", preemption_level, sleh_get_preemption_level());
 	}
 #endif
+
 }
 
 /*
@@ -1575,13 +1605,15 @@ handle_kernel_abort_recover(
 	    "add	x6, x6, _copyio_recover_table_end@pageoff	\n"
 	    "cmp	%[recover], x6					\n"
 	    "b.lt	1f						\n"
-	    "b		_panic_on_invalid_recovery_handler		\n"
+	    "bl		_panic_on_invalid_recovery_handler		\n"
+	    "brk	#0						\n"
 	    "1:								\n"
 	    "adrp	x6, _copyio_recover_table@page			\n"
 	    "add	x6, x6, _copyio_recover_table@pageoff		\n"
 	    "cmp	%[recover], x6					\n"
 	    "b.ge	1f						\n"
-	    "b		_panic_on_invalid_recovery_handler		\n"
+	    "bl		_panic_on_invalid_recovery_handler		\n"
+	    "brk	#0						\n"
 	    "1:								\n"
 	    "ldr	x1, [%[recover], %[CRE_RECOVERY]]		\n"
 	    "add	x1, x1, x6					\n"

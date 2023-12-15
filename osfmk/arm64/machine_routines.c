@@ -2648,6 +2648,20 @@ ml_expect_fault_begin(expected_fault_handler_t expected_fault_handler, uintptr_t
 	thread_t thread = current_thread();
 	thread->machine.expected_fault_handler = expected_fault_handler;
 	thread->machine.expected_fault_addr = expected_fault_addr;
+	thread->machine.expected_fault_pc = 0;
+}
+
+/** Expect an exception to be thrown at EXPECTED_FAULT_PC */
+void
+ml_expect_fault_pc_begin(expected_fault_handler_t expected_fault_handler, uintptr_t expected_fault_pc)
+{
+	thread_t thread = current_thread();
+	thread->machine.expected_fault_handler = expected_fault_handler;
+	thread->machine.expected_fault_addr = 0;
+	uintptr_t raw_func = (uintptr_t)ptrauth_strip(
+		(void *)expected_fault_pc,
+		ptrauth_key_function_pointer);
+	thread->machine.expected_fault_pc = raw_func;
 }
 
 void
@@ -2656,6 +2670,7 @@ ml_expect_fault_end(void)
 	thread_t thread = current_thread();
 	thread->machine.expected_fault_handler = NULL;
 	thread->machine.expected_fault_addr = 0;
+	thread->machine.expected_fault_pc = 0;
 }
 #endif /* CONFIG_XNUPOST */
 

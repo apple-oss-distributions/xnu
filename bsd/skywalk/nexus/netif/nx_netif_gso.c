@@ -271,6 +271,7 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 	uint64_t pflags;
 	int error = 0;
 	uint32_t policy_id;
+	uint32_t skip_policy_id;
 	uint32_t svc_class;
 	uint32_t n, n_pkts, n_bytes;
 	int32_t off = 0, total_len = m->m_pkthdr.len;
@@ -307,6 +308,7 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 	(void) mbuf_get_timestamp(m, &timestamp, NULL);
 	necp_get_app_uuid_from_packet(m, euuid);
 	policy_id = necp_get_policy_id_from_packet(m);
+	skip_policy_id = necp_get_skip_policy_id_from_packet(m);
 	svc_class = m_get_service_class(m);
 	skip_pktap = (m->m_pkthdr.pkt_flags & PKTF_SKIP_PKTAP) != 0 ||
 	    pktap_total_tap_count == 0;
@@ -356,6 +358,7 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 		pkt->pkt_csum_tx_stuff_off = 0;
 		uuid_copy(pkt->pkt_policy_euuid, euuid);
 		pkt->pkt_policy_id = policy_id;
+		pkt->pkt_skip_policy_id = skip_policy_id;
 		pkt->pkt_timestamp = timestamp;
 		pkt->pkt_svc_class = svc_class;
 		pkt->pkt_pflags |= pflags;

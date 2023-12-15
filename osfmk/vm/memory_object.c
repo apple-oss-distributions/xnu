@@ -365,8 +365,8 @@ memory_object_lock_request(
  */
 kern_return_t
 memory_object_destroy(
-	memory_object_control_t control,
-	kern_return_t           reason)
+	memory_object_control_t                 control,
+	vm_object_destroy_reason_t   reason)
 {
 	vm_object_t             object;
 

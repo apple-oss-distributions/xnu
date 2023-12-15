@@ -1785,16 +1785,46 @@ iokit_task_app_suspended_changed(task_t task)
 	}
 }
 
-extern "C" kern_return_t
-iokit_task_terminate(task_t task)
+static kern_return_t
+iokit_task_terminate_phase1(task_t task)
 {
-	IOUserClientOwner * owner;
-	IOUserClient      * dead;
-	IOUserClient      * uc;
 	queue_head_t      * taskque;
+	IOUserClientOwner * iter;
+	OSSet             * userServers = NULL;
+
+	if (!task_is_driver(task)) {
+		return KERN_SUCCESS;
+	}
+	userServers = OSSet::withCapacity(1);
 
 	IOLockLock(gIOUserClientOwnersLock);
 
+	taskque = task_io_user_clients(task);
+	queue_iterate(taskque, iter, IOUserClientOwner *, taskLink) {
+		userServers->setObject(iter->uc);
+	}
+	IOLockUnlock(gIOUserClientOwnersLock);
+
+	if (userServers) {
+		IOUserServer * userServer;
+		while ((userServer = OSRequiredCast(IOUserServer, userServers->getAnyObject()))) {
+			userServer->clientDied();
+			userServers->removeObject(userServer);
+		}
+		userServers->release();
+	}
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+iokit_task_terminate_phase2(task_t task)
+{
+	queue_head_t      * taskque;
+	IOUserClientOwner * owner;
+	IOUserClient      * dead;
+	IOUserClient      * uc;
+
+	IOLockLock(gIOUserClientOwnersLock);
 	taskque = task_io_user_clients(task);
 	dead = NULL;
 	while (!queue_empty(taskque)) {
@@ -1813,7 +1843,6 @@ iokit_task_terminate(task_t task)
 		}
 		IOFreeType(owner, IOUserClientOwner);
 	}
-
 	IOLockUnlock(gIOUserClientOwnersLock);
 
 	while (dead) {
@@ -1827,6 +1856,19 @@ iokit_task_terminate(task_t task)
 	}
 
 	return KERN_SUCCESS;
+}
+
+extern "C" kern_return_t
+iokit_task_terminate(task_t task, int phase)
+{
+	switch (phase) {
+	case 1:
+		return iokit_task_terminate_phase1(task);
+	case 2:
+		return iokit_task_terminate_phase2(task);
+	default:
+		panic("iokit_task_terminate phase %d", phase);
+	}
 }
 
 struct IOUCFilterPolicy {

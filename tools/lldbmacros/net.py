@@ -593,7 +593,7 @@ def GetSocket(socket) :
 def ShowSocket(cmd_args=None) :
     """ Show the contents of a socket
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     so = kern.GetValueFromAddress(cmd_args[0], 'socket *')
@@ -895,7 +895,7 @@ def ShowRtInet6(cmd_args=None):
 def ShowRtEntryDebug(cmd_args=None):
     """ Print the debug information of a route entry
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -993,7 +993,7 @@ def ShowRtEntryDebug(cmd_args=None):
 def InIfaShowDebug(cmd_args=None):
     """ Print the debug information of an IPv4 interface address
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1059,7 +1059,7 @@ def InIfaShowDebug(cmd_args=None):
 def In6IfaShowDebug(cmd_args=None):
     """ Print the debug information of an IPv6 interface address
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1125,7 +1125,7 @@ def In6IfaShowDebug(cmd_args=None):
 def InmShowDebug(cmd_args=None):
     """ Print the debug information of an IPv4 multicast address
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1168,7 +1168,7 @@ def InmShowDebug(cmd_args=None):
 def IfmaShowDebug(cmd_args=None):
     """ Print the debug information of a link multicast address
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1211,7 +1211,7 @@ def IfmaShowDebug(cmd_args=None):
 def IfpRefShowDebug(cmd_args=None):
     """ Print the debug information of an interface ref count
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1254,7 +1254,7 @@ def IfpRefShowDebug(cmd_args=None):
 def ndprShowDebug(cmd_args=None):
     """ Print the debug information of a nd_prefix structure
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1297,7 +1297,7 @@ def ndprShowDebug(cmd_args=None):
 def nddrShowDebug(cmd_args=None):
     """ Print the debug information of a nd_defrouter structure
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1340,7 +1340,7 @@ def nddrShowDebug(cmd_args=None):
 def IpmOptions(cmd_args=None):
     """ Print the debug information of a ip_moptions structure
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1383,7 +1383,7 @@ def IpmOptions(cmd_args=None):
 def IpmOptions(cmd_args=None):
     """ Print the debug information of a ip6_moptions structure
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1721,7 +1721,7 @@ def CalcMbufInList(mpkt, pkt_cnt, buf_byte_cnt, mbuf_cnt, mbuf_cluster_cnt):
     while (mpkt != 0):
         mp = mpkt
         if kern.globals.mb_uses_mcache == 1:
-            mpkt = mp.m_hdr.mh_nextpktpkt
+            mpkt = mp.m_hdr.mh_nextpkt
         else:
             mpkt = mp.M_hdr_common.M_hdr.mh_nextpkt
         pkt_cnt[0] +=1
@@ -1734,7 +1734,6 @@ def CalcMbufInList(mpkt, pkt_cnt, buf_byte_cnt, mbuf_cnt, mbuf_cluster_cnt):
                 mnext = mp.M_hdr_common.M_hdr.mh_next
                 mflags = mp.M_hdr_common.M_hdr.mh_flags
                 mtype = mp.M_hdr_common.M_hdr.mh_type
-            print(" mp: 0x{:x} mh_next: 0x{:x}".format(mp, mnext))
             mbuf_cnt[0] += 1
             buf_byte_cnt[int(mtype)] += 256
             buf_byte_cnt[Mbuf_Type.MT_LAST] += 256
@@ -1761,7 +1760,7 @@ def CalcMbufInSB(so, snd_cc, snd_buf, rcv_cc, rcv_buf, snd_record_cnt, rcv_recor
 def ShowSocketSbMbufUsage(cmd_args=None):
     """ Display for a socket the mbuf usage of the send and receive socket buffers
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     so = kern.GetValueFromAddress(cmd_args[0], 'socket *')

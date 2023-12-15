@@ -881,6 +881,7 @@ _proc_puniqueid
 _proc_gettty
 _proc_gettty_dev
 _proc_exitstatus
+_proc_is_zombie
 _proc_is_translated
 _proc_is_rsr
 _proc_isinitproc

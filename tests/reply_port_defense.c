@@ -5,11 +5,12 @@
 #include <spawn.h>
 #include <mach/mach.h>
 #include <sys/sysctl.h>
-#include <excserver.h>
 #include <signal.h>
+#include "excserver_protect.h"
 #include "../osfmk/ipc/ipc_init.h"
 #include "../osfmk/mach/port.h"
 #include "../osfmk/kern/exc_guard.h"
+#include "exc_helpers.h"
 
 #define MAX_TEST_NUM 5
 #define MAX_ARGV 3
@@ -82,6 +83,31 @@ catch_mach_exception_raise_state_identity(mach_port_t exception_port,
 }
 
 kern_return_t
+catch_mach_exception_raise_identity_protected(
+	__unused mach_port_t      exception_port,
+	uint64_t                  thread_id,
+	mach_port_t               task_id_token,
+	exception_type_t          exception,
+	mach_exception_data_t     codes,
+	mach_msg_type_number_t    codeCnt)
+{
+#pragma unused(exception_port, thread_id, task_id_token)
+
+	T_ASSERT_GT_UINT(codeCnt, 0, "CodeCnt");
+
+	T_LOG("Caught exception type: %d code: 0x%llx", exception, codes[0]);
+	exception_taken = exception;
+	if (exception == EXC_GUARD) {
+		received_exception_code = EXC_GUARD_DECODE_GUARD_FLAVOR((uint64_t)codes[0]);
+	} else if (exception == EXC_CORPSE_NOTIFY) {
+		received_exception_code = codes[0];
+	} else {
+		T_FAIL("Unexpected exception");
+	}
+	return KERN_SUCCESS;
+}
+
+kern_return_t
 catch_mach_exception_raise(mach_port_t exception_port,
     mach_port_t thread,
     mach_port_t task,
@@ -89,24 +115,9 @@ catch_mach_exception_raise(mach_port_t exception_port,
     mach_exception_data_t code,
     mach_msg_type_number_t code_count)
 {
-#pragma unused(exception_port, code_count)
-	kern_return_t kr;
-
-	kr = mach_port_deallocate(mach_task_self(), thread);
-	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "mach_port_deallocate");
-	kr = mach_port_deallocate(mach_task_self(), task);
-	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "mach_port_deallocate");
-
-	T_LOG("Caught exception type: %d code: 0x%llx", exception, *code);
-	exception_taken = exception;
-	if (exception == EXC_GUARD) {
-		received_exception_code = EXC_GUARD_DECODE_GUARD_FLAVOR( *((uint64_t *)code));
-	} else if (exception == EXC_CORPSE_NOTIFY) {
-		received_exception_code = *code;
-	} else {
-		T_FAIL("Unexpected exception");
-	}
-	return KERN_SUCCESS;
+#pragma unused(exception_port, thread, task, exception, code, code_count)
+	T_FAIL("Unsupported catch_mach_exception_raise_state_identity");
+	return KERN_NOT_SUPPORTED;
 }
 
 static void *
@@ -121,7 +132,7 @@ exception_server_thread(void *arg)
 
 	return NULL;
 }
-
+#define kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE 6
 T_DECL(reply_port_defense, "Test reply port semantics violations", T_META_IGNORECRASHES(".*reply_port_defense_client.*"), T_META_CHECK_LEAKS(false))
 {
 	int ret = 0;
@@ -156,6 +167,13 @@ T_DECL(reply_port_defense, "Test reply port semantics violations", T_META_IGNORE
 			triggers_exception = false;
 		}
 
+#if defined(TARGET_OS_OSX)
+		/* thread_set_exception_ports is allowed on macos due to third party plugins & drivers */
+		if (i == 5) {
+			triggers_exception = false;
+		}
+#endif
+
 		/* Create exception serving thread */
 		ret = pthread_create(&s_exc_thread, NULL, exception_server_thread, &exc_port);
 		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "pthread_create exception_server_thread");
@@ -164,7 +182,7 @@ T_DECL(reply_port_defense, "Test reply port semantics violations", T_META_IGNORE
 		posix_spawnattr_init(&attrs);
 
 		int err = posix_spawnattr_setexceptionports_np(&attrs, EXC_MASK_GUARD | EXC_MASK_CORPSE_NOTIFY, exc_port,
-		    (exception_behavior_t) (EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES), 0);
+		    (exception_behavior_t) (EXCEPTION_IDENTITY_PROTECTED | MACH_EXCEPTION_CODES), 0);
 		T_QUIET; T_ASSERT_POSIX_SUCCESS(err, "posix_spawnattr_setflags");
 
 		child_args[0] = test_prog_name;
@@ -199,6 +217,9 @@ T_DECL(reply_port_defense, "Test reply port semantics violations", T_META_IGNORE
 			expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_IMMOVABLE;
 		} else if (!triggers_exception) {
 			expected_exception_code = 0;
+		} else if (i == 5) {
+			/* 5th test is for thread_set_exception_ports with no entitlement */
+			expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE;
 		} else {
 			expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_INVALID_RIGHT;
 		}

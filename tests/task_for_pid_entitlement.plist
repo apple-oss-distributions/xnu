@@ -14,5 +14,9 @@
         <key>com.apple.security.get-movable-control-port</key>
         <!-- Allows for task_get_special_port(..TASK_KERNEL_PORT..) -->
 	<true/>
+
+        <key>com.apple.system-task-ports.token.read</key>
+        <!-- Allows for task_identity_token_get_task_port(..TASK_FLAVOR_READ..) -->
+        <true/>
 </dict>
 </plist>

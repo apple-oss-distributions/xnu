@@ -145,7 +145,7 @@ def DoPciCfgScan(max_bus, dump):
         vend_dev_id = DoPciCfgRead(32, bus, dev, func, 0)
         if not (vend_dev_id > 0 and vend_dev_id < 0xffffffff):
             continue
-        if dump == False:
+        if not dump:
             class_rev_id = DoPciCfgRead(32, bus, dev, func, 8)
             print(fmt_string.format(
                 bus, dev, func,
@@ -166,7 +166,7 @@ def PciCfgRead(cmd_args=None):
         Syntax: pci_cfg_read <bits> <bus> <device> <function> <offset>
             bits: 8, 16, 32
     """
-    if cmd_args == None or len(cmd_args) < 5:
+    if cmd_args is None or len(cmd_args) < 5:
         print(PciCfgRead.__doc__)
         return
     
@@ -199,7 +199,7 @@ def PciCfgWrite(cmd_args=None):
         Prints an error message if there was a problem
         Prints nothing upon success.
     """
-    if cmd_args == None or len(cmd_args) < 6:
+    if cmd_args is None or len(cmd_args) < 6:
         print(PciCfgWrite.__doc__)
         return
 
@@ -210,7 +210,7 @@ def PciCfgWrite(cmd_args=None):
     offs = ArgumentStringToInt(cmd_args[4])
     write_val = ArgumentStringToInt(cmd_args[5])
 
-    if DoPciCfgWrite(bits, bus, dev, func, offs, write_val) == False:
+    if not DoPciCfgWrite(bits, bus, dev, func, offs, write_val):
         print("ERROR: Failed to write PCI config space")
 
 lldb_alias('pci_cfg_write8', 'pci_cfg_write 8')
@@ -224,7 +224,7 @@ def PciCfgDump(cmd_args=None):
         be printed out.
         Syntax: pci_cfg_dump <bus> <dev> <fuction>
     """
-    if cmd_args == None or len(cmd_args) < 3:
+    if cmd_args is None or len(cmd_args) < 3:
         print(PciCfgDump.__doc__)
         return
 
@@ -240,7 +240,7 @@ def PciCfgScan(cmd_args=None):
         but can be specified as an argument
         Syntax: pci_cfg_scan [max bus number]
     """
-    if cmd_args == None or len(cmd_args) == 0:
+    if cmd_args is None or len(cmd_args) == 0:
         max_bus = 8
     elif len(cmd_args) == 1:
         max_bus = ArgumentStringToInt(cmd_args[0])
@@ -258,7 +258,7 @@ def PciCfgDumpAll(cmd_args=None):
         be scanned defaults to 8, but can be specified as an argument
         Syntax: pci_cfg_dump_all [max bus number]
     """
-    if cmd_args == None or len(cmd_args) == 0:
+    if cmd_args is None or len(cmd_args) == 0:
         max_bus = 8
     elif len(cmd_args) == 1:
         max_bus = ArgumentStringToInt(cmd_args[0])

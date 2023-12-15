@@ -361,6 +361,7 @@ struct necp_aggregate_result {
 	u_int32_t                                                       service_data;
 	u_int                                                           routed_interface_index;
 	u_int32_t                                                       policy_id;
+	u_int32_t                                                       skip_policy_id;
 	uuid_t                                                          netagents[NECP_MAX_NETAGENTS];
 	u_int32_t                                                       netagent_use_flags[NECP_MAX_NETAGENTS];
 	struct ipv6_prefix                                              nat64_prefixes[NAT64_MAX_NUM_PREFIXES];
@@ -1406,6 +1407,7 @@ extern necp_kernel_policy_id necp_ip6_output_find_policy_match(struct mbuf *pack
     necp_kernel_policy_result_parameter *result_parameter);
 
 extern int necp_mark_packet_from_ip(struct mbuf *packet, necp_kernel_policy_id policy_id);
+extern int necp_mark_packet_from_ip_with_skip(struct mbuf *packet, necp_kernel_policy_id policy_id, necp_kernel_policy_id skip_policy_id);
 extern int necp_mark_packet_from_interface(struct mbuf *packet, ifnet_t interface);
 
 extern ifnet_t necp_get_ifnet_from_result_parameter(necp_kernel_policy_result_parameter *result_parameter);
@@ -1489,6 +1491,7 @@ struct necp_client_nexus_parameters {
 	u_int16_t ethertype;
 	u_int32_t traffic_class;
 	necp_policy_id policy_id;
+	necp_policy_id skip_policy_id;
 	unsigned is_listener:1;
 	unsigned is_interpose:1;
 	unsigned is_custom_ether:1;

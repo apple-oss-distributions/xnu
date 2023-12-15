@@ -583,9 +583,10 @@ pmap_enter(
 	vm_prot_t               prot,
 	vm_prot_t               fault_type,
 	unsigned int            flags,
-	boolean_t               wired)
+	boolean_t               wired,
+	pmap_mapping_type_t     mapping_type)
 {
-	return pmap_enter_options(pmap, vaddr, pn, prot, fault_type, flags, wired, PMAP_EXPAND_OPTIONS_NONE, NULL);
+	return pmap_enter_options(pmap, vaddr, pn, prot, fault_type, flags, wired, PMAP_EXPAND_OPTIONS_NONE, NULL, mapping_type);
 }
 
 #define PTE_LOCK(EPT) INTEL_PTE_SWLOCK
@@ -624,9 +625,10 @@ pmap_enter_options_addr(
 	unsigned int flags,
 	boolean_t wired,
 	unsigned int options,
-	__unused void   *arg)
+	__unused void   *arg,
+	pmap_mapping_type_t mapping_type)
 {
-	return pmap_enter_options(pmap, v, intel_btop(pa), prot, fault_type, flags, wired, options, arg);
+	return pmap_enter_options(pmap, v, intel_btop(pa), prot, fault_type, flags, wired, options, arg, mapping_type);
 }
 
 kern_return_t
@@ -639,7 +641,8 @@ pmap_enter_options(
 	unsigned int            flags,
 	boolean_t               wired,
 	unsigned int            options,
-	void                    *arg)
+	void                    *arg,
+	__unused pmap_mapping_type_t mapping_type)
 {
 	pt_entry_t              *pte = NULL;
 	pv_rooted_entry_t       pv_h;

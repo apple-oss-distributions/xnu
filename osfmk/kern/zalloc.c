@@ -131,6 +131,7 @@
 #define z_debug_assert(expr)  (void)(expr)
 #endif
 
+
 /* Returns pid of the task with the largest number of VM map entries.  */
 extern pid_t find_largest_process_vm_map_entries(void);
 
@@ -430,15 +431,9 @@ __startup_data
 static struct zone_page_metadata
     zone_early_meta_array_startup[ZONE_EARLY_META_INLINE_COUNT];
 
-#if __x86_64__
-/*
- * On Intel we can't "free" pmap stolen pages,
- * so instead we use a static array in __KLDDATA
- * which gets reclaimed at lockdown time.
- */
-__startup_data __attribute__((aligned(PAGE_SIZE)))
-static uint8_t zone_early_pages_to_cram[PAGE_SIZE * 16];
-#endif
+
+__startup_data __attribute__((aligned(PAGE_MAX_SIZE)))
+static uint8_t zone_early_pages_to_cram[PAGE_MAX_SIZE * 16];
 
 /*
  *	The zone_locks_grp allows for collecting lock statistics.
@@ -3782,6 +3777,9 @@ zone_kma_flags(zone_t z, zone_security_flags_t zsflags, zalloc_flags_t flags)
 	if (zsflags.z_noencrypt) {
 		kmaflags |= KMA_NOENCRYPT;
 	}
+	if (zsflags.z_submap_idx == Z_SUBMAP_IDX_DATA) {
+		kmaflags |= KMA_DATA;
+	}
 	if (flags & Z_NOPAGEWAIT) {
 		kmaflags |= KMA_NOPAGEWAIT;
 	}
@@ -4702,6 +4700,37 @@ __ZONE_EXHAUSTED_AND_WAITING_HARD__(zone_t z)
 	zone_lock(z);
 }
 
+static pmap_mapping_type_t
+zone_mapping_type(zone_t z)
+{
+	zone_security_flags_t zsflags = zone_security_config(z);
+
+	/*
+	 * If the zone has z_submap_idx is not Z_SUBMAP_IDX_DATA or
+	 * Z_SUBMAP_IDX_READ_ONLY, mark the corresponding mapping
+	 * type as PMAP_MAPPING_TYPE_RESTRICTED.
+	 */
+	switch (zsflags.z_submap_idx) {
+	case Z_SUBMAP_IDX_DATA:
+		return PMAP_MAPPING_TYPE_DEFAULT;
+	case Z_SUBMAP_IDX_READ_ONLY:
+		return PMAP_MAPPING_TYPE_ROZONE;
+	default:
+		return PMAP_MAPPING_TYPE_RESTRICTED;
+	}
+}
+
+static vm_prot_t
+zone_page_prot(zone_security_flags_t zsflags)
+{
+	switch (zsflags.z_submap_idx) {
+	case Z_SUBMAP_IDX_READ_ONLY:
+		return VM_PROT_READ;
+	default:
+		return VM_PROT_READ | VM_PROT_WRITE;
+	}
+}
+
 static void
 zone_expand_locked(zone_t z, zalloc_flags_t flags)
 {
@@ -4880,11 +4909,11 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags)
 		vm_object_t object;
 		object = kernel_object_default;
 		vm_object_lock(object);
+
 		kernel_memory_populate_object_and_unlock(object,
 		    addr + ptoa(cur_pages), addr + ptoa(cur_pages), ptoa(pages), page_list,
 		    zone_kma_flags(z, zsflags, flags), VM_KERN_MEMORY_ZONE,
-		    (zsflags.z_submap_idx == Z_SUBMAP_IDX_READ_ONLY)
-		    ? VM_PROT_READ : VM_PROT_READ | VM_PROT_WRITE);
+		    zone_page_prot(zsflags), zone_mapping_type(z));
 
 		ZONE_TRACE_VM_KERN_REQUEST_END(pages);
 
@@ -5304,12 +5333,12 @@ pgz_protect(zone_t zone, vm_offset_t addr, void *fp)
 	 * Try to double-map the page (may fail if Z_NOWAIT).
 	 * we will always find a PA because pgz_init() pre-expanded the pmap.
 	 */
-	vm_offset_t  new_addr = pgz_addr(slot);
 	pmap_paddr_t pa = kvtophys(trunc_page(addr));
-
+	vm_offset_t  new_addr = pgz_addr(slot);
 	kr = pmap_enter_options_addr(kernel_pmap, new_addr, pa,
 	    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, 0, TRUE,
-	    get_preemption_level() ? PMAP_OPTIONS_NOWAIT : 0, NULL);
+	    get_preemption_level() ? PMAP_OPTIONS_NOWAIT : 0, NULL,
+	    PMAP_MAPPING_TYPE_INFER);
 
 	if (__improbable(kr != KERN_SUCCESS)) {
 		pgz_slot_free(slot);
@@ -5552,7 +5581,7 @@ pgz_init(void)
 	for (uint32_t slot = 0; slot < pgz_slots; slot++) {
 		(void)pmap_enter_options_addr(kernel_pmap, pgz_addr(slot), 0,
 		    VM_PROT_NONE, VM_PROT_NONE, 0, FALSE,
-		    PMAP_OPTIONS_NOENTER, NULL);
+		    PMAP_OPTIONS_NOENTER, NULL, PMAP_MAPPING_TYPE_INFER);
 	}
 
 	/* do this last as this will enable pgz */
@@ -10145,26 +10174,10 @@ zone_metadata_init(void)
 	 *         (including rewriting their content).
 	 */
 
-#if __x86_64__
 	kernel_memory_populate(reloc_base, early_sz,
-	    KMA_KOBJECT | KMA_NOENCRYPT | KMA_NOFAIL,
+	    KMA_KOBJECT | KMA_NOENCRYPT | KMA_NOFAIL | KMA_TAG,
 	    VM_KERN_MEMORY_OSFMK);
 	__nosan_memcpy((void *)reloc_base, (void *)early_r.min_address, early_sz);
-#else
-	for (vm_address_t addr = early_r.min_address;
-	    addr < early_r.max_address; addr += PAGE_SIZE) {
-		pmap_paddr_t pa = kvtophys(trunc_page(addr));
-		__assert_only kern_return_t kr;
-
-		unsigned int pmap_flags = 0;
-
-
-		kr = pmap_enter_options_addr(kernel_pmap, addr + reloc_delta,
-		    pa, VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, pmap_flags, TRUE,
-		    0, NULL);
-		assert(kr == KERN_SUCCESS);
-	}
-#endif
 
 #if KASAN
 	kasan_notify_address(reloc_base, early_sz);
@@ -10201,10 +10214,6 @@ zone_metadata_init(void)
 			vm_map_relocate_early_elem(zid, addr, reloc_delta);
 		}
 	}
-
-#if !__x86_64__
-	pmap_remove(kernel_pmap, early_r.min_address, early_r.max_address);
-#endif
 }
 
 __startup_data
@@ -10470,12 +10479,8 @@ zone_early_mem_init(vm_size_t size)
 	 * the VM submap (even for architectures when those zones
 	 * do not live there).
 	 */
-#if __x86_64__
 	assert3u(size, <=, sizeof(zone_early_pages_to_cram));
 	mem = (vm_offset_t)zone_early_pages_to_cram;
-#else
-	mem = (vm_offset_t)pmap_steal_zone_memory(size, PAGE_SIZE);
-#endif
 
 	zone_info.zi_meta_base = zone_early_meta_array_startup -
 	    zone_pva_from_addr(mem).packed_address;

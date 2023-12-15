@@ -677,7 +677,7 @@ def ShowTaskUserDyldInfo(cmd_args=None):
     """ Inspect the dyld global info for the given user task & print out all fields including error messages
         Syntax: (lldb)showtaskuserdyldinfo <task_t>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("No arguments passed")
         print(ShowTaskUserDyldInfo.__doc__.strip())
         return

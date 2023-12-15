@@ -121,7 +121,7 @@ struct __flow {
 			 */
 			struct __flow_policy {
 				uint32_t _fpc_id; /* policy id of pkt sender */
-				uint32_t _fpc_pad;
+				uint32_t _fpc_skip_id; /* skip policy id of pkt sender */
 				union {
 					/* process identifier */
 					uint64_t _fpc_euuid_64[2];
@@ -162,6 +162,7 @@ struct __flow {
 #define flow_src_type           flow_source._fsrc_type
 
 #define flow_policy_id          flow_policy._fpc_id
+#define flow_skip_policy_id     flow_policy._fpc_skip_id
 #define flow_policy_euuid       flow_policy._fpc_euuid
 
 	/*

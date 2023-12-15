@@ -369,7 +369,8 @@ swapfile_pager_data_request(
 		    VM_PROT_READ | VM_PROT_WRITE,
 		    VM_PROT_NONE,
 		    0,
-		    TRUE);
+		    TRUE,
+		    PMAP_MAPPING_TYPE_INFER);
 
 		assert(retval == KERN_SUCCESS);
 
@@ -500,7 +501,7 @@ swapfile_pager_terminate_internal(
 	}
 
 	/* trigger the destruction of the memory object */
-	memory_object_destroy(pager->swp_pgr_hdr.mo_control, 0);
+	memory_object_destroy(pager->swp_pgr_hdr.mo_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
 }
 
 /*

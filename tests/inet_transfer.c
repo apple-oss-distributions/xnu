@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -479,7 +479,8 @@ send_receive(const char * msg,
 			}
 			continue;
 		}
-	} while (false);
+		break;
+	} while (true);
 
 	/* receive payload from sender */
 	total = 0;

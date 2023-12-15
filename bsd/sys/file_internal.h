@@ -125,7 +125,7 @@ struct fileproc {
 	struct fileglob *XNU_PTRAUTH_SIGNED_PTR("fileproc.fp_glob") fp_glob;
 	union {
 		struct select_set     *fp_wset;   /* fp_guard_attrs == 0 */
-		struct fileproc_guard *fp_guard;  /* fp_guard_attrs != 0 */
+		struct fileproc_guard *XNU_PTRAUTH_SIGNED_PTR("fileproc.fp_guard") fp_guard;  /* fp_guard_attrs != 0 */
 	};
 };
 __CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct fileproc, fileproc);

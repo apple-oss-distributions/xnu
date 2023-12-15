@@ -295,7 +295,7 @@ static ip6_check_if_result_t ip6_input_check_interface(struct mbuf *, struct ip6
 
 /*
  * On platforms which require strict alignment (currently for anything but
- * i386 or x86_64), check if the IP header pointer is 32-bit aligned; if not,
+ * i386 or x86_64 or arm64), check if the IP header pointer is 32-bit aligned; if not,
  * copy the contents of the mbuf chain into a new chain, and free the original
  * one.  Create some head room in the first mbuf of the new chain, in case
  * it's needed later on.
@@ -304,9 +304,9 @@ static ip6_check_if_result_t ip6_input_check_interface(struct mbuf *, struct ip6
  * mostly align to 32-bit boundaries.  Care should be taken never to use 64-bit
  * load/store operations on the fields in IPv6 headers.
  */
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm64__)
 #define IP6_HDR_ALIGNMENT_FIXUP(_m, _ifp, _action) do { } while (0)
-#else /* !__i386__ && !__x86_64__ */
+#else /* !__i386__ && !__x86_64__ && !__arm64__ */
 #define IP6_HDR_ALIGNMENT_FIXUP(_m, _ifp, _action) do {                 \
 	if (!IP6_HDR_ALIGNED_P(mtod(_m, caddr_t))) {                    \
 	        struct mbuf *_n;                                        \
@@ -327,7 +327,7 @@ static ip6_check_if_result_t ip6_input_check_interface(struct mbuf *, struct ip6
 	        }                                                       \
 	}                                                               \
 } while (0)
-#endif /* !__i386__ && !__x86_64__ */
+#endif /* !__i386__ && !__x86_64___ && !__arm64__ */
 
 static void
 ip6_proto_input(protocol_family_t protocol, mbuf_t packet)

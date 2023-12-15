@@ -809,6 +809,7 @@ ipc_port_init(
 
 	if (flags & IPC_PORT_INIT_PROVISIONAL_ID_PROT_OPTOUT) {
 		ip_mark_id_prot_opt_out(port);
+		port->ip_immovable_receive = true;
 	}
 
 	port->ip_kernel_qos_override = THREAD_QOS_UNSPECIFIED;
