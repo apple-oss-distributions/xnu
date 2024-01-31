@@ -1915,9 +1915,16 @@ static void
 mld_append_relq(struct mld_ifinfo *mli, struct in6_multi *inm)
 {
 	MLI_LOCK_ASSERT_HELD(mli);
-	os_log(OS_LOG_DEFAULT, "%s: adding inm %llx on relq ifp %s\n",
+	if (inm->in6m_in_nrele) {
+		os_log_debug(OS_LOG_DEFAULT, "%s: inm %llx already on relq ifp %s\n",
+		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(inm),
+		    mli->mli_ifp != NULL ? if_name(mli->mli_ifp) : "<null>");
+		return;
+	}
+	os_log_debug(OS_LOG_DEFAULT, "%s: adding inm %llx on relq ifp %s\n",
 	    __func__, (uint64_t)VM_KERNEL_ADDRPERM(inm),
 	    mli->mli_ifp != NULL ? if_name(mli->mli_ifp) : "<null>");
+	inm->in6m_in_nrele = true;
 	SLIST_INSERT_HEAD(&mli->mli_relinmhead, inm, in6m_nrele);
 }
 
@@ -1950,9 +1957,11 @@ mld_flush_relq(struct mld_ifinfo *mli, struct mld_in6m_relhead *in6m_dthead)
 
 		SLIST_REMOVE_HEAD(&temp_relinmhead, in6m_nrele);
 		IN6M_LOCK(inm);
-		os_log(OS_LOG_DEFAULT, "%s: flushing inm %llx on relq ifp %s\n",
+		os_log_debug(OS_LOG_DEFAULT, "%s: flushing inm %llx on relq ifp %s\n",
 		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(inm),
 		    inm->in6m_ifp != NULL ? if_name(inm->in6m_ifp) : "<null>");
+		VERIFY(inm->in6m_in_nrele == true);
+		inm->in6m_in_nrele = false;
 		VERIFY(inm->in6m_nrelecnt != 0);
 		inm->in6m_nrelecnt--;
 		lastref = in6_multi_detach(inm);

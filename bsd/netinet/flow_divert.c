@@ -288,6 +288,7 @@ flow_divert_group_lookup(uint32_t ctl_unit, struct flow_divert_pcb *fd_cb)
 			    group_cursor->in_process_pid != fd_cb->so->last_pid)) {
 				FDLOG(LOG_ERR, fd_cb, "Cannot access group for control unit %u, mismatched PID (%u != %u)",
 				    ctl_unit, group_cursor->in_process_pid, fd_cb->so ? fd_cb->so->last_pid : 0);
+				group = NULL;
 			} else {
 				FDGRP_RETAIN(group);
 			}

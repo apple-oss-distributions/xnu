@@ -131,6 +131,12 @@ struct page_table_attr {
 	const uint64_t pta_page_size;
 
 	/**
+	 * Size (in bytes) of the VA region at the beginning of the address space
+	 * into which mappings should not be allowed.
+	 */
+	const uint64_t pta_pagezero_size;
+
+	/**
 	 * How many bits to shift "1" by to get the page table size. Alternatively,
 	 * could also be thought of as how many bits make up the page offset in a
 	 * virtual address.
@@ -204,6 +210,13 @@ static inline uint64_t
 pt_attr_page_size(const pt_attr_t * const pt_attr)
 {
 	return pt_attr->pta_page_size;
+}
+
+/* Pagezero region size getter. */
+static inline uint64_t
+pt_attr_pagezero_size(const pt_attr_t * const pt_attr)
+{
+	return pt_attr->pta_pagezero_size;
 }
 
 /**

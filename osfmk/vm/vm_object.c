@@ -3537,6 +3537,16 @@ Retry:
 				    "object %p size 0x%llx",
 				    old_copy, (uint64_t)copy_size);
 				old_copy->vo_size = copy_size;
+
+				/*
+				 * src_object's "vo_copy" object now covers
+				 * a larger portion of src_object.
+				 * Increment src_object's "vo_copy_version"
+				 * to make any racing vm_fault() on
+				 * "src_object" re-check if it needs to honor
+				 * any new copy-on-write obligation.
+				 */
+				src_object->vo_copy_version++;
 			}
 			if (src_object_shared == TRUE) {
 				vm_object_reference_shared(old_copy);
@@ -5182,6 +5192,12 @@ vm_object_coalesce(
 		vm_object_unlock(prev_object);
 		return FALSE;
 	}
+	/* newsize = prev_offset + prev_size + next_size; */
+	if (__improbable(os_add3_overflow(prev_offset, prev_size, next_size,
+	    &newsize))) {
+		vm_object_unlock(prev_object);
+		return FALSE;
+	}
 
 	vm_object_coalesce_count++;
 
@@ -5196,7 +5212,6 @@ vm_object_coalesce(
 	/*
 	 *	Extend the object if necessary.
 	 */
-	newsize = prev_offset + prev_size + next_size;
 	if (newsize > prev_object->vo_size) {
 		assertf(page_aligned(newsize),
 		    "object %p size 0x%llx",

@@ -4585,7 +4585,7 @@ IOServicePH::userServerAckTimerExpired(void *, void *)
 			IOUserServer * us = OSDynamicCast(IOUserServer, obj);
 			if (us) {
 			        DKLOG(DKS " power state transition failed\n", DKN(us));
-			        us->setPowerManagementFailed(true);
+			        us->kill("Power Management Failed");
 			}
 			return false;
 		});

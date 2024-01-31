@@ -318,8 +318,8 @@ struct in_multi {
 	struct  ifnet *inm_ifp;         /* back pointer to ifnet */
 	struct  ifmultiaddr *inm_ifma;  /* back pointer to ifmultiaddr */
 	u_int   inm_timer;              /* IGMPv1/v2 group / v3 query timer  */
-	u_int   inm_state;              /*  state of the membership */
-	void *inm_rti;                  /* unused, legacy field */
+	u_int   inm_state;              /* state of the membership */
+	bool    inm_in_nrele;           /* if in nrele list */
 
 	/* New fields for IGMPv3 follow. */
 	struct igmp_ifinfo      *inm_igi;       /* IGMP info */

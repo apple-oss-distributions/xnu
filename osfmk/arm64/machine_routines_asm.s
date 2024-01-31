@@ -1111,10 +1111,13 @@ LEXT(monitor_call)
 .macro COMPUTE_THREAD_STATE_HASH
 	pacga	x1, x1, x0
 	/*
-	 * Mask off the carry flag so we don't need to re-sign when that flag is
-	 * touched by the system call return path.
+	 * Mask off the carry flag for EL0 states so we don't need to re-sign when
+	 * that flag is touched by the system call return path.
 	 */
+	tst		x2, PSR64_MODE_EL_MASK
+	b.ne	1f
 	bic		x2, x2, PSR_CF
+1:
 	pacga	x1, x2, x1		/* SPSR hash (gkey + pc hash) */
 	pacga	x1, x3, x1		/* LR Hash (gkey + spsr hash) */
 	pacga	x1, x4, x1		/* X16 hash (gkey + lr hash) */

@@ -10454,16 +10454,6 @@ vector_upl_create(vm_offset_t upl_offset, uint32_t max_upls)
 	return upl;
 }
 
-upl_size_t
-vector_upl_get_size(const upl_t upl)
-{
-	if (!vector_upl_is_valid(upl)) {
-		return upl_get_size(upl);
-	} else {
-		return round_page_32(upl->vector_upl->size);
-	}
-}
-
 uint32_t
 vector_upl_max_upls(const upl_t upl)
 {

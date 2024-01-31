@@ -4422,6 +4422,8 @@ vm_map_enter_mem_object_helper(
 					if (!copy &&
 					    copy_object != VM_OBJECT_NULL &&
 					    copy_object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
+						bool is_writable;
+
 						/*
 						 * We need to resolve our side of this
 						 * "symmetric" copy-on-write now; we
@@ -4437,8 +4439,15 @@ vm_map_enter_mem_object_helper(
 						// assert(copy_object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC);
 						VME_OBJECT_SHADOW(copy_entry, copy_size, TRUE);
 						assert(copy_object != VME_OBJECT(copy_entry));
-						if (!copy_entry->needs_copy &&
-						    copy_entry->protection & VM_PROT_WRITE) {
+						is_writable = false;
+						if (copy_entry->protection & VM_PROT_WRITE) {
+							is_writable = true;
+#if __arm64e__
+						} else if (copy_entry->used_for_tpro) {
+							is_writable = true;
+#endif /* __arm64e__ */
+						}
+						if (!copy_entry->needs_copy && is_writable) {
 							vm_prot_t prot;
 
 							prot = copy_entry->protection & ~VM_PROT_WRITE;
@@ -10707,12 +10716,28 @@ vm_map_copy_overwrite_aligned(
 		 *	If the destination contains temporary unshared memory,
 		 *	we can perform the copy by throwing it away and
 		 *	installing the source data.
+		 *
+		 *	Exceptions for mappings with special semantics:
+		 *	+ "permanent" entries,
+		 *	+ JIT regions,
+		 *	+ TPRO regions,
+		 *      + pmap-specific protection policies,
+		 *	+ VM objects with COPY_NONE copy strategy.
 		 */
 
 		object = VME_OBJECT(entry);
 		if ((!entry->is_shared &&
+		    !entry->vme_permanent &&
+		    !entry->used_for_jit &&
+#if __arm64e__
+		    !entry->used_for_tpro &&
+#endif /* __arm64e__ */
+		    !(entry->protection & VM_PROT_EXECUTE) &&
+		    !pmap_has_prot_policy(dst_map->pmap, entry->translated_allow_execute, entry->protection) &&
 		    ((object == VM_OBJECT_NULL) ||
-		    (object->internal && !object->true_share))) ||
+		    (object->internal &&
+		    !object->true_share &&
+		    object->copy_strategy != MEMORY_OBJECT_COPY_NONE))) ||
 		    entry->needs_copy) {
 			vm_object_t     old_object = VME_OBJECT(entry);
 			vm_object_offset_t      old_offset = VME_OFFSET(entry);
@@ -12893,6 +12918,8 @@ vm_map_fork_share(
 	    (object->vo_size >
 	    (vm_map_size_t)(old_entry->vme_end -
 	    old_entry->vme_start)))) {
+		bool is_writable;
+
 		/*
 		 *	We need to create a shadow.
 		 *	There are three cases here.
@@ -12980,8 +13007,15 @@ vm_map_fork_share(
 		 *	to remove write permission.
 		 */
 
-		if (!old_entry->needs_copy &&
-		    (old_entry->protection & VM_PROT_WRITE)) {
+		is_writable = false;
+		if (old_entry->protection & VM_PROT_WRITE) {
+			is_writable = true;
+#if __arm64e__
+		} else if (old_entry->used_for_tpro) {
+			is_writable = true;
+#endif /* __arm64e__ */
+		}
+		if (!old_entry->needs_copy && is_writable) {
 			vm_prot_t prot;
 
 			assert(!pmap_has_prot_policy(old_map->pmap, old_entry->translated_allow_execute, old_entry->protection));
@@ -17252,6 +17286,76 @@ vm_map_remap_extract(
 			    inheritance,
 			    vmk_flags);
 			vm_map_deallocate(submap);
+
+			if (result == KERN_SUCCESS &&
+			    submap_needs_copy &&
+			    !copy) {
+				/*
+				 * We were asked for a "shared"
+				 * re-mapping but had to ask for a
+				 * "copy-on-write" remapping of the
+				 * submap's mapping to honor the
+				 * submap's "needs_copy".
+				 * We now need to resolve that
+				 * pending "copy-on-write" to
+				 * get something we can share.
+				 */
+				vm_map_entry_t copy_entry;
+				vm_object_offset_t copy_offset;
+				vm_map_size_t copy_size;
+				vm_object_t copy_object;
+				copy_entry = vm_map_copy_first_entry(map_copy);
+				copy_size = copy_entry->vme_end - copy_entry->vme_start;
+				copy_object = VME_OBJECT(copy_entry);
+				copy_offset = VME_OFFSET(copy_entry);
+				if (copy_object == VM_OBJECT_NULL) {
+					assert(copy_offset == 0);
+					assert(!copy_entry->needs_copy);
+					if (copy_entry->max_protection == VM_PROT_NONE) {
+						assert(copy_entry->protection == VM_PROT_NONE);
+						/* nothing to share */
+					} else {
+						assert(copy_offset == 0);
+						copy_object = vm_object_allocate(copy_size);
+						VME_OFFSET_SET(copy_entry, 0);
+						VME_OBJECT_SET(copy_entry, copy_object, false, 0);
+						assert(copy_entry->use_pmap);
+					}
+				} else if (copy_object->copy_strategy != MEMORY_OBJECT_COPY_SYMMETRIC) {
+					/* already shareable */
+					assert(!copy_entry->needs_copy);
+				} else if (copy_entry->needs_copy ||
+				    copy_object->shadowed ||
+				    (object->internal &&
+				    !object->true_share &&
+				    !copy_entry->is_shared &&
+				    copy_object->vo_size > copy_size)) {
+					VME_OBJECT_SHADOW(copy_entry, copy_size, TRUE);
+					assert(copy_entry->use_pmap);
+					if (copy_entry->needs_copy) {
+						/* already write-protected */
+					} else {
+						vm_prot_t prot;
+						prot = copy_entry->protection & ~VM_PROT_WRITE;
+						vm_object_pmap_protect(copy_object,
+						    copy_offset,
+						    copy_size,
+						    PMAP_NULL,
+						    PAGE_SIZE,
+						    0,
+						    prot);
+					}
+					copy_entry->needs_copy = FALSE;
+				}
+				copy_object = VME_OBJECT(copy_entry);
+				copy_offset = VME_OFFSET(copy_entry);
+				if (copy_object &&
+				    copy_object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
+					copy_object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
+					copy_object->true_share = TRUE;
+				}
+			}
+
 			return result;
 		}
 
@@ -17541,12 +17645,21 @@ vm_map_remap_extract(
 			    (object->internal && !object->true_share &&
 			    !src_entry->is_shared &&
 			    object->vo_size > entry_size)) {
+				bool is_writable;
+
 				VME_OBJECT_SHADOW(src_entry, entry_size,
 				    vm_map_always_shadow(map));
 				assert(src_entry->use_pmap);
 
-				if (!src_entry->needs_copy &&
-				    (src_entry->protection & VM_PROT_WRITE)) {
+				is_writable = false;
+				if (src_entry->protection & VM_PROT_WRITE) {
+					is_writable = true;
+#if __arm64e__
+				} else if (src_entry->used_for_tpro) {
+					is_writable = true;
+#endif /* __arm64e__ */
+				}
+				if (!src_entry->needs_copy && is_writable) {
 					vm_prot_t prot;
 
 					assert(!pmap_has_prot_policy(map->pmap, src_entry->translated_allow_execute, src_entry->protection));

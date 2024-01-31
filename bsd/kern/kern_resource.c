@@ -2681,12 +2681,14 @@ iopolicysys_vfs_nocache_write_fs_blksize(struct proc *p, int cmd, int scope, int
 
 	/* Once set, we don't allow the process or thread to clear it. */
 	if ((cmd == IOPOL_CMD_SET) && (policy == IOPOL_VFS_NOCACHE_WRITE_FS_BLKSIZE_ON)) {
+#if 0
 		if (thread != THREAD_NULL) {
 			struct uthread *ut = get_bsdthread_info(thread);
 			ut->uu_flag |= UT_FS_BLKSIZE_NOCACHE_WRITES;
 		} else {
 			os_atomic_or(&p->p_vfs_iopolicy, P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE, relaxed);
 		}
+#endif
 		return 0;
 	}
 

@@ -92,6 +92,7 @@
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
 #include <san/kasan.h>
+#include <os/log.h>
 
 #include <vm/vm_protos.h>
 #include <vm/memory_object.h>
@@ -153,7 +154,6 @@ unsigned int shared_region_pagers_resident_peak = 0;
 int             PERCPU_DATA(start_color);
 vm_page_t       PERCPU_DATA(free_pages);
 boolean_t       hibernate_cleaning_in_progress = FALSE;
-boolean_t       vm_page_free_verify = TRUE;
 
 uint32_t        vm_lopage_free_count = 0;
 uint32_t        vm_lopage_free_limit = 0;
@@ -3141,6 +3141,41 @@ vm_page_t vm_page_grab_secluded(void);
 static inline void
 vm_page_grab_diags(void);
 
+/*
+ *	vm_page_validate_no_references:
+ *
+ *	Make sure the physical page has no refcounts.
+ *
+ */
+static inline void
+vm_page_validate_no_references(
+	__unused vm_page_t       mem)
+{
+#if !XNU_TARGET_OS_OSX
+	bool is_freed;
+
+	if (mem->vmp_fictitious) {
+		return;
+	}
+
+	pmap_paddr_t paddr = ptoa(VM_PAGE_GET_PHYS_PAGE(mem));
+
+	is_freed = pmap_verify_free(VM_PAGE_GET_PHYS_PAGE(mem));
+
+	if (!is_freed) {
+		/*
+		 * There is a redundancy here, but we are going to panic anyways,
+		 * and ASSERT_PMAP_FREE traces useful information. So, we keep this
+		 * behavior.
+		 */
+		ASSERT_PMAP_FREE(mem);
+		panic("%s: page 0x%llx is referenced", __func__, paddr);
+	}
+#else
+	ASSERT_PMAP_FREE(mem);
+#endif //!XNU_TARGET_OS_OSX
+}
+
 vm_page_t
 vm_page_grab(void)
 {
@@ -3184,12 +3219,13 @@ restart:
 		assert(mem->vmp_tabled == FALSE);
 		assert(mem->vmp_object == 0);
 		assert(!mem->vmp_laundry);
-		ASSERT_PMAP_FREE(mem);
 		assert(mem->vmp_busy);
 		assert(!mem->vmp_pmapped);
 		assert(!mem->vmp_wpmapped);
 		assert(!pmap_is_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem)));
 		assert(!mem->vmp_realtime);
+
+		vm_page_validate_no_references(mem);
 
 		task_t  cur_task = current_task_early();
 		if (cur_task && cur_task != kernel_task) {
@@ -3371,12 +3407,13 @@ restart:
 
 			mem->vmp_q_state = VM_PAGE_ON_FREE_LOCAL_Q;
 
-			ASSERT_PMAP_FREE(mem);
 			assert(mem->vmp_busy);
 			assert(!mem->vmp_pmapped);
 			assert(!mem->vmp_wpmapped);
 			assert(!pmap_is_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem)));
 			assert(!mem->vmp_realtime);
+
+			vm_page_validate_no_references(mem);
 		}
 #if defined (__x86_64__) && (DEVELOPMENT || DEBUG)
 		vm_clump_update_stats(sub_count);
@@ -3558,9 +3595,9 @@ reactivate_secluded_page:
 	vm_page_free_prepare_object(mem, TRUE);
 	vm_object_unlock(object);
 	object = VM_OBJECT_NULL;
-	if (vm_page_free_verify) {
-		ASSERT_PMAP_FREE(mem);
-	}
+
+	vm_page_validate_no_references(mem);
+
 	pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
 	vm_page_secluded.grab_success_other++;
 
@@ -3639,7 +3676,6 @@ vm_page_secluded_drain(void)
 }
 #endif /* CONFIG_SECLUDED_MEMORY */
 
-
 static inline void
 vm_page_grab_diags()
 {
@@ -3679,9 +3715,9 @@ vm_page_release(
 	}
 
 	assert(!mem->vmp_private && !mem->vmp_fictitious);
-	if (vm_page_free_verify) {
-		ASSERT_PMAP_FREE(mem);
-	}
+
+	vm_page_validate_no_references(mem);
+
 //	dbgLog(VM_PAGE_GET_PHYS_PAGE(mem), vm_page_free_count, vm_page_wire_count, 5);	/* (TEST/DEBUG) */
 
 	pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
@@ -4199,13 +4235,14 @@ vm_page_free_prepare_object(
 		assert(mem->vmp_specialq.next == 0);
 		assert(mem->vmp_specialq.prev == 0);
 		assert(mem->vmp_next_m == 0);
-		ASSERT_PMAP_FREE(mem);
+
+		vm_page_validate_no_references(mem);
+
 		{
 			vm_page_init(mem, VM_PAGE_GET_PHYS_PAGE(mem), mem->vmp_lopage);
 		}
 	}
 }
-
 
 /*
  *	vm_page_free:
@@ -4294,8 +4331,8 @@ vm_page_free_list(
 			mem->vmp_snext = NULL;
 			assert(mem->vmp_pageq.prev == 0);
 
-			if (vm_page_free_verify && !mem->vmp_fictitious && !mem->vmp_private) {
-				ASSERT_PMAP_FREE(mem);
+			if (!mem->vmp_fictitious && !mem->vmp_private) {
+				vm_page_validate_no_references(mem);
 			}
 
 			if (__improbable(mem->vmp_realtime)) {

@@ -2162,9 +2162,16 @@ static void
 igmp_append_relq(struct igmp_ifinfo *igi, struct in_multi *inm)
 {
 	IGI_LOCK_ASSERT_HELD(igi);
-	os_log(OS_LOG_DEFAULT, "%s: adding inm %llx on relq ifp %s\n",
+	if (inm->inm_in_nrele) {
+		os_log_debug(OS_LOG_DEFAULT, "%s: inm %llx already on relq ifp %s\n",
+		    __func__, (uint64_t)VM_KERNEL_ADDRPERM(inm),
+		    if_name(igi->igi_ifp));
+		return;
+	}
+	os_log_debug(OS_LOG_DEFAULT, "%s: adding inm %llx on relq ifp %s\n",
 	    __func__, (uint64_t)VM_KERNEL_ADDRPERM(inm),
 	    if_name(igi->igi_ifp));
+	inm->inm_in_nrele = true;
 	SLIST_INSERT_HEAD(&igi->igi_relinmhead, inm, inm_nrele);
 }
 
@@ -2197,9 +2204,12 @@ igmp_flush_relq(struct igmp_ifinfo *igi, struct igmp_inm_relhead *inm_dthead)
 
 		SLIST_REMOVE_HEAD(&temp_relinmhead, inm_nrele);
 		INM_LOCK(inm);
-		os_log(OS_LOG_DEFAULT, "%s: flushing %llx on relq ifp %s", __func__,
+		os_log_debug(OS_LOG_DEFAULT, "%s: flushing %llx on relq ifp %s",
+		    __func__,
 		    (uint64_t)VM_KERNEL_ADDRPERM(inm),
 		    if_name(inm->inm_ifp));
+		VERIFY(inm->inm_in_nrele == true);
+		inm->inm_in_nrele = false;
 		VERIFY(inm->inm_nrelecnt != 0);
 		inm->inm_nrelecnt--;
 		lastref = in_multi_detach(inm);

@@ -3307,7 +3307,6 @@ mach_make_memory_entry_internal(
 	user_entry->data_offset = offset_in_page;
 	user_entry->is_sub_map = parent_entry->is_sub_map;
 	user_entry->is_copy = parent_entry->is_copy;
-	user_entry->internal = parent_entry->internal;
 	user_entry->protection = protections;
 
 	if (access != MAP_MEM_NOOP) {

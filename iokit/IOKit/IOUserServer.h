@@ -168,7 +168,6 @@ class IOUserServer : public IOUserClient2022
 	uint8_t               fRootNotifier;
 	uint8_t               fSystemPowerAck;
 	uint8_t               fSystemOff;
-	uint8_t               fPowerManagementFailed;
 	IOUserServerCheckInToken * fCheckInToken;
 	OSDextStatistics    * fStatistics;
 	bool                  fPlatformDriver;
@@ -238,7 +237,6 @@ public:
 	IOReturn                                setPowerState(unsigned long state, IOService * service) APPLE_KEXT_OVERRIDE;
 	IOReturn                                powerStateWillChangeTo(IOPMPowerFlags flags, unsigned long state, IOService * service) APPLE_KEXT_OVERRIDE;
 	IOReturn                                powerStateDidChangeTo(IOPMPowerFlags flags, unsigned long state, IOService * service) APPLE_KEXT_OVERRIDE;
-	void                                    setPowerManagementFailed(bool failed);
 
 	IOPStrings *           copyInStringArray(const char * string, uint32_t userSize);
 	uint32_t               stringArrayIndex(IOPStrings * array, const char * look);

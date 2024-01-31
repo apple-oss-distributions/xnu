@@ -137,11 +137,12 @@ static void
 mcc_error_notify_user(mcc_ecc_event_t event)
 {
 	mach_port_t user_port = MACH_PORT_NULL;
+	kern_return_t kr;
 
-	kern_return_t kr = host_get_memory_error_port(host_priv_self(), &user_port);
-
-	if ((kr != KERN_SUCCESS) || !IPC_PORT_VALID(user_port)) {
-		os_log(OS_LOG_DEFAULT, "Failed to get memory error port");
+	kr = host_get_memory_error_port(host_priv_self(), &user_port);
+	assert(kr == KERN_SUCCESS);
+	if (!IPC_PORT_VALID(user_port)) {
+		os_log_error(OS_LOG_DEFAULT, "Failed to get memory error port - mcc");
 		return;
 	}
 

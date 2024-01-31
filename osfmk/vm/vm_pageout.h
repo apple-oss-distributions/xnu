@@ -472,7 +472,6 @@ struct upl {
 #define UPL_CREATE_EXPEDITE_SUP 0x8
 
 extern upl_t vector_upl_create(vm_offset_t, uint32_t);
-extern upl_size_t vector_upl_get_size(const upl_t);
 extern void vector_upl_deallocate(upl_t);
 extern boolean_t vector_upl_is_valid(upl_t);
 extern boolean_t vector_upl_set_subupl(upl_t, upl_t, u_int32_t);

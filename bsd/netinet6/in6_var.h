@@ -983,6 +983,7 @@ struct in6_multi {
 	struct  ifmultiaddr *in6m_ifma; /* back pointer to ifmultiaddr */
 	u_int   in6m_state;             /* state of the membership */
 	u_int   in6m_timer;             /* MLD6 listener report timer */
+	bool    in6m_in_nrele;          /* if in nrele list */
 
 	/* New fields for MLDv2 follow. */
 	struct mld_ifinfo       *in6m_mli;      /* MLD info */

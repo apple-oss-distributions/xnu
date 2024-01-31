@@ -242,6 +242,7 @@ const struct page_table_attr pmap_pt_attr_4k = {
 	.pta_tcr_value  = TCR_EL1_4KB,
 #endif /* __ARM_MIXED_PAGE_SIZE__ */
 	.pta_page_size  = 4096,
+	.pta_pagezero_size = 4096,
 	.pta_page_shift = 12,
 };
 
@@ -261,6 +262,7 @@ const struct page_table_attr pmap_pt_attr_16k = {
 	.pta_tcr_value  = TCR_EL1_16KB,
 #endif /* __ARM_MIXED_PAGE_SIZE__ */
 	.pta_page_size  = 16384,
+	.pta_pagezero_size = 16384,
 	.pta_page_shift = 14,
 };
 
@@ -2966,6 +2968,7 @@ pmap_create_options_internal(
 
 
 	p->pmap_vm_map_cs_enforced = false;
+	p->min = 0;
 
 
 #if CONFIG_ROSETTA
@@ -2998,8 +3001,6 @@ pmap_create_options_internal(
 	}
 #endif /* __ARM_MIXED_PAGE_SIZE__ */
 	p->max = pmap_user_va_size(p);
-	/* Don't allow mapping the first page (i.e. NULL or near-NULL). */
-	p->min = pt_attr_page_size(pmap_get_pt_attr(p));
 
 	if (!pmap_get_pt_ops(p)->alloc_id(p)) {
 		local_kr = KERN_NO_SPACE;
@@ -6007,8 +6008,8 @@ pmap_enter_options_internal(
 		    __func__, pmap, (unsigned long long)v);
 	}
 
-	if (__improbable((v < pmap->min) || (v >= pmap->max))) {
-		panic("%s: attempt to map out-of-bounds VA 0x%llx in pmap %p", __func__, (unsigned long long)v, pmap);
+	if (__improbable((v < pmap->min) || (v >= pmap->max) || (v < pt_attr_pagezero_size(pt_attr)))) {
+		panic("%s: attempt to map illegal VA 0x%llx in pmap %p", __func__, (unsigned long long)v, pmap);
 	}
 
 	/* Only check kernel_pmap here as CPUWINDOWS only exists in kernel address space. */

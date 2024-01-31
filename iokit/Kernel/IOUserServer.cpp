@@ -4157,7 +4157,6 @@ IOUserServer::clientClose(void)
 {
 	OSArray   * services;
 	bool __block unexpectedExit = false;
-	bool powerManagementFailed = false;
 
 	if (kIODKLogSetup & gIODKDebug) {
 		DKLOG("%s::clientClose(%p)\n", getName(), this);
@@ -4167,7 +4166,6 @@ IOUserServer::clientClose(void)
 	if (fServices) {
 		services = OSArray::withArray(fServices);
 	}
-	powerManagementFailed = fPowerManagementFailed;
 	IOLockUnlock(fLock);
 
 	// if this was a an expected exit, termination and stop should have detached at this
@@ -4201,7 +4199,6 @@ IOUserServer::clientClose(void)
 
 	if (unexpectedExit &&
 	    !gInUserspaceReboot &&
-	    !powerManagementFailed &&
 	    (fTaskCrashReason != OS_REASON_NULL && fTaskCrashReason->osr_namespace != OS_REASON_JETSAM && fTaskCrashReason->osr_namespace != OS_REASON_RUNNINGBOARD) &&
 	    fStatistics != NULL) {
 		OSDextCrashPolicy policy = fStatistics->recordCrash();
@@ -4858,13 +4855,6 @@ IOUserServer::setPowerState(unsigned long state, IOService * service)
 	return kIOPMAckImplied;
 }
 
-void
-IOUserServer::setPowerManagementFailed(bool failed)
-{
-	IOLockLock(fLock);
-	fPowerManagementFailed = failed;
-	IOLockUnlock(fLock);
-}
 
 IOReturn
 IOUserServer::serviceSetPowerState(IOService * controllingDriver, IOService * service, IOPMPowerFlags flags, unsigned long state)
@@ -4874,7 +4864,7 @@ IOUserServer::serviceSetPowerState(IOService * controllingDriver, IOService * se
 
 	IOLockLock(fLock);
 	if (service->reserved->uvars) {
-		if (!fSystemOff && !fPowerManagementFailed && !(kIODKDisablePM & gIODKDebug)) {
+		if (!fSystemOff && !(kIODKDisablePM & gIODKDebug)) {
 			OSDictionary * wakeDescription;
 			OSObject     * prop;
 			char           wakeReasonString[128];
@@ -5361,12 +5351,6 @@ IOUserServer::systemPower(bool powerOff)
 	}
 
 	IOLockLock(fLock);
-
-	if (fPowerManagementFailed && !powerOff) {
-		IOLockUnlock(fLock);
-		kill("Power Management Failed");
-		return;
-	}
 
 	services = OSArray::withArray(fServices);
 

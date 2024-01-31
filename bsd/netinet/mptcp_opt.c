@@ -330,6 +330,13 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 	uint32_t old_mpt_flags = tp->t_mpflags & TMPF_MPTCP_SIGNALS;
 	boolean_t initial_data = FALSE;
 
+	/* There is a case where offset can become negative. tcp_output()
+	 * gracefully handles this. So, let's make MPTCP more robust as well.
+	 */
+	if (off < 0) {
+		off = 0;
+	}
+
 	if (mptcp_enable == 0 || mp_tp == NULL || tp->t_state == TCPS_CLOSED) {
 		/* do nothing */
 		goto ret_optlen;
